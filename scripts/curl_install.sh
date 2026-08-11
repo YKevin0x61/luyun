@@ -2,13 +2,12 @@
 # One-click Bootstrap Install entry for: curl … | bash
 # Fetches scripts/bootstrap_install.sh for the target Release tag, then execs it.
 #
-# 最短用法（默认装「最新正式 Release」；装机只需 Releases 只读 PAT）:
-#   export GITHUB_RELEASES_TOKEN=ghp_xxx
-#   curl -fsSL -H "Authorization: Bearer $GITHUB_RELEASES_TOKEN" \
+# 最短用法（公开仓，默认装「最新正式 Release」）:
+#   curl -fsSL \
 #     -L https://github.com/OWNER/REPO/releases/latest/download/install.sh \
-#     | sudo -E bash
+#     | sudo bash
 #
-# sudo -E 用来把上面的环境变量传给 root 下的 bash。
+# 可选：设 GITHUB_RELEASES_TOKEN 提高 API 限流（公开仓非必需）。
 # 定点版本：把 URL 里的 latest 换成 tag，或设 LUYUN_TAG=vX.Y.Z。
 set -euo pipefail
 
@@ -19,17 +18,16 @@ LUYUN_EMBEDDED_TAG=""
 
 usage() {
   cat <<'EOF'
-用法: curl …/releases/latest/download/install.sh | sudo -E bash
+用法: curl …/releases/latest/download/install.sh | sudo bash
       curl_install.sh [选项]   # 高级：显式传参
 
-最短装机（推荐，默认最新正式版）:
-  export GITHUB_RELEASES_TOKEN=ghp_xxx
-  curl -fsSL -H "Authorization: Bearer $GITHUB_RELEASES_TOKEN" \
+最短装机（推荐，公开仓，默认最新正式版）:
+  curl -fsSL \
     -L https://github.com/<owner>/<repo>/releases/latest/download/install.sh \
-    | sudo -E bash
+    | sudo bash
 
 环境变量:
-  GITHUB_RELEASES_TOKEN      Releases 只读 PAT（必需）
+  GITHUB_RELEASES_TOKEN      Releases 只读 PAT（可选；公开仓可不设）
   LUYUN_DEPLOY_DIR           部署目录（默认 /opt/luyun）
   GITHUB_REPO                覆盖脚本内嵌的 repo
   LUYUN_TAG                  覆盖 tag；空或 latest = 解析最新正式 Release
@@ -81,29 +79,36 @@ while [[ $i -lt $# ]]; do
       DEPLOY_DIR="${!i}"
       ;;
     --deploy-key-file|--git-url)
-      die "已废弃选项 ${arg}：Bootstrap 使用 Release Bundle + Releases PAT，不再需要 Deploy Key / git clone"
+      die "已废弃选项 ${arg}：Bootstrap 使用 Release Bundle，不再需要 Deploy Key / git clone"
       ;;
   esac
 done
 
 [[ -n "$REPO" ]] || die "缺少仓库名：请用带内嵌 REPO 的 Release install.sh，或设 GITHUB_REPO / --repo"
 [[ "$REPO" == */* ]] || die "GITHUB_REPO 格式应为 owner/name，收到: $REPO"
-[[ -n "$RELEASES_TOKEN" ]] || die "缺少 GITHUB_RELEASES_TOKEN（curl 私有 Release 与下载 bootstrap 都需要）。若用了 sudo，请加 -E：sudo -E bash"
 
 command -v curl >/dev/null 2>&1 || die "需要 curl"
 command -v bash >/dev/null 2>&1 || die "需要 bash"
+
+# Optional Authorization for public repos (token raises API rate limits).
+github_curl() {
+  if [[ -n "${RELEASES_TOKEN:-}" ]]; then
+    curl -fsSL -H "Authorization: Bearer ${RELEASES_TOKEN}" "$@"
+  else
+    curl -fsSL "$@"
+  fi
+}
 
 resolve_latest_tag() {
   # GitHub "latest" = newest non-prerelease, non-draft Release.
   local api_url json tag
   api_url="https://api.github.com/repos/${REPO}/releases/latest"
   json="$(
-    curl -fsSL \
-      -H "Authorization: Bearer ${RELEASES_TOKEN}" \
+    github_curl \
       -H "Accept: application/vnd.github+json" \
       -H "User-Agent: luyun-curl-install" \
       "$api_url"
-  )" || die "无法查询最新正式 Release（检查 PAT 与仓库 ${REPO}）"
+  )" || die "无法查询最新正式 Release（检查仓库 ${REPO} 是否公开、网络或 API 限流）"
   tag="$(printf '%s' "$json" | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n 1)"
   [[ -n "$tag" ]] || die "最新正式 Release 响应里没有 tag_name"
   printf '%s' "$tag"
@@ -125,16 +130,15 @@ trap cleanup EXIT
 
 download_bootstrap() {
   local ref="${LUYUN_CURL_INSTALL_REF:-$TAG}"
-  local url="https://api.github.com/repos/${REPO}/contents/scripts/bootstrap_install.sh?ref=${ref}"
+  # Prefer raw.githubusercontent.com for public repos (no API auth / lower rate-limit pressure).
+  local url="https://raw.githubusercontent.com/${REPO}/${ref}/scripts/bootstrap_install.sh"
   BOOTSTRAP_TMP="$(mktemp "${TMPDIR:-/tmp}/luyun-bootstrap.XXXXXX.sh")"
   log "download bootstrap_install.sh from ${REPO}@${ref}"
-  curl -fsSL \
-    -H "Authorization: Bearer ${RELEASES_TOKEN}" \
-    -H "Accept: application/vnd.github.raw" \
+  github_curl \
     -H "User-Agent: luyun-curl-install" \
     -o "${BOOTSTRAP_TMP}" \
     "$url" \
-    || die "无法下载 bootstrap_install.sh（检查 PAT 权限与 tag/ref: ${ref}）"
+    || die "无法下载 bootstrap_install.sh（检查仓库是否公开与 tag/ref: ${ref}）"
   chmod 700 "${BOOTSTRAP_TMP}"
   if ! grep -q 'Bootstrap Install' "${BOOTSTRAP_TMP}" 2>/dev/null; then
     die "下载内容不像 bootstrap_install.sh（ref=${ref}）"
@@ -152,11 +156,18 @@ else
 fi
 
 export GITHUB_REPO="$REPO"
-export GITHUB_RELEASES_TOKEN="$RELEASES_TOKEN"
+if [[ -n "$RELEASES_TOKEN" ]]; then
+  export GITHUB_RELEASES_TOKEN="$RELEASES_TOKEN"
+else
+  unset GITHUB_RELEASES_TOKEN || true
+fi
 
 # Build bootstrap argv. TAG is always a concrete release tag here (never "latest").
 build_bootstrap_args() {
-  BOOTSTRAP_ARGS=(--repo "$REPO" --tag "$TAG" --releases-token "$RELEASES_TOKEN")
+  BOOTSTRAP_ARGS=(--repo "$REPO" --tag "$TAG")
+  if [[ -n "$RELEASES_TOKEN" ]]; then
+    BOOTSTRAP_ARGS+=(--releases-token "$RELEASES_TOKEN")
+  fi
   if [[ -n "$DEPLOY_DIR" ]]; then
     BOOTSTRAP_ARGS+=(--deploy-dir "$DEPLOY_DIR")
   fi
@@ -174,7 +185,7 @@ build_bootstrap_args() {
         i=$((i + 2))
         ;;
       --deploy-key-file|--git-url)
-        die "已废弃选项 ${a}：Bootstrap 使用 Release Bundle + Releases PAT，不再需要 Deploy Key / git clone"
+        die "已废弃选项 ${a}：Bootstrap 使用 Release Bundle，不再需要 Deploy Key / git clone"
         ;;
       -h|--help)
         i=$((i + 1))

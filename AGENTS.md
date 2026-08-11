@@ -149,10 +149,11 @@ Single-machine, single-instance, **single uvicorn worker** deployment — no Pos
 
 - `luyun.service` — systemd unit running `uvicorn main:app --workers 1` (must stay single-worker: the realtime hub, in-memory log buffer, and scraper failure counters all live in one process's memory).
 - `luyun-update.service` — systemd oneshot Update Job started by Admin Apply Update.
+- `Dockerfile` / `docker-compose.yml` / `docker-entrypoint.sh` — Docker process-shell (bind-mount Release Bundle tree under parent volume; upgrades still via Admin「系统更新」). Helper: `scripts/docker_up.sh`.
 - `Caddyfile` / `nginx.conf` — reverse proxy + TLS termination, forwarding `/api/*` and `/ws/*` to the backend and serving `admin-web/dist` directly at the proxy layer.
 - `backup.sh` + `luyun-backup.service`/`luyun-backup.timer` — SQLite online backup (`sqlite3 .backup`) on a systemd timer, with retention policy.
-- `env.production.example` — production environment variable template (includes GitHub Release credentials).
-- `deploy/README.md` — Bootstrap Install, upgrade via Version Check / Update Preflight / Apply Update, reverse proxy, backup. Publish: `scripts/publish_release.sh`. Operator flow: `docs/RELEASE_AND_DEPLOY.md`; bundle contract: `docs/release-asset-layout.md`.
+- `env.production.example` — production environment variable template (GitHub Releases PAT optional for the public repo).
+- `deploy/README.md` — Bootstrap Install, Docker Compose, upgrade via Version Check / Update Preflight / Apply Update, reverse proxy, backup. Publish: `scripts/publish_release.sh`. Operator flow: `docs/RELEASE_AND_DEPLOY.md`; bundle contract: `docs/release-asset-layout.md`.
 
 ---
 

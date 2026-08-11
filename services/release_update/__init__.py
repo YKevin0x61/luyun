@@ -228,9 +228,9 @@ def _build_preflight(
             code=PREFLIGHT_CREDENTIALS,
             ok=bool(env.credentials_ready),
             message=(
-                "Releases 凭据可用"
+                "可访问 GitHub Releases（公开仓无需 PAT）"
                 if env.credentials_ready
-                else "Releases 凭据缺失或不可用，无法拉取发行目录/下载发行包"
+                else "无法访问 GitHub Releases（检查仓库配置、网络或 API 限流）"
             ),
         ),
         PreflightCheck(

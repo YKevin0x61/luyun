@@ -37,8 +37,10 @@ class DefaultPreflightEnvAdapter:
         return bool(shutil.which("systemctl"))
 
     def _credentials_ready(self) -> bool:
+        # Public repo: repo alone is enough for anonymous Releases access.
+        # Optional PAT (env / Admin) only raises API rate limits.
         cfg = get_effective_config()
-        return bool((cfg.repo or "").strip() and (cfg.token or "").strip())
+        return bool((cfg.repo or "").strip())
 
     def _deploy_tree_dirty(self) -> bool:
         """True when a git worktree exists and is dirty or cannot be proven clean.

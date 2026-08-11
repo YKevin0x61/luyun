@@ -12,6 +12,7 @@ Day-to-day entry scripts live here. One-off migration, debug, and smoke utilitie
 | `publish_release.sh` | Publish a GitHub Release Bundle |
 | `bootstrap_install.sh` | Shop Bootstrap Install from a Release Bundle |
 | `curl_install.sh` | Curl\|bash install entry used with Releases |
+| `docker_up.sh` | Docker / Compose process-shell bring-up |
 | `run_update_job.py` | Out-of-process Update Job runner |
 | `reconcile_settled_bills.py` | Settled-bill reconciliation utility |
 

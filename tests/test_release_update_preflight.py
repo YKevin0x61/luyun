@@ -190,6 +190,42 @@ class UpdatePreflightVersionCheckTest(unittest.TestCase):
         self.assertFalse(pf.discard_local_changes_allowed)
 
 
+class CredentialsProbeTest(unittest.TestCase):
+    def test_public_repo_ready_without_token(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from services.release_update.preflight_env import DefaultPreflightEnvAdapter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = DefaultPreflightEnvAdapter(Path(tmp))
+            cfg = mock.Mock(repo="YKevin0x61/luyun", token=None)
+            with mock.patch(
+                "services.release_update.preflight_env.get_effective_config",
+                return_value=cfg,
+            ):
+                env = adapter.inspect_env()
+            self.assertTrue(env.credentials_ready)
+
+    def test_missing_repo_is_not_ready(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from services.release_update.preflight_env import DefaultPreflightEnvAdapter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = DefaultPreflightEnvAdapter(Path(tmp))
+            cfg = mock.Mock(repo="", token=None)
+            with mock.patch(
+                "services.release_update.preflight_env.get_effective_config",
+                return_value=cfg,
+            ):
+                env = adapter.inspect_env()
+            self.assertFalse(env.credentials_ready)
+
+
 class DirtyTreeProbeTest(unittest.TestCase):
     def test_git_status_failure_is_dirty_fail_closed(self):
         import tempfile

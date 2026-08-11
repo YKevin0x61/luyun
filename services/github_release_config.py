@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GitHub Release token for Version Check / Update Job.
+"""Optional GitHub Release token for Version Check / Update Job.
 
-Editable from Admin「系统更新」without restarting the process. Encrypted at
+Public repos work anonymously (repo is fixed in ``config.GITHUB_REPO``). A
+read-only PAT is optional and only raises API rate limits. Editable from
+Admin「系统更新」without restarting the process. Encrypted at
 ``data/github_release.enc`` with the same Fernet key as POS credentials
-(``LUYUN_CRED_KEY`` / ``data/.cred_key``). Repo is fixed in ``config.GITHUB_REPO``;
-only the PAT is stored here. ``GITHUB_RELEASES_TOKEN`` remains a bootstrap
-fallback when no token is stored.
+(``LUYUN_CRED_KEY`` / ``data/.cred_key``). ``GITHUB_RELEASES_TOKEN`` remains a
+bootstrap fallback when no token is stored.
 """
 
 from __future__ import annotations

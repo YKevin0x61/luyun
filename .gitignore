@@ -10,6 +10,7 @@ scraper/cy7mm.json
 .env
 .env.*
 !.env.example
+!deploy/.env.docker.example
 *.enc
 *.pem
 *.p12
@@ -22,6 +23,8 @@ id_ed25519.*
 secrets/
 deploy/env.production
 deploy/env.production.local
+deploy/.env.docker
+deploy/runtime/
 
 # ===== 数据 / 运行时状态 =====
 data/*
@@ -99,5 +102,11 @@ dump.rdb
 config.local.*
 .settings.local.*
 
-# ===== Design / internal docs (keep local only) =====
-docs/
+# ===== Design / internal docs (keep research notes local) =====
+docs/*
+!docs/RELEASE_AND_DEPLOY.md
+!docs/release-asset-layout.md
+!docs/adr/
+docs/adr/*
+!docs/adr/0011-release-bundle-update.md
+!docs/adr/0012-repo-layout.md

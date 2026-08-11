@@ -8,10 +8,10 @@ usage() {
   cat <<'EOF'
 用法: scripts/bootstrap_install.sh [选项]
 
-新机器引导安装到「应用进程可启动」：用 Releases 只读 PAT 下载并硬校验
+新机器引导安装到「应用进程可启动」：从公开 GitHub Release 下载并硬校验
 发行包（luyun-release-bundle.tar.gz + SHA256SUMS）、解压、Python/Playwright
 依赖、写入版本清单身份、启用 systemd（luyun + luyun-update）。
-不装 Node；不 clone；不需要 Deploy Key；不含反代/TLS/POS 凭据。
+不装 Node；不 clone；不需要 Deploy Key / PAT；不含反代/TLS/POS 凭据。
 
 一键（curl|bash）请用 Release 资产 install.sh / scripts/curl_install.sh，
 见 docs/RELEASE_AND_DEPLOY.md。
@@ -22,19 +22,16 @@ usage() {
   --repo owner/name          GitHub 仓库（或环境变量 GITHUB_REPO）
   --tag TAG                  要安装的正式 Release tag
   --deploy-dir DIR           部署目录（默认 /opt/luyun）
-  --releases-token TOKEN     Releases API 只读 fine-grained PAT
+  --releases-token TOKEN     Releases API 只读 PAT（可选；公开仓可不设）
                              （或环境变量 GITHUB_RELEASES_TOKEN）
 
-缺省凭据时：若 stdin 是 TTY，会提示输入 PAT；
-非交互环境必须用 --releases-token（或环境变量）。
-
 环境变量:
-  GITHUB_REPO / GITHUB_RELEASES_TOKEN
+  GITHUB_REPO / GITHUB_RELEASES_TOKEN（可选）
   LUYUN_BOOTSTRAP_SKIP_PLAYWRIGHT_DEPS=1     跳过 playwright --with-deps（测试用）
   LUYUN_BOOTSTRAP_SKIP_SYSTEMD_ROOT_CHECK=1  测试用：跳过非 root 装单元检查
 
-凭据落盘（供 Update Job / Version Check 复用，mode 600，不入 git）:
-  <deploy-dir>/deploy/env.production   （含 GITHUB_REPO / GITHUB_RELEASES_TOKEN）
+配置落盘（供 Update Job / Version Check 复用，mode 600，不入 git）:
+  <deploy-dir>/deploy/env.production   （含 GITHUB_REPO；TOKEN 可为空）
 EOF
 }
 
@@ -67,7 +64,7 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die "--releases-token 需要参数"
       RELEASES_TOKEN="$2"; shift 2 ;;
     --deploy-key-file|--git-url)
-      die "已废弃选项 $1：Bootstrap 使用 Release Bundle + Releases PAT，不再需要 Deploy Key / git clone" ;;
+      die "已废弃选项 $1：Bootstrap 使用 Release Bundle，不再需要 Deploy Key / git clone" ;;
     -*) die "未知选项: $1" ;;
     *) die "多余参数: $1" ;;
   esac
@@ -79,33 +76,10 @@ done
 
 ENV_FILE="$DEPLOY_DIR/deploy/env.production"
 
-_can_prompt_tty() {
-  # curl|bash consumes stdin; still allow interactive paste via the real terminal.
-  # Mere -r/-w on /dev/tty can pass in CI without a controlling tty — must open it.
-  { exec 3<>/dev/tty; } 2>/dev/null || return 1
-  exec 3>&-
-  return 0
-}
-
-resolve_credentials() {
-  if [[ -z "$RELEASES_TOKEN" ]]; then
-    if [[ -t 0 ]]; then
-      echo -n "请输入 Releases API 只读 PAT: " >&2
-      read -r -s RELEASES_TOKEN
-      echo >&2
-      [[ -n "$RELEASES_TOKEN" ]] || die "未收到 Releases PAT"
-    elif _can_prompt_tty; then
-      echo -n "请输入 Releases API 只读 PAT: " >/dev/tty
-      read -r -s RELEASES_TOKEN </dev/tty
-      echo >/dev/tty
-      [[ -n "$RELEASES_TOKEN" ]] || die "未收到 Releases PAT"
-    else
-      die "缺少 GitHub 凭据：需要 --releases-token / GITHUB_RELEASES_TOKEN（Releases 只读 PAT）"
-    fi
-  fi
-}
-
-resolve_credentials
+# Public repo: token is optional (raises API rate limits if provided).
+if [[ -z "$RELEASES_TOKEN" ]]; then
+  log "no Releases token; using anonymous download (public repo)"
+fi
 
 file_sha256() {
   local path="$1"
@@ -133,13 +107,13 @@ plan:
   - download Release Bundle ${BUNDLE_ASSET} + ${CHECKSUMS_ASSET}
   - hard-verify checksum (fail closed on mismatch/missing)
   - extract bundle into deploy dir (prebuilt Admin/KDS + RELEASE_MANIFEST.json)
-  - write mode-restricted PAT secrets in env.production
+  - write GITHUB_REPO (+ optional token) in env.production
   - python3 -m venv .venv && pip install -r requirements.txt
   - playwright install chromium (no Node; once at bootstrap)
   - Release Manifest remains installed identity
   - install+enable systemd units: luyun.service + luyun-update.service
 manual_followups:
-  - edit ${ENV_FILE} (fill LUYUN_CRED_KEY etc; keep GITHUB_*)
+  - edit ${ENV_FILE} (fill LUYUN_CRED_KEY etc; GITHUB_RELEASES_TOKEN optional for public repo)
   - configure reverse proxy + TLS (deploy/Caddyfile or deploy/nginx.conf)
   - enter POS credentials via /setup
 EOF
@@ -150,7 +124,7 @@ print_manual_followups() {
 
 ==> Bootstrap finished (units enabled / startable). Manual follow-ups:
   1. Edit env file: ${ENV_FILE}
-     (fill LUYUN_CRED_KEY etc; GITHUB_REPO / GITHUB_RELEASES_TOKEN already set)
+     (fill LUYUN_CRED_KEY etc; GITHUB_REPO set; GITHUB_RELEASES_TOKEN optional for public repo)
   2. Configure reverse proxy + TLS (Caddy/Nginx; see deploy/Caddyfile or deploy/nginx.conf)
   3. Start main service: sudo systemctl start luyun.service
   4. Enter POS credentials in Admin /setup
@@ -218,13 +192,22 @@ EOF
 download_release_asset() {
   local tag="$1" name="$2" dest="$3"
   local url="https://github.com/${REPO}/releases/download/${tag}/${name}"
-  curl -fsSL \
-    -H "Authorization: Bearer ${RELEASES_TOKEN}" \
-    -H "Accept: application/octet-stream" \
-    -H "User-Agent: luyun-bootstrap" \
-    -o "$dest" \
-    "$url" \
-    || return 1
+  if [[ -n "${RELEASES_TOKEN:-}" ]]; then
+    curl -fsSL \
+      -H "Authorization: Bearer ${RELEASES_TOKEN}" \
+      -H "Accept: application/octet-stream" \
+      -H "User-Agent: luyun-bootstrap" \
+      -o "$dest" \
+      "$url" \
+      || return 1
+  else
+    curl -fsSL \
+      -H "Accept: application/octet-stream" \
+      -H "User-Agent: luyun-bootstrap" \
+      -o "$dest" \
+      "$url" \
+      || return 1
+  fi
 }
 
 verify_bundle_checksum() {

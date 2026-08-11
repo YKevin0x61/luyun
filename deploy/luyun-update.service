@@ -21,7 +21,7 @@ Group=luyun
 
 WorkingDirectory=/opt/luyun
 
-# 与主服务共用生产环境变量（含 GITHUB_REPO / GITHUB_RELEASES_TOKEN）。
+# 与主服务共用生产环境变量（含 GITHUB_REPO；GITHUB_RELEASES_TOKEN 可选）。
 EnvironmentFile=/opt/luyun/deploy/env.production
 
 ExecStart=/opt/luyun/.venv/bin/python /opt/luyun/scripts/run_update_job.py

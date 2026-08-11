@@ -29,15 +29,36 @@ class CurlInstallContractTest(unittest.TestCase):
         self.assertRegex(combined, r"bootstrap_install")
         self.assertNotRegex(combined, r"(?i)deploy.?key")
 
-    def test_requires_token(self):
-        result = subprocess.run(
-            [BASH, str(CURL_INSTALL), "--repo", "acme/luyun"],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "GITHUB_RELEASES_TOKEN": ""},
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertRegex(f"{result.stdout}\n{result.stderr}", r"(?i)TOKEN|token")
+    def test_allows_missing_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "bootstrap_stub.sh"
+            stub.write_text(
+                "#!/usr/bin/env bash\necho BOOTSTRAP_CONTRACT\necho \"args:$*\"\n",
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            env = os.environ.copy()
+            env["LUYUN_BOOTSTRAP_SCRIPT"] = str(stub)
+            env["GITHUB_RELEASES_TOKEN"] = ""
+            result = subprocess.run(
+                [
+                    BASH,
+                    str(CURL_INSTALL),
+                    "--repo",
+                    "acme/luyun",
+                    "--tag",
+                    "v0.1.0",
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        out = result.stdout + result.stderr
+        self.assertIn("BOOTSTRAP_CONTRACT", out)
+        self.assertIn("--repo acme/luyun", out)
+        self.assertIn("--tag v0.1.0", out)
+        self.assertNotIn("--releases-token", out)
 
     def test_resolves_latest_tag_via_api(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -77,7 +98,7 @@ class CurlInstallContractTest(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
             env["LUYUN_BOOTSTRAP_SCRIPT"] = str(stub)
-            env["GITHUB_RELEASES_TOKEN"] = "ghs_test_token"
+            env["GITHUB_RELEASES_TOKEN"] = ""
             env["LUYUN_TAG"] = "latest"
             result = subprocess.run(
                 [BASH, str(baked)],
@@ -117,7 +138,7 @@ class CurlInstallContractTest(unittest.TestCase):
             baked.chmod(0o755)
             env = os.environ.copy()
             env["LUYUN_BOOTSTRAP_SCRIPT"] = str(stub)
-            env["GITHUB_RELEASES_TOKEN"] = "ghs_test_token"
+            env["GITHUB_RELEASES_TOKEN"] = ""
             env["LUYUN_DEPLOY_DIR"] = str(deploy_dir)
             result = subprocess.run(
                 [BASH, str(baked)],
@@ -130,6 +151,7 @@ class CurlInstallContractTest(unittest.TestCase):
         self.assertIn("BOOTSTRAP_CONTRACT", out)
         self.assertIn("--repo acme/luyun", out)
         self.assertIn("--tag v0.1.0", out)
+        self.assertNotIn("--releases-token", out)
         self.assertNotRegex(out, r"(?i)deploy.?key|--deploy-key")
 
     def test_dry_run_delegates_to_local_bootstrap(self):
@@ -137,7 +159,7 @@ class CurlInstallContractTest(unittest.TestCase):
             deploy_dir = Path(tmp) / "opt" / "luyun"
             env = os.environ.copy()
             env["LUYUN_BOOTSTRAP_SCRIPT"] = str(BOOTSTRAP)
-            env["GITHUB_RELEASES_TOKEN"] = "ghs_test_token"
+            env["GITHUB_RELEASES_TOKEN"] = ""
             result = subprocess.run(
                 [
                     BASH,
@@ -149,8 +171,6 @@ class CurlInstallContractTest(unittest.TestCase):
                     "v0.1.0",
                     "--deploy-dir",
                     str(deploy_dir),
-                    "--releases-token",
-                    "ghs_test_token",
                 ],
                 capture_output=True,
                 text=True,

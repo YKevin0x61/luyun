@@ -1,0 +1,44 @@
+# Docker / 1Panel process-shell deploy (ADR 0011).
+#
+# Critical: mount the PARENT of the live app dir, not the app dir itself.
+# Update Job renames app ↔ app.prev / app.next on the same filesystem;
+# mounting only ./runtime/app as a volume would make that rename fail.
+#
+# From repo root:
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env.docker up -d --build
+#
+# Or: ./scripts/docker_up.sh
+#
+# Delivery remains GitHub Release Bundle (Admin「系统更新」); image pull is not
+# the shop upgrade path.
+
+name: luyun
+
+services:
+  luyun:
+    container_name: ${LUYUN_DOCKER_CONTAINER:-luyun}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ${LUYUN_DOCKER_IMAGE:-luyun:local}
+    restart: unless-stopped
+    working_dir: /srv/luyun/app
+    ports:
+      - "${LUYUN_HOST_PORT:-8000}:8000"
+    environment:
+      LUYUN_APP_DIR: /srv/luyun/app
+      LUYUN_DEPLOY_MODE: docker
+      LUYUN_DOCKER_CONTAINER: ${LUYUN_DOCKER_CONTAINER:-luyun}
+      LUYUN_DOCKER_SOCK: /var/run/docker.sock
+      RELEASE_UPDATE_REPO_DIR: /srv/luyun/app
+      GITHUB_REPO: ${GITHUB_REPO:-YKevin0x61/luyun}
+      GITHUB_RELEASES_TOKEN: ${GITHUB_RELEASES_TOKEN:-}
+      LUYUN_TAG: ${LUYUN_TAG:-latest}
+      LUYUN_DOCKER_AUTO_BOOTSTRAP: ${LUYUN_DOCKER_AUTO_BOOTSTRAP:-1}
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    volumes:
+      # Parent mount — live tree is /srv/luyun/app on this volume.
+      - ${LUYUN_HOST_PARENT:-./runtime}:/srv/luyun
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Single worker is enforced in entrypoint CMD; do not scale replicas.
+    # deploy.replicas intentionally omitted (Compose v2 ignore is fine).

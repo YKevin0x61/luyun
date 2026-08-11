@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # 基础配置
     APP_NAME: str = "LuyunOrder"
-    APP_VERSION: str = "0.3.0"
+    APP_VERSION: str = "0.5.0"
     DEBUG: bool = True
     
     # 服务器配置
@@ -95,8 +95,9 @@ class Settings(BaseSettings):
     RECONCILE_AUTO_NOTIFY: bool = True
 
     # GitHub Release Version Check / Update Job (ADR 0011)
-    # Repo is fixed for this product; token is the only shop-side secret
-    # (env bootstrap or Admin「系统更新」→ data/github_release.enc).
+    # Repo is fixed and public; Releases PAT is optional (anonymous download
+    # works; token only raises API rate limits). May be set via env bootstrap
+    # or Admin「系统更新」→ data/github_release.enc.
     GITHUB_REPO: str = "YKevin0x61/luyun"
     GITHUB_RELEASES_TOKEN: Optional[str] = None
     # Empty → project root (directory containing main.py).

@@ -8,9 +8,10 @@ Seams (agreed):
   Release Manifest as installed identity → enable luyun + luyun-update; no git
   clone / Deploy Key / Node/npm/build_kds / split frontend tarballs; success/
   dry-run output lists intentional manual follow-ups.
-- Credentials / tools: missing Releases PAT fails explicitly; Deploy Key is not
-  required; missing python3/tar/curl/(sha256sum|shasum) fails; git is not required.
-- Stubbed install: PAT lands mode-restricted in env.production; no
+- Credentials / tools: Releases PAT is optional for public repos; Deploy Key is
+  not required; missing python3/tar/curl/(sha256sum|shasum) fails; git is not
+  required.
+- Stubbed install: GitHub settings land mode-restricted in env.production; no
   secrets/github_deploy_key; command log shows bundle fetch (not git clone);
   RELEASE_MANIFEST.json + prebuilt Admin/KDS present; Node-free.
 """
@@ -142,7 +143,7 @@ class BootstrapInstallDryRunContractTest(unittest.TestCase):
         self.assertRegex(out, r"(?i)caddy|nginx|tls|反向代理")
         self.assertRegex(out, r"(?i)/setup|POS")
 
-    def test_refuses_missing_releases_token(self):
+    def test_allows_missing_releases_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             deploy_dir = Path(tmp) / "opt" / "luyun"
             result = _run_bootstrap(
@@ -155,9 +156,10 @@ class BootstrapInstallDryRunContractTest(unittest.TestCase):
                 str(deploy_dir),
                 env={"GITHUB_RELEASES_TOKEN": ""},
             )
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         combined = f"{result.stdout}\n{result.stderr}"
-        self.assertRegex(combined, r"(?i)PAT|token|凭据")
+        self.assertIn("BOOTSTRAP_CONTRACT", combined)
+        self.assertRegex(combined, r"(?i)anonymous|optional|无需|no Releases token")
         self.assertNotRegex(combined, r"(?i)deploy.?key")
 
     def test_does_not_require_deploy_key_flag(self):
@@ -171,8 +173,7 @@ class BootstrapInstallDryRunContractTest(unittest.TestCase):
                 "v0.1.0",
                 "--deploy-dir",
                 str(deploy_dir),
-                "--releases-token",
-                "ghs_test_token",
+                env={"GITHUB_RELEASES_TOKEN": ""},
             )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("BOOTSTRAP_CONTRACT", result.stdout)
@@ -417,6 +418,92 @@ class BootstrapInstallStubbedBundleTest(unittest.TestCase):
             )
             self.assertTrue((deploy_dir / "public" / "kds" / "index.html").is_file())
             self.assertTrue((deploy_dir / "admin-web" / "dist" / "index.html").is_file())
+
+    def test_stubbed_install_works_without_releases_token(self):
+        """Public-repo path: anonymous download, empty token in env.production."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            deploy_dir = tmp_path / "opt" / "luyun"
+            assets = tmp_path / "assets"
+            assets.mkdir()
+            bundle, sums = _make_bundle_and_sums(assets)
+            stub_home = tmp_path / "stubs"
+            bin_dir = stub_home / "bin"
+            bin_dir.mkdir(parents=True)
+            log_file = stub_home / "command.log"
+
+            _write_stub(
+                bin_dir,
+                "curl",
+                textwrap.dedent(
+                    f"""\
+                    echo "curl $*" >> "{log_file}"
+                    out=""
+                    prev=""
+                    for a in "$@"; do
+                      if [[ "$prev" == "-o" ]]; then out="$a"; fi
+                      prev="$a"
+                    done
+                    [[ -n "$out" ]] || exit 1
+                    case "$out" in
+                      *{BUNDLE_ASSET}) /bin/cp "{bundle}" "$out" ;;
+                      *{CHECKSUMS_ASSET}) /bin/cp "{sums}" "$out" ;;
+                      *) echo "unexpected download dest: $out" >&2; exit 1 ;;
+                    esac
+                    exit 0
+                    """
+                ),
+            )
+            _write_stub(
+                bin_dir,
+                "python3",
+                textwrap.dedent(
+                    f"""\
+                    echo "python3 $*" >> "{log_file}"
+                    if [[ "$1" == "-m" && "$2" == "venv" ]]; then
+                      mkdir -p "$3/bin"
+                      printf '%s\\n' '#!/usr/bin/env bash' 'exit 0' > "$3/bin/pip"
+                      printf '%s\\n' '#!/usr/bin/env bash' 'exit 0' > "$3/bin/python"
+                      chmod +x "$3/bin/pip" "$3/bin/python"
+                      exit 0
+                    fi
+                    exit 0
+                    """
+                ),
+            )
+            _write_stub(
+                bin_dir,
+                "systemctl",
+                textwrap.dedent(
+                    f"""\
+                    echo "systemctl $*" >> "{log_file}"
+                    exit 0
+                    """
+                ),
+            )
+
+            env = {
+                "PATH": f"{bin_dir}:/bin:/usr/bin",
+                "GITHUB_RELEASES_TOKEN": "",
+                "LUYUN_BOOTSTRAP_SKIP_PLAYWRIGHT_DEPS": "1",
+                "LUYUN_BOOTSTRAP_SKIP_SYSTEMD_ROOT_CHECK": "1",
+            }
+            result = _run_bootstrap(
+                "--repo",
+                "acme/luyun",
+                "--tag",
+                "v0.1.0",
+                "--deploy-dir",
+                str(deploy_dir),
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            env_text = (deploy_dir / "deploy" / "env.production").read_text(encoding="utf-8")
+            self.assertIn("GITHUB_REPO=acme/luyun", env_text)
+            self.assertRegex(env_text, r"(?m)^GITHUB_RELEASES_TOKEN=$")
+            log = log_file.read_text(encoding="utf-8")
+            self.assertNotRegex(log, r"(?i)Authorization")
+            self.assertRegex(log, rf"(?m)^curl .*{BUNDLE_ASSET}")
 
 
 if __name__ == "__main__":

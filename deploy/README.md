@@ -25,7 +25,7 @@ Redis、没有以容器镜像 pull 为真相的编排。数据是 `data/` 目录
 | **更新环境自检 (Update Preflight)** | 下载/校验/切换/重启条件的红绿灯；不满足则禁止应用更新 |
 | **应用更新 (Apply Update)** | 管理后台选定目标 Release 后发起更新（回滚=再装更旧发行包） |
 | **更新作业 (Update Job)** | systemd oneshot 或 Docker 旁路进程：备份 → 下发行包 → 原子切换 → 条件 pip → 重启 |
-| **引导安装 (Bootstrap Install)** | 新机器用同款发行包装到「应用进程可启动」（只需 Releases PAT） |
+| **引导安装 (Bootstrap Install)** | 新机器用同款发行包装到「应用进程可启动」（公开仓匿名下载，无需 PAT） |
 
 运行实例**不跟随 branch tip**，也**不在生产机上跑** `npm` / `uni` /
 `scripts/build_kds.sh`。前端产物只在发版时构建，由 Update Job / Bootstrap
@@ -44,9 +44,11 @@ worker/多进程会导致状态分裂、WebSocket 订阅收不到推送、甚至
 |---|---|
 | `luyun.service` | systemd 单元，常驻运行 `uvicorn main:app`（单 worker） |
 | `luyun-update.service` | systemd oneshot，Admin「系统更新」里 Apply Update 触发的 Update Job |
+| `Dockerfile` / `docker-compose.yml` / `docker-entrypoint.sh` | Docker / 1Panel 进程外壳（绑定挂载发行包树；升级仍走发行包） |
+| `.env.docker.example` | Compose 宿主机变量模板（复制为 `.env.docker`） |
 | `Caddyfile` | Caddy 反向代理配置（首选，自动 HTTPS） |
 | `nginx.conf` | Nginx 反向代理配置示例（与 Caddyfile 等价） |
-| `env.production.example` | 生产环境变量示例（含 GitHub Release 凭据说明） |
+| `env.production.example` | 生产环境变量示例（含 GitHub Release 说明；PAT 可选） |
 | `backup.sh` | SQLite 在线冷备脚本（`sqlite3 .backup`），含凭据文件/密钥 + 保留策略 |
 | `luyun-backup.service` / `luyun-backup.timer` | systemd timer，每日调用 `backup.sh` |
 | `README.md` | 本文档 |
@@ -56,6 +58,7 @@ worker/多进程会导致状态分裂、WebSocket 订阅收不到推送、甚至
 | 脚本 | 用途 |
 |---|---|
 | `scripts/bootstrap_install.sh` | 新机器 Bootstrap Install（下载/校验发行包） |
+| `scripts/docker_up.sh` | Docker Compose 一键拉起（进程外壳） |
 | `scripts/run_update_job.py` | Update Job 执行体（由 `luyun-update.service` 或 Docker 旁路调用） |
 | `scripts/publish_release.sh` | 开发者发布 GitHub Release（产出发行包） |
 
@@ -64,24 +67,23 @@ worker/多进程会导致状态分裂、WebSocket 订阅收不到推送、甚至
 ## 1. 新机器：Bootstrap Install（推荐入口）
 
 新机器用 Bootstrap 装到「应用进程可启动」，**不要求安装 Node**，**不需要
-Deploy Key / git clone**。  
+Deploy Key / git clone / Releases PAT**（仓库已公开）。  
 **一键命令（推荐）**见 [`docs/RELEASE_AND_DEPLOY.md`](../docs/RELEASE_AND_DEPLOY.md) §4.2：
 
 ```bash
-export GITHUB_RELEASES_TOKEN=ghp_xxx
-curl -fsSL -H "Authorization: Bearer $GITHUB_RELEASES_TOKEN" \
-  -L https://github.com/owner/name/releases/latest/download/install.sh \
-  | sudo -E bash
+curl -fsSL \
+  -L https://github.com/YKevin0x61/luyun/releases/latest/download/install.sh \
+  | sudo bash
 ```
 
-默认装**最新正式 Release**；`sudo -E` 保留环境变量。详情见 `docs/RELEASE_AND_DEPLOY.md` §4.2。
+默认装**最新正式 Release**。详情见 `docs/RELEASE_AND_DEPLOY.md` §4.2。
 
 脚本会完成：
 
-1. 用 Releases PAT 下载并硬校验 `luyun-release-bundle.tar.gz` + `SHA256SUMS`
+1. 匿名下载并硬校验 `luyun-release-bundle.tar.gz` + `SHA256SUMS`
 2. 解压发行包到 `<deploy-dir>`（含预构建 Admin/KDS 与 `RELEASE_MANIFEST.json`）
-3. 写入 `<deploy-dir>/deploy/env.production`（含 `GITHUB_REPO` /
-   `GITHUB_RELEASES_TOKEN`，mode 600；供 Version Check / Update Job 复用）
+3. 写入 `<deploy-dir>/deploy/env.production`（含 `GITHUB_REPO`；
+   `GITHUB_RELEASES_TOKEN` 可为空，mode 600；供 Version Check / Update Job 复用）
 4. 创建 `.venv`，`pip install -r requirements.txt`
 5. 安装 Playwright Chromium（生产 Linux 带 `--with-deps`）
 6. 安装并 **enable**（不 start）`luyun.service` + `luyun-update.service`
@@ -107,6 +109,34 @@ sudo systemctl start luyun.service
 systemctl status luyun
 curl -s http://127.0.0.1:8000/api/system/status | head
 ```
+
+### 1.1 Docker / Compose（进程外壳）
+
+适合 1Panel / Compose：容器只提供 Python + Playwright 运行时；应用树仍来自
+**发行包**（首次可由入口脚本自动下载，日常升级走 Admin「系统更新」）。
+
+```bash
+# 仓库根目录
+cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
+./scripts/docker_up.sh
+# 等价：
+# docker compose -f deploy/docker-compose.yml --env-file deploy/.env.docker up -d --build
+```
+
+**必须挂载父目录，不要挂直播应用目录本身。** Update Job 会在同卷上
+`rename app ↔ app.prev / app.next`；若把 `runtime/app` 直接当成 volume，原子切换会失败。
+
+| 宿主机（默认） | 容器 |
+|---|---|
+| `deploy/runtime/`（父目录） | `/srv/luyun` |
+| `deploy/runtime/app/`（直播树） | `/srv/luyun/app` |
+| `/var/run/docker.sock` | `/var/run/docker.sock` |
+
+环境要点：`LUYUN_DEPLOY_MODE=docker`、`LUYUN_DOCKER_CONTAINER` 与
+`container_name` 一致、`RELEASE_UPDATE_REPO_DIR=/srv/luyun/app`。  
+首次 `runtime/app` 为空时，入口默认拉取最新正式发行包（`LUYUN_DOCKER_AUTO_BOOTSTRAP=1`）。  
+之后编辑 `runtime/app/deploy/env.production`（`LUYUN_CRED_KEY` 等），反代可指到
+`127.0.0.1:${LUYUN_HOST_PORT}`。
 
 ---
 
@@ -139,8 +169,7 @@ curl -s http://127.0.0.1:8000/api/system/status | head
 并发：已有进行中的 Update Job 时，新的 Apply Update 会被拒绝。
 `data/` 业务库与凭据在代码更新过程中保留；备份另见第 4 节。
 
-**Docker / 1Panel：** 可作为进程外壳（绑定挂载应用目录与 `data/`、挂载
-`docker.sock`、设置容器名）。**不要求** `.git`；交付仍是发行包，不是镜像 pull。
+**Docker / 1Panel：** 见下方「Docker 部署」；交付仍是发行包，不是镜像 pull。
 
 ### 旧版 git 店面迁移
 
@@ -256,8 +285,8 @@ Bootstrap **不**填写 POS 凭据；反代就绪后：
 2. POS 系统登录凭据（账号/密码/门店 ID）：访问 `/setup` 页面填写，加密保存
    在 `data/credentials.enc`（加密密钥见 `LUYUN_CRED_KEY`，说明见
    `env.production.example`）。
-3. 之后同一页「系统更新」可用于版本检测 / 更新环境自检 / 应用更新（需已配置
-   `GITHUB_RELEASES_TOKEN`；Bootstrap 已写入）。
+3. 之后同一页「系统更新」可用于版本检测 / 更新环境自检 / 应用更新（公开仓
+   无需 PAT；Token 仅在 API 限流时可选）。
 
 两者都建议在部署机器上通过 SSH 隧道或临时开放安全组，只对你自己的 IP
 可访问的情况下完成，避免初始化窗口暴露在公网。
@@ -321,7 +350,7 @@ python3 -m venv .venv
 .venv/bin/python -m playwright install --with-deps chromium
 
 cp deploy/env.production.example deploy/env.production
-# 填 GITHUB_RELEASES_TOKEN、LUYUN_CRED_KEY 等；chmod 600
+# 填 LUYUN_CRED_KEY 等；GITHUB_RELEASES_TOKEN 公开仓可留空；chmod 600
 # 确认 RELEASE_MANIFEST.json 已在部署根目录
 
 sudo cp deploy/luyun.service /etc/systemd/system/luyun.service
@@ -342,8 +371,8 @@ sudo systemctl enable luyun-update.service   # oneshot，按需 start
 - **单实例、单 worker**：不要给 `uvicorn`/`gunicorn` 配置多进程，也不要在
   多台机器上同时跑这套代码指向同一份 `data/`（SQLite 文件锁 + 内存态 hub
   都不支持这种拓扑）。
-- **Docker 仅可作进程外壳**：绑定挂载应用目录与 `data/`、挂载 `docker.sock`
-  以便更新作业重启容器；**不要**把 `docker pull` 镜像当作本产品的店内交付真相。
+- **Docker 仅可作进程外壳**：见「Docker 部署」；**不要**把 `docker pull`
+  镜像当作本产品的店内交付真相。
   裸机/VM 上用 systemd + venv 仍是默认路径。
 - **生产机无 Node / 无运行时前端构建**：日常升级走发行包 + Update Job；
   发版用 `scripts/publish_release.sh`（见第 7 节与 ADR 0011）。

@@ -147,6 +147,7 @@ _Avoid_: 在运行实例上再跑前端构建；在不备份、不确认目标�
 _Avoid_: 更新作业在 Web 请求线程里做完下载与切换；失败后停在半截目录无人理会；把更新作业做成常驻多实例工作者。
 
 ### 引导安装 (Bootstrap Install)
-新机器从零装到「应用进程可启动」：用 Releases 只读凭据取得目标发行包并解压、安装 Python/Playwright 依赖、启主服务（及更新作业的拉起方式）。不要求生产机安装 Node，也不要求 Deploy Key / git clone。
+新机器从零装到「应用进程可启动」：从公开 GitHub Release 匿名取得目标发行包并解压、安装 Python/Playwright 依赖、启主服务（及更新作业的拉起方式）。不要求生产机安装 Node，也不要求 Deploy Key / git clone / Releases PAT（PAT 仅在 API 限流时可选）。
+可用 systemd 宿主机路径，或 Docker / Compose 进程外壳（`deploy/docker-compose.yml`：挂载直播树的**父目录** + `docker.sock`；升级仍走发行包 / Admin「系统更新」）。
 不含反代/TLS/域名与 POS 凭据填写——那些仍是人工一步。
-_Avoid_: 引导安装以私有仓 clone 为必经步骤。
+_Avoid_: 引导安装以私有仓 clone 或强制 PAT 为必经步骤；把 Docker 镜像 pull 当成店内交付真相。

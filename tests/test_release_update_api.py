@@ -36,7 +36,7 @@ def _sample_preflight(**overrides) -> UpdatePreflight:
     base = dict(
         checks=[
             PreflightCheck(code="restart", ok=True, message="重启能力可用"),
-            PreflightCheck(code="credentials", ok=True, message="Releases 凭据可用"),
+            PreflightCheck(code="credentials", ok=True, message="可访问 GitHub Releases（公开仓无需 PAT）"),
             PreflightCheck(code="job_idle", ok=True, message="当前没有进行中的更新作业"),
             PreflightCheck(code="tree_clean", ok=True, message="部署目录干净"),
         ],
@@ -134,7 +134,7 @@ class ReleaseUpdateApiTest(unittest.TestCase):
             discard_local_changes_allowed=True,
             checks=[
                 PreflightCheck(code="restart", ok=True, message="重启能力可用"),
-                PreflightCheck(code="credentials", ok=True, message="Releases 凭据可用"),
+                PreflightCheck(code="credentials", ok=True, message="可访问 GitHub Releases（公开仓无需 PAT）"),
                 PreflightCheck(code="job_idle", ok=True, message="当前没有进行中的更新作业"),
                 PreflightCheck(
                     code="tree_clean",

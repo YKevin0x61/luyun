@@ -574,8 +574,8 @@ onMounted(() => {
             <fieldset>
               <legend>GitHub 连接</legend>
               <p class="hint" style="margin-bottom:12px;">
-                仓库已固定为代码内配置；此处只需维护只读 PAT。Token 过期时可更换，保存后立即生效，无需重启。
-                留空「新 Token」表示保持现有 Token 不变。
+                仓库为公开仓，已固定在代码内配置；版本检测与系统更新默认匿名访问 Releases，无需 PAT。
+                若遇 API 限流，可在此选填只读 Token；保存后立即生效，无需重启。留空「新 Token」表示保持现有值不变。
               </p>
               <div v-if="githubLoading" class="hint">加载配置中…</div>
               <template v-else>
@@ -588,7 +588,7 @@ onMounted(() => {
                     <span class="k">Token 状态</span>
                     <span class="v">
                       <span class="status-pill" :class="githubConfig?.token_configured ? 'ok' : 'empty'">
-                        {{ githubConfig?.token_configured ? '已配置' : '未配置' }}
+                        {{ githubConfig?.token_configured ? '已配置（可选）' : '未配置（公开仓可用）' }}
                       </span>
                     </span>
                   </div>
@@ -606,13 +606,13 @@ onMounted(() => {
                       v-model="githubForm.token"
                       type="password"
                       autocomplete="new-password"
-                      placeholder="留空则不修改现有 Token"
+                      placeholder="公开仓可留空；仅在限流时需要"
                     >
                   </div>
                   <div class="full">
                     <label class="luyun-check-row">
                       <LuyunCheckbox v-model="githubForm.clear_token" />
-                      <span>清除已保存的 Token（将回退到环境变量，若也无则版本检测不可用）</span>
+                      <span>清除已保存的 Token（回退到环境变量；公开仓无 Token 也可继续版本检测）</span>
                     </label>
                   </div>
                 </div>
@@ -700,7 +700,7 @@ onMounted(() => {
                     class="alert show"
                     style="margin-top:12px;"
                   >
-                    当前不是健康的运行实例，已禁用「应用更新」。请先修好上方红灯（重启能力、Releases 凭据等）后再试。
+                    当前不是健康的运行实例，已禁用「应用更新」。请先修好上方红灯（重启能力、GitHub Releases 可达性等）后再试。
                   </div>
                   <div
                     v-else-if="discardLocalChangesAllowed"

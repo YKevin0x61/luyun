@@ -181,7 +181,7 @@ describe('useSystemUpdate', () => {
         discard_local_changes_allowed: false,
         checks: [
           { code: 'restart', ok: false, message: '当前部署模式缺少重启能力' },
-          { code: 'credentials', ok: true, message: 'Releases 凭据可用' },
+          { code: 'credentials', ok: true, message: '可访问 GitHub Releases（公开仓无需 PAT）' },
           { code: 'job_idle', ok: true, message: '当前没有进行中的更新作业' },
           { code: 'tree_clean', ok: true, message: '部署目录干净' },
         ],
@@ -224,7 +224,7 @@ describe('useSystemUpdate', () => {
         discard_local_changes_allowed: true,
         checks: [
           { code: 'restart', ok: true, message: '重启能力可用' },
-          { code: 'credentials', ok: true, message: 'Releases 凭据可用' },
+          { code: 'credentials', ok: true, message: '可访问 GitHub Releases（公开仓无需 PAT）' },
           { code: 'job_idle', ok: true, message: '当前没有进行中的更新作业' },
           { code: 'tree_clean', ok: false, message: '部署目录有本地改动' },
         ],
