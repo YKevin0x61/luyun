@@ -74,8 +74,11 @@ class FakeBundle:
 class FakeDeps:
     synced: bool = False
     fail: bool = False
+    cancel: bool = False
 
     def sync(self) -> None:
+        if self.cancel:
+            raise RuntimeError("cancelled by operator")
         if self.fail:
             raise RuntimeError("pip failed")
         self.synced = True
@@ -106,6 +109,7 @@ def _runner(
     bundle: Optional[FakeBundle] = None,
     deps: Optional[FakeDeps] = None,
     service: Optional[FakeService] = None,
+    is_cancelled=None,
 ) -> tuple[UpdateJobRunner, FakeBackup, FakeBundle, FakeDeps, FakeService]:
     b = backup or FakeBackup()
     bund = bundle or FakeBundle()
@@ -117,6 +121,7 @@ def _runner(
         bundle=bund,
         deps=d,
         service=s,
+        is_cancelled=is_cancelled,
     )
     return runner, b, bund, d, s
 
@@ -255,3 +260,46 @@ class UpdateJobRunnerTest(unittest.TestCase):
         self.assertIn("log=", final.error or "")
         self.assertEqual(final.previous_ref, "v0.1.0")
         self.assertIsNotNone(final.log_path)
+
+    def test_cancel_during_deps_rolls_back_previous_tree(self):
+        store = FakeJobStore(_queued())
+        runner, _, bundle, deps, service = _runner(
+            store,
+            deps=FakeDeps(cancel=True),
+        )
+
+        final = runner.run()
+
+        self.assertTrue(bundle.left_previous)
+        self.assertTrue(bundle.restored)
+        self.assertGreaterEqual(service.restarts, 1)
+        self.assertEqual(final.stage, "failed")
+        self.assertTrue(final.rollback_attempted)
+        self.assertIn("cancelled by operator", final.error or "")
+        self.assertIn("cancelled", (final.message or "").lower())
+
+    def test_cancel_before_leaving_tree_skips_rollback(self):
+        cancelled = {"v": False}
+
+        class CancelAfterBackup(FakeBackup):
+            def run_backup(self) -> str:
+                cancelled["v"] = True
+                return super().run_backup()
+
+        store = FakeJobStore(_queued())
+        runner, _, bundle, deps, service = _runner(
+            store,
+            backup=CancelAfterBackup(),
+            is_cancelled=lambda: cancelled["v"],
+        )
+
+        final = runner.run()
+
+        self.assertFalse(bundle.left_previous)
+        self.assertIsNone(bundle.fetched_tag)
+        self.assertFalse(bundle.restored)
+        self.assertFalse(deps.synced)
+        self.assertEqual(service.restarts, 0)
+        self.assertEqual(final.stage, "failed")
+        self.assertFalse(final.rollback_attempted)
+        self.assertIn("cancelled by operator", final.error or "")

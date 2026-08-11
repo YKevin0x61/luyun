@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from fastapi import FastAPI
@@ -19,6 +20,7 @@ from database import DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
 from services.release_update import (
     ApplyResult,
+    CancelResult,
     FormalRelease,
     PreflightCheck,
     ReleaseUpdate,
@@ -310,7 +312,64 @@ class ReleaseUpdateApiTest(unittest.TestCase):
         self.assertTrue(body["success"])
         self.assertEqual(body["job"]["stage"], "syncing_deps")
         self.assertEqual(body["job"]["log_path"], "data/update_job.log")
+        self.assertIn("log_tail", body)
         fake.job_status.assert_called_once_with()
+
+    def test_job_status_includes_log_tail_from_file(self):
+        log_file = Path(settings.DATABASE_DIR) / "update_job.log"
+        log_file.write_text("line-a\nline-b\nCollecting foo\n", encoding="utf-8")
+        fake = mock.Mock(spec=ReleaseUpdate)
+        fake.job_status.return_value = UpdateJobState(
+            stage="syncing_deps",
+            target_tag="v0.2.0",
+            log_path=str(log_file),
+        )
+        self.app.dependency_overrides[get_release_update] = lambda: fake
+
+        with TestClient(self.app) as client:
+            resp = client.get("/api/release-update/job")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Collecting foo", resp.json()["log_tail"])
+
+    def test_cancel_job_requires_session_and_returns_forced_state(self):
+        fake = mock.Mock(spec=ReleaseUpdate)
+        fake.cancel.return_value = CancelResult(
+            accepted=True,
+            forced=True,
+            job=UpdateJobState(
+                stage="failed",
+                target_tag="v0.2.0",
+                error="cancelled by operator (forced)",
+                cancel_requested=True,
+                log_path="data/update_job.log",
+            ),
+        )
+        self.app.dependency_overrides[get_release_update] = lambda: fake
+
+        with TestClient(self.app) as client:
+            resp = client.post("/api/release-update/job/cancel")
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["accepted"])
+        self.assertTrue(body["forced"])
+        self.assertEqual(body["job"]["stage"], "failed")
+        fake.cancel.assert_called_once_with()
+
+    def test_cancel_job_not_running_is_409(self):
+        fake = mock.Mock(spec=ReleaseUpdate)
+        fake.cancel.return_value = CancelResult(
+            accepted=False,
+            reason="not_running",
+            job=UpdateJobState(stage="idle"),
+        )
+        self.app.dependency_overrides[get_release_update] = lambda: fake
+
+        with TestClient(self.app) as client:
+            resp = client.post("/api/release-update/job/cancel")
+
+        self.assertEqual(resp.status_code, 409)
 
     def test_job_status_exposes_bundle_install_stage(self):
         fake = mock.Mock(spec=ReleaseUpdate)

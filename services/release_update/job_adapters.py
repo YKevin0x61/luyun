@@ -8,19 +8,26 @@ import hashlib
 import json
 import logging
 import os
+import select
 import shutil
+import signal
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from config import settings
 from services import backup_service
 from services.release_update.job_runner import BundleInstallResult
+from services.release_update.job_state import is_cancel_requested, job_log_path
 from services.release_update.manifest_identity import MANIFEST_NAME
+
+PIP_SYNC_TIMEOUT_SECONDS = 1800
+PIP_POLL_SECONDS = 0.5
 
 logger = logging.getLogger(__name__)
 
@@ -358,36 +365,109 @@ def _remove_preserved(root: Path) -> None:
             path.unlink(missing_ok=True)
 
 
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    pid = proc.pid
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 class PipDepsSyncAdapter:
     """Sync Python deps into the deploy venv after bundle activation."""
 
-    def __init__(self, deploy_dir: Path, *, python_bin: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        deploy_dir: Path,
+        *,
+        python_bin: Optional[str] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+        log_path: Optional[Path] = None,
+        timeout_seconds: int = PIP_SYNC_TIMEOUT_SECONDS,
+    ) -> None:
         self._deploy = Path(deploy_dir)
         if python_bin:
             self._python = python_bin
         else:
             venv_python = self._deploy / ".venv" / "bin" / "python"
             self._python = str(venv_python) if venv_python.is_file() else "python3"
+        self._is_cancelled = is_cancelled or is_cancel_requested
+        self._log_path = Path(log_path) if log_path is not None else job_log_path()
+        self._timeout_seconds = timeout_seconds
 
     def sync(self) -> None:
         req = self._deploy / "requirements.txt"
         if not req.is_file():
             raise RuntimeError("requirements.txt missing after bundle activation")
         cmd = [self._python, "-m", "pip", "install", "-r", str(req)]
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            completed = subprocess.run(
-                cmd,
-                cwd=str(self._deploy),
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=1800,
-            )
+            with open(self._log_path, "a", encoding="utf-8") as log_fh:
+                log_fh.write("\n--- pip sync ---\n")
+                log_fh.write(f"$ {' '.join(cmd)}\n")
+                log_fh.flush()
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(self._deploy),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    start_new_session=True,
+                )
+                assert proc.stdout is not None
+                deadline = time.monotonic() + self._timeout_seconds
+                while True:
+                    if self._is_cancelled():
+                        log_fh.write("\n[update] cancel requested — stopping pip\n")
+                        log_fh.flush()
+                        _terminate_process_group(proc)
+                        raise RuntimeError("cancelled by operator")
+                    if time.monotonic() > deadline:
+                        log_fh.write("\n[update] pip sync timed out\n")
+                        log_fh.flush()
+                        _terminate_process_group(proc)
+                        raise RuntimeError("pip sync timed out")
+                    ready, _, _ = select.select([proc.stdout], [], [], PIP_POLL_SECONDS)
+                    if ready:
+                        line = proc.stdout.readline()
+                        if line:
+                            log_fh.write(line)
+                            log_fh.flush()
+                        elif proc.poll() is not None:
+                            break
+                    elif proc.poll() is not None:
+                        # Drain any remaining buffered output.
+                        rest = proc.stdout.read()
+                        if rest:
+                            log_fh.write(rest)
+                            log_fh.flush()
+                        break
+                rc = proc.wait(timeout=5)
+        except RuntimeError:
+            raise
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(f"pip sync failed: {exc}") from exc
-        if completed.returncode != 0:
-            err = (completed.stderr or completed.stdout or "").strip()
-            raise RuntimeError(f"pip sync failed: {err}")
+        if rc != 0:
+            raise RuntimeError(f"pip sync failed: exit {rc} (see update_job.log)")
 
 
 class SystemdMainServiceAdapter:

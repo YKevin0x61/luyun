@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -31,8 +32,12 @@ from services.release_update.job_adapters import (  # noqa: E402
 from services.release_update.job_runner import UpdateJobRunner  # noqa: E402
 from services.release_update.job_state import (  # noqa: E402
     FileJobStateStore,
+    clear_cancel,
+    clear_job_pid,
+    is_cancel_requested,
     job_log_path,
     job_state_path,
+    write_job_pid,
 )
 
 
@@ -60,8 +65,13 @@ def build_runner(deploy_dir: Path) -> UpdateJobRunner:
             github_repo=gh.repo or "",
             token=gh.token,
         ),
-        deps=PipDepsSyncAdapter(deploy_dir),
+        deps=PipDepsSyncAdapter(
+            deploy_dir,
+            is_cancelled=is_cancel_requested,
+            log_path=job_log_path(),
+        ),
         service=build_main_service_adapter(),
+        is_cancelled=is_cancel_requested,
     )
 
 
@@ -104,8 +114,17 @@ def main(argv: list[str] | None = None) -> int:
     logger = logging.getLogger("update_job")
     logger.info("Update Job starting deploy_dir=%s state=%s", deploy_dir, state_file)
 
-    runner = build_runner(deploy_dir)
-    final = runner.run()
+    write_job_pid(os.getpid())
+    final = None
+    try:
+        runner = build_runner(deploy_dir)
+        final = runner.run()
+    finally:
+        clear_job_pid()
+        clear_cancel()
+    if final is None:
+        logger.error("Update Job aborted before producing a final state")
+        return 1
     logger.info(
         "Update Job finished stage=%s error=%s rollback_attempted=%s log=%s",
         final.stage,

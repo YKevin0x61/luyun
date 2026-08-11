@@ -293,6 +293,8 @@ Update Job：备份 → 下载/校验发行包 → 旁路解压并原子切换 �
 
 
 并发：已有进行中的作业时，新的 Apply 会被拒绝。  
+终止：Admin「终止更新」→ `POST /api/release-update/job/cancel`（写取消标志并 stop oneshot/pid；协作取消在已切树后会回滚；若进程已僵死则强制标 `failed`）。  
+进度：`GET /api/release-update/job` 附带 `log_tail`（含 pip 实时输出）。  
 排障：`data/update_job.json`、`data/update_job.log`；systemd 另看 `journalctl -u luyun-update`。
 
 ### 5.4 回滚

@@ -7,6 +7,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass, field
 from typing import List, Optional
+from unittest import mock
 
 from services.release_update import (
     FormalRelease,
@@ -63,6 +64,14 @@ class FakeOneshot:
 
 
 @dataclass
+class FakeStopper:
+    stopped: bool = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+@dataclass
 class FakePeak:
     peak: bool = False
 
@@ -104,6 +113,7 @@ def _build(
     *,
     job_store: Optional[FakeJobStore] = None,
     oneshot: Optional[FakeOneshot] = None,
+    job_stopper: Optional[FakeStopper] = None,
     peak: Optional[FakePeak] = None,
     preflight_env: Optional[FakePreflightEnv] = None,
     tag: str = "v0.1.0",
@@ -118,6 +128,7 @@ def _build(
         app_version="0.1.0",
         job_store=store,
         oneshot=starter,
+        job_stopper=job_stopper or FakeStopper(),
         peak_hours=peak or FakePeak(False),
         preflight_env=preflight_env or FakePreflightEnv(),
     )
@@ -277,3 +288,43 @@ class ApplyUpdateTest(unittest.TestCase):
         result = ru2.apply("v0.2.0", peak_override=True)
         self.assertTrue(result.accepted)
         self.assertTrue(oneshot2.started)
+
+    def test_cancel_rejected_when_idle(self):
+        ru, _, _ = _build()
+        stopper = FakeStopper()
+        ru._job_stopper = stopper
+
+        result = ru.cancel(wait_seconds=0)
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.reason, "not_running")
+        self.assertFalse(stopper.stopped)
+
+    def test_cancel_force_finalizes_stuck_in_progress_job(self):
+        store = FakeJobStore(
+            UpdateJobState(
+                stage="syncing_deps",
+                target_tag="v0.2.0",
+                previous_ref="v0.1.0",
+                message="Syncing Python dependencies",
+                log_path="data/update_job.log",
+            )
+        )
+        stopper = FakeStopper()
+        ru, _, _ = _build(job_store=store, job_stopper=stopper)
+
+        with mock.patch(
+            "services.release_update.job_state.request_cancel"
+        ) as req, mock.patch(
+            "services.release_update.job_state.clear_cancel"
+        ) as clr:
+            result = ru.cancel(wait_seconds=0)
+
+        self.assertTrue(result.accepted)
+        self.assertTrue(result.forced)
+        self.assertTrue(stopper.stopped)
+        req.assert_called_once()
+        clr.assert_called()
+        self.assertEqual(store.state.stage, "failed")
+        self.assertTrue(store.state.cancel_requested)
+        self.assertIn("cancelled by operator", store.state.error or "")

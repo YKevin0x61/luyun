@@ -74,12 +74,21 @@ export function useSystemUpdate({ showAlert, clearAlert, pollIntervalMs = DEFAUL
   const applying = ref(false)
 
   const job = ref(null)
+  const jobLogTail = ref('')
   const jobPolling = ref(false)
+  const cancelling = ref(false)
   let pollTimer = null
 
   const updateAvailable = computed(() => !!versionCheck.value?.update_available)
   const jobStageLabel = computed(() => stageLabel(job.value?.stage))
   const jobInProgress = computed(() => IN_PROGRESS.has(job.value?.stage))
+  const canCancelJob = computed(
+    () =>
+      jobInProgress.value
+      && !cancelling.value
+      && !applying.value
+      && !job.value?.cancel_requested,
+  )
 
   const preflight = computed(() => versionCheck.value?.preflight || null)
   const preflightChecks = computed(() => preflight.value?.checks || [])
@@ -126,6 +135,9 @@ export function useSystemUpdate({ showAlert, clearAlert, pollIntervalMs = DEFAUL
     try {
       const data = await api.get('/api/release-update/job', null, null, 'no-store')
       job.value = data.job || null
+      if (typeof data.log_tail === 'string') {
+        jobLogTail.value = data.log_tail
+      }
       const stage = job.value?.stage
       if (stage === 'succeeded') {
         stopPolling()
@@ -220,11 +232,43 @@ export function useSystemUpdate({ showAlert, clearAlert, pollIntervalMs = DEFAUL
     try {
       const data = await api.get('/api/release-update/job', null, null, 'no-store')
       job.value = data.job || null
+      if (typeof data.log_tail === 'string') {
+        jobLogTail.value = data.log_tail
+      }
       if (IN_PROGRESS.has(job.value?.stage)) {
         startPolling()
       }
     } catch (_) {
       // ignore — section may open while service is restarting
+    }
+  }
+
+  async function cancelJob() {
+    if (!canCancelJob.value) return
+    clearAlert()
+    cancelling.value = true
+    try {
+      const data = await api.post('/api/release-update/job/cancel', {})
+      job.value = data.job || null
+      if (typeof data.log_tail === 'string') {
+        jobLogTail.value = data.log_tail
+      }
+      if (IN_PROGRESS.has(job.value?.stage)) {
+        startPolling()
+        showAlert('info', '已请求终止更新，等待作业收尾…')
+      } else {
+        stopPolling()
+        const forced = data.forced ? '（强制收尾；若已切树请再 Apply 回退点）' : ''
+        showAlert('success', `更新作业已终止${forced}`)
+      }
+    } catch (err) {
+      const detail = err.detail
+      const msg = typeof detail === 'string'
+        ? detail
+        : (detail && detail.message) || err.message
+      showAlert('error', '终止更新失败：' + msg)
+    } finally {
+      cancelling.value = false
     }
   }
 
@@ -319,9 +363,13 @@ export function useSystemUpdate({ showAlert, clearAlert, pollIntervalMs = DEFAUL
     cancelApplyConfirm,
     confirmApply,
     job,
+    jobLogTail,
     jobPolling,
     jobStageLabel,
     jobInProgress,
+    canCancelJob,
+    cancelling,
+    cancelJob,
     loadJobStatus,
     stageLabel,
     STAGE_LABELS,

@@ -446,4 +446,57 @@ describe('useSystemUpdate', () => {
     expect(jobStageLabel.value).toBe('正在安装发行包')
     expect(jobPolling.value).toBe(true)
   })
+
+  it('keeps log_tail while polling syncing_deps and can cancel the job', async () => {
+    vi.useFakeTimers()
+    apiGet.mockResolvedValue({
+      success: true,
+      job: {
+        stage: 'syncing_deps',
+        target_tag: 'v0.2.0',
+        message: 'Syncing Python dependencies',
+        log_path: 'data/update_job.log',
+      },
+      log_tail: 'Collecting fastapi\n',
+    })
+    apiPost.mockResolvedValue({
+      success: true,
+      accepted: true,
+      forced: true,
+      job: {
+        stage: 'failed',
+        target_tag: 'v0.2.0',
+        error: 'cancelled by operator (forced)',
+        cancel_requested: true,
+        log_path: 'data/update_job.log',
+      },
+      log_tail: 'Collecting fastapi\n[update] cancel requested\n',
+    })
+
+    const showAlert = vi.fn()
+    const {
+      loadJobStatus,
+      jobLogTail,
+      canCancelJob,
+      cancelJob,
+      job,
+      jobPolling,
+    } = useSystemUpdate({
+      showAlert,
+      clearAlert: vi.fn(),
+      pollIntervalMs: 1000,
+    })
+
+    await loadJobStatus()
+    expect(jobLogTail.value).toContain('Collecting fastapi')
+    expect(canCancelJob.value).toBe(true)
+    expect(jobPolling.value).toBe(true)
+
+    await cancelJob()
+    expect(apiPost).toHaveBeenCalledWith('/api/release-update/job/cancel', {})
+    expect(job.value.stage).toBe('failed')
+    expect(jobPolling.value).toBe(false)
+    expect(jobLogTail.value).toContain('cancel requested')
+    expect(showAlert).toHaveBeenCalledWith('success', expect.stringContaining('已终止'))
+  })
 })

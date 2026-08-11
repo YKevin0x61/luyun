@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 from database import CHINA_TZ
 from services.release_update import (
@@ -21,6 +21,10 @@ from services.release_update import (
     JobStateStorePort,
     UpdateJobState,
 )
+
+
+class JobCancelled(Exception):
+    """Operator requested abort of the Update Job."""
 
 
 @dataclass(frozen=True)
@@ -79,12 +83,18 @@ class UpdateJobRunner:
         bundle: BundleInstallPort,
         deps: DepsSyncPort,
         service: MainServicePort,
+        is_cancelled: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._store = job_store
         self._backup = backup
         self._bundle = bundle
         self._deps = deps
         self._service = service
+        self._is_cancelled = is_cancelled or (lambda: False)
+
+    def _raise_if_cancelled(self) -> None:
+        if self._is_cancelled():
+            raise JobCancelled("cancelled by operator")
 
     def run(self) -> UpdateJobState:
         intent = self._store.read()
@@ -103,14 +113,17 @@ class UpdateJobRunner:
             finished_at=None,
             rollback_attempted=False,
             rollback_ok=None,
+            cancel_requested=False,
         )
         left_previous = False
 
         try:
+            self._raise_if_cancelled()
             self._set(base, STAGE_BACKING_UP, "Creating mandatory backup snapshot")
             snapshot_ts = self._backup.run_backup()
             base = replace(self._store.read(), snapshot_ts=snapshot_ts)
 
+            self._raise_if_cancelled()
             self._set(
                 base,
                 STAGE_FETCHING_BUNDLE,
@@ -119,6 +132,7 @@ class UpdateJobRunner:
             self._bundle.fetch_bundle(base.target_tag or "")
             base = self._store.read()
 
+            self._raise_if_cancelled()
             self._set(
                 base,
                 STAGE_INSTALLING,
@@ -130,6 +144,7 @@ class UpdateJobRunner:
             left_previous = True
             base = self._store.read()
 
+            self._raise_if_cancelled()
             if _fingerprint_changed(
                 install.previous_requirements_fingerprint,
                 install.requirements_fingerprint,
@@ -144,6 +159,7 @@ class UpdateJobRunner:
                 )
             base = self._store.read()
 
+            self._raise_if_cancelled()
             self._set(base, STAGE_RESTARTING, "Restarting main service")
             self._service.restart()
 
@@ -153,10 +169,16 @@ class UpdateJobRunner:
                 message="Update Job succeeded",
                 finished_at=_now_iso(),
                 error=None,
+                cancel_requested=False,
             )
             self._store.write(final)
             return final
+        except JobCancelled as exc:
+            if not left_previous:
+                return self._fail_before_leave(self._store.read(), error=str(exc))
+            return self._fail_with_rollback(self._store.read(), error=str(exc))
         except Exception as exc:
+            # Deps may raise RuntimeError("cancelled by operator"); treat like JobCancelled.
             if not left_previous:
                 return self._fail_before_leave(self._store.read(), error=str(exc))
             return self._fail_with_rollback(self._store.read(), error=str(exc))
@@ -203,14 +225,20 @@ class UpdateJobRunner:
         log_hint = state.log_path or "data/update_job.log"
         if log_hint and log_hint not in detail:
             detail = f"{detail}; log={log_hint}"
+        cancelled = "cancelled by operator" in error.lower()
         final = replace(
             state,
             stage=STAGE_FAILED,
-            message="Update Job failed; rollback attempted",
+            message=(
+                "Update Job cancelled; rollback attempted"
+                if cancelled
+                else "Update Job failed; rollback attempted"
+            ),
             error=detail,
             finished_at=_now_iso(),
             rollback_attempted=True,
             rollback_ok=rollback_ok,
+            cancel_requested=cancelled or state.cancel_requested,
         )
         self._store.write(final)
         return final

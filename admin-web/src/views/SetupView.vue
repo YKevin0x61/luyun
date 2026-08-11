@@ -182,9 +182,13 @@ const {
   cancelApplyConfirm,
   confirmApply,
   job,
+  jobLogTail,
   jobPolling,
   jobStageLabel,
   jobInProgress,
+  canCancelJob,
+  cancelling,
+  cancelJob,
   loadJobStatus,
 } = useSystemUpdate({ showAlert, clearAlert })
 
@@ -838,6 +842,18 @@ onMounted(() => {
                 <div v-if="job.error" class="alert show">{{ job.error }}</div>
                 <div v-if="job.rollback_attempted" class="hint" style="margin-top:8px;">
                   已尝试恢复更新前的应用目录：{{ job.rollback_ok ? '恢复成功' : '恢复未完全成功，请查看日志或 SSH 排查' }}
+                </div>
+                <div v-if="jobInProgress" class="actions" style="justify-content:flex-start;margin-top:12px;">
+                  <button
+                    type="button"
+                    class="btn btn-danger"
+                    :disabled="!canCancelJob"
+                    @click="cancelJob"
+                  >{{ cancelling || job.cancel_requested ? '正在终止…' : '终止更新' }}</button>
+                </div>
+                <div v-if="jobLogTail" class="update-log-tail" style="margin-top:12px;">
+                  <div class="hint" style="margin-bottom:6px;">最近日志</div>
+                  <pre class="mono" style="max-height:220px;overflow:auto;margin:0;padding:10px;white-space:pre-wrap;word-break:break-word;background:rgba(0,0,0,0.25);border-radius:8px;font-size:12px;">{{ jobLogTail }}</pre>
                 </div>
               </template>
             </fieldset>

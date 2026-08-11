@@ -11,6 +11,7 @@ from config import settings
 from services.github_release_config import get_effective_config
 from services.release_update import PeakHoursPort, ReleaseUpdate
 from services.release_update.github_releases import GitHubReleasesAdapter
+from services.release_update.job_control import build_job_stopper
 from services.release_update.job_state import FileJobStateStore
 from services.release_update.manifest_identity import ReleaseManifestAdapter
 from services.release_update.oneshot import build_oneshot_starter
@@ -46,6 +47,7 @@ def build_release_update(
         job_store=FileJobStateStore(),
         # systemd oneshot vs Docker detached — follows LUYUN_DEPLOY_MODE / runtime.
         oneshot=build_oneshot_starter(),
+        job_stopper=build_job_stopper(),
         peak_hours=peak_hours or BusinessHoursPeakAdapter(),
         preflight_env=DefaultPreflightEnvAdapter(deploy_dir),
     )

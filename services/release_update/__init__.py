@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import List, Optional, Protocol, Sequence, Tuple
+import time
 
 # Stages written by Apply Update / Update Job (stable for Admin UI polling).
 # Bundle path (ADR 0011): queued → backing_up → fetching_bundle → installing
@@ -44,6 +45,7 @@ REASON_INVALID_TARGET = "invalid_target"
 REASON_INCONSISTENT = "inconsistent"
 REASON_PREFLIGHT = "preflight"
 REASON_DIRTY_TREE = "dirty_tree"
+REASON_NOT_RUNNING = "not_running"
 
 PREFLIGHT_RESTART = "restart"
 PREFLIGHT_CREDENTIALS = "credentials"
@@ -128,6 +130,7 @@ class UpdateJobState:
     rollback_attempted: bool = False
     rollback_ok: Optional[bool] = None
     snapshot_ts: Optional[str] = None
+    cancel_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +140,16 @@ class ApplyResult:
     accepted: bool
     reason: Optional[str] = None
     job: Optional[UpdateJobState] = None
+
+
+@dataclass(frozen=True)
+class CancelResult:
+    """Outcome of operator cancel for an in-progress Update Job."""
+
+    accepted: bool
+    reason: Optional[str] = None
+    job: Optional[UpdateJobState] = None
+    forced: bool = False
 
 
 class InstalledIdentityPort(Protocol):
@@ -157,6 +170,10 @@ class JobStateStorePort(Protocol):
 
 class OneshotStarterPort(Protocol):
     def start(self) -> None: ...
+
+
+class JobStopperPort(Protocol):
+    def stop(self) -> None: ...
 
 
 class PeakHoursPort(Protocol):
@@ -277,6 +294,7 @@ class ReleaseUpdate:
         app_version: str,
         job_store: Optional[JobStateStorePort] = None,
         oneshot: Optional[OneshotStarterPort] = None,
+        job_stopper: Optional[JobStopperPort] = None,
         peak_hours: Optional[PeakHoursPort] = None,
         preflight_env: Optional[PreflightEnvPort] = None,
     ) -> None:
@@ -285,6 +303,7 @@ class ReleaseUpdate:
         self._app_version = app_version
         self._job_store = job_store
         self._oneshot = oneshot
+        self._job_stopper = job_stopper
         self._peak_hours = peak_hours
         self._preflight_env = preflight_env
 
@@ -365,6 +384,82 @@ class ReleaseUpdate:
             return UpdateJobState(stage=STAGE_IDLE)
         return self._job_store.read()
 
+    def cancel(
+        self,
+        *,
+        wait_seconds: float = 5.0,
+        poll_interval: float = 0.25,
+    ) -> CancelResult:
+        """Request abort of an in-progress Update Job.
+
+        Sets the cancel flag, asks the oneshot/process to stop, waits briefly
+        for the runner to finalize (including rollback when it already left the
+        previous tree). If the job stays in-progress, force-marks ``failed`` so
+        Admin is not stuck forever (rollback may then need a re-Apply).
+        """
+        if self._job_store is None:
+            raise RuntimeError("Apply Update adapters are not configured")
+
+        from services.release_update.job_state import (
+            clear_cancel,
+            request_cancel,
+        )
+
+        current = self._job_store.read()
+        if current.stage not in IN_PROGRESS_STAGES:
+            return CancelResult(
+                accepted=False,
+                reason=REASON_NOT_RUNNING,
+                job=current,
+            )
+
+        request_cancel()
+        self._job_store.write(
+            replace(
+                current,
+                cancel_requested=True,
+                message="Cancel requested; stopping Update Job",
+            )
+        )
+
+        if self._job_stopper is not None:
+            try:
+                self._job_stopper.stop()
+            except Exception:
+                # Still wait / force-finalize below so UI can recover.
+                pass
+
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        while time.monotonic() < deadline:
+            state = self._job_store.read()
+            if state.stage not in IN_PROGRESS_STAGES:
+                clear_cancel()
+                return CancelResult(accepted=True, job=state, forced=False)
+            time.sleep(max(0.05, poll_interval))
+
+        state = self._job_store.read()
+        if state.stage not in IN_PROGRESS_STAGES:
+            clear_cancel()
+            return CancelResult(accepted=True, job=state, forced=False)
+
+        from datetime import datetime, timedelta, timezone
+
+        finished = datetime.now(timezone(timedelta(hours=8))).isoformat()
+        final = replace(
+            state,
+            stage=STAGE_FAILED,
+            cancel_requested=True,
+            message="Update Job cancelled by operator",
+            error=(
+                "cancelled by operator (forced); if the application tree already "
+                "switched, re-Apply the previous_ref or inspect update_job.log"
+            ),
+            finished_at=finished,
+        )
+        self._job_store.write(final)
+        clear_cancel()
+        return CancelResult(accepted=True, job=final, forced=True)
+
     def apply(
         self,
         target_tag: str,
@@ -404,6 +499,10 @@ class ReleaseUpdate:
         ):
             return ApplyResult(accepted=False, reason=REASON_PEAK_HOURS)
 
+        from services.release_update.job_state import clear_cancel
+
+        clear_cancel()
+
         identity = self._installed.inspect_installed()
         previous_ref = identity.tag or identity.commit
         # Prefer store's existing log pointer when present (FileJobStateStore fills it).
@@ -414,6 +513,7 @@ class ReleaseUpdate:
             previous_ref=previous_ref,
             message="Update Job queued",
             log_path=prior.log_path if prior else None,
+            cancel_requested=False,
         )
         self._job_store.write(job)
         try:

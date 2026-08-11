@@ -19,14 +19,17 @@ from services.release_update import (
     REASON_BUSY,
     REASON_DIRTY_TREE,
     REASON_INVALID_TARGET,
+    REASON_NOT_RUNNING,
     REASON_PEAK_HOURS,
     REASON_PREFLIGHT,
     ApplyResult,
+    CancelResult,
     ReleaseUpdate,
     UpdateJobState,
     UpdatePreflight,
     VersionCheckResult,
 )
+from services.release_update.job_state import read_log_tail
 from services.release_update.factory import build_release_update
 from services.release_update.github_releases import GitHubReleasesError
 from services.release_update.peak_hours import BusinessHoursPeakAdapter
@@ -137,9 +140,29 @@ async def version_check(
 async def job_status(
     release_update: ReleaseUpdate = Depends(get_release_update),
 ) -> dict[str, Any]:
-    """Poll Update Job state from the data/ state file (+ log pointer)."""
+    """Poll Update Job state from the data/ state file (+ log pointer / tail)."""
     job = release_update.job_status()
-    return {"success": True, "job": _job_payload(job)}
+    return {
+        "success": True,
+        "job": _job_payload(job),
+        "log_tail": read_log_tail(job.log_path),
+    }
+
+
+@router.post("/job/cancel")
+async def cancel_update_job(
+    release_update: ReleaseUpdate = Depends(get_release_update),
+    _session_id: str = Depends(require_session),
+) -> dict[str, Any]:
+    """Request abort of an in-progress Update Job (session-hardened)."""
+    try:
+        result = release_update.cancel()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Cancel Update Job failed: %s", exc)
+        raise HTTPException(status_code=500, detail="终止更新作业失败") from exc
+    return _cancel_response(result)
 
 
 @router.post("/apply")
@@ -166,6 +189,25 @@ async def apply_update(
         raise HTTPException(status_code=500, detail="应用更新启动失败") from exc
 
     return _apply_response(result)
+
+
+def _cancel_response(result: CancelResult) -> dict[str, Any]:
+    if result.accepted:
+        job = result.job
+        return {
+            "success": True,
+            "accepted": True,
+            "forced": bool(result.forced),
+            "job": _job_payload(job) if job else None,
+            "log_tail": read_log_tail(job.log_path if job else None),
+        }
+    reason = result.reason or "rejected"
+    if reason == REASON_NOT_RUNNING:
+        raise HTTPException(
+            status_code=409,
+            detail="当前没有进行中的更新作业",
+        )
+    raise HTTPException(status_code=400, detail=f"无法终止更新作业: {reason}")
 
 
 def _apply_response(result: ApplyResult) -> dict[str, Any]:

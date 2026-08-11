@@ -9,7 +9,13 @@ import unittest
 from pathlib import Path
 
 from services.release_update import UpdateJobState
-from services.release_update.job_state import FileJobStateStore
+from services.release_update.job_state import (
+    FileJobStateStore,
+    clear_cancel,
+    is_cancel_requested,
+    read_log_tail,
+    request_cancel,
+)
 
 
 class FileJobStateStoreTest(unittest.TestCase):
@@ -37,3 +43,18 @@ class FileJobStateStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = FileJobStateStore(Path(tmp) / "missing.json")
             self.assertEqual(store.read().stage, "idle")
+
+    def test_cancel_flag_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertFalse(is_cancel_requested(root))
+            request_cancel(root)
+            self.assertTrue(is_cancel_requested(root))
+            clear_cancel(root)
+            self.assertFalse(is_cancel_requested(root))
+
+    def test_read_log_tail_returns_last_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "update_job.log"
+            log.write_text("a\nb\nc\nd\ne\n", encoding="utf-8")
+            self.assertEqual(read_log_tail(str(log), max_lines=2), "d\ne")
