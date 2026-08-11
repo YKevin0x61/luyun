@@ -196,6 +196,31 @@ class UpdateJobRunnerTest(unittest.TestCase):
             ],
         )
 
+    def test_persists_succeeded_before_restart_so_docker_self_kill_is_ok(self):
+        """Docker restart kills the in-container job; success must be on disk first.
+
+        Symptom without this: UI stuck at restarting while installed tag already matches.
+        """
+        store = FakeJobStore(_queued())
+        stage_at_restart: list[str] = []
+
+        @dataclass
+        class ProbeService:
+            restarts: int = 0
+
+            def restart(self) -> None:
+                self.restarts += 1
+                stage_at_restart.append(store.state.stage)
+
+        probe = ProbeService()
+        runner, _, _, _, _ = _runner(store, service=probe)
+
+        final = runner.run()
+
+        self.assertEqual(stage_at_restart, ["succeeded"])
+        self.assertEqual(final.stage, "succeeded")
+        self.assertEqual(probe.restarts, 1)
+
     def test_deps_skipped_when_requirements_fingerprint_unchanged(self):
         store = FakeJobStore(_queued())
         runner, _, _, deps, service = _runner(

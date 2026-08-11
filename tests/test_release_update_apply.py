@@ -271,6 +271,25 @@ class ApplyUpdateTest(unittest.TestCase):
         self.assertEqual(status.message, "downloading Release Bundle")
         self.assertEqual(status.log_path, "data/update_job.log")
 
+    def test_job_status_heals_stuck_restarting_when_installed_matches_target(self):
+        store = FakeJobStore(
+            UpdateJobState(
+                stage="restarting",
+                target_tag="v0.5.2",
+                previous_ref="v0.5.3",
+                message="Restarting main service",
+                log_path="data/update_job.log",
+            )
+        )
+        ru, _, _ = _build(job_store=store, tag="v0.5.2")
+
+        status = ru.job_status()
+
+        self.assertEqual(status.stage, "succeeded")
+        self.assertEqual(store.state.stage, "succeeded")
+        self.assertIsNone(status.error)
+        self.assertTrue(status.finished_at)
+
     def test_oneshot_start_failure_marks_job_failed_not_busy(self):
         class BoomOneshot:
             def start(self) -> None:

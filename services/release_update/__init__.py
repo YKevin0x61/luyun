@@ -379,10 +379,36 @@ class ReleaseUpdate:
         )
 
     def job_status(self) -> UpdateJobState:
-        """Read Update Job state from the persisted store."""
+        """Read Update Job state from the persisted store.
+
+        Heals a known Docker hazard: job wrote ``restarting`` then the
+        container restart killed the oneshot before ``succeeded`` landed, while
+        the installed Release Manifest already matches ``target_tag``.
+        """
         if self._job_store is None:
             return UpdateJobState(stage=STAGE_IDLE)
-        return self._job_store.read()
+        state = self._job_store.read()
+        if state.stage != STAGE_RESTARTING or not state.target_tag:
+            return state
+        try:
+            identity = self._installed.inspect_installed()
+        except Exception:
+            return state
+        if not identity.tag or identity.tag != state.target_tag:
+            return state
+        from datetime import datetime, timedelta, timezone
+
+        healed = replace(
+            state,
+            stage=STAGE_SUCCEEDED,
+            message="Update Job succeeded",
+            error=None,
+            finished_at=state.finished_at
+            or datetime.now(timezone(timedelta(hours=8))).isoformat(),
+            cancel_requested=False,
+        )
+        self._job_store.write(healed)
+        return healed
 
     def cancel(
         self,

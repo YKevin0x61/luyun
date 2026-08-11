@@ -161,8 +161,9 @@ class UpdateJobRunner:
 
             self._raise_if_cancelled()
             self._set(base, STAGE_RESTARTING, "Restarting main service")
-            self._service.restart()
-
+            # Persist succeeded BEFORE restart. Docker self-restart kills this
+            # process; writing after restart() would leave the job stuck at
+            # restarting even though the new Release is already live.
             final = replace(
                 self._store.read(),
                 stage=STAGE_SUCCEEDED,
@@ -172,6 +173,13 @@ class UpdateJobRunner:
                 cancel_requested=False,
             )
             self._store.write(final)
+            try:
+                self._service.restart()
+            except Exception as exc:
+                return self._fail_with_rollback(
+                    self._store.read(),
+                    error=f"restart failed: {exc}",
+                )
             return final
         except JobCancelled as exc:
             if not left_previous:
@@ -209,15 +217,10 @@ class UpdateJobRunner:
         rollback_error: Optional[str] = None
         try:
             self._bundle.restore_previous_tree()
-            self._service.restart()
             rollback_ok = True
         except Exception as rb_exc:
             rollback_ok = False
             rollback_error = str(rb_exc)
-            try:
-                self._service.restart()
-            except Exception:
-                pass
 
         detail = error
         if rollback_error:
@@ -240,5 +243,12 @@ class UpdateJobRunner:
             rollback_ok=rollback_ok,
             cancel_requested=cancelled or state.cancel_requested,
         )
+        # Write terminal failure before restart — same Docker self-kill hazard.
         self._store.write(final)
+        try:
+            self._service.restart()
+        except Exception as restart_exc:
+            detail = f"{detail}; restart: {restart_exc}"
+            final = replace(final, error=detail, rollback_ok=False)
+            self._store.write(final)
         return final
