@@ -1,0 +1,44 @@
+# systemd 一次性任务单元：执行 deploy/backup.sh 做一次 SQLite 冷备。
+# 本身不常驻，由 deploy/luyun-backup.timer 按日触发（Type=oneshot）。
+#
+# 安装步骤（占位路径 /opt/luyun 需替换为实际部署目录，与 deploy/luyun.service
+# 保持一致）：
+#   sudo cp deploy/luyun-backup.service /etc/systemd/system/luyun-backup.service
+#   sudo cp deploy/luyun-backup.timer   /etc/systemd/system/luyun-backup.timer
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now luyun-backup.timer
+#
+# 手动触发一次（不等定时器）：
+#   sudo systemctl start luyun-backup.service
+# 查看上次运行结果：
+#   systemctl status luyun-backup.service
+#   journalctl -u luyun-backup
+
+[Unit]
+Description=LuckIn SQLite 数据库定时备份（一次性任务，由 luyun-backup.timer 触发）
+# 备份依赖 data/ 下的 .db 文件，虽然 sqlite3 .backup 支持在线备份（不需要
+# luyun.service 停机），但仍建议放在其后，避免开机瞬间数据目录还没就绪：
+After=luyun.service
+
+[Service]
+Type=oneshot
+
+# 占位：运行时用户，建议与 luyun.service 一致，保证对 data/ 目录有读权限、
+# 对 backups/ 目录有写权限
+User=luyun
+Group=luyun
+
+# 占位：应用代码根目录，必须与仓库根目录一致（脚本内部会 cd 到这里的上一级
+# 逻辑是相对脚本自身路径，所以此处路径本身才是关键）
+WorkingDirectory=/opt/luyun
+
+# 可选：覆盖 deploy/backup.sh 里的默认值（备份目录、保留份数），不设置则用
+# 脚本内的默认值（./backups、保留最近 14 份）
+# Environment=BACKUP_DIR=/opt/luyun/backups
+# Environment=BACKUP_RETENTION_COUNT=14
+
+ExecStart=/opt/luyun/deploy/backup.sh
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=luyun-backup

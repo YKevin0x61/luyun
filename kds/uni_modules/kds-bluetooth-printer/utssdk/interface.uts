@@ -1,0 +1,36 @@
+export type BluetoothDeviceInfo = {
+  name: string
+  address: string
+  rssi?: number
+  paired: boolean
+}
+
+export enum PrintAlign {
+  LEFT = 0,
+  CENTER = 1,
+  RIGHT = 2
+}
+
+export enum FontSize {
+  NORMAL = 0,
+  LARGE = 1,
+  EXTRA_LARGE = 2
+}
+
+export type ConnectCallback = (success: boolean, error: string) => void
+export type DiscoveryCallback = (devices: BluetoothDeviceInfo[]) => void
+
+export interface IBluetoothPrinter {
+  isBluetoothAvailable(): boolean
+  isBluetoothEnabled(): boolean
+  enableBluetooth(): boolean
+  getPairedDevices(): BluetoothDeviceInfo[]
+  startDiscovery(callback: DiscoveryCallback): boolean
+  stopDiscovery(): boolean
+  connect(address: string, callback: ConnectCallback): void
+  disconnect(): boolean
+  isConnected(): boolean
+  printText(text: string, align: number | null, fontSize: number | null): boolean
+  printNewLine(lines: number | null): boolean
+  cutPaper(): boolean
+}

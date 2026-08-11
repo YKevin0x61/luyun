@@ -1,0 +1,15 @@
+{
+  "name": "kds",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "pinia": "2.1.7",
+    "vue": "3.4.21"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.7"
+  }
+}

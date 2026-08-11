@@ -1,0 +1,39 @@
+# systemd oneshot：Admin「应用更新」触发的 Update Job（ADR 0010）。
+#
+# 由 Web 进程（systemctl start luyun-update.service）拉起；不在 uvicorn 进程内
+# 改代码。进度写入 data/update_job.json，日志追加到 data/update_job.log。
+#
+# 安装（占位路径 /opt/luyun 请替换为实际部署目录）：
+#   sudo cp deploy/luyun-update.service /etc/systemd/system/luyun-update.service
+#   sudo systemctl daemon-reload
+#   # 无需 enable —— 按需 oneshot，由 Admin Apply Update 启动。
+
+[Unit]
+Description=LuckIn 系统更新作业（GitHub Release Apply Update）
+After=network.target
+# 不绑定到 luyun.service：更新过程中会主动重启主服务。
+
+[Service]
+Type=oneshot
+
+User=luyun
+Group=luyun
+
+WorkingDirectory=/opt/luyun
+
+# 与主服务共用生产环境变量（含 GITHUB_REPO / GITHUB_RELEASES_TOKEN）。
+EnvironmentFile=/opt/luyun/deploy/env.production
+
+ExecStart=/opt/luyun/.venv/bin/python /opt/luyun/scripts/run_update_job.py
+
+# oneshot 默认不重启；失败时状态留在 data/update_job.json 供 UI / SSH 排查。
+RemainAfterExit=no
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=luyun-update
+
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,103 @@
+# GitHub public-repo hygiene: never commit shop runtime state, secrets, or build junk.
+# Note: .gitignore only blocks *future* adds — already-tracked files need
+# `git rm --cached` (and history scrub if secrets were ever committed).
+
+# ===== 敏感凭据 / 密钥 =====
+data/credentials.enc
+data/.cred_key
+config/config.json
+scraper/cy7mm.json
+.env
+.env.*
+!.env.example
+*.enc
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+# Bootstrap Install / Update Job secrets (mode-restricted on disk; never commit)
+secrets/
+deploy/env.production
+deploy/env.production.local
+
+# ===== 数据 / 运行时状态 =====
+data/*
+# Optional: keep an empty placeholder in clones (uncomment + add the file)
+# !data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+*.db.bak*
+*.sqlite
+*.sqlite3
+# Allow intentional DB fixtures under tests/ (global *.db would otherwise block them)
+!tests/**/*.db
+!tests/**/*.sqlite
+!tests/**/*.sqlite3
+
+# ===== 日志 =====
+logs/
+*.log
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+ENV/
+env/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.egg
+
+# ===== Node =====
+node_modules/
+
+# ===== Playwright / 调试缓存 =====
+.playwright-mcp/
+playwright-report/
+test-results/
+
+# ===== IDE / 系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+*.swp
+*~
+
+# ===== 构建产物 =====
+dist/
+build/
+admin-web/dist/
+kds/dist/
+kds/unpackage/
+public/kds/
+
+# ===== 本地 agent / 草稿工作区（勿随公开仓发布） =====
+.scratch/
+.superpowers/
+
+# ===== Redis 转储（本项目不使用 Redis） =====
+dump.rdb
+
+# ===== 杂项本地覆盖 =====
+*.local
+config.local.*
+.settings.local.*
+
+# ===== Design / internal docs (keep local only) =====
+docs/

@@ -1,0 +1,23 @@
+{
+  "id": "kds-bluetooth-printer",
+  "displayName": "KDS 蓝牙热敏打印",
+  "version": "1.0.0",
+  "description": "Android 经典蓝牙 SPP + ESC/POS，适配 BlueTooth Printer 等热敏票据机",
+  "keywords": ["bluetooth", "escpos", "printer", "kds"],
+  "uni_modules": {
+    "dependencies": [],
+    "encrypt": [],
+    "platforms": {
+      "cloud": {
+        "tcb": "y",
+        "aliyun": "y"
+      },
+      "client": {
+        "App": {
+          "app-vue": "y",
+          "app-nvue": "y"
+        }
+      }
+    }
+  }
+}

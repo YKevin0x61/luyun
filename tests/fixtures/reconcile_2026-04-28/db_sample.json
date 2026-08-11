@@ -1,0 +1,26 @@
+[
+  {
+    "business_flow_id": "YY01101-260428-0053_(普通)桐乡胎菊_001",
+    "dish_name": "(普通)桐乡胎菊",
+    "quantity": 1,
+    "status": "已结"
+  },
+  {
+    "business_flow_id": "YY01101-260428-0053_一品珍珠糯米鸡_001",
+    "dish_name": "一品珍珠糯米鸡",
+    "quantity": 1,
+    "status": "已结"
+  },
+  {
+    "business_flow_id": "YY01101-260428-0053_手工烧鹅叉烧酥_001",
+    "dish_name": "手工烧鹅叉烧酥",
+    "quantity": 1,
+    "status": "已结"
+  },
+  {
+    "business_flow_id": "YY01101-260428-0053_方形饭盒_001",
+    "dish_name": "方形饭盒",
+    "quantity": 1,
+    "status": "已结"
+  }
+]

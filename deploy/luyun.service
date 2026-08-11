@@ -1,0 +1,82 @@
+# systemd 单元：单机单进程运行 FastAPI 应用（main:app），单 uvicorn worker。
+#
+# 为什么必须单 worker（禁止 --workers > 1 或多进程）：
+#   - 实时推送依赖进程内内存态的 hub（services/realtime/hub.py），WebSocket
+#     连接与订阅关系保存在单个 Python 进程里，多 worker 会导致订阅者分散在
+#     不同进程、互相收不到 nudge。
+#   - 近期日志缓冲区（main.py 的 InMemoryLogHandler）、爬虫失败计数
+#     （services/scraper_failure_tracker.py）等状态同理，都是单进程内存态。
+#   - 爬虫任务（scraper/adapter.py）在 lifespan 里作为后台 asyncio task 启动，
+#     若有多个 worker 进程会重复采集、产生重复订单数据。
+#
+# 安装步骤（下面出现的 /opt/luyun 均为占位路径，请替换为实际部署目录；
+# 该目录应与本仓库根目录一致，即 main.py 所在目录）：
+#   1. 创建专用运行用户（建议不用 root）：
+#        sudo useradd --system --create-home --shell /usr/sbin/nologin luyun
+#   2. 部署代码到 /opt/luyun，并创建虚拟环境安装依赖：
+#        cd /opt/luyun
+#        python3 -m venv .venv
+#        .venv/bin/pip install -r requirements.txt
+#        .venv/bin/python -m playwright install --with-deps chromium
+#   3. 复制并编辑生产环境变量文件（不要提交到 git）：
+#        cp deploy/env.production.example deploy/env.production
+#        vim deploy/env.production
+#   4. 复制本文件并按需修改占位路径/用户名：
+#        sudo cp deploy/luyun.service /etc/systemd/system/luyun.service
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now luyun.service
+#   5. 查看状态与日志：
+#        systemctl status luyun
+#        journalctl -u luyun -f
+
+[Unit]
+Description=LuckIn 订单系统（FastAPI / uvicorn，单机单 worker）
+After=network.target
+# 崩溃时避免无限重启刷屏：60 秒内累计重启超过 5 次则停止自动重启，
+# 需要人工介入排查（见下方 journalctl 命令）。
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# 占位：运行时系统用户/组，建议使用步骤 1 创建的专用非 root 用户
+User=luyun
+Group=luyun
+
+# 占位：应用代码根目录，必须与仓库根目录（main.py 所在目录）一致——
+# services/recipes/store.py 的默认数据库路径是相对路径 data/recipes.db，
+# 依赖进程 cwd 才能定位到正确的数据目录。
+WorkingDirectory=/opt/luyun
+
+# 占位：虚拟环境里的 uvicorn 可执行文件路径（venv 内自动定位到对应的 python）。
+# 单 worker、只监听本机回环地址，对外访问统一经由 Caddy/Nginx 反向代理终结 TLS。
+ExecStart=/opt/luyun/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+
+# 生产环境变量：见 deploy/env.production.example 说明，复制为下面这个文件后按需修改。
+# 注意 deploy/env.production 含敏感信息（LUYUN_CRED_KEY 等），切勿提交到 git
+# （已在仓库 .gitignore 里以 .env / .env.* 规则忽略，但本文件名不匹配该规则，
+# 建议額外确认不要 git add 这个文件，只 add .example 版本）。
+EnvironmentFile=/opt/luyun/deploy/env.production
+
+# Playwright/Chromium 运行所需：若 HOME 在 systemd 下解析不到预期用户目录，
+# 或浏览器缓存装在自定义路径，按需显式声明（与 playwright install 时的路径一致）：
+# Environment=HOME=/home/luyun
+# Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/luyun/.playwright-browsers
+
+Restart=always
+RestartSec=5
+
+# 日志转发到 systemd journal，用 `journalctl -u luyun` 查看
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=luyun
+
+# 基础安全加固：scraper/_session.py 启动 Chromium 时已带 --no-sandbox，
+# 因此不依赖 Chromium 自身的 setuid sandbox，NoNewPrivileges 不会破坏爬虫。
+# 若实际部署环境中 Playwright 报权限相关错误，可先注释掉这两行排查。
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

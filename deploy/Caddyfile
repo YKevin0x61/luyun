@@ -1,0 +1,95 @@
+# Caddy 反向代理配置（单机部署首选，自带自动 HTTPS / Let's Encrypt 证书续期）。
+#
+# 部署前请替换：
+#   - your-domain.example.com          → 真实域名
+#   - /opt/luyun/admin-web/dist        → 实际部署目录下 admin-web 前端构建产物路径
+#     （构建方式：cd admin-web && npm ci && npm run build，产物在 admin-web/dist）
+#
+# 安装/生效：
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#
+# 路由说明（与仓库真实路由对齐，细节见下方各 handle 块注释）：
+#   - /api/*、/ws/* → 反代到本机 127.0.0.1:8000（uvicorn main:app）。
+#     Caddy 的 reverse_proxy 会自动识别并转发 WebSocket 升级请求
+#     （Upgrade/Connection 头），不需要额外配置。
+#   - 管理后台各页面（/、/admin、/sales-report、/logs、/prep-plan、/wecom-push、
+#     /recipe*）已由 admin-web（Vue3 + vue-router，history 模式）接管，见
+#     admin-web/README.md「生产环境路由」一节 —— 生产环境应由反代层把这些路径
+#     指向 admin-web/dist/index.html，而不是打到后端；main.py 里同名的
+#     FileResponse 路由只是本机不经反代直连 :8000 时的访问入口保留，不影响
+#     生产行为。
+#   - 其余路径（/login、/setup、/vendor/*、/common.css、/common.js、/auth.js、
+#     /icons.js、/docs、/openapi.json、/kds/* 等）直接反代给后端，因为它们仍
+#     由 main.py 的 FileResponse / StaticFiles 挂载（public/、public/kds/）
+#     直接提供，无需在反代层重复维护。
+
+your-domain.example.com {
+	encode gzip zstd
+
+	# 说明：Caddy 默认不限制请求体大小，备份恢复（/api/backup/import/*）上传
+	# 几十~几百 MB 的 .luyunbak 不会被 Caddy 挡回 413。若你此前显式配置过
+	# `request_body { max_size ... }`，请确保其值 ≥ 最大备份体积（否则会 413）。
+	# 另注意：若域名走了 Cloudflare 等 CDN，上传还受 CDN 自身上限约束
+	# （Cloudflare 免费/Pro 版单请求约 100MB），需在 CDN 侧另行放宽。
+
+	# ── REST API ──
+	@api path /api/*
+	handle @api {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# ── WebSocket 实时通道（/ws/realtime）──
+	@ws path /ws/*
+	handle @ws {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# ── admin-web 构建产物里的静态资源（Vite 输出的 /assets/*.js /assets/*.css）──
+	@assets path /assets/*
+	handle @assets {
+		root * /opt/luyun/admin-web/dist
+		file_server
+		# 构建产物文件名带内容 hash，可放心长缓存
+		header Cache-Control "public, max-age=31536000, immutable"
+	}
+
+	# ── 管理后台 SPA 页面壳：history 模式路由，找不到对应静态文件时回退到
+	#    index.html，交给 vue-router 在浏览器端接管路由 ──
+	@spa path / /admin /admin/* /sales-report /sales-report/* /logs /logs/* \
+		/prep-plan /prep-plan/* /wecom-push /wecom-push/* /recipe /recipe/*
+	handle @spa {
+		root * /opt/luyun/admin-web/dist
+		try_files {path} /index.html
+		file_server
+	}
+
+	# ── 其余一切（/login、/setup、/vendor/*、/kds/*、/docs 等）反代给后端 ──
+	handle {
+		reverse_proxy 127.0.0.1:8000
+	}
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 内网/无公网域名的临时测试写法（自签证书，浏览器会提示不安全，仅供联调）：
+# 把最上面一行 `your-domain.example.com {` 换成：
+#
+#   https://localhost, https://192.168.1.10 {
+#       tls internal
+#       ...（其余 handle 块保持不变）
+#   }
+# ─────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────
+# 可选：如果想让 Caddy 直接静态托管 KDS 构建产物，不经后端进程转发
+# （main.py 目前通过 StaticFiles 把 public/kds/ 挂载在 /kds，与此处二选一，
+# 若启用下面这段，记得在最上面的 `handle { reverse_proxy ... }` 之前插入，
+# 因为 handle 块按声明顺序匹配，第一个命中的生效）：
+#
+#   @kds path /kds/*
+#   handle @kds {
+#       root * /opt/luyun/public/kds
+#       try_files {path} /index.html
+#       file_server
+#   }
+# ─────────────────────────────────────────────────────────────────

@@ -1,0 +1,16 @@
+export type { BluetoothDeviceInfo, ConnectCallback, DiscoveryCallback } from './interface.uts'
+
+export {
+  isBluetoothAvailable,
+  isBluetoothEnabled,
+  enableBluetooth,
+  getPairedDevices,
+  startDiscovery,
+  stopDiscovery,
+  connect,
+  disconnect,
+  isConnected,
+  printText,
+  printNewLine,
+  cutPaper
+} from './app-android/index.uts'

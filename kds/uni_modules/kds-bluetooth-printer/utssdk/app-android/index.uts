@@ -1,0 +1,318 @@
+import BluetoothAdapter from 'android.bluetooth.BluetoothAdapter'
+import BluetoothDevice from 'android.bluetooth.BluetoothDevice'
+import BluetoothSocket from 'android.bluetooth.BluetoothSocket'
+import UUID from 'java.util.UUID'
+import OutputStream from 'java.io.OutputStream'
+import Thread from 'java.lang.Thread'
+import JString from 'java.lang.String'
+import Charset from 'java.nio.charset.Charset'
+import {
+  BluetoothDeviceInfo,
+  ConnectCallback,
+  DiscoveryCallback
+} from '../interface.uts'
+
+const SPP_UUID = UUID.fromString('00001101-0000-1000-8000-00805F9B34FB')
+const GBK = Charset.forName('GBK')
+
+class KdsBluetoothPrinterImpl {
+  private socket: BluetoothSocket | null = null
+  private outputStream: OutputStream | null = null
+  private connectedAddress: string = ''
+  private discovering: boolean = false
+  private discoveryCallback: DiscoveryCallback | null = null
+
+  private getAdapter(): BluetoothAdapter | null {
+    return BluetoothAdapter.getDefaultAdapter()
+  }
+
+  isBluetoothAvailable(): boolean {
+    return this.getAdapter() != null
+  }
+
+  isBluetoothEnabled(): boolean {
+    const adapter = this.getAdapter()
+    if (adapter == null) {
+      return false
+    }
+    return adapter.isEnabled()
+  }
+
+  enableBluetooth(): boolean {
+    const adapter = this.getAdapter()
+    if (adapter == null) {
+      return false
+    }
+    if (adapter.isEnabled()) {
+      return true
+    }
+    return adapter.enable()
+  }
+
+  getPairedDevices(): BluetoothDeviceInfo[] {
+    const adapter = this.getAdapter()
+    if (adapter == null) {
+      return []
+    }
+
+    const bonded = adapter.getBondedDevices()
+    const devices: BluetoothDeviceInfo[] = []
+    if (bonded == null) {
+      return devices
+    }
+
+    const iterator = bonded.iterator()
+    while (iterator.hasNext()) {
+      const device = iterator.next()
+      devices.push({
+        name: device.getName() ?? '未知设备',
+        address: device.getAddress(),
+        paired: true
+      })
+    }
+    return devices
+  }
+
+  startDiscovery(callback: DiscoveryCallback): boolean {
+    const adapter = this.getAdapter()
+    if (adapter == null || !adapter.isEnabled()) {
+      callback(this.getPairedDevices())
+      return false
+    }
+
+    this.discoveryCallback = callback
+    this.discovering = true
+    adapter.startDiscovery()
+
+    const self = this
+    const timer = new Thread(function (): void {
+      Thread.sleep(3000)
+      adapter.cancelDiscovery()
+      self.discovering = false
+      const cb = self.discoveryCallback
+      self.discoveryCallback = null
+      if (cb != null) {
+        cb(self.getPairedDevices())
+      }
+    })
+    timer.start()
+    return true
+  }
+
+  stopDiscovery(): boolean {
+    const adapter = this.getAdapter()
+    if (adapter == null) {
+      return false
+    }
+    this.discovering = false
+    this.discoveryCallback = null
+    return adapter.cancelDiscovery()
+  }
+
+  private findBondedDevice(address: string): BluetoothDevice | null {
+    const adapter = this.getAdapter()
+    if (adapter == null) {
+      return null
+    }
+    const bonded = adapter.getBondedDevices()
+    if (bonded == null) {
+      return null
+    }
+    const iterator = bonded.iterator()
+    while (iterator.hasNext()) {
+      const device = iterator.next()
+      if (device.getAddress() == address) {
+        return device
+      }
+    }
+    return null
+  }
+
+  private openSocket(device: BluetoothDevice): BluetoothSocket {
+    const adapter = this.getAdapter()
+    if (adapter != null) {
+      adapter.cancelDiscovery()
+    }
+
+    const socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+    socket.connect()
+    return socket
+  }
+
+  connect(address: string, callback: ConnectCallback): void {
+    const self = this
+    const worker = new Thread(function (): void {
+      try {
+        self.disconnect()
+
+        const device = self.findBondedDevice(address)
+        if (device == null) {
+          callback(false, '未找到已配对的打印机，请先在系统蓝牙中配对')
+          return
+        }
+
+        const socket = self.openSocket(device)
+        self.socket = socket
+        self.outputStream = socket.getOutputStream()
+        self.connectedAddress = address
+        self.writeBytes([0x1B, 0x40])
+        callback(true, '')
+      } catch (error) {
+        self.disconnect()
+        callback(false, '连接失败，请确认打印机已开机并在系统蓝牙中已配对')
+      }
+    })
+    worker.start()
+  }
+
+  disconnect(): boolean {
+    try {
+      if (this.outputStream != null) {
+        this.outputStream!.close()
+      }
+    } catch (error) {
+      // ignore
+    }
+    try {
+      if (this.socket != null) {
+        this.socket!.close()
+      }
+    } catch (error) {
+      // ignore
+    }
+    this.outputStream = null
+    this.socket = null
+    this.connectedAddress = ''
+    return true
+  }
+
+  isConnected(): boolean {
+    return this.socket != null && this.socket!.isConnected()
+  }
+
+  private writeBytes(bytes: number[]): boolean {
+    if (this.outputStream == null) {
+      return false
+    }
+    const len = bytes.length.toInt()
+    const buffer = ByteArray(len)
+    for (let i: Int = 0; i < len; i++) {
+      buffer[i] = bytes[i].toInt().toByte()
+    }
+    this.outputStream!.write(buffer)
+    this.outputStream!.flush()
+    return true
+  }
+
+  private writeText(text: string): boolean {
+    if (this.outputStream == null) {
+      return false
+    }
+    const bytes = new JString(text).getBytes(GBK) as ByteArray
+    this.outputStream!.write(bytes)
+    this.outputStream!.flush()
+    return true
+  }
+
+  printText(text: string, align: number | null, fontSize: number | null): boolean {
+    if (!this.isConnected()) {
+      return false
+    }
+
+    const resolvedAlign = align != null ? align : 0
+    const resolvedFontSize = fontSize != null ? fontSize : 0
+
+    let alignValue: Int = 0
+    if (resolvedAlign == 1) {
+      alignValue = 1
+    } else if (resolvedAlign == 2) {
+      alignValue = 2
+    }
+
+    let sizeValue: Int = 0x00
+    if (resolvedFontSize == 1) {
+      sizeValue = 0x11
+    } else if (resolvedFontSize == 2) {
+      sizeValue = 0x33
+    }
+
+    this.writeBytes([0x1B, 0x61, alignValue])
+    this.writeBytes([0x1D, 0x21, sizeValue])
+    this.writeText(text)
+    return true
+  }
+
+  printNewLine(lines: number | null): boolean {
+    if (!this.isConnected()) {
+      return false
+    }
+    const rawCount = lines != null ? lines : 1
+    const count = Math.max(1, rawCount).toInt()
+    var index: Int = 0
+    while (index < count) {
+      this.writeBytes([0x0A])
+      index = index + 1
+    }
+    return true
+  }
+
+  cutPaper(): boolean {
+    if (!this.isConnected()) {
+      return false
+    }
+    this.writeBytes([0x1D, 0x56, 0x00])
+    return true
+  }
+}
+
+const printer = new KdsBluetoothPrinterImpl()
+
+export function isBluetoothAvailable(): boolean {
+  return printer.isBluetoothAvailable()
+}
+
+export function isBluetoothEnabled(): boolean {
+  return printer.isBluetoothEnabled()
+}
+
+export function enableBluetooth(): boolean {
+  return printer.enableBluetooth()
+}
+
+export function getPairedDevices(): BluetoothDeviceInfo[] {
+  return printer.getPairedDevices()
+}
+
+export function startDiscovery(callback: DiscoveryCallback): boolean {
+  return printer.startDiscovery(callback)
+}
+
+export function stopDiscovery(): boolean {
+  return printer.stopDiscovery()
+}
+
+export function connect(address: string, callback: ConnectCallback): void {
+  printer.connect(address, callback)
+}
+
+export function disconnect(): boolean {
+  return printer.disconnect()
+}
+
+export function isConnected(): boolean {
+  return printer.isConnected()
+}
+
+export function printText(text: string, align: number | null, fontSize: number | null): boolean {
+  return printer.printText(text, align, fontSize)
+}
+
+export function printNewLine(lines: number | null): boolean {
+  return printer.printNewLine(lines)
+}
+
+export function cutPaper(): boolean {
+  return printer.cutPaper()
+}
+
+export { PrintAlign, FontSize } from '../interface.uts'

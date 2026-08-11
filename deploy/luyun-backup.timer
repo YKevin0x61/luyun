@@ -1,0 +1,16 @@
+# systemd 定时器：每日触发一次 luyun-backup.service。
+# 安装方式见 deploy/luyun-backup.service 顶部注释。
+
+[Unit]
+Description=每日定时触发LuckIn SQLite 数据库备份
+
+[Timer]
+# 每天凌晨 3:10（本机系统时区）执行，错开营业时间与爬虫高频写入时段
+OnCalendar=*-*-* 03:10:00
+# 若机器在触发时间点处于关机/休眠状态，开机后会补跑一次错过的任务
+Persistent=true
+# 避免多个定时任务同一时刻同时触发造成瞬时负载尖峰，随机延迟 0-5 分钟
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
