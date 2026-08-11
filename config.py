@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # 基础配置
     APP_NAME: str = "LuyunOrder"
-    APP_VERSION: str = "0.5.0"
+    APP_VERSION: str = "0.5.1"
     DEBUG: bool = True
     
     # 服务器配置
