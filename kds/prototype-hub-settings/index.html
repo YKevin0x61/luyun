@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PROTOTYPE — KDS Hub + Settings</title>
+  <!--
+    PROTOTYPE (throwaway) — not production.
+    Question: On a landscape kitchen tablet (≥1200px), does one overview status card
+    + station cards on KDS 首页 (Hub), plus a three mega-card Settings regroup,
+    feel clear and operable — or which visual variant wins?
+    Plan: Three variants on this throwaway page, switchable via ?variant=,
+    sibling HTML next to kds/pages (uni-app production routes left untouched).
+
+    VERDICT (2026-08-12): Hub = C (Split cockpit), Settings = B (Stage-first left nav).
+    Combined default variant key: W ("Chosen"). A/B/C kept as primary sources.
+  -->
+  <style>
+    :root {
+      --bg: #eef1f4;
+      --surface: #ffffff;
+      --ink: #1a2332;
+      --muted: #5b6573;
+      --line: #d5dbe3;
+      --accent: #0b6bcb;
+      --accent-soft: #e7f1fb;
+      --ok: #1f8a4c;
+      --ok-soft: #e6f6ec;
+      --warn: #c47a00;
+      --danger: #c62828;
+      --danger-soft: #fdecea;
+      --shadow: 0 1px 2px rgba(26, 35, 50, 0.06), 0 8px 24px rgba(26, 35, 50, 0.06);
+      --radius: 14px;
+      --font: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      font-family: var(--font);
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 500px at 10% -10%, #d9e7f7 0%, transparent 55%),
+        radial-gradient(900px 400px at 100% 0%, #e5efe7 0%, transparent 50%),
+        var(--bg);
+    }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); border: 0;
+    }
+
+    /* —— Prototype chrome —— */
+    .proto-banner {
+      position: sticky; top: 0; z-index: 40;
+      display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: flex-start;
+      justify-content: space-between;
+      padding: 10px 18px;
+      background: #1a2332; color: #f3f6fa;
+      border-bottom: 3px solid #f0b429;
+      font-size: 13px;
+    }
+    .proto-banner strong { color: #f0b429; letter-spacing: 0.04em; }
+    .proto-banner p { margin: 4px 0 0; max-width: 62ch; color: #c5ceda; line-height: 1.4; }
+    .proto-controls {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    }
+    .proto-controls label {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: #2a3545; border-radius: 999px; padding: 6px 10px;
+    }
+    .proto-controls select, .proto-controls button.chip {
+      background: #2a3545; color: #f3f6fa; border: 1px solid #445066;
+      border-radius: 999px; padding: 6px 12px;
+    }
+    .proto-controls button.chip.active {
+      background: #f0b429; color: #1a2332; border-color: #f0b429; font-weight: 600;
+    }
+    .state-panel {
+      margin: 10px 18px 0;
+      padding: 10px 14px;
+      background: rgba(255,255,255,0.72);
+      border: 1px dashed #9aa7b8;
+      border-radius: 10px;
+      font-family: var(--mono); font-size: 12px; color: #334155;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px 16px;
+    }
+    .state-panel b { color: #0f172a; }
+
+    .frame-wrap {
+      padding: 14px 18px 96px;
+      overflow-x: auto;
+    }
+    /* Fixed landscape-tablet stage so judgment isn't polluted by narrow IDE panes */
+    .tablet-frame {
+      width: 1280px;
+      min-height: 720px;
+      margin: 0 auto;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+
+    /* shared bits */
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; padding: 14px 22px; border-bottom: 1px solid var(--line);
+      background: #fbfcfe;
+    }
+    .brand { font-weight: 700; font-size: 15px; letter-spacing: 0.02em; }
+    .brand span { color: var(--muted); font-weight: 500; margin-left: 8px; }
+    .nav-sec { display: flex; gap: 14px; align-items: center; }
+    .nav-sec a {
+      color: var(--muted); text-decoration: none; font-size: 14px;
+      border-bottom: 1px solid transparent;
+    }
+    .nav-sec a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 600;
+    }
+    .pill.ok { background: var(--ok-soft); color: var(--ok); }
+    .pill.bad { background: var(--danger-soft); color: var(--danger); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+    .metric { text-align: center; }
+    .metric .n { display: block; font-size: 28px; font-weight: 700; line-height: 1.1; }
+    .metric .l { font-size: 12px; color: var(--muted); }
+    .metric.urgent .n { color: var(--danger); }
+
+    .btn {
+      border: 0; border-radius: 10px; padding: 10px 16px; font-weight: 600;
+      background: var(--accent); color: #fff;
+    }
+    .btn.ghost { background: var(--accent-soft); color: var(--accent); }
+    .btn.danger { background: var(--danger); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn.sm { padding: 7px 12px; font-size: 13px; }
+
+    .station-card {
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: var(--radius); padding: 16px; cursor: pointer;
+      transition: border-color .15s, transform .15s;
+    }
+    .station-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+    .station-card h3 { margin: 0 0 10px; font-size: 16px; }
+    .station-card .stats { display: flex; gap: 18px; }
+    .station-card .stats .n { font-size: 22px; font-weight: 700; }
+    .station-card .stats .l { font-size: 11px; color: var(--muted); }
+    .station-card .stats .hot .n { color: var(--warn); }
+    .station-card .stats .urg .n { color: var(--danger); }
+
+    .mega {
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: var(--radius); padding: 18px 20px; box-shadow: var(--shadow);
+    }
+    .mega h2 { margin: 0 0 6px; font-size: 17px; }
+    .mega .sub { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .field .fake-input {
+      border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px;
+      background: #f8fafc; color: #334155; font-size: 14px;
+    }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .choice {
+      border: 1px solid var(--line); background: #fff; border-radius: 8px;
+      padding: 8px 12px; font-size: 13px;
+    }
+    .choice.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+
+    /* ================= Variant A — Stacked Ops Cards ================= */
+    .va-body { padding: 20px 22px 28px; display: flex; flex-direction: column; gap: 18px; }
+    .va-overview {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr auto;
+      gap: 20px; align-items: center;
+      padding: 22px 24px;
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      background: linear-gradient(135deg, #f7fbff, #ffffff 55%);
+      box-shadow: var(--shadow);
+    }
+    .va-overview.alert {
+      background: linear-gradient(135deg, #fff5f5, #ffffff 60%);
+      border-color: #f1b0b0;
+    }
+    .va-overview .cta-col { display: flex; flex-direction: column; gap: 10px; align-items: stretch; min-width: 180px; }
+    .va-overview .cta-col .btn { padding: 14px 18px; font-size: 16px; }
+    .va-metrics { display: flex; gap: 28px; align-items: center; }
+    .va-metrics .refresh { display: flex; flex-direction: column; align-items: center; gap: 4px; color: var(--accent); font-size: 12px; font-weight: 600; }
+    .va-stations {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+    }
+    .va-settings {
+      display: grid; gap: 16px;
+      grid-template-columns: 1fr 1fr;
+    }
+    .va-settings .mega.connect { grid-column: 1 / -1; }
+    .va-settings .mega .row2 {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    }
+
+    /* ================= Variant B — Stage-first ================= */
+    .vb-ribbon {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; padding: 10px 22px;
+      background: #f1f5f9; border-bottom: 1px solid var(--line);
+      font-size: 13px;
+    }
+    .vb-ribbon.alert { background: var(--danger-soft); }
+    .vb-ribbon .cluster { display: flex; gap: 22px; align-items: center; }
+    .vb-ribbon .n { font-weight: 700; font-size: 18px; }
+    .vb-ribbon .urg { color: var(--danger); }
+    .vb-body { padding: 18px 22px 24px; }
+    .vb-head {
+      display: flex; justify-content: space-between; align-items: baseline;
+      margin-bottom: 14px;
+    }
+    .vb-head h1 { margin: 0; font-size: 22px; }
+    .vb-head p { margin: 0; color: var(--muted); font-size: 13px; }
+    .vb-stage {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+      min-height: 420px;
+    }
+    .vb-stage .station-card {
+      min-height: 180px; display: flex; flex-direction: column; justify-content: space-between;
+      background: linear-gradient(180deg, #fff, #f7fafc);
+    }
+    .vb-stage .station-card h3 { font-size: 20px; }
+    .vb-stage .station-card .stats .n { font-size: 32px; }
+    .vb-dock {
+      position: sticky; bottom: 0; margin: 18px -22px -24px;
+      padding: 14px 22px; background: rgba(255,255,255,0.92);
+      border-top: 1px solid var(--line);
+      display: flex; justify-content: flex-end; gap: 10px;
+      backdrop-filter: blur(6px);
+    }
+    .vb-settings {
+      display: grid; grid-template-columns: 220px 1fr; min-height: 560px;
+    }
+    .vb-nav {
+      border-right: 1px solid var(--line); background: #f8fafc; padding: 16px 12px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .vb-nav button {
+      text-align: left; border: 0; background: transparent; border-radius: 10px;
+      padding: 12px 12px; color: var(--ink);
+    }
+    .vb-nav button.on { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+    .vb-nav button small { display: block; color: var(--muted); font-weight: 400; margin-top: 2px; }
+    .vb-pane { padding: 22px 24px; }
+
+    /* ================= Variant C — Split cockpit ================= */
+    .vc-hub {
+      display: grid; grid-template-columns: 340px 1fr; min-height: 640px;
+    }
+    .vc-side {
+      border-right: 1px solid var(--line);
+      padding: 20px; background: #f7f9fc;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    .vc-side.alert { background: #fff4f4; }
+    .vc-side .hero-num { font-size: 48px; font-weight: 800; line-height: 1; }
+    .vc-side .hero-num.dim { opacity: 0.45; }
+    .vc-side .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .vc-side .pair .box {
+      background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+    }
+    .vc-main { padding: 18px 20px; }
+    .vc-main h1 { margin: 0 0 4px; font-size: 18px; }
+    .vc-main .sub { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+    .vc-mosaic {
+      display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;
+    }
+    .vc-settings {
+      display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 14px;
+      padding: 18px 20px 24px; align-items: stretch;
+    }
+    .vc-settings .mega { min-height: 480px; }
+
+    /* Floating switcher */
+    .switcher {
+      position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+      z-index: 50; display: flex; align-items: center; gap: 10px;
+      background: #111827; color: #f9fafb; border-radius: 999px;
+      padding: 8px 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.28);
+      border: 2px solid #f0b429; user-select: none;
+    }
+    .switcher button {
+      width: 36px; height: 36px; border-radius: 50%; border: 0;
+      background: #374151; color: #fff; font-size: 18px; line-height: 1;
+    }
+    .switcher .label {
+      min-width: 220px; text-align: center; font-size: 13px; font-weight: 600;
+    }
+    .switcher .label small { display: block; font-weight: 400; color: #9ca3af; margin-top: 2px; }
+
+  </style>
+</head>
+<body>
+  <div class="proto-banner">
+    <div>
+      <strong>PROTOTYPE · throwaway</strong>
+      <p>
+        问题已判定：<b style="color:#f0b429">Hub = C（Split cockpit）· Settings = B（左导航三段）</b>。
+        默认变体 W 即该拼装；A/B/C 仍可对照。厨房控制台不在范围。
+      </p>
+    </div>
+    <div class="proto-controls" id="proto-controls">
+      <button type="button" class="chip" data-page="hub">Hub</button>
+      <button type="button" class="chip" data-page="settings">系统设置</button>
+      <label>连接
+        <select id="conn-select">
+          <option value="ok">正常</option>
+          <option value="down">断连</option>
+        </select>
+      </label>
+      <label>本屏职责
+        <select id="scope-select">
+          <option value="all">全部档口（空=全部）</option>
+          <option value="single">单档口锁定</option>
+          <option value="multi">多档口（烤+炸）</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <div class="state-panel" id="state-panel" aria-live="polite"></div>
+
+  <div class="frame-wrap">
+    <div class="tablet-frame" id="app"></div>
+  </div>
+
+  <div class="switcher" id="switcher" role="navigation" aria-label="Prototype variant switcher">
+    <button type="button" id="prev-variant" aria-label="Previous variant">←</button>
+    <div class="label" id="variant-label"></div>
+    <button type="button" id="next-variant" aria-label="Next variant">→</button>
+  </div>
+
+  <script>
+    /** Fixture only — no real tokens */
+    const ALL_STATIONS = [
+      { id: "grill", name: "烤档", color: "#d97706", pending: 6, urgent: 2 },
+      { id: "fry", name: "炸档", color: "#dc2626", pending: 4, urgent: 1 },
+      { id: "cold", name: "冷菜", color: "#0891b2", pending: 2, urgent: 0 },
+      { id: "noodle", name: "面档", color: "#7c3aed", pending: 3, urgent: 0 },
+      { id: "dessert", name: "甜品", color: "#db2777", pending: 1, urgent: 0 },
+      { id: "drink", name: "饮品", color: "#2563eb", pending: 0, urgent: 0 }
+    ];
+
+    const VARIANTS = [
+      { key: "W", name: "Chosen · C Hub + B Settings", blurb: "判定：Hub 用 C 分栏驾驶舱；设置用 B 左导航三段" },
+      { key: "A", name: "Stacked Ops Cards", blurb: "约定骨架：总览卡在上 + 档口卡网格；设置 连接通栏 / 本屏|设备 两列" },
+      { key: "B", name: "Stage-first", blurb: "档口舞台优先；总览收成顶栏条；设置左侧三段导航 + 单内容区" },
+      { key: "C", name: "Split cockpit", blurb: "左侧固定总览柱 + 右侧档口马赛克；设置三列等高 mega-card" }
+    ];
+
+    const state = {
+      variant: "W",
+      page: "hub",
+      connection: "ok",
+      scope: "all",
+      settingsSection: "connect",
+      density: "standard"
+    };
+
+    function readUrl() {
+      const q = new URLSearchParams(location.search);
+      const v = (q.get("variant") || "W").toUpperCase();
+      state.variant = VARIANTS.some((x) => x.key === v) ? v : "W";
+      const p = q.get("page");
+      state.page = p === "settings" ? "settings" : "hub";
+      const c = q.get("conn");
+      state.connection = c === "down" ? "down" : "ok";
+      const s = q.get("scope");
+      state.scope = ["all", "single", "multi"].includes(s) ? s : "all";
+    }
+
+    function writeUrl() {
+      const q = new URLSearchParams(location.search);
+      q.set("variant", state.variant);
+      q.set("page", state.page);
+      q.set("conn", state.connection);
+      q.set("scope", state.scope);
+      history.replaceState(null, "", `${location.pathname}?${q.toString()}`);
+    }
+
+    function watchedStations() {
+      if (state.scope === "single") return ALL_STATIONS.filter((s) => s.id === "grill");
+      if (state.scope === "multi") return ALL_STATIONS.filter((s) => s.id === "grill" || s.id === "fry");
+      return ALL_STATIONS.slice();
+    }
+
+    function totals(stations) {
+      return stations.reduce(
+        (acc, s) => ({ pending: acc.pending + s.pending, urgent: acc.urgent + s.urgent }),
+        { pending: 0, urgent: 0 }
+      );
+    }
+
+    function scopeLabel() {
+      if (state.scope === "single") return "单档口锁定 · 烤档";
+      if (state.scope === "multi") return "本屏职责 · 烤档 + 炸档";
+      return "本屏职责 · 全部档口";
+    }
+
+    function esc(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function topbar(extraBrand) {
+      return `
+        <div class="topbar">
+          <div class="brand">KDS 首页 (Hub)<span>${esc(extraBrand || "")}</span></div>
+          <div class="nav-sec">
+            <a href="#" data-goto="settings">设置</a>
+            <a href="#">订单</a>
+            <a href="#">管理</a>
+          </div>
+        </div>`;
+    }
+
+    function settingsTopbar() {
+      return `
+        <div class="topbar">
+          <div class="brand"><a href="#" data-goto="hub" style="color:inherit;text-decoration:none">← 返回</a>
+            <span>系统设置</span></div>
+          <div class="nav-sec">
+            <a href="#">订单</a>
+            <a href="#">管理</a>
+          </div>
+        </div>`;
+    }
+
+    function stationCardsHtml(stations, extraClass) {
+      return stations.map((s) => `
+        <div class="station-card ${extraClass || ""}" data-station="${esc(s.id)}" title="进入厨房 ?station=${esc(s.id)}">
+          <h3><span class="dot" style="display:inline-block;background:${esc(s.color)};margin-right:8px"></span>${esc(s.name)}</h3>
+          <div class="stats">
+            <div class="${s.pending ? "hot" : ""}"><span class="n">${s.pending}</span><div class="l">待制作</div></div>
+            <div class="${s.urgent ? "urg" : ""}"><span class="n">${s.urgent}</span><div class="l">紧急</div></div>
+          </div>
+        </div>`).join("");
+    }
+
+    function connectFields() {
+      return `
+        <div class="row2" style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div class="field"><label>API 服务器</label><div class="fake-input">https://shop.example.local</div></div>
+          <div class="field"><label>鉴权</label><div class="fake-input">Token ·•••••••abcd（fixture）</div></div>
+        </div>
+        <div class="field"><label>实时连接（只读）</label>
+          <div class="fake-input">${state.connection === "ok" ? "WebSocket 已连接 · 最近 nudge 2s 前" : "WebSocket 断开 · 正在重连…"}</div>
+        </div>
+        <div class="chip-row">
+          <button type="button" class="choice">门店内网</button>
+          <button type="button" class="choice on">生产域名</button>
+          <button type="button" class="choice">模拟器</button>
+        </div>
+        <p class="hint">快速配置 presets · 不含真实凭证</p>`;
+    }
+
+    function screenFields() {
+      return `
+        <div class="field"><label>本屏负责档口</label>
+          <div class="chip-row">
+            ${ALL_STATIONS.map((s) => {
+              const on = state.scope === "all" ? false
+                : state.scope === "single" ? s.id === "grill"
+                : s.id === "grill" || s.id === "fry";
+              return `<button type="button" class="choice ${on ? "on" : ""}">${esc(s.name)}</button>`;
+            }).join("")}
+          </div>
+          <p class="hint">不选 = 全部档口；单选则厨房页锁定该档</p>
+        </div>
+        <div class="field"><label>显示密度</label>
+          <div class="chip-row">
+            <button type="button" class="choice ${state.density === "standard" ? "on" : ""}" data-density="standard">标准</button>
+            <button type="button" class="choice ${state.density === "compact" ? "on" : ""}" data-density="compact">紧凑</button>
+            <button type="button" class="choice ${state.density === "ultra" ? "on" : ""}" data-density="ultra">超密</button>
+          </div>
+        </div>`;
+    }
+
+    function deviceFields() {
+      return `
+        <div class="field"><label>蓝牙打印（APP-only）</label>
+          <div class="fake-input">BlueTooth Printer · 已配对（示意）</div>
+        </div>
+        <div class="chip-row">
+          <button type="button" class="btn sm ghost">扫描</button>
+          <button type="button" class="btn sm">连接</button>
+        </div>
+        <div class="field" style="margin-top:16px"><label>系统信息</label>
+          <div class="fake-input">KDS H5 · prototype build · 平板横屏</div>
+        </div>`;
+    }
+
+    /* ---------- Variant A ---------- */
+    function renderA(stations, t) {
+      if (state.page === "settings") {
+        return `
+          ${settingsTopbar()}
+          <div class="va-body">
+            <div class="va-settings">
+              <section class="mega connect">
+                <h2>连接</h2>
+                <p class="sub">API 服务器 · 鉴权 · 实时状态 · 快速配置</p>
+                ${connectFields()}
+              </section>
+              <section class="mega">
+                <h2>本屏</h2>
+                <p class="sub">职责档口 · 显示密度</p>
+                ${screenFields()}
+              </section>
+              <section class="mega">
+                <h2>设备与系统</h2>
+                <p class="sub">蓝牙打印 · 系统信息</p>
+                ${deviceFields()}
+              </section>
+            </div>
+          </div>`;
+      }
+      const alert = state.connection === "down";
+      return `
+        ${topbar("Stacked Ops Cards")}
+        <div class="va-body">
+          <section class="va-overview ${alert ? "alert" : ""}">
+            <div>
+              <div class="pill ${alert ? "bad" : "ok"}"><span class="dot"></span>${alert ? "连接中断 · 数字仅供参考" : "连接正常"}</div>
+              <p style="margin:10px 0 0;color:var(--muted);font-size:13px">${esc(scopeLabel())}</p>
+              ${alert ? `<p style="margin:8px 0 0;color:var(--danger);font-size:13px;font-weight:600">断连告警优先 · 待做/紧急不盲目采信</p>` : ""}
+            </div>
+            <div class="va-metrics ${alert ? "dim" : ""}" style="${alert ? "opacity:.55" : ""}">
+              <div class="metric"><span class="n">${t.pending}</span><span class="l">待制作</span></div>
+              <div class="metric urgent"><span class="n">${t.urgent}</span><span class="l">紧急</span></div>
+              <div class="refresh" title="手动刷新"><span>↻</span>刷新</div>
+            </div>
+            <div class="cta-col">
+              <button type="button" class="btn" data-enter-kitchen>进入厨房</button>
+              <span class="hint" style="text-align:center;margin:0">无 station = 全职责集</span>
+            </div>
+          </section>
+          <div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:10px">
+              <strong>职责档口</strong>
+              <span style="color:var(--muted);font-size:13px">点卡片 → 厨房 ?station=</span>
+            </div>
+            <div class="va-stations">${stationCardsHtml(stations)}</div>
+          </div>
+        </div>`;
+    }
+
+    /* ---------- Variant B ---------- */
+    function renderB(stations, t) {
+      if (state.page === "settings") {
+        const sec = state.settingsSection;
+        const body =
+          sec === "screen" ? screenFields()
+          : sec === "device" ? deviceFields()
+          : connectFields();
+        const title =
+          sec === "screen" ? ["本屏", "职责档口 · 显示密度"]
+          : sec === "device" ? ["设备与系统", "蓝牙打印 · 系统信息"]
+          : ["连接", "API · 鉴权 · 实时 · presets"];
+        return `
+          ${settingsTopbar()}
+          <div class="vb-settings">
+            <nav class="vb-nav">
+              <button type="button" class="${sec === "connect" ? "on" : ""}" data-sec="connect">连接<small>服务器与鉴权</small></button>
+              <button type="button" class="${sec === "screen" ? "on" : ""}" data-sec="screen">本屏<small>档口与密度</small></button>
+              <button type="button" class="${sec === "device" ? "on" : ""}" data-sec="device">设备与系统<small>打印与版本</small></button>
+            </nav>
+            <div class="vb-pane">
+              <h2 style="margin:0 0 4px">${title[0]}</h2>
+              <p class="sub" style="margin:0 0 16px;color:var(--muted)">${title[1]}</p>
+              ${body}
+            </div>
+          </div>`;
+      }
+      const alert = state.connection === "down";
+      return `
+        ${topbar("Stage-first")}
+        <div class="vb-ribbon ${alert ? "alert" : ""}">
+          <div class="cluster">
+            <span class="pill ${alert ? "bad" : "ok"}"><span class="dot"></span>${alert ? "断连" : "已连接"}</span>
+            <span>待制作 <span class="n" style="${alert ? "opacity:.5" : ""}">${t.pending}</span></span>
+            <span class="urg">紧急 <span class="n" style="${alert ? "opacity:.5" : ""}">${t.urgent}</span></span>
+            <button type="button" class="btn sm ghost">刷新</button>
+          </div>
+          <span style="color:var(--muted)">${esc(scopeLabel())}${alert ? " · 告警优先，数字次要" : ""}</span>
+        </div>
+        <div class="vb-body">
+          <div class="vb-head">
+            <div>
+              <h1>职责档口</h1>
+              <p>大卡片舞台优先 · 总览收在顶栏（非独立总览卡）</p>
+            </div>
+          </div>
+          <div class="vb-stage">${stationCardsHtml(stations)}</div>
+          <div class="vb-dock">
+            <button type="button" class="btn ghost" data-goto="settings">系统设置</button>
+            <button type="button" class="btn" data-enter-kitchen>进入厨房（全职责集）</button>
+          </div>
+        </div>`;
+    }
+
+    /* ---------- Variant C ---------- */
+    function renderC(stations, t) {
+      if (state.page === "settings") {
+        return `
+          ${settingsTopbar()}
+          <div class="vc-settings">
+            <section class="mega">
+              <h2>连接</h2>
+              <p class="sub">与 A 同组内容，但三列并排（挑战「连接通栏在上」）</p>
+              ${connectFields()}
+            </section>
+            <section class="mega">
+              <h2>本屏</h2>
+              <p class="sub">职责与密度</p>
+              ${screenFields()}
+            </section>
+            <section class="mega">
+              <h2>设备与系统</h2>
+              <p class="sub">打印与信息</p>
+              ${deviceFields()}
+            </section>
+          </div>`;
+      }
+      const alert = state.connection === "down";
+      return `
+        ${topbar("Split cockpit")}
+        <div class="vc-hub">
+          <aside class="vc-side ${alert ? "alert" : ""}">
+            <div class="pill ${alert ? "bad" : "ok"}"><span class="dot"></span>${alert ? "连接中断" : "连接健康"}</div>
+            <div>
+              <div class="l" style="color:var(--muted);font-size:12px">待制作</div>
+              <div class="hero-num ${alert ? "dim" : ""}">${t.pending}</div>
+            </div>
+            <div class="pair">
+              <div class="box">
+                <div class="l" style="color:var(--muted);font-size:12px">紧急</div>
+                <div style="font-size:28px;font-weight:800;color:var(--danger);${alert ? "opacity:.5" : ""}">${t.urgent}</div>
+              </div>
+              <div class="box" style="display:flex;align-items:center;justify-content:center">
+                <button type="button" class="btn ghost sm">刷新</button>
+              </div>
+            </div>
+            ${alert ? `<p style="margin:0;color:var(--danger);font-size:13px;font-weight:600">告警主视觉 · 数字降权</p>` : `<p style="margin:0;color:var(--muted);font-size:13px">${esc(scopeLabel())}</p>`}
+            <button type="button" class="btn" data-enter-kitchen style="margin-top:auto">进入厨房</button>
+          </aside>
+          <div class="vc-main">
+            <h1>职责档口</h1>
+            <p class="sub">左栏总览常驻 · 右栏档口马赛克</p>
+            <div class="vc-mosaic">${stationCardsHtml(stations)}</div>
+          </div>
+        </div>`;
+    }
+
+    function renderStatePanel() {
+      const v = VARIANTS.find((x) => x.key === state.variant);
+      const stations = watchedStations();
+      const t = totals(stations);
+      document.getElementById("state-panel").innerHTML = `
+        <div><b>variant</b> ${esc(state.variant)} — ${esc(v.name)}</div>
+        <div><b>page</b> ${esc(state.page)}</div>
+        <div><b>connection</b> ${esc(state.connection)}</div>
+        <div><b>watchedScope</b> ${esc(state.scope)} → ${stations.map((s) => s.name).join("、")}</div>
+        <div><b>pending / urgent</b> ${t.pending} / ${t.urgent}</div>
+        <div><b>settingsSection</b> ${esc(state.settingsSection)} (B only)</div>`;
+    }
+
+    function renderSwitcher() {
+      const v = VARIANTS.find((x) => x.key === state.variant);
+      document.getElementById("variant-label").innerHTML =
+        `${esc(v.key)} — ${esc(v.name)}<small>${esc(v.blurb)}</small>`;
+    }
+
+    function syncControls() {
+      document.querySelectorAll("[data-page]").forEach((el) => {
+        el.classList.toggle("active", el.dataset.page === state.page);
+      });
+      document.getElementById("conn-select").value = state.connection;
+      document.getElementById("scope-select").value = state.scope;
+    }
+
+    function render() {
+      writeUrl();
+      syncControls();
+      renderSwitcher();
+      renderStatePanel();
+      const stations = watchedStations();
+      const t = totals(stations);
+      const root = document.getElementById("app");
+      // W = verdict stitch: Hub from C, Settings from B
+      if (state.variant === "W") {
+        root.innerHTML = state.page === "settings"
+          ? renderB(stations, t)
+          : renderC(stations, t);
+      } else if (state.variant === "B") {
+        root.innerHTML = renderB(stations, t);
+      } else if (state.variant === "C") {
+        root.innerHTML = renderC(stations, t);
+      } else {
+        root.innerHTML = renderA(stations, t);
+      }
+    }
+
+    function cycleVariant(dir) {
+      const idx = VARIANTS.findIndex((v) => v.key === state.variant);
+      const next = (idx + dir + VARIANTS.length) % VARIANTS.length;
+      state.variant = VARIANTS[next].key;
+      render();
+    }
+
+    function isTypingTarget(el) {
+      if (!el) return false;
+      const tag = el.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+    }
+
+    document.getElementById("prev-variant").addEventListener("click", () => cycleVariant(-1));
+    document.getElementById("next-variant").addEventListener("click", () => cycleVariant(1));
+    document.getElementById("conn-select").addEventListener("change", (e) => {
+      state.connection = e.target.value;
+      render();
+    });
+    document.getElementById("scope-select").addEventListener("change", (e) => {
+      state.scope = e.target.value;
+      render();
+    });
+    document.getElementById("proto-controls").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-page]");
+      if (!btn) return;
+      state.page = btn.dataset.page;
+      render();
+    });
+    document.getElementById("app").addEventListener("click", (e) => {
+      const goto = e.target.closest("[data-goto]");
+      if (goto) {
+        e.preventDefault();
+        state.page = goto.dataset.goto;
+        render();
+        return;
+      }
+      const sec = e.target.closest("[data-sec]");
+      if (sec) {
+        state.settingsSection = sec.dataset.sec;
+        render();
+        return;
+      }
+      const dens = e.target.closest("[data-density]");
+      if (dens) {
+        state.density = dens.dataset.density;
+        render();
+        return;
+      }
+      if (e.target.closest("[data-enter-kitchen]")) {
+        alert("PROTOTYPE stub: 进入厨房控制台（无 station = 全职责集）。厨房页不在本次原型范围。");
+      }
+      const st = e.target.closest("[data-station]");
+      if (st) {
+        alert(`PROTOTYPE stub: 进入厨房 ?station=${st.dataset.station}`);
+      }
+    });
+    document.addEventListener("keydown", (e) => {
+      if (isTypingTarget(e.target)) return;
+      if (e.key === "ArrowLeft") cycleVariant(-1);
+      if (e.key === "ArrowRight") cycleVariant(1);
+    });
+
+    readUrl();
+    render();
+  </script>
+</body>
+</html>
