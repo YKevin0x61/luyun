@@ -1,10 +1,7 @@
 <template>
   <view class="dashboard-page">
     <view class="top-bar">
-      <view class="status-indicator">
-        <view class="indicator-dot" :class="systemStatusClass"></view>
-        <text class="status-text">{{ systemStatusText }}</text>
-      </view>
+      <text class="brand">KDS 首页</text>
       <view class="nav-links">
         <text class="nav-link" @click="navigateToSettings">设置</text>
         <text class="nav-link" @click="navigateToOrders">订单</text>
@@ -17,65 +14,83 @@
       </view>
     </view>
 
-    <view class="hero-section">
-      <view class="cta-card" @click="navigateToKitchen()">
-        <text class="cta-title">进入厨房</text>
-        <text class="cta-desc">本屏职责档口控菜</text>
-        <view class="cta-arrow">
-          <SvgIcon name="chef-hat" :size="28" color="#fff" />
+    <view class="cockpit">
+      <view class="overview-pane" :class="{ 'overview-pane--alert': overview.alertPrimary }">
+        <view class="status-pill" :class="systemStatusClass">
+          <view class="indicator-dot" :class="systemStatusClass"></view>
+          <text class="status-text">{{ systemStatusText }}</text>
+        </view>
+
+        <view class="overview-metric" :class="{ 'overview-metric--dim': !overview.numbersTrusted }">
+          <text class="overview-metric-label">待制作</text>
+          <text class="overview-metric-value">{{ kitchenStats.total }}</text>
+        </view>
+
+        <view class="overview-pair">
+          <view class="overview-box" :class="{ 'overview-metric--dim': !overview.numbersTrusted }">
+            <text class="overview-metric-label">紧急</text>
+            <text class="overview-metric-value urgent">{{ kitchenStats.urgent }}</text>
+          </view>
+          <view class="overview-box refresh-box" @click="refreshData">
+            <SvgIcon
+              class="refresh-icon"
+              :class="{ rotating: loading }"
+              name="refresh-cw"
+              :size="20"
+              color="#1890ff"
+            />
+            <text class="refresh-label">刷新</text>
+          </view>
+        </view>
+
+        <text v-if="overview.alertPrimary" class="alert-hint">
+          连接异常 · 告警优先，待做/紧急数字仅供参考
+        </text>
+        <text v-else class="scope-hint">本屏职责 · {{ watchedScopeLabel }}</text>
+
+        <view class="cta-btn" @click="navigateToKitchen()">
+          <text class="cta-title">进入厨房</text>
+          <text class="cta-desc">{{ kitchenCtaDesc }}</text>
         </view>
       </view>
 
-      <view class="metrics-row">
-        <view class="metric-block">
-          <text class="metric-value">{{ kitchenStats.total }}</text>
-          <text class="metric-label">待制作</text>
+      <view class="stations-pane">
+        <view class="section-header">
+          <text class="section-title">职责档口</text>
+          <text class="section-desc">点卡片进入对应档口</text>
         </view>
-        <view class="metric-block" :class="{ urgent: kitchenStats.urgent > 0 }">
-          <text class="metric-value">{{ kitchenStats.urgent }}</text>
-          <text class="metric-label">紧急</text>
-        </view>
-        <view class="metric-block refresh-block" @click.stop="refreshData">
-          <SvgIcon
-            class="refresh-icon"
-            :class="{ rotating: loading }"
-            name="refresh-cw"
-            :size="18"
-            color="#1890ff"
-          />
-          <text class="metric-label">刷新</text>
-        </view>
-      </view>
-    </view>
 
-    <view class="stations-section">
-      <view class="section-header">
-        <text class="section-title">职责档口</text>
-        <text class="section-desc">{{ watchedScopeLabel }}</text>
-      </view>
-
-      <view v-if="stationStatus.length" class="station-list">
-        <view
-          v-for="station in stationStatus"
-          :key="station.id"
-          class="station-row"
-          :class="{ active: station.active }"
-          @click="navigateToKitchen(station.id)"
-        >
+        <view v-if="stationStatus.length" class="station-mosaic">
           <view
-            class="station-dot"
-            :style="{ background: station.active ? (station.color || '#52c41a') : '#d9d9d9' }"
-          ></view>
-          <text class="station-name">{{ station.name }}</text>
-          <text class="station-count" :class="{ hot: station.pendingCount > 0 }">
-            {{ station.pendingCount }}
-          </text>
-          <text class="station-count-label">待做</text>
+            v-for="station in stationStatus"
+            :key="station.id"
+            class="station-card"
+            :class="{ active: station.active }"
+            @click="navigateToKitchen(station.id)"
+          >
+            <view class="station-card-head">
+              <view
+                class="station-dot"
+                :style="{ background: station.active ? (station.color || '#52c41a') : '#d9d9d9' }"
+              ></view>
+              <text class="station-name">{{ station.name }}</text>
+            </view>
+            <view class="station-stats">
+              <view class="station-stat" :class="{ hot: station.pendingCount > 0 }">
+                <text class="station-stat-value">{{ station.pendingCount }}</text>
+                <text class="station-stat-label">待制作</text>
+              </view>
+              <view class="station-stat" :class="{ urgent: station.urgentCount > 0 }">
+                <text class="station-stat-value">{{ station.urgentCount }}</text>
+                <text class="station-stat-label">紧急</text>
+              </view>
+            </view>
+          </view>
         </view>
-      </view>
 
-      <view v-else class="empty-stations">
-        <text class="empty-text">暂无档口数据</text>
+        <view v-else class="empty-stations">
+          <text class="empty-text">暂无档口数据</text>
+        </view>
       </view>
     </view>
   </view>
@@ -96,6 +111,7 @@ import {
   countUnmappedDishNames,
   filterMergedDishesByWatched
 } from '../../utils/dashboardStats.js'
+import { hubOverviewPresentation } from '../../utils/hubOverviewPresentation.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
 
@@ -133,6 +149,10 @@ export default {
       watchedStationIds.value = ScreenSettingsManager.getWatchedStations()
     }
 
+    const overview = computed(() =>
+      hubOverviewPresentation(realtimeStore.connectionStatus)
+    )
+
     const systemStatusClass = computed(() => {
       if (realtimeStore.connectionStatus === 'connected') return 'status-online'
       if (realtimeStore.connectionStatus === 'reconnecting') return 'status-error'
@@ -141,9 +161,9 @@ export default {
 
     const systemStatusText = computed(() => {
       const statusMap = {
-        connected: '系统正常',
+        connected: '连接健康',
         reconnecting: '重连中...',
-        disconnected: '离线状态'
+        disconnected: '连接中断'
       }
       return statusMap[realtimeStore.connectionStatus] || '未知状态'
     })
@@ -177,8 +197,16 @@ export default {
     const watchedScopeLabel = computed(() => {
       const ids = watchedStationIds.value
       if (!ids.length) return '全部档口'
-      if (ids.length === 1) return '单档口'
+      if (ids.length === 1) return '单档口锁定'
       return `${ids.length} 个档口`
+    })
+
+    /** CTA subline: no station query = current watched set (not always「全部」). */
+    const kitchenCtaDesc = computed(() => {
+      const ids = watchedStationIds.value
+      if (!ids.length) return '本屏职责档口集 · 全部档口'
+      if (ids.length === 1) return '本屏职责档口集 · 单档口锁定'
+      return `本屏职责档口集 · ${ids.length} 个档口`
     })
 
     const navigateToKitchen = (stationId) => {
@@ -241,6 +269,7 @@ export default {
 
     return {
       loading,
+      overview,
       systemStatusClass,
       systemStatusText,
       kitchenStats,
@@ -248,6 +277,7 @@ export default {
       unmappedBadgeText,
       stationStatus,
       watchedScopeLabel,
+      kitchenCtaDesc,
       navigateToKitchen,
       navigateToManagement,
       navigateToSettings,
@@ -261,7 +291,7 @@ export default {
 <style scoped>
 .dashboard-page {
   min-height: 100vh;
-  background: #f5f5f5;
+  background: #eef1f4;
   padding: 24upx 24upx 48upx;
   padding-top: calc(24upx + env(safe-area-inset-top));
   box-sizing: border-box;
@@ -271,38 +301,13 @@ export default {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 28upx;
+  margin-bottom: 20upx;
 }
 
-.status-indicator {
-  display: flex;
-  align-items: center;
-  gap: 10upx;
-}
-
-.indicator-dot {
-  width: 16upx;
-  height: 16upx;
-  border-radius: 50%;
-}
-
-.indicator-dot.status-online {
-  background: #52c41a;
-  box-shadow: 0 0 8upx rgba(82, 196, 26, 0.55);
-}
-
-.indicator-dot.status-error {
-  background: #ff4d4f;
-  animation: blink 1s infinite;
-}
-
-.indicator-dot.status-offline {
-  background: #d9d9d9;
-}
-
-.status-text {
-  font-size: 24upx;
-  color: #666666;
+.brand {
+  font-size: 30upx;
+  font-weight: 700;
+  color: #1a2332;
 }
 
 .nav-links {
@@ -319,7 +324,7 @@ export default {
 
 .nav-link {
   font-size: 26upx;
-  color: #1890ff;
+  color: #5b6573;
   font-weight: 500;
 }
 
@@ -344,88 +349,121 @@ export default {
   line-height: 1;
 }
 
-.hero-section {
-  margin-bottom: 32upx;
-}
-
-.cta-card {
-  background: linear-gradient(135deg, #1890ff 0%, #096dd9 100%);
-  border-radius: 20upx;
-  padding: 48upx 36upx;
-  position: relative;
+.cockpit {
+  display: flex;
+  flex-direction: column;
+  gap: 20upx;
+  background: #ffffff;
+  border-radius: 18upx;
+  border: 1upx solid #d5dbe3;
   overflow: hidden;
-  box-shadow: 0 8upx 24upx rgba(24, 144, 255, 0.28);
+  box-shadow: 0 2upx 12upx rgba(26, 35, 50, 0.06);
+  min-height: calc(100vh - 140upx);
 }
 
-.cta-card:active {
-  transform: scale(0.985);
+.overview-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 20upx;
+  padding: 28upx 24upx;
+  background: #f7f9fc;
+  border-bottom: 1upx solid #d5dbe3;
 }
 
-.cta-title {
-  display: block;
-  font-size: 44upx;
-  font-weight: 700;
-  color: #ffffff;
-  margin-bottom: 12upx;
+.overview-pane--alert {
+  background: #fff4f4;
 }
 
-.cta-desc {
-  display: block;
-  font-size: 24upx;
-  color: rgba(255, 255, 255, 0.88);
-}
-
-.cta-arrow {
-  position: absolute;
-  right: 36upx;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 80upx;
-  height: 80upx;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.18);
+.status-pill {
+  align-self: flex-start;
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 10upx;
+  padding: 8upx 16upx;
+  border-radius: 999upx;
+  background: #e6f6ec;
 }
 
-.metrics-row {
-  margin-top: 20upx;
-  display: flex;
-  gap: 16upx;
+.status-pill.status-error,
+.status-pill.status-offline {
+  background: #fdecea;
 }
 
-.metric-block {
-  flex: 1;
+.indicator-dot {
+  width: 14upx;
+  height: 14upx;
+  border-radius: 50%;
+}
+
+.indicator-dot.status-online {
+  background: #1f8a4c;
+  box-shadow: 0 0 8upx rgba(31, 138, 76, 0.45);
+}
+
+.indicator-dot.status-error {
+  background: #c62828;
+  animation: blink 1s infinite;
+}
+
+.indicator-dot.status-offline {
+  background: #c62828;
+}
+
+.status-text {
+  font-size: 22upx;
+  font-weight: 600;
+  color: #1a2332;
+}
+
+.overview-metric-label {
+  display: block;
+  font-size: 22upx;
+  color: #5b6573;
+  margin-bottom: 4upx;
+}
+
+.overview-metric-value {
+  display: block;
+  font-size: 72upx;
+  font-weight: 800;
+  line-height: 1;
+  color: #1a2332;
+}
+
+.overview-metric-value.urgent {
+  color: #c62828;
+  font-size: 44upx;
+}
+
+.overview-metric--dim {
+  opacity: 0.45;
+}
+
+.overview-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12upx;
+}
+
+.overview-box {
   background: #ffffff;
-  border-radius: 12upx;
-  padding: 20upx 12upx;
+  border: 1upx solid #d5dbe3;
+  border-radius: 14upx;
+  padding: 16upx;
+}
+
+.refresh-box {
   display: flex;
   flex-direction: column;
   align-items: center;
-  box-shadow: 0 2upx 8upx rgba(0, 0, 0, 0.06);
-}
-
-.metric-block.urgent .metric-value {
-  color: #ff4d4f;
-}
-
-.metric-value {
-  font-size: 36upx;
-  font-weight: 700;
-  color: #1a1a1a;
-  margin-bottom: 6upx;
-}
-
-.metric-label {
-  font-size: 22upx;
-  color: #999999;
-}
-
-.refresh-block {
-  flex: 0.7;
   justify-content: center;
   gap: 8upx;
+}
+
+.refresh-label {
+  font-size: 22upx;
+  color: #1890ff;
+  font-weight: 600;
 }
 
 .refresh-icon {
@@ -436,11 +474,46 @@ export default {
   animation: spin 1s linear infinite;
 }
 
-.stations-section {
-  background: #ffffff;
-  border-radius: 16upx;
+.alert-hint {
+  font-size: 24upx;
+  font-weight: 600;
+  color: #c62828;
+  line-height: 1.4;
+}
+
+.scope-hint {
+  font-size: 24upx;
+  color: #5b6573;
+}
+
+.cta-btn {
+  margin-top: auto;
+  background: #0b6bcb;
+  border-radius: 14upx;
+  padding: 28upx 24upx;
+}
+
+.cta-btn:active {
+  opacity: 0.92;
+}
+
+.cta-title {
+  display: block;
+  font-size: 34upx;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.cta-desc {
+  display: block;
+  margin-top: 6upx;
+  font-size: 22upx;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.stations-pane {
+  flex: 1;
   padding: 24upx;
-  box-shadow: 0 2upx 8upx rgba(0, 0, 0, 0.06);
 }
 
 .section-header {
@@ -453,65 +526,78 @@ export default {
 .section-title {
   font-size: 30upx;
   font-weight: 600;
-  color: #1a1a1a;
+  color: #1a2332;
 }
 
 .section-desc {
   font-size: 22upx;
-  color: #999999;
+  color: #5b6573;
 }
 
-.station-list {
-  display: flex;
-  flex-direction: column;
+.station-mosaic {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14upx;
 }
 
-.station-row {
+.station-card {
+  background: #ffffff;
+  border: 1upx solid #d5dbe3;
+  border-radius: 14upx;
+  padding: 20upx;
+}
+
+.station-card:active {
+  border-color: #0b6bcb;
+  background: #f7fbff;
+}
+
+.station-card-head {
   display: flex;
   align-items: center;
-  padding: 22upx 8upx;
-  border-bottom: 1upx solid #f0f0f0;
-}
-
-.station-row:last-child {
-  border-bottom: none;
-}
-
-.station-row:active {
-  background: #f7faff;
+  gap: 12upx;
+  margin-bottom: 16upx;
 }
 
 .station-dot {
   width: 16upx;
   height: 16upx;
   border-radius: 50%;
-  margin-right: 16upx;
+  flex-shrink: 0;
 }
 
 .station-name {
-  flex: 1;
   font-size: 28upx;
-  color: #1a1a1a;
-  font-weight: 500;
+  font-weight: 600;
+  color: #1a2332;
 }
 
-.station-count {
-  font-size: 32upx;
+.station-stats {
+  display: flex;
+  gap: 24upx;
+}
+
+.station-stat-value {
+  display: block;
+  font-size: 36upx;
   font-weight: 700;
-  color: #1a1a1a;
-  min-width: 48upx;
-  text-align: right;
-  margin-right: 8upx;
+  color: #1a2332;
+  line-height: 1.1;
 }
 
-.station-count.hot {
-  color: #1890ff;
+.station-stat-label {
+  display: block;
+  font-size: 20upx;
+  color: #5b6573;
+  margin-top: 4upx;
 }
 
-.station-count-label {
-  font-size: 22upx;
-  color: #999999;
-  width: 56upx;
+.station-stat.hot .station-stat-value {
+  color: #c47a00;
+}
+
+.station-stat.urgent .station-stat-value {
+  color: #c62828;
 }
 
 .empty-stations {
@@ -534,101 +620,71 @@ export default {
   51%, 100% { opacity: 0.3; }
 }
 
-@media screen and (max-width: 599upx) {
-  .metrics-row {
-    gap: 12upx;
-  }
-
-  .metric-value {
-    font-size: 32upx;
-  }
-
-  .cta-title {
-    font-size: 40upx;
-  }
-
-  .cta-arrow {
-    width: 68upx;
-    height: 68upx;
-    right: 28upx;
-  }
-}
-
-@media screen and (min-width: 750upx) {
+/* Landscape tablet (≥1200px): split cockpit */
+@media screen and (min-width: 1200px) {
   .dashboard-page {
-    max-width: 960upx;
-    margin: 0 auto;
-    padding: 32upx 40upx 56upx;
+    padding: 20px 24px 32px;
   }
 
-  .station-list {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0;
+  .brand {
+    font-size: 18px;
   }
 
-  .station-row {
-    border-bottom: 1upx solid #f0f0f0;
-    border-right: 1upx solid #f0f0f0;
-    padding: 24upx 16upx;
+  .nav-link {
+    font-size: 14px;
   }
 
-  .station-row:nth-child(2n) {
-    border-right: none;
+  .cockpit {
+    flex-direction: row;
+    min-height: calc(100vh - 88px);
+    border-radius: 14px;
   }
-}
 
-@media screen and (min-width: 1024upx) {
-  .cta-card {
-    padding: 56upx 48upx;
+  .overview-pane {
+    width: 340px;
+    flex-shrink: 0;
+    border-bottom: none;
+    border-right: 1px solid #d5dbe3;
+    padding: 22px 20px;
+  }
+
+  .overview-metric-value {
+    font-size: 48px;
+  }
+
+  .overview-metric-value.urgent {
+    font-size: 28px;
+  }
+
+  .stations-pane {
+    padding: 20px;
+  }
+
+  .section-title {
+    font-size: 18px;
+  }
+
+  .station-mosaic {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+
+  .station-name {
+    font-size: 16px;
+  }
+
+  .station-stat-value {
+    font-size: 22px;
   }
 
   .cta-title {
-    font-size: 52upx;
+    font-size: 18px;
   }
+}
 
-  .station-list {
+@media screen and (min-width: 1400px) {
+  .station-mosaic {
     grid-template-columns: repeat(3, 1fr);
-  }
-
-  .station-row:nth-child(2n) {
-    border-right: 1upx solid #f0f0f0;
-  }
-
-  .station-row:nth-child(3n) {
-    border-right: none;
-  }
-}
-
-@media screen and (max-height: 500upx) and (orientation: landscape) {
-  .dashboard-page {
-    padding: 16upx 20upx 28upx;
-  }
-
-  .top-bar {
-    margin-bottom: 16upx;
-  }
-
-  .cta-card {
-    padding: 28upx 28upx;
-  }
-
-  .cta-title {
-    font-size: 34upx;
-    margin-bottom: 4upx;
-  }
-
-  .cta-desc {
-    font-size: 20upx;
-  }
-
-  .metrics-row {
-    margin-top: 12upx;
-  }
-
-  .station-list {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
   }
 }
 </style>

@@ -72,7 +72,26 @@ describe('buildWatchedStationStatuses', () => {
     expect(rows[0]).toMatchObject({
       id: 'changfen',
       pendingCount: 2,
+      urgentCount: 0,
       active: true
+    })
+  })
+
+  it('counts urgent pending dishes per station', () => {
+    const dishes = [
+      { station: 'changfen', orders: [{ dish_status: PENDING }], urgentCount: 2 },
+      { station: 'changfen', orders: [{ dish_status: PENDING }], urgentCount: 0 },
+      { station: 'changfen', orders: [{ dish_status: '已上菜' }], urgentCount: 3 },
+      { station: 'xibing', orders: [{ dish_status: PENDING }], urgentCount: 1 }
+    ]
+    const rows = buildWatchedStationStatuses(stations, dishes, [], PENDING)
+    expect(rows.find((r) => r.id === 'changfen')).toMatchObject({
+      pendingCount: 2,
+      urgentCount: 1
+    })
+    expect(rows.find((r) => r.id === 'xibing')).toMatchObject({
+      pendingCount: 1,
+      urgentCount: 1
     })
   })
 })

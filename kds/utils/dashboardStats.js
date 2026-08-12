@@ -78,17 +78,23 @@ export function buildWatchedStationStatuses(
       : all.filter((s) => watchedStationIds.includes(s.id))
 
   return stations.map((station) => {
-    const pendingCount = (mergedDishes || []).filter(
-      (dish) =>
-        dish &&
-        dish.station === station.id &&
-        (dish.orders || []).some((o) => o && o.dish_status === pendingStatus)
-    ).length
+    let pendingCount = 0
+    let urgentCount = 0
+    for (const dish of mergedDishes || []) {
+      if (!dish || dish.station !== station.id) continue
+      const hasPending = (dish.orders || []).some(
+        (o) => o && o.dish_status === pendingStatus
+      )
+      if (!hasPending) continue
+      pendingCount += 1
+      if (dish.urgentCount > 0) urgentCount += 1
+    }
     return {
       id: station.id,
       name: station.name,
       color: station.color,
       pendingCount,
+      urgentCount,
       active: pendingCount > 0
     }
   })

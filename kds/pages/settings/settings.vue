@@ -5,419 +5,424 @@
         <text class="back-link" @click="goHome">← 返回</text>
         <view class="header-titles">
           <text class="page-title">系统设置</text>
-          <text class="page-subtitle">API、鉴权与本屏职责配置</text>
+          <text class="page-subtitle">{{ activeSectionSubtitle }}</text>
+        </view>
+        <view class="header-secondary">
+          <text class="nav-link" @click="goOrders">订单</text>
+          <text class="nav-link" @click="goManagement">管理</text>
         </view>
       </view>
     </view>
 
-    <view class="settings-grid">
-    <!-- API 设置卡片 -->
-    <view class="settings-card">
-      <view class="card-header">
-        <text class="card-title">API 服务器设置</text>
-        <view class="connection-status" :class="connectionStatusClass">
-          <text class="status-text">{{ connectionStatusText }}</text>
+    <view class="settings-shell">
+      <view class="settings-nav">
+        <view
+          v-for="section in settingsSections"
+          :key="section.id"
+          class="settings-nav-item"
+          :class="{ 'settings-nav-item--on': activeSection === section.id }"
+          @click="activeSection = section.id"
+        >
+          <text class="settings-nav-label">{{ section.label }}</text>
+          <text class="settings-nav-desc">{{ section.desc }}</text>
         </view>
       </view>
 
-      <view class="card-content">
-        <!-- API 地址输入 -->
-        <view class="form-item">
-          <text class="form-label">API 地址</text>
-          <input 
-            class="form-input"
-            v-model="apiSettings.baseUrl"
-            placeholder="请输入后端 API 地址"
-            :disabled="testing || saving"
-          />
-          <text class="form-hint">例如: https://luyun.ykevin0x61.com（生产）或 http://10.0.2.2:8000（模拟器）</text>
-        </view>
-
-        <!-- 当前设置信息 -->
-        <view class="current-settings">
-          <text class="settings-label">当前配置:</text>
-          <text class="settings-value">{{ currentBaseUrl }}</text>
-          <text class="settings-time" v-if="apiSettings.updatedAt">
-            最后更新: {{ formatTime(apiSettings.updatedAt) }}
-          </text>
-        </view>
-
-        <!-- 操作按钮 -->
-        <view class="button-group">
-          <button 
-            class="btn-test"
-            :class="{ 'btn-loading': testing }"
-            :disabled="!apiSettings.baseUrl || testing || saving"
-            @click="testConnection"
-          >
-            {{ testing ? '测试中...' : '测试连接' }}
-          </button>
-          
-          <button 
-            class="btn-save"
-            :class="{ 'btn-loading': saving }"
-            :disabled="!apiSettings.baseUrl || testing || saving"
-            @click="saveSettings"
-          >
-            {{ saving ? '保存中...' : '保存设置' }}
-          </button>
-
-          <button 
-            class="btn-reset"
-            :disabled="testing || saving"
-            @click="resetToDefault"
-          >
-            重置默认
-          </button>
-        </view>
-      </view>
-    </view>
-
-    <!-- API 鉴权设置 -->
-    <view class="settings-card settings-card--wide">
-      <view class="card-header">
-        <text class="card-title">API 鉴权</text>
-        <view class="connection-status" :class="authStatusClass">
-          <text class="status-text">{{ authStatusText }}</text>
-        </view>
-      </view>
-
-      <view class="card-content">
-        <view class="auth-mode-tabs">
-          <view
-            class="auth-mode-tab"
-            :class="{ 'auth-mode-tab-active': authMode === 'manual' }"
-            @click="authMode = 'manual'"
-          >
-            <text class="auth-mode-tab-text">手动 Token</text>
-          </view>
-          <view
-            class="auth-mode-tab"
-            :class="{ 'auth-mode-tab-active': authMode === 'login' }"
-            @click="authMode = 'login'"
-          >
-            <text class="auth-mode-tab-text">账号登录</text>
-          </view>
-        </view>
-
-        <view v-if="authMode === 'manual'">
-          <view class="form-item">
-            <text class="form-label">API Token</text>
-            <input
-              class="form-input"
-              v-model="manualToken"
-              password
-              placeholder="粘贴或输入 API Token"
-              :disabled="authBusy"
-            />
-            <text class="form-hint">可在 Web 管理后台「设置」中生成 Token</text>
+      <view class="settings-pane">
+        <!-- 连接：API · 鉴权 · 实时 · presets -->
+        <view v-show="activeSection === 'connect'" class="settings-section">
+          <view class="settings-card">
+            <view class="card-header">
+              <text class="card-title">API 服务器设置</text>
+              <view class="connection-status" :class="connectionStatusClass">
+                <text class="status-text">{{ connectionStatusText }}</text>
+              </view>
+            </view>
+            <view class="card-content">
+              <view class="form-item">
+                <text class="form-label">API 地址</text>
+                <input
+                  class="form-input"
+                  v-model="apiSettings.baseUrl"
+                  placeholder="请输入后端 API 地址"
+                  :disabled="testing || saving"
+                />
+                <text class="form-hint">例如: https://luyun.ykevin0x61.com（生产）或 http://10.0.2.2:8000（模拟器）</text>
+              </view>
+              <view class="current-settings">
+                <text class="settings-label">当前配置:</text>
+                <text class="settings-value">{{ currentBaseUrl }}</text>
+                <text class="settings-time" v-if="apiSettings.updatedAt">
+                  最后更新: {{ formatTime(apiSettings.updatedAt) }}
+                </text>
+              </view>
+              <view class="button-group">
+                <button
+                  class="btn-test"
+                  :class="{ 'btn-loading': testing }"
+                  :disabled="!apiSettings.baseUrl || testing || saving"
+                  @click="testConnection"
+                >
+                  {{ testing ? '测试中...' : '测试连接' }}
+                </button>
+                <button
+                  class="btn-save"
+                  :class="{ 'btn-loading': saving }"
+                  :disabled="!apiSettings.baseUrl || testing || saving"
+                  @click="saveSettings"
+                >
+                  {{ saving ? '保存中...' : '保存设置' }}
+                </button>
+                <button
+                  class="btn-reset"
+                  :disabled="testing || saving"
+                  @click="resetToDefault"
+                >
+                  重置默认
+                </button>
+              </view>
+            </view>
           </view>
 
-          <view class="button-group">
-            <button
-              class="btn-save"
-              :class="{ 'btn-loading': authBusy }"
-              :disabled="!manualToken || authBusy"
-              @click="saveManualToken"
-            >
-              {{ authBusy ? '保存中...' : '保存 Token' }}
-            </button>
-            <button
-              class="btn-test"
-              :disabled="!manualToken || authBusy"
-              @click="saveAndTestManualToken"
-            >
-              保存并测试
-            </button>
+          <view class="settings-card">
+            <view class="card-header">
+              <text class="card-title">API 鉴权</text>
+              <view class="connection-status" :class="authStatusClass">
+                <text class="status-text">{{ authStatusText }}</text>
+              </view>
+            </view>
+            <view class="card-content">
+              <view class="auth-mode-tabs">
+                <view
+                  class="auth-mode-tab"
+                  :class="{ 'auth-mode-tab-active': authMode === 'manual' }"
+                  @click="authMode = 'manual'"
+                >
+                  <text class="auth-mode-tab-text">手动 Token</text>
+                </view>
+                <view
+                  class="auth-mode-tab"
+                  :class="{ 'auth-mode-tab-active': authMode === 'login' }"
+                  @click="authMode = 'login'"
+                >
+                  <text class="auth-mode-tab-text">账号登录</text>
+                </view>
+              </view>
+
+              <view v-if="authMode === 'manual'">
+                <view class="form-item">
+                  <text class="form-label">API Token</text>
+                  <input
+                    class="form-input"
+                    v-model="manualToken"
+                    password
+                    placeholder="粘贴或输入 API Token"
+                    :disabled="authBusy"
+                  />
+                  <text class="form-hint">可在 Web 管理后台「设置」中生成 Token</text>
+                </view>
+                <view class="button-group">
+                  <button
+                    class="btn-save"
+                    :class="{ 'btn-loading': authBusy }"
+                    :disabled="!manualToken || authBusy"
+                    @click="saveManualToken"
+                  >
+                    {{ authBusy ? '保存中...' : '保存 Token' }}
+                  </button>
+                  <button
+                    class="btn-test"
+                    :disabled="!manualToken || authBusy"
+                    @click="saveAndTestManualToken"
+                  >
+                    保存并测试
+                  </button>
+                </view>
+              </view>
+
+              <view v-else>
+                <view class="form-item">
+                  <text class="form-label">用户名</text>
+                  <input
+                    class="form-input"
+                    v-model="loginUsername"
+                    placeholder="门店管理员账号"
+                    :disabled="authBusy"
+                  />
+                </view>
+                <view class="form-item">
+                  <text class="form-label">密码</text>
+                  <input
+                    class="form-input"
+                    v-model="loginPassword"
+                    password
+                    placeholder="登录密码"
+                    :disabled="authBusy"
+                  />
+                </view>
+                <view class="button-group">
+                  <button
+                    class="btn-save"
+                    :class="{ 'btn-loading': authBusy }"
+                    :disabled="!loginUsername || !loginPassword || authBusy"
+                    @click="loginAndSaveToken"
+                  >
+                    {{ authBusy ? '登录中...' : '登录并保存' }}
+                  </button>
+                </view>
+              </view>
+
+              <view class="current-settings" v-if="savedAuthInfo.token">
+                <text class="settings-label">已保存 Token:</text>
+                <text class="settings-value">{{ maskedToken }}</text>
+                <text class="settings-time" v-if="savedAuthInfo.updatedAt">
+                  最后更新: {{ formatTime(savedAuthInfo.updatedAt) }}
+                </text>
+              </view>
+
+              <view class="button-group auth-action-buttons">
+                <button
+                  class="btn-test"
+                  :disabled="authBusy || !savedAuthInfo.token"
+                  @click="testAuth"
+                >
+                  {{ authTesting ? '测试中...' : '测试鉴权' }}
+                </button>
+                <button
+                  class="btn-reset"
+                  :disabled="authBusy || !savedAuthInfo.token"
+                  @click="clearAuth"
+                >
+                  清除鉴权
+                </button>
+              </view>
+
+              <view class="realtime-hint">
+                <text class="hint-text">• 写操作（如标记出餐）需要有效的 API Token</text>
+                <text class="hint-text">• 读接口无需鉴权，Token 仅用于写操作</text>
+                <text class="hint-text">• 账号登录会自动获取并保存 Token</text>
+              </view>
+            </view>
           </view>
-        </view>
 
-        <view v-else>
-          <view class="form-item">
-            <text class="form-label">用户名</text>
-            <input
-              class="form-input"
-              v-model="loginUsername"
-              placeholder="门店管理员账号"
-              :disabled="authBusy"
-            />
+          <view class="settings-card">
+            <view class="card-header">
+              <text class="card-title">实时连接状态</text>
+              <view class="connection-status" :class="realtimeStatusClass">
+                <text class="status-text">{{ realtimeStatusText }}</text>
+              </view>
+            </view>
+            <view class="card-content">
+              <view class="info-list">
+                <view class="info-item">
+                  <text class="info-label">连接状态</text>
+                  <text class="info-value">{{ realtimeStatusText }}</text>
+                </view>
+                <view class="info-item">
+                  <text class="info-label">上次更新</text>
+                  <text class="info-value">{{ realtimeLastUpdateText }}</text>
+                </view>
+                <view class="info-item">
+                  <text class="info-label">服务器地址</text>
+                  <text class="info-value">{{ currentBaseUrl }}</text>
+                </view>
+              </view>
+              <view class="realtime-hint">
+                <text class="hint-text">• 系统已切换为 WebSocket 实时推送，无需手动配置刷新频率</text>
+                <text class="hint-text">• 断线会自动重连；厨房页会在断线时显示醒目提示</text>
+                <text class="hint-text">• 各页面仍保留下拉手动刷新，可随时强制拉取最新数据</text>
+              </view>
+            </view>
           </view>
-          <view class="form-item">
-            <text class="form-label">密码</text>
-            <input
-              class="form-input"
-              v-model="loginPassword"
-              password
-              placeholder="登录密码"
-              :disabled="authBusy"
-            />
-          </view>
 
-          <view class="button-group">
-            <button
-              class="btn-save"
-              :class="{ 'btn-loading': authBusy }"
-              :disabled="!loginUsername || !loginPassword || authBusy"
-              @click="loginAndSaveToken"
-            >
-              {{ authBusy ? '登录中...' : '登录并保存' }}
-            </button>
-          </view>
-        </view>
-
-        <view class="current-settings" v-if="savedAuthInfo.token">
-          <text class="settings-label">已保存 Token:</text>
-          <text class="settings-value">{{ maskedToken }}</text>
-          <text class="settings-time" v-if="savedAuthInfo.updatedAt">
-            最后更新: {{ formatTime(savedAuthInfo.updatedAt) }}
-          </text>
-        </view>
-
-        <view class="button-group auth-action-buttons">
-          <button
-            class="btn-test"
-            :disabled="authBusy || !savedAuthInfo.token"
-            @click="testAuth"
-          >
-            {{ authTesting ? '测试中...' : '测试鉴权' }}
-          </button>
-          <button
-            class="btn-reset"
-            :disabled="authBusy || !savedAuthInfo.token"
-            @click="clearAuth"
-          >
-            清除鉴权
-          </button>
-        </view>
-
-        <view class="realtime-hint">
-          <text class="hint-text">• 写操作（如标记出餐）需要有效的 API Token</text>
-          <text class="hint-text">• 读接口无需鉴权，Token 仅用于写操作</text>
-          <text class="hint-text">• 账号登录会自动获取并保存 Token</text>
-        </view>
-      </view>
-    </view>
-
-    <!-- 实时连接状态 -->
-    <view class="settings-card">
-      <view class="card-header">
-        <text class="card-title">实时连接状态</text>
-        <view class="connection-status" :class="realtimeStatusClass">
-          <text class="status-text">{{ realtimeStatusText }}</text>
-        </view>
-      </view>
-
-      <view class="card-content">
-        <view class="info-list">
-          <view class="info-item">
-            <text class="info-label">连接状态</text>
-            <text class="info-value">{{ realtimeStatusText }}</text>
-          </view>
-          <view class="info-item">
-            <text class="info-label">上次更新</text>
-            <text class="info-value">{{ realtimeLastUpdateText }}</text>
-          </view>
-          <view class="info-item">
-            <text class="info-label">服务器地址</text>
-            <text class="info-value">{{ currentBaseUrl }}</text>
-          </view>
-        </view>
-
-        <view class="realtime-hint">
-          <text class="hint-text">• 系统已切换为 WebSocket 实时推送，无需手动配置刷新频率</text>
-          <text class="hint-text">• 断线会自动重连；厨房页会在断线时显示醒目提示</text>
-          <text class="hint-text">• 各页面仍保留下拉手动刷新，可随时强制拉取最新数据</text>
-        </view>
-      </view>
-    </view>
-
-    <!-- 本屏 KDS 设置：职责档口（按设备本地，ADR 0002） -->
-    <view class="settings-card settings-card--wide">
-      <view class="card-header">
-        <text class="card-title">本屏 KDS 设置</text>
-        <view class="connection-status" :class="watchedStationsBadgeClass">
-          <text class="status-text">{{ watchedStationsStatusText }}</text>
-        </view>
-      </view>
-
-      <view class="card-content">
-        <view class="form-item">
-          <text class="form-label">本屏负责档口</text>
-          <text class="form-hint">不选 = 全部档口；选 1 个则厨房页锁定该档全屏。改动即时保存，重进厨房页生效。</text>
-          <view class="station-chip-list">
-            <view
-              v-for="station in stationOptions"
-              :key="station.id"
-              class="station-chip"
-              :class="{ 'station-chip-active': isWatchedStationSelected(station.id) }"
-              :style="isWatchedStationSelected(station.id) ? { borderColor: station.color } : {}"
-              @click="toggleWatchedStation(station.id)"
-            >
-              <text class="station-chip-text">{{ station.name }}</text>
+          <view class="settings-card">
+            <view class="card-header">
+              <text class="card-title">快速配置</text>
+            </view>
+            <view class="card-content">
+              <view class="preset-list">
+                <view
+                  class="preset-item"
+                  v-for="preset in presetConfigs"
+                  :key="preset.name"
+                  @click="selectPreset(preset)"
+                >
+                  <view class="preset-info">
+                    <text class="preset-name">{{ preset.name }}</text>
+                    <text class="preset-url">{{ preset.url }}</text>
+                  </view>
+                  <text class="preset-action">选择</text>
+                </view>
+              </view>
             </view>
           </view>
         </view>
 
-        <view class="button-group">
-          <button
-            class="btn-reset"
-            :disabled="watchedStations.length === 0"
-            @click="setWatchedStationsAll"
-          >
-            设为全部档口
-          </button>
+        <!-- 本屏：职责档口 · 密度 -->
+        <view v-show="activeSection === 'screen'" class="settings-section">
+          <view class="settings-card">
+            <view class="card-header">
+              <text class="card-title">本屏 KDS 设置</text>
+              <view class="connection-status" :class="watchedStationsBadgeClass">
+                <text class="status-text">{{ watchedStationsStatusText }}</text>
+              </view>
+            </view>
+            <view class="card-content">
+              <view class="form-item">
+                <text class="form-label">本屏负责档口</text>
+                <text class="form-hint">不选 = 全部档口；选 1 个则厨房页锁定该档全屏。改动即时保存，重进厨房页生效。</text>
+                <view class="station-chip-list">
+                  <view
+                    v-for="station in stationOptions"
+                    :key="station.id"
+                    class="station-chip"
+                    :class="{ 'station-chip-active': isWatchedStationSelected(station.id) }"
+                    :style="isWatchedStationSelected(station.id) ? { borderColor: station.color } : {}"
+                    @click="toggleWatchedStation(station.id)"
+                  >
+                    <text class="station-chip-text">{{ station.name }}</text>
+                  </view>
+                </view>
+              </view>
+              <view class="button-group">
+                <button
+                  class="btn-reset"
+                  :disabled="watchedStations.length === 0"
+                  @click="setWatchedStationsAll"
+                >
+                  设为全部档口
+                </button>
+              </view>
+              <view class="form-item density-form-item">
+                <text class="form-label">显示密度</text>
+                <text class="form-hint">高峰期用更紧凑布局一屏看更多。改动即时保存，重进厨房页生效。</text>
+                <view class="density-mode-list">
+                  <view
+                    v-for="option in densityOptions"
+                    :key="option.value"
+                    class="density-mode-chip"
+                    :class="{ 'density-mode-chip-active': density === option.value }"
+                    @click="setDensityMode(option.value)"
+                  >
+                    <text class="density-mode-chip-text">{{ option.label }}</text>
+                  </view>
+                </view>
+              </view>
+            </view>
+          </view>
         </view>
 
-        <view class="form-item density-form-item">
-          <text class="form-label">显示密度</text>
-          <text class="form-hint">高峰期用更紧凑布局一屏看更多。改动即时保存，重进厨房页生效。</text>
-          <view class="density-mode-list">
-            <view
-              v-for="option in densityOptions"
-              :key="option.value"
-              class="density-mode-chip"
-              :class="{ 'density-mode-chip-active': density === option.value }"
-              @click="setDensityMode(option.value)"
-            >
-              <text class="density-mode-chip-text">{{ option.label }}</text>
+        <!-- 设备与系统：蓝牙 · 系统信息 -->
+        <view v-show="activeSection === 'device'" class="settings-section">
+          <view class="settings-card" v-if="isAppPlus">
+            <view class="card-header">
+              <text class="card-title">蓝牙打印机</text>
+              <view class="connection-status" :class="printerStatusClass">
+                <text class="status-text">{{ printerStatusText }}</text>
+              </view>
+            </view>
+            <view class="card-content">
+              <view class="form-item printer-toggle-row">
+                <text class="form-label">制作完成自动出单</text>
+                <switch
+                  :checked="printerSettings.enabled"
+                  :disabled="printerBusy"
+                  @change="onPrintEnabledChange"
+                />
+              </view>
+              <view class="current-settings">
+                <text class="settings-label">当前打印机:</text>
+                <text class="settings-value">
+                  {{ printerSettings.deviceName || '未选择' }}
+                </text>
+                <text class="settings-time" v-if="printerSettings.deviceAddress">
+                  {{ printerSettings.deviceAddress }}
+                </text>
+              </view>
+              <view class="button-group">
+                <button
+                  class="btn-test"
+                  :disabled="printerBusy"
+                  @click="refreshPairedDevices"
+                >
+                  {{ printerScanning ? '扫描中...' : '搜索设备' }}
+                </button>
+                <button
+                  class="btn-save"
+                  :class="{ 'btn-loading': printerBusy }"
+                  :disabled="!selectedPrinterAddress || printerBusy"
+                  @click="connectSelectedPrinter"
+                >
+                  {{ printerBusy ? '连接中...' : '连接打印机' }}
+                </button>
+                <button
+                  class="btn-reset"
+                  :disabled="printerBusy || !printerSettings.enabled"
+                  @click="testPrinter"
+                >
+                  测试打印
+                </button>
+              </view>
+              <view class="printer-device-list" v-if="pairedDevices.length > 0">
+                <text class="presets-title">已配对 / 已发现设备</text>
+                <view
+                  class="preset-item printer-device-item"
+                  v-for="device in pairedDevices"
+                  :key="device.address"
+                  :class="{ 'printer-device-selected': selectedPrinterAddress === device.address }"
+                  @click="selectPrinterDevice(device)"
+                >
+                  <view class="preset-info">
+                    <text class="preset-name">{{ device.name || '未知设备' }}</text>
+                    <text class="preset-url">{{ device.address }}</text>
+                    <text class="preset-url">{{ device.paired ? '已配对，可连接' : '未配对，请先在系统蓝牙中配对' }}</text>
+                  </view>
+                  <text class="preset-action">
+                    {{ selectedPrinterAddress === device.address ? '已选' : '选择' }}
+                  </text>
+                </view>
+              </view>
+              <view class="realtime-hint">
+                <text class="hint-text">• 请先在系统蓝牙中配对 BlueTooth Printer（默认 PIN: 1234 或 0000）</text>
+                <text class="hint-text">• 搜索可发现附近设备；连接前须完成系统配对</text>
+                <text class="hint-text">• 每完成一道菜打印一张，自动切纸</text>
+                <text class="hint-text">• 使用项目内置 kds-bluetooth-printer 插件，打包 APK 即可</text>
+              </view>
+            </view>
+          </view>
+
+          <view v-else class="settings-card">
+            <view class="card-header">
+              <text class="card-title">蓝牙打印机</text>
+            </view>
+            <view class="card-content">
+              <text class="form-hint">蓝牙打印仅在 APP 端可用；当前为 H5，请使用打包客户端配置打印机。</text>
+            </view>
+          </view>
+
+          <view class="settings-card">
+            <view class="card-header">
+              <text class="card-title">系统信息</text>
+            </view>
+            <view class="card-content">
+              <view class="info-list">
+                <view class="info-item">
+                  <text class="info-label">应用版本</text>
+                  <text class="info-value">{{ systemInfo.version }}</text>
+                </view>
+                <view class="info-item">
+                  <text class="info-label">设备信息</text>
+                  <text class="info-value">{{ systemInfo.platform }} {{ systemInfo.system }}</text>
+                </view>
+                <view class="info-item">
+                  <text class="info-label">网络类型</text>
+                  <text class="info-value">{{ systemInfo.networkType }}</text>
+                </view>
+              </view>
             </view>
           </view>
         </view>
       </view>
-    </view>
-
-    <!-- 蓝牙打印机 -->
-    <view class="settings-card settings-card--wide" v-if="isAppPlus">
-      <view class="card-header">
-        <text class="card-title">蓝牙打印机</text>
-        <view class="connection-status" :class="printerStatusClass">
-          <text class="status-text">{{ printerStatusText }}</text>
-        </view>
-      </view>
-
-      <view class="card-content">
-        <view class="form-item printer-toggle-row">
-          <text class="form-label">制作完成自动出单</text>
-          <switch
-            :checked="printerSettings.enabled"
-            :disabled="printerBusy"
-            @change="onPrintEnabledChange"
-          />
-        </view>
-
-        <view class="current-settings">
-          <text class="settings-label">当前打印机:</text>
-          <text class="settings-value">
-            {{ printerSettings.deviceName || '未选择' }}
-          </text>
-          <text class="settings-time" v-if="printerSettings.deviceAddress">
-            {{ printerSettings.deviceAddress }}
-          </text>
-        </view>
-
-        <view class="button-group">
-          <button
-            class="btn-test"
-            :disabled="printerBusy"
-            @click="refreshPairedDevices"
-          >
-            {{ printerScanning ? '扫描中...' : '搜索设备' }}
-          </button>
-
-          <button
-            class="btn-save"
-            :class="{ 'btn-loading': printerBusy }"
-            :disabled="!selectedPrinterAddress || printerBusy"
-            @click="connectSelectedPrinter"
-          >
-            {{ printerBusy ? '连接中...' : '连接打印机' }}
-          </button>
-
-          <button
-            class="btn-reset"
-            :disabled="printerBusy || !printerSettings.enabled"
-            @click="testPrinter"
-          >
-            测试打印
-          </button>
-        </view>
-
-        <view class="printer-device-list" v-if="pairedDevices.length > 0">
-          <text class="presets-title">已配对 / 已发现设备</text>
-          <view
-            class="preset-item printer-device-item"
-            v-for="device in pairedDevices"
-            :key="device.address"
-            :class="{ 'printer-device-selected': selectedPrinterAddress === device.address }"
-            @click="selectPrinterDevice(device)"
-          >
-            <view class="preset-info">
-              <text class="preset-name">{{ device.name || '未知设备' }}</text>
-              <text class="preset-url">{{ device.address }}</text>
-              <text class="preset-url">{{ device.paired ? '已配对，可连接' : '未配对，请先在系统蓝牙中配对' }}</text>
-            </view>
-            <text class="preset-action">
-              {{ selectedPrinterAddress === device.address ? '已选' : '选择' }}
-            </text>
-          </view>
-        </view>
-
-        <view class="realtime-hint">
-          <text class="hint-text">• 请先在系统蓝牙中配对 BlueTooth Printer（默认 PIN: 1234 或 0000）</text>
-          <text class="hint-text">• 搜索可发现附近设备；连接前须完成系统配对</text>
-          <text class="hint-text">• 每完成一道菜打印一张，自动切纸</text>
-          <text class="hint-text">• 使用项目内置 kds-bluetooth-printer 插件，打包 APK 即可</text>
-        </view>
-      </view>
-    </view>
-
-    <!-- 预设配置 -->
-    <view class="settings-card">
-      <view class="card-header">
-        <text class="card-title">快速配置</text>
-      </view>
-      
-      <view class="card-content">
-        <view class="preset-list">
-          <view 
-            class="preset-item"
-            v-for="preset in presetConfigs"
-            :key="preset.name"
-            @click="selectPreset(preset)"
-          >
-            <view class="preset-info">
-              <text class="preset-name">{{ preset.name }}</text>
-              <text class="preset-url">{{ preset.url }}</text>
-            </view>
-            <text class="preset-action">选择</text>
-          </view>
-        </view>
-      </view>
-    </view>
-
-    <!-- 系统信息 -->
-    <view class="settings-card">
-      <view class="card-header">
-        <text class="card-title">系统信息</text>
-      </view>
-      
-      <view class="card-content">
-        <view class="info-list">
-          <view class="info-item">
-            <text class="info-label">应用版本</text>
-            <text class="info-value">{{ systemInfo.version }}</text>
-          </view>
-          <view class="info-item">
-            <text class="info-label">设备信息</text>
-            <text class="info-value">{{ systemInfo.platform }} {{ systemInfo.system }}</text>
-          </view>
-          <view class="info-item">
-            <text class="info-label">网络类型</text>
-            <text class="info-value">{{ systemInfo.networkType }}</text>
-          </view>
-        </view>
-      </view>
-    </view>
     </view>
   </view>
 </template>
@@ -449,6 +454,13 @@ export default {
     return {
       realtimeStore: useRealtimeStore(),
       stationsStore: useStationsStore(),
+      /** @type {'connect'|'screen'|'device'} */
+      activeSection: 'connect',
+      settingsSections: [
+        { id: 'connect', label: '连接', desc: '服务器与鉴权' },
+        { id: 'screen', label: '本屏', desc: '档口与密度' },
+        { id: 'device', label: '设备与系统', desc: '打印与版本' }
+      ],
       /** @type {string[]} 空数组 = 全部档口 */
       watchedStations: [],
       /** @type {string} ScreenSettingsManager density mode */
@@ -518,6 +530,15 @@ export default {
   },
 
   computed: {
+    activeSectionSubtitle() {
+      const map = {
+        connect: 'API 服务器 · 鉴权 · 实时连接 · 快速配置',
+        screen: '本屏职责档口 · 显示密度',
+        device: '蓝牙打印 · 系统信息'
+      }
+      return map[this.activeSection] || '系统设置'
+    },
+
     stationOptions() {
       return this.stationsStore.stationList.map(({ id, name, color }) => ({
         id,
@@ -641,6 +662,19 @@ export default {
   methods: {
     goHome() {
       uni.reLaunch({ url: '/pages/index/index' })
+    },
+
+    goOrders() {
+      uni.navigateTo({ url: '/pages/orders/orders' })
+    },
+
+    goManagement() {
+      // #ifdef H5
+      window.location.href = '/admin/'
+      // #endif
+      // #ifndef H5
+      uni.showToast({ title: '请使用浏览器访问 /admin/', icon: 'none' })
+      // #endif
     },
 
     /**
@@ -1210,14 +1244,14 @@ export default {
 <style scoped>
 .settings-container {
   min-height: 100vh;
-  background: #f5f5f5;
+  background: #eef1f4;
   padding: 24upx 24upx 48upx;
   padding-top: calc(24upx + env(safe-area-inset-top));
   box-sizing: border-box;
 }
 
 .page-header {
-  margin-bottom: 24upx;
+  margin-bottom: 20upx;
 }
 
 .header-bar {
@@ -1229,7 +1263,7 @@ export default {
 .back-link {
   flex-shrink: 0;
   font-size: 26upx;
-  color: #1890ff;
+  color: #0b6bcb;
   font-weight: 500;
   padding: 8upx 0;
   line-height: 1.4;
@@ -1240,30 +1274,100 @@ export default {
   min-width: 0;
 }
 
+.header-secondary {
+  display: flex;
+  gap: 24upx;
+  flex-shrink: 0;
+  padding-top: 8upx;
+}
+
+.nav-link {
+  font-size: 26upx;
+  color: #5b6573;
+  font-weight: 500;
+}
+
 .page-title {
   display: block;
   font-size: 40upx;
   font-weight: 700;
-  color: #1a1a1a;
+  color: #1a2332;
   margin-bottom: 6upx;
 }
 
 .page-subtitle {
   display: block;
   font-size: 24upx;
-  color: #666666;
+  color: #5b6573;
 }
 
-.settings-grid {
+.settings-shell {
   display: flex;
   flex-direction: column;
-  gap: 20upx;
+  gap: 16upx;
+  background: #ffffff;
+  border: 1upx solid #d5dbe3;
+  border-radius: 18upx;
+  overflow: hidden;
+  box-shadow: 0 2upx 12upx rgba(26, 35, 50, 0.06);
+  min-height: calc(100vh - 160upx);
+}
+
+.settings-nav {
+  display: flex;
+  gap: 8upx;
+  padding: 16upx;
+  background: #f8fafc;
+  border-bottom: 1upx solid #d5dbe3;
+  overflow-x: auto;
+}
+
+.settings-nav-item {
+  flex: 1;
+  min-width: 160upx;
+  padding: 16upx 18upx;
+  border-radius: 12upx;
+  background: transparent;
+}
+
+.settings-nav-item--on {
+  background: #e7f1fb;
+}
+
+.settings-nav-label {
+  display: block;
+  font-size: 28upx;
+  font-weight: 700;
+  color: #1a2332;
+}
+
+.settings-nav-item--on .settings-nav-label {
+  color: #0b6bcb;
+}
+
+.settings-nav-desc {
+  display: block;
+  margin-top: 4upx;
+  font-size: 20upx;
+  color: #5b6573;
+}
+
+.settings-pane {
+  flex: 1;
+  padding: 20upx;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16upx;
 }
 
 .settings-card {
   background: #ffffff;
   border-radius: 16upx;
-  box-shadow: 0 2upx 8upx rgba(0, 0, 0, 0.06);
+  border: 1upx solid #e5eaf0;
+  box-shadow: 0 1upx 4upx rgba(26, 35, 50, 0.04);
   overflow: hidden;
 }
 
@@ -1636,49 +1740,52 @@ export default {
   }
 }
 
-/* 平板竖屏 / 中等宽度：双列卡片 */
-@media screen and (min-width: 750upx) {
+/* Landscape tablet: left nav + single content pane (variant B) */
+@media screen and (min-width: 1200px) {
   .settings-container {
-    padding: 32upx 40upx 56upx;
-    max-width: 1400upx;
-    margin: 0 auto;
+    padding: 20px 24px 32px;
   }
 
-  .settings-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 24upx;
-    align-items: start;
-  }
-
-  .settings-card {
-    margin-bottom: 0;
-  }
-
-  .settings-card--wide {
-    grid-column: 1 / -1;
-  }
-}
-
-/* 宽屏横屏 */
-@media screen and (min-width: 1024upx) {
   .page-title {
-    font-size: 44upx;
+    font-size: 22px;
   }
 
-  .settings-grid {
-    grid-template-columns: 1fr 1fr;
-    gap: 28upx;
+  .page-subtitle {
+    font-size: 13px;
+  }
+
+  .settings-shell {
+    flex-direction: row;
+    min-height: calc(100vh - 96px);
+    border-radius: 14px;
+  }
+
+  .settings-nav {
+    flex-direction: column;
+    width: 220px;
+    flex-shrink: 0;
+    border-bottom: none;
+    border-right: 1px solid #d5dbe3;
+    overflow-x: visible;
+    gap: 6px;
+    padding: 16px 12px;
+  }
+
+  .settings-nav-item {
+    flex: none;
+    min-width: 0;
+  }
+
+  .settings-pane {
+    padding: 22px 24px;
+  }
+
+  .settings-section {
+    max-width: 820px;
   }
 
   .card-content {
     padding: 28upx 32upx 32upx;
-  }
-
-  .info-list {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0 32upx;
   }
 
   .preset-list {
@@ -1688,7 +1795,6 @@ export default {
   }
 }
 
-/* 手机横屏：紧凑单列 */
 @media screen and (max-height: 500upx) and (orientation: landscape) {
   .settings-container {
     padding: 16upx 20upx 32upx;
@@ -1704,12 +1810,6 @@ export default {
 
   .page-subtitle {
     font-size: 20upx;
-  }
-
-  .settings-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 12upx;
   }
 
   .card-header {
