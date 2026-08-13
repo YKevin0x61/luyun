@@ -5,7 +5,7 @@
 			"style": {
 				"navigationStyle": "custom",
 				"navigationBarTitleText": "KDS 后厨控菜系统",
-				"backgroundColor": "#f5f5f5",
+				"backgroundColor": "#eef1f4",
 				"enablePullDownRefresh": true,
 				"onReachBottomDistance": 50
 			}

@@ -87,9 +87,4 @@ function formatAmount(value) {
 .table-live-number {
   font-weight: 600;
 }
-@media (max-width: 960px) {
-  .table-live-panel {
-    display: none;
-  }
-}
 </style>

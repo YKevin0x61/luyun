@@ -130,7 +130,7 @@
               :dish="dish"
               :density="densityMode"
               :selected-quantity="getDishSelectedQuantity(dish.chunkId)"
-              :serve-preview="dishServePreview(dish)"
+              :serve-preview-order-ids="dishServePreviewOrderIds(dish)"
               :is-new="dishHasNewBadge(dish)"
               @increase="increaseQuantity(dish.chunkId, dish.totalQuantity)"
               @decrease="decreaseQuantity(dish.chunkId)"
@@ -231,7 +231,7 @@ import { groupOrdersByDish } from '../../utils/dishMerge.js'
 import { composeKitchenDishCards, dishSplitKnobsChanged, sortKitchenDishCardsByOldest } from '../../utils/dishCardChunks.js'
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
-import { orderLineId, planBatchCookingCalls, planTablePickCookingCalls, servePreviewText } from '../../utils/batchCooking.js'
+import { orderLineId, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds } from '../../utils/batchCooking.js'
 import { toastForServeBatch } from '../../utils/serveBatchToast.js'
 import { ScreenSettingsManager, DENSITY_MODES } from '../../utils/storage.js'
 import { useKitchenOrderSession } from '../../composables/useKitchenOrderSession.js'
@@ -582,9 +582,9 @@ export default {
         .sort((a, b) => a.orderTimeMs - b.orderTimeMs || a.id.localeCompare(b.id))
     })
 
-    const dishServePreview = (dish) => {
+    const dishServePreviewOrderIds = (dish) => {
       const count = serveSelection.value.cardCounts[dish.chunkId] || 0
-      return servePreviewText((dish.orders || []).filter(isSubmittableOrder), count)
+      return servePreviewOrderIds((dish.orders || []).filter(isSubmittableOrder), count)
     }
 
     // 🆕 总选中数量计算
@@ -1080,7 +1080,7 @@ export default {
       isTablePickOpen,
       tablePickCount,
       tablePickRows,
-      dishServePreview,
+      dishServePreviewOrderIds,
       
       // 方法
       switchStation,

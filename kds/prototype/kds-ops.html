@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-variant="A" data-surface="hub">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>PROTOTYPE — KDS ops looks</title>
+  <!--
+    PROTOTYPE (throwaway). Not production.
+
+    Question: Same locked skeleton, painted in the current 厨房控制台 language
+    (blue header, white Ant Design cards). A/B/C = 标准 / 紧凑 / 超紧凑 density.
+
+    Run:  bash kds/prototype/serve.sh
+    Open: http://127.0.0.1:4177/kds-ops.html?variant=A&surface=kitchen
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js"></script>
+  <style>
+    :root {
+      --border-w: 8px;
+      --hit: 44px;
+      --space: 12px;
+      --pad: 12px;
+      --radius: 8px;
+      --control-radius: 8px;
+      --dish: 22px;
+      --motion: 300ms;
+      --ease: ease;
+      --chrome: 52px;
+      --header-bg: linear-gradient(135deg, #4A90E2 0%, #357ABD 100%);
+      --header-fg: #fff;
+      --ops-bg: #F5F7FA;
+      --ops-surface: #fff;
+      --ops-ink: #2C3E50;
+      --ops-muted: #666;
+      --ops-line: #e8e8e8;
+      --ops-accent: #1890FF;
+      --ops-accent-soft: #e6f7ff;
+      --ops-ok: #52C41A;
+      --ops-ok-soft: #f6ffed;
+      --ops-warn: #FAAD14;
+      --ops-warn-soft: #fffbe6;
+      --ops-danger: #FF4D4F;
+      --ops-danger-soft: #fff2f0;
+      --ops-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      --ops-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+      --font-dish: inherit;
+      --card-border: 2px solid #1890FF;
+      --card-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    html[data-variant="A"] {
+      --space: 12px;
+      --pad: 12px;
+      --dish: 22px;
+      --chrome: 52px;
+    }
+    html[data-variant="B"] {
+      --space: 8px;
+      --pad: 8px;
+      --dish: 20px;
+      --chrome: 46px;
+      --radius: 6px;
+    }
+    html[data-variant="C"] {
+      --space: 6px;
+      --pad: 6px;
+      --dish: 18px;
+      --chrome: 42px;
+      --radius: 6px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--ops-bg); color: var(--ops-ink); font-family: var(--ops-font); }
+    button, input { font-family: inherit; }
+    button { cursor: pointer; }
+    #app { min-height: 100%; }
+
+    .screen {
+      min-height: 100vh;
+      background: linear-gradient(135deg, #F5F7FA 0%, #E8EBF0 100%);
+      padding-bottom: 88px;
+      position: relative;
+    }
+    .screen-border {
+      position: fixed; inset: 0; z-index: 40; pointer-events: none;
+      border: var(--border-w) solid var(--ops-ok);
+      transition: border-color var(--motion) var(--ease);
+    }
+    .screen-border.is-yellow {
+      border-color: var(--ops-warn);
+      animation: yellow-flash 0.9s ease-in-out infinite;
+    }
+    .screen-border.is-red { border-color: var(--ops-danger); }
+    .screen-border.is-green { border-color: var(--ops-ok); }
+    @keyframes yellow-flash {
+      0%, 100% { border-color: #faad14; opacity: 1; }
+      50% { border-color: #ffd666; opacity: 0.55; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .screen-border.is-yellow { animation: none; border-color: var(--ops-warn); }
+      *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+    }
+
+    .edge-hits { position: fixed; inset: 0; z-index: 45; pointer-events: none; }
+    .edge-hit { position: absolute; pointer-events: auto; }
+    .edge-hit--n { top: 0; left: 0; right: 0; height: var(--hit); }
+    .edge-hit--s { bottom: 0; left: 0; right: 0; height: var(--hit); }
+    .edge-hit--e { top: 0; right: 0; bottom: 0; width: var(--hit); }
+    .edge-hit--w { top: 0; left: 0; bottom: 0; width: var(--hit); }
+
+    .topbar, .k-header, .s-header {
+      height: var(--chrome);
+      display: flex; align-items: center; gap: 12px;
+      padding: 0 var(--pad);
+      background: var(--header-bg);
+      color: var(--header-fg);
+      border-bottom: 1px solid var(--ops-line);
+    }
+    .brand, .clock { font-weight: 800; font-size: 15px; letter-spacing: 0.02em; color: var(--header-fg); }
+    .nav-link {
+      color: var(--header-fg); font-size: 13px; font-weight: 600;
+      padding: 6px 8px; border-radius: var(--control-radius); cursor: pointer; opacity: 0.78;
+    }
+    .nav-link:hover { opacity: 1; background: transparent; }
+    .spacer { flex: 1; }
+    .back {
+      border: 0; background: transparent; color: var(--header-fg);
+      font-weight: 700; font-size: 14px; padding: 8px 4px; min-height: 44px;
+    }
+    .conn {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 700; color: var(--ops-ok);
+    }
+    .conn.is-off { color: var(--ops-danger); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+    /* Hub */
+    .hub-body { display: flex; flex-direction: column; min-height: calc(100vh - var(--chrome) - 88px); }
+    .overview {
+      margin: var(--space); padding: var(--pad);
+      background: var(--ops-surface); border-radius: var(--radius);
+      border: var(--card-border); box-shadow: var(--card-shadow);
+      display: grid; grid-template-columns: auto 1fr auto auto;
+      gap: var(--space); align-items: end;
+    }
+    .overview.is-alert { background: var(--ops-danger-soft); }
+    .metric-label { display: block; font-size: 12px; color: var(--ops-muted); font-weight: 600; }
+    .metric-value { font-size: 40px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+    .metric-value.is-dim { opacity: 0.45; }
+    .metric-value.warn { color: var(--ops-danger); }
+    .pair { display: flex; gap: var(--space); }
+    .box {
+      background: var(--ops-bg); border-radius: calc(var(--radius) - 4px);
+      padding: 10px 14px; min-width: 88px;
+    }
+    .cta {
+      background: linear-gradient(135deg, #1890ff, #40a9ff); color: #fff; border: 0; border-radius: var(--radius);
+      padding: 14px 22px; min-height: 56px; min-width: 160px;
+      display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
+    }
+    .cta b { font-size: 16px; }
+    .cta span { font-size: 12px; opacity: .85; font-weight: 500; }
+    .refresh {
+      border: 1px solid var(--ops-line); background: var(--ops-surface);
+      border-radius: var(--radius); padding: 10px 14px; color: var(--ops-accent); font-weight: 600;
+    }
+    .stations { padding: 0 var(--space) var(--space); }
+    .section-title { font-size: 13px; font-weight: 700; color: var(--ops-muted); margin: 0 0 8px; }
+    .mosaic {
+      display: grid; gap: var(--space);
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    }
+    html[data-variant="B"] .mosaic { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+    .station-card {
+      background: var(--ops-surface); border-radius: var(--radius);
+      border: var(--card-border); box-shadow: var(--card-shadow);
+      padding: var(--pad); cursor: pointer; min-height: 96px;
+      transition: transform var(--motion) var(--ease), box-shadow var(--motion) var(--ease);
+    }
+    html[data-variant="C"] .station-card:hover { transform: none; }
+    .station-card h3 { margin: 0 0 10px; font-size: 16px; }
+    .station-stats { display: flex; gap: 16px; }
+    .station-stats b { display: block; font-size: 22px; }
+    .station-stats span { font-size: 11px; color: var(--ops-muted); font-weight: 600; }
+    .hot b { color: var(--ops-accent); }
+    .urg b { color: var(--ops-danger); }
+
+    /* Kitchen */
+    .rail { padding: 0 var(--space); display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+    .alert {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px; border-radius: var(--radius); color: #fff; min-height: 48px;
+      animation: rail-in var(--motion) var(--ease);
+    }
+    .alert.is-ack { background: linear-gradient(90deg, #d48806, #faad14); }
+    .alert.is-cancel { background: linear-gradient(135deg, #FF4D4F, #FF7875); }
+    .alert button {
+      margin-left: auto; border: 0; background: var(--ops-surface); color: var(--ops-ink);
+      font-weight: 800; border-radius: var(--control-radius); padding: 8px 14px; min-height: 40px;
+    }
+    @keyframes rail-in {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: none; }
+    }
+    html[data-variant="A"] .alert { animation: none; }
+    html[data-variant="C"] .alert { animation: none; }
+
+    .control {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 8px var(--space);
+    }
+    .pill, .stat-chip, .sort-pill {
+      border: 1px solid var(--ops-line); background: var(--ops-surface); color: var(--ops-ink);
+      border-radius: var(--control-radius); padding: 6px 12px; font-size: 13px; font-weight: 700;
+      min-height: 36px;
+    }
+    .pill.is-on { background: var(--ops-accent); border-color: var(--ops-accent); color: #fff; }
+    .stat-chip b { font-variant-numeric: tabular-nums; }
+    .stat-chip.is-over b { color: var(--ops-danger); }
+    .sort-pill.is-on { background: #1890FF; color: #fff; border-color: #1890FF; }
+
+    .canvas {
+      padding: var(--space);
+      min-height: 40vh;
+    }
+    .grid {
+      display: grid; gap: var(--space);
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    }
+    html[data-variant="A"] .grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+    html[data-variant="B"] .grid { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+
+    .dish {
+      position: relative;
+      background: var(--ops-surface);
+      border: var(--card-border);
+      box-shadow: var(--card-shadow);
+      border-radius: var(--radius);
+      padding: var(--pad);
+      cursor: pointer;
+      display: flex; flex-direction: column; gap: 8px;
+      min-height: 140px;
+      transition: transform var(--motion) var(--ease), box-shadow var(--motion) var(--ease), opacity var(--motion) var(--ease);
+    }
+    html[data-variant="A"] .dish { animation: dish-in var(--motion) var(--ease); }
+    html[data-variant="B"] .dish { animation: none; }
+    html[data-variant="C"] .dish { animation: none; }
+    @keyframes dish-in {
+      from { opacity: 0; transform: translateY(12px) scale(0.98); }
+      to { opacity: 1; transform: none; }
+    }
+    .dish.is-new {
+      outline: 0;
+      box-shadow:
+        0 0 0 3px rgba(250, 173, 20, 0.55),
+        0 0 18px rgba(250, 173, 20, 0.45),
+        0 4px 12px rgba(0, 0, 0, 0.08);
+    }
+    .dish.is-over {
+      background: linear-gradient(135deg, #FFF2F0, #FFFFFF);
+      border-color: #FF4D4F;
+    }
+    .dish.is-sel {
+      border-color: #52C41A;
+      box-shadow: 0 4px 16px rgba(82, 196, 26, 0.2);
+    }
+    html[data-variant="C"] .dish.is-sel { transform: none; }
+    html[data-variant="C"] .tables { display: none; }
+    .dish.is-out { opacity: 0; transform: scale(0.92); pointer-events: none; }
+    .badge {
+      position: absolute; top: 8px; right: 8px;
+      background: var(--ops-warn); color: #fff; font-size: 11px; font-weight: 800;
+      padding: 2px 6px; border-radius: 6px;
+    }
+    .dish-name { font-family: var(--font-dish); font-size: var(--dish); font-weight: 800; line-height: 1.15; padding-right: 28px; }
+    .qty { font-size: 14px; color: var(--ops-muted); font-weight: 600; }
+    .wait { font-size: 13px; font-weight: 700; }
+    .wait.is-over { color: var(--ops-danger); }
+    .tables { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tables span {
+      background: var(--ops-bg); border-radius: var(--control-radius); padding: 2px 6px;
+      font-size: 12px; color: var(--ops-muted);
+    }
+    .actions { display: flex; align-items: center; gap: 8px; margin-top: auto; }
+    .actions button {
+      border: 1px solid var(--ops-line); background: var(--ops-surface); color: var(--ops-ink);
+      border-radius: var(--control-radius);
+      min-width: 36px; min-height: 36px; font-weight: 700;
+    }
+    .sel-read { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--ops-accent); }
+
+    .empty {
+      text-align: center; color: var(--ops-ok); font-weight: 700;
+      padding: 48px 16px;
+    }
+
+    .dock {
+      position: fixed; left: var(--space); right: var(--space); bottom: 76px;
+      z-index: 55;
+      display: flex; gap: 8px; justify-content: flex-end;
+      animation: rail-in var(--motion) var(--ease);
+    }
+    .dock-btn {
+      border: 0; border-radius: var(--radius); min-height: 52px; padding: 0 22px;
+      font-weight: 800; font-size: 16px;
+    }
+    .dock-btn.cook { background: linear-gradient(135deg, #1890ff, #40a9ff); color: #fff; }
+    .dock-btn.print { background: linear-gradient(135deg, #FF8C00, #FF6600); color: #fff; }
+
+    /* Settings */
+    .s-body { padding: var(--space); display: flex; flex-direction: column; gap: var(--space); }
+    .mega {
+      background: var(--ops-surface); border-radius: var(--radius);
+      border: var(--card-border); box-shadow: var(--card-shadow); padding: var(--pad);
+    }
+    .mega h2 { margin: 0 0 12px; font-size: 16px; }
+    .s-grid {
+      display: grid; gap: var(--space);
+      grid-template-columns: 1fr 1fr;
+    }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 12px; font-weight: 700; color: var(--ops-muted); margin-bottom: 4px; }
+    .field input, .field .fake {
+      width: 100%; border: 1px solid var(--ops-line); border-radius: var(--control-radius);
+      padding: 10px 12px; font-size: 14px; background: var(--ops-surface); color: var(--ops-ink);
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      border: 1px solid var(--ops-line); border-radius: var(--control-radius); padding: 6px 12px;
+      font-size: 13px; font-weight: 600; background: var(--ops-surface); color: var(--ops-ink);
+    }
+    .chip.is-on { background: var(--ops-accent); border-color: var(--ops-accent); color: #fff; }
+    .row-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+    .row-btns button {
+      border: 1px solid var(--ops-line); background: var(--ops-surface); color: var(--ops-ink);
+      border-radius: var(--control-radius);
+      padding: 8px 14px; min-height: 40px; font-weight: 600;
+    }
+    .row-btns .primary { background: var(--ops-accent); color: #fff; border-color: var(--ops-accent); }
+
+    .hint { font-size: 12px; color: var(--ops-muted); }
+
+    .detail-mask {
+      position: fixed; inset: 0; z-index: 90;
+      background: rgba(26, 35, 50, 0.35);
+      display: flex; align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    .detail-mask .mega { min-width: min(420px, 90vw); }
+
+    .row-btns .primary { background: linear-gradient(135deg, #1890ff, #40a9ff); color: #fff; border-color: transparent; }
+    .refresh { color: #1890ff; }
+    .badge { background: #FAAD14; color: #fff; border-radius: 4px; }
+
+    /* Prototype chrome — not part of the design */
+    .proto-bar {
+      position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%);
+      z-index: 200; background: #111827; color: #fff;
+      border-radius: 999px; padding: 6px 8px;
+      display: flex; align-items: center; gap: 6px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.35);
+      font-size: 12px; max-width: calc(100vw - 16px); flex-wrap: wrap; justify-content: center;
+    }
+    .proto-bar button {
+      background: #374151; color: #fff; border: 0; border-radius: 999px;
+      min-width: 32px; min-height: 32px; font-weight: 700;
+    }
+    .proto-bar .label { font-weight: 700; min-width: 132px; text-align: center; }
+    .seg { display: flex; background: #1f2937; border-radius: 999px; padding: 2px; }
+    .seg button { min-width: 52px; font-size: 11px; }
+    .seg button.is-on { background: #fff; color: #111; }
+    .scenes { display: flex; gap: 4px; }
+    .scenes button { font-size: 11px; min-width: auto; padding: 0 8px; }
+    .state-line {
+      position: fixed; left: 8px; bottom: 56px; z-index: 199;
+      background: rgba(17,24,39,.86); color: #d1d5db;
+      font: 11px/1.4 ui-monospace, monospace;
+      padding: 6px 8px; border-radius: 8px; max-width: 42vw;
+    }
+
+    @media (max-width: 900px) {
+      .overview { grid-template-columns: 1fr 1fr; }
+      .cta { grid-column: 1 / -1; }
+      .s-grid { grid-template-columns: 1fr; }
+      .state-line { display: none; }
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div class="screen">
+    <div class="screen-border" :class="'is-' + border" v-show="surface === 'kitchen'"></div>
+    <div class="edge-hits" v-if="surface === 'kitchen' && awaitingAck">
+      <div class="edge-hit edge-hit--n" @click="ack"></div>
+      <div class="edge-hit edge-hit--s" @click="ack"></div>
+      <div class="edge-hit edge-hit--e" @click="ack"></div>
+      <div class="edge-hit edge-hit--w" @click="ack"></div>
+    </div>
+
+    <!-- HUB -->
+    <template v-if="surface === 'hub'">
+      <header class="topbar">
+        <span class="brand">KDS 首页</span>
+        <span class="spacer"></span>
+        <span class="nav-link" @click="setSurface('settings')">设置</span>
+        <span class="nav-link">订单</span>
+        <span class="nav-link">管理</span>
+      </header>
+      <div class="hub-body">
+        <section class="overview" :class="{ 'is-alert': !connected }">
+          <div>
+            <span class="conn" :class="{ 'is-off': !connected }"><i class="dot"></i>{{ connected ? '连接健康' : '连接中断' }}</span>
+            <span class="metric-label" style="margin-top:10px">待制作</span>
+            <span class="metric-value" :class="{ 'is-dim': !connected }">{{ pendingAll }}</span>
+          </div>
+          <div class="pair">
+            <div class="box">
+              <span class="metric-label">紧急</span>
+              <span class="metric-value warn" :class="{ 'is-dim': !connected }" style="font-size:28px">{{ urgentAll }}</span>
+            </div>
+            <button class="refresh" type="button">刷新</button>
+          </div>
+          <p class="hint" style="grid-column:1/-2;margin:0">
+            {{ connected ? '本屏职责 · 全部档口' : '连接异常 · 告警优先，待做/紧急数字仅供参考' }}
+          </p>
+          <button class="cta" type="button" @click="setSurface('kitchen')">
+            <b>进入厨房</b>
+            <span>本屏职责档口集 · 全部档口</span>
+          </button>
+        </section>
+        <section class="stations">
+          <p class="section-title">职责档口 · 点卡片进入对应档口</p>
+          <div class="mosaic">
+            <article class="station-card" v-for="s in stations" :key="s.id" @click="enterStation(s.id)">
+              <h3>{{ s.name }}</h3>
+              <div class="station-stats">
+                <div :class="{ hot: stationPending(s.id) }"><b>{{ stationPending(s.id) }}</b><span>待制作</span></div>
+                <div :class="{ urg: stationUrgent(s.id) }"><b>{{ stationUrgent(s.id) }}</b><span>紧急</span></div>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+    </template>
+
+    <!-- KITCHEN -->
+    <template v-else-if="surface === 'kitchen'">
+      <header class="k-header">
+        <button class="back" type="button" @click="setSurface('hub')">← 返回</button>
+        <span class="clock">{{ clock }}</span>
+        <span class="spacer"></span>
+        <span class="conn" :class="{ 'is-off': !connected }"><i class="dot"></i>{{ connected ? '连接健康' : '连接中断' }}</span>
+      </header>
+
+      <div class="rail">
+        <div class="alert is-cancel" v-if="deliveryCancel">
+          <span>外卖已取消（含已出餐/已打票，请核对退单） {{ deliveryCancel }} 项</span>
+          <button type="button" @click="deliveryCancel = 0">知道了</button>
+        </div>
+        <div class="alert is-ack" v-if="awaitingAck">
+          <span>有新单待确认</span>
+          <button type="button" @click="ack">已知晓</button>
+        </div>
+      </div>
+
+      <div class="control">
+        <button
+          v-for="s in stations" :key="s.id" type="button"
+          class="pill" :class="{ 'is-on': currentStation === s.id }"
+          @click="currentStation = s.id"
+        >{{ s.name }} {{ stationPending(s.id) }}<template v-if="stationUrgent(s.id)"> · {{ stationUrgent(s.id) }}急</template></button>
+        <span class="stat-chip is-over"><b>{{ overtimeCount }}</b> 超时</span>
+        <span class="stat-chip"><b>{{ visibleDishes.length }}</b> 待制作</span>
+        <span class="spacer"></span>
+        <button type="button" class="sort-pill" :class="{ 'is-on': sort === 'time' }" @click="sort = 'time'">按时间</button>
+        <button type="button" class="sort-pill" :class="{ 'is-on': sort === 'qty' }" @click="sort = 'qty'">按数量</button>
+        <button type="button" class="sort-pill" :class="{ 'is-on': sort === 'urg' }" @click="sort = 'urg'">按紧急度</button>
+      </div>
+
+      <div class="canvas" @click.self="onCanvasAck">
+        <div v-if="!visibleDishes.length" class="empty" @click="onCanvasAck">暂无待制作订单</div>
+        <div class="grid" v-else>
+          <article
+            v-for="d in visibleDishes" :key="d.id"
+            class="dish"
+            :class="{ 'is-new': d.isNew && awaitingAck, 'is-over': d.overtime, 'is-sel': selected[d.id], 'is-out': leaving[d.id] }"
+            @click="inc(d)"
+          >
+            <span class="badge" v-if="d.isNew && awaitingAck">新</span>
+            <div class="dish-name">{{ d.name }}</div>
+            <div class="qty">{{ d.qty }}份 · {{ d.tables.length }}单</div>
+            <div class="wait" :class="{ 'is-over': d.overtime }">最长等待 {{ d.wait }}</div>
+            <div class="tables"><span v-for="t in d.tables" :key="t.t">{{ t.t }}桌 {{ t.q }}份</span></div>
+            <div class="actions" @click.stop>
+              <button type="button" v-if="selected[d.id]" @click="dec(d)">−</button>
+              <span class="sel-read">{{ selected[d.id] || 0 }} / {{ d.qty }}</span>
+              <button type="button" @click="detail = d">详情</button>
+            </div>
+          </article>
+        </div>
+      </div>
+
+      <div class="dock" v-if="printFailed || totalSelected">
+        <button v-if="printFailed" class="dock-btn print" type="button" @click="printFailed = 0">补打 {{ printFailed }}</button>
+        <button v-if="totalSelected" class="dock-btn cook" type="button" @click="cook">提交出餐 ({{ totalSelected }})</button>
+      </div>
+
+      <div class="detail-mask" v-if="detail" @click="detail = null">
+        <div class="mega" @click.stop>
+          <h2>{{ detail.name }}</h2>
+          <p class="hint">{{ detail.qty }}份 · 最长等待 {{ detail.wait }}</p>
+          <div class="tables"><span v-for="t in detail.tables" :key="t.t">{{ t.t }}桌 {{ t.q }}份</span></div>
+          <div class="row-btns" style="margin-top:12px">
+            <button type="button" @click="detail = null">关闭</button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- SETTINGS -->
+    <template v-else>
+      <header class="s-header">
+        <button class="back" type="button" @click="setSurface('hub')">← 返回</button>
+        <span class="brand">系统设置</span>
+        <span class="spacer"></span>
+        <span class="nav-link">订单</span>
+        <span class="nav-link">管理</span>
+      </header>
+      <div class="s-body">
+        <section class="mega">
+          <h2>连接</h2>
+          <div class="field">
+            <label>API 地址</label>
+            <input value="http://10.0.2.2:8000" readonly />
+          </div>
+          <div class="field">
+            <label>鉴权</label>
+            <div class="chips">
+              <span class="chip is-on">手动 Token</span>
+              <span class="chip">账号登录</span>
+            </div>
+          </div>
+          <p class="hint">实时连接：只读 · {{ connected ? '已连接' : '已断开' }}</p>
+          <div class="row-btns">
+            <button type="button">测试连接</button>
+            <button class="primary" type="button">保存设置</button>
+            <button type="button">店内 Wi-Fi 预设</button>
+          </div>
+        </section>
+        <div class="s-grid">
+          <section class="mega">
+            <h2>本屏</h2>
+            <div class="field">
+              <label>职责档口</label>
+              <div class="chips">
+                <span class="chip is-on" v-for="s in stations" :key="s.id">{{ s.name }}</span>
+              </div>
+            </div>
+            <div class="field">
+              <label>显示密度</label>
+              <div class="chips">
+                <span class="chip">标准</span>
+                <span class="chip is-on">紧凑</span>
+                <span class="chip">超紧凑</span>
+              </div>
+            </div>
+          </section>
+          <section class="mega">
+            <h2>设备与系统</h2>
+            <p class="hint">蓝牙打印仅 APP 可用。H5 原型为只读示意。</p>
+            <div class="field">
+              <label>打印机</label>
+              <div class="fake">未连接</div>
+            </div>
+            <p class="hint">系统信息 · 版本占位 0.0.0-proto</p>
+          </section>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <pre class="state-line">{{ stateLine }}</pre>
+  <div class="proto-bar">
+    <button type="button" @click="prevVariant">←</button>
+    <span class="label">{{ variant }} — {{ variantName }}</span>
+    <button type="button" @click="nextVariant">→</button>
+    <div class="seg">
+      <button type="button" :class="{ 'is-on': surface === 'hub' }" @click="setSurface('hub')">Hub</button>
+      <button type="button" :class="{ 'is-on': surface === 'kitchen' }" @click="setSurface('kitchen')">厨房</button>
+      <button type="button" :class="{ 'is-on': surface === 'settings' }" @click="setSurface('settings')">设置</button>
+    </div>
+    <div class="scenes">
+      <button type="button" @click="applyScene('busy')">忙碌</button>
+      <button type="button" @click="applyScene('yellow')">黄闪</button>
+      <button type="button" @click="applyScene('disconnect')">断连</button>
+      <button type="button" @click="applyScene('stacked')">取消+新单</button>
+      <button type="button" @click="applyScene('print')">补打</button>
+    </div>
+  </div>
+</div>
+<script>
+const { createApp } = Vue
+const VARIANTS = [
+  { id: 'A', name: '标准' },
+  { id: 'B', name: '紧凑' },
+  { id: 'C', name: '超紧凑' }
+]
+const STATIONS = [
+  { id: 'changfen', name: '肠粉档' },
+  { id: 'shulong', name: '熟笼档' },
+  { id: 'xibing', name: '西饼档' }
+]
+function seedDishes() {
+  return [
+    { id: 'd1', station: 'changfen', name: '鲜虾肠粉', qty: 6, wait: '22分', overtime: true, isNew: false, tables: [{ t: '12', q: 2 }, { t: '8', q: 4 }] },
+    { id: 'd2', station: 'changfen', name: '牛肉肠粉', qty: 3, wait: '4分', overtime: false, isNew: true, tables: [{ t: '3', q: 3 }] },
+    { id: 'd3', station: 'shulong', name: '叉烧包', qty: 8, wait: '16分', overtime: false, isNew: false, tables: [{ t: '5', q: 4 }, { t: '9', q: 4 }] },
+    { id: 'd4', station: 'shulong', name: '流沙包', qty: 2, wait: '7分', overtime: false, isNew: true, tables: [{ t: '1', q: 2 }] },
+    { id: 'd5', station: 'xibing', name: '蛋挞', qty: 12, wait: '3分', overtime: false, isNew: false, tables: [{ t: '外', q: 12 }] },
+    { id: 'd6', station: 'xibing', name: '拿破仑', qty: 1, wait: '19分', overtime: true, isNew: false, tables: [{ t: '7', q: 1 }] }
+  ]
+}
+function params() {
+  const u = new URL(location.href)
+  const v = (u.searchParams.get('variant') || 'A').toUpperCase()
+  const s = u.searchParams.get('surface') || 'kitchen'
+  return {
+    variant: VARIANTS.some((x) => x.id === v) ? v : 'A',
+    surface: ['hub', 'kitchen', 'settings'].includes(s) ? s : 'kitchen'
+  }
+}
+
+createApp({
+  data() {
+    const p = params()
+    return {
+      variant: p.variant,
+      surface: p.surface,
+      stations: STATIONS,
+      dishes: seedDishes(),
+      selected: {},
+      leaving: {},
+      currentStation: 'changfen',
+      sort: 'time',
+      connected: true,
+      awaitingAck: true,
+      deliveryCancel: 0,
+      printFailed: 0,
+      detail: null,
+      clock: '12:49'
+    }
+  },
+  computed: {
+    variantName() {
+      return VARIANTS.find((v) => v.id === this.variant)?.name || this.variant
+    },
+    border() {
+      if (this.awaitingAck) return 'yellow'
+      if (this.dishes.some((d) => d.qty > 0)) return 'red'
+      return 'green'
+    },
+    visibleDishes() {
+      const list = this.dishes.filter((d) => d.station === this.currentStation && d.qty > 0)
+      const copy = [...list]
+      if (this.sort === 'qty') copy.sort((a, b) => b.qty - a.qty)
+      else if (this.sort === 'urg') copy.sort((a, b) => Number(b.overtime) - Number(a.overtime))
+      return copy
+    },
+    overtimeCount() {
+      return this.visibleDishes.filter((d) => d.overtime).length
+    },
+    totalSelected() {
+      return Object.values(this.selected).reduce((n, x) => n + x, 0)
+    },
+    pendingAll() {
+      return this.dishes.reduce((n, d) => n + d.qty, 0)
+    },
+    urgentAll() {
+      return this.dishes.filter((d) => d.overtime).reduce((n, d) => n + d.qty, 0)
+    },
+    stateLine() {
+      return [
+        `variant ${this.variant} ${this.variantName}`,
+        `surface ${this.surface}`,
+        `border ${this.border}`,
+        `ack ${this.awaitingAck ? 1 : 0}`,
+        `selected ${this.totalSelected}`,
+        `print ${this.printFailed}`,
+        `cancel ${this.deliveryCancel}`,
+        `conn ${this.connected ? 'ok' : 'down'}`
+      ].join(' · ')
+    }
+  },
+  watch: {
+    variant() { this.syncUrl(); document.documentElement.dataset.variant = this.variant },
+    surface() { this.syncUrl(); document.documentElement.dataset.surface = this.surface }
+  },
+  mounted() {
+    document.documentElement.dataset.variant = this.variant
+    document.documentElement.dataset.surface = this.surface
+    window.addEventListener('keydown', this.onKey)
+  },
+  unmounted() {
+    window.removeEventListener('keydown', this.onKey)
+  },
+  methods: {
+    stationPending(id) {
+      return this.dishes.filter((d) => d.station === id).reduce((n, d) => n + d.qty, 0)
+    },
+    stationUrgent(id) {
+      return this.dishes.filter((d) => d.station === id && d.overtime).reduce((n, d) => n + d.qty, 0)
+    },
+    syncUrl() {
+      const u = new URL(location.href)
+      u.searchParams.set('variant', this.variant)
+      u.searchParams.set('surface', this.surface)
+      history.replaceState(null, '', u)
+    },
+    setSurface(s) { this.surface = s },
+    enterStation(id) {
+      this.currentStation = id
+      this.setSurface('kitchen')
+    },
+    prevVariant() {
+      const i = VARIANTS.findIndex((v) => v.id === this.variant)
+      this.variant = VARIANTS[(i + VARIANTS.length - 1) % VARIANTS.length].id
+    },
+    nextVariant() {
+      const i = VARIANTS.findIndex((v) => v.id === this.variant)
+      this.variant = VARIANTS[(i + 1) % VARIANTS.length].id
+    },
+    onKey(e) {
+      const t = e.target
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      if (e.key === 'ArrowLeft') this.prevVariant()
+      if (e.key === 'ArrowRight') this.nextVariant()
+    },
+    ack() {
+      this.awaitingAck = false
+      this.dishes = this.dishes.map((d) => ({ ...d, isNew: false }))
+    },
+    onCanvasAck() {
+      if (this.awaitingAck) this.ack()
+    },
+    inc(d) {
+      const cur = this.selected[d.id] || 0
+      if (cur >= d.qty) return
+      this.selected = { ...this.selected, [d.id]: cur + 1 }
+    },
+    dec(d) {
+      const cur = this.selected[d.id] || 0
+      if (cur <= 1) {
+        const next = { ...this.selected }
+        delete next[d.id]
+        this.selected = next
+        return
+      }
+      this.selected = { ...this.selected, [d.id]: cur - 1 }
+    },
+    cook() {
+      const sel = { ...this.selected }
+      this.leaving = { ...sel }
+      const run = () => {
+        this.dishes = this.dishes
+          .map((d) => {
+            const n = sel[d.id] || 0
+            if (!n) return d
+            return { ...d, qty: Math.max(0, d.qty - n) }
+          })
+          .filter((d) => d.qty > 0)
+        this.selected = {}
+        this.leaving = {}
+        this.printFailed = 2
+      }
+      if (this.variant === 'A') setTimeout(run, 280)
+      else run()
+    },
+    applyScene(name) {
+      this.dishes = seedDishes()
+      this.selected = {}
+      this.leaving = {}
+      this.connected = true
+      this.awaitingAck = false
+      this.deliveryCancel = 0
+      this.printFailed = 0
+      this.surface = 'kitchen'
+      if (name === 'busy') return
+      if (name === 'yellow') { this.awaitingAck = true; return }
+      if (name === 'disconnect') { this.connected = false; return }
+      if (name === 'stacked') { this.awaitingAck = true; this.deliveryCancel = 2; return }
+      if (name === 'print') { this.printFailed = 2; this.selected = { d1: 2 }; return }
+    }
+  }
+}).mount('#app')
+</script>
+</body>
+</html>

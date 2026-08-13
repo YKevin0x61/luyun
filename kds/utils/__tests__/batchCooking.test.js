@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatServePreview, planBatchCookingCalls, planTablePickCookingCalls, servePreviewText } from '../batchCooking.js'
+import { formatServePreview, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds, servePreviewText } from '../batchCooking.js'
 
 function makeOrder(overrides = {}) {
   return {
@@ -270,6 +270,15 @@ describe('将出预览', () => {
     expect(formatServePreview([])).toBe('')
     expect(formatServePreview(undefined)).toBe('')
     expect(servePreviewText([makeOrder()], 0)).toBe('')
+  })
+
+  it('lists FIFO 订单行 ids for the selected 份, earliest first', () => {
+    const earlier = makeOrder({ id: 'a', table_number: '5', order_time: '2026-07-23T01:00:00.000Z' })
+    const middle = makeOrder({ id: 'b', table_number: '6', order_time: '2026-07-23T01:01:00.000Z' })
+    const later = makeOrder({ id: 'c', table_number: '14', order_time: '2026-07-23T01:02:00.000Z' })
+
+    expect(servePreviewOrderIds([later, middle, earlier], 2)).toEqual(['a', 'b'])
+    expect(servePreviewOrderIds([later, middle, earlier], 0)).toEqual([])
   })
 })
 

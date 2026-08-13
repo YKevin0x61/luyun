@@ -1,7 +1,8 @@
 /**
- * KDS 首页（运营总览）统计辅助：职责档口过滤、待做/紧急、档口卡已制作/平均制作、未映射计数。
+ * KDS 首页（运营总览）统计辅助：职责档口过滤、待做份数/紧急、档口卡已制作/平均制作、未映射计数。
  */
 
+import { isRefundOrder } from './constants.js'
 import { buildCompletedCookingStats } from './kitchenStationStats.js'
 
 /**
@@ -28,7 +29,24 @@ export function filterMergedDishesByWatched(mergedDishes, watchedStationIds) {
 }
 
 /**
- * 待制作菜品数 / 其中含紧急的菜品数（按 mergedDishes 行计，非份数）。
+ * 待出餐剩余份数（无 quantity 时按 1 份；扣已出 served_quantity）。
+ * 退菜行不计入，与厨房控制台 isPendingCookOrder 一致。
+ * @param {Array<{ dish_status?: string, quantity?: number, served_quantity?: number, servedQuantity?: number }>|undefined|null} orders
+ * @param {string} pendingStatus
+ */
+function pendingPortions(orders, pendingStatus) {
+  let total = 0
+  for (const order of orders || []) {
+    if (!order || order.dish_status !== pendingStatus || isRefundOrder(order)) continue
+    const quantity = Number(order.quantity) || 1
+    const served = Number(order.served_quantity ?? order.servedQuantity) || 0
+    total += Math.max(0, quantity - served)
+  }
+  return total
+}
+
+/**
+ * 待制作份数 / 其中含紧急的菜品数（份数按待出餐订单行剩余量计）。
  * @param {Array<{ orders?: Array<{ dish_status?: string }>, urgentCount?: number }>} mergedDishes
  * @param {string} pendingStatus
  */
@@ -36,9 +54,9 @@ export function countPendingAndUrgent(mergedDishes, pendingStatus) {
   let total = 0
   let urgent = 0
   for (const dish of mergedDishes || []) {
-    const hasPending = (dish.orders || []).some((o) => o && o.dish_status === pendingStatus)
-    if (!hasPending) continue
-    total += 1
+    const portions = pendingPortions(dish.orders, pendingStatus)
+    if (portions <= 0) continue
+    total += portions
     if (dish.urgentCount > 0) urgent += 1
   }
   return { total, urgent }
@@ -90,9 +108,9 @@ export function buildWatchedStationStatuses(
       for (const order of orders) {
         if (order) stationOrders.push(order)
       }
-      const hasPending = orders.some((o) => o && o.dish_status === pendingStatus)
-      if (!hasPending) continue
-      pendingCount += 1
+      const portions = pendingPortions(orders, pendingStatus)
+      if (portions <= 0) continue
+      pendingCount += portions
       if (dish.urgentCount > 0) urgentCount += 1
     }
     const cooking = buildCompletedCookingStats(stationOrders)

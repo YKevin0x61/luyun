@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "prototype:kds-ops": "bash prototype/serve.sh",
+    "prototype:kitchen-console": "bash pages/kitchen/serve-ui-prototype.sh"
   },
   "dependencies": {
     "pinia": "2.1.7",

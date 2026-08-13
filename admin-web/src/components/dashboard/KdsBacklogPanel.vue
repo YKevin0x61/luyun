@@ -52,7 +52,7 @@ function loadLabel(pending) {
           ></div>
         </div>
         <span class="kds-backlog-pending" :class="loadClass(item.load_level)">{{ item.pending }}</span>
-        <span class="kds-backlog-wait">最老 {{ item.oldest_wait_minutes ?? 0 }} 分</span>
+        <span class="kds-backlog-wait">最久 {{ item.oldest_wait_minutes ?? 0 }} 分</span>
       </div>
     </div>
   </div>

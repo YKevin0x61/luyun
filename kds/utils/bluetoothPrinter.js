@@ -3,6 +3,7 @@
  */
 
 import { PrinterSettingsManager } from './storage.js'
+import { canWarmupPrinter, createConnectGate } from './printerConnectGate.js'
 
 // #ifdef APP-PLUS
 import {
@@ -727,7 +728,9 @@ export async function connectPrinter(address, deviceName = '') {
   })
 }
 
-export async function ensurePrinterConnected() {
+const ensureConnectedGate = createConnectGate()
+
+async function ensurePrinterConnectedOnce() {
   if (useAndroidPrinterBridge()) {
     if (isPrinterConnectedViaAndroid()) {
       return true
@@ -756,6 +759,30 @@ export async function ensurePrinterConnected() {
   }
 
   return connectPrinter(settings.deviceAddress, settings.deviceName)
+}
+
+export async function ensurePrinterConnected() {
+  return ensureConnectedGate.run(ensurePrinterConnectedOnce)
+}
+
+/**
+ * Open the saved printer in the background so the first ticket after a
+ * successful 出餐 does not wait on Bluetooth SPP connect. Errors are swallowed:
+ * the print queue still connects (and retries) when a job actually runs.
+ */
+export function warmupPrinter() {
+  const settings = PrinterSettingsManager.getPrinterSettings()
+  if (!canWarmupPrinter({
+    platformSupported: isPrinterPlatformSupported(),
+    printEnabled: PrinterSettingsManager.isPrintEnabled(),
+    deviceAddress: settings.deviceAddress
+  })) {
+    return Promise.resolve()
+  }
+
+  return ensurePrinterConnected().catch((error) => {
+    console.warn('[蓝牙打印] 预连接失败:', error?.message || error)
+  })
 }
 
 export function disconnectPrinter() {

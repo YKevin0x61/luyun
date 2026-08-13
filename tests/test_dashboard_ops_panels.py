@@ -119,9 +119,10 @@ class DashboardOpsPanelsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(changfen["load_level"], "medium")
 
     async def test_get_table_live_list_returns_occupied_sorted_by_duration(self):
+        # tables.duration 单位是分钟（与 POS dinnerTime 一致）
         tables = [
-            {"table_number": "T1", "amount": 120.0, "people": 2, "duration": 1800},
-            {"table_number": "T2", "amount": 80.0, "people": 3, "duration": 3600},
+            {"table_number": "T1", "amount": 120.0, "people": 2, "duration": 30},
+            {"table_number": "T2", "amount": 80.0, "people": 3, "duration": 60},
             {"table_number": "T3", "amount": 0.0, "people": 0, "duration": 0},
         ]
         await self.db.save_table_data(tables)
@@ -130,7 +131,7 @@ class DashboardOpsPanelsTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(live["total_occupied"], 2)
         self.assertEqual([row["table_number"] for row in live["tables"]], ["T2", "T1"])
-        self.assertEqual(live["tables"][0]["duration_minutes"], 60.0)
+        self.assertEqual(live["tables"][0]["duration_minutes"], 60)
         self.assertEqual(live["tables"][1]["amount"], 120.0)
 
     async def test_aggregate_kds_backlog_excludes_loumian_and_yesterday(self):

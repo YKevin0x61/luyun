@@ -1,0 +1,1097 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-variant="A">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>PROTOTYPE — 厨房控制台结构</title>
+  <!--
+    PROTOTYPE (throwaway). Not production.
+
+    Three variants of the kitchen console, switchable via ?variant=, hosted next
+    to pages/kitchen/kitchen as a standalone HTML (uni-app H5 has no trivial
+    npm-run-dev; do not wire this into the production kitchen.vue).
+
+    Question: At tablet / 厨房屏 size, which structure makes 卡上出餐
+    (tap +1 from 0 → 出餐 (n)) plus 选桌出餐 feel fast, without the chrome
+    eating the first screen of cards?
+
+    Run:  cd kds && npm run prototype:kitchen-console
+    Open: http://127.0.0.1:4178/kitchen-console.ui-prototype.html?variant=A
+  -->
+  <style>
+    :root {
+      --ink: #2c3e50;
+      --muted: #64748b;
+      --line: #e8e8e8;
+      --bg: #eef1f4;
+      --surface: #fff;
+      --accent: #1890ff;
+      --ok: #52c41a;
+      --warn: #faad14;
+      --danger: #ff4d4f;
+      --header: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
+      --hit: 44px;
+      --motion: 150ms;
+      --border-w: 8px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: #1e2937; color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Noto Sans SC", sans-serif; }
+    button { font-family: inherit; cursor: pointer; }
+    #app { min-height: 100%; display: flex; flex-direction: column; padding-bottom: 72px; }
+
+    .proto-q {
+      flex-shrink: 0; background: #0f172a; color: #e2e8f0; padding: 8px 14px 6px;
+      font-size: 13px; line-height: 1.45;
+    }
+    .proto-q b { color: #fde68a; }
+    .proto-q .note { color: #94a3b8; font-size: 12px; }
+
+    .work {
+      flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 280px;
+      gap: 12px; padding: 10px 12px 0; min-height: 0; align-items: start;
+    }
+    .stage-wrap { min-width: 0; width: 100%; overflow: hidden; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+    .stage-meta { color: #94a3b8; font-size: 11px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .stage-meta button {
+      background: #334155; color: #e2e8f0; border: 0; border-radius: 999px;
+      padding: 4px 10px; font-size: 11px; min-height: 28px;
+    }
+    .stage-meta button.is-on { background: #fde68a; color: #111; font-weight: 700; }
+
+    .stage-clip { width: 1280px; height: 800px; position: relative; }
+    .stage {
+      width: 1280px; height: 800px; background: var(--bg); color: var(--ink);
+      position: absolute; top: 0; left: 0; overflow: hidden; transform-origin: top left;
+      box-shadow: 0 12px 40px rgba(0,0,0,.45); border-radius: 4px;
+    }
+    .stage.is-fill { position: relative; width: 100%; height: min(80vh, 900px); }
+
+    /* Screen border: 3 states only. No overtime 4th. */
+    .screen-border {
+      position: absolute; inset: 0; z-index: 80; pointer-events: none;
+      border: var(--border-w) solid var(--ok);
+    }
+    .screen-border.is-yellow {
+      border-color: var(--warn);
+      animation: yellow-flash 0.9s ease-in-out infinite;
+    }
+    .screen-border.is-red { border-color: var(--danger); animation: none; }
+    .screen-border.is-green { border-color: var(--ok); animation: none; }
+    @keyframes yellow-flash {
+      0%, 100% { border-color: #faad14; opacity: 1; }
+      50% { border-color: #ffd666; opacity: .55; }
+    }
+
+    .kitchen, .hub { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; }
+
+    /* —— shared kitchen bits that variants restyle —— */
+    .hdr {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--header); color: #fff; flex-shrink: 0; min-height: 44px; padding: 0 10px;
+    }
+    .hdr button, .hdr .clock {
+      background: rgba(255,255,255,.18); color: #fff; border: 1px solid rgba(255,255,255,.3);
+      border-radius: 999px; min-height: var(--hit); min-width: var(--hit);
+      padding: 0 12px; font-weight: 700; font-size: 14px;
+    }
+    .hdr .clock { font-variant-numeric: tabular-nums; padding: 0 14px; background: linear-gradient(135deg, #ff8c00, #ff6600); }
+    .hdr .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+    .hdr .dot.is-off { background: var(--danger); }
+    .hdr .refresh { min-width: var(--hit); padding: 0; font-size: 16px; }
+    .hdr-spacer { flex: 1; }
+
+    .banners { flex-shrink: 0; }
+    .banner {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 6px 12px; color: #fff; font-size: 13px; font-weight: 700; min-height: 36px;
+    }
+    .banner button {
+      background: rgba(255,255,255,.25); color: #fff; border: 1px solid rgba(255,255,255,.5);
+      border-radius: 12px; padding: 4px 12px; font-weight: 700; min-height: 32px;
+    }
+    .banner.is-dc { background: #cf1322; }
+    .banner.is-print { background: #ff4d4f; }
+    .banner.is-cancel { background: #d46b08; }
+    .banner.is-ack { background: #d48806; }
+
+    .tabs {
+      display: flex; gap: 6px; padding: 6px 8px; background: #fff; flex-shrink: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .tab {
+      border: 2px solid #cbd5e1; background: #fff; border-radius: 8px;
+      padding: 4px 10px; min-height: 40px; font-weight: 700; font-size: 13px;
+    }
+    .tab.is-on { color: #fff; }
+    .tab small { font-weight: 600; opacity: .85; margin-left: 4px; }
+    .tab .urg { color: #ff4d4f; margin-left: 4px; }
+
+    .preview {
+      font-size: 12px; font-weight: 700; color: #135200; background: #f6ffed;
+      border: 1px solid #b7eb8f; border-radius: 4px; padding: 2px 6px;
+      pointer-events: none; user-select: none;
+    }
+    .pick-btn {
+      border: 1px solid var(--accent); background: #e6f7ff; color: #0958d9;
+      font-weight: 800; font-size: 13px; border-radius: 8px;
+      min-height: var(--hit); min-width: var(--hit); padding: 0 10px;
+    }
+    .minus {
+      border: 1px solid #ffa39e; background: #fff2f0; color: #cf1322;
+      font-weight: 800; min-width: var(--hit); min-height: var(--hit); border-radius: 8px;
+    }
+    .qty-read { font-variant-numeric: tabular-nums; font-weight: 800; font-size: 15px; }
+    .qty-read.is-on { color: var(--ok); }
+
+    .serve-btn {
+      border: 0; background: linear-gradient(135deg, #1890ff, #40a9ff); color: #fff;
+      font-weight: 800; font-size: 18px; min-height: 52px; border-radius: 12px; padding: 0 28px;
+    }
+    .new-badge {
+      position: absolute; top: 0; right: 0; background: #faad14; color: #fff;
+      font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 0 8px 0 8px;
+    }
+
+    /* ========== A: card grid, 选桌 footer chip, stacked banners, inline header ========== */
+    .a-body { flex: 1; overflow: auto; padding: 8px; min-height: 0; }
+    .a-grid { display: grid; gap: 8px; align-content: start; }
+    .a-grid.d-standard { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+    .a-grid.d-compact { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; }
+    .a-grid.d-ultra { grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 4px; }
+    .a-card {
+      position: relative; background: #fff; border: 3px solid var(--accent); border-radius: 8px;
+      padding: 8px; min-height: 168px; display: flex; flex-direction: column; gap: 6px;
+      cursor: pointer; touch-action: manipulation; user-select: none;
+    }
+    .a-card.is-over { border-color: var(--danger); background: linear-gradient(135deg, #fff2f0, #fff); }
+    .a-card.is-sel { border-color: var(--ok); }
+    .a-card.is-new { box-shadow: 0 0 0 3px rgba(250,173,20,.55), 0 0 18px rgba(250,173,20,.4); }
+    .a-name { font-size: 20px; font-weight: 800; line-height: 1.15; padding-right: 28px; }
+    .a-meta { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .a-qty { font-size: 22px; font-weight: 800; color: var(--accent); }
+    .a-wait { font-size: 13px; font-weight: 700; }
+    .a-wait.is-over { color: var(--danger); }
+    .a-tables { display: flex; flex-wrap: wrap; gap: 4px; }
+    .a-tables span { background: #f5f7fa; border-radius: 4px; padding: 1px 6px; font-size: 11px; color: var(--muted); }
+    .a-grid.d-ultra .a-tables { display: none; }
+    .a-foot { margin-top: auto; display: flex; align-items: center; gap: 6px; }
+    .a-foot .preview { flex: 1; min-width: 0; }
+    .a-serve {
+      position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+      z-index: 40; width: min(420px, 92%);
+    }
+    .a-serve .serve-btn { width: 100%; }
+
+    /* ========== B: dense list, corner 选桌, overlay header, collapsing alerts (CHALLENGE) ========== */
+    .b-kitchen { position: relative; }
+    .b-hdr {
+      position: absolute; top: 0; left: 0; right: 0; z-index: 30;
+      background: linear-gradient(135deg, rgba(74,144,226,.92), rgba(53,122,189,.92));
+      backdrop-filter: blur(8px); min-height: 40px;
+    }
+    .b-alerts {
+      position: absolute; top: 40px; left: 0; right: 0; z-index: 29;
+      background: rgba(15,23,42,.88); color: #fff;
+    }
+    .b-slot {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 6px 12px; min-height: 36px; font-size: 13px; font-weight: 700; width: 100%;
+      background: transparent; color: #fff; border: 0;
+    }
+    .b-challenge { font-size: 10px; font-weight: 600; color: #fde68a; padding: 0 12px 4px; }
+    .b-body { flex: 1; overflow: auto; padding: 40px 0 72px; min-height: 0; background: #f4f6f8; }
+    .b-body.has-slot { padding-top: 76px; }
+    .b-body.has-slot.is-open { padding-top: 220px; }
+    .b-row {
+      position: relative; display: grid; grid-template-columns: 1fr auto auto auto;
+      gap: 8px; align-items: center; background: #fff; border-bottom: 1px solid var(--line);
+      padding: 8px 12px; min-height: 64px; cursor: pointer; touch-action: manipulation;
+    }
+    .b-row.d-compact { min-height: 52px; padding: 4px 10px; }
+    .b-row.d-ultra { min-height: 44px; padding: 2px 8px; }
+    .b-row.is-over { background: #fff2f0; box-shadow: inset 4px 0 0 var(--danger); }
+    .b-row.is-sel { background: #f6ffed; box-shadow: inset 4px 0 0 var(--ok); }
+    .b-row.is-new { box-shadow: inset 4px 0 0 #faad14, 0 0 0 2px rgba(250,173,20,.45); }
+    .b-name { font-size: 18px; font-weight: 800; }
+    .b-sub { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .b-row .pick-btn { grid-column: 4; grid-row: 1 / span 2; }
+    .b-row .qty-read { min-width: 48px; text-align: right; }
+    .b-serve {
+      position: absolute; left: 0; right: 0; bottom: 0; z-index: 40;
+      padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+      background: #0f172a;
+    }
+    .b-serve .serve-btn { width: 100%; border-radius: 0; }
+
+    /* ========== C: one-bite, long-press 选桌, stacked flat banners, thin inline header ========== */
+    .c-hdr { min-height: 36px; padding: 0 8px; }
+    .c-hdr button, .c-hdr .clock { min-height: 36px; min-width: 36px; font-size: 13px; }
+    .c-body { flex: 1; overflow-x: auto; overflow-y: hidden; display: flex; gap: 12px;
+      padding: 10px 16px 80px; scroll-snap-type: x mandatory; min-height: 0; }
+    .c-card {
+      scroll-snap-align: center; flex: 0 0 min(92%, 720px); max-width: 720px;
+      background: #fff; border: 4px solid var(--accent); border-radius: 12px;
+      padding: 20px; display: flex; flex-direction: column; gap: 12px;
+      cursor: pointer; position: relative; touch-action: manipulation; user-select: none;
+    }
+    .c-body.d-compact .c-card { flex-basis: min(46%, 520px); }
+    .c-body.d-ultra .c-card { flex-basis: min(32%, 400px); padding: 12px; }
+    .c-card.is-over { border-color: var(--danger); background: linear-gradient(135deg, #fff2f0, #fff); }
+    .c-card.is-sel { border-color: var(--ok); }
+    .c-card.is-new { box-shadow: 0 0 0 4px rgba(250,173,20,.55), 0 0 28px rgba(250,173,20,.4); }
+    .c-name { font-size: 42px; font-weight: 900; line-height: 1.1; }
+    .c-body.d-ultra .c-name { font-size: 28px; }
+    .c-qty { font-size: 36px; font-weight: 900; color: var(--accent); }
+    .c-wait { font-size: 20px; font-weight: 700; }
+    .c-wait.is-over { color: var(--danger); }
+    .c-hint { font-size: 13px; color: var(--muted); }
+    .c-actions { display: flex; align-items: center; gap: 10px; margin-top: auto; }
+    .c-actions .preview { font-size: 16px; padding: 6px 10px; }
+    .c-serve {
+      position: absolute; left: 16px; right: 16px; bottom: 12px; z-index: 40;
+    }
+    .c-serve .serve-btn { width: 100%; min-height: 56px; font-size: 22px; }
+
+    /* Hub — same across variants; only secondary stats added */
+    .hub { background: #eef1f4; }
+    .hub-top { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: #fff; }
+    .hub-brand { font-weight: 800; font-size: 18px; }
+    .hub-body { display: grid; grid-template-columns: 280px 1fr; gap: 12px; padding: 12px; flex: 1; min-height: 0; }
+    .hub-overview { background: #fff; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+    .hub-metric { font-size: 42px; font-weight: 900; }
+    .hub-cta { margin-top: auto; background: var(--accent); color: #fff; border: 0; border-radius: 10px; min-height: 52px; font-weight: 800; }
+    .mosaic { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; align-content: start; }
+    .st-card { background: #fff; border-radius: 12px; padding: 12px; cursor: pointer; border: 1px solid var(--line); }
+    .st-head { display: flex; align-items: center; gap: 8px; font-weight: 800; margin-bottom: 8px; }
+    .st-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .st-pri { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .st-stat { text-align: center; }
+    .st-stat b { display: block; font-size: 28px; }
+    .st-stat span { font-size: 12px; color: var(--muted); }
+    .st-stat.is-hot b { color: var(--accent); }
+    .st-stat.is-urg b { color: var(--danger); }
+    .st-sec { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+    .st-sec .st-stat b { font-size: 14px; color: var(--muted); font-weight: 700; }
+    .st-sec .st-stat span { font-size: 11px; }
+
+    /* 选桌 sheet */
+    .sheet-mask {
+      position: absolute; inset: 0; z-index: 70; background: rgba(15,23,42,.45);
+      display: flex; align-items: flex-end; justify-content: center;
+    }
+    .sheet {
+      background: #fff; width: min(560px, 100%); max-height: 86%;
+      border-radius: 12px 12px 0 0; display: flex; flex-direction: column;
+    }
+    .sheet h3 { margin: 0; padding: 12px 16px; font-size: 16px; border-bottom: 1px solid var(--line); }
+    .sheet-list { overflow: auto; padding: 8px 12px; }
+    .line {
+      display: grid; grid-template-columns: 28px 1fr auto auto; gap: 8px; align-items: center;
+      padding: 10px 4px; border-bottom: 1px solid var(--line); min-height: 48px; cursor: pointer;
+    }
+    .line input { width: 18px; height: 18px; }
+    .sheet-foot { padding: 10px 12px 14px; display: flex; gap: 8px; }
+    .sheet-foot .serve-btn { flex: 1; }
+    .ghost { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+
+    .toast {
+      position: absolute; left: 50%; top: 48%; transform: translate(-50%, -50%);
+      z-index: 90; background: #111827; color: #fff; padding: 12px 18px;
+      border-radius: 8px; font-weight: 700; pointer-events: none;
+    }
+    .empty { padding: 48px; text-align: center; color: var(--ok); font-weight: 800; font-size: 20px; }
+
+    /* Prototype chrome — not the design */
+    .state-panel {
+      background: #0f172a; color: #cbd5e1; border-radius: 8px; padding: 10px;
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      max-height: calc(800px + 28px); overflow: auto;
+    }
+    .state-panel h4 { margin: 0 0 6px; color: #fde68a; font-size: 11px; letter-spacing: .04em; }
+    .state-panel .k { color: #94a3b8; }
+    .state-panel .v { color: #e2e8f0; }
+    .rig { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+    .rig button {
+      background: #334155; color: #e2e8f0; border: 0; border-radius: 6px;
+      padding: 4px 8px; font-size: 11px; min-height: 28px;
+    }
+    .rig button.is-on { background: #fde68a; color: #111; font-weight: 700; }
+
+    .proto-bar {
+      position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%);
+      z-index: 200; background: #111827; color: #fff; border-radius: 999px;
+      padding: 6px 8px; display: flex; align-items: center; gap: 6px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.4); font-size: 12px;
+    }
+    .proto-bar button {
+      background: #374151; color: #fff; border: 0; border-radius: 999px;
+      min-width: 36px; min-height: 36px; font-weight: 700;
+    }
+    .proto-bar .label { font-weight: 700; min-width: 220px; text-align: center; }
+
+    @media (max-width: 1100px) {
+      .work { grid-template-columns: 1fr; }
+      .state-panel { max-height: 240px; }
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div class="proto-q">
+    <div><b>PROTOTYPE · 扔掉。</b> 问题：厨房屏尺寸下，哪种结构让「卡上出餐（点一下 +1）+ 选桌出餐」更快，且顶栏/告警不要把第一屏卡片吃掉？</div>
+    <div class="note">A 网格卡脚选桌 · B 密列角上选桌 + 告警折叠（挑战已锁的叠条）· C 一口大卡、长按选桌。出餐文案一律「出餐 (n)」。无第四边框态。</div>
+  </div>
+
+  <div class="work">
+    <div class="stage-wrap">
+      <div class="stage-meta">
+        <span>{{ stageLabel }}</span>
+        <button :class="{ 'is-on': !fill }" @click="fill = false">厨房屏 1280×800</button>
+        <button :class="{ 'is-on': fill }" @click="fill = true">铺满</button>
+        <button :class="{ 'is-on': surface === 'kitchen' }" @click="surface = 'kitchen'">厨房控制台</button>
+        <button :class="{ 'is-on': surface === 'hub' }" @click="surface = 'hub'">KDS 首页（马赛克次级统计）</button>
+      </div>
+
+      <div class="stage-clip" :style="clipStyle">
+      <div class="stage" :class="{ 'is-fill': fill }" :style="stageStyle" ref="stageEl">
+        <div v-if="surface === 'kitchen'" class="screen-border" :class="'is-' + border"></div>
+        <div v-if="toast" class="toast">{{ toast }}</div>
+
+        <!-- HUB -->
+        <div v-if="surface === 'hub'" class="hub">
+          <div class="hub-top">
+            <span class="hub-brand">KDS 首页</span>
+            <span class="hdr-spacer"></span>
+            <span class="dot" :class="{ 'is-off': !connected }"></span>
+          </div>
+          <div class="hub-body">
+            <div class="hub-overview">
+              <div class="k" style="color:#64748b;font-size:12px;font-weight:700">本屏职责 · {{ watchedLabel }}</div>
+              <div><span style="font-size:12px;color:#64748b">待制作</span><div class="hub-metric">{{ hubTotals.pending }}</div></div>
+              <div><span style="font-size:12px;color:#64748b">紧急</span><div class="hub-metric" style="color:#ff4d4f">{{ hubTotals.urgent }}</div></div>
+              <button class="hub-cta" @click="surface = 'kitchen'">进入厨房</button>
+            </div>
+            <div class="mosaic">
+              <div v-for="st in watchedStations" :key="st.id" class="st-card" @click="enterStation(st.id)">
+                <div class="st-head">
+                  <span class="st-dot" :style="{ background: st.color }"></span>
+                  {{ st.name }}
+                </div>
+                <div class="st-pri">
+                  <div class="st-stat" :class="{ 'is-hot': st.pending > 0 }"><b>{{ st.pending }}</b><span>待制作</span></div>
+                  <div class="st-stat" :class="{ 'is-urg': st.urgent > 0 }"><b>{{ st.urgent }}</b><span>紧急</span></div>
+                </div>
+                <div class="st-sec">
+                  <div class="st-stat"><b>{{ st.done }}</b><span>已制作</span></div>
+                  <div class="st-stat"><b>{{ st.avg }}</b><span>平均制作</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- KITCHEN A -->
+        <div v-else-if="variant === 'A'" class="kitchen">
+          <div class="hdr">
+            <button @click="surface = 'hub'">← 返回</button>
+            <span class="clock">{{ clock }}</span>
+            <span class="hdr-spacer"></span>
+            <span class="dot" :class="{ 'is-off': !connected }"></span>
+            <button class="refresh" @click="bumpRefresh">↻</button>
+          </div>
+          <div class="banners">
+            <div v-if="disconnect" class="banner is-dc">实时连接已断开，正在重连…</div>
+            <div v-if="printFail > 0" class="banner is-print">
+              <span>打印失败 {{ printFail }} 张小票（出餐已保存）</span>
+              <button @click="printFail = 0">补打</button>
+            </div>
+            <div v-if="deliveryCancel > 0" class="banner is-cancel">
+              <span>外卖订单已取消 {{ deliveryCancel }} 项：12桌 鲜虾肠粉</span>
+              <button @click="deliveryCancel = 0">知道了</button>
+            </div>
+            <div v-if="awaitingAck" class="banner is-ack">
+              <span>有新单待确认，请查看后点击「已知晓」</span>
+              <button @click="ack">已知晓</button>
+            </div>
+          </div>
+          <div v-if="watchedMode === 'multi'" class="tabs">
+            <button v-for="st in watchedStations" :key="st.id" class="tab"
+              :class="{ 'is-on': currentStation === st.id }"
+              :style="currentStation === st.id ? { background: st.color, borderColor: st.color } : { borderColor: st.color }"
+              @click="currentStation = st.id">
+              {{ st.name }} <small>{{ st.pending }}单</small>
+              <span v-if="st.urgent" class="urg">{{ st.urgent }}急</span>
+            </button>
+          </div>
+          <div class="a-body" @click.self="ackFromBlank">
+            <div v-if="!visibleCards.length" class="empty">暂无待制作订单</div>
+            <div v-else class="a-grid" :class="'d-' + density">
+              <div v-for="card in visibleCards" :key="card.id"
+                class="a-card"
+                :class="{ 'is-over': card.overtime, 'is-sel': sel(card) > 0, 'is-new': card.isNew }"
+                @click="inc(card)">
+                <span v-if="card.isNew" class="new-badge">新</span>
+                <div class="a-meta">
+                  <div class="a-name">{{ card.dishName }}</div>
+                  <div class="a-qty">{{ card.lines.length }}份</div>
+                </div>
+                <div class="a-wait" :class="{ 'is-over': card.overtime }">最长等待 {{ waitLabel(card) }}</div>
+                <div class="a-tables">
+                  <span v-for="line in card.lines" :key="line.id">{{ line.table }}桌</span>
+                </div>
+                <div class="preview" v-if="sel(card) > 0">将出 {{ previewText(card) }}</div>
+                <div class="a-foot" @click.stop>
+                  <button v-if="sel(card) > 0" class="minus" @click="dec(card)">−</button>
+                  <span class="qty-read" :class="{ 'is-on': sel(card) > 0 }">{{ sel(card) }} / {{ card.lines.length }}</span>
+                  <span class="hdr-spacer"></span>
+                  <button class="pick-btn" @click="openPick(card)">选桌</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-if="totalSelected > 0" class="a-serve">
+            <button class="serve-btn" @click="serveCardPath">出餐 ({{ totalSelected }})</button>
+          </div>
+        </div>
+
+        <!-- KITCHEN B -->
+        <div v-else-if="variant === 'B'" class="kitchen b-kitchen">
+          <div class="hdr b-hdr">
+            <button @click="surface = 'hub'">← 返回</button>
+            <span class="clock">{{ clock }}</span>
+            <span class="hdr-spacer"></span>
+            <span class="dot" :class="{ 'is-off': !connected }"></span>
+            <button class="refresh" @click="bumpRefresh">↻</button>
+          </div>
+          <div v-if="bannerCount" class="b-alerts">
+            <button class="b-slot" @click="alertsOpen = !alertsOpen">
+              <span>{{ bannerCount }} 条告警{{ alertsOpen ? ' ▴' : ' ▾' }} · {{ bannerSummary }}</span>
+              <span>{{ alertsOpen ? '收起' : '展开' }}</span>
+            </button>
+            <div class="b-challenge">挑战 grilling：告警仍叠条 — 本变体改成单槽折叠，只供偷结构</div>
+            <div v-if="alertsOpen">
+              <div v-if="disconnect" class="banner is-dc">实时连接已断开，正在重连…</div>
+              <div v-if="printFail > 0" class="banner is-print">
+                <span>打印失败 {{ printFail }} 张小票（出餐已保存）</span>
+                <button @click="printFail = 0">补打</button>
+              </div>
+              <div v-if="deliveryCancel > 0" class="banner is-cancel">
+                <span>外卖订单已取消 {{ deliveryCancel }} 项：12桌 鲜虾肠粉</span>
+                <button @click="deliveryCancel = 0">知道了</button>
+              </div>
+              <div v-if="awaitingAck" class="banner is-ack">
+                <span>有新单待确认</span>
+                <button @click="ack">已知晓</button>
+              </div>
+            </div>
+          </div>
+          <div class="b-body" :class="{ 'has-slot': bannerCount > 0, 'is-open': alertsOpen }" @click.self="ackFromBlank">
+            <div v-if="watchedMode === 'multi'" class="tabs">
+              <button v-for="st in watchedStations" :key="st.id" class="tab"
+                :class="{ 'is-on': currentStation === st.id }"
+                :style="currentStation === st.id ? { background: st.color, borderColor: st.color } : { borderColor: st.color }"
+                @click="currentStation = st.id">
+                {{ st.name }} <small>{{ st.pending }}单</small>
+                <span v-if="st.urgent" class="urg">{{ st.urgent }}急</span>
+              </button>
+            </div>
+            <div v-if="!visibleCards.length" class="empty">暂无待制作订单</div>
+            <div v-for="card in visibleCards" :key="card.id"
+              class="b-row" :class="['d-' + density, { 'is-over': card.overtime, 'is-sel': sel(card) > 0, 'is-new': card.isNew }]"
+              @click="inc(card)">
+              <div>
+                <div class="b-name">{{ card.isNew ? '新 · ' : '' }}{{ card.dishName }}</div>
+                <div class="b-sub">
+                  <span>{{ card.lines.length }}份</span>
+                  <span class="a-wait" :class="{ 'is-over': card.overtime }">{{ waitLabel(card) }}</span>
+                  <span v-if="sel(card) > 0" class="preview">将出 {{ previewText(card) }}</span>
+                </div>
+              </div>
+              <button v-if="sel(card) > 0" class="minus" @click.stop="dec(card)">−</button>
+              <span class="qty-read" :class="{ 'is-on': sel(card) > 0 }">{{ sel(card) }}/{{ card.lines.length }}</span>
+              <button class="pick-btn" @click.stop="openPick(card)">选桌</button>
+            </div>
+          </div>
+          <div v-if="totalSelected > 0" class="b-serve">
+            <button class="serve-btn" @click="serveCardPath">出餐 ({{ totalSelected }})</button>
+          </div>
+        </div>
+
+        <!-- KITCHEN C -->
+        <div v-else class="kitchen">
+          <div class="hdr c-hdr">
+            <button @click="surface = 'hub'">← 返回</button>
+            <span class="clock">{{ clock }}</span>
+            <span class="hdr-spacer"></span>
+            <span class="dot" :class="{ 'is-off': !connected }"></span>
+            <button class="refresh" @click="bumpRefresh">↻</button>
+          </div>
+          <div class="banners">
+            <div v-if="disconnect" class="banner is-dc">实时连接已断开，正在重连…</div>
+            <div v-if="printFail > 0" class="banner is-print">
+              <span>打印失败 {{ printFail }} 张</span>
+              <button @click="printFail = 0">补打</button>
+            </div>
+            <div v-if="deliveryCancel > 0" class="banner is-cancel">
+              <span>外卖已取消 {{ deliveryCancel }} 项</span>
+              <button @click="deliveryCancel = 0">知道了</button>
+            </div>
+            <div v-if="awaitingAck" class="banner is-ack">
+              <span>有新单待确认</span>
+              <button @click="ack">已知晓</button>
+            </div>
+          </div>
+          <div v-if="watchedMode === 'multi'" class="tabs">
+            <button v-for="st in watchedStations" :key="st.id" class="tab"
+              :class="{ 'is-on': currentStation === st.id }"
+              :style="currentStation === st.id ? { background: st.color, borderColor: st.color } : { borderColor: st.color }"
+              @click="currentStation = st.id">
+              {{ st.name }} <small>{{ st.pending }}</small>
+            </button>
+          </div>
+          <div class="c-body" :class="'d-' + density" @click.self="ackFromBlank">
+            <div v-if="!visibleCards.length" class="empty">暂无待制作订单</div>
+            <div v-for="card in visibleCards" :key="card.id"
+              class="c-card"
+              :class="{ 'is-over': card.overtime, 'is-sel': sel(card) > 0, 'is-new': card.isNew }"
+              @pointerdown="pressStart(card, $event)"
+              @pointerup="pressEnd(card, $event)"
+              @pointercancel="pressCancel"
+              @contextmenu.prevent>
+              <span v-if="card.isNew" class="new-badge">新</span>
+              <div class="c-name">{{ card.dishName }}</div>
+              <div class="c-qty">{{ card.lines.length }} 份</div>
+              <div class="c-wait" :class="{ 'is-over': card.overtime }">最长等待 {{ waitLabel(card) }}</div>
+              <div class="c-hint">点卡 +1 · 长按打开选桌 · 同桌两份是两行</div>
+              <div class="preview" v-if="sel(card) > 0">将出 {{ previewText(card) }}</div>
+              <div class="c-actions" @pointerdown.stop @pointerup.stop>
+                <button v-if="sel(card) > 0" class="minus" @click="dec(card)">−</button>
+                <span class="qty-read" :class="{ 'is-on': sel(card) > 0 }">{{ sel(card) }} / {{ card.lines.length }}</span>
+                <span class="hdr-spacer"></span>
+                <button class="pick-btn" @click="openPick(card)">选桌</button>
+              </div>
+            </div>
+          </div>
+          <div v-if="totalSelected > 0" class="c-serve">
+            <button class="serve-btn" @click="serveCardPath">出餐 ({{ totalSelected }})</button>
+          </div>
+        </div>
+
+        <!-- 选桌出餐 sheet -->
+        <div v-if="pick && pickCard" class="sheet-mask" @click.self="closePick">
+          <div class="sheet">
+            <h3>选桌出餐 · {{ pickCard.dishName }} · 一行一份</h3>
+            <div class="sheet-list">
+              <label v-for="line in pickCard.lines" :key="line.id" class="line">
+                <input type="checkbox" :checked="!!pick.checked[line.id]" @change="toggleLine(line.id)" />
+                <span>{{ line.table }}桌</span>
+                <span>{{ hhmm(line.ts) }}</span>
+                <span>{{ waitOf(line.ts) }}</span>
+              </label>
+            </div>
+            <div class="sheet-foot">
+              <button class="serve-btn ghost" @click="closePick">取消</button>
+              <button class="serve-btn" :disabled="pickCount === 0" @click="servePickPath">出餐 ({{ pickCount }})</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      </div>
+    </div>
+
+    <aside class="state-panel">
+      <h4>UI STATE（切变体后仍在）</h4>
+      <div><span class="k">variant</span> <span class="v">{{ variant }} — {{ variantName }}</span></div>
+      <div><span class="k">surface</span> <span class="v">{{ surface }}</span></div>
+      <div><span class="k">mutex</span> <span class="v">{{ pick ? '选桌出餐' : (totalSelected ? '卡上出餐' : '无选中') }}</span></div>
+      <div><span class="k">selected</span> <span class="v">{{ selectedDump }}</span></div>
+      <div><span class="k">将出预览</span> <span class="v">{{ allPreviews || '—' }}</span></div>
+      <div><span class="k">选桌勾选</span> <span class="v">{{ pickDump }}</span></div>
+      <div><span class="k">border</span> <span class="v">{{ border }} {{ border === 'yellow' ? '黄闪' : border === 'red' ? '红' : '绿' }}（无超时第四态）</span></div>
+      <div><span class="k">banners</span> <span class="v">{{ bannerList }}</span></div>
+      <div><span class="k">density</span> <span class="v">{{ density }} · 三档都留 选桌 + 将出预览</span></div>
+      <div><span class="k">watched</span> <span class="v">{{ watchedMode }} · tabs {{ watchedMode === 'single' ? '整条控制带已撤' : '仅档口 Tab' }}</span></div>
+      <div><span class="k">nextServe</span> <span class="v">{{ nextServe }}</span></div>
+
+      <h4 style="margin-top:12px">场景（桩，非设计）</h4>
+      <div class="rig">
+        <button @click="scene('busy')">赶餐红</button>
+        <button @click="scene('yellow')">黄闪新单</button>
+        <button @click="scene('stack')">叠告警</button>
+        <button @click="scene('idle')">空闲绿</button>
+        <button @click="scene('sameTable')">同桌两份</button>
+      </div>
+      <div class="rig">
+        <button :class="{ 'is-on': watchedMode === 'single' }" @click="watchedMode = 'single'">单档口</button>
+        <button :class="{ 'is-on': watchedMode === 'multi' }" @click="watchedMode = 'multi'">多档口</button>
+      </div>
+      <div class="rig">
+        <button v-for="d in ['standard','compact','ultra']" :key="d"
+          :class="{ 'is-on': density === d }" @click="density = d">{{ densityLabel(d) }}</button>
+      </div>
+      <div class="rig">
+        <button :class="{ 'is-on': nextServe === 'ok' }" @click="nextServe = 'ok'">下次成功</button>
+        <button :class="{ 'is-on': nextServe === 'fail' }" @click="nextServe = 'fail'">下次失败 toast</button>
+        <button :class="{ 'is-on': nextServe === 'partial' }" @click="nextServe = 'partial'">下次部分失败</button>
+        <button :class="{ 'is-on': printAfterServe }" @click="printAfterServe = !printAfterServe">出餐后补打条</button>
+      </div>
+    </aside>
+  </div>
+
+  <div class="proto-bar">
+    <button @click="prevVariant" aria-label="上一变体">←</button>
+    <div class="label">{{ variant }} — {{ variantName }}</div>
+    <button @click="nextVariant" aria-label="下一变体">→</button>
+  </div>
+</div>
+
+<script src="https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js"></script>
+<script>
+/* PROTOTYPE — throwaway. Stub mutations + mock tickets. */
+const VARIANTS = [
+  { id: 'A', name: '网格 · 选桌在卡脚' },
+  { id: 'B', name: '密列 · 角上选桌 · 告警折叠' },
+  { id: 'C', name: '一口大卡 · 长按选桌' }
+]
+const STATIONS = [
+  { id: 'changfen', name: '肠粉档', color: '#4ECDC4', done: 86, avg: '4分' },
+  { id: 'shulong', name: '熟笼档', color: '#45B7D1', done: 41, avg: '6分' },
+  { id: 'xibing', name: '西饼档', color: '#FF6B6B', done: 22, avg: '8分' }
+]
+const LP_MS = 450
+
+function seedCards(now) {
+  const t = (minAgo) => now - minAgo * 60000
+  return [
+    {
+      id: 'c-shrimp', station: 'changfen', dishName: '鲜虾肠粉', isNew: true, overtime: false,
+      lines: [
+        { id: 'r1', table: '8', ts: t(12) },
+        { id: 'r2', table: '8', ts: t(12) },
+        { id: 'r3', table: '3', ts: t(9) },
+        { id: 'r4', table: '12', ts: t(7) },
+        { id: 'r5', table: '5', ts: t(4) }
+      ]
+    },
+    {
+      id: 'c-beef', station: 'changfen', dishName: '牛肉肠粉', isNew: false, overtime: true,
+      lines: [
+        { id: 'r6', table: '2', ts: t(21) },
+        { id: 'r7', table: '9', ts: t(18) },
+        { id: 'r8', table: '9', ts: t(18) }
+      ]
+    },
+    {
+      id: 'c-char', station: 'changfen', dishName: '叉烧肠粉', isNew: true, overtime: false,
+      lines: [
+        { id: 'r9', table: '11', ts: t(6) },
+        { id: 'r10', table: '4', ts: t(5) },
+        { id: 'r11', table: '15', ts: t(3) },
+        { id: 'r12', table: '1', ts: t(2) }
+      ]
+    },
+    {
+      id: 'c-egg', station: 'changfen', dishName: '蛋肠', isNew: false, overtime: false,
+      lines: [
+        { id: 'r13', table: '7', ts: t(8) },
+        { id: 'r14', table: '16', ts: t(1) }
+      ]
+    },
+    {
+      id: 'c-veg', station: 'changfen', dishName: '斋肠', isNew: false, overtime: false,
+      lines: [
+        { id: 'r15', table: '6', ts: t(11) },
+        { id: 'r16', table: '6', ts: t(10) },
+        { id: 'r17', table: '10', ts: t(8) },
+        { id: 'r18', table: '14', ts: t(6) },
+        { id: 'r19', table: '18', ts: t(5) },
+        { id: 'r20', table: '3', ts: t(3) }
+      ]
+    },
+    {
+      id: 'c-liver', station: 'changfen', dishName: '猪肝肠粉', isNew: false, overtime: true,
+      lines: [
+        { id: 'r21', table: '19', ts: t(24) },
+        { id: 'r22', table: '8', ts: t(16) },
+        { id: 'r23', table: '21', ts: t(14) }
+      ]
+    },
+    {
+      id: 'c-onion', station: 'changfen', dishName: '葱花肠', isNew: false, overtime: false,
+      lines: [{ id: 'r24', table: '13', ts: t(5) }]
+    },
+    {
+      id: 'c-chili', station: 'changfen', dishName: '辣椒碟', isNew: false, overtime: false,
+      lines: [
+        { id: 'r25', table: '8', ts: t(12) },
+        { id: 'r26', table: '2', ts: t(21) }
+      ]
+    },
+    {
+      id: 'c-siu', station: 'shulong', dishName: '虾饺', isNew: true, overtime: false,
+      lines: [
+        { id: 'r27', table: '8', ts: t(9) },
+        { id: 'r28', table: '8', ts: t(9) },
+        { id: 'r29', table: '4', ts: t(4) }
+      ]
+    },
+    {
+      id: 'c-bbq', station: 'xibing', dishName: '叉烧包', isNew: false, overtime: true,
+      lines: [
+        { id: 'r30', table: '5', ts: t(19) },
+        { id: 'r31', table: '11', ts: t(15) }
+      ]
+    }
+  ]
+}
+
+function fifoPreview(lines, n) {
+  const taken = [...lines].sort((a, b) => a.ts - b.ts || a.id.localeCompare(b.id)).slice(0, n)
+  const groups = []
+  for (const line of taken) {
+    const prev = groups.find((g) => g.table === line.table)
+    if (prev) prev.n += 1
+    else groups.push({ table: line.table, n: 1 })
+  }
+  return groups.map((g) => (g.n > 1 ? `${g.table}桌×${g.n}` : `${g.table}桌`)).join('、')
+}
+
+function readParam(key, fallback) {
+  const u = new URL(location.href)
+  return u.searchParams.get(key) || fallback
+}
+
+const { createApp } = Vue
+createApp({
+  data() {
+    const now = Date.now()
+    const v = readParam('variant', 'A')
+    return {
+      variant: VARIANTS.some((x) => x.id === v) ? v : 'A',
+      surface: readParam('surface', 'kitchen'),
+      density: readParam('density', 'standard'),
+      watchedMode: readParam('watched', 'single'),
+      fill: false,
+      scale: 1,
+      now,
+      cards: seedCards(now),
+      selected: {},
+      pick: null,
+      currentStation: 'changfen',
+      connected: true,
+      disconnect: false,
+      printFail: 0,
+      deliveryCancel: 0,
+      awaitingAck: false,
+      alertsOpen: false,
+      toast: '',
+      toastTimer: null,
+      nextServe: 'ok',
+      printAfterServe: false,
+      lp: null,
+      refreshN: 0
+    }
+  },
+  computed: {
+    variantName() {
+      return (VARIANTS.find((x) => x.id === this.variant) || VARIANTS[0]).name
+    },
+    stageLabel() {
+      return this.fill ? '铺满窗口（真机/横屏试）' : '模拟厨房屏 1280×800'
+    },
+    clipStyle() {
+      if (this.fill) return { width: '100%', height: 'auto' }
+      return { width: `${1280 * this.scale}px`, height: `${800 * this.scale}px` }
+    },
+    stageStyle() {
+      if (this.fill) return {}
+      return { transform: `scale(${this.scale})` }
+    },
+    clock() {
+      const d = new Date(this.now)
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    },
+    watchedStations() {
+      const ids = this.watchedMode === 'single' ? ['changfen'] : STATIONS.map((s) => s.id)
+      return STATIONS.filter((s) => ids.includes(s.id)).map((s) => {
+        const lines = this.cards.filter((c) => c.station === s.id).flatMap((c) => c.lines)
+        const urgent = this.cards.filter((c) => c.station === s.id && c.overtime).reduce((n, c) => n + c.lines.length, 0)
+        return { ...s, pending: lines.length, urgent }
+      })
+    },
+    watchedLabel() {
+      return this.watchedStations.map((s) => s.name).join('、')
+    },
+    hubTotals() {
+      return this.watchedStations.reduce((acc, s) => {
+        acc.pending += s.pending
+        acc.urgent += s.urgent
+        return acc
+      }, { pending: 0, urgent: 0 })
+    },
+    visibleCards() {
+      return this.cards.filter((c) => c.station === this.currentStation)
+    },
+    totalSelected() {
+      return Object.values(this.selected).reduce((n, v) => n + (v || 0), 0)
+    },
+    pendingCount() {
+      return this.cards.reduce((n, c) => n + c.lines.length, 0)
+    },
+    border() {
+      if (this.awaitingAck) return 'yellow'
+      if (this.pendingCount > 0) return 'red'
+      return 'green'
+    },
+    bannerCount() {
+      return [this.disconnect, this.printFail > 0, this.deliveryCancel > 0, this.awaitingAck].filter(Boolean).length
+    },
+    bannerList() {
+      const a = []
+      if (this.disconnect) a.push('断连')
+      if (this.printFail) a.push(`补打×${this.printFail}`)
+      if (this.deliveryCancel) a.push('外卖取消')
+      if (this.awaitingAck) a.push('新单已知晓')
+      return a.join(' · ') || '无'
+    },
+    bannerSummary() {
+      return this.bannerList
+    },
+    pickCard() {
+      if (!this.pick) return null
+      return this.cards.find((c) => c.id === this.pick.cardId) || null
+    },
+    pickCount() {
+      if (!this.pick) return 0
+      return Object.values(this.pick.checked).filter(Boolean).length
+    },
+    selectedDump() {
+      const parts = Object.entries(this.selected).filter(([, n]) => n > 0).map(([id, n]) => {
+        const c = this.cards.find((x) => x.id === id)
+        return `${c ? c.dishName : id}:${n}`
+      })
+      return parts.join(', ') || '0'
+    },
+    allPreviews() {
+      return this.visibleCards.filter((c) => this.sel(c) > 0).map((c) => `${c.dishName} ${this.previewText(c)}`).join(' | ')
+    },
+    pickDump() {
+      if (!this.pick || !this.pickCard) return '关'
+      const ids = Object.keys(this.pick.checked).filter((id) => this.pick.checked[id])
+      const rows = this.pickCard.lines.filter((l) => ids.includes(l.id)).map((l) => `${l.table}桌`)
+      return rows.join(', ') || '未勾'
+    }
+  },
+  watch: {
+    variant() { this.syncUrl(); document.documentElement.dataset.variant = this.variant },
+    surface() { this.syncUrl() },
+    density() { this.syncUrl() },
+    watchedMode() { this.syncUrl() }
+  },
+  mounted() {
+    document.documentElement.dataset.variant = this.variant
+    window.addEventListener('keydown', this.onKey)
+    window.addEventListener('resize', this.fit)
+    this.fit()
+    this._tick = setInterval(() => { this.now = Date.now() }, 1000)
+  },
+  unmounted() {
+    window.removeEventListener('keydown', this.onKey)
+    window.removeEventListener('resize', this.fit)
+    clearInterval(this._tick)
+  },
+  methods: {
+    densityLabel(d) {
+      return { standard: '标准', compact: '紧凑', ultra: '超紧凑' }[d] || d
+    },
+    fit() {
+      const wrap = document.querySelector('.stage-wrap')
+      if (!wrap || this.fill) { this.scale = 1; return }
+      const w = wrap.clientWidth
+      this.scale = Math.min(1, Math.max(0.42, (w - 8) / 1280))
+    },
+    syncUrl() {
+      const u = new URL(location.href)
+      u.searchParams.set('variant', this.variant)
+      u.searchParams.set('surface', this.surface)
+      u.searchParams.set('density', this.density)
+      u.searchParams.set('watched', this.watchedMode)
+      history.replaceState(null, '', u)
+    },
+    prevVariant() {
+      const i = VARIANTS.findIndex((v) => v.id === this.variant)
+      this.variant = VARIANTS[(i + VARIANTS.length - 1) % VARIANTS.length].id
+    },
+    nextVariant() {
+      const i = VARIANTS.findIndex((v) => v.id === this.variant)
+      this.variant = VARIANTS[(i + 1) % VARIANTS.length].id
+    },
+    onKey(e) {
+      const t = e.target
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      if (e.key === 'ArrowLeft') this.prevVariant()
+      if (e.key === 'ArrowRight') this.nextVariant()
+    },
+    sel(card) { return this.selected[card.id] || 0 },
+    waitOf(ts) {
+      const m = Math.max(0, Math.floor((this.now - ts) / 60000))
+      return `${m}分`
+    },
+    waitLabel(card) {
+      const oldest = Math.min(...card.lines.map((l) => l.ts))
+      return this.waitOf(oldest)
+    },
+    hhmm(ts) {
+      const d = new Date(ts)
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    },
+    previewText(card) {
+      return fifoPreview(card.lines, this.sel(card))
+    },
+    inc(card) {
+      if (this.pick) return
+      const cur = this.sel(card)
+      if (cur >= card.lines.length) return
+      this.selected = { ...this.selected, [card.id]: cur + 1 }
+    },
+    dec(card) {
+      const cur = this.sel(card)
+      if (cur <= 1) {
+        const next = { ...this.selected }
+        delete next[card.id]
+        this.selected = next
+        return
+      }
+      this.selected = { ...this.selected, [card.id]: cur - 1 }
+    },
+    clearCardSel() { this.selected = {} },
+    openPick(card) {
+      this.clearCardSel()
+      this.pick = { cardId: card.id, checked: {} }
+    },
+    closePick() { this.pick = null },
+    toggleLine(id) {
+      const checked = { ...this.pick.checked, [id]: !this.pick.checked[id] }
+      this.pick = { ...this.pick, checked }
+    },
+    showToast(msg) {
+      this.toast = msg
+      clearTimeout(this.toastTimer)
+      this.toastTimer = setTimeout(() => { this.toast = '' }, 1800)
+    },
+    removeLines(cardId, lineIds) {
+      this.cards = this.cards.map((c) => {
+        if (c.id !== cardId) return c
+        return { ...c, lines: c.lines.filter((l) => !lineIds.includes(l.id)) }
+      }).filter((c) => c.lines.length > 0)
+    },
+    afterServeOk() {
+      this.clearCardSel()
+      this.pick = null
+      if (this.printAfterServe) this.printFail = Math.max(this.printFail, 2)
+    },
+    serveFromAllocations(allocs) {
+      const mode = this.nextServe
+      this.nextServe = 'ok'
+      if (mode === 'fail') {
+        this.showToast('出餐失败')
+        return
+      }
+      if (mode === 'partial') {
+        const first = allocs[0]
+        if (first) this.removeLines(first.cardId, first.lineIds.slice(0, Math.max(1, Math.ceil(first.lineIds.length / 2))))
+        this.showToast('部分出餐失败')
+        this.clearCardSel()
+        this.pick = null
+        return
+      }
+      for (const a of allocs) this.removeLines(a.cardId, a.lineIds)
+      this.afterServeOk()
+    },
+    serveCardPath() {
+      const allocs = []
+      for (const card of this.cards) {
+        const n = this.sel(card)
+        if (n <= 0) continue
+        const lineIds = [...card.lines].sort((a, b) => a.ts - b.ts || a.id.localeCompare(b.id)).slice(0, n).map((l) => l.id)
+        allocs.push({ cardId: card.id, lineIds })
+      }
+      this.serveFromAllocations(allocs)
+    },
+    servePickPath() {
+      if (!this.pickCard) return
+      const lineIds = Object.keys(this.pick.checked).filter((id) => this.pick.checked[id])
+      this.serveFromAllocations([{ cardId: this.pickCard.id, lineIds }])
+    },
+    ack() {
+      this.awaitingAck = false
+      this.cards = this.cards.map((c) => ({ ...c, isNew: false }))
+    },
+    ackFromBlank() {
+      if (this.awaitingAck) this.ack()
+    },
+    enterStation(id) {
+      this.currentStation = id
+      this.surface = 'kitchen'
+    },
+    bumpRefresh() { this.refreshN += 1 },
+    pressStart(card, e) {
+      if (e.button && e.button !== 0) return
+      this.lp = {
+        cardId: card.id,
+        fired: false,
+        t: setTimeout(() => {
+          this.lp.fired = true
+          this.openPick(card)
+        }, LP_MS)
+      }
+    },
+    pressEnd(card, e) {
+      if (!this.lp || this.lp.cardId !== card.id) return
+      clearTimeout(this.lp.t)
+      const fired = this.lp.fired
+      this.lp = null
+      if (fired) return
+      this.inc(card)
+    },
+    pressCancel() {
+      if (this.lp) clearTimeout(this.lp.t)
+      this.lp = null
+    },
+    scene(name) {
+      this.now = Date.now()
+      this.cards = seedCards(this.now)
+      this.selected = {}
+      this.pick = null
+      this.connected = true
+      this.disconnect = false
+      this.printFail = 0
+      this.deliveryCancel = 0
+      this.awaitingAck = false
+      this.alertsOpen = false
+      this.surface = 'kitchen'
+      this.currentStation = 'changfen'
+      if (name === 'busy') return
+      if (name === 'yellow') { this.awaitingAck = true; return }
+      if (name === 'stack') {
+        this.awaitingAck = true
+        this.disconnect = true
+        this.connected = false
+        this.deliveryCancel = 2
+        this.printFail = 2
+        this.alertsOpen = false
+        return
+      }
+      if (name === 'idle') { this.cards = []; return }
+      if (name === 'sameTable') {
+        this.selected = {}
+        const card = this.cards.find((c) => c.id === 'c-shrimp')
+        if (card) this.openPick(card)
+      }
+    }
+  }
+}).mount('#app')
+</script>
+</body>
+</html>

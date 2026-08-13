@@ -62,7 +62,8 @@ class _TablesRepoMixin:
             "occupancy_percent": round(occupied / total * 100, 1) if total else 0.0,
             "total_amount": round(row[1] or 0, 2),
             "total_people": int(row[2] or 0),
-            "avg_duration_minutes": round((row[3] or 0) / 60, 1) if row[3] else 0,
+            # tables.duration 存的是分钟（POS dinnerTime），不是秒
+            "avg_duration_minutes": round(float(row[3] or 0), 1) if row[3] else 0,
         }
 
     async def get_table_live_list(self) -> Dict[str, Any]:
@@ -79,13 +80,14 @@ class _TablesRepoMixin:
 
         tables = []
         for row in rows:
-            duration_sec = int(row.get("duration") or 0)
+            # duration 与 POS dinnerTime 一致，单位是分钟
+            duration_minutes = int(row.get("duration") or 0)
             tables.append(
                 {
                     "table_number": row.get("table_number") or "",
                     "people": int(row.get("people") or 0),
                     "amount": round(float(row.get("amount") or 0), 2),
-                    "duration_minutes": round(duration_sec / 60.0, 1) if duration_sec else 0.0,
+                    "duration_minutes": duration_minutes,
                     "status": row.get("status") or "occupied",
                 }
             )

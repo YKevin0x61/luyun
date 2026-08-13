@@ -77,6 +77,21 @@ export function servePreviewText(orders, selectedQuantity) {
   return formatServePreview(allocateFifo(orders || [], qty))
 }
 
+/**
+ * FIFO 将出 订单行 ids for highlighting chips on the card. Empty / 0 → [].
+ *
+ * @param {object[]} orders
+ * @param {number} selectedQuantity
+ * @returns {string[]}
+ */
+export function servePreviewOrderIds(orders, selectedQuantity) {
+  const qty = Number(selectedQuantity) || 0
+  if (qty <= 0) return []
+  return allocateFifo(orders || [], qty)
+    .map((item) => orderLineId(item.order))
+    .filter(Boolean)
+}
+
 function cookingCallFromAllocations(dishName, allocations) {
   if (!allocations.length) return null
   const completeQuantity = allocations.reduce((sum, item) => sum + item.serveQuantity, 0)
@@ -176,4 +191,4 @@ export function planBatchCookingCalls({ selectedQuantities, pendingOrders, chunk
   return plan
 }
 
-export default { planBatchCookingCalls, formatServePreview, servePreviewText, planTablePickCookingCalls, orderLineId }
+export default { planBatchCookingCalls, formatServePreview, servePreviewText, servePreviewOrderIds, planTablePickCookingCalls, orderLineId }

@@ -26,10 +26,15 @@
       <text class="time-value" :class="dish.waitTimeClass">{{ dish.maxWaitTimeFormatted }}</text>
     </view>
 
-    <!-- 超紧凑：隐藏每桌常驻列表；将出预览与选桌三档都保留 -->
-    <view v-if="density !== DENSITY_MODES.ULTRA" class="orders-detail">
+    <!-- 超紧凑：常驻每桌列表隐藏；选中后展开以便将出高亮落在小卡片上 -->
+    <view v-if="density !== DENSITY_MODES.ULTRA || selectedQuantity > 0" class="orders-detail">
       <view class="orders-grid">
-        <view v-for="order in dish.orders" :key="order.id" class="order-block">
+        <view
+          v-for="order in dish.orders"
+          :key="order.id"
+          class="order-block"
+          :class="{ 'order-block--serving': isServing(order) }"
+        >
           <view class="block-header">
             <text class="block-table">{{ order.table_number }}桌</text>
             <text class="block-quantity">{{ order.quantity }}份</text>
@@ -38,10 +43,6 @@
           <text v-if="density !== DENSITY_MODES.COMPACT" class="block-time">{{ formatOrderTime(order.order_time) }}</text>
         </view>
       </view>
-    </view>
-
-    <view v-if="selectedQuantity > 0 && servePreview" class="serve-preview" @click.stop>
-      <text class="serve-preview-text">将出 {{ servePreview }}</text>
     </view>
 
     <view class="dish-actions" @click.stop>
@@ -78,6 +79,7 @@
 
 <script>
 import { DENSITY_MODES } from '../../utils/storage.js'
+import { orderLineId } from '../../utils/batchCooking.js'
 
 export default {
   name: 'KitchenDishCard',
@@ -90,10 +92,10 @@ export default {
       type: Number,
       default: 0
     },
-    /** FIFO 将出预览文案；选中份数 > 0 时只读展示 */
-    servePreview: {
-      type: String,
-      default: ''
+    /** FIFO 将出订单行 ids；选中份数 > 0 时给对应小卡片上色 */
+    servePreviewOrderIds: {
+      type: Array,
+      default: () => []
     },
     /** 新单角标：由告警引擎 newBadges 驱动，与超时红边框用外发光区分 */
     isNew: {
@@ -107,7 +109,7 @@ export default {
     }
   },
   emits: ['increase', 'decrease', 'open-table-pick'],
-  setup() {
+  setup(props) {
     const formatOrderTime = (timeStr) => {
       const date = new Date(timeStr)
       const hours = date.getHours().toString().padStart(2, '0')
@@ -115,7 +117,13 @@ export default {
       return `${hours}:${minutes}`
     }
 
-    return { formatOrderTime, DENSITY_MODES }
+    const isServing = (order) => {
+      const ids = props.servePreviewOrderIds
+      if (!Array.isArray(ids) || ids.length === 0) return false
+      return ids.includes(orderLineId(order))
+    }
+
+    return { formatOrderTime, isServing, DENSITY_MODES }
   }
 }
 </script>
@@ -287,22 +295,6 @@ export default {
   max-height: 260upx;
 }
 
-.serve-preview {
-  flex-shrink: 0;
-  margin: 4upx 0 2upx;
-  padding: 6upx 8upx;
-  background: #F6FFED;
-  border: 1upx solid #D9F7BE;
-  border-radius: 8upx;
-}
-
-.serve-preview-text {
-  font-size: 22upx;
-  font-weight: 600;
-  color: #389E0D;
-  line-height: 1.3;
-}
-
 .orders-grid {
   display: flex;
   flex-wrap: wrap;
@@ -343,16 +335,24 @@ export default {
   min-height: 65upx;
   border: 1upx solid #D9F7BE;
   box-shadow: 0 2upx 6upx rgba(0,0,0,0.1);
-  transition: all 0.2s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   gap: 3upx;
   flex-shrink: 0;
   box-sizing: border-box;
 }
 
-.order-block:hover {
-  transform: translateY(-2upx);
-  box-shadow: 0 4upx 12upx rgba(0,0,0,0.15);
-  border-color: #1890FF;
+.order-block--serving {
+  background: #52C41A;
+  border-color: #237804;
+  border-width: 3upx;
+  box-shadow: 0 4upx 12upx rgba(35, 120, 4, 0.4);
+}
+
+.order-block--serving .block-table,
+.order-block--serving .block-quantity,
+.order-block--serving .block-time {
+  color: #fff;
+  font-weight: 800;
 }
 
 .block-header {
@@ -612,15 +612,6 @@ export default {
 
 .dish-card.density-ultra .time-value {
   font-size: 30upx;
-}
-
-.dish-card.density-ultra .serve-preview {
-  padding: 4upx 6upx;
-  margin: 2upx 0;
-}
-
-.dish-card.density-ultra .serve-preview-text {
-  font-size: 20upx;
 }
 
 .dish-card.density-ultra .actions-container {

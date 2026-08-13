@@ -41,6 +41,39 @@ describe('countPendingAndUrgent', () => {
     ]
     expect(countPendingAndUrgent(dishes, PENDING)).toEqual({ total: 2, urgent: 1 })
   })
+
+  it('sums pending 份数 not dish groups', () => {
+    const dishes = [
+      { orders: [{ dish_status: PENDING, quantity: 3 }], urgentCount: 1 },
+      { orders: [{ dish_status: PENDING, quantity: 2, served_quantity: 1 }], urgentCount: 0 },
+      { orders: [{ dish_status: '已上菜', quantity: 9 }], urgentCount: 1 }
+    ]
+    expect(countPendingAndUrgent(dishes, PENDING)).toEqual({ total: 4, urgent: 1 })
+  })
+
+  it('excludes refund 待出餐 rows from 待制作, matching kitchen console', () => {
+    const dishes = [
+      {
+        orders: [
+          { dish_status: PENDING, quantity: 1 },
+          { dish_status: PENDING, quantity: 1, status: '退菜', change_type: '退菜' }
+        ],
+        urgentCount: 1
+      },
+      {
+        orders: [
+          {
+            dish_status: PENDING,
+            quantity: 1,
+            status: '退菜',
+            business_flow_id: 'YY001_虾饺_refund_1'
+          }
+        ],
+        urgentCount: 2
+      }
+    ]
+    expect(countPendingAndUrgent(dishes, PENDING)).toEqual({ total: 1, urgent: 1 })
+  })
 })
 
 describe('countUnmappedDishNames', () => {
@@ -149,6 +182,35 @@ describe('buildWatchedStationStatuses', () => {
     })
   })
 
+  it('sums pending 份数 per station, ignoring cooked lines', () => {
+    const dishes = [
+      {
+        station: 'changfen',
+        orders: [
+          { dish_status: PENDING, quantity: 3 },
+          { dish_status: PENDING, quantity: 2 }
+        ]
+      },
+      {
+        station: 'changfen',
+        orders: [{ dish_status: '已上菜', quantity: 10 }]
+      },
+      {
+        station: 'xibing',
+        orders: [{ dish_status: PENDING, quantity: 4, served_quantity: 1 }]
+      }
+    ]
+    const rows = buildWatchedStationStatuses(stations, dishes, [], PENDING)
+    expect(rows.find((r) => r.id === 'changfen')).toMatchObject({
+      pendingCount: 5,
+      urgentCount: 0
+    })
+    expect(rows.find((r) => r.id === 'xibing')).toMatchObject({
+      pendingCount: 3,
+      urgentCount: 0
+    })
+  })
+
   it('counts urgent pending dishes per station', () => {
     const dishes = [
       { station: 'changfen', orders: [{ dish_status: PENDING }], urgentCount: 2 },
@@ -168,6 +230,38 @@ describe('buildWatchedStationStatuses', () => {
       urgentCount: 1,
       completedToday: 0,
       avgCookingTime: '0分'
+    })
+  })
+
+  it('does not treat refund-only 待出餐 as 待制作', () => {
+    const dishes = [
+      {
+        station: 'changfen',
+        orders: [
+          { dish_status: PENDING, quantity: 1, status: '退菜', change_type: '退菜' },
+          { dish_status: PENDING, quantity: 1, status: '退菜', business_flow_id: 'cf_refund_1' }
+        ],
+        urgentCount: 2
+      },
+      {
+        station: 'xibing',
+        orders: [
+          { dish_status: PENDING, quantity: 2 },
+          { dish_status: PENDING, quantity: 1, status: '退菜', change_type: '退菜' }
+        ],
+        urgentCount: 0
+      }
+    ]
+    const rows = buildWatchedStationStatuses(stations, dishes, [], PENDING)
+    expect(rows.find((r) => r.id === 'changfen')).toMatchObject({
+      pendingCount: 0,
+      urgentCount: 0,
+      active: false
+    })
+    expect(rows.find((r) => r.id === 'xibing')).toMatchObject({
+      pendingCount: 2,
+      urgentCount: 0,
+      active: true
     })
   })
 })
