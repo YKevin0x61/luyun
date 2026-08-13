@@ -3,15 +3,18 @@ import { ref } from 'vue'
 
 const getWatchedStations = vi.fn(() => ['changfen'])
 const getDishCardQuantityCap = vi.fn(() => 0)
+const getOrderGapMinutes = vi.fn(() => 0)
 const getTimeThresholdsMs = vi.fn(() => ({ warning: 15 * 60 * 1000, urgent: 20 * 60 * 1000 }))
 
 vi.mock('../../utils/storage.js', () => ({
   ScreenSettingsManager: {
     getWatchedStations: (...args) => getWatchedStations(...args),
     getDishCardQuantityCap: (...args) => getDishCardQuantityCap(...args),
+    getOrderGapMinutes: (...args) => getOrderGapMinutes(...args),
     getSettings: () => ({
       watchedStations: getWatchedStations(),
       dishCardQuantityCap: getDishCardQuantityCap(),
+      orderGapMinutes: getOrderGapMinutes(),
       alert: { warnMin: 15, urgentMin: 20 }
     })
   }
@@ -60,6 +63,7 @@ describe('useKitchenOrderSession', () => {
   beforeEach(() => {
     getWatchedStations.mockReset()
     getDishCardQuantityCap.mockReset()
+    getOrderGapMinutes.mockReset()
     getTimeThresholdsMs.mockReset()
     syncAlertOrders.mockReset()
     syncDeliveryOrders.mockReset()
@@ -68,6 +72,7 @@ describe('useKitchenOrderSession', () => {
     stopAlerts.mockReset()
     getWatchedStations.mockReturnValue(['changfen'])
     getDishCardQuantityCap.mockReturnValue(0)
+    getOrderGapMinutes.mockReturnValue(0)
     getTimeThresholdsMs.mockReturnValue({
       warning: 15 * 60 * 1000,
       urgent: 20 * 60 * 1000
@@ -112,6 +117,18 @@ describe('useKitchenOrderSession', () => {
     getDishCardQuantityCap.mockReturnValue(10)
     session.reloadDeviceSettings()
     expect(session.dishCardQuantityCap.value).toBe(10)
+  })
+
+  it('exposes orderGapMinutes from local screen settings (0 = no 浪潮 split)', () => {
+    getOrderGapMinutes.mockReturnValue(0)
+    const session = useKitchenOrderSession({
+      ordersStore: { orders: [], fetchOrders: vi.fn() }
+    })
+    expect(session.orderGapMinutes.value).toBe(0)
+
+    getOrderGapMinutes.mockReturnValue(10)
+    session.reloadDeviceSettings()
+    expect(session.orderGapMinutes.value).toBe(10)
   })
 
   it('decorateDishWait uses device-local urgent threshold', () => {

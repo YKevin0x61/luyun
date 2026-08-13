@@ -228,7 +228,7 @@ import { useStationsStore } from '../../stores/stations.js'
 import { TimeCalculator } from '../../utils/timeCalculator.js'
 import { isRefundOrder } from '../../utils/constants.js'
 import { groupOrdersByDish } from '../../utils/dishMerge.js'
-import { composeKitchenDishCards } from '../../utils/dishCardChunks.js'
+import { composeKitchenDishCards, dishSplitKnobsChanged, sortKitchenDishCardsByOldest } from '../../utils/dishCardChunks.js'
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
 import { orderLineId, planBatchCookingCalls, planTablePickCookingCalls, servePreviewText } from '../../utils/batchCooking.js'
@@ -257,13 +257,14 @@ export default {
     // 🆕 时钟 tick 间隔：仅用于驱动"已等待时长"等显示的每秒刷新，不驱动订单合并/统计聚合
     const CLOCK_TICK_INTERVAL_MS = 1000
 
-    // 订单会话：一次拉取 → 新单/外卖取消引擎；职责档口 / 拆卡上限 / 紧急阈值随 refresh/onShow 重读
+    // 订单会话：一次拉取 → 新单/外卖取消引擎；职责档口 / 拆卡旋钮 / 紧急阈值随 refresh/onShow 重读
     const orderSession = useKitchenOrderSession({ ordersStore })
     const {
       loading,
       watchedStationIds,
       thresholdsMs,
       dishCardQuantityCap,
+      orderGapMinutes,
       refresh: refreshData,
       start: startKitchenOrderSession,
       stop: stopKitchenOrderSession,
@@ -319,18 +320,6 @@ export default {
 
     // 职责集恰为 1 个：锁定该档全屏、不渲染控制条（按配置集大小，非过滤后可见数）
     const isSingleWatchedStation = computed(() => watchedStationIds.value.length === 1)
-    
-    // 列表锁死按时间（最早下单在前）；同名拆卡仍相邻
-    const sortMergedDishes = (dishes) => {
-      return [...dishes].sort((a, b) => a.oldestTimestamp - b.oldestTimestamp).map(dish => {
-        return {
-          ...dish,
-          orders: [...dish.orders].sort((a, b) => {
-            return new Date(a.order_time) - new Date(b.order_time)
-          })
-        }
-      })
-    }
     
     // 计算属性
     const currentStationInfo = computed(() => {
@@ -487,29 +476,36 @@ export default {
       }).filter(dish => dish !== null) // 过滤掉无效的菜品
     })
 
-    // Sticky FIFO 拆卡：cap 变化时丢弃上一轮快照（新 N 重新 FIFO）；成员身份跨 refresh 稳住
+    // Sticky FIFO 拆卡：菜卡份数上限或下单间隔变化时丢弃上一轮快照。先拆卡再按每张卡当前最早订单排整表，同名卡不必相邻。
     const dishChunkSnapshotByDish = ref({})
-    const dishChunkCapSeen = ref(null)
+    const dishSplitKnobsSeen = ref(null)
     const chunkedDishesBase = ref([])
 
+    const applyDishChunks = (previous) => {
+      const cap = Number(dishCardQuantityCap.value) || 0
+      const gap = Number(orderGapMinutes.value) || 0
+      const { cards, previousByDish } = composeKitchenDishCards({
+        logicalDishes: currentStationMergedDishesBase.value,
+        cap,
+        orderGapMinutes: gap,
+        previousByDish: previous
+      })
+      dishChunkSnapshotByDish.value = previousByDish
+      chunkedDishesBase.value = sortKitchenDishCardsByOldest(cards)
+      dishSplitKnobsSeen.value = { cap, orderGapMinutes: gap }
+    }
+
     watch(
-      [currentStationMergedDishesBase, dishCardQuantityCap],
+      [currentStationMergedDishesBase, dishCardQuantityCap, orderGapMinutes],
       () => {
         const cap = Number(dishCardQuantityCap.value) || 0
-        if (dishChunkCapSeen.value !== null && dishChunkCapSeen.value !== cap) {
+        const gap = Number(orderGapMinutes.value) || 0
+        if (dishSplitKnobsChanged(dishSplitKnobsSeen.value, cap, gap)) {
           dispatchServe({ type: 'externalClear' })
+          applyDishChunks({})
+          return
         }
-        const previous =
-          dishChunkCapSeen.value === cap ? dishChunkSnapshotByDish.value : {}
-        dishChunkCapSeen.value = cap
-        const logical = sortMergedDishes(currentStationMergedDishesBase.value)
-        const { cards, previousByDish } = composeKitchenDishCards({
-          logicalDishes: logical,
-          cap,
-          previousByDish: previous
-        })
-        dishChunkSnapshotByDish.value = previousByDish
-        chunkedDishesBase.value = cards
+        applyDishChunks(dishChunkSnapshotByDish.value)
       },
       { immediate: true }
     )
@@ -679,7 +675,7 @@ export default {
       // 切换档口时清空选中（含进行中的选桌）与拆卡快照
       dispatchServe({ type: 'externalClear' })
       dishChunkSnapshotByDish.value = {}
-      dishChunkCapSeen.value = null
+      dishSplitKnobsSeen.value = null
       debugLog(`[厨房页面] 切换到档口: ${stationId}, 已清空选中数量`)
     }
 
@@ -986,11 +982,12 @@ export default {
       fallback: 'reconcile',
     })
 
-    // Settings return does not remount; clear only after a 系统设置 visit (not every onShow).
+    // Settings return does not remount; discard snapshot, re-slice, and clear 出餐选中.
     onShow(() => {
       onKitchenOrderSessionShow()
       if (takeSettingsReturnClear()) {
         dispatchServe({ type: 'externalClear' })
+        applyDishChunks({})
       }
       ensureCurrentStationInWatched()
     })
@@ -1057,6 +1054,8 @@ export default {
       densityMode,
       /** 本屏菜品卡片份数上限；0 = 不拆分（列表行为与今日一致） */
       dishCardQuantityCap,
+      /** 本屏下单间隔（分钟）；0 = 不按浪潮拆 */
+      orderGapMinutes,
       selectedQuantities,
       batchSubmitting,
       printFailedCount,

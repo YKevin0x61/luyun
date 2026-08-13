@@ -110,17 +110,39 @@ function membersTotal(members) {
 }
 
 function lastUnderfilled(built, cap) {
-  for (let i = built.length - 1; i >= 0; i--) {
-    if (membersTotal(built[i].members) < cap) return built[i]
+  // Only the tail of this 浪潮: filling an earlier hole would put new tickets ahead of later FIFO work.
+  if (built.length === 0) return null
+  const last = built[built.length - 1]
+  return membersTotal(last.members) < cap ? last : null
+}
+
+const ORDER_GAP_MS_PER_MINUTE = 60 * 1000
+
+function partitionWaves(fifo, gapMinutes) {
+  const t = Number(gapMinutes) || 0
+  if (t < 1 || fifo.length === 0) return [fifo]
+  const thresholdMs = t * ORDER_GAP_MS_PER_MINUTE
+  const waves = []
+  let current = [fifo[0]]
+  for (let i = 1; i < fifo.length; i++) {
+    const gap = orderTimeMs(fifo[i]) - orderTimeMs(fifo[i - 1])
+    if (gap >= thresholdMs) {
+      waves.push(current)
+      current = [fifo[i]]
+    } else {
+      current.push(fifo[i])
+    }
   }
-  return null
+  waves.push(current)
+  return waves
 }
 
 /**
  * @param {object} params
  * @param {string} params.dishName
  * @param {object[]} params.pendingOrders
- * @param {number} params.cap 0 = no split; 1–99 = max portions per chunk
+ * @param {number} params.cap 0 = no portion split; 1–99 = max portions per chunk
+ * @param {number} [params.orderGapMinutes] 0 = no 浪潮 split; 1–99 = adjacent gap in minutes
  * @param {Array<{ chunkId: string, orders: object[] }>} [params.previousChunks]
  * @returns {Array<{ chunkId: string, dishName: string, orders: object[], totalQuantity: number, oldestTimestamp: number }>}
  */
@@ -128,6 +150,7 @@ export function reconcileDishChunks({
   dishName,
   pendingOrders,
   cap,
+  orderGapMinutes = 0,
   previousChunks
 }) {
   const raw = []
@@ -139,7 +162,8 @@ export function reconcileDishChunks({
   }
 
   const n = Number(cap) || 0
-  if (n < 1) {
+  const t = Number(orderGapMinutes) || 0
+  if (n < 1 && t < 1) {
     const fifo = sortFifo(raw)
     if (fifo.length === 0) return []
     const totalQuantity = fifo.reduce((sum, order) => sum + (order.quantity || 0), 0)
@@ -173,35 +197,53 @@ export function reconcileDishChunks({
     remaining.set(orderId(order), order.quantity)
   }
 
+  const portionCap = n < 1 ? Number.POSITIVE_INFINITY : n
+  const usedChunkIds = new Set()
   const built = []
-  for (const prev of previousChunks || []) {
-    const members = []
-    let total = 0
-    for (const member of readMembers(prev)) {
-      const left = remaining.get(member.orderId) || 0
-      if (left <= 0) continue
-      if (total >= n) break
-      const take = Math.min(left, member.quantity, n - total)
-      if (take <= 0) continue
-      members.push({ orderId: member.orderId, quantity: take })
-      remaining.set(member.orderId, left - take)
-      total += take
-    }
-    if (total <= 0) continue
-    built.push({ chunkId: prev.chunkId, members })
-  }
 
-  const leftover = leftoverFromRemaining(fifo, remaining)
-  while (leftover.length > 0) {
-    const target = lastUnderfilled(built, n)
-    if (target) {
-      fillChunk(target.members, leftover, n)
-      continue
+  for (const wave of partitionWaves(fifo, t)) {
+    const waveIds = new Set(wave.map((order) => orderId(order)))
+    const waveBuilt = []
+
+    for (const prev of previousChunks || []) {
+      const members = []
+      let total = 0
+      for (const member of readMembers(prev)) {
+        if (!waveIds.has(member.orderId)) continue
+        const left = remaining.get(member.orderId) || 0
+        if (left <= 0) continue
+        if (total >= portionCap) break
+        const take = Math.min(left, member.quantity, portionCap - total)
+        if (take <= 0) continue
+        members.push({ orderId: member.orderId, quantity: take })
+        remaining.set(member.orderId, left - take)
+        total += take
+      }
+      if (total <= 0) continue
+      let chunkId = prev.chunkId
+      if (usedChunkIds.has(chunkId)) {
+        chunkId = assignChunkId(dishName, members)
+      }
+      usedChunkIds.add(chunkId)
+      waveBuilt.push({ chunkId, members })
     }
-    const members = []
-    fillChunk(members, leftover, n)
-    if (members.length === 0) break
-    built.push({ chunkId: assignChunkId(dishName, members), members })
+
+    const leftover = leftoverFromRemaining(wave, remaining)
+    while (leftover.length > 0) {
+      const target = lastUnderfilled(waveBuilt, portionCap)
+      if (target) {
+        fillChunk(target.members, leftover, portionCap)
+        continue
+      }
+      const members = []
+      fillChunk(members, leftover, portionCap)
+      if (members.length === 0) break
+      const chunkId = assignChunkId(dishName, members)
+      usedChunkIds.add(chunkId)
+      waveBuilt.push({ chunkId, members })
+    }
+
+    built.push(...waveBuilt)
   }
 
   return built.map((chunk) =>
@@ -210,18 +252,20 @@ export function reconcileDishChunks({
 }
 
 /**
- * Flatten caller-sorted logical dishes into render cards.
- * Same-dish chunks stay adjacent in FIFO/chunk order.
+ * Flatten logical dishes into render cards. Same-dish chunks are not kept
+ * adjacent; the caller sorts the flat list (typically by each chunk’s oldest order).
  *
  * @param {object} params
  * @param {Array<{ dishName: string, station?: string, orders: object[], totalQuantity?: number }>} params.logicalDishes
  * @param {number} params.cap
+ * @param {number} [params.orderGapMinutes]
  * @param {Record<string, object[]>} [params.previousByDish]
  * @returns {{ cards: object[], previousByDish: Record<string, object[]> }}
  */
 export function composeKitchenDishCards({
   logicalDishes,
   cap,
+  orderGapMinutes = 0,
   previousByDish = {}
 }) {
   const nextPrevious = {}
@@ -232,6 +276,7 @@ export function composeKitchenDishCards({
       dishName: dish.dishName,
       pendingOrders: dish.orders,
       cap,
+      orderGapMinutes,
       previousChunks: previousByDish[dish.dishName] || []
     })
     nextPrevious[dish.dishName] = chunks
@@ -247,4 +292,41 @@ export function composeKitchenDishCards({
     }
   }
   return { cards, previousByDish: nextPrevious }
+}
+
+/**
+ * Order kitchen cards by each chunk’s current earliest pending order.
+ * Same-dish cards may interleave with other dishes.
+ *
+ * @param {object[]} cards
+ * @returns {object[]}
+ */
+export function sortKitchenDishCardsByOldest(cards) {
+  return [...(cards || [])]
+    .map((card) => ({
+      ...card,
+      orders: [...(card.orders || [])].sort((a, b) => {
+        const byTime = new Date(a.order_time) - new Date(b.order_time)
+        if (byTime !== 0) return byTime
+        return String(a.id ?? '').localeCompare(String(b.id ?? ''))
+      })
+    }))
+    .sort((a, b) => {
+      const byTime = (a.oldestTimestamp || 0) - (b.oldestTimestamp || 0)
+      if (byTime !== 0) return byTime
+      return String(a.chunkId || '').localeCompare(String(b.chunkId || ''))
+    })
+}
+
+/**
+ * Sticky snapshot is discarded when either 拆卡 knob changes.
+ * First run (seen == null) is not a change — do not clear 出餐选中.
+ *
+ * @param {{ cap: number, orderGapMinutes: number } | null} seen
+ * @param {number} cap
+ * @param {number} orderGapMinutes
+ */
+export function dishSplitKnobsChanged(seen, cap, orderGapMinutes) {
+  if (seen == null) return false
+  return Number(seen.cap) !== Number(cap) || Number(seen.orderGapMinutes) !== Number(orderGapMinutes)
 }

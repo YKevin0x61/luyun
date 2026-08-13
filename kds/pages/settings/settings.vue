@@ -320,6 +320,18 @@
                 />
                 <text class="form-hint">0=不拆分；超过则按最早订单拆成多张卡。改动即时保存，重进厨房页生效。</text>
               </view>
+              <view class="form-item">
+                <text class="form-label">下单间隔</text>
+                <input
+                  class="form-input"
+                  type="number"
+                  v-model="orderGapMinutesInput"
+                  placeholder="0"
+                  @blur="persistOrderGapMinutes"
+                  @confirm="persistOrderGapMinutes"
+                />
+                <text class="form-hint">0=不拆分；超过则按空档拆成多张卡。改动即时保存，重进厨房页生效。</text>
+              </view>
             </view>
           </view>
         </view>
@@ -485,6 +497,7 @@ export default {
       ],
       /** @type {string} bound to input; normalized integer persisted on blur */
       dishCardQuantityCapInput: '0',
+      orderGapMinutesInput: '0',
       apiSettings: {
         baseUrl: '',
         updatedAt: null
@@ -548,7 +561,7 @@ export default {
     activeSectionSubtitle() {
       const map = {
         connect: 'API 服务器 · 鉴权 · 实时连接 · 快速配置',
-        screen: '本屏职责档口 · 显示密度 · 菜品卡片份数上限',
+        screen: '本屏职责档口 · 显示密度 · 菜品卡片份数上限 · 下单间隔',
         device: '蓝牙打印 · 系统信息'
       }
       return map[this.activeSection] || '系统设置'
@@ -714,6 +727,9 @@ export default {
       this.dishCardQuantityCapInput = String(
         ScreenSettingsManager.getDishCardQuantityCap()
       )
+      this.orderGapMinutesInput = String(
+        ScreenSettingsManager.getOrderGapMinutes()
+      )
     },
 
     isWatchedStationSelected(stationId) {
@@ -776,6 +792,19 @@ export default {
       }
       const normalized = ScreenSettingsManager.getDishCardQuantityCap()
       this.dishCardQuantityCapInput = String(normalized)
+      uni.showToast({ title: '已保存', icon: 'success' })
+    },
+
+    persistOrderGapMinutes() {
+      const ok = ScreenSettingsManager.setOrderGapMinutes(
+        this.orderGapMinutesInput
+      )
+      if (!ok) {
+        uni.showToast({ title: '保存失败', icon: 'error' })
+        return
+      }
+      const normalized = ScreenSettingsManager.getOrderGapMinutes()
+      this.orderGapMinutesInput = String(normalized)
       uni.showToast({ title: '已保存', icon: 'success' })
     },
 

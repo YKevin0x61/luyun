@@ -1,6 +1,6 @@
 /**
  * Kitchen order session: one fetch → fan-out to new-order + delivery-cancel engines,
- * plus device-local watched stations / dish-card quantity cap / urgency thresholds.
+ * plus device-local watched stations / dish-card quantity cap / 下单间隔 / urgency thresholds.
  *
  * kitchen.vue should not import useKitchenAlerts / useDeliveryCancelAlert directly.
  * Print / serve / disconnect stay in the page.
@@ -22,6 +22,8 @@ export function useKitchenOrderSession({ ordersStore }) {
   const thresholdsMs = ref(getTimeThresholdsMs())
   /** 0 = no dish-card split (today’s one card per dish name). */
   const dishCardQuantityCap = ref(ScreenSettingsManager.getDishCardQuantityCap())
+  /** 0 = no 浪潮 split. */
+  const orderGapMinutes = ref(ScreenSettingsManager.getOrderGapMinutes())
 
   const kitchenAlerts = useKitchenAlerts()
   const deliveryCancel = useDeliveryCancelAlert({
@@ -32,6 +34,7 @@ export function useKitchenOrderSession({ ordersStore }) {
     watchedStationIds.value = [...ScreenSettingsManager.getWatchedStations()]
     thresholdsMs.value = getTimeThresholdsMs()
     dishCardQuantityCap.value = ScreenSettingsManager.getDishCardQuantityCap()
+    orderGapMinutes.value = ScreenSettingsManager.getOrderGapMinutes()
     kitchenAlerts.reloadConfig()
   }
 
@@ -130,6 +133,7 @@ export function useKitchenOrderSession({ ordersStore }) {
     watchedStationIds,
     thresholdsMs,
     dishCardQuantityCap,
+    orderGapMinutes,
     reloadDeviceSettings,
     refresh,
     start,

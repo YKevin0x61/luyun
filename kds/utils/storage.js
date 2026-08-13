@@ -68,15 +68,15 @@ function normalizeAlertParams(value) {
   }
 }
 
-/** 菜品卡片份数上限：0 = 不拆分；有效拆分范围为 1–99。 */
-const DISH_CARD_QUANTITY_CAP_MAX = 99
+/** 菜卡份数上限 / 下单间隔：0 = 不拆分；有效范围为 1–99。 */
+const SCREEN_SPLIT_INT_MAX = 99
 
-function normalizeDishCardQuantityCap(value) {
+function normalizeScreenSplitInt(value) {
   const n = Number(value)
   if (!Number.isFinite(n) || n < 0) return 0
   const truncated = Math.trunc(n)
   if (truncated <= 0) return 0
-  if (truncated > DISH_CARD_QUANTITY_CAP_MAX) return DISH_CARD_QUANTITY_CAP_MAX
+  if (truncated > SCREEN_SPLIT_INT_MAX) return SCREEN_SPLIT_INT_MAX
   return truncated
 }
 
@@ -363,7 +363,7 @@ export class PrintQueueManager {
 }
 
 /**
- * 本屏 KDS 设备本地配置（职责档口集 / 密度 / 菜品卡片份数上限 / 告警参数）。
+ * 本屏 KDS 设备本地配置（职责档口集 / 密度 / 菜品卡片份数上限 / 下单间隔 / 告警参数）。
  * 遵循 ADR 0002：按设备本地存储，不写后端。空职责档口集 = 全部档口。
  */
 export class ScreenSettingsManager {
@@ -372,6 +372,7 @@ export class ScreenSettingsManager {
       watchedStations: [],
       density: DENSITY_MODES.STANDARD,
       dishCardQuantityCap: 0,
+      orderGapMinutes: 0,
       alert: { ...DEFAULT_ALERT_PARAMS }
     }
   }
@@ -385,7 +386,8 @@ export class ScreenSettingsManager {
       return {
         watchedStations: normalizeWatchedStations(parsed.watchedStations),
         density: normalizeDensity(parsed.density),
-        dishCardQuantityCap: normalizeDishCardQuantityCap(parsed.dishCardQuantityCap),
+        dishCardQuantityCap: normalizeScreenSplitInt(parsed.dishCardQuantityCap),
+        orderGapMinutes: normalizeScreenSplitInt(parsed.orderGapMinutes),
         alert: normalizeAlertParams(parsed.alert)
       }
     } catch (error) {
@@ -406,10 +408,15 @@ export class ScreenSettingsManager {
         density: normalizeDensity(
           settings?.density !== undefined ? settings.density : current.density
         ),
-        dishCardQuantityCap: normalizeDishCardQuantityCap(
+        dishCardQuantityCap: normalizeScreenSplitInt(
           settings?.dishCardQuantityCap !== undefined
             ? settings.dishCardQuantityCap
             : current.dishCardQuantityCap
+        ),
+        orderGapMinutes: normalizeScreenSplitInt(
+          settings?.orderGapMinutes !== undefined
+            ? settings.orderGapMinutes
+            : current.orderGapMinutes
         ),
         alert: normalizeAlertParams(
           settings?.alert !== undefined
@@ -461,6 +468,15 @@ export class ScreenSettingsManager {
 
   static setDishCardQuantityCap(cap) {
     return this.saveSettings({ dishCardQuantityCap: cap })
+  }
+
+  /** @returns {number} 0 = 不按间隔拆；1–99 = 相邻下单间隔（分钟） */
+  static getOrderGapMinutes() {
+    return this.getSettings().orderGapMinutes
+  }
+
+  static setOrderGapMinutes(minutes) {
+    return this.saveSettings({ orderGapMinutes: minutes })
   }
 
   static getAlertParams() {
