@@ -7,7 +7,7 @@
 
 import { DISH_STATUS, isRefundOrder } from './constants.js'
 
-/** @typedef {'green' | 'yellow' | 'red' | 'overtime'} BorderState */
+/** @typedef {'green' | 'yellow' | 'red'} BorderState */
 /** @typedef {'yellow' | 'busy'} BadgeMode */
 
 /**
@@ -141,11 +141,9 @@ function hasOvertimePending(index, now, urgentMin) {
 /**
  * @param {boolean} awaitingAck
  * @param {boolean} hasPending
- * @param {boolean} overtime
  * @returns {BorderState}
  */
-function resolveBorderState(awaitingAck, hasPending, overtime) {
-  if (overtime) return 'overtime'
+function resolveBorderState(awaitingAck, hasPending) {
   if (awaitingAck) return 'yellow'
   if (hasPending) return 'red'
   return 'green'
@@ -178,7 +176,7 @@ export function step(state, input) {
   if (!prev.primed) {
     return {
       state: {
-        borderState: resolveBorderState(false, hasPending, overtime),
+        borderState: resolveBorderState(false, hasPending),
         awaitingAck: false,
         newBadges: new Map(),
         snapshot: nextSnapshot,
@@ -284,7 +282,7 @@ export function step(state, input) {
 
   return {
     state: {
-      borderState: resolveBorderState(awaitingAck, hasPending, overtime),
+      borderState: resolveBorderState(awaitingAck, hasPending),
       awaitingAck,
       newBadges: nextBadges,
       snapshot: nextSnapshot,
@@ -310,12 +308,11 @@ export function acknowledge(state) {
   const hasPending = [...prev.snapshot.values()].some(
     (entry) => entry.status === DISH_STATUS.PENDING
   )
-  const overtime = prev.borderState === 'overtime'
   return {
     ...prev,
     awaitingAck: false,
     newBadges: nextBadges,
-    borderState: resolveBorderState(false, hasPending, overtime),
+    borderState: resolveBorderState(false, hasPending),
     lastReescalateAt: null
   }
 }

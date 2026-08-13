@@ -1,6 +1,6 @@
 <template>
   <view class="kitchen-page">
-    <!-- 屏幕状态边框：全屏 overlay，中心透明、不拦截点击；绿/黄闪/红/超时深红脉冲 -->
+    <!-- 屏幕状态边框：全屏 overlay，中心透明、不拦截点击；绿 / 黄闪 / 红 -->
     <view
       class="screen-border"
       :class="'screen-border--' + screenBorderVisual"
@@ -1296,13 +1296,6 @@ export default {
   border-color: #ff4d4f;
 }
 
-/* Overtime: deep-red strong pulse; engine already ranks this above yellow */
-.screen-border--overtime {
-  border-color: #820014;
-  border-width: 14upx;
-  animation: screen-border-overtime-pulse 0.7s ease-in-out infinite;
-}
-
 @keyframes screen-border-yellow-flash {
   0%,
   100% {
@@ -1312,18 +1305,6 @@ export default {
   50% {
     border-color: #ffd666;
     opacity: 0.55;
-  }
-}
-
-@keyframes screen-border-overtime-pulse {
-  0%,
-  100% {
-    border-color: #820014;
-    opacity: 1;
-  }
-  50% {
-    border-color: #cf1322;
-    opacity: 0.35;
   }
 }
 

@@ -30,13 +30,12 @@ function isH5Runtime() {
 
 /**
  * Map engine borderState to kitchen screen-border CSS modifier.
- * overtime is a distinct visual (deep-red pulse), priority already decided by engine.
+ * Glossary: green | yellow-flash | red only — overtime is never a border visual.
  * @param {string} borderState
- * @returns {'green' | 'yellow' | 'red' | 'overtime'}
+ * @returns {'green' | 'yellow' | 'red'}
  */
 export function toScreenBorderVisual(borderState) {
   if (borderState === 'yellow') return 'yellow'
-  if (borderState === 'overtime') return 'overtime'
   if (borderState === 'red') return 'red'
   return 'green'
 }

@@ -193,15 +193,29 @@ describe('alertEngine', () => {
       expect(state.borderState).toBe('green')
     })
 
-    it('overtime beats yellow when a pending order exceeds urgentMin', () => {
+    it('yellow when awaitingAck even if some pending lines are overtime', () => {
+      const baseline = prime([])
+      const overdue = makeOrder({
+        order_time: '2026-07-23T11:00:00.000Z' // 60 min before T0
+      })
+      const { state, effects } = step(baseline, {
+        orders: [overdue],
+        config: defaultConfig({ urgentMin: 20 }),
+        now: T0
+      })
+
+      expect(state.awaitingAck).toBe(true)
+      expect(state.borderState).toBe('yellow')
+      expect(effects.overtimeAlarm).toBe(true)
+    })
+
+    it('red when pending and not awaitingAck even if overtime', () => {
       const old = makeOrder({
         business_flow_id: 'old',
         order_time: '2026-07-23T11:00:00.000Z' // 60 min before T0
       })
-      // idle → new order would be yellow, but old pending is already overtime
-      // Use busy path: baseline has old pending (overtime), then new arrives
       const baseline = prime([old], defaultConfig({ urgentMin: 20 }), T0)
-      expect(baseline.borderState).toBe('overtime')
+      expect(baseline.borderState).toBe('red')
 
       const { state, effects } = step(baseline, {
         orders: [old, makeOrder({ id: '2', business_flow_id: 'new' })],
@@ -209,12 +223,12 @@ describe('alertEngine', () => {
         now: T0
       })
 
-      expect(state.borderState).toBe('overtime')
+      expect(state.borderState).toBe('red')
       expect(effects.overtimeAlarm).toBe(true)
-      expect(state.awaitingAck).toBe(false) // busy path
+      expect(state.awaitingAck).toBe(false)
     })
 
-    it('yellow beats red when awaitingAck and no overtime', () => {
+    it('yellow when awaitingAck and pending is not overtime', () => {
       const baseline = prime([])
       const { state } = step(baseline, {
         orders: [makeOrder()],
@@ -223,6 +237,24 @@ describe('alertEngine', () => {
       })
       expect(state.borderState).toBe('yellow')
       expect(state.awaitingAck).toBe(true)
+    })
+
+    it('acknowledge after overtime pending yields red, not overtime', () => {
+      const baseline = prime([])
+      const overdue = makeOrder({
+        order_time: '2026-07-23T11:00:00.000Z'
+      })
+      const afterNew = step(baseline, {
+        orders: [overdue],
+        config: defaultConfig({ urgentMin: 20 }),
+        now: T0
+      }).state
+
+      expect(afterNew.borderState).toBe('yellow')
+
+      const acked = acknowledge(afterNew)
+      expect(acked.awaitingAck).toBe(false)
+      expect(acked.borderState).toBe('red')
     })
   })
 
@@ -324,7 +356,7 @@ describe('alertEngine', () => {
       // next tick after prime should alarm immediately once overtime exists
       const first = step(baseline, { orders: [old], config, now: T0 + 1000 })
       expect(first.effects.overtimeAlarm).toBe(true)
-      expect(first.state.borderState).toBe('overtime')
+      expect(first.state.borderState).toBe('red')
 
       const tooSoon = step(first.state, { orders: [old], config, now: T0 + 10_000 })
       expect(tooSoon.effects.overtimeAlarm).toBe(false)
