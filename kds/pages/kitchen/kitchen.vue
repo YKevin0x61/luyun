@@ -22,30 +22,19 @@
       </view>
     </view>
 
-    <!-- 整合的标题栏 -->
+    <!-- 一行银幕：返回、短时钟、连接点、紧凑刷新；无标题 -->
     <view class="integrated-header">
       <view class="header-content">
-        <view class="header-left">
-          <button @click="goBack" class="back-btn">
-            <text class="back-icon">←</text>
-            <text class="back-text">返回</text>
-          </button>
-          <text class="current-time current-time--full">{{ currentTime }}</text>
-          <text class="current-time current-time--short">{{ currentTimeShort }}</text>
-        </view>
-        
-        <view class="header-center">
-          <text class="main-title">厨房控制台</text>
-        </view>
-        
-        <view class="header-right">
-          <view class="connection-status" :class="connectionStatusClass">
-            <text>{{ connectionStatusText }}</text>
-          </view>
-          <button @click="refreshData" :disabled="loading" class="refresh-btn">
-            <text>{{ loading ? '刷新中...' : '手动刷新' }}</text>
-          </button>
-        </view>
+        <button @click="goBack" class="back-btn">
+          <text class="back-icon">←</text>
+          <text class="back-text">返回</text>
+        </button>
+        <text class="current-time">{{ currentTimeShort }}</text>
+        <view class="header-spacer" />
+        <view class="connection-dot" :class="connectionStatusClass" />
+        <button @click="refreshData" :disabled="loading" class="refresh-btn">
+          <text>↻</text>
+        </button>
       </view>
     </view>
 
@@ -91,70 +80,30 @@
       </button>
     </view>
 
-    <!-- 合并的控制面板 - 横向布局 -->
-    <view class="control-panel" :class="{ 'control-panel--no-tabs': isSingleWatchedStation }">
-      <!-- 档口标签区域：职责集恰为 1 个时隐藏，锁定该档全屏 -->
-      <view v-if="!isSingleWatchedStation" class="panel-section tabs-section">
-        <scroll-view scroll-x class="tabs-scroll">
-          <view class="tabs-container">
-            <button
-              v-for="station in stationTabs"
-              :key="station.id"
-              @click="switchStation(station.id)"
-              :class="['station-tab', station.id, { active: currentStation === station.id }]"
-              :style="{ borderColor: station.color }"
-            >
-              <view class="tab-content">
-                <text class="tab-name">{{ station.name }}</text>
-                <view class="tab-info">
-                  <text class="tab-count">{{ stationTabStats[station.id]?.pending ?? 0 }}</text>
-                  <text class="tab-unit">单</text>
-                </view>
-                <view v-if="(stationTabStats[station.id]?.urgent ?? 0) > 0" class="tab-urgent">
-                  <text>{{ stationTabStats[station.id]?.urgent }}急</text>
-                </view>
-              </view>
-            </button>
-          </view>
-        </scroll-view>
-      </view>
-
-      <!-- 档口信息区域 -->
-      <view class="panel-section info-section">
-        <!-- 统计信息 -->
-        <view class="stats-mini-section">
-          <view class="stat-mini-card urgent">
-            <text class="stat-mini-value">{{ currentStationStats?.overtimeCount || 0 }}</text>
-            <text class="stat-mini-title">超时</text>
-          </view>
-          <view class="stat-mini-card pending">
-            <text class="stat-mini-value">{{ currentStationStats?.pendingCount || 0 }}</text>
-            <text class="stat-mini-title">待制作</text>
-          </view>
-          <view class="stat-mini-card completed">
-            <text class="stat-mini-value">{{ currentStationStats?.completedToday || 0 }}</text>
-            <text class="stat-mini-title">已制作</text>
-          </view>
-          <view class="stat-mini-card efficiency">
-            <text class="stat-mini-value">{{ currentStationStats?.avgCookingTime || '0分' }}</text>
-            <text class="stat-mini-title">平均制作</text>
-          </view>
-        </view>
-      </view>
-
-      <!-- 排序选项区域 -->
-      <view class="panel-section sort-section">
-        <view class="sort-buttons">
-          <button 
-            v-for="option in sortOptions" 
-            :key="option.value"
-            @click="setSortBy(option.value)"
-            :class="['sort-btn', { active: currentSort === option.value }]"
+    <!-- 一屏多档才出档口 tabs；一屏一档无控制条 -->
+    <view v-if="!isSingleWatchedStation" class="control-panel">
+      <scroll-view scroll-x class="tabs-scroll">
+        <view class="tabs-container">
+          <button
+            v-for="station in stationTabs"
+            :key="station.id"
+            @click="switchStation(station.id)"
+            :class="['station-tab', station.id, { active: currentStation === station.id }]"
+            :style="{ borderColor: station.color }"
           >
-            <text>{{ option.label }}</text>
+            <view class="tab-content">
+              <text class="tab-name">{{ station.name }}</text>
+              <view class="tab-info">
+                <text class="tab-count">{{ stationTabStats[station.id]?.pending ?? 0 }}</text>
+                <text class="tab-unit">单</text>
+              </view>
+              <view v-if="(stationTabStats[station.id]?.urgent ?? 0) > 0" class="tab-urgent">
+                <text>{{ stationTabStats[station.id]?.urgent }}急</text>
+              </view>
+            </view>
           </button>
         </view>
-      </view>
+      </scroll-view>
     </view>
 
     <!-- 订单列表 -->
@@ -174,28 +123,7 @@
           <view class="empty-text"><SvgIcon name="sparkles" :size="20" color="#22c55e" /><text>暂无待制作订单</text></view>
         </view>
         <view v-else class="orders-list" :class="'density-' + densityMode">
-          <!-- H5 用 transition-group 做排序动画；非 H5 避免原生端标签不匹配，卡片模板共用 KitchenDishCard -->
-          <view v-if="isH5" style="display: contents;">
-            <transition-group
-              name="dish-sort"
-              tag="view"
-              class="dishes-container"
-            >
-              <KitchenDishCard
-                v-for="dish in currentStationMergedDishes"
-                :key="dish.chunkId"
-                :dish="dish"
-                :density="densityMode"
-                :selected-quantity="getDishSelectedQuantity(dish.chunkId)"
-                :serve-preview="dishServePreview(dish)"
-                :is-new="dishHasNewBadge(dish)"
-                @increase="increaseQuantity(dish.chunkId, dish.totalQuantity)"
-                @decrease="decreaseQuantity(dish.chunkId)"
-                @open-table-pick="openTablePick(dish.chunkId)"
-              />
-            </transition-group>
-          </view>
-          <view v-else class="dishes-container">
+          <view class="dishes-container">
             <KitchenDishCard
               v-for="dish in currentStationMergedDishes"
               :key="dish.chunkId"
@@ -299,12 +227,12 @@ import { useRealtimeStore } from '../../stores/realtime.js'
 import { useStationsStore } from '../../stores/stations.js'
 import { TimeCalculator } from '../../utils/timeCalculator.js'
 import { isRefundOrder } from '../../utils/constants.js'
-import { OrderPrioritySelector } from '../../utils/prioritySelector.js'
 import { groupOrdersByDish } from '../../utils/dishMerge.js'
 import { composeKitchenDishCards } from '../../utils/dishCardChunks.js'
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
 import { orderLineId, planBatchCookingCalls, planTablePickCookingCalls, servePreviewText } from '../../utils/batchCooking.js'
+import { toastForServeBatch } from '../../utils/serveBatchToast.js'
 import { ScreenSettingsManager, DENSITY_MODES } from '../../utils/storage.js'
 import { useKitchenOrderSession } from '../../composables/useKitchenOrderSession.js'
 import { useDisconnectAlert } from '../../composables/useDisconnectAlert.js'
@@ -325,9 +253,6 @@ export default {
     const ordersStore = useOrdersStore()
     const realtimeStore = useRealtimeStore()
     const stationsStore = useStationsStore()
-    
-    // 平台标识：是否为H5
-    const isH5 = typeof window !== 'undefined' && !!window.document
 
     // 🆕 时钟 tick 间隔：仅用于驱动"已等待时长"等显示的每秒刷新，不驱动订单合并/统计聚合
     const CLOCK_TICK_INTERVAL_MS = 1000
@@ -352,7 +277,6 @@ export default {
       deliveryCancelAlert,
       dismissDeliveryCancelAlert,
       decorateDishWait,
-      currentStationStats: buildCurrentStationStats,
       urgentCutoff
     } = orderSession
 
@@ -364,12 +288,10 @@ export default {
 
     // 响应式数据
     const operationLoading = ref(false)
-    const currentTime = ref('')
     const currentTimeShort = ref('')
     const currentTimestamp = ref(Date.now()) // 新增：响应式时间戳
     const timeInterval = ref(null)
     const currentStation = ref('changfen') // 默认选中肠粉档
-    const currentSort = ref('time')
     
     // 出餐选中：卡上份数与选桌互斥，页面只转发事件
     const serveSelection = ref(emptyServeSelection())
@@ -395,33 +317,12 @@ export default {
       return all.filter((station) => watched.has(station.id))
     })
 
-    // 职责集恰为 1 个：锁定该档全屏、隐藏 Tab 栏（按配置集大小，非过滤后可见数）
+    // 职责集恰为 1 个：锁定该档全屏、不渲染控制条（按配置集大小，非过滤后可见数）
     const isSingleWatchedStation = computed(() => watchedStationIds.value.length === 1)
     
-    // 排序选项
-    const sortOptions = ref([
-      { value: 'time', label: '按时间' },
-      { value: 'quantity', label: '按数量' },
-      { value: 'urgency', label: '按紧急度' }
-    ])
-
-    // 先按逻辑菜排序（N>0 时同名拆卡仍相邻）；时间序用 oldestTimestamp，不依赖每秒时钟
+    // 列表锁死按时间（最早下单在前）；同名拆卡仍相邻
     const sortMergedDishes = (dishes) => {
-      return [...dishes].sort((a, b) => {
-        switch (currentSort.value) {
-          case 'time':
-            return a.oldestTimestamp - b.oldestTimestamp
-          case 'quantity':
-            return b.totalQuantity - a.totalQuantity
-          case 'urgency':
-            const priorityA = OrderPrioritySelector.calculatePriority(new Date(Math.min(...a.orders.map(o => new Date(o.order_time)))))
-            const priorityB = OrderPrioritySelector.calculatePriority(new Date(Math.min(...b.orders.map(o => new Date(o.order_time)))))
-            const weights = { urgent: 3, high: 2, normal: 1 }
-            return (weights[priorityB] || 1) - (weights[priorityA] || 1)
-          default:
-            return 0
-        }
-      }).map(dish => {
+      return [...dishes].sort((a, b) => a.oldestTimestamp - b.oldestTimestamp).map(dish => {
         return {
           ...dish,
           orders: [...dish.orders].sort((a, b) => {
@@ -592,7 +493,7 @@ export default {
     const chunkedDishesBase = ref([])
 
     watch(
-      [currentStationMergedDishesBase, dishCardQuantityCap, currentSort],
+      [currentStationMergedDishesBase, dishCardQuantityCap],
       () => {
         const cap = Number(dishCardQuantityCap.value) || 0
         if (dishChunkCapSeen.value !== null && dishChunkCapSeen.value !== cap) {
@@ -714,28 +615,9 @@ export default {
       }).filter(dish => dish !== null) // 过滤掉无效的菜品
     })
     
-    // 当前档口统计（紧急阈值来自 orderSession / 本屏本地配置）
-    const currentStationStats = computed(() => {
-      void thresholdsMs.value.urgent
-      if (!ordersStore || !currentStation.value) {
-        return buildCurrentStationStats([], isPendingCookOrder)
-      }
-      const stationOrders = ordersStore.getOrdersByStation(currentStation.value)
-      return buildCurrentStationStats(stationOrders, isPendingCookOrder)
-    })
-    
     // WebSocket连接状态
     const connectionStatusClass = computed(() => {
       return realtimeStore.connectionStatus === 'connected' ? 'connected' : 'disconnected'
-    })
-    
-    const connectionStatusText = computed(() => {
-      const statusMap = {
-        'connected': '已连接',
-        'disconnected': '已断开',
-        'reconnecting': '重连中'
-      }
-      return statusMap[realtimeStore.connectionStatus] || '未知状态'
     })
 
     // 获取档口订单数量
@@ -780,21 +662,11 @@ export default {
     // 更新当前时间和响应式时间戳
     const updateCurrentTime = () => {
       const now = new Date()
-      const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-      const year = now.getFullYear()
-      const month = String(now.getMonth() + 1).padStart(2, '0')
-      const day = String(now.getDate()).padStart(2, '0')
       const hours = String(now.getHours()).padStart(2, '0')
       const minutes = String(now.getMinutes()).padStart(2, '0')
       const seconds = String(now.getSeconds()).padStart(2, '0')
-      const weekday = weekdays[now.getDay()]
-      
-              currentTime.value = `${year}-${month}-${day} ${weekday} ${hours}:${minutes}:${seconds}`
-        currentTimeShort.value = `${hours}:${minutes}:${seconds}`
-        
-        // 🆕 每秒更新时间戳，实现等待时间动态显示
-        const currentSecond = now.getTime()
-        currentTimestamp.value = currentSecond
+      currentTimeShort.value = `${hours}:${minutes}:${seconds}`
+      currentTimestamp.value = now.getTime()
     }
     
     // 方法
@@ -824,10 +696,6 @@ export default {
       if (!stillValid) {
         switchStation(tabs[0].id)
       }
-    }
-    
-    const setSortBy = (sortType) => {
-      currentSort.value = sortType
     }
 
     const refreshDataWithToast = async () => {
@@ -903,8 +771,13 @@ export default {
     })
 
     const submitServePlan = async (plan, totalCount) => {
+      const showToast = (outcome) => {
+        const toast = toastForServeBatch(outcome)
+        if (toast) uni.showToast(toast)
+      }
+
       if (plan.length === 0) {
-        uni.showToast({ title: '没有可提交的订单', icon: 'none' })
+        showToast({ processed: 0, requested: totalCount })
         return
       }
 
@@ -934,27 +807,14 @@ export default {
         }
 
         dispatchServe({ type: 'completeServe' })
-
-        if (actualProcessedCount === 0) {
-          uni.showToast({ title: '没有可提交的订单', icon: 'none' })
-        } else if (actualProcessedCount < totalCount) {
-          uni.showToast({
-            title: `部分出餐成功 ${actualProcessedCount}/${totalCount}份`,
-            icon: 'none'
-          })
-        } else {
-          uni.showToast({
-            title: `批量出餐成功，共${actualProcessedCount}份`,
-            icon: 'success'
-          })
-        }
-
+        showToast({ processed: actualProcessedCount, requested: totalCount })
         await refreshData()
       } catch (error) {
         console.error('批量出餐失败:', error)
-        uni.showToast({
-          title: '批量出餐失败: ' + (error.message || '未知错误'),
-          icon: 'error'
+        showToast({
+          processed: actualProcessedCount,
+          requested: totalCount,
+          errorMessage: error.message || '未知错误'
         })
         if (actualProcessedCount > 0) {
           await refreshData()
@@ -1186,21 +1046,17 @@ export default {
     })
     
     return {
-      isH5,
       // 响应式数据
       loading,
       operationLoading,
-      currentTime,
       currentTimeShort,
       currentTimestamp,
       currentStation,
-      currentSort,
       stationTabs,
       isSingleWatchedStation,
       densityMode,
       /** 本屏菜品卡片份数上限；0 = 不拆分（列表行为与今日一致） */
       dishCardQuantityCap,
-      sortOptions,
       selectedQuantities,
       batchSubmitting,
       printFailedCount,
@@ -1217,9 +1073,7 @@ export default {
       // 计算属性
       currentStationInfo,
       currentStationMergedDishes,
-      currentStationStats,
       connectionStatusClass,
-      connectionStatusText,
       showDisconnectBanner,
       totalSelectedCount,
       selectedDishes,
@@ -1231,7 +1085,6 @@ export default {
       
       // 方法
       switchStation,
-      setSortBy,
       refreshData: refreshDataWithToast,
       goBack,
       getStationOrderCount,
@@ -1365,8 +1218,9 @@ export default {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16upx;
-  padding: 14upx 20upx;
+  gap: 12upx;
+  padding: 8upx 16upx;
+  min-height: 72upx;
   background: linear-gradient(90deg, #d48806, #faad14);
   flex-shrink: 0;
   z-index: 20;
@@ -1381,7 +1235,7 @@ export default {
 
 .ack-banner-text {
   color: #fff;
-  font-size: 26upx;
+  font-size: 24upx;
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1390,13 +1244,14 @@ export default {
 
 .ack-banner-btn {
   flex-shrink: 0;
-  padding: 8upx 20upx;
+  padding: 4upx 16upx;
   background: rgba(255, 255, 255, 0.25);
   border: 2upx solid rgba(255, 255, 255, 0.55);
-  border-radius: 16upx;
+  border-radius: 12upx;
   color: #fff;
-  font-size: 24upx;
+  font-size: 22upx;
   font-weight: 700;
+  min-height: 64upx;
   touch-action: manipulation;
 }
 
@@ -1412,76 +1267,47 @@ export default {
   box-sizing: border-box;
 }
 
-/* 整合的标题栏 */
+/* 一行标题栏：返回、短时钟、连接点、紧凑刷新 */
 .integrated-header {
   flex-shrink: 0;
   width: 100%;
   background: linear-gradient(135deg, #4A90E2 0%, #357ABD 100%);
   box-shadow: 0 4upx 16upx rgba(0,0,0,0.15);
-  padding-top: calc(env(safe-area-inset-top) + 16upx);
+  padding-top: env(safe-area-inset-top);
   color: white;
 }
 
 .header-content {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  display: flex;
   align-items: center;
-  column-gap: 16upx;
+  gap: 12upx;
   width: 100%;
-  padding: 16upx 20upx;
+  min-height: 88upx;
+  padding: 8upx 16upx;
 }
 
-.header-left {
-  display: flex;
-  justify-content: flex-start;
-  align-items: center;
-  gap: clamp(8upx, 2vw, 16upx);
-  min-width: 0;
-  justify-self: start;
-  overflow: hidden;
-}
-
-.header-center {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  justify-self: center;
-  white-space: nowrap;
-  flex-shrink: 0;
-  padding: 0 8upx;
-}
-
-.main-title {
-  font-size: 36upx;
-  font-weight: bold;
-  color: white;
-  text-shadow: 0 2upx 6upx rgba(0,0,0,0.3);
-  letter-spacing: 1upx;
-  white-space: nowrap;
+.header-spacer {
+  flex: 1;
+  min-width: 8upx;
 }
 
 .back-btn {
   display: flex;
   align-items: center;
   gap: 8upx;
-  padding: 12upx 20upx;
+  padding: 8upx 16upx;
   background: rgba(255, 255, 255, 0.2);
   border: 2upx solid rgba(255, 255, 255, 0.3);
-  border-radius: 24upx;
-  backdrop-filter: blur(10upx);
-  transition: all 0.3s ease;
-  box-shadow: 0 2upx 8upx rgba(0,0,0,0.1);
+  border-radius: 999upx;
   flex-shrink: 0;
-  /* 增强触摸友好性 */
-  min-height: 44px; /* iOS 推荐的最小触摸目标 */
+  min-height: 44px;
   min-width: 44px;
-  touch-action: manipulation; /* 移除双击缩放延迟 */
+  touch-action: manipulation;
 }
 
 .back-btn:active {
   background: rgba(255, 255, 255, 0.3);
   transform: scale(0.95);
-  box-shadow: 0 1upx 4upx rgba(0,0,0,0.15);
 }
 
 .back-icon {
@@ -1498,91 +1324,51 @@ export default {
   white-space: nowrap;
 }
 
-.connection-status {
-  padding: 12upx 20upx; /* 减少内边距 */
-  border-radius: 20upx; /* 减少圆角 */
-  font-size: 22upx; /* 减少字体大小 */
-  font-weight: 600;
-  white-space: nowrap;
-  min-width: 80upx; /* 减少最小宽度 */
-  text-align: center;
+.connection-dot {
+  width: 20upx;
+  height: 20upx;
+  border-radius: 50%;
   flex-shrink: 0;
-  height: 44upx; /* 减少高度 */
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  background: #52c41a;
 }
 
-.connection-status.connected {
-  background: rgba(82, 196, 26, 0.25);
-  color: #F6FFED;
-  border: 2upx solid rgba(183, 235, 143, 0.4);
-  box-shadow: 0 0 12upx rgba(82, 196, 26, 0.3);
-}
-
-.connection-status.disconnected {
-  background: rgba(255, 77, 79, 0.25);
-  color: #FFF2F0;
-  border: 2upx solid rgba(255, 179, 179, 0.4);
-  box-shadow: 0 0 12upx rgba(255, 77, 79, 0.3);
+.connection-dot.disconnected {
+  background: #ff4d4f;
 }
 
 .current-time {
   font-size: 24upx;
   color: white;
-  font-weight: 600;
+  font-weight: 700;
   white-space: nowrap;
-  letter-spacing: 1upx;
+  font-variant-numeric: tabular-nums;
   flex-shrink: 0;
   background: linear-gradient(135deg, #FF8C00, #FF6600);
-  padding: 10upx 16upx;
-  border-radius: 20upx;
+  padding: 8upx 20upx;
+  border-radius: 999upx;
   border: 2upx solid rgba(255, 255, 255, 0.3);
-  box-shadow: 0 4upx 12upx rgba(255, 140, 0, 0.4);
-  backdrop-filter: blur(8upx);
-  text-shadow: 0 1upx 3upx rgba(0, 0, 0, 0.2);
-}
-
-.current-time--short {
-  display: none;
-}
-
-.header-right {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: clamp(8upx, 2vw, 16upx);
-  min-width: 0;
-  justify-self: end;
-  overflow: hidden;
 }
 
 .refresh-btn {
-  padding: 12upx 24upx; /* 减少内边距 */
+  padding: 0;
   background: rgba(255, 255, 255, 0.2);
   color: white;
-  border-radius: 20upx; /* 减少圆角 */
+  border-radius: 999upx;
   border: 2upx solid rgba(255, 255, 255, 0.3);
-  font-size: 26upx; /* 减少字体大小 */
-  font-weight: 600;
-  backdrop-filter: blur(8upx);
-  transition: all 0.3s ease;
-  box-shadow: 0 3upx 8upx rgba(0,0,0,0.12); /* 减少阴影 */
-  white-space: nowrap;
-  min-width: max(120upx, 44px); /* 减少最小宽度 */
+  font-size: 32upx;
+  font-weight: 700;
+  min-width: 44px;
+  min-height: 44px;
   flex-shrink: 0;
-  min-height: max(44upx, 44px); /* 减少最小高度 */
   display: flex;
   align-items: center;
   justify-content: center;
-  /* 增强触摸友好性 */
   touch-action: manipulation;
 }
 
 .refresh-btn:active {
   background: rgba(255, 255, 255, 0.3);
   transform: scale(0.95);
-  box-shadow: 0 2upx 8upx rgba(0,0,0,0.2);
 }
 
 .refresh-btn:disabled {
@@ -1597,15 +1383,15 @@ export default {
   align-items: center;
   justify-content: center;
   gap: 12upx;
-  padding: 14upx 24upx;
+  padding: 8upx 16upx;
+  min-height: 72upx;
   background: linear-gradient(135deg, #CF1322, #FF4D4F);
-  box-shadow: 0 2upx 12upx rgba(207, 19, 34, 0.5);
   animation: disconnect-banner-pulse 1.5s ease-in-out infinite;
 }
 
 .disconnect-banner-text {
   color: white;
-  font-size: 26upx;
+  font-size: 24upx;
   font-weight: 700;
   white-space: nowrap;
   overflow: hidden;
@@ -1628,9 +1414,9 @@ export default {
   align-items: center;
   justify-content: space-between;
   gap: 16upx;
-  padding: 12upx 24upx;
+  padding: 8upx 16upx;
+  min-height: 72upx;
   background: linear-gradient(135deg, #FF4D4F, #FF7875);
-  box-shadow: 0 2upx 8upx rgba(255, 77, 79, 0.3);
 }
 
 .print-fail-info {
@@ -1652,13 +1438,14 @@ export default {
 
 .print-retry-btn {
   flex-shrink: 0;
-  padding: 8upx 20upx;
+  padding: 4upx 16upx;
   background: rgba(255, 255, 255, 0.25);
   border: 2upx solid rgba(255, 255, 255, 0.5);
-  border-radius: 16upx;
+  border-radius: 12upx;
   color: white;
-  font-size: 24upx;
+  font-size: 22upx;
   font-weight: 600;
+  min-height: 64upx;
   touch-action: manipulation;
 }
 
@@ -1673,10 +1460,10 @@ export default {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16upx;
-  padding: 14upx 24upx;
+  gap: 12upx;
+  padding: 8upx 16upx;
+  min-height: 72upx;
   background: linear-gradient(135deg, #D46B08, #FA8C16);
-  box-shadow: 0 2upx 10upx rgba(212, 107, 8, 0.4);
 }
 
 /* 含已出餐/已打票时更醒目：深红 + 脉冲动画 */
@@ -1703,7 +1490,7 @@ export default {
 }
 
 .cancel-banner-title {
-  font-size: 26upx;
+  font-size: 24upx;
   font-weight: 700;
 }
 
@@ -1715,13 +1502,14 @@ export default {
 
 .cancel-dismiss-btn {
   flex-shrink: 0;
-  padding: 8upx 20upx;
+  padding: 4upx 16upx;
   background: rgba(255, 255, 255, 0.25);
   border: 2upx solid rgba(255, 255, 255, 0.5);
-  border-radius: 16upx;
+  border-radius: 12upx;
   color: white;
-  font-size: 24upx;
+  font-size: 22upx;
   font-weight: 600;
+  min-height: 64upx;
   touch-action: manipulation;
 }
 
@@ -1730,125 +1518,17 @@ export default {
   transform: scale(0.95);
 }
 
-/* 控制面板 - 纯 Grid 布局 */
+/* 一屏多档：仅档口 tabs */
 .control-panel {
   background: white;
   width: 100%;
   overflow: hidden;
   box-shadow: 0 2upx 8upx rgba(0,0,0,0.1);
-  display: grid;
-  grid-template-columns: 2fr 1fr 1fr;
-  grid-template-areas: "tabs info sort";
-  min-height: 120upx;
-  gap: 0;
   flex-shrink: 0;
-  align-items: stretch;
+  border-bottom: 1upx solid #E8E8E8;
 }
 
-/* 单档口锁定：无 Tab 栏，统计 + 排序均分 */
-.control-panel--no-tabs {
-  grid-template-columns: 1fr 1fr;
-  grid-template-areas: "info sort";
-}
-
-/* 中等屏幕：统计行独占一行 */
-@media screen and (max-width: 1199px) and (min-width: 768px) {
-  .control-panel {
-    grid-template-columns: 2fr 1fr;
-    grid-template-areas:
-      "tabs sort"
-      "info info";
-    grid-template-rows: auto auto;
-  }
-
-  .control-panel--no-tabs {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "sort"
-      "info";
-  }
-}
-
-/* 小屏幕：垂直堆叠 */
-@media screen and (max-width: 767px) {
-  .control-panel {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "tabs"
-      "info"
-      "sort";
-    grid-template-rows: auto auto auto;
-  }
-
-  .control-panel--no-tabs {
-    grid-template-areas:
-      "info"
-      "sort";
-    grid-template-rows: auto auto;
-  }
-}
-
-.panel-section {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  position: relative;
-  border-right: 1upx solid #F0F0F0;
-  padding: 12upx;
-}
-
-.panel-section:last-child {
-  border-right: none;
-}
-
-/* Grid区域分配 */
-.tabs-section {
-  grid-area: tabs;
-}
-
-.info-section {
-  grid-area: info;
-}
-
-.sort-section {
-  grid-area: sort;
-}
-
-/* 分隔线优化 */
-.panel-section:not(:last-child)::after {
-  content: '';
-  position: absolute;
-  top: 15%;
-  right: -1upx;
-  height: 70%;
-  width: 1upx;
-  background: linear-gradient(to bottom, transparent, #E0E0E0, transparent);
-}
-
-/* 小屏幕下 panel 区块改为底部分隔线 */
-@media screen and (max-width: 767px) {
-  .panel-section {
-    border-right: none;
-    border-bottom: 1upx solid #F0F0F0;
-  }
-
-  .panel-section:last-child {
-    border-bottom: none;
-  }
-
-  .panel-section:not(:last-child)::after {
-    display: none;
-  }
-}
-
-/* 档口标签区域 - 屏幕宽度自适应 */
-.tabs-section {
-  overflow: hidden;
-  min-width: 0; /* Grid中允许收缩 */
-  width: 100%; /* 占满分配的Grid空间 */
-  max-width: 100%; /* 防止溢出 */
-}
-
+/* 档口标签区域 */
 .tabs-scroll {
   width: 100%;
   height: 100%;
@@ -2066,164 +1746,6 @@ export default {
   z-index: 10;
 }
 
-/* 档口信息区域 - 固定25%宽度 */
-.info-section {
-  width: 100%; /* 占满分配的25%空间 */
-  min-width: 0; /* Grid中允许收缩 */
-  padding: 8upx 12upx; /* 统一内边距 */
-  display: flex;
-  justify-content: center; /* 内容居中显示 */
-  align-items: center;
-}
-
-/* 档口名称相关样式已移除 */
-
-/* 迷你统计信息 - 适配组件宽度 */
-.stats-mini-section {
-  display: flex;
-  gap: 8upx;
-  justify-content: space-between; /* 均匀分布，充分利用25%空间 */
-  width: 100%;
-  flex-wrap: nowrap; /* 不换行，强制一行显示 */
-}
-
-/* 中等屏幕下统计卡片 */
-@media screen and (max-width: 1199px) and (min-width: 768px) {
-  .stats-mini-section {
-    gap: 10upx;
-  }
-
-  .stat-mini-card {
-    flex: 1;
-    min-width: 0;
-  }
-}
-
-/* 小屏幕下统计卡片 */
-@media screen and (max-width: 767px) {
-  .stats-mini-section {
-    gap: 8upx;
-    justify-content: space-between;
-  }
-
-  .stat-mini-card {
-    flex: 1;
-    min-width: 0;
-  }
-}
-
-.stat-mini-card {
-  text-align: center;
-  padding: 8upx 6upx;
-  border-radius: 8upx;
-  box-shadow: 0 1upx 6upx rgba(0,0,0,0.08);
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
-
-.stat-mini-card.urgent {
-  background: linear-gradient(135deg, #FF6B6B, #FF8E85);
-  color: white;
-}
-
-.stat-mini-card.pending {
-  background: linear-gradient(135deg, #4ECDC4, #44A08D);
-  color: white;
-}
-
-.stat-mini-card.completed {
-  background: linear-gradient(135deg, #45B7D1, #2196F3);
-  color: white;
-}
-
-.stat-mini-card.efficiency {
-  background: linear-gradient(135deg, #96CEB4, #FFEAA7);
-  color: #2C3E50;
-}
-
-.stat-mini-value {
-  font-size: 34upx; /* 增大字体大小 */
-  font-weight: bold;
-  display: block;
-  margin-bottom: 2upx; /* 减少下边距 */
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.1; /* 减少行高 */
-}
-
-.stat-mini-title {
-  font-size: 22upx;
-  opacity: 0.9;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-weight: 500;
-  max-width: 100%;
-}
-
-/* 排序选项区域 - Grid优化 */
-.sort-section {
-  min-width: 0; /* Grid中允许收缩 */
-  padding: 8upx 12upx; /* 统一内边距 */
-}
-
-.sort-label {
-  font-size: 20upx; /* 减少字体大小 */
-  color: #666;
-  margin-bottom: 6upx; /* 减少下边距 */
-  text-align: center;
-  white-space: nowrap;
-  font-weight: 600;
-}
-
-.sort-buttons {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(60px, 1fr)); /* 自动适应按钮数量 */
-  gap: 6upx;
-  width: 100%;
-}
-
-/* 三个按钮时的优化布局 */
-@media screen and (min-width: 200px) {
-  .sort-buttons {
-    grid-template-columns: repeat(3, 1fr); /* 固定3列，对应3个排序按钮 */
-  }
-}
-
-.sort-btn {
-  padding: 6upx 10upx;
-  background: #F5F5F5;
-  border: 2upx solid transparent;
-  border-radius: 8upx;
-  font-size: 22upx; /* 增大字体大小 */
-  color: #666;
-  transition: all 0.3s ease;
-  white-space: nowrap;
-  font-weight: 600;
-  box-shadow: 0 1upx 4upx rgba(0,0,0,0.06);
-  min-height: 36upx;
-  touch-action: manipulation;
-  user-select: none;
-  -webkit-user-select: none;
-  /* Grid下优化 */
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-}
-
-.sort-btn.active {
-  background: #1890FF;
-  color: white;
-  border-color: #1890FF;
-  box-shadow: 0 4upx 12upx rgba(24, 144, 255, 0.3);
-}
-
 /* 订单区域 */
 .orders-section {
   margin-top: 8upx;
@@ -2327,7 +1849,7 @@ export default {
   border-radius: 24upx;
   font-weight: bold;
   box-shadow: 0 12upx 36upx rgba(24, 144, 255, 0.4);
-  transition: all 0.3s ease;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
   min-height: 96upx;
   width: 100%;
   touch-action: manipulation;
@@ -2357,20 +1879,6 @@ export default {
   font-weight: bold;
   white-space: nowrap;
   line-height: 1;
-}
-
-/* 为悬浮按钮添加脉动效果 */
-@keyframes batch-pulse {
-  0%, 100% {
-    box-shadow: 0 12upx 36upx rgba(24, 144, 255, 0.4);
-  }
-  50% {
-    box-shadow: 0 12upx 48upx rgba(24, 144, 255, 0.6);
-  }
-}
-
-.batch-submit-btn:not(:disabled) {
-  animation: batch-pulse 2s infinite;
 }
 
 /* 🆕 模态框样式 */
@@ -2708,72 +2216,18 @@ export default {
 .dishes-container {
   position: relative;
   width: 100%;
-  /* 继承父级的grid布局 */
-  display: contents; /* 让子元素直接参与父级的grid布局 */
-}
-
-.dish-sort-move {
-  transition: all 0.6s cubic-bezier(0.25, 0.8, 0.25, 1);
-}
-
-.dish-sort-enter-active {
-  transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
-}
-
-.dish-sort-leave-active {
-  transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
-  position: absolute;
-  /* Grid布局下自动适应宽度 */
-  width: auto;
-  z-index: 0;
-}
-
-.dish-sort-enter-from {
-  opacity: 0;
-  transform: translateY(-30upx) scale(0.95);
-}
-
-.dish-sort-leave-to {
-  opacity: 0;
-  transform: translateY(30upx) scale(0.95);
+  display: contents;
 }
 
 /* ========== 统一响应式断点（px） ========== */
 
-/* 中等宽度：压缩 header，避免三栏重叠 */
 @media screen and (min-width: 768px) and (max-width: 1199px) {
   .header-content {
-    padding: 14upx 16upx;
-    column-gap: 12upx;
+    padding: 6upx 16upx;
   }
 
   .back-text {
     display: none;
-  }
-
-  .current-time--full {
-    display: none;
-  }
-
-  .current-time--short {
-    display: block;
-    font-size: 20upx;
-    padding: 8upx 12upx;
-  }
-
-  .connection-status {
-    font-size: 20upx;
-    padding: 8upx 12upx;
-  }
-
-  .refresh-btn {
-    padding: 8upx 16upx;
-    font-size: 22upx;
-    min-width: auto;
-  }
-
-  .main-title {
-    font-size: 30upx;
   }
 
   .orders-list {
@@ -2781,23 +2235,9 @@ export default {
   }
 }
 
-/* 大屏厨房平板：三栏 Grid，标题始终居中 */
 @media screen and (min-width: 1200px) {
   .header-content {
-    padding: 16upx 32upx;
-    column-gap: 24upx;
-  }
-
-  .current-time--full {
-    display: block;
-  }
-
-  .current-time--short {
-    display: none;
-  }
-
-  .main-title {
-    font-size: 38upx;
+    padding: 8upx 32upx;
   }
 
   .orders-list {
@@ -2812,55 +2252,12 @@ export default {
 /* 小屏手机竖屏 */
 @media screen and (max-width: 767px) {
   .header-content {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10upx;
-    padding: 12upx 16upx;
+    padding: 6upx 12upx;
+    gap: 8upx;
   }
 
-  .header-left,
-  .header-right {
-    width: 100%;
-    justify-self: stretch;
-    justify-content: space-between;
-  }
-
-  .header-center {
-    width: 100%;
-    justify-self: stretch;
-    padding: 0;
-  }
-
-  .current-time--full {
-    display: block;
-    font-size: 22upx;
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .current-time--short {
+  .back-text {
     display: none;
-  }
-
-  .main-title {
-    font-size: 32upx;
-    text-align: center;
-  }
-
-  .back-btn,
-  .refresh-btn {
-    padding: 10upx 16upx;
-    font-size: 24upx;
-    min-width: auto;
-  }
-
-  .connection-status {
-    font-size: 22upx;
-    padding: 10upx 14upx;
-    min-width: auto;
   }
 
   .tabs-container {
@@ -2876,14 +2273,6 @@ export default {
   .tab-name {
     font-size: 22upx;
     max-width: 90upx;
-  }
-
-  .stat-mini-value {
-    font-size: 28upx;
-  }
-
-  .stat-mini-title {
-    font-size: 20upx;
   }
 
   .orders-list {
@@ -2927,27 +2316,12 @@ export default {
 /* 超小屏手机 */
 @media screen and (max-width: 479px) {
   .header-content {
-    padding: 10upx 12upx;
-  }
-
-  .main-title {
-    font-size: 28upx;
+    padding: 4upx 10upx;
   }
 
   .current-time {
-    font-size: 18upx;
-    padding: 6upx 10upx;
-  }
-
-  .back-btn,
-  .refresh-btn {
-    padding: 8upx 12upx;
     font-size: 20upx;
-  }
-
-  .connection-status {
-    font-size: 18upx;
-    padding: 6upx 10upx;
+    padding: 6upx 12upx;
   }
 
   .station-tab {
@@ -2962,19 +2336,6 @@ export default {
 
   .tab-count {
     font-size: 24upx;
-  }
-
-  .stat-mini-value {
-    font-size: 24upx;
-  }
-
-  .stat-mini-title {
-    font-size: 18upx;
-  }
-
-  .sort-btn {
-    font-size: 20upx;
-    padding: 6upx 8upx;
   }
 
   .dish-card {
@@ -3008,13 +2369,8 @@ export default {
 @media (prefers-reduced-motion: reduce) {
   .dish-card,
   .station-tab,
-  .sort-btn,
-  .complete-btn {
+  .batch-submit-btn {
     transition: none;
-  }
-  
-  .dish-card:hover {
-    transform: none;
   }
 }
 

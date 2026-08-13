@@ -127,7 +127,7 @@ export default {
   margin: 0;
   padding: clamp(8upx, 1vh, 12upx);
   border: 3upx solid #1890FF;
-  transition: all 0.3s ease;
+  transition: all 0.15s ease;
   width: 100%;
   min-width: 0;
   min-height: clamp(280upx, 35vh, 400upx);
@@ -141,12 +141,6 @@ export default {
   touch-action: manipulation;
   user-select: none;
   -webkit-user-select: none;
-}
-
-.dish-card:hover {
-  transform: translateY(-4upx);
-  box-shadow: 0 8upx 24upx rgba(0,0,0,0.15);
-  border-color: #40A9FF;
 }
 
 .dish-card:active {
@@ -446,7 +440,7 @@ export default {
   justify-content: center;
   font-size: 36upx;
   font-weight: bold;
-  transition: all 0.3s ease;
+  transition: all 0.15s ease;
   touch-action: manipulation;
   user-select: none;
   box-shadow: 0 4upx 12upx rgba(0,0,0,0.15);
@@ -501,7 +495,7 @@ export default {
   border-radius: 12upx;
   height: 64upx;
   width: 100%;
-  transition: all 0.3s ease;
+  transition: all 0.15s ease;
   box-shadow: 0 4upx 12upx rgba(24, 144, 255, 0.3);
   touch-action: manipulation;
   user-select: none;
@@ -531,7 +525,7 @@ export default {
   width: 100%;
   height: 64upx;
   text-align: center;
-  transition: all 0.3s ease;
+  transition: all 0.15s ease;
   gap: 4upx;
 }
 
@@ -548,23 +542,13 @@ export default {
   color: #1890FF;
   line-height: 1;
   text-shadow: 0 2upx 4upx rgba(24, 144, 255, 0.3);
-  transition: all 0.3s ease;
+  transition: all 0.15s ease;
 }
 
 .quantity-display.has-quantity .quantity-number {
   color: #0066CC;
   font-size: 52upx;
   text-shadow: 0 3upx 6upx rgba(24, 144, 255, 0.4);
-  animation: quantity-pulse 1.5s ease-in-out infinite;
-}
-
-@keyframes quantity-pulse {
-  0%, 100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.05);
-  }
 }
 
 .quantity-max {
