@@ -85,6 +85,16 @@
                 <text class="station-stat-label">紧急</text>
               </view>
             </view>
+            <view class="station-stats station-stats--secondary">
+              <view class="station-stat">
+                <text class="station-stat-value">{{ station.completedToday }}</text>
+                <text class="station-stat-label">已制作</text>
+              </view>
+              <view class="station-stat">
+                <text class="station-stat-value">{{ station.avgCookingTime }}</text>
+                <text class="station-stat-label">平均制作</text>
+              </view>
+            </view>
           </view>
         </view>
 
@@ -577,6 +587,22 @@ export default {
   gap: 24upx;
 }
 
+.station-stats--secondary {
+  margin-top: 12upx;
+  padding-top: 12upx;
+  border-top: 1upx dashed #d5dbe3;
+}
+
+.station-stats--secondary .station-stat-value {
+  font-size: 24upx;
+  font-weight: 700;
+  color: #5b6573;
+}
+
+.station-stats--secondary .station-stat-label {
+  font-size: 18upx;
+}
+
 .station-stat-value {
   display: block;
   font-size: 36upx;
@@ -675,6 +701,10 @@ export default {
 
   .station-stat-value {
     font-size: 22px;
+  }
+
+  .station-stats--secondary .station-stat-value {
+    font-size: 14px;
   }
 
   .cta-title {

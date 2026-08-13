@@ -1,6 +1,8 @@
 /**
- * KDS 首页（运营总览）统计辅助：职责档口过滤、待做/紧急、未映射计数。
+ * KDS 首页（运营总览）统计辅助：职责档口过滤、待做/紧急、档口卡已制作/平均制作、未映射计数。
  */
+
+import { buildCompletedCookingStats } from './kitchenStationStats.js'
 
 /**
  * 空职责集 = 全部档口（与 ScreenSettingsManager / ADR 0002 一致）。
@@ -64,6 +66,7 @@ export function countUnmappedDishNames(mergedDishes, qitaStationId = 'qita') {
  * @param {Array<{ station?: string, orders?: Array<{ dish_status?: string }> }>} mergedDishes
  * @param {string[]} watchedStationIds
  * @param {string} pendingStatus
+ * @returns {Array<{ id: string, name: string, color?: string, pendingCount: number, urgentCount: number, completedToday: number, avgCookingTime: string, active: boolean }>}
  */
 export function buildWatchedStationStatuses(
   stationList,
@@ -80,21 +83,27 @@ export function buildWatchedStationStatuses(
   return stations.map((station) => {
     let pendingCount = 0
     let urgentCount = 0
+    const stationOrders = []
     for (const dish of mergedDishes || []) {
       if (!dish || dish.station !== station.id) continue
-      const hasPending = (dish.orders || []).some(
-        (o) => o && o.dish_status === pendingStatus
-      )
+      const orders = dish.orders || []
+      for (const order of orders) {
+        if (order) stationOrders.push(order)
+      }
+      const hasPending = orders.some((o) => o && o.dish_status === pendingStatus)
       if (!hasPending) continue
       pendingCount += 1
       if (dish.urgentCount > 0) urgentCount += 1
     }
+    const cooking = buildCompletedCookingStats(stationOrders)
     return {
       id: station.id,
       name: station.name,
       color: station.color,
       pendingCount,
       urgentCount,
+      completedToday: cooking.completedToday,
+      avgCookingTime: cooking.avgCookingTime,
       active: pendingCount > 0
     }
   })
