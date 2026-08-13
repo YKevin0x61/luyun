@@ -183,13 +183,13 @@
             >
               <KitchenDishCard
                 v-for="dish in currentStationMergedDishes"
-                :key="dish.dishName"
+                :key="dish.chunkId"
                 :dish="dish"
                 :density="densityMode"
-                :selected-quantity="getDishSelectedQuantity(dish.dishName)"
+                :selected-quantity="getDishSelectedQuantity(dish.chunkId)"
                 :is-new="dishHasNewBadge(dish)"
-                @increase="increaseQuantity(dish.dishName, dish.totalQuantity)"
-                @decrease="decreaseQuantity(dish.dishName)"
+                @increase="increaseQuantity(dish.chunkId, dish.totalQuantity)"
+                @decrease="decreaseQuantity(dish.chunkId)"
                 @show-detail="showDishDetail(dish)"
               />
             </transition-group>
@@ -197,13 +197,13 @@
           <view v-else class="dishes-container">
             <KitchenDishCard
               v-for="dish in currentStationMergedDishes"
-              :key="dish.dishName"
+              :key="dish.chunkId"
               :dish="dish"
               :density="densityMode"
-              :selected-quantity="getDishSelectedQuantity(dish.dishName)"
+              :selected-quantity="getDishSelectedQuantity(dish.chunkId)"
               :is-new="dishHasNewBadge(dish)"
-              @increase="increaseQuantity(dish.dishName, dish.totalQuantity)"
-              @decrease="decreaseQuantity(dish.dishName)"
+              @increase="increaseQuantity(dish.chunkId, dish.totalQuantity)"
+              @decrease="decreaseQuantity(dish.chunkId)"
               @show-detail="showDishDetail(dish)"
             />
           </view>
@@ -283,7 +283,7 @@
           
           <view class="detail-section">
             <text class="detail-label">已选数量：</text>
-            <text class="detail-value">{{ getDishSelectedQuantity(currentDetailDish.dishName) }}份</text>
+            <text class="detail-value">{{ getDishSelectedQuantity(currentDetailDish.chunkId) }}份</text>
           </view>
           
           <view class="orders-detail-section">
@@ -305,7 +305,7 @@
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { onLoad, onShow } from '@dcloudio/uni-app'
 import { useOrdersStore } from '../../stores/orders.js'
 import { useRealtimeStore } from '../../stores/realtime.js'
@@ -314,6 +314,7 @@ import { TimeCalculator } from '../../utils/timeCalculator.js'
 import { isRefundOrder } from '../../utils/constants.js'
 import { OrderPrioritySelector } from '../../utils/prioritySelector.js'
 import { groupOrdersByDish } from '../../utils/dishMerge.js'
+import { composeKitchenDishCards } from '../../utils/dishCardChunks.js'
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
 import { planBatchCookingCalls } from '../../utils/batchCooking.js'
@@ -381,8 +382,8 @@ export default {
     const currentStation = ref('changfen') // 默认选中肠粉档
     const currentSort = ref('time')
     
-    // 🆕 数量控制相关状态
-    const selectedQuantities = ref({}) // 记录每个菜品选中的数量
+    // 🆕 数量控制相关状态（key = chunkId；N=0 时 chunkId 即菜名）
+    const selectedQuantities = ref({}) // 记录每个卡片选中的数量
     const batchSubmitting = ref(false) // 批量提交状态
     
     // 🆕 详情模态框状态
@@ -415,6 +416,32 @@ export default {
       { value: 'quantity', label: '按数量' },
       { value: 'urgency', label: '按紧急度' }
     ])
+
+    // 先按逻辑菜排序（N>0 时同名拆卡仍相邻）；时间序用 oldestTimestamp，不依赖每秒时钟
+    const sortMergedDishes = (dishes) => {
+      return [...dishes].sort((a, b) => {
+        switch (currentSort.value) {
+          case 'time':
+            return a.oldestTimestamp - b.oldestTimestamp
+          case 'quantity':
+            return b.totalQuantity - a.totalQuantity
+          case 'urgency':
+            const priorityA = OrderPrioritySelector.calculatePriority(new Date(Math.min(...a.orders.map(o => new Date(o.order_time)))))
+            const priorityB = OrderPrioritySelector.calculatePriority(new Date(Math.min(...b.orders.map(o => new Date(o.order_time)))))
+            const weights = { urgent: 3, high: 2, normal: 1 }
+            return (weights[priorityB] || 1) - (weights[priorityA] || 1)
+          default:
+            return 0
+        }
+      }).map(dish => {
+        return {
+          ...dish,
+          orders: [...dish.orders].sort((a, b) => {
+            return new Date(a.order_time) - new Date(b.order_time)
+          })
+        }
+      })
+    }
     
     // 计算属性
     const currentStationInfo = computed(() => {
@@ -568,14 +595,36 @@ export default {
       }).filter(dish => dish !== null) // 过滤掉无效的菜品
     })
 
-    // 🔧 性能优化：轻量计算，依赖 currentTimestamp 实现"已等待时长"每秒动态显示，
-    // 但只对 currentStationMergedDishesBase 已分组好的小数组做换算+排序，
-    // 不重新做订单合并/分组/时间解析，避免每秒全量重算
+    // Sticky FIFO 拆卡：cap 变化时丢弃上一轮快照（新 N 重新 FIFO）；成员身份跨 refresh 稳住
+    const dishChunkSnapshotByDish = ref({})
+    const dishChunkCapSeen = ref(null)
+    const chunkedDishesBase = ref([])
+
+    watch(
+      [currentStationMergedDishesBase, dishCardQuantityCap, currentSort],
+      () => {
+        const cap = Number(dishCardQuantityCap.value) || 0
+        const previous =
+          dishChunkCapSeen.value === cap ? dishChunkSnapshotByDish.value : {}
+        dishChunkCapSeen.value = cap
+        const logical = sortMergedDishes(currentStationMergedDishesBase.value)
+        const { cards, previousByDish } = composeKitchenDishCards({
+          logicalDishes: logical,
+          cap,
+          previousByDish: previous
+        })
+        dishChunkSnapshotByDish.value = previousByDish
+        chunkedDishesBase.value = cards
+      },
+      { immediate: true }
+    )
+
+    // 每秒只给已拆好的卡片换算等待/超时（按该卡自己的订单）
     const currentStationMergedDishes = computed(() => {
       const now = currentTimestamp.value
       void thresholdsMs.value
 
-      const decoratedDishes = currentStationMergedDishesBase.value.map(dish => {
+      return chunkedDishesBase.value.map(dish => {
         const wait = decorateDishWait(dish.oldestTimestamp, now)
         return {
           ...dish,
@@ -585,9 +634,6 @@ export default {
           waitTimeClass: wait.waitTimeClass
         }
       })
-      
-      // 排序
-      return sortMergedDishes(decoratedDishes)
     })
     
     // 🆕 总选中数量计算
@@ -597,17 +643,17 @@ export default {
     
     // 🆕 选中的菜品列表
     const selectedDishes = computed(() => {
-      return Object.keys(selectedQuantities.value).filter(dishName => 
-        selectedQuantities.value[dishName] > 0
-      ).map(dishName => {
-        const dish = currentStationMergedDishes.value.find(d => d.dishName === dishName)
+      return Object.keys(selectedQuantities.value).filter(chunkId => 
+        selectedQuantities.value[chunkId] > 0
+      ).map(chunkId => {
+        const dish = currentStationMergedDishes.value.find(d => d.chunkId === chunkId)
         if (!dish) {
-          debugLog(`[厨房页面] 找不到菜品: ${dishName}`)
+          debugLog(`[厨房页面] 找不到卡片: ${chunkId}`)
           return null
         }
         return {
           ...dish,
-          selectedQuantity: selectedQuantities.value[dishName],
+          selectedQuantity: selectedQuantities.value[chunkId],
           // 🔧 确保 orders 属性存在且为数组
           orders: dish.orders || []
         }
@@ -677,34 +723,6 @@ export default {
     //   pollingStore.hasDataChanged ? '🔄 有更新' : '✅ 无变化'
     // )
     
-    // 排序函数
-    const sortMergedDishes = (dishes) => {
-      return [...dishes].sort((a, b) => {
-        switch (currentSort.value) {
-          case 'time':
-            // 时间最早的排在前面（等待时间长的排前面）
-            return b.maxWaitTime - a.maxWaitTime
-          case 'quantity':
-            return b.totalQuantity - a.totalQuantity
-          case 'urgency':
-            const priorityA = OrderPrioritySelector.calculatePriority(new Date(Math.min(...a.orders.map(o => new Date(o.order_time)))))
-            const priorityB = OrderPrioritySelector.calculatePriority(new Date(Math.min(...b.orders.map(o => new Date(o.order_time)))))
-            const weights = { urgent: 3, high: 2, normal: 1 }
-            return (weights[priorityB] || 1) - (weights[priorityA] || 1)
-          default:
-            return 0
-        }
-      }).map(dish => {
-        // 对每个菜品内的订单按时间排序，最早的在前面
-        return {
-          ...dish,
-          orders: [...dish.orders].sort((a, b) => {
-            return new Date(a.order_time) - new Date(b.order_time)
-          })
-        }
-      })
-    }
-    
     // 时间格式化 - 只显示时分
     const formatTime = (timeStr) => {
       const date = new Date(timeStr)
@@ -740,8 +758,10 @@ export default {
       currentStation.value = stationId
       stationsStore.setCurrentStation(stationId)
       
-      // 🆕 切换档口时清空选中数量
+      // 🆕 切换档口时清空选中数量与拆卡快照（档口订单集不同，不能沿用上一档的 chunk）
       selectedQuantities.value = {}
+      dishChunkSnapshotByDish.value = {}
+      dishChunkCapSeen.value = null
       debugLog(`[厨房页面] 切换到档口: ${stationId}, 已清空选中数量`)
     }
 
@@ -806,28 +826,28 @@ export default {
     }
     
 
-    // 🆕 数量控制方法
-    const increaseQuantity = (dishName, maxQuantity) => {
-      if (!selectedQuantities.value[dishName]) {
-        selectedQuantities.value[dishName] = 0
+    // 🆕 数量控制方法（key = chunkId）
+    const increaseQuantity = (chunkId, maxQuantity) => {
+      if (!selectedQuantities.value[chunkId]) {
+        selectedQuantities.value[chunkId] = 0
       }
-      if (selectedQuantities.value[dishName] < maxQuantity) {
-        selectedQuantities.value[dishName]++
+      if (selectedQuantities.value[chunkId] < maxQuantity) {
+        selectedQuantities.value[chunkId]++
       }
     }
     
-    const decreaseQuantity = (dishName) => {
-      if (selectedQuantities.value[dishName] && selectedQuantities.value[dishName] > 0) {
-        selectedQuantities.value[dishName]--
-        if (selectedQuantities.value[dishName] === 0) {
-          delete selectedQuantities.value[dishName]
+    const decreaseQuantity = (chunkId) => {
+      if (selectedQuantities.value[chunkId] && selectedQuantities.value[chunkId] > 0) {
+        selectedQuantities.value[chunkId]--
+        if (selectedQuantities.value[chunkId] === 0) {
+          delete selectedQuantities.value[chunkId]
         }
       }
     }
     
-    // 🆕 获取菜品当前选中数量
-    const getDishSelectedQuantity = (dishName) => {
-      return selectedQuantities.value[dishName] || 0
+    // 🆕 获取卡片当前选中数量
+    const getDishSelectedQuantity = (chunkId) => {
+      return selectedQuantities.value[chunkId] || 0
     }
     
     // 🆕 显示菜品详情
@@ -924,7 +944,7 @@ export default {
     
     const completeCooking = async (dish) => {
       if (operationLoading.value) return
-      
+
       operationLoading.value = true
       try {
         // 数据完整性检查和修复
