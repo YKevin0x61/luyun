@@ -342,12 +342,13 @@ export default {
     // 🆕 时钟 tick 间隔：仅用于驱动"已等待时长"等显示的每秒刷新，不驱动订单合并/统计聚合
     const CLOCK_TICK_INTERVAL_MS = 1000
 
-    // 订单会话：一次拉取 → 新单/外卖取消引擎；职责档口与紧急阈值随 refresh/onShow 重读
+    // 订单会话：一次拉取 → 新单/外卖取消引擎；职责档口 / 拆卡上限 / 紧急阈值随 refresh/onShow 重读
     const orderSession = useKitchenOrderSession({ ordersStore })
     const {
       loading,
       watchedStationIds,
       thresholdsMs,
+      dishCardQuantityCap,
       refresh: refreshData,
       start: startKitchenOrderSession,
       stop: stopKitchenOrderSession,
@@ -1106,6 +1107,8 @@ export default {
       stationTabs,
       isSingleWatchedStation,
       densityMode,
+      /** 本屏菜品卡片份数上限；0 = 不拆分（列表行为与今日一致） */
+      dishCardQuantityCap,
       sortOptions,
       selectedQuantities,
       batchSubmitting,

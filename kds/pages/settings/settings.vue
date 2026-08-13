@@ -308,6 +308,18 @@
                   </view>
                 </view>
               </view>
+              <view class="form-item">
+                <text class="form-label">菜品卡片份数上限</text>
+                <input
+                  class="form-input"
+                  type="number"
+                  v-model="dishCardQuantityCapInput"
+                  placeholder="0"
+                  @blur="persistDishCardQuantityCap"
+                  @confirm="persistDishCardQuantityCap"
+                />
+                <text class="form-hint">0=不拆分；超过则按最早订单拆成多张卡。改动即时保存，重进厨房页生效。</text>
+              </view>
             </view>
           </view>
         </view>
@@ -458,7 +470,7 @@ export default {
       activeSection: 'connect',
       settingsSections: [
         { id: 'connect', label: '连接', desc: '服务器与鉴权' },
-        { id: 'screen', label: '本屏', desc: '档口与密度' },
+        { id: 'screen', label: '本屏', desc: '档口、密度与拆卡' },
         { id: 'device', label: '设备与系统', desc: '打印与版本' }
       ],
       /** @type {string[]} 空数组 = 全部档口 */
@@ -470,6 +482,8 @@ export default {
         { value: DENSITY_MODES.COMPACT, label: '紧凑' },
         { value: DENSITY_MODES.ULTRA, label: '超紧凑' }
       ],
+      /** @type {string} bound to input; normalized integer persisted on blur */
+      dishCardQuantityCapInput: '0',
       apiSettings: {
         baseUrl: '',
         updatedAt: null
@@ -533,7 +547,7 @@ export default {
     activeSectionSubtitle() {
       const map = {
         connect: 'API 服务器 · 鉴权 · 实时连接 · 快速配置',
-        screen: '本屏职责档口 · 显示密度',
+        screen: '本屏职责档口 · 显示密度 · 菜品卡片份数上限',
         device: '蓝牙打印 · 系统信息'
       }
       return map[this.activeSection] || '系统设置'
@@ -692,6 +706,9 @@ export default {
     loadScreenSettings() {
       this.watchedStations = [...ScreenSettingsManager.getWatchedStations()]
       this.density = ScreenSettingsManager.getDensity()
+      this.dishCardQuantityCapInput = String(
+        ScreenSettingsManager.getDishCardQuantityCap()
+      )
     },
 
     isWatchedStationSelected(stationId) {
@@ -741,6 +758,19 @@ export default {
         return
       }
       this.density = ScreenSettingsManager.getDensity()
+      uni.showToast({ title: '已保存', icon: 'success' })
+    },
+
+    persistDishCardQuantityCap() {
+      const ok = ScreenSettingsManager.setDishCardQuantityCap(
+        this.dishCardQuantityCapInput
+      )
+      if (!ok) {
+        uni.showToast({ title: '保存失败', icon: 'error' })
+        return
+      }
+      const normalized = ScreenSettingsManager.getDishCardQuantityCap()
+      this.dishCardQuantityCapInput = String(normalized)
       uni.showToast({ title: '已保存', icon: 'success' })
     },
 

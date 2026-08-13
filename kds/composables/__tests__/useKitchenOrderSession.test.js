@@ -2,13 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
 
 const getWatchedStations = vi.fn(() => ['changfen'])
+const getDishCardQuantityCap = vi.fn(() => 0)
 const getTimeThresholdsMs = vi.fn(() => ({ warning: 15 * 60 * 1000, urgent: 20 * 60 * 1000 }))
 
 vi.mock('../../utils/storage.js', () => ({
   ScreenSettingsManager: {
     getWatchedStations: (...args) => getWatchedStations(...args),
+    getDishCardQuantityCap: (...args) => getDishCardQuantityCap(...args),
     getSettings: () => ({
       watchedStations: getWatchedStations(),
+      dishCardQuantityCap: getDishCardQuantityCap(),
       alert: { warnMin: 15, urgentMin: 20 }
     })
   }
@@ -56,6 +59,7 @@ const { useKitchenOrderSession } = await import('../useKitchenOrderSession.js')
 describe('useKitchenOrderSession', () => {
   beforeEach(() => {
     getWatchedStations.mockReset()
+    getDishCardQuantityCap.mockReset()
     getTimeThresholdsMs.mockReset()
     syncAlertOrders.mockReset()
     syncDeliveryOrders.mockReset()
@@ -63,6 +67,7 @@ describe('useKitchenOrderSession', () => {
     startAlerts.mockReset()
     stopAlerts.mockReset()
     getWatchedStations.mockReturnValue(['changfen'])
+    getDishCardQuantityCap.mockReturnValue(0)
     getTimeThresholdsMs.mockReturnValue({
       warning: 15 * 60 * 1000,
       urgent: 20 * 60 * 1000
@@ -95,6 +100,18 @@ describe('useKitchenOrderSession', () => {
     session.onShow()
     expect(session.watchedStationIds.value).toEqual(['xibing'])
     expect(reloadConfig).toHaveBeenCalled()
+  })
+
+  it('exposes dishCardQuantityCap from local screen settings (0 = no split)', () => {
+    getDishCardQuantityCap.mockReturnValue(0)
+    const session = useKitchenOrderSession({
+      ordersStore: { orders: [], fetchOrders: vi.fn() }
+    })
+    expect(session.dishCardQuantityCap.value).toBe(0)
+
+    getDishCardQuantityCap.mockReturnValue(10)
+    session.reloadDeviceSettings()
+    expect(session.dishCardQuantityCap.value).toBe(10)
   })
 
   it('decorateDishWait uses device-local urgent threshold', () => {

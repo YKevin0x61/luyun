@@ -68,6 +68,18 @@ function normalizeAlertParams(value) {
   }
 }
 
+/** 菜品卡片份数上限：0 = 不拆分；有效拆分范围为 1–99。 */
+const DISH_CARD_QUANTITY_CAP_MAX = 99
+
+function normalizeDishCardQuantityCap(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) return 0
+  const truncated = Math.trunc(n)
+  if (truncated <= 0) return 0
+  if (truncated > DISH_CARD_QUANTITY_CAP_MAX) return DISH_CARD_QUANTITY_CAP_MAX
+  return truncated
+}
+
 /**
  * 规范化 API 基础地址（补全 http://，去掉末尾斜杠）
  * @param {string} baseUrl
@@ -351,7 +363,7 @@ export class PrintQueueManager {
 }
 
 /**
- * 本屏 KDS 设备本地配置（职责档口集 / 密度 / 告警参数）。
+ * 本屏 KDS 设备本地配置（职责档口集 / 密度 / 菜品卡片份数上限 / 告警参数）。
  * 遵循 ADR 0002：按设备本地存储，不写后端。空职责档口集 = 全部档口。
  */
 export class ScreenSettingsManager {
@@ -359,6 +371,7 @@ export class ScreenSettingsManager {
     return {
       watchedStations: [],
       density: DENSITY_MODES.STANDARD,
+      dishCardQuantityCap: 0,
       alert: { ...DEFAULT_ALERT_PARAMS }
     }
   }
@@ -372,6 +385,7 @@ export class ScreenSettingsManager {
       return {
         watchedStations: normalizeWatchedStations(parsed.watchedStations),
         density: normalizeDensity(parsed.density),
+        dishCardQuantityCap: normalizeDishCardQuantityCap(parsed.dishCardQuantityCap),
         alert: normalizeAlertParams(parsed.alert)
       }
     } catch (error) {
@@ -391,6 +405,11 @@ export class ScreenSettingsManager {
         ),
         density: normalizeDensity(
           settings?.density !== undefined ? settings.density : current.density
+        ),
+        dishCardQuantityCap: normalizeDishCardQuantityCap(
+          settings?.dishCardQuantityCap !== undefined
+            ? settings.dishCardQuantityCap
+            : current.dishCardQuantityCap
         ),
         alert: normalizeAlertParams(
           settings?.alert !== undefined
@@ -433,6 +452,15 @@ export class ScreenSettingsManager {
 
   static setDensity(mode) {
     return this.saveSettings({ density: mode })
+  }
+
+  /** @returns {number} 0 = 不拆分；1–99 = 单卡份数上限 */
+  static getDishCardQuantityCap() {
+    return this.getSettings().dishCardQuantityCap
+  }
+
+  static setDishCardQuantityCap(cap) {
+    return this.saveSettings({ dishCardQuantityCap: cap })
   }
 
   static getAlertParams() {
