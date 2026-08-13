@@ -322,6 +322,7 @@ import { ScreenSettingsManager, DENSITY_MODES } from '../../utils/storage.js'
 import { useKitchenOrderSession } from '../../composables/useKitchenOrderSession.js'
 import { useDisconnectAlert } from '../../composables/useDisconnectAlert.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
+import { takeSettingsReturnClear } from '../../utils/kitchenSelectionReset.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
 import KitchenDishCard from '../../components/KitchenDishCard/KitchenDishCard.vue'
 
@@ -604,6 +605,9 @@ export default {
       [currentStationMergedDishesBase, dishCardQuantityCap, currentSort],
       () => {
         const cap = Number(dishCardQuantityCap.value) || 0
+        if (dishChunkCapSeen.value !== null && dishChunkCapSeen.value !== cap) {
+          selectedQuantities.value = {}
+        }
         const previous =
           dishChunkCapSeen.value === cap ? dishChunkSnapshotByDish.value : {}
         dishChunkCapSeen.value = cap
@@ -871,15 +875,24 @@ export default {
       let actualProcessedCount = 0
 
       try {
+        const isSubmittable = (order) =>
+          isPendingCookOrder(order) && TimeCalculator.isToday(order.order_time)
+
         const pendingOrders = ordersStore.getOrdersByStation(currentStation.value)
-          .filter(order =>
-            isPendingCookOrder(order) &&
-            TimeCalculator.isToday(order.order_time)
-          )
+          .filter(isSubmittable)
+
+        const chunkOrders = {}
+        for (const dish of selectedDishes.value) {
+          chunkOrders[dish.chunkId] = {
+            dishName: dish.dishName,
+            orders: (dish.orders || []).filter(isSubmittable)
+          }
+        }
 
         const plan = planBatchCookingCalls({
           selectedQuantities: selectedQuantities.value,
-          pendingOrders
+          pendingOrders,
+          chunkOrders
         })
 
         if (plan.length === 0) {
@@ -1058,9 +1071,12 @@ export default {
       fallback: 'reconcile',
     })
 
-    // 从设置页返回时重读职责档口 / 告警阈值（不强制整页 remount）
+    // Settings return does not remount; clear only after a 系统设置 visit (not every onShow).
     onShow(() => {
       onKitchenOrderSessionShow()
+      if (takeSettingsReturnClear()) {
+        selectedQuantities.value = {}
+      }
       ensureCurrentStationInWatched()
     })
 

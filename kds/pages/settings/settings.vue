@@ -458,6 +458,7 @@ import {
 import { printTestTicket } from '../../utils/dishTicketPrinter.js'
 import { useRealtimeStore } from '../../stores/realtime.js'
 import { useStationsStore } from '../../stores/stations.js'
+import { noteSettingsVisit } from '../../utils/kitchenSelectionReset.js'
 
 export default {
   name: 'Settings',
@@ -664,6 +665,10 @@ export default {
     this.loadScreenSettings()
     this.loadSystemInfo()
     this.checkCurrentConnection()
+  },
+
+  onShow() {
+    noteSettingsVisit()
   },
 
   onUnload() {
