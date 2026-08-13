@@ -187,10 +187,11 @@
                 :dish="dish"
                 :density="densityMode"
                 :selected-quantity="getDishSelectedQuantity(dish.chunkId)"
+                :serve-preview="dishServePreview(dish)"
                 :is-new="dishHasNewBadge(dish)"
                 @increase="increaseQuantity(dish.chunkId, dish.totalQuantity)"
                 @decrease="decreaseQuantity(dish.chunkId)"
-                @show-detail="showDishDetail(dish)"
+                @open-table-pick="openTablePick(dish.chunkId)"
               />
             </transition-group>
           </view>
@@ -201,10 +202,11 @@
               :dish="dish"
               :density="densityMode"
               :selected-quantity="getDishSelectedQuantity(dish.chunkId)"
+              :serve-preview="dishServePreview(dish)"
               :is-new="dishHasNewBadge(dish)"
               @increase="increaseQuantity(dish.chunkId, dish.totalQuantity)"
               @decrease="decreaseQuantity(dish.chunkId)"
-              @show-detail="showDishDetail(dish)"
+              @open-table-pick="openTablePick(dish.chunkId)"
             />
           </view>
         </view>
@@ -231,9 +233,9 @@
       <text>数据变化: {{ dataChangeIndicator }}</text>
     </view> -->
     
-    <!-- 🆕 批量提交悬浮按钮 -->
+    <!-- 卡上出餐确认：选桌出餐打开时隐藏，改在 sheet 内确认 -->
     <view 
-      v-if="totalSelectedCount > 0" 
+      v-if="totalSelectedCount > 0 && !isTablePickOpen" 
       class="batch-submit-float"
     >
       <button 
@@ -243,61 +245,46 @@
       >
         <SvgIcon class="submit-icon" name="utensils" :size="18" color="#fff" />
         <text class="submit-text">
-          {{ batchSubmitting ? '提交中...' : `提交出餐 (${totalSelectedCount})` }}
+          {{ batchSubmitting ? '提交中...' : `出餐 (${totalSelectedCount})` }}
         </text>
       </button>
     </view>
     
-    <!-- 🆕 菜品详情模态框 -->
-    <view v-if="showDetailModal" class="modal-overlay" @click="closeDetailModal">
-      <view class="modal-container" @click.stop>
+    <!-- 选桌出餐：一行一份；点遮罩取消，不提交 -->
+    <view v-if="isTablePickOpen" class="modal-overlay table-pick-overlay" @click="closeTablePick">
+      <view class="table-pick-sheet" @click.stop>
         <view class="modal-header">
-          <text class="modal-title">菜品详情</text>
-          <button @click="closeDetailModal" class="modal-close">
+          <text class="modal-title">选桌出餐</text>
+          <button @click="closeTablePick" class="modal-close">
             <SvgIcon name="x" :size="16" color="#666" />
           </button>
         </view>
-        
-        <view class="modal-content" v-if="currentDetailDish">
-          <view class="detail-section">
-            <text class="detail-label">菜品名称：</text>
-            <text class="detail-value">{{ currentDetailDish.dishName }}</text>
+
+        <view class="table-pick-list">
+          <view
+            v-for="row in tablePickRows"
+            :key="row.id"
+            class="pick-line"
+            :class="{ selected: row.selected }"
+            @click="toggleTablePickLine(row.id)"
+          >
+            <text class="pick-check">{{ row.selected ? '✓' : '' }}</text>
+            <text class="pick-table">{{ row.tableNumber }}桌</text>
+            <text class="pick-time">{{ row.orderTimeLabel }}</text>
+            <text class="pick-wait">{{ row.waitLabel }}</text>
           </view>
-          
-          <view class="detail-section">
-            <text class="detail-label">总数量：</text>
-            <text class="detail-value">{{ currentDetailDish.totalQuantity }}份</text>
-          </view>
-          
-          <view class="detail-section">
-            <text class="detail-label">订单数：</text>
-            <text class="detail-value">{{ currentDetailDish.orders.length }}单</text>
-          </view>
-          
-          <view class="detail-section">
-            <text class="detail-label">等待时间：</text>
-            <text class="detail-value" :class="currentDetailDish.waitTimeClass">
-              {{ currentDetailDish.maxWaitTimeFormatted }}
+        </view>
+
+        <view class="table-pick-foot">
+          <button
+            class="batch-submit-btn"
+            :disabled="batchSubmitting || tablePickCount === 0"
+            @click="confirmTablePickServe"
+          >
+            <text class="submit-text">
+              {{ batchSubmitting ? '提交中...' : `出餐 (${tablePickCount})` }}
             </text>
-          </view>
-          
-          <view class="detail-section">
-            <text class="detail-label">已选数量：</text>
-            <text class="detail-value">{{ getDishSelectedQuantity(currentDetailDish.chunkId) }}份</text>
-          </view>
-          
-          <view class="orders-detail-section">
-            <text class="section-title">订单详情：</text>
-            <view class="orders-list-modal">
-              <view v-for="order in currentDetailDish.orders" :key="order.id" class="order-item">
-                <view class="order-header">
-                  <text class="order-table">{{ order.table_number }}桌</text>
-                  <text class="order-quantity">{{ order.quantity }}份</text>
-                </view>
-                <text class="order-time">下单时间：{{ formatTime(order.order_time) }}</text>
-              </view>
-            </view>
-          </view>
+          </button>
         </view>
       </view>
     </view>
@@ -317,12 +304,13 @@ import { groupOrdersByDish } from '../../utils/dishMerge.js'
 import { composeKitchenDishCards } from '../../utils/dishCardChunks.js'
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
-import { planBatchCookingCalls } from '../../utils/batchCooking.js'
+import { orderLineId, planBatchCookingCalls, planTablePickCookingCalls, servePreviewText } from '../../utils/batchCooking.js'
 import { ScreenSettingsManager, DENSITY_MODES } from '../../utils/storage.js'
 import { useKitchenOrderSession } from '../../composables/useKitchenOrderSession.js'
 import { useDisconnectAlert } from '../../composables/useDisconnectAlert.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
 import { takeSettingsReturnClear } from '../../utils/kitchenSelectionReset.js'
+import { applyServeSelection, emptyServeSelection } from '../../utils/serveSelection.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
 import KitchenDishCard from '../../components/KitchenDishCard/KitchenDishCard.vue'
 
@@ -383,13 +371,12 @@ export default {
     const currentStation = ref('changfen') // 默认选中肠粉档
     const currentSort = ref('time')
     
-    // 🆕 数量控制相关状态（key = chunkId；N=0 时 chunkId 即菜名）
-    const selectedQuantities = ref({}) // 记录每个卡片选中的数量
-    const batchSubmitting = ref(false) // 批量提交状态
-    
-    // 🆕 详情模态框状态
-    const showDetailModal = ref(false)
-    const currentDetailDish = ref(null)
+    // 出餐选中：卡上份数与选桌互斥，页面只转发事件
+    const serveSelection = ref(emptyServeSelection())
+    const dispatchServe = (event) => {
+      serveSelection.value = applyServeSelection(serveSelection.value, event)
+    }
+    const batchSubmitting = ref(false)
 
     // 🆕 打印队列状态（失败可见 + 补打），由 printQueue 订阅回调驱动，非本页轮询
     const printFailedCount = ref(0)
@@ -451,6 +438,9 @@ export default {
     
     const isPendingCookOrder = (order) =>
       order && order.dish_status === '待出餐' && !isRefundOrder(order)
+
+    const isSubmittableOrder = (order) =>
+      isPendingCookOrder(order) && TimeCalculator.isToday(order.order_time)
 
     // 🔧 性能优化：二分查找统计有序时间戳数组中"早于等于 cutoff"的数量（即等待超过阈值的订单数）
     // O(log n)，供每秒 tick 时使用，避免重新遍历+解析全量订单时间
@@ -606,7 +596,7 @@ export default {
       () => {
         const cap = Number(dishCardQuantityCap.value) || 0
         if (dishChunkCapSeen.value !== null && dishChunkCapSeen.value !== cap) {
-          selectedQuantities.value = {}
+          dispatchServe({ type: 'externalClear' })
         }
         const previous =
           dishChunkCapSeen.value === cap ? dishChunkSnapshotByDish.value : {}
@@ -640,6 +630,66 @@ export default {
       })
     })
     
+    const selectedQuantities = computed(() => serveSelection.value.cardCounts)
+
+    const formatTime = (timeStr) => {
+      const date = new Date(timeStr)
+      const hours = date.getHours().toString().padStart(2, '0')
+      const minutes = date.getMinutes().toString().padStart(2, '0')
+      return `${hours}:${minutes}`
+    }
+
+    const isTablePickOpen = computed(() => serveSelection.value.tablePick != null)
+
+    const tablePickDish = computed(() => {
+      const pick = serveSelection.value.tablePick
+      if (!pick) return null
+      return currentStationMergedDishes.value.find((dish) => dish.chunkId === pick.chunkId) || null
+    })
+
+    const tablePickCount = computed(() => {
+      const pick = serveSelection.value.tablePick
+      const dish = tablePickDish.value
+      if (!pick || !dish) return 0
+      const selected = new Set(pick.selectedOrderIds)
+      return (dish.orders || []).reduce((sum, order) => {
+        if (!selected.has(orderLineId(order))) return sum
+        const quantity = order.quantity || 1
+        const served = order.servedQuantity || order.served_quantity || 0
+        return sum + Math.max(0, quantity - served)
+      }, 0)
+    })
+
+    const tablePickRows = computed(() => {
+      const dish = tablePickDish.value
+      const pick = serveSelection.value.tablePick
+      if (!dish || !pick) return []
+      const selected = new Set(pick.selectedOrderIds)
+      const now = currentTimestamp.value
+      return [...(dish.orders || [])]
+        .map((order) => {
+          const id = orderLineId(order)
+          if (!id) return null
+          const orderTime = new Date(order.order_time).getTime()
+          const waitMs = Number.isNaN(orderTime) ? 0 : Math.max(0, now - orderTime)
+          return {
+            id,
+            tableNumber: order.table_number,
+            orderTimeMs: Number.isNaN(orderTime) ? 0 : orderTime,
+            orderTimeLabel: formatTime(order.order_time),
+            waitLabel: TimeCalculator.formatDurationClock(waitMs),
+            selected: selected.has(id)
+          }
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.orderTimeMs - b.orderTimeMs || a.id.localeCompare(b.id))
+    })
+
+    const dishServePreview = (dish) => {
+      const count = serveSelection.value.cardCounts[dish.chunkId] || 0
+      return servePreviewText((dish.orders || []).filter(isSubmittableOrder), count)
+    }
+
     // 🆕 总选中数量计算
     const totalSelectedCount = computed(() => {
       return Object.values(selectedQuantities.value).reduce((sum, qty) => sum + qty, 0)
@@ -727,14 +777,6 @@ export default {
     //   pollingStore.hasDataChanged ? '🔄 有更新' : '✅ 无变化'
     // )
     
-    // 时间格式化 - 只显示时分
-    const formatTime = (timeStr) => {
-      const date = new Date(timeStr)
-      const hours = date.getHours().toString().padStart(2, '0')
-      const minutes = date.getMinutes().toString().padStart(2, '0')
-      return `${hours}:${minutes}`
-    }
-    
     // 更新当前时间和响应式时间戳
     const updateCurrentTime = () => {
       const now = new Date()
@@ -762,8 +804,8 @@ export default {
       currentStation.value = stationId
       stationsStore.setCurrentStation(stationId)
       
-      // 🆕 切换档口时清空选中数量与拆卡快照（档口订单集不同，不能沿用上一档的 chunk）
-      selectedQuantities.value = {}
+      // 切换档口时清空选中（含进行中的选桌）与拆卡快照
+      dispatchServe({ type: 'externalClear' })
       dishChunkSnapshotByDish.value = {}
       dishChunkCapSeen.value = null
       debugLog(`[厨房页面] 切换到档口: ${stationId}, 已清空选中数量`)
@@ -830,78 +872,46 @@ export default {
     }
     
 
-    // 🆕 数量控制方法（key = chunkId）
+    // 卡上出餐：+1 / −1（选桌打开时 reducer 忽略 +1）
     const increaseQuantity = (chunkId, maxQuantity) => {
-      if (!selectedQuantities.value[chunkId]) {
-        selectedQuantities.value[chunkId] = 0
-      }
-      if (selectedQuantities.value[chunkId] < maxQuantity) {
-        selectedQuantities.value[chunkId]++
-      }
+      dispatchServe({ type: 'increase', chunkId, max: maxQuantity })
     }
     
     const decreaseQuantity = (chunkId) => {
-      if (selectedQuantities.value[chunkId] && selectedQuantities.value[chunkId] > 0) {
-        selectedQuantities.value[chunkId]--
-        if (selectedQuantities.value[chunkId] === 0) {
-          delete selectedQuantities.value[chunkId]
-        }
-      }
+      dispatchServe({ type: 'decrease', chunkId })
     }
     
-    // 🆕 获取卡片当前选中数量
     const getDishSelectedQuantity = (chunkId) => {
-      return selectedQuantities.value[chunkId] || 0
+      return serveSelection.value.cardCounts[chunkId] || 0
     }
-    
-    // 🆕 显示菜品详情
-    const showDishDetail = (dish) => {
-      currentDetailDish.value = dish
-      showDetailModal.value = true
-    }
-    
-    // 🆕 关闭详情模态框
-    const closeDetailModal = () => {
-      showDetailModal.value = false
-      currentDetailDish.value = null
-    }
-    
-    // 批量提交出餐：先规划目标订单集合，再按菜品合并调用（消除逐单串行重查）
-    const batchSubmitCooking = async () => {
-      if (batchSubmitting.value || totalSelectedCount.value === 0) return
 
-      const totalCount = totalSelectedCount.value
-      batchSubmitting.value = true
+    const openTablePick = (chunkId) => {
+      dispatchServe({ type: 'openTablePick', chunkId })
+    }
+
+    const closeTablePick = () => {
+      dispatchServe({ type: 'closeTablePick' })
+    }
+
+    const toggleTablePickLine = (orderId) => {
+      dispatchServe({ type: 'toggleOrderLine', orderId })
+    }
+    
+    const chunkOrdersForDish = (dish) => ({
+      dishName: dish.dishName,
+      orders: (dish.orders || []).filter(isSubmittableOrder)
+    })
+
+    const submitServePlan = async (plan, totalCount) => {
+      if (plan.length === 0) {
+        uni.showToast({ title: '没有可提交的订单', icon: 'none' })
+        return
+      }
+
+      const readyTime = new Date().toISOString()
       let actualProcessedCount = 0
 
       try {
-        const isSubmittable = (order) =>
-          isPendingCookOrder(order) && TimeCalculator.isToday(order.order_time)
-
-        const pendingOrders = ordersStore.getOrdersByStation(currentStation.value)
-          .filter(isSubmittable)
-
-        const chunkOrders = {}
-        for (const dish of selectedDishes.value) {
-          chunkOrders[dish.chunkId] = {
-            dishName: dish.dishName,
-            orders: (dish.orders || []).filter(isSubmittable)
-          }
-        }
-
-        const plan = planBatchCookingCalls({
-          selectedQuantities: selectedQuantities.value,
-          pendingOrders,
-          chunkOrders
-        })
-
-        if (plan.length === 0) {
-          uni.showToast({ title: '没有可提交的订单', icon: 'none' })
-          return
-        }
-
-        const readyTime = new Date().toISOString()
-
         for (const item of plan) {
           const completeData = {
             dishName: item.dishName,
@@ -923,7 +933,7 @@ export default {
           actualProcessedCount += item.completeQuantity
         }
 
-        selectedQuantities.value = {}
+        dispatchServe({ type: 'completeServe' })
 
         if (actualProcessedCount === 0) {
           uni.showToast({ title: '没有可提交的订单', icon: 'none' })
@@ -940,7 +950,6 @@ export default {
         }
 
         await refreshData()
-
       } catch (error) {
         console.error('批量出餐失败:', error)
         uni.showToast({
@@ -950,6 +959,52 @@ export default {
         if (actualProcessedCount > 0) {
           await refreshData()
         }
+      }
+    }
+
+    const batchSubmitCooking = async () => {
+      if (batchSubmitting.value || totalSelectedCount.value === 0 || isTablePickOpen.value) return
+
+      const totalCount = totalSelectedCount.value
+      batchSubmitting.value = true
+      try {
+        const pendingOrders = ordersStore.getOrdersByStation(currentStation.value)
+          .filter(isSubmittableOrder)
+
+        const chunkOrders = {}
+        for (const dish of selectedDishes.value) {
+          chunkOrders[dish.chunkId] = chunkOrdersForDish(dish)
+        }
+
+        const plan = planBatchCookingCalls({
+          selectedQuantities: selectedQuantities.value,
+          pendingOrders,
+          chunkOrders
+        })
+        await submitServePlan(plan, totalCount)
+      } finally {
+        batchSubmitting.value = false
+      }
+    }
+
+    const confirmTablePickServe = async () => {
+      const pick = serveSelection.value.tablePick
+      if (batchSubmitting.value || !pick || pick.selectedOrderIds.length === 0) return
+
+      const dish = tablePickDish.value
+      if (!dish) return
+
+      const totalCount = tablePickCount.value
+      batchSubmitting.value = true
+      try {
+        const plan = planTablePickCookingCalls({
+          selectedOrderIds: pick.selectedOrderIds,
+          chunkId: pick.chunkId,
+          chunkOrders: {
+            [pick.chunkId]: chunkOrdersForDish(dish)
+          }
+        })
+        await submitServePlan(plan, totalCount)
       } finally {
         batchSubmitting.value = false
       }
@@ -1075,7 +1130,7 @@ export default {
     onShow(() => {
       onKitchenOrderSessionShow()
       if (takeSettingsReturnClear()) {
-        selectedQuantities.value = {}
+        dispatchServe({ type: 'externalClear' })
       }
       ensureCurrentStationInWatched()
     })
@@ -1169,12 +1224,10 @@ export default {
       totalSelectedCount,
       selectedDishes,
       stationTabStats,
-      // stationStatusClass,
-      // stationStatusText,
-      // autoRefreshInterval,
-      // pollingSuccessRate,
-      // lastUpdateTime,
-      // dataChangeIndicator,
+      isTablePickOpen,
+      tablePickCount,
+      tablePickRows,
+      dishServePreview,
       
       // 方法
       switchStation,
@@ -1185,17 +1238,15 @@ export default {
       getStationUrgentCount,
       completeCooking,
       formatTime,
-      // 🆕 数量控制方法
       increaseQuantity,
       decreaseQuantity,
       getDishSelectedQuantity,
       batchSubmitCooking,
+      confirmTablePickServe,
       retryFailedPrints,
-      // 🆕 详情模态框方法
-      showDishDetail,
-      closeDetailModal,
-      showDetailModal,
-      currentDetailDish
+      openTablePick,
+      closeTablePick,
+      toggleTablePickLine
     }
   }
 }
@@ -2355,6 +2406,85 @@ export default {
   justify-content: center;
   padding: 40upx;
   backdrop-filter: blur(4upx);
+}
+
+.table-pick-overlay {
+  align-items: flex-end;
+  padding: 0;
+}
+
+.table-pick-sheet {
+  background: white;
+  width: min(560px, 100%);
+  max-height: 86vh;
+  border-radius: 16upx 16upx 0 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.table-pick-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8upx 24upx;
+  min-height: 0;
+}
+
+.pick-line {
+  display: grid;
+  grid-template-columns: 48upx 1fr auto auto;
+  gap: 16upx;
+  align-items: center;
+  padding: 20upx 8upx;
+  border-bottom: 1upx solid #F0F0F0;
+  min-height: 88upx;
+}
+
+.pick-line.selected {
+  background: #F6FFED;
+}
+
+.pick-check {
+  width: 40upx;
+  height: 40upx;
+  border: 2upx solid #BFBFBF;
+  border-radius: 8upx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24upx;
+  font-weight: 700;
+  color: #52C41A;
+}
+
+.pick-line.selected .pick-check {
+  border-color: #52C41A;
+  background: #F6FFED;
+}
+
+.pick-table {
+  font-size: 30upx;
+  font-weight: 700;
+  color: #1890FF;
+}
+
+.pick-time,
+.pick-wait {
+  font-size: 26upx;
+  color: #595959;
+  white-space: nowrap;
+}
+
+.table-pick-foot {
+  padding: 16upx 24upx calc(16upx + env(safe-area-inset-bottom));
+}
+
+.table-pick-foot .batch-submit-btn {
+  animation: none;
+}
+
+.table-pick-foot .batch-submit-btn:disabled {
+  opacity: 0.45;
 }
 
 .modal-container {

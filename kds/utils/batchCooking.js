@@ -38,6 +38,92 @@ function allocateFifo(orders, target) {
   return allocations
 }
 
+export function orderLineId(order) {
+  return String(order?.id ?? order?._id ?? '')
+}
+
+/**
+ * Group FIFO allocations into 将出预览 copy: `8桌×2、3桌` (no ×1).
+ *
+ * @param {Array<{ order: object, serveQuantity: number }>} [allocations]
+ * @returns {string}
+ */
+export function formatServePreview(allocations) {
+  if (!Array.isArray(allocations) || allocations.length === 0) return ''
+
+  const groups = []
+  for (const item of allocations) {
+    const n = Number(item?.serveQuantity) || 0
+    if (n <= 0) continue
+    const table = String(item?.order?.table_number ?? '')
+    const prev = groups.find((group) => group.table === table)
+    if (prev) prev.n += n
+    else groups.push({ table, n })
+  }
+
+  return groups.map((group) => (group.n > 1 ? `${group.table}桌×${group.n}` : `${group.table}桌`)).join('、')
+}
+
+/**
+ * FIFO 将出预览 for a card’s selected count. Empty / 0 → ''.
+ *
+ * @param {object[]} orders
+ * @param {number} selectedQuantity
+ * @returns {string}
+ */
+export function servePreviewText(orders, selectedQuantity) {
+  const qty = Number(selectedQuantity) || 0
+  if (qty <= 0) return ''
+  return formatServePreview(allocateFifo(orders || [], qty))
+}
+
+function cookingCallFromAllocations(dishName, allocations) {
+  if (!allocations.length) return null
+  const completeQuantity = allocations.reduce((sum, item) => sum + item.serveQuantity, 0)
+  return {
+    dishName,
+    completeQuantity,
+    orders: allocations.map((item) => item.order),
+    allocations
+  }
+}
+
+/**
+ * Plan 选桌出餐 from an explicit set of 订单行 ids in one chunk.
+ * No FIFO fill; ids outside the chunk are ignored.
+ *
+ * @param {object} params
+ * @param {string[]} params.selectedOrderIds
+ * @param {string} params.chunkId
+ * @param {Record<string, { dishName: string, orders: object[] }>} params.chunkOrders
+ * @returns {Array<{
+ *   dishName: string,
+ *   completeQuantity: number,
+ *   orders: object[],
+ *   allocations: Array<{ order: object, serveQuantity: number }>
+ * }>}
+ */
+export function planTablePickCookingCalls({ selectedOrderIds, chunkId, chunkOrders }) {
+  if (!Array.isArray(selectedOrderIds) || selectedOrderIds.length === 0) return []
+  if (!chunkId || !chunkOrders || typeof chunkOrders !== 'object') return []
+
+  const chunk = chunkOrders[chunkId]
+  if (!chunk) return []
+
+  const wanted = new Set(selectedOrderIds.map((id) => String(id)))
+  const allocations = []
+  for (const order of Array.isArray(chunk.orders) ? chunk.orders : []) {
+    const id = orderLineId(order)
+    if (!id || !wanted.has(id)) continue
+    const take = availableQuantity(order)
+    if (take <= 0) continue
+    allocations.push({ order, serveQuantity: take })
+  }
+
+  const call = cookingCallFromAllocations(chunk.dishName || chunkId, allocations)
+  return call ? [call] : []
+}
+
 /**
  * Plan merged completeCooking calls from selected portion counts.
  *
@@ -83,18 +169,11 @@ export function planBatchCookingCalls({ selectedQuantities, pendingOrders, chunk
     }
 
     const allocations = allocateFifo(sourceOrders, target)
-    if (allocations.length === 0) continue
-
-    const completeQuantity = allocations.reduce((sum, item) => sum + item.serveQuantity, 0)
-    plan.push({
-      dishName,
-      completeQuantity,
-      orders: allocations.map((item) => item.order),
-      allocations
-    })
+    const call = cookingCallFromAllocations(dishName, allocations)
+    if (call) plan.push(call)
   }
 
   return plan
 }
 
-export default { planBatchCookingCalls }
+export default { planBatchCookingCalls, formatServePreview, servePreviewText, planTablePickCookingCalls, orderLineId }

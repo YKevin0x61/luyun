@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { planBatchCookingCalls } from '../batchCooking.js'
+import { formatServePreview, planBatchCookingCalls, planTablePickCookingCalls, servePreviewText } from '../batchCooking.js'
 
 function makeOrder(overrides = {}) {
   return {
@@ -235,3 +235,114 @@ describe('planBatchCookingCalls', () => {
     ])
   })
 })
+
+describe('将出预览', () => {
+  it('groups FIFO tables as 8桌×2、3桌 and omits ×1', () => {
+    const eightA = makeOrder({ id: 'a', table_number: '8', order_time: '2026-07-23T01:00:00.000Z' })
+    const eightB = makeOrder({ id: 'b', table_number: '8', order_time: '2026-07-23T01:01:00.000Z' })
+    const three = makeOrder({ id: 'c', table_number: '3', order_time: '2026-07-23T01:02:00.000Z' })
+    const later = makeOrder({ id: 'd', table_number: '12', order_time: '2026-07-23T01:03:00.000Z' })
+
+    const [plan] = planBatchCookingCalls({
+      selectedQuantities: { 虾饺: 3 },
+      pendingOrders: [later, three, eightB, eightA]
+    })
+
+    expect(formatServePreview(plan.allocations)).toBe('8桌×2、3桌')
+    expect(formatServePreview([{ order: three, serveQuantity: 1 }])).toBe('3桌')
+  })
+
+  it('uses serveQuantity on a leftover qty>1 row so 8桌×2 stays correct', () => {
+    const leftover = makeOrder({
+      id: 'a',
+      quantity: 2,
+      table_number: '8',
+      order_time: '2026-07-23T01:00:00.000Z'
+    })
+    const [plan] = planBatchCookingCalls({
+      selectedQuantities: { 虾饺: 2 },
+      pendingOrders: [leftover]
+    })
+    expect(formatServePreview(plan.allocations)).toBe('8桌×2')
+  })
+
+  it('returns an empty string when nothing is selected', () => {
+    expect(formatServePreview([])).toBe('')
+    expect(formatServePreview(undefined)).toBe('')
+    expect(servePreviewText([makeOrder()], 0)).toBe('')
+  })
+})
+
+describe('planTablePickCookingCalls', () => {
+  it('plans 选桌出餐 from explicit 订单行 ids in that chunk only', () => {
+    const earlier = makeOrder({
+      id: 'a',
+      table_number: '1',
+      order_time: '2026-07-23T01:00:00.000Z'
+    })
+    const later = makeOrder({
+      id: 'b',
+      table_number: '2',
+      order_time: '2026-07-23T02:00:00.000Z'
+    })
+    const sibling = makeOrder({
+      id: 'c',
+      table_number: '3',
+      order_time: '2026-07-23T03:00:00.000Z'
+    })
+
+    const plan = planTablePickCookingCalls({
+      selectedOrderIds: ['b', 'c'],
+      chunkId: '虾饺::later',
+      chunkOrders: {
+        '虾饺::later': { dishName: '虾饺', orders: [later] },
+        '虾饺::earlier': { dishName: '虾饺', orders: [earlier, sibling] }
+      }
+    })
+
+    expect(plan).toEqual([
+      {
+        dishName: '虾饺',
+        completeQuantity: 1,
+        orders: [later],
+        allocations: [{ order: later, serveQuantity: 1 }]
+      }
+    ])
+  })
+
+  it('returns an empty plan for an empty pick', () => {
+    const order = makeOrder({ id: 'a' })
+    expect(
+      planTablePickCookingCalls({
+        selectedOrderIds: [],
+        chunkId: '虾饺',
+        chunkOrders: { 虾饺: { dishName: '虾饺', orders: [order] } }
+      })
+    ).toEqual([])
+  })
+
+  it('takes the leftover quantity on a selected 订单行 (no FIFO fill)', () => {
+    const leftover = makeOrder({ id: 'a', quantity: 2, table_number: '8' })
+    const later = makeOrder({
+      id: 'b',
+      quantity: 1,
+      table_number: '3',
+      order_time: '2026-07-23T02:00:00.000Z'
+    })
+    expect(
+      planTablePickCookingCalls({
+        selectedOrderIds: ['a'],
+        chunkId: '虾饺',
+        chunkOrders: { 虾饺: { dishName: '虾饺', orders: [leftover, later] } }
+      })
+    ).toEqual([
+      {
+        dishName: '虾饺',
+        completeQuantity: 2,
+        orders: [leftover],
+        allocations: [{ order: leftover, serveQuantity: 2 }]
+      }
+    ])
+  })
+})
+

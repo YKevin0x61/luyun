@@ -26,7 +26,7 @@
       <text class="time-value" :class="dish.waitTimeClass">{{ dish.maxWaitTimeFormatted }}</text>
     </view>
 
-    <!-- 超紧凑：隐藏每桌明细，桌号进详情；紧凑：每桌收成单行 -->
+    <!-- 超紧凑：隐藏每桌常驻列表；将出预览与选桌三档都保留 -->
     <view v-if="density !== DENSITY_MODES.ULTRA" class="orders-detail">
       <view class="orders-grid">
         <view v-for="order in dish.orders" :key="order.id" class="order-block">
@@ -38,6 +38,10 @@
           <text v-if="density !== DENSITY_MODES.COMPACT" class="block-time">{{ formatOrderTime(order.order_time) }}</text>
         </view>
       </view>
+    </view>
+
+    <view v-if="selectedQuantity > 0 && servePreview" class="serve-preview" @click.stop>
+      <text class="serve-preview-text">将出 {{ servePreview }}</text>
     </view>
 
     <view class="dish-actions" @click.stop>
@@ -63,8 +67,8 @@
         </view>
 
         <view class="action-section detail-section">
-          <button class="detail-btn" @click="$emit('show-detail')">
-            <text class="detail-text">详情</text>
+          <button class="detail-btn" @click="$emit('open-table-pick')">
+            <text class="detail-text">选桌</text>
           </button>
         </view>
       </view>
@@ -86,6 +90,11 @@ export default {
       type: Number,
       default: 0
     },
+    /** FIFO 将出预览文案；选中份数 > 0 时只读展示 */
+    servePreview: {
+      type: String,
+      default: ''
+    },
     /** 新单角标：由告警引擎 newBadges 驱动，与超时红边框用外发光区分 */
     isNew: {
       type: Boolean,
@@ -97,7 +106,7 @@ export default {
       default: DENSITY_MODES.STANDARD
     }
   },
-  emits: ['increase', 'decrease', 'show-detail'],
+  emits: ['increase', 'decrease', 'open-table-pick'],
   setup() {
     const formatOrderTime = (timeStr) => {
       const date = new Date(timeStr)
@@ -282,6 +291,22 @@ export default {
   overflow: hidden;
   min-height: 0;
   max-height: 260upx;
+}
+
+.serve-preview {
+  flex-shrink: 0;
+  margin: 4upx 0 2upx;
+  padding: 6upx 8upx;
+  background: #F6FFED;
+  border: 1upx solid #D9F7BE;
+  border-radius: 8upx;
+}
+
+.serve-preview-text {
+  font-size: 22upx;
+  font-weight: 600;
+  color: #389E0D;
+  line-height: 1.3;
 }
 
 .orders-grid {
@@ -603,6 +628,15 @@ export default {
 
 .dish-card.density-ultra .time-value {
   font-size: 30upx;
+}
+
+.dish-card.density-ultra .serve-preview {
+  padding: 4upx 6upx;
+  margin: 2upx 0;
+}
+
+.dish-card.density-ultra .serve-preview-text {
+  font-size: 20upx;
 }
 
 .dish-card.density-ultra .actions-container {
