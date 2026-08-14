@@ -33,7 +33,9 @@ import { DISH_STATUS, isRefundOrder } from './constants.js'
  *   reescalateSec?: number,
  *   badgeDismissSec?: number,
  *   urgentMin?: number,
- *   overtimeRepeatSec?: number
+ *   steamUrgentMin?: number,
+ *   overtimeRepeatSec?: number,
+ *   steamerWorkSurface?: '' | 'load' | 'steaming' | 'solo'
  * }} AlertConfig
  */
 
@@ -43,8 +45,11 @@ const DEFAULT_CONFIG = Object.freeze({
   reescalateSec: 20,
   badgeDismissSec: 30,
   urgentMin: 20,
+  steamUrgentMin: 20,
   overtimeRepeatSec: 30
 })
+
+const STEAMER_WORK_SURFACE_SET = new Set(['load', 'steaming', 'solo'])
 
 /**
  * @returns {AlertState}
@@ -94,30 +99,56 @@ function normalizeConfig(raw) {
       ? Number(c.badgeDismissSec)
       : DEFAULT_CONFIG.badgeDismissSec,
     urgentMin: Number.isFinite(Number(c.urgentMin)) ? Number(c.urgentMin) : DEFAULT_CONFIG.urgentMin,
+    steamUrgentMin: Number.isFinite(Number(c.steamUrgentMin))
+      ? Number(c.steamUrgentMin)
+      : DEFAULT_CONFIG.steamUrgentMin,
     overtimeRepeatSec: Number.isFinite(Number(c.overtimeRepeatSec))
       ? Number(c.overtimeRepeatSec)
-      : DEFAULT_CONFIG.overtimeRepeatSec
+      : DEFAULT_CONFIG.overtimeRepeatSec,
+    steamerWorkSurface: STEAMER_WORK_SURFACE_SET.has(c.steamerWorkSurface)
+      ? c.steamerWorkSurface
+      : ''
   }
+}
+
+function asTimestamp(value) {
+  if (value == null || value === '') return NaN
+  if (typeof value === 'number') return value
+  if (value instanceof Date) return value.getTime()
+  return Date.parse(value)
+}
+
+function isCancelHold(order) {
+  return Boolean(order && order.dish_status === '已取消' && order.placement)
 }
 
 /**
  * @param {object[]} orders
  * @param {string[]} watchedStations
- * @returns {Map<string, { status: string, quantity: number, orderTime: number }>}
+ * @param {string} surface
+ * @returns {Map<string, object>}
  */
-function buildRelevantIndex(orders, watchedStations) {
+function buildRelevantIndex(orders, watchedStations, surface) {
   const index = new Map()
   if (!Array.isArray(orders)) return index
   for (const order of orders) {
-    if (!order || isRefundOrder(order)) continue
+    if (!order) continue
+    const hold = isCancelHold(order)
+    if (isRefundOrder(order) && !(surface && hold)) continue
     if (!isWatched(watchedStations, order)) continue
     const flowId = flowIdOf(order)
     if (!flowId) continue
     const quantity = Number(order.quantity)
+    const hasPlacement = Boolean(order.placement)
+    const pending = order.dish_status === DISH_STATUS.PENDING
     index.set(flowId, {
       status: order.dish_status,
       quantity: Number.isFinite(quantity) ? quantity : 0,
-      orderTime: new Date(order.order_time).getTime()
+      orderTime: new Date(order.order_time).getTime(),
+      awaiting: pending && !hasPlacement,
+      steaming: pending && hasPlacement,
+      cancelHold: hold,
+      loadedAt: asTimestamp(order.placement?.loaded_at)
     })
   }
   return index
@@ -136,6 +167,61 @@ function hasOvertimePending(index, now, urgentMin) {
     if (now - entry.orderTime > thresholdMs) return true
   }
   return false
+}
+
+function hasAwaitingOvertime(index, now, urgentMin) {
+  const thresholdMs = urgentMin * 60 * 1000
+  for (const entry of index.values()) {
+    if (!entry.awaiting) continue
+    if (!Number.isFinite(entry.orderTime)) continue
+    if (now - entry.orderTime > thresholdMs) return true
+  }
+  return false
+}
+
+function hasSteamOvertime(index, now, steamUrgentMin) {
+  const thresholdMs = steamUrgentMin * 60 * 1000
+  for (const entry of index.values()) {
+    if (!entry.steaming) continue
+    if (!Number.isFinite(entry.loadedAt)) continue
+    if (now - entry.loadedAt > thresholdMs) return true
+  }
+  return false
+}
+
+function hasPendingWork(index, surface) {
+  if (surface === 'steaming') {
+    for (const entry of index.values()) {
+      if (entry.steaming || entry.cancelHold) return true
+    }
+    return false
+  }
+  if (surface === 'load' || surface === 'solo') {
+    for (const entry of index.values()) {
+      if (entry.awaiting) return true
+    }
+    return false
+  }
+  for (const entry of index.values()) {
+    if (entry.status === DISH_STATUS.PENDING) return true
+  }
+  return false
+}
+
+function isNewOrderEntry(entry, surface) {
+  if (surface === 'steaming') return false
+  if (surface === 'load' || surface === 'solo') return entry.awaiting
+  return entry.status === DISH_STATUS.PENDING
+}
+
+function snapshotEntry(entry, surface) {
+  const base = { status: entry.status, quantity: entry.quantity }
+  if (!surface) return base
+  return {
+    ...base,
+    awaiting: entry.awaiting,
+    mapWork: entry.steaming || entry.cancelHold
+  }
 }
 
 /**
@@ -158,19 +244,24 @@ export function step(state, input) {
   const prev = state || createInitialState()
   const now = Number.isFinite(input?.now) ? input.now : Date.now()
   const config = normalizeConfig(input?.config)
-  const index = buildRelevantIndex(input?.orders, config.watchedStations)
+  const surface = config.steamerWorkSurface
+  const index = buildRelevantIndex(input?.orders, config.watchedStations, surface)
 
   const nextSnapshot = new Map()
   for (const [flowId, entry] of index) {
-    nextSnapshot.set(flowId, { status: entry.status, quantity: entry.quantity })
+    nextSnapshot.set(flowId, snapshotEntry(entry, surface))
   }
 
-  let pendingCount = 0
-  for (const entry of index.values()) {
-    if (entry.status === DISH_STATUS.PENDING) pendingCount++
-  }
-  const hasPending = pendingCount > 0
-  const overtime = hasOvertimePending(index, now, config.urgentMin)
+  const hasPending = hasPendingWork(index, surface)
+  const waitOvertime = surface === 'steaming'
+    ? false
+    : surface
+      ? hasAwaitingOvertime(index, now, config.urgentMin)
+      : hasOvertimePending(index, now, config.urgentMin)
+  const steamOvertime = surface === 'steaming' || surface === 'solo'
+    ? hasSteamOvertime(index, now, config.steamUrgentMin)
+    : false
+  const overtime = waitOvertime || steamOvertime
 
   // First pass: baseline only — mirror reality, no alerts.
   if (!prev.primed) {
@@ -191,12 +282,13 @@ export function step(state, input) {
   /** @type {string[]} */
   const newEventFlowIds = []
   for (const [flowId, entry] of index) {
-    if (entry.status !== DISH_STATUS.PENDING) continue
+    if (!isNewOrderEntry(entry, surface)) continue
     const prevEntry = prev.snapshot.get(flowId)
     if (!prevEntry) {
       newEventFlowIds.push(flowId)
       continue
     }
+    // 下笼 clears placement but the line was already 待出餐 — not a 新单事件.
     if (prevEntry.status !== DISH_STATUS.PENDING) {
       newEventFlowIds.push(flowId)
       continue
@@ -208,7 +300,11 @@ export function step(state, input) {
 
   let prevPendingCount = 0
   for (const entry of prev.snapshot.values()) {
-    if (entry.status === DISH_STATUS.PENDING) prevPendingCount++
+    if (Object.prototype.hasOwnProperty.call(entry, 'awaiting')) {
+      if (entry.awaiting) prevPendingCount++
+    } else if (entry.status === DISH_STATUS.PENDING) {
+      prevPendingCount++
+    }
   }
   const wasIdle = prevPendingCount === 0
 
@@ -217,6 +313,13 @@ export function step(state, input) {
   const nextBadges = new Map(prev.newBadges)
   let dingCount = 0
   let lastReescalateAt = prev.lastReescalateAt
+
+  // 在蒸面 never yellow-flashes or keeps new-order chrome.
+  if (surface === 'steaming') {
+    awaitingAck = false
+    lastReescalateAt = null
+    nextBadges.clear()
+  }
 
   // No pending left → nothing to acknowledge; border falls to green.
   if (!hasPending) {
@@ -305,8 +408,10 @@ export function acknowledge(state) {
   for (const [flowId, badge] of prev.newBadges) {
     if (badge.mode === 'busy') nextBadges.set(flowId, badge)
   }
-  const hasPending = [...prev.snapshot.values()].some(
-    (entry) => entry.status === DISH_STATUS.PENDING
+  const hasPending = [...prev.snapshot.values()].some((entry) =>
+    Object.prototype.hasOwnProperty.call(entry, 'awaiting')
+      ? entry.awaiting
+      : entry.status === DISH_STATUS.PENDING
   )
   return {
     ...prev,

@@ -117,8 +117,16 @@ class Settings(BaseSettings):
         },
         "shulong": {
             "id": "shulong",
-            "name": "熟笼档", 
-            "color": "#45B7D1"
+            "name": "熟笼档",
+            "color": "#45B7D1",
+            "steamer_layout": {
+                "steamers": [
+                    {"id": "1", "port_count": 6},
+                    {"id": "2", "port_count": 6},
+                ],
+                "port_capacity": 10,
+                "awaiting_cancel_notice_seconds": 180,
+            },
         },
         "mingdang1": {
             "id": "mingdang1",

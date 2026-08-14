@@ -76,3 +76,24 @@ class CompleteCookingRequest(BaseModel):
     orders: List[CompleteCookingOrderItem]
     operator_id: str = "system"
     ready_time: Optional[str] = None
+
+
+class LoadSteamerRequest(BaseModel):
+    order_ids: List[str]
+    steamer_id: str
+    port_index: int
+    loaded_at: Optional[str] = None
+
+
+class MoveSteamerRequest(BaseModel):
+    order_ids: List[str]
+    steamer_id: str
+    port_index: int
+
+
+class UnloadSteamerRequest(BaseModel):
+    order_ids: List[str]
+
+
+class PluckSteamerRequest(BaseModel):
+    order_ids: List[str]

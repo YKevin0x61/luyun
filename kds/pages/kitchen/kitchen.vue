@@ -70,7 +70,7 @@
     </view>
 
     <!-- 新单未确认：黄闪期间点「已知晓」停闪静音、清角标、边框转红 -->
-    <view v-if="awaitingAck" class="ack-banner">
+    <view v-if="awaitingAck && showNewOrderAck" class="ack-banner">
       <view class="ack-banner-info">
         <SvgIcon name="alert-triangle" :size="18" color="#fff" />
         <text class="ack-banner-text">有新单待确认，请查看后点击「已知晓」</text>
@@ -106,8 +106,27 @@
       </scroll-view>
     </view>
 
+    <!-- 熟笼蒸炉屏：待上笼一行一份 + 蒸孔图；未设工作面时仍走菜卡 -->
+    <ShulongSteamerConsole
+      v-if="isSteamerConsoleView"
+      :awaiting-cages="awaitingSteamerCages"
+      :steaming-cages="steamingSteamerCages"
+      :layout="steamerLayout"
+      :loading="steamerLoading"
+      :work-surface="steamerWorkSurface"
+      :now="currentTimestamp"
+      :is-new-cage="cageIsNew"
+      :wait-thresholds-ms="thresholdsMs"
+      :steam-thresholds-ms="steamThresholdsMs"
+      @load="onSteamerLoad"
+      @move="onSteamerMove"
+      @unload="onSteamerUnload"
+      @serve="onSteamerBasketServe"
+      @pluck="onSteamerPluck"
+    />
+
     <!-- 订单列表 -->
-    <view class="orders-section">
+    <view v-else class="orders-section">
       <!-- <view class="section-header">
         <text class="section-title">待制作订单</text>
         <view class="orders-count">
@@ -163,7 +182,7 @@
     
     <!-- 卡上出餐确认：选桌出餐打开时隐藏，改在 sheet 内确认 -->
     <view 
-      v-if="totalSelectedCount > 0 && !isTablePickOpen" 
+      v-if="!isSteamerConsoleView && totalSelectedCount > 0 && !isTablePickOpen" 
       class="batch-submit-float"
     >
       <button 
@@ -179,7 +198,7 @@
     </view>
     
     <!-- 选桌出餐：一行一份；点遮罩取消，不提交 -->
-    <view v-if="isTablePickOpen" class="modal-overlay table-pick-overlay" @click="closeTablePick">
+    <view v-if="!isSteamerConsoleView && isTablePickOpen" class="modal-overlay table-pick-overlay" @click="closeTablePick">
       <view class="table-pick-sheet" @click.stop>
         <view class="modal-header">
           <text class="modal-title">选桌出餐</text>
@@ -231,9 +250,19 @@ import { groupOrdersByDish } from '../../utils/dishMerge.js'
 import { composeKitchenDishCards, dishSplitKnobsChanged, sortKitchenDishCardsByOldest } from '../../utils/dishCardChunks.js'
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
-import { orderLineId, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds } from '../../utils/batchCooking.js'
+import { orderLineId, planBasketServeCookingCalls, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds } from '../../utils/batchCooking.js'
 import { toastForServeBatch } from '../../utils/serveBatchToast.js'
+import { ordersAPI } from '../../api/orders.js'
+import { stationsAPI } from '../../api/stations.js'
 import { ScreenSettingsManager, DENSITY_MODES } from '../../utils/storage.js'
+import { getSteamTimeThresholdsMs } from '../../utils/timeThresholds.js'
+import {
+  SHULONG_STEAMER_LAYOUT,
+  isSteamerConsole,
+  listAwaitingSteamerCages,
+  listSteamingSteamerCages,
+  steamerLayoutFromStations
+} from '../../utils/steamerConsole.js'
 import { useKitchenOrderSession } from '../../composables/useKitchenOrderSession.js'
 import { useDisconnectAlert } from '../../composables/useDisconnectAlert.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
@@ -241,13 +270,14 @@ import { takeSettingsReturnClear } from '../../utils/kitchenSelectionReset.js'
 import { applyServeSelection, emptyServeSelection } from '../../utils/serveSelection.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
 import KitchenDishCard from '../../components/KitchenDishCard/KitchenDishCard.vue'
+import ShulongSteamerConsole from '../../components/ShulongSteamerConsole/ShulongSteamerConsole.vue'
 
 // 各页独立订阅 id；后端按连接去重推送，卸载时可安全 unsubscribe
 const ORDERS_SUBSCRIPTION_ID = 'kds-kitchen-orders'
 
 export default {
   name: 'KitchenPage',
-  components: { SvgIcon, KitchenDishCard },
+  components: { SvgIcon, KitchenDishCard, ShulongSteamerConsole },
   
   setup() {
     const ordersStore = useOrdersStore()
@@ -308,6 +338,33 @@ export default {
 
     // 显示密度（进页快照；设置页改完重进厨房页生效）
     const densityMode = ScreenSettingsManager.getDensity() || DENSITY_MODES.STANDARD
+    const steamerWorkSurface = ScreenSettingsManager.getSteamerWorkSurface()
+    const steamerLayout = ref(steamerLayoutFromStations(null))
+    const steamThresholdsMs = ref(getSteamTimeThresholdsMs())
+    const steamerLoading = ref(false)
+    const isSteamerConsoleView = computed(() =>
+      isSteamerConsole({
+        steamerWorkSurface,
+        stationId: currentStation.value
+      })
+    )
+    const showNewOrderAck = computed(() =>
+      !(isSteamerConsoleView.value && steamerWorkSurface === 'steaming')
+    )
+    const cageIsNew = (cage) => {
+      if (steamerWorkSurface === 'steaming') return false
+      return dishHasNewBadge({ orders: [cage] })
+    }
+
+    const loadSteamerLayout = async () => {
+      try {
+        const payload = await stationsAPI.getStations()
+        steamerLayout.value = steamerLayoutFromStations(payload)
+      } catch (error) {
+        console.error('[熟笼炉孔布局] 读取失败，使用本屏回退:', error)
+        steamerLayout.value = steamerLayoutFromStations(null)
+      }
+    }
 
     // 档口标签：stationsStore 为源，再按职责集过滤
     const stationTabs = computed(() => {
@@ -407,6 +464,77 @@ export default {
     const currentStationOrders = computed(() => {
       return ordersStore.getOrdersByStation(currentStation.value).filter(isPendingCookOrder)
     })
+
+    const steamerStationOrders = computed(() =>
+      ordersStore.getOrdersByStation(currentStation.value)
+    )
+    const steamerPhaseOpts = computed(() => ({
+      now: currentTimestamp.value,
+      noticeSeconds: steamerLayout.value.awaitingCancelNoticeSeconds
+        || SHULONG_STEAMER_LAYOUT.awaitingCancelNoticeSeconds
+    }))
+    const awaitingSteamerCages = computed(() =>
+      listAwaitingSteamerCages(steamerStationOrders.value, steamerPhaseOpts.value)
+    )
+    const steamingSteamerCages = computed(() =>
+      listSteamingSteamerCages(steamerStationOrders.value, steamerPhaseOpts.value)
+    )
+
+    const onSteamerLoad = async (intent) => {
+      if (!intent || steamerLoading.value) return
+      steamerLoading.value = true
+      try {
+        await ordersAPI.loadSteamer(intent)
+        await refreshData()
+      } catch (error) {
+        console.error('[上笼] 失败:', error)
+        uni.showToast({ title: '上笼失败', icon: 'none' })
+      } finally {
+        steamerLoading.value = false
+      }
+    }
+
+    const onSteamerMove = async (intent) => {
+      if (!intent || steamerLoading.value) return
+      steamerLoading.value = true
+      try {
+        await ordersAPI.moveSteamer(intent)
+        await refreshData()
+      } catch (error) {
+        console.error('[换孔] 失败:', error)
+        uni.showToast({ title: '换孔失败', icon: 'none' })
+      } finally {
+        steamerLoading.value = false
+      }
+    }
+
+    const onSteamerUnload = async (intent) => {
+      if (!intent || steamerLoading.value) return
+      steamerLoading.value = true
+      try {
+        await ordersAPI.unloadSteamer(intent)
+        await refreshData()
+      } catch (error) {
+        console.error('[下笼] 失败:', error)
+        uni.showToast({ title: '下笼失败', icon: 'none' })
+      } finally {
+        steamerLoading.value = false
+      }
+    }
+
+    const onSteamerPluck = async (intent) => {
+      if (!intent || steamerLoading.value) return
+      steamerLoading.value = true
+      try {
+        await ordersAPI.pluckSteamer(intent)
+        await refreshData()
+      } catch (error) {
+        console.error('[抽笼] 失败:', error)
+        uni.showToast({ title: '抽笼失败', icon: 'none' })
+      } finally {
+        steamerLoading.value = false
+      }
+    }
     
     // 🔧 性能优化：数据类计算，只依赖订单数据本身（currentStationOrders 变化时才重算）
     // 按菜品名称分组、解析下单时间戳得到"最早下单时间"；不引用 currentTimestamp，
@@ -865,6 +993,22 @@ export default {
         batchSubmitting.value = false
       }
     }
+
+    const onSteamerBasketServe = async (intent) => {
+      if (!intent || steamerLoading.value || batchSubmitting.value) return
+      const plan = planBasketServeCookingCalls({
+        selectedOrderIds: intent.orderIds,
+        cages: [...awaitingSteamerCages.value, ...steamingSteamerCages.value]
+      })
+      const totalCount = plan.reduce((sum, item) => sum + item.completeQuantity, 0)
+      if (totalCount === 0) return
+      steamerLoading.value = true
+      try {
+        await submitServePlan(plan, totalCount)
+      } finally {
+        steamerLoading.value = false
+      }
+    }
     
     const completeCooking = async (dish) => {
       if (operationLoading.value) return
@@ -985,6 +1129,7 @@ export default {
     // Settings return does not remount; discard snapshot, re-slice, and clear 出餐选中.
     onShow(() => {
       onKitchenOrderSessionShow()
+      steamThresholdsMs.value = getSteamTimeThresholdsMs()
       if (takeSettingsReturnClear()) {
         dispatchServe({ type: 'externalClear' })
         applyDishChunks({})
@@ -1000,6 +1145,7 @@ export default {
       await stationsStore.initializeStations()
       startKitchenOrderSession()
       startDisconnectAlert()
+      await loadSteamerLayout()
 
       const requestedStation = pendingStationFromQuery.value
       if (
@@ -1052,6 +1198,21 @@ export default {
       stationTabs,
       isSingleWatchedStation,
       densityMode,
+      isSteamerConsoleView,
+      steamerWorkSurface,
+      showNewOrderAck,
+      cageIsNew,
+      steamThresholdsMs,
+      thresholdsMs,
+      awaitingSteamerCages,
+      steamingSteamerCages,
+      steamerLayout,
+      steamerLoading,
+      onSteamerLoad,
+      onSteamerMove,
+      onSteamerUnload,
+      onSteamerBasketServe,
+      onSteamerPluck,
       /** 本屏菜品卡片份数上限；0 = 不拆分（列表行为与今日一致） */
       dishCardQuantityCap,
       /** 本屏下单间隔（分钟）；0 = 不按浪潮拆 */

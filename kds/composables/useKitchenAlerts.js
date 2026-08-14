@@ -44,6 +44,7 @@ function readAlertConfig() {
   const settings = ScreenSettingsManager.getSettings()
   return {
     watchedStations: settings.watchedStations,
+    steamerWorkSurface: settings.steamerWorkSurface,
     ...settings.alert
   }
 }

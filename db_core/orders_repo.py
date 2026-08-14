@@ -7,7 +7,7 @@ DatabaseManager 的订单仓储职责：查询、保存、批量插入/删除、
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Set, Tuple
 
 from db_core.utils import (
     CHINA_TZ,
@@ -19,6 +19,41 @@ from db_core.utils import (
 from services.urgency_policy import level_for_wait_ms
 
 logger = logging.getLogger(__name__)
+
+
+def _shape_order_placement(order: Optional[Dict]) -> Optional[Dict]:
+    """Nest 蒸笼位 on the public order dict; absent/None when not loaded."""
+    if not order:
+        return order
+    steamer_id = order.pop("steamer_id", None)
+    port_index = order.pop("port_index", None)
+    stack_order = order.pop("stack_order", None)
+    loaded_at = order.pop("loaded_at", None)
+    if steamer_id in (None, "") or port_index is None:
+        order["placement"] = None
+        # Kept after 抽笼 so 待上笼退示 only applies to never-loaded cancels.
+        if loaded_at not in (None, ""):
+            order["loaded_at"] = loaded_at
+        return order
+    order["placement"] = {
+        "steamer_id": str(steamer_id),
+        "port_index": int(port_index),
+        "stack_order": int(stack_order) if stack_order is not None else 1,
+        "loaded_at": loaded_at,
+    }
+    return order
+
+
+def _placement_hole(order: Optional[Dict]) -> Optional[Tuple[str, int]]:
+    """Hole identity from a shaped order, or None when not on a 蒸笼位."""
+    if not order:
+        return None
+    placement = order.get("placement") or {}
+    steamer_id = placement.get("steamer_id")
+    port_index = placement.get("port_index")
+    if steamer_id in (None, "") or port_index is None:
+        return None
+    return (str(steamer_id), int(port_index))
 
 
 class _OrdersRepoMixin:
@@ -48,7 +83,8 @@ class _OrdersRepoMixin:
             sql = f"""
                 SELECT id, business_flow_id, table_number, dish_name, quantity,
                        order_time, station, priority, price, category, status,
-                       dish_status, ready_time, updated_at
+                       dish_status, ready_time, steamer_id, port_index,
+                       stack_order, loaded_at, updated_at
                 FROM orders WHERE {where} ORDER BY order_time DESC
             """
             if limit > 0:
@@ -57,7 +93,7 @@ class _OrdersRepoMixin:
             async with self.table("orders").conn.cursor() as cursor:
                 await cursor.execute(sql, params)
                 rows = await cursor.fetchall()
-            orders = [self._row_to_dict(row) for row in rows]
+            orders = [_shape_order_placement(self._row_to_dict(row)) for row in rows]
             self.stats['queries_executed'] += 1
             return orders
         except Exception as e:
@@ -77,7 +113,7 @@ class _OrdersRepoMixin:
                     "SELECT * FROM orders WHERE business_flow_id = ?", (order_id,)
                 )
                 row = await cursor.fetchone()
-            return self._row_to_dict(row) if row else None
+            return _shape_order_placement(self._row_to_dict(row)) if row else None
         except Exception as e:
             logger.error(f"❌ 根据ID获取订单失败: {e}")
             return None
@@ -108,7 +144,7 @@ class _OrdersRepoMixin:
             )
             row = await cursor.fetchone()
             if row:
-                return self._row_to_dict(row)
+                return _shape_order_placement(self._row_to_dict(row))
         return None
 
     @timing_decorator
@@ -517,6 +553,7 @@ class _OrdersRepoMixin:
         now = datetime.now(CHINA_TZ).isoformat()
         updated_count = 0
         stations = set()
+        holes_to_compact: Set[Tuple[str, int]] = set()
 
         for item in completions:
             order = item["order"]
@@ -526,10 +563,16 @@ class _OrdersRepoMixin:
             if station:
                 stations.add(station)
 
+            hole = _placement_hole(order)
+            if hole:
+                holes_to_compact.add(hole)
+
             oid = order["_id"]
             if complete_qty == db_qty:
                 await tdb.execute(
-                    """UPDATE orders SET dish_status = ?, ready_time = ?, updated_at = ?
+                    """UPDATE orders SET dish_status = ?, ready_time = ?, updated_at = ?,
+                       steamer_id = NULL, port_index = NULL, stack_order = NULL,
+                       loaded_at = NULL
                        WHERE id = ?""",
                     ("已制作待上菜", ready_time, now, oid),
                 )
@@ -569,6 +612,206 @@ class _OrdersRepoMixin:
                     ),
                 )
                 updated_count += 1
+
+        for steamer_id, port_index in holes_to_compact:
+            await self.compact_steamer_hole(steamer_id, port_index)
+
+        await tdb.commit()
+        return {
+            "updated_count": updated_count,
+            "stations": sorted(stations),
+        }
+
+    async def compact_steamer_hole(self, steamer_id: str, port_index: int) -> None:
+        """Reindex remaining cages on a hole to stack_order 1..n. Does not commit."""
+        tdb = self.table("orders")
+        now = datetime.now(CHINA_TZ).isoformat()
+        cursor = await tdb.execute(
+            """SELECT id FROM orders
+               WHERE steamer_id = ? AND port_index = ?
+               ORDER BY stack_order ASC, id ASC""",
+            (steamer_id, int(port_index)),
+        )
+        rows = await cursor.fetchall()
+        for index, row in enumerate(rows, start=1):
+            await tdb.execute(
+                "UPDATE orders SET stack_order = ?, updated_at = ? WHERE id = ?",
+                (index, now, row[0]),
+            )
+
+    async def apply_steamer_load(
+        self,
+        *,
+        steamer_id: str,
+        port_index: int,
+        loaded_at: str,
+        order_ids: List[str],
+    ) -> Dict[str, Any]:
+        """Write 蒸笼位; stack_order appends at the hole top."""
+        tdb = self.table("orders")
+        now = datetime.now(CHINA_TZ).isoformat()
+        hole_port = int(port_index)
+        cursor = await tdb.execute(
+            """SELECT MAX(stack_order) FROM orders
+               WHERE steamer_id = ? AND port_index = ?""",
+            (steamer_id, hole_port),
+        )
+        row = await cursor.fetchone()
+        next_stack = int(row[0] or 0) + 1
+
+        updated_count = 0
+        stations = set()
+        for oid in order_ids:
+            order = await self.get_order_by_id(str(oid))
+            if not order:
+                continue
+            row_id = order["_id"]
+            station = order.get("station") or ""
+            if station:
+                stations.add(station)
+            await tdb.execute(
+                """UPDATE orders SET steamer_id = ?, port_index = ?, stack_order = ?,
+                   loaded_at = ?, updated_at = ? WHERE id = ?""",
+                (steamer_id, hole_port, next_stack, loaded_at, now, row_id),
+            )
+            next_stack += 1
+            updated_count += 1
+
+        await tdb.commit()
+        return {
+            "updated_count": updated_count,
+            "stations": sorted(stations),
+        }
+
+    async def apply_steamer_move(
+        self,
+        *,
+        steamer_id: str,
+        port_index: int,
+        order_ids: List[str],
+    ) -> Dict[str, Any]:
+        """Move 在蒸 cages onto dest hole top; compact each source hole."""
+        tdb = self.table("orders")
+        now = datetime.now(CHINA_TZ).isoformat()
+        dest_port = int(port_index)
+        dest = (str(steamer_id), dest_port)
+        cursor = await tdb.execute(
+            """SELECT MAX(stack_order) FROM orders
+               WHERE steamer_id = ? AND port_index = ?""",
+            (steamer_id, dest_port),
+        )
+        row = await cursor.fetchone()
+        next_stack = int(row[0] or 0) + 1
+
+        updated_count = 0
+        stations = set()
+        holes_to_compact: Set[Tuple[str, int]] = set()
+        for oid in order_ids:
+            order = await self.get_order_by_id(str(oid))
+            if not order:
+                continue
+            source = _placement_hole(order)
+            if source == dest:
+                continue
+            row_id = order["_id"]
+            station = order.get("station") or ""
+            if station:
+                stations.add(station)
+            if source:
+                holes_to_compact.add(source)
+            await tdb.execute(
+                """UPDATE orders SET steamer_id = ?, port_index = ?, stack_order = ?,
+                   updated_at = ? WHERE id = ?""",
+                (steamer_id, dest_port, next_stack, now, row_id),
+            )
+            next_stack += 1
+            updated_count += 1
+
+        for source_id, source_port in holes_to_compact:
+            await self.compact_steamer_hole(source_id, source_port)
+
+        await tdb.commit()
+        return {
+            "updated_count": updated_count,
+            "stations": sorted(stations),
+        }
+
+    async def apply_steamer_unload(
+        self,
+        *,
+        order_ids: List[str],
+    ) -> Dict[str, Any]:
+        """Clear 蒸笼位; compact each source hole. dish_status is unchanged."""
+        tdb = self.table("orders")
+        now = datetime.now(CHINA_TZ).isoformat()
+        updated_count = 0
+        stations = set()
+        holes_to_compact: Set[Tuple[str, int]] = set()
+        for oid in order_ids:
+            order = await self.get_order_by_id(str(oid))
+            if not order:
+                continue
+            source = _placement_hole(order)
+            if not source:
+                continue
+            row_id = order["_id"]
+            station = order.get("station") or ""
+            if station:
+                stations.add(station)
+            holes_to_compact.add(source)
+            await tdb.execute(
+                """UPDATE orders SET steamer_id = NULL, port_index = NULL,
+                   stack_order = NULL, loaded_at = NULL, updated_at = ?
+                   WHERE id = ?""",
+                (now, row_id),
+            )
+            updated_count += 1
+
+        for source_id, source_port in holes_to_compact:
+            await self.compact_steamer_hole(source_id, source_port)
+
+        await tdb.commit()
+        return {
+            "updated_count": updated_count,
+            "stations": sorted(stations),
+        }
+
+    async def apply_steamer_pluck(
+        self,
+        *,
+        order_ids: List[str],
+    ) -> Dict[str, Any]:
+        """Clear 蒸笼位 on a 退菜占位; compact the hole.
+
+        dish_status stays cancelled. updated_at is left as the cancel timestamp
+        so 待上笼退示 does not restart after 抽笼.
+        """
+        tdb = self.table("orders")
+        updated_count = 0
+        stations = set()
+        holes_to_compact: Set[Tuple[str, int]] = set()
+        for oid in order_ids:
+            order = await self.get_order_by_id(str(oid))
+            if not order:
+                continue
+            source = _placement_hole(order)
+            if not source:
+                continue
+            row_id = order["_id"]
+            station = order.get("station") or ""
+            if station:
+                stations.add(station)
+            holes_to_compact.add(source)
+            await tdb.execute(
+                """UPDATE orders SET steamer_id = NULL, port_index = NULL,
+                   stack_order = NULL
+                   WHERE id = ?""",
+                (row_id,),
+            )
+            updated_count += 1
+
+        for source_id, source_port in holes_to_compact:
+            await self.compact_steamer_hole(source_id, source_port)
 
         await tdb.commit()
         return {

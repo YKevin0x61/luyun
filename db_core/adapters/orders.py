@@ -50,6 +50,48 @@ class OrdersPortAdapter:
             ready_time=ready_time, completions=completions
         )
 
+    async def apply_steamer_load(
+        self,
+        *,
+        steamer_id: str,
+        port_index: int,
+        loaded_at: str,
+        order_ids: List[str],
+    ) -> Dict[str, Any]:
+        return await self._db.apply_steamer_load(
+            steamer_id=steamer_id,
+            port_index=port_index,
+            loaded_at=loaded_at,
+            order_ids=order_ids,
+        )
+
+    async def apply_steamer_move(
+        self,
+        *,
+        steamer_id: str,
+        port_index: int,
+        order_ids: List[str],
+    ) -> Dict[str, Any]:
+        return await self._db.apply_steamer_move(
+            steamer_id=steamer_id,
+            port_index=port_index,
+            order_ids=order_ids,
+        )
+
+    async def apply_steamer_unload(
+        self,
+        *,
+        order_ids: List[str],
+    ) -> Dict[str, Any]:
+        return await self._db.apply_steamer_unload(order_ids=order_ids)
+
+    async def apply_steamer_pluck(
+        self,
+        *,
+        order_ids: List[str],
+    ) -> Dict[str, Any]:
+        return await self._db.apply_steamer_pluck(order_ids=order_ids)
+
     async def get_merged_dishes(
         self, station: Optional[str] = None, **kwargs: Any
     ) -> List[Dict]:

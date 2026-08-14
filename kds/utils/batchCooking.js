@@ -140,6 +140,46 @@ export function planTablePickCookingCalls({ selectedOrderIds, chunkId, chunkOrde
 }
 
 /**
+ * Plan 笼上出餐 from an explicit set of 在蒸 订单行 ids.
+ * No FIFO fill; ids not present in `cages` are ignored. Mixed dishes
+ * become one complete-cooking call per dish_name.
+ *
+ * @param {object} params
+ * @param {string[]} params.selectedOrderIds
+ * @param {object[]} params.cages steaming cages (or any order-line list)
+ * @returns {Array<{
+ *   dishName: string,
+ *   completeQuantity: number,
+ *   orders: object[],
+ *   allocations: Array<{ order: object, serveQuantity: number }>
+ * }>}
+ */
+export function planBasketServeCookingCalls({ selectedOrderIds, cages }) {
+  if (!Array.isArray(selectedOrderIds) || selectedOrderIds.length === 0) return []
+  if (!Array.isArray(cages)) return []
+
+  const wanted = new Set(selectedOrderIds.map((id) => String(id)))
+  const byDish = new Map()
+
+  for (const cage of cages) {
+    const id = orderLineId(cage)
+    if (!id || !wanted.has(id)) continue
+    const take = availableQuantity(cage)
+    if (take <= 0) continue
+    const dishName = cage.dish_name || ''
+    if (!byDish.has(dishName)) byDish.set(dishName, [])
+    byDish.get(dishName).push({ order: cage, serveQuantity: take })
+  }
+
+  const plan = []
+  for (const [dishName, allocations] of byDish) {
+    const call = cookingCallFromAllocations(dishName, allocations)
+    if (call) plan.push(call)
+  }
+  return plan
+}
+
+/**
  * Plan merged completeCooking calls from selected portion counts.
  *
  * When `chunkOrders` is provided, each selected key is a chunkId and allocation
@@ -191,4 +231,4 @@ export function planBatchCookingCalls({ selectedQuantities, pendingOrders, chunk
   return plan
 }
 
-export default { planBatchCookingCalls, formatServePreview, servePreviewText, servePreviewOrderIds, planTablePickCookingCalls, orderLineId }
+export default { planBatchCookingCalls, formatServePreview, servePreviewText, servePreviewOrderIds, planTablePickCookingCalls, planBasketServeCookingCalls, orderLineId }

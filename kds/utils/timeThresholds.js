@@ -20,3 +20,20 @@ export function getTimeThresholdsMs(params) {
     urgent: (Number.isFinite(urgentMin) ? urgentMin : 20) * 60 * 1000
   }
 }
+
+/**
+ * Steam-urgency thresholds (ms). Independent of wait warnMin / urgentMin.
+ * @param {{ steamWarnMin?: number, steamUrgentMin?: number } | null | undefined} [params]
+ * @returns {{ warning: number, urgent: number }}
+ */
+export function getSteamTimeThresholdsMs(params) {
+  const alert = params && typeof params === 'object'
+    ? params
+    : ScreenSettingsManager.getAlertParams()
+  const warnMin = Number(alert.steamWarnMin)
+  const urgentMin = Number(alert.steamUrgentMin)
+  return {
+    warning: (Number.isFinite(warnMin) ? warnMin : 15) * 60 * 1000,
+    urgent: (Number.isFinite(urgentMin) ? urgentMin : 20) * 60 * 1000
+  }
+}

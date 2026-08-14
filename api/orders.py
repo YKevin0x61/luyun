@@ -13,9 +13,21 @@ import time
 # 定义北京时区
 CHINA_TZ = timezone(timedelta(hours=8))
 
-from models import OrderResponse, SuccessResponse, CompleteCookingRequest
+from models import (
+    OrderResponse,
+    SuccessResponse,
+    CompleteCookingRequest,
+    LoadSteamerRequest,
+    MoveSteamerRequest,
+    UnloadSteamerRequest,
+    PluckSteamerRequest,
+)
 from database import DatabaseManager, get_db, ensure_beijing_datetime
 from services.kds_orders import complete_cooking as kds_complete_cooking
+from services.kds_orders import load_steamer as kds_load_steamer
+from services.kds_orders import move_steamer as kds_move_steamer
+from services.kds_orders import unload_steamer as kds_unload_steamer
+from services.kds_orders import pluck_steamer as kds_pluck_steamer
 from services.urgency_policy import urgent_cutoff
 from api.security import verify_admin_token
 
@@ -451,6 +463,81 @@ async def complete_cooking(
     except Exception as e:
         logger.error(f"制作完成失败: {e}")
         raise HTTPException(status_code=500, detail="制作完成失败")
+
+
+@router.post("/load-steamer", status_code=200, dependencies=_ADMIN_WRITE)
+async def load_steamer(
+    body: LoadSteamerRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    """KDS 上笼：写入蒸笼位，出餐状态仍为待出餐。"""
+    try:
+        result = await kds_load_steamer(db.orders, body.model_dump())
+        stations = result.pop("stations", [])
+        await _notify_orders_completed(stations)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"上笼失败: {e}")
+        raise HTTPException(status_code=500, detail="上笼失败")
+
+
+@router.post("/move-steamer", status_code=200, dependencies=_ADMIN_WRITE)
+async def move_steamer(
+    body: MoveSteamerRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    """KDS 换孔：在蒸笼移到目标孔顶，出餐状态仍为待出餐。"""
+    try:
+        result = await kds_move_steamer(db.orders, body.model_dump())
+        stations = result.pop("stations", [])
+        if stations:
+            await _notify_orders_completed(stations)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"换孔失败: {e}")
+        raise HTTPException(status_code=500, detail="换孔失败")
+
+
+@router.post("/unload-steamer", status_code=200, dependencies=_ADMIN_WRITE)
+async def unload_steamer(
+    body: UnloadSteamerRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    """KDS 下笼：清空蒸笼位，回到待上笼，出餐状态仍为待出餐。"""
+    try:
+        result = await kds_unload_steamer(db.orders, body.model_dump())
+        stations = result.pop("stations", [])
+        if stations:
+            await _notify_orders_completed(stations)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"下笼失败: {e}")
+        raise HTTPException(status_code=500, detail="下笼失败")
+
+
+@router.post("/pluck-steamer", status_code=200, dependencies=_ADMIN_WRITE)
+async def pluck_steamer(
+    body: PluckSteamerRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    """KDS 抽笼：只清退菜占位的蒸笼位，不出餐、不打票。"""
+    try:
+        result = await kds_pluck_steamer(db.orders, body.model_dump())
+        stations = result.pop("stations", [])
+        if stations:
+            await _notify_orders_completed(stations)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"抽笼失败: {e}")
+        raise HTTPException(status_code=500, detail="抽笼失败")
 
 
 @router.get("/{order_id}", response_model=OrderResponse)

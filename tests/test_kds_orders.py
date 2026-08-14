@@ -65,6 +65,10 @@ class KdsSchemaMigrationTest(unittest.IsolatedAsyncioTestCase):
         cols = await self._orders_columns(db)
         self.assertIn("dish_status", cols)
         self.assertIn("ready_time", cols)
+        self.assertIn("steamer_id", cols)
+        self.assertIn("port_index", cols)
+        self.assertIn("stack_order", cols)
+        self.assertIn("loaded_at", cols)
 
         await db.close()
 
@@ -82,6 +86,10 @@ class KdsSchemaMigrationTest(unittest.IsolatedAsyncioTestCase):
         cols = await self._orders_columns(db)
         self.assertIn("dish_status", cols)
         self.assertIn("ready_time", cols)
+        self.assertIn("steamer_id", cols)
+        self.assertIn("port_index", cols)
+        self.assertIn("stack_order", cols)
+        self.assertIn("loaded_at", cols)
 
         await db.close()
 

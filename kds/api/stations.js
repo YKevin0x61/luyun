@@ -6,6 +6,17 @@ import { request } from '../utils/request.js'
 
 export const stationsAPI = {
   /**
+   * Shop-level station catalog, including 熟笼 steamer_layout.
+   * @returns {Promise<object[]>}
+   */
+  async getStations() {
+    return await request({
+      url: '/api/stations',
+      method: 'GET'
+    })
+  },
+
+  /**
    * 获取档口统计信息
    * @param {String} stationId 档口ID
    * @param {String} date 日期 (YYYY-MM-DD)

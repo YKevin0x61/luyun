@@ -77,5 +77,65 @@ export const ordersAPI = {
       method: 'POST',
       data: apiData
     })
+  },
+
+  /**
+   * 上笼：把待上笼蒸笼放到指定蒸孔顶上。
+   * @param {{ orderIds: string[], steamerId: string, portIndex: number }} intent
+   */
+  async loadSteamer(intent) {
+    return await request({
+      url: '/api/orders/load-steamer',
+      method: 'POST',
+      data: {
+        order_ids: intent.orderIds,
+        steamer_id: intent.steamerId,
+        port_index: intent.portIndex
+      }
+    })
+  },
+
+  /**
+   * 换孔：把在蒸笼移到指定蒸孔顶上。
+   * @param {{ orderIds: string[], steamerId: string, portIndex: number }} intent
+   */
+  async moveSteamer(intent) {
+    return await request({
+      url: '/api/orders/move-steamer',
+      method: 'POST',
+      data: {
+        order_ids: intent.orderIds,
+        steamer_id: intent.steamerId,
+        port_index: intent.portIndex
+      }
+    })
+  },
+
+  /**
+   * 下笼：清空蒸笼位，回到待上笼。
+   * @param {{ orderIds: string[] }} intent
+   */
+  async unloadSteamer(intent) {
+    return await request({
+      url: '/api/orders/unload-steamer',
+      method: 'POST',
+      data: {
+        order_ids: intent.orderIds
+      }
+    })
+  },
+
+  /**
+   * 抽笼：只清退菜占位，不出餐、不打票。
+   * @param {{ orderIds: string[] }} intent
+   */
+  async pluckSteamer(intent) {
+    return await request({
+      url: '/api/orders/pluck-steamer',
+      method: 'POST',
+      data: {
+        order_ids: intent.orderIds
+      }
+    })
   }
 }

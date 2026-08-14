@@ -480,7 +480,8 @@ export const useOrdersStore = defineStore('orders', {
         id: order.id || order._id,
         dish_status: order.dish_status,
         quantity: order.quantity,
-        updated_at: order.updated_at
+        updated_at: order.updated_at,
+        placement: order.placement || null
       }))
       return JSON.stringify(hashData)
     },

@@ -35,6 +35,14 @@ async def migrate_orders_kds_columns(conn: aiosqlite.Connection) -> None:
                 "UPDATE orders SET source = 'delivery' "
                 "WHERE COALESCE(source, '') = '' AND notes LIKE '外卖平台:%'"
             )
+        if "steamer_id" not in cols:
+            await cursor.execute("ALTER TABLE orders ADD COLUMN steamer_id TEXT")
+        if "port_index" not in cols:
+            await cursor.execute("ALTER TABLE orders ADD COLUMN port_index INTEGER")
+        if "stack_order" not in cols:
+            await cursor.execute("ALTER TABLE orders ADD COLUMN stack_order INTEGER")
+        if "loaded_at" not in cols:
+            await cursor.execute("ALTER TABLE orders ADD COLUMN loaded_at TEXT")
     await conn.commit()
 
 

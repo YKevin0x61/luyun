@@ -23,6 +23,10 @@ _TABLE_SCHEMAS = {
             source TEXT DEFAULT '',
             dish_status TEXT DEFAULT '待出餐',
             ready_time TEXT,
+            steamer_id TEXT,
+            port_index INTEGER,
+            stack_order INTEGER,
+            loaded_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )

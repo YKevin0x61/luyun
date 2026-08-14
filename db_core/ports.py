@@ -39,6 +39,35 @@ class OrdersPort(Protocol):
         completions: List[Dict[str, Any]],
     ) -> Dict[str, Any]: ...
 
+    async def apply_steamer_load(
+        self,
+        *,
+        steamer_id: str,
+        port_index: int,
+        loaded_at: str,
+        order_ids: List[str],
+    ) -> Dict[str, Any]: ...
+
+    async def apply_steamer_move(
+        self,
+        *,
+        steamer_id: str,
+        port_index: int,
+        order_ids: List[str],
+    ) -> Dict[str, Any]: ...
+
+    async def apply_steamer_unload(
+        self,
+        *,
+        order_ids: List[str],
+    ) -> Dict[str, Any]: ...
+
+    async def apply_steamer_pluck(
+        self,
+        *,
+        order_ids: List[str],
+    ) -> Dict[str, Any]: ...
+
     async def get_merged_dishes(
         self, station: Optional[str] = None, **kwargs: Any
     ) -> List[Dict]: ...

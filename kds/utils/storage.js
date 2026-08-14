@@ -27,6 +27,8 @@ const DEFAULT_ALERT_PARAMS = Object.freeze({
   badgeDismissSec: 30,
   warnMin: 15,
   urgentMin: 20,
+  steamWarnMin: 15,
+  steamUrgentMin: 20,
   overtimeRepeatSec: 30
 })
 
@@ -61,6 +63,11 @@ function normalizeAlertParams(value) {
     badgeDismissSec: normalizeAlertNumber(raw.badgeDismissSec, DEFAULT_ALERT_PARAMS.badgeDismissSec),
     warnMin: normalizeAlertNumber(raw.warnMin, DEFAULT_ALERT_PARAMS.warnMin),
     urgentMin: normalizeAlertNumber(raw.urgentMin, DEFAULT_ALERT_PARAMS.urgentMin),
+    steamWarnMin: normalizeAlertNumber(raw.steamWarnMin, DEFAULT_ALERT_PARAMS.steamWarnMin),
+    steamUrgentMin: normalizeAlertNumber(
+      raw.steamUrgentMin,
+      DEFAULT_ALERT_PARAMS.steamUrgentMin
+    ),
     overtimeRepeatSec: normalizeAlertNumber(
       raw.overtimeRepeatSec,
       DEFAULT_ALERT_PARAMS.overtimeRepeatSec
@@ -366,6 +373,12 @@ export class PrintQueueManager {
  * 本屏 KDS 设备本地配置（职责档口集 / 密度 / 菜品卡片份数上限 / 下单间隔 / 告警参数）。
  * 遵循 ADR 0002：按设备本地存储，不写后端。空职责档口集 = 全部档口。
  */
+const STEAMER_WORK_SURFACE_SET = new Set(['load', 'steaming', 'solo'])
+
+function normalizeSteamerWorkSurface(value) {
+  return STEAMER_WORK_SURFACE_SET.has(value) ? value : ''
+}
+
 export class ScreenSettingsManager {
   static getDefaultSettings() {
     return {
@@ -373,6 +386,7 @@ export class ScreenSettingsManager {
       density: DENSITY_MODES.STANDARD,
       dishCardQuantityCap: 0,
       orderGapMinutes: 0,
+      steamerWorkSurface: '',
       alert: { ...DEFAULT_ALERT_PARAMS }
     }
   }
@@ -388,6 +402,7 @@ export class ScreenSettingsManager {
         density: normalizeDensity(parsed.density),
         dishCardQuantityCap: normalizeScreenSplitInt(parsed.dishCardQuantityCap),
         orderGapMinutes: normalizeScreenSplitInt(parsed.orderGapMinutes),
+        steamerWorkSurface: normalizeSteamerWorkSurface(parsed.steamerWorkSurface),
         alert: normalizeAlertParams(parsed.alert)
       }
     } catch (error) {
@@ -417,6 +432,11 @@ export class ScreenSettingsManager {
           settings?.orderGapMinutes !== undefined
             ? settings.orderGapMinutes
             : current.orderGapMinutes
+        ),
+        steamerWorkSurface: normalizeSteamerWorkSurface(
+          settings?.steamerWorkSurface !== undefined
+            ? settings.steamerWorkSurface
+            : current.steamerWorkSurface
         ),
         alert: normalizeAlertParams(
           settings?.alert !== undefined
@@ -477,6 +497,15 @@ export class ScreenSettingsManager {
 
   static setOrderGapMinutes(minutes) {
     return this.saveSettings({ orderGapMinutes: minutes })
+  }
+
+  /** @returns {''|'load'|'steaming'|'solo'} empty = not a 熟笼蒸炉屏 */
+  static getSteamerWorkSurface() {
+    return this.getSettings().steamerWorkSurface
+  }
+
+  static setSteamerWorkSurface(surface) {
+    return this.saveSettings({ steamerWorkSurface: surface })
   }
 
   static getAlertParams() {

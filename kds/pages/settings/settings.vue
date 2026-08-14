@@ -332,6 +332,45 @@
                 />
                 <text class="form-hint">0=不拆分；超过则按空档拆成多张卡。改动即时保存，重进厨房页生效。</text>
               </view>
+              <view class="form-item">
+                <text class="form-label">熟笼工作面</text>
+                <view class="density-mode-list">
+                  <view
+                    v-for="option in steamerWorkSurfaceOptions"
+                    :key="option.value || 'unset'"
+                    class="density-mode-chip"
+                    :class="{ 'density-mode-chip-active': steamerWorkSurface === option.value }"
+                    @click="setSteamerWorkSurface(option.value)"
+                  >
+                    <text class="density-mode-chip-text">{{ option.label }}</text>
+                  </view>
+                </view>
+                <text class="form-hint">炉孔布局由店级配置只读，本屏不能改炉数。未使用时总控/多档屏上的熟笼仍是菜卡。改动即时保存，重进厨房页生效。</text>
+              </view>
+              <view class="form-item">
+                <text class="form-label">蒸制较急（分钟）</text>
+                <input
+                  class="form-input"
+                  type="number"
+                  v-model="steamWarnMinInput"
+                  placeholder="15"
+                  @blur="persistSteamThresholds"
+                  @confirm="persistSteamThresholds"
+                />
+                <text class="form-hint">上笼后多久标较急。与等待紧急度分开，只影响熟笼蒸炉屏。</text>
+              </view>
+              <view class="form-item">
+                <text class="form-label">蒸制紧急（分钟）</text>
+                <input
+                  class="form-input"
+                  type="number"
+                  v-model="steamUrgentMinInput"
+                  placeholder="20"
+                  @blur="persistSteamThresholds"
+                  @confirm="persistSteamThresholds"
+                />
+                <text class="form-hint">上笼后多久标紧急并响超时音。不占用边框黄闪。</text>
+              </view>
             </view>
           </view>
         </view>
@@ -483,7 +522,7 @@ export default {
       activeSection: 'connect',
       settingsSections: [
         { id: 'connect', label: '连接', desc: '服务器与鉴权' },
-        { id: 'screen', label: '本屏', desc: '档口、密度与拆卡' },
+        { id: 'screen', label: '本屏', desc: '档口、工作面与拆卡' },
         { id: 'device', label: '设备与系统', desc: '打印与版本' }
       ],
       /** @type {string[]} 空数组 = 全部档口 */
@@ -498,6 +537,16 @@ export default {
       /** @type {string} bound to input; normalized integer persisted on blur */
       dishCardQuantityCapInput: '0',
       orderGapMinutesInput: '0',
+      /** @type {''|'load'|'steaming'|'solo'} */
+      steamerWorkSurface: '',
+      steamerWorkSurfaceOptions: [
+        { value: '', label: '未使用（菜卡）' },
+        { value: 'load', label: '待上笼面' },
+        { value: 'steaming', label: '在蒸面' },
+        { value: 'solo', label: '闲时面' }
+      ],
+      steamWarnMinInput: '15',
+      steamUrgentMinInput: '20',
       apiSettings: {
         baseUrl: '',
         updatedAt: null
@@ -561,7 +610,7 @@ export default {
     activeSectionSubtitle() {
       const map = {
         connect: 'API 服务器 · 鉴权 · 实时连接 · 快速配置',
-        screen: '本屏职责档口 · 显示密度 · 菜品卡片份数上限 · 下单间隔',
+        screen: '本屏职责档口 · 熟笼工作面 · 显示密度 · 菜品卡片份数上限 · 下单间隔',
         device: '蓝牙打印 · 系统信息'
       }
       return map[this.activeSection] || '系统设置'
@@ -730,6 +779,10 @@ export default {
       this.orderGapMinutesInput = String(
         ScreenSettingsManager.getOrderGapMinutes()
       )
+      this.steamerWorkSurface = ScreenSettingsManager.getSteamerWorkSurface()
+      const alert = ScreenSettingsManager.getAlertParams()
+      this.steamWarnMinInput = String(alert.steamWarnMin)
+      this.steamUrgentMinInput = String(alert.steamUrgentMin)
     },
 
     isWatchedStationSelected(stationId) {
@@ -805,6 +858,32 @@ export default {
       }
       const normalized = ScreenSettingsManager.getOrderGapMinutes()
       this.orderGapMinutesInput = String(normalized)
+      uni.showToast({ title: '已保存', icon: 'success' })
+    },
+
+    setSteamerWorkSurface(surface) {
+      if (surface === this.steamerWorkSurface) return
+      const ok = ScreenSettingsManager.setSteamerWorkSurface(surface)
+      if (!ok) {
+        uni.showToast({ title: '保存失败', icon: 'error' })
+        return
+      }
+      this.steamerWorkSurface = ScreenSettingsManager.getSteamerWorkSurface()
+      uni.showToast({ title: '已保存', icon: 'success' })
+    },
+
+    persistSteamThresholds() {
+      const ok = ScreenSettingsManager.setAlertParams({
+        steamWarnMin: this.steamWarnMinInput,
+        steamUrgentMin: this.steamUrgentMinInput
+      })
+      if (!ok) {
+        uni.showToast({ title: '保存失败', icon: 'error' })
+        return
+      }
+      const alert = ScreenSettingsManager.getAlertParams()
+      this.steamWarnMinInput = String(alert.steamWarnMin)
+      this.steamUrgentMinInput = String(alert.steamUrgentMin)
       uni.showToast({ title: '已保存', icon: 'success' })
     },
 

@@ -46,6 +46,10 @@ class DomainPortsTests(unittest.IsolatedAsyncioTestCase):
     def test_port_callables_exist(self):
         self.assertTrue(callable(self.db.orders.get_orders))
         self.assertTrue(callable(self.db.orders.apply_cooking_completion))
+        self.assertTrue(callable(self.db.orders.apply_steamer_load))
+        self.assertTrue(callable(self.db.orders.apply_steamer_move))
+        self.assertTrue(callable(self.db.orders.apply_steamer_unload))
+        self.assertTrue(callable(self.db.orders.apply_steamer_pluck))
         self.assertTrue(callable(self.db.orders.aggregate_orders_paginated))
         self.assertTrue(callable(self.db.dish_stations.dish_stations_find))
         self.assertTrue(callable(self.db.dish_stations.dish_stations_insert))

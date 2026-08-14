@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatServePreview, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds, servePreviewText } from '../batchCooking.js'
+import { formatServePreview, planBasketServeCookingCalls, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds, servePreviewText } from '../batchCooking.js'
 
 function makeOrder(overrides = {}) {
   return {
@@ -350,6 +350,117 @@ describe('planTablePickCookingCalls', () => {
         completeQuantity: 2,
         orders: [leftover],
         allocations: [{ order: leftover, serveQuantity: 2 }]
+      }
+    ])
+  })
+})
+
+describe('planBasketServeCookingCalls', () => {
+  it('plans 笼上出餐 from explicit steaming ids, not FIFO of the same dish', () => {
+    const earlier = makeOrder({
+      id: 'early',
+      table_number: '1',
+      order_time: '2026-08-14T10:00:00+08:00'
+    })
+    const later = makeOrder({
+      id: 'late',
+      table_number: '2',
+      order_time: '2026-08-14T10:10:00+08:00'
+    })
+
+    expect(
+      planBasketServeCookingCalls({
+        selectedOrderIds: ['late'],
+        cages: [earlier, later]
+      })
+    ).toEqual([
+      {
+        dishName: '虾饺',
+        completeQuantity: 1,
+        orders: [later],
+        allocations: [{ order: later, serveQuantity: 1 }]
+      }
+    ])
+  })
+
+  it('returns an empty plan when confirm has no selected cages', () => {
+    const cage = makeOrder({ id: 's1' })
+    expect(
+      planBasketServeCookingCalls({
+        selectedOrderIds: [],
+        cages: [cage]
+      })
+    ).toEqual([])
+  })
+
+  it('groups mixed dishes into one complete-cooking call per dish', () => {
+    const dumpling = makeOrder({ id: 'd1', dish_name: '虾饺', table_number: '3' })
+    const bun = makeOrder({ id: 'b1', dish_name: '叉烧包', table_number: '4' })
+    const dumpling2 = makeOrder({ id: 'd2', dish_name: '虾饺', table_number: '5' })
+
+    expect(
+      planBasketServeCookingCalls({
+        selectedOrderIds: ['b1', 'd2'],
+        cages: [dumpling, bun, dumpling2]
+      })
+    ).toEqual([
+      {
+        dishName: '叉烧包',
+        completeQuantity: 1,
+        orders: [bun],
+        allocations: [{ order: bun, serveQuantity: 1 }]
+      },
+      {
+        dishName: '虾饺',
+        completeQuantity: 1,
+        orders: [dumpling2],
+        allocations: [{ order: dumpling2, serveQuantity: 1 }]
+      }
+    ])
+  })
+
+  it('plans 笼上出餐 from selected awaiting ids, not the whole 待上笼组', () => {
+    const earlier = makeOrder({
+      id: 'a1',
+      table_number: '1',
+      order_time: '2026-08-14T10:00:00+08:00',
+      placement: null
+    })
+    const later = makeOrder({
+      id: 'a2',
+      table_number: '2',
+      order_time: '2026-08-14T10:10:00+08:00',
+      placement: null
+    })
+
+    expect(
+      planBasketServeCookingCalls({
+        selectedOrderIds: ['a2'],
+        cages: [earlier, later]
+      })
+    ).toEqual([
+      {
+        dishName: '虾饺',
+        completeQuantity: 1,
+        orders: [later],
+        allocations: [{ order: later, serveQuantity: 1 }]
+      }
+    ])
+  })
+
+  it('ignores selected ids that are not in the steaming cages list', () => {
+    const steaming = makeOrder({ id: 's1', table_number: '9' })
+    expect(
+      planBasketServeCookingCalls({
+        selectedOrderIds: ['a1', steaming.id],
+        cages: [steaming]
+      })
+    ).toEqual([
+      {
+        dishName: '虾饺',
+        completeQuantity: 1,
+        orders: [steaming],
+        allocations: [{ order: steaming, serveQuantity: 1 }]
       }
     ])
   })
