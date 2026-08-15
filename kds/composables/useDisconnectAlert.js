@@ -1,42 +1,34 @@
 /**
- * Kitchen glue for connection edge alerts: watch status + APP beep/vibrate.
+ * Kitchen glue for connection edge alerts: watch status + shared sound engine.
  */
 
 import { computed, watch } from 'vue'
 import { connectionEdge } from '../utils/connectionEdge.js'
-
-const DISCONNECT_ALERT_BEEP_COUNT = 2
-
-function playDisconnectAlert() {
-  // #ifdef APP-PLUS
-  try {
-    if (typeof plus !== 'undefined' && plus.device && typeof plus.device.beep === 'function') {
-      plus.device.beep(DISCONNECT_ALERT_BEEP_COUNT)
-    }
-  } catch (error) {
-    console.warn('[厨房] 断连提示音播放失败:', error)
-  }
-  try {
-    uni.vibrateLong()
-  } catch (error) {
-    console.warn('[厨房] 断连振动提示失败:', error)
-  }
-  // #endif
-}
+import { playDisconnectAlert } from '../utils/sound.js'
+import { ScreenSettingsManager } from '../utils/storage.js'
 
 /**
  * @param {() => string} getStatus  e.g. () => realtimeStore.connectionStatus
+ * @param {{ higherKindClaimed?: () => boolean }} [options]
  */
-export function useDisconnectAlert(getStatus) {
+export function useDisconnectAlert(getStatus, options = {}) {
+  const higherKindClaimed =
+    typeof options.higherKindClaimed === 'function' ? options.higherKindClaimed : () => false
   const showDisconnectBanner = computed(() => getStatus() !== 'connected')
   let stopWatching = null
+  let alertParams = ScreenSettingsManager.getAlertParams()
+
+  function reloadConfig() {
+    alertParams = ScreenSettingsManager.getAlertParams()
+  }
 
   function start() {
     if (stopWatching) return
+    reloadConfig()
     stopWatching = watch(getStatus, (newStatus, oldStatus) => {
-      if (connectionEdge(oldStatus, newStatus) === 'disconnect') {
-        playDisconnectAlert()
-      }
+      if (connectionEdge(oldStatus, newStatus) !== 'disconnect') return
+      if (higherKindClaimed()) return
+      playDisconnectAlert({ tone: alertParams.disconnectTone, volume: alertParams.alertVolume })
     })
   }
 
@@ -50,6 +42,7 @@ export function useDisconnectAlert(getStatus) {
   return {
     showDisconnectBanner,
     start,
-    stop
+    stop,
+    reloadConfig
   }
 }

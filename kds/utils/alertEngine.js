@@ -34,8 +34,7 @@ import { DISH_STATUS, isRefundOrder } from './constants.js'
  *   badgeDismissSec?: number,
  *   urgentMin?: number,
  *   steamUrgentMin?: number,
- *   overtimeRepeatSec?: number,
- *   steamerWorkSurface?: '' | 'load' | 'steaming' | 'solo'
+ *   overtimeRepeatSec?: number
  * }} AlertConfig
  */
 
@@ -48,8 +47,6 @@ const DEFAULT_CONFIG = Object.freeze({
   steamUrgentMin: 20,
   overtimeRepeatSec: 30
 })
-
-const STEAMER_WORK_SURFACE_SET = new Set(['load', 'steaming', 'solo'])
 
 /**
  * @returns {AlertState}
@@ -79,7 +76,7 @@ function flowIdOf(order) {
  * @param {object} order
  */
 function isWatched(watchedStations, order) {
-  if (!Array.isArray(watchedStations) || watchedStations.length === 0) return true
+  if (!Array.isArray(watchedStations) || watchedStations.length === 0) return false
   const station = typeof order.station === 'string' ? order.station.trim() : ''
   return station !== '' && watchedStations.includes(station)
 }
@@ -104,10 +101,7 @@ function normalizeConfig(raw) {
       : DEFAULT_CONFIG.steamUrgentMin,
     overtimeRepeatSec: Number.isFinite(Number(c.overtimeRepeatSec))
       ? Number(c.overtimeRepeatSec)
-      : DEFAULT_CONFIG.overtimeRepeatSec,
-    steamerWorkSurface: STEAMER_WORK_SURFACE_SET.has(c.steamerWorkSurface)
-      ? c.steamerWorkSurface
-      : ''
+      : DEFAULT_CONFIG.overtimeRepeatSec
   }
 }
 
@@ -125,16 +119,15 @@ function isCancelHold(order) {
 /**
  * @param {object[]} orders
  * @param {string[]} watchedStations
- * @param {string} surface
  * @returns {Map<string, object>}
  */
-function buildRelevantIndex(orders, watchedStations, surface) {
+function buildRelevantIndex(orders, watchedStations) {
   const index = new Map()
   if (!Array.isArray(orders)) return index
   for (const order of orders) {
     if (!order) continue
     const hold = isCancelHold(order)
-    if (isRefundOrder(order) && !(surface && hold)) continue
+    if (isRefundOrder(order) && !hold) continue
     if (!isWatched(watchedStations, order)) continue
     const flowId = flowIdOf(order)
     if (!flowId) continue
@@ -159,16 +152,6 @@ function buildRelevantIndex(orders, watchedStations, surface) {
  * @param {number} now
  * @param {number} urgentMin
  */
-function hasOvertimePending(index, now, urgentMin) {
-  const thresholdMs = urgentMin * 60 * 1000
-  for (const entry of index.values()) {
-    if (entry.status !== DISH_STATUS.PENDING) continue
-    if (!Number.isFinite(entry.orderTime)) continue
-    if (now - entry.orderTime > thresholdMs) return true
-  }
-  return false
-}
-
 function hasAwaitingOvertime(index, now, urgentMin) {
   const thresholdMs = urgentMin * 60 * 1000
   for (const entry of index.values()) {
@@ -189,36 +172,21 @@ function hasSteamOvertime(index, now, steamUrgentMin) {
   return false
 }
 
-function hasPendingWork(index, surface) {
-  if (surface === 'steaming') {
-    for (const entry of index.values()) {
-      if (entry.steaming || entry.cancelHold) return true
-    }
-    return false
-  }
-  if (surface === 'load' || surface === 'solo') {
-    for (const entry of index.values()) {
-      if (entry.awaiting) return true
-    }
-    return false
-  }
+function hasPendingWork(index) {
   for (const entry of index.values()) {
-    if (entry.status === DISH_STATUS.PENDING) return true
+    if (entry.awaiting) return true
   }
   return false
 }
 
-function isNewOrderEntry(entry, surface) {
-  if (surface === 'steaming') return false
-  if (surface === 'load' || surface === 'solo') return entry.awaiting
-  return entry.status === DISH_STATUS.PENDING
+function isNewOrderEntry(entry) {
+  return Boolean(entry.awaiting)
 }
 
-function snapshotEntry(entry, surface) {
-  const base = { status: entry.status, quantity: entry.quantity }
-  if (!surface) return base
+function snapshotEntry(entry) {
   return {
-    ...base,
+    status: entry.status,
+    quantity: entry.quantity,
     awaiting: entry.awaiting,
     mapWork: entry.steaming || entry.cancelHold
   }
@@ -244,23 +212,16 @@ export function step(state, input) {
   const prev = state || createInitialState()
   const now = Number.isFinite(input?.now) ? input.now : Date.now()
   const config = normalizeConfig(input?.config)
-  const surface = config.steamerWorkSurface
-  const index = buildRelevantIndex(input?.orders, config.watchedStations, surface)
+  const index = buildRelevantIndex(input?.orders, config.watchedStations)
 
   const nextSnapshot = new Map()
   for (const [flowId, entry] of index) {
-    nextSnapshot.set(flowId, snapshotEntry(entry, surface))
+    nextSnapshot.set(flowId, snapshotEntry(entry))
   }
 
-  const hasPending = hasPendingWork(index, surface)
-  const waitOvertime = surface === 'steaming'
-    ? false
-    : surface
-      ? hasAwaitingOvertime(index, now, config.urgentMin)
-      : hasOvertimePending(index, now, config.urgentMin)
-  const steamOvertime = surface === 'steaming' || surface === 'solo'
-    ? hasSteamOvertime(index, now, config.steamUrgentMin)
-    : false
+  const hasPending = hasPendingWork(index)
+  const waitOvertime = hasAwaitingOvertime(index, now, config.urgentMin)
+  const steamOvertime = hasSteamOvertime(index, now, config.steamUrgentMin)
   const overtime = waitOvertime || steamOvertime
 
   // First pass: baseline only — mirror reality, no alerts.
@@ -282,7 +243,7 @@ export function step(state, input) {
   /** @type {string[]} */
   const newEventFlowIds = []
   for (const [flowId, entry] of index) {
-    if (!isNewOrderEntry(entry, surface)) continue
+    if (!isNewOrderEntry(entry)) continue
     const prevEntry = prev.snapshot.get(flowId)
     if (!prevEntry) {
       newEventFlowIds.push(flowId)
@@ -313,13 +274,6 @@ export function step(state, input) {
   const nextBadges = new Map(prev.newBadges)
   let dingCount = 0
   let lastReescalateAt = prev.lastReescalateAt
-
-  // 在蒸面 never yellow-flashes or keeps new-order chrome.
-  if (surface === 'steaming') {
-    awaitingAck = false
-    lastReescalateAt = null
-    nextBadges.clear()
-  }
 
   // No pending left → nothing to acknowledge; border falls to green.
   if (!hasPending) {
@@ -381,6 +335,11 @@ export function step(state, input) {
     }
   } else {
     lastOvertimeAlarmAt = null
+  }
+
+  // Alert preempt: same-step 新单提醒 wins; overtime waits for the next repeat interval.
+  if (dingCount > 0 && overtimeAlarm) {
+    overtimeAlarm = false
   }
 
   return {

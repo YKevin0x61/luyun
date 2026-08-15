@@ -9,7 +9,7 @@ const T0 = Date.parse('2026-07-23T12:00:00.000Z')
 
 function defaultConfig(overrides = {}) {
   return {
-    watchedStations: [],
+    watchedStations: ['shulong'],
     beepCap: 5,
     reescalateSec: 20,
     badgeDismissSec: 30,
@@ -58,7 +58,9 @@ describe('alertEngine', () => {
     expect(state.borderState).toBe('red')
     expect(state.snapshot.get('flow-1')).toEqual({
       status: '待出餐',
-      quantity: 1
+      quantity: 1,
+      awaiting: true,
+      mapWork: false
     })
   })
 
@@ -107,7 +109,7 @@ describe('alertEngine', () => {
       expect(badgeModes(state)).toEqual({ 'flow-1': 'yellow' })
     })
 
-    it('ignores orders outside watched stations; empty watched = all stations', () => {
+    it('ignores orders outside watched stations; empty watched = no stations', () => {
       const watched = defaultConfig({ watchedStations: ['shulong'] })
       const baseline = prime([], watched)
       const { state, effects } = step(baseline, {
@@ -122,6 +124,16 @@ describe('alertEngine', () => {
       expect(effects.dingCount).toBe(1)
       expect(badgeModes(state)).toEqual({ mine: 'yellow' })
       expect(state.snapshot.has('other')).toBe(false)
+
+      const empty = defaultConfig({ watchedStations: [] })
+      const emptyBaseline = prime([], empty)
+      const ignored = step(emptyBaseline, {
+        orders: [makeOrder({ business_flow_id: 'mine', station: 'shulong' })],
+        config: empty,
+        now: T0
+      })
+      expect(ignored.effects.dingCount).toBe(0)
+      expect(ignored.state.snapshot.has('mine')).toBe(false)
     })
 
     it('ignores refund orders', () => {
@@ -206,7 +218,8 @@ describe('alertEngine', () => {
 
       expect(state.awaitingAck).toBe(true)
       expect(state.borderState).toBe('yellow')
-      expect(effects.overtimeAlarm).toBe(true)
+      expect(effects.dingCount).toBe(1)
+      expect(effects.overtimeAlarm).toBe(false)
     })
 
     it('red when pending and not awaitingAck even if overtime', () => {
@@ -224,7 +237,8 @@ describe('alertEngine', () => {
       })
 
       expect(state.borderState).toBe('red')
-      expect(effects.overtimeAlarm).toBe(true)
+      expect(effects.dingCount).toBe(1)
+      expect(effects.overtimeAlarm).toBe(false)
       expect(state.awaitingAck).toBe(false)
     })
 
@@ -342,6 +356,40 @@ describe('alertEngine', () => {
   })
 
   describe('overtime alarm + re-escalate', () => {
+    it('same-step ding and overtime emits ding only; overtime waits for the next repeat interval', () => {
+      const baseline = prime([])
+      const config = defaultConfig({ urgentMin: 20, overtimeRepeatSec: 30 })
+      const overdue = makeOrder({
+        order_time: '2026-07-23T11:00:00.000Z'
+      })
+      const first = step(baseline, {
+        orders: [overdue],
+        config,
+        now: T0
+      })
+
+      expect(first.effects.dingCount).toBe(1)
+      expect(first.effects.overtimeAlarm).toBe(false)
+      expect(first.state.lastOvertimeAlarmAt).toBe(T0)
+
+      const acked = acknowledge(first.state)
+      const oneSecondLater = step(acked, {
+        orders: [overdue],
+        config,
+        now: T0 + 1000
+      })
+      expect(oneSecondLater.effects.overtimeAlarm).toBe(false)
+      expect(oneSecondLater.effects.dingCount).toBe(0)
+
+      const atRepeat = step(oneSecondLater.state, {
+        orders: [overdue],
+        config,
+        now: T0 + 30_000
+      })
+      expect(atRepeat.effects.overtimeAlarm).toBe(true)
+      expect(atRepeat.effects.dingCount).toBe(0)
+    })
+
     it('emits overtimeAlarm when pending wait exceeds urgentMin, then repeats on interval', () => {
       const old = makeOrder({
         order_time: '2026-07-23T11:30:00.000Z' // 30 min before T0
@@ -393,7 +441,7 @@ describe('alertEngine', () => {
     })
   })
 
-  describe('steamer work surface', () => {
+  describe('熟笼蒸炉屏', () => {
     const placement = {
       steamer_id: '1',
       port_index: 1,
@@ -401,29 +449,15 @@ describe('alertEngine', () => {
       loaded_at: '2026-07-23T11:58:00.000Z'
     }
 
-    it('keeps today’s behavior when steamerWorkSurface is absent', () => {
+    it('new 待上笼 yellow-flashes; a new 在蒸 cage does not', () => {
       const baseline = prime([])
-      const { state, effects } = step(baseline, {
-        orders: [makeOrder({ business_flow_id: 'flow-new' })],
-        config: defaultConfig(),
-        now: T0
-      })
-      expect(effects.dingCount).toBe(1)
-      expect(state.awaitingAck).toBe(true)
-      expect(state.borderState).toBe('yellow')
-      expect(badgeModes(state)).toEqual({ 'flow-new': 'yellow' })
-    })
-
-    it('load: new 待上笼 yellow-flashes; a new 在蒸 cage does not', () => {
-      const load = defaultConfig({ steamerWorkSurface: 'load' })
-      const baseline = prime([], load)
       const steaming = makeOrder({
         business_flow_id: 'already-on',
         placement
       })
       const afterSteam = step(baseline, {
         orders: [steaming],
-        config: load,
+        config: defaultConfig(),
         now: T0
       })
       expect(afterSteam.effects.dingCount).toBe(0)
@@ -434,7 +468,7 @@ describe('alertEngine', () => {
       const awaiting = makeOrder({ business_flow_id: 'need-load' })
       const afterAwaiting = step(afterSteam.state, {
         orders: [steaming, awaiting],
-        config: load,
+        config: defaultConfig(),
         now: T0 + 1000
       })
       expect(afterAwaiting.effects.dingCount).toBe(1)
@@ -443,17 +477,16 @@ describe('alertEngine', () => {
       expect(badgeModes(afterAwaiting.state)).toEqual({ 'need-load': 'yellow' })
     })
 
-    it('load: 下笼 of a 在蒸 line is not a 新单事件', () => {
-      const load = defaultConfig({ steamerWorkSurface: 'load' })
+    it('下笼 of a 在蒸 line is not a 新单事件', () => {
       const steaming = makeOrder({
         business_flow_id: 'same-line',
         placement
       })
-      const baseline = prime([steaming], load)
+      const baseline = prime([steaming])
       const unloaded = makeOrder({ business_flow_id: 'same-line' })
       const { state, effects } = step(baseline, {
         orders: [unloaded],
-        config: load,
+        config: defaultConfig(),
         now: T0 + 1000
       })
       expect(effects.dingCount).toBe(0)
@@ -462,133 +495,23 @@ describe('alertEngine', () => {
       expect(state.borderState).toBe('red')
     })
 
-    it('load: hasPending for border is 待上笼 only', () => {
-      const load = defaultConfig({ steamerWorkSurface: 'load' })
+    it('hasPending for border is 待上笼 only', () => {
       const steaming = makeOrder({ business_flow_id: 'on-hole', placement })
       const { state } = step(createInitialState(), {
         orders: [steaming],
-        config: load,
+        config: defaultConfig(),
         now: T0
       })
       expect(state.borderState).toBe('green')
       expect(state.awaitingAck).toBe(false)
     })
 
-    it('steaming: leftover awaitingAck does not yellow-flash even with 在蒸', () => {
-      const steamingCfg = defaultConfig({ steamerWorkSurface: 'steaming' })
-      const onHole = makeOrder({ business_flow_id: 'on-hole', placement })
-      const leftover = prime([onHole], steamingCfg)
-      leftover.awaitingAck = true
-      leftover.borderState = 'yellow'
-      leftover.newBadges.set('ghost', { mode: 'yellow', at: T0 })
-      leftover.lastReescalateAt = T0
-      const { state, effects } = step(leftover, {
-        orders: [onHole],
-        config: steamingCfg,
-        now: T0 + 25_000
-      })
-      expect(effects.dingCount).toBe(0)
-      expect(state.awaitingAck).toBe(false)
-      expect(state.newBadges.size).toBe(0)
-      expect(state.borderState).toBe('red')
-    })
-
-    it('steaming: new 待上笼 does not ding, badge, or yellow-flash', () => {
-      const steamingCfg = defaultConfig({ steamerWorkSurface: 'steaming' })
-      const baseline = prime([], steamingCfg)
-      const { state, effects } = step(baseline, {
-        orders: [makeOrder({ business_flow_id: 'need-load' })],
-        config: steamingCfg,
-        now: T0
-      })
-      expect(effects.dingCount).toBe(0)
-      expect(state.awaitingAck).toBe(false)
-      expect(state.newBadges.size).toBe(0)
-      expect(state.borderState).toBe('green')
-    })
-
-    it('steaming: border is red when 在蒸 or 退菜占位 exists, else green', () => {
-      const steamingCfg = defaultConfig({ steamerWorkSurface: 'steaming' })
-      const onHole = makeOrder({ business_flow_id: 'on-hole', placement })
-      const withSteam = step(createInitialState(), {
-        orders: [onHole],
-        config: steamingCfg,
-        now: T0
-      }).state
-      expect(withSteam.borderState).toBe('red')
-
-      const hold = makeOrder({
-        business_flow_id: 'hold-1',
-        dish_status: '已取消',
-        status: '退菜',
-        placement
-      })
-      const withHold = step(createInitialState(), {
-        orders: [hold],
-        config: steamingCfg,
-        now: T0
-      }).state
-      expect(withHold.borderState).toBe('red')
-
-      const empty = step(createInitialState(), {
-        orders: [makeOrder({ business_flow_id: 'need-load' })],
-        config: steamingCfg,
-        now: T0
-      }).state
-      expect(empty.borderState).toBe('green')
-    })
-
-    it('steaming: overtime uses loaded_at + steamUrgentMin and never sets border yellow', () => {
-      const steamingCfg = defaultConfig({
-        steamerWorkSurface: 'steaming',
-        urgentMin: 1,
-        steamUrgentMin: 20,
-        overtimeRepeatSec: 30
-      })
-      const recentSteam = makeOrder({
-        business_flow_id: 'fresh',
-        order_time: '2026-07-23T10:00:00.000Z',
-        placement: {
-          ...placement,
-          loaded_at: '2026-07-23T11:58:00.000Z'
-        }
-      })
-      const overdueSteam = makeOrder({
-        business_flow_id: 'over',
-        order_time: '2026-07-23T11:59:00.000Z',
-        placement: {
-          ...placement,
-          loaded_at: '2026-07-23T11:30:00.000Z'
-        }
-      })
-
-      const recentBaseline = prime([recentSteam], steamingCfg, T0)
-      const recentTick = step(recentBaseline, {
-        orders: [recentSteam],
-        config: steamingCfg,
-        now: T0 + 1000
-      })
-      expect(recentTick.effects.overtimeAlarm).toBe(false)
-      expect(recentTick.state.borderState).toBe('red')
-
-      const overdueBaseline = prime([overdueSteam], steamingCfg, T0)
-      const overdueTick = step(overdueBaseline, {
-        orders: [overdueSteam],
-        config: steamingCfg,
-        now: T0 + 1000
-      })
-      expect(overdueTick.effects.overtimeAlarm).toBe(true)
-      expect(overdueTick.state.borderState).toBe('red')
-      expect(overdueTick.state.borderState).not.toBe('yellow')
-    })
-
-    it('solo: new 待上笼 yellow-flashes; steam overtime does not steal the yellow border', () => {
-      const solo = defaultConfig({
-        steamerWorkSurface: 'solo',
+    it('steam overtime uses loaded_at and does not steal the yellow border', () => {
+      const cfg = defaultConfig({
         steamUrgentMin: 15,
         overtimeRepeatSec: 30
       })
-      const baseline = prime([], solo)
+      const baseline = prime([], cfg)
       const awaiting = makeOrder({ business_flow_id: 'need-load' })
       const overdueSteam = makeOrder({
         business_flow_id: 'over',
@@ -599,19 +522,18 @@ describe('alertEngine', () => {
       })
       const { state, effects } = step(baseline, {
         orders: [awaiting, overdueSteam],
-        config: solo,
+        config: cfg,
         now: T0
       })
       expect(effects.dingCount).toBe(1)
-      expect(effects.overtimeAlarm).toBe(true)
+      expect(effects.overtimeAlarm).toBe(false)
       expect(state.awaitingAck).toBe(true)
       expect(state.borderState).toBe('yellow')
       expect(badgeModes(state)).toEqual({ 'need-load': 'yellow' })
     })
 
-    it('steaming: cancel-holds are map work, not new-order events', () => {
-      const steamingCfg = defaultConfig({ steamerWorkSurface: 'steaming' })
-      const baseline = prime([], steamingCfg)
+    it('cancel-holds are not new-order events', () => {
+      const baseline = prime([])
       const hold = makeOrder({
         business_flow_id: 'hold-1',
         dish_status: '已取消',
@@ -620,13 +542,13 @@ describe('alertEngine', () => {
       })
       const { state, effects } = step(baseline, {
         orders: [hold],
-        config: steamingCfg,
+        config: defaultConfig(),
         now: T0
       })
       expect(effects.dingCount).toBe(0)
       expect(state.awaitingAck).toBe(false)
       expect(state.newBadges.size).toBe(0)
-      expect(state.borderState).toBe('red')
+      expect(state.borderState).toBe('green')
     })
   })
 })

@@ -21,6 +21,27 @@ export const DENSITY_MODES = Object.freeze({
 
 const DENSITY_MODE_SET = new Set(Object.values(DENSITY_MODES))
 
+export const ALERT_TONES = Object.freeze(['清脆', '穿透', '圆润', '低沉', '厚实'])
+const ALERT_TONE_SET = new Set(ALERT_TONES)
+export const DEFAULT_ALERT_TONE = '清脆'
+export const DEFAULT_ALERT_VOLUME = 0.6
+export const ALERT_VOLUME_FLOOR = 0.2
+
+export function normalizeAlertTone(value) {
+  if (typeof value !== 'string') return DEFAULT_ALERT_TONE
+  const tone = value.trim()
+  return ALERT_TONE_SET.has(tone) ? tone : DEFAULT_ALERT_TONE
+}
+
+export function normalizeAlertVolume(value) {
+  if (value === '' || value == null) return DEFAULT_ALERT_VOLUME
+  const n = Number(value)
+  if (!Number.isFinite(n)) return DEFAULT_ALERT_VOLUME
+  if (n < ALERT_VOLUME_FLOOR) return ALERT_VOLUME_FLOOR
+  if (n > 1) return 1
+  return n
+}
+
 const DEFAULT_ALERT_PARAMS = Object.freeze({
   beepCap: 5,
   reescalateSec: 20,
@@ -29,7 +50,12 @@ const DEFAULT_ALERT_PARAMS = Object.freeze({
   urgentMin: 20,
   steamWarnMin: 15,
   steamUrgentMin: 20,
-  overtimeRepeatSec: 30
+  overtimeRepeatSec: 30,
+  newOrderTone: DEFAULT_ALERT_TONE,
+  overtimeTone: DEFAULT_ALERT_TONE,
+  cancelTone: DEFAULT_ALERT_TONE,
+  disconnectTone: DEFAULT_ALERT_TONE,
+  alertVolume: DEFAULT_ALERT_VOLUME
 })
 
 function normalizeWatchedStations(value) {
@@ -43,7 +69,8 @@ function normalizeWatchedStations(value) {
     seen.add(id)
     result.push(id)
   }
-  return result
+  // One screen locks exactly one station. Legacy empty/multi stays unset.
+  return result.length === 1 ? result : []
 }
 
 function normalizeDensity(value) {
@@ -71,7 +98,12 @@ function normalizeAlertParams(value) {
     overtimeRepeatSec: normalizeAlertNumber(
       raw.overtimeRepeatSec,
       DEFAULT_ALERT_PARAMS.overtimeRepeatSec
-    )
+    ),
+    newOrderTone: normalizeAlertTone(raw.newOrderTone),
+    overtimeTone: normalizeAlertTone(raw.overtimeTone),
+    cancelTone: normalizeAlertTone(raw.cancelTone),
+    disconnectTone: normalizeAlertTone(raw.disconnectTone),
+    alertVolume: normalizeAlertVolume(raw.alertVolume)
   }
 }
 
@@ -370,8 +402,8 @@ export class PrintQueueManager {
 }
 
 /**
- * 本屏 KDS 设备本地配置（职责档口集 / 密度 / 菜品卡片份数上限 / 下单间隔 / 告警参数）。
- * 遵循 ADR 0002：按设备本地存储，不写后端。空职责档口集 = 全部档口。
+ * 本屏 KDS 设备本地配置（职责档口 / 密度 / 菜品卡片份数上限 / 下单间隔 / 告警参数）。
+ * 遵循 ADR 0002：按设备本地存储，不写后端。watchedStations 长度为 0 或 1。
  */
 const STEAMER_WORK_SURFACE_SET = new Set(['load', 'steaming', 'solo'])
 
@@ -453,9 +485,15 @@ export class ScreenSettingsManager {
     }
   }
 
-  /** @returns {string[]} 空数组表示全部档口 */
+  /** @returns {string[]} length 0 = unlocked; length 1 = locked station */
   static getWatchedStations() {
     return this.getSettings().watchedStations
+  }
+
+  /** @returns {string|null} */
+  static getLockedStationId() {
+    const watched = this.getWatchedStations()
+    return watched.length === 1 ? watched[0] : null
   }
 
   static setWatchedStations(stationIds) {
@@ -463,14 +501,12 @@ export class ScreenSettingsManager {
   }
 
   /**
-   * 某档口是否属于本屏职责。空集合语义为全部档口。
+   * 某档口是否为本屏锁死档。未锁定时一律 false。
    * @param {string} stationId
    */
   static isStationWatched(stationId) {
     if (typeof stationId !== 'string' || !stationId.trim()) return false
-    const watched = this.getWatchedStations()
-    if (watched.length === 0) return true
-    return watched.includes(stationId.trim())
+    return this.getLockedStationId() === stationId.trim()
   }
 
   static getDensity() {
@@ -533,5 +569,9 @@ export default {
   PrinterSettingsManager,
   PrintQueueManager,
   ScreenSettingsManager,
-  DENSITY_MODES
+  DENSITY_MODES,
+  ALERT_TONES,
+  DEFAULT_ALERT_TONE,
+  DEFAULT_ALERT_VOLUME,
+  ALERT_VOLUME_FLOOR
 } 

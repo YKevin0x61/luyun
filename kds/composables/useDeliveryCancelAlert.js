@@ -1,5 +1,5 @@
 /**
- * Kitchen glue for deliveryCancelEngine: banner state + APP beep/vibrate.
+ * Kitchen glue for deliveryCancelEngine: banner state + shared sound engine.
  * kitchen.vue only renders the banner and calls syncOrders / dismiss.
  */
 
@@ -9,25 +9,11 @@ import {
   dismiss as dismissEngine,
   step
 } from '../utils/deliveryCancelEngine.js'
+import { playCancelAlert } from '../utils/sound.js'
+import { ScreenSettingsManager } from '../utils/storage.js'
 
-const CANCEL_ALERT_BEEP_COUNT = 4
-
-function playCancelAlert() {
-  // #ifdef APP-PLUS
-  try {
-    if (typeof plus !== 'undefined' && plus.device && typeof plus.device.beep === 'function') {
-      plus.device.beep(CANCEL_ALERT_BEEP_COUNT)
-    }
-  } catch (error) {
-    console.warn('[厨房] 外卖取消提示音播放失败:', error)
-  }
-  try {
-    uni.vibrateLong()
-  } catch (error) {
-    console.warn('[厨房] 外卖取消振动提示失败:', error)
-  }
-  // #endif
-}
+/** One kitchen tick / one higher-kind playback. Losing sounds are dropped, not queued. */
+const HIGHER_KIND_CLAIM_MS = 1000
 
 /**
  * @param {{
@@ -42,6 +28,12 @@ export function useDeliveryCancelAlert(options = {}) {
   /** @type {import('vue').ShallowRef<ReturnType<typeof createInitialState>>} */
   const engineState = shallowRef(createInitialState())
   const deliveryCancelAlert = ref({ ...engineState.value.banner })
+  let claimedAt = null
+  let alertParams = ScreenSettingsManager.getAlertParams()
+
+  function reloadConfig() {
+    alertParams = ScreenSettingsManager.getAlertParams()
+  }
 
   function resolveWatchedStations() {
     if (getWatchedStations) {
@@ -69,7 +61,15 @@ export function useDeliveryCancelAlert(options = {}) {
       watchedStations: resolveWatchedStations()
     })
     publish(state)
-    if (effects.playAlert) playCancelAlert()
+    if (effects.playAlert) {
+      playCancelAlert({ tone: alertParams.cancelTone, volume: alertParams.alertVolume })
+      claimedAt = Date.now()
+    }
+    return Boolean(effects.playAlert)
+  }
+
+  function higherKindClaimed() {
+    return claimedAt != null && Date.now() - claimedAt < HIGHER_KIND_CLAIM_MS
   }
 
   function dismissDeliveryCancelAlert() {
@@ -80,6 +80,8 @@ export function useDeliveryCancelAlert(options = {}) {
     deliveryCancelAlert,
     syncOrders,
     dismissDeliveryCancelAlert,
-    setWatchedStations
+    setWatchedStations,
+    reloadConfig,
+    higherKindClaimed
   }
 }

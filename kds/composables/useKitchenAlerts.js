@@ -23,6 +23,8 @@ import {
 import { ScreenSettingsManager } from '../utils/storage.js'
 
 const TICK_INTERVAL_MS = 1000
+/** One kitchen tick / one higher-kind playback. Losing sounds are dropped, not queued. */
+const HIGHER_KIND_CLAIM_MS = 1000
 
 function isH5Runtime() {
   return typeof window !== 'undefined' && !!window.document
@@ -44,7 +46,6 @@ function readAlertConfig() {
   const settings = ScreenSettingsManager.getSettings()
   return {
     watchedStations: settings.watchedStations,
-    steamerWorkSurface: settings.steamerWorkSurface,
     ...settings.alert
   }
 }
@@ -68,6 +69,7 @@ export function useKitchenAlerts() {
   let started = false
   /** @type {ReturnType<typeof readAlertConfig> | null} */
   let alertConfig = null
+  let claimedAt = null
 
   const screenBorderVisual = computed(() => toScreenBorderVisual(borderState.value))
 
@@ -82,28 +84,45 @@ export function useKitchenAlerts() {
     newBadgeModes.value = modes
   }
 
-  function runStep(orders, now = Date.now()) {
+  function runStep(orders, now = Date.now(), options = {}) {
+    const config = alertConfig || readAlertConfig()
     const { state, effects } = step(engineState.value, {
       orders: Array.isArray(orders) ? orders : [],
-      config: alertConfig || readAlertConfig(),
+      config,
       now
     })
     publishState(state)
-    if (effects.dingCount > 0) {
-      playNewOrderDing(effects.dingCount)
+    const cancelClaimed = Boolean(options.cancelClaimed)
+    if (effects.dingCount > 0 && !cancelClaimed) {
+      playNewOrderDing(effects.dingCount, {
+        tone: config.newOrderTone,
+        volume: config.alertVolume
+      })
+      claimedAt = now
     }
-    if (effects.overtimeAlarm) {
-      playOvertimeAlarm()
+    if (effects.overtimeAlarm && !cancelClaimed) {
+      playOvertimeAlarm({
+        tone: config.overtimeTone,
+        volume: config.alertVolume
+      })
+      claimedAt = now
     }
   }
 
   /**
    * Sync engine with the current order list (after mount baseline / nudge refetch).
+   * Engine always runs (badges / awaitingAck / lastOvertimeAlarmAt).
+   * Playback is skipped when delivery-cancel claimed this same orders sync.
    * @param {object[]} orders
+   * @param {{ cancelClaimed?: boolean }} [options]
    */
-  function syncOrders(orders) {
+  function syncOrders(orders, options = {}) {
     latestOrders = Array.isArray(orders) ? orders : []
-    runStep(latestOrders)
+    runStep(latestOrders, Date.now(), options)
+  }
+
+  function higherKindClaimed() {
+    return claimedAt != null && Date.now() - claimedAt < HIGHER_KIND_CLAIM_MS
   }
 
   /** 1s tick: busy-badge auto-dismiss + idle re-escalate + overtime repeat. */
@@ -171,6 +190,7 @@ export function useKitchenAlerts() {
     unlockSoundFromGesture,
     reloadConfig,
     start,
-    stop
+    stop,
+    higherKindClaimed
   }
 }

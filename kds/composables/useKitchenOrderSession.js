@@ -36,6 +36,7 @@ export function useKitchenOrderSession({ ordersStore }) {
     dishCardQuantityCap.value = ScreenSettingsManager.getDishCardQuantityCap()
     orderGapMinutes.value = ScreenSettingsManager.getOrderGapMinutes()
     kitchenAlerts.reloadConfig()
+    deliveryCancel.reloadConfig()
   }
 
   /**
@@ -70,8 +71,8 @@ export function useKitchenOrderSession({ ordersStore }) {
         start_time: startOfDay.toISOString(),
         end_time: endOfDay.toISOString()
       })
-      kitchenAlerts.syncOrders(ordersStore.orders)
-      deliveryCancel.syncOrders(ordersStore.orders)
+      const cancelClaimed = Boolean(deliveryCancel.syncOrders(ordersStore.orders))
+      kitchenAlerts.syncOrders(ordersStore.orders, { cancelClaimed })
     } finally {
       loading.value = false
     }
@@ -128,6 +129,10 @@ export function useKitchenOrderSession({ ordersStore }) {
     return now - thresholdsMs.value.urgent
   }
 
+  function higherKindClaimed() {
+    return Boolean(deliveryCancel.higherKindClaimed() || kitchenAlerts.higherKindClaimed())
+  }
+
   return {
     loading,
     watchedStationIds,
@@ -149,6 +154,7 @@ export function useKitchenOrderSession({ ordersStore }) {
     dishHasNewBadge: kitchenAlerts.dishHasNewBadge,
     unlockSoundFromGesture: kitchenAlerts.unlockSoundFromGesture,
     deliveryCancelAlert: deliveryCancel.deliveryCancelAlert,
-    dismissDeliveryCancelAlert: deliveryCancel.dismissDeliveryCancelAlert
+    dismissDeliveryCancelAlert: deliveryCancel.dismissDeliveryCancelAlert,
+    higherKindClaimed
   }
 }

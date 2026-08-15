@@ -1,11 +1,29 @@
 <template>
-  <view class="kitchen-page">
-    <!-- 屏幕状态边框：全屏 overlay，中心透明、不拦截点击；绿 / 黄闪 / 红 -->
+  <page-meta
+    :disable-scroll="isSteamerConsoleView"
+    :enable-pull-down-refresh="!isSteamerConsoleView"
+  />
+  <view class="kitchen-page" :class="{ 'is-steamer': isSteamerConsoleView }">
+    <!-- 屏幕状态边框：全屏 overlay，中心透明、不拦截点击；绿/红呼吸，黄走线 -->
     <view
       class="screen-border"
       :class="'screen-border--' + screenBorderVisual"
       aria-hidden="true"
-    />
+    >
+      <view class="screen-border__bar" />
+      <view class="screen-border__glow">
+        <view class="screen-border__glow-n" />
+        <view class="screen-border__glow-s" />
+        <view class="screen-border__glow-e" />
+        <view class="screen-border__glow-w" />
+      </view>
+      <view
+        v-if="screenBorderVisual === 'yellow'"
+        class="screen-border__sweep-clip"
+      >
+        <view class="screen-border__sweep-spin" />
+      </view>
+    </view>
 
     <!-- H5 一次性提示音解锁遮罩（APP-PLUS 无需） -->
     <view
@@ -70,7 +88,7 @@
     </view>
 
     <!-- 新单未确认：黄闪期间点「已知晓」停闪静音、清角标、边框转红 -->
-    <view v-if="awaitingAck && showNewOrderAck" class="ack-banner">
+    <view v-if="awaitingAck" class="ack-banner">
       <view class="ack-banner-info">
         <SvgIcon name="alert-triangle" :size="18" color="#fff" />
         <text class="ack-banner-text">有新单待确认，请查看后点击「已知晓」</text>
@@ -80,7 +98,7 @@
       </button>
     </view>
 
-    <!-- 一屏多档才出档口 tabs；一屏一档无控制条 -->
+    <!-- 未锁死时会跳设置；锁死后不渲染档口 tabs -->
     <view v-if="!isSingleWatchedStation" class="control-panel">
       <scroll-view scroll-x class="tabs-scroll">
         <view class="tabs-container">
@@ -106,24 +124,26 @@
       </scroll-view>
     </view>
 
-    <!-- 熟笼蒸炉屏：待上笼一行一份 + 蒸孔图；未设工作面时仍走菜卡 -->
-    <ShulongSteamerConsole
-      v-if="isSteamerConsoleView"
-      :awaiting-cages="awaitingSteamerCages"
-      :steaming-cages="steamingSteamerCages"
-      :layout="steamerLayout"
-      :loading="steamerLoading"
-      :work-surface="steamerWorkSurface"
-      :now="currentTimestamp"
-      :is-new-cage="cageIsNew"
-      :wait-thresholds-ms="thresholdsMs"
-      :steam-thresholds-ms="steamThresholdsMs"
-      @load="onSteamerLoad"
-      @move="onSteamerMove"
-      @unload="onSteamerUnload"
-      @serve="onSteamerBasketServe"
-      @pluck="onSteamerPluck"
-    />
+    <!-- 熟笼蒸炉屏：待上笼组按本屏菜卡份数上限 / 下单间隔拆，再加蒸孔图 -->
+    <view v-if="isSteamerConsoleView" class="steamer-stage">
+      <ShulongSteamerConsole
+        :awaiting-cages="awaitingSteamerCages"
+        :steaming-cages="steamingSteamerCages"
+        :layout="steamerLayout"
+        :loading="steamerLoading"
+        :now="currentTimestamp"
+        :is-new-cage="cageIsNew"
+        :wait-thresholds-ms="thresholdsMs"
+        :steam-thresholds-ms="steamThresholdsMs"
+        :dish-card-quantity-cap="dishCardQuantityCap"
+        :order-gap-minutes="orderGapMinutes"
+        @load="onSteamerLoad"
+        @move="onSteamerMove"
+        @unload="onSteamerUnload"
+        @serve="onSteamerBasketServe"
+        @pluck="onSteamerPluck"
+      />
+    </view>
 
     <!-- 订单列表 -->
     <view v-else class="orders-section">
@@ -240,7 +260,7 @@
 
 <script>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { onLoad, onShow } from '@dcloudio/uni-app'
+import { onShow } from '@dcloudio/uni-app'
 import { useOrdersStore } from '../../stores/orders.js'
 import { useRealtimeStore } from '../../stores/realtime.js'
 import { useStationsStore } from '../../stores/stations.js'
@@ -314,8 +334,11 @@ export default {
     const {
       showDisconnectBanner,
       start: startDisconnectAlert,
-      stop: stopDisconnectAlert
-    } = useDisconnectAlert(() => realtimeStore.connectionStatus)
+      stop: stopDisconnectAlert,
+      reloadConfig: reloadDisconnectAlert
+    } = useDisconnectAlert(() => realtimeStore.connectionStatus, {
+      higherKindClaimed: () => orderSession.higherKindClaimed()
+    })
 
     // 响应式数据
     const operationLoading = ref(false)
@@ -338,23 +361,13 @@ export default {
 
     // 显示密度（进页快照；设置页改完重进厨房页生效）
     const densityMode = ScreenSettingsManager.getDensity() || DENSITY_MODES.STANDARD
-    const steamerWorkSurface = ScreenSettingsManager.getSteamerWorkSurface()
     const steamerLayout = ref(steamerLayoutFromStations(null))
     const steamThresholdsMs = ref(getSteamTimeThresholdsMs())
     const steamerLoading = ref(false)
     const isSteamerConsoleView = computed(() =>
-      isSteamerConsole({
-        steamerWorkSurface,
-        stationId: currentStation.value
-      })
+      isSteamerConsole({ stationId: currentStation.value })
     )
-    const showNewOrderAck = computed(() =>
-      !(isSteamerConsoleView.value && steamerWorkSurface === 'steaming')
-    )
-    const cageIsNew = (cage) => {
-      if (steamerWorkSurface === 'steaming') return false
-      return dishHasNewBadge({ orders: [cage] })
-    }
+    const cageIsNew = (cage) => dishHasNewBadge({ orders: [cage] })
 
     const loadSteamerLayout = async () => {
       try {
@@ -366,16 +379,15 @@ export default {
       }
     }
 
-    // 档口标签：stationsStore 为源，再按职责集过滤
+    // 档口标签：只保留本屏锁死的那一个；未锁定时为空（页面会跳设置）
     const stationTabs = computed(() => {
-      const all = stationsStore.stationList.map(({ id, name, color }) => ({ id, name, color }))
-      const watchedIds = watchedStationIds.value
-      if (!watchedIds.length) return all
-      const watched = new Set(watchedIds)
-      return all.filter((station) => watched.has(station.id))
+      const locked = watchedStationIds.value.length === 1 ? watchedStationIds.value[0] : null
+      if (!locked) return []
+      return stationsStore.stationList
+        .filter((station) => station.id === locked)
+        .map(({ id, name, color }) => ({ id, name, color }))
     })
 
-    // 职责集恰为 1 个：锁定该档全屏、不渲染控制条（按配置集大小，非过滤后可见数）
     const isSingleWatchedStation = computed(() => watchedStationIds.value.length === 1)
     
     // 计算属性
@@ -807,19 +819,18 @@ export default {
       debugLog(`[厨房页面] 切换到档口: ${stationId}, 已清空选中数量`)
     }
 
-    // 当前选中档口不在职责集时，切到第一个职责档口；单档口配置则强制锁定
+    const leaveIfUnlocked = () => {
+      onKitchenOrderSessionShow()
+      if (watchedStationIds.value.length === 1) return false
+      uni.showToast({ title: '请先选定本屏档口', icon: 'none' })
+      uni.reLaunch({ url: '/pages/settings/settings' })
+      return true
+    }
+
     const ensureCurrentStationInWatched = () => {
-      const watchedIds = watchedStationIds.value
-      if (watchedIds.length === 1) {
-        switchStation(watchedIds[0])
-        return
-      }
-      const tabs = stationTabs.value
-      if (!tabs.length) return
-      const stillValid = tabs.some((station) => station.id === currentStation.value)
-      if (!stillValid) {
-        switchStation(tabs[0].id)
-      }
+      const locked = watchedStationIds.value[0]
+      if (!locked) return
+      switchStation(locked)
     }
 
     const refreshDataWithToast = async () => {
@@ -1100,19 +1111,6 @@ export default {
       }
     }
     
-    // 首页档口行带入的 ?station=；大 CTA 不带参时为空
-    const pendingStationFromQuery = ref('')
-    onLoad((options) => {
-      const station = options?.station
-      if (typeof station === 'string' && station.trim()) {
-        try {
-          pendingStationFromQuery.value = decodeURIComponent(station.trim())
-        } catch {
-          pendingStationFromQuery.value = station.trim()
-        }
-      }
-    })
-
     // 实时：nudge → 重拉当天订单并做外卖取消检测；60s reconcile 由 useNudgePull 默认 fallback
     const todayDateStr = TimeCalculator.formatTime(new Date(), 'YYYY-MM-DD')
     useNudgePull({
@@ -1128,7 +1126,8 @@ export default {
 
     // Settings return does not remount; discard snapshot, re-slice, and clear 出餐选中.
     onShow(() => {
-      onKitchenOrderSessionShow()
+      if (leaveIfUnlocked()) return
+      reloadDisconnectAlert()
       steamThresholdsMs.value = getSteamTimeThresholdsMs()
       if (takeSettingsReturnClear()) {
         dispatchServe({ type: 'externalClear' })
@@ -1140,21 +1139,13 @@ export default {
     // 生命周期
     onMounted(async () => {
       debugLog('[厨房页面] 页面加载，强制获取当天数据')
-      
+      if (leaveIfUnlocked()) return
+
       // 初始化档口
       await stationsStore.initializeStations()
       startKitchenOrderSession()
       startDisconnectAlert()
       await loadSteamerLayout()
-
-      const requestedStation = pendingStationFromQuery.value
-      if (
-        requestedStation &&
-        ScreenSettingsManager.isStationWatched(requestedStation) &&
-        stationTabs.value.some((tab) => tab.id === requestedStation)
-      ) {
-        switchStation(requestedStation)
-      }
       ensureCurrentStationInWatched()
 
       // 初始加载：一次拉取并同步新单告警与外卖取消基线
@@ -1199,8 +1190,6 @@ export default {
       isSingleWatchedStation,
       densityMode,
       isSteamerConsoleView,
-      steamerWorkSurface,
-      showNewOrderAck,
       cageIsNew,
       steamThresholdsMs,
       thresholdsMs,
@@ -1283,41 +1272,160 @@ export default {
   scroll-behavior: smooth;
 }
 
-/* 屏幕状态边框：四周描边，中心透明，不挡操作 */
+.kitchen-page.is-steamer {
+  height: 100vh;
+  max-height: 100vh;
+  overflow: hidden;
+}
+
+.steamer-stage {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 屏幕状态边框：实线永不透明；光晕锁在边框带，不洗菜卡 */
 .screen-border {
+  --kds-border-bar: 16upx;
+  --kds-border-glow: 16upx;
+  --c: #52c41a;
+  --g: rgba(82, 196, 26, 0.55);
   position: fixed;
   inset: 0;
   z-index: 9000;
   pointer-events: none;
   box-sizing: border-box;
-  border-style: solid;
-  border-width: 10upx;
-  border-color: #52c41a;
-  transition: border-color 0.2s ease;
-}
-
-.screen-border--green {
-  border-color: #52c41a;
-}
-
-.screen-border--yellow {
-  border-color: #faad14;
-  animation: screen-border-yellow-flash 0.9s ease-in-out infinite;
 }
 
 .screen-border--red {
-  border-color: #ff4d4f;
+  --c: #ff4d4f;
+  --g: rgba(255, 77, 79, 0.55);
 }
 
-@keyframes screen-border-yellow-flash {
+.screen-border--yellow {
+  --c: #faad14;
+  --g: rgba(250, 173, 20, 0.55);
+}
+
+.screen-border__bar {
+  position: absolute;
+  inset: 0;
+  border: var(--kds-border-bar) solid var(--c);
+}
+
+.screen-border__glow {
+  position: absolute;
+  inset: var(--kds-border-bar);
+  animation: screen-border-breathe 3s ease-in-out infinite;
+}
+
+.screen-border__glow-n,
+.screen-border__glow-s,
+.screen-border__glow-e,
+.screen-border__glow-w {
+  position: absolute;
+}
+
+.screen-border__glow-n,
+.screen-border__glow-s {
+  left: 0;
+  right: 0;
+  height: var(--kds-border-glow);
+}
+
+.screen-border__glow-e,
+.screen-border__glow-w {
+  top: 0;
+  bottom: 0;
+  width: var(--kds-border-glow);
+}
+
+.screen-border__glow-n {
+  top: 0;
+  background: linear-gradient(to bottom, var(--g), transparent);
+}
+
+.screen-border__glow-s {
+  bottom: 0;
+  background: linear-gradient(to top, var(--g), transparent);
+}
+
+.screen-border__glow-w {
+  left: 0;
+  background: linear-gradient(to right, var(--g), transparent);
+}
+
+.screen-border__glow-e {
+  right: 0;
+  background: linear-gradient(to left, var(--g), transparent);
+}
+
+@keyframes screen-border-breathe {
   0%,
   100% {
-    border-color: #faad14;
-    opacity: 1;
+    opacity: 0.2;
   }
   50% {
-    border-color: #ffd666;
     opacity: 0.55;
+  }
+}
+
+/* 黄闪：走线在静态遮罩里转，避免整框跟着转 */
+.screen-border--yellow .screen-border__bar,
+.screen-border--yellow .screen-border__glow {
+  display: none;
+}
+
+.screen-border__sweep-clip {
+  position: absolute;
+  inset: 0;
+  padding: var(--kds-border-bar);
+  box-sizing: border-box;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+.screen-border__sweep-spin {
+  position: absolute;
+  inset: -50%;
+  background: conic-gradient(
+    from 0deg,
+    #d48806 0 48%,
+    #ffc53d 62%,
+    #ffe58f 76%,
+    #fff 86%,
+    #d48806 100%
+  );
+  animation: screen-border-sweep-spin 0.85s linear infinite;
+}
+
+@keyframes screen-border-sweep-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen-border__glow {
+    animation: none;
+    opacity: 0.4;
+  }
+
+  .screen-border--yellow .screen-border__bar {
+    display: block;
+  }
+
+  .screen-border--yellow .screen-border__sweep-clip {
+    display: none;
   }
 }
 
@@ -1678,7 +1786,7 @@ export default {
   transform: scale(0.95);
 }
 
-/* 一屏多档：仅档口 tabs */
+/* 未锁死时的档口 tabs（进页会跳设置，正常不渲染） */
 .control-panel {
   background: white;
   width: 100%;

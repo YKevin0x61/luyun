@@ -270,7 +270,7 @@
             <view class="card-content">
               <view class="form-item">
                 <text class="form-label">本屏负责档口</text>
-                <text class="form-hint">不选 = 全部档口；选 1 个则厨房页锁定该档全屏。改动即时保存，重进厨房页生效。</text>
+                <text class="form-hint">一块屏只锁一个档口。点选即保存，不能取消成空；厨房页只显示该档。未选定前不能进厨房。</text>
                 <view class="station-chip-list">
                   <view
                     v-for="station in stationOptions"
@@ -278,20 +278,11 @@
                     class="station-chip"
                     :class="{ 'station-chip-active': isWatchedStationSelected(station.id) }"
                     :style="isWatchedStationSelected(station.id) ? { borderColor: station.color } : {}"
-                    @click="toggleWatchedStation(station.id)"
+                    @click="selectWatchedStation(station.id)"
                   >
                     <text class="station-chip-text">{{ station.name }}</text>
                   </view>
                 </view>
-              </view>
-              <view class="button-group">
-                <button
-                  class="btn-reset"
-                  :disabled="watchedStations.length === 0"
-                  @click="setWatchedStationsAll"
-                >
-                  设为全部档口
-                </button>
               </view>
               <view class="form-item density-form-item">
                 <text class="form-label">显示密度</text>
@@ -333,21 +324,6 @@
                 <text class="form-hint">0=不拆分；超过则按空档拆成多张卡。改动即时保存，重进厨房页生效。</text>
               </view>
               <view class="form-item">
-                <text class="form-label">熟笼工作面</text>
-                <view class="density-mode-list">
-                  <view
-                    v-for="option in steamerWorkSurfaceOptions"
-                    :key="option.value || 'unset'"
-                    class="density-mode-chip"
-                    :class="{ 'density-mode-chip-active': steamerWorkSurface === option.value }"
-                    @click="setSteamerWorkSurface(option.value)"
-                  >
-                    <text class="density-mode-chip-text">{{ option.label }}</text>
-                  </view>
-                </view>
-                <text class="form-hint">炉孔布局由店级配置只读，本屏不能改炉数。未使用时总控/多档屏上的熟笼仍是菜卡。改动即时保存，重进厨房页生效。</text>
-              </view>
-              <view class="form-item">
                 <text class="form-label">蒸制较急（分钟）</text>
                 <input
                   class="form-input"
@@ -370,6 +346,46 @@
                   @confirm="persistSteamThresholds"
                 />
                 <text class="form-hint">上笼后多久标紧急并响超时音。不占用边框黄闪。</text>
+              </view>
+            </view>
+          </view>
+
+          <view class="settings-card">
+            <view class="card-header">
+              <text class="card-title">提示音</text>
+            </view>
+            <view class="card-content">
+              <view
+                v-for="kind in alertKindOptions"
+                :key="kind.key"
+                class="form-item"
+              >
+                <view class="tone-kind-head">
+                  <text class="form-label tone-kind-label">{{ kind.label }}</text>
+                  <text class="tone-preview" @click="previewAlertKind(kind.key)">试听</text>
+                </view>
+                <view class="density-mode-list">
+                  <view
+                    v-for="tone in alertTones"
+                    :key="tone"
+                    class="density-mode-chip"
+                    :class="{ 'density-mode-chip-active': alertTonesByKind[kind.key] === tone }"
+                    @click="setAlertTone(kind.key, tone)"
+                  >
+                    <text class="density-mode-chip-text">{{ tone }}</text>
+                  </view>
+                </view>
+              </view>
+              <view class="form-item tone-volume-item">
+                <text class="form-label">本屏告警音量</text>
+                <slider
+                  :value="alertVolume"
+                  :min="alertVolumeFloor"
+                  :max="1"
+                  :step="0.05"
+                  @change="onAlertVolumeChange"
+                />
+                <text class="form-hint">四种告警共用。滑不到 0，不能从本屏静音。改动即时保存，重进厨房页生效。</text>
               </view>
             </view>
           </view>
@@ -496,8 +512,19 @@ import {
   ApiAuthManager,
   PrinterSettingsManager,
   ScreenSettingsManager,
-  DENSITY_MODES
+  DENSITY_MODES,
+  ALERT_TONES,
+  ALERT_VOLUME_FLOOR,
+  DEFAULT_ALERT_TONE,
+  DEFAULT_ALERT_VOLUME
 } from '../../utils/storage.js'
+import {
+  playCancelAlert,
+  playDisconnectAlert,
+  playNewOrderDing,
+  playOvertimeAlarm,
+  unlockSound
+} from '../../utils/sound.js'
 import {
   isPrinterPlatformSupported,
   getPairedDevices,
@@ -522,10 +549,10 @@ export default {
       activeSection: 'connect',
       settingsSections: [
         { id: 'connect', label: '连接', desc: '服务器与鉴权' },
-        { id: 'screen', label: '本屏', desc: '档口、工作面与拆卡' },
+        { id: 'screen', label: '本屏', desc: '档口与拆卡' },
         { id: 'device', label: '设备与系统', desc: '打印与版本' }
       ],
-      /** @type {string[]} 空数组 = 全部档口 */
+      /** @type {string[]} length 0 = unlocked; length 1 = locked station */
       watchedStations: [],
       /** @type {string} ScreenSettingsManager density mode */
       density: DENSITY_MODES.STANDARD,
@@ -537,16 +564,21 @@ export default {
       /** @type {string} bound to input; normalized integer persisted on blur */
       dishCardQuantityCapInput: '0',
       orderGapMinutesInput: '0',
-      /** @type {''|'load'|'steaming'|'solo'} */
-      steamerWorkSurface: '',
-      steamerWorkSurfaceOptions: [
-        { value: '', label: '未使用（菜卡）' },
-        { value: 'load', label: '待上笼面' },
-        { value: 'steaming', label: '在蒸面' },
-        { value: 'solo', label: '闲时面' }
-      ],
       steamWarnMinInput: '15',
       steamUrgentMinInput: '20',
+      alertTones: ALERT_TONES,
+      alertVolumeFloor: ALERT_VOLUME_FLOOR,
+      alertKindOptions: [
+        { key: 'newOrderTone', label: '新单提醒' },
+        { key: 'overtimeTone', label: '超时提示音' },
+        { key: 'cancelTone', label: '外卖取消' },
+        { key: 'disconnectTone', label: '断连告警' }
+      ],
+      newOrderTone: DEFAULT_ALERT_TONE,
+      overtimeTone: DEFAULT_ALERT_TONE,
+      cancelTone: DEFAULT_ALERT_TONE,
+      disconnectTone: DEFAULT_ALERT_TONE,
+      alertVolume: DEFAULT_ALERT_VOLUME,
       apiSettings: {
         baseUrl: '',
         updatedAt: null
@@ -610,7 +642,7 @@ export default {
     activeSectionSubtitle() {
       const map = {
         connect: 'API 服务器 · 鉴权 · 实时连接 · 快速配置',
-        screen: '本屏职责档口 · 熟笼工作面 · 显示密度 · 菜品卡片份数上限 · 下单间隔',
+        screen: '本屏职责档口 · 显示密度 · 菜品卡片份数上限 · 下单间隔 · 提示音',
         device: '蓝牙打印 · 系统信息'
       }
       return map[this.activeSection] || '系统设置'
@@ -629,10 +661,19 @@ export default {
       return { 'status-unknown': true }
     },
 
+    alertTonesByKind() {
+      return {
+        newOrderTone: this.newOrderTone,
+        overtimeTone: this.overtimeTone,
+        cancelTone: this.cancelTone,
+        disconnectTone: this.disconnectTone
+      }
+    },
+
     watchedStationsStatusText() {
-      if (this.watchedStations.length === 0) return '全部档口'
-      if (this.watchedStations.length === 1) return '单档口锁定'
-      return `${this.watchedStations.length} 个档口`
+      if (this.watchedStations.length !== 1) return '未设档口'
+      const name = this.stationOptions.find((s) => s.id === this.watchedStations[0])?.name
+      return name ? `单档口锁定 · ${name}` : '单档口锁定'
     },
 
     realtimeStatusClass() {
@@ -779,10 +820,10 @@ export default {
       this.orderGapMinutesInput = String(
         ScreenSettingsManager.getOrderGapMinutes()
       )
-      this.steamerWorkSurface = ScreenSettingsManager.getSteamerWorkSurface()
       const alert = ScreenSettingsManager.getAlertParams()
       this.steamWarnMinInput = String(alert.steamWarnMin)
       this.steamUrgentMinInput = String(alert.steamUrgentMin)
+      this.applyAlertParams(alert)
     },
 
     isWatchedStationSelected(stationId) {
@@ -800,28 +841,10 @@ export default {
       return true
     },
 
-    toggleWatchedStation(stationId) {
-      if (!stationId) return
-      const selected = new Set(this.watchedStations)
-      if (selected.has(stationId)) {
-        selected.delete(stationId)
-      } else {
-        selected.add(stationId)
-      }
-      // Preserve stationsStore order for stable chip ↔ tab ordering
-      const ordered = this.stationOptions
-        .map((s) => s.id)
-        .filter((id) => selected.has(id))
-      if (!this.persistWatchedStations(ordered)) return
-      uni.showToast({
-        title: ordered.length === 0 ? '已设为全部档口' : '已保存',
-        icon: 'success'
-      })
-    },
-
-    setWatchedStationsAll() {
-      if (!this.persistWatchedStations([])) return
-      uni.showToast({ title: '已设为全部档口', icon: 'success' })
+    selectWatchedStation(stationId) {
+      if (!stationId || this.watchedStations[0] === stationId) return
+      if (!this.persistWatchedStations([stationId])) return
+      uni.showToast({ title: '已锁定本屏档口', icon: 'success' })
     },
 
     setDensityMode(mode) {
@@ -861,17 +884,6 @@ export default {
       uni.showToast({ title: '已保存', icon: 'success' })
     },
 
-    setSteamerWorkSurface(surface) {
-      if (surface === this.steamerWorkSurface) return
-      const ok = ScreenSettingsManager.setSteamerWorkSurface(surface)
-      if (!ok) {
-        uni.showToast({ title: '保存失败', icon: 'error' })
-        return
-      }
-      this.steamerWorkSurface = ScreenSettingsManager.getSteamerWorkSurface()
-      uni.showToast({ title: '已保存', icon: 'success' })
-    },
-
     persistSteamThresholds() {
       const ok = ScreenSettingsManager.setAlertParams({
         steamWarnMin: this.steamWarnMinInput,
@@ -885,6 +897,54 @@ export default {
       this.steamWarnMinInput = String(alert.steamWarnMin)
       this.steamUrgentMinInput = String(alert.steamUrgentMin)
       uni.showToast({ title: '已保存', icon: 'success' })
+    },
+
+    applyAlertParams(alert) {
+      this.newOrderTone = alert.newOrderTone
+      this.overtimeTone = alert.overtimeTone
+      this.cancelTone = alert.cancelTone
+      this.disconnectTone = alert.disconnectTone
+      this.alertVolume = alert.alertVolume
+    },
+
+    persistAlertTones(partial) {
+      const ok = ScreenSettingsManager.setAlertParams(partial)
+      if (!ok) {
+        uni.showToast({ title: '保存失败', icon: 'error' })
+        return false
+      }
+      this.applyAlertParams(ScreenSettingsManager.getAlertParams())
+      uni.showToast({ title: '已保存', icon: 'success' })
+      return true
+    },
+
+    setAlertTone(kindKey, tone) {
+      if (this[kindKey] === tone) return
+      this.persistAlertTones({ [kindKey]: tone })
+    },
+
+    onAlertVolumeChange(event) {
+      const next = Number(event?.detail?.value)
+      this.persistAlertTones({ alertVolume: next })
+    },
+
+    async previewAlertKind(kindKey) {
+      await unlockSound()
+      const volume = this.alertVolume
+      const options = { tone: this[kindKey], volume }
+      if (kindKey === 'newOrderTone') {
+        playNewOrderDing(1, options)
+        return
+      }
+      if (kindKey === 'overtimeTone') {
+        playOvertimeAlarm(options)
+        return
+      }
+      if (kindKey === 'cancelTone') {
+        playCancelAlert(options)
+        return
+      }
+      playDisconnectAlert(options)
     },
 
     loadAuthSettings() {
@@ -1630,6 +1690,32 @@ export default {
 
 .density-form-item {
   margin-top: 28upx;
+  margin-bottom: 0;
+}
+
+.tone-kind-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16upx;
+  margin-bottom: 4upx;
+}
+
+.tone-kind-label {
+  margin-bottom: 0;
+}
+
+.tone-preview {
+  flex-shrink: 0;
+  padding: 8upx 20upx;
+  border-radius: 999upx;
+  background: #e6f7ff;
+  color: #1890ff;
+  font-size: 24upx;
+  font-weight: 600;
+}
+
+.tone-volume-item {
   margin-bottom: 0;
 }
 

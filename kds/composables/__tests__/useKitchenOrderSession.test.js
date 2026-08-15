@@ -28,6 +28,7 @@ const syncAlertOrders = vi.fn()
 const reloadConfig = vi.fn()
 const startAlerts = vi.fn()
 const stopAlerts = vi.fn()
+const kitchenHigherKindClaimed = vi.fn(() => false)
 
 vi.mock('../useKitchenAlerts.js', () => ({
   useKitchenAlerts: () => ({
@@ -40,12 +41,15 @@ vi.mock('../useKitchenAlerts.js', () => ({
     unlockSoundFromGesture: vi.fn(),
     reloadConfig,
     start: startAlerts,
-    stop: stopAlerts
+    stop: stopAlerts,
+    higherKindClaimed: (...args) => kitchenHigherKindClaimed(...args)
   })
 }))
 
 const syncDeliveryOrders = vi.fn()
 const setWatchedStations = vi.fn()
+const reloadCancelConfig = vi.fn()
+const cancelHigherKindClaimed = vi.fn(() => false)
 
 vi.mock('../useDeliveryCancelAlert.js', () => ({
   useDeliveryCancelAlert: (options) => ({
@@ -53,7 +57,9 @@ vi.mock('../useDeliveryCancelAlert.js', () => ({
     syncOrders: syncDeliveryOrders,
     dismissDeliveryCancelAlert: vi.fn(),
     setWatchedStations,
-    getWatchedStations: options.getWatchedStations
+    reloadConfig: reloadCancelConfig,
+    getWatchedStations: options.getWatchedStations,
+    higherKindClaimed: (...args) => cancelHigherKindClaimed(...args)
   })
 }))
 
@@ -67,7 +73,12 @@ describe('useKitchenOrderSession', () => {
     getTimeThresholdsMs.mockReset()
     syncAlertOrders.mockReset()
     syncDeliveryOrders.mockReset()
+    kitchenHigherKindClaimed.mockReset()
+    cancelHigherKindClaimed.mockReset()
+    kitchenHigherKindClaimed.mockReturnValue(false)
+    cancelHigherKindClaimed.mockReturnValue(false)
     reloadConfig.mockReset()
+    reloadCancelConfig.mockReset()
     startAlerts.mockReset()
     stopAlerts.mockReset()
     getWatchedStations.mockReturnValue(['changfen'])
@@ -85,14 +96,52 @@ describe('useKitchenOrderSession', () => {
       ordersStore.orders = orders
     })
     const ordersStore = { orders: [], fetchOrders }
+    const syncOrder = []
+    syncDeliveryOrders.mockImplementation(() => {
+      syncOrder.push('cancel')
+      return false
+    })
+    syncAlertOrders.mockImplementation(() => {
+      syncOrder.push('kitchen')
+    })
 
     const session = useKitchenOrderSession({ ordersStore })
     await session.refresh()
 
     expect(fetchOrders).toHaveBeenCalledTimes(1)
-    expect(syncAlertOrders).toHaveBeenCalledWith(orders)
+    expect(syncOrder).toEqual(['cancel', 'kitchen'])
     expect(syncDeliveryOrders).toHaveBeenCalledWith(orders)
+    expect(syncAlertOrders).toHaveBeenCalledWith(orders, { cancelClaimed: false })
     expect(reloadConfig).toHaveBeenCalled()
+  })
+
+  it('passes cancelClaimed when delivery-cancel sync plays', async () => {
+    const orders = [{ id: 1, station: 'changfen' }]
+    const fetchOrders = vi.fn(async () => {
+      ordersStore.orders = orders
+    })
+    const ordersStore = { orders: [], fetchOrders }
+    syncDeliveryOrders.mockReturnValue(true)
+
+    const session = useKitchenOrderSession({ ordersStore })
+    await session.refresh()
+
+    expect(syncDeliveryOrders).toHaveBeenCalledWith(orders)
+    expect(syncAlertOrders).toHaveBeenCalledWith(orders, { cancelClaimed: true })
+  })
+
+  it('higherKindClaimed is true when cancel or kitchen claimed this moment', () => {
+    const session = useKitchenOrderSession({
+      ordersStore: { orders: [], fetchOrders: vi.fn() }
+    })
+    expect(session.higherKindClaimed()).toBe(false)
+
+    cancelHigherKindClaimed.mockReturnValue(true)
+    expect(session.higherKindClaimed()).toBe(true)
+
+    cancelHigherKindClaimed.mockReturnValue(false)
+    kitchenHigherKindClaimed.mockReturnValue(true)
+    expect(session.higherKindClaimed()).toBe(true)
   })
 
   it('reloadDeviceSettings / onShow re-reads watched stations', () => {
@@ -105,6 +154,7 @@ describe('useKitchenOrderSession', () => {
     session.onShow()
     expect(session.watchedStationIds.value).toEqual(['xibing'])
     expect(reloadConfig).toHaveBeenCalled()
+    expect(reloadCancelConfig).toHaveBeenCalled()
   })
 
   it('exposes dishCardQuantityCap from local screen settings (0 = no split)', () => {
