@@ -15,6 +15,11 @@ from scraper._common import (
     ScraperSessionError,
     pos_response_indicates_auth_failure,
 )
+from scraper.order_source import (
+    DEFAULT_DELIVERY_PLATFORMS,
+    SOURCE_DELIVERY,
+    classify_order_source,
+)
 from services.dish_normalize import strip_trailing_dash_suffix
 
 DELIVERY_ORDER_TIME_FIELDS = ("settleTime1", "settleTime2", "openTime", "settleTime")
@@ -45,7 +50,7 @@ class DeliveryBillTracker:
         self._session = session
         self._state = state_store
         self.logger = logger_ or logging.getLogger(__name__)
-        self.delivery_platforms = ["美团", "淘宝闪购"]
+        self.delivery_platforms = list(DEFAULT_DELIVERY_PLATFORMS)
         self._last_delivery_cancel_count = 0
         self._last_delivery_poll_at = None
 
@@ -267,6 +272,16 @@ class DeliveryBillTracker:
             self.logger.error("已结账单 API 探测失败: %s", exc)
             return {"ok": False, "http_status": 0, "message": f"已结账单 API 调用异常: {exc}"}
 
+    def _bill_source(self, bill: Dict) -> str:
+        """Classify a settled-bill row as dine_in or delivery."""
+        return classify_order_source(
+            table_number=bill.get("pointName") or "",
+            bill_source=bill.get("billSource") or "",
+            order_source=bill.get("orderSource") or "",
+            people_qty=bill.get("peopleQty"),
+            delivery_platforms=self.delivery_platforms,
+        )
+
     async def fetch_settled_bill_list(
         self,
         begin: datetime,
@@ -303,15 +318,7 @@ class DeliveryBillTracker:
 
         delivery_bills = []
         for bill in bill_list:
-            bill_source = bill.get("billSource", "")
-            people_qty = bill.get("peopleQty", 1)
-            point_name = bill.get("pointName", "")
-            is_delivery = (
-                people_qty == 0
-                or any(platform in bill_source for platform in self.delivery_platforms)
-                or any(platform in point_name for platform in self.delivery_platforms)
-            )
-            if is_delivery and bill.get("bsId"):
+            if bill.get("bsId") and self._bill_source(bill) == SOURCE_DELIVERY:
                 delivery_bills.append(bill)
         if delivery_bills:
             self.logger.info(f"🚴 获取到 {len(delivery_bills)} 条外卖账单")
@@ -404,7 +411,7 @@ class DeliveryBillTracker:
             if not dish_list:
                 return []
 
-            platform = bill.get('billSource', '外卖')
+            platform = bill.get('orderSource') or bill.get('billSource') or '外卖'
             point_name = bill.get('pointName', '外卖')
             settle_time_str = bill.get('settleTime', '')
             bs_id = bill.get('bsId', '')

@@ -3,7 +3,7 @@
  *
  * Snapshot-diff: previous dish_status by flowId + current orders + watchedStations
  * → next state + effects. Only source=delivery orders in the watched station set
- * can raise an alert (empty watched = all stations).
+ * can raise an alert (empty watched = no stations).
  */
 
 export const DELIVERY_CANCELLED_DISH_STATUS = '已取消'
@@ -63,7 +63,7 @@ function flowIdOf(order) {
  * @param {object} order
  */
 function isWatched(watchedStations, order) {
-  if (!Array.isArray(watchedStations) || watchedStations.length === 0) return true
+  if (!Array.isArray(watchedStations) || watchedStations.length === 0) return false
   const station = typeof order.station === 'string' ? order.station.trim() : ''
   return station !== '' && watchedStations.includes(station)
 }

@@ -47,9 +47,9 @@
           <text v-if="overview.alertPrimary" class="alert-hint">
             连接异常 · 告警优先，待做/紧急数字仅供参考
           </text>
-          <text v-else class="scope-hint">本屏职责 · {{ watchedScopeLabel }}</text>
+          <text v-else class="scope-hint">全店各档 · {{ watchedScopeLabel }}</text>
 
-          <view class="cta-btn" @click="navigateToKitchen()">
+          <view class="cta-btn" @click="enterKitchenOrSettings">
             <text class="cta-title">进入厨房</text>
             <text class="cta-desc">{{ kitchenCtaDesc }}</text>
           </view>
@@ -57,8 +57,8 @@
 
         <view class="stations-pane">
           <view class="section-header">
-            <text class="section-title">职责档口</text>
-            <text class="section-desc">点卡片进入对应档口</text>
+            <text class="section-title">全部档口</text>
+            <text class="section-desc">数字总览，进厨房只进本屏档口</text>
           </view>
 
           <view v-if="stationStatus.length" class="station-mosaic">
@@ -66,8 +66,7 @@
               v-for="station in stationStatus"
               :key="station.id"
               class="station-card"
-              :class="{ active: station.active }"
-              @click="navigateToKitchen(station.id)"
+              :class="{ active: station.active, 'station-card--locked': station.locked }"
             >
               <view class="station-card-head">
                 <view
@@ -75,6 +74,7 @@
                   :style="{ background: station.active ? (station.color || '#52c41a') : '#d9d9d9' }"
                 ></view>
                 <text class="station-name">{{ station.name }}</text>
+                <text v-if="station.locked" class="station-lock-mark">本屏</text>
               </view>
               <view class="station-stats">
                 <view class="station-stat" :class="{ hot: station.pendingCount > 0 }">
@@ -120,8 +120,7 @@ import { ScreenSettingsManager } from '../../utils/storage.js'
 import {
   buildWatchedStationStatuses,
   countPendingAndUrgent,
-  countUnmappedDishNames,
-  filterMergedDishesByWatched
+  countUnmappedDishNames
 } from '../../utils/dashboardStats.js'
 import { hubOverviewPresentation } from '../../utils/hubOverviewPresentation.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
@@ -180,12 +179,12 @@ export default {
       return statusMap[realtimeStore.connectionStatus] || '未知状态'
     })
 
-    const watchedDishes = computed(() =>
-      filterMergedDishesByWatched(ordersStore.mergedDishes, watchedStationIds.value)
+    const lockedStationId = computed(() =>
+      watchedStationIds.value.length === 1 ? watchedStationIds.value[0] : null
     )
 
     const kitchenStats = computed(() =>
-      countPendingAndUrgent(watchedDishes.value, DISH_STATUS.PENDING)
+      countPendingAndUrgent(ordersStore.mergedDishes, DISH_STATUS.PENDING)
     )
 
     const unmappedCount = computed(() => {
@@ -201,32 +200,36 @@ export default {
       buildWatchedStationStatuses(
         stationsStore.stationList,
         ordersStore.mergedDishes,
-        watchedStationIds.value,
+        [],
         DISH_STATUS.PENDING
-      )
+      ).map((station) => ({
+        ...station,
+        locked: station.id === lockedStationId.value
+      }))
     )
 
+    const lockedStationName = computed(() => {
+      const id = lockedStationId.value
+      if (!id) return ''
+      return stationsStore.getStationById(id)?.name || id
+    })
+
     const watchedScopeLabel = computed(() => {
-      const ids = watchedStationIds.value
-      if (!ids.length) return '全部档口'
-      if (ids.length === 1) return '单档口锁定'
-      return `${ids.length} 个档口`
+      if (!lockedStationId.value) return '未设档口'
+      return `本屏锁定 ${lockedStationName.value}`
     })
 
-    /** CTA subline: no station query = current watched set (not always「全部」). */
     const kitchenCtaDesc = computed(() => {
-      const ids = watchedStationIds.value
-      if (!ids.length) return '本屏职责档口集 · 全部档口'
-      if (ids.length === 1) return '本屏职责档口集 · 单档口锁定'
-      return `本屏职责档口集 · ${ids.length} 个档口`
+      if (lockedStationId.value) return `进入本屏档口 · ${lockedStationName.value}`
+      return '先在设置里选定本屏档口'
     })
 
-    const navigateToKitchen = (stationId) => {
-      if (stationId) {
-        navigateSafely(`/pages/kitchen/kitchen?station=${encodeURIComponent(stationId)}`)
+    const enterKitchenOrSettings = () => {
+      if (lockedStationId.value) {
+        navigateSafely('/pages/kitchen/kitchen')
         return
       }
-      navigateSafely('/pages/kitchen/kitchen')
+      navigateSafely('/pages/settings/settings')
     }
 
     const navigateToManagement = () => {
@@ -290,7 +293,7 @@ export default {
       stationStatus,
       watchedScopeLabel,
       kitchenCtaDesc,
-      navigateToKitchen,
+      enterKitchenOrSettings,
       navigateToManagement,
       navigateToSettings,
       navigateToOrders,
@@ -585,12 +588,11 @@ export default {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  transition: border-color 0.15s, transform 0.15s;
 }
 
-.station-card:active {
+.station-card--locked {
   border-color: var(--ops-accent);
-  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px var(--ops-accent);
 }
 
 .station-card-head {
@@ -611,6 +613,16 @@ export default {
   font-size: 16px;
   font-weight: 600;
   color: var(--ops-ink);
+}
+
+.station-lock-mark {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ops-accent);
+  background: #e8f2fb;
 }
 
 .station-stats {

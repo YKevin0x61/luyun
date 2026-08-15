@@ -10,7 +10,7 @@ import {
 const PENDING = '待出餐'
 
 describe('isStationInWatched', () => {
-  it('empty watched set means all stations', () => {
+  it('empty filter means all stations (hub mosaic)', () => {
     expect(isStationInWatched('changfen', [])).toBe(true)
   })
 

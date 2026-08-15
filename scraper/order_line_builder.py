@@ -17,6 +17,7 @@ from scraper.order_flow_ids import (
     allocate_reconcile_flow_ids,
     allocate_unit_flow_ids,
 )
+from scraper.order_source import SOURCE_DINE_IN
 
 FLOW_MODE_UNIT = "unit"
 FLOW_MODE_COMBO = "combo"
@@ -98,6 +99,8 @@ class OrderLineBuilder:
                 "station_id": station,
             }
             row.update(overlays)
+            if not str(row.get("source") or "").strip():
+                row["source"] = SOURCE_DINE_IN
             rows.append(row)
         return rows
 

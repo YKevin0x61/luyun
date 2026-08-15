@@ -77,6 +77,7 @@ class TableParseStripTest(unittest.IsolatedAsyncioTestCase):
         orders = await adapter._parse_api_order_response(data, "A1")
         names = {order["dish_name"] for order in orders}
         self.assertEqual(names, {"酱皇豉椒蒸凤爪", "四色烧卖"})
+        self.assertTrue(all(order["source"] == "dine_in" for order in orders))
         for order in orders:
             self.assertNotIn("(-)", order["business_flow_id"])
         main_flow_ids = [o["business_flow_id"] for o in orders if o["dish_name"] == "酱皇豉椒蒸凤爪"]
@@ -84,6 +85,22 @@ class TableParseStripTest(unittest.IsolatedAsyncioTestCase):
             main_flow_ids,
             ["YY01101-260720-0001_酱皇豉椒蒸凤爪_001", "YY01101-260720-0001_酱皇豉椒蒸凤爪_002"],
         )
+
+    async def test_meituan_table_marked_delivery(self):
+        adapter = _StubTableAdapter()
+        data = {
+            "success": True,
+            "data": {
+                "bsCode": "YY01101-260720-0009",
+                "pointName": "美团12",
+                "peopleQty": 0,
+                "scDetail": [
+                    {"itemName": "虾饺", "lastQty": 1, "lastPrice": 18.0, "orderTime": "12:30"},
+                ],
+            },
+        }
+        orders = await adapter._parse_api_order_response(data, "美团12")
+        self.assertEqual(orders[0]["source"], "delivery")
 
 
 class _FakeSession:
@@ -124,7 +141,7 @@ class DeliveryParseStripTest(unittest.IsolatedAsyncioTestCase):
             [{"name": "美团渠道(-)", "lastQty": 1, "price": 0, "lastSubtotal": 0}]
         )
         bill = {
-            "billSource": "美团",
+            "orderSource": "美团",
             "pointName": "美团1",
             "bsId": "b1",
             "bsCode": "YY01101-260720-0002",
@@ -134,6 +151,7 @@ class DeliveryParseStripTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["dish_name"], "美团渠道")
         self.assertEqual(orders[0]["business_flow_id"], "YY01101-260720-0002_美团渠道_001")
+        self.assertEqual(orders[0]["source"], "delivery")
 
 
 class ReconcileAggregateStripTest(unittest.TestCase):

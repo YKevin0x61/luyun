@@ -97,7 +97,7 @@ export const COLUMN_LABELS = {
   'auth.expires_at': '过期时间', 'auth.last_seen_at': '最后活跃', 'auth.token_hash': 'Token哈希',
   'auth.label': '标签', 'auth.revoked_at': '撤销时间', 'auth.created_at': '创建时间',
   'auth.updated_at': '更新时间', 'auth.rowid': '序号',
-  'orders.source': '来源', 'orders.dish_status': '出餐状态', 'orders.ready_time': '出餐时间',
+  'orders.source': '堂食/外卖', 'orders.dish_status': '出餐状态', 'orders.ready_time': '出餐时间',
   run_id: '运行ID', plan_item_id: '计划项ID', prep_item_id: '备货项ID', item_name: '备货项名称',
   slot_start: '时段开始', slot_end: '时段结束', forecast_qty: '预测量', available_qty: '可用量',
   recommended_qty: '建议备货量', created_at: '创建时间', updated_at: '更新时间',
@@ -143,4 +143,19 @@ export function getColumnLabel(table, column) {
     || COLUMN_LABELS[columnName]
     || COLUMN_LABELS[columnNameLower]
     || column
+}
+
+const CELL_VALUE_LABELS = {
+  'orders.source': {
+    dine_in: '堂食',
+    delivery: '外卖',
+  },
+}
+
+export function getCellLabel(table, column, value) {
+  const key = `${String(table || '')}.${String(column || '')}`
+  const mapped = CELL_VALUE_LABELS[key]
+  if (!mapped) return value
+  const label = mapped[value]
+  return label === undefined ? value : label
 }

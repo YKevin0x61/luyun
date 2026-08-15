@@ -2,32 +2,57 @@
   <view class="steamer-console">
     <view class="steamer-body" :class="'awaiting-' + awaitingPlacement">
       <view v-if="awaitingPlacement !== 'hidden'" class="awaiting-pane">
-        <text class="pane-title">待上笼</text>
+        <text class="pane-title">待上笼组 · 点次数选最早，再点孔上笼</text>
         <scroll-view scroll-y class="awaiting-scroll">
-          <view v-if="awaitingGroups.length === 0" class="empty-hint">
-            <text>暂无待上笼蒸笼</text>
-          </view>
-          <view
-            v-for="group in awaitingGroups"
-            :key="group.dishName"
-            class="awaiting-group"
-          >
-            <text class="group-header">{{ group.dishName }}</text>
+          <view class="awaiting-scroll-body">
+            <view v-if="awaitingGroups.length === 0" class="empty-hint">
+              <text>暂无待上笼蒸笼</text>
+            </view>
             <view
-              v-for="cage in group.cages"
-              :key="cageId(cage)"
-              class="awaiting-row"
-              :class="{
-                selected: isSelected(cage),
-                notice: isAwaitingNotice(cage),
-                [awaitingUrgencyClass(cage)]: !isAwaitingNotice(cage)
-              }"
-              @click="toggleCage(cage)"
+              v-for="group in awaitingGroups"
+              :key="group.chunkId || group.dishName"
+              class="awaiting-group"
             >
-              <text class="cage-table">{{ cage.table_number }}桌</text>
-              <text class="cage-dish">{{ cage.dish_name }}</text>
-              <text v-if="isNewCage(cage)" class="new-badge">新</text>
-              <text v-if="isAwaitingNotice(cage)" class="notice-mark">退</text>
+              <view class="awaiting-group-main">
+                <view
+                  v-if="group.selectableCages.length"
+                  class="awaiting-qty"
+                  :class="{
+                    selected: groupSelectedCount(group) > 0,
+                    'is-new': groupHasNew(group)
+                  }"
+                  @click="advanceGroup(group)"
+                >
+                  <text class="group-qty">{{ groupQtyLabel(group) }}</text>
+                  <text class="group-name">{{ group.dishName }}</text>
+                  <view
+                    class="group-detail-btn"
+                    :class="{ open: isGroupDetailOpen(group) }"
+                    @click.stop="toggleGroupDetail(group)"
+                  >
+                    <text class="group-detail-text">{{ isGroupDetailOpen(group) ? '收起' : '详情' }}</text>
+                  </view>
+                </view>
+                <view v-if="group.noticeCages.length" class="awaiting-notices">
+                  <view
+                    v-for="cage in group.noticeCages"
+                    :key="cageId(cage)"
+                    class="awaiting-chip notice"
+                  >
+                    <text class="notice-mark">退示</text>
+                  </view>
+                </view>
+              </view>
+              <view v-if="isGroupDetailOpen(group)" class="awaiting-detail">
+                <view
+                  v-for="cage in groupDetailCages(group)"
+                  :key="cageId(cage)"
+                  class="awaiting-detail-row"
+                >
+                  <text class="detail-table">{{ cageDetailTable(cage) }}</text>
+                  <text class="detail-time">{{ cageDetailTime(cage) }}</text>
+                </view>
+              </view>
             </view>
           </view>
         </scroll-view>
@@ -39,7 +64,7 @@
           :key="steamer.id"
           class="steamer-block"
         >
-          <text class="steamer-title">蒸炉 {{ steamer.id }}</text>
+          <text class="steamer-title">炉 {{ steamer.id }}</text>
           <view class="hole-row">
             <view
               v-for="portIndex in portsFor(steamer)"
@@ -47,7 +72,7 @@
               class="hole"
               @click="tapHole(steamer.id, portIndex)"
             >
-              <text class="hole-index">{{ portIndex }}</text>
+              <text class="hole-index" :class="{ armed: holeArmed }">孔{{ portIndex }}</text>
               <view class="hole-slots">
                 <view
                   v-for="(slot, slotIndex) in slotsFor(steamer.id, portIndex)"
@@ -66,18 +91,25 @@
                     }"
                     @click.stop="toggleHoleCage(slot.cage)"
                   >
-                    <text class="cage-primary">{{ cageCard(slot.cage).primary }}</text>
-                    <view class="cage-secondary">
-                      <text
-                        v-for="(line, lineIndex) in cageCard(slot.cage).tableLines"
-                        :key="lineIndex"
-                        class="cage-table-part"
-                      >{{ line }}</text>
-                      <text class="cage-mins">{{ cageCard(slot.cage).steamMinutes }}分</text>
+                    <view class="cage-primary-row">
+                      <text class="cage-primary">{{ cageCard(slot.cage).primary }}</text>
+                      <text v-if="cageCard(slot.cage).rushMark" class="rush-mark">催</text>
+                      <text v-if="cageCard(slot.cage).holdMark" class="hold-mark">退</text>
                     </view>
-                    <text v-if="cageCard(slot.cage).holdMark" class="hold-mark">退</text>
+                    <view class="cage-meta">
+                      <text class="cage-table-line">{{ cageCard(slot.cage).tableLines.join(' ') }}</text>
+                      <text class="cage-steam-time">{{ cageCard(slot.cage).timeLabel }}</text>
+                    </view>
                   </view>
                 </view>
+              </view>
+              <view
+                v-if="holeHasCages(steamer.id, portIndex)"
+                class="hole-select-all"
+                :class="{ on: holeAllSelected(steamer.id, portIndex) }"
+                @click.stop="selectAllOnHole(steamer.id, portIndex)"
+              >
+                <text class="hole-select-all-text">{{ holeAllSelected(steamer.id, portIndex) ? '取消' : '全选' }}</text>
               </view>
             </view>
           </view>
@@ -85,26 +117,18 @@
       </view>
     </view>
 
-    <view v-if="showPluckBar" class="serve-bar">
+    <view class="serve-bar">
+      <text class="serve-hint">{{ serveHint }}</text>
       <button
+        v-if="showPluckBar"
         class="pluck-btn"
         :disabled="loading"
         @click="confirmPluck"
       >
-        <text>{{ loading ? '提交中...' : '抽走' }}</text>
+        <text>{{ loading ? '提交中...' : `抽走 (${selectedHoldIds.length})` }}</text>
       </button>
-    </view>
-    <view v-else-if="showAwaitingServeBar" class="serve-bar">
       <button
-        class="serve-btn"
-        :disabled="loading"
-        @click="confirmBasketServe"
-      >
-        <text>{{ loading ? '提交中...' : `出餐 (${selectedOrderIds.length})` }}</text>
-      </button>
-    </view>
-    <view v-else-if="showSteamingServeBar" class="serve-bar">
-      <button
+        v-if="showSteamingServeBar"
         class="unload-btn"
         :disabled="loading"
         @click="confirmUnload"
@@ -112,11 +136,12 @@
         <text>{{ loading ? '提交中...' : '下笼' }}</text>
       </button>
       <button
+        v-if="showAwaitingServeBar || showSteamingServeBar"
         class="serve-btn"
         :disabled="loading"
         @click="confirmBasketServe"
       >
-        <text>{{ loading ? '提交中...' : `出餐 (${selectedSteamingIds.length})` }}</text>
+        <text>{{ loading ? '提交中...' : `出餐 (${serveCount})` }}</text>
       </button>
     </view>
   </view>
@@ -125,19 +150,26 @@
 <script>
 import { computed, ref, watch } from 'vue'
 import { orderLineId } from '../../utils/batchCooking.js'
+import { dishSplitKnobsChanged } from '../../utils/dishCardChunks.js'
 import {
   SHULONG_STEAMER_LAYOUT,
   deriveSteamerPhase,
   fillHoleSlots,
+  advanceAwaitingGroupSelection,
+  awaitingGroupSelectedCount,
+  composeAwaitingSteamerGroups,
   formatSteamerCageCard,
-  groupAwaitingSteamerCages,
+  formatSteamerTableLabel,
+  sortAwaitingCagesFifo,
   steamUrgencyLevel,
   steamerAwaitingPlacement,
   steamerBasketServeIntent,
   steamerHoleTapIntent,
   steamerPluckIntent,
   steamerUnloadIntent,
-  toggleSteamerCageSelection
+  toggleSteamerCageSelection,
+  selectAllHoleCages,
+  isHoleFullySelected
 } from '../../utils/steamerConsole.js'
 
 export default {
@@ -159,10 +191,6 @@ export default {
       type: Boolean,
       default: false
     },
-    workSurface: {
-      type: String,
-      default: ''
-    },
     now: {
       type: Number,
       default: 0
@@ -178,6 +206,14 @@ export default {
     steamThresholdsMs: {
       type: Object,
       default: null
+    },
+    dishCardQuantityCap: {
+      type: Number,
+      default: 0
+    },
+    orderGapMinutes: {
+      type: Number,
+      default: 0
     }
   },
   emits: ['load', 'move', 'unload', 'serve', 'pluck'],
@@ -185,8 +221,10 @@ export default {
     const selectedOrderIds = ref([])
     const selectedSteamingIds = ref([])
     const selectedHoldIds = ref([])
+    const detailGroupKey = ref('')
 
     const cageId = (cage) => orderLineId(cage)
+    const groupKey = (group) => group.chunkId || group.dishName
 
     const clock = () => props.now || Date.now()
 
@@ -198,13 +236,29 @@ export default {
 
     const cagePhase = (cage) => deriveSteamerPhase(cage, phaseOpts())
 
-    const awaitingGroups = computed(() =>
-      groupAwaitingSteamerCages(props.awaitingCages, phaseOpts())
-    )
+    const awaitingGroups = ref([])
+    const chunkSnapshotByDish = ref({})
+    const splitKnobsSeen = ref(null)
 
-    const awaitingPlacement = computed(() =>
-      steamerAwaitingPlacement(props.workSurface)
-    )
+    const applyAwaitingGroups = (previous) => {
+      const { groups, previousByDish } = composeAwaitingSteamerGroups(
+        props.awaitingCages,
+        phaseOpts(),
+        {
+          cap: Number(props.dishCardQuantityCap) || 0,
+          orderGapMinutes: Number(props.orderGapMinutes) || 0,
+          previousByDish: previous
+        }
+      )
+      awaitingGroups.value = groups
+      chunkSnapshotByDish.value = previousByDish
+      splitKnobsSeen.value = {
+        cap: Number(props.dishCardQuantityCap) || 0,
+        orderGapMinutes: Number(props.orderGapMinutes) || 0
+      }
+    }
+
+    const awaitingPlacement = computed(() => steamerAwaitingPlacement())
 
     const showAwaitingServeBar = computed(() =>
       awaitingPlacement.value !== 'hidden'
@@ -213,20 +267,62 @@ export default {
     )
 
     const showSteamingServeBar = computed(() =>
-      props.workSurface !== 'load'
-      && selectedSteamingIds.value.length > 0
+      selectedSteamingIds.value.length > 0
       && selectedOrderIds.value.length === 0
     )
 
-    const showPluckBar = computed(() =>
-      props.workSurface !== 'load' && selectedHoldIds.value.length > 0
+    const showPluckBar = computed(() => selectedHoldIds.value.length > 0)
+
+    const holeArmed = computed(() =>
+      selectedOrderIds.value.length > 0 || selectedSteamingIds.value.length > 0
     )
 
-    const isAwaitingNotice = (cage) => cagePhase(cage) === '待上笼退示'
+    const serveCount = computed(() =>
+      selectedOrderIds.value.length + selectedSteamingIds.value.length
+    )
+
+    const serveHint = computed(() => {
+      if (showPluckBar.value) return '退菜占位已选中 · 抽走不出餐'
+      if (showAwaitingServeBar.value) return '点孔即上笼 · 或直接出餐'
+      if (showSteamingServeBar.value) return '点孔换孔 · 下笼退回待上笼 · 出餐要按确认'
+      return '点组选最早 · 点孔上笼或换孔 · 出餐要按确认'
+    })
+
+    const groupSelectedCount = (group) =>
+      awaitingGroupSelectedCount(group.selectableCages, selectedOrderIds.value)
+
+    const groupQtyLabel = (group) => {
+      const total = Number(group.totalQuantity) || group.selectableCages.length
+      const selected = groupSelectedCount(group)
+      return selected > 0 ? `${selected}/${total}` : String(total)
+    }
+
+    const groupHasNew = (group) =>
+      (group.selectableCages || []).some((cage) => isNewCage(cage))
+
+    const isGroupDetailOpen = (group) => detailGroupKey.value === groupKey(group)
+
+    const toggleGroupDetail = (group) => {
+      const key = groupKey(group)
+      detailGroupKey.value = detailGroupKey.value === key ? '' : key
+    }
+
+    const groupDetailCages = (group) => sortAwaitingCagesFifo(group.selectableCages)
+
+    const cageDetailTable = (cage) => {
+      const label = formatSteamerTableLabel(cage?.table_number, cage?.source)
+      return label.lines.filter(Boolean).join(' ')
+    }
+
+    const cageDetailTime = (cage) => {
+      const date = new Date(cage?.order_time)
+      if (Number.isNaN(date.getTime())) return ''
+      const hours = String(date.getHours()).padStart(2, '0')
+      const minutes = String(date.getMinutes()).padStart(2, '0')
+      return `${hours}:${minutes}`
+    }
 
     const isCancelHold = (cage) => cagePhase(cage) === '退菜占位'
-
-    const isSelected = (cage) => selectedOrderIds.value.includes(cageId(cage))
 
     const isHoleCageSelected = (cage) => {
       const id = cageId(cage)
@@ -240,17 +336,6 @@ export default {
       return Boolean(props.isNewCage(cage))
     }
 
-    const awaitingUrgencyClass = (cage) => {
-      const thresholds = props.waitThresholdsMs
-      if (!thresholds) return 'normal'
-      const orderTime = Date.parse(cage?.order_time)
-      if (!Number.isFinite(orderTime)) return 'normal'
-      const wait = clock() - orderTime
-      if (wait > Number(thresholds.urgent)) return 'urgent'
-      if (wait > Number(thresholds.warning)) return 'high'
-      return 'normal'
-    }
-
     const holeUrgencyClass = (cage) => steamUrgencyLevel(cage, clock(), props.steamThresholdsMs)
 
     const applySelection = (next) => {
@@ -259,14 +344,11 @@ export default {
       selectedHoldIds.value = next.holdIds
     }
 
-    const toggleCage = (cage) => {
-      applySelection(toggleSteamerCageSelection({
-        awaitingIds: selectedOrderIds.value,
-        steamingIds: selectedSteamingIds.value,
-        holdIds: selectedHoldIds.value,
-        orderId: cageId(cage),
-        phase: cagePhase(cage)
-      }))
+    const advanceGroup = (group) => {
+      selectedOrderIds.value = advanceAwaitingGroupSelection({
+        selectableCages: group.selectableCages,
+        selectedIds: selectedOrderIds.value
+      })
     }
 
     const toggleHoleCage = (cage) => {
@@ -276,6 +358,25 @@ export default {
         holdIds: selectedHoldIds.value,
         orderId: cageId(cage),
         phase: cagePhase(cage)
+      }))
+    }
+
+    const holeHasCages = (steamerId, portIndex) => cagesOnHole(steamerId, portIndex).length > 0
+
+    const holeAllSelected = (steamerId, portIndex) => isHoleFullySelected({
+      cagesOnHole: cagesOnHole(steamerId, portIndex),
+      steamingIds: selectedSteamingIds.value,
+      holdIds: selectedHoldIds.value,
+      ...phaseOpts()
+    })
+
+    const selectAllOnHole = (steamerId, portIndex) => {
+      applySelection(selectAllHoleCages({
+        cagesOnHole: cagesOnHole(steamerId, portIndex),
+        awaitingIds: selectedOrderIds.value,
+        steamingIds: selectedSteamingIds.value,
+        holdIds: selectedHoldIds.value,
+        ...phaseOpts()
       }))
     }
 
@@ -345,16 +446,13 @@ export default {
         portIndex,
         occupiedOnHole: onHole.length,
         portCapacity: Number(props.layout.portCapacity || SHULONG_STEAMER_LAYOUT.portCapacity),
-        idsOnHole: onHole.map(cageId),
-        workSurface: props.workSurface
+        idsOnHole: onHole.map(cageId)
       })
       if (!intent) return
       if (intent.type === 'reject') {
         const title = intent.reason === 'capacity'
           ? '蒸孔已满'
-          : intent.reason === 'surface'
-            ? (props.workSurface === 'load' ? '待上笼面不能换孔' : '在蒸面不能上笼')
-            : '不能同时上笼和换孔'
+          : '不能同时上笼和换孔'
         uni.showToast({ title, icon: 'none' })
         return
       }
@@ -368,11 +466,26 @@ export default {
     }
 
     watch(
-      () => props.awaitingCages,
-      (cages) => {
-        const live = new Set((cages || []).map(cageId))
+      () => [
+        props.awaitingCages,
+        props.dishCardQuantityCap,
+        props.orderGapMinutes,
+        props.now,
+        props.layout.awaitingCancelNoticeSeconds
+      ],
+      () => {
+        const cap = Number(props.dishCardQuantityCap) || 0
+        const gap = Number(props.orderGapMinutes) || 0
+        if (dishSplitKnobsChanged(splitKnobsSeen.value, cap, gap)) {
+          selectedOrderIds.value = []
+          applyAwaitingGroups({})
+        } else {
+          applyAwaitingGroups(chunkSnapshotByDish.value)
+        }
+        const live = new Set((props.awaitingCages || []).map(cageId))
         selectedOrderIds.value = selectedOrderIds.value.filter((id) => live.has(id))
-      }
+      },
+      { immediate: true }
     )
 
     watch(
@@ -393,17 +506,28 @@ export default {
       showAwaitingServeBar,
       showSteamingServeBar,
       showPluckBar,
+      holeArmed,
+      serveCount,
+      serveHint,
+      groupSelectedCount,
+      groupQtyLabel,
+      groupHasNew,
+      isGroupDetailOpen,
+      toggleGroupDetail,
+      groupDetailCages,
+      cageDetailTable,
+      cageDetailTime,
       isNewCage,
-      awaitingUrgencyClass,
       holeUrgencyClass,
       cageId,
       cageCard,
-      isSelected,
-      isAwaitingNotice,
       isCancelHold,
       isHoleCageSelected,
-      toggleCage,
+      advanceGroup,
       toggleHoleCage,
+      holeHasCages,
+      holeAllSelected,
+      selectAllOnHole,
       confirmBasketServe,
       confirmUnload,
       confirmPluck,
@@ -419,11 +543,12 @@ export default {
 .steamer-console {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 12upx;
-  padding: 12upx 16upx 16upx;
+  background: #e8edf1;
   box-sizing: border-box;
+  overflow: hidden;
 }
 
 .steamer-body {
@@ -431,127 +556,212 @@ export default {
   min-height: 0;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 12upx;
-}
-
-.steamer-body.awaiting-side {
   flex-direction: row;
   align-items: stretch;
+  gap: 8px;
+  padding: 8px 10px 0;
+  overflow: hidden;
 }
 
 .awaiting-pane {
-  background: #fff;
-  border-radius: 16upx;
-  padding: 16upx 20upx;
-  box-shadow: 0 4upx 16upx rgba(15, 23, 42, 0.06);
-  box-sizing: border-box;
-}
-
-.awaiting-side .awaiting-pane {
-  width: 360upx;
+  width: 300px;
   flex-shrink: 0;
+  align-self: stretch;
+  background: #fff;
+  border: 2px solid #45B7D1;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 .pane-title {
-  font-size: 28upx;
-  font-weight: 600;
-  color: #1f2937;
+  font-size: 13px;
+  font-weight: 800;
+  color: #2c3e50;
+  padding: 6px 10px;
+  flex-shrink: 0;
 }
 
 .awaiting-scroll {
-  max-height: 280upx;
-  margin-top: 12upx;
-}
-
-.awaiting-side .awaiting-scroll {
-  max-height: none;
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  width: 100%;
+  height: 0;
+  touch-action: pan-y;
+}
+
+.awaiting-scroll-body {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0 8px 8px;
+  box-sizing: border-box;
 }
 
 .awaiting-group {
-  margin-bottom: 12upx;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-height: 44px;
+  min-width: 0;
+  max-width: 100%;
+  margin-bottom: 6px;
 }
 
-.group-header {
-  display: block;
-  font-size: 26upx;
-  font-weight: 600;
-  color: #0f766e;
-  padding: 4upx 4upx 8upx;
+.awaiting-group-main {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.awaiting-qty {
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 52px;
+  padding: 6px 6px 6px 10px;
+  border-radius: 8px;
+  border: 2px solid #45B7D1;
+  background: #e6fffb;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.awaiting-qty.selected {
+  border-color: #52c41a;
+  background: #f6ffed;
+}
+
+.awaiting-qty.is-new {
+  box-shadow: 0 0 0 2px rgba(250, 173, 20, 0.7);
+}
+
+.group-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 800;
+  color: #2c3e50;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-qty {
+  flex-shrink: 0;
+  font-size: 22px;
+  font-weight: 800;
+  color: #d97706;
+}
+
+.awaiting-qty.selected .group-qty {
+  color: #389e0d;
+}
+
+.group-detail-btn {
+  flex-shrink: 0;
+  min-width: 48px;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: #1890ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.group-detail-text {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.group-detail-btn.open {
+  background: #096dd9;
+}
+
+.awaiting-detail {
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #c5d6de;
+  background: #f7fafc;
+  box-sizing: border-box;
+}
+
+.awaiting-detail-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.detail-table,
+.detail-time {
+  font-size: 13px;
+  font-weight: 700;
+  color: #2c3e50;
+}
+
+.detail-time {
+  flex-shrink: 0;
+  color: #64748b;
 }
 
 .empty-hint {
-  padding: 24upx 0;
+  padding: 24px 0;
   color: #9ca3af;
-  font-size: 26upx;
+  font-size: 13px;
 }
 
-.awaiting-row {
+.awaiting-notices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.awaiting-chip {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 2px solid #bfbfbf;
+  background: #f5f5f5;
   display: flex;
   align-items: center;
-  gap: 16upx;
-  padding: 16upx 12upx;
-  border-radius: 12upx;
-  margin-bottom: 8upx;
-  background: #f8fafc;
+  box-sizing: border-box;
 }
 
-.awaiting-row.selected {
-  background: #dbeafe;
-  outline: 2upx solid #3b82f6;
-}
-
-.awaiting-row.high {
-  box-shadow: inset 4upx 0 0 #fa8c16;
-}
-
-.awaiting-row.urgent {
-  box-shadow: inset 4upx 0 0 #ff4d4f;
-}
-
-.awaiting-row.notice {
-  background: #e5e7eb;
-  color: #6b7280;
-}
-
-.new-badge {
-  margin-left: auto;
-  font-size: 18upx;
-  font-weight: 700;
-  color: #d48806;
-  background: #fff7e6;
-  border-radius: 6upx;
-  padding: 0 8upx;
-}
-
-.awaiting-row.notice .cage-table,
-.awaiting-row.notice .cage-dish {
-  color: #6b7280;
+.awaiting-chip.notice .notice-mark {
+  color: #8c8c8c;
 }
 
 .notice-mark,
+.hold-mark,
+.rush-mark {
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.rush-mark {
+  color: #ff4d4f;
+}
+
 .hold-mark {
-  margin-left: auto;
-  font-size: 18upx;
-  font-weight: 700;
-  color: #6b7280;
-}
-
-.cage-table {
-  font-size: 28upx;
-  font-weight: 600;
-  color: #111827;
-  min-width: 88upx;
-}
-
-.cage-dish {
-  font-size: 28upx;
-  color: #374151;
+  color: #8c8c8c;
 }
 
 .hole-map {
@@ -560,200 +770,263 @@ export default {
   min-width: 0;
   display: flex;
   flex-direction: row;
-  gap: 12upx;
+  gap: 10px;
+  overflow: hidden;
 }
 
 .steamer-block {
   flex: 1;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  background: #fff;
-  border-radius: 16upx;
-  padding: 12upx;
-  box-shadow: 0 4upx 16upx rgba(15, 23, 42, 0.06);
+  background: #d9e3ea;
+  border: 3px solid #5a7a88;
+  border-radius: 10px;
+  overflow: hidden;
   box-sizing: border-box;
 }
 
 .steamer-title {
-  font-size: 24upx;
-  font-weight: 600;
-  color: #0f766e;
-  margin-bottom: 8upx;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #fff;
+  background: #4a6673;
+  padding: 4px 8px;
   flex-shrink: 0;
 }
 
 .hole-row {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: row;
-  gap: 6upx;
+  gap: 3px;
+  padding: 4px;
+  overflow: hidden;
 }
 
 .hole {
-  flex: 1;
+  flex: 1 1 0;
+  width: 0;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border: 2upx dashed #cbd5e1;
-  border-radius: 10upx;
-  padding: 4upx;
-  box-sizing: border-box;
-  background: #f8fafc;
+  background: #c5d0d6;
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 .hole-index {
-  display: block;
-  text-align: center;
-  font-size: 18upx;
-  color: #64748b;
-  margin-bottom: 2upx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  background: #3d5a66;
+  color: #fff;
+  font-weight: 800;
+  font-size: 13px;
   flex-shrink: 0;
+}
+
+.hole-index.armed {
+  background: #135200;
+  animation: steamer-arm-pulse 1s ease-in-out infinite;
+}
+
+.hole-select-all {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  flex-shrink: 0;
+  background: #3d5a66;
+  box-sizing: border-box;
+}
+
+.hole-select-all-text {
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.hole-select-all.on {
+  background: #52c41a;
+}
+
+@keyframes steamer-arm-pulse {
+  0%, 100% { background: #135200; }
+  50% { background: #237804; }
 }
 
 .hole-slots {
   flex: 1;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+  display: grid;
+  grid-template-rows: repeat(10, minmax(0, 1fr));
+  grid-auto-rows: 0;
+  gap: 2px;
+  padding: 2px;
+  overflow: hidden;
 }
 
 .hole-slot {
-  flex: 1;
   min-height: 0;
-}
-
-.hole-slot.empty {
-  background: transparent;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
 }
 
 .hole-cage {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   height: 100%;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  background: #45b7d1;
-  border-radius: 6upx;
-  padding: 2upx 3upx;
-  position: relative;
+  background: #fff;
+  border: 2px solid #45B7D1;
+  border-radius: 6px;
+  padding: 1px 3px;
+  color: #2c3e50;
+  overflow: hidden;
 }
 
 .hole-cage.selected {
-  outline: 2upx solid #fbbf24;
-  box-shadow: 0 0 0 2upx #f59e0b;
+  outline: 3px solid #52c41a;
+  outline-offset: -3px;
 }
 
 .hole-cage.warn {
-  background: #d97706;
+  border-color: #d48806;
+  background: #fff7e6;
 }
 
 .hole-cage.urgent {
-  background: #dc2626;
+  border-color: #ff4d4f;
+  background: #fff2f0;
 }
 
 .hole-cage.hold {
-  background: #9ca3af;
+  border-color: #8c8c8c;
+  background: #f0f0f0;
+  color: #8c8c8c;
 }
 
-.hole-cage.hold .cage-primary,
-.hole-cage.hold .cage-secondary,
-.hole-cage.hold .hold-mark {
-  color: #f3f4f6;
-}
-
-.hole-cage .hold-mark {
-  position: absolute;
-  top: 0;
-  right: 2upx;
-  margin-left: 0;
-  font-size: 16upx;
+.cage-primary-row {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .cage-primary {
   display: block;
-  font-size: 18upx;
-  font-weight: 600;
-  color: #fff;
-  text-align: center;
+  flex: 1;
+  width: 0;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  line-height: 1.15;
 }
 
-.cage-secondary {
+.cage-meta {
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
-  align-items: center;
-  gap: 2upx 4upx;
-  max-height: 2.4em;
-  overflow: hidden;
-  line-height: 1.15;
+  align-items: baseline;
+  min-width: 0;
+  max-width: 100%;
 }
 
-.cage-table-part,
-.cage-mins {
-  font-size: 14upx;
-  color: #fff;
-  text-align: center;
+.cage-table-line,
+.cage-steam-time {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cage-steam-time {
+  flex: 1 0 100%;
+}
+
+.hole-cage.hold .cage-table-line,
+.hole-cage.hold .cage-steam-time {
+  color: #8c8c8c;
 }
 
 .serve-bar {
-  position: sticky;
-  bottom: 0;
-  display: flex;
-  justify-content: center;
-  gap: 16upx;
-  padding: 12upx 0 4upx;
   flex-shrink: 0;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #fff;
+  border-top: 1px solid #e8e8e8;
+}
+
+.serve-hint {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.unload-btn,
+.pluck-btn,
+.serve-btn {
+  margin: 0;
+  padding: 0 18px;
+  min-height: 52px;
+  width: auto;
+  flex-shrink: 0;
+  border-radius: 12px;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 52px;
 }
 
 .unload-btn {
-  min-width: 200upx;
-  height: 80upx;
-  border: none;
-  border-radius: 40upx;
-  background: #64748b;
-  color: #fff;
-  font-size: 30upx;
-  font-weight: 600;
-}
-
-.unload-btn:disabled {
-  opacity: 0.6;
+  border: 1px solid #e8e8e8;
+  background: #fff;
+  color: #2c3e50;
 }
 
 .pluck-btn {
-  min-width: 200upx;
-  height: 80upx;
-  border: none;
-  border-radius: 40upx;
-  background: #6b7280;
+  border: 0;
+  background: #8c8c8c;
   color: #fff;
-  font-size: 30upx;
-  font-weight: 600;
-}
-
-.pluck-btn:disabled {
-  opacity: 0.6;
 }
 
 .serve-btn {
-  min-width: 280upx;
-  height: 80upx;
-  border: none;
-  border-radius: 40upx;
-  background: #16a34a;
+  border: 0;
+  background: linear-gradient(135deg, #1890ff, #40a9ff);
   color: #fff;
-  font-size: 30upx;
-  font-weight: 600;
+  padding: 0 28px;
 }
 
+.unload-btn:disabled,
+.pluck-btn:disabled,
 .serve-btn:disabled {
   opacity: 0.6;
 }

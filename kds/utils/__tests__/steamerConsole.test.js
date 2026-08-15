@@ -2,8 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   deriveSteamerPhase,
   isSteamerConsole,
+  advanceAwaitingGroupSelection,
+  awaitingGroupSelectedCount,
+  composeAwaitingSteamerGroups,
   groupAwaitingSteamerCages,
   listAwaitingSteamerCages,
+  sortAwaitingCagesFifo,
   SHULONG_STEAMER_LAYOUT,
   steamerBasketServeIntent,
   steamerHoleTapIntent,
@@ -12,6 +16,8 @@ import {
   steamerUnloadIntent,
   toggleSteamerCageSelection,
   toggleSteamerSelection,
+  selectAllHoleCages,
+  isHoleFullySelected,
   sortHoleDisplay,
   fillHoleSlots,
   formatSteamerTableLabel,
@@ -97,18 +103,11 @@ describe('deriveSteamerPhase', () => {
 })
 
 describe('isSteamerConsole', () => {
-  it('is false for shulong when work surface is unset', () => {
-    expect(isSteamerConsole({ steamerWorkSurface: '', stationId: 'shulong' })).toBe(false)
-    expect(isSteamerConsole({ steamerWorkSurface: null, stationId: 'shulong' })).toBe(false)
-    expect(isSteamerConsole({ stationId: 'shulong' })).toBe(false)
-  })
-
-  it('is true only when work surface is set and station is shulong', () => {
-    expect(isSteamerConsole({ steamerWorkSurface: 'load', stationId: 'shulong' })).toBe(true)
-    expect(isSteamerConsole({ steamerWorkSurface: 'steaming', stationId: 'shulong' })).toBe(true)
-    expect(isSteamerConsole({ steamerWorkSurface: 'solo', stationId: 'shulong' })).toBe(true)
-    expect(isSteamerConsole({ steamerWorkSurface: 'load', stationId: 'changfen' })).toBe(false)
-    expect(isSteamerConsole({ steamerWorkSurface: 'solo', stationId: 'xibing' })).toBe(false)
+  it('is true only for 熟笼档', () => {
+    expect(isSteamerConsole({ stationId: 'shulong' })).toBe(true)
+    expect(isSteamerConsole({ stationId: 'changfen' })).toBe(false)
+    expect(isSteamerConsole({ stationId: 'xibing' })).toBe(false)
+    expect(isSteamerConsole({})).toBe(false)
   })
 })
 
@@ -219,28 +218,11 @@ describe('steamerHoleTapIntent', () => {
     })
   })
 
-  it('refuses 换孔 on 待上笼面 and 上笼 on 在蒸面', () => {
-    expect(
-      steamerHoleTapIntent({
-        awaitingIds: [],
-        steamingIds: ['21'],
-        workSurface: 'load',
-        ...hole
-      })
-    ).toEqual({ type: 'reject', reason: 'surface' })
+  it('allows 上笼 and 换孔 on the same 熟笼蒸炉屏', () => {
     expect(
       steamerHoleTapIntent({
         awaitingIds: ['11'],
         steamingIds: [],
-        workSurface: 'steaming',
-        ...hole
-      })
-    ).toEqual({ type: 'reject', reason: 'surface' })
-    expect(
-      steamerHoleTapIntent({
-        awaitingIds: ['11'],
-        steamingIds: [],
-        workSurface: 'load',
         ...hole
       }).type
     ).toBe('load')
@@ -248,7 +230,6 @@ describe('steamerHoleTapIntent', () => {
       steamerHoleTapIntent({
         awaitingIds: [],
         steamingIds: ['21'],
-        workSurface: 'solo',
         ...hole
       })
     ).toMatchObject({ type: 'move', orderIds: ['21'] })
@@ -461,6 +442,104 @@ describe('退菜占位 selection and 抽笼', () => {
   })
 })
 
+describe('selectAllHoleCages', () => {
+  const now = Date.parse('2026-08-14T10:12:00+08:00')
+
+  it('is a no-op on an empty hole', () => {
+    expect(
+      selectAllHoleCages({
+        cagesOnHole: [],
+        awaitingIds: ['a1'],
+        steamingIds: ['s9'],
+        holdIds: []
+      })
+    ).toEqual({
+      awaitingIds: ['a1'],
+      steamingIds: ['s9'],
+      holdIds: []
+    })
+    expect(isHoleFullySelected({ cagesOnHole: [], steamingIds: ['s9'] })).toBe(false)
+  })
+
+  it('selects every 在蒸 cage on the hole and clears 退菜占位 plus 待上笼', () => {
+    const cages = [
+      steamingCage({ id: 's1' }),
+      steamingCage({ id: 's2' })
+    ]
+    const next = selectAllHoleCages({
+      cagesOnHole: cages,
+      awaitingIds: ['a1'],
+      steamingIds: [],
+      holdIds: ['h1'],
+      now
+    })
+    expect(next).toEqual({
+      awaitingIds: [],
+      steamingIds: ['s1', 's2'],
+      holdIds: []
+    })
+    expect(isHoleFullySelected({ cagesOnHole: cages, steamingIds: next.steamingIds, now })).toBe(true)
+  })
+
+  it('keeps other holes and toggles this hole off when already fully selected', () => {
+    const cages = [steamingCage({ id: 's1' }), steamingCage({ id: 's2' })]
+    const next = selectAllHoleCages({
+      cagesOnHole: cages,
+      steamingIds: ['s9', 's1', 's2'],
+      holdIds: [],
+      now
+    })
+    expect(next.steamingIds).toEqual(['s9'])
+    expect(isHoleFullySelected({ cagesOnHole: cages, steamingIds: next.steamingIds, now })).toBe(false)
+  })
+
+  it('selects 在蒸 only when the hole also has 退菜占位', () => {
+    const cages = [
+      steamingCage({ id: 's1' }),
+      steamingCage({
+        id: 'h1',
+        dish_status: '已取消',
+        status: '退菜'
+      })
+    ]
+    const next = selectAllHoleCages({
+      cagesOnHole: cages,
+      steamingIds: [],
+      holdIds: [],
+      now
+    })
+    expect(next.steamingIds).toEqual(['s1'])
+    expect(next.holdIds).toEqual([])
+  })
+
+  it('selects every 退菜占位 when the hole has no 在蒸', () => {
+    const cages = [
+      steamingCage({
+        id: 'h1',
+        dish_status: '已取消',
+        status: '退菜'
+      }),
+      steamingCage({
+        id: 'h2',
+        dish_status: '已取消',
+        status: '退菜'
+      })
+    ]
+    const next = selectAllHoleCages({
+      cagesOnHole: cages,
+      steamingIds: ['s9'],
+      holdIds: [],
+      now
+    })
+    expect(next).toEqual({
+      awaitingIds: [],
+      steamingIds: [],
+      holdIds: ['h1', 'h2']
+    })
+    expect(isHoleFullySelected({ cagesOnHole: cages, holdIds: next.holdIds, now })).toBe(true)
+  })
+})
+
 describe('listAwaitingSteamerCages', () => {
   const now = Date.parse('2026-08-14T10:05:00+08:00')
   const noticeSeconds = 180
@@ -547,6 +626,7 @@ describe('groupAwaitingSteamerCages', () => {
     expect(groups).toHaveLength(1)
     expect(groups[0].cages.map((cage) => cage._id)).toEqual(['a1', 'n1'])
     expect(groups[0].selectableCages.map((cage) => cage._id)).toEqual(['a1'])
+    expect(groups[0].noticeCages.map((cage) => cage._id)).toEqual(['n1'])
   })
 
   it('builds load and serve intents from cage ids, not the group dish name', () => {
@@ -584,6 +664,140 @@ describe('groupAwaitingSteamerCages', () => {
     expect(steamerBasketServeIntent({ selectedOrderIds: [groups[0].dishName] })).not.toEqual({
       orderIds: cageIds
     })
+  })
+})
+
+describe('advanceAwaitingGroupSelection', () => {
+  const early = { _id: 'a1', order_time: '2026-08-16T08:00:00+08:00' }
+  const mid = { _id: 'a2', order_time: '2026-08-16T08:10:00+08:00' }
+  const late = { _id: 'a3', order_time: '2026-08-16T08:20:00+08:00' }
+  const cages = [late, early, mid]
+
+  it('sorts 待上笼 FIFO by order_time, missing time last', () => {
+    const undated = { _id: 'z9' }
+    expect(sortAwaitingCagesFifo([late, undated, early]).map((cage) => cage._id)).toEqual([
+      'a1',
+      'a3',
+      'z9'
+    ])
+  })
+
+  it('each click takes the next earliest cage; wrap clears the group', () => {
+    let selected = []
+    selected = advanceAwaitingGroupSelection({ selectableCages: cages, selectedIds: selected })
+    expect(selected).toEqual(['a1'])
+    selected = advanceAwaitingGroupSelection({ selectableCages: cages, selectedIds: selected })
+    expect(selected).toEqual(['a1', 'a2'])
+    selected = advanceAwaitingGroupSelection({ selectableCages: cages, selectedIds: selected })
+    expect(selected).toEqual(['a1', 'a2', 'a3'])
+    selected = advanceAwaitingGroupSelection({ selectableCages: cages, selectedIds: selected })
+    expect(selected).toEqual([])
+  })
+
+  it('keeps other groups selected and snaps this group to earliest prefix', () => {
+    const next = advanceAwaitingGroupSelection({
+      selectableCages: cages,
+      selectedIds: ['other', 'a3']
+    })
+    expect(next).toEqual(['other', 'a1', 'a2'])
+    expect(awaitingGroupSelectedCount(cages, next)).toBe(2)
+  })
+
+  it('does nothing when the group has no selectable cages', () => {
+    expect(
+      advanceAwaitingGroupSelection({
+        selectableCages: [],
+        selectedIds: ['other']
+      })
+    ).toEqual(['other'])
+  })
+})
+
+describe('composeAwaitingSteamerGroups', () => {
+  const now = Date.parse('2026-08-16T12:00:00+08:00')
+  const opts = { now, noticeSeconds: 180 }
+
+  function cage(id, dishName, orderTime, extra = {}) {
+    return {
+      _id: id,
+      dish_name: dishName,
+      dish_status: '待出餐',
+      placement: null,
+      quantity: 1,
+      order_time: orderTime,
+      ...extra
+    }
+  }
+
+  it('N=0 T=0 keeps one group per dish and sorts by oldest order', () => {
+    const { groups } = composeAwaitingSteamerGroups(
+      [
+        cage('s1', '虾饺', '2026-08-16T08:10:00+08:00'),
+        cage('b1', '叉烧包', '2026-08-16T08:00:00+08:00')
+      ],
+      opts,
+      { cap: 0, orderGapMinutes: 0 }
+    )
+    expect(groups.map((group) => group.dishName)).toEqual(['叉烧包', '虾饺'])
+    expect(groups.map((group) => group.totalQuantity)).toEqual([1, 1])
+  })
+
+  it('applies 菜卡份数上限 like other kitchen cards', () => {
+    const cages = [
+      cage('s1', '虾饺', '2026-08-16T08:00:00+08:00'),
+      cage('s2', '虾饺', '2026-08-16T08:01:00+08:00'),
+      cage('s3', '虾饺', '2026-08-16T08:02:00+08:00'),
+      cage('s4', '虾饺', '2026-08-16T08:03:00+08:00'),
+      cage('s5', '虾饺', '2026-08-16T08:04:00+08:00')
+    ]
+    const { groups } = composeAwaitingSteamerGroups(cages, opts, { cap: 2, orderGapMinutes: 0 })
+    expect(groups.map((group) => group.totalQuantity)).toEqual([2, 2, 1])
+    expect(groups.every((group) => group.dishName === '虾饺')).toBe(true)
+    expect(new Set(groups.map((group) => group.chunkId)).size).toBe(3)
+  })
+
+  it('applies 下单间隔 so a gap starts a new 待上笼组', () => {
+    const cages = [
+      cage('s1', '虾饺', '2026-08-16T08:00:00+08:00'),
+      cage('s2', '虾饺', '2026-08-16T08:05:00+08:00'),
+      cage('s3', '虾饺', '2026-08-16T08:20:00+08:00')
+    ]
+    const { groups } = composeAwaitingSteamerGroups(cages, opts, { cap: 0, orderGapMinutes: 10 })
+    expect(groups.map((group) => group.selectableCages.map((row) => row._id))).toEqual([
+      ['s1', 's2'],
+      ['s3']
+    ])
+  })
+
+  it('interleaves same-dish groups with other dishes by oldest order', () => {
+    const cages = [
+      cage('s1', '虾饺', '2026-08-16T10:00:00+08:00', { quantity: 10 }),
+      cage('s2', '虾饺', '2026-08-16T11:00:00+08:00', { quantity: 8 }),
+      cage('b1', '叉烧包', '2026-08-16T10:30:00+08:00', { quantity: 3 })
+    ]
+    const { groups } = composeAwaitingSteamerGroups(cages, opts, { cap: 10, orderGapMinutes: 0 })
+    expect(groups.map((group) => group.dishName)).toEqual(['虾饺', '叉烧包', '虾饺'])
+    expect(groups.map((group) => group.totalQuantity)).toEqual([10, 3, 8])
+  })
+
+  it('pins 待上笼退示 on the earliest group of that dish', () => {
+    const cages = [
+      cage('s1', '虾饺', '2026-08-16T08:00:00+08:00'),
+      cage('s2', '虾饺', '2026-08-16T08:01:00+08:00'),
+      cage('s3', '虾饺', '2026-08-16T08:02:00+08:00'),
+      {
+        _id: 'n1',
+        dish_name: '虾饺',
+        dish_status: '已取消',
+        status: '退菜',
+        placement: null,
+        updated_at: '2026-08-16T11:59:00+08:00'
+      }
+    ]
+    const { groups } = composeAwaitingSteamerGroups(cages, opts, { cap: 2, orderGapMinutes: 0 })
+    expect(groups[0].noticeCages.map((row) => row._id)).toEqual(['n1'])
+    expect(groups.slice(1).every((group) => group.noticeCages.length === 0)).toBe(true)
+    expect(groups[0].selectableCages.map((row) => row._id)).not.toContain('n1')
   })
 })
 
@@ -792,6 +1006,7 @@ describe('formatSteamerTableLabel', () => {
     expect(formatSteamerTableLabel('美团1', 'delivery')).toEqual({ lines: ['外·美团', '1'] })
     expect(formatSteamerTableLabel('饿了么3', 'delivery')).toEqual({ lines: ['外·饿了么', '3'] })
     expect(formatSteamerTableLabel('外·美团7')).toEqual({ lines: ['外·美团', '7'] })
+    expect(formatSteamerTableLabel('淘宝闪购18', 'delivery')).toEqual({ lines: ['外·淘宝', '18'] })
   })
 
   it('uses a short 包 prefix when the table looks like 包间', () => {
@@ -815,7 +1030,40 @@ describe('formatSteamerCageCard', () => {
     )
     expect(card.primary).toBe('虾饺')
     expect(card.secondary).toBe('8桌 12分')
+    expect(card.steamMinutes).toBe(12)
+    expect(card.totalMinutes).toBe(0)
+    expect(card.timeLabel).toBe('12分')
+    expect(card.rushMark).toBe('')
     expect(card.holdMark).toBe('')
+  })
+
+  it('appends total wait from order_time after steam minutes', () => {
+    const card = formatSteamerCageCard(
+      steamingCage({
+        dish_name: '虾饺',
+        table_number: '8',
+        order_time: '2026-08-14T09:00:00+08:00',
+        placement: { loaded_at: '2026-08-14T10:00:00+08:00' }
+      }),
+      now
+    )
+    expect(card.steamMinutes).toBe(12)
+    expect(card.totalMinutes).toBe(72)
+    expect(card.timeLabel).toBe('12分 总72分')
+  })
+
+  it('marks 催 on the card without replacing the dish name', () => {
+    const card = formatSteamerCageCard(
+      steamingCage({
+        dish_name: '虾饺',
+        table_number: '8',
+        notes: '催菜',
+        placement: { loaded_at: '2026-08-14T10:00:00+08:00' }
+      }),
+      now
+    )
+    expect(card.primary).toBe('虾饺')
+    expect(card.rushMark).toBe('催')
   })
 
   it('keeps 「退」 as a mark and does not replace the dish name', () => {
@@ -848,6 +1096,20 @@ describe('formatSteamerCageCard', () => {
     expect(card.tableLines).toEqual(['外·美团', '7'])
     expect(card.secondary).toBe('外·美团 7 9分')
     expect(card.secondary).not.toContain('外·美团7')
+  })
+
+  it('drops a leading 外卖 prefix so the dish name fits the hole', () => {
+    const card = formatSteamerCageCard(
+      steamingCage({
+        dish_name: '(外卖)金牌禄运虾饺皇',
+        table_number: '淘宝闪购18',
+        source: 'delivery',
+        placement: { loaded_at: '2026-08-14T10:03:00+08:00' }
+      }),
+      now
+    )
+    expect(card.primary).toBe('金牌禄运虾饺皇')
+    expect(card.tableLines).toEqual(['外·淘宝', '18'])
   })
 })
 
@@ -958,13 +1220,9 @@ describe('steamerLayoutFromStations', () => {
 })
 
 describe('steamerAwaitingPlacement', () => {
-  it('puts 待上笼 on a side panel for 闲时面, hides it on 在蒸面, and never uses a covering drawer', () => {
-    expect(steamerAwaitingPlacement('solo')).toBe('side')
-    expect(steamerAwaitingPlacement('load')).toBe('top')
-    expect(steamerAwaitingPlacement('steaming')).toBe('hidden')
-    expect(steamerAwaitingPlacement('solo')).not.toBe('drawer')
-    expect(steamerAwaitingPlacement('load')).not.toBe('drawer')
-    expect(steamerAwaitingPlacement('steaming')).not.toBe('drawer')
+  it('puts 待上笼 on the left side panel, never a covering drawer', () => {
+    expect(steamerAwaitingPlacement()).toBe('side')
+    expect(steamerAwaitingPlacement()).not.toBe('drawer')
   })
 })
 
@@ -984,32 +1242,9 @@ vi.stubGlobal('uni', {
 
 const { ScreenSettingsManager } = await import('../storage.js')
 
-describe('ScreenSettingsManager steamerWorkSurface', () => {
+describe('ScreenSettingsManager steamer thresholds', () => {
   beforeEach(() => {
     memory.clear()
-  })
-
-  it('defaults to empty so shulong still uses 菜卡', () => {
-    expect(ScreenSettingsManager.getSteamerWorkSurface()).toBe('')
-    expect(ScreenSettingsManager.getSettings().steamerWorkSurface).toBe('')
-    expect(
-      isSteamerConsole({
-        steamerWorkSurface: ScreenSettingsManager.getSteamerWorkSurface(),
-        stationId: 'shulong'
-      })
-    ).toBe(false)
-  })
-
-  it('persists a set work surface and treats it as a 熟笼蒸炉屏', () => {
-    expect(ScreenSettingsManager.setSteamerWorkSurface('load')).toBe(true)
-    expect(ScreenSettingsManager.getSteamerWorkSurface()).toBe('load')
-    expect(ScreenSettingsManager.getSettings().steamerWorkSurface).toBe('load')
-    expect(
-      isSteamerConsole({
-        steamerWorkSurface: ScreenSettingsManager.getSteamerWorkSurface(),
-        stationId: 'shulong'
-      })
-    ).toBe(true)
   })
 
   it('defaults steamWarnMin / steamUrgentMin to 15/20 without overwriting wait mins', () => {

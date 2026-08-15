@@ -1,9 +1,10 @@
 /**
- * 熟笼蒸炉屏: derived phase, work-surface gate, 上笼 / 换孔 / 下笼 / 笼上出餐 / 抽笼 intents.
+ * 熟笼蒸炉屏: derived phase, 上笼 / 换孔 / 下笼 / 笼上出餐 / 抽笼 intents.
  * Phase is not a 出餐状态.
  */
 
 import { isRefundOrder } from './constants.js'
+import { composeKitchenDishCards, sortKitchenDishCardsByOldest } from './dishCardChunks.js'
 
 export const STEAMER_PHASE_AWAITING = '待上笼'
 export const STEAMER_PHASE_STEAMING = '在蒸'
@@ -11,14 +12,6 @@ export const STEAMER_PHASE_CANCEL_HOLD = '退菜占位'
 export const STEAMER_PHASE_AWAITING_NOTICE = '待上笼退示'
 export const SHULONG_STATION_ID = 'shulong'
 export const DEFAULT_AWAITING_CANCEL_NOTICE_SECONDS = 180
-
-export const STEAMER_WORK_SURFACES = Object.freeze({
-  LOAD: 'load',
-  STEAMING: 'steaming',
-  SOLO: 'solo'
-})
-
-const STEAMER_WORK_SURFACE_SET = new Set(Object.values(STEAMER_WORK_SURFACES))
 
 /** Fallback when /api/stations has no shulong.steamer_layout. Keep in sync with config.KITCHEN_STATIONS.shulong. */
 export const SHULONG_STEAMER_LAYOUT = Object.freeze({
@@ -29,10 +22,6 @@ export const SHULONG_STEAMER_LAYOUT = Object.freeze({
   portCapacity: 10,
   awaitingCancelNoticeSeconds: DEFAULT_AWAITING_CANCEL_NOTICE_SECONDS
 })
-
-export function normalizeSteamerWorkSurface(value) {
-  return STEAMER_WORK_SURFACE_SET.has(value) ? value : ''
-}
 
 function isCancelledOrRefund(order) {
   if (!order) return false
@@ -45,6 +34,39 @@ function asTimestamp(value) {
   if (typeof value === 'number') return value
   if (value instanceof Date) return value.getTime()
   return Date.parse(value)
+}
+
+function cageLineId(cage) {
+  return String(cage?.id ?? cage?._id ?? '')
+}
+
+export function sortAwaitingCagesFifo(cages) {
+  return (Array.isArray(cages) ? cages.slice() : []).sort((a, b) => {
+    const ta = asTimestamp(a?.order_time)
+    const tb = asTimestamp(b?.order_time)
+    const aOk = Number.isFinite(ta)
+    const bOk = Number.isFinite(tb)
+    if (aOk && bOk && ta !== tb) return ta - tb
+    if (aOk !== bOk) return aOk ? -1 : 1
+    return cageLineId(a).localeCompare(cageLineId(b))
+  })
+}
+
+export function awaitingGroupSelectedCount(selectableCages, selectedIds) {
+  const fifoIds = new Set(sortAwaitingCagesFifo(selectableCages).map(cageLineId).filter(Boolean))
+  return (Array.isArray(selectedIds) ? selectedIds : []).filter((id) => fifoIds.has(String(id))).length
+}
+
+/** Click count on a 待上笼组: earliest N cages. Wrap at full selection clears this group only. */
+export function advanceAwaitingGroupSelection({ selectableCages, selectedIds } = {}) {
+  const fifoIds = sortAwaitingCagesFifo(selectableCages).map(cageLineId).filter(Boolean)
+  const current = Array.isArray(selectedIds) ? selectedIds.map(String) : []
+  if (fifoIds.length === 0) return current
+  const fifoSet = new Set(fifoIds)
+  const selectedInGroup = fifoIds.filter((id) => current.includes(id)).length
+  const nextCount = selectedInGroup >= fifoIds.length ? 0 : selectedInGroup + 1
+  const keep = current.filter((id) => !fifoSet.has(id))
+  return [...keep, ...fifoIds.slice(0, nextCount)]
 }
 
 export function deriveSteamerPhase(order, { now, noticeSeconds } = {}) {
@@ -85,16 +107,85 @@ export function groupAwaitingSteamerCages(cages, opts) {
     const dishName = cage?.dish_name || ''
     let group = byName.get(dishName)
     if (!group) {
-      group = { dishName, cages: [], selectableCages: [] }
+      group = { dishName, cages: [], selectableCages: [], noticeCages: [] }
       byName.set(dishName, group)
       groups.push(group)
     }
     group.cages.push(cage)
-    if (deriveSteamerPhase(cage, opts) === STEAMER_PHASE_AWAITING) {
+    const phase = deriveSteamerPhase(cage, opts)
+    if (phase === STEAMER_PHASE_AWAITING) {
       group.selectableCages.push(cage)
+    } else if (phase === STEAMER_PHASE_AWAITING_NOTICE) {
+      group.noticeCages.push(cage)
     }
   }
   return groups
+}
+
+/**
+ * 待上笼组走和其他屏相同的拆卡：菜卡份数上限 + 下单间隔，再按每组最早订单排。
+ * 待上笼退示挂在该菜名最早一组上，不参与拆卡。
+ */
+export function composeAwaitingSteamerGroups(
+  cages,
+  opts,
+  { cap = 0, orderGapMinutes = 0, previousByDish = {} } = {}
+) {
+  const grouped = groupAwaitingSteamerCages(cages, opts)
+  const noticeByDish = new Map()
+  const logicalDishes = []
+  const noticeOnly = []
+
+  for (const group of grouped) {
+    if (group.noticeCages.length) noticeByDish.set(group.dishName, group.noticeCages)
+    if (group.selectableCages.length === 0) {
+      if (group.noticeCages.length) noticeOnly.push(group)
+      continue
+    }
+    logicalDishes.push({
+      dishName: group.dishName,
+      orders: group.selectableCages
+    })
+  }
+
+  const { cards, previousByDish: nextPrevious } = composeKitchenDishCards({
+    logicalDishes,
+    cap: Number(cap) || 0,
+    orderGapMinutes: Number(orderGapMinutes) || 0,
+    previousByDish
+  })
+
+  const attached = new Set()
+  const groups = sortKitchenDishCardsByOldest(cards).map((card) => {
+    let noticeCages = []
+    if (!attached.has(card.dishName) && noticeByDish.has(card.dishName)) {
+      noticeCages = noticeByDish.get(card.dishName)
+      attached.add(card.dishName)
+    }
+    return {
+      dishName: card.dishName,
+      chunkId: card.chunkId,
+      cages: [...card.orders, ...noticeCages],
+      selectableCages: card.orders,
+      noticeCages,
+      totalQuantity: card.totalQuantity,
+      oldestTimestamp: card.oldestTimestamp
+    }
+  })
+
+  for (const group of noticeOnly) {
+    groups.push({
+      dishName: group.dishName,
+      chunkId: `${group.dishName}::notice`,
+      cages: group.noticeCages,
+      selectableCages: [],
+      noticeCages: group.noticeCages,
+      totalQuantity: 0,
+      oldestTimestamp: 0
+    })
+  }
+
+  return { groups, previousByDish: nextPrevious }
 }
 
 export function listSteamingSteamerCages(orders, opts) {
@@ -104,8 +195,8 @@ export function listSteamingSteamerCages(orders, opts) {
   })
 }
 
-export function isSteamerConsole({ steamerWorkSurface, stationId } = {}) {
-  return Boolean(normalizeSteamerWorkSurface(steamerWorkSurface)) && stationId === SHULONG_STATION_ID
+export function isSteamerConsole({ stationId } = {}) {
+  return stationId === SHULONG_STATION_ID
 }
 
 export function steamerLoadIntent({ selectedOrderIds, steamerId, portIndex } = {}) {
@@ -129,13 +220,11 @@ export function steamerHoleTapIntent({
   portIndex,
   occupiedOnHole,
   portCapacity,
-  idsOnHole,
-  workSurface
+  idsOnHole
 } = {}) {
   const awaiting = _asIdList(awaitingIds)
   const steaming = _asIdList(steamingIds)
   const holds = _asIdList(holdIds)
-  const surface = normalizeSteamerWorkSurface(workSurface)
   if (awaiting.length === 0 && steaming.length === 0 && holds.length === 0) return null
   if (
     (awaiting.length > 0 && steaming.length > 0)
@@ -157,13 +246,7 @@ export function steamerHoleTapIntent({
   if (incoming.length === 0) return null
 
   if (awaiting.length > 0) {
-    if (surface === STEAMER_WORK_SURFACES.STEAMING) {
-      return { type: 'reject', reason: 'surface' }
-    }
     return { type: 'load', orderIds: awaiting, steamerId, portIndex }
-  }
-  if (surface === STEAMER_WORK_SURFACES.LOAD) {
-    return { type: 'reject', reason: 'surface' }
   }
   return { type: 'move', orderIds: steaming, steamerId, portIndex }
 }
@@ -226,6 +309,85 @@ export function toggleSteamerSelection(selectedOrderIds, orderId) {
   return [...current, id]
 }
 
+function uniqueIds(ids) {
+  const seen = new Set()
+  const out = []
+  for (const id of _asIdList(ids)) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
+function holeSelectAllTarget(cagesOnHole, opts) {
+  const steaming = []
+  const holds = []
+  for (const cage of sortHoleDisplay(cagesOnHole, opts?.now)) {
+    const id = cageLineId(cage)
+    if (!id) continue
+    const phase = deriveSteamerPhase(cage, opts)
+    if (phase === STEAMER_PHASE_STEAMING) steaming.push(id)
+    else if (phase === STEAMER_PHASE_CANCEL_HOLD) holds.push(id)
+  }
+  if (steaming.length) return { bucket: 'steaming', ids: steaming }
+  if (holds.length) return { bucket: 'hold', ids: holds }
+  return { bucket: null, ids: [] }
+}
+
+/** Select every 在蒸 cage on a hole; if the hole is only 退菜占位, select those. Tap again clears this hole. */
+export function selectAllHoleCages({
+  cagesOnHole,
+  awaitingIds = [],
+  steamingIds = [],
+  holdIds = [],
+  now,
+  noticeSeconds
+} = {}) {
+  const target = holeSelectAllTarget(cagesOnHole, { now, noticeSeconds })
+  const currentSteaming = _asIdList(steamingIds)
+  const currentHolds = _asIdList(holdIds)
+  const currentAwaiting = _asIdList(awaitingIds)
+  if (target.ids.length === 0) {
+    return {
+      awaitingIds: currentAwaiting,
+      steamingIds: currentSteaming,
+      holdIds: currentHolds
+    }
+  }
+  const current = target.bucket === 'steaming' ? currentSteaming : currentHolds
+  const allOn = target.ids.every((id) => current.includes(id))
+  if (target.bucket === 'steaming') {
+    return {
+      awaitingIds: [],
+      steamingIds: allOn
+        ? currentSteaming.filter((id) => !target.ids.includes(id))
+        : uniqueIds([...currentSteaming, ...target.ids]),
+      holdIds: []
+    }
+  }
+  return {
+    awaitingIds: [],
+    steamingIds: [],
+    holdIds: allOn
+      ? currentHolds.filter((id) => !target.ids.includes(id))
+      : uniqueIds([...currentHolds, ...target.ids])
+  }
+}
+
+export function isHoleFullySelected({
+  cagesOnHole,
+  steamingIds = [],
+  holdIds = [],
+  now,
+  noticeSeconds
+} = {}) {
+  const target = holeSelectAllTarget(cagesOnHole, { now, noticeSeconds })
+  if (target.ids.length === 0) return false
+  const current = target.bucket === 'steaming' ? _asIdList(steamingIds) : _asIdList(holdIds)
+  return target.ids.every((id) => current.includes(id))
+}
+
 function isHoleDisplayHold(cage, now) {
   return deriveSteamerPhase(cage, { now }) === STEAMER_PHASE_CANCEL_HOLD
 }
@@ -233,6 +395,13 @@ function isHoleDisplayHold(cage, now) {
 function isRushedCage(cage) {
   if (cage?.priority === 'urgent') return true
   return String(cage?.notes || '').includes('催')
+}
+
+function elapsedMinutesSince(start, now) {
+  const begin = asTimestamp(start)
+  const moment = now == null ? Date.now() : asTimestamp(now)
+  if (!Number.isFinite(begin) || !Number.isFinite(moment)) return 0
+  return Math.max(0, Math.floor((moment - begin) / 60000))
 }
 
 function steamDurationMs(cage, now) {
@@ -279,7 +448,8 @@ export function fillHoleSlots(cages, { steamerId, portIndex, portCapacity, now }
 
 const DELIVERY_TABLE_PLATFORMS = Object.freeze([
   { match: /美团/, prefix: '外·美团' },
-  { match: /饿了么/, prefix: '外·饿了么' }
+  { match: /饿了么/, prefix: '外·饿了么' },
+  { match: /淘宝|闪购/, prefix: '外·淘宝' }
 ])
 
 function trailingTableNumber(value) {
@@ -323,13 +493,18 @@ export function steamUrgencyLevel(cage, now, thresholds) {
 
 export function formatSteamerCageCard(cage, now) {
   const table = formatSteamerTableLabel(cage?.table_number, cage?.source)
-  const minutes = Math.floor(steamDurationMs(cage, now) / 60000)
+  const minutes = elapsedMinutesSince(cage?.placement?.loaded_at, now)
+  const totalMinutes = elapsedMinutesSince(cage?.order_time, now)
   const hold = isHoleDisplayHold(cage, now)
+  const dishName = String(cage?.dish_name || '').replace(/^[（(]外卖[）)]/, '').trim()
   return {
-    primary: cage?.dish_name || '',
+    primary: dishName,
     secondary: `${table.lines.join(' ')} ${minutes}分`.trim(),
     tableLines: table.lines,
     steamMinutes: minutes,
+    totalMinutes,
+    timeLabel: totalMinutes > 0 ? `${minutes}分 总${totalMinutes}分` : `${minutes}分`,
+    rushMark: isRushedCage(cage) ? '催' : '',
     holdMark: hold ? '退' : ''
   }
 }
@@ -374,9 +549,6 @@ export function steamerLayoutFromStations(stationsPayload) {
   }
 }
 
-export function steamerAwaitingPlacement(workSurface) {
-  const surface = normalizeSteamerWorkSurface(workSurface)
-  if (surface === STEAMER_WORK_SURFACES.SOLO) return 'side'
-  if (surface === STEAMER_WORK_SURFACES.STEAMING) return 'hidden'
-  return 'top'
+export function steamerAwaitingPlacement() {
+  return 'side'
 }

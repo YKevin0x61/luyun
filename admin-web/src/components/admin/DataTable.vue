@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { resolveTablePlugin } from '../../admin/tablePlugins'
 import { useAdminTable } from '../../composables/useAdminTable'
 import { useNudgePull } from '../../composables/useNudgePull'
-import { getColumnLabel, getTableIcon, getTableLabel } from '../../utils/adminLabels'
+import { getCellLabel, getColumnLabel, getTableIcon, getTableLabel } from '../../utils/adminLabels'
 import SvgIcon from '../SvgIcon.vue'
 import RowEditModal from './RowEditModal.vue'
 import ColumnManageModal from './ColumnManageModal.vue'
@@ -220,10 +220,11 @@ function jumpToPage() {
   pageJumpInput.value = ''
 }
 
-function formatCellText(val) {
+function formatCellText(col, val) {
   if (val === null || val === undefined || val === '') return ''
   if (typeof val === 'object') return JSON.stringify(val)
-  return String(val)
+  const mapped = getCellLabel(currentTable.value, col, val)
+  return mapped === undefined || mapped === null ? String(val) : String(mapped)
 }
 </script>
 
@@ -325,10 +326,10 @@ function formatCellText(val) {
               @click="tableReadOnly ? undefined : toggleRowSelection(rowKey(row))"
             >
               <td style="color:var(--text-dim)">{{ rowKey(row) }}</td>
-              <td v-for="col in columns" :key="col" :title="formatCellText(row[col])">
+              <td v-for="col in columns" :key="col" :title="formatCellText(col, row[col])">
                 <span v-if="row[col] === null || row[col] === undefined" style="color:var(--text-dim)">NULL</span>
                 <span v-else-if="row[col] === ''" style="color:var(--text-dim)">—</span>
-                <template v-else>{{ formatCellText(row[col]) }}</template>
+                <template v-else>{{ formatCellText(col, row[col]) }}</template>
               </td>
               <td v-if="!tableReadOnly" class="actions" @click.stop>
                 <button class="btn btn-sm" @click="openEdit(row)"><SvgIcon name="pencil" :size="12" /> 编辑</button>

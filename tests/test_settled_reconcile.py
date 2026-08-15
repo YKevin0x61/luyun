@@ -7,9 +7,12 @@ from datetime import datetime
 from pathlib import Path
 
 from database import CHINA_TZ
+from scraper.order_line_builder import OrderLineBuilder
 from scraper.settled_reconcile import (
+    ReconcileDiffItem,
     aggregate_db_orders,
     aggregate_pos_dishes,
+    build_fix_orders_from_diffs,
     build_reconcile_result,
     compute_reconcile_diff,
     render_reconcile_markdown,
@@ -76,6 +79,28 @@ class SettledReconcileTest(unittest.TestCase):
         self.assertTrue(should_alert_reconcile(result))
         message = build_reconcile_alert_message(result)
         self.assertIn("数据质量告警", message)
+
+
+class _FakeCatalog:
+    async def resolve(self, dish_name):
+        return "changfen"
+
+
+class BuildFixOrdersSourceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_reconcile_fix_sets_dine_in_and_delivery(self):
+        builder = OrderLineBuilder(_FakeCatalog())
+        diffs = [
+            ReconcileDiffItem("YY1", "虾饺", 1, 0, 1, "full"),
+            ReconcileDiffItem("YY2", "烧卖", 1, 0, 1, "full"),
+        ]
+        bills_meta = {
+            "YY1": {"pointName": "A区22", "orderSource": "扫码点餐", "peopleQty": 2},
+            "YY2": {"pointName": "美团3", "orderSource": "美团", "peopleQty": 0},
+        }
+        rows = await build_fix_orders_from_diffs(diffs, bills_meta, order_lines=builder)
+        by_bs = {row["notes"].split("|")[1]: row for row in rows}
+        self.assertEqual(by_bs["YY1"]["source"], "dine_in")
+        self.assertEqual(by_bs["YY2"]["source"], "delivery")
 
 
 class _StubProgressAdapter:

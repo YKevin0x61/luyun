@@ -1,12 +1,13 @@
 /**
- * KDS 首页（运营总览）统计辅助：职责档口过滤、待做份数/紧急、档口卡已制作/平均制作、未映射计数。
+ * KDS 首页（运营总览）统计辅助：档口过滤、待做份数/紧急、档口卡已制作/平均制作、未映射计数。
+ * 首页马赛克始终传空过滤 = 全店各档；厨房锁死档由 ScreenSettingsManager 单独表达。
  */
 
 import { isRefundOrder } from './constants.js'
 import { buildCompletedCookingStats } from './kitchenStationStats.js'
 
 /**
- * 空职责集 = 全部档口（与 ScreenSettingsManager / ADR 0002 一致）。
+ * 空过滤 = 不限制（首页全店马赛克）。告警锁死档不走这里。
  * @param {string|undefined|null} stationId
  * @param {string[]} watchedStationIds
  */
@@ -79,7 +80,7 @@ export function countUnmappedDishNames(mergedDishes, qitaStationId = 'qita') {
 }
 
 /**
- * 本屏职责档口状态行（空职责集 = 全部档口）。
+ * 档口状态行（空过滤 = 全部档口，供首页马赛克）。
  * @param {Array<{ id: string, name: string, color?: string }>} stationList
  * @param {Array<{ station?: string, orders?: Array<{ dish_status?: string }> }>} mergedDishes
  * @param {string[]} watchedStationIds

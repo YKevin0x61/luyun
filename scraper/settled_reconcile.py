@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from database import CHINA_TZ, DatabaseManager, ensure_beijing_datetime
 from scraper.order_flow_ids import parse_order_flow_id
+from scraper.order_source import SOURCE_DELIVERY, classify_order_source
 from services.dish_normalize import strip_trailing_dash_suffix
 
 DishKey = Tuple[str, str]
@@ -240,8 +241,13 @@ async def build_fix_orders_from_diffs(
 
     for item in diffs:
         bill = bills_meta.get(item.bs_code, {})
-        is_delivery = bill.get("peopleQty", 1) == 0 or bill.get("billSource", "") not in ("", "堂食")
-        if is_delivery:
+        source = classify_order_source(
+            table_number=bill.get("pointName") or bill.get("tableNumber") or "",
+            bill_source=bill.get("billSource") or "",
+            order_source=bill.get("orderSource") or "",
+            people_qty=bill.get("peopleQty"),
+        )
+        if source == SOURCE_DELIVERY:
             table_number = bill.get("pointName") or "外卖"
         else:
             table_number = bill.get("pointName") or bill.get("tableNumber") or "未知"
@@ -269,6 +275,7 @@ async def build_fix_orders_from_diffs(
                     "status": "已结",
                     "priority": "normal",
                     "notes": f"reconcile_fix|{item.bs_code}",
+                    "source": source,
                 },
             )
         )
@@ -331,15 +338,17 @@ async def run_settled_reconcile(
     return result, bills_meta
 
 
-def _bill_is_delivery(bill: Dict, delivery_platforms) -> bool:
+def _bill_is_delivery(bill: Dict, delivery_platforms=None) -> bool:
     """与实时采集一致的外卖判定：无人数或平台名命中。"""
-    bill_source = bill.get("billSource", "") or ""
-    point_name = bill.get("pointName", "") or ""
-    people_qty = bill.get("peopleQty", 1)
     return (
-        people_qty == 0
-        or any(p in bill_source for p in delivery_platforms)
-        or any(p in point_name for p in delivery_platforms)
+        classify_order_source(
+            table_number=bill.get("pointName") or "",
+            bill_source=bill.get("billSource") or "",
+            order_source=bill.get("orderSource") or "",
+            people_qty=bill.get("peopleQty"),
+            delivery_platforms=delivery_platforms,
+        )
+        == SOURCE_DELIVERY
     )
 
 

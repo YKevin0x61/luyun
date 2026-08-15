@@ -2,16 +2,17 @@
  * Cross-platform KDS alert sound engine.
  *
  * Public API (used by kitchen alert integration):
- *   playNewOrderDing(count, options) — short chirps, one per new order (caller caps)
+ *   playNewOrderDing(count, options) — three 嘀s when the engine says play
  *   playOvertimeAlarm(options)       — lower, urgent double-pulse pairs
- *   playCancelAlert(options)         — four hits (外卖取消)
- *   playDisconnectAlert(options)     — two hits (断连告警)
+ *   playCancelAlert(options)         — two hits (外卖取消)
+ *   playDisconnectAlert(options)     — one hit (断连告警)
  *   unlockSound()                    — H5: resume AudioContext inside a user gesture
  *   isSoundUnlocked()                — whether play* will actually emit sound
  *
  * options.tone is 提示音款 (register/timbre). Rhythm stays on the 告警种类.
- * options.volume is 本屏告警音量 (0–1, floor 0.2). Factory medium 0.6 keeps
- * today's peak 0.25: peak = 0.25 * (volume / 0.6).
+ * options.volume is 本屏告警音量 (0–1, floor 0.2). Factory medium 0.6:
+ * total peak = 0.9 * (volume / 0.6), capped at 1. Each hit splits that
+ * budget across a piercing osc and a lower body — no hard clip.
  *
  * H5 and APP both synthesize (no audio files, no system beep, no vibration).
  * H5 is gated by autoplay unlock. APP is always treated as unlocked; the
@@ -27,55 +28,59 @@ import {
 
 /** @typedef {'ding' | 'overtime' | 'cancel' | 'disconnect'} SoundKind */
 
-const DING_FREQ_HZ = 1046.5 // C6 — bright short chirp (清脆 新单叮 register)
+// Staccato 叮叮叮 / 嘀嘀嘀 — short square beeps, not a soft musical chirp.
 const DING_DURATION_MS = 70
-const DING_GAP_MS = 110
-const MEDIUM_PEAK_GAIN = 0.25
+const DING_GAP_MS = 80
+const MEDIUM_PEAK_GAIN = 0.9
+const BEEP_ATTACK_S = 0.004
+const BEEP_RELEASE_S = 0.012
+const BODY_RATIO = 0.5
+const MIN_BODY_HZ = 350
+const PIERCE_MIX = 0.58
+const BODY_MIX = 0.42
 
-// Overtime: lower, longer, double-pulse — clearly not a ding by ear
-const OVERTIME_FREQ_A_HZ = 392 // G4
-const OVERTIME_FREQ_B_HZ = 277.2 // C#4
-const OVERTIME_PULSE_MS = 160
-const OVERTIME_GAP_MS = 80
+const OVERTIME_PULSE_MS = 110
+const OVERTIME_GAP_MS = 55
 const OVERTIME_PULSE_PAIRS = 2
 
-const CANCEL_HIT_COUNT = 4
-const DISCONNECT_HIT_COUNT = 2
+const NEW_ORDER_HIT_COUNT = 3
+const CANCEL_HIT_COUNT = 2
+const DISCONNECT_HIT_COUNT = 1
 
 /**
- * 款 = register/timbre only. 清脆 keeps today's ding + overtime freqs.
- * Other four are spread so they stay distinguishable in a noisy room.
+ * 款 = register/timbre only. All five stay beep-like (square/saw);
+ * pitch band is what separates them in a noisy kitchen.
  */
 const TONE_VOICES = Object.freeze({
   清脆: {
-    dingHz: DING_FREQ_HZ,
-    overtimeAHz: OVERTIME_FREQ_A_HZ,
-    overtimeBHz: OVERTIME_FREQ_B_HZ,
-    wave: 'sine'
+    dingHz: 1760,
+    overtimeAHz: 1175,
+    overtimeBHz: 880,
+    wave: 'square'
   },
   穿透: {
-    dingHz: 2093,
-    overtimeAHz: 784,
-    overtimeBHz: 554.4,
-    wave: 'sine'
+    dingHz: 2794,
+    overtimeAHz: 1976,
+    overtimeBHz: 1480,
+    wave: 'square'
   },
   圆润: {
-    dingHz: 523.25,
-    overtimeAHz: 329.63,
-    overtimeBHz: 220,
-    wave: 'sine'
+    dingHz: 988,
+    overtimeAHz: 740,
+    overtimeBHz: 554,
+    wave: 'square'
   },
   低沉: {
-    dingHz: 196,
-    overtimeAHz: 146.83,
-    overtimeBHz: 110,
-    wave: 'sine'
+    dingHz: 494,
+    overtimeAHz: 370,
+    overtimeBHz: 277,
+    wave: 'square'
   },
   厚实: {
-    dingHz: 329.63,
-    overtimeAHz: 246.94,
-    overtimeBHz: 185,
-    wave: 'triangle'
+    dingHz: 659,
+    overtimeAHz: 494,
+    overtimeBHz: 370,
+    wave: 'sawtooth'
   }
 })
 
@@ -142,7 +147,7 @@ function voiceForTone(tone) {
 }
 
 function peakGainForVolume(volume) {
-  return MEDIUM_PEAK_GAIN * (volume / DEFAULT_ALERT_VOLUME)
+  return Math.min(1, MEDIUM_PEAK_GAIN * (volume / DEFAULT_ALERT_VOLUME))
 }
 
 /**
@@ -159,7 +164,7 @@ function produceSound(kind, count, playOptions) {
   const peakGain = peakGainForVolume(playOptions.volume)
 
   if (kind === 'ding') {
-    scheduleHits(ctx, Math.max(1, count), voice, peakGain)
+    scheduleHits(ctx, NEW_ORDER_HIT_COUNT, voice, peakGain)
     return
   }
   if (kind === 'cancel') {
@@ -207,26 +212,35 @@ function scheduleHits(ctx, count, voice, peakGain) {
  * @param {OscillatorType} wave
  * @param {number} peakGain
  */
-function scheduleTone(ctx, freqHz, offsetMs, durationMs, wave, peakGain) {
-  const start = ctx.currentTime + offsetMs / 1000
-  const end = start + durationMs / 1000
+function startBeepOsc(ctx, freqHz, wave, peakGain, start, end) {
   const osc = ctx.createOscillator()
   const gain = ctx.createGain()
   osc.type = wave
   osc.frequency.value = freqHz
-  // Soft attack/release to avoid clicks
+  const attackEnd = start + BEEP_ATTACK_S
+  const releaseStart = Math.max(attackEnd, end - BEEP_RELEASE_S)
   gain.gain.setValueAtTime(0.0001, start)
-  gain.gain.exponentialRampToValueAtTime(peakGain, start + 0.01)
-  gain.gain.exponentialRampToValueAtTime(0.0001, end)
+  gain.gain.linearRampToValueAtTime(peakGain, attackEnd)
+  gain.gain.setValueAtTime(peakGain, releaseStart)
+  gain.gain.linearRampToValueAtTime(0.0001, end)
   osc.connect(gain)
   gain.connect(ctx.destination)
   osc.start(start)
-  osc.stop(end + 0.02)
+  osc.stop(end + 0.01)
   activeVoices.push({ osc, gain })
 }
 
+function scheduleTone(ctx, freqHz, offsetMs, durationMs, wave, peakGain) {
+  const start = ctx.currentTime + offsetMs / 1000
+  const end = start + durationMs / 1000
+  const bodyHz = Math.max(MIN_BODY_HZ, freqHz * BODY_RATIO)
+  startBeepOsc(ctx, freqHz, wave, peakGain * PIERCE_MIX, start, end)
+  startBeepOsc(ctx, bodyHz, wave, peakGain * BODY_MIX, start, end)
+}
+
 /**
- * Play new-order dings. No-op on H5 until unlockSound() has succeeded.
+ * Play new-order 嘀嘀嘀 (three hits). `count` only gates whether to play.
+ * No-op on H5 until unlockSound() has succeeded.
  * @param {number} count
  * @param {{ tone?: string, volume?: number }} [options]
  */
@@ -248,7 +262,7 @@ export function playOvertimeAlarm(options) {
 }
 
 /**
- * Play 外卖取消: four hits in the selected 款. No-op on H5 until unlockSound() has succeeded.
+ * Play 外卖取消: two hits in the selected 款. No-op on H5 until unlockSound() has succeeded.
  * @param {{ tone?: string, volume?: number }} [options]
  */
 export function playCancelAlert(options) {
@@ -257,7 +271,7 @@ export function playCancelAlert(options) {
 }
 
 /**
- * Play 断连告警: two hits in the selected 款. No-op on H5 until unlockSound() has succeeded.
+ * Play 断连告警: one hit in the selected 款. No-op on H5 until unlockSound() has succeeded.
  * @param {{ tone?: string, volume?: number }} [options]
  */
 export function playDisconnectAlert(options) {

@@ -24,7 +24,7 @@ describe('deliveryCancelEngine', () => {
   it('first sync only primes baseline without alert', () => {
     const { state, effects } = step(createInitialState(), {
       orders: [makeOrder({ dish_status: DELIVERY_CANCELLED_DISH_STATUS })],
-      watchedStations: []
+      watchedStations: ['shulong']
     })
     expect(state.primed).toBe(true)
     expect(effects.playAlert).toBe(false)
@@ -79,7 +79,7 @@ describe('deliveryCancelEngine', () => {
     expect(next.effects.playAlert).toBe(false)
   })
 
-  it('empty watched set means all stations', () => {
+  it('empty watched set means no stations', () => {
     const primed = step(createInitialState(), {
       orders: [makeOrder({ station: 'xibing', dish_status: '待出餐' })],
       watchedStations: []
@@ -90,17 +90,17 @@ describe('deliveryCancelEngine', () => {
       ],
       watchedStations: []
     })
-    expect(next.effects.playAlert).toBe(true)
+    expect(next.effects.playAlert).toBe(false)
   })
 
   it('dismiss clears banner', () => {
     const primed = step(createInitialState(), {
       orders: [makeOrder({ dish_status: '待出餐' })],
-      watchedStations: []
+      watchedStations: ['shulong']
     }).state
     const alerted = step(primed, {
       orders: [makeOrder({ dish_status: DELIVERY_CANCELLED_DISH_STATUS })],
-      watchedStations: []
+      watchedStations: ['shulong']
     }).state
     const cleared = dismiss(alerted)
     expect(cleared.banner.visible).toBe(false)

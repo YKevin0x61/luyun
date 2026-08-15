@@ -1056,6 +1056,7 @@ class PosSession:
     async def _parse_api_order_response(self, data: Dict, table_number: str) -> List[Dict]:
         """解析桌情 API → RawOrderLine → OrderLineBuilder 入库行。"""
         from scraper.order_line_builder import FLOW_MODE_COMBO, FLOW_MODE_UNIT, RawOrderLine
+        from scraper.order_source import classify_order_source
 
         try:
             if not data.get('success', False):
@@ -1075,7 +1076,13 @@ class PosSession:
 
             current_year = datetime.now(CHINA_TZ).year
             current_date = datetime.now(CHINA_TZ).strftime("%m-%d")
-            dine_in_overlays = {"status": "未结"}
+            table_overlays = {
+                "status": "未结",
+                "source": classify_order_source(
+                    table_number=table_number or response_data.get("pointName") or "",
+                    people_qty=response_data.get("peopleQty"),
+                ),
+            }
             raws: List[RawOrderLine] = []
 
             for item in sc_detail:
@@ -1105,7 +1112,7 @@ class PosSession:
                                 table_number=table_number,
                                 order_time=order_time_dt,
                                 flow_mode=FLOW_MODE_UNIT,
-                                overlays=dict(dine_in_overlays),
+                                overlays=dict(table_overlays),
                             )
                         )
                         if quantity > 1:
@@ -1128,7 +1135,7 @@ class PosSession:
                                     table_number=table_number,
                                     order_time=order_time_dt,
                                     flow_mode=FLOW_MODE_COMBO,
-                                    overlays=dict(dine_in_overlays),
+                                    overlays=dict(table_overlays),
                                 )
                             )
                             if child_qty > 1:

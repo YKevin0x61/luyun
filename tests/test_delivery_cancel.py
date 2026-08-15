@@ -197,7 +197,7 @@ class SourceMigrationBackfillTest(unittest.IsolatedAsyncioTestCase):
                 ) as cur:
                     table_row = await cur.fetchone()
                 self.assertEqual(delivery_row[0], "delivery")
-                self.assertEqual(table_row[0], "")
+                self.assertEqual(table_row[0], "dine_in")
 
 
 class _FakeSession:

@@ -59,6 +59,7 @@ class ExpandTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row["total_amount"], 18.0)
             self.assertEqual(row["station"], "changfen")
             self.assertEqual(row["status"], "未结")
+            self.assertEqual(row["source"], "dine_in")
             self.assertIsInstance(row["order_time"], datetime)
 
     async def test_combo_flow_mode(self):
