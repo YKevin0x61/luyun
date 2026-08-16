@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { noteSettingsVisit, takeSettingsReturnClear } from '../kitchenSelectionReset.js'
+import {
+  noteSettingsVisit,
+  stationChangeClearsSelection,
+  takeSettingsReturnClear
+} from '../kitchenSelectionReset.js'
 
 describe('kitchen selection reset on settings return', () => {
   beforeEach(() => {
@@ -13,5 +17,17 @@ describe('kitchen selection reset on settings return', () => {
     noteSettingsVisit()
     expect(takeSettingsReturnClear()).toBe(true)
     expect(takeSettingsReturnClear()).toBe(false)
+  })
+})
+
+describe('kitchen selection reset on station lock after refresh', () => {
+  it('keeps 出餐选中 when a new-order refresh re-locks the same watched station', () => {
+    expect(stationChangeClearsSelection('changfen', 'changfen')).toBe(false)
+  })
+
+  it('clears 出餐选中 only when the displayed station actually changes', () => {
+    expect(stationChangeClearsSelection('changfen', 'shulong')).toBe(true)
+    expect(stationChangeClearsSelection('', 'changfen')).toBe(true)
+    expect(stationChangeClearsSelection('changfen', '')).toBe(false)
   })
 })

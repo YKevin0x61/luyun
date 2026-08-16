@@ -16,3 +16,16 @@ export function takeSettingsReturnClear() {
   settingsReturnPending = false
   return pending
 }
+
+/**
+ * Clear 出餐选中 only when the displayed station actually changes.
+ * Same-station lock after a new-order refresh / 60s reconcile must keep picks.
+ *
+ * @param {string} currentStationId
+ * @param {string} nextStationId
+ * @returns {boolean}
+ */
+export function stationChangeClearsSelection(currentStationId, nextStationId) {
+  if (nextStationId == null || nextStationId === '') return false
+  return String(currentStationId ?? '') !== String(nextStationId)
+}

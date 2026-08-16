@@ -50,7 +50,7 @@
         <text class="current-time">{{ currentTimeShort }}</text>
         <view class="header-spacer" />
         <view class="connection-dot" :class="connectionStatusClass" />
-        <button @click="refreshData" :disabled="loading" class="refresh-btn">
+        <button @click="refreshData" :disabled="loading || batchSubmitting || steamerLoading" class="refresh-btn">
           <text>↻</text>
         </button>
       </view>
@@ -271,6 +271,7 @@ import { composeKitchenDishCards, dishSplitKnobsChanged, sortKitchenDishCardsByO
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
 import { orderLineId, planBasketServeCookingCalls, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds } from '../../utils/batchCooking.js'
+import { kitchenShouldPull, runServeConfirm, serveConfirmErrorMessage } from '../../utils/serveConfirm.js'
 import { toastForServeBatch } from '../../utils/serveBatchToast.js'
 import { ordersAPI } from '../../api/orders.js'
 import { stationsAPI } from '../../api/stations.js'
@@ -286,7 +287,7 @@ import {
 import { useKitchenOrderSession } from '../../composables/useKitchenOrderSession.js'
 import { useDisconnectAlert } from '../../composables/useDisconnectAlert.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
-import { takeSettingsReturnClear } from '../../utils/kitchenSelectionReset.js'
+import { stationChangeClearsSelection, takeSettingsReturnClear } from '../../utils/kitchenSelectionReset.js'
 import { applyServeSelection, emptyServeSelection } from '../../utils/serveSelection.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
 import KitchenDishCard from '../../components/KitchenDishCard/KitchenDishCard.vue'
@@ -638,6 +639,7 @@ export default {
     watch(
       [currentStationMergedDishesBase, dishCardQuantityCap, orderGapMinutes],
       () => {
+        if (batchSubmitting.value) return
         const cap = Number(dishCardQuantityCap.value) || 0
         const gap = Number(orderGapMinutes.value) || 0
         if (dishSplitKnobsChanged(dishSplitKnobsSeen.value, cap, gap)) {
@@ -809,10 +811,12 @@ export default {
     // 🆕 ordersStore.orders 始终持有"当天全档口"订单（不再按档口过滤请求），
     // 切换档口只是本地重新按 currentStation 过滤展示，无需任何网络请求。
     const switchStation = (stationId) => {
+      const shouldClear = stationChangeClearsSelection(currentStation.value, stationId)
       currentStation.value = stationId
       stationsStore.setCurrentStation(stationId)
-      
-      // 切换档口时清空选中（含进行中的选桌）与拆卡快照
+      if (!shouldClear) return
+
+      // Clear picks only when the displayed station actually changes
       dispatchServe({ type: 'externalClear' })
       dishChunkSnapshotByDish.value = {}
       dishSplitKnobsSeen.value = null
@@ -911,49 +915,35 @@ export default {
         if (toast) uni.showToast(toast)
       }
 
-      if (plan.length === 0) {
-        showToast({ processed: 0, requested: totalCount })
-        return
-      }
-
-      const readyTime = new Date().toISOString()
-      let actualProcessedCount = 0
-
       try {
-        for (const item of plan) {
-          const completeData = {
-            dishName: item.dishName,
+        const result = await runServeConfirm({
+          plan,
+          meta: {
             station: currentStation.value,
-            completeQuantity: item.completeQuantity,
-            orders: item.orders,
             operatorId: 'chef_' + currentStation.value,
-            notes: `${currentStationInfo.value.name}批量制作完成`,
-            ready_time: readyTime
-          }
+            readyTime: new Date().toISOString()
+          },
+          completeCooking: (body) => ordersAPI.completeCooking(body),
+          enqueuePrint: ({ order, dishName, readyTime }) => {
+            tryPrintCompletedDish(order, dishName, readyTime)
+          },
+          pull: refreshData
+        })
 
-          await ordersStore.completeCooking(completeData)
-
-          for (const { order, serveQuantity } of item.allocations) {
-            for (let i = 0; i < serveQuantity; i++) {
-              tryPrintCompletedDish(order, item.dishName, readyTime)
-            }
-          }
-          actualProcessedCount += item.completeQuantity
+        if (!result.submitted) {
+          showToast({ processed: 0, requested: totalCount })
+          return
         }
 
         dispatchServe({ type: 'completeServe' })
-        showToast({ processed: actualProcessedCount, requested: totalCount })
-        await refreshData()
+        showToast({ processed: result.processed, requested: totalCount })
       } catch (error) {
-        console.error('批量出餐失败:', error)
+        console.error('出餐失败:', error)
         showToast({
-          processed: actualProcessedCount,
+          processed: 0,
           requested: totalCount,
-          errorMessage: error.message || '未知错误'
+          errorMessage: serveConfirmErrorMessage(error)
         })
-        if (actualProcessedCount > 0) {
-          await refreshData()
-        }
       }
     }
 
@@ -979,6 +969,7 @@ export default {
         await submitServePlan(plan, totalCount)
       } finally {
         batchSubmitting.value = false
+        applyDishChunks(dishChunkSnapshotByDish.value)
       }
     }
 
@@ -1002,6 +993,7 @@ export default {
         await submitServePlan(plan, totalCount)
       } finally {
         batchSubmitting.value = false
+        applyDishChunks(dishChunkSnapshotByDish.value)
       }
     }
 
@@ -1111,17 +1103,25 @@ export default {
       }
     }
     
-    // 实时：nudge → 重拉当天订单并做外卖取消检测；60s reconcile 由 useNudgePull 默认 fallback
-    const todayDateStr = TimeCalculator.formatTime(new Date(), 'YYYY-MM-DD')
-    useNudgePull({
+    // orders nudge → pull; hold during confirm; filter by watched station. 60s reconcile still via fallback.
+    const kitchenOrdersPull = useNudgePull({
       id: ORDERS_SUBSCRIPTION_ID,
       topics: ['orders'],
-      filters: { date: todayDateStr },
+      filters: { station: currentStation.value },
+      match: (ev) => ev?.type === 'nudge' && ev.topic === 'orders' && kitchenShouldPull({
+        submitting: batchSubmitting.value,
+        steamerLoading: steamerLoading.value,
+        lockedStation: currentStation.value,
+        scope: ev.scope
+      }),
       pull: async () => {
         debugLog('[厨房页面] 收到 orders 实时通知，重拉当天数据...')
         await refreshDataWithToast()
       },
       fallback: 'reconcile',
+    })
+    watch(currentStation, (station) => {
+      if (station) kitchenOrdersPull.setFilters({ station })
     })
 
     // Settings return does not remount; discard snapshot, re-slice, and clear 出餐选中.

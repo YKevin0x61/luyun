@@ -1,7 +1,7 @@
 /**
- * Batch cooking plan — decide target orders up front, then one completeCooking call per selection key.
+ * Batch cooking plan — decide target 订单行 up front (per 菜卡 / 选桌 / 蒸笼).
  * With chunkOrders, each key is a chunk (same-dish siblings stay isolated).
- * Keeps kitchen.vue free of serial re-query / race-on-same-order loops.
+ * Confirm flattens the plan into one complete-cooking request (see serveConfirm).
  */
 
 /**
@@ -142,7 +142,7 @@ export function planTablePickCookingCalls({ selectedOrderIds, chunkId, chunkOrde
 /**
  * Plan 笼上出餐 from an explicit set of 在蒸 订单行 ids.
  * No FIFO fill; ids not present in `cages` are ignored. Mixed dishes
- * become one complete-cooking call per dish_name.
+ * stay grouped per 菜名 in the plan; confirm flattens them into one request.
  *
  * @param {object} params
  * @param {string[]} params.selectedOrderIds
