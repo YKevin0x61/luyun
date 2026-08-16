@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { planBasketServeCookingCalls, planBatchCookingCalls, planTablePickCookingCalls } from '../batchCooking.js'
-import { buildCompleteCookingRequest, conflictOrderIdsFromReject, hasMarkedOrderLine, kitchenShouldPull, nextConflictMarks, orderLineIsMarked, runServeConfirm, serveConfirmErrorMessage } from '../serveConfirm.js'
+import { buildCompleteCookingRequest, conflictOrderIdsFromReject, hasMarkedOrderLine, hubShouldPull, kitchenShouldPull, nextConflictMarks, orderLineIsMarked, runServeConfirm, serveConfirmErrorMessage } from '../serveConfirm.js'
 import { applyServeSelection, emptyServeSelection, serveSelectionAfterConfirm } from '../serveSelection.js'
 import { toggleSteamerSelection } from '../steamerConsole.js'
 
@@ -247,6 +247,19 @@ describe('kitchenShouldPull', () => {
       lockedStation: 'changfen',
       scope: { station: 'changfen' }
     })).toBe(true)
+  })
+})
+
+describe('hubShouldPull', () => {
+  it('does not pull today\'s full order list on a non-reconcile orders nudge', () => {
+    expect(hubShouldPull({ scope: { station: 'changfen' } })).toBe(false)
+    expect(hubShouldPull({ scope: {} })).toBe(false)
+    expect(hubShouldPull({})).toBe(false)
+  })
+
+  it('allows the 60s reconcile to pull', () => {
+    expect(hubShouldPull({ scope: { reconcile: true } })).toBe(true)
+    expect(hubShouldPull({ scope: { station: 'changfen', reconcile: true } })).toBe(true)
   })
 })
 

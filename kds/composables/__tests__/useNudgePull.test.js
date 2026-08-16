@@ -23,6 +23,7 @@ vi.mock('vue', () => ({
 }))
 
 const { useNudgePull, NUDGE_PULL_COALESCE_MS } = await import('../useNudgePull.js')
+const { hubShouldPull } = await import('../../utils/serveConfirm.js')
 
 function flushMount() {
   for (const fn of mountHooks) fn()
@@ -159,6 +160,24 @@ describe('useNudgePull (KDS)', () => {
     expect(pull).toHaveBeenCalledTimes(1)
     vi.advanceTimersByTime(NUDGE_PULL_COALESCE_MS)
     // pending coalesce was cancelled by reconcile
+    expect(pull).toHaveBeenCalledTimes(1)
+  })
+
+  it('hub match skips a serve-scoped orders nudge and still pulls on reconcile', () => {
+    const pull = vi.fn()
+    useNudgePull({
+      id: 'kds-hub',
+      topics: ['orders'],
+      pull,
+      match: (ev) => ev?.type === 'nudge' && ev.topic === 'orders' && hubShouldPull({
+        scope: ev.scope
+      }),
+    })
+    flushMount()
+    emitTopic('orders', { station: 'changfen' })
+    vi.advanceTimersByTime(NUDGE_PULL_COALESCE_MS)
+    expect(pull).not.toHaveBeenCalled()
+    emitTopic('orders', { reconcile: true })
     expect(pull).toHaveBeenCalledTimes(1)
   })
 

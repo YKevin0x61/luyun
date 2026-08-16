@@ -123,6 +123,7 @@ import {
   countUnmappedDishNames
 } from '../../utils/dashboardStats.js'
 import { hubOverviewPresentation } from '../../utils/hubOverviewPresentation.js'
+import { hubShouldPull } from '../../utils/serveConfirm.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
 
@@ -265,11 +266,15 @@ export default {
       }
     }
 
+    // 出餐 nudge must not download today's full 订单行; mount / 刷新 / 60s reconcile still pull.
     const todayDateStr = TimeCalculator.formatTime(new Date(), 'YYYY-MM-DD')
     useNudgePull({
       id: ORDERS_SUBSCRIPTION_ID,
       topics: ['orders'],
       filters: { date: todayDateStr },
+      match: (ev) => ev?.type === 'nudge' && ev.topic === 'orders' && hubShouldPull({
+        scope: ev.scope
+      }),
       pull: refreshOrders,
       fallback: 'reconcile',
     })

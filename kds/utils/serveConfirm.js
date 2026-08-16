@@ -71,6 +71,17 @@ export function kitchenShouldPull(state = {}) {
   return true
 }
 
+/**
+ * KDS 首页: skip today's full order list on an 出餐 (or other non-reconcile)
+ * orders nudge. Mount / 刷新 call fetch directly; 60s reconcile still pulls.
+ *
+ * @param {{ scope?: { reconcile?: boolean } }} [state]
+ * @returns {boolean}
+ */
+export function hubShouldPull(state = {}) {
+  return Boolean(state.scope?.reconcile)
+}
+
 function rejectDetail(errorOrDetail) {
   if (!errorOrDetail) return null
   const nested = errorOrDetail.response?.data?.detail
