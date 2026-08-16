@@ -5,6 +5,7 @@
       'dish-overtime': dish.isOvertime,
       'dish-new': isNew,
       selected: selectedQuantity > 0,
+      'has-conflict': hasConflict,
       'density-compact': density === DENSITY_MODES.COMPACT,
       'density-ultra': density === DENSITY_MODES.ULTRA
     }"
@@ -33,7 +34,10 @@
           v-for="order in dish.orders"
           :key="order.id"
           class="order-block"
-          :class="{ 'order-block--serving': isServing(order) }"
+          :class="{
+            'order-block--serving': isServing(order) && !isConflict(order),
+            'order-block--conflict': isConflict(order)
+          }"
         >
           <view class="block-header">
             <text class="block-table">{{ order.table_number }}桌</text>
@@ -78,8 +82,10 @@
 </template>
 
 <script>
+import { computed } from 'vue'
 import { DENSITY_MODES } from '../../utils/storage.js'
 import { orderLineId } from '../../utils/batchCooking.js'
+import { hasMarkedOrderLine, orderLineIsMarked } from '../../utils/serveConfirm.js'
 
 export default {
   name: 'KitchenDishCard',
@@ -94,6 +100,11 @@ export default {
     },
     /** FIFO 将出订单行 ids；选中份数 > 0 时给对应小卡片上色 */
     servePreviewOrderIds: {
+      type: Array,
+      default: () => []
+    },
+    /** 409 冲突订单行；所在菜卡与小卡片可辨认 */
+    conflictOrderIds: {
       type: Array,
       default: () => []
     },
@@ -123,7 +134,10 @@ export default {
       return ids.includes(orderLineId(order))
     }
 
-    return { formatOrderTime, isServing, DENSITY_MODES }
+    const isConflict = (order) => orderLineIsMarked(props.conflictOrderIds, order)
+    const hasConflict = computed(() => hasMarkedOrderLine(props.conflictOrderIds, props.dish?.orders))
+
+    return { formatOrderTime, isServing, isConflict, hasConflict, DENSITY_MODES }
   }
 }
 </script>
@@ -163,6 +177,16 @@ export default {
   box-shadow: 0 4upx 16upx rgba(82, 196, 26, 0.2);
 }
 
+.dish-card.has-conflict {
+  box-shadow:
+    0 0 0 4upx rgba(255, 77, 79, 0.55),
+    0 4upx 16upx rgba(255, 77, 79, 0.25);
+}
+
+.dish-card.has-conflict.selected {
+  border-color: #FF4D4F;
+}
+
 .dish-card.dish-overtime {
   border-color: #FF4D4F;
   background: linear-gradient(135deg, #FFF2F0, #FFFFFF);
@@ -183,6 +207,14 @@ export default {
     0 0 28upx rgba(250, 173, 20, 0.4),
     0 4upx 16upx rgba(255, 77, 79, 0.3);
   border-color: #FF4D4F;
+}
+
+.dish-card.has-conflict.dish-overtime,
+.dish-card.has-conflict.dish-new {
+  box-shadow:
+    0 0 0 4upx rgba(255, 77, 79, 0.65),
+    0 0 24upx rgba(255, 77, 79, 0.4),
+    0 4upx 16upx rgba(255, 77, 79, 0.25);
 }
 
 .new-badge {
@@ -351,6 +383,20 @@ export default {
 .order-block--serving .block-table,
 .order-block--serving .block-quantity,
 .order-block--serving .block-time {
+  color: #fff;
+  font-weight: 800;
+}
+
+.order-block--conflict {
+  background: #FF4D4F;
+  border-color: #A8071A;
+  border-width: 3upx;
+  box-shadow: 0 4upx 12upx rgba(168, 7, 26, 0.35);
+}
+
+.order-block--conflict .block-table,
+.order-block--conflict .block-quantity,
+.order-block--conflict .block-time {
   color: #fff;
   font-weight: 800;
 }

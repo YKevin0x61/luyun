@@ -19,7 +19,8 @@
                   class="awaiting-qty"
                   :class="{
                     selected: groupSelectedCount(group) > 0,
-                    'is-new': groupHasNew(group)
+                    'is-new': groupHasNew(group),
+                    conflict: groupHasConflict(group)
                   }"
                   @click="advanceGroup(group)"
                 >
@@ -48,6 +49,7 @@
                   v-for="cage in groupDetailCages(group)"
                   :key="cageId(cage)"
                   class="awaiting-detail-row"
+                  :class="{ conflict: cageIsConflict(cage) }"
                 >
                   <text class="detail-table">{{ cageDetailTable(cage) }}</text>
                   <text class="detail-time">{{ cageDetailTime(cage) }}</text>
@@ -87,7 +89,8 @@
                       selected: isHoleCageSelected(slot.cage),
                       hold: isCancelHold(slot.cage),
                       warn: holeUrgencyClass(slot.cage) === 'warn',
-                      urgent: holeUrgencyClass(slot.cage) === 'urgent'
+                      urgent: holeUrgencyClass(slot.cage) === 'urgent',
+                      conflict: cageIsConflict(slot.cage)
                     }"
                     @click.stop="toggleHoleCage(slot.cage)"
                   >
@@ -150,6 +153,7 @@
 <script>
 import { computed, ref, watch } from 'vue'
 import { orderLineId } from '../../utils/batchCooking.js'
+import { hasMarkedOrderLine, orderLineIsMarked } from '../../utils/serveConfirm.js'
 import { dishSplitKnobsChanged } from '../../utils/dishCardChunks.js'
 import {
   SHULONG_STEAMER_LAYOUT,
@@ -214,9 +218,13 @@ export default {
     orderGapMinutes: {
       type: Number,
       default: 0
+    },
+    conflictOrderIds: {
+      type: Array,
+      default: () => []
     }
   },
-  emits: ['load', 'move', 'unload', 'serve', 'pluck'],
+  emits: ['load', 'move', 'unload', 'serve', 'pluck', 'selection-change'],
   setup(props, { emit }) {
     const selectedOrderIds = ref([])
     const selectedSteamingIds = ref([])
@@ -300,6 +308,10 @@ export default {
     const groupHasNew = (group) =>
       (group.selectableCages || []).some((cage) => isNewCage(cage))
 
+    const cageIsConflict = (cage) => orderLineIsMarked(props.conflictOrderIds, cage)
+    const groupHasConflict = (group) =>
+      hasMarkedOrderLine(props.conflictOrderIds, group.selectableCages)
+
     const isGroupDetailOpen = (group) => detailGroupKey.value === groupKey(group)
 
     const toggleGroupDetail = (group) => {
@@ -344,11 +356,16 @@ export default {
       selectedHoldIds.value = next.holdIds
     }
 
+    const notifySelectionChange = () => {
+      emit('selection-change')
+    }
+
     const advanceGroup = (group) => {
       selectedOrderIds.value = advanceAwaitingGroupSelection({
         selectableCages: group.selectableCages,
         selectedIds: selectedOrderIds.value
       })
+      notifySelectionChange()
     }
 
     const toggleHoleCage = (cage) => {
@@ -359,6 +376,7 @@ export default {
         orderId: cageId(cage),
         phase: cagePhase(cage)
       }))
+      notifySelectionChange()
     }
 
     const holeHasCages = (steamerId, portIndex) => cagesOnHole(steamerId, portIndex).length > 0
@@ -378,6 +396,7 @@ export default {
         holdIds: selectedHoldIds.value,
         ...phaseOpts()
       }))
+      notifySelectionChange()
     }
 
     const confirmBasketServe = () => {
@@ -512,6 +531,8 @@ export default {
       groupSelectedCount,
       groupQtyLabel,
       groupHasNew,
+      cageIsConflict,
+      groupHasConflict,
       isGroupDetailOpen,
       toggleGroupDetail,
       groupDetailCages,
@@ -645,6 +666,11 @@ export default {
   box-shadow: 0 0 0 2px rgba(250, 173, 20, 0.7);
 }
 
+.awaiting-qty.conflict {
+  border-color: #ff4d4f;
+  box-shadow: 0 0 0 2px rgba(255, 77, 79, 0.55);
+}
+
 .group-name {
   flex: 1;
   min-width: 0;
@@ -705,6 +731,11 @@ export default {
   justify-content: space-between;
   gap: 8px;
   min-height: 28px;
+}
+
+.awaiting-detail-row.conflict {
+  background: #fff2f0;
+  box-shadow: inset 3px 0 0 #ff4d4f;
 }
 
 .detail-table,
@@ -903,6 +934,11 @@ export default {
 
 .hole-cage.selected {
   outline: 3px solid #52c41a;
+  outline-offset: -3px;
+}
+
+.hole-cage.conflict {
+  outline: 3px solid #ff4d4f;
   outline-offset: -3px;
 }
 

@@ -137,11 +137,13 @@
         :steam-thresholds-ms="steamThresholdsMs"
         :dish-card-quantity-cap="dishCardQuantityCap"
         :order-gap-minutes="orderGapMinutes"
+        :conflict-order-ids="conflictMarks"
         @load="onSteamerLoad"
         @move="onSteamerMove"
         @unload="onSteamerUnload"
         @serve="onSteamerBasketServe"
         @pluck="onSteamerPluck"
+        @selection-change="onSteamerSelectionChange"
       />
     </view>
 
@@ -170,6 +172,7 @@
               :density="densityMode"
               :selected-quantity="getDishSelectedQuantity(dish.chunkId)"
               :serve-preview-order-ids="dishServePreviewOrderIds(dish)"
+              :conflict-order-ids="conflictMarks"
               :is-new="dishHasNewBadge(dish)"
               @increase="increaseQuantity(dish.chunkId, dish.totalQuantity)"
               @decrease="decreaseQuantity(dish.chunkId)"
@@ -232,7 +235,7 @@
             v-for="row in tablePickRows"
             :key="row.id"
             class="pick-line"
-            :class="{ selected: row.selected }"
+            :class="{ selected: row.selected, conflict: row.conflict }"
             @click="toggleTablePickLine(row.id)"
           >
             <text class="pick-check">{{ row.selected ? '✓' : '' }}</text>
@@ -271,7 +274,7 @@ import { composeKitchenDishCards, dishSplitKnobsChanged, sortKitchenDishCardsByO
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
 import { orderLineId, planBasketServeCookingCalls, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds } from '../../utils/batchCooking.js'
-import { kitchenShouldPull, runServeConfirm, serveConfirmErrorMessage } from '../../utils/serveConfirm.js'
+import { kitchenShouldPull, nextConflictMarks, orderLineIsMarked, runServeConfirm, serveConfirmErrorMessage } from '../../utils/serveConfirm.js'
 import { toastForServeBatch } from '../../utils/serveBatchToast.js'
 import { ordersAPI } from '../../api/orders.js'
 import { stationsAPI } from '../../api/stations.js'
@@ -288,7 +291,7 @@ import { useKitchenOrderSession } from '../../composables/useKitchenOrderSession
 import { useDisconnectAlert } from '../../composables/useDisconnectAlert.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
 import { stationChangeClearsSelection, takeSettingsReturnClear } from '../../utils/kitchenSelectionReset.js'
-import { applyServeSelection, emptyServeSelection } from '../../utils/serveSelection.js'
+import { applyServeSelection, emptyServeSelection, serveSelectionAfterConfirm } from '../../utils/serveSelection.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
 import KitchenDishCard from '../../components/KitchenDishCard/KitchenDishCard.vue'
 import ShulongSteamerConsole from '../../components/ShulongSteamerConsole/ShulongSteamerConsole.vue'
@@ -350,8 +353,16 @@ export default {
     
     // 出餐选中：卡上份数与选桌互斥，页面只转发事件
     const serveSelection = ref(emptyServeSelection())
+    const conflictMarks = ref([])
     const dispatchServe = (event) => {
-      serveSelection.value = applyServeSelection(serveSelection.value, event)
+      const next = applyServeSelection(serveSelection.value, event)
+      if (next !== serveSelection.value) {
+        conflictMarks.value = nextConflictMarks(conflictMarks.value, { type: 'selectionChange' })
+      }
+      serveSelection.value = next
+    }
+    const onSteamerSelectionChange = () => {
+      conflictMarks.value = nextConflictMarks(conflictMarks.value, { type: 'selectionChange' })
     }
     const batchSubmitting = ref(false)
 
@@ -717,7 +728,8 @@ export default {
             orderTimeMs: Number.isNaN(orderTime) ? 0 : orderTime,
             orderTimeLabel: formatTime(order.order_time),
             waitLabel: TimeCalculator.formatDurationClock(waitMs),
-            selected: selected.has(id)
+            selected: selected.has(id),
+            conflict: orderLineIsMarked(conflictMarks.value, id)
           }
         })
         .filter(Boolean)
@@ -915,6 +927,8 @@ export default {
         if (toast) uni.showToast(toast)
       }
 
+      conflictMarks.value = nextConflictMarks(conflictMarks.value, { type: 'confirmStart' })
+
       try {
         const result = await runServeConfirm({
           plan,
@@ -930,15 +944,17 @@ export default {
           pull: refreshData
         })
 
+        serveSelection.value = serveSelectionAfterConfirm(serveSelection.value, result.submitted)
         if (!result.submitted) {
           showToast({ processed: 0, requested: totalCount })
           return
         }
 
-        dispatchServe({ type: 'completeServe' })
         showToast({ processed: result.processed, requested: totalCount })
       } catch (error) {
         console.error('出餐失败:', error)
+        serveSelection.value = serveSelectionAfterConfirm(serveSelection.value, false)
+        conflictMarks.value = nextConflictMarks(conflictMarks.value, { type: 'reject', error })
         showToast({
           processed: 0,
           requested: totalCount,
@@ -1207,6 +1223,8 @@ export default {
       /** 本屏下单间隔（分钟）；0 = 不按浪潮拆 */
       orderGapMinutes,
       selectedQuantities,
+      conflictMarks,
+      onSteamerSelectionChange,
       batchSubmitting,
       printFailedCount,
       printPendingCount,
@@ -2199,6 +2217,11 @@ export default {
 
 .pick-line.selected {
   background: #F6FFED;
+}
+
+.pick-line.conflict {
+  background: #FFF2F0;
+  box-shadow: inset 6upx 0 0 #FF4D4F;
 }
 
 .pick-check {

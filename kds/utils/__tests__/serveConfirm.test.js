@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { planBasketServeCookingCalls, planBatchCookingCalls, planTablePickCookingCalls } from '../batchCooking.js'
-import { buildCompleteCookingRequest, conflictOrderIdsFromReject, kitchenShouldPull, runServeConfirm, serveConfirmErrorMessage } from '../serveConfirm.js'
+import { buildCompleteCookingRequest, conflictOrderIdsFromReject, hasMarkedOrderLine, kitchenShouldPull, nextConflictMarks, orderLineIsMarked, runServeConfirm, serveConfirmErrorMessage } from '../serveConfirm.js'
+import { applyServeSelection, emptyServeSelection, serveSelectionAfterConfirm } from '../serveSelection.js'
+import { toggleSteamerSelection } from '../steamerConsole.js'
 
 function makeOrder(overrides = {}) {
   return {
@@ -285,6 +287,138 @@ describe('conflictOrderIdsFromReject', () => {
     }
     expect(serveConfirmErrorMessage(error)).toBe('出餐确认冲突')
     expect(serveConfirmErrorMessage(new Error('请求超时，请检查网络连接'))).toBe('请求超时，请检查网络连接')
+  })
+})
+
+describe('nextConflictMarks', () => {
+  it('marks every conflict order_id from a 409 reject', () => {
+    const error = new Error('HTTP 409: 出餐确认冲突')
+    error.response = {
+      data: {
+        detail: {
+          message: '出餐确认冲突',
+          conflicts: [
+            { order_id: 'a', reason: '退菜' },
+            { order_id: 'c', reason: '已出餐' }
+          ]
+        }
+      }
+    }
+    expect(nextConflictMarks(['stale'], { type: 'reject', error })).toEqual(['a', 'c'])
+  })
+
+  it('marks no lines on timeout or disconnect', () => {
+    expect(nextConflictMarks(['stale'], {
+      type: 'reject',
+      error: new Error('请求超时，请检查网络连接')
+    })).toEqual([])
+    expect(nextConflictMarks(['stale'], {
+      type: 'reject',
+      error: new Error('网络连接失败，请检查网络设置')
+    })).toEqual([])
+  })
+
+  it('clears previous marks when the chef changes selection or starts another confirm', () => {
+    expect(nextConflictMarks(['a', 'c'], { type: 'selectionChange' })).toEqual([])
+    expect(nextConflictMarks(['a', 'c'], { type: 'confirmStart' })).toEqual([])
+  })
+
+  it('marks the conflicting 订单行 and the 菜卡 that contains it', () => {
+    const marks = ['c']
+    const earlier = makeOrder({ id: 'a', table_number: '1' })
+    const later = makeOrder({ id: 'c', table_number: '3' })
+    expect(orderLineIsMarked(marks, later)).toBe(true)
+    expect(orderLineIsMarked(marks, earlier)).toBe(false)
+    expect(hasMarkedOrderLine(marks, [earlier, later])).toBe(true)
+    expect(hasMarkedOrderLine(marks, [earlier])).toBe(false)
+  })
+
+  it('keeps 选桌出餐 rows after a 409 so dropping the marked line retries the rest', () => {
+    const a = makeOrder({ id: 'a', table_number: '1' })
+    const b = makeOrder({ id: 'b', table_number: '2' })
+    const c = makeOrder({ id: 'c', table_number: '3' })
+    let selection = emptyServeSelection()
+    selection = applyServeSelection(selection, { type: 'openTablePick', chunkId: '虾饺' })
+    selection = applyServeSelection(selection, { type: 'toggleOrderLine', orderId: 'a' })
+    selection = applyServeSelection(selection, { type: 'toggleOrderLine', orderId: 'b' })
+    selection = applyServeSelection(selection, { type: 'toggleOrderLine', orderId: 'c' })
+
+    let marks = nextConflictMarks([], {
+      type: 'reject',
+      error: { conflicts: [{ order_id: 'b', reason: '退菜' }] }
+    })
+    selection = serveSelectionAfterConfirm(selection, false)
+    expect(selection.tablePick.selectedOrderIds).toEqual(['a', 'b', 'c'])
+    expect(marks).toEqual(['b'])
+
+    selection = applyServeSelection(selection, { type: 'toggleOrderLine', orderId: 'b' })
+    marks = nextConflictMarks(marks, { type: 'selectionChange' })
+    expect(marks).toEqual([])
+    expect(selection.tablePick.selectedOrderIds).toEqual(['a', 'c'])
+
+    const plan = planTablePickCookingCalls({
+      selectedOrderIds: selection.tablePick.selectedOrderIds,
+      chunkId: '虾饺',
+      chunkOrders: { 虾饺: { dishName: '虾饺', orders: [a, b, c] } }
+    })
+    expect(plan[0].allocations.map(({ order }) => order.id)).toEqual(['a', 'c'])
+  })
+
+  it('keeps 卡上出餐 counts after a 409 so other 菜卡 need not be re-tapped', () => {
+    let selection = emptyServeSelection()
+    selection = applyServeSelection(selection, { type: 'increase', chunkId: '虾饺', max: 2 })
+    selection = applyServeSelection(selection, { type: 'increase', chunkId: '虾饺', max: 2 })
+    selection = applyServeSelection(selection, { type: 'increase', chunkId: '叉烧包', max: 1 })
+    selection = serveSelectionAfterConfirm(selection, false)
+    expect(selection.cardCounts).toEqual({ 虾饺: 2, 叉烧包: 1 })
+
+    selection = applyServeSelection(selection, { type: 'decrease', chunkId: '虾饺' })
+    expect(selection.cardCounts).toEqual({ 虾饺: 1, 叉烧包: 1 })
+  })
+
+  it('keeps 笼上出餐 ids after a 409 so dropping the marked 蒸笼 retries the rest', () => {
+    const dumpling = makeOrder({
+      id: 'd2',
+      dish_name: '虾饺',
+      table_number: '5',
+      business_flow_id: 'flow-d2'
+    })
+    const bun = makeOrder({
+      id: 'b1',
+      dish_name: '叉烧包',
+      table_number: '4',
+      business_flow_id: 'flow-b1'
+    })
+    let selectedOrderIds = ['b1', 'd2']
+    let marks = nextConflictMarks([], {
+      type: 'reject',
+      error: { conflicts: [{ order_id: 'b1', reason: '退菜' }] }
+    })
+    expect(selectedOrderIds).toEqual(['b1', 'd2'])
+    expect(marks).toEqual(['b1'])
+    expect(orderLineIsMarked(marks, bun)).toBe(true)
+
+    selectedOrderIds = toggleSteamerSelection(selectedOrderIds, 'b1')
+    marks = nextConflictMarks(marks, { type: 'selectionChange' })
+    expect(marks).toEqual([])
+    expect(selectedOrderIds).toEqual(['d2'])
+
+    const plan = planBasketServeCookingCalls({
+      selectedOrderIds,
+      cages: [dumpling, bun]
+    })
+    expect(plan.map((item) => item.allocations.map(({ order }) => order.id))).toEqual([['d2']])
+  })
+
+  it('keeps selection on timeout and still leaves no line marks', () => {
+    let selection = emptyServeSelection()
+    selection = applyServeSelection(selection, { type: 'increase', chunkId: '虾饺', max: 2 })
+    selection = serveSelectionAfterConfirm(selection, false)
+    expect(selection.cardCounts).toEqual({ 虾饺: 1 })
+    expect(nextConflictMarks(['stale'], {
+      type: 'reject',
+      error: new Error('请求超时，请检查网络连接')
+    })).toEqual([])
   })
 })
 

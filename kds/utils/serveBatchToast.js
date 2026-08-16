@@ -8,18 +8,12 @@
 export function toastForServeBatch({ processed, requested, errorMessage }) {
   if (errorMessage) {
     return {
-      title: '批量出餐失败: ' + errorMessage,
+      title: '出餐失败: ' + errorMessage,
       icon: 'error'
     }
   }
   if (!processed) {
     return { title: '没有可提交的订单', icon: 'none' }
-  }
-  if (processed < requested) {
-    return {
-      title: `部分出餐成功 ${processed}/${requested}份`,
-      icon: 'none'
-    }
   }
   return null
 }

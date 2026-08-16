@@ -80,3 +80,14 @@ export function applyServeSelection(state, event) {
 
   return current
 }
+
+/**
+ * Failed confirm keeps 出餐选中 so the chef can drop marked lines and retry.
+ *
+ * @param {{ cardCounts: Record<string, number>, tablePick: object|null }} selection
+ * @param {boolean} success
+ */
+export function serveSelectionAfterConfirm(selection, success) {
+  if (success) return emptyServeSelection()
+  return selection || emptyServeSelection()
+}

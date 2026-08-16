@@ -94,6 +94,47 @@ export function conflictOrderIdsFromReject(errorOrDetail) {
 }
 
 /**
+ * Conflict-mark set after a confirm outcome or a chef action.
+ * 409 → every conflict order_id. Timeout / disconnect → none.
+ *
+ * @param {string[]} [current]
+ * @param {{ type?: string, error?: object|Error|null }} [event]
+ * @returns {string[]}
+ */
+export function nextConflictMarks(current, event) {
+  if (event?.type === 'reject') {
+    return conflictOrderIdsFromReject(event.error)
+  }
+  if (event?.type === 'selectionChange' || event?.type === 'confirmStart') {
+    return []
+  }
+  return Array.isArray(current) ? current : []
+}
+
+/**
+ * @param {string[]} marks
+ * @param {object|string|null|undefined} orderOrId
+ * @returns {boolean}
+ */
+export function orderLineIsMarked(marks, orderOrId) {
+  const id = typeof orderOrId === 'object' && orderOrId
+    ? orderLineId(orderOrId)
+    : String(orderOrId ?? '')
+  if (!id) return false
+  return Array.isArray(marks) && marks.includes(id)
+}
+
+/**
+ * @param {string[]} marks
+ * @param {object[]} orders
+ * @returns {boolean}
+ */
+export function hasMarkedOrderLine(marks, orders) {
+  if (!Array.isArray(orders) || !marks?.length) return false
+  return orders.some((order) => orderLineIsMarked(marks, order))
+}
+
+/**
  * @param {object|Error|null|undefined} errorOrDetail
  * @returns {string}
  */
