@@ -139,11 +139,14 @@ async def complete_cooking(orders: OrdersPort, payload: Dict) -> Dict:
 
     for item in payload["orders"]:
         requested_id = str(item.get("order_id", "") or item.get("business_flow_id", "") or "")
+        # A supplied id that misses is a conflict. Do not FIFO another
+        # 待出餐 row via table + payload dish_name.
+        locate_by_id = bool(requested_id.strip())
         order = await orders.resolve_order_for_cooking(
             order_id=str(item.get("order_id", "")),
             business_flow_id=str(item.get("business_flow_id", "") or ""),
             table_number=str(item.get("table_number", "") or ""),
-            dish_name=str(payload.get("dish_name", "") or ""),
+            dish_name="" if locate_by_id else str(payload.get("dish_name", "") or ""),
         )
         if not order:
             conflicts.append(_cooking_conflict(requested_id or "unknown", "不存在"))

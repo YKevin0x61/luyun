@@ -194,16 +194,6 @@ class CompleteCookingOrdersNudgeTest(_OrdersNudgeCase):
         rows = {row["business_flow_id"]: row for row in _run_async(self.db.get_orders(limit=-1))}
         ok = rows["nudge-ok"]
         refund = rows["nudge-refund_虾饺_refund_1"]
-        tdb = self.db.table("orders")
-
-        async def _mark_refund():
-            await tdb.execute(
-                "UPDATE orders SET status = '退菜' WHERE id = ?",
-                (refund["_id"],),
-            )
-            await tdb.commit()
-
-        _run_async(_mark_refund())
 
         resp = self.client.post("/api/orders/complete-cooking", json={
             "dish_name": "虾饺",

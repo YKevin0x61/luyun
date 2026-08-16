@@ -476,6 +476,35 @@ def test_complete_cooking_mixed_conflicts_writes_nothing(orders_client):
     assert _run_async(db.get_order_by_id(ready["_id"]))["dish_status"] == "已制作待上菜"
 
 
+def test_complete_cooking_stale_id_does_not_fallback_to_table_dish(orders_client):
+    client, db, admin_headers = orders_client
+    seeded = _seed_orders(db, [{
+        "business_flow_id": "stale-fallback",
+        "table_number": "A1",
+        "dish_name": "肠粉",
+        "quantity": 1,
+        "order_time": datetime(2026, 6, 30, 11, 0, tzinfo=CHINA_TZ),
+        "station": "changfen",
+        "status": "未结",
+    }])
+    pending = seeded["stale-fallback"]
+
+    resp = client.post(
+        "/api/orders/complete-cooking",
+        json=_confirm_body([{
+            "order_id": "stale-chip",
+            "table_number": "A1",
+            "complete_quantity": 1,
+            "original_quantity": 1,
+        }]),
+        headers=admin_headers,
+    )
+
+    assert resp.status_code == 409
+    assert _conflict_pairs(resp) == {("stale-chip", "不存在")}
+    assert _run_async(db.get_order_by_id(pending["_id"]))["dish_status"] == "待出餐"
+
+
 def test_resolve_order_for_cooking_fallback_by_table_dish(tmp_path):
     async def _run():
         old = settings.DATABASE_DIR
