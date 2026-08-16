@@ -116,12 +116,29 @@ def _is_cancelled_or_refund(order: Dict) -> bool:
     return _is_refund_order(order)
 
 
+def _cooking_conflict(order_id: str, reason: str) -> Dict[str, str]:
+    return {"order_id": str(order_id), "reason": reason}
+
+
+def _raise_cooking_conflicts(conflicts: list) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "message": "出餐确认冲突",
+            "conflicts": conflicts,
+        },
+    )
+
+
 async def complete_cooking(orders: OrdersPort, payload: Dict) -> Dict:
     ready_time = payload.get("ready_time") or datetime.now(CHINA_TZ).isoformat()
     ensure_beijing_datetime(ready_time)
     completions = []
+    conflicts = []
+    seen_ids: Set[str] = set()
 
     for item in payload["orders"]:
+        requested_id = str(item.get("order_id", "") or item.get("business_flow_id", "") or "")
         order = await orders.resolve_order_for_cooking(
             order_id=str(item.get("order_id", "")),
             business_flow_id=str(item.get("business_flow_id", "") or ""),
@@ -129,20 +146,32 @@ async def complete_cooking(orders: OrdersPort, payload: Dict) -> Dict:
             dish_name=str(payload.get("dish_name", "") or ""),
         )
         if not order:
-            tried = item.get("order_id") or item.get("business_flow_id") or "unknown"
-            raise HTTPException(status_code=404, detail=f"订单不存在: {tried}")
+            conflicts.append(_cooking_conflict(requested_id or "unknown", "不存在"))
+            continue
+        oid = str(order.get("_id") or order.get("id") or requested_id)
+        if oid in seen_ids:
+            conflicts.append(_cooking_conflict(oid, "重复"))
+            continue
+        seen_ids.add(oid)
         if _is_refund_order(order):
-            raise HTTPException(status_code=409, detail="退菜单不可制作完成")
+            conflicts.append(_cooking_conflict(oid, "退菜"))
+            continue
         if order.get("dish_status", "待出餐") != "待出餐":
-            raise HTTPException(status_code=409, detail=f"订单状态不可制作完成: {item['order_id']}")
+            conflicts.append(_cooking_conflict(oid, "已出餐"))
+            continue
         db_qty = int(order.get("quantity") or 1)
         complete_qty = int(item["complete_quantity"])
         if complete_qty > db_qty:
-            raise HTTPException(status_code=400, detail="完成数量超过当前数量")
+            conflicts.append(_cooking_conflict(oid, "数量超过"))
+            continue
         if order.get("table_number") != item["table_number"]:
-            raise HTTPException(status_code=400, detail="桌号不匹配")
+            conflicts.append(_cooking_conflict(oid, "桌号不匹配"))
+            continue
 
         completions.append({"order": order, "complete_quantity": complete_qty})
+
+    if conflicts:
+        _raise_cooking_conflicts(conflicts)
 
     applied = await orders.apply_cooking_completion(
         ready_time=ready_time,

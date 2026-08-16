@@ -168,7 +168,7 @@ class CompleteCookingOrdersNudgeTest(_OrdersNudgeCase):
         self.assertEqual(len(order_nudges), 2)
 
     def test_complete_cooking_failure_does_not_broadcast(self):
-        """订单不存在导致 404 时不应广播任何 nudge。"""
+        """订单不存在导致 409 时不应广播任何 nudge。"""
         resp = self.client.post("/api/orders/complete-cooking", json={
             "dish_name": "虾饺",
             "station": "shulong",
@@ -182,8 +182,56 @@ class CompleteCookingOrdersNudgeTest(_OrdersNudgeCase):
             "operator_id": "test",
         }, headers=self.admin_headers)
 
-        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()["detail"]["conflicts"], [
+            {"order_id": "does-not-exist", "reason": "不存在"},
+        ])
         self.assertEqual(self.broadcast_calls, [])
+
+    def test_complete_cooking_mixed_conflicts_do_not_broadcast(self):
+        _seed_pending(self.db, table="N1", flow_id="nudge-ok", qty=1)
+        _seed_pending(self.db, table="N2", flow_id="nudge-refund_虾饺_refund_1", qty=1)
+        rows = {row["business_flow_id"]: row for row in _run_async(self.db.get_orders(limit=-1))}
+        ok = rows["nudge-ok"]
+        refund = rows["nudge-refund_虾饺_refund_1"]
+        tdb = self.db.table("orders")
+
+        async def _mark_refund():
+            await tdb.execute(
+                "UPDATE orders SET status = '退菜' WHERE id = ?",
+                (refund["_id"],),
+            )
+            await tdb.commit()
+
+        _run_async(_mark_refund())
+
+        resp = self.client.post("/api/orders/complete-cooking", json={
+            "dish_name": "虾饺",
+            "station": "shulong",
+            "complete_quantity": 2,
+            "orders": [
+                {
+                    "order_id": ok["_id"],
+                    "table_number": "N1",
+                    "complete_quantity": 1,
+                    "original_quantity": 1,
+                },
+                {
+                    "order_id": refund["_id"],
+                    "table_number": "N2",
+                    "complete_quantity": 1,
+                    "original_quantity": 1,
+                },
+            ],
+            "operator_id": "test",
+        }, headers=self.admin_headers)
+
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.broadcast_calls, [])
+        self.assertEqual(
+            _run_async(self.db.get_order_by_id(ok["_id"]))["dish_status"],
+            "待出餐",
+        )
 
 
 class LoadSteamerOrdersNudgeTest(_OrdersNudgeCase):

@@ -177,6 +177,52 @@ def _seed_pending(db):
     }]))
 
 
+def _seed_orders(db, rows):
+    _run_async(db.batch_insert_orders(rows))
+    return {row["business_flow_id"]: row for row in _run_async(db.get_orders(limit=-1))}
+
+
+def _cooking_line(order, **overrides):
+    line = {
+        "order_id": order["_id"],
+        "table_number": order["table_number"],
+        "complete_quantity": int(order["quantity"]),
+        "original_quantity": int(order["quantity"]),
+    }
+    line.update(overrides)
+    return line
+
+
+def _confirm_body(orders, *, dish_name="肠粉", station="changfen", complete_quantity=None):
+    if complete_quantity is None:
+        complete_quantity = sum(int(item["complete_quantity"]) for item in orders)
+    return {
+        "dish_name": dish_name,
+        "station": station,
+        "complete_quantity": complete_quantity,
+        "orders": orders,
+        "operator_id": "test",
+        "ready_time": "2026-06-30T11:05:00+08:00",
+    }
+
+
+def _conflict_pairs(resp):
+    detail = resp.json()["detail"]
+    return {(item["order_id"], item["reason"]) for item in detail["conflicts"]}
+
+
+def _mark_dish_status(db, order_id, dish_status):
+    async def _run():
+        tdb = db.table("orders")
+        await tdb.execute(
+            "UPDATE orders SET dish_status = ? WHERE id = ?",
+            (dish_status, order_id),
+        )
+        await tdb.commit()
+
+    _run_async(_run())
+
+
 def test_complete_cooking_full(orders_client):
     client, db, admin_headers = orders_client
     _seed_pending(db)
@@ -283,6 +329,153 @@ def test_complete_cooking_by_business_flow_id(orders_client):
     assert updated["dish_status"] == "已制作待上菜"
 
 
+def test_complete_cooking_multi_dish_writes_all(orders_client):
+    client, db, admin_headers = orders_client
+    seeded = _seed_orders(db, [
+        {
+            "business_flow_id": "multi-changfen",
+            "table_number": "A1",
+            "dish_name": "肠粉",
+            "quantity": 1,
+            "order_time": datetime(2026, 6, 30, 11, 0, tzinfo=CHINA_TZ),
+            "station": "changfen",
+            "status": "未结",
+        },
+        {
+            "business_flow_id": "multi-shulong",
+            "table_number": "B2",
+            "dish_name": "虾饺",
+            "quantity": 2,
+            "order_time": datetime(2026, 6, 30, 11, 1, tzinfo=CHINA_TZ),
+            "station": "shulong",
+            "status": "未结",
+        },
+    ])
+    changfen = seeded["multi-changfen"]
+    shulong = seeded["multi-shulong"]
+
+    resp = client.post(
+        "/api/orders/complete-cooking",
+        json=_confirm_body([
+            _cooking_line(changfen),
+            _cooking_line(shulong),
+        ]),
+        headers=admin_headers,
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["updated_count"] == 2
+    assert _run_async(db.get_order_by_id(changfen["_id"]))["dish_status"] == "已制作待上菜"
+    assert _run_async(db.get_order_by_id(shulong["_id"]))["dish_status"] == "已制作待上菜"
+
+
+def test_complete_cooking_mixed_conflicts_writes_nothing(orders_client):
+    client, db, admin_headers = orders_client
+    seeded = _seed_orders(db, [
+        {
+            "business_flow_id": "mix-valid-fen",
+            "table_number": "A1",
+            "dish_name": "肠粉",
+            "quantity": 1,
+            "order_time": datetime(2026, 6, 30, 11, 0, tzinfo=CHINA_TZ),
+            "station": "changfen",
+            "status": "未结",
+        },
+        {
+            "business_flow_id": "mix-valid-jiao",
+            "table_number": "B2",
+            "dish_name": "虾饺",
+            "quantity": 1,
+            "order_time": datetime(2026, 6, 30, 11, 1, tzinfo=CHINA_TZ),
+            "station": "shulong",
+            "status": "未结",
+        },
+        {
+            "business_flow_id": "mix-refund_虾饺_refund_1",
+            "table_number": "C3",
+            "dish_name": "虾饺",
+            "quantity": 1,
+            "order_time": datetime(2026, 6, 30, 11, 2, tzinfo=CHINA_TZ),
+            "station": "shulong",
+            "status": "退菜",
+        },
+        {
+            "business_flow_id": "mix-ready",
+            "table_number": "D4",
+            "dish_name": "虾饺",
+            "quantity": 1,
+            "order_time": datetime(2026, 6, 30, 11, 3, tzinfo=CHINA_TZ),
+            "station": "shulong",
+            "status": "未结",
+        },
+        {
+            "business_flow_id": "mix-qty",
+            "table_number": "E5",
+            "dish_name": "肠粉",
+            "quantity": 1,
+            "order_time": datetime(2026, 6, 30, 11, 4, tzinfo=CHINA_TZ),
+            "station": "changfen",
+            "status": "未结",
+        },
+        {
+            "business_flow_id": "mix-table",
+            "table_number": "F6",
+            "dish_name": "肠粉",
+            "quantity": 1,
+            "order_time": datetime(2026, 6, 30, 11, 5, tzinfo=CHINA_TZ),
+            "station": "changfen",
+            "status": "未结",
+        },
+    ])
+    valid_fen = seeded["mix-valid-fen"]
+    valid_jiao = seeded["mix-valid-jiao"]
+    refund = seeded["mix-refund_虾饺_refund_1"]
+    ready = seeded["mix-ready"]
+    over_qty = seeded["mix-qty"]
+    table_mismatch = seeded["mix-table"]
+    _mark_dish_status(db, ready["_id"], "已制作待上菜")
+
+    resp = client.post(
+        "/api/orders/complete-cooking",
+        json=_confirm_body([
+            _cooking_line(valid_fen),
+            _cooking_line(valid_jiao),
+            _cooking_line(refund),
+            _cooking_line(ready),
+            _cooking_line(over_qty, complete_quantity=9),
+            _cooking_line(table_mismatch, table_number="Z9"),
+            _cooking_line(valid_fen),
+            {
+                "order_id": "ghost-missing",
+                "table_number": "ZZ",
+                "complete_quantity": 1,
+                "original_quantity": 1,
+            },
+        ]),
+        headers=admin_headers,
+    )
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["message"] == "出餐确认冲突"
+    assert _conflict_pairs(resp) == {
+        (refund["_id"], "退菜"),
+        (ready["_id"], "已出餐"),
+        (over_qty["_id"], "数量超过"),
+        (table_mismatch["_id"], "桌号不匹配"),
+        (valid_fen["_id"], "重复"),
+        ("ghost-missing", "不存在"),
+    }
+    assert _run_async(db.get_order_by_id(valid_fen["_id"]))["dish_status"] == "待出餐"
+    assert _run_async(db.get_order_by_id(valid_jiao["_id"]))["dish_status"] == "待出餐"
+    assert _run_async(db.get_order_by_id(over_qty["_id"]))["dish_status"] == "待出餐"
+    assert _run_async(db.get_order_by_id(table_mismatch["_id"]))["dish_status"] == "待出餐"
+    assert _run_async(db.get_order_by_id(refund["_id"]))["status"] == "退菜"
+    assert _run_async(db.get_order_by_id(ready["_id"]))["dish_status"] == "已制作待上菜"
+
+
 def test_resolve_order_for_cooking_fallback_by_table_dish(tmp_path):
     async def _run():
         old = settings.DATABASE_DIR
@@ -339,7 +532,9 @@ def test_complete_cooking_rejects_refund_order(orders_client):
         "operator_id": "test",
     }, headers=admin_headers)
     assert resp.status_code == 409
-    assert "退菜" in resp.json()["detail"]
+    assert resp.json()["detail"]["conflicts"] == [
+        {"order_id": row["_id"], "reason": "退菜"},
+    ]
 
 
 def test_merged_dishes_pending_only(orders_client):

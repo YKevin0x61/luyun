@@ -7,6 +7,8 @@ import unittest
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from fastapi import HTTPException
+
 from config import settings
 from database import DatabaseManager
 from db_core.adapters import (
@@ -148,3 +150,67 @@ class FakeOrdersPortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["updated_count"], 1)
         self.assertEqual(result["stations"], ["changfen"])
         self.assertEqual(len(fake.completions), 1)
+
+
+class _ConflictOrdersPort:
+    """OrdersPort stand-in that can return mixed rows and record writes."""
+
+    def __init__(self, catalog):
+        self.catalog = catalog
+        self.completions: List[Dict[str, Any]] = []
+
+    async def resolve_order_for_cooking(self, **kwargs: Any) -> Optional[Dict]:
+        oid = str(kwargs.get("order_id") or "")
+        row = self.catalog.get(oid)
+        return dict(row) if row else None
+
+    async def apply_cooking_completion(
+        self, *, ready_time: str, completions: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        self.completions.append({"ready_time": ready_time, "completions": completions})
+        return {"updated_count": len(completions), "stations": ["changfen"]}
+
+
+class CookingConflictPortTests(unittest.IsolatedAsyncioTestCase):
+    async def test_complete_cooking_conflict_does_not_apply(self):
+        fake = _ConflictOrdersPort({
+            "1": {
+                "_id": "1",
+                "table_number": "T1",
+                "quantity": 1,
+                "dish_status": "待出餐",
+                "status": "未结",
+            },
+            "2": {
+                "_id": "2",
+                "table_number": "T2",
+                "quantity": 1,
+                "dish_status": "待出餐",
+                "status": "退菜",
+            },
+        })
+        with self.assertRaises(HTTPException) as raised:
+            await complete_cooking(
+                fake,
+                {
+                    "dish_name": "肠粉",
+                    "orders": [
+                        {
+                            "order_id": "1",
+                            "table_number": "T1",
+                            "complete_quantity": 1,
+                        },
+                        {
+                            "order_id": "2",
+                            "table_number": "T2",
+                            "complete_quantity": 1,
+                        },
+                    ],
+                },
+            )
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(
+            raised.exception.detail["conflicts"],
+            [{"order_id": "2", "reason": "退菜"}],
+        )
+        self.assertEqual(fake.completions, [])
