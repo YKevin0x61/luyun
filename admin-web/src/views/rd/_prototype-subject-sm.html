@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PROTOTYPE — 研发课题状态机</title>
+  <!--
+    PROTOTYPE (throwaway). Not production. Do not ship this page.
+    Question: 研发课题的状态机对不对？
+    立项 → 概念（AI 稿 / 人锁定）→ 配方草稿（AI 稿 / 人锁定）→ 本店可行性（人过/不过）
+    → 试做（可多条）→ 上架标记 或 废弃。
+    纸上看似通，要点过非法动作和回头路才知道卡不卡。
+
+    Run: double-click this file (no server).
+    Path: admin-web/src/views/rd/_prototype-subject-sm.html
+  -->
+  <style>
+    :root {
+      --ink: #1c1917;
+      --muted: #78716c;
+      --bg: #f4f1ea;
+      --paper: #fffdf8;
+      --line: #e7e0d4;
+      --accent: #0f766e;
+      --accent-soft: #ccfbf1;
+      --warn: #b45309;
+      --warn-soft: #ffedd5;
+      --ok: #0f766e;
+      --ok-soft: #ccfbf1;
+      --chip: #f5f0e6;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--ink); }
+    body {
+      font: 15px/1.5 "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", sans-serif;
+      padding: 28px 22px 64px;
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; letter-spacing: -0.02em; }
+    h2 { font-size: 15px; margin: 0 0 10px; }
+    .banner {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: var(--warn);
+      background: var(--warn-soft);
+      border-radius: 999px;
+      padding: 3px 10px;
+      margin-bottom: 10px;
+    }
+    .lede { color: var(--muted); max-width: 78ch; margin: 0 0 22px; }
+    .lede strong { color: var(--ink); font-weight: 650; }
+
+    .panel {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px 18px 18px;
+      margin: 0 0 16px;
+    }
+    .flash {
+      border-color: var(--accent);
+      background: #f0fdfa;
+    }
+    .flash.reject {
+      border-color: #f59e0b;
+      background: var(--warn-soft);
+    }
+    .flash b { display: block; margin-bottom: 4px; }
+    .flash.reject b { color: var(--warn); }
+    .flash.ok b { color: var(--accent); }
+
+    .phase {
+      font-size: 20px;
+      font-weight: 700;
+      margin: 0 0 12px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px 18px;
+    }
+    .block h3 {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin: 0 0 6px;
+      text-transform: none;
+    }
+    .kv { margin: 0; }
+    .kv div { display: flex; gap: 8px; padding: 2px 0; }
+    .kv dt { color: var(--muted); min-width: 7em; flex: 0 0 auto; }
+    .kv dd { margin: 0; font-weight: 550; }
+    .kv dd.hi { background: #fef3c7; border-radius: 4px; padding: 0 4px; }
+    .empty { color: var(--muted); font-weight: 400; }
+    .note { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .chip {
+      background: var(--chip);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+    }
+
+    .actions { display: flex; flex-direction: column; gap: 14px; }
+    .group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .btns { display: flex; flex-wrap: wrap; gap: 8px; }
+    button {
+      font: inherit;
+      cursor: pointer;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      padding: 8px 12px;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.ghost { background: transparent; color: var(--muted); }
+    button.blocked { opacity: 0.55; }
+    button.done { opacity: 0.45; text-decoration: line-through; }
+    button.current { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+    .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+    .tabs button[aria-selected="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .walk-blurb { color: var(--muted); margin: 0 0 12px; max-width: 78ch; }
+    .steps { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+    .steps button { text-align: left; }
+    .done-note { margin: 12px 0 0; font-weight: 650; color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="banner">PROTOTYPE · 用完即弃 · 不入库 · 不接网</div>
+  <h1>研发课题会不会卡在半路？</h1>
+  <p class="lede">
+    要回答的是：<strong>立项 → 概念（AI 稿 / 人锁定）→ 配方草稿（AI 稿 / 人锁定）→ 本店可行性（人过 / 不过）→ 试做（可多条）→ 上架标记或废弃</strong>
+    这条状态机，点非法动作和回头路时卡不卡。
+    一份课题只对应一道本店菜。AI 只出稿、不作过关。上架标记不写 SOP、不写菜品档口目录、不写半成品规则、不写回 POS。
+    夹具数据，内存里玩，双击本文件即可。
+  </p>
+
+  <div id="flash" class="panel flash" hidden></div>
+
+  <section class="panel" id="state-panel" aria-live="polite"></section>
+
+  <section class="panel">
+    <h2>自由点（动作始终都在；不合法会驳回并说明）</h2>
+    <div class="actions" id="freeplay"></div>
+    <p class="note">「清空重来」只属于这张演示页，不是业务动作。</p>
+    <div class="btns" style="margin-top:8px">
+      <button type="button" class="ghost" id="reset">清空重来</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>按情景走一遍</h2>
+    <div class="tabs" id="tabs"></div>
+    <p class="walk-blurb" id="walk-blurb"></p>
+    <div class="steps" id="steps"></div>
+    <p class="done-note" id="walk-done" hidden>这一路走完了。对照上面的课题状态，看卡没卡住。</p>
+  </section>
+
+  <!-- Pure machine: no DOM. Page below calls reduce() only. -->
+  <script>
+  const SubjectSM = (() => {
+    const STATIONS = ["西饼档", "肠粉档", "熟笼档", "明档1", "明档2", "煎炸档"];
+
+    const ACTION = {
+      OPEN_FROM_LAUNCH: "OPEN_FROM_LAUNCH",
+      OPEN_FROM_MOMENTUM_DURIAN: "OPEN_FROM_MOMENTUM_DURIAN",
+      OPEN_FROM_MOMENTUM_CHEESE: "OPEN_FROM_MOMENTUM_CHEESE",
+      OPEN_FROM_CLIP: "OPEN_FROM_CLIP",
+      TAG_CLIP: "TAG_CLIP",
+      AI_CONCEPT: "AI_CONCEPT",
+      FILL_CONCEPT: "FILL_CONCEPT",
+      FILL_CONCEPT_NO_PRICE: "FILL_CONCEPT_NO_PRICE",
+      LOCK_CONCEPT: "LOCK_CONCEPT",
+      AI_RECIPE: "AI_RECIPE",
+      OVERWRITE_RECIPE: "OVERWRITE_RECIPE",
+      LOCK_RECIPE: "LOCK_RECIPE",
+      SET_COMPARABLES: "SET_COMPARABLES",
+      CONFIRM_SOP_YES: "CONFIRM_SOP_YES",
+      CONFIRM_SOP_NO: "CONFIRM_SOP_NO",
+      FIT_PASS: "FIT_PASS",
+      FIT_FAIL: "FIT_FAIL",
+      TRIAL_FAIL: "TRIAL_FAIL",
+      TRIAL_PASS: "TRIAL_PASS",
+      LIST: "LIST",
+      ABANDON: "ABANDON",
+    };
+
+    const LABELS = {
+      OPEN_FROM_LAUNCH: "从竞品上新立项",
+      OPEN_FROM_MOMENTUM_DURIAN: "从食材势立项（榴莲）",
+      OPEN_FROM_MOMENTUM_CHEESE: "从食材势立项（芝士）",
+      OPEN_FROM_CLIP: "从独立种草摘录立项",
+      TAG_CLIP: "给独立种草打食材标签",
+      AI_CONCEPT: "AI 出概念",
+      FILL_CONCEPT: "人补齐本店菜名、建议档口、拟定售价",
+      FILL_CONCEPT_NO_PRICE: "人只填本店菜名和建议档口（漏售价）",
+      LOCK_CONCEPT: "人锁定概念",
+      AI_RECIPE: "AI 出配方草稿",
+      OVERWRITE_RECIPE: "人覆盖配方草稿",
+      LOCK_RECIPE: "人锁定配方草稿",
+      SET_COMPARABLES: "人指定对照菜",
+      CONFIRM_SOP_YES: "确认近义 SOP（算近义）",
+      CONFIRM_SOP_NO: "确认近义 SOP（不算近义）",
+      FIT_PASS: "本店可行性：过",
+      FIT_FAIL: "本店可行性：不过",
+      TRIAL_FAIL: "记试做（口味不过，不进入上架）",
+      TRIAL_PASS: "记试做（口味通过，进入上架）",
+      LIST: "上架标记",
+      ABANDON: "废弃课题",
+    };
+
+    function createInitialState() {
+      return {
+        brief: {
+          competitorLaunch: { brand: "稻香", dishName: "流沙奶黄包", clip: "菜单摘录：流沙奶黄包 18 元，咸蛋黄+奶黄" },
+          durianMomentum: { tag: "榴莲", note: "观察名单里「榴莲」标签变勤，种草摘录也在增加" },
+          independentClip: {
+            note: "有人推芝士奶盖肠粉（独立主题，未打食材标签）",
+            ingredientTag: null,
+          },
+        },
+        subject: null,
+      };
+    }
+
+    function clone(state) {
+      return JSON.parse(JSON.stringify(state));
+    }
+
+    function reject(state, reason) {
+      return { state, ok: false, reason, changed: [] };
+    }
+
+    function accept(state, reason, changed) {
+      return { state, ok: true, reason, changed: changed || [] };
+    }
+
+    function derivePhase(state) {
+      const s = state.subject;
+      if (!s) return "未立项";
+      if (s.abandoned) return "已废弃";
+      if (s.listed) return "已上架";
+      if (s.shopFit.decision === "fail") return "本店可行性不过";
+      if (s.shopFit.decision === "pass") {
+        return s.trials.length ? "试做中" : "本店可行性已过";
+      }
+      if (s.recipe.locked) return "配方草稿已锁定";
+      if (s.concept.locked) return "概念已锁定";
+      return "已立项";
+    }
+
+    function roughMargin(subject) {
+      if (!subject || subject.concept.proposedPrice == null) return null;
+      const lines = subject.recipe.lines || [];
+      if (!lines.length) return null;
+      const sum = lines.reduce((acc, line) => acc + Number(line.qty) * Number(line.roughUnitCost), 0);
+      const waste = Number(subject.recipe.wastePct) || 0;
+      const cost = sum * (1 + waste / 100);
+      return {
+        sum,
+        cost,
+        price: Number(subject.concept.proposedPrice),
+        margin: Number(subject.concept.proposedPrice) - cost,
+        waste,
+      };
+    }
+
+    function fillFor(source) {
+      if (source === "competitor_launch") {
+        return { shopDishName: "咸蛋流沙包", proposedStation: "熟笼档", proposedPrice: 16, benchmark: "稻香·流沙奶黄包" };
+      }
+      if (source === "ingredient_momentum_cheese") {
+        return { shopDishName: "芝士奶盖肠粉", proposedStation: "肠粉档", proposedPrice: 18, benchmark: "种草·芝士奶盖肠粉" };
+      }
+      return { shopDishName: "冰榴莲班戟", proposedStation: "西饼档", proposedPrice: 22, benchmark: "食材势·榴莲" };
+    }
+
+    function recipeFor(source, variant) {
+      if (source === "ingredient_momentum_cheese") {
+        return variant === "overwrite"
+          ? {
+              lines: [
+                { name: "肠粉皮", qty: 1, unit: "份", roughUnitCost: 1.2 },
+                { name: "芝士", qty: 20, unit: "g", roughUnitCost: 0.12 },
+                { name: "奶盖", qty: 25, unit: "g", roughUnitCost: 0.08 },
+              ],
+              wastePct: 6,
+              method: "肠粉出炉后淋奶盖，少放芝士。",
+            }
+          : {
+              lines: [
+                { name: "肠粉皮", qty: 1, unit: "份", roughUnitCost: 1.2 },
+                { name: "芝士", qty: 30, unit: "g", roughUnitCost: 0.12 },
+                { name: "奶盖", qty: 40, unit: "g", roughUnitCost: 0.08 },
+              ],
+              wastePct: 8,
+              method: "肠粉出炉后淋奶盖、撒芝士。",
+            };
+      }
+      if (source === "ingredient_momentum_durian") {
+        return {
+          lines: [
+            { name: "班戟皮", qty: 2, unit: "张", roughUnitCost: 0.8 },
+            { name: "榴莲肉", qty: 40, unit: "g", roughUnitCost: 0.25 },
+            { name: "淡奶油", qty: 20, unit: "g", roughUnitCost: 0.06 },
+          ],
+          wastePct: 10,
+          method: "冷藏定型后切件。",
+        };
+      }
+      return variant === "overwrite"
+        ? {
+            lines: [
+              { name: "奶黄馅", qty: 35, unit: "g", roughUnitCost: 0.06 },
+              { name: "咸蛋黄", qty: 1, unit: "个", roughUnitCost: 1.0 },
+              { name: "包皮", qty: 45, unit: "g", roughUnitCost: 0.03 },
+            ],
+            wastePct: 5,
+            method: "包好蒸 8 分钟，馅少一点。",
+          }
+        : {
+            lines: [
+              { name: "奶黄馅", qty: 40, unit: "g", roughUnitCost: 0.08 },
+              { name: "咸蛋黄", qty: 1, unit: "个", roughUnitCost: 1.2 },
+              { name: "包皮", qty: 50, unit: "g", roughUnitCost: 0.03 },
+            ],
+            wastePct: 8,
+            method: "包好蒸 8 分钟。",
+          };
+    }
+
+    function comparablesFor(source) {
+      if (source === "ingredient_momentum_cheese") {
+        return [
+          { name: "鲜虾肠粉", sales30d: 510 },
+          { name: "牛肉肠粉", sales30d: 360 },
+        ];
+      }
+      if (source === "ingredient_momentum_durian") {
+        return [
+          { name: "芒果班戟", sales30d: 190 },
+          { name: "榴莲酥", sales30d: 140 },
+        ];
+      }
+      return [
+        { name: "奶黄包", sales30d: 420 },
+        { name: "叉烧包", sales30d: 380 },
+        { name: "流沙包", sales30d: 210 },
+      ];
+    }
+
+    function sopHitsFor(source) {
+      if (source === "ingredient_momentum_cheese") return ["鲜虾肠粉（肠粉档）"];
+      if (source === "ingredient_momentum_durian") return ["芒果班戟（西饼档）"];
+      return ["奶黄包（熟笼档）", "流沙包旧方"];
+    }
+
+    function newSubject(source, title, materials) {
+      return {
+        source,
+        title,
+        abandoned: false,
+        listed: false,
+        listedWrites: { sop: false, catalog: false, semi: false, pos: false },
+        draftingMaterials: materials,
+        concept: {
+          aiDrafts: [],
+          shopDishName: "",
+          proposedStation: "",
+          proposedPrice: null,
+          locked: false,
+        },
+        recipe: {
+          aiDrafts: [],
+          lines: [],
+          wastePct: null,
+          method: "",
+          locked: false,
+          lockGeneration: 0,
+        },
+        shopFit: {
+          comparables: [],
+          nearbySopHits: sopHitsFor(source),
+          nearbySopConfirmed: null,
+          decision: null,
+        },
+        trials: [],
+      };
+    }
+
+    function guardSubject(state, need) {
+      if (!state.subject) return "还没有研发课题，先从竞品上新或食材势立项。";
+      if (state.subject.abandoned) return "课题已废弃：记录还在，但不能再往下走。";
+      if (state.subject.listed && need !== "readonly") return "已经打过上架标记，这条课题不再改。";
+      return null;
+    }
+
+    function openSubject(state, source, title, materials) {
+      if (state.subject) {
+        return reject(state, "这份演示一次只跟一份课题。要另立一份，先废弃或清空。");
+      }
+      const next = clone(state);
+      next.subject = newSubject(source, title, materials);
+      return accept(next, "已立项。标题先用对标名，还不是本店菜名。", ["课题"]);
+    }
+
+    function reduce(state, action) {
+      const type = action.type;
+      const brief = state.brief;
+
+      if (type === ACTION.OPEN_FROM_LAUNCH) {
+        return openSubject(state, "competitor_launch", brief.competitorLaunch.dishName, {
+          clips: [brief.competitorLaunch.clip],
+          proposedStationHint: "熟笼档（夹具，人锁定时写入）",
+        });
+      }
+
+      if (type === ACTION.OPEN_FROM_MOMENTUM_DURIAN) {
+        return openSubject(state, "ingredient_momentum_durian", "榴莲", {
+          clips: [brief.durianMomentum.note],
+          proposedStationHint: "西饼档（夹具）",
+        });
+      }
+
+      if (type === ACTION.OPEN_FROM_MOMENTUM_CHEESE) {
+        if (!brief.independentClip.ingredientTag) {
+          return reject(state, "还没有「芝士」这条食材势。独立种草摘录要先打食材标签。");
+        }
+        return openSubject(state, "ingredient_momentum_cheese", "芝士", {
+          clips: ["种草摘录已打标签「芝士」，进入食材势。"],
+          proposedStationHint: "肠粉档（夹具）",
+        });
+      }
+
+      if (type === ACTION.OPEN_FROM_CLIP) {
+        if (brief.independentClip.ingredientTag) {
+          return reject(state, "独立种草摘录不能直接立项。已经打了食材标签，请从食材势立项。");
+        }
+        return reject(state, "独立种草摘录不能立项。先打食材标签，进入食材势之后才能立项。");
+      }
+
+      if (type === ACTION.TAG_CLIP) {
+        if (brief.independentClip.ingredientTag) {
+          return reject(state, "这份种草摘录已经有食材标签「芝士」，已经算进食材势。");
+        }
+        const next = clone(state);
+        next.brief.independentClip.ingredientTag = "芝士";
+        return accept(next, "已打食材标签「芝士」。现在可以从食材势立项，仍不能从摘录直接立项。", ["种草摘录"]);
+      }
+
+      const blocked = guardSubject(state);
+      if (blocked && type !== ACTION.OPEN_FROM_LAUNCH) {
+        if (!state.subject && [ACTION.AI_CONCEPT, ACTION.FILL_CONCEPT, ACTION.LOCK_CONCEPT, ACTION.AI_RECIPE, ACTION.LOCK_RECIPE, ACTION.FIT_PASS, ACTION.TRIAL_PASS, ACTION.LIST, ACTION.ABANDON].includes(type)) {
+          return reject(state, blocked);
+        }
+      }
+
+      if (type === ACTION.ABANDON) {
+        if (!state.subject) return reject(state, "还没有课题，谈不上废弃。");
+        if (state.subject.abandoned) return reject(state, "已经废弃过了。");
+        if (state.subject.listed) return reject(state, "已经上架标记，不再废弃。下架不在这条状态机里。");
+        const next = clone(state);
+        next.subject.abandoned = true;
+        return accept(next, "已废弃。概念、配方草稿、试做记录都还在，只是不能再往下。", ["废弃"]);
+      }
+
+      if (!state.subject) return reject(state, "还没有研发课题，先立项。");
+      if (state.subject.abandoned) return reject(state, "课题已废弃：记录还在，但不能再往下走。");
+      if (state.subject.listed) return reject(state, "已经打过上架标记，这条课题不再改。");
+
+      const next = clone(state);
+      const s = next.subject;
+      const source = s.source;
+
+      if (type === ACTION.AI_CONCEPT) {
+        if (s.concept.locked) return reject(state, "概念已锁定。AI 不能改锁定，也不能再出稿替人过关。");
+        if (s.concept.aiDrafts.length >= 3) {
+          return reject(state, "AI 只出 1–3 稿。再点也不会锁定，锁定只能人来。");
+        }
+        const n = s.concept.aiDrafts.length + 1;
+        const fill = fillFor(source);
+        s.concept.aiDrafts.push({
+          n,
+          audience: "下午茶",
+          scene: "堂食",
+          sellingPoint: n === 1 ? "对标竞品的咸香流沙" : n === 2 ? "更强调现蒸" : "价格带贴近本店包子",
+          benchmark: fill.benchmark,
+        });
+        return accept(next, "AI 出了第 " + n + " 稿概念。只根据本课题起草材料写，没有锁定。", ["概念稿"]);
+      }
+
+      if (type === ACTION.FILL_CONCEPT || type === ACTION.FILL_CONCEPT_NO_PRICE) {
+        if (s.concept.locked) return reject(state, "概念已锁定。一份课题一道本店菜，要换菜就废弃另立。");
+        const fill = fillFor(source);
+        s.concept.shopDishName = fill.shopDishName;
+        s.concept.proposedStation = fill.proposedStation;
+        if (type === ACTION.FILL_CONCEPT) {
+          s.concept.proposedPrice = fill.proposedPrice;
+          return accept(next, "人已补齐本店菜名、建议档口、拟定售价。还没锁定。", ["概念字段"]);
+        }
+        s.concept.proposedPrice = null;
+        return accept(next, "只写了本店菜名和建议档口，拟定售价仍空。锁定会失败。", ["概念字段"]);
+      }
+
+      if (type === ACTION.LOCK_CONCEPT) {
+        if (s.concept.locked) return reject(state, "概念已经锁定。");
+        const missing = [];
+        if (!s.concept.shopDishName) missing.push("本店菜名");
+        if (!s.concept.proposedStation) missing.push("建议档口");
+        if (s.concept.proposedPrice == null || s.concept.proposedPrice === "") missing.push("拟定售价");
+        if (missing.length) {
+          return reject(state, "锁定概念必须有" + missing.join("、") + "。立项标题还只是对标名，不能当本店菜名。");
+        }
+        if (STATIONS.indexOf(s.concept.proposedStation) < 0) {
+          return reject(state, "建议档口必须是已有档口，不能自造。");
+        }
+        s.concept.locked = true;
+        return accept(next, "人锁定了概念。AI 没有参与过关。", ["概念锁定"]);
+      }
+
+      if (type === ACTION.AI_RECIPE) {
+        if (!s.concept.locked) return reject(state, "配方草稿在概念锁定之后。现在概念还没锁定。");
+        if (s.recipe.locked) return reject(state, "当前配方草稿已锁定。要改就先覆盖前稿。");
+        if (s.recipe.aiDrafts.length >= 3) {
+          return reject(state, "AI 只出 1–3 稿配方。再点也不会锁定。");
+        }
+        const draft = recipeFor(source, "ai");
+        s.recipe.aiDrafts.push({ n: s.recipe.aiDrafts.length + 1, ...draft });
+        s.recipe.lines = draft.lines;
+        s.recipe.wastePct = draft.wastePct;
+        s.recipe.method = draft.method;
+        return accept(next, "AI 出了第 " + s.recipe.aiDrafts.length + " 稿配方草稿。配料是自由文本，未写成 SOP。", ["配方草稿"]);
+      }
+
+      if (type === ACTION.OVERWRITE_RECIPE) {
+        if (!s.concept.locked) return reject(state, "配方草稿在概念锁定之后。");
+        const draft = recipeFor(source, "overwrite");
+        s.recipe.lines = draft.lines;
+        s.recipe.wastePct = draft.wastePct;
+        s.recipe.method = draft.method;
+        s.recipe.locked = false;
+        s.shopFit.decision = null;
+        return accept(next, "人覆盖了前稿。锁定解开，可行性决定清空。旧试做还在，但不能拿旧试做去上架。", ["配方草稿", "可行性"]);
+      }
+
+      if (type === ACTION.LOCK_RECIPE) {
+        if (!s.concept.locked) return reject(state, "还没锁定概念，不能锁配方草稿。");
+        if (s.recipe.locked) return reject(state, "配方草稿已经锁定。");
+        if (!s.recipe.lines.length) return reject(state, "配方草稿还是空的。先让 AI 出稿，或人覆盖一稿。");
+        s.recipe.locked = true;
+        s.recipe.lockGeneration += 1;
+        s.shopFit.decision = null;
+        return accept(next, "人锁定了配方草稿（第 " + s.recipe.lockGeneration + " 次）。后改会覆盖前稿。", ["配方锁定"]);
+      }
+
+      if (type === ACTION.SET_COMPARABLES) {
+        if (!s.concept.locked) return reject(state, "还没有本店菜名，先锁定概念再指定对照菜。系统不按字面猜相似。");
+        s.shopFit.comparables = comparablesFor(source);
+        return accept(next, "人指定了 " + s.shopFit.comparables.length + " 道对照菜。销量只当可行性信号。", ["对照菜"]);
+      }
+
+      if (type === ACTION.CONFIRM_SOP_YES || type === ACTION.CONFIRM_SOP_NO) {
+        if (!s.concept.locked) return reject(state, "先锁定概念。近义 SOP 按本店菜名与对标名搜标题，人确认才算。");
+        s.shopFit.nearbySopConfirmed = type === ACTION.CONFIRM_SOP_YES;
+        return accept(
+          next,
+          type === ACTION.CONFIRM_SOP_YES
+            ? "人确认：这些标题命中算近义 SOP。"
+            : "人确认：标题命中了，但不算近义。标题命中本身不等于已有近义。",
+          ["近义 SOP"]
+        );
+      }
+
+      if (type === ACTION.FIT_PASS || type === ACTION.FIT_FAIL) {
+        if (!s.recipe.locked) return reject(state, "本店可行性在配方草稿锁定之后。现在还没锁配方。");
+        if (!s.shopFit.comparables.length) return reject(state, "先由人指定 1–3 道对照菜。");
+        if (s.shopFit.nearbySopConfirmed == null) {
+          return reject(state, "近义 SOP 要人确认算或不算。标题命中还不算数。");
+        }
+        s.shopFit.decision = type === ACTION.FIT_PASS ? "pass" : "fail";
+        const margin = roughMargin(s);
+        const marginNote = margin ? "粗毛利 " + margin.margin.toFixed(2) + " 元只是信号，不自动拦截。" : "粗毛利还算不出来。";
+        if (type === ACTION.FIT_PASS) {
+          return accept(next, "人点了过。可以试做。" + marginNote, ["可行性"]);
+        }
+        return accept(next, "人点了不过。不能试做。人可以改口再点过，系统不按分数卡死。" + marginNote, ["可行性"]);
+      }
+
+      if (type === ACTION.TRIAL_FAIL || type === ACTION.TRIAL_PASS) {
+        if (s.shopFit.decision !== "pass") {
+          return reject(state, s.shopFit.decision === "fail"
+            ? "本店可行性是「不过」，不能试做。"
+            : "还没人点过本店可行性，不能试做。");
+        }
+        const n = s.trials.length + 1;
+        const day = 16 + n;
+        s.trials.push({
+          n,
+          date: "2026-08-" + String(day).padStart(2, "0"),
+          cook: "阿强",
+          taste: type === ACTION.TRIAL_PASS ? "咸甜对了" : "偏甜",
+          enterListing: type === ACTION.TRIAL_PASS,
+          recipeLockGeneration: s.recipe.lockGeneration,
+        });
+        return accept(
+          next,
+          type === ACTION.TRIAL_PASS
+            ? "记下第 " + n + " 条试做：口味通过，进入上架。上架标记还要人另点。"
+            : "记下第 " + n + " 条试做：口味不过，不进入上架。可以覆盖配方再来。",
+          ["试做"]
+        );
+      }
+
+      if (type === ACTION.LIST) {
+        if (s.shopFit.decision !== "pass") {
+          return reject(state, "上架前本店可行性要是「过」。");
+        }
+        const okTrial = s.trials.some(function (t) {
+          return t.enterListing && t.recipeLockGeneration === s.recipe.lockGeneration;
+        });
+        if (!okTrial) {
+          const old = s.trials.some(function (t) { return t.enterListing; });
+          if (old) {
+            return reject(state, "有过「进入上架」的试做，但那是旧配方锁定上的。覆盖再锁之后，要再试做一条。");
+          }
+          return reject(state, "要有一条针对当前配方、且勾了「进入上架」的试做，才能打上架标记。");
+        }
+        s.listed = true;
+        s.listedWrites = { sop: false, catalog: false, semi: false, pos: false };
+        return accept(next, "已打上架标记。没有写 SOP、菜品档口目录、半成品规则，也没有写回 POS。", ["上架标记"]);
+      }
+
+      return reject(state, "未知动作。");
+    }
+
+    function preview(state, action) {
+      const result = reduce(state, action);
+      return { ok: result.ok, reason: result.reason };
+    }
+
+    return {
+      ACTION,
+      LABELS,
+      STATIONS,
+      createInitialState,
+      reduce,
+      preview,
+      derivePhase,
+      roughMargin,
+    };
+  })();
+  </script>
+
+  <script>
+  (function () {
+    const SM = SubjectSM;
+    const FREEPLAY_GROUPS = [
+      { label: "简报 · 立项", keys: ["OPEN_FROM_LAUNCH", "OPEN_FROM_MOMENTUM_DURIAN", "OPEN_FROM_MOMENTUM_CHEESE", "OPEN_FROM_CLIP", "TAG_CLIP"] },
+      { label: "概念", keys: ["AI_CONCEPT", "FILL_CONCEPT", "FILL_CONCEPT_NO_PRICE", "LOCK_CONCEPT"] },
+      { label: "配方草稿", keys: ["AI_RECIPE", "OVERWRITE_RECIPE", "LOCK_RECIPE"] },
+      { label: "本店可行性", keys: ["SET_COMPARABLES", "CONFIRM_SOP_YES", "CONFIRM_SOP_NO", "FIT_PASS", "FIT_FAIL"] },
+      { label: "试做 · 收尾", keys: ["TRIAL_FAIL", "TRIAL_PASS", "LIST", "ABANDON"] },
+    ];
+
+    const SCENARIOS = [
+      {
+        id: "happy",
+        title: "1 顺路",
+        blurb: "从竞品上新一路走到上架。看人锁定、人过关、上架不写后厨主数据。",
+        steps: ["OPEN_FROM_LAUNCH", "AI_CONCEPT", "FILL_CONCEPT", "LOCK_CONCEPT", "AI_RECIPE", "LOCK_RECIPE", "SET_COMPARABLES", "CONFIRM_SOP_YES", "FIT_PASS", "TRIAL_PASS", "LIST"],
+      },
+      {
+        id: "clip",
+        title: "2 独立种草不能立项",
+        blurb: "独立种草摘录直接立项应失败；打食材标签后，从食材势立项应成功。",
+        steps: ["OPEN_FROM_CLIP", "TAG_CLIP", "OPEN_FROM_MOMENTUM_CHEESE"],
+      },
+      {
+        id: "skip",
+        title: "3 跳步非法",
+        blurb: "未锁概念就出配方、未锁配方就点可行性、不过就试做、没有「进入上架」的试做就打上架，都应驳回。中间人把可行性改口为过，只为走到最后一脚。",
+        steps: ["OPEN_FROM_LAUNCH", "AI_RECIPE", "FILL_CONCEPT", "LOCK_CONCEPT", "FIT_PASS", "AI_RECIPE", "LOCK_RECIPE", "SET_COMPARABLES", "CONFIRM_SOP_YES", "FIT_FAIL", "TRIAL_PASS", "FIT_PASS", "TRIAL_FAIL", "LIST"],
+      },
+      {
+        id: "retry",
+        title: "4 改方再试",
+        blurb: "试做失败后覆盖配方、再锁、再过可行性。旧试做保留，但不能拿旧试做上架。",
+        steps: ["OPEN_FROM_LAUNCH", "AI_CONCEPT", "FILL_CONCEPT", "LOCK_CONCEPT", "AI_RECIPE", "LOCK_RECIPE", "SET_COMPARABLES", "CONFIRM_SOP_YES", "FIT_PASS", "TRIAL_FAIL", "OVERWRITE_RECIPE", "LOCK_RECIPE", "FIT_PASS", "TRIAL_PASS", "LIST"],
+      },
+      {
+        id: "abandon",
+        title: "5 废弃",
+        blurb: "试做中废弃：阶段停住，记录还在，不能再上架。",
+        steps: ["OPEN_FROM_LAUNCH", "AI_CONCEPT", "FILL_CONCEPT", "LOCK_CONCEPT", "AI_RECIPE", "LOCK_RECIPE", "SET_COMPARABLES", "CONFIRM_SOP_YES", "FIT_PASS", "TRIAL_FAIL", "ABANDON", "LIST"],
+      },
+      {
+        id: "ai",
+        title: "6 AI 不能替人",
+        blurb: "连续出概念稿不会变成锁定；未锁定不能往下。第四稿应被拒。",
+        steps: ["OPEN_FROM_LAUNCH", "AI_CONCEPT", "AI_CONCEPT", "AI_CONCEPT", "AI_CONCEPT", "LOCK_CONCEPT", "AI_RECIPE", "FIT_PASS"],
+      },
+    ];
+
+    let state = SM.createInitialState();
+    let last = { ok: true, reason: "还没点过。从自由点或下面的情景开始。", changed: [], label: "" };
+    let scenarioId = SCENARIOS[0].id;
+    let stepIndex = 0;
+    let walkActive = false;
+
+    function dispatch(type, fromWalk) {
+      const result = SM.reduce(state, { type: SM.ACTION[type] });
+      state = result.state;
+      last = { ok: result.ok, reason: result.reason, changed: result.changed, label: SM.LABELS[type] };
+      if (fromWalk && walkActive) stepIndex += 1;
+      render();
+    }
+
+    function startScenario(id) {
+      scenarioId = id;
+      stepIndex = 0;
+      walkActive = true;
+      state = SM.createInitialState();
+      last = { ok: true, reason: "已回到简报，按这一路的按钮往下点。", changed: [], label: "开始情景" };
+      render();
+    }
+
+    function fmt(v) {
+      if (v == null || v === "") return null;
+      if (typeof v === "boolean") return v ? "是" : "否";
+      return String(v);
+    }
+
+    function dd(label, value, hi) {
+      const shown = fmt(value);
+      return "<div><dt>" + label + "</dt><dd class=\"" + (hi ? "hi" : "") + (shown == null ? " empty" : "") + "\">" +
+        (shown == null ? "（空）" : shown) + "</dd></div>";
+    }
+
+    function hi(name) {
+      return last.changed && last.changed.indexOf(name) >= 0;
+    }
+
+    function renderState() {
+      const s = state.subject;
+      const phase = SM.derivePhase(state);
+      const clip = state.brief.independentClip;
+      const margin = s ? SM.roughMargin(s) : null;
+      let html = "<p class=\"phase\">现在：" + phase + "</p><div class=\"grid\">";
+
+      html += "<div class=\"block\"><h3>简报夹具</h3><dl class=\"kv\">";
+      html += dd("竞品上新", state.brief.competitorLaunch.brand + " · " + state.brief.competitorLaunch.dishName);
+      html += dd("食材势", "榴莲（已在）" + (clip.ingredientTag ? "；芝士（种草已打标签）" : "；芝士（还没有）"));
+      html += dd("独立种草", clip.note, hi("种草摘录"));
+      html += dd("种草的食材标签", clip.ingredientTag, hi("种草摘录"));
+      html += "</dl></div>";
+
+      if (!s) {
+        html += "<div class=\"block\"><h3>研发课题</h3><p class=\"empty\">还没有课题。</p></div></div>";
+        return html;
+      }
+
+      html += "<div class=\"block\"><h3>研发课题</h3><dl class=\"kv\">";
+      html += dd("来源", s.source === "competitor_launch" ? "竞品上新" : "食材势", hi("课题"));
+      html += dd("立项标题", s.title, hi("课题"));
+      html += dd("废弃", s.abandoned, hi("废弃"));
+      html += dd("上架标记", s.listed, hi("上架标记"));
+      html += "</dl><p class=\"note\">起草材料只限本课题：对标摘录、建议档口提示。不看全店 SOP / 全店销量。</p>";
+      html += "<div class=\"chips\">" + (s.draftingMaterials.clips || []).map(function (c) { return "<span class=\"chip\">" + c + "</span>"; }).join("") + "</div></div>";
+
+      html += "<div class=\"block\"><h3>概念</h3><dl class=\"kv\">";
+      html += dd("AI 稿数", s.concept.aiDrafts.length + " / 3", hi("概念稿"));
+      html += dd("本店菜名", s.concept.shopDishName, hi("概念字段"));
+      html += dd("建议档口", s.concept.proposedStation, hi("概念字段"));
+      html += dd("拟定售价", s.concept.proposedPrice != null ? s.concept.proposedPrice + " 元" : null, hi("概念字段"));
+      html += dd("人已锁定", s.concept.locked, hi("概念锁定"));
+      html += "</dl>";
+      if (s.concept.aiDrafts.length) {
+        html += "<p class=\"note\">最近一稿卖点：" + s.concept.aiDrafts[s.concept.aiDrafts.length - 1].sellingPoint + "。AI 稿不会带上锁定。</p>";
+      }
+      html += "</div>";
+
+      html += "<div class=\"block\"><h3>配方草稿 · 粗毛利</h3><dl class=\"kv\">";
+      html += dd("AI 稿数", s.recipe.aiDrafts.length + " / 3", hi("配方草稿"));
+      html += dd("配料行", s.recipe.lines.length ? s.recipe.lines.map(function (l) { return l.name + " " + l.qty + l.unit + " × " + l.roughUnitCost; }).join("；") : null, hi("配方草稿"));
+      html += dd("整份损耗", s.recipe.wastePct != null ? s.recipe.wastePct + "%" : null, hi("配方草稿"));
+      html += dd("做法", s.recipe.method || null, hi("配方草稿"));
+      html += dd("人已锁定", s.recipe.locked, hi("配方锁定"));
+      html += dd("锁定次数", s.recipe.lockGeneration, hi("配方锁定"));
+      if (margin) {
+        html += dd("粗毛利", margin.margin.toFixed(2) + " 元 ＝ " + margin.price + " − " + margin.sum.toFixed(2) + " × (1+" + margin.waste + "%)");
+      } else {
+        html += dd("粗毛利", null);
+      }
+      html += "</dl><p class=\"note\">粗毛利不是财务口径。再差也能点「过」，系统不按分数拦截。</p></div>";
+
+      html += "<div class=\"block\"><h3>本店可行性</h3><dl class=\"kv\">";
+      html += dd("对照菜", s.shopFit.comparables.length ? s.shopFit.comparables.map(function (c) { return c.name + "（30 日 " + c.sales30d + "）"; }).join("、") : null, hi("对照菜"));
+      html += dd("标题命中的 SOP", s.shopFit.nearbySopHits.join("、"));
+      html += dd("人确认近义", s.shopFit.nearbySopConfirmed == null ? null : (s.shopFit.nearbySopConfirmed ? "算近义" : "不算近义"), hi("近义 SOP"));
+      html += dd("人的决定", s.shopFit.decision == null ? null : (s.shopFit.decision === "pass" ? "过" : "不过"), hi("可行性"));
+      html += "</dl></div>";
+
+      html += "<div class=\"block\"><h3>试做记录</h3>";
+      if (!s.trials.length) {
+        html += "<p class=\"empty\">还没有试做。</p>";
+      } else {
+        html += "<dl class=\"kv\">" + s.trials.map(function (t) {
+          return dd(
+            "第 " + t.n + " 条",
+            t.date + " · " + t.cook + " · " + t.taste + " · " + (t.enterListing ? "进入上架" : "不进入上架") + " · 针对第 " + t.recipeLockGeneration + " 次锁定的配方",
+            hi("试做")
+          );
+        }).join("") + "</dl>";
+      }
+      html += "</div>";
+
+      html += "<div class=\"block\"><h3>上架标记写了什么</h3><dl class=\"kv\">";
+      html += dd("写 SOP", s.listedWrites.sop, hi("上架标记"));
+      html += dd("写菜品档口目录", s.listedWrites.catalog, hi("上架标记"));
+      html += dd("写半成品规则", s.listedWrites.semi, hi("上架标记"));
+      html += dd("写回 POS", s.listedWrites.pos, hi("上架标记"));
+      html += "</dl><p class=\"note\">四项都应永远是「否」。建议档口不是目录里的权威映射。</p></div>";
+
+      html += "</div>";
+      return html;
+    }
+
+    function renderFlash() {
+      const el = document.getElementById("flash");
+      el.hidden = false;
+      el.className = "panel flash " + (last.ok ? "ok" : "reject");
+      el.innerHTML = "<b>" + (last.ok ? "刚才成了" : "刚才被驳回") + (last.label ? " · " + last.label : "") + "</b>" + last.reason;
+    }
+
+    function renderFreeplay() {
+      const root = document.getElementById("freeplay");
+      root.innerHTML = "";
+      FREEPLAY_GROUPS.forEach(function (g) {
+        const wrap = document.createElement("div");
+        wrap.className = "group";
+        const lab = document.createElement("label");
+        lab.textContent = g.label;
+        wrap.appendChild(lab);
+        const row = document.createElement("div");
+        row.className = "btns";
+        g.keys.forEach(function (key) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          const prev = SM.preview(state, { type: SM.ACTION[key] });
+          btn.textContent = SM.LABELS[key];
+          btn.title = prev.ok ? "现在可以" : prev.reason;
+          if (!prev.ok) btn.className = "blocked";
+          btn.addEventListener("click", function () { walkActive = false; dispatch(key, false); });
+          row.appendChild(btn);
+        });
+        wrap.appendChild(row);
+        root.appendChild(wrap);
+      });
+    }
+
+    function renderWalk() {
+      const tabs = document.getElementById("tabs");
+      tabs.innerHTML = "";
+      SCENARIOS.forEach(function (sc) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = sc.title;
+        b.setAttribute("aria-selected", sc.id === scenarioId ? "true" : "false");
+        b.addEventListener("click", function () { startScenario(sc.id); });
+        tabs.appendChild(b);
+      });
+      const sc = SCENARIOS.filter(function (x) { return x.id === scenarioId; })[0];
+      document.getElementById("walk-blurb").textContent = sc.blurb;
+      const steps = document.getElementById("steps");
+      steps.innerHTML = "";
+      sc.steps.forEach(function (key, i) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = (i + 1) + ". " + SM.LABELS[key];
+        if (i < stepIndex) btn.className = "done";
+        if (i === stepIndex) btn.className = "current primary";
+        if (i > stepIndex) btn.disabled = true;
+        if (i === stepIndex) {
+          btn.addEventListener("click", function () { walkActive = true; dispatch(key, true); });
+        }
+        steps.appendChild(btn);
+      });
+      document.getElementById("walk-done").hidden = stepIndex < sc.steps.length;
+    }
+
+    function render() {
+      document.getElementById("state-panel").innerHTML = renderState();
+      renderFlash();
+      renderFreeplay();
+      renderWalk();
+    }
+
+    document.getElementById("reset").addEventListener("click", function () {
+      walkActive = false;
+      stepIndex = 0;
+      state = SM.createInitialState();
+      last = { ok: true, reason: "已清空。简报夹具还在，课题没有了。", changed: [], label: "清空重来" };
+      render();
+    });
+
+    render();
+  })();
+  </script>
+</body>
+</html>

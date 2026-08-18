@@ -82,6 +82,27 @@ export function applyServeSelection(state, event) {
     return emptyServeSelection()
   }
 
+  if (event.type === 'syncLiveWork') {
+    const live = new Set((event.liveOrderIds || []).map(String).filter(Boolean))
+    const chunkMax = event.chunkMax && typeof event.chunkMax === 'object' ? event.chunkMax : {}
+    let tablePick = current.tablePick
+    if (tablePick) {
+      const selectedOrderIds = tablePick.selectedOrderIds.filter((id) => live.has(String(id)))
+      if (!Object.prototype.hasOwnProperty.call(chunkMax, tablePick.chunkId)) {
+        tablePick = null
+      } else {
+        tablePick = { ...tablePick, selectedOrderIds }
+      }
+    }
+    const cardCounts = {}
+    for (const [chunkId, count] of Object.entries(current.cardCounts || {})) {
+      const max = Number(chunkMax[chunkId]) || 0
+      const clamped = Math.min(Number(count) || 0, max)
+      if (clamped > 0) cardCounts[chunkId] = clamped
+    }
+    return { cardCounts, tablePick }
+  }
+
   return current
 }
 
