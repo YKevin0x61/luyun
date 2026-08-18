@@ -219,3 +219,12 @@ class SteamerAwaitingCancelNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(still.get("placement"), before_placement)
         self.assertEqual(still["dish_status"], "已取消")
         self.assertFalse(still.get("ready_time"))
+
+    def test_parallel_refund_pending_row_is_not_awaiting_notice(self):
+        refund = {
+            "business_flow_id": "t8_虾饺_refund_1",
+            "dish_status": "待出餐",
+            "status": "退菜",
+            "quantity": 1,
+        }
+        self.assertIsNone(derive_steamer_phase(refund))

@@ -144,10 +144,10 @@ describe('useDeliveryCancelAlert', () => {
     delete globalThis.uni.vibrateLong
   })
 
-  it('higherKindClaimed is true only for this moment after cancel plays', () => {
+  it('higherKindClaimed stays true while the banner is visible', () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
-    const { syncOrders, higherKindClaimed } = useDeliveryCancelAlert({
+    const { syncOrders, higherKindClaimed, dismissDeliveryCancelAlert } = useDeliveryCancelAlert({
       watchedStations: ['shulong']
     })
     expect(syncOrders([makeOrder({ dish_status: '已制作待上菜' })])).toBe(false)
@@ -157,6 +157,9 @@ describe('useDeliveryCancelAlert', () => {
     expect(higherKindClaimed()).toBe(true)
 
     vi.setSystemTime(1_000_000 + 1000)
+    expect(higherKindClaimed()).toBe(true)
+
+    dismissDeliveryCancelAlert()
     expect(higherKindClaimed()).toBe(false)
   })
 

@@ -97,7 +97,9 @@ export function useKitchenAlerts(options = {}) {
       now
     })
     publishState(state)
-    const cancelClaimed = Boolean(options.cancelClaimed)
+    const cancelClaimed = Boolean(
+      options.cancelClaimed || (getCancelClaimed && getCancelClaimed())
+    )
     if (effects.dingCount > 0 && !cancelClaimed) {
       playNewOrderDing(effects.dingCount, {
         tone: config.newOrderTone,
