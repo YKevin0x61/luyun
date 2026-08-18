@@ -75,6 +75,29 @@ describe('countPendingAndUrgent', () => {
     expect(countPendingAndUrgent(dishes, PENDING)).toEqual({ total: 1, urgent: 1 })
   })
 
+  it('excludes 等叫 from 待制作', () => {
+    const dishes = [
+      {
+        orders: [
+          { dish_status: PENDING, quantity: 2 },
+          { dish_status: PENDING, quantity: 3, is_hold: true }
+        ],
+        urgentCount: 1
+      }
+    ]
+    expect(countPendingAndUrgent(dishes, PENDING)).toEqual({ total: 2, urgent: 1 })
+  })
+
+  it('does not count 等叫-only dishes toward 紧急', () => {
+    const dishes = [
+      {
+        orders: [{ dish_status: PENDING, quantity: 2, is_hold: true }],
+        urgentCount: 4
+      }
+    ]
+    expect(countPendingAndUrgent(dishes, PENDING)).toEqual({ total: 0, urgent: 0 })
+  })
+
   it('excludes 已取消 退示 from 待制作 even when quantity is 0', () => {
     const dishes = [
       {

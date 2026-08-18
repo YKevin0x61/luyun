@@ -652,3 +652,107 @@ def test_rush_path_is_not_an_order_id(orders_client):
     assert resp.status_code == 200
     missing = client.get("/api/orders/not-a-real-order")
     assert missing.status_code == 404
+
+
+def test_floor_console_http_excludes_delivery(orders_client):
+    client, db, _admin_headers = orders_client
+    now = datetime.now(CHINA_TZ)
+    _run_async(
+        db.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "dine",
+                    "table_number": "8",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": now,
+                    "station": "changfen",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+                {
+                    "business_flow_id": "wm",
+                    "table_number": "W1",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": now,
+                    "station": "changfen",
+                    "status": "未结",
+                    "source": "delivery",
+                },
+            ]
+        )
+    )
+    resp = client.get("/api/orders/floor-console", params=_hold_window())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "stations" not in body
+    numbers = [table["table_number"] for table in body["tables"]]
+    assert numbers == ["8"]
+
+
+def test_floor_console_http_drops_empty_pos_table(orders_client):
+    client, db, admin_headers = orders_client
+    now = datetime.now(CHINA_TZ)
+    _run_async(
+        db.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "open",
+                    "table_number": "8",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": now,
+                    "station": "changfen",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+                {
+                    "business_flow_id": "gone",
+                    "table_number": "9",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": now,
+                    "station": "changfen",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+            ]
+        )
+    )
+    by_flow = {row["business_flow_id"]: row for row in _run_async(db.get_orders(limit=-1))}
+    cooked = client.post(
+        "/api/orders/complete-cooking",
+        json={
+            "dish_name": "虾饺",
+            "station": "changfen",
+            "complete_quantity": 1,
+            "orders": [
+                {
+                    "order_id": by_flow["gone"]["_id"],
+                    "table_number": "9",
+                    "complete_quantity": 1,
+                    "original_quantity": 1,
+                }
+            ],
+            "operator_id": "floor-http",
+            "ready_time": now.isoformat(),
+        },
+        headers=admin_headers,
+    )
+    assert cooked.status_code == 200
+    _run_async(
+        db.save_table_data(
+            [
+                {"table_number": "8", "amount": 88.0, "people": 2, "duration": 20},
+                {"table_number": "9", "amount": 0.0, "people": 0, "duration": 0},
+            ]
+        )
+    )
+    resp = client.get("/api/orders/floor-console", params=_hold_window())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "stations" not in body
+    numbers = [table["table_number"] for table in body["tables"]]
+    assert numbers == ["8"]
+    assert body["tables"][0]["lines"][0]["phase"] == "待出餐"

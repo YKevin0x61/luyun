@@ -137,5 +137,37 @@ export const ordersAPI = {
         order_ids: intent.orderIds
       }
     })
+  },
+
+  async getFloorConsole(params = {}) {
+    return await request({
+      url: '/api/orders/floor-console',
+      method: 'GET',
+      params
+    })
+  },
+
+  async holdOrders(orderIds) {
+    return await request({
+      url: '/api/orders/hold',
+      method: 'POST',
+      data: { order_ids: orderIds }
+    })
+  },
+
+  async fireOrders(orderIds) {
+    return await request({
+      url: '/api/orders/fire',
+      method: 'POST',
+      data: { order_ids: orderIds }
+    })
+  },
+
+  async rushOrders(orderIds) {
+    return await request({
+      url: '/api/orders/rush',
+      method: 'POST',
+      data: { order_ids: orderIds }
+    })
   }
 }
