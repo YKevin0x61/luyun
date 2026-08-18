@@ -138,6 +138,7 @@ export function useKitchenAlerts(options = {}) {
   }
 
   function acknowledge() {
+    // 新单已确认 only. 退菜已确认 is dismissDeliveryCancelAlert.
     const next = acknowledgeEngine(engineState.value)
     publishState(next)
   }

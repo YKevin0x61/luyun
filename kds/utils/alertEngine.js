@@ -6,6 +6,7 @@
  */
 
 import { DISH_STATUS, isRefundOrder } from './constants.js'
+import { isNeverLoadedCancel } from './cancelAck.js'
 
 /** @typedef {'green' | 'yellow' | 'red'} BorderState */
 /** @typedef {'yellow' | 'busy'} BadgeMode */
@@ -116,6 +117,10 @@ function isCancelHold(order) {
   return Boolean(order && order.dish_status === '已取消' && order.placement)
 }
 
+function isCancelNotice(order) {
+  return isNeverLoadedCancel(order)
+}
+
 /**
  * @param {object[]} orders
  * @param {string[]} watchedStations
@@ -127,7 +132,8 @@ function buildRelevantIndex(orders, watchedStations) {
   for (const order of orders) {
     if (!order) continue
     const hold = isCancelHold(order)
-    if (isRefundOrder(order) && !hold) continue
+    const notice = isCancelNotice(order)
+    if (isRefundOrder(order) && !hold && !notice) continue
     if (!isWatched(watchedStations, order)) continue
     const flowId = flowIdOf(order)
     if (!flowId) continue
@@ -138,9 +144,10 @@ function buildRelevantIndex(orders, watchedStations) {
       status: order.dish_status,
       quantity: Number.isFinite(quantity) ? quantity : 0,
       orderTime: new Date(order.order_time).getTime(),
-      awaiting: pending && !hasPlacement,
+      awaiting: pending && !hasPlacement && !notice,
       steaming: pending && hasPlacement,
       cancelHold: hold,
+      cancelNotice: notice,
       loadedAt: asTimestamp(order.placement?.loaded_at)
     })
   }
@@ -180,6 +187,7 @@ function hasPendingWork(index) {
 }
 
 function isNewOrderEntry(entry) {
+  if (entry.cancelHold || entry.cancelNotice) return false
   return Boolean(entry.awaiting)
 }
 

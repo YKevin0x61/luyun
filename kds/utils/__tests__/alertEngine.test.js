@@ -550,5 +550,44 @@ describe('alertEngine', () => {
       expect(state.newBadges.size).toBe(0)
       expect(state.borderState).toBe('green')
     })
+
+    it('待上笼退示 does not redden the border and is not a 新单事件', () => {
+      const baseline = prime([])
+      const notice = makeOrder({
+        business_flow_id: 'notice-1',
+        dish_status: '已取消',
+        status: '退菜'
+      })
+      const { state, effects } = step(baseline, {
+        orders: [notice],
+        config: defaultConfig(),
+        now: T0
+      })
+      expect(effects.dingCount).toBe(0)
+      expect(state.awaitingAck).toBe(false)
+      expect(state.newBadges.size).toBe(0)
+      expect(state.borderState).toBe('green')
+    })
+
+    it('a 待上笼 line becoming 待上笼退示 is not a 新单事件 and clears pending red', () => {
+      const live = makeOrder({ business_flow_id: 'same-line' })
+      const baseline = prime([live])
+      expect(baseline.borderState).toBe('red')
+      const { state, effects } = step(baseline, {
+        orders: [
+          makeOrder({
+            business_flow_id: 'same-line',
+            dish_status: '已取消',
+            status: '退菜'
+          })
+        ],
+        config: defaultConfig(),
+        now: T0 + 1000
+      })
+      expect(effects.dingCount).toBe(0)
+      expect(state.awaitingAck).toBe(false)
+      expect(state.newBadges.size).toBe(0)
+      expect(state.borderState).toBe('green')
+    })
   })
 })

@@ -10,6 +10,11 @@ import {
   dismiss as dismissEngine,
   step
 } from '../utils/deliveryCancelEngine.js'
+import {
+  acknowledgeNeverLoadedCancels,
+  businessDateKey,
+  loadAcknowledgedCancelIds
+} from '../utils/cancelAck.js'
 import { playCancelAlert } from '../utils/sound.js'
 import { ScreenSettingsManager } from '../utils/storage.js'
 
@@ -30,6 +35,7 @@ export function useDeliveryCancelAlert(options = {}) {
   /** @type {import('vue').ShallowRef<ReturnType<typeof createInitialState>>} */
   const engineState = shallowRef(createInitialState())
   const deliveryCancelAlert = ref({ ...engineState.value.banner })
+  const acknowledgedCancelIds = ref([...loadAcknowledgedCancelIds(businessDateKey())])
   let claimedAt = null
   let alertParams = ScreenSettingsManager.getAlertParams()
   /** @type {object[] | null} */
@@ -38,8 +44,13 @@ export function useDeliveryCancelAlert(options = {}) {
   let tickTimer = null
   let started = false
 
+  function reloadAcked(now = Date.now()) {
+    acknowledgedCancelIds.value = [...loadAcknowledgedCancelIds(businessDateKey(now))]
+  }
+
   function reloadConfig() {
     alertParams = ScreenSettingsManager.getAlertParams()
+    reloadAcked()
   }
 
   function resolveWatchedStations() {
@@ -111,11 +122,18 @@ export function useDeliveryCancelAlert(options = {}) {
   }
 
   function dismissDeliveryCancelAlert() {
+    const next = acknowledgeNeverLoadedCancels({
+      orders: latestOrders || [],
+      watchedStations: resolveWatchedStations(),
+      now: Date.now()
+    })
+    acknowledgedCancelIds.value = [...next]
     publish(dismissEngine(engineState.value))
   }
 
   return {
     deliveryCancelAlert,
+    acknowledgedCancelIds,
     syncOrders,
     dismissDeliveryCancelAlert,
     setWatchedStations,

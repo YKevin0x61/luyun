@@ -60,6 +60,7 @@ const cancelHigherKindClaimed = vi.fn(() => false)
 vi.mock('../useDeliveryCancelAlert.js', () => ({
   useDeliveryCancelAlert: (options) => ({
     deliveryCancelAlert: ref({ visible: false }),
+    acknowledgedCancelIds: ref([]),
     syncOrders: syncDeliveryOrders,
     dismissDeliveryCancelAlert: vi.fn(),
     setWatchedStations,
@@ -222,5 +223,13 @@ describe('useKitchenOrderSession', () => {
     session.stop()
     expect(stopAlerts).toHaveBeenCalled()
     expect(stopCancel).toHaveBeenCalled()
+  })
+
+  it('exposes 退菜已确认 ids separately from 新单已确认', () => {
+    const session = useKitchenOrderSession({
+      ordersStore: { orders: [], fetchOrders: vi.fn() }
+    })
+    expect(session.acknowledgedCancelIds.value).toEqual([])
+    expect(session.acknowledgeNewOrders).not.toBe(session.dismissDeliveryCancelAlert)
   })
 })

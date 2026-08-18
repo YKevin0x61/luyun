@@ -40,6 +40,7 @@ def derive_steamer_phase(
         return STEAMER_PHASE_CANCEL_HOLD
     if cancelled:
         # 抽笼 keeps loaded_at; 待上笼退示 is only for never-loaded cancels.
+        # Ack is device-local; server always keeps 待上笼退示 so load/complete stay blocked.
         if order.get("loaded_at"):
             return None
         return _awaiting_cancel_notice_phase(order, now=now, notice_seconds=notice_seconds)
@@ -56,16 +57,8 @@ def _awaiting_cancel_notice_phase(
     now: Optional[datetime],
     notice_seconds: Optional[int],
 ) -> Optional[str]:
-    window = steamer_awaiting_cancel_notice_seconds() if notice_seconds is None else int(notice_seconds)
-    cancelled_at = order.get("updated_at")
-    if not cancelled_at:
-        return None
-    start = ensure_beijing_datetime(cancelled_at)
-    moment = datetime.now(CHINA_TZ) if now is None else ensure_beijing_datetime(now)
-    elapsed = (moment - start).total_seconds()
-    if 0 <= elapsed < window:
-        return STEAMER_PHASE_AWAITING_NOTICE
-    return None
+    # now / notice_seconds kept for callers; 退示 no longer expires by shop seconds.
+    return STEAMER_PHASE_AWAITING_NOTICE
 
 
 def steamer_port_capacity() -> int:
