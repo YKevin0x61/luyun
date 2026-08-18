@@ -187,3 +187,59 @@ class ReleaseBundleInstallAdapterTest(unittest.TestCase):
                 (live / "data" / "shop.db").read_text(encoding="utf-8"), "precious\n"
             )
             self.assertFalse(prev.exists())
+
+    def test_activate_preserves_cred_key_so_webhook_still_decrypts(self):
+        import os
+        import tempfile
+
+        from cryptography.fernet import Fernet
+
+        from services.wecom_push_service import (
+            decrypt_webhook_url,
+            encrypt_webhook_url,
+        )
+
+        valid = (
+            "https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
+            "?key=693a91f6-7aoc-4bc4-97a0-0ec2sifa5aaa"
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            live = base / "luyun"
+            live.mkdir()
+            _write_bundle_tree(
+                live, tag="v0.1.0", fingerprint="sha256:old", marker="old-app"
+            )
+            data = live / "data"
+            data.mkdir()
+            key = Fernet.generate_key()
+            (data / ".cred_key").write_bytes(key)
+            os.chmod(data / ".cred_key", 0o600)
+
+            from unittest.mock import patch
+
+            previous = os.environ.pop("LUYUN_CRED_KEY", None)
+            try:
+                with patch("services.credentials_store._DATA_DIR", data), \
+                     patch("services.credentials_store._KEY_FILE", data / ".cred_key"):
+                    encrypted = encrypt_webhook_url(valid)
+            finally:
+                if previous is not None:
+                    os.environ["LUYUN_CRED_KEY"] = previous
+
+            staging = base / "stage"
+            staging.mkdir()
+            archive = _make_bundle_archive(
+                staging, tag="v0.2.0", fingerprint="sha256:new", marker="new-app"
+            )
+            adapter = ReleaseBundleInstallAdapter(
+                live, github_repo="owner/repo", token=None
+            )
+            adapter._verified_bundle = archive
+            adapter.activate_bundle("v0.2.0")
+
+            new_key = live / "data" / ".cred_key"
+            self.assertTrue(new_key.is_file())
+            with patch("services.credentials_store._DATA_DIR", live / "data"), \
+                 patch("services.credentials_store._KEY_FILE", new_key):
+                self.assertEqual(decrypt_webhook_url(encrypted), valid)

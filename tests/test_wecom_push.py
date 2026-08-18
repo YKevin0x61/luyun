@@ -156,6 +156,43 @@ class WeComWebhookHelperTest(unittest.TestCase):
                 self.assertNotIn("qyapi", encrypted)
                 self.assertEqual(decrypt_webhook_url(encrypted), VALID_WEBHOOK)
 
+    def test_env_key_survives_after_env_is_unset(self):
+        """LUYUN_CRED_KEY must be persisted so a later process without the env can decrypt."""
+        from pathlib import Path
+
+        from cryptography.fernet import Fernet
+
+        env_key = Fernet.generate_key().decode("ascii")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            key_path = Path(tmpdir) / ".cred_key"
+            with patch("services.credentials_store._DATA_DIR", Path(tmpdir)), \
+                 patch("services.credentials_store._KEY_FILE", key_path):
+                previous = os.environ.get("LUYUN_CRED_KEY")
+                os.environ["LUYUN_CRED_KEY"] = env_key
+                try:
+                    encrypted = encrypt_webhook_url(VALID_WEBHOOK)
+                finally:
+                    os.environ.pop("LUYUN_CRED_KEY", None)
+                    if previous is not None:
+                        os.environ["LUYUN_CRED_KEY"] = previous
+                self.assertEqual(decrypt_webhook_url(encrypted), VALID_WEBHOOK)
+
+    def test_missing_key_does_not_mint_replacement_when_ciphertext_exists(self):
+        """A vanished .cred_key must not be replaced with a fresh key (orphans webhooks)."""
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            key_path = data_dir / ".cred_key"
+            with patch("services.credentials_store._DATA_DIR", data_dir), \
+                 patch("services.credentials_store._KEY_FILE", key_path):
+                encrypted = encrypt_webhook_url(VALID_WEBHOOK)
+                (data_dir / "credentials.enc").write_bytes(b"placeholder")
+                key_path.unlink()
+                with self.assertRaises(ValueError):
+                    decrypt_webhook_url(encrypted)
+                self.assertFalse(key_path.exists())
+
     def test_validate_schedule_time(self):
         self.assertEqual(validate_schedule_time("09:05"), "09:05")
         with self.assertRaises(ValueError):

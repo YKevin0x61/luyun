@@ -45,7 +45,9 @@ def encrypt_webhook_url(webhook_url: str) -> str:
 def decrypt_webhook_url(encrypted_url: str) -> str:
     try:
         return _fernet().decrypt(encrypted_url.encode("ascii")).decode("utf-8")
-    except (InvalidToken, UnicodeError, ValueError) as exc:
+    except InvalidToken as exc:
+        raise ValueError("webhook 解密失败") from exc
+    except UnicodeError as exc:
         raise ValueError("webhook 解密失败") from exc
 
 

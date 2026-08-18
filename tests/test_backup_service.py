@@ -6,6 +6,7 @@ import io
 import json
 import os
 import sqlite3
+import stat
 import struct
 import tarfile
 import tempfile
@@ -279,6 +280,56 @@ class SnapshotTest(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_snapshot_keep_limit_and_list_order(self):
+        cred_path = os.path.join(self._tmpdir.name, "credentials.enc")
+        with open(cred_path, "wb") as f:
+            f.write(b"test")
+
+        timestamps = []
+        base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=CHINA_TZ)
+        for i in range(SNAPSHOT_KEEP + 2):
+            fake_now = base.replace(second=i)
+            with mock.patch(
+                "services.backup_service.datetime",
+            ) as mock_dt:
+                mock_dt.now.return_value = fake_now
+                mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+                ts = backup_service.create_restore_snapshot(
+                    self.app_db,
+                    self.app_db,
+                    cred_path,
+                )
+            timestamps.append(ts)
+
+        root = backup_service._snapshot_root()
+        remaining = [d.name for d in root.iterdir() if d.is_dir()]
+        self.assertEqual(len(remaining), SNAPSHOT_KEEP)
+
+        listed = backup_service.list_snapshots()
+        self.assertEqual(len(listed), SNAPSHOT_KEEP)
+        listed_ts = [item["ts"] for item in listed]
+        self.assertEqual(listed_ts, sorted(listed_ts, reverse=True))
+        self.assertNotIn(timestamps[0], listed_ts)
+        self.assertNotIn(timestamps[1], listed_ts)
+
+    def test_snapshot_copies_cred_key_beside_credentials(self):
+        cred_path = os.path.join(self._tmpdir.name, "credentials.enc")
+        key_path = os.path.join(self._tmpdir.name, ".cred_key")
+        with open(cred_path, "wb") as f:
+            f.write(b"enc-blob")
+        with open(key_path, "wb") as f:
+            f.write(b"fernet-key-material")
+        os.chmod(key_path, 0o600)
+
+        ts = backup_service.create_restore_snapshot(
+            self.app_db,
+            self.app_db,
+            cred_path,
+        )
+        snap_dir = backup_service._snapshot_root() / ts
+        copied_key = snap_dir / ".cred_key"
+        self.assertTrue(copied_key.is_file())
+        self.assertEqual(copied_key.read_bytes(), b"fernet-key-material")
+        self.assertEqual(stat.S_IMODE(copied_key.stat().st_mode), 0o600)
         cred_path = os.path.join(self._tmpdir.name, "credentials.enc")
         with open(cred_path, "wb") as f:
             f.write(b"test")

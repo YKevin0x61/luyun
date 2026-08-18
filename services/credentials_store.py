@@ -133,28 +133,61 @@ def _ensure_data_dir() -> None:
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _persist_key(key: bytes) -> None:
+    """Write the active Fernet key to ``.cred_key`` so it survives env loss / tree swap."""
+    normalized = key.strip()
+    _KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _KEY_FILE.exists() and _KEY_FILE.read_bytes().strip() == normalized:
+        return
+    _KEY_FILE.write_bytes(normalized)
+    try:
+        os.chmod(_KEY_FILE, _FILE_MODE)
+    except OSError:
+        pass
+
+
+def _sibling_ciphertext_exists() -> bool:
+    """True when this key directory already holds Fernet ciphertext we must not orphan."""
+    folder = _KEY_FILE.parent
+    return (folder / "credentials.enc").is_file() or (folder / "github_release.enc").is_file()
+
+
 def _load_or_create_key() -> bytes:
     """读取或创建 Fernet 密钥。
 
     优先级：``LUYUN_CRED_KEY`` 环境变量 > ``data/.cred_key`` 本地文件。
+    使用环境变量时写回 ``.cred_key``，避免系统更新后 env 丢失导致 webhook / 凭据解密失败。
+    已有密文时禁止静默生成新密钥。
     """
     env_key = os.environ.get("LUYUN_CRED_KEY")
-    if env_key:
+    if env_key and env_key.strip():
         try:
-            return env_key.strip().encode("ascii")
+            raw = env_key.strip().encode("ascii")
+            Fernet(raw)
+            _persist_key(raw)
+            return raw
         except Exception as exc:
             logger.warning("环境变量 LUYUN_CRED_KEY 不是有效 Fernet 密钥: %s", exc)
 
     _ensure_data_dir()
     if _KEY_FILE.exists():
-        return _KEY_FILE.read_bytes().strip()
+        stored = _KEY_FILE.read_bytes().strip()
+        if stored:
+            try:
+                Fernet(stored)
+                return stored
+            except Exception as exc:
+                logger.warning("本地凭据密钥文件无效: %s", exc)
+
+    if _sibling_ciphertext_exists():
+        raise ValueError(
+            "加密密钥缺失（LUYUN_CRED_KEY / data/.cred_key）。"
+            "已有加密凭据，拒绝自动生成新密钥以免 webhook 与登录密文失效。"
+            "请恢复 data/.cred_key 或设置与加密时相同的 LUYUN_CRED_KEY。"
+        )
 
     key = Fernet.generate_key()
-    _KEY_FILE.write_bytes(key)
-    try:
-        os.chmod(_KEY_FILE, _FILE_MODE)
-    except OSError:
-        pass
+    _persist_key(key)
     logger.warning(
         "🔑 已自动生成凭据加密密钥 %s，请妥善备份。要覆盖请在环境变量 LUYUN_CRED_KEY 中提供 base64 Fernet key。",
         _KEY_FILE,

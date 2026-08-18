@@ -285,6 +285,15 @@ def create_restore_snapshot(
         except OSError:
             pass
 
+    key_file_path = Path(cred_file_path).parent / ".cred_key"
+    if os.path.isfile(key_file_path):
+        dest_key = snap_dir / ".cred_key"
+        shutil.copy2(key_file_path, dest_key)
+        try:
+            os.chmod(dest_key, 0o600)
+        except OSError:
+            pass
+
     meta = {
         "ts": ts,
         "created_at": datetime.now(CHINA_TZ).isoformat(),
