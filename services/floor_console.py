@@ -159,6 +159,8 @@ def _pick_substitute(
             continue
         if (row.get("dish_name") or "") != dish:
             continue
+        if not is_dine_in(row):
+            continue
         if not is_unloaded_pending_work(row):
             continue
         candidates.append(row)
@@ -230,10 +232,11 @@ async def hold_portions(orders: OrdersPort, payload: Dict) -> Dict[str, Any]:
         rush_ids=[],
         substitutes=substitutes,
     )
-    _raise_if_all_failed(conflicts, applied["updated_count"], "等叫")
+    updated_count = len(direct_holds) + len(substitutes)
+    _raise_if_all_failed(conflicts, updated_count, "等叫")
     return {
         "success": True,
-        "updated_count": applied["updated_count"],
+        "updated_count": updated_count,
         "conflicts": conflicts,
         "stations": applied["stations"],
         "substituted": [

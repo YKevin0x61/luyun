@@ -5,7 +5,8 @@ import {
   canRush,
   defaultSelectedOrderIds,
   groupLinesByDishName,
-  isActionable
+  isActionable,
+  nextSelectedOrderIds
 } from '../floorConsole.js'
 
 describe('floorConsole actionability', () => {
@@ -55,6 +56,16 @@ describe('floorConsole default select', () => {
       { order_id: 'd', dish_name: '虾饺', phase: '已制作待上菜' }
     ]
     expect(defaultSelectedOrderIds(lines)).toEqual(['a', 'b'])
+  })
+
+  it('keeps an explicit empty selection after refresh instead of re-defaulting', () => {
+    const lines = [
+      { order_id: 'a', dish_name: '虾饺', phase: '待出餐' },
+      { order_id: 'b', dish_name: '虾饺', phase: '待上笼' }
+    ]
+    expect(nextSelectedOrderIds(undefined, lines, { groupSeen: false })).toEqual(['a', 'b'])
+    expect(nextSelectedOrderIds([], lines, { groupSeen: true })).toEqual([])
+    expect(nextSelectedOrderIds(['a', 'gone'], lines, { groupSeen: true })).toEqual(['a'])
   })
 })
 

@@ -208,13 +208,9 @@ def test_hold_steaming_swaps_same_dish_awaiting(orders_client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["success"] is True
+    assert body["updated_count"] == 1
     assert body["conflicts"] == []
-    assert body["substituted"] == [
-        {
-            "held_id": str(by_flow["t8"]["_id"]),
-            "substitute_id": str(by_flow["t9"]["_id"]),
-        }
-    ]
+    assert "substituted" not in body
     assert "stations" not in body
     held = _run_async(db.get_order_by_id(by_flow["t8"]["_id"]))
     sub = _run_async(db.get_order_by_id(by_flow["t9"]["_id"]))
@@ -282,7 +278,7 @@ def test_hold_steaming_without_substitute_partial_200(orders_client):
     assert body["conflicts"] == [
         {"order_id": str(by_flow["steam"]["_id"]), "reason": "在蒸且无替补"}
     ]
-    assert body.get("substituted") == []
+    assert "substituted" not in body
     assert "stations" not in body
     held = _run_async(db.get_order_by_id(by_flow["await"]["_id"]))
     steaming = _run_async(db.get_order_by_id(by_flow["steam"]["_id"]))
