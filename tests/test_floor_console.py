@@ -109,6 +109,7 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         by_flow = await self._by_flow()
         await _load(self.db.orders, by_flow["t8"]["_id"])
         result = await hold_portions(self.db.orders, {"order_ids": [by_flow["t8"]["_id"]]})
+        self.assertEqual(result["updated_count"], 1)
         self.assertEqual(len(result["substituted"]), 1)
         self.assertEqual(
             result["substituted"],
@@ -172,6 +173,30 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(other.get("placement"))
         self.assertEqual(other.get("table_number"), "9")
         self.assertTrue(is_pending_kitchen_work(other))
+
+    async def test_steaming_hold_does_not_use_delivery_same_dish(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(
+                    business_flow_id="wm",
+                    table_number="W1",
+                    source="delivery",
+                ),
+                _order(business_flow_id="steam", table_number="8"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await _load(self.db.orders, by_flow["steam"]["_id"])
+        with self.assertRaises(HTTPException) as raised:
+            await hold_portions(self.db.orders, {"order_ids": [by_flow["steam"]["_id"]]})
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "在蒸且无替补")
+        delivery = await self.db.orders.get_order_by_id(by_flow["wm"]["_id"])
+        steam = await self.db.orders.get_order_by_id(by_flow["steam"]["_id"])
+        self.assertIsNone(delivery.get("placement"))
+        self.assertFalse(is_hold(delivery))
+        self.assertFalse(is_hold(steam))
+        self.assertIsNotNone(steam.get("placement"))
 
     async def test_steaming_hold_does_not_cross_dish(self):
         await self.db.orders.batch_insert_orders(

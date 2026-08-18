@@ -26,6 +26,12 @@ export function defaultSelectedOrderIds(lines) {
   return (lines || []).filter(isActionable).map((line) => line.order_id)
 }
 
+export function nextSelectedOrderIds(previous, lines, { groupSeen = false } = {}) {
+  if (!groupSeen) return defaultSelectedOrderIds(lines)
+  const allowed = new Set(defaultSelectedOrderIds(lines))
+  return (previous || []).filter((id) => allowed.has(id))
+}
+
 export function groupLinesByDishName(lines) {
   const byDish = new Map()
   for (const line of lines || []) {

@@ -602,6 +602,7 @@ async def hold_orders(
     try:
         result = await floor_hold_portions(db.orders, body.model_dump())
         stations = result.pop("stations", [])
+        result.pop("substituted", None)
         await _notify_orders_completed(stations)
         return result
     except HTTPException:

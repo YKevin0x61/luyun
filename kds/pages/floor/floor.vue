@@ -81,9 +81,9 @@ import {
   canFire,
   canHold,
   canRush,
-  defaultSelectedOrderIds,
   groupLinesByDishName,
-  isActionable
+  isActionable,
+  nextSelectedOrderIds
 } from '../../utils/floorConsole.js'
 
 const SUBSCRIPTION_ID = 'kds-floor-orders'
@@ -110,9 +110,10 @@ export default {
         for (const group of table.groups) {
           const key = groupKey(table.table_number, group.dishName)
           nextKeys.add(key)
-          const actionableIds = new Set(group.lines.filter(isActionable).map((line) => line.order_id))
-          const prev = (selectedByGroup[key] || []).filter((id) => actionableIds.has(id))
-          selectedByGroup[key] = prev.length > 0 ? prev : defaultSelectedOrderIds(group.lines)
+          const groupSeen = Object.prototype.hasOwnProperty.call(selectedByGroup, key)
+          selectedByGroup[key] = nextSelectedOrderIds(selectedByGroup[key], group.lines, {
+            groupSeen
+          })
         }
       }
       for (const key of Object.keys(selectedByGroup)) {
