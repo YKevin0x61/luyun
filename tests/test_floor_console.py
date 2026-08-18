@@ -110,14 +110,159 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         await _load(self.db.orders, by_flow["t8"]["_id"])
         result = await hold_portions(self.db.orders, {"order_ids": [by_flow["t8"]["_id"]]})
         self.assertEqual(len(result["substituted"]), 1)
+        self.assertEqual(
+            result["substituted"],
+            [
+                {
+                    "held_id": str(by_flow["t8"]["_id"]),
+                    "substitute_id": str(by_flow["t9"]["_id"]),
+                }
+            ],
+        )
         held = await self.db.orders.get_order_by_id(by_flow["t8"]["_id"])
         sub = await self.db.orders.get_order_by_id(by_flow["t9"]["_id"])
+        original_loaded_at = "2026-08-18T10:05:00+08:00"
         self.assertTrue(is_hold(held))
         self.assertIsNone(held.get("placement"))
+        self.assertTrue(not held.get("loaded_at"))
+        self.assertEqual(held["dish_status"], "待出餐")
+        self.assertIsNone(derive_steamer_phase(held))
         self.assertFalse(is_hold(sub))
         self.assertEqual((sub.get("placement") or {}).get("steamer_id"), "1")
         self.assertEqual((sub.get("placement") or {}).get("port_index"), 3)
+        self.assertEqual((sub.get("placement") or {}).get("stack_order"), 1)
+        self.assertEqual((sub.get("placement") or {}).get("loaded_at"), original_loaded_at)
+        self.assertNotEqual(sub.get("updated_at"), original_loaded_at)
         self.assertEqual(derive_steamer_phase(sub), "在蒸")
+        self.assertEqual(held.get("table_number"), "8")
+        self.assertEqual(sub.get("table_number"), "9")
+
+    async def test_steaming_hold_prefers_same_table_same_dish_awaiting(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="other", table_number="9"),
+                _order(business_flow_id="same", table_number="8"),
+                _order(business_flow_id="steam", table_number="8"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await _load(self.db.orders, by_flow["steam"]["_id"])
+        result = await hold_portions(self.db.orders, {"order_ids": [by_flow["steam"]["_id"]]})
+        self.assertEqual(
+            result["substituted"],
+            [
+                {
+                    "held_id": str(by_flow["steam"]["_id"]),
+                    "substitute_id": str(by_flow["same"]["_id"]),
+                }
+            ],
+        )
+        held = await self.db.orders.get_order_by_id(by_flow["steam"]["_id"])
+        same = await self.db.orders.get_order_by_id(by_flow["same"]["_id"])
+        other = await self.db.orders.get_order_by_id(by_flow["other"]["_id"])
+        self.assertTrue(is_hold(held))
+        self.assertIsNone(held.get("placement"))
+        self.assertEqual(held.get("table_number"), "8")
+        self.assertFalse(is_hold(same))
+        self.assertEqual((same.get("placement") or {}).get("steamer_id"), "1")
+        self.assertEqual((same.get("placement") or {}).get("loaded_at"), "2026-08-18T10:05:00+08:00")
+        self.assertEqual(same.get("table_number"), "8")
+        self.assertEqual(derive_steamer_phase(same), "在蒸")
+        self.assertFalse(is_hold(other))
+        self.assertIsNone(other.get("placement"))
+        self.assertEqual(other.get("table_number"), "9")
+        self.assertTrue(is_pending_kitchen_work(other))
+
+    async def test_steaming_hold_does_not_cross_dish(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="same_dish_other_table", table_number="9"),
+                _order(
+                    business_flow_id="other_dish_same_table",
+                    table_number="8",
+                    dish_name="叉烧包",
+                ),
+                _order(business_flow_id="steam", table_number="8"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await _load(self.db.orders, by_flow["steam"]["_id"])
+        result = await hold_portions(self.db.orders, {"order_ids": [by_flow["steam"]["_id"]]})
+        self.assertEqual(
+            result["substituted"],
+            [
+                {
+                    "held_id": str(by_flow["steam"]["_id"]),
+                    "substitute_id": str(by_flow["same_dish_other_table"]["_id"]),
+                }
+            ],
+        )
+        other_dish = await self.db.orders.get_order_by_id(by_flow["other_dish_same_table"]["_id"])
+        same_dish = await self.db.orders.get_order_by_id(by_flow["same_dish_other_table"]["_id"])
+        self.assertIsNone(other_dish.get("placement"))
+        self.assertFalse(is_hold(other_dish))
+        self.assertEqual(other_dish.get("dish_name"), "叉烧包")
+        self.assertEqual(other_dish.get("table_number"), "8")
+        self.assertEqual((same_dish.get("placement") or {}).get("steamer_id"), "1")
+        self.assertEqual(
+            (same_dish.get("placement") or {}).get("loaded_at"),
+            "2026-08-18T10:05:00+08:00",
+        )
+        self.assertEqual(same_dish.get("table_number"), "9")
+
+    async def test_steaming_hold_other_dish_only_conflicts(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(
+                    business_flow_id="other_dish",
+                    table_number="8",
+                    dish_name="叉烧包",
+                ),
+                _order(business_flow_id="steam", table_number="8"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await _load(self.db.orders, by_flow["steam"]["_id"])
+        with self.assertRaises(HTTPException) as raised:
+            await hold_portions(self.db.orders, {"order_ids": [by_flow["steam"]["_id"]]})
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "在蒸且无替补")
+        other_dish = await self.db.orders.get_order_by_id(by_flow["other_dish"]["_id"])
+        steam = await self.db.orders.get_order_by_id(by_flow["steam"]["_id"])
+        self.assertFalse(is_hold(other_dish))
+        self.assertIsNone(other_dish.get("placement"))
+        self.assertFalse(is_hold(steam))
+        self.assertEqual((steam.get("placement") or {}).get("steamer_id"), "1")
+        self.assertEqual(
+            (steam.get("placement") or {}).get("loaded_at"),
+            "2026-08-18T10:05:00+08:00",
+        )
+
+    async def test_steaming_hold_does_not_use_other_steaming_or_hold(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="held", table_number="9"),
+                _order(business_flow_id="other_steam", table_number="7"),
+                _order(business_flow_id="steam", table_number="8"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await hold_portions(self.db.orders, {"order_ids": [by_flow["held"]["_id"]]})
+        await _load(self.db.orders, by_flow["other_steam"]["_id"], steamer_id="2", port_index=1)
+        await _load(self.db.orders, by_flow["steam"]["_id"])
+        with self.assertRaises(HTTPException) as raised:
+            await hold_portions(self.db.orders, {"order_ids": [by_flow["steam"]["_id"]]})
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "在蒸且无替补")
+        steam = await self.db.orders.get_order_by_id(by_flow["steam"]["_id"])
+        other_steam = await self.db.orders.get_order_by_id(by_flow["other_steam"]["_id"])
+        held = await self.db.orders.get_order_by_id(by_flow["held"]["_id"])
+        self.assertFalse(is_hold(steam))
+        self.assertEqual((steam.get("placement") or {}).get("steamer_id"), "1")
+        self.assertFalse(is_hold(other_steam))
+        self.assertEqual((other_steam.get("placement") or {}).get("steamer_id"), "2")
+        self.assertTrue(is_hold(held))
+        self.assertIsNone(held.get("placement"))
 
     async def test_steaming_hold_without_substitute_conflicts_partial(self):
         await self.db.orders.batch_insert_orders(

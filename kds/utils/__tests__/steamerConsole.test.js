@@ -26,6 +26,7 @@ import {
   steamerLayoutFromStations,
   steamUrgencyLevel
 } from '../steamerConsole.js'
+import * as steamerConsoleApi from '../steamerConsole.js'
 
 describe('deriveSteamerPhase', () => {
   it('treats 待出餐 without placement as 待上笼', () => {
@@ -1336,6 +1337,13 @@ describe('steamerAwaitingPlacement', () => {
   it('puts 待上笼 on the left side panel, never a covering drawer', () => {
     expect(steamerAwaitingPlacement()).toBe('side')
     expect(steamerAwaitingPlacement()).not.toBe('drawer')
+  })
+})
+
+describe('steamerConsole public actions', () => {
+  it('does not export a 对调 or swap action', () => {
+    const names = Object.keys(steamerConsoleApi)
+    expect(names.join(' ')).not.toMatch(/swap|substitute|对调/i)
   })
 })
 
