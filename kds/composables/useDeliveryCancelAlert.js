@@ -118,10 +118,12 @@ export function useDeliveryCancelAlert(options = {}) {
   }
 
   function higherKindClaimed() {
+    if (engineState.value.banner.visible) return true
     return claimedAt != null && Date.now() - claimedAt < HIGHER_KIND_CLAIM_MS
   }
 
   function dismissDeliveryCancelAlert() {
+    claimedAt = null
     const next = acknowledgeNeverLoadedCancels({
       orders: latestOrders || [],
       watchedStations: resolveWatchedStations(),

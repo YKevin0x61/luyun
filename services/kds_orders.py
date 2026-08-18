@@ -35,7 +35,7 @@ def derive_steamer_phase(
     """Derived 熟笼工作阶段. Not a 出餐状态."""
     if not order:
         return None
-    cancelled = _is_cancelled_or_refund(order)
+    cancelled = order.get("dish_status") == "已取消"
     if cancelled and order.get("placement"):
         return STEAMER_PHASE_CANCEL_HOLD
     if cancelled:
@@ -44,6 +44,8 @@ def derive_steamer_phase(
         if order.get("loaded_at"):
             return None
         return _awaiting_cancel_notice_phase(order, now=now, notice_seconds=notice_seconds)
+    if _is_refund_order(order):
+        return None
     if order.get("dish_status", "待出餐") != "待出餐":
         return None
     if order.get("placement"):

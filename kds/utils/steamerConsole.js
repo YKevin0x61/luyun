@@ -24,12 +24,6 @@ export const SHULONG_STEAMER_LAYOUT = Object.freeze({
   awaitingCancelNoticeSeconds: DEFAULT_AWAITING_CANCEL_NOTICE_SECONDS
 })
 
-function isCancelledOrRefund(order) {
-  if (!order) return false
-  if (order.dish_status === '已取消') return true
-  return isRefundOrder(order)
-}
-
 function asTimestamp(value) {
   if (value == null || value === '') return NaN
   if (typeof value === 'number') return value
@@ -72,7 +66,7 @@ export function advanceAwaitingGroupSelection({ selectableCages, selectedIds } =
 
 export function deriveSteamerPhase(order, { acknowledgedCancelIds } = {}) {
   if (!order) return null
-  const cancelled = isCancelledOrRefund(order)
+  const cancelled = order.dish_status === '已取消'
   if (cancelled && order.placement) return STEAMER_PHASE_CANCEL_HOLD
   if (cancelled) {
     // 抽走 keeps loaded_at; 待上笼退示 is never-loaded and unacked on this screen.
@@ -80,6 +74,7 @@ export function deriveSteamerPhase(order, { acknowledgedCancelIds } = {}) {
     if (isCancelAcknowledged(cancelAckLineId(order), acknowledgedCancelIds)) return null
     return STEAMER_PHASE_AWAITING_NOTICE
   }
+  if (isRefundOrder(order)) return null
   if (order.dish_status !== '待出餐') return null
   if (order.placement) return STEAMER_PHASE_STEAMING
   return STEAMER_PHASE_AWAITING
