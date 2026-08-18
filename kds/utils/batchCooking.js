@@ -4,6 +4,8 @@
  * Confirm flattens the plan into one complete-cooking request (see serveConfirm).
  */
 
+import { compareKitchenFifo } from './pendingKitchenWork.js'
+
 /**
  * @param {object} order
  * @returns {number}
@@ -28,7 +30,7 @@ function serveableQuantity(order) {
 function allocateFifo(orders, target) {
   const pool = [...orders]
     .filter((order) => serveableQuantity(order) > 0)
-    .sort((a, b) => new Date(a.order_time) - new Date(b.order_time))
+    .sort(compareKitchenFifo)
 
   const allocations = []
   let remaining = target

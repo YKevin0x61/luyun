@@ -79,6 +79,34 @@ describe('reconcileDishChunks', () => {
     expect(chunks[0].orders[0].served_quantity).toBe(4)
   })
 
+  it('FIFO-fills by 进入待出餐工作时刻 so a late 叫起 does not cut in front', () => {
+    const orders = [
+      makeOrder({
+        id: 'fired',
+        quantity: 6,
+        order_time: '2026-07-23T09:00:00.000Z',
+        fired_at: '2026-07-23T11:00:00.000Z'
+      }),
+      makeOrder({ id: 'fresh', quantity: 6, order_time: '2026-07-23T10:00:00.000Z' })
+    ]
+
+    const chunks = reconcileDishChunks({
+      dishName: '虾饺',
+      pendingOrders: orders,
+      cap: 10,
+      previousChunks: []
+    })
+
+    expect(chunks.map((chunk) => chunk.totalQuantity)).toEqual([10, 2])
+    expect(chunkPortions(chunks[0])).toEqual([
+      { id: 'fresh', quantity: 6 },
+      { id: 'fired', quantity: 4 }
+    ])
+    expect(chunkPortions(chunks[1])).toEqual([{ id: 'fired', quantity: 2 }])
+    expect(chunks[0].oldestTimestamp).toBe(Date.parse('2026-07-23T10:00:00.000Z'))
+    expect(chunks[1].oldestTimestamp).toBe(Date.parse('2026-07-23T11:00:00.000Z'))
+  })
+
   it('FIFO-fills chunks of at most N, splitting an order that straddles the cap', () => {
     const orders = [
       makeOrder({ id: 'a', quantity: 6, order_time: '2026-07-23T10:00:00.000Z' }),

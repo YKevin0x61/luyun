@@ -576,6 +576,70 @@ class HoldOrdersNudgeTest(_OrdersNudgeCase):
         self.assertEqual(len(order_nudges), 2)
 
 
+class FireOrdersNudgeTest(_OrdersNudgeCase):
+    def _hold(self, order_ids):
+        resp = self.client.post(
+            "/api/orders/hold",
+            json={"order_ids": order_ids},
+            headers=self.admin_headers,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.broadcast_calls.clear()
+        return resp
+
+    def test_fire_broadcasts_orders_nudge_with_station(self):
+        _seed_pending(self.db, station="changfen", table="8", flow_id="fire-nudge-001", qty=1)
+        row = _run_async(self.db.get_orders(limit=1))[0]
+        self._hold([row["_id"]])
+
+        resp = self.client.post(
+            "/api/orders/fire",
+            json={"order_ids": [row["_id"]]},
+            headers=self.admin_headers,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(("orders", {"station": "changfen"}), self.broadcast_calls)
+        self.assertNotIn("stations", resp.json())
+
+    def test_fire_all_fail_does_not_broadcast(self):
+        _seed_pending(self.db, station="changfen", table="8", flow_id="fire-nudge-409", qty=1)
+        row = _run_async(self.db.get_orders(limit=1))[0]
+        self.broadcast_calls.clear()
+
+        resp = self.client.post(
+            "/api/orders/fire",
+            json={"order_ids": [row["_id"]]},
+            headers=self.admin_headers,
+        )
+
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.broadcast_calls, [])
+
+    def test_fire_multi_station_broadcasts_once_per_station(self):
+        _seed_pending(self.db, station="shulong", table="8", flow_id="fire-shulong", qty=1)
+        _seed_pending(self.db, station="changfen", table="8", flow_id="fire-changfen", qty=1)
+        rows = {row["business_flow_id"]: row for row in _run_async(self.db.get_orders(limit=-1))}
+        self._hold([rows["fire-shulong"]["_id"], rows["fire-changfen"]["_id"]])
+
+        resp = self.client.post(
+            "/api/orders/fire",
+            json={
+                "order_ids": [
+                    rows["fire-shulong"]["_id"],
+                    rows["fire-changfen"]["_id"],
+                ]
+            },
+            headers=self.admin_headers,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        order_nudges = self._order_nudges()
+        self.assertIn(("orders", {"station": "shulong"}), order_nudges)
+        self.assertIn(("orders", {"station": "changfen"}), order_nudges)
+        self.assertEqual(len(order_nudges), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
 

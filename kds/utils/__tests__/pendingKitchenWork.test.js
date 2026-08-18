@@ -13,6 +13,11 @@ describe('pendingKitchenWork', () => {
     expect(isPendingKitchenWork({ dish_status: '待出餐', quantity: 1 })).toBe(true)
   })
 
+  it('uses 下单时间 as 进入待出餐工作时刻 when never 叫起', () => {
+    const order = { order_time: '2026-08-18T10:00:00+08:00' }
+    expect(workEnterTimeMs(order)).toBe(Date.parse('2026-08-18T10:00:00+08:00'))
+  })
+
   it('uses 叫起时刻 as 进入待出餐工作时刻', () => {
     const order = {
       order_time: '2026-08-18T10:00:00+08:00',

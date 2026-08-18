@@ -140,17 +140,67 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_hold(steaming))
         self.assertIsNotNone(steaming.get("placement"))
 
+    async def test_never_held_work_enter_time_is_order_time(self):
+        await self.db.orders.batch_insert_orders([_order()])
+        row = (await self._by_flow())["floor-001"]
+        self.assertFalse(is_hold(row))
+        self.assertTrue(is_pending_kitchen_work(row))
+        self.assertEqual(work_enter_time(row), row.get("order_time"))
+        self.assertTrue(not row.get("fired_at"))
+
     async def test_fire_sets_work_enter_time_and_kitchen_work(self):
         await self.db.orders.batch_insert_orders([_order()])
         row = (await self._by_flow())["floor-001"]
+        order_time = row.get("order_time")
         await hold_portions(self.db.orders, {"order_ids": [row["_id"]]})
         result = await fire_portions(self.db.orders, {"order_ids": [row["_id"]]})
         after = await self.db.orders.get_order_by_id(row["_id"])
+        self.assertEqual(after["dish_status"], "待出餐")
         self.assertFalse(is_hold(after))
         self.assertTrue(is_pending_kitchen_work(after))
         self.assertIsNotNone(after.get("fired_at"))
         self.assertEqual(work_enter_time(after), after.get("fired_at"))
+        self.assertNotEqual(work_enter_time(after), order_time)
         self.assertTrue(result["fired_at"])
+
+    async def test_second_fire_uses_new_fired_at(self):
+        await self.db.orders.batch_insert_orders([_order()])
+        row = (await self._by_flow())["floor-001"]
+        await hold_portions(self.db.orders, {"order_ids": [row["_id"]]})
+        first = await fire_portions(self.db.orders, {"order_ids": [row["_id"]]})
+        await hold_portions(self.db.orders, {"order_ids": [row["_id"]]})
+        second = await fire_portions(self.db.orders, {"order_ids": [row["_id"]]})
+        after = await self.db.orders.get_order_by_id(row["_id"])
+        self.assertNotEqual(first["fired_at"], second["fired_at"])
+        self.assertEqual(work_enter_time(after), after.get("fired_at"))
+        self.assertEqual(after.get("fired_at").isoformat(), second["fired_at"])
+        self.assertTrue(is_pending_kitchen_work(after))
+
+    async def test_fire_partial_conflicts_non_hold(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="held", station="changfen"),
+                _order(business_flow_id="open", station="changfen"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await hold_portions(self.db.orders, {"order_ids": [by_flow["held"]["_id"]]})
+        result = await fire_portions(
+            self.db.orders,
+            {"order_ids": [by_flow["held"]["_id"], by_flow["open"]["_id"]]},
+        )
+        self.assertEqual(result["updated_count"], 1)
+        self.assertEqual(
+            result["conflicts"],
+            [{"order_id": str(by_flow["open"]["_id"]), "reason": "不是等叫"}],
+        )
+        fired = await self.db.orders.get_order_by_id(by_flow["held"]["_id"])
+        skipped = await self.db.orders.get_order_by_id(by_flow["open"]["_id"])
+        self.assertFalse(is_hold(fired))
+        self.assertTrue(is_pending_kitchen_work(fired))
+        self.assertIsNotNone(fired.get("fired_at"))
+        self.assertFalse(is_hold(skipped))
+        self.assertTrue(not skipped.get("fired_at"))
 
     async def test_rush_only_unloaded_work_and_clears_on_hold(self):
         await self.db.orders.batch_insert_orders(

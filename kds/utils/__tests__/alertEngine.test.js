@@ -79,6 +79,40 @@ describe('alertEngine', () => {
       expect(badgeModes(state)).toEqual({ 'flow-new': 'yellow' })
     })
 
+    it('treats 叫起 as a new-order event', () => {
+      const held = makeOrder({ business_flow_id: 'flow-hold', is_hold: true })
+      const baseline = prime([held])
+      expect(baseline.borderState).toBe('green')
+      expect(baseline.awaitingAck).toBe(false)
+      const { state, effects } = step(baseline, {
+        orders: [makeOrder({ business_flow_id: 'flow-hold', is_hold: false })],
+        config: defaultConfig(),
+        now: T0
+      })
+      expect(effects.dingCount).toBe(1)
+      expect(state.awaitingAck).toBe(true)
+      expect(state.borderState).toBe('yellow')
+    })
+
+    it('clears yellow when 等叫 empties 待出餐工作', () => {
+      const pending = makeOrder({ business_flow_id: 'flow-hold' })
+      const afterNew = step(prime([]), {
+        orders: [pending],
+        config: defaultConfig(),
+        now: T0
+      }).state
+      expect(afterNew.borderState).toBe('yellow')
+      expect(afterNew.awaitingAck).toBe(true)
+      const { state, effects } = step(afterNew, {
+        orders: [makeOrder({ business_flow_id: 'flow-hold', is_hold: true })],
+        config: defaultConfig(),
+        now: T0
+      })
+      expect(effects.dingCount).toBe(0)
+      expect(state.borderState).toBe('green')
+      expect(state.awaitingAck).toBe(false)
+    })
+
     it('treats pending quantity increase as a new-order event (busy path)', () => {
       const baseline = prime([makeOrder({ quantity: 1 })])
       const { state, effects } = step(baseline, {
@@ -411,6 +445,17 @@ describe('alertEngine', () => {
 
       const due = step(tooSoon.state, { orders: [old], config, now: T0 + 1_000 + 30_000 })
       expect(due.effects.overtimeAlarm).toBe(true)
+    })
+
+    it('does not treat a just-fired line as overtime from the old 下单时间', () => {
+      const fired = makeOrder({
+        order_time: '2026-07-23T11:30:00.000Z',
+        fired_at: '2026-07-23T12:00:00.000Z'
+      })
+      const config = defaultConfig({ urgentMin: 20, overtimeRepeatSec: 30 })
+      const baseline = prime([fired], config, T0)
+      const { effects } = step(baseline, { orders: [fired], config, now: T0 + 1000 })
+      expect(effects.overtimeAlarm).toBe(false)
     })
 
     it('re-escalates with dingCount=1 while awaitingAck after reescalateSec', () => {
