@@ -28,7 +28,7 @@
     </view>
 
     <!-- 超紧凑：常驻每桌列表隐藏；选中后展开以便将出高亮落在小卡片上 -->
-    <view v-if="density !== DENSITY_MODES.ULTRA || selectedQuantity > 0" class="orders-detail">
+    <view v-if="density !== DENSITY_MODES.ULTRA || selectedQuantity > 0 || hasNotices" class="orders-detail">
       <view class="orders-grid">
         <view
           v-for="order in dish.orders"
@@ -42,6 +42,19 @@
           <view class="block-header">
             <text class="block-table">{{ order.table_number }}桌</text>
             <text class="block-quantity">{{ order.quantity }}份</text>
+            <text v-if="density === DENSITY_MODES.COMPACT" class="block-time">{{ formatOrderTime(order.order_time) }}</text>
+          </view>
+          <text v-if="density !== DENSITY_MODES.COMPACT" class="block-time">{{ formatOrderTime(order.order_time) }}</text>
+        </view>
+        <view
+          v-for="order in noticeOrders"
+          :key="'notice-' + (order.business_flow_id || order.id || order._id)"
+          class="order-block order-block--notice"
+          @click.stop
+        >
+          <view class="block-header">
+            <text class="block-table">{{ order.table_number }}桌</text>
+            <text class="block-quantity">退示</text>
             <text v-if="density === DENSITY_MODES.COMPACT" class="block-time">{{ formatOrderTime(order.order_time) }}</text>
           </view>
           <text v-if="density !== DENSITY_MODES.COMPACT" class="block-time">{{ formatOrderTime(order.order_time) }}</text>
@@ -136,8 +149,20 @@ export default {
 
     const isConflict = (order) => orderLineIsMarked(props.conflictOrderIds, order)
     const hasConflict = computed(() => hasMarkedOrderLine(props.conflictOrderIds, props.dish?.orders))
+    const noticeOrders = computed(() =>
+      Array.isArray(props.dish?.noticeOrders) ? props.dish.noticeOrders : []
+    )
+    const hasNotices = computed(() => noticeOrders.value.length > 0)
 
-    return { formatOrderTime, isServing, isConflict, hasConflict, DENSITY_MODES }
+    return {
+      formatOrderTime,
+      isServing,
+      isConflict,
+      hasConflict,
+      noticeOrders,
+      hasNotices,
+      DENSITY_MODES
+    }
   }
 }
 </script>
@@ -398,6 +423,17 @@ export default {
 .order-block--conflict .block-quantity,
 .order-block--conflict .block-time {
   color: #fff;
+  font-weight: 800;
+}
+
+.order-block--notice {
+  background: #FFF7E6;
+  border-color: #D48806;
+  cursor: default;
+}
+
+.order-block--notice .block-quantity {
+  color: #D48806;
   font-weight: 800;
 }
 

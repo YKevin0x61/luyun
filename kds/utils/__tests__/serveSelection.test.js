@@ -83,4 +83,29 @@ describe('出餐选中 reducer', () => {
     })
     expect(serveSelectionAfterConfirm(state, true)).toEqual(emptyServeSelection())
   })
+
+  it('refuses 选桌 toggle of ids outside the selectable set (退示)', () => {
+    let state = emptyServeSelection()
+    state = applyServeSelection(state, { type: 'openTablePick', chunkId: '虾饺' })
+    state = applyServeSelection(state, {
+      type: 'toggleOrderLine',
+      orderId: 'n1',
+      selectableOrderIds: ['a', 'b']
+    })
+    expect(state.tablePick.selectedOrderIds).toEqual([])
+
+    state = applyServeSelection(state, {
+      type: 'toggleOrderLine',
+      orderId: 'a',
+      selectableOrderIds: ['a', 'b']
+    })
+    expect(state.tablePick.selectedOrderIds).toEqual(['a'])
+
+    state = applyServeSelection(state, {
+      type: 'toggleOrderLine',
+      orderId: 'n1',
+      selectableOrderIds: ['a', 'b']
+    })
+    expect(state.tablePick.selectedOrderIds).toEqual(['a'])
+  })
 })

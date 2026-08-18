@@ -74,6 +74,24 @@ describe('countPendingAndUrgent', () => {
     ]
     expect(countPendingAndUrgent(dishes, PENDING)).toEqual({ total: 1, urgent: 1 })
   })
+
+  it('excludes 已取消 退示 from 待制作 even when quantity is 0', () => {
+    const dishes = [
+      {
+        orders: [
+          { dish_status: PENDING, quantity: 2 },
+          {
+            dish_status: '已取消',
+            status: '退菜',
+            quantity: 0,
+            business_flow_id: 'flow-notice'
+          }
+        ],
+        urgentCount: 1
+      }
+    ]
+    expect(countPendingAndUrgent(dishes, PENDING)).toEqual({ total: 2, urgent: 1 })
+  })
 })
 
 describe('countUnmappedDishNames', () => {
@@ -261,6 +279,25 @@ describe('buildWatchedStationStatuses', () => {
     expect(rows.find((r) => r.id === 'xibing')).toMatchObject({
       pendingCount: 2,
       urgentCount: 0,
+      active: true
+    })
+  })
+
+  it('does not count 已取消 退示 toward station 待制作', () => {
+    const dishes = [
+      {
+        station: 'changfen',
+        orders: [
+          { dish_status: PENDING, quantity: 1 },
+          { dish_status: '已取消', status: '退菜', quantity: 0 }
+        ],
+        urgentCount: 1
+      }
+    ]
+    const rows = buildWatchedStationStatuses(stations, dishes, [], PENDING)
+    expect(rows.find((r) => r.id === 'changfen')).toMatchObject({
+      pendingCount: 1,
+      urgentCount: 1,
       active: true
     })
   })

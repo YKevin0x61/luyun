@@ -24,6 +24,25 @@ describe('kitchenStationStats', () => {
     expect(stats.changfen.urgent).toBe(1)
   })
 
+  it('does not count 已取消 退示 as pending or urgent', () => {
+    const now = Date.now()
+    const stats = buildStationTabStats(
+      ['changfen'],
+      () => [
+        { dish_status: '待出餐', order_time: new Date(now - 5 * 60 * 1000).toISOString() },
+        {
+          dish_status: '已取消',
+          status: '退菜',
+          quantity: 0,
+          order_time: new Date(now - 40 * 60 * 1000).toISOString()
+        }
+      ],
+      { urgentMs: 20 * 60 * 1000 }
+    )
+    expect(stats.changfen.pending).toBe(1)
+    expect(stats.changfen.urgent).toBe(0)
+  })
+
   it('decorateOrderWait classifies by thresholds', () => {
     const now = Date.now()
     const orderTime = new Date(now - 18 * 60 * 1000).toISOString()
@@ -56,5 +75,26 @@ describe('kitchenStationStats', () => {
     expect(stats.overtimeCount).toBe(1)
     expect(stats.completedToday).toBe(1)
     expect(stats.avgCookingTime).not.toBe('0分')
+  })
+
+  it('buildCurrentStationStats excludes 已取消 退示 from pendingCount', () => {
+    const now = Date.now()
+    const stats = buildCurrentStationStats(
+      [
+        {
+          dish_status: '待出餐',
+          order_time: new Date(now - 5 * 60 * 1000).toISOString()
+        },
+        {
+          dish_status: '已取消',
+          status: '退菜',
+          quantity: 0,
+          order_time: new Date(now - 30 * 60 * 1000).toISOString()
+        }
+      ],
+      { urgentMs: 20 * 60 * 1000 }
+    )
+    expect(stats.pendingCount).toBe(1)
+    expect(stats.overtimeCount).toBe(0)
   })
 })
