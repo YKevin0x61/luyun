@@ -173,7 +173,8 @@ import {
   steamerUnloadIntent,
   toggleSteamerCageSelection,
   selectAllHoleCages,
-  isHoleFullySelected
+  isHoleFullySelected,
+  pruneSteamerSelection
 } from '../../utils/steamerConsole.js'
 
 export default {
@@ -501,8 +502,8 @@ export default {
         } else {
           applyAwaitingGroups(chunkSnapshotByDish.value)
         }
-        const live = new Set((props.awaitingCages || []).map(cageId))
-        selectedOrderIds.value = selectedOrderIds.value.filter((id) => live.has(id))
+        const liveIds = (props.awaitingCages || []).map(cageId)
+        selectedOrderIds.value = pruneSteamerSelection(selectedOrderIds.value, liveIds)
       },
       { immediate: true }
     )
@@ -510,9 +511,9 @@ export default {
     watch(
       () => props.steamingCages,
       (cages) => {
-        const live = new Set((cages || []).map(cageId))
-        selectedSteamingIds.value = selectedSteamingIds.value.filter((id) => live.has(id))
-        selectedHoldIds.value = selectedHoldIds.value.filter((id) => live.has(id))
+        const liveIds = (cages || []).map(cageId)
+        selectedSteamingIds.value = pruneSteamerSelection(selectedSteamingIds.value, liveIds)
+        selectedHoldIds.value = pruneSteamerSelection(selectedHoldIds.value, liveIds)
       }
     )
 

@@ -756,3 +756,68 @@ def test_floor_console_http_drops_empty_pos_table(orders_client):
     numbers = [table["table_number"] for table in body["tables"]]
     assert numbers == ["8"]
     assert body["tables"][0]["lines"][0]["phase"] == "待出餐"
+
+
+def test_complete_cooking_http_rejects_hold_with_dengjiao_conflict(orders_client):
+    client, db, admin_headers = orders_client
+    seeded = _seed_dine_in(db)
+    order_id = seeded["floor-http-001"]["_id"]
+    hold = client.post(
+        "/api/orders/hold",
+        json={"order_ids": [order_id]},
+        headers=admin_headers,
+    )
+    assert hold.status_code == 200
+    resp = client.post(
+        "/api/orders/complete-cooking",
+        json={
+            "dish_name": "虾饺",
+            "station": "changfen",
+            "complete_quantity": 1,
+            "orders": [
+                {
+                    "order_id": order_id,
+                    "table_number": "8",
+                    "complete_quantity": 1,
+                    "original_quantity": 1,
+                }
+            ],
+            "operator_id": "floor-http",
+            "ready_time": datetime.now(CHINA_TZ).isoformat(),
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["conflicts"] == [{"order_id": str(order_id), "reason": "等叫"}]
+    after = _run_async(db.get_order_by_id(order_id))
+    assert after["dish_status"] == "待出餐"
+    assert after.get("is_hold") is True
+
+
+def test_load_steamer_http_rejects_hold_with_dengjiao_conflict(orders_client):
+    client, db, admin_headers = orders_client
+    seeded = _seed_dine_in(db, station="shulong")
+    order_id = seeded["floor-http-001"]["_id"]
+    hold = client.post(
+        "/api/orders/hold",
+        json={"order_ids": [order_id]},
+        headers=admin_headers,
+    )
+    assert hold.status_code == 200
+    resp = client.post(
+        "/api/orders/load-steamer",
+        json={
+            "order_ids": [order_id],
+            "steamer_id": "1",
+            "port_index": 3,
+            "loaded_at": "2026-08-18T10:05:00+08:00",
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["conflicts"] == [{"order_id": str(order_id), "reason": "等叫"}]
+    after = _run_async(db.get_order_by_id(order_id))
+    assert after.get("placement") is None
+    assert after.get("is_hold") is True

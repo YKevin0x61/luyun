@@ -94,6 +94,22 @@ describe('alertEngine', () => {
       expect(state.borderState).toBe('yellow')
     })
 
+    it('does not raise a 退菜/取消 banner or ding when a line is 等叫', () => {
+      const pending = makeOrder({ business_flow_id: 'flow-hold' })
+      const baseline = prime([pending])
+      const { state, effects } = step(baseline, {
+        orders: [makeOrder({ business_flow_id: 'flow-hold', is_hold: true, dish_status: '待出餐' })],
+        config: defaultConfig(),
+        now: T0 + 1000
+      })
+      expect(effects.dingCount).toBe(0)
+      expect(effects.overtimeAlarm).toBe(false)
+      expect(state.awaitingAck).toBe(false)
+      expect(state.newBadges.size).toBe(0)
+      expect(state.snapshot.get('flow-hold').status).toBe('待出餐')
+      expect(state.snapshot.get('flow-hold').awaiting).toBe(false)
+    })
+
     it('clears yellow when 等叫 empties 待出餐工作', () => {
       const pending = makeOrder({ business_flow_id: 'flow-hold' })
       const afterNew = step(prime([]), {

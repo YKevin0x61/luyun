@@ -181,6 +181,11 @@ export function isSteamerConsole({ stationId } = {}) {
   return stationId === SHULONG_STATION_ID
 }
 
+export function pruneSteamerSelection(selectedIds, liveIds) {
+  const live = new Set((Array.isArray(liveIds) ? liveIds : []).map(String).filter(Boolean))
+  return (Array.isArray(selectedIds) ? selectedIds : []).filter((id) => live.has(String(id)))
+}
+
 export function steamerLoadIntent({ selectedOrderIds, steamerId, portIndex } = {}) {
   if (!Array.isArray(selectedOrderIds) || selectedOrderIds.length === 0) return null
   return {

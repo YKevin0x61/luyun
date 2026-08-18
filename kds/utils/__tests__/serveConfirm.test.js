@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { planBasketServeCookingCalls, planBatchCookingCalls, planTablePickCookingCalls } from '../batchCooking.js'
-import { buildCompleteCookingRequest, conflictOrderIdsFromReject, hasMarkedOrderLine, hubShouldPull, kitchenShouldPull, nextConflictMarks, orderLineIsMarked, runServeConfirm, serveConfirmErrorMessage } from '../serveConfirm.js'
+import { buildCompleteCookingRequest, conflictOrderIdsFromReject, hasMarkedOrderLine, hubShouldPull, kitchenShouldPull, kitchenShouldRedrawWork, nextConflictMarks, orderLineIsMarked, runServeConfirm, serveConfirmErrorMessage } from '../serveConfirm.js'
 import { applyServeSelection, emptyServeSelection, serveSelectionAfterConfirm } from '../serveSelection.js'
-import { toggleSteamerSelection } from '../steamerConsole.js'
+import { pruneSteamerSelection, steamerLoadIntent, toggleSteamerSelection } from '../steamerConsole.js'
 
 function makeOrder(overrides = {}) {
   return {
@@ -178,6 +178,47 @@ describe('buildCompleteCookingRequest', () => {
     )
   })
 
+  it('returns null when 等叫 emptied the remaining 出餐选中', () => {
+    let selection = emptyServeSelection()
+    selection = applyServeSelection(selection, { type: 'increase', chunkId: '虾饺', max: 2 })
+    selection = applyServeSelection(selection, { type: 'increase', chunkId: '虾饺', max: 2 })
+    selection = applyServeSelection(selection, {
+      type: 'syncLiveWork',
+      liveOrderIds: [],
+      chunkMax: {}
+    })
+    expect(selection.cardCounts).toEqual({})
+    expect(
+      buildCompleteCookingRequest(
+        planBatchCookingCalls({
+          selectedQuantities: selection.cardCounts,
+          pendingOrders: [makeOrder({ id: 'a', is_hold: true })],
+          chunkOrders: { 虾饺: { dishName: '虾饺', orders: [] } }
+        }),
+        { station: 'changfen', readyTime: '2026-07-23T12:00:00.000Z' }
+      )
+    ).toBeNull()
+
+    selection = applyServeSelection(emptyServeSelection(), { type: 'openTablePick', chunkId: '虾饺' })
+    selection = applyServeSelection(selection, { type: 'toggleOrderLine', orderId: 'a' })
+    selection = applyServeSelection(selection, {
+      type: 'syncLiveWork',
+      liveOrderIds: [],
+      chunkMax: {}
+    })
+    expect(selection.tablePick).toBeNull()
+    expect(
+      buildCompleteCookingRequest(
+        planTablePickCookingCalls({
+          selectedOrderIds: selection.tablePick?.selectedOrderIds || [],
+          chunkId: '虾饺',
+          chunkOrders: { 虾饺: { dishName: '虾饺', orders: [makeOrder({ id: 'a', is_hold: true })] } }
+        }),
+        { station: 'changfen', readyTime: '2026-07-23T12:00:00.000Z' }
+      )
+    ).toBeNull()
+  })
+
   it('returns null for an empty plan so confirm does not hit the server', () => {
     expect(
       buildCompleteCookingRequest([], {
@@ -194,6 +235,13 @@ describe('buildCompleteCookingRequest', () => {
         { station: 'changfen', readyTime: '2026-07-23T12:00:00.000Z' }
       )
     ).toBeNull()
+  })
+})
+
+describe('kitchenShouldRedrawWork', () => {
+  it('skips redraw of 待出餐工作 while 提交中', () => {
+    expect(kitchenShouldRedrawWork({ submitting: true })).toBe(false)
+    expect(kitchenShouldRedrawWork({ submitting: false })).toBe(true)
   })
 })
 
@@ -304,6 +352,25 @@ describe('conflictOrderIdsFromReject', () => {
 })
 
 describe('nextConflictMarks', () => {
+  it('marks 等叫 lines from an in-flight 409, distinct from 退菜', () => {
+    const error = new Error('HTTP 409: 出餐确认冲突')
+    error.response = {
+      data: {
+        detail: {
+          message: '出餐确认冲突',
+          conflicts: [
+            { order_id: 'held-a', reason: '等叫' },
+            { order_id: 'held-b', reason: '等叫' }
+          ]
+        }
+      }
+    }
+    expect(nextConflictMarks(['stale'], { type: 'reject', error })).toEqual(['held-a', 'held-b'])
+    expect(conflictOrderIdsFromReject(error)).toEqual(['held-a', 'held-b'])
+    expect(error.response.data.detail.conflicts.map((item) => item.reason)).toEqual(['等叫', '等叫'])
+    expect(error.response.data.detail.conflicts.map((item) => item.reason)).not.toContain('退菜')
+  })
+
   it('marks every conflict order_id from a 409 reject', () => {
     const error = new Error('HTTP 409: 出餐确认冲突')
     error.response = {

@@ -431,6 +431,41 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "等叫")
 
+    async def test_complete_cooking_hold_mixed_writes_nothing(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="held", station="changfen"),
+                _order(business_flow_id="open", station="changfen"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await hold_portions(self.db.orders, {"order_ids": [by_flow["held"]["_id"]]})
+        with self.assertRaises(HTTPException) as raised:
+            await complete_cooking(
+                self.db.orders,
+                {
+                    "dish_name": "虾饺",
+                    "orders": [
+                        {
+                            "order_id": by_flow["held"]["_id"],
+                            "table_number": "8",
+                            "complete_quantity": 1,
+                        },
+                        {
+                            "order_id": by_flow["open"]["_id"],
+                            "table_number": "8",
+                            "complete_quantity": 1,
+                        },
+                    ],
+                },
+            )
+        self.assertEqual(raised.exception.status_code, 409)
+        reasons = {item["reason"] for item in raised.exception.detail["conflicts"]}
+        self.assertEqual(reasons, {"等叫"})
+        open_row = await self.db.orders.get_order_by_id(by_flow["open"]["_id"])
+        self.assertEqual(open_row["dish_status"], "待出餐")
+        self.assertFalse(is_hold(open_row))
+
     async def test_list_floor_tables_skips_delivery_and_empty_pos(self):
         now = datetime.now(CHINA_TZ)
         await self.db.orders.batch_insert_orders(
@@ -548,4 +583,33 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as raised:
             await _load(self.db.orders, row["_id"])
         self.assertEqual(raised.exception.status_code, 409)
-        self.assertIn("等叫", str(raised.exception.detail))
+        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "等叫")
+        self.assertEqual(
+            raised.exception.detail["conflicts"][0]["order_id"],
+            str(row["_id"]),
+        )
+
+    async def test_load_steamer_hold_mixed_loads_nothing(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="held"),
+                _order(business_flow_id="open"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await hold_portions(self.db.orders, {"order_ids": [by_flow["held"]["_id"]]})
+        with self.assertRaises(HTTPException) as raised:
+            await load_steamer(
+                self.db.orders,
+                {
+                    "order_ids": [by_flow["held"]["_id"], by_flow["open"]["_id"]],
+                    "steamer_id": "1",
+                    "port_index": 3,
+                    "loaded_at": "2026-08-18T10:05:00+08:00",
+                },
+            )
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "等叫")
+        open_row = await self.db.orders.get_order_by_id(by_flow["open"]["_id"])
+        self.assertIsNone(open_row.get("placement"))
+        self.assertFalse(is_hold(open_row))

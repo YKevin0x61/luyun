@@ -72,6 +72,17 @@ export function kitchenShouldPull(state = {}) {
 }
 
 /**
+ * Freeze 待出餐工作 cards while a 出餐 confirm is in flight.
+ * After settle, the page applies the latest work.
+ *
+ * @param {{ submitting?: boolean }} [state]
+ * @returns {boolean}
+ */
+export function kitchenShouldRedrawWork(state = {}) {
+  return !state.submitting
+}
+
+/**
  * KDS 首页: skip today's full order list on an 出餐 (or other non-reconcile)
  * orders nudge. Mount / 刷新 call fetch directly; 60s reconcile still pulls.
  *

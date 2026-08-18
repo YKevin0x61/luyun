@@ -101,6 +101,26 @@ describe('deliveryCancelEngine', () => {
     expect(next.effects.playAlert).toBe(false)
   })
 
+  it('does not banner when a watched line is 等叫', () => {
+    const primed = step(createInitialState(), {
+      orders: [makeOrder({ dish_status: '待出餐', table_number: '8桌', source: '' })],
+      watchedStations: ['shulong']
+    }).state
+    const next = step(primed, {
+      orders: [
+        makeOrder({
+          dish_status: '待出餐',
+          is_hold: true,
+          table_number: '8桌',
+          source: ''
+        })
+      ],
+      watchedStations: ['shulong']
+    })
+    expect(next.effects.playAlert).toBe(false)
+    expect(next.state.banner.visible).toBe(false)
+  })
+
   it('stays silent when the wave is only 退菜占位', () => {
     const primed = step(createInitialState(), {
       orders: [
