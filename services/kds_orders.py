@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from config import settings
 from database import CHINA_TZ, ensure_beijing_datetime
 from db_core.ports import OrdersPort
+from services.kitchen_work import is_hold
 
 STEAMER_PHASE_AWAITING = "待上笼"
 STEAMER_PHASE_STEAMING = "在蒸"
@@ -47,6 +48,8 @@ def derive_steamer_phase(
     if _is_refund_order(order):
         return None
     if order.get("dish_status", "待出餐") != "待出餐":
+        return None
+    if is_hold(order):
         return None
     if order.get("placement"):
         return STEAMER_PHASE_STEAMING
@@ -157,6 +160,9 @@ async def complete_cooking(orders: OrdersPort, payload: Dict) -> Dict:
         if order.get("dish_status", "待出餐") != "待出餐":
             conflicts.append(_cooking_conflict(oid, "已出餐"))
             continue
+        if is_hold(order):
+            conflicts.append(_cooking_conflict(oid, "等叫"))
+            continue
         db_qty = int(order.get("quantity") or 1)
         complete_qty = int(item["complete_quantity"])
         if complete_qty > db_qty:
@@ -208,6 +214,8 @@ async def load_steamer(orders: OrdersPort, payload: Dict) -> Dict:
             raise HTTPException(status_code=404, detail=f"订单不存在: {order_id}")
         if order.get("dish_status", "待出餐") != "待出餐":
             raise HTTPException(status_code=409, detail=f"订单状态不可上笼: {order_id}")
+        if is_hold(order):
+            raise HTTPException(status_code=409, detail=f"等叫不可上笼: {order_id}")
         if order.get("placement"):
             raise HTTPException(status_code=409, detail=f"订单已上笼: {order_id}")
 

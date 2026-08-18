@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { composeKitchenDishCards, dishSplitKnobsChanged, reconcileDishChunks, sortKitchenDishCardsByOldest } from '../dishCardChunks.js'
+import { isPendingKitchenWork } from '../pendingKitchenWork.js'
 
 function makeOrder(overrides = {}) {
   return {
@@ -25,6 +26,21 @@ function chunkPortions(chunk) {
     quantity: order.quantity
   }))
 }
+
+describe('composeKitchenDishCards 等叫', () => {
+  it('does not put 等叫 on 菜卡 when given 待出餐工作', () => {
+    const pending = [
+      makeOrder({ id: 'work' }),
+      makeOrder({ id: 'held', is_hold: true })
+    ].filter(isPendingKitchenWork)
+    const { cards } = composeKitchenDishCards({
+      logicalDishes: [{ dishName: '虾饺', orders: pending }],
+      cap: 0
+    })
+    expect(cards).toHaveLength(1)
+    expect(chunkOrderIds(cards[0])).toEqual(['work'])
+  })
+})
 
 describe('reconcileDishChunks', () => {
   it('N=0 keeps one card with every pending order (no split)', () => {
@@ -585,6 +601,28 @@ describe('composeKitchenDishCards 下单间隔', () => {
     expect(chunkOrderIds(sorted[0])).toEqual(['s1'])
     expect(chunkOrderIds(sorted[1])).toEqual(['b1'])
     expect(chunkOrderIds(sorted[2])).toEqual(['s2'])
+  })
+
+  it('splits 浪潮 by 进入待出餐工作时刻 so a late 叫起 does not join an old wave', () => {
+    const orders = [
+      makeOrder({ id: 'old', quantity: 1, order_time: '2026-07-23T10:00:00.000Z' }),
+      makeOrder({
+        id: 'fired',
+        quantity: 1,
+        order_time: '2026-07-23T10:00:00.000Z',
+        fired_at: '2026-07-23T10:20:00.000Z'
+      })
+    ]
+    const chunks = reconcileDishChunks({
+      dishName: '虾饺',
+      pendingOrders: orders,
+      cap: 0,
+      orderGapMinutes: 10,
+      previousChunks: []
+    })
+    expect(chunks).toHaveLength(2)
+    expect(chunkOrderIds(chunks[0])).toEqual(['old'])
+    expect(chunkOrderIds(chunks[1])).toEqual(['fired'])
   })
 })
 

@@ -83,7 +83,13 @@ def row_to_dict(row: aiosqlite.Row) -> Dict:
     d = dict(row)
     if 'id' in d:
         d['_id'] = str(d.pop('id'))
-    for ts_field in ('order_time', 'updated_at', 'created_at'):
+    for flag in ('is_hold', 'is_rushed'):
+        if flag in d:
+            try:
+                d[flag] = bool(int(d[flag] or 0))
+            except (TypeError, ValueError):
+                d[flag] = bool(d[flag])
+    for ts_field in ('order_time', 'updated_at', 'created_at', 'fired_at'):
         if ts_field in d and d[ts_field]:
             try:
                 d[ts_field] = datetime.fromisoformat(d[ts_field])

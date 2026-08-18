@@ -5,6 +5,7 @@
 
 import { TimeCalculator } from './timeCalculator.js'
 import { DISH_STATUS } from './constants.js'
+import { isPendingKitchenWork, workEnterTimeMs } from './pendingKitchenWork.js'
 
 /**
  * @param {string[]} stationIds
@@ -14,9 +15,7 @@ import { DISH_STATUS } from './constants.js'
  */
 export function buildStationTabStats(stationIds, getOrdersByStation, options) {
   const urgentMs = options.urgentMs
-  const isPending =
-    options.isPending ||
-    ((order) => order && order.dish_status === DISH_STATUS.PENDING)
+  const isPending = options.isPending || isPendingKitchenWork
   const stats = {}
   for (const stationId of stationIds || []) {
     const pending = (getOrdersByStation(stationId) || []).filter(isPending)
@@ -24,7 +23,7 @@ export function buildStationTabStats(stationIds, getOrdersByStation, options) {
       pending: pending.length,
       urgent: pending.filter((order) => {
         try {
-          return TimeCalculator.calculateWaitTime(new Date(order.order_time)) > urgentMs
+          return TimeCalculator.calculateWaitTime(new Date(workEnterTimeMs(order))) > urgentMs
         } catch {
           return false
         }
@@ -122,14 +121,12 @@ export function buildCurrentStationStats(stationOrders, options) {
   }
   if (!Array.isArray(stationOrders)) return defaultStats
 
-  const isPending =
-    options.isPending ||
-    ((order) => order && order.dish_status === DISH_STATUS.PENDING)
+  const isPending = options.isPending || isPendingKitchenWork
   const pendingOrders = stationOrders.filter(isPending)
 
   const overtimeCount = pendingOrders.filter((order) => {
     try {
-      return TimeCalculator.calculateWaitTime(new Date(order.order_time)) > options.urgentMs
+      return TimeCalculator.calculateWaitTime(new Date(workEnterTimeMs(order))) > options.urgentMs
     } catch {
       return false
     }

@@ -47,6 +47,16 @@ async def migrate_orders_kds_columns(conn: aiosqlite.Connection) -> None:
             await cursor.execute("ALTER TABLE orders ADD COLUMN stack_order INTEGER")
         if "loaded_at" not in cols:
             await cursor.execute("ALTER TABLE orders ADD COLUMN loaded_at TEXT")
+        if "is_hold" not in cols:
+            await cursor.execute(
+                "ALTER TABLE orders ADD COLUMN is_hold INTEGER DEFAULT 0"
+            )
+        if "is_rushed" not in cols:
+            await cursor.execute(
+                "ALTER TABLE orders ADD COLUMN is_rushed INTEGER DEFAULT 0"
+            )
+        if "fired_at" not in cols:
+            await cursor.execute("ALTER TABLE orders ADD COLUMN fired_at TEXT")
     await conn.commit()
 
 

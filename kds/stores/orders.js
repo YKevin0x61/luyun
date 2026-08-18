@@ -9,6 +9,7 @@ import { TimeCalculator } from '../utils/timeCalculator.js'
 import { OrderPrioritySelector } from '../utils/prioritySelector.js'
 import { groupOrdersByDish } from '../utils/dishMerge.js'
 import { TIME_THRESHOLDS } from '../utils/constants.js'
+import { isPendingKitchenWork } from '../utils/pendingKitchenWork.js'
 
 export const useOrdersStore = defineStore('orders', {
   state: () => ({
@@ -80,7 +81,7 @@ export const useOrdersStore = defineStore('orders', {
 
     // 待出餐订单
     pendingOrders: (state) => {
-      return state.orders.filter(order => order.dish_status === '待出餐')
+      return state.orders.filter((order) => isPendingKitchenWork(order))
     },
 
     // 已制作待上菜订单
@@ -104,7 +105,7 @@ export const useOrdersStore = defineStore('orders', {
     // 订单统计
     orderStats: (state) => {
       const total = state.orders.length
-      const pending = state.orders.filter(order => order.dish_status === '待出餐').length
+      const pending = state.orders.filter((order) => isPendingKitchenWork(order)).length
       const ready = state.orders.filter(order => order.dish_status === '已制作待上菜').length
       const served = state.orders.filter(order => order.dish_status === '已上菜').length
 

@@ -97,3 +97,7 @@ class UnloadSteamerRequest(BaseModel):
 
 class PluckSteamerRequest(BaseModel):
     order_ids: List[str]
+
+
+class FloorOrderIdsRequest(BaseModel):
+    order_ids: List[str]

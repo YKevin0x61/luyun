@@ -268,7 +268,7 @@ import { useOrdersStore } from '../../stores/orders.js'
 import { useRealtimeStore } from '../../stores/realtime.js'
 import { useStationsStore } from '../../stores/stations.js'
 import { TimeCalculator } from '../../utils/timeCalculator.js'
-import { isRefundOrder } from '../../utils/constants.js'
+import { isPendingKitchenWork, workEnterTimeMs } from '../../utils/pendingKitchenWork.js'
 import { groupOrdersByDish } from '../../utils/dishMerge.js'
 import { dishSplitKnobsChanged } from '../../utils/dishCardChunks.js'
 import { composeKitchenDishCardsWithNotices, isDishCardCancelNotice } from '../../utils/dishCardNotices.js'
@@ -408,8 +408,7 @@ export default {
       return stationTabs.value.find(station => station.id === currentStation.value) || {}
     })
     
-    const isPendingCookOrder = (order) =>
-      order && order.dish_status === '待出餐' && !isRefundOrder(order)
+    const isPendingCookOrder = (order) => isPendingKitchenWork(order)
 
     const isSubmittableOrder = (order) =>
       isPendingCookOrder(order) && TimeCalculator.isToday(order.order_time)
@@ -451,9 +450,9 @@ export default {
 
         result[stationId].pending++
 
-        if (order.order_time) {
-          const orderTime = new Date(order.order_time).getTime()
-          if (!Number.isNaN(orderTime)) {
+        if (order.order_time || order.fired_at) {
+          const orderTime = workEnterTimeMs(order)
+          if (orderTime) {
             result[stationId].timestamps.push(orderTime)
           }
         }
@@ -615,12 +614,12 @@ export default {
         
         const orderTimestamps = dish.orders
           .map(order => {
-            if (!order || !order.order_time) {
+            if (!order) {
               debugLog('[厨房合并] 订单时间无效:', order)
               return null
             }
-            const ts = new Date(order.order_time).getTime()
-            return Number.isNaN(ts) ? null : ts
+            const ts = workEnterTimeMs(order)
+            return ts > 0 ? ts : null
           })
           .filter(ts => ts !== null)
 
@@ -656,6 +655,21 @@ export default {
       dishChunkSnapshotByDish.value = previousByDish
       chunkedDishesBase.value = cards
       dishSplitKnobsSeen.value = { cap, orderGapMinutes: gap }
+      if (batchSubmitting.value) return
+      const liveOrderIds = []
+      const chunkMax = {}
+      for (const dish of chunkedDishesBase.value) {
+        chunkMax[dish.chunkId] = Number(dish.totalQuantity) || 0
+        for (const order of dish.orders || []) {
+          const id = orderLineId(order)
+          if (id) liveOrderIds.push(id)
+        }
+      }
+      serveSelection.value = applyServeSelection(serveSelection.value, {
+        type: 'syncLiveWork',
+        liveOrderIds,
+        chunkMax
+      })
     }
 
     watch(
@@ -731,12 +745,12 @@ export default {
         .map((order) => {
           const id = orderLineId(order)
           if (!id) return null
-          const orderTime = new Date(order.order_time).getTime()
-          const waitMs = Number.isNaN(orderTime) ? 0 : Math.max(0, now - orderTime)
+          const orderTime = workEnterTimeMs(order)
+          const waitMs = orderTime ? Math.max(0, now - orderTime) : 0
           return {
             id,
             tableNumber: order.table_number,
-            orderTimeMs: Number.isNaN(orderTime) ? 0 : orderTime,
+            orderTimeMs: orderTime || 0,
             orderTimeLabel: formatTime(order.order_time),
             waitLabel: TimeCalculator.formatDurationClock(waitMs),
             selected: selected.has(id),

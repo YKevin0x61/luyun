@@ -27,6 +27,9 @@ _TABLE_SCHEMAS = {
             port_index INTEGER,
             stack_order INTEGER,
             loaded_at TEXT,
+            is_hold INTEGER DEFAULT 0,
+            is_rushed INTEGER DEFAULT 0,
+            fired_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )

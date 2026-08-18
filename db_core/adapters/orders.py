@@ -92,6 +92,25 @@ class OrdersPortAdapter:
     ) -> Dict[str, Any]:
         return await self._db.apply_steamer_pluck(order_ids=order_ids)
 
+    async def apply_floor_mutations(
+        self,
+        *,
+        now: str,
+        hold_ids: List[str],
+        fire_ids: List[str],
+        fired_at: Optional[str],
+        rush_ids: List[str],
+        substitutes: List[Tuple[str, str]],
+    ) -> Dict[str, Any]:
+        return await self._db.apply_floor_mutations(
+            now=now,
+            hold_ids=hold_ids,
+            fire_ids=fire_ids,
+            fired_at=fired_at,
+            rush_ids=rush_ids,
+            substitutes=substitutes,
+        )
+
     async def get_merged_dishes(
         self, station: Optional[str] = None, **kwargs: Any
     ) -> List[Dict]:

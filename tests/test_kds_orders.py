@@ -69,6 +69,9 @@ class KdsSchemaMigrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("port_index", cols)
         self.assertIn("stack_order", cols)
         self.assertIn("loaded_at", cols)
+        self.assertIn("is_hold", cols)
+        self.assertIn("is_rushed", cols)
+        self.assertIn("fired_at", cols)
 
         await db.close()
 
@@ -90,6 +93,9 @@ class KdsSchemaMigrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("port_index", cols)
         self.assertIn("stack_order", cols)
         self.assertIn("loaded_at", cols)
+        self.assertIn("is_hold", cols)
+        self.assertIn("is_rushed", cols)
+        self.assertIn("fired_at", cols)
 
         await db.close()
 

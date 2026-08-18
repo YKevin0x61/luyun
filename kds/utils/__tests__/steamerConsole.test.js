@@ -47,6 +47,18 @@ describe('deriveSteamerPhase', () => {
     ).toBe('在蒸')
   })
 
+  it('does not put 等叫 on 待上笼', () => {
+    expect(deriveSteamerPhase({ dish_status: '待出餐', is_hold: true })).toBeNull()
+  })
+
+  it('listAwaitingSteamerCages excludes 等叫', () => {
+    const awaiting = listAwaitingSteamerCages([
+      { id: 'held', dish_status: '待出餐', is_hold: true, dish_name: '虾饺' },
+      { id: 'work', dish_status: '待出餐', dish_name: '虾饺' }
+    ])
+    expect(awaiting.map((row) => row.id)).toEqual(['work'])
+  })
+
   it('does not invent a 出餐状态 from phase', () => {
     const steaming = deriveSteamerPhase({
       dish_status: '待出餐',
@@ -694,6 +706,15 @@ describe('advanceAwaitingGroupSelection', () => {
       'a1',
       'a3',
       'z9'
+    ])
+  })
+
+  it('selects 加急 待上笼 before older non-rush', () => {
+    const rushedLate = { _id: 'r1', order_time: '2026-08-16T08:20:00+08:00', is_rushed: true }
+    expect(sortAwaitingCagesFifo([late, early, rushedLate]).map((cage) => cage._id)).toEqual([
+      'r1',
+      'a1',
+      'a3'
     ])
   })
 
