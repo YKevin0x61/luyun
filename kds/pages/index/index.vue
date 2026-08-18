@@ -53,6 +53,10 @@
             <text class="cta-title">进入厨房</text>
             <text class="cta-desc">{{ kitchenCtaDesc }}</text>
           </view>
+          <view class="cta-btn cta-btn--floor" @click="enterFloor">
+            <text class="cta-title">进入楼面</text>
+            <text class="cta-desc">按桌看进度 · 等叫 / 叫起 / 加急</text>
+          </view>
         </view>
 
         <view class="stations-pane">
@@ -242,6 +246,7 @@ export default {
       // #endif
     }
 
+    const enterFloor = () => navigateSafely('/pages/floor/floor')
     const navigateToSettings = () => navigateSafely('/pages/settings/settings')
     const navigateToOrders = () => navigateSafely('/pages/orders/orders')
 
@@ -299,6 +304,7 @@ export default {
       watchedScopeLabel,
       kitchenCtaDesc,
       enterKitchenOrSettings,
+      enterFloor,
       navigateToManagement,
       navigateToSettings,
       navigateToOrders,
@@ -535,6 +541,11 @@ export default {
   background: var(--ops-accent);
   border-radius: 10px;
   padding: 14px 18px;
+}
+
+.cta-btn--floor {
+  margin-top: 10px;
+  background: #2f6f4e;
 }
 
 .cta-btn:active {

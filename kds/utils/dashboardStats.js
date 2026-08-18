@@ -4,6 +4,7 @@
  */
 
 import { isRefundOrder } from './constants.js'
+import { isHold } from './pendingKitchenWork.js'
 import { buildCompletedCookingStats } from './kitchenStationStats.js'
 
 /**
@@ -30,15 +31,15 @@ export function filterMergedDishesByWatched(mergedDishes, watchedStationIds) {
 }
 
 /**
- * 待出餐剩余份数（无 quantity 时按 1 份；扣已出 served_quantity）。
- * 退菜行不计入，与厨房控制台 isPendingCookOrder 一致。
+ * 待出餐工作剩余份数（无 quantity 时按 1 份；扣已出 served_quantity）。
+ * 退菜行与等叫不计入，与厨房控制台待出餐工作一致。
  * @param {Array<{ dish_status?: string, quantity?: number, served_quantity?: number, servedQuantity?: number }>|undefined|null} orders
  * @param {string} pendingStatus
  */
 function pendingPortions(orders, pendingStatus) {
   let total = 0
   for (const order of orders || []) {
-    if (!order || order.dish_status !== pendingStatus || isRefundOrder(order)) continue
+    if (!order || order.dish_status !== pendingStatus || isRefundOrder(order) || isHold(order)) continue
     const quantity = Number(order.quantity) || 1
     const served = Number(order.served_quantity ?? order.servedQuantity) || 0
     total += Math.max(0, quantity - served)
