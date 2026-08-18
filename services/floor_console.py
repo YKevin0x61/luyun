@@ -22,6 +22,7 @@ from services.kitchen_work import (
 )
 
 SHULONG_STATION_ID = "shulong"
+LOUMIAN_STATION_ID = "loumian"
 
 
 def _conflict(order_id: str, reason: str) -> Dict[str, str]:
@@ -58,14 +59,28 @@ async def _load_rows(orders: OrdersPort, order_ids: Sequence[str]) -> Dict[str, 
     return rows
 
 
+def _is_floor_station_line(order: Dict) -> bool:
+    """楼面档口（传菜 / 席间项目）不是后厨制作，不纳入楼面控制台。"""
+    return (order.get("station") or "") == LOUMIAN_STATION_ID
+
+
 def _floor_keep_line(order: Dict) -> bool:
     if not is_dine_in(order):
+        return False
+    if _is_floor_station_line(order):
         return False
     if is_hold(order):
         return True
     if is_pending_kitchen_work(order):
         return True
     return order.get("dish_status") == "已制作待上菜"
+
+
+def _floor_visible_line(order: Dict) -> bool:
+    """楼面档口 never shows on 桌卡 / 单桌面, including its 已取消 lines."""
+    if _is_floor_station_line(order):
+        return False
+    return _floor_keep_line(order) or is_cancelled_status(order)
 
 
 def floor_phase(order: Dict) -> str:
@@ -136,7 +151,7 @@ async def list_floor_tables(
                         "work_enter_time": work_enter_time(line),
                     }
                     for line in lines
-                    if _floor_keep_line(line) or is_cancelled_status(line)
+                    if _floor_visible_line(line)
                 ],
             }
         )

@@ -68,3 +68,112 @@ export function groupLinesByDishName(lines) {
     lines: dishLines
   }))
 }
+
+export const FLOOR_SPLIT_MIN_WIDTH = 960
+export const FLOOR_SPLIT_MIN_SHORT_EDGE = 768
+export const FLOOR_JUMP_MISS_TOAST = '不在盯桌列表'
+
+const PENDING_WORK_PHASES = ['待出餐', '待上笼', '在蒸']
+const READY_PHASE = '已制作待上菜'
+const HOLD_PHASE = '等叫'
+
+export function isFloorSplitLayout(viewport) {
+  const width = Number(viewport?.width) || 0
+  const height = Number(viewport?.height) || 0
+  if (width >= FLOOR_SPLIT_MIN_WIDTH) return true
+  return width >= FLOOR_SPLIT_MIN_SHORT_EDGE && height >= FLOOR_SPLIT_MIN_SHORT_EDGE
+}
+
+export function tableCardStats(lines) {
+  let holdCount = 0
+  let pendingWorkCount = 0
+  let readyCount = 0
+  let hasRush = false
+  for (const line of lines || []) {
+    const phase = line?.phase
+    if (phase === HOLD_PHASE) holdCount += 1
+    else if (phase === READY_PHASE) readyCount += 1
+    else if (PENDING_WORK_PHASES.includes(phase)) pendingWorkCount += 1
+    if (line?.is_rushed) hasRush = true
+  }
+  return { holdCount, pendingWorkCount, readyCount, hasRush }
+}
+
+export function tableCardEmphasis(stats) {
+  return (stats?.readyCount || 0) > 0 ? 'ready' : 'plain'
+}
+
+export function compareFloorTableNumber(a, b) {
+  return String(a || '').localeCompare(String(b || ''), undefined, { numeric: true })
+}
+
+export function matchFloorTable(tables, rawQuery) {
+  const query = String(rawQuery || '').trim()
+  if (!query) return null
+  return (tables || []).find((table) => String(table.table_number) === query) || null
+}
+
+export function nextSelectedTableNumber(previous, tables) {
+  const current = String(previous || '')
+  if (!current) return ''
+  const stillThere = (tables || []).some((table) => String(table.table_number) === current)
+  return stillThere ? current : ''
+}
+
+export function tableLeftToastTitle(tableNumber) {
+  return `${tableNumber}桌已离台`
+}
+
+function floorWorkEnterMs(line) {
+  const raw = line?.work_enter_time || line?.fired_at || line?.order_time
+  const ts = new Date(raw).getTime()
+  return Number.isFinite(ts) ? ts : 0
+}
+
+function compareFloorLineClock(a, b) {
+  const ta = floorWorkEnterMs(a)
+  const tb = floorWorkEnterMs(b)
+  if (ta !== tb) return ta - tb
+  return String(a?.order_id || '').localeCompare(String(b?.order_id || ''))
+}
+
+export function sortFloorGroupLines(lines) {
+  return [...(lines || [])].sort((a, b) => {
+    const actionableA = isActionable(a) ? 0 : 1
+    const actionableB = isActionable(b) ? 0 : 1
+    if (actionableA !== actionableB) return actionableA - actionableB
+    return compareFloorLineClock(a, b)
+  })
+}
+
+export function sortFloorDishGroups(groups) {
+  return [...(groups || [])].sort((a, b) => {
+    const readyA = (a.lines || []).some((line) => line.phase === READY_PHASE) ? 0 : 1
+    const readyB = (b.lines || []).some((line) => line.phase === READY_PHASE) ? 0 : 1
+    if (readyA !== readyB) return readyA - readyB
+    return String(a.dishName || '').localeCompare(String(b.dishName || ''), 'zh')
+  })
+}
+
+export function decorateFloorTable(table) {
+  const lines = table?.lines || []
+  const stats = tableCardStats(lines)
+  const groups = sortFloorDishGroups(
+    groupLinesByDishName(lines).map((group) => ({
+      dishName: group.dishName,
+      lines: sortFloorGroupLines(group.lines)
+    }))
+  )
+  return {
+    table_number: table?.table_number,
+    stats,
+    emphasis: tableCardEmphasis(stats),
+    groups
+  }
+}
+
+export function decorateFloorTables(rawTables) {
+  return (rawTables || [])
+    .map((table) => decorateFloorTable(table))
+    .sort((a, b) => compareFloorTableNumber(a.table_number, b.table_number))
+}

@@ -687,6 +687,68 @@ def test_floor_console_http_excludes_delivery(orders_client):
     assert numbers == ["8"]
 
 
+def test_floor_console_http_excludes_floor_station_lines(orders_client):
+    client, db, _admin_headers = orders_client
+    now = datetime.now(CHINA_TZ)
+    _run_async(
+        db.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "kitchen",
+                    "table_number": "8",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": now,
+                    "station": "changfen",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+                {
+                    "business_flow_id": "floor",
+                    "table_number": "8",
+                    "dish_name": "茶位",
+                    "quantity": 1,
+                    "order_time": now,
+                    "station": "loumian",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+            ]
+        )
+    )
+    resp = client.get("/api/orders/floor-console", params=_hold_window())
+    assert resp.status_code == 200
+    tables = resp.json()["tables"]
+    assert len(tables) == 1
+    lines = tables[0]["lines"]
+    assert len(lines) == 1
+    assert lines[0]["dish_name"] == "虾饺"
+
+
+def test_floor_console_http_omits_table_with_only_floor_station_lines(orders_client):
+    client, db, _admin_headers = orders_client
+    now = datetime.now(CHINA_TZ)
+    _run_async(
+        db.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "floor-only",
+                    "table_number": "9",
+                    "dish_name": "茶位",
+                    "quantity": 1,
+                    "order_time": now,
+                    "station": "loumian",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+            ]
+        )
+    )
+    resp = client.get("/api/orders/floor-console", params=_hold_window())
+    assert resp.status_code == 200
+    assert resp.json()["tables"] == []
+
+
 def test_floor_console_http_drops_empty_pos_table(orders_client):
     client, db, admin_headers = orders_client
     now = datetime.now(CHINA_TZ)

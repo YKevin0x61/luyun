@@ -583,6 +583,55 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_hold(held_ok))
         self.assertFalse(is_pending_kitchen_work(held_ok))
 
+    async def test_list_floor_tables_excludes_floor_station_lines(self):
+        now = datetime.now(CHINA_TZ)
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(
+                    business_flow_id="kitchen",
+                    table_number="8",
+                    order_time=now,
+                    station="changfen",
+                ),
+                _order(
+                    business_flow_id="floor",
+                    table_number="8",
+                    dish_name="茶位",
+                    order_time=now,
+                    station="loumian",
+                ),
+            ]
+        )
+        data = await list_floor_tables(
+            self.db.orders,
+            start_time=now - timedelta(hours=1),
+            end_time=now + timedelta(hours=1),
+        )
+        self.assertEqual(len(data["tables"]), 1)
+        lines = data["tables"][0]["lines"]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["dish_name"], "虾饺")
+
+    async def test_list_floor_tables_omits_table_with_only_floor_station_lines(self):
+        now = datetime.now(CHINA_TZ)
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(
+                    business_flow_id="floor-only",
+                    table_number="9",
+                    dish_name="茶位",
+                    order_time=now,
+                    station="loumian",
+                ),
+            ]
+        )
+        data = await list_floor_tables(
+            self.db.orders,
+            start_time=now - timedelta(hours=1),
+            end_time=now + timedelta(hours=1),
+        )
+        self.assertEqual(data["tables"], [])
+
     async def test_list_floor_tables_shows_hold_phase(self):
         now = datetime.now(CHINA_TZ)
         await self.db.orders.batch_insert_orders(
