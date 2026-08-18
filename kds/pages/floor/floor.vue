@@ -36,7 +36,7 @@
               :class="['chip--' + phaseClass(line.phase), { 'chip--locked': !isActionable(line) }]"
               @click="toggleLine(table.table_number, group.dishName, line.order_id, line)"
             >
-              <text>{{ line.phase }}{{ line.is_rushed ? '·加急' : '' }}</text>
+              <text>{{ floorLineChipText(line) }}</text>
               <text v-if="isSelected(table.table_number, group.dishName, line.order_id)" class="chip-mark">✓</text>
             </view>
           </view>
@@ -81,6 +81,8 @@ import {
   canFire,
   canHold,
   canRush,
+  floorConflictsToastTitle,
+  floorLineChipText,
   groupLinesByDishName,
   isActionable,
   nextSelectedOrderIds
@@ -187,11 +189,10 @@ export default {
     const selectedRushIds = (table, group) => selectedOf(table, group, canRush)
 
     const toastConflicts = (result) => {
-      const conflicts = result?.conflicts || []
-      if (conflicts.length === 0) return
-      const first = conflicts[0]
+      const title = floorConflictsToastTitle(result?.conflicts)
+      if (!title) return
       uni.showToast({
-        title: `${conflicts.length} 份未改：${first.reason}`,
+        title,
         icon: 'none',
         duration: 2500
       })
@@ -208,7 +209,11 @@ export default {
         await refresh()
       } catch (error) {
         const detail = error?.response?.data?.detail
-        const reason = (typeof detail === 'object' && (detail?.conflicts?.[0]?.reason || detail?.message))
+        const conflictTitle = floorConflictsToastTitle(
+          typeof detail === 'object' ? detail?.conflicts : null
+        )
+        const reason = conflictTitle
+          || (typeof detail === 'object' && detail?.message)
           || (typeof detail === 'string' && detail)
           || error?.message
           || '操作失败'
@@ -247,6 +252,7 @@ export default {
       goHome,
       isSelected,
       toggleLine,
+      floorLineChipText,
       isActionable,
       selectedHoldIds,
       selectedFireIds,

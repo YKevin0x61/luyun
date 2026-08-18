@@ -32,6 +32,30 @@ export function nextSelectedOrderIds(previous, lines, { groupSeen = false } = {}
   return (previous || []).filter((id) => allowed.has(id))
 }
 
+function orderClockLabel(orderTime) {
+  const match = String(orderTime || '').match(/T(\d{2}):(\d{2})/)
+  return match ? `${match[1]}:${match[2]}` : ''
+}
+
+export function floorLineChipText(line) {
+  const phase = line?.phase || ''
+  const clock = orderClockLabel(line?.order_time)
+  const rush = line?.is_rushed ? '·加急' : ''
+  if (!clock) return `${phase}${rush}`
+  return `${phase} ${clock}${rush}`
+}
+
+export function floorConflictsToastTitle(conflicts) {
+  const list = Array.isArray(conflicts) ? conflicts : []
+  if (!list.length) return ''
+  const reasons = []
+  for (const item of list) {
+    const reason = item?.reason
+    if (reason && !reasons.includes(reason)) reasons.push(reason)
+  }
+  return `${list.length} 份未改：${reasons.join('；')}`
+}
+
 export function groupLinesByDishName(lines) {
   const byDish = new Map()
   for (const line of lines || []) {

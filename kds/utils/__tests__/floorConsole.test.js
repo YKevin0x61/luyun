@@ -4,6 +4,8 @@ import {
   canHold,
   canRush,
   defaultSelectedOrderIds,
+  floorConflictsToastTitle,
+  floorLineChipText,
   groupLinesByDishName,
   isActionable,
   nextSelectedOrderIds
@@ -66,6 +68,31 @@ describe('floorConsole default select', () => {
     expect(nextSelectedOrderIds(undefined, lines, { groupSeen: false })).toEqual(['a', 'b'])
     expect(nextSelectedOrderIds([], lines, { groupSeen: true })).toEqual([])
     expect(nextSelectedOrderIds(['a', 'gone'], lines, { groupSeen: true })).toEqual(['a'])
+  })
+})
+
+describe('floorConsole chip and conflict copy', () => {
+  it('shows 下单时间 on the chip so 对账 still sees when the guest ordered', () => {
+    expect(floorLineChipText({
+      phase: '等叫',
+      order_time: '2026-08-18T12:30:00+08:00'
+    })).toBe('等叫 12:30')
+    expect(floorLineChipText({
+      phase: '待出餐',
+      is_rushed: true,
+      order_time: '2026-08-18T09:05:00+08:00'
+    })).toBe('待出餐 09:05·加急')
+    expect(floorLineChipText({ phase: '在蒸' })).toBe('在蒸')
+  })
+
+  it('names every distinct conflict reason with the unchanged portion count', () => {
+    expect(floorConflictsToastTitle([])).toBe('')
+    expect(floorConflictsToastTitle([{ order_id: 'a', reason: '已出餐' }])).toBe('1 份未改：已出餐')
+    expect(floorConflictsToastTitle([
+      { order_id: 'a', reason: '已出餐' },
+      { order_id: 'b', reason: '已被等叫' },
+      { order_id: 'c', reason: '已出餐' }
+    ])).toBe('3 份未改：已出餐；已被等叫')
   })
 })
 
