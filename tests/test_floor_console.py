@@ -219,9 +219,51 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["conflicts"][0]["reason"], "等叫须先叫起")
         rushed = await self.db.orders.get_order_by_id(by_flow["work"]["_id"])
         self.assertTrue(rushed.get("is_rushed"))
+        self.assertEqual(rushed["dish_status"], "待出餐")
         await hold_portions(self.db.orders, {"order_ids": [by_flow["work"]["_id"]]})
         after_hold = await self.db.orders.get_order_by_id(by_flow["work"]["_id"])
         self.assertFalse(after_hold.get("is_rushed"))
+        self.assertEqual(after_hold["dish_status"], "待出餐")
+
+    async def test_rush_steaming_conflicts_and_leaves_clock(self):
+        await self.db.orders.batch_insert_orders([_order()])
+        row = (await self._by_flow())["floor-001"]
+        await _load(self.db.orders, row["_id"])
+        before = await self.db.orders.get_order_by_id(row["_id"])
+        loaded_at = (before.get("placement") or {}).get("loaded_at")
+        self.assertEqual(loaded_at, "2026-08-18T10:05:00+08:00")
+        with self.assertRaises(HTTPException) as raised:
+            await rush_portions(self.db.orders, {"order_ids": [row["_id"]]})
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "在蒸")
+        after = await self.db.orders.get_order_by_id(row["_id"])
+        self.assertEqual(after["dish_status"], "待出餐")
+        self.assertFalse(after.get("is_rushed"))
+        self.assertEqual((after.get("placement") or {}).get("loaded_at"), loaded_at)
+        self.assertEqual(derive_steamer_phase(after), "在蒸")
+
+    async def test_complete_cooking_clears_rush(self):
+        await self.db.orders.batch_insert_orders([_order(station="changfen")])
+        row = (await self._by_flow())["floor-001"]
+        await rush_portions(self.db.orders, {"order_ids": [row["_id"]]})
+        rushed = await self.db.orders.get_order_by_id(row["_id"])
+        self.assertTrue(rushed.get("is_rushed"))
+        await complete_cooking(
+            self.db.orders,
+            {
+                "dish_name": "虾饺",
+                "orders": [
+                    {
+                        "order_id": row["_id"],
+                        "table_number": "8",
+                        "complete_quantity": 1,
+                    }
+                ],
+            },
+        )
+        after = await self.db.orders.get_order_by_id(row["_id"])
+        self.assertEqual(after["dish_status"], "已制作待上菜")
+        self.assertFalse(after.get("is_rushed"))
 
     async def test_complete_cooking_rejects_hold(self):
         await self.db.orders.batch_insert_orders([_order(station="changfen")])

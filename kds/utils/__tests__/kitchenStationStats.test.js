@@ -42,6 +42,23 @@ describe('kitchenStationStats', () => {
     expect(stats.changfen.urgent).toBe(1)
   })
 
+  it('does not treat 加急 as wait-urgency urgent', () => {
+    const now = Date.now()
+    const stats = buildStationTabStats(
+      ['changfen'],
+      () => [
+        {
+          dish_status: '待出餐',
+          is_rushed: true,
+          order_time: new Date(now - 5 * 60 * 1000).toISOString()
+        }
+      ],
+      { urgentMs: 20 * 60 * 1000 }
+    )
+    expect(stats.changfen.pending).toBe(1)
+    expect(stats.changfen.urgent).toBe(0)
+  })
+
   it('does not count 已取消 退示 as pending or urgent', () => {
     const now = Date.now()
     const stats = buildStationTabStats(

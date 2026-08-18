@@ -735,6 +735,12 @@ describe('advanceAwaitingGroupSelection', () => {
       'a1',
       'a3'
     ])
+    expect(
+      advanceAwaitingGroupSelection({
+        selectableCages: [late, early, rushedLate],
+        selectedIds: []
+      })
+    ).toEqual(['r1'])
   })
 
   it('each click takes the next earliest cage; wrap clears the group', () => {
@@ -1249,6 +1255,16 @@ describe('steamUrgencyLevel', () => {
     }
     expect(steamUrgencyLevel(hold, now, thresholds)).toBe('normal')
     expect(steamUrgencyLevel(awaiting, now, thresholds)).toBe('normal')
+  })
+
+  it('does not treat floor 加急 as steam 催 or steam-urgent', () => {
+    const cage = steamingCage({
+      is_rushed: true,
+      order_time: '2026-08-14T09:00:00+08:00',
+      placement: { loaded_at: '2026-08-14T10:10:00+08:00' }
+    })
+    expect(steamUrgencyLevel(cage, now, thresholds)).toBe('normal')
+    expect(formatSteamerCageCard(cage, now).rushMark).toBe('')
   })
 })
 

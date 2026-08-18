@@ -4,7 +4,7 @@
  * Confirm flattens the plan into one complete-cooking request (see serveConfirm).
  */
 
-import { compareKitchenFifo } from './pendingKitchenWork.js'
+import { compareRushThenFifo } from './pendingKitchenWork.js'
 
 /**
  * @param {object} order
@@ -30,7 +30,7 @@ function serveableQuantity(order) {
 function allocateFifo(orders, target) {
   const pool = [...orders]
     .filter((order) => serveableQuantity(order) > 0)
-    .sort(compareKitchenFifo)
+    .sort(compareRushThenFifo)
 
   const allocations = []
   let remaining = target

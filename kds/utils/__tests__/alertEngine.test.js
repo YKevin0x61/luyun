@@ -635,4 +635,31 @@ describe('alertEngine', () => {
       expect(state.borderState).toBe('green')
     })
   })
+
+  describe('加急 is not a fifth alert kind', () => {
+    it('does not ding or overtime when an existing pending line is rushed', () => {
+      const pending = makeOrder()
+      const baseline = prime([pending])
+      const { state, effects } = step(baseline, {
+        orders: [makeOrder({ is_rushed: true })],
+        config: defaultConfig(),
+        now: T0 + 1000
+      })
+      expect(effects).toEqual({ dingCount: 0, overtimeAlarm: false })
+      expect(state.borderState).toBe('red')
+      expect(state.awaitingAck).toBe(false)
+    })
+
+    it('still uses wait overtime, not a new rush alarm, when a rushed line is overdue', () => {
+      const old = makeOrder({
+        order_time: '2026-07-23T11:30:00.000Z',
+        is_rushed: true
+      })
+      const config = defaultConfig({ urgentMin: 20, overtimeRepeatSec: 30 })
+      const baseline = prime([old], config, T0)
+      const first = step(baseline, { orders: [old], config, now: T0 + 1000 })
+      expect(first.effects).toEqual({ dingCount: 0, overtimeAlarm: true })
+      expect(first.state.borderState).toBe('red')
+    })
+  })
 })
