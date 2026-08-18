@@ -70,8 +70,10 @@ describe('deriveSteamerPhase', () => {
     expect(hold.dish_status).toBe('已取消')
   })
 
-  it('treats cancelled-without-placement as 待上笼退示 only inside the notice window', () => {
+  it('treats cancelled-without-placement as 待上笼退示 until this screen acks, not by elapsed time', () => {
     const notice = {
+      business_flow_id: 'flow-notice',
+      id: 'n1',
       dish_status: '已取消',
       status: '退菜',
       placement: null,
@@ -82,6 +84,11 @@ describe('deriveSteamerPhase', () => {
       deriveSteamerPhase(notice, {
         now: Date.parse('2026-08-14T10:08:00+08:00'),
         noticeSeconds
+      })
+    ).toBe('待上笼退示')
+    expect(
+      deriveSteamerPhase(notice, {
+        acknowledgedCancelIds: ['flow-notice']
       })
     ).toBeNull()
   })
@@ -544,7 +551,7 @@ describe('listAwaitingSteamerCages', () => {
   const now = Date.parse('2026-08-14T10:05:00+08:00')
   const noticeSeconds = 180
 
-  it('keeps live 待上笼 and in-window 待上笼退示, drops expired notices', () => {
+  it('keeps live 待上笼 and unacked 待上笼退示 past the old notice window; drops acked notices', () => {
     const awaiting = {
       _id: 'a1',
       dish_status: '待出餐',
@@ -552,21 +559,29 @@ describe('listAwaitingSteamerCages', () => {
     }
     const notice = {
       _id: 'n1',
+      business_flow_id: 'flow-n1',
       dish_status: '已取消',
       status: '退菜',
       placement: null,
       updated_at: '2026-08-14T10:04:00+08:00'
     }
-    const expired = {
+    const stale = {
       _id: 'e1',
+      business_flow_id: 'flow-e1',
       dish_status: '已取消',
       status: '退菜',
       placement: null,
       updated_at: '2026-08-14T10:00:00+08:00'
     }
     expect(
-      listAwaitingSteamerCages([awaiting, notice, expired], { now, noticeSeconds }).map((row) => row._id)
-    ).toEqual(['a1', 'n1'])
+      listAwaitingSteamerCages([awaiting, notice, stale], { now, noticeSeconds }).map((row) => row._id)
+    ).toEqual(['a1', 'n1', 'e1'])
+    expect(
+      listAwaitingSteamerCages([awaiting, notice, stale], {
+        now,
+        acknowledgedCancelIds: ['flow-n1', 'flow-e1']
+      }).map((row) => row._id)
+    ).toEqual(['a1'])
   })
 })
 
@@ -798,6 +813,48 @@ describe('composeAwaitingSteamerGroups', () => {
     expect(groups[0].noticeCages.map((row) => row._id)).toEqual(['n1'])
     expect(groups.slice(1).every((group) => group.noticeCages.length === 0)).toBe(true)
     expect(groups[0].selectableCages.map((row) => row._id)).not.toContain('n1')
+  })
+
+  it('still pins a stale 待上笼退示 and does not count it toward 拆组份数', () => {
+    const cages = [
+      cage('s1', '虾饺', '2026-08-16T08:00:00+08:00'),
+      cage('s2', '虾饺', '2026-08-16T08:01:00+08:00'),
+      {
+        _id: 'n1',
+        business_flow_id: 'flow-n1',
+        dish_name: '虾饺',
+        dish_status: '已取消',
+        status: '退菜',
+        placement: null,
+        updated_at: '2026-08-16T08:00:00+08:00'
+      }
+    ]
+    const { groups } = composeAwaitingSteamerGroups(cages, opts, { cap: 2, orderGapMinutes: 0 })
+    expect(groups).toHaveLength(1)
+    expect(groups[0].totalQuantity).toBe(2)
+    expect(groups[0].noticeCages.map((row) => row._id)).toEqual(['n1'])
+  })
+
+  it('drops an acked 待上笼退示 from 待上笼 groups', () => {
+    const cages = [
+      cage('s1', '虾饺', '2026-08-16T08:00:00+08:00'),
+      {
+        _id: 'n1',
+        business_flow_id: 'flow-n1',
+        dish_name: '虾饺',
+        dish_status: '已取消',
+        status: '退菜',
+        placement: null,
+        updated_at: '2026-08-16T11:59:00+08:00'
+      }
+    ]
+    const { groups } = composeAwaitingSteamerGroups(
+      cages,
+      { ...opts, acknowledgedCancelIds: ['flow-n1'] },
+      { cap: 0, orderGapMinutes: 0 }
+    )
+    expect(groups[0].noticeCages).toEqual([])
+    expect(groups[0].selectableCages.map((row) => row._id)).toEqual(['s1'])
   })
 })
 

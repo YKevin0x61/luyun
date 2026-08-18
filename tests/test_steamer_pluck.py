@@ -167,7 +167,7 @@ class SteamerAwaitingCancelNoticeTests(unittest.IsolatedAsyncioTestCase):
         await self.db.orders.mark_delivery_cancelled(flow_id.split("_")[0])
         return await self.db.orders.get_order_by_id(row["_id"])
 
-    async def test_cancel_without_placement_is_awaiting_notice_then_expires(self):
+    async def test_cancel_without_placement_stays_awaiting_notice_regardless_of_elapsed_time(self):
         after = await self._cancel_unloaded()
         self.assertIsNone(after.get("placement"))
         self.assertEqual(after["dish_status"], "已取消")
@@ -179,7 +179,10 @@ class SteamerAwaitingCancelNoticeTests(unittest.IsolatedAsyncioTestCase):
             derive_steamer_phase(after, now=inside, notice_seconds=180),
             "待上笼退示",
         )
-        self.assertIsNone(derive_steamer_phase(after, now=expired, notice_seconds=180))
+        self.assertEqual(
+            derive_steamer_phase(after, now=expired, notice_seconds=180),
+            "待上笼退示",
+        )
 
     async def test_awaiting_notice_cannot_load_or_complete_cooking(self):
         after = await self._cancel_unloaded(flow_id="bs91_1")

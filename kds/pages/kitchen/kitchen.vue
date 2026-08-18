@@ -281,7 +281,6 @@ import { stationsAPI } from '../../api/stations.js'
 import { ScreenSettingsManager, DENSITY_MODES } from '../../utils/storage.js'
 import { getSteamTimeThresholdsMs } from '../../utils/timeThresholds.js'
 import {
-  SHULONG_STEAMER_LAYOUT,
   isSteamerConsole,
   listAwaitingSteamerCages,
   listSteamingSteamerCages,
@@ -330,6 +329,7 @@ export default {
       dishHasNewBadge,
       unlockSoundFromGesture,
       deliveryCancelAlert,
+      acknowledgedCancelIds,
       dismissDeliveryCancelAlert,
       decorateDishWait,
       urgentCutoff
@@ -494,8 +494,7 @@ export default {
     )
     const steamerPhaseOpts = computed(() => ({
       now: currentTimestamp.value,
-      noticeSeconds: steamerLayout.value.awaitingCancelNoticeSeconds
-        || SHULONG_STEAMER_LAYOUT.awaitingCancelNoticeSeconds
+      acknowledgedCancelIds: acknowledgedCancelIds.value
     }))
     const awaitingSteamerCages = computed(() =>
       listAwaitingSteamerCages(steamerStationOrders.value, steamerPhaseOpts.value)

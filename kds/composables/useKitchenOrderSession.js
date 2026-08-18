@@ -158,6 +158,7 @@ export function useKitchenOrderSession({ ordersStore }) {
     dishHasNewBadge: kitchenAlerts.dishHasNewBadge,
     unlockSoundFromGesture: kitchenAlerts.unlockSoundFromGesture,
     deliveryCancelAlert: deliveryCancel.deliveryCancelAlert,
+    acknowledgedCancelIds: deliveryCancel.acknowledgedCancelIds,
     dismissDeliveryCancelAlert: deliveryCancel.dismissDeliveryCancelAlert,
     higherKindClaimed
   }

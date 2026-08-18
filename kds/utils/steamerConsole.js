@@ -4,6 +4,7 @@
  */
 
 import { isRefundOrder } from './constants.js'
+import { cancelAckLineId, isCancelAcknowledged } from './cancelAck.js'
 import { composeKitchenDishCards, sortKitchenDishCardsByOldest } from './dishCardChunks.js'
 
 export const STEAMER_PHASE_AWAITING = '待上笼'
@@ -69,23 +70,15 @@ export function advanceAwaitingGroupSelection({ selectableCages, selectedIds } =
   return [...keep, ...fifoIds.slice(0, nextCount)]
 }
 
-export function deriveSteamerPhase(order, { now, noticeSeconds } = {}) {
+export function deriveSteamerPhase(order, { acknowledgedCancelIds } = {}) {
   if (!order) return null
   const cancelled = isCancelledOrRefund(order)
   if (cancelled && order.placement) return STEAMER_PHASE_CANCEL_HOLD
   if (cancelled) {
+    // 抽走 keeps loaded_at; 待上笼退示 is never-loaded and unacked on this screen.
     if (order.loaded_at) return null
-    const windowSeconds = noticeSeconds == null
-      ? SHULONG_STEAMER_LAYOUT.awaitingCancelNoticeSeconds
-      : Number(noticeSeconds)
-    const start = asTimestamp(order.updated_at)
-    const moment = now == null ? Date.now() : asTimestamp(now)
-    if (!Number.isFinite(start) || !Number.isFinite(moment) || !Number.isFinite(windowSeconds)) {
-      return null
-    }
-    const elapsed = moment - start
-    if (elapsed >= 0 && elapsed < windowSeconds * 1000) return STEAMER_PHASE_AWAITING_NOTICE
-    return null
+    if (isCancelAcknowledged(cancelAckLineId(order), acknowledgedCancelIds)) return null
+    return STEAMER_PHASE_AWAITING_NOTICE
   }
   if (order.dish_status !== '待出餐') return null
   if (order.placement) return STEAMER_PHASE_STEAMING
