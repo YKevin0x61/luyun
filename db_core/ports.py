@@ -84,6 +84,14 @@ class OrdersPort(Protocol):
 
     async def revert_delivery_cancelled(self, orders: List[Dict]) -> int: ...
 
+    async def cancel_dine_in_portions(
+        self, table_number: str, dish_name: str, portions: int
+    ) -> int: ...
+
+    async def restore_dine_in_cancelled(
+        self, table_number: str, dish_name: str, order: Optional[Dict] = None
+    ) -> Optional[Dict]: ...
+
     async def get_delivery_flow_ids(
         self, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None
     ) -> List[str]: ...

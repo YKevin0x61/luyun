@@ -413,6 +413,135 @@ class _OrdersRepoMixin:
             logger.error(f"❌ 恢复外卖取消行失败: {e}")
             return 0
 
+    async def cancel_dine_in_portions(
+        self, table_number: str, dish_name: str, portions: int
+    ) -> int:
+        """Mark N dine-in 退菜对象 as cancelled by 桌号+菜名.
+
+        Selection: 未做 (待出餐, not loaded) → 在蒸 → 已出餐. Same bucket uses
+        earlier 下单时间. Soft-cancel fields match delivery: 已取消 / 退菜 /
+        qty+amount 0; steamer placement is left untouched.
+        """
+        if not table_number or not dish_name or portions <= 0:
+            return 0
+        try:
+            tdb = self.table("orders")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT id FROM orders
+                       WHERE table_number = ?
+                         AND dish_name = ?
+                         AND IFNULL(source, '') != 'delivery'
+                         AND status != '退菜'
+                         AND IFNULL(dish_status, '待出餐') != '已取消'
+                         AND IFNULL(business_flow_id, '') NOT LIKE '%_refund_%'
+                         AND IFNULL(dish_status, '待出餐') IN (
+                             '待出餐', '已制作待上菜', '已上菜'
+                         )
+                       ORDER BY
+                         CASE
+                           WHEN IFNULL(dish_status, '待出餐') = '待出餐'
+                                AND (steamer_id IS NULL OR steamer_id = '') THEN 0
+                           WHEN IFNULL(dish_status, '待出餐') = '待出餐' THEN 1
+                           ELSE 2
+                         END,
+                         order_time ASC,
+                         id ASC
+                       LIMIT ?""",
+                    (table_number, dish_name, int(portions)),
+                )
+                target_ids = [row[0] for row in await cursor.fetchall()]
+                affected = 0
+                for row_id in target_ids:
+                    now = datetime.now(CHINA_TZ).isoformat()
+                    await cursor.execute(
+                        """UPDATE orders
+                           SET status = '退菜', quantity = 0, total_amount = 0,
+                               dish_status = '已取消', updated_at = ?
+                           WHERE id = ?""",
+                        (now, row_id),
+                    )
+                    affected += cursor.rowcount
+            await tdb.commit()
+            if affected:
+                logger.info(
+                    "🚫 堂食退菜，软取消 %s 行: table=%s dish=%s",
+                    affected,
+                    table_number,
+                    dish_name,
+                )
+            return affected
+        except Exception as e:
+            logger.error(
+                "❌ 堂食退菜失败 table=%s dish=%s: %s", table_number, dish_name, e
+            )
+            return 0
+
+    async def restore_dine_in_cancelled(
+        self, table_number: str, dish_name: str, order: Optional[Dict] = None
+    ) -> Optional[Dict]:
+        """Restore the most recently cancelled original dine-in 订单行.
+
+        After restore dish_status is 待出餐. Placement is kept: still on a hole
+        → 在蒸; no placement → 未做. Does not insert a new row.
+        """
+        if not table_number or not dish_name:
+            return None
+        fields = order or {}
+        quantity = int(fields.get("quantity") or 1)
+        if quantity <= 0:
+            quantity = 1
+        price = float(fields.get("price") or 0.0)
+        total_amount = fields.get("total_amount")
+        if total_amount is None:
+            total_amount = price * quantity
+        status = fields.get("status") or "未结"
+        try:
+            now = datetime.now(CHINA_TZ).isoformat()
+            tdb = self.table("orders")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT id FROM orders
+                       WHERE table_number = ?
+                         AND dish_name = ?
+                         AND status = '退菜'
+                         AND dish_status = '已取消'
+                         AND IFNULL(source, '') != 'delivery'
+                         AND IFNULL(business_flow_id, '') NOT LIKE '%_refund_%'
+                       ORDER BY updated_at DESC, id DESC
+                       LIMIT 1""",
+                    (table_number, dish_name),
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                row_id = row[0]
+                await cursor.execute(
+                    """UPDATE orders
+                       SET status = ?, quantity = ?, price = ?, total_amount = ?,
+                           dish_status = '待出餐', ready_time = NULL, updated_at = ?
+                       WHERE id = ? AND status = '退菜' AND dish_status = '已取消'""",
+                    (status, quantity, price, float(total_amount), now, row_id),
+                )
+                if cursor.rowcount <= 0:
+                    return None
+            await tdb.commit()
+            logger.info(
+                "↩️ 堂食退后重下，恢复行 id=%s table=%s dish=%s",
+                row_id,
+                table_number,
+                dish_name,
+            )
+            return await self.get_order_by_id(str(row_id))
+        except Exception as e:
+            logger.error(
+                "❌ 堂食退后重下失败 table=%s dish=%s: %s",
+                table_number,
+                dish_name,
+                e,
+            )
+            return None
+
     async def get_delivery_flow_ids(
         self,
         start_time: Optional[datetime] = None,

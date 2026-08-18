@@ -74,6 +74,25 @@ class SteamerCancelHoldPhaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(derive_steamer_phase(after), "退菜占位")
         self.assertEqual(after["status"], "退菜")
 
+    async def test_dine_in_load_then_cancel_keeps_placement_as_cancel_hold(self):
+        await self.db.orders.batch_insert_orders(
+            [_pending_order(source="dine_in", business_flow_id="t8_虾饺_hold")]
+        )
+        row = (await self.db.orders.get_orders(limit=-1))[0]
+        await _load(self.db.orders, row["_id"], port_index=5)
+        await self.db.orders.cancel_dine_in_portions("A1", "虾饺", 1)
+
+        after = await self.db.orders.get_order_by_id(row["_id"])
+        self.assertEqual(after["dish_status"], "已取消")
+        self.assertEqual(after["placement"]["port_index"], 5)
+        self.assertEqual(derive_steamer_phase(after), "退菜占位")
+
+        plucked = await pluck_steamer(self.db.orders, {"order_ids": [row["_id"]]})
+        self.assertTrue(plucked["success"])
+        gone = await self.db.orders.get_order_by_id(row["_id"])
+        self.assertIsNone(gone.get("placement"))
+        self.assertEqual(gone["dish_status"], "已取消")
+
     async def test_pluck_clears_hold_and_compacts_remaining_hole(self):
         await self.db.orders.batch_insert_orders([
             _pending_order(business_flow_id="bs88_1", table_number="A1"),
