@@ -84,6 +84,37 @@ describe('出餐选中 reducer', () => {
     expect(serveSelectionAfterConfirm(state, true)).toEqual(emptyServeSelection())
   })
 
+  it('drops 等叫 lines from 选桌 and clamps 卡上出餐 to remaining 待出餐工作', () => {
+    let state = emptyServeSelection()
+    state = applyServeSelection(state, { type: 'increase', chunkId: '虾饺', max: 3 })
+    state = applyServeSelection(state, { type: 'increase', chunkId: '虾饺', max: 3 })
+    state = applyServeSelection(state, { type: 'increase', chunkId: '叉烧包', max: 1 })
+    state = applyServeSelection(state, {
+      type: 'syncLiveWork',
+      liveOrderIds: ['a', 'b'],
+      chunkMax: { 虾饺: 1 }
+    })
+    expect(state.cardCounts).toEqual({ 虾饺: 1 })
+    expect(state.tablePick).toBeNull()
+
+    state = applyServeSelection(emptyServeSelection(), { type: 'openTablePick', chunkId: '虾饺' })
+    state = applyServeSelection(state, { type: 'toggleOrderLine', orderId: 'a' })
+    state = applyServeSelection(state, { type: 'toggleOrderLine', orderId: 'b' })
+    state = applyServeSelection(state, {
+      type: 'syncLiveWork',
+      liveOrderIds: ['a'],
+      chunkMax: { 虾饺: 1 }
+    })
+    expect(state.tablePick.selectedOrderIds).toEqual(['a'])
+
+    state = applyServeSelection(state, {
+      type: 'syncLiveWork',
+      liveOrderIds: [],
+      chunkMax: {}
+    })
+    expect(state.tablePick).toBeNull()
+  })
+
   it('refuses 选桌 toggle of ids outside the selectable set (退示)', () => {
     let state = emptyServeSelection()
     state = applyServeSelection(state, { type: 'openTablePick', chunkId: '虾饺' })
