@@ -29,21 +29,25 @@ const reloadConfig = vi.fn()
 const startAlerts = vi.fn()
 const stopAlerts = vi.fn()
 const kitchenHigherKindClaimed = vi.fn(() => false)
+let kitchenAlertOptions = null
 
 vi.mock('../useKitchenAlerts.js', () => ({
-  useKitchenAlerts: () => ({
-    screenBorderVisual: ref('green'),
-    awaitingAck: ref(false),
-    showSoundUnlockOverlay: ref(false),
-    syncOrders: syncAlertOrders,
-    acknowledge: vi.fn(),
-    dishHasNewBadge: vi.fn(() => false),
-    unlockSoundFromGesture: vi.fn(),
-    reloadConfig,
-    start: startAlerts,
-    stop: stopAlerts,
-    higherKindClaimed: (...args) => kitchenHigherKindClaimed(...args)
-  })
+  useKitchenAlerts: (options) => {
+    kitchenAlertOptions = options
+    return {
+      screenBorderVisual: ref('green'),
+      awaitingAck: ref(false),
+      showSoundUnlockOverlay: ref(false),
+      syncOrders: syncAlertOrders,
+      acknowledge: vi.fn(),
+      dishHasNewBadge: vi.fn(() => false),
+      unlockSoundFromGesture: vi.fn(),
+      reloadConfig,
+      start: startAlerts,
+      stop: stopAlerts,
+      higherKindClaimed: (...args) => kitchenHigherKindClaimed(...args)
+    }
+  }
 }))
 
 const syncDeliveryOrders = vi.fn()
@@ -144,10 +148,12 @@ describe('useKitchenOrderSession', () => {
 
     cancelHigherKindClaimed.mockReturnValue(true)
     expect(session.higherKindClaimed()).toBe(true)
+    expect(kitchenAlertOptions.getCancelClaimed()).toBe(true)
 
     cancelHigherKindClaimed.mockReturnValue(false)
     kitchenHigherKindClaimed.mockReturnValue(true)
     expect(session.higherKindClaimed()).toBe(true)
+    expect(kitchenAlertOptions.getCancelClaimed()).toBe(false)
   })
 
   it('reloadDeviceSettings / onShow re-reads watched stations', () => {

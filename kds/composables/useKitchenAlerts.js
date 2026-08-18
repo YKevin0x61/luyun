@@ -51,9 +51,14 @@ function readAlertConfig() {
 }
 
 /**
+ * @param {{
+ *   getCancelClaimed?: () => boolean,
+ * }} [options]
  * @returns {object}
  */
-export function useKitchenAlerts() {
+export function useKitchenAlerts(options = {}) {
+  const getCancelClaimed =
+    typeof options.getCancelClaimed === 'function' ? options.getCancelClaimed : null
   /** @type {import('vue').ShallowRef<ReturnType<typeof createInitialState>>} */
   const engineState = shallowRef(createInitialState())
   const borderState = ref('green')
@@ -128,7 +133,8 @@ export function useKitchenAlerts() {
   /** 1s tick: busy-badge auto-dismiss + idle re-escalate + overtime repeat. */
   function tick() {
     if (latestOrders == null) return
-    runStep(latestOrders, Date.now())
+    const cancelClaimed = Boolean(getCancelClaimed && getCancelClaimed())
+    runStep(latestOrders, Date.now(), { cancelClaimed })
   }
 
   function acknowledge() {

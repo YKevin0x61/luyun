@@ -25,9 +25,11 @@ export function useKitchenOrderSession({ ordersStore }) {
   /** 0 = no 浪潮 split. */
   const orderGapMinutes = ref(ScreenSettingsManager.getOrderGapMinutes())
 
-  const kitchenAlerts = useKitchenAlerts()
   const deliveryCancel = useDeliveryCancelAlert({
     getWatchedStations: () => watchedStationIds.value
+  })
+  const kitchenAlerts = useKitchenAlerts({
+    getCancelClaimed: () => deliveryCancel.higherKindClaimed()
   })
 
   function reloadDeviceSettings() {

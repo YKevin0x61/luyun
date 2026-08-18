@@ -80,4 +80,21 @@ describe('useKitchenAlerts', () => {
     vi.setSystemTime(1_000_000 + 1000)
     expect(alerts.higherKindClaimed()).toBe(false)
   })
+
+  it('tick skips ding when getCancelClaimed is true', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_000)
+    const getCancelClaimed = vi.fn(() => true)
+    const alerts = useKitchenAlerts({ getCancelClaimed })
+    alerts.start()
+    alerts.syncOrders([])
+    alerts.syncOrders([makeOrder()])
+    expect(playNewOrderDing).toHaveBeenCalled()
+
+    playNewOrderDing.mockReset()
+    vi.advanceTimersByTime(20_000)
+    expect(getCancelClaimed).toHaveBeenCalled()
+    expect(playNewOrderDing).not.toHaveBeenCalled()
+    alerts.stop()
+  })
 })
