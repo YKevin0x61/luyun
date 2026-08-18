@@ -1,6 +1,7 @@
 /**
- * Kitchen glue for deliveryCancelEngine: banner state + shared sound engine.
+ * Kitchen glue for the 退菜/取消 engine: banner state + shared sound engine.
  * kitchen.vue only renders the banner and calls syncOrders / dismiss.
+ * 1s tick re-prompts at CANCEL_REPEAT_SEC while the banner is visible.
  */
 
 import { ref, shallowRef } from 'vue'
@@ -12,6 +13,7 @@ import {
 import { playCancelAlert } from '../utils/sound.js'
 import { ScreenSettingsManager } from '../utils/storage.js'
 
+const TICK_INTERVAL_MS = 1000
 /** One kitchen tick / one higher-kind playback. Losing sounds are dropped, not queued. */
 const HIGHER_KIND_CLAIM_MS = 1000
 
@@ -30,6 +32,11 @@ export function useDeliveryCancelAlert(options = {}) {
   const deliveryCancelAlert = ref({ ...engineState.value.banner })
   let claimedAt = null
   let alertParams = ScreenSettingsManager.getAlertParams()
+  /** @type {object[] | null} */
+  let latestOrders = null
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let tickTimer = null
+  let started = false
 
   function reloadConfig() {
     alertParams = ScreenSettingsManager.getAlertParams()
@@ -54,18 +61,49 @@ export function useDeliveryCancelAlert(options = {}) {
 
   /**
    * @param {object[]} orders
+   * @param {number} [now]
    */
-  function syncOrders(orders) {
+  function runStep(orders, now = Date.now()) {
     const { state, effects } = step(engineState.value, {
       orders: Array.isArray(orders) ? orders : [],
-      watchedStations: resolveWatchedStations()
+      watchedStations: resolveWatchedStations(),
+      now
     })
     publish(state)
     if (effects.playAlert) {
       playCancelAlert({ tone: alertParams.cancelTone, volume: alertParams.alertVolume })
-      claimedAt = Date.now()
+      claimedAt = now
     }
     return Boolean(effects.playAlert)
+  }
+
+  /**
+   * @param {object[]} orders
+   */
+  function syncOrders(orders) {
+    latestOrders = Array.isArray(orders) ? orders : []
+    return runStep(latestOrders, Date.now())
+  }
+
+  function tick() {
+    if (latestOrders == null) return false
+    return runStep(latestOrders, Date.now())
+  }
+
+  function start() {
+    if (started) return
+    started = true
+    reloadConfig()
+    tickTimer = setInterval(tick, TICK_INTERVAL_MS)
+  }
+
+  function stop() {
+    if (tickTimer != null) {
+      clearInterval(tickTimer)
+      tickTimer = null
+    }
+    started = false
+    latestOrders = null
   }
 
   function higherKindClaimed() {
@@ -82,6 +120,8 @@ export function useDeliveryCancelAlert(options = {}) {
     dismissDeliveryCancelAlert,
     setWatchedStations,
     reloadConfig,
-    higherKindClaimed
+    higherKindClaimed,
+    start,
+    stop
   }
 }

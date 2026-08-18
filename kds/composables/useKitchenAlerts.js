@@ -112,7 +112,7 @@ export function useKitchenAlerts() {
   /**
    * Sync engine with the current order list (after mount baseline / nudge refetch).
    * Engine always runs (badges / awaitingAck / lastOvertimeAlarmAt).
-   * Playback is skipped when delivery-cancel claimed this same orders sync.
+   * Playback is skipped when 退菜/取消 claimed this same orders sync.
    * @param {object[]} orders
    * @param {{ cancelClaimed?: boolean }} [options]
    */

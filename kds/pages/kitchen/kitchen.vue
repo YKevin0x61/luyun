@@ -73,12 +73,12 @@
       </button>
     </view>
 
-    <!-- 🆕 外卖取消告警：外卖单在 POS 被取消后展示醒目横条；含已出餐/已打票时高亮并加强提示音 -->
+    <!-- 退菜/取消告警：本屏职责档口出餐状态变为已取消后展示横条；含已出餐/已打票时用核对退单语气 -->
     <view v-if="deliveryCancelAlert.visible" :class="['cancel-banner', { cooked: deliveryCancelAlert.hasCooked }]">
       <view class="cancel-banner-info">
         <SvgIcon name="alert-triangle" :size="20" color="#fff" />
         <text class="cancel-banner-text">
-          <text class="cancel-banner-title">{{ deliveryCancelAlert.hasCooked ? '⚠ 外卖已取消（含已出餐/已打票，请核对退单）' : '外卖订单已取消' }} {{ deliveryCancelAlert.count }} 项</text>
+          <text class="cancel-banner-title">{{ deliveryCancelAlert.hasCooked ? '⚠ 退菜/取消（含已出餐/已打票，请核对退单）' : '退菜/取消' }} {{ deliveryCancelAlert.count }} 项</text>
           <text class="cancel-banner-list">：{{ deliveryCancelAlert.summary }}</text>
         </text>
       </view>
@@ -311,7 +311,7 @@ export default {
     // 🆕 时钟 tick 间隔：仅用于驱动"已等待时长"等显示的每秒刷新，不驱动订单合并/统计聚合
     const CLOCK_TICK_INTERVAL_MS = 1000
 
-    // 订单会话：一次拉取 → 新单/外卖取消引擎；职责档口 / 拆卡旋钮 / 紧急阈值随 refresh/onShow 重读
+    // 订单会话：一次拉取 → 新单/退菜取消引擎；职责档口 / 拆卡旋钮 / 紧急阈值随 refresh/onShow 重读
     const orderSession = useKitchenOrderSession({ ordersStore })
     const {
       loading,
@@ -1164,7 +1164,7 @@ export default {
       await loadSteamerLayout()
       ensureCurrentStationInWatched()
 
-      // 初始加载：一次拉取并同步新单告警与外卖取消基线
+      // 初始加载：一次拉取并同步新单告警与退菜/取消基线
       await refreshDataWithToast()
 
       // 开始时间更新
@@ -1740,7 +1740,7 @@ export default {
   transform: scale(0.95);
 }
 
-/* 🆕 外卖取消告警横条 */
+/* 退菜/取消告警横条 */
 .cancel-banner {
   flex-shrink: 0;
   display: flex;

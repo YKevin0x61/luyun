@@ -1,15 +1,18 @@
 /**
- * Pure delivery-cancel alert engine (no Vue / uni / audio).
+ * Pure 退菜/取消 alert engine (no Vue / uni / audio).
  *
  * Snapshot-diff: previous dish_status by flowId + current orders + watchedStations
- * → next state + effects. Only source=delivery orders in the watched station set
- * can raise an alert (empty watched = no stations).
+ * → next state + effects. Dine-in and delivery in the watched station set can
+ * raise an alert (empty watched = no stations). A wave of only 退菜占位 is silent.
  */
+
+import { deriveSteamerPhase, STEAMER_PHASE_CANCEL_HOLD } from './steamerConsole.js'
 
 export const DELIVERY_CANCELLED_DISH_STATUS = '已取消'
 export const WORKED_DISH_STATUSES = Object.freeze(['已制作待上菜', '已上菜'])
 export const CANCEL_SUMMARY_MAX_ITEMS = 6
-export const DELIVERY_SOURCE = 'delivery'
+/** Re-prompt cadence for 退菜/取消. Independent of new-order busy/idle. */
+export const CANCEL_REPEAT_SEC = 20
 
 /**
  * @typedef {{
@@ -24,7 +27,8 @@ export const DELIVERY_SOURCE = 'delivery'
  * @typedef {{
  *   primed: boolean,
  *   statusByFlowId: Map<string, string|undefined>,
- *   banner: CancelBanner
+ *   banner: CancelBanner,
+ *   lastAlertAt: number|null
  * }} DeliveryCancelState
  */
 
@@ -46,7 +50,8 @@ export function createInitialState() {
   return {
     primed: false,
     statusByFlowId: new Map(),
-    banner: emptyBanner()
+    banner: emptyBanner(),
+    lastAlertAt: null
   }
 }
 
@@ -69,10 +74,24 @@ function isWatched(watchedStations, order) {
 }
 
 /**
+ * 退菜占位: cancelled and already on a steamer hole.
+ * Uses steamer phase so hole detection stays one definition.
  * @param {object} order
  */
-function isDeliveryOrder(order) {
-  return (order?.source || '') === DELIVERY_SOURCE
+function isCancelHold(order) {
+  return deriveSteamerPhase(order) === STEAMER_PHASE_CANCEL_HOLD
+}
+
+/**
+ * 未做退示 at cancel time: cancelled, never loaded.
+ * Do not use notice_seconds expiry here (ticket 03); a just-cancelled
+ * unloaded line still counts so the banner can fire.
+ * @param {object} order
+ */
+function isUnloadedNotice(order) {
+  if (order?.placement) return false
+  if (order?.loaded_at) return false
+  return true
 }
 
 /**
@@ -112,45 +131,65 @@ function buildStatusMap(orders) {
 
 /**
  * @param {DeliveryCancelState} state
- * @param {{ orders?: object[], watchedStations?: string[] }} input
+ * @param {{ orders?: object[], watchedStations?: string[], now?: number }} input
  * @returns {{ state: DeliveryCancelState, effects: DeliveryCancelEffects }}
  */
 export function step(state, input = {}) {
   const orders = Array.isArray(input.orders) ? input.orders : []
   const watchedStations = Array.isArray(input.watchedStations) ? input.watchedStations : []
+  const now = Number.isFinite(input.now) ? input.now : Date.now()
   const workedSet = new Set(WORKED_DISH_STATUSES)
   const nextMap = buildStatusMap(orders)
 
   /** @type {{ tableNumber: string, dishName: string, cooked: boolean }[]} */
-  const newlyCancelled = []
+  const alertable = []
 
   if (state.primed) {
     for (const order of orders) {
       if (!order || order.dish_status !== DELIVERY_CANCELLED_DISH_STATUS) continue
-      if (!isDeliveryOrder(order)) continue
       if (!isWatched(watchedStations, order)) continue
       const flowId = flowIdOf(order)
       if (!flowId) continue
       const previousStatus = state.statusByFlowId.get(flowId)
-      if (previousStatus !== undefined && previousStatus !== DELIVERY_CANCELLED_DISH_STATUS) {
-        newlyCancelled.push({
-          tableNumber: order.table_number || '外卖',
-          dishName: order.dish_name || '',
-          cooked: workedSet.has(previousStatus)
-        })
+      if (previousStatus === undefined || previousStatus === DELIVERY_CANCELLED_DISH_STATUS) {
+        continue
       }
+      const cooked = workedSet.has(previousStatus)
+      if (!cooked && isCancelHold(order)) continue
+      if (!cooked && !isUnloadedNotice(order)) continue
+      alertable.push({
+        tableNumber: order.table_number || '',
+        dishName: order.dish_name || '',
+        cooked
+      })
     }
   }
 
-  const banner = newlyCancelled.length > 0 ? buildBanner(newlyCancelled) : state.banner
+  let banner = state.banner
+  let playAlert = false
+  let lastAlertAt = state.lastAlertAt ?? null
+
+  if (alertable.length > 0) {
+    banner = buildBanner(alertable)
+    playAlert = true
+    lastAlertAt = now
+  } else if (
+    banner.visible
+    && lastAlertAt != null
+    && now - lastAlertAt >= CANCEL_REPEAT_SEC * 1000
+  ) {
+    playAlert = true
+    lastAlertAt = now
+  }
 
   return {
     state: {
       primed: true,
       statusByFlowId: nextMap,
-      banner
+      banner,
+      lastAlertAt
     },
-    effects: { playAlert: newlyCancelled.length > 0 }
+    effects: { playAlert }
   }
 }
 
@@ -161,6 +200,7 @@ export function step(state, input = {}) {
 export function dismiss(state) {
   return {
     ...state,
-    banner: emptyBanner()
+    banner: emptyBanner(),
+    lastAlertAt: null
   }
 }
