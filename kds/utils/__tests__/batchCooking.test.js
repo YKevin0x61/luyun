@@ -38,6 +38,27 @@ describe('planBatchCookingCalls', () => {
     ])
   })
 
+  it('allocates a late 叫起 after earlier never-held FIFO', () => {
+    const fresh = makeOrder({
+      id: '1',
+      order_time: '2026-07-23T02:00:00.000Z',
+      table_number: '1'
+    })
+    const firedLate = makeOrder({
+      id: '2',
+      order_time: '2026-07-23T01:00:00.000Z',
+      fired_at: '2026-07-23T03:00:00.000Z',
+      table_number: '2'
+    })
+
+    const plan = planBatchCookingCalls({
+      selectedQuantities: { 虾饺: 1 },
+      pendingOrders: [firedLate, fresh]
+    })
+
+    expect(plan[0].orders).toEqual([fresh])
+  })
+
   it('takes multiple portions from an earlier multi-qty order before later ones', () => {
     const o1 = makeOrder({ id: '1', quantity: 2, order_time: '2026-07-23T01:00:00.000Z' })
     const o2 = makeOrder({ id: '2', quantity: 2, order_time: '2026-07-23T02:00:00.000Z' })

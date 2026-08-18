@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""HTTP seam for 楼面控制台：GET /floor-console and POST /hold."""
+"""HTTP seam for 楼面控制台：GET /floor-console and POST /hold /fire."""
 
 import asyncio
 from datetime import datetime, timedelta
@@ -223,5 +223,143 @@ def test_floor_console_and_hold_paths_are_not_order_ids(orders_client):
     list_resp = client.get("/api/orders/floor-console", params=_hold_window())
     assert list_resp.status_code == 200
     assert "tables" in list_resp.json()
+    missing = client.get("/api/orders/not-a-real-order")
+    assert missing.status_code == 404
+
+
+def test_fire_without_token_fails(orders_client):
+    client, db, admin_headers = orders_client
+    seeded = _seed_dine_in(db)
+    order_id = seeded["floor-http-001"]["_id"]
+    hold_resp = client.post(
+        "/api/orders/hold",
+        json={"order_ids": [order_id]},
+        headers=admin_headers,
+    )
+    assert hold_resp.status_code == 200
+    resp = client.post("/api/orders/fire", json={"order_ids": [order_id]})
+    assert resp.status_code == 401
+    after = _run_async(db.get_order_by_id(order_id))
+    assert after["dish_status"] == "待出餐"
+    assert after.get("is_hold") is True
+    assert not after.get("fired_at")
+
+
+def test_fire_with_admin_token_succeeds(orders_client):
+    client, db, admin_headers = orders_client
+    seeded = _seed_dine_in(db)
+    order_id = seeded["floor-http-001"]["_id"]
+    hold_resp = client.post(
+        "/api/orders/hold",
+        json={"order_ids": [order_id]},
+        headers=admin_headers,
+    )
+    assert hold_resp.status_code == 200
+    resp = client.post(
+        "/api/orders/fire",
+        json={"order_ids": [order_id]},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["updated_count"] == 1
+    assert body["conflicts"] == []
+    assert body["fired_at"]
+    assert "stations" not in body
+    after = _run_async(db.get_order_by_id(order_id))
+    assert after["dish_status"] == "待出餐"
+    assert after.get("is_hold") is False
+    assert after.get("fired_at")
+
+
+def test_fire_all_conflicts_returns_409(orders_client):
+    client, db, admin_headers = orders_client
+    seeded = _seed_dine_in(db)
+    order_id = seeded["floor-http-001"]["_id"]
+    resp = client.post(
+        "/api/orders/fire",
+        json={"order_ids": [order_id]},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["conflicts"] == [{"order_id": str(order_id), "reason": "不是等叫"}]
+    after = _run_async(db.get_order_by_id(order_id))
+    assert after.get("is_hold") is False
+    assert not after.get("fired_at")
+
+
+def test_fire_partial_conflicts_returns_200(orders_client):
+    client, db, admin_headers = orders_client
+    _run_async(
+        db.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "held",
+                    "table_number": "8",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": datetime.now(CHINA_TZ),
+                    "station": "changfen",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+                {
+                    "business_flow_id": "open",
+                    "table_number": "8",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": datetime.now(CHINA_TZ),
+                    "station": "changfen",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+            ]
+        )
+    )
+    by_flow = {row["business_flow_id"]: row for row in _run_async(db.get_orders(limit=-1))}
+    already = client.post(
+        "/api/orders/hold",
+        json={"order_ids": [by_flow["held"]["_id"]]},
+        headers=admin_headers,
+    )
+    assert already.status_code == 200
+    resp = client.post(
+        "/api/orders/fire",
+        json={"order_ids": [by_flow["held"]["_id"], by_flow["open"]["_id"]]},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["updated_count"] == 1
+    assert body["conflicts"] == [
+        {"order_id": str(by_flow["open"]["_id"]), "reason": "不是等叫"}
+    ]
+    assert "stations" not in body
+    fired = _run_async(db.get_order_by_id(by_flow["held"]["_id"]))
+    skipped = _run_async(db.get_order_by_id(by_flow["open"]["_id"]))
+    assert fired.get("is_hold") is False
+    assert fired.get("fired_at")
+    assert skipped.get("is_hold") is False
+    assert not skipped.get("fired_at")
+
+
+def test_fire_path_is_not_an_order_id(orders_client):
+    client, db, admin_headers = orders_client
+    seeded = _seed_dine_in(db)
+    order_id = seeded["floor-http-001"]["_id"]
+    hold_resp = client.post(
+        "/api/orders/hold",
+        json={"order_ids": [order_id]},
+        headers=admin_headers,
+    )
+    assert hold_resp.status_code == 200
+    resp = client.post(
+        "/api/orders/fire",
+        json={"order_ids": [order_id]},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
     missing = client.get("/api/orders/not-a-real-order")
     assert missing.status_code == 404

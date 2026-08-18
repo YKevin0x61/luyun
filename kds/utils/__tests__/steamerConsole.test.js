@@ -700,7 +700,26 @@ describe('advanceAwaitingGroupSelection', () => {
   const late = { _id: 'a3', order_time: '2026-08-16T08:20:00+08:00' }
   const cages = [late, early, mid]
 
-  it('sorts 待上笼 FIFO by order_time, missing time last', () => {
+  it('sorts 待上笼 FIFO by 进入待出餐工作时刻 so a late 叫起 is last', () => {
+    const neverHeld = { _id: 'fresh', order_time: '2026-08-16T08:10:00+08:00' }
+    const firedLate = {
+      _id: 'fired',
+      order_time: '2026-08-16T08:00:00+08:00',
+      fired_at: '2026-08-16T08:20:00+08:00'
+    }
+    expect(sortAwaitingCagesFifo([firedLate, neverHeld]).map((cage) => cage._id)).toEqual([
+      'fresh',
+      'fired'
+    ])
+    expect(
+      advanceAwaitingGroupSelection({
+        selectableCages: [firedLate, neverHeld],
+        selectedIds: []
+      })
+    ).toEqual(['fresh'])
+  })
+
+  it('sorts 待上笼 FIFO by 进入待出餐工作时刻, missing time last', () => {
     const undated = { _id: 'z9' }
     expect(sortAwaitingCagesFifo([late, undated, early]).map((cage) => cage._id)).toEqual([
       'a1',

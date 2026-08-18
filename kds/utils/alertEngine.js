@@ -7,6 +7,7 @@
 
 import { DISH_STATUS, isRefundOrder } from './constants.js'
 import { isNeverLoadedCancel } from './cancelAck.js'
+import { isHold, workEnterTimeMs } from './pendingKitchenWork.js'
 
 /** @typedef {'green' | 'yellow' | 'red'} BorderState */
 /** @typedef {'yellow' | 'busy'} BadgeMode */
@@ -139,13 +140,13 @@ function buildRelevantIndex(orders, watchedStations) {
     if (!flowId) continue
     const quantity = Number(order.quantity)
     const hasPlacement = Boolean(order.placement)
-    const pending = order.dish_status === DISH_STATUS.PENDING
+    const pendingWork = order.dish_status === DISH_STATUS.PENDING && !isHold(order)
     index.set(flowId, {
       status: order.dish_status,
       quantity: Number.isFinite(quantity) ? quantity : 0,
-      orderTime: new Date(order.order_time).getTime(),
-      awaiting: pending && !hasPlacement && !notice,
-      steaming: pending && hasPlacement,
+      workEnterTime: workEnterTimeMs(order),
+      awaiting: pendingWork && !hasPlacement && !notice,
+      steaming: pendingWork && hasPlacement,
       cancelHold: hold,
       cancelNotice: notice,
       loadedAt: asTimestamp(order.placement?.loaded_at)
@@ -155,7 +156,7 @@ function buildRelevantIndex(orders, watchedStations) {
 }
 
 /**
- * @param {Map<string, { status: string, quantity: number, orderTime: number }>} index
+ * @param {Map<string, { status: string, quantity: number, workEnterTime: number }>} index
  * @param {number} now
  * @param {number} urgentMin
  */
@@ -163,8 +164,8 @@ function hasAwaitingOvertime(index, now, urgentMin) {
   const thresholdMs = urgentMin * 60 * 1000
   for (const entry of index.values()) {
     if (!entry.awaiting) continue
-    if (!Number.isFinite(entry.orderTime)) continue
-    if (now - entry.orderTime > thresholdMs) return true
+    if (!Number.isFinite(entry.workEnterTime)) continue
+    if (now - entry.workEnterTime > thresholdMs) return true
   }
   return false
 }
@@ -257,6 +258,10 @@ export function step(state, input) {
       newEventFlowIds.push(flowId)
       continue
     }
+    if (!prevEntry.awaiting && entry.awaiting && !prevEntry.mapWork) {
+      newEventFlowIds.push(flowId)
+      continue
+    }
     // 下笼 clears placement but the line was already 待出餐 — not a 新单事件.
     if (prevEntry.status !== DISH_STATUS.PENDING) {
       newEventFlowIds.push(flowId)
@@ -315,7 +320,7 @@ export function step(state, input) {
   const badgeDismissMs = config.badgeDismissSec * 1000
   for (const flowId of [...nextBadges.keys()]) {
     const entry = index.get(flowId)
-    if (!entry || entry.status !== DISH_STATUS.PENDING) {
+    if (!entry || entry.status !== DISH_STATUS.PENDING || (!entry.awaiting && !entry.steaming)) {
       nextBadges.delete(flowId)
       continue
     }
