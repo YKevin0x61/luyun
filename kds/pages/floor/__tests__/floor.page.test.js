@@ -85,7 +85,9 @@ beforeEach(() => {
     reLaunch: vi.fn(),
     getSystemInfoSync: vi.fn().mockReturnValue({ windowWidth: 390, windowHeight: 844 }),
     onWindowResize: vi.fn(),
-    offWindowResize: vi.fn()
+    offWindowResize: vi.fn(),
+    vibrateShort: vi.fn(),
+    vibrateLong: vi.fn()
   }
 })
 
@@ -163,7 +165,7 @@ describe('楼面控制台 page — split (tablet) layout', () => {
 
     expect(isHiddenByVShow(wrapper.find('.table-list'))).toBe(false)
     expect(wrapper.find('.pane-empty').exists()).toBe(false)
-    expect(wrapper.find('.table-card--active').exists()).toBe(true)
+    expect(wrapper.find('[aria-current="true"]').text()).toContain('8')
   })
 
   it('follows the current viewport after rotation', async () => {
@@ -171,13 +173,16 @@ describe('楼面控制台 page — split (tablet) layout', () => {
     setViewport(390, 844)
     const wrapper = mountPage()
     await flushPromises()
-    expect(wrapper.find('.floor-page').classes()).not.toContain('floor-page--split')
+    expect(isHiddenByVShow(wrapper.find('.table-list'))).toBe(false)
+    expect(wrapper.find('.table-pane').exists()).toBe(false)
 
     setViewport(1200, 800)
     const resizeHandler = globalThis.uni.onWindowResize.mock.calls[0][0]
     resizeHandler()
     await flushPromises()
-    expect(wrapper.find('.floor-page').classes()).toContain('floor-page--split')
+    expect(isHiddenByVShow(wrapper.find('.table-list'))).toBe(false)
+    expect(wrapper.find('.table-pane').exists()).toBe(true)
+    expect(wrapper.find('.pane-empty').text()).toBe('点左侧桌卡')
   })
 })
 
@@ -206,15 +211,16 @@ describe('楼面控制台 page — jump to 桌号', () => {
     setViewport(1200, 800)
     const wrapper = mountPage()
     await flushPromises()
-    expect(wrapper.find('.table-card--active').exists()).toBe(false)
+    expect(wrapper.find('[aria-current="true"]').exists()).toBe(false)
 
     await wrapper.find('.jump-input').setValue('12')
     await wrapper.find('.jump-go').trigger('click')
     await flushPromises()
 
-    const active = wrapper.find('.table-card--active')
+    const active = wrapper.find('[aria-current="true"]')
     expect(active.exists()).toBe(true)
     expect(active.text()).toContain('12')
+    expect(wrapper.find('.pane-title').text()).toBe('12 桌')
   })
 })
 
@@ -229,7 +235,7 @@ describe('楼面控制台 page — table leaves the list', () => {
     expect(wrapper.find('.table-pane').exists()).toBe(true)
 
     getFloorConsole.mockResolvedValueOnce({ tables: [] })
-    await wrapper.vm.refresh()
+    await wrapper.find('.refresh-btn').trigger('click')
     await flushPromises()
 
     expect(wrapper.find('.table-pane').exists()).toBe(false)
@@ -249,7 +255,10 @@ describe('楼面控制台 page — disconnect strip', () => {
 
     const banner = wrapper.find('.disconnect-banner')
     expect(banner.exists()).toBe(true)
-    expect(banner.classes()).toEqual(['disconnect-banner'])
+    expect(banner.text()).toBe('实时连接已断开，正在重连…')
+    expect(wrapper.find('.screen-border--yellow').exists()).toBe(false)
+    expect(globalThis.uni.vibrateShort).not.toHaveBeenCalled()
+    expect(globalThis.uni.vibrateLong).not.toHaveBeenCalled()
   })
 
   it('shows no strip while connected', async () => {

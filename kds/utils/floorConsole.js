@@ -37,7 +37,7 @@ function orderClockLabel(orderTime) {
   return match ? `${match[1]}:${match[2]}` : ''
 }
 
-export function floorLineChipText(line) {
+export function floorLineRowText(line) {
   const phase = line?.phase || ''
   const clock = orderClockLabel(line?.order_time)
   const rush = line?.is_rushed ? '·加急' : ''
@@ -73,7 +73,6 @@ export const FLOOR_SPLIT_MIN_WIDTH = 960
 export const FLOOR_SPLIT_MIN_SHORT_EDGE = 768
 export const FLOOR_JUMP_MISS_TOAST = '不在盯桌列表'
 
-const PENDING_WORK_PHASES = ['待出餐', '待上笼', '在蒸']
 const READY_PHASE = '已制作待上菜'
 const HOLD_PHASE = '等叫'
 
@@ -93,7 +92,7 @@ export function tableCardStats(lines) {
     const phase = line?.phase
     if (phase === HOLD_PHASE) holdCount += 1
     else if (phase === READY_PHASE) readyCount += 1
-    else if (PENDING_WORK_PHASES.includes(phase)) pendingWorkCount += 1
+    else if (HOLD_PHASES.includes(phase)) pendingWorkCount += 1
     if (line?.is_rushed) hasRush = true
   }
   return { holdCount, pendingWorkCount, readyCount, hasRush }

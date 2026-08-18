@@ -39,6 +39,7 @@
               'table-card--' + table.emphasis,
               { 'table-card--active': table.table_number === selectedTableNumber }
             ]"
+            :aria-current="table.table_number === selectedTableNumber ? 'true' : undefined"
             @click="openTable(table.table_number)"
           >
             <view class="table-card-head">
@@ -82,7 +83,7 @@
               :class="['line-row--' + phaseClass(line.phase), { 'line-row--locked': !isActionable(line) }]"
               @click="toggleLine(selectedTable.table_number, group.dishName, line.order_id, line)"
             >
-              <text class="line-text">{{ floorLineChipText(line) }}</text>
+              <text class="line-text">{{ floorLineRowText(line) }}</text>
               <text v-if="isSelected(selectedTable.table_number, group.dishName, line.order_id)" class="line-mark">✓</text>
             </view>
             <view class="actions">
@@ -130,7 +131,7 @@ import {
   decorateFloorTables,
   FLOOR_JUMP_MISS_TOAST,
   floorConflictsToastTitle,
-  floorLineChipText,
+  floorLineRowText,
   isActionable,
   isFloorSplitLayout,
   matchFloorTable,
@@ -379,7 +380,7 @@ export default {
       submitJump,
       isSelected,
       toggleLine,
-      floorLineChipText,
+      floorLineRowText,
       isActionable,
       selectedHoldIds,
       selectedFireIds,

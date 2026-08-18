@@ -7,7 +7,7 @@ import {
   decorateFloorTables,
   defaultSelectedOrderIds,
   floorConflictsToastTitle,
-  floorLineChipText,
+  floorLineRowText,
   groupLinesByDishName,
   isActionable,
   isFloorSplitLayout,
@@ -82,18 +82,18 @@ describe('floorConsole default select', () => {
   })
 })
 
-describe('floorConsole chip and conflict copy', () => {
-  it('shows 下单时间 on the chip so 对账 still sees when the guest ordered', () => {
-    expect(floorLineChipText({
+describe('floorConsole row and conflict copy', () => {
+  it('shows 下单时间 on the portion row so 对账 still sees when the guest ordered', () => {
+    expect(floorLineRowText({
       phase: '等叫',
       order_time: '2026-08-18T12:30:00+08:00'
     })).toBe('等叫 12:30')
-    expect(floorLineChipText({
+    expect(floorLineRowText({
       phase: '待出餐',
       is_rushed: true,
       order_time: '2026-08-18T09:05:00+08:00'
     })).toBe('待出餐 09:05·加急')
-    expect(floorLineChipText({ phase: '在蒸' })).toBe('在蒸')
+    expect(floorLineRowText({ phase: '在蒸' })).toBe('在蒸')
   })
 
   it('names every distinct conflict reason with the unchanged portion count', () => {
