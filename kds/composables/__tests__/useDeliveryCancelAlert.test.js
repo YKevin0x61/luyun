@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const playCancelAlert = vi.fn()
 const getAlertParams = vi.fn(() => ({
@@ -45,6 +45,10 @@ describe('useDeliveryCancelAlert', () => {
     })
   })
 
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('plays cancel alert when a watched delivery order is cancelled after prime', () => {
     const { syncOrders } = useDeliveryCancelAlert({ watchedStations: ['shulong'] })
     syncOrders([makeOrder({ dish_status: '已制作待上菜' })])
@@ -53,6 +57,43 @@ describe('useDeliveryCancelAlert', () => {
     const played = syncOrders([makeOrder({ dish_status: DELIVERY_CANCELLED_DISH_STATUS })])
     expect(played).toBe(true)
     expect(playCancelAlert).toHaveBeenCalledTimes(1)
+  })
+
+  it('plays cancel alert when a watched dine-in order is cancelled after prime', () => {
+    const { syncOrders } = useDeliveryCancelAlert({ watchedStations: ['shulong'] })
+    syncOrders([makeOrder({ source: '', table_number: '12桌', dish_status: '待出餐' })])
+    expect(playCancelAlert).not.toHaveBeenCalled()
+
+    const played = syncOrders([
+      makeOrder({
+        source: '',
+        table_number: '12桌',
+        dish_status: DELIVERY_CANCELLED_DISH_STATUS
+      })
+    ])
+    expect(played).toBe(true)
+    expect(playCancelAlert).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not play when the wave is only 退菜占位', () => {
+    const { syncOrders, deliveryCancelAlert } = useDeliveryCancelAlert({
+      watchedStations: ['shulong']
+    })
+    syncOrders([
+      makeOrder({
+        dish_status: '待出餐',
+        placement: { steamer_id: '1', port_index: 3 }
+      })
+    ])
+    const played = syncOrders([
+      makeOrder({
+        dish_status: DELIVERY_CANCELLED_DISH_STATUS,
+        placement: { steamer_id: '1', port_index: 3 }
+      })
+    ])
+    expect(played).toBe(false)
+    expect(playCancelAlert).not.toHaveBeenCalled()
+    expect(deliveryCancelAlert.value.visible).toBe(false)
   })
 
   it('does not play on prime or a non-cancel sync', () => {
@@ -64,7 +105,7 @@ describe('useDeliveryCancelAlert', () => {
     expect(playCancelAlert).not.toHaveBeenCalled()
   })
 
-  it('does not call plus.device.beep or uni.vibrate for 外卖取消', () => {
+  it('does not call plus.device.beep or uni.vibrate for 退菜/取消', () => {
     const beep = vi.fn()
     const vibrateShort = vi.fn()
     const vibrateLong = vi.fn()
@@ -98,7 +139,6 @@ describe('useDeliveryCancelAlert', () => {
 
     vi.setSystemTime(1_000_000 + 1000)
     expect(higherKindClaimed()).toBe(false)
-    vi.useRealTimers()
   })
 
   it('plays the snapshotted 款 until reloadConfig', () => {
@@ -117,5 +157,34 @@ describe('useDeliveryCancelAlert', () => {
     syncOrders([makeOrder({ dish_status: '待出餐' })])
     syncOrders([makeOrder({ dish_status: DELIVERY_CANCELLED_DISH_STATUS })])
     expect(playCancelAlert).toHaveBeenLastCalledWith({ tone: '穿透', volume: 0.8 })
+  })
+
+  it('re-plays cancel alert every 20s until 知道了', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_000)
+    const {
+      syncOrders,
+      start,
+      stop,
+      dismissDeliveryCancelAlert
+    } = useDeliveryCancelAlert({
+      watchedStations: ['shulong']
+    })
+    start()
+    syncOrders([makeOrder({ dish_status: '待出餐' })])
+    syncOrders([makeOrder({ dish_status: DELIVERY_CANCELLED_DISH_STATUS })])
+    expect(playCancelAlert).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(19_000)
+    expect(playCancelAlert).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(1_000)
+    expect(playCancelAlert).toHaveBeenCalledTimes(2)
+
+    dismissDeliveryCancelAlert()
+    vi.advanceTimersByTime(20_000)
+    expect(playCancelAlert).toHaveBeenCalledTimes(2)
+
+    stop()
   })
 })

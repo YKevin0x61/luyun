@@ -571,7 +571,7 @@ export default {
       alertKindOptions: [
         { key: 'newOrderTone', label: '新单提醒' },
         { key: 'overtimeTone', label: '超时提示音' },
-        { key: 'cancelTone', label: '外卖取消' },
+        { key: 'cancelTone', label: '退菜/取消' },
         { key: 'disconnectTone', label: '断连告警' }
       ],
       newOrderTone: DEFAULT_ALERT_TONE,

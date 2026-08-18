@@ -4,7 +4,7 @@
  * Public API (used by kitchen alert integration):
  *   playNewOrderDing(count, options) — three 嘀s when the engine says play
  *   playOvertimeAlarm(options)       — lower, urgent double-pulse pairs
- *   playCancelAlert(options)         — two hits (外卖取消)
+ *   playCancelAlert(options)         — two hits (退菜/取消)
  *   playDisconnectAlert(options)     — one hit (断连告警)
  *   unlockSound()                    — H5: resume AudioContext inside a user gesture
  *   isSoundUnlocked()                — whether play* will actually emit sound
@@ -262,7 +262,7 @@ export function playOvertimeAlarm(options) {
 }
 
 /**
- * Play 外卖取消: two hits in the selected 款. No-op on H5 until unlockSound() has succeeded.
+ * Play 退菜/取消: two hits in the selected 款. No-op on H5 until unlockSound() has succeeded.
  * @param {{ tone?: string, volume?: number }} [options]
  */
 export function playCancelAlert(options) {

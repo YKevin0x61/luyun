@@ -49,6 +49,8 @@ vi.mock('../useKitchenAlerts.js', () => ({
 const syncDeliveryOrders = vi.fn()
 const setWatchedStations = vi.fn()
 const reloadCancelConfig = vi.fn()
+const startCancel = vi.fn()
+const stopCancel = vi.fn()
 const cancelHigherKindClaimed = vi.fn(() => false)
 
 vi.mock('../useDeliveryCancelAlert.js', () => ({
@@ -58,6 +60,8 @@ vi.mock('../useDeliveryCancelAlert.js', () => ({
     dismissDeliveryCancelAlert: vi.fn(),
     setWatchedStations,
     reloadConfig: reloadCancelConfig,
+    start: startCancel,
+    stop: stopCancel,
     getWatchedStations: options.getWatchedStations,
     higherKindClaimed: (...args) => cancelHigherKindClaimed(...args)
   })
@@ -81,6 +85,8 @@ describe('useKitchenOrderSession', () => {
     reloadCancelConfig.mockReset()
     startAlerts.mockReset()
     stopAlerts.mockReset()
+    startCancel.mockReset()
+    stopCancel.mockReset()
     getWatchedStations.mockReturnValue(['changfen'])
     getDishCardQuantityCap.mockReturnValue(0)
     getOrderGapMinutes.mockReturnValue(0)
@@ -199,14 +205,16 @@ describe('useKitchenOrderSession', () => {
     expect(hot.waitTimeClass).toBe('urgent')
   })
 
-  it('start/stop delegate to kitchen alerts after settings reload', () => {
+  it('start/stop delegate to kitchen alerts and cancel alert after settings reload', () => {
     const session = useKitchenOrderSession({
       ordersStore: { orders: [], fetchOrders: vi.fn() }
     })
     session.start()
     expect(reloadConfig).toHaveBeenCalled()
     expect(startAlerts).toHaveBeenCalled()
+    expect(startCancel).toHaveBeenCalled()
     session.stop()
     expect(stopAlerts).toHaveBeenCalled()
+    expect(stopCancel).toHaveBeenCalled()
   })
 })

@@ -1,5 +1,5 @@
 /**
- * Kitchen order session: one fetch → fan-out to new-order + delivery-cancel engines,
+ * Kitchen order session: one fetch → fan-out to new-order + 退菜/取消 engines,
  * plus device-local watched stations / dish-card quantity cap / 下单间隔 / urgency thresholds.
  *
  * kitchen.vue should not import useKitchenAlerts / useDeliveryCancelAlert directly.
@@ -81,10 +81,12 @@ export function useKitchenOrderSession({ ordersStore }) {
   function start() {
     reloadDeviceSettings()
     kitchenAlerts.start()
+    deliveryCancel.start()
   }
 
   function stop() {
     kitchenAlerts.stop()
+    deliveryCancel.stop()
   }
 
   /** onShow / settings return: refresh watched + alert config without fetching. */
