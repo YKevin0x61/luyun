@@ -270,7 +270,8 @@ import { useStationsStore } from '../../stores/stations.js'
 import { TimeCalculator } from '../../utils/timeCalculator.js'
 import { isRefundOrder } from '../../utils/constants.js'
 import { groupOrdersByDish } from '../../utils/dishMerge.js'
-import { composeKitchenDishCards, dishSplitKnobsChanged, sortKitchenDishCardsByOldest } from '../../utils/dishCardChunks.js'
+import { dishSplitKnobsChanged } from '../../utils/dishCardChunks.js'
+import { composeKitchenDishCardsWithNotices, isDishCardCancelNotice } from '../../utils/dishCardNotices.js'
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
 import { orderLineId, planBasketServeCookingCalls, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds } from '../../utils/batchCooking.js'
@@ -489,6 +490,15 @@ export default {
       return ordersStore.getOrdersByStation(currentStation.value).filter(isPendingCookOrder)
     })
 
+    const currentStationNoticeOrders = computed(() =>
+      ordersStore.getOrdersByStation(currentStation.value).filter(
+        (order) =>
+          order &&
+          TimeCalculator.isToday(order.order_time) &&
+          isDishCardCancelNotice(order, acknowledgedCancelIds.value)
+      )
+    )
+
     const steamerStationOrders = computed(() =>
       ordersStore.getOrdersByStation(currentStation.value)
     )
@@ -635,19 +645,21 @@ export default {
     const applyDishChunks = (previous) => {
       const cap = Number(dishCardQuantityCap.value) || 0
       const gap = Number(orderGapMinutes.value) || 0
-      const { cards, previousByDish } = composeKitchenDishCards({
+      const { cards, previousByDish } = composeKitchenDishCardsWithNotices({
         logicalDishes: currentStationMergedDishesBase.value,
+        noticeOrders: currentStationNoticeOrders.value,
+        acknowledgedCancelIds: acknowledgedCancelIds.value,
         cap,
         orderGapMinutes: gap,
         previousByDish: previous
       })
       dishChunkSnapshotByDish.value = previousByDish
-      chunkedDishesBase.value = sortKitchenDishCardsByOldest(cards)
+      chunkedDishesBase.value = cards
       dishSplitKnobsSeen.value = { cap, orderGapMinutes: gap }
     }
 
     watch(
-      [currentStationMergedDishesBase, dishCardQuantityCap, orderGapMinutes],
+      [currentStationMergedDishesBase, currentStationNoticeOrders, dishCardQuantityCap, orderGapMinutes],
       () => {
         if (batchSubmitting.value) return
         const cap = Number(dishCardQuantityCap.value) || 0
@@ -912,7 +924,12 @@ export default {
     }
 
     const toggleTablePickLine = (orderId) => {
-      dispatchServe({ type: 'toggleOrderLine', orderId })
+      const dish = tablePickDish.value
+      const selectableOrderIds = (dish?.orders || [])
+        .filter(isSubmittableOrder)
+        .map((order) => orderLineId(order))
+        .filter(Boolean)
+      dispatchServe({ type: 'toggleOrderLine', orderId, selectableOrderIds })
     }
     
     const chunkOrdersForDish = (dish) => ({

@@ -280,6 +280,28 @@ describe('将出预览', () => {
     expect(servePreviewOrderIds([later, middle, earlier], 2)).toEqual(['a', 'b'])
     expect(servePreviewOrderIds([later, middle, earlier], 0)).toEqual([])
   })
+
+  it('does not treat 已取消 退示 (quantity 0) as FIFO 将出', () => {
+    const cancelled = makeOrder({
+      id: 'n1',
+      dish_status: '已取消',
+      status: '退菜',
+      quantity: 0,
+      table_number: '3',
+      order_time: '2026-07-23T00:00:00.000Z'
+    })
+    const pending = makeOrder({
+      id: 'a',
+      table_number: '8',
+      order_time: '2026-07-23T01:00:00.000Z'
+    })
+    expect(servePreviewOrderIds([cancelled, pending], 1)).toEqual(['a'])
+    const [plan] = planBatchCookingCalls({
+      selectedQuantities: { 虾饺: 1 },
+      pendingOrders: [cancelled, pending]
+    })
+    expect(plan.orders.map((order) => order.id)).toEqual(['a'])
+  })
 })
 
 describe('planTablePickCookingCalls', () => {
@@ -328,6 +350,30 @@ describe('planTablePickCookingCalls', () => {
         chunkOrders: { 虾饺: { dishName: '虾饺', orders: [order] } }
       })
     ).toEqual([])
+  })
+
+  it('ignores 已取消 退示 ids even if they were passed in the pick', () => {
+    const cancelled = makeOrder({
+      id: 'n1',
+      dish_status: '已取消',
+      status: '退菜',
+      quantity: 0
+    })
+    const pending = makeOrder({ id: 'a', table_number: '8' })
+    expect(
+      planTablePickCookingCalls({
+        selectedOrderIds: ['n1', 'a'],
+        chunkId: '虾饺',
+        chunkOrders: { 虾饺: { dishName: '虾饺', orders: [cancelled, pending] } }
+      })
+    ).toEqual([
+      {
+        dishName: '虾饺',
+        completeQuantity: 1,
+        orders: [pending],
+        allocations: [{ order: pending, serveQuantity: 1 }]
+      }
+    ])
   })
 
   it('takes the leftover quantity on a selected 订单行 (no FIFO fill)', () => {

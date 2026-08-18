@@ -14,6 +14,12 @@ function availableQuantity(order) {
   return Math.max(0, quantity - served)
 }
 
+/** 已取消 退示 have quantity 0; `quantity || 1` must not turn them into 1 serveable 份. */
+function serveableQuantity(order) {
+  if (!order || order.dish_status === '已取消') return 0
+  return availableQuantity(order)
+}
+
 /**
  * @param {object[]} orders
  * @param {number} target
@@ -21,7 +27,7 @@ function availableQuantity(order) {
  */
 function allocateFifo(orders, target) {
   const pool = [...orders]
-    .filter((order) => order && availableQuantity(order) > 0)
+    .filter((order) => serveableQuantity(order) > 0)
     .sort((a, b) => new Date(a.order_time) - new Date(b.order_time))
 
   const allocations = []
@@ -29,7 +35,7 @@ function allocateFifo(orders, target) {
 
   for (const order of pool) {
     if (remaining <= 0) break
-    const take = Math.min(availableQuantity(order), remaining)
+    const take = Math.min(serveableQuantity(order), remaining)
     if (take <= 0) continue
     allocations.push({ order, serveQuantity: take })
     remaining -= take
@@ -130,7 +136,7 @@ export function planTablePickCookingCalls({ selectedOrderIds, chunkId, chunkOrde
   for (const order of Array.isArray(chunk.orders) ? chunk.orders : []) {
     const id = orderLineId(order)
     if (!id || !wanted.has(id)) continue
-    const take = availableQuantity(order)
+    const take = serveableQuantity(order)
     if (take <= 0) continue
     allocations.push({ order, serveQuantity: take })
   }
@@ -164,7 +170,7 @@ export function planBasketServeCookingCalls({ selectedOrderIds, cages }) {
   for (const cage of cages) {
     const id = orderLineId(cage)
     if (!id || !wanted.has(id)) continue
-    const take = availableQuantity(cage)
+    const take = serveableQuantity(cage)
     if (take <= 0) continue
     const dishName = cage.dish_name || ''
     if (!byDish.has(dishName)) byDish.set(dishName, [])

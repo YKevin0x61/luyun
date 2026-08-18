@@ -61,6 +61,10 @@ export function applyServeSelection(state, event) {
     if (!orderId) return current
     const selected = current.tablePick.selectedOrderIds
     const exists = selected.includes(orderId)
+    if (!exists && Array.isArray(event.selectableOrderIds)) {
+      const allowed = new Set(event.selectableOrderIds.map((id) => String(id)))
+      if (!allowed.has(String(orderId))) return current
+    }
     const selectedOrderIds = exists
       ? selected.filter((id) => id !== orderId)
       : [...selected, orderId]
