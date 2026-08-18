@@ -59,6 +59,50 @@ describe('planBatchCookingCalls', () => {
     expect(plan[0].orders).toEqual([fresh])
   })
 
+  it('allocates 加急份 before older non-rush FIFO', () => {
+    const early = makeOrder({ id: '1', order_time: '2026-07-23T01:00:00.000Z', table_number: '1' })
+    const rushed = makeOrder({
+      id: '2',
+      order_time: '2026-07-23T03:00:00.000Z',
+      table_number: '2',
+      is_rushed: true
+    })
+
+    const plan = planBatchCookingCalls({
+      selectedQuantities: { 虾饺: 1 },
+      pendingOrders: [early, rushed]
+    })
+
+    expect(plan[0].orders).toEqual([rushed])
+  })
+
+  it('allocates earlier 加急 before later 加急, then older non-rush', () => {
+    const earlyNonRush = makeOrder({
+      id: '1',
+      order_time: '2026-07-23T01:00:00.000Z',
+      table_number: '1'
+    })
+    const earlyRush = makeOrder({
+      id: '2',
+      order_time: '2026-07-23T02:00:00.000Z',
+      table_number: '2',
+      is_rushed: true
+    })
+    const lateRush = makeOrder({
+      id: '3',
+      order_time: '2026-07-23T03:00:00.000Z',
+      table_number: '3',
+      is_rushed: true
+    })
+
+    const plan = planBatchCookingCalls({
+      selectedQuantities: { 虾饺: 2 },
+      pendingOrders: [lateRush, earlyNonRush, earlyRush]
+    })
+
+    expect(plan[0].orders).toEqual([earlyRush, lateRush])
+  })
+
   it('takes multiple portions from an earlier multi-qty order before later ones', () => {
     const o1 = makeOrder({ id: '1', quantity: 2, order_time: '2026-07-23T01:00:00.000Z' })
     const o2 = makeOrder({ id: '2', quantity: 2, order_time: '2026-07-23T02:00:00.000Z' })
@@ -302,6 +346,24 @@ describe('将出预览', () => {
     expect(servePreviewOrderIds([later, middle, earlier], 0)).toEqual([])
   })
 
+  it('lists 加急 订单行 before older non-rush in 将出预览', () => {
+    const early = makeOrder({ id: 'a', table_number: '5', order_time: '2026-07-23T01:00:00.000Z' })
+    const rushedLate = makeOrder({
+      id: 'b',
+      table_number: '14',
+      order_time: '2026-07-23T01:02:00.000Z',
+      is_rushed: true
+    })
+
+    expect(servePreviewOrderIds([early, rushedLate], 1)).toEqual(['b'])
+    expect(formatServePreview(
+      planBatchCookingCalls({
+        selectedQuantities: { 虾饺: 1 },
+        pendingOrders: [early, rushedLate]
+      })[0].allocations
+    )).toBe('14桌')
+  })
+
   it('does not treat 已取消 退示 (quantity 0) as FIFO 将出', () => {
     const cancelled = makeOrder({
       id: 'n1',
@@ -395,6 +457,28 @@ describe('planTablePickCookingCalls', () => {
         allocations: [{ order: pending, serveQuantity: 1 }]
       }
     ])
+  })
+
+  it('still serves chef-picked non-rush when a later 加急 exists', () => {
+    const early = makeOrder({
+      id: 'a',
+      table_number: '1',
+      order_time: '2026-07-23T01:00:00.000Z'
+    })
+    const rushed = makeOrder({
+      id: 'b',
+      table_number: '2',
+      order_time: '2026-07-23T02:00:00.000Z',
+      is_rushed: true
+    })
+
+    const plan = planTablePickCookingCalls({
+      selectedOrderIds: ['a'],
+      chunkId: '虾饺',
+      chunkOrders: { 虾饺: { dishName: '虾饺', orders: [early, rushed] } }
+    })
+
+    expect(plan[0].orders).toEqual([early])
   })
 
   it('takes the leftover quantity on a selected 订单行 (no FIFO fill)', () => {
