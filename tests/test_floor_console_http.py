@@ -159,6 +159,140 @@ def test_hold_all_conflicts_returns_409(orders_client):
     assert detail["conflicts"] == [{"order_id": str(order_id), "reason": "已被等叫"}]
 
 
+def test_hold_steaming_swaps_same_dish_awaiting(orders_client):
+    client, db, admin_headers = orders_client
+    _run_async(
+        db.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "t8",
+                    "table_number": "8",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": datetime.now(CHINA_TZ),
+                    "station": "shulong",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+                {
+                    "business_flow_id": "t9",
+                    "table_number": "9",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": datetime.now(CHINA_TZ),
+                    "station": "shulong",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+            ]
+        )
+    )
+    by_flow = {row["business_flow_id"]: row for row in _run_async(db.get_orders(limit=-1))}
+    original_loaded_at = "2026-08-18T10:05:00+08:00"
+    load = client.post(
+        "/api/orders/load-steamer",
+        json={
+            "order_ids": [by_flow["t8"]["_id"]],
+            "steamer_id": "1",
+            "port_index": 3,
+            "loaded_at": original_loaded_at,
+        },
+        headers=admin_headers,
+    )
+    assert load.status_code == 200
+    resp = client.post(
+        "/api/orders/hold",
+        json={"order_ids": [by_flow["t8"]["_id"]]},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["conflicts"] == []
+    assert body["substituted"] == [
+        {
+            "held_id": str(by_flow["t8"]["_id"]),
+            "substitute_id": str(by_flow["t9"]["_id"]),
+        }
+    ]
+    assert "stations" not in body
+    held = _run_async(db.get_order_by_id(by_flow["t8"]["_id"]))
+    sub = _run_async(db.get_order_by_id(by_flow["t9"]["_id"]))
+    assert held.get("is_hold") is True
+    assert held.get("placement") is None
+    assert held["dish_status"] == "待出餐"
+    assert held.get("table_number") == "8"
+    assert not sub.get("is_hold")
+    assert (sub.get("placement") or {}).get("steamer_id") == "1"
+    assert (sub.get("placement") or {}).get("port_index") == 3
+    assert (sub.get("placement") or {}).get("stack_order") == 1
+    assert (sub.get("placement") or {}).get("loaded_at") == original_loaded_at
+    assert sub.get("updated_at") != original_loaded_at
+    assert sub.get("table_number") == "9"
+
+
+def test_hold_steaming_without_substitute_partial_200(orders_client):
+    client, db, admin_headers = orders_client
+    _run_async(
+        db.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "await",
+                    "table_number": "8",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": datetime.now(CHINA_TZ),
+                    "station": "shulong",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+                {
+                    "business_flow_id": "steam",
+                    "table_number": "8",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": datetime.now(CHINA_TZ),
+                    "station": "shulong",
+                    "status": "未结",
+                    "source": "dine_in",
+                },
+            ]
+        )
+    )
+    by_flow = {row["business_flow_id"]: row for row in _run_async(db.get_orders(limit=-1))}
+    load = client.post(
+        "/api/orders/load-steamer",
+        json={
+            "order_ids": [by_flow["steam"]["_id"]],
+            "steamer_id": "1",
+            "port_index": 3,
+            "loaded_at": "2026-08-18T10:05:00+08:00",
+        },
+        headers=admin_headers,
+    )
+    assert load.status_code == 200
+    resp = client.post(
+        "/api/orders/hold",
+        json={"order_ids": [by_flow["await"]["_id"], by_flow["steam"]["_id"]]},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["updated_count"] == 1
+    assert body["conflicts"] == [
+        {"order_id": str(by_flow["steam"]["_id"]), "reason": "在蒸且无替补"}
+    ]
+    assert body.get("substituted") == []
+    assert "stations" not in body
+    held = _run_async(db.get_order_by_id(by_flow["await"]["_id"]))
+    steaming = _run_async(db.get_order_by_id(by_flow["steam"]["_id"]))
+    assert held.get("is_hold") is True
+    assert held["dish_status"] == "待出餐"
+    assert not steaming.get("is_hold")
+    assert steaming.get("placement") is not None
+    assert steaming.get("table_number") == "8"
+
+
 def test_hold_partial_conflicts_returns_200(orders_client):
     client, db, admin_headers = orders_client
     _run_async(
