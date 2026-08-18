@@ -156,9 +156,13 @@ class RestaurantScraper:
         return await self.session.scrape_table_data()
 
     async def monitor_table_orders(
-        self, current_tables_data: Optional[List[Dict]] = None
+        self,
+        current_tables_data: Optional[List[Dict]] = None,
+        orders=None,
     ) -> List[Dict]:
-        return await self.tables.monitor_table_orders(current_tables_data)
+        return await self.tables.monitor_table_orders(
+            current_tables_data, orders=orders
+        )
 
     # ---- owned orchestration ----
 
@@ -187,7 +191,7 @@ class RestaurantScraper:
             await realtime_hub.broadcast_nudge("tables", {"count": len(tables_data)})
 
             self.logger.info("🎯 调用智能监控方法 monitor_table_orders()")
-            all_orders = await self.monitor_table_orders(tables_data)
+            all_orders = await self.monitor_table_orders(tables_data, orders=db.orders)
             self.logger.info(
                 "🎯 智能监控返回 %s 个订单项目",
                 len(all_orders) if all_orders else 0,
@@ -198,6 +202,14 @@ class RestaurantScraper:
                 self.logger.info("✅ 保存 %s 条订单数据", len(all_orders))
                 await realtime_hub.broadcast_nudge(
                     "orders", {"count": len(all_orders), "source": "table"}
+                )
+            elif self.tables.last_dine_in_port_updates:
+                await realtime_hub.broadcast_nudge(
+                    "orders",
+                    {
+                        "count": self.tables.last_dine_in_port_updates,
+                        "source": "dine_in_cancel",
+                    },
                 )
 
         delivery_orders = await self.scrape_delivery_orders(db=db)

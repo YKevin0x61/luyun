@@ -17,11 +17,16 @@ class TableChangeDetector:
         self._session = session
         self._state = state_store
         self.logger = logger_ or logging.getLogger(__name__)
+        self.last_dine_in_port_updates = 0
 
-
-    async def monitor_table_orders(self, current_tables_data: Optional[List[Dict]] = None) -> List[Dict]:
+    async def monitor_table_orders(
+        self,
+        current_tables_data: Optional[List[Dict]] = None,
+        orders=None,
+    ) -> List[Dict]:
         """监控餐桌点菜详情变化 - 智能检测模式"""
         try:
+            self.last_dine_in_port_updates = 0
             # 确保已初始化
             if not await self._session.ensure_ready():
                 return []
@@ -84,8 +89,12 @@ class TableChangeDetector:
                         previous_amount = self._state.previous_tables_state[table_number]
 
                         # 检测菜品变化（新增、减少、退菜）
-                        changed_dishes, current_table_orders_for_state = self._detect_dish_changes(
-                            table_number, current_table_orders, previous_amount, current_amount
+                        changed_dishes, current_table_orders_for_state = await self._detect_dish_changes(
+                            table_number,
+                            current_table_orders,
+                            previous_amount,
+                            current_amount,
+                            orders=orders,
                         )
 
                         # 只添加发生变化的菜品
@@ -152,39 +161,35 @@ class TableChangeDetector:
 
         return all_orders
 
-    def _detect_dish_changes(self, table_number: str, current_orders: List[Dict],
-                           previous_amount: float, current_amount: float) -> tuple:
-        """🆕 检测菜品变化（新增、退菜）- 适配单条记录模式"""
-        changed_items = []  # 只包含发生变化的菜品
+    async def _detect_dish_changes(
+        self,
+        table_number: str,
+        current_orders: List[Dict],
+        previous_amount: float,
+        current_amount: float,
+        orders=None,
+    ) -> tuple:
+        """Detect qty-up / qty-down. Qty-down cancels existing 订单行 via OrdersPort."""
+        changed_items = []
 
-        # 获取之前的菜品列表
         previous_orders = self._state.previous_table_orders.get(table_number, [])
         known_orders = list(current_orders) + list(previous_orders)
 
-        # 如果没有历史记录，说明是新餐桌，返回所有当前菜品
-        if not previous_orders:
-            return current_orders, current_orders
-
-        # 🆕 简化的退菜检测：基于菜品数量统计
-        # 统计当前菜品数量
         current_dish_counts = {}
         for order in current_orders:
             dish_key = f"{order.get('dish_name', '')}|{order.get('price', 0.0)}"
             current_dish_counts[dish_key] = current_dish_counts.get(dish_key, 0) + order.get('quantity', 0)
 
-        # 统计之前菜品数量
         previous_dish_counts = {}
-        previous_orders_map = {}  # 保存模板订单
+        previous_orders_map = {}
         for order in previous_orders:
             dish_key = f"{order.get('dish_name', '')}|{order.get('price', 0.0)}"
             previous_dish_counts[dish_key] = previous_dish_counts.get(dish_key, 0) + order.get('quantity', 0)
             if dish_key not in previous_orders_map:
                 previous_orders_map[dish_key] = order
 
-        # 获取所有菜品的key
         all_dish_keys = set(current_dish_counts.keys()) | set(previous_dish_counts.keys())
 
-        # 检测变化
         for dish_key in all_dish_keys:
             current_qty = current_dish_counts.get(dish_key, 0)
             previous_qty = previous_dish_counts.get(dish_key, 0)
@@ -193,21 +198,38 @@ class TableChangeDetector:
             price = float(price_str)
 
             if current_qty > previous_qty:
-                # 菜品数量增加 - 新增
                 added_quantity = current_qty - previous_qty
-
-                # 从当前订单中找一个作为模板
                 template_order = None
                 for order in current_orders:
                     if order.get('dish_name') == dish_name and order.get('price') == price:
                         template_order = order
                         break
+                if template_order is None:
+                    template_order = previous_orders_map.get(dish_key)
 
-                if template_order:
+                restored = 0
+                if orders is not None and template_order is not None:
+                    restore_fields = {
+                        "quantity": 1,
+                        "price": price,
+                        "total_amount": price,
+                        "status": template_order.get("status") or "未结",
+                    }
+                    for _ in range(added_quantity):
+                        restored_row = await orders.restore_dine_in_cancelled(
+                            table_number, dish_name, restore_fields
+                        )
+                        if restored_row is None:
+                            break
+                        restored += 1
+                    self.last_dine_in_port_updates += restored
+
+                insert_count = added_quantity - restored
+                if template_order is not None and insert_count > 0:
                     new_flow_ids = allocate_incremental_flow_ids(
                         template_order,
                         known_orders,
-                        added_quantity,
+                        insert_count,
                         refund=False,
                     )
                     for flow_id in new_flow_ids:
@@ -220,29 +242,21 @@ class TableChangeDetector:
                         known_orders.append(new_item)
 
             elif current_qty < previous_qty:
-                # 菜品数量减少 - 退菜
                 reduced_quantity = previous_qty - current_qty
-                template_order = previous_orders_map.get(dish_key)
-
-                if template_order:
-                    refund_flow_ids = allocate_incremental_flow_ids(
-                        template_order,
-                        known_orders,
-                        reduced_quantity,
-                        refund=True,
+                if orders is not None:
+                    affected = await orders.cancel_dine_in_portions(
+                        table_number, dish_name, reduced_quantity
                     )
-                    for flow_id in refund_flow_ids:
-                        refund_time = datetime.now(CHINA_TZ)
-                        refunded_item = template_order.copy()
-                        refunded_item["business_flow_id"] = flow_id
-                        refunded_item["quantity"] = 1
-                        refunded_item["total_amount"] = price
-                        refunded_item["status"] = "退菜"
-                        refunded_item["change_type"] = "退菜"
-                        refunded_item["refund_time"] = refund_time.isoformat()
-                        changed_items.append(refunded_item)
+                    self.last_dine_in_port_updates += affected
+                else:
+                    self.logger.warning(
+                        "⚠️  堂食少份未接到订单端口，跳过插入退菜行: table=%s dish=%s qty=%s",
+                        table_number,
+                        dish_name,
+                        reduced_quantity,
+                    )
 
-        return changed_items, current_orders  # 返回变化的菜品和当前所有订单（用于更新状态）
+        return changed_items, current_orders
 
     def _print_orders_summary(self, orders: List[Dict], changed_tables: List[Dict]):
         """打印订单摘要"""
