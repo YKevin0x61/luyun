@@ -24,7 +24,8 @@ import {
   formatSteamerCageCard,
   steamerAwaitingPlacement,
   steamerLayoutFromStations,
-  steamUrgencyLevel
+  steamUrgencyLevel,
+  pruneSteamerSelection
 } from '../steamerConsole.js'
 import * as steamerConsoleApi from '../steamerConsole.js'
 
@@ -131,6 +132,21 @@ describe('isSteamerConsole', () => {
   })
 })
 
+describe('pruneSteamerSelection', () => {
+  it('drops 等叫 ids that left live 待上笼', () => {
+    expect(pruneSteamerSelection(['held', 'keep'], ['keep'])).toEqual(['keep'])
+  })
+
+  it('drops 对调 substitutes that left 待上笼', () => {
+    expect(pruneSteamerSelection(['sub', 'keep'], ['keep'])).toEqual(['keep'])
+  })
+
+  it('returns empty when every selected 待上笼 cage was stolen', () => {
+    expect(pruneSteamerSelection(['held', 'sub'], [])).toEqual([])
+    expect(pruneSteamerSelection(['held'], null)).toEqual([])
+  })
+})
+
 describe('steamerLoadIntent', () => {
   it('is a no-op when tapping a hole with no selected cages', () => {
     expect(
@@ -143,6 +159,17 @@ describe('steamerLoadIntent', () => {
     expect(
       steamerLoadIntent({
         selectedOrderIds: null,
+        steamerId: '1',
+        portIndex: 3
+      })
+    ).toBeNull()
+  })
+
+  it('returns null when 等叫 or 对调 emptied the remaining 待上笼选中', () => {
+    const remaining = pruneSteamerSelection(['held', 'sub'], [])
+    expect(
+      steamerLoadIntent({
+        selectedOrderIds: remaining,
         steamerId: '1',
         portIndex: 3
       })

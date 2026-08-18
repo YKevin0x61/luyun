@@ -118,11 +118,11 @@ def _cooking_conflict(order_id: str, reason: str) -> Dict[str, str]:
     return {"order_id": str(order_id), "reason": reason}
 
 
-def _raise_cooking_conflicts(conflicts: list) -> None:
+def _raise_cooking_conflicts(conflicts: list, message: str = "出餐确认冲突") -> None:
     raise HTTPException(
         status_code=409,
         detail={
-            "message": "出餐确认冲突",
+            "message": message,
             "conflicts": conflicts,
         },
     )
@@ -208,6 +208,7 @@ async def load_steamer(orders: OrdersPort, payload: Dict) -> Dict:
     loaded_at = payload.get("loaded_at") or datetime.now(CHINA_TZ).isoformat()
     ensure_beijing_datetime(loaded_at)
 
+    conflicts = []
     for order_id in order_ids:
         order = await orders.get_order_by_id(order_id)
         if not order:
@@ -215,9 +216,12 @@ async def load_steamer(orders: OrdersPort, payload: Dict) -> Dict:
         if order.get("dish_status", "待出餐") != "待出餐":
             raise HTTPException(status_code=409, detail=f"订单状态不可上笼: {order_id}")
         if is_hold(order):
-            raise HTTPException(status_code=409, detail=f"等叫不可上笼: {order_id}")
+            conflicts.append(_cooking_conflict(order_id, "等叫"))
+            continue
         if order.get("placement"):
             raise HTTPException(status_code=409, detail=f"订单已上笼: {order_id}")
+    if conflicts:
+        _raise_cooking_conflicts(conflicts, message="上笼确认冲突")
 
     await _reject_if_over_capacity(
         orders,

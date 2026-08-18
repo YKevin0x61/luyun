@@ -115,6 +115,18 @@ describe('出餐选中 reducer', () => {
     expect(state.tablePick).toBeNull()
   })
 
+  it('drops 对调 substitutes that left 待上笼 from 选桌', () => {
+    let state = applyServeSelection(emptyServeSelection(), { type: 'openTablePick', chunkId: '虾饺' })
+    state = applyServeSelection(state, { type: 'toggleOrderLine', orderId: 'sub' })
+    state = applyServeSelection(state, { type: 'toggleOrderLine', orderId: 'keep' })
+    state = applyServeSelection(state, {
+      type: 'syncLiveWork',
+      liveOrderIds: ['keep'],
+      chunkMax: { 虾饺: 1 }
+    })
+    expect(state.tablePick.selectedOrderIds).toEqual(['keep'])
+  })
+
   it('refuses 选桌 toggle of ids outside the selectable set (退示)', () => {
     let state = emptyServeSelection()
     state = applyServeSelection(state, { type: 'openTablePick', chunkId: '虾饺' })

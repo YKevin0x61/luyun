@@ -275,7 +275,7 @@ import { composeKitchenDishCardsWithNotices, isDishCardCancelNotice } from '../.
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
 import { orderLineId, planBasketServeCookingCalls, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds } from '../../utils/batchCooking.js'
-import { kitchenShouldPull, nextConflictMarks, orderLineIsMarked, runServeConfirm, serveConfirmErrorMessage } from '../../utils/serveConfirm.js'
+import { kitchenShouldPull, kitchenShouldRedrawWork, nextConflictMarks, orderLineIsMarked, runServeConfirm, serveConfirmErrorMessage } from '../../utils/serveConfirm.js'
 import { toastForServeBatch } from '../../utils/serveBatchToast.js'
 import { ordersAPI } from '../../api/orders.js'
 import { stationsAPI } from '../../api/stations.js'
@@ -514,12 +514,14 @@ export default {
 
     const onSteamerLoad = async (intent) => {
       if (!intent || steamerLoading.value) return
+      conflictMarks.value = nextConflictMarks(conflictMarks.value, { type: 'confirmStart' })
       steamerLoading.value = true
       try {
         await ordersAPI.loadSteamer(intent)
         await refreshData()
       } catch (error) {
         console.error('[上笼] 失败:', error)
+        conflictMarks.value = nextConflictMarks(conflictMarks.value, { type: 'reject', error })
         uni.showToast({ title: '上笼失败', icon: 'none' })
       } finally {
         steamerLoading.value = false
@@ -642,6 +644,7 @@ export default {
     const chunkedDishesBase = ref([])
 
     const applyDishChunks = (previous) => {
+      if (!kitchenShouldRedrawWork({ submitting: batchSubmitting.value })) return
       const cap = Number(dishCardQuantityCap.value) || 0
       const gap = Number(orderGapMinutes.value) || 0
       const { cards, previousByDish } = composeKitchenDishCardsWithNotices({
@@ -655,7 +658,6 @@ export default {
       dishChunkSnapshotByDish.value = previousByDish
       chunkedDishesBase.value = cards
       dishSplitKnobsSeen.value = { cap, orderGapMinutes: gap }
-      if (batchSubmitting.value) return
       const liveOrderIds = []
       const chunkMax = {}
       for (const dish of chunkedDishesBase.value) {
@@ -675,7 +677,7 @@ export default {
     watch(
       [currentStationMergedDishesBase, currentStationNoticeOrders, dishCardQuantityCap, orderGapMinutes],
       () => {
-        if (batchSubmitting.value) return
+        if (!kitchenShouldRedrawWork({ submitting: batchSubmitting.value })) return
         const cap = Number(dishCardQuantityCap.value) || 0
         const gap = Number(orderGapMinutes.value) || 0
         if (dishSplitKnobsChanged(dishSplitKnobsSeen.value, cap, gap)) {
