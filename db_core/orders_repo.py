@@ -84,7 +84,8 @@ class _OrdersRepoMixin:
                 SELECT id, business_flow_id, table_number, dish_name, quantity,
                        order_time, station, priority, price, category, status,
                        dish_status, ready_time, steamer_id, port_index,
-                       stack_order, loaded_at, updated_at
+                       stack_order, loaded_at, source, is_hold, is_rushed,
+                       fired_at, updated_at
                 FROM orders WHERE {where} ORDER BY order_time DESC
             """
             if limit > 0:
@@ -701,7 +702,7 @@ class _OrdersRepoMixin:
                 await tdb.execute(
                     """UPDATE orders SET dish_status = ?, ready_time = ?, updated_at = ?,
                        steamer_id = NULL, port_index = NULL, stack_order = NULL,
-                       loaded_at = NULL
+                       loaded_at = NULL, is_rushed = 0
                        WHERE id = ?""",
                     ("已制作待上菜", ready_time, now, oid),
                 )
@@ -945,6 +946,98 @@ class _OrdersRepoMixin:
         await tdb.commit()
         return {
             "updated_count": updated_count,
+            "stations": sorted(stations),
+        }
+
+    async def apply_floor_mutations(
+        self,
+        *,
+        now: str,
+        hold_ids: List[str],
+        fire_ids: List[str],
+        fired_at: Optional[str],
+        rush_ids: List[str],
+        substitutes: List[Tuple[str, str]],
+    ) -> Dict[str, Any]:
+        """Apply 等叫 / 叫起 / 加急 / 对调 in one commit. Caller already validated."""
+        tdb = self.table("orders")
+        stations: Set[str] = set()
+        updated_ids: Set[str] = set()
+
+        async def _touch_station(oid: str) -> Optional[Dict]:
+            row = await self.get_order_by_id(str(oid))
+            if not row:
+                return None
+            station = row.get("station") or ""
+            if station:
+                stations.add(station)
+            return row
+
+        for held_id, sub_id in substitutes:
+            held = await _touch_station(held_id)
+            sub = await _touch_station(sub_id)
+            if not held or not sub:
+                continue
+            placement = held.get("placement") or {}
+            await tdb.execute(
+                """UPDATE orders SET steamer_id = ?, port_index = ?, stack_order = ?,
+                   loaded_at = ?, updated_at = ?
+                   WHERE id = ?""",
+                (
+                    placement.get("steamer_id"),
+                    placement.get("port_index"),
+                    placement.get("stack_order"),
+                    placement.get("loaded_at"),
+                    now,
+                    sub["_id"],
+                ),
+            )
+            await tdb.execute(
+                """UPDATE orders SET steamer_id = NULL, port_index = NULL,
+                   stack_order = NULL, loaded_at = NULL, is_hold = 1, is_rushed = 0,
+                   updated_at = ?
+                   WHERE id = ?""",
+                (now, held["_id"]),
+            )
+            updated_ids.add(held["_id"])
+            updated_ids.add(sub["_id"])
+
+        for oid in hold_ids:
+            row = await _touch_station(oid)
+            if not row:
+                continue
+            await tdb.execute(
+                """UPDATE orders SET is_hold = 1, is_rushed = 0, updated_at = ?
+                   WHERE id = ?""",
+                (now, row["_id"]),
+            )
+            updated_ids.add(row["_id"])
+
+        fire_stamp = fired_at or now
+        for oid in fire_ids:
+            row = await _touch_station(oid)
+            if not row:
+                continue
+            await tdb.execute(
+                """UPDATE orders SET is_hold = 0, fired_at = ?, updated_at = ?
+                   WHERE id = ?""",
+                (fire_stamp, now, row["_id"]),
+            )
+            updated_ids.add(row["_id"])
+
+        for oid in rush_ids:
+            row = await _touch_station(oid)
+            if not row:
+                continue
+            await tdb.execute(
+                """UPDATE orders SET is_rushed = 1, updated_at = ? WHERE id = ?""",
+                (now, row["_id"]),
+            )
+            updated_ids.add(row["_id"])
+
+        await tdb.commit()
+        return {
+            "updated_count": len(updated_ids),
             "stations": sorted(stations),
         }
 

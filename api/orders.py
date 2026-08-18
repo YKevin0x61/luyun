@@ -21,6 +21,7 @@ from models import (
     MoveSteamerRequest,
     UnloadSteamerRequest,
     PluckSteamerRequest,
+    FloorOrderIdsRequest,
 )
 from database import DatabaseManager, get_db, ensure_beijing_datetime
 from services.kds_orders import complete_cooking as kds_complete_cooking
@@ -28,6 +29,12 @@ from services.kds_orders import load_steamer as kds_load_steamer
 from services.kds_orders import move_steamer as kds_move_steamer
 from services.kds_orders import unload_steamer as kds_unload_steamer
 from services.kds_orders import pluck_steamer as kds_pluck_steamer
+from services.floor_console import (
+    fire_portions as floor_fire_portions,
+    hold_portions as floor_hold_portions,
+    list_floor_tables,
+    rush_portions as floor_rush_portions,
+)
 from services.urgency_policy import urgent_cutoff
 from api.security import verify_admin_token
 
@@ -538,6 +545,104 @@ async def pluck_steamer(
     except Exception as e:
         logger.error(f"抽笼失败: {e}")
         raise HTTPException(status_code=500, detail="抽笼失败")
+
+
+def _iso(value):
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+@router.get("/floor-console", status_code=200)
+async def get_floor_console(
+    start_time: Optional[str] = Query(None),
+    end_time: Optional[str] = Query(None),
+    db: DatabaseManager = Depends(get_db),
+):
+    """楼面控制台：按堂食桌列出等叫 / 待出餐工作 / 已制作待上菜。"""
+    parsed_start = None
+    parsed_end = None
+    if not start_time and not end_time:
+        today = datetime.now(CHINA_TZ)
+        parsed_start = today.replace(hour=0, minute=0, second=0, microsecond=0)
+        parsed_end = today.replace(hour=23, minute=59, second=59, microsecond=999000)
+    if start_time:
+        parsed_start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+        if parsed_start.tzinfo is None:
+            parsed_start = parsed_start.replace(tzinfo=CHINA_TZ)
+    if end_time:
+        parsed_end = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+        if parsed_end.tzinfo is None:
+            parsed_end = parsed_end.replace(tzinfo=CHINA_TZ)
+    live = await db.get_table_live_list()
+    snap = await db.get_table_snapshot_stats()
+    occupied = [row.get("table_number") for row in live.get("tables") or []]
+    data = await list_floor_tables(
+        db.orders,
+        occupied_table_numbers=occupied,
+        table_snapshot_exists=(snap.get("total_tables") or 0) > 0,
+        start_time=parsed_start,
+        end_time=parsed_end,
+    )
+    for table in data["tables"]:
+        for line in table["lines"]:
+            line["order_time"] = _iso(line.get("order_time"))
+            line["fired_at"] = _iso(line.get("fired_at"))
+            line["work_enter_time"] = _iso(line.get("work_enter_time"))
+    return data
+
+
+@router.post("/hold", status_code=200, dependencies=_ADMIN_WRITE)
+async def hold_orders(
+    body: FloorOrderIdsRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    try:
+        result = await floor_hold_portions(db.orders, body.model_dump())
+        stations = result.pop("stations", [])
+        await _notify_orders_completed(stations)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"等叫失败: {e}")
+        raise HTTPException(status_code=500, detail="等叫失败")
+
+
+@router.post("/fire", status_code=200, dependencies=_ADMIN_WRITE)
+async def fire_orders(
+    body: FloorOrderIdsRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    try:
+        result = await floor_fire_portions(db.orders, body.model_dump())
+        stations = result.pop("stations", [])
+        await _notify_orders_completed(stations)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"叫起失败: {e}")
+        raise HTTPException(status_code=500, detail="叫起失败")
+
+
+@router.post("/rush", status_code=200, dependencies=_ADMIN_WRITE)
+async def rush_orders(
+    body: FloorOrderIdsRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    try:
+        result = await floor_rush_portions(db.orders, body.model_dump())
+        stations = result.pop("stations", [])
+        await _notify_orders_completed(stations)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"加急失败: {e}")
+        raise HTTPException(status_code=500, detail="加急失败")
 
 
 @router.get("/{order_id}", response_model=OrderResponse)

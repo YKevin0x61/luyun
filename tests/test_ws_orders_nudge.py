@@ -506,6 +506,76 @@ class PluckSteamerOrdersNudgeTest(_OrdersNudgeCase):
         self.assertIsNotNone(after.get("placement"))
 
 
+class HoldOrdersNudgeTest(_OrdersNudgeCase):
+    def test_hold_broadcasts_orders_nudge_with_station(self):
+        _seed_pending(self.db, station="changfen", table="8", flow_id="hold-nudge-001", qty=1)
+        row = _run_async(self.db.get_orders(limit=1))[0]
+
+        resp = self.client.post(
+            "/api/orders/hold",
+            json={"order_ids": [row["_id"]]},
+            headers=self.admin_headers,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(("orders", {"station": "changfen"}), self.broadcast_calls)
+
+    def test_hold_response_does_not_leak_internal_stations_field(self):
+        _seed_pending(self.db, station="changfen", table="8", flow_id="hold-nudge-002", qty=1)
+        row = _run_async(self.db.get_orders(limit=1))[0]
+
+        resp = self.client.post(
+            "/api/orders/hold",
+            json={"order_ids": [row["_id"]]},
+            headers=self.admin_headers,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("stations", resp.json())
+
+    def test_hold_all_fail_does_not_broadcast(self):
+        _seed_pending(self.db, station="changfen", table="8", flow_id="hold-nudge-409", qty=1)
+        row = _run_async(self.db.get_orders(limit=1))[0]
+        first = self.client.post(
+            "/api/orders/hold",
+            json={"order_ids": [row["_id"]]},
+            headers=self.admin_headers,
+        )
+        self.assertEqual(first.status_code, 200)
+        self.broadcast_calls.clear()
+
+        resp = self.client.post(
+            "/api/orders/hold",
+            json={"order_ids": [row["_id"]]},
+            headers=self.admin_headers,
+        )
+
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.broadcast_calls, [])
+
+    def test_hold_multi_station_broadcasts_once_per_station(self):
+        _seed_pending(self.db, station="shulong", table="8", flow_id="hold-shulong", qty=1)
+        _seed_pending(self.db, station="changfen", table="8", flow_id="hold-changfen", qty=1)
+        rows = {row["business_flow_id"]: row for row in _run_async(self.db.get_orders(limit=-1))}
+
+        resp = self.client.post(
+            "/api/orders/hold",
+            json={
+                "order_ids": [
+                    rows["hold-shulong"]["_id"],
+                    rows["hold-changfen"]["_id"],
+                ]
+            },
+            headers=self.admin_headers,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        order_nudges = self._order_nudges()
+        self.assertIn(("orders", {"station": "shulong"}), order_nudges)
+        self.assertIn(("orders", {"station": "changfen"}), order_nudges)
+        self.assertEqual(len(order_nudges), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
 

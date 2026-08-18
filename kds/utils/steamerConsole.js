@@ -6,6 +6,7 @@
 import { isRefundOrder } from './constants.js'
 import { cancelAckLineId, isCancelAcknowledged } from './cancelAck.js'
 import { composeKitchenDishCards, sortKitchenDishCardsByOldest } from './dishCardChunks.js'
+import { compareRushThenFifo, isHold } from './pendingKitchenWork.js'
 
 export const STEAMER_PHASE_AWAITING = '待上笼'
 export const STEAMER_PHASE_STEAMING = '在蒸'
@@ -36,15 +37,7 @@ function cageLineId(cage) {
 }
 
 export function sortAwaitingCagesFifo(cages) {
-  return (Array.isArray(cages) ? cages.slice() : []).sort((a, b) => {
-    const ta = asTimestamp(a?.order_time)
-    const tb = asTimestamp(b?.order_time)
-    const aOk = Number.isFinite(ta)
-    const bOk = Number.isFinite(tb)
-    if (aOk && bOk && ta !== tb) return ta - tb
-    if (aOk !== bOk) return aOk ? -1 : 1
-    return cageLineId(a).localeCompare(cageLineId(b))
-  })
+  return (Array.isArray(cages) ? cages.slice() : []).sort(compareRushThenFifo)
 }
 
 export function awaitingGroupSelectedCount(selectableCages, selectedIds) {
@@ -76,6 +69,7 @@ export function deriveSteamerPhase(order, { acknowledgedCancelIds } = {}) {
   }
   if (isRefundOrder(order)) return null
   if (order.dish_status !== '待出餐') return null
+  if (isHold(order)) return null
   if (order.placement) return STEAMER_PHASE_STEAMING
   return STEAMER_PHASE_AWAITING
 }

@@ -1,7 +1,4 @@
-/**
- * Sticky FIFO split of one logical dish into kitchen cards of at most N portions.
- * N = 0 is a no-op (one card, all pending orders).
- */
+import { workEnterTimeMs } from './pendingKitchenWork.js'
 
 function availableQuantity(order) {
   const quantity = order?.quantity || 1
@@ -14,8 +11,7 @@ function orderId(order) {
 }
 
 function orderTimeMs(order) {
-  const ts = new Date(order?.order_time).getTime()
-  return Number.isFinite(ts) ? ts : 0
+  return workEnterTimeMs(order)
 }
 
 function sortFifo(orders) {
@@ -306,9 +302,9 @@ export function sortKitchenDishCardsByOldest(cards) {
     .map((card) => ({
       ...card,
       orders: [...(card.orders || [])].sort((a, b) => {
-        const byTime = new Date(a.order_time) - new Date(b.order_time)
+        const byTime = workEnterTimeMs(a) - workEnterTimeMs(b)
         if (byTime !== 0) return byTime
-        return String(a.id ?? '').localeCompare(String(b.id ?? ''))
+        return String(a.id ?? a._id ?? '').localeCompare(String(b.id ?? b._id ?? ''))
       })
     }))
     .sort((a, b) => {

@@ -68,6 +68,17 @@ class OrdersPort(Protocol):
         order_ids: List[str],
     ) -> Dict[str, Any]: ...
 
+    async def apply_floor_mutations(
+        self,
+        *,
+        now: str,
+        hold_ids: List[str],
+        fire_ids: List[str],
+        fired_at: Optional[str],
+        rush_ids: List[str],
+        substitutes: List[Tuple[str, str]],
+    ) -> Dict[str, Any]: ...
+
     async def get_merged_dishes(
         self, station: Optional[str] = None, **kwargs: Any
     ) -> List[Dict]: ...

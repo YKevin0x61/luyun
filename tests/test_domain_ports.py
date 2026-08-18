@@ -52,6 +52,7 @@ class DomainPortsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(callable(self.db.orders.apply_steamer_move))
         self.assertTrue(callable(self.db.orders.apply_steamer_unload))
         self.assertTrue(callable(self.db.orders.apply_steamer_pluck))
+        self.assertTrue(callable(self.db.orders.apply_floor_mutations))
         self.assertTrue(callable(self.db.orders.aggregate_orders_paginated))
         self.assertTrue(callable(self.db.dish_stations.dish_stations_find))
         self.assertTrue(callable(self.db.dish_stations.dish_stations_insert))
