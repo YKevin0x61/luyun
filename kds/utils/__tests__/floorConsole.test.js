@@ -6,6 +6,7 @@ import {
   compareFloorTableNumber,
   decorateFloorTables,
   defaultSelectedOrderIds,
+  dropSuccessfulOrderIds,
   floorConflictsToastTitle,
   floorLineRowText,
   groupLinesByDishName,
@@ -61,38 +62,98 @@ describe('floorConsole actionability', () => {
 })
 
 describe('floorConsole default select', () => {
-  it('selects every actionable portion of the same dish', () => {
+  it('pre-checks 待出餐 / 待上笼 / 等叫 and leaves 在蒸 / 已制作待上菜 / 已取消 unchecked', () => {
     const lines = [
-      { order_id: 'a', dish_name: '虾饺', phase: '待出餐' },
-      { order_id: 'b', dish_name: '虾饺', phase: '待上笼' },
-      { order_id: 'c', dish_name: '虾饺', phase: '已取消' },
-      { order_id: 'd', dish_name: '虾饺', phase: '已制作待上菜' }
+      { order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' },
+      { order_id: 'basket-1', dish_name: '虾饺', phase: '待上笼' },
+      { order_id: 'hold-1', dish_name: '虾饺', phase: '等叫' },
+      { order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' },
+      { order_id: 'cancel-1', dish_name: '虾饺', phase: '已取消' },
+      { order_id: 'ready-1', dish_name: '虾饺', phase: '已制作待上菜' }
     ]
-    expect(defaultSelectedOrderIds(lines)).toEqual(['a', 'b'])
+    expect(defaultSelectedOrderIds(lines)).toEqual(['pending-1', 'basket-1', 'hold-1'])
   })
 
-  it('keeps an explicit empty selection after refresh instead of re-defaulting', () => {
+  it('「全选」 is that default set, so a hand-checked 在蒸 is not in it', () => {
     const lines = [
-      { order_id: 'a', dish_name: '虾饺', phase: '待出餐' },
-      { order_id: 'b', dish_name: '虾饺', phase: '待上笼' }
+      { order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' },
+      { order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' },
+      { order_id: 'hold-1', dish_name: '虾饺', phase: '等叫' }
     ]
-    expect(nextSelectedOrderIds(undefined, lines, { groupSeen: false })).toEqual(['a', 'b'])
-    expect(nextSelectedOrderIds([], lines, { groupSeen: true })).toEqual([])
-    expect(nextSelectedOrderIds(['a', 'gone'], lines, { groupSeen: true })).toEqual(['a'])
+    const selectAllIds = defaultSelectedOrderIds(lines)
+    expect(selectAllIds).toEqual(['pending-1', 'hold-1'])
+    expect(selectAllIds).not.toContain('steam-1')
+  })
+})
+
+describe('floorConsole seen-group keep', () => {
+  it('keeps peeled checks, does not auto-check new portions, drops became-在蒸, keeps still-在蒸 if selected', () => {
+    const previousLines = [
+      { order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' },
+      { order_id: 'pending-2', dish_name: '虾饺', phase: '待出餐' },
+      { order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' },
+      { order_id: 'swap-1', dish_name: '虾饺', phase: '待上笼' },
+      { order_id: 'ready-1', dish_name: '虾饺', phase: '待出餐' }
+    ]
+    const nextLines = [
+      { order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' },
+      { order_id: 'pending-2', dish_name: '虾饺', phase: '待出餐' },
+      { order_id: 'new-1', dish_name: '虾饺', phase: '待出餐' },
+      { order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' },
+      { order_id: 'swap-1', dish_name: '虾饺', phase: '在蒸' },
+      { order_id: 'ready-1', dish_name: '虾饺', phase: '已制作待上菜' }
+    ]
+    expect(nextSelectedOrderIds(
+      ['pending-1', 'steam-1', 'swap-1', 'ready-1'],
+      nextLines,
+      { groupSeen: true, previousLines }
+    )).toEqual(['pending-1', 'steam-1'])
+  })
+
+  it('uses the default set for a first-seen group and keeps an explicit empty selection empty', () => {
+    const lines = [
+      { order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' },
+      { order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' },
+      { order_id: 'hold-1', dish_name: '虾饺', phase: '等叫' }
+    ]
+    expect(nextSelectedOrderIds(undefined, lines, { groupSeen: false })).toEqual(['pending-1', 'hold-1'])
+    expect(nextSelectedOrderIds([], lines, { groupSeen: true, previousLines: lines })).toEqual([])
+  })
+})
+
+describe('floorConsole drop after action', () => {
+  it('drops submitted ids minus conflict order_ids and leaves conflict checks; 409 is not this helper\'s job', () => {
+    expect(dropSuccessfulOrderIds(
+      ['hold-1', 'steam-1', 'pending-1', 'other-1'],
+      ['hold-1', 'steam-1', 'pending-1'],
+      [{ order_id: 'steam-1', reason: '在蒸且无替补' }]
+    )).toEqual(['steam-1', 'other-1'])
+    expect(dropSuccessfulOrderIds(
+      ['hold-1', 'pending-1'],
+      ['hold-1', 'pending-1'],
+      []
+    )).toEqual([])
   })
 })
 
 describe('floorConsole row and conflict copy', () => {
-  it('shows 下单时间 on the portion row so 对账 still sees when the guest ordered', () => {
+  it('prints 进入待出餐工作时刻, then 叫起时刻, then 下单时间, as 「阶段 HH:mm」 / 「·加急」', () => {
     expect(floorLineRowText({
       phase: '等叫',
+      work_enter_time: '2026-08-18T12:40:00+08:00',
+      fired_at: '2026-08-18T12:35:00+08:00',
       order_time: '2026-08-18T12:30:00+08:00'
-    })).toBe('等叫 12:30')
+    })).toBe('等叫 12:40')
     expect(floorLineRowText({
       phase: '待出餐',
-      is_rushed: true,
-      order_time: '2026-08-18T09:05:00+08:00'
-    })).toBe('待出餐 09:05·加急')
+      fired_at: '2026-08-18T09:10:00+08:00',
+      order_time: '2026-08-18T09:05:00+08:00',
+      is_rushed: true
+    })).toBe('待出餐 09:10·加急')
+    expect(floorLineRowText({
+      phase: '待上笼',
+      order_time: '2026-08-18T08:15:00+08:00'
+    })).toBe('待上笼 08:15')
     expect(floorLineRowText({ phase: '在蒸' })).toBe('在蒸')
   })
 
@@ -202,25 +263,30 @@ describe('floorConsole jump and selected table', () => {
 })
 
 describe('floorConsole 单桌面 order', () => {
-  it('puts 已制作待上菜 groups first, then remaining dishes by name', () => {
+  it('puts groups with an actionable portion first, then remaining dishes by 菜名', () => {
     const groups = sortFloorDishGroups([
-      { dishName: '虾饺', lines: [{ phase: '待出餐' }] },
       { dishName: '叉烧包', lines: [{ phase: '已制作待上菜' }] },
-      { dishName: '烧卖', lines: [{ phase: '等叫' }] }
+      { dishName: '虾饺', lines: [{ phase: '待出餐' }] },
+      { dishName: '烧卖', lines: [{ phase: '等叫' }] },
+      { dishName: '凤爪', lines: [{ phase: '在蒸' }] }
     ])
-    expect(groups.map((group) => group.dishName)).toEqual(['叉烧包', '烧卖', '虾饺'])
+    expect(groups.map((group) => group.dishName)).toEqual(['凤爪', '烧卖', '虾饺', '叉烧包'])
   })
 
-  it('puts actionable portions above read-only, then 进入待出餐工作时刻', () => {
+  it('orders lines as actionable-not-在蒸, then 在蒸, then read-only, each by 进入待出餐工作时刻', () => {
     const lines = sortFloorGroupLines([
       { order_id: 'ready-late', phase: '已制作待上菜', work_enter_time: '2026-08-18T10:00:00+08:00' },
+      { order_id: 'steam-late', phase: '在蒸', work_enter_time: '2026-08-18T09:45:00+08:00' },
       { order_id: 'hold-late', phase: '等叫', work_enter_time: '2026-08-18T09:30:00+08:00' },
       { order_id: 'pending-early', phase: '待出餐', work_enter_time: '2026-08-18T09:00:00+08:00' },
+      { order_id: 'steam-early', phase: '在蒸', work_enter_time: '2026-08-18T08:30:00+08:00' },
       { order_id: 'cancel', phase: '已取消', work_enter_time: '2026-08-18T08:00:00+08:00' }
     ])
     expect(lines.map((line) => line.order_id)).toEqual([
       'pending-early',
       'hold-late',
+      'steam-early',
+      'steam-late',
       'cancel',
       'ready-late'
     ])
