@@ -74,13 +74,29 @@
           >
             <view class="dish-head">
               <text class="dish-name">{{ group.dishName }}</text>
-              <text class="dish-station">{{ group.stationLabel }}</text>
+              <view class="dish-head-right">
+                <text class="dish-station">{{ group.stationLabel }}</text>
+                <view v-if="groupHasActionable(group)" class="group-chrome">
+                  <view class="group-chrome-btn" @click.stop="selectAllInGroup(selectedTable.table_number, group)">
+                    <text>全选</text>
+                  </view>
+                  <view class="group-chrome-btn" @click.stop="clearGroupSelection(selectedTable.table_number, group.dishName)">
+                    <text>清空</text>
+                  </view>
+                </view>
+              </view>
             </view>
             <view
               v-for="line in group.lines"
               :key="line.order_id"
               class="line-row"
-              :class="['line-row--' + phaseClass(line.phase), { 'line-row--locked': !isActionable(line) }]"
+              :class="[
+                'line-row--' + phaseClass(line.phase),
+                {
+                  'line-row--locked': !isActionable(line),
+                  'line-row--selected': isSelected(selectedTable.table_number, group.dishName, line.order_id)
+                }
+              ]"
               @click="toggleLine(selectedTable.table_number, group.dishName, line.order_id, line)"
             >
               <text class="line-text">{{ floorLineRowText(line) }}</text>
@@ -129,6 +145,8 @@ import {
   canHold,
   canRush,
   decorateFloorTables,
+  defaultSelectedOrderIds,
+  dropSuccessfulOrderIds,
   FLOOR_JUMP_MISS_TOAST,
   floorConflictsToastTitle,
   floorLineRowText,
@@ -170,7 +188,17 @@ export default {
       for (const key of Object.keys(selectedByGroup)) delete selectedByGroup[key]
     }
 
-    const syncSelection = (nextTables) => {
+    const snapshotGroupLines = (currentTables) => {
+      const previousLinesByGroup = {}
+      for (const table of currentTables || []) {
+        for (const group of table.groups || []) {
+          previousLinesByGroup[groupKey(table.table_number, group.dishName)] = group.lines
+        }
+      }
+      return previousLinesByGroup
+    }
+
+    const syncSelection = (nextTables, previousLinesByGroup = {}) => {
       const nextKeys = new Set()
       for (const table of nextTables) {
         for (const group of table.groups) {
@@ -178,7 +206,8 @@ export default {
           nextKeys.add(key)
           const groupSeen = Object.prototype.hasOwnProperty.call(selectedByGroup, key)
           selectedByGroup[key] = nextSelectedOrderIds(selectedByGroup[key], group.lines, {
-            groupSeen
+            groupSeen,
+            previousLines: previousLinesByGroup[key]
           })
         }
       }
@@ -210,6 +239,8 @@ export default {
           await stationsStore.initializeStations()
           const data = await ordersAPI.getFloorConsole()
           const previous = selectedTableNumber.value
+          // Snapshot before replace so still-在蒸 hand-checks survive keep.
+          const previousLinesByGroup = snapshotGroupLines(tables.value)
           const next = withStationLabels(decorateFloorTables(data?.tables || []))
           tables.value = next
           const kept = nextSelectedTableNumber(previous, next)
@@ -220,7 +251,7 @@ export default {
           } else {
             selectedTableNumber.value = kept
           }
-          syncSelection(next)
+          syncSelection(next, previousLinesByGroup)
         } while (refreshQueued)
       } catch (error) {
         console.error('楼面刷新失败', error)
@@ -252,6 +283,16 @@ export default {
         : [...current, orderId]
     }
 
+    const groupHasActionable = (group) => (group?.lines || []).some(isActionable)
+
+    const selectAllInGroup = (tableNumber, group) => {
+      selectedByGroup[groupKey(tableNumber, group.dishName)] = defaultSelectedOrderIds(group.lines)
+    }
+
+    const clearGroupSelection = (tableNumber, dishName) => {
+      selectedByGroup[groupKey(tableNumber, dishName)] = []
+    }
+
     const selectedOf = (table, group, pred) => {
       const selected = new Set(selectedByGroup[groupKey(table.table_number, group.dishName)] || [])
       return group.lines.filter((line) => selected.has(line.order_id) && pred(line)).map((line) => line.order_id)
@@ -271,13 +312,18 @@ export default {
       })
     }
 
-    const runAction = async (ids, apiFn, emptyTitle) => {
+    const runAction = async (ids, apiFn, emptyTitle, selectionKey) => {
       if (!ids.length) {
         uni.showToast({ title: emptyTitle, icon: 'none' })
         return
       }
       try {
         const result = await apiFn(ids)
+        selectedByGroup[selectionKey] = dropSuccessfulOrderIds(
+          selectedByGroup[selectionKey],
+          ids,
+          result?.conflicts
+        )
         toastConflicts(result)
         await refresh()
       } catch (error) {
@@ -294,9 +340,24 @@ export default {
       }
     }
 
-    const runHold = (table, group) => runAction(selectedHoldIds(table, group), (ids) => ordersAPI.holdOrders(ids), '没有可等叫的份')
-    const runFire = (table, group) => runAction(selectedFireIds(table, group), (ids) => ordersAPI.fireOrders(ids), '没有可叫起的份')
-    const runRush = (table, group) => runAction(selectedRushIds(table, group), (ids) => ordersAPI.rushOrders(ids), '没有可加急的份')
+    const runHold = (table, group) => runAction(
+      selectedHoldIds(table, group),
+      (ids) => ordersAPI.holdOrders(ids),
+      '没有可等叫的份',
+      groupKey(table.table_number, group.dishName)
+    )
+    const runFire = (table, group) => runAction(
+      selectedFireIds(table, group),
+      (ids) => ordersAPI.fireOrders(ids),
+      '没有可叫起的份',
+      groupKey(table.table_number, group.dishName)
+    )
+    const runRush = (table, group) => runAction(
+      selectedRushIds(table, group),
+      (ids) => ordersAPI.rushOrders(ids),
+      '没有可加急的份',
+      groupKey(table.table_number, group.dishName)
+    )
 
     const phaseClass = (phase) => {
       if (phase === '等叫') return 'hold'
@@ -380,6 +441,9 @@ export default {
       submitJump,
       isSelected,
       toggleLine,
+      groupHasActionable,
+      selectAllInGroup,
+      clearGroupSelection,
       floorLineRowText,
       isActionable,
       selectedHoldIds,
@@ -567,7 +631,15 @@ export default {
 .dish-head {
   display: flex;
   justify-content: space-between;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 8px;
+}
+.dish-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 .dish-name {
   font-size: 16px;
@@ -576,6 +648,20 @@ export default {
 .dish-station {
   font-size: 12px;
   color: #888;
+}
+.group-chrome {
+  display: flex;
+  gap: 6px;
+}
+.group-chrome-btn {
+  min-height: 32px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: #f0f2f5;
+  color: #262626;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
 }
 .line-row {
   display: flex;
@@ -591,8 +677,9 @@ export default {
 .line-row--steam { background: #bae7ff; }
 .line-row--ready { background: #d9f7be; }
 .line-row--cancel { background: #ffccc7; }
-.line-row--pending { background: #e6f7ff; }
-.line-row--locked { opacity: 0.7; }
+.line-row--pending { background: #f5f5f5; }
+.line-row--locked { opacity: 0.55; }
+.line-row--selected { outline: 2px solid #1890ff; outline-offset: -2px; }
 .line-text { font-size: 14px; }
 .line-mark { font-weight: 700; font-size: 16px; }
 .actions {

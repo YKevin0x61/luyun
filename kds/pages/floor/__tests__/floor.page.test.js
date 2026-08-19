@@ -74,6 +74,22 @@ function isHiddenByVShow(domWrapper) {
   return /display:\s*none/.test(domWrapper.attributes('style') || '')
 }
 
+function dishGroup(wrapper, dishName) {
+  return wrapper.findAll('.dish-group').find((group) => {
+    const name = group.find('.dish-name')
+    return name.exists() && name.text() === dishName
+  })
+}
+
+function chromeBtn(group, label) {
+  return group.findAll('.group-chrome-btn').find((btn) => btn.text() === label)
+}
+
+async function openFirstCard(wrapper) {
+  await wrapper.find('.table-card').trigger('click')
+  await flushPromises()
+}
+
 beforeEach(() => {
   getFloorConsole.mockReset().mockResolvedValue({ tables: [] })
   holdOrders.mockReset().mockResolvedValue({ conflicts: [] })
@@ -87,7 +103,8 @@ beforeEach(() => {
     onWindowResize: vi.fn(),
     offWindowResize: vi.fn(),
     vibrateShort: vi.fn(),
-    vibrateLong: vi.fn()
+    vibrateLong: vi.fn(),
+    showModal: vi.fn()
   }
 })
 
@@ -270,7 +287,7 @@ describe('楼面控制台 page — disconnect strip', () => {
 })
 
 describe('楼面控制台 page — per-dish-group actions', () => {
-  it('等叫/加急 act on the 待出餐 group only, not the whole table', async () => {
+  it('等叫 acts on the 待出餐 group only, not the whole table', async () => {
     const table = tableFixture('8', [
       floorLine({ order_id: 'h1', dish_name: '虾饺', phase: '待出餐' }),
       floorLine({ order_id: 'w1', dish_name: '叉烧包', phase: '等叫' })
@@ -286,14 +303,30 @@ describe('楼面控制台 page — per-dish-group actions', () => {
     expect(groups).toHaveLength(2)
     const shrimpGroup = groups.find((group) => group.text().includes('虾饺'))
     const holdBtn = shrimpGroup.find('.action-btn.hold')
-    const rushBtn = shrimpGroup.find('.action-btn.rush')
     expect(holdBtn.exists()).toBe(true)
-    expect(rushBtn.exists()).toBe(true)
 
     await holdBtn.trigger('click')
     await flushPromises()
     expect(holdOrders).toHaveBeenCalledWith(['h1'])
     expect(holdOrders).not.toHaveBeenCalledWith(expect.arrayContaining(['w1']))
+  })
+
+  it('加急 acts on the 待出餐 group only, not the whole table', async () => {
+    const table = tableFixture('8', [
+      floorLine({ order_id: 'h1', dish_name: '虾饺', phase: '待出餐' }),
+      floorLine({ order_id: 'w1', dish_name: '叉烧包', phase: '等叫' })
+    ])
+    getFloorConsole.mockResolvedValue({ tables: [table] })
+    setViewport(390, 844)
+    const wrapper = mountPage()
+    await flushPromises()
+    await wrapper.find('.table-card').trigger('click')
+    await flushPromises()
+
+    const groups = wrapper.findAll('.dish-group')
+    const shrimpGroup = groups.find((group) => group.text().includes('虾饺'))
+    const rushBtn = shrimpGroup.find('.action-btn.rush')
+    expect(rushBtn.exists()).toBe(true)
 
     await rushBtn.trigger('click')
     await flushPromises()
@@ -322,5 +355,452 @@ describe('楼面控制台 page — per-dish-group actions', () => {
     await flushPromises()
     expect(fireOrders).toHaveBeenCalledWith(['w1'])
     expect(fireOrders).not.toHaveBeenCalledWith(expect.arrayContaining(['h1']))
+  })
+})
+
+describe('楼面控制台 page — 单桌面 default check excludes 在蒸', () => {
+  it('opening 待出餐 + 在蒸 + 等叫 does not 等叫 the 在蒸; 叫起 count is the 等叫 row only', async () => {
+    getFloorConsole.mockResolvedValue({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' }),
+          floorLine({ order_id: 'hold-1', dish_name: '虾饺', phase: '等叫' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    const shrimp = dishGroup(wrapper, '虾饺')
+    const holdBtn = shrimp.find('.action-btn.hold')
+    const fireBtn = shrimp.find('.action-btn.fire')
+    expect(holdBtn.text()).toBe('等叫 1')
+    expect(fireBtn.text()).toBe('叫起 1')
+
+    await holdBtn.trigger('click')
+    await flushPromises()
+    expect(holdOrders).toHaveBeenCalledWith(['pending-1'])
+    expect(holdOrders).not.toHaveBeenCalledWith(expect.arrayContaining(['steam-1']))
+  })
+})
+
+describe('楼面控制台 page — tap 在蒸 then 等叫', () => {
+  it('tapping 在蒸 includes it in the next 等叫 with no confirm and no 对调 copy', async () => {
+    getFloorConsole.mockResolvedValue({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' }),
+          floorLine({ order_id: 'hold-1', dish_name: '虾饺', phase: '等叫' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    const shrimp = dishGroup(wrapper, '虾饺')
+    await shrimp.find('.line-row--steam').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('对调')
+    expect(wrapper.text()).not.toContain('替补')
+    expect(globalThis.uni.showModal).not.toHaveBeenCalled()
+
+    await shrimp.find('.action-btn.hold').trigger('click')
+    await flushPromises()
+    expect(holdOrders).toHaveBeenCalledWith(['pending-1', 'steam-1'])
+    expect(globalThis.uni.showModal).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('对调')
+  })
+})
+
+describe('楼面控制台 page — 全选 / 清空 chrome', () => {
+  it('renders 全选 / 清空 only on groups with an actionable portion', async () => {
+    getFloorConsole.mockResolvedValue({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' }),
+          floorLine({ order_id: 'ready-1', dish_name: '叉烧包', phase: '已制作待上菜' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    const shrimp = dishGroup(wrapper, '虾饺')
+    const bun = dishGroup(wrapper, '叉烧包')
+    expect(chromeBtn(shrimp, '全选')).toBeTruthy()
+    expect(chromeBtn(shrimp, '清空')).toBeTruthy()
+    expect(chromeBtn(bun, '全选')).toBeUndefined()
+    expect(chromeBtn(bun, '清空')).toBeUndefined()
+    expect(bun.text()).not.toContain('全选')
+    expect(bun.text()).not.toContain('清空')
+  })
+
+  it('renders 全选 / 清空 on an 在蒸-only group', async () => {
+    getFloorConsole.mockResolvedValue({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+    const shrimp = dishGroup(wrapper, '虾饺')
+    expect(chromeBtn(shrimp, '全选')).toBeTruthy()
+    expect(chromeBtn(shrimp, '清空')).toBeTruthy()
+    await shrimp.find('.line-row--steam').trigger('click')
+    await flushPromises()
+    expect(shrimp.find('.action-btn.hold').text()).toBe('等叫 1')
+    await chromeBtn(shrimp, '全选').trigger('click')
+    await flushPromises()
+    expect(shrimp.find('.action-btn.hold').exists()).toBe(false)
+  })
+
+  it('全选 restores the default set and 清空 hides that group’s action buttons', async () => {
+    getFloorConsole.mockResolvedValue({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' }),
+          floorLine({ order_id: 'hold-1', dish_name: '虾饺', phase: '等叫' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    const shrimp = dishGroup(wrapper, '虾饺')
+    await shrimp.find('.line-row--steam').trigger('click')
+    await flushPromises()
+    expect(shrimp.find('.action-btn.hold').text()).toBe('等叫 2')
+
+    await chromeBtn(shrimp, '全选').trigger('click')
+    await flushPromises()
+    expect(shrimp.find('.action-btn.hold').text()).toBe('等叫 1')
+
+    await chromeBtn(shrimp, '清空').trigger('click')
+    await flushPromises()
+    expect(shrimp.find('.action-btn.hold').exists()).toBe(false)
+    expect(shrimp.find('.action-btn.fire').exists()).toBe(false)
+    expect(shrimp.find('.action-btn.rush').exists()).toBe(false)
+  })
+
+  it('全选 / 清空 on 虾饺 do not reset 叉烧包 checks', async () => {
+    getFloorConsole.mockResolvedValue({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'shrimp-pending', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'shrimp-steam', dish_name: '虾饺', phase: '在蒸' }),
+          floorLine({ order_id: 'bun-pending', dish_name: '叉烧包', phase: '待出餐' }),
+          floorLine({ order_id: 'bun-steam', dish_name: '叉烧包', phase: '在蒸' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    const shrimp = dishGroup(wrapper, '虾饺')
+    const bun = dishGroup(wrapper, '叉烧包')
+    await bun.find('.line-row--steam').trigger('click')
+    await flushPromises()
+    expect(bun.find('.action-btn.hold').text()).toBe('等叫 2')
+
+    await chromeBtn(shrimp, '清空').trigger('click')
+    await flushPromises()
+    expect(shrimp.find('.action-btn.hold').exists()).toBe(false)
+    expect(bun.find('.action-btn.hold').text()).toBe('等叫 2')
+
+    await chromeBtn(shrimp, '全选').trigger('click')
+    await flushPromises()
+    expect(shrimp.find('.action-btn.hold').text()).toBe('等叫 1')
+    expect(bun.find('.action-btn.hold').text()).toBe('等叫 2')
+  })
+})
+
+describe('楼面控制台 page — after-action drop', () => {
+  it('successful hold unchecks those rows so 叫起 does not appear for them', async () => {
+    const initial = tableFixture('8', [
+      floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+      floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' })
+    ])
+    const afterHold = tableFixture('8', [
+      floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '等叫' }),
+      floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' })
+    ])
+    getFloorConsole.mockResolvedValueOnce({ tables: [initial] })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    expect(dishGroup(wrapper, '虾饺').find('.action-btn.fire').exists()).toBe(false)
+
+    getFloorConsole.mockResolvedValueOnce({ tables: [afterHold] })
+    holdOrders.mockResolvedValue({ conflicts: [] })
+    await dishGroup(wrapper, '虾饺').find('.action-btn.hold').trigger('click')
+    await flushPromises()
+
+    expect(holdOrders).toHaveBeenCalledWith(['pending-1'])
+    const shrimp = dishGroup(wrapper, '虾饺')
+    expect(shrimp.find('.action-btn.fire').exists()).toBe(false)
+    expect(shrimp.find('.line-row--hold').find('.line-mark').exists()).toBe(false)
+  })
+
+  it('partial 200 keeps conflict ids checked and toasts 在蒸且无替补', async () => {
+    const initial = tableFixture('8', [
+      floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+      floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' })
+    ])
+    const afterHold = tableFixture('8', [
+      floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '等叫' }),
+      floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' })
+    ])
+    getFloorConsole.mockResolvedValueOnce({ tables: [initial] })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    await dishGroup(wrapper, '虾饺').find('.line-row--steam').trigger('click')
+    await flushPromises()
+
+    getFloorConsole.mockResolvedValueOnce({ tables: [afterHold] })
+    holdOrders.mockResolvedValue({
+      conflicts: [{ order_id: 'steam-1', reason: '在蒸且无替补' }]
+    })
+    await dishGroup(wrapper, '虾饺').find('.action-btn.hold').trigger('click')
+    await flushPromises()
+
+    expect(holdOrders).toHaveBeenCalledWith(['pending-1', 'steam-1'])
+    expect(globalThis.uni.showToast).toHaveBeenCalledWith({
+      title: '1 份未改：在蒸且无替补',
+      icon: 'none',
+      duration: 2500
+    })
+    const shrimp = dishGroup(wrapper, '虾饺')
+    expect(shrimp.find('.line-row--steam').find('.line-mark').exists()).toBe(true)
+    expect(shrimp.find('.action-btn.hold').text()).toBe('等叫 1')
+    expect(shrimp.find('.action-btn.fire').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('对调')
+  })
+
+  it('409 leaves checks unchanged and toasts conflicts', async () => {
+    getFloorConsole.mockResolvedValue({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' }),
+          floorLine({ order_id: 'hold-1', dish_name: '虾饺', phase: '等叫' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    const error = new Error('HTTP 409: Conflict')
+    error.statusCode = 409
+    error.response = {
+      data: { detail: { conflicts: [{ order_id: 'pending-1', reason: '在蒸且无替补' }] } }
+    }
+    holdOrders.mockRejectedValue(error)
+    await dishGroup(wrapper, '虾饺').find('.action-btn.hold').trigger('click')
+    await flushPromises()
+
+    const shrimp = dishGroup(wrapper, '虾饺')
+    expect(shrimp.find('.action-btn.hold').text()).toBe('等叫 1')
+    expect(shrimp.find('.action-btn.fire').text()).toBe('叫起 1')
+    expect(shrimp.find('.line-row--steam').find('.line-mark').exists()).toBe(false)
+    expect(globalThis.uni.showToast).toHaveBeenCalledWith({
+      title: '1 份未改：在蒸且无替补',
+      icon: 'none'
+    })
+  })
+})
+
+describe('楼面控制台 page — refresh keep while on the table', () => {
+  it('keeps a peeled 待出餐 unchecked after refresh', async () => {
+    const table = tableFixture('8', [
+      floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+      floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' })
+    ])
+    getFloorConsole.mockResolvedValueOnce({ tables: [table] })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    await dishGroup(wrapper, '虾饺').find('.line-row--pending').trigger('click')
+    await flushPromises()
+    expect(dishGroup(wrapper, '虾饺').find('.action-btn.hold').exists()).toBe(false)
+
+    getFloorConsole.mockResolvedValueOnce({ tables: [table] })
+    await wrapper.find('.refresh-btn').trigger('click')
+    await flushPromises()
+    expect(dishGroup(wrapper, '虾饺').find('.action-btn.hold').exists()).toBe(false)
+    expect(dishGroup(wrapper, '虾饺').find('.line-row--pending').find('.line-mark').exists()).toBe(false)
+  })
+
+  it('does not auto-check a new portion in a seen group', async () => {
+    getFloorConsole.mockResolvedValueOnce({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+    expect(dishGroup(wrapper, '虾饺').find('.action-btn.hold').text()).toBe('等叫 1')
+
+    getFloorConsole.mockResolvedValueOnce({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'pending-2', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' })
+        ])
+      ]
+    })
+    await wrapper.find('.refresh-btn').trigger('click')
+    await flushPromises()
+    expect(dishGroup(wrapper, '虾饺').find('.action-btn.hold').text()).toBe('等叫 1')
+  })
+
+  it('unchecks a 待出餐 that becomes 在蒸', async () => {
+    getFloorConsole.mockResolvedValueOnce({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'become-steam', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'hold-1', dish_name: '虾饺', phase: '等叫' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+    expect(dishGroup(wrapper, '虾饺').find('.action-btn.hold').text()).toBe('等叫 1')
+
+    getFloorConsole.mockResolvedValueOnce({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'become-steam', dish_name: '虾饺', phase: '在蒸' }),
+          floorLine({ order_id: 'hold-1', dish_name: '虾饺', phase: '等叫' })
+        ])
+      ]
+    })
+    await wrapper.find('.refresh-btn').trigger('click')
+    await flushPromises()
+    const shrimp = dishGroup(wrapper, '虾饺')
+    expect(shrimp.find('.action-btn.hold').exists()).toBe(false)
+    expect(shrimp.find('.line-row--steam').find('.line-mark').exists()).toBe(false)
+    expect(shrimp.find('.action-btn.fire').text()).toBe('叫起 1')
+  })
+
+  it('keeps a hand-checked 在蒸 that is still 在蒸', async () => {
+    getFloorConsole.mockResolvedValueOnce({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+    await dishGroup(wrapper, '虾饺').find('.line-row--steam').trigger('click')
+    await flushPromises()
+    expect(dishGroup(wrapper, '虾饺').find('.action-btn.hold').text()).toBe('等叫 2')
+
+    getFloorConsole.mockResolvedValueOnce({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' })
+        ])
+      ]
+    })
+    await wrapper.find('.refresh-btn').trigger('click')
+    await flushPromises()
+    const shrimp = dishGroup(wrapper, '虾饺')
+    expect(shrimp.find('.line-row--steam').find('.line-mark').exists()).toBe(true)
+    expect(shrimp.find('.action-btn.hold').text()).toBe('等叫 2')
+  })
+
+  it('uses the default set for a newly seen dish group on the same visit', async () => {
+    getFloorConsole.mockResolvedValueOnce({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'shrimp-pending', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'shrimp-steam', dish_name: '虾饺', phase: '在蒸' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    getFloorConsole.mockResolvedValueOnce({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'shrimp-pending', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'shrimp-steam', dish_name: '虾饺', phase: '在蒸' }),
+          floorLine({ order_id: 'bun-pending', dish_name: '叉烧包', phase: '待出餐' }),
+          floorLine({ order_id: 'bun-steam', dish_name: '叉烧包', phase: '在蒸' })
+        ])
+      ]
+    })
+    await wrapper.find('.refresh-btn').trigger('click')
+    await flushPromises()
+
+    expect(dishGroup(wrapper, '虾饺').find('.action-btn.hold').text()).toBe('等叫 1')
+    const bun = dishGroup(wrapper, '叉烧包')
+    expect(bun.find('.action-btn.hold').text()).toBe('等叫 1')
+    expect(bun.find('.line-row--steam').find('.line-mark').exists()).toBe(false)
+    expect(bun.find('.line-row--pending').find('.line-mark').exists()).toBe(true)
+  })
+})
+
+describe('楼面控制台 page — phase contrast modifiers', () => {
+  it('marks pending / steam / selected / locked with existing row modifiers and ✓', async () => {
+    getFloorConsole.mockResolvedValue({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'pending-1', dish_name: '虾饺', phase: '待出餐' }),
+          floorLine({ order_id: 'steam-1', dish_name: '虾饺', phase: '在蒸' }),
+          floorLine({ order_id: 'ready-1', dish_name: '虾饺', phase: '已制作待上菜' })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    const shrimp = dishGroup(wrapper, '虾饺')
+    const pending = shrimp.find('.line-row--pending')
+    const steam = shrimp.find('.line-row--steam')
+    const locked = shrimp.find('.line-row--locked')
+    expect(pending.exists()).toBe(true)
+    expect(pending.classes()).toContain('line-row--selected')
+    expect(pending.find('.line-mark').text()).toBe('✓')
+    expect(steam.exists()).toBe(true)
+    expect(steam.classes()).not.toContain('line-row--selected')
+    expect(locked.exists()).toBe(true)
+    expect(locked.classes()).toContain('line-row--ready')
+
+    await steam.trigger('click')
+    await flushPromises()
+    expect(steam.classes()).toContain('line-row--selected')
+    expect(steam.find('.line-mark').text()).toBe('✓')
   })
 })
