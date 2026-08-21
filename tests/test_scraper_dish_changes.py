@@ -12,6 +12,7 @@ from database import CHINA_TZ, DatabaseManager
 from scraper.order_flow_ids import (
     allocate_incremental_flow_ids,
     allocate_reconcile_flow_ids,
+    biz_date_from_bs_code,
     parse_order_flow_id,
 )
 from scraper.table_change_detector import TableChangeDetector
@@ -45,6 +46,12 @@ class OrderFlowIdsTest(unittest.TestCase):
     def test_parse_order_flow_id(self):
         parsed = parse_order_flow_id("YY01101-260428-0053_(普通)桐乡胎菊_006")
         self.assertEqual(parsed, ("YY01101-260428-0053", "(普通)桐乡胎菊"))
+
+    def test_biz_date_from_bs_code(self):
+        self.assertEqual(biz_date_from_bs_code("YY001301-260820-0001"), "2026-08-20")
+        self.assertEqual(biz_date_from_bs_code("YY001302-260821-0012"), "2026-08-21")
+        self.assertIsNone(biz_date_from_bs_code("A"))
+        self.assertIsNone(biz_date_from_bs_code(""))
 
     def test_reconcile_flow_ids(self):
         ids = allocate_reconcile_flow_ids("YY01101-260428-0001", "虾饺", 2, start_index=3)

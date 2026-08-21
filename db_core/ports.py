@@ -115,6 +115,10 @@ class OrdersPort(Protocol):
         self, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None
     ) -> List[str]: ...
 
+    async def get_cancelled_delivery_flow_ids(
+        self, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None
+    ) -> List[str]: ...
+
     async def search_orders_raw(
         self,
         match_condition: Dict,

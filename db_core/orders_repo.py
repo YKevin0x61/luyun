@@ -567,13 +567,40 @@ class _OrdersRepoMixin:
         end_time: Optional[datetime] = None,
     ) -> List[str]:
         """时间段内所有未取消外卖行的 business_flow_id（对账消失兜底用）。"""
+        return await self._list_delivery_flow_ids(
+            start_time, end_time, cancelled=False
+        )
+
+    async def get_cancelled_delivery_flow_ids(
+        self,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[str]:
+        """时间段内已软取消外卖行的 business_flow_id（切日窗口拉回用）。"""
+        return await self._list_delivery_flow_ids(
+            start_time, end_time, cancelled=True
+        )
+
+    async def _list_delivery_flow_ids(
+        self,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+        *,
+        cancelled: bool,
+    ) -> List[str]:
         try:
-            conditions = ["source = 'delivery'", "status != '退菜'"]
+            conditions = ["source = 'delivery'"]
             params: List[Any] = []
+            if cancelled:
+                conditions.append("status = '退菜'")
+            else:
+                conditions.append("status != '退菜'")
             if start_time:
-                conditions.append("order_time >= ?"); params.append(start_time.isoformat())
+                conditions.append("order_time >= ?")
+                params.append(start_time.isoformat())
             if end_time:
-                conditions.append("order_time <= ?"); params.append(end_time.isoformat())
+                conditions.append("order_time <= ?")
+                params.append(end_time.isoformat())
             where = " AND ".join(conditions)
             tdb = self.table("orders")
             async with tdb.conn.cursor() as cursor:

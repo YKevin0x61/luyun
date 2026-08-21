@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, Optional
 
 from scraper._common import CHINA_TZ, DATA_DIR
@@ -20,6 +20,11 @@ def _json_default(obj):
     if isinstance(obj, datetime):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def previous_biz_date_of(biz_date: str) -> str:
+    year, month, day = (int(part) for part in biz_date.split("-"))
+    return (date(year, month, day) - timedelta(days=1)).isoformat()
 
 
 class ScraperStateStore:
@@ -42,6 +47,7 @@ class ScraperStateStore:
 
         self.delivery_bill_state: dict = {}
         self.collected_delivery_bills: set = set()
+        self.last_prev_day_cancel_sweep_biz_date: str = ""
 
         self.load_table_state()
         self.collected_delivery_bills = self.load_delivery_bills()
@@ -53,6 +59,9 @@ class ScraperStateStore:
         else:
             d = now.date()
         return d.isoformat()
+
+    def previous_biz_date(self) -> str:
+        return previous_biz_date_of(self.current_biz_date())
 
     def load_table_state(self) -> None:
         biz_date = self.current_biz_date()
@@ -95,6 +104,7 @@ class ScraperStateStore:
 
     def load_delivery_bills(self) -> set:
         self.delivery_bill_state = {}
+        self.last_prev_day_cancel_sweep_biz_date = ""
         biz_date = self.current_biz_date()
         if not os.path.exists(self._delivery_bills_file):
             return set()
@@ -103,16 +113,22 @@ class ScraperStateStore:
                 data = json.load(f)
             saved_date = data.get("biz_date", "")
             bills: list = data.get("bills", [])
+            self.delivery_bill_state = data.get("bill_state", {}) or {}
+            self.last_prev_day_cancel_sweep_biz_date = (
+                data.get("last_prev_day_cancel_sweep_biz_date", "") or ""
+            )
             if saved_date != biz_date:
                 self.logger.info(
-                    f"🗓️  营业日切换（{saved_date} → {biz_date}），清空外卖去重记录"
+                    "🗓️  营业日切换（%s → %s），保留外卖跟踪待昨日窗口扫描",
+                    saved_date,
+                    biz_date,
                 )
-                return set()
-            self.delivery_bill_state = data.get("bill_state", {}) or {}
-            self.logger.info(
-                f"📂 加载 {len(bills)} 条已采集外卖账单, "
-                f"{len(self.delivery_bill_state)} 条跟踪记录"
-            )
+            else:
+                self.logger.info(
+                    "📂 加载 %s 条已采集外卖账单, %s 条跟踪记录",
+                    len(bills),
+                    len(self.delivery_bill_state),
+                )
             return set(bills)
         except Exception as e:
             self.logger.warning(f"⚠️  加载外卖账单记录失败: {e}")
@@ -124,6 +140,9 @@ class ScraperStateStore:
                 "biz_date": self.current_biz_date(),
                 "bills": list(self.collected_delivery_bills),
                 "bill_state": self.delivery_bill_state,
+                "last_prev_day_cancel_sweep_biz_date": (
+                    self.last_prev_day_cancel_sweep_biz_date or ""
+                ),
             }
             with open(self._delivery_bills_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, default=_json_default)

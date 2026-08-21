@@ -6,10 +6,28 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import date
 from typing import Dict, List, Optional, Tuple
 
 BS_CODE_PATTERN = re.compile(r"^(YY\d+-\d{6}-\d+)_")
 FLOW_SEQ_SUFFIX = re.compile(r"_(\d{3})$")
+# YY001301-260820-0001 → 260820
+BS_CODE_BIZ_DATE_PATTERN = re.compile(r"-(\d{6})(?:-|$)")
+
+
+def biz_date_from_bs_code(bs_code: str) -> Optional[str]:
+    """Parse ``YYYY-MM-DD`` from a POS ``bsCode`` like ``YY001301-260820-0001``."""
+    if not bs_code:
+        return None
+    match = BS_CODE_BIZ_DATE_PATTERN.search(str(bs_code))
+    if not match:
+        return None
+    raw = match.group(1)
+    try:
+        parsed = date(int("20" + raw[:2]), int(raw[2:4]), int(raw[4:6]))
+    except ValueError:
+        return None
+    return parsed.isoformat()
 
 
 def extract_bs_code(business_flow_id: str) -> str:

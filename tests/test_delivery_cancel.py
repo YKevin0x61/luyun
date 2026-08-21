@@ -15,6 +15,10 @@ from db_core.table_db import migrate_orders_kds_columns
 from scraper.delivery_bill_tracker import DELIVERY_CANCEL_MISS_THRESHOLD, DeliveryBillTracker
 from scraper.settled_reconcile import sweep_cancelled_delivery_for_biz_date
 
+TODAY_BS = "YY001301-260821-0001"
+OTHER_TODAY_BS = "YY001301-260821-0002"
+YESTERDAY_BS = "YY001301-260820-0001"
+
 
 def _delivery_order(bs_code: str, dish: str, seq: int = 1, *, price=10.0):
     return {
@@ -106,6 +110,14 @@ class DeliveryRepoTest(unittest.IsolatedAsyncioTestCase):
         await self.db.mark_delivery_cancelled(bs)
         ids_after = await self.db.get_delivery_flow_ids()
         self.assertNotIn(f"{bs}_叉烧包_001", ids_after)
+
+    async def test_get_cancelled_delivery_flow_ids(self):
+        bs = "YY001301-260720-0201"
+        await self.db.save_orders([_delivery_order(bs, "叉烧包")])
+        self.assertEqual(await self.db.get_cancelled_delivery_flow_ids(), [])
+        await self.db.mark_delivery_cancelled(bs)
+        cancelled_ids = await self.db.get_cancelled_delivery_flow_ids()
+        self.assertEqual(cancelled_ids, [f"{bs}_叉烧包_001"])
 
     async def test_revert_restores_rows(self):
         bs = "YY001301-260720-0300"
@@ -206,10 +218,20 @@ class _FakeSession:
 
 
 class _MinimalState:
-    def __init__(self):
+    def __init__(self, biz_date="2026-08-21"):
         self.delivery_bill_state = {}
         self.collected_delivery_bills = set()
         self.save_calls = 0
+        self._biz_date = biz_date
+        self.last_prev_day_cancel_sweep_biz_date = ""
+
+    def current_biz_date(self):
+        return self._biz_date
+
+    def previous_biz_date(self):
+        year, month, day = (int(part) for part in self._biz_date.split("-"))
+        from datetime import date, timedelta
+        return (date(year, month, day) - timedelta(days=1)).isoformat()
 
     def save_delivery_bills(self):
         self.save_calls += 1
@@ -266,53 +288,89 @@ class SweepThresholdTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_absent_reaches_threshold_then_cancelled(self):
         adapter = _StubDeliveryAdapter()
-        adapter._delivery_bill_state = {"A": {"bs_id": "a", "miss_count": 0, "cancelled": False}}
+        adapter._delivery_bill_state = {
+            TODAY_BS: {"bs_id": "a", "miss_count": 0, "cancelled": False}
+        }
         db = _FakeDB()
 
-        # 连续缺席 K-1 次不取消
         for _ in range(DELIVERY_CANCEL_MISS_THRESHOLD - 1):
-            await adapter._sweep_cancelled_delivery(db, {"OTHER"}, {"OTHER": {}})
+            await adapter._sweep_cancelled_delivery(
+                db, {OTHER_TODAY_BS}, {OTHER_TODAY_BS: {}}
+            )
             self.assertEqual(db.cancelled, [])
-        # 第 K 次触发取消
-        await adapter._sweep_cancelled_delivery(db, {"OTHER"}, {"OTHER": {}})
-        self.assertEqual(db.cancelled, ["A"])
-        self.assertTrue(adapter._delivery_bill_state["A"]["cancelled"])
+        await adapter._sweep_cancelled_delivery(
+            db, {OTHER_TODAY_BS}, {OTHER_TODAY_BS: {}}
+        )
+        self.assertEqual(db.cancelled, [TODAY_BS])
+        self.assertTrue(adapter._delivery_bill_state[TODAY_BS]["cancelled"])
         self.assertEqual(adapter._last_delivery_cancel_count, 3)
 
     async def test_configured_threshold_overrides_default(self):
         adapter = _StubDeliveryAdapter()
         adapter.config = {"settings": {"delivery_cancel_miss_threshold": 2}}
-        adapter._delivery_bill_state = {"A": {"bs_id": "a", "miss_count": 0, "cancelled": False}}
+        adapter._delivery_bill_state = {
+            TODAY_BS: {"bs_id": "a", "miss_count": 0, "cancelled": False}
+        }
         db = _FakeDB()
-        await adapter._sweep_cancelled_delivery(db, {"OTHER"}, {"OTHER": {}})
-        self.assertEqual(db.cancelled, [])  # 第 1 次不取消
-        await adapter._sweep_cancelled_delivery(db, {"OTHER"}, {"OTHER": {}})
-        self.assertEqual(db.cancelled, ["A"])  # 第 2 次即取消（自定义阈值=2）
+        await adapter._sweep_cancelled_delivery(
+            db, {OTHER_TODAY_BS}, {OTHER_TODAY_BS: {}}
+        )
+        self.assertEqual(db.cancelled, [])
+        await adapter._sweep_cancelled_delivery(
+            db, {OTHER_TODAY_BS}, {OTHER_TODAY_BS: {}}
+        )
+        self.assertEqual(db.cancelled, [TODAY_BS])
 
     async def test_reappear_before_threshold_resets(self):
         adapter = _StubDeliveryAdapter()
-        adapter._delivery_bill_state = {"A": {"bs_id": "a", "miss_count": 2, "cancelled": False}}
+        adapter._delivery_bill_state = {
+            TODAY_BS: {"bs_id": "a", "miss_count": 2, "cancelled": False}
+        }
         db = _FakeDB()
-        # A 重新出现 → 计数清零，不取消
-        await adapter._sweep_cancelled_delivery(db, {"A"}, {"A": {"_dishes": []}})
+        await adapter._sweep_cancelled_delivery(
+            db, {TODAY_BS}, {TODAY_BS: {"_dishes": []}}
+        )
         self.assertEqual(db.cancelled, [])
-        self.assertEqual(adapter._delivery_bill_state["A"]["miss_count"], 0)
+        self.assertEqual(adapter._delivery_bill_state[TODAY_BS]["miss_count"], 0)
 
     async def test_cancelled_reappear_triggers_revert(self):
         adapter = _StubDeliveryAdapter()
-        adapter._delivery_bill_state = {"A": {"bs_id": "a", "miss_count": 3, "cancelled": True}}
+        adapter._delivery_bill_state = {
+            TODAY_BS: {"bs_id": "a", "miss_count": 3, "cancelled": True}
+        }
         db = _FakeDB()
-        bill = {"_dishes": [{"business_flow_id": "A_菜_001", "quantity": 1, "total_amount": 10.0, "status": "已结"}]}
-        await adapter._sweep_cancelled_delivery(db, {"A"}, {"A": bill})
+        bill = {
+            "_dishes": [{
+                "business_flow_id": f"{TODAY_BS}_菜_001",
+                "quantity": 1,
+                "total_amount": 10.0,
+                "status": "已结",
+            }]
+        }
+        await adapter._sweep_cancelled_delivery(db, {TODAY_BS}, {TODAY_BS: bill})
         self.assertEqual(len(db.reverted), 1)
-        self.assertFalse(adapter._delivery_bill_state["A"]["cancelled"])
-        self.assertEqual(adapter._delivery_bill_state["A"]["miss_count"], 0)
+        self.assertFalse(adapter._delivery_bill_state[TODAY_BS]["cancelled"])
+        self.assertEqual(adapter._delivery_bill_state[TODAY_BS]["miss_count"], 0)
+
+    async def test_yesterday_bs_code_is_not_miss_counted_against_today_list(self):
+        adapter = _StubDeliveryAdapter()
+        adapter.config = {"settings": {"delivery_cancel_miss_threshold": 1}}
+        adapter._delivery_bill_state = {
+            YESTERDAY_BS: {"bs_id": "y", "miss_count": 0, "cancelled": False},
+            TODAY_BS: {"bs_id": "t", "miss_count": 0, "cancelled": False},
+        }
+        db = _FakeDB()
+        await adapter._sweep_cancelled_delivery(db, {TODAY_BS}, {TODAY_BS: {}})
+        self.assertEqual(db.cancelled, [])
+        self.assertEqual(adapter._delivery_bill_state[YESTERDAY_BS]["miss_count"], 0)
+        self.assertFalse(adapter._delivery_bill_state[YESTERDAY_BS]["cancelled"])
 
 
 class _StubReconcileAdapter:
     def __init__(self, present_bills, raise_fetch=False):
         self._present = present_bills
         self._raise = raise_fetch
+        self.fetch_line_calls = []
 
     def biz_datetime_range(self, biz_date=None):
         return (
@@ -325,11 +383,17 @@ class _StubReconcileAdapter:
             raise RuntimeError("boom")
         return self._present
 
+    async def fetch_delivery_order_lines(self, bill):
+        self.fetch_line_calls.append(bill.get("bsCode"))
+        return bill.get("_dishes", [])
+
 
 class _FakeReconcileDB:
-    def __init__(self, flow_ids):
+    def __init__(self, flow_ids, cancelled_flow_ids=None):
         self._flow_ids = flow_ids
+        self._cancelled_flow_ids = cancelled_flow_ids or []
         self.cancelled = []
+        self.reverted = []
 
     @property
     def orders(self):
@@ -338,9 +402,16 @@ class _FakeReconcileDB:
     async def get_delivery_flow_ids(self, begin=None, end=None):
         return self._flow_ids
 
+    async def get_cancelled_delivery_flow_ids(self, begin=None, end=None):
+        return self._cancelled_flow_ids
+
     async def mark_delivery_cancelled(self, bs_code):
         self.cancelled.append(bs_code)
         return 2
+
+    async def revert_delivery_cancelled(self, orders):
+        self.reverted.append(orders)
+        return len(orders)
 
 
 class ReconcileSafetyNetTest(unittest.IsolatedAsyncioTestCase):
@@ -370,6 +441,119 @@ class ReconcileSafetyNetTest(unittest.IsolatedAsyncioTestCase):
         summary = await sweep_cancelled_delivery_for_biz_date(adapter, db, "2026-07-20")
         self.assertTrue(summary["skipped"])
         self.assertEqual(db.cancelled, [])
+
+    async def test_present_cancelled_bills_are_reverted(self):
+        present_code = "YY001301-260720-0001"
+        vanished_code = "YY001301-260720-0003"
+        dishes = [{
+            "business_flow_id": f"{present_code}_菜_001",
+            "quantity": 2,
+            "price": 12.0,
+            "total_amount": 24.0,
+            "status": "已结",
+        }]
+        present = [{"bsCode": present_code, "_dishes": dishes}]
+        db = _FakeReconcileDB(
+            [f"{vanished_code}_菜_001"],
+            cancelled_flow_ids=[f"{present_code}_菜_001"],
+        )
+        adapter = _StubReconcileAdapter(present)
+        summary = await sweep_cancelled_delivery_for_biz_date(adapter, db, "2026-07-20")
+        self.assertEqual(db.cancelled, [vanished_code])
+        self.assertEqual(len(db.reverted), 1)
+        self.assertEqual(db.reverted[0], dishes)
+        self.assertEqual(summary["restored_bills"], 1)
+        self.assertEqual(summary["restored_rows"], 1)
+        self.assertEqual(adapter.fetch_line_calls, [present_code])
+
+
+class PreviousBizDateSweepTest(unittest.IsolatedAsyncioTestCase):
+    async def test_success_reverts_present_and_drops_yesterday_tracking(self):
+        adapter = _StubDeliveryAdapter()
+        adapter._delivery_bill_state = {
+            YESTERDAY_BS: {"bs_id": "y1", "miss_count": 1, "cancelled": True},
+            TODAY_BS: {"bs_id": "t1", "miss_count": 0, "cancelled": False},
+        }
+        adapter._state.collected_delivery_bills = {"y1", "t1"}
+        dishes = [{
+            "business_flow_id": f"{YESTERDAY_BS}_菜_001",
+            "quantity": 1,
+            "total_amount": 10.0,
+            "status": "已结",
+        }]
+        present = [{"bsCode": YESTERDAY_BS, "_dishes": dishes}]
+
+        async def _fetch(begin, end, *, delivery_only=False):
+            return present
+
+        async def _lines(bill):
+            return bill.get("_dishes", [])
+
+        adapter.fetch_settled_bill_list = _fetch
+        adapter.fetch_delivery_order_lines = _lines
+        db = _FakeReconcileDB(
+            [],
+            cancelled_flow_ids=[f"{YESTERDAY_BS}_菜_001"],
+        )
+        await adapter.maybe_sweep_previous_biz_date(db)
+        self.assertEqual(len(db.reverted), 1)
+        self.assertNotIn(YESTERDAY_BS, adapter._delivery_bill_state)
+        self.assertIn(TODAY_BS, adapter._delivery_bill_state)
+        self.assertEqual(adapter._state.last_prev_day_cancel_sweep_biz_date, "2026-08-20")
+        self.assertNotIn("y1", adapter._state.collected_delivery_bills)
+
+    async def test_empty_list_keeps_yesterday_tracking(self):
+        adapter = _StubDeliveryAdapter()
+        adapter._delivery_bill_state = {
+            YESTERDAY_BS: {"bs_id": "y1", "miss_count": 0, "cancelled": False},
+        }
+        adapter._state.collected_delivery_bills = {"y1"}
+
+        async def _fetch(begin, end, *, delivery_only=False):
+            return []
+
+        adapter.fetch_settled_bill_list = _fetch
+        db = _FakeReconcileDB([f"{YESTERDAY_BS}_菜_001"])
+        await adapter.maybe_sweep_previous_biz_date(db)
+        self.assertEqual(db.cancelled, [])
+        self.assertIn(YESTERDAY_BS, adapter._delivery_bill_state)
+        self.assertEqual(adapter._state.last_prev_day_cancel_sweep_biz_date, "")
+
+    async def test_already_swept_only_keeps_today_tracking(self):
+        adapter = _StubDeliveryAdapter()
+        adapter._state.last_prev_day_cancel_sweep_biz_date = "2026-08-20"
+        adapter._delivery_bill_state = {
+            YESTERDAY_BS: {"bs_id": "y1", "miss_count": 0, "cancelled": False},
+            TODAY_BS: {"bs_id": "t1", "miss_count": 0, "cancelled": False},
+        }
+        fetch_calls = []
+
+        async def _fetch(begin, end, *, delivery_only=False):
+            fetch_calls.append(1)
+            return [{"bsCode": YESTERDAY_BS}]
+
+        adapter.fetch_settled_bill_list = _fetch
+        db = _FakeReconcileDB([])
+        await adapter.maybe_sweep_previous_biz_date(db)
+        self.assertEqual(fetch_calls, [])
+        self.assertNotIn(YESTERDAY_BS, adapter._delivery_bill_state)
+        self.assertIn(TODAY_BS, adapter._delivery_bill_state)
+
+    async def test_next_rollover_drops_stale_day_without_cancelling(self):
+        adapter = _StubDeliveryAdapter()
+        adapter._state._biz_date = "2026-08-22"
+        adapter._delivery_bill_state = {
+            YESTERDAY_BS: {"bs_id": "y1", "miss_count": 0, "cancelled": False},
+        }
+
+        async def _fetch(begin, end, *, delivery_only=False):
+            return []
+
+        adapter.fetch_settled_bill_list = _fetch
+        db = _FakeReconcileDB([f"{YESTERDAY_BS}_菜_001"])
+        await adapter.maybe_sweep_previous_biz_date(db)
+        self.assertEqual(db.cancelled, [])
+        self.assertNotIn(YESTERDAY_BS, adapter._delivery_bill_state)
 
 
 if __name__ == "__main__":

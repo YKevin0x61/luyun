@@ -15,6 +15,7 @@ from scraper._common import (
     ScraperSessionError,
     pos_response_indicates_auth_failure,
 )
+from scraper.order_flow_ids import biz_date_from_bs_code
 from scraper.order_source import (
     DEFAULT_DELIVERY_PLATFORMS,
     SOURCE_DELIVERY,
@@ -469,6 +470,86 @@ class DeliveryBillTracker:
             self.logger.error(f"❌ 获取外卖账单菜品明细出错: {e}")
             return []
 
+    async def fetch_delivery_order_lines(self, bill: Dict) -> List[Dict]:
+        """Public seam for biz-date cancel sweep revert (POS 明细 → 订单行)."""
+        return await self._get_delivery_bill_dishes(bill)
+
+    def _current_biz_date(self):
+        current_biz_date = getattr(self._state, "current_biz_date", None)
+        if not callable(current_biz_date):
+            return None
+        return current_biz_date()
+
+    def _previous_biz_date(self):
+        previous_biz_date = getattr(self._state, "previous_biz_date", None)
+        if callable(previous_biz_date):
+            return previous_biz_date()
+        current = self._current_biz_date()
+        if not current:
+            return None
+        from scraper.state_store import previous_biz_date_of
+        return previous_biz_date_of(current)
+
+    def _prune_delivery_tracking(self, keep_biz_dates: set) -> bool:
+        """Drop tracked bills whose bsCode date is outside keep_biz_dates."""
+        changed = False
+        collected = getattr(self._state, "collected_delivery_bills", None)
+        for bs_code, st in list(self._state.delivery_bill_state.items()):
+            code_date = biz_date_from_bs_code(bs_code)
+            if code_date is None or code_date in keep_biz_dates:
+                continue
+            self._state.delivery_bill_state.pop(bs_code, None)
+            bs_id = (st or {}).get("bs_id")
+            if bs_id and collected is not None:
+                collected.discard(bs_id)
+            changed = True
+        return changed
+
+    async def maybe_sweep_previous_biz_date(self, db) -> None:
+        """Scan yesterday's POS window, then drop cross-day tracking.
+
+        Retries while the previous biz date is still pending. Empty/failed
+        fetches skip cancel. After the next rollover, stale dates are dropped
+        even if that sweep never succeeded.
+        """
+        from scraper.settled_reconcile import sweep_cancelled_delivery_for_biz_date
+
+        current = self._current_biz_date()
+        previous = self._previous_biz_date()
+        if not current or not previous:
+            return
+        last_sweep = getattr(self._state, "last_prev_day_cancel_sweep_biz_date", "") or ""
+
+        if last_sweep == previous:
+            if self._prune_delivery_tracking({current}):
+                self._state.save_delivery_bills()
+            return
+
+        if self._prune_delivery_tracking({current, previous}):
+            self._state.save_delivery_bills()
+
+        summary = await sweep_cancelled_delivery_for_biz_date(self, db, previous)
+        if summary.get("skipped"):
+            self.logger.info(
+                "⏭️ 昨日外卖取消窗口跳过（失败或空列表）biz_date=%s，下次重试",
+                previous,
+            )
+            return
+
+        self._state.last_prev_day_cancel_sweep_biz_date = previous
+        self._prune_delivery_tracking({current})
+        self._state.save_delivery_bills()
+        affected = int(summary.get("cancelled_rows") or 0) + int(
+            summary.get("restored_rows") or 0
+        )
+        self._last_delivery_cancel_count += affected
+        self.logger.info(
+            "🗓️ 昨日外卖窗口扫描完成 biz_date=%s 取消 %s 行 / 恢复 %s 行",
+            previous,
+            summary.get("cancelled_rows", 0),
+            summary.get("restored_rows", 0),
+        )
+
     # ---- 外卖订单采集 ----
 
     def _delivery_poll_due(self) -> bool:
@@ -499,6 +580,9 @@ class DeliveryBillTracker:
 
             if not self._delivery_poll_due():
                 return []
+
+            if db is not None:
+                await self.maybe_sweep_previous_biz_date(db)
 
             # 获取外卖账单列表（区分“成功但为空”与“拉取失败”）
             fetch_ok, delivery_bills = await self._get_delivery_bills_checked()
@@ -598,8 +682,12 @@ class DeliveryBillTracker:
             pass
         state_changed = False
         affected_total = 0
+        current_biz_date = self._current_biz_date()
 
         for bs_code, st in list(self._state.delivery_bill_state.items()):
+            code_date = biz_date_from_bs_code(bs_code)
+            if current_biz_date and code_date and code_date != current_biz_date:
+                continue
             if bs_code in present_bs_codes:
                 if st.get("cancelled"):
                     # 重现 → 自愈：重新拉取明细并恢复此前软删除的行
@@ -631,4 +719,4 @@ class DeliveryBillTracker:
 
         if state_changed:
             self._state.save_delivery_bills()
-        self._last_delivery_cancel_count = affected_total
+        self._last_delivery_cancel_count += affected_total

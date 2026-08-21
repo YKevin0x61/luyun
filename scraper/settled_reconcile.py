@@ -352,39 +352,86 @@ def _bill_is_delivery(bill: Dict, delivery_platforms=None) -> bool:
     )
 
 
-async def sweep_cancelled_delivery_for_biz_date(adapter, db, biz_date: str) -> Dict[str, Any]:
-    """对账兜底：DB 有 source=delivery 的 bsCode、但 POS 当日已结列表已无 → 软删除（退菜 + 归零）。
+def _bs_codes_from_flow_ids(flow_ids) -> set:
+    codes = set()
+    for flow_id in flow_ids or []:
+        parsed = parse_order_flow_id(flow_id)
+        if parsed:
+            codes.add(parsed[0])
+    return codes
 
-    覆盖实时 sweep 漏检、或跨营业日（06:00 滚动后）才发生的取消。
-    防误杀：拉取失败或当日外卖列表为空时直接跳过，绝不批量取消。
+
+def _skipped_cancel_summary(*, error=None) -> Dict[str, Any]:
+    summary = {
+        "checked": 0,
+        "cancelled_bills": 0,
+        "cancelled_rows": 0,
+        "restored_bills": 0,
+        "restored_rows": 0,
+        "skipped": True,
+    }
+    if error:
+        summary["error"] = error
+    return summary
+
+
+async def sweep_cancelled_delivery_for_biz_date(adapter, db, biz_date: str) -> Dict[str, Any]:
+    """对账/切日窗口：该营业日 POS 已结外卖列表 vs 本地库。
+
+    - DB 未取消、POS 已无 → 软删除（退菜 + 归零）。
+    - DB 已取消、POS 仍在 → 拉明细 revert 恢复数量。
+    防误杀：拉取失败或当日外卖列表为空时直接跳过。
     """
     begin, end = adapter.biz_datetime_range(biz_date)
     try:
         present_bills = await adapter.fetch_settled_bill_list(begin, end, delivery_only=True)
     except Exception as exc:
-        return {"checked": 0, "cancelled_bills": 0, "cancelled_rows": 0, "skipped": True, "error": str(exc)}
+        return _skipped_cancel_summary(error=str(exc))
 
     # 成功但为空：极可能是异常状态而非“全天外卖都被取消”，跳过以防误杀
     if not present_bills:
-        return {"checked": 0, "cancelled_bills": 0, "cancelled_rows": 0, "skipped": True}
+        return _skipped_cancel_summary()
 
-    present_bs_codes = {(b.get("bsCode") or b.get("bsId") or "") for b in present_bills}
-    present_bs_codes.discard("")
+    present_bills_by_code = {}
+    for bill in present_bills:
+        bs_code = bill.get("bsCode") or bill.get("bsId") or ""
+        if bs_code:
+            present_bills_by_code[bs_code] = bill
+    present_bs_codes = set(present_bills_by_code)
 
     flow_ids = await db.orders.get_delivery_flow_ids(begin, end)
-    db_bs_codes = set()
-    for flow_id in flow_ids:
-        parsed = parse_order_flow_id(flow_id)
-        if parsed:
-            db_bs_codes.add(parsed[0])
+    db_bs_codes = _bs_codes_from_flow_ids(flow_ids)
+    cancelled_flow_ids = await db.orders.get_cancelled_delivery_flow_ids(begin, end)
+    cancelled_bs_codes = _bs_codes_from_flow_ids(cancelled_flow_ids)
 
     vanished = db_bs_codes - present_bs_codes
     cancelled_rows = 0
     for bs_code in sorted(vanished):
         cancelled_rows += await db.orders.mark_delivery_cancelled(bs_code)
+
+    restored_rows = 0
+    restored_bills = 0
+    to_restore = cancelled_bs_codes & present_bs_codes
+    fetch_lines = getattr(adapter, "fetch_delivery_order_lines", None)
+    if fetch_lines is None:
+        fetch_lines = getattr(adapter, "_get_delivery_bill_dishes", None)
+    if to_restore and fetch_lines is not None:
+        for bs_code in sorted(to_restore):
+            bill = present_bills_by_code.get(bs_code)
+            if not bill:
+                continue
+            restored_orders = await fetch_lines(bill)
+            if restored_orders:
+                restored = await db.orders.revert_delivery_cancelled(restored_orders)
+                if restored:
+                    restored_bills += 1
+                    restored_rows += restored
+
     return {
-        "checked": len(db_bs_codes),
+        "checked": len(db_bs_codes | cancelled_bs_codes),
         "cancelled_bills": len(vanished),
         "cancelled_rows": cancelled_rows,
+        "restored_bills": restored_bills,
+        "restored_rows": restored_rows,
         "skipped": False,
     }

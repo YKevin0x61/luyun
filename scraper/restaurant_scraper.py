@@ -137,6 +137,9 @@ class RestaurantScraper:
     async def fetch_settled_bill_raw_dishes(self, bill, begin, end):
         return await self.delivery.fetch_settled_bill_raw_dishes(bill, begin, end)
 
+    async def fetch_delivery_order_lines(self, bill):
+        return await self.delivery.fetch_delivery_order_lines(bill)
+
     async def fetch_settled_bills_for_biz_date(self, biz_date: Optional[str] = None):
         return await self.delivery.fetch_settled_bills_for_biz_date(biz_date)
 
