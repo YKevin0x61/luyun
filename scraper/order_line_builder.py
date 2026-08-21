@@ -24,6 +24,13 @@ FLOW_MODE_COMBO = "combo"
 FLOW_MODE_RECONCILE = "reconcile"
 
 
+def notes_from_method_text(method_text: Any) -> str:
+    """POS methodText → order-line notes. Missing or whitespace-only → empty."""
+    if method_text is None:
+        return ""
+    return str(method_text).strip()
+
+
 def classify_dish(dish_name: str) -> str:
     """Heuristic dish category used at intake (茶水/点心/热菜…)."""
     if not dish_name:

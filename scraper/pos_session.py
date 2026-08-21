@@ -1055,7 +1055,12 @@ class PosSession:
 
     async def _parse_api_order_response(self, data: Dict, table_number: str) -> List[Dict]:
         """解析桌情 API → RawOrderLine → OrderLineBuilder 入库行。"""
-        from scraper.order_line_builder import FLOW_MODE_COMBO, FLOW_MODE_UNIT, RawOrderLine
+        from scraper.order_line_builder import (
+            FLOW_MODE_COMBO,
+            FLOW_MODE_UNIT,
+            RawOrderLine,
+            notes_from_method_text,
+        )
         from scraper.order_source import classify_order_source
 
         try:
@@ -1103,6 +1108,10 @@ class PosSession:
                         order_time_dt = datetime.now(CHINA_TZ)
 
                     if quantity > 0 and dish_name:
+                        parent_overlays = dict(table_overlays)
+                        parent_overlays["notes"] = notes_from_method_text(
+                            item.get("methodText")
+                        )
                         raws.append(
                             RawOrderLine(
                                 bs_code=business_flow_id,
@@ -1112,7 +1121,7 @@ class PosSession:
                                 table_number=table_number,
                                 order_time=order_time_dt,
                                 flow_mode=FLOW_MODE_UNIT,
-                                overlays=dict(table_overlays),
+                                overlays=parent_overlays,
                             )
                         )
                         if quantity > 1:
@@ -1126,6 +1135,10 @@ class PosSession:
                             child_qty = int(float(child.get('lastQty', 0) or 0))
                             if child_qty <= 0 or not child_name:
                                 continue
+                            child_overlays = dict(table_overlays)
+                            child_overlays["notes"] = notes_from_method_text(
+                                child.get("methodText")
+                            )
                             raws.append(
                                 RawOrderLine(
                                     bs_code=business_flow_id,
@@ -1135,7 +1148,7 @@ class PosSession:
                                     table_number=table_number,
                                     order_time=order_time_dt,
                                     flow_mode=FLOW_MODE_COMBO,
-                                    overlays=dict(table_overlays),
+                                    overlays=child_overlays,
                                 )
                             )
                             if child_qty > 1:

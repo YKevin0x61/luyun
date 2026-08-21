@@ -101,6 +101,8 @@ class BuildFixOrdersSourceTest(unittest.IsolatedAsyncioTestCase):
         by_bs = {row["notes"].split("|")[1]: row for row in rows}
         self.assertEqual(by_bs["YY1"]["source"], "dine_in")
         self.assertEqual(by_bs["YY2"]["source"], "delivery")
+        self.assertEqual(by_bs["YY1"]["notes"], "reconcile_fix|YY1")
+        self.assertEqual(by_bs["YY2"]["notes"], "reconcile_fix|YY2")
 
 
 class _StubProgressAdapter:

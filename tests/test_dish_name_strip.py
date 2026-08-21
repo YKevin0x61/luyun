@@ -3,8 +3,11 @@
 """采集入库剥离菜名尾部 "(-)" 后缀，以及对账两侧聚合键一致性的测试。"""
 
 import logging
+import tempfile
 import unittest
 
+from config import settings
+from database import DatabaseManager
 from scraper.delivery_bill_tracker import DeliveryBillTracker
 from scraper.pos_session import PosSession
 from scraper.settled_reconcile import (
@@ -102,6 +105,93 @@ class TableParseStripTest(unittest.IsolatedAsyncioTestCase):
         orders = await adapter._parse_api_order_response(data, "美团12")
         self.assertEqual(orders[0]["source"], "delivery")
 
+    async def test_method_text_writes_notes_on_every_split_row(self):
+        adapter = _StubTableAdapter()
+        data = {
+            "success": True,
+            "data": {
+                "bsCode": "YY01101-260720-0010",
+                "scDetail": [
+                    {
+                        "itemName": "艇仔粥",
+                        "lastQty": 2,
+                        "lastPrice": 18.0,
+                        "orderTime": "12:30",
+                        "methodText": "免葱",
+                    }
+                ],
+            },
+        }
+        orders = await adapter._parse_api_order_response(data, "A1")
+        self.assertEqual(len(orders), 2)
+        self.assertEqual([order["notes"] for order in orders], ["免葱", "免葱"])
+
+    async def test_combo_child_uses_own_method_text_not_parent(self):
+        adapter = _StubTableAdapter()
+        data = {
+            "success": True,
+            "data": {
+                "bsCode": "YY01101-260720-0011",
+                "scDetail": [
+                    {
+                        "itemName": "艇仔粥套餐",
+                        "lastQty": 1,
+                        "lastPrice": 38.0,
+                        "orderTime": "12:30",
+                        "methodText": "套餐头",
+                        "children": [
+                            {"itemName": "艇仔粥", "lastQty": 1, "methodText": "免葱"},
+                            {"itemName": "烧卖", "lastQty": 1},
+                        ],
+                    }
+                ],
+            },
+        }
+        orders = await adapter._parse_api_order_response(data, "A1")
+        by_name = {order["dish_name"]: order for order in orders}
+        self.assertEqual(by_name["艇仔粥套餐"]["notes"], "套餐头")
+        self.assertEqual(by_name["艇仔粥"]["notes"], "免葱")
+        self.assertEqual(by_name["烧卖"]["notes"], "")
+
+    async def test_missing_or_blank_method_text_yields_empty_notes(self):
+        adapter = _StubTableAdapter()
+        data = {
+            "success": True,
+            "data": {
+                "bsCode": "YY01101-260720-0012",
+                "scDetail": [
+                    {"itemName": "虾饺", "lastQty": 1, "lastPrice": 18.0, "orderTime": "12:30"},
+                    {
+                        "itemName": "烧卖",
+                        "lastQty": 1,
+                        "lastPrice": 16.0,
+                        "orderTime": "12:30",
+                        "methodText": "",
+                    },
+                    {
+                        "itemName": "凤爪",
+                        "lastQty": 1,
+                        "lastPrice": 18.0,
+                        "orderTime": "12:30",
+                        "methodText": "   ",
+                    },
+                    {
+                        "itemName": "艇仔粥",
+                        "lastQty": 1,
+                        "lastPrice": 18.0,
+                        "orderTime": "12:30",
+                        "methodText": "  免葱  ",
+                    },
+                ],
+            },
+        }
+        orders = await adapter._parse_api_order_response(data, "A1")
+        by_name = {order["dish_name"]: order for order in orders}
+        self.assertEqual(by_name["虾饺"]["notes"], "")
+        self.assertEqual(by_name["烧卖"]["notes"], "")
+        self.assertEqual(by_name["凤爪"]["notes"], "")
+        self.assertEqual(by_name["艇仔粥"]["notes"], "免葱")
+
 
 class _FakeSession:
     def __init__(self):
@@ -152,6 +242,34 @@ class DeliveryParseStripTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(orders[0]["dish_name"], "美团渠道")
         self.assertEqual(orders[0]["business_flow_id"], "YY01101-260720-0002_美团渠道_001")
         self.assertEqual(orders[0]["source"], "delivery")
+        self.assertEqual(orders[0]["notes"], "")
+        self.assertNotIn("外卖平台:", orders[0]["notes"])
+
+    async def test_delivery_method_text_writes_notes_without_platform_prefix(self):
+        adapter = _StubDeliveryAdapter(
+            [
+                {
+                    "name": "艇仔粥",
+                    "lastQty": 1,
+                    "price": 18.0,
+                    "lastSubtotal": 18.0,
+                    "methodText": "免香菜",
+                }
+            ]
+        )
+        bill = {
+            "orderSource": "美团",
+            "pointName": "美团1",
+            "bsId": "b1",
+            "bsCode": "YY01101-260720-0005",
+            "settleTime": "2026-07-20 12:00:00",
+        }
+        orders = await adapter._get_delivery_bill_dishes(bill)
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["notes"], "免香菜")
+        self.assertNotIn("外卖平台:", orders[0]["notes"])
+        self.assertEqual(orders[0]["source"], "delivery")
+        self.assertEqual(orders[0]["table_number"], "美团1")
 
 
 class ReconcileAggregateStripTest(unittest.TestCase):
@@ -189,6 +307,67 @@ class ReconcileAggregateStripTest(unittest.TestCase):
         self.assertEqual(len(diffs), 1)
         self.assertEqual(diffs[0].dish_name, "纸巾")
         self.assertEqual(diffs[0].missed_qty, 2.0)
+
+
+class SaveOrdersNotesSkipTest(unittest.IsolatedAsyncioTestCase):
+    """Re-saving the same business_flow_id must not rewrite notes (scraper insert path)."""
+
+    async def asyncSetUp(self):
+        self._old = settings.DATABASE_DIR
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect())
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        settings.DATABASE_DIR = self._old
+        self._tmpdir.cleanup()
+
+    async def test_existing_flow_id_does_not_rewrite_notes(self):
+        adapter = _StubTableAdapter()
+        first_payload = {
+            "success": True,
+            "data": {
+                "bsCode": "YY01101-260720-0013",
+                "scDetail": [
+                    {
+                        "itemName": "艇仔粥",
+                        "lastQty": 1,
+                        "lastPrice": 18.0,
+                        "orderTime": "12:30",
+                    }
+                ],
+            },
+        }
+        first_rows = await adapter._parse_api_order_response(first_payload, "A1")
+        self.assertEqual(first_rows[0]["notes"], "")
+        self.assertTrue(await self.db.orders.save_orders(first_rows))
+
+        refetch_payload = {
+            "success": True,
+            "data": {
+                "bsCode": "YY01101-260720-0013",
+                "scDetail": [
+                    {
+                        "itemName": "艇仔粥",
+                        "lastQty": 1,
+                        "lastPrice": 18.0,
+                        "orderTime": "12:30",
+                        "methodText": "免葱",
+                    }
+                ],
+            },
+        }
+        refetch_rows = await adapter._parse_api_order_response(refetch_payload, "A1")
+        self.assertEqual(refetch_rows[0]["notes"], "免葱")
+        self.assertEqual(
+            refetch_rows[0]["business_flow_id"], first_rows[0]["business_flow_id"]
+        )
+        self.assertTrue(await self.db.orders.save_orders(refetch_rows))
+
+        stored = await self.db.orders.get_order_by_id(first_rows[0]["business_flow_id"])
+        self.assertEqual(stored["notes"], "")
 
 
 if __name__ == "__main__":

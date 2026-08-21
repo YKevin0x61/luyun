@@ -411,7 +411,6 @@ class DeliveryBillTracker:
             if not dish_list:
                 return []
 
-            platform = bill.get('orderSource') or bill.get('billSource') or '外卖'
             point_name = bill.get('pointName', '外卖')
             settle_time_str = bill.get('settleTime', '')
             bs_id = bill.get('bsId', '')
@@ -428,7 +427,7 @@ class DeliveryBillTracker:
                     f"bfid='{business_flow_id}'"
                 )
 
-            from scraper.order_line_builder import FLOW_MODE_UNIT, RawOrderLine
+            from scraper.order_line_builder import FLOW_MODE_UNIT, RawOrderLine, notes_from_method_text
 
             builder = getattr(self._session, "order_lines", None)
             if builder is None:
@@ -457,7 +456,7 @@ class DeliveryBillTracker:
                         flow_mode=FLOW_MODE_UNIT,
                         overlays={
                             'status': '已结',
-                            'notes': f"外卖平台:{platform}|来源:{point_name}",
+                            'notes': notes_from_method_text(item.get('methodText')),
                             'change_type': '新增',
                             'source': 'delivery',
                         },
@@ -541,7 +540,10 @@ class DeliveryBillTracker:
                 by_platform: Dict[str, List[Dict]] = {}
                 for order in all_orders:
                     notes = order.get('notes', '')
-                    platform = notes.split('|')[0].replace('外卖平台:', '') if '外卖平台:' in notes else '未知'
+                    if '外卖平台:' in notes:
+                        platform = notes.split('|')[0].replace('外卖平台:', '')
+                    else:
+                        platform = order.get('table_number') or '外卖'
                     if platform not in by_platform:
                         by_platform[platform] = []
                     by_platform[platform].append(order)
