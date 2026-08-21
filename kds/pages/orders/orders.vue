@@ -127,7 +127,10 @@
 
           <view class="order-content">
             <view class="dish-info">
-              <view class="dish-name"><SvgIcon name="utensils" :size="14" color="#333" /><text>{{ order.dish_name }}</text></view>
+              <view class="dish-heading">
+                <view class="dish-name"><SvgIcon name="utensils" :size="14" color="#333" /><text>{{ order.dish_name }}</text></view>
+                <view v-if="canonicalOrderNotes(order.notes)" class="dish-notes">{{ canonicalOrderNotes(order.notes) }}</view>
+              </view>
               <view class="dish-details">
                 <view class="dish-detail"><SvgIcon name="store" :size="12" color="#666" /><text>{{ getStationName(order.station) }}</text></view>
                 <view class="dish-detail"><SvgIcon name="armchair" :size="12" color="#666" /><text>{{ order.table_number }}桌</text></view>
@@ -288,6 +291,7 @@ import { ref, computed, onMounted, reactive } from 'vue'
 import { request } from '../../utils/request.js'
 import { useStationsStore } from '../../stores/stations.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
+import { canonicalOrderNotes } from '../../utils/orderNotes.js'
 
 export default {
   name: 'OrdersPage',
@@ -683,7 +687,8 @@ export default {
       hideOrderDetail,
       refreshData,
       onRefresh,
-      exportData
+      exportData,
+      canonicalOrderNotes
     }
   }
 }
@@ -1028,6 +1033,10 @@ export default {
   margin-bottom: 16upx;
 }
 
+.dish-heading {
+  margin-bottom: 12upx;
+}
+
 .dish-name {
   display: flex;
   align-items: center;
@@ -1035,7 +1044,13 @@ export default {
   font-size: 30upx;
   font-weight: 600;
   color: #1a1a1a;
-  margin-bottom: 12upx;
+}
+
+.dish-notes {
+  font-size: 24upx;
+  font-weight: 600;
+  color: #64748b;
+  margin-top: 4upx;
 }
 
 .dish-details {

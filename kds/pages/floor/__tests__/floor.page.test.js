@@ -804,3 +804,41 @@ describe('楼面控制台 page — phase contrast modifiers', () => {
     expect(steam.find('.line-mark').text()).toBe('✓')
   })
 })
+
+describe('楼面控制台 page — 单桌面 notes on each 份', () => {
+  it('keeps 免葱 and plain 艇仔粥 in one group; notes on the line, never the title', async () => {
+    getFloorConsole.mockResolvedValue({
+      tables: [
+        tableFixture('8', [
+          floorLine({ order_id: 'onion', dish_name: '艇仔粥', notes: '免葱', phase: '待出餐' }),
+          floorLine({ order_id: 'plain', dish_name: '艇仔粥', notes: '', phase: '待出餐' }),
+          floorLine({
+            order_id: 'platform',
+            dish_name: '艇仔粥',
+            notes: '外卖平台:美团|来源:美团1',
+            phase: '待出餐'
+          })
+        ])
+      ]
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+    await openFirstCard(wrapper)
+
+    expect(wrapper.findAll('.dish-group')).toHaveLength(1)
+    const porridge = dishGroup(wrapper, '艇仔粥')
+    expect(porridge).toBeTruthy()
+    expect(porridge.find('.dish-name').text()).toBe('艇仔粥')
+    expect(porridge.find('.dish-name').text()).not.toContain('免葱')
+
+    const rows = porridge.findAll('.line-row')
+    expect(rows).toHaveLength(3)
+    expect(rows.map((row) => {
+      const notes = row.find('.line-notes')
+      return notes.exists() ? notes.text() : ''
+    })).toEqual(['免葱', '', ''])
+    expect(porridge.findAll('.line-notes')).toHaveLength(1)
+    expect(porridge.text()).not.toContain('外卖平台')
+    expect(porridge.findAll('.line-text').every((el) => !el.text().includes('免葱'))).toBe(true)
+  })
+})

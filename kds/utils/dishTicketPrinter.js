@@ -13,6 +13,7 @@ import {
   getPrintAlign,
   getFontSize
 } from './bluetoothPrinter.js'
+import { serveTicketNotesLine } from './orderNotes.js'
 
 function formatTicketTime(time) {
   if (!time) {
@@ -27,13 +28,6 @@ function normalizeTableNumber(tableNumber) {
   }
   const text = String(tableNumber).trim()
   return text.endsWith('桌') ? text : `${text}桌`
-}
-
-function normalizeNotes(notes) {
-  if (notes === null || notes === undefined) {
-    return ''
-  }
-  return String(notes).trim()
 }
 
 /**
@@ -66,7 +60,7 @@ export async function printDishTicket(ticket) {
   const dishName = ticket.dishName || '未知菜品'
   const orderTimeText = formatTicketTime(ticket.orderTime)
   const readyTimeText = formatTicketTime(ticket.readyTime)
-  const notesText = normalizeNotes(ticket.notes)
+  const notesLine = serveTicketNotesLine(ticket.notes)
 
   try {
     printText(tableText, PrintAlign.CENTER, FontSize.EXTRA_LARGE)
@@ -76,9 +70,9 @@ export async function printDishTicket(ticket) {
     printText(`下单: ${orderTimeText}`, PrintAlign.LEFT, FontSize.NORMAL)
     printNewLine(1)
     printText(`出餐: ${readyTimeText}`, PrintAlign.LEFT, FontSize.NORMAL)
-    if (notesText) {
+    if (notesLine) {
       printNewLine(1)
-      printText(`备注: ${notesText}`, PrintAlign.LEFT, FontSize.NORMAL)
+      printText(notesLine, PrintAlign.LEFT, FontSize.NORMAL)
     }
     printNewLine(3)
     cutPaper()

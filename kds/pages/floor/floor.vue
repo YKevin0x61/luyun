@@ -99,7 +99,10 @@
               ]"
               @click="toggleLine(selectedTable.table_number, group.dishName, line.order_id, line)"
             >
-              <text class="line-text">{{ floorLineRowText(line) }}</text>
+              <view class="line-copy">
+                <text class="line-text">{{ floorLineRowText(line) }}</text>
+                <text v-if="floorLineNotes(line)" class="line-notes">{{ floorLineNotes(line) }}</text>
+              </view>
               <text v-if="isSelected(selectedTable.table_number, group.dishName, line.order_id)" class="line-mark">✓</text>
             </view>
             <view class="actions">
@@ -149,6 +152,7 @@ import {
   dropSuccessfulOrderIds,
   FLOOR_JUMP_MISS_TOAST,
   floorConflictsToastTitle,
+  floorLineNotes,
   floorLineRowText,
   isActionable,
   isFloorSplitLayout,
@@ -444,6 +448,7 @@ export default {
       groupHasActionable,
       selectAllInGroup,
       clearGroupSelection,
+      floorLineNotes,
       floorLineRowText,
       isActionable,
       selectedHoldIds,
@@ -680,7 +685,19 @@ export default {
 .line-row--pending { background: #f5f5f5; }
 .line-row--locked { opacity: 0.55; }
 .line-row--selected { outline: 2px solid #1890ff; outline-offset: -2px; }
+.line-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
 .line-text { font-size: 14px; }
+.line-notes {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+}
 .line-mark { font-weight: 700; font-size: 16px; }
 .actions {
   display: flex;

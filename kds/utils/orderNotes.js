@@ -26,3 +26,14 @@ export function canonicalOrderNotes(value) {
 export function dishNotesIdentityKey(dishName, notes) {
   return `${String(dishName || '')}\0${canonicalOrderNotes(notes)}`
 }
+
+/**
+ * Printed 出餐票 notes line. Empty when there is no canonical 备注.
+ * @param {unknown} notes
+ * @returns {string}
+ */
+export function serveTicketNotesLine(notes) {
+  const text = canonicalOrderNotes(notes)
+  if (!text) return ''
+  return `备注: ${text}`
+}

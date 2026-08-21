@@ -3,6 +3,8 @@
  * Vue pages stay as adapters; hold / fire / rush predicates live here.
  */
 
+import { canonicalOrderNotes } from './orderNotes.js'
+
 const HOLD_PHASES = ['待出餐', '待上笼', '在蒸']
 const RUSH_PHASES = ['待出餐', '待上笼']
 const STEAMING_PHASE = '在蒸'
@@ -67,6 +69,10 @@ export function floorLineRowText(line) {
   const rush = line?.is_rushed ? '·加急' : ''
   if (!clock) return `${phase}${rush}`
   return `${phase} ${clock}${rush}`
+}
+
+export function floorLineNotes(line) {
+  return canonicalOrderNotes(line?.notes)
 }
 
 export function floorConflictsToastTitle(conflicts) {

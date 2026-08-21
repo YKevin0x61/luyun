@@ -650,6 +650,44 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(line["dish_status"], "待出餐")
         self.assertTrue(line["is_hold"])
 
+    async def test_list_floor_tables_includes_raw_line_notes(self):
+        now = datetime.now(CHINA_TZ)
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(
+                    business_flow_id="onion",
+                    order_time=now,
+                    station="changfen",
+                    notes="免葱",
+                ),
+                _order(
+                    business_flow_id="plain",
+                    order_time=now,
+                    station="changfen",
+                    notes="",
+                ),
+                _order(
+                    business_flow_id="platform",
+                    order_time=now,
+                    station="changfen",
+                    notes="外卖平台:美团|来源:美团1",
+                ),
+            ]
+        )
+        by_flow = await self._by_flow()
+        data = await list_floor_tables(
+            self.db.orders,
+            start_time=now - timedelta(hours=1),
+            end_time=now + timedelta(hours=1),
+        )
+        lines = {line["order_id"]: line for line in data["tables"][0]["lines"]}
+        self.assertEqual(lines[str(by_flow["onion"]["_id"])]["notes"], "免葱")
+        self.assertEqual(lines[str(by_flow["plain"]["_id"])]["notes"], "")
+        self.assertEqual(
+            lines[str(by_flow["platform"]["_id"])]["notes"],
+            "外卖平台:美团|来源:美团1",
+        )
+
     async def test_load_steamer_rejects_hold(self):
         await self.db.orders.batch_insert_orders([_order()])
         row = (await self._by_flow())["floor-001"]

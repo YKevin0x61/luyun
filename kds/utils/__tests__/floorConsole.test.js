@@ -8,6 +8,7 @@ import {
   defaultSelectedOrderIds,
   dropSuccessfulOrderIds,
   floorConflictsToastTitle,
+  floorLineNotes,
   floorLineRowText,
   groupLinesByDishName,
   isActionable,
@@ -181,6 +182,31 @@ describe('floorConsole grouping', () => {
     expect(groups[1].lines.map((line) => line.order_id)).toEqual(['b'])
     expect(defaultSelectedOrderIds(groups[0].lines)).toEqual(['a', 'c'])
     expect(defaultSelectedOrderIds(groups[1].lines)).toEqual(['b'])
+  })
+
+  it('keeps 免葱 and plain 艇仔粥 in one group; notes stay on each line, not the title', () => {
+    const groups = groupLinesByDishName([
+      { order_id: 'onion', dish_name: '艇仔粥', notes: '免葱', phase: '待出餐' },
+      { order_id: 'plain', dish_name: '艇仔粥', notes: '', phase: '待出餐' }
+    ])
+    expect(groups).toHaveLength(1)
+    expect(groups[0].dishName).toBe('艇仔粥')
+    expect(groups[0].dishName).not.toContain('免葱')
+    expect(groups[0].lines.map((line) => line.order_id)).toEqual(['onion', 'plain'])
+    expect(floorLineNotes(groups[0].lines[0])).toBe('免葱')
+    expect(floorLineNotes(groups[0].lines[1])).toBe('')
+  })
+
+  it('does not treat 外卖平台: notes as visible 备注, and does not stuff notes into the phase row', () => {
+    expect(floorLineNotes({ notes: '外卖平台:美团|来源:美团1' })).toBe('')
+    expect(floorLineNotes({ notes: '  免葱  ' })).toBe('免葱')
+    expect(floorLineNotes({ notes: '' })).toBe('')
+    expect(floorLineNotes({})).toBe('')
+    expect(floorLineRowText({
+      phase: '待出餐',
+      notes: '免葱',
+      order_time: '2026-08-18T08:15:00+08:00'
+    })).toBe('待出餐 08:15')
   })
 })
 

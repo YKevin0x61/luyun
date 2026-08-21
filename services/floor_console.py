@@ -150,6 +150,7 @@ async def list_floor_tables(
                         "order_time": line.get("order_time"),
                         "fired_at": line.get("fired_at"),
                         "work_enter_time": work_enter_time(line),
+                        "notes": line.get("notes") or "",
                     }
                     for line in lines
                     if _floor_visible_line(line)
