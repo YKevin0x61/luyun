@@ -687,3 +687,137 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         open_row = await self.db.orders.get_order_by_id(by_flow["open"]["_id"])
         self.assertIsNone(open_row.get("placement"))
         self.assertFalse(is_hold(open_row))
+
+    async def test_steaming_hold_does_not_cross_notes(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="await_plain", notes=""),
+                _order(business_flow_id="steam_no_onion", notes="免葱"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await _load(self.db.orders, by_flow["steam_no_onion"]["_id"])
+        with self.assertRaises(HTTPException) as raised:
+            await hold_portions(
+                self.db.orders, {"order_ids": [by_flow["steam_no_onion"]["_id"]]}
+            )
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "在蒸且无替补")
+        awaiting = await self.db.orders.get_order_by_id(by_flow["await_plain"]["_id"])
+        steaming = await self.db.orders.get_order_by_id(by_flow["steam_no_onion"]["_id"])
+        self.assertFalse(is_hold(awaiting))
+        self.assertIsNone(awaiting.get("placement"))
+        self.assertFalse(is_hold(steaming))
+        self.assertEqual((steaming.get("placement") or {}).get("steamer_id"), "1")
+
+    async def test_steaming_hold_swaps_same_notes_awaiting(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="await_no_onion", notes="免葱"),
+                _order(business_flow_id="await_plain", notes=""),
+                _order(business_flow_id="steam_no_onion", notes="免葱"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await _load(self.db.orders, by_flow["steam_no_onion"]["_id"])
+        result = await hold_portions(
+            self.db.orders, {"order_ids": [by_flow["steam_no_onion"]["_id"]]}
+        )
+        self.assertEqual(
+            result["substituted"],
+            [
+                {
+                    "held_id": str(by_flow["steam_no_onion"]["_id"]),
+                    "substitute_id": str(by_flow["await_no_onion"]["_id"]),
+                }
+            ],
+        )
+        held = await self.db.orders.get_order_by_id(by_flow["steam_no_onion"]["_id"])
+        sub = await self.db.orders.get_order_by_id(by_flow["await_no_onion"]["_id"])
+        plain = await self.db.orders.get_order_by_id(by_flow["await_plain"]["_id"])
+        self.assertTrue(is_hold(held))
+        self.assertIsNone(held.get("placement"))
+        self.assertFalse(is_hold(sub))
+        self.assertEqual((sub.get("placement") or {}).get("steamer_id"), "1")
+        self.assertFalse(is_hold(plain))
+        self.assertIsNone(plain.get("placement"))
+
+    async def test_hold_mixed_notes_conflicts_only_steaming_without_sub(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="unloaded_plain", notes=""),
+                _order(business_flow_id="await_plain", notes=""),
+                _order(business_flow_id="steam_plain", notes=""),
+                _order(business_flow_id="steam_no_onion", notes="免葱"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await _load(self.db.orders, by_flow["steam_plain"]["_id"], steamer_id="1", port_index=3)
+        await _load(
+            self.db.orders, by_flow["steam_no_onion"]["_id"], steamer_id="2", port_index=1
+        )
+        result = await hold_portions(
+            self.db.orders,
+            {
+                "order_ids": [
+                    by_flow["unloaded_plain"]["_id"],
+                    by_flow["steam_no_onion"]["_id"],
+                    by_flow["steam_plain"]["_id"],
+                ]
+            },
+        )
+        self.assertEqual(result["updated_count"], 2)
+        self.assertEqual(
+            result["conflicts"],
+            [
+                {
+                    "order_id": str(by_flow["steam_no_onion"]["_id"]),
+                    "reason": "在蒸且无替补",
+                }
+            ],
+        )
+        unloaded = await self.db.orders.get_order_by_id(by_flow["unloaded_plain"]["_id"])
+        plain_steam = await self.db.orders.get_order_by_id(by_flow["steam_plain"]["_id"])
+        sub = await self.db.orders.get_order_by_id(by_flow["await_plain"]["_id"])
+        no_onion = await self.db.orders.get_order_by_id(by_flow["steam_no_onion"]["_id"])
+        self.assertTrue(is_hold(unloaded))
+        self.assertTrue(is_hold(plain_steam))
+        self.assertIsNone(plain_steam.get("placement"))
+        self.assertFalse(is_hold(sub))
+        self.assertEqual((sub.get("placement") or {}).get("steamer_id"), "1")
+        self.assertFalse(is_hold(no_onion))
+        self.assertEqual((no_onion.get("placement") or {}).get("steamer_id"), "2")
+
+    async def test_steaming_hold_treats_platform_prefix_as_empty_notes(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(
+                    business_flow_id="await_platform",
+                    notes="外卖平台:美团|来源:美团1",
+                ),
+                _order(business_flow_id="await_no_onion", notes="免葱"),
+                _order(business_flow_id="steam_plain", notes=""),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await _load(self.db.orders, by_flow["steam_plain"]["_id"])
+        result = await hold_portions(
+            self.db.orders, {"order_ids": [by_flow["steam_plain"]["_id"]]}
+        )
+        self.assertEqual(
+            result["substituted"],
+            [
+                {
+                    "held_id": str(by_flow["steam_plain"]["_id"]),
+                    "substitute_id": str(by_flow["await_platform"]["_id"]),
+                }
+            ],
+        )
+        held = await self.db.orders.get_order_by_id(by_flow["steam_plain"]["_id"])
+        sub = await self.db.orders.get_order_by_id(by_flow["await_platform"]["_id"])
+        no_onion = await self.db.orders.get_order_by_id(by_flow["await_no_onion"]["_id"])
+        self.assertTrue(is_hold(held))
+        self.assertFalse(is_hold(sub))
+        self.assertEqual((sub.get("placement") or {}).get("steamer_id"), "1")
+        self.assertFalse(is_hold(no_onion))
+        self.assertIsNone(no_onion.get("placement"))

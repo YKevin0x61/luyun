@@ -87,7 +87,14 @@ class DetectDishChangesIntegrationTest(unittest.TestCase):
         self.assertTrue(all(flow_id not in {o["business_flow_id"] for o in current_orders} for flow_id in new_ids))
 
 
-def _pos_line(flow_id: str, *, qty: int = 1, dish: str = "虾饺", price: float = 12.0):
+def _pos_line(
+    flow_id: str,
+    *,
+    qty: int = 1,
+    dish: str = "虾饺",
+    price: float = 12.0,
+    notes: str = "",
+):
     return {
         "business_flow_id": flow_id,
         "table_number": "8",
@@ -99,6 +106,7 @@ def _pos_line(flow_id: str, *, qty: int = 1, dish: str = "虾饺", price: float 
         "order_time": datetime(2026, 8, 18, 10, 0, tzinfo=CHINA_TZ),
         "source": "dine_in",
         "station": "shulong",
+        "notes": notes,
     }
 
 
@@ -184,6 +192,97 @@ class DetectDishChangesDineInCancelTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(changed, [])
         self.assertEqual(await self.db.orders.get_orders(limit=-1), [])
+
+    async def test_qty_down_no_onion_does_not_cancel_unnoted(self):
+        plain = _pos_line("t8_虾饺_plain", notes="")
+        no_onion = _pos_line("t8_虾饺_no_onion", notes="免葱")
+        await self.db.orders.batch_insert_orders([plain, no_onion])
+        self.state.previous_table_orders["8"] = [plain, no_onion]
+
+        changed, _snapshot = await self.detector._detect_dish_changes(
+            "8",
+            [plain],
+            24.0,
+            12.0,
+            orders=self.db.orders,
+        )
+        self.assertEqual(changed, [])
+        cancelled = await self.db.orders.get_order_by_id("t8_虾饺_no_onion")
+        kept = await self.db.orders.get_order_by_id("t8_虾饺_plain")
+        self.assertEqual(cancelled["dish_status"], "已取消")
+        self.assertEqual(cancelled["quantity"], 0)
+        self.assertEqual(kept["dish_status"], "待出餐")
+        self.assertEqual(kept["quantity"], 1)
+
+    async def test_qty_up_no_onion_does_not_increase_unnoted(self):
+        plain = _pos_line("t8_虾饺_plain", notes="")
+        no_onion = _pos_line("t8_虾饺_no_onion", notes="免葱")
+        await self.db.orders.batch_insert_orders([plain, no_onion])
+        self.state.previous_table_orders["8"] = [plain, no_onion]
+        extra = _pos_line("t8_虾饺_pos_extra", notes="免葱")
+
+        changed, _snapshot = await self.detector._detect_dish_changes(
+            "8",
+            [plain, no_onion, extra],
+            24.0,
+            36.0,
+            orders=self.db.orders,
+        )
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(changed[0]["notes"], "免葱")
+        self.assertEqual(changed[0]["quantity"], 1)
+        self.assertNotIn("_refund_", changed[0]["business_flow_id"])
+        plain_row = await self.db.orders.get_order_by_id("t8_虾饺_plain")
+        no_onion_row = await self.db.orders.get_order_by_id("t8_虾饺_no_onion")
+        self.assertEqual(plain_row["dish_status"], "待出餐")
+        self.assertEqual(plain_row["quantity"], 1)
+        self.assertEqual(no_onion_row["dish_status"], "待出餐")
+        self.assertEqual(no_onion_row["quantity"], 1)
+
+    async def test_platform_prefix_qty_up_restores_empty_notes_row(self):
+        original = _pos_line("t8_虾饺_001", notes="")
+        no_onion = _pos_line("t8_虾饺_no_onion", notes="免葱")
+        await self.db.orders.batch_insert_orders([original, no_onion])
+        await self.db.orders.cancel_dine_in_portions("8", "虾饺", 1)
+        self.state.previous_table_orders["8"] = [no_onion]
+        current = [
+            no_onion,
+            _pos_line("t8_虾饺_pos", notes="外卖平台:美团|来源:美团1"),
+        ]
+
+        changed, _snapshot = await self.detector._detect_dish_changes(
+            "8",
+            current,
+            12.0,
+            24.0,
+            orders=self.db.orders,
+        )
+        restored = await self.db.orders.get_order_by_id("t8_虾饺_001")
+        live_no_onion = await self.db.orders.get_order_by_id("t8_虾饺_no_onion")
+        self.assertEqual(restored["dish_status"], "待出餐")
+        self.assertEqual(restored["quantity"], 1)
+        self.assertEqual(live_no_onion["dish_status"], "待出餐")
+        self.assertEqual(live_no_onion["quantity"], 1)
+        self.assertEqual(len(changed), 0)
+
+    async def test_qty_down_empty_identity_cancels_platform_prefix_not_no_onion(self):
+        platform = _pos_line("t8_虾饺_platform", notes="外卖平台:美团|来源:美团1")
+        no_onion = _pos_line("t8_虾饺_no_onion", notes="免葱")
+        await self.db.orders.batch_insert_orders([platform, no_onion])
+        self.state.previous_table_orders["8"] = [platform, no_onion]
+
+        changed, _snapshot = await self.detector._detect_dish_changes(
+            "8",
+            [no_onion],
+            24.0,
+            12.0,
+            orders=self.db.orders,
+        )
+        self.assertEqual(changed, [])
+        cancelled = await self.db.orders.get_order_by_id("t8_虾饺_platform")
+        kept = await self.db.orders.get_order_by_id("t8_虾饺_no_onion")
+        self.assertEqual(cancelled["dish_status"], "已取消")
+        self.assertEqual(kept["dish_status"], "待出餐")
 
 
 if __name__ == "__main__":

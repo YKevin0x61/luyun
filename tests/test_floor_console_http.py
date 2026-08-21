@@ -289,6 +289,66 @@ def test_hold_steaming_without_substitute_partial_200(orders_client):
     assert steaming.get("table_number") == "8"
 
 
+def test_hold_steaming_does_not_cross_notes(orders_client):
+    client, db, admin_headers = orders_client
+    _run_async(
+        db.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "await_plain",
+                    "table_number": "8",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": datetime.now(CHINA_TZ),
+                    "station": "shulong",
+                    "status": "未结",
+                    "source": "dine_in",
+                    "notes": "",
+                },
+                {
+                    "business_flow_id": "steam_no_onion",
+                    "table_number": "8",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": datetime.now(CHINA_TZ),
+                    "station": "shulong",
+                    "status": "未结",
+                    "source": "dine_in",
+                    "notes": "免葱",
+                },
+            ]
+        )
+    )
+    by_flow = {row["business_flow_id"]: row for row in _run_async(db.get_orders(limit=-1))}
+    load = client.post(
+        "/api/orders/load-steamer",
+        json={
+            "order_ids": [by_flow["steam_no_onion"]["_id"]],
+            "steamer_id": "1",
+            "port_index": 3,
+            "loaded_at": "2026-08-18T10:05:00+08:00",
+        },
+        headers=admin_headers,
+    )
+    assert load.status_code == 200
+    resp = client.post(
+        "/api/orders/hold",
+        json={"order_ids": [by_flow["steam_no_onion"]["_id"]]},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["detail"]["conflicts"] == [
+        {"order_id": str(by_flow["steam_no_onion"]["_id"]), "reason": "在蒸且无替补"}
+    ]
+    awaiting = _run_async(db.get_order_by_id(by_flow["await_plain"]["_id"]))
+    steaming = _run_async(db.get_order_by_id(by_flow["steam_no_onion"]["_id"]))
+    assert not awaiting.get("is_hold")
+    assert awaiting.get("placement") is None
+    assert not steaming.get("is_hold")
+    assert steaming.get("placement") is not None
+
+
 def test_hold_partial_conflicts_returns_200(orders_client):
     client, db, admin_headers = orders_client
     _run_async(

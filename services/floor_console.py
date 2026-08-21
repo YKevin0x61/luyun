@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from fastapi import HTTPException
 
+from db_core.order_notes import canonical_order_notes
 from db_core.ports import OrdersPort
 from services.kds_orders import derive_steamer_phase
 from services.kitchen_work import (
@@ -167,12 +168,15 @@ def _pick_substitute(
 ) -> Optional[Dict]:
     dish = target.get("dish_name") or ""
     table = target.get("table_number") or ""
+    notes = canonical_order_notes(target.get("notes"))
     candidates = []
     for row in pool:
         oid = line_id(row)
         if not oid or oid in taken_ids:
             continue
         if (row.get("dish_name") or "") != dish:
+            continue
+        if canonical_order_notes(row.get("notes")) != notes:
             continue
         if not is_dine_in(row):
             continue

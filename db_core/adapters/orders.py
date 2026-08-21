@@ -134,17 +134,21 @@ class OrdersPortAdapter:
         return await self._db.revert_delivery_cancelled(orders)
 
     async def cancel_dine_in_portions(
-        self, table_number: str, dish_name: str, portions: int
+        self, table_number: str, dish_name: str, portions: int, notes: str = ""
     ) -> int:
         return await self._db.cancel_dine_in_portions(
-            table_number, dish_name, portions
+            table_number, dish_name, portions, notes=notes
         )
 
     async def restore_dine_in_cancelled(
-        self, table_number: str, dish_name: str, order: Optional[Dict] = None
+        self,
+        table_number: str,
+        dish_name: str,
+        order: Optional[Dict] = None,
+        notes: Optional[str] = None,
     ) -> Optional[Dict]:
         return await self._db.restore_dine_in_cancelled(
-            table_number, dish_name, order
+            table_number, dish_name, order, notes=notes
         )
 
     async def get_delivery_flow_ids(

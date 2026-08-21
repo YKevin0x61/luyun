@@ -3,11 +3,21 @@
 """Table change detection: amount/dish diffs and flow_id allocation."""
 
 import logging
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
+from db_core.order_notes import canonical_order_notes
 from scraper._common import CHINA_TZ
 from scraper.order_flow_ids import allocate_incremental_flow_ids
+
+
+def _dine_in_dish_key(order: Dict[str, Any]) -> Tuple[Any, Any, str]:
+    """Dish name + unit price + canonical notes; blank notes are a distinct identity."""
+    return (
+        order.get("dish_name", ""),
+        order.get("price", 0.0),
+        canonical_order_notes(order.get("notes")),
+    )
 
 
 class TableChangeDetector:
@@ -177,13 +187,13 @@ class TableChangeDetector:
 
         current_dish_counts = {}
         for order in current_orders:
-            dish_key = f"{order.get('dish_name', '')}|{order.get('price', 0.0)}"
+            dish_key = _dine_in_dish_key(order)
             current_dish_counts[dish_key] = current_dish_counts.get(dish_key, 0) + order.get('quantity', 0)
 
         previous_dish_counts = {}
         previous_orders_map = {}
         for order in previous_orders:
-            dish_key = f"{order.get('dish_name', '')}|{order.get('price', 0.0)}"
+            dish_key = _dine_in_dish_key(order)
             previous_dish_counts[dish_key] = previous_dish_counts.get(dish_key, 0) + order.get('quantity', 0)
             if dish_key not in previous_orders_map:
                 previous_orders_map[dish_key] = order
@@ -193,15 +203,13 @@ class TableChangeDetector:
         for dish_key in all_dish_keys:
             current_qty = current_dish_counts.get(dish_key, 0)
             previous_qty = previous_dish_counts.get(dish_key, 0)
-
-            dish_name, price_str = dish_key.split('|')
-            price = float(price_str)
+            dish_name, price, notes = dish_key
 
             if current_qty > previous_qty:
                 added_quantity = current_qty - previous_qty
                 template_order = None
                 for order in current_orders:
-                    if order.get('dish_name') == dish_name and order.get('price') == price:
+                    if _dine_in_dish_key(order) == dish_key:
                         template_order = order
                         break
                 if template_order is None:
@@ -214,6 +222,7 @@ class TableChangeDetector:
                         "price": price,
                         "total_amount": price,
                         "status": template_order.get("status") or "未结",
+                        "notes": notes,
                     }
                     for _ in range(added_quantity):
                         restored_row = await orders.restore_dine_in_cancelled(
@@ -245,7 +254,7 @@ class TableChangeDetector:
                 reduced_quantity = previous_qty - current_qty
                 if orders is not None:
                     affected = await orders.cancel_dine_in_portions(
-                        table_number, dish_name, reduced_quantity
+                        table_number, dish_name, reduced_quantity, notes=notes
                     )
                     self.last_dine_in_port_updates += affected
                 else:

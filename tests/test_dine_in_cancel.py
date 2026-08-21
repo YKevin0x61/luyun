@@ -381,3 +381,81 @@ class DineInCancelTargetTests(unittest.IsolatedAsyncioTestCase):
         after_pluck = await self.db.orders.get_order_by_id(hold["_id"])
         self.assertEqual(after_pluck["dish_status"], "已取消")
         self.assertIsNone(after_pluck.get("placement"))
+
+    async def test_cancel_one_no_onion_leaves_unnoted_same_dish(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _dine_in_order("t8_虾饺_plain", notes=""),
+                _dine_in_order("t8_虾饺_no_onion", notes="免葱"),
+            ]
+        )
+        affected = await self.db.orders.cancel_dine_in_portions(
+            "8", "虾饺", 1, notes="免葱"
+        )
+        self.assertEqual(affected, 1)
+        by_flow = await _by_flow(self.db)
+        self.assertEqual(by_flow["t8_虾饺_no_onion"]["dish_status"], "已取消")
+        self.assertEqual(by_flow["t8_虾饺_no_onion"]["quantity"], 0)
+        self.assertEqual(by_flow["t8_虾饺_plain"]["dish_status"], "待出餐")
+        self.assertEqual(by_flow["t8_虾饺_plain"]["quantity"], 1)
+
+    async def test_restore_same_notes_skips_later_other_notes_cancel(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _dine_in_order("t8_虾饺_no_onion", notes="免葱", seq_time_hour=10),
+                _dine_in_order("t8_虾饺_plain", notes="", seq_time_hour=11),
+            ]
+        )
+        await self.db.orders.cancel_dine_in_portions("8", "虾饺", 1, notes="免葱")
+        await self.db.orders.cancel_dine_in_portions("8", "虾饺", 1, notes="")
+        restored = await self.db.orders.restore_dine_in_cancelled(
+            "8",
+            "虾饺",
+            {
+                "quantity": 1,
+                "price": 12.0,
+                "total_amount": 12.0,
+                "status": "未结",
+                "notes": "免葱",
+            },
+        )
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored["business_flow_id"], "t8_虾饺_no_onion")
+        self.assertEqual(restored["dish_status"], "待出餐")
+        still_cancelled = await self.db.orders.get_order_by_id("t8_虾饺_plain")
+        self.assertEqual(still_cancelled["dish_status"], "已取消")
+
+    async def test_platform_prefix_notes_identity_equals_empty_on_cancel_and_restore(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _dine_in_order(
+                    "t8_虾饺_platform",
+                    notes="外卖平台:美团|来源:美团1",
+                    seq_time_hour=10,
+                ),
+                _dine_in_order("t8_虾饺_no_onion", notes="免葱", seq_time_hour=11),
+            ]
+        )
+        affected = await self.db.orders.cancel_dine_in_portions(
+            "8", "虾饺", 1, notes="外卖平台:饿了么"
+        )
+        self.assertEqual(affected, 1)
+        by_flow = await _by_flow(self.db)
+        self.assertEqual(by_flow["t8_虾饺_platform"]["dish_status"], "已取消")
+        self.assertEqual(by_flow["t8_虾饺_no_onion"]["dish_status"], "待出餐")
+        restored = await self.db.orders.restore_dine_in_cancelled(
+            "8",
+            "虾饺",
+            {
+                "quantity": 1,
+                "price": 12.0,
+                "total_amount": 12.0,
+                "status": "未结",
+                "notes": "",
+            },
+        )
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored["business_flow_id"], "t8_虾饺_platform")
+        self.assertEqual(restored["dish_status"], "待出餐")
+        still_live = await self.db.orders.get_order_by_id("t8_虾饺_no_onion")
+        self.assertEqual(still_live["dish_status"], "待出餐")

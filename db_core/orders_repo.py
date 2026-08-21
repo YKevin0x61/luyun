@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Set, Tuple
 
+from db_core.order_notes import canonical_order_notes
 from db_core.utils import (
     CHINA_TZ,
     ORDER_DEDUP_BATCH_SIZE,
@@ -85,7 +86,7 @@ class _OrdersRepoMixin:
                        order_time, station, priority, price, category, status,
                        dish_status, ready_time, steamer_id, port_index,
                        stack_order, loaded_at, source, is_hold, is_rushed,
-                       fired_at, updated_at
+                       fired_at, notes, updated_at
                 FROM orders WHERE {where} ORDER BY order_time DESC
             """
             if limit > 0:
@@ -415,9 +416,9 @@ class _OrdersRepoMixin:
             return 0
 
     async def cancel_dine_in_portions(
-        self, table_number: str, dish_name: str, portions: int
+        self, table_number: str, dish_name: str, portions: int, notes: str = ""
     ) -> int:
-        """Mark N dine-in 退菜对象 as cancelled by 桌号+菜名.
+        """Mark N dine-in 退菜对象 as cancelled by 桌号+菜名+归一备注.
 
         Selection: 未做 (待出餐, not loaded) → 在蒸 → 已出餐. Same bucket uses
         earlier 下单时间. Soft-cancel fields match delivery: 已取消 / 退菜 /
@@ -425,11 +426,12 @@ class _OrdersRepoMixin:
         """
         if not table_number or not dish_name or portions <= 0:
             return 0
+        wanted_notes = canonical_order_notes(notes)
         try:
             tdb = self.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
-                    """SELECT id FROM orders
+                    """SELECT id, notes FROM orders
                        WHERE table_number = ?
                          AND dish_name = ?
                          AND IFNULL(source, '') != 'delivery'
@@ -447,11 +449,16 @@ class _OrdersRepoMixin:
                            ELSE 2
                          END,
                          order_time ASC,
-                         id ASC
-                       LIMIT ?""",
-                    (table_number, dish_name, int(portions)),
+                         id ASC""",
+                    (table_number, dish_name),
                 )
-                target_ids = [row[0] for row in await cursor.fetchall()]
+                target_ids = []
+                for row in await cursor.fetchall():
+                    if canonical_order_notes(row["notes"]) != wanted_notes:
+                        continue
+                    target_ids.append(row["id"])
+                    if len(target_ids) >= int(portions):
+                        break
                 affected = 0
                 for row_id in target_ids:
                     now = datetime.now(CHINA_TZ).isoformat()
@@ -479,16 +486,24 @@ class _OrdersRepoMixin:
             return 0
 
     async def restore_dine_in_cancelled(
-        self, table_number: str, dish_name: str, order: Optional[Dict] = None
+        self,
+        table_number: str,
+        dish_name: str,
+        order: Optional[Dict] = None,
+        notes: Optional[str] = None,
     ) -> Optional[Dict]:
         """Restore the most recently cancelled original dine-in 订单行.
 
-        After restore dish_status is 待出餐. Placement is kept: still on a hole
-        → 在蒸; no placement → 未做. Does not insert a new row.
+        Match 桌号+菜名+归一备注. After restore dish_status is 待出餐.
+        Placement is kept: still on a hole → 在蒸; no placement → 未做.
+        Does not insert a new row.
         """
         if not table_number or not dish_name:
             return None
         fields = order or {}
+        if notes is None:
+            notes = fields.get("notes")
+        wanted_notes = canonical_order_notes(notes)
         quantity = int(fields.get("quantity") or 1)
         if quantity <= 0:
             quantity = 1
@@ -502,21 +517,24 @@ class _OrdersRepoMixin:
             tdb = self.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
-                    """SELECT id FROM orders
+                    """SELECT id, notes FROM orders
                        WHERE table_number = ?
                          AND dish_name = ?
                          AND status = '退菜'
                          AND dish_status = '已取消'
                          AND IFNULL(source, '') != 'delivery'
                          AND IFNULL(business_flow_id, '') NOT LIKE '%_refund_%'
-                       ORDER BY updated_at DESC, id DESC
-                       LIMIT 1""",
+                       ORDER BY updated_at DESC, id DESC""",
                     (table_number, dish_name),
                 )
-                row = await cursor.fetchone()
-                if not row:
+                row_id = None
+                for row in await cursor.fetchall():
+                    if canonical_order_notes(row["notes"]) != wanted_notes:
+                        continue
+                    row_id = row["id"]
+                    break
+                if row_id is None:
                     return None
-                row_id = row[0]
                 await cursor.execute(
                     """UPDATE orders
                        SET status = ?, quantity = ?, price = ?, total_amount = ?,
