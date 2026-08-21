@@ -25,7 +25,10 @@
                   @click="advanceGroup(group)"
                 >
                   <text class="group-qty">{{ groupQtyLabel(group) }}</text>
-                  <text class="group-name">{{ group.dishName }}</text>
+                  <view class="group-title">
+                    <text class="group-name">{{ group.dishName }}</text>
+                    <text v-if="groupNotesLine(group)" class="group-notes">{{ groupNotesLine(group) }}</text>
+                  </view>
                   <view
                     class="group-detail-btn"
                     :class="{ open: isGroupDetailOpen(group) }"
@@ -41,6 +44,10 @@
                     class="awaiting-chip notice"
                   >
                     <text class="notice-mark">退示</text>
+                    <view class="notice-title">
+                      <text class="notice-dish">{{ group.dishName }}</text>
+                      <text v-if="cageNotesLine(cage)" class="notice-notes">{{ cageNotesLine(cage) }}</text>
+                    </view>
                   </view>
                 </view>
               </view>
@@ -99,6 +106,7 @@
                       <text v-if="cageCard(slot.cage).rushMark" class="rush-mark">催</text>
                       <text v-if="cageCard(slot.cage).holdMark" class="hold-mark">退</text>
                     </view>
+                    <text v-if="cageCard(slot.cage).notesLine" class="cage-notes">{{ cageCard(slot.cage).notesLine }}</text>
                     <view class="cage-meta">
                       <text class="cage-table-line">{{ cageCard(slot.cage).tableLines.join(' ') }}</text>
                       <text class="cage-steam-time">{{ cageCard(slot.cage).timeLabel }}</text>
@@ -155,6 +163,7 @@ import { computed, ref, watch } from 'vue'
 import { orderLineId } from '../../utils/batchCooking.js'
 import { hasMarkedOrderLine, orderLineIsMarked } from '../../utils/serveConfirm.js'
 import { dishSplitKnobsChanged } from '../../utils/dishCardChunks.js'
+import { canonicalOrderNotes } from '../../utils/orderNotes.js'
 import {
   SHULONG_STEAMER_LAYOUT,
   deriveSteamerPhase,
@@ -343,6 +352,8 @@ export default {
     }
 
     const cageCard = (cage) => formatSteamerCageCard(cage, clock())
+    const groupNotesLine = (group) => canonicalOrderNotes(group?.notes)
+    const cageNotesLine = (cage) => canonicalOrderNotes(cage?.notes)
 
     const isNewCage = (cage) => {
       if (typeof props.isNewCage !== 'function') return false
@@ -543,6 +554,8 @@ export default {
       holeUrgencyClass,
       cageId,
       cageCard,
+      groupNotesLine,
+      cageNotesLine,
       isCancelHold,
       isHoleCageSelected,
       advanceGroup,
@@ -672,12 +685,29 @@ export default {
   box-shadow: 0 0 0 2px rgba(255, 77, 79, 0.55);
 }
 
-.group-name {
+.group-title {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.group-name {
   min-width: 0;
   font-size: 15px;
   font-weight: 800;
   color: #2c3e50;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-notes {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -774,11 +804,35 @@ export default {
   background: #f5f5f5;
   display: flex;
   align-items: center;
+  gap: 6px;
   box-sizing: border-box;
 }
 
 .awaiting-chip.notice .notice-mark {
   color: #8c8c8c;
+}
+
+.notice-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.notice-dish,
+.notice-notes {
+  font-size: 12px;
+  font-weight: 700;
+  color: #2c3e50;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notice-notes {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
 }
 
 .notice-mark,
@@ -975,6 +1029,19 @@ export default {
   font-size: 12px;
   font-weight: 800;
   line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cage-notes {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.15;
+  color: #64748b;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

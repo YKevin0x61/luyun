@@ -174,4 +174,51 @@ describe('composeKitchenDishCardsWithNotices', () => {
     expect(plan[0].orders.map((row) => row.id)).toEqual(['a'])
     expect(plan[0].allocations.every((item) => item.order.dish_status !== '已取消')).toBe(true)
   })
+
+  it('pins 退示 onto the matching 菜名+备注 card, not another remark of the same dish', () => {
+    const { cards } = composeKitchenDishCardsWithNotices({
+      logicalDishes: [
+        {
+          dishName: '艇仔粥',
+          notes: '',
+          station: 'changfen',
+          orders: [pending({ id: 'p1', dish_name: '艇仔粥', notes: '' })]
+        },
+        {
+          dishName: '艇仔粥',
+          notes: '免葱',
+          station: 'changfen',
+          orders: [pending({ id: 'o1', dish_name: '艇仔粥', notes: '免葱' })]
+        }
+      ],
+      noticeOrders: [
+        notice({ id: 'n1', dish_name: '艇仔粥', notes: '免葱' })
+      ],
+      cap: 0
+    })
+    const onion = cards.find((card) => card.notes === '免葱')
+    const plain = cards.find((card) => card.notes === '')
+    expect(onion.noticeOrders.map((row) => row.id)).toEqual(['n1'])
+    expect(plain.noticeOrders).toEqual([])
+    expect(onion.dishName).toBe('艇仔粥')
+    expect(onion.notes).toBe('免葱')
+  })
+
+  it('keeps a notice-only 外卖平台: 退示 on the empty-notes card, not a platform card', () => {
+    const { cards } = composeKitchenDishCardsWithNotices({
+      logicalDishes: [],
+      noticeOrders: [
+        notice({
+          id: 'n1',
+          dish_name: '艇仔粥',
+          notes: '外卖平台:美团|来源:美团1'
+        })
+      ],
+      cap: 0
+    })
+    expect(cards).toHaveLength(1)
+    expect(cards[0].dishName).toBe('艇仔粥')
+    expect(cards[0].notes).toBe('')
+    expect(cards[0].noticeOrders.map((row) => row.id)).toEqual(['n1'])
+  })
 })

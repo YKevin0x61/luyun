@@ -274,30 +274,62 @@ describe('planBatchCookingCalls', () => {
     ).toEqual([])
   })
 
-  it('N=0-style chunk ids (dish name) still take earliest orders in that card', () => {
-    const o1 = makeOrder({ id: '1', order_time: '2026-07-23T01:00:00.000Z', table_number: '1' })
-    const o2 = makeOrder({ id: '2', order_time: '2026-07-23T02:00:00.000Z', table_number: '2' })
-    const o3 = makeOrder({ id: '3', order_time: '2026-07-23T03:00:00.000Z', table_number: '3' })
+  it('does not let two same-name different-notes cards steal each other’s 份', () => {
+    const onion = makeOrder({
+      id: 'o1',
+      dish_name: '艇仔粥',
+      notes: '免葱',
+      quantity: 2,
+      order_time: '2026-07-23T01:00:00.000Z',
+      table_number: '1'
+    })
+    const plain = makeOrder({
+      id: 'p1',
+      dish_name: '艇仔粥',
+      notes: '',
+      quantity: 2,
+      order_time: '2026-07-23T01:01:00.000Z',
+      table_number: '2'
+    })
 
     const plan = planBatchCookingCalls({
-      selectedQuantities: { 虾饺: 2 },
-      pendingOrders: [o3, o1, o2],
+      selectedQuantities: { 'onion-card': 1, 'plain-card': 1 },
+      pendingOrders: [onion, plain],
       chunkOrders: {
-        虾饺: { dishName: '虾饺', orders: [o3, o1, o2] }
+        'onion-card': { dishName: '艇仔粥', notes: '免葱', orders: [onion] },
+        'plain-card': { dishName: '艇仔粥', notes: '', orders: [plain] }
       }
     })
 
-    expect(plan).toEqual([
-      {
-        dishName: '虾饺',
-        completeQuantity: 2,
-        orders: [o1, o2],
-        allocations: [
-          { order: o1, serveQuantity: 1 },
-          { order: o2, serveQuantity: 1 }
-        ]
-      }
-    ])
+    expect(plan).toHaveLength(2)
+    expect(plan[0].orders).toEqual([onion])
+    expect(plan[1].orders).toEqual([plain])
+    expect(plan[0].allocations).toEqual([{ order: onion, serveQuantity: 1 }])
+    expect(plan[1].allocations).toEqual([{ order: plain, serveQuantity: 1 }])
+  })
+
+  it('does not treat notes containing 催 as 加急 when is_rushed is false', () => {
+    const early = makeOrder({
+      id: 'a',
+      notes: '催一下',
+      is_rushed: false,
+      order_time: '2026-07-23T01:00:00.000Z',
+      table_number: '1'
+    })
+    const later = makeOrder({
+      id: 'b',
+      notes: '催一下',
+      is_rushed: false,
+      order_time: '2026-07-23T02:00:00.000Z',
+      table_number: '2'
+    })
+
+    const plan = planBatchCookingCalls({
+      selectedQuantities: { 虾饺: 1 },
+      pendingOrders: [later, early]
+    })
+    expect(plan[0].orders).toEqual([early])
+    expect(servePreviewOrderIds([later, early], 1)).toEqual(['a'])
   })
 })
 

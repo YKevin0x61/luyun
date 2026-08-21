@@ -1,4 +1,5 @@
 import { workEnterTimeMs } from './pendingKitchenWork.js'
+import { canonicalOrderNotes, dishNotesIdentityKey } from './orderNotes.js'
 
 function availableQuantity(order) {
   const quantity = order?.quantity || 1
@@ -27,7 +28,7 @@ function oldestTimestamp(orders) {
   return times.length > 0 ? Math.min(...times) : 0
 }
 
-function hydrateChunk(dishName, chunkId, members, byId) {
+function hydrateChunk(dishName, chunkId, members, byId, notes) {
   const merged = []
   for (const member of members) {
     if (!member || member.quantity <= 0) continue
@@ -54,6 +55,7 @@ function hydrateChunk(dishName, chunkId, members, byId) {
   return {
     chunkId,
     dishName,
+    notes: canonicalOrderNotes(notes),
     orders,
     totalQuantity,
     oldestTimestamp: oldestTimestamp(orders)
@@ -136,14 +138,16 @@ function partitionWaves(fifo, gapMinutes) {
 /**
  * @param {object} params
  * @param {string} params.dishName
+ * @param {string} [params.notes]
  * @param {object[]} params.pendingOrders
  * @param {number} params.cap 0 = no portion split; 1–99 = max portions per chunk
  * @param {number} [params.orderGapMinutes] 0 = no 浪潮 split; 1–99 = adjacent gap in minutes
  * @param {Array<{ chunkId: string, orders: object[] }>} [params.previousChunks]
- * @returns {Array<{ chunkId: string, dishName: string, orders: object[], totalQuantity: number, oldestTimestamp: number }>}
+ * @returns {Array<{ chunkId: string, dishName: string, notes: string, orders: object[], totalQuantity: number, oldestTimestamp: number }>}
  */
 export function reconcileDishChunks({
   dishName,
+  notes,
   pendingOrders,
   cap,
   orderGapMinutes = 0,
@@ -157,6 +161,9 @@ export function reconcileDishChunks({
     raw.push(order)
   }
 
+  const canonicalNotes = canonicalOrderNotes(notes)
+  const identity = dishNotesIdentityKey(dishName, canonicalNotes)
+
   const n = Number(cap) || 0
   const t = Number(orderGapMinutes) || 0
   if (n < 1 && t < 1) {
@@ -165,8 +172,9 @@ export function reconcileDishChunks({
     const totalQuantity = fifo.reduce((sum, order) => sum + (order.quantity || 0), 0)
     return [
       {
-        chunkId: dishName,
+        chunkId: identity,
         dishName,
+        notes: canonicalNotes,
         orders: fifo,
         totalQuantity,
         oldestTimestamp: oldestTimestamp(fifo)
@@ -243,7 +251,7 @@ export function reconcileDishChunks({
   }
 
   return built.map((chunk) =>
-    hydrateChunk(dishName, chunk.chunkId, chunk.members, byId)
+    hydrateChunk(dishName, chunk.chunkId, chunk.members, byId, canonicalNotes)
   )
 }
 
@@ -252,7 +260,7 @@ export function reconcileDishChunks({
  * adjacent; the caller sorts the flat list (typically by each chunk’s oldest order).
  *
  * @param {object} params
- * @param {Array<{ dishName: string, station?: string, orders: object[], totalQuantity?: number }>} params.logicalDishes
+ * @param {Array<{ dishName: string, notes?: string, station?: string, orders: object[], totalQuantity?: number }>} params.logicalDishes
  * @param {number} params.cap
  * @param {number} [params.orderGapMinutes]
  * @param {Record<string, object[]>} [params.previousByDish]
@@ -268,17 +276,21 @@ export function composeKitchenDishCards({
   const cards = []
   for (const dish of logicalDishes || []) {
     if (!dish || !dish.dishName) continue
+    const notes = canonicalOrderNotes(dish.notes ?? dish.orders?.[0]?.notes)
+    const identity = dishNotesIdentityKey(dish.dishName, notes)
     const chunks = reconcileDishChunks({
       dishName: dish.dishName,
+      notes,
       pendingOrders: dish.orders,
       cap,
       orderGapMinutes,
-      previousChunks: previousByDish[dish.dishName] || []
+      previousChunks: previousByDish[identity] || []
     })
-    nextPrevious[dish.dishName] = chunks
+    nextPrevious[identity] = chunks
     for (const chunk of chunks) {
       cards.push({
         dishName: chunk.dishName,
+        notes: chunk.notes,
         station: dish.station,
         chunkId: chunk.chunkId,
         orders: chunk.orders,

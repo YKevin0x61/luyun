@@ -659,6 +659,38 @@ describe('groupAwaitingSteamerCages', () => {
     expect(groups[1].cages.map((cage) => cage._id)).toEqual(['d1'])
   })
 
+  it('splits 艇仔粥 免葱 and 无备注 into two 待上笼组; 点组 stays inside one', () => {
+    const onion = {
+      _id: 'o1',
+      dish_name: '艇仔粥',
+      notes: '免葱',
+      dish_status: '待出餐',
+      placement: null,
+      order_time: '2026-08-14T10:00:00+08:00'
+    }
+    const plain = {
+      _id: 'p1',
+      dish_name: '艇仔粥',
+      notes: '',
+      dish_status: '待出餐',
+      placement: null,
+      order_time: '2026-08-14T10:01:00+08:00'
+    }
+    const groups = groupAwaitingSteamerCages([onion, plain], opts)
+    expect(groups).toHaveLength(2)
+    expect(groups.map((group) => group.dishName)).toEqual(['艇仔粥', '艇仔粥'])
+    expect(groups.map((group) => group.notes)).toEqual(['免葱', ''])
+    expect(groups[0].selectableCages.map((cage) => cage._id)).toEqual(['o1'])
+    expect(groups[1].selectableCages.map((cage) => cage._id)).toEqual(['p1'])
+
+    expect(
+      advanceAwaitingGroupSelection({
+        selectableCages: groups[0].selectableCages,
+        selectedIds: []
+      })
+    ).toEqual(['o1'])
+  })
+
   it('lists 待上笼退示 in the group but excludes them from selectable cages', () => {
     const live = {
       _id: 'a1',
@@ -930,6 +962,61 @@ describe('composeAwaitingSteamerGroups', () => {
     expect(groups[0].noticeCages).toEqual([])
     expect(groups[0].selectableCages.map((row) => row._id)).toEqual(['s1'])
   })
+
+  it('splits 艇仔粥 免葱 and 无备注 into two groups; close timestamps are not one 浪潮', () => {
+    const cages = [
+      cage('o1', '艇仔粥', '2026-08-16T08:00:00+08:00', { notes: '免葱' }),
+      cage('p1', '艇仔粥', '2026-08-16T08:01:00+08:00', { notes: '' }),
+      cage('o2', '艇仔粥', '2026-08-16T08:08:00+08:00', { notes: '免葱' })
+    ]
+    const { groups } = composeAwaitingSteamerGroups(cages, opts, {
+      cap: 10,
+      orderGapMinutes: 10
+    })
+    const onion = groups.filter((group) => group.notes === '免葱')
+    const plain = groups.filter((group) => group.notes === '')
+    expect(onion).toHaveLength(1)
+    expect(plain).toHaveLength(1)
+    expect(onion[0].dishName).toBe('艇仔粥')
+    expect(plain[0].dishName).toBe('艇仔粥')
+    expect(onion[0].selectableCages.map((row) => row._id)).toEqual(['o1', 'o2'])
+    expect(plain[0].selectableCages.map((row) => row._id)).toEqual(['p1'])
+  })
+
+  it('groups 外卖平台: notes with empty 备注 and does not show that string', () => {
+    const cages = [
+      cage('d1', '艇仔粥', '2026-08-16T08:00:00+08:00', {
+        notes: '外卖平台:美团|来源:美团1'
+      }),
+      cage('p1', '艇仔粥', '2026-08-16T08:01:00+08:00', { notes: '' })
+    ]
+    const { groups } = composeAwaitingSteamerGroups(cages, opts, { cap: 0 })
+    expect(groups).toHaveLength(1)
+    expect(groups[0].dishName).toBe('艇仔粥')
+    expect(groups[0].notes).toBe('')
+    expect(groups[0].selectableCages.map((row) => row._id)).toEqual(['d1', 'p1'])
+  })
+
+  it('pins 待上笼退示 on the earliest group of that 菜名+备注', () => {
+    const cages = [
+      cage('p1', '艇仔粥', '2026-08-16T08:00:00+08:00', { notes: '' }),
+      cage('o1', '艇仔粥', '2026-08-16T08:01:00+08:00', { notes: '免葱' }),
+      {
+        _id: 'n1',
+        dish_name: '艇仔粥',
+        notes: '免葱',
+        dish_status: '已取消',
+        status: '退菜',
+        placement: null,
+        updated_at: '2026-08-16T11:59:00+08:00'
+      }
+    ]
+    const { groups } = composeAwaitingSteamerGroups(cages, opts, { cap: 0 })
+    const onion = groups.find((group) => group.notes === '免葱')
+    const plain = groups.find((group) => group.notes === '')
+    expect(onion.noticeCages.map((row) => row._id)).toEqual(['n1'])
+    expect(plain.noticeCages).toEqual([])
+  })
 })
 
 function steamingCage(overrides = {}) {
@@ -975,7 +1062,7 @@ describe('sortHoleDisplay', () => {
     expect(sortHoleDisplay([hold, live], now).map((cage) => cage.id)).toEqual(['s1', 'h1'])
   })
 
-  it('puts 催 cages before other live cages', () => {
+  it('puts 加急 cages before other live cages', () => {
     const quiet = steamingCage({
       id: 'q1',
       placement: { stack_order: 1, loaded_at: '2026-08-14T09:00:00+08:00' }
@@ -990,11 +1077,17 @@ describe('sortHoleDisplay', () => {
       notes: '催菜',
       placement: { stack_order: 3, loaded_at: '2026-08-14T10:11:00+08:00' }
     })
+    const rushed = steamingCage({
+      id: 'r1',
+      is_rushed: true,
+      placement: { stack_order: 4, loaded_at: '2026-08-14T10:11:30+08:00' }
+    })
 
-    expect(sortHoleDisplay([quiet, byPriority, byNotes], now).map((cage) => cage.id)).toEqual([
+    expect(sortHoleDisplay([quiet, byPriority, byNotes, rushed], now).map((cage) => cage.id)).toEqual([
+      'r1',
+      'q1',
       'u1',
-      'n1',
-      'q1'
+      'n1'
     ])
   })
 
@@ -1082,7 +1175,7 @@ describe('fillHoleSlots', () => {
     })
     const rushed = steamingCage({
       id: 'u1',
-      priority: 'urgent',
+      is_rushed: true,
       placement: {
         steamer_id: '2',
         port_index: 1,
@@ -1183,7 +1276,21 @@ describe('formatSteamerCageCard', () => {
     expect(card.timeLabel).toBe('12分 总72分')
   })
 
-  it('marks 催 on the card without replacing the dish name', () => {
+  it('marks 催 on the card from is_rushed without replacing the dish name', () => {
+    const card = formatSteamerCageCard(
+      steamingCage({
+        dish_name: '虾饺',
+        table_number: '8',
+        is_rushed: true,
+        placement: { loaded_at: '2026-08-14T10:00:00+08:00' }
+      }),
+      now
+    )
+    expect(card.primary).toBe('虾饺')
+    expect(card.rushMark).toBe('催')
+  })
+
+  it('does not mark 催 from notes containing 催 without is_rushed', () => {
     const card = formatSteamerCageCard(
       steamingCage({
         dish_name: '虾饺',
@@ -1194,7 +1301,61 @@ describe('formatSteamerCageCard', () => {
       now
     )
     expect(card.primary).toBe('虾饺')
-    expect(card.rushMark).toBe('催')
+    expect(card.notesLine).toBe('催菜')
+    expect(card.rushMark).toBe('')
+  })
+
+  it('shows 备注 as a second line and omits it when empty or 外卖平台:', () => {
+    const withNotes = formatSteamerCageCard(
+      steamingCage({
+        dish_name: '艇仔粥',
+        notes: '免葱',
+        table_number: '8',
+        placement: { loaded_at: '2026-08-14T10:00:00+08:00' }
+      }),
+      now
+    )
+    expect(withNotes.primary).toBe('艇仔粥')
+    expect(withNotes.notesLine).toBe('免葱')
+    expect(withNotes.primary).not.toContain('免葱')
+
+    const empty = formatSteamerCageCard(
+      steamingCage({
+        dish_name: '艇仔粥',
+        notes: '',
+        table_number: '8',
+        placement: { loaded_at: '2026-08-14T10:00:00+08:00' }
+      }),
+      now
+    )
+    expect(empty.notesLine).toBe('')
+
+    const platform = formatSteamerCageCard(
+      steamingCage({
+        dish_name: '艇仔粥',
+        notes: '外卖平台:美团|来源:美团1',
+        table_number: '8',
+        placement: { loaded_at: '2026-08-14T10:00:00+08:00' }
+      }),
+      now
+    )
+    expect(platform.primary).toBe('艇仔粥')
+    expect(platform.notesLine).toBe('')
+
+    const hold = formatSteamerCageCard(
+      steamingCage({
+        dish_name: '艇仔粥',
+        notes: '免葱',
+        dish_status: '已取消',
+        status: '退菜',
+        table_number: '3',
+        placement: { loaded_at: '2026-08-14T10:00:00+08:00' }
+      }),
+      now
+    )
+    expect(hold.primary).toBe('艇仔粥')
+    expect(hold.notesLine).toBe('免葱')
+    expect(hold.holdMark).toBe('退')
   })
 
   it('keeps 「退」 as a mark and does not replace the dish name', () => {
@@ -1285,14 +1446,14 @@ describe('steamUrgencyLevel', () => {
     expect(steamUrgencyLevel(awaiting, now, thresholds)).toBe('normal')
   })
 
-  it('does not treat floor 加急 as steam 催 or steam-urgent', () => {
+  it('does not treat is_rushed as steam-urgent; rushMark follows the flag', () => {
     const cage = steamingCage({
       is_rushed: true,
       order_time: '2026-08-14T09:00:00+08:00',
       placement: { loaded_at: '2026-08-14T10:10:00+08:00' }
     })
     expect(steamUrgencyLevel(cage, now, thresholds)).toBe('normal')
-    expect(formatSteamerCageCard(cage, now).rushMark).toBe('')
+    expect(formatSteamerCageCard(cage, now).rushMark).toBe('催')
   })
 })
 

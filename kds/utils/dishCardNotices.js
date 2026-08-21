@@ -5,6 +5,7 @@
 
 import { cancelAckLineId, isCancelAcknowledged, isNeverLoadedCancel } from './cancelAck.js'
 import { composeKitchenDishCards, sortKitchenDishCardsByOldest } from './dishCardChunks.js'
+import { canonicalOrderNotes, dishNotesIdentityKey } from './orderNotes.js'
 
 /**
  * Unacked never-loaded 已取消 — visible 退示 on an ordinary-station card.
@@ -20,16 +21,21 @@ function dishNameOf(order) {
   return typeof order?.dish_name === 'string' ? order.dish_name : ''
 }
 
-function groupNoticesByDish(noticeOrders, acknowledgedIds) {
-  const noticeByDish = new Map()
+function noticeIdentity(order) {
+  return dishNotesIdentityKey(dishNameOf(order), order?.notes)
+}
+
+function groupNoticesByDishNotes(noticeOrders, acknowledgedIds) {
+  const noticeByIdentity = new Map()
   for (const order of Array.isArray(noticeOrders) ? noticeOrders : []) {
     if (!isDishCardCancelNotice(order, acknowledgedIds)) continue
     const dishName = dishNameOf(order)
     if (!dishName) continue
-    if (!noticeByDish.has(dishName)) noticeByDish.set(dishName, [])
-    noticeByDish.get(dishName).push(order)
+    const identity = noticeIdentity(order)
+    if (!noticeByIdentity.has(identity)) noticeByIdentity.set(identity, [])
+    noticeByIdentity.get(identity).push(order)
   }
-  return noticeByDish
+  return noticeByIdentity
 }
 
 function oldestOrderTimeMs(orders) {
@@ -42,11 +48,12 @@ function oldestOrderTimeMs(orders) {
   return times.length > 0 ? Math.min(...times) : 0
 }
 
-function noticeOnlyCard(dishName, noticeOrders, station) {
+function noticeOnlyCard(dishName, notes, noticeOrders, station) {
   return {
     dishName,
+    notes: canonicalOrderNotes(notes),
     station,
-    chunkId: `${dishName}::notice`,
+    chunkId: `${dishNotesIdentityKey(dishName, notes)}::notice`,
     orders: [],
     noticeOrders,
     totalQuantity: 0,
@@ -56,10 +63,10 @@ function noticeOnlyCard(dishName, noticeOrders, station) {
 
 /**
  * Split serveable work with the ordinary 拆卡 engine, then pin 退示 onto the
- * earliest card of that dishName. Notice-only dishes get a card with totalQuantity 0.
+ * earliest card of that 菜名+备注. Notice-only dishes get a card with totalQuantity 0.
  *
  * @param {object} params
- * @param {Array<{ dishName: string, station?: string, orders: object[] }>} params.logicalDishes
+ * @param {Array<{ dishName: string, notes?: string, station?: string, orders: object[] }>} params.logicalDishes
  * @param {object[]} [params.noticeOrders]
  * @param {Iterable<string>|Set<string>} [params.acknowledgedCancelIds]
  * @param {number} params.cap
@@ -75,14 +82,16 @@ export function composeKitchenDishCardsWithNotices({
   orderGapMinutes = 0,
   previousByDish = {}
 } = {}) {
-  const noticeByDish = groupNoticesByDish(noticeOrders, acknowledgedCancelIds)
-  const stationByDish = new Map()
+  const noticeByIdentity = groupNoticesByDishNotes(noticeOrders, acknowledgedCancelIds)
+  const stationByIdentity = new Map()
   for (const dish of logicalDishes || []) {
-    if (dish?.dishName && dish.station) stationByDish.set(dish.dishName, dish.station)
+    if (!dish?.dishName) continue
+    const identity = dishNotesIdentityKey(dish.dishName, dish.notes)
+    if (dish.station) stationByIdentity.set(identity, dish.station)
   }
-  for (const [dishName, notices] of noticeByDish) {
-    if (!stationByDish.has(dishName) && notices[0]?.station) {
-      stationByDish.set(dishName, notices[0].station)
+  for (const [identity, notices] of noticeByIdentity) {
+    if (!stationByIdentity.has(identity) && notices[0]?.station) {
+      stationByIdentity.set(identity, notices[0].station)
     }
   }
 
@@ -95,10 +104,11 @@ export function composeKitchenDishCardsWithNotices({
 
   const attached = new Set()
   const withNotices = sortKitchenDishCardsByOldest(cards).map((card) => {
+    const identity = dishNotesIdentityKey(card.dishName, card.notes)
     let pinned = []
-    if (!attached.has(card.dishName) && noticeByDish.has(card.dishName)) {
-      pinned = noticeByDish.get(card.dishName)
-      attached.add(card.dishName)
+    if (!attached.has(identity) && noticeByIdentity.has(identity)) {
+      pinned = noticeByIdentity.get(identity)
+      attached.add(identity)
     }
     return {
       ...card,
@@ -106,9 +116,11 @@ export function composeKitchenDishCardsWithNotices({
     }
   })
 
-  for (const [dishName, notices] of noticeByDish) {
-    if (attached.has(dishName)) continue
-    withNotices.push(noticeOnlyCard(dishName, notices, stationByDish.get(dishName)))
+  for (const [identity, notices] of noticeByIdentity) {
+    if (attached.has(identity)) continue
+    const dishName = dishNameOf(notices[0])
+    const notes = canonicalOrderNotes(notices[0]?.notes)
+    withNotices.push(noticeOnlyCard(dishName, notes, notices, stationByIdentity.get(identity)))
   }
 
   return { cards: withNotices, previousByDish: nextPrevious }

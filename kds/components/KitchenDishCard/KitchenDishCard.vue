@@ -15,7 +15,10 @@
       <text class="new-badge-text">新</text>
     </view>
     <view class="dish-header">
-      <text class="dish-name">{{ dish.dishName }}</text>
+      <view class="dish-title">
+        <text class="dish-name">{{ dish.dishName }}</text>
+        <text v-if="notesSubtitle" class="dish-notes">{{ notesSubtitle }}</text>
+      </view>
       <view class="dish-quantity">
         <text class="quantity-text">{{ dish.totalQuantity }}份</text>
         <text v-if="density !== DENSITY_MODES.ULTRA" class="orders-count">({{ dish.orders.length }}单)</text>
@@ -58,6 +61,7 @@
             <text v-if="density === DENSITY_MODES.COMPACT" class="block-time">{{ formatOrderTime(order.order_time) }}</text>
           </view>
           <text v-if="density !== DENSITY_MODES.COMPACT" class="block-time">{{ formatOrderTime(order.order_time) }}</text>
+          <text v-if="noticeNotes(order)" class="block-notes">{{ noticeNotes(order) }}</text>
         </view>
       </view>
     </view>
@@ -98,6 +102,7 @@
 import { computed } from 'vue'
 import { DENSITY_MODES } from '../../utils/storage.js'
 import { orderLineId } from '../../utils/batchCooking.js'
+import { canonicalOrderNotes } from '../../utils/orderNotes.js'
 import { hasMarkedOrderLine, orderLineIsMarked } from '../../utils/serveConfirm.js'
 
 export default {
@@ -153,6 +158,8 @@ export default {
       Array.isArray(props.dish?.noticeOrders) ? props.dish.noticeOrders : []
     )
     const hasNotices = computed(() => noticeOrders.value.length > 0)
+    const notesSubtitle = computed(() => canonicalOrderNotes(props.dish?.notes))
+    const noticeNotes = (order) => canonicalOrderNotes(order?.notes)
 
     return {
       formatOrderTime,
@@ -161,6 +168,8 @@ export default {
       hasConflict,
       noticeOrders,
       hasNotices,
+      notesSubtitle,
+      noticeNotes,
       DENSITY_MODES
     }
   }
@@ -270,6 +279,14 @@ export default {
   flex-shrink: 0;
 }
 
+.dish-title {
+  max-width: 65%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2upx;
+}
+
 .dish-name {
   font-size: 36upx;
   font-weight: bold;
@@ -281,7 +298,16 @@ export default {
   -webkit-line-clamp: 2;
   line-clamp: 2;
   -webkit-box-orient: vertical;
-  max-width: 65%;
+}
+
+.dish-notes {
+  font-size: 24upx;
+  font-weight: 600;
+  color: #64748b;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dish-quantity {
@@ -473,6 +499,18 @@ export default {
   line-height: 1.2;
   margin-top: 2upx;
   font-weight: 500;
+}
+
+.block-notes {
+  display: block;
+  font-size: 18upx;
+  font-weight: 600;
+  color: #64748b;
+  line-height: 1.2;
+  margin-top: 2upx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dish-actions {
@@ -683,9 +721,12 @@ export default {
   min-height: clamp(140upx, 18vh, 220upx);
 }
 
+.dish-card.density-ultra .dish-title {
+  max-width: 70%;
+}
+
 .dish-card.density-ultra .dish-name {
   font-size: 32upx;
-  max-width: 70%;
 }
 
 .dish-card.density-ultra .quantity-text {

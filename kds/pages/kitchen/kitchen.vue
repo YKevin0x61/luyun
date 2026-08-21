@@ -239,6 +239,10 @@
             @click="toggleTablePickLine(row.id)"
           >
             <text class="pick-check">{{ row.selected ? '✓' : '' }}</text>
+            <view class="pick-dish">
+              <text class="pick-dish-name">{{ row.dishName }}</text>
+              <text v-if="notesSubtitle(row)" class="pick-dish-notes">{{ notesSubtitle(row) }}</text>
+            </view>
             <text class="pick-table">{{ row.tableNumber }}桌</text>
             <text class="pick-time">{{ row.orderTimeLabel }}</text>
             <text class="pick-wait">{{ row.waitLabel }}</text>
@@ -269,7 +273,8 @@ import { useRealtimeStore } from '../../stores/realtime.js'
 import { useStationsStore } from '../../stores/stations.js'
 import { TimeCalculator } from '../../utils/timeCalculator.js'
 import { isPendingKitchenWork, workEnterTimeMs } from '../../utils/pendingKitchenWork.js'
-import { groupOrdersByDish } from '../../utils/dishMerge.js'
+import { groupOrdersByDishNotes } from '../../utils/dishMerge.js'
+import { canonicalOrderNotes } from '../../utils/orderNotes.js'
 import { dishSplitKnobsChanged } from '../../utils/dishCardChunks.js'
 import { composeKitchenDishCardsWithNotices, isDishCardCancelNotice } from '../../utils/dishCardNotices.js'
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
@@ -596,7 +601,7 @@ export default {
         }
       }
       
-      // 按菜品名称分组（过滤无效订单，校验+日志与合并前保持一致）
+      // 按菜名+归一备注分组（过滤无效订单，校验+日志与合并前保持一致）
       const validOrders = currentStationOrders.value.filter(order => {
         if (!order || !order.dish_name) {
           debugLog('[厨房合并] 订单数据无效:', order)
@@ -604,10 +609,10 @@ export default {
         }
         return true
       })
-      const dishGroups = groupOrdersByDish(validOrders, order => order.dish_name)
-      
+      const dishGroups = groupOrdersByDishNotes(validOrders)
+
       // 转换为数组，计算最早下单时间戳（时长/超时等派生字段延后到 currentStationMergedDishes 计算）
-      return Object.values(dishGroups).map(dish => {
+      return dishGroups.map(dish => {
         // 🔧 确保菜品数据有效
         if (!dish || !dish.orders || dish.orders.length === 0) {
           debugLog('[厨房合并] 菜品数据无效:', dish)
@@ -716,6 +721,8 @@ export default {
       return `${hours}:${minutes}`
     }
 
+    const notesSubtitle = (row) => canonicalOrderNotes(row?.notes)
+
     const isTablePickOpen = computed(() => serveSelection.value.tablePick != null)
 
     const tablePickDish = computed(() => {
@@ -751,6 +758,8 @@ export default {
           const waitMs = orderTime ? Math.max(0, now - orderTime) : 0
           return {
             id,
+            dishName: order.dish_name || dish.dishName,
+            notes: canonicalOrderNotes(order.notes),
             tableNumber: order.table_number,
             orderTimeMs: orderTime || 0,
             orderTimeLabel: formatTime(order.order_time),
@@ -1280,6 +1289,7 @@ export default {
       isTablePickOpen,
       tablePickCount,
       tablePickRows,
+      notesSubtitle,
       dishServePreviewOrderIds,
       
       // 方法
@@ -2239,7 +2249,7 @@ export default {
 
 .pick-line {
   display: grid;
-  grid-template-columns: 48upx 1fr auto auto;
+  grid-template-columns: 48upx minmax(0, 1.4fr) auto auto auto;
   gap: 16upx;
   align-items: center;
   padding: 20upx 8upx;
@@ -2272,6 +2282,31 @@ export default {
 .pick-line.selected .pick-check {
   border-color: #52C41A;
   background: #F6FFED;
+}
+
+.pick-dish {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2upx;
+}
+
+.pick-dish-name {
+  font-size: 28upx;
+  font-weight: 800;
+  color: #2C3E50;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-dish-notes {
+  font-size: 22upx;
+  font-weight: 600;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pick-table {

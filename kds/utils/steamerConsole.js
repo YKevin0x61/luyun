@@ -6,7 +6,8 @@
 import { isRefundOrder } from './constants.js'
 import { cancelAckLineId, isCancelAcknowledged } from './cancelAck.js'
 import { composeKitchenDishCards, sortKitchenDishCardsByOldest } from './dishCardChunks.js'
-import { compareRushThenFifo, isHold } from './pendingKitchenWork.js'
+import { canonicalOrderNotes, dishNotesIdentityKey } from './orderNotes.js'
+import { compareRushThenFifo, isHold, isRushed } from './pendingKitchenWork.js'
 
 export const STEAMER_PHASE_AWAITING = '待上笼'
 export const STEAMER_PHASE_STEAMING = '在蒸'
@@ -81,16 +82,18 @@ export function listAwaitingSteamerCages(orders, opts) {
   })
 }
 
-/** First-seen dish_name order; 待上笼退示 stay visible but out of selectableCages. */
+/** First-seen 菜名+归一备注 order; 待上笼退示 stay visible but out of selectableCages. */
 export function groupAwaitingSteamerCages(cages, opts) {
   const groups = []
-  const byName = new Map()
+  const byIdentity = new Map()
   for (const cage of Array.isArray(cages) ? cages : []) {
     const dishName = cage?.dish_name || ''
-    let group = byName.get(dishName)
+    const notes = canonicalOrderNotes(cage?.notes)
+    const identity = dishNotesIdentityKey(dishName, notes)
+    let group = byIdentity.get(identity)
     if (!group) {
-      group = { dishName, cages: [], selectableCages: [], noticeCages: [] }
-      byName.set(dishName, group)
+      group = { dishName, notes, cages: [], selectableCages: [], noticeCages: [] }
+      byIdentity.set(identity, group)
       groups.push(group)
     }
     group.cages.push(cage)
@@ -106,7 +109,7 @@ export function groupAwaitingSteamerCages(cages, opts) {
 
 /**
  * 待上笼组走和其他屏相同的拆卡：菜卡份数上限 + 下单间隔，再按每组最早订单排。
- * 待上笼退示挂在该菜名最早一组上，不参与拆卡。
+ * 待上笼退示挂在该菜名+备注最早一组上，不参与拆卡。
  */
 export function composeAwaitingSteamerGroups(
   cages,
@@ -114,18 +117,20 @@ export function composeAwaitingSteamerGroups(
   { cap = 0, orderGapMinutes = 0, previousByDish = {} } = {}
 ) {
   const grouped = groupAwaitingSteamerCages(cages, opts)
-  const noticeByDish = new Map()
+  const noticeByIdentity = new Map()
   const logicalDishes = []
   const noticeOnly = []
 
   for (const group of grouped) {
-    if (group.noticeCages.length) noticeByDish.set(group.dishName, group.noticeCages)
+    const identity = dishNotesIdentityKey(group.dishName, group.notes)
+    if (group.noticeCages.length) noticeByIdentity.set(identity, group.noticeCages)
     if (group.selectableCages.length === 0) {
       if (group.noticeCages.length) noticeOnly.push(group)
       continue
     }
     logicalDishes.push({
       dishName: group.dishName,
+      notes: group.notes,
       orders: group.selectableCages
     })
   }
@@ -139,13 +144,15 @@ export function composeAwaitingSteamerGroups(
 
   const attached = new Set()
   const groups = sortKitchenDishCardsByOldest(cards).map((card) => {
+    const identity = dishNotesIdentityKey(card.dishName, card.notes)
     let noticeCages = []
-    if (!attached.has(card.dishName) && noticeByDish.has(card.dishName)) {
-      noticeCages = noticeByDish.get(card.dishName)
-      attached.add(card.dishName)
+    if (!attached.has(identity) && noticeByIdentity.has(identity)) {
+      noticeCages = noticeByIdentity.get(identity)
+      attached.add(identity)
     }
     return {
       dishName: card.dishName,
+      notes: card.notes,
       chunkId: card.chunkId,
       cages: [...card.orders, ...noticeCages],
       selectableCages: card.orders,
@@ -156,9 +163,11 @@ export function composeAwaitingSteamerGroups(
   })
 
   for (const group of noticeOnly) {
+    const identity = dishNotesIdentityKey(group.dishName, group.notes)
     groups.push({
       dishName: group.dishName,
-      chunkId: `${group.dishName}::notice`,
+      notes: group.notes,
+      chunkId: `${identity}::notice`,
       cages: group.noticeCages,
       selectableCages: [],
       noticeCages: group.noticeCages,
@@ -379,11 +388,6 @@ function isHoleDisplayHold(cage, now) {
   return deriveSteamerPhase(cage, { now }) === STEAMER_PHASE_CANCEL_HOLD
 }
 
-function isRushedCage(cage) {
-  if (cage?.priority === 'urgent') return true
-  return String(cage?.notes || '').includes('催')
-}
-
 function elapsedMinutesSince(start, now) {
   const begin = asTimestamp(start)
   const moment = now == null ? Date.now() : asTimestamp(now)
@@ -406,8 +410,8 @@ export function compareHoleDisplay(a, b, now) {
   const holdA = isHoleDisplayHold(a, now)
   const holdB = isHoleDisplayHold(b, now)
   if (holdA !== holdB) return holdA ? 1 : -1
-  const rushA = isRushedCage(a)
-  const rushB = isRushedCage(b)
+  const rushA = isRushed(a)
+  const rushB = isRushed(b)
   if (rushA !== rushB) return rushA ? -1 : 1
   const duration = steamDurationMs(b, now) - steamDurationMs(a, now)
   if (duration) return duration
@@ -486,12 +490,13 @@ export function formatSteamerCageCard(cage, now) {
   const dishName = String(cage?.dish_name || '').replace(/^[（(]外卖[）)]/, '').trim()
   return {
     primary: dishName,
+    notesLine: canonicalOrderNotes(cage?.notes),
     secondary: `${table.lines.join(' ')} ${minutes}分`.trim(),
     tableLines: table.lines,
     steamMinutes: minutes,
     totalMinutes,
     timeLabel: totalMinutes > 0 ? `${minutes}分 总${totalMinutes}分` : `${minutes}分`,
-    rushMark: isRushedCage(cage) ? '催' : '',
+    rushMark: isRushed(cage) ? '催' : '',
     holdMark: hold ? '退' : ''
   }
 }

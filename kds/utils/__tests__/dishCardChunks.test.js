@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { composeKitchenDishCards, dishSplitKnobsChanged, reconcileDishChunks, sortKitchenDishCardsByOldest } from '../dishCardChunks.js'
+import { groupOrdersByDishNotes } from '../dishMerge.js'
+import { canonicalOrderNotes } from '../orderNotes.js'
 import { isPendingKitchenWork } from '../pendingKitchenWork.js'
 
 function makeOrder(overrides = {}) {
@@ -359,7 +361,7 @@ describe('composeKitchenDishCards', () => {
     )
   })
 
-  it('N=0 emits one card per logical dish using the dish name as chunk id', () => {
+  it('N=0 emits one card per logical dish; title stays 菜名', () => {
     const { cards } = composeKitchenDishCards({
       logicalDishes: [
         {
@@ -376,8 +378,8 @@ describe('composeKitchenDishCards', () => {
     })
 
     expect(cards).toHaveLength(1)
-    expect(cards[0].chunkId).toBe('虾饺')
     expect(cards[0].dishName).toBe('虾饺')
+    expect(cards[0].notes).toBe('')
     expect(cards[0].totalQuantity).toBe(12)
   })
 })
@@ -663,6 +665,165 @@ describe('dishSplitKnobsChanged', () => {
   it('is true when 菜卡份数上限 or 下单间隔 changes', () => {
     expect(dishSplitKnobsChanged({ cap: 10, orderGapMinutes: 5 }, 8, 5)).toBe(true)
     expect(dishSplitKnobsChanged({ cap: 10, orderGapMinutes: 5 }, 10, 0)).toBe(true)
+  })
+})
+
+function cardsFromOrders(orders, extra = {}) {
+  const logicalDishes = groupOrdersByDishNotes(orders)
+  return composeKitchenDishCards({
+    logicalDishes,
+    cap: 0,
+    previousByDish: {},
+    ...extra
+  })
+}
+
+describe('composeKitchenDishCards 菜名+备注', () => {
+  it('splits 艇仔粥 免葱 and 无备注 into two 菜卡; title stays 菜名', () => {
+    const onion = makeOrder({
+      id: 'o1',
+      dish_name: '艇仔粥',
+      notes: '免葱',
+      order_time: '2026-07-23T10:00:00.000Z'
+    })
+    const plain = makeOrder({
+      id: 'p1',
+      dish_name: '艇仔粥',
+      notes: '',
+      order_time: '2026-07-23T10:01:00.000Z'
+    })
+    const { cards } = cardsFromOrders([onion, plain])
+
+    expect(cards).toHaveLength(2)
+    expect(cards.map((card) => card.dishName)).toEqual(['艇仔粥', '艇仔粥'])
+    expect(cards.map((card) => card.notes)).toEqual(['免葱', ''])
+    expect(chunkOrderIds(cards[0])).toEqual(['o1'])
+    expect(chunkOrderIds(cards[1])).toEqual(['p1'])
+    expect(cards[0].chunkId).not.toBe(cards[1].chunkId)
+  })
+
+  it('strips notes and uses that as the subtitle, not concatenated into 菜名', () => {
+    const onion = makeOrder({
+      id: 'o1',
+      dish_name: '艇仔粥',
+      notes: '  免葱  ',
+      order_time: '2026-07-23T10:00:00.000Z'
+    })
+    const { cards } = cardsFromOrders([onion])
+    expect(cards).toHaveLength(1)
+    expect(cards[0].dishName).toBe('艇仔粥')
+    expect(cards[0].notes).toBe('免葱')
+    expect(canonicalOrderNotes('  免葱  ')).toBe('免葱')
+    expect(canonicalOrderNotes('   ')).toBe('')
+    expect(canonicalOrderNotes(null)).toBe('')
+  })
+
+  it('does not merge 拆卡 snapshots across remarks of the same dish name', () => {
+    const onion = makeOrder({
+      id: 'o1',
+      dish_name: '艇仔粥',
+      notes: '免葱',
+      quantity: 10,
+      order_time: '2026-07-23T10:00:00.000Z'
+    })
+    const plain = makeOrder({
+      id: 'p1',
+      dish_name: '艇仔粥',
+      notes: '',
+      quantity: 10,
+      order_time: '2026-07-23T10:01:00.000Z'
+    })
+    const first = cardsFromOrders([onion, plain], { cap: 10 })
+    const onionAfter = makeOrder({
+      id: 'o1',
+      dish_name: '艇仔粥',
+      notes: '免葱',
+      quantity: 5,
+      order_time: '2026-07-23T10:00:00.000Z'
+    })
+    const onionNew = makeOrder({
+      id: 'o2',
+      dish_name: '艇仔粥',
+      notes: '免葱',
+      quantity: 3,
+      order_time: '2026-07-23T10:02:00.000Z'
+    })
+    const second = cardsFromOrders([onionAfter, onionNew, plain], {
+      cap: 10,
+      previousByDish: first.previousByDish
+    })
+
+    const onionCards = second.cards.filter((card) => card.notes === '免葱')
+    const plainCards = second.cards.filter((card) => card.notes === '')
+    expect(plainCards).toHaveLength(1)
+    expect(chunkOrderIds(plainCards[0])).toEqual(['p1'])
+    expect(plainCards[0].totalQuantity).toBe(10)
+    expect(onionCards.flatMap((card) => chunkOrderIds(card)).sort()).toEqual(['o1', 'o2'])
+    expect(onionCards.every((card) => !chunkOrderIds(card).includes('p1'))).toBe(true)
+  })
+
+  it('treats notes starting with 外卖平台: as empty; subtitle empty; no platform card', () => {
+    const platform = makeOrder({
+      id: 'd1',
+      dish_name: '艇仔粥',
+      notes: '外卖平台:美团|来源:美团1',
+      order_time: '2026-07-23T10:00:00.000Z'
+    })
+    const plain = makeOrder({
+      id: 'p1',
+      dish_name: '艇仔粥',
+      notes: '',
+      order_time: '2026-07-23T10:01:00.000Z'
+    })
+    const spaced = makeOrder({
+      id: 'd2',
+      dish_name: '艇仔粥',
+      notes: '  外卖平台:饿了么',
+      order_time: '2026-07-23T10:02:00.000Z'
+    })
+    const { cards } = cardsFromOrders([platform, plain, spaced])
+
+    expect(cards).toHaveLength(1)
+    expect(cards[0].dishName).toBe('艇仔粥')
+    expect(cards[0].notes).toBe('')
+    expect(chunkOrderIds(cards[0])).toEqual(['d1', 'p1', 'd2'])
+  })
+
+  it('computes 浪潮 and 菜卡份数上限 only inside the same 菜名+备注', () => {
+    const onionEarly = makeOrder({
+      id: 'o1',
+      dish_name: '艇仔粥',
+      notes: '免葱',
+      quantity: 5,
+      order_time: '2026-07-23T10:00:00.000Z'
+    })
+    const plainClose = makeOrder({
+      id: 'p1',
+      dish_name: '艇仔粥',
+      notes: '',
+      quantity: 5,
+      order_time: '2026-07-23T10:01:00.000Z'
+    })
+    const onionLater = makeOrder({
+      id: 'o2',
+      dish_name: '艇仔粥',
+      notes: '免葱',
+      quantity: 5,
+      order_time: '2026-07-23T10:08:00.000Z'
+    })
+    const { cards } = cardsFromOrders([onionEarly, plainClose, onionLater], {
+      cap: 10,
+      orderGapMinutes: 10
+    })
+
+    const onionCards = cards.filter((card) => card.notes === '免葱')
+    const plainCards = cards.filter((card) => card.notes === '')
+    expect(onionCards).toHaveLength(1)
+    expect(plainCards).toHaveLength(1)
+    expect(onionCards[0].totalQuantity).toBe(10)
+    expect(chunkOrderIds(onionCards[0])).toEqual(['o1', 'o2'])
+    expect(plainCards[0].totalQuantity).toBe(5)
+    expect(chunkOrderIds(plainCards[0])).toEqual(['p1'])
   })
 })
 
