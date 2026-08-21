@@ -1062,7 +1062,7 @@ describe('sortHoleDisplay', () => {
     expect(sortHoleDisplay([hold, live], now).map((cage) => cage.id)).toEqual(['s1', 'h1'])
   })
 
-  it('puts 加急 cages before other live cages', () => {
+  it('does not reorder 在蒸 by is_rushed, notes 催, or inbound priority', () => {
     const quiet = steamingCage({
       id: 'q1',
       placement: { stack_order: 1, loaded_at: '2026-08-14T09:00:00+08:00' }
@@ -1084,10 +1084,10 @@ describe('sortHoleDisplay', () => {
     })
 
     expect(sortHoleDisplay([quiet, byPriority, byNotes, rushed], now).map((cage) => cage.id)).toEqual([
-      'r1',
       'q1',
       'u1',
-      'n1'
+      'n1',
+      'r1'
     ])
   })
 
@@ -1200,8 +1200,8 @@ describe('fillHoleSlots', () => {
     })
 
     expect(slots.map((slot) => (slot.empty ? null : slot.cage.id))).toEqual([
-      'u1',
       'q1',
+      'u1',
       'h1',
       null,
       null,
@@ -1276,7 +1276,7 @@ describe('formatSteamerCageCard', () => {
     expect(card.timeLabel).toBe('12分 总72分')
   })
 
-  it('marks 催 on the card from is_rushed without replacing the dish name', () => {
+  it('does not mark 催 on 在蒸 from is_rushed', () => {
     const card = formatSteamerCageCard(
       steamingCage({
         dish_name: '虾饺',
@@ -1287,7 +1287,7 @@ describe('formatSteamerCageCard', () => {
       now
     )
     expect(card.primary).toBe('虾饺')
-    expect(card.rushMark).toBe('催')
+    expect(card.rushMark).toBe('')
   })
 
   it('does not mark 催 from notes containing 催 without is_rushed', () => {
@@ -1446,14 +1446,14 @@ describe('steamUrgencyLevel', () => {
     expect(steamUrgencyLevel(awaiting, now, thresholds)).toBe('normal')
   })
 
-  it('does not treat is_rushed as steam-urgent; rushMark follows the flag', () => {
+  it('does not treat is_rushed as steam-urgent or a 在蒸 催 mark', () => {
     const cage = steamingCage({
       is_rushed: true,
       order_time: '2026-08-14T09:00:00+08:00',
       placement: { loaded_at: '2026-08-14T10:10:00+08:00' }
     })
     expect(steamUrgencyLevel(cage, now, thresholds)).toBe('normal')
-    expect(formatSteamerCageCard(cage, now).rushMark).toBe('催')
+    expect(formatSteamerCageCard(cage, now).rushMark).toBe('')
   })
 })
 

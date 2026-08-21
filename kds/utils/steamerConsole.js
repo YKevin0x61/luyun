@@ -7,7 +7,7 @@ import { isRefundOrder } from './constants.js'
 import { cancelAckLineId, isCancelAcknowledged } from './cancelAck.js'
 import { composeKitchenDishCards, sortKitchenDishCardsByOldest } from './dishCardChunks.js'
 import { canonicalOrderNotes, dishNotesIdentityKey } from './orderNotes.js'
-import { compareRushThenFifo, isHold, isRushed } from './pendingKitchenWork.js'
+import { compareRushThenFifo, isHold } from './pendingKitchenWork.js'
 
 export const STEAMER_PHASE_AWAITING = '待上笼'
 export const STEAMER_PHASE_STEAMING = '在蒸'
@@ -410,9 +410,6 @@ export function compareHoleDisplay(a, b, now) {
   const holdA = isHoleDisplayHold(a, now)
   const holdB = isHoleDisplayHold(b, now)
   if (holdA !== holdB) return holdA ? 1 : -1
-  const rushA = isRushed(a)
-  const rushB = isRushed(b)
-  if (rushA !== rushB) return rushA ? -1 : 1
   const duration = steamDurationMs(b, now) - steamDurationMs(a, now)
   if (duration) return duration
   return stackOrderOf(a) - stackOrderOf(b)
@@ -496,7 +493,7 @@ export function formatSteamerCageCard(cage, now) {
     steamMinutes: minutes,
     totalMinutes,
     timeLabel: totalMinutes > 0 ? `${minutes}分 总${totalMinutes}分` : `${minutes}分`,
-    rushMark: isRushed(cage) ? '催' : '',
+    rushMark: '',
     holdMark: hold ? '退' : ''
   }
 }
