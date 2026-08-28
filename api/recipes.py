@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from services.recipes.store import (
     RecipeStore, SLUG_MAX_LEN, TEXT_FIELD_MAX_LEN, BODY_MAX_LEN,
-    INGREDIENT_FIELD_MAX_LEN,
+    INGREDIENT_FIELD_MAX_LEN, STEP_TEXT_MAX_LEN, STEPS_MAX_COUNT,
 )
 from services.recipes.rendering import render_markdown_to_docx
 from api.security import verify_admin_token
@@ -76,6 +76,18 @@ def _validate_ingredients(items) -> list[dict]:
     return out
 
 
+def _validate_steps(items) -> list[str]:
+    raw = list(items or [])
+    if len(raw) > STEPS_MAX_COUNT:
+        raise HTTPException(status_code=400, detail=f"步骤数量不能超过 {STEPS_MAX_COUNT} 个")
+    out: list[str] = []
+    for item in raw:
+        text = _validate_text(item, "步骤", required=False, max_len=STEP_TEXT_MAX_LEN)
+        if text:
+            out.append(text)
+    return out
+
+
 def _csv_safe_cell(value) -> str:
     text = "" if value is None else str(value)
     if text.startswith(DANGEROUS_CSV_PREFIXES):
@@ -110,6 +122,7 @@ class RecipeCreate(BaseModel):
     sort_order: Optional[int] = None
     is_new: bool = False
     ingredients: list[IngredientItem] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
 
 
 class RecipeUpdate(BaseModel):
@@ -119,6 +132,7 @@ class RecipeUpdate(BaseModel):
     sort_order: Optional[int] = None
     is_new: bool = False
     ingredients: Optional[list[IngredientItem]] = None
+    steps: Optional[list[str]] = None
 
 
 class RecipeReorder(BaseModel):
@@ -206,8 +220,10 @@ async def create_recipe(slug: str, payload: RecipeCreate, store: RecipeStore = D
     name = _validate_text(payload.recipe_name, "条目名称")
     body = _validate_body(payload.body)
     ingredients = _validate_ingredients(payload.ingredients)
+    steps = _validate_steps(payload.steps)
     rid = await store.create_recipe(
-        slug, section, name, body, payload.sort_order, payload.is_new, ingredients=ingredients,
+        slug, section, name, body, payload.sort_order, payload.is_new,
+        ingredients=ingredients, steps=steps,
     )
     return {"id": rid}
 
@@ -224,8 +240,10 @@ async def update_recipe(recipe_id: int, payload: RecipeUpdate, store: RecipeStor
     ingredients = (
         None if payload.ingredients is None else _validate_ingredients(payload.ingredients)
     )
+    steps = None if payload.steps is None else _validate_steps(payload.steps)
     updated = await store.update_recipe(
-        recipe_id, section, name, body, sort_order, payload.is_new, ingredients=ingredients,
+        recipe_id, section, name, body, sort_order, payload.is_new,
+        ingredients=ingredients, steps=steps,
     )
     return updated
 

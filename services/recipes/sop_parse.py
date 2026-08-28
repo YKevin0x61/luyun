@@ -33,6 +33,7 @@ class ParsedRecipe:
     is_active: bool = True
     id: int | None = None
     ingredients: tuple = ()
+    steps: tuple = ()
 
 
 def _split_pipe_row(line: str) -> list[str]:

@@ -12,6 +12,9 @@ from .sop_parse import ParsedRecipe
 RECIPE_INGREDIENTS_TABLE_CLASS = "recipe-ingredients"
 RECIPE_INGREDIENTS_NAME_CLASS = "recipe-ingredients-name"
 RECIPE_INGREDIENTS_AMOUNT_CLASS = "recipe-ingredients-amount"
+# Keep in sync with admin-web/src/utils/recipeSteps.js
+RECIPE_STEPS_LIST_CLASS = "recipe-steps"
+RECIPE_STEPS_ITEM_CLASS = "recipe-steps-item"
 
 
 def _esc(value) -> str:
@@ -33,9 +36,20 @@ def render_structured_recipe_body(
 ) -> str:
     """Inner HTML of `.recipe-card-body` from structured fields.
 
-    `steps` and `tips` are accepted for later tickets and ignored here.
+    `tips` is accepted for later tickets and ignored here.
     """
-    del steps, tips
+    del tips
+    parts: list[str] = []
+    ingredient_html = _render_ingredients_table(ingredients)
+    if ingredient_html:
+        parts.append(ingredient_html)
+    steps_html = _render_steps_list(steps)
+    if steps_html:
+        parts.append(steps_html)
+    return "".join(parts)
+
+
+def _render_ingredients_table(ingredients) -> str:
     rows = []
     for item in ingredients or []:
         if not isinstance(item, dict):
@@ -58,6 +72,23 @@ def render_structured_recipe_body(
             "</tr>"
         )
     parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def _render_steps_list(steps) -> str:
+    texts: list[str] = []
+    for item in steps or []:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            texts.append(text)
+    if not texts:
+        return ""
+    parts = [f'<ol class="{RECIPE_STEPS_LIST_CLASS}">']
+    for text in texts:
+        parts.append(f'<li class="{RECIPE_STEPS_ITEM_CLASS}">{_esc(text)}</li>')
+    parts.append("</ol>")
     return "".join(parts)
 
 
@@ -98,8 +129,11 @@ def render_station_html(station_title: str, recipes: list[ParsedRecipe]) -> str:
         parts.append(f"<h2>{_esc(section)}</h2>")
         for recipe in items:
             parts.append(_heading_html(recipe))
-            if recipe.ingredients:
-                body = render_structured_recipe_body(list(recipe.ingredients))
+            if recipe.ingredients or recipe.steps:
+                body = render_structured_recipe_body(
+                    ingredients=list(recipe.ingredients),
+                    steps=list(recipe.steps),
+                )
             else:
                 body = render_markdown_fragment(recipe.body_markdown)
             if body:

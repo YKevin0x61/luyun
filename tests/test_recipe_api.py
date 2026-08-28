@@ -113,6 +113,27 @@ def test_station_detail_renders_structured_ingredients_table(client):
     assert "sop-section-grid" in html
 
 
+def test_station_detail_renders_structured_steps_list(client):
+    rid = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团做法",
+            "body": "这段 Markdown 不应出现在步骤卡片里",
+            "is_new": False,
+            "steps": ["混合面粉与水", "静置 10 分钟"],
+        },
+    ).json()["id"]
+    html = client.get("/api/recipes/stations/changfen").json()["content_html"]
+    assert "recipe-steps" in html
+    assert "recipe-steps-item" in html
+    assert "混合面粉与水" in html
+    assert "静置 10 分钟" in html
+    assert f'data-recipe-id="{rid}"' in html
+    assert "这段 Markdown 不应出现在步骤卡片里" not in html
+    assert "酱油：100g" in html
+
+
 def test_station_detail_404(client):
     assert client.get("/api/recipes/stations/nope").status_code == 404
 
@@ -460,3 +481,98 @@ def test_ingredient_unit_over_limit_returns_400(client):
     )
     assert r.status_code == 400
     assert r.json()["detail"] == "用料单位长度不能超过 120 个字符"
+
+
+def test_create_omitting_steps_still_works(client):
+    r = client.post("/api/recipes/stations/changfen/recipes",
+                    json={"section": "配方", "recipe_name": "无步骤", "body": "x", "is_new": False})
+    assert r.status_code == 200
+    rid = r.json()["id"]
+    recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    row = next(x for x in recipes if x["id"] == rid)
+    assert row["steps"] == []
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["steps"] == []
+
+
+def test_create_and_list_recipes_include_steps(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "is_new": False,
+            "steps": ["混合面粉与水", "静置 10 分钟"],
+        },
+    )
+    assert r.status_code == 200
+    rid = r.json()["id"]
+    recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    row = next(x for x in recipes if x["id"] == rid)
+    assert row["steps"] == ["混合面粉与水", "静置 10 分钟"]
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["steps"] == row["steps"]
+
+
+def test_update_recipe_steps(client):
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={
+            "section": "配方",
+            "recipe_name": "肠粉酱油",
+            "body": "酱油：100g",
+            "is_new": False,
+            "steps": ["把酱油煮开"],
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["steps"] == ["把酱油煮开"]
+
+
+def test_update_omitting_steps_preserves_existing_rows(client):
+    rid = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "steps": ["混合面粉与水"],
+        },
+    ).json()["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={"section": "配方", "recipe_name": "面团改", "body": "", "is_new": False},
+    )
+    assert r.status_code == 200
+    assert r.json()["recipe_name"] == "面团改"
+    assert r.json()["steps"] == ["混合面粉与水"]
+
+
+def test_step_text_over_limit_returns_400(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "steps": ["a" * 121],
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "步骤长度不能超过 120 个字符"
+
+
+def test_steps_count_over_limit_returns_400(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "steps": ["步"] * 51,
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "步骤数量不能超过 50 个"

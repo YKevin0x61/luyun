@@ -16,12 +16,19 @@ import {
   dropBlankIngredientRows,
   moveIngredientRow,
   removeIngredientRow,
-  renderIngredientsTableHtml,
 } from '../../utils/recipeIngredients'
+import {
+  addStepRow,
+  dropBlankStepRows,
+  moveStepRow,
+  removeStepRow,
+  renderStructuredRecipePreviewHtml,
+} from '../../utils/recipeSteps'
 
 useScopedStylesheet('/recipe.css')
 
 const INGREDIENT_FIELD_MAX_LEN = 120
+const STEP_TEXT_MAX_LEN = 120
 
 const view = ref('stations') // 'stations' | 'recipes'
 const stations = ref([])
@@ -34,22 +41,26 @@ const dragIndex = ref(null)
 const reorderBusy = ref(false)
 const ingredientDragIndex = ref(null)
 const ingredientUndo = ref(null)
+const stepDragIndex = ref(null)
+const stepUndo = ref(null)
 
 // 各类弹窗状态（复用一个 modal 容器，按 kind 渲染不同表单）
 const modal = reactive({ kind: null }) // 'add-station' | 'rename-station' | 'recipe-form' | 'history'
 const stationForm = reactive({ slug: '', title: '' })
 const renameForm = reactive({ slug: '', title: '' })
 const recipeForm = reactive({
-  id: null, section: '配方', recipe_name: '', body: '', sort_order: null, is_new: false, ingredients: [],
+  id: null, section: '配方', recipe_name: '', body: '', sort_order: null, is_new: false,
+  ingredients: [], steps: [],
 })
 const historyItems = ref([])
 
-const ingredientPreviewHtml = computed(() => renderIngredientsTableHtml(
+const structuredPreviewHtml = computed(() => renderStructuredRecipePreviewHtml(
   recipeForm.ingredients.map((row) => ({
     name: row.name,
     amount: row.amount,
     unit: row.unit,
   })),
+  recipeForm.steps,
 ))
 
 const sectionOptions = computed(() => buildSectionOptions(recipes.value))
@@ -76,6 +87,7 @@ function closeModal() {
   modal.kind = null
   errorMsg.value = ''
   ingredientUndo.value = null
+  stepUndo.value = null
 }
 
 async function loadStations() {
@@ -157,7 +169,9 @@ function openAddRecipe() {
   recipeForm.sort_order = null
   recipeForm.is_new = false
   recipeForm.ingredients = []
+  recipeForm.steps = []
   ingredientUndo.value = null
+  stepUndo.value = null
   modal.kind = 'recipe-form'
 }
 async function openEditRecipe(id) {
@@ -174,7 +188,9 @@ async function openEditRecipe(id) {
     amount: row.amount || '',
     unit: row.unit || '',
   }))
+  recipeForm.steps = (r.steps || []).map((text) => String(text || ''))
   ingredientUndo.value = null
+  stepUndo.value = null
   modal.kind = 'recipe-form'
 }
 async function submitRecipeForm() {
@@ -190,6 +206,7 @@ async function submitRecipeForm() {
       amount: row.amount,
       unit: row.unit,
     })),
+    steps: dropBlankStepRows(recipeForm.steps).map((text) => String(text).trim()),
   }
   try {
     if (recipeForm.id) {
@@ -301,6 +318,53 @@ function onIngredientDrop(idx) {
 
 function moveIngredient(idx, delta) {
   applyIngredientReorder(idx, idx + delta)
+}
+
+function addStep() {
+  recipeForm.steps = addStepRow(recipeForm.steps)
+}
+
+function removeStep(idx) {
+  const removed = recipeForm.steps[idx]
+  if (removed === undefined) return
+  recipeForm.steps = removeStepRow(recipeForm.steps, idx)
+  stepUndo.value = { index: idx, row: removed }
+}
+
+function undoStepRemove() {
+  const pending = stepUndo.value
+  if (!pending) return
+  const list = [...recipeForm.steps]
+  const insertAt = Math.min(pending.index, list.length)
+  list.splice(insertAt, 0, pending.row)
+  recipeForm.steps = list
+  stepUndo.value = null
+}
+
+function applyStepReorder(fromIndex, toIndex) {
+  recipeForm.steps = moveStepRow(recipeForm.steps, fromIndex, toIndex)
+}
+
+function onStepDragStart(idx, event) {
+  stepDragIndex.value = idx
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(idx))
+  }
+}
+
+function onStepDragEnd() {
+  stepDragIndex.value = null
+}
+
+function onStepDrop(idx) {
+  if (stepDragIndex.value === null) return
+  applyStepReorder(stepDragIndex.value, idx)
+  stepDragIndex.value = null
+}
+
+function moveStep(idx, delta) {
+  applyStepReorder(idx, idx + delta)
 }
 
 async function toggleActive(id) {
@@ -614,6 +678,66 @@ loadStations()
                 @click="undoIngredientRemove"
               >撤销删除</button>
             </div>
+            <label class="form-label">步骤</label>
+            <div v-if="recipeForm.steps.length" class="step-editor-wrap">
+              <ol class="step-editor">
+                <li
+                  v-for="(_step, idx) in recipeForm.steps"
+                  :key="idx"
+                  class="step-editor-row"
+                  @dragover.prevent
+                  @drop.prevent="onStepDrop(idx)"
+                >
+                  <div class="reorder-controls">
+                    <button
+                      type="button"
+                      class="drag-handle"
+                      draggable="true"
+                      aria-label="拖拽排序步骤"
+                      @dragstart="onStepDragStart(idx, $event)"
+                      @dragend="onStepDragEnd"
+                    >⋮⋮</button>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-ghost"
+                      aria-label="上移步骤"
+                      :disabled="idx === 0"
+                      @click="moveStep(idx, -1)"
+                    >上移</button>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-ghost"
+                      aria-label="下移步骤"
+                      :disabled="idx === recipeForm.steps.length - 1"
+                      @click="moveStep(idx, 1)"
+                    >下移</button>
+                  </div>
+                  <span class="step-editor-num" aria-hidden="true">{{ idx + 1 }}</span>
+                  <input
+                    class="form-input"
+                    v-model="recipeForm.steps[idx]"
+                    :maxlength="STEP_TEXT_MAX_LEN"
+                    :aria-label="'步骤 ' + (idx + 1)"
+                  >
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-danger"
+                    aria-label="删除步骤"
+                    @click="removeStep(idx)"
+                  >删除</button>
+                </li>
+              </ol>
+            </div>
+            <div class="row-actions ingredient-editor-toolbar">
+              <button type="button" class="btn btn-sm btn-ghost" aria-label="添加步骤" @click="addStep">添加步骤</button>
+              <button
+                v-if="stepUndo"
+                type="button"
+                class="btn btn-sm btn-ghost"
+                aria-label="撤销删除步骤"
+                @click="undoStepRemove"
+              >撤销删除</button>
+            </div>
             <label class="form-label">正文（Markdown）</label>
             <textarea class="form-input" rows="6" v-model="recipeForm.body"></textarea>
           </div>
@@ -623,7 +747,7 @@ loadStations()
               <header class="recipe-card-head">
                 <h3 class="recipe-title">{{ recipeForm.recipe_name || '未命名' }}</h3>
               </header>
-              <div class="recipe-card-body" v-html="ingredientPreviewHtml"></div>
+              <div class="recipe-card-body" v-html="structuredPreviewHtml"></div>
             </article>
           </div>
         </div>

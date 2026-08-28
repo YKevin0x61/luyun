@@ -41,6 +41,8 @@ ALLOWED_ATTRS = {
     "article": {"class", "data-recipe-id"},
     "section": {"class"},
     "header": {"class"},
+    "ol": {"class"},
+    "li": {"class"},
 }
 
 SAFE_PROTOCOLS = {"http:", "https:", "mailto:"}

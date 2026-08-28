@@ -200,3 +200,104 @@ def test_station_html_escapes_recipe_name():
     ])
     assert "<img" not in html
     assert "&lt;img src=x&gt;" in html
+
+
+def test_structured_steps_empty_omits_list():
+    assert render_structured_recipe_body(steps=[]) == ""
+    assert render_structured_recipe_body(steps=None) == ""
+    assert render_structured_recipe_body(ingredients=[], steps=[]) == ""
+
+
+def test_structured_steps_one():
+    html = render_structured_recipe_body(steps=["混合面粉与水"])
+    assert html == (
+        '<ol class="recipe-steps">'
+        '<li class="recipe-steps-item">混合面粉与水</li>'
+        '</ol>'
+    )
+
+
+def test_structured_steps_many():
+    html = render_structured_recipe_body(steps=["混合面粉与水", "静置 10 分钟", "分成剂子"])
+    assert html == (
+        '<ol class="recipe-steps">'
+        '<li class="recipe-steps-item">混合面粉与水</li>'
+        '<li class="recipe-steps-item">静置 10 分钟</li>'
+        '<li class="recipe-steps-item">分成剂子</li>'
+        '</ol>'
+    )
+
+
+def test_structured_steps_escapes_html():
+    html = render_structured_recipe_body(steps=['<script>x</script> 1<"'])
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+    assert "&quot;" in html
+
+
+def test_structured_body_concatenates_ingredients_then_steps():
+    html = render_structured_recipe_body(
+        ingredients=[{"name": "面粉", "amount": "200", "unit": "g"}],
+        steps=["混合面粉与水"],
+    )
+    assert html == (
+        '<table class="recipe-ingredients"><tbody>'
+        '<tr>'
+        '<td class="recipe-ingredients-name">面粉</td>'
+        '<td class="recipe-ingredients-amount">200 g</td>'
+        '</tr>'
+        '</tbody></table>'
+        '<ol class="recipe-steps">'
+        '<li class="recipe-steps-item">混合面粉与水</li>'
+        '</ol>'
+    )
+
+
+def test_html_keeps_structured_step_list_classes():
+    html = render_markdown_to_html(
+        '# T\n\n## S\n\n### 面团\n\n'
+        '<ol class="recipe-steps">'
+        '<li class="recipe-steps-item">混合面粉与水</li>'
+        '</ol>\n'
+    )
+    assert "recipe-steps" in html
+    assert "recipe-steps-item" in html
+
+
+def test_station_html_steps_only_uses_structured_seam():
+    html = render_station_html("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="面团",
+            body_markdown="这段 Markdown 不应出现在结构化卡片里",
+            sort_order=0, id=9,
+            steps=("混合面粉与水", "静置 10 分钟"),
+        ),
+    ])
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    card = soup.select_one("article.recipe-card")
+    assert card is not None
+    ol = card.select_one("ol.recipe-steps")
+    assert ol is not None
+    items = [li.get_text() for li in ol.select("li.recipe-steps-item")]
+    assert items == ["混合面粉与水", "静置 10 分钟"]
+    assert "这段 Markdown 不应出现在结构化卡片里" not in html
+    assert card.select_one(".recipe-ingredients") is None
+
+
+def test_station_html_keeps_ingredients_when_steps_present():
+    html = render_station_html("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="面团", body_markdown="",
+            sort_order=0, id=10,
+            ingredients=({"name": "面粉", "amount": "200", "unit": "g"},),
+            steps=("混合面粉与水",),
+        ),
+    ])
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    body = soup.select_one(".recipe-card-body")
+    assert body.select_one("table.recipe-ingredients") is not None
+    assert body.select_one("ol.recipe-steps") is not None
+    assert body.select_one(".recipe-ingredients-name").get_text() == "面粉"
+    assert body.select_one(".recipe-steps-item").get_text() == "混合面粉与水"
