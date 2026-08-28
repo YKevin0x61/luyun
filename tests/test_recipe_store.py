@@ -139,3 +139,68 @@ def test_search_recipes_skips_inactive_by_default(store):
     assert _run(store.search_recipes("停用虾饺")) == []
     included = _run(store.search_recipes("停用虾饺", include_inactive=True))
     assert included[0]["items"][0]["recipe_id"] == rid
+
+
+def test_missing_ingredients_read_as_empty_list(store):
+    row = _run(store.list_recipes("changfen"))[0]
+    assert row["ingredients"] == []
+    got = _run(store.get_recipe(row["id"]))
+    assert got["ingredients"] == []
+
+
+def test_create_without_ingredients_defaults_empty(store):
+    rid = _run(store.create_recipe("changfen", "配方", "无用料", "正文", None, False))
+    assert _run(store.get_recipe(rid))["ingredients"] == []
+
+
+def test_ingredients_roundtrip(store):
+    items = [
+        {"name": "面粉", "amount": "200", "unit": "g"},
+        {"name": "水", "amount": "适量", "unit": ""},
+    ]
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "body", None, False, ingredients=items,
+    ))
+    got = _run(store.get_recipe(rid))
+    assert got["ingredients"] == [
+        {"name": "面粉", "amount": "200", "unit": "g"},
+        {"name": "水", "amount": "适量", "unit": ""},
+    ]
+    listed = next(x for x in _run(store.list_recipes("changfen")) if x["id"] == rid)
+    assert listed["ingredients"] == [
+        {"name": "面粉", "amount": "200", "unit": "g"},
+        {"name": "水", "amount": "适量", "unit": ""},
+    ]
+
+    updated = _run(store.update_recipe(
+        rid, "配方", "面团", "body", got["sort_order"], False,
+        ingredients=[{"name": "盐", "amount": "2-3", "unit": "g"}],
+    ))
+    assert updated["ingredients"] == [{"name": "盐", "amount": "2-3", "unit": "g"}]
+
+
+def test_create_drops_blank_ingredient_rows(store):
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "body", None, False,
+        ingredients=[
+            {"name": "", "amount": "", "unit": ""},
+            {"name": "盐", "amount": "1", "unit": "g"},
+            {"name": "  ", "amount": "", "unit": ""},
+        ],
+    ))
+    assert _run(store.get_recipe(rid))["ingredients"] == [
+        {"name": "盐", "amount": "1", "unit": "g"},
+    ]
+
+
+def test_invalid_stored_ingredients_json_returns_empty_list(store):
+    row = _run(store.list_recipes("changfen"))[0]
+    conn = sqlite3.connect(store.db_path)
+    conn.execute(
+        "UPDATE sop_recipes SET ingredients_json = ? WHERE id = ?",
+        ("{not json", row["id"]),
+    )
+    conn.commit()
+    conn.close()
+    assert _run(store.get_recipe(row["id"]))["ingredients"] == []
+    assert _run(store.list_recipes("changfen"))[0]["ingredients"] == []

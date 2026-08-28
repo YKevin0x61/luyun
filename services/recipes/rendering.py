@@ -24,12 +24,23 @@ ALLOWED_TAGS = {
     "table", "thead", "tbody", "tfoot", "tr", "th", "td",
     "blockquote", "pre", "code",
     "div", "a",
+    "article", "section", "header",
 }
 
 ALLOWED_ATTRS = {
     "div": {"class", "style"},
     "h3": {"class", "data-recipe-id"},
+    "h4": {"class"},
     "a": {"href", "target", "rel"},
+    "table": {"class"},
+    "thead": {"class"},
+    "tbody": {"class"},
+    "tr": {"class"},
+    "th": {"class"},
+    "td": {"class"},
+    "article": {"class", "data-recipe-id"},
+    "section": {"class"},
+    "header": {"class"},
 }
 
 SAFE_PROTOCOLS = {"http:", "https:", "mailto:"}
@@ -67,11 +78,14 @@ def _sanitize_html(soup: BeautifulSoup) -> None:
             elif tag.name == "h3" and attr == "data-recipe-id":
                 if not str(tag.get(attr) or "").isdigit():
                     del tag[attr]
+            elif tag.name == "article" and attr == "data-recipe-id":
+                if not str(tag.get(attr) or "").isdigit():
+                    del tag[attr]
         if tag.name == "a" and tag.get("target") == "_blank":
             tag["rel"] = "noopener noreferrer"
 
 
-def _postprocess(html_fragment: str) -> str:
+def _sanitize_fragment(html_fragment: str) -> str:
     wrapper = BeautifulSoup(f"<div>{html_fragment}</div>", "html.parser")
     root = wrapper.div
     if root is None:
@@ -92,12 +106,23 @@ def _postprocess(html_fragment: str) -> str:
         parent_classes = parent.get("class") if parent and parent.name else None
         if parent_classes and "table-scroll" in parent_classes:
             continue
+        if "recipe-ingredients" in (table.get("class") or []):
+            continue
         scroll = wrapper.new_tag("div", attrs={"class": "table-scroll"})
         table.replace_with(scroll)
         scroll.append(table)
 
-    inner = root.decode_contents()
+    return root.decode_contents()
+
+
+def _postprocess(html_fragment: str) -> str:
+    inner = _sanitize_fragment(html_fragment)
     return wrap_sop_semantic_layout(inner)
+
+
+def render_markdown_fragment(markdown_text: str) -> str:
+    html = markdown.markdown(markdown_text or "", extensions=MARKDOWN_EXTENSIONS)
+    return _sanitize_fragment(html)
 
 
 def render_markdown_to_html(markdown_text: str) -> str:

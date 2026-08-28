@@ -10,8 +10,18 @@ import {
   assignSortOrders,
   buildSectionOptions,
 } from '../../utils/recipeManageOrder'
+import { SCALE_UNITS } from '../../utils/recipeCore'
+import {
+  addIngredientRow,
+  dropBlankIngredientRows,
+  moveIngredientRow,
+  removeIngredientRow,
+  renderIngredientsTableHtml,
+} from '../../utils/recipeIngredients'
 
 useScopedStylesheet('/recipe.css')
+
+const INGREDIENT_FIELD_MAX_LEN = 120
 
 const view = ref('stations') // 'stations' | 'recipes'
 const stations = ref([])
@@ -22,13 +32,25 @@ const csvDropzoneRef = ref(null)
 const errorMsg = ref('')
 const dragIndex = ref(null)
 const reorderBusy = ref(false)
+const ingredientDragIndex = ref(null)
+const ingredientUndo = ref(null)
 
 // 各类弹窗状态（复用一个 modal 容器，按 kind 渲染不同表单）
 const modal = reactive({ kind: null }) // 'add-station' | 'rename-station' | 'recipe-form' | 'history'
 const stationForm = reactive({ slug: '', title: '' })
 const renameForm = reactive({ slug: '', title: '' })
-const recipeForm = reactive({ id: null, section: '配方', recipe_name: '', body: '', sort_order: null, is_new: false })
+const recipeForm = reactive({
+  id: null, section: '配方', recipe_name: '', body: '', sort_order: null, is_new: false, ingredients: [],
+})
 const historyItems = ref([])
+
+const ingredientPreviewHtml = computed(() => renderIngredientsTableHtml(
+  recipeForm.ingredients.map((row) => ({
+    name: row.name,
+    amount: row.amount,
+    unit: row.unit,
+  })),
+))
 
 const sectionOptions = computed(() => buildSectionOptions(recipes.value))
 const existingSections = computed(() =>
@@ -53,6 +75,7 @@ function closeModal() {
   if (modal.kind === 'import-csv') csvDropzoneRef.value?.reset()
   modal.kind = null
   errorMsg.value = ''
+  ingredientUndo.value = null
 }
 
 async function loadStations() {
@@ -133,6 +156,8 @@ function openAddRecipe() {
   recipeForm.body = ''
   recipeForm.sort_order = null
   recipeForm.is_new = false
+  recipeForm.ingredients = []
+  ingredientUndo.value = null
   modal.kind = 'recipe-form'
 }
 async function openEditRecipe(id) {
@@ -144,6 +169,12 @@ async function openEditRecipe(id) {
   recipeForm.body = r.body_markdown
   recipeForm.sort_order = r.sort_order
   recipeForm.is_new = !!r.is_new
+  recipeForm.ingredients = (r.ingredients || []).map((row) => ({
+    name: row.name || '',
+    amount: row.amount || '',
+    unit: row.unit || '',
+  }))
+  ingredientUndo.value = null
   modal.kind = 'recipe-form'
 }
 async function submitRecipeForm() {
@@ -154,6 +185,11 @@ async function submitRecipeForm() {
     body: recipeForm.body,
     sort_order: recipeForm.id ? recipeForm.sort_order : null,
     is_new: recipeForm.is_new,
+    ingredients: dropBlankIngredientRows(recipeForm.ingredients).map((row) => ({
+      name: row.name,
+      amount: row.amount,
+      unit: row.unit,
+    })),
   }
   try {
     if (recipeForm.id) {
@@ -218,6 +254,53 @@ function onDrop(idx) {
 
 function moveRecipe(idx, delta) {
   applyRecipeReorder(idx, idx + delta)
+}
+
+function addIngredient() {
+  recipeForm.ingredients = addIngredientRow(recipeForm.ingredients)
+}
+
+function removeIngredient(idx) {
+  const removed = recipeForm.ingredients[idx]
+  if (!removed) return
+  recipeForm.ingredients = removeIngredientRow(recipeForm.ingredients, idx)
+  ingredientUndo.value = { index: idx, row: removed }
+}
+
+function undoIngredientRemove() {
+  const pending = ingredientUndo.value
+  if (!pending) return
+  const list = [...recipeForm.ingredients]
+  const insertAt = Math.min(pending.index, list.length)
+  list.splice(insertAt, 0, pending.row)
+  recipeForm.ingredients = list
+  ingredientUndo.value = null
+}
+
+function applyIngredientReorder(fromIndex, toIndex) {
+  recipeForm.ingredients = moveIngredientRow(recipeForm.ingredients, fromIndex, toIndex)
+}
+
+function onIngredientDragStart(idx, event) {
+  ingredientDragIndex.value = idx
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(idx))
+  }
+}
+
+function onIngredientDragEnd() {
+  ingredientDragIndex.value = null
+}
+
+function onIngredientDrop(idx) {
+  if (ingredientDragIndex.value === null) return
+  applyIngredientReorder(ingredientDragIndex.value, idx)
+  ingredientDragIndex.value = null
+}
+
+function moveIngredient(idx, delta) {
+  applyIngredientReorder(idx, idx + delta)
 }
 
 async function toggleActive(id) {
@@ -417,24 +500,133 @@ loadStations()
     <!-- 弹窗：新增/编辑条目 -->
     <div v-if="modal.kind === 'recipe-form'" class="print-preview-modal" @click.self="closeModal">
       <div class="print-preview-modal-backdrop" @click="closeModal"></div>
-      <div class="sop-panel" style="position:relative;max-width:640px;width:92%;max-height:86vh;overflow:auto;padding:24px;z-index:1">
+      <div class="sop-panel recipe-form-modal">
         <h2 class="page-title" style="font-size:1.2rem">{{ recipeForm.id ? '编辑条目' : '新增条目' }}</h2>
-        <label class="form-label">章节</label>
-        <select class="form-input" v-model="sectionSelectValue">
-          <option v-for="opt in sectionOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-        </select>
-        <input
-          v-if="sectionSelectValue === NEW_SECTION_VALUE"
-          class="form-input new-section-input"
-          v-model="recipeForm.section"
-          aria-label="新章节名"
-          placeholder="输入新章节名"
-        >
-        <label class="form-label">条目名称</label>
-        <input class="form-input" v-model="recipeForm.recipe_name">
-        <label class="form-check"><RecipeCheckbox v-model="recipeForm.is_new" /><span>标记为新品</span></label>
-        <label class="form-label">正文（Markdown）</label>
-        <textarea class="form-input" rows="8" v-model="recipeForm.body"></textarea>
+        <div class="recipe-form-layout">
+          <div class="recipe-form-fields">
+            <label class="form-label">章节</label>
+            <select class="form-input" v-model="sectionSelectValue">
+              <option v-for="opt in sectionOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+            <input
+              v-if="sectionSelectValue === NEW_SECTION_VALUE"
+              class="form-input new-section-input"
+              v-model="recipeForm.section"
+              aria-label="新章节名"
+              placeholder="输入新章节名"
+            >
+            <label class="form-label">条目名称</label>
+            <input class="form-input" v-model="recipeForm.recipe_name">
+            <label class="form-check"><RecipeCheckbox v-model="recipeForm.is_new" /><span>标记为新品</span></label>
+            <label class="form-label">用料</label>
+            <div v-if="recipeForm.ingredients.length" class="ingredient-editor-wrap">
+              <table class="ingredient-editor">
+                <thead>
+                  <tr>
+                    <th class="ingredient-editor-handle"></th>
+                    <th>名称</th>
+                    <th>用量</th>
+                    <th>单位</th>
+                    <th class="ingredient-editor-actions"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="(row, idx) in recipeForm.ingredients"
+                    :key="idx"
+                    class="ingredient-editor-row"
+                    @dragover.prevent
+                    @drop.prevent="onIngredientDrop(idx)"
+                  >
+                    <td>
+                      <div class="reorder-controls">
+                        <button
+                          type="button"
+                          class="drag-handle"
+                          draggable="true"
+                          aria-label="拖拽排序用料"
+                          @dragstart="onIngredientDragStart(idx, $event)"
+                          @dragend="onIngredientDragEnd"
+                        >⋮⋮</button>
+                        <button
+                          type="button"
+                          class="btn btn-sm btn-ghost"
+                          aria-label="上移用料"
+                          :disabled="idx === 0"
+                          @click="moveIngredient(idx, -1)"
+                        >上移</button>
+                        <button
+                          type="button"
+                          class="btn btn-sm btn-ghost"
+                          aria-label="下移用料"
+                          :disabled="idx === recipeForm.ingredients.length - 1"
+                          @click="moveIngredient(idx, 1)"
+                        >下移</button>
+                      </div>
+                    </td>
+                    <td>
+                      <input
+                        class="form-input"
+                        v-model="row.name"
+                        :maxlength="INGREDIENT_FIELD_MAX_LEN"
+                        aria-label="用料名称"
+                      >
+                    </td>
+                    <td>
+                      <input
+                        class="form-input"
+                        v-model="row.amount"
+                        :maxlength="INGREDIENT_FIELD_MAX_LEN"
+                        aria-label="用料用量"
+                      >
+                    </td>
+                    <td>
+                      <input
+                        class="form-input"
+                        list="recipe-scale-units"
+                        v-model="row.unit"
+                        :maxlength="INGREDIENT_FIELD_MAX_LEN"
+                        aria-label="用料单位"
+                      >
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        class="btn btn-sm btn-danger"
+                        aria-label="删除用料"
+                        @click="removeIngredient(idx)"
+                      >删除</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <datalist id="recipe-scale-units">
+              <option v-for="unit in SCALE_UNITS" :key="unit" :value="unit" />
+            </datalist>
+            <div class="row-actions ingredient-editor-toolbar">
+              <button type="button" class="btn btn-sm btn-ghost" aria-label="添加用料" @click="addIngredient">添加用料</button>
+              <button
+                v-if="ingredientUndo"
+                type="button"
+                class="btn btn-sm btn-ghost"
+                aria-label="撤销删除用料"
+                @click="undoIngredientRemove"
+              >撤销删除</button>
+            </div>
+            <label class="form-label">正文（Markdown）</label>
+            <textarea class="form-input" rows="6" v-model="recipeForm.body"></textarea>
+          </div>
+          <div class="recipe-form-preview markdown-body">
+            <p class="form-label">预览</p>
+            <article class="recipe-card">
+              <header class="recipe-card-head">
+                <h3 class="recipe-title">{{ recipeForm.recipe_name || '未命名' }}</h3>
+              </header>
+              <div class="recipe-card-body" v-html="ingredientPreviewHtml"></div>
+            </article>
+          </div>
+        </div>
         <div class="row-actions" style="margin-top:16px">
           <button class="btn btn-primary" @click="submitRecipeForm">保存</button>
           <button class="btn btn-ghost" @click="closeModal">取消</button>
@@ -513,5 +705,18 @@ loadStations()
 .drag-handle:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+.recipe-form-modal {
+  position: relative;
+  max-width: 960px;
+  width: 94%;
+  max-height: 86vh;
+  overflow: auto;
+  padding: 24px;
+  z-index: 1;
+}
+.ingredient-editor-toolbar {
+  justify-content: flex-start;
+  margin: 0.5rem 0 0;
 }
 </style>

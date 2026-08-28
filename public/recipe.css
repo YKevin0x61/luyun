@@ -208,6 +208,9 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .markdown-body tr:last-child th,.markdown-body tr:last-child td{border-bottom:0}
 .markdown-body th{background:var(--jade-soft);color:var(--jade-ink);font-weight:800}
 .markdown-body tbody tr:nth-child(even) td{background:var(--surface-2)}
+.markdown-body table.recipe-ingredients{margin:.15rem 0 0}
+.markdown-body .recipe-ingredients-name{text-align:left;word-break:break-word}
+.markdown-body .recipe-ingredients-amount{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .table-scroll{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;margin:.5rem 0 .8rem;border-radius:var(--radius-sm)}
 .table-scroll table{margin:0;min-width:min(100%,30rem)}
 @media (max-width:40rem){.table-scroll table{min-width:28rem}}
@@ -253,6 +256,20 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .badge-status{display:inline-flex;align-items:center;justify-content:center;min-width:2.6rem;padding:.12rem .5rem;font-size:.72rem;font-weight:800;border-radius:999px;border:1px solid transparent}
 .badge-status--on{color:var(--jade-ink);background:var(--jade-soft);border-color:var(--line)}
 .badge-status--off{color:var(--muted);background:var(--surface-2);border-color:var(--line)}
+.recipe-form-layout{display:grid;gap:1rem}
+@media (min-width:48rem){.recipe-form-layout{grid-template-columns:minmax(0,1.15fr) minmax(16rem,0.85fr);align-items:start}}
+.recipe-form-preview{min-width:0}
+.recipe-form-preview .recipe-card,.recipe-form-preview .recipe-card:hover{transition:none;transform:none;box-shadow:var(--shadow-sm)}
+.recipe-form-preview .recipe-card-body{transition:none}
+.ingredient-editor-wrap{overflow:auto;border:1px solid var(--line);border-radius:var(--radius-sm)}
+.ingredient-editor{width:100%;min-width:28rem;border-collapse:separate;border-spacing:0;font-size:.88rem}
+.ingredient-editor th,.ingredient-editor td{padding:.35rem .4rem;text-align:left;vertical-align:middle;border-bottom:1px solid var(--line)}
+.ingredient-editor th{background:var(--surface-2);font-size:.75rem;color:var(--muted)}
+.ingredient-editor tr:last-child td{border-bottom:0}
+.ingredient-editor .form-input{min-height:2.1rem;padding:.3rem .45rem}
+.ingredient-editor-handle,.ingredient-editor-actions{width:1%}
+.ingredient-editor-row{animation:sop-fade .18s var(--ease) both}
+@media (prefers-reduced-motion:reduce){.ingredient-editor-row{animation:none}}
 
 /* ===== 11. 弹层（管理端 modal 复用） ===== */
 .print-preview-modal{position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;padding:.5rem}
@@ -414,6 +431,7 @@ body.batch-mode .station-item.is-checked .station-link{border-color:var(--jade);
   .markdown-body tbody tr:nth-child(even) td{background:transparent}
   .markdown-body th,.markdown-body td{border-bottom:1px solid #ccc;border-right:1px solid #ccc}
   .markdown-body tr{break-inside:avoid;page-break-inside:avoid}
+  .markdown-body .recipe-ingredients-amount{text-align:right;font-variant-numeric:tabular-nums}
   .table-scroll{overflow:visible;border:0}
   .markdown-body blockquote{background:var(--quote-bg);color:var(--quote);box-shadow:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}
   .sop-print-page-break{margin:0;border:0;break-after:page;page-break-after:always}

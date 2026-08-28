@@ -56,6 +56,7 @@ export function formatQty(n) {
 }
 
 const SCALE_UNIT = '千克|毫升|kg|mg|mL|ml|cc|克|斤|两|钱|升|杯|勺|滴|只|个|块|片|张|条|根|瓶|包|袋|盒|颗|粒|份|g|L'
+export const SCALE_UNITS = SCALE_UNIT.split('|')
 const SCALE_RE = new RegExp(
   `(\\d+(?:\\.\\d+)?)\\s*([-~\u2013])\\s*(\\d+(?:\\.\\d+)?)(\\s*)(${SCALE_UNIT})` +
     `|(\\d+)\\s*/\\s*(\\d+)(\\s*)(${SCALE_UNIT})` +

@@ -9,12 +9,13 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from services.recipes.store import (
     RecipeStore, SLUG_MAX_LEN, TEXT_FIELD_MAX_LEN, BODY_MAX_LEN,
+    INGREDIENT_FIELD_MAX_LEN,
 )
-from services.recipes.rendering import render_markdown_to_html, render_markdown_to_docx
+from services.recipes.rendering import render_markdown_to_docx
 from api.security import verify_admin_token
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
@@ -63,6 +64,18 @@ def _validate_body(value: str) -> str:
     return body
 
 
+def _validate_ingredients(items) -> list[dict]:
+    out: list[dict] = []
+    for item in items or []:
+        name = _validate_text(item.name, "用料名称", required=False, max_len=INGREDIENT_FIELD_MAX_LEN)
+        amount = _validate_text(item.amount, "用料用量", required=False, max_len=INGREDIENT_FIELD_MAX_LEN)
+        unit = _validate_text(item.unit, "用料单位", required=False, max_len=INGREDIENT_FIELD_MAX_LEN)
+        if not name and not amount and not unit:
+            continue
+        out.append({"name": name, "amount": amount, "unit": unit})
+    return out
+
+
 def _csv_safe_cell(value) -> str:
     text = "" if value is None else str(value)
     if text.startswith(DANGEROUS_CSV_PREFIXES):
@@ -84,12 +97,19 @@ class StationRename(BaseModel):
     title: str
 
 
+class IngredientItem(BaseModel):
+    name: str = ""
+    amount: str = ""
+    unit: str = ""
+
+
 class RecipeCreate(BaseModel):
     section: str = "配方"
     recipe_name: str
     body: str = ""
     sort_order: Optional[int] = None
     is_new: bool = False
+    ingredients: list[IngredientItem] = Field(default_factory=list)
 
 
 class RecipeUpdate(BaseModel):
@@ -98,6 +118,7 @@ class RecipeUpdate(BaseModel):
     body: str = ""
     sort_order: Optional[int] = None
     is_new: bool = False
+    ingredients: Optional[list[IngredientItem]] = None
 
 
 class RecipeReorder(BaseModel):
@@ -122,11 +143,11 @@ async def station_detail(slug: str, include_inactive: bool = False,
     station = await store.get_station(slug)
     if station is None:
         raise HTTPException(status_code=404, detail="岗位不存在")
-    md = await store.station_display_markdown(slug, include_inactive=include_inactive)
-    if md is None:
+    html = await store.station_display_html(slug, include_inactive=include_inactive)
+    if html is None:
         raise HTTPException(status_code=404, detail="该岗位暂无可显示条目")
     return {"slug": station["slug"], "title": station["title"],
-            "content_html": render_markdown_to_html(md)}
+            "content_html": html}
 
 
 @router.get("/stations/{slug}/recipes")
@@ -184,7 +205,10 @@ async def create_recipe(slug: str, payload: RecipeCreate, store: RecipeStore = D
     section = _validate_text(payload.section or "配方", "章节")
     name = _validate_text(payload.recipe_name, "条目名称")
     body = _validate_body(payload.body)
-    rid = await store.create_recipe(slug, section, name, body, payload.sort_order, payload.is_new)
+    ingredients = _validate_ingredients(payload.ingredients)
+    rid = await store.create_recipe(
+        slug, section, name, body, payload.sort_order, payload.is_new, ingredients=ingredients,
+    )
     return {"id": rid}
 
 
@@ -197,7 +221,12 @@ async def update_recipe(recipe_id: int, payload: RecipeUpdate, store: RecipeStor
     name = _validate_text(payload.recipe_name, "条目名称")
     body = _validate_body(payload.body)
     sort_order = payload.sort_order if payload.sort_order is not None else int(current["sort_order"])
-    updated = await store.update_recipe(recipe_id, section, name, body, sort_order, payload.is_new)
+    ingredients = (
+        None if payload.ingredients is None else _validate_ingredients(payload.ingredients)
+    )
+    updated = await store.update_recipe(
+        recipe_id, section, name, body, sort_order, payload.is_new, ingredients=ingredients,
+    )
     return updated
 
 

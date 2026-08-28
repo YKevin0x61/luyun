@@ -4,6 +4,7 @@ data/app.db（WAL），自身仍持有独立连接（不接入 DatabaseManager �
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from typing import Optional
@@ -17,11 +18,14 @@ from .sop_parse import (
     ParsedRecipe,
     recipes_to_display_markdown,
 )
+from .structured_render import render_station_html
 
 SLUG_MAX_LEN = 64
 TEXT_FIELD_MAX_LEN = 120
+INGREDIENT_FIELD_MAX_LEN = TEXT_FIELD_MAX_LEN
 BODY_MAX_LEN = 50_000
 LIKE_ESCAPE_CHAR = "!"
+INGREDIENT_KEYS = ("name", "amount", "unit")
 
 
 def _escape_like_literal(text: str) -> str:
@@ -32,6 +36,45 @@ def _escape_like_literal(text: str) -> str:
         .replace("%", LIKE_ESCAPE_CHAR + "%")
         .replace("_", LIKE_ESCAPE_CHAR + "_")
     )
+
+
+def _normalize_ingredients(value) -> list[dict]:
+    if not value:
+        return []
+    out: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        row = {}
+        for key in INGREDIENT_KEYS:
+            raw = item.get(key)
+            row[key] = "" if raw is None else str(raw).strip()
+        if not any(row[key] for key in INGREDIENT_KEYS):
+            continue
+        out.append(row)
+    return out
+
+
+def _ingredients_from_storage(raw) -> list[dict]:
+    if raw is None or raw == "":
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return _normalize_ingredients(data)
+
+
+def _ingredients_to_storage(value) -> str:
+    return json.dumps(_normalize_ingredients(value), ensure_ascii=False)
+
+
+def _recipe_dict(row) -> dict:
+    data = dict(row)
+    data["ingredients"] = _ingredients_from_storage(data.pop("ingredients_json", None))
+    return data
 
 
 def utc_now_iso() -> str:
@@ -87,6 +130,7 @@ class RecipeStore:
                 sort_order INTEGER NOT NULL,
                 is_new INTEGER NOT NULL DEFAULT 0,
                 is_active INTEGER NOT NULL DEFAULT 1,
+                ingredients_json TEXT,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
             );
@@ -113,6 +157,10 @@ class RecipeStore:
         if "is_active" not in cols:
             await self.conn.execute(
                 "ALTER TABLE sop_recipes ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+            )
+        if "ingredients_json" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes ADD COLUMN ingredients_json TEXT"
             )
 
     # ---- 岗位 ----
@@ -171,24 +219,26 @@ class RecipeStore:
     async def list_recipes(self, slug: str) -> list[dict]:
         cur = await self.conn.execute(
             """
-            SELECT id, section, recipe_name, body_markdown, sort_order, updated_at, is_new, is_active
+            SELECT id, section, recipe_name, body_markdown, sort_order, updated_at, is_new, is_active,
+                   ingredients_json
             FROM sop_recipes WHERE station_slug = ?
             ORDER BY sort_order ASC, id ASC
             """,
             (slug,),
         )
-        return [dict(r) for r in await cur.fetchall()]
+        return [_recipe_dict(r) for r in await cur.fetchall()]
 
     async def get_recipe(self, recipe_id: int) -> Optional[dict]:
         cur = await self.conn.execute(
             """
-            SELECT id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, is_active, updated_at
+            SELECT id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, is_active, updated_at,
+                   ingredients_json
             FROM sop_recipes WHERE id = ?
             """,
             (recipe_id,),
         )
         row = await cur.fetchone()
-        return dict(row) if row else None
+        return _recipe_dict(row) if row else None
 
     async def _allocate_sort_order(self, slug: str, section: str, explicit: int | None) -> int:
         if explicit is not None:
@@ -220,15 +270,19 @@ class RecipeStore:
 
     async def create_recipe(
         self, slug: str, section: str, recipe_name: str, body: str,
-        explicit_sort: int | None, is_new_checked: bool,
+        explicit_sort: int | None, is_new_checked: bool, ingredients=None,
     ) -> int:
         now = utc_now_iso()
         sort_order = await self._allocate_sort_order(slug, section, explicit_sort)
         is_new = is_new_checked
         cur = await self.conn.execute(
-            "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, is_new, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (slug, section, recipe_name, body, sort_order, 1 if is_new else 0, now),
+            "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, is_new, "
+            "ingredients_json, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                slug, section, recipe_name, body, sort_order, 1 if is_new else 0,
+                _ingredients_to_storage(ingredients), now,
+            ),
         )
         await self._touch_station(slug, now)
         await self.conn.commit()
@@ -236,13 +290,16 @@ class RecipeStore:
 
     async def update_recipe(
         self, recipe_id: int, section: str, recipe_name: str, body: str,
-        sort_order: int, is_new_checked: bool,
+        sort_order: int, is_new_checked: bool, ingredients=None,
     ) -> Optional[dict]:
         current = await self.get_recipe(recipe_id)
         if current is None:
             return None
         now = utc_now_iso()
         is_new = is_new_checked
+        stored_ingredients = (
+            current["ingredients"] if ingredients is None else ingredients
+        )
         await self.conn.execute(
             "INSERT INTO sop_recipes_history "
             "(recipe_id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, changed_at) "
@@ -251,9 +308,13 @@ class RecipeStore:
             (now, recipe_id),
         )
         await self.conn.execute(
-            "UPDATE sop_recipes SET section=?, recipe_name=?, body_markdown=?, sort_order=?, is_new=?, updated_at=? "
+            "UPDATE sop_recipes SET section=?, recipe_name=?, body_markdown=?, sort_order=?, is_new=?, "
+            "ingredients_json=?, updated_at=? "
             "WHERE id = ?",
-            (section, recipe_name, body, sort_order, 1 if is_new else 0, now, recipe_id),
+            (
+                section, recipe_name, body, sort_order, 1 if is_new else 0,
+                _ingredients_to_storage(stored_ingredients), now, recipe_id,
+            ),
         )
         await self._touch_station(current["station_slug"], now)
         await self.conn.commit()
@@ -368,7 +429,7 @@ class RecipeStore:
         if not include_inactive:
             where += " AND is_active = 1"
         cur = await self.conn.execute(
-            "SELECT id, section, recipe_name, body_markdown, sort_order, is_new, is_active "
+            "SELECT id, section, recipe_name, body_markdown, sort_order, is_new, is_active, ingredients_json "
             "FROM sop_recipes " + where + " ORDER BY sort_order ASC, id ASC",
             (slug,),
         )
@@ -379,6 +440,7 @@ class RecipeStore:
                 body_markdown=r["body_markdown"], sort_order=int(r["sort_order"]),
                 is_new=bool(r["is_new"]), is_active=bool(r["is_active"]),
                 id=int(r["id"]),
+                ingredients=tuple(_ingredients_from_storage(r["ingredients_json"])),
             )
             for r in rows
         ]
@@ -391,3 +453,12 @@ class RecipeStore:
         if not recipes:
             return None
         return recipes_to_display_markdown(station["title"], recipes)
+
+    async def station_display_html(self, slug: str, include_inactive: bool = False) -> Optional[str]:
+        station = await self.get_station(slug)
+        if station is None:
+            return None
+        recipes = await self._parsed_recipes(slug, include_inactive)
+        if not recipes:
+            return None
+        return render_station_html(station["title"], recipes)

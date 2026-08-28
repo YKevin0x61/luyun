@@ -92,6 +92,27 @@ def test_station_detail_stamps_recipe_id_on_cards(client):
     assert "recipe-card" in html
 
 
+def test_station_detail_renders_structured_ingredients_table(client):
+    rid = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "这段 Markdown 不应出现在结构化卡片里",
+            "is_new": False,
+            "ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}],
+        },
+    ).json()["id"]
+    html = client.get("/api/recipes/stations/changfen").json()["content_html"]
+    assert "recipe-ingredients" in html
+    assert "面粉" in html
+    assert "200 g" in html
+    assert f'data-recipe-id="{rid}"' in html
+    assert "这段 Markdown 不应出现在结构化卡片里" not in html
+    assert "酱油：100g" in html
+    assert "sop-section-grid" in html
+
+
 def test_station_detail_404(client):
     assert client.get("/api/recipes/stations/nope").status_code == 404
 
@@ -312,3 +333,130 @@ def test_search_stays_public(client):
     r = client.get("/api/recipes/search", params={"q": "肠粉"})
     assert r.status_code == 200
     assert r.json()["groups"][0]["items"][0]["recipe_name"] == "肠粉酱油"
+
+
+def test_create_omitting_ingredients_still_works(client):
+    r = client.post("/api/recipes/stations/changfen/recipes",
+                    json={"section": "配方", "recipe_name": "无用料", "body": "x", "is_new": False})
+    assert r.status_code == 200
+    rid = r.json()["id"]
+    recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    row = next(x for x in recipes if x["id"] == rid)
+    assert row["ingredients"] == []
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["ingredients"] == []
+
+
+def test_create_and_list_recipes_include_ingredients(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "is_new": False,
+            "ingredients": [
+                {"name": "面粉", "amount": "200", "unit": "g"},
+                {"name": "水", "amount": "适量", "unit": ""},
+            ],
+        },
+    )
+    assert r.status_code == 200
+    rid = r.json()["id"]
+    recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    row = next(x for x in recipes if x["id"] == rid)
+    assert row["ingredients"] == [
+        {"name": "面粉", "amount": "200", "unit": "g"},
+        {"name": "水", "amount": "适量", "unit": ""},
+    ]
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["ingredients"] == row["ingredients"]
+
+
+def test_update_recipe_ingredients(client):
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={
+            "section": "配方",
+            "recipe_name": "肠粉酱油",
+            "body": "酱油：100g",
+            "is_new": False,
+            "ingredients": [{"name": "酱油", "amount": "100", "unit": "g"}],
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["ingredients"] == [{"name": "酱油", "amount": "100", "unit": "g"}]
+
+
+def test_update_omitting_ingredients_still_works(client):
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={"section": "配方", "recipe_name": "改名", "body": "新正文", "is_new": False},
+    )
+    assert r.status_code == 200
+    assert r.json()["recipe_name"] == "改名"
+    assert r.json()["ingredients"] == []
+
+
+def test_update_omitting_ingredients_preserves_existing_rows(client):
+    rid = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}],
+        },
+    ).json()["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={"section": "配方", "recipe_name": "面团改", "body": "", "is_new": False},
+    )
+    assert r.status_code == 200
+    assert r.json()["recipe_name"] == "面团改"
+    assert r.json()["ingredients"] == [{"name": "面粉", "amount": "200", "unit": "g"}]
+
+
+def test_ingredient_name_over_limit_returns_400(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "ingredients": [{"name": "a" * 121, "amount": "1", "unit": "g"}],
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "用料名称长度不能超过 120 个字符"
+
+
+def test_ingredient_amount_over_limit_returns_400(client):
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={
+            "section": "配方",
+            "recipe_name": "肠粉酱油",
+            "body": "",
+            "ingredients": [{"name": "酱油", "amount": "b" * 121, "unit": "g"}],
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "用料用量长度不能超过 120 个字符"
+
+
+def test_ingredient_unit_over_limit_returns_400(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "ingredients": [{"name": "盐", "amount": "1", "unit": "c" * 121}],
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "用料单位长度不能超过 120 个字符"
