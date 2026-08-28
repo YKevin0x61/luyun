@@ -15,7 +15,6 @@ from db_core.utils import SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE_WAL
 
 from .sop_parse import (
     ParsedRecipe,
-    infer_recipe_is_new,
     recipes_to_display_markdown,
 )
 
@@ -214,7 +213,7 @@ class RecipeStore:
     ) -> int:
         now = utc_now_iso()
         sort_order = await self._allocate_sort_order(slug, section, explicit_sort)
-        is_new = infer_recipe_is_new(recipe_name, body) or is_new_checked
+        is_new = is_new_checked
         cur = await self.conn.execute(
             "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, is_new, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -232,7 +231,7 @@ class RecipeStore:
         if current is None:
             return None
         now = utc_now_iso()
-        is_new = infer_recipe_is_new(recipe_name, body) or is_new_checked
+        is_new = is_new_checked
         await self.conn.execute(
             "INSERT INTO sop_recipes_history "
             "(recipe_id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, changed_at) "

@@ -126,3 +126,18 @@ def test_station_detail_include_inactive(client):
     d2 = client.get("/api/recipes/stations/changfen?include_inactive=1").json()
     assert "停售品" in d2["content_html"]
     assert "recipe-card--inactive" in d2["content_html"]
+
+
+def test_import_csv_does_not_infer_is_new_from_name_or_body(client):
+    csv_body = (
+        "section,recipe_name,body_markdown,sort_order,is_new\n"
+        "配方,【新】菠菜饺,正文含【新】标记,10,0\n"
+    )
+    r = client.post(
+        "/api/recipes/stations/changfen/import",
+        files={"csv_file": ("recipes.csv", csv_body.encode("utf-8"), "text/csv")},
+    )
+    assert r.status_code == 200
+    recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    imported = next(row for row in recipes if row["recipe_name"] == "【新】菠菜饺")
+    assert imported["is_new"] == 0

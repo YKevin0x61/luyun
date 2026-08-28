@@ -212,9 +212,8 @@ def recipes_to_display_markdown(station_title: str, recipes: list[ParsedRecipe])
         parts.append(f"## {section}")
         parts.append("")
         for r in sorted(section_items[section], key=lambda x: x.sort_order):
-            display_new = r.is_new or infer_recipe_is_new(r.recipe_name, r.body_markdown)
             classes = ["recipe-title"]
-            if display_new:
+            if r.is_new:
                 classes.append("recipe-title--new")
             if not r.is_active:
                 classes.append("recipe-title--inactive")

@@ -392,3 +392,13 @@ _Avoid_: 更新作业在 Web 请求线程里做完下载与切换；失败后停
 可用 systemd 宿主机路径，或 Docker / Compose 进程外壳（`deploy/docker-compose.yml`：挂载直播树的**父目录** + `docker.sock`；升级仍走发行包 / Admin「系统更新」）。
 不含反代/TLS/域名与 POS 凭据填写——那些仍是人工一步。
 _Avoid_: 引导安装以私有仓 clone 或强制 PAT 为必经步骤；把 Docker 镜像 pull 当成店内交付真相。
+
+## 配方 SOP
+
+### 配方岗位 (Recipe Station)
+配方模块自己的一套岗位登记（`sop_stations.slug/title`），与 KDS 权威的「档口」（`config.py KITCHEN_STATIONS`）是两套独立数据，不互相引用、不要求一一对应；可以包含非制作档口的岗位（如传菜、楼面）。命名可能相似纯属巧合，不代表同一实体。
+_Avoid_: 把配方岗位当成 KDS 档口的展示层；假设改一处另一处会跟着变。
+
+### 新品 (New Product Marker)
+配方条目上的「新品」角标，唯一权威来源是显式的 `is_new` 字段；正文或名称里的【新】文字不再有语义。
+_Avoid_: 靠正文文字自动判断新品；两种来源同时生效。

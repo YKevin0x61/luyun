@@ -62,12 +62,29 @@ def test_create_and_get_recipe(store):
     assert r["recipe_name"] == "新条目"
 
 
+def test_create_does_not_infer_is_new_from_name_or_body(store):
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "【新】菠菜饺", "正文含【新】标记", None, False,
+    ))
+    r = _run(store.get_recipe(rid))
+    assert r["is_new"] == 0
+
+
 def test_update_writes_history(store):
     r = _run(store.list_recipes("changfen"))[0]
     _run(store.update_recipe(r["id"], "配方", "改名", "新正文", r["sort_order"], False))
     hist = _run(store.list_history(r["id"]))
     assert len(hist) == 1
     assert hist[0]["recipe_name"] == "肠粉酱油"
+
+
+def test_update_does_not_infer_is_new_from_name_or_body(store):
+    r = _run(store.list_recipes("changfen"))[0]
+    _run(store.update_recipe(
+        r["id"], "配方", "【新】菠菜饺", "正文含【新】标记", r["sort_order"], False,
+    ))
+    updated = _run(store.get_recipe(r["id"]))
+    assert updated["is_new"] == 0
 
 
 def test_toggle_active(store):

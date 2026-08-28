@@ -69,3 +69,18 @@ def test_display_markdown_appended_item_stays_in_its_section():
     assert md.count("## 配方") == 1
     # 新增条目归位到「配方」块，先于后续章节「食安要求」
     assert md.index("新增丙") < md.index("## 食安要求")
+
+
+def test_display_markdown_new_class_follows_explicit_is_new_only():
+    recipes = [
+        ParsedRecipe(
+            section="配方",
+            recipe_name="【新】菠菜饺",
+            body_markdown="正文含【新】标记",
+            sort_order=0,
+            is_new=False,
+            is_active=True,
+        ),
+    ]
+    md = recipes_to_display_markdown("测", recipes)
+    assert "recipe-title--new" not in md

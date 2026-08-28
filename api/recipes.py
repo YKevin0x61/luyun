@@ -15,7 +15,6 @@ from services.recipes.store import (
     RecipeStore, SLUG_MAX_LEN, TEXT_FIELD_MAX_LEN, BODY_MAX_LEN,
 )
 from services.recipes.rendering import render_markdown_to_html, render_markdown_to_docx
-from services.recipes.sop_parse import infer_recipe_is_new
 from api.security import verify_admin_token
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
@@ -266,7 +265,7 @@ async def import_csv(slug: str, csv_file: UploadFile = File(...),
             except ValueError:
                 errors.append(f"第 {idx} 行：排序号必须是整数")
                 continue
-            is_new = 1 if (infer_recipe_is_new(name, body) or _parse_bool_flag(row_data.get("is_new"))) else 0
+            is_new = 1 if _parse_bool_flag(row_data.get("is_new")) else 0
             pending.append((section, name, body, sort_order, is_new))
     except csv.Error as e:
         raise HTTPException(status_code=400, detail=f"导入失败：CSV 格式错误：{e}")
