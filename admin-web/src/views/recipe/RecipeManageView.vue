@@ -29,6 +29,11 @@ import {
   dropBlankTipRows,
   removeTipRow,
 } from '../../utils/recipeTips'
+import {
+  filterRecipesByReview,
+  recipeHasLegacyMarkdown,
+  recipeNeedsReview,
+} from '../../utils/recipeReview'
 
 useScopedStylesheet('/recipe.css')
 
@@ -41,10 +46,12 @@ const stations = ref([])
 const currentSlug = ref('')
 const currentTitle = ref('')
 const recipes = ref([])
+const reviewOnly = ref(false)
 const csvDropzoneRef = ref(null)
 const errorMsg = ref('')
 const dragIndex = ref(null)
 const reorderBusy = ref(false)
+const confirmReviewBusy = ref(false)
 const ingredientDragIndex = ref(null)
 const ingredientUndo = ref(null)
 const stepDragIndex = ref(null)
@@ -59,8 +66,11 @@ const recipeForm = reactive({
   id: null, section: '配方', recipe_name: '', body: '', sort_order: null, is_new: false,
   ingredients: [], steps: [], tips: [],
   base_servings_qty: '', base_servings_unit: '',
+  needs_review: 0, legacy_markdown: '',
 })
 const historyItems = ref([])
+const visibleRecipes = computed(() => filterRecipesByReview(recipes.value, reviewOnly.value))
+const reviewCount = computed(() => filterRecipesByReview(recipes.value, true).length)
 
 const structuredPreviewHtml = computed(() => renderStructuredRecipePreviewHtml(
   recipeForm.ingredients.map((row) => ({
@@ -114,6 +124,7 @@ async function loadStations() {
 async function openStation(slug) {
   try {
     currentSlug.value = slug
+    reviewOnly.value = false
     const data = await api.get('/api/recipes/stations')
     const st = (data.stations || []).find((s) => s.slug === slug)
     currentTitle.value = st ? st.title : slug
@@ -183,6 +194,8 @@ function openAddRecipe() {
   recipeForm.tips = []
   recipeForm.base_servings_qty = ''
   recipeForm.base_servings_unit = ''
+  recipeForm.needs_review = 0
+  recipeForm.legacy_markdown = ''
   ingredientUndo.value = null
   stepUndo.value = null
   tipUndo.value = null
@@ -206,6 +219,8 @@ async function openEditRecipe(id) {
   recipeForm.tips = (r.tips || []).map((text) => String(text || ''))
   recipeForm.base_servings_qty = r.base_servings_qty == null ? '' : String(r.base_servings_qty)
   recipeForm.base_servings_unit = r.base_servings_unit || ''
+  recipeForm.needs_review = recipeNeedsReview(r) ? 1 : 0
+  recipeForm.legacy_markdown = r.legacy_markdown == null ? '' : String(r.legacy_markdown)
   ingredientUndo.value = null
   stepUndo.value = null
   tipUndo.value = null
@@ -246,6 +261,26 @@ async function submitRecipeForm() {
     await refreshRecipes()
   } catch (e) {
     errorMsg.value = e.message
+  }
+}
+
+async function confirmReview() {
+  if (!recipeForm.id || confirmReviewBusy.value) return
+  errorMsg.value = ''
+  confirmReviewBusy.value = true
+  try {
+    const updated = await api.post(`/api/recipes/recipes/${recipeForm.id}/confirm-review`, {})
+    recipeForm.needs_review = 0
+    if (updated && updated.legacy_markdown != null) {
+      recipeForm.legacy_markdown = String(updated.legacy_markdown)
+    }
+    recipes.value = recipes.value.map((row) => (
+      row.id === recipeForm.id ? { ...row, needs_review: 0 } : row
+    ))
+  } catch (e) {
+    errorMsg.value = e.message
+  } finally {
+    confirmReviewBusy.value = false
   }
 }
 
@@ -518,12 +553,20 @@ loadStations()
             <button class="btn btn-ghost" @click="loadStations">返回管理首页</button>
           </div>
         </header>
+        <div class="manage-filter-row">
+          <button
+            type="button"
+            class="sop-chip"
+            :aria-pressed="reviewOnly"
+            @click="reviewOnly = !reviewOnly"
+          >待复核 {{ reviewCount }}</button>
+        </div>
         <div class="manage-table-wrap">
           <table class="manage-table">
             <thead><tr><th>排序</th><th>章节</th><th>条目名称</th><th>新品</th><th>状态</th><th class="manage-table-actions">操作</th></tr></thead>
             <tbody>
               <tr
-                v-for="(r, idx) in recipes"
+                v-for="(r, idx) in visibleRecipes"
                 :key="r.id"
                 :class="{ 'is-inactive': !r.is_active }"
                 @dragover.prevent
@@ -536,7 +579,7 @@ loadStations()
                       class="drag-handle"
                       draggable="true"
                       aria-label="拖拽排序"
-                      :disabled="reorderBusy"
+                      :disabled="reorderBusy || reviewOnly"
                       @dragstart="onDragStart(idx, $event)"
                       @dragend="onDragEnd"
                     >⋮⋮</button>
@@ -544,14 +587,14 @@ loadStations()
                       type="button"
                       class="btn btn-sm btn-ghost"
                       aria-label="上移"
-                      :disabled="idx === 0 || reorderBusy"
+                      :disabled="idx === 0 || reorderBusy || reviewOnly"
                       @click="moveRecipe(idx, -1)"
                     >上移</button>
                     <button
                       type="button"
                       class="btn btn-sm btn-ghost"
                       aria-label="下移"
-                      :disabled="idx === recipes.length - 1 || reorderBusy"
+                      :disabled="idx === visibleRecipes.length - 1 || reorderBusy || reviewOnly"
                       @click="moveRecipe(idx, 1)"
                     >下移</button>
                   </div>
@@ -649,6 +692,22 @@ loadStations()
                 aria-label="基准份数单位"
                 placeholder="人份"
               >
+            </div>
+            <div v-if="recipeHasLegacyMarkdown(recipeForm)" class="legacy-review">
+              <div class="legacy-review-head">
+                <span class="form-label">迁移前原文对比</span>
+                <button
+                  v-if="recipeNeedsReview(recipeForm)"
+                  type="button"
+                  class="btn btn-sm btn-primary"
+                  :disabled="confirmReviewBusy"
+                  @click="confirmReview"
+                >确认拆分无误</button>
+              </div>
+              <details class="legacy-review-panel" open>
+                <summary>展开 / 折叠原文</summary>
+                <pre class="legacy-review-pre">{{ recipeForm.legacy_markdown }}</pre>
+              </details>
             </div>
             <label class="form-label">用料</label>
             <div v-if="recipeForm.ingredients.length" class="ingredient-editor-wrap">
@@ -950,5 +1009,49 @@ loadStations()
 }
 .servings-editor .form-input {
   flex: 1;
+}
+.manage-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+}
+.legacy-review {
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.legacy-review-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.legacy-review-head .form-label {
+  margin: 0;
+}
+.legacy-review-panel summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+.legacy-review-pre {
+  margin: 0.5rem 0 0;
+  padding: 0.6rem 0.75rem;
+  max-height: 16rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
 }
 </style>

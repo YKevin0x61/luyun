@@ -171,6 +171,12 @@ def _recipe_dict(row) -> dict:
     )
     data["base_servings_qty"] = qty
     data["base_servings_unit"] = unit
+    try:
+        data["needs_review"] = 1 if int(data.get("needs_review") or 0) else 0
+    except (TypeError, ValueError):
+        data["needs_review"] = 0
+    legacy = data.get("legacy_markdown")
+    data["legacy_markdown"] = None if legacy is None else str(legacy)
     return data
 
 
@@ -295,7 +301,9 @@ class RecipeStore:
         cur = await self.conn.execute(
             """
             SELECT s.slug, s.title, s.updated_at,
-                   (SELECT COUNT(*) FROM sop_recipes r WHERE r.station_slug = s.slug) AS recipe_count
+                   (SELECT COUNT(*) FROM sop_recipes r WHERE r.station_slug = s.slug) AS recipe_count,
+                   (SELECT COUNT(*) FROM sop_recipes r
+                    WHERE r.station_slug = s.slug AND r.needs_review = 1) AS needs_review_count
             FROM sop_stations s
             ORDER BY s.slug COLLATE NOCASE
             """
@@ -347,7 +355,8 @@ class RecipeStore:
         cur = await self.conn.execute(
             """
             SELECT id, section, recipe_name, body_markdown, sort_order, updated_at, is_new, is_active,
-                   ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit
+                   ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit,
+                   needs_review, legacy_markdown
             FROM sop_recipes WHERE station_slug = ?
             ORDER BY sort_order ASC, id ASC
             """,
@@ -359,7 +368,8 @@ class RecipeStore:
         cur = await self.conn.execute(
             """
             SELECT id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, is_active, updated_at,
-                   ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit
+                   ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit,
+                   needs_review, legacy_markdown
             FROM sop_recipes WHERE id = ?
             """,
             (recipe_id,),
@@ -506,6 +516,30 @@ class RecipeStore:
         await self._touch_station(current["station_slug"], now)
         await self.conn.commit()
         return await self.get_recipe(recipe_id)
+
+    async def confirm_review(self, recipe_id: int) -> Optional[dict]:
+        current = await self.get_recipe(recipe_id)
+        if current is None:
+            return None
+        await self.conn.execute(
+            "UPDATE sop_recipes SET needs_review = 0 WHERE id = ?",
+            (recipe_id,),
+        )
+        await self.conn.commit()
+        return await self.get_recipe(recipe_id)
+
+    async def count_needs_review(self, slug: str | None = None) -> int:
+        if slug is None:
+            cur = await self.conn.execute(
+                "SELECT COUNT(*) FROM sop_recipes WHERE needs_review = 1"
+            )
+        else:
+            cur = await self.conn.execute(
+                "SELECT COUNT(*) FROM sop_recipes WHERE needs_review = 1 AND station_slug = ?",
+                (slug,),
+            )
+        row = await cur.fetchone()
+        return int(row[0])
 
     async def search_recipes(self, q: str, include_inactive: bool = False) -> list[dict]:
         """Cross-station substring search on recipe_name. Empty q returns no groups."""

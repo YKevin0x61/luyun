@@ -45,11 +45,18 @@ def _seed(path):
 
 
 @pytest.fixture
-def client(tmp_path):
+def recipe_store(tmp_path):
     db_path = tmp_path / "recipes.db"
     _seed(str(db_path))
     store = RecipeStore(str(db_path))
     _run(store.connect())
+    yield store
+    _run(store.close())
+
+
+@pytest.fixture
+def client(recipe_store, tmp_path):
+    store = recipe_store
 
     old_database_dir = settings.DATABASE_DIR
     settings.DATABASE_DIR = str(tmp_path)
@@ -66,7 +73,6 @@ def client(tmp_path):
         c.headers.update({"X-Admin-Token": token})
         yield c
 
-    _run(store.close())
     _run(auth_db.close())
     set_runtime(None)
     settings.DATABASE_DIR = old_database_dir
@@ -854,3 +860,103 @@ def test_update_negative_base_servings_qty_returns_400(client):
     )
     assert r.status_code == 400
     assert r.json()["detail"] == "基准份数不能为负数"
+
+
+def _flag_review(store, recipe_id, *, needs_review=1, legacy_markdown="旧正文\n第二行"):
+    conn = sqlite3.connect(store.db_path)
+    conn.execute(
+        "UPDATE sop_recipes SET needs_review=?, legacy_markdown=? WHERE id=?",
+        (needs_review, legacy_markdown, recipe_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_list_get_history_include_needs_review_and_legacy_markdown(client, recipe_store):
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    listed = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]
+    assert listed["needs_review"] == 0
+    assert listed["legacy_markdown"] is None
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["needs_review"] == 0
+    assert current["legacy_markdown"] is None
+
+    snapshot = "面粉 200g\n混合"
+    _flag_review(recipe_store, rid, legacy_markdown=snapshot)
+    listed = next(
+        row for row in client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+        if row["id"] == rid
+    )
+    assert listed["needs_review"] == 1
+    assert listed["legacy_markdown"] == snapshot
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["needs_review"] == 1
+    assert current["legacy_markdown"] == snapshot
+
+
+def test_list_stations_includes_needs_review_count(client, recipe_store):
+    stations = client.get("/api/recipes/stations").json()["stations"]
+    assert stations[0]["slug"] == "changfen"
+    assert stations[0]["needs_review_count"] == 0
+
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    _flag_review(recipe_store, rid)
+    stations = client.get("/api/recipes/stations").json()["stations"]
+    assert stations[0]["needs_review_count"] == 1
+
+
+def test_confirm_review_sets_flag_zero_and_preserves_other_fields(client, recipe_store):
+    created = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "正文保留",
+            "is_new": False,
+            "ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}],
+            "steps": ["混合面粉与水"],
+            "tips": ["夏天水温要更低"],
+            "base_servings_qty": 4,
+            "base_servings_unit": "人份",
+        },
+    )
+    assert created.status_code == 200
+    rid = created.json()["id"]
+    snapshot = "迁移前原文\n盐 2g"
+    _flag_review(recipe_store, rid, legacy_markdown=snapshot)
+
+    r = client.post(f"/api/recipes/recipes/{rid}/confirm-review")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["needs_review"] == 0
+    assert body["legacy_markdown"] == snapshot
+    assert body["recipe_name"] == "面团"
+    assert body["body_markdown"] == "正文保留"
+    assert body["ingredients"] == [{"name": "面粉", "amount": "200", "unit": "g"}]
+    assert body["steps"] == ["混合面粉与水"]
+    assert body["tips"] == ["夏天水温要更低"]
+    assert body["base_servings_qty"] == 4
+    assert body["base_servings_unit"] == "人份"
+
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["needs_review"] == 0
+    assert current["legacy_markdown"] == snapshot
+    assert current["ingredients"] == body["ingredients"]
+    listed = next(
+        row for row in client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+        if row["id"] == rid
+    )
+    assert listed["needs_review"] == 0
+    assert listed["legacy_markdown"] == snapshot
+
+
+def test_confirm_review_missing_returns_404(client):
+    r = client.post("/api/recipes/recipes/99999/confirm-review")
+    assert r.status_code == 404
+
+
+def test_confirm_review_requires_auth(client):
+    client.headers.pop("X-Admin-Token", None)
+    r = client.post("/api/recipes/recipes/1/confirm-review")
+    assert r.status_code == 401
+

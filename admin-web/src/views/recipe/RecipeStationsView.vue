@@ -268,7 +268,13 @@ function onDocumentPointerDown(evt) {
             <router-link class="station-link" :to="`/recipe/detail?slug=${encodeURIComponent(s.slug)}`" @click="onItemClick(s.slug, $event)">
               <span class="station-link-icon" aria-hidden="true">{{ (s.title || '·').slice(0, 1) }}</span>
               <span class="station-link-copy">
-                <span class="station-link-title">{{ s.title }}</span>
+                <span class="station-link-title">
+                  {{ s.title }}
+                  <span
+                    v-if="s.needs_review_count > 0"
+                    class="station-review-badge"
+                  >待复核 {{ s.needs_review_count }}</span>
+                </span>
                 <span class="station-link-subtitle">{{ s.recipe_count }} 个条目 · 查看配方 / 出品标准 / 检核</span>
               </span>
               <span class="station-link-arrow" aria-hidden="true">→</span>
@@ -285,5 +291,23 @@ function onDocumentPointerDown(evt) {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+}
+.station-link-title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.station-review-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.08rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: var(--new);
+  font-variant-numeric: tabular-nums;
 }
 </style>

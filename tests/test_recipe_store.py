@@ -478,3 +478,113 @@ def test_connect_adds_legacy_markdown_and_needs_review_columns(store):
     assert cols["needs_review"][2].upper() == "INTEGER"
     assert cols["needs_review"][4] == "0"
     assert cols["needs_review"][3] == 1
+
+
+def _flag_review(store, recipe_id, *, needs_review=1, legacy_markdown="旧正文\n第二行"):
+    conn = sqlite3.connect(store.db_path)
+    conn.execute(
+        "UPDATE sop_recipes SET needs_review=?, legacy_markdown=? WHERE id=?",
+        (needs_review, legacy_markdown, recipe_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_list_and_get_include_needs_review_and_legacy_markdown(store):
+    row = _run(store.list_recipes("changfen"))[0]
+    assert row["needs_review"] == 0
+    assert row["legacy_markdown"] is None
+    got = _run(store.get_recipe(row["id"]))
+    assert got["needs_review"] == 0
+    assert got["legacy_markdown"] is None
+
+    _flag_review(store, row["id"], legacy_markdown="面粉 200g")
+    listed = _run(store.list_recipes("changfen"))[0]
+    assert listed["needs_review"] == 1
+    assert listed["legacy_markdown"] == "面粉 200g"
+    fetched = _run(store.get_recipe(row["id"]))
+    assert fetched["needs_review"] == 1
+    assert fetched["legacy_markdown"] == "面粉 200g"
+
+
+def test_create_defaults_needs_review_zero_and_legacy_null(store):
+    rid = _run(store.create_recipe("changfen", "配方", "新条目", "正文", None, False))
+    got = _run(store.get_recipe(rid))
+    assert got["needs_review"] == 0
+    assert got["legacy_markdown"] is None
+
+
+def test_confirm_review_clears_flag_and_preserves_other_fields(store):
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "正文保留", None, False,
+        ingredients=[{"name": "面粉", "amount": "200", "unit": "g"}],
+        steps=["混合面粉与水"],
+        tips=["夏天水温要更低"],
+        base_servings_qty=4,
+        base_servings_unit="人份",
+    ))
+    snapshot = "迁移前原文\n盐 2g"
+    _flag_review(store, rid, legacy_markdown=snapshot)
+    before = _run(store.get_recipe(rid))
+    assert before["needs_review"] == 1
+
+    updated = _run(store.confirm_review(rid))
+    assert updated["id"] == rid
+    assert updated["needs_review"] == 0
+    assert updated["legacy_markdown"] == snapshot
+    assert updated["recipe_name"] == "面团"
+    assert updated["body_markdown"] == "正文保留"
+    assert updated["ingredients"] == [{"name": "面粉", "amount": "200", "unit": "g"}]
+    assert updated["steps"] == ["混合面粉与水"]
+    assert updated["tips"] == ["夏天水温要更低"]
+    assert updated["base_servings_qty"] == 4
+    assert updated["base_servings_unit"] == "人份"
+    listed = next(x for x in _run(store.list_recipes("changfen")) if x["id"] == rid)
+    assert listed["needs_review"] == 0
+    assert listed["legacy_markdown"] == snapshot
+
+
+def test_confirm_review_missing_returns_none(store):
+    assert _run(store.confirm_review(99999)) is None
+
+
+def test_count_needs_review_all_and_by_station(store):
+    seed = _run(store.list_recipes("changfen"))[0]
+    _run(store.create_station("shulong", "熟笼档"))
+    other = _run(store.create_recipe("shulong", "配方", "鲜虾饺", "虾馅", None, False))
+    assert _run(store.count_needs_review()) == 0
+    assert _run(store.count_needs_review("changfen")) == 0
+    assert _run(store.count_needs_review("shulong")) == 0
+
+    _flag_review(store, seed["id"])
+    _flag_review(store, other, legacy_markdown="虾 10只")
+    extra = _run(store.create_recipe("changfen", "配方", "第二", "x", None, False))
+    _flag_review(store, extra, legacy_markdown="第二原文")
+
+    assert _run(store.count_needs_review()) == 3
+    assert _run(store.count_needs_review(None)) == 3
+    assert _run(store.count_needs_review("changfen")) == 2
+    assert _run(store.count_needs_review("shulong")) == 1
+    _run(store.confirm_review(seed["id"]))
+    assert _run(store.count_needs_review("changfen")) == 1
+    assert _run(store.count_needs_review()) == 2
+
+
+def test_list_stations_includes_needs_review_count(store):
+    rows = _run(store.list_stations())
+    assert rows[0]["slug"] == "changfen"
+    assert rows[0]["needs_review_count"] == 0
+
+    seed = _run(store.list_recipes("changfen"))[0]
+    _flag_review(store, seed["id"])
+    _run(store.create_station("shulong", "熟笼档"))
+    other = _run(store.create_recipe("shulong", "配方", "鲜虾饺", "虾馅", None, False))
+    _flag_review(store, other)
+
+    by_slug = {row["slug"]: row for row in _run(store.list_stations())}
+    assert by_slug["changfen"]["needs_review_count"] == 1
+    assert by_slug["shulong"]["needs_review_count"] == 1
+    _run(store.confirm_review(seed["id"]))
+    by_slug = {row["slug"]: row for row in _run(store.list_stations())}
+    assert by_slug["changfen"]["needs_review_count"] == 0
+    assert by_slug["shulong"]["needs_review_count"] == 1

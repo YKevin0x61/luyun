@@ -316,6 +316,14 @@ async def toggle_active(recipe_id: int, store: RecipeStore = Depends(_get_recipe
     return updated
 
 
+@router.post("/recipes/{recipe_id}/confirm-review", dependencies=[Depends(verify_admin_token)])
+async def confirm_review(recipe_id: int, store: RecipeStore = Depends(_get_recipe_store)):
+    updated = await store.confirm_review(recipe_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="条目不存在")
+    return updated
+
+
 @router.get("/recipes/{recipe_id}/history")
 async def recipe_history(recipe_id: int, store: RecipeStore = Depends(_get_recipe_store)):
     current = await store.get_recipe(recipe_id)

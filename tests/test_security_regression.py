@@ -159,6 +159,11 @@ class TestRecipesWriteRequiresAuth(unittest.TestCase):
             )
         self.assertEqual(resp.status_code, 401)
 
+    def test_confirm_review_requires_auth(self):
+        with TestClient(self.app) as client:
+            resp = client.post("/api/recipes/recipes/1/confirm-review")
+        self.assertEqual(resp.status_code, 401)
+
     def test_list_stations_stays_public(self):
         with TestClient(self.app) as client:
             resp = client.get("/api/recipes/stations")
