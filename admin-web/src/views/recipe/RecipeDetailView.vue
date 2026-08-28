@@ -7,6 +7,7 @@ import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import * as RC from '../../utils/recipeCore'
 import { RECIPE_INGREDIENTS_AMOUNT_CLASS } from '../../utils/recipeIngredients'
 import { parseBaseServingsQty, scaleAmount, servingsFactor } from '../../utils/recipeServings'
+import { isRecipeDrawerPanel, nextRecipeDrawerState } from '../../utils/recipeDrawer'
 import SvgIcon from '../../components/SvgIcon.vue'
 import RecipeNavIcon from './RecipeNavIcon.vue'
 
@@ -39,8 +40,16 @@ const qrCanvasRef = ref(null)
 const targetServingsQty = ref('')
 const servingsUnitLabel = ref('')
 const servingsControlVisible = ref(false)
+const drawerPanel = ref(null)
+const drawerRef = ref(null)
+const canEdit = ref(false)
+const lastTriggerEls = {}
+const SHEET_TITLES = { toc: '章节目录', more: '更多', font: '字号', servings: '目标份数', search: '搜索' }
+const sheetOpen = computed(() => isRecipeDrawerPanel(drawerPanel.value))
+const sheetTitle = computed(() => SHEET_TITLES[drawerPanel.value] || '')
 
 let searchDebounce = null
+let desktopMq = null
 let intersectionObserver = null
 let focusHighlightTimer = null
 let scaleOutsideHandler = null
@@ -149,9 +158,7 @@ function buildToc() {
   nextTick(() => {
     const tocEl = document.getElementById('sopToc')
     if (!tocEl) return
-    const links = {}
     tocEl.querySelectorAll('a[data-toc]').forEach((a) => {
-      links[a.getAttribute('data-toc')] = a
       a.addEventListener('click', (e) => {
         e.preventDefault()
         document.getElementById(a.getAttribute('data-toc'))?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -162,7 +169,9 @@ function buildToc() {
         (entries) => {
           for (const en of entries) {
             if (en.isIntersecting) {
-              Object.keys(links).forEach((k) => links[k].classList.toggle('on', k === en.target.id))
+              document.querySelectorAll('a[data-toc]').forEach((a) => {
+                a.classList.toggle('on', a.getAttribute('data-toc') === en.target.id)
+              })
             }
           }
         },
@@ -401,8 +410,81 @@ async function openQr() {
   }
 }
 
+function applyDrawer(next) {
+  const restore = next.restoreFocus
+  drawerPanel.value = next.open
+  if (restore) {
+    nextTick(() => lastTriggerEls[restore]?.focus())
+  }
+}
+
+function onDrawerToggle(id, event) {
+  if (id === 'servings' && !servingsControlVisible.value) return
+  if (id === 'toc' && !tocVisible.value) return
+  if (event && event.currentTarget instanceof HTMLElement) {
+    lastTriggerEls[id] = event.currentTarget
+  }
+  applyDrawer(nextRecipeDrawerState({ open: drawerPanel.value }, { type: 'toggle', id }))
+}
+
+function onDrawerBackdrop() {
+  applyDrawer(nextRecipeDrawerState({ open: drawerPanel.value }, { type: 'backdrop' }))
+}
+
+function onDrawerKeydown(e) {
+  if (e.key !== 'Escape') return
+  if (!drawerPanel.value) return
+  applyDrawer(nextRecipeDrawerState({ open: drawerPanel.value }, { type: 'escape' }))
+}
+
+function onDesktopMq(e) {
+  if (e.matches && drawerPanel.value) {
+    applyDrawer(nextRecipeDrawerState({ open: drawerPanel.value }, { type: 'close' }))
+  }
+}
+
+function onMobileTocClick(e) {
+  const a = e.target.closest && e.target.closest('a[data-toc]')
+  if (!a) return
+  e.preventDefault()
+  document.getElementById(a.getAttribute('data-toc'))?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  applyDrawer(nextRecipeDrawerState({ open: drawerPanel.value }, { type: 'close' }))
+}
+
+function onMoreQr() {
+  applyDrawer(nextRecipeDrawerState({ open: drawerPanel.value }, { type: 'close' }))
+  openQr()
+}
+
+async function loadEditAccess() {
+  try {
+    const resp = await fetch('/api/auth/status', { credentials: 'include' })
+    if (!resp.ok) return
+    const data = await resp.json()
+    canEdit.value = !!data.logged_in
+  } catch {
+    canEdit.value = false
+  }
+}
+
 watch(slug, load)
 watch(targetServingsQty, () => applyAllCardScales())
+watch(drawerPanel, (open) => {
+  const lock = isRecipeDrawerPanel(open)
+  document.body.style.overflow = lock ? 'hidden' : ''
+  if (!lock) return
+  nextTick(() => {
+    if (open === 'servings') {
+      document.getElementById('sop-target-servings-sheet')?.focus()
+    } else if (open === 'search') {
+      document.getElementById('sop-search-sheet')?.focus()
+    } else if (open === 'font') {
+      drawerRef.value?.querySelector('button')?.focus()
+    } else {
+      drawerRef.value?.focus()
+    }
+  })
+})
 watch(() => route.query.focus, () => {
   if (!loading.value) nextTick(() => applyFocusFromQuery())
 })
@@ -411,6 +493,10 @@ onMounted(() => {
   applyFont(fontPx.value)
   document.body.classList.toggle('sop-density-compact', density.value)
   document.body.classList.toggle('sop-density-comfortable', !density.value)
+  document.addEventListener('keydown', onDrawerKeydown)
+  desktopMq = window.matchMedia('(min-width: 901px)')
+  desktopMq.addEventListener('change', onDesktopMq)
+  loadEditAccess()
   load()
 })
 onBeforeUnmount(() => {
@@ -418,6 +504,9 @@ onBeforeUnmount(() => {
   clearTimeout(searchDebounce)
   if (focusHighlightTimer != null) clearTimeout(focusHighlightTimer)
   unbindScaleDismiss()
+  document.removeEventListener('keydown', onDrawerKeydown)
+  desktopMq?.removeEventListener('change', onDesktopMq)
+  document.body.style.overflow = ''
   document.documentElement.removeAttribute('data-theme')
   document.documentElement.style.removeProperty('--reader-fs')
   document.body.classList.remove('sop-density-compact', 'sop-density-comfortable', 'sop-only-new')
@@ -425,7 +514,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div>
+  <div class="sop-reader">
     <header class="site-header no-print" style="position:static">
       <div class="site-header-inner">
         <router-link class="site-brand" to="/recipe">
@@ -441,23 +530,41 @@ onBeforeUnmount(() => {
           <router-link class="site-nav-link" to="/recipe/manage"><RecipeNavIcon name="sparkles" :size="14" />配方管理</router-link>
         </nav>
         <div class="sop-header-actions no-print">
-          <input type="search" v-model="searchTerm" class="sop-search-input" placeholder="搜索配方…" autocomplete="off" @input="onSearchInput">
-          <span class="sop-btn-group" role="group" aria-label="字号">
-            <button type="button" class="btn btn-ghost btn-sm" @click="incFont(-1)">A−</button>
-            <button type="button" class="btn btn-ghost btn-sm" @click="incFont(1)">A+</button>
+          <button
+            type="button"
+            class="sop-search-toggle"
+            aria-label="搜索"
+            :aria-expanded="drawerPanel === 'search'"
+            @click="onDrawerToggle('search', $event)"
+          >
+            <SvgIcon name="search" :size="16" />
+          </button>
+          <input
+            type="search"
+            v-model="searchTerm"
+            class="sop-search-input"
+            placeholder="搜索配方…"
+            autocomplete="off"
+            @input="onSearchInput"
+          >
+          <span class="sop-header-desktop">
+            <span class="sop-btn-group" role="group" aria-label="字号">
+              <button type="button" class="btn btn-ghost btn-sm" @click="incFont(-1)">A−</button>
+              <button type="button" class="btn btn-ghost btn-sm" @click="incFont(1)">A+</button>
+            </span>
+            <button type="button" class="btn btn-ghost sop-density-toggle" @click="toggleTheme">
+              <span aria-hidden="true">◐</span><span>{{ RC.themeLabel(theme) }}</span>
+            </button>
+            <button type="button" class="btn btn-ghost sop-density-toggle" @click="toggleDensity">
+              <span aria-hidden="true">▦</span><span>{{ density ? '网格' : '紧凑' }}</span>
+            </button>
+            <button type="button" class="btn btn-ghost sop-density-toggle" @click="openQr">
+              <span aria-hidden="true">▣</span>二维码
+            </button>
+            <router-link class="print-button" :to="`/recipe/print?slug=${encodeURIComponent(slug)}`">
+              <span aria-hidden="true">◱</span>打印预览
+            </router-link>
           </span>
-          <button type="button" class="btn btn-ghost sop-density-toggle" @click="toggleTheme">
-            <span aria-hidden="true">◐</span><span>{{ RC.themeLabel(theme) }}</span>
-          </button>
-          <button type="button" class="btn btn-ghost sop-density-toggle" @click="toggleDensity">
-            <span aria-hidden="true">▦</span><span>{{ density ? '网格' : '紧凑' }}</span>
-          </button>
-          <button type="button" class="btn btn-ghost sop-density-toggle" @click="openQr">
-            <span aria-hidden="true">▣</span>二维码
-          </button>
-          <router-link class="print-button" :to="`/recipe/print?slug=${encodeURIComponent(slug)}`">
-            <span aria-hidden="true">◱</span>打印预览
-          </router-link>
         </div>
       </div>
     </header>
@@ -468,7 +575,7 @@ onBeforeUnmount(() => {
           <div class="sop-toolbar no-print">
             <router-link class="back-link" to="/recipe"><span class="back-link-icon" aria-hidden="true">←</span>返回列表</router-link>
             <span class="sop-toolbar-chip">{{ title }}</span>
-            <div v-if="servingsControlVisible" class="sop-servings no-print" aria-live="polite">
+            <div v-if="servingsControlVisible" class="sop-servings sop-servings--toolbar no-print" aria-live="polite">
               <label class="sop-servings-label" for="sop-target-servings">目标份数</label>
               <input
                 id="sop-target-servings"
@@ -494,6 +601,130 @@ onBeforeUnmount(() => {
         </article>
       </div>
     </main>
+
+    <nav class="sop-bottom-bar no-print" aria-label="阅读工具">
+      <button
+        type="button"
+        aria-label="搜索"
+        :aria-pressed="drawerPanel === 'search'"
+        @click="onDrawerToggle('search', $event)"
+      >
+        <SvgIcon name="search" :size="18" />
+        <span>搜索</span>
+      </button>
+      <button
+        type="button"
+        aria-label="目录"
+        :disabled="!tocVisible"
+        :aria-pressed="drawerPanel === 'toc'"
+        @click="onDrawerToggle('toc', $event)"
+      >
+        <SvgIcon name="scroll-text" :size="18" />
+        <span>目录</span>
+      </button>
+      <button
+        type="button"
+        aria-label="字号"
+        :aria-pressed="drawerPanel === 'font'"
+        @click="onDrawerToggle('font', $event)"
+      >
+        <span class="sop-bottom-bar-font-mark" aria-hidden="true">A</span>
+        <span>字号</span>
+      </button>
+      <button
+        type="button"
+        aria-label="份数"
+        :disabled="!servingsControlVisible"
+        :aria-pressed="drawerPanel === 'servings'"
+        @click="onDrawerToggle('servings', $event)"
+      >
+        <SvgIcon name="bowl" :size="18" />
+        <span>份数</span>
+      </button>
+      <button
+        type="button"
+        aria-label="更多"
+        :aria-pressed="drawerPanel === 'more'"
+        @click="onDrawerToggle('more', $event)"
+      >
+        <SvgIcon name="menu" :size="18" />
+        <span>更多</span>
+      </button>
+    </nav>
+
+    <Teleport to="body">
+      <Transition name="sop-sheet">
+        <div v-if="sheetOpen" class="sop-drawer-root no-print">
+          <div class="sop-drawer-backdrop" @click="onDrawerBackdrop"></div>
+          <div
+            ref="drawerRef"
+            class="sop-drawer"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="sheetTitle"
+            tabindex="-1"
+          >
+            <h2 class="sop-drawer-title">{{ sheetTitle }}</h2>
+            <div v-if="drawerPanel === 'search'" class="sop-drawer-search">
+              <input
+                id="sop-search-sheet"
+                v-model="searchTerm"
+                type="search"
+                class="sop-search-input"
+                placeholder="搜索配方…"
+                autocomplete="off"
+                aria-label="搜索配方"
+                @input="onSearchInput"
+              >
+              <span class="sop-search-count" aria-live="polite">{{ searchCount }}</span>
+            </div>
+            <div
+              v-else-if="drawerPanel === 'toc'"
+              class="sop-toc"
+              v-html="tocHtml"
+              @click="onMobileTocClick"
+            ></div>
+            <div v-else-if="drawerPanel === 'font'" class="sop-btn-group" role="group" aria-label="字号">
+              <button type="button" class="btn btn-ghost" aria-label="减小字号" @click="incFont(-1)">A−</button>
+              <button type="button" class="btn btn-ghost" aria-label="增大字号" @click="incFont(1)">A+</button>
+            </div>
+            <div v-else-if="drawerPanel === 'servings'" class="sop-servings" aria-live="polite">
+              <label class="sop-servings-label" for="sop-target-servings-sheet">目标份数</label>
+              <input
+                id="sop-target-servings-sheet"
+                v-model="targetServingsQty"
+                type="number"
+                inputmode="decimal"
+                min="0.1"
+                step="any"
+                class="sop-servings-input"
+                aria-label="目标份数"
+              >
+              <span class="sop-servings-unit">{{ servingsUnitLabel }}</span>
+            </div>
+            <div v-else-if="drawerPanel === 'more'" class="sop-drawer-more">
+              <button type="button" class="btn btn-ghost" aria-label="切换主题" @click="toggleTheme">
+                <span aria-hidden="true">◐</span><span>{{ RC.themeLabel(theme) }}</span>
+              </button>
+              <button type="button" class="btn btn-ghost" aria-label="切换密度" @click="toggleDensity">
+                <span aria-hidden="true">▦</span><span>{{ density ? '网格' : '紧凑' }}</span>
+              </button>
+              <button type="button" class="btn btn-ghost" aria-label="二维码" @click="onMoreQr">
+                <span aria-hidden="true">▣</span>二维码
+              </button>
+              <router-link
+                class="print-button"
+                aria-label="打印预览"
+                :to="`/recipe/print?slug=${encodeURIComponent(slug)}`"
+              >
+                <span aria-hidden="true">◱</span>打印预览
+              </router-link>
+              <router-link v-if="canEdit" class="btn btn-ghost" to="/recipe/manage">配方管理</router-link>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
 
     <div v-if="qrModalUrl" class="print-preview-modal" @click.self="qrModalUrl = ''">
       <div class="print-preview-modal-backdrop" @click="qrModalUrl = ''"></div>

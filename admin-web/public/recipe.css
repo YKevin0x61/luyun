@@ -355,6 +355,10 @@ body.sop-only-new .markdown-body article.recipe-card:not(.recipe-card--new){disp
   .sop-toc{position:sticky;top:5rem;flex-direction:column;max-height:calc(100vh - 6rem);overflow:auto}
   .sop-toc h5{display:block;font-size:.66rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);padding:.3rem .5rem}
   .sop-toc a{justify-content:space-between}
+  .sop-bottom-bar{display:none}
+  .sop-search-toggle{display:none}
+  .sop-header-desktop{display:contents}
+  .sop-drawer-root{display:none}
 }
 
 .recipe-copy{position:absolute;bottom:.3rem;right:.4rem;z-index:2;opacity:0;border:1px solid var(--line-strong);background:var(--surface);color:var(--muted);border-radius:6px;font:inherit;font-size:.7rem;padding:.12rem .4rem;cursor:pointer;transition:opacity .15s}
@@ -398,6 +402,42 @@ body.batch-mode .station-item.is-checked .station-link{border-color:var(--jade);
 .sop-scale-input:focus-visible{outline:none;border-color:var(--jade);box-shadow:0 0 0 2px var(--jade-soft)}
 .sop-scale-input::-webkit-outer-spin-button,.sop-scale-input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 @media (pointer:coarse){.sop-scale-btn,.sop-scale-input,.sop-scale-toggle{height:2rem}.sop-scale-toggle{width:2rem}}
+
+/* ===== 12e. 窄屏阅读底栏 / 抽屉 ===== */
+.sop-search-toggle{display:none;align-items:center;justify-content:center;width:2.35rem;height:2.35rem;padding:0;border:1px solid transparent;border-radius:999px;background:transparent;color:var(--ink);cursor:pointer}
+.sop-search-toggle:focus-visible{outline:2px solid var(--jade);outline-offset:2px}
+.sop-bottom-bar{position:fixed;left:0;right:0;bottom:0;z-index:50;display:flex;align-items:stretch;gap:.15rem;padding:.25rem .3rem;padding-bottom:calc(.25rem + env(safe-area-inset-bottom));border-top:1px solid var(--line);background:var(--surface);box-shadow:0 -6px 20px rgba(31,29,24,.08)}
+.sop-bottom-bar button{flex:1 1 0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.1rem;min-height:2.75rem;padding:.25rem .15rem;border:0;background:transparent;color:var(--muted);font:inherit;font-size:.62rem;font-weight:800;cursor:pointer}
+.sop-bottom-bar button:disabled{opacity:.4;cursor:not-allowed}
+.sop-bottom-bar button:focus-visible{outline:2px solid var(--jade);outline-offset:-2px;color:var(--jade-ink)}
+.sop-bottom-bar button[aria-pressed="true"]{color:var(--jade-ink)}
+.sop-bottom-bar button:active:not(:disabled){transform:scale(.97);transition:transform .16s ease-out}
+.sop-bottom-bar-font-mark{font-weight:900;font-size:1.05rem;line-height:1}
+.sop-drawer-root{position:fixed;inset:0;z-index:60}
+.sop-drawer-backdrop{position:absolute;inset:0;background:rgba(12,12,12,.45);opacity:1;transition:opacity .22s var(--ease)}
+.sop-drawer{position:absolute;left:0;right:0;bottom:0;max-height:min(78vh,36rem);overflow:auto;overscroll-behavior:contain;padding:1rem 1rem calc(1rem + env(safe-area-inset-bottom));border:1px solid var(--line);border-bottom:0;border-radius:var(--radius-lg) var(--radius-lg) 0 0;background:var(--surface);box-shadow:var(--shadow-md);transform:translateY(0);transition:transform .22s cubic-bezier(.32,.72,0,1)}
+.sop-drawer-title{margin:0 0 .75rem;font-size:.82rem;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.sop-drawer .sop-toc{flex-direction:column;overflow:visible;border:0;padding:0}
+.sop-drawer .sop-toc h5{display:none}
+.sop-drawer .sop-toc a{white-space:normal;justify-content:space-between}
+.sop-drawer-more{display:flex;flex-direction:column;gap:.45rem;align-items:stretch}
+.sop-drawer-more .btn,.sop-drawer-more .print-button{width:100%}
+.sop-drawer-search{display:flex;flex-direction:column;gap:.4rem}
+.sop-drawer-search .sop-search-input{width:100%;max-width:none;min-width:0}
+.sop-sheet-enter-active .sop-drawer{transition:transform .22s cubic-bezier(.32,.72,0,1)}
+.sop-sheet-leave-active .sop-drawer{transition:transform .16s ease-in}
+.sop-sheet-enter-from .sop-drawer,.sop-sheet-leave-to .sop-drawer{transform:translateY(100%)}
+.sop-sheet-enter-active .sop-drawer-backdrop{transition:opacity .22s var(--ease)}
+.sop-sheet-leave-active .sop-drawer-backdrop{transition:opacity .16s var(--ease)}
+.sop-sheet-enter-from .sop-drawer-backdrop,.sop-sheet-leave-to .sop-drawer-backdrop{opacity:0}
+@media (max-width:900px){
+  .sop-layout>.sop-toc{display:none}
+  .sop-header-desktop{display:none}
+  .sop-search-toggle{display:inline-flex}
+  .sop-reader .sop-header-actions .sop-search-input{display:none}
+  .sop-servings--toolbar{display:none}
+  .sop-reader .site-main{padding-bottom:calc(5.2rem + env(safe-area-inset-bottom))}
+}
 
 /* ===== 13. 自适应断点 ===== */
 @media (max-width:640px){
@@ -449,7 +489,7 @@ body.batch-mode .station-item.is-checked .station-link{border-color:var(--jade);
   .page-title{font-size:1.7rem}
 }
 @media (pointer:coarse){
-  .btn,.print-button,.site-nav-link,.station-link,.back-link{min-height:44px}
+  .btn,.print-button,.site-nav-link,.station-link,.back-link,.sop-bottom-bar button,.sop-search-toggle{min-height:44px}
   .form-input,.form-textarea,.sop-search-input{min-height:44px}
 }
 
