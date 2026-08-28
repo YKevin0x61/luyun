@@ -232,6 +232,8 @@ class RecipeStore:
                 tips_json TEXT,
                 base_servings_qty REAL,
                 base_servings_unit TEXT,
+                legacy_markdown TEXT,
+                needs_review INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
             );
@@ -278,6 +280,14 @@ class RecipeStore:
         if "base_servings_unit" not in cols:
             await self.conn.execute(
                 "ALTER TABLE sop_recipes ADD COLUMN base_servings_unit TEXT"
+            )
+        if "legacy_markdown" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes ADD COLUMN legacy_markdown TEXT"
+            )
+        if "needs_review" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0"
             )
 
     # ---- 岗位 ----

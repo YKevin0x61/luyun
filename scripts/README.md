@@ -15,6 +15,7 @@ Day-to-day entry scripts live here. One-off migration, debug, and smoke utilitie
 | `docker_up.sh` | Docker / Compose process-shell bring-up |
 | `run_update_job.py` | Out-of-process Update Job runner |
 | `reconcile_settled_bills.py` | Settled-bill reconciliation utility |
+| `migrate_recipes_structured.py` (+ `migrate_recipes_structured.rollback.md`) | One-time SOP `body_markdown` → structured JSON (dry-run first; move to `archive/` after a real-shop verify) |
 
 ## Archive (`archive/`)
 

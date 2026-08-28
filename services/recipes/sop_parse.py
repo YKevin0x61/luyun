@@ -17,10 +17,197 @@ from html import escape as html_escape
 
 NEW_PRODUCT_MARK = "【新】"
 
+# Keep in lockstep with admin-web/src/utils/recipeCore.js SCALE_UNIT / SCALE_RE.
+SCALE_UNIT = (
+    "千克|毫升|kg|mg|mL|ml|cc|克|斤|两|钱|升|杯|勺|滴|只|个|块|片|张|"
+    "条|根|瓶|包|袋|盒|颗|粒|份|g|L"
+)
+SCALE_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*([-\~\u2013])\s*(\d+(?:\.\d+)?)(\s*)(" + SCALE_UNIT + r")"
+    r"|(\d+)\s*/\s*(\d+)(\s*)(" + SCALE_UNIT + r")"
+    r"|(\d+(?:\.\d+)?)(\s*)(" + SCALE_UNIT + r")"
+)
+_LIST_MARKER_RE = re.compile(r"^(?:[-*+]|\d+[.)、])\s+")
+_NAME_TRAIL_RE = re.compile(r"[:：]+$")
+_SENTENCE_PUNCT_RE = re.compile(r"[。！？]")
+
 
 def infer_recipe_is_new(recipe_name: str, body_markdown: str) -> bool:
     """名称或正文中含「【新】」则视为新品（与 SOP 文档约定一致）。"""
     return NEW_PRODUCT_MARK in (recipe_name or "") or NEW_PRODUCT_MARK in (body_markdown or "")
+
+
+def _strip_list_marker(line: str) -> str:
+    return _LIST_MARKER_RE.sub("", line.strip())
+
+
+def _scale_match_to_amount_unit(match: re.Match) -> tuple[str, str]:
+    if match.group(1) is not None:
+        return f"{match.group(1)}{match.group(2)}{match.group(3)}", match.group(5)
+    if match.group(6) is not None:
+        return f"{match.group(6)}/{match.group(7)}", match.group(9)
+    return match.group(10), match.group(12)
+
+
+def _looks_like_name_plus_qty(line: str) -> bool:
+    """Conservative: SCALE hit AND the line is roughly 'name + quantity', not a sentence."""
+    text = _strip_list_marker(line)
+    if not text or _SENTENCE_PUNCT_RE.search(text):
+        return False
+    matches = list(SCALE_RE.finditer(text))
+    if len(matches) != 1:
+        return False
+    match = matches[0]
+    before = text[: match.start()].strip()
+    after = text[match.end() :].strip()
+    if before and after:
+        return False
+    name = before or after
+    if not name or len(name) > 40:
+        return False
+    return True
+
+
+def _line_to_ingredient(line: str) -> dict | None:
+    text = _strip_list_marker(line)
+    match = SCALE_RE.search(text)
+    if match is None:
+        return None
+    amount, unit = _scale_match_to_amount_unit(match)
+    before = text[: match.start()].strip()
+    after = text[match.end() :].strip()
+    name = _NAME_TRAIL_RE.sub("", before or after).strip()
+    if not name:
+        return None
+    return {"name": name, "amount": amount, "unit": unit}
+
+
+def _classify_plain_line(line: str) -> tuple[dict | None, str | None]:
+    """Return (ingredient, None) or (None, step_text) for a non-empty line."""
+    if _looks_like_name_plus_qty(line):
+        item = _line_to_ingredient(line)
+        if item is not None:
+            return item, None
+    return None, line.strip()
+
+
+def _amount_text_to_amount_unit(amount_text: str) -> tuple[str, str] | None:
+    match = SCALE_RE.search(amount_text)
+    if match is None:
+        return None
+    leftover = (amount_text[: match.start()] + amount_text[match.end() :]).strip()
+    if leftover:
+        return None
+    return _scale_match_to_amount_unit(match)
+
+
+def _row_is_qty_only_cells(data_row: list[str]) -> bool:
+    nonempty = [cell.strip() for cell in data_row if cell.strip()]
+    if not nonempty:
+        return False
+    return all(_amount_text_to_amount_unit(cell) is not None for cell in nonempty)
+
+
+def _table_block_to_structured(table_lines: list[str]) -> tuple[list[dict], list[str]]:
+    rows = [_split_pipe_row(line) for line in table_lines]
+    rows = [row for row in rows if row]
+    if not rows:
+        return [], []
+
+    rest = rows[1:]
+    if rest and _is_separator_row(rest[0]):
+        header = rows[0]
+        data_rows = rest[1:]
+        if len(data_rows) == 1 and _row_is_qty_only_cells(data_rows[0]):
+            return _header_and_single_row_to_structured(header, data_rows[0])
+    else:
+        data_rows = rows
+
+    ingredients: list[dict] = []
+    steps: list[str] = []
+    for data_row in data_rows:
+        cells = [cell.strip() for cell in data_row]
+        nonempty = [cell for cell in cells if cell]
+        if not nonempty:
+            continue
+        if len(nonempty) == 1:
+            item, step = _classify_plain_line(nonempty[0])
+            if item is not None:
+                ingredients.append(item)
+            elif step:
+                steps.append(step)
+            continue
+        name = cells[0]
+        amount_text = " ".join(cell for cell in cells[1:] if cell)
+        parsed = _amount_text_to_amount_unit(amount_text) if amount_text else None
+        if name and parsed is not None:
+            amount, unit = parsed
+            ingredients.append({"name": name, "amount": amount, "unit": unit})
+            continue
+        steps.append(" | ".join(nonempty))
+    return ingredients, steps
+
+
+def _header_and_single_row_to_structured(
+    header: list[str], data_row: list[str],
+) -> tuple[list[dict], list[str]]:
+    """One data row: header cells are names (same orientation as _table_to_recipes)."""
+    num_cols = max(len(header), len(data_row))
+    header = (header + [""] * num_cols)[:num_cols]
+    data_row = (data_row + [""] * num_cols)[:num_cols]
+    ingredients: list[dict] = []
+    steps: list[str] = []
+    for name_cell, body_cell in zip(header, data_row):
+        name = (name_cell or "").strip()
+        body = (body_cell or "").strip()
+        if not name and not body:
+            continue
+        if body:
+            parsed = _amount_text_to_amount_unit(body)
+            if name and parsed is not None:
+                amount, unit = parsed
+                ingredients.append({"name": name, "amount": amount, "unit": unit})
+                continue
+            item, step = _classify_plain_line(body)
+            if item is not None:
+                ingredients.append(item)
+                continue
+        leftover = " | ".join(part for part in (name, body) if part)
+        if leftover:
+            steps.append(leftover)
+    return ingredients, steps
+
+
+def migrate_legacy_to_structured(body_markdown: str) -> dict:
+    """Best-effort split of a single recipe body's markdown into structured fields.
+
+    Tips are always empty — never guess. Non-empty leftover lines go to steps.
+    """
+    ingredients: list[dict] = []
+    steps: list[str] = []
+    lines = (body_markdown or "").splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped:
+            i += 1
+            continue
+        if stripped.startswith("|"):
+            table_lines: list[str] = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                table_lines.append(lines[i])
+                i += 1
+            table_ings, table_steps = _table_block_to_structured(table_lines)
+            ingredients.extend(table_ings)
+            steps.extend(table_steps)
+            continue
+        item, step = _classify_plain_line(stripped)
+        if item is not None:
+            ingredients.append(item)
+        elif step:
+            steps.append(step)
+        i += 1
+    return {"ingredients": ingredients, "steps": steps, "tips": []}
 
 
 @dataclass(frozen=True)

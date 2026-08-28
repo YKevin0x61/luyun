@@ -466,3 +466,15 @@ def test_update_explicit_null_clears_base_servings(store):
     ))
     assert updated["base_servings_qty"] is None
     assert updated["base_servings_unit"] is None
+
+
+def test_connect_adds_legacy_markdown_and_needs_review_columns(store):
+    conn = sqlite3.connect(store.db_path)
+    cols = {row[1]: row for row in conn.execute("PRAGMA table_info(sop_recipes)")}
+    conn.close()
+    assert "legacy_markdown" in cols
+    assert cols["legacy_markdown"][2].upper() == "TEXT"
+    assert "needs_review" in cols
+    assert cols["needs_review"][2].upper() == "INTEGER"
+    assert cols["needs_review"][4] == "0"
+    assert cols["needs_review"][3] == 1
