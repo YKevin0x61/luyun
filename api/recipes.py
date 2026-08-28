@@ -100,6 +100,10 @@ class RecipeUpdate(BaseModel):
     is_new: bool = False
 
 
+class RecipeReorder(BaseModel):
+    ids: list[int]
+
+
 # ---- 浏览 ----
 @router.get("/stations")
 async def list_stations(store: RecipeStore = Depends(_get_recipe_store)):
@@ -124,6 +128,18 @@ async def list_recipes(slug: str, store: RecipeStore = Depends(_get_recipe_store
     if not await store.station_exists(slug):
         raise HTTPException(status_code=404, detail="岗位不存在")
     return {"recipes": await store.list_recipes(slug)}
+
+
+@router.put("/stations/{slug}/recipes/reorder", dependencies=[Depends(verify_admin_token)])
+async def reorder_recipes(slug: str, payload: RecipeReorder,
+                          store: RecipeStore = Depends(_get_recipe_store)):
+    if not await store.station_exists(slug):
+        raise HTTPException(status_code=404, detail="岗位不存在")
+    current_ids = [int(row["id"]) for row in await store.list_recipes(slug)]
+    if len(payload.ids) != len(set(payload.ids)) or set(payload.ids) != set(current_ids):
+        raise HTTPException(status_code=400, detail="排序列表必须包含该岗位全部条目且不能重复")
+    await store.reorder_recipes(slug, payload.ids)
+    return {"ok": True}
 
 
 # ---- 岗位管理 ----

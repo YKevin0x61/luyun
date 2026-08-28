@@ -1,10 +1,15 @@
 <script setup>
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { api } from '../../api/client'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import RecipeNavIcon from './RecipeNavIcon.vue'
 import RecipeCheckbox from '../../components/recipe/RecipeCheckbox.vue'
 import RecipeFileDropzone from '../../components/recipe/RecipeFileDropzone.vue'
+import {
+  NEW_SECTION_VALUE,
+  assignSortOrders,
+  buildSectionOptions,
+} from '../../utils/recipeManageOrder'
 
 useScopedStylesheet('/recipe.css')
 
@@ -15,13 +20,34 @@ const currentTitle = ref('')
 const recipes = ref([])
 const csvDropzoneRef = ref(null)
 const errorMsg = ref('')
+const dragIndex = ref(null)
+const reorderBusy = ref(false)
 
 // 各类弹窗状态（复用一个 modal 容器，按 kind 渲染不同表单）
 const modal = reactive({ kind: null }) // 'add-station' | 'rename-station' | 'recipe-form' | 'history'
 const stationForm = reactive({ slug: '', title: '' })
 const renameForm = reactive({ slug: '', title: '' })
-const recipeForm = reactive({ id: null, section: '配方', recipe_name: '', body: '', sort_order: '', is_new: false })
+const recipeForm = reactive({ id: null, section: '配方', recipe_name: '', body: '', sort_order: null, is_new: false })
 const historyItems = ref([])
+
+const sectionOptions = computed(() => buildSectionOptions(recipes.value))
+const existingSections = computed(() =>
+  sectionOptions.value.filter((opt) => opt.value !== NEW_SECTION_VALUE).map((opt) => opt.value),
+)
+const sectionSelectValue = computed({
+  get() {
+    return existingSections.value.includes(recipeForm.section)
+      ? recipeForm.section
+      : NEW_SECTION_VALUE
+  },
+  set(value) {
+    if (value === NEW_SECTION_VALUE) {
+      if (existingSections.value.includes(recipeForm.section)) recipeForm.section = ''
+    } else {
+      recipeForm.section = value
+    }
+  },
+})
 
 function closeModal() {
   if (modal.kind === 'import-csv') csvDropzoneRef.value?.reset()
@@ -105,7 +131,7 @@ function openAddRecipe() {
   recipeForm.section = '配方'
   recipeForm.recipe_name = ''
   recipeForm.body = ''
-  recipeForm.sort_order = ''
+  recipeForm.sort_order = null
   recipeForm.is_new = false
   modal.kind = 'recipe-form'
 }
@@ -116,18 +142,17 @@ async function openEditRecipe(id) {
   recipeForm.section = r.section
   recipeForm.recipe_name = r.recipe_name
   recipeForm.body = r.body_markdown
-  recipeForm.sort_order = String(r.sort_order ?? '')
+  recipeForm.sort_order = r.sort_order
   recipeForm.is_new = !!r.is_new
   modal.kind = 'recipe-form'
 }
 async function submitRecipeForm() {
   errorMsg.value = ''
-  const sortRaw = String(recipeForm.sort_order).trim()
   const payload = {
     section: recipeForm.section,
     recipe_name: recipeForm.recipe_name,
     body: recipeForm.body,
-    sort_order: sortRaw === '' ? null : parseInt(sortRaw, 10),
+    sort_order: recipeForm.id ? recipeForm.sort_order : null,
     is_new: recipeForm.is_new,
   }
   try {
@@ -141,6 +166,58 @@ async function submitRecipeForm() {
   } catch (e) {
     errorMsg.value = e.message
   }
+}
+
+async function persistRecipeOrder(ordered) {
+  const assignments = assignSortOrders(ordered)
+  reorderBusy.value = true
+  try {
+    await api.put(
+      `/api/recipes/stations/${encodeURIComponent(currentSlug.value)}/recipes/reorder`,
+      { ids: assignments.map((row) => row.id) },
+    )
+    recipes.value = ordered.map((row, index) => ({
+      ...row,
+      sort_order: assignments[index].sort_order,
+    }))
+  } catch (e) {
+    window.alert(e.message || '排序保存失败')
+    await refreshRecipes()
+  } finally {
+    reorderBusy.value = false
+  }
+}
+
+function applyRecipeReorder(fromIndex, toIndex) {
+  if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return
+  if (toIndex >= recipes.value.length) return
+  const list = [...recipes.value]
+  const [moved] = list.splice(fromIndex, 1)
+  list.splice(toIndex, 0, moved)
+  recipes.value = list
+  persistRecipeOrder(list)
+}
+
+function onDragStart(idx, event) {
+  dragIndex.value = idx
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(idx))
+  }
+}
+
+function onDragEnd() {
+  dragIndex.value = null
+}
+
+function onDrop(idx) {
+  if (dragIndex.value === null) return
+  applyRecipeReorder(dragIndex.value, idx)
+  dragIndex.value = null
+}
+
+function moveRecipe(idx, delta) {
+  applyRecipeReorder(idx, idx + delta)
 }
 
 async function toggleActive(id) {
@@ -249,8 +326,40 @@ loadStations()
           <table class="manage-table">
             <thead><tr><th>排序</th><th>章节</th><th>条目名称</th><th>新品</th><th>状态</th><th class="manage-table-actions">操作</th></tr></thead>
             <tbody>
-              <tr v-for="r in recipes" :key="r.id" :class="{ 'is-inactive': !r.is_active }">
-                <td class="muted">{{ r.sort_order }}</td>
+              <tr
+                v-for="(r, idx) in recipes"
+                :key="r.id"
+                :class="{ 'is-inactive': !r.is_active }"
+                @dragover.prevent
+                @drop.prevent="onDrop(idx)"
+              >
+                <td>
+                  <div class="reorder-controls">
+                    <button
+                      type="button"
+                      class="drag-handle"
+                      draggable="true"
+                      aria-label="拖拽排序"
+                      :disabled="reorderBusy"
+                      @dragstart="onDragStart(idx, $event)"
+                      @dragend="onDragEnd"
+                    >⋮⋮</button>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-ghost"
+                      aria-label="上移"
+                      :disabled="idx === 0 || reorderBusy"
+                      @click="moveRecipe(idx, -1)"
+                    >上移</button>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-ghost"
+                      aria-label="下移"
+                      :disabled="idx === recipes.length - 1 || reorderBusy"
+                      @click="moveRecipe(idx, 1)"
+                    >下移</button>
+                  </div>
+                </td>
                 <td>{{ r.section }}</td>
                 <td>{{ r.recipe_name }}</td>
                 <td><span v-if="r.is_new" class="badge-new">新</span><span v-else class="muted">—</span></td>
@@ -311,11 +420,18 @@ loadStations()
       <div class="sop-panel" style="position:relative;max-width:640px;width:92%;max-height:86vh;overflow:auto;padding:24px;z-index:1">
         <h2 class="page-title" style="font-size:1.2rem">{{ recipeForm.id ? '编辑条目' : '新增条目' }}</h2>
         <label class="form-label">章节</label>
-        <input class="form-input" v-model="recipeForm.section">
+        <select class="form-input" v-model="sectionSelectValue">
+          <option v-for="opt in sectionOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+        </select>
+        <input
+          v-if="sectionSelectValue === NEW_SECTION_VALUE"
+          class="form-input new-section-input"
+          v-model="recipeForm.section"
+          aria-label="新章节名"
+          placeholder="输入新章节名"
+        >
         <label class="form-label">条目名称</label>
         <input class="form-input" v-model="recipeForm.recipe_name">
-        <label class="form-label">排序号（留空＝章节末尾）</label>
-        <input class="form-input" v-model="recipeForm.sort_order">
         <label class="form-check"><RecipeCheckbox v-model="recipeForm.is_new" /><span>标记为新品</span></label>
         <label class="form-label">正文（Markdown）</label>
         <textarea class="form-input" rows="8" v-model="recipeForm.body"></textarea>
@@ -372,5 +488,30 @@ loadStations()
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+}
+.reorder-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.new-section-input {
+  margin-top: 0.35rem;
+}
+.drag-handle {
+  cursor: grab;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--muted);
+  border-radius: 4px;
+  padding: 0.15rem 0.4rem;
+  letter-spacing: -0.1em;
+  line-height: 1.2;
+}
+.drag-handle:active {
+  cursor: grabbing;
+}
+.drag-handle:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 </style>

@@ -248,6 +248,17 @@ class RecipeStore:
         await self.conn.commit()
         return await self.get_recipe(recipe_id)
 
+    async def reorder_recipes(self, slug: str, ids: list[int]) -> None:
+        """Rewrite sort_order for the station list. No history rows."""
+        now = utc_now_iso()
+        for sort_order, recipe_id in enumerate(ids):
+            await self.conn.execute(
+                "UPDATE sop_recipes SET sort_order = ? WHERE id = ? AND station_slug = ?",
+                (sort_order, recipe_id, slug),
+            )
+        await self._touch_station(slug, now)
+        await self.conn.commit()
+
     async def delete_recipe(self, recipe_id: int) -> Optional[str]:
         current = await self.get_recipe(recipe_id)
         if current is None:

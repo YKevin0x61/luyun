@@ -151,6 +151,14 @@ class TestRecipesWriteRequiresAuth(unittest.TestCase):
             resp = client.delete("/api/recipes/stations/changfen")
         self.assertEqual(resp.status_code, 401)
 
+    def test_reorder_recipes_requires_auth(self):
+        with TestClient(self.app) as client:
+            resp = client.put(
+                "/api/recipes/stations/changfen/recipes/reorder",
+                json={"ids": [1]},
+            )
+        self.assertEqual(resp.status_code, 401)
+
     def test_list_stations_stays_public(self):
         with TestClient(self.app) as client:
             resp = client.get("/api/recipes/stations")

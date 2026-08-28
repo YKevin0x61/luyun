@@ -141,3 +141,33 @@ def test_import_csv_does_not_infer_is_new_from_name_or_body(client):
     recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
     imported = next(row for row in recipes if row["recipe_name"] == "【新】菠菜饺")
     assert imported["is_new"] == 0
+
+
+def test_reorder_recipes_requires_auth(client):
+    client.headers.pop("X-Admin-Token", None)
+    r = client.put("/api/recipes/stations/changfen/recipes/reorder", json={"ids": [1]})
+    assert r.status_code == 401
+
+
+def test_reorder_recipes_assigns_unique_sort_order(client):
+    first_id = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    second_id = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={"section": "配方", "recipe_name": "第二", "body": "b", "is_new": False},
+    ).json()["id"]
+    third_id = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={"section": "出品标准", "recipe_name": "第三", "body": "c", "is_new": False},
+    ).json()["id"]
+
+    r = client.put(
+        "/api/recipes/stations/changfen/recipes/reorder",
+        json={"ids": [third_id, first_id, second_id]},
+    )
+    assert r.status_code == 200
+
+    recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    assert [row["id"] for row in recipes] == [third_id, first_id, second_id]
+    assert [row["sort_order"] for row in recipes] == [0, 1, 2]
+    history = client.get(f"/api/recipes/recipes/{first_id}/history").json()["history"]
+    assert history == []
