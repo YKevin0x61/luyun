@@ -11,12 +11,18 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from services.recipes.csv_codec import (
+    CsvStructuredDecodeError,
+    decode_ingredients_cell,
+    decode_string_list_cell,
+    encode_json_cell,
+)
 from services.recipes.store import (
     RecipeStore, SLUG_MAX_LEN, TEXT_FIELD_MAX_LEN, BODY_MAX_LEN,
     INGREDIENT_FIELD_MAX_LEN, STEP_TEXT_MAX_LEN, STEPS_MAX_COUNT,
     TIP_TEXT_MAX_LEN, TIPS_MAX_COUNT,
 )
-from services.recipes.rendering import render_markdown_to_docx
+from services.recipes.rendering import render_station_to_docx
 from api.security import verify_admin_token
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
@@ -24,6 +30,10 @@ router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 CSV_IMPORT_MAX_BYTES = 2 * 1024 * 1024
 CSV_IMPORT_MAX_ROWS = 2_000
 CSV_REQUIRED_FIELDS = {"section", "recipe_name", "body_markdown", "sort_order", "is_new"}
+CSV_EXPORT_FIELDS = [
+    "section", "recipe_name", "body_markdown", "sort_order", "is_new",
+    "ingredients_json", "steps_json", "tips_json",
+]
 DANGEROUS_CSV_PREFIXES = ("=", "+", "-", "@")
 FORBIDDEN_SLUG_CHARS = set('/\\:*?"<>|\n\r\t\x00')
 
@@ -340,11 +350,14 @@ async def export_csv(slug: str, store: RecipeStore = Depends(_get_recipe_store))
     rows = await store.list_recipes(slug)
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["section", "recipe_name", "body_markdown", "sort_order", "is_new"])
+    writer.writerow(CSV_EXPORT_FIELDS)
     for r in rows:
         writer.writerow([
             _csv_safe_cell(r["section"]), _csv_safe_cell(r["recipe_name"]),
             _csv_safe_cell(r["body_markdown"]), r["sort_order"], r["is_new"],
+            _csv_safe_cell(encode_json_cell(r.get("ingredients") or [])),
+            _csv_safe_cell(encode_json_cell(r.get("steps") or [])),
+            _csv_safe_cell(encode_json_cell(r.get("tips") or [])),
         ])
     filename = quote(f"{slug}.csv")
     return Response(
@@ -383,8 +396,19 @@ async def import_csv(slug: str, csv_file: UploadFile = File(...),
                 section = _validate_text(row_data.get("section") or "配方", "章节")
                 name = _validate_text(row_data.get("recipe_name") or "", "条目名称")
                 body = _validate_body(row_data.get("body_markdown") or "")
-            except HTTPException as exc:
-                errors.append(f"第 {idx} 行：{exc.detail}")
+                ingredients = _validate_ingredients([
+                    IngredientItem(**item)
+                    for item in decode_ingredients_cell(row_data.get("ingredients_json"))
+                ])
+                steps = _validate_steps(
+                    decode_string_list_cell(row_data.get("steps_json"), column_label="步骤")
+                )
+                tips = _validate_tips(
+                    decode_string_list_cell(row_data.get("tips_json"), column_label="小贴士")
+                )
+            except (CsvStructuredDecodeError, HTTPException) as exc:
+                detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                errors.append(f"第 {idx} 行：{detail}")
                 if len(errors) >= 10:
                     errors.append("错误过多，已停止检查")
                     break
@@ -395,7 +419,7 @@ async def import_csv(slug: str, csv_file: UploadFile = File(...),
                 errors.append(f"第 {idx} 行：排序号必须是整数")
                 continue
             is_new = 1 if _parse_bool_flag(row_data.get("is_new")) else 0
-            pending.append((section, name, body, sort_order, is_new))
+            pending.append((section, name, body, sort_order, is_new, ingredients, steps, tips))
     except csv.Error as e:
         raise HTTPException(status_code=400, detail=f"导入失败：CSV 格式错误：{e}")
     if errors:
@@ -412,10 +436,10 @@ async def export_docx(slug: str, store: RecipeStore = Depends(_get_recipe_store)
     station = await store.get_station(slug)
     if station is None:
         raise HTTPException(status_code=404, detail="岗位不存在")
-    md = await store.station_display_markdown(slug)
-    if md is None:
+    recipes = await store.parsed_recipes(slug)
+    if not recipes:
         raise HTTPException(status_code=404, detail="该岗位暂无可显示条目")
-    doc = render_markdown_to_docx(md)
+    doc = render_station_to_docx(station["title"], recipes)
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)

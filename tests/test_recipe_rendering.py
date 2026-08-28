@@ -101,6 +101,51 @@ def test_docx_renders_page_break_div():
     assert 'w:type="page"' in xml
 
 
+def test_station_docx_renders_ingredient_table_and_numbered_steps():
+    from docx.shared import RGBColor
+
+    from services.recipes.rendering import render_station_to_docx
+
+    doc = render_station_to_docx("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="面团", body_markdown="这段 Markdown 不应出现",
+            sort_order=0, id=1,
+            ingredients=({"name": "面粉", "amount": "200", "unit": "g"},),
+            steps=("混合面粉与水", "静置 10 分钟"),
+            tips=("夏天水温要更低",),
+        ),
+    ])
+    assert len(doc.tables) == 1
+    cell_texts = [cell.text.strip() for row in doc.tables[0].rows for cell in row.cells]
+    assert "面粉" in cell_texts
+    assert any("200" in text for text in cell_texts)
+    paragraph_texts = [p.text for p in doc.paragraphs]
+    assert not any("这段 Markdown 不应出现" in text for text in paragraph_texts)
+    assert any(text.startswith("1.") and "混合面粉与水" in text for text in paragraph_texts)
+    assert any(text.startswith("2.") and "静置 10 分钟" in text for text in paragraph_texts)
+    tip_runs = [
+        run for p in doc.paragraphs if "夏天水温要更低" in p.text for run in p.runs
+    ]
+    assert tip_runs
+    assert any(run.font.color.rgb == RGBColor(180, 30, 30) for run in tip_runs)
+    tip_paras = [p for p in doc.paragraphs if "夏天水温要更低" in p.text]
+    assert tip_paras
+    assert any('w:fill="FFF1F2"' in p._element.xml for p in tip_paras)
+
+
+def test_station_docx_markdown_only_still_renders_body():
+    from services.recipes.rendering import render_station_to_docx
+
+    doc = render_station_to_docx("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="肠粉酱油", body_markdown="酱油：100g",
+            sort_order=0, id=1,
+        ),
+    ])
+    assert len(doc.tables) == 0
+    assert any("酱油：100g" in p.text for p in doc.paragraphs)
+
+
 def test_structured_ingredients_empty_omits_table():
     assert render_structured_recipe_body([]) == ""
     assert render_structured_recipe_body(None) == ""

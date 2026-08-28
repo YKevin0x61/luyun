@@ -1,4 +1,6 @@
 import asyncio
+import csv
+import io
 import sqlite3
 
 import pytest
@@ -81,7 +83,9 @@ def client(recipe_store, tmp_path):
 def test_list_stations(client):
     r = client.get("/api/recipes/stations")
     assert r.status_code == 200
-    assert r.json()["stations"][0]["slug"] == "changfen"
+    station = r.json()["stations"][0]
+    assert station["slug"] == "changfen"
+    assert station["title"] == "肠粉档"
 
 
 def test_station_detail_fragment(client):
@@ -145,6 +149,26 @@ def test_station_detail_renders_structured_ingredients_table(client):
     assert "sop-section-grid" in html
 
 
+def test_station_detail_print_html_includes_structured_card_classes(client):
+    client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团全套",
+            "body": "",
+            "is_new": False,
+            "ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}],
+            "steps": ["混合面粉与水"],
+            "tips": ["夏天水温要更低"],
+        },
+    )
+    html = client.get("/api/recipes/stations/changfen").json()["content_html"]
+    assert "recipe-card" in html
+    assert "recipe-ingredients" in html
+    assert "recipe-steps" in html
+    assert "recipe-tips" in html
+
+
 def test_station_detail_renders_structured_steps_list(client):
     rid = client.post(
         "/api/recipes/stations/changfen/recipes",
@@ -190,10 +214,109 @@ def test_export_csv(client):
     assert "section,recipe_name" in r.text
 
 
+def test_export_csv_includes_structured_json_columns(client):
+    client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "兜底正文",
+            "is_new": False,
+            "ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}],
+            "steps": ["混合面粉与水"],
+            "tips": ["夏天水温要更低"],
+        },
+    )
+    r = client.get("/api/recipes/stations/changfen/export")
+    assert r.status_code == 200
+    reader = csv.DictReader(io.StringIO(r.text.lstrip("\ufeff")))
+    assert reader.fieldnames == [
+        "section", "recipe_name", "body_markdown", "sort_order", "is_new",
+        "ingredients_json", "steps_json", "tips_json",
+    ]
+    dough = next(row for row in reader if row["recipe_name"] == "面团")
+    assert dough["body_markdown"] == "兜底正文"
+    assert dough["ingredients_json"] == '[{"name": "面粉", "amount": "200", "unit": "g"}]'
+    assert dough["steps_json"] == '["混合面粉与水"]'
+    assert dough["tips_json"] == '["夏天水温要更低"]'
+
+
+def test_csv_export_import_roundtrip_structured_fields(client):
+    client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "兜底正文",
+            "is_new": False,
+            "ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}],
+            "steps": ["混合面粉与水"],
+            "tips": ["夏天水温要更低"],
+        },
+    )
+    exported = client.get("/api/recipes/stations/changfen/export")
+    assert exported.status_code == 200
+    created = client.post("/api/recipes/stations", json={"slug": "xibing", "title": "西饼档"})
+    assert created.status_code == 200
+    imported = client.post(
+        "/api/recipes/stations/xibing/import",
+        files={"csv_file": ("recipes.csv", exported.content, "text/csv")},
+    )
+    assert imported.status_code == 200
+    recipes = client.get("/api/recipes/stations/xibing/recipes").json()["recipes"]
+    dough = next(row for row in recipes if row["recipe_name"] == "面团")
+    assert dough["ingredients"] == [{"name": "面粉", "amount": "200", "unit": "g"}]
+    assert dough["steps"] == ["混合面粉与水"]
+    assert dough["tips"] == ["夏天水温要更低"]
+    assert dough["body_markdown"] == "兜底正文"
+
+
+def test_import_csv_invalid_ingredients_json_returns_400(client):
+    csv_body = (
+        "section,recipe_name,body_markdown,sort_order,is_new,"
+        "ingredients_json,steps_json,tips_json\n"
+        "配方,面团,x,0,0,not-json,[],[]\n"
+    )
+    r = client.post(
+        "/api/recipes/stations/changfen/import",
+        files={"csv_file": ("recipes.csv", csv_body.encode("utf-8"), "text/csv")},
+    )
+    assert r.status_code == 400
+    assert "第 2 行" in r.json()["detail"]
+    assert "用料" in r.json()["detail"]
+
+
 def test_docx_export(client):
     r = client.get("/api/recipes/stations/changfen/docx")
     assert r.status_code == 200
     assert "officedocument" in r.headers["content-type"]
+
+
+def test_docx_export_includes_structured_fields(client):
+    from docx import Document
+
+    client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "这段 Markdown 不应出现",
+            "is_new": False,
+            "ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}],
+            "steps": ["混合面粉与水"],
+            "tips": ["夏天水温要更低"],
+        },
+    )
+    r = client.get("/api/recipes/stations/changfen/docx")
+    assert r.status_code == 200
+    doc = Document(io.BytesIO(r.content))
+    cell_texts = [cell.text.strip() for table in doc.tables for row in table.rows for cell in row.cells]
+    assert "面粉" in cell_texts
+    assert any("200" in text for text in cell_texts)
+    paragraph_texts = [p.text for p in doc.paragraphs]
+    assert any("混合面粉与水" in text for text in paragraph_texts)
+    assert any("夏天水温要更低" in text for text in paragraph_texts)
+    assert not any("这段 Markdown 不应出现" in text for text in paragraph_texts)
 
 
 def test_station_detail_include_inactive(client):

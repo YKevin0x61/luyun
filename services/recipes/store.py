@@ -587,19 +587,27 @@ class RecipeStore:
         return [dict(r) for r in await cur.fetchall()]
 
     async def bulk_insert_recipes(self, slug: str, rows: list[tuple]) -> int:
-        """rows: (section, recipe_name, body, sort_order, is_new_int)"""
+        """rows: (section, recipe_name, body, sort_order, is_new_int, ingredients, steps, tips)."""
         now = utc_now_iso()
         await self.conn.executemany(
-            "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, is_new, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [(slug, s, n, b, so, isn, now) for (s, n, b, so, isn) in rows],
+            "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, is_new, "
+            "ingredients_json, steps_json, tips_json, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    slug, section, name, body, sort_order, is_new,
+                    _ingredients_to_storage(ingredients), _steps_to_storage(steps),
+                    _tips_to_storage(tips), now,
+                )
+                for (section, name, body, sort_order, is_new, ingredients, steps, tips) in rows
+            ],
         )
         await self._touch_station(slug, now)
         await self.conn.commit()
         return len(rows)
 
     # ---- 渲染辅助 ----
-    async def _parsed_recipes(self, slug: str, include_inactive: bool = False) -> list[ParsedRecipe]:
+    async def parsed_recipes(self, slug: str, include_inactive: bool = False) -> list[ParsedRecipe]:
         where = "WHERE station_slug = ?"
         if not include_inactive:
             where += " AND is_active = 1"
@@ -632,7 +640,7 @@ class RecipeStore:
         station = await self.get_station(slug)
         if station is None:
             return None
-        recipes = await self._parsed_recipes(slug, include_inactive)
+        recipes = await self.parsed_recipes(slug, include_inactive)
         if not recipes:
             return None
         return recipes_to_display_markdown(station["title"], recipes)
@@ -641,7 +649,7 @@ class RecipeStore:
         station = await self.get_station(slug)
         if station is None:
             return None
-        recipes = await self._parsed_recipes(slug, include_inactive)
+        recipes = await self.parsed_recipes(slug, include_inactive)
         if not recipes:
             return None
         return render_station_html(station["title"], recipes)

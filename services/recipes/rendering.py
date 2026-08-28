@@ -159,6 +159,15 @@ H2_SIZE = 12
 TABLE_HEADER_SIZE = 10
 TABLE_BODY_SIZE = 10
 QUOTE_SIZE = 10
+QUOTE_FILL = "FFF1F2"
+
+
+def _set_paragraph_shading(paragraph, color_hex: str) -> None:
+    pPr = paragraph._element.get_or_add_pPr()
+    shd = pPr.makeelement(qn("w:shd"), {
+        qn("w:val"): "clear", qn("w:color"): "auto", qn("w:fill"): color_hex,
+    })
+    pPr.append(shd)
 
 
 def _set_run_font(run, size=BODY_SIZE, bold=False, color=None):
@@ -239,11 +248,8 @@ def _add_rich_text_to_cell(cell, html_content):
         para = process_node(child, para)
 
 
-def render_markdown_to_docx(markdown_text: str) -> Document:
-    html = markdown.markdown(markdown_text, extensions=MARKDOWN_EXTENSIONS)
-    soup = BeautifulSoup(html, "html.parser")
+def _new_recipe_docx() -> Document:
     doc = Document()
-
     style = doc.styles["Normal"]
     style.font.name = FONT_NAME_EN
     style.element.rPr.rFonts.set(qn("w:eastAsia"), FONT_NAME)
@@ -259,128 +265,246 @@ def render_markdown_to_docx(markdown_text: str) -> Document:
         section.bottom_margin = Cm(1.0)
         section.left_margin = Cm(1.2)
         section.right_margin = Cm(1.2)
+    return doc
 
-    for element in soup.children:
-        if isinstance(element, NavigableString):
-            if element.strip():
-                doc.add_paragraph(element.strip())
-            continue
 
-        if element.name == "h1":
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            run = p.add_run(element.get_text())
-            _set_run_font(run, size=H1_SIZE, bold=True)
-            p.paragraph_format.space_before = Pt(2)
-            p.paragraph_format.space_after = Pt(6)
-        elif element.name == "h2":
-            p = doc.add_paragraph()
-            run = p.add_run(element.get_text())
-            _set_run_font(run, size=H2_SIZE, bold=True)
-            p.paragraph_format.space_before = Pt(6)
-            p.paragraph_format.space_after = Pt(3)
-            p.paragraph_format.keep_with_next = True
-            p_border = p._element.get_or_add_pPr()
-            bottom_border = p_border.makeelement(qn("w:pBdr"), {})
-            bottom_elem = bottom_border.makeelement(qn("w:bottom"), {
-                qn("w:val"): "single", qn("w:sz"): "4", qn("w:space"): "1", qn("w:color"): "666666",
-            })
-            bottom_border.append(bottom_elem)
-            p_border.append(bottom_border)
-        elif element.name == "h3":
-            p = doc.add_paragraph()
-            run = p.add_run(element.get_text())
-            _set_run_font(run, size=9, bold=True)
-            p.paragraph_format.space_before = Pt(4)
-            p.paragraph_format.space_after = Pt(2)
-        elif element.name == "hr":
+def _add_h1(doc, text: str) -> None:
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run(text)
+    _set_run_font(run, size=H1_SIZE, bold=True)
+    p.paragraph_format.space_before = Pt(2)
+    p.paragraph_format.space_after = Pt(6)
+
+
+def _add_h2(doc, text: str) -> None:
+    p = doc.add_paragraph()
+    run = p.add_run(text)
+    _set_run_font(run, size=H2_SIZE, bold=True)
+    p.paragraph_format.space_before = Pt(6)
+    p.paragraph_format.space_after = Pt(3)
+    p.paragraph_format.keep_with_next = True
+    p_border = p._element.get_or_add_pPr()
+    bottom_border = p_border.makeelement(qn("w:pBdr"), {})
+    bottom_elem = bottom_border.makeelement(qn("w:bottom"), {
+        qn("w:val"): "single", qn("w:sz"): "4", qn("w:space"): "1", qn("w:color"): "666666",
+    })
+    bottom_border.append(bottom_elem)
+    p_border.append(bottom_border)
+
+
+def _add_h3(doc, text: str) -> None:
+    p = doc.add_paragraph()
+    run = p.add_run(text)
+    _set_run_font(run, size=9, bold=True)
+    p.paragraph_format.space_before = Pt(4)
+    p.paragraph_format.space_after = Pt(2)
+
+
+def _add_table_spacer(doc) -> None:
+    spacer = doc.add_paragraph()
+    spacer.paragraph_format.space_before = Pt(1)
+    spacer.paragraph_format.space_after = Pt(1)
+    spacer.paragraph_format.line_spacing = Pt(4)
+    spacer.paragraph_format.keep_with_next = True
+
+
+def _add_grid_table(doc, num_cols: int):
+    table = doc.add_table(rows=0, cols=num_cols)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.style = "Table Grid"
+    tbl = table._tbl
+    tblPr = tbl.tblPr if tbl.tblPr is not None else tbl.makeelement(qn("w:tblPr"), {})
+    tblW = tblPr.makeelement(qn("w:tblW"), {qn("w:w"): "5000", qn("w:type"): "pct"})
+    tblPr.append(tblW)
+    tblLayout = tblPr.makeelement(qn("w:tblLayout"), {qn("w:type"): "fixed"})
+    tblPr.append(tblLayout)
+    return table, 5000 // num_cols
+
+
+def _set_cell_pct_width(cell, col_width_pct: int) -> None:
+    tcPr = cell._element.get_or_add_tcPr()
+    tcW = tcPr.makeelement(qn("w:tcW"), {qn("w:w"): str(col_width_pct), qn("w:type"): "pct"})
+    tcPr.append(tcW)
+
+
+def _ingredient_qty_text(item: dict) -> str:
+    from .structured_render import format_ingredient_qty
+    return format_ingredient_qty(item.get("amount") or "", item.get("unit") or "")
+
+
+def _add_ingredient_table(doc, ingredients) -> None:
+    rows = []
+    for item in ingredients or []:
+        if not isinstance(item, dict):
             continue
-        elif element.name == "div":
-            style_attr = element.get("style") or ""
-            if "page-break" in style_attr:
-                p = doc.add_paragraph()
-                run = p.add_run()
-                run._r.append(run._r.makeelement(qn("w:br"), {qn("w:type"): "page"}))
-                p.paragraph_format.space_before = Pt(0)
-                p.paragraph_format.space_after = Pt(0)
+        name = (item.get("name") or "").strip()
+        qty = _ingredient_qty_text(item)
+        if not name and not qty:
             continue
-        elif element.name == "table":
-            rows = element.find_all("tr")
-            if not rows:
-                continue
-            header_cells = rows[0].find_all(["th", "td"])
-            num_cols = len(header_cells)
-            if num_cols == 0:
-                continue
-            table = doc.add_table(rows=0, cols=num_cols)
-            table.alignment = WD_TABLE_ALIGNMENT.CENTER
-            table.style = "Table Grid"
-            tbl = table._tbl
-            tblPr = tbl.tblPr if tbl.tblPr is not None else tbl.makeelement(qn("w:tblPr"), {})
-            tblW = tblPr.makeelement(qn("w:tblW"), {qn("w:w"): "5000", qn("w:type"): "pct"})
-            tblPr.append(tblW)
-            tblLayout = tblPr.makeelement(qn("w:tblLayout"), {qn("w:type"): "fixed"})
-            tblPr.append(tblLayout)
-            col_width_pct = 5000 // num_cols
-            hdr_row = table.add_row()
-            for i, th in enumerate(header_cells):
-                cell = hdr_row.cells[i]
-                cell.text = ""
-                tcPr = cell._element.get_or_add_tcPr()
-                tcW = tcPr.makeelement(qn("w:tcW"), {qn("w:w"): str(col_width_pct), qn("w:type"): "pct"})
-                tcPr.append(tcW)
-                p = cell.paragraphs[0]
-                p.paragraph_format.space_before = Pt(1)
-                p.paragraph_format.space_after = Pt(1)
-                run = p.add_run(th.get_text().strip())
-                _set_run_font(run, size=TABLE_HEADER_SIZE, bold=True)
-                _set_cell_shading(cell, "E8E8E8")
-                _set_cell_margin(cell, top=15, bottom=15, left=30, right=30)
-            _set_row_no_split(hdr_row, keep_with_next=True)
-            for tr in rows[1:]:
-                tds = tr.find_all("td")
-                row = table.add_row()
-                for i, td in enumerate(tds):
-                    if i < num_cols:
-                        cell = row.cells[i]
-                        tcPr = cell._element.get_or_add_tcPr()
-                        tcW = tcPr.makeelement(qn("w:tcW"), {qn("w:w"): str(col_width_pct), qn("w:type"): "pct"})
-                        tcPr.append(tcW)
-                        inner_html = "".join(str(c) for c in td.children)
-                        _add_rich_text_to_cell(cell, inner_html)
-                        _set_cell_margin(cell, top=15, bottom=15, left=30, right=30)
-            spacer = doc.add_paragraph()
-            spacer.paragraph_format.space_before = Pt(1)
-            spacer.paragraph_format.space_after = Pt(1)
-            spacer.paragraph_format.line_spacing = Pt(4)
-            spacer.paragraph_format.keep_with_next = True
-        elif element.name == "blockquote":
+        rows.append((name, qty))
+    if not rows:
+        return
+    table, col_width_pct = _add_grid_table(doc, 2)
+    for name, qty in rows:
+        row = table.add_row()
+        for i, text in enumerate((name, qty)):
+            cell = row.cells[i]
+            _set_plain_data_cell(cell, text, col_width_pct)
+    _add_table_spacer(doc)
+
+
+def _set_plain_data_cell(cell, text: str, col_width_pct: int) -> None:
+    _set_cell_pct_width(cell, col_width_pct)
+    cell.text = ""
+    para = cell.paragraphs[0]
+    para.paragraph_format.space_before = Pt(1)
+    para.paragraph_format.space_after = Pt(1)
+    para.paragraph_format.line_spacing = Pt(11)
+    run = para.add_run(text)
+    _set_run_font(run, size=TABLE_BODY_SIZE)
+    _set_cell_margin(cell, top=15, bottom=15, left=30, right=30)
+
+
+def _add_numbered_steps(doc, steps) -> None:
+    for index, step in enumerate(steps or [], start=1):
+        text = str(step).strip()
+        if not text:
+            continue
+        p = doc.add_paragraph()
+        run = p.add_run(f"{index}. {text}")
+        _set_run_font(run, size=BODY_SIZE)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(0)
+
+
+def _add_emphasized_tips(doc, tips) -> None:
+    for tip in tips or []:
+        text = str(tip).strip()
+        if not text:
+            continue
+        p = doc.add_paragraph()
+        p.paragraph_format.left_indent = Cm(0.3)
+        run = p.add_run(text)
+        _set_run_font(run, size=QUOTE_SIZE, bold=True, color=(180, 30, 30))
+        _set_paragraph_shading(p, QUOTE_FILL)
+        p.paragraph_format.space_before = Pt(3)
+        p.paragraph_format.space_after = Pt(3)
+
+
+def _append_html_element_to_docx(doc, element) -> None:
+    if isinstance(element, NavigableString):
+        if element.strip():
+            doc.add_paragraph(element.strip())
+        return
+
+    if element.name == "h1":
+        _add_h1(doc, element.get_text())
+    elif element.name == "h2":
+        _add_h2(doc, element.get_text())
+    elif element.name == "h3":
+        _add_h3(doc, element.get_text())
+    elif element.name == "hr":
+        return
+    elif element.name == "div":
+        style_attr = element.get("style") or ""
+        if "page-break" in style_attr:
             p = doc.add_paragraph()
-            p.paragraph_format.left_indent = Cm(0.3)
-            run = p.add_run(element.get_text().strip())
-            _set_run_font(run, size=QUOTE_SIZE, bold=True, color=(180, 30, 30))
-            p.paragraph_format.space_before = Pt(3)
-            p.paragraph_format.space_after = Pt(3)
-        elif element.name == "p":
-            p = doc.add_paragraph()
+            run = p.add_run()
+            run._r.append(run._r.makeelement(qn("w:br"), {qn("w:type"): "page"}))
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(0)
+        return
+    elif element.name == "table":
+        rows = element.find_all("tr")
+        if not rows:
+            return
+        header_cells = rows[0].find_all(["th", "td"])
+        num_cols = len(header_cells)
+        if num_cols == 0:
+            return
+        table, col_width_pct = _add_grid_table(doc, num_cols)
+        hdr_row = table.add_row()
+        for i, th in enumerate(header_cells):
+            cell = hdr_row.cells[i]
+            cell.text = ""
+            _set_cell_pct_width(cell, col_width_pct)
+            p = cell.paragraphs[0]
             p.paragraph_format.space_before = Pt(1)
             p.paragraph_format.space_after = Pt(1)
-            for child in element.children:
-                if isinstance(child, NavigableString):
-                    run = p.add_run(str(child))
-                    _set_run_font(run, size=BODY_SIZE)
-                elif child.name in ("strong", "b"):
-                    run = p.add_run(child.get_text())
-                    _set_run_font(run, size=BODY_SIZE, bold=True)
-                elif child.name == "br":
-                    p.add_run("\n")
-                else:
-                    run = p.add_run(child.get_text())
-                    _set_run_font(run, size=BODY_SIZE)
-        elif element.name in ("ul", "ol"):
-            for li in element.find_all("li"):
-                p = doc.add_paragraph(li.get_text(), style="List Bullet")
-                p.paragraph_format.space_before = Pt(0)
-                p.paragraph_format.space_after = Pt(0)
+            run = p.add_run(th.get_text().strip())
+            _set_run_font(run, size=TABLE_HEADER_SIZE, bold=True)
+            _set_cell_shading(cell, "E8E8E8")
+            _set_cell_margin(cell, top=15, bottom=15, left=30, right=30)
+        _set_row_no_split(hdr_row, keep_with_next=True)
+        for tr in rows[1:]:
+            tds = tr.find_all("td")
+            row = table.add_row()
+            for i, td in enumerate(tds):
+                if i < num_cols:
+                    cell = row.cells[i]
+                    _set_cell_pct_width(cell, col_width_pct)
+                    inner_html = "".join(str(c) for c in td.children)
+                    _add_rich_text_to_cell(cell, inner_html)
+                    _set_cell_margin(cell, top=15, bottom=15, left=30, right=30)
+        _add_table_spacer(doc)
+    elif element.name == "blockquote":
+        p = doc.add_paragraph()
+        p.paragraph_format.left_indent = Cm(0.3)
+        run = p.add_run(element.get_text().strip())
+        _set_run_font(run, size=QUOTE_SIZE, bold=True, color=(180, 30, 30))
+        p.paragraph_format.space_before = Pt(3)
+        p.paragraph_format.space_after = Pt(3)
+    elif element.name == "p":
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(1)
+        p.paragraph_format.space_after = Pt(1)
+        for child in element.children:
+            if isinstance(child, NavigableString):
+                run = p.add_run(str(child))
+                _set_run_font(run, size=BODY_SIZE)
+            elif child.name in ("strong", "b"):
+                run = p.add_run(child.get_text())
+                _set_run_font(run, size=BODY_SIZE, bold=True)
+            elif child.name == "br":
+                p.add_run("\n")
+            else:
+                run = p.add_run(child.get_text())
+                _set_run_font(run, size=BODY_SIZE)
+    elif element.name in ("ul", "ol"):
+        for li in element.find_all("li"):
+            p = doc.add_paragraph(li.get_text(), style="List Bullet")
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(0)
 
+
+def render_markdown_to_docx(markdown_text: str) -> Document:
+    html = markdown.markdown(markdown_text, extensions=MARKDOWN_EXTENSIONS)
+    soup = BeautifulSoup(html, "html.parser")
+    doc = _new_recipe_docx()
+    for element in soup.children:
+        _append_html_element_to_docx(doc, element)
+    return doc
+
+
+def render_station_to_docx(title: str, recipes: list) -> Document:
+    """Word export for a station: structured fields as table/numbered/tips, else Markdown body."""
+    doc = _new_recipe_docx()
+    _add_h1(doc, title or "")
+    current_section = None
+    for recipe in recipes:
+        section = recipe.section or ""
+        if section != current_section:
+            current_section = section
+            _add_h2(doc, section)
+        _add_h3(doc, recipe.recipe_name or "")
+        if recipe.ingredients or recipe.steps or recipe.tips:
+            _add_ingredient_table(doc, recipe.ingredients)
+            _add_numbered_steps(doc, recipe.steps)
+            _add_emphasized_tips(doc, recipe.tips)
+        else:
+            html = markdown.markdown(recipe.body_markdown or "", extensions=MARKDOWN_EXTENSIONS)
+            soup = BeautifulSoup(html, "html.parser")
+            for element in soup.children:
+                _append_html_element_to_docx(doc, element)
     return doc
