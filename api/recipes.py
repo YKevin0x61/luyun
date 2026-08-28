@@ -101,6 +101,29 @@ def _validate_tips(items) -> list[str]:
     return out
 
 
+def _validate_base_servings_qty(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        qty = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="基准份数必须是数字")
+    if qty != qty or qty in (float("inf"), float("-inf")):
+        raise HTTPException(status_code=400, detail="基准份数必须是数字")
+    if qty < 0:
+        raise HTTPException(status_code=400, detail="基准份数不能为负数")
+    if qty == 0:
+        return None
+    return qty
+
+
+def _validate_base_servings_unit(value) -> str | None:
+    if value is None:
+        return None
+    text = _validate_text(str(value), "基准份数单位", required=False)
+    return text or None
+
+
 def _csv_safe_cell(value) -> str:
     text = "" if value is None else str(value)
     if text.startswith(DANGEROUS_CSV_PREFIXES):
@@ -137,6 +160,8 @@ class RecipeCreate(BaseModel):
     ingredients: list[IngredientItem] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
     tips: list[str] = Field(default_factory=list)
+    base_servings_qty: Optional[float] = None
+    base_servings_unit: Optional[str] = None
 
 
 class RecipeUpdate(BaseModel):
@@ -148,6 +173,8 @@ class RecipeUpdate(BaseModel):
     ingredients: Optional[list[IngredientItem]] = None
     steps: Optional[list[str]] = None
     tips: Optional[list[str]] = None
+    base_servings_qty: Optional[float] = None
+    base_servings_unit: Optional[str] = None
 
 
 class RecipeReorder(BaseModel):
@@ -237,9 +264,12 @@ async def create_recipe(slug: str, payload: RecipeCreate, store: RecipeStore = D
     ingredients = _validate_ingredients(payload.ingredients)
     steps = _validate_steps(payload.steps)
     tips = _validate_tips(payload.tips)
+    base_servings_qty = _validate_base_servings_qty(payload.base_servings_qty)
+    base_servings_unit = _validate_base_servings_unit(payload.base_servings_unit)
     rid = await store.create_recipe(
         slug, section, name, body, payload.sort_order, payload.is_new,
         ingredients=ingredients, steps=steps, tips=tips,
+        base_servings_qty=base_servings_qty, base_servings_unit=base_servings_unit,
     )
     return {"id": rid}
 
@@ -258,9 +288,14 @@ async def update_recipe(recipe_id: int, payload: RecipeUpdate, store: RecipeStor
     )
     steps = None if payload.steps is None else _validate_steps(payload.steps)
     tips = None if payload.tips is None else _validate_tips(payload.tips)
+    update_kwargs = {}
+    if "base_servings_qty" in payload.model_fields_set:
+        update_kwargs["base_servings_qty"] = _validate_base_servings_qty(payload.base_servings_qty)
+    if "base_servings_unit" in payload.model_fields_set:
+        update_kwargs["base_servings_unit"] = _validate_base_servings_unit(payload.base_servings_unit)
     updated = await store.update_recipe(
         recipe_id, section, name, body, sort_order, payload.is_new,
-        ingredients=ingredients, steps=steps, tips=tips,
+        ingredients=ingredients, steps=steps, tips=tips, **update_kwargs,
     )
     return updated
 

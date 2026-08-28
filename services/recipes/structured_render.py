@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from html import escape as html_escape
 
 from .rendering import render_markdown_fragment
@@ -18,10 +20,30 @@ RECIPE_STEPS_ITEM_CLASS = "recipe-steps-item"
 # Keep in sync with admin-web/src/utils/recipeTips.js
 RECIPE_TIPS_LIST_CLASS = "recipe-tips"
 RECIPE_TIPS_ITEM_CLASS = "recipe-tips-item"
+_SERVINGS_QTY_ATTR_RE = re.compile(r"^\d+(?:\.\d+)?$")
 
 
 def _esc(value) -> str:
     return html_escape("" if value is None else str(value), quote=True)
+
+
+def format_servings_qty_attr(qty) -> str | None:
+    """Sanitize base servings qty for a data-* attribute; None if not a positive number."""
+    if qty is None:
+        return None
+    try:
+        n = float(qty)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(n) or n <= 0:
+        return None
+    if n == int(n) and abs(n) < 1e15:
+        text = str(int(n))
+    else:
+        text = f"{n:.10g}"
+    if not _SERVINGS_QTY_ATTR_RE.fullmatch(text):
+        return None
+    return text
 
 
 def format_ingredient_qty(amount: str, unit: str) -> str:
@@ -118,8 +140,16 @@ def _heading_html(recipe: ParsedRecipe) -> str:
     if not recipe.is_active:
         classes.append("recipe-title--inactive")
     id_attr = f' data-recipe-id="{int(recipe.id)}"' if recipe.id is not None else ""
+    servings_attr = ""
+    qty_text = format_servings_qty_attr(recipe.base_servings_qty)
+    if qty_text is not None:
+        unit = recipe.base_servings_unit or ""
+        servings_attr = (
+            f' data-base-servings-qty="{_esc(qty_text)}"'
+            f' data-base-servings-unit="{_esc(unit)}"'
+        )
     return (
-        f'<h3 class="{" ".join(classes)}"{id_attr}>'
+        f'<h3 class="{" ".join(classes)}"{id_attr}{servings_attr}>'
         f"{_esc(recipe.recipe_name.strip())}</h3>"
     )
 

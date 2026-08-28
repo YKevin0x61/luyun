@@ -5,7 +5,11 @@
 
 from __future__ import annotations
 
+import re
+
 from bs4 import BeautifulSoup, Tag
+
+_SERVINGS_QTY_ATTR_RE = re.compile(r"^\d+(?:\.\d+)?$")
 
 
 def _take_first_element(parent: Tag) -> Tag | None:
@@ -81,6 +85,11 @@ def wrap_sop_semantic_layout(html_fragment: str) -> str:
                     recipe_id = n2.get("data-recipe-id")
                     if recipe_id and str(recipe_id).isdigit():
                         card_attrs["data-recipe-id"] = str(recipe_id)
+                    qty = n2.get("data-base-servings-qty")
+                    if qty is not None and _SERVINGS_QTY_ATTR_RE.fullmatch(str(qty)):
+                        card_attrs["data-base-servings-qty"] = str(qty)
+                        unit = n2.get("data-base-servings-unit")
+                        card_attrs["data-base-servings-unit"] = "" if unit is None else str(unit)
                     card = soup.new_tag("article", attrs=card_attrs)
                     chead = soup.new_tag("header", attrs={"class": "recipe-card-head"})
                     chead.append(n2)

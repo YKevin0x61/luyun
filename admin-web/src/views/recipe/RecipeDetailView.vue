@@ -5,11 +5,14 @@ import QRCode from 'qrcode'
 import { api } from '../../api/client'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import * as RC from '../../utils/recipeCore'
+import { RECIPE_INGREDIENTS_AMOUNT_CLASS } from '../../utils/recipeIngredients'
+import { parseBaseServingsQty, scaleAmount, servingsFactor } from '../../utils/recipeServings'
 import SvgIcon from '../../components/SvgIcon.vue'
 import RecipeNavIcon from './RecipeNavIcon.vue'
 
 // 通过 innerHTML 注入的原生 DOM（复制按钮），无法命中 Vue 的 <style scoped>，故用行内 style 兜底对齐。
 const CHECK_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:-0.15em;flex-shrink:0"><path d="M20 6 9 17l-5-5"/></svg>'
+const SCALE_TOGGLE_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><path d="M9 12h6"/></svg>'
 
 useScopedStylesheet('/recipe.css')
 
@@ -33,10 +36,15 @@ const onlyNew = ref(false)
 const showInactive = ref(false)
 const qrModalUrl = ref('')
 const qrCanvasRef = ref(null)
+const targetServingsQty = ref('')
+const servingsUnitLabel = ref('')
+const servingsControlVisible = ref(false)
 
 let searchDebounce = null
 let intersectionObserver = null
 let focusHighlightTimer = null
+let scaleOutsideHandler = null
+let scaleEscHandler = null
 const FOCUS_HIGHLIGHT_MS = 1600
 
 function applyTheme(t) {
@@ -86,7 +94,10 @@ async function load() {
 
 function afterContentRendered() {
   buildToc()
+  readPageServingsDefault()
   injectScaleControls()
+  applyAllCardScales()
+  bindScaleDismiss()
   injectCopyButtons()
   nextTick(() => applyFocusFromQuery())
 }
@@ -208,61 +219,152 @@ function copyText(text) {
 
 const SCALE_PRESETS = [['×½', 0.5], ['×1', 1], ['×2', 2], ['×3', 3]]
 
-function scaleCard(card, factor) {
-  const bodyEl = card.querySelector('.recipe-card-body')
-  if (!bodyEl) return
-  if (card.__sopBaseHTML == null) card.__sopBaseHTML = bodyEl.innerHTML
-  if (factor === 1) {
-    bodyEl.innerHTML = card.__sopBaseHTML
-  } else {
-    const tmp = document.createElement('div')
-    tmp.innerHTML = card.__sopBaseHTML
-    const walker = document.createTreeWalker(tmp, NodeFilter.SHOW_TEXT, null)
-    const nodes = []
-    let n
-    while ((n = walker.nextNode())) nodes.push(n)
-    nodes.forEach((node) => {
-      const scaled = RC.scaleText(node.nodeValue, factor)
-      if (scaled !== node.nodeValue) node.nodeValue = scaled
-    })
-    bodyEl.innerHTML = tmp.innerHTML
+function cardBaseQty(card) {
+  return parseBaseServingsQty(card.getAttribute('data-base-servings-qty'))
+}
+
+function readPageServingsDefault() {
+  if (!bodyRef.value) {
+    servingsControlVisible.value = false
+    targetServingsQty.value = ''
+    servingsUnitLabel.value = ''
+    return
   }
-  card.setAttribute('data-scale', factor === 1 ? '' : `×${RC.formatQty(factor)}`)
-  card.classList.toggle('recipe-card--scaled', factor !== 1)
+  const cards = bodyRef.value.querySelectorAll('article.recipe-card')
+  let first = null
+  for (const card of cards) {
+    if (cardBaseQty(card) != null) {
+      first = card
+      break
+    }
+  }
+  if (!first) {
+    servingsControlVisible.value = false
+    targetServingsQty.value = ''
+    servingsUnitLabel.value = ''
+    return
+  }
+  servingsControlVisible.value = true
+  targetServingsQty.value = String(cardBaseQty(first))
+  servingsUnitLabel.value = first.getAttribute('data-base-servings-unit') || ''
+}
+
+function effectiveFactor(card) {
+  if (card.__sopOverrideFactor != null) return RC.clampFactor(card.__sopOverrideFactor)
+  const base = cardBaseQty(card)
+  if (base == null) return 1
+  return servingsFactor(targetServingsQty.value, base)
+}
+
+function scaleCardAmounts(card, factor) {
+  card.querySelectorAll(`.${RECIPE_INGREDIENTS_AMOUNT_CLASS}`).forEach((cell) => {
+    if (cell.dataset.sopBaseAmount == null) {
+      cell.dataset.sopBaseAmount = cell.textContent || ''
+    }
+    cell.textContent = scaleAmount(cell.dataset.sopBaseAmount, factor)
+  })
+  const f = RC.clampFactor(factor)
+  card.setAttribute('data-scale', f === 1 ? '' : `×${RC.formatQty(f)}`)
+  card.classList.toggle('recipe-card--scaled', f !== 1)
+}
+
+function applyAllCardScales() {
+  if (!bodyRef.value) return
+  bodyRef.value.querySelectorAll('article.recipe-card').forEach((card) => {
+    if (cardBaseQty(card) == null) return
+    scaleCardAmounts(card, effectiveFactor(card))
+  })
+}
+
+function closeAllScalePopovers() {
+  if (!bodyRef.value) return
+  bodyRef.value.querySelectorAll('.sop-scale-wrap.is-open').forEach((wrap) => {
+    wrap.classList.remove('is-open')
+    wrap.querySelector('.sop-scale-toggle')?.setAttribute('aria-expanded', 'false')
+  })
+}
+
+function bindScaleDismiss() {
+  unbindScaleDismiss()
+  scaleOutsideHandler = (e) => {
+    if (e.target.closest && e.target.closest('.sop-scale-wrap')) return
+    closeAllScalePopovers()
+  }
+  scaleEscHandler = (e) => {
+    if (e.key === 'Escape') closeAllScalePopovers()
+  }
+  document.addEventListener('click', scaleOutsideHandler)
+  document.addEventListener('keydown', scaleEscHandler)
+}
+
+function unbindScaleDismiss() {
+  if (scaleOutsideHandler) document.removeEventListener('click', scaleOutsideHandler)
+  if (scaleEscHandler) document.removeEventListener('keydown', scaleEscHandler)
+  scaleOutsideHandler = null
+  scaleEscHandler = null
 }
 
 function injectScaleControls() {
   if (!bodyRef.value) return
   bodyRef.value.querySelectorAll('article.recipe-card').forEach((card) => {
-    if (card.querySelector('.sop-scale')) return
+    if (cardBaseQty(card) == null) return
+    if (card.querySelector('.sop-scale-wrap')) return
     const head = card.querySelector('.recipe-card-head')
     if (!head) return
+    const wrap = document.createElement('div')
+    wrap.className = 'sop-scale-wrap no-print'
+    const toggle = document.createElement('button')
+    toggle.type = 'button'
+    toggle.className = 'sop-scale-toggle'
+    toggle.setAttribute('aria-label', '临时覆盖用量倍率')
+    toggle.setAttribute('aria-expanded', 'false')
+    toggle.innerHTML = SCALE_TOGGLE_SVG
     const box = document.createElement('div')
-    box.className = 'sop-scale no-print'
+    box.className = 'sop-scale sop-scale--popover'
     let html = ''
     for (const [label, f] of SCALE_PRESETS) {
-      html += `<button type="button" class="sop-scale-btn${f === 1 ? ' on' : ''}" data-f="${f}">${label}</button>`
+      html += `<button type="button" class="sop-scale-btn" data-f="${f}">${label}</button>`
     }
     html += '<input type="text" inputmode="decimal" class="sop-scale-input" placeholder="倍" aria-label="自定义倍率">'
     box.innerHTML = html
-    head.appendChild(box)
+    wrap.appendChild(toggle)
+    wrap.appendChild(box)
+    head.appendChild(wrap)
+
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const open = wrap.classList.toggle('is-open')
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false')
+      if (open) {
+        bodyRef.value.querySelectorAll('.sop-scale-wrap.is-open').forEach((other) => {
+          if (other === wrap) return
+          other.classList.remove('is-open')
+          other.querySelector('.sop-scale-toggle')?.setAttribute('aria-expanded', 'false')
+        })
+      }
+    })
     box.addEventListener('click', (e) => {
       const b = e.target.closest('.sop-scale-btn')
       if (!b) return
       const f = parseFloat(b.getAttribute('data-f'))
-      box.querySelectorAll('.sop-scale-btn').forEach((btn) => btn.classList.toggle('on', parseFloat(btn.getAttribute('data-f')) === f))
-      scaleCard(card, f)
+      card.__sopOverrideFactor = f
+      box.querySelectorAll('.sop-scale-btn').forEach((btn) => {
+        btn.classList.toggle('on', parseFloat(btn.getAttribute('data-f')) === f)
+      })
       box.querySelector('.sop-scale-input').value = ''
+      scaleCardAmounts(card, f)
     })
     box.querySelector('.sop-scale-input').addEventListener('input', (e) => {
       if (e.target.value === '') {
-        box.querySelectorAll('.sop-scale-btn').forEach((btn) => btn.classList.toggle('on', parseFloat(btn.getAttribute('data-f')) === 1))
-        scaleCard(card, 1)
+        card.__sopOverrideFactor = null
+        box.querySelectorAll('.sop-scale-btn').forEach((btn) => btn.classList.remove('on'))
+        scaleCardAmounts(card, effectiveFactor(card))
         return
       }
       const f = RC.clampFactor(e.target.value)
+      card.__sopOverrideFactor = f
       box.querySelectorAll('.sop-scale-btn').forEach((btn) => btn.classList.remove('on'))
-      scaleCard(card, f)
+      scaleCardAmounts(card, f)
     })
   })
 }
@@ -300,6 +402,7 @@ async function openQr() {
 }
 
 watch(slug, load)
+watch(targetServingsQty, () => applyAllCardScales())
 watch(() => route.query.focus, () => {
   if (!loading.value) nextTick(() => applyFocusFromQuery())
 })
@@ -314,6 +417,7 @@ onBeforeUnmount(() => {
   intersectionObserver?.disconnect()
   clearTimeout(searchDebounce)
   if (focusHighlightTimer != null) clearTimeout(focusHighlightTimer)
+  unbindScaleDismiss()
   document.documentElement.removeAttribute('data-theme')
   document.documentElement.style.removeProperty('--reader-fs')
   document.body.classList.remove('sop-density-compact', 'sop-density-comfortable', 'sop-only-new')
@@ -364,6 +468,20 @@ onBeforeUnmount(() => {
           <div class="sop-toolbar no-print">
             <router-link class="back-link" to="/recipe"><span class="back-link-icon" aria-hidden="true">←</span>返回列表</router-link>
             <span class="sop-toolbar-chip">{{ title }}</span>
+            <div v-if="servingsControlVisible" class="sop-servings no-print" aria-live="polite">
+              <label class="sop-servings-label" for="sop-target-servings">目标份数</label>
+              <input
+                id="sop-target-servings"
+                v-model="targetServingsQty"
+                type="number"
+                inputmode="decimal"
+                min="0.1"
+                step="any"
+                class="sop-servings-input"
+                aria-label="目标份数"
+              >
+              <span class="sop-servings-unit">{{ servingsUnitLabel }}</span>
+            </div>
             <button type="button" class="sop-chip" :aria-pressed="onlyNew" @click="toggleOnlyNew"><SvgIcon name="star" :size="12" /> 只看新品</button>
             <button type="button" class="sop-chip" :aria-pressed="showInactive" @click="toggleShowInactive">显示停用</button>
             <span class="sop-search-count" aria-live="polite">{{ searchCount }}</span>

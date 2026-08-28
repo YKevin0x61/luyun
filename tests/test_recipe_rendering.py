@@ -47,6 +47,24 @@ def test_html_strips_non_numeric_recipe_id():
     assert "data-recipe-id" not in html
 
 
+def test_html_keeps_numeric_base_servings_qty():
+    html = render_markdown_to_html(
+        '# T\n\n## S\n\n<h3 class="recipe-title" data-recipe-id="1" '
+        'data-base-servings-qty="4.5" data-base-servings-unit="人份">面团</h3>\n\nx\n'
+    )
+    assert 'data-base-servings-qty="4.5"' in html
+    assert 'data-base-servings-unit="人份"' in html
+
+
+def test_html_strips_non_numeric_base_servings_qty():
+    html = render_markdown_to_html(
+        '# T\n\n## S\n\n<h3 class="recipe-title" data-recipe-id="1" '
+        'data-base-servings-qty="nope" data-base-servings-unit="人份">面团</h3>\n\nx\n'
+    )
+    assert "data-base-servings-qty" not in html
+    assert "data-base-servings-unit" not in html
+
+
 def test_html_wraps_table_in_scroll():
     html = render_markdown_to_html("## 配方\n\n| A | B |\n|:---|:---|\n| 1 | 2 |\n")
     assert "table-scroll" in html
@@ -413,3 +431,45 @@ def test_station_html_keeps_ingredients_and_steps_when_tips_present():
     assert body.select_one(".recipe-ingredients-name").get_text() == "面粉"
     assert body.select_one(".recipe-steps-item").get_text() == "混合面粉与水"
     assert body.select_one(".recipe-tips-item").get_text() == "夏天水温要更低"
+
+
+def test_station_html_stamps_base_servings_when_qty_present():
+    html = render_station_html("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="面团", body_markdown="",
+            sort_order=0, id=13,
+            ingredients=({"name": "面粉", "amount": "200", "unit": "g"},),
+            base_servings_qty=4.5, base_servings_unit="人份",
+        ),
+    ])
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    card = soup.select_one("article.recipe-card")
+    assert card.get("data-base-servings-qty") == "4.5"
+    assert card.get("data-base-servings-unit") == "人份"
+    h3 = card.select_one("h3")
+    assert h3.get("data-base-servings-qty") == "4.5"
+    assert h3.get("data-base-servings-unit") == "人份"
+
+
+def test_station_html_omits_base_servings_when_qty_null():
+    html = render_station_html("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="面团", body_markdown="x",
+            sort_order=0, id=14,
+        ),
+    ])
+    assert "data-base-servings-qty" not in html
+    assert "data-base-servings-unit" not in html
+
+
+def test_station_html_omits_base_servings_when_qty_not_positive():
+    html = render_station_html("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="面团", body_markdown="x",
+            sort_order=0, id=15,
+            base_servings_qty=0, base_servings_unit="人份",
+        ),
+    ])
+    assert "data-base-servings-qty" not in html
+    assert "data-base-servings-unit" not in html

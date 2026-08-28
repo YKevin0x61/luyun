@@ -58,6 +58,7 @@ const renameForm = reactive({ slug: '', title: '' })
 const recipeForm = reactive({
   id: null, section: '配方', recipe_name: '', body: '', sort_order: null, is_new: false,
   ingredients: [], steps: [], tips: [],
+  base_servings_qty: '', base_servings_unit: '',
 })
 const historyItems = ref([])
 
@@ -180,6 +181,8 @@ function openAddRecipe() {
   recipeForm.ingredients = []
   recipeForm.steps = []
   recipeForm.tips = []
+  recipeForm.base_servings_qty = ''
+  recipeForm.base_servings_unit = ''
   ingredientUndo.value = null
   stepUndo.value = null
   tipUndo.value = null
@@ -201,11 +204,20 @@ async function openEditRecipe(id) {
   }))
   recipeForm.steps = (r.steps || []).map((text) => String(text || ''))
   recipeForm.tips = (r.tips || []).map((text) => String(text || ''))
+  recipeForm.base_servings_qty = r.base_servings_qty == null ? '' : String(r.base_servings_qty)
+  recipeForm.base_servings_unit = r.base_servings_unit || ''
   ingredientUndo.value = null
   stepUndo.value = null
   tipUndo.value = null
   modal.kind = 'recipe-form'
 }
+function servingsQtyPayload(raw) {
+  if (raw === '' || raw == null) return 0
+  const qty = Number(raw)
+  if (!Number.isFinite(qty)) return 0
+  return qty
+}
+
 async function submitRecipeForm() {
   errorMsg.value = ''
   const payload = {
@@ -221,6 +233,8 @@ async function submitRecipeForm() {
     })),
     steps: dropBlankStepRows(recipeForm.steps).map((text) => String(text).trim()),
     tips: dropBlankTipRows(recipeForm.tips).map((text) => String(text).trim()),
+    base_servings_qty: servingsQtyPayload(recipeForm.base_servings_qty),
+    base_servings_unit: String(recipeForm.base_servings_unit || '').trim(),
   }
   try {
     if (recipeForm.id) {
@@ -617,6 +631,25 @@ loadStations()
             <label class="form-label">条目名称</label>
             <input class="form-input" v-model="recipeForm.recipe_name">
             <label class="form-check"><RecipeCheckbox v-model="recipeForm.is_new" /><span>标记为新品</span></label>
+            <label class="form-label">基准份数</label>
+            <div class="servings-editor">
+              <input
+                class="form-input"
+                type="number"
+                inputmode="decimal"
+                min="0"
+                step="any"
+                v-model="recipeForm.base_servings_qty"
+                aria-label="基准份数数值"
+                placeholder="数值"
+              >
+              <input
+                class="form-input"
+                v-model="recipeForm.base_servings_unit"
+                aria-label="基准份数单位"
+                placeholder="人份"
+              >
+            </div>
             <label class="form-label">用料</label>
             <div v-if="recipeForm.ingredients.length" class="ingredient-editor-wrap">
               <table class="ingredient-editor">
@@ -910,5 +943,12 @@ loadStations()
 .ingredient-editor-toolbar {
   justify-content: flex-start;
   margin: 0.5rem 0 0;
+}
+.servings-editor {
+  display: flex;
+  gap: 0.5rem;
+}
+.servings-editor .form-input {
+  flex: 1;
 }
 </style>

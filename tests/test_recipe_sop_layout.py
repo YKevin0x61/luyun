@@ -71,3 +71,29 @@ def test_wrap_copies_recipe_id_from_h3_to_card():
     card = soup.select_one("article.recipe-card")
     assert card is not None
     assert card.get("data-recipe-id") == "42"
+
+
+def test_wrap_copies_base_servings_from_h3_to_card():
+    html = (
+        "<h1>T</h1><h2>S</h2>"
+        '<h3 class="recipe-title" data-recipe-id="42" '
+        'data-base-servings-qty="4.5" data-base-servings-unit="人份">面团</h3><p>x</p>'
+    )
+    out = wrap_sop_semantic_layout(html)
+    soup = BeautifulSoup(out, "html.parser")
+    card = soup.select_one("article.recipe-card")
+    assert card is not None
+    assert card.get("data-base-servings-qty") == "4.5"
+    assert card.get("data-base-servings-unit") == "人份"
+
+
+def test_wrap_omits_base_servings_attrs_when_qty_missing():
+    html = (
+        "<h1>T</h1><h2>S</h2>"
+        '<h3 class="recipe-title" data-recipe-id="42">面团</h3><p>x</p>'
+    )
+    out = wrap_sop_semantic_layout(html)
+    soup = BeautifulSoup(out, "html.parser")
+    card = soup.select_one("article.recipe-card")
+    assert card.get("data-base-servings-qty") is None
+    assert card.get("data-base-servings-unit") is None

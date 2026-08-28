@@ -35,6 +35,8 @@ class ParsedRecipe:
     ingredients: tuple = ()
     steps: tuple = ()
     tips: tuple = ()
+    base_servings_qty: float | None = None
+    base_servings_unit: str | None = None
 
 
 def _split_pipe_row(line: str) -> list[str]:

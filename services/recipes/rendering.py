@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import markdown
 from bs4 import BeautifulSoup, NavigableString
 from docx import Document
@@ -29,7 +31,7 @@ ALLOWED_TAGS = {
 
 ALLOWED_ATTRS = {
     "div": {"class", "style"},
-    "h3": {"class", "data-recipe-id"},
+    "h3": {"class", "data-recipe-id", "data-base-servings-qty", "data-base-servings-unit"},
     "h4": {"class"},
     "a": {"href", "target", "rel"},
     "table": {"class"},
@@ -38,7 +40,7 @@ ALLOWED_ATTRS = {
     "tr": {"class"},
     "th": {"class"},
     "td": {"class"},
-    "article": {"class", "data-recipe-id"},
+    "article": {"class", "data-recipe-id", "data-base-servings-qty", "data-base-servings-unit"},
     "section": {"class"},
     "header": {"class"},
     "ol": {"class"},
@@ -47,6 +49,7 @@ ALLOWED_ATTRS = {
 }
 
 SAFE_PROTOCOLS = {"http:", "https:", "mailto:"}
+_SERVINGS_QTY_ATTR_RE = re.compile(r"^\d+(?:\.\d+)?$")
 
 
 def _sanitize_html(soup: BeautifulSoup) -> None:
@@ -84,8 +87,19 @@ def _sanitize_html(soup: BeautifulSoup) -> None:
             elif tag.name == "article" and attr == "data-recipe-id":
                 if not str(tag.get(attr) or "").isdigit():
                     del tag[attr]
+            elif tag.name in ("h3", "article") and attr == "data-base-servings-qty":
+                if not _SERVINGS_QTY_ATTR_RE.fullmatch(str(tag.get(attr) or "")):
+                    del tag[attr]
+            elif tag.name in ("h3", "article") and attr == "data-base-servings-unit":
+                unit = str(tag.get(attr) or "")
+                if any(ch in unit for ch in ("\n", "\r", "\x00")):
+                    del tag[attr]
         if tag.name == "a" and tag.get("target") == "_blank":
             tag["rel"] = "noopener noreferrer"
+
+    for tag in soup.find_all(["h3", "article"]):
+        if "data-base-servings-qty" not in tag.attrs:
+            tag.attrs.pop("data-base-servings-unit", None)
 
 
 def _sanitize_fragment(html_fragment: str) -> str:

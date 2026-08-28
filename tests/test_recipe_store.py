@@ -391,3 +391,78 @@ def test_non_list_stored_tips_json_returns_empty_list(store):
     conn.commit()
     conn.close()
     assert _run(store.get_recipe(row["id"]))["tips"] == []
+
+
+def test_missing_base_servings_read_as_null(store):
+    row = _run(store.list_recipes("changfen"))[0]
+    assert row["base_servings_qty"] is None
+    assert row["base_servings_unit"] is None
+    got = _run(store.get_recipe(row["id"]))
+    assert got["base_servings_qty"] is None
+    assert got["base_servings_unit"] is None
+
+
+def test_create_without_base_servings_defaults_null(store):
+    rid = _run(store.create_recipe("changfen", "配方", "无份数", "正文", None, False))
+    got = _run(store.get_recipe(rid))
+    assert got["base_servings_qty"] is None
+    assert got["base_servings_unit"] is None
+
+
+def test_base_servings_roundtrip(store):
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "body", None, False,
+        base_servings_qty=4.5, base_servings_unit="人份",
+    ))
+    got = _run(store.get_recipe(rid))
+    assert got["base_servings_qty"] == 4.5
+    assert got["base_servings_unit"] == "人份"
+    listed = next(x for x in _run(store.list_recipes("changfen")) if x["id"] == rid)
+    assert listed["base_servings_qty"] == 4.5
+    assert listed["base_servings_unit"] == "人份"
+
+    updated = _run(store.update_recipe(
+        rid, "配方", "面团", "body", got["sort_order"], False,
+        base_servings_qty=2, base_servings_unit="份",
+    ))
+    assert updated["base_servings_qty"] == 2
+    assert updated["base_servings_unit"] == "份"
+
+
+def test_create_zero_base_servings_qty_stores_null(store):
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "body", None, False,
+        base_servings_qty=0, base_servings_unit="人份",
+    ))
+    got = _run(store.get_recipe(rid))
+    assert got["base_servings_qty"] is None
+    assert got["base_servings_unit"] is None
+
+
+def test_update_omitting_base_servings_preserves_existing(store):
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "body", None, False,
+        ingredients=[{"name": "面粉", "amount": "200", "unit": "g"}],
+        base_servings_qty=4, base_servings_unit="人份",
+    ))
+    updated = _run(store.update_recipe(
+        rid, "配方", "面团改", "body", 0, False,
+        ingredients=[{"name": "盐", "amount": "1", "unit": "g"}],
+    ))
+    assert updated["recipe_name"] == "面团改"
+    assert updated["ingredients"] == [{"name": "盐", "amount": "1", "unit": "g"}]
+    assert updated["base_servings_qty"] == 4
+    assert updated["base_servings_unit"] == "人份"
+
+
+def test_update_explicit_null_clears_base_servings(store):
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "body", None, False,
+        base_servings_qty=4, base_servings_unit="人份",
+    ))
+    updated = _run(store.update_recipe(
+        rid, "配方", "面团", "body", 0, False,
+        base_servings_qty=None, base_servings_unit=None,
+    ))
+    assert updated["base_servings_qty"] is None
+    assert updated["base_servings_unit"] is None

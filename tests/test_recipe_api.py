@@ -92,6 +92,32 @@ def test_station_detail_stamps_recipe_id_on_cards(client):
     assert "recipe-card" in html
 
 
+def test_station_detail_stamps_base_servings_on_cards(client):
+    rid = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团份数",
+            "body": "",
+            "is_new": False,
+            "ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}],
+            "base_servings_qty": 4.5,
+            "base_servings_unit": "人份",
+        },
+    ).json()["id"]
+    html = client.get("/api/recipes/stations/changfen").json()["content_html"]
+    assert f'data-recipe-id="{rid}"' in html
+    assert 'data-base-servings-qty="4.5"' in html
+    assert 'data-base-servings-unit="人份"' in html
+
+
+def test_station_detail_omits_base_servings_when_null(client):
+    html = client.get("/api/recipes/stations/changfen").json()["content_html"]
+    # seed recipe has no base servings
+    assert "data-base-servings-qty" not in html
+    assert "data-base-servings-unit" not in html
+
+
 def test_station_detail_renders_structured_ingredients_table(client):
     rid = client.post(
         "/api/recipes/stations/changfen/recipes",
@@ -692,3 +718,139 @@ def test_tips_count_over_limit_returns_400(client):
     )
     assert r.status_code == 400
     assert r.json()["detail"] == "小贴士数量不能超过 50 个"
+
+
+def test_create_omitting_base_servings_defaults_null(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={"section": "配方", "recipe_name": "无份数", "body": "x", "is_new": False},
+    )
+    assert r.status_code == 200
+    rid = r.json()["id"]
+    recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    row = next(x for x in recipes if x["id"] == rid)
+    assert row["base_servings_qty"] is None
+    assert row["base_servings_unit"] is None
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["base_servings_qty"] is None
+    assert current["base_servings_unit"] is None
+
+
+def test_create_and_list_recipes_include_base_servings(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "is_new": False,
+            "base_servings_qty": 4.5,
+            "base_servings_unit": "人份",
+        },
+    )
+    assert r.status_code == 200
+    rid = r.json()["id"]
+    recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    row = next(x for x in recipes if x["id"] == rid)
+    assert row["base_servings_qty"] == 4.5
+    assert row["base_servings_unit"] == "人份"
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["base_servings_qty"] == 4.5
+    assert current["base_servings_unit"] == "人份"
+
+
+def test_update_recipe_base_servings(client):
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={
+            "section": "配方",
+            "recipe_name": "肠粉酱油",
+            "body": "酱油：100g",
+            "is_new": False,
+            "base_servings_qty": 2,
+            "base_servings_unit": "份",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["base_servings_qty"] == 2
+    assert r.json()["base_servings_unit"] == "份"
+
+
+def test_update_omitting_base_servings_preserves_existing(client):
+    rid = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "base_servings_qty": 4,
+            "base_servings_unit": "人份",
+        },
+    ).json()["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={"section": "配方", "recipe_name": "面团改", "body": "", "is_new": False},
+    )
+    assert r.status_code == 200
+    assert r.json()["recipe_name"] == "面团改"
+    assert r.json()["base_servings_qty"] == 4
+    assert r.json()["base_servings_unit"] == "人份"
+
+
+def test_update_zero_base_servings_qty_stores_null(client):
+    rid = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "base_servings_qty": 4,
+            "base_servings_unit": "人份",
+        },
+    ).json()["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "is_new": False,
+            "base_servings_qty": 0,
+            "base_servings_unit": "人份",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["base_servings_qty"] is None
+    assert r.json()["base_servings_unit"] is None
+
+
+def test_negative_base_servings_qty_returns_400(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "base_servings_qty": -1,
+            "base_servings_unit": "人份",
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "基准份数不能为负数"
+
+
+def test_update_negative_base_servings_qty_returns_400(client):
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={
+            "section": "配方",
+            "recipe_name": "肠粉酱油",
+            "body": "",
+            "is_new": False,
+            "base_servings_qty": -0.5,
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "基准份数不能为负数"

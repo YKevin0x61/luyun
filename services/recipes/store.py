@@ -5,6 +5,7 @@ data/app.db（WAL），自身仍持有独立连接（不接入 DatabaseManager �
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime, timezone
 from typing import Optional
@@ -30,6 +31,7 @@ TIPS_MAX_COUNT = 50
 BODY_MAX_LEN = 50_000
 LIKE_ESCAPE_CHAR = "!"
 INGREDIENT_KEYS = ("name", "amount", "unit")
+_UNSET = object()
 
 
 def _escape_like_literal(text: str) -> str:
@@ -133,11 +135,42 @@ def _tips_to_storage(value) -> str:
     return json.dumps(_normalize_tips(value), ensure_ascii=False)
 
 
+def _normalize_base_servings_qty(value):
+    if value is None:
+        return None
+    try:
+        qty = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(qty) or qty <= 0:
+        return None
+    return qty
+
+
+def _normalize_base_servings_unit(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _pair_base_servings(qty, unit) -> tuple:
+    qty = _normalize_base_servings_qty(qty)
+    if qty is None:
+        return None, None
+    return qty, _normalize_base_servings_unit(unit)
+
+
 def _recipe_dict(row) -> dict:
     data = dict(row)
     data["ingredients"] = _ingredients_from_storage(data.pop("ingredients_json", None))
     data["steps"] = _steps_from_storage(data.pop("steps_json", None))
     data["tips"] = _tips_from_storage(data.pop("tips_json", None))
+    qty, unit = _pair_base_servings(
+        data.get("base_servings_qty"), data.get("base_servings_unit"),
+    )
+    data["base_servings_qty"] = qty
+    data["base_servings_unit"] = unit
     return data
 
 
@@ -197,6 +230,8 @@ class RecipeStore:
                 ingredients_json TEXT,
                 steps_json TEXT,
                 tips_json TEXT,
+                base_servings_qty REAL,
+                base_servings_unit TEXT,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
             );
@@ -235,6 +270,14 @@ class RecipeStore:
         if "tips_json" not in cols:
             await self.conn.execute(
                 "ALTER TABLE sop_recipes ADD COLUMN tips_json TEXT"
+            )
+        if "base_servings_qty" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes ADD COLUMN base_servings_qty REAL"
+            )
+        if "base_servings_unit" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes ADD COLUMN base_servings_unit TEXT"
             )
 
     # ---- 岗位 ----
@@ -294,7 +337,7 @@ class RecipeStore:
         cur = await self.conn.execute(
             """
             SELECT id, section, recipe_name, body_markdown, sort_order, updated_at, is_new, is_active,
-                   ingredients_json, steps_json, tips_json
+                   ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit
             FROM sop_recipes WHERE station_slug = ?
             ORDER BY sort_order ASC, id ASC
             """,
@@ -306,7 +349,7 @@ class RecipeStore:
         cur = await self.conn.execute(
             """
             SELECT id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, is_active, updated_at,
-                   ingredients_json, steps_json, tips_json
+                   ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit
             FROM sop_recipes WHERE id = ?
             """,
             (recipe_id,),
@@ -345,19 +388,20 @@ class RecipeStore:
     async def create_recipe(
         self, slug: str, section: str, recipe_name: str, body: str,
         explicit_sort: int | None, is_new_checked: bool, ingredients=None, steps=None,
-        tips=None,
+        tips=None, base_servings_qty=None, base_servings_unit=None,
     ) -> int:
         now = utc_now_iso()
         sort_order = await self._allocate_sort_order(slug, section, explicit_sort)
         is_new = is_new_checked
+        qty, unit = _pair_base_servings(base_servings_qty, base_servings_unit)
         cur = await self.conn.execute(
             "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, is_new, "
-            "ingredients_json, steps_json, tips_json, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 slug, section, recipe_name, body, sort_order, 1 if is_new else 0,
                 _ingredients_to_storage(ingredients), _steps_to_storage(steps),
-                _tips_to_storage(tips), now,
+                _tips_to_storage(tips), qty, unit, now,
             ),
         )
         await self._touch_station(slug, now)
@@ -367,7 +411,7 @@ class RecipeStore:
     async def update_recipe(
         self, recipe_id: int, section: str, recipe_name: str, body: str,
         sort_order: int, is_new_checked: bool, ingredients=None, steps=None,
-        tips=None,
+        tips=None, base_servings_qty=_UNSET, base_servings_unit=_UNSET,
     ) -> Optional[dict]:
         current = await self.get_recipe(recipe_id)
         if current is None:
@@ -379,6 +423,13 @@ class RecipeStore:
         )
         stored_steps = current["steps"] if steps is None else steps
         stored_tips = current["tips"] if tips is None else tips
+        qty_in = (
+            current["base_servings_qty"] if base_servings_qty is _UNSET else base_servings_qty
+        )
+        unit_in = (
+            current["base_servings_unit"] if base_servings_unit is _UNSET else base_servings_unit
+        )
+        stored_qty, stored_unit = _pair_base_servings(qty_in, unit_in)
         await self.conn.execute(
             "INSERT INTO sop_recipes_history "
             "(recipe_id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, changed_at) "
@@ -388,12 +439,12 @@ class RecipeStore:
         )
         await self.conn.execute(
             "UPDATE sop_recipes SET section=?, recipe_name=?, body_markdown=?, sort_order=?, is_new=?, "
-            "ingredients_json=?, steps_json=?, tips_json=?, updated_at=? "
-            "WHERE id = ?",
+            "ingredients_json=?, steps_json=?, tips_json=?, base_servings_qty=?, base_servings_unit=?, "
+            "updated_at=? WHERE id = ?",
             (
                 section, recipe_name, body, sort_order, 1 if is_new else 0,
                 _ingredients_to_storage(stored_ingredients), _steps_to_storage(stored_steps),
-                _tips_to_storage(stored_tips), now, recipe_id,
+                _tips_to_storage(stored_tips), stored_qty, stored_unit, now, recipe_id,
             ),
         )
         await self._touch_station(current["station_slug"], now)
@@ -510,23 +561,28 @@ class RecipeStore:
             where += " AND is_active = 1"
         cur = await self.conn.execute(
             "SELECT id, section, recipe_name, body_markdown, sort_order, is_new, is_active, "
-            "ingredients_json, steps_json, tips_json "
+            "ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit "
             "FROM sop_recipes " + where + " ORDER BY sort_order ASC, id ASC",
             (slug,),
         )
         rows = await cur.fetchall()
-        return [
-            ParsedRecipe(
-                section=r["section"], recipe_name=r["recipe_name"],
-                body_markdown=r["body_markdown"], sort_order=int(r["sort_order"]),
-                is_new=bool(r["is_new"]), is_active=bool(r["is_active"]),
-                id=int(r["id"]),
-                ingredients=tuple(_ingredients_from_storage(r["ingredients_json"])),
-                steps=tuple(_steps_from_storage(r["steps_json"])),
-                tips=tuple(_tips_from_storage(r["tips_json"])),
+        parsed: list[ParsedRecipe] = []
+        for r in rows:
+            qty, unit = _pair_base_servings(r["base_servings_qty"], r["base_servings_unit"])
+            parsed.append(
+                ParsedRecipe(
+                    section=r["section"], recipe_name=r["recipe_name"],
+                    body_markdown=r["body_markdown"], sort_order=int(r["sort_order"]),
+                    is_new=bool(r["is_new"]), is_active=bool(r["is_active"]),
+                    id=int(r["id"]),
+                    ingredients=tuple(_ingredients_from_storage(r["ingredients_json"])),
+                    steps=tuple(_steps_from_storage(r["steps_json"])),
+                    tips=tuple(_tips_from_storage(r["tips_json"])),
+                    base_servings_qty=qty,
+                    base_servings_unit=unit,
+                )
             )
-            for r in rows
-        ]
+        return parsed
 
     async def station_display_markdown(self, slug: str, include_inactive: bool = False) -> Optional[str]:
         station = await self.get_station(slug)

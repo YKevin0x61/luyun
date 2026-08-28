@@ -184,6 +184,11 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .back-link:hover,.back-link:focus-visible{color:var(--jade-ink);background:var(--jade-soft)}
 .back-link-icon{font-size:1rem;line-height:1}
 .sop-toolbar-chip{display:inline-flex;align-items:center;padding:.32rem .65rem;border-radius:999px;color:var(--jade-ink);background:var(--jade-soft);border:1px solid var(--line);font-size:.82rem;font-weight:900}
+.sop-servings{display:inline-flex;align-items:center;gap:.35rem}
+.sop-servings-label{font-size:.82rem;font-weight:800;color:var(--jade-ink)}
+.sop-servings-input{width:3.6rem;height:1.8rem;padding:0 .35rem;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit;font-size:.82rem;font-variant-numeric:tabular-nums;text-align:center}
+.sop-servings-input:focus-visible{outline:none;border-color:var(--jade);box-shadow:0 0 0 2px var(--jade-soft)}
+.sop-servings-unit{font-size:.82rem;color:var(--muted)}
 
 .sop-panel{border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--shadow-md);overflow:hidden}
 .sop-body{padding:clamp(.85rem,2.2vw,1.4rem)}
@@ -378,16 +383,21 @@ body.batch-mode .station-item.is-checked .station-link{border-color:var(--jade);
 .qr-card-box img,.qr-card-box canvas{display:block}
 .qr-card-title{margin-top:.6rem;font-weight:900;color:var(--jade-ink)}
 
-/* ===== 12d. P3 用量换算：每卡倍率控件 + ×N 角标 ===== */
+/* ===== 12d. P3 用量换算：页级目标份数 + 每卡收起的临时覆盖 ===== */
 .recipe-card-head{display:flex;align-items:center;gap:.4rem}
 .recipe-card-head h3{flex:1 1 auto;min-width:0}
-.sop-scale{display:inline-flex;flex-wrap:wrap;gap:.15rem;margin-left:auto;align-items:center}
+.sop-scale-wrap{position:relative;margin-left:auto;flex:0 0 auto}
+.sop-scale-toggle{width:1.7rem;height:1.6rem;display:inline-flex;align-items:center;justify-content:center;padding:0;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--muted);cursor:pointer}
+.sop-scale-toggle:focus-visible{outline:none;border-color:var(--jade);box-shadow:0 0 0 2px var(--jade-soft)}
+.sop-scale{display:inline-flex;flex-wrap:wrap;gap:.15rem;align-items:center}
+.sop-scale--popover{display:none;position:absolute;right:0;top:calc(100% + .2rem);z-index:4;padding:.2rem;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);box-shadow:var(--shadow-sm);transform:scale(.95);opacity:0;transform-origin:top right}
+.sop-scale-wrap.is-open .sop-scale--popover{display:inline-flex;transform:scale(1);opacity:1}
 .sop-scale-btn{min-width:1.7rem;height:1.6rem;padding:0 .3rem;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--muted);font:inherit;font-size:.72rem;font-weight:800;cursor:pointer}
 .sop-scale-btn.on{background:var(--jade);border-color:var(--jade);color:#fff}
 .sop-scale-input{width:2.6rem;height:1.6rem;padding:0 .3rem;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit;font-size:.72rem;text-align:center;-moz-appearance:textfield;appearance:textfield}
 .sop-scale-input:focus-visible{outline:none;border-color:var(--jade);box-shadow:0 0 0 2px var(--jade-soft)}
 .sop-scale-input::-webkit-outer-spin-button,.sop-scale-input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
-@media (pointer:coarse){.sop-scale-btn,.sop-scale-input{height:2rem}}
+@media (pointer:coarse){.sop-scale-btn,.sop-scale-input,.sop-scale-toggle{height:2rem}.sop-scale-toggle{width:2rem}}
 
 /* ===== 13. 自适应断点 ===== */
 @media (max-width:640px){
