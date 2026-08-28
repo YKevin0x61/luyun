@@ -15,6 +15,9 @@ RECIPE_INGREDIENTS_AMOUNT_CLASS = "recipe-ingredients-amount"
 # Keep in sync with admin-web/src/utils/recipeSteps.js
 RECIPE_STEPS_LIST_CLASS = "recipe-steps"
 RECIPE_STEPS_ITEM_CLASS = "recipe-steps-item"
+# Keep in sync with admin-web/src/utils/recipeTips.js
+RECIPE_TIPS_LIST_CLASS = "recipe-tips"
+RECIPE_TIPS_ITEM_CLASS = "recipe-tips-item"
 
 
 def _esc(value) -> str:
@@ -34,11 +37,7 @@ def render_structured_recipe_body(
     steps=None,
     tips=None,
 ) -> str:
-    """Inner HTML of `.recipe-card-body` from structured fields.
-
-    `tips` is accepted for later tickets and ignored here.
-    """
-    del tips
+    """Inner HTML of `.recipe-card-body` from structured fields."""
     parts: list[str] = []
     ingredient_html = _render_ingredients_table(ingredients)
     if ingredient_html:
@@ -46,6 +45,9 @@ def render_structured_recipe_body(
     steps_html = _render_steps_list(steps)
     if steps_html:
         parts.append(steps_html)
+    tips_html = _render_tips_list(tips)
+    if tips_html:
+        parts.append(tips_html)
     return "".join(parts)
 
 
@@ -92,6 +94,23 @@ def _render_steps_list(steps) -> str:
     return "".join(parts)
 
 
+def _render_tips_list(tips) -> str:
+    texts: list[str] = []
+    for item in tips or []:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            texts.append(text)
+    if not texts:
+        return ""
+    parts = [f'<ul class="{RECIPE_TIPS_LIST_CLASS}">']
+    for text in texts:
+        parts.append(f'<li class="{RECIPE_TIPS_ITEM_CLASS}">{_esc(text)}</li>')
+    parts.append("</ul>")
+    return "".join(parts)
+
+
 def _heading_html(recipe: ParsedRecipe) -> str:
     classes = ["recipe-title"]
     if recipe.is_new:
@@ -129,10 +148,11 @@ def render_station_html(station_title: str, recipes: list[ParsedRecipe]) -> str:
         parts.append(f"<h2>{_esc(section)}</h2>")
         for recipe in items:
             parts.append(_heading_html(recipe))
-            if recipe.ingredients or recipe.steps:
+            if recipe.ingredients or recipe.steps or recipe.tips:
                 body = render_structured_recipe_body(
                     ingredients=list(recipe.ingredients),
                     steps=list(recipe.steps),
+                    tips=list(recipe.tips),
                 )
             else:
                 body = render_markdown_fragment(recipe.body_markdown)

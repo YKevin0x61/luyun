@@ -576,3 +576,119 @@ def test_steps_count_over_limit_returns_400(client):
     )
     assert r.status_code == 400
     assert r.json()["detail"] == "步骤数量不能超过 50 个"
+
+
+def test_station_detail_renders_structured_tips_list(client):
+    rid = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团贴士",
+            "body": "这段 Markdown 不应出现在贴士卡片里",
+            "is_new": False,
+            "tips": ["夏天水温要更低", "饧面不要超过 20 分钟"],
+        },
+    ).json()["id"]
+    html = client.get("/api/recipes/stations/changfen").json()["content_html"]
+    assert "recipe-tips" in html
+    assert "recipe-tips-item" in html
+    assert "夏天水温要更低" in html
+    assert "饧面不要超过 20 分钟" in html
+    assert f'data-recipe-id="{rid}"' in html
+    assert "这段 Markdown 不应出现在贴士卡片里" not in html
+    assert "酱油：100g" in html
+
+
+def test_create_omitting_tips_still_works(client):
+    r = client.post("/api/recipes/stations/changfen/recipes",
+                    json={"section": "配方", "recipe_name": "无贴士", "body": "x", "is_new": False})
+    assert r.status_code == 200
+    rid = r.json()["id"]
+    recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    row = next(x for x in recipes if x["id"] == rid)
+    assert row["tips"] == []
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["tips"] == []
+
+
+def test_create_and_list_recipes_include_tips(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "is_new": False,
+            "tips": ["夏天水温要更低", "饧面不要超过 20 分钟"],
+        },
+    )
+    assert r.status_code == 200
+    rid = r.json()["id"]
+    recipes = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    row = next(x for x in recipes if x["id"] == rid)
+    assert row["tips"] == ["夏天水温要更低", "饧面不要超过 20 分钟"]
+    current = client.get(f"/api/recipes/recipes/{rid}/history").json()["current"]
+    assert current["tips"] == row["tips"]
+
+
+def test_update_recipe_tips(client):
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={
+            "section": "配方",
+            "recipe_name": "肠粉酱油",
+            "body": "酱油：100g",
+            "is_new": False,
+            "tips": ["按口味调整盐"],
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["tips"] == ["按口味调整盐"]
+
+
+def test_update_omitting_tips_preserves_existing_rows(client):
+    rid = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "tips": ["夏天水温要更低"],
+        },
+    ).json()["id"]
+    r = client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={"section": "配方", "recipe_name": "面团改", "body": "", "is_new": False},
+    )
+    assert r.status_code == 200
+    assert r.json()["recipe_name"] == "面团改"
+    assert r.json()["tips"] == ["夏天水温要更低"]
+
+
+def test_tip_text_over_limit_returns_400(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "tips": ["a" * 121],
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "小贴士长度不能超过 120 个字符"
+
+
+def test_tips_count_over_limit_returns_400(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团",
+            "body": "",
+            "tips": ["贴"] * 51,
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "小贴士数量不能超过 50 个"

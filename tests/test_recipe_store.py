@@ -296,3 +296,98 @@ def test_non_list_stored_steps_json_returns_empty_list(store):
     conn.commit()
     conn.close()
     assert _run(store.get_recipe(row["id"]))["steps"] == []
+
+
+def test_missing_tips_read_as_empty_list(store):
+    row = _run(store.list_recipes("changfen"))[0]
+    assert row["tips"] == []
+    got = _run(store.get_recipe(row["id"]))
+    assert got["tips"] == []
+
+
+def test_create_without_tips_defaults_empty(store):
+    rid = _run(store.create_recipe("changfen", "配方", "无贴士", "正文", None, False))
+    assert _run(store.get_recipe(rid))["tips"] == []
+
+
+def test_tips_roundtrip(store):
+    tips = ["夏天水温要更低", "饧面不要超过 20 分钟"]
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "body", None, False, tips=tips,
+    ))
+    got = _run(store.get_recipe(rid))
+    assert got["tips"] == ["夏天水温要更低", "饧面不要超过 20 分钟"]
+    listed = next(x for x in _run(store.list_recipes("changfen")) if x["id"] == rid)
+    assert listed["tips"] == ["夏天水温要更低", "饧面不要超过 20 分钟"]
+
+    updated = _run(store.update_recipe(
+        rid, "配方", "面团", "body", got["sort_order"], False,
+        tips=["按口味调整盐"],
+    ))
+    assert updated["tips"] == ["按口味调整盐"]
+
+
+def test_create_drops_blank_tip_rows(store):
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "body", None, False,
+        tips=["", "夏天水温要更低", "  "],
+    ))
+    assert _run(store.get_recipe(rid))["tips"] == ["夏天水温要更低"]
+
+
+def test_update_omitting_tips_preserves_existing(store):
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "body", None, False,
+        ingredients=[{"name": "面粉", "amount": "200", "unit": "g"}],
+        steps=["混合面粉与水"],
+        tips=["夏天水温要更低"],
+    ))
+    updated = _run(store.update_recipe(
+        rid, "配方", "面团改", "body", 0, False,
+        ingredients=[{"name": "盐", "amount": "1", "unit": "g"}],
+        steps=["静置"],
+    ))
+    assert updated["recipe_name"] == "面团改"
+    assert updated["ingredients"] == [{"name": "盐", "amount": "1", "unit": "g"}]
+    assert updated["steps"] == ["静置"]
+    assert updated["tips"] == ["夏天水温要更低"]
+
+
+def test_update_omitting_steps_preserves_tips_and_steps(store):
+    rid = _run(store.create_recipe(
+        "changfen", "配方", "面团", "body", None, False,
+        steps=["混合面粉与水"],
+        tips=["夏天水温要更低"],
+    ))
+    got = _run(store.get_recipe(rid))
+    updated = _run(store.update_recipe(
+        rid, "配方", "面团改", "body", got["sort_order"], False,
+        tips=["按口味调整盐"],
+    ))
+    assert updated["steps"] == ["混合面粉与水"]
+    assert updated["tips"] == ["按口味调整盐"]
+
+
+def test_invalid_stored_tips_json_returns_empty_list(store):
+    row = _run(store.list_recipes("changfen"))[0]
+    conn = sqlite3.connect(store.db_path)
+    conn.execute(
+        "UPDATE sop_recipes SET tips_json = ? WHERE id = ?",
+        ("{not json", row["id"]),
+    )
+    conn.commit()
+    conn.close()
+    assert _run(store.get_recipe(row["id"]))["tips"] == []
+    assert _run(store.list_recipes("changfen"))[0]["tips"] == []
+
+
+def test_non_list_stored_tips_json_returns_empty_list(store):
+    row = _run(store.list_recipes("changfen"))[0]
+    conn = sqlite3.connect(store.db_path)
+    conn.execute(
+        "UPDATE sop_recipes SET tips_json = ? WHERE id = ?",
+        ("{}", row["id"]),
+    )
+    conn.commit()
+    conn.close()
+    assert _run(store.get_recipe(row["id"]))["tips"] == []

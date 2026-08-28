@@ -25,6 +25,8 @@ TEXT_FIELD_MAX_LEN = 120
 INGREDIENT_FIELD_MAX_LEN = TEXT_FIELD_MAX_LEN
 STEP_TEXT_MAX_LEN = TEXT_FIELD_MAX_LEN
 STEPS_MAX_COUNT = 50
+TIP_TEXT_MAX_LEN = TEXT_FIELD_MAX_LEN
+TIPS_MAX_COUNT = 50
 BODY_MAX_LEN = 50_000
 LIKE_ESCAPE_CHAR = "!"
 INGREDIENT_KEYS = ("name", "amount", "unit")
@@ -102,10 +104,40 @@ def _steps_to_storage(value) -> str:
     return json.dumps(_normalize_steps(value), ensure_ascii=False)
 
 
+def _normalize_tips(value) -> list[str]:
+    if not value or not isinstance(value, (list, tuple)):
+        return []
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _tips_from_storage(raw) -> list[str]:
+    if raw is None or raw == "":
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return _normalize_tips(data)
+
+
+def _tips_to_storage(value) -> str:
+    return json.dumps(_normalize_tips(value), ensure_ascii=False)
+
+
 def _recipe_dict(row) -> dict:
     data = dict(row)
     data["ingredients"] = _ingredients_from_storage(data.pop("ingredients_json", None))
     data["steps"] = _steps_from_storage(data.pop("steps_json", None))
+    data["tips"] = _tips_from_storage(data.pop("tips_json", None))
     return data
 
 
@@ -164,6 +196,7 @@ class RecipeStore:
                 is_active INTEGER NOT NULL DEFAULT 1,
                 ingredients_json TEXT,
                 steps_json TEXT,
+                tips_json TEXT,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
             );
@@ -198,6 +231,10 @@ class RecipeStore:
         if "steps_json" not in cols:
             await self.conn.execute(
                 "ALTER TABLE sop_recipes ADD COLUMN steps_json TEXT"
+            )
+        if "tips_json" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes ADD COLUMN tips_json TEXT"
             )
 
     # ---- 岗位 ----
@@ -257,7 +294,7 @@ class RecipeStore:
         cur = await self.conn.execute(
             """
             SELECT id, section, recipe_name, body_markdown, sort_order, updated_at, is_new, is_active,
-                   ingredients_json, steps_json
+                   ingredients_json, steps_json, tips_json
             FROM sop_recipes WHERE station_slug = ?
             ORDER BY sort_order ASC, id ASC
             """,
@@ -269,7 +306,7 @@ class RecipeStore:
         cur = await self.conn.execute(
             """
             SELECT id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, is_active, updated_at,
-                   ingredients_json, steps_json
+                   ingredients_json, steps_json, tips_json
             FROM sop_recipes WHERE id = ?
             """,
             (recipe_id,),
@@ -308,17 +345,19 @@ class RecipeStore:
     async def create_recipe(
         self, slug: str, section: str, recipe_name: str, body: str,
         explicit_sort: int | None, is_new_checked: bool, ingredients=None, steps=None,
+        tips=None,
     ) -> int:
         now = utc_now_iso()
         sort_order = await self._allocate_sort_order(slug, section, explicit_sort)
         is_new = is_new_checked
         cur = await self.conn.execute(
             "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, is_new, "
-            "ingredients_json, steps_json, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "ingredients_json, steps_json, tips_json, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 slug, section, recipe_name, body, sort_order, 1 if is_new else 0,
-                _ingredients_to_storage(ingredients), _steps_to_storage(steps), now,
+                _ingredients_to_storage(ingredients), _steps_to_storage(steps),
+                _tips_to_storage(tips), now,
             ),
         )
         await self._touch_station(slug, now)
@@ -328,6 +367,7 @@ class RecipeStore:
     async def update_recipe(
         self, recipe_id: int, section: str, recipe_name: str, body: str,
         sort_order: int, is_new_checked: bool, ingredients=None, steps=None,
+        tips=None,
     ) -> Optional[dict]:
         current = await self.get_recipe(recipe_id)
         if current is None:
@@ -338,6 +378,7 @@ class RecipeStore:
             current["ingredients"] if ingredients is None else ingredients
         )
         stored_steps = current["steps"] if steps is None else steps
+        stored_tips = current["tips"] if tips is None else tips
         await self.conn.execute(
             "INSERT INTO sop_recipes_history "
             "(recipe_id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, changed_at) "
@@ -347,12 +388,12 @@ class RecipeStore:
         )
         await self.conn.execute(
             "UPDATE sop_recipes SET section=?, recipe_name=?, body_markdown=?, sort_order=?, is_new=?, "
-            "ingredients_json=?, steps_json=?, updated_at=? "
+            "ingredients_json=?, steps_json=?, tips_json=?, updated_at=? "
             "WHERE id = ?",
             (
                 section, recipe_name, body, sort_order, 1 if is_new else 0,
                 _ingredients_to_storage(stored_ingredients), _steps_to_storage(stored_steps),
-                now, recipe_id,
+                _tips_to_storage(stored_tips), now, recipe_id,
             ),
         )
         await self._touch_station(current["station_slug"], now)
@@ -469,7 +510,7 @@ class RecipeStore:
             where += " AND is_active = 1"
         cur = await self.conn.execute(
             "SELECT id, section, recipe_name, body_markdown, sort_order, is_new, is_active, "
-            "ingredients_json, steps_json "
+            "ingredients_json, steps_json, tips_json "
             "FROM sop_recipes " + where + " ORDER BY sort_order ASC, id ASC",
             (slug,),
         )
@@ -482,6 +523,7 @@ class RecipeStore:
                 id=int(r["id"]),
                 ingredients=tuple(_ingredients_from_storage(r["ingredients_json"])),
                 steps=tuple(_steps_from_storage(r["steps_json"])),
+                tips=tuple(_tips_from_storage(r["tips_json"])),
             )
             for r in rows
         ]

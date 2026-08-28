@@ -42,6 +42,7 @@ ALLOWED_ATTRS = {
     "section": {"class"},
     "header": {"class"},
     "ol": {"class"},
+    "ul": {"class"},
     "li": {"class"},
 }
 

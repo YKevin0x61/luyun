@@ -24,11 +24,17 @@ import {
   removeStepRow,
   renderStructuredRecipePreviewHtml,
 } from '../../utils/recipeSteps'
+import {
+  addTipRow,
+  dropBlankTipRows,
+  removeTipRow,
+} from '../../utils/recipeTips'
 
 useScopedStylesheet('/recipe.css')
 
 const INGREDIENT_FIELD_MAX_LEN = 120
 const STEP_TEXT_MAX_LEN = 120
+const TIP_TEXT_MAX_LEN = 120
 
 const view = ref('stations') // 'stations' | 'recipes'
 const stations = ref([])
@@ -43,6 +49,7 @@ const ingredientDragIndex = ref(null)
 const ingredientUndo = ref(null)
 const stepDragIndex = ref(null)
 const stepUndo = ref(null)
+const tipUndo = ref(null)
 
 // 各类弹窗状态（复用一个 modal 容器，按 kind 渲染不同表单）
 const modal = reactive({ kind: null }) // 'add-station' | 'rename-station' | 'recipe-form' | 'history'
@@ -50,7 +57,7 @@ const stationForm = reactive({ slug: '', title: '' })
 const renameForm = reactive({ slug: '', title: '' })
 const recipeForm = reactive({
   id: null, section: '配方', recipe_name: '', body: '', sort_order: null, is_new: false,
-  ingredients: [], steps: [],
+  ingredients: [], steps: [], tips: [],
 })
 const historyItems = ref([])
 
@@ -61,6 +68,7 @@ const structuredPreviewHtml = computed(() => renderStructuredRecipePreviewHtml(
     unit: row.unit,
   })),
   recipeForm.steps,
+  recipeForm.tips,
 ))
 
 const sectionOptions = computed(() => buildSectionOptions(recipes.value))
@@ -88,6 +96,7 @@ function closeModal() {
   errorMsg.value = ''
   ingredientUndo.value = null
   stepUndo.value = null
+  tipUndo.value = null
 }
 
 async function loadStations() {
@@ -170,8 +179,10 @@ function openAddRecipe() {
   recipeForm.is_new = false
   recipeForm.ingredients = []
   recipeForm.steps = []
+  recipeForm.tips = []
   ingredientUndo.value = null
   stepUndo.value = null
+  tipUndo.value = null
   modal.kind = 'recipe-form'
 }
 async function openEditRecipe(id) {
@@ -189,8 +200,10 @@ async function openEditRecipe(id) {
     unit: row.unit || '',
   }))
   recipeForm.steps = (r.steps || []).map((text) => String(text || ''))
+  recipeForm.tips = (r.tips || []).map((text) => String(text || ''))
   ingredientUndo.value = null
   stepUndo.value = null
+  tipUndo.value = null
   modal.kind = 'recipe-form'
 }
 async function submitRecipeForm() {
@@ -207,6 +220,7 @@ async function submitRecipeForm() {
       unit: row.unit,
     })),
     steps: dropBlankStepRows(recipeForm.steps).map((text) => String(text).trim()),
+    tips: dropBlankTipRows(recipeForm.tips).map((text) => String(text).trim()),
   }
   try {
     if (recipeForm.id) {
@@ -365,6 +379,27 @@ function onStepDrop(idx) {
 
 function moveStep(idx, delta) {
   applyStepReorder(idx, idx + delta)
+}
+
+function addTip() {
+  recipeForm.tips = addTipRow(recipeForm.tips)
+}
+
+function removeTip(idx) {
+  const removed = recipeForm.tips[idx]
+  if (removed === undefined) return
+  recipeForm.tips = removeTipRow(recipeForm.tips, idx)
+  tipUndo.value = { index: idx, row: removed }
+}
+
+function undoTipRemove() {
+  const pending = tipUndo.value
+  if (!pending) return
+  const list = [...recipeForm.tips]
+  const insertAt = Math.min(pending.index, list.length)
+  list.splice(insertAt, 0, pending.row)
+  recipeForm.tips = list
+  tipUndo.value = null
 }
 
 async function toggleActive(id) {
@@ -736,6 +771,39 @@ loadStations()
                 class="btn btn-sm btn-ghost"
                 aria-label="撤销删除步骤"
                 @click="undoStepRemove"
+              >撤销删除</button>
+            </div>
+            <label class="form-label">小贴士</label>
+            <div v-if="recipeForm.tips.length" class="step-editor-wrap">
+              <ul class="step-editor">
+                <li
+                  v-for="(_tip, idx) in recipeForm.tips"
+                  :key="idx"
+                  class="step-editor-row"
+                >
+                  <input
+                    class="form-input"
+                    v-model="recipeForm.tips[idx]"
+                    :maxlength="TIP_TEXT_MAX_LEN"
+                    :aria-label="'小贴士 ' + (idx + 1)"
+                  >
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-danger"
+                    aria-label="删除小贴士"
+                    @click="removeTip(idx)"
+                  >删除</button>
+                </li>
+              </ul>
+            </div>
+            <div class="row-actions ingredient-editor-toolbar">
+              <button type="button" class="btn btn-sm btn-ghost" aria-label="添加小贴士" @click="addTip">添加小贴士</button>
+              <button
+                v-if="tipUndo"
+                type="button"
+                class="btn btn-sm btn-ghost"
+                aria-label="撤销删除小贴士"
+                @click="undoTipRemove"
               >撤销删除</button>
             </div>
             <label class="form-label">正文（Markdown）</label>

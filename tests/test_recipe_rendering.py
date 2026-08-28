@@ -301,3 +301,115 @@ def test_station_html_keeps_ingredients_when_steps_present():
     assert body.select_one("ol.recipe-steps") is not None
     assert body.select_one(".recipe-ingredients-name").get_text() == "面粉"
     assert body.select_one(".recipe-steps-item").get_text() == "混合面粉与水"
+
+
+def test_structured_tips_empty_omits_list():
+    assert render_structured_recipe_body(tips=[]) == ""
+    assert render_structured_recipe_body(tips=None) == ""
+    assert render_structured_recipe_body(ingredients=[], steps=[], tips=[]) == ""
+
+
+def test_structured_tips_one():
+    html = render_structured_recipe_body(tips=["夏天水温要更低"])
+    assert html == (
+        '<ul class="recipe-tips">'
+        '<li class="recipe-tips-item">夏天水温要更低</li>'
+        '</ul>'
+    )
+
+
+def test_structured_tips_many():
+    html = render_structured_recipe_body(tips=["夏天水温要更低", "饧面不要超过 20 分钟", "按口味调整盐"])
+    assert html == (
+        '<ul class="recipe-tips">'
+        '<li class="recipe-tips-item">夏天水温要更低</li>'
+        '<li class="recipe-tips-item">饧面不要超过 20 分钟</li>'
+        '<li class="recipe-tips-item">按口味调整盐</li>'
+        '</ul>'
+    )
+
+
+def test_structured_tips_escapes_html():
+    html = render_structured_recipe_body(tips=['<script>x</script> 1<"'])
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+    assert "&quot;" in html
+
+
+def test_structured_body_concatenates_ingredients_then_steps_then_tips():
+    html = render_structured_recipe_body(
+        ingredients=[{"name": "面粉", "amount": "200", "unit": "g"}],
+        steps=["混合面粉与水"],
+        tips=["夏天水温要更低"],
+    )
+    assert html == (
+        '<table class="recipe-ingredients"><tbody>'
+        '<tr>'
+        '<td class="recipe-ingredients-name">面粉</td>'
+        '<td class="recipe-ingredients-amount">200 g</td>'
+        '</tr>'
+        '</tbody></table>'
+        '<ol class="recipe-steps">'
+        '<li class="recipe-steps-item">混合面粉与水</li>'
+        '</ol>'
+        '<ul class="recipe-tips">'
+        '<li class="recipe-tips-item">夏天水温要更低</li>'
+        '</ul>'
+    )
+
+
+def test_html_keeps_structured_tip_list_classes():
+    html = render_markdown_to_html(
+        '# T\n\n## S\n\n### 面团\n\n'
+        '<ul class="recipe-tips">'
+        '<li class="recipe-tips-item">夏天水温要更低</li>'
+        '</ul>\n'
+    )
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    ul = soup.select_one("ul.recipe-tips")
+    assert ul is not None
+    assert ul.select_one("li.recipe-tips-item").get_text() == "夏天水温要更低"
+
+
+def test_station_html_tips_only_uses_structured_seam():
+    html = render_station_html("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="面团",
+            body_markdown="这段 Markdown 不应出现在结构化卡片里",
+            sort_order=0, id=11,
+            tips=("夏天水温要更低", "饧面不要超过 20 分钟"),
+        ),
+    ])
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    card = soup.select_one("article.recipe-card")
+    assert card is not None
+    ul = card.select_one("ul.recipe-tips")
+    assert ul is not None
+    items = [li.get_text() for li in ul.select("li.recipe-tips-item")]
+    assert items == ["夏天水温要更低", "饧面不要超过 20 分钟"]
+    assert "这段 Markdown 不应出现在结构化卡片里" not in html
+    assert card.select_one(".recipe-ingredients") is None
+    assert card.select_one(".recipe-steps") is None
+
+
+def test_station_html_keeps_ingredients_and_steps_when_tips_present():
+    html = render_station_html("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="面团", body_markdown="",
+            sort_order=0, id=12,
+            ingredients=({"name": "面粉", "amount": "200", "unit": "g"},),
+            steps=("混合面粉与水",),
+            tips=("夏天水温要更低",),
+        ),
+    ])
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    body = soup.select_one(".recipe-card-body")
+    assert body.select_one("table.recipe-ingredients") is not None
+    assert body.select_one("ol.recipe-steps") is not None
+    assert body.select_one("ul.recipe-tips") is not None
+    assert body.select_one(".recipe-ingredients-name").get_text() == "面粉"
+    assert body.select_one(".recipe-steps-item").get_text() == "混合面粉与水"
+    assert body.select_one(".recipe-tips-item").get_text() == "夏天水温要更低"

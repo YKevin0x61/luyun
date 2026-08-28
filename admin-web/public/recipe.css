@@ -246,6 +246,8 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .markdown-body ol.recipe-steps{list-style:none;margin:.5rem 0 0;padding:0;counter-reset:recipe-step}
 .markdown-body ol.recipe-steps > li.recipe-steps-item{counter-increment:recipe-step;position:relative;padding:.2rem 0 .2rem 1.85rem;word-break:break-word}
 .markdown-body ol.recipe-steps > li.recipe-steps-item::before{content:counter(recipe-step);position:absolute;left:0;top:.12rem;display:inline-flex;align-items:center;justify-content:center;width:1.35rem;height:1.35rem;border-radius:50%;font-size:.72rem;font-weight:800;font-variant-numeric:tabular-nums;line-height:1;color:var(--jade-ink);background:var(--jade-soft);border:1px solid var(--jade)}
+.markdown-body ul.recipe-tips{list-style:none;margin:.5rem 0 0;padding:.35rem .75rem;border-left:3px solid var(--new)}
+.markdown-body ul.recipe-tips > li.recipe-tips-item{padding:.12rem 0;word-break:break-word}
 .table-scroll{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;margin:.5rem 0 .8rem;border-radius:var(--radius-sm)}
 .table-scroll table{margin:0;min-width:min(100%,30rem)}
 @media (max-width:40rem){.table-scroll table{min-width:28rem}}
@@ -477,6 +479,7 @@ body.batch-mode .station-item.is-checked .station-link{border-color:var(--jade);
   .markdown-body tr{break-inside:avoid;page-break-inside:avoid}
   .markdown-body .recipe-ingredients-amount{text-align:right;font-variant-numeric:tabular-nums}
   .markdown-body ol.recipe-steps > li.recipe-steps-item::before{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .markdown-body ul.recipe-tips{border-left:3px solid var(--new);-webkit-print-color-adjust:exact;print-color-adjust:exact}
   .table-scroll{overflow:visible;border:0}
   .markdown-body blockquote{background:var(--quote-bg);color:var(--quote);box-shadow:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}
   .sop-print-page-break{margin:0;border:0;break-after:page;page-break-after:always}
