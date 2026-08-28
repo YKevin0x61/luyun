@@ -86,6 +86,12 @@ def test_station_detail_fragment(client):
     assert "sop-doc" in data["content_html"]
 
 
+def test_station_detail_stamps_recipe_id_on_cards(client):
+    html = client.get("/api/recipes/stations/changfen").json()["content_html"]
+    assert 'data-recipe-id="1"' in html
+    assert "recipe-card" in html
+
+
 def test_station_detail_404(client):
     assert client.get("/api/recipes/stations/nope").status_code == 404
 
@@ -171,3 +177,138 @@ def test_reorder_recipes_assigns_unique_sort_order(client):
     assert [row["sort_order"] for row in recipes] == [0, 1, 2]
     history = client.get(f"/api/recipes/recipes/{first_id}/history").json()["history"]
     assert history == []
+
+
+def test_search_empty_query_returns_empty_groups(client):
+    r = client.get("/api/recipes/search")
+    assert r.status_code == 200
+    assert r.json() == {"groups": []}
+
+    r2 = client.get("/api/recipes/search", params={"q": ""})
+    assert r2.status_code == 200
+    assert r2.json() == {"groups": []}
+
+    r3 = client.get("/api/recipes/search", params={"q": "   "})
+    assert r3.status_code == 200
+    assert r3.json() == {"groups": []}
+
+
+def test_search_groups_matches_by_station(client):
+    client.post("/api/recipes/stations", json={"slug": "shulong", "title": "熟笼档"})
+    dumpling = client.post(
+        "/api/recipes/stations/shulong/recipes",
+        json={"section": "配方", "recipe_name": "鲜虾饺", "body": "虾馅", "is_new": False},
+    ).json()["id"]
+    sauce = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]
+    assert sauce["recipe_name"] == "肠粉酱油"
+
+    r = client.get("/api/recipes/search", params={"q": "虾"})
+    assert r.status_code == 200
+    assert r.json() == {
+        "groups": [
+            {
+                "station_slug": "shulong",
+                "station_title": "熟笼档",
+                "items": [
+                    {"recipe_id": dumpling, "recipe_name": "鲜虾饺", "section": "配方"},
+                ],
+            },
+        ],
+    }
+
+    r2 = client.get("/api/recipes/search", params={"q": "肠粉"})
+    assert r2.json() == {
+        "groups": [
+            {
+                "station_slug": "changfen",
+                "station_title": "肠粉档",
+                "items": [
+                    {"recipe_id": sauce["id"], "recipe_name": "肠粉酱油", "section": "配方"},
+                ],
+            },
+        ],
+    }
+
+
+def test_search_returns_multiple_items_in_one_station(client):
+    sauce = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]
+    check_id = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={"section": "出品标准", "recipe_name": "肠粉检核", "body": "x", "is_new": False},
+    ).json()["id"]
+    items = client.get("/api/recipes/search", params={"q": "肠粉"}).json()["groups"][0]["items"]
+    assert items == [
+        {"recipe_id": sauce["id"], "recipe_name": "肠粉酱油", "section": "配方"},
+        {"recipe_id": check_id, "recipe_name": "肠粉检核", "section": "出品标准"},
+    ]
+
+
+def test_search_is_case_insensitive_and_skips_body(client):
+    wrap_id = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={"section": "配方", "recipe_name": "Spinach Wrap", "body": "hidden dumpling filling", "is_new": False},
+    ).json()["id"]
+    decoy_id = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={"section": "配方", "recipe_name": "无关名字", "body": "Spinach Wrap 写在正文", "is_new": False},
+    ).json()["id"]
+
+    r = client.get("/api/recipes/search", params={"q": "spinach wrap"})
+    names = [item["recipe_name"] for g in r.json()["groups"] for item in g["items"]]
+    ids = [item["recipe_id"] for g in r.json()["groups"] for item in g["items"]]
+    assert names == ["Spinach Wrap"]
+    assert ids == [wrap_id]
+    assert decoy_id not in ids
+
+    r2 = client.get("/api/recipes/search", params={"q": "hidden dumpling"})
+    assert r2.json() == {"groups": []}
+
+
+def test_search_excludes_inactive_unless_flagged(client):
+    r = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={"section": "配方", "recipe_name": "停用虾饺", "body": "y", "is_new": False},
+    )
+    rid = r.json()["id"]
+    client.post(f"/api/recipes/recipes/{rid}/toggle-active")
+
+    assert client.get("/api/recipes/search", params={"q": "停用虾饺"}).json() == {"groups": []}
+
+    flagged = client.get("/api/recipes/search", params={"q": "停用虾饺", "include_inactive": 1}).json()
+    assert flagged["groups"][0]["items"] == [
+        {"recipe_id": rid, "recipe_name": "停用虾饺", "section": "配方"},
+    ]
+
+
+def test_search_treats_like_wildcards_as_literal(client):
+    percent_id = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={"section": "配方", "recipe_name": "50%糖浆", "body": "x", "is_new": False},
+    ).json()["id"]
+    client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={"section": "配方", "recipe_name": "普通糖浆", "body": "x", "is_new": False},
+    )
+
+    wildcard = client.get("/api/recipes/search", params={"q": "%"}).json()
+    assert wildcard == {
+        "groups": [
+            {
+                "station_slug": "changfen",
+                "station_title": "肠粉档",
+                "items": [
+                    {"recipe_id": percent_id, "recipe_name": "50%糖浆", "section": "配方"},
+                ],
+            },
+        ],
+    }
+
+    underscore = client.get("/api/recipes/search", params={"q": "_"}).json()
+    assert underscore == {"groups": []}
+
+
+def test_search_stays_public(client):
+    client.headers.pop("X-Admin-Token", None)
+    r = client.get("/api/recipes/search", params={"q": "肠粉"})
+    assert r.status_code == 200
+    assert r.json()["groups"][0]["items"][0]["recipe_name"] == "肠粉酱油"

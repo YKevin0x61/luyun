@@ -59,3 +59,15 @@ def test_wrap_page_break_spans_full_grid():
     out = wrap_sop_semantic_layout(html)
     assert "sop-grid-span-break" in out
     assert "recipe-card" in out
+
+
+def test_wrap_copies_recipe_id_from_h3_to_card():
+    html = (
+        "<h1>T</h1><h2>S</h2>"
+        '<h3 class="recipe-title" data-recipe-id="42">艇仔粥</h3><p>比例 1:1</p>'
+    )
+    out = wrap_sop_semantic_layout(html)
+    soup = BeautifulSoup(out, "html.parser")
+    card = soup.select_one("article.recipe-card")
+    assert card is not None
+    assert card.get("data-recipe-id") == "42"

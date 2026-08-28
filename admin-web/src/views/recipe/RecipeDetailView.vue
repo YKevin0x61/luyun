@@ -36,6 +36,8 @@ const qrCanvasRef = ref(null)
 
 let searchDebounce = null
 let intersectionObserver = null
+let focusHighlightTimer = null
+const FOCUS_HIGHLIGHT_MS = 1600
 
 function applyTheme(t) {
   const norm = RC.normalizeTheme(t)
@@ -86,6 +88,27 @@ function afterContentRendered() {
   buildToc()
   injectScaleControls()
   injectCopyButtons()
+  nextTick(() => applyFocusFromQuery())
+}
+
+function applyFocusFromQuery() {
+  if (!bodyRef.value) return
+  const raw = route.query.focus
+  if (raw == null || raw === '') return
+  const id = String(Array.isArray(raw) ? raw[0] : raw).trim()
+  if (!/^\d+$/.test(id)) return
+  const card = bodyRef.value.querySelector(`article.recipe-card[data-recipe-id="${id}"]`)
+  if (!card) return
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  bodyRef.value.querySelectorAll('article.recipe-card.recipe-card--focus').forEach((el) => {
+    el.classList.remove('recipe-card--focus')
+  })
+  card.classList.add('recipe-card--focus')
+  if (focusHighlightTimer != null) clearTimeout(focusHighlightTimer)
+  focusHighlightTimer = setTimeout(() => {
+    card.classList.remove('recipe-card--focus')
+    focusHighlightTimer = null
+  }, FOCUS_HIGHLIGHT_MS)
 }
 
 function buildToc() {
@@ -277,6 +300,9 @@ async function openQr() {
 }
 
 watch(slug, load)
+watch(() => route.query.focus, () => {
+  if (!loading.value) nextTick(() => applyFocusFromQuery())
+})
 onMounted(() => {
   applyTheme(theme.value)
   applyFont(fontPx.value)
@@ -287,6 +313,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   intersectionObserver?.disconnect()
   clearTimeout(searchDebounce)
+  if (focusHighlightTimer != null) clearTimeout(focusHighlightTimer)
   document.documentElement.removeAttribute('data-theme')
   document.documentElement.style.removeProperty('--reader-fs')
   document.body.classList.remove('sop-density-compact', 'sop-density-comfortable', 'sop-only-new')

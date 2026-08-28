@@ -21,6 +21,17 @@ from .sop_parse import (
 SLUG_MAX_LEN = 64
 TEXT_FIELD_MAX_LEN = 120
 BODY_MAX_LEN = 50_000
+LIKE_ESCAPE_CHAR = "!"
+
+
+def _escape_like_literal(text: str) -> str:
+    """Make %, _, and the LIKE ESCAPE char literal in a user-supplied fragment."""
+    return (
+        (text or "")
+        .replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR + LIKE_ESCAPE_CHAR)
+        .replace("%", LIKE_ESCAPE_CHAR + "%")
+        .replace("_", LIKE_ESCAPE_CHAR + "_")
+    )
 
 
 def utc_now_iso() -> str:
@@ -294,6 +305,43 @@ class RecipeStore:
         await self.conn.commit()
         return await self.get_recipe(recipe_id)
 
+    async def search_recipes(self, q: str, include_inactive: bool = False) -> list[dict]:
+        """Cross-station substring search on recipe_name. Empty q returns no groups."""
+        needle = (q or "").strip()
+        if not needle:
+            return []
+        sql = (
+            "SELECT s.slug AS station_slug, s.title AS station_title, "
+            "r.id AS recipe_id, r.recipe_name, r.section "
+            "FROM sop_recipes r "
+            "JOIN sop_stations s ON s.slug = r.station_slug "
+            "WHERE LOWER(r.recipe_name) LIKE '%' || LOWER(?) || '%' ESCAPE ? "
+        )
+        params: list = [_escape_like_literal(needle), LIKE_ESCAPE_CHAR]
+        if not include_inactive:
+            sql += "AND r.is_active = 1 "
+        sql += "ORDER BY s.slug COLLATE NOCASE, r.sort_order ASC, r.id ASC"
+        cur = await self.conn.execute(sql, params)
+        groups: list[dict] = []
+        by_slug: dict[str, dict] = {}
+        for row in await cur.fetchall():
+            slug = row["station_slug"]
+            group = by_slug.get(slug)
+            if group is None:
+                group = {
+                    "station_slug": slug,
+                    "station_title": row["station_title"],
+                    "items": [],
+                }
+                by_slug[slug] = group
+                groups.append(group)
+            group["items"].append({
+                "recipe_id": int(row["recipe_id"]),
+                "recipe_name": row["recipe_name"],
+                "section": row["section"],
+            })
+        return groups
+
     async def list_history(self, recipe_id: int) -> list[dict]:
         cur = await self.conn.execute(
             "SELECT section, recipe_name, body_markdown, sort_order, is_new, changed_at "
@@ -320,7 +368,7 @@ class RecipeStore:
         if not include_inactive:
             where += " AND is_active = 1"
         cur = await self.conn.execute(
-            "SELECT section, recipe_name, body_markdown, sort_order, is_new, is_active "
+            "SELECT id, section, recipe_name, body_markdown, sort_order, is_new, is_active "
             "FROM sop_recipes " + where + " ORDER BY sort_order ASC, id ASC",
             (slug,),
         )
@@ -330,6 +378,7 @@ class RecipeStore:
                 section=r["section"], recipe_name=r["recipe_name"],
                 body_markdown=r["body_markdown"], sort_order=int(r["sort_order"]),
                 is_new=bool(r["is_new"]), is_active=bool(r["is_active"]),
+                id=int(r["id"]),
             )
             for r in rows
         ]

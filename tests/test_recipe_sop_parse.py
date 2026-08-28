@@ -84,3 +84,27 @@ def test_display_markdown_new_class_follows_explicit_is_new_only():
     ]
     md = recipes_to_display_markdown("测", recipes)
     assert "recipe-title--new" not in md
+
+
+def test_display_markdown_stamps_recipe_id_on_h3():
+    recipes = [
+        ParsedRecipe(
+            section="配方",
+            recipe_name="艇仔粥",
+            body_markdown="比例 1:1",
+            sort_order=0,
+            id=42,
+        ),
+    ]
+    md = recipes_to_display_markdown("测", recipes)
+    assert 'data-recipe-id="42"' in md
+    assert "艇仔粥" in md
+
+
+def test_display_markdown_omits_recipe_id_when_missing():
+    recipes = [
+        ParsedRecipe(section="配方", recipe_name="艇仔粥", body_markdown="x", sort_order=0),
+    ]
+    md = recipes_to_display_markdown("测", recipes)
+    assert "data-recipe-id" not in md
+    assert "### 艇仔粥" in md

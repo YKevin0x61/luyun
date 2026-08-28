@@ -15,6 +15,22 @@ def test_html_blocks_script_and_unsafe_style():
     assert 'rel="noopener noreferrer"' in html
 
 
+def test_html_stamps_recipe_id_on_wrapped_card():
+    html = render_markdown_to_html(
+        '# T\n\n## S\n\n<h3 class="recipe-title" data-recipe-id="42">艇仔粥</h3>\n\n比例 1:1\n'
+    )
+    assert 'data-recipe-id="42"' in html
+    assert 'article' in html
+    assert 'recipe-card' in html
+
+
+def test_html_strips_non_numeric_recipe_id():
+    html = render_markdown_to_html(
+        '# T\n\n## S\n\n<h3 class="recipe-title" data-recipe-id="nope">艇仔粥</h3>\n\n比例 1:1\n'
+    )
+    assert "data-recipe-id" not in html
+
+
 def test_html_wraps_table_in_scroll():
     html = render_markdown_to_html("## 配方\n\n| A | B |\n|:---|:---|\n| 1 | 2 |\n")
     assert "table-scroll" in html

@@ -97,3 +97,45 @@ def test_detail_markdown(store):
     md = _run(store.station_display_markdown("changfen"))
     assert md is not None
     assert "肠粉档" in md
+
+
+def test_search_empty_query_returns_no_groups(store):
+    assert _run(store.search_recipes("")) == []
+    assert _run(store.search_recipes("   ")) == []
+
+
+def test_search_recipes_groups_by_station_on_name(store):
+    seed = _run(store.list_recipes("changfen"))[0]
+    assert seed["recipe_name"] == "肠粉酱油"
+    _run(store.create_station("shulong", "熟笼档"))
+    dumpling_id = _run(store.create_recipe("shulong", "配方", "鲜虾饺", "虾馅", None, False))
+
+    groups = _run(store.search_recipes("虾"))
+    assert groups == [
+        {
+            "station_slug": "shulong",
+            "station_title": "熟笼档",
+            "items": [
+                {"recipe_id": dumpling_id, "recipe_name": "鲜虾饺", "section": "配方"},
+            ],
+        },
+    ]
+
+    groups2 = _run(store.search_recipes("肠粉"))
+    assert groups2 == [
+        {
+            "station_slug": "changfen",
+            "station_title": "肠粉档",
+            "items": [
+                {"recipe_id": seed["id"], "recipe_name": "肠粉酱油", "section": "配方"},
+            ],
+        },
+    ]
+
+
+def test_search_recipes_skips_inactive_by_default(store):
+    rid = _run(store.create_recipe("changfen", "配方", "停用虾饺", "y", None, False))
+    _run(store.toggle_active(rid))
+    assert _run(store.search_recipes("停用虾饺")) == []
+    included = _run(store.search_recipes("停用虾饺", include_inactive=True))
+    assert included[0]["items"][0]["recipe_id"] == rid

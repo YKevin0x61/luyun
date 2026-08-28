@@ -77,7 +77,11 @@ def wrap_sop_semantic_layout(html_fragment: str) -> str:
                         card_classes += " recipe-card--new"
                     if "recipe-title--inactive" in h3_classes:
                         card_classes += " recipe-card--inactive"
-                    card = soup.new_tag("article", attrs={"class": card_classes})
+                    card_attrs = {"class": card_classes}
+                    recipe_id = n2.get("data-recipe-id")
+                    if recipe_id and str(recipe_id).isdigit():
+                        card_attrs["data-recipe-id"] = str(recipe_id)
+                    card = soup.new_tag("article", attrs=card_attrs)
                     chead = soup.new_tag("header", attrs={"class": "recipe-card-head"})
                     chead.append(n2)
                     card.append(chead)

@@ -31,6 +31,7 @@ class ParsedRecipe:
     sort_order: int
     is_new: bool = False
     is_active: bool = True
+    id: int | None = None
 
 
 def _split_pipe_row(line: str) -> list[str]:
@@ -212,20 +213,25 @@ def recipes_to_display_markdown(station_title: str, recipes: list[ParsedRecipe])
         parts.append(f"## {section}")
         parts.append("")
         for r in sorted(section_items[section], key=lambda x: x.sort_order):
-            classes = ["recipe-title"]
-            if r.is_new:
-                classes.append("recipe-title--new")
-            if not r.is_active:
-                classes.append("recipe-title--inactive")
-            if len(classes) > 1:
-                safe = html_escape(r.recipe_name.strip(), quote=True)
-                parts.append(f'<h3 class="{" ".join(classes)}">{safe}</h3>')
-            else:
-                parts.append(f"### {r.recipe_name}")
+            parts.append(_recipe_heading_markdown(r))
             parts.append("")
             parts.append(r.body_markdown.strip())
             parts.append("")
     return "\n".join(parts).rstrip() + "\n"
+
+
+def _recipe_heading_markdown(r: ParsedRecipe) -> str:
+    classes = ["recipe-title"]
+    if r.is_new:
+        classes.append("recipe-title--new")
+    if not r.is_active:
+        classes.append("recipe-title--inactive")
+    needs_html = len(classes) > 1 or r.id is not None
+    if not needs_html:
+        return f"### {r.recipe_name}"
+    safe = html_escape(r.recipe_name.strip(), quote=True)
+    id_attr = f' data-recipe-id="{int(r.id)}"' if r.id is not None else ""
+    return f'<h3 class="{" ".join(classes)}"{id_attr}>{safe}</h3>'
 
 
 @dataclass(frozen=True)

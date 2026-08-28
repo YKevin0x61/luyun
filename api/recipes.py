@@ -105,6 +105,12 @@ class RecipeReorder(BaseModel):
 
 
 # ---- 浏览 ----
+@router.get("/search")
+async def search_recipes(q: str = "", include_inactive: bool = False,
+                         store: RecipeStore = Depends(_get_recipe_store)):
+    return {"groups": await store.search_recipes(q, include_inactive=include_inactive)}
+
+
 @router.get("/stations")
 async def list_stations(store: RecipeStore = Depends(_get_recipe_store)):
     return {"stations": await store.list_stations()}

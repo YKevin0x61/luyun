@@ -28,7 +28,7 @@ ALLOWED_TAGS = {
 
 ALLOWED_ATTRS = {
     "div": {"class", "style"},
-    "h3": {"class"},
+    "h3": {"class", "data-recipe-id"},
     "a": {"href", "target", "rel"},
 }
 
@@ -64,6 +64,9 @@ def _sanitize_html(soup: BeautifulSoup) -> None:
                     del tag[attr]
             elif tag.name == "a" and attr == "rel":
                 tag[attr] = "noopener noreferrer"
+            elif tag.name == "h3" and attr == "data-recipe-id":
+                if not str(tag.get(attr) or "").isdigit():
+                    del tag[attr]
         if tag.name == "a" and tag.get("target") == "_blank":
             tag["rel"] = "noopener noreferrer"
 
