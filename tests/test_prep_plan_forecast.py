@@ -57,7 +57,7 @@ class PrepPlanServiceFixture(unittest.IsolatedAsyncioTestCase):
         settings.DATABASE_DIR = self._old
         self._tmpdir.cleanup()
 
-    async def _seed_item_and_rule(self):
+    async def _seed_item_and_rule(self, *, min_batch_qty=0):
         items = self.db.table("prep_items")
         async with items.conn.cursor() as cursor:
             await cursor.execute(
@@ -66,9 +66,9 @@ class PrepPlanServiceFixture(unittest.IsolatedAsyncioTestCase):
                     item_name, station, position, category, unit,
                     shelf_life_hours, lead_time_hours, min_batch_qty,
                     safety_stock_ratio, active, notes, created_at, updated_at
-                ) VALUES (?, 'shulong', '熟笼', '', ?, 24, 0, 0, 0, 1, '', ?, ?)
+                ) VALUES (?, 'shulong', '熟笼', '', ?, 24, 0, ?, 0, 1, '', ?, ?)
                 """,
-                (ITEM_NAME, UNIT, self.stamp, self.stamp),
+                (ITEM_NAME, UNIT, min_batch_qty, self.stamp, self.stamp),
             )
             prep_item_id = cursor.lastrowid
         await items.commit()
@@ -238,3 +238,22 @@ class PrepPlanForecastCoverageTests(PrepPlanServiceFixture):
         item = self._board_item(result)
         self.assertEqual(item["confidence"], "low")
         self.assertGreater(item["recommended_qty"], 0)
+
+    async def test_min_batch_lifts_only_when_uncovered_gap_is_positive(self):
+        await self._seed_item_and_rule(min_batch_qty=100)
+        await self._seed_identical_history()
+
+        result = await self._forecast()
+        item = self._board_item(result)
+        self.assertEqual(item["recommended_qty"], 100)
+        self.assertTrue(item["min_batch_applied"])
+
+    async def test_min_batch_does_not_lift_when_coverage_fills_the_window(self):
+        prep_item_id = await self._seed_item_and_rule(min_batch_qty=100)
+        await self._seed_identical_history()
+        await self._seed_batch(prep_item_id, 80, WINDOW_END)
+
+        result = await self._forecast()
+        item = self._board_item(result)
+        self.assertEqual(item["recommended_qty"], 0)
+        self.assertFalse(item["min_batch_applied"])

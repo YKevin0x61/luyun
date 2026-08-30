@@ -18,6 +18,7 @@ export const FORMULA_LABEL = '怎么算的'
 export const BATCHES_LABEL = '本品批次'
 export const FORECAST_LABEL = '预测'
 export const SAFETY_LABEL = '安全库存'
+export const CONFIDENCE_FIELD_LABEL = '信心'
 export const NO_MASTER_REASON = '没有备货品主数据，不能登记'
 export const EMPTY_HINT = '点「刷新建议」，按档口列出备货品。'
 export const ALL_STATIONS_LABEL = '全部后厨'
@@ -53,23 +54,12 @@ export const CONFIDENCE_LABELS = {
   none: '样本不足',
 }
 
-export const SLOT_LABELS = {
-  morning: '早班',
-  lunch: '午市',
-  afternoon: '下午',
-  dinner: '晚市',
-}
-
 export function riskLabel(level) {
   return RISK_LABELS[level] || ''
 }
 
 export function confidenceLabel(level) {
   return CONFIDENCE_LABELS[level] || ''
-}
-
-export function slotLabel(name) {
-  return SLOT_LABELS[name] || name || ''
 }
 
 export function discardConfirmCopy(batch) {

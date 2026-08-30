@@ -8,6 +8,7 @@ import {
   ALL_STATIONS_LABEL,
   BATCHES_LABEL,
   CONFIDENCE_LABELS,
+  CONFIDENCE_FIELD_LABEL,
   CUSTOM_TIME_LABEL,
   DISCARD_LABEL,
   EMPTY_HINT,
@@ -35,6 +36,7 @@ import {
   UNCATEGORIZED_STATION,
   UNDO_LABEL,
   discardConfirmCopy,
+  confidenceLabel,
 } from '../utils/prepPlanCopy'
 import { buildPrepPlanText } from '../utils/prepPlanText'
 import {
@@ -407,6 +409,10 @@ function cancelDiscard() {
                   <dt>{{ RECOMMENDED_LABEL }}</dt>
                   <dd>{{ qtyText(item.recommended_qty) }} {{ item.unit }}</dd>
                 </div>
+                <div v-if="confidenceLabel(item.confidence)">
+                  <dt>{{ CONFIDENCE_FIELD_LABEL }}</dt>
+                  <dd>{{ confidenceLabel(item.confidence) }}</dd>
+                </div>
               </dl>
               <p v-if="item.min_batch_applied && item.reason" class="prep-min-batch">{{ item.reason }}</p>
               <template v-if="usableBatches(item).length">
@@ -428,7 +434,10 @@ function cancelDiscard() {
       v-if="lowConfidence.length || missingRules.length"
       class="card prep-aux"
     >
-      <summary>{{ CONFIDENCE_LABELS.none }} {{ lowConfidence.length }} · 缺规则 {{ missingRules.length }}</summary>
+      <summary>
+        <template v-if="lowConfidence.length">{{ CONFIDENCE_LABELS.none }} {{ lowConfidence.length }} · </template>
+        缺规则 {{ missingRules.length }}
+      </summary>
       <ul v-if="lowConfidence.length" class="prep-aux-list">
         <li v-for="(row, index) in lowConfidence" :key="`low-${index}`">
           {{ row.item_name }}（{{ row.unit || '—' }}）{{ row.reason || '' }}

@@ -157,6 +157,19 @@ export function usePrepPlan() {
     })
     extraRecordOpen[key] = false
     registerQty[key] = nextRecommended > 0 ? nextRecommended : ''
+    if (near) {
+      expiring.value = [
+        ...expiring.value,
+        {
+          batch_id: data.batch_id,
+          item_name: item.item_name,
+          unit: item.unit || '',
+          station: item.station || '',
+          remaining_qty: Number(data.remaining_qty || qty),
+          expires_at: data.expires_at,
+        },
+      ].sort((a, b) => String(a.expires_at || '').localeCompare(String(b.expires_at || '')))
+    }
     statusText.value = `已登记 ${item.item_name} ${qty}${item.unit || ''}`
   }
 

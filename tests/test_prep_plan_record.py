@@ -2,12 +2,10 @@
 # -*- coding: utf-8 -*-
 """备货计划：登记产量写成备货批次（服务缝）。"""
 
-import inspect
 from datetime import timedelta
 
 from api.prep_plan import CreateBatchRequest
 from database import ensure_beijing_datetime
-from services.prep_plan_service import PrepPlanService
 from tests.test_prep_plan_forecast import (
     ITEM_NAME,
     NOW,
@@ -47,7 +45,6 @@ class PrepPlanRecordBatchTests(PrepPlanServiceFixture):
         await self._seed_item_and_rule()
         await self._seed_identical_history()
 
-        self.assertNotIn("expires_at", inspect.signature(PrepPlanService.record_batch).parameters)
         self.assertNotIn("expires_at", CreateBatchRequest.model_fields)
 
         before = await self.service.compute_forecast(

@@ -3,6 +3,7 @@ import {
   ALL_STATIONS_LABEL,
   BATCHES_LABEL,
   CONFIDENCE_LABELS,
+  CONFIDENCE_FIELD_LABEL,
   CUSTOM_TIME_LABEL,
   DISCARD_LABEL,
   EMPTY_LIST_TEXT,
@@ -57,6 +58,7 @@ describe('prep plan chrome copy', () => {
       UNCATEGORIZED_STATION,
       FORECAST_LABEL,
       SAFETY_LABEL,
+      CONFIDENCE_FIELD_LABEL,
       FORMULA_LABEL,
       BATCHES_LABEL,
       EXPORT_LABEL,
@@ -91,6 +93,7 @@ describe('prep plan chrome copy', () => {
     expect(RISK_LABELS.high).toBe('缺货高')
     expect(FORECAST_LABEL).toBe('预测')
     expect(SAFETY_LABEL).toBe('安全库存')
+    expect(CONFIDENCE_FIELD_LABEL).toBe('信心')
     expect(FORMULA_LABEL).toBe('怎么算的')
     expect(BATCHES_LABEL).toBe('本品批次')
     expect(EXPORT_LABEL).toBe('复制清单')
