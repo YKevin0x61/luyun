@@ -127,12 +127,16 @@ export function usePrepPlan() {
       operator: '后厨',
     })
     const near = isNearExpiry(data.expires_at)
-    const nextRecommended = Math.max(0, Number(item.recommended_qty || 0) - Math.ceil(qty))
+    const currentRecommended = Number(item.recommended_qty || 0)
+    const qtyCeil = Math.ceil(qty)
+    const nextRecommended = Math.max(0, currentRecommended - qtyCeil)
+    const undoRecommendedDelta = Math.min(currentRecommended, qtyCeil)
     items.value = patchItem(items.value, key, (current) => {
       const next = {
         ...current,
         produced_qty: Number(current.produced_qty || 0) + qty,
         undo_batch_id: data.batch_id,
+        undo_recommended_delta: undoRecommendedDelta,
         available_fresh_qty: Number(current.available_fresh_qty || 0) + (near ? 0 : qty),
         available_near_expiry_qty: Number(current.available_near_expiry_qty || 0) + (near ? qty : 0),
         recommended_qty: nextRecommended,
@@ -166,11 +170,16 @@ export function usePrepPlan() {
       const batch = (current.batches || []).find((row) => row.batch_id === batchId)
       const qty = Number(batch?.remaining_qty || batch?.produced_qty || 0)
       const near = Boolean(batch?.near_expiry)
-      nextRecommended = Number(current.recommended_qty || 0) + Math.ceil(qty)
+      const qtyCeil = Math.ceil(qty)
+      const recordedDelta = Number(current.undo_recommended_delta)
+      nextRecommended =
+        Number(current.recommended_qty || 0) +
+        (Number.isFinite(recordedDelta) ? recordedDelta : qtyCeil)
       const next = {
         ...current,
         produced_qty: Math.max(0, Number(current.produced_qty || 0) - qty),
         undo_batch_id: null,
+        undo_recommended_delta: null,
         available_fresh_qty: Math.max(0, Number(current.available_fresh_qty || 0) - (near ? 0 : qty)),
         available_near_expiry_qty: Math.max(0, Number(current.available_near_expiry_qty || 0) - (near ? qty : 0)),
         recommended_qty: nextRecommended,
