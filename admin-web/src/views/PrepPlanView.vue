@@ -18,6 +18,7 @@ import {
   SKIP_LABEL,
   TODO_COUNT_LABEL,
   UNCATEGORIZED_STATION,
+  UNDO_LABEL,
 } from '../utils/prepPlanCopy'
 import {
   PRESET_AFTERNOON,
@@ -50,6 +51,7 @@ const {
   itemKey,
   refresh,
   recordItem,
+  undoItem,
 } = usePrepPlan()
 
 function selectPreset(id) {
@@ -206,36 +208,47 @@ function openExtraRecord(item) {
               <span>{{ PRODUCED_LABEL }} {{ qtyText(item.produced_qty) }} {{ item.unit }}</span>
             </div>
             <p v-if="!item.can_record" class="prep-no-master">{{ NO_MASTER_REASON }}</p>
-            <button
-              v-else-if="showExtraRecord(item)"
-              type="button"
-              class="btn prep-extra"
-              :disabled="busy"
-              @click="openExtraRecord(item)"
-            >
-              {{ EXTRA_RECORD_LABEL }}
-            </button>
-            <form
-              v-else-if="registerFormOpen(item)"
-              class="prep-register"
-              @submit.prevent="recordItem(item)"
-            >
-              <label class="prep-qty-field">
-                这次做了
-                <input
-                  v-model.number="registerQty[itemKey(item)]"
-                  class="input prep-qty-input"
-                  type="number"
-                  step="any"
-                  inputmode="decimal"
-                  :disabled="busy"
-                >
-                {{ item.unit }}
-              </label>
-              <button type="submit" class="btn btn-primary prep-record" :disabled="busy">
-                {{ RECORD_LABEL }}
+            <div v-else class="prep-row-actions">
+              <button
+                v-if="showExtraRecord(item)"
+                type="button"
+                class="btn prep-extra"
+                :disabled="busy"
+                @click="openExtraRecord(item)"
+              >
+                {{ EXTRA_RECORD_LABEL }}
               </button>
-            </form>
+              <form
+                v-else-if="registerFormOpen(item)"
+                class="prep-register"
+                @submit.prevent="recordItem(item)"
+              >
+                <label class="prep-qty-field">
+                  这次做了
+                  <input
+                    v-model.number="registerQty[itemKey(item)]"
+                    class="input prep-qty-input"
+                    type="number"
+                    step="any"
+                    inputmode="decimal"
+                    :disabled="busy"
+                  >
+                  {{ item.unit }}
+                </label>
+                <button type="submit" class="btn btn-primary prep-record" :disabled="busy">
+                  {{ RECORD_LABEL }}
+                </button>
+              </form>
+              <button
+                v-if="item.undo_batch_id"
+                type="button"
+                class="btn prep-undo"
+                :disabled="busy"
+                @click="undoItem(item)"
+              >
+                {{ UNDO_LABEL }}
+              </button>
+            </div>
           </li>
         </ul>
       </section>
@@ -280,10 +293,17 @@ function openExtraRecord(item) {
 .prep-preset,
 .prep-refresh,
 .prep-record,
-.prep-extra {
+.prep-extra,
+.prep-undo {
   min-height: 44px;
   padding: 10px 18px;
   font-size: 15px;
+}
+.prep-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
 }
 .prep-preset.is-active {
   background: var(--accent);

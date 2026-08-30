@@ -15,6 +15,7 @@ import {
   REFRESHING_LABEL,
   RISK_LABELS,
   SKIP_LABEL,
+  UNDO_LABEL,
   discardConfirmCopy,
 } from '../prepPlanCopy.js'
 
@@ -29,6 +30,7 @@ describe('prep plan chrome copy', () => {
       RECOMMENDED_LABEL,
       PRODUCED_LABEL,
       RECORD_LABEL,
+      UNDO_LABEL,
       EXTRA_RECORD_LABEL,
       NO_MASTER_REASON,
       FRESH_AVAILABLE_LABEL,
@@ -47,6 +49,8 @@ describe('prep plan chrome copy', () => {
     expect(SKIP_LABEL).toBe('不用做')
     expect(PRODUCED_LABEL).toBe('已做')
     expect(RECORD_LABEL).toBe('登记')
+    expect(UNDO_LABEL).toBe('撤销')
+    expect(UNDO_LABEL).not.toContain('报废')
     expect(EXTRA_RECORD_LABEL).toBe('多做一笔')
     expect(NO_MASTER_REASON).toBe('没有备货品主数据，不能登记')
     expect(CONFIDENCE_LABELS.low).toBe('样本少')

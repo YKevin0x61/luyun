@@ -161,22 +161,25 @@ export function usePrepPlan() {
     if (!batchId) return
     await api.post(`/api/prep-plan/batches/${batchId}/undo`)
     const key = itemKey(item)
+    let nextRecommended = 0
     items.value = patchItem(items.value, key, (current) => {
       const batch = (current.batches || []).find((row) => row.batch_id === batchId)
       const qty = Number(batch?.remaining_qty || batch?.produced_qty || 0)
       const near = Boolean(batch?.near_expiry)
+      nextRecommended = Number(current.recommended_qty || 0) + Math.ceil(qty)
       const next = {
         ...current,
         produced_qty: Math.max(0, Number(current.produced_qty || 0) - qty),
         undo_batch_id: null,
         available_fresh_qty: Math.max(0, Number(current.available_fresh_qty || 0) - (near ? 0 : qty)),
         available_near_expiry_qty: Math.max(0, Number(current.available_near_expiry_qty || 0) - (near ? qty : 0)),
-        recommended_qty: Number(current.recommended_qty || 0) + Math.ceil(qty),
+        recommended_qty: nextRecommended,
         batches: (current.batches || []).filter((row) => row.batch_id !== batchId),
       }
       next.available_qty = Number(next.available_fresh_qty) + Number(next.available_near_expiry_qty)
       return next
     })
+    registerQty[key] = nextRecommended > 0 ? nextRecommended : ''
     expiring.value = expiring.value.filter((row) => row.batch_id !== batchId)
     statusText.value = `已撤销 ${item.item_name} 刚才那笔`
   }

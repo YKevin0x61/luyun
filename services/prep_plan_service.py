@@ -968,6 +968,19 @@ class PrepPlanService:
             "reason": reason,
         }
 
+    async def undo_record(
+        self,
+        db,
+        batch_id: int,
+        operator: str = "",
+    ) -> Dict[str, Any]:
+        return await self.retire_batch(
+            db,
+            batch_id,
+            reason=UNDO_MOVEMENT_REASON,
+            operator=operator,
+        )
+
 
 prep_plan_service = PrepPlanService()
 
