@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   CONFIDENCE_LABELS,
+  CUSTOM_TIME_LABEL,
   FRESH_AVAILABLE_LABEL,
   NEAR_AVAILABLE_LABEL,
   PREP_PLAN_TITLE,
@@ -20,6 +21,7 @@ describe('prep plan chrome copy', () => {
       REFRESH_LABEL,
       REFRESHING_LABEL,
       SKIP_LABEL,
+      CUSTOM_TIME_LABEL,
       RECOMMENDED_LABEL,
       FRESH_AVAILABLE_LABEL,
       NEAR_AVAILABLE_LABEL,
@@ -30,6 +32,10 @@ describe('prep plan chrome copy', () => {
     expect(chrome).not.toMatch(/high|medium|normal|waste_risk|run_id/i)
     expect(PREP_PLAN_TITLE).toBe('备货计划')
     expect(REFRESH_LABEL).toBe('刷新建议')
+    expect(CUSTOM_TIME_LABEL).toBe('自定义时间')
+    expect(PRESET_LABELS.future24).toBe('未来 24 小时')
+    expect(PRESET_LABELS.morning).toBe('早班')
+    expect(PRESET_LABELS.afternoon).toBe('午后补货')
     expect(SKIP_LABEL).toBe('不用做')
     expect(CONFIDENCE_LABELS.low).toBe('样本少')
     expect(RISK_LABELS.high).toBe('缺货高')

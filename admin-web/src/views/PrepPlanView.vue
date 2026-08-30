@@ -3,20 +3,38 @@ import { computed, onMounted } from 'vue'
 import { usePrepPlan } from '../composables/usePrepPlan'
 import { useStationsStore } from '../stores/stations'
 import {
+  CUSTOM_TIME_LABEL,
   EMPTY_HINT,
   FRESH_AVAILABLE_LABEL,
   NEAR_AVAILABLE_LABEL,
   PREP_PLAN_TITLE,
+  PRESET_LABELS,
   RECOMMENDED_LABEL,
   REFRESH_LABEL,
   SKIP_LABEL,
   TODO_COUNT_LABEL,
   UNCATEGORIZED_STATION,
 } from '../utils/prepPlanCopy'
+import {
+  PRESET_AFTERNOON,
+  PRESET_CUSTOM,
+  PRESET_FUTURE_24H,
+  PRESET_MORNING,
+} from '../utils/prepPlanWindow'
 
 const LOUMIAN_STATION = 'loumian'
 
+const PRESET_CHIPS = [
+  { id: PRESET_FUTURE_24H, label: PRESET_LABELS.future24 },
+  { id: PRESET_MORNING, label: PRESET_LABELS.morning },
+  { id: PRESET_AFTERNOON, label: PRESET_LABELS.afternoon },
+]
+
 const {
+  preset,
+  customStart,
+  customEnd,
+  showCustom,
   busy,
   statusText,
   errorText,
@@ -25,6 +43,20 @@ const {
   lowConfidence,
   refresh,
 } = usePrepPlan()
+
+function selectPreset(id) {
+  preset.value = id
+  showCustom.value = false
+}
+
+function toggleCustom() {
+  if (showCustom.value) {
+    showCustom.value = false
+    return
+  }
+  showCustom.value = true
+  preset.value = PRESET_CUSTOM
+}
 
 const stationsStore = useStationsStore()
 onMounted(() => stationsStore.load())
@@ -73,6 +105,47 @@ function qtyText(value) {
   <div class="prep-plan">
     <div class="card prep-toolbar">
       <h1 class="prep-title">{{ PREP_PLAN_TITLE }}</h1>
+      <div class="prep-toolbar-row" role="group" aria-label="时间窗">
+        <button
+          v-for="chip in PRESET_CHIPS"
+          :key="chip.id"
+          type="button"
+          class="btn prep-preset"
+          :class="{ 'is-active': preset === chip.id }"
+          :aria-pressed="preset === chip.id"
+          @click="selectPreset(chip.id)"
+        >
+          {{ chip.label }}
+        </button>
+        <button
+          type="button"
+          class="btn prep-preset"
+          :class="{ 'is-active': preset === PRESET_CUSTOM }"
+          :aria-pressed="preset === PRESET_CUSTOM"
+          :aria-expanded="showCustom"
+          @click="toggleCustom"
+        >
+          {{ CUSTOM_TIME_LABEL }}
+        </button>
+      </div>
+      <div v-if="showCustom" class="prep-custom-fields">
+        <label class="prep-custom-field">
+          开始
+          <input
+            v-model="customStart"
+            class="input prep-datetime"
+            type="datetime-local"
+          >
+        </label>
+        <label class="prep-custom-field">
+          结束
+          <input
+            v-model="customEnd"
+            class="input prep-datetime"
+            type="datetime-local"
+          >
+        </label>
+      </div>
       <div class="prep-toolbar-row">
         <button
           type="button"
@@ -148,12 +221,36 @@ function qtyText(value) {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
+.prep-preset,
 .prep-refresh {
   min-height: 44px;
   padding: 10px 18px;
   font-size: 15px;
+}
+.prep-preset.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.prep-custom-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 10px 0 4px;
+}
+.prep-custom-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.prep-datetime {
+  min-height: 44px;
+  min-width: 220px;
+  font-size: 16px;
 }
 .prep-status {
   font-size: 13px;
