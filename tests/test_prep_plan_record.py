@@ -113,6 +113,7 @@ class PrepPlanRecordBatchTests(PrepPlanServiceFixture):
 
     async def test_record_rejects_non_positive_qty_and_missing_master(self):
         await self._seed_item_and_rule()
+        await self._seed_identical_history()
         with self.assertRaises(ValueError):
             await self.service.record_batch(
                 db=self.db,
@@ -127,3 +128,14 @@ class PrepPlanRecordBatchTests(PrepPlanServiceFixture):
                 unit=UNIT,
                 produced_qty=10,
             )
+        result = await self.service.compute_forecast(
+            db=self.db,
+            target_start=WINDOW_START.isoformat(),
+            target_end=WINDOW_END.isoformat(),
+            include_inventory=True,
+            now=NOW,
+        )
+        item = self._board_item(result)
+        self.assertEqual(item["produced_qty"], 0)
+        self.assertEqual(item["recommended_qty"], 80)
+        self.assertEqual(item["available_fresh_qty"], 0)

@@ -173,8 +173,6 @@ async def create_batch(payload: CreateBatchRequest, db=Depends(get_db)):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except HTTPException:
-        raise
     except Exception as exc:
         logger.exception("创建备货批次失败")
         raise HTTPException(status_code=500, detail=f"创建备货批次失败: {exc}")

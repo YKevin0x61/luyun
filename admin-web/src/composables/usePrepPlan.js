@@ -127,6 +127,7 @@ export function usePrepPlan() {
       operator: '后厨',
     })
     const near = isNearExpiry(data.expires_at)
+    const nextRecommended = Math.max(0, Number(item.recommended_qty || 0) - Math.ceil(qty))
     items.value = patchItem(items.value, key, (current) => {
       const next = {
         ...current,
@@ -134,7 +135,7 @@ export function usePrepPlan() {
         undo_batch_id: data.batch_id,
         available_fresh_qty: Number(current.available_fresh_qty || 0) + (near ? 0 : qty),
         available_near_expiry_qty: Number(current.available_near_expiry_qty || 0) + (near ? qty : 0),
-        recommended_qty: Math.max(0, Number(current.recommended_qty || 0) - Math.ceil(qty)),
+        recommended_qty: nextRecommended,
       }
       next.available_qty = Number(next.available_fresh_qty) + Number(next.available_near_expiry_qty)
       next.batches = [
@@ -151,7 +152,6 @@ export function usePrepPlan() {
       return next
     })
     extraRecordOpen[key] = false
-    const nextRecommended = Math.max(0, Number(item.recommended_qty || 0) - Math.ceil(qty))
     registerQty[key] = nextRecommended > 0 ? nextRecommended : ''
     statusText.value = `已登记 ${item.item_name} ${qty}${item.unit || ''}`
   }

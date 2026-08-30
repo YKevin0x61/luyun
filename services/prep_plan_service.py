@@ -866,7 +866,6 @@ class PrepPlanService:
                 ),
             )
             batch_id = cursor.lastrowid
-        await batches_tdb.commit()
 
         async with movements_tdb.conn.cursor() as cursor:
             await cursor.execute(
