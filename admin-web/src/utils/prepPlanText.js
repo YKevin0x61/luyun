@@ -2,8 +2,6 @@ import {
   EMPTY_LIST_TEXT,
   PREP_PLAN_TITLE,
   SKIP_LABEL,
-  SLOT_LABELS,
-  slotLabel,
 } from './prepPlanCopy'
 import { formatPrepTime } from './prepPlanWindow'
 
@@ -53,5 +51,3 @@ export function buildPrepPlanText({ windowStart, windowEnd, stations, expiring, 
   while (lines[lines.length - 1] === '') lines.pop()
   return lines.join('\n')
 }
-
-export { slotLabel, SLOT_LABELS }
