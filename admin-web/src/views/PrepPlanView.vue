@@ -1,15 +1,23 @@
 <script setup>
 import { computed, onMounted } from 'vue'
 import ConfirmDialog from '../components/admin/ConfirmDialog.vue'
+import TextExportModal from '../components/salesreport/TextExportModal.vue'
 import { usePrepPlan } from '../composables/usePrepPlan'
 import { useStationsStore } from '../stores/stations'
 import {
   ALL_STATIONS_LABEL,
+  BATCHES_LABEL,
+  CONFIDENCE_LABELS,
   CUSTOM_TIME_LABEL,
   DISCARD_LABEL,
   EMPTY_HINT,
+  EXPORT_HINT,
+  EXPORT_LABEL,
+  EXPORT_TITLE,
   EXPIRES_AT_LABEL,
   EXTRA_RECORD_LABEL,
+  FORECAST_LABEL,
+  FORMULA_LABEL,
   FRESH_AVAILABLE_LABEL,
   NEAR_AVAILABLE_LABEL,
   NEAR_EXPIRY_TITLE,
@@ -21,18 +29,21 @@ import {
   RECORD_LABEL,
   REFRESH_LABEL,
   REMAINING_LABEL,
+  SAFETY_LABEL,
   SKIP_LABEL,
   TODO_COUNT_LABEL,
   UNCATEGORIZED_STATION,
   UNDO_LABEL,
   discardConfirmCopy,
 } from '../utils/prepPlanCopy'
+import { buildPrepPlanText } from '../utils/prepPlanText'
 import {
   PRESET_AFTERNOON,
   PRESET_CUSTOM,
   PRESET_FUTURE_24H,
   PRESET_MORNING,
   formatPrepTime,
+  rowTone,
 } from '../utils/prepPlanWindow'
 
 const LOUMIAN_STATION = 'loumian'
@@ -59,6 +70,9 @@ const {
   lowConfidence,
   expiring,
   discardTarget,
+  windowStart,
+  windowEnd,
+  exportOpen,
   itemKey,
   refresh,
   recordItem,
@@ -152,8 +166,29 @@ const discardCopy = computed(() => {
   })
 })
 
+const exportText = computed(() =>
+  buildPrepPlanText({
+    windowStart: windowStart.value,
+    windowEnd: windowEnd.value,
+    stations: board.value.map((group) => ({
+      stationLabel: group.label,
+      items: group.items,
+    })),
+    expiring: filteredExpiring.value,
+    missingRules: missingRules.value,
+  })
+)
+
 function qtyText(value) {
   return Number.isFinite(Number(value)) ? String(Math.round(Number(value))) : '0'
+}
+
+function usableBatches(item) {
+  return (item.batches || []).filter((batch) => Number(batch.remaining_qty || 0) > 0)
+}
+
+function isLowSample(item) {
+  return item.confidence === 'low'
 }
 
 function registerFormOpen(item) {
@@ -233,6 +268,13 @@ function cancelDiscard() {
         >
           {{ REFRESH_LABEL }}
         </button>
+        <button
+          type="button"
+          class="btn prep-export"
+          @click="exportOpen = true"
+        >
+          {{ EXPORT_LABEL }}
+        </button>
         <span class="prep-status" :class="{ 'is-error': errorText }">{{ errorText || statusText }}</span>
       </div>
       <div class="prep-toolbar-row prep-station-chips" role="group" aria-label="档口">
@@ -282,12 +324,15 @@ function cancelDiscard() {
       <section v-for="group in board" :key="group.stationId" class="card prep-station">
         <h2 class="prep-station-title">{{ group.label }}</h2>
         <ul class="prep-rows">
-          <li v-for="item in group.items" :key="`${item.item_name}|${item.unit}`" class="prep-row">
+          <li v-for="item in group.items" :key="`${item.item_name}|${item.unit}`" class="prep-row" :class="`is-${rowTone(item)}`">
             <div class="prep-row-main">
-              <div class="prep-item-name">{{ item.item_name }}</div>
+              <div class="prep-item-name">
+                {{ item.item_name }}
+                <span v-if="isLowSample(item)" class="badge prep-sample-badge">{{ CONFIDENCE_LABELS.low }}</span>
+              </div>
               <div class="prep-rec">
                 <span class="prep-rec-label">{{ RECOMMENDED_LABEL }}</span>
-                <span class="prep-rec-qty">{{ qtyText(item.recommended_qty) }}</span>
+                <span class="prep-rec-qty" :class="`is-${rowTone(item)}`">{{ qtyText(item.recommended_qty) }}</span>
                 <span class="prep-rec-unit">{{ item.unit }}</span>
                 <span v-if="Number(item.recommended_qty || 0) <= 0" class="prep-skip">{{ SKIP_LABEL }}</span>
               </div>
@@ -339,6 +384,41 @@ function cancelDiscard() {
                 {{ UNDO_LABEL }}
               </button>
             </div>
+            <details class="prep-row-more">
+              <summary>{{ FORMULA_LABEL }}</summary>
+              <dl class="prep-formula">
+                <div>
+                  <dt>{{ FORECAST_LABEL }}</dt>
+                  <dd>{{ qtyText(item.forecast_qty) }} {{ item.unit }}</dd>
+                </div>
+                <div>
+                  <dt>{{ SAFETY_LABEL }}</dt>
+                  <dd>{{ qtyText(item.safety_qty) }} {{ item.unit }}</dd>
+                </div>
+                <div>
+                  <dt>{{ FRESH_AVAILABLE_LABEL }}</dt>
+                  <dd>{{ qtyText(item.available_fresh_qty) }} {{ item.unit }}</dd>
+                </div>
+                <div>
+                  <dt>{{ NEAR_AVAILABLE_LABEL }}</dt>
+                  <dd>{{ qtyText(item.available_near_expiry_qty) }} {{ item.unit }}</dd>
+                </div>
+                <div>
+                  <dt>{{ RECOMMENDED_LABEL }}</dt>
+                  <dd>{{ qtyText(item.recommended_qty) }} {{ item.unit }}</dd>
+                </div>
+              </dl>
+              <p v-if="item.min_batch_applied && item.reason" class="prep-min-batch">{{ item.reason }}</p>
+              <template v-if="usableBatches(item).length">
+                <h3 class="prep-batches-title">{{ BATCHES_LABEL }}</h3>
+                <ul class="prep-batches">
+                  <li v-for="batch in usableBatches(item)" :key="batch.batch_id">
+                    {{ REMAINING_LABEL }} {{ qtyText(batch.remaining_qty) }} {{ item.unit }}
+                    · {{ EXPIRES_AT_LABEL }} {{ formatPrepTime(batch.expires_at) }}
+                  </li>
+                </ul>
+              </template>
+            </details>
           </li>
         </ul>
       </section>
@@ -348,7 +428,7 @@ function cancelDiscard() {
       v-if="lowConfidence.length || missingRules.length"
       class="card prep-aux"
     >
-      <summary>样本不足 {{ lowConfidence.length }} · 缺规则 {{ missingRules.length }}</summary>
+      <summary>{{ CONFIDENCE_LABELS.none }} {{ lowConfidence.length }} · 缺规则 {{ missingRules.length }}</summary>
       <ul v-if="lowConfidence.length" class="prep-aux-list">
         <li v-for="(row, index) in lowConfidence" :key="`low-${index}`">
           {{ row.item_name }}（{{ row.unit || '—' }}）{{ row.reason || '' }}
@@ -370,6 +450,14 @@ function cancelDiscard() {
       danger
       @confirm="discardBatch(discardTarget)"
       @cancel="cancelDiscard"
+    />
+    <TextExportModal
+      v-if="exportOpen"
+      :content="exportText"
+      :allow-push="false"
+      :title="EXPORT_TITLE"
+      :hint="EXPORT_HINT"
+      @close="exportOpen = false"
     />
   </div>
 </template>
@@ -396,6 +484,7 @@ function cancelDiscard() {
 }
 .prep-preset,
 .prep-refresh,
+.prep-export,
 .prep-record,
 .prep-extra,
 .prep-undo,
@@ -476,6 +565,19 @@ function cancelDiscard() {
   padding: 14px 4px;
   border-top: 1px solid var(--border);
 }
+.prep-row {
+  padding-left: 12px;
+  border-left: 4px solid var(--border);
+}
+.prep-row.is-skip {
+  border-left-color: var(--green);
+}
+.prep-row.is-todo {
+  border-left-color: var(--yellow);
+}
+.prep-row.is-danger {
+  border-left-color: var(--red);
+}
 .prep-expiring-row:first-child,
 .prep-row:first-child {
   border-top: 0;
@@ -486,7 +588,14 @@ function cancelDiscard() {
   gap: 8px;
 }
 .prep-item-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   font-size: 16px;
+  font-weight: 600;
+}
+.prep-sample-badge {
   font-weight: 600;
 }
 .prep-rec {
@@ -504,6 +613,15 @@ function cancelDiscard() {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
+}
+.prep-rec-qty.is-skip {
+  color: var(--green);
+}
+.prep-rec-qty.is-todo {
+  color: var(--yellow);
+}
+.prep-rec-qty.is-danger {
+  color: var(--red);
 }
 .prep-rec-unit {
   font-size: 14px;
@@ -552,6 +670,51 @@ function cancelDiscard() {
 .prep-aux-list {
   margin: 8px 0 0;
   padding-left: 18px;
+}
+.prep-row-more {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.prep-row-more summary {
+  cursor: pointer;
+  min-height: 32px;
+  font-size: 13px;
+  color: var(--text);
+}
+.prep-formula {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+.prep-formula > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.prep-formula dt {
+  min-width: 7em;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.prep-formula dd {
+  margin: 0;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.prep-min-batch {
+  margin: 8px 0 0;
+  color: var(--text);
+}
+.prep-batches-title {
+  margin: 12px 0 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.prep-batches {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text);
 }
 @media (max-width: 720px) {
   .prep-board,

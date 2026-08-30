@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import {
   ALL_STATIONS_LABEL,
+  BATCHES_LABEL,
   CONFIDENCE_LABELS,
   CUSTOM_TIME_LABEL,
   DISCARD_LABEL,
+  EMPTY_LIST_TEXT,
+  EXPORT_HINT,
+  EXPORT_LABEL,
+  EXPORT_TITLE,
   EXTRA_RECORD_LABEL,
   EXPIRES_AT_LABEL,
+  FORECAST_LABEL,
+  FORMULA_LABEL,
   FRESH_AVAILABLE_LABEL,
   NEAR_AVAILABLE_LABEL,
   NEAR_EXPIRY_TITLE,
@@ -19,6 +26,7 @@ import {
   REFRESHING_LABEL,
   REMAINING_LABEL,
   RISK_LABELS,
+  SAFETY_LABEL,
   SKIP_LABEL,
   UNCATEGORIZED_STATION,
   UNDO_LABEL,
@@ -47,6 +55,14 @@ describe('prep plan chrome copy', () => {
       EXPIRES_AT_LABEL,
       ALL_STATIONS_LABEL,
       UNCATEGORIZED_STATION,
+      FORECAST_LABEL,
+      SAFETY_LABEL,
+      FORMULA_LABEL,
+      BATCHES_LABEL,
+      EXPORT_LABEL,
+      EXPORT_TITLE,
+      EXPORT_HINT,
+      EMPTY_LIST_TEXT,
       ...Object.values(PRESET_LABELS),
       ...Object.values(RISK_LABELS),
       ...Object.values(CONFIDENCE_LABELS),
@@ -73,6 +89,14 @@ describe('prep plan chrome copy', () => {
     expect(NO_MASTER_REASON).toBe('没有备货品主数据，不能登记')
     expect(CONFIDENCE_LABELS.low).toBe('样本少')
     expect(RISK_LABELS.high).toBe('缺货高')
+    expect(FORECAST_LABEL).toBe('预测')
+    expect(SAFETY_LABEL).toBe('安全库存')
+    expect(FORMULA_LABEL).toBe('怎么算的')
+    expect(BATCHES_LABEL).toBe('本品批次')
+    expect(EXPORT_LABEL).toBe('复制清单')
+    expect(EXPORT_TITLE).toBe('复制清单 — 预览')
+    expect(EXPORT_HINT).toBe('预览后复制，不推企业微信。')
+    expect(EMPTY_LIST_TEXT).toBe('暂无建议')
   })
 })
 
