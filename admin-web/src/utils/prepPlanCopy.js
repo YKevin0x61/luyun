@@ -22,6 +22,9 @@ export const RECOMMENDED_LABEL = '建议制作量'
 export const PRODUCED_LABEL = '已做'
 export const FRESH_AVAILABLE_LABEL = '非临期可用'
 export const NEAR_AVAILABLE_LABEL = '临期可用'
+export const NEAR_EXPIRY_TITLE = '临期批次'
+export const REMAINING_LABEL = '剩余'
+export const EXPIRES_AT_LABEL = '过期时间'
 
 export const PRESET_LABELS = {
   future24: '未来 24 小时',

@@ -1,3 +1,5 @@
+import { UNCATEGORIZED_STATION } from './prepPlanCopy'
+
 export const PRESET_FUTURE_24H = 'future24'
 export const PRESET_MORNING = 'morning'
 export const PRESET_AFTERNOON = 'afternoon'
@@ -58,7 +60,7 @@ export function formatPrepTime(value) {
 }
 
 export function itemKey(item) {
-  const station = (item?.station || '').trim() || '未分类'
+  const station = (item?.station || '').trim() || UNCATEGORIZED_STATION
   return `${station}|${item?.item_name || ''}|${item?.unit || ''}`
 }
 

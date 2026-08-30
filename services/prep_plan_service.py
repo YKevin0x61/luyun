@@ -981,6 +981,19 @@ class PrepPlanService:
             operator=operator,
         )
 
+    async def discard_batch(
+        self,
+        db,
+        batch_id: int,
+        operator: str = "",
+    ) -> Dict[str, Any]:
+        return await self.retire_batch(
+            db,
+            batch_id,
+            reason="discard",
+            operator=operator,
+        )
+
 
 prep_plan_service = PrepPlanService()
 

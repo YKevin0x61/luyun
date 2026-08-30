@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ALL_STATIONS_LABEL,
   CONFIDENCE_LABELS,
   CUSTOM_TIME_LABEL,
+  DISCARD_LABEL,
   EXTRA_RECORD_LABEL,
+  EXPIRES_AT_LABEL,
   FRESH_AVAILABLE_LABEL,
   NEAR_AVAILABLE_LABEL,
+  NEAR_EXPIRY_TITLE,
   NO_MASTER_REASON,
   PREP_PLAN_TITLE,
   PRESET_LABELS,
@@ -13,8 +17,10 @@ import {
   RECORD_LABEL,
   REFRESH_LABEL,
   REFRESHING_LABEL,
+  REMAINING_LABEL,
   RISK_LABELS,
   SKIP_LABEL,
+  UNCATEGORIZED_STATION,
   UNDO_LABEL,
   discardConfirmCopy,
 } from '../prepPlanCopy.js'
@@ -31,10 +37,16 @@ describe('prep plan chrome copy', () => {
       PRODUCED_LABEL,
       RECORD_LABEL,
       UNDO_LABEL,
+      DISCARD_LABEL,
       EXTRA_RECORD_LABEL,
       NO_MASTER_REASON,
       FRESH_AVAILABLE_LABEL,
       NEAR_AVAILABLE_LABEL,
+      NEAR_EXPIRY_TITLE,
+      REMAINING_LABEL,
+      EXPIRES_AT_LABEL,
+      ALL_STATIONS_LABEL,
+      UNCATEGORIZED_STATION,
       ...Object.values(PRESET_LABELS),
       ...Object.values(RISK_LABELS),
       ...Object.values(CONFIDENCE_LABELS),
@@ -51,6 +63,12 @@ describe('prep plan chrome copy', () => {
     expect(RECORD_LABEL).toBe('登记')
     expect(UNDO_LABEL).toBe('撤销')
     expect(UNDO_LABEL).not.toContain('报废')
+    expect(DISCARD_LABEL).toBe('报废')
+    expect(NEAR_EXPIRY_TITLE).toBe('临期批次')
+    expect(ALL_STATIONS_LABEL).toBe('全部后厨')
+    expect(UNCATEGORIZED_STATION).toBe('未分类')
+    expect(REMAINING_LABEL).toBe('剩余')
+    expect(EXPIRES_AT_LABEL).toBe('过期时间')
     expect(EXTRA_RECORD_LABEL).toBe('多做一笔')
     expect(NO_MASTER_REASON).toBe('没有备货品主数据，不能登记')
     expect(CONFIDENCE_LABELS.low).toBe('样本少')
@@ -67,7 +85,9 @@ describe('discardConfirmCopy', () => {
       expires_at: '今天 15:00',
     })
     expect(copy.title).toBe('报废「虾饺馅」？')
+    expect(copy.body).toContain('剩余')
     expect(copy.body).toContain('30')
+    expect(copy.body).toContain('过期时间')
     expect(copy.body).toContain('今天 15:00')
     expect(copy.confirmLabel).toBe('报废')
   })

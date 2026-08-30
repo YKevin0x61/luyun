@@ -191,6 +191,19 @@ async def undo_batch(batch_id: int, db=Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"撤销登记失败: {exc}")
 
 
+@router.post("/batches/{batch_id}/discard", dependencies=_ADMIN_WRITE)
+async def discard_batch(batch_id: int, db=Depends(get_db)):
+    try:
+        return await prep_plan_service.discard_batch(db, batch_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("报废批次失败")
+        raise HTTPException(status_code=500, detail=f"报废批次失败: {exc}")
+
+
 @router.patch("/batches/{batch_id}", dependencies=_ADMIN_WRITE)
 async def update_batch(batch_id: int, payload: UpdateBatchRequest, db=Depends(get_db)):
     try:

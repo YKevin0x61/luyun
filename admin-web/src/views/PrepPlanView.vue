@@ -1,13 +1,18 @@
 <script setup>
 import { computed, onMounted } from 'vue'
+import ConfirmDialog from '../components/admin/ConfirmDialog.vue'
 import { usePrepPlan } from '../composables/usePrepPlan'
 import { useStationsStore } from '../stores/stations'
 import {
+  ALL_STATIONS_LABEL,
   CUSTOM_TIME_LABEL,
+  DISCARD_LABEL,
   EMPTY_HINT,
+  EXPIRES_AT_LABEL,
   EXTRA_RECORD_LABEL,
   FRESH_AVAILABLE_LABEL,
   NEAR_AVAILABLE_LABEL,
+  NEAR_EXPIRY_TITLE,
   NO_MASTER_REASON,
   PREP_PLAN_TITLE,
   PRESET_LABELS,
@@ -15,16 +20,19 @@ import {
   RECOMMENDED_LABEL,
   RECORD_LABEL,
   REFRESH_LABEL,
+  REMAINING_LABEL,
   SKIP_LABEL,
   TODO_COUNT_LABEL,
   UNCATEGORIZED_STATION,
   UNDO_LABEL,
+  discardConfirmCopy,
 } from '../utils/prepPlanCopy'
 import {
   PRESET_AFTERNOON,
   PRESET_CUSTOM,
   PRESET_FUTURE_24H,
   PRESET_MORNING,
+  formatPrepTime,
 } from '../utils/prepPlanWindow'
 
 const LOUMIAN_STATION = 'loumian'
@@ -40,6 +48,7 @@ const {
   customStart,
   customEnd,
   showCustom,
+  stationFilter,
   extraRecordOpen,
   registerQty,
   busy,
@@ -48,10 +57,13 @@ const {
   items,
   missingRules,
   lowConfidence,
+  expiring,
+  discardTarget,
   itemKey,
   refresh,
   recordItem,
   undoItem,
+  discardBatch,
 } = usePrepPlan()
 
 function selectPreset(id) {
@@ -68,21 +80,46 @@ function toggleCustom() {
   preset.value = PRESET_CUSTOM
 }
 
+function stationIdOf(row) {
+  return (row.station || '').trim() || UNCATEGORIZED_STATION
+}
+
 const stationsStore = useStationsStore()
 onMounted(() => stationsStore.load())
 
+const stationChips = computed(() => [
+  { id: '', label: ALL_STATIONS_LABEL },
+  ...stationsStore.list
+    .filter((station) => station.id && station.id !== LOUMIAN_STATION)
+    .map((station) => ({ id: station.id, label: station.name })),
+  { id: UNCATEGORIZED_STATION, label: UNCATEGORIZED_STATION },
+])
+
 const kitchenItems = computed(() =>
-  items.value.filter((item) => (item.station || '').trim() !== LOUMIAN_STATION)
+  items.value.filter((item) => stationIdOf(item) !== LOUMIAN_STATION)
 )
 
+const filteredKitchenItems = computed(() => {
+  const filter = stationFilter.value
+  if (!filter) return kitchenItems.value
+  return kitchenItems.value.filter((item) => stationIdOf(item) === filter)
+})
+
+const filteredExpiring = computed(() => {
+  const kitchenExpiring = expiring.value.filter((row) => stationIdOf(row) !== LOUMIAN_STATION)
+  const filter = stationFilter.value
+  if (!filter) return kitchenExpiring
+  return kitchenExpiring.filter((row) => stationIdOf(row) === filter)
+})
+
 const todoCount = computed(
-  () => kitchenItems.value.filter((item) => Number(item.recommended_qty || 0) > 0).length
+  () => filteredKitchenItems.value.filter((item) => Number(item.recommended_qty || 0) > 0).length
 )
 
 const board = computed(() => {
   const grouped = new Map()
-  for (const item of kitchenItems.value) {
-    const stationId = (item.station || '').trim() || UNCATEGORIZED_STATION
+  for (const item of filteredKitchenItems.value) {
+    const stationId = stationIdOf(item)
     if (!grouped.has(stationId)) grouped.set(stationId, [])
     grouped.get(stationId).push(item)
   }
@@ -106,6 +143,15 @@ const board = computed(() => {
   }))
 })
 
+const discardCopy = computed(() => {
+  const target = discardTarget.value
+  if (!target) return { title: '', body: '', confirmLabel: DISCARD_LABEL }
+  return discardConfirmCopy({
+    ...target,
+    expires_at: formatPrepTime(target.expires_at),
+  })
+})
+
 function qtyText(value) {
   return Number.isFinite(Number(value)) ? String(Math.round(Number(value))) : '0'
 }
@@ -122,6 +168,14 @@ function showExtraRecord(item) {
 
 function openExtraRecord(item) {
   extraRecordOpen[itemKey(item)] = true
+}
+
+function openDiscard(batch) {
+  discardTarget.value = batch
+}
+
+function cancelDiscard() {
+  discardTarget.value = null
 }
 </script>
 
@@ -181,13 +235,49 @@ function openExtraRecord(item) {
         </button>
         <span class="prep-status" :class="{ 'is-error': errorText }">{{ errorText || statusText }}</span>
       </div>
+      <div class="prep-toolbar-row prep-station-chips" role="group" aria-label="档口">
+        <button
+          v-for="chip in stationChips"
+          :key="chip.id || 'all'"
+          type="button"
+          class="btn prep-preset"
+          :class="{ 'is-active': stationFilter === chip.id }"
+          :aria-pressed="stationFilter === chip.id"
+          @click="stationFilter = chip.id"
+        >
+          {{ chip.label }}
+        </button>
+      </div>
     </div>
 
-    <div v-if="!board.length" class="card prep-empty">
+    <section v-if="filteredExpiring.length" class="card prep-expiring" aria-label="临期批次">
+      <h2 class="prep-station-title">{{ NEAR_EXPIRY_TITLE }}</h2>
+      <ul class="prep-expiring-list">
+        <li v-for="batch in filteredExpiring" :key="batch.batch_id" class="prep-expiring-row">
+          <div class="prep-expiring-main">
+            <div class="prep-item-name">{{ batch.item_name }}</div>
+            <div class="prep-avail">
+              <span>{{ REMAINING_LABEL }} {{ qtyText(batch.remaining_qty) }} {{ batch.unit }}</span>
+              <span>{{ EXPIRES_AT_LABEL }} {{ formatPrepTime(batch.expires_at) }}</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            class="btn prep-discard"
+            :disabled="busy"
+            @click="openDiscard(batch)"
+          >
+            {{ DISCARD_LABEL }}
+          </button>
+        </li>
+      </ul>
+    </section>
+
+    <div v-if="!kitchenItems.length && !filteredExpiring.length" class="card prep-empty">
       <p class="empty-state">{{ errorText ? errorText : EMPTY_HINT }}</p>
     </div>
 
-    <div v-else class="prep-board">
+    <div v-else-if="kitchenItems.length" class="prep-board">
       <p class="prep-todo">{{ TODO_COUNT_LABEL }} {{ todoCount }} 项</p>
       <section v-for="group in board" :key="group.stationId" class="card prep-station">
         <h2 class="prep-station-title">{{ group.label }}</h2>
@@ -270,6 +360,17 @@ function openExtraRecord(item) {
         </li>
       </ul>
     </details>
+
+    <ConfirmDialog
+      v-if="discardTarget"
+      class="prep-discard-confirm"
+      :title="discardCopy.title"
+      :message="discardCopy.body"
+      :confirm-label="discardCopy.confirmLabel"
+      danger
+      @confirm="discardBatch(discardTarget)"
+      @cancel="cancelDiscard"
+    />
   </div>
 </template>
 
@@ -290,11 +391,15 @@ function openExtraRecord(item) {
   align-items: center;
   gap: 8px;
 }
+.prep-station-chips {
+  margin-top: 8px;
+}
 .prep-preset,
 .prep-refresh,
 .prep-record,
 .prep-extra,
-.prep-undo {
+.prep-undo,
+.prep-discard {
   min-height: 44px;
   padding: 10px 18px;
   font-size: 15px;
@@ -344,21 +449,26 @@ function openExtraRecord(item) {
   font-size: 14px;
   color: var(--text-dim);
 }
-.prep-board {
+.prep-board,
+.prep-expiring-list,
+.prep-rows {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+.prep-expiring-list,
+.prep-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  gap: 0;
 }
 .prep-station-title {
   font-size: 16px;
   font-weight: 700;
   margin: 0 0 8px;
 }
-.prep-rows {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
+.prep-expiring-row,
 .prep-row {
   display: flex;
   flex-direction: column;
@@ -366,8 +476,14 @@ function openExtraRecord(item) {
   padding: 14px 4px;
   border-top: 1px solid var(--border);
 }
+.prep-expiring-row:first-child,
 .prep-row:first-child {
   border-top: 0;
+}
+.prep-expiring-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 .prep-item-name {
   font-size: 16px;
@@ -436,5 +552,21 @@ function openExtraRecord(item) {
 .prep-aux-list {
   margin: 8px 0 0;
   padding-left: 18px;
+}
+@media (max-width: 720px) {
+  .prep-board,
+  .prep-expiring-list,
+  .prep-rows,
+  .prep-expiring-row,
+  .prep-row {
+    display: flex;
+    flex-direction: column;
+    grid-template-columns: none;
+  }
+}
+:deep(.prep-discard-confirm .btn) {
+  min-height: 44px;
+  padding: 10px 18px;
+  font-size: 15px;
 }
 </style>

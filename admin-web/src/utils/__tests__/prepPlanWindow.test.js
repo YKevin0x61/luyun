@@ -4,6 +4,7 @@ import {
   PRESET_CUSTOM,
   PRESET_FUTURE_24H,
   PRESET_MORNING,
+  itemKey,
   resolvePrepWindow,
   rowTone,
 } from '../prepPlanWindow.js'
@@ -80,6 +81,17 @@ describe('resolvePrepWindow', () => {
     expect(end.getDate()).toBe(31)
     expect(end.getHours()).toBe(14)
     expect(end.getMinutes()).toBe(0)
+  })
+})
+
+describe('itemKey', () => {
+  it('空档口和未分类用同一把钥匙，报废才能改到对应行', () => {
+    const emptyStation = itemKey({ station: '', item_name: '虾饺馅', unit: '份' })
+    const missingStation = itemKey({ item_name: '虾饺馅', unit: '份' })
+    const uncategorized = itemKey({ station: '未分类', item_name: '虾饺馅', unit: '份' })
+    expect(emptyStation).toBe('未分类|虾饺馅|份')
+    expect(missingStation).toBe(emptyStation)
+    expect(uncategorized).toBe(emptyStation)
   })
 })
 
