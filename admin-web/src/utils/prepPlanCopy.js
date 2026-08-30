@@ -19,6 +19,7 @@ export const ALL_STATIONS_LABEL = '全部后厨'
 export const UNCATEGORIZED_STATION = '未分类'
 export const TODO_COUNT_LABEL = '还要做'
 export const RECOMMENDED_LABEL = '建议制作量'
+export const PRODUCED_LABEL = '已做'
 export const FRESH_AVAILABLE_LABEL = '非临期可用'
 export const NEAR_AVAILABLE_LABEL = '临期可用'
 

@@ -42,7 +42,7 @@ def _at(date_str, hour, minute=0):
     return datetime(year, month, day, hour, minute, tzinfo=CHINA_TZ)
 
 
-class PrepPlanForecastCoverageTests(unittest.IsolatedAsyncioTestCase):
+class PrepPlanServiceFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._old = settings.DATABASE_DIR
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -156,6 +156,8 @@ class PrepPlanForecastCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(matches), 1)
         return matches[0]
 
+
+class PrepPlanForecastCoverageTests(PrepPlanServiceFixture):
     async def test_near_expiry_batch_covering_morning_does_not_cover_dinner(self):
         prep_item_id = await self._seed_item_and_rule()
         await self._seed_identical_history()

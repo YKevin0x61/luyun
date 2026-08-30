@@ -162,82 +162,17 @@ async def get_current_plan(db=Depends(get_db)):
 @router.post("/batches", dependencies=_ADMIN_WRITE)
 async def create_batch(payload: CreateBatchRequest, db=Depends(get_db)):
     try:
-        prep_items_tdb = db.table("prep_items")
-        batches_tdb = db.table("prep_batches")
-        movements_tdb = db.table("prep_stock_movements")
-
-        async with prep_items_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                SELECT id, item_name, unit, shelf_life_hours
-                FROM prep_items
-                WHERE item_name = ? AND unit = ? AND active = 1
-                LIMIT 1
-                """,
-                (payload.item_name, payload.unit),
-            )
-            prep_item = await cursor.fetchone()
-        if not prep_item:
-            raise HTTPException(status_code=400, detail=f"备货品不存在或未启用: {payload.item_name} ({payload.unit})")
-
-        produced_dt = datetime.now(CHINA_TZ) if not payload.produced_at else datetime.fromisoformat(
-            payload.produced_at.replace("Z", "+00:00")
-        ).astimezone(CHINA_TZ)
-        now_iso = datetime.now(CHINA_TZ).isoformat()
-        shelf_life_hours = float(prep_item["shelf_life_hours"] or 24)
-        expires_dt = produced_dt + timedelta(hours=shelf_life_hours)
-
-        async with batches_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO prep_batches (
-                    prep_item_id, item_name, produced_qty, remaining_qty, unit,
-                    produced_at, expires_at, status, operator, notes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
-                """,
-                (
-                    prep_item["id"],
-                    payload.item_name,
-                    float(payload.produced_qty),
-                    float(payload.produced_qty),
-                    payload.unit,
-                    produced_dt.isoformat(),
-                    expires_dt.isoformat(),
-                    payload.operator or "",
-                    payload.notes or "",
-                    now_iso,
-                    now_iso,
-                ),
-            )
-            batch_id = cursor.lastrowid
-        await batches_tdb.commit()
-
-        async with movements_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO prep_stock_movements (
-                    batch_id, prep_item_id, item_name, unit, movement_type, qty_delta,
-                    reason, operator, source_type, source_id, created_at
-                ) VALUES (?, ?, ?, ?, 'produce', ?, 'batch_create', ?, 'batch', ?, ?)
-                """,
-                (
-                    batch_id,
-                    prep_item["id"],
-                    payload.item_name,
-                    payload.unit,
-                    float(payload.produced_qty),
-                    payload.operator or "",
-                    str(batch_id),
-                    now_iso,
-                ),
-            )
-        await movements_tdb.commit()
-
-        return {
-            "success": True,
-            "batch_id": batch_id,
-            "expires_at": expires_dt.isoformat(),
-        }
+        return await prep_plan_service.record_batch(
+            db=db,
+            item_name=payload.item_name,
+            produced_qty=payload.produced_qty,
+            unit=payload.unit,
+            produced_at=payload.produced_at,
+            operator=payload.operator,
+            notes=payload.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except HTTPException:
         raise
     except Exception as exc:

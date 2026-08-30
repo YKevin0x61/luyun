@@ -5,11 +5,15 @@ import { useStationsStore } from '../stores/stations'
 import {
   CUSTOM_TIME_LABEL,
   EMPTY_HINT,
+  EXTRA_RECORD_LABEL,
   FRESH_AVAILABLE_LABEL,
   NEAR_AVAILABLE_LABEL,
+  NO_MASTER_REASON,
   PREP_PLAN_TITLE,
   PRESET_LABELS,
+  PRODUCED_LABEL,
   RECOMMENDED_LABEL,
+  RECORD_LABEL,
   REFRESH_LABEL,
   SKIP_LABEL,
   TODO_COUNT_LABEL,
@@ -35,13 +39,17 @@ const {
   customStart,
   customEnd,
   showCustom,
+  extraRecordOpen,
+  registerQty,
   busy,
   statusText,
   errorText,
   items,
   missingRules,
   lowConfidence,
+  itemKey,
   refresh,
+  recordItem,
 } = usePrepPlan()
 
 function selectPreset(id) {
@@ -98,6 +106,20 @@ const board = computed(() => {
 
 function qtyText(value) {
   return Number.isFinite(Number(value)) ? String(Math.round(Number(value))) : '0'
+}
+
+function registerFormOpen(item) {
+  if (!item.can_record) return false
+  if (Number(item.recommended_qty || 0) > 0) return true
+  return Boolean(extraRecordOpen[itemKey(item)])
+}
+
+function showExtraRecord(item) {
+  return Boolean(item.can_record) && Number(item.recommended_qty || 0) <= 0 && !extraRecordOpen[itemKey(item)]
+}
+
+function openExtraRecord(item) {
+  extraRecordOpen[itemKey(item)] = true
 }
 </script>
 
@@ -181,7 +203,39 @@ function qtyText(value) {
             <div class="prep-avail">
               <span>{{ FRESH_AVAILABLE_LABEL }} {{ qtyText(item.available_fresh_qty) }} {{ item.unit }}</span>
               <span>{{ NEAR_AVAILABLE_LABEL }} {{ qtyText(item.available_near_expiry_qty) }} {{ item.unit }}</span>
+              <span>{{ PRODUCED_LABEL }} {{ qtyText(item.produced_qty) }} {{ item.unit }}</span>
             </div>
+            <p v-if="!item.can_record" class="prep-no-master">{{ NO_MASTER_REASON }}</p>
+            <button
+              v-else-if="showExtraRecord(item)"
+              type="button"
+              class="btn prep-extra"
+              :disabled="busy"
+              @click="openExtraRecord(item)"
+            >
+              {{ EXTRA_RECORD_LABEL }}
+            </button>
+            <form
+              v-else-if="registerFormOpen(item)"
+              class="prep-register"
+              @submit.prevent="recordItem(item)"
+            >
+              <label class="prep-qty-field">
+                这次做了
+                <input
+                  v-model.number="registerQty[itemKey(item)]"
+                  class="input prep-qty-input"
+                  type="number"
+                  step="any"
+                  inputmode="decimal"
+                  :disabled="busy"
+                >
+                {{ item.unit }}
+              </label>
+              <button type="submit" class="btn btn-primary prep-record" :disabled="busy">
+                {{ RECORD_LABEL }}
+              </button>
+            </form>
           </li>
         </ul>
       </section>
@@ -224,7 +278,9 @@ function qtyText(value) {
   gap: 8px;
 }
 .prep-preset,
-.prep-refresh {
+.prep-refresh,
+.prep-record,
+.prep-extra {
   min-height: 44px;
   padding: 10px 18px;
   font-size: 15px;
@@ -328,6 +384,30 @@ function qtyText(value) {
   gap: 16px;
   font-size: 14px;
   color: var(--text);
+}
+.prep-no-master {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.prep-register {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+.prep-qty-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text-dim);
+}
+.prep-qty-input {
+  width: 96px;
+  min-height: 44px;
+  font-size: 16px;
 }
 .prep-aux {
   font-size: 13px;

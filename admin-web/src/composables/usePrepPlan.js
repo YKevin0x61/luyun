@@ -151,6 +151,8 @@ export function usePrepPlan() {
       return next
     })
     extraRecordOpen[key] = false
+    const nextRecommended = Math.max(0, Number(item.recommended_qty || 0) - Math.ceil(qty))
+    registerQty[key] = nextRecommended > 0 ? nextRecommended : ''
     statusText.value = `已登记 ${item.item_name} ${qty}${item.unit || ''}`
   }
 

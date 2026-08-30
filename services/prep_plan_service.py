@@ -806,6 +806,98 @@ class PrepPlanService:
             "summary": summary,
         }
 
+    async def record_batch(
+        self,
+        db,
+        item_name: str,
+        produced_qty: float,
+        unit: str = "",
+        produced_at: Optional[str] = None,
+        operator: str = "",
+        notes: str = "",
+    ) -> Dict[str, Any]:
+        qty = float(produced_qty)
+        if qty <= 0:
+            raise ValueError("登记数量必须大于 0")
+
+        prep_items_tdb = db.table("prep_items")
+        batches_tdb = db.table("prep_batches")
+        movements_tdb = db.table("prep_stock_movements")
+
+        async with prep_items_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT id, item_name, unit, shelf_life_hours
+                FROM prep_items
+                WHERE item_name = ? AND unit = ? AND active = 1
+                LIMIT 1
+                """,
+                (item_name, unit),
+            )
+            prep_item = await cursor.fetchone()
+        if not prep_item:
+            raise ValueError(f"备货品不存在或未启用: {item_name} ({unit})")
+
+        produced_dt = ensure_beijing_datetime(produced_at) if produced_at else datetime.now(CHINA_TZ)
+        now_iso = datetime.now(CHINA_TZ).isoformat()
+        shelf_life_hours = float(prep_item["shelf_life_hours"] or DEFAULT_SHELF_LIFE_HOURS)
+        expires_dt = produced_dt + timedelta(hours=shelf_life_hours)
+
+        async with batches_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO prep_batches (
+                    prep_item_id, item_name, produced_qty, remaining_qty, unit,
+                    produced_at, expires_at, status, operator, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                """,
+                (
+                    prep_item["id"],
+                    item_name,
+                    qty,
+                    qty,
+                    unit,
+                    produced_dt.isoformat(),
+                    expires_dt.isoformat(),
+                    operator or "",
+                    notes or "",
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            batch_id = cursor.lastrowid
+        await batches_tdb.commit()
+
+        async with movements_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO prep_stock_movements (
+                    batch_id, prep_item_id, item_name, unit, movement_type, qty_delta,
+                    reason, operator, source_type, source_id, created_at
+                ) VALUES (?, ?, ?, ?, 'produce', ?, 'batch_create', ?, 'batch', ?, ?)
+                """,
+                (
+                    batch_id,
+                    prep_item["id"],
+                    item_name,
+                    unit,
+                    qty,
+                    operator or "",
+                    str(batch_id),
+                    now_iso,
+                ),
+            )
+        await movements_tdb.commit()
+
+        return {
+            "success": True,
+            "batch_id": batch_id,
+            "produced_qty": qty,
+            "remaining_qty": qty,
+            "produced_at": produced_dt.isoformat(),
+            "expires_at": expires_dt.isoformat(),
+        }
+
     async def retire_batch(
         self,
         db,

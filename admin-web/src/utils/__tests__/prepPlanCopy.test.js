@@ -2,11 +2,15 @@ import { describe, expect, it } from 'vitest'
 import {
   CONFIDENCE_LABELS,
   CUSTOM_TIME_LABEL,
+  EXTRA_RECORD_LABEL,
   FRESH_AVAILABLE_LABEL,
   NEAR_AVAILABLE_LABEL,
+  NO_MASTER_REASON,
   PREP_PLAN_TITLE,
   PRESET_LABELS,
+  PRODUCED_LABEL,
   RECOMMENDED_LABEL,
+  RECORD_LABEL,
   REFRESH_LABEL,
   REFRESHING_LABEL,
   RISK_LABELS,
@@ -23,6 +27,10 @@ describe('prep plan chrome copy', () => {
       SKIP_LABEL,
       CUSTOM_TIME_LABEL,
       RECOMMENDED_LABEL,
+      PRODUCED_LABEL,
+      RECORD_LABEL,
+      EXTRA_RECORD_LABEL,
+      NO_MASTER_REASON,
       FRESH_AVAILABLE_LABEL,
       NEAR_AVAILABLE_LABEL,
       ...Object.values(PRESET_LABELS),
@@ -37,6 +45,10 @@ describe('prep plan chrome copy', () => {
     expect(PRESET_LABELS.morning).toBe('早班')
     expect(PRESET_LABELS.afternoon).toBe('午后补货')
     expect(SKIP_LABEL).toBe('不用做')
+    expect(PRODUCED_LABEL).toBe('已做')
+    expect(RECORD_LABEL).toBe('登记')
+    expect(EXTRA_RECORD_LABEL).toBe('多做一笔')
+    expect(NO_MASTER_REASON).toBe('没有备货品主数据，不能登记')
     expect(CONFIDENCE_LABELS.low).toBe('样本少')
     expect(RISK_LABELS.high).toBe('缺货高')
   })
