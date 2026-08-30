@@ -1,141 +1,247 @@
 import { reactive, ref } from 'vue'
 import { api } from '../api/client'
+import {
+  NO_MASTER_REASON,
+  REFRESHING_LABEL,
+  UNCATEGORIZED_STATION,
+} from '../utils/prepPlanCopy'
+import {
+  PRESET_CUSTOM,
+  PRESET_FUTURE_24H,
+  formatPrepTime,
+  itemKey,
+  resolvePrepWindow,
+  toDatetimeLocalValue,
+} from '../utils/prepPlanWindow'
 
-const DONE_STORAGE_KEY = 'prepDone'
+const NEAR_MS = 4 * 3600 * 1000
 
-function loadDoneKeys() {
-  try {
-    return new Set(JSON.parse(sessionStorage.getItem(DONE_STORAGE_KEY) || '[]'))
-  } catch (e) {
-    return new Set()
-  }
+function cloneItems(items) {
+  return (items || []).map((item) => ({
+    ...item,
+    slots: [...(item.slots || [])],
+    batches: (item.batches || []).map((batch) => ({ ...batch })),
+  }))
 }
 
-function toIsoInputValue(date) {
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+function isNearExpiry(expiresAt, now = Date.now()) {
+  const ts = new Date(expiresAt).getTime()
+  if (!Number.isFinite(ts)) return false
+  return ts > now && ts <= now + NEAR_MS
 }
 
-/** 阶段三：备货计划页面状态管理，1:1 迁移自原 public/prep-plan.html。 */
+function patchItem(items, key, updater) {
+  return items.map((item) => (itemKey(item) === key ? updater({ ...item, batches: [...(item.batches || [])] }) : item))
+}
+
 export function usePrepPlan() {
-  const now = new Date()
-  const targetStart = ref(toIsoInputValue(now))
-  const targetEnd = ref(toIsoInputValue(new Date(now.getTime() + 24 * 3600 * 1000)))
-  const station = ref('')
-
+  const preset = ref(PRESET_FUTURE_24H)
+  const customStart = ref(toDatetimeLocalValue(new Date()))
+  const customEnd = ref(toDatetimeLocalValue(new Date(Date.now() + 24 * 3600 * 1000)))
+  const showCustom = ref(false)
+  const stationFilter = ref('')
+  const extraRecordOpen = reactive({})
+  const registerQty = reactive({})
   const busy = ref(false)
   const statusText = ref('')
-  const steps = reactive({
-    step1: '设置时间窗（默认未来 24 小时）',
-    step2: '点击"一键生成执行清单"',
-    step3: '按下方档口卡片逐项执行',
-  })
-
-  const summary = reactive({
-    item_count: 0, missing_rule_count: 0, high_risk_count: 0,
-    expiry_risk_count: 0, waste_risk_count: 0,
-  })
+  const errorText = ref('')
   const items = ref([])
-  const lowConfidence = ref([])
   const missingRules = ref([])
-  const doneKeys = ref(loadDoneKeys())
+  const lowConfidence = ref([])
+  const expiring = ref([])
+  const summary = reactive({
+    item_count: 0,
+    todo_count: 0,
+    missing_rule_count: 0,
+    high_risk_count: 0,
+    expiry_risk_count: 0,
+    waste_risk_count: 0,
+  })
+  const windowStart = ref('')
+  const windowEnd = ref('')
+  const exportOpen = ref(false)
+  const discardTarget = ref(null)
 
-  function toggleDone(key, checked) {
-    const next = new Set(doneKeys.value)
-    if (checked) next.add(key)
-    else next.delete(key)
-    doneKeys.value = next
-    sessionStorage.setItem(DONE_STORAGE_KEY, JSON.stringify([...next]))
-  }
-
-  function windowParams() {
-    const p = {}
-    if (targetStart.value) p.target_start = new Date(targetStart.value).toISOString()
-    if (targetEnd.value) p.target_end = new Date(targetEnd.value).toISOString()
-    if (station.value) p.station = station.value
-    return p
-  }
-
-  function applyResult(result) {
-    Object.assign(summary, result.summary || {})
-    items.value = result.items || []
-    lowConfidence.value = result.low_confidence || []
-    missingRules.value = result.missing_rules || []
-  }
-
-  async function runForecast() {
-    statusText.value = '正在计算预测...'
-    steps.step1 = '已完成：时间窗设置'; steps.step2 = '进行中：预测计算'; steps.step3 = '等待生成计划'
-    const data = await api.get('/api/prep-plan/forecast', windowParams())
-    applyResult(data)
-    statusText.value = `预测完成：${new Date().toLocaleTimeString()}`
-    return data
-  }
-
-  async function runGenerate() {
-    statusText.value = '正在生成计划...'
-    steps.step2 = '已完成：预测计算'; steps.step3 = '进行中：保存计划'
-    const data = await api.post('/api/prep-plan/generate', {
-      target_start: windowParams().target_start,
-      target_end: windowParams().target_end,
-      station: station.value || null,
-      method: 'weighted_history',
-      created_by: 'web_user',
-    })
-    statusText.value = `生成成功，run_id=${data.run_id}`
-    return data
-  }
-
-  async function runCurrent() {
-    statusText.value = '读取最近一次计划...'
-    const data = await api.get('/api/prep-plan/current')
-    if (data.run) {
-      Object.assign(summary, {
-        item_count: data.run.item_count,
-        missing_rule_count: data.run.missing_rule_count,
-        high_risk_count: data.run.high_risk_count,
-        expiry_risk_count: data.run.expiry_risk_count,
-        waste_risk_count: data.run.waste_risk_count,
-      })
-      statusText.value = `读取完成 run #${data.run.id || data.run.run_id || '—'} · ${data.run.created_at || ''} · ${new Date().toLocaleTimeString()}`
-    } else {
-      Object.assign(summary, { item_count: 0, missing_rule_count: 0, high_risk_count: 0, expiry_risk_count: 0, waste_risk_count: 0 })
-      statusText.value = `读取完成：${new Date().toLocaleTimeString()}`
+  function windowRange() {
+    if (preset.value === PRESET_CUSTOM) {
+      return resolvePrepWindow(PRESET_CUSTOM, new Date(), customStart.value, customEnd.value)
     }
-    items.value = data.items || []
-    lowConfidence.value = []
+    return resolvePrepWindow(preset.value, new Date())
+  }
+
+  function resetRegisterDefaults(nextItems) {
+    for (const item of nextItems) {
+      const key = itemKey(item)
+      const recommended = Number(item.recommended_qty || 0)
+      if (registerQty[key] === undefined || registerQty[key] === '') {
+        registerQty[key] = recommended > 0 ? recommended : ''
+      }
+    }
+  }
+
+  function applyForecast(data) {
+    const nextItems = cloneItems(data.items || [])
+    items.value = nextItems
     missingRules.value = data.missing_rules || []
-    steps.step1 = '已完成：读取历史计划'; steps.step2 = '按档口展开卡片'; steps.step3 = '按建议量从上到下执行'
-    return data
+    lowConfidence.value = data.low_confidence || []
+    expiring.value = data.expiring || []
+    Object.assign(summary, {
+      item_count: 0,
+      todo_count: 0,
+      missing_rule_count: 0,
+      high_risk_count: 0,
+      expiry_risk_count: 0,
+      waste_risk_count: 0,
+      ...(data.summary || {}),
+    })
+    windowStart.value = data.target_window?.start || windowRange().start.toISOString()
+    windowEnd.value = data.target_window?.end || windowRange().end.toISOString()
+    resetRegisterDefaults(nextItems)
+  }
+
+  async function refresh() {
+    errorText.value = ''
+    statusText.value = REFRESHING_LABEL
+    const { start, end } = windowRange()
+    const data = await api.get('/api/prep-plan/forecast', {
+      target_start: start.toISOString(),
+      target_end: end.toISOString(),
+    })
+    applyForecast(data)
+    statusText.value = `已更新 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`
+  }
+
+  async function recordItem(item) {
+    const key = itemKey(item)
+    const qty = Number(registerQty[key])
+    if (!Number.isFinite(qty) || qty <= 0) {
+      throw new Error('登记数量必须大于 0')
+    }
+    if (!item.can_record) {
+      throw new Error(NO_MASTER_REASON)
+    }
+    const data = await api.post('/api/prep-plan/batches', {
+      item_name: item.item_name,
+      unit: item.unit || '',
+      produced_qty: qty,
+      operator: '后厨',
+    })
+    const near = isNearExpiry(data.expires_at)
+    items.value = patchItem(items.value, key, (current) => {
+      const next = {
+        ...current,
+        produced_qty: Number(current.produced_qty || 0) + qty,
+        undo_batch_id: data.batch_id,
+        available_fresh_qty: Number(current.available_fresh_qty || 0) + (near ? 0 : qty),
+        available_near_expiry_qty: Number(current.available_near_expiry_qty || 0) + (near ? qty : 0),
+        recommended_qty: Math.max(0, Number(current.recommended_qty || 0) - Math.ceil(qty)),
+      }
+      next.available_qty = Number(next.available_fresh_qty) + Number(next.available_near_expiry_qty)
+      next.batches = [
+        {
+          batch_id: data.batch_id,
+          produced_qty: qty,
+          remaining_qty: Number(data.remaining_qty || qty),
+          produced_at: new Date().toISOString(),
+          expires_at: data.expires_at,
+          near_expiry: near,
+        },
+        ...(current.batches || []),
+      ]
+      return next
+    })
+    extraRecordOpen[key] = false
+    statusText.value = `已登记 ${item.item_name} ${qty}${item.unit || ''}`
+  }
+
+  async function undoItem(item) {
+    const batchId = item.undo_batch_id
+    if (!batchId) return
+    await api.post(`/api/prep-plan/batches/${batchId}/undo`)
+    const key = itemKey(item)
+    items.value = patchItem(items.value, key, (current) => {
+      const batch = (current.batches || []).find((row) => row.batch_id === batchId)
+      const qty = Number(batch?.remaining_qty || batch?.produced_qty || 0)
+      const near = Boolean(batch?.near_expiry)
+      const next = {
+        ...current,
+        produced_qty: Math.max(0, Number(current.produced_qty || 0) - qty),
+        undo_batch_id: null,
+        available_fresh_qty: Math.max(0, Number(current.available_fresh_qty || 0) - (near ? 0 : qty)),
+        available_near_expiry_qty: Math.max(0, Number(current.available_near_expiry_qty || 0) - (near ? qty : 0)),
+        recommended_qty: Number(current.recommended_qty || 0) + Math.ceil(qty),
+        batches: (current.batches || []).filter((row) => row.batch_id !== batchId),
+      }
+      next.available_qty = Number(next.available_fresh_qty) + Number(next.available_near_expiry_qty)
+      return next
+    })
+    expiring.value = expiring.value.filter((row) => row.batch_id !== batchId)
+    statusText.value = `已撤销 ${item.item_name} 刚才那笔`
+  }
+
+  async function discardBatch(target) {
+    if (!target?.batch_id) return
+    await api.post(`/api/prep-plan/batches/${target.batch_id}/discard`)
+    const qty = Number(target.remaining_qty || 0)
+    const near = target.near_expiry !== false
+    const key = itemKey(target)
+    items.value = patchItem(items.value, key, (current) => {
+      const next = {
+        ...current,
+        available_fresh_qty: Math.max(0, Number(current.available_fresh_qty || 0) - (near ? 0 : qty)),
+        available_near_expiry_qty: Math.max(0, Number(current.available_near_expiry_qty || 0) - (near ? qty : 0)),
+        recommended_qty: Number(current.recommended_qty || 0) + Math.ceil(qty),
+        batches: (current.batches || []).filter((row) => row.batch_id !== target.batch_id),
+        undo_batch_id: current.undo_batch_id === target.batch_id ? null : current.undo_batch_id,
+      }
+      next.available_qty = Number(next.available_fresh_qty) + Number(next.available_near_expiry_qty)
+      return next
+    })
+    expiring.value = expiring.value.filter((row) => row.batch_id !== target.batch_id)
+    discardTarget.value = null
+    statusText.value = `已报废 ${target.item_name}`
   }
 
   async function safelyRun(taskFn) {
     busy.value = true
+    errorText.value = ''
     try {
       await taskFn()
-    } catch (e) {
-      statusText.value = `失败：${e.message}`
-      steps.step1 = '设置时间窗（默认未来 24 小时）'
-      steps.step2 = '点击"一键生成执行清单"'
-      steps.step3 = '失败后重试，或读取最近一次'
+    } catch (err) {
+      errorText.value = err.message || '操作失败'
+      statusText.value = `失败：${err.message || '请重试'}`
     } finally {
       busy.value = false
     }
   }
 
-  async function runAll() {
-    statusText.value = '开始一键流程...'
-    await runForecast()
-    await runGenerate()
-    await runCurrent()
-    statusText.value = `一键流程完成：${new Date().toLocaleTimeString()}`
-    steps.step1 = '已完成：时间窗设置'; steps.step2 = '已完成：预测+生成'; steps.step3 = '执行中：按档口卡片操作'
-  }
-
   return {
-    targetStart, targetEnd, station, busy, statusText, steps, summary, items,
-    lowConfidence, missingRules, doneKeys, toggleDone,
-    runAll: () => safelyRun(runAll),
-    runCurrent: () => safelyRun(runCurrent),
+    preset,
+    customStart,
+    customEnd,
+    showCustom,
+    stationFilter,
+    extraRecordOpen,
+    registerQty,
+    busy,
+    statusText,
+    errorText,
+    items,
+    missingRules,
+    lowConfidence,
+    expiring,
+    summary,
+    windowStart,
+    windowEnd,
+    exportOpen,
+    discardTarget,
+    windowRange,
+    UNCATEGORIZED_STATION,
+    formatPrepTime,
+    itemKey,
+    refresh: () => safelyRun(refresh),
+    recordItem: (item) => safelyRun(() => recordItem(item)),
+    undoItem: (item) => safelyRun(() => undoItem(item)),
+    discardBatch: (target) => safelyRun(() => discardBatch(target)),
   }
 }

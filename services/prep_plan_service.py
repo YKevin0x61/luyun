@@ -12,7 +12,7 @@
 import logging
 import math
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from database import CHINA_TZ, ensure_beijing_datetime
@@ -44,6 +44,76 @@ POSITION_STATION_MAP = {
     "明档1": "mingdang1",
     "煎炸": "jianzha",
 }
+
+NEAR_EXPIRY_HOURS = 4.0
+UNDO_MOVEMENT_REASON = "undo_record"
+
+
+def split_available_qty(batches: List[Dict[str, Any]], now_dt: datetime, near_hours: float = NEAR_EXPIRY_HOURS) -> Tuple[float, float]:
+    """Split live remaining into non-near-expiry vs near-expiry (still usable)."""
+    near_end = now_dt + timedelta(hours=near_hours)
+    fresh = 0.0
+    near = 0.0
+    for batch in batches:
+        qty = float(batch.get("remaining_qty") or 0)
+        if qty <= 0:
+            continue
+        expires_at = ensure_beijing_datetime(batch["expires_at"])
+        if expires_at <= now_dt:
+            continue
+        if expires_at <= near_end:
+            near += qty
+        else:
+            fresh += qty
+    return fresh, near
+
+
+def cover_slot_demand(
+    slots: List[Dict[str, Any]],
+    forecasts: List[float],
+    safety_ratio: float,
+    batches: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], float]:
+    """
+    FEFO coverage: a batch can only cover a slot if expires_at >= slot_end.
+    Demand per slot is forecast * (1 + safety_ratio).
+    """
+    remaining = [max(float(batch.get("remaining_qty") or 0), 0.0) for batch in batches]
+    order = sorted(
+        range(len(batches)),
+        key=lambda index: ensure_beijing_datetime(batches[index]["expires_at"]),
+    )
+    slot_results: List[Dict[str, Any]] = []
+    total_uncovered = 0.0
+    for slot, forecast in zip(slots, forecasts):
+        demand = max(float(forecast or 0), 0.0) * (1.0 + float(safety_ratio or 0))
+        covered = 0.0
+        slot_end = slot["slot_end"]
+        if demand > 0:
+            for index in order:
+                expires_at = ensure_beijing_datetime(batches[index]["expires_at"])
+                if expires_at < slot_end:
+                    continue
+                take = min(remaining[index], demand - covered)
+                if take <= 0:
+                    continue
+                remaining[index] -= take
+                covered += take
+                if covered >= demand:
+                    break
+        uncovered = max(demand - covered, 0.0)
+        total_uncovered += uncovered
+        slot_results.append(
+            {
+                "slot_name": slot.get("slot_name") or "",
+                "slot_start": slot["slot_start"].isoformat() if hasattr(slot["slot_start"], "isoformat") else slot["slot_start"],
+                "slot_end": slot["slot_end"].isoformat() if hasattr(slot["slot_end"], "isoformat") else slot["slot_end"],
+                "forecast_qty": float(forecast or 0),
+                "available_qty": covered,
+                "recommended_qty": uncovered,
+            }
+        )
+    return slot_results, total_uncovered
 
 
 class PrepPlanService:
@@ -204,30 +274,86 @@ class PrepPlanService:
                 "shelf_life_hours": float(row["shelf_life_hours"] or DEFAULT_SHELF_LIFE_HOURS),
                 "lead_time_hours": float(row["lead_time_hours"] or 0),
                 "min_batch_qty": float(row["min_batch_qty"] or DEFAULT_MIN_BATCH_QTY),
-                "safety_stock_ratio": float(row["safety_stock_ratio"] or DEFAULT_SAFETY_STOCK_RATIO),
+                "safety_stock_ratio": (
+                    float(row["safety_stock_ratio"])
+                    if row["safety_stock_ratio"] is not None
+                    else DEFAULT_SAFETY_STOCK_RATIO
+                ),
             }
         return prep_map
 
     @staticmethod
-    async def _load_active_batches(db, now_dt: datetime) -> Dict[Tuple[str, str], float]:
-        available_map: Dict[Tuple[str, str], float] = defaultdict(float)
+    async def _load_live_batches(db, now_dt: datetime) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
         tdb = db.table("prep_batches")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT item_name, unit, remaining_qty
+                SELECT id, prep_item_id, item_name, unit, produced_qty, remaining_qty,
+                       produced_at, expires_at, status, notes
                 FROM prep_batches
                 WHERE status IN ('active', 'near_expiry')
                   AND remaining_qty > 0
                   AND expires_at > ?
+                ORDER BY expires_at ASC, id ASC
                 """,
                 (now_dt.isoformat(),),
             )
             rows = await cursor.fetchall()
         for row in rows:
             key = (row["item_name"], row["unit"] or "")
-            available_map[key] += float(row["remaining_qty"] or 0)
-        return dict(available_map)
+            grouped[key].append(dict(row))
+        return dict(grouped)
+
+    @staticmethod
+    async def _load_undo_batch_ids(db) -> set:
+        tdb = db.table("prep_stock_movements")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT DISTINCT batch_id
+                FROM prep_stock_movements
+                WHERE reason = ?
+                """,
+                (UNDO_MOVEMENT_REASON,),
+            )
+            rows = await cursor.fetchall()
+        return {int(row["batch_id"]) for row in rows if row["batch_id"] is not None}
+
+    @staticmethod
+    async def _load_window_production(
+        db,
+        start_dt: datetime,
+        end_dt: datetime,
+        undo_ids: set,
+    ) -> Dict[Tuple[str, str], Dict[str, Any]]:
+        produced: Dict[Tuple[str, str], Dict[str, Any]] = defaultdict(
+            lambda: {"qty": 0.0, "undo_batch_id": None, "latest_at": ""}
+        )
+        tdb = db.table("prep_batches")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT id, item_name, unit, produced_qty, produced_at
+                FROM prep_batches
+                WHERE produced_at >= ?
+                  AND produced_at <= ?
+                ORDER BY produced_at DESC, id DESC
+                """,
+                (start_dt.isoformat(), end_dt.isoformat()),
+            )
+            rows = await cursor.fetchall()
+        for row in rows:
+            batch_id = int(row["id"])
+            if batch_id in undo_ids:
+                continue
+            key = (row["item_name"], row["unit"] or "")
+            entry = produced[key]
+            entry["qty"] += float(row["produced_qty"] or 0)
+            if entry["undo_batch_id"] is None:
+                entry["undo_batch_id"] = batch_id
+                entry["latest_at"] = row["produced_at"] or ""
+        return dict(produced)
 
     async def compute_forecast(
         self,
@@ -236,15 +362,16 @@ class PrepPlanService:
         target_end: Optional[str],
         station: Optional[str] = None,
         include_inventory: bool = False,
+        now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         """
         计算备货预测。
         include_inventory=False => MVP1 行为（库存全部按 0）
+        now: inventory clock; defaults to datetime.now(CHINA_TZ).
         """
         start_dt, end_dt = self._parse_window(target_start, target_end)
-        now_dt = datetime.now(CHINA_TZ)
+        now_dt = ensure_beijing_datetime(now) if now is not None else datetime.now(CHINA_TZ)
         slots = self._build_slots(start_dt, end_dt)
-        slot_names = [slot["slot_name"] for slot in slots]
 
         # 历史窗口：至少覆盖最近4个同星期 + 最近7天
         history_start = (start_dt - timedelta(days=35)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -252,7 +379,11 @@ class PrepPlanService:
 
         exact_rules, norm_rules = await self._load_rules(db)
         prep_item_map = await self._load_prep_item_map(db)
-        available_map = await self._load_active_batches(db, now_dt) if include_inventory else {}
+        live_batches = await self._load_live_batches(db, now_dt) if include_inventory else {}
+        undo_ids = await self._load_undo_batch_ids(db) if include_inventory else set()
+        window_production = (
+            await self._load_window_production(db, start_dt, end_dt, undo_ids) if include_inventory else {}
+        )
 
         orders_tdb = db.table("orders")
         query_params: List[Any] = [history_start.isoformat(), history_end.isoformat()]
@@ -333,19 +464,13 @@ class PrepPlanService:
             prep_key = (item_name, unit)
             item_meta = prep_item_map.get(prep_key, {})
 
-            slot_results: List[Dict[str, Any]] = []
-            total_forecast = 0.0
-            total_available = 0.0
-            total_recommended = 0.0
+            slot_forecasts: List[float] = []
             confidence_values: List[str] = []
 
             for slot in slots:
                 slot_start = slot["slot_start"]
                 slot_name = slot["slot_name"]
-                slot_date = slot_start.strftime("%Y-%m-%d")
-                weekday = slot_start.weekday()
 
-                # 最近4个同星期同窗口
                 same_week_values = []
                 same_week_days = 0
                 for k in range(1, 5):
@@ -355,7 +480,6 @@ class PrepPlanService:
                     if val > 0:
                         same_week_days += 1
 
-                # 最近7天同窗口
                 last7_values = []
                 last7_non_zero = 0
                 for k in range(1, 8):
@@ -382,43 +506,32 @@ class PrepPlanService:
                     + yesterday_val * weight_yesterday
                 )
                 forecast_qty = max(forecast_qty, 0.0)
-                confidence = score_confidence(last7_non_zero, same_week_days, forecast_qty)
-                confidence_values.append(confidence)
+                confidence_values.append(score_confidence(last7_non_zero, same_week_days, forecast_qty))
+                slot_forecasts.append(forecast_qty)
 
-                available_qty = 0.0
-                if include_inventory:
-                    # MVP2 简化：先用总可用库存展示，不做分桶抵扣细分
-                    available_qty = float(available_map.get(prep_key, 0.0))
-                safety_ratio = float(item_meta.get("safety_stock_ratio", DEFAULT_SAFETY_STOCK_RATIO))
-                safety_qty_slot = forecast_qty * safety_ratio
-                rec_slot = max(forecast_qty + safety_qty_slot - available_qty, 0.0)
-
-                slot_results.append(
-                    {
-                        "slot_start": slot["slot_start"].isoformat(),
-                        "slot_end": slot["slot_end"].isoformat(),
-                        "forecast_qty": int(math.ceil(forecast_qty)),
-                        "available_qty": round(available_qty, 2),
-                        "recommended_qty": int(math.ceil(rec_slot)),
-                    }
-                )
-
-                total_forecast += forecast_qty
-                total_available += available_qty
-                total_recommended += rec_slot
-
+            total_forecast = sum(slot_forecasts)
             safety_ratio = float(item_meta.get("safety_stock_ratio", DEFAULT_SAFETY_STOCK_RATIO))
             safety_qty = total_forecast * safety_ratio
             min_batch_qty = float(item_meta.get("min_batch_qty", DEFAULT_MIN_BATCH_QTY))
-            recommended_qty = max(total_forecast + safety_qty - total_available, 0.0)
+            item_batches = live_batches.get(prep_key, []) if include_inventory else []
+            available_fresh, available_near = split_available_qty(item_batches, now_dt)
+            total_available = available_fresh + available_near
+
+            if include_inventory:
+                slot_results, uncovered = cover_slot_demand(slots, slot_forecasts, safety_ratio, item_batches)
+            else:
+                slot_results, uncovered = cover_slot_demand(slots, slot_forecasts, safety_ratio, [])
+
+            recommended_qty = max(uncovered, 0.0)
+            min_batch_applied = False
             if recommended_qty > 0 and min_batch_qty > 0 and recommended_qty < min_batch_qty:
                 recommended_qty = min_batch_qty
+                min_batch_applied = True
 
-            # MVP1：风险一律 normal；MVP2：按库存计算粗粒度风险
             if not include_inventory:
                 risk_level = "normal"
             else:
-                gap = total_forecast + safety_qty - total_available
+                gap = recommended_qty
                 shortage_rate = gap / max(total_forecast, 1.0)
                 overload_rate = total_available / max(total_forecast, 1.0)
                 if shortage_rate >= 0.5:
@@ -432,7 +545,6 @@ class PrepPlanService:
                 else:
                     risk_level = "normal"
 
-            # 项目级 confidence：按最保守值聚合
             if "low" in confidence_values:
                 item_confidence = "low"
             elif "medium" in confidence_values:
@@ -441,6 +553,35 @@ class PrepPlanService:
                 item_confidence = "high"
             else:
                 item_confidence = "none"
+
+            production = window_production.get(prep_key, {})
+            can_record = bool(item_meta.get("prep_item_id"))
+            display_slots = []
+            for slot_row, raw_forecast in zip(slot_results, slot_forecasts):
+                display_slots.append(
+                    {
+                        "slot_name": slot_row["slot_name"],
+                        "slot_start": slot_row["slot_start"],
+                        "slot_end": slot_row["slot_end"],
+                        "forecast_qty": int(math.ceil(raw_forecast)),
+                        "available_qty": round(float(slot_row["available_qty"]), 2),
+                        "recommended_qty": int(math.ceil(float(slot_row["recommended_qty"]))),
+                    }
+                )
+
+            live_batch_payload = []
+            for batch in item_batches:
+                expires_at = ensure_beijing_datetime(batch["expires_at"])
+                live_batch_payload.append(
+                    {
+                        "batch_id": batch["id"],
+                        "produced_qty": round(float(batch.get("produced_qty") or 0), 2),
+                        "remaining_qty": round(float(batch.get("remaining_qty") or 0), 2),
+                        "produced_at": batch.get("produced_at") or "",
+                        "expires_at": batch.get("expires_at") or "",
+                        "near_expiry": expires_at <= now_dt + timedelta(hours=NEAR_EXPIRY_HOURS),
+                    }
+                )
 
             base_item = {
                 "prep_item_id": item_meta.get("prep_item_id"),
@@ -451,11 +592,19 @@ class PrepPlanService:
                 "forecast_qty": int(math.ceil(total_forecast)),
                 "safety_qty": round(safety_qty, 2),
                 "available_qty": round(total_available, 2),
+                "available_fresh_qty": round(available_fresh, 2),
+                "available_near_expiry_qty": round(available_near, 2),
                 "recommended_qty": int(math.ceil(recommended_qty)),
+                "produced_qty": round(float(production.get("qty") or 0), 2),
+                "undo_batch_id": production.get("undo_batch_id"),
+                "min_batch_qty": round(min_batch_qty, 2),
+                "min_batch_applied": min_batch_applied,
+                "can_record": can_record,
                 "risk_level": risk_level,
                 "confidence": item_confidence,
                 "reason": "",
-                "slots": slot_results,
+                "slots": display_slots,
+                "batches": live_batch_payload,
             }
 
             if item_confidence == "none":
@@ -470,12 +619,18 @@ class PrepPlanService:
                 )
                 continue
 
-            base_item["reason"] = (
+            reason = (
                 f"预测需求 {base_item['forecast_qty']} {unit}，"
                 f"安全库存 {base_item['safety_qty']} {unit}，"
-                f"可用库存 {base_item['available_qty']} {unit}，"
+                f"可用 {base_item['available_fresh_qty']} {unit}，"
+                f"临期 {base_item['available_near_expiry_qty']} {unit}，"
                 f"建议制作 {base_item['recommended_qty']} {unit}"
             )
+            if min_batch_applied:
+                reason += f"（已按最小批量 {int(math.ceil(min_batch_qty))} {unit} 上调）"
+            if not can_record:
+                reason += "。没有备货品主数据，不能登记"
+            base_item["reason"] = reason
             items.append(base_item)
 
         missing_rules = []
@@ -485,15 +640,39 @@ class PrepPlanService:
                     "dish_name": dish_name,
                     "station": dish_station,
                     "forecast_qty": round(qty, 2),
-                    "reason": "没有配置 semi_finished_rules，无法换算为备货品",
+                    "reason": "没有配置半成品换算规则，无法换算为备货品",
                 }
             )
 
+        expiring = []
+        if include_inventory:
+            near_end = now_dt + timedelta(hours=NEAR_EXPIRY_HOURS)
+            for key, batches in live_batches.items():
+                item_name, unit = key
+                meta = prep_item_map.get(key, {})
+                for batch in batches:
+                    expires_at = ensure_beijing_datetime(batch["expires_at"])
+                    if expires_at > near_end:
+                        continue
+                    expiring.append(
+                        {
+                            "batch_id": batch["id"],
+                            "item_name": item_name,
+                            "unit": unit,
+                            "station": meta.get("station") or "",
+                            "position": meta.get("position") or "",
+                            "remaining_qty": round(float(batch.get("remaining_qty") or 0), 2),
+                            "expires_at": batch.get("expires_at") or "",
+                        }
+                    )
+            expiring.sort(key=lambda row: row["expires_at"])
+
         summary = {
             "item_count": len(items),
+            "todo_count": sum(1 for item in items if item["recommended_qty"] > 0),
             "missing_rule_count": len(missing_rules),
             "high_risk_count": sum(1 for item in items if item["risk_level"] == "high"),
-            "expiry_risk_count": sum(1 for item in items if item["risk_level"] == "expiry_risk"),
+            "expiry_risk_count": sum(1 for item in items if item["available_near_expiry_qty"] > 0),
             "waste_risk_count": sum(1 for item in items if item["risk_level"] == "waste_risk"),
         }
 
@@ -508,6 +687,7 @@ class PrepPlanService:
             "items": sorted(items, key=lambda x: (x["station"], x["position"], -x["recommended_qty"], x["item_name"])),
             "missing_rules": missing_rules,
             "low_confidence": low_confidence_items,
+            "expiring": expiring,
         }
 
     async def create_plan_run(
@@ -624,6 +804,77 @@ class PrepPlanService:
             "run_id": run_id,
             "plan_date": plan_date,
             "summary": summary,
+        }
+
+    async def retire_batch(
+        self,
+        db,
+        batch_id: int,
+        reason: str,
+        operator: str = "",
+    ) -> Dict[str, Any]:
+        if reason not in {UNDO_MOVEMENT_REASON, "discard"}:
+            raise ValueError("不支持的批次处理原因")
+        batches_tdb = db.table("prep_batches")
+        movements_tdb = db.table("prep_stock_movements")
+        now_iso = datetime.now(CHINA_TZ).isoformat()
+
+        async with batches_tdb.conn.cursor() as cursor:
+            await cursor.execute("SELECT * FROM prep_batches WHERE id = ? LIMIT 1", (batch_id,))
+            batch = await cursor.fetchone()
+        if not batch:
+            raise KeyError("批次不存在")
+        batch_dict = dict(batch)
+        remaining = float(batch_dict["remaining_qty"] or 0)
+        if remaining <= 0 and batch_dict.get("status") == "discarded":
+            return {
+                "success": True,
+                "batch_id": batch_id,
+                "remaining_qty": 0.0,
+                "status": "discarded",
+            }
+
+        qty_delta = -remaining if remaining > 0 else 0.0
+        movement_type = "discard"
+        async with movements_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO prep_stock_movements (
+                    batch_id, prep_item_id, item_name, unit, movement_type, qty_delta,
+                    reason, operator, source_type, source_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'batch', ?, ?)
+                """,
+                (
+                    batch_id,
+                    batch_dict.get("prep_item_id"),
+                    batch_dict["item_name"],
+                    batch_dict["unit"] or "",
+                    movement_type,
+                    qty_delta,
+                    reason,
+                    operator or "",
+                    str(batch_id),
+                    now_iso,
+                ),
+            )
+        await movements_tdb.commit()
+
+        async with batches_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE prep_batches
+                SET remaining_qty = 0, status = 'discarded', updated_at = ?
+                WHERE id = ?
+                """,
+                (now_iso, batch_id),
+            )
+        await batches_tdb.commit()
+        return {
+            "success": True,
+            "batch_id": batch_id,
+            "remaining_qty": 0.0,
+            "status": "discarded",
+            "reason": reason,
         }
 
 

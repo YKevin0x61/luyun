@@ -71,7 +71,7 @@ async def get_forecast(
             target_start=target_start,
             target_end=target_end,
             station=station,
-            include_inventory=False,
+            include_inventory=True,
         )
         return result
     except ValueError as exc:
