@@ -9,6 +9,7 @@ import KdsBacklogPanel from '../components/dashboard/KdsBacklogPanel.vue'
 import TableLivePanel from '../components/dashboard/TableLivePanel.vue'
 import SystemAlertBanner from '../components/dashboard/SystemAlertBanner.vue'
 import { useDashboardData } from '../composables/useDashboardData'
+import { RECIPE_BRAND_TITLE, RECIPE_DASHBOARD_BLURB } from '../utils/recipeCopy'
 
 const { summary, loading, error, refresh } = useDashboardData()
 
@@ -31,8 +32,8 @@ const lastUpdateText = computed(() => {
       <SystemAlertBanner :summary="summary" />
       <div class="grid" style="grid-template-columns: repeat(2, minmax(0, 1fr))">
         <router-link to="/recipe" class="card app-shortcut">
-          <span class="app-shortcut-title">配方 SOP</span>
-          <span class="app-shortcut-desc">岗位配方 · 出品检核</span>
+          <span class="app-shortcut-title">{{ RECIPE_BRAND_TITLE }}</span>
+          <span class="app-shortcut-desc">{{ RECIPE_DASHBOARD_BLURB }}</span>
         </router-link>
         <a href="/kds/" class="card app-shortcut">
           <span class="app-shortcut-title">厨房 KDS</span>

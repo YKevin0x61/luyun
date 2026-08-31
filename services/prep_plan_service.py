@@ -12,11 +12,25 @@
 import logging
 import math
 from collections import defaultdict
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, time, timedelta
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from database import CHINA_TZ, ensure_beijing_datetime
 from services.dish_normalize import normalize_dish_name
+from services.prep_forecast_policy import (
+    DEFAULT_BASE_WEIGHTS,
+    DEFAULT_SAFETY_STOCK_RATIO,
+    MAX_SAFETY_STOCK_RATIO,
+    MODEL_CALIBRATED_SAFETY_RATIO,
+    SAME_WEEK_LOOKBACK_DAYS,
+    SLOT_BASE_WEIGHTS,
+    compute_effective_safety_ratio,
+    compute_signals,
+    extract_signal_dates,
+    find_complete_store_days,
+    renormalize_and_combine,
+    score_confidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -363,6 +377,7 @@ class PrepPlanService:
         station: Optional[str] = None,
         include_inventory: bool = False,
         now: Optional[datetime] = None,
+        model_safety_ratio: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         计算备货预测。
@@ -373,9 +388,11 @@ class PrepPlanService:
         now_dt = ensure_beijing_datetime(now) if now is not None else datetime.now(CHINA_TZ)
         slots = self._build_slots(start_dt, end_dt)
 
-        # 历史窗口：至少覆盖最近4个同星期 + 最近7天
-        history_start = (start_dt - timedelta(days=35)).replace(hour=0, minute=0, second=0, microsecond=0)
-        history_end = end_dt
+        # 历史窗口：严格冻结在 start_dt 之前，避免目标日订单泄漏
+        history_start = (start_dt - timedelta(days=SAME_WEEK_LOOKBACK_DAYS + 7)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        history_end = start_dt
 
         exact_rules, norm_rules = await self._load_rules(db)
         prep_item_map = await self._load_prep_item_map(db)
@@ -386,6 +403,34 @@ class PrepPlanService:
         )
 
         orders_tdb = db.table("orders")
+
+        # 1. 查找历史区间内的全店完整营业日（首单 <= 08:15 且 末单 >= 20:00）
+        async with orders_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT order_time
+                FROM orders
+                WHERE order_time >= ? AND order_time < ?
+                """,
+                (history_start.isoformat(), history_end.isoformat()),
+            )
+            time_rows = await cursor.fetchall()
+
+        day_spans: Dict[str, Tuple[Optional[time], Optional[time]]] = {}
+        for trow in time_rows:
+            odt = ensure_beijing_datetime(trow["order_time"])
+            d_str = odt.strftime("%Y-%m-%d")
+            t_val = odt.time()
+            if d_str not in day_spans:
+                day_spans[d_str] = (t_val, t_val)
+            else:
+                min_t, max_t = day_spans[d_str]
+                day_spans[d_str] = (min(min_t, t_val), max(max_t, t_val))
+
+        complete_days = find_complete_store_days(day_spans)
+        effective_complete_days = complete_days if complete_days else set(day_spans.keys())
+
+        # 2. 查询档口在 [history_start, start_dt) 内的历史订单
         query_params: List[Any] = [history_start.isoformat(), history_end.isoformat()]
         station_clause = " AND station != 'loumian'"
         if station and station != "all":
@@ -400,7 +445,7 @@ class PrepPlanService:
                 SELECT dish_name, quantity, order_time, station
                 FROM orders
                 WHERE order_time >= ?
-                  AND order_time <= ?
+                  AND order_time < ?
                   {station_clause}
                 """,
                 query_params,
@@ -447,22 +492,22 @@ class PrepPlanService:
                 consumed_qty = qty * float(rule["factor"] or 1)
                 series_map[series_key][(day_key, slot_name)] += consumed_qty
 
-        def score_confidence(last7_non_zero_days: int, same_week_days: int, forecast_qty: float) -> str:
-            if forecast_qty <= 0:
-                return "none"
-            if last7_non_zero_days >= 5 and same_week_days >= 3:
-                return "high"
-            if last7_non_zero_days >= 3 or same_week_days >= 2:
-                return "medium"
-            return "low"
+        all_series_keys: Set[Tuple[str, str, str, str]] = set(series_map.keys())
+        for prep_key, meta in prep_item_map.items():
+            s_id = meta.get("station") or ""
+            pos = meta.get("position") or ""
+            if station and station != "all" and s_id != station:
+                continue
+            all_series_keys.add((prep_key[0], prep_key[1], s_id, pos))
 
         items: List[Dict[str, Any]] = []
         low_confidence_items: List[Dict[str, Any]] = []
 
-        for series_key, day_slot_values in series_map.items():
+        for series_key in sorted(all_series_keys):
             item_name, unit, station_id, position = series_key
             prep_key = (item_name, unit)
             item_meta = prep_item_map.get(prep_key, {})
+            day_slot_values = series_map.get(series_key, {})
 
             slot_forecasts: List[float] = []
             confidence_values: List[str] = []
@@ -471,56 +516,52 @@ class PrepPlanService:
                 slot_start = slot["slot_start"]
                 slot_name = slot["slot_name"]
 
-                same_week_values = []
-                same_week_days = 0
-                for k in range(1, 5):
-                    d = (slot_start - timedelta(days=7 * k)).strftime("%Y-%m-%d")
-                    val = day_slot_values.get((d, slot_name), 0.0)
-                    same_week_values.append(val)
-                    if val > 0:
-                        same_week_days += 1
+                signal_dates = extract_signal_dates(slot_start, effective_complete_days)
+                s_val, r_val, y_val = compute_signals(day_slot_values, slot_name, signal_dates)
+                weights = SLOT_BASE_WEIGHTS.get(slot_name, DEFAULT_BASE_WEIGHTS)
 
-                last7_values = []
-                last7_non_zero = 0
-                for k in range(1, 8):
-                    d = (slot_start - timedelta(days=k)).strftime("%Y-%m-%d")
-                    val = day_slot_values.get((d, slot_name), 0.0)
-                    last7_values.append(val)
-                    if val > 0:
-                        last7_non_zero += 1
+                fallback_vals = [
+                    day_slot_values.get((d, slot_name), 0.0)
+                    for d in effective_complete_days
+                    if (d, slot_name) in day_slot_values
+                ]
 
-                yesterday_val = day_slot_values.get(((slot_start - timedelta(days=1)).strftime("%Y-%m-%d"), slot_name), 0.0)
-                avg_same_week = sum(same_week_values) / len(same_week_values) if same_week_values else 0.0
-                avg_last7 = sum(last7_values) / len(last7_values) if last7_values else 0.0
-
-                weight_same, weight_last7, weight_yesterday = 0.5, 0.3, 0.2
-                if same_week_days < 2:
-                    weight_last7 += weight_same
-                    weight_same = 0.0
-                if avg_last7 <= 0 and avg_same_week > 0 and yesterday_val <= 0:
-                    weight_same, weight_last7, weight_yesterday = 0.7, 0.3, 0.0
-
-                forecast_qty = (
-                    avg_same_week * weight_same
-                    + avg_last7 * weight_last7
-                    + yesterday_val * weight_yesterday
+                forecast_qty, _ = renormalize_and_combine(
+                    s_val, r_val, y_val, weights=weights, fallback_candidates=fallback_vals
                 )
-                forecast_qty = max(forecast_qty, 0.0)
-                confidence_values.append(score_confidence(last7_non_zero, same_week_days, forecast_qty))
+
+                valid_recent = sum(1 for d in signal_dates["recent"] if day_slot_values.get((d, slot_name), 0.0) > 0)
+                valid_same_week = sum(1 for d in signal_dates["same_week"] if day_slot_values.get((d, slot_name), 0.0) > 0)
+                conf = score_confidence(valid_recent, valid_same_week, forecast_qty)
+
                 slot_forecasts.append(forecast_qty)
+                confidence_values.append(conf)
 
             total_forecast = sum(slot_forecasts)
-            safety_ratio = float(item_meta.get("safety_stock_ratio", DEFAULT_SAFETY_STOCK_RATIO))
-            safety_qty = total_forecast * safety_ratio
+            item_safety_ratio = float(item_meta.get("safety_stock_ratio", DEFAULT_SAFETY_STOCK_RATIO))
+            if model_safety_ratio is not None:
+                eff_safety_ratio = compute_effective_safety_ratio(
+                    item_safety_ratio=item_safety_ratio,
+                    model_safety_ratio=model_safety_ratio,
+                )
+            elif item_safety_ratio == 0.0:
+                eff_safety_ratio = 0.0
+            else:
+                eff_safety_ratio = compute_effective_safety_ratio(
+                    item_safety_ratio=item_safety_ratio,
+                    model_safety_ratio=MODEL_CALIBRATED_SAFETY_RATIO,
+                )
+
+            safety_qty = total_forecast * eff_safety_ratio
             min_batch_qty = float(item_meta.get("min_batch_qty", DEFAULT_MIN_BATCH_QTY))
             item_batches = live_batches.get(prep_key, []) if include_inventory else []
             available_fresh, available_near = split_available_qty(item_batches, now_dt)
             total_available = available_fresh + available_near
 
             if include_inventory:
-                slot_results, uncovered = cover_slot_demand(slots, slot_forecasts, safety_ratio, item_batches)
+                slot_results, uncovered = cover_slot_demand(slots, slot_forecasts, eff_safety_ratio, item_batches)
             else:
-                slot_results, uncovered = cover_slot_demand(slots, slot_forecasts, safety_ratio, [])
+                slot_results, uncovered = cover_slot_demand(slots, slot_forecasts, eff_safety_ratio, [])
 
             recommended_qty = max(uncovered, 0.0)
             min_batch_applied = False
@@ -591,6 +632,8 @@ class PrepPlanService:
                 "unit": unit,
                 "forecast_qty": int(math.ceil(total_forecast)),
                 "safety_qty": round(safety_qty, 2),
+                "safety_stock_ratio": round(item_safety_ratio, 4),
+                "effective_safety_ratio": round(eff_safety_ratio, 4),
                 "available_qty": round(total_available, 2),
                 "available_fresh_qty": round(available_fresh, 2),
                 "available_near_expiry_qty": round(available_near, 2),

@@ -1,18 +1,25 @@
-/** Section combobox options and sort_order assignment for recipe manage list. */
+/** Section combobox options and sort_order assignment for recipe manage list.
+ * Keep RECIPE_SECTIONS in lockstep with services/recipes/sections.py.
+ */
 
-export const NEW_SECTION_VALUE = '__new__'
+export const RECIPE_SECTIONS = ['配方', '出品标准', '检核要求', '食安要求']
+export const DEFAULT_RECIPE_SECTION = '配方'
 
-export function buildSectionOptions(recipes) {
-  const seen = new Set()
-  const options = []
-  for (const recipe of recipes || []) {
-    const section = recipe.section
-    if (section == null || seen.has(section)) continue
-    seen.add(section)
-    options.push({ value: section, label: section })
-  }
-  options.push({ value: NEW_SECTION_VALUE, label: '新建章节…' })
-  return options
+export function canonicalizeSection(name) {
+  const text = String(name || '').trim()
+  if (RECIPE_SECTIONS.includes(text)) return text
+  if (text.includes('食安')) return '食安要求'
+  if (text.includes('检核')) return '检核要求'
+  if (text.includes('出品') && text.includes('标准')) return '出品标准'
+  return DEFAULT_RECIPE_SECTION
+}
+
+export function buildSectionOptions() {
+  return RECIPE_SECTIONS.map((section) => ({ value: section, label: section }))
+}
+
+export function defaultSectionForNewRecipe() {
+  return DEFAULT_RECIPE_SECTION
 }
 
 export function assignSortOrders(orderedRecipes) {
@@ -21,4 +28,3 @@ export function assignSortOrders(orderedRecipes) {
     sort_order: index,
   }))
 }
-

@@ -359,7 +359,7 @@ onBeforeUnmount(() => {
 
   .logs-sidebar {
     position: fixed;
-    top: clamp(38px, 4.4vh, 46px);
+    top: var(--global-nav-height, 46px);
     left: 0;
     bottom: 0;
     width: min(280px, 86vw);
@@ -377,7 +377,7 @@ onBeforeUnmount(() => {
     display: block;
     position: fixed;
     left: 0; right: 0; bottom: 0;
-    top: clamp(38px, 4.4vh, 46px);
+    top: var(--global-nav-height, 46px);
     background: rgba(0, 0, 0, 0.55);
     z-index: 55;
     opacity: 0;

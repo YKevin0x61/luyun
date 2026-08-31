@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api/client'
 import SvgIcon from './SvgIcon.vue'
+import { RECIPE_BRAND_TITLE } from '../utils/recipeCopy'
 
 defineProps({
   connected: { type: Boolean, default: false },
@@ -17,7 +18,7 @@ const PAGE_SUBTITLES = [
   { prefix: '/prep-plan', subtitle: '备货计划' },
   { prefix: '/wecom-push', subtitle: '企微推送' },
   { prefix: '/sales-report', subtitle: '销售报表' },
-  { prefix: '/recipe', subtitle: '配方 SOP' },
+  { prefix: '/recipe', subtitle: RECIPE_BRAND_TITLE },
   { prefix: '/admin', subtitle: '数据管理' },
   { prefix: '/', subtitle: '运营仪表盘' },
 ]
@@ -76,14 +77,14 @@ async function handleLogout() {
       <router-link to="/" class="nav-tab" :class="{ active: route.path === '/' }">仪表盘</router-link>
       <router-link to="/admin" class="nav-tab" :class="{ active: route.path.startsWith('/admin') }">数据管理</router-link>
       <router-link to="/sales-report" class="nav-tab" :class="{ active: route.path.startsWith('/sales-report') }">销售报表</router-link>
-      <router-link to="/recipe" class="nav-tab" :class="{ active: route.path.startsWith('/recipe') }">配方 SOP</router-link>
+      <router-link to="/recipe" class="nav-tab" :class="{ active: route.path.startsWith('/recipe') }">{{ RECIPE_BRAND_TITLE }}</router-link>
       <router-link to="/wecom-push" class="nav-tab" :class="{ active: route.path.startsWith('/wecom-push') }">企微推送</router-link>
       <router-link to="/prep-plan" class="nav-tab" :class="{ active: route.path.startsWith('/prep-plan') }">备货计划</router-link>
       <router-link to="/logs" class="nav-tab" :class="{ active: route.path.startsWith('/logs') }">日志</router-link>
     </div>
     <div class="nav-right">
-      <span class="nav-status-dot" :class="connected ? 'online' : 'offline'"></span>
-      <span style="font-size:11px;color:var(--text-dim)">{{ connected ? '实时已连接' : '实时已断开' }}</span>
+      <span class="nav-status-dot" :class="connected ? 'online' : 'offline'" :title="connected ? '实时已连接' : '实时已断开'"></span>
+      <span class="nav-conn-label">{{ connected ? '实时已连接' : '实时已断开' }}</span>
       <span v-if="connected && latencyMs != null" class="nav-latency">延迟 {{ latencyMs }}ms</span>
       <span class="nav-clock">{{ clockText }}</span>
       <router-link

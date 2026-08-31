@@ -52,7 +52,7 @@ def test_display_markdown_groups_same_section_into_one_grid():
     md = recipes_to_display_markdown("测", recipes)
     assert md.count("## 配方") == 1  # 不拆成两个同名网格
     assert "### A" in md and "### C" in md
-    # 章节顺序按首次出现（最小 sort_order）：配方(0) 先于 出品标准(1)
+    # 章节顺序固定：配方先于出品标准
     assert md.index("## 配方") < md.index("## 出品标准")
     # 章节内部仍按 sort_order：A(0) 先于 C(2)
     assert md.index("### A") < md.index("### C")

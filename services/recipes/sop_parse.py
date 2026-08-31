@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass
 from html import escape as html_escape
 
+from .sections import DEFAULT_RECIPE_SECTION, canonicalize_section, section_sort_key
+
 
 NEW_PRODUCT_MARK = "【新】"
 
@@ -338,7 +340,7 @@ def split_station_markdown_to_recipes(markdown_text: str) -> tuple[str, list[Par
         station_title = "未命名"
         body_lines = lines[:]
 
-    section = "正文"
+    section = DEFAULT_RECIPE_SECTION
     order = 0
     recipes: list[ParsedRecipe] = []
 
@@ -348,7 +350,7 @@ def split_station_markdown_to_recipes(markdown_text: str) -> tuple[str, list[Par
         stripped = line.strip()
 
         if stripped.startswith("##"):
-            section = stripped.lstrip("#").strip() or "正文"
+            section = canonicalize_section(stripped.lstrip("#").strip())
             i += 1
             continue
 
@@ -385,19 +387,20 @@ def recipes_to_display_markdown(station_title: str, recipes: list[ParsedRecipe])
 
     同名章节的条目会聚合到同一个 ## 之下（即使它们的 sort_order 不连续、被其他章节穿插），
     避免新增/编辑后因排序错位而在岗位页拆分成多个同名网格（“表格”）。
-    - 章节之间的先后：以各章节内最小 sort_order 为准（首次出现顺序）。
+    - 章节之间的先后：配方 → 出品标准 → 检核要求 → 食安要求。
     - 章节内部：按 sort_order 升序。
     """
     section_items: dict[str, list[ParsedRecipe]] = {}
     section_min_order: dict[str, int] = {}
     for r in recipes:
-        section_items.setdefault(r.section, []).append(r)
-        if r.section not in section_min_order or r.sort_order < section_min_order[r.section]:
-            section_min_order[r.section] = r.sort_order
+        section = canonicalize_section(r.section)
+        section_items.setdefault(section, []).append(r)
+        if section not in section_min_order or r.sort_order < section_min_order[section]:
+            section_min_order[section] = r.sort_order
 
     ordered_sections = sorted(
         section_items.keys(),
-        key=lambda s: (section_min_order[s], s),
+        key=lambda s: (section_sort_key(s), section_min_order[s], s),
     )
 
     parts: list[str] = [f"# {station_title}", ""]
@@ -444,7 +447,7 @@ def split_station_markdown_to_blocks(markdown_text: str) -> tuple[str, list[Bloc
     返回 (station_title, blocks)。
     - 首行 # 为岗位标题。
     - 按 ## 切节；每节内全部内容（表格+散文）原样进 body_markdown，仅首尾 strip。
-    - ## 之前、# 之后的内容（若有）归入默认章节「正文」。
+    - ## 之前、# 之后的内容（若有）归入默认章节「配方」。
     """
     lines = markdown_text.splitlines()
     if not lines:
@@ -460,7 +463,7 @@ def split_station_markdown_to_blocks(markdown_text: str) -> tuple[str, list[Bloc
 
     blocks: list[Block] = []
     order = 0
-    current_section = "正文"
+    current_section = DEFAULT_RECIPE_SECTION
     buf: list[str] = []
 
     def flush() -> None:
@@ -481,7 +484,7 @@ def split_station_markdown_to_blocks(markdown_text: str) -> tuple[str, list[Bloc
         if line.strip().startswith("##"):
             flush()
             buf = []
-            current_section = line.strip().lstrip("#").strip() or "正文"
+            current_section = canonicalize_section(line.strip().lstrip("#").strip())
             continue
         buf.append(line)
     flush()

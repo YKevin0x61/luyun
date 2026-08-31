@@ -2,6 +2,7 @@
 import { computed, onMounted } from 'vue'
 import ConfirmDialog from '../components/admin/ConfirmDialog.vue'
 import TextExportModal from '../components/salesreport/TextExportModal.vue'
+import LuyunNumberInput from '../components/ui/LuyunNumberInput.vue'
 import { usePrepPlan } from '../composables/usePrepPlan'
 import { useStationsStore } from '../stores/stations'
 import {
@@ -28,7 +29,9 @@ import {
   PRODUCED_LABEL,
   RECOMMENDED_LABEL,
   RECORD_LABEL,
+  RECORD_QTY_LABEL,
   REFRESH_LABEL,
+  REFRESHING_LABEL,
   REMAINING_LABEL,
   SAFETY_LABEL,
   SKIP_LABEL,
@@ -76,6 +79,7 @@ const {
   windowEnd,
   exportOpen,
   itemKey,
+  windowRange,
   refresh,
   recordItem,
   undoItem,
@@ -130,6 +134,15 @@ const filteredExpiring = computed(() => {
 
 const todoCount = computed(
   () => filteredKitchenItems.value.filter((item) => Number(item.recommended_qty || 0) > 0).length
+)
+
+const windowCaption = computed(() => {
+  const { start, end } = windowRange()
+  return `${formatPrepTime(start)} – ${formatPrepTime(end)}`
+})
+
+const refreshButtonLabel = computed(() =>
+  busy.value && statusText.value === REFRESHING_LABEL ? REFRESHING_LABEL : REFRESH_LABEL
 )
 
 const board = computed(() => {
@@ -217,15 +230,18 @@ function cancelDiscard() {
 </script>
 
 <template>
-  <div class="prep-plan">
+  <div class="prep-plan" :aria-busy="busy ? 'true' : 'false'">
     <div class="card prep-toolbar">
-      <h1 class="prep-title">{{ PREP_PLAN_TITLE }}</h1>
-      <div class="prep-toolbar-row" role="group" aria-label="时间窗">
+      <header class="prep-head">
+        <h1 class="prep-title">{{ PREP_PLAN_TITLE }}</h1>
+        <p v-if="kitchenItems.length" class="prep-todo">{{ TODO_COUNT_LABEL }} {{ todoCount }} 项</p>
+      </header>
+      <div class="prep-toolbar-row prep-preset-row" role="group" aria-label="时间窗">
         <button
           v-for="chip in PRESET_CHIPS"
           :key="chip.id"
           type="button"
-          class="btn prep-preset"
+          class="btn prep-chip"
           :class="{ 'is-active': preset === chip.id }"
           :aria-pressed="preset === chip.id"
           @click="selectPreset(chip.id)"
@@ -234,7 +250,7 @@ function cancelDiscard() {
         </button>
         <button
           type="button"
-          class="btn prep-preset"
+          class="btn prep-chip"
           :class="{ 'is-active': preset === PRESET_CUSTOM }"
           :aria-pressed="preset === PRESET_CUSTOM"
           :aria-expanded="showCustom"
@@ -243,6 +259,7 @@ function cancelDiscard() {
           {{ CUSTOM_TIME_LABEL }}
         </button>
       </div>
+      <p class="prep-window-caption">{{ windowCaption }}</p>
       <div v-if="showCustom" class="prep-custom-fields">
         <label class="prep-custom-field">
           开始
@@ -261,14 +278,15 @@ function cancelDiscard() {
           >
         </label>
       </div>
-      <div class="prep-toolbar-row">
+      <div class="prep-toolbar-row prep-action-row">
         <button
           type="button"
           class="btn btn-primary prep-refresh"
           :disabled="busy"
+          :aria-busy="busy && statusText === REFRESHING_LABEL ? 'true' : 'false'"
           @click="refresh"
         >
-          {{ REFRESH_LABEL }}
+          {{ refreshButtonLabel }}
         </button>
         <button
           type="button"
@@ -277,14 +295,16 @@ function cancelDiscard() {
         >
           {{ EXPORT_LABEL }}
         </button>
-        <span class="prep-status" :class="{ 'is-error': errorText }">{{ errorText || statusText }}</span>
       </div>
+      <p class="prep-status" :class="{ 'is-error': errorText }" role="status" aria-live="polite">
+        {{ errorText || statusText }}
+      </p>
       <div class="prep-toolbar-row prep-station-chips" role="group" aria-label="档口">
         <button
           v-for="chip in stationChips"
           :key="chip.id || 'all'"
           type="button"
-          class="btn prep-preset"
+          class="btn prep-chip"
           :class="{ 'is-active': stationFilter === chip.id }"
           :aria-pressed="stationFilter === chip.id"
           @click="stationFilter = chip.id"
@@ -300,14 +320,21 @@ function cancelDiscard() {
         <li v-for="batch in filteredExpiring" :key="batch.batch_id" class="prep-expiring-row">
           <div class="prep-expiring-main">
             <div class="prep-item-name">{{ batch.item_name }}</div>
-            <div class="prep-avail">
-              <span>{{ REMAINING_LABEL }} {{ qtyText(batch.remaining_qty) }} {{ batch.unit }}</span>
-              <span>{{ EXPIRES_AT_LABEL }} {{ formatPrepTime(batch.expires_at) }}</span>
+            <div class="prep-metrics prep-metrics--expiring">
+              <div class="prep-metric">
+                <span class="prep-metric-label">{{ REMAINING_LABEL }}</span>
+                <span class="prep-metric-value">{{ qtyText(batch.remaining_qty) }}</span>
+                <span class="prep-metric-unit">{{ batch.unit }}</span>
+              </div>
+              <div class="prep-metric prep-metric--wide">
+                <span class="prep-metric-label">{{ EXPIRES_AT_LABEL }}</span>
+                <span class="prep-metric-value prep-metric-time">{{ formatPrepTime(batch.expires_at) }}</span>
+              </div>
             </div>
           </div>
           <button
             type="button"
-            class="btn prep-discard"
+            class="btn btn-danger prep-discard"
             :disabled="busy"
             @click="openDiscard(batch)"
           >
@@ -319,10 +346,17 @@ function cancelDiscard() {
 
     <div v-if="!kitchenItems.length && !filteredExpiring.length" class="card prep-empty">
       <p class="empty-state">{{ errorText ? errorText : EMPTY_HINT }}</p>
+      <button
+        type="button"
+        class="btn btn-primary prep-refresh"
+        :disabled="busy"
+        @click="refresh"
+      >
+        {{ refreshButtonLabel }}
+      </button>
     </div>
 
     <div v-else-if="kitchenItems.length" class="prep-board">
-      <p class="prep-todo">{{ TODO_COUNT_LABEL }} {{ todoCount }} 项</p>
       <section v-for="group in board" :key="group.stationId" class="card prep-station">
         <h2 class="prep-station-title">{{ group.label }}</h2>
         <ul class="prep-rows">
@@ -332,17 +366,29 @@ function cancelDiscard() {
                 {{ item.item_name }}
                 <span v-if="isLowSample(item)" class="badge prep-sample-badge">{{ CONFIDENCE_LABELS.low }}</span>
               </div>
-              <div class="prep-rec">
-                <span class="prep-rec-label">{{ RECOMMENDED_LABEL }}</span>
-                <span class="prep-rec-qty" :class="`is-${rowTone(item)}`">{{ qtyText(item.recommended_qty) }}</span>
-                <span class="prep-rec-unit">{{ item.unit }}</span>
+              <div class="prep-stamp" :class="`is-${rowTone(item)}`">
+                <span class="prep-stamp-label">{{ RECOMMENDED_LABEL }}</span>
+                <span class="prep-stamp-qty">{{ qtyText(item.recommended_qty) }}</span>
+                <span class="prep-stamp-unit">{{ item.unit }}</span>
                 <span v-if="Number(item.recommended_qty || 0) <= 0" class="prep-skip">{{ SKIP_LABEL }}</span>
               </div>
             </div>
-            <div class="prep-avail">
-              <span>{{ FRESH_AVAILABLE_LABEL }} {{ qtyText(item.available_fresh_qty) }} {{ item.unit }}</span>
-              <span>{{ NEAR_AVAILABLE_LABEL }} {{ qtyText(item.available_near_expiry_qty) }} {{ item.unit }}</span>
-              <span>{{ PRODUCED_LABEL }} {{ qtyText(item.produced_qty) }} {{ item.unit }}</span>
+            <div class="prep-metrics">
+              <div class="prep-metric">
+                <span class="prep-metric-label">{{ FRESH_AVAILABLE_LABEL }}</span>
+                <span class="prep-metric-value">{{ qtyText(item.available_fresh_qty) }}</span>
+                <span class="prep-metric-unit">{{ item.unit }}</span>
+              </div>
+              <div class="prep-metric" :class="{ 'is-warn': Number(item.available_near_expiry_qty || 0) > 0 }">
+                <span class="prep-metric-label">{{ NEAR_AVAILABLE_LABEL }}</span>
+                <span class="prep-metric-value">{{ qtyText(item.available_near_expiry_qty) }}</span>
+                <span class="prep-metric-unit">{{ item.unit }}</span>
+              </div>
+              <div class="prep-metric">
+                <span class="prep-metric-label">{{ PRODUCED_LABEL }}</span>
+                <span class="prep-metric-value">{{ qtyText(item.produced_qty) }}</span>
+                <span class="prep-metric-unit">{{ item.unit }}</span>
+              </div>
             </div>
             <p v-if="!item.can_record" class="prep-no-master">{{ NO_MASTER_REASON }}</p>
             <div v-else class="prep-row-actions">
@@ -360,18 +406,16 @@ function cancelDiscard() {
                 class="prep-register"
                 @submit.prevent="recordItem(item)"
               >
-                <label class="prep-qty-field">
-                  这次做了
-                  <input
-                    v-model.number="registerQty[itemKey(item)]"
-                    class="input prep-qty-input"
-                    type="number"
-                    step="any"
-                    inputmode="decimal"
+                <div class="prep-qty-field">
+                  <span class="prep-qty-label">{{ RECORD_QTY_LABEL }}</span>
+                  <LuyunNumberInput
+                    v-model="registerQty[itemKey(item)]"
+                    decimal
+                    :step="1"
                     :disabled="busy"
-                  >
-                  {{ item.unit }}
-                </label>
+                  />
+                  <span class="prep-qty-unit">{{ item.unit }}</span>
+                </div>
                 <button type="submit" class="btn btn-primary prep-record" :disabled="busy">
                   {{ RECORD_LABEL }}
                 </button>
@@ -462,6 +506,7 @@ function cancelDiscard() {
     />
     <TextExportModal
       v-if="exportOpen"
+      class="prep-export-modal"
       :content="exportText"
       :allow-push="false"
       :title="EXPORT_TITLE"
@@ -473,25 +518,48 @@ function cancelDiscard() {
 
 <style scoped>
 .prep-plan {
+  --prep-mute: #9ca3af;
+  --prep-chit: #161c2e;
+  --prep-stamp-todo: rgba(245, 158, 11, 0.16);
+  --prep-stamp-skip: rgba(34, 197, 94, 0.12);
+  --prep-stamp-danger: rgba(239, 68, 68, 0.16);
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow-x: clip;
+  max-width: 960px;
+}
+.prep-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 14px;
+  margin-bottom: 10px;
 }
 .prep-title {
   font-size: 20px;
   font-weight: 700;
-  margin: 0 0 10px;
+  margin: 0;
+}
+.prep-todo {
+  margin: 0;
+  font-size: 14px;
+  color: var(--prep-mute);
 }
 .prep-toolbar-row {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
+}
+.prep-preset-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .prep-station-chips {
   margin-top: 8px;
 }
-.prep-preset,
+.prep-chip,
 .prep-refresh,
 .prep-export,
 .prep-record,
@@ -499,24 +567,32 @@ function cancelDiscard() {
 .prep-undo,
 .prep-discard {
   min-height: 44px;
-  padding: 10px 18px;
+  padding: 10px 16px;
   font-size: 15px;
+  touch-action: manipulation;
+  white-space: nowrap;
 }
-.prep-row-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 8px;
-}
-.prep-preset.is-active {
+.prep-chip.is-active {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
 }
+.prep-action-row .prep-refresh,
+.prep-action-row .prep-export {
+  flex: 1 1 140px;
+  justify-content: center;
+}
+.prep-window-caption {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--prep-mute);
+  font-variant-numeric: tabular-nums;
+}
 .prep-custom-fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
   margin: 10px 0 4px;
 }
 .prep-custom-field {
@@ -524,28 +600,40 @@ function cancelDiscard() {
   flex-direction: column;
   gap: 6px;
   font-size: 13px;
-  color: var(--text-dim);
+  color: var(--prep-mute);
+  min-width: 0;
 }
 .prep-datetime {
   min-height: 44px;
-  min-width: 220px;
+  width: 100%;
+  min-width: 0;
   font-size: 16px;
 }
 .prep-status {
+  margin: 8px 0 0;
+  min-height: 1.5em;
   font-size: 13px;
-  color: var(--text-dim);
+  line-height: 1.5;
+  color: var(--prep-mute);
 }
 .prep-status.is-error {
   color: var(--red);
 }
-.prep-empty .empty-state {
-  padding: 28px 12px;
-  font-size: 14px;
+.prep-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
 }
-.prep-todo {
-  margin: 0 2px 4px;
-  font-size: 14px;
-  color: var(--text-dim);
+.prep-empty .empty-state {
+  padding: 16px 12px 0;
+  font-size: 15px;
+  line-height: 1.5;
+}
+.prep-empty .prep-refresh {
+  width: 100%;
+  max-width: 280px;
 }
 .prep-board,
 .prep-expiring-list,
@@ -570,13 +658,16 @@ function cancelDiscard() {
 .prep-row {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px 4px;
+  gap: 10px;
+  padding: 14px 0;
   border-top: 1px solid var(--border);
 }
 .prep-row {
-  padding-left: 12px;
+  padding: 14px 12px 14px 14px;
+  margin: 0 -4px;
   border-left: 4px solid var(--border);
+  background: var(--prep-chit);
+  border-radius: 0 10px 10px 0;
 }
 .prep-row.is-skip {
   border-left-color: var(--green);
@@ -591,104 +682,188 @@ function cancelDiscard() {
 .prep-row:first-child {
   border-top: 0;
 }
+.prep-expiring-row {
+  gap: 12px;
+}
 .prep-expiring-main {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 .prep-item-name {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   font-size: 16px;
   font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 .prep-sample-badge {
   font-weight: 600;
 }
-.prep-rec {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px;
+.prep-row-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px 12px;
 }
-.prep-rec-label {
-  font-size: 12px;
-  color: var(--text-dim);
-}
-.prep-rec-qty {
-  font-size: 28px;
-  font-weight: 700;
+.prep-stamp {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  min-width: 88px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--prep-stamp-todo);
   font-variant-numeric: tabular-nums;
-  line-height: 1.1;
 }
-.prep-rec-qty.is-skip {
-  color: var(--green);
+.prep-stamp.is-skip {
+  background: var(--prep-stamp-skip);
 }
-.prep-rec-qty.is-todo {
+.prep-stamp.is-danger {
+  background: var(--prep-stamp-danger);
+}
+.prep-stamp-label {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--prep-mute);
+}
+.prep-stamp-qty {
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1;
   color: var(--yellow);
 }
-.prep-rec-qty.is-danger {
-  color: var(--red);
-}
-.prep-rec-unit {
-  font-size: 14px;
-  color: var(--text-dim);
-}
-.prep-skip {
-  font-size: 14px;
-  font-weight: 700;
+.prep-stamp.is-skip .prep-stamp-qty {
   color: var(--green);
 }
-.prep-avail {
+.prep-stamp.is-danger .prep-stamp-qty {
+  color: var(--red);
+}
+.prep-stamp-unit,
+.prep-skip {
+  font-size: 13px;
+  font-weight: 700;
+}
+.prep-stamp-unit {
+  color: var(--prep-mute);
+}
+.prep-skip {
+  color: var(--green);
+}
+.prep-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.prep-metrics--expiring {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+}
+.prep-metric {
   display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  font-size: 14px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(10, 13, 22, 0.45);
+}
+.prep-metric.is-warn {
+  background: rgba(245, 158, 11, 0.12);
+}
+.prep-metric-label {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--prep-mute);
+}
+.prep-metric-value {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   color: var(--text);
+  overflow-wrap: anywhere;
+}
+.prep-metric-time {
+  font-size: 14px;
+  font-weight: 600;
+}
+.prep-metric-unit {
+  font-size: 12px;
+  color: var(--prep-mute);
 }
 .prep-no-master {
   margin: 0;
   font-size: 13px;
-  color: var(--text-dim);
+  line-height: 1.5;
+  color: var(--prep-mute);
+}
+.prep-row-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
 }
 .prep-register {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
+  flex-direction: column;
   gap: 8px;
 }
 .prep-qty-field {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   font-size: 14px;
-  color: var(--text-dim);
+  color: var(--prep-mute);
 }
-.prep-qty-input {
-  width: 96px;
+.prep-qty-label,
+.prep-qty-unit {
+  white-space: nowrap;
+}
+.prep-register :deep(.luyun-number) {
+  width: 100%;
+}
+.prep-register :deep(.luyun-number__step) {
+  width: 44px;
+  min-height: 44px;
+}
+.prep-register :deep(.luyun-number__input) {
   min-height: 44px;
   font-size: 16px;
 }
+.prep-record,
+.prep-extra,
+.prep-undo,
+.prep-discard {
+  width: 100%;
+  justify-content: center;
+}
 .prep-aux {
   font-size: 13px;
-  color: var(--text-dim);
+  color: var(--prep-mute);
+}
+.prep-aux summary,
+.prep-row-more summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+  color: var(--text);
+  touch-action: manipulation;
 }
 .prep-aux-list {
   margin: 8px 0 0;
   padding-left: 18px;
+  line-height: 1.5;
 }
 .prep-row-more {
   font-size: 13px;
-  color: var(--text-dim);
-}
-.prep-row-more summary {
-  cursor: pointer;
-  min-height: 32px;
-  font-size: 13px;
-  color: var(--text);
+  color: var(--prep-mute);
 }
 .prep-formula {
   display: grid;
@@ -703,7 +878,7 @@ function cancelDiscard() {
 .prep-formula dt {
   min-width: 7em;
   font-weight: 600;
-  color: var(--text-dim);
+  color: var(--prep-mute);
 }
 .prep-formula dd {
   margin: 0;
@@ -725,20 +900,107 @@ function cancelDiscard() {
   padding-left: 18px;
   color: var(--text);
 }
-@media (max-width: 720px) {
-  .prep-board,
-  .prep-expiring-list,
-  .prep-rows,
-  .prep-expiring-row,
-  .prep-row {
+.prep-plan :is(button, .btn, input, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.prep-plan .btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.prep-plan :deep(.modal-overlay) {
+  padding: 12px;
+  padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
+  align-items: flex-end;
+}
+.prep-plan :deep(.modal-box) {
+  width: min(600px, 100%) !important;
+  max-height: min(86vh, 86dvh);
+}
+.prep-plan :deep(textarea.input) {
+  min-height: 180px !important;
+}
+.prep-plan :deep(.modal-footer) {
+  flex-wrap: wrap;
+}
+.prep-plan :deep(.modal-footer .btn),
+.prep-plan :deep(.modal-header .btn) {
+  min-height: 44px;
+  min-width: 44px;
+  flex: 1 1 120px;
+  justify-content: center;
+  font-size: 15px;
+}
+.prep-plan :deep(.modal-header .btn) {
+  flex: 0 0 44px;
+  padding: 0;
+}
+@media (min-width: 721px) {
+  .prep-preset-row {
     display: flex;
-    flex-direction: column;
     grid-template-columns: none;
   }
+  .prep-custom-fields {
+    grid-template-columns: 1fr 1fr;
+  }
+  .prep-action-row .prep-refresh,
+  .prep-action-row .prep-export,
+  .prep-record,
+  .prep-extra,
+  .prep-undo,
+  .prep-discard {
+    width: auto;
+    flex: 0 0 auto;
+  }
+  .prep-row-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: flex-end;
+  }
+  .prep-register {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: flex-end;
+  }
+  .prep-qty-field {
+    min-width: 220px;
+  }
+  .prep-plan :deep(.modal-overlay) {
+    align-items: center;
+  }
 }
-:deep(.prep-discard-confirm .btn) {
-  min-height: 44px;
-  padding: 10px 18px;
-  font-size: 15px;
+@media (max-width: 720px) {
+  .prep-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .prep-head {
+    margin-bottom: 8px;
+  }
+  .prep-todo {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .prep-chip {
+    justify-content: center;
+    min-width: 0;
+  }
+  .prep-metrics--expiring {
+    grid-template-columns: 1fr;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prep-plan .btn,
+  .prep-plan .btn:active:not(:disabled) {
+    transition: none;
+    transform: none;
+  }
 }
 </style>

@@ -257,3 +257,112 @@ class PrepPlanForecastCoverageTests(PrepPlanServiceFixture):
         item = self._board_item(result)
         self.assertEqual(item["recommended_qty"], 0)
         self.assertFalse(item["min_batch_applied"])
+
+    async def test_target_day_orders_do_not_affect_forecast_or_leak(self):
+        await self._seed_item_and_rule()
+        await self._seed_identical_history()
+
+        # 在目标日 (2026-08-30) 插入海量订单，这绝不能泄漏进历史并改变预测需求
+        extra = await self.db.orders.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "target-day-leak-1",
+                    "table_number": "A99",
+                    "dish_name": DISH_NAME,
+                    "quantity": 9999,
+                    "order_time": _at("2026-08-30", 12),
+                    "station": "shulong",
+                }
+            ]
+        )
+        self.assertEqual(extra["inserted_count"], 1)
+
+        result = await self._forecast()
+        item = self._board_item(result)
+        # 预测需求依然保持历史正常值（40 + 40 = 80），不受目标日 9999 订单影响
+        self.assertEqual(item["forecast_qty"], 80)
+
+    async def test_target_day_only_dish_never_enters_forecast_items(self):
+        # 规则配置了“新鲜菠萝包”
+        rules = self.db.table("semi_finished_rules")
+        async with rules.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO semi_finished_rules (
+                    dish_name, semi_name, position, factor, unit, category,
+                    notes, created_at, updated_at
+                ) VALUES ('菠萝包', '菠萝面团', '西饼', 1, '个', '', '', ?, ?)
+                """,
+                (self.stamp, self.stamp),
+            )
+        await rules.commit()
+
+        # 仅在目标日当天 (2026-08-30) 下单了菠萝包，历史从未下过
+        extra = await self.db.orders.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "target-day-first-time",
+                    "table_number": "B1",
+                    "dish_name": "菠萝包",
+                    "quantity": 50,
+                    "order_time": _at("2026-08-30", 10),
+                    "station": "xibing",
+                }
+            ]
+        )
+        self.assertEqual(extra["inserted_count"], 1)
+
+        result = await self._forecast()
+        # 菠萝面团绝不能出现在预测列表中
+        item_names = [row["item_name"] for row in result["items"]]
+        self.assertNotIn("菠萝面团", item_names)
+
+    async def test_effective_safety_ratio_respects_manual_floor_and_caps_at_40(self):
+        # 种子品配置超大安全库存比例 0.80 (80%)
+        items = self.db.table("prep_items")
+        async with items.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO prep_items (
+                    item_name, station, position, category, unit,
+                    shelf_life_hours, lead_time_hours, min_batch_qty,
+                    safety_stock_ratio, active, notes, created_at, updated_at
+                ) VALUES ('超大安全品', 'shulong', '熟笼', '', '份', 24, 0, 0, 0.80, 1, '', ?, ?)
+                """,
+                (self.stamp, self.stamp),
+            )
+        await items.commit()
+
+        rules = self.db.table("semi_finished_rules")
+        async with rules.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO semi_finished_rules (
+                    dish_name, semi_name, position, factor, unit, category,
+                    notes, created_at, updated_at
+                ) VALUES ('超大菜', '超大安全品', '熟笼', 1, '份', '', '', ?, ?)
+                """,
+                (self.stamp, self.stamp),
+            )
+        await rules.commit()
+
+        await self.db.orders.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": "huge-safety-1",
+                    "table_number": "A1",
+                    "dish_name": "超大菜",
+                    "quantity": 100,
+                    "order_time": _at("2026-08-29", 9),
+                    "station": "shulong",
+                }
+            ]
+        )
+
+        result = await self._forecast()
+        matches = [row for row in result["items"] if row["item_name"] == "超大安全品"]
+        self.assertEqual(len(matches), 1)
+        item = matches[0]
+        # 单品配置为 0.80，但系统强制上限为 0.40
+        self.assertEqual(item["effective_safety_ratio"], 0.40)
+

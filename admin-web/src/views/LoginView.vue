@@ -2,6 +2,7 @@
 import { nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
+import { resolveLoginNext } from '../utils/loginNext'
 
 // 迁移自 public/login.html：登录 / 首次初始化管理员 / 已登录三态页面。
 // 该页不经过 api/client.js（避免其 401 重定向逻辑与本页自身状态机冲突），
@@ -51,8 +52,7 @@ function parseErrorDetail(data) {
 }
 
 function redirectAfterSuccess() {
-  const next = route.query.next
-  router.push(next ? String(next) : '/')
+  router.push(resolveLoginNext(route.query.next, '/'))
 }
 
 async function focusField(inputRef) {

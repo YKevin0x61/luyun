@@ -1,4 +1,4 @@
-"""配方（SOP）模块 REST 路由。返回 JSON 与 HTML 片段；写操作需 admin 鉴权，读路由保持公开。"""
+"""配方模块 REST 路由。返回 JSON 与 HTML 片段；写操作需 admin 鉴权，读路由保持公开。"""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from services.recipes.store import (
     INGREDIENT_FIELD_MAX_LEN, STEP_TEXT_MAX_LEN, STEPS_MAX_COUNT,
     TIP_TEXT_MAX_LEN, TIPS_MAX_COUNT,
 )
+from services.recipes.sections import RecipeSectionError, require_recipe_section
 from services.recipes.rendering import render_station_to_docx
 from api.security import verify_admin_token
 
@@ -68,10 +69,18 @@ def _validate_text(value: str, label: str, *, required: bool = True, max_len: in
     return text
 
 
+def _validate_section(value: str) -> str:
+    text = _validate_text(value, "章节")
+    try:
+        return require_recipe_section(text)
+    except RecipeSectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _validate_body(value: str) -> str:
     body = value or ""
     if len(body) > BODY_MAX_LEN:
-        raise HTTPException(status_code=400, detail=f"正文长度不能超过 {BODY_MAX_LEN} 个字符")
+        raise HTTPException(status_code=400, detail=f"原文长度不能超过 {BODY_MAX_LEN} 个字符")
     return body
 
 
@@ -162,7 +171,7 @@ class IngredientItem(BaseModel):
 
 
 class RecipeCreate(BaseModel):
-    section: str = "配方"
+    section: str
     recipe_name: str
     body: str = ""
     sort_order: Optional[int] = None
@@ -175,7 +184,7 @@ class RecipeCreate(BaseModel):
 
 
 class RecipeUpdate(BaseModel):
-    section: str = "配方"
+    section: str
     recipe_name: str
     body: str = ""
     sort_order: Optional[int] = None
@@ -211,7 +220,7 @@ async def station_detail(slug: str, include_inactive: bool = False,
         raise HTTPException(status_code=404, detail="岗位不存在")
     html = await store.station_display_html(slug, include_inactive=include_inactive)
     if html is None:
-        raise HTTPException(status_code=404, detail="该岗位暂无可显示条目")
+        raise HTTPException(status_code=404, detail="该岗位暂无可显示配方")
     return {"slug": station["slug"], "title": station["title"],
             "content_html": html}
 
@@ -230,7 +239,7 @@ async def reorder_recipes(slug: str, payload: RecipeReorder,
         raise HTTPException(status_code=404, detail="岗位不存在")
     current_ids = [int(row["id"]) for row in await store.list_recipes(slug)]
     if len(payload.ids) != len(set(payload.ids)) or set(payload.ids) != set(current_ids):
-        raise HTTPException(status_code=400, detail="排序列表必须包含该岗位全部条目且不能重复")
+        raise HTTPException(status_code=400, detail="排序列表必须包含该岗位全部配方且不能重复")
     await store.reorder_recipes(slug, payload.ids)
     return {"ok": True}
 
@@ -263,13 +272,13 @@ async def delete_station(slug: str, store: RecipeStore = Depends(_get_recipe_sto
     return {"ok": True}
 
 
-# ---- 条目管理 ----
+# ---- recipes ----
 @router.post("/stations/{slug}/recipes", dependencies=[Depends(verify_admin_token)])
 async def create_recipe(slug: str, payload: RecipeCreate, store: RecipeStore = Depends(_get_recipe_store)):
     if not await store.station_exists(slug):
         raise HTTPException(status_code=404, detail="岗位不存在")
-    section = _validate_text(payload.section or "配方", "章节")
-    name = _validate_text(payload.recipe_name, "条目名称")
+    section = _validate_section(payload.section)
+    name = _validate_text(payload.recipe_name, "配方名称")
     body = _validate_body(payload.body)
     ingredients = _validate_ingredients(payload.ingredients)
     steps = _validate_steps(payload.steps)
@@ -288,9 +297,9 @@ async def create_recipe(slug: str, payload: RecipeCreate, store: RecipeStore = D
 async def update_recipe(recipe_id: int, payload: RecipeUpdate, store: RecipeStore = Depends(_get_recipe_store)):
     current = await store.get_recipe(recipe_id)
     if current is None:
-        raise HTTPException(status_code=404, detail="条目不存在")
-    section = _validate_text(payload.section or "配方", "章节")
-    name = _validate_text(payload.recipe_name, "条目名称")
+        raise HTTPException(status_code=404, detail="配方不存在")
+    section = _validate_section(payload.section)
+    name = _validate_text(payload.recipe_name, "配方名称")
     body = _validate_body(payload.body)
     sort_order = payload.sort_order if payload.sort_order is not None else int(current["sort_order"])
     ingredients = (
@@ -314,7 +323,7 @@ async def update_recipe(recipe_id: int, payload: RecipeUpdate, store: RecipeStor
 async def delete_recipe(recipe_id: int, store: RecipeStore = Depends(_get_recipe_store)):
     slug = await store.delete_recipe(recipe_id)
     if slug is None:
-        raise HTTPException(status_code=404, detail="条目不存在")
+        raise HTTPException(status_code=404, detail="配方不存在")
     return {"ok": True, "station_slug": slug}
 
 
@@ -322,7 +331,7 @@ async def delete_recipe(recipe_id: int, store: RecipeStore = Depends(_get_recipe
 async def toggle_active(recipe_id: int, store: RecipeStore = Depends(_get_recipe_store)):
     updated = await store.toggle_active(recipe_id)
     if updated is None:
-        raise HTTPException(status_code=404, detail="条目不存在")
+        raise HTTPException(status_code=404, detail="配方不存在")
     return updated
 
 
@@ -330,7 +339,7 @@ async def toggle_active(recipe_id: int, store: RecipeStore = Depends(_get_recipe
 async def confirm_review(recipe_id: int, store: RecipeStore = Depends(_get_recipe_store)):
     updated = await store.confirm_review(recipe_id)
     if updated is None:
-        raise HTTPException(status_code=404, detail="条目不存在")
+        raise HTTPException(status_code=404, detail="配方不存在")
     return updated
 
 
@@ -338,8 +347,21 @@ async def confirm_review(recipe_id: int, store: RecipeStore = Depends(_get_recip
 async def recipe_history(recipe_id: int, store: RecipeStore = Depends(_get_recipe_store)):
     current = await store.get_recipe(recipe_id)
     if current is None:
-        raise HTTPException(status_code=404, detail="条目不存在")
+        raise HTTPException(status_code=404, detail="配方不存在")
     return {"current": current, "history": await store.list_history(recipe_id)}
+
+
+@router.post(
+    "/recipes/{recipe_id}/history/{history_id}/restore",
+    dependencies=[Depends(verify_admin_token)],
+)
+async def restore_recipe_history(
+    recipe_id: int, history_id: int, store: RecipeStore = Depends(_get_recipe_store),
+):
+    updated = await store.restore_history(recipe_id, history_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="配方或历史版本不存在")
+    return updated
 
 
 # ---- CSV ----
@@ -393,8 +415,8 @@ async def import_csv(slug: str, csv_file: UploadFile = File(...),
                 errors.append(f"最多一次导入 {CSV_IMPORT_MAX_ROWS} 条")
                 break
             try:
-                section = _validate_text(row_data.get("section") or "配方", "章节")
-                name = _validate_text(row_data.get("recipe_name") or "", "条目名称")
+                section = _validate_section(row_data.get("section") or "")
+                name = _validate_text(row_data.get("recipe_name") or "", "配方名称")
                 body = _validate_body(row_data.get("body_markdown") or "")
                 ingredients = _validate_ingredients([
                     IngredientItem(**item)
@@ -425,7 +447,7 @@ async def import_csv(slug: str, csv_file: UploadFile = File(...),
     if errors:
         raise HTTPException(status_code=400, detail="；".join(errors))
     if not pending:
-        raise HTTPException(status_code=400, detail="CSV 中没有可导入的有效条目")
+        raise HTTPException(status_code=400, detail="CSV 中没有可导入的有效配方")
     count = await store.bulk_insert_recipes(slug, pending)
     return {"imported": count}
 
@@ -438,7 +460,7 @@ async def export_docx(slug: str, store: RecipeStore = Depends(_get_recipe_store)
         raise HTTPException(status_code=404, detail="岗位不存在")
     recipes = await store.parsed_recipes(slug)
     if not recipes:
-        raise HTTPException(status_code=404, detail="该岗位暂无可显示条目")
+        raise HTTPException(status_code=404, detail="该岗位暂无可显示配方")
     doc = render_station_to_docx(station["title"], recipes)
     buf = io.BytesIO()
     doc.save(buf)

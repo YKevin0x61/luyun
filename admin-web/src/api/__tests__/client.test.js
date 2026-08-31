@@ -103,6 +103,15 @@ describe('api.upload', () => {
     expect(global.window.location.href).toBe('')
   })
 
+  it('401 且处于配方阅读面时不整页跳登录', async () => {
+    global.window.location.pathname = '/recipe/detail'
+    const promise = api.upload('/api/recipes/stations/x/import', new FormData())
+    const xhr = FakeXHR.instances[0]
+    xhr.emitLoad(401, JSON.stringify({ detail: '需要登录' }))
+    await expect(promise).rejects.toMatchObject({ message: '需要登录', status: 401 })
+    expect(global.window.location.href).toBe('')
+  })
+
   it('不传 onProgress 时兼容旧行为（不注册 upload 回调）', async () => {
     const promise = api.upload('/api/recipes/stations/x/import', new FormData())
     const xhr = FakeXHR.instances[0]

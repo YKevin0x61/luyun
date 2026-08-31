@@ -23,6 +23,7 @@ import {
   PRODUCED_LABEL,
   RECOMMENDED_LABEL,
   RECORD_LABEL,
+  RECORD_QTY_LABEL,
   REFRESH_LABEL,
   REFRESHING_LABEL,
   REMAINING_LABEL,
@@ -45,6 +46,7 @@ describe('prep plan chrome copy', () => {
       RECOMMENDED_LABEL,
       PRODUCED_LABEL,
       RECORD_LABEL,
+      RECORD_QTY_LABEL,
       UNDO_LABEL,
       DISCARD_LABEL,
       EXTRA_RECORD_LABEL,
@@ -79,6 +81,7 @@ describe('prep plan chrome copy', () => {
     expect(SKIP_LABEL).toBe('不用做')
     expect(PRODUCED_LABEL).toBe('已做')
     expect(RECORD_LABEL).toBe('登记')
+    expect(RECORD_QTY_LABEL).toBe('这次做了')
     expect(UNDO_LABEL).toBe('撤销')
     expect(UNDO_LABEL).not.toContain('报废')
     expect(DISCARD_LABEL).toBe('报废')

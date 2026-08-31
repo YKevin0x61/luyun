@@ -205,6 +205,24 @@ def test_create_recipe_validation(client):
     r = client.post("/api/recipes/stations/changfen/recipes",
                     json={"section": "配方", "recipe_name": "", "body": "x"})
     assert r.status_code == 400
+    assert r.json()["detail"] == "配方名称不能为空"
+
+
+def test_create_recipe_unknown_section_rejected(client):
+    r = client.post("/api/recipes/stations/changfen/recipes",
+                    json={"section": "粥品", "recipe_name": "新", "body": "x"})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "章节必须是配方、出品标准、检核要求或食安要求"
+    r = client.post("/api/recipes/stations/changfen/recipes",
+                    json={"section": "  ", "recipe_name": "新", "body": "x"})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "章节不能为空"
+
+
+def test_missing_recipe_uses_recipe_word(client):
+    r = client.get("/api/recipes/recipes/99999/history")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "配方不存在"
 
 
 def test_export_csv(client):
@@ -1082,4 +1100,43 @@ def test_confirm_review_requires_auth(client):
     client.headers.pop("X-Admin-Token", None)
     r = client.post("/api/recipes/recipes/1/confirm-review")
     assert r.status_code == 401
+
+
+def test_restore_history_applies_previous_version(client):
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    client.put(
+        f"/api/recipes/recipes/{rid}",
+        json={
+            "section": "配方",
+            "recipe_name": "改名",
+            "body": "新正文",
+            "is_new": False,
+            "ingredients": [{"name": "酱油", "amount": "80", "unit": "g"}],
+            "steps": ["先改"],
+            "tips": [],
+        },
+    )
+    hist = client.get(f"/api/recipes/recipes/{rid}/history").json()["history"]
+    assert hist[0]["recipe_name"] == "肠粉酱油"
+    history_id = hist[0]["id"]
+    restored = client.post(
+        f"/api/recipes/recipes/{rid}/history/{history_id}/restore",
+    )
+    assert restored.status_code == 200
+    assert restored.json()["recipe_name"] == "肠粉酱油"
+    after = client.get(f"/api/recipes/recipes/{rid}/history").json()["history"]
+    assert after[0]["recipe_name"] == "改名"
+    assert after[0]["ingredients"] == [{"name": "酱油", "amount": "80", "unit": "g"}]
+
+
+def test_restore_history_requires_auth(client):
+    client.headers.pop("X-Admin-Token", None)
+    r = client.post("/api/recipes/recipes/1/history/1/restore")
+    assert r.status_code == 401
+
+
+def test_restore_history_unknown_returns_404(client):
+    rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
+    r = client.post(f"/api/recipes/recipes/{rid}/history/99999/restore")
+    assert r.status_code == 404
 

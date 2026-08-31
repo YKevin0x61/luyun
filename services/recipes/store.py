@@ -15,6 +15,7 @@ import aiosqlite
 from config import settings
 from db_core.utils import SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE_WAL
 
+from .sections import DEFAULT_RECIPE_SECTION, canonicalize_section
 from .sop_parse import (
     ParsedRecipe,
     recipes_to_display_markdown,
@@ -28,6 +29,12 @@ STEP_TEXT_MAX_LEN = TEXT_FIELD_MAX_LEN
 STEPS_MAX_COUNT = 50
 TIP_TEXT_MAX_LEN = TEXT_FIELD_MAX_LEN
 TIPS_MAX_COUNT = 50
+NEW_STATION_SEED_SECTION = DEFAULT_RECIPE_SECTION
+NEW_STATION_SEED_NAME = "（示例）"
+NEW_STATION_SEED_BODY = "请填写用料、步骤或小贴士。"
+LAST_RECIPE_PLACEHOLDER_SECTION = DEFAULT_RECIPE_SECTION
+LAST_RECIPE_PLACEHOLDER_NAME = "（占位）"
+LAST_RECIPE_PLACEHOLDER_BODY = "请至少保留一条配方，或删除整个岗位。"
 BODY_MAX_LEN = 50_000
 LIKE_ESCAPE_CHAR = "!"
 INGREDIENT_KEYS = ("name", "amount", "unit")
@@ -180,6 +187,26 @@ def _recipe_dict(row) -> dict:
     return data
 
 
+def _history_dict(row) -> dict:
+    data = dict(row)
+    data["id"] = int(data["id"])
+    data["recipe_id"] = int(data["recipe_id"])
+    data["ingredients"] = _ingredients_from_storage(data.pop("ingredients_json", None))
+    data["steps"] = _steps_from_storage(data.pop("steps_json", None))
+    data["tips"] = _tips_from_storage(data.pop("tips_json", None))
+    qty, unit = _pair_base_servings(
+        data.get("base_servings_qty"), data.get("base_servings_unit"),
+    )
+    data["base_servings_qty"] = qty
+    data["base_servings_unit"] = unit
+    try:
+        data["is_new"] = 1 if int(data.get("is_new") or 0) else 0
+    except (TypeError, ValueError):
+        data["is_new"] = 0
+    data["sort_order"] = int(data.get("sort_order") or 0)
+    return data
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -254,6 +281,11 @@ class RecipeStore:
                 body_markdown TEXT NOT NULL,
                 sort_order INTEGER NOT NULL,
                 is_new INTEGER NOT NULL DEFAULT 0,
+                ingredients_json TEXT,
+                steps_json TEXT,
+                tips_json TEXT,
+                base_servings_qty REAL,
+                base_servings_unit TEXT,
                 changed_at TEXT NOT NULL,
                 FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
             );
@@ -295,6 +327,40 @@ class RecipeStore:
             await self.conn.execute(
                 "ALTER TABLE sop_recipes ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0"
             )
+        hist_cur = await self.conn.execute("PRAGMA table_info(sop_recipes_history)")
+        hist_cols = {row["name"] for row in await hist_cur.fetchall()}
+        if "ingredients_json" not in hist_cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes_history ADD COLUMN ingredients_json TEXT"
+            )
+        if "steps_json" not in hist_cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes_history ADD COLUMN steps_json TEXT"
+            )
+        if "tips_json" not in hist_cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes_history ADD COLUMN tips_json TEXT"
+            )
+        if "base_servings_qty" not in hist_cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes_history ADD COLUMN base_servings_qty REAL"
+            )
+        if "base_servings_unit" not in hist_cols:
+            await self.conn.execute(
+                "ALTER TABLE sop_recipes_history ADD COLUMN base_servings_unit TEXT"
+            )
+        await self._canonicalize_stored_sections()
+
+    async def _canonicalize_stored_sections(self) -> None:
+        for table in ("sop_recipes", "sop_recipes_history"):
+            cur = await self.conn.execute(f"SELECT DISTINCT section FROM {table}")
+            for (name,) in await cur.fetchall():
+                canon = canonicalize_section(name)
+                if canon != name:
+                    await self.conn.execute(
+                        f"UPDATE {table} SET section = ? WHERE section = ?",
+                        (canon, name),
+                    )
 
     # ---- 岗位 ----
     async def list_stations(self) -> list[dict]:
@@ -326,7 +392,7 @@ class RecipeStore:
         await self.conn.execute(
             "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, is_new, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (slug, "配方", "示例条目", "在此编写 Markdown 正文。", 0, 0, now),
+            (slug, NEW_STATION_SEED_SECTION, NEW_STATION_SEED_NAME, NEW_STATION_SEED_BODY, 0, 0, now),
         )
         await self.conn.commit()
 
@@ -350,7 +416,7 @@ class RecipeStore:
             "UPDATE sop_stations SET updated_at = ? WHERE slug = ?", (now, slug)
         )
 
-    # ---- 条目 ----
+    # ---- recipes ----
     async def list_recipes(self, slug: str) -> list[dict]:
         cur = await self.conn.execute(
             """
@@ -411,6 +477,7 @@ class RecipeStore:
         tips=None, base_servings_qty=None, base_servings_unit=None,
     ) -> int:
         now = utc_now_iso()
+        section = canonicalize_section(section)
         sort_order = await self._allocate_sort_order(slug, section, explicit_sort)
         is_new = is_new_checked
         qty, unit = _pair_base_servings(base_servings_qty, base_servings_unit)
@@ -436,6 +503,7 @@ class RecipeStore:
         current = await self.get_recipe(recipe_id)
         if current is None:
             return None
+        section = canonicalize_section(section)
         now = utc_now_iso()
         is_new = is_new_checked
         stored_ingredients = (
@@ -450,13 +518,7 @@ class RecipeStore:
             current["base_servings_unit"] if base_servings_unit is _UNSET else base_servings_unit
         )
         stored_qty, stored_unit = _pair_base_servings(qty_in, unit_in)
-        await self.conn.execute(
-            "INSERT INTO sop_recipes_history "
-            "(recipe_id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, changed_at) "
-            "SELECT id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, ? "
-            "FROM sop_recipes WHERE id = ?",
-            (now, recipe_id),
-        )
+        await self._insert_history_snapshot(recipe_id, now)
         await self.conn.execute(
             "UPDATE sop_recipes SET section=?, recipe_name=?, body_markdown=?, sort_order=?, is_new=?, "
             "ingredients_json=?, steps_json=?, tips_json=?, base_servings_qty=?, base_servings_unit=?, "
@@ -497,7 +559,8 @@ class RecipeStore:
             await self.conn.execute(
                 "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, is_new, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (slug, "正文", "（占位）", "请至少保留一条条目，或删除整个岗位。", 0, 0, now),
+                (slug, LAST_RECIPE_PLACEHOLDER_SECTION, LAST_RECIPE_PLACEHOLDER_NAME,
+                 LAST_RECIPE_PLACEHOLDER_BODY, 0, 0, now),
             )
         await self._touch_station(slug, now)
         await self.conn.commit()
@@ -580,11 +643,59 @@ class RecipeStore:
 
     async def list_history(self, recipe_id: int) -> list[dict]:
         cur = await self.conn.execute(
-            "SELECT section, recipe_name, body_markdown, sort_order, is_new, changed_at "
-            "FROM sop_recipes_history WHERE recipe_id = ? ORDER BY changed_at DESC",
+            "SELECT id, recipe_id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, "
+            "ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit, changed_at "
+            "FROM sop_recipes_history WHERE recipe_id = ? ORDER BY changed_at DESC, id DESC",
             (recipe_id,),
         )
-        return [dict(r) for r in await cur.fetchall()]
+        return [_history_dict(r) for r in await cur.fetchall()]
+
+    async def _insert_history_snapshot(self, recipe_id: int, changed_at: str) -> None:
+        await self.conn.execute(
+            "INSERT INTO sop_recipes_history "
+            "(recipe_id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, "
+            "ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit, changed_at) "
+            "SELECT id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, "
+            "ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit, ? "
+            "FROM sop_recipes WHERE id = ?",
+            (changed_at, recipe_id),
+        )
+
+    async def restore_history(self, recipe_id: int, history_id: int) -> Optional[dict]:
+        current = await self.get_recipe(recipe_id)
+        if current is None:
+            return None
+        cur = await self.conn.execute(
+            "SELECT id, recipe_id, station_slug, section, recipe_name, body_markdown, sort_order, is_new, "
+            "ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit, changed_at "
+            "FROM sop_recipes_history WHERE id = ? AND recipe_id = ?",
+            (history_id, recipe_id),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        snapshot = _history_dict(row)
+        now = utc_now_iso()
+        await self._insert_history_snapshot(recipe_id, now)
+        stored_qty, stored_unit = _pair_base_servings(
+            snapshot["base_servings_qty"], snapshot["base_servings_unit"],
+        )
+        await self.conn.execute(
+            "UPDATE sop_recipes SET section=?, recipe_name=?, body_markdown=?, sort_order=?, is_new=?, "
+            "ingredients_json=?, steps_json=?, tips_json=?, base_servings_qty=?, base_servings_unit=?, "
+            "updated_at=? WHERE id = ?",
+            (
+                canonicalize_section(snapshot["section"]), snapshot["recipe_name"], snapshot["body_markdown"],
+                snapshot["sort_order"], snapshot["is_new"],
+                _ingredients_to_storage(snapshot["ingredients"]),
+                _steps_to_storage(snapshot["steps"]),
+                _tips_to_storage(snapshot["tips"]),
+                stored_qty, stored_unit, now, recipe_id,
+            ),
+        )
+        await self._touch_station(current["station_slug"], now)
+        await self.conn.commit()
+        return await self.get_recipe(recipe_id)
 
     async def bulk_insert_recipes(self, slug: str, rows: list[tuple]) -> int:
         """rows: (section, recipe_name, body, sort_order, is_new_int, ingredients, steps, tips)."""
@@ -595,7 +706,7 @@ class RecipeStore:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
-                    slug, section, name, body, sort_order, is_new,
+                    slug, canonicalize_section(section), name, body, sort_order, is_new,
                     _ingredients_to_storage(ingredients), _steps_to_storage(steps),
                     _tips_to_storage(tips), now,
                 )
@@ -623,7 +734,7 @@ class RecipeStore:
             qty, unit = _pair_base_servings(r["base_servings_qty"], r["base_servings_unit"])
             parsed.append(
                 ParsedRecipe(
-                    section=r["section"], recipe_name=r["recipe_name"],
+                    section=canonicalize_section(r["section"]), recipe_name=r["recipe_name"],
                     body_markdown=r["body_markdown"], sort_order=int(r["sort_order"]),
                     is_new=bool(r["is_new"]), is_active=bool(r["is_active"]),
                     id=int(r["id"]),

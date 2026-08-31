@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import QRCode from 'qrcode'
 import { api } from '../../api/client'
@@ -10,6 +10,33 @@ import { parseBaseServingsQty, scaleAmount, servingsFactor } from '../../utils/r
 import { isRecipeDrawerPanel, nextRecipeDrawerState } from '../../utils/recipeDrawer'
 import SvgIcon from '../../components/SvgIcon.vue'
 import RecipeNavIcon from './RecipeNavIcon.vue'
+import RecipeFormModal from '../../components/recipe/RecipeFormModal.vue'
+import {
+  RECIPE_BRAND_MARK,
+  RECIPE_BRAND_TAGLINE,
+  RECIPE_BRAND_TITLE,
+  RECIPE_NAV_HOME_LABEL,
+  RECIPE_NAV_MANAGE_LABEL,
+  RECIPE_NAV_STATIONS_LABEL,
+  recipeDocumentTitle,
+} from '../../utils/recipeCopy'
+import { deleteRecipeConfirmCopy } from '../../utils/recipeConfirmCopy'
+import {
+  readerToggleLabel,
+  recipeCardId,
+  recipeCardIsInactive,
+  recipeCardName,
+} from '../../utils/recipeReaderActions'
+import {
+  READER_DRAG_BLOCK_MQ,
+  READER_DRAG_IGNORE_SELECTOR,
+  applySubsetOrder,
+  collectGridRecipeIds,
+  eventElement,
+  insertCardRelative,
+  readerDragAllowed,
+  sameSectionGrid,
+} from '../../utils/recipeReaderDrag'
 
 // 通过 innerHTML 注入的原生 DOM（复制按钮），无法命中 Vue 的 <style scoped>，故用行内 style 兜底对齐。
 const CHECK_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:-0.15em;flex-shrink:0"><path d="M20 6 9 17l-5-5"/></svg>'
@@ -30,7 +57,7 @@ const tocVisible = ref(false)
 
 const theme = ref(RC.readPref(window.localStorage, 'sop.theme', 'auto'))
 const density = ref(RC.readPref(window.localStorage, 'sop.density', 'compact') !== 'grid')
-const fontPx = ref(RC.clampFontPx(RC.readPref(window.localStorage, 'sop.fontScale', '14')))
+const fontPx = ref(RC.clampFontPx(RC.readPref(window.localStorage, 'sop.fontScale', '12')))
 const searchTerm = ref('')
 const searchCount = ref('')
 const onlyNew = ref(false)
@@ -43,6 +70,16 @@ const servingsControlVisible = ref(false)
 const drawerPanel = ref(null)
 const drawerRef = ref(null)
 const canEdit = ref(false)
+const editRecipeId = ref(null)
+const confirmDialog = reactive({
+  open: false,
+  title: '',
+  body: '',
+  confirmLabel: '确认',
+  busy: false,
+  error: '',
+})
+let confirmAction = null
 const lastTriggerEls = {}
 const SHEET_TITLES = { toc: '章节目录', more: '更多', font: '字号', servings: '目标份数', search: '搜索' }
 const sheetOpen = computed(() => isRecipeDrawerPanel(drawerPanel.value))
@@ -50,10 +87,15 @@ const sheetTitle = computed(() => SHEET_TITLES[drawerPanel.value] || '')
 
 let searchDebounce = null
 let desktopMq = null
+let dragBlockMq = null
 let intersectionObserver = null
 let focusHighlightTimer = null
 let scaleOutsideHandler = null
 let scaleEscHandler = null
+let dragRoot = null
+let dragFromId = null
+let reorderBusy = false
+const dragBlocked = ref(false)
 const FOCUS_HIGHLIGHT_MS = 1600
 
 function applyTheme(t) {
@@ -82,6 +124,7 @@ function toggleDensity() {
 }
 
 async function load() {
+  unbindReaderDrag()
   loading.value = true
   errorMsg.value = ''
   try {
@@ -90,14 +133,15 @@ async function load() {
     })
     title.value = data.title
     contentHtml.value = data.content_html
-    document.title = `${data.title} · 配方 SOP`
-    await nextTick()
-    afterContentRendered()
+    document.title = recipeDocumentTitle(data.title)
   } catch (e) {
-    // 对齐老页 public/recipe-app.js:92,100 的固定中文文案：404 → 未找到该岗位，其它异常 → 加载失败。
-    errorMsg.value = e.status === 404 ? '未找到该岗位' : '加载失败'
+    errorMsg.value = e.status === 404 ? '未找到该岗位' : '无法加载该岗位配方，请稍后重试'
   } finally {
     loading.value = false
+  }
+  if (!errorMsg.value) {
+    await nextTick()
+    afterContentRendered()
   }
 }
 
@@ -107,7 +151,8 @@ function afterContentRendered() {
   injectScaleControls()
   applyAllCardScales()
   bindScaleDismiss()
-  injectCopyButtons()
+  injectCardActions()
+  bindReaderDrag()
   nextTick(() => applyFocusFromQuery())
 }
 
@@ -188,27 +233,275 @@ function escapeHtml(s) {
   return d.innerHTML
 }
 
-function injectCopyButtons() {
+function injectCardActions() {
   if (!bodyRef.value) return
   bodyRef.value.querySelectorAll('article.recipe-card').forEach((card) => {
-    if (card.querySelector('.recipe-copy')) return
-    const btn = document.createElement('button')
-    btn.type = 'button'
-    btn.className = 'recipe-copy no-print'
-    btn.textContent = '复制'
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation()
-      const head = card.querySelector('.recipe-card-head')
-      const bodyEl = card.querySelector('.recipe-card-body')
-      const text = `${head ? head.textContent : ''}\n${bodyEl ? bodyEl.textContent : ''}`.trim()
-      copyText(text).then(() => {
-        const old = btn.innerHTML
-        btn.innerHTML = `${CHECK_ICON_SVG} 已复制`
-        setTimeout(() => { btn.innerHTML = old }, 900)
+    let wrap = card.querySelector('.recipe-card-actions')
+    if (!wrap) {
+      wrap = document.createElement('div')
+      wrap.className = 'recipe-card-actions no-print'
+      wrap.setAttribute('role', 'group')
+      wrap.setAttribute('aria-label', '配方操作')
+      const copy = document.createElement('button')
+      copy.type = 'button'
+      copy.className = 'recipe-copy'
+      copy.textContent = '复制'
+      copy.addEventListener('click', (e) => {
+        e.stopPropagation()
+        const head = card.querySelector('.recipe-card-head')
+        const bodyEl = card.querySelector('.recipe-card-body')
+        const text = `${head ? head.textContent : ''}\n${bodyEl ? bodyEl.textContent : ''}`.trim()
+        copyText(text).then(() => {
+          const old = copy.innerHTML
+          copy.innerHTML = `${CHECK_ICON_SVG} 已复制`
+          setTimeout(() => { copy.innerHTML = old }, 900)
+        })
       })
-    })
-    card.appendChild(btn)
+      wrap.appendChild(copy)
+      card.appendChild(wrap)
+    }
+    syncCardAdminActions(card, wrap)
   })
+}
+
+function makeReaderActionButton(action, label, extraClass, handler) {
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = extraClass ? `recipe-card-action ${extraClass}` : 'recipe-card-action'
+  btn.setAttribute('data-reader-action', action)
+  btn.textContent = label
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    handler()
+  })
+  return btn
+}
+
+function syncCardAdminActions(card, wrap) {
+  wrap.querySelectorAll('[data-reader-action]').forEach((el) => el.remove())
+  if (!canEdit.value) return
+  const id = recipeCardId(card)
+  if (!id) return
+  const inactive = recipeCardIsInactive(card)
+  wrap.appendChild(makeReaderActionButton('delete', '删除', 'recipe-card-action--danger', () => {
+    onReaderDelete(card)
+  }))
+  wrap.appendChild(makeReaderActionButton('toggle', readerToggleLabel(inactive), '', () => {
+    onReaderToggle(card)
+  }))
+  wrap.appendChild(makeReaderActionButton('edit', '编辑', '', () => {
+    onReaderEdit(card)
+  }))
+}
+
+function askConfirm(copy, action) {
+  confirmDialog.title = copy.title
+  confirmDialog.body = copy.body
+  confirmDialog.confirmLabel = copy.confirmLabel
+  confirmDialog.error = ''
+  confirmAction = action
+  confirmDialog.open = true
+}
+
+function cancelConfirm() {
+  if (confirmDialog.busy) return
+  confirmDialog.open = false
+  confirmDialog.error = ''
+  confirmAction = null
+}
+
+async function runConfirm() {
+  if (confirmDialog.busy) return
+  confirmDialog.busy = true
+  confirmDialog.error = ''
+  try {
+    await confirmAction?.()
+    confirmDialog.open = false
+    confirmAction = null
+  } catch (e) {
+    confirmDialog.error = e.message || '操作失败'
+  } finally {
+    confirmDialog.busy = false
+  }
+}
+
+function onReaderDelete(card) {
+  const id = recipeCardId(card)
+  if (!id) return
+  askConfirm(deleteRecipeConfirmCopy({ recipeName: recipeCardName(card) }), async () => {
+    await api.delete(`/api/recipes/recipes/${id}`)
+    await load()
+  })
+}
+
+async function onReaderToggle(card) {
+  const id = recipeCardId(card)
+  if (!id) return
+  try {
+    await api.post(`/api/recipes/recipes/${id}/toggle-active`, {})
+    await load()
+  } catch (e) {
+    window.alert(e.message || '无法更新配方状态')
+  }
+}
+
+function onReaderEdit(card) {
+  const id = recipeCardId(card)
+  if (!id) return
+  editRecipeId.value = id
+}
+
+function closeEditForm() {
+  editRecipeId.value = null
+}
+
+async function onEditFormSaved() {
+  closeEditForm()
+  await load()
+}
+
+function readerDragEnabled() {
+  return readerDragAllowed({ canEdit: canEdit.value, blocked: dragBlocked.value })
+}
+
+function cardFromDragEvent(e) {
+  const card = eventElement(e)?.closest?.('article.recipe-card')
+  if (!card || !dragRoot || !dragRoot.contains(card)) return null
+  return card
+}
+
+function clearDropTargets(except) {
+  if (!dragRoot) return
+  dragRoot.querySelectorAll('article.recipe-card.is-drop-target').forEach((el) => {
+    if (el !== except) el.classList.remove('is-drop-target')
+  })
+}
+
+function syncCardDraggable() {
+  if (!bodyRef.value) return
+  const on = readerDragEnabled()
+  bodyRef.value.querySelectorAll('article.recipe-card[data-recipe-id]').forEach((card) => {
+    if (on) {
+      card.setAttribute('draggable', 'true')
+      card.classList.add('is-draggable')
+    } else {
+      card.removeAttribute('draggable')
+      card.classList.remove('is-draggable', 'is-dragging', 'is-drop-target')
+    }
+  })
+}
+
+function onReaderDragStart(e) {
+  if (!readerDragEnabled()) {
+    e.preventDefault()
+    return
+  }
+  if (eventElement(e)?.closest?.(READER_DRAG_IGNORE_SELECTOR)) {
+    e.preventDefault()
+    return
+  }
+  const card = cardFromDragEvent(e)
+  const id = card?.getAttribute('data-recipe-id')
+  if (!card || !id) {
+    e.preventDefault()
+    return
+  }
+  dragFromId = id
+  card.classList.add('is-dragging')
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', id)
+  }
+}
+
+function onReaderDragOver(e) {
+  if (!readerDragEnabled() || !dragFromId) return
+  const toCard = cardFromDragEvent(e)
+  const fromCard = dragRoot?.querySelector(`article.recipe-card[data-recipe-id="${dragFromId}"]`)
+  if (!toCard || !fromCard || !sameSectionGrid(fromCard, toCard)) {
+    clearDropTargets()
+    return
+  }
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  toCard.classList.add('is-drop-target')
+  clearDropTargets(toCard)
+}
+
+function onReaderDragEnd() {
+  if (dragRoot) {
+    dragRoot.querySelectorAll('article.recipe-card.is-dragging, article.recipe-card.is-drop-target').forEach((el) => {
+      el.classList.remove('is-dragging', 'is-drop-target')
+    })
+  }
+  dragFromId = null
+}
+
+async function persistGridOrder(grid) {
+  if (reorderBusy || !slug.value) return
+  const subsetIds = collectGridRecipeIds(grid)
+  if (subsetIds.length < 2) return
+  reorderBusy = true
+  try {
+    const data = await api.get(`/api/recipes/stations/${encodeURIComponent(slug.value)}/recipes`)
+    const fullIds = (data.recipes || []).map((row) => row.id)
+    const ids = applySubsetOrder(fullIds, subsetIds)
+    const unchanged = ids.length === fullIds.length
+      && ids.every((id, i) => Number(id) === Number(fullIds[i]))
+    if (unchanged) return
+    await api.put(
+      `/api/recipes/stations/${encodeURIComponent(slug.value)}/recipes/reorder`,
+      { ids },
+    )
+  } catch (e) {
+    window.alert(e.message || '排序保存失败')
+    await load()
+  } finally {
+    reorderBusy = false
+  }
+}
+
+async function onReaderDrop(e) {
+  e.preventDefault()
+  const toCard = cardFromDragEvent(e)
+  const rawFrom = dragFromId || (e.dataTransfer && e.dataTransfer.getData('text/plain'))
+  const fromId = rawFrom && /^\d+$/.test(rawFrom) ? rawFrom : ''
+  const fromCard = fromId && dragRoot
+    ? dragRoot.querySelector(`article.recipe-card[data-recipe-id="${fromId}"]`)
+    : null
+  onReaderDragEnd()
+  if (!readerDragEnabled() || !fromCard || !toCard) return
+  if (!insertCardRelative(fromCard, toCard)) return
+  await persistGridOrder(toCard.closest('.sop-section-grid'))
+}
+
+function bindReaderDrag() {
+  unbindReaderDrag()
+  if (!bodyRef.value) return
+  dragRoot = bodyRef.value
+  dragRoot.addEventListener('dragstart', onReaderDragStart)
+  dragRoot.addEventListener('dragover', onReaderDragOver)
+  dragRoot.addEventListener('drop', onReaderDrop)
+  dragRoot.addEventListener('dragend', onReaderDragEnd)
+  syncCardDraggable()
+}
+
+function unbindReaderDrag() {
+  if (!dragRoot) return
+  dragRoot.removeEventListener('dragstart', onReaderDragStart)
+  dragRoot.removeEventListener('dragover', onReaderDragOver)
+  dragRoot.removeEventListener('drop', onReaderDrop)
+  dragRoot.removeEventListener('dragend', onReaderDragEnd)
+  dragRoot.querySelectorAll('article.recipe-card').forEach((card) => {
+    card.removeAttribute('draggable')
+    card.classList.remove('is-draggable', 'is-dragging', 'is-drop-target')
+  })
+  dragRoot = null
+  dragFromId = null
+}
+
+function onDragBlockMq(e) {
+  dragBlocked.value = e.matches
 }
 
 function copyText(text) {
@@ -433,6 +726,10 @@ function onDrawerBackdrop() {
 
 function onDrawerKeydown(e) {
   if (e.key !== 'Escape') return
+  if (confirmDialog.open) {
+    cancelConfirm()
+    return
+  }
   if (!drawerPanel.value) return
   applyDrawer(nextRecipeDrawerState({ open: drawerPanel.value }, { type: 'escape' }))
 }
@@ -488,6 +785,10 @@ watch(drawerPanel, (open) => {
 watch(() => route.query.focus, () => {
   if (!loading.value) nextTick(() => applyFocusFromQuery())
 })
+watch([canEdit, dragBlocked], () => {
+  injectCardActions()
+  syncCardDraggable()
+})
 onMounted(() => {
   applyTheme(theme.value)
   applyFont(fontPx.value)
@@ -496,6 +797,9 @@ onMounted(() => {
   document.addEventListener('keydown', onDrawerKeydown)
   desktopMq = window.matchMedia('(min-width: 901px)')
   desktopMq.addEventListener('change', onDesktopMq)
+  dragBlockMq = window.matchMedia(READER_DRAG_BLOCK_MQ)
+  dragBlocked.value = dragBlockMq.matches
+  dragBlockMq.addEventListener('change', onDragBlockMq)
   loadEditAccess()
   load()
 })
@@ -504,8 +808,10 @@ onBeforeUnmount(() => {
   clearTimeout(searchDebounce)
   if (focusHighlightTimer != null) clearTimeout(focusHighlightTimer)
   unbindScaleDismiss()
+  unbindReaderDrag()
   document.removeEventListener('keydown', onDrawerKeydown)
   desktopMq?.removeEventListener('change', onDesktopMq)
+  dragBlockMq?.removeEventListener('change', onDragBlockMq)
   document.body.style.overflow = ''
   document.documentElement.removeAttribute('data-theme')
   document.documentElement.style.removeProperty('--reader-fs')
@@ -518,16 +824,16 @@ onBeforeUnmount(() => {
     <header class="site-header no-print" style="position:static">
       <div class="site-header-inner">
         <router-link class="site-brand" to="/recipe">
-          <span class="site-brand-mark" aria-hidden="true"><span class="site-brand-mark-inner">SOP</span></span>
+          <span class="site-brand-mark" aria-hidden="true"><span class="site-brand-mark-inner">{{ RECIPE_BRAND_MARK }}</span></span>
           <span class="site-brand-text">
-            <span class="site-brand-title">配方 SOP</span>
-            <span class="site-brand-tagline">岗位配方 · 出品检核</span>
+            <span class="site-brand-title">{{ RECIPE_BRAND_TITLE }}</span>
+            <span class="site-brand-tagline">{{ RECIPE_BRAND_TAGLINE }}</span>
           </span>
         </router-link>
         <nav class="site-nav no-print">
-          <router-link class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />返回主页</router-link>
-          <router-link class="site-nav-link" to="/recipe"><RecipeNavIcon name="layout-grid" :size="14" />岗位列表</router-link>
-          <router-link class="site-nav-link" to="/recipe/manage"><RecipeNavIcon name="sparkles" :size="14" />配方管理</router-link>
+          <router-link class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />{{ RECIPE_NAV_HOME_LABEL }}</router-link>
+          <router-link class="site-nav-link" to="/recipe"><RecipeNavIcon name="layout-grid" :size="14" />{{ RECIPE_NAV_STATIONS_LABEL }}</router-link>
+          <router-link class="site-nav-link" to="/recipe/manage"><RecipeNavIcon name="sparkles" :size="14" />{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
         </nav>
         <div class="sop-header-actions no-print">
           <button
@@ -569,7 +875,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
     <main class="site-main">
-      <div class="sop-layout">
+      <div class="sop-layout" :class="{ 'sop-layout--with-toc': tocVisible }">
         <aside class="sop-toc no-print" id="sopToc" v-show="tocVisible" v-html="tocHtml"></aside>
         <article class="sop-article">
           <div class="sop-toolbar no-print">
@@ -719,7 +1025,7 @@ onBeforeUnmount(() => {
               >
                 <span aria-hidden="true">◱</span>打印预览
               </router-link>
-              <router-link v-if="canEdit" class="btn btn-ghost" to="/recipe/manage">配方管理</router-link>
+              <router-link v-if="canEdit" class="btn btn-ghost" to="/recipe/manage">{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
             </div>
           </div>
         </div>
@@ -733,6 +1039,43 @@ onBeforeUnmount(() => {
         <div class="qr-box"><canvas ref="qrCanvasRef"></canvas></div>
         <p class="qr-url">{{ qrModalUrl }}</p>
         <div class="qr-actions"><button type="button" class="btn btn-ghost" @click="qrModalUrl = ''">关闭</button></div>
+      </div>
+    </div>
+
+    <RecipeFormModal
+      v-if="editRecipeId"
+      :key="editRecipeId"
+      :station-slug="String(slug || '')"
+      :station-title="title"
+      :recipe-id="editRecipeId"
+      @close="closeEditForm"
+      @saved="onEditFormSaved"
+      @review-confirmed="load"
+    />
+
+    <div
+      v-if="confirmDialog.open"
+      class="print-preview-modal"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="recipe-reader-confirm-title"
+      aria-describedby="recipe-reader-confirm-body"
+      @click.self="cancelConfirm"
+    >
+      <div class="print-preview-modal-backdrop" @click="cancelConfirm"></div>
+      <div class="sop-panel qr-modal">
+        <h3 id="recipe-reader-confirm-title" class="qr-modal-title">{{ confirmDialog.title }}</h3>
+        <p id="recipe-reader-confirm-body" class="qr-url">{{ confirmDialog.body }}</p>
+        <p v-if="confirmDialog.error" class="flash flash-error">{{ confirmDialog.error }}</p>
+        <div class="qr-actions" style="gap:.5rem">
+          <button
+            type="button"
+            class="btn btn-danger"
+            :disabled="confirmDialog.busy"
+            @click="runConfirm"
+          >{{ confirmDialog.confirmLabel }}</button>
+          <button type="button" class="btn btn-ghost" :disabled="confirmDialog.busy" @click="cancelConfirm">取消</button>
+        </div>
       </div>
     </div>
   </div>

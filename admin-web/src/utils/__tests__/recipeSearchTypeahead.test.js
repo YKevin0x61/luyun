@@ -5,6 +5,7 @@ import {
   flattenCappedSearchHits,
   nextTypeaheadKeyboardState,
   recipeFocusLocation,
+  recipeManageEditLocation,
 } from '../recipeSearchTypeahead.js'
 
 const groups = [
@@ -111,6 +112,15 @@ describe('recipeFocusLocation', () => {
     expect(recipeFocusLocation('changfen', 42)).toEqual({
       path: '/recipe/detail',
       query: { slug: 'changfen', focus: '42' },
+    })
+  })
+})
+
+describe('recipeManageEditLocation', () => {
+  it('打开管理页并带上岗位和配方 id', () => {
+    expect(recipeManageEditLocation('肠粉档', 120)).toEqual({
+      path: '/recipe/manage',
+      query: { slug: '肠粉档', edit: '120' },
     })
   })
 })

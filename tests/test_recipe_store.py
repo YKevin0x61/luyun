@@ -3,7 +3,15 @@ import sqlite3
 
 import pytest
 
-from services.recipes.store import RecipeStore
+from services.recipes.store import (
+    LAST_RECIPE_PLACEHOLDER_BODY,
+    LAST_RECIPE_PLACEHOLDER_NAME,
+    LAST_RECIPE_PLACEHOLDER_SECTION,
+    NEW_STATION_SEED_BODY,
+    NEW_STATION_SEED_NAME,
+    NEW_STATION_SEED_SECTION,
+    RecipeStore,
+)
 
 
 def _seed_db(path):
@@ -62,6 +70,34 @@ def test_create_and_get_recipe(store):
     assert r["recipe_name"] == "新条目"
 
 
+def test_create_recipe_canonicalizes_legacy_section(store):
+    rid = _run(store.create_recipe("changfen", "粥品", "艇仔粥", "米", None, False))
+    assert _run(store.get_recipe(rid))["section"] == "配方"
+
+
+def test_connect_rewrites_legacy_sections(tmp_path):
+    db = tmp_path / "legacy-sections.db"
+    _seed_db(str(db))
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO sop_recipes (station_slug,section,recipe_name,body_markdown,sort_order,is_new,is_active,updated_at) "
+        "VALUES ('changfen','二十大招牌检核','咸蛋黄肉松蛋挞','x',1,0,1,'2026-01-01T00:00:00+00:00')"
+    )
+    conn.execute(
+        "INSERT INTO sop_recipes (station_slug,section,recipe_name,body_markdown,sort_order,is_new,is_active,updated_at) "
+        "VALUES ('changfen','常规检核','仪容','x',2,0,1,'2026-01-01T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+    store = RecipeStore(str(db))
+    _run(store.connect())
+    by_name = {row["recipe_name"]: row["section"] for row in _run(store.list_recipes("changfen"))}
+    assert by_name["肠粉酱油"] == "配方"
+    assert by_name["咸蛋黄肉松蛋挞"] == "检核要求"
+    assert by_name["仪容"] == "检核要求"
+    _run(store.close())
+
+
 def test_create_does_not_infer_is_new_from_name_or_body(store):
     rid = _run(store.create_recipe(
         "changfen", "配方", "【新】菠菜饺", "正文含【新】标记", None, False,
@@ -72,10 +108,43 @@ def test_create_does_not_infer_is_new_from_name_or_body(store):
 
 def test_update_writes_history(store):
     r = _run(store.list_recipes("changfen"))[0]
-    _run(store.update_recipe(r["id"], "配方", "改名", "新正文", r["sort_order"], False))
+    _run(store.update_recipe(
+        r["id"], "配方", "改名", "新正文", r["sort_order"], False,
+        ingredients=[{"name": "酱油", "amount": "100", "unit": "g"}],
+        steps=["兑汁"],
+        tips=["别放糖"],
+    ))
     hist = _run(store.list_history(r["id"]))
     assert len(hist) == 1
     assert hist[0]["recipe_name"] == "肠粉酱油"
+    assert hist[0]["ingredients"] == []
+    assert "id" in hist[0]
+
+
+def test_restore_history_snapshots_current_then_applies_version(store):
+    r = _run(store.list_recipes("changfen"))[0]
+    _run(store.update_recipe(
+        r["id"], "配方", "改名", "新正文", r["sort_order"], False,
+        ingredients=[{"name": "酱油", "amount": "80", "unit": "g"}],
+        steps=["先改"],
+        tips=[],
+        base_servings_qty=10,
+        base_servings_unit="人份",
+    ))
+    hist = _run(store.list_history(r["id"]))
+    first_id = hist[0]["id"]
+    restored = _run(store.restore_history(r["id"], first_id))
+    assert restored["recipe_name"] == "肠粉酱油"
+    assert restored["body_markdown"] == "酱油：100g"
+    after = _run(store.list_history(r["id"]))
+    assert len(after) == 2
+    assert after[0]["recipe_name"] == "改名"
+    assert after[0]["ingredients"] == [{"name": "酱油", "amount": "80", "unit": "g"}]
+
+
+def test_restore_history_unknown_id_returns_none(store):
+    r = _run(store.list_recipes("changfen"))[0]
+    assert _run(store.restore_history(r["id"], 99999)) is None
 
 
 def test_update_does_not_infer_is_new_from_name_or_body(store):
@@ -588,3 +657,29 @@ def test_list_stations_includes_needs_review_count(store):
     by_slug = {row["slug"]: row for row in _run(store.list_stations())}
     assert by_slug["changfen"]["needs_review_count"] == 0
     assert by_slug["shulong"]["needs_review_count"] == 1
+
+
+def test_create_station_seed_is_not_sop_or_markdown(store):
+    _run(store.create_station("xibing", "西饼档"))
+    rows = _run(store.list_recipes("xibing"))
+    assert len(rows) == 1
+    seed = rows[0]
+    assert seed["section"] == NEW_STATION_SEED_SECTION
+    assert seed["recipe_name"] == NEW_STATION_SEED_NAME
+    assert seed["body_markdown"] == NEW_STATION_SEED_BODY
+    assert seed["section"] == "配方"
+    assert "条目" not in seed["recipe_name"]
+    assert "Markdown" not in seed["body_markdown"]
+
+
+def test_delete_last_recipe_inserts_placeholder_not_entry_word(store):
+    _run(store.create_station("xibing", "西饼档"))
+    seed = _run(store.list_recipes("xibing"))[0]
+    _run(store.delete_recipe(seed["id"]))
+    rows = _run(store.list_recipes("xibing"))
+    assert len(rows) == 1
+    placeholder = rows[0]
+    assert placeholder["section"] == LAST_RECIPE_PLACEHOLDER_SECTION
+    assert placeholder["recipe_name"] == LAST_RECIPE_PLACEHOLDER_NAME
+    assert placeholder["body_markdown"] == LAST_RECIPE_PLACEHOLDER_BODY
+    assert "条目" not in placeholder["body_markdown"]

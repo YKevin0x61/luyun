@@ -60,3 +60,10 @@ export function recipeFocusLocation(stationSlug, recipeId) {
     query: { slug: stationSlug, focus: String(recipeId) },
   }
 }
+
+export function recipeManageEditLocation(stationSlug, recipeId) {
+  return {
+    path: '/recipe/manage',
+    query: { slug: stationSlug, edit: String(recipeId) },
+  }
+}

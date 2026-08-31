@@ -1,12 +1,14 @@
 // 统一 fetch 封装：同源 Cookie 会话鉴权（阶段二后端仍是 Session Cookie），
 // 401 时跳转到 SPA 内的 /login 路由（阶段三登录页已迁移进 admin-web）。
 
+import { shouldSkipLoginRedirect } from '../utils/loginNext'
+
 // 登录页 / 配置页自身也会调用写接口鉴权（如 /api/credentials、/api/auth/tokens）。
 // 若它们在未登录/会话过期时也触发跳转，会与页面自身的状态机互相打架，
 // 甚至造成 /login <-> /setup 来回跳转，因此这两个路由自己吞掉 401，交给页面处理。
+// 配方阅读面 API 读公开；401 不应把厨房扫码页整页踢去登录。
 function isStandaloneAuthRoute() {
-  const path = window.location.pathname
-  return path === '/login' || path === '/setup'
+  return shouldSkipLoginRedirect(window.location.pathname)
 }
 
 function redirectToLogin() {

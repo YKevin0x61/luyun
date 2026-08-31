@@ -41,7 +41,7 @@ export function themeLabel(v) {
 
 export function clampFontPx(v) {
   const n = parseInt(v, 10)
-  if (Number.isNaN(n)) return 14
+  if (Number.isNaN(n)) return 12
   return Math.max(12, Math.min(20, n))
 }
 

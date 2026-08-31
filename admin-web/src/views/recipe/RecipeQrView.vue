@@ -4,6 +4,15 @@ import QRCode from 'qrcode'
 import { api } from '../../api/client'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import RecipeNavIcon from './RecipeNavIcon.vue'
+import {
+  RECIPE_BRAND_MARK,
+  RECIPE_BRAND_TAGLINE,
+  RECIPE_BRAND_TITLE,
+  RECIPE_NAV_HOME_LABEL,
+  RECIPE_NAV_MANAGE_LABEL,
+  RECIPE_NAV_STATIONS_LABEL,
+  recipeDocumentTitle,
+} from '../../utils/recipeCopy'
 
 useScopedStylesheet('/recipe.css')
 
@@ -12,6 +21,7 @@ const loading = ref(true)
 const errorMsg = ref('')
 
 onMounted(async () => {
+  document.title = recipeDocumentTitle('岗位二维码')
   try {
     const data = await api.get('/api/recipes/stations')
     stations.value = data.stations || []
@@ -23,7 +33,7 @@ onMounted(async () => {
       QRCode.toCanvas(canvas, url, { width: 150, margin: 1 })
     }
   } catch (e) {
-    errorMsg.value = '加载失败'
+    errorMsg.value = '无法加载岗位列表，请稍后重试'
   } finally {
     loading.value = false
   }
@@ -39,16 +49,16 @@ function doPrint() {
     <header class="site-header no-print" style="position:static">
       <div class="site-header-inner">
         <router-link class="site-brand" to="/recipe">
-          <span class="site-brand-mark" aria-hidden="true"><span class="site-brand-mark-inner">SOP</span></span>
+          <span class="site-brand-mark" aria-hidden="true"><span class="site-brand-mark-inner">{{ RECIPE_BRAND_MARK }}</span></span>
           <span class="site-brand-text">
-            <span class="site-brand-title">配方 SOP</span>
-            <span class="site-brand-tagline">岗位二维码 · 张贴</span>
+            <span class="site-brand-title">{{ RECIPE_BRAND_TITLE }}</span>
+            <span class="site-brand-tagline">{{ RECIPE_BRAND_TAGLINE }}</span>
           </span>
         </router-link>
         <nav class="site-nav no-print">
-          <router-link class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />返回主页</router-link>
-          <router-link class="site-nav-link" to="/recipe"><RecipeNavIcon name="layout-grid" :size="14" />岗位列表</router-link>
-          <router-link class="site-nav-link" to="/recipe/manage"><RecipeNavIcon name="sparkles" :size="14" />配方管理</router-link>
+          <router-link class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />{{ RECIPE_NAV_HOME_LABEL }}</router-link>
+          <router-link class="site-nav-link" to="/recipe"><RecipeNavIcon name="layout-grid" :size="14" />{{ RECIPE_NAV_STATIONS_LABEL }}</router-link>
+          <router-link class="site-nav-link" to="/recipe/manage"><RecipeNavIcon name="sparkles" :size="14" />{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
         </nav>
         <div class="sop-header-actions no-print">
           <button type="button" class="print-button" @click="doPrint"><RecipeNavIcon name="printer" :size="14" />打印</button>
@@ -58,14 +68,13 @@ function doPrint() {
     <main class="site-main">
       <header class="index-hero no-print">
         <div class="hero-copy">
-          <span class="hero-eyebrow">QR Posters</span>
           <h1 class="page-title">岗位二维码</h1>
-          <p class="page-lead">打印张贴到各档口，扫码即可在手机查看该岗位 SOP。</p>
+          <p class="page-lead">打印后张贴到岗位，扫码查看该岗位配方。</p>
         </div>
       </header>
-      <div v-if="loading" class="loading-state">加载中...</div>
+      <div v-if="loading" class="loading-state">加载岗位列表…</div>
       <div v-else-if="errorMsg" class="empty-state">{{ errorMsg }}</div>
-      <div v-else-if="!stations.length" class="empty-state">暂无岗位</div>
+      <div v-else-if="!stations.length" class="empty-state">暂无岗位。可在配方管理里新增。</div>
       <div v-else class="qr-grid">
         <div v-for="s in stations" :key="s.slug" class="qr-card">
           <div class="qr-card-box"><canvas :id="`qr-${s.slug}`"></canvas></div>

@@ -1,39 +1,36 @@
 import { describe, expect, it } from 'vitest'
-import { NEW_SECTION_VALUE, assignSortOrders, buildSectionOptions } from '../recipeManageOrder.js'
+import {
+  DEFAULT_RECIPE_SECTION,
+  RECIPE_SECTIONS,
+  assignSortOrders,
+  buildSectionOptions,
+  canonicalizeSection,
+  defaultSectionForNewRecipe,
+} from '../recipeManageOrder.js'
 
 describe('buildSectionOptions', () => {
-  it('空岗位仍提供新建章节选项，且不含全局固定枚举', () => {
-    expect(buildSectionOptions([])).toEqual([
-      { value: NEW_SECTION_VALUE, label: '新建章节…' },
-    ])
+  it('always lists the four canonical sections in order', () => {
+    expect(buildSectionOptions([])).toEqual(
+      RECIPE_SECTIONS.map((section) => ({ value: section, label: section })),
+    )
+    expect(buildSectionOptions([{ section: '粥品' }])).toEqual(buildSectionOptions())
   })
+})
 
-  it('按首次出现顺序去重已有章节，并追加新建选项', () => {
-    expect(buildSectionOptions([
-      { section: '配方' },
-      { section: '出品标准' },
-      { section: '配方' },
-      { section: '操作要点' },
-    ])).toEqual([
-      { value: '配方', label: '配方' },
-      { value: '出品标准', label: '出品标准' },
-      { value: '操作要点', label: '操作要点' },
-      { value: NEW_SECTION_VALUE, label: '新建章节…' },
-    ])
+describe('defaultSectionForNewRecipe', () => {
+  it('defaults new recipes to 配方', () => {
+    expect(defaultSectionForNewRecipe()).toBe(DEFAULT_RECIPE_SECTION)
+    expect(defaultSectionForNewRecipe([{ section: '出品标准' }])).toBe('配方')
   })
+})
 
-  it('不清洗历史章节名的空格或全半角差异', () => {
-    expect(buildSectionOptions([
-      { section: '配方' },
-      { section: '配方 ' },
-      { section: '配 方' },
-      { section: '配方' },
-    ])).toEqual([
-      { value: '配方', label: '配方' },
-      { value: '配方 ', label: '配方 ' },
-      { value: '配 方', label: '配 方' },
-      { value: NEW_SECTION_VALUE, label: '新建章节…' },
-    ])
+describe('canonicalizeSection', () => {
+  it('maps legacy headings onto the four sections', () => {
+    expect(canonicalizeSection('粥品')).toBe('配方')
+    expect(canonicalizeSection('二十大招牌检核')).toBe('检核要求')
+    expect(canonicalizeSection('常规检核')).toBe('检核要求')
+    expect(canonicalizeSection('出品标准')).toBe('出品标准')
+    expect(canonicalizeSection('食安要求')).toBe('食安要求')
   })
 })
 

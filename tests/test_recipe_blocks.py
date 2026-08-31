@@ -25,7 +25,7 @@ def test_split_keeps_table_block_verbatim():
 """
     title, blocks = split_station_markdown_to_blocks(md)
     assert title == "肠粉档"
-    assert [b.section for b in blocks] == ["配方", "浆比例"]
+    assert [b.section for b in blocks] == ["配方", "配方"]
     assert [b.sort_order for b in blocks] == [0, 1]
     assert "| A | B |" in blocks[0].body_markdown
     assert "|:---|:---|" in blocks[0].body_markdown
@@ -46,7 +46,7 @@ def test_split_marks_new_block():
 def test_preamble_before_first_h2_goes_to_default_section():
     md = "# 测\n\n开场说明\n\n## 配方\n\n| A |\n|:---|\n| 1 |\n"
     _, blocks = split_station_markdown_to_blocks(md)
-    assert blocks[0].section == "正文"
+    assert blocks[0].section == "配方"
     assert "开场说明" in blocks[0].body_markdown
     assert blocks[1].section == "配方"
 

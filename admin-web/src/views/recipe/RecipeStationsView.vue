@@ -12,6 +12,16 @@ import {
   recipeFocusLocation,
 } from '../../utils/recipeSearchTypeahead'
 import RecipeNavIcon from './RecipeNavIcon.vue'
+import {
+  RECIPE_BRAND_MARK,
+  RECIPE_BRAND_TAGLINE,
+  RECIPE_BRAND_TITLE,
+  RECIPE_NAV_HOME_LABEL,
+  RECIPE_NAV_MANAGE_LABEL,
+  RECIPE_NAV_STATIONS_LABEL,
+  recipeCountLabel,
+  recipeDocumentTitle,
+} from '../../utils/recipeCopy'
 
 useScopedStylesheet('/recipe.css')
 
@@ -49,6 +59,7 @@ function applyTheme(t) {
 
 onMounted(() => {
   applyTheme(RC.readPref(window.localStorage, 'sop.theme', 'auto'))
+  document.title = recipeDocumentTitle('选择岗位')
   document.addEventListener('pointerdown', onDocumentPointerDown)
   load()
 })
@@ -66,7 +77,7 @@ async function load() {
     stations.value = data.stations || []
     errorMsg.value = ''
   } catch (e) {
-    errorMsg.value = e.message || '加载失败'
+    errorMsg.value = e.message || '无法加载岗位列表，请稍后重试'
   } finally {
     loading.value = false
   }
@@ -172,16 +183,16 @@ function onDocumentPointerDown(evt) {
     <header class="site-header no-print" style="position:static">
       <div class="site-header-inner">
         <router-link class="site-brand" to="/recipe">
-          <span class="site-brand-mark" aria-hidden="true"><span class="site-brand-mark-inner">SOP</span></span>
+          <span class="site-brand-mark" aria-hidden="true"><span class="site-brand-mark-inner">{{ RECIPE_BRAND_MARK }}</span></span>
           <span class="site-brand-text">
-            <span class="site-brand-title">配方 SOP</span>
-            <span class="site-brand-tagline">岗位配方 · 出品检核</span>
+            <span class="site-brand-title">{{ RECIPE_BRAND_TITLE }}</span>
+            <span class="site-brand-tagline">{{ RECIPE_BRAND_TAGLINE }}</span>
           </span>
         </router-link>
         <nav class="site-nav no-print">
-          <router-link class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />返回仪表盘</router-link>
-          <router-link class="site-nav-link" to="/recipe"><RecipeNavIcon name="layout-grid" :size="14" />岗位列表</router-link>
-          <router-link class="site-nav-link" to="/recipe/manage"><RecipeNavIcon name="sparkles" :size="14" />配方管理</router-link>
+          <router-link class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />{{ RECIPE_NAV_HOME_LABEL }}</router-link>
+          <router-link class="site-nav-link" to="/recipe"><RecipeNavIcon name="layout-grid" :size="14" />{{ RECIPE_NAV_STATIONS_LABEL }}</router-link>
+          <router-link class="site-nav-link" to="/recipe/manage"><RecipeNavIcon name="sparkles" :size="14" />{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
         </nav>
       </div>
     </header>
@@ -189,17 +200,16 @@ function onDocumentPointerDown(evt) {
       <section class="index-section">
         <header class="index-hero">
           <div class="hero-copy">
-            <span class="hero-eyebrow">SOP Command Center</span>
-            <h1 class="page-title">茶楼岗位配方中枢</h1>
-            <p class="page-lead">把配方、出品标准、检核和打印交付整合到一个高密度工作台。</p>
+            <h1 class="page-title">选择岗位</h1>
+            <p class="page-lead">查看该岗位配方，也可打印或张贴二维码。</p>
             <div class="station-search" ref="searchRoot">
               <input
                 id="station-global-search"
                 type="search"
                 class="sop-search-input station-search-input"
-                placeholder="搜索条目名称…"
+                placeholder="搜索配方名称…"
                 autocomplete="off"
-                aria-label="搜索配方条目"
+                aria-label="搜索配方"
                 aria-autocomplete="list"
                 :aria-expanded="dropdownOpen ? 'true' : 'false'"
                 aria-controls="station-search-listbox"
@@ -217,7 +227,7 @@ function onDocumentPointerDown(evt) {
               >
                 <div v-if="searchLoading" class="station-search-status">搜索中…</div>
                 <div v-else-if="searchError" class="station-search-status">{{ searchError }}</div>
-                <div v-else-if="!flatHits.length" class="station-search-status">未找到匹配条目</div>
+                <div v-else-if="!flatHits.length" class="station-search-status">未找到匹配配方</div>
                 <template v-else>
                   <div
                     v-for="group in visibleGroups"
@@ -247,7 +257,6 @@ function onDocumentPointerDown(evt) {
             </div>
           </div>
         </header>
-        <div class="section-caption"><span>Station Library</span><strong>选择岗位开始</strong></div>
         <div class="station-toolbar no-print">
           <button type="button" class="sop-chip" :aria-pressed="batchMode" @click="toggleBatch">批量打印</button>
           <button v-if="batchMode" type="button" class="btn btn-primary btn-sm" @click="printSelected">
@@ -255,8 +264,9 @@ function onDocumentPointerDown(evt) {
           </button>
           <router-link class="btn btn-ghost btn-sm" to="/recipe/qr">岗位二维码</router-link>
         </div>
-        <div v-if="loading" class="loading-state">加载中...</div>
+        <div v-if="loading" class="loading-state">加载岗位列表…</div>
         <div v-else-if="errorMsg" class="empty-state">{{ errorMsg }}</div>
+        <div v-else-if="!stations.length" class="empty-state">暂无岗位。可在配方管理里新增。</div>
         <ul v-else class="station-list">
           <li
             v-for="s in stations"
@@ -275,7 +285,7 @@ function onDocumentPointerDown(evt) {
                     class="station-review-badge"
                   >待复核 {{ s.needs_review_count }}</span>
                 </span>
-                <span class="station-link-subtitle">{{ s.recipe_count }} 个条目 · 查看配方 / 出品标准 / 检核</span>
+                <span class="station-link-subtitle">{{ recipeCountLabel(s.recipe_count) }}</span>
               </span>
               <span class="station-link-arrow" aria-hidden="true">→</span>
             </router-link>
