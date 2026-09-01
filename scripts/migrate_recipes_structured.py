@@ -14,8 +14,10 @@ ingredients_json / steps_json / tips_json，并留下 legacy_markdown 快照与 
 ----
 - ``--dry-run`` 只读报告，不写库、不建备份。
 - 正式跑会先按 ``*.bak.<YYYYmmdd_HHMMSS>`` 备份 db（及 wal/shm）。
-- 已有非空 ``legacy_markdown`` 的行默认跳过；``--force`` 才重拆。
-- **不**清空 ``body_markdown``。小贴士不猜测，恒为 ``[]``。
+- 默认只处理用料/步骤/小贴士全空、且正文非空的行（含停用）。
+- 已有非空 ``legacy_markdown`` 时不覆盖快照，只填 JSON。
+- ``--force`` 对已有结构化字段的行也按当前正文重拆 JSON，仍不覆盖已有快照。
+- **不**清空 ``body_markdown``。小贴士与基准份数不猜测。
 
 回滚见同目录 ``migrate_recipes_structured.rollback.md``。
 验证通过后再按 ``scripts/README.md`` 约定移入 ``scripts/archive/``。
@@ -42,9 +44,15 @@ import aiosqlite  # noqa: E402
 from config import settings  # noqa: E402
 from services.recipes.sop_parse import migrate_legacy_to_structured  # noqa: E402
 from services.recipes.store import (  # noqa: E402
+    INGREDIENT_FIELD_MAX_LEN,
+    STEP_TEXT_MAX_LEN,
+    STEPS_MAX_COUNT,
     RecipeStore,
+    _ingredients_from_storage,
     _ingredients_to_storage,
+    _steps_from_storage,
     _steps_to_storage,
+    _tips_from_storage,
     _tips_to_storage,
 )
 
@@ -56,10 +64,14 @@ class MigrationReport:
     backup_path: Optional[str]
     processed: int = 0
     skipped: int = 0
+    skipped_structured: int = 0
+    skipped_blank: int = 0
     with_ingredients: int = 0
     zero_ingredients: int = 0
     per_station: dict[str, int] = field(default_factory=dict)
     station_titles: dict[str, str] = field(default_factory=dict)
+    zero_ingredient_labels: list[str] = field(default_factory=list)
+    oversize_labels: list[str] = field(default_factory=list)
 
 
 def _backup_app_db_if_exists(app_db_path: str) -> Optional[str]:
@@ -78,6 +90,42 @@ def _backup_app_db_if_exists(app_db_path: str) -> Optional[str]:
 
 def _already_migrated(legacy_markdown) -> bool:
     return legacy_markdown is not None and str(legacy_markdown).strip() != ""
+
+
+def _body_blank(body_markdown) -> bool:
+    return str(body_markdown or "").strip() == ""
+
+
+def _structured_nonempty(ingredients_json, steps_json, tips_json) -> bool:
+    return bool(
+        _ingredients_from_storage(ingredients_json)
+        or _steps_from_storage(steps_json)
+        or _tips_from_storage(tips_json)
+    )
+
+
+def _row_label(slug: str, recipe_name: str) -> str:
+    name = (recipe_name or "").strip() or "(unnamed)"
+    return f"{slug} / {name}"
+
+
+def _oversize_reasons(parsed: dict) -> list[str]:
+    reasons: list[str] = []
+    steps = parsed.get("steps") or []
+    if len(steps) > STEPS_MAX_COUNT:
+        reasons.append(f"步骤 {len(steps)} 条（上限 {STEPS_MAX_COUNT}）")
+    long_steps = sum(1 for text in steps if len(text) > STEP_TEXT_MAX_LEN)
+    if long_steps:
+        reasons.append(f"{long_steps} 条步骤超过 {STEP_TEXT_MAX_LEN} 字")
+    long_ings = 0
+    for item in parsed.get("ingredients") or []:
+        if not isinstance(item, dict):
+            continue
+        if any(len(str(item.get(key) or "")) > INGREDIENT_FIELD_MAX_LEN for key in ("name", "amount", "unit")):
+            long_ings += 1
+    if long_ings:
+        reasons.append(f"{long_ings} 条用料字段超过 {INGREDIENT_FIELD_MAX_LEN} 字")
+    return reasons
 
 
 def _pragma_columns(rows) -> set[str]:
@@ -117,11 +165,18 @@ async def run_migration(
         cur = await conn.execute("PRAGMA table_info(sop_recipes)")
         cols = _pragma_columns(await cur.fetchall())
         has_legacy = "legacy_markdown" in cols
+        has_json = "ingredients_json" in cols
 
         select_legacy = "r.legacy_markdown" if has_legacy else "NULL AS legacy_markdown"
+        if has_json:
+            select_json = "r.ingredients_json, r.steps_json, r.tips_json"
+        else:
+            select_json = (
+                "NULL AS ingredients_json, NULL AS steps_json, NULL AS tips_json"
+            )
         cur = await conn.execute(
-            "SELECT r.id, r.station_slug, r.body_markdown, "
-            f"{select_legacy}, s.title AS station_title "
+            "SELECT r.id, r.station_slug, r.recipe_name, r.body_markdown, "
+            f"{select_legacy}, {select_json}, s.title AS station_title "
             "FROM sop_recipes r "
             "LEFT JOIN sop_stations s ON s.slug = r.station_slug "
             "ORDER BY r.id"
@@ -132,8 +187,16 @@ async def run_migration(
             slug = row["station_slug"]
             title = row["station_title"] or slug
             report.station_titles.setdefault(slug, title)
-            if not force and _already_migrated(row["legacy_markdown"]):
+            label = _row_label(slug, row["recipe_name"])
+            if _body_blank(row["body_markdown"]):
                 report.skipped += 1
+                report.skipped_blank += 1
+                continue
+            if not force and _structured_nonempty(
+                row["ingredients_json"], row["steps_json"], row["tips_json"]
+            ):
+                report.skipped += 1
+                report.skipped_structured += 1
                 continue
 
             parsed = migrate_legacy_to_structured(row["body_markdown"] or "")
@@ -143,11 +206,19 @@ async def run_migration(
                 report.with_ingredients += 1
             else:
                 report.zero_ingredients += 1
+                report.zero_ingredient_labels.append(label)
+            for reason in _oversize_reasons(parsed):
+                report.oversize_labels.append(f"{label}: {reason}")
             report.per_station[slug] = report.per_station.get(slug, 0) + 1
 
             if dry_run:
                 continue
 
+            snapshot = (
+                row["legacy_markdown"]
+                if _already_migrated(row["legacy_markdown"])
+                else row["body_markdown"]
+            )
             await conn.execute(
                 "UPDATE sop_recipes SET ingredients_json=?, steps_json=?, tips_json=?, "
                 "legacy_markdown=?, needs_review=1 WHERE id=?",
@@ -155,7 +226,7 @@ async def run_migration(
                     _ingredients_to_storage(parsed["ingredients"]),
                     _steps_to_storage(parsed["steps"]),
                     _tips_to_storage(parsed["tips"]),
-                    row["body_markdown"],
+                    snapshot,
                     row["id"],
                 ),
             )
@@ -181,7 +252,23 @@ def print_report(report: MigrationReport) -> None:
     print(f"处理条目: {report.processed}")
     print(f"识别出至少一条用料: {report.with_ingredients}")
     print(f"全部落入步骤（无用料）: {report.zero_ingredients}")
-    print(f"跳过（已有 legacy_markdown）: {report.skipped}")
+    print(f"跳过: {report.skipped}")
+    print(f"  已有结构化字段: {report.skipped_structured}")
+    print(f"  正文为空: {report.skipped_blank}")
+    print()
+    print("无用料名单:")
+    if not report.zero_ingredient_labels:
+        print("  （无）")
+    else:
+        for label in report.zero_ingredient_labels:
+            print(f"  {label}")
+    print()
+    print("超长/超条数:")
+    if not report.oversize_labels:
+        print("  （无）")
+    else:
+        for label in report.oversize_labels:
+            print(f"  {label}")
     print()
     print("按岗位:")
     if not report.per_station:
@@ -207,7 +294,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="对已有 legacy_markdown 的条目也重新拆分并覆盖结构化字段",
+        help="对已有结构化字段的条目也按当前正文重拆 JSON（不覆盖已有 legacy_markdown）",
     )
     parser.add_argument(
         "--db",

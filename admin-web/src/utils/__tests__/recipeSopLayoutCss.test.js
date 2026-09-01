@@ -148,9 +148,10 @@ describe.each(Object.entries(CSS_FILES))('%s recipe card body type size', (label
 
   it('sets card body (ingredients, steps, tips) to 12px and tables inherit it', () => {
     expect(compact).toContain('--reader-fs:12px')
-    expect(css).toContain('.markdown-body .recipe-card-body{flex:1 1 auto;padding:.46rem .6rem .6rem;font-size:var(--reader-fs);line-height:1.45}')
+    expect(css).toContain('.markdown-body .recipe-card-body{flex:1 1 auto;padding:.46rem .6rem .6rem;font-size:var(--reader-fs);line-height:1.45;font-weight:700}')
     expect(css).toContain('.markdown-body .recipe-card-body table{font-size:inherit}')
-    expect(css).toContain('.sop-density-compact .markdown-body .recipe-card-body{padding:.42rem .55rem .5rem;font-size:var(--reader-fs);line-height:1.45}')
+    expect(css).toContain('.sop-density-compact .markdown-body .recipe-card-body{padding:.42rem .55rem .5rem;font-size:var(--reader-fs);line-height:1.45;font-weight:700}')
+    expect(compact).toContain('font-weight:700;-webkit-text-size-adjust:100%')
     expect(compact.includes('font-size:calc(var(--reader-fs)-.5px)')).toBe(false)
   })
 })
@@ -181,9 +182,9 @@ describe.each(Object.entries(CSS_FILES))('%s print preview packs 3 newspaper col
     expect(block).toContain('--surface:#ffffff')
     expect(block).toContain('--ink:#1f1d18')
     expect(previewCss).toContain('background:#fff;color:#1f1d18')
-    expect(compactPreview).toContain('font-size:11pt;line-height:1.4;--reader-fs:8.5pt')
     expect(compactPreview).toContain('.recipe-card-headh3{font-size:9.5pt;padding:.1cm.2cm')
-    expect(compactPreview).toContain('.recipe-card-body{font-size:8.5pt;line-height:1.35;padding:.1cm.2cm.15cm')
+    expect(compactPreview).toContain('.recipe-card-body{font-size:8.5pt;line-height:1.35;padding:.1cm.2cm.15cm;font-weight:700')
+    expect(compactPreview).toContain('font-size:11pt;line-height:1.4;font-weight:700;--reader-fs:8.5pt')
   })
 
   it('packs print section grids as a 3-col newspaper stack', () => {
@@ -210,6 +211,8 @@ describe.each(Object.entries(CSS_FILES))('%s print preview packs 3 newspaper col
     expect(printCss).toContain('.sop-print-preview-sheet-wrap{display:block')
     expect(printCss).toContain('break-after:page')
     expect(printCss).toContain('page-break-after:always')
+    expect(printCss).toContain('.sop-print-preview-sheet.is-print-skipped{display:none!important}')
+    expect(printCss).toContain('.sop-print-preview-sheet.is-print-tail')
   })
 })
 

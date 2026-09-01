@@ -226,6 +226,13 @@ class ParsedRecipe:
     tips: tuple = ()
     base_servings_qty: float | None = None
     base_servings_unit: str | None = None
+    needs_review: bool = False
+
+    def reader_uses_structured(self) -> bool:
+        """Kitchen/print/Word: structured cards only after review."""
+        if self.needs_review:
+            return False
+        return bool(self.ingredients or self.steps or self.tips)
 
 
 def _split_pipe_row(line: str) -> list[str]:

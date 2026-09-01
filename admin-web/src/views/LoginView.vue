@@ -2,6 +2,7 @@
 import { nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
+import { clearAuthStatusCache, setAuthLoggedIn } from '../utils/authStatus'
 import { resolveLoginNext } from '../utils/loginNext'
 
 // 迁移自 public/login.html：登录 / 首次初始化管理员 / 已登录三态页面。
@@ -52,6 +53,7 @@ function parseErrorDetail(data) {
 }
 
 function redirectAfterSuccess() {
+  setAuthLoggedIn(true)
   router.push(resolveLoginNext(route.query.next, '/'))
 }
 
@@ -85,6 +87,7 @@ async function loadStatus() {
     const data = await resp.json()
     if (data.logged_in) {
       showLoggedInPanel(data.username)
+      setAuthLoggedIn(true)
       return
     }
     if (data.initialized) showLoginForm()
@@ -158,6 +161,7 @@ async function logoutFromLogin() {
     showAlert(err.message || '退出失败', 'error')
     return
   }
+  clearAuthStatusCache()
   hideAlert()
   showLoginForm()
 }

@@ -125,6 +125,38 @@ export function mmToPx(mm, doc = document) {
   return px
 }
 
+export function allPageIndexes(pageCount) {
+  const n = Math.max(0, Math.floor(Number(pageCount) || 0))
+  return Array.from({ length: n }, (_, i) => i)
+}
+
+export function normalizeSelectedPages(selected, pageCount) {
+  const n = Math.max(0, Math.floor(Number(pageCount) || 0))
+  const seen = new Set()
+  const picked = []
+  for (const raw of Array.isArray(selected) ? selected : []) {
+    const index = Number(raw)
+    if (!Number.isInteger(index) || index < 0 || index >= n || seen.has(index)) continue
+    seen.add(index)
+    picked.push(index)
+  }
+  picked.sort((a, b) => a - b)
+  return picked
+}
+
+/** Keep in-range checks; fill all pages when nothing valid is selected. */
+export function syncSelectedPages(selected, pageCount) {
+  const n = Math.max(0, Math.floor(Number(pageCount) || 0))
+  const kept = normalizeSelectedPages(selected, n)
+  return kept.length ? kept : allPageIndexes(n)
+}
+
+export function lastSelectedPageIndex(selected) {
+  const list = Array.isArray(selected) ? selected : []
+  if (!list.length) return -1
+  return Math.max(...list)
+}
+
 /** Packing uses an off-screen measure host; skip while print media is emulated or the dialog is open. */
 export function shouldRepackPrintPreview(matchMediaFn = globalThis.matchMedia) {
   if (typeof matchMediaFn !== 'function') return true

@@ -170,7 +170,7 @@ def _set_paragraph_shading(paragraph, color_hex: str) -> None:
     pPr.append(shd)
 
 
-def _set_run_font(run, size=BODY_SIZE, bold=False, color=None):
+def _set_run_font(run, size=BODY_SIZE, bold=True, color=None):
     run.font.size = Pt(size)
     run.bold = bold
     run.font.name = FONT_NAME_EN
@@ -254,6 +254,7 @@ def _new_recipe_docx() -> Document:
     style.font.name = FONT_NAME_EN
     style.element.rPr.rFonts.set(qn("w:eastAsia"), FONT_NAME)
     style.font.size = Pt(BODY_SIZE)
+    style.font.bold = True
     style.paragraph_format.space_before = Pt(1)
     style.paragraph_format.space_after = Pt(1)
     style.paragraph_format.line_spacing = Pt(11)
@@ -498,7 +499,7 @@ def render_station_to_docx(title: str, recipes: list) -> Document:
             current_section = section
             _add_h2(doc, section)
         _add_h3(doc, recipe.recipe_name or "")
-        if recipe.ingredients or recipe.steps or recipe.tips:
+        if recipe.reader_uses_structured():
             _add_ingredient_table(doc, recipe.ingredients)
             _add_numbered_steps(doc, recipe.steps)
             _add_emphasized_tips(doc, recipe.tips)

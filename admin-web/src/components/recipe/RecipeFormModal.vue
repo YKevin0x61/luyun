@@ -26,10 +26,7 @@ import {
   dropBlankTipRows,
   removeTipRow,
 } from '../../utils/recipeTips'
-import {
-  recipeHasLegacyMarkdown,
-  recipeNeedsReview,
-} from '../../utils/recipeReview'
+import { recipeNeedsReview } from '../../utils/recipeReview'
 import { discardRecipeEditsCopy } from '../../utils/recipeConfirmCopy'
 import { recipeFormIsDirty, snapshotRecipeForm } from '../../utils/recipeFormDirty'
 
@@ -43,12 +40,11 @@ const props = defineProps({
   recipeId: { type: [Number, null], default: null },
 })
 
-const emit = defineEmits(['close', 'saved', 'review-confirmed'])
+const emit = defineEmits(['close', 'saved'])
 
 const recipeForm = reactive(blankForm())
 const recipeFormFieldsRef = ref(null)
 const submitBusy = ref(false)
-const confirmReviewBusy = ref(false)
 const errorMsg = ref('')
 const loading = ref(true)
 const baseline = ref('')
@@ -204,25 +200,6 @@ async function submitRecipeForm() {
     errorMsg.value = e.message
   } finally {
     submitBusy.value = false
-  }
-}
-
-async function confirmReview() {
-  if (!recipeForm.id || confirmReviewBusy.value) return
-  errorMsg.value = ''
-  confirmReviewBusy.value = true
-  try {
-    const updated = await api.post(`/api/recipes/recipes/${recipeForm.id}/confirm-review`, {})
-    recipeForm.needs_review = 0
-    if (updated && updated.legacy_markdown != null) {
-      recipeForm.legacy_markdown = String(updated.legacy_markdown)
-    }
-    baseline.value = snapshotRecipeForm(recipeForm)
-    emit('review-confirmed', recipeForm.id)
-  } catch (e) {
-    errorMsg.value = e.message
-  } finally {
-    confirmReviewBusy.value = false
   }
 }
 
@@ -468,22 +445,6 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                 </div>
-              </div>
-              <div v-if="recipeHasLegacyMarkdown(recipeForm)" class="legacy-review">
-                <div class="legacy-review-head">
-                  <span class="form-label">迁移前原文对比</span>
-                  <button
-                    v-if="recipeNeedsReview(recipeForm)"
-                    type="button"
-                    class="btn btn-sm btn-primary"
-                    :disabled="confirmReviewBusy"
-                    @click="confirmReview"
-                  >确认拆分无误</button>
-                </div>
-                <details class="legacy-review-panel">
-                  <summary>{{ recipeNeedsReview(recipeForm) ? '对照迁移原文' : '查看迁移原文' }}</summary>
-                  <pre class="legacy-review-pre">{{ recipeForm.legacy_markdown }}</pre>
-                </details>
               </div>
               <section class="recipe-form-block">
                 <header class="recipe-form-block-head">
@@ -801,44 +762,6 @@ onBeforeUnmount(() => {
 }
 .drag-handle:active {
   cursor: grabbing;
-}
-.legacy-review {
-  margin: 1rem 0 0;
-  padding: 0.75rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-}
-.legacy-review-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  margin-bottom: 0.4rem;
-}
-.legacy-review-head .form-label {
-  margin: 0;
-}
-.legacy-review-panel summary {
-  cursor: pointer;
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: var(--muted);
-}
-.legacy-review-pre {
-  margin: 0.5rem 0 0;
-  padding: 0.6rem 0.75rem;
-  max-height: 16rem;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--font-mono);
-  font-size: 0.82rem;
-  line-height: 1.45;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 6px;
 }
 .confirm-dialog {
   z-index: 2100;

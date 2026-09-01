@@ -337,6 +337,29 @@ def test_docx_export_includes_structured_fields(client):
     assert not any("这段 Markdown 不应出现" in text for text in paragraph_texts)
 
 
+def test_station_detail_needs_review_renders_markdown_not_structured(client, recipe_store):
+    rid = client.post(
+        "/api/recipes/stations/changfen/recipes",
+        json={
+            "section": "配方",
+            "recipe_name": "面团待复核",
+            "body": "面粉 200g\n水 300ml",
+            "is_new": False,
+            "ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}],
+            "steps": ["不该出现在待复核阅读里"],
+        },
+    ).json()["id"]
+    _run(recipe_store.conn.execute(
+        "UPDATE sop_recipes SET needs_review=1, legacy_markdown=? WHERE id=?",
+        ("面粉 200g\n水 300ml", rid),
+    ))
+    _run(recipe_store.conn.commit())
+    html = client.get("/api/recipes/stations/changfen").json()["content_html"]
+    assert "recipe-ingredients" not in html
+    assert "不该出现在待复核阅读里" not in html
+    assert "面粉 200g" in html
+
+
 def test_station_detail_include_inactive(client):
     r = client.post("/api/recipes/stations/changfen/recipes",
                     json={"section": "配方", "recipe_name": "停售品", "body": "y"})

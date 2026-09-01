@@ -178,7 +178,7 @@ def render_station_html(station_title: str, recipes: list[ParsedRecipe]) -> str:
         parts.append(f"<h2>{_esc(section)}</h2>")
         for recipe in items:
             parts.append(_heading_html(recipe))
-            if recipe.ingredients or recipe.steps or recipe.tips:
+            if recipe.reader_uses_structured():
                 body = render_structured_recipe_body(
                     ingredients=list(recipe.ingredients),
                     steps=list(recipe.steps),

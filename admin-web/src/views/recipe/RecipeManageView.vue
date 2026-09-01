@@ -190,10 +190,6 @@ async function onRecipeFormSaved() {
   await refreshRecipes()
 }
 
-async function onRecipeFormReviewConfirmed() {
-  await refreshRecipes()
-}
-
 async function persistRecipeOrder(ordered) {
   const assignments = assignSortOrders(ordered)
   reorderBusy.value = true
@@ -501,7 +497,6 @@ applyManageQuery()
       :recipe-id="formRecipeId"
       @close="forceCloseModal"
       @saved="onRecipeFormSaved"
-      @review-confirmed="onRecipeFormReviewConfirmed"
     />
 
     <!-- 弹窗：导入 CSV -->

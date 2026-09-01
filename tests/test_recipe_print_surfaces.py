@@ -43,6 +43,8 @@ def test_print_css_packs_unbroken_cards_in_newspaper_columns():
         assert ".sop-print-preview-sheet-wrap{display:block" in compact_print
         assert "break-after:page" in compact_print
         assert "@page{size:A4;margin:0}" in compact_print
+        assert ".sop-print-preview-sheet.is-print-skipped{display:none!important}" in compact_print
+        assert ".sop-print-preview-sheet.is-print-tail" in compact_print
 
 
 def test_print_view_embeds_station_content_html():
@@ -61,6 +63,10 @@ def test_print_view_embeds_station_content_html():
     assert 'class="sop-print-preview-sheet-wrap"' in src
     assert "shouldRepackPrintPreview" in src
     assert "afterprint" in src
+    assert "syncSelectedPages" in src
+    assert "is-print-skipped" in src
+    assert "打印已选页" in src
+    assert "第 {{ index + 1 }} 页" in src
 
 
 def test_qr_view_lists_stations_and_encodes_detail_slug():

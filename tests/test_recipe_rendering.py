@@ -144,6 +144,44 @@ def test_station_docx_markdown_only_still_renders_body():
     ])
     assert len(doc.tables) == 0
     assert any("酱油：100g" in p.text for p in doc.paragraphs)
+    assert any(
+        "酱油：100g" in (run.text or "") and run.bold
+        for p in doc.paragraphs
+        for run in p.runs
+    )
+
+
+def test_station_html_needs_review_uses_markdown_not_structured():
+    html = render_station_html("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="面团",
+            body_markdown="面粉 200g\n水 300ml",
+            sort_order=0, id=1, needs_review=True,
+            ingredients=({"name": "面粉", "amount": "200", "unit": "g"},),
+            steps=("不该出现在待复核阅读里",),
+        ),
+    ])
+    assert "recipe-ingredients" not in html
+    assert "不该出现在待复核阅读里" not in html
+    assert "面粉 200g" in html
+
+
+def test_station_docx_needs_review_uses_markdown_not_structured():
+    from services.recipes.rendering import render_station_to_docx
+
+    doc = render_station_to_docx("肠粉档", [
+        ParsedRecipe(
+            section="配方", recipe_name="面团",
+            body_markdown="面粉 200g",
+            sort_order=0, id=1, needs_review=True,
+            ingredients=({"name": "面粉", "amount": "200", "unit": "g"},),
+            steps=("不该出现在待复核 Word 里",),
+        ),
+    ])
+    assert len(doc.tables) == 0
+    texts = [p.text for p in doc.paragraphs]
+    assert any("面粉 200g" in text for text in texts)
+    assert not any("不该出现在待复核 Word 里" in text for text in texts)
 
 
 def test_structured_ingredients_empty_omits_table():

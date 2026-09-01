@@ -3,6 +3,8 @@
 本脚本只改 `sop_recipes` 上的结构化 JSON 列、`legacy_markdown` 快照和 `needs_review`。
 **不**清空、不删除 `body_markdown`，也**不**删除 `legacy_markdown`（审计轨迹）。
 
+待复核期间阅读/打印/Word 走 `body_markdown`，清 JSON 会让已确认的配方也退回 Markdown 兜底。
+
 先停应用再操作。
 
 ## 方式一：清空结构化字段（推荐）
@@ -48,5 +50,5 @@ cp data/app.db.bak.<timestamp>-shm data/app.db-shm 2>/dev/null || true
 
 ## 关于幂等重跑
 
-已有非空 `legacy_markdown` 的行默认跳过。`--force` 会按当前 `body_markdown` 重拆并覆盖 JSON / 快照 / `needs_review=1`。
-回滚后若快照仍在，默认重跑仍会跳过这些行；要再拆一次需要 `--force`。
+默认只处理用料/步骤/小贴士全空、且正文非空的行。已有快照时不覆盖 `legacy_markdown`。
+回滚清 JSON 后，默认重跑会再拆这些行（快照保留）。`--force` 对已有结构化字段也重拆 JSON，仍不覆盖已有快照。

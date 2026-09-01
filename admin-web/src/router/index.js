@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { isLoggedIn } from '../utils/authStatus'
 import { buildLoginNextFromRoute } from '../utils/loginNext'
 
 const RECIPE_READER_META = { public: true, standalone: true }
@@ -23,26 +24,6 @@ const router = createRouter({
   history: createWebHistory(),
   routes,
 })
-
-// 登录态缓存：避免每次客户端导航都请求 /api/auth/status（登录/登出走整页跳转会重置本模块）。
-const AUTH_STATUS_TTL_MS = 10000
-let authStatusCache = null // { loggedIn: boolean, ts: number }
-
-async function isLoggedIn() {
-  const now = Date.now()
-  if (authStatusCache && now - authStatusCache.ts < AUTH_STATUS_TTL_MS) {
-    return authStatusCache.loggedIn
-  }
-  try {
-    const resp = await fetch('/api/auth/status', { credentials: 'include' })
-    const data = await resp.json()
-    authStatusCache = { loggedIn: !!data.logged_in, ts: now }
-    return authStatusCache.loggedIn
-  } catch {
-    // fail-closed：拿不到状态时按未登录处理，跳登录页
-    return false
-  }
-}
 
 // 全站登录守卫：public 路由（登录页、配方阅读面）放行；其余未登录跳 /login?next=
 router.beforeEach(async (to) => {

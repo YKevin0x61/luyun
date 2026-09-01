@@ -1,4 +1,6 @@
-/** Build and resolve /login?next= without double-encoding query values. */
+/** Build and resolve /login?next= without double-encoding query values.
+ *  RECIPE_READER_PATHS must stay in lockstep with main.py HTML_AUTH_PUBLIC_PAGES.
+ */
 
 export const RECIPE_READER_PATHS = ['/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr']
 

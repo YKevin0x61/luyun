@@ -359,12 +359,20 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 HTML_AUTH_EXACT = {"/login", "/login.html"}
-HTML_AUTH_PREFIXES = ("/api/auth/", "/vendor/")
+# Keep in lockstep with admin-web/src/utils/loginNext.js RECIPE_READER_PATHS.
+# Do not use a /recipe prefix — /recipe/manage still requires a session.
+HTML_AUTH_PUBLIC_PAGES = frozenset({
+    "/recipe",
+    "/recipe/detail",
+    "/recipe/print",
+    "/recipe/qr",
+})
+HTML_AUTH_PREFIXES = ("/api/auth/", "/vendor/", "/kds", "/assets/")
 HTML_AUTH_SUFFIXES = (".css", ".js", ".png", ".ico", ".woff", ".woff2")
 
 
 def _is_html_auth_exempt(path: str) -> bool:
-    if path in HTML_AUTH_EXACT:
+    if path in HTML_AUTH_EXACT or path in HTML_AUTH_PUBLIC_PAGES:
         return True
     for prefix in HTML_AUTH_PREFIXES:
         if path.startswith(prefix):
@@ -377,6 +385,18 @@ def _is_html_auth_exempt(path: str) -> bool:
     if settings.DEBUG and path in ("/docs", "/openapi.json", "/redoc"):
         return True
     return False
+
+
+def _html_login_redirect(request: Request) -> RedirectResponse:
+    path = request.url.path
+    query = request.url.query
+    next_path = f"{path}?{query}" if query else path
+    if path in HTML_AUTH_EXACT:
+        return RedirectResponse(url="/login", status_code=302)
+    return RedirectResponse(
+        url=f"/login?next={quote(next_path, safe='')}",
+        status_code=302,
+    )
 
 
 class HtmlAuthMiddleware(BaseHTTPMiddleware):
@@ -395,7 +415,7 @@ class HtmlAuthMiddleware(BaseHTTPMiddleware):
         session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
         if await auth_service.validate_session_id(session_id):
             return await call_next(request)
-        return RedirectResponse(url=f"/login?next={quote(path)}", status_code=302)
+        return _html_login_redirect(request)
 
 
 # 配置CORS
@@ -512,7 +532,7 @@ def _spa_index():
 
 
 # ---- admin-web SPA 页面路由（Phase 4.6：统一服务同一 SPA，登录/配置也走 SPA） ----
-# 未登录访问由 HtmlAuthMiddleware 服务端重定向到 /login；/login 本身在中间件豁免列表内。
+# 未登录访问由 HtmlAuthMiddleware 服务端重定向到 /login（配方阅读面、KDS、/login 豁免）。
 @app.get("/")
 @app.get("/admin")
 @app.get("/admin/")

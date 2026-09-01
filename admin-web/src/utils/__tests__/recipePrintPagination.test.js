@@ -7,11 +7,13 @@ import {
   A4_WIDTH_MM,
   PRINT_CARD_GAP_MM,
   PRINT_COLUMN_COUNT,
+  lastSelectedPageIndex,
   packItemsIntoPages,
   packNewspaperPages,
   paginateStationCards,
   shouldRepackPrintPreview,
   stationPageHtml,
+  syncSelectedPages,
 } from '../recipePrintPagination.js'
 
 describe('A4 sheet metrics', () => {
@@ -135,6 +137,25 @@ describe('paginateStationCards', () => {
 
   it('keeps the print column gap in mm matching CSS .2cm', () => {
     expect(PRINT_CARD_GAP_MM).toBe(2)
+  })
+})
+
+describe('syncSelectedPages', () => {
+  it('selects every page when nothing is checked yet', () => {
+    expect(syncSelectedPages([], 3)).toEqual([0, 1, 2])
+  })
+
+  it('keeps a subset and drops indexes that no longer exist', () => {
+    expect(syncSelectedPages([0, 2, 9], 3)).toEqual([0, 2])
+  })
+
+  it('keeps a subset when the page count grows', () => {
+    expect(syncSelectedPages([0], 3)).toEqual([0])
+  })
+
+  it('returns the last checked index for the print tail class', () => {
+    expect(lastSelectedPageIndex([0, 3, 1])).toBe(3)
+    expect(lastSelectedPageIndex([])).toBe(-1)
   })
 })
 

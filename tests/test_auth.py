@@ -233,6 +233,10 @@ def auth_app_client(tmp_path):
     settings.DATABASE_DIR = old
 
 
+def _html_headers():
+    return {"Accept": "text/html"}
+
+
 def test_unauthenticated_root_redirects(auth_app_client):
     client, _ = auth_app_client
     resp = client.get("/", follow_redirects=False)
@@ -252,6 +256,50 @@ def test_static_asset_accessible_without_session(auth_app_client):
     client, _ = auth_app_client
     resp = client.get("/recipe.css")
     assert resp.status_code == 200
+
+
+def test_recipe_reader_pages_accessible_without_session(auth_app_client):
+    client, _ = auth_app_client
+    for path in ("/recipe", "/recipe/detail", "/recipe/print", "/recipe/qr"):
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        loc = resp.headers.get("location", "")
+        assert resp.status_code != 302 or "/login" not in loc, path
+
+
+def test_recipe_manage_html_requires_session(auth_app_client):
+    client, _ = auth_app_client
+    resp = client.get("/recipe/manage", headers=_html_headers(), follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"].startswith("/login")
+
+
+def test_setup_html_requires_session(auth_app_client):
+    client, _ = auth_app_client
+    resp = client.get("/setup", headers=_html_headers(), follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"].startswith("/login")
+
+
+def test_kds_html_not_redirected_to_login(auth_app_client):
+    client, _ = auth_app_client
+    resp = client.get("/kds", headers=_html_headers(), follow_redirects=False)
+    loc = resp.headers.get("location", "")
+    assert "/login" not in loc
+
+
+def test_html_auth_preserves_query_in_next(auth_app_client):
+    client, _ = auth_app_client
+    resp = client.get(
+        "/admin",
+        params={"tab": "orders"},
+        headers=_html_headers(),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    from urllib.parse import parse_qs, urlparse
+
+    next_val = parse_qs(urlparse(resp.headers["location"]).query).get("next", [""])[0]
+    assert next_val == "/admin?tab=orders"
 
 
 import api.orders as orders_module

@@ -724,7 +724,8 @@ class RecipeStore:
             where += " AND is_active = 1"
         cur = await self.conn.execute(
             "SELECT id, section, recipe_name, body_markdown, sort_order, is_new, is_active, "
-            "ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit "
+            "ingredients_json, steps_json, tips_json, base_servings_qty, base_servings_unit, "
+            "needs_review "
             "FROM sop_recipes " + where + " ORDER BY sort_order ASC, id ASC",
             (slug,),
         )
@@ -743,6 +744,7 @@ class RecipeStore:
                     tips=tuple(_tips_from_storage(r["tips_json"])),
                     base_servings_qty=qty,
                     base_servings_unit=unit,
+                    needs_review=bool(int(r["needs_review"] or 0)),
                 )
             )
         return parsed

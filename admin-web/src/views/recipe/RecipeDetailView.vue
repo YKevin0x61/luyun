@@ -1050,7 +1050,6 @@ onBeforeUnmount(() => {
       :recipe-id="editRecipeId"
       @close="closeEditForm"
       @saved="onEditFormSaved"
-      @review-confirmed="load"
     />
 
     <div

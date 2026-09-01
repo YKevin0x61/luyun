@@ -201,7 +201,9 @@ def _seed_legacy_db(path: Path) -> None:
             ('changfen', '配方', '面团', '面粉 200g\n水 300ml', 0, 0, 1, '2026-01-01T00:00:00+00:00'),
             ('changfen', '做法', '说明', '将面粉与水和成面团，静置十分钟后擀开。', 1, 0, 1, '2026-01-01T00:00:00+00:00'),
             ('changfen', '配方', '表格酱油', '| 用料 | 用量 |\n| --- | --- |\n| 酱油 | 100g |\n| 糖 | 20g |', 2, 0, 1, '2026-01-01T00:00:00+00:00'),
-            ('shulong', '配方', '虾饺皮', '面粉 200g\n将面粉与水混合均匀。', 0, 0, 1, '2026-01-01T00:00:00+00:00');
+            ('shulong', '配方', '虾饺皮', '面粉 200g\n将面粉与水混合均匀。', 0, 0, 1, '2026-01-01T00:00:00+00:00'),
+            ('changfen', '配方', '空正文', '', 3, 0, 1, '2026-01-01T00:00:00+00:00'),
+            ('changfen', '配方', '停用浆', '米浆 80g', 4, 0, 0, '2026-01-01T00:00:00+00:00');
         """
     )
     conn.commit()
@@ -241,10 +243,11 @@ def test_dry_run_writes_nothing_including_no_backup(recipes_db):
     assert _bak_files(recipes_db) == []
     assert report.dry_run is True
     assert report.backup_path is None
-    assert report.processed == 4
-    assert report.with_ingredients == 3
+    assert report.processed == 5
+    assert report.with_ingredients == 4
     assert report.zero_ingredients == 1
-    assert report.per_station == {"changfen": 3, "shulong": 1}
+    assert report.skipped_blank == 1
+    assert report.per_station == {"changfen": 4, "shulong": 1}
 
 
 def test_main_dry_run_db_tmp_writes_nothing(recipes_db, capsys):
@@ -254,7 +257,7 @@ def test_main_dry_run_db_tmp_writes_nothing(recipes_db, capsys):
     assert _recipe_rows(str(recipes_db)) == before
     assert _bak_files(recipes_db) == []
     out = capsys.readouterr().out
-    assert "处理条目: 4" in out
+    assert "处理条目: 5" in out
     assert "肠粉档" in out or "changfen" in out
 
 
@@ -264,10 +267,12 @@ def test_real_run_writes_split_json_snapshot_and_needs_review(recipes_db):
     assert report.dry_run is False
     assert report.backup_path is not None
     assert Path(report.backup_path).exists()
-    assert report.processed == 4
-    assert report.with_ingredients == 3
+    assert report.processed == 5
+    assert report.with_ingredients == 4
     assert report.zero_ingredients == 1
-    assert report.skipped == 0
+    assert report.skipped == 1
+    assert report.skipped_blank == 1
+    assert report.skipped_structured == 0
 
     rows = {r["id"]: r for r in _recipe_rows(str(recipes_db))}
     dough = next(r for r in rows.values() if r["recipe_name"] == "面团")
@@ -302,6 +307,12 @@ def test_real_run_writes_split_json_snapshot_and_needs_review(recipes_db):
     assert json.loads(table["steps_json"]) == []
     assert json.loads(table["tips_json"]) == []
 
+    inactive = next(r for r in rows.values() if r["recipe_name"] == "停用浆")
+    assert inactive["needs_review"] == 1
+    assert json.loads(inactive["ingredients_json"]) == [
+        {"name": "米浆", "amount": "80", "unit": "g"},
+    ]
+
 
 def test_default_skips_rows_with_legacy_markdown(recipes_db):
     _run(mrs.run_migration(str(recipes_db), dry_run=False, force=False))
@@ -315,7 +326,9 @@ def test_default_skips_rows_with_legacy_markdown(recipes_db):
 
     report = _run(mrs.run_migration(str(recipes_db), dry_run=False, force=False))
     assert report.processed == 0
-    assert report.skipped == 4
+    assert report.skipped == 6
+    assert report.skipped_structured == 5
+    assert report.skipped_blank == 1
     dough = next(r for r in _recipe_rows(str(recipes_db)) if r["recipe_name"] == "面团")
     assert json.loads(dough["ingredients_json"]) == [
         {"name": "被改过", "amount": "1", "unit": "g"},
@@ -324,6 +337,9 @@ def test_default_skips_rows_with_legacy_markdown(recipes_db):
 
 def test_force_remigrates_rows_with_legacy_markdown(recipes_db):
     _run(mrs.run_migration(str(recipes_db), dry_run=False, force=False))
+    original_body = next(
+        r["legacy_markdown"] for r in _recipe_rows(str(recipes_db)) if r["recipe_name"] == "面团"
+    )
     conn = sqlite3.connect(recipes_db)
     conn.execute(
         "UPDATE sop_recipes SET body_markdown = ? WHERE recipe_name = ?",
@@ -333,11 +349,96 @@ def test_force_remigrates_rows_with_legacy_markdown(recipes_db):
     conn.close()
 
     report = _run(mrs.run_migration(str(recipes_db), dry_run=False, force=True))
-    assert report.processed == 4
+    assert report.processed == 5
     dough = next(r for r in _recipe_rows(str(recipes_db)) if r["recipe_name"] == "面团")
-    assert dough["legacy_markdown"] == "盐 2g"
+    assert dough["legacy_markdown"] == original_body
     assert json.loads(dough["ingredients_json"]) == [
         {"name": "盐", "amount": "2", "unit": "g"},
     ]
     assert dough["needs_review"] == 1
     assert dough["body_markdown"] == "盐 2g"
+
+
+def test_skips_blank_body_without_flagging_review(recipes_db):
+    report = _run(mrs.run_migration(str(recipes_db), dry_run=False, force=False))
+    blank = next(r for r in _recipe_rows(str(recipes_db)) if r["recipe_name"] == "空正文")
+    assert report.skipped_blank == 1
+    assert blank["needs_review"] in (0, None)
+    assert blank["legacy_markdown"] in (None, "")
+    assert not json.loads(blank["ingredients_json"] or "[]")
+    assert not json.loads(blank["steps_json"] or "[]")
+
+
+def test_skips_existing_structured_without_legacy(recipes_db):
+    conn = sqlite3.connect(recipes_db)
+    conn.execute(
+        "UPDATE sop_recipes SET ingredients_json = ? WHERE recipe_name = ?",
+        ('[{"name":"人手填的","amount":"1","unit":"g"}]', "面团"),
+    )
+    conn.commit()
+    conn.close()
+    report = _run(mrs.run_migration(str(recipes_db), dry_run=False, force=False))
+    dough = next(r for r in _recipe_rows(str(recipes_db)) if r["recipe_name"] == "面团")
+    assert report.skipped_structured >= 1
+    assert json.loads(dough["ingredients_json"]) == [
+        {"name": "人手填的", "amount": "1", "unit": "g"},
+    ]
+    assert dough["legacy_markdown"] in (None, "")
+
+
+def test_keeps_existing_legacy_when_refilling_empty_json(recipes_db):
+    _run(mrs.run_migration(str(recipes_db), dry_run=False, force=False))
+    snapshot = next(r for r in _recipe_rows(str(recipes_db)) if r["recipe_name"] == "面团")[
+        "legacy_markdown"
+    ]
+    conn = sqlite3.connect(recipes_db)
+    conn.execute(
+        "UPDATE sop_recipes SET ingredients_json=NULL, steps_json=NULL, tips_json=NULL, "
+        "body_markdown=? WHERE recipe_name=?",
+        ("盐 2g", "面团"),
+    )
+    conn.commit()
+    conn.close()
+    _run(mrs.run_migration(str(recipes_db), dry_run=False, force=False))
+    dough = next(r for r in _recipe_rows(str(recipes_db)) if r["recipe_name"] == "面团")
+    assert dough["legacy_markdown"] == snapshot
+    assert json.loads(dough["ingredients_json"]) == [
+        {"name": "盐", "amount": "2", "unit": "g"},
+    ]
+
+
+def test_migrates_inactive_and_reports_oversize(tmp_path):
+    db = tmp_path / "oversize.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE sop_stations (
+            slug TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE sop_recipes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            station_slug TEXT NOT NULL, section TEXT NOT NULL, recipe_name TEXT NOT NULL,
+            body_markdown TEXT NOT NULL, sort_order INTEGER NOT NULL,
+            is_new INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO sop_stations VALUES ('changfen', '肠粉档', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    long_step = "将" + ("面" * 130)
+    conn.execute(
+        "INSERT INTO sop_recipes "
+        "(station_slug, section, recipe_name, body_markdown, sort_order, is_new, is_active, updated_at) "
+        "VALUES ('changfen', '配方', '长说明', ?, 0, 0, 1, '2026-01-01T00:00:00+00:00')",
+        (long_step,),
+    )
+    conn.commit()
+    conn.close()
+    store = RecipeStore(str(db))
+    _run(store.connect())
+    _run(store.close())
+    report = _run(mrs.run_migration(str(db), dry_run=True, force=False))
+    assert report.processed == 1
+    assert report.zero_ingredients == 1
+    assert any("长说明" in label for label in report.zero_ingredient_labels)
+    assert any("超过" in label for label in report.oversize_labels)
