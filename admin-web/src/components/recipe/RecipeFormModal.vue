@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../../api/client'
 import RecipeCheckbox from './RecipeCheckbox.vue'
 import {
@@ -19,13 +19,13 @@ import {
   dropBlankStepRows,
   moveStepRow,
   removeStepRow,
-  renderStructuredRecipePreviewHtml,
 } from '../../utils/recipeSteps'
 import {
   addTipRow,
   dropBlankTipRows,
   removeTipRow,
 } from '../../utils/recipeTips'
+import { createStructuredBodyPreview } from '../../utils/recipeStructuredPreview'
 import { recipeNeedsReview } from '../../utils/recipeReview'
 import { discardRecipeEditsCopy } from '../../utils/recipeConfirmCopy'
 import { recipeFormIsDirty, snapshotRecipeForm } from '../../utils/recipeFormDirty'
@@ -64,15 +64,39 @@ let confirmAction = null
 let previousOverflow = ''
 
 const sectionOptions = computed(() => buildSectionOptions())
-const structuredPreviewHtml = computed(() => renderStructuredRecipePreviewHtml(
-  recipeForm.ingredients.map((row) => ({
-    name: row.name,
-    amount: row.amount,
-    unit: row.unit,
-  })),
-  recipeForm.steps,
-  recipeForm.tips,
-))
+const structuredPreviewHtml = ref('')
+const structuredPreview = createStructuredBodyPreview({
+  postPreview: (body) => api.post('/api/recipes/preview-body', body),
+})
+structuredPreview.subscribe((html) => {
+  structuredPreviewHtml.value = html
+})
+
+function previewBodyFromForm() {
+  return {
+    ingredients: dropBlankIngredientRows(recipeForm.ingredients).map((row) => ({
+      name: row.name,
+      amount: row.amount,
+      unit: row.unit,
+    })),
+    steps: dropBlankStepRows(recipeForm.steps).map((text) => String(text).trim()),
+    tips: dropBlankTipRows(recipeForm.tips).map((text) => String(text).trim()),
+  }
+}
+
+watch(
+  () => [
+    loading.value,
+    recipeForm.ingredients,
+    recipeForm.steps,
+    recipeForm.tips,
+  ],
+  () => {
+    if (loading.value) return
+    structuredPreview.schedule(previewBodyFromForm())
+  },
+  { deep: true, immediate: true },
+)
 const recipeFormHasBody = computed(() => String(recipeForm.body || '').trim() !== '')
 const titleText = computed(() => {
   const station = String(props.stationTitle || '').trim() || '配方'
@@ -377,6 +401,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.body.style.overflow = previousOverflow
   document.removeEventListener('keydown', onDocumentKey, true)
+  structuredPreview.dispose()
 })
 </script>
 

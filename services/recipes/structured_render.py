@@ -10,14 +10,12 @@ from .rendering import render_markdown_fragment
 from .sop_layout import wrap_sop_semantic_layout
 from .sop_parse import ParsedRecipe
 
-# Keep in sync with admin-web/src/utils/recipeIngredients.js
 RECIPE_INGREDIENTS_TABLE_CLASS = "recipe-ingredients"
 RECIPE_INGREDIENTS_NAME_CLASS = "recipe-ingredients-name"
+# Reader scales cells by this class; keep in sync with recipeIngredients.js.
 RECIPE_INGREDIENTS_AMOUNT_CLASS = "recipe-ingredients-amount"
-# Keep in sync with admin-web/src/utils/recipeSteps.js
 RECIPE_STEPS_LIST_CLASS = "recipe-steps"
 RECIPE_STEPS_ITEM_CLASS = "recipe-steps-item"
-# Keep in sync with admin-web/src/utils/recipeTips.js
 RECIPE_TIPS_LIST_CLASS = "recipe-tips"
 RECIPE_TIPS_ITEM_CLASS = "recipe-tips-item"
 _SERVINGS_QTY_ATTR_RE = re.compile(r"^\d+(?:\.\d+)?$")

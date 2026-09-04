@@ -24,6 +24,7 @@ from services.recipes.store import (
 )
 from services.recipes.sections import RecipeSectionError, require_recipe_section
 from services.recipes.rendering import render_station_to_docx
+from services.recipes.structured_render import render_structured_recipe_body
 from api.security import verify_admin_token
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
@@ -200,7 +201,25 @@ class RecipeReorder(BaseModel):
     ids: list[int]
 
 
+class RecipePreviewBody(BaseModel):
+    ingredients: list[IngredientItem] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
+    tips: list[str] = Field(default_factory=list)
+
+
 # ---- 浏览 ----
+@router.post("/preview-body", dependencies=[Depends(verify_admin_token)])
+async def preview_recipe_body(payload: RecipePreviewBody):
+    ingredients = _validate_ingredients(payload.ingredients)
+    steps = _validate_steps(payload.steps)
+    tips = _validate_tips(payload.tips)
+    return {
+        "html": render_structured_recipe_body(
+            ingredients=ingredients, steps=steps, tips=tips,
+        )
+    }
+
+
 @router.get("/search")
 async def search_recipes(q: str = "", include_inactive: bool = False,
                          store: RecipeStore = Depends(_get_recipe_store)):

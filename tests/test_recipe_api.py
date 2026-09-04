@@ -1163,3 +1163,53 @@ def test_restore_history_unknown_returns_404(client):
     r = client.post(f"/api/recipes/recipes/{rid}/history/99999/restore")
     assert r.status_code == 404
 
+
+def test_preview_body_empty_returns_empty_html(client):
+    before = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    r = client.post("/api/recipes/preview-body", json={})
+    assert r.status_code == 200
+    assert r.json() == {"html": ""}
+    after = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
+    assert after == before
+
+
+def test_preview_body_matches_structured_render(client):
+    payload = {
+        "ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}],
+        "steps": ["混合面粉与水"],
+        "tips": ["夏天水温要更低"],
+    }
+    r = client.post("/api/recipes/preview-body", json=payload)
+    assert r.status_code == 200
+    assert r.json()["html"] == (
+        '<table class="recipe-ingredients"><tbody>'
+        "<tr>"
+        '<td class="recipe-ingredients-name">面粉</td>'
+        '<td class="recipe-ingredients-amount">200 g</td>'
+        "</tr>"
+        "</tbody></table>"
+        '<ol class="recipe-steps">'
+        '<li class="recipe-steps-item">混合面粉与水</li>'
+        "</ol>"
+        '<ul class="recipe-tips">'
+        '<li class="recipe-tips-item">夏天水温要更低</li>'
+        "</ul>"
+    )
+
+
+def test_preview_body_requires_auth(client):
+    client.headers.pop("X-Admin-Token", None)
+    r = client.post(
+        "/api/recipes/preview-body",
+        json={"ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}]},
+    )
+    assert r.status_code == 401
+
+
+def test_preview_body_rejects_overlong_ingredient(client):
+    r = client.post(
+        "/api/recipes/preview-body",
+        json={"ingredients": [{"name": "x" * 121, "amount": "", "unit": ""}]},
+    )
+    assert r.status_code == 400
+

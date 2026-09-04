@@ -2,14 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { SCALE_UNITS } from '../recipeCore.js'
 import {
   RECIPE_INGREDIENTS_AMOUNT_CLASS,
-  RECIPE_INGREDIENTS_NAME_CLASS,
-  RECIPE_INGREDIENTS_TABLE_CLASS,
   addIngredientRow,
   dropBlankIngredientRows,
   emptyIngredient,
   moveIngredientRow,
   removeIngredientRow,
-  renderIngredientsTableHtml,
 } from '../recipeIngredients.js'
 
 describe('SCALE_UNITS', () => {
@@ -71,53 +68,8 @@ describe('ingredient row list', () => {
   })
 })
 
-describe('renderIngredientsTableHtml', () => {
-  it('empty list omits the table', () => {
-    expect(renderIngredientsTableHtml([])).toBe('')
-    expect(renderIngredientsTableHtml(null)).toBe('')
-  })
-
-  it('one row matches backend class names and amount+unit', () => {
-    const html = renderIngredientsTableHtml([
-      { name: '面粉', amount: '200', unit: 'g' },
-    ])
-    expect(html).toBe(
-      '<table class="recipe-ingredients"><tbody>'
-      + '<tr>'
-      + '<td class="recipe-ingredients-name">面粉</td>'
-      + '<td class="recipe-ingredients-amount">200 g</td>'
-      + '</tr>'
-      + '</tbody></table>',
-    )
-    expect(RECIPE_INGREDIENTS_TABLE_CLASS).toBe('recipe-ingredients')
-    expect(RECIPE_INGREDIENTS_NAME_CLASS).toBe('recipe-ingredients-name')
+describe('RECIPE_INGREDIENTS_AMOUNT_CLASS', () => {
+  it('matches the structured-render amount cell class the reader scales', () => {
     expect(RECIPE_INGREDIENTS_AMOUNT_CLASS).toBe('recipe-ingredients-amount')
-  })
-
-  it('many rows and 适量 amount appear literally', () => {
-    const html = renderIngredientsTableHtml([
-      { name: '面粉', amount: '200', unit: 'g' },
-      { name: '胡椒', amount: '适量', unit: '' },
-    ])
-    expect(html).toBe(
-      '<table class="recipe-ingredients"><tbody>'
-      + '<tr>'
-      + '<td class="recipe-ingredients-name">面粉</td>'
-      + '<td class="recipe-ingredients-amount">200 g</td>'
-      + '</tr>'
-      + '<tr>'
-      + '<td class="recipe-ingredients-name">胡椒</td>'
-      + '<td class="recipe-ingredients-amount">适量</td>'
-      + '</tr>'
-      + '</tbody></table>',
-    )
-  })
-
-  it('escapes user strings', () => {
-    const html = renderIngredientsTableHtml([
-      { name: '<script>x</script>', amount: '1<', unit: 'g>"' },
-    ])
-    expect(html.includes('<script>')).toBe(false)
-    expect(html.includes('&lt;script&gt;')).toBe(true)
   })
 })

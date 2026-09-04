@@ -1,13 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
-  RECIPE_STEPS_ITEM_CLASS,
-  RECIPE_STEPS_LIST_CLASS,
   addStepRow,
   dropBlankStepRows,
   moveStepRow,
   removeStepRow,
-  renderStepsListHtml,
-  renderStructuredRecipePreviewHtml,
 } from '../recipeSteps.js'
 
 describe('step row list', () => {
@@ -32,78 +28,5 @@ describe('step row list', () => {
 
   it('dropBlankStepRows drops empty and whitespace rows', () => {
     expect(dropBlankStepRows(['', '混合面粉与水', '  '])).toEqual(['混合面粉与水'])
-  })
-})
-
-describe('renderStepsListHtml', () => {
-  it('empty list omits the ordered list', () => {
-    expect(renderStepsListHtml([])).toBe('')
-    expect(renderStepsListHtml(null)).toBe('')
-  })
-
-  it('one step matches backend class names', () => {
-    const html = renderStepsListHtml(['混合面粉与水'])
-    expect(html).toBe(
-      '<ol class="recipe-steps">'
-      + '<li class="recipe-steps-item">混合面粉与水</li>'
-      + '</ol>',
-    )
-    expect(RECIPE_STEPS_LIST_CLASS).toBe('recipe-steps')
-    expect(RECIPE_STEPS_ITEM_CLASS).toBe('recipe-steps-item')
-  })
-
-  it('many steps keep array order', () => {
-    const html = renderStepsListHtml(['混合面粉与水', '静置 10 分钟', '分成剂子'])
-    expect(html).toBe(
-      '<ol class="recipe-steps">'
-      + '<li class="recipe-steps-item">混合面粉与水</li>'
-      + '<li class="recipe-steps-item">静置 10 分钟</li>'
-      + '<li class="recipe-steps-item">分成剂子</li>'
-      + '</ol>',
-    )
-  })
-
-  it('escapes user strings', () => {
-    const html = renderStepsListHtml(['<script>x</script> 1<"'])
-    expect(html.includes('<script>')).toBe(false)
-    expect(html.includes('&lt;script&gt;')).toBe(true)
-  })
-})
-
-describe('renderStructuredRecipePreviewHtml', () => {
-  it('concatenates ingredients table then steps list', () => {
-    const html = renderStructuredRecipePreviewHtml(
-      [{ name: '面粉', amount: '200', unit: 'g' }],
-      ['混合面粉与水'],
-    )
-    expect(html).toBe(
-      '<table class="recipe-ingredients"><tbody>'
-      + '<tr>'
-      + '<td class="recipe-ingredients-name">面粉</td>'
-      + '<td class="recipe-ingredients-amount">200 g</td>'
-      + '</tr>'
-      + '</tbody></table>'
-      + '<ol class="recipe-steps">'
-      + '<li class="recipe-steps-item">混合面粉与水</li>'
-      + '</ol>',
-    )
-  })
-
-  it('omits missing blocks', () => {
-    expect(renderStructuredRecipePreviewHtml([], ['混合'])).toBe(
-      '<ol class="recipe-steps"><li class="recipe-steps-item">混合</li></ol>',
-    )
-    expect(renderStructuredRecipePreviewHtml(
-      [{ name: '盐', amount: '1', unit: 'g' }],
-      [],
-    )).toBe(
-      '<table class="recipe-ingredients"><tbody>'
-      + '<tr>'
-      + '<td class="recipe-ingredients-name">盐</td>'
-      + '<td class="recipe-ingredients-amount">1 g</td>'
-      + '</tr>'
-      + '</tbody></table>',
-    )
-    expect(renderStructuredRecipePreviewHtml([], [])).toBe('')
   })
 })
