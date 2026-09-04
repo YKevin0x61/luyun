@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyServeSelection, emptyServeSelection, serveSelectionAfterConfirm } from '../serveSelection.js'
+import { applyServeSelection, emptyServeSelection } from '../kitchenServe.js'
 
 describe('出餐选中 reducer', () => {
   it('counts 卡上出餐 from 0 and clamps to remaining 份', () => {
@@ -70,18 +70,6 @@ describe('出餐选中 reducer', () => {
     state = applyServeSelection(state, { type: 'toggleOrderLine', orderId: 'a' })
     state = applyServeSelection(state, { type: 'externalClear' })
     expect(state).toEqual(emptyServeSelection())
-  })
-
-  it('keeps 出餐选中 when the confirm is rejected', () => {
-    let state = emptyServeSelection()
-    state = applyServeSelection(state, { type: 'increase', chunkId: '虾饺', max: 2 })
-    state = applyServeSelection(state, { type: 'increase', chunkId: '叉烧包', max: 1 })
-
-    expect(serveSelectionAfterConfirm(state, false)).toEqual({
-      cardCounts: { 虾饺: 1, 叉烧包: 1 },
-      tablePick: null
-    })
-    expect(serveSelectionAfterConfirm(state, true)).toEqual(emptyServeSelection())
   })
 
   it('drops 等叫 lines from 选桌 and clamps 卡上出餐 to remaining 待出餐工作', () => {

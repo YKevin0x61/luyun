@@ -23,7 +23,7 @@ vi.mock('vue', () => ({
 }))
 
 const { useNudgePull, NUDGE_PULL_COALESCE_MS } = await import('../useNudgePull.js')
-const { hubShouldPull } = await import('../../utils/serveConfirm.js')
+const { hubShouldPull } = await import('../../utils/kitchenServe.js')
 
 function flushMount() {
   for (const fn of mountHooks) fn()

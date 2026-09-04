@@ -127,7 +127,7 @@ import {
   countUnmappedDishNames
 } from '../../utils/dashboardStats.js'
 import { hubOverviewPresentation } from '../../utils/hubOverviewPresentation.js'
-import { hubShouldPull } from '../../utils/serveConfirm.js'
+import { hubShouldPull } from '../../utils/kitchenServe.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
 

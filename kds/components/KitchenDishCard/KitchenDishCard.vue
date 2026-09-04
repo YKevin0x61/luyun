@@ -101,9 +101,8 @@
 <script>
 import { computed } from 'vue'
 import { DENSITY_MODES } from '../../utils/storage.js'
-import { orderLineId } from '../../utils/batchCooking.js'
 import { canonicalOrderNotes } from '../../utils/orderNotes.js'
-import { hasMarkedOrderLine, orderLineIsMarked } from '../../utils/serveConfirm.js'
+import { hasMarkedOrderLine, orderLineId, orderLineIsMarked } from '../../utils/kitchenServe.js'
 
 export default {
   name: 'KitchenDishCard',

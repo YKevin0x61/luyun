@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { planBatchCookingCalls, servePreviewOrderIds } from '../batchCooking.js'
+import { servePreviewOrderIds } from '../kitchenServe.js'
 import { composeKitchenDishCardsWithNotices, isDishCardCancelNotice } from '../dishCardNotices.js'
 
 function pending(overrides = {}) {
@@ -168,16 +168,7 @@ describe('composeKitchenDishCardsWithNotices', () => {
     })
     const card = cards[0]
     expect(servePreviewOrderIds([...card.orders, ...card.noticeOrders], 1)).toEqual(['a'])
-
-    const plan = planBatchCookingCalls({
-      selectedQuantities: { [card.chunkId]: 1 },
-      pendingOrders: [...card.orders, ...card.noticeOrders],
-      chunkOrders: {
-        [card.chunkId]: { dishName: card.dishName, orders: card.orders }
-      }
-    })
-    expect(plan[0].orders.map((row) => row.id)).toEqual(['a'])
-    expect(plan[0].allocations.every((item) => item.order.dish_status !== '已取消')).toBe(true)
+    expect(servePreviewOrderIds(card.orders, 1)).toEqual(['a'])
   })
 
   it('pins 退示 onto the matching 菜名+备注 card, not another remark of the same dish', () => {

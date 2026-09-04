@@ -22,7 +22,6 @@ import { useRealtimeStore } from './stores/realtime.js'
 
 // 导入工具类和常量
 import { TimeCalculator } from './utils/timeCalculator.js'
-import { OrderPrioritySelector } from './utils/prioritySelector.js'
 import { StationWindowMapper } from './utils/stationWindowMapper.js'
 import { KITCHEN_STATIONS, API_CONFIG } from './utils/constants.js'
 
@@ -35,7 +34,6 @@ export function createApp() {
   
   // 配置全局属性，让所有组件都能访问工具类
   app.config.globalProperties.$timeCalculator = TimeCalculator
-  app.config.globalProperties.$prioritySelector = OrderPrioritySelector
   app.config.globalProperties.$stationMapper = StationWindowMapper
   app.config.globalProperties.$kitchenStations = KITCHEN_STATIONS
   app.config.globalProperties.$apiConfig = API_CONFIG

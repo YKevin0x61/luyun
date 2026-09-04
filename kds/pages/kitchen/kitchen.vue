@@ -279,8 +279,20 @@ import { dishSplitKnobsChanged } from '../../utils/dishCardChunks.js'
 import { composeKitchenDishCardsWithNotices, isDishCardCancelNotice } from '../../utils/dishCardNotices.js'
 import { enqueuePrintTicket, subscribeQueueState, retryAllFailedJobs } from '../../utils/printQueue.js'
 import { debugLog } from '../../utils/debug.js'
-import { orderLineId, planBasketServeCookingCalls, planBatchCookingCalls, planTablePickCookingCalls, servePreviewOrderIds } from '../../utils/batchCooking.js'
-import { kitchenShouldPull, kitchenShouldRedrawWork, nextConflictMarks, orderLineIsMarked, runServeConfirm, serveConfirmErrorMessage } from '../../utils/serveConfirm.js'
+import {
+  applyServeSelection,
+  confirmBasketServe as runBasketServe,
+  confirmCardServe as runCardServe,
+  confirmTablePickServe as runTablePickServe,
+  emptyServeSelection,
+  kitchenShouldPull,
+  kitchenShouldRedrawWork,
+  nextConflictMarks,
+  orderLineId,
+  orderLineIsMarked,
+  serveConfirmErrorMessage,
+  servePreviewOrderIds
+} from '../../utils/kitchenServe.js'
 import { toastForServeBatch } from '../../utils/serveBatchToast.js'
 import { ordersAPI } from '../../api/orders.js'
 import { stationsAPI } from '../../api/stations.js'
@@ -296,7 +308,6 @@ import { useKitchenOrderSession } from '../../composables/useKitchenOrderSession
 import { useDisconnectAlert } from '../../composables/useDisconnectAlert.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
 import { stationChangeClearsSelection, takeSettingsReturnClear } from '../../utils/kitchenSelectionReset.js'
-import { applyServeSelection, emptyServeSelection, serveSelectionAfterConfirm } from '../../utils/serveSelection.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
 import KitchenDishCard from '../../components/KitchenDishCard/KitchenDishCard.vue'
 import ShulongSteamerConsole from '../../components/ShulongSteamerConsole/ShulongSteamerConsole.vue'
@@ -351,7 +362,6 @@ export default {
     })
 
     // 响应式数据
-    const operationLoading = ref(false)
     const currentTimeShort = ref('')
     const currentTimestamp = ref(Date.now()) // 新增：响应式时间戳
     const timeInterval = ref(null)
@@ -962,46 +972,28 @@ export default {
       orders: (dish.orders || []).filter(isSubmittableOrder)
     })
 
-    const submitServePlan = async (plan, totalCount) => {
-      const showToast = (outcome) => {
-        const toast = toastForServeBatch(outcome)
-        if (toast) uni.showToast(toast)
-      }
+    const serveAdapters = () => ({
+      meta: {
+        station: currentStation.value,
+        operatorId: 'chef_' + currentStation.value,
+        readyTime: new Date().toISOString()
+      },
+      completeCooking: (body) => ordersAPI.completeCooking(body),
+      enqueuePrint: ({ order, dishName, readyTime }) => {
+        tryPrintCompletedDish(order, dishName, readyTime)
+      },
+      pull: refreshData
+    })
 
-      conflictMarks.value = nextConflictMarks(conflictMarks.value, { type: 'confirmStart' })
-
-      try {
-        const result = await runServeConfirm({
-          plan,
-          meta: {
-            station: currentStation.value,
-            operatorId: 'chef_' + currentStation.value,
-            readyTime: new Date().toISOString()
-          },
-          completeCooking: (body) => ordersAPI.completeCooking(body),
-          enqueuePrint: ({ order, dishName, readyTime }) => {
-            tryPrintCompletedDish(order, dishName, readyTime)
-          },
-          pull: refreshData
-        })
-
-        serveSelection.value = serveSelectionAfterConfirm(serveSelection.value, result.submitted)
-        if (!result.submitted) {
-          showToast({ processed: 0, requested: totalCount })
-          return
-        }
-
-        showToast({ processed: result.processed, requested: totalCount })
-      } catch (error) {
-        console.error('出餐失败:', error)
-        serveSelection.value = serveSelectionAfterConfirm(serveSelection.value, false)
-        conflictMarks.value = nextConflictMarks(conflictMarks.value, { type: 'reject', error })
-        showToast({
-          processed: 0,
-          requested: totalCount,
-          errorMessage: serveConfirmErrorMessage(error)
-        })
-      }
+    const applyServeOutcome = (outcome, totalCount) => {
+      serveSelection.value = outcome.selection
+      conflictMarks.value = outcome.conflictMarks
+      const toast = toastForServeBatch({
+        processed: outcome.processed,
+        requested: totalCount,
+        errorMessage: outcome.error ? serveConfirmErrorMessage(outcome.error) : undefined
+      })
+      if (toast) uni.showToast(toast)
     }
 
     const batchSubmitCooking = async () => {
@@ -1018,12 +1010,13 @@ export default {
           chunkOrders[dish.chunkId] = chunkOrdersForDish(dish)
         }
 
-        const plan = planBatchCookingCalls({
-          selectedQuantities: selectedQuantities.value,
+        const outcome = await runCardServe({
+          selection: serveSelection.value,
           pendingOrders,
-          chunkOrders
+          chunkOrders,
+          ...serveAdapters()
         })
-        await submitServePlan(plan, totalCount)
+        applyServeOutcome(outcome, totalCount)
       } finally {
         batchSubmitting.value = false
         applyDishChunks(dishChunkSnapshotByDish.value)
@@ -1040,14 +1033,14 @@ export default {
       const totalCount = tablePickCount.value
       batchSubmitting.value = true
       try {
-        const plan = planTablePickCookingCalls({
-          selectedOrderIds: pick.selectedOrderIds,
-          chunkId: pick.chunkId,
+        const outcome = await runTablePickServe({
+          selection: serveSelection.value,
           chunkOrders: {
             [pick.chunkId]: chunkOrdersForDish(dish)
-          }
+          },
+          ...serveAdapters()
         })
-        await submitServePlan(plan, totalCount)
+        applyServeOutcome(outcome, totalCount)
       } finally {
         batchSubmitting.value = false
         applyDishChunks(dishChunkSnapshotByDish.value)
@@ -1056,109 +1049,23 @@ export default {
 
     const onSteamerBasketServe = async (intent) => {
       if (!intent || steamerLoading.value || batchSubmitting.value) return
-      const plan = planBasketServeCookingCalls({
-        selectedOrderIds: intent.orderIds,
-        cages: [...awaitingSteamerCages.value, ...steamingSteamerCages.value]
-      })
-      const totalCount = plan.reduce((sum, item) => sum + item.completeQuantity, 0)
+      const cages = [...awaitingSteamerCages.value, ...steamingSteamerCages.value]
+      const totalCount = intent.orderIds?.length || 0
       if (totalCount === 0) return
       steamerLoading.value = true
       try {
-        await submitServePlan(plan, totalCount)
+        const outcome = await runBasketServe({
+          selectedOrderIds: intent.orderIds,
+          cages,
+          selection: serveSelection.value,
+          ...serveAdapters()
+        })
+        applyServeOutcome(outcome, totalCount)
       } finally {
         steamerLoading.value = false
       }
     }
     
-    const completeCooking = async (dish) => {
-      if (operationLoading.value) return
-
-      operationLoading.value = true
-      try {
-        // 数据完整性检查和修复
-        const dishName = dish.dishName || dish.name || '未知菜品'
-        const totalQuantity = dish.totalQuantity || dish.total_quantity || dish.quantity || 1
-        const orders = dish.orders || []
-        
-        const validOrders = orders.filter(order =>
-          isPendingCookOrder(order) && TimeCalculator.isToday(order.order_time)
-        )
-        
-        if (validOrders.length === 0) {
-          uni.showToast({
-            title: '没有当天的订单可操作',
-            icon: 'none'
-          })
-          return
-        }
-        
-        debugLog(`[厨房页面] 制作完成操作: ${dishName}, 当天有效订单: ${validOrders.length}个`)
-        
-        // 🔍 验证菜品名称与订单中的菜品名称是否匹配
-        const dishNameMismatches = validOrders.filter(order => order.dish_name !== dishName)
-        if (dishNameMismatches.length > 0) {
-          debugLog('[厨房页面] 发现菜品名称不匹配的订单:', dishNameMismatches.map(order => ({
-            orderId: order._id || order.id,
-            orderDishName: order.dish_name,
-            mergeDishName: dishName,
-            equal: order.dish_name === dishName
-          })))
-        }
-        
-        // 🔍 打印第一个订单的详细信息用于诊断
-        if (validOrders.length > 0) {
-          const firstOrder = validOrders[0]
-          debugLog('[厨房页面] 第一个订单详细信息:', {
-            id: firstOrder._id || firstOrder.id,
-            dish_name: firstOrder.dish_name,
-            dish_status: firstOrder.dish_status,
-            table_number: firstOrder.table_number,
-            quantity: firstOrder.quantity,
-            served_quantity: firstOrder.served_quantity || 0
-          })
-        }
-        
-        // 🆕 记录制作完成时间，确保时间记录准确
-        const readyTime = new Date().toISOString()
-        debugLog(`[厨房页面] 制作完成时间: ${readyTime}`)
-        
-        const completeData = {
-          dishName: dishName,
-          station: currentStation.value,
-          completeQuantity: 1, // 默认只完成1份（最早的一个订单）
-          orders: validOrders, // 只传递当天的订单
-          operatorId: 'chef_' + currentStation.value,
-          notes: `${currentStationInfo.value.name}制作完成`,
-          ready_time: readyTime // 🆕 明确传递制作完成时间
-        }
-        
-        const response = await ordersStore.completeCooking(completeData)
-
-        const completedOrder = validOrders[0]
-        if (completedOrder) {
-          tryPrintCompletedDish(completedOrder, dishName, readyTime)
-        }
-        
-        uni.showToast({
-          title: '最早一单制作完成',
-          icon: 'success'
-        })
-        
-        // 立即刷新数据
-        debugLog('[厨房页面] 制作完成成功，立即刷新数据...')
-        await refreshData()
-        debugLog('[厨房页面] 数据刷新完成')
-        
-      } catch (error) {
-        console.error('制作完成操作失败:', error)
-        uni.showToast({
-          title: '操作失败: ' + (error.message || '未知错误'),
-          icon: 'error'
-        })
-      } finally {
-        operationLoading.value = false
-      }
-    }
     
     // orders nudge → pull; hold during confirm; filter by watched station. 60s reconcile still via fallback.
     const kitchenOrdersPull = useNudgePull({
@@ -1239,7 +1146,6 @@ export default {
     return {
       // 响应式数据
       loading,
-      operationLoading,
       currentTimeShort,
       currentTimestamp,
       currentStation,
@@ -1298,7 +1204,6 @@ export default {
       goBack,
       getStationOrderCount,
       getStationUrgentCount,
-      completeCooking,
       formatTime,
       increaseQuantity,
       decreaseQuantity,

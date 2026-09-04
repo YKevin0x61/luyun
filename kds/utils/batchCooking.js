@@ -51,41 +51,6 @@ export function orderLineId(order) {
 }
 
 /**
- * Group FIFO allocations into 将出预览 copy: `8桌×2、3桌` (no ×1).
- *
- * @param {Array<{ order: object, serveQuantity: number }>} [allocations]
- * @returns {string}
- */
-export function formatServePreview(allocations) {
-  if (!Array.isArray(allocations) || allocations.length === 0) return ''
-
-  const groups = []
-  for (const item of allocations) {
-    const n = Number(item?.serveQuantity) || 0
-    if (n <= 0) continue
-    const table = String(item?.order?.table_number ?? '')
-    const prev = groups.find((group) => group.table === table)
-    if (prev) prev.n += n
-    else groups.push({ table, n })
-  }
-
-  return groups.map((group) => (group.n > 1 ? `${group.table}桌×${group.n}` : `${group.table}桌`)).join('、')
-}
-
-/**
- * FIFO 将出预览 for a card’s selected count. Empty / 0 → ''.
- *
- * @param {object[]} orders
- * @param {number} selectedQuantity
- * @returns {string}
- */
-export function servePreviewText(orders, selectedQuantity) {
-  const qty = Number(selectedQuantity) || 0
-  if (qty <= 0) return ''
-  return formatServePreview(allocateFifo(orders || [], qty))
-}
-
-/**
  * FIFO 将出 订单行 ids for highlighting chips on the card. Empty / 0 → [].
  *
  * @param {object[]} orders
@@ -238,5 +203,3 @@ export function planBatchCookingCalls({ selectedQuantities, pendingOrders, chunk
 
   return plan
 }
-
-export default { planBatchCookingCalls, formatServePreview, servePreviewText, servePreviewOrderIds, planTablePickCookingCalls, planBasketServeCookingCalls, orderLineId }

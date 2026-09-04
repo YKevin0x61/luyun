@@ -160,8 +160,7 @@
 
 <script>
 import { computed, ref, watch } from 'vue'
-import { orderLineId } from '../../utils/batchCooking.js'
-import { hasMarkedOrderLine, orderLineIsMarked } from '../../utils/serveConfirm.js'
+import { hasMarkedOrderLine, orderLineId, orderLineIsMarked } from '../../utils/kitchenServe.js'
 import { dishSplitKnobsChanged } from '../../utils/dishCardChunks.js'
 import { canonicalOrderNotes } from '../../utils/orderNotes.js'
 import {
