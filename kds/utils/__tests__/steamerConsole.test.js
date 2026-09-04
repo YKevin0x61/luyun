@@ -4,10 +4,10 @@ import {
   isSteamerConsole,
   advanceAwaitingGroupSelection,
   awaitingGroupSelectedCount,
-  composeAwaitingSteamerGroups,
-  groupAwaitingSteamerCages,
-  listAwaitingSteamerCages,
-  sortAwaitingCagesFifo,
+  composeAwaitingSteamerGroups as composeAwaitingSteamerGroupsRaw,
+  groupAwaitingSteamerCages as groupAwaitingSteamerCagesRaw,
+  listAwaitingSteamerCages as listAwaitingSteamerCagesRaw,
+  sortAwaitingCagesFifo as sortAwaitingCagesFifoRaw,
   SHULONG_STEAMER_LAYOUT,
   steamerBasketServeIntent,
   steamerHoleTapIntent,
@@ -16,110 +16,119 @@ import {
   steamerUnloadIntent,
   toggleSteamerCageSelection,
   toggleSteamerSelection,
-  selectAllHoleCages,
-  isHoleFullySelected,
+  selectAllHoleCages as selectAllHoleCagesRaw,
+  isHoleFullySelected as isHoleFullySelectedRaw,
   sortHoleDisplay,
-  fillHoleSlots,
+  fillHoleSlots as fillHoleSlotsRaw,
   formatSteamerTableLabel,
-  formatSteamerCageCard,
+  formatSteamerCageCard as formatSteamerCageCardRaw,
   steamerAwaitingPlacement,
   steamerLayoutFromStations,
-  steamUrgencyLevel,
+  steamUrgencyLevel as steamUrgencyLevelRaw,
   pruneSteamerSelection
 } from '../steamerConsole.js'
 import * as steamerConsoleApi from '../steamerConsole.js'
 
-describe('deriveSteamerPhase', () => {
-  it('treats 待出餐 without placement as 待上笼', () => {
-    expect(deriveSteamerPhase({ dish_status: '待出餐' })).toBe('待上笼')
-    expect(deriveSteamerPhase({ dish_status: '待出餐', placement: null })).toBe('待上笼')
-  })
+function stampLine(overrides = {}) {
+  if (!overrides || typeof overrides !== 'object') return overrides
+  const order = { ...overrides }
+  if (order.steamer_phase === undefined) {
+    if (order.dish_status === '已取消' && order.placement) order.steamer_phase = '退菜占位'
+    else if (order.dish_status === '已取消' && order.loaded_at) order.steamer_phase = null
+    else if (order.dish_status === '已取消') order.steamer_phase = '待上笼退示'
+    else if (order.is_hold) order.steamer_phase = null
+    else if (order.placement) order.steamer_phase = '在蒸'
+    else if (order.dish_status === '待出餐') order.steamer_phase = '待上笼'
+    else order.steamer_phase = null
+  }
+  if (order.work_enter_time == null) {
+    order.work_enter_time = order.fired_at || order.order_time || null
+  }
+  if (order.is_pending_kitchen_work == null) {
+    order.is_pending_kitchen_work =
+      order.steamer_phase === '待上笼' || order.steamer_phase === '在蒸'
+  }
+  return order
+}
 
-  it('treats 待出餐 with placement as 在蒸', () => {
+function stampLines(orders) {
+  return (Array.isArray(orders) ? orders : []).map(stampLine)
+}
+
+function listAwaitingSteamerCages(orders, opts) {
+  return listAwaitingSteamerCagesRaw(stampLines(orders), opts)
+}
+
+function sortAwaitingCagesFifo(orders) {
+  return sortAwaitingCagesFifoRaw(stampLines(orders))
+}
+
+function groupAwaitingSteamerCages(orders, opts) {
+  return groupAwaitingSteamerCagesRaw(stampLines(orders), opts)
+}
+
+function composeAwaitingSteamerGroups(orders, opts, knobs) {
+  return composeAwaitingSteamerGroupsRaw(stampLines(orders), opts, knobs)
+}
+
+function fillHoleSlots(orders, opts) {
+  return fillHoleSlotsRaw(stampLines(orders), opts)
+}
+
+function formatSteamerCageCard(order, now) {
+  return formatSteamerCageCardRaw(stampLine(order), now)
+}
+
+function steamUrgencyLevel(order, now, thresholds) {
+  return steamUrgencyLevelRaw(stampLine(order), now, thresholds)
+}
+
+function selectAllHoleCages(args) {
+  const cagesOnHole = stampLines(args?.cagesOnHole)
+  return selectAllHoleCagesRaw({ ...args, cagesOnHole })
+}
+
+function isHoleFullySelected(args) {
+  const cagesOnHole = stampLines(args?.cagesOnHole)
+  return isHoleFullySelectedRaw({ ...args, cagesOnHole })
+}
+
+describe('deriveSteamerPhase', () => {
+  it('reads stamped 熟笼工作阶段', () => {
+    expect(deriveSteamerPhase({ steamer_phase: '待上笼' })).toBe('待上笼')
     expect(
       deriveSteamerPhase({
+        steamer_phase: '在蒸',
         dish_status: '待出餐',
-        placement: {
-          steamer_id: '1',
-          port_index: 3,
-          stack_order: 1,
-          loaded_at: '2026-08-14T10:05:00+08:00'
-        }
+        placement: { steamer_id: '1', port_index: 3 }
       })
     ).toBe('在蒸')
   })
 
-  it('does not put 等叫 on 待上笼', () => {
+  it('does not re-derive when the list row was not stamped', () => {
+    expect(deriveSteamerPhase({ dish_status: '待出餐' })).toBeNull()
     expect(deriveSteamerPhase({ dish_status: '待出餐', is_hold: true })).toBeNull()
   })
 
-  it('listAwaitingSteamerCages excludes 等叫', () => {
-    const awaiting = listAwaitingSteamerCages([
-      { id: 'held', dish_status: '待出餐', is_hold: true, dish_name: '虾饺' },
-      { id: 'work', dish_status: '待出餐', dish_name: '虾饺' }
-    ])
-    expect(awaiting.map((row) => row.id)).toEqual(['work'])
-  })
-
-  it('does not invent a 出餐状态 from phase', () => {
-    const steaming = deriveSteamerPhase({
-      dish_status: '待出餐',
-      placement: { steamer_id: '1', port_index: 1, stack_order: 1, loaded_at: 't' }
-    })
-    expect(steaming).toBe('在蒸')
-    expect(['待出餐', '已制作待上菜', '退菜/已取消']).not.toContain(steaming)
-  })
-
-  const noticeNow = Date.parse('2026-08-14T10:05:00+08:00')
-  const noticeSeconds = 180
-
-  it('treats cancelled-with-placement as 退菜占位, not a new dish_status', () => {
-    const hold = {
-      dish_status: '已取消',
-      status: '退菜',
-      placement: { steamer_id: '1', port_index: 3, stack_order: 1, loaded_at: 't' },
-      updated_at: '2026-08-14T10:04:00+08:00'
-    }
-    expect(deriveSteamerPhase(hold, { now: noticeNow, noticeSeconds })).toBe('退菜占位')
-    expect(hold.dish_status).toBe('已取消')
-  })
-
-  it('treats cancelled-without-placement as 待上笼退示 until this screen acks, not by elapsed time', () => {
+  it('hides 待上笼退示 only after this screen acks; does not change the stamped phase', () => {
     const notice = {
       business_flow_id: 'flow-notice',
       id: 'n1',
       dish_status: '已取消',
-      status: '退菜',
-      placement: null,
-      updated_at: '2026-08-14T10:04:00+08:00'
+      steamer_phase: '待上笼退示'
     }
-    expect(deriveSteamerPhase(notice, { now: noticeNow, noticeSeconds })).toBe('待上笼退示')
-    expect(
-      deriveSteamerPhase(notice, {
-        now: Date.parse('2026-08-14T10:08:00+08:00'),
-        noticeSeconds
-      })
-    ).toBe('待上笼退示')
-    expect(
-      deriveSteamerPhase(notice, {
-        acknowledgedCancelIds: ['flow-notice']
-      })
-    ).toBeNull()
+    expect(deriveSteamerPhase(notice)).toBe('待上笼退示')
+    expect(notice.steamer_phase).toBe('待上笼退示')
+    expect(deriveSteamerPhase(notice, { acknowledgedCancelIds: ['flow-notice'] })).toBeNull()
   })
 
-  it('does not treat a plucked hold as 待上笼退示', () => {
-    expect(
-      deriveSteamerPhase(
-        {
-          dish_status: '已取消',
-          status: '退菜',
-          placement: null,
-          loaded_at: '2026-08-14T10:05:00+08:00',
-          updated_at: '2026-08-14T10:04:00+08:00'
-        },
-        { now: noticeNow, noticeSeconds }
-      )
-    ).toBeNull()
+  it('does not hide 退菜占位 on ack', () => {
+    const hold = {
+      dish_status: '已取消',
+      steamer_phase: '退菜占位',
+      placement: { steamer_id: '1', port_index: 3 }
+    }
+    expect(deriveSteamerPhase(hold, { acknowledgedCancelIds: ['x'] })).toBe('退菜占位')
   })
 })
 
@@ -755,17 +764,34 @@ describe('groupAwaitingSteamerCages', () => {
 })
 
 describe('advanceAwaitingGroupSelection', () => {
-  const early = { _id: 'a1', order_time: '2026-08-16T08:00:00+08:00' }
-  const mid = { _id: 'a2', order_time: '2026-08-16T08:10:00+08:00' }
-  const late = { _id: 'a3', order_time: '2026-08-16T08:20:00+08:00' }
+  const early = {
+    _id: 'a1',
+    order_time: '2026-08-16T08:00:00+08:00',
+    work_enter_time: '2026-08-16T08:00:00+08:00'
+  }
+  const mid = {
+    _id: 'a2',
+    order_time: '2026-08-16T08:10:00+08:00',
+    work_enter_time: '2026-08-16T08:10:00+08:00'
+  }
+  const late = {
+    _id: 'a3',
+    order_time: '2026-08-16T08:20:00+08:00',
+    work_enter_time: '2026-08-16T08:20:00+08:00'
+  }
   const cages = [late, early, mid]
 
   it('sorts 待上笼 FIFO by 进入待出餐工作时刻 so a late 叫起 is last', () => {
-    const neverHeld = { _id: 'fresh', order_time: '2026-08-16T08:10:00+08:00' }
+    const neverHeld = {
+      _id: 'fresh',
+      order_time: '2026-08-16T08:10:00+08:00',
+      work_enter_time: '2026-08-16T08:10:00+08:00'
+    }
     const firedLate = {
       _id: 'fired',
       order_time: '2026-08-16T08:00:00+08:00',
-      fired_at: '2026-08-16T08:20:00+08:00'
+      fired_at: '2026-08-16T08:20:00+08:00',
+      work_enter_time: '2026-08-16T08:20:00+08:00'
     }
     expect(sortAwaitingCagesFifo([firedLate, neverHeld]).map((cage) => cage._id)).toEqual([
       'fresh',
@@ -1020,19 +1046,13 @@ describe('composeAwaitingSteamerGroups', () => {
 })
 
 function steamingCage(overrides = {}) {
-  return {
+  const order = {
     id: 's1',
     dish_name: '虾饺',
     dish_status: '待出餐',
     table_number: '8',
     notes: '',
     priority: 'normal',
-    placement: {
-      steamer_id: '1',
-      port_index: 1,
-      stack_order: 1,
-      loaded_at: '2026-08-14T10:00:00+08:00'
-    },
     ...overrides,
     placement: {
       steamer_id: '1',
@@ -1042,6 +1062,13 @@ function steamingCage(overrides = {}) {
       ...(overrides.placement || {})
     }
   }
+  if (order.steamer_phase === undefined) {
+    order.steamer_phase = order.dish_status === '已取消' ? '退菜占位' : '在蒸'
+  }
+  if (order.is_pending_kitchen_work == null) {
+    order.is_pending_kitchen_work = order.steamer_phase === '在蒸'
+  }
+  return order
 }
 
 describe('sortHoleDisplay', () => {

@@ -130,7 +130,6 @@ export const DISH_STATUS = {
 export function isRefundOrder(order) {
   if (!order) return false
   if (order.status === DISH_STATUS.CANCELLED) return true
-  if (order.change_type === '退菜') return true
   if (typeof order.quantity === 'number' && order.quantity < 0) return true
   const flowId = order.business_flow_id || ''
   return flowId.includes('_refund_')

@@ -9,7 +9,7 @@ from fastapi import HTTPException
 
 from db_core.order_notes import canonical_order_notes
 from db_core.ports import OrdersPort
-from services.kds_orders import derive_steamer_phase
+from services.kitchen_work import derive_steamer_phase
 from services.kitchen_work import (
     is_cancelled_status,
     is_dine_in,

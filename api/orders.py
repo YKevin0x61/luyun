@@ -35,6 +35,7 @@ from services.floor_console import (
     list_floor_tables,
     rush_portions as floor_rush_portions,
 )
+from services.kitchen_work import annotate_kitchen_work
 from services.urgency_policy import urgent_cutoff
 from api.security import verify_admin_token
 
@@ -101,13 +102,17 @@ async def get_orders(
             limit=limit
         )
 
+        stamped = []
         for order in orders:
-            if "_id" in order and "id" not in order:
-                order["id"] = order["_id"]
+            row = dict(order)
+            if "_id" in row and "id" not in row:
+                row["id"] = row["_id"]
+            annotate_kitchen_work(row)
+            stamped.append(row)
 
         return {
             "success": True,
-            "data": orders,
+            "data": stamped,
             "count": len(orders),
             "timestamp": datetime.now(CHINA_TZ).isoformat()
         }

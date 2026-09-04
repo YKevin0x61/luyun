@@ -31,7 +31,7 @@ vi.mock('../../utils/storage.js', () => ({
 const { useKitchenAlerts } = await import('../useKitchenAlerts.js')
 
 function makeOrder(overrides = {}) {
-  return {
+  const order = {
     id: '1',
     business_flow_id: 'flow-1',
     dish_name: '虾饺',
@@ -42,6 +42,14 @@ function makeOrder(overrides = {}) {
     station: 'shulong',
     ...overrides
   }
+  if (order.work_enter_time == null) {
+    order.work_enter_time = order.fired_at || order.order_time
+  }
+  if (order.is_pending_kitchen_work == null) {
+    const hold = order.is_hold === true || order.is_hold === 1 || order.is_hold === '1'
+    order.is_pending_kitchen_work = order.dish_status === '待出餐' && !hold
+  }
+  return order
 }
 
 describe('useKitchenAlerts', () => {

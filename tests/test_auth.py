@@ -224,10 +224,13 @@ def test_verify_admin_token_accepts_api_token(auth_client):
 
 
 @pytest.fixture
-def auth_app_client(tmp_path):
+def auth_app_client(tmp_path, monkeypatch):
     old = settings.DATABASE_DIR
     settings.DATABASE_DIR = str(tmp_path)
     import main as main_module
+    stub = tmp_path / "spa-index.html"
+    stub.write_text("<!doctype html><title>spa stub</title>", encoding="utf-8")
+    monkeypatch.setattr(main_module, "spa_index_path", str(stub))
     with TestClient(main_module.app) as client:
         yield client, main_module.db_manager
     settings.DATABASE_DIR = old
@@ -248,6 +251,21 @@ def test_login_page_accessible_without_session(auth_app_client):
     client, _ = auth_app_client
     resp = client.get("/login")
     assert resp.status_code == 200
+
+
+def test_spa_index_missing_returns_404(tmp_path, monkeypatch):
+    old = settings.DATABASE_DIR
+    settings.DATABASE_DIR = str(tmp_path)
+    import main as main_module
+    monkeypatch.setattr(
+        main_module, "spa_index_path", str(tmp_path / "missing-index.html")
+    )
+    try:
+        with TestClient(main_module.app) as client:
+            resp = client.get("/login")
+        assert resp.status_code == 404
+    finally:
+        settings.DATABASE_DIR = old
 
 
 def test_static_asset_accessible_without_session(auth_app_client):

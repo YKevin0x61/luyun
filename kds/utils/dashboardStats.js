@@ -3,8 +3,6 @@
  * 首页马赛克始终传空过滤 = 全店各档；厨房锁死档由 ScreenSettingsManager 单独表达。
  */
 
-import { isRefundOrder } from './constants.js'
-import { isHold } from './pendingKitchenWork.js'
 import { buildCompletedCookingStats } from './kitchenStationStats.js'
 
 /**
@@ -36,10 +34,10 @@ export function filterMergedDishesByWatched(mergedDishes, watchedStationIds) {
  * @param {Array<{ dish_status?: string, quantity?: number, served_quantity?: number, servedQuantity?: number }>|undefined|null} orders
  * @param {string} pendingStatus
  */
-function pendingPortions(orders, pendingStatus) {
+function pendingPortions(orders) {
   let total = 0
   for (const order of orders || []) {
-    if (!order || order.dish_status !== pendingStatus || isRefundOrder(order) || isHold(order)) continue
+    if (!order?.is_pending_kitchen_work) continue
     const quantity = Number(order.quantity) || 1
     const served = Number(order.served_quantity ?? order.servedQuantity) || 0
     total += Math.max(0, quantity - served)
@@ -56,7 +54,7 @@ export function countPendingAndUrgent(mergedDishes, pendingStatus) {
   let total = 0
   let urgent = 0
   for (const dish of mergedDishes || []) {
-    const portions = pendingPortions(dish.orders, pendingStatus)
+    const portions = pendingPortions(dish.orders)
     if (portions <= 0) continue
     total += portions
     if (dish.urgentCount > 0) urgent += 1
@@ -110,7 +108,7 @@ export function buildWatchedStationStatuses(
       for (const order of orders) {
         if (order) stationOrders.push(order)
       }
-      const portions = pendingPortions(orders, pendingStatus)
+      const portions = pendingPortions(orders)
       if (portions <= 0) continue
       pendingCount += portions
       if (dish.urgentCount > 0) urgentCount += 1

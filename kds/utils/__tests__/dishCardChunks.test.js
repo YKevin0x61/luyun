@@ -5,7 +5,7 @@ import { canonicalOrderNotes } from '../orderNotes.js'
 import { isPendingKitchenWork } from '../pendingKitchenWork.js'
 
 function makeOrder(overrides = {}) {
-  return {
+  const order = {
     id: '1',
     dish_name: '虾饺',
     dish_status: '待出餐',
@@ -16,6 +16,13 @@ function makeOrder(overrides = {}) {
     station: 'shulong',
     ...overrides
   }
+  if (order.work_enter_time == null) {
+    order.work_enter_time = order.fired_at || order.order_time
+  }
+  if (order.is_pending_kitchen_work == null) {
+    order.is_pending_kitchen_work = order.dish_status === '待出餐' && !order.is_hold
+  }
+  return order
 }
 
 function chunkOrderIds(chunk) {

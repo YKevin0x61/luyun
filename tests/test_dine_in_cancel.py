@@ -12,10 +12,10 @@ from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.kds_orders import (
     complete_cooking,
-    derive_steamer_phase,
     load_steamer,
     pluck_steamer,
 )
+from services.kitchen_work import derive_steamer_phase
 
 
 def _dine_in_order(flow_id: str, dish: str = "虾饺", *, seq_time_hour: int = 10, **overrides):

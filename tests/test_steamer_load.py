@@ -9,7 +9,8 @@ from typing import Any, Dict, List, Optional
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
-from services.kds_orders import derive_steamer_phase, load_steamer
+from services.kds_orders import load_steamer
+from services.kitchen_work import derive_steamer_phase
 
 
 def _pending_order(**overrides):

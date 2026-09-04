@@ -35,17 +35,17 @@ describe('filterMergedDishesByWatched', () => {
 describe('countPendingAndUrgent', () => {
   it('counts pending dishes and urgent subset', () => {
     const dishes = [
-      { orders: [{ dish_status: PENDING }], urgentCount: 2 },
-      { orders: [{ dish_status: PENDING }], urgentCount: 0 },
-      { orders: [{ dish_status: '已上菜' }], urgentCount: 1 }
+      { orders: [{ dish_status: PENDING, is_pending_kitchen_work: true }], urgentCount: 2 },
+      { orders: [{ dish_status: PENDING, is_pending_kitchen_work: true }], urgentCount: 0 },
+      { orders: [{ dish_status: '已上菜', is_pending_kitchen_work: false }], urgentCount: 1 }
     ]
     expect(countPendingAndUrgent(dishes, PENDING)).toEqual({ total: 2, urgent: 1 })
   })
 
   it('sums pending 份数 not dish groups', () => {
     const dishes = [
-      { orders: [{ dish_status: PENDING, quantity: 3 }], urgentCount: 1 },
-      { orders: [{ dish_status: PENDING, quantity: 2, served_quantity: 1 }], urgentCount: 0 },
+      { orders: [{ dish_status: PENDING, quantity: 3, is_pending_kitchen_work: true }], urgentCount: 1 },
+      { orders: [{ dish_status: PENDING, quantity: 2, served_quantity: 1, is_pending_kitchen_work: true }], urgentCount: 0 },
       { orders: [{ dish_status: '已上菜', quantity: 9 }], urgentCount: 1 }
     ]
     expect(countPendingAndUrgent(dishes, PENDING)).toEqual({ total: 4, urgent: 1 })
@@ -55,8 +55,8 @@ describe('countPendingAndUrgent', () => {
     const dishes = [
       {
         orders: [
-          { dish_status: PENDING, quantity: 1 },
-          { dish_status: PENDING, quantity: 1, status: '退菜', change_type: '退菜' }
+          { dish_status: PENDING, quantity: 1, is_pending_kitchen_work: true },
+          { dish_status: PENDING, quantity: 1, status: '退菜', is_pending_kitchen_work: false }
         ],
         urgentCount: 1
       },
@@ -66,7 +66,8 @@ describe('countPendingAndUrgent', () => {
             dish_status: PENDING,
             quantity: 1,
             status: '退菜',
-            business_flow_id: 'YY001_虾饺_refund_1'
+            business_flow_id: 'YY001_虾饺_refund_1',
+            is_pending_kitchen_work: false
           }
         ],
         urgentCount: 2
@@ -79,8 +80,8 @@ describe('countPendingAndUrgent', () => {
     const dishes = [
       {
         orders: [
-          { dish_status: PENDING, quantity: 2 },
-          { dish_status: PENDING, quantity: 3, is_hold: true }
+          { dish_status: PENDING, quantity: 2, is_pending_kitchen_work: true },
+          { dish_status: PENDING, quantity: 3, is_hold: true, is_pending_kitchen_work: false }
         ],
         urgentCount: 1
       }
@@ -91,7 +92,7 @@ describe('countPendingAndUrgent', () => {
   it('does not count 等叫-only dishes toward 紧急', () => {
     const dishes = [
       {
-        orders: [{ dish_status: PENDING, quantity: 2, is_hold: true }],
+        orders: [{ dish_status: PENDING, quantity: 2, is_hold: true, is_pending_kitchen_work: false }],
         urgentCount: 4
       }
     ]
@@ -102,7 +103,7 @@ describe('countPendingAndUrgent', () => {
     const dishes = [
       {
         orders: [
-          { dish_status: PENDING, quantity: 2 },
+          { dish_status: PENDING, quantity: 2, is_pending_kitchen_work: true },
           {
             dish_status: '已取消',
             status: '退菜',
@@ -137,9 +138,9 @@ describe('buildWatchedStationStatuses', () => {
 
   it('scopes rows to watched stations and pending counts', () => {
     const dishes = [
-      { station: 'changfen', orders: [{ dish_status: PENDING }] },
-      { station: 'changfen', orders: [{ dish_status: PENDING }] },
-      { station: 'xibing', orders: [{ dish_status: PENDING }] }
+      { station: 'changfen', orders: [{ dish_status: PENDING, is_pending_kitchen_work: true }] },
+      { station: 'changfen', orders: [{ dish_status: PENDING, is_pending_kitchen_work: true }] },
+      { station: 'xibing', orders: [{ dish_status: PENDING, is_pending_kitchen_work: true }] }
     ]
     const rows = buildWatchedStationStatuses(stations, dishes, ['changfen'], PENDING)
     expect(rows).toHaveLength(1)
@@ -160,7 +161,7 @@ describe('buildWatchedStationStatuses', () => {
     const dishes = [
       {
         station: 'changfen',
-        orders: [{ dish_status: PENDING, order_time: new Date(now - 5 * 60 * 1000).toISOString() }],
+        orders: [{ dish_status: PENDING, is_pending_kitchen_work: true, order_time: new Date(now - 5 * 60 * 1000).toISOString() }],
         urgentCount: 0
       },
       {
@@ -228,8 +229,8 @@ describe('buildWatchedStationStatuses', () => {
       {
         station: 'changfen',
         orders: [
-          { dish_status: PENDING, quantity: 3 },
-          { dish_status: PENDING, quantity: 2 }
+          { dish_status: PENDING, quantity: 3, is_pending_kitchen_work: true },
+          { dish_status: PENDING, quantity: 2, is_pending_kitchen_work: true }
         ]
       },
       {
@@ -238,7 +239,7 @@ describe('buildWatchedStationStatuses', () => {
       },
       {
         station: 'xibing',
-        orders: [{ dish_status: PENDING, quantity: 4, served_quantity: 1 }]
+        orders: [{ dish_status: PENDING, quantity: 4, served_quantity: 1, is_pending_kitchen_work: true }]
       }
     ]
     const rows = buildWatchedStationStatuses(stations, dishes, [], PENDING)
@@ -254,10 +255,10 @@ describe('buildWatchedStationStatuses', () => {
 
   it('counts urgent pending dishes per station', () => {
     const dishes = [
-      { station: 'changfen', orders: [{ dish_status: PENDING }], urgentCount: 2 },
-      { station: 'changfen', orders: [{ dish_status: PENDING }], urgentCount: 0 },
+      { station: 'changfen', orders: [{ dish_status: PENDING, is_pending_kitchen_work: true }], urgentCount: 2 },
+      { station: 'changfen', orders: [{ dish_status: PENDING, is_pending_kitchen_work: true }], urgentCount: 0 },
       { station: 'changfen', orders: [{ dish_status: '已上菜' }], urgentCount: 3 },
-      { station: 'xibing', orders: [{ dish_status: PENDING }], urgentCount: 1 }
+      { station: 'xibing', orders: [{ dish_status: PENDING, is_pending_kitchen_work: true }], urgentCount: 1 }
     ]
     const rows = buildWatchedStationStatuses(stations, dishes, [], PENDING)
     expect(rows.find((r) => r.id === 'changfen')).toMatchObject({
@@ -279,16 +280,16 @@ describe('buildWatchedStationStatuses', () => {
       {
         station: 'changfen',
         orders: [
-          { dish_status: PENDING, quantity: 1, status: '退菜', change_type: '退菜' },
-          { dish_status: PENDING, quantity: 1, status: '退菜', business_flow_id: 'cf_refund_1' }
+          { dish_status: PENDING, quantity: 1, status: '退菜', is_pending_kitchen_work: false },
+          { dish_status: PENDING, quantity: 1, status: '退菜', business_flow_id: 'cf_refund_1', is_pending_kitchen_work: false }
         ],
         urgentCount: 2
       },
       {
         station: 'xibing',
         orders: [
-          { dish_status: PENDING, quantity: 2 },
-          { dish_status: PENDING, quantity: 1, status: '退菜', change_type: '退菜' }
+          { dish_status: PENDING, quantity: 2, is_pending_kitchen_work: true },
+          { dish_status: PENDING, quantity: 1, status: '退菜', is_pending_kitchen_work: false }
         ],
         urgentCount: 0
       }
@@ -311,7 +312,7 @@ describe('buildWatchedStationStatuses', () => {
       {
         station: 'changfen',
         orders: [
-          { dish_status: PENDING, quantity: 1 },
+          { dish_status: PENDING, quantity: 1, is_pending_kitchen_work: true },
           { dish_status: '已取消', status: '退菜', quantity: 0 }
         ],
         urgentCount: 1

@@ -1,8 +1,7 @@
 /**
  * 待出餐工作 vs 等叫, and 进入待出餐工作时刻.
+ * Kitchen list rows stamp these on GET /api/orders/; missing fields fail closed.
  */
-
-import { DISH_STATUS, isRefundOrder } from './constants.js'
 
 export function isHold(order) {
   return Boolean(order && (order.is_hold === true || order.is_hold === 1 || order.is_hold === '1'))
@@ -13,16 +12,11 @@ export function isRushed(order) {
 }
 
 export function isPendingKitchenWork(order) {
-  return Boolean(
-    order &&
-      order.dish_status === DISH_STATUS.PENDING &&
-      !isRefundOrder(order) &&
-      !isHold(order)
-  )
+  return Boolean(order && order.is_pending_kitchen_work)
 }
 
 export function workEnterTimeMs(order) {
-  const raw = order?.fired_at || order?.order_time
+  const raw = order?.work_enter_time
   const ts = new Date(raw).getTime()
   return Number.isFinite(ts) ? ts : 0
 }

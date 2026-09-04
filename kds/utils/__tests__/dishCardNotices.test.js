@@ -3,7 +3,7 @@ import { planBatchCookingCalls, servePreviewOrderIds } from '../batchCooking.js'
 import { composeKitchenDishCardsWithNotices, isDishCardCancelNotice } from '../dishCardNotices.js'
 
 function pending(overrides = {}) {
-  return {
+  const order = {
     id: 'p1',
     dish_name: '虾饺',
     dish_status: '待出餐',
@@ -12,8 +12,13 @@ function pending(overrides = {}) {
     order_time: '2026-08-18T10:00:00.000Z',
     table_number: '8',
     station: 'changfen',
+    is_pending_kitchen_work: true,
     ...overrides
   }
+  if (order.work_enter_time == null) {
+    order.work_enter_time = order.fired_at || order.order_time
+  }
+  return order
 }
 
 function notice(overrides = {}) {

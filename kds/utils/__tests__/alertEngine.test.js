@@ -20,7 +20,7 @@ function defaultConfig(overrides = {}) {
 }
 
 function makeOrder(overrides = {}) {
-  return {
+  const order = {
     id: '1',
     business_flow_id: 'flow-1',
     dish_name: '虾饺',
@@ -31,6 +31,18 @@ function makeOrder(overrides = {}) {
     station: 'shulong',
     ...overrides
   }
+  if (order.work_enter_time == null) {
+    order.work_enter_time = order.fired_at || order.order_time
+  }
+  if (order.is_pending_kitchen_work == null) {
+    const hold = order.is_hold === true || order.is_hold === 1 || order.is_hold === '1'
+    const refund =
+      order.status === '退菜' ||
+      (typeof order.quantity === 'number' && order.quantity < 0) ||
+      String(order.business_flow_id || '').includes('_refund_')
+    order.is_pending_kitchen_work = order.dish_status === '待出餐' && !hold && !refund
+  }
+  return order
 }
 
 function badgeModes(state) {

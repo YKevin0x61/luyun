@@ -3,11 +3,10 @@
  * Phase is not a 出餐状态.
  */
 
-import { isRefundOrder } from './constants.js'
 import { cancelAckLineId, isCancelAcknowledged } from './cancelAck.js'
 import { composeKitchenDishCards, sortKitchenDishCardsByOldest } from './dishCardChunks.js'
 import { canonicalOrderNotes, dishNotesIdentityKey } from './orderNotes.js'
-import { compareRushThenFifo, isHold } from './pendingKitchenWork.js'
+import { compareRushThenFifo } from './pendingKitchenWork.js'
 
 export const STEAMER_PHASE_AWAITING = '待上笼'
 export const STEAMER_PHASE_STEAMING = '在蒸'
@@ -60,19 +59,11 @@ export function advanceAwaitingGroupSelection({ selectableCages, selectedIds } =
 
 export function deriveSteamerPhase(order, { acknowledgedCancelIds } = {}) {
   if (!order) return null
-  const cancelled = order.dish_status === '已取消'
-  if (cancelled && order.placement) return STEAMER_PHASE_CANCEL_HOLD
-  if (cancelled) {
-    // 抽走 keeps loaded_at; 待上笼退示 is never-loaded and unacked on this screen.
-    if (order.loaded_at) return null
-    if (isCancelAcknowledged(cancelAckLineId(order), acknowledgedCancelIds)) return null
-    return STEAMER_PHASE_AWAITING_NOTICE
+  const phase = order.steamer_phase || null
+  if (phase === STEAMER_PHASE_AWAITING_NOTICE && isCancelAcknowledged(cancelAckLineId(order), acknowledgedCancelIds)) {
+    return null
   }
-  if (isRefundOrder(order)) return null
-  if (order.dish_status !== '待出餐') return null
-  if (isHold(order)) return null
-  if (order.placement) return STEAMER_PHASE_STEAMING
-  return STEAMER_PHASE_AWAITING
+  return phase
 }
 
 export function listAwaitingSteamerCages(orders, opts) {

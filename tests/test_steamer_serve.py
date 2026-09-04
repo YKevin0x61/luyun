@@ -8,7 +8,8 @@ from datetime import datetime
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
-from services.kds_orders import complete_cooking, derive_steamer_phase, load_steamer
+from services.kds_orders import complete_cooking, load_steamer
+from services.kitchen_work import derive_steamer_phase
 
 
 def _pending_order(**overrides):

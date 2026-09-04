@@ -7,7 +7,7 @@ import {
 } from '../deliveryCancelEngine.js'
 
 function makeOrder(overrides = {}) {
-  return {
+  const order = {
     id: '1',
     business_flow_id: 'flow-1',
     dish_name: '虾饺',
@@ -18,6 +18,15 @@ function makeOrder(overrides = {}) {
     source: 'delivery',
     ...overrides
   }
+  if (order.steamer_phase === undefined) {
+    if (order.dish_status === '已取消' && order.placement) order.steamer_phase = '退菜占位'
+    else if (order.dish_status === '已取消' && order.loaded_at) order.steamer_phase = null
+    else if (order.dish_status === '已取消') order.steamer_phase = '待上笼退示'
+    else if (order.placement) order.steamer_phase = '在蒸'
+    else if (order.dish_status === '待出餐') order.steamer_phase = '待上笼'
+    else order.steamer_phase = null
+  }
+  return order
 }
 
 describe('deliveryCancelEngine', () => {

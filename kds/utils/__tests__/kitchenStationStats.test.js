@@ -5,14 +5,23 @@ import {
   decorateOrderWait
 } from '../kitchenStationStats.js'
 
+function line(extra = {}) {
+  const order = { dish_status: '待出餐', ...extra }
+  if (order.work_enter_time == null) order.work_enter_time = order.order_time
+  if (order.is_pending_kitchen_work == null) {
+    order.is_pending_kitchen_work = order.dish_status === '待出餐' && !order.is_hold
+  }
+  return order
+}
+
 describe('kitchenStationStats', () => {
   it('buildStationTabStats counts pending and urgent', () => {
     const now = Date.now()
     const ordersByStation = {
       changfen: [
-        { dish_status: '待出餐', order_time: new Date(now - 25 * 60 * 1000).toISOString() },
-        { dish_status: '待出餐', order_time: new Date(now - 5 * 60 * 1000).toISOString() },
-        { dish_status: '已上菜', order_time: new Date(now - 40 * 60 * 1000).toISOString() }
+        line({ dish_status: '待出餐', order_time: new Date(now - 25 * 60 * 1000).toISOString() }),
+        line({ dish_status: '待出餐', order_time: new Date(now - 5 * 60 * 1000).toISOString() }),
+        line({ dish_status: '已上菜', order_time: new Date(now - 40 * 60 * 1000).toISOString() })
       ]
     }
     const stats = buildStationTabStats(
@@ -29,12 +38,12 @@ describe('kitchenStationStats', () => {
     const stats = buildStationTabStats(
       ['changfen'],
       () => [
-        { dish_status: '待出餐', order_time: new Date(now - 25 * 60 * 1000).toISOString() },
-        {
+        line({ dish_status: '待出餐', order_time: new Date(now - 25 * 60 * 1000).toISOString() }),
+        line({
           dish_status: '待出餐',
           is_hold: true,
           order_time: new Date(now - 40 * 60 * 1000).toISOString()
-        }
+        })
       ],
       { urgentMs: 20 * 60 * 1000 }
     )
@@ -47,11 +56,11 @@ describe('kitchenStationStats', () => {
     const stats = buildStationTabStats(
       ['changfen'],
       () => [
-        {
+        line({
           dish_status: '待出餐',
           is_rushed: true,
           order_time: new Date(now - 5 * 60 * 1000).toISOString()
-        }
+        })
       ],
       { urgentMs: 20 * 60 * 1000 }
     )
@@ -64,13 +73,13 @@ describe('kitchenStationStats', () => {
     const stats = buildStationTabStats(
       ['changfen'],
       () => [
-        { dish_status: '待出餐', order_time: new Date(now - 5 * 60 * 1000).toISOString() },
-        {
+        line({ dish_status: '待出餐', order_time: new Date(now - 5 * 60 * 1000).toISOString() }),
+        line({
           dish_status: '已取消',
           status: '退菜',
           quantity: 0,
           order_time: new Date(now - 40 * 60 * 1000).toISOString()
-        }
+        })
       ],
       { urgentMs: 20 * 60 * 1000 }
     )
@@ -94,10 +103,10 @@ describe('kitchenStationStats', () => {
     const todayReady = new Date(now).toISOString()
     const stats = buildCurrentStationStats(
       [
-        {
+        line({
           dish_status: '待出餐',
           order_time: new Date(now - 30 * 60 * 1000).toISOString()
-        },
+        }),
         {
           dish_status: '已制作待上菜',
           order_time: new Date(now - 40 * 60 * 1000).toISOString(),
@@ -116,10 +125,10 @@ describe('kitchenStationStats', () => {
     const now = Date.now()
     const stats = buildCurrentStationStats(
       [
-        {
+        line({
           dish_status: '待出餐',
           order_time: new Date(now - 5 * 60 * 1000).toISOString()
-        },
+        }),
         {
           dish_status: '已取消',
           status: '退菜',

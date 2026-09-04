@@ -10,12 +10,7 @@ from fastapi import HTTPException
 from config import settings
 from database import CHINA_TZ, ensure_beijing_datetime
 from db_core.ports import OrdersPort
-from services.kitchen_work import is_hold
-
-STEAMER_PHASE_AWAITING = "待上笼"
-STEAMER_PHASE_STEAMING = "在蒸"
-STEAMER_PHASE_CANCEL_HOLD = "退菜占位"
-STEAMER_PHASE_AWAITING_NOTICE = "待上笼退示"
+from services.kitchen_work import is_cancelled_status, is_hold, is_refund_line
 
 DEFAULT_AWAITING_CANCEL_NOTICE_SECONDS = 180
 
@@ -26,44 +21,6 @@ def steamer_awaiting_cancel_notice_seconds() -> int:
     if raw in (None, ""):
         return DEFAULT_AWAITING_CANCEL_NOTICE_SECONDS
     return int(raw)
-
-
-def derive_steamer_phase(
-    order: Optional[Dict],
-    now: Optional[datetime] = None,
-    notice_seconds: Optional[int] = None,
-) -> Optional[str]:
-    """Derived 熟笼工作阶段. Not a 出餐状态."""
-    if not order:
-        return None
-    cancelled = order.get("dish_status") == "已取消"
-    if cancelled and order.get("placement"):
-        return STEAMER_PHASE_CANCEL_HOLD
-    if cancelled:
-        # 抽笼 keeps loaded_at; 待上笼退示 is only for never-loaded cancels.
-        # Ack is device-local; server always keeps 待上笼退示 so load/complete stay blocked.
-        if order.get("loaded_at"):
-            return None
-        return _awaiting_cancel_notice_phase(order, now=now, notice_seconds=notice_seconds)
-    if _is_refund_order(order):
-        return None
-    if order.get("dish_status", "待出餐") != "待出餐":
-        return None
-    if is_hold(order):
-        return None
-    if order.get("placement"):
-        return STEAMER_PHASE_STEAMING
-    return STEAMER_PHASE_AWAITING
-
-
-def _awaiting_cancel_notice_phase(
-    order: Dict,
-    *,
-    now: Optional[datetime],
-    notice_seconds: Optional[int],
-) -> Optional[str]:
-    # now / notice_seconds kept for callers; 退示 no longer expires by shop seconds.
-    return STEAMER_PHASE_AWAITING_NOTICE
 
 
 def steamer_port_capacity() -> int:
@@ -98,20 +55,6 @@ async def _reject_if_over_capacity(
     incoming.discard("")
     if len(occupants) + len(incoming) > steamer_port_capacity():
         raise HTTPException(status_code=409, detail="蒸孔已满")
-
-
-def _is_refund_order(order: Dict) -> bool:
-    if order.get("status") == "退菜":
-        return True
-    if "_refund_" in (order.get("business_flow_id") or ""):
-        return True
-    return int(order.get("quantity") or 0) < 0
-
-
-def _is_cancelled_or_refund(order: Dict) -> bool:
-    if order.get("dish_status") == "已取消":
-        return True
-    return _is_refund_order(order)
 
 
 def _cooking_conflict(order_id: str, reason: str) -> Dict[str, str]:
@@ -154,7 +97,7 @@ async def complete_cooking(orders: OrdersPort, payload: Dict) -> Dict:
             conflicts.append(_cooking_conflict(oid, "重复"))
             continue
         seen_ids.add(oid)
-        if _is_refund_order(order):
+        if is_refund_line(order):
             conflicts.append(_cooking_conflict(oid, "退菜"))
             continue
         if order.get("dish_status", "待出餐") != "待出餐":
@@ -266,7 +209,7 @@ async def move_steamer(orders: OrdersPort, payload: Dict) -> Dict:
             raise HTTPException(status_code=404, detail=f"订单不存在: {order_id}")
         if order.get("dish_status", "待出餐") != "待出餐":
             raise HTTPException(status_code=409, detail=f"订单状态不可换孔: {order_id}")
-        if _is_cancelled_or_refund(order):
+        if is_cancelled_status(order):
             raise HTTPException(status_code=409, detail=f"退菜占位不可换孔: {order_id}")
         if not order.get("placement"):
             raise HTTPException(status_code=409, detail=f"订单未上笼: {order_id}")
@@ -325,7 +268,7 @@ async def pluck_steamer(orders: OrdersPort, payload: Dict) -> Dict:
         order = await orders.get_order_by_id(order_id)
         if not order:
             raise HTTPException(status_code=404, detail=f"订单不存在: {order_id}")
-        if not _is_cancelled_or_refund(order) or not order.get("placement"):
+        if not is_cancelled_status(order) or not order.get("placement"):
             raise HTTPException(status_code=409, detail=f"仅退菜占位可抽笼: {order_id}")
 
     applied = await orders.apply_steamer_pluck(order_ids=order_ids)

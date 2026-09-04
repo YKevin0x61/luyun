@@ -7,7 +7,9 @@ describe('deriveSteamerPhase kitchen identity', () => {
       business_flow_id: 't8_虾饺_refund_1',
       dish_status: '待出餐',
       status: '退菜',
-      quantity: 1
+      quantity: 1,
+      steamer_phase: null,
+      is_pending_kitchen_work: false
     }
     expect(deriveSteamerPhase(refund)).toBeNull()
     expect(listAwaitingSteamerCages([refund])).toEqual([])
@@ -18,7 +20,8 @@ describe('deriveSteamerPhase kitchen identity', () => {
       business_flow_id: 'flow-n1',
       dish_status: '已取消',
       status: '退菜',
-      quantity: 0
+      quantity: 0,
+      steamer_phase: '待上笼退示'
     }
     expect(deriveSteamerPhase(notice)).toBe('待上笼退示')
   })

@@ -527,7 +527,9 @@ spa_index_path = os.path.join(spa_dir, "index.html")
 
 
 def _spa_index():
-    """返回 admin-web SPA 入口 index.html，由前端 vue-router 接管客户端路由。"""
+    """Return admin-web SPA index.html; vue-router owns client routes."""
+    if not os.path.isfile(spa_index_path):
+        raise HTTPException(status_code=404, detail="管理后台前端未构建")
     return FileResponse(spa_index_path)
 
 

@@ -5,9 +5,9 @@
  * → next state + effects (dingCount / overtimeAlarm). Outer layer executes effects.
  */
 
-import { DISH_STATUS, isRefundOrder } from './constants.js'
+import { DISH_STATUS } from './constants.js'
 import { isNeverLoadedCancel } from './cancelAck.js'
-import { isHold, workEnterTimeMs } from './pendingKitchenWork.js'
+import { isHold, isPendingKitchenWork, workEnterTimeMs } from './pendingKitchenWork.js'
 
 /** @typedef {'green' | 'yellow' | 'red'} BorderState */
 /** @typedef {'yellow' | 'busy'} BadgeMode */
@@ -134,13 +134,13 @@ function buildRelevantIndex(orders, watchedStations) {
     if (!order) continue
     const hold = isCancelHold(order)
     const notice = isCancelNotice(order)
-    if (isRefundOrder(order) && !hold && !notice) continue
+    if (!isPendingKitchenWork(order) && !isHold(order) && !hold && !notice) continue
     if (!isWatched(watchedStations, order)) continue
     const flowId = flowIdOf(order)
     if (!flowId) continue
     const quantity = Number(order.quantity)
     const hasPlacement = Boolean(order.placement)
-    const pendingWork = order.dish_status === DISH_STATUS.PENDING && !isHold(order)
+      const pendingWork = isPendingKitchenWork(order)
     index.set(flowId, {
       status: order.dish_status,
       quantity: Number.isFinite(quantity) ? quantity : 0,
