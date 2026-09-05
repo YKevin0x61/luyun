@@ -1,5 +1,5 @@
-"""配方库异步数据访问层（aiosqlite）。配方相关表与其它业务表同库存放于统一的
-data/app.db（WAL），自身仍持有独立连接（不接入 DatabaseManager 的共享连接）。
+"""配方库异步数据访问层（aiosqlite）。配方表与其它业务表同库存放于
+data/app.db（WAL）。生产借 DatabaseManager 的连接；测试可按路径自开连接。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Optional
 import aiosqlite
 
 from config import settings
+from db_core.schema import apply_recipe_schema
 from db_core.utils import SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE_WAL
 
 from .sections import DEFAULT_RECIPE_SECTION, canonicalize_section
@@ -212,28 +213,42 @@ def utc_now_iso() -> str:
 
 
 class RecipeStore:
-    def __init__(self, db_path: str | os.PathLike | None = None):
-        # 优先级：显式传入（测试用 tmp 库注入） > RECIPES_DB_PATH 环境变量覆盖
-        # > 统一单库路径 settings.APP_DB_PATH（与 DatabaseManager 同一常量，见 config.py）。
-        self.db_path = str(
-            db_path or os.environ.get("RECIPES_DB_PATH") or settings.APP_DB_PATH
-        )
-        self._conn: Optional[aiosqlite.Connection] = None
+    def __init__(
+        self,
+        db_path: str | os.PathLike | None = None,
+        *,
+        conn: aiosqlite.Connection | None = None,
+    ):
+        if conn is not None:
+            self._conn = conn
+            self._owns_conn = False
+            self.db_path = None
+            return
+        self._conn = None
+        self._owns_conn = True
+        self.db_path = str(db_path) if db_path is not None else settings.APP_DB_PATH
 
     async def connect(self) -> bool:
+        if not self._owns_conn:
+            await self.prepare()
+            return True
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
-        # 与 app.db 同库、独立连接：显式开 WAL + busy_timeout，避免与
-        # DatabaseManager 主连接的写操作发生 SQLITE_BUSY 锁竞争。
         await self._conn.execute(f"PRAGMA journal_mode={SQLITE_JOURNAL_MODE_WAL}")
         await self._conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
         await self._conn.execute("PRAGMA foreign_keys = ON")
-        await self._ensure_schema()
+        await apply_recipe_schema(self._conn)
+        await self.prepare()
         await self._conn.commit()
         return True
 
+    async def prepare(self) -> None:
+        """Run section canonicalize (and rely on schema already applied)."""
+        await self._canonicalize_stored_sections()
+        await self.conn.commit()
+
     async def close(self) -> None:
-        if self._conn is not None:
+        if self._owns_conn and self._conn is not None:
             await self._conn.close()
             self._conn = None
 
@@ -242,114 +257,6 @@ class RecipeStore:
         if self._conn is None:
             raise RuntimeError("RecipeStore 未连接")
         return self._conn
-
-    async def _ensure_schema(self) -> None:
-        await self.conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS sop_stations (
-                slug TEXT PRIMARY KEY NOT NULL,
-                title TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS sop_recipes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                station_slug TEXT NOT NULL,
-                section TEXT NOT NULL,
-                recipe_name TEXT NOT NULL,
-                body_markdown TEXT NOT NULL,
-                sort_order INTEGER NOT NULL,
-                is_new INTEGER NOT NULL DEFAULT 0,
-                is_active INTEGER NOT NULL DEFAULT 1,
-                ingredients_json TEXT,
-                steps_json TEXT,
-                tips_json TEXT,
-                base_servings_qty REAL,
-                base_servings_unit TEXT,
-                legacy_markdown TEXT,
-                needs_review INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_sop_recipes_station_order
-            ON sop_recipes (station_slug, sort_order);
-            CREATE TABLE IF NOT EXISTS sop_recipes_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                recipe_id INTEGER NOT NULL,
-                station_slug TEXT NOT NULL,
-                section TEXT NOT NULL,
-                recipe_name TEXT NOT NULL,
-                body_markdown TEXT NOT NULL,
-                sort_order INTEGER NOT NULL,
-                is_new INTEGER NOT NULL DEFAULT 0,
-                ingredients_json TEXT,
-                steps_json TEXT,
-                tips_json TEXT,
-                base_servings_qty REAL,
-                base_servings_unit TEXT,
-                changed_at TEXT NOT NULL,
-                FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_sop_recipes_history_recipe
-            ON sop_recipes_history (recipe_id, changed_at DESC);
-            """
-        )
-        cur = await self.conn.execute("PRAGMA table_info(sop_recipes)")
-        cols = {row["name"] for row in await cur.fetchall()}
-        if "is_active" not in cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
-            )
-        if "ingredients_json" not in cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes ADD COLUMN ingredients_json TEXT"
-            )
-        if "steps_json" not in cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes ADD COLUMN steps_json TEXT"
-            )
-        if "tips_json" not in cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes ADD COLUMN tips_json TEXT"
-            )
-        if "base_servings_qty" not in cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes ADD COLUMN base_servings_qty REAL"
-            )
-        if "base_servings_unit" not in cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes ADD COLUMN base_servings_unit TEXT"
-            )
-        if "legacy_markdown" not in cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes ADD COLUMN legacy_markdown TEXT"
-            )
-        if "needs_review" not in cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0"
-            )
-        hist_cur = await self.conn.execute("PRAGMA table_info(sop_recipes_history)")
-        hist_cols = {row["name"] for row in await hist_cur.fetchall()}
-        if "ingredients_json" not in hist_cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes_history ADD COLUMN ingredients_json TEXT"
-            )
-        if "steps_json" not in hist_cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes_history ADD COLUMN steps_json TEXT"
-            )
-        if "tips_json" not in hist_cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes_history ADD COLUMN tips_json TEXT"
-            )
-        if "base_servings_qty" not in hist_cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes_history ADD COLUMN base_servings_qty REAL"
-            )
-        if "base_servings_unit" not in hist_cols:
-            await self.conn.execute(
-                "ALTER TABLE sop_recipes_history ADD COLUMN base_servings_unit TEXT"
-            )
-        await self._canonicalize_stored_sections()
 
     async def _canonicalize_stored_sections(self) -> None:
         for table in ("sop_recipes", "sop_recipes_history"):

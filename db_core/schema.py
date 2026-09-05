@@ -322,3 +322,110 @@ _INDEX_DEFINITIONS = {
 
 # 所有表名（按数据量从小到大排列）
 ALL_TABLES = list(_TABLE_SCHEMAS.keys())
+
+# Recipe tables live in app.db but stay out of ALL_TABLES: Admin CRUD and
+# app.db overwrite/merge must not treat them as generic business tables.
+RECIPE_TABLES = ("sop_stations", "sop_recipes", "sop_recipes_history")
+
+_RECIPE_TABLE_SCHEMAS = {
+    "sop_stations": """
+        CREATE TABLE IF NOT EXISTS sop_stations (
+            slug TEXT PRIMARY KEY NOT NULL,
+            title TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """,
+    "sop_recipes": """
+        CREATE TABLE IF NOT EXISTS sop_recipes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            station_slug TEXT NOT NULL,
+            section TEXT NOT NULL,
+            recipe_name TEXT NOT NULL,
+            body_markdown TEXT NOT NULL,
+            sort_order INTEGER NOT NULL,
+            is_new INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            ingredients_json TEXT,
+            steps_json TEXT,
+            tips_json TEXT,
+            base_servings_qty REAL,
+            base_servings_unit TEXT,
+            legacy_markdown TEXT,
+            needs_review INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
+        )
+    """,
+    "sop_recipes_history": """
+        CREATE TABLE IF NOT EXISTS sop_recipes_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipe_id INTEGER NOT NULL,
+            station_slug TEXT NOT NULL,
+            section TEXT NOT NULL,
+            recipe_name TEXT NOT NULL,
+            body_markdown TEXT NOT NULL,
+            sort_order INTEGER NOT NULL,
+            is_new INTEGER NOT NULL DEFAULT 0,
+            ingredients_json TEXT,
+            steps_json TEXT,
+            tips_json TEXT,
+            base_servings_qty REAL,
+            base_servings_unit TEXT,
+            changed_at TEXT NOT NULL,
+            FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
+        )
+    """,
+}
+
+_RECIPE_INDEX_DEFINITIONS = {
+    "sop_recipes": [
+        "CREATE INDEX IF NOT EXISTS idx_sop_recipes_station_order "
+        "ON sop_recipes (station_slug, sort_order)",
+    ],
+    "sop_recipes_history": [
+        "CREATE INDEX IF NOT EXISTS idx_sop_recipes_history_recipe "
+        "ON sop_recipes_history (recipe_id, changed_at DESC)",
+    ],
+}
+
+
+async def migrate_recipe_columns(conn) -> None:
+    """Add columns introduced after the first sop_* CREATE on existing DBs."""
+    cur = await conn.execute("PRAGMA table_info(sop_recipes)")
+    cols = {row[1] for row in await cur.fetchall()}
+    alters = [
+        ("is_active", "ALTER TABLE sop_recipes ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"),
+        ("ingredients_json", "ALTER TABLE sop_recipes ADD COLUMN ingredients_json TEXT"),
+        ("steps_json", "ALTER TABLE sop_recipes ADD COLUMN steps_json TEXT"),
+        ("tips_json", "ALTER TABLE sop_recipes ADD COLUMN tips_json TEXT"),
+        ("base_servings_qty", "ALTER TABLE sop_recipes ADD COLUMN base_servings_qty REAL"),
+        ("base_servings_unit", "ALTER TABLE sop_recipes ADD COLUMN base_servings_unit TEXT"),
+        ("legacy_markdown", "ALTER TABLE sop_recipes ADD COLUMN legacy_markdown TEXT"),
+        ("needs_review", "ALTER TABLE sop_recipes ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for name, sql in alters:
+        if name not in cols:
+            await conn.execute(sql)
+
+    hist_cur = await conn.execute("PRAGMA table_info(sop_recipes_history)")
+    hist_cols = {row[1] for row in await hist_cur.fetchall()}
+    hist_alters = [
+        ("ingredients_json", "ALTER TABLE sop_recipes_history ADD COLUMN ingredients_json TEXT"),
+        ("steps_json", "ALTER TABLE sop_recipes_history ADD COLUMN steps_json TEXT"),
+        ("tips_json", "ALTER TABLE sop_recipes_history ADD COLUMN tips_json TEXT"),
+        ("base_servings_qty", "ALTER TABLE sop_recipes_history ADD COLUMN base_servings_qty REAL"),
+        ("base_servings_unit", "ALTER TABLE sop_recipes_history ADD COLUMN base_servings_unit TEXT"),
+    ]
+    for name, sql in hist_alters:
+        if name not in hist_cols:
+            await conn.execute(sql)
+
+
+async def apply_recipe_schema(conn) -> None:
+    """Create recipe tables/indexes on an open app.db connection. Not ALL_TABLES."""
+    for sql in _RECIPE_TABLE_SCHEMAS.values():
+        await conn.executescript(sql)
+    for stmts in _RECIPE_INDEX_DEFINITIONS.values():
+        for stmt in stmts:
+            await conn.execute(stmt)
+    await migrate_recipe_columns(conn)

@@ -18,13 +18,16 @@ def _seed_db(path):
     conn = sqlite3.connect(path)
     conn.executescript(
         """
-        CREATE TABLE sop_stations (slug TEXT PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL);
-        CREATE TABLE sop_recipes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            station_slug TEXT NOT NULL, section TEXT NOT NULL, recipe_name TEXT NOT NULL,
-            body_markdown TEXT NOT NULL, sort_order INTEGER NOT NULL,
-            is_new INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL
-        );
+            CREATE TABLE sop_stations (
+                slug TEXT PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sop_recipes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                station_slug TEXT NOT NULL, section TEXT NOT NULL, recipe_name TEXT NOT NULL,
+                body_markdown TEXT NOT NULL, sort_order INTEGER NOT NULL,
+                is_new INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL,
+                FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
+            );
         INSERT INTO sop_stations VALUES ('changfen','肠粉档','2026-01-01T00:00:00+00:00');
         INSERT INTO sop_recipes (station_slug,section,recipe_name,body_markdown,sort_order,is_new,is_active,updated_at)
         VALUES ('changfen','配方','肠粉酱油','酱油：100g',0,0,1,'2026-01-01T00:00:00+00:00');
@@ -55,6 +58,54 @@ def store(tmp_path):
     _run(s.connect())
     yield s
     _run(s.close())
+
+
+def test_constructor_ignores_recipes_db_path_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECIPES_DB_PATH", str(tmp_path / "other.db"))
+    owned = RecipeStore(str(tmp_path / "mine.db"))
+    assert owned.db_path == str(tmp_path / "mine.db")
+    from config import settings
+    default = RecipeStore()
+    assert default.db_path == settings.APP_DB_PATH
+
+
+def test_borrowed_connection_close_does_not_close_shared(tmp_path):
+    from config import settings
+    from database import DatabaseManager
+
+    old_dir = settings.DATABASE_DIR
+    settings.DATABASE_DIR = str(tmp_path)
+    db = DatabaseManager()
+    try:
+        assert _run(db.connect())
+        store = RecipeStore(conn=db._conn)
+        _run(store.prepare())
+        _run(store.create_station("cf", "肠粉档"))
+        _run(store.close())
+        cur = _run(db._conn.execute("SELECT title FROM sop_stations WHERE slug = ?", ("cf",)))
+        row = _run(cur.fetchone())
+        assert dict(row)["title"] == "肠粉档"
+    finally:
+        _run(db.close())
+        settings.DATABASE_DIR = old_dir
+
+
+def test_delete_station_cascades_recipes_and_history(store):
+    r = _run(store.list_recipes("changfen"))[0]
+    _run(store.update_recipe(
+        r["id"], "配方", "改名", "新正文", r["sort_order"], False,
+    ))
+    _run(store.delete_station("changfen"))
+    assert _run(store.list_stations()) == []
+
+    async def counts():
+        recipes = await store.conn.execute("SELECT COUNT(*) AS n FROM sop_recipes")
+        history = await store.conn.execute("SELECT COUNT(*) AS n FROM sop_recipes_history")
+        return (await recipes.fetchone())["n"], (await history.fetchone())["n"]
+
+    n_recipes, n_history = _run(counts())
+    assert n_recipes == 0
+    assert n_history == 0
 
 
 def test_list_stations(store):

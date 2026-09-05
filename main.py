@@ -177,10 +177,11 @@ async def lifespan(app: FastAPI):
             dish_catalog = DishCatalog(db_manager)
             set_runtime(AppRuntime(db=db_manager, dish_catalog=dish_catalog, scraper=None))
 
-        # 初始化配方库（独立 data/recipes.db，与 db_manager 解耦）
+        # 初始化配方库（与 db_manager 共用 app.db 连接）
         from services.recipes.store import RecipeStore
-        recipe_store = RecipeStore()
-        if await recipe_store.connect():
+        if db_manager and db_manager._conn is not None:
+            recipe_store = RecipeStore(conn=db_manager._conn)
+            await recipe_store.prepare()
             startup_results.append("配方库")
 
         if db_manager:
@@ -271,18 +272,17 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"❌ 关闭餐厅爬虫适配器失败: {e}")
         
-        # 关闭数据库连接
-        if db_manager:
-            await db_manager.close()
-            logger.info("✅ 数据库连接已关闭")
-
-        # 关闭配方库
+        # 关闭配方库（生产借连接时 close 是 no-op）再关主库
         if recipe_store:
             try:
                 await recipe_store.close()
                 logger.info("✅ 配方库已关闭")
             except Exception as e:
                 logger.error(f"❌ 关闭配方库失败: {e}")
+
+        if db_manager:
+            await db_manager.close()
+            logger.info("✅ 数据库连接已关闭")
         
         # 🆕 停止内存管理器
         await memory_manager.stop_background_tasks()

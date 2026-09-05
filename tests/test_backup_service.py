@@ -365,6 +365,17 @@ class SnapshotTest(unittest.TestCase):
 class ExportRecipesDbBytesTest(unittest.TestCase):
     """配方表与业务表同库时，recipes 成员应只含 sop_* 表，不重复整库。"""
 
+    def test_get_recipes_db_path_ignores_recipes_db_path_env(self):
+        old = os.environ.get("RECIPES_DB_PATH")
+        os.environ["RECIPES_DB_PATH"] = "/tmp/not-app.db"
+        try:
+            self.assertEqual(backup_service.get_recipes_db_path(), settings.APP_DB_PATH)
+        finally:
+            if old is None:
+                os.environ.pop("RECIPES_DB_PATH", None)
+            else:
+                os.environ["RECIPES_DB_PATH"] = old
+
     def _make_db(self) -> str:
         fd, tmp_path = tempfile.mkstemp(suffix=".db")
         os.close(fd)

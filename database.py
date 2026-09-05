@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 餐厅订单数据采集系统数据库管理器
-单库 app.db（WAL）架构；`logs` 表独立在 logs.db，配方库独立在 recipes.db。
+单库 app.db（WAL）架构；`logs` 表独立在 logs.db。配方表也在 app.db，
+由 RecipeStore 借用这条连接访问（不进 Admin 通用表名单）。
 跨表查询在同一连接上写 SQL JOIN 即可。
 
 本模块是对外统一门面：`DatabaseManager` 由 db_core/ 下的多个职责 Mixin 组合而成，

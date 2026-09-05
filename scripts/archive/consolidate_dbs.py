@@ -69,9 +69,8 @@ from db_core.schema import ALL_TABLES, _TABLE_SCHEMAS, _INDEX_DEFINITIONS  # noq
 from db_core.utils import SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE_WAL  # noqa: E402
 from services.recipes.store import RecipeStore  # noqa: E402
 
-# 配方库三张表定义于 services/recipes/store.py::RecipeStore._ensure_schema，
-# 此处仅用于枚举"待迁移的表名"，不重复维护其 DDL（schema 创建时直接复用
-# RecipeStore.connect()，见 _ensure_app_db_schema）。
+# 配方库三张表定义于 db_core.schema.apply_recipe_schema（不进 ALL_TABLES），
+# 此处仅枚举待迁移表名；schema 创建复用 RecipeStore.connect()，见 _ensure_app_db_schema。
 RECIPES_SOURCE_FILE = "recipes.db"
 RECIPES_TABLES = ("sop_stations", "sop_recipes", "sop_recipes_history")
 
@@ -180,8 +179,7 @@ async def _ensure_app_db_schema(app_db_path: str) -> None:
     finally:
         await conn.close()
 
-    # 配方库三表结构与 RecipeStore 保持完全一致：直接复用其 connect()/_ensure_schema，
-    # 避免在本脚本里重复维护一份 DDL 造成日后漂移。
+    # Recipe tables: RecipeStore.connect() applies db_core.schema.apply_recipe_schema.
     recipe_store = RecipeStore(db_path=app_db_path)
     await recipe_store.connect()
     await recipe_store.close()

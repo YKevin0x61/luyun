@@ -49,6 +49,21 @@ class DatabaseManagerSmokeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(table, existing)
         self.assertEqual(self.db._attached_tables, set())
 
+    async def test_connect_creates_recipe_tables_outside_all_tables(self):
+        recipe_tables = ("sop_stations", "sop_recipes", "sop_recipes_history")
+        for table in recipe_tables:
+            self.assertNotIn(table, ALL_TABLES)
+            self.assertIsNone(self.db.table_or_none(table))
+
+        async with self.db._conn.cursor() as cursor:
+            await cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            existing = {row[0] for row in await cursor.fetchall()}
+            await cursor.execute("PRAGMA foreign_keys")
+            fk_on = (await cursor.fetchone())[0]
+        for table in recipe_tables:
+            self.assertIn(table, existing)
+        self.assertEqual(fk_on, 1)
+
     async def test_cross_table_query_works_on_single_connection(self):
         """单库架构下跨表查询直接引用表名，无需 ATTACH。"""
         self.assertEqual(self.db._attached_tables, set())

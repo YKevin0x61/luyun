@@ -25,7 +25,7 @@ import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
 
 from config import settings
-from db_core.schema import ALL_TABLES
+from db_core.schema import ALL_TABLES, RECIPE_TABLES
 from services import credentials_store
 from services.credentials_store import CHINA_TZ, _derive_backup_key
 
@@ -39,7 +39,6 @@ SNAPSHOT_KEEP = 5
 
 # auth 在 ALL_TABLES 里是虚拟项，实际表名如下
 AUTH_PHYSICAL_TABLES = ("admin_user", "sessions", "api_tokens")
-RECIPE_TABLES = ("sop_stations", "sop_recipes", "sop_recipes_history")
 
 # 每张表的去重键（与 api/admin.py 导入逻辑一致）
 TABLE_DEDUP_KEY: Dict[str, str] = {
@@ -57,8 +56,8 @@ def _snapshot_root() -> Path:
 
 
 def get_recipes_db_path() -> str:
-    """与 RecipeStore 一致：RECIPES_DB_PATH 环境变量 > APP_DB_PATH。"""
-    return os.environ.get("RECIPES_DB_PATH") or settings.APP_DB_PATH
+    """Recipe tables live in app.db; backup extracts sop_* into a recipes.db member."""
+    return settings.APP_DB_PATH
 
 
 def get_credentials_file_path() -> str:

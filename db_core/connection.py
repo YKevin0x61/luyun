@@ -12,7 +12,12 @@ from typing import Dict, Optional
 import aiosqlite
 from config import settings
 
-from db_core.schema import ALL_TABLES, _TABLE_SCHEMAS, _INDEX_DEFINITIONS
+from db_core.schema import (
+    ALL_TABLES,
+    _INDEX_DEFINITIONS,
+    _TABLE_SCHEMAS,
+    apply_recipe_schema,
+)
 from db_core.table_db import TableView, migrate_orders_kds_columns
 from db_core.utils import (
     SQLITE_BUSY_TIMEOUT_MS,
@@ -52,6 +57,7 @@ class _ConnectionMixin:
             self._main_conn.row_factory = aiosqlite.Row
             await self._main_conn.execute(f"PRAGMA journal_mode={SQLITE_JOURNAL_MODE_WAL}")
             await self._main_conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+            await self._main_conn.execute("PRAGMA foreign_keys = ON")
 
             # 1. 建齐全部表结构（含 auth），CREATE TABLE IF NOT EXISTS 对已存在表安全无害
             for table in ALL_TABLES:
@@ -66,6 +72,9 @@ class _ConnectionMixin:
             for table in ALL_TABLES:
                 for idx_sql in _INDEX_DEFINITIONS.get(table, []):
                     await self._main_conn.execute(idx_sql)
+
+            # Recipe tables: same file, not ALL_TABLES / TableView / Admin CRUD.
+            await apply_recipe_schema(self._main_conn)
             await self._main_conn.commit()
 
             # 4. 各表共享同一连接的 TableView
