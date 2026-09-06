@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Set, Tuple
 
+from db_core.errors import ConflictError
 from db_core.order_notes import canonical_order_notes
 from db_core.utils import (
     CHINA_TZ,
@@ -814,6 +815,45 @@ class _OrdersRepoMixin:
                 (index, now, row[0]),
             )
 
+    async def _reject_if_hole_over_capacity(
+        self,
+        *,
+        steamer_id: str,
+        port_index: int,
+        order_ids: List[str],
+        capacity: int,
+    ) -> None:
+        incoming_row_ids: List[int] = []
+        for oid in order_ids:
+            order = await self.get_order_by_id(str(oid))
+            if not order:
+                continue
+            incoming_row_ids.append(int(order["_id"]))
+        tdb = self.table("orders")
+        hole_port = int(port_index)
+        if incoming_row_ids:
+            placeholders = ",".join("?" * len(incoming_row_ids))
+            cursor = await tdb.execute(
+                f"""
+                SELECT COUNT(*) FROM orders
+                WHERE steamer_id = ? AND port_index = ?
+                  AND id NOT IN ({placeholders})
+                """,
+                (steamer_id, hole_port, *incoming_row_ids),
+            )
+        else:
+            cursor = await tdb.execute(
+                """
+                SELECT COUNT(*) FROM orders
+                WHERE steamer_id = ? AND port_index = ?
+                """,
+                (steamer_id, hole_port),
+            )
+        row = await cursor.fetchone()
+        occupied = int((row[0] if row else 0) or 0)
+        if occupied + len(incoming_row_ids) > int(capacity):
+            raise ConflictError("蒸孔已满")
+
     async def apply_steamer_load(
         self,
         *,
@@ -821,8 +861,15 @@ class _OrdersRepoMixin:
         port_index: int,
         loaded_at: str,
         order_ids: List[str],
+        capacity: int,
     ) -> Dict[str, Any]:
         """Write 蒸笼位; stack_order appends at the hole top."""
+        await self._reject_if_hole_over_capacity(
+            steamer_id=steamer_id,
+            port_index=port_index,
+            order_ids=order_ids,
+            capacity=capacity,
+        )
         tdb = self.table("orders")
         now = datetime.now(CHINA_TZ).isoformat()
         hole_port = int(port_index)
@@ -864,8 +911,15 @@ class _OrdersRepoMixin:
         steamer_id: str,
         port_index: int,
         order_ids: List[str],
+        capacity: int,
     ) -> Dict[str, Any]:
         """Move 在蒸 cages onto dest hole top; compact each source hole."""
+        await self._reject_if_hole_over_capacity(
+            steamer_id=steamer_id,
+            port_index=port_index,
+            order_ids=order_ids,
+            capacity=capacity,
+        )
         tdb = self.table("orders")
         now = datetime.now(CHINA_TZ).isoformat()
         dest_port = int(port_index)

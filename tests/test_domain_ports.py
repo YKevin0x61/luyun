@@ -7,10 +7,8 @@ import unittest
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import HTTPException
-
 from config import settings
-from database import DatabaseManager
+from database import ConflictError, DatabaseManager
 from db_core.adapters import (
     DishStationsPortAdapter,
     OrdersPortAdapter,
@@ -190,7 +188,7 @@ class CookingConflictPortTests(unittest.IsolatedAsyncioTestCase):
                 "status": "退菜",
             },
         })
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await complete_cooking(
                 fake,
                 {
@@ -209,9 +207,9 @@ class CookingConflictPortTests(unittest.IsolatedAsyncioTestCase):
                     ],
                 },
             )
-        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.message, "出餐确认冲突")
         self.assertEqual(
-            raised.exception.detail["conflicts"],
+            raised.exception.conflicts,
             [{"order_id": "2", "reason": "退菜"}],
         )
         self.assertEqual(fake.completions, [])

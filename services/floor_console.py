@@ -5,9 +5,8 @@
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from fastapi import HTTPException
-
 from db_core.order_notes import canonical_order_notes
+from db_core.errors import ConflictError
 from db_core.ports import OrdersPort
 from services.kitchen_work import derive_steamer_phase
 from services.kitchen_work import (
@@ -34,11 +33,8 @@ def _raise_if_all_failed(conflicts: List[Dict[str, str]], updated_count: int, ac
     if updated_count > 0:
         return
     if not conflicts:
-        raise HTTPException(status_code=400, detail="订单行不能为空")
-    raise HTTPException(
-        status_code=409,
-        detail={"message": f"{action}冲突", "conflicts": conflicts},
-    )
+        raise ValueError("订单行不能为空")
+    raise ConflictError(f"{action}冲突", conflicts)
 
 
 def _uniq_ids(order_ids: Optional[Sequence[str]]) -> List[str]:
@@ -193,7 +189,7 @@ def _pick_substitute(
 async def hold_portions(orders: OrdersPort, payload: Dict) -> Dict[str, Any]:
     order_ids = _uniq_ids(payload.get("order_ids"))
     if not order_ids:
-        raise HTTPException(status_code=400, detail="订单行不能为空")
+        raise ValueError("订单行不能为空")
 
     rows_by_id = await _load_rows(orders, order_ids)
     pending_pool = await orders.get_orders(dish_status="待出餐", limit=-1)
@@ -269,7 +265,7 @@ async def hold_portions(orders: OrdersPort, payload: Dict) -> Dict[str, Any]:
 async def fire_portions(orders: OrdersPort, payload: Dict) -> Dict[str, Any]:
     order_ids = _uniq_ids(payload.get("order_ids"))
     if not order_ids:
-        raise HTTPException(status_code=400, detail="订单行不能为空")
+        raise ValueError("订单行不能为空")
 
     rows_by_id = await _load_rows(orders, order_ids)
     conflicts: List[Dict[str, str]] = []
@@ -318,7 +314,7 @@ async def fire_portions(orders: OrdersPort, payload: Dict) -> Dict[str, Any]:
 async def rush_portions(orders: OrdersPort, payload: Dict) -> Dict[str, Any]:
     order_ids = _uniq_ids(payload.get("order_ids"))
     if not order_ids:
-        raise HTTPException(status_code=400, detail="订单行不能为空")
+        raise ValueError("订单行不能为空")
 
     rows_by_id = await _load_rows(orders, order_ids)
     conflicts: List[Dict[str, str]] = []

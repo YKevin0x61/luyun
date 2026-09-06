@@ -28,6 +28,7 @@ from db_core.wecom_repo import _WecomRepoMixin
 from db_core.aggregation import _AggregationMixin
 from db_core.reports import _ReportsMixin
 from db_core.stats import _StatsMixin
+from db_core.errors import ConflictError
 from db_core.ports import DishStationsPort, OrdersPort, ReportsPort
 from db_core.adapters import (
     DishStationsPortAdapter,
@@ -46,6 +47,7 @@ __all__ = [
     "OrdersPort",
     "DishStationsPort",
     "ReportsPort",
+    "ConflictError",
 ]
 
 

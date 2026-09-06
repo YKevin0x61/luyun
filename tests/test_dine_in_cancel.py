@@ -6,10 +6,8 @@ import tempfile
 import unittest
 from datetime import datetime
 
-from fastapi import HTTPException
-
 from config import settings
-from database import CHINA_TZ, DatabaseManager
+from database import CHINA_TZ, ConflictError, DatabaseManager
 from services.kds_orders import (
     complete_cooking,
     load_steamer,
@@ -349,7 +347,7 @@ class DineInCancelTargetTests(unittest.IsolatedAsyncioTestCase):
         hold = await self.db.orders.get_order_by_id(by_flow["t8_虾饺_041"]["_id"])
         self.assertEqual(derive_steamer_phase(hold), "退菜占位")
 
-        with self.assertRaises(HTTPException) as cook_err:
+        with self.assertRaises(ConflictError) as cook_err:
             await complete_cooking(
                 self.db.orders,
                 {
@@ -363,9 +361,9 @@ class DineInCancelTargetTests(unittest.IsolatedAsyncioTestCase):
                     ],
                 },
             )
-        self.assertEqual(cook_err.exception.status_code, 409)
+        self.assertEqual(cook_err.exception.message, "出餐确认冲突")
 
-        with self.assertRaises(HTTPException) as load_err:
+        with self.assertRaises(ConflictError) as load_err:
             await load_steamer(
                 self.db.orders,
                 {
@@ -374,7 +372,7 @@ class DineInCancelTargetTests(unittest.IsolatedAsyncioTestCase):
                     "port_index": 5,
                 },
             )
-        self.assertEqual(load_err.exception.status_code, 409)
+        self.assertTrue(load_err.exception.message)
 
         plucked = await pluck_steamer(self.db.orders, {"order_ids": [hold["_id"]]})
         self.assertTrue(plucked["success"])

@@ -6,10 +6,8 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
-from fastapi import HTTPException
-
 from config import settings
-from database import CHINA_TZ, DatabaseManager
+from database import CHINA_TZ, ConflictError, DatabaseManager
 from services.floor_console import fire_portions, hold_portions, list_floor_tables, rush_portions
 from services.kds_orders import complete_cooking, load_steamer
 from services.kitchen_work import derive_steamer_phase, is_hold, is_pending_kitchen_work, work_enter_time
@@ -94,10 +92,9 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
                 ],
             },
         )
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await hold_portions(self.db.orders, {"order_ids": [row["_id"]]})
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "已出餐")
+        self.assertEqual(raised.exception.conflicts[0]["reason"], "已出餐")
 
     async def test_steaming_hold_swaps_same_dish_awaiting_other_table(self):
         await self.db.orders.batch_insert_orders(
@@ -187,10 +184,9 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         )
         by_flow = await self._by_flow()
         await _load(self.db.orders, by_flow["steam"]["_id"])
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await hold_portions(self.db.orders, {"order_ids": [by_flow["steam"]["_id"]]})
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "在蒸且无替补")
+        self.assertEqual(raised.exception.conflicts[0]["reason"], "在蒸且无替补")
         delivery = await self.db.orders.get_order_by_id(by_flow["wm"]["_id"])
         steam = await self.db.orders.get_order_by_id(by_flow["steam"]["_id"])
         self.assertIsNone(delivery.get("placement"))
@@ -248,10 +244,9 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         )
         by_flow = await self._by_flow()
         await _load(self.db.orders, by_flow["steam"]["_id"])
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await hold_portions(self.db.orders, {"order_ids": [by_flow["steam"]["_id"]]})
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "在蒸且无替补")
+        self.assertEqual(raised.exception.conflicts[0]["reason"], "在蒸且无替补")
         other_dish = await self.db.orders.get_order_by_id(by_flow["other_dish"]["_id"])
         steam = await self.db.orders.get_order_by_id(by_flow["steam"]["_id"])
         self.assertFalse(is_hold(other_dish))
@@ -275,10 +270,9 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         await hold_portions(self.db.orders, {"order_ids": [by_flow["held"]["_id"]]})
         await _load(self.db.orders, by_flow["other_steam"]["_id"], steamer_id="2", port_index=1)
         await _load(self.db.orders, by_flow["steam"]["_id"])
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await hold_portions(self.db.orders, {"order_ids": [by_flow["steam"]["_id"]]})
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "在蒸且无替补")
+        self.assertEqual(raised.exception.conflicts[0]["reason"], "在蒸且无替补")
         steam = await self.db.orders.get_order_by_id(by_flow["steam"]["_id"])
         other_steam = await self.db.orders.get_order_by_id(by_flow["other_steam"]["_id"])
         held = await self.db.orders.get_order_by_id(by_flow["held"]["_id"])
@@ -402,10 +396,9 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         before = await self.db.orders.get_order_by_id(row["_id"])
         loaded_at = (before.get("placement") or {}).get("loaded_at")
         self.assertEqual(loaded_at, "2026-08-18T10:05:00+08:00")
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await rush_portions(self.db.orders, {"order_ids": [row["_id"]]})
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "在蒸")
+        self.assertEqual(raised.exception.conflicts[0]["reason"], "在蒸")
         after = await self.db.orders.get_order_by_id(row["_id"])
         self.assertEqual(after["dish_status"], "待出餐")
         self.assertFalse(after.get("is_rushed"))
@@ -439,7 +432,7 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         await self.db.orders.batch_insert_orders([_order(station="changfen")])
         row = (await self._by_flow())["floor-001"]
         await hold_portions(self.db.orders, {"order_ids": [row["_id"]]})
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await complete_cooking(
                 self.db.orders,
                 {
@@ -453,8 +446,7 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
                     ],
                 },
             )
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "等叫")
+        self.assertEqual(raised.exception.conflicts[0]["reason"], "等叫")
 
     async def test_complete_cooking_hold_mixed_writes_nothing(self):
         await self.db.orders.batch_insert_orders(
@@ -465,7 +457,7 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         )
         by_flow = await self._by_flow()
         await hold_portions(self.db.orders, {"order_ids": [by_flow["held"]["_id"]]})
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await complete_cooking(
                 self.db.orders,
                 {
@@ -484,8 +476,7 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
                     ],
                 },
             )
-        self.assertEqual(raised.exception.status_code, 409)
-        reasons = {item["reason"] for item in raised.exception.detail["conflicts"]}
+        reasons = {item["reason"] for item in raised.exception.conflicts}
         self.assertEqual(reasons, {"等叫"})
         open_row = await self.db.orders.get_order_by_id(by_flow["open"]["_id"])
         self.assertEqual(open_row["dish_status"], "待出餐")
@@ -692,12 +683,11 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         await self.db.orders.batch_insert_orders([_order()])
         row = (await self._by_flow())["floor-001"]
         await hold_portions(self.db.orders, {"order_ids": [row["_id"]]})
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await _load(self.db.orders, row["_id"])
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "等叫")
+        self.assertEqual(raised.exception.conflicts[0]["reason"], "等叫")
         self.assertEqual(
-            raised.exception.detail["conflicts"][0]["order_id"],
+            raised.exception.conflicts[0]["order_id"],
             str(row["_id"]),
         )
 
@@ -710,7 +700,7 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         )
         by_flow = await self._by_flow()
         await hold_portions(self.db.orders, {"order_ids": [by_flow["held"]["_id"]]})
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await load_steamer(
                 self.db.orders,
                 {
@@ -720,8 +710,7 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
                     "loaded_at": "2026-08-18T10:05:00+08:00",
                 },
             )
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "等叫")
+        self.assertEqual(raised.exception.conflicts[0]["reason"], "等叫")
         open_row = await self.db.orders.get_order_by_id(by_flow["open"]["_id"])
         self.assertIsNone(open_row.get("placement"))
         self.assertFalse(is_hold(open_row))
@@ -735,12 +724,11 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         )
         by_flow = await self._by_flow()
         await _load(self.db.orders, by_flow["steam_no_onion"]["_id"])
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await hold_portions(
                 self.db.orders, {"order_ids": [by_flow["steam_no_onion"]["_id"]]}
             )
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail["conflicts"][0]["reason"], "在蒸且无替补")
+        self.assertEqual(raised.exception.conflicts[0]["reason"], "在蒸且无替补")
         awaiting = await self.db.orders.get_order_by_id(by_flow["await_plain"]["_id"])
         steaming = await self.db.orders.get_order_by_id(by_flow["steam_no_onion"]["_id"])
         self.assertFalse(is_hold(awaiting))

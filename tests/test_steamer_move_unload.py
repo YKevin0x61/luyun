@@ -7,9 +7,7 @@ import unittest
 from datetime import datetime
 
 from config import settings
-from database import CHINA_TZ, DatabaseManager
-from fastapi import HTTPException
-
+from database import CHINA_TZ, ConflictError, DatabaseManager
 from services.kds_orders import (
     load_steamer,
     move_steamer,
@@ -256,7 +254,7 @@ class SteamerCapacityOrdersPortTests(unittest.IsolatedAsyncioTestCase):
             for row in await self.db.orders.get_orders(limit=-1)
         }
 
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await load_steamer(
                 self.db.orders,
                 {
@@ -265,8 +263,6 @@ class SteamerCapacityOrdersPortTests(unittest.IsolatedAsyncioTestCase):
                     "port_index": 4,
                 },
             )
-        self.assertEqual(raised.exception.status_code, 409)
-
         after = {
             row["_id"]: row.get("placement")
             for row in await self.db.orders.get_orders(limit=-1)
@@ -289,7 +285,7 @@ class SteamerCapacityOrdersPortTests(unittest.IsolatedAsyncioTestCase):
             for row in await self.db.orders.get_orders(limit=-1)
         }
 
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await move_steamer(
                 self.db.orders,
                 {
@@ -298,8 +294,6 @@ class SteamerCapacityOrdersPortTests(unittest.IsolatedAsyncioTestCase):
                     "port_index": 4,
                 },
             )
-        self.assertEqual(raised.exception.status_code, 409)
-
         after = {
             row["business_flow_id"]: row.get("placement")
             for row in await self.db.orders.get_orders(limit=-1)
@@ -342,7 +336,7 @@ class SteamerCancelHoldOrdersPortTests(unittest.IsolatedAsyncioTestCase):
         before = await self.db.orders.get_order_by_id(hold_id)
         self.assertIsNotNone(before.get("placement"))
 
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await move_steamer(
                 self.db.orders,
                 {
@@ -351,8 +345,6 @@ class SteamerCancelHoldOrdersPortTests(unittest.IsolatedAsyncioTestCase):
                     "port_index": 2,
                 },
             )
-        self.assertEqual(raised.exception.status_code, 409)
-
         after = await self.db.orders.get_order_by_id(hold_id)
         self.assertEqual(after.get("placement"), before.get("placement"))
 
@@ -389,7 +381,7 @@ class SteamerCancelHoldOrdersPortTests(unittest.IsolatedAsyncioTestCase):
             for row in await self.db.orders.get_orders(limit=-1)
         }
 
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await load_steamer(
                 self.db.orders,
                 {
@@ -398,7 +390,6 @@ class SteamerCancelHoldOrdersPortTests(unittest.IsolatedAsyncioTestCase):
                     "port_index": 6,
                 },
             )
-        self.assertEqual(raised.exception.status_code, 409)
         after = {
             row["_id"]: row.get("placement")
             for row in await self.db.orders.get_orders(limit=-1)
@@ -416,7 +407,7 @@ class SteamerCancelHoldOrdersPortTests(unittest.IsolatedAsyncioTestCase):
         await _load(self.db.orders, row["_id"], port_index=3)
         before = await self.db.orders.get_order_by_id(row["_id"])
 
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(ConflictError) as raised:
             await move_steamer(
                 self.db.orders,
                 {
@@ -425,7 +416,6 @@ class SteamerCancelHoldOrdersPortTests(unittest.IsolatedAsyncioTestCase):
                     "port_index": 1,
                 },
             )
-        self.assertEqual(raised.exception.status_code, 409)
         after = await self.db.orders.get_order_by_id(row["_id"])
         self.assertEqual(after.get("placement"), before.get("placement"))
         self.assertEqual(after["dish_status"], "待出餐")

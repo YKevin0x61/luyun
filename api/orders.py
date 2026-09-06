@@ -23,7 +23,7 @@ from models import (
     PluckSteamerRequest,
     FloorOrderIdsRequest,
 )
-from database import DatabaseManager, get_db, ensure_beijing_datetime
+from database import DatabaseManager, get_db, ensure_beijing_datetime, ConflictError
 from services.kds_orders import complete_cooking as kds_complete_cooking
 from services.kds_orders import load_steamer as kds_load_steamer
 from services.kds_orders import move_steamer as kds_move_steamer
@@ -42,6 +42,24 @@ from api.security import verify_admin_token
 logger = logging.getLogger(__name__)
 _ADMIN_WRITE = [Depends(verify_admin_token)]
 router = APIRouter(prefix="/api/orders", tags=["订单管理"])
+
+
+def _kitchen_http(exc: Exception) -> HTTPException:
+    if isinstance(exc, ConflictError):
+        if exc.conflicts:
+            return HTTPException(
+                status_code=409,
+                detail={"message": exc.message, "conflicts": exc.conflicts},
+            )
+        return HTTPException(status_code=409, detail=exc.message)
+    if isinstance(exc, KeyError):
+        return HTTPException(
+            status_code=404,
+            detail=exc.args[0] if exc.args else "订单不存在",
+        )
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    raise exc
 
 
 @router.get("/", status_code=200)
@@ -470,6 +488,8 @@ async def complete_cooking(
         stations = result.pop("stations", [])
         await _notify_orders_completed(stations)
         return result
+    except (ConflictError, KeyError, ValueError) as exc:
+        raise _kitchen_http(exc)
     except HTTPException:
         raise
     except Exception as e:
@@ -488,6 +508,8 @@ async def load_steamer(
         stations = result.pop("stations", [])
         await _notify_orders_completed(stations)
         return result
+    except (ConflictError, KeyError, ValueError) as exc:
+        raise _kitchen_http(exc)
     except HTTPException:
         raise
     except Exception as e:
@@ -507,6 +529,8 @@ async def move_steamer(
         if stations:
             await _notify_orders_completed(stations)
         return result
+    except (ConflictError, KeyError, ValueError) as exc:
+        raise _kitchen_http(exc)
     except HTTPException:
         raise
     except Exception as e:
@@ -526,6 +550,8 @@ async def unload_steamer(
         if stations:
             await _notify_orders_completed(stations)
         return result
+    except (ConflictError, KeyError, ValueError) as exc:
+        raise _kitchen_http(exc)
     except HTTPException:
         raise
     except Exception as e:
@@ -545,6 +571,8 @@ async def pluck_steamer(
         if stations:
             await _notify_orders_completed(stations)
         return result
+    except (ConflictError, KeyError, ValueError) as exc:
+        raise _kitchen_http(exc)
     except HTTPException:
         raise
     except Exception as e:
@@ -610,6 +638,8 @@ async def hold_orders(
         result.pop("substituted", None)
         await _notify_orders_completed(stations)
         return result
+    except (ConflictError, KeyError, ValueError) as exc:
+        raise _kitchen_http(exc)
     except HTTPException:
         raise
     except Exception as e:
@@ -627,6 +657,8 @@ async def fire_orders(
         stations = result.pop("stations", [])
         await _notify_orders_completed(stations)
         return result
+    except (ConflictError, KeyError, ValueError) as exc:
+        raise _kitchen_http(exc)
     except HTTPException:
         raise
     except Exception as e:
@@ -644,6 +676,8 @@ async def rush_orders(
         stations = result.pop("stations", [])
         await _notify_orders_completed(stations)
         return result
+    except (ConflictError, KeyError, ValueError) as exc:
+        raise _kitchen_http(exc)
     except HTTPException:
         raise
     except Exception as e:

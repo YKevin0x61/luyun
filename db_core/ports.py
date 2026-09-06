@@ -46,6 +46,7 @@ class OrdersPort(Protocol):
         port_index: int,
         loaded_at: str,
         order_ids: List[str],
+        capacity: int,
     ) -> Dict[str, Any]: ...
 
     async def apply_steamer_move(
@@ -54,6 +55,7 @@ class OrdersPort(Protocol):
         steamer_id: str,
         port_index: int,
         order_ids: List[str],
+        capacity: int,
     ) -> Dict[str, Any]: ...
 
     async def apply_steamer_unload(

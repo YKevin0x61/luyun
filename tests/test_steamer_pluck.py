@@ -6,10 +6,8 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
-from fastapi import HTTPException
-
 from config import settings
-from database import CHINA_TZ, DatabaseManager, ensure_beijing_datetime
+from database import CHINA_TZ, ConflictError, DatabaseManager, ensure_beijing_datetime
 from services.kds_orders import (
     complete_cooking,
     load_steamer,
@@ -188,7 +186,7 @@ class SteamerAwaitingCancelNoticeTests(unittest.IsolatedAsyncioTestCase):
         after = await self._cancel_unloaded(flow_id="bs91_1")
         before_placement = after.get("placement")
 
-        with self.assertRaises(HTTPException) as load_err:
+        with self.assertRaises(ConflictError) as load_err:
             await load_steamer(
                 self.db.orders,
                 {
@@ -197,9 +195,9 @@ class SteamerAwaitingCancelNoticeTests(unittest.IsolatedAsyncioTestCase):
                     "port_index": 2,
                 },
             )
-        self.assertEqual(load_err.exception.status_code, 409)
+        self.assertEqual(load_err.exception.message, "订单状态不可上笼: " + str(after["_id"]))
 
-        with self.assertRaises(HTTPException) as cook_err:
+        with self.assertRaises(ConflictError) as cook_err:
             await complete_cooking(
                 self.db.orders,
                 {
@@ -213,7 +211,7 @@ class SteamerAwaitingCancelNoticeTests(unittest.IsolatedAsyncioTestCase):
                     ],
                 },
             )
-        self.assertEqual(cook_err.exception.status_code, 409)
+        self.assertEqual(cook_err.exception.message, "出餐确认冲突")
 
         still = await self.db.orders.get_order_by_id(after["_id"])
         self.assertEqual(still.get("placement"), before_placement)

@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from config import settings
-from database import CHINA_TZ, DatabaseManager
+from database import CHINA_TZ, ConflictError, DatabaseManager
 from services.kds_orders import load_steamer
 from services.kitchen_work import derive_steamer_phase
 
@@ -143,6 +143,37 @@ class SteamerLoadOrdersPortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(derive_steamer_phase(after["steam-001"]), "在蒸")
         self.assertEqual(derive_steamer_phase(after["steam-002"]), "在蒸")
 
+    async def test_apply_steamer_load_rejects_when_hole_full(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _pending_order(business_flow_id="occ-1", table_number="A1"),
+                _pending_order(business_flow_id="inc-1", table_number="A2"),
+            ]
+        )
+        rows = {
+            row["business_flow_id"]: row
+            for row in await self.db.orders.get_orders(limit=-1)
+        }
+        await self.db.orders.apply_steamer_load(
+            steamer_id="1",
+            port_index=1,
+            loaded_at="2026-08-14T10:05:00+08:00",
+            order_ids=[rows["occ-1"]["_id"]],
+            capacity=1,
+        )
+        with self.assertRaises(ConflictError) as raised:
+            await self.db.orders.apply_steamer_load(
+                steamer_id="1",
+                port_index=1,
+                loaded_at="2026-08-14T10:06:00+08:00",
+                order_ids=[rows["inc-1"]["_id"]],
+                capacity=1,
+            )
+        self.assertEqual(raised.exception.message, "蒸孔已满")
+        self.assertEqual(raised.exception.conflicts, [])
+        after = await self.db.orders.get_order_by_id(rows["inc-1"]["_id"])
+        self.assertIsNone(after.get("placement"))
+
 
 class _FakeSteamerOrdersPort:
     def __init__(self):
@@ -171,6 +202,7 @@ class _FakeSteamerOrdersPort:
         port_index: int,
         loaded_at: str,
         order_ids: List[str],
+        capacity: int,
     ) -> Dict[str, Any]:
         self.loads.append(
             {
