@@ -7,69 +7,18 @@ import { defineStore } from 'pinia'
 import { stationsAPI } from '../api/stations.js'
 import { StationWindowMapper } from '../utils/stationWindowMapper.js'
 import { TimeCalculator } from '../utils/timeCalculator.js'
+import { steamerLayoutFromStations } from '../utils/steamerConsole.js'
+
+const LOUMIAN_STATION_ID = 'loumian'
+
+function isKitchenStation(station) {
+  return station && station.id && station.id !== LOUMIAN_STATION_ID
+}
 
 export const useStationsStore = defineStore('stations', {
   state: () => ({
-    // 档口配置信息（单一数据源：厨房页 tabs 等消费方统一从这里读取，顺序即厨房页 tabs 的展示顺序）
-    // 名称/id 与后端 config.py 的 KITCHEN_STATIONS 保持一致；color 与厨房页历史展示色保持一致，避免切换数据源后出现视觉跳变
-    stations: {
-      changfen: {
-        id: 'changfen',
-        name: '肠粉档',
-        color: '#4ECDC4',
-        description: '负责制作各类肠粉和米制品',
-        windowId: 2,
-        isActive: true
-      },
-      shulong: {
-        id: 'shulong',
-        name: '熟笼档',
-        color: '#45B7D1',
-        description: '负责制作蒸制类点心',
-        windowId: 2,
-        isActive: true
-      },
-      xibing: {
-        id: 'xibing',
-        name: '西饼档',
-        color: '#FF6B6B',
-        description: '负责制作各类西式点心和烘焙产品',
-        windowId: 1,
-        isActive: true
-      },
-      mingdang1: {
-        id: 'mingdang1',
-        name: '明档1',
-        color: '#96CEB4',
-        description: '负责制作现点现做菜品',
-        windowId: 4,
-        isActive: true
-      },
-      mingdang2: {
-        id: 'mingdang2',
-        name: '明档2',
-        color: '#FECA57',
-        description: '负责制作特色菜品',
-        windowId: 3,
-        isActive: true
-      },
-      jianzha: {
-        id: 'jianzha',
-        name: '煎炸档',
-        color: '#DDA0DD',
-        description: '负责制作煎炸类菜品',
-        windowId: 4,
-        isActive: true
-      },
-      qita: {
-        id: 'qita',
-        name: '其他档口',
-        color: '#A8A8A8',
-        description: '处理未分类菜品和新菜品',
-        windowId: 5,
-        isActive: true
-      }
-    },
+    stations: {},
+    loaded: false,
 
     // 档口统计数据
     stationStats: {},
@@ -91,12 +40,14 @@ export const useStationsStore = defineStore('stations', {
   getters: {
     // 获取所有激活的档口
     activeStations: (state) => {
-      return Object.values(state.stations).filter(station => station.isActive)
+      return Object.values(state.stations).filter(
+        (station) => station.isActive && isKitchenStation(station)
+      )
     },
 
     // 获取档口列表
     stationList: (state) => {
-      return Object.values(state.stations)
+      return Object.values(state.stations).filter(isKitchenStation)
     },
 
     // 根据档口ID获取档口信息
@@ -156,7 +107,9 @@ export const useStationsStore = defineStore('stations', {
         totalPending,
         totalCompleted,
         completionRate: totalOrders > 0 ? ((totalCompleted / totalOrders) * 100).toFixed(1) : 0,
-        activeStations: Object.values(state.stations).filter(s => s.isActive).length
+        activeStations: Object.values(state.stations).filter(
+          (s) => s.isActive && isKitchenStation(s)
+        ).length
       }
     },
 
@@ -194,6 +147,10 @@ export const useStationsStore = defineStore('stations', {
         station: state.stations[efficientStationId],
         efficiency: maxEfficiency
       } : null
+    },
+
+    steamerLayout() {
+      return steamerLayoutFromStations(Object.values(this.stations))
     }
   },
 
@@ -201,23 +158,40 @@ export const useStationsStore = defineStore('stations', {
     /**
      * 初始化档口配置
      */
-    async initializeStations() {
+    async initializeStations(force = false) {
+      if (this.loaded && !force) return true
+      this.loading = true
+      this.error = null
       try {
-        // 使用StationWindowMapper同步窗口映射
-        const allStations = StationWindowMapper.getAllStations()
-        
-        allStations.forEach(stationId => {
-          if (this.stations[stationId]) {
-            this.stations[stationId].windowId = StationWindowMapper.getWindowByStation(stationId)
+        const payload = await stationsAPI.getStations()
+        const list = Array.isArray(payload) ? payload : []
+        const next = {}
+        for (const raw of list) {
+          const id = raw && raw.id
+          if (!id) continue
+          next[id] = {
+            id,
+            name: raw.name || id,
+            color: raw.color || '#6b7280',
+            description: raw.description || '',
+            steamer_layout: raw.steamer_layout || raw.steamerLayout,
+            windowId: id === LOUMIAN_STATION_ID
+              ? null
+              : StationWindowMapper.getWindowByStation(id),
+            isActive: true
           }
-        })
-
-        console.log('档口配置初始化完成')
+        }
+        this.stations = next
+        this.loaded = true
         return true
       } catch (error) {
         console.error('初始化档口配置失败:', error)
+        this.stations = {}
+        this.loaded = false
         this.error = error.message
         return false
+      } finally {
+        this.loading = false
       }
     },
 
@@ -434,6 +408,8 @@ export const useStationsStore = defineStore('stations', {
       this.loading = false
       this.error = null
       this.lastUpdated = null
+      this.loaded = false
+      this.stations = {}
     },
 
     /**
@@ -442,8 +418,8 @@ export const useStationsStore = defineStore('stations', {
      * @returns {Array} 档口配置列表
      */
     getStationConfigs(activeOnly = false) {
-      const stations = Object.values(this.stations)
-      return activeOnly ? stations.filter(station => station.isActive) : stations
+      const stations = Object.values(this.stations).filter(isKitchenStation)
+      return activeOnly ? stations.filter((station) => station.isActive) : stations
     },
 
     /**

@@ -643,6 +643,7 @@ export default {
       const todayStr = today.toISOString().split('T')[0]
       filters.startDate = todayStr
       filters.endDate = todayStr
+      await stationsStore.initializeStations()
       await searchOrders()
     })
 

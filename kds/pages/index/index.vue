@@ -192,10 +192,9 @@ export default {
       countPendingAndUrgent(ordersStore.mergedDishes, DISH_STATUS.PENDING)
     )
 
-    const unmappedCount = computed(() => {
-      const qitaId = stationsStore.getStationById('qita')?.id || 'qita'
-      return countUnmappedDishNames(ordersStore.mergedDishes, qitaId)
-    })
+    const unmappedCount = computed(() =>
+      countUnmappedDishNames(ordersStore.mergedDishes, 'qita')
+    )
 
     const unmappedBadgeText = computed(() =>
       unmappedCount.value > UNMAPPED_BADGE_MAX ? `${UNMAPPED_BADGE_MAX}+` : String(unmappedCount.value)

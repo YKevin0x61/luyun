@@ -63,7 +63,7 @@ export function countPendingAndUrgent(mergedDishes, pendingStatus) {
 }
 
 /**
- * 全店未映射菜品名数量（station 空或落入 qita 兜底）。
+ * 全店未映射菜品名数量（station 空，或历史脏数据里的 qita）。
  * @param {Array<{ dishName?: string, station?: string }>} mergedDishes
  * @param {string} qitaStationId
  */

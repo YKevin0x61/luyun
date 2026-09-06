@@ -762,6 +762,7 @@ export default {
     // #ifdef APP-PLUS
     this.isAppPlus = true
     // #endif
+    this.stationsStore.initializeStations()
     this.loadSettings()
     this.loadAuthSettings()
     this.loadPrinterSettings()

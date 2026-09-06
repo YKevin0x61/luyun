@@ -23,7 +23,7 @@ import { useRealtimeStore } from './stores/realtime.js'
 // 导入工具类和常量
 import { TimeCalculator } from './utils/timeCalculator.js'
 import { StationWindowMapper } from './utils/stationWindowMapper.js'
-import { KITCHEN_STATIONS, API_CONFIG } from './utils/constants.js'
+import { API_CONFIG } from './utils/constants.js'
 
 export function createApp() {
   const app = createSSRApp(App)
@@ -35,7 +35,6 @@ export function createApp() {
   // 配置全局属性，让所有组件都能访问工具类
   app.config.globalProperties.$timeCalculator = TimeCalculator
   app.config.globalProperties.$stationMapper = StationWindowMapper
-  app.config.globalProperties.$kitchenStations = KITCHEN_STATIONS
   app.config.globalProperties.$apiConfig = API_CONFIG
   
   // 全局错误处理
@@ -127,13 +126,6 @@ async function preloadCriticalData() {
   try {
     console.log('开始预加载关键数据...')
     
-    // 由于这是在应用启动时调用，我们需要确保Pinia store已经可用
-    // 这里只做基础的数据结构初始化
-    
-    // 预加载档口配置
-    console.log('预加载档口配置:', KITCHEN_STATIONS)
-    
-    // 验证工具类可用性
     const testTime = TimeCalculator.formatTime(new Date())
     console.log('工具类验证通过，当前时间:', testTime)
     

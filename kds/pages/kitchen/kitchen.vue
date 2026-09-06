@@ -295,14 +295,12 @@ import {
 } from '../../utils/kitchenServe.js'
 import { toastForServeBatch } from '../../utils/serveBatchToast.js'
 import { ordersAPI } from '../../api/orders.js'
-import { stationsAPI } from '../../api/stations.js'
 import { ScreenSettingsManager, DENSITY_MODES } from '../../utils/storage.js'
 import { getSteamTimeThresholdsMs } from '../../utils/timeThresholds.js'
 import {
   isSteamerConsole,
   listAwaitingSteamerCages,
-  listSteamingSteamerCages,
-  steamerLayoutFromStations
+  listSteamingSteamerCages
 } from '../../utils/steamerConsole.js'
 import { useKitchenOrderSession } from '../../composables/useKitchenOrderSession.js'
 import { useDisconnectAlert } from '../../composables/useDisconnectAlert.js'
@@ -389,23 +387,13 @@ export default {
 
     // 显示密度（进页快照；设置页改完重进厨房页生效）
     const densityMode = ScreenSettingsManager.getDensity() || DENSITY_MODES.STANDARD
-    const steamerLayout = ref(steamerLayoutFromStations(null))
+    const steamerLayout = computed(() => stationsStore.steamerLayout)
     const steamThresholdsMs = ref(getSteamTimeThresholdsMs())
     const steamerLoading = ref(false)
     const isSteamerConsoleView = computed(() =>
       isSteamerConsole({ stationId: currentStation.value })
     )
     const cageIsNew = (cage) => dishHasNewBadge({ orders: [cage] })
-
-    const loadSteamerLayout = async () => {
-      try {
-        const payload = await stationsAPI.getStations()
-        steamerLayout.value = steamerLayoutFromStations(payload)
-      } catch (error) {
-        console.error('[熟笼炉孔布局] 读取失败，使用本屏回退:', error)
-        steamerLayout.value = steamerLayoutFromStations(null)
-      }
-    }
 
     // 档口标签：只保留本屏锁死的那一个；未锁定时为空（页面会跳设置）
     const stationTabs = computed(() => {
@@ -1109,7 +1097,6 @@ export default {
       await stationsStore.initializeStations()
       startKitchenOrderSession()
       startDisconnectAlert()
-      await loadSteamerLayout()
       ensureCurrentStationInWatched()
 
       // 初始加载：一次拉取并同步新单告警与退菜/取消基线
@@ -1841,7 +1828,6 @@ export default {
 .station-tab.mingdang1 { border-color: #96CEB4; }
 .station-tab.mingdang2 { border-color: #FECA57; }
 .station-tab.jianzha { border-color: #DDA0DD; }
-.station-tab.qita { border-color: #A8A8A8; }
 
 /* 选中状态的背景色高亮 - 🌟 鲜艳版本 */
 .station-tab.changfen.active { 
@@ -1880,21 +1866,12 @@ export default {
   border-width: 4upx;
   box-shadow: 0 6upx 20upx rgba(221, 160, 221, 0.5), 0 0 20upx rgba(221, 160, 221, 0.3);
 }
-.station-tab.qita.active { 
-  background: linear-gradient(135deg, rgba(168, 168, 168, 0.45), rgba(168, 168, 168, 0.25));
-  border-color: #A8A8A8;
-  border-width: 4upx;
-  box-shadow: 0 6upx 20upx rgba(168, 168, 168, 0.5), 0 0 20upx rgba(168, 168, 168, 0.3);
-}
-
-/* 选中状态的文字颜色强调 */
 .station-tab.changfen.active .tab-name { color: #4ECDC4; }
 .station-tab.shulong.active .tab-name { color: #45B7D1; }
 .station-tab.xibing.active .tab-name { color: #FF6B6B; }
 .station-tab.mingdang1.active .tab-name { color: #96CEB4; }
 .station-tab.mingdang2.active .tab-name { color: #FECA57; }
 .station-tab.jianzha.active .tab-name { color: #DDA0DD; }
-.station-tab.qita.active .tab-name { color: #A8A8A8; }
 
 .station-tab.changfen.active .tab-count { color: #4ECDC4; }
 .station-tab.shulong.active .tab-count { color: #45B7D1; }
@@ -1902,7 +1879,6 @@ export default {
 .station-tab.mingdang1.active .tab-count { color: #96CEB4; }
 .station-tab.mingdang2.active .tab-count { color: #FECA57; }
 .station-tab.jianzha.active .tab-count { color: #DDA0DD; }
-.station-tab.qita.active .tab-count { color: #A8A8A8; }
 
 .tab-content {
   display: flex;

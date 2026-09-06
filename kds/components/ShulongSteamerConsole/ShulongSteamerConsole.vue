@@ -164,7 +164,8 @@ import { hasMarkedOrderLine, orderLineId, orderLineIsMarked } from '../../utils/
 import { dishSplitKnobsChanged } from '../../utils/dishCardChunks.js'
 import { canonicalOrderNotes } from '../../utils/orderNotes.js'
 import {
-  SHULONG_STEAMER_LAYOUT,
+  EMPTY_STEAMER_LAYOUT,
+  DEFAULT_AWAITING_CANCEL_NOTICE_SECONDS,
   deriveSteamerPhase,
   fillHoleSlots,
   advanceAwaitingGroupSelection,
@@ -198,7 +199,7 @@ export default {
     },
     layout: {
       type: Object,
-      default: () => SHULONG_STEAMER_LAYOUT
+      default: () => EMPTY_STEAMER_LAYOUT
     },
     loading: {
       type: Boolean,
@@ -247,8 +248,8 @@ export default {
 
     const phaseOpts = () => ({
       now: clock(),
-      noticeSeconds: props.layout.awaitingCancelNoticeSeconds
-        || SHULONG_STEAMER_LAYOUT.awaitingCancelNoticeSeconds
+      noticeSeconds: Number(props.layout.awaitingCancelNoticeSeconds)
+        || DEFAULT_AWAITING_CANCEL_NOTICE_SECONDS
     })
 
     const cagePhase = (cage) => deriveSteamerPhase(cage, phaseOpts())
@@ -460,7 +461,7 @@ export default {
       return fillHoleSlots(props.steamingCages, {
         steamerId,
         portIndex,
-        portCapacity: Number(props.layout.portCapacity || SHULONG_STEAMER_LAYOUT.portCapacity),
+        portCapacity: Number(props.layout.portCapacity) || 0,
         now: clock()
       })
     }
@@ -475,7 +476,7 @@ export default {
         steamerId,
         portIndex,
         occupiedOnHole: onHole.length,
-        portCapacity: Number(props.layout.portCapacity || SHULONG_STEAMER_LAYOUT.portCapacity),
+        portCapacity: Number(props.layout.portCapacity) || 0,
         idsOnHole: onHole.map(cageId)
       })
       if (!intent) return

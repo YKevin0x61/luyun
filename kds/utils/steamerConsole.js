@@ -15,13 +15,9 @@ export const STEAMER_PHASE_AWAITING_NOTICE = '待上笼退示'
 export const SHULONG_STATION_ID = 'shulong'
 export const DEFAULT_AWAITING_CANCEL_NOTICE_SECONDS = 180
 
-/** Fallback when /api/stations has no shulong.steamer_layout. Keep in sync with config.KITCHEN_STATIONS.shulong. */
-export const SHULONG_STEAMER_LAYOUT = Object.freeze({
-  steamers: Object.freeze([
-    Object.freeze({ id: '1', portCount: 6 }),
-    Object.freeze({ id: '2', portCount: 6 })
-  ]),
-  portCapacity: 10,
+export const EMPTY_STEAMER_LAYOUT = Object.freeze({
+  steamers: Object.freeze([]),
+  portCapacity: 0,
   awaitingCancelNoticeSeconds: DEFAULT_AWAITING_CANCEL_NOTICE_SECONDS
 })
 
@@ -226,7 +222,7 @@ export function steamerHoleTapIntent({
     ? awaiting
     : steaming.filter((id) => !onHole.has(id))
   const occupied = Number(occupiedOnHole) || 0
-  const capacity = Number(portCapacity) || SHULONG_STEAMER_LAYOUT.portCapacity
+  const capacity = Number(portCapacity) || 0
   if (occupied + incoming.length > capacity) {
     return { type: 'reject', reason: 'capacity' }
   }
@@ -411,7 +407,7 @@ export function sortHoleDisplay(cages, now) {
 }
 
 export function fillHoleSlots(cages, { steamerId, portIndex, portCapacity, now } = {}) {
-  const capacity = Number(portCapacity) || SHULONG_STEAMER_LAYOUT.portCapacity
+  const capacity = Number(portCapacity) || 0
   const onHole = (Array.isArray(cages) ? cages : []).filter((cage) => {
     const placement = cage?.placement
     return placement
@@ -511,9 +507,9 @@ function normalizeSteamerPorts(steamers) {
 export function steamerLayoutFromStations(stationsPayload) {
   const station = findShulongStation(stationsPayload)
   const raw = station?.steamer_layout || station?.steamerLayout
-  if (!raw || typeof raw !== 'object') return SHULONG_STEAMER_LAYOUT
+  if (!raw || typeof raw !== 'object') return EMPTY_STEAMER_LAYOUT
   const steamers = normalizeSteamerPorts(raw.steamers)
-  if (steamers.length === 0) return SHULONG_STEAMER_LAYOUT
+  if (steamers.length === 0) return EMPTY_STEAMER_LAYOUT
   const portCapacity = Number(raw.portCapacity ?? raw.port_capacity)
   const noticeSeconds = Number(
     raw.awaitingCancelNoticeSeconds ?? raw.awaiting_cancel_notice_seconds
@@ -522,10 +518,10 @@ export function steamerLayoutFromStations(stationsPayload) {
     steamers,
     portCapacity: Number.isFinite(portCapacity) && portCapacity > 0
       ? portCapacity
-      : SHULONG_STEAMER_LAYOUT.portCapacity,
+      : 0,
     awaitingCancelNoticeSeconds: Number.isFinite(noticeSeconds) && noticeSeconds > 0
       ? noticeSeconds
-      : SHULONG_STEAMER_LAYOUT.awaitingCancelNoticeSeconds
+      : DEFAULT_AWAITING_CANCEL_NOTICE_SECONDS
   }
 }
 

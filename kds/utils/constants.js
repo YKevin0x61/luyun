@@ -13,60 +13,7 @@ export const API_CONFIG = {
   RETRY_COUNT: 3
 }
 
-// 档口配置
-// 注：页面/组件请从 stores/stations.js（Pinia）读取档口名称/id/顺序/颜色。
-// 本常量仅保留给尚未迁移的启动预加载等遗留调用；名称/id 需与后端 config.py 一致。
-export const KITCHEN_STATIONS = {
-  XIBING: {
-    id: 'xibing',
-    name: '西饼档',
-    color: '#FF6B6B',
-    description: '负责制作各类西式点心和烘焙产品',
-    path: '/pages/kitchen/xibing/xibing'
-  },
-  CHANGFEN: {
-    id: 'changfen',
-    name: '肠粉档',
-    color: '#4ECDC4',
-    description: '专门制作各种肠粉类产品',
-    path: '/pages/kitchen/changfen/changfen'
-  },
-  SHULONG: {
-    id: 'shulong',
-    name: '熟笼档',
-    color: '#722ED1',
-    description: '负责制作各类蒸制点心',
-    path: '/pages/kitchen/shulong/shulong'
-  },
-  MINGDANG1: {
-    id: 'mingdang1',
-    name: '明档1',
-    color: '#13C2C2',
-    description: '明档现做菜品',
-    path: '/pages/kitchen/mingdang1/mingdang1'
-  },
-  MINGDANG2: {
-    id: 'mingdang2',
-    name: '明档2',
-    color: '#FA541C',
-    description: '明档汤粥类菜品',
-    path: '/pages/kitchen/mingdang2/mingdang2'
-  },
-  JIANZHA: {
-    id: 'jianzha',
-    name: '煎炸档',
-    color: '#FAAD14',
-    description: '负责煎炸类菜品',
-    path: '/pages/kitchen/jianzha/jianzha'
-  },
-  QITA: {
-    id: 'qita',
-    name: '其他档口',
-    color: '#8C8C8C',
-    description: '处理未分类菜品和新菜品',
-    path: '/pages/kitchen/qita/qita'
-  }
-}
+// 档口 catalog 只从 /api/stations 进 Pinia stations store，不在此硬编码。
 
 // 窗口配置
 export const DELIVERY_WINDOWS = {

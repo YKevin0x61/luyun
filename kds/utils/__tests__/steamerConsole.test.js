@@ -8,7 +8,6 @@ import {
   groupAwaitingSteamerCages as groupAwaitingSteamerCagesRaw,
   listAwaitingSteamerCages as listAwaitingSteamerCagesRaw,
   sortAwaitingCagesFifo as sortAwaitingCagesFifoRaw,
-  SHULONG_STEAMER_LAYOUT,
   steamerBasketServeIntent,
   steamerHoleTapIntent,
   steamerLoadIntent,
@@ -205,7 +204,7 @@ describe('steamerHoleTapIntent', () => {
     steamerId: '1',
     portIndex: 3,
     occupiedOnHole: 2,
-    portCapacity: SHULONG_STEAMER_LAYOUT.portCapacity
+    portCapacity: 10
   }
 
   it('is a no-op when tapping a hole with empty selection', () => {
@@ -1223,6 +1222,7 @@ describe('fillHoleSlots', () => {
     const slots = fillHoleSlots([hold, quiet, rushed], {
       steamerId: '2',
       portIndex: 1,
+      portCapacity: 10,
       now
     })
 
@@ -1538,13 +1538,16 @@ describe('steamerLayoutFromStations', () => {
     }))
   })
 
-  it('falls back to SHULONG_STEAMER_LAYOUT when layout is missing', () => {
-    expect(steamerLayoutFromStations(null)).toBe(SHULONG_STEAMER_LAYOUT)
-    expect(steamerLayoutFromStations([])).toBe(SHULONG_STEAMER_LAYOUT)
-    expect(steamerLayoutFromStations([{ id: 'changfen' }])).toBe(SHULONG_STEAMER_LAYOUT)
-    expect(steamerLayoutFromStations([{ id: 'shulong', name: '熟笼档' }])).toBe(
-      SHULONG_STEAMER_LAYOUT
-    )
+  it('returns empty layout when steamer_layout is missing', () => {
+    const empty = {
+      steamers: [],
+      portCapacity: 0,
+      awaitingCancelNoticeSeconds: 180
+    }
+    expect(steamerLayoutFromStations(null)).toEqual(empty)
+    expect(steamerLayoutFromStations([])).toEqual(empty)
+    expect(steamerLayoutFromStations([{ id: 'changfen' }])).toEqual(empty)
+    expect(steamerLayoutFromStations([{ id: 'shulong', name: '熟笼档' }])).toEqual(empty)
   })
 })
 
