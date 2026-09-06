@@ -1037,6 +1037,408 @@ class PrepPlanService:
             operator=operator,
         )
 
+    async def get_current_plan(self, db, now: Optional[datetime] = None) -> Dict[str, Any]:
+        now_iso = (now or datetime.now(CHINA_TZ)).isoformat()
+        runs_tdb = db.table("prep_plan_runs")
+        items_tdb = db.table("prep_plan_items")
+
+        async with runs_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT *
+                FROM prep_plan_runs
+                WHERE target_start <= ? AND target_end > ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (now_iso, now_iso),
+            )
+            run_row = await cursor.fetchone()
+            if not run_row:
+                await cursor.execute(
+                    """
+                    SELECT *
+                    FROM prep_plan_runs
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
+                run_row = await cursor.fetchone()
+                if not run_row:
+                    return {"success": True, "run": None, "items": [], "missing_rules": []}
+
+        run = dict(run_row)
+        async with items_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT *
+                FROM prep_plan_items
+                WHERE run_id = ?
+                ORDER BY station ASC, position ASC, recommended_qty DESC, item_name ASC
+                """,
+                (run["id"],),
+            )
+            items = [dict(row) for row in await cursor.fetchall()]
+        return {
+            "success": True,
+            "run": run,
+            "items": items,
+            "missing_rules": [],
+        }
+
+    async def update_batch(
+        self,
+        db,
+        batch_id: int,
+        remaining_qty: Optional[float] = None,
+        status: Optional[str] = None,
+        notes: Optional[str] = None,
+        operator: str = "",
+    ) -> Dict[str, Any]:
+        batches_tdb = db.table("prep_batches")
+        movements_tdb = db.table("prep_stock_movements")
+        now_iso = datetime.now(CHINA_TZ).isoformat()
+
+        async with batches_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                "SELECT * FROM prep_batches WHERE id = ? LIMIT 1",
+                (batch_id,),
+            )
+            current = await cursor.fetchone()
+        if not current:
+            raise KeyError("批次不存在")
+        current_dict = dict(current)
+
+        update_fields = []
+        update_values: List[Any] = []
+
+        if remaining_qty is not None:
+            new_qty = float(remaining_qty)
+            old_qty = float(current_dict["remaining_qty"] or 0)
+            delta = new_qty - old_qty
+            if abs(delta) > 1e-9:
+                async with movements_tdb.conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO prep_stock_movements (
+                            batch_id, prep_item_id, item_name, unit, movement_type, qty_delta,
+                            reason, operator, source_type, source_id, created_at
+                        ) VALUES (?, ?, ?, ?, 'adjust', ?, 'batch_update', ?, 'batch', ?, ?)
+                        """,
+                        (
+                            batch_id,
+                            current_dict.get("prep_item_id"),
+                            current_dict["item_name"],
+                            current_dict["unit"],
+                            delta,
+                            operator or "",
+                            str(batch_id),
+                            now_iso,
+                        ),
+                    )
+                await movements_tdb.commit()
+            update_fields.append("remaining_qty = ?")
+            update_values.append(new_qty)
+
+        if status is not None:
+            update_fields.append("status = ?")
+            update_values.append(status)
+
+        if notes is not None:
+            update_fields.append("notes = ?")
+            update_values.append(notes)
+
+        update_fields.append("updated_at = ?")
+        update_values.append(now_iso)
+        update_values.append(batch_id)
+
+        async with batches_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                f"UPDATE prep_batches SET {', '.join(update_fields)} WHERE id = ?",
+                tuple(update_values),
+            )
+            affected = cursor.rowcount
+        await batches_tdb.commit()
+        return {"success": True, "affected": affected}
+
+    async def list_movements(
+        self,
+        db,
+        item_name: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        tdb = db.table("prep_stock_movements")
+        conditions = []
+        params: List[Any] = []
+        if item_name:
+            conditions.append("item_name = ?")
+            params.append(item_name)
+        if start_date:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=CHINA_TZ)
+            conditions.append("created_at >= ?")
+            params.append(start_dt.isoformat())
+        if end_date:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=CHINA_TZ) + timedelta(days=1)
+            conditions.append("created_at < ?")
+            params.append(end_dt.isoformat())
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                f"""
+                SELECT *
+                FROM prep_stock_movements
+                {where_clause}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                tuple(params + [limit]),
+            )
+            rows = [dict(row) for row in await cursor.fetchall()]
+        return {"success": True, "items": rows, "count": len(rows)}
+
+    async def create_movement(
+        self,
+        db,
+        batch_id: int,
+        item_name: str,
+        movement_type: str,
+        qty_delta: float,
+        unit: str = "",
+        reason: str = "",
+        operator: str = "",
+        source_type: str = "",
+        source_id: str = "",
+    ) -> Dict[str, Any]:
+        allowed_types = {"produce", "discard", "adjust", "expire"}
+        if movement_type not in allowed_types:
+            raise ValueError(f"不支持的 movement_type: {movement_type}")
+        if movement_type == "produce" and qty_delta <= 0:
+            raise ValueError("produce 的 qty_delta 必须 > 0")
+        if movement_type in {"discard", "expire"} and qty_delta >= 0:
+            raise ValueError(f"{movement_type} 的 qty_delta 必须 < 0")
+
+        batches_tdb = db.table("prep_batches")
+        movements_tdb = db.table("prep_stock_movements")
+        now_iso = datetime.now(CHINA_TZ).isoformat()
+
+        async with batches_tdb.conn.cursor() as cursor:
+            await cursor.execute("SELECT * FROM prep_batches WHERE id = ? LIMIT 1", (batch_id,))
+            batch = await cursor.fetchone()
+        if not batch:
+            raise KeyError("批次不存在")
+        batch_dict = dict(batch)
+
+        async with movements_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO prep_stock_movements (
+                    batch_id, prep_item_id, item_name, unit, movement_type, qty_delta,
+                    reason, operator, source_type, source_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    batch_id,
+                    batch_dict.get("prep_item_id"),
+                    item_name,
+                    unit,
+                    movement_type,
+                    float(qty_delta),
+                    reason or "",
+                    operator or "",
+                    source_type or "",
+                    source_id or "",
+                    now_iso,
+                ),
+            )
+            movement_id = cursor.lastrowid
+        await movements_tdb.commit()
+
+        old_remaining = float(batch_dict["remaining_qty"] or 0)
+        new_remaining = old_remaining + float(qty_delta)
+        if new_remaining < 0:
+            new_remaining = 0.0
+
+        new_status = batch_dict["status"]
+        if new_remaining <= 0 and new_status in {"active", "near_expiry"}:
+            new_status = "active"  # MVP2: do not introduce used_up yet
+        if movement_type == "discard":
+            new_status = "discarded"
+        if movement_type == "expire":
+            new_status = "expired"
+
+        async with batches_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE prep_batches
+                SET remaining_qty = ?, status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (new_remaining, new_status, now_iso, batch_id),
+            )
+        await batches_tdb.commit()
+        return {
+            "success": True,
+            "movement_id": movement_id,
+            "remaining_qty": round(new_remaining, 2),
+            "status": new_status,
+        }
+
+    async def list_expiring_batches(self, db, within_hours: int = 4) -> Dict[str, Any]:
+        now_dt = datetime.now(CHINA_TZ)
+        end_dt = now_dt + timedelta(hours=within_hours)
+        tdb = db.table("prep_batches")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT *
+                FROM prep_batches
+                WHERE status IN ('active', 'near_expiry')
+                  AND remaining_qty > 0
+                  AND expires_at > ?
+                  AND expires_at <= ?
+                ORDER BY expires_at ASC
+                """,
+                (now_dt.isoformat(), end_dt.isoformat()),
+            )
+            rows = [dict(row) for row in await cursor.fetchall()]
+        return {"success": True, "items": rows, "count": len(rows)}
+
+    async def get_accuracy(self, db, start_date: str, end_date: str) -> Dict[str, Any]:
+        runs_tdb = db.table("prep_plan_runs")
+        items_tdb = db.table("prep_plan_items")
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=CHINA_TZ)
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=CHINA_TZ) + timedelta(days=1)
+
+        async with runs_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT id, target_start, target_end
+                FROM prep_plan_runs
+                WHERE target_start >= ? AND target_start < ?
+                """,
+                (start_dt.isoformat(), end_dt.isoformat()),
+            )
+            run_rows = await cursor.fetchall()
+
+        if not run_rows:
+            return {"success": True, "summary": {"plan_count": 0, "accuracy": None}, "items": []}
+
+        run_ids = [row["id"] for row in run_rows]
+        placeholders = ",".join(["?"] * len(run_ids))
+        async with items_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                f"""
+                SELECT run_id, item_name, unit, forecast_qty
+                FROM prep_plan_items
+                WHERE run_id IN ({placeholders})
+                """,
+                tuple(run_ids),
+            )
+            plan_items = [dict(row) for row in await cursor.fetchall()]
+
+        result_items = []
+        accuracy_values = []
+        for row in run_rows:
+            actual_totals = await self.compute_actual_consumption_totals(
+                db=db,
+                target_start=row["target_start"],
+                target_end=row["target_end"],
+                station=None,
+            )
+            run_plan_items = [item for item in plan_items if item["run_id"] == row["id"]]
+            for item in run_plan_items:
+                key = (item["item_name"], item["unit"])
+                forecast_qty = float(item["forecast_qty"] or 0)
+                actual_qty = float(actual_totals.get(key, 0))
+                if actual_qty <= 0:
+                    acc = 1.0 if forecast_qty <= 0 else 0.0
+                else:
+                    acc = 1.0 - abs(forecast_qty - actual_qty) / actual_qty
+                    if acc < 0:
+                        acc = 0.0
+                accuracy_values.append(acc)
+                result_items.append(
+                    {
+                        "run_id": row["id"],
+                        "item_name": item["item_name"],
+                        "unit": item["unit"],
+                        "forecast_qty": round(forecast_qty, 2),
+                        "actual_qty": round(actual_qty, 2),
+                        "accuracy": round(acc, 4),
+                    }
+                )
+
+        overall = sum(accuracy_values) / len(accuracy_values) if accuracy_values else None
+        return {
+            "success": True,
+            "summary": {
+                "plan_count": len(run_rows),
+                "item_count": len(result_items),
+                "accuracy": round(overall, 4) if overall is not None else None,
+            },
+            "items": result_items[:2000],
+        }
+
+    async def init_items_from_rules(self, db) -> Dict[str, Any]:
+        rules_tdb = db.table("semi_finished_rules")
+        items_tdb = db.table("prep_items")
+        now_iso = datetime.now(CHINA_TZ).isoformat()
+
+        async with rules_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT semi_name, unit, category, position, COUNT(*) AS rule_count
+                FROM semi_finished_rules
+                GROUP BY semi_name, unit, category, position
+                """
+            )
+            rule_rows = await cursor.fetchall()
+
+        existing_keys = set()
+        async with items_tdb.conn.cursor() as cursor:
+            await cursor.execute("SELECT item_name, unit FROM prep_items")
+            for row in await cursor.fetchall():
+                existing_keys.add((row["item_name"], row["unit"] or ""))
+
+        created = 0
+        for row in rule_rows:
+            item_name = row["semi_name"]
+            unit = row["unit"] or ""
+            key = (item_name, unit)
+            if key in existing_keys:
+                continue
+
+            position = row["position"] or ""
+            station = POSITION_STATION_MAP.get(position, "")
+
+            async with items_tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    INSERT INTO prep_items (
+                        item_name, station, position, category, unit,
+                        shelf_life_hours, lead_time_hours, min_batch_qty,
+                        safety_stock_ratio, active, notes, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 24, 0, 0, 0.15, 1, 'auto_init_from_rules', ?, ?)
+                    """,
+                    (
+                        item_name,
+                        station,
+                        position,
+                        row["category"] or "",
+                        unit,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+            created += 1
+            existing_keys.add(key)
+
+        await items_tdb.commit()
+        return {"success": True, "created": created, "total_rules": len(rule_rows)}
+
 
 prep_plan_service = PrepPlanService()
 
