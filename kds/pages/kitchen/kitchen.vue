@@ -106,13 +106,19 @@
             v-for="station in stationTabs"
             :key="station.id"
             @click="switchStation(station.id)"
-            :class="['station-tab', station.id, { active: currentStation === station.id }]"
-            :style="{ borderColor: station.color }"
+            :class="['station-tab', { active: currentStation === station.id }]"
+            :style="stationTabStyle(station, currentStation === station.id)"
           >
             <view class="tab-content">
-              <text class="tab-name">{{ station.name }}</text>
+              <text
+                class="tab-name"
+                :style="currentStation === station.id ? { color: station.color } : null"
+              >{{ station.name }}</text>
               <view class="tab-info">
-                <text class="tab-count">{{ stationTabStats[station.id]?.pending ?? 0 }}</text>
+                <text
+                  class="tab-count"
+                  :style="currentStation === station.id ? { color: station.color } : null"
+                >{{ stationTabStats[station.id]?.pending ?? 0 }}</text>
                 <text class="tab-unit">单</text>
               </view>
               <view v-if="(stationTabStats[station.id]?.urgent ?? 0) > 0" class="tab-urgent">
@@ -394,6 +400,28 @@ export default {
       isSteamerConsole({ stationId: currentStation.value })
     )
     const cageIsNew = (cage) => dishHasNewBadge({ orders: [cage] })
+
+    function parseHexRgb(hex) {
+      const n = String(hex || '').replace('#', '')
+      if (n.length !== 6 || /[^0-9a-fA-F]/.test(n)) return null
+      return [
+        parseInt(n.slice(0, 2), 16),
+        parseInt(n.slice(2, 4), 16),
+        parseInt(n.slice(4, 6), 16)
+      ]
+    }
+
+    function stationTabStyle(station, active) {
+      const color = station.color || '#95A5A6'
+      const rgb = parseHexRgb(color)
+      const style = { borderColor: color }
+      if (!active || !rgb) return style
+      const [r, g, b] = rgb
+      style.borderWidth = '4upx'
+      style.background = `linear-gradient(135deg, rgba(${r}, ${g}, ${b}, 0.45), rgba(${r}, ${g}, ${b}, 0.25))`
+      style.boxShadow = `0 6upx 20upx rgba(${r}, ${g}, ${b}, 0.5), 0 0 20upx rgba(${r}, ${g}, ${b}, 0.3)`
+      return style
+    }
 
     // 档口标签：只保留本屏锁死的那一个；未锁定时为空（页面会跳设置）
     const stationTabs = computed(() => {
@@ -1137,6 +1165,7 @@ export default {
       currentTimestamp,
       currentStation,
       stationTabs,
+      stationTabStyle,
       isSingleWatchedStation,
       densityMode,
       isSteamerConsoleView,
@@ -1821,64 +1850,6 @@ export default {
   box-shadow: 0 4upx 16upx rgba(0,0,0,0.15);
   transform: translateY(-2upx);
 }
-
-.station-tab.changfen { border-color: #4ECDC4; }
-.station-tab.shulong { border-color: #45B7D1; }
-.station-tab.xibing { border-color: #FF6B6B; }
-.station-tab.mingdang1 { border-color: #96CEB4; }
-.station-tab.mingdang2 { border-color: #FECA57; }
-.station-tab.jianzha { border-color: #DDA0DD; }
-
-/* 选中状态的背景色高亮 - 🌟 鲜艳版本 */
-.station-tab.changfen.active { 
-  background: linear-gradient(135deg, rgba(78, 205, 196, 0.45), rgba(78, 205, 196, 0.25));
-  border-color: #4ECDC4;
-  border-width: 4upx;
-  box-shadow: 0 6upx 20upx rgba(78, 205, 196, 0.5), 0 0 20upx rgba(78, 205, 196, 0.3);
-}
-.station-tab.shulong.active { 
-  background: linear-gradient(135deg, rgba(69, 183, 209, 0.45), rgba(69, 183, 209, 0.25));
-  border-color: #45B7D1;
-  border-width: 4upx;
-  box-shadow: 0 6upx 20upx rgba(69, 183, 209, 0.5), 0 0 20upx rgba(69, 183, 209, 0.3);
-}
-.station-tab.xibing.active { 
-  background: linear-gradient(135deg, rgba(255, 107, 107, 0.45), rgba(255, 107, 107, 0.25));
-  border-color: #FF6B6B;
-  border-width: 4upx;
-  box-shadow: 0 6upx 20upx rgba(255, 107, 107, 0.5), 0 0 20upx rgba(255, 107, 107, 0.3);
-}
-.station-tab.mingdang1.active { 
-  background: linear-gradient(135deg, rgba(150, 206, 180, 0.45), rgba(150, 206, 180, 0.25));
-  border-color: #96CEB4;
-  border-width: 4upx;
-  box-shadow: 0 6upx 20upx rgba(150, 206, 180, 0.5), 0 0 20upx rgba(150, 206, 180, 0.3);
-}
-.station-tab.mingdang2.active { 
-  background: linear-gradient(135deg, rgba(254, 202, 87, 0.45), rgba(254, 202, 87, 0.25));
-  border-color: #FECA57;
-  border-width: 4upx;
-  box-shadow: 0 6upx 20upx rgba(254, 202, 87, 0.5), 0 0 20upx rgba(254, 202, 87, 0.3);
-}
-.station-tab.jianzha.active { 
-  background: linear-gradient(135deg, rgba(221, 160, 221, 0.45), rgba(221, 160, 221, 0.25));
-  border-color: #DDA0DD;
-  border-width: 4upx;
-  box-shadow: 0 6upx 20upx rgba(221, 160, 221, 0.5), 0 0 20upx rgba(221, 160, 221, 0.3);
-}
-.station-tab.changfen.active .tab-name { color: #4ECDC4; }
-.station-tab.shulong.active .tab-name { color: #45B7D1; }
-.station-tab.xibing.active .tab-name { color: #FF6B6B; }
-.station-tab.mingdang1.active .tab-name { color: #96CEB4; }
-.station-tab.mingdang2.active .tab-name { color: #FECA57; }
-.station-tab.jianzha.active .tab-name { color: #DDA0DD; }
-
-.station-tab.changfen.active .tab-count { color: #4ECDC4; }
-.station-tab.shulong.active .tab-count { color: #45B7D1; }
-.station-tab.xibing.active .tab-count { color: #FF6B6B; }
-.station-tab.mingdang1.active .tab-count { color: #96CEB4; }
-.station-tab.mingdang2.active .tab-count { color: #FECA57; }
-.station-tab.jianzha.active .tab-count { color: #DDA0DD; }
 
 .tab-content {
   display: flex;

@@ -13,6 +13,7 @@ import { useStationsStore } from '../stations.js'
 
 const API_STATIONS = [
   { id: 'changfen', name: '肠粉档', color: '#4ECDC4' },
+  { id: 'jianzha', name: '煎炸档', color: '#FF9FF3' },
   {
     id: 'shulong',
     name: '熟笼档',
@@ -49,7 +50,12 @@ describe('stations store catalog', () => {
     vi.mocked(stationsAPI.getStations).mockResolvedValue(API_STATIONS)
     const store = useStationsStore()
     await store.initializeStations()
-    expect(store.stationList.map((station) => station.id)).toEqual(['changfen', 'shulong'])
+    expect(store.stationList.map((station) => station.id)).toEqual([
+      'changfen',
+      'jianzha',
+      'shulong'
+    ])
+    expect(store.getStationColor('jianzha')).toBe('#FF9FF3')
     expect(store.getStationById('loumian')?.name).toBe('楼面')
     expect(store.steamerLayout).toEqual({
       steamers: [
