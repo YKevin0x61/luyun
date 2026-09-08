@@ -18,7 +18,7 @@ async function load() {
   try {
     const [dishesRes, namesRes] = await Promise.all([
       api.get('/api/report-dishes/'),
-      api.get('/api/semi-rules/dishes/available'),
+      api.get('/api/report-dishes/catalog'),
     ])
     fixedDishes.value = dishesRes.dishes || []
     allDishNames.value = namesRes.dishes || []

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from database import DatabaseManager, get_db
 from api.security import verify_admin_token
+from services.dish_catalog import get_dish_catalog
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/report-dishes", tags=["报表固定菜品"])
@@ -31,6 +32,22 @@ class ReportDishReorder(BaseModel):
 async def list_report_dishes(db: DatabaseManager = Depends(get_db)):
     """列出全部固定报表菜品"""
     dishes = await db.report_dishes_all()
+    return {"success": True, "dishes": dishes, "total": len(dishes)}
+
+
+@router.get("/catalog")
+async def list_report_dish_catalog(
+    db: DatabaseManager = Depends(get_db),
+    dish_catalog=Depends(get_dish_catalog),
+):
+    """菜品库名单，供固定报表菜品下拉选择。
+
+    半成品 ``/dishes/available`` 会去掉已有规则的菜，且订单去重默认只取 500 条，
+    不能当菜品库用。这里用档口目录 ∪ 订单里出现过的菜名。
+    """
+    mapping = await dish_catalog.as_dict()
+    order_names = await db.orders.list_distinct_order_dish_names()
+    dishes = sorted({*mapping.keys(), *order_names})
     return {"success": True, "dishes": dishes, "total": len(dishes)}
 
 
