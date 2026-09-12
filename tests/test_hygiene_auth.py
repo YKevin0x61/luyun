@@ -459,3 +459,110 @@ def test_staff_admin_cannot_patch_overdue_clocks_admin_cookie_can(hygiene_http):
         "day_hhmm": "16:00",
         "night_hhmm": "22:15",
     }
+
+
+def _submit_deep_clean(client, item_id, before=SHOT_A, after=SHOT_B, live="true"):
+    return client.post(
+        f"/api/hygiene/staff/deep-clean/{item_id}/submit",
+        data={"live": live},
+        files={
+            "before": ("before.jpg", before, "image/jpeg"),
+            "after": ("after.jpg", after, "image/jpeg"),
+        },
+    )
+
+
+def test_staff_both_shifts_submit_deep_clean_staff_cannot_configure_admin_can(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    template = {"weekday": 6, "name": "冷柜一号"}
+    assert client.post("/api/hygiene/admin/deep-clean/items", json=template).status_code == 401
+    assert client.get("/api/hygiene/admin/deep-clean/items").status_code == 401
+    assert client.get("/api/hygiene/admin/deep-clean/clock").status_code == 401
+    assert client.patch(
+        "/api/hygiene/admin/deep-clean/clock", json={"hhmm": "20:00"}
+    ).status_code == 401
+
+    _approve_staff(accounts, PHONE, "白班")
+    _approve_staff(accounts, PHONE_NIGHT, "夜班")
+    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _staff_login(client, PHONE)
+    assert client.post("/api/hygiene/admin/deep-clean/items", json=template).status_code == 401
+    assert client.patch(
+        "/api/hygiene/admin/deep-clean/clock", json={"hhmm": "20:00"}
+    ).status_code == 401
+    empty = client.get("/api/hygiene/staff/deep-clean")
+    assert empty.status_code == 200
+    assert empty.json()["items"] == []
+
+    client.cookies.clear()
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200
+    created = client.post("/api/hygiene/admin/deep-clean/items", json=template)
+    assert created.status_code == 200
+    item = created.json()["item"]
+    assert item["name"] == "冷柜一号"
+    second = client.post(
+        "/api/hygiene/admin/deep-clean/items",
+        json={"weekday": 6, "name": "冷柜二号"},
+    )
+    assert second.status_code == 200
+    other = second.json()["item"]
+    clock = client.patch("/api/hygiene/admin/deep-clean/clock", json={"hhmm": "20:00"})
+    assert clock.status_code == 200
+    assert clock.json()["hhmm"] == "20:00"
+    listed = client.get("/api/hygiene/admin/deep-clean/items")
+    assert listed.status_code == 200
+    names = [row["name"] for row in listed.json()["items"] if row["weekday"] == 6]
+    assert names == ["冷柜一号", "冷柜二号"]
+    calendar = client.get(
+        "/api/hygiene/admin/deep-clean/calendar",
+        params={"from_date": "2026-09-13", "to_date": "2026-09-13"},
+    )
+    assert calendar.status_code == 200
+    assert calendar.json()["days"][0]["status"] == "待办"
+
+    _staff_login(client, PHONE)
+    inbox = client.get("/api/hygiene/staff/deep-clean")
+    assert inbox.status_code == 200
+    assert [row["item_name"] for row in inbox.json()["items"]] == ["冷柜一号", "冷柜二号"]
+    submitted = _submit_deep_clean(client, item["id"])
+    assert submitted.status_code == 200
+    assert submitted.json()["status"] == "待验收"
+    album = _submit_deep_clean(client, other["id"], live="false")
+    assert album.status_code == 400
+    before_img = client.get(f"/api/hygiene/staff/deep-clean/{item['id']}/before")
+    assert before_img.status_code == 200
+    assert before_img.content == SHOT_A
+    after_img = client.get(f"/api/hygiene/staff/deep-clean/{item['id']}/after")
+    assert after_img.status_code == 200
+    assert after_img.content == SHOT_B
+    self_accept = client.post(f"/api/hygiene/staff/deep-clean/{item['id']}/accept")
+    assert self_accept.status_code == 403
+
+    _staff_login(client, PHONE_NIGHT)
+    night_inbox = client.get("/api/hygiene/staff/deep-clean")
+    assert night_inbox.status_code == 200
+    night_submit = _submit_deep_clean(client, other["id"], before=b"NIGHT-B", after=b"NIGHT-A")
+    assert night_submit.status_code == 200
+    assert night_submit.json()["status"] == "待验收"
+
+    _staff_login(client, PHONE_ADMIN)
+    accepted = client.post(f"/api/hygiene/staff/deep-clean/{item['id']}/accept")
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "已通过"
+
+    client.cookies.clear()
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "password123"},
+    )
+    assert login.status_code == 200
+    queue = client.get("/api/hygiene/admin/deep-clean/queue")
+    assert queue.status_code == 200
+    pending = queue.json()["items"]
+    assert any(row["item_id"] == other["id"] and row["status"] == "待验收" for row in pending)
+    super_accept = client.post(f"/api/hygiene/admin/deep-clean/{other['id']}/accept")
+    assert super_accept.status_code == 200
+    assert super_accept.json()["status"] == "已通过"
+    done = _run(work.list_deep_clean_work({"kind": "super"}))
+    assert done["status"] == "已完成"

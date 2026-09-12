@@ -14,6 +14,7 @@ const route = useRoute()
 
 // 简单映射，对齐旧原生页各自的 data-subtitle（如 public/logs.html:130）
 const PAGE_SUBTITLES = [
+  { prefix: '/hygiene-deep-clean', subtitle: '专项卫生' },
   { prefix: '/hygiene-daily', subtitle: '日常验收' },
   { prefix: '/hygiene-zones', subtitle: '卫生责任区' },
   { prefix: '/hygiene-roster', subtitle: '卫生花名册' },
@@ -82,6 +83,7 @@ async function handleLogout() {
       <router-link to="/hygiene-roster" class="nav-tab" :class="{ active: route.path.startsWith('/hygiene-roster') }">花名册</router-link>
       <router-link to="/hygiene-zones" class="nav-tab" :class="{ active: route.path.startsWith('/hygiene-zones') }">卫生区</router-link>
       <router-link to="/hygiene-daily" class="nav-tab" :class="{ active: route.path.startsWith('/hygiene-daily') }">日常验收</router-link>
+      <router-link to="/hygiene-deep-clean" class="nav-tab" :class="{ active: route.path.startsWith('/hygiene-deep-clean') }">专项卫生</router-link>
       <router-link to="/sales-report" class="nav-tab" :class="{ active: route.path.startsWith('/sales-report') }">销售报表</router-link>
       <router-link to="/recipe" class="nav-tab" :class="{ active: route.path.startsWith('/recipe') }">{{ RECIPE_BRAND_TITLE }}</router-link>
       <router-link to="/wecom-push" class="nav-tab" :class="{ active: route.path.startsWith('/wecom-push') }">企微推送</router-link>

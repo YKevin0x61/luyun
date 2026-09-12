@@ -87,6 +87,14 @@ export function frozenStandardUrl(kind, row) {
   return `${prefix}/daily/${itemId}/frozen-standard?shift=${shift}&v=${version}`
 }
 
+export function deepCleanShotUrl(kind, row, which) {
+  const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
+  const itemId = row && row.item_id
+  const key = which === 'before' ? 'before_capture_id' : 'after_capture_id'
+  const version = encodeURIComponent((row && row[key]) || '')
+  return `${prefix}/deep-clean/${itemId}/${which}?v=${version}`
+}
+
 export function formatWatermarkTime(value) {
   const raw = String(value || '')
   const matched = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(raw)

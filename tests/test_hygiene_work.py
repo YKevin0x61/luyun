@@ -139,6 +139,12 @@ class HygieneWorkTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HygieneWorkError) as clocks:
             await self.work.set_daily_overdue_clocks(STAFF_ADMIN, "16:00", "22:00")
         self.assertEqual(clocks.exception.code, "forbidden")
+        with self.assertRaises(HygieneWorkError) as deep_item:
+            await self.work.add_deep_clean_item(STAFF_ADMIN, 6, "冷柜一号")
+        self.assertEqual(deep_item.exception.code, "forbidden")
+        with self.assertRaises(HygieneWorkError) as deep_clock:
+            await self.work.set_deep_clean_overdue_clock(STAFF, "20:00")
+        self.assertEqual(deep_clock.exception.code, "forbidden")
         current = await self.work.current_standard(item["id"])
         self.assertEqual(self.captures.get(current["capture_id"]), OLD_BYTES)
         zone = await self.work.create_zone(SUPER, "卫生间")
@@ -543,6 +549,214 @@ class HygieneDailyOverdueTest(unittest.IsolatedAsyncioTestCase):
             [event["event_type"] for event in still_person], ["实拍", "驳回", "实拍"]
         )
         self.assertFalse(any(event["event_type"] == "逾期" for event in still_person))
+
+
+SUNDAY = 6
+FRIDGE_A = "冷柜一号"
+FRIDGE_B = "冷柜二号"
+BEFORE_A = b"BEFORE-A"
+AFTER_A = b"AFTER-A"
+BEFORE_B = b"BEFORE-B"
+AFTER_B = b"AFTER-B"
+
+
+class HygieneDeepCleanTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        self.db = DatabaseManager()
+        await self.db.connect()
+        self.fixed_now = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
+        self.captures = FakeCaptureStore()
+        self.notifier = FakeNotifier()
+        self.work = HygieneWork(
+            self.db,
+            captures=self.captures,
+            now=lambda: self.fixed_now,
+            notifier=self.notifier,
+        )
+        await self.work.prepare()
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        settings.DATABASE_DIR = self._old_database_dir
+        self._tmpdir.cleanup()
+
+    def _live(self, data):
+        return {"bytes": data, "content_type": "image/jpeg", "live": True}
+
+    async def test_add_deep_clean_item_without_standard_appears_for_staff(self):
+        added = await self.work.add_deep_clean_item(SUPER, SUNDAY, FRIDGE_A)
+        self.assertEqual(added["name"], FRIDGE_A)
+        self.assertEqual(added["weekday"], SUNDAY)
+        self.assertNotIn("current_standard_id", added)
+        self.assertNotIn("capture_id", added)
+        listed = await self.work.list_deep_clean_work(_staff(10, DAY_PHONE, "白班"))
+        names = [row["item_name"] for row in listed["items"]]
+        self.assertEqual(names, [FRIDGE_A])
+        self.assertEqual(listed["items"][0]["status"], "待拍")
+        self.assertIsNone(listed["items"][0].get("zone_name"))
+
+    async def _two_sunday_items(self):
+        first = await self.work.add_deep_clean_item(SUPER, SUNDAY, FRIDGE_A)
+        second = await self.work.add_deep_clean_item(SUPER, SUNDAY, FRIDGE_B)
+        return first, second
+
+    def _pair_row(self, listed, item_id):
+        return next(row for row in listed["items"] if row["item_id"] == item_id)
+
+    async def test_one_pair_does_not_complete_until_every_pair_accepted(self):
+        first, second = await self._two_sunday_items()
+        day = _staff(10, DAY_PHONE, "白班")
+        reviewer = _staff(21, OTHER_ADMIN_PHONE, "白班", "管理员")
+        await self.work.submit_deep_clean_pair(
+            day, first["id"], self._live(BEFORE_A), self._live(AFTER_A)
+        )
+        listed = await self.work.list_deep_clean_work(day)
+        self.assertEqual(listed["status"], "待办")
+        self.assertEqual(self._pair_row(listed, first["id"])["status"], "待验收")
+        self.assertEqual(self._pair_row(listed, second["id"])["status"], "待拍")
+        await self.work.accept_deep_clean_pair(reviewer, first["id"])
+        still = await self.work.list_deep_clean_work(day)
+        self.assertEqual(still["status"], "待办")
+        self.assertEqual(self._pair_row(still, first["id"])["status"], "已通过")
+        self.assertEqual(self._pair_row(still, second["id"])["status"], "待拍")
+        await self.work.submit_deep_clean_pair(
+            day, second["id"], self._live(BEFORE_B), self._live(AFTER_B)
+        )
+        await self.work.accept_deep_clean_pair(reviewer, second["id"])
+        done = await self.work.list_deep_clean_work(day)
+        self.assertEqual(done["status"], "已完成")
+        self.assertEqual(self._pair_row(done, first["id"])["status"], "已通过")
+        self.assertEqual(self._pair_row(done, second["id"])["status"], "已通过")
+
+    async def test_day_and_night_staff_can_both_submit_same_weekday_task(self):
+        first, second = await self._two_sunday_items()
+        day = _staff(10, DAY_PHONE, "白班")
+        night = _staff(11, NIGHT_PHONE, "夜班")
+        day_shot = await self.work.submit_deep_clean_pair(
+            day, first["id"], self._live(BEFORE_A), self._live(AFTER_A)
+        )
+        night_shot = await self.work.submit_deep_clean_pair(
+            night, second["id"], self._live(BEFORE_B), self._live(AFTER_B)
+        )
+        self.assertEqual(day_shot["status"], "待验收")
+        self.assertEqual(night_shot["status"], "待验收")
+        listed = await self.work.list_deep_clean_work(night)
+        self.assertEqual(self._pair_row(listed, first["id"])["submitter_phone"], DAY_PHONE)
+        self.assertEqual(self._pair_row(listed, second["id"])["submitter_phone"], NIGHT_PHONE)
+
+    async def test_submitter_cannot_accept_own_pair_other_admin_or_super_can(self):
+        first, second = await self._two_sunday_items()
+        submitter = _staff(20, ADMIN_PHONE, "夜班", "管理员")
+        other = _staff(21, OTHER_ADMIN_PHONE, "白班", "管理员")
+        await self.work.submit_deep_clean_pair(
+            submitter, first["id"], self._live(BEFORE_A), self._live(AFTER_A)
+        )
+        with self.assertRaises(HygieneWorkError) as self_accept:
+            await self.work.accept_deep_clean_pair(submitter, first["id"])
+        self.assertEqual(self_accept.exception.code, "cannot_self_accept")
+        regular = _staff(10, DAY_PHONE, "白班")
+        with self.assertRaises(HygieneWorkError) as staff_accept:
+            await self.work.accept_deep_clean_pair(regular, first["id"])
+        self.assertEqual(staff_accept.exception.code, "forbidden")
+        passed = await self.work.accept_deep_clean_pair(other, first["id"])
+        self.assertEqual(passed["status"], "已通过")
+        await self.work.submit_deep_clean_pair(
+            submitter, second["id"], self._live(BEFORE_B), self._live(AFTER_B)
+        )
+        rejected = await self.work.reject_deep_clean_pair(SUPER, second["id"])
+        self.assertEqual(rejected["status"], "待拍")
+        inbox = await self.work.list_deep_clean_work(submitter)
+        row = self._pair_row(inbox, second["id"])
+        self.assertEqual(row["status"], "待拍")
+        self.assertIsNone(row["before_capture_id"])
+        self.assertIsNone(row["after_capture_id"])
+
+    async def test_watermark_has_item_name_not_zone_name(self):
+        first, _second = await self._two_sunday_items()
+        day = _staff(10, DAY_PHONE, "白班")
+        with self.assertRaises(HygieneWorkError) as album:
+            await self.work.submit_deep_clean_pair(
+                day,
+                first["id"],
+                {"bytes": BEFORE_A, "content_type": "image/jpeg", "live": False},
+                self._live(AFTER_A),
+            )
+        self.assertEqual(album.exception.code, "live_required")
+        submitted = await self.work.submit_deep_clean_pair(
+            day, first["id"], self._live(BEFORE_A), self._live(AFTER_A)
+        )
+        expected = {
+            "time": "2026-09-13T10:00:00+08:00",
+            "item_name": FRIDGE_A,
+            "photographer": DAY_PHONE,
+        }
+        self.assertEqual(submitted["watermark"], expected)
+        self.assertNotIn("zone", submitted["watermark"])
+        self.assertEqual(submitted["before_watermark"]["item_name"], FRIDGE_A)
+        self.assertEqual(submitted["after_watermark"]["item_name"], FRIDGE_A)
+        review = await self.work.get_deep_clean_review(first["id"])
+        self.assertEqual(review["watermark"]["item_name"], FRIDGE_A)
+        self.assertNotIn("zone", review["watermark"])
+
+    async def test_later_pair_submit_replaces_pending_before_and_after(self):
+        first, _second = await self._two_sunday_items()
+        day = _staff(10, DAY_PHONE, "白班")
+        first_shot = await self.work.submit_deep_clean_pair(
+            day, first["id"], self._live(BEFORE_A), self._live(AFTER_A)
+        )
+        second_shot = await self.work.submit_deep_clean_pair(
+            day, first["id"], self._live(BEFORE_B), self._live(AFTER_B)
+        )
+        self.assertEqual(second_shot["status"], "待验收")
+        self.assertNotEqual(second_shot["before_capture_id"], first_shot["before_capture_id"])
+        self.assertNotEqual(second_shot["after_capture_id"], first_shot["after_capture_id"])
+        review = await self.work.get_deep_clean_review(first["id"])
+        self.assertEqual(self.captures.get(review["before_capture_id"]), BEFORE_B)
+        self.assertEqual(self.captures.get(review["after_capture_id"]), AFTER_B)
+        self.assertNotEqual(self.captures.get(review["before_capture_id"]), BEFORE_A)
+        listed = await self.work.list_deep_clean_work(day)
+        row = self._pair_row(listed, first["id"])
+        self.assertEqual(self.captures.get(row["before_capture_id"]), BEFORE_B)
+        self.assertEqual(self.captures.get(row["after_capture_id"]), AFTER_B)
+
+    async def test_overdue_incomplete_notifies_once_calendar_miss_not_boards(self):
+        first, second = await self._two_sunday_items()
+        clocks = await self.work.set_deep_clean_overdue_clock(SUPER, "20:00")
+        self.assertEqual(clocks["hhmm"], "20:00")
+        day = _staff(10, DAY_PHONE, "白班")
+        await self.work.submit_deep_clean_pair(
+            day, first["id"], self._live(BEFORE_A), self._live(AFTER_A)
+        )
+        await self.work.accept_deep_clean_pair(SUPER, first["id"])
+
+        self.fixed_now = datetime(2026, 9, 13, 19, 59, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(self.notifier.texts, [])
+
+        self.fixed_now = datetime(2026, 9, 13, 20, 0, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(len(self.notifier.texts), 1)
+        text = self.notifier.texts[0]
+        self.assertIsInstance(text, str)
+        self.assertIn("专项卫生", text)
+        self.assertIn("2026-09-13", text)
+        self.assertNotIn(DAY_PHONE, text)
+        self.assertNotIn("@", text)
+        self.assertNotIn("image", text.lower())
+        self.assertNotIn("案板", text)
+
+        await self.work.sweep_overdue()
+        self.assertEqual(len(self.notifier.texts), 1)
+        self.assertEqual(await self.work.list_zone_board_events(), [])
+        self.assertEqual(await self.work.list_person_board_events(), [])
+        calendar = await self.work.list_deep_clean_calendar("2026-09-13", "2026-09-13")
+        self.assertEqual(len(calendar), 1)
+        self.assertEqual(calendar[0]["business_date"], "2026-09-13")
+        self.assertEqual(calendar[0]["status"], "未完成")
+        self.assertEqual(calendar[0]["weekday"], SUNDAY)
 
 
 

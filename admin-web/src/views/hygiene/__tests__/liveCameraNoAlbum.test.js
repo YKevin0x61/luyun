@@ -16,5 +16,7 @@ describe('staff daily capture has no album picker', () => {
     expect(source).not.toMatch(/type=["']file["']/)
     expect(source).not.toMatch(/accept=["']image/)
     expect(source).not.toMatch(/capture=["']environment["']/)
+    expect(source).toMatch(/deep-clean/)
+    expect(source).toMatch(/拍清理前/)
   })
 })

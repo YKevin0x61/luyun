@@ -10,7 +10,7 @@ const lines = computed(() => {
   const mark = props.watermark || {}
   return [
     formatWatermarkTime(mark.time),
-    mark.zone,
+    mark.item_name || mark.zone,
     mark.photographer,
   ].filter(Boolean)
 })

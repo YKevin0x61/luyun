@@ -445,6 +445,10 @@ HYGIENE_TABLES = (
     "hygiene_settings",
     "hygiene_overdue_notices",
     "hygiene_board_events",
+    "hygiene_deep_clean_items",
+    "hygiene_deep_clean_instances",
+    "hygiene_deep_clean_submissions",
+    "hygiene_deep_clean_overdue_notices",
 )
 
 _HYGIENE_TABLE_SCHEMAS = {
@@ -576,6 +580,52 @@ _HYGIENE_TABLE_SCHEMAS = {
             occurred_at TEXT NOT NULL
         )
     """,
+    "hygiene_deep_clean_items": """
+        CREATE TABLE IF NOT EXISTS hygiene_deep_clean_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            weekday INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (weekday, name)
+        )
+    """,
+    "hygiene_deep_clean_instances": """
+        CREATE TABLE IF NOT EXISTS hygiene_deep_clean_instances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            business_date TEXT NOT NULL,
+            item_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            pending_submission_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (business_date, item_id),
+            FOREIGN KEY (item_id) REFERENCES hygiene_deep_clean_items(id)
+        )
+    """,
+    "hygiene_deep_clean_submissions": """
+        CREATE TABLE IF NOT EXISTS hygiene_deep_clean_submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instance_id INTEGER NOT NULL,
+            before_capture_id TEXT NOT NULL,
+            after_capture_id TEXT NOT NULL,
+            before_content_type TEXT NOT NULL,
+            after_content_type TEXT NOT NULL,
+            submitter_id INTEGER NOT NULL,
+            submitter_phone TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            before_captured_at TEXT NOT NULL,
+            after_captured_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (instance_id) REFERENCES hygiene_deep_clean_instances(id)
+        )
+    """,
+    "hygiene_deep_clean_overdue_notices": """
+        CREATE TABLE IF NOT EXISTS hygiene_deep_clean_overdue_notices (
+            business_date TEXT PRIMARY KEY NOT NULL,
+            notified_at TEXT NOT NULL
+        )
+    """,
 }
 
 _HYGIENE_INDEX_DEFINITIONS = {
@@ -616,6 +666,18 @@ _HYGIENE_INDEX_DEFINITIONS = {
     "hygiene_board_events": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_board_events_board "
         "ON hygiene_board_events(board, occurred_at)",
+    ],
+    "hygiene_deep_clean_items": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_deep_clean_items_weekday "
+        "ON hygiene_deep_clean_items(weekday)",
+    ],
+    "hygiene_deep_clean_instances": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_deep_clean_instances_date "
+        "ON hygiene_deep_clean_instances(business_date)",
+    ],
+    "hygiene_deep_clean_submissions": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_deep_clean_submissions_instance "
+        "ON hygiene_deep_clean_submissions(instance_id)",
     ],
 }
 

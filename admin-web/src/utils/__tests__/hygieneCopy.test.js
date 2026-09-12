@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   HYGIENE_PERMISSIONS,
   HYGIENE_SHIFTS,
+  HYGIENE_WEEKDAYS,
   hygienePermissionLabel,
   hygieneShiftLabel,
+  hygieneWeekdayLabel,
   isAllowedHygienePermission,
   isAllowedHygieneShift,
   rosterStatusLabel,
@@ -39,5 +41,12 @@ describe('hygieneCopy', () => {
     expect(hygieneShiftLabel('夜班')).toBe('夜班')
     expect(hygieneShiftLabel(null)).toBe('未选')
     expect(hygieneShiftLabel('')).toBe('未选')
+  })
+
+  it('专项卫生按周一到周日配，下标 0 是周一', () => {
+    expect(HYGIENE_WEEKDAYS).toEqual(['周一', '周二', '周三', '周四', '周五', '周六', '周日'])
+    expect(hygieneWeekdayLabel(0)).toBe('周一')
+    expect(hygieneWeekdayLabel(6)).toBe('周日')
+    expect(hygieneWeekdayLabel(9)).toBe('')
   })
 })

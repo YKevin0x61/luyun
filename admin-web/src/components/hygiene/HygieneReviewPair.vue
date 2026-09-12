@@ -9,17 +9,32 @@ defineProps({
   captureSrc: { type: String, default: '' },
   captureAlt: { type: String, default: '实拍' },
   watermark: { type: Object, default: null },
+  leftWatermark: { type: Object, default: null },
+  leftLabel: { type: String, default: '标准图' },
+  rightLabel: { type: String, default: '实拍' },
 })
 </script>
 
 <template>
   <div class="review-pair">
     <section>
-      <h3>标准图</h3>
-      <HygieneStandardOverlay :src="standardSrc" :markup="standardMarkup" :alt="standardAlt" />
+      <h3>{{ leftLabel }}</h3>
+      <div v-if="leftWatermark" class="capture-frame">
+        <p v-if="!standardSrc" class="capture-empty">还没有清理前</p>
+        <div v-else class="capture-photo">
+          <img :src="standardSrc" :alt="standardAlt">
+          <HygieneWatermarkOverlay :watermark="leftWatermark" />
+        </div>
+      </div>
+      <HygieneStandardOverlay
+        v-else
+        :src="standardSrc"
+        :markup="standardMarkup"
+        :alt="standardAlt"
+      />
     </section>
     <section>
-      <h3>实拍</h3>
+      <h3>{{ rightLabel }}</h3>
       <div class="capture-frame">
         <p v-if="!captureSrc" class="capture-empty">还没有实拍</p>
         <div v-else class="capture-photo">

@@ -46,6 +46,7 @@ _ERROR_DETAILS = {
     "not_pending": "没有待验收的实拍",
     "photographer_required": "拍摄人未知",
     "invalid_clock": "逾期点须为 HH:MM，例如 15:00",
+    "invalid_weekday": "请选择周一到周日",
 }
 
 
@@ -137,6 +138,15 @@ class ZoneIn(BaseModel):
 class OverdueClocksIn(BaseModel):
     day_hhmm: str
     night_hhmm: str
+
+
+class DeepCleanItemIn(BaseModel):
+    weekday: int
+    name: str
+
+
+class DeepCleanClockIn(BaseModel):
+    hhmm: str
 
 
 def _parse_markup_field(raw: Optional[str]) -> list:
@@ -638,3 +648,233 @@ async def admin_daily_review(
         return await work.get_daily_review(item_id, shift)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+
+
+async def _deep_clean_shot_response(work: HygieneWork, item_id: int, which: str) -> Response:
+    try:
+        review = await work.get_deep_clean_review(item_id)
+        capture_id = review["before_capture_id"] if which == "before" else review["after_capture_id"]
+        content_type = (
+            review["before_content_type"] if which == "before" else review["after_content_type"]
+        )
+        body = work.capture_bytes(capture_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="实拍不存在") from exc
+    return Response(
+        content=body,
+        media_type=content_type or "image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/staff/deep-clean")
+async def staff_deep_clean_work(
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return await work.list_deep_clean_work(_staff_actor(staff["employee"]))
+
+
+@router.post("/staff/deep-clean/{item_id}/submit")
+async def staff_submit_deep_clean(
+    item_id: int,
+    live: Optional[str] = Form(None),
+    before: UploadFile = File(...),
+    after: UploadFile = File(...),
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    before_capture = await _live_capture_from_upload(before, live)
+    after_capture = await _live_capture_from_upload(after, live)
+    try:
+        return await work.submit_deep_clean_pair(
+            _staff_actor(staff["employee"]),
+            item_id,
+            before_capture,
+            after_capture,
+        )
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.post("/staff/deep-clean/{item_id}/accept")
+async def staff_accept_deep_clean(
+    item_id: int,
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.accept_deep_clean_pair(_staff_actor(staff["employee"]), item_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.post("/staff/deep-clean/{item_id}/reject")
+async def staff_reject_deep_clean(
+    item_id: int,
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.reject_deep_clean_pair(_staff_actor(staff["employee"]), item_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/staff/deep-clean/{item_id}/review")
+async def staff_deep_clean_review(
+    item_id: int,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.get_deep_clean_review(item_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/staff/deep-clean/{item_id}/before")
+async def staff_deep_clean_before(
+    item_id: int,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _deep_clean_shot_response(work, item_id, "before")
+
+
+@router.get("/staff/deep-clean/{item_id}/after")
+async def staff_deep_clean_after(
+    item_id: int,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _deep_clean_shot_response(work, item_id, "after")
+
+
+@router.get("/admin/deep-clean/items")
+async def admin_list_deep_clean_items(
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {"items": await work.list_deep_clean_items()}
+
+
+@router.post("/admin/deep-clean/items")
+async def admin_add_deep_clean_item(
+    body: DeepCleanItemIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        item = await work.add_deep_clean_item(SUPER_ACTOR, body.weekday, body.name)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    return {"item": item}
+
+
+@router.delete("/admin/deep-clean/items/{item_id}")
+async def admin_remove_deep_clean_item(
+    item_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.remove_deep_clean_item(SUPER_ACTOR, item_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/admin/deep-clean/clock")
+async def admin_get_deep_clean_clock(
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return await work.get_deep_clean_overdue_clock()
+
+
+@router.patch("/admin/deep-clean/clock")
+async def admin_set_deep_clean_clock(
+    body: DeepCleanClockIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.set_deep_clean_overdue_clock(SUPER_ACTOR, body.hhmm)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/admin/deep-clean/calendar")
+async def admin_deep_clean_calendar(
+    from_date: str,
+    to_date: str,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {"days": await work.list_deep_clean_calendar(from_date, to_date)}
+
+
+@router.get("/admin/deep-clean/queue")
+async def admin_deep_clean_queue(
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    listed = await work.list_deep_clean_work(SUPER_ACTOR)
+    pending = [row for row in listed["items"] if row["status"] == "待验收"]
+    return {"items": pending, "status": listed["status"]}
+
+
+@router.post("/admin/deep-clean/{item_id}/accept")
+async def admin_accept_deep_clean(
+    item_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.accept_deep_clean_pair(SUPER_ACTOR, item_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.post("/admin/deep-clean/{item_id}/reject")
+async def admin_reject_deep_clean(
+    item_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.reject_deep_clean_pair(SUPER_ACTOR, item_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/admin/deep-clean/{item_id}/review")
+async def admin_deep_clean_review(
+    item_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.get_deep_clean_review(item_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/admin/deep-clean/{item_id}/before")
+async def admin_deep_clean_before(
+    item_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _deep_clean_shot_response(work, item_id, "before")
+
+
+@router.get("/admin/deep-clean/{item_id}/after")
+async def admin_deep_clean_after(
+    item_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _deep_clean_shot_response(work, item_id, "after")

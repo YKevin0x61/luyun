@@ -39,6 +39,7 @@ describe('shouldSkipLoginRedirect', () => {
     expect(shouldSkipLoginRedirect('/hygiene-roster')).toBe(false)
     expect(shouldSkipLoginRedirect('/hygiene-zones')).toBe(false)
     expect(shouldSkipLoginRedirect('/hygiene-daily')).toBe(false)
+    expect(shouldSkipLoginRedirect('/hygiene-deep-clean')).toBe(false)
   })
 })
 

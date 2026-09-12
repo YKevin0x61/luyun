@@ -6,6 +6,7 @@ import {
   createCaptionMark,
   createCircleMark,
   dailyCaptureUrl,
+  deepCleanShotUrl,
   formatWatermarkTime,
   frozenStandardUrl,
   parseMarkup,
@@ -70,5 +71,19 @@ describe('hygieneMarkup', () => {
       '/api/hygiene/admin/daily/10/frozen-standard?shift=%E7%99%BD%E7%8F%AD&v=7',
     )
     expect(formatWatermarkTime('2026-09-13T10:00:00+08:00')).toBe('2026-09-13 10:00')
+  })
+
+  it('专项前后实拍地址带专项清单项和版本，不带卫生责任区', () => {
+    const row = {
+      item_id: 4,
+      before_capture_id: 'before-1',
+      after_capture_id: 'after-2',
+    }
+    expect(deepCleanShotUrl('staff', row, 'before')).toBe(
+      '/api/hygiene/staff/deep-clean/4/before?v=before-1',
+    )
+    expect(deepCleanShotUrl('admin', row, 'after')).toBe(
+      '/api/hygiene/admin/deep-clean/4/after?v=after-2',
+    )
   })
 })

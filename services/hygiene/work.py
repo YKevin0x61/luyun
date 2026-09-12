@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""卫生责任区、日常检查项、当前标准图、日常提交与验收、逾期群通知、红黑榜事件。
+"""卫生责任区、日常检查项、当前标准图、日常提交与验收、专项卫生、逾期群通知、红黑榜事件。
 
 Does not hash passwords or issue staff sessions. Captures stay off SQLite WAL.
 """
@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from database import CHINA_TZ
@@ -34,6 +34,12 @@ DEFAULT_DAY_OVERDUE_HHMM = "15:00"
 DEFAULT_NIGHT_OVERDUE_HHMM = "21:30"
 SETTING_DAY_OVERDUE = "daily_overdue_day_hhmm"
 SETTING_NIGHT_OVERDUE = "daily_overdue_night_hhmm"
+SETTING_DEEP_CLEAN_OVERDUE = "deep_clean_overdue_hhmm"
+DEFAULT_DEEP_CLEAN_OVERDUE_HHMM = "21:30"
+WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+CALENDAR_TODO = "待办"
+CALENDAR_DONE = "已完成"
+CALENDAR_MISSED = "未完成"
 OVERDUE_SWEEP_INTERVAL_SECONDS = 30
 BOARD_ZONE = "zone"
 BOARD_PERSON = "person"
@@ -684,14 +690,17 @@ class HygieneWork:
     async def _seed_overdue_clocks_if_empty(self) -> None:
         day = await self._setting(SETTING_DAY_OVERDUE)
         night = await self._setting(SETTING_NIGHT_OVERDUE)
-        if day and night:
+        deep = await self._setting(SETTING_DEEP_CLEAN_OVERDUE)
+        if day and night and deep:
             return
-        await self._upsert_setting(
-            SETTING_DAY_OVERDUE, day or DEFAULT_DAY_OVERDUE_HHMM
-        )
-        await self._upsert_setting(
-            SETTING_NIGHT_OVERDUE, night or DEFAULT_NIGHT_OVERDUE_HHMM
-        )
+        if not day:
+            await self._upsert_setting(SETTING_DAY_OVERDUE, DEFAULT_DAY_OVERDUE_HHMM)
+        if not night:
+            await self._upsert_setting(SETTING_NIGHT_OVERDUE, DEFAULT_NIGHT_OVERDUE_HHMM)
+        if not deep:
+            await self._upsert_setting(
+                SETTING_DEEP_CLEAN_OVERDUE, DEFAULT_DEEP_CLEAN_OVERDUE_HHMM
+            )
         await self._conn.commit()
 
     async def get_daily_overdue_clocks(self) -> dict:
@@ -710,6 +719,18 @@ class HygieneWork:
         await self._conn.commit()
         logger.info("hygiene overdue clocks day=%s night=%s", day, night)
         return {"day_hhmm": day, "night_hhmm": night}
+
+    async def get_deep_clean_overdue_clock(self) -> dict:
+        hhmm = await self._setting(SETTING_DEEP_CLEAN_OVERDUE) or DEFAULT_DEEP_CLEAN_OVERDUE_HHMM
+        return {"hhmm": hhmm}
+
+    async def set_deep_clean_overdue_clock(self, actor: dict, hhmm: str) -> dict:
+        self._require_super(actor)
+        cleaned = self._parse_hhmm(hhmm)
+        await self._upsert_setting(SETTING_DEEP_CLEAN_OVERDUE, cleaned)
+        await self._conn.commit()
+        logger.info("hygiene deep-clean overdue clock=%s", cleaned)
+        return {"hhmm": cleaned}
 
     def _clock_reached(self, now: datetime, hhmm: str) -> bool:
         local = now.astimezone(CHINA_TZ) if now.tzinfo else now.replace(tzinfo=CHINA_TZ)
@@ -866,7 +887,471 @@ class HygieneWork:
                         "text": text,
                     }
                 )
+        deep_notice = await self._sweep_deep_clean_overdue(now, business_date)
+        if deep_notice is not None:
+            notified.append(deep_notice)
         return notified
+
+    async def _deep_clean_complete(self, business_date: str) -> bool:
+        weekday = self._weekday_of(business_date)
+        items = await self._catalog_deep_clean_items(weekday)
+        if not items:
+            return True
+        for item in items:
+            instance = await self._fetch_deep_clean_instance(business_date, int(item["id"]))
+            if instance is None or instance["status"] != STATUS_PASSED:
+                return False
+        return True
+
+    async def _deep_clean_notice_exists(self, business_date: str) -> bool:
+        cur = await self._conn.execute(
+            """SELECT 1 FROM hygiene_deep_clean_overdue_notices
+               WHERE business_date = ?""",
+            (business_date,),
+        )
+        return await cur.fetchone() is not None
+
+    def _deep_clean_overdue_text(self, business_date: str) -> str:
+        return f"【卫生逾期】{business_date} 专项卫生仍未完成，请到员工卫生入口补拍。"
+
+    async def _record_deep_clean_overdue(self, business_date: str) -> None:
+        now = self._now_iso()
+        await self._conn.execute(
+            """INSERT INTO hygiene_deep_clean_overdue_notices
+               (business_date, notified_at) VALUES (?, ?)""",
+            (business_date, now),
+        )
+        await self._conn.commit()
+
+    async def _sweep_deep_clean_overdue(self, now: datetime, business_date: str):
+        items = await self._catalog_deep_clean_items(self._weekday_of(business_date))
+        if not items:
+            return None
+        clock = await self.get_deep_clean_overdue_clock()
+        if not self._clock_reached(now, clock["hhmm"]):
+            return None
+        if await self._deep_clean_complete(business_date):
+            return None
+        if await self._deep_clean_notice_exists(business_date):
+            return None
+        text = self._deep_clean_overdue_text(business_date)
+        if self._notifier is not None:
+            await self._notifier.notify_group_text(text)
+        await self._record_deep_clean_overdue(business_date)
+        return {
+            "business_date": business_date,
+            "kind": "专项卫生",
+            "text": text,
+        }
+
+    async def list_deep_clean_calendar(self, from_date: str, to_date: str) -> list:
+        start = datetime.strptime(from_date, "%Y-%m-%d").date()
+        end = datetime.strptime(to_date, "%Y-%m-%d").date()
+        if end < start:
+            return []
+        days = []
+        cursor = start
+        while cursor <= end:
+            business_date = cursor.isoformat()
+            weekday = cursor.weekday()
+            items = await self._catalog_deep_clean_items(weekday)
+            if items:
+                complete = await self._deep_clean_complete(business_date)
+                missed = await self._deep_clean_notice_exists(business_date)
+                if complete:
+                    status = CALENDAR_DONE
+                elif missed:
+                    status = CALENDAR_MISSED
+                else:
+                    status = CALENDAR_TODO
+                days.append(
+                    {
+                        "business_date": business_date,
+                        "weekday": weekday,
+                        "weekday_name": WEEKDAY_NAMES[weekday],
+                        "status": status,
+                        "item_count": len(items),
+                    }
+                )
+            cursor = cursor + timedelta(days=1)
+        return days
+
+    def _parse_weekday(self, weekday) -> int:
+        if isinstance(weekday, str) and weekday in WEEKDAY_NAMES:
+            return WEEKDAY_NAMES.index(weekday)
+        try:
+            value = int(weekday)
+        except (TypeError, ValueError) as exc:
+            raise HygieneWorkError("invalid_weekday", "invalid_weekday") from exc
+        if value < 0 or value > 6:
+            raise HygieneWorkError("invalid_weekday", "invalid_weekday")
+        return value
+
+    def _weekday_of(self, business_date: str) -> int:
+        return datetime.strptime(business_date, "%Y-%m-%d").weekday()
+
+    def _deep_clean_watermark(
+        self, captured_at: str, item_name: str, photographer: str
+    ) -> dict:
+        return {
+            "time": captured_at,
+            "item_name": item_name,
+            "photographer": photographer,
+        }
+
+    async def add_deep_clean_item(self, actor: dict, weekday, name: str) -> dict:
+        self._require_super(actor)
+        day = self._parse_weekday(weekday)
+        cleaned = (name or "").strip()
+        if not cleaned:
+            raise HygieneWorkError("invalid_item_name", "invalid_item_name")
+        now = self._now_iso()
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO hygiene_deep_clean_items
+                   (weekday, name, created_at, updated_at)
+                   VALUES (?, ?, ?, ?)""",
+                (day, cleaned, now, now),
+            )
+            await self._conn.commit()
+        except sqlite3.IntegrityError as exc:
+            await self._conn.rollback()
+            raise HygieneWorkError("duplicate_item", "duplicate_item") from exc
+        logger.info(
+            "hygiene deep-clean item created id=%s weekday=%s name=%s",
+            cur.lastrowid,
+            day,
+            cleaned,
+        )
+        return {
+            "id": int(cur.lastrowid),
+            "weekday": day,
+            "weekday_name": WEEKDAY_NAMES[day],
+            "name": cleaned,
+        }
+
+    async def remove_deep_clean_item(self, actor: dict, item_id: int) -> dict:
+        self._require_super(actor)
+        cur = await self._conn.execute(
+            "SELECT id, weekday, name FROM hygiene_deep_clean_items WHERE id = ?",
+            (int(item_id),),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        mapping = dict(row)
+        await self._conn.execute(
+            "DELETE FROM hygiene_deep_clean_items WHERE id = ?",
+            (int(item_id),),
+        )
+        await self._conn.commit()
+        return {
+            "id": int(mapping["id"]),
+            "weekday": int(mapping["weekday"]),
+            "name": mapping["name"],
+        }
+
+    async def list_deep_clean_items(self, weekday=None) -> list:
+        sql = """SELECT id, weekday, name FROM hygiene_deep_clean_items"""
+        params: list = []
+        if weekday is not None:
+            sql += " WHERE weekday = ?"
+            params.append(self._parse_weekday(weekday))
+        sql += " ORDER BY weekday ASC, id ASC"
+        cur = await self._conn.execute(sql, params)
+        rows = await cur.fetchall()
+        return [
+            {
+                "id": int(mapping["id"]),
+                "weekday": int(mapping["weekday"]),
+                "weekday_name": WEEKDAY_NAMES[int(mapping["weekday"])],
+                "name": mapping["name"],
+            }
+            for mapping in (dict(row) for row in rows)
+        ]
+
+    async def _catalog_deep_clean_items(self, weekday: int) -> list:
+        return await self.list_deep_clean_items(weekday)
+
+    async def _fetch_deep_clean_item(self, item_id: int):
+        cur = await self._conn.execute(
+            "SELECT id, weekday, name FROM hygiene_deep_clean_items WHERE id = ?",
+            (int(item_id),),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
+
+    async def _fetch_deep_clean_instance(self, business_date: str, item_id: int):
+        cur = await self._conn.execute(
+            """SELECT id, business_date, item_id, status, pending_submission_id
+               FROM hygiene_deep_clean_instances
+               WHERE business_date = ? AND item_id = ?""",
+            (business_date, int(item_id)),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
+
+    async def _fetch_deep_clean_submission(self, submission_id):
+        if not submission_id:
+            return None
+        cur = await self._conn.execute(
+            """SELECT id, instance_id, before_capture_id, after_capture_id,
+                      before_content_type, after_content_type, submitter_id,
+                      submitter_phone, item_name, before_captured_at,
+                      after_captured_at
+               FROM hygiene_deep_clean_submissions WHERE id = ?""",
+            (int(submission_id),),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
+
+    def _deep_clean_row(self, item: dict, business_date: str, instance, submission) -> dict:
+        status = STATUS_TODO
+        if instance is not None:
+            status = instance["status"]
+        before_wm = None
+        after_wm = None
+        if submission is not None:
+            before_wm = self._deep_clean_watermark(
+                submission["before_captured_at"],
+                submission["item_name"],
+                submission["submitter_phone"],
+            )
+            after_wm = self._deep_clean_watermark(
+                submission["after_captured_at"],
+                submission["item_name"],
+                submission["submitter_phone"],
+            )
+        return {
+            "item_id": int(item["id"]),
+            "item_name": item["name"],
+            "weekday": int(item["weekday"]),
+            "business_date": business_date,
+            "status": status,
+            "submitter_id": None if submission is None else int(submission["submitter_id"]),
+            "submitter_phone": None if submission is None else submission["submitter_phone"],
+            "before_capture_id": None if submission is None else submission["before_capture_id"],
+            "after_capture_id": None if submission is None else submission["after_capture_id"],
+            "before_watermark": before_wm,
+            "after_watermark": after_wm,
+            "watermark": after_wm,
+        }
+
+    async def list_deep_clean_work(self, actor: dict) -> dict:
+        del actor  # shop-wide; 班次 does not gate 专项卫生
+        business_date = hygiene_business_date(self._now_dt())
+        weekday = self._weekday_of(business_date)
+        items = await self._catalog_deep_clean_items(weekday)
+        rows = []
+        for item in items:
+            instance = await self._fetch_deep_clean_instance(business_date, int(item["id"]))
+            submission = None
+            if instance is not None:
+                submission = await self._fetch_deep_clean_submission(
+                    instance.get("pending_submission_id")
+                )
+                if submission is None and instance["status"] == STATUS_PASSED:
+                    sub_cur = await self._conn.execute(
+                        """SELECT id, instance_id, before_capture_id, after_capture_id,
+                                  before_content_type, after_content_type, submitter_id,
+                                  submitter_phone, item_name, before_captured_at,
+                                  after_captured_at
+                           FROM hygiene_deep_clean_submissions
+                           WHERE instance_id = ?
+                           ORDER BY id DESC LIMIT 1""",
+                        (instance["id"],),
+                    )
+                    sub_row = await sub_cur.fetchone()
+                    submission = None if sub_row is None else dict(sub_row)
+            rows.append(self._deep_clean_row(item, business_date, instance, submission))
+        status = CALENDAR_DONE if rows and all(
+            row["status"] == STATUS_PASSED for row in rows
+        ) else CALENDAR_TODO
+        if not rows:
+            status = "无专项"
+        return {
+            "business_date": business_date,
+            "weekday": weekday,
+            "weekday_name": WEEKDAY_NAMES[weekday],
+            "status": status,
+            "items": rows,
+        }
+
+    def _require_staff_submitter(self, actor: dict) -> None:
+        if not actor or actor.get("kind") != "staff":
+            raise HygieneWorkError("forbidden", "forbidden")
+
+    async def _ensure_deep_clean_instance(self, business_date: str, item_id: int) -> dict:
+        existing = await self._fetch_deep_clean_instance(business_date, item_id)
+        if existing is not None:
+            return existing
+        now = self._now_iso()
+        cur = await self._conn.execute(
+            """INSERT INTO hygiene_deep_clean_instances
+               (business_date, item_id, status, pending_submission_id, created_at, updated_at)
+               VALUES (?, ?, ?, NULL, ?, ?)""",
+            (business_date, int(item_id), STATUS_TODO, now, now),
+        )
+        await self._conn.commit()
+        return {
+            "id": int(cur.lastrowid),
+            "business_date": business_date,
+            "item_id": int(item_id),
+            "status": STATUS_TODO,
+            "pending_submission_id": None,
+        }
+
+    async def submit_deep_clean_pair(self, actor: dict, item_id: int, before, after) -> dict:
+        """Submit a live before/after pair. Last writer of the complete pair is the submitter."""
+        self._require_staff_submitter(actor)
+        before_data = self._require_live_capture(before)
+        after_data = self._require_live_capture(after)
+        item = await self._fetch_deep_clean_item(item_id)
+        if item is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        photographer = self._photographer(actor)
+        if not photographer:
+            raise HygieneWorkError("photographer_required", "photographer_required")
+        business_date = hygiene_business_date(self._now_dt())
+        weekday = self._weekday_of(business_date)
+        if int(item["weekday"]) != weekday:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        instance = await self._ensure_deep_clean_instance(business_date, int(item_id))
+        if instance["status"] == STATUS_PASSED:
+            raise HygieneWorkError("already_accepted", "already_accepted")
+        before_type = (before.get("content_type") or "image/jpeg").strip()
+        after_type = (after.get("content_type") or "image/jpeg").strip()
+        before_id = self._captures.put(before_data, content_type=before_type)
+        after_id = self._captures.put(after_data, content_type=after_type)
+        now = self._now_iso()
+        cur = await self._conn.execute(
+            """INSERT INTO hygiene_deep_clean_submissions
+               (instance_id, before_capture_id, after_capture_id, before_content_type,
+                after_content_type, submitter_id, submitter_phone, item_name,
+                before_captured_at, after_captured_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                instance["id"],
+                before_id,
+                after_id,
+                before_type,
+                after_type,
+                int(actor["id"]),
+                photographer,
+                item["name"],
+                now,
+                now,
+                now,
+            ),
+        )
+        submission_id = int(cur.lastrowid)
+        await self._conn.execute(
+            """UPDATE hygiene_deep_clean_instances
+               SET status = ?, pending_submission_id = ?, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_PENDING, submission_id, now, instance["id"]),
+        )
+        await self._conn.commit()
+        logger.info(
+            "hygiene deep-clean submitted item=%s before=%s after=%s",
+            item_id,
+            before_id,
+            after_id,
+        )
+        after_wm = self._deep_clean_watermark(now, item["name"], photographer)
+        return {
+            "item_id": int(item_id),
+            "item_name": item["name"],
+            "business_date": business_date,
+            "status": STATUS_PENDING,
+            "submitter_id": int(actor["id"]),
+            "submitter_phone": photographer,
+            "before_capture_id": before_id,
+            "after_capture_id": after_id,
+            "before_watermark": self._deep_clean_watermark(now, item["name"], photographer),
+            "after_watermark": after_wm,
+            "watermark": after_wm,
+        }
+
+    async def _pending_deep_clean(self, item_id: int) -> tuple:
+        business_date = hygiene_business_date(self._now_dt())
+        instance = await self._fetch_deep_clean_instance(business_date, int(item_id))
+        if instance is None or instance["status"] != STATUS_PENDING:
+            raise HygieneWorkError("not_pending", "not_pending")
+        submission = await self._fetch_deep_clean_submission(
+            instance.get("pending_submission_id")
+        )
+        if submission is None:
+            raise HygieneWorkError("not_pending", "not_pending")
+        return instance, submission
+
+    async def get_deep_clean_review(self, item_id: int) -> dict:
+        instance, submission = await self._pending_deep_clean(item_id)
+        item = await self._fetch_deep_clean_item(item_id)
+        name = submission["item_name"] if item is None else item["name"]
+        before_wm = self._deep_clean_watermark(
+            submission["before_captured_at"],
+            name,
+            submission["submitter_phone"],
+        )
+        after_wm = self._deep_clean_watermark(
+            submission["after_captured_at"],
+            name,
+            submission["submitter_phone"],
+        )
+        return {
+            "item_id": int(item_id),
+            "item_name": name,
+            "business_date": instance["business_date"],
+            "status": STATUS_PENDING,
+            "submitter_id": int(submission["submitter_id"]),
+            "submitter_phone": submission["submitter_phone"],
+            "before_capture_id": submission["before_capture_id"],
+            "after_capture_id": submission["after_capture_id"],
+            "before_content_type": submission["before_content_type"],
+            "after_content_type": submission["after_content_type"],
+            "before_watermark": before_wm,
+            "after_watermark": after_wm,
+            "watermark": after_wm,
+        }
+
+    async def accept_deep_clean_pair(self, actor: dict, item_id: int) -> dict:
+        instance, submission = await self._pending_deep_clean(item_id)
+        self._require_reviewer(actor, submission["submitter_id"])
+        now = self._now_iso()
+        await self._conn.execute(
+            """UPDATE hygiene_deep_clean_instances
+               SET status = ?, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_PASSED, now, instance["id"]),
+        )
+        await self._conn.commit()
+        logger.info("hygiene deep-clean accepted item=%s", item_id)
+        work = await self.list_deep_clean_work(actor)
+        return {
+            "item_id": int(item_id),
+            "business_date": instance["business_date"],
+            "status": STATUS_PASSED,
+            "task_status": work["status"],
+        }
+
+    async def reject_deep_clean_pair(self, actor: dict, item_id: int) -> dict:
+        instance, submission = await self._pending_deep_clean(item_id)
+        self._require_reviewer(actor, submission["submitter_id"])
+        now = self._now_iso()
+        await self._conn.execute(
+            """UPDATE hygiene_deep_clean_instances
+               SET status = ?, pending_submission_id = NULL, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_TODO, now, instance["id"]),
+        )
+        await self._conn.commit()
+        logger.info("hygiene deep-clean rejected item=%s", item_id)
+        return {
+            "item_id": int(item_id),
+            "business_date": instance["business_date"],
+            "status": STATUS_TODO,
+        }
 
     async def overdue_scheduler_loop(self) -> None:
         logger.info("卫生逾期调度器已启动")
