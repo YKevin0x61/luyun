@@ -9,6 +9,7 @@ from datetime import datetime
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.hygiene.captures import FakeCaptureStore
+from services.hygiene.notifier import FakeNotifier
 from services.hygiene.work import HygieneWork, HygieneWorkError
 
 SEED_ZONE_NAMES = ["案板", "馅档", "熟笼", "肠粉", "西饼", "明档1", "明档2", "煎炸"]
@@ -135,6 +136,9 @@ class HygieneWorkTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HygieneWorkError) as replaced:
             await self.work.replace_standard(STAFF, item["id"], self._capture(NEW_BYTES))
         self.assertEqual(replaced.exception.code, "forbidden")
+        with self.assertRaises(HygieneWorkError) as clocks:
+            await self.work.set_daily_overdue_clocks(STAFF_ADMIN, "16:00", "22:00")
+        self.assertEqual(clocks.exception.code, "forbidden")
         current = await self.work.current_standard(item["id"])
         self.assertEqual(self.captures.get(current["capture_id"]), OLD_BYTES)
         zone = await self.work.create_zone(SUPER, "卫生间")
@@ -380,6 +384,165 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
             {(row["zone_name"], row["shift"], row["status"]) for row in night_inbox},
             {(row["zone_name"], row["shift"], row["status"]) for row in inbox},
         )
+
+
+class HygieneDailyOverdueTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        self.db = DatabaseManager()
+        await self.db.connect()
+        self.fixed_now = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
+        self.captures = FakeCaptureStore()
+        self.notifier = FakeNotifier()
+        self.work = HygieneWork(
+            self.db,
+            captures=self.captures,
+            now=lambda: self.fixed_now,
+            notifier=self.notifier,
+        )
+        await self.work.prepare()
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        settings.DATABASE_DIR = self._old_database_dir
+        self._tmpdir.cleanup()
+
+    def _zone(self, zones, name):
+        return next(zone for zone in zones if zone["name"] == name)
+
+    def _capture(self, data):
+        return {"bytes": data, "content_type": "image/jpeg", "markup": []}
+
+    def _live(self, data):
+        return {"bytes": data, "content_type": "image/jpeg", "live": True}
+
+    async def _anban_item(self):
+        zones = await self.work.list_zones()
+        return await self.work.add_daily_item(
+            SUPER,
+            self._zone(zones, "案板")["id"],
+            "案板表面",
+            self._capture(OLD_BYTES),
+        )
+
+    async def test_sweep_notifies_once_after_configured_day_clock(self):
+        item = await self._anban_item()
+        clocks = await self.work.set_daily_overdue_clocks(SUPER, "15:00", "21:30")
+        self.assertEqual(clocks["day_hhmm"], "15:00")
+        self.assertEqual(clocks["night_hhmm"], "21:30")
+
+        self.fixed_now = datetime(2026, 9, 13, 14, 59, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(self.notifier.texts, [])
+
+        self.fixed_now = datetime(2026, 9, 13, 15, 0, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(len(self.notifier.texts), 1)
+        text = self.notifier.texts[0]
+        self.assertIsInstance(text, str)
+        self.assertIn("白班", text)
+        self.assertIn("案板", text)
+        self.assertIn("案板表面", text)
+        self.assertNotIn(DAY_PHONE, text)
+        self.assertNotIn("@", text)
+        self.assertNotIn("image", text.lower())
+        self.assertNotIn(str(item["id"]) + ".jpg", text)
+
+        await self.work.sweep_overdue()
+        self.assertEqual(len(self.notifier.texts), 1)
+
+    async def test_pending_accept_before_clock_is_not_overdue(self):
+        item = await self._anban_item()
+        await self.work.set_daily_overdue_clocks(SUPER, "15:00", "21:30")
+        day = _staff(10, DAY_PHONE, "白班")
+        self.fixed_now = datetime(2026, 9, 13, 14, 50, tzinfo=CHINA_TZ)
+        submitted = await self.work.submit_daily(day, item["id"], self._live(SHOT_A))
+        self.assertEqual(submitted["status"], "待验收")
+
+        self.fixed_now = datetime(2026, 9, 13, 15, 1, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(self.notifier.texts, [])
+        zone_events = await self.work.list_zone_board_events()
+        self.assertEqual(zone_events, [])
+
+    async def test_changed_clocks_are_read_not_hardcoded_1500(self):
+        await self._anban_item()
+        await self.work.set_daily_overdue_clocks(SUPER, "16:00", "21:30")
+        self.fixed_now = datetime(2026, 9, 13, 15, 30, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(self.notifier.texts, [])
+        clocks = await self.work.get_daily_overdue_clocks()
+        self.assertEqual(clocks["day_hhmm"], "16:00")
+        self.assertEqual(clocks["night_hhmm"], "21:30")
+
+    async def test_missed_daily_increments_zone_board_not_shift_picker(self):
+        from services.hygiene.accounts import EmployeeAccounts
+
+        accounts = EmployeeAccounts(self.db, now=lambda: self.fixed_now)
+        picker = await accounts.register("13800138010", "password123")
+        await accounts.approve(picker["id"])
+        await accounts.pick_shift(picker["id"], "白班")
+        item = await self._anban_item()
+        await self.work.set_daily_overdue_clocks(SUPER, "15:00", "21:30")
+        self.fixed_now = datetime(2026, 9, 13, 15, 0, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        zone_events = await self.work.list_zone_board_events(item["zone_id"])
+        self.assertEqual(len(zone_events), 1)
+        self.assertEqual(zone_events[0]["event_type"], "逾期")
+        self.assertEqual(zone_events[0]["zone_id"], item["zone_id"])
+        self.assertIsNone(zone_events[0]["employee_id"])
+        person_events = await self.work.list_person_board_events(picker["id"])
+        self.assertEqual(person_events, [])
+
+    async def test_submit_and_reject_record_person_board_missed_sibling_zone_only(self):
+        zones = await self.work.list_zones()
+        anban = await self.work.add_daily_item(
+            SUPER,
+            self._zone(zones, "案板")["id"],
+            "案板表面",
+            self._capture(OLD_BYTES),
+        )
+        xian = await self.work.add_daily_item(
+            SUPER,
+            self._zone(zones, "馅档")["id"],
+            "馅档台面",
+            self._capture(ZONE_A_BYTES),
+        )
+        day = _staff(10, DAY_PHONE, "白班")
+        reviewer = _staff(21, OTHER_ADMIN_PHONE, "白班", "管理员")
+        await self.work.set_daily_overdue_clocks(SUPER, "15:00", "21:30")
+        self.fixed_now = datetime(2026, 9, 13, 14, 40, tzinfo=CHINA_TZ)
+        await self.work.submit_daily(day, anban["id"], self._live(SHOT_A))
+        await self.work.reject_daily(reviewer, anban["id"], "白班")
+        await self.work.submit_daily(day, anban["id"], self._live(SHOT_B))
+        person_events = await self.work.list_person_board_events(day["id"])
+        types = [event["event_type"] for event in person_events]
+        self.assertEqual(types, ["实拍", "驳回", "实拍"])
+        self.assertTrue(all(event["employee_id"] == day["id"] for event in person_events))
+        self.assertEqual(await self.work.list_person_board_events(reviewer["id"]), [])
+
+        self.fixed_now = datetime(2026, 9, 13, 15, 0, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        anban_missed = [
+            event
+            for event in await self.work.list_zone_board_events(anban["zone_id"])
+            if event["event_type"] == "逾期"
+        ]
+        xian_missed = [
+            event
+            for event in await self.work.list_zone_board_events(xian["zone_id"])
+            if event["event_type"] == "逾期"
+        ]
+        self.assertEqual(anban_missed, [])
+        self.assertEqual(len(xian_missed), 1)
+        self.assertEqual(xian_missed[0]["zone_id"], xian["zone_id"])
+        still_person = await self.work.list_person_board_events(day["id"])
+        self.assertEqual(
+            [event["event_type"] for event in still_person], ["实拍", "驳回", "实拍"]
+        )
+        self.assertFalse(any(event["event_type"] == "逾期" for event in still_person))
 
 
 

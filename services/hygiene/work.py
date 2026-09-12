@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""卫生责任区、日常检查项、当前标准图、日常提交与验收。
+"""卫生责任区、日常检查项、当前标准图、日常提交与验收、逾期群通知、红黑榜事件。
 
 Does not hash passwords or issue staff sessions. Captures stay off SQLite WAL.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 import sqlite3
 from datetime import datetime
 from typing import Callable, Optional
@@ -28,6 +30,17 @@ STATUS_TODO = "待拍"
 STATUS_PENDING = "待验收"
 STATUS_PASSED = "已通过"
 DAILY_SHIFTS = (SHIFT_DAY, SHIFT_NIGHT)
+DEFAULT_DAY_OVERDUE_HHMM = "15:00"
+DEFAULT_NIGHT_OVERDUE_HHMM = "21:30"
+SETTING_DAY_OVERDUE = "daily_overdue_day_hhmm"
+SETTING_NIGHT_OVERDUE = "daily_overdue_night_hhmm"
+OVERDUE_SWEEP_INTERVAL_SECONDS = 30
+BOARD_ZONE = "zone"
+BOARD_PERSON = "person"
+EVENT_MISSED_DAILY = "逾期"
+EVENT_CAPTURE = "实拍"
+EVENT_REJECT = "驳回"
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 class HygieneWorkError(ValueError):
@@ -69,6 +82,7 @@ class HygieneWork:
 
     async def prepare(self) -> None:
         await self._seed_zones_if_empty()
+        await self._seed_overdue_clocks_if_empty()
 
     async def _seed_zones_if_empty(self) -> None:
         cur = await self._conn.execute("SELECT COUNT(*) AS n FROM hygiene_zones")
@@ -458,6 +472,15 @@ class HygieneWork:
                WHERE id = ?""",
             (STATUS_PENDING, submission_id, now, instance["id"]),
         )
+        await self._insert_board_event(
+            BOARD_PERSON,
+            EVENT_CAPTURE,
+            zone_id=int(item["zone_id"]),
+            employee_id=int(actor["id"]),
+            item_id=int(item_id),
+            shift=target_shift,
+            business_date=business_date,
+        )
         await self._conn.commit()
         logger.info(
             "hygiene daily submitted item=%s shift=%s capture=%s",
@@ -614,6 +637,17 @@ class HygieneWork:
                WHERE id = ?""",
             (STATUS_TODO, now, instance["id"]),
         )
+        item_row = await self._fetch_item(item_id)
+        zone_id = None if item_row is None else int(dict(item_row)["zone_id"])
+        await self._insert_board_event(
+            BOARD_PERSON,
+            EVENT_REJECT,
+            zone_id=zone_id,
+            employee_id=int(submission["submitter_id"]),
+            item_id=int(item_id),
+            shift=shift,
+            business_date=instance["business_date"],
+        )
         await self._conn.commit()
         logger.info("hygiene daily rejected item=%s shift=%s", item_id, shift)
         return {
@@ -622,5 +656,227 @@ class HygieneWork:
             "business_date": instance["business_date"],
             "status": STATUS_TODO,
         }
+
+    def _parse_hhmm(self, raw: str) -> str:
+        cleaned = (raw or "").strip()
+        if not _HHMM_RE.fullmatch(cleaned):
+            raise HygieneWorkError("invalid_clock", "invalid_clock")
+        return cleaned
+
+    async def _setting(self, key: str) -> Optional[str]:
+        cur = await self._conn.execute(
+            "SELECT value FROM hygiene_settings WHERE key = ?",
+            (key,),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)["value"]
+
+    async def _upsert_setting(self, key: str, value: str) -> None:
+        now = self._now_iso()
+        await self._conn.execute(
+            """INSERT INTO hygiene_settings (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                   updated_at = excluded.updated_at""",
+            (key, value, now),
+        )
+
+    async def _seed_overdue_clocks_if_empty(self) -> None:
+        day = await self._setting(SETTING_DAY_OVERDUE)
+        night = await self._setting(SETTING_NIGHT_OVERDUE)
+        if day and night:
+            return
+        await self._upsert_setting(
+            SETTING_DAY_OVERDUE, day or DEFAULT_DAY_OVERDUE_HHMM
+        )
+        await self._upsert_setting(
+            SETTING_NIGHT_OVERDUE, night or DEFAULT_NIGHT_OVERDUE_HHMM
+        )
+        await self._conn.commit()
+
+    async def get_daily_overdue_clocks(self) -> dict:
+        day = await self._setting(SETTING_DAY_OVERDUE) or DEFAULT_DAY_OVERDUE_HHMM
+        night = await self._setting(SETTING_NIGHT_OVERDUE) or DEFAULT_NIGHT_OVERDUE_HHMM
+        return {"day_hhmm": day, "night_hhmm": night}
+
+    async def set_daily_overdue_clocks(
+        self, actor: dict, day_hhmm: str, night_hhmm: str
+    ) -> dict:
+        self._require_super(actor)
+        day = self._parse_hhmm(day_hhmm)
+        night = self._parse_hhmm(night_hhmm)
+        await self._upsert_setting(SETTING_DAY_OVERDUE, day)
+        await self._upsert_setting(SETTING_NIGHT_OVERDUE, night)
+        await self._conn.commit()
+        logger.info("hygiene overdue clocks day=%s night=%s", day, night)
+        return {"day_hhmm": day, "night_hhmm": night}
+
+    def _clock_reached(self, now: datetime, hhmm: str) -> bool:
+        local = now.astimezone(CHINA_TZ) if now.tzinfo else now.replace(tzinfo=CHINA_TZ)
+        hour, minute = hhmm.split(":")
+        return local.hour * 60 + local.minute >= int(hour) * 60 + int(minute)
+
+    async def _catalog_daily_items(self) -> list:
+        cur = await self._conn.execute(
+            """SELECT i.id, i.zone_id, i.name, z.name AS zone_name
+               FROM hygiene_daily_items i
+               JOIN hygiene_zones z ON z.id = i.zone_id
+               WHERE i.current_standard_id IS NOT NULL
+               ORDER BY i.id ASC"""
+        )
+        return [dict(row) for row in await cur.fetchall()]
+
+    async def _notice_exists(self, business_date: str, shift: str, item_id: int) -> bool:
+        cur = await self._conn.execute(
+            """SELECT 1 FROM hygiene_overdue_notices
+               WHERE business_date = ? AND shift = ? AND item_id = ?""",
+            (business_date, shift, item_id),
+        )
+        return await cur.fetchone() is not None
+
+    def _overdue_group_text(self, business_date: str, shift: str, item: dict) -> str:
+        return (
+            f"【卫生逾期】{business_date} {shift} {item['zone_name']}「{item['name']}」"
+            "仍未提交，请到员工卫生入口补拍。"
+        )
+
+    async def _record_overdue_notice(
+        self, business_date: str, shift: str, item: dict
+    ) -> None:
+        now = self._now_iso()
+        await self._conn.execute(
+            """INSERT INTO hygiene_overdue_notices
+               (business_date, shift, item_id, zone_id, notified_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (business_date, shift, int(item["id"]), int(item["zone_id"]), now),
+        )
+        await self._insert_board_event(
+            BOARD_ZONE,
+            EVENT_MISSED_DAILY,
+            zone_id=int(item["zone_id"]),
+            item_id=int(item["id"]),
+            shift=shift,
+            business_date=business_date,
+        )
+        await self._conn.commit()
+
+    def _event_from_row(self, row) -> dict:
+        mapping = dict(row)
+        zone_id = mapping.get("zone_id")
+        employee_id = mapping.get("employee_id")
+        item_id = mapping.get("item_id")
+        return {
+            "id": int(mapping["id"]),
+            "board": mapping["board"],
+            "event_type": mapping["event_type"],
+            "zone_id": None if zone_id is None else int(zone_id),
+            "employee_id": None if employee_id is None else int(employee_id),
+            "item_id": None if item_id is None else int(item_id),
+            "shift": mapping.get("shift"),
+            "business_date": mapping.get("business_date"),
+            "occurred_at": mapping["occurred_at"],
+        }
+
+    async def _insert_board_event(
+        self,
+        board: str,
+        event_type: str,
+        *,
+        zone_id=None,
+        employee_id=None,
+        item_id=None,
+        shift=None,
+        business_date=None,
+    ) -> None:
+        await self._conn.execute(
+            """INSERT INTO hygiene_board_events
+               (board, event_type, zone_id, employee_id, item_id, shift,
+                business_date, occurred_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                board,
+                event_type,
+                zone_id,
+                employee_id,
+                item_id,
+                shift,
+                business_date,
+                self._now_iso(),
+            ),
+        )
+
+    async def list_zone_board_events(self, zone_id=None) -> list:
+        sql = """SELECT id, board, event_type, zone_id, employee_id, item_id,
+                        shift, business_date, occurred_at
+                 FROM hygiene_board_events
+                 WHERE board = ?"""
+        params = [BOARD_ZONE]
+        if zone_id is not None:
+            sql += " AND zone_id = ?"
+            params.append(int(zone_id))
+        sql += " ORDER BY id ASC"
+        cur = await self._conn.execute(sql, params)
+        return [self._event_from_row(row) for row in await cur.fetchall()]
+
+    async def list_person_board_events(self, employee_id=None) -> list:
+        sql = """SELECT id, board, event_type, zone_id, employee_id, item_id,
+                        shift, business_date, occurred_at
+                 FROM hygiene_board_events
+                 WHERE board = ?"""
+        params = [BOARD_PERSON]
+        if employee_id is not None:
+            sql += " AND employee_id = ?"
+            params.append(int(employee_id))
+        sql += " ORDER BY id ASC"
+        cur = await self._conn.execute(sql, params)
+        return [self._event_from_row(row) for row in await cur.fetchall()]
+
+    async def sweep_overdue(self) -> list:
+        now = self._now_dt()
+        business_date = hygiene_business_date(now)
+        clocks = await self.get_daily_overdue_clocks()
+        shift_clocks = (
+            (SHIFT_DAY, clocks["day_hhmm"]),
+            (SHIFT_NIGHT, clocks["night_hhmm"]),
+        )
+        items = await self._catalog_daily_items()
+        notified = []
+        for shift, hhmm in shift_clocks:
+            if not self._clock_reached(now, hhmm):
+                continue
+            for item in items:
+                instance = await self._fetch_instance(
+                    business_date, shift, int(item["id"])
+                )
+                status = STATUS_TODO if instance is None else dict(instance)["status"]
+                if status != STATUS_TODO:
+                    continue
+                if await self._notice_exists(business_date, shift, int(item["id"])):
+                    continue
+                text = self._overdue_group_text(business_date, shift, item)
+                if self._notifier is not None:
+                    await self._notifier.notify_group_text(text)
+                await self._record_overdue_notice(business_date, shift, item)
+                notified.append(
+                    {
+                        "business_date": business_date,
+                        "shift": shift,
+                        "item_id": int(item["id"]),
+                        "zone_id": int(item["zone_id"]),
+                        "text": text,
+                    }
+                )
+        return notified
+
+    async def overdue_scheduler_loop(self) -> None:
+        logger.info("卫生逾期调度器已启动")
+        while True:
+            try:
+                await self.sweep_overdue()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("卫生逾期调度异常: %s", exc)
+            await asyncio.sleep(OVERDUE_SWEEP_INTERVAL_SECONDS)
 
 

@@ -45,6 +45,7 @@ _ERROR_DETAILS = {
     "already_accepted": "这项已经通过，不能再交",
     "not_pending": "没有待验收的实拍",
     "photographer_required": "拍摄人未知",
+    "invalid_clock": "逾期点须为 HH:MM，例如 15:00",
 }
 
 
@@ -131,6 +132,11 @@ class ShiftIn(BaseModel):
 
 class ZoneIn(BaseModel):
     name: str
+
+
+class OverdueClocksIn(BaseModel):
+    day_hhmm: str
+    night_hhmm: str
 
 
 def _parse_markup_field(raw: Optional[str]) -> list:
@@ -378,6 +384,39 @@ async def admin_create_zone(
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     return {"zone": zone}
+
+
+@router.get("/admin/overdue-clocks")
+async def admin_get_overdue_clocks(
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return await work.get_daily_overdue_clocks()
+
+
+@router.patch("/admin/overdue-clocks")
+async def admin_set_overdue_clocks(
+    body: OverdueClocksIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.set_daily_overdue_clocks(
+            SUPER_ACTOR, body.day_hhmm, body.night_hhmm
+        )
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/admin/board-events")
+async def admin_board_events(
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {
+        "zones": await work.list_zone_board_events(),
+        "people": await work.list_person_board_events(),
+    }
 
 
 @router.post("/admin/zones/{zone_id}/items")

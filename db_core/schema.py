@@ -442,6 +442,9 @@ HYGIENE_TABLES = (
     "hygiene_standards",
     "hygiene_daily_instances",
     "hygiene_daily_submissions",
+    "hygiene_settings",
+    "hygiene_overdue_notices",
+    "hygiene_board_events",
 )
 
 _HYGIENE_TABLE_SCHEMAS = {
@@ -541,6 +544,38 @@ _HYGIENE_TABLE_SCHEMAS = {
             FOREIGN KEY (frozen_standard_id) REFERENCES hygiene_standards(id)
         )
     """,
+    "hygiene_settings": """
+        CREATE TABLE IF NOT EXISTS hygiene_settings (
+            key TEXT PRIMARY KEY NOT NULL,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """,
+    "hygiene_overdue_notices": """
+        CREATE TABLE IF NOT EXISTS hygiene_overdue_notices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            business_date TEXT NOT NULL,
+            shift TEXT NOT NULL,
+            item_id INTEGER NOT NULL,
+            zone_id INTEGER NOT NULL,
+            notified_at TEXT NOT NULL,
+            UNIQUE (business_date, shift, item_id),
+            FOREIGN KEY (item_id) REFERENCES hygiene_daily_items(id)
+        )
+    """,
+    "hygiene_board_events": """
+        CREATE TABLE IF NOT EXISTS hygiene_board_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            board TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            zone_id INTEGER,
+            employee_id INTEGER,
+            item_id INTEGER,
+            shift TEXT,
+            business_date TEXT,
+            occurred_at TEXT NOT NULL
+        )
+    """,
 }
 
 _HYGIENE_INDEX_DEFINITIONS = {
@@ -573,6 +608,14 @@ _HYGIENE_INDEX_DEFINITIONS = {
     "hygiene_daily_submissions": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_daily_submissions_instance "
         "ON hygiene_daily_submissions(instance_id)",
+    ],
+    "hygiene_overdue_notices": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_overdue_notices_date "
+        "ON hygiene_overdue_notices(business_date, shift)",
+    ],
+    "hygiene_board_events": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_board_events_board "
+        "ON hygiene_board_events(board, occurred_at)",
     ],
 }
 

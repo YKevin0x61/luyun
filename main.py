@@ -127,6 +127,7 @@ dish_catalog = None
 restaurant_scraper = None
 scraper_task = None
 wecom_push_task = None
+hygiene_overdue_task = None
 reconcile_scheduler_task = None
 unmapped_watchdog_task = None
 recipe_store = None
@@ -148,7 +149,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global db_manager, dish_catalog, restaurant_scraper, scraper_task, wecom_push_task
     global reconcile_scheduler_task, unmapped_watchdog_task
-    global recipe_store, employee_accounts, hygiene_work
+    global recipe_store, employee_accounts, hygiene_work, hygiene_overdue_task
     
     try:
         logger.info("🚀 启动订单数据采集系统...")
@@ -189,6 +190,7 @@ async def lifespan(app: FastAPI):
 
         from services.hygiene.accounts import EmployeeAccounts
         from services.hygiene.captures import FileCaptureStore
+        from services.hygiene.notifier import WeComGroupTextNotifier
         from services.hygiene.work import HygieneWork
         from pathlib import Path
         if db_manager and db_manager._conn is not None:
@@ -198,10 +200,14 @@ async def lifespan(app: FastAPI):
             hygiene_work = HygieneWork(
                 db_manager,
                 captures=FileCaptureStore(capture_root),
-                notifier=None,
+                notifier=WeComGroupTextNotifier(db_manager),
             )
             await hygiene_work.prepare()
             startup_results.append("卫生待办")
+            hygiene_overdue_task = asyncio.create_task(
+                hygiene_work.overdue_scheduler_loop()
+            )
+            startup_results.append("卫生逾期调度器")
 
         if db_manager:
             wecom_push_task = asyncio.create_task(wecom_push_service.scheduler_loop(db_manager))
@@ -271,6 +277,13 @@ async def lifespan(app: FastAPI):
                 await wecom_push_task
             except asyncio.CancelledError:
                 logger.info("✅ 企微推送调度器已停止")
+
+        if hygiene_overdue_task and not hygiene_overdue_task.done():
+            hygiene_overdue_task.cancel()
+            try:
+                await hygiene_overdue_task
+            except asyncio.CancelledError:
+                logger.info("✅ 卫生逾期调度器已停止")
 
         for task_name, task in (
             ("日终对账调度", reconcile_scheduler_task),

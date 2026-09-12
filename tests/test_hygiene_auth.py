@@ -422,3 +422,40 @@ def test_night_staff_http_cannot_submit_day_instance(hygiene_http):
     )
     assert rejected.status_code == 200
     assert rejected.json()["status"] == "待拍"
+
+
+def test_staff_admin_cannot_patch_overdue_clocks_admin_cookie_can(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    payload = {"day_hhmm": "15:00", "night_hhmm": "21:30"}
+    assert client.get("/api/hygiene/admin/overdue-clocks").status_code == 401
+    assert client.patch("/api/hygiene/admin/overdue-clocks", json=payload).status_code == 401
+
+    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _staff_login(client, PHONE_ADMIN)
+    assert client.get("/api/hygiene/admin/overdue-clocks").status_code == 401
+    assert client.patch("/api/hygiene/admin/overdue-clocks", json=payload).status_code == 401
+    clocks = _run(work.get_daily_overdue_clocks())
+    assert clocks["day_hhmm"] == "15:00"
+    assert clocks["night_hhmm"] == "21:30"
+
+    client.cookies.clear()
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200
+    listed = client.get("/api/hygiene/admin/overdue-clocks")
+    assert listed.status_code == 200
+    assert listed.json()["day_hhmm"] == "15:00"
+    assert listed.json()["night_hhmm"] == "21:30"
+    updated = client.patch(
+        "/api/hygiene/admin/overdue-clocks",
+        json={"day_hhmm": "16:00", "night_hhmm": "22:15"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["day_hhmm"] == "16:00"
+    assert updated.json()["night_hhmm"] == "22:15"
+    again = client.get("/api/hygiene/admin/overdue-clocks")
+    assert again.json()["day_hhmm"] == "16:00"
+    assert again.json()["night_hhmm"] == "22:15"
+    assert _run(work.get_daily_overdue_clocks()) == {
+        "day_hhmm": "16:00",
+        "night_hhmm": "22:15",
+    }
