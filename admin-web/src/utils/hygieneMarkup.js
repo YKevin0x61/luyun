@@ -109,6 +109,15 @@ export function fixReshootUrl(kind, ticket) {
   return `${prefix}/fix/${id}/reshoot?v=${version}`
 }
 
+export function teachingShotUrl(kind, example, which) {
+  const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
+  const id = example && example.id
+  const side = which === 'right' ? 'right' : 'left'
+  const captureKey = side === 'right' ? 'right_capture_id' : 'left_capture_id'
+  const version = encodeURIComponent((example && (example[captureKey] || example.id)) || '')
+  return `${prefix}/teaching/${id}/${side}?v=${version}`
+}
+
 export function formatWatermarkTime(value) {
   const raw = String(value || '')
   const matched = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(raw)

@@ -19,6 +19,8 @@ const clockHint = ref('')
 const busy = ref(false)
 const selected = ref(null)
 const review = ref(null)
+const lastPassed = ref(null)
+const teachingHint = ref('')
 const fromDate = ref('')
 const toDate = ref('')
 
@@ -181,12 +183,37 @@ async function decide(action) {
   errorText.value = ''
   try {
     await api.post(`/api/hygiene/admin/deep-clean/${selected.value.item_id}/${action}`)
+    if (action === 'accept') {
+      lastPassed.value = {
+        item_id: selected.value.item_id,
+        item_name: selected.value.item_name,
+      }
+      teachingHint.value = ''
+    }
     selected.value = null
     review.value = null
     await loadQueue()
     await loadCalendar()
   } catch (err) {
     errorText.value = err.message || (action === 'accept' ? '验收失败' : '驳回失败')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function markTeaching() {
+  if (!lastPassed.value || busy.value) return
+  busy.value = true
+  errorText.value = ''
+  teachingHint.value = ''
+  try {
+    await api.post('/api/hygiene/admin/teaching', {
+      kind: 'deep_clean',
+      item_id: lastPassed.value.item_id,
+    })
+    teachingHint.value = '已标成卫生教材，全员能打开。'
+  } catch (err) {
+    errorText.value = err.message || '无法标成卫生教材'
   } finally {
     busy.value = false
   }
@@ -204,6 +231,11 @@ async function decide(action) {
     </div>
 
     <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>
+    <div v-if="lastPassed" class="card teach-banner">
+      <p>刚通过：{{ lastPassed.item_name }}。合格图不会自动进教材。</p>
+      <button type="button" class="btn btn-primary" :disabled="busy" @click="markTeaching">标为卫生教材</button>
+      <p v-if="teachingHint" class="clocks-hint">{{ teachingHint }}</p>
+    </div>
 
     <form class="card clocks-card" @submit.prevent="saveClock">
       <div>
@@ -507,4 +539,13 @@ async function decide(action) {
   justify-content: flex-end;
   gap: 8px;
 }
+.teach-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+}
+.teach-banner p { margin: 0; color: var(--text-dim); font-size: 13px; }
+
 </style>

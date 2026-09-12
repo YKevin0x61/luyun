@@ -628,3 +628,102 @@ def test_staff_regular_cannot_open_fix_admin_can_super_needs_live(hygiene_http):
     assert super_open.status_code == 200
     assert super_open.json()["opener_kind"] == "super"
     assert super_open.json()["status"] == "待回拍"
+
+
+def _assert_no_score_keys(obj):
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            text = str(key)
+            assert "score" not in text.lower()
+            assert "points" not in text.lower()
+            assert "分" not in text
+            _assert_no_score_keys(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _assert_no_score_keys(item)
+
+
+def test_unauthenticated_boards_401_regular_staff_gets_both(hygiene_http):
+    client, _db, accounts, _work = hygiene_http
+    assert client.get("/api/hygiene/staff/boards").status_code == 401
+    assert client.get("/api/hygiene/admin/boards").status_code == 401
+    assert client.get("/api/hygiene/staff/teaching").status_code == 401
+    employee = _run(accounts.register(PHONE, PASSWORD))
+    _run(accounts.approve(employee["id"]))
+    login = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    )
+    assert login.status_code == 200
+    boards = client.get("/api/hygiene/staff/boards")
+    assert boards.status_code == 200
+    payload = boards.json()
+    assert "people" in payload
+    assert "zones" in payload
+    assert payload["week_start"] == "2026-09-07T06:00:00+08:00"
+    _assert_no_score_keys(payload)
+    teaching = client.get("/api/hygiene/staff/teaching")
+    assert teaching.status_code == 200
+    assert teaching.json()["items"] == []
+    _assert_no_score_keys(teaching.json())
+    assert client.post(
+        "/api/hygiene/admin/teaching",
+        json={"kind": "daily", "item_id": 1, "shift": "白班"},
+    ).status_code == 401
+
+
+def test_super_can_get_boards_and_mark_teaching_staff_can_list(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    _approve_staff(accounts, PHONE, "白班")
+    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    item = _add_anban_item(work, data=b"STD-TEACH")
+    _staff_login(client, PHONE)
+    submitted = _submit_daily(client, item["id"], SHOT_A)
+    assert submitted.status_code == 200
+    staff_mark = client.post(
+        "/api/hygiene/admin/teaching",
+        json={"kind": "daily", "item_id": item["id"], "shift": "白班"},
+    )
+    assert staff_mark.status_code == 401
+
+    client.cookies.clear()
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200
+    boards = client.get("/api/hygiene/admin/boards")
+    assert boards.status_code == 200
+    _assert_no_score_keys(boards.json())
+    people = boards.json()["people"]
+    assert any(row["employee_id"] and row.get("实拍", 0) >= 1 for row in people)
+
+    accept = client.post(
+        f"/api/hygiene/admin/daily/{item['id']}/accept",
+        json={"shift": "白班"},
+    )
+    assert accept.status_code == 200
+    empty = client.get("/api/hygiene/admin/teaching")
+    assert empty.status_code == 200
+    assert empty.json()["items"] == []
+    marked = client.post(
+        "/api/hygiene/admin/teaching",
+        json={"kind": "daily", "item_id": item["id"], "shift": "白班"},
+    )
+    assert marked.status_code == 200
+    example = marked.json()["example"]
+    assert example["kind"] == "daily"
+    _assert_no_score_keys(example)
+
+    _staff_login(client, PHONE)
+    listed = client.get("/api/hygiene/staff/teaching")
+    assert listed.status_code == 200
+    items = listed.json()["items"]
+    assert len(items) == 1
+    opened = client.get(f"/api/hygiene/staff/teaching/{items[0]['id']}")
+    assert opened.status_code == 200
+    left = client.get(f"/api/hygiene/staff/teaching/{items[0]['id']}/left")
+    right = client.get(f"/api/hygiene/staff/teaching/{items[0]['id']}/right")
+    assert left.status_code == 200
+    assert right.status_code == 200
+    assert left.content == b"STD-TEACH"
+    assert right.content == SHOT_A
+    _assert_no_score_keys(listed.json())
+    _assert_no_score_keys(opened.json())

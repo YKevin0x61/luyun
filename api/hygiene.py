@@ -52,6 +52,9 @@ _ERROR_DETAILS = {
     "invalid_body": "请写明哪里脏、怎么改",
     "invalid_duration": "请填写整改时限",
     "ticket_not_found": "整改单不存在",
+    "not_passed": "只有已通过的对照才能标成卫生教材",
+    "invalid_teaching": "请选择已通过的日常或专项对照",
+    "teaching_not_found": "卫生教材不存在",
 }
 
 
@@ -81,7 +84,7 @@ def _http_error(exc: EmployeeAccountsError) -> HTTPException:
 def _work_http_error(exc: HygieneWorkError) -> HTTPException:
     if exc.code in ("forbidden", "cannot_self_accept"):
         status = 403
-    elif exc.code in ("zone_not_found", "item_not_found", "ticket_not_found"):
+    elif exc.code in ("zone_not_found", "item_not_found", "ticket_not_found", "teaching_not_found"):
         status = 404
     elif exc.code in ("duplicate_zone", "duplicate_item"):
         status = 409
@@ -152,6 +155,12 @@ class DeepCleanItemIn(BaseModel):
 
 class DeepCleanClockIn(BaseModel):
     hhmm: str
+
+
+class TeachingMarkIn(BaseModel):
+    kind: str
+    item_id: int
+    shift: Optional[str] = None
 
 
 def _parse_markup_field(raw: Optional[str]) -> list:
@@ -432,6 +441,22 @@ async def admin_board_events(
         "zones": await work.list_zone_board_events(),
         "people": await work.list_person_board_events(),
     }
+
+
+@router.get("/admin/boards")
+async def admin_boards(
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return await work.list_boards()
+
+
+@router.get("/staff/boards")
+async def staff_boards(
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return await work.list_boards()
 
 
 @router.post("/admin/zones/{zone_id}/items")
@@ -1131,3 +1156,112 @@ async def admin_fix_reshoot_image(
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
     return await _fix_shot_response(work, ticket_id, "reshoot")
+
+
+def _teaching_source(body: TeachingMarkIn) -> dict:
+    source = {"kind": body.kind, "item_id": body.item_id}
+    if body.shift:
+        source["shift"] = body.shift
+    return source
+
+
+async def _teaching_shot_response(work: HygieneWork, example_id: int, which: str) -> Response:
+    try:
+        example = await work.get_teaching(example_id)
+        key = "left" if which == "left" else "right"
+        body = work.capture_bytes(example[f"{key}_capture_id"])
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="教材图片不存在") from exc
+    media = example.get(f"{key}_content_type") or "image/jpeg"
+    return Response(content=body, media_type=media, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/staff/teaching")
+async def staff_list_teaching(
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {"items": await work.list_teaching()}
+
+
+@router.get("/staff/teaching/{example_id}")
+async def staff_get_teaching(
+    example_id: int,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.get_teaching(example_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/staff/teaching/{example_id}/left")
+async def staff_teaching_left(
+    example_id: int,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _teaching_shot_response(work, example_id, "left")
+
+
+@router.get("/staff/teaching/{example_id}/right")
+async def staff_teaching_right(
+    example_id: int,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _teaching_shot_response(work, example_id, "right")
+
+
+@router.get("/admin/teaching")
+async def admin_list_teaching(
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {"items": await work.list_teaching()}
+
+
+@router.post("/admin/teaching")
+async def admin_mark_teaching(
+    body: TeachingMarkIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        example = await work.mark_teaching(SUPER_ACTOR, _teaching_source(body))
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    return {"example": example}
+
+
+@router.get("/admin/teaching/{example_id}")
+async def admin_get_teaching(
+    example_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.get_teaching(example_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/admin/teaching/{example_id}/left")
+async def admin_teaching_left(
+    example_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _teaching_shot_response(work, example_id, "left")
+
+
+@router.get("/admin/teaching/{example_id}/right")
+async def admin_teaching_right(
+    example_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _teaching_shot_response(work, example_id, "right")

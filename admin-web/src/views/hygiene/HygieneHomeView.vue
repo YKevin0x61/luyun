@@ -21,6 +21,7 @@ import {
   fixOriginalUrl,
   fixReshootUrl,
   frozenStandardUrl,
+  teachingShotUrl,
 } from '../../utils/hygieneMarkup'
 import { staffRequest, staffUpload } from '../../utils/hygieneStaff'
 
@@ -34,6 +35,8 @@ const deepInbox = ref([])
 const deepStatus = ref('')
 const fixInbox = ref([])
 const zones = ref([])
+const boards = ref({ week_start: '', people: [], zones: [] })
+const teaching = ref([])
 const busy = ref(false)
 const sheet = ref(null)
 const previewUrl = ref('')
@@ -62,6 +65,7 @@ const liveOk = computed(() => hasLiveCamera())
 const sheetTitle = computed(() => {
   if (!sheet.value) return ''
   if (sheet.value.kind === 'fix' && sheet.value.mode === 'form') return '开整改单'
+  if (sheet.value.kind === 'teaching') return sheet.value.row && sheet.value.row.title
   if (sheet.value.kind === 'fix' && sheet.value.row) {
     return `${sheet.value.row.zone_name} · ${sheet.value.row.ticket_type}`
   }
@@ -76,7 +80,7 @@ async function loadMe() {
     const data = await staffRequest('/api/hygiene/staff/me')
     employee.value = data.employee
     try {
-      await Promise.all([loadDeepClean(), loadFixTickets(), loadZones()])
+      await Promise.all([loadDeepClean(), loadFixTickets(), loadZones(), loadBoards(), loadTeaching()])
     } catch (err) {
       errorText.value = err.message || '无法加载专项卫生'
     }
@@ -114,6 +118,30 @@ async function loadFixTickets() {
 async function loadZones() {
   const data = await staffRequest('/api/hygiene/staff/daily-catalog')
   zones.value = data.zones || []
+}
+
+async function loadBoards() {
+  boards.value = await staffRequest('/api/hygiene/staff/boards')
+}
+
+async function loadTeaching() {
+  const data = await staffRequest('/api/hygiene/staff/teaching')
+  teaching.value = data.items || []
+}
+
+function weekLabel(iso) {
+  const raw = String(iso || '')
+  const matched = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(raw)
+  return matched ? `${matched[1]} ${matched[2]}` : raw
+}
+
+function personLabel(row) {
+  return row.phone || `员工 ${row.employee_id}`
+}
+
+function openTeaching(row) {
+  errorText.value = ''
+  sheet.value = { kind: 'teaching', mode: 'review', row }
 }
 
 async function pickShift(shift) {
@@ -558,6 +586,39 @@ async function decide(action) {
             </div>
           </article>
         </section>
+        <section class="staff-zone">
+          <h2>人的红黑榜</h2>
+          <p class="staff-lead">本周 {{ weekLabel(boards.week_start) }} 起。只记次数。</p>
+          <p v-if="!(boards.people || []).length" class="staff-lead">这一周还没有人的次数。</p>
+          <article v-for="row in boards.people" :key="`person-${row.employee_id}`" class="staff-row">
+            <div>
+              <strong>{{ personLabel(row) }}</strong>
+              <p>实拍 {{ row['实拍'] }} · 驳回 {{ row['驳回'] }} · 一次通过 {{ row['一次通过'] }} · 逾期 {{ row['逾期'] }}</p>
+            </div>
+          </article>
+        </section>
+        <section class="staff-zone">
+          <h2>卫生责任区红黑榜</h2>
+          <p v-if="!(boards.zones || []).length" class="staff-lead">这一周还没有卫生责任区的次数。</p>
+          <article v-for="row in boards.zones" :key="`zone-${row.zone_id}`" class="staff-row">
+            <div>
+              <strong>{{ row.zone_name }}</strong>
+              <p>逾期 {{ row['逾期'] }}</p>
+            </div>
+          </article>
+        </section>
+        <section class="staff-zone">
+          <h2>卫生教材</h2>
+          <p class="staff-lead">超级管理员手点的合格对照。合格图不会自动进来。</p>
+          <p v-if="!teaching.length" class="staff-lead">还没有卫生教材。</p>
+          <article v-for="row in teaching" :key="`teach-${row.id}`" class="staff-row">
+            <div>
+              <strong>{{ row.title }}</strong>
+              <p>{{ row.left_label }} / {{ row.right_label }}</p>
+            </div>
+            <button type="button" class="btn btn-sm" @click="openTeaching(row)">打开</button>
+          </article>
+        </section>
         <button type="button" class="btn btn-block staff-submit staff-chooser-logout" :disabled="loggingOut" @click="logout">
           退出登录
         </button>
@@ -662,6 +723,39 @@ async function decide(action) {
             </section>
           </div>
           <p v-else class="staff-lead">还没有带标准图的日常检查项。</p>
+          <section class="staff-zone">
+            <h2>人的红黑榜</h2>
+            <p class="staff-lead">本周 {{ weekLabel(boards.week_start) }} 起。只记次数。</p>
+            <p v-if="!(boards.people || []).length" class="staff-lead">这一周还没有人的次数。</p>
+            <article v-for="row in boards.people" :key="`home-person-${row.employee_id}`" class="staff-row">
+              <div>
+                <strong>{{ personLabel(row) }}</strong>
+                <p>实拍 {{ row['实拍'] }} · 驳回 {{ row['驳回'] }} · 一次通过 {{ row['一次通过'] }} · 逾期 {{ row['逾期'] }}</p>
+              </div>
+            </article>
+          </section>
+          <section class="staff-zone">
+            <h2>卫生责任区红黑榜</h2>
+            <p v-if="!(boards.zones || []).length" class="staff-lead">这一周还没有卫生责任区的次数。</p>
+            <article v-for="row in boards.zones" :key="`home-zone-${row.zone_id}`" class="staff-row">
+              <div>
+                <strong>{{ row.zone_name }}</strong>
+                <p>逾期 {{ row['逾期'] }}</p>
+              </div>
+            </article>
+          </section>
+          <section class="staff-zone">
+            <h2>卫生教材</h2>
+            <p class="staff-lead">超级管理员手点的合格对照。合格图不会自动进来。</p>
+            <p v-if="!teaching.length" class="staff-lead">还没有卫生教材。</p>
+            <article v-for="row in teaching" :key="`home-teach-${row.id}`" class="staff-row">
+              <div>
+                <strong>{{ row.title }}</strong>
+                <p>{{ row.left_label }} / {{ row.right_label }}</p>
+              </div>
+              <button type="button" class="btn btn-sm" @click="openTeaching(row)">打开</button>
+            </article>
+          </section>
           <button type="button" class="btn btn-block staff-submit" :disabled="loggingOut" @click="logout">
             退出登录
           </button>
@@ -682,6 +776,7 @@ async function decide(action) {
         <h2>{{ sheetTitle }}</h2>
         <p class="staff-lead">
           <template v-if="sheet.kind === 'fix'">整改单 · 现场拍，没有相册。先看开单原图再拍，镜头不叠图。</template>
+          <template v-else-if="sheet.kind === 'teaching'">卫生教材 · {{ sheet.row.left_label }} / {{ sheet.row.right_label }}</template>
           <template v-else-if="sheet.kind === 'deep'">专项卫生 · 清理前 / 清理后</template>
           <template v-else>{{ sheet.row.zone_name }} · {{ sheet.row.shift }}</template>
         </p>
@@ -800,6 +895,18 @@ async function decide(action) {
             {{ busy ? '正在提交…' : '提交待验收' }}
           </button>
           <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="openCamera">重拍</button>
+        </template>
+
+        <template v-else-if="sheet.kind === 'teaching' && sheet.row">
+          <HygieneReviewPair
+            :left-label="sheet.row.left_label"
+            :right-label="sheet.row.right_label"
+            :standard-src="teachingShotUrl('staff', sheet.row, 'left')"
+            :standard-markup="sheet.row.left_markup || []"
+            :standard-alt="sheet.row.left_label"
+            :capture-src="teachingShotUrl('staff', sheet.row, 'right')"
+            :capture-alt="sheet.row.right_label"
+          />
         </template>
 
         <template v-else-if="sheet.kind === 'fix' && sheet.mode === 'review' && sheet.review">

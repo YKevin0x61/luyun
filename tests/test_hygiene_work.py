@@ -10,7 +10,7 @@ from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.notifier import FakeNotifier
-from services.hygiene.work import HygieneWork, HygieneWorkError
+from services.hygiene.work import HygieneWork, HygieneWorkError, hygiene_week_start
 
 SEED_ZONE_NAMES = ["案板", "馅档", "熟笼", "肠粉", "西饼", "明档1", "明档2", "煎炸"]
 SUPER = {"kind": "super"}
@@ -1047,6 +1047,232 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         last_shooter = await self.work.list_person_board_events(10)
         self.assertEqual([event["event_type"] for event in last_shooter], ["逾期"])
         self.assertEqual(last_shooter[0]["employee_id"], 10)
+
+
+class HygieneWeekStartTest(unittest.TestCase):
+    def test_monday_0600_opens_new_week_0559_stays_previous(self):
+        self.assertEqual(
+            hygiene_week_start(datetime(2026, 9, 14, 5, 59, tzinfo=CHINA_TZ)),
+            datetime(2026, 9, 7, 6, 0, tzinfo=CHINA_TZ),
+        )
+        self.assertEqual(
+            hygiene_week_start(datetime(2026, 9, 14, 6, 0, tzinfo=CHINA_TZ)),
+            datetime(2026, 9, 14, 6, 0, tzinfo=CHINA_TZ),
+        )
+        self.assertEqual(
+            hygiene_week_start(datetime(2026, 9, 13, 5, 59, tzinfo=CHINA_TZ)),
+            datetime(2026, 9, 7, 6, 0, tzinfo=CHINA_TZ),
+        )
+        self.assertEqual(
+            hygiene_week_start(datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)),
+            datetime(2026, 9, 7, 6, 0, tzinfo=CHINA_TZ),
+        )
+
+
+def _no_score_keys(obj):
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            text = str(key)
+            if "score" in text.lower() or "points" in text.lower() or "分" in text:
+                raise AssertionError(f"score-like key {key!r}")
+            _no_score_keys(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _no_score_keys(item)
+
+
+def _person_row(boards, employee_id):
+    return next(row for row in boards["people"] if row["employee_id"] == employee_id)
+
+
+def _zone_row(boards, zone_id):
+    return next(row for row in boards["zones"] if row["zone_id"] == zone_id)
+
+
+class HygieneBoardsAndTeachingTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        self.db = DatabaseManager()
+        await self.db.connect()
+        self.fixed_now = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
+        self.captures = FakeCaptureStore()
+        self.notifier = FakeNotifier()
+        self.work = HygieneWork(
+            self.db,
+            captures=self.captures,
+            now=lambda: self.fixed_now,
+            notifier=self.notifier,
+        )
+        await self.work.prepare()
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        settings.DATABASE_DIR = self._old_database_dir
+        self._tmpdir.cleanup()
+
+    def _zone(self, zones, name):
+        return next(zone for zone in zones if zone["name"] == name)
+
+    def _capture(self, data):
+        return {"bytes": data, "content_type": "image/jpeg", "markup": []}
+
+    def _live(self, data):
+        return {"bytes": data, "content_type": "image/jpeg", "live": True}
+
+    async def _item(self, zone_name, item_name, photo=OLD_BYTES):
+        zones = await self.work.list_zones()
+        return await self.work.add_daily_item(
+            SUPER, self._zone(zones, zone_name)["id"], item_name, self._capture(photo)
+        )
+
+    async def test_events_at_monday_0559_and_0600_land_in_different_weeks(self):
+        anban = await self._item("案板", "案板表面")
+        xian = await self._item("馅档", "馅档台面", ZONE_A_BYTES)
+        day = _staff(10, DAY_PHONE, "白班")
+
+        self.fixed_now = datetime(2026, 9, 14, 5, 59, tzinfo=CHINA_TZ)
+        await self.work.submit_daily(day, anban["id"], self._live(SHOT_A))
+        before_cut = await self.work.list_boards(self.fixed_now)
+        self.assertEqual(before_cut["week_start"], "2026-09-07T06:00:00+08:00")
+        self.assertEqual(_person_row(before_cut, 10)["实拍"], 1)
+        _no_score_keys(before_cut)
+
+        self.fixed_now = datetime(2026, 9, 14, 6, 0, tzinfo=CHINA_TZ)
+        await self.work.submit_daily(day, xian["id"], self._live(SHOT_B))
+        after_cut = await self.work.list_boards(self.fixed_now)
+        self.assertEqual(after_cut["week_start"], "2026-09-14T06:00:00+08:00")
+        self.assertEqual(_person_row(after_cut, 10)["实拍"], 1)
+        prior = await self.work.list_boards(datetime(2026, 9, 14, 5, 59, tzinfo=CHINA_TZ))
+        self.assertEqual(prior["week_start"], "2026-09-07T06:00:00+08:00")
+        self.assertEqual(_person_row(prior, 10)["实拍"], 1)
+        self.assertEqual(_person_row(prior, 10)["驳回"], 0)
+        _no_score_keys(after_cut)
+        _no_score_keys(prior)
+
+    async def test_miss_kinds_split_across_zone_person_and_calendar(self):
+        missed_daily = await self._item("馅档", "馅档台面", ZONE_A_BYTES)
+        first_pass = await self._item("熟笼", "蒸笼内壁")
+        shot = await self._item("案板", "案板表面")
+        day = _staff(10, DAY_PHONE, "白班")
+        reviewer = _staff(21, OTHER_ADMIN_PHONE, "白班", "管理员")
+        opener = _staff(20, ADMIN_PHONE, "白班", "管理员")
+        await self.work.set_daily_overdue_clocks(SUPER, "15:00", "21:30")
+        await self.work.set_deep_clean_overdue_clock(SUPER, "20:00")
+        await self.work.add_deep_clean_item(SUPER, 6, FRIDGE_A)
+        await self.work.add_deep_clean_item(SUPER, 6, FRIDGE_B)
+
+        await self.work.submit_daily(day, shot["id"], self._live(SHOT_A))
+        await self.work.reject_daily(reviewer, shot["id"], "白班")
+        await self.work.submit_daily(day, shot["id"], self._live(SHOT_A))
+        await self.work.submit_daily(day, first_pass["id"], self._live(SHOT_B))
+        await self.work.accept_daily(reviewer, first_pass["id"], "白班")
+
+        zones = await self.work.list_zones()
+        xipi_id = self._zone(zones, "西饼")["id"]
+        ming_id = self._zone(zones, "明档1")["id"]
+        reshot = await self.work.open_fix(
+            opener,
+            xipi_id,
+            "摆放",
+            "西饼乱，收整齐",
+            TWO_HOURS,
+            self._live(OPEN_BYTES),
+        )
+        await self.work.reshoot_fix(day, reshot["id"], self._live(RESHOOT_A))
+        await self.work.open_fix(
+            opener,
+            ming_id,
+            "标签",
+            "日期贴掉了，重贴",
+            TWO_HOURS,
+            self._live(OPEN_BYTES),
+        )
+
+        self.fixed_now = datetime(2026, 9, 13, 12, 0, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.fixed_now = datetime(2026, 9, 13, 15, 0, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.fixed_now = datetime(2026, 9, 13, 20, 0, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+
+        boards = await self.work.list_boards()
+        _no_score_keys(boards)
+        person = _person_row(boards, 10)
+        self.assertEqual(person["实拍"], 3)
+        self.assertEqual(person["驳回"], 1)
+        self.assertEqual(person["一次通过"], 1)
+        self.assertEqual(person["逾期"], 1)
+        self.assertFalse(any(row["employee_id"] == 20 for row in boards["people"]))
+        self.assertEqual(_zone_row(boards, missed_daily["zone_id"])["逾期"], 1)
+        self.assertEqual(_zone_row(boards, ming_id)["逾期"], 1)
+        self.assertEqual(_zone_row(boards, xipi_id)["逾期"], 1)
+        self.assertFalse(any(row.get("employee_id") for row in boards["zones"]))
+        calendar = await self.work.list_deep_clean_calendar("2026-09-13", "2026-09-13")
+        self.assertEqual(calendar[0]["status"], "未完成")
+        self.assertEqual(len(calendar), 1)
+        self.assertNotIn("考核分", str(boards))
+        self.assertNotIn("score", str(boards).lower())
+        self.assertNotIn("points", str(boards).lower())
+
+    async def test_accept_does_not_auto_fill_teaching_super_marks_then_list(self):
+        item = await self._item("案板", "案板表面")
+        day = _staff(10, DAY_PHONE, "白班")
+        reviewer = _staff(21, OTHER_ADMIN_PHONE, "白班", "管理员")
+        await self.work.submit_daily(day, item["id"], self._live(SHOT_A))
+        with self.assertRaises(HygieneWorkError) as pending:
+            await self.work.mark_teaching(
+                SUPER, {"kind": "daily", "item_id": item["id"], "shift": "白班"}
+            )
+        self.assertEqual(pending.exception.code, "not_passed")
+        await self.work.accept_daily(reviewer, item["id"], "白班")
+        self.assertEqual(await self.work.list_teaching(), [])
+        with self.assertRaises(HygieneWorkError) as staff_mark:
+            await self.work.mark_teaching(
+                day, {"kind": "daily", "item_id": item["id"], "shift": "白班"}
+            )
+        self.assertEqual(staff_mark.exception.code, "forbidden")
+        with self.assertRaises(HygieneWorkError) as admin_mark:
+            await self.work.mark_teaching(
+                reviewer, {"kind": "daily", "item_id": item["id"], "shift": "白班"}
+            )
+        self.assertEqual(admin_mark.exception.code, "forbidden")
+        marked = await self.work.mark_teaching(
+            SUPER, {"kind": "daily", "item_id": item["id"], "shift": "白班"}
+        )
+        self.assertEqual(marked["kind"], "daily")
+        self.assertEqual(marked["title"], "案板 · 案板表面")
+        self.assertEqual(marked["left_label"], "标准图")
+        self.assertEqual(marked["right_label"], "实拍")
+        listed = await self.work.list_teaching()
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["id"], marked["id"])
+        self.assertEqual(self.captures.get(listed[0]["left_capture_id"]), OLD_BYTES)
+        self.assertEqual(self.captures.get(listed[0]["right_capture_id"]), SHOT_A)
+        opened = await self.work.get_teaching(listed[0]["id"])
+        self.assertEqual(opened["id"], marked["id"])
+        _no_score_keys(marked)
+        _no_score_keys(listed)
+        self.assertNotIn("考核分", str(listed))
+
+        fridge = await self.work.add_deep_clean_item(SUPER, 6, FRIDGE_A)
+        await self.work.submit_deep_clean_pair(
+            day, fridge["id"], self._live(BEFORE_A), self._live(AFTER_A)
+        )
+        await self.work.accept_deep_clean_pair(reviewer, fridge["id"])
+        self.assertEqual(len(await self.work.list_teaching()), 1)
+        deep = await self.work.mark_teaching(
+            SUPER, {"kind": "deep_clean", "item_id": fridge["id"]}
+        )
+        self.assertEqual(deep["kind"], "deep_clean")
+        self.assertEqual(deep["title"], FRIDGE_A)
+        self.assertEqual(deep["left_label"], "清理前")
+        self.assertEqual(deep["right_label"], "清理后")
+        self.assertEqual(len(await self.work.list_teaching()), 2)
+        self.assertEqual(self.captures.get(deep["left_capture_id"]), BEFORE_A)
+        self.assertEqual(self.captures.get(deep["right_capture_id"]), AFTER_A)
+        _no_score_keys(deep)
 
 
 

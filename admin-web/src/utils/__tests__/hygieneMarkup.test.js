@@ -13,6 +13,7 @@ import {
   frozenStandardUrl,
   parseMarkup,
   standardImageUrl,
+  teachingShotUrl,
 } from '../hygieneMarkup.js'
 
 describe('hygieneMarkup', () => {
@@ -93,5 +94,15 @@ describe('hygieneMarkup', () => {
     const ticket = { id: 9, capture_id: 'open-1', reshoot_capture_id: 'reshot-2' }
     expect(fixOriginalUrl('staff', ticket)).toBe('/api/hygiene/staff/fix/9/original?v=open-1')
     expect(fixReshootUrl('admin', ticket)).toBe('/api/hygiene/admin/fix/9/reshoot?v=reshot-2')
+  })
+
+  it('教材左右图走教学接口，不复用待验收路径', () => {
+    const example = { id: 4, left_capture_id: 'std-1', right_capture_id: 'shot-2' }
+    expect(teachingShotUrl('staff', example, 'left')).toBe(
+      '/api/hygiene/staff/teaching/4/left?v=std-1',
+    )
+    expect(teachingShotUrl('admin', example, 'right')).toBe(
+      '/api/hygiene/admin/teaching/4/right?v=shot-2',
+    )
   })
 })

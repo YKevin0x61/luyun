@@ -10,6 +10,8 @@ const errorText = ref('')
 const busy = ref(false)
 const selected = ref(null)
 const review = ref(null)
+const lastPassed = ref(null)
+const teachingHint = ref('')
 
 onMounted(loadQueue)
 
@@ -66,11 +68,39 @@ async function decide(action) {
     await api.post(`/api/hygiene/admin/daily/${selected.value.item_id}/${action}`, {
       shift: selected.value.shift,
     })
+    if (action === 'accept') {
+      lastPassed.value = {
+        item_id: selected.value.item_id,
+        shift: selected.value.shift,
+        item_name: selected.value.item_name,
+        zone_name: selected.value.zone_name,
+      }
+      teachingHint.value = ''
+    }
     selected.value = null
     review.value = null
     await loadQueue()
   } catch (err) {
     errorText.value = err.message || (action === 'accept' ? '验收失败' : '驳回失败')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function markTeaching() {
+  if (!lastPassed.value || busy.value) return
+  busy.value = true
+  errorText.value = ''
+  teachingHint.value = ''
+  try {
+    await api.post('/api/hygiene/admin/teaching', {
+      kind: 'daily',
+      item_id: lastPassed.value.item_id,
+      shift: lastPassed.value.shift,
+    })
+    teachingHint.value = '已标成卫生教材，全员能打开。'
+  } catch (err) {
+    errorText.value = err.message || '无法标成卫生教材'
   } finally {
     busy.value = false
   }
@@ -88,6 +118,11 @@ async function decide(action) {
     </div>
 
     <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>
+    <div v-if="lastPassed" class="card teach-banner">
+      <p>刚通过：{{ lastPassed.zone_name }} · {{ lastPassed.item_name }} · {{ lastPassed.shift }}。合格图不会自动进教材。</p>
+      <button type="button" class="btn btn-primary" :disabled="busy" @click="markTeaching">标为卫生教材</button>
+      <p v-if="teachingHint" class="clocks-hint">{{ teachingHint }}</p>
+    </div>
 
     <div class="daily-grid">
       <div class="table-card">
@@ -213,4 +248,14 @@ async function decide(action) {
   justify-content: flex-end;
   gap: 8px;
 }
+.teach-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+}
+.teach-banner p { margin: 0; color: var(--text-dim); font-size: 13px; }
+.clocks-hint { color: var(--cyan); font-size: 12px; }
+
 </style>

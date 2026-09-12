@@ -452,6 +452,7 @@ HYGIENE_TABLES = (
     "hygiene_fix_tickets",
     "hygiene_fix_reshoots",
     "hygiene_fix_overdue_notices",
+    "hygiene_teaching_examples",
 )
 
 _HYGIENE_TABLE_SCHEMAS = {
@@ -671,6 +672,23 @@ _HYGIENE_TABLE_SCHEMAS = {
             FOREIGN KEY (ticket_id) REFERENCES hygiene_fix_tickets(id)
         )
     """,
+    "hygiene_teaching_examples": """
+        CREATE TABLE IF NOT EXISTS hygiene_teaching_examples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            left_label TEXT NOT NULL,
+            right_label TEXT NOT NULL,
+            left_capture_id TEXT NOT NULL,
+            right_capture_id TEXT NOT NULL,
+            left_content_type TEXT NOT NULL,
+            right_content_type TEXT NOT NULL,
+            left_markup_json TEXT NOT NULL DEFAULT '[]',
+            item_id INTEGER,
+            shift TEXT,
+            created_at TEXT NOT NULL
+        )
+    """,
 }
 
 _HYGIENE_INDEX_DEFINITIONS = {
@@ -731,6 +749,10 @@ _HYGIENE_INDEX_DEFINITIONS = {
     "hygiene_fix_reshoots": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_fix_reshoots_ticket "
         "ON hygiene_fix_reshoots(ticket_id)",
+    ],
+    "hygiene_teaching_examples": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_teaching_created "
+        "ON hygiene_teaching_examples(created_at)",
     ],
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""卫生责任区、日常检查项、当前标准图、日常提交与验收、专项卫生、整改单、逾期群通知、红黑榜事件。
+"""卫生责任区、日常检查项、当前标准图、日常提交与验收、专项卫生、整改单、逾期群通知、红黑榜、卫生教材。
 
 Does not hash passwords or issue staff sessions. Captures stay off SQLite WAL.
 """
@@ -17,6 +17,7 @@ from typing import Callable, Optional
 
 from database import CHINA_TZ
 from services.hygiene.accounts import (
+    BUSINESS_DAY_CUT_HOUR,
     PERMISSION_ADMIN,
     SHIFT_DAY,
     SHIFT_NIGHT,
@@ -50,7 +51,31 @@ BOARD_PERSON = "person"
 EVENT_MISSED_DAILY = "逾期"
 EVENT_CAPTURE = "实拍"
 EVENT_REJECT = "驳回"
+EVENT_FIRST_PASS = "一次通过"
+PERSON_COUNT_KEYS = ("实拍", "驳回", "一次通过", "逾期")
+ZONE_COUNT_KEYS = ("逾期",)
+TEACHING_DAILY = "daily"
+TEACHING_DEEP_CLEAN = "deep_clean"
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def hygiene_week_start(now: datetime) -> datetime:
+    """Monday 06:00 China of the hygiene week containing `now`."""
+    if now.tzinfo is None:
+        local = now.replace(tzinfo=CHINA_TZ)
+    else:
+        local = now.astimezone(CHINA_TZ)
+    if local.hour < BUSINESS_DAY_CUT_HOUR:
+        local = local - timedelta(days=1)
+    monday = local.date() - timedelta(days=local.weekday())
+    return datetime(
+        monday.year,
+        monday.month,
+        monday.day,
+        BUSINESS_DAY_CUT_HOUR,
+        0,
+        tzinfo=CHINA_TZ,
+    )
 
 
 class HygieneWorkError(ValueError):
@@ -618,6 +643,17 @@ class HygieneWork:
             raise HygieneWorkError("not_pending", "not_pending")
         return instance, submission
 
+    async def _daily_was_rejected(
+        self, item_id: int, shift: str, business_date: str
+    ) -> bool:
+        cur = await self._conn.execute(
+            """SELECT 1 FROM hygiene_board_events
+               WHERE board = ? AND event_type = ? AND item_id = ?
+                 AND shift = ? AND business_date = ? LIMIT 1""",
+            (BOARD_PERSON, EVENT_REJECT, int(item_id), shift, business_date),
+        )
+        return await cur.fetchone() is not None
+
     async def accept_daily(self, actor: dict, item_id: int, shift: str) -> dict:
         instance, submission = await self._pending_instance(item_id, shift)
         self._require_reviewer(actor, submission["submitter_id"])
@@ -628,6 +664,20 @@ class HygieneWork:
                WHERE id = ?""",
             (STATUS_PASSED, now, instance["id"]),
         )
+        if not await self._daily_was_rejected(
+            int(item_id), shift, instance["business_date"]
+        ):
+            item_row = await self._fetch_item(item_id)
+            zone_id = None if item_row is None else int(dict(item_row)["zone_id"])
+            await self._insert_board_event(
+                BOARD_PERSON,
+                EVENT_FIRST_PASS,
+                zone_id=zone_id,
+                employee_id=int(submission["submitter_id"]),
+                item_id=int(item_id),
+                shift=shift,
+                business_date=instance["business_date"],
+            )
         await self._conn.commit()
         logger.info("hygiene daily accepted item=%s shift=%s", item_id, shift)
         return {
@@ -855,6 +905,94 @@ class HygieneWork:
         sql += " ORDER BY id ASC"
         cur = await self._conn.execute(sql, params)
         return [self._event_from_row(row) for row in await cur.fetchall()]
+
+    def _week_bounds(self, now: Optional[datetime] = None) -> tuple[datetime, datetime]:
+        clock = now or self._now_dt()
+        start = hygiene_week_start(clock)
+        return start, start + timedelta(days=7)
+
+    async def _events_in_week(self, board: str, now: Optional[datetime] = None) -> list:
+        start, end = self._week_bounds(now)
+        cur = await self._conn.execute(
+            """SELECT id, board, event_type, zone_id, employee_id, item_id,
+                      shift, business_date, occurred_at
+               FROM hygiene_board_events
+               WHERE board = ? AND occurred_at >= ? AND occurred_at < ?
+               ORDER BY id ASC""",
+            (board, start.isoformat(), end.isoformat()),
+        )
+        return [self._event_from_row(row) for row in await cur.fetchall()]
+
+    async def person_board(self, now: Optional[datetime] = None) -> list:
+        events = await self._events_in_week(BOARD_PERSON, now)
+        by_id = {}
+        for event in events:
+            employee_id = event.get("employee_id")
+            if employee_id is None:
+                continue
+            row = by_id.setdefault(
+                int(employee_id),
+                {
+                    "employee_id": int(employee_id),
+                    "phone": None,
+                    **{key: 0 for key in PERSON_COUNT_KEYS},
+                },
+            )
+            kind = event["event_type"]
+            if kind in PERSON_COUNT_KEYS:
+                row[kind] += 1
+        if by_id:
+            placeholders = ",".join("?" * len(by_id))
+            cur = await self._conn.execute(
+                f"SELECT id, phone FROM hygiene_employees WHERE id IN ({placeholders})",
+                list(by_id),
+            )
+            for row in await cur.fetchall():
+                mapping = dict(row)
+                by_id[int(mapping["id"])]["phone"] = mapping["phone"]
+        people = list(by_id.values())
+        people.sort(key=lambda row: (-row["逾期"], -row["驳回"], row["employee_id"]))
+        return people
+
+    async def zone_board(self, now: Optional[datetime] = None) -> list:
+        events = await self._events_in_week(BOARD_ZONE, now)
+        by_id = {}
+        for event in events:
+            zone_id = event.get("zone_id")
+            if zone_id is None:
+                continue
+            row = by_id.setdefault(
+                int(zone_id),
+                {
+                    "zone_id": int(zone_id),
+                    "zone_name": None,
+                    **{key: 0 for key in ZONE_COUNT_KEYS},
+                },
+            )
+            kind = event["event_type"]
+            if kind in ZONE_COUNT_KEYS:
+                row[kind] += 1
+        if by_id:
+            placeholders = ",".join("?" * len(by_id))
+            cur = await self._conn.execute(
+                f"SELECT id, name FROM hygiene_zones WHERE id IN ({placeholders})",
+                list(by_id),
+            )
+            for row in await cur.fetchall():
+                mapping = dict(row)
+                by_id[int(mapping["id"])]["zone_name"] = mapping["name"]
+        zones = list(by_id.values())
+        zones.sort(key=lambda row: (-row["逾期"], row["zone_id"]))
+        return zones
+
+    async def list_boards(self, now: Optional[datetime] = None) -> dict:
+        start, end = self._week_bounds(now)
+        return {
+            "week_start": start.isoformat(),
+            "week_end": end.isoformat(),
+            "people": await self.person_board(now),
+            "zones": await self.zone_board(now),
+        }
 
     async def sweep_overdue(self) -> list:
         now = self._now_dt()
@@ -1797,5 +1935,188 @@ class HygieneWork:
             except Exception as exc:
                 logger.error("卫生逾期调度异常: %s", exc)
             await asyncio.sleep(OVERDUE_SWEEP_INTERVAL_SECONDS)
+
+    def _teaching_from_row(self, row) -> dict:
+        mapping = dict(row)
+        return {
+            "id": int(mapping["id"]),
+            "kind": mapping["kind"],
+            "title": mapping["title"],
+            "left_label": mapping["left_label"],
+            "right_label": mapping["right_label"],
+            "left_capture_id": mapping["left_capture_id"],
+            "right_capture_id": mapping["right_capture_id"],
+            "left_content_type": mapping["left_content_type"],
+            "right_content_type": mapping["right_content_type"],
+            "left_markup": self._parse_markup(mapping.get("left_markup_json") or "[]"),
+            "item_id": None if mapping.get("item_id") is None else int(mapping["item_id"]),
+            "shift": mapping.get("shift"),
+            "created_at": mapping["created_at"],
+        }
+
+    async def _insert_teaching(
+        self,
+        *,
+        kind: str,
+        title: str,
+        left_label: str,
+        right_label: str,
+        left_capture_id: str,
+        right_capture_id: str,
+        left_content_type: str,
+        right_content_type: str,
+        left_markup,
+        item_id=None,
+        shift=None,
+    ) -> dict:
+        cur = await self._conn.execute(
+            """SELECT id, kind, title, left_label, right_label, left_capture_id,
+                      right_capture_id, left_content_type, right_content_type,
+                      left_markup_json, item_id, shift, created_at
+               FROM hygiene_teaching_examples
+               WHERE kind = ? AND left_capture_id = ? AND right_capture_id = ?""",
+            (kind, left_capture_id, right_capture_id),
+        )
+        existing = await cur.fetchone()
+        if existing is not None:
+            return self._teaching_from_row(existing)
+        now = self._now_iso()
+        markup_json = json.dumps(left_markup or [], ensure_ascii=False)
+        cur = await self._conn.execute(
+            """INSERT INTO hygiene_teaching_examples
+               (kind, title, left_label, right_label, left_capture_id,
+                right_capture_id, left_content_type, right_content_type,
+                left_markup_json, item_id, shift, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                kind,
+                title,
+                left_label,
+                right_label,
+                left_capture_id,
+                right_capture_id,
+                left_content_type,
+                right_content_type,
+                markup_json,
+                item_id,
+                shift,
+                now,
+            ),
+        )
+        await self._conn.commit()
+        return {
+            "id": int(cur.lastrowid),
+            "kind": kind,
+            "title": title,
+            "left_label": left_label,
+            "right_label": right_label,
+            "left_capture_id": left_capture_id,
+            "right_capture_id": right_capture_id,
+            "left_content_type": left_content_type,
+            "right_content_type": right_content_type,
+            "left_markup": left_markup or [],
+            "item_id": None if item_id is None else int(item_id),
+            "shift": shift,
+            "created_at": now,
+        }
+
+    async def _passed_daily_source(self, item_id: int, shift: str) -> dict:
+        if shift not in DAILY_SHIFTS:
+            raise HygieneWorkError("shift_mismatch", "shift_mismatch")
+        item_row = await self._fetch_item_with_zone(item_id)
+        if item_row is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        item = dict(item_row)
+        business_date = hygiene_business_date(self._now_dt())
+        instance_row = await self._fetch_instance(business_date, shift, item_id)
+        if instance_row is None:
+            raise HygieneWorkError("not_passed", "not_passed")
+        instance = dict(instance_row)
+        if instance["status"] != STATUS_PASSED:
+            raise HygieneWorkError("not_passed", "not_passed")
+        submission = await self._fetch_submission(instance.get("pending_submission_id"))
+        if submission is None:
+            raise HygieneWorkError("not_passed", "not_passed")
+        standard = await self.standard_by_id(int(submission["frozen_standard_id"]))
+        return {
+            "kind": TEACHING_DAILY,
+            "title": f"{item['zone_name']} · {item['name']}",
+            "left_label": "标准图",
+            "right_label": "实拍",
+            "left_capture_id": standard["capture_id"],
+            "right_capture_id": submission["capture_id"],
+            "left_content_type": standard["content_type"],
+            "right_content_type": submission["content_type"],
+            "left_markup": standard["markup"],
+            "item_id": int(item_id),
+            "shift": shift,
+        }
+
+    async def _passed_deep_clean_source(self, item_id: int) -> dict:
+        item = await self._fetch_deep_clean_item(item_id)
+        if item is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        business_date = hygiene_business_date(self._now_dt())
+        instance = await self._fetch_deep_clean_instance(business_date, item_id)
+        if instance is None or instance["status"] != STATUS_PASSED:
+            raise HygieneWorkError("not_passed", "not_passed")
+        submission = await self._fetch_deep_clean_submission(
+            instance.get("pending_submission_id")
+        )
+        if submission is None:
+            raise HygieneWorkError("not_passed", "not_passed")
+        return {
+            "kind": TEACHING_DEEP_CLEAN,
+            "title": item["name"],
+            "left_label": "清理前",
+            "right_label": "清理后",
+            "left_capture_id": submission["before_capture_id"],
+            "right_capture_id": submission["after_capture_id"],
+            "left_content_type": submission["before_content_type"],
+            "right_content_type": submission["after_content_type"],
+            "left_markup": [],
+            "item_id": int(item_id),
+            "shift": None,
+        }
+
+    async def mark_teaching(self, actor: dict, source: dict) -> dict:
+        self._require_super(actor)
+        payload = source or {}
+        kind = (payload.get("kind") or "").strip()
+        if kind == TEACHING_DAILY:
+            row = await self._passed_daily_source(
+                int(payload.get("item_id") or 0),
+                (payload.get("shift") or "").strip(),
+            )
+        elif kind == TEACHING_DEEP_CLEAN:
+            row = await self._passed_deep_clean_source(int(payload.get("item_id") or 0))
+        else:
+            raise HygieneWorkError("invalid_teaching", "invalid_teaching")
+        example = await self._insert_teaching(**row)
+        logger.info("hygiene teaching marked id=%s kind=%s", example["id"], kind)
+        return example
+
+    async def list_teaching(self) -> list:
+        cur = await self._conn.execute(
+            """SELECT id, kind, title, left_label, right_label, left_capture_id,
+                      right_capture_id, left_content_type, right_content_type,
+                      left_markup_json, item_id, shift, created_at
+               FROM hygiene_teaching_examples
+               ORDER BY id DESC"""
+        )
+        return [self._teaching_from_row(row) for row in await cur.fetchall()]
+
+    async def get_teaching(self, example_id: int) -> dict:
+        cur = await self._conn.execute(
+            """SELECT id, kind, title, left_label, right_label, left_capture_id,
+                      right_capture_id, left_content_type, right_content_type,
+                      left_markup_json, item_id, shift, created_at
+               FROM hygiene_teaching_examples WHERE id = ?""",
+            (int(example_id),),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise HygieneWorkError("teaching_not_found", "teaching_not_found")
+        return self._teaching_from_row(row)
 
 
