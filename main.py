@@ -131,6 +131,7 @@ reconcile_scheduler_task = None
 unmapped_watchdog_task = None
 recipe_store = None
 employee_accounts = None
+hygiene_work = None
 
 def serialize_all(obj):
     if isinstance(obj, dict):
@@ -147,7 +148,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global db_manager, dish_catalog, restaurant_scraper, scraper_task, wecom_push_task
     global reconcile_scheduler_task, unmapped_watchdog_task
-    global recipe_store, employee_accounts
+    global recipe_store, employee_accounts, hygiene_work
     
     try:
         logger.info("🚀 启动订单数据采集系统...")
@@ -187,9 +188,20 @@ async def lifespan(app: FastAPI):
             startup_results.append("配方库")
 
         from services.hygiene.accounts import EmployeeAccounts
+        from services.hygiene.captures import FileCaptureStore
+        from services.hygiene.work import HygieneWork
+        from pathlib import Path
         if db_manager and db_manager._conn is not None:
             employee_accounts = EmployeeAccounts(db_manager)
             startup_results.append("员工账号")
+            capture_root = Path(settings.DATABASE_DIR) / "hygiene-captures"
+            hygiene_work = HygieneWork(
+                db_manager,
+                captures=FileCaptureStore(capture_root),
+                notifier=None,
+            )
+            await hygiene_work.prepare()
+            startup_results.append("卫生待办")
 
         if db_manager:
             wecom_push_task = asyncio.create_task(wecom_push_service.scheduler_loop(db_manager))
@@ -563,6 +575,7 @@ def _spa_index():
 @app.get("/hygiene/login")
 @app.get("/hygiene/register")
 @app.get("/hygiene-roster")
+@app.get("/hygiene-zones")
 async def spa_page():
     return _spa_index()
 

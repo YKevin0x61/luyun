@@ -37,6 +37,7 @@ describe('shouldSkipLoginRedirect', () => {
     expect(shouldSkipLoginRedirect('/recipe/manage')).toBe(false)
     expect(shouldSkipLoginRedirect('/admin')).toBe(false)
     expect(shouldSkipLoginRedirect('/hygiene-roster')).toBe(false)
+    expect(shouldSkipLoginRedirect('/hygiene-zones')).toBe(false)
   })
 })
 

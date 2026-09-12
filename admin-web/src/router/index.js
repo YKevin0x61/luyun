@@ -19,6 +19,7 @@ const routes = [
   { path: '/prep-plan', name: 'prep-plan', component: () => import('../views/PrepPlanView.vue') },
   { path: '/wecom-push', name: 'wecom-push', component: () => import('../views/WecomPushView.vue') },
   { path: '/hygiene-roster', name: 'hygiene-roster', component: () => import('../views/hygiene/HygieneRosterView.vue') },
+  { path: '/hygiene-zones', name: 'hygiene-zones', component: () => import('../views/hygiene/HygieneZonesView.vue') },
   { path: '/hygiene', name: 'hygiene-home', component: () => import('../views/hygiene/HygieneHomeView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true } },
   { path: '/hygiene/login', name: 'hygiene-login', component: () => import('../views/hygiene/HygieneLoginView.vue'), meta: HYGIENE_STAFF_META },
   { path: '/hygiene/register', name: 'hygiene-register', component: () => import('../views/hygiene/HygieneRegisterView.vue'), meta: HYGIENE_STAFF_META },

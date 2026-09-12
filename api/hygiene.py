@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Staff-phone and Admin SPA roster HTTP adapter. Rules live in EmployeeAccounts."""
+"""Staff-phone and Admin SPA hygiene HTTP adapter. Rules live in the modules."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+import json
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
 
 from api.security import require_session
 from config import settings
 from services.hygiene.accounts import EmployeeAccounts, EmployeeAccountsError
+from services.hygiene.work import HygieneWork, HygieneWorkError
 
 router = APIRouter(prefix="/api/hygiene", tags=["hygiene"])
+
+SUPER_ACTOR = {"kind": "super"}
 
 _ERROR_DETAILS = {
     "invalid_phone": "请输入有效的中国大陆手机号",
@@ -25,6 +29,14 @@ _ERROR_DETAILS = {
     "employee_not_found": "员工不存在",
     "invalid_shift": "班次只能是白班或夜班",
     "shift_already_picked": "当天班次已选定，不能自己改",
+    "forbidden": "只有超级管理员能改卫生责任区和标准图",
+    "standard_required": "没有标准图不能上架日常检查项",
+    "invalid_zone_name": "请填写卫生责任区名称",
+    "invalid_item_name": "请填写日常检查项名称",
+    "zone_not_found": "卫生责任区不存在",
+    "item_not_found": "日常检查项不存在",
+    "duplicate_zone": "已有同名卫生责任区",
+    "duplicate_item": "该卫生责任区已有同名检查项",
 }
 
 
@@ -36,10 +48,30 @@ def _get_accounts() -> EmployeeAccounts:
     return employee_accounts
 
 
+def _get_work() -> HygieneWork:
+    from main import hygiene_work
+
+    if hygiene_work is None:
+        raise HTTPException(status_code=500, detail="卫生待办未初始化")
+    return hygiene_work
+
+
 def _http_error(exc: EmployeeAccountsError) -> HTTPException:
     status = 404 if exc.code == "employee_not_found" else 400
     if exc.code == "duplicate_phone" or exc.code == "shift_already_picked":
         status = 409
+    return HTTPException(status_code=status, detail=_ERROR_DETAILS.get(exc.code, exc.code))
+
+
+def _work_http_error(exc: HygieneWorkError) -> HTTPException:
+    if exc.code == "forbidden":
+        status = 403
+    elif exc.code in ("zone_not_found", "item_not_found"):
+        status = 404
+    elif exc.code in ("duplicate_zone", "duplicate_item"):
+        status = 409
+    else:
+        status = 400
     return HTTPException(status_code=status, detail=_ERROR_DETAILS.get(exc.code, exc.code))
 
 
@@ -87,6 +119,51 @@ class RosterPatchIn(BaseModel):
 
 class ShiftIn(BaseModel):
     shift: str
+
+
+class ZoneIn(BaseModel):
+    name: str
+
+
+def _parse_markup_field(raw: Optional[str]) -> list:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="标注格式不对") from exc
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="标注格式不对")
+    return value
+
+
+async def _capture_from_upload(file: UploadFile, markup_raw: Optional[str]) -> dict:
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="请上传标准图")
+    content_type = (file.content_type or "image/jpeg").split(";")[0].strip()
+    if not content_type.startswith("image/"):
+        content_type = "image/jpeg"
+    return {
+        "bytes": data,
+        "content_type": content_type,
+        "markup": _parse_markup_field(markup_raw),
+    }
+
+
+async def _standard_image_response(work: HygieneWork, item_id: int) -> Response:
+    try:
+        standard = await work.current_standard(item_id)
+        body = work.capture_bytes(standard["capture_id"])
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="标准图不存在") from exc
+    return Response(
+        content=body,
+        media_type=standard["content_type"] or "image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.post("/staff/register")
@@ -215,3 +292,83 @@ async def admin_set_shift(
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
     return picked
+
+
+@router.get("/admin/zones")
+async def admin_list_zones(
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {"zones": await work.list_staff_daily_items()}
+
+
+@router.post("/admin/zones")
+async def admin_create_zone(
+    body: ZoneIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        zone = await work.create_zone(SUPER_ACTOR, body.name)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    return {"zone": zone}
+
+
+@router.post("/admin/zones/{zone_id}/items")
+async def admin_add_daily_item(
+    zone_id: int,
+    name: str = Form(...),
+    markup: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    capture = await _capture_from_upload(file, markup)
+    try:
+        item = await work.add_daily_item(SUPER_ACTOR, zone_id, name, capture)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    return {"item": item}
+
+
+@router.post("/admin/items/{item_id}/standard")
+async def admin_replace_standard(
+    item_id: int,
+    markup: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    capture = await _capture_from_upload(file, markup)
+    try:
+        item = await work.replace_standard(SUPER_ACTOR, item_id, capture)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    return {"item": item}
+
+
+@router.get("/admin/items/{item_id}/standard")
+async def admin_current_standard_image(
+    item_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _standard_image_response(work, item_id)
+
+
+@router.get("/staff/daily-catalog")
+async def staff_daily_catalog(
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {"zones": await work.list_staff_daily_items()}
+
+
+@router.get("/staff/items/{item_id}/standard")
+async def staff_current_standard_image(
+    item_id: int,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _standard_image_response(work, item_id)

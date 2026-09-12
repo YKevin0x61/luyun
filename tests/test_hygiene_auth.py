@@ -16,6 +16,10 @@ from database import CHINA_TZ, DatabaseManager
 from services import auth_service
 from services.app_runtime import AppRuntime, set_runtime
 from services.hygiene.accounts import EmployeeAccounts
+from services.hygiene.captures import FakeCaptureStore
+from services.hygiene.work import HygieneWork, SEED_ZONE_NAMES
+
+SUPER = {"kind": "super"}
 
 PHONE = "13800138000"
 PHONE_ADMIN = "13800138001"
@@ -50,19 +54,27 @@ def hygiene_http(tmp_path):
     accounts = EmployeeAccounts(
         db, now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
     )
+    work = HygieneWork(
+        db,
+        captures=FakeCaptureStore(),
+        now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        notifier=None,
+    )
+    _run(work.prepare())
     app = FastAPI()
     app.include_router(auth_module.router)
     app.include_router(hygiene_module.router)
     app.dependency_overrides[hygiene_module._get_accounts] = lambda: accounts
+    app.dependency_overrides[hygiene_module._get_work] = lambda: work
     with TestClient(app) as client:
-        yield client, db, accounts
+        yield client, db, accounts, work
     _run(db.close())
     set_runtime(None)
     settings.DATABASE_DIR = old
 
 
 def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http):
-    client, _db, _accounts = hygiene_http
+    client, _db, _accounts, _work = hygiene_http
     resp = client.post(
         "/api/hygiene/staff/register",
         json={"phone": PHONE, "password": PASSWORD},
@@ -91,7 +103,7 @@ def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http)
 
 
 def test_staff_session_can_me_not_admin_roster_writes(hygiene_http):
-    client, _db, accounts = hygiene_http
+    client, _db, accounts, _work = hygiene_http
     employee = _run(accounts.register(PHONE, PASSWORD))
     _run(accounts.approve(employee["id"]))
     login = client.post(
@@ -118,7 +130,7 @@ def test_staff_session_can_me_not_admin_roster_writes(hygiene_http):
 
 
 def test_admin_cookie_can_roster_but_is_not_staff_phone_identity(hygiene_http):
-    client, _db, accounts = hygiene_http
+    client, _db, accounts, _work = hygiene_http
     init = client.post("/api/auth/init", json=ADMIN_INIT)
     assert init.status_code == 200
     employee = _run(accounts.register(PHONE, PASSWORD))
@@ -141,7 +153,7 @@ def test_admin_cookie_can_roster_but_is_not_staff_phone_identity(hygiene_http):
 
 
 def test_api_token_is_not_staff_session_or_roster_cookie(hygiene_http):
-    client, _db, _accounts = hygiene_http
+    client, _db, _accounts, _work = hygiene_http
     client.post("/api/auth/init", json=ADMIN_INIT)
     login = client.post(
         "/api/auth/login",
@@ -164,7 +176,7 @@ def test_api_token_is_not_staff_session_or_roster_cookie(hygiene_http):
 
 
 def test_staff_can_self_pick_shift_once_not_admin_fix(hygiene_http):
-    client, _db, accounts = hygiene_http
+    client, _db, accounts, _work = hygiene_http
     employee = _run(accounts.register(PHONE, PASSWORD))
     _run(accounts.approve(employee["id"]))
     login = client.post(
@@ -189,7 +201,7 @@ def test_staff_can_self_pick_shift_once_not_admin_fix(hygiene_http):
 
 
 def test_staff_admin_cannot_change_another_shift_admin_cookie_can(hygiene_http):
-    client, _db, accounts = hygiene_http
+    client, _db, accounts, _work = hygiene_http
     staff = _run(accounts.register(PHONE, PASSWORD))
     manager = _run(accounts.register(PHONE_ADMIN, PASSWORD))
     _run(accounts.approve(staff["id"]))
@@ -221,3 +233,65 @@ def test_staff_admin_cannot_change_another_shift_admin_cookie_can(hygiene_http):
     assert roster.status_code == 200
     row = next(item for item in roster.json()["employees"] if item["id"] == staff["id"])
     assert row["shift"] == "夜班"
+
+
+def test_admin_cookie_can_create_zone_staff_cannot(hygiene_http):
+    client, _db, accounts, _work = hygiene_http
+    assert client.post(
+        "/api/hygiene/admin/zones", json={"name": "卫生间"}
+    ).status_code == 401
+    employee = _run(accounts.register(PHONE, PASSWORD))
+    _run(accounts.approve(employee["id"]))
+    login = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    )
+    assert login.status_code == 200
+    assert client.post(
+        "/api/hygiene/admin/zones", json={"name": "卫生间"}
+    ).status_code == 401
+    client.cookies.clear()
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200
+    created = client.post("/api/hygiene/admin/zones", json={"name": "卫生间"})
+    assert created.status_code == 200
+    assert created.json()["zone"]["name"] == "卫生间"
+    listed = client.get("/api/hygiene/admin/zones")
+    assert listed.status_code == 200
+    names = [zone["name"] for zone in listed.json()["zones"]]
+    assert names == list(SEED_ZONE_NAMES) + ["卫生间"]
+
+
+def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    employee = _run(accounts.register(PHONE, PASSWORD))
+    _run(accounts.approve(employee["id"]))
+    assert client.get("/api/hygiene/staff/daily-catalog").status_code == 401
+    login = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    )
+    assert login.status_code == 200
+    empty = client.get("/api/hygiene/staff/daily-catalog")
+    assert empty.status_code == 200
+    zones = empty.json()["zones"]
+    assert [zone["name"] for zone in zones] == list(SEED_ZONE_NAMES)
+    assert zones[0]["items"] == []
+    anban = next(zone for zone in _run(work.list_zones()) if zone["name"] == "案板")
+    photo = b"STAFF-CATALOG-JPEG-LITERAL"
+    item = _run(
+        work.add_daily_item(
+            SUPER,
+            anban["id"],
+            "案板表面",
+            {"bytes": photo, "content_type": "image/jpeg", "markup": []},
+        )
+    )
+    catalog = client.get("/api/hygiene/staff/daily-catalog")
+    assert catalog.status_code == 200
+    listed = next(zone for zone in catalog.json()["zones"] if zone["name"] == "案板")
+    assert [row["name"] for row in listed["items"]] == ["案板表面"]
+    image = client.get(f"/api/hygiene/staff/items/{item['id']}/standard")
+    assert image.status_code == 200
+    assert image.content == photo
+    assert image.headers["content-type"].startswith("image/jpeg")

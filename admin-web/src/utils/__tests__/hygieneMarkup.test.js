@@ -1,0 +1,55 @@
+import { describe, expect, it } from 'vitest'
+import {
+  MARK_KINDS,
+  clamp01,
+  createArrowMark,
+  createCaptionMark,
+  createCircleMark,
+  parseMarkup,
+  standardImageUrl,
+} from '../hygieneMarkup.js'
+
+describe('hygieneMarkup', () => {
+  it('圆圈箭头批注三种标注，坐标夹在 0 到 1', () => {
+    expect(MARK_KINDS).toEqual(['circle', 'arrow', 'caption'])
+    expect(createCircleMark(-1, 2, 0.08)).toEqual({ kind: 'circle', x: 0, y: 1, r: 0.08 })
+    expect(createArrowMark(0.2, 0.8, 0.5, 0.4)).toEqual({
+      kind: 'arrow',
+      x1: 0.2,
+      y1: 0.8,
+      x2: 0.5,
+      y2: 0.4,
+    })
+    expect(createCaptionMark(0.5, 0.9, '  擦干净  ')).toEqual({
+      kind: 'caption',
+      x: 0.5,
+      y: 0.9,
+      text: '擦干净',
+    })
+    expect(clamp01('nope')).toBe(0)
+  })
+
+  it('解析标注时丢掉不明类型，坏 JSON 当空', () => {
+    expect(parseMarkup('not-json')).toEqual([])
+    expect(parseMarkup({ kind: 'circle' })).toEqual([])
+    expect(
+      parseMarkup([
+        { kind: 'circle', x: 0.4, y: 0.3, r: 0.08 },
+        { kind: 'polygon', x: 0 },
+        { kind: 'caption', x: 0.5, y: 0.9, text: '擦干净' },
+      ]),
+    ).toEqual([
+      { kind: 'circle', x: 0.4, y: 0.3, r: 0.08 },
+      { kind: 'caption', x: 0.5, y: 0.9, text: '擦干净' },
+    ])
+  })
+
+  it('标准图地址带当前版本，换图后预览不会吃到旧缓存', () => {
+    expect(standardImageUrl('staff', { id: 10, current_standard_id: 3 })).toBe(
+      '/api/hygiene/staff/items/10/standard?v=3',
+    )
+    expect(standardImageUrl('admin', { id: 10, current_standard_id: 4 })).toBe(
+      '/api/hygiene/admin/items/10/standard?v=4',
+    )
+  })
+})

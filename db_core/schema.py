@@ -431,9 +431,16 @@ async def apply_recipe_schema(conn) -> None:
     await migrate_recipe_columns(conn)
 
 
-# Hygiene employee tables live in app.db but stay out of ALL_TABLES: Admin
-# generic CRUD must not be the write path (EmployeeAccounts owns writes).
-HYGIENE_TABLES = ("hygiene_employees", "hygiene_staff_sessions", "hygiene_shift_picks")
+# Hygiene tables live in app.db but stay out of ALL_TABLES: Admin generic
+# CRUD must not be the write path (EmployeeAccounts / HygieneWork own writes).
+HYGIENE_TABLES = (
+    "hygiene_employees",
+    "hygiene_staff_sessions",
+    "hygiene_shift_picks",
+    "hygiene_zones",
+    "hygiene_daily_items",
+    "hygiene_standards",
+)
 
 _HYGIENE_TABLE_SCHEMAS = {
     "hygiene_employees": """
@@ -471,6 +478,37 @@ _HYGIENE_TABLE_SCHEMAS = {
             FOREIGN KEY (employee_id) REFERENCES hygiene_employees(id)
         )
     """,
+    "hygiene_zones": """
+        CREATE TABLE IF NOT EXISTS hygiene_zones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """,
+    "hygiene_daily_items": """
+        CREATE TABLE IF NOT EXISTS hygiene_daily_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            zone_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            current_standard_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (zone_id, name),
+            FOREIGN KEY (zone_id) REFERENCES hygiene_zones(id)
+        )
+    """,
+    "hygiene_standards": """
+        CREATE TABLE IF NOT EXISTS hygiene_standards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            capture_id TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            markup_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (item_id) REFERENCES hygiene_daily_items(id)
+        )
+    """,
 }
 
 _HYGIENE_INDEX_DEFINITIONS = {
@@ -485,11 +523,22 @@ _HYGIENE_INDEX_DEFINITIONS = {
         "CREATE INDEX IF NOT EXISTS idx_hygiene_shift_picks_date "
         "ON hygiene_shift_picks(business_date)",
     ],
+    "hygiene_zones": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_zones_name ON hygiene_zones(name)",
+    ],
+    "hygiene_daily_items": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_daily_items_zone "
+        "ON hygiene_daily_items(zone_id)",
+    ],
+    "hygiene_standards": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_standards_item "
+        "ON hygiene_standards(item_id)",
+    ],
 }
 
 
 async def apply_hygiene_schema(conn) -> None:
-    """Create hygiene employee/session/shift tables on app.db. Not ALL_TABLES."""
+    """Create hygiene tables on app.db. Not ALL_TABLES."""
     for sql in _HYGIENE_TABLE_SCHEMAS.values():
         await conn.executescript(sql)
     for stmts in _HYGIENE_INDEX_DEFINITIONS.values():
