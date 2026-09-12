@@ -7,6 +7,8 @@ import {
   createCircleMark,
   dailyCaptureUrl,
   deepCleanShotUrl,
+  fixOriginalUrl,
+  fixReshootUrl,
   formatWatermarkTime,
   frozenStandardUrl,
   parseMarkup,
@@ -85,5 +87,11 @@ describe('hygieneMarkup', () => {
     expect(deepCleanShotUrl('admin', row, 'after')).toBe(
       '/api/hygiene/admin/deep-clean/4/after?v=after-2',
     )
+  })
+
+  it('整改单原图和回拍地址带版本，不把原图叠进镜头路径', () => {
+    const ticket = { id: 9, capture_id: 'open-1', reshoot_capture_id: 'reshot-2' }
+    expect(fixOriginalUrl('staff', ticket)).toBe('/api/hygiene/staff/fix/9/original?v=open-1')
+    expect(fixReshootUrl('admin', ticket)).toBe('/api/hygiene/admin/fix/9/reshoot?v=reshot-2')
   })
 })

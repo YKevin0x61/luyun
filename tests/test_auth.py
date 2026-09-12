@@ -315,7 +315,7 @@ def test_hygiene_staff_pages_accessible_without_admin_session(auth_app_client):
 
 def test_hygiene_roster_html_requires_admin_session(auth_app_client):
     client, _ = auth_app_client
-    for path in ("/hygiene-roster", "/hygiene-zones", "/hygiene-daily", "/hygiene-deep-clean"):
+    for path in ("/hygiene-roster", "/hygiene-zones", "/hygiene-daily", "/hygiene-deep-clean", "/hygiene-fix"):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         assert resp.status_code == 302, path
         assert resp.headers["location"].startswith("/login"), path

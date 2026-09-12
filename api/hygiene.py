@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any, Dict, Optional
 import json
 
@@ -47,6 +48,10 @@ _ERROR_DETAILS = {
     "photographer_required": "拍摄人未知",
     "invalid_clock": "逾期点须为 HH:MM，例如 15:00",
     "invalid_weekday": "请选择周一到周日",
+    "invalid_type": "整改类型只能是卫生、摆放或标签",
+    "invalid_body": "请写明哪里脏、怎么改",
+    "invalid_duration": "请填写整改时限",
+    "ticket_not_found": "整改单不存在",
 }
 
 
@@ -76,7 +81,7 @@ def _http_error(exc: EmployeeAccountsError) -> HTTPException:
 def _work_http_error(exc: HygieneWorkError) -> HTTPException:
     if exc.code in ("forbidden", "cannot_self_accept"):
         status = 403
-    elif exc.code in ("zone_not_found", "item_not_found"):
+    elif exc.code in ("zone_not_found", "item_not_found", "ticket_not_found"):
         status = 404
     elif exc.code in ("duplicate_zone", "duplicate_item"):
         status = 409
@@ -878,3 +883,251 @@ async def admin_deep_clean_after(
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
     return await _deep_clean_shot_response(work, item_id, "after")
+
+
+def _parse_duration_hours(raw: Optional[str]) -> timedelta:
+    try:
+        hours = float((raw or "").strip())
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=_ERROR_DETAILS["invalid_duration"]) from exc
+    if hours <= 0:
+        raise HTTPException(status_code=400, detail=_ERROR_DETAILS["invalid_duration"])
+    return timedelta(hours=hours)
+
+
+async def _open_fix_from_form(
+    actor: dict,
+    zone_id: int,
+    ticket_type: str,
+    body_text: str,
+    duration_hours: Optional[str],
+    live: Optional[str],
+    file: UploadFile,
+    markup: Optional[str],
+    work: HygieneWork,
+) -> Dict[str, Any]:
+    capture = await _live_capture_from_upload(file, live)
+    capture["markup"] = _parse_markup_field(markup)
+    try:
+        return await work.open_fix(
+            actor,
+            zone_id,
+            ticket_type,
+            body_text,
+            _parse_duration_hours(duration_hours),
+            capture,
+        )
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+async def _fix_shot_response(work: HygieneWork, ticket_id: int, which: str) -> Response:
+    try:
+        ticket = await work.get_fix_ticket(ticket_id)
+        if which == "original":
+            capture_id = ticket["capture_id"]
+            content_type = ticket.get("content_type") or "image/jpeg"
+        else:
+            capture_id = ticket.get("reshoot_capture_id")
+            content_type = ticket.get("reshoot_content_type") or "image/jpeg"
+            if not capture_id:
+                raise HygieneWorkError("not_pending", "not_pending")
+        body = work.capture_bytes(capture_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="实拍不存在") from exc
+    return Response(
+        content=body,
+        media_type=content_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/staff/fix")
+async def staff_list_fix(
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {"items": await work.list_fix_tickets(_staff_actor(staff["employee"]))}
+
+
+@router.post("/staff/fix")
+async def staff_open_fix(
+    zone_id: int = Form(...),
+    ticket_type: str = Form(...),
+    body_text: str = Form(...),
+    duration_hours: Optional[str] = Form(None),
+    live: Optional[str] = Form(None),
+    markup: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return await _open_fix_from_form(
+        _staff_actor(staff["employee"]),
+        zone_id,
+        ticket_type,
+        body_text,
+        duration_hours,
+        live,
+        file,
+        markup,
+        work,
+    )
+
+
+@router.get("/staff/fix/{ticket_id}")
+async def staff_get_fix(
+    ticket_id: int,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.get_fix_ticket(ticket_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.post("/staff/fix/{ticket_id}/reshoot")
+async def staff_reshoot_fix(
+    ticket_id: int,
+    live: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    capture = await _live_capture_from_upload(file, live)
+    try:
+        return await work.reshoot_fix(_staff_actor(staff["employee"]), ticket_id, capture)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.post("/staff/fix/{ticket_id}/accept")
+async def staff_accept_fix(
+    ticket_id: int,
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.accept_fix(_staff_actor(staff["employee"]), ticket_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.post("/staff/fix/{ticket_id}/reject")
+async def staff_reject_fix(
+    ticket_id: int,
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.reject_fix(_staff_actor(staff["employee"]), ticket_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/staff/fix/{ticket_id}/original")
+async def staff_fix_original(
+    ticket_id: int,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _fix_shot_response(work, ticket_id, "original")
+
+
+@router.get("/staff/fix/{ticket_id}/reshoot")
+async def staff_fix_reshoot_image(
+    ticket_id: int,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _fix_shot_response(work, ticket_id, "reshoot")
+
+
+@router.get("/admin/fix")
+async def admin_list_fix(
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {"items": await work.list_fix_tickets(SUPER_ACTOR)}
+
+
+@router.post("/admin/fix")
+async def admin_open_fix(
+    zone_id: int = Form(...),
+    ticket_type: str = Form(...),
+    body_text: str = Form(...),
+    duration_hours: Optional[str] = Form(None),
+    live: Optional[str] = Form(None),
+    markup: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return await _open_fix_from_form(
+        SUPER_ACTOR,
+        zone_id,
+        ticket_type,
+        body_text,
+        duration_hours,
+        live,
+        file,
+        markup,
+        work,
+    )
+
+
+@router.get("/admin/fix/{ticket_id}")
+async def admin_get_fix(
+    ticket_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.get_fix_ticket(ticket_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.post("/admin/fix/{ticket_id}/accept")
+async def admin_accept_fix(
+    ticket_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.accept_fix(SUPER_ACTOR, ticket_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.post("/admin/fix/{ticket_id}/reject")
+async def admin_reject_fix(
+    ticket_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.reject_fix(SUPER_ACTOR, ticket_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/admin/fix/{ticket_id}/original")
+async def admin_fix_original(
+    ticket_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _fix_shot_response(work, ticket_id, "original")
+
+
+@router.get("/admin/fix/{ticket_id}/reshoot")
+async def admin_fix_reshoot_image(
+    ticket_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _fix_shot_response(work, ticket_id, "reshoot")

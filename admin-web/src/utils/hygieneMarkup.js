@@ -95,6 +95,20 @@ export function deepCleanShotUrl(kind, row, which) {
   return `${prefix}/deep-clean/${itemId}/${which}?v=${version}`
 }
 
+export function fixOriginalUrl(kind, ticket) {
+  const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
+  const id = ticket && ticket.id
+  const version = encodeURIComponent((ticket && ticket.capture_id) || '')
+  return `${prefix}/fix/${id}/original?v=${version}`
+}
+
+export function fixReshootUrl(kind, ticket) {
+  const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
+  const id = ticket && ticket.id
+  const version = encodeURIComponent((ticket && ticket.reshoot_capture_id) || '')
+  return `${prefix}/fix/${id}/reshoot?v=${version}`
+}
+
 export function formatWatermarkTime(value) {
   const raw = String(value || '')
   const matched = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(raw)

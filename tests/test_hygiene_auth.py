@@ -566,3 +566,65 @@ def test_staff_both_shifts_submit_deep_clean_staff_cannot_configure_admin_can(hy
     assert super_accept.json()["status"] == "已通过"
     done = _run(work.list_deep_clean_work({"kind": "super"}))
     assert done["status"] == "已完成"
+
+
+def _open_fix(client, path, zone_id, data=SHOT_A, live="true", ticket_type="卫生"):
+    return client.post(
+        path,
+        data={
+            "live": live,
+            "zone_id": str(zone_id),
+            "ticket_type": ticket_type,
+            "body_text": "案板有油，用热水擦干净",
+            "duration_hours": "2",
+        },
+        files={"file": ("shot.jpg", data, "image/jpeg")},
+    )
+
+
+def test_staff_regular_cannot_open_fix_admin_can_super_needs_live(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    _approve_staff(accounts, PHONE, "白班")
+    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _approve_staff(accounts, PHONE_NIGHT, "夜班")
+    anban = next(zone for zone in _run(work.list_zones()) if zone["name"] == "案板")
+    zone_id = anban["id"]
+
+    _staff_login(client, PHONE)
+    denied = _open_fix(client, "/api/hygiene/staff/fix", zone_id)
+    assert denied.status_code == 403
+    listed = client.get("/api/hygiene/staff/fix")
+    assert listed.status_code == 200
+    assert listed.json()["items"] == []
+
+    _staff_login(client, PHONE_ADMIN)
+    opened = _open_fix(client, "/api/hygiene/staff/fix", zone_id)
+    assert opened.status_code == 200
+    ticket = opened.json()
+    assert ticket["status"] == "待回拍"
+    assert ticket["ticket_type"] == "卫生"
+    original = client.get(f"/api/hygiene/staff/fix/{ticket['id']}/original")
+    assert original.status_code == 200
+    assert original.content == SHOT_A
+
+    _staff_login(client, PHONE_NIGHT)
+    reshot = client.post(
+        f"/api/hygiene/staff/fix/{ticket['id']}/reshoot",
+        data={"live": "true"},
+        files={"file": ("reshot.jpg", SHOT_B, "image/jpeg")},
+    )
+    assert reshot.status_code == 200
+    assert reshot.json()["status"] == "待验收"
+    capture = client.get(f"/api/hygiene/staff/fix/{ticket['id']}/reshoot")
+    assert capture.status_code == 200
+    assert capture.content == SHOT_B
+
+    client.cookies.clear()
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200
+    no_live = _open_fix(client, "/api/hygiene/admin/fix", zone_id, live="false")
+    assert no_live.status_code == 400
+    super_open = _open_fix(client, "/api/hygiene/admin/fix", zone_id, data=b"SUPER-LIVE")
+    assert super_open.status_code == 200
+    assert super_open.json()["opener_kind"] == "super"
+    assert super_open.json()["status"] == "待回拍"

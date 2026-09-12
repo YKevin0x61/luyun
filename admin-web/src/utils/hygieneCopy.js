@@ -3,6 +3,7 @@
 export const HYGIENE_PERMISSIONS = ['普通员工', '管理员']
 export const HYGIENE_SHIFTS = ['白班', '夜班']
 export const HYGIENE_WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+export const HYGIENE_FIX_TYPES = ['卫生', '摆放', '标签']
 
 export function isAllowedHygienePermission(permission) {
   return HYGIENE_PERMISSIONS.includes(permission)
@@ -29,6 +30,25 @@ export function hygieneWeekdayLabel(weekday) {
     return HYGIENE_WEEKDAYS[index]
   }
   return ''
+}
+
+export function hasLiveCamera() {
+  return Boolean(
+    typeof navigator !== 'undefined'
+      && navigator.mediaDevices
+      && typeof navigator.mediaDevices.getUserMedia === 'function',
+  )
+}
+
+export function canAcceptFixTicket(actor, ticket, now = Date.now()) {
+  if (!ticket || ticket.status !== '待验收') return false
+  if (actor && actor.kind === 'super' && ticket.opener_kind === 'super') return true
+  if (actor && actor.id != null && Number(actor.id) === Number(ticket.opener_id)) return true
+  if (!actor) return false
+  const isAdmin = actor.kind === 'super' || actor.permission === '管理员'
+  if (!isAdmin) return false
+  const deadline = Date.parse(ticket.deadline)
+  return Number.isFinite(deadline) && now >= deadline
 }
 
 export function rosterStatusLabel(employee) {

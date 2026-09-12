@@ -22,6 +22,7 @@ const routes = [
   { path: '/hygiene-zones', name: 'hygiene-zones', component: () => import('../views/hygiene/HygieneZonesView.vue') },
   { path: '/hygiene-daily', name: 'hygiene-daily', component: () => import('../views/hygiene/HygieneDailyView.vue') },
   { path: '/hygiene-deep-clean', name: 'hygiene-deep-clean', component: () => import('../views/hygiene/HygieneDeepCleanView.vue') },
+  { path: '/hygiene-fix', name: 'hygiene-fix', component: () => import('../views/hygiene/HygieneFixView.vue') },
   { path: '/hygiene', name: 'hygiene-home', component: () => import('../views/hygiene/HygieneHomeView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true } },
   { path: '/hygiene/login', name: 'hygiene-login', component: () => import('../views/hygiene/HygieneLoginView.vue'), meta: HYGIENE_STAFF_META },
   { path: '/hygiene/register', name: 'hygiene-register', component: () => import('../views/hygiene/HygieneRegisterView.vue'), meta: HYGIENE_STAFF_META },

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""卫生责任区、日常检查项、当前标准图、日常提交与验收、专项卫生、逾期群通知、红黑榜事件。
+"""卫生责任区、日常检查项、当前标准图、日常提交与验收、专项卫生、整改单、逾期群通知、红黑榜事件。
 
 Does not hash passwords or issue staff sessions. Captures stay off SQLite WAL.
 """
@@ -29,6 +29,10 @@ SEED_ZONE_NAMES = ("案板", "馅档", "熟笼", "肠粉", "西饼", "明档1", 
 STATUS_TODO = "待拍"
 STATUS_PENDING = "待验收"
 STATUS_PASSED = "已通过"
+STATUS_FIX_TODO = "待回拍"
+FIX_TYPES = ("卫生", "摆放", "标签")
+OPENER_STAFF = "staff"
+OPENER_SUPER = "super"
 DAILY_SHIFTS = (SHIFT_DAY, SHIFT_NIGHT)
 DEFAULT_DAY_OVERDUE_HHMM = "15:00"
 DEFAULT_NIGHT_OVERDUE_HHMM = "21:30"
@@ -890,6 +894,7 @@ class HygieneWork:
         deep_notice = await self._sweep_deep_clean_overdue(now, business_date)
         if deep_notice is not None:
             notified.append(deep_notice)
+        notified.extend(await self._sweep_fix_overdue(now))
         return notified
 
     async def _deep_clean_complete(self, business_date: str) -> bool:
@@ -1352,6 +1357,435 @@ class HygieneWork:
             "business_date": instance["business_date"],
             "status": STATUS_TODO,
         }
+
+    def _as_duration(self, duration) -> timedelta:
+        if isinstance(duration, timedelta):
+            if duration.total_seconds() <= 0:
+                raise HygieneWorkError("invalid_duration", "invalid_duration")
+            return duration
+        raise HygieneWorkError("invalid_duration", "invalid_duration")
+
+    def _parse_iso(self, raw: str) -> datetime:
+        value = datetime.fromisoformat(raw)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=CHINA_TZ)
+        return value
+
+    def _duration_label(self, seconds: int) -> str:
+        hours = seconds / 3600
+        if hours == int(hours):
+            return f"{int(hours)} 小时"
+        return f"{hours:g} 小时"
+
+    def _require_fix_opener(self, actor: dict) -> None:
+        if actor and actor.get("kind") == "super":
+            return
+        if (
+            actor
+            and actor.get("kind") == "staff"
+            and actor.get("permission") == PERMISSION_ADMIN
+        ):
+            return
+        raise HygieneWorkError("forbidden", "forbidden")
+
+    def _is_fix_opener(self, actor: dict, ticket: dict) -> bool:
+        if not actor:
+            return False
+        if ticket["opener_kind"] == OPENER_SUPER:
+            return actor.get("kind") == "super"
+        if actor.get("kind") != "staff":
+            return False
+        return int(actor.get("id") or 0) == int(ticket["opener_id"] or 0)
+
+    def _require_fix_reviewer(self, actor: dict, ticket: dict) -> None:
+        if self._is_fix_opener(actor, ticket):
+            return
+        deadline = self._parse_iso(ticket["deadline"])
+        if self._now_dt() < deadline:
+            raise HygieneWorkError("forbidden", "forbidden")
+        if actor and actor.get("kind") == "super":
+            return
+        if (
+            actor
+            and actor.get("kind") == "staff"
+            and actor.get("permission") == PERMISSION_ADMIN
+        ):
+            return
+        raise HygieneWorkError("forbidden", "forbidden")
+
+    def _fix_open_text(self, zone_name: str, ticket_type: str, body: str, seconds: int) -> str:
+        return (
+            f"【整改单】{zone_name} · {ticket_type}：{body}"
+            f" 时限 {self._duration_label(seconds)}。"
+            "请到员工卫生入口回拍。"
+        )
+
+    def _fix_overdue_text(self, ticket: dict) -> str:
+        return (
+            f"【卫生逾期】整改单 {ticket['zone_name']} · {ticket['ticket_type']}"
+            "已到时限仍未完成，请到员工卫生入口处理。"
+        )
+
+    def _fix_row(self, ticket: dict, reshoot=None) -> dict:
+        opener_id = ticket.get("opener_id")
+        watermark = None
+        reshoot_capture_id = None
+        if reshoot is not None:
+            reshoot_capture_id = reshoot["capture_id"]
+            watermark = self._watermark(
+                reshoot["captured_at"],
+                reshoot["zone_name"],
+                reshoot["photographer_phone"],
+            )
+        return {
+            "id": int(ticket["id"]),
+            "zone_id": int(ticket["zone_id"]),
+            "zone_name": ticket["zone_name"],
+            "ticket_type": ticket["ticket_type"],
+            "body_text": ticket["body_text"],
+            "deadline": ticket["deadline"],
+            "opener_kind": ticket["opener_kind"],
+            "opener_id": None if opener_id is None else int(opener_id),
+            "status": ticket["status"],
+            "capture_id": ticket["capture_id"],
+            "content_type": ticket.get("content_type"),
+            "markup": self._parse_markup(ticket.get("markup_json") or "[]"),
+            "reshoot_capture_id": reshoot_capture_id,
+            "reshoot_content_type": None if reshoot is None else reshoot.get("content_type"),
+            "watermark": watermark,
+        }
+
+    async def _fetch_fix_ticket(self, ticket_id: int):
+        cur = await self._conn.execute(
+            """SELECT t.id, t.zone_id, t.ticket_type, t.body_text, t.duration_seconds,
+                      t.deadline, t.opener_kind, t.opener_id, t.opener_phone, t.status,
+                      t.capture_id, t.content_type, t.markup_json, t.pending_reshoot_id,
+                      z.name AS zone_name
+               FROM hygiene_fix_tickets t
+               JOIN hygiene_zones z ON z.id = t.zone_id
+               WHERE t.id = ?""",
+            (int(ticket_id),),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
+
+    async def _fetch_fix_reshoot(self, reshoot_id):
+        if not reshoot_id:
+            return None
+        cur = await self._conn.execute(
+            """SELECT id, ticket_id, capture_id, content_type, photographer_id,
+                      photographer_phone, zone_name, captured_at
+               FROM hygiene_fix_reshoots WHERE id = ?""",
+            (int(reshoot_id),),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
+
+    async def _latest_fix_reshoot(self, ticket_id: int):
+        cur = await self._conn.execute(
+            """SELECT id, ticket_id, capture_id, content_type, photographer_id,
+                      photographer_phone, zone_name, captured_at
+               FROM hygiene_fix_reshoots
+               WHERE ticket_id = ?
+               ORDER BY id DESC LIMIT 1""",
+            (int(ticket_id),),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
+
+    async def open_fix(
+        self,
+        actor: dict,
+        zone_id: int,
+        ticket_type: str,
+        body_text: str,
+        duration,
+        live_capture,
+        markup=None,
+    ) -> dict:
+        self._require_fix_opener(actor)
+        data = self._require_live_capture(live_capture)
+        cleaned_type = (ticket_type or "").strip()
+        if cleaned_type not in FIX_TYPES:
+            raise HygieneWorkError("invalid_type", "invalid_type")
+        cleaned_body = (body_text or "").strip()
+        if not cleaned_body:
+            raise HygieneWorkError("invalid_body", "invalid_body")
+        span = self._as_duration(duration)
+        zone = await self._fetch_zone(zone_id)
+        if zone is None:
+            raise HygieneWorkError("zone_not_found", "zone_not_found")
+        zone_name = dict(zone)["name"]
+        if actor.get("kind") == "super":
+            opener_kind = OPENER_SUPER
+            opener_id = None
+            opener_phone = self._photographer(actor) or "超级管理员"
+        else:
+            opener_kind = OPENER_STAFF
+            opener_id = int(actor["id"])
+            opener_phone = self._photographer(actor)
+            if not opener_phone:
+                raise HygieneWorkError("photographer_required", "photographer_required")
+        marks = markup
+        if marks is None and live_capture is not None:
+            marks = live_capture.get("markup")
+        content_type = (live_capture.get("content_type") or "image/jpeg").strip()
+        capture_id = self._captures.put(data, content_type=content_type)
+        now = self._now_iso()
+        duration_seconds = int(span.total_seconds())
+        deadline = (self._now_dt() + span).isoformat()
+        cur = await self._conn.execute(
+            """INSERT INTO hygiene_fix_tickets
+               (zone_id, ticket_type, body_text, duration_seconds, deadline,
+                opener_kind, opener_id, opener_phone, status, capture_id,
+                content_type, markup_json, pending_reshoot_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+            (
+                int(zone_id),
+                cleaned_type,
+                cleaned_body,
+                duration_seconds,
+                deadline,
+                opener_kind,
+                opener_id,
+                opener_phone,
+                STATUS_FIX_TODO,
+                capture_id,
+                content_type,
+                self._markup_json({"markup": marks or []}),
+                now,
+                now,
+            ),
+        )
+        ticket_id = int(cur.lastrowid)
+        await self._conn.commit()
+        text = self._fix_open_text(zone_name, cleaned_type, cleaned_body, duration_seconds)
+        if self._notifier is not None:
+            await self._notifier.notify_group_text(text)
+        logger.info(
+            "hygiene fix opened id=%s zone=%s type=%s",
+            ticket_id,
+            zone_id,
+            cleaned_type,
+        )
+        return {
+            "id": ticket_id,
+            "zone_id": int(zone_id),
+            "zone_name": zone_name,
+            "ticket_type": cleaned_type,
+            "body_text": cleaned_body,
+            "deadline": deadline,
+            "opener_kind": opener_kind,
+            "opener_id": opener_id,
+            "status": STATUS_FIX_TODO,
+            "capture_id": capture_id,
+            "markup": marks or [],
+            "reshoot_capture_id": None,
+            "watermark": None,
+        }
+
+    async def list_fix_tickets(self, actor: dict) -> list:
+        del actor  # shop-wide; 班次 does not gate 整改单
+        cur = await self._conn.execute(
+            """SELECT t.id, t.zone_id, t.ticket_type, t.body_text, t.duration_seconds,
+                      t.deadline, t.opener_kind, t.opener_id, t.opener_phone, t.status,
+                      t.capture_id, t.content_type, t.markup_json, t.pending_reshoot_id,
+                      z.name AS zone_name
+               FROM hygiene_fix_tickets t
+               JOIN hygiene_zones z ON z.id = t.zone_id
+               WHERE t.status != ?
+               ORDER BY t.id ASC""",
+            (STATUS_PASSED,),
+        )
+        rows = []
+        for row in await cur.fetchall():
+            ticket = dict(row)
+            reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
+            rows.append(self._fix_row(ticket, reshoot))
+        return rows
+
+    async def get_fix_ticket(self, ticket_id: int) -> dict:
+        ticket = await self._fetch_fix_ticket(ticket_id)
+        if ticket is None:
+            raise HygieneWorkError("ticket_not_found", "ticket_not_found")
+        reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
+        return self._fix_row(ticket, reshoot)
+
+    async def get_fix_review(self, ticket_id: int) -> dict:
+        ticket = await self._fetch_fix_ticket(ticket_id)
+        if ticket is None:
+            raise HygieneWorkError("ticket_not_found", "ticket_not_found")
+        if ticket["status"] != STATUS_PENDING:
+            raise HygieneWorkError("not_pending", "not_pending")
+        reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
+        if reshoot is None:
+            raise HygieneWorkError("not_pending", "not_pending")
+        return self._fix_row(ticket, reshoot)
+
+    async def reshoot_fix(self, actor: dict, ticket_id: int, live_capture) -> dict:
+        self._require_staff_submitter(actor)
+        data = self._require_live_capture(live_capture)
+        ticket = await self._fetch_fix_ticket(ticket_id)
+        if ticket is None:
+            raise HygieneWorkError("ticket_not_found", "ticket_not_found")
+        if ticket["status"] == STATUS_PASSED:
+            raise HygieneWorkError("already_accepted", "already_accepted")
+        photographer = self._photographer(actor)
+        if not photographer:
+            raise HygieneWorkError("photographer_required", "photographer_required")
+        content_type = (live_capture.get("content_type") or "image/jpeg").strip()
+        capture_id = self._captures.put(data, content_type=content_type)
+        now = self._now_iso()
+        cur = await self._conn.execute(
+            """INSERT INTO hygiene_fix_reshoots
+               (ticket_id, capture_id, content_type, photographer_id,
+                photographer_phone, zone_name, captured_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                int(ticket_id),
+                capture_id,
+                content_type,
+                int(actor["id"]),
+                photographer,
+                ticket["zone_name"],
+                now,
+                now,
+            ),
+        )
+        reshoot_id = int(cur.lastrowid)
+        await self._conn.execute(
+            """UPDATE hygiene_fix_tickets
+               SET status = ?, pending_reshoot_id = ?, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_PENDING, reshoot_id, now, int(ticket_id)),
+        )
+        await self._conn.commit()
+        logger.info(
+            "hygiene fix reshot ticket=%s capture=%s",
+            ticket_id,
+            capture_id,
+        )
+        ticket["status"] = STATUS_PENDING
+        ticket["pending_reshoot_id"] = reshoot_id
+        reshoot = {
+            "capture_id": capture_id,
+            "content_type": content_type,
+            "photographer_phone": photographer,
+            "zone_name": ticket["zone_name"],
+            "captured_at": now,
+        }
+        return self._fix_row(ticket, reshoot)
+
+    async def _pending_fix(self, ticket_id: int) -> tuple:
+        ticket = await self._fetch_fix_ticket(ticket_id)
+        if ticket is None:
+            raise HygieneWorkError("ticket_not_found", "ticket_not_found")
+        if ticket["status"] != STATUS_PENDING:
+            raise HygieneWorkError("not_pending", "not_pending")
+        reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
+        if reshoot is None:
+            raise HygieneWorkError("not_pending", "not_pending")
+        return ticket, reshoot
+
+    async def accept_fix(self, actor: dict, ticket_id: int) -> dict:
+        ticket, _reshoot = await self._pending_fix(ticket_id)
+        self._require_fix_reviewer(actor, ticket)
+        now = self._now_iso()
+        await self._conn.execute(
+            """UPDATE hygiene_fix_tickets
+               SET status = ?, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_PASSED, now, int(ticket_id)),
+        )
+        await self._conn.commit()
+        logger.info("hygiene fix accepted ticket=%s", ticket_id)
+        return {
+            "id": int(ticket_id),
+            "status": STATUS_PASSED,
+            "deadline": ticket["deadline"],
+        }
+
+    async def reject_fix(self, actor: dict, ticket_id: int) -> dict:
+        ticket, _reshoot = await self._pending_fix(ticket_id)
+        self._require_fix_reviewer(actor, ticket)
+        now_dt = self._now_dt()
+        now = now_dt.isoformat()
+        deadline = (now_dt + timedelta(seconds=int(ticket["duration_seconds"]))).isoformat()
+        await self._conn.execute(
+            """UPDATE hygiene_fix_tickets
+               SET status = ?, pending_reshoot_id = NULL, deadline = ?, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_FIX_TODO, deadline, now, int(ticket_id)),
+        )
+        await self._conn.commit()
+        logger.info("hygiene fix rejected ticket=%s deadline=%s", ticket_id, deadline)
+        return {
+            "id": int(ticket_id),
+            "status": STATUS_FIX_TODO,
+            "deadline": deadline,
+            "reshoot_capture_id": None,
+        }
+
+    async def _fix_notice_exists(self, ticket_id: int) -> bool:
+        cur = await self._conn.execute(
+            "SELECT 1 FROM hygiene_fix_overdue_notices WHERE ticket_id = ?",
+            (int(ticket_id),),
+        )
+        return await cur.fetchone() is not None
+
+    async def _record_fix_overdue(self, ticket: dict) -> None:
+        now = self._now_iso()
+        ticket_id = int(ticket["id"])
+        zone_id = int(ticket["zone_id"])
+        await self._conn.execute(
+            """INSERT INTO hygiene_fix_overdue_notices (ticket_id, notified_at)
+               VALUES (?, ?)""",
+            (ticket_id, now),
+        )
+        await self._insert_board_event(
+            BOARD_ZONE,
+            EVENT_MISSED_DAILY,
+            zone_id=zone_id,
+        )
+        last = await self._latest_fix_reshoot(ticket_id)
+        if last is not None:
+            await self._insert_board_event(
+                BOARD_PERSON,
+                EVENT_MISSED_DAILY,
+                zone_id=zone_id,
+                employee_id=int(last["photographer_id"]),
+            )
+        await self._conn.commit()
+
+    async def _sweep_fix_overdue(self, now: datetime) -> list:
+        cur = await self._conn.execute(
+            """SELECT t.id, t.zone_id, t.ticket_type, t.body_text, t.deadline, t.status,
+                      z.name AS zone_name
+               FROM hygiene_fix_tickets t
+               JOIN hygiene_zones z ON z.id = t.zone_id
+               WHERE t.status != ?""",
+            (STATUS_PASSED,),
+        )
+        notified = []
+        for row in await cur.fetchall():
+            ticket = dict(row)
+            if self._parse_iso(ticket["deadline"]) > now:
+                continue
+            if await self._fix_notice_exists(int(ticket["id"])):
+                continue
+            text = self._fix_overdue_text(ticket)
+            if self._notifier is not None:
+                await self._notifier.notify_group_text(text)
+            await self._record_fix_overdue(ticket)
+            notified.append(
+                {
+                    "ticket_id": int(ticket["id"]),
+                    "zone_id": int(ticket["zone_id"]),
+                    "kind": "整改单",
+                    "text": text,
+                }
+            )
+        return notified
 
     async def overdue_scheduler_loop(self) -> None:
         logger.info("卫生逾期调度器已启动")

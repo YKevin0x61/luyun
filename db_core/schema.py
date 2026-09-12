@@ -449,6 +449,9 @@ HYGIENE_TABLES = (
     "hygiene_deep_clean_instances",
     "hygiene_deep_clean_submissions",
     "hygiene_deep_clean_overdue_notices",
+    "hygiene_fix_tickets",
+    "hygiene_fix_reshoots",
+    "hygiene_fix_overdue_notices",
 )
 
 _HYGIENE_TABLE_SCHEMAS = {
@@ -626,6 +629,48 @@ _HYGIENE_TABLE_SCHEMAS = {
             notified_at TEXT NOT NULL
         )
     """,
+    "hygiene_fix_tickets": """
+        CREATE TABLE IF NOT EXISTS hygiene_fix_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            zone_id INTEGER NOT NULL,
+            ticket_type TEXT NOT NULL,
+            body_text TEXT NOT NULL,
+            duration_seconds INTEGER NOT NULL,
+            deadline TEXT NOT NULL,
+            opener_kind TEXT NOT NULL,
+            opener_id INTEGER,
+            opener_phone TEXT NOT NULL,
+            status TEXT NOT NULL,
+            capture_id TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            markup_json TEXT NOT NULL DEFAULT '[]',
+            pending_reshoot_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (zone_id) REFERENCES hygiene_zones(id)
+        )
+    """,
+    "hygiene_fix_reshoots": """
+        CREATE TABLE IF NOT EXISTS hygiene_fix_reshoots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            capture_id TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            photographer_id INTEGER NOT NULL,
+            photographer_phone TEXT NOT NULL,
+            zone_name TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (ticket_id) REFERENCES hygiene_fix_tickets(id)
+        )
+    """,
+    "hygiene_fix_overdue_notices": """
+        CREATE TABLE IF NOT EXISTS hygiene_fix_overdue_notices (
+            ticket_id INTEGER PRIMARY KEY NOT NULL,
+            notified_at TEXT NOT NULL,
+            FOREIGN KEY (ticket_id) REFERENCES hygiene_fix_tickets(id)
+        )
+    """,
 }
 
 _HYGIENE_INDEX_DEFINITIONS = {
@@ -678,6 +723,14 @@ _HYGIENE_INDEX_DEFINITIONS = {
     "hygiene_deep_clean_submissions": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_deep_clean_submissions_instance "
         "ON hygiene_deep_clean_submissions(instance_id)",
+    ],
+    "hygiene_fix_tickets": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_fix_tickets_status "
+        "ON hygiene_fix_tickets(status, deadline)",
+    ],
+    "hygiene_fix_reshoots": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_fix_reshoots_ticket "
+        "ON hygiene_fix_reshoots(ticket_id)",
     ],
 }
 

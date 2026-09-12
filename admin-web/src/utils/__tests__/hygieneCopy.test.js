@@ -3,6 +3,8 @@ import {
   HYGIENE_PERMISSIONS,
   HYGIENE_SHIFTS,
   HYGIENE_WEEKDAYS,
+  HYGIENE_FIX_TYPES,
+  canAcceptFixTicket,
   hygienePermissionLabel,
   hygieneShiftLabel,
   hygieneWeekdayLabel,
@@ -48,5 +50,23 @@ describe('hygieneCopy', () => {
     expect(hygieneWeekdayLabel(0)).toBe('周一')
     expect(hygieneWeekdayLabel(6)).toBe('周日')
     expect(hygieneWeekdayLabel(9)).toBe('')
+  })
+
+  it('整改类型只有卫生摆放标签，时限未到只有开单人能验', () => {
+    expect(HYGIENE_FIX_TYPES).toEqual(['卫生', '摆放', '标签'])
+    const ticket = {
+      status: '待验收',
+      opener_id: 20,
+      opener_kind: 'staff',
+      deadline: '2026-09-13T12:00:00+08:00',
+    }
+    const before = Date.parse('2026-09-13T11:59:00+08:00')
+    const after = Date.parse('2026-09-13T12:00:00+08:00')
+    expect(canAcceptFixTicket({ id: 20, permission: '管理员' }, ticket, before)).toBe(true)
+    expect(canAcceptFixTicket({ id: 21, permission: '管理员' }, ticket, before)).toBe(false)
+    expect(canAcceptFixTicket({ kind: 'super' }, ticket, before)).toBe(false)
+    expect(canAcceptFixTicket({ id: 21, permission: '管理员' }, ticket, after)).toBe(true)
+    expect(canAcceptFixTicket({ kind: 'super' }, ticket, after)).toBe(true)
+    expect(canAcceptFixTicket({ id: 10, permission: '普通员工' }, ticket, after)).toBe(false)
   })
 })

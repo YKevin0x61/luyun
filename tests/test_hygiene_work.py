@@ -4,7 +4,7 @@
 
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
@@ -757,6 +757,296 @@ class HygieneDeepCleanTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calendar[0]["business_date"], "2026-09-13")
         self.assertEqual(calendar[0]["status"], "未完成")
         self.assertEqual(calendar[0]["weekday"], SUNDAY)
+
+
+OPEN_BYTES = b"FIX-OPEN-JPEG"
+RESHOOT_A = b"FIX-RESHOOT-A"
+RESHOOT_B = b"FIX-RESHOOT-B"
+TWO_HOURS = timedelta(hours=2)
+OPEN_AT = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
+DEADLINE_AT = datetime(2026, 9, 13, 12, 0, tzinfo=CHINA_TZ)
+CIRCLES = [{"kind": "circle", "x": 0.4, "y": 0.3, "r": 0.08}]
+
+
+class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        self.db = DatabaseManager()
+        await self.db.connect()
+        self.fixed_now = OPEN_AT
+        self.captures = FakeCaptureStore()
+        self.notifier = FakeNotifier()
+        self.work = HygieneWork(
+            self.db,
+            captures=self.captures,
+            now=lambda: self.fixed_now,
+            notifier=self.notifier,
+        )
+        await self.work.prepare()
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        settings.DATABASE_DIR = self._old_database_dir
+        self._tmpdir.cleanup()
+
+    async def _zone_id(self, name):
+        zones = await self.work.list_zones()
+        return next(zone["id"] for zone in zones if zone["name"] == name)
+
+    def _live(self, data, markup=None):
+        capture = {"bytes": data, "content_type": "image/jpeg", "live": True}
+        if markup is not None:
+            capture["markup"] = markup
+        return capture
+
+    async def _open_on(self, actor, zone_name="案板", ticket_type="卫生", body="案板有油，用热水擦干净"):
+        zone_id = await self._zone_id(zone_name)
+        return await self.work.open_fix(
+            actor,
+            zone_id,
+            ticket_type,
+            body,
+            TWO_HOURS,
+            self._live(OPEN_BYTES, CIRCLES),
+        )
+
+    async def test_staff_cannot_open_admin_can_super_needs_live_and_notifies_text(self):
+        zone_id = await self._zone_id("案板")
+        staff = _staff(10, DAY_PHONE, "白班")
+        admin = _staff(20, ADMIN_PHONE, "白班", "管理员")
+        with self.assertRaises(HygieneWorkError) as staff_open:
+            await self.work.open_fix(
+                staff,
+                zone_id,
+                "卫生",
+                "案板有油，用热水擦干净",
+                TWO_HOURS,
+                self._live(OPEN_BYTES),
+            )
+        self.assertEqual(staff_open.exception.code, "forbidden")
+        self.assertEqual(self.notifier.texts, [])
+
+        opened = await self.work.open_fix(
+            admin,
+            zone_id,
+            "卫生",
+            "案板有油，用热水擦干净",
+            TWO_HOURS,
+            self._live(OPEN_BYTES, CIRCLES),
+        )
+        self.assertEqual(opened["status"], "待回拍")
+        self.assertEqual(opened["ticket_type"], "卫生")
+        self.assertEqual(opened["body_text"], "案板有油，用热水擦干净")
+        self.assertEqual(opened["deadline"], "2026-09-13T12:00:00+08:00")
+        self.assertEqual(opened["markup"], CIRCLES)
+        self.assertEqual(self.captures.get(opened["capture_id"]), OPEN_BYTES)
+        self.assertEqual(len(self.notifier.texts), 1)
+        text = self.notifier.texts[0]
+        self.assertIsInstance(text, str)
+        self.assertIn("案板", text)
+        self.assertIn("卫生", text)
+        self.assertNotIn("image", text.lower())
+        self.assertNotIn("FIX-OPEN-JPEG", text)
+        self.assertNotIn("@", text)
+
+        with self.assertRaises(HygieneWorkError) as no_camera:
+            await self.work.open_fix(
+                SUPER,
+                zone_id,
+                "摆放",
+                "盘子叠歪了，重新摆齐",
+                TWO_HOURS,
+                {"bytes": OPEN_BYTES, "content_type": "image/jpeg", "live": False},
+            )
+        self.assertEqual(no_camera.exception.code, "live_required")
+        self.assertEqual(len(self.notifier.texts), 1)
+
+        super_opened = await self.work.open_fix(
+            SUPER,
+            zone_id,
+            "摆放",
+            "盘子叠歪了，重新摆齐",
+            TWO_HOURS,
+            self._live(OPEN_BYTES),
+        )
+        self.assertEqual(super_opened["status"], "待回拍")
+        self.assertEqual(super_opened["opener_kind"], "super")
+        self.assertEqual(len(self.notifier.texts), 2)
+        self.assertNotIn("FIX-OPEN-JPEG", self.notifier.texts[1])
+        self.assertNotIn("image", self.notifier.texts[1].lower())
+
+    async def test_night_staff_can_reshoot_day_opened_ticket(self):
+        opener = _staff(20, ADMIN_PHONE, "白班", "管理员")
+        night = _staff(11, NIGHT_PHONE, "夜班")
+        opened = await self._open_on(opener)
+        listed = await self.work.list_fix_tickets(night)
+        row = next(ticket for ticket in listed if ticket["id"] == opened["id"])
+        self.assertEqual(row["markup"], CIRCLES)
+        self.assertEqual(self.captures.get(row["capture_id"]), OPEN_BYTES)
+        self.assertIsNone(row["reshoot_capture_id"])
+
+        reshot = await self.work.reshoot_fix(night, opened["id"], self._live(RESHOOT_A))
+        self.assertEqual(reshot["status"], "待验收")
+        self.assertEqual(self.captures.get(reshot["reshoot_capture_id"]), RESHOOT_A)
+        self.assertEqual(
+            reshot["watermark"],
+            {
+                "time": "2026-09-13T10:00:00+08:00",
+                "zone": "案板",
+                "photographer": NIGHT_PHONE,
+            },
+        )
+        after = next(
+            ticket
+            for ticket in await self.work.list_fix_tickets(night)
+            if ticket["id"] == opened["id"]
+        )
+        self.assertEqual(self.captures.get(after["capture_id"]), OPEN_BYTES)
+        self.assertEqual(after["markup"], CIRCLES)
+        self.assertEqual(self.captures.get(after["reshoot_capture_id"]), RESHOOT_A)
+
+    async def test_other_admin_cannot_accept_before_deadline_can_after(self):
+        opener = _staff(20, ADMIN_PHONE, "白班", "管理员")
+        other = _staff(21, OTHER_ADMIN_PHONE, "白班", "管理员")
+        regular = _staff(10, DAY_PHONE, "白班")
+        opened = await self._open_on(opener)
+        later = await self._open_on(
+            opener, zone_name="馅档", ticket_type="标签", body="日期贴掉了，重贴"
+        )
+        await self.work.reshoot_fix(regular, opened["id"], self._live(RESHOOT_A))
+        await self.work.reshoot_fix(regular, later["id"], self._live(RESHOOT_B))
+
+        self.fixed_now = datetime(2026, 9, 13, 11, 59, tzinfo=CHINA_TZ)
+        with self.assertRaises(HygieneWorkError) as too_soon:
+            await self.work.accept_fix(other, opened["id"])
+        self.assertEqual(too_soon.exception.code, "forbidden")
+        with self.assertRaises(HygieneWorkError) as super_too_soon:
+            await self.work.accept_fix(SUPER, opened["id"])
+        self.assertEqual(super_too_soon.exception.code, "forbidden")
+        passed_by_opener = await self.work.accept_fix(opener, opened["id"])
+        self.assertEqual(passed_by_opener["status"], "已通过")
+
+        self.fixed_now = DEADLINE_AT
+        with self.assertRaises(HygieneWorkError) as staff_accept:
+            await self.work.accept_fix(regular, later["id"])
+        self.assertEqual(staff_accept.exception.code, "forbidden")
+        passed = await self.work.accept_fix(other, later["id"])
+        self.assertEqual(passed["status"], "已通过")
+
+    async def test_disabled_opener_still_blocks_others_until_deadline(self):
+        from services.hygiene.accounts import EmployeeAccounts
+
+        accounts = EmployeeAccounts(self.db, now=lambda: self.fixed_now)
+        registered = await accounts.register(ADMIN_PHONE, "password123")
+        await accounts.approve(registered["id"])
+        opener_row = await accounts.set_permission(registered["id"], "管理员")
+        opener = _staff(opener_row["id"], ADMIN_PHONE, "白班", "管理员")
+        other = _staff(21, OTHER_ADMIN_PHONE, "白班", "管理员")
+        opened = await self._open_on(opener)
+        await self.work.reshoot_fix(
+            _staff(10, DAY_PHONE, "白班"), opened["id"], self._live(RESHOOT_A)
+        )
+        await accounts.disable(opener_row["id"])
+
+        self.fixed_now = datetime(2026, 9, 13, 11, 0, tzinfo=CHINA_TZ)
+        with self.assertRaises(HygieneWorkError) as still_waiting:
+            await self.work.accept_fix(other, opened["id"])
+        self.assertEqual(still_waiting.exception.code, "forbidden")
+        with self.assertRaises(HygieneWorkError) as super_waiting:
+            await self.work.accept_fix(SUPER, opened["id"])
+        self.assertEqual(super_waiting.exception.code, "forbidden")
+
+        self.fixed_now = DEADLINE_AT
+        passed = await self.work.accept_fix(other, opened["id"])
+        self.assertEqual(passed["status"], "已通过")
+
+    async def test_reject_restarts_same_two_hour_deadline_from_reject_now(self):
+        opener = _staff(20, ADMIN_PHONE, "白班", "管理员")
+        opened = await self._open_on(opener)
+        self.assertEqual(opened["deadline"], "2026-09-13T12:00:00+08:00")
+        await self.work.reshoot_fix(
+            _staff(10, DAY_PHONE, "白班"), opened["id"], self._live(RESHOOT_A)
+        )
+        reject_at = datetime(2026, 9, 13, 11, 0, tzinfo=CHINA_TZ)
+        self.fixed_now = reject_at
+        rejected = await self.work.reject_fix(opener, opened["id"])
+        self.assertEqual(rejected["status"], "待回拍")
+        self.assertEqual(rejected["deadline"], "2026-09-13T13:00:00+08:00")
+        listed = next(
+            ticket
+            for ticket in await self.work.list_fix_tickets(opener)
+            if ticket["id"] == opened["id"]
+        )
+        self.assertEqual(listed["deadline"], "2026-09-13T13:00:00+08:00")
+        self.assertIsNone(listed["reshoot_capture_id"])
+
+    async def test_later_reshoot_replaces_pending_capture_bytes(self):
+        opener = _staff(20, ADMIN_PHONE, "白班", "管理员")
+        night = _staff(11, NIGHT_PHONE, "夜班")
+        opened = await self._open_on(opener)
+        first = await self.work.reshoot_fix(night, opened["id"], self._live(RESHOOT_A))
+        second = await self.work.reshoot_fix(
+            _staff(10, DAY_PHONE, "白班"), opened["id"], self._live(RESHOOT_B)
+        )
+        self.assertEqual(second["status"], "待验收")
+        self.assertNotEqual(second["reshoot_capture_id"], first["reshoot_capture_id"])
+        listed = next(
+            ticket
+            for ticket in await self.work.list_fix_tickets(night)
+            if ticket["id"] == opened["id"]
+        )
+        self.assertEqual(self.captures.get(listed["reshoot_capture_id"]), RESHOOT_B)
+        self.assertNotEqual(self.captures.get(listed["reshoot_capture_id"]), RESHOOT_A)
+        self.assertEqual(self.captures.get(listed["capture_id"]), OPEN_BYTES)
+
+    async def test_sweep_no_reshoot_reddens_zone_only_reshoot_counts_photographer(self):
+        opener = _staff(20, ADMIN_PHONE, "白班", "管理员")
+        night = _staff(11, NIGHT_PHONE, "夜班")
+        missed = await self._open_on(opener, zone_name="案板")
+        shot = await self._open_on(opener, zone_name="馅档", ticket_type="摆放", body="托盘乱，收整齐")
+        await self.work.reshoot_fix(night, shot["id"], self._live(RESHOOT_A))
+        await self.work.reshoot_fix(
+            _staff(10, DAY_PHONE, "白班"), shot["id"], self._live(RESHOOT_B)
+        )
+        open_texts = list(self.notifier.texts)
+
+        self.fixed_now = datetime(2026, 9, 13, 11, 59, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(self.notifier.texts, open_texts)
+
+        self.fixed_now = DEADLINE_AT
+        await self.work.sweep_overdue()
+        self.assertEqual(len(self.notifier.texts), len(open_texts) + 2)
+        for text in self.notifier.texts[len(open_texts) :]:
+            self.assertIsInstance(text, str)
+            self.assertNotIn("image", text.lower())
+            self.assertNotIn("FIX-OPEN-JPEG", text)
+            self.assertNotIn("@", text)
+
+        await self.work.sweep_overdue()
+        self.assertEqual(len(self.notifier.texts), len(open_texts) + 2)
+
+        anban_zone = [
+            event
+            for event in await self.work.list_zone_board_events(missed["zone_id"])
+            if event["event_type"] == "逾期"
+        ]
+        xian_zone = [
+            event
+            for event in await self.work.list_zone_board_events(shot["zone_id"])
+            if event["event_type"] == "逾期"
+        ]
+        self.assertEqual(len(anban_zone), 1)
+        self.assertIsNone(anban_zone[0]["employee_id"])
+        self.assertEqual(len(xian_zone), 1)
+
+        self.assertEqual(await self.work.list_person_board_events(opener["id"]), [])
+        self.assertEqual(await self.work.list_person_board_events(night["id"]), [])
+        last_shooter = await self.work.list_person_board_events(10)
+        self.assertEqual([event["event_type"] for event in last_shooter], ["逾期"])
+        self.assertEqual(last_shooter[0]["employee_id"], 10)
 
 
 
