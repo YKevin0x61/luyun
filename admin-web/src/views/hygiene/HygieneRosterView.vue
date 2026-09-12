@@ -4,7 +4,9 @@ import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import {
   HYGIENE_PERMISSIONS,
+  HYGIENE_SHIFTS,
   hygienePermissionLabel,
+  hygieneShiftLabel,
   rosterStatusLabel,
 } from '../../utils/hygieneCopy'
 
@@ -30,6 +32,7 @@ async function loadRoster() {
       next[row.id] = {
         job_title: row.job_title || '',
         permission: row.permission,
+        shift: row.shift || '白班',
       }
     }
     drafts.value = next
@@ -91,6 +94,23 @@ async function saveRow(row) {
     busyId.value = null
   }
 }
+
+async function changeShift(row) {
+  const draft = draftFor(row)
+  if (!draft) return
+  busyId.value = row.id
+  errorText.value = ''
+  try {
+    await api.post(`/api/hygiene/admin/roster/${row.id}/shift`, {
+      shift: draft.shift,
+    })
+    await loadRoster()
+  } catch (err) {
+    errorText.value = err.message || '改班次失败'
+  } finally {
+    busyId.value = null
+  }
+}
 </script>
 
 <template>
@@ -98,7 +118,7 @@ async function saveRow(row) {
     <div class="card roster-head">
       <div>
         <h2>卫生花名册</h2>
-        <p>批准新注册、写职位、把人设成普通员工或管理员。停用后不能登录，行还留在这里。超级管理员仍是后台共享账号，不能从花名册升上去。</p>
+        <p>批准新注册、写职位、把人设成普通员工或管理员。当天班次只有超级管理员能改。停用后不能登录，行还留在这里。超级管理员仍是后台共享账号，不能从花名册升上去。</p>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="loadRoster">刷新</button>
     </div>
@@ -118,6 +138,7 @@ async function saveRow(row) {
               <th>手机号</th>
               <th>职位</th>
               <th>卫生权限</th>
+              <th>当天班次</th>
               <th>状态</th>
               <th>操作</th>
             </tr>
@@ -149,6 +170,27 @@ async function saveRow(row) {
                     {{ hygienePermissionLabel(perm) }}
                   </option>
                 </select>
+              </td>
+              <td>
+                <div v-if="drafts[row.id]" class="roster-shift">
+                  <span class="roster-shift-now">{{ hygieneShiftLabel(row.shift) }}</span>
+                  <select
+                    v-model="drafts[row.id].shift"
+                    class="select"
+                    :disabled="busyId === row.id"
+                    :aria-label="`当天班次，当前${hygieneShiftLabel(row.shift)}`"
+                  >
+                    <option v-for="shift in HYGIENE_SHIFTS" :key="shift" :value="shift">
+                      {{ shift }}
+                    </option>
+                  </select>
+                  <button
+                    type="button"
+                    class="btn btn-sm"
+                    :disabled="busyId === row.id"
+                    @click="changeShift(row)"
+                  >改班次</button>
+                </div>
               </td>
               <td>
                 <span class="roster-status" :data-status="rosterStatusLabel(row)">
@@ -236,6 +278,20 @@ async function saveRow(row) {
   font-size: 13px;
 }
 .roster-phone { font-variant-numeric: tabular-nums; }
+.roster-shift {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.roster-shift-now {
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.roster-shift .select {
+  min-width: 88px;
+  width: auto;
+}
 .roster-actions {
   display: flex;
   gap: 6px;

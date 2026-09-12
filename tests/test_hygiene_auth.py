@@ -18,6 +18,7 @@ from services.app_runtime import AppRuntime, set_runtime
 from services.hygiene.accounts import EmployeeAccounts
 
 PHONE = "13800138000"
+PHONE_ADMIN = "13800138001"
 PASSWORD = "password123"
 ADMIN_INIT = {
     "username": "admin",
@@ -78,6 +79,14 @@ def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http)
     assert client.patch(
         "/api/hygiene/admin/roster/1",
         json={"permission": "管理员"},
+    ).status_code == 401
+    assert client.post(
+        "/api/hygiene/staff/shift",
+        json={"shift": "白班"},
+    ).status_code == 401
+    assert client.post(
+        "/api/hygiene/admin/roster/1/shift",
+        json={"shift": "夜班"},
     ).status_code == 401
 
 
@@ -147,3 +156,68 @@ def test_api_token_is_not_staff_session_or_roster_cookie(hygiene_http):
     headers = {"X-Admin-Token": token}
     assert client.get("/api/hygiene/staff/me", headers=headers).status_code == 401
     assert client.get("/api/hygiene/admin/roster", headers=headers).status_code == 401
+    assert client.post(
+        "/api/hygiene/admin/roster/1/shift",
+        headers=headers,
+        json={"shift": "夜班"},
+    ).status_code == 401
+
+
+def test_staff_can_self_pick_shift_once_not_admin_fix(hygiene_http):
+    client, _db, accounts = hygiene_http
+    employee = _run(accounts.register(PHONE, PASSWORD))
+    _run(accounts.approve(employee["id"]))
+    login = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    )
+    assert login.status_code == 200
+    me = client.get("/api/hygiene/staff/me")
+    assert me.status_code == 200
+    assert me.json()["employee"]["shift"] is None
+    picked = client.post("/api/hygiene/staff/shift", json={"shift": "白班"})
+    assert picked.status_code == 200
+    assert picked.json()["shift"] == "白班"
+    assert client.get("/api/hygiene/staff/me").json()["employee"]["shift"] == "白班"
+    again = client.post("/api/hygiene/staff/shift", json={"shift": "夜班"})
+    assert again.status_code == 409
+    assert client.get("/api/hygiene/staff/me").json()["employee"]["shift"] == "白班"
+    assert client.post(
+        f"/api/hygiene/admin/roster/{employee['id']}/shift",
+        json={"shift": "夜班"},
+    ).status_code == 401
+
+
+def test_staff_admin_cannot_change_another_shift_admin_cookie_can(hygiene_http):
+    client, _db, accounts = hygiene_http
+    staff = _run(accounts.register(PHONE, PASSWORD))
+    manager = _run(accounts.register(PHONE_ADMIN, PASSWORD))
+    _run(accounts.approve(staff["id"]))
+    _run(accounts.approve(manager["id"]))
+    _run(accounts.set_permission(manager["id"], "管理员"))
+    _run(accounts.pick_shift(staff["id"], "白班"))
+
+    staff_login = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE_ADMIN, "password": PASSWORD},
+    )
+    assert staff_login.status_code == 200
+    assert client.post(
+        f"/api/hygiene/admin/roster/{staff['id']}/shift",
+        json={"shift": "夜班"},
+    ).status_code == 401
+    assert _run(accounts.current_shift(staff["id"])) == "白班"
+
+    client.cookies.clear()
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200
+    fixed = client.post(
+        f"/api/hygiene/admin/roster/{staff['id']}/shift",
+        json={"shift": "夜班"},
+    )
+    assert fixed.status_code == 200
+    assert fixed.json()["shift"] == "夜班"
+    roster = client.get("/api/hygiene/admin/roster")
+    assert roster.status_code == 200
+    row = next(item for item in roster.json()["employees"] if item["id"] == staff["id"])
+    assert row["shift"] == "夜班"

@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   HYGIENE_PERMISSIONS,
+  HYGIENE_SHIFTS,
   hygienePermissionLabel,
+  hygieneShiftLabel,
   isAllowedHygienePermission,
+  isAllowedHygieneShift,
   rosterStatusLabel,
 } from '../hygieneCopy.js'
 
@@ -25,5 +28,16 @@ describe('hygieneCopy', () => {
     expect(rosterStatusLabel({ approved: false, disabled: false })).toBe('待批准')
     expect(rosterStatusLabel({ approved: true, disabled: false })).toBe('已批准')
     expect(rosterStatusLabel({ approved: true, disabled: true })).toBe('已停用')
+  })
+
+  it('班次只有白班或夜班，没选显示未选', () => {
+    expect(HYGIENE_SHIFTS).toEqual(['白班', '夜班'])
+    expect(isAllowedHygieneShift('白班')).toBe(true)
+    expect(isAllowedHygieneShift('夜班')).toBe(true)
+    expect(isAllowedHygieneShift('早班')).toBe(false)
+    expect(hygieneShiftLabel('白班')).toBe('白班')
+    expect(hygieneShiftLabel('夜班')).toBe('夜班')
+    expect(hygieneShiftLabel(null)).toBe('未选')
+    expect(hygieneShiftLabel('')).toBe('未选')
   })
 })

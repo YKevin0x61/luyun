@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""员工花名册、手机号+密码登录、批准、停用、职位、卫生权限。
+"""员工花名册、手机号+密码登录、批准、停用、职位、卫生权限、班次。
 
-Does not know 日常检查 / 专项卫生 / 整改单. 班次 pick is ticket 02.
+Does not know 日常检查 / 专项卫生 / 整改单.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
@@ -26,6 +27,22 @@ FORBIDDEN_SUPER_PERMISSION = "超级管理员"
 
 # Mainland China mobile: 11 digits, 1[3-9]...
 _PHONE_RE = re.compile(r"^1[3-9]\d{9}$")
+
+BUSINESS_DAY_CUT_HOUR = 6
+SHIFT_DAY = "白班"
+SHIFT_NIGHT = "夜班"
+ALLOWED_SHIFTS = frozenset({SHIFT_DAY, SHIFT_NIGHT})
+
+
+def hygiene_business_date(now: datetime) -> str:
+    """营业日 YYYY-MM-DD. Cuts at 06:00 China time, same idea as POS."""
+    if now.tzinfo is None:
+        local = now.replace(tzinfo=CHINA_TZ)
+    else:
+        local = now.astimezone(CHINA_TZ)
+    if local.hour < BUSINESS_DAY_CUT_HOUR:
+        local = local - timedelta(days=1)
+    return local.date().isoformat()
 
 
 class EmployeeAccountsError(ValueError):
@@ -171,13 +188,23 @@ class EmployeeAccounts:
         return self._employee_from_row(row)
 
     async def list_roster(self) -> list[dict]:
+        business_date = self._business_date()
         cur = await self._conn.execute(
-            """SELECT id, phone, job_title, permission, approved, disabled
-               FROM hygiene_employees
-               ORDER BY disabled ASC, approved ASC, id ASC"""
+            """SELECT e.id, e.phone, e.job_title, e.permission, e.approved, e.disabled,
+                      p.shift AS shift
+               FROM hygiene_employees e
+               LEFT JOIN hygiene_shift_picks p
+                 ON p.employee_id = e.id AND p.business_date = ?
+               ORDER BY e.disabled ASC, e.approved ASC, e.id ASC""",
+            (business_date,),
         )
         rows = await cur.fetchall()
-        return [self._employee_from_row(row) for row in rows]
+        employees = []
+        for row in rows:
+            employee = self._employee_from_row(row)
+            employee["shift"] = dict(row).get("shift")
+            employees.append(employee)
+        return employees
 
     async def set_job_title(self, employee_id: int, title: str) -> dict:
         row = await self._fetch_employee(employee_id)
@@ -234,7 +261,91 @@ class EmployeeAccounts:
             return None
         if not _as_bool(mapping["approved"]) or _as_bool(mapping["disabled"]):
             return None
-        return self._employee_from_row(mapping)
+        employee = self._employee_from_row(mapping)
+        employee["shift"] = await self.current_shift(employee["id"])
+        return employee
+
+    def _business_date(self) -> str:
+        return hygiene_business_date(self._now_dt())
+
+    def _shift_pick(self, employee_id: int, business_date: str, shift: str) -> dict:
+        return {
+            "employee_id": int(employee_id),
+            "business_date": business_date,
+            "shift": shift,
+        }
+
+    def _normalize_shift(self, shift: str) -> str:
+        value = (shift or "").strip()
+        if value not in ALLOWED_SHIFTS:
+            raise EmployeeAccountsError("invalid_shift", "invalid_shift")
+        return value
+
+    async def current_shift(self, employee_id: int) -> Optional[str]:
+        cur = await self._conn.execute(
+            """SELECT shift FROM hygiene_shift_picks
+               WHERE employee_id = ? AND business_date = ?""",
+            (employee_id, self._business_date()),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return dict(row)["shift"]
+
+    async def pick_shift(self, employee_id: int, shift: str) -> dict:
+        row = await self._fetch_employee(employee_id)
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        shift = self._normalize_shift(shift)
+        business_date = self._business_date()
+        if await self.current_shift(employee_id) is not None:
+            raise EmployeeAccountsError("shift_already_picked", "shift_already_picked")
+        now = self._now_iso()
+        try:
+            await self._conn.execute(
+                """INSERT INTO hygiene_shift_picks
+                   (employee_id, business_date, shift, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (employee_id, business_date, shift, now, now),
+            )
+            await self._conn.commit()
+        except sqlite3.IntegrityError as exc:
+            await self._conn.rollback()
+            raise EmployeeAccountsError(
+                "shift_already_picked", "shift_already_picked"
+            ) from exc
+        logger.info(
+            "hygiene shift picked employee=%s date=%s shift=%s",
+            employee_id,
+            business_date,
+            shift,
+        )
+        return self._shift_pick(employee_id, business_date, shift)
+
+    async def super_set_shift(self, employee_id: int, shift: str) -> dict:
+        row = await self._fetch_employee(employee_id)
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        shift = self._normalize_shift(shift)
+        business_date = self._business_date()
+        now = self._now_iso()
+        await self._conn.execute(
+            """INSERT INTO hygiene_shift_picks
+               (employee_id, business_date, shift, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(employee_id, business_date) DO UPDATE SET
+                 shift = excluded.shift,
+                 updated_at = excluded.updated_at""",
+            (employee_id, business_date, shift, now, now),
+        )
+        await self._conn.commit()
+        logger.info(
+            "hygiene shift super-set employee=%s date=%s shift=%s",
+            employee_id,
+            business_date,
+            shift,
+        )
+        return self._shift_pick(employee_id, business_date, shift)
 
     async def logout(self, session_id: str) -> None:
         await self._conn.execute(

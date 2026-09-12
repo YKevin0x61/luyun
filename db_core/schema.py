@@ -433,7 +433,7 @@ async def apply_recipe_schema(conn) -> None:
 
 # Hygiene employee tables live in app.db but stay out of ALL_TABLES: Admin
 # generic CRUD must not be the write path (EmployeeAccounts owns writes).
-HYGIENE_TABLES = ("hygiene_employees", "hygiene_staff_sessions")
+HYGIENE_TABLES = ("hygiene_employees", "hygiene_staff_sessions", "hygiene_shift_picks")
 
 _HYGIENE_TABLE_SCHEMAS = {
     "hygiene_employees": """
@@ -459,6 +459,18 @@ _HYGIENE_TABLE_SCHEMAS = {
             FOREIGN KEY (employee_id) REFERENCES hygiene_employees(id)
         )
     """,
+    "hygiene_shift_picks": """
+        CREATE TABLE IF NOT EXISTS hygiene_shift_picks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
+            business_date TEXT NOT NULL,
+            shift TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (employee_id, business_date),
+            FOREIGN KEY (employee_id) REFERENCES hygiene_employees(id)
+        )
+    """,
 }
 
 _HYGIENE_INDEX_DEFINITIONS = {
@@ -469,11 +481,15 @@ _HYGIENE_INDEX_DEFINITIONS = {
         "CREATE INDEX IF NOT EXISTS idx_hygiene_staff_sessions_employee "
         "ON hygiene_staff_sessions(employee_id)",
     ],
+    "hygiene_shift_picks": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_shift_picks_date "
+        "ON hygiene_shift_picks(business_date)",
+    ],
 }
 
 
 async def apply_hygiene_schema(conn) -> None:
-    """Create hygiene employee tables on an open app.db connection. Not ALL_TABLES."""
+    """Create hygiene employee/session/shift tables on app.db. Not ALL_TABLES."""
     for sql in _HYGIENE_TABLE_SCHEMAS.values():
         await conn.executescript(sql)
     for stmts in _HYGIENE_INDEX_DEFINITIONS.values():

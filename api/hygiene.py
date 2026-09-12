@@ -23,6 +23,8 @@ _ERROR_DETAILS = {
     "invalid_permission": "卫生权限只能是普通员工或管理员",
     "invalid_job_title": "职位过长",
     "employee_not_found": "员工不存在",
+    "invalid_shift": "班次只能是白班或夜班",
+    "shift_already_picked": "当天班次已选定，不能自己改",
 }
 
 
@@ -36,7 +38,7 @@ def _get_accounts() -> EmployeeAccounts:
 
 def _http_error(exc: EmployeeAccountsError) -> HTTPException:
     status = 404 if exc.code == "employee_not_found" else 400
-    if exc.code == "duplicate_phone":
+    if exc.code == "duplicate_phone" or exc.code == "shift_already_picked":
         status = 409
     return HTTPException(status_code=status, detail=_ERROR_DETAILS.get(exc.code, exc.code))
 
@@ -81,6 +83,10 @@ class StaffLoginIn(BaseModel):
 class RosterPatchIn(BaseModel):
     job_title: Optional[str] = None
     permission: Optional[str] = None
+
+
+class ShiftIn(BaseModel):
+    shift: str
 
 
 @router.post("/staff/register")
@@ -128,6 +134,19 @@ async def staff_logout(
     await accounts.logout(staff["session_id"])
     _clear_staff_cookie(response)
     return {"success": True}
+
+
+@router.post("/staff/shift")
+async def staff_pick_shift(
+    body: ShiftIn,
+    staff=Depends(require_staff_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, Any]:
+    try:
+        picked = await accounts.pick_shift(staff["employee"]["id"], body.shift)
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
+    return picked
 
 
 @router.get("/admin/roster")
@@ -182,3 +201,17 @@ async def admin_patch_roster(
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
     return {"employee": employee}
+
+
+@router.post("/admin/roster/{employee_id}/shift")
+async def admin_set_shift(
+    employee_id: int,
+    body: ShiftIn,
+    _session_id: str = Depends(require_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, Any]:
+    try:
+        picked = await accounts.super_set_shift(employee_id, body.shift)
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
+    return picked

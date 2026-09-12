@@ -1,15 +1,26 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { hygienePermissionLabel } from '../../utils/hygieneCopy'
+import {
+  HYGIENE_SHIFTS,
+  hygienePermissionLabel,
+  hygieneShiftLabel,
+} from '../../utils/hygieneCopy'
 import { staffRequest } from '../../utils/hygieneStaff'
 
 const router = useRouter()
 const employee = ref(null)
 const errorText = ref('')
 const loggingOut = ref(false)
+const picking = ref('')
 
-onMounted(async () => {
+const needsShiftPick = computed(() => {
+  return Boolean(employee.value) && !employee.value.shift
+})
+
+onMounted(loadMe)
+
+async function loadMe() {
   try {
     const data = await staffRequest('/api/hygiene/staff/me')
     employee.value = data.employee
@@ -17,7 +28,24 @@ onMounted(async () => {
     errorText.value = err.message || '无法读取登录状态'
     router.replace('/hygiene/login')
   }
-})
+}
+
+async function pickShift(shift) {
+  if (picking.value) return
+  errorText.value = ''
+  picking.value = shift
+  try {
+    await staffRequest('/api/hygiene/staff/shift', {
+      method: 'POST',
+      body: { shift },
+    })
+    await loadMe()
+  } catch (err) {
+    errorText.value = err.message || '选班失败'
+  } finally {
+    picking.value = ''
+  }
+}
 
 async function logout() {
   if (loggingOut.value) return
@@ -35,26 +63,53 @@ async function logout() {
   <div class="staff-phone">
     <div class="staff-card">
       <p class="staff-brand">LuckIn<span>卫生</span></p>
-      <h1 class="staff-title">卫生入口</h1>
-      <p v-if="errorText" class="staff-alert">{{ errorText }}</p>
-      <template v-else-if="employee">
-        <p class="staff-hello">{{ employee.phone }}</p>
-        <dl class="staff-meta">
-          <div>
-            <dt>职位</dt>
-            <dd>{{ employee.job_title || '未设置' }}</dd>
-          </div>
-          <div>
-            <dt>卫生权限</dt>
-            <dd>{{ hygienePermissionLabel(employee.permission) }}</dd>
-          </div>
-        </dl>
-        <p class="staff-lead">日常检查、专项卫生和整改单会在这里出现。现在先确认账号能登录。</p>
-        <button type="button" class="btn btn-block staff-submit" :disabled="loggingOut" @click="logout">
+      <template v-if="needsShiftPick">
+        <h1 class="staff-title">今天上哪一班？</h1>
+        <p class="staff-lead">选一次就锁在这个营业日。白班和夜班的日常检查分开交，选错了要找超级管理员改。</p>
+        <p v-if="errorText" class="staff-alert">{{ errorText }}</p>
+        <div class="staff-shift-choices">
+          <button
+            v-for="shift in HYGIENE_SHIFTS"
+            :key="shift"
+            type="button"
+            class="btn staff-shift-btn"
+            :class="{ 'btn-primary': shift === '白班', 'staff-shift-night': shift === '夜班' }"
+            :disabled="Boolean(picking)"
+            @click="pickShift(shift)"
+          >
+            {{ picking === shift ? '正在锁定…' : shift }}
+          </button>
+        </div>
+        <button type="button" class="btn btn-block staff-submit staff-chooser-logout" :disabled="loggingOut" @click="logout">
           退出登录
         </button>
       </template>
-      <p v-else class="staff-lead">正在确认登录…</p>
+      <template v-else>
+        <h1 class="staff-title">卫生入口</h1>
+        <p v-if="errorText" class="staff-alert">{{ errorText }}</p>
+        <template v-else-if="employee">
+          <p class="staff-hello">{{ employee.phone }}</p>
+          <dl class="staff-meta">
+            <div>
+              <dt>当天班次</dt>
+              <dd>{{ hygieneShiftLabel(employee.shift) }}</dd>
+            </div>
+            <div>
+              <dt>职位</dt>
+              <dd>{{ employee.job_title || '未设置' }}</dd>
+            </div>
+            <div>
+              <dt>卫生权限</dt>
+              <dd>{{ hygienePermissionLabel(employee.permission) }}</dd>
+            </div>
+          </dl>
+          <p class="staff-lead">今天班次已锁定。日常检查、专项卫生和整改单会在这里出现。</p>
+          <button type="button" class="btn btn-block staff-submit" :disabled="loggingOut" @click="logout">
+            退出登录
+          </button>
+        </template>
+        <p v-else class="staff-lead">正在确认登录…</p>
+      </template>
     </div>
   </div>
 </template>
@@ -117,4 +172,24 @@ async function logout() {
   margin: 0 0 16px;
 }
 .staff-submit { min-height: 48px; font-size: 16px; }
+.staff-shift-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.staff-shift-btn {
+  min-height: 56px;
+  font-size: 18px;
+  font-weight: 600;
+}
+.staff-shift-night {
+  background: #1e293b;
+  border-color: #334155;
+  color: #e2e8f0;
+}
+.staff-shift-night:hover:not(:disabled) {
+  border-color: var(--cyan);
+  color: #fff;
+}
+.staff-chooser-logout { margin-top: 16px; }
 </style>

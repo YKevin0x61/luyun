@@ -1,4 +1,4 @@
-"""Hygiene domain modules. Ticket 01 owns EmployeeAccounts only."""
+"""Hygiene domain modules. EmployeeAccounts owns roster and 班次."""
 
 from services.hygiene.accounts import EmployeeAccounts
 
