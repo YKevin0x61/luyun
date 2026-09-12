@@ -36,3 +36,20 @@ export async function staffRequest(path, { method = 'GET', body } = {}) {
   }
   return data
 }
+
+export async function staffUpload(path, formData) {
+  const res = await fetch(path, {
+    method: 'POST',
+    credentials: 'include',
+    body: formData,
+  })
+  const contentType = res.headers.get('content-type') || ''
+  const data = contentType.includes('application/json') ? await res.json() : await res.text()
+  if (!res.ok) {
+    const message = typeof data === 'string' ? data : parseApiDetail(data)
+    const err = new Error(message)
+    err.status = res.status
+    throw err
+  }
+  return data
+}

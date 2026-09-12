@@ -23,7 +23,11 @@ SUPER = {"kind": "super"}
 
 PHONE = "13800138000"
 PHONE_ADMIN = "13800138001"
+PHONE_NIGHT = "13800138002"
+PHONE_OTHER_ADMIN = "13800138003"
 PASSWORD = "password123"
+SHOT_A = b"SHOT-A"
+SHOT_B = b"SHOT-B"
 ADMIN_INIT = {
     "username": "admin",
     "password": "password123",
@@ -295,3 +299,126 @@ def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
     assert image.status_code == 200
     assert image.content == photo
     assert image.headers["content-type"].startswith("image/jpeg")
+
+
+def _approve_staff(accounts, phone, shift, permission="普通员工"):
+    employee = _run(accounts.register(phone, PASSWORD))
+    _run(accounts.approve(employee["id"]))
+    if permission != "普通员工":
+        _run(accounts.set_permission(employee["id"], permission))
+    _run(accounts.pick_shift(employee["id"], shift))
+    return employee
+
+
+def _add_anban_item(work, data=b"STD-ANBAN"):
+    anban = next(zone for zone in _run(work.list_zones()) if zone["name"] == "案板")
+    return _run(
+        work.add_daily_item(
+            SUPER,
+            anban["id"],
+            "案板表面",
+            {"bytes": data, "content_type": "image/jpeg", "markup": []},
+        )
+    )
+
+
+def _staff_login(client, phone):
+    client.cookies.clear()
+    resp = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": phone, "password": PASSWORD},
+    )
+    assert resp.status_code == 200
+    return resp
+
+
+def _submit_daily(client, item_id, data, shift="白班", live="true"):
+    return client.post(
+        f"/api/hygiene/staff/daily/{item_id}/submit",
+        data={"live": live, "shift": shift},
+        files={"file": ("shot.jpg", data, "image/jpeg")},
+    )
+
+
+def test_staff_submit_allowed_regular_accept_403_admin_cookie_can_accept(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    _approve_staff(accounts, PHONE, "白班")
+    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    item = _add_anban_item(work)
+    _staff_login(client, PHONE)
+    inbox = client.get("/api/hygiene/staff/daily-work")
+    assert inbox.status_code == 200
+    rows = inbox.json()["items"]
+    assert any(row["zone_name"] == "案板" and row["shift"] == "夜班" for row in rows)
+    submitted = _submit_daily(client, item["id"], SHOT_A)
+    assert submitted.status_code == 200
+    assert submitted.json()["status"] == "待验收"
+    capture = client.get(
+        f"/api/hygiene/staff/daily/{item['id']}/capture", params={"shift": "白班"}
+    )
+    assert capture.status_code == 200
+    assert capture.content == SHOT_A
+    frozen = client.get(
+        f"/api/hygiene/staff/daily/{item['id']}/frozen-standard",
+        params={"shift": "白班"},
+    )
+    assert frozen.status_code == 200
+    assert frozen.content == b"STD-ANBAN"
+    regular_accept = client.post(
+        f"/api/hygiene/staff/daily/{item['id']}/accept", json={"shift": "白班"}
+    )
+    assert regular_accept.status_code == 403
+    admin_via_staff = client.post(
+        f"/api/hygiene/admin/daily/{item['id']}/accept", json={"shift": "白班"}
+    )
+    assert admin_via_staff.status_code == 401
+
+    _staff_login(client, PHONE_ADMIN)
+    replaced = _submit_daily(client, item["id"], SHOT_B)
+    assert replaced.status_code == 200
+    later = client.get(
+        f"/api/hygiene/staff/daily/{item['id']}/capture", params={"shift": "白班"}
+    )
+    assert later.content == SHOT_B
+    self_accept = client.post(
+        f"/api/hygiene/staff/daily/{item['id']}/accept", json={"shift": "白班"}
+    )
+    assert self_accept.status_code == 403
+
+    client.cookies.clear()
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200
+    queue = client.get("/api/hygiene/admin/daily-queue")
+    assert queue.status_code == 200
+    pending = queue.json()["items"]
+    assert any(row["item_id"] == item["id"] and row["status"] == "待验收" for row in pending)
+    admin_capture = client.get(
+        f"/api/hygiene/admin/daily/{item['id']}/capture", params={"shift": "白班"}
+    )
+    assert admin_capture.status_code == 200
+    assert admin_capture.content == SHOT_B
+    accepted = client.post(
+        f"/api/hygiene/admin/daily/{item['id']}/accept", json={"shift": "白班"}
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "已通过"
+
+
+def test_night_staff_http_cannot_submit_day_instance(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    _approve_staff(accounts, PHONE_NIGHT, "夜班")
+    item = _add_anban_item(work)
+    _staff_login(client, PHONE_NIGHT)
+    denied = _submit_daily(client, item["id"], SHOT_A, shift="白班")
+    assert denied.status_code == 400
+    album = _submit_daily(client, item["id"], SHOT_A, shift="夜班", live="false")
+    assert album.status_code == 400
+    ok = _submit_daily(client, item["id"], SHOT_A, shift="夜班")
+    assert ok.status_code == 200
+    _approve_staff(accounts, PHONE_OTHER_ADMIN, "夜班", "管理员")
+    _staff_login(client, PHONE_OTHER_ADMIN)
+    rejected = client.post(
+        f"/api/hygiene/staff/daily/{item['id']}/reject", json={"shift": "夜班"}
+    )
+    assert rejected.status_code == 200
+    assert rejected.json()["status"] == "待拍"

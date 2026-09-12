@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""卫生责任区、日常检查项、当前标准图。
+"""卫生责任区、日常检查项、当前标准图、日常提交与验收。
 
 Does not hash passwords or issue staff sessions. Captures stay off SQLite WAL.
 """
@@ -14,10 +14,20 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from database import CHINA_TZ
+from services.hygiene.accounts import (
+    PERMISSION_ADMIN,
+    SHIFT_DAY,
+    SHIFT_NIGHT,
+    hygiene_business_date,
+)
 
 logger = logging.getLogger(__name__)
 
 SEED_ZONE_NAMES = ("案板", "馅档", "熟笼", "肠粉", "西饼", "明档1", "明档2", "煎炸")
+STATUS_TODO = "待拍"
+STATUS_PENDING = "待验收"
+STATUS_PASSED = "已通过"
+DAILY_SHIFTS = (SHIFT_DAY, SHIFT_NIGHT)
 
 
 class HygieneWorkError(ValueError):
@@ -225,6 +235,9 @@ class HygieneWork:
         standard_id = mapping.get("current_standard_id")
         if not standard_id:
             raise HygieneWorkError("standard_required", "standard_required")
+        return await self.standard_by_id(int(standard_id))
+
+    async def standard_by_id(self, standard_id: int) -> dict:
         cur = await self._conn.execute(
             """SELECT id, item_id, capture_id, content_type, markup_json, created_at
                FROM hygiene_standards WHERE id = ?""",
@@ -280,6 +293,334 @@ class HygieneWork:
             "name": dict(item)["name"],
             "current_standard_id": standard_id,
             "capture_id": capture_id,
+        }
+
+    def _actor_shift(self, actor: dict, requested: Optional[str] = None) -> str:
+        if not actor or actor.get("kind") != "staff":
+            raise HygieneWorkError("forbidden", "forbidden")
+        picked = actor.get("shift")
+        if not picked:
+            raise HygieneWorkError("shift_required", "shift_required")
+        target = (requested or picked).strip()
+        if target not in DAILY_SHIFTS:
+            raise HygieneWorkError("shift_mismatch", "shift_mismatch")
+        if picked != target:
+            raise HygieneWorkError("shift_mismatch", "shift_mismatch")
+        return target
+
+    def _require_live_capture(self, capture) -> bytes:
+        if not capture or capture.get("live") is not True:
+            raise HygieneWorkError("live_required", "live_required")
+        data = capture.get("bytes")
+        if not data:
+            raise HygieneWorkError("capture_required", "capture_required")
+        return data
+
+    def _photographer(self, actor: dict) -> str:
+        return (actor.get("phone") or actor.get("display_name") or "").strip()
+
+    def _watermark(self, captured_at: str, zone_name: str, photographer: str) -> dict:
+        return {
+            "time": captured_at,
+            "zone": zone_name,
+            "photographer": photographer,
+        }
+
+    async def _fetch_item_with_zone(self, item_id: int):
+        cur = await self._conn.execute(
+            """SELECT i.id, i.zone_id, i.name, i.current_standard_id, z.name AS zone_name
+               FROM hygiene_daily_items i
+               JOIN hygiene_zones z ON z.id = i.zone_id
+               WHERE i.id = ?""",
+            (item_id,),
+        )
+        return await cur.fetchone()
+
+    async def _fetch_instance(self, business_date: str, shift: str, item_id: int):
+        cur = await self._conn.execute(
+            """SELECT id, business_date, shift, item_id, status, pending_submission_id
+               FROM hygiene_daily_instances
+               WHERE business_date = ? AND shift = ? AND item_id = ?""",
+            (business_date, shift, item_id),
+        )
+        return await cur.fetchone()
+
+    async def _ensure_instance(self, business_date: str, shift: str, item_id: int) -> dict:
+        existing = await self._fetch_instance(business_date, shift, item_id)
+        if existing is not None:
+            return dict(existing)
+        now = self._now_iso()
+        cur = await self._conn.execute(
+            """INSERT INTO hygiene_daily_instances
+               (business_date, shift, item_id, status, pending_submission_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, NULL, ?, ?)""",
+            (business_date, shift, item_id, STATUS_TODO, now, now),
+        )
+        await self._conn.commit()
+        return {
+            "id": int(cur.lastrowid),
+            "business_date": business_date,
+            "shift": shift,
+            "item_id": item_id,
+            "status": STATUS_TODO,
+            "pending_submission_id": None,
+        }
+
+    async def _fetch_submission(self, submission_id: Optional[int]):
+        if not submission_id:
+            return None
+        cur = await self._conn.execute(
+            """SELECT id, instance_id, capture_id, content_type, frozen_standard_id,
+                      submitter_id, submitter_phone, zone_name, captured_at
+               FROM hygiene_daily_submissions WHERE id = ?""",
+            (int(submission_id),),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
+
+    def _inbox_from_parts(self, item: dict, shift: str, business_date: str, instance, submission) -> dict:
+        status = STATUS_TODO
+        if instance is not None:
+            status = instance["status"]
+        watermark = None
+        if submission is not None:
+            watermark = self._watermark(
+                submission["captured_at"],
+                submission["zone_name"],
+                submission["submitter_phone"],
+            )
+        return {
+            "item_id": int(item["id"]),
+            "item_name": item["name"],
+            "zone_id": int(item["zone_id"]),
+            "zone_name": item["zone_name"],
+            "shift": shift,
+            "business_date": business_date,
+            "status": status,
+            "submitter_id": None if submission is None else int(submission["submitter_id"]),
+            "submitter_phone": None if submission is None else submission["submitter_phone"],
+            "capture_id": None if submission is None else submission["capture_id"],
+            "frozen_standard_id": None if submission is None else int(submission["frozen_standard_id"]),
+            "current_standard_id": int(item["current_standard_id"])
+            if item.get("current_standard_id")
+            else None,
+            "markup": self._parse_markup(item.get("markup_json") or "[]"),
+            "watermark": watermark,
+        }
+
+    async def submit_daily(
+        self,
+        actor: dict,
+        item_id: int,
+        capture,
+        shift: Optional[str] = None,
+    ) -> dict:
+        target_shift = self._actor_shift(actor, shift)
+        data = self._require_live_capture(capture)
+        item_row = await self._fetch_item_with_zone(item_id)
+        if item_row is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        item = dict(item_row)
+        standard_id = item.get("current_standard_id")
+        if not standard_id:
+            raise HygieneWorkError("standard_required", "standard_required")
+        photographer = self._photographer(actor)
+        if not photographer:
+            raise HygieneWorkError("photographer_required", "photographer_required")
+        business_date = hygiene_business_date(self._now_dt())
+        instance = await self._ensure_instance(business_date, target_shift, item_id)
+        if instance["status"] == STATUS_PASSED:
+            raise HygieneWorkError("already_accepted", "already_accepted")
+        content_type = (capture.get("content_type") or "image/jpeg").strip()
+        capture_id = self._captures.put(data, content_type=content_type)
+        now = self._now_iso()
+        cur = await self._conn.execute(
+            """INSERT INTO hygiene_daily_submissions
+               (instance_id, capture_id, content_type, frozen_standard_id,
+                submitter_id, submitter_phone, zone_name, captured_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                instance["id"],
+                capture_id,
+                content_type,
+                int(standard_id),
+                int(actor["id"]),
+                photographer,
+                item["zone_name"],
+                now,
+                now,
+            ),
+        )
+        submission_id = int(cur.lastrowid)
+        await self._conn.execute(
+            """UPDATE hygiene_daily_instances
+               SET status = ?, pending_submission_id = ?, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_PENDING, submission_id, now, instance["id"]),
+        )
+        await self._conn.commit()
+        logger.info(
+            "hygiene daily submitted item=%s shift=%s capture=%s",
+            item_id,
+            target_shift,
+            capture_id,
+        )
+        return {
+            "item_id": int(item_id),
+            "shift": target_shift,
+            "business_date": business_date,
+            "status": STATUS_PENDING,
+            "zone_name": item["zone_name"],
+            "capture_id": capture_id,
+            "frozen_standard_id": int(standard_id),
+            "submitter_id": int(actor["id"]),
+            "submitter_phone": photographer,
+            "watermark": self._watermark(now, item["zone_name"], photographer),
+        }
+
+    async def list_daily_work(self, actor: dict) -> list[dict]:
+        del actor  # shop-wide; zone membership is not an inbox filter
+        business_date = hygiene_business_date(self._now_dt())
+        cur = await self._conn.execute(
+            """SELECT i.id, i.zone_id, i.name, i.current_standard_id, z.name AS zone_name,
+                      s.markup_json
+               FROM hygiene_daily_items i
+               JOIN hygiene_zones z ON z.id = i.zone_id
+               JOIN hygiene_standards s ON s.id = i.current_standard_id
+               WHERE i.current_standard_id IS NOT NULL
+               ORDER BY i.id ASC"""
+        )
+        items = [dict(row) for row in await cur.fetchall()]
+        inst_cur = await self._conn.execute(
+            """SELECT id, business_date, shift, item_id, status, pending_submission_id
+               FROM hygiene_daily_instances
+               WHERE business_date = ?""",
+            (business_date,),
+        )
+        instances = {}
+        for row in await inst_cur.fetchall():
+            mapping = dict(row)
+            instances[(int(mapping["item_id"]), mapping["shift"])] = mapping
+        inbox = []
+        for item in items:
+            for shift in DAILY_SHIFTS:
+                instance = instances.get((int(item["id"]), shift))
+                submission = None
+                if instance is not None:
+                    submission = await self._fetch_submission(
+                        instance.get("pending_submission_id")
+                    )
+                    if submission is None and instance["status"] == STATUS_PASSED:
+                        sub_cur = await self._conn.execute(
+                            """SELECT id, instance_id, capture_id, content_type,
+                                      frozen_standard_id, submitter_id, submitter_phone,
+                                      zone_name, captured_at
+                               FROM hygiene_daily_submissions
+                               WHERE instance_id = ?
+                               ORDER BY id DESC LIMIT 1""",
+                            (instance["id"],),
+                        )
+                        sub_row = await sub_cur.fetchone()
+                        submission = None if sub_row is None else dict(sub_row)
+                inbox.append(
+                    self._inbox_from_parts(item, shift, business_date, instance, submission)
+                )
+        return inbox
+
+    async def get_daily_review(self, item_id: int, shift: str) -> dict:
+        if shift not in DAILY_SHIFTS:
+            raise HygieneWorkError("shift_mismatch", "shift_mismatch")
+        business_date = hygiene_business_date(self._now_dt())
+        instance_row = await self._fetch_instance(business_date, shift, item_id)
+        if instance_row is None:
+            raise HygieneWorkError("not_pending", "not_pending")
+        instance = dict(instance_row)
+        if instance["status"] != STATUS_PENDING:
+            raise HygieneWorkError("not_pending", "not_pending")
+        submission = await self._fetch_submission(instance.get("pending_submission_id"))
+        if submission is None:
+            raise HygieneWorkError("not_pending", "not_pending")
+        standard = await self.standard_by_id(int(submission["frozen_standard_id"]))
+        return {
+            "item_id": int(item_id),
+            "shift": shift,
+            "business_date": business_date,
+            "status": STATUS_PENDING,
+            "capture_id": submission["capture_id"],
+            "content_type": submission["content_type"],
+            "frozen_standard_id": int(submission["frozen_standard_id"]),
+            "frozen_markup": standard["markup"],
+            "submitter_id": int(submission["submitter_id"]),
+            "submitter_phone": submission["submitter_phone"],
+            "zone_name": submission["zone_name"],
+            "watermark": self._watermark(
+                submission["captured_at"],
+                submission["zone_name"],
+                submission["submitter_phone"],
+            ),
+        }
+
+    def _require_reviewer(self, actor: dict, submitter_id: int) -> None:
+        if not actor:
+            raise HygieneWorkError("forbidden", "forbidden")
+        if actor.get("kind") == "super":
+            return
+        if actor.get("kind") != "staff" or actor.get("permission") != PERMISSION_ADMIN:
+            raise HygieneWorkError("forbidden", "forbidden")
+        if int(actor.get("id") or 0) == int(submitter_id):
+            raise HygieneWorkError("cannot_self_accept", "cannot_self_accept")
+
+    async def _pending_instance(self, item_id: int, shift: str) -> tuple[dict, dict]:
+        if shift not in DAILY_SHIFTS:
+            raise HygieneWorkError("shift_mismatch", "shift_mismatch")
+        business_date = hygiene_business_date(self._now_dt())
+        instance_row = await self._fetch_instance(business_date, shift, item_id)
+        if instance_row is None:
+            raise HygieneWorkError("not_pending", "not_pending")
+        instance = dict(instance_row)
+        if instance["status"] != STATUS_PENDING:
+            raise HygieneWorkError("not_pending", "not_pending")
+        submission = await self._fetch_submission(instance.get("pending_submission_id"))
+        if submission is None:
+            raise HygieneWorkError("not_pending", "not_pending")
+        return instance, submission
+
+    async def accept_daily(self, actor: dict, item_id: int, shift: str) -> dict:
+        instance, submission = await self._pending_instance(item_id, shift)
+        self._require_reviewer(actor, submission["submitter_id"])
+        now = self._now_iso()
+        await self._conn.execute(
+            """UPDATE hygiene_daily_instances
+               SET status = ?, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_PASSED, now, instance["id"]),
+        )
+        await self._conn.commit()
+        logger.info("hygiene daily accepted item=%s shift=%s", item_id, shift)
+        return {
+            "item_id": int(item_id),
+            "shift": shift,
+            "business_date": instance["business_date"],
+            "status": STATUS_PASSED,
+        }
+
+    async def reject_daily(self, actor: dict, item_id: int, shift: str) -> dict:
+        instance, submission = await self._pending_instance(item_id, shift)
+        self._require_reviewer(actor, submission["submitter_id"])
+        now = self._now_iso()
+        await self._conn.execute(
+            """UPDATE hygiene_daily_instances
+               SET status = ?, pending_submission_id = NULL, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_TODO, now, instance["id"]),
+        )
+        await self._conn.commit()
+        logger.info("hygiene daily rejected item=%s shift=%s", item_id, shift)
+        return {
+            "item_id": int(item_id),
+            "shift": shift,
+            "business_date": instance["business_date"],
+            "status": STATUS_TODO,
         }
 
 

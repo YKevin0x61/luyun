@@ -29,7 +29,7 @@ _ERROR_DETAILS = {
     "employee_not_found": "员工不存在",
     "invalid_shift": "班次只能是白班或夜班",
     "shift_already_picked": "当天班次已选定，不能自己改",
-    "forbidden": "只有超级管理员能改卫生责任区和标准图",
+    "forbidden": "没有权限做这一步",
     "standard_required": "没有标准图不能上架日常检查项",
     "invalid_zone_name": "请填写卫生责任区名称",
     "invalid_item_name": "请填写日常检查项名称",
@@ -37,6 +37,14 @@ _ERROR_DETAILS = {
     "item_not_found": "日常检查项不存在",
     "duplicate_zone": "已有同名卫生责任区",
     "duplicate_item": "该卫生责任区已有同名检查项",
+    "shift_required": "请先选择当天班次",
+    "shift_mismatch": "只能交自己班次的日常检查",
+    "live_required": "必须现场拍摄，不能从相册选图",
+    "capture_required": "请拍摄日常检查照片",
+    "cannot_self_accept": "交这张的人不能自己验收",
+    "already_accepted": "这项已经通过，不能再交",
+    "not_pending": "没有待验收的实拍",
+    "photographer_required": "拍摄人未知",
 }
 
 
@@ -64,7 +72,7 @@ def _http_error(exc: EmployeeAccountsError) -> HTTPException:
 
 
 def _work_http_error(exc: HygieneWorkError) -> HTTPException:
-    if exc.code == "forbidden":
+    if exc.code in ("forbidden", "cannot_self_accept"):
         status = 403
     elif exc.code in ("zone_not_found", "item_not_found"):
         status = 404
@@ -149,6 +157,63 @@ async def _capture_from_upload(file: UploadFile, markup_raw: Optional[str]) -> d
         "content_type": content_type,
         "markup": _parse_markup_field(markup_raw),
     }
+
+
+def _staff_actor(employee: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "kind": "staff",
+        "id": employee["id"],
+        "permission": employee["permission"],
+        "phone": employee["phone"],
+        "shift": employee.get("shift"),
+    }
+
+
+def _live_flag(raw: Optional[str]) -> bool:
+    return (raw or "").strip().lower() in {"true", "1", "yes"}
+
+
+async def _live_capture_from_upload(file: UploadFile, live_raw: Optional[str]) -> dict:
+    data = await file.read()
+    content_type = (file.content_type or "image/jpeg").split(";")[0].strip()
+    if not content_type.startswith("image/"):
+        content_type = "image/jpeg"
+    return {
+        "bytes": data,
+        "content_type": content_type,
+        "live": _live_flag(live_raw),
+    }
+
+
+async def _daily_capture_response(work: HygieneWork, item_id: int, shift: str) -> Response:
+    try:
+        review = await work.get_daily_review(item_id, shift)
+        body = work.capture_bytes(review["capture_id"])
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="实拍不存在") from exc
+    return Response(
+        content=body,
+        media_type=review.get("content_type") or "image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _frozen_standard_response(work: HygieneWork, item_id: int, shift: str) -> Response:
+    try:
+        review = await work.get_daily_review(item_id, shift)
+        standard = await work.standard_by_id(review["frozen_standard_id"])
+        body = work.capture_bytes(standard["capture_id"])
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="标准图不存在") from exc
+    return Response(
+        content=body,
+        media_type=standard.get("content_type") or "image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def _standard_image_response(work: HygieneWork, item_id: int) -> Response:
@@ -372,3 +437,165 @@ async def staff_current_standard_image(
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
     return await _standard_image_response(work, item_id)
+
+
+@router.get("/staff/daily-work")
+async def staff_daily_work(
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {"items": await work.list_daily_work(_staff_actor(staff["employee"]))}
+
+
+@router.post("/staff/daily/{item_id}/submit")
+async def staff_submit_daily(
+    item_id: int,
+    live: Optional[str] = Form(None),
+    shift: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    capture = await _live_capture_from_upload(file, live)
+    try:
+        submitted = await work.submit_daily(
+            _staff_actor(staff["employee"]),
+            item_id,
+            capture,
+            shift=shift,
+        )
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    return submitted
+
+
+@router.post("/staff/daily/{item_id}/accept")
+async def staff_accept_daily(
+    item_id: int,
+    body: ShiftIn,
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.accept_daily(
+            _staff_actor(staff["employee"]), item_id, body.shift
+        )
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.post("/staff/daily/{item_id}/reject")
+async def staff_reject_daily(
+    item_id: int,
+    body: ShiftIn,
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.reject_daily(
+            _staff_actor(staff["employee"]), item_id, body.shift
+        )
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/staff/daily/{item_id}/capture")
+async def staff_daily_capture(
+    item_id: int,
+    shift: str,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _daily_capture_response(work, item_id, shift)
+
+
+@router.get("/staff/daily/{item_id}/frozen-standard")
+async def staff_daily_frozen_standard(
+    item_id: int,
+    shift: str,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _frozen_standard_response(work, item_id, shift)
+
+
+@router.get("/staff/daily/{item_id}/review")
+async def staff_daily_review(
+    item_id: int,
+    shift: str,
+    _staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.get_daily_review(item_id, shift)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/admin/daily-queue")
+async def admin_daily_queue(
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    items = await work.list_daily_work(SUPER_ACTOR)
+    pending = [row for row in items if row["status"] == "待验收"]
+    return {"items": pending}
+
+
+@router.post("/admin/daily/{item_id}/accept")
+async def admin_accept_daily(
+    item_id: int,
+    body: ShiftIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.accept_daily(SUPER_ACTOR, item_id, body.shift)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.post("/admin/daily/{item_id}/reject")
+async def admin_reject_daily(
+    item_id: int,
+    body: ShiftIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.reject_daily(SUPER_ACTOR, item_id, body.shift)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
+@router.get("/admin/daily/{item_id}/capture")
+async def admin_daily_capture(
+    item_id: int,
+    shift: str,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _daily_capture_response(work, item_id, shift)
+
+
+@router.get("/admin/daily/{item_id}/frozen-standard")
+async def admin_daily_frozen_standard(
+    item_id: int,
+    shift: str,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    return await _frozen_standard_response(work, item_id, shift)
+
+
+@router.get("/admin/daily/{item_id}/review")
+async def admin_daily_review(
+    item_id: int,
+    shift: str,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        return await work.get_daily_review(item_id, shift)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc

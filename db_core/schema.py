@@ -440,6 +440,8 @@ HYGIENE_TABLES = (
     "hygiene_zones",
     "hygiene_daily_items",
     "hygiene_standards",
+    "hygiene_daily_instances",
+    "hygiene_daily_submissions",
 )
 
 _HYGIENE_TABLE_SCHEMAS = {
@@ -509,6 +511,36 @@ _HYGIENE_TABLE_SCHEMAS = {
             FOREIGN KEY (item_id) REFERENCES hygiene_daily_items(id)
         )
     """,
+    "hygiene_daily_instances": """
+        CREATE TABLE IF NOT EXISTS hygiene_daily_instances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            business_date TEXT NOT NULL,
+            shift TEXT NOT NULL,
+            item_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            pending_submission_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (business_date, shift, item_id),
+            FOREIGN KEY (item_id) REFERENCES hygiene_daily_items(id)
+        )
+    """,
+    "hygiene_daily_submissions": """
+        CREATE TABLE IF NOT EXISTS hygiene_daily_submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instance_id INTEGER NOT NULL,
+            capture_id TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            frozen_standard_id INTEGER NOT NULL,
+            submitter_id INTEGER NOT NULL,
+            submitter_phone TEXT NOT NULL,
+            zone_name TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (instance_id) REFERENCES hygiene_daily_instances(id),
+            FOREIGN KEY (frozen_standard_id) REFERENCES hygiene_standards(id)
+        )
+    """,
 }
 
 _HYGIENE_INDEX_DEFINITIONS = {
@@ -533,6 +565,14 @@ _HYGIENE_INDEX_DEFINITIONS = {
     "hygiene_standards": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_standards_item "
         "ON hygiene_standards(item_id)",
+    ],
+    "hygiene_daily_instances": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_daily_instances_date "
+        "ON hygiene_daily_instances(business_date, shift)",
+    ],
+    "hygiene_daily_submissions": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_daily_submissions_instance "
+        "ON hygiene_daily_submissions(instance_id)",
     ],
 }
 

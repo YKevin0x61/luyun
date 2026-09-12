@@ -576,6 +576,7 @@ def _spa_index():
 @app.get("/hygiene/register")
 @app.get("/hygiene-roster")
 @app.get("/hygiene-zones")
+@app.get("/hygiene-daily")
 async def spa_page():
     return _spa_index()
 

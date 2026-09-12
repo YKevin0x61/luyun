@@ -5,6 +5,9 @@ import {
   createArrowMark,
   createCaptionMark,
   createCircleMark,
+  dailyCaptureUrl,
+  formatWatermarkTime,
+  frozenStandardUrl,
   parseMarkup,
   standardImageUrl,
 } from '../hygieneMarkup.js'
@@ -51,5 +54,21 @@ describe('hygieneMarkup', () => {
     expect(standardImageUrl('admin', { id: 10, current_standard_id: 4 })).toBe(
       '/api/hygiene/admin/items/10/standard?v=4',
     )
+  })
+
+  it('日常实拍和提交当时标准图地址带班次和版本', () => {
+    const row = {
+      item_id: 10,
+      shift: '白班',
+      capture_id: 'fake-2',
+      frozen_standard_id: 7,
+    }
+    expect(dailyCaptureUrl('staff', row)).toBe(
+      '/api/hygiene/staff/daily/10/capture?shift=%E7%99%BD%E7%8F%AD&v=fake-2',
+    )
+    expect(frozenStandardUrl('admin', row)).toBe(
+      '/api/hygiene/admin/daily/10/frozen-standard?shift=%E7%99%BD%E7%8F%AD&v=7',
+    )
+    expect(formatWatermarkTime('2026-09-13T10:00:00+08:00')).toBe('2026-09-13 10:00')
   })
 })
