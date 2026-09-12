@@ -16,6 +16,7 @@ from db_core.schema import (
     ALL_TABLES,
     _INDEX_DEFINITIONS,
     _TABLE_SCHEMAS,
+    apply_hygiene_schema,
     apply_recipe_schema,
 )
 from db_core.table_db import TableView, migrate_orders_kds_columns
@@ -73,8 +74,9 @@ class _ConnectionMixin:
                 for idx_sql in _INDEX_DEFINITIONS.get(table, []):
                     await self._main_conn.execute(idx_sql)
 
-            # Recipe tables: same file, not ALL_TABLES / TableView / Admin CRUD.
+            # Recipe + hygiene tables: same file, not ALL_TABLES / TableView / Admin CRUD.
             await apply_recipe_schema(self._main_conn)
+            await apply_hygiene_schema(self._main_conn)
             await self._main_conn.commit()
 
             # 4. 各表共享同一连接的 TableView

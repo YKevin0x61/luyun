@@ -33,6 +33,7 @@ from api.analytics import router as analytics_router
 from api.export_api import router as export_router
 from api.security import authenticate_ws, warn_if_admin_open
 from api.auth import router as auth_router
+from api.hygiene import router as hygiene_router
 from services import auth_service
 from services import backup_import_staging
 from scraper.restaurant_scraper import create_restaurant_scraper
@@ -129,6 +130,7 @@ wecom_push_task = None
 reconcile_scheduler_task = None
 unmapped_watchdog_task = None
 recipe_store = None
+employee_accounts = None
 
 def serialize_all(obj):
     if isinstance(obj, dict):
@@ -145,7 +147,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global db_manager, dish_catalog, restaurant_scraper, scraper_task, wecom_push_task
     global reconcile_scheduler_task, unmapped_watchdog_task
-    global recipe_store
+    global recipe_store, employee_accounts
     
     try:
         logger.info("🚀 启动订单数据采集系统...")
@@ -183,6 +185,11 @@ async def lifespan(app: FastAPI):
             recipe_store = RecipeStore(conn=db_manager._conn)
             await recipe_store.prepare()
             startup_results.append("配方库")
+
+        from services.hygiene.accounts import EmployeeAccounts
+        if db_manager and db_manager._conn is not None:
+            employee_accounts = EmployeeAccounts(db_manager)
+            startup_results.append("员工账号")
 
         if db_manager:
             wecom_push_task = asyncio.create_task(wecom_push_service.scheduler_loop(db_manager))
@@ -358,16 +365,17 @@ import time
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-HTML_AUTH_EXACT = {"/login", "/login.html"}
+HTML_AUTH_EXACT = {"/login", "/login.html", "/hygiene"}
 # Keep in lockstep with admin-web/src/utils/loginNext.js RECIPE_READER_PATHS.
 # Do not use a /recipe prefix — /recipe/manage still requires a session.
+# Staff-phone lives under /hygiene and /hygiene/... ; /hygiene-roster is Admin SPA.
 HTML_AUTH_PUBLIC_PAGES = frozenset({
     "/recipe",
     "/recipe/detail",
     "/recipe/print",
     "/recipe/qr",
 })
-HTML_AUTH_PREFIXES = ("/api/auth/", "/vendor/", "/kds", "/assets/")
+HTML_AUTH_PREFIXES = ("/api/auth/", "/vendor/", "/kds", "/assets/", "/hygiene/")
 HTML_AUTH_SUFFIXES = (".css", ".js", ".png", ".ico", ".woff", ".woff2")
 
 
@@ -497,6 +505,7 @@ async def realtime_ws(websocket: WebSocket):
 
 # 注册API路由
 app.include_router(auth_router)
+app.include_router(hygiene_router)
 app.include_router(orders.router)
 app.include_router(dishes.router)
 app.include_router(dish_stations.router)
@@ -550,6 +559,10 @@ def _spa_index():
 @app.get("/recipe/manage")
 @app.get("/recipe/qr")
 @app.get("/logs")
+@app.get("/hygiene")
+@app.get("/hygiene/login")
+@app.get("/hygiene/register")
+@app.get("/hygiene-roster")
 async def spa_page():
     return _spa_index()
 

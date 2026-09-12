@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import bcrypt
 import hashlib
 import logging
 import secrets
@@ -13,9 +12,11 @@ from typing import Any, Dict, Optional, Tuple
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
+from services.password_hash import hash_password as _hash_password
+from services.password_hash import validate_password as _validate_password
+from services.password_hash import verify_password as _verify_password
 
 logger = logging.getLogger(__name__)
-BCRYPT_ROUNDS = 12
 
 
 def _db() -> DatabaseManager:
@@ -37,37 +38,6 @@ def _now_iso() -> str:
 
 def _hash_token(plain: str) -> str:
     return hashlib.sha256(plain.encode("utf-8")).hexdigest()
-
-
-def _password_digest(password: str) -> str:
-    """SHA-256 后再 bcrypt，避免 bcrypt 72 字节上限。"""
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
-
-
-def _validate_password(password: str) -> None:
-    if len(password) < settings.AUTH_MIN_PASSWORD_LENGTH:
-        raise ValueError("password_too_short")
-    if len(password.encode("utf-8")) > settings.AUTH_MAX_PASSWORD_BYTES:
-        raise ValueError("password_too_long")
-
-
-def _hash_password(password: str) -> str:
-    _validate_password(password)
-    digest = _password_digest(password).encode("utf-8")
-    hashed = bcrypt.hashpw(digest, bcrypt.gensalt(rounds=BCRYPT_ROUNDS))
-    return hashed.decode("utf-8")
-
-
-def _verify_password(password: str, stored_hash: str) -> bool:
-    # 兼容旧版 passlib/bcrypt(明文密码)；新版为 bcrypt(sha256(password))
-    stored = stored_hash.encode("utf-8")
-    for candidate in (_password_digest(password).encode("utf-8"), password.encode("utf-8")):
-        try:
-            if bcrypt.checkpw(candidate, stored):
-                return True
-        except (ValueError, TypeError):
-            continue
-    return False
 
 
 def validate_password(password: str) -> None:

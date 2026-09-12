@@ -1,8 +1,10 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { isLoggedIn } from '../utils/authStatus'
 import { buildLoginNextFromRoute } from '../utils/loginNext'
+import { isStaffLoggedIn } from '../utils/hygieneStaff'
 
 const RECIPE_READER_META = { public: true, standalone: true }
+const HYGIENE_STAFF_META = { public: true, standalone: true, staffPhone: true }
 
 const routes = [
   { path: '/', name: 'dashboard', component: () => import('../views/DashboardView.vue') },
@@ -16,6 +18,10 @@ const routes = [
   { path: '/logs', name: 'logs', component: () => import('../views/LogsView.vue') },
   { path: '/prep-plan', name: 'prep-plan', component: () => import('../views/PrepPlanView.vue') },
   { path: '/wecom-push', name: 'wecom-push', component: () => import('../views/WecomPushView.vue') },
+  { path: '/hygiene-roster', name: 'hygiene-roster', component: () => import('../views/hygiene/HygieneRosterView.vue') },
+  { path: '/hygiene', name: 'hygiene-home', component: () => import('../views/hygiene/HygieneHomeView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true } },
+  { path: '/hygiene/login', name: 'hygiene-login', component: () => import('../views/hygiene/HygieneLoginView.vue'), meta: HYGIENE_STAFF_META },
+  { path: '/hygiene/register', name: 'hygiene-register', component: () => import('../views/hygiene/HygieneRegisterView.vue'), meta: HYGIENE_STAFF_META },
   { path: '/login', name: 'login', component: () => import('../views/LoginView.vue'), meta: { standalone: true, public: true } },
   { path: '/setup', name: 'setup', component: () => import('../views/SetupView.vue'), meta: { standalone: true } },
 ]
@@ -25,8 +31,13 @@ const router = createRouter({
   routes,
 })
 
-// 全站登录守卫：public 路由（登录页、配方阅读面）放行；其余未登录跳 /login?next=
+// 全站登录守卫：public 路由（登录页、配方阅读面、员工手机入口）放行；
+// 员工卫生首页另查员工会话；其余未登录跳 /login?next=
 router.beforeEach(async (to) => {
+  if (to.meta.staffAuth) {
+    if (await isStaffLoggedIn()) return true
+    return { path: '/hygiene/login' }
+  }
   if (to.meta.public) return true
   if (await isLoggedIn()) return true
   return { path: '/login', query: { next: buildLoginNextFromRoute(to) } }

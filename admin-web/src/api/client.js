@@ -197,6 +197,7 @@ export const api = {
   get: (path, params, signal, cache) => request(path, { method: 'GET', params, signal, cache }),
   post: (path, body, params) => request(path, { method: 'POST', body, params }),
   put: (path, body, params) => request(path, { method: 'PUT', body, params }),
+  patch: (path, body, params) => request(path, { method: 'PATCH', body, params }),
   delete: (path, params) => request(path, { method: 'DELETE', params }),
   upload,
   download,

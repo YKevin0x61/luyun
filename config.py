@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     ADMIN_API_KEY: Optional[str] = None
     ALLOW_UNAUTH_SETUP_FROM_LOCALHOST: bool = False
     SESSION_COOKIE_NAME: str = "luyun_session"
+    STAFF_SESSION_COOKIE_NAME: str = "luyun_staff_session"
     SESSION_TTL_HOURS: int = 8
     SESSION_REMEMBER_DAYS: int = 30
     AUTH_MIN_PASSWORD_LENGTH: int = 8

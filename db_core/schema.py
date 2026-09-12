@@ -429,3 +429,53 @@ async def apply_recipe_schema(conn) -> None:
         for stmt in stmts:
             await conn.execute(stmt)
     await migrate_recipe_columns(conn)
+
+
+# Hygiene employee tables live in app.db but stay out of ALL_TABLES: Admin
+# generic CRUD must not be the write path (EmployeeAccounts owns writes).
+HYGIENE_TABLES = ("hygiene_employees", "hygiene_staff_sessions")
+
+_HYGIENE_TABLE_SCHEMAS = {
+    "hygiene_employees": """
+        CREATE TABLE IF NOT EXISTS hygiene_employees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            job_title TEXT NOT NULL DEFAULT '',
+            permission TEXT NOT NULL DEFAULT '普通员工',
+            approved INTEGER NOT NULL DEFAULT 0,
+            disabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """,
+    "hygiene_staff_sessions": """
+        CREATE TABLE IF NOT EXISTS hygiene_staff_sessions (
+            session_id TEXT PRIMARY KEY NOT NULL,
+            employee_id INTEGER NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            FOREIGN KEY (employee_id) REFERENCES hygiene_employees(id)
+        )
+    """,
+}
+
+_HYGIENE_INDEX_DEFINITIONS = {
+    "hygiene_employees": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_employees_phone ON hygiene_employees(phone)",
+    ],
+    "hygiene_staff_sessions": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_staff_sessions_employee "
+        "ON hygiene_staff_sessions(employee_id)",
+    ],
+}
+
+
+async def apply_hygiene_schema(conn) -> None:
+    """Create hygiene employee tables on an open app.db connection. Not ALL_TABLES."""
+    for sql in _HYGIENE_TABLE_SCHEMAS.values():
+        await conn.executescript(sql)
+    for stmts in _HYGIENE_INDEX_DEFINITIONS.values():
+        for stmt in stmts:
+            await conn.execute(stmt)

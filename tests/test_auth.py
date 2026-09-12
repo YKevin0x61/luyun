@@ -305,6 +305,21 @@ def test_kds_html_not_redirected_to_login(auth_app_client):
     assert "/login" not in loc
 
 
+def test_hygiene_staff_pages_accessible_without_admin_session(auth_app_client):
+    client, _ = auth_app_client
+    for path in ("/hygiene", "/hygiene/login", "/hygiene/register"):
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        loc = resp.headers.get("location", "")
+        assert resp.status_code != 302 or "/login" not in loc, path
+
+
+def test_hygiene_roster_html_requires_admin_session(auth_app_client):
+    client, _ = auth_app_client
+    resp = client.get("/hygiene-roster", headers=_html_headers(), follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"].startswith("/login")
+
+
 def test_html_auth_preserves_query_in_next(auth_app_client):
     client, _ = auth_app_client
     resp = client.get(

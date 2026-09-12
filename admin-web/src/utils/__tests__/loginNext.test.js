@@ -27,9 +27,16 @@ describe('shouldSkipLoginRedirect', () => {
     expect(shouldSkipLoginRedirect('/recipe/detail')).toBe(true)
   })
 
+  it('员工手机卫生入口不因 401 跳后台登录', () => {
+    expect(shouldSkipLoginRedirect('/hygiene')).toBe(true)
+    expect(shouldSkipLoginRedirect('/hygiene/login')).toBe(true)
+    expect(shouldSkipLoginRedirect('/hygiene/register')).toBe(true)
+  })
+
   it('管理面和运营页仍跳登录', () => {
     expect(shouldSkipLoginRedirect('/recipe/manage')).toBe(false)
     expect(shouldSkipLoginRedirect('/admin')).toBe(false)
+    expect(shouldSkipLoginRedirect('/hygiene-roster')).toBe(false)
   })
 })
 

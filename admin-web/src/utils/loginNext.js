@@ -8,8 +8,14 @@ export function isRecipeReaderPath(pathname) {
   return RECIPE_READER_PATHS.includes(pathname || '')
 }
 
+export function isHygieneStaffPath(pathname) {
+  if (pathname === '/hygiene') return true
+  return (pathname || '').startsWith('/hygiene/')
+}
+
 export function shouldSkipLoginRedirect(pathname) {
   if (pathname === '/login' || pathname === '/setup') return true
+  if (isHygieneStaffPath(pathname)) return true
   return isRecipeReaderPath(pathname)
 }
 
