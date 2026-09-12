@@ -161,6 +161,146 @@ class HygieneWork:
         logger.info("hygiene zone created id=%s name=%s", cur.lastrowid, cleaned)
         return {"id": int(cur.lastrowid), "name": cleaned}
 
+    async def _item_ids_for_zone(self, zone_id: int) -> list[int]:
+        cur = await self._conn.execute(
+            "SELECT id FROM hygiene_daily_items WHERE zone_id = ?",
+            (int(zone_id),),
+        )
+        return [int(dict(row)["id"]) for row in await cur.fetchall()]
+
+    async def _drop_daily_items(self, item_ids: list[int]) -> None:
+        if not item_ids:
+            return
+        placeholders = ",".join("?" * len(item_ids))
+        inst_cur = await self._conn.execute(
+            f"SELECT id FROM hygiene_daily_instances WHERE item_id IN ({placeholders})",
+            item_ids,
+        )
+        instance_ids = [int(dict(row)["id"]) for row in await inst_cur.fetchall()]
+        if instance_ids:
+            inst_ph = ",".join("?" * len(instance_ids))
+            await self._conn.execute(
+                f"UPDATE hygiene_daily_instances SET pending_submission_id = NULL "
+                f"WHERE id IN ({inst_ph})",
+                instance_ids,
+            )
+            await self._conn.execute(
+                f"DELETE FROM hygiene_daily_submissions WHERE instance_id IN ({inst_ph})",
+                instance_ids,
+            )
+            await self._conn.execute(
+                f"DELETE FROM hygiene_daily_instances WHERE id IN ({inst_ph})",
+                instance_ids,
+            )
+        await self._conn.execute(
+            f"DELETE FROM hygiene_overdue_notices WHERE item_id IN ({placeholders})",
+            item_ids,
+        )
+        await self._conn.execute(
+            f"UPDATE hygiene_daily_items SET current_standard_id = NULL "
+            f"WHERE id IN ({placeholders})",
+            item_ids,
+        )
+        await self._conn.execute(
+            f"DELETE FROM hygiene_standards WHERE item_id IN ({placeholders})",
+            item_ids,
+        )
+        await self._conn.execute(
+            f"DELETE FROM hygiene_daily_items WHERE id IN ({placeholders})",
+            item_ids,
+        )
+
+    async def _drop_zone_fix_tickets(self, zone_id: int) -> None:
+        cur = await self._conn.execute(
+            "SELECT id FROM hygiene_fix_tickets WHERE zone_id = ?",
+            (int(zone_id),),
+        )
+        ticket_ids = [int(dict(row)["id"]) for row in await cur.fetchall()]
+        if not ticket_ids:
+            return
+        placeholders = ",".join("?" * len(ticket_ids))
+        await self._conn.execute(
+            f"UPDATE hygiene_fix_tickets SET pending_reshoot_id = NULL "
+            f"WHERE id IN ({placeholders})",
+            ticket_ids,
+        )
+        await self._conn.execute(
+            f"DELETE FROM hygiene_fix_reshoots WHERE ticket_id IN ({placeholders})",
+            ticket_ids,
+        )
+        await self._conn.execute(
+            f"DELETE FROM hygiene_fix_overdue_notices WHERE ticket_id IN ({placeholders})",
+            ticket_ids,
+        )
+        await self._conn.execute(
+            f"DELETE FROM hygiene_fix_tickets WHERE id IN ({placeholders})",
+            ticket_ids,
+        )
+
+    async def _drop_board_events(self, zone_id=None, item_ids=None) -> None:
+        clauses = []
+        params: list = []
+        if zone_id is not None:
+            clauses.append("zone_id = ?")
+            params.append(int(zone_id))
+        if item_ids:
+            placeholders = ",".join("?" * len(item_ids))
+            clauses.append(f"item_id IN ({placeholders})")
+            params.extend(item_ids)
+        if not clauses:
+            return
+        await self._conn.execute(
+            f"DELETE FROM hygiene_board_events WHERE {' OR '.join(clauses)}",
+            params,
+        )
+
+    async def delete_zone(self, actor: dict, zone_id: int) -> dict:
+        self._require_super(actor)
+        zone = await self._fetch_zone(zone_id)
+        if zone is None:
+            raise HygieneWorkError("zone_not_found", "zone_not_found")
+        mapping = dict(zone)
+        try:
+            item_ids = await self._item_ids_for_zone(int(zone_id))
+            await self._drop_daily_items(item_ids)
+            await self._drop_zone_fix_tickets(int(zone_id))
+            await self._drop_board_events(zone_id=int(zone_id), item_ids=item_ids)
+            await self._conn.execute(
+                "DELETE FROM hygiene_zones WHERE id = ?",
+                (int(zone_id),),
+            )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        logger.info("hygiene zone deleted id=%s name=%s", mapping["id"], mapping["name"])
+        return {"id": int(mapping["id"]), "name": mapping["name"]}
+
+    async def delete_daily_item(self, actor: dict, item_id: int) -> dict:
+        self._require_super(actor)
+        item = await self._fetch_item(item_id)
+        if item is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        mapping = dict(item)
+        try:
+            ids = [int(item_id)]
+            await self._drop_daily_items(ids)
+            await self._drop_board_events(item_ids=ids)
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        logger.info(
+            "hygiene daily item deleted id=%s zone=%s",
+            mapping["id"],
+            mapping["zone_id"],
+        )
+        return {
+            "id": int(mapping["id"]),
+            "zone_id": int(mapping["zone_id"]),
+            "name": mapping["name"],
+        }
+
     def _require_capture(self, capture) -> bytes:
         data = None if capture is None else capture.get("bytes")
         if not data:

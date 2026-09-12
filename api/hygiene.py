@@ -410,6 +410,19 @@ async def admin_create_zone(
     return {"zone": zone}
 
 
+@router.delete("/admin/zones/{zone_id}")
+async def admin_delete_zone(
+    zone_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        zone = await work.delete_zone(SUPER_ACTOR, zone_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    return {"zone": zone}
+
+
 @router.get("/admin/overdue-clocks")
 async def admin_get_overdue_clocks(
     _session_id: str = Depends(require_session),
@@ -471,6 +484,19 @@ async def admin_add_daily_item(
     capture = await _capture_from_upload(file, markup)
     try:
         item = await work.add_daily_item(SUPER_ACTOR, zone_id, name, capture)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    return {"item": item}
+
+
+@router.delete("/admin/items/{item_id}")
+async def admin_delete_daily_item(
+    item_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        item = await work.delete_daily_item(SUPER_ACTOR, item_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     return {"item": item}

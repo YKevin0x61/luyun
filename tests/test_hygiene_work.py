@@ -950,6 +950,15 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         )
         await accounts.disable(opener_row["id"])
 
+        listed = await self.work.list_fix_tickets(other)
+        still_open = next(ticket for ticket in listed if ticket["id"] == opened["id"])
+        self.assertEqual(still_open["status"], "待验收")
+        self.assertEqual(still_open["opener_id"], opener_row["id"])
+        roster = await accounts.list_roster()
+        self.assertEqual(len(roster), 1)
+        self.assertTrue(roster[0]["disabled"])
+        self.assertEqual(roster[0]["phone"], ADMIN_PHONE)
+
         self.fixed_now = datetime(2026, 9, 13, 11, 0, tzinfo=CHINA_TZ)
         with self.assertRaises(HygieneWorkError) as still_waiting:
             await self.work.accept_fix(other, opened["id"])
@@ -1274,5 +1283,153 @@ class HygieneBoardsAndTeachingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.captures.get(deep["right_capture_id"]), AFTER_A)
         _no_score_keys(deep)
 
+
+class HygieneDeleteDropsWorkTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        self.db = DatabaseManager()
+        await self.db.connect()
+        self.fixed_now = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
+        self.captures = FakeCaptureStore()
+        self.work = HygieneWork(
+            self.db,
+            captures=self.captures,
+            now=lambda: self.fixed_now,
+            notifier=FakeNotifier(),
+        )
+        await self.work.prepare()
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        settings.DATABASE_DIR = self._old_database_dir
+        self._tmpdir.cleanup()
+
+    def _zone(self, zones, name):
+        return next(zone for zone in zones if zone["name"] == name)
+
+    def _capture(self, data):
+        return {"bytes": data, "content_type": "image/jpeg", "markup": []}
+
+    def _live(self, data):
+        return {"bytes": data, "content_type": "image/jpeg", "live": True}
+
+    async def test_delete_zone_drops_pending_daily_and_open_fix_other_zone_stays(self):
+        zones = await self.work.list_zones()
+        anban = self._zone(zones, "案板")
+        xian = self._zone(zones, "馅档")
+        anban_item = await self.work.add_daily_item(
+            SUPER, anban["id"], "案板表面", self._capture(OLD_BYTES)
+        )
+        xian_item = await self.work.add_daily_item(
+            SUPER, xian["id"], "馅档台面", self._capture(ZONE_A_BYTES)
+        )
+        day = _staff(10, DAY_PHONE, "白班")
+        opener = _staff(20, ADMIN_PHONE, "白班", "管理员")
+        await self.work.submit_daily(day, anban_item["id"], self._live(SHOT_A))
+        await self.work.submit_daily(day, xian_item["id"], self._live(SHOT_B))
+        anban_fix = await self.work.open_fix(
+            opener,
+            anban["id"],
+            "卫生",
+            "案板有油，用热水擦干净",
+            TWO_HOURS,
+            self._live(OPEN_BYTES),
+        )
+        xian_fix = await self.work.open_fix(
+            opener,
+            xian["id"],
+            "摆放",
+            "托盘乱，收整齐",
+            TWO_HOURS,
+            self._live(OPEN_BYTES),
+        )
+
+        deleted = await self.work.delete_zone(SUPER, anban["id"])
+        self.assertEqual(deleted["name"], "案板")
+
+        names = [zone["name"] for zone in await self.work.list_zones()]
+        self.assertNotIn("案板", names)
+        self.assertIn("馅档", names)
+        catalog = await self.work.list_staff_daily_items()
+        self.assertNotIn("案板", [zone["name"] for zone in catalog])
+        xian_catalog = self._zone(catalog, "馅档")["items"]
+        self.assertEqual([item["name"] for item in xian_catalog], ["馅档台面"])
+
+        inbox = await self.work.list_daily_work(day)
+        self.assertFalse(any(row["zone_name"] == "案板" for row in inbox))
+        self.assertFalse(any(row["item_id"] == anban_item["id"] for row in inbox))
+        remaining = next(
+            row
+            for row in inbox
+            if row["item_id"] == xian_item["id"] and row["shift"] == "白班"
+        )
+        self.assertEqual(remaining["status"], "待验收")
+        self.assertEqual(remaining["zone_name"], "馅档")
+
+        tickets = await self.work.list_fix_tickets(day)
+        self.assertFalse(any(ticket["id"] == anban_fix["id"] for ticket in tickets))
+        self.assertFalse(any(ticket["zone_name"] == "案板" for ticket in tickets))
+        kept = next(ticket for ticket in tickets if ticket["id"] == xian_fix["id"])
+        self.assertEqual(kept["zone_name"], "馅档")
+        self.assertEqual(kept["status"], "待回拍")
+
+    async def test_delete_daily_item_drops_only_that_item_pending_work(self):
+        zones = await self.work.list_zones()
+        anban = self._zone(zones, "案板")
+        surface = await self.work.add_daily_item(
+            SUPER, anban["id"], "案板表面", self._capture(OLD_BYTES)
+        )
+        edge = await self.work.add_daily_item(
+            SUPER, anban["id"], "案板边缝", self._capture(ZONE_A_BYTES)
+        )
+        opener = _staff(20, ADMIN_PHONE, "白班", "管理员")
+        zone_fix = await self.work.open_fix(
+            opener,
+            anban["id"],
+            "卫生",
+            "案板有油，用热水擦干净",
+            TWO_HOURS,
+            self._live(OPEN_BYTES),
+        )
+        day = _staff(10, DAY_PHONE, "白班")
+        await self.work.submit_daily(day, surface["id"], self._live(SHOT_A))
+        await self.work.submit_daily(day, edge["id"], self._live(SHOT_B))
+
+        deleted = await self.work.delete_daily_item(SUPER, surface["id"])
+        self.assertEqual(deleted["name"], "案板表面")
+
+        catalog = self._zone(await self.work.list_staff_daily_items(), "案板")["items"]
+        self.assertEqual([item["name"] for item in catalog], ["案板边缝"])
+        inbox = await self.work.list_daily_work(day)
+        self.assertFalse(any(row["item_id"] == surface["id"] for row in inbox))
+        kept = next(
+            row for row in inbox if row["item_id"] == edge["id"] and row["shift"] == "白班"
+        )
+        self.assertEqual(kept["status"], "待验收")
+        self.assertEqual(kept["item_name"], "案板边缝")
+        tickets = await self.work.list_fix_tickets(day)
+        self.assertEqual([ticket["id"] for ticket in tickets], [zone_fix["id"]])
+        self.assertEqual(tickets[0]["zone_name"], "案板")
+        self.assertEqual(tickets[0]["status"], "待回拍")
+
+    async def test_staff_cannot_delete_zone_or_daily_item(self):
+        zones = await self.work.list_zones()
+        anban = self._zone(zones, "案板")
+        item = await self.work.add_daily_item(
+            SUPER, anban["id"], "案板表面", self._capture(OLD_BYTES)
+        )
+        for actor in (STAFF, STAFF_ADMIN):
+            with self.assertRaises(HygieneWorkError) as zone_err:
+                await self.work.delete_zone(actor, anban["id"])
+            self.assertEqual(zone_err.exception.code, "forbidden")
+            with self.assertRaises(HygieneWorkError) as item_err:
+                await self.work.delete_daily_item(actor, item["id"])
+            self.assertEqual(item_err.exception.code, "forbidden")
+        names = [zone["name"] for zone in await self.work.list_zones()]
+        self.assertIn("案板", names)
+        catalog = self._zone(await self.work.list_staff_daily_items(), "案板")["items"]
+        self.assertEqual([row["name"] for row in catalog], ["案板表面"])
 
 

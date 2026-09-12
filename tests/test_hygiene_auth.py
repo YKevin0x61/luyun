@@ -266,6 +266,52 @@ def test_admin_cookie_can_create_zone_staff_cannot(hygiene_http):
     assert names == list(SEED_ZONE_NAMES) + ["卫生间"]
 
 
+def test_staff_cannot_delete_zone_or_item_admin_cookie_can(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    anban = next(zone for zone in _run(work.list_zones()) if zone["name"] == "案板")
+    item = _run(
+        work.add_daily_item(
+            SUPER,
+            anban["id"],
+            "案板表面",
+            {"bytes": b"STD-DEL", "content_type": "image/jpeg", "markup": []},
+        )
+    )
+    extra = _run(work.create_zone(SUPER, "卫生间"))
+
+    assert client.delete(f"/api/hygiene/admin/zones/{extra['id']}").status_code == 401
+    assert client.delete(f"/api/hygiene/admin/items/{item['id']}").status_code == 401
+
+    _approve_staff(accounts, PHONE, "白班")
+    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _staff_login(client, PHONE)
+    assert client.delete(f"/api/hygiene/admin/zones/{extra['id']}").status_code == 401
+    assert client.delete(f"/api/hygiene/admin/items/{item['id']}").status_code == 401
+    _staff_login(client, PHONE_ADMIN)
+    assert client.delete(f"/api/hygiene/admin/zones/{extra['id']}").status_code == 401
+    assert client.delete(f"/api/hygiene/admin/items/{item['id']}").status_code == 401
+    catalog = _run(work.list_staff_daily_items())
+    anban_items = next(zone for zone in catalog if zone["name"] == "案板")["items"]
+    assert [row["name"] for row in anban_items] == ["案板表面"]
+    assert any(zone["name"] == "卫生间" for zone in _run(work.list_zones()))
+
+    client.cookies.clear()
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200
+    removed_item = client.delete(f"/api/hygiene/admin/items/{item['id']}")
+    assert removed_item.status_code == 200
+    assert removed_item.json()["item"]["name"] == "案板表面"
+    removed_zone = client.delete(f"/api/hygiene/admin/zones/{extra['id']}")
+    assert removed_zone.status_code == 200
+    assert removed_zone.json()["zone"]["name"] == "卫生间"
+    listed = client.get("/api/hygiene/admin/zones")
+    assert listed.status_code == 200
+    names = [zone["name"] for zone in listed.json()["zones"]]
+    assert names == list(SEED_ZONE_NAMES)
+    leftover = next(zone for zone in listed.json()["zones"] if zone["name"] == "案板")
+    assert leftover["items"] == []
+
+
 def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
     client, _db, accounts, work = hygiene_http
     employee = _run(accounts.register(PHONE, PASSWORD))

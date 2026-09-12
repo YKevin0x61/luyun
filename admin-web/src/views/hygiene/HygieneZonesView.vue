@@ -155,6 +155,37 @@ async function createZone() {
   }
 }
 
+async function deleteZone(zone) {
+  if (!zone) return
+  if (!window.confirm(`删除卫生责任区「${zone.name}」？该区进行中的日常待办和未闭环整改单会一并去掉。`)) {
+    return
+  }
+  errorText.value = ''
+  try {
+    await api.delete(`/api/hygiene/admin/zones/${zone.id}`)
+    if (selectedId.value === zone.id) selectedId.value = null
+    clearEditor()
+    await loadZones()
+  } catch (err) {
+    errorText.value = err.message || '无法删除卫生责任区'
+  }
+}
+
+async function deleteItem(item) {
+  if (!item) return
+  if (!window.confirm(`删除日常检查项「${item.name}」？该项进行中的待办会一并去掉。`)) {
+    return
+  }
+  errorText.value = ''
+  try {
+    await api.delete(`/api/hygiene/admin/items/${item.id}`)
+    if (replacingId.value === item.id) clearEditor()
+    await loadZones()
+  } catch (err) {
+    errorText.value = err.message || '无法删除日常检查项'
+  }
+}
+
 function clearPreview() {
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
   previewUrl.value = ''
@@ -245,7 +276,7 @@ function markLabel(mark) {
     <div class="card roster-head">
       <div>
         <h2>卫生责任区</h2>
-        <p>卫生责任区不是档口、配方岗位或备货子岗位。每个区自己的日常清单；没有当前标准图的检查项不会出现在员工端。换标准图后，新检查只看新图。白班夜班共用这一套检查项。</p>
+        <p>卫生责任区不是档口、配方岗位或备货子岗位。每个区自己的日常清单；没有当前标准图的检查项不会出现在员工端。换标准图后，新检查只看新图。白班夜班共用这一套检查项。删除卫生责任区或检查项会把进行中的日常待办和该区未闭环整改单一并去掉。</p>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
     </div>
@@ -288,7 +319,7 @@ function markLabel(mark) {
         </div>
         <div v-if="loading" class="roster-empty">正在加载…</div>
         <ul v-else class="zone-list">
-          <li v-for="zone in zones" :key="zone.id">
+          <li v-for="zone in zones" :key="zone.id" class="zone-row">
             <button
               type="button"
               class="zone-btn"
@@ -301,6 +332,12 @@ function markLabel(mark) {
                 <template v-if="missedByZone[zone.id]"> · 漏拍 {{ missedByZone[zone.id] }}</template>
               </span>
             </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-danger"
+              :aria-label="`删除卫生责任区 ${zone.name}`"
+              @click="deleteZone(zone)"
+            >删除</button>
           </li>
         </ul>
         <form class="zone-add" @submit.prevent="createZone">
@@ -332,7 +369,15 @@ function markLabel(mark) {
               />
               <div class="item-meta">
                 <strong>{{ item.name }}</strong>
-                <button type="button" class="btn btn-sm" @click="startReplace(item)">换标准图</button>
+                <div class="item-actions">
+                  <button type="button" class="btn btn-sm" @click="startReplace(item)">换标准图</button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-danger"
+                    :aria-label="`删除日常检查项 ${item.name}`"
+                    @click="deleteItem(item)"
+                  >删除</button>
+                </div>
               </div>
             </li>
           </ul>
@@ -483,6 +528,13 @@ function markLabel(mark) {
   flex-direction: column;
   gap: 6px;
 }
+.zone-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+.zone-row .zone-btn { flex: 1; }
+.zone-row .btn-danger { flex: 0 0 auto; align-self: center; }
 .zone-btn {
   width: 100%;
   display: flex;
@@ -530,6 +582,11 @@ function markLabel(mark) {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
+  gap: 8px;
+}
+.item-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .item-editor {
