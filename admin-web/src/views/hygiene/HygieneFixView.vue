@@ -10,7 +10,7 @@ import {
   canAcceptFixTicket,
   hasLiveCamera,
 } from '../../utils/hygieneCopy'
-import { createCircleMark, fixOriginalUrl, fixReshootUrl } from '../../utils/hygieneMarkup'
+import { chinaNowIso, createCircleMark, fixOriginalUrl, fixReshootUrl } from '../../utils/hygieneMarkup'
 
 const CAMERA_MISSING = '这台电脑没有相机，不能开整改单。必须现场拍，没有相册。'
 
@@ -100,7 +100,7 @@ function onCaptured(blob) {
   previewUrl.value = URL.createObjectURL(blob)
   const zone = zones.value.find((row) => String(row.id) === String(zoneId.value))
   localWatermark.value = {
-    time: new Date().toISOString(),
+    time: chinaNowIso(),
     zone: zone ? zone.name : '',
     photographer: '超级管理员',
   }
@@ -312,6 +312,7 @@ function deadlineLabel(iso) {
             :standard-alt="selected.ticket_type"
             :capture-src="selected.reshoot_capture_id ? fixReshootUrl('admin', selected) : ''"
             :capture-alt="'回拍'"
+            :left-watermark="selected.open_watermark"
             :watermark="selected.watermark"
           />
           <p v-if="selected.status === '待验收' && !canDecide(selected)" class="editor-lead">时限还没到，只有开单人能验。</p>

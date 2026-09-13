@@ -395,7 +395,9 @@ def test_staff_submit_allowed_regular_accept_403_admin_cookie_can_accept(hygiene
     inbox = client.get("/api/hygiene/staff/daily-work")
     assert inbox.status_code == 200
     rows = inbox.json()["items"]
-    assert any(row["zone_name"] == "案板" and row["shift"] == "夜班" for row in rows)
+    assert rows
+    assert all(row["shift"] == "白班" for row in rows)
+    assert any(row["zone_name"] == "案板" and row["shift"] == "白班" for row in rows)
     submitted = _submit_daily(client, item["id"], SHOT_A)
     assert submitted.status_code == 200
     assert submitted.json()["status"] == "待验收"

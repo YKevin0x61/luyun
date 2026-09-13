@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../../api/client'
+import LuyunTimePicker from '../../components/ui/LuyunTimePicker.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import {
   createArrowMark,
@@ -288,25 +289,13 @@ function markLabel(mark) {
         <h3>日常逾期点</h3>
         <p>白班、夜班各一个钟点，到点仍未交才给企微群发文字。已交待验不算逾期，也不会点名某个人。</p>
       </div>
-      <label class="clock-field">
+      <label class="clock-field" aria-label="白班日常逾期点">
         白班
-        <input
-          v-model="dayClock"
-          class="input"
-          type="time"
-          required
-          aria-label="白班日常逾期点"
-        >
+        <LuyunTimePicker v-model="dayClock" />
       </label>
-      <label class="clock-field">
+      <label class="clock-field" aria-label="夜班日常逾期点">
         夜班
-        <input
-          v-model="nightClock"
-          class="input"
-          type="time"
-          required
-          aria-label="夜班日常逾期点"
-        >
+        <LuyunTimePicker v-model="nightClock" />
       </label>
       <button type="submit" class="btn btn-primary" :disabled="savingClocks">保存逾期点</button>
       <p v-if="clocksHint" class="clocks-hint">{{ clocksHint }}</p>
@@ -487,7 +476,8 @@ function markLabel(mark) {
   font-size: 12px;
   color: var(--text-dim);
 }
-.clock-field .input {
+.clock-field .input,
+.clock-field .luyun-time-picker {
   min-width: 140px;
 }
 .clocks-hint {

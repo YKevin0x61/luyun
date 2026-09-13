@@ -1,6 +1,8 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
+import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
+import LuyunTimePicker from '../../components/ui/LuyunTimePicker.vue'
 import { api } from '../../api/client'
 import { HYGIENE_WEEKDAYS, hygieneWeekdayLabel } from '../../utils/hygieneCopy'
 import { deepCleanShotUrl } from '../../utils/hygieneMarkup'
@@ -240,17 +242,11 @@ async function markTeaching() {
     <form class="card clocks-card" @submit.prevent="saveClock">
       <div>
         <h3>专项逾期点</h3>
-        <p>全店一个钟点。到点这条专项还有未验收的组，就发一次企微群文字。</p>
+        <p>全店一个钟点。到点这条专项还有未提交的组，就发一次企微群文字。已交待验不算逾期。</p>
       </div>
-      <label class="clock-field">
+      <label class="clock-field" aria-label="专项卫生逾期点">
         专项
-        <input
-          v-model="clock"
-          class="input"
-          type="time"
-          required
-          aria-label="专项卫生逾期点"
-        >
+        <LuyunTimePicker v-model="clock" />
       </label>
       <button type="submit" class="btn btn-primary" :disabled="savingClock">保存逾期点</button>
       <p v-if="clockHint" class="clocks-hint">{{ clockHint }}</p>
@@ -298,13 +294,13 @@ async function markTeaching() {
           <h3>完成日历</h3>
         </div>
         <form class="cal-range" @submit.prevent="loadCalendar">
-          <label class="clock-field">
+          <label class="clock-field" aria-label="专项日历开始日期">
             从
-            <input v-model="fromDate" class="input" type="date" required aria-label="专项日历开始日期">
+            <LuyunDatePicker v-model="fromDate" placeholder="开始日期" />
           </label>
-          <label class="clock-field">
+          <label class="clock-field" aria-label="专项日历结束日期">
             到
-            <input v-model="toDate" class="input" type="date" required aria-label="专项日历结束日期">
+            <LuyunDatePicker v-model="toDate" placeholder="结束日期" />
           </label>
           <button type="submit" class="btn">查看</button>
         </form>
@@ -411,7 +407,9 @@ async function markTeaching() {
   font-size: 12px;
   color: var(--text-dim);
 }
-.clock-field .input { min-width: 140px; }
+.clock-field .input,
+.clock-field .luyun-time-picker,
+.clock-field .luyun-date-picker { min-width: 140px; }
 .clocks-hint {
   flex: 1 1 100%;
   margin: 0;

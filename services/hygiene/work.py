@@ -676,9 +676,20 @@ class HygieneWork:
             "watermark": self._watermark(now, item["zone_name"], photographer),
         }
 
+    def _inbox_shifts(self, actor: dict) -> tuple[str, ...]:
+        if actor and actor.get("kind") == "staff":
+            picked = actor.get("shift")
+            if picked not in DAILY_SHIFTS:
+                return ()
+            return (picked,)
+        return DAILY_SHIFTS
+
     async def list_daily_work(self, actor: dict) -> list[dict]:
-        del actor  # shop-wide; zone membership is not an inbox filter
+        # Shop-wide across 卫生责任区; staff still only see their 班次.
         business_date = hygiene_business_date(self._now_dt())
+        shifts = self._inbox_shifts(actor)
+        if not shifts:
+            return []
         cur = await self._conn.execute(
             """SELECT i.id, i.zone_id, i.name, i.current_standard_id, z.name AS zone_name,
                       s.markup_json
@@ -701,7 +712,7 @@ class HygieneWork:
             instances[(int(mapping["item_id"]), mapping["shift"])] = mapping
         inbox = []
         for item in items:
-            for shift in DAILY_SHIFTS:
+            for shift in shifts:
                 instance = instances.get((int(item["id"]), shift))
                 submission = None
                 if instance is not None:
@@ -928,8 +939,20 @@ class HygieneWork:
 
     def _clock_reached(self, now: datetime, hhmm: str) -> bool:
         local = now.astimezone(CHINA_TZ) if now.tzinfo else now.replace(tzinfo=CHINA_TZ)
-        hour, minute = hhmm.split(":")
-        return local.hour * 60 + local.minute >= int(hour) * 60 + int(minute)
+        hour, minute = (int(part) for part in hhmm.split(":"))
+        business = datetime.strptime(hygiene_business_date(local), "%Y-%m-%d").date()
+        deadline_date = business
+        if hour < BUSINESS_DAY_CUT_HOUR:
+            deadline_date = business + timedelta(days=1)
+        deadline = datetime(
+            deadline_date.year,
+            deadline_date.month,
+            deadline_date.day,
+            hour,
+            minute,
+            tzinfo=CHINA_TZ,
+        )
+        return local >= deadline
 
     async def _catalog_daily_items(self) -> list:
         cur = await self._conn.execute(
@@ -1186,6 +1209,17 @@ class HygieneWork:
                 return False
         return True
 
+    async def _deep_clean_all_submitted(self, business_date: str) -> bool:
+        weekday = self._weekday_of(business_date)
+        items = await self._catalog_deep_clean_items(weekday)
+        if not items:
+            return True
+        for item in items:
+            instance = await self._fetch_deep_clean_instance(business_date, int(item["id"]))
+            if instance is None or instance["status"] == STATUS_TODO:
+                return False
+        return True
+
     async def _deep_clean_notice_exists(self, business_date: str) -> bool:
         cur = await self._conn.execute(
             """SELECT 1 FROM hygiene_deep_clean_overdue_notices
@@ -1213,7 +1247,7 @@ class HygieneWork:
         clock = await self.get_deep_clean_overdue_clock()
         if not self._clock_reached(now, clock["hhmm"]):
             return None
-        if await self._deep_clean_complete(business_date):
+        if await self._deep_clean_all_submitted(business_date):
             return None
         if await self._deep_clean_notice_exists(business_date):
             return None
@@ -1706,7 +1740,12 @@ class HygieneWork:
 
     def _fix_row(self, ticket: dict, reshoot=None) -> dict:
         opener_id = ticket.get("opener_id")
-        watermark = None
+        open_watermark = self._watermark(
+            ticket.get("created_at") or self._now_iso(),
+            ticket["zone_name"],
+            ticket.get("opener_phone") or "",
+        )
+        watermark = open_watermark
         reshoot_capture_id = None
         if reshoot is not None:
             reshoot_capture_id = reshoot["capture_id"]
@@ -1730,6 +1769,7 @@ class HygieneWork:
             "markup": self._parse_markup(ticket.get("markup_json") or "[]"),
             "reshoot_capture_id": reshoot_capture_id,
             "reshoot_content_type": None if reshoot is None else reshoot.get("content_type"),
+            "open_watermark": open_watermark,
             "watermark": watermark,
         }
 
@@ -1738,7 +1778,7 @@ class HygieneWork:
             """SELECT t.id, t.zone_id, t.ticket_type, t.body_text, t.duration_seconds,
                       t.deadline, t.opener_kind, t.opener_id, t.opener_phone, t.status,
                       t.capture_id, t.content_type, t.markup_json, t.pending_reshoot_id,
-                      z.name AS zone_name
+                      t.created_at, z.name AS zone_name
                FROM hygiene_fix_tickets t
                JOIN hygiene_zones z ON z.id = t.zone_id
                WHERE t.id = ?""",
@@ -1859,7 +1899,8 @@ class HygieneWork:
             "capture_id": capture_id,
             "markup": marks or [],
             "reshoot_capture_id": None,
-            "watermark": None,
+            "open_watermark": self._watermark(now, zone_name, opener_phone),
+            "watermark": self._watermark(now, zone_name, opener_phone),
         }
 
     async def list_fix_tickets(self, actor: dict) -> list:
@@ -1868,7 +1909,7 @@ class HygieneWork:
             """SELECT t.id, t.zone_id, t.ticket_type, t.body_text, t.duration_seconds,
                       t.deadline, t.opener_kind, t.opener_id, t.opener_phone, t.status,
                       t.capture_id, t.content_type, t.markup_json, t.pending_reshoot_id,
-                      z.name AS zone_name
+                      t.created_at, z.name AS zone_name
                FROM hygiene_fix_tickets t
                JOIN hygiene_zones z ON z.id = t.zone_id
                WHERE t.status != ?

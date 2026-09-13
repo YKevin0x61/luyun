@@ -124,3 +124,21 @@ export function formatWatermarkTime(value) {
   if (matched) return `${matched[1]} ${matched[2]}`
   return raw
 }
+
+export function chinaNowIso(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(now)
+  const pick = (type) => {
+    const part = parts.find((item) => item.type === type)
+    return part ? part.value : '00'
+  }
+  return `${pick('year')}-${pick('month')}-${pick('day')}T${pick('hour')}:${pick('minute')}:${pick('second')}+08:00`
+}

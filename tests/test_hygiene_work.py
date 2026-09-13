@@ -381,15 +381,26 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
             for row in inbox
         }
         self.assertIn(("案板", "案板表面", "白班", "待拍"), seen)
-        self.assertIn(("案板", "案板表面", "夜班", "待拍"), seen)
         self.assertIn(("馅档", "馅档台面", "白班", "待验收"), seen)
-        self.assertIn(("馅档", "馅档台面", "夜班", "待拍"), seen)
+        self.assertFalse(any(row["shift"] == "夜班" for row in inbox))
         night = _staff(11, NIGHT_PHONE, "夜班")
         night_inbox = await self.work.list_daily_work(night)
-        self.assertEqual(
-            {(row["zone_name"], row["shift"], row["status"]) for row in night_inbox},
-            {(row["zone_name"], row["shift"], row["status"]) for row in inbox},
-        )
+        night_seen = {
+            (row["zone_name"], row["item_name"], row["shift"], row["status"])
+            for row in night_inbox
+        }
+        self.assertIn(("案板", "案板表面", "夜班", "待拍"), night_seen)
+        self.assertIn(("馅档", "馅档台面", "夜班", "待拍"), night_seen)
+        self.assertFalse(any(row["shift"] == "白班" for row in night_inbox))
+        super_inbox = await self.work.list_daily_work(SUPER)
+        super_seen = {
+            (row["zone_name"], row["item_name"], row["shift"], row["status"])
+            for row in super_inbox
+        }
+        self.assertIn(("案板", "案板表面", "白班", "待拍"), super_seen)
+        self.assertIn(("案板", "案板表面", "夜班", "待拍"), super_seen)
+        self.assertIn(("馅档", "馅档台面", "白班", "待验收"), super_seen)
+        self.assertIn(("馅档", "馅档台面", "夜班", "待拍"), super_seen)
 
 
 class HygieneDailyOverdueTest(unittest.IsolatedAsyncioTestCase):
@@ -458,6 +469,22 @@ class HygieneDailyOverdueTest(unittest.IsolatedAsyncioTestCase):
 
         await self.work.sweep_overdue()
         self.assertEqual(len(self.notifier.texts), 1)
+
+    async def test_pre_six_clock_waits_until_next_calendar_morning(self):
+        await self._anban_item()
+        await self.work.set_daily_overdue_clocks(SUPER, "05:00", "21:30")
+        self.fixed_now = datetime(2026, 9, 13, 6, 0, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(self.notifier.texts, [])
+        self.fixed_now = datetime(2026, 9, 14, 4, 59, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(len(self.notifier.texts), 1)
+        self.assertIn("夜班", self.notifier.texts[0])
+        self.assertNotIn("白班", self.notifier.texts[0])
+        self.fixed_now = datetime(2026, 9, 14, 5, 0, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(len(self.notifier.texts), 2)
+        self.assertTrue(any("白班" in text for text in self.notifier.texts))
 
     async def test_pending_accept_before_clock_is_not_overdue(self):
         item = await self._anban_item()
@@ -758,6 +785,22 @@ class HygieneDeepCleanTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calendar[0]["status"], "未完成")
         self.assertEqual(calendar[0]["weekday"], SUNDAY)
 
+    async def test_pending_pairs_before_clock_are_not_overdue(self):
+        first, second = await self._two_sunday_items()
+        await self.work.set_deep_clean_overdue_clock(SUPER, "20:00")
+        day = _staff(10, DAY_PHONE, "白班")
+        await self.work.submit_deep_clean_pair(
+            day, first["id"], self._live(BEFORE_A), self._live(AFTER_A)
+        )
+        await self.work.submit_deep_clean_pair(
+            day, second["id"], self._live(BEFORE_B), self._live(AFTER_B)
+        )
+        self.fixed_now = datetime(2026, 9, 13, 20, 0, tzinfo=CHINA_TZ)
+        await self.work.sweep_overdue()
+        self.assertEqual(self.notifier.texts, [])
+        calendar = await self.work.list_deep_clean_calendar("2026-09-13", "2026-09-13")
+        self.assertEqual(calendar[0]["status"], "待办")
+
 
 OPEN_BYTES = b"FIX-OPEN-JPEG"
 RESHOOT_A = b"FIX-RESHOOT-A"
@@ -873,6 +916,22 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(super_opened["status"], "待回拍")
         self.assertEqual(super_opened["opener_kind"], "super")
+        self.assertEqual(
+            opened["watermark"],
+            {
+                "time": "2026-09-13T10:00:00+08:00",
+                "zone": "案板",
+                "photographer": ADMIN_PHONE,
+            },
+        )
+        self.assertEqual(
+            super_opened["watermark"],
+            {
+                "time": "2026-09-13T10:00:00+08:00",
+                "zone": "案板",
+                "photographer": "超级管理员",
+            },
+        )
         self.assertEqual(len(self.notifier.texts), 2)
         self.assertNotIn("FIX-OPEN-JPEG", self.notifier.texts[1])
         self.assertNotIn("image", self.notifier.texts[1].lower())
@@ -896,6 +955,14 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
                 "time": "2026-09-13T10:00:00+08:00",
                 "zone": "案板",
                 "photographer": NIGHT_PHONE,
+            },
+        )
+        self.assertEqual(
+            reshot["open_watermark"],
+            {
+                "time": "2026-09-13T10:00:00+08:00",
+                "zone": "案板",
+                "photographer": ADMIN_PHONE,
             },
         )
         after = next(

@@ -5,6 +5,7 @@ import {
   createArrowMark,
   createCaptionMark,
   createCircleMark,
+  chinaNowIso,
   dailyCaptureUrl,
   deepCleanShotUrl,
   fixOriginalUrl,
@@ -74,6 +75,9 @@ describe('hygieneMarkup', () => {
       '/api/hygiene/admin/daily/10/frozen-standard?shift=%E7%99%BD%E7%8F%AD&v=7',
     )
     expect(formatWatermarkTime('2026-09-13T10:00:00+08:00')).toBe('2026-09-13 10:00')
+    expect(chinaNowIso(new Date('2026-09-13T02:00:00.000Z'))).toBe(
+      '2026-09-13T10:00:00+08:00',
+    )
   })
 
   it('专项前后实拍地址带专项清单项和版本，不带卫生责任区', () => {

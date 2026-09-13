@@ -14,6 +14,7 @@ import {
   hygieneShiftLabel,
 } from '../../utils/hygieneCopy'
 import {
+  chinaNowIso,
   createCircleMark,
   dailyCaptureUrl,
   dailyItemStandardUrl,
@@ -330,7 +331,7 @@ function onCaptured(blob) {
     const zoneName = (row && row.zone_name)
       || (zones.value.find((zone) => zone.id === current.zoneId) || {}).name
     localWatermark.value = {
-      time: new Date().toISOString(),
+      time: chinaNowIso(),
       zone: zoneName,
       photographer: employee.value && employee.value.phone,
     }
@@ -345,7 +346,7 @@ function onCaptured(blob) {
   }
   if (current && current.kind === 'deep') {
     localWatermark.value = {
-      time: new Date().toISOString(),
+      time: chinaNowIso(),
       item_name: row && row.item_name,
       photographer: employee.value && employee.value.phone,
     }
@@ -359,7 +360,7 @@ function onCaptured(blob) {
     }
   }
   localWatermark.value = {
-    time: new Date().toISOString(),
+    time: chinaNowIso(),
     zone: row && row.zone_name,
     photographer: employee.value && employee.value.phone,
   }
@@ -918,6 +919,7 @@ async function decide(action) {
             :standard-alt="sheet.row.ticket_type"
             :capture-src="sheet.row.reshoot_capture_id ? fixReshootUrl('staff', sheet.row) : ''"
             :capture-alt="'回拍'"
+            :left-watermark="sheet.review.open_watermark"
             :watermark="sheet.review.watermark"
           />
           <p v-if="isManager && !canDecideFix(sheet.row)" class="staff-lead">时限还没到，只有开单人能验。</p>
