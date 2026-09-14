@@ -135,6 +135,35 @@ def test_staff_session_can_me_not_admin_roster_writes(hygiene_http):
     assert client.get("/api/hygiene/staff/me").status_code == 401
 
 
+def test_staff_can_update_own_profile_name_and_phone(hygiene_http):
+    client, _db, accounts, _work = hygiene_http
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
+    _run(accounts.approve(employee["id"]))
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    ).status_code == 200
+
+    updated = client.patch(
+        "/api/hygiene/staff/me",
+        json={"name": "李四", "phone": "13800138009"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["employee"]["name"] == "李四"
+    assert updated.json()["employee"]["phone"] == "13800138009"
+    assert client.get("/api/hygiene/staff/me").status_code == 200
+
+    client.cookies.clear()
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    ).status_code == 401
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": "13800138009", "password": PASSWORD},
+    ).status_code == 200
+
+
 def test_admin_cookie_can_roster_but_is_not_staff_phone_identity(hygiene_http):
     client, _db, accounts, _work = hygiene_http
     init = client.post("/api/auth/init", json=ADMIN_INIT)

@@ -162,6 +162,11 @@ class StaffLoginIn(BaseModel):
     password: str
 
 
+class StaffProfileIn(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+
+
 class RosterPatchIn(BaseModel):
     name: Optional[str] = None
     job_title: Optional[str] = None
@@ -393,6 +398,31 @@ async def staff_me(
         "daily_clocks": await work.get_daily_overdue_clocks(),
         "deep_clock": await work.get_deep_clean_overdue_clock(),
     }
+
+
+@router.patch("/staff/me")
+async def staff_update_me(
+    body: StaffProfileIn,
+    staff=Depends(require_staff_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, Any]:
+    if body.name is None and body.phone is None:
+        raise HTTPException(status_code=400, detail="请提供姓名或手机号")
+    try:
+        employee = await accounts.update_profile(
+            staff["employee"]["id"],
+            name=body.name,
+            phone=body.phone,
+        )
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
+    except ValueError as exc:
+        code = str(exc)
+        raise HTTPException(
+            status_code=400,
+            detail=_ERROR_DETAILS.get(code, code),
+        ) from exc
+    return {"employee": employee}
 
 
 @router.post("/staff/logout")

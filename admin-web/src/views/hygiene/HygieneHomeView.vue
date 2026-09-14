@@ -67,6 +67,12 @@ const picking = ref('')
 const changingAssignment = ref(false)
 const selectedShift = ref('')
 const selectedZoneId = ref('')
+const profileEditing = ref(false)
+const profileName = ref('')
+const profilePhone = ref('')
+const profileSaving = ref(false)
+const profileError = ref('')
+const profileFlash = ref('')
 const inbox = ref([])
 const deepInbox = ref([])
 const deepStatus = ref('')
@@ -290,6 +296,42 @@ async function openAssignmentPicker() {
   await nextTick()
   const main = document.getElementById('hygiene-work-main')
   if (main) main.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function startProfileEdit() {
+  profileEditing.value = true
+  profileError.value = ''
+  profileFlash.value = ''
+  profileName.value = (employee.value && employee.value.name) || ''
+  profilePhone.value = (employee.value && employee.value.phone) || ''
+}
+
+function cancelProfileEdit() {
+  profileEditing.value = false
+  profileError.value = ''
+}
+
+async function saveProfile() {
+  if (profileSaving.value || !employee.value) return
+  profileSaving.value = true
+  profileError.value = ''
+  profileFlash.value = ''
+  try {
+    const data = await staffRequest('/api/hygiene/staff/me', {
+      method: 'PATCH',
+      body: {
+        name: profileName.value.trim(),
+        phone: profilePhone.value.trim(),
+      },
+    })
+    employee.value = { ...employee.value, ...(data.employee || {}) }
+    profileEditing.value = false
+    profileFlash.value = '个人信息已保存，手机号下次登录生效。'
+  } catch (err) {
+    profileError.value = err.message || '保存个人信息失败'
+  } finally {
+    profileSaving.value = false
+  }
 }
 
 async function logout() {
@@ -1074,7 +1116,39 @@ async function decide(action) {
       <section v-if="tab === 'me'">
         <h1>我</h1>
         <template v-if="employee">
-          <dl class="hy-meta">
+          <p v-if="profileFlash" class="staff-flash" role="status">{{ profileFlash }}</p>
+          <p v-if="profileError" class="hy-staff-alert" role="alert">{{ profileError }}</p>
+          <div v-if="profileEditing" class="staff-profile-edit">
+            <label class="staff-field">
+              姓名
+              <input
+                v-model="profileName"
+                class="staff-input"
+                type="text"
+                maxlength="40"
+                autocomplete="name"
+              >
+            </label>
+            <label class="staff-field">
+              手机号
+              <input
+                v-model="profilePhone"
+                class="staff-input"
+                type="tel"
+                inputmode="numeric"
+                maxlength="11"
+                autocomplete="username"
+              >
+            </label>
+            <p class="hy-staff-lead">手机号也是登录账号；保存后请用新手机号登录。</p>
+            <div class="staff-decide">
+              <button type="button" class="btn btn-primary" :disabled="profileSaving" @click="saveProfile">
+                {{ profileSaving ? '正在保存…' : '保存' }}
+              </button>
+              <button type="button" class="btn" :disabled="profileSaving" @click="cancelProfileEdit">取消</button>
+            </div>
+          </div>
+          <dl v-else class="hy-meta">
             <div>
               <dt>姓名</dt>
               <dd>{{ employee.name || '未设置' }}</dd>
@@ -1108,11 +1182,24 @@ async function decide(action) {
               <dd>{{ hygienePermissionLabel(employee.permission) }}</dd>
             </div>
           </dl>
-          <p class="hy-staff-lead">专项不跟区域和班次；整改跟所选区域、不跟班次。都不能从相册选。</p>
-          <button type="button" class="btn btn-block hy-staff-submit" :disabled="loggingOut" @click="logout">
+          <p v-if="!profileEditing" class="hy-staff-lead">专项不跟区域和班次；整改跟所选区域、不跟班次。都不能从相册选。</p>
+          <button
+            v-if="!profileEditing"
+            type="button"
+            class="btn btn-block hy-staff-submit"
+            @click="startProfileEdit"
+          >修改个人信息</button>
+          <button
+            v-if="!profileEditing"
+            type="button"
+            class="btn btn-block hy-staff-submit"
+            :disabled="loggingOut"
+            @click="logout"
+          >
             {{ loggingOut ? '正在退出…' : '退出登录' }}
           </button>
           <button
+            v-if="!profileEditing"
             type="button"
             class="btn btn-block hy-staff-submit"
             @click="openAssignmentPicker"

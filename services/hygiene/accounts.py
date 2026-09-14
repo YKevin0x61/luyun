@@ -267,6 +267,48 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
+    async def update_profile(
+        self,
+        employee_id: int,
+        *,
+        name: Optional[str] = None,
+        phone: Optional[str] = None,
+    ) -> dict:
+        row = await self._fetch_employee(employee_id)
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        mapping = dict(row)
+        fields = []
+        params: list = []
+        if name is not None:
+            fields.append("name = ?")
+            params.append(self._normalize_name(name))
+        if phone is not None:
+            normalized = self._normalize_phone(phone)
+            if normalized != mapping["phone"]:
+                existing = await self._fetch_employee_by_phone(normalized)
+                if existing is not None and int(dict(existing)["id"]) != int(employee_id):
+                    raise EmployeeAccountsError("duplicate_phone", "duplicate_phone")
+            fields.append("phone = ?")
+            params.append(normalized)
+        if not fields:
+            raise EmployeeAccountsError("invalid_profile", "invalid_profile")
+        fields.append("updated_at = ?")
+        params.append(self._now_iso())
+        params.append(employee_id)
+        try:
+            await self._conn.execute(
+                f"UPDATE hygiene_employees SET {', '.join(fields)} WHERE id = ?",
+                params,
+            )
+            await self._conn.commit()
+        except sqlite3.IntegrityError as exc:
+            await self._conn.rollback()
+            raise EmployeeAccountsError("duplicate_phone", "duplicate_phone") from exc
+        logger.info("hygiene employee profile updated id=%s", employee_id)
+        row = await self._fetch_employee(employee_id)
+        return self._employee_from_row(row)
+
     async def set_permission(self, employee_id: int, permission: str) -> dict:
         row = await self._fetch_employee(employee_id)
         if row is None:

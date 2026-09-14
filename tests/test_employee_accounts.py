@@ -140,6 +140,27 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         roster = await self.accounts.list_roster()
         self.assertEqual(roster[0]["name"], "李四")
 
+    async def test_employee_can_update_own_name_and_login_phone(self):
+        employee = await self._approved_employee()
+        updated = await self.accounts.update_profile(
+            employee["id"],
+            name="李四",
+            phone="13800138009",
+        )
+        self.assertEqual(updated["name"], "李四")
+        self.assertEqual(updated["phone"], "13800138009")
+        self.assertIsNone(await self.accounts.login(PHONE, PASSWORD))
+        login = await self.accounts.login("13800138009", PASSWORD)
+        self.assertIsNotNone(login)
+        self.assertEqual(login["employee"]["name"], "李四")
+
+    async def test_employee_profile_rejects_duplicate_phone(self):
+        employee = await self._approved_employee()
+        other = await self._approved_employee(PHONE_ADMIN)
+        with self.assertRaises(EmployeeAccountsError) as raised:
+            await self.accounts.update_profile(employee["id"], phone=other["phone"])
+        self.assertEqual(raised.exception.code, "duplicate_phone")
+
     async def test_pick_at_0559_is_previous_business_day_0600_is_new_day(self):
         employee = await self._approved_employee()
         self.fixed_now = datetime(2026, 9, 13, 5, 59, tzinfo=CHINA_TZ)
