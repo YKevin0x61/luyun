@@ -19,7 +19,7 @@ function weekLabel(iso) {
 }
 
 function personLabel(row) {
-  return row.phone || `员工 ${row.employee_id}`
+  return row.name || row.phone || `员工 ${row.employee_id}`
 }
 
 async function refreshPage() {
@@ -48,7 +48,8 @@ function openTeaching(row) {
   <div class="boards-page">
     <div class="card roster-head">
       <div>
-        <h2>红黑榜与卫生教材</h2>
+        <p class="hy-eyebrow">Boards · 周次公示</p>
+        <h1>红黑榜与卫生教材</h1>
         <p>两张榜只记次数：逾期、驳回、一次通过、实拍。按周一 06:00 切周，不是零点。所有登录员工都能看。教材要超级管理员从已通过的对照里手点，合格图不会自动进库。</p>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
@@ -124,51 +125,27 @@ function openTeaching(row) {
 </template>
 
 <style scoped>
-.boards-page {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-width: 1180px;
-}
-.roster-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
-}
-.roster-head h2 { margin: 0 0 6px; font-size: 16px; }
-.roster-head p {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.6;
-  max-width: 56em;
-}
 .week-line {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 13px;
+  margin: 2px 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--hy-faint);
+  font-size: .72rem;
+  letter-spacing: .18em;
+  text-transform: uppercase;
 }
-.roster-error {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
-  font-size: 13px;
-}
-.roster-empty {
-  padding: 28px 16px;
-  text-align: center;
-  color: var(--text-dim);
-  font-size: 13px;
+.week-line::before,
+.week-line::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--hy-line), transparent);
 }
 .boards-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 14px;
   align-items: start;
 }
 @media (max-width: 900px) {
@@ -177,42 +154,18 @@ function openTeaching(row) {
 .count-list {
   list-style: none;
   margin: 0;
-  padding: 8px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
-.count-row, .queue-btn {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  text-align: left;
-  background: var(--card2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-family: inherit;
-}
-.queue-btn { cursor: pointer; }
-.queue-btn.active { border-color: var(--accent); }
-.count-row span, .queue-btn span { color: var(--text-dim); font-size: 12px; }
-.editor-lead {
-  margin: 0;
-  padding: 0 12px 8px;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.6;
+  gap: 8px;
 }
 .teaching-grid {
   display: grid;
-  grid-template-columns: 280px 1fr;
-  gap: 12px;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 14px;
   align-items: start;
 }
 @media (max-width: 900px) {
   .teaching-grid { grid-template-columns: 1fr; }
 }
-.review-body { padding: 12px; }
 </style>

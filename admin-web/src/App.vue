@@ -4,10 +4,12 @@ import { useRoute } from 'vue-router'
 import NavBar from './components/NavBar.vue'
 import { useRealtime } from './composables/useRealtime'
 import { useStationsStore } from './stores/stations'
+import { isHygieneAdminPath } from './utils/hygieneCopy'
 
 const route = useRoute()
 // 登录 / 配置页是独立全屏页，不显示主导航壳（见 router meta.standalone）。
 const isStandalone = computed(() => !!route.meta.standalone)
+const isHygieneAdmin = computed(() => isHygieneAdminPath(route.path))
 
 const listeners = new Set()
 function onRealtimeEvent(event) {
@@ -33,7 +35,7 @@ onMounted(() => {
 <template>
   <div class="app-shell">
     <NavBar v-if="!isStandalone" :connected="connected" :latency-ms="latencyMs" />
-    <div class="page-body luyun-scrollbar" :class="{ 'page-body-standalone': isStandalone }">
+    <div class="page-body luyun-scrollbar" :class="{ 'page-body-standalone': isStandalone || isHygieneAdmin }">
       <router-view />
     </div>
   </div>
@@ -43,6 +45,6 @@ onMounted(() => {
 /* 登录 / 配置页自带全屏背景与内边距，去掉主壳给 .page-body 加的外边距，避免双重滚动条。 */
 .page-body-standalone {
   padding: 0;
-  overflow-y: auto;
+  overflow: hidden;
 }
 </style>

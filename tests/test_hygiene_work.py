@@ -192,11 +192,12 @@ ADMIN_PHONE = "13800138013"
 OTHER_ADMIN_PHONE = "13800138014"
 
 
-def _staff(employee_id, phone, shift, permission="普通员工"):
+def _staff(employee_id, phone, shift, permission="普通员工", name=""):
     return {
         "kind": "staff",
         "id": employee_id,
         "permission": permission,
+        "name": name,
         "phone": phone,
         "shift": shift,
     }
@@ -344,7 +345,7 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_watermark_fields_are_injected_now_zone_and_photographer(self):
         _anban, xian = await self._two_items()
-        day = _staff(10, DAY_PHONE, "白班")
+        day = _staff(10, DAY_PHONE, "白班", name="张三")
         with self.assertRaises(HygieneWorkError) as album:
             await self.work.submit_daily(
                 day,
@@ -363,13 +364,13 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
             {
                 "time": "2026-09-13T10:00:00+08:00",
                 "zone": "馅档",
-                "photographer": DAY_PHONE,
+                "photographer": "张三",
             },
         )
         review = await self.work.get_daily_review(xian["id"], "白班")
         self.assertEqual(review["watermark"]["time"], "2026-09-13T10:00:00+08:00")
         self.assertEqual(review["watermark"]["zone"], "馅档")
-        self.assertEqual(review["watermark"]["photographer"], DAY_PHONE)
+        self.assertEqual(review["watermark"]["photographer"], "张三")
 
     async def test_inbox_is_shop_wide_not_filtered_by_zone(self):
         anban, xian = await self._two_items()
@@ -514,7 +515,7 @@ class HygieneDailyOverdueTest(unittest.IsolatedAsyncioTestCase):
         from services.hygiene.accounts import EmployeeAccounts
 
         accounts = EmployeeAccounts(self.db, now=lambda: self.fixed_now)
-        picker = await accounts.register("13800138010", "password123")
+        picker = await accounts.register("13800138010", "password123", "张三")
         await accounts.approve(picker["id"])
         await accounts.pick_shift(picker["id"], "白班")
         item = await self._anban_item()
@@ -1006,7 +1007,7 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         from services.hygiene.accounts import EmployeeAccounts
 
         accounts = EmployeeAccounts(self.db, now=lambda: self.fixed_now)
-        registered = await accounts.register(ADMIN_PHONE, "password123")
+        registered = await accounts.register(ADMIN_PHONE, "password123", "李四")
         await accounts.approve(registered["id"])
         opener_row = await accounts.set_permission(registered["id"], "管理员")
         opener = _staff(opener_row["id"], ADMIN_PHONE, "白班", "管理员")
@@ -1498,5 +1499,3 @@ class HygieneDeleteDropsWorkTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("案板", names)
         catalog = self._zone(await self.work.list_staff_daily_items(), "案板")["items"]
         self.assertEqual([row["name"] for row in catalog], ["案板表面"])
-
-

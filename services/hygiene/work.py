@@ -506,7 +506,12 @@ class HygieneWork:
         return data
 
     def _photographer(self, actor: dict) -> str:
-        return (actor.get("phone") or actor.get("display_name") or "").strip()
+        return (
+            actor.get("name")
+            or actor.get("phone")
+            or actor.get("display_name")
+            or ""
+        ).strip()
 
     def _watermark(self, captured_at: str, zone_name: str, photographer: str) -> dict:
         return {
@@ -1097,6 +1102,7 @@ class HygieneWork:
                 int(employee_id),
                 {
                     "employee_id": int(employee_id),
+                    "name": None,
                     "phone": None,
                     **{key: 0 for key in PERSON_COUNT_KEYS},
                 },
@@ -1107,11 +1113,12 @@ class HygieneWork:
         if by_id:
             placeholders = ",".join("?" * len(by_id))
             cur = await self._conn.execute(
-                f"SELECT id, phone FROM hygiene_employees WHERE id IN ({placeholders})",
+                f"SELECT id, name, phone FROM hygiene_employees WHERE id IN ({placeholders})",
                 list(by_id),
             )
             for row in await cur.fetchall():
                 mapping = dict(row)
+                by_id[int(mapping["id"])]["name"] = mapping["name"]
                 by_id[int(mapping["id"])]["phone"] = mapping["phone"]
         people = list(by_id.values())
         people.sort(key=lambda row: (-row["逾期"], -row["驳回"], row["employee_id"]))
@@ -2299,5 +2306,4 @@ class HygieneWork:
         if row is None:
             raise HygieneWorkError("teaching_not_found", "teaching_not_found")
         return self._teaching_from_row(row)
-
 

@@ -50,20 +50,34 @@ defineProps({
 .review-pair {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 14px;
 }
 .review-pair h3 {
   margin: 0 0 8px;
-  font-size: 13px;
-  color: var(--text-dim);
-  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--hy-mint);
+}
+.review-pair h3::before {
+  content: '';
+  width: 14px;
+  height: 1px;
+  background: var(--hy-mint);
+  box-shadow: 0 0 6px var(--hy-mint);
 }
 .capture-frame {
-  background: #0b1220;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  position: relative;
+  background: var(--hy-ink);
+  border: 1px solid var(--hy-line);
+  border-radius: var(--hy-radius-md);
   overflow: hidden;
-  min-height: 160px;
+  min-height: 180px;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -77,14 +91,15 @@ defineProps({
   display: block;
   width: 100%;
   height: auto;
-  max-height: 420px;
+  max-height: 440px;
 }
 .capture-empty {
   margin: 0;
-  padding: 48px 16px;
+  padding: 56px 16px;
   text-align: center;
-  color: var(--text-dim);
+  color: var(--hy-faint);
   font-size: 13px;
+  letter-spacing: .08em;
 }
 @media (max-width: 720px) {
   .review-pair { grid-template-columns: 1fr; }

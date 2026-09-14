@@ -460,6 +460,7 @@ _HYGIENE_TABLE_SCHEMAS = {
         CREATE TABLE IF NOT EXISTS hygiene_employees (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL DEFAULT '',
             password_hash TEXT NOT NULL,
             job_title TEXT NOT NULL DEFAULT '',
             permission TEXT NOT NULL DEFAULT '普通员工',
@@ -761,6 +762,17 @@ async def apply_hygiene_schema(conn) -> None:
     """Create hygiene tables on app.db. Not ALL_TABLES."""
     for sql in _HYGIENE_TABLE_SCHEMAS.values():
         await conn.executescript(sql)
+    await migrate_hygiene_columns(conn)
     for stmts in _HYGIENE_INDEX_DEFINITIONS.values():
         for stmt in stmts:
             await conn.execute(stmt)
+
+
+async def migrate_hygiene_columns(conn) -> None:
+    """Add hygiene columns introduced after the first table creation."""
+    cur = await conn.execute("PRAGMA table_info(hygiene_employees)")
+    cols = {row[1] for row in await cur.fetchall()}
+    if "name" not in cols:
+        await conn.execute(
+            "ALTER TABLE hygiene_employees ADD COLUMN name TEXT NOT NULL DEFAULT ''"
+        )

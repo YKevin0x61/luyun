@@ -276,7 +276,8 @@ function markLabel(mark) {
   <div class="zones-page">
     <div class="card roster-head">
       <div>
-        <h2>卫生责任区</h2>
+        <p class="hy-eyebrow">Zones · 责任区划</p>
+        <h1>卫生责任区</h1>
         <p>卫生责任区不是档口、配方岗位或备货子岗位。每个区自己的日常清单；没有当前标准图的检查项不会出现在员工端。换标准图后，新检查只看新图。白班夜班共用这一套检查项。删除卫生责任区或检查项会把进行中的日常待办和该区未闭环整改单一并去掉。</p>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
@@ -430,43 +431,15 @@ function markLabel(mark) {
 </template>
 
 <style scoped>
-.zones-page {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-width: 1180px;
-}
-.roster-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
-}
-.roster-head h2 { margin: 0 0 6px; font-size: 16px; }
-.roster-head p {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.6;
-  max-width: 56em;
-}
-.clocks-card {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 12px 16px;
-  padding: 14px 16px;
-}
-.clocks-card h3 {
-  margin: 0 0 4px;
-  font-size: 14px;
+@media (min-width: 721px) {
+  .hygiene-admin .zones-page .clocks-card {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px 16px;
+  }
 }
 .clocks-card p {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.55;
   max-width: 42em;
 }
 .clock-field {
@@ -474,37 +447,21 @@ function markLabel(mark) {
   flex-direction: column;
   gap: 6px;
   font-size: 12px;
-  color: var(--text-dim);
+  color: var(--hy-muted);
 }
-.clock-field .input,
-.clock-field .luyun-time-picker {
+.clock-field .input {
   min-width: 140px;
+}
+.clock-field :deep(.luyun-time-picker) {
+  width: 104px;
 }
 .clocks-hint {
   flex: 1 1 100%;
-  margin: 0;
-  color: var(--cyan);
-  font-size: 12px;
-}
-.roster-error {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
-  font-size: 13px;
-}
-.roster-empty {
-  padding: 28px 16px;
-  text-align: center;
-  color: var(--text-dim);
-  font-size: 13px;
 }
 .zones-grid {
   display: grid;
-  grid-template-columns: 260px 1fr;
-  gap: 12px;
+  grid-template-columns: 280px 1fr;
+  gap: 14px;
   align-items: start;
 }
 @media (max-width: 900px) {
@@ -513,66 +470,50 @@ function markLabel(mark) {
 .zone-list {
   list-style: none;
   margin: 0;
-  padding: 8px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 .zone-row {
   display: flex;
   align-items: stretch;
-  gap: 6px;
+  gap: 8px;
 }
 .zone-row .zone-btn { flex: 1; }
 .zone-row .btn-danger { flex: 0 0 auto; align-self: center; }
-.zone-btn {
-  width: 100%;
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  text-align: left;
-  background: var(--card2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 8px;
-  padding: 10px 12px;
-  cursor: pointer;
-  font-family: inherit;
-}
-.zone-btn span { color: var(--text-dim); font-size: 12px; }
-.zone-btn.active { border-color: var(--accent); }
 .zone-add {
   display: flex;
   gap: 8px;
-  padding: 8px 8px 12px;
+  padding: 4px 10px 12px;
 }
 .zone-add .input { flex: 1; }
 .item-list {
   list-style: none;
   margin: 0;
-  padding: 8px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 .item-row {
   display: grid;
-  grid-template-columns: 140px 1fr;
+  grid-template-columns: 148px 1fr;
   gap: 12px;
   align-items: center;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--card2);
+  padding: 10px;
 }
 .item-thumb { min-height: 0; }
 .item-thumb :deep(.std-frame) { min-height: 0; }
-.item-thumb :deep(.std-photo img) { max-height: 96px; }
+.item-thumb :deep(.std-photo img) { max-height: 104px; }
 .item-meta {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
+}
+.item-meta strong {
+  font-weight: 600;
 }
 .item-actions {
   display: flex;
@@ -583,22 +524,27 @@ function markLabel(mark) {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px;
-  border-top: 1px solid var(--border);
+  padding: 14px;
+  border-top: 1px solid var(--hy-line);
 }
-.item-editor h4 { margin: 0; font-size: 14px; }
+.item-editor h4 {
+  margin: 0;
+  font-family: var(--font-song);
+  font-size: 15px;
+  letter-spacing: .04em;
+}
 .editor-lead {
   margin: 0;
-  color: var(--text-dim);
+  color: var(--hy-muted);
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.6;
 }
 .editor-field {
   display: flex;
   flex-direction: column;
   gap: 6px;
   font-size: 12px;
-  color: var(--text-dim);
+  color: var(--hy-muted);
 }
 .mark-tools {
   display: flex;
@@ -607,7 +553,6 @@ function markLabel(mark) {
   align-items: center;
 }
 .mark-tools .input { min-width: 180px; flex: 1; }
-.editor-hint { font-size: 12px; color: var(--cyan); }
 .mark-list {
   list-style: none;
   margin: 0;
@@ -622,6 +567,7 @@ function markLabel(mark) {
   align-items: center;
   gap: 8px;
   font-size: 12px;
+  color: var(--hy-muted);
 }
 .editor-actions {
   display: flex;

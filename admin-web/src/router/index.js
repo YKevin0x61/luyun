@@ -5,6 +5,26 @@ import { isStaffLoggedIn } from '../utils/hygieneStaff'
 
 const RECIPE_READER_META = { public: true, standalone: true }
 const HYGIENE_STAFF_META = { public: true, standalone: true, staffPhone: true }
+const HygieneAdminLayout = () => import('../views/hygiene/HygieneAdminLayout.vue')
+const HygieneStaffAuthLayout = () => import('../views/hygiene/HygieneStaffAuthLayout.vue')
+
+function hygieneAdminPage(path, name, loader) {
+  return {
+    path,
+    component: HygieneAdminLayout,
+    meta: { standalone: true },
+    children: [{ path: '', name, component: loader }],
+  }
+}
+
+function hygieneStaffAuthPage(path, name, loader, title) {
+  return {
+    path,
+    component: HygieneStaffAuthLayout,
+    meta: { ...HYGIENE_STAFF_META, staffPageTitle: title },
+    children: [{ path: '', name, component: loader }],
+  }
+}
 
 const routes = [
   { path: '/', name: 'dashboard', component: () => import('../views/DashboardView.vue') },
@@ -18,15 +38,15 @@ const routes = [
   { path: '/logs', name: 'logs', component: () => import('../views/LogsView.vue') },
   { path: '/prep-plan', name: 'prep-plan', component: () => import('../views/PrepPlanView.vue') },
   { path: '/wecom-push', name: 'wecom-push', component: () => import('../views/WecomPushView.vue') },
-  { path: '/hygiene-roster', name: 'hygiene-roster', component: () => import('../views/hygiene/HygieneRosterView.vue') },
-  { path: '/hygiene-zones', name: 'hygiene-zones', component: () => import('../views/hygiene/HygieneZonesView.vue') },
-  { path: '/hygiene-daily', name: 'hygiene-daily', component: () => import('../views/hygiene/HygieneDailyView.vue') },
-  { path: '/hygiene-deep-clean', name: 'hygiene-deep-clean', component: () => import('../views/hygiene/HygieneDeepCleanView.vue') },
-  { path: '/hygiene-fix', name: 'hygiene-fix', component: () => import('../views/hygiene/HygieneFixView.vue') },
-  { path: '/hygiene-boards', name: 'hygiene-boards', component: () => import('../views/hygiene/HygieneBoardsView.vue') },
+  hygieneAdminPage('/hygiene-roster', 'hygiene-roster', () => import('../views/hygiene/HygieneRosterView.vue')),
+  hygieneAdminPage('/hygiene-zones', 'hygiene-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
+  hygieneAdminPage('/hygiene-daily', 'hygiene-daily', () => import('../views/hygiene/HygieneDailyView.vue')),
+  hygieneAdminPage('/hygiene-deep-clean', 'hygiene-deep-clean', () => import('../views/hygiene/HygieneDeepCleanView.vue')),
+  hygieneAdminPage('/hygiene-fix', 'hygiene-fix', () => import('../views/hygiene/HygieneFixView.vue')),
+  hygieneAdminPage('/hygiene-boards', 'hygiene-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
   { path: '/hygiene', name: 'hygiene-home', component: () => import('../views/hygiene/HygieneHomeView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true } },
-  { path: '/hygiene/login', name: 'hygiene-login', component: () => import('../views/hygiene/HygieneLoginView.vue'), meta: HYGIENE_STAFF_META },
-  { path: '/hygiene/register', name: 'hygiene-register', component: () => import('../views/hygiene/HygieneRegisterView.vue'), meta: HYGIENE_STAFF_META },
+  hygieneStaffAuthPage('/hygiene/login', 'hygiene-login', () => import('../views/hygiene/HygieneLoginView.vue'), '员工登录'),
+  hygieneStaffAuthPage('/hygiene/register', 'hygiene-register', () => import('../views/hygiene/HygieneRegisterView.vue'), '员工注册'),
   { path: '/login', name: 'login', component: () => import('../views/LoginView.vue'), meta: { standalone: true, public: true } },
   { path: '/setup', name: 'setup', component: () => import('../views/SetupView.vue'), meta: { standalone: true } },
 ]

@@ -26,6 +26,7 @@ PHONE_ADMIN = "13800138001"
 PHONE_NIGHT = "13800138002"
 PHONE_OTHER_ADMIN = "13800138003"
 PASSWORD = "password123"
+NAME = "张三"
 SHOT_A = b"SHOT-A"
 SHOT_B = b"SHOT-B"
 ADMIN_INIT = {
@@ -81,7 +82,7 @@ def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http)
     client, _db, _accounts, _work = hygiene_http
     resp = client.post(
         "/api/hygiene/staff/register",
-        json={"phone": PHONE, "password": PASSWORD},
+        json={"name": NAME, "phone": PHONE, "password": PASSWORD},
     )
     assert resp.status_code == 200
     login = client.post(
@@ -92,6 +93,7 @@ def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http)
     assert client.get("/api/hygiene/admin/roster").status_code == 401
     assert client.post("/api/hygiene/admin/roster/1/approve").status_code == 401
     assert client.post("/api/hygiene/admin/roster/1/disable").status_code == 401
+    assert client.post("/api/hygiene/admin/roster/1/enable").status_code == 401
     assert client.patch(
         "/api/hygiene/admin/roster/1",
         json={"permission": "管理员"},
@@ -108,7 +110,7 @@ def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http)
 
 def test_staff_session_can_me_not_admin_roster_writes(hygiene_http):
     client, _db, accounts, _work = hygiene_http
-    employee = _run(accounts.register(PHONE, PASSWORD))
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
     login = client.post(
         "/api/hygiene/staff/login",
@@ -137,23 +139,54 @@ def test_admin_cookie_can_roster_but_is_not_staff_phone_identity(hygiene_http):
     client, _db, accounts, _work = hygiene_http
     init = client.post("/api/auth/init", json=ADMIN_INIT)
     assert init.status_code == 200
-    employee = _run(accounts.register(PHONE, PASSWORD))
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
     roster = client.get("/api/hygiene/admin/roster")
     assert roster.status_code == 200
     assert roster.json()["employees"][0]["phone"] == PHONE
+    assert roster.json()["employees"][0]["name"] == NAME
     approve = client.post(f"/api/hygiene/admin/roster/{employee['id']}/approve")
     assert approve.status_code == 200
     title = client.patch(
         f"/api/hygiene/admin/roster/{employee['id']}",
-        json={"job_title": "领班", "permission": "普通员工"},
+        json={"name": "李四", "job_title": "领班", "permission": "普通员工"},
     )
     assert title.status_code == 200
+    assert title.json()["employee"]["name"] == "李四"
     staff_as_admin = client.post(
         "/api/hygiene/staff/login",
         json={"phone": "admin", "password": "password123"},
     )
     assert staff_as_admin.status_code == 401
     assert client.get("/api/hygiene/staff/me").status_code == 401
+
+
+def test_admin_can_disable_and_enable_staff_login(hygiene_http):
+    client, _db, accounts, _work = hygiene_http
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
+    _run(accounts.approve(employee["id"]))
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    ).status_code == 200
+
+    client.cookies.clear()
+    assert client.post("/api/auth/init", json=ADMIN_INIT).status_code == 200
+    disabled = client.post(f"/api/hygiene/admin/roster/{employee['id']}/disable")
+    assert disabled.status_code == 200
+    assert disabled.json()["employee"]["disabled"] is True
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    ).status_code == 401
+
+    enabled = client.post(f"/api/hygiene/admin/roster/{employee['id']}/enable")
+    assert enabled.status_code == 200
+    assert enabled.json()["employee"]["disabled"] is False
+    assert enabled.json()["employee"]["approved"] is True
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    ).status_code == 200
 
 
 def test_api_token_is_not_staff_session_or_roster_cookie(hygiene_http):
@@ -181,7 +214,7 @@ def test_api_token_is_not_staff_session_or_roster_cookie(hygiene_http):
 
 def test_staff_can_self_pick_shift_once_not_admin_fix(hygiene_http):
     client, _db, accounts, _work = hygiene_http
-    employee = _run(accounts.register(PHONE, PASSWORD))
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
     login = client.post(
         "/api/hygiene/staff/login",
@@ -191,6 +224,9 @@ def test_staff_can_self_pick_shift_once_not_admin_fix(hygiene_http):
     me = client.get("/api/hygiene/staff/me")
     assert me.status_code == 200
     assert me.json()["employee"]["shift"] is None
+    assert me.json()["daily_clocks"]["day_hhmm"]
+    assert me.json()["daily_clocks"]["night_hhmm"]
+    assert me.json()["deep_clock"]["hhmm"]
     picked = client.post("/api/hygiene/staff/shift", json={"shift": "白班"})
     assert picked.status_code == 200
     assert picked.json()["shift"] == "白班"
@@ -206,8 +242,8 @@ def test_staff_can_self_pick_shift_once_not_admin_fix(hygiene_http):
 
 def test_staff_admin_cannot_change_another_shift_admin_cookie_can(hygiene_http):
     client, _db, accounts, _work = hygiene_http
-    staff = _run(accounts.register(PHONE, PASSWORD))
-    manager = _run(accounts.register(PHONE_ADMIN, PASSWORD))
+    staff = _run(accounts.register(PHONE, PASSWORD, NAME))
+    manager = _run(accounts.register(PHONE_ADMIN, PASSWORD, "李四"))
     _run(accounts.approve(staff["id"]))
     _run(accounts.approve(manager["id"]))
     _run(accounts.set_permission(manager["id"], "管理员"))
@@ -244,7 +280,7 @@ def test_admin_cookie_can_create_zone_staff_cannot(hygiene_http):
     assert client.post(
         "/api/hygiene/admin/zones", json={"name": "卫生间"}
     ).status_code == 401
-    employee = _run(accounts.register(PHONE, PASSWORD))
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
     login = client.post(
         "/api/hygiene/staff/login",
@@ -314,7 +350,7 @@ def test_staff_cannot_delete_zone_or_item_admin_cookie_can(hygiene_http):
 
 def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
     client, _db, accounts, work = hygiene_http
-    employee = _run(accounts.register(PHONE, PASSWORD))
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
     assert client.get("/api/hygiene/staff/daily-catalog").status_code == 401
     login = client.post(
@@ -348,7 +384,7 @@ def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
 
 
 def _approve_staff(accounts, phone, shift, permission="普通员工"):
-    employee = _run(accounts.register(phone, PASSWORD))
+    employee = _run(accounts.register(phone, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
     if permission != "普通员工":
         _run(accounts.set_permission(employee["id"], permission))
@@ -696,7 +732,7 @@ def test_unauthenticated_boards_401_regular_staff_gets_both(hygiene_http):
     assert client.get("/api/hygiene/staff/boards").status_code == 401
     assert client.get("/api/hygiene/admin/boards").status_code == 401
     assert client.get("/api/hygiene/staff/teaching").status_code == 401
-    employee = _run(accounts.register(PHONE, PASSWORD))
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
     login = client.post(
         "/api/hygiene/staff/login",

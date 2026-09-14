@@ -11,6 +11,7 @@ import {
   hasLiveCamera,
 } from '../../utils/hygieneCopy'
 import { chinaNowIso, createCircleMark, fixOriginalUrl, fixReshootUrl } from '../../utils/hygieneMarkup'
+import { deadlineUrgency, fixQueueKey, formatStamp, nextAfterRemove } from '../../utils/hygieneWorkFlow'
 
 const CAMERA_MISSING = '这台电脑没有相机，不能开整改单。必须现场拍，没有相册。'
 
@@ -153,6 +154,8 @@ function canDecide(ticket) {
 
 async function decide(action) {
   if (!selected.value || busy.value) return
+  const current = selected.value
+  const previous = pending.value
   busy.value = true
   errorText.value = ''
   try {
@@ -160,6 +163,8 @@ async function decide(action) {
     selected.value = null
     review.value = null
     await loadTickets()
+    const next = nextAfterRemove(previous, current, fixQueueKey)
+    if (next) selectRow(next)
   } catch (err) {
     errorText.value = err.message || (action === 'accept' ? '验收失败' : '驳回失败')
   } finally {
@@ -168,9 +173,7 @@ async function decide(action) {
 }
 
 function deadlineLabel(iso) {
-  const raw = String(iso || '')
-  const matched = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(raw)
-  return matched ? `${matched[1]} ${matched[2]}` : raw
+  return formatStamp(iso)
 }
 </script>
 
@@ -178,7 +181,8 @@ function deadlineLabel(iso) {
   <div class="fix-page">
     <div class="card roster-head">
       <div>
-        <h2>整改单</h2>
+        <p class="hy-eyebrow">Fix · 整改闭环</p>
+        <h1>整改单</h1>
         <p>超级管理员在这里开单也必须现场拍。没相机就开不了，不能从相册选。时限到了才能验别人开的单；自己开的随时能验。驳回后用原来的时限重新倒计时。</p>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
@@ -276,11 +280,14 @@ function deadlineLabel(iso) {
             <button
               type="button"
               class="queue-btn"
-              :class="{ active: selected && selected.id === row.id }"
+              :class="{
+                active: selected && selected.id === row.id,
+                overdue: deadlineUrgency(row.deadline) === 'overdue',
+              }"
               @click="selectRow(row)"
             >
               <strong>{{ row.zone_name }} · {{ row.ticket_type }}</strong>
-              <span>{{ row.status }} · 时限 {{ deadlineLabel(row.deadline) }}</span>
+              <span>{{ row.status }} · 时限 {{ deadlineLabel(row.deadline) }}{{ deadlineUrgency(row.deadline) === 'overdue' ? ' · 已超时' : '' }}</span>
             </button>
           </li>
         </ul>
@@ -288,9 +295,17 @@ function deadlineLabel(iso) {
           <h4>待回拍</h4>
           <ul class="queue-list">
             <li v-for="row in waiting" :key="`wait-${row.id}`">
-              <button type="button" class="queue-btn" :class="{ active: selected && selected.id === row.id }" @click="selectRow(row)">
+              <button
+                type="button"
+                class="queue-btn"
+                :class="{
+                  active: selected && selected.id === row.id,
+                  overdue: deadlineUrgency(row.deadline) === 'overdue',
+                }"
+                @click="selectRow(row)"
+              >
                 <strong>{{ row.zone_name }} · {{ row.ticket_type }}</strong>
-                <span>{{ row.status }} · 时限 {{ deadlineLabel(row.deadline) }}</span>
+                <span>{{ row.status }} · 时限 {{ deadlineLabel(row.deadline) }}{{ deadlineUrgency(row.deadline) === 'overdue' ? ' · 已超时' : '' }}</span>
               </button>
             </li>
           </ul>
@@ -301,7 +316,7 @@ function deadlineLabel(iso) {
         <div class="table-card-header">
           <h3>{{ selected ? `${selected.zone_name} · ${selected.ticket_type}` : '对照验收' }}</h3>
         </div>
-        <div v-if="!selected" class="roster-empty">从左边点一张单。时限未到只能由开单人验；到了超级管理员才能验别人开的单。</div>
+        <div v-if="!selected" class="roster-empty">点一张单。时限未到只能由开单人验；到了超级管理员才能验别人开的单。</div>
         <div v-else class="review-body">
           <p class="review-meta">{{ selected.body_text }} · 时限 {{ deadlineLabel(selected.deadline) }}</p>
           <HygieneReviewPair
@@ -327,38 +342,10 @@ function deadlineLabel(iso) {
 </template>
 
 <style scoped>
-.fix-page {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-width: 1180px;
-}
-.roster-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
-}
-.roster-head h2 { margin: 0 0 6px; font-size: 16px; }
-.roster-head p {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.6;
-  max-width: 56em;
-}
-.open-card {
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.open-card h3 { margin: 0; font-size: 14px; }
 .open-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 @media (max-width: 800px) {
   .open-grid { grid-template-columns: 1fr; }
@@ -368,82 +355,7 @@ function deadlineLabel(iso) {
   flex-direction: column;
   gap: 6px;
   font-size: 12px;
-  color: var(--text-dim);
-}
-.editor-lead {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.55;
-}
-.camera-missing {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
-  font-size: 13px;
-}
-.roster-error {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
-  font-size: 13px;
-}
-.roster-empty {
-  padding: 28px 16px;
-  text-align: center;
-  color: var(--text-dim);
-  font-size: 13px;
-}
-.daily-grid {
-  display: grid;
-  grid-template-columns: 280px 1fr;
-  gap: 12px;
-  align-items: start;
-}
-@media (max-width: 900px) {
-  .daily-grid { grid-template-columns: 1fr; }
-}
-.queue-list {
-  list-style: none;
-  margin: 0;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.queue-btn {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  text-align: left;
-  background: var(--card2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 8px;
-  padding: 10px 12px;
-  cursor: pointer;
-  font-family: inherit;
-}
-.queue-btn span { color: var(--text-dim); font-size: 12px; }
-.queue-btn.active { border-color: var(--accent); }
-.waiting-block h4 {
-  margin: 8px 12px 0;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-.review-body { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
-.review-meta { margin: 0; color: var(--text-dim); font-size: 13px; }
-.review-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
+  color: var(--hy-muted);
 }
 .capture-preview { position: relative; }
 .mark-list {
@@ -457,6 +369,19 @@ function deadlineLabel(iso) {
 .mark-list li {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   font-size: 12px;
+  color: var(--hy-muted);
+}
+.waiting-block {
+  border-top: 1px dashed var(--hy-line);
+  margin-top: 4px;
+}
+.waiting-block h4 {
+  margin: 10px 12px 0;
+  font-size: 11px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--hy-faint);
 }
 </style>

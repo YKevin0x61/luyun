@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import { api } from '../../api/client'
 import { dailyCaptureUrl, frozenStandardUrl } from '../../utils/hygieneMarkup'
+import { dailyQueueKey, nextAfterRemove } from '../../utils/hygieneWorkFlow'
 
 const items = ref([])
 const loading = ref(true)
@@ -62,6 +63,8 @@ async function selectRow(row) {
 
 async function decide(action) {
   if (!selected.value || busy.value) return
+  const current = selected.value
+  const previous = items.value
   busy.value = true
   errorText.value = ''
   try {
@@ -80,6 +83,8 @@ async function decide(action) {
     selected.value = null
     review.value = null
     await loadQueue()
+    const next = nextAfterRemove(previous, current, dailyQueueKey)
+    if (next) await selectRow(next)
   } catch (err) {
     errorText.value = err.message || (action === 'accept' ? '验收失败' : '驳回失败')
   } finally {
@@ -111,7 +116,8 @@ async function markTeaching() {
   <div class="daily-page">
     <div class="card roster-head">
       <div>
-        <h2>日常验收</h2>
+        <p class="hy-eyebrow">Daily · 当日对照</p>
+        <h1>日常验收</h1>
         <p>对照提交当时的标准图验实拍。左标准图、右实拍。交这张的人不能自己验；超级管理员在这里验。</p>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="loadQueue">刷新</button>
@@ -150,7 +156,7 @@ async function markTeaching() {
         <div class="table-card-header">
           <h3>{{ selected ? selected.item_name : '对照验收' }}</h3>
         </div>
-        <div v-if="!selected" class="roster-empty">从左边点一项，对照提交当时的标准图。</div>
+        <div v-if="!selected" class="roster-empty">点一项，对照提交当时的标准图。</div>
         <div v-else-if="review" class="review-body">
           <p class="review-meta">{{ selected.zone_name }} · {{ selected.shift }} · 拍摄人 {{ review.submitter_phone }}</p>
           <HygieneReviewPair
@@ -172,46 +178,10 @@ async function markTeaching() {
 </template>
 
 <style scoped>
-.daily-page {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-width: 1180px;
-}
-.roster-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
-}
-.roster-head h2 { margin: 0 0 6px; font-size: 16px; }
-.roster-head p {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.6;
-  max-width: 56em;
-}
-.roster-error {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
-  font-size: 13px;
-}
-.roster-empty {
-  padding: 28px 16px;
-  text-align: center;
-  color: var(--text-dim);
-  font-size: 13px;
-}
 .daily-grid {
   display: grid;
-  grid-template-columns: 280px 1fr;
-  gap: 12px;
+  grid-template-columns: 300px 1fr;
+  gap: 14px;
   align-items: start;
 }
 @media (max-width: 900px) {
@@ -220,42 +190,22 @@ async function markTeaching() {
 .queue-list {
   list-style: none;
   margin: 0;
-  padding: 8px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
-.queue-btn {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  text-align: left;
-  background: var(--card2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 8px;
-  padding: 10px 12px;
-  cursor: pointer;
-  font-family: inherit;
+.review-body { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+.review-meta {
+  margin: 0;
+  color: var(--hy-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }
-.queue-btn span { color: var(--text-dim); font-size: 12px; }
-.queue-btn.active { border-color: var(--accent); }
-.review-body { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
-.review-meta { margin: 0; color: var(--text-dim); font-size: 13px; }
 .review-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
 }
-.teach-banner {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-}
-.teach-banner p { margin: 0; color: var(--text-dim); font-size: 13px; }
-.clocks-hint { color: var(--cyan); font-size: 12px; }
-
+.teach-banner p { max-width: 60em; }
 </style>

@@ -36,7 +36,7 @@ function onPoint(event) {
       <svg class="std-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
         <defs>
           <marker :id="markerId" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
-            <path d="M0,0 L5,2.5 L0,5 z" fill="#22d3ee" />
+            <path d="M0,0 L5,2.5 L0,5 z" fill="#3fe0b0" />
           </marker>
         </defs>
         <circle
@@ -46,7 +46,7 @@ function onPoint(event) {
           :cy="mark.y * 100"
           :r="(mark.r || 0.08) * 100"
           fill="none"
-          stroke="#22d3ee"
+          stroke="#3fe0b0"
           stroke-width="1.4"
           vector-effect="non-scaling-stroke"
         />
@@ -57,7 +57,7 @@ function onPoint(event) {
           :y1="mark.y1 * 100"
           :x2="mark.x2 * 100"
           :y2="mark.y2 * 100"
-          stroke="#22d3ee"
+          stroke="#3fe0b0"
           stroke-width="1.6"
           :marker-end="`url(#${markerId})`"
           vector-effect="non-scaling-stroke"
@@ -75,11 +75,12 @@ function onPoint(event) {
 
 <style scoped>
 .std-frame {
-  background: #0b1220;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  position: relative;
+  background: var(--hy-ink);
+  border: 1px solid var(--hy-line);
+  border-radius: var(--hy-radius-md);
   overflow: hidden;
-  min-height: 160px;
+  min-height: 180px;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -92,11 +93,15 @@ function onPoint(event) {
 .std-photo.editable {
   cursor: crosshair;
 }
+.std-photo.editable img {
+  outline: 1px dashed var(--hy-mint-line);
+  outline-offset: -1px;
+}
 .std-photo img {
   display: block;
   width: 100%;
   height: auto;
-  max-height: 420px;
+  max-height: 440px;
 }
 .std-svg {
   position: absolute;
@@ -105,15 +110,21 @@ function onPoint(event) {
   height: 100%;
   pointer-events: none;
 }
+.std-svg circle,
+.std-svg line {
+  filter: drop-shadow(0 0 3px rgba(63, 224, 176, .65));
+}
 .std-caption {
   position: absolute;
   transform: translate(-50%, -110%);
-  background: rgba(15, 23, 42, 0.88);
-  color: #e2e8f0;
-  border: 1px solid rgba(34, 211, 238, 0.45);
+  background: rgba(8, 22, 20, .92);
+  color: var(--hy-mint-bright);
+  border: 1px solid var(--hy-mint-line);
   border-radius: 6px;
-  padding: 2px 7px;
-  font-size: 12px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .04em;
   white-space: nowrap;
   max-width: 80%;
   overflow: hidden;
@@ -122,9 +133,10 @@ function onPoint(event) {
 }
 .std-empty {
   margin: 0;
-  padding: 48px 16px;
+  padding: 56px 16px;
   text-align: center;
-  color: var(--text-dim);
+  color: var(--hy-faint);
   font-size: 13px;
+  letter-spacing: .08em;
 }
 </style>

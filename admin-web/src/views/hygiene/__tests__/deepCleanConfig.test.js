@@ -14,6 +14,8 @@ describe('admin deep-clean config', () => {
     expect(source).toMatch(/aria-label="专项卫生逾期点"/)
     expect(source).toMatch(/LuyunTimePicker/)
     expect(source).toMatch(/LuyunDatePicker/)
+    expect(source).not.toMatch(/:dark="false"/)
+    expect(source).toMatch(/<LuyunDatePicker[\s\S]*?\bdark\b/)
     expect(source).not.toMatch(/type="time"/)
     expect(source).not.toMatch(/type="date"/)
     expect(source).toMatch(/HYGIENE_WEEKDAYS/)

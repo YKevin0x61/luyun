@@ -25,6 +25,7 @@ _ERROR_DETAILS = {
     "password_too_short": f"密码至少 {settings.AUTH_MIN_PASSWORD_LENGTH} 位",
     "password_too_long": f"密码过长（最多 {settings.AUTH_MAX_PASSWORD_BYTES} 字节）",
     "duplicate_phone": "该手机号已注册",
+    "invalid_name": "请填写员工姓名",
     "invalid_permission": "卫生权限只能是普通员工或管理员",
     "invalid_job_title": "职位过长",
     "employee_not_found": "员工不存在",
@@ -121,6 +122,7 @@ async def require_staff_session(
 
 
 class StaffRegisterIn(BaseModel):
+    name: str
     phone: str
     password: str
 
@@ -131,6 +133,7 @@ class StaffLoginIn(BaseModel):
 
 
 class RosterPatchIn(BaseModel):
+    name: Optional[str] = None
     job_title: Optional[str] = None
     permission: Optional[str] = None
 
@@ -194,6 +197,7 @@ def _staff_actor(employee: Dict[str, Any]) -> Dict[str, Any]:
         "kind": "staff",
         "id": employee["id"],
         "permission": employee["permission"],
+        "name": employee.get("name") or "",
         "phone": employee["phone"],
         "shift": employee.get("shift"),
     }
@@ -267,7 +271,7 @@ async def staff_register(
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
     try:
-        employee = await accounts.register(body.phone, body.password)
+        employee = await accounts.register(body.phone, body.password, body.name)
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
     except ValueError as exc:
@@ -293,8 +297,15 @@ async def staff_login(
 
 
 @router.get("/staff/me")
-async def staff_me(staff=Depends(require_staff_session)) -> Dict[str, Any]:
-    return {"employee": staff["employee"]}
+async def staff_me(
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    return {
+        "employee": staff["employee"],
+        "daily_clocks": await work.get_daily_overdue_clocks(),
+        "deep_clock": await work.get_deep_clean_overdue_clock(),
+    }
 
 
 @router.post("/staff/logout")
@@ -355,6 +366,19 @@ async def admin_disable(
     return {"employee": employee}
 
 
+@router.post("/admin/roster/{employee_id}/enable")
+async def admin_enable(
+    employee_id: int,
+    _session_id: str = Depends(require_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, Any]:
+    try:
+        employee = await accounts.enable(employee_id)
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
+    return {"employee": employee}
+
+
 @router.patch("/admin/roster/{employee_id}")
 async def admin_patch_roster(
     employee_id: int,
@@ -362,10 +386,12 @@ async def admin_patch_roster(
     _session_id: str = Depends(require_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
-    if body.job_title is None and body.permission is None:
-        raise HTTPException(status_code=400, detail="请提供职位或卫生权限")
+    if body.name is None and body.job_title is None and body.permission is None:
+        raise HTTPException(status_code=400, detail="请提供姓名、职位或卫生权限")
     try:
         employee = None
+        if body.name is not None:
+            employee = await accounts.set_name(employee_id, body.name)
         if body.job_title is not None:
             employee = await accounts.set_job_title(employee_id, body.job_title)
         if body.permission is not None:

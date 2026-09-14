@@ -10,6 +10,7 @@ import TableLivePanel from '../components/dashboard/TableLivePanel.vue'
 import SystemAlertBanner from '../components/dashboard/SystemAlertBanner.vue'
 import { useDashboardData } from '../composables/useDashboardData'
 import { RECIPE_BRAND_TITLE, RECIPE_DASHBOARD_BLURB } from '../utils/recipeCopy'
+import { HYGIENE_BRAND_TITLE, HYGIENE_DASHBOARD_BLURB } from '../utils/hygieneCopy'
 
 const { summary, loading, error, refresh } = useDashboardData()
 
@@ -30,10 +31,14 @@ const lastUpdateText = computed(() => {
     <div v-else style="display:flex;flex-direction:column;gap:14px">
       <div v-if="error" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> 仪表盘数据可能已过期：{{ error }}</div>
       <SystemAlertBanner :summary="summary" />
-      <div class="grid" style="grid-template-columns: repeat(2, minmax(0, 1fr))">
+      <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr))">
         <router-link to="/recipe" class="card app-shortcut">
           <span class="app-shortcut-title">{{ RECIPE_BRAND_TITLE }}</span>
           <span class="app-shortcut-desc">{{ RECIPE_DASHBOARD_BLURB }}</span>
+        </router-link>
+        <router-link to="/hygiene-roster" class="card app-shortcut">
+          <span class="app-shortcut-title">{{ HYGIENE_BRAND_TITLE }}</span>
+          <span class="app-shortcut-desc">{{ HYGIENE_DASHBOARD_BLURB }}</span>
         </router-link>
         <a href="/kds/" class="card app-shortcut">
           <span class="app-shortcut-title">厨房 KDS</span>

@@ -5,6 +5,7 @@ import { VueDatePicker } from '@vuepic/vue-datepicker'
 const props = defineProps({
   placeholder: { type: String, default: '选择日期' },
   disabled: { type: Boolean, default: false },
+  dark: { type: Boolean, default: true },
   minDate: { type: [String, Date], default: undefined },
   maxDate: { type: [String, Date], default: undefined },
 })
@@ -31,7 +32,7 @@ const inner = computed({
     :placeholder="placeholder"
     :min-date="minDate"
     :max-date="maxDate"
-    dark
+    :dark="dark"
     auto-apply
     class="luyun-date-picker"
   />

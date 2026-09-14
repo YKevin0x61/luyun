@@ -608,6 +608,12 @@ async def recipe_css():
     target = spa_css if os.path.exists(spa_css) else os.path.join(public_dir, "recipe.css")
     return FileResponse(target, media_type="text/css")
 
+@app.get("/hygiene-admin.css")
+async def hygiene_admin_css():
+    spa_css = os.path.join(spa_dir, "hygiene-admin.css")
+    target = spa_css if os.path.exists(spa_css) else os.path.join(public_dir, "hygiene-admin.css")
+    return FileResponse(target, media_type="text/css")
+
 vendor_dir = os.path.join(public_dir, "vendor")
 if os.path.isdir(vendor_dir):
     app.mount("/vendor", StaticFiles(directory=vendor_dir), name="vendor")

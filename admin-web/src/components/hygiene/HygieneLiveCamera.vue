@@ -82,28 +82,53 @@ onBeforeUnmount(stopCamera)
 .live-camera {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 .live-video {
   width: 100%;
-  border-radius: 10px;
-  background: #020617;
-  min-height: 220px;
+  border-radius: var(--hy-radius-md);
+  background: var(--hy-ink);
+  border: 1px solid var(--hy-line);
+  min-height: 240px;
   object-fit: cover;
 }
-.live-snap { min-height: 48px; font-size: 16px; }
+.live-snap {
+  min-height: 56px;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: .12em;
+}
 .live-hint {
   margin: 0;
-  color: var(--text-dim);
-  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--hy-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: .08em;
+}
+.live-hint::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--hy-mint);
+  box-shadow: 0 0 8px var(--hy-mint);
+  animation: hy-live-pulse 1.4s ease-in-out infinite;
 }
 .live-alert {
   margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
+  padding: 11px 13px;
+  border-radius: var(--hy-radius-sm);
+  background: var(--hy-seal-soft);
+  border: 1px solid var(--hy-seal-line);
+  color: var(--hy-seal-bright);
   font-size: 13px;
+  line-height: 1.6;
+}
+@keyframes hy-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
 }
 </style>

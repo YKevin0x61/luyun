@@ -6,6 +6,7 @@ import LuyunTimePicker from '../../components/ui/LuyunTimePicker.vue'
 import { api } from '../../api/client'
 import { HYGIENE_WEEKDAYS, hygieneWeekdayLabel } from '../../utils/hygieneCopy'
 import { deepCleanShotUrl } from '../../utils/hygieneMarkup'
+import { deepQueueKey, nextAfterRemove } from '../../utils/hygieneWorkFlow'
 
 const items = ref([])
 const days = ref([])
@@ -181,6 +182,8 @@ async function selectRow(row) {
 
 async function decide(action) {
   if (!selected.value || busy.value) return
+  const current = selected.value
+  const previous = queue.value
   busy.value = true
   errorText.value = ''
   try {
@@ -196,6 +199,8 @@ async function decide(action) {
     review.value = null
     await loadQueue()
     await loadCalendar()
+    const next = nextAfterRemove(previous, current, deepQueueKey)
+    if (next) await selectRow(next)
   } catch (err) {
     errorText.value = err.message || (action === 'accept' ? '验收失败' : '驳回失败')
   } finally {
@@ -226,7 +231,8 @@ async function markTeaching() {
   <div class="deep-page">
     <div class="card roster-head">
       <div>
-        <h2>专项卫生</h2>
+        <p class="hy-eyebrow">Deep · 专项计划</p>
+        <h1>专项卫生</h1>
         <p>按星期几配全店一条。不要标准图。每项拍清理前和清理后，全部验收才算完成。漏做只在日历记未完成，不上人的红黑榜，也不红卫生责任区。</p>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
@@ -296,11 +302,11 @@ async function markTeaching() {
         <form class="cal-range" @submit.prevent="loadCalendar">
           <label class="clock-field" aria-label="专项日历开始日期">
             从
-            <LuyunDatePicker v-model="fromDate" placeholder="开始日期" />
+            <LuyunDatePicker v-model="fromDate" dark placeholder="开始日期" />
           </label>
           <label class="clock-field" aria-label="专项日历结束日期">
             到
-            <LuyunDatePicker v-model="toDate" placeholder="结束日期" />
+            <LuyunDatePicker v-model="toDate" dark placeholder="结束日期" />
           </label>
           <button type="submit" class="btn">查看</button>
         </form>
@@ -340,7 +346,7 @@ async function markTeaching() {
         <div class="table-card-header">
           <h3>{{ selected ? selected.item_name : '前后对照' }}</h3>
         </div>
-        <div v-if="!selected" class="roster-empty">从左边点一组，对照清理前和清理后。</div>
+        <div v-if="!selected" class="roster-empty">点一组，对照清理前和清理后。</div>
         <div v-else-if="review" class="review-body">
           <p class="review-meta">拍摄人 {{ review.submitter_phone }} · 交这一组的人不能自己验</p>
           <HygieneReviewPair
@@ -367,183 +373,94 @@ async function markTeaching() {
 .deep-page {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  max-width: 1180px;
+  gap: 14px;
 }
-.roster-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
+.deep-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr);
+  gap: 14px;
+  align-items: start;
 }
-.roster-head h2 { margin: 0 0 6px; font-size: 16px; }
-.roster-head p {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.6;
-  max-width: 56em;
+@media (max-width: 980px) {
+  .deep-grid { grid-template-columns: 1fr; }
 }
+
+/* 专项逾期点 */
 .clocks-card {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 12px 16px;
-  padding: 14px 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px 14px;
+  align-items: end;
 }
-.clocks-card h3 { margin: 0 0 4px; font-size: 14px; }
+.clocks-card h3 { margin: 0 0 4px; }
 .clocks-card p {
   margin: 0;
-  color: var(--text-dim);
+  color: var(--hy-muted);
   font-size: 12px;
-  line-height: 1.55;
-  max-width: 42em;
+  line-height: 1.6;
 }
 .clock-field {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
   font-size: 12px;
-  color: var(--text-dim);
+  color: var(--hy-faint);
+  white-space: nowrap;
 }
-.clock-field .input,
-.clock-field .luyun-time-picker,
-.clock-field .luyun-date-picker { min-width: 140px; }
-.clocks-hint {
-  flex: 1 1 100%;
-  margin: 0;
-  color: var(--cyan);
-  font-size: 12px;
+.clock-field :deep(.luyun-time-picker) { width: 108px; }
+@media (max-width: 640px) {
+  .clocks-card { grid-template-columns: 1fr; }
 }
-.roster-error {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
-  font-size: 13px;
-}
-.roster-empty {
-  padding: 28px 16px;
-  text-align: center;
-  color: var(--text-dim);
-  font-size: 13px;
-}
-.deep-grid,
-.daily-grid {
-  display: grid;
-  grid-template-columns: 280px 1fr;
-  gap: 12px;
-  align-items: start;
-}
-@media (max-width: 900px) {
-  .deep-grid,
-  .daily-grid { grid-template-columns: 1fr; }
-}
+
+/* 专项清单 + 完成日历 */
 .weekday-tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 8px 8px 0;
+  padding: 12px 14px 0;
 }
 .editor-lead {
   margin: 0;
-  padding: 8px 12px 0;
-  color: var(--text-dim);
+  padding: 10px 14px 0;
   font-size: 12px;
-  line-height: 1.55;
+  color: var(--hy-muted);
 }
 .item-list {
   list-style: none;
   margin: 0;
-  padding: 8px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 .item-row {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--card2);
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
 }
 .zone-add {
   display: flex;
   gap: 8px;
-  padding: 8px 8px 12px;
+  padding: 0 14px 14px;
 }
-.zone-add .input { flex: 1; }
+.zone-add .input { flex: 1; min-width: 0; }
 .cal-range {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
   align-items: flex-end;
-  padding: 12px;
+  gap: 8px;
+  padding: 12px 14px;
 }
+.cal-range .clock-field { white-space: nowrap; }
+.cal-range :deep(.luyun-date-picker) { width: 150px; }
 .cal-list {
   list-style: none;
   margin: 0;
-  padding: 8px 12px 12px;
+  padding: 0 14px 14px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
-.cal-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--card2);
-  font-size: 13px;
-}
-.cal-row .missed { color: #fca5a5; }
-.cal-row .done { color: #6ee7b7; }
-.queue-list {
-  list-style: none;
-  margin: 0;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.queue-btn {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  text-align: left;
-  background: var(--card2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 8px;
-  padding: 10px 12px;
-  cursor: pointer;
-  font-family: inherit;
-}
-.queue-btn span { color: var(--text-dim); font-size: 12px; }
-.queue-btn.active { border-color: var(--accent); }
-.review-body { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
-.review-meta { margin: 0; color: var(--text-dim); font-size: 13px; }
-.review-actions {
-  display: flex;
-  justify-content: flex-end;
   gap: 8px;
 }
-.teach-banner {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-}
-.teach-banner p { margin: 0; color: var(--text-dim); font-size: 13px; }
-
 </style>

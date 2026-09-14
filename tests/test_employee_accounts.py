@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""EmployeeAccounts: register, approve, login, disable, 职位, 卫生权限, 班次."""
+"""EmployeeAccounts: register/name, approve, login, disable, 职位, 卫生权限, 班次."""
 
 import tempfile
 import unittest
 from datetime import datetime
 
+import aiosqlite
+
 from config import settings
 from database import CHINA_TZ, DatabaseManager
+from db_core.schema import migrate_hygiene_columns
 from services.hygiene.accounts import (
     EmployeeAccounts,
     EmployeeAccountsError,
@@ -17,6 +20,7 @@ from services.hygiene.accounts import (
 PHONE = "13800138000"
 PHONE_ADMIN = "13800138001"
 PASSWORD = "password123"
+NAME = "张三"
 
 
 class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
@@ -35,34 +39,36 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self._tmpdir.cleanup()
 
     async def test_pending_register_cannot_login_with_correct_password(self):
-        await self.accounts.register(PHONE, PASSWORD)
+        await self.accounts.register(PHONE, PASSWORD, NAME)
         result = await self.accounts.login(PHONE, PASSWORD)
         self.assertIsNone(result)
 
     async def test_login_succeeds_after_super_approves(self):
-        employee = await self.accounts.register(PHONE, PASSWORD)
+        employee = await self.accounts.register(PHONE, PASSWORD, NAME)
         await self.accounts.approve(employee["id"])
         result = await self.accounts.login(PHONE, PASSWORD)
         self.assertIsNotNone(result)
         self.assertEqual(result["employee"]["phone"], PHONE)
+        self.assertEqual(result["employee"]["name"], NAME)
         self.assertEqual(result["employee"]["permission"], "普通员工")
         self.assertTrue(result["employee"]["approved"])
         self.assertFalse(result["employee"]["disabled"])
         self.assertTrue(result["session_id"])
 
     async def test_disable_blocks_login_and_keeps_roster_row(self):
-        employee = await self.accounts.register(PHONE, PASSWORD)
+        employee = await self.accounts.register(PHONE, PASSWORD, NAME)
         await self.accounts.approve(employee["id"])
         await self.accounts.disable(employee["id"])
         self.assertIsNone(await self.accounts.login(PHONE, PASSWORD))
         roster = await self.accounts.list_roster()
         self.assertEqual(len(roster), 1)
         self.assertEqual(roster[0]["phone"], PHONE)
+        self.assertEqual(roster[0]["name"], NAME)
         self.assertTrue(roster[0]["disabled"])
         self.assertTrue(roster[0]["approved"])
 
     async def test_job_title_is_display_only_permission_is_staff_or_admin(self):
-        employee = await self.accounts.register(PHONE, PASSWORD)
+        employee = await self.accounts.register(PHONE, PASSWORD, NAME)
         await self.accounts.approve(employee["id"])
         titled = await self.accounts.set_job_title(employee["id"], "领班")
         self.assertEqual(titled["job_title"], "领班")
@@ -80,7 +86,7 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(still[0]["permission"], "管理员")
 
     async def test_cannot_promote_employee_to_super_admin(self):
-        employee = await self.accounts.register(PHONE, PASSWORD)
+        employee = await self.accounts.register(PHONE, PASSWORD, NAME)
         await self.accounts.approve(employee["id"])
         with self.assertRaises(EmployeeAccountsError) as raised:
             await self.accounts.set_permission(employee["id"], "超级管理员")
@@ -99,9 +105,33 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
             "2026-09-13",
         )
 
+    async def test_legacy_employee_table_gets_name_column(self):
+        conn = await aiosqlite.connect(":memory:")
+        try:
+            await conn.execute(
+                "CREATE TABLE hygiene_employees (id INTEGER PRIMARY KEY, phone TEXT)"
+            )
+            await migrate_hygiene_columns(conn)
+            cur = await conn.execute("PRAGMA table_info(hygiene_employees)")
+            columns = {row[1] for row in await cur.fetchall()}
+            self.assertIn("name", columns)
+        finally:
+            await conn.close()
+
     async def _approved_employee(self, phone=PHONE):
-        employee = await self.accounts.register(phone, PASSWORD)
+        employee = await self.accounts.register(phone, PASSWORD, NAME)
         return await self.accounts.approve(employee["id"])
+
+    async def test_name_is_required_and_admin_can_fix_legacy_row(self):
+        with self.assertRaises(EmployeeAccountsError) as missing:
+            await self.accounts.register(PHONE, PASSWORD, "  ")
+        self.assertEqual(missing.exception.code, "invalid_name")
+
+        employee = await self.accounts.register(PHONE, PASSWORD, NAME)
+        renamed = await self.accounts.set_name(employee["id"], "李四")
+        self.assertEqual(renamed["name"], "李四")
+        roster = await self.accounts.list_roster()
+        self.assertEqual(roster[0]["name"], "李四")
 
     async def test_pick_at_0559_is_previous_business_day_0600_is_new_day(self):
         employee = await self._approved_employee()

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""员工花名册、手机号+密码登录、批准、停用、职位、卫生权限、班次。
+"""员工花名册、手机号+密码登录、批准、停用/启用、职位、卫生权限、班次。
 
 Does not know 日常检查 / 专项卫生 / 整改单.
 """
@@ -32,6 +32,7 @@ BUSINESS_DAY_CUT_HOUR = 6
 SHIFT_DAY = "白班"
 SHIFT_NIGHT = "夜班"
 ALLOWED_SHIFTS = frozenset({SHIFT_DAY, SHIFT_NIGHT})
+MAX_NAME_LENGTH = 40
 
 
 def hygiene_business_date(now: datetime) -> str:
@@ -82,11 +83,20 @@ class EmployeeAccounts:
             raise EmployeeAccountsError("invalid_phone", "invalid_phone")
         return digits
 
+    def _normalize_name(self, name: str) -> str:
+        cleaned = " ".join((name or "").strip().split())
+        if not cleaned:
+            raise EmployeeAccountsError("invalid_name", "invalid_name")
+        if len(cleaned) > MAX_NAME_LENGTH:
+            raise EmployeeAccountsError("invalid_name", "invalid_name")
+        return cleaned
+
     def _employee_from_row(self, row) -> dict:
         mapping = dict(row)
         return {
             "id": int(mapping["id"]),
             "phone": mapping["phone"],
+            "name": mapping.get("name") or "",
             "job_title": mapping.get("job_title") or "",
             "permission": mapping["permission"],
             "approved": _as_bool(mapping["approved"]),
@@ -95,7 +105,7 @@ class EmployeeAccounts:
 
     async def _fetch_employee(self, employee_id: int):
         cur = await self._conn.execute(
-            """SELECT id, phone, job_title, permission, approved, disabled
+            """SELECT id, phone, name, job_title, permission, approved, disabled
                FROM hygiene_employees WHERE id = ?""",
             (employee_id,),
         )
@@ -103,14 +113,15 @@ class EmployeeAccounts:
 
     async def _fetch_employee_by_phone(self, phone: str):
         cur = await self._conn.execute(
-            """SELECT id, phone, password_hash, job_title, permission, approved, disabled
+            """SELECT id, phone, name, password_hash, job_title, permission, approved, disabled
                FROM hygiene_employees WHERE phone = ?""",
             (phone,),
         )
         return await cur.fetchone()
 
-    async def register(self, phone: str, password: str) -> dict:
+    async def register(self, phone: str, password: str, name: str) -> dict:
         normalized = self._normalize_phone(phone)
+        employee_name = self._normalize_name(name)
         password_hash.validate_password(password)
         existing = await self._fetch_employee_by_phone(normalized)
         if existing is not None:
@@ -119,9 +130,10 @@ class EmployeeAccounts:
         hashed = password_hash.hash_password(password)
         cur = await self._conn.execute(
             """INSERT INTO hygiene_employees
-               (phone, password_hash, job_title, permission, approved, disabled, created_at, updated_at)
-               VALUES (?, ?, '', ?, 0, 0, ?, ?)""",
-            (normalized, hashed, PERMISSION_STAFF, now, now),
+               (phone, name, password_hash, job_title, permission, approved, disabled,
+                created_at, updated_at)
+               VALUES (?, ?, ?, '', ?, 0, 0, ?, ?)""",
+            (normalized, employee_name, hashed, PERMISSION_STAFF, now, now),
         )
         await self._conn.commit()
         logger.info("hygiene employee registered id=%s", cur.lastrowid)
@@ -187,10 +199,25 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
+    async def enable(self, employee_id: int) -> dict:
+        row = await self._fetch_employee(employee_id)
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        now = self._now_iso()
+        await self._conn.execute(
+            "UPDATE hygiene_employees SET disabled = 0, updated_at = ? WHERE id = ?",
+            (now, employee_id),
+        )
+        await self._conn.commit()
+        logger.info("hygiene employee enabled id=%s", employee_id)
+        row = await self._fetch_employee(employee_id)
+        return self._employee_from_row(row)
+
     async def list_roster(self) -> list[dict]:
         business_date = self._business_date()
         cur = await self._conn.execute(
-            """SELECT e.id, e.phone, e.job_title, e.permission, e.approved, e.disabled,
+            """SELECT e.id, e.phone, e.name, e.job_title, e.permission,
+                      e.approved, e.disabled,
                       p.shift AS shift
                FROM hygiene_employees e
                LEFT JOIN hygiene_shift_picks p
@@ -222,6 +249,20 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
+    async def set_name(self, employee_id: int, name: str) -> dict:
+        row = await self._fetch_employee(employee_id)
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        cleaned = self._normalize_name(name)
+        now = self._now_iso()
+        await self._conn.execute(
+            "UPDATE hygiene_employees SET name = ?, updated_at = ? WHERE id = ?",
+            (cleaned, now, employee_id),
+        )
+        await self._conn.commit()
+        row = await self._fetch_employee(employee_id)
+        return self._employee_from_row(row)
+
     async def set_permission(self, employee_id: int, permission: str) -> dict:
         row = await self._fetch_employee(employee_id)
         if row is None:
@@ -243,7 +284,8 @@ class EmployeeAccounts:
             return None
         cur = await self._conn.execute(
             """SELECT s.session_id, s.expires_at,
-                      e.id, e.phone, e.job_title, e.permission, e.approved, e.disabled
+                      e.id, e.phone, e.name, e.job_title, e.permission,
+                      e.approved, e.disabled
                FROM hygiene_staff_sessions s
                JOIN hygiene_employees e ON e.id = s.employee_id
                WHERE s.session_id = ?""",

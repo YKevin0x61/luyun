@@ -5,6 +5,38 @@ export const HYGIENE_SHIFTS = ['白班', '夜班']
 export const HYGIENE_WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 export const HYGIENE_FIX_TYPES = ['卫生', '摆放', '标签']
 
+export const HYGIENE_BRAND_MARK = '卫'
+export const HYGIENE_BRAND_TITLE = '卫生'
+export const HYGIENE_BRAND_TAGLINE = '对照实拍验收'
+export const HYGIENE_DASHBOARD_BLURB = '花名册、责任区、验收、整改、红黑榜'
+export const HYGIENE_ADMIN_NAV = [
+  { path: '/hygiene-roster', title: '花名册', shortTitle: '人员', icon: 'clipboard', code: 'ROSTER' },
+  { path: '/hygiene-zones', title: '卫生区', shortTitle: '区域', icon: 'layout-grid', code: 'ZONES' },
+  { path: '/hygiene-daily', title: '日常验收', shortTitle: '日常', icon: 'check-circle', code: 'DAILY' },
+  { path: '/hygiene-deep-clean', title: '专项卫生', shortTitle: '专项', icon: 'calendar', code: 'DEEP' },
+  { path: '/hygiene-fix', title: '整改单', shortTitle: '整改', icon: 'siren', code: 'FIX' },
+  { path: '/hygiene-boards', title: '红黑榜', shortTitle: '榜', icon: 'star', code: 'BOARDS' },
+]
+
+export const HYGIENE_STAFF_TABS = [
+  { id: 'inbox', title: '待办', icon: 'inbox' },
+  { id: 'deep', title: '专项', icon: 'calendar' },
+  { id: 'fix', title: '整改', icon: 'siren' },
+  { id: 'boards', title: '榜', icon: 'star' },
+  { id: 'me', title: '我', icon: 'settings' },
+]
+
+export const HYGIENE_BACK_TO_ADMIN_LABEL = '后台'
+
+export function isHygieneAdminPath(pathname) {
+  return String(pathname || '').startsWith('/hygiene-')
+}
+
+export function hygieneDocumentTitle(pageName) {
+  const name = pageName == null ? '' : String(pageName).trim()
+  return name ? `${name} · ${HYGIENE_BRAND_TITLE}` : HYGIENE_BRAND_TITLE
+}
+
 export function isAllowedHygienePermission(permission) {
   return HYGIENE_PERMISSIONS.includes(permission)
 }

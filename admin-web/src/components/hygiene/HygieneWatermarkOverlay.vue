@@ -25,20 +25,28 @@ const lines = computed(() => {
 <style scoped>
 .wm {
   position: absolute;
-  left: 8px;
-  bottom: 8px;
+  left: 10px;
+  bottom: 10px;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 6px 8px;
-  background: rgba(2, 6, 23, 0.72);
-  border: 1px solid rgba(148, 163, 184, 0.35);
+  padding: 7px 9px;
+  background: rgba(6, 17, 16, .78);
+  border: 1px solid var(--hy-mint-line);
+  border-left: 2px solid var(--hy-mint);
   border-radius: 6px;
-  color: #f8fafc;
-  font-size: 12px;
-  line-height: 1.35;
+  color: #eafaf5;
+  font-size: 11px;
+  line-height: 1.4;
+  letter-spacing: .03em;
   pointer-events: none;
-  max-width: calc(100% - 16px);
+  max-width: calc(100% - 20px);
+  backdrop-filter: blur(2px);
+}
+.wm span:first-child {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--hy-mint-bright);
 }
 .wm span {
   white-space: nowrap;

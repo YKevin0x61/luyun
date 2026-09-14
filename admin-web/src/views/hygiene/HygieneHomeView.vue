@@ -1,15 +1,22 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import SvgIcon from '../../components/SvgIcon.vue'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import HygieneWatermarkOverlay from '../../components/hygiene/HygieneWatermarkOverlay.vue'
+import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import {
+  HYGIENE_BRAND_MARK,
+  HYGIENE_BRAND_TAGLINE,
+  HYGIENE_BRAND_TITLE,
   HYGIENE_FIX_TYPES,
   HYGIENE_SHIFTS,
+  HYGIENE_STAFF_TABS,
   canAcceptFixTicket,
   hasLiveCamera,
+  hygieneDocumentTitle,
   hygienePermissionLabel,
   hygieneShiftLabel,
 } from '../../utils/hygieneCopy'
@@ -25,8 +32,30 @@ import {
   teachingShotUrl,
 } from '../../utils/hygieneMarkup'
 import { staffRequest, staffUpload } from '../../utils/hygieneStaff'
+import {
+  buildWorkQueue,
+  dailyPrimaryAction,
+  dailyProgress,
+  deadlineUrgency,
+  deepPrimaryAction,
+  fixPrimaryAction,
+  formatStamp,
+  groupByZone,
+  nextDeepShootRow,
+  nextFixWorkRow,
+  nextShootRow,
+  openRows,
+  passedRows,
+  queueGroups,
+  shiftClock,
+  statusTone,
+  tabWorkCount,
+} from '../../utils/hygieneWorkFlow'
+
+useScopedStylesheet('/hygiene-admin.css')
 
 const router = useRouter()
+const tab = ref('inbox')
 const employee = ref(null)
 const errorText = ref('')
 const loggingOut = ref(false)
@@ -41,28 +70,73 @@ const teaching = ref([])
 const busy = ref(false)
 const sheet = ref(null)
 const previewUrl = ref('')
+const beforePreviewUrl = ref('')
 const localWatermark = ref(null)
+const localBeforeWatermark = ref(null)
+const dailyClocks = ref(null)
+const deepClock = ref(null)
+const flashText = ref('')
+const nowTick = ref(Date.now())
+const closeButton = ref(null)
+let clockTimer = null
 
 const needsShiftPick = computed(() => {
   return Boolean(employee.value) && !employee.value.shift
 })
 
-const groupedInbox = computed(() => {
-  const zones = []
-  const byId = new Map()
-  for (const row of inbox.value) {
-    if (!byId.has(row.zone_id)) {
-      const zone = { id: row.zone_id, name: row.zone_name, rows: [] }
-      byId.set(row.zone_id, zone)
-      zones.push(zone)
-    }
-    byId.get(row.zone_id).rows.push(row)
-  }
-  return zones
-})
+const dailyStats = computed(() => dailyProgress(inbox.value))
+const groupedPassed = computed(() => groupByZone(passedRows(inbox.value)))
+const openDeep = computed(() => openRows(deepInbox.value))
+const passedDeep = computed(() => passedRows(deepInbox.value))
+const deepStats = computed(() => dailyProgress(deepInbox.value))
+const shiftDue = computed(() => shiftClock(
+  employee.value && employee.value.shift,
+  dailyClocks.value,
+))
+const deepDue = computed(() => (deepClock.value && deepClock.value.hhmm) || '')
 
 const isManager = computed(() => employee.value && employee.value.permission === '管理员')
 const liveOk = computed(() => hasLiveCamera())
+const workQueue = computed(() => buildWorkQueue({
+  inbox: inbox.value,
+  deepInbox: deepInbox.value,
+  fixInbox: fixInbox.value,
+  shiftDue: shiftDue.value,
+  deepDue: deepDue.value,
+  now: nowTick.value,
+  isManager: isManager.value,
+}))
+const nextWork = computed(() => workQueue.value[0] || null)
+const restWorkGroups = computed(() => {
+  const nextKey = nextWork.value && nextWork.value.key
+  return queueGroups(workQueue.value.filter((task) => task.key !== nextKey))
+})
+const queueSummary = computed(() => ({
+  overdue: workQueue.value.filter((task) => task.bucket === 'overdue').length,
+  soon: workQueue.value.filter((task) => task.bucket === 'soon').length,
+  waiting: workQueue.value.filter((task) => task.bucket === 'waiting').length,
+}))
+const currentStaffTab = computed(() => (
+  HYGIENE_STAFF_TABS.find((item) => item.id === tab.value) || HYGIENE_STAFF_TABS[0]
+))
+
+watch(currentStaffTab, (item) => {
+  document.title = hygieneDocumentTitle(item.title)
+}, { immediate: true })
+
+watch(sheet, async (value, previous) => {
+  if (!value || previous) return
+  await nextTick()
+  if (closeButton.value) closeButton.value.focus()
+})
+
+function tabCount(id) {
+  return tabWorkCount(id, {
+    inbox: inbox.value,
+    deepInbox: deepInbox.value,
+    fixInbox: fixInbox.value,
+  })
+}
 const sheetTitle = computed(() => {
   if (!sheet.value) return ''
   if (sheet.value.kind === 'fix' && sheet.value.mode === 'form') return '开整改单'
@@ -73,30 +147,45 @@ const sheetTitle = computed(() => {
   return sheet.value.row && sheet.value.row.item_name
 })
 
-onMounted(loadMe)
-onBeforeUnmount(clearPreview)
+function tickClock() {
+  nowTick.value = Date.now()
+}
+
+function onKeydown(event) {
+  if (event.key === 'Escape' && sheet.value) closeSheet()
+}
+
+onMounted(() => {
+  tickClock()
+  clockTimer = window.setInterval(tickClock, 30_000)
+  window.addEventListener('keydown', onKeydown)
+  loadMe()
+})
+
+onBeforeUnmount(() => {
+  if (clockTimer) window.clearInterval(clockTimer)
+  window.removeEventListener('keydown', onKeydown)
+  clearPreview()
+})
 
 async function loadMe() {
   try {
     const data = await staffRequest('/api/hygiene/staff/me')
     employee.value = data.employee
-    try {
-      await Promise.all([loadDeepClean(), loadFixTickets(), loadZones(), loadBoards(), loadTeaching()])
-    } catch (err) {
-      errorText.value = err.message || '无法加载专项卫生'
-    }
-    if (data.employee && data.employee.shift) {
-      try {
-        await loadInbox()
-      } catch (err) {
-        errorText.value = err.message || '无法加载日常待办'
-      }
-    } else {
-      inbox.value = []
-    }
+    dailyClocks.value = data.daily_clocks || null
+    deepClock.value = data.deep_clock || null
   } catch (err) {
     errorText.value = err.message || '无法读取登录状态'
     router.replace('/hygiene/login')
+    return
+  }
+  const jobs = [loadDeepClean, loadFixTickets, loadZones, loadBoards, loadTeaching]
+  if (employee.value && employee.value.shift) jobs.push(loadInbox)
+  else inbox.value = []
+  const results = await Promise.allSettled(jobs.map((fn) => fn()))
+  const failed = results.find((result) => result.status === 'rejected')
+  if (failed) {
+    errorText.value = (failed.reason && failed.reason.message) || '无法加载卫生待办'
   }
 }
 
@@ -131,17 +220,16 @@ async function loadTeaching() {
 }
 
 function weekLabel(iso) {
-  const raw = String(iso || '')
-  const matched = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(raw)
-  return matched ? `${matched[1]} ${matched[2]}` : raw
+  return formatStamp(iso)
 }
 
 function personLabel(row) {
-  return row.phone || `员工 ${row.employee_id}`
+  return row.name || row.phone || `员工 ${row.employee_id}`
 }
 
 function openTeaching(row) {
   errorText.value = ''
+  flashText.value = ''
   sheet.value = { kind: 'teaching', mode: 'review', row }
 }
 
@@ -173,14 +261,6 @@ async function logout() {
   router.replace('/hygiene/login')
 }
 
-function canShoot(row) {
-  return Boolean(employee.value && employee.value.shift === row.shift && row.status !== '已通过')
-}
-
-function canReview(row) {
-  return row.status === '待验收'
-}
-
 function canShootDeep(row) {
   return Boolean(employee.value && row.status !== '已通过')
 }
@@ -200,13 +280,49 @@ function canDecideFix(ticket) {
 }
 
 function deadlineLabel(iso) {
-  const raw = String(iso || '')
-  const matched = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(raw)
-  return matched ? `${matched[1]} ${matched[2]}` : raw
+  return formatStamp(iso)
+}
+
+function fixUrgency(row) {
+  if (!row || row.status === '待验收') return 'none'
+  return deadlineUrgency(row.deadline, nowTick.value)
+}
+
+function fixDueLabel(row) {
+  if (row && row.status === '待验收') return '已交，等验收'
+  return deadlineLabel(row && row.deadline)
+}
+
+function runDailyPrimary(row) {
+  const action = dailyPrimaryAction(row)
+  if (action === 'review') return openReview(row)
+  if (action === 'shoot') return openStandard(row)
+  return undefined
+}
+
+function runDeepPrimary(row) {
+  const action = deepPrimaryAction(row)
+  if (action === 'review') return openDeepReview(row)
+  if (action === 'shoot') return openDeepCapture(row)
+  return undefined
+}
+
+function runFixPrimary(row) {
+  const action = fixPrimaryAction(row, { isManager: isManager.value })
+  if (action === 'review') return openFixReview(row)
+  return openFixOriginal(row)
+}
+
+function runQueueTask(task) {
+  if (!task) return
+  if (task.kind === 'daily') return runDailyPrimary(task.row)
+  if (task.kind === 'deep') return runDeepPrimary(task.row)
+  return runFixPrimary(task.row)
 }
 
 function openFixForm() {
   errorText.value = ''
+  flashText.value = ''
   if (!isManager.value) return
   if (!liveOk.value) {
     errorText.value = '打不开相机。必须现场拍，没有相册入口。'
@@ -229,6 +345,7 @@ function openFixForm() {
 
 function openFixOriginal(row) {
   errorText.value = ''
+  flashText.value = ''
   clearPreview()
   sheet.value = { kind: 'fix', mode: 'original', row }
 }
@@ -252,6 +369,7 @@ function openFixReshootCamera() {
 
 async function openFixReview(row) {
   errorText.value = ''
+  flashText.value = ''
   busy.value = true
   try {
     const review = await staffRequest(`/api/hygiene/staff/fix/${row.id}`)
@@ -273,11 +391,13 @@ function addFixCircle(point) {
 
 function openStandard(row) {
   errorText.value = ''
+  flashText.value = ''
   sheet.value = { mode: 'standard', row }
 }
 
 async function openReview(row) {
   errorText.value = ''
+  flashText.value = ''
   busy.value = true
   try {
     const review = await staffRequest(
@@ -299,6 +419,7 @@ function openCamera() {
 
 function openDeepCapture(row) {
   errorText.value = ''
+  flashText.value = ''
   clearPreview()
   sheet.value = {
     kind: 'deep',
@@ -311,6 +432,7 @@ function openDeepCapture(row) {
 
 async function openDeepReview(row) {
   errorText.value = ''
+  flashText.value = ''
   busy.value = true
   try {
     const review = await staffRequest(`/api/hygiene/staff/deep-clean/${row.item_id}/review`)
@@ -323,17 +445,17 @@ async function openDeepReview(row) {
 }
 
 function onCaptured(blob) {
-  clearPreview()
-  previewUrl.value = URL.createObjectURL(blob)
   const current = sheet.value
   const row = current && current.row
   if (current && current.kind === 'fix') {
+    clearPreview()
+    previewUrl.value = URL.createObjectURL(blob)
     const zoneName = (row && row.zone_name)
       || (zones.value.find((zone) => zone.id === current.zoneId) || {}).name
     localWatermark.value = {
       time: chinaNowIso(),
       zone: zoneName,
-      photographer: employee.value && employee.value.phone,
+      photographer: employee.value && (employee.value.name || employee.value.phone),
     }
     if (current.mode === 'fix-camera') {
       sheet.value = { ...current, mode: 'fix-preview', blob }
@@ -345,31 +467,40 @@ function onCaptured(blob) {
     }
   }
   if (current && current.kind === 'deep') {
-    localWatermark.value = {
-      time: chinaNowIso(),
+    const capturedAt = chinaNowIso()
+    const watermark = {
+      time: capturedAt,
       item_name: row && row.item_name,
-      photographer: employee.value && employee.value.phone,
+      photographer: employee.value && (employee.value.name || employee.value.phone),
     }
     if (current.mode === 'before-camera') {
+      clearBeforePreview()
+      beforePreviewUrl.value = URL.createObjectURL(blob)
+      localBeforeWatermark.value = watermark
       sheet.value = { ...current, mode: 'before-preview', beforeBlob: blob }
       return
     }
     if (current.mode === 'after-camera') {
+      clearAfterPreview()
+      previewUrl.value = URL.createObjectURL(blob)
+      localWatermark.value = watermark
       sheet.value = { ...current, mode: 'after-preview', afterBlob: blob }
       return
     }
   }
+  clearPreview()
+  previewUrl.value = URL.createObjectURL(blob)
   localWatermark.value = {
     time: chinaNowIso(),
     zone: row && row.zone_name,
-    photographer: employee.value && employee.value.phone,
+    photographer: employee.value && (employee.value.name || employee.value.phone),
   }
   sheet.value = { mode: 'preview', row, blob }
 }
 
 function openDeepAfterCamera() {
   if (!sheet.value || sheet.value.kind !== 'deep') return
-  clearPreview()
+  clearAfterPreview()
   sheet.value = { ...sheet.value, mode: 'after-camera' }
 }
 
@@ -379,7 +510,7 @@ function openDeepBeforeCamera() {
   sheet.value = { ...sheet.value, mode: 'before-camera', beforeBlob: null }
 }
 
-function clearPreview() {
+function clearAfterPreview() {
   if (previewUrl.value) {
     URL.revokeObjectURL(previewUrl.value)
     previewUrl.value = ''
@@ -387,9 +518,59 @@ function clearPreview() {
   localWatermark.value = null
 }
 
+function clearBeforePreview() {
+  if (beforePreviewUrl.value) {
+    URL.revokeObjectURL(beforePreviewUrl.value)
+    beforePreviewUrl.value = ''
+  }
+  localBeforeWatermark.value = null
+}
+
+function clearPreview() {
+  clearAfterPreview()
+  clearBeforePreview()
+}
+
 function closeSheet() {
   clearPreview()
   sheet.value = null
+  flashText.value = ''
+}
+
+function continueDaily(current) {
+  const next = nextShootRow(inbox.value, current)
+  if (next) {
+    flashText.value = `已交，下一项：${next.zone_name} · ${next.item_name}`
+    sheet.value = { mode: 'standard', row: next }
+    return
+  }
+  closeSheet()
+}
+
+function continueDeep(current) {
+  const next = nextDeepShootRow(deepInbox.value, current)
+  if (next) {
+    openDeepCapture(next)
+    flashText.value = `已交，下一项：${next.item_name}`
+    return
+  }
+  closeSheet()
+}
+
+function continueFix(current) {
+  const next = nextFixWorkRow(fixInbox.value, current, { isManager: isManager.value })
+  if (!next) {
+    closeSheet()
+    return
+  }
+  if (next.status === '待验收' && isManager.value) {
+    openFixReview(next)
+  } else {
+    openFixOriginal(next)
+  }
+  flashText.value = next.status === '待验收'
+    ? `已交，下一张对照：${next.zone_name}`
+    : `已交，下一张回拍：${next.zone_name}`
 }
 
 async function submitCapture() {
@@ -407,8 +588,9 @@ async function submitCapture() {
     form.append('live', 'true')
     form.append('shift', row.shift)
     await staffUpload(`/api/hygiene/staff/daily/${row.item_id}/submit`, form)
-    closeSheet()
+    clearPreview()
     await loadInbox()
+    continueDaily(row)
   } catch (err) {
     errorText.value = err.message || '提交失败'
   } finally {
@@ -448,8 +630,10 @@ async function submitFixReshoot() {
     form.append('file', sheet.value.blob, 'capture.jpg')
     form.append('live', 'true')
     await staffUpload(`/api/hygiene/staff/fix/${sheet.value.row.id}/reshoot`, form)
-    closeSheet()
+    const current = sheet.value.row
+    clearPreview()
     await loadFixTickets()
+    continueFix(current)
   } catch (err) {
     errorText.value = err.message || '回拍失败'
   } finally {
@@ -468,8 +652,9 @@ async function submitDeepPair() {
     form.append('after', sheet.value.afterBlob, 'after.jpg')
     form.append('live', 'true')
     await staffUpload(`/api/hygiene/staff/deep-clean/${row.item_id}/submit`, form)
-    closeSheet()
+    clearPreview()
     await loadDeepClean()
+    continueDeep(row)
   } catch (err) {
     errorText.value = err.message || '提交失败'
   } finally {
@@ -491,12 +676,22 @@ async function decide(action) {
       })
       closeSheet()
       await loadDeepClean()
+      const next = openDeep.value.find((item) => item.status === '待验收' && item.item_id !== row.item_id)
+      if (next && isManager.value) await openDeepReview(next)
     } else if (sheet.value.kind === 'fix') {
       await staffRequest(`/api/hygiene/staff/fix/${row.id}/${action}`, {
         method: 'POST',
       })
       closeSheet()
       await loadFixTickets()
+      const next = nextFixWorkRow(fixInbox.value, row, { isManager: isManager.value })
+      if (next) {
+        if (next.status === '待验收' && isManager.value) await openFixReview(next)
+        else openFixOriginal(next)
+        flashText.value = next.status === '待验收'
+          ? `下一张对照：${next.zone_name}`
+          : `下一张回拍：${next.zone_name}`
+      }
     } else {
       await staffRequest(`/api/hygiene/staff/daily/${row.item_id}/${action}`, {
         method: 'POST',
@@ -504,6 +699,10 @@ async function decide(action) {
       })
       closeSheet()
       await loadInbox()
+      const next = inbox.value.find((item) => (
+        item.status === '待验收' && !(item.item_id === row.item_id && item.shift === row.shift)
+      ))
+      if (next && isManager.value) await openReview(next)
     }
   } catch (err) {
     errorText.value = err.message || (action === 'accept' ? '验收失败' : '驳回失败')
@@ -514,125 +713,294 @@ async function decide(action) {
 </script>
 
 <template>
-  <div class="staff-phone">
-    <div class="staff-card">
-      <p class="staff-brand">LuckIn<span>卫生</span></p>
-      <template v-if="needsShiftPick">
-        <h1 class="staff-title">今天上哪一班？</h1>
-        <p class="staff-lead">选一次就锁在这个营业日。白班和夜班的日常检查分开交，选错了要找超级管理员改。</p>
-        <p v-if="errorText" class="staff-alert">{{ errorText }}</p>
-        <div class="staff-shift-choices">
-          <button
-            v-for="shift in HYGIENE_SHIFTS"
-            :key="shift"
-            type="button"
-            class="btn staff-shift-btn"
-            :class="{ 'btn-primary': shift === '白班', 'staff-shift-night': shift === '夜班' }"
-            :disabled="Boolean(picking)"
-            @click="pickShift(shift)"
-          >
-            {{ picking === shift ? '正在锁定…' : shift }}
-          </button>
+  <div class="hygiene-staff hygiene-work">
+    <a class="hy-skip" href="#hygiene-work-main">跳到内容</a>
+    <header class="hy-work-header">
+      <div class="hy-work-header-inner">
+        <div class="hy-brand">
+          <span class="hy-brand-mark" aria-hidden="true">{{ HYGIENE_BRAND_MARK }}</span>
+          <span class="hy-brand-text">
+            <span class="hy-brand-title">{{ HYGIENE_BRAND_TITLE }}</span>
+            <span class="hy-brand-tagline">{{ HYGIENE_BRAND_TAGLINE }}</span>
+          </span>
         </div>
-        <section v-if="deepInbox.length" class="staff-zone staff-deep">
-          <h2>专项卫生{{ deepStatus ? ` · ${deepStatus}` : '' }}</h2>
-          <p class="staff-lead">不跟班次。每项都要拍清理前和清理后，不要标准图。</p>
-          <article v-for="row in deepInbox" :key="`deep-${row.item_id}`" class="staff-row">
+        <span v-if="employee" class="hy-work-shift">
+          {{ employee.name || employee.phone }} · {{ hygieneShiftLabel(employee.shift) }}
+        </span>
+      </div>
+    </header>
+
+    <main id="hygiene-work-main" class="hy-work-main">
+      <p v-if="errorText && !sheet" class="hy-staff-alert" role="alert">{{ errorText }}</p>
+      <p
+        v-if="needsShiftPick && tab !== 'inbox'"
+        class="hy-staff-alert"
+        role="status"
+      >
+        交日常前先选今天班次。
+        <button type="button" class="btn btn-primary" @click="tab = 'inbox'">去选班</button>
+      </p>
+
+      <section v-if="tab === 'inbox'">
+        <template v-if="needsShiftPick">
+          <h1>今天上哪一班？</h1>
+          <p class="hy-staff-lead">选一次就锁在这个营业日。白班和夜班的日常分开交，选错了要找超级管理员改。</p>
+          <div class="hy-shift-choices">
+            <button
+              v-for="shift in HYGIENE_SHIFTS"
+              :key="shift"
+              type="button"
+              class="btn"
+              :class="{ 'btn-primary': shift === '白班' }"
+              :disabled="Boolean(picking)"
+              @click="pickShift(shift)"
+            >
+              {{ picking === shift ? '正在锁定…' : shift }}
+            </button>
+          </div>
+        </template>
+        <template v-else-if="employee">
+          <h1>今天还差什么</h1>
+          <div class="hy-work-facts">
+            <span>日常 {{ dailyStats.passed }}/{{ dailyStats.total }}</span>
+            <span v-if="deepStats.total">专项 {{ deepStats.passed }}/{{ deepStats.total }}</span>
+            <span v-if="fixInbox.length">整改 {{ fixInbox.length }}</span>
+            <span v-if="queueSummary.overdue" class="is-overdue">超时 {{ queueSummary.overdue }}</span>
+            <span v-else-if="queueSummary.soon" class="is-soon">快到时 {{ queueSummary.soon }}</span>
+            <span v-if="queueSummary.waiting">等验收 {{ queueSummary.waiting }}</span>
+          </div>
+          <p class="hy-staff-lead">
+            <template v-if="shiftDue">本班 {{ shiftDue }} 前交。专项和整改不跟班次。</template>
+            <template v-else>按超时、快到截止、待拍的顺序排好，照下一个做就行。</template>
+          </p>
+
+          <article
+            v-if="nextWork"
+            class="hy-next"
+            :class="[`is-${nextWork.bucket}`, `is-${statusTone(nextWork.status)}`]"
+          >
+            <div class="hy-next-head">
+              <span class="hy-task-kind">{{ nextWork.typeLabel }}</span>
+              <span class="hy-status" :class="`is-${statusTone(nextWork.status)}`">{{ nextWork.status }}</span>
+            </div>
+            <h2>{{ nextWork.title }}</h2>
+            <p class="hy-next-context">{{ nextWork.context }}</p>
+            <p v-if="nextWork.dueText" class="hy-next-due">{{ nextWork.dueText }}</p>
+            <button
+              type="button"
+              class="btn btn-primary btn-block hy-next-action"
+              :disabled="busy"
+              @click="runQueueTask(nextWork)"
+            >{{ nextWork.primaryLabel }}</button>
+          </article>
+
+          <p v-else class="hy-staff-done">
+            <template v-if="dailyStats.total">今天的卫生待办都交了。等验收不算逾期。</template>
+            <template v-else>还没有带标准图的日常检查项。</template>
+          </p>
+
+          <section v-for="group in restWorkGroups" :key="group.id" class="hy-queue-group">
+            <h2>{{ group.label }} <span>{{ group.rows.length }}</span></h2>
+            <button
+              v-for="task in group.rows"
+              :key="task.key"
+              type="button"
+              class="hy-work-row"
+              :class="[`is-${task.bucket}`, `is-${statusTone(task.status)}`]"
+              :disabled="busy"
+              @click="runQueueTask(task)"
+            >
+              <span class="hy-task-kind">{{ task.typeLabel }}</span>
+              <span class="hy-work-copy">
+                <strong>{{ task.title }}</strong>
+                <span>{{ task.context }}</span>
+              </span>
+              <span class="hy-work-due">{{ task.dueText || task.status }}</span>
+              <SvgIcon name="chevron-right" :size="18" />
+            </button>
+          </section>
+
+          <details v-if="groupedPassed.length" class="hy-done">
+            <summary>已通过 {{ dailyStats.passed }}</summary>
+            <section v-for="zone in groupedPassed" :key="`done-${zone.id}`" class="hy-section">
+              <h2>{{ zone.name }}</h2>
+              <article v-for="row in zone.rows" :key="`done-${row.item_id}-${row.shift}`" class="hy-task is-done">
+                <div>
+                  <strong>{{ row.item_name }}</strong>
+                  <p>{{ row.shift }} · 已通过</p>
+                </div>
+              </article>
+            </section>
+          </details>
+        </template>
+        <p v-else class="hy-staff-lead">正在确认登录…</p>
+      </section>
+
+      <section v-if="tab === 'deep'" class="hy-section">
+        <h1>专项卫生{{ deepStatus ? ` · ${deepStatus}` : '' }}</h1>
+        <p v-if="deepStats.total" class="hy-progress">
+          {{ deepStats.passed }}/{{ deepStats.total }}
+          <span v-if="deepDue"> · {{ deepDue }} 前做完</span>
+        </p>
+        <p class="hy-staff-lead">不跟班次。每项拍清理前和清理后，不要标准图。</p>
+        <p v-if="!deepInbox.length" class="hy-staff-lead">这一轮没有专项卫生。</p>
+        <article
+          v-for="row in openDeep"
+          :key="`deep-${row.item_id}`"
+          class="hy-task"
+          :class="`is-${statusTone(row.status)}`"
+        >
+          <button type="button" class="hy-task-main" :disabled="busy" @click="runDeepPrimary(row)">
+            <strong>{{ row.item_name }}</strong>
+            <p><span class="hy-status" :class="`is-${statusTone(row.status)}`">{{ row.status }}</span></p>
+          </button>
+          <div class="hy-task-actions">
+            <button
+              v-if="deepPrimaryAction(row) === 'review'"
+              type="button"
+              class="btn btn-primary"
+              :disabled="busy"
+              @click="openDeepReview(row)"
+            >对照</button>
+            <button
+              v-else-if="canShootDeep(row)"
+              type="button"
+              class="btn btn-primary"
+              :disabled="busy"
+              @click="openDeepCapture(row)"
+            >拍前后</button>
+            <button
+              v-if="canShootDeep(row) && deepPrimaryAction(row) === 'review'"
+              type="button"
+              class="btn"
+              :disabled="busy"
+              @click="openDeepCapture(row)"
+            >重拍</button>
+          </div>
+        </article>
+        <p v-if="deepInbox.length && !openDeep.length" class="hy-staff-done">今天专项都交了。</p>
+        <details v-if="passedDeep.length" class="hy-done">
+          <summary>已通过 {{ passedDeep.length }}</summary>
+          <article v-for="row in passedDeep" :key="`deep-done-${row.item_id}`" class="hy-task is-done">
             <div>
               <strong>{{ row.item_name }}</strong>
-              <p>{{ row.status }}</p>
-            </div>
-            <div class="staff-row-actions">
-              <button
-                v-if="canShootDeep(row)"
-                type="button"
-                class="btn btn-sm btn-primary"
-                :disabled="busy"
-                @click="openDeepCapture(row)"
-              >拍前后</button>
-              <button
-                v-if="canReview(row)"
-                type="button"
-                class="btn btn-sm"
-                :disabled="busy"
-                @click="openDeepReview(row)"
-              >对照</button>
+              <p>已通过</p>
             </div>
           </article>
-        </section>
-        <section v-if="isManager || fixInbox.length" class="staff-zone staff-fix">
-          <h2>整改单</h2>
-          <p class="staff-lead">不跟班次。先看开单原图再拍，镜头不叠图。</p>
-          <button
-            v-if="isManager"
-            type="button"
-            class="btn btn-sm btn-primary"
-            :disabled="busy"
-            @click="openFixForm"
-          >开整改单</button>
-          <article v-for="row in fixInbox" :key="`shift-fix-${row.id}`" class="staff-row">
-            <div>
-              <strong>{{ row.zone_name }} · {{ row.ticket_type }}</strong>
-              <p>{{ row.status }} · {{ deadlineLabel(row.deadline) }}</p>
-            </div>
-            <div class="staff-row-actions">
-              <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="openFixOriginal(row)">回拍</button>
-              <button
-                v-if="isManager && row.status === '待验收'"
-                type="button"
-                class="btn btn-sm"
-                :disabled="busy"
-                @click="openFixReview(row)"
-              >对照</button>
-            </div>
-          </article>
-        </section>
-        <section class="staff-zone">
+        </details>
+      </section>
+
+      <section v-if="tab === 'fix'" class="hy-section">
+        <h1>整改单</h1>
+        <p class="hy-staff-lead">不跟班次。先看开单原图再拍，镜头不叠图。</p>
+        <button
+          v-if="isManager"
+          type="button"
+          class="btn btn-primary hy-staff-submit"
+          :disabled="busy"
+          @click="openFixForm"
+        >开整改单</button>
+        <p v-if="!fixInbox.length" class="hy-staff-lead">现在没有整改单。</p>
+        <article
+          v-for="row in fixInbox"
+          :key="`fix-${row.id}`"
+          class="hy-task"
+          :class="[`is-${statusTone(row.status)}`, `is-${fixUrgency(row)}`]"
+        >
+          <button type="button" class="hy-task-main" :disabled="busy" @click="runFixPrimary(row)">
+            <strong>{{ row.zone_name }} · {{ row.ticket_type }}</strong>
+            <p>
+              <span class="hy-status" :class="`is-${statusTone(row.status)}`">{{ row.status }}</span>
+              · {{ fixDueLabel(row) }}
+            </p>
+            <p v-if="row.body_text" class="hy-task-body">{{ row.body_text }}</p>
+          </button>
+          <div class="hy-task-actions">
+            <button
+              v-if="fixPrimaryAction(row, { isManager }) === 'review'"
+              type="button"
+              class="btn btn-primary"
+              :disabled="busy"
+              @click="openFixReview(row)"
+            >对照</button>
+            <button
+              v-else
+              type="button"
+              class="btn btn-primary"
+              :disabled="busy"
+              @click="openFixOriginal(row)"
+            >回拍</button>
+            <button
+              v-if="fixPrimaryAction(row, { isManager }) === 'review'"
+              type="button"
+              class="btn"
+              :disabled="busy"
+              @click="openFixOriginal(row)"
+            >重拍</button>
+          </div>
+        </article>
+      </section>
+
+      <section v-if="tab === 'boards'">
+        <h1>红黑榜</h1>
+        <p class="hy-staff-lead">本周 {{ weekLabel(boards.week_start) }} 起。只记次数。</p>
+        <section class="hy-section">
           <h2>人的红黑榜</h2>
-          <p class="staff-lead">本周 {{ weekLabel(boards.week_start) }} 起。只记次数。</p>
-          <p v-if="!(boards.people || []).length" class="staff-lead">这一周还没有人的次数。</p>
-          <article v-for="row in boards.people" :key="`person-${row.employee_id}`" class="staff-row">
+          <p v-if="!(boards.people || []).length" class="hy-staff-lead">这一周还没有人的次数。</p>
+          <article v-for="row in boards.people" :key="`person-${row.employee_id}`" class="hy-task">
             <div>
               <strong>{{ personLabel(row) }}</strong>
               <p>实拍 {{ row['实拍'] }} · 驳回 {{ row['驳回'] }} · 一次通过 {{ row['一次通过'] }} · 逾期 {{ row['逾期'] }}</p>
             </div>
           </article>
         </section>
-        <section class="staff-zone">
+        <section class="hy-section">
           <h2>卫生责任区红黑榜</h2>
-          <p v-if="!(boards.zones || []).length" class="staff-lead">这一周还没有卫生责任区的次数。</p>
-          <article v-for="row in boards.zones" :key="`zone-${row.zone_id}`" class="staff-row">
+          <p v-if="!(boards.zones || []).length" class="hy-staff-lead">这一周还没有卫生责任区的次数。</p>
+          <article v-for="row in boards.zones" :key="`zone-${row.zone_id}`" class="hy-task">
             <div>
               <strong>{{ row.zone_name }}</strong>
               <p>逾期 {{ row['逾期'] }}</p>
             </div>
           </article>
         </section>
-        <section class="staff-zone">
+        <section class="hy-section">
           <h2>卫生教材</h2>
-          <p class="staff-lead">超级管理员手点的合格对照。合格图不会自动进来。</p>
-          <p v-if="!teaching.length" class="staff-lead">还没有卫生教材。</p>
-          <article v-for="row in teaching" :key="`teach-${row.id}`" class="staff-row">
+          <p class="hy-staff-lead">超级管理员手点的合格对照。合格图不会自动进来。</p>
+          <p v-if="!teaching.length" class="hy-staff-lead">还没有卫生教材。</p>
+          <article v-for="row in teaching" :key="`teach-${row.id}`" class="hy-task">
             <div>
               <strong>{{ row.title }}</strong>
               <p>{{ row.left_label }} / {{ row.right_label }}</p>
             </div>
-            <button type="button" class="btn btn-sm" @click="openTeaching(row)">打开</button>
+            <button type="button" class="btn" @click="openTeaching(row)">打开</button>
           </article>
         </section>
-        <button type="button" class="btn btn-block staff-submit staff-chooser-logout" :disabled="loggingOut" @click="logout">
-          退出登录
-        </button>
-      </template>
-      <template v-else>
-        <h1 class="staff-title">卫生待办</h1>
-        <p v-if="errorText" class="staff-alert">{{ errorText }}</p>
-        <template v-else-if="employee">
-          <p class="staff-hello">{{ employee.phone }}</p>
-          <dl class="staff-meta">
+      </section>
+
+      <section v-if="tab === 'me'">
+        <h1>我</h1>
+        <template v-if="employee">
+          <dl class="hy-meta">
+            <div>
+              <dt>姓名</dt>
+              <dd>{{ employee.name || '未设置' }}</dd>
+            </div>
+            <div>
+              <dt>手机号</dt>
+              <dd>{{ employee.phone }}</dd>
+            </div>
             <div>
               <dt>当天班次</dt>
               <dd>{{ hygieneShiftLabel(employee.shift) }}</dd>
+            </div>
+            <div v-if="shiftDue">
+              <dt>本班日常截止</dt>
+              <dd>{{ shiftDue }} 前交</dd>
+            </div>
+            <div v-if="deepDue">
+              <dt>专项截止</dt>
+              <dd>{{ deepDue }} 前做完</dd>
             </div>
             <div>
               <dt>职位</dt>
@@ -643,144 +1011,51 @@ async function decide(action) {
               <dd>{{ hygienePermissionLabel(employee.permission) }}</dd>
             </div>
           </dl>
-          <p class="staff-lead">日常只能交自己班次；专项和整改单白班夜班都能交。先看标准图再拍日常。整改先看开单原图再拍，镜头不叠图。都不能从相册选。</p>
-          <section v-if="deepInbox.length" class="staff-zone staff-deep">
-            <h2>专项卫生 · {{ deepStatus }}</h2>
-            <article v-for="row in deepInbox" :key="`deep-${row.item_id}`" class="staff-row">
-              <div>
-                <strong>{{ row.item_name }}</strong>
-                <p>{{ row.status }}</p>
-              </div>
-              <div class="staff-row-actions">
-                <button
-                  v-if="canShootDeep(row)"
-                  type="button"
-                  class="btn btn-sm btn-primary"
-                  :disabled="busy"
-                  @click="openDeepCapture(row)"
-                >拍前后</button>
-                <button
-                  v-if="canReview(row)"
-                  type="button"
-                  class="btn btn-sm"
-                  :disabled="busy"
-                  @click="openDeepReview(row)"
-                >对照</button>
-              </div>
-            </article>
-          </section>
-          <section v-if="isManager || fixInbox.length" class="staff-zone staff-fix">
-            <h2>整改单</h2>
-            <p class="staff-lead">先看开单原图再拍，镜头不叠图。后交覆盖先交。</p>
-            <button
-              v-if="isManager"
-              type="button"
-              class="btn btn-sm btn-primary"
-              :disabled="busy"
-              @click="openFixForm"
-            >开整改单</button>
-            <article v-for="row in fixInbox" :key="`fix-${row.id}`" class="staff-row">
-              <div>
-                <strong>{{ row.zone_name }} · {{ row.ticket_type }}</strong>
-                <p>{{ row.status }} · {{ deadlineLabel(row.deadline) }}</p>
-              </div>
-              <div class="staff-row-actions">
-                <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="openFixOriginal(row)">回拍</button>
-                <button
-                  v-if="isManager && row.status === '待验收'"
-                  type="button"
-                  class="btn btn-sm"
-                  :disabled="busy"
-                  @click="openFixReview(row)"
-                >对照</button>
-              </div>
-            </article>
-          </section>
-          <div v-if="groupedInbox.length" class="staff-catalog">
-            <section v-for="zone in groupedInbox" :key="zone.id" class="staff-zone">
-              <h2>{{ zone.name }}</h2>
-              <article v-for="row in zone.rows" :key="`${row.item_id}-${row.shift}`" class="staff-row">
-                <div>
-                  <strong>{{ row.item_name }}</strong>
-                  <p>{{ row.shift }} · {{ row.status }}</p>
-                </div>
-                <div class="staff-row-actions">
-                  <button
-                    v-if="canShoot(row)"
-                    type="button"
-                    class="btn btn-sm btn-primary"
-                    :disabled="busy"
-                    @click="openStandard(row)"
-                  >拍摄</button>
-                  <button
-                    v-if="canReview(row)"
-                    type="button"
-                    class="btn btn-sm"
-                    :disabled="busy"
-                    @click="openReview(row)"
-                  >对照</button>
-                </div>
-              </article>
-            </section>
-          </div>
-          <p v-else class="staff-lead">还没有带标准图的日常检查项。</p>
-          <section class="staff-zone">
-            <h2>人的红黑榜</h2>
-            <p class="staff-lead">本周 {{ weekLabel(boards.week_start) }} 起。只记次数。</p>
-            <p v-if="!(boards.people || []).length" class="staff-lead">这一周还没有人的次数。</p>
-            <article v-for="row in boards.people" :key="`home-person-${row.employee_id}`" class="staff-row">
-              <div>
-                <strong>{{ personLabel(row) }}</strong>
-                <p>实拍 {{ row['实拍'] }} · 驳回 {{ row['驳回'] }} · 一次通过 {{ row['一次通过'] }} · 逾期 {{ row['逾期'] }}</p>
-              </div>
-            </article>
-          </section>
-          <section class="staff-zone">
-            <h2>卫生责任区红黑榜</h2>
-            <p v-if="!(boards.zones || []).length" class="staff-lead">这一周还没有卫生责任区的次数。</p>
-            <article v-for="row in boards.zones" :key="`home-zone-${row.zone_id}`" class="staff-row">
-              <div>
-                <strong>{{ row.zone_name }}</strong>
-                <p>逾期 {{ row['逾期'] }}</p>
-              </div>
-            </article>
-          </section>
-          <section class="staff-zone">
-            <h2>卫生教材</h2>
-            <p class="staff-lead">超级管理员手点的合格对照。合格图不会自动进来。</p>
-            <p v-if="!teaching.length" class="staff-lead">还没有卫生教材。</p>
-            <article v-for="row in teaching" :key="`home-teach-${row.id}`" class="staff-row">
-              <div>
-                <strong>{{ row.title }}</strong>
-                <p>{{ row.left_label }} / {{ row.right_label }}</p>
-              </div>
-              <button type="button" class="btn btn-sm" @click="openTeaching(row)">打开</button>
-            </article>
-          </section>
-          <button type="button" class="btn btn-block staff-submit" :disabled="loggingOut" @click="logout">
-            退出登录
+          <p class="hy-staff-lead">专项和整改不跟班次。都不能从相册选。</p>
+          <button type="button" class="btn btn-block hy-staff-submit" :disabled="loggingOut" @click="logout">
+            {{ loggingOut ? '正在退出…' : '退出登录' }}
           </button>
         </template>
-        <p v-else class="staff-lead">正在确认登录…</p>
-      </template>
-    </div>
+        <p v-else class="hy-staff-lead">正在确认登录…</p>
+      </section>
+    </main>
+
+    <nav v-if="employee" class="hy-tabbar" aria-label="卫生入口">
+      <button
+        v-for="item in HYGIENE_STAFF_TABS"
+        :key="item.id"
+        type="button"
+        class="hy-tab"
+        :class="{ 'is-active': tab === item.id }"
+        :aria-current="tab === item.id ? 'page' : undefined"
+        @click="tab = item.id"
+      >
+        <SvgIcon :name="item.icon" :size="20" />
+        <span>{{ item.title }}</span>
+        <span v-if="tabCount(item.id)" class="hy-tab-badge">{{ tabCount(item.id) }}</span>
+      </button>
+    </nav>
 
     <div
       v-if="sheet"
       class="staff-preview"
       role="dialog"
       aria-modal="true"
-      :aria-label="sheetTitle"
+      aria-labelledby="hygiene-sheet-title"
       @click.self="closeSheet"
     >
       <div class="staff-preview-card">
-        <h2>{{ sheetTitle }}</h2>
+        <div class="staff-preview-head">
+          <h2 id="hygiene-sheet-title">{{ sheetTitle }}</h2>
+          <button ref="closeButton" type="button" class="staff-preview-close" @click="closeSheet">关闭</button>
+        </div>
         <p class="staff-lead">
-          <template v-if="sheet.kind === 'fix'">整改单 · 现场拍，没有相册。先看开单原图再拍，镜头不叠图。</template>
-          <template v-else-if="sheet.kind === 'teaching'">卫生教材 · {{ sheet.row.left_label }} / {{ sheet.row.right_label }}</template>
-          <template v-else-if="sheet.kind === 'deep'">专项卫生 · 清理前 / 清理后</template>
+          <template v-if="sheet.kind === 'fix'">先看开单原图再拍。镜头不叠图。</template>
+          <template v-else-if="sheet.kind === 'teaching'">{{ sheet.row.left_label }} / {{ sheet.row.right_label }}</template>
+          <template v-else-if="sheet.kind === 'deep'">清理前 / 清理后</template>
           <template v-else>{{ sheet.row.zone_name }} · {{ sheet.row.shift }}</template>
         </p>
+        <p v-if="flashText" class="staff-flash" role="status">{{ flashText }}</p>
         <p v-if="errorText" class="staff-alert">{{ errorText }}</p>
 
         <template v-if="sheet.mode === 'form'">
@@ -808,7 +1083,7 @@ async function decide(action) {
         </template>
 
         <template v-else-if="sheet.mode === 'standard'">
-          <p class="staff-lead">先看标准图，看清角度再打开相机。</p>
+          <p class="staff-lead">对照标准图，看清角度再拍。</p>
           <HygieneStandardOverlay
             :src="dailyItemStandardUrl('staff', sheet.row)"
             :markup="sheet.row.markup || []"
@@ -818,7 +1093,7 @@ async function decide(action) {
         </template>
 
         <template v-else-if="sheet.mode === 'before-camera' || sheet.mode === 'after-camera'">
-          <p class="staff-lead">{{ sheet.mode === 'before-camera' ? '先拍清理前。现场拍，没有相册。' : '再拍清理后。现场拍，没有相册。' }}</p>
+          <p class="staff-lead">{{ sheet.mode === 'before-camera' ? '先拍清理前。' : '再拍清理后。' }}</p>
           <HygieneLiveCamera @captured="onCaptured" />
         </template>
 
@@ -828,7 +1103,7 @@ async function decide(action) {
         />
 
         <template v-else-if="sheet.mode === 'original'">
-          <p class="staff-lead">先看开单原图，看清圈点再打开相机。镜头不叠图。</p>
+          <p class="staff-lead">对照开单原图，看清圈点再拍。镜头不叠图。</p>
           <HygieneStandardOverlay
             :src="fixOriginalUrl('staff', sheet.row)"
             :markup="sheet.row.markup || []"
@@ -869,18 +1144,24 @@ async function decide(action) {
 
         <template v-else-if="sheet.mode === 'before-preview'">
           <div class="capture-preview">
-            <img v-if="previewUrl" :src="previewUrl" alt="清理前">
-            <HygieneWatermarkOverlay :watermark="localWatermark" />
+            <img v-if="beforePreviewUrl" :src="beforePreviewUrl" alt="清理前">
+            <HygieneWatermarkOverlay :watermark="localBeforeWatermark" />
           </div>
           <button type="button" class="btn btn-primary btn-block staff-submit" @click="openDeepAfterCamera">拍清理后</button>
           <button type="button" class="btn btn-block staff-submit" @click="openDeepBeforeCamera">重拍清理前</button>
         </template>
 
         <template v-else-if="sheet.mode === 'after-preview'">
-          <div class="capture-preview">
-            <img v-if="previewUrl" :src="previewUrl" alt="清理后">
-            <HygieneWatermarkOverlay :watermark="localWatermark" />
-          </div>
+          <HygieneReviewPair
+            left-label="清理前"
+            right-label="清理后"
+            :standard-src="beforePreviewUrl"
+            :standard-alt="'清理前'"
+            :left-watermark="localBeforeWatermark"
+            :capture-src="previewUrl"
+            :capture-alt="'清理后'"
+            :watermark="localWatermark"
+          />
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitDeepPair">
             {{ busy ? '正在提交…' : '提交这一组待验收' }}
           </button>
@@ -962,177 +1243,7 @@ async function decide(action) {
             <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="decide('reject')">驳回</button>
           </div>
         </template>
-
-        <button type="button" class="btn btn-block staff-submit" @click="closeSheet">关掉</button>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.staff-phone {
-  min-height: 100%;
-  display: flex;
-  align-items: stretch;
-  justify-content: center;
-  padding: max(20px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
-}
-.staff-card {
-  width: 100%;
-  max-width: 420px;
-  margin: auto 0;
-  background: rgba(17, 24, 39, 0.92);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 28px 22px;
-}
-.staff-brand {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  margin: 0 0 10px;
-}
-.staff-brand span { color: var(--accent); margin-left: 6px; }
-.staff-title { font-size: 22px; margin: 0 0 8px; }
-.staff-hello {
-  font-size: 20px;
-  font-variant-numeric: tabular-nums;
-  margin: 0 0 16px;
-}
-.staff-meta {
-  display: grid;
-  gap: 10px;
-  margin: 0 0 16px;
-  padding: 12px 14px;
-  background: var(--card2);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-}
-.staff-meta div { display: flex; justify-content: space-between; gap: 12px; }
-.staff-meta dt { color: var(--text-dim); font-size: 13px; }
-.staff-meta dd { margin: 0; font-size: 14px; }
-.staff-lead {
-  color: var(--text-dim);
-  font-size: 14px;
-  line-height: 1.55;
-  margin: 0 0 20px;
-}
-.staff-alert {
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-size: 13px;
-  margin: 0 0 16px;
-}
-.staff-submit { min-height: 48px; font-size: 16px; }
-.staff-shift-choices {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-.staff-shift-btn {
-  min-height: 56px;
-  font-size: 18px;
-  font-weight: 600;
-}
-.staff-shift-night {
-  background: #1e293b;
-  border-color: #334155;
-  color: #e2e8f0;
-}
-.staff-shift-night:hover:not(:disabled) {
-  border-color: var(--cyan);
-  color: #fff;
-}
-.staff-chooser-logout { margin-top: 16px; }
-.staff-deep { margin: 16px 0 8px; }
-.staff-fix { margin: 16px 0 8px; }
-.staff-fix > .btn { margin-bottom: 10px; }
-.staff-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0 0 12px;
-  color: var(--text-dim);
-  font-size: 13px;
-}
-.staff-input {
-  min-height: 44px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--card2);
-  color: var(--text);
-  padding: 8px 10px;
-  font: inherit;
-}
-.staff-catalog {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  margin: 0 0 20px;
-}
-.staff-zone h2 {
-  margin: 0 0 8px;
-  font-size: 15px;
-}
-.staff-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  align-items: center;
-  margin: 0 0 6px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--card2);
-}
-.staff-row strong { display: block; font-size: 15px; }
-.staff-row p {
-  margin: 4px 0 0;
-  color: var(--text-dim);
-  font-size: 12px;
-}
-.staff-row-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.staff-preview {
-  position: fixed;
-  inset: 0;
-  background: rgba(2, 6, 23, 0.72);
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  padding: 16px;
-  z-index: 20;
-  overflow: auto;
-}
-.staff-preview-card {
-  width: 100%;
-  max-width: 420px;
-  background: rgba(17, 24, 39, 0.96);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 18px 16px 20px;
-}
-.staff-preview-card h2 {
-  margin: 0 0 6px;
-  font-size: 18px;
-}
-.staff-preview-card .staff-submit { margin-top: 14px; }
-.staff-decide { display: grid; gap: 8px; }
-.capture-preview {
-  position: relative;
-  border-radius: 10px;
-  overflow: hidden;
-  background: #020617;
-}
-.capture-preview img {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-</style>

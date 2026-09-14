@@ -30,6 +30,7 @@ async function loadRoster() {
     const next = {}
     for (const row of employees.value) {
       next[row.id] = {
+        name: row.name || '',
         job_title: row.job_title || '',
         permission: row.permission,
         shift: row.shift || '白班',
@@ -78,12 +79,26 @@ async function confirmDisable() {
   }
 }
 
+async function enable(row) {
+  busyId.value = row.id
+  errorText.value = ''
+  try {
+    await api.post(`/api/hygiene/admin/roster/${row.id}/enable`)
+    await loadRoster()
+  } catch (err) {
+    errorText.value = err.message || '启用失败'
+  } finally {
+    busyId.value = null
+  }
+}
+
 async function saveRow(row) {
   const draft = draftFor(row)
   busyId.value = row.id
   errorText.value = ''
   try {
     await api.patch(`/api/hygiene/admin/roster/${row.id}`, {
+      name: draft.name,
       job_title: draft.job_title,
       permission: draft.permission,
     })
@@ -117,8 +132,9 @@ async function changeShift(row) {
   <div class="roster-page">
     <div class="card roster-head">
       <div>
-        <h2>卫生花名册</h2>
-        <p>批准新注册、写职位、把人设成普通员工或管理员。当天班次只有超级管理员能改。停用后不能登录，行还留在这里。超级管理员仍是后台共享账号，不能从花名册升上去。</p>
+        <p class="hy-eyebrow">Roster · 人员名册</p>
+        <h1>卫生花名册</h1>
+        <p>批准新注册、补姓名、写职位、把人设成普通员工或管理员。当天班次只有超级管理员能改。停用后不能登录，行还留在这里，可随时重新启用。超级管理员仍是后台共享账号，不能从花名册升上去。</p>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="loadRoster">刷新</button>
     </div>
@@ -131,104 +147,110 @@ async function changeShift(row) {
       </div>
       <div v-if="loading" class="roster-empty">正在加载…</div>
       <div v-else-if="!employees.length" class="roster-empty">还没有人注册。</div>
-      <div v-else class="data-table-wrap">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>手机号</th>
-              <th>职位</th>
-              <th>卫生权限</th>
-              <th>当天班次</th>
-              <th>状态</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in employees" :key="row.id">
-              <td class="roster-phone">{{ row.phone }}</td>
-              <td>
-                <input
-                  v-if="drafts[row.id]"
-                  v-model="drafts[row.id].job_title"
-                  class="input"
-                  type="text"
-                  maxlength="40"
-                  :disabled="busyId === row.id"
-                  placeholder="头衔，比如领班"
-                  aria-label="职位"
-                >
-              </td>
-              <td>
+      <div v-else class="hy-person-list">
+        <article v-for="row in employees" :key="row.id" class="hy-person">
+          <div class="hy-person-top">
+            <div class="roster-person-copy">
+              <strong>{{ row.name || '未设置姓名' }}</strong>
+              <span>{{ row.phone }}</span>
+            </div>
+            <span class="roster-status" :data-status="rosterStatusLabel(row)">
+              {{ rosterStatusLabel(row) }}
+            </span>
+          </div>
+          <div v-if="drafts[row.id]" class="hy-person-fields">
+            <label>
+              姓名
+              <input
+                v-model="drafts[row.id].name"
+                class="input"
+                type="text"
+                maxlength="40"
+                :disabled="busyId === row.id"
+                placeholder="请输入真实姓名"
+              >
+            </label>
+            <label>
+              职位
+              <input
+                v-model="drafts[row.id].job_title"
+                class="input"
+                type="text"
+                maxlength="40"
+                :disabled="busyId === row.id"
+                placeholder="头衔，比如领班"
+              >
+            </label>
+            <label>
+              卫生权限
+              <select
+                v-model="drafts[row.id].permission"
+                class="select"
+                :disabled="busyId === row.id"
+              >
+                <option v-for="perm in HYGIENE_PERMISSIONS" :key="perm" :value="perm">
+                  {{ hygienePermissionLabel(perm) }}
+                </option>
+              </select>
+            </label>
+            <label>
+              当天班次 · 现在 {{ hygieneShiftLabel(row.shift) }}
+              <span class="hy-person-shift">
                 <select
-                  v-if="drafts[row.id]"
-                  v-model="drafts[row.id].permission"
+                  v-model="drafts[row.id].shift"
                   class="select"
                   :disabled="busyId === row.id"
-                  aria-label="卫生权限"
                 >
-                  <option v-for="perm in HYGIENE_PERMISSIONS" :key="perm" :value="perm">
-                    {{ hygienePermissionLabel(perm) }}
+                  <option v-for="shift in HYGIENE_SHIFTS" :key="shift" :value="shift">
+                    {{ shift }}
                   </option>
                 </select>
-              </td>
-              <td>
-                <div v-if="drafts[row.id]" class="roster-shift">
-                  <span class="roster-shift-now">{{ hygieneShiftLabel(row.shift) }}</span>
-                  <select
-                    v-model="drafts[row.id].shift"
-                    class="select"
-                    :disabled="busyId === row.id"
-                    :aria-label="`当天班次，当前${hygieneShiftLabel(row.shift)}`"
-                  >
-                    <option v-for="shift in HYGIENE_SHIFTS" :key="shift" :value="shift">
-                      {{ shift }}
-                    </option>
-                  </select>
-                  <button
-                    type="button"
-                    class="btn btn-sm"
-                    :disabled="busyId === row.id"
-                    @click="changeShift(row)"
-                  >改班次</button>
-                </div>
-              </td>
-              <td>
-                <span class="roster-status" :data-status="rosterStatusLabel(row)">
-                  {{ rosterStatusLabel(row) }}
-                </span>
-              </td>
-              <td class="roster-actions">
-                <button
-                  v-if="!row.approved && !row.disabled"
-                  type="button"
-                  class="btn btn-primary btn-sm"
-                  :disabled="busyId === row.id"
-                  @click="approve(row)"
-                >批准</button>
                 <button
                   type="button"
-                  class="btn btn-sm"
+                  class="btn"
                   :disabled="busyId === row.id"
-                  @click="saveRow(row)"
-                >保存</button>
-                <button
-                  v-if="!row.disabled"
-                  type="button"
-                  class="btn btn-danger btn-sm"
-                  :disabled="busyId === row.id"
-                  @click="askDisable(row)"
-                >停用</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+                  @click="changeShift(row)"
+                >改班次</button>
+              </span>
+            </label>
+          </div>
+          <div class="hy-person-actions">
+            <button
+              v-if="!row.approved && !row.disabled"
+              type="button"
+              class="btn btn-primary"
+              :disabled="busyId === row.id"
+              @click="approve(row)"
+            >批准</button>
+            <button
+              v-if="row.disabled"
+              type="button"
+              class="btn btn-primary"
+              :disabled="busyId === row.id"
+              @click="enable(row)"
+            >启用</button>
+            <button
+              type="button"
+              class="btn"
+              :disabled="busyId === row.id"
+              @click="saveRow(row)"
+            >保存</button>
+            <button
+              v-if="!row.disabled"
+              type="button"
+              class="btn btn-danger"
+              :disabled="busyId === row.id"
+              @click="askDisable(row)"
+            >停用</button>
+          </div>
+        </article>
       </div>
     </div>
 
     <ConfirmDialog
       v-if="disableTarget"
       title="停用员工"
-      :message="`停用 ${disableTarget.phone} 后不能登录，花名册里仍能看到这个人。`"
+      :message="`停用 ${disableTarget.name || disableTarget.phone} 后不能登录，花名册里仍能看到这个人。`"
       confirm-label="停用"
       danger
       @confirm="confirmDisable"
@@ -238,71 +260,10 @@ async function changeShift(row) {
 </template>
 
 <style scoped>
-.roster-page {
+.roster-person-copy {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  max-width: 1100px;
-}
-.roster-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
-}
-.roster-head h2 {
-  margin: 0 0 6px;
-  font-size: 16px;
-}
-.roster-head p {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.6;
-  max-width: 52em;
-}
-.roster-error {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
-  font-size: 13px;
-}
-.roster-empty {
-  padding: 28px 16px;
-  text-align: center;
-  color: var(--text-dim);
-  font-size: 13px;
-}
-.roster-phone { font-variant-numeric: tabular-nums; }
-.roster-shift {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.roster-shift-now {
-  color: var(--text-dim);
-  font-size: 12px;
-  white-space: nowrap;
-}
-.roster-shift .select {
-  min-width: 88px;
-  width: auto;
-}
-.roster-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.roster-status[data-status='待批准'] { color: var(--yellow); }
-.roster-status[data-status='已批准'] { color: var(--green); }
-.roster-status[data-status='已停用'] { color: var(--text-dim); }
-.data-table .input,
-.data-table .select {
-  min-width: 120px;
-  width: 100%;
+  gap: 2px;
+  min-width: 0;
 }
 </style>
