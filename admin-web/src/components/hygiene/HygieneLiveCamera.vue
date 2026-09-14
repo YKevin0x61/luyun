@@ -1,26 +1,136 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import {
+  rearCameraDevices,
+  wideCameraDevices,
+} from '../../utils/cameraCapabilities'
 
 const emit = defineEmits(['captured', 'error'])
 
 const videoEl = ref(null)
 const starting = ref(true)
 const snapping = ref(false)
+const switchingCamera = ref(false)
+const wideAvailable = ref(false)
+const cameraActionText = ref('')
 const errorText = ref('')
 let stream = null
+let rearDevices = []
+let wideDevices = []
+let zoomWideOn = false
+let savedZoom = null
+
+function videoTrack() {
+  return stream && stream.getVideoTracks()[0]
+}
+
+function canZoomWide(track = videoTrack()) {
+  const zoom = track && track.getCapabilities
+    ? track.getCapabilities().zoom
+    : null
+  return Boolean(zoom && Number(zoom.min) < 1 && Number(zoom.max) > Number(zoom.min))
+}
+
+async function attachStream(nextStream) {
+  stream = nextStream
+  if (videoEl.value) {
+    videoEl.value.srcObject = nextStream
+    await videoEl.value.play()
+  }
+}
+
+async function refreshCameraCapabilities() {
+  wideAvailable.value = false
+  cameraActionText.value = ''
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    rearDevices = rearCameraDevices(devices)
+    wideDevices = wideCameraDevices(devices)
+    const track = videoTrack()
+    const currentId = track && track.getSettings ? track.getSettings().deviceId : ''
+    const zoomWide = canZoomWide(track)
+    const alternateWide = wideDevices.some((device) => device.deviceId !== currentId)
+    wideAvailable.value = Boolean(zoomWide || alternateWide || rearDevices.length > 1)
+    if (zoomWide || alternateWide) cameraActionText.value = '广角'
+    else if (wideAvailable.value) cameraActionText.value = '切换镜头'
+  } catch {
+    // Device enumeration is optional; keep using the browser-selected camera.
+  }
+}
+
+async function switchToCamera(deviceId) {
+  stopCamera()
+  const nextStream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      deviceId: { exact: deviceId },
+      facingMode: { ideal: 'environment' },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+    },
+    audio: false,
+  })
+  await attachStream(nextStream)
+  await refreshCameraCapabilities()
+}
+
+async function toggleWide() {
+  if (!wideAvailable.value || switchingCamera.value) return
+  switchingCamera.value = true
+  errorText.value = ''
+  try {
+    const track = videoTrack()
+    if (canZoomWide(track)) {
+      const zoom = track.getCapabilities().zoom
+      if (zoomWideOn) {
+        zoomWideOn = false
+        cameraActionText.value = '广角'
+        await track.applyConstraints({
+          advanced: [{ zoom: savedZoom == null ? 1 : savedZoom }],
+        })
+      } else {
+        const settings = track.getSettings ? track.getSettings() : {}
+        savedZoom = settings.zoom == null ? 1 : settings.zoom
+        zoomWideOn = true
+        cameraActionText.value = '标准视角'
+        await track.applyConstraints({ advanced: [{ zoom: zoom.min }] })
+      }
+      return
+    }
+
+    const currentId = track && track.getSettings ? track.getSettings().deviceId : ''
+    const alternateWide = wideDevices.find((device) => device.deviceId !== currentId)
+    if (alternateWide) {
+      await switchToCamera(alternateWide.deviceId)
+      return
+    }
+    const candidates = rearDevices
+    if (candidates.length < 2) return
+    const currentIndex = candidates.findIndex((device) => device.deviceId === currentId)
+    const next = candidates[(currentIndex + 1 + candidates.length) % candidates.length]
+    await switchToCamera(next.deviceId)
+  } catch (err) {
+    errorText.value = '切换相机镜头失败，请重新打开相机。'
+    emit('error', err)
+  } finally {
+    switchingCamera.value = false
+  }
+}
 
 async function startCamera() {
   errorText.value = ''
   starting.value = true
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' } },
+    const nextStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
       audio: false,
     })
-    if (videoEl.value) {
-      videoEl.value.srcObject = stream
-      await videoEl.value.play()
-    }
+    await attachStream(nextStream)
+    await refreshCameraCapabilities()
   } catch (err) {
     errorText.value = '打不开相机。必须现场拍，没有相册入口。'
     emit('error', err)
@@ -67,14 +177,23 @@ onBeforeUnmount(stopCamera)
     <p v-if="errorText" class="live-alert">{{ errorText }}</p>
     <p v-else-if="starting" class="live-hint">正在打开后置相机…</p>
     <video ref="videoEl" class="live-video" playsinline muted autoplay></video>
-    <button
-      type="button"
-      class="btn btn-primary btn-block live-snap"
-      :disabled="starting || snapping || Boolean(errorText)"
-      @click="snap"
-    >
-      {{ snapping ? '正在拍照…' : '拍一张' }}
-    </button>
+    <div class="live-actions">
+      <button
+        type="button"
+        class="btn btn-primary btn-block live-snap"
+        :disabled="starting || switchingCamera || snapping || Boolean(errorText)"
+        @click="snap"
+      >
+        {{ snapping ? '正在拍照…' : '拍一张' }}
+      </button>
+      <button
+        v-if="wideAvailable"
+        type="button"
+        class="btn live-wide"
+        :disabled="switchingCamera || starting || Boolean(errorText)"
+        @click="toggleWide"
+      >{{ switchingCamera ? '切换中…' : cameraActionText }}</button>
+    </div>
   </div>
 </template>
 
@@ -84,19 +203,27 @@ onBeforeUnmount(stopCamera)
   flex-direction: column;
   gap: 12px;
 }
+.live-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 9px;
+}
 .live-video {
   width: 100%;
   border-radius: var(--hy-radius-md);
   background: var(--hy-ink);
   border: 1px solid var(--hy-line);
   min-height: 240px;
-  object-fit: cover;
+  object-fit: contain;
 }
 .live-snap {
   min-height: 56px;
   font-size: 17px;
   font-weight: 800;
   letter-spacing: .12em;
+}
+.live-wide {
+  min-width: 92px;
 }
 .live-hint {
   margin: 0;

@@ -14,6 +14,10 @@ describe('staff daily capture has no album picker', () => {
   it('uses getUserMedia and has no file/image album input', () => {
     const source = FILES.slice(0, 1).concat(FILES[2]).map((path) => readFileSync(path, 'utf8')).join('\n')
     expect(source).toMatch(/getUserMedia/)
+    expect(source).toMatch(/enumerateDevices/)
+    expect(source).toMatch(/getCapabilities\(\)/)
+    expect(source).toMatch(/object-fit: contain/)
+    expect(source).toMatch(/广角/)
     expect(source).not.toMatch(/type=["']file["']/)
     expect(source).not.toMatch(/accept=["']image/)
     expect(source).not.toMatch(/capture=["']environment["']/)
