@@ -64,6 +64,8 @@ const employee = ref(null)
 const errorText = ref('')
 const loggingOut = ref(false)
 const picking = ref('')
+const selectedShift = ref('')
+const selectedZoneId = ref('')
 const inbox = ref([])
 const deepInbox = ref([])
 const deepStatus = ref('')
@@ -84,8 +86,8 @@ const nowTick = ref(Date.now())
 const closeButton = ref(null)
 let clockTimer = null
 
-const needsShiftPick = computed(() => {
-  return Boolean(employee.value) && !employee.value.shift
+const needsAssignment = computed(() => {
+  return Boolean(employee.value) && (!employee.value.shift || !employee.value.zone_id)
 })
 
 const dailyStats = computed(() => dailyProgress(inbox.value))
@@ -187,6 +189,12 @@ async function loadMe() {
   try {
     const data = await staffRequest('/api/hygiene/staff/me')
     employee.value = data.employee
+    if (employee.value.shift && !selectedShift.value) {
+      selectedShift.value = employee.value.shift
+    }
+    if (employee.value.zone_id && !selectedZoneId.value) {
+      selectedZoneId.value = employee.value.zone_id
+    }
     dailyClocks.value = data.daily_clocks || null
     deepClock.value = data.deep_clock || null
   } catch (err) {
@@ -194,9 +202,13 @@ async function loadMe() {
     router.replace('/hygiene/login')
     return
   }
-  const jobs = [loadDeepClean, loadFixTickets, loadZones, loadBoards, loadTeaching]
-  if (employee.value && employee.value.shift) jobs.push(loadInbox)
-  else inbox.value = []
+  const jobs = [loadDeepClean, loadZones, loadBoards, loadTeaching]
+  if (employee.value && employee.value.shift && employee.value.zone_id) {
+    jobs.push(loadInbox, loadFixTickets)
+  } else {
+    inbox.value = []
+    fixInbox.value = []
+  }
   const results = await Promise.allSettled(jobs.map((fn) => fn()))
   const failed = results.find((result) => result.status === 'rejected')
   if (failed) {
@@ -248,18 +260,21 @@ function openTeaching(row) {
   sheet.value = { kind: 'teaching', mode: 'review', row }
 }
 
-async function pickShift(shift) {
-  if (picking.value) return
+async function pickAssignment() {
+  if (picking.value || !selectedShift.value || !selectedZoneId.value) return
   errorText.value = ''
-  picking.value = shift
+  picking.value = 'assignment'
   try {
-    await staffRequest('/api/hygiene/staff/shift', {
+    await staffRequest('/api/hygiene/staff/assignment', {
       method: 'POST',
-      body: { shift },
+      body: {
+        shift: selectedShift.value,
+        zone_id: Number(selectedZoneId.value),
+      },
     })
     await loadMe()
   } catch (err) {
-    errorText.value = err.message || '选班失败'
+    errorText.value = err.message || '选择区域和班次失败'
   } finally {
     picking.value = ''
   }
@@ -339,6 +354,10 @@ function openFixForm() {
   errorText.value = ''
   flashText.value = ''
   if (!isManager.value) return
+  if (needsAssignment.value) {
+    errorText.value = '先选今天的区域和班次。'
+    return
+  }
   if (!liveOk.value) {
     errorText.value = '打不开相机。必须现场拍，没有相册入口。'
     return
@@ -764,7 +783,7 @@ async function decide(action) {
           </span>
         </div>
         <span v-if="employee" class="hy-work-shift">
-          {{ employee.name || employee.phone }} · {{ hygieneShiftLabel(employee.shift) }}
+          {{ employee.name || employee.phone }} · {{ employee.zone_name || '未选区域' }} · {{ hygieneShiftLabel(employee.shift) }}
         </span>
       </div>
     </header>
@@ -772,31 +791,48 @@ async function decide(action) {
     <main id="hygiene-work-main" class="hy-work-main">
       <p v-if="errorText && !sheet" class="hy-staff-alert" role="alert">{{ errorText }}</p>
       <p
-        v-if="needsShiftPick && tab !== 'inbox'"
+        v-if="needsAssignment && tab !== 'inbox'"
         class="hy-staff-alert"
         role="status"
       >
-        交日常前先选今天班次。
-        <button type="button" class="btn btn-primary" @click="tab = 'inbox'">去选班</button>
+        交日常前先选今天区域和班次。
+        <button type="button" class="btn btn-primary" @click="tab = 'inbox'">去选择</button>
       </p>
 
       <section v-if="tab === 'inbox'">
-        <template v-if="needsShiftPick">
-          <h1>今天上哪一班？</h1>
-          <p class="hy-staff-lead">选一次就锁在这个营业日。白班和夜班的日常分开交，选错了要找超级管理员改。</p>
+        <template v-if="needsAssignment">
+          <h1>今天负责哪个区域、上哪一班？</h1>
+          <p class="hy-staff-lead">区域和班次各选一次，锁在这个营业日。只显示和允许提交所选区域的日常与整改，选错了要找超级管理员改。</p>
+          <h2>卫生责任区</h2>
+          <div class="hy-shift-choices">
+            <button
+              v-for="zone in zones"
+              :key="zone.id"
+              type="button"
+              class="btn"
+              :class="{ 'btn-primary': String(selectedZoneId) === String(zone.id) }"
+              :disabled="Boolean(picking)"
+              @click="selectedZoneId = zone.id"
+            >{{ zone.name }}</button>
+          </div>
+          <h2>班次</h2>
           <div class="hy-shift-choices">
             <button
               v-for="shift in HYGIENE_SHIFTS"
               :key="shift"
               type="button"
               class="btn"
-              :class="{ 'btn-primary': shift === '白班' }"
+              :class="{ 'btn-primary': selectedShift === shift }"
               :disabled="Boolean(picking)"
-              @click="pickShift(shift)"
-            >
-              {{ picking === shift ? '正在锁定…' : shift }}
-            </button>
+              @click="selectedShift = shift"
+            >{{ shift }}</button>
           </div>
+          <button
+            type="button"
+            class="btn btn-primary btn-block hy-staff-submit"
+            :disabled="Boolean(picking) || !selectedShift || !selectedZoneId || !zones.length"
+            @click="pickAssignment"
+          >{{ picking ? '正在锁定…' : '确认区域和班次' }}</button>
         </template>
         <template v-else-if="employee">
           <h1>今天还差什么</h1>
@@ -809,7 +845,7 @@ async function decide(action) {
             <span v-if="queueSummary.waiting">等验收 {{ queueSummary.waiting }}</span>
           </div>
           <p class="hy-staff-lead">
-            <template v-if="shiftDue">本班 {{ shiftDue }} 前交。专项和整改不跟班次。</template>
+            <template v-if="shiftDue">本班 {{ shiftDue }} 前交。专项不跟班次；整改跟区域、不跟班次。</template>
             <template v-else>按超时、快到截止、待拍的顺序排好，照下一个做就行。</template>
           </p>
 
@@ -881,7 +917,7 @@ async function decide(action) {
           {{ deepStats.passed }}/{{ deepStats.total }}
           <span v-if="deepDue"> · {{ deepDue }} 前做完</span>
         </p>
-        <p class="hy-staff-lead">不跟班次。每项拍清理前和清理后，不要标准图。</p>
+        <p class="hy-staff-lead">不跟区域和班次。每项拍清理前和清理后，不要标准图。</p>
         <p v-if="!deepInbox.length" class="hy-staff-lead">这一轮没有专项卫生。</p>
         <article
           v-for="row in openDeep"
@@ -931,7 +967,7 @@ async function decide(action) {
 
       <section v-if="tab === 'fix'" class="hy-section">
         <h1>整改单</h1>
-        <p class="hy-staff-lead">不跟班次。先看开单原图再拍，镜头不叠图。</p>
+        <p class="hy-staff-lead">按所选区域显示和提交。先看开单原图再拍，镜头不叠图。</p>
         <button
           v-if="isManager"
           type="button"
@@ -1030,6 +1066,10 @@ async function decide(action) {
               <dd>{{ employee.phone }}</dd>
             </div>
             <div>
+              <dt>当天区域</dt>
+              <dd>{{ employee.zone_name || '未选' }}</dd>
+            </div>
+            <div>
               <dt>当天班次</dt>
               <dd>{{ hygieneShiftLabel(employee.shift) }}</dd>
             </div>
@@ -1050,7 +1090,7 @@ async function decide(action) {
               <dd>{{ hygienePermissionLabel(employee.permission) }}</dd>
             </div>
           </dl>
-          <p class="hy-staff-lead">专项和整改不跟班次。都不能从相册选。</p>
+          <p class="hy-staff-lead">专项不跟区域和班次；整改跟所选区域、不跟班次。都不能从相册选。</p>
           <button type="button" class="btn btn-block hy-staff-submit" :disabled="loggingOut" @click="logout">
             {{ loggingOut ? '正在退出…' : '退出登录' }}
           </button>

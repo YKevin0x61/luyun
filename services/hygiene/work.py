@@ -432,16 +432,23 @@ class HygieneWork:
             "markup": self._parse_markup(mapping.get("markup_json") or "[]"),
         }
 
-    async def list_staff_daily_items(self) -> list[dict]:
+    async def list_staff_daily_items(self, actor: Optional[dict] = None) -> list[dict]:
         zones = await self.list_zones()
-        cur = await self._conn.execute(
-            """SELECT i.id, i.zone_id, i.name, i.current_standard_id,
-                      s.capture_id, s.markup_json
-               FROM hygiene_daily_items i
-               JOIN hygiene_standards s ON s.id = i.current_standard_id
-               WHERE i.current_standard_id IS NOT NULL
-               ORDER BY i.id ASC"""
-        )
+        sql = """SELECT i.id, i.zone_id, i.name, i.current_standard_id,
+                        s.capture_id, s.markup_json
+                 FROM hygiene_daily_items i
+                 JOIN hygiene_standards s ON s.id = i.current_standard_id
+                 WHERE i.current_standard_id IS NOT NULL"""
+        params: list = []
+        try:
+            zone_id = self._actor_zone_id(actor or {})
+        except HygieneWorkError:
+            zone_id = None
+        if zone_id is not None:
+            sql += " AND i.zone_id = ?"
+            params.append(zone_id)
+        sql += " ORDER BY i.id ASC"
+        cur = await self._conn.execute(sql, params)
         rows = await cur.fetchall()
         by_zone: dict[int, list] = {}
         for row in rows:
@@ -459,6 +466,12 @@ class HygieneWork:
             (item_id,),
         )
         return await cur.fetchone()
+
+    async def require_daily_item_access(self, actor: dict, item_id: int) -> None:
+        item = await self._fetch_item(item_id)
+        if item is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        self._require_zone_access(actor, dict(item)["zone_id"])
 
     async def current_standard(self, item_id: int) -> dict:
         item = await self._fetch_item(item_id)
@@ -598,6 +611,21 @@ class HygieneWork:
             raise HygieneWorkError("shift_mismatch", "shift_mismatch")
         return target
 
+    def _actor_zone_id(self, actor: dict) -> Optional[int]:
+        if not actor or actor.get("kind") != "staff":
+            return None
+        if "zone_id" not in actor:
+            return None
+        zone_id = actor.get("zone_id")
+        if not zone_id:
+            raise HygieneWorkError("zone_required", "zone_required")
+        return int(zone_id)
+
+    def _require_zone_access(self, actor: dict, zone_id: int) -> None:
+        selected = self._actor_zone_id(actor)
+        if selected is not None and selected != int(zone_id):
+            raise HygieneWorkError("zone_mismatch", "zone_mismatch")
+
     def _require_live_capture(self, capture) -> bytes:
         if not capture or capture.get("live") is not True:
             raise HygieneWorkError("live_required", "live_required")
@@ -716,6 +744,7 @@ class HygieneWork:
         if item_row is None:
             raise HygieneWorkError("item_not_found", "item_not_found")
         item = dict(item_row)
+        self._require_zone_access(actor, item["zone_id"])
         standard_id = item.get("current_standard_id")
         if not standard_id:
             raise HygieneWorkError("standard_required", "standard_required")
@@ -782,29 +811,35 @@ class HygieneWork:
             "watermark": self._watermark(now, item["zone_name"], photographer),
         }
 
-    def _inbox_shifts(self, actor: dict) -> tuple[str, ...]:
+    def _inbox_filter(self, actor: dict) -> tuple[tuple[str, ...], Optional[int]]:
         if actor and actor.get("kind") == "staff":
             picked = actor.get("shift")
             if picked not in DAILY_SHIFTS:
-                return ()
-            return (picked,)
-        return DAILY_SHIFTS
+                return (), None
+            try:
+                zone_id = self._actor_zone_id(actor)
+            except HygieneWorkError:
+                return (), None
+            return (picked,), zone_id
+        return DAILY_SHIFTS, None
 
     async def list_daily_work(self, actor: dict) -> list[dict]:
-        # Shop-wide across 卫生责任区; staff still only see their 班次.
         business_date = hygiene_business_date(self._now_dt())
-        shifts = self._inbox_shifts(actor)
+        shifts, zone_id = self._inbox_filter(actor)
         if not shifts:
             return []
-        cur = await self._conn.execute(
-            """SELECT i.id, i.zone_id, i.name, i.current_standard_id, z.name AS zone_name,
-                      s.markup_json
-               FROM hygiene_daily_items i
-               JOIN hygiene_zones z ON z.id = i.zone_id
-               JOIN hygiene_standards s ON s.id = i.current_standard_id
-               WHERE i.current_standard_id IS NOT NULL
-               ORDER BY i.id ASC"""
-        )
+        sql = """SELECT i.id, i.zone_id, i.name, i.current_standard_id, z.name AS zone_name,
+                        s.markup_json
+                 FROM hygiene_daily_items i
+                 JOIN hygiene_zones z ON z.id = i.zone_id
+                 JOIN hygiene_standards s ON s.id = i.current_standard_id
+                 WHERE i.current_standard_id IS NOT NULL"""
+        params: list = []
+        if zone_id is not None:
+            sql += " AND i.zone_id = ?"
+            params.append(zone_id)
+        sql += " ORDER BY i.id ASC"
+        cur = await self._conn.execute(sql, params)
         items = [dict(row) for row in await cur.fetchall()]
         inst_cur = await self._conn.execute(
             """SELECT id, business_date, shift, item_id, status, pending_submission_id
@@ -842,7 +877,12 @@ class HygieneWork:
                 )
         return inbox
 
-    async def get_daily_review(self, item_id: int, shift: str) -> dict:
+    async def get_daily_review(
+        self,
+        item_id: int,
+        shift: str,
+        actor: Optional[dict] = None,
+    ) -> dict:
         if shift not in DAILY_SHIFTS:
             raise HygieneWorkError("shift_mismatch", "shift_mismatch")
         business_date = hygiene_business_date(self._now_dt())
@@ -855,6 +895,9 @@ class HygieneWork:
         submission = await self._fetch_submission(instance.get("pending_submission_id"))
         if submission is None:
             raise HygieneWorkError("not_pending", "not_pending")
+        item = await self._fetch_item_with_zone(item_id)
+        if item is not None:
+            self._require_zone_access(actor or {"kind": "super"}, item["zone_id"])
         standard = await self.standard_by_id(int(submission["frozen_standard_id"]))
         return {
             "item_id": int(item_id),
@@ -913,6 +956,9 @@ class HygieneWork:
 
     async def accept_daily(self, actor: dict, item_id: int, shift: str) -> dict:
         instance, submission = await self._pending_instance(item_id, shift)
+        item_row = await self._fetch_item_with_zone(item_id)
+        if item_row is not None:
+            self._require_zone_access(actor, item_row["zone_id"])
         self._require_reviewer(actor, submission["submitter_id"])
         now = self._now_iso()
         await self._conn.execute(
@@ -946,6 +992,9 @@ class HygieneWork:
 
     async def reject_daily(self, actor: dict, item_id: int, shift: str) -> dict:
         instance, submission = await self._pending_instance(item_id, shift)
+        item_row = await self._fetch_item_with_zone(item_id)
+        if item_row is not None:
+            self._require_zone_access(actor, item_row["zone_id"])
         self._require_reviewer(actor, submission["submitter_id"])
         now = self._now_iso()
         await self._conn.execute(
@@ -1941,6 +1990,7 @@ class HygieneWork:
         zone = await self._fetch_zone(zone_id)
         if zone is None:
             raise HygieneWorkError("zone_not_found", "zone_not_found")
+        self._require_zone_access(actor, zone_id)
         zone_name = dict(zone)["name"]
         if actor.get("kind") == "super":
             opener_kind = OPENER_SUPER
@@ -2012,18 +2062,20 @@ class HygieneWork:
         }
 
     async def list_fix_tickets(self, actor: dict) -> list:
-        del actor  # shop-wide; 班次 does not gate 整改单
-        cur = await self._conn.execute(
-            """SELECT t.id, t.zone_id, t.ticket_type, t.body_text, t.duration_seconds,
-                      t.deadline, t.opener_kind, t.opener_id, t.opener_phone, t.status,
-                      t.capture_id, t.content_type, t.markup_json, t.pending_reshoot_id,
-                      t.created_at, z.name AS zone_name
-               FROM hygiene_fix_tickets t
-               JOIN hygiene_zones z ON z.id = t.zone_id
-               WHERE t.status != ?
-               ORDER BY t.id ASC""",
-            (STATUS_PASSED,),
-        )
+        sql = """SELECT t.id, t.zone_id, t.ticket_type, t.body_text, t.duration_seconds,
+                        t.deadline, t.opener_kind, t.opener_id, t.opener_phone, t.status,
+                        t.capture_id, t.content_type, t.markup_json, t.pending_reshoot_id,
+                        t.created_at, z.name AS zone_name
+                 FROM hygiene_fix_tickets t
+                 JOIN hygiene_zones z ON z.id = t.zone_id
+                 WHERE t.status != ?"""
+        params: list = [STATUS_PASSED]
+        zone_id = self._actor_zone_id(actor)
+        if zone_id is not None:
+            sql += " AND t.zone_id = ?"
+            params.append(zone_id)
+        sql += " ORDER BY t.id ASC"
+        cur = await self._conn.execute(sql, params)
         rows = []
         for row in await cur.fetchall():
             ticket = dict(row)
@@ -2031,17 +2083,27 @@ class HygieneWork:
             rows.append(self._fix_row(ticket, reshoot))
         return rows
 
-    async def get_fix_ticket(self, ticket_id: int) -> dict:
+    async def get_fix_ticket(
+        self,
+        ticket_id: int,
+        actor: Optional[dict] = None,
+    ) -> dict:
         ticket = await self._fetch_fix_ticket(ticket_id)
         if ticket is None:
             raise HygieneWorkError("ticket_not_found", "ticket_not_found")
+        self._require_zone_access(actor or {"kind": "super"}, ticket["zone_id"])
         reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
         return self._fix_row(ticket, reshoot)
 
-    async def get_fix_review(self, ticket_id: int) -> dict:
+    async def get_fix_review(
+        self,
+        ticket_id: int,
+        actor: Optional[dict] = None,
+    ) -> dict:
         ticket = await self._fetch_fix_ticket(ticket_id)
         if ticket is None:
             raise HygieneWorkError("ticket_not_found", "ticket_not_found")
+        self._require_zone_access(actor or {"kind": "super"}, ticket["zone_id"])
         if ticket["status"] != STATUS_PENDING:
             raise HygieneWorkError("not_pending", "not_pending")
         reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
@@ -2055,6 +2117,7 @@ class HygieneWork:
         ticket = await self._fetch_fix_ticket(ticket_id)
         if ticket is None:
             raise HygieneWorkError("ticket_not_found", "ticket_not_found")
+        self._require_zone_access(actor, ticket["zone_id"])
         if ticket["status"] == STATUS_PASSED:
             raise HygieneWorkError("already_accepted", "already_accepted")
         photographer = self._photographer(actor)
@@ -2116,6 +2179,7 @@ class HygieneWork:
 
     async def accept_fix(self, actor: dict, ticket_id: int) -> dict:
         ticket, _reshoot = await self._pending_fix(ticket_id)
+        self._require_zone_access(actor, ticket["zone_id"])
         self._require_fix_reviewer(actor, ticket)
         now = self._now_iso()
         await self._conn.execute(
@@ -2134,6 +2198,7 @@ class HygieneWork:
 
     async def reject_fix(self, actor: dict, ticket_id: int) -> dict:
         ticket, _reshoot = await self._pending_fix(ticket_id)
+        self._require_zone_access(actor, ticket["zone_id"])
         self._require_fix_reviewer(actor, ticket)
         now_dt = self._now_dt()
         now = now_dt.isoformat()

@@ -100,11 +100,11 @@ def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http)
     ).status_code == 401
     assert client.post(
         "/api/hygiene/staff/shift",
-        json={"shift": "白班"},
+        json={"shift": "白班", "zone_id": 1},
     ).status_code == 401
     assert client.post(
         "/api/hygiene/admin/roster/1/shift",
-        json={"shift": "夜班"},
+        json={"shift": "夜班", "zone_id": 1},
     ).status_code == 401
 
 
@@ -227,16 +227,26 @@ def test_staff_can_self_pick_shift_once_not_admin_fix(hygiene_http):
     assert me.json()["daily_clocks"]["day_hhmm"]
     assert me.json()["daily_clocks"]["night_hhmm"]
     assert me.json()["deep_clock"]["hhmm"]
-    picked = client.post("/api/hygiene/staff/shift", json={"shift": "白班"})
+    picked = client.post(
+        "/api/hygiene/staff/assignment",
+        json={"shift": "白班", "zone_id": 1},
+    )
     assert picked.status_code == 200
     assert picked.json()["shift"] == "白班"
-    assert client.get("/api/hygiene/staff/me").json()["employee"]["shift"] == "白班"
-    again = client.post("/api/hygiene/staff/shift", json={"shift": "夜班"})
+    assert picked.json()["zone_id"] == 1
+    me_after = client.get("/api/hygiene/staff/me").json()["employee"]
+    assert me_after["shift"] == "白班"
+    assert me_after["zone_id"] == 1
+    assert me_after["zone_name"] == "案板"
+    again = client.post(
+        "/api/hygiene/staff/assignment",
+        json={"shift": "夜班", "zone_id": 1},
+    )
     assert again.status_code == 409
     assert client.get("/api/hygiene/staff/me").json()["employee"]["shift"] == "白班"
     assert client.post(
         f"/api/hygiene/admin/roster/{employee['id']}/shift",
-        json={"shift": "夜班"},
+        json={"shift": "夜班", "zone_id": 1},
     ).status_code == 401
 
 
@@ -247,7 +257,7 @@ def test_staff_admin_cannot_change_another_shift_admin_cookie_can(hygiene_http):
     _run(accounts.approve(staff["id"]))
     _run(accounts.approve(manager["id"]))
     _run(accounts.set_permission(manager["id"], "管理员"))
-    _run(accounts.pick_shift(staff["id"], "白班"))
+    _run(accounts.pick_assignment(staff["id"], "白班", 1))
 
     staff_login = client.post(
         "/api/hygiene/staff/login",
@@ -256,7 +266,7 @@ def test_staff_admin_cannot_change_another_shift_admin_cookie_can(hygiene_http):
     assert staff_login.status_code == 200
     assert client.post(
         f"/api/hygiene/admin/roster/{staff['id']}/shift",
-        json={"shift": "夜班"},
+        json={"shift": "夜班", "zone_id": 1},
     ).status_code == 401
     assert _run(accounts.current_shift(staff["id"])) == "白班"
 
@@ -265,10 +275,11 @@ def test_staff_admin_cannot_change_another_shift_admin_cookie_can(hygiene_http):
     assert init.status_code == 200
     fixed = client.post(
         f"/api/hygiene/admin/roster/{staff['id']}/shift",
-        json={"shift": "夜班"},
+        json={"shift": "夜班", "zone_id": 1},
     )
     assert fixed.status_code == 200
     assert fixed.json()["shift"] == "夜班"
+    assert fixed.json()["zone_id"] == 1
     roster = client.get("/api/hygiene/admin/roster")
     assert roster.status_code == 200
     row = next(item for item in roster.json()["employees"] if item["id"] == staff["id"])
@@ -377,10 +388,46 @@ def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
     assert catalog.status_code == 200
     listed = next(zone for zone in catalog.json()["zones"] if zone["name"] == "案板")
     assert [row["name"] for row in listed["items"]] == ["案板表面"]
+    assigned = client.post(
+        "/api/hygiene/staff/assignment",
+        json={"shift": "白班", "zone_id": anban["id"]},
+    )
+    assert assigned.status_code == 200
     image = client.get(f"/api/hygiene/staff/items/{item['id']}/standard")
     assert image.status_code == 200
     assert image.content == photo
     assert image.headers["content-type"].startswith("image/jpeg")
+
+
+def test_staff_assignment_hides_and_rejects_other_zones(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    _approve_staff(accounts, PHONE, "白班")
+    anban = next(zone for zone in _run(work.list_zones()) if zone["name"] == "案板")
+    xian = next(zone for zone in _run(work.list_zones()) if zone["name"] == "馅档")
+    anban_item = _run(
+        work.add_daily_item(
+            SUPER,
+            anban["id"],
+            "案板表面",
+            {"bytes": b"ANBAN", "content_type": "image/jpeg", "markup": []},
+        )
+    )
+    xian_item = _run(
+        work.add_daily_item(
+            SUPER,
+            xian["id"],
+            "馅料盆",
+            {"bytes": b"XIAN", "content_type": "image/jpeg", "markup": []},
+        )
+    )
+    _staff_login(client, PHONE)
+
+    inbox = client.get("/api/hygiene/staff/daily-work").json()["items"]
+    assert [row["item_id"] for row in inbox] == [anban_item["id"]]
+    assert client.get(f"/api/hygiene/staff/items/{xian_item['id']}/standard").status_code == 403
+    denied = _submit_daily(client, xian_item["id"], SHOT_A)
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "只能查看和提交所选卫生责任区的任务"
 
 
 def test_standard_manifest_and_immutable_image_contract(hygiene_http):
@@ -428,7 +475,7 @@ def _approve_staff(accounts, phone, shift, permission="普通员工"):
     _run(accounts.approve(employee["id"]))
     if permission != "普通员工":
         _run(accounts.set_permission(employee["id"], permission))
-    _run(accounts.pick_shift(employee["id"], shift))
+    _run(accounts.pick_assignment(employee["id"], shift, 1))
     return employee
 
 

@@ -164,6 +164,74 @@ class HygieneWorkTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("shift", catalog[0])
         self.assertNotIn("shift", self._zone(catalog, "案板")["items"][0])
 
+    async def test_staff_zone_assignment_limits_daily_work_and_submit(self):
+        zones = await self.work.list_zones()
+        anban = self._zone(zones, "案板")
+        xian = self._zone(zones, "馅档")
+        anban_item = await self.work.add_daily_item(
+            SUPER, anban["id"], "案板表面", self._capture(b"ANBAN")
+        )
+        xian_item = await self.work.add_daily_item(
+            SUPER, xian["id"], "馅料盆", self._capture(b"XIAN")
+        )
+        actor = {
+            "kind": "staff",
+            "id": 1,
+            "permission": "普通员工",
+            "name": "张三",
+            "phone": DAY_PHONE,
+            "shift": "白班",
+            "zone_id": anban["id"],
+        }
+
+        inbox = await self.work.list_daily_work(actor)
+        self.assertEqual({row["zone_id"] for row in inbox}, {anban["id"]})
+        self.assertEqual(inbox[0]["item_id"], anban_item["id"])
+        with self.assertRaises(HygieneWorkError) as raised:
+            await self.work.submit_daily(
+                actor,
+                xian_item["id"],
+                {"bytes": b"SHOT", "content_type": "image/jpeg", "live": True},
+            )
+        self.assertEqual(raised.exception.code, "zone_mismatch")
+
+    async def test_staff_zone_assignment_limits_fix_tickets(self):
+        zones = await self.work.list_zones()
+        anban = self._zone(zones, "案板")
+        xian = self._zone(zones, "馅档")
+        live = {"bytes": b"FIX", "content_type": "image/jpeg", "live": True}
+        anban_ticket = await self.work.open_fix(
+            SUPER,
+            anban["id"],
+            "卫生",
+            "案板脏",
+            timedelta(hours=2),
+            live,
+        )
+        xian_ticket = await self.work.open_fix(
+            SUPER,
+            xian["id"],
+            "卫生",
+            "馅档脏",
+            timedelta(hours=2),
+            live,
+        )
+        actor = {
+            "kind": "staff",
+            "id": 1,
+            "permission": "普通员工",
+            "name": "张三",
+            "phone": DAY_PHONE,
+            "shift": "白班",
+            "zone_id": anban["id"],
+        }
+
+        tickets = await self.work.list_fix_tickets(actor)
+        self.assertEqual([row["id"] for row in tickets], [anban_ticket["id"]])
+        with self.assertRaises(HygieneWorkError) as raised:
+            await self.work.get_fix_ticket(xian_ticket["id"], actor=actor)
+        self.assertEqual(raised.exception.code, "zone_mismatch")
+
     async def test_standard_keeps_circle_arrow_caption_markup(self):
         markup = [
             {"kind": "circle", "x": 0.4, "y": 0.3, "r": 0.08},

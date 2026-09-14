@@ -486,10 +486,12 @@ _HYGIENE_TABLE_SCHEMAS = {
             employee_id INTEGER NOT NULL,
             business_date TEXT NOT NULL,
             shift TEXT NOT NULL,
+            zone_id INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE (employee_id, business_date),
-            FOREIGN KEY (employee_id) REFERENCES hygiene_employees(id)
+            FOREIGN KEY (employee_id) REFERENCES hygiene_employees(id),
+            FOREIGN KEY (zone_id) REFERENCES hygiene_zones(id)
         )
     """,
     "hygiene_zones": """
@@ -778,6 +780,16 @@ async def migrate_hygiene_columns(conn) -> None:
         await conn.execute(
             "ALTER TABLE hygiene_employees ADD COLUMN name TEXT NOT NULL DEFAULT ''"
         )
+    cur = await conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hygiene_shift_picks'"
+    )
+    if await cur.fetchone() is not None:
+        cur = await conn.execute("PRAGMA table_info(hygiene_shift_picks)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if "zone_id" not in cols:
+            await conn.execute(
+                "ALTER TABLE hygiene_shift_picks ADD COLUMN zone_id INTEGER"
+            )
     cur = await conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hygiene_standards'"
     )

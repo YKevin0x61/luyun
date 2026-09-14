@@ -11,6 +11,7 @@ import {
 } from '../../utils/hygieneCopy'
 
 const employees = ref([])
+const zones = ref([])
 const loading = ref(true)
 const errorText = ref('')
 const drafts = ref({})
@@ -27,6 +28,7 @@ async function loadRoster() {
   try {
     const data = await api.get('/api/hygiene/admin/roster')
     employees.value = data.employees || []
+    zones.value = data.zones || []
     const next = {}
     for (const row of employees.value) {
       next[row.id] = {
@@ -34,6 +36,7 @@ async function loadRoster() {
         job_title: row.job_title || '',
         permission: row.permission,
         shift: row.shift || '白班',
+        zone_id: row.zone_id || (zones.value[0] && zones.value[0].id) || '',
       }
     }
     drafts.value = next
@@ -110,18 +113,19 @@ async function saveRow(row) {
   }
 }
 
-async function changeShift(row) {
+async function changeAssignment(row) {
   const draft = draftFor(row)
   if (!draft) return
   busyId.value = row.id
   errorText.value = ''
   try {
-    await api.post(`/api/hygiene/admin/roster/${row.id}/shift`, {
+    await api.post(`/api/hygiene/admin/roster/${row.id}/assignment`, {
       shift: draft.shift,
+      zone_id: Number(draft.zone_id),
     })
     await loadRoster()
   } catch (err) {
-    errorText.value = err.message || '改班次失败'
+    errorText.value = err.message || '改区域和班次失败'
   } finally {
     busyId.value = null
   }
@@ -134,7 +138,7 @@ async function changeShift(row) {
       <div>
         <p class="hy-eyebrow">Roster · 人员名册</p>
         <h1>卫生花名册</h1>
-        <p>批准新注册、补姓名、写职位、把人设成普通员工或管理员。当天班次只有超级管理员能改。停用后不能登录，行还留在这里，可随时重新启用。超级管理员仍是后台共享账号，不能从花名册升上去。</p>
+        <p>批准新注册、补姓名、写职位、把人设成普通员工或管理员。当天区域和班次只有超级管理员能改。停用后不能登录，行还留在这里，可随时重新启用。超级管理员仍是后台共享账号，不能从花名册升上去。</p>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="loadRoster">刷新</button>
     </div>
@@ -194,6 +198,19 @@ async function changeShift(row) {
               </select>
             </label>
             <label>
+              当天区域 · 现在 {{ row.zone_name || '未选' }}
+              <select
+                v-model="drafts[row.id].zone_id"
+                class="select"
+                :disabled="busyId === row.id"
+              >
+                <option value="">未选</option>
+                <option v-for="zone in zones" :key="zone.id" :value="zone.id">
+                  {{ zone.name }}
+                </option>
+              </select>
+            </label>
+            <label>
               当天班次 · 现在 {{ hygieneShiftLabel(row.shift) }}
               <span class="hy-person-shift">
                 <select
@@ -208,9 +225,9 @@ async function changeShift(row) {
                 <button
                   type="button"
                   class="btn"
-                  :disabled="busyId === row.id"
-                  @click="changeShift(row)"
-                >改班次</button>
+                  :disabled="busyId === row.id || !drafts[row.id].zone_id"
+                  @click="changeAssignment(row)"
+                >改区域和班次</button>
               </span>
             </label>
           </div>

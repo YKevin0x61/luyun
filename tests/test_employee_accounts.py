@@ -115,6 +115,13 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
             cur = await conn.execute("PRAGMA table_info(hygiene_employees)")
             columns = {row[1] for row in await cur.fetchall()}
             self.assertIn("name", columns)
+            cur = await conn.execute(
+                "CREATE TABLE hygiene_shift_picks (id INTEGER PRIMARY KEY, employee_id INTEGER)"
+            )
+            await migrate_hygiene_columns(conn)
+            cur = await conn.execute("PRAGMA table_info(hygiene_shift_picks)")
+            columns = {row[1] for row in await cur.fetchall()}
+            self.assertIn("zone_id", columns)
         finally:
             await conn.close()
 
@@ -147,6 +154,46 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(later["business_date"], "2026-09-13")
         self.assertEqual(later["shift"], "夜班")
         self.assertEqual(await self.accounts.current_shift(employee["id"]), "夜班")
+
+    async def test_assignment_locks_shift_and_zone_and_super_can_fix_both(self):
+        employee = await self._approved_employee()
+        now = self.fixed_now.isoformat()
+        await self.db._conn.executemany(
+            "INSERT INTO hygiene_zones (name, created_at, updated_at) VALUES (?, ?, ?)",
+            [("案板", now, now), ("馅档", now, now)],
+        )
+        await self.db._conn.commit()
+        picked = await self.accounts.pick_assignment(employee["id"], "白班", 1)
+        self.assertEqual(picked["shift"], "白班")
+        self.assertEqual(picked["zone_id"], 1)
+        self.assertEqual(picked["zone_name"], "案板")
+        current = await self.accounts.current_assignment(employee["id"])
+        self.assertEqual(current["zone_id"], 1)
+        with self.assertRaises(EmployeeAccountsError) as raised:
+            await self.accounts.pick_assignment(employee["id"], "夜班", 2)
+        self.assertEqual(raised.exception.code, "shift_already_picked")
+        fixed = await self.accounts.super_set_assignment(employee["id"], "夜班", 2)
+        self.assertEqual(fixed["shift"], "夜班")
+        self.assertEqual(fixed["zone_id"], 2)
+
+    async def test_assignment_rejects_unknown_zone(self):
+        employee = await self._approved_employee()
+        with self.assertRaises(EmployeeAccountsError) as raised:
+            await self.accounts.pick_assignment(employee["id"], "白班", 99999)
+        self.assertEqual(raised.exception.code, "zone_not_found")
+
+    async def test_legacy_shift_only_assignment_can_add_zone_once(self):
+        employee = await self._approved_employee()
+        now = self.fixed_now.isoformat()
+        await self.db._conn.execute(
+            "INSERT INTO hygiene_zones (name, created_at, updated_at) VALUES (?, ?, ?)",
+            ("案板", now, now),
+        )
+        await self.db._conn.commit()
+        await self.accounts.pick_shift(employee["id"], "白班")
+        completed = await self.accounts.pick_assignment(employee["id"], "白班", 1)
+        self.assertEqual(completed["shift"], "白班")
+        self.assertEqual(completed["zone_id"], 1)
 
     async def test_second_self_pick_same_business_day_fails(self):
         employee = await self._approved_employee()

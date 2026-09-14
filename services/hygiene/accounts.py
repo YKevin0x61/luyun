@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""员工花名册、手机号+密码登录、批准、停用/启用、职位、卫生权限、班次。
+"""员工花名册、手机号+密码登录、批准、停用/启用、职位、卫生权限、班次与责任区。
 
 Does not know 日常检查 / 专项卫生 / 整改单.
 """
@@ -218,10 +218,12 @@ class EmployeeAccounts:
         cur = await self._conn.execute(
             """SELECT e.id, e.phone, e.name, e.job_title, e.permission,
                       e.approved, e.disabled,
-                      p.shift AS shift
+                      p.shift AS shift, p.zone_id AS zone_id,
+                      z.name AS zone_name
                FROM hygiene_employees e
                LEFT JOIN hygiene_shift_picks p
                  ON p.employee_id = e.id AND p.business_date = ?
+               LEFT JOIN hygiene_zones z ON z.id = p.zone_id
                ORDER BY e.disabled ASC, e.approved ASC, e.id ASC""",
             (business_date,),
         )
@@ -230,6 +232,8 @@ class EmployeeAccounts:
         for row in rows:
             employee = self._employee_from_row(row)
             employee["shift"] = dict(row).get("shift")
+            employee["zone_id"] = dict(row).get("zone_id")
+            employee["zone_name"] = dict(row).get("zone_name")
             employees.append(employee)
         return employees
 
@@ -304,17 +308,26 @@ class EmployeeAccounts:
         if not _as_bool(mapping["approved"]) or _as_bool(mapping["disabled"]):
             return None
         employee = self._employee_from_row(mapping)
-        employee["shift"] = await self.current_shift(employee["id"])
+        employee.update(await self.current_assignment(employee["id"]))
         return employee
 
     def _business_date(self) -> str:
         return hygiene_business_date(self._now_dt())
 
-    def _shift_pick(self, employee_id: int, business_date: str, shift: str) -> dict:
+    def _assignment(
+        self,
+        employee_id: int,
+        business_date: str,
+        shift: Optional[str],
+        zone_id: Optional[int] = None,
+        zone_name: Optional[str] = None,
+    ) -> dict:
         return {
             "employee_id": int(employee_id),
             "business_date": business_date,
             "shift": shift,
+            "zone_id": None if zone_id is None else int(zone_id),
+            "zone_name": zone_name,
         }
 
     def _normalize_shift(self, shift: str) -> str:
@@ -324,15 +337,97 @@ class EmployeeAccounts:
         return value
 
     async def current_shift(self, employee_id: int) -> Optional[str]:
+        assignment = await self.current_assignment(employee_id)
+        return assignment["shift"]
+
+    async def current_assignment(self, employee_id: int) -> dict:
         cur = await self._conn.execute(
-            """SELECT shift FROM hygiene_shift_picks
-               WHERE employee_id = ? AND business_date = ?""",
+            """SELECT p.shift, p.zone_id, z.name AS zone_name
+               FROM hygiene_shift_picks p
+               LEFT JOIN hygiene_zones z ON z.id = p.zone_id
+               WHERE p.employee_id = ? AND p.business_date = ?""",
             (employee_id, self._business_date()),
         )
         row = await cur.fetchone()
         if row is None:
-            return None
-        return dict(row)["shift"]
+            return self._assignment(
+                employee_id,
+                self._business_date(),
+                None,
+            )
+        mapping = dict(row)
+        return self._assignment(
+            employee_id,
+            self._business_date(),
+            mapping["shift"],
+            mapping.get("zone_id"),
+            mapping.get("zone_name"),
+        )
+
+    async def _fetch_zone(self, zone_id: int):
+        cur = await self._conn.execute(
+            "SELECT id, name FROM hygiene_zones WHERE id = ?",
+            (int(zone_id),),
+        )
+        return await cur.fetchone()
+
+    async def pick_assignment(self, employee_id: int, shift: str, zone_id: int) -> dict:
+        row = await self._fetch_employee(employee_id)
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        shift = self._normalize_shift(shift)
+        zone = await self._fetch_zone(zone_id)
+        if zone is None:
+            raise EmployeeAccountsError("zone_not_found", "zone_not_found")
+        business_date = self._business_date()
+        current = await self.current_assignment(employee_id)
+        if current["shift"] is not None:
+            if current["zone_id"] is None and current["shift"] == shift:
+                await self._conn.execute(
+                    """UPDATE hygiene_shift_picks
+                       SET zone_id = ?, updated_at = ?
+                       WHERE employee_id = ? AND business_date = ?""",
+                    (int(zone_id), self._now_iso(), employee_id, business_date),
+                )
+                await self._conn.commit()
+                zone_mapping = dict(zone)
+                return self._assignment(
+                    employee_id,
+                    business_date,
+                    shift,
+                    zone_id,
+                    zone_mapping["name"],
+                )
+            raise EmployeeAccountsError("shift_already_picked", "shift_already_picked")
+        now = self._now_iso()
+        try:
+            await self._conn.execute(
+                """INSERT INTO hygiene_shift_picks
+                   (employee_id, business_date, shift, zone_id, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (employee_id, business_date, shift, int(zone_id), now, now),
+            )
+            await self._conn.commit()
+        except sqlite3.IntegrityError as exc:
+            await self._conn.rollback()
+            raise EmployeeAccountsError(
+                "shift_already_picked", "shift_already_picked"
+            ) from exc
+        zone_mapping = dict(zone)
+        logger.info(
+            "hygiene assignment picked employee=%s date=%s shift=%s zone=%s",
+            employee_id,
+            business_date,
+            shift,
+            zone_id,
+        )
+        return self._assignment(
+            employee_id,
+            business_date,
+            shift,
+            zone_id,
+            zone_mapping["name"],
+        )
 
     async def pick_shift(self, employee_id: int, shift: str) -> dict:
         row = await self._fetch_employee(employee_id)
@@ -362,9 +457,16 @@ class EmployeeAccounts:
             business_date,
             shift,
         )
-        return self._shift_pick(employee_id, business_date, shift)
+        return self._assignment(employee_id, business_date, shift)
 
     async def super_set_shift(self, employee_id: int, shift: str) -> dict:
+        current = await self.current_assignment(employee_id)
+        if current["zone_id"] is not None:
+            return await self.super_set_assignment(
+                employee_id,
+                shift,
+                current["zone_id"],
+            )
         row = await self._fetch_employee(employee_id)
         if row is None:
             raise EmployeeAccountsError("employee_not_found", "employee_not_found")
@@ -381,13 +483,44 @@ class EmployeeAccounts:
             (employee_id, business_date, shift, now, now),
         )
         await self._conn.commit()
+        return self._assignment(employee_id, business_date, shift)
+
+    async def super_set_assignment(self, employee_id: int, shift: str, zone_id: int) -> dict:
+        row = await self._fetch_employee(employee_id)
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        shift = self._normalize_shift(shift)
+        zone = await self._fetch_zone(zone_id)
+        if zone is None:
+            raise EmployeeAccountsError("zone_not_found", "zone_not_found")
+        business_date = self._business_date()
+        now = self._now_iso()
+        await self._conn.execute(
+            """INSERT INTO hygiene_shift_picks
+               (employee_id, business_date, shift, zone_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(employee_id, business_date) DO UPDATE SET
+                 shift = excluded.shift,
+                 zone_id = excluded.zone_id,
+                 updated_at = excluded.updated_at""",
+            (employee_id, business_date, shift, int(zone_id), now, now),
+        )
+        await self._conn.commit()
         logger.info(
-            "hygiene shift super-set employee=%s date=%s shift=%s",
+            "hygiene assignment super-set employee=%s date=%s shift=%s zone=%s",
             employee_id,
             business_date,
             shift,
+            zone_id,
         )
-        return self._shift_pick(employee_id, business_date, shift)
+        zone_mapping = dict(zone)
+        return self._assignment(
+            employee_id,
+            business_date,
+            shift,
+            zone_id,
+            zone_mapping["name"],
+        )
 
     async def logout(self, session_id: str) -> None:
         await self._conn.execute(

@@ -19,5 +19,8 @@ describe('hygiene roster enable', () => {
     expect(roster).toMatch(/可随时重新启用/)
     expect(roster).toMatch(/v-model="drafts\[row\.id\]\.name"/)
     expect(roster).toMatch(/name: draft\.name/)
+    expect(roster).toMatch(/drafts\[row\.id\]\.zone_id/)
+    expect(roster).toMatch(/\/assignment/)
+    expect(roster).toMatch(/改区域和班次/)
   })
 })
