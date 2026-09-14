@@ -380,39 +380,18 @@ class EmployeeAccounts:
         if zone is None:
             raise EmployeeAccountsError("zone_not_found", "zone_not_found")
         business_date = self._business_date()
-        current = await self.current_assignment(employee_id)
-        if current["shift"] is not None:
-            if current["zone_id"] is None and current["shift"] == shift:
-                await self._conn.execute(
-                    """UPDATE hygiene_shift_picks
-                       SET zone_id = ?, updated_at = ?
-                       WHERE employee_id = ? AND business_date = ?""",
-                    (int(zone_id), self._now_iso(), employee_id, business_date),
-                )
-                await self._conn.commit()
-                zone_mapping = dict(zone)
-                return self._assignment(
-                    employee_id,
-                    business_date,
-                    shift,
-                    zone_id,
-                    zone_mapping["name"],
-                )
-            raise EmployeeAccountsError("shift_already_picked", "shift_already_picked")
         now = self._now_iso()
-        try:
-            await self._conn.execute(
-                """INSERT INTO hygiene_shift_picks
-                   (employee_id, business_date, shift, zone_id, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (employee_id, business_date, shift, int(zone_id), now, now),
-            )
-            await self._conn.commit()
-        except sqlite3.IntegrityError as exc:
-            await self._conn.rollback()
-            raise EmployeeAccountsError(
-                "shift_already_picked", "shift_already_picked"
-            ) from exc
+        await self._conn.execute(
+            """INSERT INTO hygiene_shift_picks
+               (employee_id, business_date, shift, zone_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(employee_id, business_date) DO UPDATE SET
+                 shift = excluded.shift,
+                 zone_id = excluded.zone_id,
+                 updated_at = excluded.updated_at""",
+            (employee_id, business_date, shift, int(zone_id), now, now),
+        )
+        await self._conn.commit()
         zone_mapping = dict(zone)
         logger.info(
             "hygiene assignment picked employee=%s date=%s shift=%s zone=%s",

@@ -155,7 +155,7 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(later["shift"], "夜班")
         self.assertEqual(await self.accounts.current_shift(employee["id"]), "夜班")
 
-    async def test_assignment_locks_shift_and_zone_and_super_can_fix_both(self):
+    async def test_assignment_can_change_shift_and_zone_same_day(self):
         employee = await self._approved_employee()
         now = self.fixed_now.isoformat()
         await self.db._conn.executemany(
@@ -169,12 +169,12 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(picked["zone_name"], "案板")
         current = await self.accounts.current_assignment(employee["id"])
         self.assertEqual(current["zone_id"], 1)
-        with self.assertRaises(EmployeeAccountsError) as raised:
-            await self.accounts.pick_assignment(employee["id"], "夜班", 2)
-        self.assertEqual(raised.exception.code, "shift_already_picked")
-        fixed = await self.accounts.super_set_assignment(employee["id"], "夜班", 2)
-        self.assertEqual(fixed["shift"], "夜班")
-        self.assertEqual(fixed["zone_id"], 2)
+        changed = await self.accounts.pick_assignment(employee["id"], "夜班", 2)
+        self.assertEqual(changed["shift"], "夜班")
+        self.assertEqual(changed["zone_id"], 2)
+        current = await self.accounts.current_assignment(employee["id"])
+        self.assertEqual(current["shift"], "夜班")
+        self.assertEqual(current["zone_id"], 2)
 
     async def test_assignment_rejects_unknown_zone(self):
         employee = await self._approved_employee()

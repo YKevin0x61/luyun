@@ -240,10 +240,15 @@ def test_staff_can_self_pick_shift_once_not_admin_fix(hygiene_http):
     assert me_after["zone_name"] == "案板"
     again = client.post(
         "/api/hygiene/staff/assignment",
-        json={"shift": "夜班", "zone_id": 1},
+        json={"shift": "夜班", "zone_id": 2},
     )
-    assert again.status_code == 409
-    assert client.get("/api/hygiene/staff/me").json()["employee"]["shift"] == "白班"
+    assert again.status_code == 200
+    assert again.json()["shift"] == "夜班"
+    assert again.json()["zone_id"] == 2
+    changed_me = client.get("/api/hygiene/staff/me").json()["employee"]
+    assert changed_me["shift"] == "夜班"
+    assert changed_me["zone_id"] == 2
+    assert changed_me["zone_name"] == "馅档"
     assert client.post(
         f"/api/hygiene/admin/roster/{employee['id']}/shift",
         json={"shift": "夜班", "zone_id": 1},

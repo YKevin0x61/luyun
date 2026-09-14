@@ -64,6 +64,7 @@ const employee = ref(null)
 const errorText = ref('')
 const loggingOut = ref(false)
 const picking = ref('')
+const changingAssignment = ref(false)
 const selectedShift = ref('')
 const selectedZoneId = ref('')
 const inbox = ref([])
@@ -89,6 +90,7 @@ let clockTimer = null
 const needsAssignment = computed(() => {
   return Boolean(employee.value) && (!employee.value.shift || !employee.value.zone_id)
 })
+const showAssignmentPicker = computed(() => needsAssignment.value || changingAssignment.value)
 
 const dailyStats = computed(() => dailyProgress(inbox.value))
 const groupedPassed = computed(() => groupByZone(passedRows(inbox.value)))
@@ -272,6 +274,7 @@ async function pickAssignment() {
         zone_id: Number(selectedZoneId.value),
       },
     })
+    changingAssignment.value = false
     await loadMe()
   } catch (err) {
     errorText.value = err.message || '选择区域和班次失败'
@@ -800,9 +803,9 @@ async function decide(action) {
       </p>
 
       <section v-if="tab === 'inbox'">
-        <template v-if="needsAssignment">
-          <h1>今天负责哪个区域、上哪一班？</h1>
-          <p class="hy-staff-lead">区域和班次各选一次，锁在这个营业日。只显示和允许提交所选区域的日常与整改，选错了要找超级管理员改。</p>
+        <template v-if="showAssignmentPicker">
+          <h1>{{ changingAssignment ? '重新选择区域和班次' : '今天负责哪个区域、上哪一班？' }}</h1>
+          <p class="hy-staff-lead">区域和班次可以在当天随时重新选择。只显示和允许提交当前所选区域的日常与整改。</p>
           <h2>卫生责任区</h2>
           <div class="hy-shift-choices">
             <button
@@ -832,7 +835,7 @@ async function decide(action) {
             class="btn btn-primary btn-block hy-staff-submit"
             :disabled="Boolean(picking) || !selectedShift || !selectedZoneId || !zones.length"
             @click="pickAssignment"
-          >{{ picking ? '正在锁定…' : '确认区域和班次' }}</button>
+          >{{ picking ? '正在保存…' : (changingAssignment ? '保存区域和班次' : '确认区域和班次') }}</button>
         </template>
         <template v-else-if="employee">
           <h1>今天还差什么</h1>
@@ -1094,6 +1097,11 @@ async function decide(action) {
           <button type="button" class="btn btn-block hy-staff-submit" :disabled="loggingOut" @click="logout">
             {{ loggingOut ? '正在退出…' : '退出登录' }}
           </button>
+          <button
+            type="button"
+            class="btn btn-block hy-staff-submit"
+            @click="changingAssignment = true; tab = 'inbox'"
+          >重新选择区域和班次</button>
         </template>
         <p v-else class="hy-staff-lead">正在确认登录…</p>
       </section>

@@ -21,6 +21,7 @@ describe('hygiene staff work app', () => {
     expect(home).toMatch(/aria-label="卫生入口"/)
     expect(home).toMatch(/今天负责哪个区域、上哪一班/)
     expect(home).toMatch(/staff\/assignment/)
+    expect(home).toMatch(/重新选择区域和班次/)
     expect(home).not.toMatch(/staff-phone/)
     expect(home).not.toMatch(/<style scoped>/)
   })
