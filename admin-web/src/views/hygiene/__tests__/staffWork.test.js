@@ -27,6 +27,8 @@ describe('hygiene staff work app', () => {
     expect(home).toMatch(/修改个人信息/)
     expect(home).toMatch(/staffRequest\('\/api\/hygiene\/staff\/me'/)
     expect(home).toMatch(/method: 'PATCH'/)
+    expect(home).toMatch(/修改密码/)
+    expect(home).toMatch(/\/api\/hygiene\/staff\/password/)
     expect(home).not.toMatch(/staff-phone/)
     expect(home).not.toMatch(/<style scoped>/)
   })

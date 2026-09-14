@@ -164,6 +164,53 @@ def test_staff_can_update_own_profile_name_and_phone(hygiene_http):
     ).status_code == 200
 
 
+def test_staff_can_change_own_password(hygiene_http):
+    client, _db, accounts, _work = hygiene_http
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
+    _run(accounts.approve(employee["id"]))
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    ).status_code == 200
+
+    assert client.patch(
+        "/api/hygiene/staff/password",
+        json={
+            "current_password": "wrong-password",
+            "new_password": "new-password123",
+            "confirm_password": "new-password123",
+        },
+    ).status_code == 400
+    assert client.patch(
+        "/api/hygiene/staff/password",
+        json={
+            "current_password": PASSWORD,
+            "new_password": "new-password123",
+            "confirm_password": "different-password123",
+        },
+    ).status_code == 400
+    changed = client.patch(
+        "/api/hygiene/staff/password",
+        json={
+            "current_password": PASSWORD,
+            "new_password": "new-password123",
+            "confirm_password": "new-password123",
+        },
+    )
+    assert changed.status_code == 200
+    assert client.get("/api/hygiene/staff/me").status_code == 200
+
+    client.cookies.clear()
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    ).status_code == 401
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": "new-password123"},
+    ).status_code == 200
+
+
 def test_admin_cookie_can_roster_but_is_not_staff_phone_identity(hygiene_http):
     client, _db, accounts, _work = hygiene_http
     init = client.post("/api/auth/init", json=ADMIN_INIT)

@@ -161,6 +161,34 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
             await self.accounts.update_profile(employee["id"], phone=other["phone"])
         self.assertEqual(raised.exception.code, "duplicate_phone")
 
+    async def test_employee_changes_password_and_other_sessions_are_revoked(self):
+        employee = await self._approved_employee()
+        first = await self.accounts.login(PHONE, PASSWORD)
+        second = await self.accounts.login(PHONE, PASSWORD)
+        with self.assertRaises(EmployeeAccountsError) as raised:
+            await self.accounts.change_password(
+                employee["id"],
+                "wrong-password",
+                "new-password123",
+                keep_session_id=first["session_id"],
+            )
+        self.assertEqual(raised.exception.code, "invalid_current_password")
+
+        await self.accounts.change_password(
+            employee["id"],
+            PASSWORD,
+            "new-password123",
+            keep_session_id=first["session_id"],
+        )
+        self.assertIsNotNone(
+            await self.accounts.get_staff_session(first["session_id"])
+        )
+        self.assertIsNone(
+            await self.accounts.get_staff_session(second["session_id"])
+        )
+        self.assertIsNone(await self.accounts.login(PHONE, PASSWORD))
+        self.assertIsNotNone(await self.accounts.login(PHONE, "new-password123"))
+
     async def test_pick_at_0559_is_previous_business_day_0600_is_new_day(self):
         employee = await self._approved_employee()
         self.fixed_now = datetime(2026, 9, 13, 5, 59, tzinfo=CHINA_TZ)

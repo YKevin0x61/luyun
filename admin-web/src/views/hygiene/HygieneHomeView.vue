@@ -73,6 +73,13 @@ const profilePhone = ref('')
 const profileSaving = ref(false)
 const profileError = ref('')
 const profileFlash = ref('')
+const passwordEditing = ref(false)
+const currentPassword = ref('')
+const newPassword = ref('')
+const confirmPassword = ref('')
+const passwordSaving = ref(false)
+const passwordError = ref('')
+const passwordFlash = ref('')
 const inbox = ref([])
 const deepInbox = ref([])
 const deepStatus = ref('')
@@ -299,6 +306,7 @@ async function openAssignmentPicker() {
 }
 
 function startProfileEdit() {
+  passwordEditing.value = false
   profileEditing.value = true
   profileError.value = ''
   profileFlash.value = ''
@@ -331,6 +339,54 @@ async function saveProfile() {
     profileError.value = err.message || '保存个人信息失败'
   } finally {
     profileSaving.value = false
+  }
+}
+
+function startPasswordEdit() {
+  profileEditing.value = false
+  passwordEditing.value = true
+  passwordError.value = ''
+  passwordFlash.value = ''
+  currentPassword.value = ''
+  newPassword.value = ''
+  confirmPassword.value = ''
+}
+
+function cancelPasswordEdit() {
+  passwordEditing.value = false
+  passwordError.value = ''
+  currentPassword.value = ''
+  newPassword.value = ''
+  confirmPassword.value = ''
+}
+
+async function savePassword() {
+  if (passwordSaving.value) return
+  passwordError.value = ''
+  passwordFlash.value = ''
+  if (newPassword.value !== confirmPassword.value) {
+    passwordError.value = '两次输入的新密码不一致'
+    return
+  }
+  passwordSaving.value = true
+  try {
+    await staffRequest('/api/hygiene/staff/password', {
+      method: 'PATCH',
+      body: {
+        current_password: currentPassword.value,
+        new_password: newPassword.value,
+        confirm_password: confirmPassword.value,
+      },
+    })
+    passwordEditing.value = false
+    currentPassword.value = ''
+    newPassword.value = ''
+    confirmPassword.value = ''
+    passwordFlash.value = '密码已修改，其他设备上的登录已失效。'
+  } catch (err) {
+    passwordError.value = err.message || '修改密码失败'
+  } finally {
+    passwordSaving.value = false
   }
 }
 
@@ -1117,7 +1173,9 @@ async function decide(action) {
         <h1>我</h1>
         <template v-if="employee">
           <p v-if="profileFlash" class="staff-flash" role="status">{{ profileFlash }}</p>
+          <p v-if="passwordFlash" class="staff-flash" role="status">{{ passwordFlash }}</p>
           <p v-if="profileError" class="hy-staff-alert" role="alert">{{ profileError }}</p>
+          <p v-if="passwordError" class="hy-staff-alert" role="alert">{{ passwordError }}</p>
           <div v-if="profileEditing" class="staff-profile-edit">
             <label class="staff-field">
               姓名
@@ -1146,6 +1204,44 @@ async function decide(action) {
                 {{ profileSaving ? '正在保存…' : '保存' }}
               </button>
               <button type="button" class="btn" :disabled="profileSaving" @click="cancelProfileEdit">取消</button>
+            </div>
+          </div>
+          <div v-else-if="passwordEditing" class="staff-profile-edit">
+            <label class="staff-field">
+              当前密码
+              <input
+                v-model="currentPassword"
+                class="staff-input"
+                type="password"
+                autocomplete="current-password"
+              >
+            </label>
+            <label class="staff-field">
+              新密码
+              <input
+                v-model="newPassword"
+                class="staff-input"
+                type="password"
+                minlength="8"
+                autocomplete="new-password"
+              >
+            </label>
+            <label class="staff-field">
+              确认新密码
+              <input
+                v-model="confirmPassword"
+                class="staff-input"
+                type="password"
+                minlength="8"
+                autocomplete="new-password"
+              >
+            </label>
+            <p class="hy-staff-lead">修改后保留当前设备登录，其他设备上的登录会失效。</p>
+            <div class="staff-decide">
+              <button type="button" class="btn btn-primary" :disabled="passwordSaving" @click="savePassword">
+                {{ passwordSaving ? '正在保存…' : '修改密码' }}
+              </button>
+              <button type="button" class="btn" :disabled="passwordSaving" @click="cancelPasswordEdit">取消</button>
             </div>
           </div>
           <dl v-else class="hy-meta">
@@ -1182,15 +1278,21 @@ async function decide(action) {
               <dd>{{ hygienePermissionLabel(employee.permission) }}</dd>
             </div>
           </dl>
-          <p v-if="!profileEditing" class="hy-staff-lead">专项不跟区域和班次；整改跟所选区域、不跟班次。都不能从相册选。</p>
+          <p v-if="!profileEditing && !passwordEditing" class="hy-staff-lead">专项不跟区域和班次；整改跟所选区域、不跟班次。都不能从相册选。</p>
           <button
-            v-if="!profileEditing"
+            v-if="!profileEditing && !passwordEditing"
             type="button"
             class="btn btn-block hy-staff-submit"
             @click="startProfileEdit"
           >修改个人信息</button>
           <button
-            v-if="!profileEditing"
+            v-if="!profileEditing && !passwordEditing"
+            type="button"
+            class="btn btn-block hy-staff-submit"
+            @click="startPasswordEdit"
+          >修改密码</button>
+          <button
+            v-if="!profileEditing && !passwordEditing"
             type="button"
             class="btn btn-block hy-staff-submit"
             :disabled="loggingOut"
@@ -1199,7 +1301,7 @@ async function decide(action) {
             {{ loggingOut ? '正在退出…' : '退出登录' }}
           </button>
           <button
-            v-if="!profileEditing"
+            v-if="!profileEditing && !passwordEditing"
             type="button"
             class="btn btn-block hy-staff-submit"
             @click="openAssignmentPicker"

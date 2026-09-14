@@ -25,6 +25,8 @@ _ERROR_DETAILS = {
     "invalid_phone": "请输入有效的中国大陆手机号",
     "password_too_short": f"密码至少 {settings.AUTH_MIN_PASSWORD_LENGTH} 位",
     "password_too_long": f"密码过长（最多 {settings.AUTH_MAX_PASSWORD_BYTES} 字节）",
+    "invalid_current_password": "当前密码错误",
+    "passwords_do_not_match": "两次输入的新密码不一致",
     "duplicate_phone": "该手机号已注册",
     "invalid_name": "请填写员工姓名",
     "invalid_permission": "卫生权限只能是普通员工或管理员",
@@ -165,6 +167,12 @@ class StaffLoginIn(BaseModel):
 class StaffProfileIn(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
+
+
+class StaffPasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
 
 
 class RosterPatchIn(BaseModel):
@@ -423,6 +431,32 @@ async def staff_update_me(
             detail=_ERROR_DETAILS.get(code, code),
         ) from exc
     return {"employee": employee}
+
+
+@router.patch("/staff/password")
+async def staff_change_password(
+    body: StaffPasswordIn,
+    staff=Depends(require_staff_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, bool]:
+    if body.new_password != body.confirm_password:
+        raise HTTPException(status_code=400, detail=_ERROR_DETAILS["passwords_do_not_match"])
+    try:
+        await accounts.change_password(
+            staff["employee"]["id"],
+            body.current_password,
+            body.new_password,
+            keep_session_id=staff["session_id"],
+        )
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
+    except ValueError as exc:
+        code = str(exc)
+        raise HTTPException(
+            status_code=400,
+            detail=_ERROR_DETAILS.get(code, code),
+        ) from exc
+    return {"success": True}
 
 
 @router.post("/staff/logout")

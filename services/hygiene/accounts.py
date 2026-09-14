@@ -309,6 +309,45 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
+    async def change_password(
+        self,
+        employee_id: int,
+        current_password: str,
+        new_password: str,
+        keep_session_id: Optional[str] = None,
+    ) -> None:
+        cur = await self._conn.execute(
+            "SELECT password_hash FROM hygiene_employees WHERE id = ?",
+            (int(employee_id),),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        if not password_hash.verify_password(current_password, dict(row)["password_hash"]):
+            raise EmployeeAccountsError(
+                "invalid_current_password",
+                "invalid_current_password",
+            )
+        password_hash.validate_password(new_password)
+        hashed = password_hash.hash_password(new_password)
+        await self._conn.execute(
+            "UPDATE hygiene_employees SET password_hash = ?, updated_at = ? WHERE id = ?",
+            (hashed, self._now_iso(), int(employee_id)),
+        )
+        if keep_session_id:
+            await self._conn.execute(
+                """DELETE FROM hygiene_staff_sessions
+                   WHERE employee_id = ? AND session_id != ?""",
+                (int(employee_id), keep_session_id),
+            )
+        else:
+            await self._conn.execute(
+                "DELETE FROM hygiene_staff_sessions WHERE employee_id = ?",
+                (int(employee_id),),
+            )
+        await self._conn.commit()
+        logger.info("hygiene employee password changed id=%s", employee_id)
+
     async def set_permission(self, employee_id: int, permission: str) -> dict:
         row = await self._fetch_employee(employee_id)
         if row is None:
