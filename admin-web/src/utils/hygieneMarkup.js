@@ -57,11 +57,10 @@ export function parseMarkup(raw) {
   return value.filter(isMarkupMark)
 }
 
-export function standardImageUrl(kind, item) {
-  const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
-  const id = item && item.id
-  const version = item && item.current_standard_id
-  return `${prefix}/items/${id}/standard?v=${version}`
+export function standardImageUrl(_kind, item) {
+  const standardId = item && item.current_standard_id
+  if (!standardId) return ''
+  return `/api/hygiene/standards/${standardId}/image`
 }
 
 export function dailyItemStandardUrl(kind, row) {

@@ -518,6 +518,8 @@ _HYGIENE_TABLE_SCHEMAS = {
             item_id INTEGER NOT NULL,
             capture_id TEXT NOT NULL,
             content_type TEXT NOT NULL,
+            byte_size INTEGER,
+            content_sha256 TEXT,
             markup_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL,
             FOREIGN KEY (item_id) REFERENCES hygiene_daily_items(id)
@@ -775,4 +777,19 @@ async def migrate_hygiene_columns(conn) -> None:
     if "name" not in cols:
         await conn.execute(
             "ALTER TABLE hygiene_employees ADD COLUMN name TEXT NOT NULL DEFAULT ''"
+        )
+    cur = await conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hygiene_standards'"
+    )
+    if await cur.fetchone() is None:
+        return
+    cur = await conn.execute("PRAGMA table_info(hygiene_standards)")
+    cols = {row[1] for row in await cur.fetchall()}
+    if "byte_size" not in cols:
+        await conn.execute(
+            "ALTER TABLE hygiene_standards ADD COLUMN byte_size INTEGER"
+        )
+    if "content_sha256" not in cols:
+        await conn.execute(
+            "ALTER TABLE hygiene_standards ADD COLUMN content_sha256 TEXT"
         )

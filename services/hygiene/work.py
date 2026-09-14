@@ -8,6 +8,7 @@ Does not hash passwords or issue staff sessions. Captures stay off SQLite WAL.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -41,6 +42,7 @@ SETTING_DAY_OVERDUE = "daily_overdue_day_hhmm"
 SETTING_NIGHT_OVERDUE = "daily_overdue_night_hhmm"
 SETTING_DEEP_CLEAN_OVERDUE = "deep_clean_overdue_hhmm"
 DEFAULT_DEEP_CLEAN_OVERDUE_HHMM = "21:30"
+MAX_STANDARD_BYTES = 20 * 1024 * 1024
 WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 CALENDAR_TODO = "待办"
 CALENDAR_DONE = "已完成"
@@ -116,8 +118,39 @@ class HygieneWork:
             raise HygieneWorkError("forbidden", "forbidden")
 
     async def prepare(self) -> None:
+        await self._backfill_standard_metadata()
         await self._seed_zones_if_empty()
         await self._seed_overdue_clocks_if_empty()
+
+    async def _backfill_standard_metadata(self) -> None:
+        cur = await self._conn.execute(
+            """SELECT id, capture_id, byte_size, content_sha256
+               FROM hygiene_standards
+               WHERE byte_size IS NULL OR content_sha256 IS NULL"""
+        )
+        rows = await cur.fetchall()
+        changed = False
+        for row in rows:
+            mapping = dict(row)
+            try:
+                if not self._captures.exists(mapping["capture_id"]):
+                    raise FileNotFoundError(mapping["capture_id"])
+                data = self._captures.get(mapping["capture_id"])
+            except (FileNotFoundError, KeyError):
+                logger.warning(
+                    "hygiene standard capture missing standard=%s",
+                    mapping["id"],
+                )
+                continue
+            await self._conn.execute(
+                """UPDATE hygiene_standards
+                   SET byte_size = ?, content_sha256 = ?
+                   WHERE id = ?""",
+                (len(data), hashlib.sha256(data).hexdigest(), int(mapping["id"])),
+            )
+            changed = True
+        if changed:
+            await self._conn.commit()
 
     async def _seed_zones_if_empty(self) -> None:
         cur = await self._conn.execute("SELECT COUNT(*) AS n FROM hygiene_zones")
@@ -305,6 +338,8 @@ class HygieneWork:
         data = None if capture is None else capture.get("bytes")
         if not data:
             raise HygieneWorkError("standard_required", "standard_required")
+        if len(data) > MAX_STANDARD_BYTES:
+            raise HygieneWorkError("standard_too_large", "standard_too_large")
         return data
 
     def _markup_json(self, capture) -> str:
@@ -349,9 +384,18 @@ class HygieneWork:
             item_id = int(item_cur.lastrowid)
             std_cur = await self._conn.execute(
                 """INSERT INTO hygiene_standards
-                   (item_id, capture_id, content_type, markup_json, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (item_id, capture_id, content_type, self._markup_json(capture), now),
+                   (item_id, capture_id, content_type, byte_size,
+                    content_sha256, markup_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    item_id,
+                    capture_id,
+                    content_type,
+                    len(data),
+                    hashlib.sha256(data).hexdigest(),
+                    self._markup_json(capture),
+                    now,
+                ),
             )
             standard_id = int(std_cur.lastrowid)
             await self._conn.execute(
@@ -428,21 +472,69 @@ class HygieneWork:
 
     async def standard_by_id(self, standard_id: int) -> dict:
         cur = await self._conn.execute(
-            """SELECT id, item_id, capture_id, content_type, markup_json, created_at
+            """SELECT id, item_id, capture_id, content_type, byte_size,
+                      content_sha256, markup_json, created_at
                FROM hygiene_standards WHERE id = ?""",
             (int(standard_id),),
         )
         row = await cur.fetchone()
         if row is None:
-            raise HygieneWorkError("standard_required", "standard_required")
+            raise HygieneWorkError("standard_not_found", "standard_not_found")
         std = dict(row)
         return {
             "id": int(std["id"]),
             "item_id": int(std["item_id"]),
             "capture_id": std["capture_id"],
             "content_type": std["content_type"],
+            "byte_size": int(std["byte_size"]) if std.get("byte_size") is not None else None,
+            "sha256": std.get("content_sha256"),
             "markup": self._parse_markup(std.get("markup_json") or "[]"),
             "created_at": std["created_at"],
+        }
+
+    async def standard_version(self, standard_id: int) -> dict:
+        return await self.standard_by_id(standard_id)
+
+    async def standard_manifest(self) -> dict:
+        cur = await self._conn.execute(
+            """SELECT i.id AS item_id, i.name AS item_name,
+                      i.current_standard_id AS standard_id,
+                      s.capture_id, s.byte_size, s.content_sha256, s.content_type
+               FROM hygiene_daily_items i
+               JOIN hygiene_standards s ON s.id = i.current_standard_id
+               WHERE i.current_standard_id IS NOT NULL
+                 AND s.byte_size IS NOT NULL
+                 AND s.content_sha256 IS NOT NULL
+               ORDER BY s.id ASC"""
+        )
+        standards = []
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            if not self._captures.exists(mapping["capture_id"]):
+                logger.warning(
+                    "hygiene current standard capture missing standard=%s",
+                    mapping["standard_id"],
+                )
+                continue
+            standard_id = int(mapping["standard_id"])
+            standards.append({
+                "item_id": int(mapping["item_id"]),
+                "item_name": mapping["item_name"],
+                "standard_id": standard_id,
+                "byte_size": int(mapping["byte_size"]),
+                "sha256": mapping["content_sha256"],
+                "content_type": mapping["content_type"],
+            })
+        digest_input = json.dumps(
+            standards,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return {
+            "version": hashlib.sha256(digest_input).hexdigest(),
+            "generated_at": self._now_iso(),
+            "standards": standards,
         }
 
     def capture_bytes(self, capture_id: str) -> bytes:
@@ -459,9 +551,18 @@ class HygieneWork:
         now = self._now_iso()
         std_cur = await self._conn.execute(
             """INSERT INTO hygiene_standards
-               (item_id, capture_id, content_type, markup_json, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (item_id, capture_id, content_type, self._markup_json(capture), now),
+               (item_id, capture_id, content_type, byte_size,
+                content_sha256, markup_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                item_id,
+                capture_id,
+                content_type,
+                len(data),
+                hashlib.sha256(data).hexdigest(),
+                self._markup_json(capture),
+                now,
+            ),
         )
         standard_id = int(std_cur.lastrowid)
         await self._conn.execute(
@@ -2306,4 +2407,3 @@ class HygieneWork:
         if row is None:
             raise HygieneWorkError("teaching_not_found", "teaching_not_found")
         return self._teaching_from_row(row)
-

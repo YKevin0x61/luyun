@@ -26,7 +26,13 @@ class FakeCaptureStore:
         return capture_id
 
     def get(self, capture_id: str) -> bytes:
-        return self.blobs[capture_id]
+        try:
+            return self.blobs[capture_id]
+        except KeyError as exc:
+            raise FileNotFoundError(capture_id) from exc
+
+    def exists(self, capture_id: str) -> bool:
+        return capture_id in self.blobs
 
 
 class FileCaptureStore:
@@ -41,11 +47,20 @@ class FileCaptureStore:
         path.write_bytes(data)
         return capture_id
 
-    def get(self, capture_id: str) -> bytes:
+    def _path(self, capture_id: str) -> Path:
         if not _CAPTURE_ID_RE.fullmatch(capture_id or ""):
             raise FileNotFoundError(capture_id)
         path = (self._root / capture_id).resolve()
         root = self._root.resolve()
         if not path.is_relative_to(root):
             raise FileNotFoundError(capture_id)
-        return path.read_bytes()
+        return path
+
+    def get(self, capture_id: str) -> bytes:
+        return self._path(capture_id).read_bytes()
+
+    def exists(self, capture_id: str) -> bool:
+        try:
+            return self._path(capture_id).is_file()
+        except FileNotFoundError:
+            return False

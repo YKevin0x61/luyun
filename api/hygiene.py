@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from api.security import require_session
 from config import settings
+from services import auth_service
 from services.hygiene.accounts import EmployeeAccounts, EmployeeAccountsError
 from services.hygiene.work import HygieneWork, HygieneWorkError
 
@@ -33,6 +34,8 @@ _ERROR_DETAILS = {
     "shift_already_picked": "当天班次已选定，不能自己改",
     "forbidden": "没有权限做这一步",
     "standard_required": "没有标准图不能上架日常检查项",
+    "standard_not_found": "标准图版本不存在",
+    "standard_too_large": "标准图不能超过 20 MB",
     "invalid_zone_name": "请填写卫生责任区名称",
     "invalid_item_name": "请填写日常检查项名称",
     "zone_not_found": "卫生责任区不存在",
@@ -85,10 +88,18 @@ def _http_error(exc: EmployeeAccountsError) -> HTTPException:
 def _work_http_error(exc: HygieneWorkError) -> HTTPException:
     if exc.code in ("forbidden", "cannot_self_accept"):
         status = 403
-    elif exc.code in ("zone_not_found", "item_not_found", "ticket_not_found", "teaching_not_found"):
+    elif exc.code in (
+        "zone_not_found",
+        "item_not_found",
+        "ticket_not_found",
+        "teaching_not_found",
+        "standard_not_found",
+    ):
         status = 404
     elif exc.code in ("duplicate_zone", "duplicate_item"):
         status = 409
+    elif exc.code == "standard_too_large":
+        status = 413
     else:
         status = 400
     return HTTPException(status_code=status, detail=_ERROR_DETAILS.get(exc.code, exc.code))
@@ -119,6 +130,21 @@ async def require_staff_session(
     if employee is None:
         raise HTTPException(status_code=401, detail="需要员工登录")
     return {"session_id": session_id, "employee": employee}
+
+
+async def require_standard_cache_session(
+    request: Request,
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, Any]:
+    admin_session = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    if await auth_service.validate_session_id(admin_session):
+        return {"kind": "admin", "session_id": admin_session}
+    employee = await accounts.get_staff_session(
+        request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    )
+    if employee is not None:
+        return {"kind": "staff", "employee": employee}
+    raise HTTPException(status_code=401, detail="需要登录")
 
 
 class StaffRegisterIn(BaseModel):
@@ -262,6 +288,46 @@ async def _standard_image_response(work: HygieneWork, item_id: int) -> Response:
         content=body,
         media_type=standard["content_type"] or "image/jpeg",
         headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/standard-manifest")
+async def standard_manifest(
+    _identity=Depends(require_standard_cache_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    manifest = await work.standard_manifest()
+    for entry in manifest["standards"]:
+        entry["image_url"] = (
+            f"/api/hygiene/standards/{int(entry['standard_id'])}/image"
+        )
+    return manifest
+
+
+@router.get("/standards/{standard_id}/image")
+async def standard_version_image(
+    standard_id: int,
+    _identity=Depends(require_standard_cache_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    try:
+        standard = await work.standard_version(standard_id)
+        body = work.capture_bytes(standard["capture_id"])
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="标准图不存在") from exc
+    headers = {
+        "Cache-Control": "private, max-age=31536000, immutable",
+        "Content-Length": str(len(body)),
+        "Content-Encoding": "identity",
+    }
+    if standard.get("sha256"):
+        headers["ETag"] = f'"{standard["sha256"]}"'
+    return Response(
+        content=body,
+        media_type=standard.get("content_type") or "image/jpeg",
+        headers=headers,
     )
 
 

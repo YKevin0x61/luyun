@@ -119,7 +119,10 @@ def test_get_orders_stamps_kitchen_work_fields(orders_client):
         "station": "shulong",
         "status": "未结",
     }]))
-    resp = client.get("/api/orders/")
+    resp = client.get(
+        "/api/orders/",
+        params={"start_time": "2026-09-05", "end_time": "2026-09-05"},
+    )
     assert resp.status_code == 200
     row = resp.json()["data"][0]
     assert row["steamer_phase"] == "待上笼"

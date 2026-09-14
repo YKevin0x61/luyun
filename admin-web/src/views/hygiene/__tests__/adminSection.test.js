@@ -26,6 +26,8 @@ describe('hygiene admin section shell', () => {
   it('layout owns the six inner links and loads the section stylesheet', () => {
     const layout = read('../HygieneAdminLayout.vue')
     expect(layout).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    expect(layout).toMatch(/StandardPhotoCachePanel/)
+    expect(layout).toMatch(/useStandardPhotoCacheStore/)
     expect(layout).toMatch(/HYGIENE_ADMIN_NAV/)
     expect(layout).toMatch(/aria-label="卫生管理"/)
     expect(layout).toMatch(/class="hy-tabbar"/)

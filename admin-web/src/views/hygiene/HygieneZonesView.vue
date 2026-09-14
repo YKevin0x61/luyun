@@ -354,6 +354,7 @@ function markLabel(mark) {
               <HygieneStandardOverlay
                 class="item-thumb"
                 :src="standardImageUrl('admin', item)"
+                :standard-id="item.current_standard_id"
                 :markup="item.markup || []"
                 :alt="item.name"
               />
@@ -406,6 +407,7 @@ function markLabel(mark) {
             </div>
             <HygieneStandardOverlay
               :src="editorSrc"
+              :standard-id="replacingItem ? replacingItem.current_standard_id : null"
               :markup="markup"
               editable
               :alt="itemName || '标准图预览'"

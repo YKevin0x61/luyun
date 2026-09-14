@@ -54,10 +54,10 @@ describe('hygieneMarkup', () => {
 
   it('标准图地址带当前版本，换图后预览不会吃到旧缓存', () => {
     expect(standardImageUrl('staff', { id: 10, current_standard_id: 3 })).toBe(
-      '/api/hygiene/staff/items/10/standard?v=3',
+      '/api/hygiene/standards/3/image',
     )
     expect(standardImageUrl('admin', { id: 10, current_standard_id: 4 })).toBe(
-      '/api/hygiene/admin/items/10/standard?v=4',
+      '/api/hygiene/standards/4/image',
     )
   })
 

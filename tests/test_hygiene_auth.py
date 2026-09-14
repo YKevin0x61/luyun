@@ -383,6 +383,46 @@ def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
     assert image.headers["content-type"].startswith("image/jpeg")
 
 
+def test_standard_manifest_and_immutable_image_contract(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    _approve_staff(accounts, PHONE, "白班")
+    item = _add_anban_item(work, b"STD-OLD")
+
+    assert client.get("/api/hygiene/standard-manifest").status_code == 401
+    _staff_login(client, PHONE)
+    manifest = client.get("/api/hygiene/standard-manifest")
+    assert manifest.status_code == 200
+    entry = manifest.json()["standards"][0]
+    assert entry["item_id"] == item["id"]
+    assert entry["standard_id"] == item["current_standard_id"]
+    assert entry["byte_size"] == len(b"STD-OLD")
+    assert entry["image_url"].endswith(f"/standards/{item['current_standard_id']}/image")
+
+    old_image = client.get(entry["image_url"], headers={"Accept-Encoding": "gzip"})
+    assert old_image.status_code == 200
+    assert old_image.content == b"STD-OLD"
+    assert old_image.headers["cache-control"] == "private, max-age=31536000, immutable"
+    assert old_image.headers["etag"] == f'"{entry["sha256"]}"'
+    assert old_image.headers["content-length"] == str(len(b"STD-OLD"))
+    assert old_image.headers.get("content-encoding") == "identity"
+
+    replaced = _run(work.replace_standard(
+        SUPER,
+        item["id"],
+        {"bytes": b"STD-NEW", "content_type": "image/jpeg", "markup": []},
+    ))
+    changed = client.get("/api/hygiene/standard-manifest").json()
+    assert changed["standards"][0]["standard_id"] == replaced["current_standard_id"]
+    assert changed["version"] != manifest.json()["version"]
+    still_old = client.get(entry["image_url"])
+    assert still_old.status_code == 200
+    assert still_old.content == b"STD-OLD"
+
+    client.cookies.clear()
+    assert client.post("/api/auth/init", json=ADMIN_INIT).status_code == 200
+    assert client.get("/api/hygiene/standard-manifest").status_code == 200
+
+
 def _approve_staff(accounts, phone, shift, permission="普通员工"):
     employee = _run(accounts.register(phone, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))

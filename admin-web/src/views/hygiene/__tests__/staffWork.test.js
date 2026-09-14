@@ -13,6 +13,8 @@ describe('hygiene staff work app', () => {
   it('uses the porcelain work shell with a five-tab bar and no dark staff-phone card', () => {
     const home = read('../HygieneHomeView.vue')
     expect(home).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    expect(home).toMatch(/StandardPhotoCachePanel/)
+    expect(home).toMatch(/useStandardPhotoCacheStore/)
     expect(home).toMatch(/class="hygiene-staff hygiene-work"/)
     expect(home).toMatch(/HYGIENE_STAFF_TABS/)
     expect(home).toMatch(/class="hy-tabbar"/)

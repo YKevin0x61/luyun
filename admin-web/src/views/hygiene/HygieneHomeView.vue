@@ -6,7 +6,9 @@ import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import HygieneWatermarkOverlay from '../../components/hygiene/HygieneWatermarkOverlay.vue'
+import StandardPhotoCachePanel from '../../components/hygiene/StandardPhotoCachePanel.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
+import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
 import {
   HYGIENE_BRAND_MARK,
   HYGIENE_BRAND_TAGLINE,
@@ -31,6 +33,7 @@ import {
   frozenStandardUrl,
   teachingShotUrl,
 } from '../../utils/hygieneMarkup'
+import { standardVersionChanged } from '../../utils/standardPhotoCache'
 import { staffRequest, staffUpload } from '../../utils/hygieneStaff'
 import {
   buildWorkQueue,
@@ -55,6 +58,7 @@ import {
 useScopedStylesheet('/hygiene-admin.css')
 
 const router = useRouter()
+const standardPhotoCache = useStandardPhotoCacheStore()
 const tab = ref('inbox')
 const employee = ref(null)
 const errorText = ref('')
@@ -125,6 +129,7 @@ watch(currentStaffTab, (item) => {
 }, { immediate: true })
 
 watch(sheet, async (value, previous) => {
+  standardPhotoCache.setTaskSheetOpen(Boolean(value))
   if (!value || previous) return
   await nextTick()
   if (closeButton.value) closeButton.value.focus()
@@ -147,6 +152,15 @@ const sheetTitle = computed(() => {
   return sheet.value.row && sheet.value.row.item_name
 })
 
+function currentStandardId(itemId, fallback = null) {
+  return standardPhotoCache.currentStandardId(itemId) || fallback || null
+}
+
+function standardMissingOffline(itemId, fallback = null) {
+  const standardId = currentStandardId(itemId, fallback)
+  return Boolean(standardId && !standardPhotoCache.online && standardPhotoCache.isMissing(standardId))
+}
+
 function tickClock() {
   nowTick.value = Date.now()
 }
@@ -165,6 +179,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (clockTimer) window.clearInterval(clockTimer)
   window.removeEventListener('keydown', onKeydown)
+  standardPhotoCache.setTaskSheetOpen(false)
   clearPreview()
 })
 
@@ -413,8 +428,17 @@ async function openReview(row) {
 
 function openCamera() {
   if (!sheet.value) return
+  if (standardMissingOffline(sheet.value.row.item_id, sheet.value.row.current_standard_id)) {
+    errorText.value = '这张标准图尚未缓存，联网后才能打开相机。'
+    return
+  }
   clearPreview()
-  sheet.value = { mode: 'camera', row: sheet.value.row }
+  const row = sheet.value.row
+  sheet.value = {
+    mode: 'camera',
+    row,
+    seenStandardId: currentStandardId(row.item_id, row.current_standard_id),
+  }
 }
 
 function openDeepCapture(row) {
@@ -495,7 +519,12 @@ function onCaptured(blob) {
     zone: row && row.zone_name,
     photographer: employee.value && (employee.value.name || employee.value.phone),
   }
-  sheet.value = { mode: 'preview', row, blob }
+  sheet.value = {
+    mode: 'preview',
+    row,
+    blob,
+    seenStandardId: current && current.seenStandardId,
+  }
 }
 
 function openDeepAfterCamera() {
@@ -580,6 +609,15 @@ async function submitCapture() {
     return
   }
   const row = sheet.value.row
+  const latestStandardId = currentStandardId(row.item_id, row.current_standard_id)
+  if (standardVersionChanged(sheet.value.seenStandardId, latestStandardId)) {
+    errorText.value = '标准图已更新，请先查看新版再拍摄。'
+    sheet.value = {
+      mode: 'standard',
+      row: { ...row, current_standard_id: latestStandardId },
+    }
+    return
+  }
   busy.value = true
   errorText.value = ''
   try {
@@ -714,6 +752,7 @@ async function decide(action) {
 
 <template>
   <div class="hygiene-staff hygiene-work">
+    <StandardPhotoCachePanel />
     <a class="hy-skip" href="#hygiene-work-main">跳到内容</a>
     <header class="hy-work-header">
       <div class="hy-work-header-inner">
@@ -1086,10 +1125,16 @@ async function decide(action) {
           <p class="staff-lead">对照标准图，看清角度再拍。</p>
           <HygieneStandardOverlay
             :src="dailyItemStandardUrl('staff', sheet.row)"
+            :standard-id="currentStandardId(sheet.row.item_id, sheet.row.current_standard_id)"
             :markup="sheet.row.markup || []"
             :alt="sheet.row.item_name"
           />
-          <button type="button" class="btn btn-primary btn-block staff-submit" @click="openCamera">打开相机</button>
+          <button
+            type="button"
+            class="btn btn-primary btn-block staff-submit"
+            :disabled="standardMissingOffline(sheet.row.item_id, sheet.row.current_standard_id)"
+            @click="openCamera"
+          >打开相机</button>
         </template>
 
         <template v-else-if="sheet.mode === 'before-camera' || sheet.mode === 'after-camera'">

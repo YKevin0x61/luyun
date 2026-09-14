@@ -1,8 +1,10 @@
 <script setup>
 import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import StandardPhotoCachePanel from '../../components/hygiene/StandardPhotoCachePanel.vue'
 import SvgIcon from '../../components/SvgIcon.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
+import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
 import {
   HYGIENE_ADMIN_NAV,
   HYGIENE_BACK_TO_ADMIN_LABEL,
@@ -15,6 +17,7 @@ import {
 useScopedStylesheet('/hygiene-admin.css')
 
 const route = useRoute()
+const standardPhotoCache = useStandardPhotoCacheStore()
 const currentNav = computed(() => (
   HYGIENE_ADMIN_NAV.find((item) => route.path === item.path) || HYGIENE_ADMIN_NAV[0]
 ))
@@ -26,6 +29,13 @@ function navIndex(item) {
 watch(currentNav, (item) => {
   document.title = hygieneDocumentTitle(item.title)
 }, { immediate: true })
+
+watch(
+  () => route.path,
+  () => {
+    if (standardPhotoCache.initialized) standardPhotoCache.checkForUpdates()
+  },
+)
 </script>
 
 <template>
@@ -86,5 +96,6 @@ watch(currentNav, (item) => {
         <router-view />
       </main>
     </div>
+    <StandardPhotoCachePanel />
   </div>
 </template>

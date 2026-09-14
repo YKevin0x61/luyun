@@ -1,17 +1,28 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
 import { clamp01 } from '../../utils/hygieneMarkup'
 
 const props = defineProps({
   src: { type: String, default: '' },
+  standardId: { type: [Number, String], default: null },
   markup: { type: Array, default: () => [] },
   alt: { type: String, default: '标准图' },
   editable: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['point'])
+const standardPhotoCache = useStandardPhotoCacheStore()
+const resolvedSrc = ref(props.src)
+let resolveGeneration = 0
 
 const markerId = `hygiene-arrow-${Math.random().toString(36).slice(2, 10)}`
+
+const missingOffline = computed(() => Boolean(
+  props.standardId
+  && !standardPhotoCache.online
+  && standardPhotoCache.isMissing(props.standardId),
+))
 
 const circles = computed(() => (props.markup || []).filter((m) => m.kind === 'circle'))
 const arrows = computed(() => (props.markup || []).filter((m) => m.kind === 'arrow'))
@@ -26,13 +37,62 @@ function onPoint(event) {
     y: clamp01((event.clientY - rect.top) / rect.height),
   })
 }
+
+async function resolveSource() {
+  resolveGeneration += 1
+  const generation = resolveGeneration
+  const previous = resolvedSrc.value
+  if (missingOffline.value) {
+    resolvedSrc.value = ''
+    if (previous && previous.startsWith('blob:')) standardPhotoCache.releaseImage(previous)
+    return
+  }
+  if (!props.standardId) {
+    resolvedSrc.value = props.src
+    if (previous && previous !== props.src && previous.startsWith('blob:')) {
+      standardPhotoCache.releaseImage(previous)
+    }
+    return
+  }
+  const resolved = await standardPhotoCache.resolveImage(props.standardId)
+  if (generation !== resolveGeneration) {
+    if (resolved && resolved.url) standardPhotoCache.releaseImage(resolved.url)
+    return
+  }
+  const next = (resolved && resolved.url) || props.src
+  resolvedSrc.value = next
+  if (previous && previous !== next && previous.startsWith('blob:')) {
+    standardPhotoCache.releaseImage(previous)
+  }
+}
+
+watch(
+  () => [props.src, props.standardId, missingOffline.value],
+  resolveSource,
+  { immediate: true },
+)
+watch(
+  () => standardPhotoCache.cacheGeneration,
+  resolveSource,
+)
+
+onBeforeUnmount(() => {
+  resolveGeneration += 1
+  if (resolvedSrc.value && resolvedSrc.value.startsWith('blob:')) {
+    standardPhotoCache.releaseImage(resolvedSrc.value)
+  }
+})
 </script>
 
 <template>
   <div class="std-frame">
-    <p v-if="!src" class="std-empty">还没有标准图</p>
+    <div v-if="missingOffline" class="std-empty">
+      <p>尚未缓存，需联网下载</p>
+      <button type="button" @click="standardPhotoCache.checkForUpdates({ force: true })">重试下载</button>
+    </div>
+    <p v-else-if="!resolvedSrc" class="std-empty">还没有标准图</p>
     <div v-else class="std-photo" :class="{ editable }" @click="onPoint">
-      <img :src="src" :alt="alt">
+      <img :src="resolvedSrc" :alt="alt">
       <svg class="std-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
         <defs>
           <marker :id="markerId" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
@@ -138,5 +198,16 @@ function onPoint(event) {
   color: var(--hy-faint);
   font-size: 13px;
   letter-spacing: .08em;
+}
+.std-empty p {
+  margin: 0;
+}
+.std-empty button {
+  margin-top: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--hy-mint);
+  font: inherit;
+  text-decoration: underline;
 }
 </style>
