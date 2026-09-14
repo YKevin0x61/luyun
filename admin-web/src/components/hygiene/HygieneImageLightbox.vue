@@ -54,7 +54,7 @@ onBeforeUnmount(() => {
       >关闭</button>
       <div class="hy-lightbox-photo">
         <img :src="src" :alt="alt">
-        <HygieneMarkupOverlay :markup="markup" />
+        <HygieneMarkupOverlay :markup="markup" fullscreen />
         <HygieneWatermarkOverlay :watermark="watermark" />
       </div>
     </div>

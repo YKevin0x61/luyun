@@ -12,11 +12,16 @@ function read(rel) {
 describe('hygiene image lightbox', () => {
   it('renders a closable full-screen image with markup and watermark', () => {
     const lightbox = read('../../../components/hygiene/HygieneImageLightbox.vue')
+    const overlay = read('../../../components/hygiene/HygieneMarkupOverlay.vue')
     expect(lightbox).toMatch(/<Teleport to="body">/)
     expect(lightbox).toMatch(/event\.key === 'Escape'/)
     expect(lightbox).toMatch(/HygieneMarkupOverlay/)
     expect(lightbox).toMatch(/HygieneWatermarkOverlay/)
     expect(lightbox).toMatch(/关闭全屏预览/)
+    expect(lightbox).toMatch(/HygieneMarkupOverlay :markup="markup" fullscreen/)
+    expect(overlay).toMatch(/is-fullscreen/)
+    expect(overlay).toMatch(/captionSize/)
+    expect(overlay).toMatch(/overflow-wrap: anywhere/)
   })
 
   it('makes standard photos, review pairs, and fresh captures zoomable', () => {

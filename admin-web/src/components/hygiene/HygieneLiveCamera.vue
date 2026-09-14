@@ -1,13 +1,14 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  rearCameraDevices,
-  wideCameraDevices,
+  cameraLensPair,
+  supportsNativeCameraCapture,
 } from '../../utils/cameraCapabilities'
 
 const emit = defineEmits(['captured', 'error'])
 
 const videoEl = ref(null)
+const nativeCameraInput = ref(null)
 const starting = ref(true)
 const snapping = ref(false)
 const switchingCamera = ref(false)
@@ -15,10 +16,12 @@ const wideAvailable = ref(false)
 const cameraActionText = ref('')
 const errorText = ref('')
 let stream = null
-let rearDevices = []
-let wideDevices = []
-let zoomWideOn = false
+let wideMode = false
+let standardDeviceId = ''
+let wideDeviceId = ''
 let savedZoom = null
+
+const canUseNativeCamera = supportsNativeCameraCapture()
 
 function videoTrack() {
   return stream && stream.getVideoTracks()[0]
@@ -45,15 +48,16 @@ async function refreshCameraCapabilities() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return
   try {
     const devices = await navigator.mediaDevices.enumerateDevices()
-    rearDevices = rearCameraDevices(devices)
-    wideDevices = wideCameraDevices(devices)
     const track = videoTrack()
     const currentId = track && track.getSettings ? track.getSettings().deviceId : ''
     const zoomWide = canZoomWide(track)
-    const alternateWide = wideDevices.some((device) => device.deviceId !== currentId)
-    wideAvailable.value = Boolean(zoomWide || alternateWide || rearDevices.length > 1)
-    if (zoomWide || alternateWide) cameraActionText.value = '广角'
-    else if (wideAvailable.value) cameraActionText.value = '切换镜头'
+    const pair = cameraLensPair(devices, currentId)
+    standardDeviceId = pair.standardDevice ? pair.standardDevice.deviceId : currentId
+    wideDeviceId = pair.wideDevice ? pair.wideDevice.deviceId : ''
+    wideAvailable.value = Boolean(zoomWide || pair.canSwitchDevices)
+    if (wideAvailable.value) {
+      cameraActionText.value = wideMode ? '标准视角' : '广角'
+    }
   } catch {
     // Device enumeration is optional; keep using the browser-selected camera.
   }
@@ -74,6 +78,28 @@ async function switchToCamera(deviceId) {
   await refreshCameraCapabilities()
 }
 
+async function applyWideDefault() {
+  const track = videoTrack()
+  if (canZoomWide(track)) {
+    const settings = track.getSettings ? track.getSettings() : {}
+    savedZoom = settings.zoom == null ? 1 : settings.zoom
+    const zoom = track.getCapabilities().zoom
+    wideMode = true
+    cameraActionText.value = '标准视角'
+    await track.applyConstraints({ advanced: [{ zoom: zoom.min }] })
+    return
+  }
+  const currentId = track && track.getSettings ? track.getSettings().deviceId : ''
+  if (!wideDeviceId) return
+  if (wideDeviceId === currentId) {
+    wideMode = true
+    cameraActionText.value = '标准视角'
+    return
+  }
+  wideMode = true
+  await switchToCamera(wideDeviceId)
+}
+
 async function toggleWide() {
   if (!wideAvailable.value || switchingCamera.value) return
   switchingCamera.value = true
@@ -82,8 +108,8 @@ async function toggleWide() {
     const track = videoTrack()
     if (canZoomWide(track)) {
       const zoom = track.getCapabilities().zoom
-      if (zoomWideOn) {
-        zoomWideOn = false
+      if (wideMode) {
+        wideMode = false
         cameraActionText.value = '广角'
         await track.applyConstraints({
           advanced: [{ zoom: savedZoom == null ? 1 : savedZoom }],
@@ -91,7 +117,7 @@ async function toggleWide() {
       } else {
         const settings = track.getSettings ? track.getSettings() : {}
         savedZoom = settings.zoom == null ? 1 : settings.zoom
-        zoomWideOn = true
+        wideMode = true
         cameraActionText.value = '标准视角'
         await track.applyConstraints({ advanced: [{ zoom: zoom.min }] })
       }
@@ -99,16 +125,10 @@ async function toggleWide() {
     }
 
     const currentId = track && track.getSettings ? track.getSettings().deviceId : ''
-    const alternateWide = wideDevices.find((device) => device.deviceId !== currentId)
-    if (alternateWide) {
-      await switchToCamera(alternateWide.deviceId)
-      return
-    }
-    const candidates = rearDevices
-    if (candidates.length < 2) return
-    const currentIndex = candidates.findIndex((device) => device.deviceId === currentId)
-    const next = candidates[(currentIndex + 1 + candidates.length) % candidates.length]
-    await switchToCamera(next.deviceId)
+    const target = wideMode ? standardDeviceId : wideDeviceId
+    if (!target || target === currentId) return
+    wideMode = !wideMode
+    await switchToCamera(target)
   } catch (err) {
     errorText.value = '切换相机镜头失败，请重新打开相机。'
     emit('error', err)
@@ -131,6 +151,7 @@ async function startCamera() {
     })
     await attachStream(nextStream)
     await refreshCameraCapabilities()
+    if (wideAvailable.value && !wideMode) await applyWideDefault()
   } catch (err) {
     errorText.value = '无法打开相机。请在浏览器设置中允许相机权限，或换一部手机；卫生拍照必须现场完成。'
     emit('error', err)
@@ -168,6 +189,18 @@ async function snap() {
   }
 }
 
+function openNativeCamera() {
+  nativeCameraInput.value?.click()
+}
+
+function onNativeCameraChange(event) {
+  const input = event.target
+  const file = input && input.files && input.files[0]
+  if (!file) return
+  emit('captured', file)
+  input.value = ''
+}
+
 onMounted(startCamera)
 onBeforeUnmount(stopCamera)
 </script>
@@ -187,12 +220,28 @@ onBeforeUnmount(stopCamera)
         {{ snapping ? '正在拍照…' : '拍一张' }}
       </button>
       <button
+        v-if="canUseNativeCamera"
+        type="button"
+        class="btn live-native"
+        aria-label="使用系统原相机拍摄"
+        :disabled="switchingCamera || snapping"
+        @click="openNativeCamera"
+      >原相机</button>
+      <button
         v-if="wideAvailable"
         type="button"
         class="btn live-wide"
         :disabled="switchingCamera || starting || Boolean(errorText)"
         @click="toggleWide"
       >{{ switchingCamera ? '切换中…' : cameraActionText }}</button>
+      <input
+        ref="nativeCameraInput"
+        class="native-camera-input"
+        type="file"
+        accept="image/*"
+        capture="environment"
+        @change="onNativeCameraChange"
+      >
     </div>
   </div>
 </template>
@@ -205,7 +254,7 @@ onBeforeUnmount(stopCamera)
 }
 .live-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 9px;
 }
 .live-video {
@@ -224,6 +273,12 @@ onBeforeUnmount(stopCamera)
 }
 .live-wide {
   min-width: 92px;
+}
+.live-native {
+  min-width: 76px;
+}
+.native-camera-input {
+  display: none;
 }
 .live-hint {
   margin: 0;

@@ -1,5 +1,7 @@
 /** Hygiene roster copy and permission helpers. Rules stay on the server. */
 
+import { supportsNativeCameraCapture } from './cameraCapabilities'
+
 export const HYGIENE_PERMISSIONS = ['普通员工', '管理员']
 export const HYGIENE_SHIFTS = ['白班', '夜班']
 export const HYGIENE_WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
@@ -65,6 +67,7 @@ export function hygieneWeekdayLabel(weekday) {
 }
 
 export function hasLiveCamera() {
+  if (supportsNativeCameraCapture()) return true
   return Boolean(
     typeof navigator !== 'undefined'
       && navigator.mediaDevices

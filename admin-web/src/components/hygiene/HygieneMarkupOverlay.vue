@@ -1,35 +1,64 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const props = defineProps({
   markup: { type: Array, default: () => [] },
+  fullscreen: { type: Boolean, default: false },
 })
+
+const layerEl = ref(null)
+const layerSize = ref({ width: 0, height: 0 })
+let resizeObserver = null
 
 const markerId = `hygiene-arrow-${Math.random().toString(36).slice(2, 10)}`
 const circles = computed(() => (props.markup || []).filter((mark) => mark.kind === 'circle'))
 const arrows = computed(() => (props.markup || []).filter((mark) => mark.kind === 'arrow'))
 const captions = computed(() => (props.markup || []).filter((mark) => mark.kind === 'caption'))
+const captionSize = computed(() => {
+  const base = Math.min(layerSize.value.width || 1, layerSize.value.height || 1)
+  return Math.max(props.fullscreen ? 15 : 11, Math.min(props.fullscreen ? 24 : 16, base * 0.025))
+})
+
+function updateLayerSize() {
+  const rect = layerEl.value?.getBoundingClientRect()
+  layerSize.value = rect
+    ? { width: rect.width, height: rect.height }
+    : { width: 0, height: 0 }
+}
+
+function circleDiameter(mark) {
+  return Math.max(
+    props.fullscreen ? 22 : 16,
+    Number(mark.r || 0.08) * 2 * Math.min(layerSize.value.width || 1, layerSize.value.height || 1),
+  )
+}
+
+onMounted(() => {
+  updateLayerSize()
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(updateLayerSize)
+    if (layerEl.value) resizeObserver.observe(layerEl.value)
+  }
+})
+
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+})
 </script>
 
 <template>
-  <div class="hy-markup-layer">
+  <div
+    ref="layerEl"
+    class="hy-markup-layer"
+    :class="{ 'is-fullscreen': fullscreen }"
+  >
     <svg class="std-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
       <defs>
         <marker :id="markerId" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
           <path d="M0,0 L5,2.5 L0,5 z" fill="#3fe0b0" />
         </marker>
       </defs>
-      <circle
-        v-for="(mark, index) in circles"
-        :key="`c-${index}`"
-        :cx="mark.x * 100"
-        :cy="mark.y * 100"
-        :r="(mark.r || 0.08) * 100"
-        fill="none"
-        stroke="#3fe0b0"
-        stroke-width="1.4"
-        vector-effect="non-scaling-stroke"
-      />
       <line
         v-for="(mark, index) in arrows"
         :key="`a-${index}`"
@@ -38,16 +67,31 @@ const captions = computed(() => (props.markup || []).filter((mark) => mark.kind 
         :x2="mark.x2 * 100"
         :y2="mark.y2 * 100"
         stroke="#3fe0b0"
-        stroke-width="1.6"
+        :stroke-width="fullscreen ? 2.2 : 1.6"
         :marker-end="`url(#${markerId})`"
         vector-effect="non-scaling-stroke"
       />
     </svg>
     <span
+      v-for="(mark, index) in circles"
+      :key="`c-${index}`"
+      class="std-circle"
+      :style="{
+        left: `${mark.x * 100}%`,
+        top: `${mark.y * 100}%`,
+        width: `${circleDiameter(mark)}px`,
+        height: `${circleDiameter(mark)}px`,
+      }"
+    />
+    <span
       v-for="(mark, index) in captions"
       :key="`t-${index}`"
       class="std-caption"
-      :style="{ left: `${mark.x * 100}%`, top: `${mark.y * 100}%` }"
+      :style="{
+        left: `${mark.x * 100}%`,
+        top: `${mark.y * 100}%`,
+        fontSize: `${captionSize}px`,
+      }"
     >{{ mark.text }}</span>
   </div>
 </template>
@@ -65,8 +109,14 @@ const captions = computed(() => (props.markup || []).filter((mark) => mark.kind 
   height: 100%;
   pointer-events: none;
 }
-.std-svg circle,
 .std-svg line {
+  filter: drop-shadow(0 0 3px rgba(63, 224, 176, .65));
+}
+.std-circle {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--hy-mint-bright);
+  border-radius: 50%;
   filter: drop-shadow(0 0 3px rgba(63, 224, 176, .65));
 }
 .std-caption {
@@ -78,11 +128,18 @@ const captions = computed(() => (props.markup || []).filter((mark) => mark.kind 
   border-radius: 6px;
   padding: 2px 8px;
   font-family: var(--font-mono);
-  font-size: 11px;
   letter-spacing: .04em;
-  white-space: nowrap;
-  max-width: 80%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  max-width: min(80%, 360px);
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+.hy-markup-layer.is-fullscreen .std-circle {
+  border-width: 3px;
+}
+.hy-markup-layer.is-fullscreen .std-caption {
+  padding: 5px 9px;
+  border-radius: 8px;
+  line-height: 1.4;
 }
 </style>
