@@ -93,7 +93,7 @@ describe('hygieneCopy', () => {
     expect(isHygieneAdminPath('/hygiene/login')).toBe(false)
     expect(isHygieneAdminPath('/hygiene/register')).toBe(false)
     expect(HYGIENE_ADMIN_NAV.map((item) => item.shortTitle)).toEqual([
-      '人员', '区域', '日常', '专项', '整改', '榜',
+      '人员', '责任区', '日常', '专项', '整改', '榜',
     ])
     expect(HYGIENE_STAFF_TABS.map((item) => item.id)).toEqual([
       'inbox', 'deep', 'fix', 'boards', 'me',

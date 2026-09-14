@@ -453,6 +453,7 @@ HYGIENE_TABLES = (
     "hygiene_fix_reshoots",
     "hygiene_fix_overdue_notices",
     "hygiene_teaching_examples",
+    "hygiene_capture_variants",
 )
 
 _HYGIENE_TABLE_SCHEMAS = {
@@ -694,6 +695,20 @@ _HYGIENE_TABLE_SCHEMAS = {
             created_at TEXT NOT NULL
         )
     """,
+    "hygiene_capture_variants": """
+        CREATE TABLE IF NOT EXISTS hygiene_capture_variants (
+            source_capture_id TEXT NOT NULL,
+            variant TEXT NOT NULL CHECK (variant IN ('thumb', 'preview')),
+            capture_id TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            width INTEGER NOT NULL,
+            height INTEGER NOT NULL,
+            byte_size INTEGER NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (source_capture_id, variant)
+        )
+    """,
 }
 
 _HYGIENE_INDEX_DEFINITIONS = {
@@ -725,7 +740,7 @@ _HYGIENE_INDEX_DEFINITIONS = {
     ],
     "hygiene_daily_submissions": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_daily_submissions_instance "
-        "ON hygiene_daily_submissions(instance_id)",
+        "ON hygiene_daily_submissions(instance_id, id DESC)",
     ],
     "hygiene_overdue_notices": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_overdue_notices_date "
@@ -734,6 +749,8 @@ _HYGIENE_INDEX_DEFINITIONS = {
     "hygiene_board_events": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_board_events_board "
         "ON hygiene_board_events(board, occurred_at)",
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_board_events_board_time_id "
+        "ON hygiene_board_events(board, occurred_at, id)",
     ],
     "hygiene_deep_clean_items": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_deep_clean_items_weekday "
@@ -745,7 +762,7 @@ _HYGIENE_INDEX_DEFINITIONS = {
     ],
     "hygiene_deep_clean_submissions": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_deep_clean_submissions_instance "
-        "ON hygiene_deep_clean_submissions(instance_id)",
+        "ON hygiene_deep_clean_submissions(instance_id, id DESC)",
     ],
     "hygiene_fix_tickets": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_fix_tickets_status "
@@ -753,11 +770,17 @@ _HYGIENE_INDEX_DEFINITIONS = {
     ],
     "hygiene_fix_reshoots": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_fix_reshoots_ticket "
-        "ON hygiene_fix_reshoots(ticket_id)",
+        "ON hygiene_fix_reshoots(ticket_id, id DESC)",
     ],
     "hygiene_teaching_examples": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_teaching_created "
         "ON hygiene_teaching_examples(created_at)",
+    ],
+    "hygiene_capture_variants": [
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_capture_variants_capture "
+        "ON hygiene_capture_variants(capture_id)",
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_capture_variants_created "
+        "ON hygiene_capture_variants(created_at)",
     ],
 }
 

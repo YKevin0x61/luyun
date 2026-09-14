@@ -8,6 +8,7 @@ Does not hash passwords or issue staff sessions. Captures stay off SQLite WAL.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -24,6 +25,7 @@ from services.hygiene.accounts import (
     SHIFT_NIGHT,
     hygiene_business_date,
 )
+from services.hygiene.images import GeneratedVariant, InvalidImageError
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,8 @@ SETTING_NIGHT_OVERDUE = "daily_overdue_night_hhmm"
 SETTING_DEEP_CLEAN_OVERDUE = "deep_clean_overdue_hhmm"
 DEFAULT_DEEP_CLEAN_OVERDUE_HHMM = "21:30"
 MAX_STANDARD_BYTES = 20 * 1024 * 1024
+CAPTURE_VARIANTS = ("thumb", "preview")
+ORPHAN_CAPTURE_MIN_AGE_SECONDS = 24 * 60 * 60
 WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 CALENDAR_TODO = "待办"
 CALENDAR_DONE = "已完成"
@@ -59,6 +63,15 @@ ZONE_COUNT_KEYS = ("逾期",)
 TEACHING_DAILY = "daily"
 TEACHING_DEEP_CLEAN = "deep_clean"
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def serialized_write(method):
+    @functools.wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        async with self._write_lock:
+            return await method(self, *args, **kwargs)
+
+    return wrapper
 
 
 def hygiene_week_start(now: datetime) -> datetime:
@@ -93,6 +106,8 @@ class HygieneWork:
         captures,
         now: Optional[Callable[[], datetime]] = None,
         notifier=None,
+        image_variants=None,
+        on_change=None,
     ):
         conn = getattr(conn_or_db, "_conn", conn_or_db)
         if conn is None:
@@ -103,6 +118,19 @@ class HygieneWork:
         self._captures = captures
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._notifier = notifier
+        self._image_variants = image_variants
+        self._on_change = on_change
+        self._write_lock_owner = conn_or_db
+        self._local_write_lock = None
+
+    @property
+    def _write_lock(self):
+        shared = getattr(self._write_lock_owner, "_write_lock", None)
+        if shared is not None:
+            return shared
+        if self._local_write_lock is None:
+            self._local_write_lock = asyncio.Lock()
+        return self._local_write_lock
 
     def _now_dt(self) -> datetime:
         value = self._now()
@@ -122,6 +150,86 @@ class HygieneWork:
         await self._seed_zones_if_empty()
         await self._seed_overdue_clocks_if_empty()
 
+    async def _store_capture(
+        self,
+        data: bytes,
+        content_type: str,
+        *,
+        require_image: bool = False,
+    ) -> tuple[str, dict[str, tuple[str, GeneratedVariant]]]:
+        capture_id = await self._captures.put_async(data, content_type=content_type)
+        generated: dict[str, tuple[str, GeneratedVariant]] = {}
+        if self._image_variants is None:
+            return capture_id, generated
+        try:
+            variants = await asyncio.to_thread(self._image_variants.generate, data)
+        except InvalidImageError:
+            if require_image:
+                await self._captures.delete_async(capture_id)
+                raise HygieneWorkError("invalid_image", "invalid_image")
+            logger.warning("hygiene capture is not decodable capture=%s", capture_id)
+            return capture_id, generated
+        except Exception:
+            logger.exception("hygiene derivative generation failed capture=%s", capture_id)
+            if require_image:
+                await self._captures.delete_async(capture_id)
+                raise
+            return capture_id, generated
+        try:
+            for variant_name, variant in variants.items():
+                derivative_id = await self._captures.put_async(
+                    variant.data,
+                    content_type="image/jpeg",
+                )
+                generated[variant_name] = (derivative_id, variant)
+        except Exception:
+            await self._delete_capture_files(
+                [capture_id, *(item[0] for item in generated.values())]
+            )
+            raise
+        return capture_id, generated
+
+    async def _insert_variants(
+        self,
+        source_capture_id: str,
+        generated: dict[str, tuple[str, GeneratedVariant]],
+    ) -> None:
+        if not generated:
+            return
+        now = self._now_iso()
+        await self._conn.executemany(
+            """INSERT INTO hygiene_capture_variants
+               (source_capture_id, variant, capture_id, content_type,
+                width, height, byte_size, content_sha256, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(source_capture_id, variant) DO NOTHING""",
+            [
+                (
+                    source_capture_id,
+                    variant_name,
+                    capture_id,
+                    "image/jpeg",
+                    variant.width,
+                    variant.height,
+                    len(variant.data),
+                    hashlib.sha256(variant.data).hexdigest(),
+                    now,
+                )
+                for variant_name, (capture_id, variant) in generated.items()
+            ],
+        )
+
+    async def _delete_capture_files(self, capture_ids) -> None:
+        for capture_id in {item for item in capture_ids if item}:
+            try:
+                await self._captures.delete_async(capture_id)
+            except Exception:
+                logger.warning(
+                    "hygiene capture cleanup failed capture=%s",
+                    capture_id,
+                    exc_info=True,
+                )
+
     async def _backfill_standard_metadata(self) -> None:
         cur = await self._conn.execute(
             """SELECT id, capture_id, byte_size, content_sha256
@@ -133,9 +241,9 @@ class HygieneWork:
         for row in rows:
             mapping = dict(row)
             try:
-                if not self._captures.exists(mapping["capture_id"]):
+                if not await self._captures.exists_async(mapping["capture_id"]):
                     raise FileNotFoundError(mapping["capture_id"])
-                data = self._captures.get(mapping["capture_id"])
+                data = await self._captures.get_async(mapping["capture_id"])
             except (FileNotFoundError, KeyError):
                 logger.warning(
                     "hygiene standard capture missing standard=%s",
@@ -287,6 +395,7 @@ class HygieneWork:
             params,
         )
 
+    @serialized_write
     async def delete_zone(self, actor: dict, zone_id: int) -> dict:
         self._require_super(actor)
         zone = await self._fetch_zone(zone_id)
@@ -309,6 +418,7 @@ class HygieneWork:
         logger.info("hygiene zone deleted id=%s name=%s", mapping["id"], mapping["name"])
         return {"id": int(mapping["id"]), "name": mapping["name"]}
 
+    @serialized_write
     async def delete_daily_item(self, actor: dict, item_id: int) -> dict:
         self._require_super(actor)
         item = await self._fetch_item(item_id)
@@ -362,6 +472,7 @@ class HygieneWork:
         )
         return await cur.fetchone()
 
+    @serialized_write
     async def add_daily_item(self, actor: dict, zone_id: int, name: str, capture) -> dict:
         self._require_super(actor)
         data = self._require_capture(capture)
@@ -372,7 +483,11 @@ class HygieneWork:
         if zone is None:
             raise HygieneWorkError("zone_not_found", "zone_not_found")
         content_type = (capture.get("content_type") or "image/jpeg").strip()
-        capture_id = self._captures.put(data, content_type=content_type)
+        capture_id, generated = await self._store_capture(
+            data,
+            content_type,
+            require_image=True,
+        )
         now = self._now_iso()
         try:
             item_cur = await self._conn.execute(
@@ -404,10 +519,20 @@ class HygieneWork:
                    WHERE id = ?""",
                 (standard_id, now, item_id),
             )
+            await self._insert_variants(capture_id, generated)
             await self._conn.commit()
         except sqlite3.IntegrityError as exc:
             await self._conn.rollback()
+            await self._delete_capture_files(
+                [capture_id, *(item[0] for item in generated.values())]
+            )
             raise HygieneWorkError("duplicate_item", "duplicate_item") from exc
+        except Exception:
+            await self._conn.rollback()
+            await self._delete_capture_files(
+                [capture_id, *(item[0] for item in generated.values())]
+            )
+            raise
         logger.info(
             "hygiene daily item created id=%s zone=%s standard=%s",
             item_id,
@@ -523,7 +648,7 @@ class HygieneWork:
         standards = []
         for row in await cur.fetchall():
             mapping = dict(row)
-            if not self._captures.exists(mapping["capture_id"]):
+            if not await self._captures.exists_async(mapping["capture_id"]):
                 logger.warning(
                     "hygiene current standard capture missing standard=%s",
                     mapping["standard_id"],
@@ -550,9 +675,209 @@ class HygieneWork:
             "standards": standards,
         }
 
-    def capture_bytes(self, capture_id: str) -> bytes:
-        return self._captures.get(capture_id)
+    async def capture_bytes(self, capture_id: str) -> bytes:
+        return await self._captures.get_async(capture_id)
 
+    async def _original_capture_meta(self, capture_id: str) -> dict:
+        cur = await self._conn.execute(
+            """SELECT capture_id, content_type, byte_size, content_sha256
+               FROM hygiene_standards WHERE capture_id = ?
+               UNION ALL
+               SELECT capture_id, content_type, NULL, NULL
+               FROM hygiene_daily_submissions WHERE capture_id = ?
+               UNION ALL
+               SELECT before_capture_id AS capture_id,
+                      before_content_type AS content_type, NULL, NULL
+               FROM hygiene_deep_clean_submissions WHERE before_capture_id = ?
+               UNION ALL
+               SELECT after_capture_id AS capture_id,
+                      after_content_type AS content_type, NULL, NULL
+               FROM hygiene_deep_clean_submissions WHERE after_capture_id = ?
+               UNION ALL
+               SELECT capture_id, content_type, NULL, NULL
+               FROM hygiene_fix_tickets WHERE capture_id = ?
+               UNION ALL
+               SELECT capture_id, content_type, NULL, NULL
+               FROM hygiene_fix_reshoots WHERE capture_id = ?
+               LIMIT 1""",
+            (capture_id, capture_id, capture_id, capture_id, capture_id, capture_id),
+        )
+        row = await cur.fetchone()
+        mapping = {} if row is None else dict(row)
+        return {
+            "capture_id": capture_id,
+            "content_type": mapping.get("content_type") or "image/jpeg",
+            "byte_size": (
+                int(mapping["byte_size"])
+                if mapping.get("byte_size") is not None
+                else None
+            ),
+            "sha256": mapping.get("content_sha256"),
+        }
+
+    async def capture_view(self, capture_id: str, variant: str = "original") -> dict:
+        requested = (variant or "original").strip().lower()
+        if requested not in {"original", *CAPTURE_VARIANTS}:
+            raise HygieneWorkError("invalid_variant", "invalid_variant")
+        if requested != "original":
+            cur = await self._conn.execute(
+                """SELECT capture_id, content_type, byte_size, content_sha256
+                   FROM hygiene_capture_variants
+                   WHERE source_capture_id = ? AND variant = ?""",
+                (capture_id, requested),
+            )
+            row = await cur.fetchone()
+            if row is not None:
+                mapping = dict(row)
+                if await self._captures.exists_async(mapping["capture_id"]):
+                    return {
+                        "capture_id": mapping["capture_id"],
+                        "content_type": mapping["content_type"],
+                        "byte_size": int(mapping["byte_size"]),
+                        "sha256": mapping["content_sha256"],
+                        "variant": requested,
+                        "fallback": False,
+                        "path": await self._captures.path_async(mapping["capture_id"]),
+                    }
+        if not await self._captures.exists_async(capture_id):
+            raise FileNotFoundError(capture_id)
+        meta = await self._original_capture_meta(capture_id)
+        return {
+            **meta,
+            "variant": "original",
+            "fallback": requested != "original",
+            "requested_variant": requested,
+            "path": await self._captures.path_async(capture_id),
+        }
+
+    async def _referenced_capture_ids(self) -> set[str]:
+        cur = await self._conn.execute(
+            """SELECT capture_id FROM hygiene_standards
+               UNION
+               SELECT capture_id FROM hygiene_daily_submissions
+               UNION
+               SELECT before_capture_id FROM hygiene_deep_clean_submissions
+               UNION
+               SELECT after_capture_id FROM hygiene_deep_clean_submissions
+               UNION
+               SELECT capture_id FROM hygiene_fix_tickets
+               UNION
+               SELECT capture_id FROM hygiene_fix_reshoots
+               UNION
+               SELECT left_capture_id FROM hygiene_teaching_examples
+               UNION
+               SELECT right_capture_id FROM hygiene_teaching_examples
+               UNION
+               SELECT capture_id FROM hygiene_capture_variants"""
+        )
+        return {str(dict(row)["capture_id"]) for row in await cur.fetchall()}
+
+    async def backfill_capture_variants_once(self, batch_size: int = 20) -> int:
+        if self._image_variants is None:
+            return 0
+        referenced = sorted(await self._referenced_capture_ids())
+        if not referenced:
+            return 0
+        placeholders = ",".join("?" * len(referenced))
+        cur = await self._conn.execute(
+            f"""SELECT source_capture_id, variant
+                FROM hygiene_capture_variants
+                WHERE source_capture_id IN ({placeholders})""",
+            referenced,
+        )
+        existing = {}
+        for row in await cur.fetchall():
+            existing.setdefault(str(dict(row)["source_capture_id"]), set()).add(
+                str(dict(row)["variant"])
+            )
+        complete = {
+            capture_id
+            for capture_id, variants in existing.items()
+            if set(CAPTURE_VARIANTS).issubset(variants)
+        }
+        missing = [capture_id for capture_id in referenced if capture_id not in complete]
+        created = 0
+        for capture_id in missing[: max(1, int(batch_size))]:
+            try:
+                data = await self._captures.get_async(capture_id)
+                variants = await asyncio.to_thread(self._image_variants.generate, data)
+                generated: dict[str, tuple[str, GeneratedVariant]] = {}
+                for variant_name, variant in variants.items():
+                    derivative_id = await self._captures.put_async(
+                        variant.data,
+                        content_type="image/jpeg",
+                    )
+                    generated[variant_name] = (derivative_id, variant)
+                await self._insert_variants(capture_id, generated)
+                await self._conn.commit()
+                created += 1
+            except FileNotFoundError:
+                logger.warning("hygiene variant backfill source missing capture=%s", capture_id)
+            except InvalidImageError:
+                logger.warning("hygiene variant backfill source invalid capture=%s", capture_id)
+            except Exception:
+                await self._conn.rollback()
+                logger.exception("hygiene variant backfill failed capture=%s", capture_id)
+            await asyncio.sleep(0)
+        return created
+
+    async def variant_backfill_loop(self, batch_size: int = 20) -> None:
+        while True:
+            try:
+                created = await self.backfill_capture_variants_once(batch_size)
+                if created == 0:
+                    await asyncio.sleep(300)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("hygiene variant backfill loop failed")
+                await asyncio.sleep(300)
+
+    async def sweep_capture_orphans(
+        self,
+        max_age_seconds: int = ORPHAN_CAPTURE_MIN_AGE_SECONDS,
+    ) -> int:
+        referenced = await self._referenced_capture_ids()
+        if referenced:
+            placeholders = ",".join("?" * len(referenced))
+            await self._conn.execute(
+                f"""DELETE FROM hygiene_capture_variants
+                    WHERE source_capture_id NOT IN ({placeholders})""",
+                sorted(referenced),
+            )
+            await self._conn.commit()
+            referenced = await self._referenced_capture_ids()
+        else:
+            await self._conn.execute("DELETE FROM hygiene_capture_variants")
+            await self._conn.commit()
+        now = self._now_dt().timestamp()
+        removed = 0
+        for capture_id in await self._captures.list_ids_async():
+            if capture_id in referenced:
+                continue
+            modified = await self._captures.modified_at_async(capture_id)
+            if modified is None or now - modified < max_age_seconds:
+                continue
+            await self._captures.delete_async(capture_id)
+            removed += 1
+        return removed
+
+    async def capture_maintenance_loop(
+        self,
+        interval_seconds: int = 3600,
+    ) -> None:
+        while True:
+            try:
+                removed = await self.sweep_capture_orphans()
+                if removed:
+                    logger.info("hygiene orphan captures removed count=%s", removed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("hygiene capture maintenance failed")
+            await asyncio.sleep(interval_seconds)
+
+    @serialized_write
     async def replace_standard(self, actor: dict, item_id: int, capture) -> dict:
         self._require_super(actor)
         data = self._require_capture(capture)
@@ -560,31 +885,43 @@ class HygieneWork:
         if item is None:
             raise HygieneWorkError("item_not_found", "item_not_found")
         content_type = (capture.get("content_type") or "image/jpeg").strip()
-        capture_id = self._captures.put(data, content_type=content_type)
+        capture_id, generated = await self._store_capture(
+            data,
+            content_type,
+            require_image=True,
+        )
         now = self._now_iso()
-        std_cur = await self._conn.execute(
-            """INSERT INTO hygiene_standards
-               (item_id, capture_id, content_type, byte_size,
-                content_sha256, markup_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                item_id,
-                capture_id,
-                content_type,
-                len(data),
-                hashlib.sha256(data).hexdigest(),
-                self._markup_json(capture),
-                now,
-            ),
-        )
-        standard_id = int(std_cur.lastrowid)
-        await self._conn.execute(
-            """UPDATE hygiene_daily_items
-               SET current_standard_id = ?, updated_at = ?
-               WHERE id = ?""",
-            (standard_id, now, item_id),
-        )
-        await self._conn.commit()
+        try:
+            std_cur = await self._conn.execute(
+                """INSERT INTO hygiene_standards
+                   (item_id, capture_id, content_type, byte_size,
+                    content_sha256, markup_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    item_id,
+                    capture_id,
+                    content_type,
+                    len(data),
+                    hashlib.sha256(data).hexdigest(),
+                    self._markup_json(capture),
+                    now,
+                ),
+            )
+            standard_id = int(std_cur.lastrowid)
+            await self._conn.execute(
+                """UPDATE hygiene_daily_items
+                   SET current_standard_id = ?, updated_at = ?
+                   WHERE id = ?""",
+                (standard_id, now, item_id),
+            )
+            await self._insert_variants(capture_id, generated)
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            await self._delete_capture_files(
+                [capture_id, *(item[0] for item in generated.values())]
+            )
+            raise
         logger.info(
             "hygiene standard replaced item=%s standard=%s",
             item_id,
@@ -669,25 +1006,17 @@ class HygieneWork:
         return await cur.fetchone()
 
     async def _ensure_instance(self, business_date: str, shift: str, item_id: int) -> dict:
-        existing = await self._fetch_instance(business_date, shift, item_id)
-        if existing is not None:
-            return dict(existing)
         now = self._now_iso()
-        cur = await self._conn.execute(
-            """INSERT INTO hygiene_daily_instances
+        await self._conn.execute(
+            """INSERT OR IGNORE INTO hygiene_daily_instances
                (business_date, shift, item_id, status, pending_submission_id, created_at, updated_at)
                VALUES (?, ?, ?, ?, NULL, ?, ?)""",
             (business_date, shift, item_id, STATUS_TODO, now, now),
         )
-        await self._conn.commit()
-        return {
-            "id": int(cur.lastrowid),
-            "business_date": business_date,
-            "shift": shift,
-            "item_id": item_id,
-            "status": STATUS_TODO,
-            "pending_submission_id": None,
-        }
+        existing = await self._fetch_instance(business_date, shift, item_id)
+        if existing is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        return dict(existing)
 
     async def _fetch_submission(self, submission_id: Optional[int]):
         if not submission_id:
@@ -731,6 +1060,7 @@ class HygieneWork:
             "watermark": watermark,
         }
 
+    @serialized_write
     async def submit_daily(
         self,
         actor: dict,
@@ -756,42 +1086,50 @@ class HygieneWork:
         if instance["status"] == STATUS_PASSED:
             raise HygieneWorkError("already_accepted", "already_accepted")
         content_type = (capture.get("content_type") or "image/jpeg").strip()
-        capture_id = self._captures.put(data, content_type=content_type)
+        capture_id, generated = await self._store_capture(data, content_type)
         now = self._now_iso()
-        cur = await self._conn.execute(
-            """INSERT INTO hygiene_daily_submissions
-               (instance_id, capture_id, content_type, frozen_standard_id,
-                submitter_id, submitter_phone, zone_name, captured_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                instance["id"],
-                capture_id,
-                content_type,
-                int(standard_id),
-                int(actor["id"]),
-                photographer,
-                item["zone_name"],
-                now,
-                now,
-            ),
-        )
-        submission_id = int(cur.lastrowid)
-        await self._conn.execute(
-            """UPDATE hygiene_daily_instances
-               SET status = ?, pending_submission_id = ?, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_PENDING, submission_id, now, instance["id"]),
-        )
-        await self._insert_board_event(
-            BOARD_PERSON,
-            EVENT_CAPTURE,
-            zone_id=int(item["zone_id"]),
-            employee_id=int(actor["id"]),
-            item_id=int(item_id),
-            shift=target_shift,
-            business_date=business_date,
-        )
-        await self._conn.commit()
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO hygiene_daily_submissions
+                   (instance_id, capture_id, content_type, frozen_standard_id,
+                    submitter_id, submitter_phone, zone_name, captured_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    instance["id"],
+                    capture_id,
+                    content_type,
+                    int(standard_id),
+                    int(actor["id"]),
+                    photographer,
+                    item["zone_name"],
+                    now,
+                    now,
+                ),
+            )
+            submission_id = int(cur.lastrowid)
+            await self._conn.execute(
+                """UPDATE hygiene_daily_instances
+                   SET status = ?, pending_submission_id = ?, updated_at = ?
+                   WHERE id = ?""",
+                (STATUS_PENDING, submission_id, now, instance["id"]),
+            )
+            await self._insert_variants(capture_id, generated)
+            await self._insert_board_event(
+                BOARD_PERSON,
+                EVENT_CAPTURE,
+                zone_id=int(item["zone_id"]),
+                employee_id=int(actor["id"]),
+                item_id=int(item_id),
+                shift=target_shift,
+                business_date=business_date,
+            )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            await self._delete_capture_files(
+                [capture_id, *(item[0] for item in generated.values())]
+            )
+            raise
         logger.info(
             "hygiene daily submitted item=%s shift=%s capture=%s",
             item_id,
@@ -828,53 +1166,73 @@ class HygieneWork:
         shifts, zone_id = self._inbox_filter(actor)
         if not shifts:
             return []
-        sql = """SELECT i.id, i.zone_id, i.name, i.current_standard_id, z.name AS zone_name,
-                        s.markup_json
+        shift_sql = " UNION ALL ".join("SELECT ? AS shift" for _ in shifts)
+        sql = f"""WITH shifts(shift) AS ({shift_sql})
+                 SELECT i.id AS item_id, i.zone_id, i.name AS item_name,
+                        i.current_standard_id, z.name AS zone_name,
+                        s.markup_json,
+                        inst.id AS instance_id, inst.status AS instance_status,
+                        inst.pending_submission_id,
+                        sub.id AS submission_id, sub.capture_id, sub.content_type,
+                        sub.frozen_standard_id, sub.submitter_id,
+                        sub.submitter_phone, sub.zone_name AS submission_zone_name,
+                        sub.captured_at, sh.shift AS shift
                  FROM hygiene_daily_items i
                  JOIN hygiene_zones z ON z.id = i.zone_id
                  JOIN hygiene_standards s ON s.id = i.current_standard_id
+                 CROSS JOIN shifts sh
+                 LEFT JOIN hygiene_daily_instances inst
+                   ON inst.item_id = i.id
+                  AND inst.business_date = ?
+                  AND inst.shift = sh.shift
+                 LEFT JOIN hygiene_daily_submissions sub
+                   ON sub.id = inst.pending_submission_id
                  WHERE i.current_standard_id IS NOT NULL"""
-        params: list = []
+        params: list = [*shifts, business_date]
         if zone_id is not None:
             sql += " AND i.zone_id = ?"
             params.append(zone_id)
-        sql += " ORDER BY i.id ASC"
+        sql += " ORDER BY i.id ASC, sh.shift ASC"
         cur = await self._conn.execute(sql, params)
-        items = [dict(row) for row in await cur.fetchall()]
-        inst_cur = await self._conn.execute(
-            """SELECT id, business_date, shift, item_id, status, pending_submission_id
-               FROM hygiene_daily_instances
-               WHERE business_date = ?""",
-            (business_date,),
-        )
-        instances = {}
-        for row in await inst_cur.fetchall():
-            mapping = dict(row)
-            instances[(int(mapping["item_id"]), mapping["shift"])] = mapping
         inbox = []
-        for item in items:
-            for shift in shifts:
-                instance = instances.get((int(item["id"]), shift))
-                submission = None
-                if instance is not None:
-                    submission = await self._fetch_submission(
-                        instance.get("pending_submission_id")
-                    )
-                    if submission is None and instance["status"] == STATUS_PASSED:
-                        sub_cur = await self._conn.execute(
-                            """SELECT id, instance_id, capture_id, content_type,
-                                      frozen_standard_id, submitter_id, submitter_phone,
-                                      zone_name, captured_at
-                               FROM hygiene_daily_submissions
-                               WHERE instance_id = ?
-                               ORDER BY id DESC LIMIT 1""",
-                            (instance["id"],),
-                        )
-                        sub_row = await sub_cur.fetchone()
-                        submission = None if sub_row is None else dict(sub_row)
-                inbox.append(
-                    self._inbox_from_parts(item, shift, business_date, instance, submission)
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            item = {
+                "id": mapping["item_id"],
+                "name": mapping["item_name"],
+                "zone_id": mapping["zone_id"],
+                "zone_name": mapping["zone_name"],
+                "current_standard_id": mapping["current_standard_id"],
+                "markup_json": mapping.get("markup_json"),
+            }
+            instance = None
+            if mapping.get("instance_id") is not None:
+                instance = {
+                    "id": mapping["instance_id"],
+                    "status": mapping["instance_status"],
+                    "pending_submission_id": mapping.get("pending_submission_id"),
+                }
+            submission = None
+            if mapping.get("submission_id") is not None:
+                submission = {
+                    "id": mapping["submission_id"],
+                    "capture_id": mapping["capture_id"],
+                    "content_type": mapping["content_type"],
+                    "frozen_standard_id": mapping["frozen_standard_id"],
+                    "submitter_id": mapping["submitter_id"],
+                    "submitter_phone": mapping["submitter_phone"],
+                    "zone_name": mapping["submission_zone_name"],
+                    "captured_at": mapping["captured_at"],
+                }
+            inbox.append(
+                self._inbox_from_parts(
+                    item,
+                    mapping["shift"],
+                    business_date,
+                    instance,
+                    submission,
                 )
+            )
         return inbox
 
     async def get_daily_review(
@@ -954,6 +1312,7 @@ class HygieneWork:
         )
         return await cur.fetchone() is not None
 
+    @serialized_write
     async def accept_daily(self, actor: dict, item_id: int, shift: str) -> dict:
         instance, submission = await self._pending_instance(item_id, shift)
         item_row = await self._fetch_item_with_zone(item_id)
@@ -961,12 +1320,15 @@ class HygieneWork:
             self._require_zone_access(actor, item_row["zone_id"])
         self._require_reviewer(actor, submission["submitter_id"])
         now = self._now_iso()
-        await self._conn.execute(
+        cur = await self._conn.execute(
             """UPDATE hygiene_daily_instances
                SET status = ?, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_PASSED, now, instance["id"]),
+               WHERE id = ? AND status = ?""",
+            (STATUS_PASSED, now, instance["id"], STATUS_PENDING),
         )
+        if cur.rowcount != 1:
+            await self._conn.rollback()
+            raise HygieneWorkError("not_pending", "not_pending")
         if not await self._daily_was_rejected(
             int(item_id), shift, instance["business_date"]
         ):
@@ -990,6 +1352,7 @@ class HygieneWork:
             "status": STATUS_PASSED,
         }
 
+    @serialized_write
     async def reject_daily(self, actor: dict, item_id: int, shift: str) -> dict:
         instance, submission = await self._pending_instance(item_id, shift)
         item_row = await self._fetch_item_with_zone(item_id)
@@ -997,12 +1360,15 @@ class HygieneWork:
             self._require_zone_access(actor, item_row["zone_id"])
         self._require_reviewer(actor, submission["submitter_id"])
         now = self._now_iso()
-        await self._conn.execute(
+        cur = await self._conn.execute(
             """UPDATE hygiene_daily_instances
                SET status = ?, pending_submission_id = NULL, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_TODO, now, instance["id"]),
+               WHERE id = ? AND status = ?""",
+            (STATUS_TODO, now, instance["id"], STATUS_PENDING),
         )
+        if cur.rowcount != 1:
+            await self._conn.rollback()
+            raise HygieneWorkError("not_pending", "not_pending")
         item_row = await self._fetch_item(item_id)
         zone_id = None if item_row is None else int(dict(item_row)["zone_id"])
         await self._insert_board_event(
@@ -1119,38 +1485,63 @@ class HygieneWork:
         )
         return [dict(row) for row in await cur.fetchall()]
 
-    async def _notice_exists(self, business_date: str, shift: str, item_id: int) -> bool:
+    async def _overdue_notice_keys(self, business_date: str) -> set[tuple[str, int]]:
         cur = await self._conn.execute(
-            """SELECT 1 FROM hygiene_overdue_notices
-               WHERE business_date = ? AND shift = ? AND item_id = ?""",
-            (business_date, shift, item_id),
+            """SELECT shift, item_id FROM hygiene_overdue_notices
+               WHERE business_date = ?""",
+            (business_date,),
         )
-        return await cur.fetchone() is not None
+        return {
+            (str(dict(row)["shift"]), int(dict(row)["item_id"]))
+            for row in await cur.fetchall()
+        }
 
-    def _overdue_group_text(self, business_date: str, shift: str, item: dict) -> str:
-        return (
-            f"【卫生逾期】{business_date} {shift} {item['zone_name']}「{item['name']}」"
-            "仍未提交，请到员工卫生入口补拍。"
-        )
+    def _overdue_digest_text(
+        self,
+        business_date: str,
+        shift: str,
+        items: list[dict],
+    ) -> str:
+        by_zone: dict[str, list[str]] = {}
+        for item in items:
+            by_zone.setdefault(item["zone_name"], []).append(item["name"])
+        lines = [f"【卫生逾期】{business_date} {shift}"]
+        for zone_name, names in by_zone.items():
+            lines.append(f"{zone_name}：{'、'.join(names)}")
+        lines.append("请到员工卫生入口补拍。")
+        return "\n".join(lines)
 
-    async def _record_overdue_notice(
-        self, business_date: str, shift: str, item: dict
+    async def _record_overdue_notices(
+        self,
+        business_date: str,
+        shift: str,
+        items: list[dict],
     ) -> None:
         now = self._now_iso()
-        await self._conn.execute(
-            """INSERT INTO hygiene_overdue_notices
+        await self._conn.executemany(
+            """INSERT OR IGNORE INTO hygiene_overdue_notices
                (business_date, shift, item_id, zone_id, notified_at)
                VALUES (?, ?, ?, ?, ?)""",
-            (business_date, shift, int(item["id"]), int(item["zone_id"]), now),
+            [
+                (
+                    business_date,
+                    shift,
+                    int(item["id"]),
+                    int(item["zone_id"]),
+                    now,
+                )
+                for item in items
+            ],
         )
-        await self._insert_board_event(
-            BOARD_ZONE,
-            EVENT_MISSED_DAILY,
-            zone_id=int(item["zone_id"]),
-            item_id=int(item["id"]),
-            shift=shift,
-            business_date=business_date,
-        )
+        for item in items:
+            await self._insert_board_event(
+                BOARD_ZONE,
+                EVENT_MISSED_DAILY,
+                zone_id=int(item["zone_id"]),
+                item_id=int(item["id"]),
+                shift=shift,
+                business_date=business_date,
+            )
         await self._conn.commit()
 
     def _event_from_row(self, row) -> dict:
@@ -1242,16 +1633,23 @@ class HygieneWork:
         return [self._event_from_row(row) for row in await cur.fetchall()]
 
     async def person_board(self, now: Optional[datetime] = None) -> list:
-        events = await self._events_in_week(BOARD_PERSON, now)
+        start, end = self._week_bounds(now)
+        cur = await self._conn.execute(
+            """SELECT employee_id, event_type, COUNT(*) AS event_count
+               FROM hygiene_board_events
+               WHERE board = ? AND occurred_at >= ? AND occurred_at < ?
+                 AND employee_id IS NOT NULL
+               GROUP BY employee_id, event_type""",
+            (BOARD_PERSON, start.isoformat(), end.isoformat()),
+        )
         by_id = {}
-        for event in events:
-            employee_id = event.get("employee_id")
-            if employee_id is None:
-                continue
+        for event_row in await cur.fetchall():
+            event = dict(event_row)
+            employee_id = int(event["employee_id"])
             row = by_id.setdefault(
-                int(employee_id),
+                employee_id,
                 {
-                    "employee_id": int(employee_id),
+                    "employee_id": employee_id,
                     "name": None,
                     "phone": None,
                     **{key: 0 for key in PERSON_COUNT_KEYS},
@@ -1259,7 +1657,7 @@ class HygieneWork:
             )
             kind = event["event_type"]
             if kind in PERSON_COUNT_KEYS:
-                row[kind] += 1
+                row[kind] += int(event["event_count"])
         if by_id:
             placeholders = ",".join("?" * len(by_id))
             cur = await self._conn.execute(
@@ -1275,23 +1673,30 @@ class HygieneWork:
         return people
 
     async def zone_board(self, now: Optional[datetime] = None) -> list:
-        events = await self._events_in_week(BOARD_ZONE, now)
+        start, end = self._week_bounds(now)
+        cur = await self._conn.execute(
+            """SELECT zone_id, event_type, COUNT(*) AS event_count
+               FROM hygiene_board_events
+               WHERE board = ? AND occurred_at >= ? AND occurred_at < ?
+                 AND zone_id IS NOT NULL
+               GROUP BY zone_id, event_type""",
+            (BOARD_ZONE, start.isoformat(), end.isoformat()),
+        )
         by_id = {}
-        for event in events:
-            zone_id = event.get("zone_id")
-            if zone_id is None:
-                continue
+        for event_row in await cur.fetchall():
+            event = dict(event_row)
+            zone_id = int(event["zone_id"])
             row = by_id.setdefault(
-                int(zone_id),
+                zone_id,
                 {
-                    "zone_id": int(zone_id),
+                    "zone_id": zone_id,
                     "zone_name": None,
                     **{key: 0 for key in ZONE_COUNT_KEYS},
                 },
             )
             kind = event["event_type"]
             if kind in ZONE_COUNT_KEYS:
-                row[kind] += 1
+                row[kind] += int(event["event_count"])
         if by_id:
             placeholders = ",".join("?" * len(by_id))
             cur = await self._conn.execute(
@@ -1323,23 +1728,38 @@ class HygieneWork:
             (SHIFT_NIGHT, clocks["night_hhmm"]),
         )
         items = await self._catalog_daily_items()
+        inst_cur = await self._conn.execute(
+            """SELECT item_id, shift, status
+               FROM hygiene_daily_instances
+               WHERE business_date = ?""",
+            (business_date,),
+        )
+        statuses = {
+            (str(dict(row)["shift"]), int(dict(row)["item_id"])): str(
+                dict(row)["status"]
+            )
+            for row in await inst_cur.fetchall()
+        }
+        noticed = await self._overdue_notice_keys(business_date)
         notified = []
         for shift, hhmm in shift_clocks:
             if not self._clock_reached(now, hhmm):
                 continue
+            missing = []
             for item in items:
-                instance = await self._fetch_instance(
-                    business_date, shift, int(item["id"])
-                )
-                status = STATUS_TODO if instance is None else dict(instance)["status"]
-                if status != STATUS_TODO:
+                key = (shift, int(item["id"]))
+                if statuses.get(key, STATUS_TODO) != STATUS_TODO:
                     continue
-                if await self._notice_exists(business_date, shift, int(item["id"])):
+                if key in noticed:
                     continue
-                text = self._overdue_group_text(business_date, shift, item)
-                if self._notifier is not None:
-                    await self._notifier.notify_group_text(text)
-                await self._record_overdue_notice(business_date, shift, item)
+                missing.append(item)
+            if not missing:
+                continue
+            text = self._overdue_digest_text(business_date, shift, missing)
+            if self._notifier is not None:
+                await self._notifier.notify_group_text(text)
+            await self._record_overdue_notices(business_date, shift, missing)
+            for item in missing:
                 notified.append(
                     {
                         "business_date": business_date,
@@ -1353,29 +1773,47 @@ class HygieneWork:
         if deep_notice is not None:
             notified.append(deep_notice)
         notified.extend(await self._sweep_fix_overdue(now))
+        if notified and self._on_change is not None:
+            await self._on_change({
+                "resource": "boards",
+                "action": "overdue",
+                "business_date": business_date,
+            })
         return notified
 
     async def _deep_clean_complete(self, business_date: str) -> bool:
         weekday = self._weekday_of(business_date)
-        items = await self._catalog_deep_clean_items(weekday)
-        if not items:
-            return True
-        for item in items:
-            instance = await self._fetch_deep_clean_instance(business_date, int(item["id"]))
-            if instance is None or instance["status"] != STATUS_PASSED:
-                return False
-        return True
+        cur = await self._conn.execute(
+            """SELECT
+                 (SELECT COUNT(*) FROM hygiene_deep_clean_items
+                  WHERE weekday = ?) AS total,
+                 (SELECT COUNT(*)
+                  FROM hygiene_deep_clean_instances inst
+                  JOIN hygiene_deep_clean_items item ON item.id = inst.item_id
+                  WHERE inst.business_date = ?
+                    AND item.weekday = ?
+                    AND inst.status = ?) AS passed""",
+            (weekday, business_date, weekday, STATUS_PASSED),
+        )
+        row = dict(await cur.fetchone())
+        return int(row["total"]) == 0 or int(row["passed"]) == int(row["total"])
 
     async def _deep_clean_all_submitted(self, business_date: str) -> bool:
         weekday = self._weekday_of(business_date)
-        items = await self._catalog_deep_clean_items(weekday)
-        if not items:
-            return True
-        for item in items:
-            instance = await self._fetch_deep_clean_instance(business_date, int(item["id"]))
-            if instance is None or instance["status"] == STATUS_TODO:
-                return False
-        return True
+        cur = await self._conn.execute(
+            """SELECT
+                 (SELECT COUNT(*) FROM hygiene_deep_clean_items
+                  WHERE weekday = ?) AS total,
+                 (SELECT COUNT(*)
+                  FROM hygiene_deep_clean_instances inst
+                  JOIN hygiene_deep_clean_items item ON item.id = inst.item_id
+                  WHERE inst.business_date = ?
+                    AND item.weekday = ?
+                    AND inst.status != ?) AS submitted""",
+            (weekday, business_date, weekday, STATUS_TODO),
+        )
+        row = dict(await cur.fetchone())
+        return int(row["total"]) == 0 or int(row["submitted"]) == int(row["total"])
 
     async def _deep_clean_notice_exists(self, business_date: str) -> bool:
         cur = await self._conn.execute(
@@ -1423,15 +1861,53 @@ class HygieneWork:
         end = datetime.strptime(to_date, "%Y-%m-%d").date()
         if end < start:
             return []
+        start_text = start.isoformat()
+        end_text = end.isoformat()
+        item_cur = await self._conn.execute(
+            """SELECT weekday, COUNT(*) AS item_count
+               FROM hygiene_deep_clean_items
+               GROUP BY weekday"""
+        )
+        item_counts = {
+            int(dict(row)["weekday"]): int(dict(row)["item_count"])
+            for row in await item_cur.fetchall()
+        }
+        inst_cur = await self._conn.execute(
+            """SELECT inst.business_date, item.weekday, inst.status, COUNT(*) AS item_count
+               FROM hygiene_deep_clean_instances inst
+               JOIN hygiene_deep_clean_items item ON item.id = inst.item_id
+               WHERE inst.business_date BETWEEN ? AND ?
+               GROUP BY inst.business_date, item.weekday, inst.status""",
+            (start_text, end_text),
+        )
+        instance_counts: dict[tuple[str, int, str], int] = {}
+        for row in await inst_cur.fetchall():
+            mapping = dict(row)
+            instance_counts[
+                (
+                    str(mapping["business_date"]),
+                    int(mapping["weekday"]),
+                    str(mapping["status"]),
+                )
+            ] = int(mapping["item_count"])
+        notice_cur = await self._conn.execute(
+            """SELECT business_date FROM hygiene_deep_clean_overdue_notices
+               WHERE business_date BETWEEN ? AND ?""",
+            (start_text, end_text),
+        )
+        missed_dates = {str(dict(row)["business_date"]) for row in await notice_cur.fetchall()}
         days = []
         cursor = start
         while cursor <= end:
             business_date = cursor.isoformat()
             weekday = cursor.weekday()
-            items = await self._catalog_deep_clean_items(weekday)
-            if items:
-                complete = await self._deep_clean_complete(business_date)
-                missed = await self._deep_clean_notice_exists(business_date)
+            item_count = item_counts.get(weekday, 0)
+            if item_count:
+                complete = (
+                    instance_counts.get((business_date, weekday, STATUS_PASSED), 0)
+                    == item_count
+                )
+                missed = business_date in missed_dates
                 if complete:
                     status = CALENDAR_DONE
                 elif missed:
@@ -1444,7 +1920,7 @@ class HygieneWork:
                         "weekday": weekday,
                         "weekday_name": WEEKDAY_NAMES[weekday],
                         "status": status,
-                        "item_count": len(items),
+                        "item_count": item_count,
                     }
                 )
             cursor = cursor + timedelta(days=1)
@@ -1473,6 +1949,7 @@ class HygieneWork:
             "photographer": photographer,
         }
 
+    @serialized_write
     async def add_deep_clean_item(self, actor: dict, weekday, name: str) -> dict:
         self._require_super(actor)
         day = self._parse_weekday(weekday)
@@ -1615,28 +2092,53 @@ class HygieneWork:
         del actor  # shop-wide; 班次 does not gate 专项卫生
         business_date = hygiene_business_date(self._now_dt())
         weekday = self._weekday_of(business_date)
-        items = await self._catalog_deep_clean_items(weekday)
+        cur = await self._conn.execute(
+            """SELECT i.id AS item_id, i.weekday, i.name AS item_name,
+                      inst.id AS instance_id, inst.status AS instance_status,
+                      inst.pending_submission_id,
+                      sub.id AS submission_id,
+                      sub.before_capture_id, sub.after_capture_id,
+                      sub.before_content_type, sub.after_content_type,
+                      sub.submitter_id, sub.submitter_phone, sub.item_name AS submission_item_name,
+                      sub.before_captured_at, sub.after_captured_at
+               FROM hygiene_deep_clean_items i
+               LEFT JOIN hygiene_deep_clean_instances inst
+                 ON inst.item_id = i.id AND inst.business_date = ?
+               LEFT JOIN hygiene_deep_clean_submissions sub
+                 ON sub.id = inst.pending_submission_id
+               WHERE i.weekday = ?
+               ORDER BY i.id ASC""",
+            (business_date, weekday),
+        )
         rows = []
-        for item in items:
-            instance = await self._fetch_deep_clean_instance(business_date, int(item["id"]))
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            item = {
+                "id": mapping["item_id"],
+                "weekday": mapping["weekday"],
+                "name": mapping["item_name"],
+            }
+            instance = None
+            if mapping.get("instance_id") is not None:
+                instance = {
+                    "id": mapping["instance_id"],
+                    "status": mapping["instance_status"],
+                    "pending_submission_id": mapping.get("pending_submission_id"),
+                }
             submission = None
-            if instance is not None:
-                submission = await self._fetch_deep_clean_submission(
-                    instance.get("pending_submission_id")
-                )
-                if submission is None and instance["status"] == STATUS_PASSED:
-                    sub_cur = await self._conn.execute(
-                        """SELECT id, instance_id, before_capture_id, after_capture_id,
-                                  before_content_type, after_content_type, submitter_id,
-                                  submitter_phone, item_name, before_captured_at,
-                                  after_captured_at
-                           FROM hygiene_deep_clean_submissions
-                           WHERE instance_id = ?
-                           ORDER BY id DESC LIMIT 1""",
-                        (instance["id"],),
-                    )
-                    sub_row = await sub_cur.fetchone()
-                    submission = None if sub_row is None else dict(sub_row)
+            if mapping.get("submission_id") is not None:
+                submission = {
+                    "id": mapping["submission_id"],
+                    "before_capture_id": mapping["before_capture_id"],
+                    "after_capture_id": mapping["after_capture_id"],
+                    "before_content_type": mapping["before_content_type"],
+                    "after_content_type": mapping["after_content_type"],
+                    "submitter_id": mapping["submitter_id"],
+                    "submitter_phone": mapping["submitter_phone"],
+                    "item_name": mapping["submission_item_name"],
+                    "before_captured_at": mapping["before_captured_at"],
+                    "after_captured_at": mapping["after_captured_at"],
+                }
             rows.append(self._deep_clean_row(item, business_date, instance, submission))
         status = CALENDAR_DONE if rows and all(
             row["status"] == STATUS_PASSED for row in rows
@@ -1656,25 +2158,19 @@ class HygieneWork:
             raise HygieneWorkError("forbidden", "forbidden")
 
     async def _ensure_deep_clean_instance(self, business_date: str, item_id: int) -> dict:
-        existing = await self._fetch_deep_clean_instance(business_date, item_id)
-        if existing is not None:
-            return existing
         now = self._now_iso()
-        cur = await self._conn.execute(
-            """INSERT INTO hygiene_deep_clean_instances
+        await self._conn.execute(
+            """INSERT OR IGNORE INTO hygiene_deep_clean_instances
                (business_date, item_id, status, pending_submission_id, created_at, updated_at)
                VALUES (?, ?, ?, NULL, ?, ?)""",
             (business_date, int(item_id), STATUS_TODO, now, now),
         )
-        await self._conn.commit()
-        return {
-            "id": int(cur.lastrowid),
-            "business_date": business_date,
-            "item_id": int(item_id),
-            "status": STATUS_TODO,
-            "pending_submission_id": None,
-        }
+        existing = await self._fetch_deep_clean_instance(business_date, item_id)
+        if existing is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        return existing
 
+    @serialized_write
     async def submit_deep_clean_pair(self, actor: dict, item_id: int, before, after) -> dict:
         """Submit a live before/after pair. Last writer of the complete pair is the submitter."""
         self._require_staff_submitter(actor)
@@ -1695,37 +2191,51 @@ class HygieneWork:
             raise HygieneWorkError("already_accepted", "already_accepted")
         before_type = (before.get("content_type") or "image/jpeg").strip()
         after_type = (after.get("content_type") or "image/jpeg").strip()
-        before_id = self._captures.put(before_data, content_type=before_type)
-        after_id = self._captures.put(after_data, content_type=after_type)
+        before_id, before_generated = await self._store_capture(before_data, before_type)
+        after_id, after_generated = await self._store_capture(after_data, after_type)
         now = self._now_iso()
-        cur = await self._conn.execute(
-            """INSERT INTO hygiene_deep_clean_submissions
-               (instance_id, before_capture_id, after_capture_id, before_content_type,
-                after_content_type, submitter_id, submitter_phone, item_name,
-                before_captured_at, after_captured_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                instance["id"],
-                before_id,
-                after_id,
-                before_type,
-                after_type,
-                int(actor["id"]),
-                photographer,
-                item["name"],
-                now,
-                now,
-                now,
-            ),
-        )
-        submission_id = int(cur.lastrowid)
-        await self._conn.execute(
-            """UPDATE hygiene_deep_clean_instances
-               SET status = ?, pending_submission_id = ?, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_PENDING, submission_id, now, instance["id"]),
-        )
-        await self._conn.commit()
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO hygiene_deep_clean_submissions
+                   (instance_id, before_capture_id, after_capture_id, before_content_type,
+                    after_content_type, submitter_id, submitter_phone, item_name,
+                    before_captured_at, after_captured_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    instance["id"],
+                    before_id,
+                    after_id,
+                    before_type,
+                    after_type,
+                    int(actor["id"]),
+                    photographer,
+                    item["name"],
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            submission_id = int(cur.lastrowid)
+            await self._conn.execute(
+                """UPDATE hygiene_deep_clean_instances
+                   SET status = ?, pending_submission_id = ?, updated_at = ?
+                   WHERE id = ?""",
+                (STATUS_PENDING, submission_id, now, instance["id"]),
+            )
+            await self._insert_variants(before_id, before_generated)
+            await self._insert_variants(after_id, after_generated)
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            await self._delete_capture_files(
+                [
+                    before_id,
+                    after_id,
+                    *(item[0] for item in before_generated.values()),
+                    *(item[0] for item in after_generated.values()),
+                ]
+            )
+            raise
         logger.info(
             "hygiene deep-clean submitted item=%s before=%s after=%s",
             item_id,
@@ -1789,16 +2299,20 @@ class HygieneWork:
             "watermark": after_wm,
         }
 
+    @serialized_write
     async def accept_deep_clean_pair(self, actor: dict, item_id: int) -> dict:
         instance, submission = await self._pending_deep_clean(item_id)
         self._require_reviewer(actor, submission["submitter_id"])
         now = self._now_iso()
-        await self._conn.execute(
+        cur = await self._conn.execute(
             """UPDATE hygiene_deep_clean_instances
                SET status = ?, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_PASSED, now, instance["id"]),
+               WHERE id = ? AND status = ?""",
+            (STATUS_PASSED, now, instance["id"], STATUS_PENDING),
         )
+        if cur.rowcount != 1:
+            await self._conn.rollback()
+            raise HygieneWorkError("not_pending", "not_pending")
         await self._conn.commit()
         logger.info("hygiene deep-clean accepted item=%s", item_id)
         work = await self.list_deep_clean_work(actor)
@@ -1809,16 +2323,20 @@ class HygieneWork:
             "task_status": work["status"],
         }
 
+    @serialized_write
     async def reject_deep_clean_pair(self, actor: dict, item_id: int) -> dict:
         instance, submission = await self._pending_deep_clean(item_id)
         self._require_reviewer(actor, submission["submitter_id"])
         now = self._now_iso()
-        await self._conn.execute(
+        cur = await self._conn.execute(
             """UPDATE hygiene_deep_clean_instances
                SET status = ?, pending_submission_id = NULL, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_TODO, now, instance["id"]),
+               WHERE id = ? AND status = ?""",
+            (STATUS_TODO, now, instance["id"], STATUS_PENDING),
         )
+        if cur.rowcount != 1:
+            await self._conn.rollback()
+            raise HygieneWorkError("not_pending", "not_pending")
         await self._conn.commit()
         logger.info("hygiene deep-clean rejected item=%s", item_id)
         return {
@@ -1968,6 +2486,7 @@ class HygieneWork:
         row = await cur.fetchone()
         return None if row is None else dict(row)
 
+    @serialized_write
     async def open_fix(
         self,
         actor: dict,
@@ -2006,35 +2525,43 @@ class HygieneWork:
         if marks is None and live_capture is not None:
             marks = live_capture.get("markup")
         content_type = (live_capture.get("content_type") or "image/jpeg").strip()
-        capture_id = self._captures.put(data, content_type=content_type)
+        capture_id, generated = await self._store_capture(data, content_type)
         now = self._now_iso()
         duration_seconds = int(span.total_seconds())
         deadline = (self._now_dt() + span).isoformat()
-        cur = await self._conn.execute(
-            """INSERT INTO hygiene_fix_tickets
-               (zone_id, ticket_type, body_text, duration_seconds, deadline,
-                opener_kind, opener_id, opener_phone, status, capture_id,
-                content_type, markup_json, pending_reshoot_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
-            (
-                int(zone_id),
-                cleaned_type,
-                cleaned_body,
-                duration_seconds,
-                deadline,
-                opener_kind,
-                opener_id,
-                opener_phone,
-                STATUS_FIX_TODO,
-                capture_id,
-                content_type,
-                self._markup_json({"markup": marks or []}),
-                now,
-                now,
-            ),
-        )
-        ticket_id = int(cur.lastrowid)
-        await self._conn.commit()
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO hygiene_fix_tickets
+                   (zone_id, ticket_type, body_text, duration_seconds, deadline,
+                    opener_kind, opener_id, opener_phone, status, capture_id,
+                    content_type, markup_json, pending_reshoot_id, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+                (
+                    int(zone_id),
+                    cleaned_type,
+                    cleaned_body,
+                    duration_seconds,
+                    deadline,
+                    opener_kind,
+                    opener_id,
+                    opener_phone,
+                    STATUS_FIX_TODO,
+                    capture_id,
+                    content_type,
+                    self._markup_json({"markup": marks or []}),
+                    now,
+                    now,
+                ),
+            )
+            ticket_id = int(cur.lastrowid)
+            await self._insert_variants(capture_id, generated)
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            await self._delete_capture_files(
+                [capture_id, *(item[0] for item in generated.values())]
+            )
+            raise
         text = self._fix_open_text(zone_name, cleaned_type, cleaned_body, duration_seconds)
         if self._notifier is not None:
             await self._notifier.notify_group_text(text)
@@ -2065,9 +2592,16 @@ class HygieneWork:
         sql = """SELECT t.id, t.zone_id, t.ticket_type, t.body_text, t.duration_seconds,
                         t.deadline, t.opener_kind, t.opener_id, t.opener_phone, t.status,
                         t.capture_id, t.content_type, t.markup_json, t.pending_reshoot_id,
-                        t.created_at, z.name AS zone_name
+                        t.created_at, z.name AS zone_name,
+                        r.id AS reshoot_id, r.capture_id AS reshoot_capture_id,
+                        r.content_type AS reshoot_content_type,
+                        r.photographer_id AS reshoot_photographer_id,
+                        r.photographer_phone AS reshoot_photographer_phone,
+                        r.zone_name AS reshoot_zone_name,
+                        r.captured_at AS reshoot_captured_at
                  FROM hygiene_fix_tickets t
                  JOIN hygiene_zones z ON z.id = t.zone_id
+                 LEFT JOIN hygiene_fix_reshoots r ON r.id = t.pending_reshoot_id
                  WHERE t.status != ?"""
         params: list = [STATUS_PASSED]
         zone_id = self._actor_zone_id(actor)
@@ -2079,7 +2613,17 @@ class HygieneWork:
         rows = []
         for row in await cur.fetchall():
             ticket = dict(row)
-            reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
+            reshoot = None
+            if ticket.get("reshoot_id") is not None:
+                reshoot = {
+                    "id": ticket["reshoot_id"],
+                    "capture_id": ticket["reshoot_capture_id"],
+                    "content_type": ticket["reshoot_content_type"],
+                    "photographer_id": ticket["reshoot_photographer_id"],
+                    "photographer_phone": ticket["reshoot_photographer_phone"],
+                    "zone_name": ticket["reshoot_zone_name"],
+                    "captured_at": ticket["reshoot_captured_at"],
+                }
             rows.append(self._fix_row(ticket, reshoot))
         return rows
 
@@ -2111,6 +2655,7 @@ class HygieneWork:
             raise HygieneWorkError("not_pending", "not_pending")
         return self._fix_row(ticket, reshoot)
 
+    @serialized_write
     async def reshoot_fix(self, actor: dict, ticket_id: int, live_capture) -> dict:
         self._require_staff_submitter(actor)
         data = self._require_live_capture(live_capture)
@@ -2124,32 +2669,40 @@ class HygieneWork:
         if not photographer:
             raise HygieneWorkError("photographer_required", "photographer_required")
         content_type = (live_capture.get("content_type") or "image/jpeg").strip()
-        capture_id = self._captures.put(data, content_type=content_type)
+        capture_id, generated = await self._store_capture(data, content_type)
         now = self._now_iso()
-        cur = await self._conn.execute(
-            """INSERT INTO hygiene_fix_reshoots
-               (ticket_id, capture_id, content_type, photographer_id,
-                photographer_phone, zone_name, captured_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                int(ticket_id),
-                capture_id,
-                content_type,
-                int(actor["id"]),
-                photographer,
-                ticket["zone_name"],
-                now,
-                now,
-            ),
-        )
-        reshoot_id = int(cur.lastrowid)
-        await self._conn.execute(
-            """UPDATE hygiene_fix_tickets
-               SET status = ?, pending_reshoot_id = ?, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_PENDING, reshoot_id, now, int(ticket_id)),
-        )
-        await self._conn.commit()
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO hygiene_fix_reshoots
+                   (ticket_id, capture_id, content_type, photographer_id,
+                    photographer_phone, zone_name, captured_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    int(ticket_id),
+                    capture_id,
+                    content_type,
+                    int(actor["id"]),
+                    photographer,
+                    ticket["zone_name"],
+                    now,
+                    now,
+                ),
+            )
+            reshoot_id = int(cur.lastrowid)
+            await self._conn.execute(
+                """UPDATE hygiene_fix_tickets
+                   SET status = ?, pending_reshoot_id = ?, updated_at = ?
+                   WHERE id = ?""",
+                (STATUS_PENDING, reshoot_id, now, int(ticket_id)),
+            )
+            await self._insert_variants(capture_id, generated)
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            await self._delete_capture_files(
+                [capture_id, *(item[0] for item in generated.values())]
+            )
+            raise
         logger.info(
             "hygiene fix reshot ticket=%s capture=%s",
             ticket_id,
@@ -2177,17 +2730,21 @@ class HygieneWork:
             raise HygieneWorkError("not_pending", "not_pending")
         return ticket, reshoot
 
+    @serialized_write
     async def accept_fix(self, actor: dict, ticket_id: int) -> dict:
         ticket, _reshoot = await self._pending_fix(ticket_id)
         self._require_zone_access(actor, ticket["zone_id"])
         self._require_fix_reviewer(actor, ticket)
         now = self._now_iso()
-        await self._conn.execute(
+        cur = await self._conn.execute(
             """UPDATE hygiene_fix_tickets
                SET status = ?, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_PASSED, now, int(ticket_id)),
+               WHERE id = ? AND status = ?""",
+            (STATUS_PASSED, now, int(ticket_id), STATUS_PENDING),
         )
+        if cur.rowcount != 1:
+            await self._conn.rollback()
+            raise HygieneWorkError("not_pending", "not_pending")
         await self._conn.commit()
         logger.info("hygiene fix accepted ticket=%s", ticket_id)
         return {
@@ -2196,6 +2753,7 @@ class HygieneWork:
             "deadline": ticket["deadline"],
         }
 
+    @serialized_write
     async def reject_fix(self, actor: dict, ticket_id: int) -> dict:
         ticket, _reshoot = await self._pending_fix(ticket_id)
         self._require_zone_access(actor, ticket["zone_id"])
@@ -2203,12 +2761,15 @@ class HygieneWork:
         now_dt = self._now_dt()
         now = now_dt.isoformat()
         deadline = (now_dt + timedelta(seconds=int(ticket["duration_seconds"]))).isoformat()
-        await self._conn.execute(
+        cur = await self._conn.execute(
             """UPDATE hygiene_fix_tickets
                SET status = ?, pending_reshoot_id = NULL, deadline = ?, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_FIX_TODO, deadline, now, int(ticket_id)),
+               WHERE id = ? AND status = ?""",
+            (STATUS_FIX_TODO, deadline, now, int(ticket_id), STATUS_PENDING),
         )
+        if cur.rowcount != 1:
+            await self._conn.rollback()
+            raise HygieneWorkError("not_pending", "not_pending")
         await self._conn.commit()
         logger.info("hygiene fix rejected ticket=%s deadline=%s", ticket_id, deadline)
         return {
@@ -2218,12 +2779,20 @@ class HygieneWork:
             "reshoot_capture_id": None,
         }
 
-    async def _fix_notice_exists(self, ticket_id: int) -> bool:
+    async def _fix_notice_ids(self) -> set[int]:
         cur = await self._conn.execute(
-            "SELECT 1 FROM hygiene_fix_overdue_notices WHERE ticket_id = ?",
-            (int(ticket_id),),
+            "SELECT ticket_id FROM hygiene_fix_overdue_notices"
         )
-        return await cur.fetchone() is not None
+        return {int(dict(row)["ticket_id"]) for row in await cur.fetchall()}
+
+    def _fix_overdue_digest_text(self, zone_name: str, tickets: list[dict]) -> str:
+        lines = [f"【整改逾期】{zone_name}"]
+        for ticket in tickets:
+            body = (ticket.get("body_text") or "").strip()
+            suffix = f"：{body}" if body else ""
+            lines.append(f"- {ticket['ticket_type']}{suffix}")
+        lines.append("请到员工卫生入口回拍。")
+        return "\n".join(lines)
 
     async def _record_fix_overdue(self, ticket: dict) -> None:
         now = self._now_iso()
@@ -2239,44 +2808,53 @@ class HygieneWork:
             EVENT_MISSED_DAILY,
             zone_id=zone_id,
         )
-        last = await self._latest_fix_reshoot(ticket_id)
-        if last is not None:
+        last_photographer_id = ticket.get("last_photographer_id")
+        if last_photographer_id is not None:
             await self._insert_board_event(
                 BOARD_PERSON,
                 EVENT_MISSED_DAILY,
                 zone_id=zone_id,
-                employee_id=int(last["photographer_id"]),
+                employee_id=int(last_photographer_id),
             )
-        await self._conn.commit()
 
     async def _sweep_fix_overdue(self, now: datetime) -> list:
         cur = await self._conn.execute(
             """SELECT t.id, t.zone_id, t.ticket_type, t.body_text, t.deadline, t.status,
-                      z.name AS zone_name
+                      z.name AS zone_name,
+                      (SELECT r.photographer_id
+                       FROM hygiene_fix_reshoots r
+                       WHERE r.ticket_id = t.id
+                       ORDER BY r.id DESC LIMIT 1) AS last_photographer_id
                FROM hygiene_fix_tickets t
                JOIN hygiene_zones z ON z.id = t.zone_id
                WHERE t.status != ?""",
             (STATUS_PASSED,),
         )
-        notified = []
+        noticed = await self._fix_notice_ids()
+        by_zone: dict[str, list[dict]] = {}
         for row in await cur.fetchall():
             ticket = dict(row)
             if self._parse_iso(ticket["deadline"]) > now:
                 continue
-            if await self._fix_notice_exists(int(ticket["id"])):
+            if int(ticket["id"]) in noticed:
                 continue
-            text = self._fix_overdue_text(ticket)
+            by_zone.setdefault(ticket["zone_name"], []).append(ticket)
+        notified = []
+        for zone_name, tickets in by_zone.items():
+            text = self._fix_overdue_digest_text(zone_name, tickets)
             if self._notifier is not None:
                 await self._notifier.notify_group_text(text)
-            await self._record_fix_overdue(ticket)
-            notified.append(
-                {
-                    "ticket_id": int(ticket["id"]),
-                    "zone_id": int(ticket["zone_id"]),
-                    "kind": "整改单",
-                    "text": text,
-                }
-            )
+            for ticket in tickets:
+                await self._record_fix_overdue(ticket)
+                notified.append(
+                    {
+                        "ticket_id": int(ticket["id"]),
+                        "zone_id": int(ticket["zone_id"]),
+                        "kind": "整改单",
+                        "text": text,
+                    }
+                )
+            await self._conn.commit()
         return notified
 
     async def overdue_scheduler_loop(self) -> None:
@@ -2433,6 +3011,7 @@ class HygieneWork:
             "shift": None,
         }
 
+    @serialized_write
     async def mark_teaching(self, actor: dict, source: dict) -> dict:
         self._require_super(actor)
         payload = source or {}

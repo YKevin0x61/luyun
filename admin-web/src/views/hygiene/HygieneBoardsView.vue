@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import { api } from '../../api/client'
+import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import { teachingShotUrl } from '../../utils/hygieneMarkup'
 
 const boards = ref({ week_start: '', people: [], zones: [] })
@@ -11,6 +12,12 @@ const errorText = ref('')
 const selected = ref(null)
 
 onMounted(refreshPage)
+
+useHygieneRealtime({
+  id: 'hygiene-admin-boards',
+  resources: ['boards', 'teaching'],
+  pull: refreshPage,
+})
 
 function weekLabel(iso) {
   const raw = String(iso || '')
@@ -50,7 +57,11 @@ function openTeaching(row) {
       <div>
         <p class="hy-eyebrow">Boards · 周次公示</p>
         <h1>红黑榜与卫生教材</h1>
-        <p>两张榜只记次数：逾期、驳回、一次通过、实拍。按周一 06:00 切周，不是零点。所有登录员工都能看。教材要超级管理员从已通过的对照里手点，合格图不会自动进库。</p>
+        <p>按本周次数公示，不折算评分。</p>
+        <details class="rule-help">
+          <summary>规则说明</summary>
+          <p>两张榜只记录逾期、驳回、一次通过和实拍次数，按周一 06:00 切周。所有登录员工都能查看。卫生教材由超级管理员从已通过的对照中手动标记。</p>
+        </details>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
     </div>
@@ -112,10 +123,12 @@ function openTeaching(row) {
           <HygieneReviewPair
             :left-label="selected.left_label"
             :right-label="selected.right_label"
-            :standard-src="teachingShotUrl('admin', selected, 'left')"
+            :standard-src="teachingShotUrl('admin', selected, 'left', 'preview')"
+            :original-standard-src="teachingShotUrl('admin', selected, 'left')"
             :standard-markup="selected.left_markup || []"
             :standard-alt="selected.left_label"
-            :capture-src="teachingShotUrl('admin', selected, 'right')"
+            :capture-src="teachingShotUrl('admin', selected, 'right', 'preview')"
+            :original-capture-src="teachingShotUrl('admin', selected, 'right')"
             :capture-alt="selected.right_label"
           />
         </div>

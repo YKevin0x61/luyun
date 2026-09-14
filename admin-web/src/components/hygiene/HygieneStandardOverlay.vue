@@ -7,6 +7,8 @@ import HygieneMarkupOverlay from './HygieneMarkupOverlay.vue'
 
 const props = defineProps({
   src: { type: String, default: '' },
+  displayVariant: { type: String, default: '' },
+  lightboxSrc: { type: String, default: '' },
   standardId: { type: [Number, String], default: null },
   markup: { type: Array, default: () => [] },
   alt: { type: String, default: '标准图' },
@@ -55,7 +57,7 @@ async function resolveSource() {
     if (previous && previous.startsWith('blob:')) standardPhotoCache.releaseImage(previous)
     return
   }
-  if (!props.standardId) {
+  if (!props.standardId || props.displayVariant) {
     resolvedSrc.value = props.src
     if (previous && previous !== props.src && previous.startsWith('blob:')) {
       standardPhotoCache.releaseImage(previous)
@@ -75,7 +77,7 @@ async function resolveSource() {
 }
 
 watch(
-  () => [props.src, props.standardId, missingOffline.value],
+  () => [props.src, props.standardId, props.displayVariant, missingOffline.value],
   resolveSource,
   { immediate: true },
 )
@@ -119,7 +121,7 @@ onBeforeUnmount(() => {
     </div>
     <HygieneImageLightbox
       v-if="lightboxOpen"
-      :src="resolvedSrc"
+      :src="lightboxSrc || resolvedSrc"
       :alt="alt"
       :markup="markup"
       :watermark="lightboxWatermark"

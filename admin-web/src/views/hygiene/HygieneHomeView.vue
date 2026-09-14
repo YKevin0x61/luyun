@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import SvgIcon from '../../components/SvgIcon.vue'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneImageLightbox from '../../components/hygiene/HygieneImageLightbox.vue'
@@ -9,6 +10,7 @@ import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOver
 import HygieneWatermarkOverlay from '../../components/hygiene/HygieneWatermarkOverlay.vue'
 import StandardPhotoCachePanel from '../../components/hygiene/StandardPhotoCachePanel.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
+import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
 import {
   HYGIENE_BRAND_MARK,
@@ -99,12 +101,36 @@ const localBeforeWatermark = ref(null)
 const dailyClocks = ref(null)
 const deepClock = ref(null)
 const flashText = ref('')
+const uploadProgress = ref(null)
+const confirmCloseOpen = ref(false)
+const formError = ref('')
+const formErrorField = ref('')
 const nowTick = ref(Date.now())
 const closeButton = ref(null)
+const lastFocusedElement = ref(null)
+const zonesLoaded = ref(false)
+const boardsLoaded = ref(false)
+const teachingLoaded = ref(false)
 let clockTimer = null
 
 const needsAssignment = computed(() => {
   return Boolean(employee.value) && (!employee.value.shift || !employee.value.zone_id)
+})
+const sheetDirty = computed(() => {
+  const current = sheet.value
+  if (!current) return false
+  if (current.mode === 'form') {
+    return Boolean(
+      String(current.bodyText || '').trim()
+        || (current.markup || []).length
+    )
+  }
+  return Boolean(
+    current.blob
+      || current.beforeBlob
+      || current.afterBlob
+      || (current.mode && current.mode.endsWith('-preview')),
+  )
 })
 const showAssignmentPicker = computed(() => needsAssignment.value || changingAssignment.value)
 
@@ -150,10 +176,32 @@ watch(currentStaffTab, (item) => {
 
 watch(sheet, async (value, previous) => {
   standardPhotoCache.setTaskSheetOpen(Boolean(value))
-  if (!value || previous) return
+  if (!value) {
+    if (previous && lastFocusedElement.value instanceof HTMLElement) {
+      lastFocusedElement.value.focus()
+    }
+    document.body.style.overflow = ''
+    lastFocusedElement.value = null
+    return
+  }
+  if (previous) return
+  lastFocusedElement.value = document.activeElement
+  document.body.style.overflow = 'hidden'
   await nextTick()
   if (closeButton.value) closeButton.value.focus()
 })
+
+watch(tab, async (id) => {
+  if (id === 'boards') {
+    await Promise.allSettled([loadBoards(), loadTeaching()])
+  } else if (id === 'fix') {
+    await loadZones()
+  }
+})
+
+watch(needsAssignment, (needed) => {
+  if (needed && !zonesLoaded.value) loadZones()
+}, { immediate: true })
 
 function tabCount(id) {
   return tabWorkCount(id, {
@@ -185,9 +233,86 @@ function tickClock() {
   nowTick.value = Date.now()
 }
 
-function onKeydown(event) {
-  if (event.key === 'Escape' && sheet.value) closeSheet()
+function submitLabel(fallback, processing = '正在处理…') {
+  if (!busy.value) return fallback
+  if (uploadProgress.value) {
+    return uploadProgress.value.done
+      ? processing
+      : `上传 ${uploadProgress.value.percent}%`
+  }
+  return '正在提交…'
 }
+
+async function staffUploadWithProgress(path, formData) {
+  uploadProgress.value = { percent: 0, done: false }
+  try {
+    return await staffUpload(path, formData, (next) => {
+      uploadProgress.value = next
+    })
+  } finally {
+    uploadProgress.value = null
+  }
+}
+
+function onKeydown(event) {
+  if (event.key === 'Escape' && sheet.value) {
+    requestCloseSheet()
+    return
+  }
+  if (event.key === 'Tab' && sheet.value) {
+    const container = document.querySelector('.staff-preview-card')
+    if (!container) return
+    const focusable = Array.from(container.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ))
+    if (!focusable.length) return
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
+}
+
+useHygieneRealtime({
+  id: 'hygiene-staff-home',
+  resources: [
+    'assignment',
+    'daily',
+    'deep',
+    'fix',
+    'boards',
+    'teaching',
+    'zones',
+    'settings',
+  ],
+  pull: async (event) => {
+    if (!employee.value) return
+    const resource = event && event.scope && event.scope.resource
+    if (resource === 'assignment' || resource === 'settings') {
+      await loadMe()
+      return
+    }
+    if (resource === 'daily') await loadInbox()
+    if (resource === 'deep') await loadDeepClean()
+    if (resource === 'fix') await loadFixTickets()
+    if (resource === 'boards') await loadBoards()
+    if (resource === 'teaching') await loadTeaching()
+    if (resource === 'zones') await loadZones()
+    if (!resource && employee.value.shift && employee.value.zone_id) {
+      await Promise.allSettled([
+        loadInbox(),
+        loadDeepClean(),
+        loadFixTickets(),
+        loadZones(),
+      ])
+    }
+  },
+})
 
 function openImageLightbox(src, alt, watermark = null, markup = []) {
   if (!src) return
@@ -206,6 +331,7 @@ onBeforeUnmount(() => {
   if (clockTimer) window.clearInterval(clockTimer)
   window.removeEventListener('keydown', onKeydown)
   standardPhotoCache.setTaskSheetOpen(false)
+  document.body.style.overflow = ''
   clearPreview()
 })
 
@@ -226,7 +352,7 @@ async function loadMe() {
     router.replace('/hygiene/login')
     return
   }
-  const jobs = [loadDeepClean, loadZones, loadBoards, loadTeaching]
+  const jobs = [loadDeepClean]
   if (employee.value && employee.value.shift && employee.value.zone_id) {
     jobs.push(loadInbox, loadFixTickets)
   } else {
@@ -257,17 +383,23 @@ async function loadFixTickets() {
 }
 
 async function loadZones() {
+  if (zonesLoaded.value) return
   const data = await staffRequest('/api/hygiene/staff/daily-catalog')
   zones.value = data.zones || []
+  zonesLoaded.value = true
 }
 
 async function loadBoards() {
+  if (boardsLoaded.value) return
   boards.value = await staffRequest('/api/hygiene/staff/boards')
+  boardsLoaded.value = true
 }
 
 async function loadTeaching() {
+  if (teachingLoaded.value) return
   const data = await staffRequest('/api/hygiene/staff/teaching')
   teaching.value = data.items || []
+  teachingLoaded.value = true
 }
 
 function weekLabel(iso) {
@@ -471,6 +603,7 @@ function runQueueTask(task) {
 
 function openFixForm() {
   errorText.value = ''
+  formError.value = ''
   flashText.value = ''
   if (!isManager.value) return
   if (needsAssignment.value) {
@@ -478,7 +611,7 @@ function openFixForm() {
     return
   }
   if (!liveOk.value) {
-    errorText.value = '打不开相机。必须现场拍，没有相册入口。'
+    errorText.value = '无法打开相机。请在浏览器设置中允许相机权限，或换一部手机；卫生拍照必须现场完成。'
     return
   }
   clearPreview()
@@ -505,13 +638,30 @@ function openFixOriginal(row) {
 
 function openFixCameraFromForm() {
   if (!sheet.value || sheet.value.kind !== 'fix') return
-  if (!sheet.value.zoneId || !sheet.value.bodyText.trim() || !sheet.value.durationHours) {
-    errorText.value = '请填类型、说明、时限，并选卫生责任区。'
+  if (!sheet.value.zoneId) {
+    formError.value = '请选择卫生责任区。'
+    formErrorField.value = 'fix-zone'
+  } else if (!sheet.value.ticketType) {
+    formError.value = '请选择整改类型。'
+    formErrorField.value = 'fix-type'
+  } else if (!sheet.value.bodyText.trim()) {
+    formError.value = '请写明哪里脏、怎么改。'
+    formErrorField.value = 'fix-body'
+  } else if (!sheet.value.durationHours || sheet.value.durationHours <= 0) {
+    formError.value = '请填写大于 0 的整改时限。'
+    formErrorField.value = 'fix-duration'
+  } else {
+    formError.value = ''
+    formErrorField.value = ''
+    errorText.value = ''
+    clearPreview()
+    sheet.value = { ...sheet.value, mode: 'fix-camera' }
     return
   }
-  errorText.value = ''
-  clearPreview()
-  sheet.value = { ...sheet.value, mode: 'fix-camera' }
+  nextTick(() => {
+    const field = document.getElementById(formErrorField.value)
+    field?.focus()
+  })
 }
 
 function openFixReshootCamera() {
@@ -698,7 +848,20 @@ function clearPreview() {
   clearBeforePreview()
 }
 
-function closeSheet() {
+function requestCloseSheet() {
+  if (sheetDirty.value) {
+    confirmCloseOpen.value = true
+    return
+  }
+  closeSheet()
+}
+
+function closeSheet(force = false) {
+  if (sheetDirty.value && !force) {
+    requestCloseSheet()
+    return
+  }
+  confirmCloseOpen.value = false
   clearPreview()
   sheet.value = null
   flashText.value = ''
@@ -711,7 +874,7 @@ function continueDaily(current) {
     sheet.value = { mode: 'standard', row: next }
     return
   }
-  closeSheet()
+  closeSheet(true)
 }
 
 function continueDeep(current) {
@@ -721,13 +884,13 @@ function continueDeep(current) {
     flashText.value = `已交，下一项：${next.item_name}`
     return
   }
-  closeSheet()
+  closeSheet(true)
 }
 
 function continueFix(current) {
   const next = nextFixWorkRow(fixInbox.value, current, { isManager: isManager.value })
   if (!next) {
-    closeSheet()
+    closeSheet(true)
     return
   }
   if (next.status === '待验收' && isManager.value) {
@@ -763,7 +926,7 @@ async function submitCapture() {
     form.append('file', sheet.value.blob, 'capture.jpg')
     form.append('live', 'true')
     form.append('shift', row.shift)
-    await staffUpload(`/api/hygiene/staff/daily/${row.item_id}/submit`, form)
+    await staffUploadWithProgress(`/api/hygiene/staff/daily/${row.item_id}/submit`, form)
     clearPreview()
     await loadInbox()
     continueDaily(row)
@@ -787,8 +950,8 @@ async function submitFixOpen() {
     form.append('body_text', sheet.value.bodyText.trim())
     form.append('duration_hours', String(sheet.value.durationHours))
     form.append('markup', JSON.stringify(sheet.value.markup || []))
-    await staffUpload('/api/hygiene/staff/fix', form)
-    closeSheet()
+    await staffUploadWithProgress('/api/hygiene/staff/fix', form)
+    closeSheet(true)
     await loadFixTickets()
   } catch (err) {
     errorText.value = err.message || '开单失败'
@@ -805,7 +968,10 @@ async function submitFixReshoot() {
     const form = new FormData()
     form.append('file', sheet.value.blob, 'capture.jpg')
     form.append('live', 'true')
-    await staffUpload(`/api/hygiene/staff/fix/${sheet.value.row.id}/reshoot`, form)
+    await staffUploadWithProgress(
+      `/api/hygiene/staff/fix/${sheet.value.row.id}/reshoot`,
+      form,
+    )
     const current = sheet.value.row
     clearPreview()
     await loadFixTickets()
@@ -827,7 +993,10 @@ async function submitDeepPair() {
     form.append('before', sheet.value.beforeBlob, 'before.jpg')
     form.append('after', sheet.value.afterBlob, 'after.jpg')
     form.append('live', 'true')
-    await staffUpload(`/api/hygiene/staff/deep-clean/${row.item_id}/submit`, form)
+    await staffUploadWithProgress(
+      `/api/hygiene/staff/deep-clean/${row.item_id}/submit`,
+      form,
+    )
     clearPreview()
     await loadDeepClean()
     continueDeep(row)
@@ -850,7 +1019,7 @@ async function decide(action) {
       await staffRequest(`/api/hygiene/staff/deep-clean/${row.item_id}/${action}`, {
         method: 'POST',
       })
-      closeSheet()
+      closeSheet(true)
       await loadDeepClean()
       const next = openDeep.value.find((item) => item.status === '待验收' && item.item_id !== row.item_id)
       if (next && isManager.value) await openDeepReview(next)
@@ -858,7 +1027,7 @@ async function decide(action) {
       await staffRequest(`/api/hygiene/staff/fix/${row.id}/${action}`, {
         method: 'POST',
       })
-      closeSheet()
+      closeSheet(true)
       await loadFixTickets()
       const next = nextFixWorkRow(fixInbox.value, row, { isManager: isManager.value })
       if (next) {
@@ -873,7 +1042,7 @@ async function decide(action) {
         method: 'POST',
         body: { shift: row.shift },
       })
-      closeSheet()
+      closeSheet(true)
       await loadInbox()
       const next = inbox.value.find((item) => (
         item.status === '待验收' && !(item.item_id === row.item_id && item.shift === row.shift)
@@ -900,7 +1069,7 @@ async function decide(action) {
       @close="lightboxOpen = false"
     />
     <a class="hy-skip" href="#hygiene-work-main">跳到内容</a>
-    <header class="hy-work-header">
+    <header class="hy-work-header" :inert="Boolean(sheet)">
       <div class="hy-work-header-inner">
         <div class="hy-brand">
           <span class="hy-brand-mark" aria-hidden="true">{{ HYGIENE_BRAND_MARK }}</span>
@@ -921,7 +1090,7 @@ async function decide(action) {
       </div>
     </header>
 
-    <main id="hygiene-work-main" class="hy-work-main">
+    <main id="hygiene-work-main" class="hy-work-main" :inert="Boolean(sheet)">
       <p v-if="errorText && !sheet" class="hy-staff-alert" role="alert">{{ errorText }}</p>
       <p
         v-if="needsAssignment && tab !== 'inbox'"
@@ -1050,7 +1219,7 @@ async function decide(action) {
           {{ deepStats.passed }}/{{ deepStats.total }}
           <span v-if="deepDue"> · {{ deepDue }} 前做完</span>
         </p>
-        <p class="hy-staff-lead">不跟区域和班次。每项拍清理前和清理后，不要标准图。</p>
+        <p class="hy-staff-lead">全店专项，不按责任区或班次。每项拍清理前和清理后。</p>
         <p v-if="!deepInbox.length" class="hy-staff-lead">这一轮没有专项卫生。</p>
         <article
           v-for="row in openDeep"
@@ -1174,7 +1343,7 @@ async function decide(action) {
         </section>
         <section class="hy-section">
           <h2>卫生教材</h2>
-          <p class="hy-staff-lead">超级管理员手点的合格对照。合格图不会自动进来。</p>
+          <p class="hy-staff-lead">只展示超级管理员手动标记的合格对照。</p>
           <p v-if="!teaching.length" class="hy-staff-lead">还没有卫生教材。</p>
           <article v-for="row in teaching" :key="`teach-${row.id}`" class="hy-task">
             <div>
@@ -1295,7 +1464,7 @@ async function decide(action) {
               <dd>{{ hygienePermissionLabel(employee.permission) }}</dd>
             </div>
           </dl>
-          <p v-if="!profileEditing && !passwordEditing" class="hy-staff-lead">专项不跟区域和班次；整改跟所选区域、不跟班次。都不能从相册选。</p>
+          <p v-if="!profileEditing && !passwordEditing" class="hy-staff-lead">专项全店可用；整改按所选责任区显示。所有现场照片都需实拍。</p>
           <button
             v-if="!profileEditing && !passwordEditing"
             type="button"
@@ -1328,7 +1497,7 @@ async function decide(action) {
       </section>
     </main>
 
-    <nav v-if="employee" class="hy-tabbar" aria-label="卫生入口">
+    <nav v-if="employee" class="hy-tabbar" aria-label="卫生入口" :inert="Boolean(sheet)">
       <button
         v-for="item in HYGIENE_STAFF_TABS"
         :key="item.id"
@@ -1350,12 +1519,12 @@ async function decide(action) {
       role="dialog"
       aria-modal="true"
       aria-labelledby="hygiene-sheet-title"
-      @click.self="closeSheet"
+      @click.self="requestCloseSheet"
     >
       <div class="staff-preview-card">
         <div class="staff-preview-head">
           <h2 id="hygiene-sheet-title">{{ sheetTitle }}</h2>
-          <button ref="closeButton" type="button" class="staff-preview-close" @click="closeSheet">关闭</button>
+          <button ref="closeButton" type="button" class="staff-preview-close" @click="requestCloseSheet">关闭</button>
         </div>
         <p class="staff-lead">
           <template v-if="sheet.kind === 'fix'">先看开单原图再拍。镜头不叠图。</template>
@@ -1367,25 +1536,55 @@ async function decide(action) {
         <p v-if="errorText" class="staff-alert">{{ errorText }}</p>
 
         <template v-if="sheet.mode === 'form'">
+          <p v-if="formError" class="staff-alert" role="alert">{{ formError }}</p>
           <label class="staff-field">
             卫生责任区
-            <select v-model="sheet.zoneId" class="staff-input">
+            <select
+              id="fix-zone"
+              v-model="sheet.zoneId"
+              class="staff-input"
+              :aria-invalid="formErrorField === 'fix-zone'"
+              @change="formError = ''; formErrorField = ''"
+            >
               <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
             </select>
           </label>
           <label class="staff-field">
             类型
-            <select v-model="sheet.ticketType" class="staff-input">
+            <select
+              id="fix-type"
+              v-model="sheet.ticketType"
+              class="staff-input"
+              :aria-invalid="formErrorField === 'fix-type'"
+              @change="formError = ''; formErrorField = ''"
+            >
               <option v-for="kind in HYGIENE_FIX_TYPES" :key="kind" :value="kind">{{ kind }}</option>
             </select>
           </label>
           <label class="staff-field">
             时限（小时）
-            <input v-model.number="sheet.durationHours" class="staff-input" type="number" min="1" step="1">
+            <input
+              id="fix-duration"
+              v-model.number="sheet.durationHours"
+              class="staff-input"
+              type="number"
+              min="1"
+              step="1"
+              :aria-invalid="formErrorField === 'fix-duration'"
+              @input="formError = ''; formErrorField = ''"
+            >
           </label>
           <label class="staff-field">
             哪里脏、怎么改
-            <textarea v-model="sheet.bodyText" class="staff-input" rows="3" maxlength="400"></textarea>
+            <textarea
+              id="fix-body"
+              v-model="sheet.bodyText"
+              class="staff-input"
+              rows="3"
+              maxlength="400"
+              :aria-invalid="formErrorField === 'fix-body'"
+              @input="formError = ''; formErrorField = ''"
+            ></textarea>
           </label>
           <button type="button" class="btn btn-primary btn-block staff-submit" @click="openFixCameraFromForm">打开相机</button>
         </template>
@@ -1441,7 +1640,7 @@ async function decide(action) {
           </div>
           <p class="staff-lead">点图画面圈，可选。</p>
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitFixOpen">
-            {{ busy ? '正在开单…' : '开整改单' }}
+            {{ submitLabel('开整改单', '正在开单…') }}
           </button>
           <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="openFixCameraFromForm">重拍</button>
         </template>
@@ -1460,7 +1659,7 @@ async function decide(action) {
             <HygieneWatermarkOverlay :watermark="localWatermark" />
           </div>
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitFixReshoot">
-            {{ busy ? '正在提交…' : '提交回拍' }}
+            {{ submitLabel('提交回拍') }}
           </button>
           <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="openFixReshootCamera">重拍</button>
         </template>
@@ -1494,7 +1693,7 @@ async function decide(action) {
             :watermark="localWatermark"
           />
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitDeepPair">
-            {{ busy ? '正在提交…' : '提交这一组待验收' }}
+            {{ submitLabel('提交这一组待验收') }}
           </button>
           <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="openDeepAfterCamera">重拍清理后</button>
         </template>
@@ -1513,7 +1712,7 @@ async function decide(action) {
             <HygieneWatermarkOverlay :watermark="localWatermark" />
           </div>
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitCapture">
-            {{ busy ? '正在提交…' : '提交待验收' }}
+            {{ submitLabel('提交待验收') }}
           </button>
           <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="openCamera">重拍</button>
         </template>
@@ -1522,10 +1721,12 @@ async function decide(action) {
           <HygieneReviewPair
             :left-label="sheet.row.left_label"
             :right-label="sheet.row.right_label"
-            :standard-src="teachingShotUrl('staff', sheet.row, 'left')"
+            :standard-src="teachingShotUrl('staff', sheet.row, 'left', 'preview')"
+            :original-standard-src="teachingShotUrl('staff', sheet.row, 'left')"
             :standard-markup="sheet.row.left_markup || []"
             :standard-alt="sheet.row.left_label"
-            :capture-src="teachingShotUrl('staff', sheet.row, 'right')"
+            :capture-src="teachingShotUrl('staff', sheet.row, 'right', 'preview')"
+            :original-capture-src="teachingShotUrl('staff', sheet.row, 'right')"
             :capture-alt="sheet.row.right_label"
           />
         </template>
@@ -1534,10 +1735,12 @@ async function decide(action) {
           <HygieneReviewPair
             left-label="开单原图"
             right-label="回拍"
-            :standard-src="fixOriginalUrl('staff', sheet.row)"
+            :standard-src="fixOriginalUrl('staff', sheet.row, 'preview')"
+            :original-standard-src="fixOriginalUrl('staff', sheet.row)"
             :standard-markup="sheet.review.markup || []"
             :standard-alt="sheet.row.ticket_type"
-            :capture-src="sheet.row.reshoot_capture_id ? fixReshootUrl('staff', sheet.row) : ''"
+            :capture-src="sheet.row.reshoot_capture_id ? fixReshootUrl('staff', sheet.row, 'preview') : ''"
+            :original-capture-src="sheet.row.reshoot_capture_id ? fixReshootUrl('staff', sheet.row) : ''"
             :capture-alt="'回拍'"
             :left-watermark="sheet.review.open_watermark"
             :watermark="sheet.review.watermark"
@@ -1553,10 +1756,12 @@ async function decide(action) {
           <HygieneReviewPair
             left-label="清理前"
             right-label="清理后"
-            :standard-src="deepCleanShotUrl('staff', sheet.row, 'before')"
+            :standard-src="deepCleanShotUrl('staff', sheet.row, 'before', 'preview')"
+            :original-standard-src="deepCleanShotUrl('staff', sheet.row, 'before')"
             :standard-alt="'清理前'"
             :left-watermark="sheet.review.before_watermark"
-            :capture-src="deepCleanShotUrl('staff', sheet.row, 'after')"
+            :capture-src="deepCleanShotUrl('staff', sheet.row, 'after', 'preview')"
+            :original-capture-src="deepCleanShotUrl('staff', sheet.row, 'after')"
             :capture-alt="'清理后'"
             :watermark="sheet.review.after_watermark || sheet.review.watermark"
           />
@@ -1569,10 +1774,12 @@ async function decide(action) {
 
         <template v-else-if="sheet.mode === 'review' && sheet.review">
           <HygieneReviewPair
-            :standard-src="frozenStandardUrl('staff', sheet.row)"
+            :standard-src="frozenStandardUrl('staff', sheet.row, 'preview')"
+            :original-standard-src="frozenStandardUrl('staff', sheet.row)"
             :standard-markup="sheet.review.frozen_markup || []"
             :standard-alt="sheet.row.item_name"
-            :capture-src="dailyCaptureUrl('staff', sheet.row)"
+            :capture-src="dailyCaptureUrl('staff', sheet.row, 'preview')"
+            :original-capture-src="dailyCaptureUrl('staff', sheet.row)"
             :capture-alt="'实拍'"
             :watermark="sheet.review.watermark"
           />
@@ -1584,5 +1791,14 @@ async function decide(action) {
         </template>
       </div>
     </div>
+    <ConfirmDialog
+      v-if="confirmCloseOpen"
+      title="放弃未提交的内容？"
+      message="关闭后，刚填写的说明、标注和照片不会被保存。"
+      confirm-label="放弃"
+      danger
+      @confirm="closeSheet(true)"
+      @cancel="confirmCloseOpen = false"
+    />
   </div>
 </template>

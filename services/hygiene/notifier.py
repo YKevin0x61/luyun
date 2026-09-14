@@ -39,25 +39,31 @@ class WeComGroupTextNotifier:
         content = (text or "").strip()
         if not content:
             return
-        from services.wecom_push_service import decrypt_webhook_url, wecom_push_service
+        from services.wecom_push_service import (
+            decrypt_webhook_url,
+            split_text_for_wecom,
+            wecom_push_service,
+        )
 
         webhooks = await self._db.wecom_webhooks_all(include_disabled=False)
         if not webhooks:
             logger.warning("hygiene group text skipped: no enabled wecom webhook")
             return
+        chunks = split_text_for_wecom(content)
         for webhook in webhooks:
-            try:
-                url = decrypt_webhook_url(webhook["webhook_url_encrypted"])
-                ok, response_text = await wecom_push_service.send_text(url, content)
-                if not ok:
+            for chunk in chunks:
+                try:
+                    url = decrypt_webhook_url(webhook["webhook_url_encrypted"])
+                    ok, response_text = await wecom_push_service.send_text(url, chunk)
+                    if not ok:
+                        logger.warning(
+                            "hygiene group text failed webhook=%s: %s",
+                            webhook.get("name") or webhook.get("id"),
+                            response_text,
+                        )
+                except Exception as exc:
                     logger.warning(
-                        "hygiene group text failed webhook=%s: %s",
+                        "hygiene group text error webhook=%s: %s",
                         webhook.get("name") or webhook.get("id"),
-                        response_text,
+                        exc,
                     )
-            except Exception as exc:
-                logger.warning(
-                    "hygiene group text error webhook=%s: %s",
-                    webhook.get("name") or webhook.get("id"),
-                    exc,
-                )

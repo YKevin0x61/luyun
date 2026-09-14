@@ -73,9 +73,9 @@ class HygieneStandardCacheTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first["version"], second["version"])
 
         old = await self.work.standard_version(item["current_standard_id"])
-        self.assertEqual(self.work.capture_bytes(old["capture_id"]), OLD_BYTES)
+        self.assertEqual(await self.work.capture_bytes(old["capture_id"]), OLD_BYTES)
         current = await self.work.standard_version(replaced["current_standard_id"])
-        self.assertEqual(self.work.capture_bytes(current["capture_id"]), NEW_BYTES)
+        self.assertEqual(await self.work.capture_bytes(current["capture_id"]), NEW_BYTES)
 
     async def test_prepare_backfills_legacy_metadata(self):
         item = await self._add_item()

@@ -11,7 +11,7 @@ export const HYGIENE_BRAND_TAGLINE = '对照实拍验收'
 export const HYGIENE_DASHBOARD_BLURB = '花名册、责任区、验收、整改、红黑榜'
 export const HYGIENE_ADMIN_NAV = [
   { path: '/hygiene-roster', title: '花名册', shortTitle: '人员', icon: 'clipboard', code: 'ROSTER' },
-  { path: '/hygiene-zones', title: '卫生区', shortTitle: '区域', icon: 'layout-grid', code: 'ZONES' },
+  { path: '/hygiene-zones', title: '卫生责任区', shortTitle: '责任区', icon: 'layout-grid', code: 'ZONES' },
   { path: '/hygiene-daily', title: '日常验收', shortTitle: '日常', icon: 'check-circle', code: 'DAILY' },
   { path: '/hygiene-deep-clean', title: '专项卫生', shortTitle: '专项', icon: 'calendar', code: 'DEEP' },
   { path: '/hygiene-fix', title: '整改单', shortTitle: '整改', icon: 'siren', code: 'FIX' },

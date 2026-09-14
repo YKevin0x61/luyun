@@ -128,6 +128,8 @@ restaurant_scraper = None
 scraper_task = None
 wecom_push_task = None
 hygiene_overdue_task = None
+hygiene_variant_task = None
+hygiene_maintenance_task = None
 reconcile_scheduler_task = None
 unmapped_watchdog_task = None
 recipe_store = None
@@ -150,6 +152,7 @@ async def lifespan(app: FastAPI):
     global db_manager, dish_catalog, restaurant_scraper, scraper_task, wecom_push_task
     global reconcile_scheduler_task, unmapped_watchdog_task
     global recipe_store, employee_accounts, hygiene_work, hygiene_overdue_task
+    global hygiene_variant_task, hygiene_maintenance_task
     
     try:
         logger.info("🚀 启动订单数据采集系统...")
@@ -190,6 +193,7 @@ async def lifespan(app: FastAPI):
 
         from services.hygiene.accounts import EmployeeAccounts
         from services.hygiene.captures import FileCaptureStore
+        from services.hygiene.images import ImageVariantGenerator
         from services.hygiene.notifier import WeComGroupTextNotifier
         from services.hygiene.work import HygieneWork
         from pathlib import Path
@@ -201,6 +205,8 @@ async def lifespan(app: FastAPI):
                 db_manager,
                 captures=FileCaptureStore(capture_root),
                 notifier=WeComGroupTextNotifier(db_manager),
+                image_variants=ImageVariantGenerator(),
+                on_change=broadcast_hygiene_change,
             )
             await hygiene_work.prepare()
             startup_results.append("卫生待办")
@@ -208,6 +214,13 @@ async def lifespan(app: FastAPI):
                 hygiene_work.overdue_scheduler_loop()
             )
             startup_results.append("卫生逾期调度器")
+            hygiene_variant_task = asyncio.create_task(
+                hygiene_work.variant_backfill_loop()
+            )
+            hygiene_maintenance_task = asyncio.create_task(
+                hygiene_work.capture_maintenance_loop()
+            )
+            startup_results.append("卫生图片后台任务")
 
         if db_manager:
             wecom_push_task = asyncio.create_task(wecom_push_service.scheduler_loop(db_manager))
@@ -284,6 +297,17 @@ async def lifespan(app: FastAPI):
                 await hygiene_overdue_task
             except asyncio.CancelledError:
                 logger.info("✅ 卫生逾期调度器已停止")
+
+        for task, label in (
+            (hygiene_variant_task, "卫生图片补全任务"),
+            (hygiene_maintenance_task, "卫生图片维护任务"),
+        ):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.info("✅ %s已停止", label)
 
         for task_name, task in (
             ("日终对账调度", reconcile_scheduler_task),
@@ -363,6 +387,11 @@ async def broadcast_realtime_event(event_type: str, **payload):
     if topic == "admin" and "table" in payload:
         scope["table"] = payload["table"]
     await realtime_hub.broadcast_nudge(topic, scope)
+
+
+async def broadcast_hygiene_change(scope: dict) -> None:
+    """Data-less hygiene nudge. Consumers re-fetch through HTTP."""
+    await realtime_hub.broadcast_nudge("hygiene", scope)
 
 # 添加自定义验证错误处理器
 @app.exception_handler(RequestValidationError)

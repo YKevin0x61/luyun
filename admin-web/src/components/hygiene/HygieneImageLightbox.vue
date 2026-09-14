@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeUnmount, onMounted } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import HygieneMarkupOverlay from './HygieneMarkupOverlay.vue'
 import HygieneWatermarkOverlay from './HygieneWatermarkOverlay.vue'
 
@@ -11,21 +11,34 @@ defineProps({
 })
 
 const emit = defineEmits(['close'])
+const closeButton = ref(null)
+let previousActive = null
 let previousOverflow = ''
 
 function onKeydown(event) {
-  if (event.key === 'Escape') emit('close')
+  if (event.key === 'Escape') {
+    emit('close')
+    return
+  }
+  if (event.key === 'Tab') {
+    event.preventDefault()
+    closeButton.value?.focus()
+  }
 }
 
-onMounted(() => {
+onMounted(async () => {
+  previousActive = document.activeElement
   previousOverflow = document.body.style.overflow
   document.body.style.overflow = 'hidden'
   window.addEventListener('keydown', onKeydown)
+  await nextTick()
+  closeButton.value?.focus()
 })
 
 onBeforeUnmount(() => {
   document.body.style.overflow = previousOverflow
   window.removeEventListener('keydown', onKeydown)
+  previousActive?.focus?.()
 })
 </script>
 
@@ -33,6 +46,7 @@ onBeforeUnmount(() => {
   <Teleport to="body">
     <div class="hy-lightbox" role="dialog" aria-modal="true" :aria-label="alt" @click.self="$emit('close')">
       <button
+        ref="closeButton"
         type="button"
         class="hy-lightbox-close"
         aria-label="关闭全屏预览"

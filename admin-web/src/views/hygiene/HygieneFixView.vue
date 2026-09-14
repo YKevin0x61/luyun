@@ -5,6 +5,7 @@ import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import HygieneWatermarkOverlay from '../../components/hygiene/HygieneWatermarkOverlay.vue'
 import { api } from '../../api/client'
+import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import {
   HYGIENE_FIX_TYPES,
   canAcceptFixTicket,
@@ -13,7 +14,7 @@ import {
 import { chinaNowIso, createCircleMark, fixOriginalUrl, fixReshootUrl } from '../../utils/hygieneMarkup'
 import { deadlineUrgency, fixQueueKey, formatStamp, nextAfterRemove } from '../../utils/hygieneWorkFlow'
 
-const CAMERA_MISSING = '这台电脑没有相机，不能开整改单。必须现场拍，没有相册。'
+const CAMERA_MISSING = '此设备没有可用相机。整改开单必须现场拍摄，不能从相册选择。'
 
 const items = ref([])
 const zones = ref([])
@@ -49,6 +50,12 @@ const canSubmitOpen = computed(() => {
 
 onMounted(refreshPage)
 onBeforeUnmount(clearPreview)
+
+useHygieneRealtime({
+  id: 'hygiene-admin-fix',
+  resources: ['fix', 'zones'],
+  pull: refreshPage,
+})
 
 function clearPreview() {
   if (previewUrl.value) {
@@ -183,7 +190,11 @@ function deadlineLabel(iso) {
       <div>
         <p class="hy-eyebrow">Fix · 整改闭环</p>
         <h1>整改单</h1>
-        <p>超级管理员在这里开单也必须现场拍。没相机就开不了，不能从相册选。时限到了才能验别人开的单；自己开的随时能验。驳回后用原来的时限重新倒计时。</p>
+        <p>现场拍照开单，员工回拍后按时限验收。</p>
+        <details class="rule-help">
+          <summary>规则说明</summary>
+          <p>开单必须现场拍照，不能从相册选择。时限未到只有开单人能验收；时限到达后其他管理员或超级管理员可验收。驳回后按原时限重新计时。</p>
+        </details>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
     </div>
@@ -237,7 +248,7 @@ function deadlineLabel(iso) {
           @click="opening = true"
         >打开相机</button>
         <template v-else>
-          <p class="editor-lead">现场拍，没有相册。</p>
+          <p class="editor-lead">必须现场拍摄，不能选择相册。</p>
           <HygieneLiveCamera v-if="!previewUrl" @captured="onCaptured" />
           <template v-else>
             <div class="capture-preview">
@@ -254,7 +265,7 @@ function deadlineLabel(iso) {
             <ul v-if="markup.length" class="mark-list">
               <li v-for="(mark, index) in markup" :key="index">
                 <span>圆圈</span>
-                <button type="button" class="btn btn-sm" @click="removeMark(index)">去掉</button>
+                <button type="button" class="btn btn-sm" @click="removeMark(index)">删除标注</button>
               </li>
             </ul>
             <div class="review-actions">
@@ -322,10 +333,12 @@ function deadlineLabel(iso) {
           <HygieneReviewPair
             left-label="开单原图"
             right-label="回拍"
-            :standard-src="fixOriginalUrl('admin', selected)"
+            :standard-src="fixOriginalUrl('admin', selected, 'preview')"
+            :original-standard-src="fixOriginalUrl('admin', selected)"
             :standard-markup="selected.markup || []"
             :standard-alt="selected.ticket_type"
-            :capture-src="selected.reshoot_capture_id ? fixReshootUrl('admin', selected) : ''"
+            :capture-src="selected.reshoot_capture_id ? fixReshootUrl('admin', selected, 'preview') : ''"
+            :original-capture-src="selected.reshoot_capture_id ? fixReshootUrl('admin', selected) : ''"
             :capture-alt="'回拍'"
             :left-watermark="selected.open_watermark"
             :watermark="selected.watermark"

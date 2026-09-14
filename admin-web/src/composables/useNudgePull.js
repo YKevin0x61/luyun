@@ -53,8 +53,8 @@ export function useNudgePull(options) {
     return (match || defaultMatch)(ev)
   }
 
-  function runPull() {
-    return pull()
+  function runPull(event) {
+    return pull(event)
   }
 
   /** Immediate pull; cancels any pending coalesce. */
@@ -64,21 +64,21 @@ export function useNudgePull(options) {
     return runPull()
   }
 
-  function schedulePull() {
+  function schedulePull(event) {
     if (debounceMs > 0) {
       clearTimeout(debounceTimer)
       debounceTimer = setTimeout(() => {
         debounceTimer = null
-        runPull()
+        runPull(event)
       }, debounceMs)
       return
     }
-    runPull()
+    runPull(event)
   }
 
   function handleEvent(ev) {
     if (!matches(ev)) return
-    schedulePull()
+    schedulePull(ev)
   }
 
   function setFilters(next = {}) {

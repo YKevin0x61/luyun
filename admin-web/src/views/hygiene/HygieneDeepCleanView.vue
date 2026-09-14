@@ -1,9 +1,11 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
+import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import LuyunTimePicker from '../../components/ui/LuyunTimePicker.vue'
 import { api } from '../../api/client'
+import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import { HYGIENE_WEEKDAYS, hygieneWeekdayLabel } from '../../utils/hygieneCopy'
 import { deepCleanShotUrl } from '../../utils/hygieneMarkup'
 import { deepQueueKey, nextAfterRemove } from '../../utils/hygieneWorkFlow'
@@ -26,6 +28,7 @@ const lastPassed = ref(null)
 const teachingHint = ref('')
 const fromDate = ref('')
 const toDate = ref('')
+const removeTarget = ref(null)
 
 const weekdayItems = computed(() => {
   return items.value.filter((item) => item.weekday === weekday.value)
@@ -37,6 +40,12 @@ onMounted(() => {
   toDate.value = range.to
   weekday.value = pythonWeekday(new Date())
   refreshPage()
+})
+
+useHygieneRealtime({
+  id: 'hygiene-admin-deep',
+  resources: ['deep', 'settings'],
+  pull: refreshPage,
 })
 
 function toIsoDate(date) {
@@ -144,21 +153,23 @@ async function addItem() {
     await loadItems()
     await loadCalendar()
   } catch (err) {
-    errorText.value = err.message || '无法上架专项清单项'
+    errorText.value = err.message || '无法新增专项清单项'
   } finally {
     adding.value = false
   }
 }
 
-async function removeItem(item) {
-  if (!window.confirm(`从${hygieneWeekdayLabel(item.weekday)}清单去掉「${item.name}」？`)) return
+async function confirmRemoveItem() {
+  const item = removeTarget.value
+  removeTarget.value = null
+  if (!item) return
   errorText.value = ''
   try {
     await api.delete(`/api/hygiene/admin/deep-clean/items/${item.id}`)
     await loadItems()
     await loadCalendar()
   } catch (err) {
-    errorText.value = err.message || '无法去掉专项清单项'
+    errorText.value = err.message || '无法删除专项清单项'
   }
 }
 
@@ -233,14 +244,18 @@ async function markTeaching() {
       <div>
         <p class="hy-eyebrow">Deep · 专项计划</p>
         <h1>专项卫生</h1>
-        <p>按星期几配全店一条。不要标准图。每项拍清理前和清理后，全部验收才算完成。漏做只在日历记未完成，不上人的红黑榜，也不红卫生责任区。</p>
+        <p>按星期几安排全店专项清洁，每项提交清理前和清理后。</p>
+        <details class="rule-help">
+          <summary>规则说明</summary>
+          <p>专项不需要标准图。全部项目验收通过才算完成；漏做只在完成日历中记未完成，不进入红黑榜。</p>
+        </details>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
     </div>
 
     <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>
     <div v-if="lastPassed" class="card teach-banner">
-      <p>刚通过：{{ lastPassed.item_name }}。合格图不会自动进教材。</p>
+      <p>刚通过：{{ lastPassed.item_name }}。</p>
       <button type="button" class="btn btn-primary" :disabled="busy" @click="markTeaching">标为卫生教材</button>
       <p v-if="teachingHint" class="clocks-hint">{{ teachingHint }}</p>
     </div>
@@ -273,13 +288,13 @@ async function markTeaching() {
             @click="weekday = index"
           >{{ label }}</button>
         </div>
-        <p class="editor-lead">{{ hygieneWeekdayLabel(weekday) }}全店一条。上架专项清单项不需要标准图。</p>
+        <p class="editor-lead">{{ hygieneWeekdayLabel(weekday) }}全店一条，不需要标准图。</p>
         <div v-if="loading" class="roster-empty">正在加载…</div>
         <div v-else-if="!weekdayItems.length" class="roster-empty">这一天还没有专项清单项。</div>
         <ul v-else class="item-list">
           <li v-for="item in weekdayItems" :key="item.id" class="item-row">
             <strong>{{ item.name }}</strong>
-            <button type="button" class="btn btn-sm" @click="removeItem(item)">去掉</button>
+            <button type="button" class="btn btn-sm" @click="removeTarget = item">删除</button>
           </li>
         </ul>
         <form class="zone-add" @submit.prevent="addItem">
@@ -291,7 +306,7 @@ async function markTeaching() {
             placeholder="专项清单项名称，比如冷柜一号"
             aria-label="专项清单项名称"
           >
-          <button type="submit" class="btn btn-primary" :disabled="adding || !newName.trim()">上架</button>
+          <button type="submit" class="btn btn-primary" :disabled="adding || !newName.trim()">新增</button>
         </form>
       </div>
 
@@ -352,10 +367,12 @@ async function markTeaching() {
           <HygieneReviewPair
             left-label="清理前"
             right-label="清理后"
-            :standard-src="deepCleanShotUrl('admin', selected, 'before')"
+            :standard-src="deepCleanShotUrl('admin', selected, 'before', 'preview')"
+            :original-standard-src="deepCleanShotUrl('admin', selected, 'before')"
             :standard-alt="'清理前'"
             :left-watermark="review.before_watermark"
-            :capture-src="deepCleanShotUrl('admin', selected, 'after')"
+            :capture-src="deepCleanShotUrl('admin', selected, 'after', 'preview')"
+            :original-capture-src="deepCleanShotUrl('admin', selected, 'after')"
             :capture-alt="'清理后'"
             :watermark="review.after_watermark || review.watermark"
           />
@@ -366,6 +383,16 @@ async function markTeaching() {
         </div>
       </div>
     </div>
+
+    <ConfirmDialog
+      v-if="removeTarget"
+      title="删除专项清单项"
+      :message="`从${hygieneWeekdayLabel(removeTarget.weekday)}清单删除「${removeTarget.name}」？`"
+      confirm-label="删除"
+      danger
+      @confirm="confirmRemoveItem"
+      @cancel="removeTarget = null"
+    />
   </div>
 </template>
 

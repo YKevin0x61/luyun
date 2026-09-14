@@ -587,6 +587,22 @@
   line-height: 1.7;
   font-weight: 400;
 }
+.hygiene-admin .rule-help {
+  margin-top: .55rem;
+  max-width: 60em;
+  color: var(--hy-faint);
+  font-size: .76rem;
+}
+.hygiene-admin .rule-help summary {
+  cursor: pointer;
+  color: var(--hy-mint);
+  font-weight: 700;
+}
+.hygiene-admin .rule-help p {
+  margin: .4rem 0 0;
+  color: var(--hy-muted);
+  line-height: 1.65;
+}
 .hygiene-admin .roster-head > .btn {
   flex: 0 0 auto;
   align-self: flex-start;

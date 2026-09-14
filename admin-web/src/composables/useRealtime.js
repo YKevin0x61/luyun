@@ -1,4 +1,4 @@
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 const PING_INTERVAL_MS = 30000
 
@@ -6,9 +6,16 @@ const PING_INTERVAL_MS = 30000
  * 连接 /ws/realtime，支持 subscribe/unsubscribe/ping 协议。
  * 断线自动退避重连，重连后重发全部已知订阅。
  */
-export function useRealtime(onEvent) {
+export function useRealtime(onEvent, { enabled = true } = {}) {
   const connected = ref(false)
   const latencyMs = ref(null)
+  const enabledState = computed(() => {
+    if (typeof enabled === 'function') return Boolean(enabled())
+    if (enabled && typeof enabled === 'object' && 'value' in enabled) {
+      return Boolean(enabled.value)
+    }
+    return Boolean(enabled)
+  })
   let ws = null
   let reconnectTimer = null
   let pingTimer = null
@@ -57,7 +64,7 @@ export function useRealtime(onEvent) {
   }
 
   function connect() {
-    if (stopped) return
+    if (stopped || !enabledState.value) return
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     ws = new WebSocket(`${proto}//${window.location.host}/ws/realtime`)
 
@@ -94,17 +101,35 @@ export function useRealtime(onEvent) {
   }
 
   function scheduleReconnect() {
+    if (!enabledState.value) return
     clearTimeout(reconnectTimer)
     reconnectTimer = setTimeout(connect, backoffMs)
     backoffMs = Math.min(backoffMs * 2, 30000)
   }
 
-  onMounted(connect)
-  onBeforeUnmount(() => {
+  function stopConnection() {
     stopped = true
     clearTimeout(reconnectTimer)
     stopPing()
     ws?.close()
+    ws = null
+    connected.value = false
+    latencyMs.value = null
+  }
+
+  function startConnection() {
+    stopped = false
+    backoffMs = 1000
+    connect()
+  }
+
+  watch(enabledState, (next) => {
+    if (next) startConnection()
+    else stopConnection()
+  }, { immediate: true })
+
+  onBeforeUnmount(() => {
+    stopConnection()
   })
 
   return { connected, latencyMs, subscribe, unsubscribe }

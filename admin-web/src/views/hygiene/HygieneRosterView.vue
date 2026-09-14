@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
+import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import {
   HYGIENE_PERMISSIONS,
   HYGIENE_SHIFTS,
@@ -48,6 +49,12 @@ async function loadRoster() {
 }
 
 onMounted(loadRoster)
+
+useHygieneRealtime({
+  id: 'hygiene-admin-roster',
+  resources: ['roster', 'assignment'],
+  pull: loadRoster,
+})
 
 async function approve(row) {
   busyId.value = row.id
@@ -138,7 +145,11 @@ async function changeAssignment(row) {
       <div>
         <p class="hy-eyebrow">Roster · 人员名册</p>
         <h1>卫生花名册</h1>
-        <p>批准新注册、补姓名、写职位、把人设成普通员工或管理员。当天区域和班次只有超级管理员能改。停用后不能登录，行还留在这里，可随时重新启用。超级管理员仍是后台共享账号，不能从花名册升上去。</p>
+        <p>批准注册、维护姓名职位，并设置卫生权限。</p>
+        <details class="rule-help">
+          <summary>规则说明</summary>
+          <p>当天责任区和班次只能由超级管理员调整。停用后不能登录，但花名册记录保留，可重新启用。超级管理员是后台共享账号，不能从花名册提升。</p>
+        </details>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="loadRoster">刷新</button>
     </div>

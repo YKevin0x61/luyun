@@ -16,7 +16,7 @@ describe('hygiene roster enable', () => {
     expect(roster).toMatch(/\/api\/hygiene\/admin\/roster\/\$\{row\.id\}\/enable/)
     expect(roster).toMatch(/v-if="row\.disabled"/)
     expect(roster).toMatch(/>启用</)
-    expect(roster).toMatch(/可随时重新启用/)
+    expect(roster).toMatch(/可重新启用/)
     expect(roster).toMatch(/v-model="drafts\[row\.id\]\.name"/)
     expect(roster).toMatch(/name: draft\.name/)
     expect(roster).toMatch(/drafts\[row\.id\]\.zone_id/)

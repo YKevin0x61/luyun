@@ -132,7 +132,7 @@ async function startCamera() {
     await attachStream(nextStream)
     await refreshCameraCapabilities()
   } catch (err) {
-    errorText.value = '打不开相机。必须现场拍，没有相册入口。'
+    errorText.value = '无法打开相机。请在浏览器设置中允许相机权限，或换一部手机；卫生拍照必须现场完成。'
     emit('error', err)
   } finally {
     starting.value = false

@@ -71,6 +71,17 @@ async def authenticate_ws(websocket) -> Optional[str]:
     if token and await auth_service.validate_api_token(token):
         return "api_token"
 
+    staff_session_id = websocket.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    if staff_session_id:
+        try:
+            from main import employee_accounts
+        except ImportError:
+            employee_accounts = None
+        if employee_accounts is not None:
+            employee = await employee_accounts.get_staff_session(staff_session_id)
+            if employee is not None:
+                return "staff"
+
     return None
 
 

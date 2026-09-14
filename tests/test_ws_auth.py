@@ -4,11 +4,13 @@
 
 import tempfile
 import unittest
+from datetime import datetime
 
 from config import settings
-from database import DatabaseManager
+from database import CHINA_TZ, DatabaseManager
 from services import auth_service
 from services.app_runtime import AppRuntime, set_runtime
+from services.hygiene.accounts import EmployeeAccounts
 
 
 class _FakeWebSocket:
@@ -28,6 +30,10 @@ class AuthenticateWsTest(unittest.IsolatedAsyncioTestCase):
         await self.db.connect()
         set_runtime(AppRuntime(db=self.db))
         await auth_service.init_user("admin", "password123")
+        self.accounts = EmployeeAccounts(
+            self.db,
+            now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        )
 
     async def asyncTearDown(self):
         await self.db.close()
@@ -63,6 +69,29 @@ class AuthenticateWsTest(unittest.IsolatedAsyncioTestCase):
             query_params={"token": "bogus-token"},
         )
         self.assertIsNone(await authenticate_ws(ws))
+
+    async def test_approved_staff_session_returns_staff(self):
+        import main
+        from api.security import authenticate_ws
+
+        employee = await self.accounts.register(
+            "13800138000",
+            "password123",
+            "张三",
+        )
+        await self.accounts.approve(employee["id"])
+        login = await self.accounts.login("13800138000", "password123")
+        previous = main.employee_accounts
+        main.employee_accounts = self.accounts
+        try:
+            ws = _FakeWebSocket(
+                cookies={
+                    settings.STAFF_SESSION_COOKIE_NAME: login["session_id"],
+                },
+            )
+            self.assertEqual(await authenticate_ws(ws), "staff")
+        finally:
+            main.employee_accounts = previous
 
 
 if __name__ == "__main__":

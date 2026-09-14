@@ -1,6 +1,8 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../../api/client'
+import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
+import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import LuyunTimePicker from '../../components/ui/LuyunTimePicker.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import {
@@ -21,7 +23,9 @@ const dayClock = ref('15:00')
 const nightClock = ref('21:30')
 const savingClocks = ref(false)
 const clocksHint = ref('')
-const zoneEvents = ref([])
+const boards = ref({ zones: [] })
+const deleteZoneTarget = ref(null)
+const deleteItemTarget = ref(null)
 
 const itemName = ref('')
 const file = ref(null)
@@ -56,9 +60,9 @@ const canSave = computed(() => {
 
 const missedByZone = computed(() => {
   const counts = {}
-  for (const event of zoneEvents.value) {
-    if (event.event_type !== '逾期' || event.zone_id == null) continue
-    counts[event.zone_id] = (counts[event.zone_id] || 0) + 1
+  for (const row of boards.value.zones || []) {
+    if (row.zone_id == null) continue
+    counts[row.zone_id] = row['逾期'] || 0
   }
   return counts
 })
@@ -68,6 +72,12 @@ onMounted(() => {
 })
 
 onBeforeUnmount(clearPreview)
+
+useHygieneRealtime({
+  id: 'hygiene-admin-zones',
+  resources: ['zones', 'daily', 'fix', 'settings'],
+  pull: refreshPage,
+})
 
 async function refreshPage() {
   await Promise.all([loadZones(), loadClocks(), loadBoardPreview()])
@@ -106,10 +116,9 @@ async function loadClocks() {
 
 async function loadBoardPreview() {
   try {
-    const data = await api.get('/api/hygiene/admin/board-events')
-    zoneEvents.value = data.zones || []
+    boards.value = await api.get('/api/hygiene/admin/boards')
   } catch (_err) {
-    zoneEvents.value = []
+    boards.value = { zones: [] }
   }
 }
 
@@ -156,11 +165,10 @@ async function createZone() {
   }
 }
 
-async function deleteZone(zone) {
+async function confirmDeleteZone() {
+  const zone = deleteZoneTarget.value
+  deleteZoneTarget.value = null
   if (!zone) return
-  if (!window.confirm(`删除卫生责任区「${zone.name}」？该区进行中的日常待办和未闭环整改单会一并去掉。`)) {
-    return
-  }
   errorText.value = ''
   try {
     await api.delete(`/api/hygiene/admin/zones/${zone.id}`)
@@ -172,11 +180,10 @@ async function deleteZone(zone) {
   }
 }
 
-async function deleteItem(item) {
+async function confirmDeleteItem() {
+  const item = deleteItemTarget.value
+  deleteItemTarget.value = null
   if (!item) return
-  if (!window.confirm(`删除日常检查项「${item.name}」？该项进行中的待办会一并去掉。`)) {
-    return
-  }
   errorText.value = ''
   try {
     await api.delete(`/api/hygiene/admin/items/${item.id}`)
@@ -278,7 +285,11 @@ function markLabel(mark) {
       <div>
         <p class="hy-eyebrow">Zones · 责任区划</p>
         <h1>卫生责任区</h1>
-        <p>卫生责任区不是档口、配方岗位或备货子岗位。每个区自己的日常清单；没有当前标准图的检查项不会出现在员工端。换标准图后，新检查只看新图。白班夜班共用这一套检查项。删除卫生责任区或检查项会把进行中的日常待办和该区未闭环整改单一并去掉。</p>
+        <p>维护各卫生责任区的日常检查项和当前标准图。</p>
+        <details class="rule-help">
+          <summary>规则说明</summary>
+          <p>卫生责任区与档口、配方岗位相互独立。没有当前标准图的检查项不会出现在员工端；更换标准图后，新检查使用新图。删除责任区或检查项会同时删除进行中的待办和该区未闭环整改单。</p>
+        </details>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
     </div>
@@ -326,7 +337,7 @@ function markLabel(mark) {
               type="button"
               class="btn btn-sm btn-danger"
               :aria-label="`删除卫生责任区 ${zone.name}`"
-              @click="deleteZone(zone)"
+              @click="deleteZoneTarget = zone"
             >删除</button>
           </li>
         </ul>
@@ -353,7 +364,9 @@ function markLabel(mark) {
             <li v-for="item in selected.items" :key="item.id" class="item-row">
               <HygieneStandardOverlay
                 class="item-thumb"
-                :src="standardImageUrl('admin', item)"
+                :src="standardImageUrl('admin', item, 'thumb')"
+                display-variant="thumb"
+                :lightbox-src="standardImageUrl('admin', item)"
                 :standard-id="item.current_standard_id"
                 :markup="item.markup || []"
                 :alt="item.name"
@@ -366,7 +379,7 @@ function markLabel(mark) {
                     type="button"
                     class="btn btn-sm btn-danger"
                     :aria-label="`删除日常检查项 ${item.name}`"
-                    @click="deleteItem(item)"
+                  @click="deleteItemTarget = item"
                   >删除</button>
                 </div>
               </div>
@@ -375,7 +388,7 @@ function markLabel(mark) {
 
           <form class="item-editor" @submit.prevent="saveItem">
             <h4>{{ replacingId ? '更新标准图' : '新增检查项' }}</h4>
-            <p class="editor-lead">必须先有标准图才能上架。可在图上点圆圈、拖两下画箭头、写批注。相册选图可以，员工开单拍实拍才禁止相册。</p>
+            <p class="editor-lead">标准图保存后检查项才会出现在员工端。可在图上画圆圈、箭头和批注。</p>
             <label class="editor-field">
               检查项名称
               <input
@@ -416,19 +429,38 @@ function markLabel(mark) {
             <ul v-if="markup.length" class="mark-list">
               <li v-for="(mark, index) in markup" :key="index">
                 <span>{{ markLabel(mark) }}</span>
-                <button type="button" class="btn btn-sm" @click="removeMark(index)">去掉</button>
+                <button type="button" class="btn btn-sm" @click="removeMark(index)">删除标注</button>
               </li>
             </ul>
             <div class="editor-actions">
               <button v-if="replacingId" type="button" class="btn" @click="clearEditor">取消</button>
               <button type="submit" class="btn btn-primary" :disabled="!canSave">
-                {{ replacingId ? '保存新标准图' : '上架检查项' }}
+                {{ replacingId ? '保存新标准图' : '新增检查项' }}
               </button>
             </div>
           </form>
         </template>
       </div>
     </div>
+
+    <ConfirmDialog
+      v-if="deleteZoneTarget"
+      title="删除卫生责任区"
+      :message="`删除「${deleteZoneTarget.name}」会同时删除该区进行中的日常待办和未闭环整改单。`"
+      confirm-label="删除"
+      danger
+      @confirm="confirmDeleteZone"
+      @cancel="deleteZoneTarget = null"
+    />
+    <ConfirmDialog
+      v-if="deleteItemTarget"
+      title="删除日常检查项"
+      :message="`删除「${deleteItemTarget.name}」会同时删除该项进行中的待办。`"
+      confirm-label="删除"
+      danger
+      @confirm="confirmDeleteItem"
+      @cancel="deleteItemTarget = null"
+    />
   </div>
 </template>
 

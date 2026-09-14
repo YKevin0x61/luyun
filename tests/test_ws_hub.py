@@ -81,6 +81,21 @@ class RealtimeHubTest(unittest.IsolatedAsyncioTestCase):
         nudges = [m for m in ws.sent if m.get("type") == "nudge"]
         self.assertEqual(nudges, [])
 
+    async def test_hygiene_topic_is_valid_and_broadcast(self):
+        ws = _FakeWebSocket()
+        await self.hub.register(ws, "staff")
+        await _subscribe(self.hub, ws, "hygiene-1", ["hygiene"])
+
+        await self.hub.broadcast_nudge(
+            "hygiene",
+            {"resource": "daily", "action": "submitted"},
+        )
+
+        nudges = [m for m in ws.sent if m.get("type") == "nudge"]
+        self.assertEqual(len(nudges), 1)
+        self.assertEqual(nudges[0]["topic"], "hygiene")
+        self.assertEqual(nudges[0]["scope"]["resource"], "daily")
+
     async def test_ping_returns_pong(self):
         ws = _FakeWebSocket()
         await self.hub.register(ws, "session")

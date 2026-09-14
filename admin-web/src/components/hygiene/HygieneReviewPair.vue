@@ -6,9 +6,11 @@ import HygieneWatermarkOverlay from './HygieneWatermarkOverlay.vue'
 
 defineProps({
   standardSrc: { type: String, default: '' },
+  originalStandardSrc: { type: String, default: '' },
   standardMarkup: { type: Array, default: () => [] },
   standardAlt: { type: String, default: '标准图' },
   captureSrc: { type: String, default: '' },
+  originalCaptureSrc: { type: String, default: '' },
   captureAlt: { type: String, default: '实拍' },
   watermark: { type: Object, default: null },
   leftWatermark: { type: Object, default: null },
@@ -19,9 +21,10 @@ defineProps({
 const lightboxOpen = ref(false)
 const lightbox = ref({ src: '', alt: '', markup: [], watermark: null })
 
-function openLightbox(src, alt, markup = [], watermark = null) {
-  if (!src) return
-  lightbox.value = { src, alt, markup, watermark }
+function openLightbox(src, originalSrc, alt, markup = [], watermark = null) {
+  const target = originalSrc || src
+  if (!target) return
+  lightbox.value = { src: target, alt, markup, watermark }
   lightboxOpen.value = true
 }
 </script>
@@ -37,7 +40,7 @@ function openLightbox(src, alt, markup = [], watermark = null) {
             type="button"
             class="preview-zoom"
             :aria-label="`全屏查看${standardAlt}`"
-            @click="openLightbox(standardSrc, standardAlt, standardMarkup, leftWatermark)"
+            @click="openLightbox(standardSrc, originalStandardSrc, standardAlt, standardMarkup, leftWatermark)"
           >
             <img :src="standardSrc" :alt="standardAlt">
           </button>
@@ -50,6 +53,7 @@ function openLightbox(src, alt, markup = [], watermark = null) {
         :markup="standardMarkup"
         :alt="standardAlt"
         :lightbox-watermark="leftWatermark"
+        :lightbox-src="originalStandardSrc"
       />
     </section>
     <section>
@@ -61,7 +65,7 @@ function openLightbox(src, alt, markup = [], watermark = null) {
             type="button"
             class="preview-zoom"
             :aria-label="`全屏查看${captureAlt}`"
-            @click="openLightbox(captureSrc, captureAlt, [], watermark)"
+            @click="openLightbox(captureSrc, originalCaptureSrc, captureAlt, [], watermark)"
           >
             <img :src="captureSrc" :alt="captureAlt">
           </button>

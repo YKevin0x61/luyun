@@ -8,6 +8,8 @@ Does not know 日常检查 / 专项卫生 / 整改单.
 from __future__ import annotations
 
 import logging
+import asyncio
+import functools
 import re
 import secrets
 import sqlite3
@@ -33,6 +35,15 @@ SHIFT_DAY = "白班"
 SHIFT_NIGHT = "夜班"
 ALLOWED_SHIFTS = frozenset({SHIFT_DAY, SHIFT_NIGHT})
 MAX_NAME_LENGTH = 40
+
+
+def serialized_write(method):
+    @functools.wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        async with self._write_lock:
+            return await method(self, *args, **kwargs)
+
+    return wrapper
 
 
 def hygiene_business_date(now: datetime) -> str:
@@ -63,6 +74,17 @@ class EmployeeAccounts:
             raise RuntimeError("EmployeeAccounts requires an open database connection")
         self._conn = conn
         self._now = now or (lambda: datetime.now(CHINA_TZ))
+        self._write_lock_owner = conn_or_db
+        self._local_write_lock = None
+
+    @property
+    def _write_lock(self):
+        shared = getattr(self._write_lock_owner, "_write_lock", None)
+        if shared is not None:
+            return shared
+        if self._local_write_lock is None:
+            self._local_write_lock = asyncio.Lock()
+        return self._local_write_lock
 
     def _now_dt(self) -> datetime:
         value = self._now()
@@ -119,6 +141,7 @@ class EmployeeAccounts:
         )
         return await cur.fetchone()
 
+    @serialized_write
     async def register(self, phone: str, password: str, name: str) -> dict:
         normalized = self._normalize_phone(phone)
         employee_name = self._normalize_name(name)
@@ -128,14 +151,18 @@ class EmployeeAccounts:
             raise EmployeeAccountsError("duplicate_phone", "duplicate_phone")
         now = self._now_iso()
         hashed = password_hash.hash_password(password)
-        cur = await self._conn.execute(
-            """INSERT INTO hygiene_employees
-               (phone, name, password_hash, job_title, permission, approved, disabled,
-                created_at, updated_at)
-               VALUES (?, ?, ?, '', ?, 0, 0, ?, ?)""",
-            (normalized, employee_name, hashed, PERMISSION_STAFF, now, now),
-        )
-        await self._conn.commit()
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO hygiene_employees
+                   (phone, name, password_hash, job_title, permission, approved, disabled,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, '', ?, 0, 0, ?, ?)""",
+                (normalized, employee_name, hashed, PERMISSION_STAFF, now, now),
+            )
+            await self._conn.commit()
+        except sqlite3.IntegrityError as exc:
+            await self._conn.rollback()
+            raise EmployeeAccountsError("duplicate_phone", "duplicate_phone") from exc
         logger.info("hygiene employee registered id=%s", cur.lastrowid)
         row = await self._fetch_employee(cur.lastrowid)
         return self._employee_from_row(row)
@@ -267,6 +294,7 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
+    @serialized_write
     async def update_profile(
         self,
         employee_id: int,
@@ -364,6 +392,48 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
+    @serialized_write
+    async def update_fields(
+        self,
+        employee_id: int,
+        *,
+        name: Optional[str] = None,
+        job_title: Optional[str] = None,
+        permission: Optional[str] = None,
+    ) -> dict:
+        row = await self._fetch_employee(employee_id)
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        fields = []
+        params: list = []
+        if name is not None:
+            fields.append("name = ?")
+            params.append(self._normalize_name(name))
+        if job_title is not None:
+            cleaned_title = (job_title or "").strip()
+            if len(cleaned_title) > 40:
+                raise EmployeeAccountsError("invalid_job_title", "invalid_job_title")
+            fields.append("job_title = ?")
+            params.append(cleaned_title)
+        if permission is not None:
+            value = (permission or "").strip()
+            if value == FORBIDDEN_SUPER_PERMISSION or value not in ALLOWED_PERMISSIONS:
+                raise EmployeeAccountsError("invalid_permission", "invalid_permission")
+            fields.append("permission = ?")
+            params.append(value)
+        if not fields:
+            return self._employee_from_row(row)
+        fields.append("updated_at = ?")
+        params.append(self._now_iso())
+        params.append(employee_id)
+        await self._conn.execute(
+            f"UPDATE hygiene_employees SET {', '.join(fields)} WHERE id = ?",
+            params,
+        )
+        await self._conn.commit()
+        refreshed = await self._fetch_employee(employee_id)
+        return self._employee_from_row(refreshed)
+
     async def get_staff_session(self, session_id: Optional[str]) -> Optional[dict]:
         if not session_id:
             return None
@@ -452,6 +522,7 @@ class EmployeeAccounts:
         )
         return await cur.fetchone()
 
+    @serialized_write
     async def pick_assignment(self, employee_id: int, shift: str, zone_id: int) -> dict:
         row = await self._fetch_employee(employee_id)
         if row is None:

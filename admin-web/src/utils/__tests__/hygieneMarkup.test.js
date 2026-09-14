@@ -56,6 +56,9 @@ describe('hygieneMarkup', () => {
     expect(standardImageUrl('staff', { id: 10, current_standard_id: 3 })).toBe(
       '/api/hygiene/standards/3/image',
     )
+    expect(standardImageUrl('staff', { current_standard_id: 3 }, 'thumb')).toBe(
+      '/api/hygiene/standards/3/image?variant=thumb',
+    )
     expect(standardImageUrl('admin', { id: 10, current_standard_id: 4 })).toBe(
       '/api/hygiene/standards/4/image',
     )
@@ -73,6 +76,9 @@ describe('hygieneMarkup', () => {
     )
     expect(frozenStandardUrl('admin', row)).toBe(
       '/api/hygiene/admin/daily/10/frozen-standard?shift=%E7%99%BD%E7%8F%AD&v=7',
+    )
+    expect(dailyCaptureUrl('staff', row, 'preview')).toBe(
+      '/api/hygiene/staff/daily/10/capture?shift=%E7%99%BD%E7%8F%AD&v=fake-2&variant=preview',
     )
     expect(formatWatermarkTime('2026-09-13T10:00:00+08:00')).toBe('2026-09-13 10:00')
     expect(chinaNowIso(new Date('2026-09-13T02:00:00.000Z'))).toBe(

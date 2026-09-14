@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 import json
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from api.security import require_session
@@ -16,10 +17,18 @@ from config import settings
 from services import auth_service
 from services.hygiene.accounts import EmployeeAccounts, EmployeeAccountsError
 from services.hygiene.work import HygieneWork, HygieneWorkError
+from services.realtime.hub import realtime_hub
 
 router = APIRouter(prefix="/api/hygiene", tags=["hygiene"])
 
 SUPER_ACTOR = {"kind": "super"}
+
+
+async def _hygiene_nudge(resource: str, action: str, **scope) -> None:
+    await realtime_hub.broadcast_nudge(
+        "hygiene",
+        {"resource": resource, "action": action, **scope},
+    )
 
 _ERROR_DETAILS = {
     "invalid_phone": "请输入有效的中国大陆手机号",
@@ -29,6 +38,7 @@ _ERROR_DETAILS = {
     "passwords_do_not_match": "两次输入的新密码不一致",
     "duplicate_phone": "该手机号已注册",
     "invalid_name": "请填写员工姓名",
+    "invalid_profile": "没有需要修改的资料",
     "invalid_permission": "卫生权限只能是普通员工或管理员",
     "invalid_job_title": "职位过长",
     "employee_not_found": "员工不存在",
@@ -59,6 +69,8 @@ _ERROR_DETAILS = {
     "invalid_type": "整改类型只能是卫生、摆放或标签",
     "invalid_body": "请写明哪里脏、怎么改",
     "invalid_duration": "请填写整改时限",
+    "invalid_image": "图片无法读取，请换一张有效的照片",
+    "invalid_variant": "图片尺寸类型不支持",
     "ticket_not_found": "整改单不存在",
     "not_passed": "只有已通过的对照才能标成卫生教材",
     "invalid_teaching": "请选择已通过的日常或专项对照",
@@ -274,18 +286,18 @@ async def _daily_capture_response(
     item_id: int,
     shift: str,
     actor: Dict[str, Any],
+    variant: str = "original",
+    request: Optional[Request] = None,
 ) -> Response:
     try:
         review = await work.get_daily_review(item_id, shift, actor=actor)
-        body = work.capture_bytes(review["capture_id"])
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="实拍不存在") from exc
-    return Response(
-        content=body,
-        media_type=review.get("content_type") or "image/jpeg",
-        headers={"Cache-Control": "no-store"},
+    return await _image_response(
+        work,
+        review["capture_id"],
+        variant=variant,
+        request=request,
     )
 
 
@@ -294,35 +306,82 @@ async def _frozen_standard_response(
     item_id: int,
     shift: str,
     actor: Dict[str, Any],
+    variant: str = "original",
+    request: Optional[Request] = None,
 ) -> Response:
     try:
         review = await work.get_daily_review(item_id, shift, actor=actor)
         standard = await work.standard_by_id(review["frozen_standard_id"])
-        body = work.capture_bytes(standard["capture_id"])
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="标准图不存在") from exc
-    return Response(
-        content=body,
-        media_type=standard.get("content_type") or "image/jpeg",
-        headers={"Cache-Control": "no-store"},
+    return await _image_response(
+        work,
+        standard["capture_id"],
+        variant=variant,
+        request=request,
     )
 
 
-async def _standard_image_response(work: HygieneWork, item_id: int) -> Response:
+async def _standard_image_response(
+    work: HygieneWork,
+    item_id: int,
+    variant: str = "original",
+    request: Optional[Request] = None,
+) -> Response:
     try:
         standard = await work.current_standard(item_id)
-        body = work.capture_bytes(standard["capture_id"])
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    return await _image_response(
+        work,
+        standard["capture_id"],
+        variant=variant,
+        request=request,
+    )
+
+
+def _etag_matches(request: Optional[Request], etag: Optional[str]) -> bool:
+    if request is None or not etag:
+        return False
+    raw = request.headers.get("if-none-match") or ""
+    return etag in {part.strip() for part in raw.split(",")}
+
+
+async def _image_response(
+    work: HygieneWork,
+    capture_id: str,
+    *,
+    variant: str = "original",
+    request: Optional[Request] = None,
+    cache_control: str = "no-store",
+) -> Response:
+    try:
+        view = await work.capture_view(capture_id, variant)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="标准图不存在") from exc
-    return Response(
-        content=body,
-        media_type=standard["content_type"] or "image/jpeg",
-        headers={"Cache-Control": "no-store"},
-    )
+        raise HTTPException(status_code=404, detail="图片不存在") from exc
+    headers = {
+        "Cache-Control": cache_control,
+        "Content-Encoding": "identity",
+    }
+    if view.get("byte_size") is not None:
+        headers["Content-Length"] = str(int(view["byte_size"]))
+    if view.get("sha256"):
+        headers["ETag"] = f'"{view["sha256"]}"'
+    if view.get("fallback"):
+        headers["X-Hygiene-Variant-Fallback"] = "original"
+    if _etag_matches(request, headers.get("ETag")):
+        return Response(status_code=304, headers=headers)
+    content_type = view.get("content_type") or "image/jpeg"
+    if view.get("path") is not None:
+        return FileResponse(
+            path=view["path"],
+            media_type=content_type,
+            headers=headers,
+        )
+    body = await work.capture_bytes(view["capture_id"])
+    return Response(content=body, media_type=content_type, headers=headers)
 
 
 @router.get("/standard-manifest")
@@ -341,27 +400,21 @@ async def standard_manifest(
 @router.get("/standards/{standard_id}/image")
 async def standard_version_image(
     standard_id: int,
+    request: Request,
+    variant: str = "original",
     _identity=Depends(require_standard_cache_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
     try:
         standard = await work.standard_version(standard_id)
-        body = work.capture_bytes(standard["capture_id"])
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="标准图不存在") from exc
-    headers = {
-        "Cache-Control": "private, max-age=31536000, immutable",
-        "Content-Length": str(len(body)),
-        "Content-Encoding": "identity",
-    }
-    if standard.get("sha256"):
-        headers["ETag"] = f'"{standard["sha256"]}"'
-    return Response(
-        content=body,
-        media_type=standard.get("content_type") or "image/jpeg",
-        headers=headers,
+    return await _image_response(
+        work,
+        standard["capture_id"],
+        variant=variant,
+        request=request,
+        cache_control="private, max-age=31536000, immutable",
     )
 
 
@@ -380,6 +433,7 @@ async def staff_register(
             status_code=400,
             detail=_ERROR_DETAILS.get(code, code),
         ) from exc
+    await _hygiene_nudge("roster", "registered")
     return {"employee": employee}
 
 
@@ -430,6 +484,7 @@ async def staff_update_me(
             status_code=400,
             detail=_ERROR_DETAILS.get(code, code),
         ) from exc
+    await _hygiene_nudge("roster", "profile_updated")
     return {"employee": employee}
 
 
@@ -456,6 +511,7 @@ async def staff_change_password(
             status_code=400,
             detail=_ERROR_DETAILS.get(code, code),
         ) from exc
+    await _hygiene_nudge("roster", "password_changed")
     return {"success": True}
 
 
@@ -470,8 +526,7 @@ async def staff_logout(
     return {"success": True}
 
 
-@router.post("/staff/shift")
-async def staff_pick_shift(
+async def _pick_assignment(
     body: AssignmentIn,
     staff=Depends(require_staff_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
@@ -493,7 +548,20 @@ async def staff_pick_assignment(
     staff=Depends(require_staff_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
-    return await staff_pick_shift(body, staff, accounts)
+    picked = await _pick_assignment(body, staff, accounts)
+    await _hygiene_nudge("assignment", "changed", employee_id=staff["employee"]["id"])
+    return picked
+
+
+@router.post("/staff/shift")
+async def staff_pick_shift(
+    body: AssignmentIn,
+    staff=Depends(require_staff_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, Any]:
+    picked = await _pick_assignment(body, staff, accounts)
+    await _hygiene_nudge("assignment", "changed", employee_id=staff["employee"]["id"])
+    return picked
 
 
 @router.get("/admin/roster")
@@ -518,6 +586,7 @@ async def admin_approve(
         employee = await accounts.approve(employee_id)
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
+    await _hygiene_nudge("roster", "approved", employee_id=employee_id)
     return {"employee": employee}
 
 
@@ -531,6 +600,7 @@ async def admin_disable(
         employee = await accounts.disable(employee_id)
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
+    await _hygiene_nudge("roster", "disabled", employee_id=employee_id)
     return {"employee": employee}
 
 
@@ -544,6 +614,7 @@ async def admin_enable(
         employee = await accounts.enable(employee_id)
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
+    await _hygiene_nudge("roster", "enabled", employee_id=employee_id)
     return {"employee": employee}
 
 
@@ -557,23 +628,21 @@ async def admin_patch_roster(
     if body.name is None and body.job_title is None and body.permission is None:
         raise HTTPException(status_code=400, detail="请提供姓名、职位或卫生权限")
     try:
-        employee = None
-        if body.name is not None:
-            employee = await accounts.set_name(employee_id, body.name)
-        if body.job_title is not None:
-            employee = await accounts.set_job_title(employee_id, body.job_title)
-        if body.permission is not None:
-            employee = await accounts.set_permission(employee_id, body.permission)
+        employee = await accounts.update_fields(
+            employee_id,
+            name=body.name,
+            job_title=body.job_title,
+            permission=body.permission,
+        )
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
+    await _hygiene_nudge("roster", "updated", employee_id=employee_id)
     return {"employee": employee}
 
 
-@router.post("/admin/roster/{employee_id}/shift")
-async def admin_set_shift(
+async def _admin_set_assignment(
     employee_id: int,
     body: AssignmentIn,
-    _session_id: str = Depends(require_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
     try:
@@ -594,7 +663,21 @@ async def admin_set_assignment(
     _session_id: str = Depends(require_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
-    return await admin_set_shift(employee_id, body, _session_id, accounts)
+    picked = await _admin_set_assignment(employee_id, body, accounts)
+    await _hygiene_nudge("assignment", "changed", employee_id=employee_id)
+    return picked
+
+
+@router.post("/admin/roster/{employee_id}/shift")
+async def admin_set_shift(
+    employee_id: int,
+    body: AssignmentIn,
+    _session_id: str = Depends(require_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, Any]:
+    picked = await _admin_set_assignment(employee_id, body, accounts)
+    await _hygiene_nudge("assignment", "changed", employee_id=employee_id)
+    return picked
 
 
 @router.get("/admin/zones")
@@ -615,6 +698,7 @@ async def admin_create_zone(
         zone = await work.create_zone(SUPER_ACTOR, body.name)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("zones", "created", zone_id=zone["id"])
     return {"zone": zone}
 
 
@@ -628,6 +712,7 @@ async def admin_delete_zone(
         zone = await work.delete_zone(SUPER_ACTOR, zone_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("zones", "deleted", zone_id=zone_id)
     return {"zone": zone}
 
 
@@ -646,11 +731,13 @@ async def admin_set_overdue_clocks(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.set_daily_overdue_clocks(
+        clocks = await work.set_daily_overdue_clocks(
             SUPER_ACTOR, body.day_hhmm, body.night_hhmm
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("settings", "updated")
+    return clocks
 
 
 @router.get("/admin/board-events")
@@ -694,6 +781,7 @@ async def admin_add_daily_item(
         item = await work.add_daily_item(SUPER_ACTOR, zone_id, name, capture)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("zones", "created", zone_id=item["zone_id"])
     return {"item": item}
 
 
@@ -707,6 +795,7 @@ async def admin_delete_daily_item(
         item = await work.delete_daily_item(SUPER_ACTOR, item_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("zones", "deleted", item_id=item["id"])
     return {"item": item}
 
 
@@ -723,16 +812,19 @@ async def admin_replace_standard(
         item = await work.replace_standard(SUPER_ACTOR, item_id, capture)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("zones", "standard_updated", item_id=item["id"])
     return {"item": item}
 
 
 @router.get("/admin/items/{item_id}/standard")
 async def admin_current_standard_image(
     item_id: int,
+    request: Request,
+    variant: str = "original",
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _standard_image_response(work, item_id)
+    return await _standard_image_response(work, item_id, variant, request)
 
 
 @router.get("/staff/daily-catalog")
@@ -746,6 +838,8 @@ async def staff_daily_catalog(
 @router.get("/staff/items/{item_id}/standard")
 async def staff_current_standard_image(
     item_id: int,
+    request: Request,
+    variant: str = "original",
     staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
@@ -753,7 +847,7 @@ async def staff_current_standard_image(
         await work.require_daily_item_access(_staff_actor(staff["employee"]), item_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
-    return await _standard_image_response(work, item_id)
+    return await _standard_image_response(work, item_id, variant, request)
 
 
 @router.get("/staff/daily-work")
@@ -783,6 +877,8 @@ async def staff_submit_daily(
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("daily", "submitted", item_id=item_id)
+    await _hygiene_nudge("boards", "changed")
     return submitted
 
 
@@ -794,11 +890,14 @@ async def staff_accept_daily(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.accept_daily(
+        accepted = await work.accept_daily(
             _staff_actor(staff["employee"]), item_id, body.shift
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("daily", "accepted", item_id=item_id)
+    await _hygiene_nudge("boards", "changed")
+    return accepted
 
 
 @router.post("/staff/daily/{item_id}/reject")
@@ -809,17 +908,22 @@ async def staff_reject_daily(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.reject_daily(
+        rejected = await work.reject_daily(
             _staff_actor(staff["employee"]), item_id, body.shift
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("daily", "rejected", item_id=item_id)
+    await _hygiene_nudge("boards", "changed")
+    return rejected
 
 
 @router.get("/staff/daily/{item_id}/capture")
 async def staff_daily_capture(
     item_id: int,
     shift: str,
+    request: Request,
+    variant: str = "original",
     staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
@@ -828,6 +932,8 @@ async def staff_daily_capture(
         item_id,
         shift,
         _staff_actor(staff["employee"]),
+        variant,
+        request,
     )
 
 
@@ -835,6 +941,8 @@ async def staff_daily_capture(
 async def staff_daily_frozen_standard(
     item_id: int,
     shift: str,
+    request: Request,
+    variant: str = "original",
     staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
@@ -843,6 +951,8 @@ async def staff_daily_frozen_standard(
         item_id,
         shift,
         _staff_actor(staff["employee"]),
+        variant,
+        request,
     )
 
 
@@ -881,9 +991,12 @@ async def admin_accept_daily(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.accept_daily(SUPER_ACTOR, item_id, body.shift)
+        accepted = await work.accept_daily(SUPER_ACTOR, item_id, body.shift)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("daily", "accepted", item_id=item_id)
+    await _hygiene_nudge("boards", "changed")
+    return accepted
 
 
 @router.post("/admin/daily/{item_id}/reject")
@@ -894,29 +1007,50 @@ async def admin_reject_daily(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.reject_daily(SUPER_ACTOR, item_id, body.shift)
+        rejected = await work.reject_daily(SUPER_ACTOR, item_id, body.shift)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("daily", "rejected", item_id=item_id)
+    await _hygiene_nudge("boards", "changed")
+    return rejected
 
 
 @router.get("/admin/daily/{item_id}/capture")
 async def admin_daily_capture(
     item_id: int,
     shift: str,
+    request: Request,
+    variant: str = "original",
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _daily_capture_response(work, item_id, shift, SUPER_ACTOR)
+    return await _daily_capture_response(
+        work,
+        item_id,
+        shift,
+        SUPER_ACTOR,
+        variant,
+        request,
+    )
 
 
 @router.get("/admin/daily/{item_id}/frozen-standard")
 async def admin_daily_frozen_standard(
     item_id: int,
     shift: str,
+    request: Request,
+    variant: str = "original",
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _frozen_standard_response(work, item_id, shift, SUPER_ACTOR)
+    return await _frozen_standard_response(
+        work,
+        item_id,
+        shift,
+        SUPER_ACTOR,
+        variant,
+        request,
+    )
 
 
 @router.get("/admin/daily/{item_id}/review")
@@ -932,22 +1066,23 @@ async def admin_daily_review(
         raise _work_http_error(exc) from exc
 
 
-async def _deep_clean_shot_response(work: HygieneWork, item_id: int, which: str) -> Response:
+async def _deep_clean_shot_response(
+    work: HygieneWork,
+    item_id: int,
+    which: str,
+    variant: str = "original",
+    request: Optional[Request] = None,
+) -> Response:
     try:
         review = await work.get_deep_clean_review(item_id)
         capture_id = review["before_capture_id"] if which == "before" else review["after_capture_id"]
-        content_type = (
-            review["before_content_type"] if which == "before" else review["after_content_type"]
-        )
-        body = work.capture_bytes(capture_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="实拍不存在") from exc
-    return Response(
-        content=body,
-        media_type=content_type or "image/jpeg",
-        headers={"Cache-Control": "no-store"},
+    return await _image_response(
+        work,
+        capture_id,
+        variant=variant,
+        request=request,
     )
 
 
@@ -971,7 +1106,7 @@ async def staff_submit_deep_clean(
     before_capture = await _live_capture_from_upload(before, live)
     after_capture = await _live_capture_from_upload(after, live)
     try:
-        return await work.submit_deep_clean_pair(
+        submitted = await work.submit_deep_clean_pair(
             _staff_actor(staff["employee"]),
             item_id,
             before_capture,
@@ -979,6 +1114,8 @@ async def staff_submit_deep_clean(
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("deep", "submitted", item_id=item_id)
+    return submitted
 
 
 @router.post("/staff/deep-clean/{item_id}/accept")
@@ -988,9 +1125,13 @@ async def staff_accept_deep_clean(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.accept_deep_clean_pair(_staff_actor(staff["employee"]), item_id)
+        accepted = await work.accept_deep_clean_pair(
+            _staff_actor(staff["employee"]), item_id
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("deep", "accepted", item_id=item_id)
+    return accepted
 
 
 @router.post("/staff/deep-clean/{item_id}/reject")
@@ -1000,9 +1141,13 @@ async def staff_reject_deep_clean(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.reject_deep_clean_pair(_staff_actor(staff["employee"]), item_id)
+        rejected = await work.reject_deep_clean_pair(
+            _staff_actor(staff["employee"]), item_id
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("deep", "rejected", item_id=item_id)
+    return rejected
 
 
 @router.get("/staff/deep-clean/{item_id}/review")
@@ -1020,19 +1165,23 @@ async def staff_deep_clean_review(
 @router.get("/staff/deep-clean/{item_id}/before")
 async def staff_deep_clean_before(
     item_id: int,
+    request: Request,
+    variant: str = "original",
     _staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _deep_clean_shot_response(work, item_id, "before")
+    return await _deep_clean_shot_response(work, item_id, "before", variant, request)
 
 
 @router.get("/staff/deep-clean/{item_id}/after")
 async def staff_deep_clean_after(
     item_id: int,
+    request: Request,
+    variant: str = "original",
     _staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _deep_clean_shot_response(work, item_id, "after")
+    return await _deep_clean_shot_response(work, item_id, "after", variant, request)
 
 
 @router.get("/admin/deep-clean/items")
@@ -1053,6 +1202,7 @@ async def admin_add_deep_clean_item(
         item = await work.add_deep_clean_item(SUPER_ACTOR, body.weekday, body.name)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("deep", "configured", weekday=body.weekday)
     return {"item": item}
 
 
@@ -1063,9 +1213,11 @@ async def admin_remove_deep_clean_item(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.remove_deep_clean_item(SUPER_ACTOR, item_id)
+        item = await work.remove_deep_clean_item(SUPER_ACTOR, item_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("deep", "configured", weekday=item["weekday"])
+    return item
 
 
 @router.get("/admin/deep-clean/clock")
@@ -1083,9 +1235,11 @@ async def admin_set_deep_clean_clock(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.set_deep_clean_overdue_clock(SUPER_ACTOR, body.hhmm)
+        clock = await work.set_deep_clean_overdue_clock(SUPER_ACTOR, body.hhmm)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("settings", "updated")
+    return clock
 
 
 @router.get("/admin/deep-clean/calendar")
@@ -1115,9 +1269,11 @@ async def admin_accept_deep_clean(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.accept_deep_clean_pair(SUPER_ACTOR, item_id)
+        accepted = await work.accept_deep_clean_pair(SUPER_ACTOR, item_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("deep", "accepted", item_id=item_id)
+    return accepted
 
 
 @router.post("/admin/deep-clean/{item_id}/reject")
@@ -1127,9 +1283,11 @@ async def admin_reject_deep_clean(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.reject_deep_clean_pair(SUPER_ACTOR, item_id)
+        rejected = await work.reject_deep_clean_pair(SUPER_ACTOR, item_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("deep", "rejected", item_id=item_id)
+    return rejected
 
 
 @router.get("/admin/deep-clean/{item_id}/review")
@@ -1147,19 +1305,23 @@ async def admin_deep_clean_review(
 @router.get("/admin/deep-clean/{item_id}/before")
 async def admin_deep_clean_before(
     item_id: int,
+    request: Request,
+    variant: str = "original",
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _deep_clean_shot_response(work, item_id, "before")
+    return await _deep_clean_shot_response(work, item_id, "before", variant, request)
 
 
 @router.get("/admin/deep-clean/{item_id}/after")
 async def admin_deep_clean_after(
     item_id: int,
+    request: Request,
+    variant: str = "original",
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _deep_clean_shot_response(work, item_id, "after")
+    return await _deep_clean_shot_response(work, item_id, "after", variant, request)
 
 
 def _parse_duration_hours(raw: Optional[str]) -> timedelta:
@@ -1186,7 +1348,7 @@ async def _open_fix_from_form(
     capture = await _live_capture_from_upload(file, live)
     capture["markup"] = _parse_markup_field(markup)
     try:
-        return await work.open_fix(
+        result = await work.open_fix(
             actor,
             zone_id,
             ticket_type,
@@ -1196,6 +1358,13 @@ async def _open_fix_from_form(
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge(
+        "fix",
+        "opened",
+        ticket_id=result["id"],
+        zone_id=result["zone_id"],
+    )
+    return result
 
 
 async def _fix_shot_response(
@@ -1203,26 +1372,24 @@ async def _fix_shot_response(
     ticket_id: int,
     which: str,
     actor: Dict[str, Any],
+    variant: str = "original",
+    request: Optional[Request] = None,
 ) -> Response:
     try:
         ticket = await work.get_fix_ticket(ticket_id, actor=actor)
         if which == "original":
             capture_id = ticket["capture_id"]
-            content_type = ticket.get("content_type") or "image/jpeg"
         else:
             capture_id = ticket.get("reshoot_capture_id")
-            content_type = ticket.get("reshoot_content_type") or "image/jpeg"
             if not capture_id:
                 raise HygieneWorkError("not_pending", "not_pending")
-        body = work.capture_bytes(capture_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="实拍不存在") from exc
-    return Response(
-        content=body,
-        media_type=content_type,
-        headers={"Cache-Control": "no-store"},
+    return await _image_response(
+        work,
+        capture_id,
+        variant=variant,
+        request=request,
     )
 
 
@@ -1284,9 +1451,13 @@ async def staff_reshoot_fix(
 ) -> Dict[str, Any]:
     capture = await _live_capture_from_upload(file, live)
     try:
-        return await work.reshoot_fix(_staff_actor(staff["employee"]), ticket_id, capture)
+        reshoot = await work.reshoot_fix(
+            _staff_actor(staff["employee"]), ticket_id, capture
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("fix", "reshot", ticket_id=ticket_id)
+    return reshoot
 
 
 @router.post("/staff/fix/{ticket_id}/accept")
@@ -1296,9 +1467,11 @@ async def staff_accept_fix(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.accept_fix(_staff_actor(staff["employee"]), ticket_id)
+        accepted = await work.accept_fix(_staff_actor(staff["employee"]), ticket_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("fix", "accepted", ticket_id=ticket_id)
+    return accepted
 
 
 @router.post("/staff/fix/{ticket_id}/reject")
@@ -1308,14 +1481,18 @@ async def staff_reject_fix(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.reject_fix(_staff_actor(staff["employee"]), ticket_id)
+        rejected = await work.reject_fix(_staff_actor(staff["employee"]), ticket_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("fix", "rejected", ticket_id=ticket_id)
+    return rejected
 
 
 @router.get("/staff/fix/{ticket_id}/original")
 async def staff_fix_original(
     ticket_id: int,
+    request: Request,
+    variant: str = "original",
     staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
@@ -1324,12 +1501,16 @@ async def staff_fix_original(
         ticket_id,
         "original",
         _staff_actor(staff["employee"]),
+        variant,
+        request,
     )
 
 
 @router.get("/staff/fix/{ticket_id}/reshoot")
 async def staff_fix_reshoot_image(
     ticket_id: int,
+    request: Request,
+    variant: str = "original",
     staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
@@ -1338,6 +1519,8 @@ async def staff_fix_reshoot_image(
         ticket_id,
         "reshoot",
         _staff_actor(staff["employee"]),
+        variant,
+        request,
     )
 
 
@@ -1393,9 +1576,11 @@ async def admin_accept_fix(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.accept_fix(SUPER_ACTOR, ticket_id)
+        accepted = await work.accept_fix(SUPER_ACTOR, ticket_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("fix", "accepted", ticket_id=ticket_id)
+    return accepted
 
 
 @router.post("/admin/fix/{ticket_id}/reject")
@@ -1405,27 +1590,47 @@ async def admin_reject_fix(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.reject_fix(SUPER_ACTOR, ticket_id)
+        rejected = await work.reject_fix(SUPER_ACTOR, ticket_id)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("fix", "rejected", ticket_id=ticket_id)
+    return rejected
 
 
 @router.get("/admin/fix/{ticket_id}/original")
 async def admin_fix_original(
     ticket_id: int,
+    request: Request,
+    variant: str = "original",
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _fix_shot_response(work, ticket_id, "original", SUPER_ACTOR)
+    return await _fix_shot_response(
+        work,
+        ticket_id,
+        "original",
+        SUPER_ACTOR,
+        variant,
+        request,
+    )
 
 
 @router.get("/admin/fix/{ticket_id}/reshoot")
 async def admin_fix_reshoot_image(
     ticket_id: int,
+    request: Request,
+    variant: str = "original",
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _fix_shot_response(work, ticket_id, "reshoot", SUPER_ACTOR)
+    return await _fix_shot_response(
+        work,
+        ticket_id,
+        "reshoot",
+        SUPER_ACTOR,
+        variant,
+        request,
+    )
 
 
 def _teaching_source(body: TeachingMarkIn) -> dict:
@@ -1435,17 +1640,25 @@ def _teaching_source(body: TeachingMarkIn) -> dict:
     return source
 
 
-async def _teaching_shot_response(work: HygieneWork, example_id: int, which: str) -> Response:
+async def _teaching_shot_response(
+    work: HygieneWork,
+    example_id: int,
+    which: str,
+    variant: str = "original",
+    request: Optional[Request] = None,
+) -> Response:
     try:
         example = await work.get_teaching(example_id)
         key = "left" if which == "left" else "right"
-        body = work.capture_bytes(example[f"{key}_capture_id"])
+        capture_id = example[f"{key}_capture_id"]
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="教材图片不存在") from exc
-    media = example.get(f"{key}_content_type") or "image/jpeg"
-    return Response(content=body, media_type=media, headers={"Cache-Control": "no-store"})
+    return await _image_response(
+        work,
+        capture_id,
+        variant=variant,
+        request=request,
+    )
 
 
 @router.get("/staff/teaching")
@@ -1471,19 +1684,23 @@ async def staff_get_teaching(
 @router.get("/staff/teaching/{example_id}/left")
 async def staff_teaching_left(
     example_id: int,
+    request: Request,
+    variant: str = "original",
     _staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _teaching_shot_response(work, example_id, "left")
+    return await _teaching_shot_response(work, example_id, "left", variant, request)
 
 
 @router.get("/staff/teaching/{example_id}/right")
 async def staff_teaching_right(
     example_id: int,
+    request: Request,
+    variant: str = "original",
     _staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _teaching_shot_response(work, example_id, "right")
+    return await _teaching_shot_response(work, example_id, "right", variant, request)
 
 
 @router.get("/admin/teaching")
@@ -1504,6 +1721,7 @@ async def admin_mark_teaching(
         example = await work.mark_teaching(SUPER_ACTOR, _teaching_source(body))
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+    await _hygiene_nudge("teaching", "marked", example_id=example["id"])
     return {"example": example}
 
 
@@ -1522,16 +1740,20 @@ async def admin_get_teaching(
 @router.get("/admin/teaching/{example_id}/left")
 async def admin_teaching_left(
     example_id: int,
+    request: Request,
+    variant: str = "original",
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _teaching_shot_response(work, example_id, "left")
+    return await _teaching_shot_response(work, example_id, "left", variant, request)
 
 
 @router.get("/admin/teaching/{example_id}/right")
 async def admin_teaching_right(
     example_id: int,
+    request: Request,
+    variant: str = "original",
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
-    return await _teaching_shot_response(work, example_id, "right")
+    return await _teaching_shot_response(work, example_id, "right", variant, request)

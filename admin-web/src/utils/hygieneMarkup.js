@@ -57,64 +57,91 @@ export function parseMarkup(raw) {
   return value.filter(isMarkupMark)
 }
 
-export function standardImageUrl(_kind, item) {
-  const standardId = item && item.current_standard_id
-  if (!standardId) return ''
-  return `/api/hygiene/standards/${standardId}/image`
+export function appendImageVariant(url, variant) {
+  if (!url || !variant || variant === 'original') return url
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}variant=${encodeURIComponent(variant)}`
 }
 
-export function dailyItemStandardUrl(kind, row) {
+export function standardImageUrl(_kind, item, variant = 'original') {
+  const standardId = item && item.current_standard_id
+  if (!standardId) return ''
+  return appendImageVariant(
+    `/api/hygiene/standards/${standardId}/image`,
+    variant,
+  )
+}
+
+export function dailyItemStandardUrl(kind, row, variant = 'original') {
   return standardImageUrl(kind, {
     id: row && row.item_id,
     current_standard_id: row && row.current_standard_id,
-  })
+  }, variant)
 }
 
-export function dailyCaptureUrl(kind, row) {
+export function dailyCaptureUrl(kind, row, variant = 'original') {
   const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
   const itemId = row && row.item_id
   const shift = encodeURIComponent((row && row.shift) || '')
   const version = encodeURIComponent((row && row.capture_id) || '')
-  return `${prefix}/daily/${itemId}/capture?shift=${shift}&v=${version}`
+  return appendImageVariant(
+    `${prefix}/daily/${itemId}/capture?shift=${shift}&v=${version}`,
+    variant,
+  )
 }
 
-export function frozenStandardUrl(kind, row) {
+export function frozenStandardUrl(kind, row, variant = 'original') {
   const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
   const itemId = row && row.item_id
   const shift = encodeURIComponent((row && row.shift) || '')
   const version = encodeURIComponent((row && row.frozen_standard_id) || '')
-  return `${prefix}/daily/${itemId}/frozen-standard?shift=${shift}&v=${version}`
+  return appendImageVariant(
+    `${prefix}/daily/${itemId}/frozen-standard?shift=${shift}&v=${version}`,
+    variant,
+  )
 }
 
-export function deepCleanShotUrl(kind, row, which) {
+export function deepCleanShotUrl(kind, row, which, variant = 'original') {
   const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
   const itemId = row && row.item_id
   const key = which === 'before' ? 'before_capture_id' : 'after_capture_id'
   const version = encodeURIComponent((row && row[key]) || '')
-  return `${prefix}/deep-clean/${itemId}/${which}?v=${version}`
+  return appendImageVariant(
+    `${prefix}/deep-clean/${itemId}/${which}?v=${version}`,
+    variant,
+  )
 }
 
-export function fixOriginalUrl(kind, ticket) {
+export function fixOriginalUrl(kind, ticket, variant = 'original') {
   const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
   const id = ticket && ticket.id
   const version = encodeURIComponent((ticket && ticket.capture_id) || '')
-  return `${prefix}/fix/${id}/original?v=${version}`
+  return appendImageVariant(
+    `${prefix}/fix/${id}/original?v=${version}`,
+    variant,
+  )
 }
 
-export function fixReshootUrl(kind, ticket) {
+export function fixReshootUrl(kind, ticket, variant = 'original') {
   const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
   const id = ticket && ticket.id
   const version = encodeURIComponent((ticket && ticket.reshoot_capture_id) || '')
-  return `${prefix}/fix/${id}/reshoot?v=${version}`
+  return appendImageVariant(
+    `${prefix}/fix/${id}/reshoot?v=${version}`,
+    variant,
+  )
 }
 
-export function teachingShotUrl(kind, example, which) {
+export function teachingShotUrl(kind, example, which, variant = 'original') {
   const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
   const id = example && example.id
   const side = which === 'right' ? 'right' : 'left'
   const captureKey = side === 'right' ? 'right_capture_id' : 'left_capture_id'
   const version = encodeURIComponent((example && (example[captureKey] || example.id)) || '')
-  return `${prefix}/teaching/${id}/${side}?v=${version}`
+  return appendImageVariant(
+    `${prefix}/teaching/${id}/${side}?v=${version}`,
+    variant,
+  )
 }
 
 export function formatWatermarkTime(value) {

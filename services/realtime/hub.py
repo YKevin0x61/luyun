@@ -15,7 +15,15 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-VALID_TOPICS = {"orders", "tables", "scraper", "dashboard", "logs", "admin"}
+VALID_TOPICS = {
+    "orders",
+    "tables",
+    "scraper",
+    "dashboard",
+    "logs",
+    "admin",
+    "hygiene",
+}
 
 _VALID_ACTIONS = {"subscribe", "unsubscribe", "ping"}
 

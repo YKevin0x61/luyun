@@ -7,6 +7,7 @@ DatabaseManager 的连接/生命周期职责：
 
 import logging
 import os
+import asyncio
 from typing import Dict, Optional
 
 import aiosqlite
@@ -40,6 +41,7 @@ class _ConnectionMixin:
         self._main_conn: Optional[aiosqlite.Connection] = None
         # Legacy: always empty under single-db architecture (ATTACH removed).
         self._attached_tables: set[str] = set()
+        self._write_lock = None
 
         self.stats = {
             'queries_executed': 0,

@@ -19,7 +19,7 @@ describe('admin deep-clean config', () => {
     expect(source).not.toMatch(/type="time"/)
     expect(source).not.toMatch(/type="date"/)
     expect(source).toMatch(/HYGIENE_WEEKDAYS/)
-    expect(source).toMatch(/不要标准图/)
+    expect(source).toMatch(/不需要标准图/)
     expect(source).not.toMatch(/type=["']file["']/)
     expect(source).not.toMatch(/accept=["']image/)
   })

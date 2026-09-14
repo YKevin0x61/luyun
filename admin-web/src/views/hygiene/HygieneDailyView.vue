@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import { api } from '../../api/client'
+import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import { dailyCaptureUrl, frozenStandardUrl } from '../../utils/hygieneMarkup'
 import { dailyQueueKey, nextAfterRemove } from '../../utils/hygieneWorkFlow'
 
@@ -15,6 +16,12 @@ const lastPassed = ref(null)
 const teachingHint = ref('')
 
 onMounted(loadQueue)
+
+useHygieneRealtime({
+  id: 'hygiene-admin-daily',
+  resources: ['daily'],
+  pull: loadQueue,
+})
 
 async function loadQueue() {
   loading.value = true
@@ -118,14 +125,18 @@ async function markTeaching() {
       <div>
         <p class="hy-eyebrow">Daily · 当日对照</p>
         <h1>日常验收</h1>
-        <p>对照提交当时的标准图验实拍。左标准图、右实拍。交这张的人不能自己验；超级管理员在这里验。</p>
+        <p>对照提交当时的标准图验收员工实拍。</p>
+        <details class="rule-help">
+          <summary>规则说明</summary>
+          <p>左标准图、右实拍。提交人不能验收自己的实拍，超级管理员可在这里验收。</p>
+        </details>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="loadQueue">刷新</button>
     </div>
 
     <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>
     <div v-if="lastPassed" class="card teach-banner">
-      <p>刚通过：{{ lastPassed.zone_name }} · {{ lastPassed.item_name }} · {{ lastPassed.shift }}。合格图不会自动进教材。</p>
+      <p>刚通过：{{ lastPassed.zone_name }} · {{ lastPassed.item_name }} · {{ lastPassed.shift }}。</p>
       <button type="button" class="btn btn-primary" :disabled="busy" @click="markTeaching">标为卫生教材</button>
       <p v-if="teachingHint" class="clocks-hint">{{ teachingHint }}</p>
     </div>
@@ -160,10 +171,12 @@ async function markTeaching() {
         <div v-else-if="review" class="review-body">
           <p class="review-meta">{{ selected.zone_name }} · {{ selected.shift }} · 拍摄人 {{ review.submitter_phone }}</p>
           <HygieneReviewPair
-            :standard-src="frozenStandardUrl('admin', selected)"
+            :standard-src="frozenStandardUrl('admin', selected, 'preview')"
+            :original-standard-src="frozenStandardUrl('admin', selected)"
             :standard-markup="review.frozen_markup || []"
             :standard-alt="selected.item_name"
-            :capture-src="dailyCaptureUrl('admin', selected)"
+            :capture-src="dailyCaptureUrl('admin', selected, 'preview')"
+            :original-capture-src="dailyCaptureUrl('admin', selected)"
             :capture-alt="'实拍'"
             :watermark="review.watermark"
           />

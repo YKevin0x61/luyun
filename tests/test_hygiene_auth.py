@@ -4,6 +4,7 @@
 
 import asyncio
 from datetime import datetime
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -979,3 +980,19 @@ def test_super_can_get_boards_and_mark_teaching_staff_can_list(hygiene_http):
     assert right.content == SHOT_A
     _assert_no_score_keys(listed.json())
     _assert_no_score_keys(opened.json())
+
+
+def test_daily_submit_broadcasts_data_less_hygiene_nudges(hygiene_http, monkeypatch):
+    client, _db, accounts, work = hygiene_http
+    _approve_staff(accounts, PHONE, "白班")
+    item = _add_anban_item(work)
+    _staff_login(client, PHONE)
+    broadcast = AsyncMock()
+    monkeypatch.setattr(hygiene_module.realtime_hub, "broadcast_nudge", broadcast)
+
+    submitted = _submit_daily(client, item["id"], SHOT_A)
+
+    assert submitted.status_code == 200
+    calls = [call.args for call in broadcast.await_args_list]
+    assert ("hygiene", {"resource": "daily", "action": "submitted", "item_id": item["id"]}) in calls
+    assert ("hygiene", {"resource": "boards", "action": "changed"}) in calls
