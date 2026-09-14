@@ -1,4 +1,6 @@
 <script setup>
+import { ref } from 'vue'
+import HygieneImageLightbox from './HygieneImageLightbox.vue'
 import HygieneStandardOverlay from './HygieneStandardOverlay.vue'
 import HygieneWatermarkOverlay from './HygieneWatermarkOverlay.vue'
 
@@ -13,6 +15,15 @@ defineProps({
   leftLabel: { type: String, default: '标准图' },
   rightLabel: { type: String, default: '实拍' },
 })
+
+const lightboxOpen = ref(false)
+const lightbox = ref({ src: '', alt: '', markup: [], watermark: null })
+
+function openLightbox(src, alt, markup = [], watermark = null) {
+  if (!src) return
+  lightbox.value = { src, alt, markup, watermark }
+  lightboxOpen.value = true
+}
 </script>
 
 <template>
@@ -22,7 +33,14 @@ defineProps({
       <div v-if="leftWatermark" class="capture-frame">
         <p v-if="!standardSrc" class="capture-empty">还没有清理前</p>
         <div v-else class="capture-photo">
-          <img :src="standardSrc" :alt="standardAlt">
+          <button
+            type="button"
+            class="preview-zoom"
+            :aria-label="`全屏查看${standardAlt}`"
+            @click="openLightbox(standardSrc, standardAlt, standardMarkup, leftWatermark)"
+          >
+            <img :src="standardSrc" :alt="standardAlt">
+          </button>
           <HygieneWatermarkOverlay :watermark="leftWatermark" />
         </div>
       </div>
@@ -31,6 +49,7 @@ defineProps({
         :src="standardSrc"
         :markup="standardMarkup"
         :alt="standardAlt"
+        :lightbox-watermark="leftWatermark"
       />
     </section>
     <section>
@@ -38,11 +57,26 @@ defineProps({
       <div class="capture-frame">
         <p v-if="!captureSrc" class="capture-empty">还没有实拍</p>
         <div v-else class="capture-photo">
-          <img :src="captureSrc" :alt="captureAlt">
+          <button
+            type="button"
+            class="preview-zoom"
+            :aria-label="`全屏查看${captureAlt}`"
+            @click="openLightbox(captureSrc, captureAlt, [], watermark)"
+          >
+            <img :src="captureSrc" :alt="captureAlt">
+          </button>
           <HygieneWatermarkOverlay :watermark="watermark" />
         </div>
       </div>
     </section>
+    <HygieneImageLightbox
+      v-if="lightboxOpen"
+      :src="lightbox.src"
+      :alt="lightbox.alt"
+      :markup="lightbox.markup"
+      :watermark="lightbox.watermark"
+      @close="lightboxOpen = false"
+    />
   </div>
 </template>
 
@@ -92,6 +126,14 @@ defineProps({
   width: 100%;
   height: auto;
   max-height: 440px;
+}
+.preview-zoom {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
 }
 .capture-empty {
   margin: 0;

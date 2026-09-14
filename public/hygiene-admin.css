@@ -1170,6 +1170,14 @@
   width: 100%;
   height: auto;
 }
+.hygiene-work .capture-preview .preview-zoom {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
 
 @media (max-width: 720px) {
   .hygiene-admin .hy-header-inner {

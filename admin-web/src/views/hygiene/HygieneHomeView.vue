@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import SvgIcon from '../../components/SvgIcon.vue'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
+import HygieneImageLightbox from '../../components/hygiene/HygieneImageLightbox.vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import HygieneWatermarkOverlay from '../../components/hygiene/HygieneWatermarkOverlay.vue'
@@ -80,6 +81,8 @@ const confirmPassword = ref('')
 const passwordSaving = ref(false)
 const passwordError = ref('')
 const passwordFlash = ref('')
+const lightboxOpen = ref(false)
+const lightbox = ref({ src: '', alt: '', markup: [], watermark: null })
 const inbox = ref([])
 const deepInbox = ref([])
 const deepStatus = ref('')
@@ -184,6 +187,12 @@ function tickClock() {
 
 function onKeydown(event) {
   if (event.key === 'Escape' && sheet.value) closeSheet()
+}
+
+function openImageLightbox(src, alt, watermark = null, markup = []) {
+  if (!src) return
+  lightbox.value = { src, alt, watermark, markup }
+  lightboxOpen.value = true
 }
 
 onMounted(() => {
@@ -882,6 +891,14 @@ async function decide(action) {
 <template>
   <div class="hygiene-staff hygiene-work">
     <StandardPhotoCachePanel />
+    <HygieneImageLightbox
+      v-if="lightboxOpen"
+      :src="lightbox.src"
+      :alt="lightbox.alt"
+      :markup="lightbox.markup"
+      :watermark="lightbox.watermark"
+      @close="lightboxOpen = false"
+    />
     <a class="hy-skip" href="#hygiene-work-main">跳到内容</a>
     <header class="hy-work-header">
       <div class="hy-work-header-inner">
@@ -1416,6 +1433,7 @@ async function decide(action) {
               :src="previewUrl"
               :markup="sheet.markup || []"
               editable
+              :lightbox-watermark="localWatermark"
               alt="刚拍的整改原图"
               @point="addFixCircle"
             />
@@ -1430,7 +1448,15 @@ async function decide(action) {
 
         <template v-else-if="sheet.mode === 'reshoot-preview'">
           <div class="capture-preview">
-            <img v-if="previewUrl" :src="previewUrl" alt="刚拍的回拍">
+            <button
+              v-if="previewUrl"
+              type="button"
+              class="preview-zoom"
+              aria-label="全屏查看刚拍的回拍"
+              @click="openImageLightbox(previewUrl, '刚拍的回拍', localWatermark)"
+            >
+              <img :src="previewUrl" alt="刚拍的回拍">
+            </button>
             <HygieneWatermarkOverlay :watermark="localWatermark" />
           </div>
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitFixReshoot">
@@ -1441,7 +1467,15 @@ async function decide(action) {
 
         <template v-else-if="sheet.mode === 'before-preview'">
           <div class="capture-preview">
-            <img v-if="beforePreviewUrl" :src="beforePreviewUrl" alt="清理前">
+            <button
+              v-if="beforePreviewUrl"
+              type="button"
+              class="preview-zoom"
+              aria-label="全屏查看清理前照片"
+              @click="openImageLightbox(beforePreviewUrl, '清理前', localBeforeWatermark)"
+            >
+              <img :src="beforePreviewUrl" alt="清理前">
+            </button>
             <HygieneWatermarkOverlay :watermark="localBeforeWatermark" />
           </div>
           <button type="button" class="btn btn-primary btn-block staff-submit" @click="openDeepAfterCamera">拍清理后</button>
@@ -1467,7 +1501,15 @@ async function decide(action) {
 
         <template v-else-if="sheet.mode === 'preview'">
           <div class="capture-preview">
-            <img v-if="previewUrl" :src="previewUrl" alt="刚拍的实拍">
+            <button
+              v-if="previewUrl"
+              type="button"
+              class="preview-zoom"
+              aria-label="全屏查看刚拍的实拍"
+              @click="openImageLightbox(previewUrl, '刚拍的实拍', localWatermark)"
+            >
+              <img :src="previewUrl" alt="刚拍的实拍">
+            </button>
             <HygieneWatermarkOverlay :watermark="localWatermark" />
           </div>
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitCapture">
