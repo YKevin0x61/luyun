@@ -1340,7 +1340,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  appearance: none;
+  font: inherit;
+  cursor: pointer;
 }
+.hygiene-work .hy-work-shift:hover { border-color: var(--hy-mint); }
 .hygiene-work .hy-work-shift::before {
   content: "";
   width: 6px;

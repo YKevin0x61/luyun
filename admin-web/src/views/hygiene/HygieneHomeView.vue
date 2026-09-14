@@ -283,6 +283,15 @@ async function pickAssignment() {
   }
 }
 
+async function openAssignmentPicker() {
+  if (!employee.value) return
+  changingAssignment.value = true
+  tab.value = 'inbox'
+  await nextTick()
+  const main = document.getElementById('hygiene-work-main')
+  if (main) main.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
 async function logout() {
   if (loggingOut.value) return
   loggingOut.value = true
@@ -785,9 +794,15 @@ async function decide(action) {
             <span class="hy-brand-tagline">{{ HYGIENE_BRAND_TAGLINE }}</span>
           </span>
         </div>
-        <span v-if="employee" class="hy-work-shift">
+        <button
+          v-if="employee"
+          type="button"
+          class="hy-work-shift"
+          aria-label="重新选择区域和班次"
+          @click="openAssignmentPicker"
+        >
           {{ employee.name || employee.phone }} · {{ employee.zone_name || '未选区域' }} · {{ hygieneShiftLabel(employee.shift) }}
-        </span>
+        </button>
       </div>
     </header>
 
@@ -1100,7 +1115,7 @@ async function decide(action) {
           <button
             type="button"
             class="btn btn-block hy-staff-submit"
-            @click="changingAssignment = true; tab = 'inbox'"
+            @click="openAssignmentPicker"
           >重新选择区域和班次</button>
         </template>
         <p v-else class="hy-staff-lead">正在确认登录…</p>
