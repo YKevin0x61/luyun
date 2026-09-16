@@ -10,10 +10,10 @@ const emit = defineEmits(['captured', 'error'])
 const videoEl = ref(null)
 const nativeCameraInput = ref(null)
 const starting = ref(true)
+const cameraReady = ref(false)
 const snapping = ref(false)
 const switchingCamera = ref(false)
 const wideAvailable = ref(false)
-const cameraActionText = ref('')
 const errorText = ref('')
 let stream = null
 let wideMode = false
@@ -40,11 +40,11 @@ async function attachStream(nextStream) {
     videoEl.value.srcObject = nextStream
     await videoEl.value.play()
   }
+  cameraReady.value = true
 }
 
 async function refreshCameraCapabilities() {
   wideAvailable.value = false
-  cameraActionText.value = ''
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return
   try {
     const devices = await navigator.mediaDevices.enumerateDevices()
@@ -55,9 +55,6 @@ async function refreshCameraCapabilities() {
     standardDeviceId = pair.standardDevice ? pair.standardDevice.deviceId : currentId
     wideDeviceId = pair.wideDevice ? pair.wideDevice.deviceId : ''
     wideAvailable.value = Boolean(zoomWide || pair.canSwitchDevices)
-    if (wideAvailable.value) {
-      cameraActionText.value = wideMode ? '标准视角' : '广角'
-    }
   } catch {
     // Device enumeration is optional; keep using the browser-selected camera.
   }
@@ -85,7 +82,6 @@ async function applyWideDefault() {
     savedZoom = settings.zoom == null ? 1 : settings.zoom
     const zoom = track.getCapabilities().zoom
     wideMode = true
-    cameraActionText.value = '标准视角'
     await track.applyConstraints({ advanced: [{ zoom: zoom.min }] })
     return
   }
@@ -93,7 +89,6 @@ async function applyWideDefault() {
   if (!wideDeviceId) return
   if (wideDeviceId === currentId) {
     wideMode = true
-    cameraActionText.value = '标准视角'
     return
   }
   wideMode = true
@@ -110,7 +105,6 @@ async function toggleWide() {
       const zoom = track.getCapabilities().zoom
       if (wideMode) {
         wideMode = false
-        cameraActionText.value = '广角'
         await track.applyConstraints({
           advanced: [{ zoom: savedZoom == null ? 1 : savedZoom }],
         })
@@ -118,7 +112,6 @@ async function toggleWide() {
         const settings = track.getSettings ? track.getSettings() : {}
         savedZoom = settings.zoom == null ? 1 : settings.zoom
         wideMode = true
-        cameraActionText.value = '标准视角'
         await track.applyConstraints({ advanced: [{ zoom: zoom.min }] })
       }
       return
@@ -161,6 +154,7 @@ async function startCamera() {
 }
 
 function stopCamera() {
+  cameraReady.value = false
   if (stream) {
     for (const track of stream.getTracks()) track.stop()
     stream = null
@@ -228,12 +222,20 @@ onBeforeUnmount(stopCamera)
         @click="openNativeCamera"
       >原相机</button>
       <button
-        v-if="wideAvailable"
+        v-if="cameraReady"
         type="button"
         class="btn live-wide"
-        :disabled="switchingCamera || starting || Boolean(errorText)"
+        :class="{ 'is-active': wideMode }"
+        :aria-pressed="wideMode"
+        :aria-label="wideAvailable
+          ? (wideMode ? '切换到标准视角' : '切换到广角')
+          : '当前镜头不支持广角'"
+        :title="wideAvailable
+          ? (wideMode ? '切换到标准视角' : '切换到广角')
+          : '当前镜头不支持广角，可用原相机手动选择'"
+        :disabled="switchingCamera || starting || Boolean(errorText) || !wideAvailable"
         @click="toggleWide"
-      >{{ switchingCamera ? '切换中…' : cameraActionText }}</button>
+      >{{ switchingCamera ? '切换中…' : '广角' }}</button>
       <input
         ref="nativeCameraInput"
         class="native-camera-input"
@@ -273,6 +275,11 @@ onBeforeUnmount(stopCamera)
 }
 .live-wide {
   min-width: 92px;
+}
+.live-wide.is-active {
+  border-color: var(--hy-mint-line);
+  background: var(--hy-mint-soft);
+  color: var(--hy-mint-bright);
 }
 .live-native {
   min-width: 76px;

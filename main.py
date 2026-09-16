@@ -419,7 +419,9 @@ import time
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-HTML_AUTH_EXACT = {"/login", "/login.html", "/hygiene"}
+# The SPA shell is public (it only boots the client router); protected pages are
+# still enforced by the router/API. The Service Worker also needs to precache it.
+HTML_AUTH_EXACT = {"/login", "/login.html", "/index.html", "/hygiene"}
 # Keep in lockstep with admin-web/src/utils/loginNext.js RECIPE_READER_PATHS.
 # Do not use a /recipe prefix — /recipe/manage still requires a session.
 # Staff-phone lives under /hygiene and /hygiene/... ; /hygiene-roster is Admin SPA.
@@ -429,8 +431,23 @@ HTML_AUTH_PUBLIC_PAGES = frozenset({
     "/recipe/print",
     "/recipe/qr",
 })
-HTML_AUTH_PREFIXES = ("/api/auth/", "/vendor/", "/kds", "/assets/", "/hygiene/")
-HTML_AUTH_SUFFIXES = (".css", ".js", ".png", ".ico", ".woff", ".woff2")
+HTML_AUTH_PREFIXES = (
+    "/api/auth/",
+    "/vendor/",
+    "/kds",
+    "/assets/",
+    "/pwa/",
+    "/hygiene/",
+)
+HTML_AUTH_SUFFIXES = (
+    ".css",
+    ".js",
+    ".png",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".webmanifest",
+)
 
 
 def _is_html_auth_exempt(path: str) -> bool:
@@ -517,6 +534,21 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
             # 添加性能头信息
             response.headers["X-Process-Time"] = str(round(process_time * 1000, 2))
             response.headers["X-Server-Version"] = settings.APP_VERSION
+
+            if request.url.path.startswith("/assets/") or request.url.path.startswith(
+                "/kds/assets/"
+            ):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            elif request.url.path.startswith("/pwa/icons/") or request.url.path.startswith(
+                "/kds/static/pwa/"
+            ):
+                response.headers["Cache-Control"] = "public, max-age=86400"
+            elif (
+                request.url.path in {"/sw.js", "/kds/sw.js"}
+                or request.url.path.endswith(".webmanifest")
+                or response.headers.get("content-type", "").startswith("text/html")
+            ):
+                response.headers["Cache-Control"] = "no-cache"
             
             # 只记录真正的慢请求
             if process_time > 3.0:  # 超过3秒的请求
@@ -593,12 +625,71 @@ def _spa_index():
     """Return admin-web SPA index.html; vue-router owns client routes."""
     if not os.path.isfile(spa_index_path):
         raise HTTPException(status_code=404, detail="管理后台前端未构建")
-    return FileResponse(spa_index_path)
+    return FileResponse(spa_index_path, headers={"Cache-Control": "no-cache"})
+
+
+def _spa_asset(relative_path: str, media_type: str):
+    target = os.path.join(spa_dir, relative_path)
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="管理后台 PWA 资源未构建")
+    return FileResponse(
+        target,
+        media_type=media_type,
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+def _kds_asset(relative_path: str, media_type: str):
+    target = os.path.join(public_dir, "kds", relative_path)
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="KDS PWA 资源未构建")
+    return FileResponse(
+        target,
+        media_type=media_type,
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/sw.js", include_in_schema=False)
+async def admin_service_worker():
+    return _spa_asset("sw.js", "application/javascript")
+
+
+@app.get("/pwa/manifests/{manifest_name}", include_in_schema=False)
+async def admin_manifest(manifest_name: str):
+    if manifest_name not in {
+        "admin.webmanifest",
+        "hygiene.webmanifest",
+        "recipe.webmanifest",
+    }:
+        raise HTTPException(status_code=404, detail="PWA manifest 不存在")
+    return _spa_asset(
+        f"pwa/manifests/{manifest_name}",
+        "application/manifest+json",
+    )
+
+
+@app.get("/pwa/icons/{icon_name}", include_in_schema=False)
+async def admin_pwa_icon(icon_name: str):
+    if not icon_name.endswith(".png"):
+        raise HTTPException(status_code=404, detail="PWA 图标不存在")
+    return _spa_asset(f"pwa/icons/{icon_name}", "image/png")
+
+
+@app.get("/kds/sw.js", include_in_schema=False)
+async def kds_service_worker():
+    return _kds_asset("sw.js", "application/javascript")
+
+
+@app.get("/kds/manifest.webmanifest", include_in_schema=False)
+async def kds_manifest():
+    return _kds_asset("manifest.webmanifest", "application/manifest+json")
 
 
 # ---- admin-web SPA 页面路由（Phase 4.6：统一服务同一 SPA，登录/配置也走 SPA） ----
 # 未登录访问由 HtmlAuthMiddleware 服务端重定向到 /login（配方阅读面、KDS、/login 豁免）。
 @app.get("/")
+@app.get("/index.html")
 @app.get("/admin")
 @app.get("/admin/")
 @app.get("/login")
@@ -655,6 +746,7 @@ if os.path.isdir(spa_assets_dir):
 kds_dir = os.path.join(public_dir, "kds")
 if os.path.isdir(kds_dir):
     app.mount("/kds", StaticFiles(directory=kds_dir, html=True), name="kds")
+
 
 @app.get("/kds")
 async def kds_root():

@@ -1,5 +1,6 @@
 <template>
   <view class="orders-container">
+    <PwaUpdateBanner />
     <view class="page-header">
       <view class="header-bar">
         <text class="back-link" @click="goHome">← 返回</text>
@@ -291,11 +292,12 @@ import { ref, computed, onMounted, reactive } from 'vue'
 import { request } from '../../utils/request.js'
 import { useStationsStore } from '../../stores/stations.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
+import PwaUpdateBanner from '../../components/PwaUpdateBanner.vue'
 import { canonicalOrderNotes } from '../../utils/orderNotes.js'
 
 export default {
   name: 'OrdersPage',
-  components: { SvgIcon },
+  components: { SvgIcon, PwaUpdateBanner },
   setup() {
     const stationsStore = useStationsStore()
 

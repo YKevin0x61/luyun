@@ -109,6 +109,7 @@ The admin/management UI is a Vue3 SPA (Vite + Vue3 + Pinia + vue-router) in `adm
 
 - **Dev:** `cd admin-web && npm run dev` — Vite dev server on `:5173`, proxies `/api` and `/ws` to the backend (`:8000` by default, override via `LUYUN_API_PROXY`).
 - **Build:** `cd admin-web && npm run build` → `admin-web/dist`.
+- **PWA:** Vite builds a root-scope `sw.js` plus Admin/Hygiene/Recipe manifests and icons. The worker precaches only frontend assets; `/api`, `/ws`, uploads, and protected images stay network-only. The browser checks for a waiting update on startup and the user applies it from a non-blocking prompt.
 - **Production serving:** FastAPI (`main.py`) serves the SPA directly — all page routes (`/`, `/admin`, `/login`, `/setup`, `/stations-speed`, `/sales-report`, `/prep-plan`, `/wecom-push`, `/recipe*`, `/logs`) return `admin-web/dist/index.html`, and client-side `vue-router` takes over routing. Built JS/CSS chunks are mounted at `/assets` from `admin-web/dist/assets`. Login (`/login`) and initial setup (`/setup`) are SPA routes too, not separate HTML files.
 - Station lookups no longer use a hardcoded JS constant — `admin-web/src/stores/stations.js` fetches `/api/stations` once and caches it in a Pinia store, avoiding drift from `config.py`'s `KITCHEN_STATIONS`.
 
@@ -135,13 +136,14 @@ The kitchen display is a uni-app project (`kds/`, H5 build), no longer HTTP-poll
 - `kds/stores/realtime.js` — Pinia store (`useRealtimeStore`) built on top of `RealtimeConnection`: pages register per-topic handlers via `on(topic, handler)`; also runs a **60s low-frequency reconciliation poll** that re-triggers the `orders` handlers regardless of connection state, as a safety net against missed nudges or a dead connection.
 - `kds/pages/kitchen/kitchen.vue` shows a prominent disconnect banner (断连告警，含提示音/振动) when the WS connection drops or is reconnecting, and queues print jobs via `kds/utils/printQueue.js` (`enqueuePrintTicket`/`retryAllFailedJobs`) with serialized processing + failure retry + a manual "retry failed" button.
 - Build: `scripts/build_kds.sh` builds the uni-app H5 bundle and deploys it into `public/kds/`, which FastAPI mounts at `/kds` (`StaticFiles(directory=..., html=True)`).
+- PWA: a separate scoped `/kds/sw.js` and `manifest.webmanifest` are generated from a build fingerprint. Startup checks a waiting update, and applying it confirms first when persisted print jobs remain.
 
 ---
 
 ## Testing & CI
 
-- Test suite lives in `tests/` and mixes `unittest`-style and `pytest`-style tests; run with `pytest tests/` (collects both styles, 166 tests as of this writing). Plain `python -m unittest discover -s tests` no longer collects the full suite.
-- CI (`.github/workflows/`) runs two jobs: a Python job (`pip install -r requirements.txt` + `pytest tests/ -v`) and an `admin-web` job (`npm ci` + `npm run build` + `npm run test`, i.e. vitest) in `admin-web/`.
+- Test suite lives in `tests/` and mixes `unittest`-style and `pytest`-style tests; run with `pytest tests/` (collects both styles). Plain `python -m unittest discover -s tests` no longer collects the full suite.
+- CI (`.github/workflows/`) runs three jobs: Python (`pip install -r requirements.txt` + `pytest tests/ -v`), `admin-web` (`npm ci` + build/PWA artifact checks + Vitest), and `kds` (`npm ci` + Vitest).
 
 ## Deployment (`deploy/`)
 

@@ -21,7 +21,7 @@ function fakeCache(overrides = {}) {
       image_url: '/api/hygiene/standards/2/image',
     }],
   }
-  return {
+  const cache = {
     loadManifest: vi.fn(async () => manifest),
     inspect: vi.fn(async () => ({
       complete: false,
@@ -48,6 +48,12 @@ function fakeCache(overrides = {}) {
     currentStandardId: vi.fn(),
     ...overrides,
   }
+  cache.snapshot = vi.fn(async () => ({
+    state: await cache.inspect(),
+    stats: await cache.stats(),
+  }))
+  if (overrides.snapshot) cache.snapshot = overrides.snapshot
+  return cache
 }
 
 describe('standard photo cache store', () => {

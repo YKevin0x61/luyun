@@ -16,6 +16,7 @@ const minuteColRef = ref(null)
 const open = ref(false)
 const suppressScrollWrite = ref(false)
 
+// Keep in sync with --luyun-time-item-height in src/styles/theme.css.
 const ITEM_HEIGHT = 36
 
 const hours = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'))

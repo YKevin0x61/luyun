@@ -1,0 +1,31 @@
+{
+  "id": "/pwa/manifests/recipe.webmanifest",
+  "name": "禄云配方",
+  "short_name": "禄云配方",
+  "description": "LuckIn 厨房配方与 SOP 阅读",
+  "start_url": "/recipe",
+  "scope": "/recipe",
+  "display": "standalone",
+  "background_color": "#fffbeb",
+  "theme_color": "#d97706",
+  "icons": [
+    {
+      "src": "/pwa/icons/recipe-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa/icons/recipe-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa/icons/recipe-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

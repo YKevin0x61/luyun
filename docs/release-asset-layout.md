@@ -22,6 +22,15 @@ The bundle archive is a **tar.gz of directory contents** (not a wrapper folder).
 - `public/kds/index.html` and `public/kds/assets/` must exist
 - `requirements.txt` must exist (fingerprint source for conditional pip)
 
+New bundles also contain the optional PWA enhancement files:
+
+- `admin-web/dist/sw.js` and `admin-web/dist/pwa/manifests/*.webmanifest`
+- `public/kds/sw.js` and `public/kds/manifest.webmanifest`
+
+Publish validates these files. Runtime Bundle activation intentionally keeps the
+legacy required-file set above, so operators can still roll back to a Release
+published before PWA support existed.
+
 ## Release Manifest (`RELEASE_MANIFEST.json`)
 
 Embedded in the bundle. Stable fields for Version Check / Update Job:

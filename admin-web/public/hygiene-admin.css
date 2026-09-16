@@ -752,7 +752,7 @@
 .hygiene-admin .select,
 .hygiene-admin textarea.input,
 .hygiene-admin .luyun-time-picker__trigger,
-.hygiene-admin .luyun-date-picker .dp__input,
+.hygiene-admin .luyun-date-picker .dp--input,
 .hygiene-staff .input {
   background: var(--hy-surface-2);
   border: 1px solid var(--hy-line-strong);
@@ -774,7 +774,7 @@
 .hygiene-admin .select:focus,
 .hygiene-admin textarea.input:focus,
 .hygiene-admin .luyun-time-picker__trigger:focus,
-.hygiene-admin .luyun-date-picker .dp__input:focus,
+.hygiene-admin .luyun-date-picker .dp--input:focus,
 .hygiene-staff .input:focus {
   outline: none;
   border-color: var(--hy-mint);
@@ -799,6 +799,12 @@
 
 /* 时间选择器 */
 .hygiene-admin .luyun-time-picker { position: relative; }
+/* 卡片带 backdrop-filter，本身就是一个层叠上下文，弹窗会被后一张卡片盖住；
+   把承载逾期点的卡片抬起来，弹窗才能盖过下列卡片。 */
+.hygiene-admin .clocks-card {
+  position: relative;
+  z-index: 30;
+}
 .hygiene-admin .luyun-time-picker__trigger {
   display: flex;
   align-items: center;
@@ -819,7 +825,6 @@
   padding: 6px;
 }
 .hygiene-admin .luyun-time-picker__wheel {
-  display: flex;
   gap: 4px;
   border-radius: 8px;
 }
@@ -827,14 +832,6 @@
 .hygiene-admin .luyun-time-picker__wheel::after {
   background: rgba(63, 224, 176, .08);
   border-color: rgba(63, 224, 176, .25);
-}
-.hygiene-admin .luyun-time-picker__column {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  max-height: 168px;
-  overflow-y: auto;
-  width: 64px;
 }
 .hygiene-admin .luyun-time-picker__item {
   padding: 7px 0;

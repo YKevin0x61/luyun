@@ -31,6 +31,13 @@ jobs:
         run: npm ci
       - name: Build
         run: npm run build
+      - name: Verify PWA artifacts
+        working-directory: .
+        run: |
+          test -f admin-web/dist/sw.js
+          test -f admin-web/dist/pwa/manifests/admin.webmanifest
+          test -f admin-web/dist/pwa/manifests/hygiene.webmanifest
+          test -f admin-web/dist/pwa/manifests/recipe.webmanifest
       - name: Run tests
         run: npm run test
 

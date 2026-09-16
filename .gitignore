@@ -72,6 +72,7 @@ node_modules/
 .playwright-mcp/
 playwright-report/
 test-results/
+output/
 
 # ===== IDE / 系统 / 编辑器 =====
 .DS_Store
@@ -93,6 +94,8 @@ public/kds/
 # ===== 本地 agent / 草稿工作区（勿随公开仓发布） =====
 .scratch/
 .superpowers/
+.impeccable/
+scripts/prototype_*/
 
 # ===== Redis 转储（本项目不使用 Redis） =====
 dump.rdb
@@ -110,3 +113,4 @@ docs/*
 docs/adr/*
 !docs/adr/0011-release-bundle-update.md
 !docs/adr/0012-repo-layout.md
+!docs/adr/0013-frontend-pwa-cache-update.md

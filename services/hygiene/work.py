@@ -45,8 +45,12 @@ SETTING_NIGHT_OVERDUE = "daily_overdue_night_hhmm"
 SETTING_DEEP_CLEAN_OVERDUE = "deep_clean_overdue_hhmm"
 DEFAULT_DEEP_CLEAN_OVERDUE_HHMM = "21:30"
 MAX_STANDARD_BYTES = 20 * 1024 * 1024
+MAX_CAPTURE_BYTES = MAX_STANDARD_BYTES
 CAPTURE_VARIANTS = ("thumb", "preview")
 ORPHAN_CAPTURE_MIN_AGE_SECONDS = 24 * 60 * 60
+# Keep every `IN (...)` well under SQLITE_MAX_VARIABLE_NUMBER (999 on old builds,
+# 250000 on the SQLite shipped with macOS Command Line Tools).
+SQL_ID_CHUNK_SIZE = 500
 WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 CALENDAR_TODO = "待办"
 CALENDAR_DONE = "已完成"
@@ -91,6 +95,12 @@ def hygiene_week_start(now: datetime) -> datetime:
         0,
         tzinfo=CHINA_TZ,
     )
+
+
+def _chunked(items, size: int):
+    """Yield bounded slices so a single statement never binds too many variables."""
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
 
 
 class HygieneWorkError(ValueError):
@@ -275,32 +285,114 @@ class HygieneWork:
 
     def _zone_from_row(self, row) -> dict:
         mapping = dict(row)
-        return {"id": int(mapping["id"]), "name": mapping["name"]}
+        return {
+            "id": int(mapping["id"]),
+            "name": mapping["name"],
+            "shifts": self._zone_shifts_from_flags(mapping),
+        }
+
+    @staticmethod
+    def _zone_shifts_from_flags(mapping: dict) -> list[str]:
+        shifts = []
+        if int(mapping.get("day_shift", 1) or 0):
+            shifts.append(SHIFT_DAY)
+        if int(mapping.get("night_shift", 1) or 0):
+            shifts.append(SHIFT_NIGHT)
+        return shifts
+
+    @staticmethod
+    def _zone_shift_enabled(mapping: dict, shift: str) -> bool:
+        if shift == SHIFT_DAY:
+            return bool(int(mapping.get("day_shift", 1) or 0))
+        if shift == SHIFT_NIGHT:
+            return bool(int(mapping.get("night_shift", 1) or 0))
+        return False
+
+    @staticmethod
+    def _normalize_zone_shifts(shifts) -> tuple[int, int]:
+        """Return (day_shift, night_shift) flags for a zone's enabled shifts."""
+        if shifts is None:
+            return 1, 1
+        if isinstance(shifts, str):
+            cleaned = [part.strip() for part in shifts.split(",") if part.strip()]
+        else:
+            cleaned = [str(part).strip() for part in shifts]
+        if any(part not in DAILY_SHIFTS for part in cleaned):
+            raise HygieneWorkError("invalid_shift", "invalid_shift")
+        if not cleaned:
+            raise HygieneWorkError("zone_shift_required", "zone_shift_required")
+        return int(SHIFT_DAY in cleaned), int(SHIFT_NIGHT in cleaned)
 
     async def list_zones(self) -> list[dict]:
         cur = await self._conn.execute(
-            "SELECT id, name FROM hygiene_zones ORDER BY id ASC"
+            """SELECT id, name, day_shift, night_shift
+               FROM hygiene_zones ORDER BY id ASC"""
         )
         rows = await cur.fetchall()
         return [self._zone_from_row(row) for row in rows]
 
-    async def create_zone(self, actor: dict, name: str) -> dict:
+    async def create_zone(self, actor: dict, name: str, shifts=None) -> dict:
         self._require_super(actor)
         cleaned = (name or "").strip()
         if not cleaned:
             raise HygieneWorkError("invalid_zone_name", "invalid_zone_name")
+        day_shift, night_shift = self._normalize_zone_shifts(shifts)
         now = self._now_iso()
         try:
             cur = await self._conn.execute(
-                "INSERT INTO hygiene_zones (name, created_at, updated_at) VALUES (?, ?, ?)",
-                (cleaned, now, now),
+                """INSERT INTO hygiene_zones
+                   (name, day_shift, night_shift, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (cleaned, day_shift, night_shift, now, now),
             )
             await self._conn.commit()
         except sqlite3.IntegrityError as exc:
             await self._conn.rollback()
             raise HygieneWorkError("duplicate_zone", "duplicate_zone") from exc
-        logger.info("hygiene zone created id=%s name=%s", cur.lastrowid, cleaned)
-        return {"id": int(cur.lastrowid), "name": cleaned}
+        shifts_enabled = self._zone_shifts_from_flags(
+            {"day_shift": day_shift, "night_shift": night_shift}
+        )
+        logger.info(
+            "hygiene zone created id=%s name=%s shifts=%s",
+            cur.lastrowid,
+            cleaned,
+            ",".join(shifts_enabled),
+        )
+        return {
+            "id": int(cur.lastrowid),
+            "name": cleaned,
+            "shifts": shifts_enabled,
+        }
+
+    @serialized_write
+    async def set_zone_shifts(self, actor: dict, zone_id: int, shifts) -> dict:
+        """超级管理员设置责任区跑哪些班次。"""
+        self._require_super(actor)
+        zone = await self._fetch_zone(zone_id)
+        if zone is None:
+            raise HygieneWorkError("zone_not_found", "zone_not_found")
+        day_shift, night_shift = self._normalize_zone_shifts(shifts)
+        await self._conn.execute(
+            """UPDATE hygiene_zones
+               SET day_shift = ?, night_shift = ?, updated_at = ?
+               WHERE id = ?""",
+            (day_shift, night_shift, self._now_iso(), int(zone_id)),
+        )
+        await self._conn.commit()
+        mapping = dict(zone)
+        shifts_enabled = self._zone_shifts_from_flags(
+            {"day_shift": day_shift, "night_shift": night_shift}
+        )
+        logger.info(
+            "hygiene zone shifts updated id=%s shifts=%s",
+            zone_id,
+            ",".join(shifts_enabled),
+        )
+        return {
+            "id": int(mapping["id"]),
+            "name": mapping["name"],
+            "shifts": shifts_enabled,
+        }
 
     async def _item_ids_for_zone(self, zone_id: int) -> list[int]:
         cur = await self._conn.execute(
@@ -467,7 +559,8 @@ class HygieneWork:
 
     async def _fetch_zone(self, zone_id: int):
         cur = await self._conn.execute(
-            "SELECT id, name FROM hygiene_zones WHERE id = ?",
+            """SELECT id, name, day_shift, night_shift
+               FROM hygiene_zones WHERE id = ?""",
             (zone_id,),
         )
         return await cur.fetchone()
@@ -580,7 +673,12 @@ class HygieneWork:
             item = self._item_from_join(dict(row))
             by_zone.setdefault(item["zone_id"], []).append(item)
         return [
-            {"id": zone["id"], "name": zone["name"], "items": by_zone.get(zone["id"], [])}
+            {
+                "id": zone["id"],
+                "name": zone["name"],
+                "shifts": zone.get("shifts") or list(DAILY_SHIFTS),
+                "items": by_zone.get(zone["id"], []),
+            }
             for zone in zones
         ]
 
@@ -645,10 +743,16 @@ class HygieneWork:
                  AND s.content_sha256 IS NOT NULL
                ORDER BY s.id ASC"""
         )
+        rows = [dict(row) for row in await cur.fetchall()]
+        readable_ids = set()
+        if rows:
+            readable_ids = {
+                str(capture_id)
+                for capture_id in await self._captures.list_ids_async()
+            }
         standards = []
-        for row in await cur.fetchall():
-            mapping = dict(row)
-            if not await self._captures.exists_async(mapping["capture_id"]):
+        for mapping in rows:
+            if str(mapping["capture_id"]) not in readable_ids:
                 logger.warning(
                     "hygiene current standard capture missing standard=%s",
                     mapping["standard_id"],
@@ -751,6 +855,7 @@ class HygieneWork:
         }
 
     async def _referenced_capture_ids(self) -> set[str]:
+        """Capture ids owned by hygiene business tables (roots of the variant tree)."""
         cur = await self._conn.execute(
             """SELECT capture_id FROM hygiene_standards
                UNION
@@ -766,36 +871,47 @@ class HygieneWork:
                UNION
                SELECT left_capture_id FROM hygiene_teaching_examples
                UNION
-               SELECT right_capture_id FROM hygiene_teaching_examples
-               UNION
-               SELECT capture_id FROM hygiene_capture_variants"""
+               SELECT right_capture_id FROM hygiene_teaching_examples"""
+        )
+        return {str(dict(row)["capture_id"]) for row in await cur.fetchall()}
+
+    async def _variant_capture_ids(self) -> set[str]:
+        """Derivative capture ids. These are never variant sources, or thumbs recurse."""
+        cur = await self._conn.execute(
+            "SELECT capture_id FROM hygiene_capture_variants"
         )
         return {str(dict(row)["capture_id"]) for row in await cur.fetchall()}
 
     async def backfill_capture_variants_once(self, batch_size: int = 20) -> int:
         if self._image_variants is None:
             return 0
-        referenced = sorted(await self._referenced_capture_ids())
-        if not referenced:
-            return 0
-        placeholders = ",".join("?" * len(referenced))
-        cur = await self._conn.execute(
-            f"""SELECT source_capture_id, variant
-                FROM hygiene_capture_variants
-                WHERE source_capture_id IN ({placeholders})""",
-            referenced,
+        derivatives = await self._variant_capture_ids()
+        sources = sorted(
+            capture_id
+            for capture_id in await self._referenced_capture_ids()
+            if capture_id not in derivatives
         )
-        existing = {}
-        for row in await cur.fetchall():
-            existing.setdefault(str(dict(row)["source_capture_id"]), set()).add(
-                str(dict(row)["variant"])
+        if not sources:
+            return 0
+        existing: dict[str, set[str]] = {}
+        for chunk in _chunked(sources, SQL_ID_CHUNK_SIZE):
+            placeholders = ",".join("?" * len(chunk))
+            cur = await self._conn.execute(
+                f"""SELECT source_capture_id, variant
+                    FROM hygiene_capture_variants
+                    WHERE source_capture_id IN ({placeholders})""",
+                chunk,
             )
+            for row in await cur.fetchall():
+                existing.setdefault(str(dict(row)["source_capture_id"]), set()).add(
+                    str(dict(row)["variant"])
+                )
         complete = {
             capture_id
             for capture_id, variants in existing.items()
             if set(CAPTURE_VARIANTS).issubset(variants)
         }
-        missing = [capture_id for capture_id in referenced if capture_id not in complete]
+        missing = [capture_id for capture_id in sources if capture_id not in complete]
         created = 0
         for capture_id in missing[: max(1, int(batch_size))]:
             try:
@@ -838,22 +954,12 @@ class HygieneWork:
         max_age_seconds: int = ORPHAN_CAPTURE_MIN_AGE_SECONDS,
     ) -> int:
         referenced = await self._referenced_capture_ids()
-        if referenced:
-            placeholders = ",".join("?" * len(referenced))
-            await self._conn.execute(
-                f"""DELETE FROM hygiene_capture_variants
-                    WHERE source_capture_id NOT IN ({placeholders})""",
-                sorted(referenced),
-            )
-            await self._conn.commit()
-            referenced = await self._referenced_capture_ids()
-        else:
-            await self._conn.execute("DELETE FROM hygiene_capture_variants")
-            await self._conn.commit()
+        await self._drop_unrooted_variant_rows(referenced)
+        keep = referenced | await self._variant_capture_ids()
         now = self._now_dt().timestamp()
         removed = 0
         for capture_id in await self._captures.list_ids_async():
-            if capture_id in referenced:
+            if capture_id in keep:
                 continue
             modified = await self._captures.modified_at_async(capture_id)
             if modified is None or now - modified < max_age_seconds:
@@ -861,6 +967,29 @@ class HygieneWork:
             await self._captures.delete_async(capture_id)
             removed += 1
         return removed
+
+    async def _drop_unrooted_variant_rows(self, referenced: set[str]) -> None:
+        """Drop variant rows whose source is deleted or is itself a derivative."""
+        cur = await self._conn.execute(
+            "SELECT DISTINCT source_capture_id FROM hygiene_capture_variants"
+        )
+        stale = [
+            str(dict(row)["source_capture_id"])
+            for row in await cur.fetchall()
+            if str(dict(row)["source_capture_id"]) not in referenced
+        ]
+        removed = 0
+        for chunk in _chunked(stale, SQL_ID_CHUNK_SIZE):
+            placeholders = ",".join("?" * len(chunk))
+            cur = await self._conn.execute(
+                f"""DELETE FROM hygiene_capture_variants
+                    WHERE source_capture_id IN ({placeholders})""",
+                chunk,
+            )
+            removed += max(0, cur.rowcount or 0)
+        if stale:
+            await self._conn.commit()
+            logger.info("hygiene variant rows pruned count=%s", removed)
 
     async def capture_maintenance_loop(
         self,
@@ -969,6 +1098,8 @@ class HygieneWork:
         data = capture.get("bytes")
         if not data:
             raise HygieneWorkError("capture_required", "capture_required")
+        if len(data) > MAX_CAPTURE_BYTES:
+            raise HygieneWorkError("capture_too_large", "capture_too_large")
         return data
 
     def _photographer(self, actor: dict) -> str:
@@ -988,7 +1119,8 @@ class HygieneWork:
 
     async def _fetch_item_with_zone(self, item_id: int):
         cur = await self._conn.execute(
-            """SELECT i.id, i.zone_id, i.name, i.current_standard_id, z.name AS zone_name
+            """SELECT i.id, i.zone_id, i.name, i.current_standard_id,
+                      z.name AS zone_name, z.day_shift, z.night_shift
                FROM hygiene_daily_items i
                JOIN hygiene_zones z ON z.id = i.zone_id
                WHERE i.id = ?""",
@@ -1075,6 +1207,8 @@ class HygieneWork:
             raise HygieneWorkError("item_not_found", "item_not_found")
         item = dict(item_row)
         self._require_zone_access(actor, item["zone_id"])
+        if not self._zone_shift_enabled(item, target_shift):
+            raise HygieneWorkError("zone_shift_mismatch", "zone_shift_mismatch")
         standard_id = item.get("current_standard_id")
         if not standard_id:
             raise HygieneWorkError("standard_required", "standard_required")
@@ -1170,6 +1304,7 @@ class HygieneWork:
         sql = f"""WITH shifts(shift) AS ({shift_sql})
                  SELECT i.id AS item_id, i.zone_id, i.name AS item_name,
                         i.current_standard_id, z.name AS zone_name,
+                        z.day_shift, z.night_shift,
                         s.markup_json,
                         inst.id AS instance_id, inst.status AS instance_status,
                         inst.pending_submission_id,
@@ -1197,6 +1332,8 @@ class HygieneWork:
         inbox = []
         for row in await cur.fetchall():
             mapping = dict(row)
+            if not self._zone_shift_enabled(mapping, mapping["shift"]):
+                continue
             item = {
                 "id": mapping["item_id"],
                 "name": mapping["item_name"],
@@ -1477,7 +1614,8 @@ class HygieneWork:
 
     async def _catalog_daily_items(self) -> list:
         cur = await self._conn.execute(
-            """SELECT i.id, i.zone_id, i.name, z.name AS zone_name
+            """SELECT i.id, i.zone_id, i.name, z.name AS zone_name,
+                      z.day_shift, z.night_shift
                FROM hygiene_daily_items i
                JOIN hygiene_zones z ON z.id = i.zone_id
                WHERE i.current_standard_id IS NOT NULL
@@ -1747,6 +1885,8 @@ class HygieneWork:
                 continue
             missing = []
             for item in items:
+                if not self._zone_shift_enabled(item, shift):
+                    continue
                 key = (shift, int(item["id"]))
                 if statuses.get(key, STATUS_TODO) != STATUS_TODO:
                     continue
@@ -2777,6 +2917,74 @@ class HygieneWork:
             "status": STATUS_FIX_TODO,
             "deadline": deadline,
             "reshoot_capture_id": None,
+        }
+
+    async def _fix_ticket_capture_ids(self, ticket_id: int, ticket: dict) -> tuple[list[str], list[str]]:
+        """Return (original captures, derivative captures) owned by one fix ticket."""
+        cur = await self._conn.execute(
+            """SELECT capture_id FROM hygiene_fix_reshoots
+               WHERE ticket_id = ? ORDER BY id ASC""",
+            (int(ticket_id),),
+        )
+        roots = [str(ticket["capture_id"])]
+        roots.extend(str(dict(row)["capture_id"]) for row in await cur.fetchall())
+        placeholders = ",".join("?" * len(roots))
+        cur = await self._conn.execute(
+            f"""SELECT capture_id FROM hygiene_capture_variants
+                WHERE source_capture_id IN ({placeholders})""",
+            roots,
+        )
+        derivatives = [str(dict(row)["capture_id"]) for row in await cur.fetchall()]
+        return roots, derivatives
+
+    @serialized_write
+    async def delete_fix_ticket(self, actor: dict, ticket_id: int) -> dict:
+        """超级管理员删除整改单，连带回拍、逾期记录与实拍文件。"""
+        self._require_super(actor)
+        ticket = await self._fetch_fix_ticket(ticket_id)
+        if ticket is None:
+            raise HygieneWorkError("ticket_not_found", "ticket_not_found")
+        roots, derivatives = await self._fix_ticket_capture_ids(
+            int(ticket_id), ticket
+        )
+        try:
+            await self._conn.execute(
+                "UPDATE hygiene_fix_tickets SET pending_reshoot_id = NULL WHERE id = ?",
+                (int(ticket_id),),
+            )
+            await self._conn.execute(
+                "DELETE FROM hygiene_fix_reshoots WHERE ticket_id = ?",
+                (int(ticket_id),),
+            )
+            await self._conn.execute(
+                "DELETE FROM hygiene_fix_overdue_notices WHERE ticket_id = ?",
+                (int(ticket_id),),
+            )
+            placeholders = ",".join("?" * len(roots))
+            await self._conn.execute(
+                f"""DELETE FROM hygiene_capture_variants
+                    WHERE source_capture_id IN ({placeholders})""",
+                roots,
+            )
+            await self._conn.execute(
+                "DELETE FROM hygiene_fix_tickets WHERE id = ?",
+                (int(ticket_id),),
+            )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        await self._delete_capture_files([*roots, *derivatives])
+        logger.info(
+            "hygiene fix deleted ticket=%s zone=%s",
+            ticket_id,
+            ticket["zone_id"],
+        )
+        return {
+            "id": int(ticket["id"]),
+            "zone_id": int(ticket["zone_id"]),
+            "zone_name": ticket["zone_name"],
+            "status": ticket["status"],
         }
 
     async def _fix_notice_ids(self) -> set[int]:

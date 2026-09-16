@@ -1,11 +1,13 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import HygieneWatermarkOverlay from '../../components/hygiene/HygieneWatermarkOverlay.vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
+import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import {
   HYGIENE_FIX_TYPES,
   canAcceptFixTicket,
@@ -23,6 +25,7 @@ const errorText = ref('')
 const busy = ref(false)
 const selected = ref(null)
 const review = ref(null)
+const deleteTarget = ref(null)
 const liveOk = ref(hasLiveCamera())
 const zoneId = ref('')
 const ticketType = ref('卫生')
@@ -33,6 +36,7 @@ const previewUrl = ref('')
 const capturedBlob = ref(null)
 const markup = ref([])
 const localWatermark = ref(null)
+const imageUploads = useImageUploadQueueStore()
 
 const pending = computed(() => items.value.filter((row) => row.status === '待验收'))
 const waiting = computed(() => items.value.filter((row) => row.status !== '待验收'))
@@ -122,30 +126,33 @@ function removeMark(index) {
   markup.value = markup.value.filter((_, i) => i !== index)
 }
 
-async function submitOpen() {
+function submitOpen() {
   if (!canSubmitOpen.value) return
-  busy.value = true
   errorText.value = ''
+  const zone = zones.value.find((row) => String(row.id) === String(zoneId.value))
+  const form = new FormData()
+  form.append('file', capturedBlob.value, 'capture.jpg')
+  form.append('live', 'true')
+  form.append('zone_id', String(zoneId.value))
+  form.append('ticket_type', ticketType.value)
+  form.append('body_text', bodyText.value.trim())
+  form.append('duration_hours', String(durationHours.value))
+  form.append('markup', JSON.stringify(markup.value))
   try {
-    const form = new FormData()
-    form.append('file', capturedBlob.value, 'capture.jpg')
-    form.append('live', 'true')
-    form.append('zone_id', String(zoneId.value))
-    form.append('ticket_type', ticketType.value)
-    form.append('body_text', bodyText.value.trim())
-    form.append('duration_hours', String(durationHours.value))
-    form.append('markup', JSON.stringify(markup.value))
-    await api.upload('/api/hygiene/admin/fix', form)
+    imageUploads.enqueue({
+      path: '/api/hygiene/admin/fix',
+      formData: form,
+      label: `整改原图 · ${zone ? zone.name : '卫生责任区'}`,
+      detail: ticketType.value,
+      onSuccess: loadTickets,
+    })
     bodyText.value = ''
     durationHours.value = 2
     markup.value = []
     opening.value = false
     clearPreview()
-    await loadTickets()
   } catch (err) {
-    errorText.value = err.message || '开单失败'
-  } finally {
-    busy.value = false
+    errorText.value = err.message || '无法加入上传队列'
   }
 }
 
@@ -182,6 +189,26 @@ async function decide(action) {
 function deadlineLabel(iso) {
   return formatStamp(iso)
 }
+
+async function confirmDelete() {
+  const row = deleteTarget.value
+  deleteTarget.value = null
+  if (!row) return
+  busy.value = true
+  errorText.value = ''
+  try {
+    await api.delete(`/api/hygiene/admin/fix/${row.id}`)
+    if (selected.value && selected.value.id === row.id) {
+      selected.value = null
+      review.value = null
+    }
+    await loadTickets()
+  } catch (err) {
+    errorText.value = err.message || '无法删除整改单'
+  } finally {
+    busy.value = false
+  }
+}
 </script>
 
 <template>
@@ -193,7 +220,7 @@ function deadlineLabel(iso) {
         <p>现场拍照开单，员工回拍后按时限验收。</p>
         <details class="rule-help">
           <summary>规则说明</summary>
-          <p>开单必须现场拍照，不能从相册选择。时限未到只有开单人能验收；时限到达后其他管理员或超级管理员可验收。驳回后按原时限重新计时。</p>
+          <p>开单必须现场拍照，不能从相册选择。时限未到只有开单人能验收；时限到达后其他管理员或超级管理员可验收。驳回后按原时限重新计时。超级管理员可以删除整张整改单。</p>
         </details>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
@@ -271,7 +298,7 @@ function deadlineLabel(iso) {
             <div class="review-actions">
               <button type="button" class="btn" :disabled="busy" @click="clearPreview">重拍</button>
               <button type="button" class="btn btn-primary" :disabled="!canSubmitOpen" @click="submitOpen">
-                {{ busy ? '正在开单…' : '开整改单' }}
+                开整改单
               </button>
             </div>
           </template>
@@ -344,13 +371,31 @@ function deadlineLabel(iso) {
             :watermark="selected.watermark"
           />
           <p v-if="selected.status === '待验收' && !canDecide(selected)" class="editor-lead">时限还没到，只有开单人能验。</p>
-          <div v-if="canDecide(selected)" class="review-actions">
-            <button type="button" class="btn btn-primary" :disabled="busy" @click="decide('accept')">通过</button>
-            <button type="button" class="btn btn-danger" :disabled="busy" @click="decide('reject')">驳回</button>
+          <div class="review-actions">
+            <template v-if="canDecide(selected)">
+              <button type="button" class="btn btn-primary" :disabled="busy" @click="decide('accept')">通过</button>
+              <button type="button" class="btn btn-danger" :disabled="busy" @click="decide('reject')">驳回</button>
+            </template>
+            <button
+              type="button"
+              class="btn btn-danger"
+              :disabled="busy"
+              @click="deleteTarget = selected"
+            >删除整改单</button>
           </div>
         </div>
       </div>
     </div>
+
+    <ConfirmDialog
+      v-if="deleteTarget"
+      title="删除整改单"
+      :message="`删除「${deleteTarget.zone_name} · ${deleteTarget.ticket_type}」会连同开单原图、回拍和逾期记录一起删除。`"
+      confirm-label="删除"
+      danger
+      @confirm="confirmDelete"
+      @cancel="deleteTarget = null"
+    />
   </div>
 </template>
 

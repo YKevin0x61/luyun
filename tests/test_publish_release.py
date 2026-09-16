@@ -170,7 +170,12 @@ class PublishReleaseTagPinTest(unittest.TestCase):
                     textwrap.dedent(
                         f"""\
                         mkdir -p "{root}/admin-web/dist/assets"
+                        mkdir -p "{root}/admin-web/dist/pwa/manifests"
+                        mkdir -p "{root}/admin-web/dist/pwa/icons"
                         echo ok > "{root}/admin-web/dist/index.html"
+                        echo ok > "{root}/admin-web/dist/sw.js"
+                        echo ok > "{root}/admin-web/dist/pwa/manifests/admin.webmanifest"
+                        echo ok > "{root}/admin-web/dist/pwa/icons/admin-192.png"
                         """
                     ),
                 )
@@ -194,6 +199,8 @@ class PublishReleaseTagPinTest(unittest.TestCase):
                         #!/usr/bin/env bash
                         mkdir -p "{root}/public/kds/assets"
                         echo ok > "{root}/public/kds/index.html"
+                        echo ok > "{root}/public/kds/sw.js"
+                        echo ok > "{root}/public/kds/manifest.webmanifest"
                         """
                     ),
                     encoding="utf-8",
@@ -248,8 +255,13 @@ class PublishReleaseHappyPathStubTest(unittest.TestCase):
                         f"""\
                         echo "npm $*" >> "{log_file}"
                         mkdir -p "{root}/admin-web/dist/assets"
+                        mkdir -p "{root}/admin-web/dist/pwa/manifests"
+                        mkdir -p "{root}/admin-web/dist/pwa/icons"
                         echo ok > "{root}/admin-web/dist/index.html"
                         echo ok > "{root}/admin-web/dist/assets/app.js"
+                        echo ok > "{root}/admin-web/dist/sw.js"
+                        echo ok > "{root}/admin-web/dist/pwa/manifests/admin.webmanifest"
+                        echo ok > "{root}/admin-web/dist/pwa/icons/admin-192.png"
                         """
                     ),
                 )
@@ -262,6 +274,8 @@ class PublishReleaseHappyPathStubTest(unittest.TestCase):
                         mkdir -p "{root}/public/kds/assets"
                         echo ok > "{root}/public/kds/index.html"
                         echo ok > "{root}/public/kds/assets/app.js"
+                        echo ok > "{root}/public/kds/sw.js"
+                        echo ok > "{root}/public/kds/manifest.webmanifest"
                         """
                     ),
                 )
@@ -389,7 +403,11 @@ class PublishReleaseHappyPathStubTest(unittest.TestCase):
 
                 self.assertIn(MANIFEST_NAME, names)
                 self.assertIn("admin-web/dist/index.html", names)
+                self.assertIn("admin-web/dist/sw.js", names)
+                self.assertIn("admin-web/dist/pwa/manifests/admin.webmanifest", names)
                 self.assertIn("public/kds/index.html", names)
+                self.assertIn("public/kds/sw.js", names)
+                self.assertIn("public/kds/manifest.webmanifest", names)
                 self.assertTrue(
                     any(n == "public/kds/assets" or n.startswith("public/kds/assets/") for n in names),
                     msg="bundle missing public/kds/assets/",

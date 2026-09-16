@@ -130,3 +130,25 @@ def test_original_endpoint_remains_backward_compatible(image_http):
     )
     assert response.status_code == 200
     assert response.content == original
+
+
+def test_staff_upload_rejects_oversized_file_before_domain_write(
+    image_http,
+    monkeypatch,
+):
+    client, _db, _accounts, work = image_http
+    monkeypatch.setattr(hygiene_module, "MAX_UPLOAD_BYTES", 10)
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    ).status_code == 200
+
+    response = client.post(
+        "/api/hygiene/staff/daily/1/submit",
+        data={"live": "true", "shift": "白班"},
+        files={"file": ("capture.jpg", b"x" * 11, "image/jpeg")},
+    )
+
+    assert response.status_code == 413
+    assert "不能超过" in response.json()["detail"]
+    assert _run(work.list_daily_work({"kind": "super"})) == []

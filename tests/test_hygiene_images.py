@@ -2,16 +2,19 @@
 # -*- coding: utf-8 -*-
 """Image derivative generation and variant fallback tests."""
 
+import hashlib
 import io
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
+from services.hygiene import work as hygiene_work_module
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.captures import FileCaptureStore
 from services.hygiene.images import ImageVariantGenerator, InvalidImageError
@@ -149,6 +152,93 @@ class HygieneVariantIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created, 1)
         thumb = await self.work.capture_view(standard["capture_id"], "thumb")
         self.assertFalse(thumb["fallback"])
+
+    async def test_backfill_never_treats_derivatives_as_sources(self):
+        zone = (await self.work.list_zones())[0]
+        legacy_work = HygieneWork(
+            self.db,
+            captures=self.captures,
+            now=lambda: datetime(2026, 9, 14, 10, 0, tzinfo=CHINA_TZ),
+        )
+        item = await legacy_work.add_daily_item(
+            SUPER,
+            zone["id"],
+            "旧检查项",
+            {"bytes": jpeg_bytes(), "content_type": "image/jpeg", "markup": []},
+        )
+        self.assertEqual(await self.work.backfill_capture_variants_once(), 1)
+        self.assertEqual(await self._variant_sources(), {item["capture_id"]})
+        # A second pass must be a no-op: thumbnails of thumbnails never become work.
+        self.assertEqual(await self.work.backfill_capture_variants_once(), 0)
+        self.assertEqual(await self._variant_sources(), {item["capture_id"]})
+        self.assertEqual(len(self.captures.blobs), 3)
+
+    async def test_backfill_chunks_referenced_ids(self):
+        zone = (await self.work.list_zones())[0]
+        legacy_work = HygieneWork(
+            self.db,
+            captures=self.captures,
+            now=lambda: datetime(2026, 9, 14, 10, 0, tzinfo=CHINA_TZ),
+        )
+        expected = set()
+        for name in ("旧项一", "旧项二", "旧项三"):
+            item = await legacy_work.add_daily_item(
+                SUPER,
+                zone["id"],
+                name,
+                {"bytes": jpeg_bytes(), "content_type": "image/jpeg", "markup": []},
+            )
+            expected.add(item["capture_id"])
+        with mock.patch.object(hygiene_work_module, "SQL_ID_CHUNK_SIZE", 1):
+            self.assertEqual(await self.work.backfill_capture_variants_once(), 3)
+            self.assertEqual(await self.work.backfill_capture_variants_once(), 0)
+        self.assertEqual(await self._variant_sources(), expected)
+
+    async def test_sweep_drops_recursive_variant_rows_and_files(self):
+        zone = (await self.work.list_zones())[0]
+        item = await self.work.add_daily_item(
+            SUPER,
+            zone["id"],
+            "案板表面",
+            {"bytes": jpeg_bytes(), "content_type": "image/jpeg", "markup": []},
+        )
+        thumb = await self.work.capture_view(item["capture_id"], "thumb")
+        # Simulate the runaway: a variant row whose source is itself a derivative.
+        junk = jpeg_bytes(64, 48)
+        junk_id = await self.captures.put_async(junk, content_type="image/jpeg")
+        await self.db._conn.execute(
+            """INSERT INTO hygiene_capture_variants
+               (source_capture_id, variant, capture_id, content_type,
+                width, height, byte_size, content_sha256, created_at)
+               VALUES (?, 'thumb', ?, 'image/jpeg', 64, 48, ?, ?, ?)""",
+            (
+                thumb["capture_id"],
+                junk_id,
+                len(junk),
+                hashlib.sha256(junk).hexdigest(),
+                "2026-09-14T09:00:00+08:00",
+            ),
+        )
+        await self.db._conn.commit()
+
+        # The fake store reports mtimes from `time.time()`, so sweep with a clock
+        # a little ahead of it to make every capture old enough to be collected.
+        sweeper = HygieneWork(
+            self.db,
+            captures=self.captures,
+            now=lambda: datetime.now(CHINA_TZ) + timedelta(hours=1),
+        )
+        self.assertEqual(await sweeper.sweep_capture_orphans(max_age_seconds=0), 1)
+        self.assertEqual(await self._variant_sources(), {item["capture_id"]})
+        self.assertFalse(await self.captures.exists_async(junk_id))
+        self.assertTrue(await self.captures.exists_async(item["capture_id"]))
+        self.assertTrue(await self.captures.exists_async(thumb["capture_id"]))
+
+    async def _variant_sources(self) -> set[str]:
+        cur = await self.db._conn.execute(
+            "SELECT DISTINCT source_capture_id FROM hygiene_capture_variants"
+        )
+        return {str(row[0]) for row in await cur.fetchall()}
 
 
 if __name__ == "__main__":

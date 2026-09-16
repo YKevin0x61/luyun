@@ -125,6 +125,23 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await conn.close()
 
+    async def test_legacy_zone_table_gets_shift_columns(self):
+        conn = await aiosqlite.connect(":memory:")
+        try:
+            await conn.execute(
+                "CREATE TABLE hygiene_employees (id INTEGER PRIMARY KEY, phone TEXT)"
+            )
+            await conn.execute(
+                "CREATE TABLE hygiene_zones (id INTEGER PRIMARY KEY, name TEXT)"
+            )
+            await migrate_hygiene_columns(conn)
+            cur = await conn.execute("PRAGMA table_info(hygiene_zones)")
+            columns = {row[1] for row in await cur.fetchall()}
+            self.assertIn("day_shift", columns)
+            self.assertIn("night_shift", columns)
+        finally:
+            await conn.close()
+
     async def _approved_employee(self, phone=PHONE):
         employee = await self.accounts.register(phone, PASSWORD, NAME)
         return await self.accounts.approve(employee["id"])
@@ -216,14 +233,22 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(picked["shift"], "白班")
         self.assertEqual(picked["zone_id"], 1)
         self.assertEqual(picked["zone_name"], "案板")
+        self.assertEqual(picked["zone_shifts"], ["白班", "夜班"])
         current = await self.accounts.current_assignment(employee["id"])
         self.assertEqual(current["zone_id"], 1)
+        self.assertEqual(current["zone_shifts"], ["白班", "夜班"])
         changed = await self.accounts.pick_assignment(employee["id"], "夜班", 2)
         self.assertEqual(changed["shift"], "夜班")
         self.assertEqual(changed["zone_id"], 2)
         current = await self.accounts.current_assignment(employee["id"])
         self.assertEqual(current["shift"], "夜班")
         self.assertEqual(current["zone_id"], 2)
+        await self.db._conn.execute(
+            "UPDATE hygiene_zones SET day_shift = 1, night_shift = 0 WHERE id = 2"
+        )
+        await self.db._conn.commit()
+        current = await self.accounts.current_assignment(employee["id"])
+        self.assertEqual(current["zone_shifts"], ["白班"])
 
     async def test_assignment_rejects_unknown_zone(self):
         employee = await self._approved_employee()

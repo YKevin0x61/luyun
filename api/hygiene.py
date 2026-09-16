@@ -16,12 +16,39 @@ from api.security import require_session
 from config import settings
 from services import auth_service
 from services.hygiene.accounts import EmployeeAccounts, EmployeeAccountsError
-from services.hygiene.work import HygieneWork, HygieneWorkError
+from services.hygiene.work import (
+    MAX_STANDARD_BYTES,
+    HygieneWork,
+    HygieneWorkError,
+)
 from services.realtime.hub import realtime_hub
 
 router = APIRouter(prefix="/api/hygiene", tags=["hygiene"])
 
 SUPER_ACTOR = {"kind": "super"}
+MAX_UPLOAD_BYTES = MAX_STANDARD_BYTES
+UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+def _upload_too_large_detail(label: str) -> str:
+    limit_mb = max(1, MAX_UPLOAD_BYTES // (1024 * 1024))
+    return f"{label}不能超过 {limit_mb} MB"
+
+
+async def _read_upload_bounded(file: UploadFile, label: str) -> bytes:
+    declared_size = getattr(file, "size", None)
+    if declared_size is not None and declared_size > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=_upload_too_large_detail(label))
+
+    data = bytearray()
+    while True:
+        chunk = await file.read(UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=_upload_too_large_detail(label))
+    return bytes(data)
 
 
 async def _hygiene_nudge(resource: str, action: str, **scope) -> None:
@@ -47,8 +74,11 @@ _ERROR_DETAILS = {
     "forbidden": "没有权限做这一步",
     "standard_required": "没有标准图不能上架日常检查项",
     "standard_not_found": "标准图版本不存在",
-    "standard_too_large": "标准图不能超过 20 MB",
+    "standard_too_large": _upload_too_large_detail("标准图"),
+    "capture_too_large": _upload_too_large_detail("照片"),
     "invalid_zone_name": "请填写卫生责任区名称",
+    "zone_shift_required": "卫生责任区至少要有一个班次",
+    "zone_shift_mismatch": "这个责任区没有该班次，请换一个责任区或班次",
     "invalid_item_name": "请填写日常检查项名称",
     "zone_not_found": "卫生责任区不存在",
     "item_not_found": "日常检查项不存在",
@@ -117,6 +147,8 @@ def _work_http_error(exc: HygieneWorkError) -> HTTPException:
     elif exc.code in ("duplicate_zone", "duplicate_item"):
         status = 409
     elif exc.code == "standard_too_large":
+        status = 413
+    elif exc.code == "capture_too_large":
         status = 413
     else:
         status = 400
@@ -204,6 +236,11 @@ class AssignmentIn(BaseModel):
 
 class ZoneIn(BaseModel):
     name: str
+    shifts: Optional[list[str]] = None
+
+
+class ZoneShiftsIn(BaseModel):
+    shifts: list[str]
 
 
 class OverdueClocksIn(BaseModel):
@@ -239,7 +276,7 @@ def _parse_markup_field(raw: Optional[str]) -> list:
 
 
 async def _capture_from_upload(file: UploadFile, markup_raw: Optional[str]) -> dict:
-    data = await file.read()
+    data = await _read_upload_bounded(file, "标准图")
     if not data:
         raise HTTPException(status_code=400, detail="请上传标准图")
     content_type = (file.content_type or "image/jpeg").split(";")[0].strip()
@@ -270,7 +307,7 @@ def _live_flag(raw: Optional[str]) -> bool:
 
 
 async def _live_capture_from_upload(file: UploadFile, live_raw: Optional[str]) -> dict:
-    data = await file.read()
+    data = await _read_upload_bounded(file, "照片")
     content_type = (file.content_type or "image/jpeg").split(";")[0].strip()
     if not content_type.startswith("image/"):
         content_type = "image/jpeg"
@@ -695,10 +732,25 @@ async def admin_create_zone(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        zone = await work.create_zone(SUPER_ACTOR, body.name)
+        zone = await work.create_zone(SUPER_ACTOR, body.name, body.shifts)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     await _hygiene_nudge("zones", "created", zone_id=zone["id"])
+    return {"zone": zone}
+
+
+@router.patch("/admin/zones/{zone_id}")
+async def admin_update_zone(
+    zone_id: int,
+    body: ZoneShiftsIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        zone = await work.set_zone_shifts(SUPER_ACTOR, zone_id, body.shifts)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    await _hygiene_nudge("zones", "updated", zone_id=zone_id)
     return {"zone": zone}
 
 
@@ -1595,6 +1647,20 @@ async def admin_reject_fix(
         raise _work_http_error(exc) from exc
     await _hygiene_nudge("fix", "rejected", ticket_id=ticket_id)
     return rejected
+
+
+@router.delete("/admin/fix/{ticket_id}")
+async def admin_delete_fix(
+    ticket_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        ticket = await work.delete_fix_ticket(SUPER_ACTOR, ticket_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    await _hygiene_nudge("fix", "deleted", ticket_id=ticket_id)
+    return {"ticket": ticket}
 
 
 @router.get("/admin/fix/{ticket_id}/original")

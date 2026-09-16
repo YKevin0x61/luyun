@@ -19,6 +19,7 @@ import { createPinia } from 'pinia'
 import { useOrdersStore } from './stores/orders.js'
 import { useStationsStore } from './stores/stations.js'
 import { useRealtimeStore } from './stores/realtime.js'
+import { usePwaUpdateStore } from './stores/pwaUpdate.js'
 
 // 导入工具类和常量
 import { TimeCalculator } from './utils/timeCalculator.js'
@@ -66,6 +67,7 @@ export function createApp() {
   preloadCriticalData()
   setupNetworkStatusListener()
   initializeRealtimeConnection()
+  initializePwaUpdate()
   
   return {
     app,
@@ -81,6 +83,15 @@ function initializeRealtimeConnection() {
     console.log('实时连接已初始化')
   } catch (error) {
     console.error('初始化实时连接失败:', error)
+  }
+}
+
+// 只在应用启动时检查一次版本；新版本预缓存完成后由全局提示条询问用户。
+function initializePwaUpdate() {
+  try {
+    usePwaUpdateStore().initialize()
+  } catch (error) {
+    console.warn('[PWA] 初始化更新检查失败:', error)
   }
 }
 

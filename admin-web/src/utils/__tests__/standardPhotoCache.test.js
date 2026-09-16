@@ -6,6 +6,7 @@ import {
   inspectManifest,
   shouldAutoDownload,
   standardVersionChanged,
+  STANDARD_PHOTO_DOWNLOAD_CONCURRENCY,
 } from '../standardPhotoCache.js'
 
 function manifest(version, entries) {
@@ -28,22 +29,33 @@ function blobFor(text) {
 }
 
 function fakeStorage() {
-    const index = {
-      manifestVersion: '',
-      lastSyncAt: '',
-      baselineReady: false,
-      entries: {},
-      failures: {},
-    }
+  const index = {
+    manifestVersion: '',
+    lastSyncAt: '',
+    baselineReady: false,
+    entries: {},
+    failures: {},
+  }
   const blobs = new Map()
   return {
     index,
     blobs,
+    existsCalls: 0,
+    listUrlsCalls: 0,
     async readIndex() { return JSON.parse(JSON.stringify(index)) },
     async writeIndex(next) { Object.assign(index, JSON.parse(JSON.stringify(next))) },
     async put(cacheEntry, blob) { blobs.set(String(cacheEntry.standard_id), blob) },
     async get(cacheEntry) { return blobs.get(String(cacheEntry.standard_id)) || null },
-    async exists(cacheEntry) { return blobs.has(String(cacheEntry.standard_id)) },
+    async exists(cacheEntry) {
+      this.existsCalls += 1
+      return blobs.has(String(cacheEntry.standard_id))
+    },
+    async listUrls() {
+      this.listUrlsCalls += 1
+      return Object.values(index.entries)
+        .filter((cacheEntry) => blobs.has(String(cacheEntry.standard_id)))
+        .map((cacheEntry) => cacheEntry.image_url)
+    },
     async remove(cacheEntry) { blobs.delete(String(cacheEntry.standard_id)) },
     async clear() {
       blobs.clear()
@@ -56,6 +68,10 @@ function fakeStorage() {
   }
 }
 
+function hashCharacter(bytes) {
+  return `hash-${String.fromCharCode(bytes[0])}`
+}
+
 function cacheHarness({ networkKind = 'wifi', files = {}, now = () => 1_700_000_000_000 } = {}) {
   const storage = fakeStorage()
   const cache = createStandardPhotoCache({
@@ -64,7 +80,7 @@ function cacheHarness({ networkKind = 'wifi', files = {}, now = () => 1_700_000_
     storage,
     network: { getKind: async () => networkKind },
     now,
-    hashBytes: async (blob) => `hash-${(await blob.text()).slice(0, 1)}`,
+    hashBytes: async (bytes) => hashCharacter(bytes),
     createObjectUrl: () => `blob:${Math.random()}`,
     revokeObjectUrl: vi.fn(),
   })
@@ -120,6 +136,7 @@ describe('createStandardPhotoCache', () => {
     expect(progress).toEqual([{ completed: 1, total: 1, downloadedBytes: 1, current: first }])
     expect((await cache.inspect()).complete).toBe(true)
     expect(storage.index.baselineReady).toBe(true)
+    expect(storage.index.lastSyncAt).toBeTruthy()
     expect(await cache.resolve(1)).toEqual({ url: 'blob:one', entry: expect.objectContaining({ standard_id: 1 }) })
   })
 
@@ -158,19 +175,73 @@ describe('createStandardPhotoCache', () => {
     const storage = fakeStorage()
     const cache = createStandardPhotoCache({
       manifestLoader: async () => manifest('v2', [one, two]),
-      imageLoader: async (standard) => ({
-        arrayBuffer: async () => new Uint8Array(standard.byte_size),
-        text: async () => (standard.standard_id === 1 ? 'A' : 'B'),
-      }),
+      imageLoader: async (standard) => {
+        const bytes = new Uint8Array(standard.byte_size)
+        bytes[0] = standard.standard_id === 1 ? 65 : 66
+        return new Blob([bytes], { type: 'image/jpeg' })
+      },
       storage,
       network: { getKind: async () => 'unknown' },
-      hashBytes: async (blob) => `hash-${await blob.text()}`,
+      hashBytes: async (bytes) => hashCharacter(bytes),
     })
     const deferred = await cache.sync()
     expect(deferred.status).toBe('deferred')
     const forced = await cache.sync({ force: true })
     expect(forced.status).toBe('updated')
     expect(forced.updated).toBe(2)
+    expect(storage.index.lastSyncAt).toBeTruthy()
+  })
+
+  it('keeps two downloads in flight and preserves manifest order for progress', async () => {
+    const rows = [
+      entry(1, 'A', 'hash-A'),
+      entry(2, 'B', 'hash-B'),
+      entry(3, 'C', 'hash-C'),
+      entry(4, 'D', 'hash-D'),
+    ]
+    const storage = fakeStorage()
+    let active = 0
+    let peak = 0
+    const started = []
+    const cache = createStandardPhotoCache({
+      manifestLoader: async () => manifest('v1', rows),
+      imageLoader: async (standard) => {
+        active += 1
+        peak = Math.max(peak, active)
+        started.push(standard.standard_id)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        active -= 1
+        return blobFor(String.fromCharCode(64 + standard.standard_id))
+      },
+      storage,
+      hashBytes: async (bytes) => hashCharacter(bytes),
+    })
+    const progress = []
+    const result = await cache.downloadAll(null, {
+      onProgress: (value) => progress.push(value.current.standard_id),
+    })
+    expect(peak).toBe(STANDARD_PHOTO_DOWNLOAD_CONCURRENCY)
+    expect(started.slice(0, STANDARD_PHOTO_DOWNLOAD_CONCURRENCY)).toEqual([1, 2])
+    expect(result.updated).toBe(4)
+    expect(new Set(progress)).toEqual(new Set([1, 2, 3, 4]))
+  })
+
+  it('reads each response body once and uses one bulk cache listing for inspection', async () => {
+    const first = entry(1, 'A', 'hash-A')
+    const storage = fakeStorage()
+    const arrayBuffer = vi.fn(async () => new Uint8Array([65]).buffer)
+    const cache = createStandardPhotoCache({
+      manifestLoader: async () => manifest('v1', [first]),
+      imageLoader: async () => ({ arrayBuffer, headers: { get: () => 'image/jpeg' } }),
+      storage,
+      hashBytes: async (bytes) => hashCharacter(bytes),
+    })
+    await cache.downloadAll()
+    storage.listUrlsCalls = 0
+    await cache.inspect(manifest('v1', [first]))
+    expect(arrayBuffer).toHaveBeenCalledTimes(1)
+    expect(storage.listUrlsCalls).toBe(1)
+    expect(storage.existsCalls).toBe(0)
   })
 
   it('keeps current versions, expires old versions after seven days and reports stats', async () => {
@@ -229,24 +300,92 @@ describe('createStandardPhotoCache', () => {
     expect(storage.blobs.has('2')).toBe(true)
   })
 
-  it('preserves completed images and stops before the next image when aborted', async () => {
-    const one = entry(1, 'A', 'hash-A')
-    const two = entry(2, 'B', 'hash-B')
+  it('stops starting new downloads after abort and keeps committed images', async () => {
+    const rows = [entry(1, 'A', 'hash-A'), entry(2, 'B', 'hash-B'), entry(3, 'C', 'hash-C')]
     const storage = fakeStorage()
     const controller = new AbortController()
+    const calls = []
     const cache = createStandardPhotoCache({
-      manifestLoader: async () => manifest('v1', [one, two]),
-      imageLoader: async (standard) => blobFor(standard.standard_id === 1 ? 'A' : 'B'),
+      manifestLoader: async () => manifest('v1', rows),
+      imageLoader: async (standard, { signal }) => {
+        calls.push(standard.standard_id)
+        expect(signal).toBe(controller.signal)
+        if (standard.standard_id === 1) {
+          controller.abort()
+          return blobFor('A')
+        }
+        throw new Error('should not start')
+      },
       storage,
-      hashBytes: async (blob) => `hash-${await blob.text()}`,
+      hashBytes: async (bytes) => hashCharacter(bytes),
     })
-    const result = await cache.downloadAll(null, {
-      signal: controller.signal,
-      onProgress: () => controller.abort(),
-    })
+    const result = await cache.downloadAll(null, { signal: controller.signal })
+    expect(calls).toEqual([1])
     expect(result.aborted).toBe(true)
     expect(result.updated).toBe(1)
     expect(storage.blobs.has('1')).toBe(true)
     expect(storage.blobs.has('2')).toBe(false)
+  })
+
+  it('removes a corrupted cached file and records it as a failure', async () => {
+    const first = entry(1, 'A', 'hash-A')
+    const storage = fakeStorage()
+    const cache = createStandardPhotoCache({
+      manifestLoader: async () => manifest('v1', [first]),
+      imageLoader: async () => blobFor('A'),
+      storage,
+      hashBytes: async () => 'hash-A',
+    })
+    await cache.downloadAll()
+    storage.blobs.set('1', blobFor('short'))
+    expect(await cache.resolve(1)).toBeNull()
+    expect(storage.index.entries['1']).toBeUndefined()
+    expect(storage.index.failures['1'].reason).toBe('缓存大小不一致')
+  })
+
+  it('verifies legacy entries once and throttles repeated access writes', async () => {
+    let currentNow = 1_700_000_000_000
+    const first = entry(1, 'A', 'hash-A')
+    const storage = fakeStorage()
+    storage.index.entries['1'] = { ...first, lastAccessAt: currentNow - 120_000 }
+    storage.blobs.set('1', blobFor('A'))
+    const writeIndex = vi.spyOn(storage, 'writeIndex')
+    const hash = vi.fn(async () => 'hash-A')
+    const cache = createStandardPhotoCache({
+      manifestLoader: async () => manifest('v1', [first]),
+      imageLoader: async () => blobFor('A'),
+      storage,
+      now: () => currentNow,
+      hashBytes: hash,
+      createObjectUrl: () => 'blob:one',
+    })
+    await cache.resolve(1)
+    currentNow += 1_000
+    await cache.resolve(1)
+    expect(hash).toHaveBeenCalledTimes(1)
+    expect(writeIndex).toHaveBeenCalledTimes(1)
+    expect(storage.index.entries['1'].verifiedAt).toBeTruthy()
+  })
+
+  it('does not repopulate index failures when cache is cleared during resolve', async () => {
+    const first = entry(1, 'A', 'hash-A')
+    const storage = fakeStorage()
+    storage.index.entries['1'] = { ...first, verifiedAt: 'already-verified' }
+    let releaseGet
+    storage.get = () => new Promise((resolve) => { releaseGet = resolve })
+    const cache = createStandardPhotoCache({
+      manifestLoader: async () => manifest('v1', [first]),
+      imageLoader: async () => blobFor('A'),
+      storage,
+      hashBytes: async () => 'hash-A',
+      createObjectUrl: () => 'blob:one',
+    })
+    const pending = cache.resolve(1)
+    await vi.waitFor(() => expect(releaseGet).toBeTypeOf('function'))
+    await cache.clear()
+    releaseGet(blobFor('A'))
+    expect(await pending).toBeNull()
+    expect(storage.index.entries).toEqual({})
+    expect(storage.index.failures).toEqual({})
   })
 })

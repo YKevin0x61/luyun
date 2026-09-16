@@ -62,6 +62,12 @@ worker/多进程会导致状态分裂、WebSocket 订阅收不到推送、甚至
 | `scripts/run_update_job.py` | Update Job 执行体（由 `luyun-update.service` 或 Docker 旁路调用） |
 | `scripts/publish_release.sh` | 开发者发布 GitHub Release（产出发行包） |
 
+Admin 与 KDS 构建产物包含各自的 Service Worker 和 Web App Manifest。反代需要
+让 `/sw.js`、`/pwa/*` 与 `/kds/sw.js`、`/kds/manifest.webmanifest` 到达
+FastAPI；FastAPI 会为 Service Worker/manifest/HTML 设置 `no-cache`，并为
+哈希静态资源设置 immutable 缓存。Service Worker 不会缓存 `/api/*`、`/ws/*`、
+上传下载或卫生图片。
+
 ---
 
 ## 1. 新机器：Bootstrap Install（推荐入口）

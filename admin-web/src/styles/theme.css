@@ -413,8 +413,8 @@ table.data-table td.actions { display: flex; gap: 6px; }
 .luyun-dropzone__hint { font-size: 11px; color: var(--text-dim); }
 
 .luyun-date-picker { width: 100%; }
-.luyun-date-picker .dp__input_wrap { width: 100%; background: transparent; }
-.luyun-date-picker .dp__input {
+.luyun-date-picker .dp--input-wrap { width: 100%; background: transparent; }
+.luyun-date-picker .dp--input {
   background: var(--card2);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -424,16 +424,21 @@ table.data-table td.actions { display: flex; gap: 6px; }
   min-height: 34px;
   width: 100%;
 }
-.luyun-date-picker .dp__input_icon,
-.luyun-date-picker .dp__clear_icon {
+.luyun-date-picker .dp--input-icon,
+.luyun-date-picker .dp--clear-btn {
   color: var(--text-dim);
 }
-.luyun-date-picker .dp__input:focus {
+.luyun-date-picker .dp--input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
 }
 
 .luyun-time-picker {
+  /* 3 行滚轮：行高与可见行数决定滚轮高度，列内边距负责把首尾项也顶到中间。
+     改这里时同步 LuyunTimePicker.vue 里的 ITEM_HEIGHT。 */
+  --luyun-time-item-height: 36px;
+  --luyun-time-visible-rows: 3;
+  --luyun-time-wheel-height: calc(var(--luyun-time-item-height) * var(--luyun-time-visible-rows));
   position: relative;
   width: 100%;
 }
@@ -481,7 +486,7 @@ table.data-table td.actions { display: flex; gap: 6px; }
   display: grid;
   grid-template-columns: 1fr 1fr;
   position: relative;
-  height: 200px;
+  height: var(--luyun-time-wheel-height);
 }
 .luyun-time-picker__wheel::before {
   content: '';
@@ -490,7 +495,7 @@ table.data-table td.actions { display: flex; gap: 6px; }
   right: 8px;
   top: 50%;
   transform: translateY(-50%);
-  height: 36px;
+  height: var(--luyun-time-item-height);
   border-radius: 6px;
   background: rgba(99, 102, 241, 0.12);
   border: 1px solid rgba(99, 102, 241, 0.28);
@@ -503,12 +508,12 @@ table.data-table td.actions { display: flex; gap: 6px; }
   scroll-snap-type: y mandatory;
   scrollbar-width: none;
   margin: 0;
-  padding: 82px 0;
+  padding: calc((var(--luyun-time-wheel-height) - var(--luyun-time-item-height)) / 2) 0;
   list-style: none;
 }
 .luyun-time-picker__column::-webkit-scrollbar { display: none; }
 .luyun-time-picker__item {
-  height: 36px;
+  height: var(--luyun-time-item-height);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -527,7 +532,11 @@ table.data-table td.actions { display: flex; gap: 6px; }
   color: var(--text);
 }
 
-.dp__theme_dark {
+/* @vuepic/vue-datepicker v14 renamed the dark theme class to .dp--theme-dark
+   and applies it to both the root (.dp--main) and the teleported menu (.dp--menu).
+   Keep the higher specificity so these tokens win over the library stylesheet. */
+.dp--main.dp--theme-dark,
+.dp--menu.dp--theme-dark {
   --dp-background-color: var(--card);
   --dp-text-color: var(--text);
   --dp-hover-color: var(--card2);

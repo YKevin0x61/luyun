@@ -499,6 +499,8 @@ _HYGIENE_TABLE_SCHEMAS = {
         CREATE TABLE IF NOT EXISTS hygiene_zones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
+            day_shift INTEGER NOT NULL DEFAULT 1,
+            night_shift INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -797,6 +799,20 @@ async def apply_hygiene_schema(conn) -> None:
 
 async def migrate_hygiene_columns(conn) -> None:
     """Add hygiene columns introduced after the first table creation."""
+    cur = await conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hygiene_zones'"
+    )
+    if await cur.fetchone() is not None:
+        cur = await conn.execute("PRAGMA table_info(hygiene_zones)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if "day_shift" not in cols:
+            await conn.execute(
+                "ALTER TABLE hygiene_zones ADD COLUMN day_shift INTEGER NOT NULL DEFAULT 1"
+            )
+        if "night_shift" not in cols:
+            await conn.execute(
+                "ALTER TABLE hygiene_zones ADD COLUMN night_shift INTEGER NOT NULL DEFAULT 1"
+            )
     cur = await conn.execute("PRAGMA table_info(hygiene_employees)")
     cols = {row[1] for row in await cur.fetchall()}
     if "name" not in cols:

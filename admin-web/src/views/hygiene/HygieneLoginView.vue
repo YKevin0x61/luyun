@@ -1,9 +1,11 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { parseApiDetail, staffRequest } from '../../utils/hygieneStaff'
 
 const router = useRouter()
+const imageUploads = useImageUploadQueueStore()
 const phone = ref('')
 const password = ref('')
 const submitting = ref(false)
@@ -21,6 +23,7 @@ async function submit() {
       method: 'POST',
       body: { phone: phone.value.trim(), password: password.value },
     })
+    imageUploads.clearTasksByTransport('staff')
     router.replace('/hygiene')
   } catch (err) {
     errorText.value = err.message || parseApiDetail(null)

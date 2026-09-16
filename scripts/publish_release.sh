@@ -162,11 +162,16 @@ log "build Admin SPA"
   npm run build
 )
 [[ -f "$ROOT/$ADMIN_DIST_PATH/index.html" ]] || die "Admin SPA 构建失败：缺少 $ADMIN_DIST_PATH/index.html"
+[[ -f "$ROOT/$ADMIN_DIST_PATH/sw.js" ]] || die "Admin PWA 构建失败：缺少 sw.js"
+[[ -f "$ROOT/$ADMIN_DIST_PATH/pwa/manifests/admin.webmanifest" ]] || die "Admin PWA 构建失败：缺少 admin manifest"
+[[ -f "$ROOT/$ADMIN_DIST_PATH/pwa/icons/admin-192.png" ]] || die "Admin PWA 构建失败：缺少 admin 图标"
 
 log "build KDS"
 "$ROOT/scripts/build_kds.sh"
 [[ -f "$ROOT/$KDS_DIST_PATH/index.html" ]] || die "KDS 构建失败：缺少 $KDS_DIST_PATH/index.html"
 [[ -d "$ROOT/$KDS_DIST_PATH/assets" ]] || die "KDS 构建失败：缺少 $KDS_DIST_PATH/assets/"
+[[ -f "$ROOT/$KDS_DIST_PATH/sw.js" ]] || die "KDS PWA 构建失败：缺少 sw.js"
+[[ -f "$ROOT/$KDS_DIST_PATH/manifest.webmanifest" ]] || die "KDS PWA 构建失败：缺少 manifest"
 
 log "stage Release Bundle tree → $BUNDLE_ROOT"
 mkdir -p "$BUNDLE_ROOT"
@@ -224,7 +229,12 @@ with open(out, "w", encoding="utf-8") as fh:
 PY
 
 [[ -f "$BUNDLE_ROOT/$ADMIN_DIST_PATH/index.html" ]] || die "发行包缺少 $ADMIN_DIST_PATH/index.html"
+[[ -f "$BUNDLE_ROOT/$ADMIN_DIST_PATH/sw.js" ]] || die "发行包缺少 Admin PWA Service Worker"
+[[ -f "$BUNDLE_ROOT/$ADMIN_DIST_PATH/pwa/manifests/admin.webmanifest" ]] || die "发行包缺少 Admin PWA manifest"
+[[ -f "$BUNDLE_ROOT/$ADMIN_DIST_PATH/pwa/icons/admin-192.png" ]] || die "发行包缺少 Admin PWA 图标"
 [[ -f "$BUNDLE_ROOT/$KDS_DIST_PATH/index.html" ]] || die "发行包缺少 $KDS_DIST_PATH/index.html"
+[[ -f "$BUNDLE_ROOT/$KDS_DIST_PATH/sw.js" ]] || die "发行包缺少 KDS PWA Service Worker"
+[[ -f "$BUNDLE_ROOT/$KDS_DIST_PATH/manifest.webmanifest" ]] || die "发行包缺少 KDS PWA manifest"
 [[ -f "$BUNDLE_ROOT/$MANIFEST_NAME" ]] || die "发行包缺少 $MANIFEST_NAME"
 
 log "package $BUNDLE_ASSET_NAME"

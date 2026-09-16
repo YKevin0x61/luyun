@@ -11,6 +11,7 @@ import HygieneWatermarkOverlay from '../../components/hygiene/HygieneWatermarkOv
 import StandardPhotoCachePanel from '../../components/hygiene/StandardPhotoCachePanel.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
+import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
 import {
   HYGIENE_BRAND_MARK,
@@ -37,7 +38,7 @@ import {
   teachingShotUrl,
 } from '../../utils/hygieneMarkup'
 import { standardVersionChanged } from '../../utils/standardPhotoCache'
-import { staffRequest, staffUpload } from '../../utils/hygieneStaff'
+import { staffRequest } from '../../utils/hygieneStaff'
 import {
   buildWorkQueue,
   dailyPrimaryAction,
@@ -61,6 +62,7 @@ import {
 useScopedStylesheet('/hygiene-admin.css')
 
 const router = useRouter()
+const imageUploads = useImageUploadQueueStore()
 const standardPhotoCache = useStandardPhotoCacheStore()
 const tab = ref('inbox')
 const employee = ref(null)
@@ -101,7 +103,6 @@ const localBeforeWatermark = ref(null)
 const dailyClocks = ref(null)
 const deepClock = ref(null)
 const flashText = ref('')
-const uploadProgress = ref(null)
 const confirmCloseOpen = ref(false)
 const formError = ref('')
 const formErrorField = ref('')
@@ -113,8 +114,31 @@ const boardsLoaded = ref(false)
 const teachingLoaded = ref(false)
 let clockTimer = null
 
+const assignmentMismatch = computed(() => {
+  const current = employee.value
+  if (!current || !current.shift || !current.zone_id) return false
+  const shifts = current.zone_shifts
+  if (!Array.isArray(shifts) || !shifts.length) return false
+  return !shifts.includes(current.shift)
+})
 const needsAssignment = computed(() => {
-  return Boolean(employee.value) && (!employee.value.shift || !employee.value.zone_id)
+  return Boolean(employee.value) && (
+    !employee.value.shift || !employee.value.zone_id || assignmentMismatch.value
+  )
+})
+const assignableZones = computed(() => {
+  const shift = selectedShift.value
+  if (!shift) return zones.value
+  return zones.value.filter((zone) => (zone.shifts || HYGIENE_SHIFTS).includes(shift))
+})
+watch(assignableZones, (allowed) => {
+  if (!allowed.length) {
+    selectedZoneId.value = ''
+    return
+  }
+  if (!allowed.some((zone) => String(zone.id) === String(selectedZoneId.value))) {
+    selectedZoneId.value = allowed[0].id
+  }
 })
 const sheetDirty = computed(() => {
   const current = sheet.value
@@ -191,9 +215,21 @@ watch(sheet, async (value, previous) => {
   if (closeButton.value) closeButton.value.focus()
 })
 
+async function loadBoardsAndTeaching({ force = false } = {}) {
+  const results = await Promise.allSettled([
+    loadBoards({ force }),
+    loadTeaching({ force }),
+  ])
+  const failed = results.find((result) => result.status === 'rejected')
+  if (failed) {
+    errorText.value = (failed.reason && failed.reason.message) || '无法加载红黑榜和卫生教材'
+  }
+}
+
 watch(tab, async (id) => {
   if (id === 'boards') {
-    await Promise.allSettled([loadBoards(), loadTeaching()])
+    errorText.value = ''
+    await loadBoardsAndTeaching({ force: true })
   } else if (id === 'fix') {
     await loadZones()
   }
@@ -231,27 +267,6 @@ function standardMissingOffline(itemId, fallback = null) {
 
 function tickClock() {
   nowTick.value = Date.now()
-}
-
-function submitLabel(fallback, processing = '正在处理…') {
-  if (!busy.value) return fallback
-  if (uploadProgress.value) {
-    return uploadProgress.value.done
-      ? processing
-      : `上传 ${uploadProgress.value.percent}%`
-  }
-  return '正在提交…'
-}
-
-async function staffUploadWithProgress(path, formData) {
-  uploadProgress.value = { percent: 0, done: false }
-  try {
-    return await staffUpload(path, formData, (next) => {
-      uploadProgress.value = next
-    })
-  } finally {
-    uploadProgress.value = null
-  }
 }
 
 function onKeydown(event) {
@@ -292,24 +307,28 @@ useHygieneRealtime({
   ],
   pull: async (event) => {
     if (!employee.value) return
-    const resource = event && event.scope && event.scope.resource
-    if (resource === 'assignment' || resource === 'settings') {
-      await loadMe()
-      return
-    }
-    if (resource === 'daily') await loadInbox()
-    if (resource === 'deep') await loadDeepClean()
-    if (resource === 'fix') await loadFixTickets()
-    if (resource === 'boards') await loadBoards()
-    if (resource === 'teaching') await loadTeaching()
-    if (resource === 'zones') await loadZones()
-    if (!resource && employee.value.shift && employee.value.zone_id) {
-      await Promise.allSettled([
-        loadInbox(),
-        loadDeepClean(),
-        loadFixTickets(),
-        loadZones(),
-      ])
+    try {
+      const resource = event && event.scope && event.scope.resource
+      if (resource === 'assignment' || resource === 'settings') {
+        await loadMe()
+        return
+      }
+      if (resource === 'daily') await loadInbox()
+      if (resource === 'deep') await loadDeepClean()
+      if (resource === 'fix') await loadFixTickets()
+      if (resource === 'boards') await loadBoards({ force: true })
+      if (resource === 'teaching') await loadTeaching({ force: true })
+      if (resource === 'zones') await loadZones({ force: true })
+      if (!resource && employee.value.shift && employee.value.zone_id) {
+        await Promise.allSettled([
+          loadInbox(),
+          loadDeepClean(),
+          loadFixTickets(),
+          loadZones(),
+        ])
+      }
+    } catch (err) {
+      errorText.value = err.message || '无法刷新卫生数据'
     }
   },
 })
@@ -349,6 +368,7 @@ async function loadMe() {
     deepClock.value = data.deep_clock || null
   } catch (err) {
     errorText.value = err.message || '无法读取登录状态'
+    imageUploads.clearTasksByTransport('staff')
     router.replace('/hygiene/login')
     return
   }
@@ -382,21 +402,21 @@ async function loadFixTickets() {
   fixInbox.value = data.items || []
 }
 
-async function loadZones() {
-  if (zonesLoaded.value) return
+async function loadZones({ force = false } = {}) {
+  if (zonesLoaded.value && !force) return
   const data = await staffRequest('/api/hygiene/staff/daily-catalog')
   zones.value = data.zones || []
   zonesLoaded.value = true
 }
 
-async function loadBoards() {
-  if (boardsLoaded.value) return
+async function loadBoards({ force = false } = {}) {
+  if (boardsLoaded.value && !force) return
   boards.value = await staffRequest('/api/hygiene/staff/boards')
   boardsLoaded.value = true
 }
 
-async function loadTeaching() {
-  if (teachingLoaded.value) return
+async function loadTeaching({ force = false } = {}) {
+  if (teachingLoaded.value && !force) return
   const data = await staffRequest('/api/hygiene/staff/teaching')
   teaching.value = data.items || []
   teachingLoaded.value = true
@@ -441,6 +461,11 @@ async function openAssignmentPicker() {
   if (!employee.value) return
   changingAssignment.value = true
   tab.value = 'inbox'
+  try {
+    await loadZones({ force: true })
+  } catch (err) {
+    errorText.value = err.message || '无法加载卫生责任区'
+  }
   await nextTick()
   const main = document.getElementById('hygiene-work-main')
   if (main) main.scrollTo({ top: 0, behavior: 'smooth' })
@@ -534,6 +559,7 @@ async function savePassword() {
 async function logout() {
   if (loggingOut.value) return
   loggingOut.value = true
+  imageUploads.clearTasksByTransport('staff')
   try {
     await staffRequest('/api/hygiene/staff/logout', { method: 'POST' })
   } catch {
@@ -903,10 +929,10 @@ function continueFix(current) {
     : `已交，下一张回拍：${next.zone_name}`
 }
 
-async function submitCapture() {
+function submitCapture() {
   if (!sheet.value || !sheet.value.blob || busy.value) return
   if (sheet.value.kind === 'fix') {
-    await submitFixOpen()
+    submitFixOpen()
     return
   }
   const row = sheet.value.row
@@ -919,91 +945,99 @@ async function submitCapture() {
     }
     return
   }
-  busy.value = true
   errorText.value = ''
   try {
     const form = new FormData()
     form.append('file', sheet.value.blob, 'capture.jpg')
     form.append('live', 'true')
     form.append('shift', row.shift)
-    await staffUploadWithProgress(`/api/hygiene/staff/daily/${row.item_id}/submit`, form)
+    imageUploads.enqueue({
+      transport: 'staff',
+      path: `/api/hygiene/staff/daily/${row.item_id}/submit`,
+      formData: form,
+      label: `日常实拍 · ${row.item_name}`,
+      detail: `${row.zone_name} · ${row.shift}`,
+      onSuccess: loadInbox,
+    })
     clearPreview()
-    await loadInbox()
     continueDaily(row)
   } catch (err) {
-    errorText.value = err.message || '提交失败'
-  } finally {
-    busy.value = false
+    errorText.value = err.message || '无法加入上传队列'
   }
 }
 
-async function submitFixOpen() {
+function submitFixOpen() {
   if (!sheet.value || !sheet.value.blob || busy.value) return
-  busy.value = true
   errorText.value = ''
+  const current = sheet.value
+  const zone = zones.value.find((row) => String(row.id) === String(current.zoneId))
   try {
     const form = new FormData()
-    form.append('file', sheet.value.blob, 'capture.jpg')
+    form.append('file', current.blob, 'capture.jpg')
     form.append('live', 'true')
-    form.append('zone_id', String(sheet.value.zoneId))
-    form.append('ticket_type', sheet.value.ticketType)
-    form.append('body_text', sheet.value.bodyText.trim())
-    form.append('duration_hours', String(sheet.value.durationHours))
-    form.append('markup', JSON.stringify(sheet.value.markup || []))
-    await staffUploadWithProgress('/api/hygiene/staff/fix', form)
+    form.append('zone_id', String(current.zoneId))
+    form.append('ticket_type', current.ticketType)
+    form.append('body_text', current.bodyText.trim())
+    form.append('duration_hours', String(current.durationHours))
+    form.append('markup', JSON.stringify(current.markup || []))
+    imageUploads.enqueue({
+      transport: 'staff',
+      path: '/api/hygiene/staff/fix',
+      formData: form,
+      label: `整改开单 · ${zone ? zone.name : '卫生责任区'}`,
+      detail: current.ticketType,
+      onSuccess: loadFixTickets,
+    })
     closeSheet(true)
-    await loadFixTickets()
   } catch (err) {
-    errorText.value = err.message || '开单失败'
-  } finally {
-    busy.value = false
+    errorText.value = err.message || '无法加入上传队列'
   }
 }
 
-async function submitFixReshoot() {
+function submitFixReshoot() {
   if (!sheet.value || !sheet.value.blob || !sheet.value.row || busy.value) return
-  busy.value = true
   errorText.value = ''
+  const current = sheet.value.row
   try {
     const form = new FormData()
     form.append('file', sheet.value.blob, 'capture.jpg')
     form.append('live', 'true')
-    await staffUploadWithProgress(
-      `/api/hygiene/staff/fix/${sheet.value.row.id}/reshoot`,
-      form,
-    )
-    const current = sheet.value.row
+    imageUploads.enqueue({
+      transport: 'staff',
+      path: `/api/hygiene/staff/fix/${current.id}/reshoot`,
+      formData: form,
+      label: `整改回拍 · ${current.zone_name || '卫生责任区'}`,
+      detail: current.ticket_type || '',
+      onSuccess: loadFixTickets,
+    })
     clearPreview()
-    await loadFixTickets()
     continueFix(current)
   } catch (err) {
-    errorText.value = err.message || '回拍失败'
-  } finally {
-    busy.value = false
+    errorText.value = err.message || '无法加入上传队列'
   }
 }
 
-async function submitDeepPair() {
+function submitDeepPair() {
   if (!sheet.value || !sheet.value.beforeBlob || !sheet.value.afterBlob || busy.value) return
   const row = sheet.value.row
-  busy.value = true
   errorText.value = ''
   try {
     const form = new FormData()
     form.append('before', sheet.value.beforeBlob, 'before.jpg')
     form.append('after', sheet.value.afterBlob, 'after.jpg')
     form.append('live', 'true')
-    await staffUploadWithProgress(
-      `/api/hygiene/staff/deep-clean/${row.item_id}/submit`,
-      form,
-    )
+    imageUploads.enqueue({
+      transport: 'staff',
+      path: `/api/hygiene/staff/deep-clean/${row.item_id}/submit`,
+      formData: form,
+      label: `专项前后 · ${row.item_name}`,
+      detail: '清理前 + 清理后',
+      onSuccess: loadDeepClean,
+    })
     clearPreview()
-    await loadDeepClean()
     continueDeep(row)
   } catch (err) {
-    errorText.value = err.message || '提交失败'
-  } finally {
-    busy.value = false
+    errorText.value = err.message || '无法加入上传队列'
   }
 }
 
@@ -1108,7 +1142,7 @@ async function decide(action) {
           <h2>卫生责任区</h2>
           <div class="hy-shift-choices">
             <button
-              v-for="zone in zones"
+              v-for="zone in assignableZones"
               :key="zone.id"
               type="button"
               class="btn"
@@ -1117,6 +1151,7 @@ async function decide(action) {
               @click="selectedZoneId = zone.id"
             >{{ zone.name }}</button>
           </div>
+          <p v-if="selectedShift && !assignableZones.length" class="hy-staff-lead">这个班次暂时没有责任区。</p>
           <h2>班次</h2>
           <div class="hy-shift-choices">
             <button
@@ -1132,7 +1167,7 @@ async function decide(action) {
           <button
             type="button"
             class="btn btn-primary btn-block hy-staff-submit"
-            :disabled="Boolean(picking) || !selectedShift || !selectedZoneId || !zones.length"
+            :disabled="Boolean(picking) || !selectedShift || !assignableZones.some((zone) => String(zone.id) === String(selectedZoneId))"
             @click="pickAssignment"
           >{{ picking ? '正在保存…' : (changingAssignment ? '保存区域和班次' : '确认区域和班次') }}</button>
         </template>
@@ -1640,7 +1675,7 @@ async function decide(action) {
           </div>
           <p class="staff-lead">点图画面圈，可选。</p>
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitFixOpen">
-            {{ submitLabel('开整改单', '正在开单…') }}
+            开整改单
           </button>
           <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="openFixCameraFromForm">重拍</button>
         </template>
@@ -1659,7 +1694,7 @@ async function decide(action) {
             <HygieneWatermarkOverlay :watermark="localWatermark" />
           </div>
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitFixReshoot">
-            {{ submitLabel('提交回拍') }}
+            提交回拍
           </button>
           <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="openFixReshootCamera">重拍</button>
         </template>
@@ -1693,7 +1728,7 @@ async function decide(action) {
             :watermark="localWatermark"
           />
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitDeepPair">
-            {{ submitLabel('提交这一组待验收') }}
+            提交这一组待验收
           </button>
           <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="openDeepAfterCamera">重拍清理后</button>
         </template>
@@ -1712,7 +1747,7 @@ async function decide(action) {
             <HygieneWatermarkOverlay :watermark="localWatermark" />
           </div>
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitCapture">
-            {{ submitLabel('提交待验收') }}
+            提交待验收
           </button>
           <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="openCamera">重拍</button>
         </template>

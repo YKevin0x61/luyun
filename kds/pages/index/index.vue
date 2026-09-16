@@ -1,5 +1,6 @@
 <template>
   <view class="dashboard-page">
+    <PwaUpdateBanner />
     <view class="cockpit">
       <view class="top-bar">
         <text class="brand">KDS 首页</text>
@@ -130,6 +131,7 @@ import { hubOverviewPresentation } from '../../utils/hubOverviewPresentation.js'
 import { hubShouldPull } from '../../utils/kitchenServe.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
+import PwaUpdateBanner from '../../components/PwaUpdateBanner.vue'
 
 const ORDERS_SUBSCRIPTION_ID = 'kds-dashboard-orders'
 const UNMAPPED_BADGE_MAX = 99
@@ -151,7 +153,7 @@ function navigateSafely(url) {
 
 export default {
   name: 'DashboardPage',
-  components: { SvgIcon },
+  components: { SvgIcon, PwaUpdateBanner },
 
   setup() {
     const ordersStore = useOrdersStore()

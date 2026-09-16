@@ -472,6 +472,7 @@ class EmployeeAccounts:
         shift: Optional[str],
         zone_id: Optional[int] = None,
         zone_name: Optional[str] = None,
+        zone_shifts=None,
     ) -> dict:
         return {
             "employee_id": int(employee_id),
@@ -479,6 +480,7 @@ class EmployeeAccounts:
             "shift": shift,
             "zone_id": None if zone_id is None else int(zone_id),
             "zone_name": zone_name,
+            "zone_shifts": list(zone_shifts or []),
         }
 
     def _normalize_shift(self, shift: str) -> str:
@@ -493,7 +495,8 @@ class EmployeeAccounts:
 
     async def current_assignment(self, employee_id: int) -> dict:
         cur = await self._conn.execute(
-            """SELECT p.shift, p.zone_id, z.name AS zone_name
+            """SELECT p.shift, p.zone_id, z.name AS zone_name,
+                      z.day_shift, z.night_shift
                FROM hygiene_shift_picks p
                LEFT JOIN hygiene_zones z ON z.id = p.zone_id
                WHERE p.employee_id = ? AND p.business_date = ?""",
@@ -513,14 +516,32 @@ class EmployeeAccounts:
             mapping["shift"],
             mapping.get("zone_id"),
             mapping.get("zone_name"),
+            self._zone_shift_list(mapping) if mapping.get("zone_id") else [],
         )
 
     async def _fetch_zone(self, zone_id: int):
         cur = await self._conn.execute(
-            "SELECT id, name FROM hygiene_zones WHERE id = ?",
+            """SELECT id, name, day_shift, night_shift
+               FROM hygiene_zones WHERE id = ?""",
             (int(zone_id),),
         )
         return await cur.fetchone()
+
+    @staticmethod
+    def _zone_allows_shift(zone, shift: str) -> bool:
+        mapping = dict(zone)
+        flag = mapping.get("day_shift") if shift == SHIFT_DAY else mapping.get("night_shift")
+        return bool(int(flag or 0))
+
+    @staticmethod
+    def _zone_shift_list(zone) -> list[str]:
+        mapping = dict(zone)
+        shifts = []
+        if int(mapping.get("day_shift", 1) or 0):
+            shifts.append(SHIFT_DAY)
+        if int(mapping.get("night_shift", 1) or 0):
+            shifts.append(SHIFT_NIGHT)
+        return shifts
 
     @serialized_write
     async def pick_assignment(self, employee_id: int, shift: str, zone_id: int) -> dict:
@@ -531,6 +552,8 @@ class EmployeeAccounts:
         zone = await self._fetch_zone(zone_id)
         if zone is None:
             raise EmployeeAccountsError("zone_not_found", "zone_not_found")
+        if not self._zone_allows_shift(zone, shift):
+            raise EmployeeAccountsError("zone_shift_mismatch", "zone_shift_mismatch")
         business_date = self._business_date()
         now = self._now_iso()
         await self._conn.execute(
@@ -558,6 +581,7 @@ class EmployeeAccounts:
             shift,
             zone_id,
             zone_mapping["name"],
+            self._zone_shift_list(zone),
         )
 
     async def pick_shift(self, employee_id: int, shift: str) -> dict:
@@ -624,6 +648,8 @@ class EmployeeAccounts:
         zone = await self._fetch_zone(zone_id)
         if zone is None:
             raise EmployeeAccountsError("zone_not_found", "zone_not_found")
+        if not self._zone_allows_shift(zone, shift):
+            raise EmployeeAccountsError("zone_shift_mismatch", "zone_shift_mismatch")
         business_date = self._business_date()
         now = self._now_iso()
         await self._conn.execute(
@@ -651,6 +677,7 @@ class EmployeeAccounts:
             shift,
             zone_id,
             zone_mapping["name"],
+            self._zone_shift_list(zone),
         )
 
     async def logout(self, session_id: str) -> None:

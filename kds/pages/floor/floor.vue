@@ -1,5 +1,6 @@
 <template>
   <view class="floor-page" :class="{ 'floor-page--split': splitLayout }">
+    <PwaUpdateBanner />
     <view v-if="disconnected" class="disconnect-banner">
       <text class="disconnect-banner-text">实时连接已断开，正在重连…</text>
     </view>
@@ -143,6 +144,7 @@ import { useNudgePull } from '../../composables/useNudgePull.js'
 import { useRealtimeStore } from '../../stores/realtime.js'
 import { useStationsStore } from '../../stores/stations.js'
 import { TimeCalculator } from '../../utils/timeCalculator.js'
+import PwaUpdateBanner from '../../components/PwaUpdateBanner.vue'
 import {
   canFire,
   canHold,
@@ -170,6 +172,7 @@ function groupKey(tableNumber, dishName) {
 
 export default {
   name: 'FloorConsolePage',
+  components: { PwaUpdateBanner },
   setup() {
     const realtimeStore = useRealtimeStore()
     const stationsStore = useStationsStore()

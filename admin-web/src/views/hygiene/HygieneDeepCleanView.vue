@@ -317,11 +317,21 @@ async function markTeaching() {
         <form class="cal-range" @submit.prevent="loadCalendar">
           <label class="clock-field" aria-label="专项日历开始日期">
             从
-            <LuyunDatePicker v-model="fromDate" dark placeholder="开始日期" />
+            <LuyunDatePicker
+              v-model="fromDate"
+              dark
+              placeholder="开始日期"
+              aria-label="专项日历开始日期"
+            />
           </label>
           <label class="clock-field" aria-label="专项日历结束日期">
             到
-            <LuyunDatePicker v-model="toDate" dark placeholder="结束日期" />
+            <LuyunDatePicker
+              v-model="toDate"
+              dark
+              placeholder="结束日期"
+              aria-label="专项日历结束日期"
+            />
           </label>
           <button type="submit" class="btn">查看</button>
         </form>

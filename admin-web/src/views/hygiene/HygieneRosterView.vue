@@ -37,7 +37,7 @@ async function loadRoster() {
         job_title: row.job_title || '',
         permission: row.permission,
         shift: row.shift || '白班',
-        zone_id: row.zone_id || (zones.value[0] && zones.value[0].id) || '',
+        zone_id: row.zone_id || (zonesForShift('白班')[0] && zonesForShift('白班')[0].id) || '',
       }
     }
     drafts.value = next
@@ -45,6 +45,21 @@ async function loadRoster() {
     errorText.value = err.message || '无法加载花名册'
   } finally {
     loading.value = false
+  }
+}
+
+function zonesForShift(shift) {
+  return zones.value.filter((zone) =>
+    (zone.shifts || HYGIENE_SHIFTS).includes(shift),
+  )
+}
+
+function onShiftChange(row) {
+  const draft = drafts.value[row.id]
+  if (!draft) return
+  const allowed = zonesForShift(draft.shift)
+  if (!allowed.some((zone) => String(zone.id) === String(draft.zone_id))) {
+    draft.zone_id = allowed.length ? allowed[0].id : ''
   }
 }
 
@@ -216,7 +231,7 @@ async function changeAssignment(row) {
                 :disabled="busyId === row.id"
               >
                 <option value="">未选</option>
-                <option v-for="zone in zones" :key="zone.id" :value="zone.id">
+                <option v-for="zone in zonesForShift(drafts[row.id].shift)" :key="zone.id" :value="zone.id">
                   {{ zone.name }}
                 </option>
               </select>
@@ -228,6 +243,7 @@ async function changeAssignment(row) {
                   v-model="drafts[row.id].shift"
                   class="select"
                   :disabled="busyId === row.id"
+                  @change="onShiftChange(row)"
                 >
                   <option v-for="shift in HYGIENE_SHIFTS" :key="shift" :value="shift">
                     {{ shift }}

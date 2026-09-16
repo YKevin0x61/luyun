@@ -6,7 +6,7 @@ import hashlib
 import tempfile
 import unittest
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
@@ -76,6 +76,19 @@ class HygieneStandardCacheTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.work.capture_bytes(old["capture_id"]), OLD_BYTES)
         current = await self.work.standard_version(replaced["current_standard_id"])
         self.assertEqual(await self.work.capture_bytes(current["capture_id"]), NEW_BYTES)
+
+    async def test_manifest_checks_all_capture_ids_once(self):
+        await self._add_item()
+        original_list = self.captures.list_ids_async
+        self.captures.exists_async = AsyncMock(
+            side_effect=AssertionError("manifest must not probe captures one by one")
+        )
+        self.captures.list_ids_async = AsyncMock(wraps=original_list)
+
+        manifest = await self.work.standard_manifest()
+
+        self.assertEqual(len(manifest["standards"]), 1)
+        self.assertEqual(self.captures.list_ids_async.await_count, 1)
 
     async def test_prepare_backfills_legacy_metadata(self):
         item = await self._add_item()

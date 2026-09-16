@@ -46,6 +46,13 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
     },
   },
   actions: {
+    _applySnapshot(snapshot) {
+      this.missingStandardIds = snapshot
+        ? snapshot.state.missing.map((entry) => String(entry.standard_id))
+        : []
+      this.stats = snapshot ? snapshot.stats : this.stats
+      return snapshot ? snapshot.state : null
+    },
     _publishNotice(notice) {
       if (this.taskSheetOpen) this.queuedNotice = notice
       else this.notice = notice
@@ -61,9 +68,10 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
       this.notice = null
     },
     async refreshStats() {
-      const state = this.manifest ? await getBrowserCache().inspect(this.manifest) : null
-      this.missingStandardIds = state ? state.missing.map((entry) => String(entry.standard_id)) : []
-      this.stats = await getBrowserCache().stats(this.manifest)
+      const snapshot = this.manifest
+        ? await getBrowserCache().snapshot(this.manifest)
+        : null
+      this._applySnapshot(snapshot)
       return this.stats
     },
     setOnline(value) {
@@ -75,8 +83,9 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
       this.errorText = ''
       try {
         this.manifest = await getBrowserCache().loadManifest()
-        const state = await getBrowserCache().inspect(this.manifest)
-        await this.refreshStats()
+        const state = this._applySnapshot(
+          await getBrowserCache().snapshot(this.manifest),
+        )
         this.initialized = true
         if (state.complete) {
           await this.checkForUpdates({ manifest: this.manifest })
@@ -104,7 +113,9 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
       this.firstPromptOpen = false
       this.errorText = ''
       try {
-        const state = await getBrowserCache().inspect(this.manifest)
+        const state = this._applySnapshot(
+          await getBrowserCache().snapshot(this.manifest),
+        )
         this.progress = {
           completed: 0,
           total: state.missing.length,

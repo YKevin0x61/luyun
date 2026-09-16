@@ -474,7 +474,7 @@
 .hygiene-admin .input,
 .hygiene-admin .select,
 .hygiene-admin textarea.input,
-.hygiene-admin .luyun-date-picker .dp__input,
+.hygiene-admin .luyun-date-picker .dp--input,
 .hygiene-staff .input {
   background: var(--hy-surface);
   border-color: var(--hy-line-strong);
@@ -484,7 +484,7 @@
 .hygiene-admin .input:focus,
 .hygiene-admin .select:focus,
 .hygiene-admin textarea.input:focus,
-.hygiene-admin .luyun-date-picker .dp__input:focus,
+.hygiene-admin .luyun-date-picker .dp--input:focus,
 .hygiene-staff .input:focus {
   border-color: var(--hy-pool);
   box-shadow: 0 0 0 3px var(--hy-pool-soft);
@@ -555,6 +555,10 @@
 .hygiene-admin .clocks-card,
 .hygiene-admin .open-card {
   padding: 1rem 1.05rem;
+}
+.hygiene-admin .clocks-card {
+  position: relative;
+  z-index: 30;
 }
 .hygiene-admin .clocks-card h3,
 .hygiene-admin .open-card h3 {

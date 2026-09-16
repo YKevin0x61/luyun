@@ -996,3 +996,86 @@ def test_daily_submit_broadcasts_data_less_hygiene_nudges(hygiene_http, monkeypa
     calls = [call.args for call in broadcast.await_args_list]
     assert ("hygiene", {"resource": "daily", "action": "submitted", "item_id": item["id"]}) in calls
     assert ("hygiene", {"resource": "boards", "action": "changed"}) in calls
+
+
+def test_admin_sets_zone_shifts_and_staff_assignment_rejects_disabled_shift(hygiene_http):
+    client, _db, accounts, _work = hygiene_http
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200
+
+    created = client.post(
+        "/api/hygiene/admin/zones",
+        json={"name": "仅白班区", "shifts": ["白班"]},
+    )
+    assert created.status_code == 200
+    zone = created.json()["zone"]
+    assert zone["shifts"] == ["白班"]
+
+    empty = client.patch(
+        f"/api/hygiene/admin/zones/{zone['id']}", json={"shifts": []}
+    )
+    assert empty.status_code == 400
+    assert empty.json()["detail"] == "卫生责任区至少要有一个班次"
+
+    both = client.patch(
+        f"/api/hygiene/admin/zones/{zone['id']}",
+        json={"shifts": ["白班", "夜班"]},
+    )
+    assert both.status_code == 200
+    assert both.json()["zone"]["shifts"] == ["白班", "夜班"]
+
+    day_only = client.patch(
+        f"/api/hygiene/admin/zones/{zone['id']}", json={"shifts": ["白班"]}
+    )
+    assert day_only.status_code == 200
+    assert day_only.json()["zone"]["shifts"] == ["白班"]
+
+    _approve_staff(accounts, PHONE, "白班")
+    _staff_login(client, PHONE)
+    mismatch = client.post(
+        "/api/hygiene/staff/assignment",
+        json={"shift": "夜班", "zone_id": zone["id"]},
+    )
+    assert mismatch.status_code == 400
+    assert mismatch.json()["detail"] == "这个责任区没有该班次，请换一个责任区或班次"
+
+    picked = client.post(
+        "/api/hygiene/staff/assignment",
+        json={"shift": "白班", "zone_id": zone["id"]},
+    )
+    assert picked.status_code == 200
+    assert picked.json()["zone_id"] == zone["id"]
+    me = client.get("/api/hygiene/staff/me")
+    assert me.status_code == 200
+    assert me.json()["employee"]["zone_shifts"] == ["白班"]
+    catalog = client.get("/api/hygiene/staff/daily-catalog")
+    assert catalog.status_code == 200
+    listed = next(row for row in catalog.json()["zones"] if row["id"] == zone["id"])
+    assert listed["shifts"] == ["白班"]
+
+
+def test_admin_can_delete_fix_ticket_staff_cannot(hygiene_http):
+    client, _db, accounts, work = hygiene_http
+    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _staff_login(client, PHONE_ADMIN)
+    anban = next(zone for zone in _run(work.list_zones()) if zone["name"] == "案板")
+    opened = _open_fix(client, "/api/hygiene/staff/fix", anban["id"])
+    assert opened.status_code == 200
+    ticket = opened.json()
+    assert ticket["status"] == "待回拍"
+
+    denied = client.delete(f"/api/hygiene/admin/fix/{ticket['id']}")
+    assert denied.status_code == 401
+    assert client.get("/api/hygiene/staff/fix").json()["items"]
+
+    client.cookies.clear()
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200
+    removed = client.delete(f"/api/hygiene/admin/fix/{ticket['id']}")
+    assert removed.status_code == 200
+    assert removed.json()["ticket"]["id"] == ticket["id"]
+    listed = client.get("/api/hygiene/admin/fix")
+    assert listed.status_code == 200
+    assert all(row["id"] != ticket["id"] for row in listed.json()["items"])
+    missing = client.get(f"/api/hygiene/admin/fix/{ticket['id']}")
+    assert missing.status_code == 404

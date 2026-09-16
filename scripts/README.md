@@ -9,6 +9,7 @@ Day-to-day entry scripts live here. One-off migration, debug, and smoke utilitie
 | `start.py` | Start the FastAPI app (dev-friendly wrapper) |
 | `quick_start.sh` | Quick local bootstrap helper |
 | `build_kds.sh` | Build KDS H5 and deploy into `public/kds/` |
+| `generate_kds_pwa.py` | Inject the versioned KDS manifest/service worker after the H5 build (called by `build_kds.sh`) |
 | `publish_release.sh` | Publish a GitHub Release Bundle |
 | `bootstrap_install.sh` | Shop Bootstrap Install from a Release Bundle |
 | `curl_install.sh` | Curl\|bash install entry used with Releases |

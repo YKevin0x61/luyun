@@ -57,6 +57,31 @@ class HygieneWorkTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(set(SEED_ZONE_NAMES), station_names)
         self.assertNotIn("卫生间", station_names)
 
+    async def test_zone_shifts_default_both_and_can_be_day_only(self):
+        zones = await self.work.list_zones()
+        self.assertTrue(all(zone["shifts"] == ["白班", "夜班"] for zone in zones))
+
+        extra = await self.work.create_zone(SUPER, "卫生间", ["白班"])
+        self.assertEqual(extra["shifts"], ["白班"])
+
+        updated = await self.work.set_zone_shifts(SUPER, extra["id"], ["夜班"])
+        self.assertEqual(updated["shifts"], ["夜班"])
+        listed = self._zone(await self.work.list_zones(), "卫生间")
+        self.assertEqual(listed["shifts"], ["夜班"])
+
+        staff = {"kind": "staff", "id": 1, "permission": "管理员"}
+        with self.assertRaises(HygieneWorkError) as forbidden:
+            await self.work.set_zone_shifts(staff, extra["id"], ["白班"])
+        self.assertEqual(forbidden.exception.code, "forbidden")
+
+        with self.assertRaises(HygieneWorkError) as empty:
+            await self.work.create_zone(SUPER, "库房", [])
+        self.assertEqual(empty.exception.code, "zone_shift_required")
+
+        with self.assertRaises(HygieneWorkError) as bad:
+            await self.work.create_zone(SUPER, "库房", ["早班"])
+        self.assertEqual(bad.exception.code, "invalid_shift")
+
     def _zone(self, zones, name):
         return next(zone for zone in zones if zone["name"] == name)
 
@@ -194,6 +219,31 @@ class HygieneWorkTest(unittest.IsolatedAsyncioTestCase):
                 {"bytes": b"SHOT", "content_type": "image/jpeg", "live": True},
             )
         self.assertEqual(raised.exception.code, "zone_mismatch")
+
+    async def test_day_only_zone_has_no_night_work_and_rejects_night_submit(self):
+        zones = await self.work.list_zones()
+        anban = self._zone(zones, "案板")
+        await self.work.set_zone_shifts(SUPER, anban["id"], ["白班"])
+        item = await self.work.add_daily_item(
+            SUPER, anban["id"], "案板表面", self._capture(OLD_BYTES)
+        )
+        day = _staff(10, DAY_PHONE, "白班")
+        night = _staff(11, NIGHT_PHONE, "夜班")
+        day["zone_id"] = anban["id"]
+        night["zone_id"] = anban["id"]
+        live = {"bytes": SHOT_A, "content_type": "image/jpeg", "live": True}
+
+        inbox = await self.work.list_daily_work(SUPER)
+        shifts = {row["shift"] for row in inbox if row["item_id"] == item["id"]}
+        self.assertEqual(shifts, {"白班"})
+
+        self.assertEqual(await self.work.list_daily_work(night), [])
+        with self.assertRaises(HygieneWorkError) as raised:
+            await self.work.submit_daily(night, item["id"], live)
+        self.assertEqual(raised.exception.code, "zone_shift_mismatch")
+
+        submitted = await self.work.submit_daily(day, item["id"], live)
+        self.assertEqual(submitted["shift"], "白班")
 
     async def test_staff_zone_assignment_limits_fix_tickets(self):
         zones = await self.work.list_zones()
@@ -538,6 +588,22 @@ class HygieneDailyOverdueTest(unittest.IsolatedAsyncioTestCase):
 
         await self.work.sweep_overdue()
         self.assertEqual(len(self.notifier.texts), 1)
+
+    async def test_overdue_sweep_skips_shift_a_zone_does_not_run(self):
+        zones = await self.work.list_zones()
+        anban = self._zone(zones, "案板")
+        await self.work.set_zone_shifts(SUPER, anban["id"], ["白班"])
+        await self.work.add_daily_item(
+            SUPER, anban["id"], "案板表面", self._capture(OLD_BYTES)
+        )
+        await self.work.set_daily_overdue_clocks(SUPER, "09:00", "09:30")
+
+        notified = await self.work.sweep_overdue()
+        shifts = {row["shift"] for row in notified if row.get("item_id")}
+        self.assertEqual(shifts, {"白班"})
+        self.assertEqual(len(self.notifier.texts), 1)
+        self.assertIn("白班", self.notifier.texts[0])
+        self.assertNotIn("夜班", self.notifier.texts[0])
 
     async def test_pre_six_clock_waits_until_next_calendar_morning(self):
         await self._anban_item()
@@ -1145,6 +1211,36 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.captures.get(listed["reshoot_capture_id"]), RESHOOT_B)
         self.assertNotEqual(self.captures.get(listed["reshoot_capture_id"]), RESHOOT_A)
         self.assertEqual(self.captures.get(listed["capture_id"]), OPEN_BYTES)
+
+    async def test_super_deletes_fix_ticket_with_captures_staff_admin_cannot(self):
+        opener = _staff(20, ADMIN_PHONE, "白班", "管理员")
+        opened = await self._open_on(opener)
+        await self.work.reshoot_fix(
+            _staff(10, DAY_PHONE, "白班"), opened["id"], self._live(RESHOOT_A)
+        )
+        listed = next(
+            ticket
+            for ticket in await self.work.list_fix_tickets(opener)
+            if ticket["id"] == opened["id"]
+        )
+        capture_ids = [listed["capture_id"], listed["reshoot_capture_id"]]
+
+        with self.assertRaises(HygieneWorkError) as forbidden:
+            await self.work.delete_fix_ticket(opener, opened["id"])
+        self.assertEqual(forbidden.exception.code, "forbidden")
+        self.assertTrue(await self.captures.exists_async(capture_ids[0]))
+
+        removed = await self.work.delete_fix_ticket(SUPER, opened["id"])
+        self.assertEqual(removed["id"], opened["id"])
+        self.assertNotIn(
+            opened["id"],
+            [ticket["id"] for ticket in await self.work.list_fix_tickets(SUPER)],
+        )
+        with self.assertRaises(HygieneWorkError) as missing:
+            await self.work.get_fix_ticket(opened["id"])
+        self.assertEqual(missing.exception.code, "ticket_not_found")
+        for capture_id in capture_ids:
+            self.assertFalse(await self.captures.exists_async(capture_id))
 
     async def test_sweep_no_reshoot_reddens_zone_only_reshoot_counts_photographer(self):
         opener = _staff(20, ADMIN_PHONE, "白班", "管理员")

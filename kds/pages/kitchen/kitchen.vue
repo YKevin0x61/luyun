@@ -4,6 +4,7 @@
     :enable-pull-down-refresh="!isSteamerConsoleView"
   />
   <view class="kitchen-page" :class="{ 'is-steamer': isSteamerConsoleView }">
+    <PwaUpdateBanner />
     <!-- 屏幕状态边框：全屏 overlay，中心透明、不拦截点击；绿/红呼吸，黄走线 -->
     <view
       class="screen-border"
@@ -313,6 +314,7 @@ import { useDisconnectAlert } from '../../composables/useDisconnectAlert.js'
 import { useNudgePull } from '../../composables/useNudgePull.js'
 import { stationChangeClearsSelection, takeSettingsReturnClear } from '../../utils/kitchenSelectionReset.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
+import PwaUpdateBanner from '../../components/PwaUpdateBanner.vue'
 import KitchenDishCard from '../../components/KitchenDishCard/KitchenDishCard.vue'
 import ShulongSteamerConsole from '../../components/ShulongSteamerConsole/ShulongSteamerConsole.vue'
 
@@ -321,7 +323,7 @@ const ORDERS_SUBSCRIPTION_ID = 'kds-kitchen-orders'
 
 export default {
   name: 'KitchenPage',
-  components: { SvgIcon, KitchenDishCard, ShulongSteamerConsole },
+  components: { SvgIcon, PwaUpdateBanner, KitchenDishCard, ShulongSteamerConsole },
   
   setup() {
     const ordersStore = useOrdersStore()

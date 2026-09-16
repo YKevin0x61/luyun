@@ -39,8 +39,18 @@ npm run dev          # http://localhost:5173，自动代理 /api /ws 到 http://
 ## 生产构建
 
 ```bash
-npm run build        # 产出 dist/；生产由 FastAPI 或 deploy/ 反向代理托管
+npm run build        # 产出 dist/（含 sw.js、多角色 manifest 与 PWA 图标）
 ```
+
+生产由 FastAPI 或 `deploy/` 反向代理托管。Service Worker 仅缓存前端程序资源；
+`/api/*`、`/ws/*` 和上传下载始终直连后端。页面在每次启动时检查一次新版本，
+发现等待中的新 Worker 后显示全局更新提示，用户确认后才切换并刷新。
+
+管理端、卫生员工端与配方阅读端分别使用：
+
+- `/pwa/manifests/admin.webmanifest`
+- `/pwa/manifests/hygiene.webmanifest`
+- `/pwa/manifests/recipe.webmanifest`
 
 ## 目录结构
 

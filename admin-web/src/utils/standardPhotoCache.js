@@ -2,6 +2,9 @@ export const STANDARD_PHOTO_CACHE_NAME = 'luyun-hygiene-standard-photos-v1'
 export const STANDARD_PHOTO_INDEX_KEY = 'luyun.hygiene.standardPhotoCache.index'
 export const STANDARD_PHOTO_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 export const STANDARD_PHOTO_BATCH_LIMIT_BYTES = 10 * 1024 * 1024
+export const STANDARD_PHOTO_DOWNLOAD_CONCURRENCY = 2
+
+const STANDARD_PHOTO_TOUCH_THROTTLE_MS = 60 * 1000
 
 function emptyIndex() {
   return {
@@ -15,12 +18,31 @@ function emptyIndex() {
 
 function normalizeIndex(raw) {
   const value = raw && typeof raw === 'object' ? raw : {}
+  const entries = {}
+  for (const [key, entry] of Object.entries(
+    value.entries && typeof value.entries === 'object' ? value.entries : {},
+  )) {
+    if (entry && typeof entry === 'object') entries[key] = { ...entry }
+  }
+  const failures = {}
+  for (const [key, failure] of Object.entries(
+    value.failures && typeof value.failures === 'object' ? value.failures : {},
+  )) {
+    if (failure && typeof failure === 'object') {
+      failures[key] = {
+        ...failure,
+        entry: failure.entry && typeof failure.entry === 'object'
+          ? { ...failure.entry }
+          : failure.entry,
+      }
+    }
+  }
   return {
     manifestVersion: value.manifestVersion || '',
     lastSyncAt: value.lastSyncAt || '',
     baselineReady: Boolean(value.baselineReady),
-    entries: value.entries && typeof value.entries === 'object' ? value.entries : {},
-    failures: value.failures && typeof value.failures === 'object' ? value.failures : {},
+    entries,
+    failures,
   }
 }
 
@@ -38,21 +60,47 @@ function sameVersion(left, right) {
   )
 }
 
-function responseToBlob(value) {
-  if (value && typeof value.blob === 'function') return value.blob()
-  return Promise.resolve(value)
+async function bytesFromValue(value) {
+  if (!value) throw new Error('图片响应不是可读取的文件')
+  if (value instanceof Uint8Array) return value
+  if (value instanceof ArrayBuffer) return new Uint8Array(value)
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+  }
+  if (typeof value.arrayBuffer === 'function') {
+    return new Uint8Array(await value.arrayBuffer())
+  }
+  throw new Error('图片响应不是可读取的文件')
 }
 
-async function bytesFromBlob(blob) {
-  if (!blob || typeof blob.arrayBuffer !== 'function') {
-    throw new Error('图片响应不是可读取的文件')
+function blobFromBytes(bytes, contentType) {
+  return new Blob([bytes], { type: contentType || 'image/jpeg' })
+}
+
+function contentTypeFromValue(value, fallback = 'image/jpeg') {
+  if (value && value.headers && typeof value.headers.get === 'function') {
+    return value.headers.get('content-type') || fallback
   }
-  return new Uint8Array(await blob.arrayBuffer())
+  if (value && typeof value.type === 'string' && value.type) return value.type
+  return fallback
 }
 
 function toHex(value) {
   if (typeof value === 'string') return value
   return Array.from(value || [], (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function cacheUrlKey(value) {
+  const raw = String(value || '')
+  if (!raw) return ''
+  try {
+    const base = typeof location !== 'undefined' && location.origin
+      ? location.origin
+      : 'http://luyun.local'
+    return new URL(raw, base).href
+  } catch {
+    return raw
+  }
 }
 
 function isQuotaError(error) {
@@ -61,8 +109,8 @@ function isQuotaError(error) {
   return name === 'QuotaExceededError' || /quota|空间不足/i.test(message)
 }
 
-export async function sha256Hex(blob) {
-  const bytes = await blob.arrayBuffer()
+export async function sha256Hex(value) {
+  const bytes = await bytesFromValue(value)
   const digest = await crypto.subtle.digest('SHA-256', bytes)
   return toHex(new Uint8Array(digest))
 }
@@ -88,7 +136,9 @@ export function inspectManifest(index, manifest) {
     if (sameVersion(cached, entry)) completeEntries.push(entry)
     else missing.push(entry)
   }
-  const obsolete = Object.values(current.entries).filter((entry) => !currentIds.has(entryKey(entry)))
+  const obsolete = Object.values(current.entries).filter(
+    (entry) => !currentIds.has(entryKey(entry)),
+  )
   return {
     complete: missing.length === 0,
     missing,
@@ -145,6 +195,14 @@ export function createStandardPhotoCache({
 
   let latestManifest = null
   const objectUrls = new Set()
+  let mutationTail = Promise.resolve()
+  let invalidationGeneration = 0
+
+  function enqueueExclusive(task) {
+    const run = mutationTail.then(task, task)
+    mutationTail = run.catch(() => {})
+    return run
+  }
 
   async function readIndex() {
     return normalizeIndex(await storage.readIndex())
@@ -154,237 +212,81 @@ export function createStandardPhotoCache({
     await storage.writeIndex(normalizeIndex(index))
   }
 
-  function applyManifest(index, manifest) {
-    const next = normalizeIndex(index)
+  function withIndex(mutator) {
+    return enqueueExclusive(async () => {
+      const index = await readIndex()
+      const outcome = (await mutator(index)) || {}
+      if (outcome.changed !== false) await writeIndex(index)
+      return outcome.value
+    })
+  }
+
+  function applyManifestInPlace(index, manifest) {
     const ids = new Set((manifest.standards || []).map(entryKey))
     const stamp = new Date(now()).toISOString()
-    for (const [key, entry] of Object.entries(next.entries)) {
+    for (const [key, entry] of Object.entries(index.entries)) {
       if (ids.has(key)) {
         delete entry.orphanedAt
       } else if (!entry.orphanedAt) {
         entry.orphanedAt = stamp
       }
     }
-    for (const key of Object.keys(next.failures)) {
-      if (!ids.has(key)) delete next.failures[key]
+    for (const key of Object.keys(index.failures)) {
+      if (!ids.has(key)) delete index.failures[key]
     }
-    next.manifestVersion = manifest.version || ''
-    return next
+    index.manifestVersion = manifest.version || ''
   }
 
-  async function loadManifest() {
-    latestManifest = await manifestLoader()
-    return latestManifest
-  }
-
-  async function inspect(manifest = latestManifest) {
-    const index = await readIndex()
-    const effective = manifest || (await loadManifest())
-    const state = inspectManifest(index, effective)
-    if (!state.completeEntries.length) return state
-    const present = []
-    const missing = [...state.missing]
-    let changed = false
-    for (const entry of state.completeEntries) {
-      if (await storage.exists(entry)) present.push(entry)
-      else {
-        missing.push(entry)
-        delete index.entries[entryKey(entry)]
-        changed = true
-      }
-    }
-    if (changed) await writeIndex(index)
-    return {
-      ...state,
-      complete: missing.length === 0,
-      missing,
-      completeEntries: present,
-    }
-  }
-
-  async function removeEntry(index, entry) {
-    await storage.remove(entry)
-    delete index.entries[entryKey(entry)]
-  }
-
-  async function pruneExpired(index) {
+  async function pruneExpiredInPlace(index) {
     const cutoff = now() - STANDARD_PHOTO_RETENTION_MS
     let changed = false
     for (const entry of Object.values(index.entries)) {
       if (!entry.orphanedAt) continue
       const orphanedAt = Date.parse(entry.orphanedAt)
       if (Number.isFinite(orphanedAt) && orphanedAt <= cutoff) {
-        await removeEntry(index, entry)
+        await storage.remove(entry)
+        delete index.entries[entryKey(entry)]
         changed = true
       }
     }
-    if (changed) await writeIndex(index)
+    return changed
   }
 
-  async function pruneOldest(index) {
+  async function pruneOldestInPlace(index) {
     const candidates = Object.values(index.entries)
       .filter((entry) => entry.orphanedAt)
       .sort((left, right) => Number(left.lastAccessAt || 0) - Number(right.lastAccessAt || 0))
     if (!candidates.length) return false
-    await removeEntry(index, candidates[0])
-    await writeIndex(index)
+    await storage.remove(candidates[0])
+    delete index.entries[entryKey(candidates[0])]
     return true
   }
 
-  async function storeVerified(index, entry, blob, bytes, hash) {
-    await storage.put(entry, blob)
-    index.entries[entryKey(entry)] = {
-      ...entry,
-      sha256: hash,
-      byte_size: bytes.length,
-      lastAccessAt: now(),
-    }
-    delete index.failures[entryKey(entry)]
-    await writeIndex(index)
-  }
-
-  async function downloadEntries(index, entries, { onProgress, signal } = {}) {
-    const changed = normalizeIndex(index)
-    const total = entries.length
-    let completed = 0
-    let downloadedBytes = 0
-    let updated = 0
-    let aborted = false
-    const failures = []
-    for (const entry of entries) {
-      if (signal && signal.aborted) {
-        aborted = true
-        break
-      }
+  async function cachedUrlSet(index) {
+    if (typeof storage.listUrls === 'function') {
       try {
-        const response = await imageLoader(entry)
-        const blob = await responseToBlob(response)
-        const bytes = await bytesFromBlob(blob)
-        if (bytes.length !== Number(entry.byte_size)) {
-          throw new Error('图片大小不一致')
-        }
-        const hash = toHex(await hashBytes(blob))
-        if (hash !== entry.sha256) throw new Error('图片校验失败')
-        try {
-          await storeVerified(changed, entry, blob, bytes, hash)
-        } catch (error) {
-          if (!isQuotaError(error) || !(await pruneOldest(changed))) throw error
-          await storeVerified(changed, entry, blob, bytes, hash)
-        }
-        completed += 1
-        updated += 1
-        downloadedBytes += bytes.length
-        if (onProgress) {
-          onProgress({ completed, total, downloadedBytes, current: entry })
-        }
-      } catch (error) {
-        failures.push(entry)
-        changed.failures[entryKey(entry)] = {
-          entry,
-          reason: error && error.message ? error.message : '下载失败',
-        }
-        await writeIndex(changed)
-        completed += 1
-        if (onProgress) {
-          onProgress({ completed, total, downloadedBytes, current: entry })
-        }
+        const urls = await storage.listUrls()
+        return new Set((urls || []).map(cacheUrlKey))
+      } catch {
+        // Fall back to per-entry probes on browsers without bulk key listing.
       }
     }
-    changed.lastSyncAt = new Date(now()).toISOString()
-    await writeIndex(changed)
-    return { updated, failures, completed, total, downloadedBytes, aborted }
-  }
-
-  async function downloadAll(manifest, options = {}) {
-    const effective = manifest || (await loadManifest())
-    let index = applyManifest(await readIndex(), effective)
-    await pruneExpired(index)
-    await writeIndex(index)
-    const state = await inspect(effective)
-    index = await readIndex()
-    const result = await downloadEntries(index, state.missing, options)
-    index.baselineReady = Boolean(
-      !result.aborted && result.failures.length === 0,
-    )
-    await writeIndex(index)
-    return { ...result, manifest: effective, missing: result.failures }
-  }
-
-  async function sync({ manifest, force = false, onProgress } = {}) {
-    const effective = manifest || (await loadManifest())
-    let index = applyManifest(await readIndex(), effective)
-    await pruneExpired(index)
-    await writeIndex(index)
-    const state = await inspect(effective)
-    index = await readIndex()
-    if (!state.missing.length) {
-      index.lastSyncAt = new Date(now()).toISOString()
-      await writeIndex(index)
-      return { status: 'up-to-date', updated: 0, failures: [], missing: [] }
+    const urls = []
+    for (const entry of Object.values(index.entries)) {
+      if (await storage.exists(entry)) urls.push(cacheUrlKey(entry.image_url))
     }
-    const networkKind = network.getKind ? await network.getKind() : 'unknown'
-    if (!force && !shouldAutoDownload(state.missing, networkKind)) {
-      await writeIndex(index)
-      return {
-        status: 'deferred',
-        updated: 0,
-        failures: [],
-        missing: state.missing,
-        totalBytes: state.missing.reduce((sum, entry) => sum + Number(entry.byte_size || 0), 0),
-      }
-    }
-    const result = await downloadEntries(index, state.missing, { onProgress })
-    if (!result.failures.length) index.baselineReady = true
-    await writeIndex(index)
-    return { status: 'updated', ...result, missing: result.failures }
+    return new Set(urls)
   }
 
-  async function resolve(standardId, { touch = true } = {}) {
-    const index = await readIndex()
-    const entry = index.entries[String(standardId)]
-    if (!entry) return null
-    try {
-      const blob = await storage.get(entry)
-      if (!blob) throw new Error('缓存内容不存在')
-      if (touch) {
-        entry.lastAccessAt = now()
-        await writeIndex(index)
-      }
-      const url = createObjectUrl(blob)
-      objectUrls.add(url)
-      return { url, entry }
-    } catch (error) {
-      await removeEntry(index, entry)
-      index.failures[String(standardId)] = {
-        entry,
-        reason: error && error.message ? error.message : '缓存损坏',
-      }
-      await writeIndex(index)
-      return null
-    }
-  }
-
-  async function retryFailed({ onProgress } = {}) {
-    const index = await readIndex()
-    const entries = Object.values(index.failures).map((failure) => failure.entry).filter(Boolean)
-    delete index.failures
-    index.failures = {}
-    await writeIndex(index)
-    return downloadEntries(index, entries, { onProgress })
-  }
-
-  async function stats(manifest = latestManifest) {
-    let index = await readIndex()
-    const state = manifest ? await inspect(manifest) : null
-    index = await readIndex()
+  function buildStats(index, state) {
     return {
       entryCount: Object.keys(index.entries).length,
       byteSize: Object.values(index.entries)
         .reduce((sum, entry) => sum + Number(entry.byte_size || 0), 0),
       failureCount: Object.keys(index.failures).length,
       baselineReady: index.baselineReady,
-      totalCount: Array.isArray(manifest && manifest.standards)
-        ? manifest.standards.length
+      totalCount: state && Array.isArray(state.completeEntries)
+        ? state.completeEntries.length + state.missing.length
         : 0,
       missingCount: state ? state.missing.length : 0,
       missingBytes: state
@@ -394,9 +296,260 @@ export function createStandardPhotoCache({
     }
   }
 
+  async function loadManifest() {
+    latestManifest = await manifestLoader()
+    return latestManifest
+  }
+
+  async function snapshot(manifest = latestManifest) {
+    const effective = manifest || (await loadManifest())
+    return withIndex(async (index) => {
+      const urls = await cachedUrlSet(index)
+      let changed = false
+      for (const [key, entry] of Object.entries(index.entries)) {
+        if (!urls.has(cacheUrlKey(entry.image_url))) {
+          delete index.entries[key]
+          changed = true
+        }
+      }
+      const state = inspectManifest(index, effective)
+      return {
+        value: { state, stats: buildStats(index, state) },
+        changed,
+      }
+    })
+  }
+
+  async function inspect(manifest = latestManifest) {
+    return (await snapshot(manifest)).state
+  }
+
+  async function commitVerified(entry, blob, bytes, hash) {
+    await withIndex(async (index) => {
+      const put = () => storage.put(entry, blob)
+      try {
+        await put()
+      } catch (error) {
+        if (!isQuotaError(error) || !(await pruneOldestInPlace(index))) throw error
+        await put()
+      }
+      index.entries[entryKey(entry)] = {
+        ...entry,
+        sha256: hash,
+        byte_size: bytes.length,
+        verifiedAt: new Date(now()).toISOString(),
+        lastAccessAt: now(),
+      }
+      delete index.failures[entryKey(entry)]
+      return { changed: true }
+    })
+  }
+
+  async function recordFailure(entry, error) {
+    await withIndex((index) => {
+      index.failures[entryKey(entry)] = {
+        entry,
+        reason: error && error.message ? error.message : '下载失败',
+      }
+      return { changed: true }
+    })
+  }
+
+  async function downloadEntries(entries, { onProgress, signal } = {}) {
+    const total = entries.length
+    let nextIndex = 0
+    let completed = 0
+    let downloadedBytes = 0
+    let updated = 0
+    let aborted = Boolean(signal && signal.aborted)
+    const failures = []
+
+    async function downloadOne(entry) {
+      try {
+        const response = await imageLoader(entry, { signal })
+        const bytes = await bytesFromValue(response)
+        if (bytes.length !== Number(entry.byte_size)) {
+          throw new Error('图片大小不一致')
+        }
+        const hash = toHex(await hashBytes(bytes))
+        if (hash !== entry.sha256) throw new Error('图片校验失败')
+        const blob = blobFromBytes(
+          bytes,
+          contentTypeFromValue(response, entry.content_type),
+        )
+        await commitVerified(entry, blob, bytes, hash)
+        completed += 1
+        updated += 1
+        downloadedBytes += bytes.length
+        if (onProgress) {
+          onProgress({ completed, total, downloadedBytes, current: entry })
+        }
+      } catch (error) {
+        if (aborted || (signal && signal.aborted) || String(error && error.name || '') === 'AbortError') {
+          aborted = true
+          return
+        }
+        failures.push(entry)
+        await recordFailure(entry, error)
+        completed += 1
+        if (onProgress) {
+          onProgress({ completed, total, downloadedBytes, current: entry })
+        }
+      }
+    }
+
+    async function worker() {
+      while (!aborted && !(signal && signal.aborted)) {
+        const currentIndex = nextIndex
+        nextIndex += 1
+        if (currentIndex >= total) return
+        await downloadOne(entries[currentIndex])
+      }
+    }
+
+    const workerCount = Math.min(STANDARD_PHOTO_DOWNLOAD_CONCURRENCY, total)
+    await Promise.all(Array.from({ length: workerCount }, () => worker()))
+    if (signal && signal.aborted) aborted = true
+    return { updated, failures, completed, total, downloadedBytes, aborted }
+  }
+
+  async function downloadAll(manifest, options = {}) {
+    const effective = manifest || (await loadManifest())
+    await withIndex(async (index) => {
+      applyManifestInPlace(index, effective)
+      await pruneExpiredInPlace(index)
+      return { changed: true }
+    })
+    const state = (await snapshot(effective)).state
+    const result = await downloadEntries(state.missing, options)
+    await withIndex((index) => {
+      index.lastSyncAt = new Date(now()).toISOString()
+      index.baselineReady = Boolean(!result.aborted && result.failures.length === 0)
+      return { changed: true }
+    })
+    return { ...result, manifest: effective, missing: result.failures }
+  }
+
+  async function sync({ manifest, force = false, onProgress } = {}) {
+    const effective = manifest || (await loadManifest())
+    await withIndex(async (index) => {
+      applyManifestInPlace(index, effective)
+      await pruneExpiredInPlace(index)
+      return { changed: true }
+    })
+    const state = (await snapshot(effective)).state
+    if (!state.missing.length) {
+      await withIndex((index) => {
+        index.lastSyncAt = new Date(now()).toISOString()
+        return { changed: true }
+      })
+      return { status: 'up-to-date', updated: 0, failures: [], missing: [] }
+    }
+    const networkKind = network.getKind ? await network.getKind() : 'unknown'
+    if (!force && !shouldAutoDownload(state.missing, networkKind)) {
+      return {
+        status: 'deferred',
+        updated: 0,
+        failures: [],
+        missing: state.missing,
+        totalBytes: state.missing.reduce((sum, entry) => sum + Number(entry.byte_size || 0), 0),
+      }
+    }
+    const result = await downloadEntries(state.missing, { onProgress })
+    await withIndex((index) => {
+      if (!result.aborted && !result.failures.length) index.baselineReady = true
+      index.lastSyncAt = new Date(now()).toISOString()
+      return { changed: true }
+    })
+    return { status: 'updated', ...result, missing: result.failures }
+  }
+
+  async function removeCorruptEntry(entry, reason, generation) {
+    await withIndex(async (index) => {
+      if (generation !== invalidationGeneration) return { changed: false }
+      await storage.remove(entry)
+      delete index.entries[entryKey(entry)]
+      index.failures[entryKey(entry)] = { entry, reason }
+      return { changed: true }
+    })
+  }
+
+  async function resolve(standardId, { touch = true } = {}) {
+    const key = String(standardId)
+    const operation = await withIndex((index) => ({
+      value: {
+        entry: index.entries[key] ? { ...index.entries[key] } : null,
+        generation: invalidationGeneration,
+      },
+      changed: false,
+    }))
+    const snapshotEntry = operation.entry
+    if (!snapshotEntry) return null
+    try {
+      const blob = await storage.get(snapshotEntry)
+      if (!blob) throw new Error('缓存内容不存在')
+      if (operation.generation !== invalidationGeneration) return null
+      if (Number(blob.size) !== Number(snapshotEntry.byte_size)) {
+        throw new Error('缓存大小不一致')
+      }
+      let verifiedAt = snapshotEntry.verifiedAt || ''
+      if (!verifiedAt) {
+        const hash = toHex(await hashBytes(blob))
+        if (hash !== snapshotEntry.sha256) throw new Error('缓存校验失败')
+        verifiedAt = new Date(now()).toISOString()
+      }
+      const lastAccessAt = Number(snapshotEntry.lastAccessAt || 0)
+      const shouldTouch = touch && now() - lastAccessAt >= STANDARD_PHOTO_TOUCH_THROTTLE_MS
+      if (!snapshotEntry.verifiedAt || shouldTouch) {
+        await withIndex((index) => {
+          const current = index.entries[key]
+          if (!sameVersion(current, snapshotEntry)) return { changed: false }
+          if (!current.verifiedAt) current.verifiedAt = verifiedAt
+          if (shouldTouch) current.lastAccessAt = now()
+          return { changed: true }
+        })
+      }
+      const url = createObjectUrl(blob)
+      objectUrls.add(url)
+      return { url, entry: snapshotEntry }
+    } catch (error) {
+      if (operation.generation !== invalidationGeneration) return null
+      const reason = error && error.message ? error.message : '缓存损坏'
+      await removeCorruptEntry(snapshotEntry, reason, operation.generation)
+      return null
+    }
+  }
+
+  async function retryFailed({ onProgress } = {}) {
+    const entries = await withIndex((index) => {
+      const failed = Object.values(index.failures)
+        .map((failure) => failure.entry)
+        .filter(Boolean)
+      index.failures = {}
+      return { value: failed, changed: true }
+    })
+    const result = await downloadEntries(entries, { onProgress })
+    await withIndex((index) => {
+      index.lastSyncAt = new Date(now()).toISOString()
+      return { changed: true }
+    })
+    return result
+  }
+
+  async function stats(manifest = latestManifest) {
+    if (manifest) return (await snapshot(manifest)).stats
+    return withIndex((index) => ({
+      value: buildStats(index, null),
+      changed: false,
+    }))
+  }
+
   async function clear() {
-    await storage.clear()
-    latestManifest = null
+    await enqueueExclusive(async () => {
+      invalidationGeneration += 1
+      await storage.clear()
+      latestManifest = null
+    })
   }
 
   function release(url) {
@@ -413,6 +566,7 @@ export function createStandardPhotoCache({
 
   return {
     loadManifest,
+    snapshot,
     inspect,
     downloadAll,
     sync,
@@ -430,21 +584,38 @@ export function createBrowserStandardPhotoCache({
   cacheName = STANDARD_PHOTO_CACHE_NAME,
   indexKey = STANDARD_PHOTO_INDEX_KEY,
 } = {}) {
-  const memoryIndex = emptyIndex()
-  async function openCache() {
-    if (typeof caches === 'undefined') throw new Error('当前浏览器不支持本地缓存')
-    return caches.open(cacheName)
+  let memoryIndex = emptyIndex()
+  let indexLoaded = false
+  let cachePromise = null
+
+  function openCache() {
+    if (typeof caches === 'undefined') {
+      return Promise.reject(new Error('当前浏览器不支持本地缓存'))
+    }
+    if (!cachePromise) {
+      cachePromise = caches.open(cacheName).catch((error) => {
+        cachePromise = null
+        throw error
+      })
+    }
+    return cachePromise
   }
+
   const storage = {
     async readIndex() {
-      try {
-        return JSON.parse(localStorage.getItem(indexKey) || 'null') || memoryIndex
-      } catch {
-        return memoryIndex
+      if (!indexLoaded) {
+        indexLoaded = true
+        try {
+          const raw = localStorage.getItem(indexKey)
+          if (raw) memoryIndex = normalizeIndex(JSON.parse(raw))
+        } catch {
+          memoryIndex = emptyIndex()
+        }
       }
+      return normalizeIndex(memoryIndex)
     },
     async writeIndex(index) {
-      Object.assign(memoryIndex, normalizeIndex(index))
+      memoryIndex = normalizeIndex(index)
       try {
         localStorage.setItem(indexKey, JSON.stringify(memoryIndex))
       } catch {
@@ -469,18 +640,25 @@ export function createBrowserStandardPhotoCache({
       const cache = await openCache()
       return Boolean(await cache.match(entry.image_url))
     },
+    async listUrls() {
+      const cache = await openCache()
+      const requests = await cache.keys()
+      return requests.map((request) => request.url)
+    },
     async remove(entry) {
       const cache = await openCache()
       await cache.delete(entry.image_url)
     },
     async clear() {
       if (typeof caches !== 'undefined') await caches.delete(cacheName)
+      cachePromise = null
+      memoryIndex = emptyIndex()
+      indexLoaded = true
       try {
         localStorage.removeItem(indexKey)
       } catch {
         // Ignore storage cleanup failures.
       }
-      Object.assign(memoryIndex, emptyIndex())
     },
   }
   const network = {
@@ -497,10 +675,14 @@ export function createBrowserStandardPhotoCache({
     if (!response.ok) throw new Error(`标准图清单加载失败 (${response.status})`)
     return response.json()
   }
-  async function loadImage(entry) {
-    const response = await fetch(entry.image_url, { credentials: 'include' })
+  async function loadImage(entry, { signal } = {}) {
+    const response = await fetch(entry.image_url, {
+      credentials: 'include',
+      cache: 'no-store',
+      signal,
+    })
     if (!response.ok) throw new Error(`标准图下载失败 (${response.status})`)
-    return response.blob()
+    return response
   }
   return createStandardPhotoCache({
     manifestLoader: loadManifest,

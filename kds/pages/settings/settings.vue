@@ -1,5 +1,6 @@
 <template>
   <view class="settings-container">
+    <PwaUpdateBanner />
     <view class="page-header">
       <view class="header-bar">
         <text class="back-link" @click="goHome">← 返回</text>
@@ -536,10 +537,12 @@ import {
 import { printTestTicket } from '../../utils/dishTicketPrinter.js'
 import { useRealtimeStore } from '../../stores/realtime.js'
 import { useStationsStore } from '../../stores/stations.js'
+import PwaUpdateBanner from '../../components/PwaUpdateBanner.vue'
 import { noteSettingsVisit } from '../../utils/kitchenSelectionReset.js'
 
 export default {
   name: 'Settings',
+  components: { PwaUpdateBanner },
   
   data() {
     return {
@@ -2067,4 +2070,4 @@ export default {
     font-size: 24upx;
   }
 }
-</style> 
+</style>

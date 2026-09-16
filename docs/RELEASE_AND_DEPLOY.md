@@ -84,9 +84,10 @@
 1. 拒绝 dirty worktree、拒绝 `APP_VERSION` 与 tag 不对齐
 2. `admin-web`: `npm ci && npm run build`
 3. `./scripts/build_kds.sh`
-4. 打包并上传发行包与校验材料（见下节）
-5. 在当前 HEAD 打 tag（若 tag 已存在则必须已指向同一 HEAD）
-6. `gh release create`（`--generate-notes`）
+4. 校验 Admin/KDS 均产出 PWA Service Worker、manifest 与图标
+5. 打包并上传发行包与校验材料（见下节）
+6. 在当前 HEAD 打 tag（若 tag 已存在则必须已指向同一 HEAD）
+7. `gh release create`（`--generate-notes`）
 
 发布成功后，在 GitHub 仓库 Releases 页确认该 tag 下有发行包附件。
 
@@ -104,6 +105,7 @@
 
 - 归档是**目录内容**的 tar.gz（不是外包一层同名文件夹）。  
 - 解压后至少存在：`RELEASE_MANIFEST.json`、`admin-web/dist/index.html`、`public/kds/index.html`、`public/kds/assets/`、`requirements.txt`。  
+- 新发行包还会包含 Admin/KDS 各自的 `sw.js`、manifest 与 PWA 图标；发版脚本要求它们存在。更新器仍接受不含 PWA 的旧发行包，以保留回滚能力。
 - 缺发行包或校验材料时，Update Job / Bootstrap **必须失败**，不得半截装 UI。  
 - 运行实例**禁止**用「在店内重新 build」代替下载发行包。  
 - **已退役**：分拆的 `admin-web-dist.tar.gz` / `kds-dist.tar.gz` + git checkout **不再是**店内装机/升级路径（ADR 0010，已被 0011 取代）。

@@ -1,7 +1,9 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
+import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
+import { HYGIENE_SHIFTS } from '../../utils/hygieneCopy'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import LuyunTimePicker from '../../components/ui/LuyunTimePicker.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
@@ -18,7 +20,11 @@ const selectedId = ref(null)
 const loading = ref(true)
 const errorText = ref('')
 const newZoneName = ref('')
+const newZoneShifts = ref([...HYGIENE_SHIFTS])
 const creatingZone = ref(false)
+const zoneShifts = ref([])
+const savingShifts = ref(false)
+const shiftsHint = ref('')
 const dayClock = ref('15:00')
 const nightClock = ref('21:30')
 const savingClocks = ref(false)
@@ -34,12 +40,17 @@ const markup = ref([])
 const mode = ref('circle')
 const captionText = ref('')
 const arrowStart = ref(null)
-const saving = ref(false)
 const replacingId = ref(null)
+const imageUploads = useImageUploadQueueStore()
 
 const selected = computed(() => {
   return zones.value.find((zone) => zone.id === selectedId.value) || zones.value[0] || null
 })
+
+watch(selected, (zone) => {
+  zoneShifts.value = zone ? [...(zone.shifts || HYGIENE_SHIFTS)] : []
+  shiftsHint.value = ''
+}, { immediate: true })
 
 const replacingItem = computed(() => {
   if (!replacingId.value || !selected.value) return null
@@ -53,7 +64,7 @@ const editorSrc = computed(() => {
 })
 
 const canSave = computed(() => {
-  if (!selected.value || !file.value || saving.value) return false
+  if (!selected.value || !file.value) return false
   if (replacingId.value) return true
   return Boolean(itemName.value.trim())
 })
@@ -148,20 +159,59 @@ function selectZone(zone) {
   clearEditor()
 }
 
+function zoneShiftLabel(zone) {
+  const shifts = (zone && zone.shifts) || []
+  return shifts.length ? shifts.join(' · ') : HYGIENE_SHIFTS.join(' · ')
+}
+
 async function createZone() {
   const name = newZoneName.value.trim()
   if (!name || creatingZone.value) return
+  if (!newZoneShifts.value.length) {
+    errorText.value = '卫生责任区至少要有一个班次'
+    return
+  }
   creatingZone.value = true
   errorText.value = ''
   try {
-    const data = await api.post('/api/hygiene/admin/zones', { name })
+    const data = await api.post('/api/hygiene/admin/zones', {
+      name,
+      shifts: newZoneShifts.value,
+    })
     newZoneName.value = ''
+    newZoneShifts.value = [...HYGIENE_SHIFTS]
     await loadZones()
     if (data.zone) selectedId.value = data.zone.id
   } catch (err) {
     errorText.value = err.message || '无法新增卫生责任区'
   } finally {
     creatingZone.value = false
+  }
+}
+
+async function saveZoneShifts() {
+  if (!selected.value || savingShifts.value) return
+  if (!zoneShifts.value.length) {
+    errorText.value = '卫生责任区至少要有一个班次'
+    return
+  }
+  savingShifts.value = true
+  shiftsHint.value = ''
+  errorText.value = ''
+  try {
+    const data = await api.patch(`/api/hygiene/admin/zones/${selected.value.id}`, {
+      shifts: zoneShifts.value,
+    })
+    const index = zones.value.findIndex((zone) => zone.id === data.zone.id)
+    if (index >= 0) {
+      zones.value[index].shifts = [...data.zone.shifts]
+    }
+    zoneShifts.value = [...data.zone.shifts]
+    shiftsHint.value = '已保存。该责任区只会出现在选中的班次。'
+  } catch (err) {
+    errorText.value = err.message || '无法保存责任区班次'
+  } finally {
+    savingShifts.value = false
   }
 }
 
@@ -249,26 +299,28 @@ function startReplace(item) {
   arrowStart.value = null
 }
 
-async function saveItem() {
+function saveItem() {
   if (!canSave.value) return
-  saving.value = true
   errorText.value = ''
+  const replacing = Boolean(replacingId.value)
+  const itemLabel = replacingItem.value ? replacingItem.value.name : itemName.value.trim()
   const form = new FormData()
   form.append('file', file.value)
   form.append('markup', JSON.stringify(markup.value))
+  if (!replacing) form.append('name', itemName.value.trim())
   try {
-    if (replacingId.value) {
-      await api.upload(`/api/hygiene/admin/items/${replacingId.value}/standard`, form)
-    } else {
-      form.append('name', itemName.value.trim())
-      await api.upload(`/api/hygiene/admin/zones/${selected.value.id}/items`, form)
-    }
+    imageUploads.enqueue({
+      path: replacing
+        ? `/api/hygiene/admin/items/${replacingId.value}/standard`
+        : `/api/hygiene/admin/zones/${selected.value.id}/items`,
+      formData: form,
+      label: replacing ? `更新标准图 · ${itemLabel}` : `标准图 · ${itemLabel}`,
+      detail: file.value.name,
+      onSuccess: loadZones,
+    })
     clearEditor()
-    await loadZones()
   } catch (err) {
-    errorText.value = err.message || '保存失败'
-  } finally {
-    saving.value = false
+    errorText.value = err.message || '无法加入上传队列'
   }
 }
 
@@ -288,7 +340,7 @@ function markLabel(mark) {
         <p>维护各卫生责任区的日常检查项和当前标准图。</p>
         <details class="rule-help">
           <summary>规则说明</summary>
-          <p>卫生责任区与档口、配方岗位相互独立。没有当前标准图的检查项不会出现在员工端；更换标准图后，新检查使用新图。删除责任区或检查项会同时删除进行中的待办和该区未闭环整改单。</p>
+          <p>卫生责任区与档口、配方岗位相互独立。每个责任区可选白班、夜班或只跑其中一个班次；没有当前标准图的检查项不会出现在员工端；更换标准图后，新检查使用新图。删除责任区或检查项会同时删除进行中的待办和该区未闭环整改单。</p>
         </details>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
@@ -332,6 +384,7 @@ function markLabel(mark) {
                 {{ (zone.items || []).length }} 项
                 <template v-if="missedByZone[zone.id]"> · 漏拍 {{ missedByZone[zone.id] }}</template>
               </span>
+              <em class="zone-shifts">{{ zoneShiftLabel(zone) }}</em>
             </button>
             <button
               type="button"
@@ -350,6 +403,16 @@ function markLabel(mark) {
             placeholder="再加一个卫生责任区，比如卫生间"
             aria-label="新卫生责任区名称"
           >
+          <div class="zone-shift-picks" role="group" aria-label="新责任区班次">
+            <label
+              v-for="shift in HYGIENE_SHIFTS"
+              :key="`new-${shift}`"
+              class="zone-shift-toggle"
+            >
+              <input v-model="newZoneShifts" type="checkbox" :value="shift">
+              {{ shift }}
+            </label>
+          </div>
           <button type="submit" class="btn btn-primary" :disabled="creatingZone || !newZoneName.trim()">新增</button>
         </form>
       </div>
@@ -359,6 +422,19 @@ function markLabel(mark) {
           <h3>{{ selected ? selected.name + ' 日常清单' : '日常清单' }}</h3>
         </div>
         <template v-if="selected">
+          <form class="zone-shifts-editor" @submit.prevent="saveZoneShifts">
+            <span class="zone-shifts-title">班次</span>
+            <label
+              v-for="shift in HYGIENE_SHIFTS"
+              :key="`zone-${shift}`"
+              class="zone-shift-toggle"
+            >
+              <input v-model="zoneShifts" type="checkbox" :value="shift">
+              {{ shift }}
+            </label>
+            <button type="submit" class="btn btn-sm" :disabled="savingShifts">保存班次</button>
+            <p v-if="shiftsHint" class="zone-shifts-hint">{{ shiftsHint }}</p>
+          </form>
           <div v-if="!(selected.items || []).length" class="roster-empty">这个区还没有带标准图的检查项。</div>
           <ul v-else class="item-list">
             <li v-for="item in selected.items" :key="item.id" class="item-row">
@@ -516,12 +592,47 @@ function markLabel(mark) {
 }
 .zone-row .zone-btn { flex: 1; }
 .zone-row .btn-danger { flex: 0 0 auto; align-self: center; }
+.zone-shifts {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--hy-mint);
+}
 .zone-add {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   padding: 4px 10px 12px;
 }
 .zone-add .input { flex: 1; }
+.zone-shift-picks,
+.zone-shifts-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.zone-shifts-editor {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--hy-line);
+  font-size: 12px;
+  color: var(--hy-muted);
+}
+.zone-shifts-title { font-weight: 600; color: var(--hy-ink); }
+.zone-shift-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.zone-shift-toggle input { accent-color: var(--hy-mint); }
+.zone-shifts-hint {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 11px;
+  color: var(--hy-mint);
+}
 .item-list {
   list-style: none;
   margin: 0;

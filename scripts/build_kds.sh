@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/kds"
 OUT="$ROOT/public/kds"
+PWA_GENERATOR="$ROOT/scripts/generate_kds_pwa.py"
 
 usage() {
   cat <<'EOF'
@@ -126,10 +127,23 @@ verify_build() {
   local dir="$1"
   [[ -f "$dir/index.html" ]] || die "缺少 index.html: $dir"
   [[ -d "$dir/assets" ]] || die "缺少 assets 目录: $dir"
+  [[ -f "$dir/sw.js" ]] || die "缺少 KDS Service Worker: $dir/sw.js"
+  [[ -f "$dir/manifest.webmanifest" ]] || die "缺少 KDS manifest: $dir/manifest.webmanifest"
+  [[ -f "$dir/static/pwa/icon-192.png" ]] || die "缺少 KDS 192 图标"
+  [[ -f "$dir/static/pwa/icon-512.png" ]] || die "缺少 KDS 512 图标"
+  [[ -f "$dir/static/pwa/icon-maskable-512.png" ]] || die "缺少 KDS maskable 图标"
 
   if ! grep -q '/kds/' "$dir/index.html"; then
     die "index.html 未包含 /kds/ 路径，请检查 kds/manifest.json h5.publicPath"
   fi
+  if ! grep -q 'rel="manifest"' "$dir/index.html"; then
+    die "index.html 未包含 KDS PWA manifest"
+  fi
+}
+
+read_app_version() {
+  sed -nE 's/^[[:space:]]*APP_VERSION:[[:space:]]*str[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+    "$ROOT/config.py" | head -n 1
 }
 
 # ── 部署到 public/kds ──
@@ -139,6 +153,15 @@ deploy() {
   rm -rf "$OUT"
   mkdir -p "$OUT"
   cp -R "$build_dir/"* "$OUT/"
+  mkdir -p "$OUT/static/pwa"
+  cp "$SRC/static/pwa/icon-192.png" "$OUT/static/pwa/icon-192.png"
+  cp "$SRC/static/pwa/icon-512.png" "$OUT/static/pwa/icon-512.png"
+  cp "$SRC/static/pwa/icon-maskable-512.png" "$OUT/static/pwa/icon-maskable-512.png"
+  local app_version
+  app_version="$(read_app_version)"
+  [[ -n "$app_version" ]] || die "无法从 config.py 解析 APP_VERSION"
+  log "生成 KDS manifest 与版本化 Service Worker"
+  python3 "$PWA_GENERATOR" --dist "$OUT" --version "$app_version"
   verify_build "$OUT"
 }
 
@@ -146,6 +169,7 @@ deploy() {
 main() {
   [[ -d "$SRC" ]] || die "KDS 源码目录不存在: $SRC"
   [[ -f "$SRC/manifest.json" ]] || die "缺少 kds/manifest.json"
+  [[ -f "$PWA_GENERATOR" ]] || die "缺少 KDS PWA 生成器: $PWA_GENERATOR"
 
   if [[ "$COPY_ONLY" -eq 1 ]]; then
     local build_dir

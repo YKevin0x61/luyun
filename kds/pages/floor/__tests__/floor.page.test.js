@@ -64,7 +64,11 @@ function setViewport(width, height) {
 }
 
 function mountPage() {
-  return mount(FloorConsolePage)
+  return mount(FloorConsolePage, {
+    global: {
+      stubs: { PwaUpdateBanner: true },
+    },
+  })
 }
 
 // happy-dom's getComputedStyle only reflects inline style once the node is attached to
