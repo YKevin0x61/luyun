@@ -7,20 +7,35 @@ import {
   formatTs,
   progressLabel,
 } from '../utils/backupProgress'
+import {
+  CONTENT_LABELS,
+  CONTENT_OTHER_PHOTOS,
+  CONTENT_STANDARD_PHOTOS,
+  PHOTO_CONTENTS,
+  cleanupDeleteSummary,
+} from '../utils/backupPoints'
 
 const BACKUP_PASSPHRASE_MIN_LENGTH = 6
 
 /**
- * Setup page — backup export / import / snapshots.
+ * Setup page — 备份中心：备份健康 / 备份点列表 / 导出备份 / 恢复 / 保留与清理。
+ *
+ * 恢复动作一律走本 composable 内的两步确认（不使用浏览器原生 confirm）：
+ * 先 requestConfirm 展示将要发生什么与风险勾选项，再由页面上的确认按钮调用
+ * onConfirmClick；覆盖导入、数据回滚、清理与保存保留配置都复用这一条通道。
+ *
  * @param {{ showAlert: Function, clearAlert: Function, onAfterRollback?: () => Promise<void> }} opts
  */
 export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
+  // ==================== 导出备份 ====================
   const exportForm = reactive({
     passphrase: '',
     passphrase2: '',
     include_runtime: false,
     include_app_db: true,
     include_recipes: true,
+    include_standard_photos: true,
+    include_other_photos: true,
   })
   const exporting = ref(false)
   const exportBtnLabel = computed(() => (exporting.value ? '导出中…' : '生成并下载备份'))
@@ -45,12 +60,16 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
           include_runtime: exportForm.include_runtime,
           include_app_db: exportForm.include_app_db,
           include_recipes: exportForm.include_recipes,
+          include_standard_photos: exportForm.include_standard_photos,
+          include_other_photos: exportForm.include_other_photos,
         },
         'luyun_backup.luyunbak',
       )
-      showAlert('success', '已生成加密备份文件，请务必牢记口令（遗失将无法解密恢复）')
+      showAlert('success', '已生成加密导出备份，请务必牢记口令（遗失将无法解密恢复）')
       exportForm.passphrase = ''
       exportForm.passphrase2 = ''
+      // 导出同时在本机登记一条导出备份点，列表与健康结论都需要刷新。
+      await Promise.all([loadPoints(), loadHealth()])
     } catch (err) {
       showAlert('error', '导出失败：' + err.message)
     } finally {
@@ -58,6 +77,204 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     }
   }
 
+  // ==================== 两步确认 ====================
+  const confirmState = reactive({
+    open: false,
+    title: '',
+    message: '',
+    details: [],
+    danger: false,
+    confirmLabel: '确认',
+    checkboxes: [],
+    onConfirm: null,
+  })
+  const confirmChecked = reactive({})
+
+  function requestConfirm(opts = {}, onConfirm = null) {
+    confirmState.open = true
+    confirmState.title = opts.title || '请确认'
+    confirmState.message = opts.message || ''
+    confirmState.details = Array.isArray(opts.details) ? opts.details : []
+    confirmState.danger = !!opts.danger
+    confirmState.confirmLabel = opts.confirmLabel || '确认'
+    confirmState.checkboxes = (opts.checkboxes || []).map((box) => ({
+      key: String(box.key),
+      label: box.label || '',
+      required: box.required !== false,
+    }))
+    confirmState.onConfirm = typeof onConfirm === 'function' ? onConfirm : null
+    for (const key of Object.keys(confirmChecked)) delete confirmChecked[key]
+    for (const box of confirmState.checkboxes) confirmChecked[box.key] = false
+  }
+
+  function closeConfirm() {
+    confirmState.open = false
+    confirmState.onConfirm = null
+    confirmState.checkboxes = []
+    confirmState.details = []
+  }
+
+  const confirmReady = computed(() =>
+    confirmState.checkboxes.every((box) => !box.required || !!confirmChecked[box.key]),
+  )
+
+  async function onConfirmClick() {
+    if (!confirmReady.value) return
+    const action = confirmState.onConfirm
+    closeConfirm()
+    if (action) await action()
+  }
+
+  // ==================== 备份健康 ====================
+  const health = ref(null)
+  const healthLoading = ref(false)
+  const healthError = ref('')
+
+  function applyHealth(next) {
+    if (next) health.value = next
+  }
+
+  async function loadHealth() {
+    healthLoading.value = true
+    healthError.value = ''
+    try {
+      const data = await api.get('/api/backup/health', null, null, 'no-store')
+      applyHealth(data?.health)
+    } catch (err) {
+      healthError.value = err.message || '加载失败'
+      health.value = null
+    } finally {
+      healthLoading.value = false
+    }
+  }
+
+  async function refreshHealth() {
+    healthLoading.value = true
+    healthError.value = ''
+    try {
+      const data = await api.post('/api/backup/health/refresh', {})
+      applyHealth(data?.health)
+    } catch (err) {
+      healthError.value = err.message || '重跑备份健康失败'
+      showAlert('error', '重跑备份健康失败：' + (err.message || '未知错误'))
+    } finally {
+      healthLoading.value = false
+    }
+  }
+
+  const healthView = computed(() => {
+    const h = health.value
+    if (!h) return null
+    return {
+      status: h.status || '',
+      summary: h.summary || '',
+      next_step: h.next_step || '',
+      last_success_at: h.last_success_at || null,
+      last_success_medium_label: h.last_success_medium_label || '',
+      checks: Array.isArray(h.checks) ? h.checks : [],
+      counts: h.counts || { total: 0, usable: 0, unusable: 0, by_medium: {} },
+      coverage: Array.isArray(h.coverage) ? h.coverage : [],
+      coverage_labels: Array.isArray(h.coverage_labels) ? h.coverage_labels : [],
+      total_bytes: h.total_bytes || 0,
+      computed_at: h.computed_at || null,
+    }
+  })
+
+  // ==================== 备份点列表 ====================
+  const points = ref([])
+  const pointsLoading = ref(false)
+  const pointsError = ref('')
+  const validatingId = ref('')
+  const validateResults = reactive({})
+  const notBackedUp = ref([])
+  const mediumLabels = ref({})
+  const mediumPurposes = ref({})
+
+  const snapshotPoints = computed(() =>
+    points.value.filter((p) => p.medium === 'local_snapshot'))
+  const exportPoints = computed(() =>
+    points.value.filter((p) => p.medium === 'export_backup'))
+  const coldPoints = computed(() =>
+    points.value.filter((p) => p.medium === 'cold_backup'))
+
+  /** 空列表时给一句可操作的话，而不是一张空表。 */
+  const pointsEmptyHint = computed(() => {
+    if (points.value.length) return ''
+    if (!coldPoints.value.length) return '还没有可用于恢复的备份'
+    return '还没有可用于恢复的备份（下方冷备只读，不能在页面直接恢复）'
+  })
+
+  async function loadPoints() {
+    pointsLoading.value = true
+    pointsError.value = ''
+    try {
+      const data = await api.get('/api/backup/points', null, null, 'no-store')
+      points.value = Array.isArray(data?.points) ? data.points : []
+      notBackedUp.value = Array.isArray(data?.not_backed_up) ? data.not_backed_up : []
+      mediumLabels.value = data?.medium_labels || {}
+      mediumPurposes.value = data?.medium_purposes || {}
+      applyHealth(data?.health)
+    } catch (err) {
+      pointsError.value = err.message || '加载失败'
+      points.value = []
+      notBackedUp.value = []
+    } finally {
+      pointsLoading.value = false
+    }
+  }
+
+  async function validatePoint(id) {
+    if (!id) return null
+    validatingId.value = id
+    clearAlert()
+    try {
+      const data = await api.post(
+        `/api/backup/points/${encodeURIComponent(id)}/validate`,
+        {},
+      )
+      const result = data?.result || null
+      if (result) validateResults[id] = result
+      if (result?.ok) {
+        showAlert('success', `备份点基础校验通过：${id}`)
+      } else {
+        showAlert(
+          'error',
+          `备份点基础校验未通过：${(result?.messages || []).join('；') || '未知原因'}`,
+        )
+      }
+      return result
+    } catch (err) {
+      showAlert('error', '备份点校验失败：' + err.message)
+      return null
+    } finally {
+      validatingId.value = ''
+    }
+  }
+
+  function pointDisplay(point) {
+    const result = validateResults[point?.id]
+    const check = point?.basic_check || null
+    return {
+      mediumLabel: point?.medium_label
+        || mediumLabels.value[point?.medium]
+        || point?.medium
+        || '—',
+      purpose: point?.purpose || mediumPurposes.value[point?.medium] || '—',
+      provenanceLabel: point?.provenance_label || '—',
+      sizeLabel: formatBytes(point?.size_bytes),
+      createdLabel: point?.created_at ? formatTs(point.created_at) : '（时间未知）',
+      contentsLabels: Array.isArray(point?.contents_labels) ? point.contents_labels : [],
+      missingLabels: (point?.missing || []).map((m) => m.label || m.content),
+      photoSummary: point?.photos || {},
+      // 校验结论优先用刚刚手动跑出来的结果，其次用列表里的基础校验。
+      checkOk: result ? !!result.ok : (check ? !!check.ok : null),
+      checkMessages: result?.messages || check?.messages || [],
+      recoverable: result ? !!result.recoverable : point?.recoverable !== false,
+      checkAt: result?.checked_at || null,
+    }
+  }
+
+  // ==================== 导入 / 恢复预览 ====================
   const importState = reactive({
     file: null,
     fileName: '',
@@ -67,13 +284,17 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     apply_runtime: false,
     apply_app_db: false,
     apply_recipes: false,
+    apply_standard_photos: false,
+    apply_other_photos: false,
   })
   const importPreview = ref(null)
   const importToken = ref('')
   const previewing = ref(false)
   const importing = ref(false)
   const previewBtnLabel = computed(() => (previewing.value ? '预览中…' : '预览'))
-  const importApplyLabel = computed(() => (importing.value ? '导入中…' : '确认导入'))
+  const importApplyLabel = computed(() => (importing.value ? '导入中…' : '确认恢复'))
+  /** 强制继续（跨备份点差异）必须由操作者显式勾选，默认关闭。 */
+  const forceContinue = ref(false)
 
   const previewProgress = reactive(createProgressState())
   const importProgress = reactive(createProgressState())
@@ -82,6 +303,57 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
   const importPreviewMeta = computed(() => importPreview.value?.meta || null)
   const importPreviewCredentials = computed(() => importPreview.value?.credentials_preview || null)
   const importIncludes = computed(() => importPreviewMeta.value?.includes || {})
+
+  const importPhotos = computed(() => importPreview.value?.photos || null)
+  const importMissing = computed(() =>
+    Array.isArray(importPreview.value?.missing) ? importPreview.value.missing : [])
+  const importValidation = computed(() => importPreview.value?.validation || null)
+  const restoreAllowed = computed(() => {
+    if (importPreview.value?.restore_allowed !== undefined) {
+      return !!importPreview.value.restore_allowed
+    }
+    return importValidation.value?.in_backup?.ok !== false
+  })
+  const requiresForce = computed(() => {
+    if (importPreview.value?.requires_force !== undefined) {
+      return !!importPreview.value.requires_force
+    }
+    return !!importValidation.value?.cross_point?.has_difference
+  })
+  const importErrors = computed(() =>
+    importValidation.value?.in_backup?.errors || [])
+  const importHasErrors = computed(() =>
+    importValidation.value?.in_backup?.ok === false)
+
+  const importCrossPoint = computed(() => importValidation.value?.cross_point || null)
+  const crossPointStandardMissing = computed(() =>
+    importCrossPoint.value?.standard_missing
+    ?? (importCrossPoint.value?.missing?.standard || []).length)
+  const crossPointOtherMissing = computed(() =>
+    importCrossPoint.value?.other_missing
+    ?? (importCrossPoint.value?.missing?.other || []).length)
+  const crossPointMissingLabels = computed(() => {
+    const labels = []
+    if (crossPointStandardMissing.value) labels.push(CONTENT_LABELS.standard_photos)
+    if (crossPointOtherMissing.value) labels.push(CONTENT_LABELS.other_photos)
+    return labels
+  })
+  const importPhotoItems = computed(() => {
+    const photos = importPhotos.value
+    if (!photos) return []
+    return PHOTO_CONTENTS
+      .map((kind) => {
+        const entry = photos[kind]
+        if (!entry) return null
+        const label = entry.label || CONTENT_LABELS[kind]
+        if (!entry.included) return `${label}：未包含`
+        const missingRefs = Number(entry.missing_references) || 0
+        return `${label}：${entry.count ?? 0} 张（清单 ${entry.declared_count ?? 0}${
+          missingRefs ? `，缺失引用 ${missingRefs}` : ''
+        }）`
+      })
+      .filter(Boolean)
+  })
 
   const importPreviewItems = computed(() => {
     const meta = importPreviewMeta.value
@@ -95,22 +367,76 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       ['含运行配置', meta.includes?.runtime ? '是' : '否'],
       ['含业务数据', meta.includes?.app_db ? '是' : '否'],
       ['含配方', meta.includes?.recipes_db ? '是' : '否'],
-      ['导出时间', meta.exported_at ? String(meta.exported_at).replace('T', ' ').slice(0, 19) : '—'],
+      ['含标准图', meta.includes?.standard_photos ? '是' : '否'],
+      ['含其它照片', meta.includes?.other_photos ? '是' : '否'],
+      ['导出时间', meta.exported_at ? formatTs(meta.exported_at) : '—'],
       ['应用版本', meta.app_version || '—'],
     ]
   })
 
+  /**
+   * 应用项的默认勾选：以服务端 default_apply 为准（跨备份点差异会让受影响
+   * 的照片类默认不勾选）。旧版预览没有 default_apply 时退化为按 includes 推导。
+   */
   function syncImportApplyOptions() {
+    const defaults = importPreview.value?.default_apply
+    if (defaults) {
+      importState.apply_credentials = !!defaults.credentials
+      importState.apply_runtime = !!defaults.runtime
+      importState.apply_app_db = !!defaults.app_db
+      importState.apply_recipes = !!defaults.recipes_db
+      importState.apply_standard_photos = !!defaults.standard_photos
+      importState.apply_other_photos = !!defaults.other_photos
+      return
+    }
     const includes = importIncludes.value
     importState.apply_credentials = true
     importState.apply_runtime = !!includes.runtime
     importState.apply_app_db = !!includes.app_db
     importState.apply_recipes = !!includes.recipes_db
+    importState.apply_standard_photos = !!includes.standard_photos
+    importState.apply_other_photos = !!includes.other_photos
   }
+
+  /**
+   * 被跨备份点差异影响、且操作者又勾回来的照片类。只有这种情况下才需要
+   * 「我已知晓并强制继续」，避免影响无关的合并导入。
+   */
+  const importRecheckedMissing = computed(() => {
+    const rechecked = []
+    if (importState.apply_standard_photos && crossPointStandardMissing.value) {
+      rechecked.push(CONTENT_LABELS.standard_photos)
+    }
+    if (importState.apply_other_photos && crossPointOtherMissing.value) {
+      rechecked.push(CONTENT_LABELS.other_photos)
+    }
+    return rechecked
+  })
+
+  const forceRequired = computed(
+    () => requiresForce.value && importRecheckedMissing.value.length > 0,
+  )
+  const forceSatisfied = computed(() => !forceRequired.value || forceContinue.value)
+
+  /** 恢复按钮是否可用：备份自身损坏时不可覆盖；照片差异需要显式强制勾选。 */
+  const canApplyImport = computed(
+    () => !!importPreview.value && !!importToken.value && !importing.value
+      && restoreAllowed.value && forceSatisfied.value,
+  )
+
+  const importInvalidReason = computed(() => {
+    if (!importPreview.value) return ''
+    if (!restoreAllowed.value) return '这份备份自身不一致，已阻止恢复'
+    if (!forceSatisfied.value) {
+      return `已勾选备份中缺失的${importRecheckedMissing.value.join('、')}，需先勾选强制继续`
+    }
+    return ''
+  })
 
   function onImportFileChange(file) {
     importPreview.value = null
     importToken.value = ''
+    forceContinue.value = false
     if (!file) {
       importState.file = null
       importState.fileName = ''
@@ -143,12 +469,20 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       )
       importPreview.value = data
       importToken.value = data.import_token || ''
+      forceContinue.value = false
       syncImportApplyOptions()
       finishProgress(previewProgress, 'preview', true)
-      showAlert('info', '解密成功，请核对下方内容后确认导入')
+      if (data?.validation?.in_backup?.ok === false) {
+        showAlert('error', '这份备份自身不一致，已阻止恢复；请改用其它备份点')
+      } else if (data?.validation?.cross_point?.has_difference) {
+        showAlert('info', '解密成功；这份备份缺少当前数据引用的部分照片，请核对后确认恢复')
+      } else {
+        showAlert('info', '解密成功，请核对下方内容后确认恢复')
+      }
     } catch (err) {
       importPreview.value = null
       importToken.value = ''
+      forceContinue.value = false
       finishProgress(previewProgress, 'preview', false)
       showAlert('error', '预览失败：' + err.message)
     } finally {
@@ -158,14 +492,21 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
 
   const importSuccessModal = reactive({ show: false, message: '' })
 
-  async function onApplyImport() {
-    if (!importPreview.value || !importToken.value) {
-      showAlert('error', '请先预览确认备份内容')
-      return
+  function importSuccessMessage(data, verb) {
+    const parts = []
+    if (data?.applied_labels?.length) parts.push(`已恢复：${data.applied_labels.join('、')}`)
+    else parts.push('没有任何内容被恢复')
+    const photos = data?.photos_restored || {}
+    if (photos.standard || photos.other) {
+      parts.push(`照片：标准图 ${photos.standard || 0} 张、其它照片 ${photos.other || 0} 张`)
     }
-    if (importState.mode === 'overwrite') {
-      if (!window.confirm('将替换整库并覆盖当前数据，系统会先自动生成回滚快照，是否继续？')) return
-    }
+    if (data?.snapshot_ts) parts.push(`已生成新的本机回滚快照 ${data.snapshot_ts}`)
+    let msg = `${verb}成功。${parts.join('；')}。`
+    if (data?.session_invalidated) msg += '当前登录会话已失效，请点击确认后重新登录。'
+    return msg
+  }
+
+  async function applyImportNow() {
     importing.value = true
     startProgress(importProgress, 'import')
     try {
@@ -176,6 +517,9 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       formData.append('apply_runtime', importState.apply_runtime ? 'true' : 'false')
       formData.append('apply_app_db', importState.apply_app_db ? 'true' : 'false')
       formData.append('apply_recipes', importState.apply_recipes ? 'true' : 'false')
+      formData.append('apply_standard_photos', importState.apply_standard_photos ? 'true' : 'false')
+      formData.append('apply_other_photos', importState.apply_other_photos ? 'true' : 'false')
+      formData.append('force', forceRequired.value && forceContinue.value ? 'true' : 'false')
       const data = await api.upload(
         '/api/backup/import/apply',
         formData,
@@ -185,17 +529,72 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       importPreview.value = null
       importToken.value = ''
       importState.passphrase = ''
-      let msg = '导入成功'
-      if (data.snapshot_ts) msg += `，已生成回滚点 ${data.snapshot_ts}`
-      msg += '。当前登录会话已失效，请点击确认后重新登录。'
-      importSuccessModal.message = msg
+      forceContinue.value = false
+      importSuccessModal.message = importSuccessMessage(data, '恢复')
       importSuccessModal.show = true
+      await Promise.all([loadPoints(), loadHealth()])
     } catch (err) {
       finishProgress(importProgress, 'import', false)
-      showAlert('error', '导入失败：' + err.message)
+      const detail = err.detail
+      if (err.status === 409 && detail && detail.reason === 'backup_corrupt') {
+        showAlert('error', detail.message || '这份备份自身不一致，已阻止恢复')
+        return
+      }
+      if (err.status === 409 && detail && detail.reason === 'photo_mismatch') {
+        showAlert('error', detail.message || '备份缺少当前数据引用的照片，请确认后强制继续')
+        return
+      }
+      showAlert('error', '恢复失败：' + err.message)
     } finally {
       importing.value = false
     }
+  }
+
+  const appliedSelectionLabels = computed(() => {
+    const labels = []
+    if (importState.apply_credentials) labels.push('凭据')
+    if (importState.apply_runtime) labels.push('运行配置')
+    if (importState.apply_app_db) labels.push('业务数据')
+    if (importState.apply_recipes) labels.push('配方数据')
+    if (importState.apply_standard_photos) labels.push('标准图')
+    if (importState.apply_other_photos) labels.push('其它照片')
+    return labels
+  })
+
+  /** 覆盖导入会替换整库，必须先过两步确认；其它模式只做一次风险确认。 */
+  function onApplyImport() {
+    if (!canApplyImport.value) {
+      if (importInvalidReason.value) showAlert('error', importInvalidReason.value)
+      else showAlert('error', '请先预览确认备份内容')
+      return
+    }
+    const overwrite = importState.mode === 'overwrite'
+    const details = [
+      `恢复模式：${overwrite ? '覆盖恢复 · 整库替换' : '合并去重追加'}`,
+      `应用项：${appliedSelectionLabels.value.join('、') || '（无）'}`,
+    ]
+    if (forceRequired.value) {
+      details.push(`强制继续：备份中缺失${importRecheckedMissing.value.join('、')}`)
+    }
+    requestConfirm(
+      {
+        title: overwrite ? '确认覆盖恢复' : '确认恢复备份',
+        message: overwrite
+          ? '将替换整库并覆盖当前数据，系统会先自动生成一份本机回滚快照。'
+          : '将把所选内容合并进当前数据，系统不会删除现有记录。',
+        details,
+        danger: overwrite,
+        confirmLabel: overwrite ? '确认覆盖恢复' : '确认恢复',
+        checkboxes: overwrite
+          ? [{
+            key: 'overwrite',
+            label: '我确认覆盖当前数据（会先自动生成本机回滚快照）',
+            required: true,
+          }]
+          : [],
+      },
+      applyImportNow,
+    )
   }
 
   async function confirmImportSuccessRedirect() {
@@ -208,47 +607,302 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     window.location.href = '/login'
   }
 
-  const snapshots = ref([])
-  const snapshotsLoading = ref(false)
-  const snapshotsError = ref('')
+  // ==================== 本机回滚快照 ====================
   const rollingBackTs = ref('')
+  const snapshotListLoading = ref(false)
+  const snapshotListError = ref('')
+  const snapshots = computed(() =>
+    points.value
+      .filter((p) => p.medium === 'local_snapshot')
+      .map((p) => ({
+        ts: p.detail?.ts || String(p.id || '').replace(/^snapshot:/, ''),
+        created_at: p.created_at,
+        size_bytes: p.size_bytes,
+        files: p.detail?.files || [],
+        provenance_label: p.provenance_label,
+        contents: p.contents || [],
+        contents_labels: p.contents_labels || [],
+        recoverable: p.recoverable !== false,
+        basic_check: p.basic_check || null,
+      })))
+  const snapshotsLoading = computed(() => pointsLoading.value || snapshotListLoading.value)
+  const snapshotsError = computed(() => pointsError.value || snapshotListError.value)
 
+  /** 兼容旧调用名：本机回滚快照现在来自统一备份点清单。 */
   async function loadSnapshots() {
-    snapshotsLoading.value = true
-    snapshotsError.value = ''
+    snapshotListLoading.value = true
+    snapshotListError.value = ''
     try {
-      const data = await api.get('/api/backup/snapshots', null, null, 'no-store')
-      snapshots.value = data.snapshots || []
+      await loadPoints()
     } catch (err) {
-      snapshotsError.value = err.message || '加载失败'
-      snapshots.value = []
+      snapshotListError.value = err.message || '加载失败'
     } finally {
-      snapshotsLoading.value = false
+      snapshotListLoading.value = false
     }
   }
 
-  async function onRollbackSnapshot(ts) {
-    if (!window.confirm(`确认回滚到快照 ${ts}？当前数据将被替换。`)) return
+  async function rollbackSnapshotNow(ts, photoFlags) {
     rollingBackTs.value = ts
     clearAlert()
     try {
-      await api.post(`/api/backup/snapshots/${encodeURIComponent(ts)}/rollback`, {})
-      showAlert('success', `已回滚到快照 ${ts}`)
+      const data = await api.post(
+        `/api/backup/snapshots/${encodeURIComponent(ts)}/rollback`,
+        {},
+        photoFlags,
+      )
+      showAlert('success', importSuccessMessage(data, '数据回滚'))
       if (typeof onAfterRollback === 'function') await onAfterRollback()
-      await loadSnapshots()
+      await Promise.all([loadPoints(), loadHealth()])
     } catch (err) {
-      showAlert('error', '回滚失败：' + err.message)
+      const detail = err.detail
+      showAlert('error', '数据回滚失败：'
+        + (detail?.message || err.message || '未知错误'))
     } finally {
       rollingBackTs.value = ''
     }
   }
 
+  /**
+   * 数据回滚走两步确认。文案与照片选项随这份快照实际包含的内容变化：
+   * 没有照片成员的旧快照不会声称能恢复照片。
+   */
+  function onRollbackSnapshot(tsOrPoint) {
+    const point = typeof tsOrPoint === 'string'
+      ? snapshots.value.find((s) => s.ts === tsOrPoint) || { ts: tsOrPoint }
+      : (tsOrPoint || {})
+    const ts = point.ts
+    const contents = Array.isArray(point.contents_labels) ? point.contents_labels : []
+    const contentCodes = Array.isArray(point.contents) ? point.contents : []
+    const hasStandard = contentCodes.includes(CONTENT_STANDARD_PHOTOS)
+    const hasOther = contentCodes.includes(CONTENT_OTHER_PHOTOS)
+    const photoFlags = {
+      apply_standard_photos: hasStandard,
+      apply_other_photos: hasOther,
+    }
+    const details = [
+      `目标本机回滚快照：${ts}`,
+      `恢复内容：${contents.length ? contents.join('、') : '（该快照没有覆盖内容清单）'}`,
+      '会先自动生成一份新的本机回滚快照',
+    ]
+    if (!hasStandard && !hasOther) {
+      details.push('该快照不含卫生照片，恢复后标准图与其它照片保持现状')
+    }
+    requestConfirm(
+      {
+        title: '确认数据回滚',
+        message: `将把当前业务数据替换为本机回滚快照 ${ts} 的内容，并先为当前状态新建一份本机回滚快照。`,
+        details,
+        danger: true,
+        confirmLabel: '确认数据回滚',
+        checkboxes: [{
+          key: 'rollback',
+          label: '我确认用这份本机回滚快照替换当前数据',
+          required: true,
+        }],
+      },
+      () => rollbackSnapshotNow(ts, photoFlags),
+    )
+  }
+
+  // ==================== 保留与清理 ====================
+  const retention = ref(null)
+  const retentionLimits = ref(null)
+  const retentionLoading = ref(false)
+  const retentionSaving = ref(false)
+  const retentionForm = reactive({ snapshot_keep: 5, export_keep: 5, cold_keep: 14 })
+  const cleanupPreview = ref(null)
+  const cleanupPreviewLoading = ref(false)
+  const cleaningUp = ref(false)
+
+  function applyRetention(data) {
+    if (data?.config) {
+      retention.value = data.config
+      retentionForm.snapshot_keep = data.config.snapshot_keep
+      retentionForm.export_keep = data.config.export_keep
+      retentionForm.cold_keep = data.config.cold_keep
+    }
+    if (data?.limits) retentionLimits.value = data.limits
+    if (data?.preview) cleanupPreview.value = data.preview
+  }
+
+  async function loadRetention() {
+    retentionLoading.value = true
+    try {
+      const data = await api.get('/api/backup/retention', null, null, 'no-store')
+      applyRetention(data)
+    } catch (err) {
+      showAlert('error', '加载保留配置失败：' + err.message)
+    } finally {
+      retentionLoading.value = false
+    }
+  }
+
+  async function previewCleanup(config) {
+    cleanupPreviewLoading.value = true
+    try {
+      const data = await api.post('/api/backup/cleanup/preview', {
+        snapshot_keep: Number(config?.snapshot_keep ?? retentionForm.snapshot_keep),
+        export_keep: Number(config?.export_keep ?? retentionForm.export_keep),
+        cold_keep: Number(config?.cold_keep ?? retentionForm.cold_keep),
+      })
+      if (data?.preview) cleanupPreview.value = data.preview
+      return data?.preview || null
+    } catch (err) {
+      showAlert('error', '预览清理失败：' + err.message)
+      return null
+    } finally {
+      cleanupPreviewLoading.value = false
+    }
+  }
+
+  const retentionPreviewSummary = computed(() =>
+    cleanupDeleteSummary(cleanupPreview.value))
+
+  /** 保存保留配置前必须先展示「将删除哪些备份点」，再写入。 */
+  async function saveRetention() {
+    if (retentionSaving.value) return
+    clearAlert()
+    const snapshotKeep = Number(retentionForm.snapshot_keep)
+    const exportKeep = Number(retentionForm.export_keep)
+    const coldKeep = Number(retentionForm.cold_keep)
+    if (![snapshotKeep, exportKeep, coldKeep].every(Number.isFinite)) {
+      showAlert('error', '请填写有效的保留份数')
+      return
+    }
+    const preview = await previewCleanup({
+      snapshot_keep: snapshotKeep,
+      export_keep: exportKeep,
+      cold_keep: coldKeep,
+    })
+    if (!preview) return
+    const summary = cleanupDeleteSummary(preview)
+    const totalDelete = summary.snapshotDelete + summary.exportDelete + summary.coldDelete
+    requestConfirm(
+      {
+        title: '确认保存保留配置',
+        message:
+          `保存后将按新配置立即清理：本机回滚快照保留 ${snapshotKeep} 份、`
+          + `导出备份保留 ${exportKeep} 份、冷备保留 ${coldKeep} 份。`,
+        details: [
+          `将删除本机回滚快照 ${summary.snapshotDelete} 份`,
+          `将删除导出备份 ${summary.exportDelete} 份`,
+          `将删除冷备 ${summary.coldDelete} 份`,
+          `受保护、不会自动清理的条目：${summary.protected} 份`,
+        ],
+        danger: totalDelete > 0,
+        confirmLabel: '确认保存并清理',
+        checkboxes: totalDelete > 0
+          ? [{ key: 'cleanup', label: '我已知晓将删除上述备份点', required: true }]
+          : [],
+      },
+      saveRetentionNow,
+    )
+  }
+
+  async function saveRetentionNow() {
+    retentionSaving.value = true
+    try {
+      const data = await api.put('/api/backup/retention', {
+        snapshot_keep: Number(retentionForm.snapshot_keep),
+        export_keep: Number(retentionForm.export_keep),
+        cold_keep: Number(retentionForm.cold_keep),
+      })
+      applyRetention(data)
+      const freed = formatBytes(data?.cleanup?.freed_bytes)
+      const deleted = (data?.cleanup?.deleted || []).length
+      showAlert('success', `保留配置已保存，已清理 ${deleted} 个备份点（释放 ${freed}）`)
+      await Promise.all([loadPoints(), loadHealth()])
+    } catch (err) {
+      showAlert('error', '保存保留配置失败：' + err.message)
+    } finally {
+      retentionSaving.value = false
+    }
+  }
+
+  async function runCleanupNow() {
+    cleaningUp.value = true
+    clearAlert()
+    try {
+      const data = await api.post('/api/backup/cleanup', {})
+      if (data?.preview) cleanupPreview.value = data.preview
+      const freed = formatBytes(data?.freed_bytes)
+      const deleted = (data?.deleted || []).length
+      showAlert('success', `已清理 ${deleted} 个备份点（释放 ${freed}）`)
+      await Promise.all([loadPoints(), loadHealth()])
+    } catch (err) {
+      showAlert('error', '清理失败：' + err.message)
+    } finally {
+      cleaningUp.value = false
+    }
+  }
+
+  /** 清理是不可逆动作，走两步确认并展示预览里的删除集合。 */
+  function runCleanup() {
+    if (cleaningUp.value) return
+    const summary = cleanupDeleteSummary(cleanupPreview.value)
+    const totalDelete = summary.snapshotDelete + summary.exportDelete + summary.coldDelete
+    const details = [
+      `本机回滚快照：删除 ${summary.snapshotDelete} 份`,
+      `导出备份：删除 ${summary.exportDelete} 份`,
+      `冷备：删除 ${summary.coldDelete} 份`,
+      `受保护的条目不会删除：${summary.protected} 份`,
+    ]
+    if (totalDelete === 0) {
+      details.push('按当前保留配置没有可删除的备份点')
+    }
+    requestConfirm(
+      {
+        title: '确认清理备份点',
+        message: '将按当前保留配置删除超出份数的备份点，此操作不可撤销。',
+        details,
+        danger: totalDelete > 0,
+        confirmLabel: '确认清理',
+        checkboxes: totalDelete > 0
+          ? [{ key: 'cleanup', label: '我已知晓清理不可撤销', required: true }]
+          : [],
+      },
+      runCleanupNow,
+    )
+  }
+
   return {
+    // 导出备份
     exportForm,
     exporting,
     exportBtnLabel,
     exportHasLargePayload,
     onExportBackup,
+    // 备份健康
+    health,
+    healthLoading,
+    healthError,
+    healthView,
+    loadHealth,
+    refreshHealth,
+    // 备份点列表
+    points,
+    pointsLoading,
+    pointsError,
+    loadPoints,
+    notBackedUp,
+    mediumLabels,
+    mediumPurposes,
+    snapshotPoints,
+    exportPoints,
+    coldPoints,
+    pointsEmptyHint,
+    validatingId,
+    validateResults,
+    validatePoint,
+    pointDisplay,
+    // 两步确认
+    confirmState,
+    confirmChecked,
+    confirmReady,
+    requestConfirm,
+    closeConfirm,
+    onConfirmClick,
+    // 导入 / 恢复
     importState,
     importPreview,
     importToken,
@@ -263,18 +917,47 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     importPreviewCredentials,
     importIncludes,
     importPreviewItems,
+    importPhotos,
+    importPhotoItems,
+    importMissing,
+    importValidation,
+    importErrors,
+    importHasErrors,
+    restoreAllowed,
+    requiresForce,
+    forceRequired,
+    forceContinue,
+    importRecheckedMissing,
+    importInvalidReason,
+    canApplyImport,
     onImportFileChange,
     onPreviewImport,
     onApplyImport,
     importSuccessModal,
     confirmImportSuccessRedirect,
+    // 本机回滚快照
     snapshots,
     snapshotsLoading,
     snapshotsError,
     rollingBackTs,
-    formatBytes,
-    formatTs,
     loadSnapshots,
     onRollbackSnapshot,
+    // 保留与清理
+    retention,
+    retentionLimits,
+    retentionForm,
+    retentionLoading,
+    retentionSaving,
+    cleanupPreview,
+    cleanupPreviewLoading,
+    cleaningUp,
+    retentionPreviewSummary,
+    loadRetention,
+    previewCleanup,
+    saveRetention,
+    runCleanup,
+    // 格式化
+    formatBytes,
+    formatTs,
   }
 }

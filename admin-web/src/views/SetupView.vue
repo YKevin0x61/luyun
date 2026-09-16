@@ -97,6 +97,32 @@ const {
   exportBtnLabel,
   exportHasLargePayload,
   onExportBackup,
+  // 备份健康
+  health,
+  healthLoading,
+  healthError,
+  healthView,
+  loadHealth,
+  refreshHealth,
+  // 备份点列表
+  points,
+  pointsLoading,
+  pointsError,
+  loadPoints,
+  notBackedUp,
+  coldPoints,
+  pointsEmptyHint,
+  validatingId,
+  validateResults,
+  validatePoint,
+  pointDisplay,
+  // 两步确认
+  confirmState,
+  confirmChecked,
+  confirmReady,
+  closeConfirm,
+  onConfirmClick,
+  // 导入 / 恢复
   importState,
   importPreview,
   previewing,
@@ -108,19 +134,43 @@ const {
   progressLabel,
   importIncludes,
   importPreviewItems,
+  importPhotoItems,
+  importMissing,
+  importErrors,
+  importHasErrors,
+  restoreAllowed,
+  requiresForce,
+  forceRequired,
+  forceContinue,
+  importRecheckedMissing,
+  importInvalidReason,
+  canApplyImport,
   onImportFileChange,
   onPreviewImport,
   onApplyImport,
   importSuccessModal,
   confirmImportSuccessRedirect,
+  // 本机回滚快照
   snapshots,
   snapshotsLoading,
   snapshotsError,
   rollingBackTs,
+  onRollbackSnapshot,
+  // 保留与清理
+  retention,
+  retentionLimits,
+  retentionForm,
+  retentionLoading,
+  retentionSaving,
+  cleanupPreview,
+  cleanupPreviewLoading,
+  cleaningUp,
+  retentionPreviewSummary,
+  loadRetention,
+  saveRetention,
+  runCleanup,
   formatBytes,
   formatTs,
-  loadSnapshots,
-  onRollbackSnapshot,
 } = useBackupCenter({
   showAlert,
   clearAlert,
@@ -190,17 +240,42 @@ const {
   cancelling,
   cancelJob,
   loadJobStatus,
+  // 健康确认（succeeded_but_unhealthy）
+  unhealthy,
+  healthPending,
+  healthDetailView,
+  healthChecking,
+  healthCheckError,
+  recheckHealth,
+  recheckIn,
+  autoRecheckEnabled,
+  // 版本回滚入口
+  previousRef,
+  canRollbackToPrevious,
+  rollbackToPrevious,
+  // 更新历史
+  historyEntries,
+  historyLoading,
+  historyError,
+  loadHistory,
+  lastSuccessEntry,
+  failureCount,
 } = useSystemUpdate({ showAlert, clearAlert })
 
 function switchSection(id) {
   activeSection.value = id
   if (id === 'account') loadTokenList()
   if (id === 'runtime') loadRuntimeSettings()
-  if (id === 'backup') loadSnapshots()
+  if (id === 'backup') {
+    loadPoints()
+    loadHealth()
+    loadRetention()
+  }
   if (id === 'update') {
     loadGithubConfig()
     loadVersionCheck()
     loadJobStatus()
+    loadHistory()
   }
 }
 
@@ -413,10 +488,200 @@ onMounted(() => {
           </div>
 
           <div v-show="activeSection === 'backup'" class="section-panel">
+            <!-- 1. 备份健康结论 -->
+            <fieldset>
+              <legend>备份健康</legend>
+              <div v-if="healthLoading" class="hint">正在计算备份健康…</div>
+              <div v-else-if="healthError" class="hint" style="color:var(--red);">
+                加载失败：{{ healthError }}
+                <button type="button" class="btn btn-sm" style="margin-left:8px;" @click="loadHealth">重试</button>
+              </div>
+              <template v-else-if="healthView">
+                <div class="meta-grid" style="margin-bottom:12px;">
+                  <div>
+                    <span class="k">结论</span>
+                    <span class="v">
+                      <span class="status-pill" :class="health.status === 'ok' ? 'ok' : 'empty'">
+                        {{ healthView.summary }}
+                      </span>
+                    </span>
+                  </div>
+                  <div>
+                    <span class="k">最近一次可用备份</span>
+                    <span class="v">{{ formatTs(healthView.last_success_at) || '（无）' }}</span>
+                  </div>
+                  <div>
+                    <span class="k">介质</span>
+                    <span class="v">{{ healthView.last_success_medium_label || '—' }}</span>
+                  </div>
+                  <div>
+                    <span class="k">可恢复备份点</span>
+                    <span class="v">{{ healthView.counts.usable }} / {{ healthView.counts.total }}</span>
+                  </div>
+                  <div>
+                    <span class="k">覆盖内容</span>
+                    <span class="v">{{ healthView.coverage_labels.join('、') || '—' }}</span>
+                  </div>
+                  <div>
+                    <span class="k">总体积</span>
+                    <span class="v">{{ formatBytes(healthView.total_bytes) }}</span>
+                  </div>
+                </div>
+                <div class="hint" style="margin-bottom:10px;">下一步：{{ healthView.next_step }}</div>
+                <ul class="hint" style="margin:0;padding-left:0;list-style:none;">
+                  <li
+                    v-for="c in healthView.checks"
+                    :key="c.code"
+                    style="margin-bottom:6px;display:flex;gap:8px;align-items:flex-start;"
+                  >
+                    <span class="status-pill" :class="c.ok ? 'ok' : 'empty'" style="flex-shrink:0;">
+                      {{ c.ok ? '通过' : '未通过' }}
+                    </span>
+                    <span>{{ c.message }}</span>
+                  </li>
+                </ul>
+                <div class="actions" style="justify-content:flex-start;margin-top:12px;">
+                  <button type="button" class="btn" :disabled="healthLoading" @click="refreshHealth">重跑备份健康</button>
+                  <button type="button" class="btn" :disabled="pointsLoading" @click="loadPoints">刷新列表</button>
+                </div>
+              </template>
+              <div v-else class="hint">尚未计算备份健康。</div>
+            </fieldset>
+
+            <!-- 2. 备份点列表 -->
+            <fieldset>
+              <legend>备份点列表</legend>
+              <p class="hint" style="margin-bottom:12px;">
+                本机回滚快照用于快速回滚，导出备份用于离机保存，冷备由宿主机定时产出；每条都标注来由、体积与校验结论。
+              </p>
+              <div v-if="pointsLoading" class="hint">加载中…</div>
+              <div v-else-if="pointsError" class="hint" style="color:var(--red);">加载失败：{{ pointsError }}</div>
+              <div v-else-if="!points.length" class="hint">{{ pointsEmptyHint }}</div>
+              <table v-else class="token-list">
+                <thead>
+                  <tr>
+                    <th>介质 / 用途</th>
+                    <th>备份点</th>
+                    <th>来由</th>
+                    <th>体积</th>
+                    <th>内容</th>
+                    <th>照片</th>
+                    <th>校验</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="p in points" :key="p.id">
+                    <td>
+                      {{ pointDisplay(p).mediumLabel }}
+                      <div class="hint" style="margin-top:2px;">{{ pointDisplay(p).purpose }}</div>
+                    </td>
+                    <td class="mono">
+                      {{ p.detail?.ts || p.id }}
+                      <div class="hint" style="margin-top:2px;">{{ pointDisplay(p).createdLabel }}</div>
+                    </td>
+                    <td>
+                      {{ pointDisplay(p).provenanceLabel }}
+                      <div
+                        v-if="p.medium === 'cold_backup' && p.detail?.reported === false"
+                        class="hint"
+                        style="margin-top:2px;"
+                      >有备份但任务没报告</div>
+                    </td>
+                    <td>{{ pointDisplay(p).sizeLabel }}</td>
+                    <td>
+                      {{ pointDisplay(p).contentsLabels.join('、') || '—' }}
+                      <div v-if="pointDisplay(p).missingLabels.length" class="hint" style="margin-top:2px;color:var(--yellow);">
+                        缺少：{{ pointDisplay(p).missingLabels.join('、') }}
+                      </div>
+                    </td>
+                    <td>
+                      <template v-for="(info, kind) in p.photos" :key="kind">
+                        <div
+                          v-if="kind === 'standard' || kind === 'other'"
+                          class="hint"
+                          style="margin-top:0;"
+                        >
+                          {{ kind === 'standard' ? '标准图' : '其它照片' }}：{{ info.count || 0 }} 张{{ info.missing ? `（缺失引用 ${info.missing}）` : '' }}
+                        </div>
+                      </template>
+                      <span v-if="!p.photos || (!p.photos.standard && !p.photos.other)" class="hint">—</span>
+                    </td>
+                    <td>
+                      <span
+                        v-if="pointDisplay(p).checkOk === true"
+                        class="status-pill ok"
+                      >可恢复</span>
+                      <span
+                        v-else-if="pointDisplay(p).checkOk === false"
+                        class="status-pill empty"
+                      >不可恢复</span>
+                      <span v-else class="hint">未校验</span>
+                      <div
+                        v-if="pointDisplay(p).checkMessages.length"
+                        class="hint"
+                        style="margin-top:2px;"
+                      >{{ pointDisplay(p).checkMessages.join('；') }}</div>
+                      <div v-if="pointDisplay(p).checkAt" class="hint" style="margin-top:2px;">
+                        校验于 {{ formatTs(pointDisplay(p).checkAt) }}
+                      </div>
+                    </td>
+                    <td>
+                      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                        <button
+                          v-if="p.medium !== 'cold_backup'"
+                          type="button"
+                          class="btn btn-sm"
+                          :disabled="validatingId === p.id"
+                          @click="validatePoint(p.id)"
+                        >{{ validatingId === p.id ? '校验中…' : '校验' }}</button>
+                        <button
+                          v-if="p.medium === 'local_snapshot' && pointDisplay(p).recoverable"
+                          type="button"
+                          class="btn btn-sm btn-danger"
+                          :disabled="rollingBackTs === (p.detail?.ts || '')"
+                          @click="onRollbackSnapshot(p)"
+                        >{{ rollingBackTs === (p.detail?.ts || '') ? '回滚中…' : '数据回滚' }}</button>
+                        <span v-if="p.medium === 'cold_backup'" class="hint">只读</span>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-if="coldPoints.length" style="margin-top:14px;">
+                <div class="hint" style="margin-bottom:6px;">
+                  冷备（宿主机定时产出，只读；在页面不能直接恢复）
+                  <template v-if="coldPoints.some((p) => p.detail?.reported === false)">
+                    ：其中「有备份但任务没报告」的条目来自目录扫描兜底，没有任务写出的校验结论。
+                  </template>
+                </div>
+                <ul class="hint" style="margin:0;padding-left:0;list-style:none;">
+                  <li v-for="p in coldPoints" :key="p.id" style="margin-bottom:4px;">
+                    <span class="mono">{{ p.detail?.ts || p.id }}</span>
+                    · {{ formatBytes(p.size_bytes) }}
+                    · {{ p.provenance_label || '—' }}
+                    · {{ pointDisplay(p).checkOk === false ? '校验未通过' : '校验通过' }}
+                  </li>
+                </ul>
+              </div>
+              <div v-else class="hint" style="margin-top:10px;">
+                没有冷备：宿主机冷备任务尚未产出，或本机不是该任务的产出目录。
+              </div>
+              <div v-if="notBackedUp.length" style="margin-top:12px;">
+                <div class="hint" style="margin-bottom:6px;">不备份清单（这些内容不会进入任何备份点）</div>
+                <ul class="hint" style="margin:0;padding-left:0;list-style:none;">
+                  <li v-for="item in notBackedUp" :key="item.name" style="margin-bottom:4px;">
+                    <strong>{{ item.name }}</strong>：{{ item.reason }}
+                  </li>
+                </ul>
+              </div>
+            </fieldset>
+
+            <!-- 3. 新建备份 -->
             <fieldset>
               <legend>导出备份</legend>
               <p class="hint" style="margin-bottom:12px;">
-                导出为口令加密的 <code>.luyunbak</code> 文件，可打包 POS 凭据、运行配置与业务数据。口令遗失将无法解密恢复，请牢记。
+                导出为口令加密的 <code>.luyunbak</code> 文件，可打包 POS 凭据、运行配置、业务数据与两类卫生照片。口令遗失将无法解密恢复，请牢记。
               </p>
               <div class="grid">
                 <div>
@@ -445,6 +710,18 @@ onMounted(() => {
                     <span>同时打包配方数据</span>
                   </label>
                 </div>
+                <div class="full">
+                  <label class="luyun-check-row">
+                    <LuyunCheckbox v-model="exportForm.include_standard_photos" />
+                    <span>同时打包标准图（含全部历史版本）</span>
+                  </label>
+                </div>
+                <div class="full">
+                  <label class="luyun-check-row">
+                    <LuyunCheckbox v-model="exportForm.include_other_photos" />
+                    <span>同时打包其它照片（日常实拍、专项、整改回拍、教材）</span>
+                  </label>
+                </div>
               </div>
               <div v-if="exportHasLargePayload" class="hint" style="margin-top:8px;">
                 已勾选业务数据或配方，备份文件可能较大，导出耗时会更长。
@@ -454,10 +731,11 @@ onMounted(() => {
               </div>
             </fieldset>
 
+            <!-- 4. 恢复 -->
             <fieldset>
-              <legend>导入 / 恢复</legend>
+              <legend>恢复</legend>
               <p class="hint" style="margin-bottom:12px;">
-                选择 <code>.luyunbak</code> 备份文件并输入导出时的口令，先预览核对再确认导入（备份文件只需上传一次）。
+                选择 <code>.luyunbak</code> 导出备份并输入导出时的口令，先预览核对再确认恢复（备份文件只需上传一次）。
               </p>
               <div class="grid">
                 <div class="full">
@@ -493,6 +771,29 @@ onMounted(() => {
                 <div v-for="[k, v] in importPreviewItems" :key="k"><span class="k">{{ k }}</span><span class="v">{{ v }}</span></div>
               </div>
 
+              <!-- 两层校验：备份自身损坏 → 阻止恢复且不可覆盖 -->
+              <div v-if="importHasErrors" class="alert error show" style="margin-top:12px;">
+                这份备份自身不一致，已阻止恢复（无法强制继续）：
+                <ul style="margin:6px 0 0;padding-left:18px;">
+                  <li v-for="(msg, i) in importErrors" :key="i">{{ msg }}</li>
+                </ul>
+              </div>
+              <!-- 跨备份点差异 → 只提示，默认不勾选受影响类别 -->
+              <div v-else-if="requiresForce" class="alert info show" style="margin-top:12px;">
+                这份备份缺少当前数据引用的照片{{ importRecheckedMissing.length ? `（${importRecheckedMissing.join('、')}）` : '' }}。
+                这只是不匹配，不是备份损坏：受影响的照片类已默认不勾选；若仍要恢复它们，需勾选下方「我已知晓并强制继续」。
+              </div>
+
+              <div v-if="importPreview" style="margin-top:14px;">
+                <div class="hint" style="margin-bottom:6px;">照片清单</div>
+                <ul class="hint" style="margin:0;padding-left:0;list-style:none;">
+                  <li v-for="(item, i) in importPhotoItems" :key="i">{{ item }}</li>
+                </ul>
+                <div v-if="importMissing.length" class="hint" style="margin-top:6px;">
+                  备份中不含：{{ importMissing.map((m) => m.label).join('、') }}
+                </div>
+              </div>
+
               <div v-if="importPreview" style="margin-top:14px;">
                 <div class="hint" style="margin-bottom:8px;">恢复模式</div>
                 <LuyunRadioGroup
@@ -516,16 +817,37 @@ onMounted(() => {
                 </label>
                 <label class="luyun-check-row" style="display:flex;margin-top:6px;">
                   <LuyunCheckbox v-model="importState.apply_app_db" :disabled="!importIncludes.app_db" />
-                  <span>业务数据库</span>
+                  <span>业务数据</span>
                 </label>
                 <label class="luyun-check-row" style="display:flex;margin-top:6px;">
                   <LuyunCheckbox v-model="importState.apply_recipes" :disabled="!importIncludes.recipes_db" />
                   <span>配方数据</span>
                 </label>
+                <label class="luyun-check-row" style="display:flex;margin-top:6px;">
+                  <LuyunCheckbox v-model="importState.apply_standard_photos" :disabled="!importIncludes.standard_photos" />
+                  <span>标准图</span>
+                </label>
+                <label class="luyun-check-row" style="display:flex;margin-top:6px;">
+                  <LuyunCheckbox v-model="importState.apply_other_photos" :disabled="!importIncludes.other_photos" />
+                  <span>其它照片</span>
+                </label>
               </div>
 
+              <label v-if="importPreview && forceRequired" class="luyun-check-row" style="margin-top:12px;">
+                <LuyunCheckbox v-model="forceContinue" />
+                <span>我已知晓并强制继续（已勾选备份中缺失的照片类）</span>
+              </label>
+
               <div v-if="importPreview" class="actions">
-                <button type="button" class="btn btn-danger" :disabled="importing" @click="onApplyImport">{{ importApplyLabel }}</button>
+                <button
+                  type="button"
+                  class="btn btn-danger"
+                  :disabled="!canApplyImport"
+                  @click="onApplyImport"
+                >{{ importApplyLabel }}</button>
+              </div>
+              <div v-if="importPreview && importInvalidReason" class="hint" style="margin-top:6px;color:var(--yellow);">
+                {{ importInvalidReason }}
               </div>
               <div v-if="importProgress.active" class="upload-progress" :class="'is-' + importProgress.phase">
                 <div class="upload-progress__track">
@@ -537,43 +859,159 @@ onMounted(() => {
                 </div>
                 <span class="upload-progress__label">{{ progressLabel(importProgress) }}</span>
               </div>
-            </fieldset>
 
-            <fieldset>
-              <legend>回滚快照</legend>
-              <p class="hint" style="margin-bottom:12px;">
-                覆盖导入前系统会自动创建回滚点；也可在此手动回滚到历史快照。
-              </p>
-              <div v-if="snapshotsLoading" class="hint">加载中…</div>
-              <div v-else-if="snapshotsError" class="hint" style="color:var(--red);">加载失败：{{ snapshotsError }}</div>
-              <div v-else-if="!snapshots.length" class="hint">暂无回滚点</div>
-              <table v-else class="token-list">
-                <thead>
-                  <tr><th>时间戳</th><th>创建时间</th><th>大小</th><th>文件</th><th></th></tr>
-                </thead>
-                <tbody>
-                  <tr v-for="s in snapshots" :key="s.ts">
-                    <td class="mono">{{ s.ts }}</td>
-                    <td>{{ formatTs(s.created_at) }}</td>
-                    <td>{{ formatBytes(s.size_bytes) }}</td>
-                    <td class="mono">{{ (s.files || []).join(', ') || '—' }}</td>
-                    <td>
-                      <button
-                        type="button"
-                        class="btn btn-sm btn-danger"
-                        :disabled="rollingBackTs === s.ts"
-                        @click="onRollbackSnapshot(s.ts)"
-                      >{{ rollingBackTs === s.ts ? '回滚中…' : '回滚' }}</button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-              <div class="actions" style="justify-content:flex-start;">
-                <button type="button" class="btn" :disabled="snapshotsLoading" @click="loadSnapshots">刷新列表</button>
+              <div style="margin-top:16px;">
+                <div class="hint" style="margin-bottom:8px;">
+                  本机回滚快照（用于快速的数据回滚；回滚前会自动新建一份本机回滚快照）
+                </div>
+                <div v-if="snapshotsLoading" class="hint">加载中…</div>
+                <div v-else-if="snapshotsError" class="hint" style="color:var(--red);">加载失败：{{ snapshotsError }}</div>
+                <div v-else-if="!snapshots.length" class="hint">还没有可用于恢复的备份</div>
+                <table v-else class="token-list">
+                  <thead>
+                    <tr><th>时间戳</th><th>创建时间</th><th>来由</th><th>大小</th><th>文件</th><th></th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="s in snapshots" :key="s.ts">
+                      <td class="mono">{{ s.ts }}</td>
+                      <td>{{ formatTs(s.created_at) || '—' }}</td>
+                      <td>{{ s.provenance_label || '—' }}</td>
+                      <td>{{ formatBytes(s.size_bytes) }}</td>
+                      <td class="mono">{{ (s.files || []).join(', ') || '—' }}</td>
+                      <td>
+                        <button
+                          type="button"
+                          class="btn btn-sm btn-danger"
+                          :disabled="!s.recoverable || rollingBackTs === s.ts"
+                          @click="onRollbackSnapshot(s)"
+                        >{{ rollingBackTs === s.ts ? '回滚中…' : '数据回滚' }}</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             </fieldset>
-          </div>
 
+            <!-- 5. 保留与清理 -->
+            <fieldset>
+              <legend>保留与清理</legend>
+              <p class="hint" style="margin-bottom:12px;">
+                本机回滚快照、导出备份与冷备各自保留份数；超出份数会被清理，但更新作业前的本机回滚快照与最近一份永不自动删除。保存前会先展示将删除哪些备份点。
+              </p>
+              <div v-if="retentionLoading" class="hint">加载中…</div>
+              <template v-else>
+                <div class="grid">
+                  <div>
+                    <label for="snapshotKeep">本机回滚快照保留份数</label>
+                    <LuyunNumberInput
+                      id="snapshotKeep"
+                      v-model="retentionForm.snapshot_keep"
+                      :min="retentionLimits?.snapshot_keep_min ?? 1"
+                      :max="retentionLimits?.snapshot_keep_max ?? 20"
+                    />
+                  </div>
+                  <div>
+                    <label for="exportKeep">导出备份保留份数</label>
+                    <LuyunNumberInput
+                      id="exportKeep"
+                      v-model="retentionForm.export_keep"
+                      :min="retentionLimits?.export_keep_min ?? 1"
+                      :max="retentionLimits?.export_keep_max ?? 20"
+                    />
+                  </div>
+                  <div>
+                    <label for="coldKeep">冷备保留份数</label>
+                    <LuyunNumberInput
+                      id="coldKeep"
+                      v-model="retentionForm.cold_keep"
+                      :min="retentionLimits?.cold_keep_min ?? 1"
+                      :max="retentionLimits?.cold_keep_max ?? 90"
+                    />
+                  </div>
+                </div>
+                <div class="hint" style="margin-top:6px;">
+                  默认值：本机回滚快照 {{ retentionLimits?.snapshot_keep_default ?? '—' }} 份、
+                  导出备份 {{ retentionLimits?.export_keep_default ?? '—' }} 份、
+                  冷备 {{ retentionLimits?.cold_keep_default ?? '—' }} 份。
+                  导出备份以 .luyunbak 下载到浏览器，本机另留一份副本用于列表展示与直接恢复。
+                </div>
+
+                <div v-if="cleanupPreview" style="margin-top:14px;">
+                  <div class="hint" style="margin-bottom:6px;">
+                    当前配置的清理预览：将删除本机回滚快照 {{ retentionPreviewSummary.snapshotDelete }} 份、
+                    导出备份 {{ retentionPreviewSummary.exportDelete }} 份、
+                    冷备 {{ retentionPreviewSummary.coldDelete }} 份；受保护 {{ retentionPreviewSummary.protected }} 份。
+                  </div>
+                  <ul class="hint" style="margin:0;padding-left:0;list-style:none;">
+                    <li
+                      v-for="entry in cleanupPreview.snapshot.protected"
+                      :key="'sp-' + entry.id"
+                      style="margin-bottom:4px;"
+                    >
+                      <span class="status-pill ok" style="margin-right:6px;">受保护</span>
+                      {{ entry.ts }} · {{ entry.provenance_label }} · {{ entry.reason }}
+                    </li>
+                    <li
+                      v-for="entry in cleanupPreview.export.protected"
+                      :key="'ep-' + entry.id"
+                      style="margin-bottom:4px;"
+                    >
+                      <span class="status-pill ok" style="margin-right:6px;">受保护</span>
+                      {{ entry.name }} · {{ entry.reason }}
+                    </li>
+                    <li
+                      v-for="entry in cleanupPreview.cold.protected"
+                      :key="'cp-' + entry.id"
+                      style="margin-bottom:4px;"
+                    >
+                      <span class="status-pill ok" style="margin-right:6px;">受保护</span>
+                      {{ entry.ts }} · {{ entry.reason }}
+                    </li>
+                    <li
+                      v-for="entry in cleanupPreview.snapshot.delete"
+                      :key="'sd-' + entry.id"
+                      style="margin-bottom:4px;"
+                    >
+                      <span class="status-pill empty" style="margin-right:6px;">将删除</span>
+                      {{ entry.ts }} · {{ entry.provenance_label }} · {{ formatBytes(entry.size_bytes) }}
+                    </li>
+                    <li
+                      v-for="entry in cleanupPreview.export.delete"
+                      :key="'ed-' + entry.id"
+                      style="margin-bottom:4px;"
+                    >
+                      <span class="status-pill empty" style="margin-right:6px;">将删除</span>
+                      {{ entry.name }} · {{ formatBytes(entry.size_bytes) }}
+                    </li>
+                    <li
+                      v-for="entry in cleanupPreview.cold.delete"
+                      :key="'cd-' + entry.id"
+                      style="margin-bottom:4px;"
+                    >
+                      <span class="status-pill empty" style="margin-right:6px;">将删除</span>
+                      {{ entry.ts }} · {{ formatBytes(entry.size_bytes) }}
+                    </li>
+                  </ul>
+                </div>
+
+                <div class="actions" style="justify-content:flex-start;margin-top:12px;">
+                  <button type="button" class="btn" :disabled="retentionLoading" @click="loadRetention">刷新</button>
+                  <button type="button" class="btn btn-primary" :disabled="retentionSaving" @click="saveRetention">
+                    {{ retentionSaving ? '保存中…' : '保存保留配置' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-danger"
+                    :disabled="cleaningUp || cleanupPreviewLoading"
+                    @click="runCleanup"
+                  >{{ cleaningUp ? '清理中…' : '立即清理' }}</button>
+                </div>
+                <div v-if="!retention && !cleanupPreview" class="hint" style="margin-top:8px;">
+                  尚未加载保留配置。
+                </div>
+              </template>
+            </fieldset>
+          </div>
           <div v-show="activeSection === 'update'" class="section-panel">
             <fieldset>
               <legend>GitHub 连接</legend>
@@ -783,7 +1221,7 @@ onMounted(() => {
               </div>
               <label
                 v-if="discardLocalChangesAllowed"
-                class="check"
+                class="luyun-check-row"
                 style="margin-bottom:12px;"
               >
                 <LuyunCheckbox v-model="discardLocalChanges" />
@@ -792,7 +1230,7 @@ onMounted(() => {
               <div v-if="needsPeakOverride" class="alert show" style="margin-bottom:12px;">
                 当前处于营业高峰时段。若仍要继续，请勾选下方覆盖项后再次确认。
               </div>
-              <label class="check" style="margin-bottom:12px;">
+              <label class="luyun-check-row" style="margin-bottom:12px;">
                 <LuyunCheckbox v-model="peakOverride" />
                 <span>我已知晓营业高峰风险，仍然执行更新</span>
               </label>
@@ -812,6 +1250,9 @@ onMounted(() => {
               <p class="hint" style="margin-bottom:12px;">
                 进度保存在本机状态文件，主服务短暂重启后仍可继续查看。
                 <span v-if="jobPolling">正在轮询…</span>
+                <span v-else-if="healthPending && autoRecheckEnabled">
+                  将于 {{ recheckIn }} 秒后自动重新检测就绪（冷却重检，不会自动重试更新或回滚）。
+                </span>
               </p>
               <div v-if="!job || job.stage === 'idle'" class="hint">暂无进行中的更新作业。</div>
               <template v-else>
@@ -821,7 +1262,7 @@ onMounted(() => {
                     <span class="v">
                       <span
                         class="status-pill"
-                        :class="job.stage === 'succeeded' ? 'ok' : (job.stage === 'failed' ? 'empty' : 'empty')"
+                        :class="job.stage === 'succeeded' ? 'ok' : 'empty'"
                       >{{ jobStageLabel }}</span>
                     </span>
                   </div>
@@ -837,25 +1278,147 @@ onMounted(() => {
                     <span class="k">日志</span>
                     <span class="v mono">{{ job.log_path || '—' }}</span>
                   </div>
+                  <div v-if="job.restart_requested_at">
+                    <span class="k">已请求重启</span>
+                    <span class="v">{{ formatTs(job.restart_requested_at) }}</span>
+                  </div>
+                  <div v-if="job.health_confirmed_at">
+                    <span class="k">健康确认</span>
+                    <span class="v">{{ formatTs(job.health_confirmed_at) }}</span>
+                  </div>
                 </div>
                 <div class="hint" style="margin-bottom:8px;">{{ job.message || '' }}</div>
                 <div v-if="job.error" class="alert show">{{ job.error }}</div>
                 <div v-if="job.rollback_attempted" class="hint" style="margin-top:8px;">
                   已尝试恢复更新前的应用目录：{{ job.rollback_ok ? '恢复成功' : '恢复未完全成功，请查看日志或 SSH 排查' }}
                 </div>
-                <div v-if="jobInProgress" class="actions" style="justify-content:flex-start;margin-top:12px;">
+                <div class="actions" style="justify-content:flex-start;margin-top:12px;">
                   <button
+                    v-if="jobInProgress"
                     type="button"
                     class="btn btn-danger"
                     :disabled="!canCancelJob"
                     @click="cancelJob"
                   >{{ cancelling || job.cancel_requested ? '正在终止…' : '终止更新' }}</button>
+                  <button
+                    v-else-if="canRollbackToPrevious"
+                    type="button"
+                    class="btn btn-danger"
+                    :disabled="applying"
+                    @click="rollbackToPrevious"
+                  >回到上一版本（{{ previousRef }}）</button>
                 </div>
                 <div v-if="jobLogTail" class="update-log-tail" style="margin-top:12px;">
                   <div class="hint" style="margin-bottom:6px;">最近日志</div>
                   <pre class="mono" style="max-height:220px;overflow:auto;margin:0;padding:10px;white-space:pre-wrap;word-break:break-word;background:rgba(0,0,0,0.25);border-radius:8px;font-size:12px;">{{ jobLogTail }}</pre>
                 </div>
               </template>
+            </fieldset>
+
+            <!-- 健康确认结果：succeeded_but_unhealthy 明确显示 + 三条出路 -->
+            <fieldset v-if="unhealthy || (healthPending && job && job.stage !== 'idle')">
+              <legend>健康确认结果</legend>
+              <div v-if="unhealthy" class="alert error show" style="margin-bottom:12px;">
+                已切换到 <span class="mono">{{ healthDetailView?.targetTag || '—' }}</span>，但重启后健康确认未通过。
+                页面不会自动重试，也不会自动回滚；请查看日志或回到上一版本。
+              </div>
+              <div v-else class="hint" style="margin-bottom:12px;">
+                主服务已切换、正在重启，等待健康确认（数据库已连接、迁移完成、关键表可读）。
+              </div>
+              <div class="meta-grid" style="margin-bottom:12px;">
+                <div>
+                  <span class="k">阶段</span>
+                  <span class="v">{{ healthDetailView?.stageLabel || '—' }}</span>
+                </div>
+                <div>
+                  <span class="k">健康结论</span>
+                  <span class="v">{{ healthDetailView?.healthDetail || '（尚未确认）' }}</span>
+                </div>
+                <div>
+                  <span class="k">回退点</span>
+                  <span class="v mono">{{ healthDetailView?.previousRef || '—' }}</span>
+                </div>
+                <div>
+                  <span class="k">日志</span>
+                  <span class="v mono">{{ healthDetailView?.logPath || '—' }}</span>
+                </div>
+              </div>
+              <div v-if="healthCheckError" class="alert show" style="margin-bottom:12px;">
+                重新检测失败：{{ healthCheckError }}
+              </div>
+              <div class="actions" style="justify-content:flex-start;">
+                <button
+                  type="button"
+                  class="btn"
+                  :disabled="healthChecking"
+                  @click="recheckHealth"
+                >{{ healthChecking ? '检测中…' : '重新检测' }}</button>
+                <button
+                  v-if="canRollbackToPrevious"
+                  type="button"
+                  class="btn btn-danger"
+                  :disabled="applying"
+                  @click="rollbackToPrevious"
+                >回到上一版本（{{ previousRef }}）</button>
+                <a
+                  v-if="healthDetailView?.logPath"
+                  class="btn"
+                  href="/logs"
+                  target="_blank"
+                  rel="noopener"
+                >查看日志（{{ healthDetailView.logPath }}）</a>
+              </div>
+              <div v-if="!autoRecheckEnabled" class="hint" style="margin-top:8px;">
+                自动重检已关闭，请手动点击「重新检测」。
+              </div>
+            </fieldset>
+
+            <!-- 更新历史 -->
+            <fieldset>
+              <legend>更新历史</legend>
+              <p class="hint" style="margin-bottom:12px;">
+                最近一次成功：{{ lastSuccessEntry ? `${lastSuccessEntry.target_tag}（${formatTs(lastSuccessEntry.finished_at)}）` : '（暂无成功记录）' }}；
+                之后失败或取消 {{ failureCount }} 次。
+              </p>
+              <div v-if="historyLoading" class="hint">加载中…</div>
+              <div v-else-if="historyError" class="hint" style="color:var(--red);">
+                加载失败：{{ historyError }}
+                <button type="button" class="btn btn-sm" style="margin-left:8px;" @click="loadHistory">重试</button>
+              </div>
+              <div v-else-if="!historyEntries.length" class="hint">暂无更新历史。</div>
+              <table v-else class="token-list">
+                <thead>
+                  <tr>
+                    <th>目标版本</th>
+                    <th>更新前版本</th>
+                    <th>结果</th>
+                    <th>耗时</th>
+                    <th>结束时间</th>
+                    <th>日志</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(entry, i) in historyEntries" :key="`${entry.target_tag}-${entry.finished_at}-${i}`">
+                    <td class="mono">{{ entry.target_tag || '—' }}</td>
+                    <td class="mono">{{ entry.previous_tag || '—' }}</td>
+                    <td>
+                      <span class="status-pill" :class="entry.result === 'succeeded' ? 'ok' : 'empty'">
+                        {{ entry.result_label || entry.result }}
+                      </span>
+                      <div v-if="entry.rolled_back" class="hint" style="margin-top:2px;">
+                        已回滚：{{ entry.rollback_ok ? '恢复成功' : '恢复未完全成功' }}
+                      </div>
+                      <div v-if="entry.error" class="hint" style="margin-top:2px;">{{ entry.error }}</div>
+                    </td>
+                    <td>{{ entry.duration_seconds != null ? `${entry.duration_seconds} 秒` : '—' }}</td>
+                    <td>{{ formatTs(entry.finished_at) || '—' }}</td>
+                    <td class="mono">{{ entry.log_path || '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="actions" style="justify-content:flex-start;">
+                <button type="button" class="btn" :disabled="historyLoading" @click="loadHistory">刷新历史</button>
+              </div>
             </fieldset>
           </div>
 
@@ -931,10 +1494,39 @@ onMounted(() => {
 
     <div v-if="importSuccessModal.show" class="modal-overlay show" role="dialog" aria-modal="true">
       <div class="modal-box">
-        <h3>导入成功</h3>
+        <h3>恢复完成</h3>
         <p>{{ importSuccessModal.message }}</p>
         <div class="actions">
           <button type="button" class="btn btn-primary" @click="confirmImportSuccessRedirect">确认</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 两步确认：覆盖导入 / 数据回滚 / 清理 / 保存保留配置都走这里，不使用浏览器原生 confirm -->
+    <div v-if="confirmState.open" class="modal-overlay show" role="dialog" aria-modal="true">
+      <div class="modal-box">
+        <h3>{{ confirmState.title }}</h3>
+        <p>{{ confirmState.message }}</p>
+        <ul v-if="confirmState.details.length" class="confirm-details">
+          <li v-for="(item, i) in confirmState.details" :key="i">{{ item }}</li>
+        </ul>
+        <label
+          v-for="box in confirmState.checkboxes"
+          :key="box.key"
+          class="luyun-check-row"
+          style="display:flex;margin-top:10px;"
+        >
+          <LuyunCheckbox v-model="confirmChecked[box.key]" />
+          <span>{{ box.label }}</span>
+        </label>
+        <div class="actions">
+          <button type="button" class="btn" @click="closeConfirm">取消</button>
+          <button
+            type="button"
+            :class="['btn', confirmState.danger ? 'btn-danger' : 'btn-primary']"
+            :disabled="!confirmReady"
+            @click="onConfirmClick"
+          >{{ confirmState.confirmLabel }}</button>
         </div>
       </div>
     </div>
@@ -1107,6 +1699,12 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
   padding: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 13px; word-break: break-all; margin-bottom: 16px; user-select: all;
 }
+
+.confirm-details {
+  margin: 0 0 8px; padding-left: 18px;
+  font-size: 12px; color: var(--text-dim); line-height: 1.7;
+}
+.confirm-details li { margin-bottom: 2px; }
 
 @media (max-width: 700px) {
   .container { padding: 20px 18px; }
