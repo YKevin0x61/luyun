@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-系统完整备份 v2：口令加密 tar 归档、快照回滚、数据库覆盖/合并。
+系统完整备份：口令加密 tar 归档、快照回滚、数据库覆盖/合并、卫生照片、冷备归档。
+
+归档格式向后兼容：magic 保持 ``LUYUNBK2``，``meta.json`` 的 ``version`` 递增。
+新增成员（两类卫生照片）都是可选成员，v2 备份仍可解析与恢复。
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import struct
@@ -19,26 +23,74 @@ import tarfile
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
 
 from config import settings
 from db_core.schema import ALL_TABLES, RECIPE_TABLES
-from services import credentials_store
+from services import backup_retention, credentials_store
 from services.credentials_store import CHINA_TZ, _derive_backup_key
 
 logger = logging.getLogger(__name__)
 
-# —— v2 备份格式 ——
-BACKUP_MAGIC = b"LUYUNBK2"
-BACKUP_VERSION = 2
-SNAPSHOT_DIRNAME = "restore_snapshots"
-SNAPSHOT_KEEP = 5
+# 快照保留份数的默认值单一来源在 backup_retention；这里保留旧名以兼容调用方
+SNAPSHOT_KEEP = backup_retention.SNAPSHOT_KEEP_DEFAULT
 
 # auth 在 ALL_TABLES 里是虚拟项，实际表名如下
 AUTH_PHYSICAL_TABLES = ("admin_user", "sessions", "api_tokens")
+
+# —— 备份格式 ——
+BACKUP_MAGIC = b"LUYUNBK2"
+BACKUP_VERSION = 3
+EXPORT_DIRNAME = "backup_exports"
+SNAPSHOT_DIRNAME = "restore_snapshots"
+
+# —— 卫生照片归档内目录 ——
+PHOTO_STANDARD = "standard"
+PHOTO_OTHER = "other"
+PHOTO_MEMBER_DIRS = {
+    PHOTO_STANDARD: "photos/standard",
+    PHOTO_OTHER: "photos/other",
+}
+
+# —— 快照来由 ——
+PROVENANCE_MANUAL = "manual"
+PROVENANCE_PRE_IMPORT = "pre_import"
+PROVENANCE_PRE_UPDATE = "pre_update"
+PROVENANCE_PRE_ROLLBACK = "pre_rollback"
+PROVENANCE_LABELS = {
+    PROVENANCE_MANUAL: "手动",
+    PROVENANCE_PRE_IMPORT: "覆盖导入前",
+    PROVENANCE_PRE_UPDATE: "更新作业前",
+    PROVENANCE_PRE_ROLLBACK: "回滚前",
+}
+
+# 备份归档覆盖的内容类别（页面与恢复结果共用同一组领域词）
+CONTENT_CREDENTIALS = "credentials"
+CONTENT_RUNTIME = "runtime"
+CONTENT_APP_DB = "app_db"
+CONTENT_RECIPES = "recipes_db"
+CONTENT_STANDARD_PHOTOS = "standard_photos"
+CONTENT_OTHER_PHOTOS = "other_photos"
+CONTENT_LABELS = {
+    CONTENT_CREDENTIALS: "凭据",
+    CONTENT_RUNTIME: "运行配置",
+    CONTENT_APP_DB: "业务数据",
+    CONTENT_RECIPES: "配方数据",
+    CONTENT_STANDARD_PHOTOS: "标准图",
+    CONTENT_OTHER_PHOTOS: "其它照片",
+}
+
+# 基础校验读取的关键表；缺失任一即视为不可恢复
+KEY_TABLES = ("orders", "tables", "dish_stations")
+
+# 冷备状态文件（固定位置，冷备任务每次运行覆盖写入）
+COLD_STATUS_FILENAME = "cold_backup_status.json"
+COLD_ARCHIVE_NAME = "luyun_cold_backup.tar"
+COLD_MANIFEST_NAME = "manifest.json"
+COLD_CHECKSUMS_NAME = "SHA256SUMS"
 
 # 每张表的去重键（与 api/admin.py 导入逻辑一致）
 TABLE_DEDUP_KEY: Dict[str, str] = {
@@ -55,6 +107,15 @@ def _snapshot_root() -> Path:
     return Path(settings.DATABASE_DIR) / SNAPSHOT_DIRNAME
 
 
+def _export_root() -> Path:
+    return Path(settings.DATABASE_DIR) / EXPORT_DIRNAME
+
+
+def get_hygiene_capture_root() -> Path:
+    """卫生照片文件目录（与启动时 FileCaptureStore 使用同一路径）。"""
+    return Path(settings.DATABASE_DIR) / "hygiene-captures"
+
+
 def get_recipes_db_path() -> str:
     """Recipe tables live in app.db; backup extracts sop_* into a recipes.db member."""
     return settings.APP_DB_PATH
@@ -62,6 +123,18 @@ def get_recipes_db_path() -> str:
 
 def get_credentials_file_path() -> str:
     return os.path.join(settings.DATABASE_DIR, "credentials.enc")
+
+
+def get_cold_backup_dir() -> Path:
+    """冷备输出根目录；部署脚本可用 BACKUP_DIR 覆盖。"""
+    override = os.environ.get("BACKUP_DIR")
+    if override:
+        return Path(override)
+    return Path(settings.COLD_BACKUP_DIR)
+
+
+def cold_status_path(backup_dir: Optional[Path] = None) -> Path:
+    return (backup_dir or get_cold_backup_dir()) / COLD_STATUS_FILENAME
 
 
 def _app_db_target_tables() -> List[str]:
@@ -83,10 +156,230 @@ def _read_tar_member(tar: tarfile.TarFile, name: str) -> bytes:
     return extracted.read()
 
 
-# ==================== v2 加密归档 ====================
+# ==================== 卫生照片分类 ====================
 
-def build_backup(
-    passphrase: str,
+# 标准图：日常检查项的合格参照，含全部历史版本（hygiene_standards 每一行一个版本）
+_STANDARD_PHOTO_QUERIES: Tuple[str, ...] = (
+    "SELECT capture_id FROM hygiene_standards",
+)
+
+# 其它照片：日常实拍、专项（深度清洁）、整改与回拍、教材
+_OTHER_PHOTO_QUERIES: Tuple[str, ...] = (
+    "SELECT capture_id FROM hygiene_daily_submissions",
+    "SELECT before_capture_id AS capture_id FROM hygiene_deep_clean_submissions",
+    "SELECT after_capture_id AS capture_id FROM hygiene_deep_clean_submissions",
+    "SELECT capture_id FROM hygiene_fix_tickets",
+    "SELECT capture_id FROM hygiene_fix_reshoots",
+    "SELECT left_capture_id AS capture_id FROM hygiene_teaching_examples",
+    "SELECT right_capture_id AS capture_id FROM hygiene_teaching_examples",
+)
+
+# 派生图（缩略图/预览图）由源照片派生，随源照片一起归类
+_VARIANT_QUERY = "SELECT source_capture_id, capture_id FROM hygiene_capture_variants"
+
+
+def _query_capture_ids(conn: sqlite3.Connection, sql: str) -> List[str]:
+    try:
+        rows = conn.execute(sql).fetchall()
+    except sqlite3.Error:
+        # 表不存在（旧库/未启用卫生模块）不算错误，按「没有这类照片」处理
+        return []
+    return [row[0] for row in rows if row and row[0]]
+
+
+def classify_hygiene_capture_ids(app_db_path: str) -> Dict[str, List[str]]:
+    """按业务身份把库中引用的照片分成标准图与其它照片两类。
+
+    分类在备份创建时确定并写入清单，不在读取时猜测。返回 ``capture_id``
+    列表（保持稳定顺序，便于测试与清单比对）。
+    """
+    result: Dict[str, List[str]] = {PHOTO_STANDARD: [], PHOTO_OTHER: []}
+    if not os.path.isfile(app_db_path):
+        return result
+
+    conn = sqlite3.connect(app_db_path)
+    try:
+        standard: set = set()
+        for sql in _STANDARD_PHOTO_QUERIES:
+            standard.update(_query_capture_ids(conn, sql))
+
+        other: set = set()
+        for sql in _OTHER_PHOTO_QUERIES:
+            other.update(_query_capture_ids(conn, sql))
+        # 一张照片同时被两类引用时，标准图优先（标准图更严格）
+        other -= standard
+
+        # 派生图跟随源照片归类
+        try:
+            variants = conn.execute(_VARIANT_QUERY).fetchall()
+        except sqlite3.Error:
+            variants = []
+        for source_id, variant_id in variants:
+            if not variant_id:
+                continue
+            if source_id in standard:
+                standard.add(variant_id)
+            elif source_id in other:
+                other.add(variant_id)
+
+        result[PHOTO_STANDARD] = sorted(standard)
+        result[PHOTO_OTHER] = sorted(other)
+    finally:
+        conn.close()
+    return result
+
+
+def collect_photo_blobs(
+    capture_root: Path,
+    capture_ids: Sequence[str],
+) -> Tuple[Dict[str, bytes], List[str]]:
+    """读取照片字节，返回 ``(存在的照片, 缺失的 capture_id)``。"""
+    blobs: Dict[str, bytes] = {}
+    missing: List[str] = []
+    for capture_id in capture_ids:
+        path = Path(capture_root) / capture_id
+        try:
+            if not path.is_file():
+                missing.append(capture_id)
+                continue
+            blobs[capture_id] = path.read_bytes()
+        except OSError:
+            missing.append(capture_id)
+    return blobs, missing
+
+
+def collect_hygiene_photo_members(
+    app_db_path: Optional[str] = None,
+    capture_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """收集两类卫生照片，返回归档成员、清单与缺项。
+
+    ``members`` 的键是归档内路径（``photos/standard/<capture_id>``），值是字节；
+    ``manifest`` 记录每类的文件数、总字节与校验和；``missing`` 记录库中有引用
+    但磁盘上找不到的照片。
+    """
+    db_path = app_db_path or settings.APP_DB_PATH
+    root = capture_root or get_hygiene_capture_root()
+    classified = classify_hygiene_capture_ids(db_path)
+
+    members: Dict[str, bytes] = {}
+    manifest: Dict[str, Any] = {}
+    missing: Dict[str, List[str]] = {PHOTO_STANDARD: [], PHOTO_OTHER: []}
+
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+        blobs, gone = collect_photo_blobs(root, classified[kind])
+        missing[kind] = gone
+        member_dir = PHOTO_MEMBER_DIRS[kind]
+        for capture_id, data in blobs.items():
+            members[f"{member_dir}/{capture_id}"] = data
+        digest = hashlib.sha256()
+        for capture_id in sorted(blobs):
+            digest.update(capture_id.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(blobs[capture_id])
+        manifest[kind] = {
+            "count": len(blobs),
+            "bytes": sum(len(b) for b in blobs.values()),
+            "sha256": digest.hexdigest(),
+            "referenced": len(classified[kind]),
+            "missing": len(gone),
+        }
+
+    return {"members": members, "manifest": manifest, "missing": missing}
+
+
+def photo_included_kinds(manifest: Optional[dict]) -> List[str]:
+    """清单里实际包含照片的类别（count > 0）。"""
+    if not manifest:
+        return []
+    return [
+        kind
+        for kind in (PHOTO_STANDARD, PHOTO_OTHER)
+        if int((manifest.get(kind) or {}).get("count") or 0) > 0
+    ]
+
+
+# ==================== 表行数快照（一致性校验的一半）====================
+
+def key_table_row_counts(app_db_path: str) -> Dict[str, int]:
+    """记录关键表的行数快照（备份创建时写入清单，校验时逐表对账）。"""
+    if not os.path.isfile(app_db_path):
+        return {}
+    try:
+        conn = sqlite3.connect(app_db_path)
+    except sqlite3.Error:
+        return {}
+    try:
+        return _count_rows(conn)
+    finally:
+        conn.close()
+
+
+def row_counts_from_db_bytes(db_bytes: Optional[bytes]) -> Dict[str, int]:
+    if not db_bytes:
+        return {}
+    fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-rows-")
+    os.close(fd)
+    try:
+        with open(tmp_path, "wb") as handle:
+            handle.write(db_bytes)
+        conn = sqlite3.connect(f"{Path(tmp_path).resolve().as_uri()}?immutable=1", uri=True)
+        try:
+            return _count_rows(conn)
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return {}
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _count_rows(conn: sqlite3.Connection) -> Dict[str, int]:
+    try:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    except sqlite3.Error:
+        return {}
+    counts: Dict[str, int] = {}
+    for table in KEY_TABLES:
+        if table not in names:
+            continue
+        try:
+            counts[table] = int(
+                conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            )
+        except sqlite3.Error:
+            continue
+    return counts
+
+
+def row_count_mismatches(
+    expected: Optional[dict],
+    actual: Optional[dict],
+) -> List[str]:
+    """清单记录的行数快照与实际不符 = 这份备份在创建后被改动/截断。"""
+    if not expected:
+        return []
+    mismatches: List[str] = []
+    for table, count in expected.items():
+        seen = (actual or {}).get(table)
+        if seen is None or int(seen) != int(count):
+            mismatches.append(
+                f"关键表 {table} 行数与清单不符（清单 {count}，归档 {seen}）"
+            )
+    return mismatches
+
+
+# ==================== 口令加密归档 ====================
+
+def _build_backup_members(
     *,
     include_runtime: bool,
     runtime_data: Optional[dict],
@@ -94,23 +387,40 @@ def build_backup(
     app_db_bytes: Optional[bytes],
     include_recipes: bool,
     recipes_db_bytes: Optional[bytes],
+    include_standard_photos: bool = False,
+    include_other_photos: bool = False,
+    photo_members: Optional[Dict[str, bytes]] = None,
+    photo_manifest: Optional[dict] = None,
+    photo_missing: Optional[dict] = None,
+    consistency: Optional[dict] = None,
+    provenance: str = PROVENANCE_MANUAL,
     app_version: str,
-) -> bytes:
-    """构建 v2 口令加密备份二进制包。"""
-    passphrase = (passphrase or "").strip()
-    if len(passphrase) < credentials_store.BACKUP_PASSPHRASE_MIN_LENGTH:
-        raise ValueError(f"导出口令至少 {credentials_store.BACKUP_PASSPHRASE_MIN_LENGTH} 位")
+) -> Tuple[bytes, dict]:
+    """组装归档成员与 ``meta.json``，返回 ``(未加密 tar 字节, meta)``。"""
+    if include_standard_photos and include_other_photos:
+        want_photo_kinds = {PHOTO_STANDARD, PHOTO_OTHER}
+    elif include_standard_photos:
+        want_photo_kinds = {PHOTO_STANDARD}
+    elif include_other_photos:
+        want_photo_kinds = {PHOTO_OTHER}
+    else:
+        want_photo_kinds = set()
 
     bundle = credentials_store.get_credentials()
     if bundle is None:
         raise ValueError("当前未配置凭据")
-
     credentials_bytes = json.dumps(
         bundle.to_storage(), ensure_ascii=False
     ).encode("utf-8")
 
     members: Dict[str, bytes] = {"credentials.json": credentials_bytes}
-    includes = {"runtime": False, "app_db": False, "recipes_db": False}
+    includes = {
+        "runtime": False,
+        "app_db": False,
+        "recipes_db": False,
+        CONTENT_STANDARD_PHOTOS: False,
+        CONTENT_OTHER_PHOTOS: False,
+    }
 
     if include_runtime and runtime_data is not None:
         members["runtime.json"] = json.dumps(
@@ -126,19 +436,54 @@ def build_backup(
         members["recipes.db"] = recipes_db_bytes
         includes["recipes_db"] = True
 
-    sha256_map = {
-        name: _sha256_hex(data)
-        for name, data in members.items()
-        if name != "meta.json"
+    photos_meta: Dict[str, Any] = {
+        PHOTO_STANDARD: {"included": False, "count": 0, "bytes": 0, "sha256": None},
+        PHOTO_OTHER: {"included": False, "count": 0, "bytes": 0, "sha256": None},
     }
+    member_manifest = photo_manifest or {}
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+        entry = dict(member_manifest.get(kind) or {})
+        entry.setdefault("count", 0)
+        entry.setdefault("bytes", 0)
+        entry.setdefault("sha256", None)
+        entry.setdefault("missing", 0)
+        entry["included"] = kind in want_photo_kinds
+        if kind in want_photo_kinds:
+            includes[
+                CONTENT_STANDARD_PHOTOS if kind == PHOTO_STANDARD else CONTENT_OTHER_PHOTOS
+            ] = True
+        photos_meta[kind] = entry
+
+    if want_photo_kinds and photo_members:
+        prefix_ok = {
+            kind: PHOTO_MEMBER_DIRS[kind] + "/"
+            for kind in want_photo_kinds
+        }
+        for name, data in photo_members.items():
+            if any(name.startswith(prefix) for prefix in prefix_ok.values()):
+                members[name] = data
 
     meta = {
         "version": BACKUP_VERSION,
         "exported_at": datetime.now(CHINA_TZ).isoformat(),
         "app_version": app_version,
+        "provenance": provenance,
         "includes": includes,
-        "sha256": sha256_map,
+        "photos": photos_meta,
+        "row_counts": row_counts_from_db_bytes(app_db_bytes) if app_db_bytes else {},
+        "sha256": {
+            name: _sha256_hex(data)
+            for name, data in members.items()
+            if not name.startswith("photos/")
+        },
     }
+    if photo_missing:
+        meta["photos_missing"] = {
+            kind: list(ids) for kind, ids in photo_missing.items() if ids
+        }
+    if consistency is not None:
+        meta["consistency"] = consistency
+
     members["meta.json"] = json.dumps(meta, ensure_ascii=False).encode("utf-8")
 
     tar_buffer = io.BytesIO()
@@ -147,7 +492,48 @@ def build_backup(
             info = tarfile.TarInfo(name=name)
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
-    tar_bytes = tar_buffer.getvalue()
+    return tar_buffer.getvalue(), meta
+
+
+def build_export_backup(
+    passphrase: str,
+    *,
+    include_runtime: bool,
+    runtime_data: Optional[dict],
+    include_app_db: bool,
+    app_db_bytes: Optional[bytes],
+    include_recipes: bool,
+    recipes_db_bytes: Optional[bytes],
+    include_standard_photos: bool = False,
+    include_other_photos: bool = False,
+    photo_members: Optional[Dict[str, bytes]] = None,
+    photo_manifest: Optional[dict] = None,
+    photo_missing: Optional[dict] = None,
+    consistency: Optional[dict] = None,
+    provenance: str = PROVENANCE_MANUAL,
+    app_version: str,
+) -> Tuple[bytes, dict]:
+    """构建口令加密备份包与它的 ``meta``（调用方据此写导出侧车清单）。"""
+    passphrase = (passphrase or "").strip()
+    if len(passphrase) < credentials_store.BACKUP_PASSPHRASE_MIN_LENGTH:
+        raise ValueError(f"导出口令至少 {credentials_store.BACKUP_PASSPHRASE_MIN_LENGTH} 位")
+
+    tar_bytes, meta = _build_backup_members(
+        include_runtime=include_runtime,
+        runtime_data=runtime_data,
+        include_app_db=include_app_db,
+        app_db_bytes=app_db_bytes,
+        include_recipes=include_recipes,
+        recipes_db_bytes=recipes_db_bytes,
+        include_standard_photos=include_standard_photos,
+        include_other_photos=include_other_photos,
+        photo_members=photo_members,
+        photo_manifest=photo_manifest,
+        photo_missing=photo_missing,
+        consistency=consistency,
+        provenance=provenance,
+        app_version=app_version,
+    )
 
     salt = os.urandom(credentials_store.BACKUP_SALT_BYTES)
     iterations = credentials_store.BACKUP_KDF_ITERATIONS
@@ -161,16 +547,92 @@ def build_backup(
     }
     header_bytes = json.dumps(header_obj, ensure_ascii=False).encode("utf-8")
 
-    return (
+    blob = (
         BACKUP_MAGIC
         + struct.pack(">I", len(header_bytes))
         + header_bytes
         + token
     )
+    meta["archive_bytes"] = len(blob)
+    meta["archive_sha256"] = _sha256_hex(blob)
+    return blob, meta
+
+
+def build_backup(
+    passphrase: str,
+    *,
+    include_runtime: bool,
+    runtime_data: Optional[dict],
+    include_app_db: bool,
+    app_db_bytes: Optional[bytes],
+    include_recipes: bool,
+    recipes_db_bytes: Optional[bytes],
+    include_standard_photos: bool = False,
+    include_other_photos: bool = False,
+    photo_members: Optional[Dict[str, bytes]] = None,
+    photo_manifest: Optional[dict] = None,
+    photo_missing: Optional[dict] = None,
+    consistency: Optional[dict] = None,
+    provenance: str = PROVENANCE_MANUAL,
+    app_version: str,
+) -> bytes:
+    """构建口令加密备份二进制包（向后兼容入口，只返回字节）。"""
+    blob, _meta = build_export_backup(
+        passphrase,
+        include_runtime=include_runtime,
+        runtime_data=runtime_data,
+        include_app_db=include_app_db,
+        app_db_bytes=app_db_bytes,
+        include_recipes=include_recipes,
+        recipes_db_bytes=recipes_db_bytes,
+        include_standard_photos=include_standard_photos,
+        include_other_photos=include_other_photos,
+        photo_members=photo_members,
+        photo_manifest=photo_manifest,
+        photo_missing=photo_missing,
+        consistency=consistency,
+        provenance=provenance,
+        app_version=app_version,
+    )
+    return blob
+
+
+def _read_photo_members(tar: tarfile.TarFile) -> Dict[str, bytes]:
+    photos: Dict[str, bytes] = {}
+    for name in tar.getnames():
+        for kind, member_dir in PHOTO_MEMBER_DIRS.items():
+            prefix = member_dir + "/"
+            if name.startswith(prefix) and name != prefix:
+                photos[name] = _read_tar_member(tar, name)
+                break
+    return photos
+
+
+def archive_integrity_errors(
+    meta: dict,
+    photo_counts: Dict[str, int],
+) -> List[str]:
+    """归档内一致性：清单声明的照片数量必须与归档内容一致。"""
+    errors: List[str] = []
+    declared = meta.get("photos") or {}
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+        entry = declared.get(kind) or {}
+        if not entry or not entry.get("included"):
+            continue
+        expected = int(entry.get("count") or 0)
+        actual = int(photo_counts.get(kind) or 0)
+        if expected != actual:
+            label = (
+                CONTENT_LABELS[CONTENT_STANDARD_PHOTOS]
+                if kind == PHOTO_STANDARD
+                else CONTENT_LABELS[CONTENT_OTHER_PHOTOS]
+            )
+            errors.append(f"{label}数量与清单不符（清单 {expected}，归档 {actual}）")
+    return errors
 
 
 def parse_backup(blob: bytes, passphrase: str) -> dict:
-    """解密并校验 v2 备份包，返回各成员内容。"""
+    """解密并校验备份包，返回各成员内容（照片按类别分开）。"""
     passphrase = (passphrase or "").strip()
     if not passphrase:
         raise ValueError("请输入解密口令")
@@ -207,29 +669,49 @@ def parse_backup(blob: bytes, passphrase: str) -> dict:
         meta_bytes = _read_tar_member(tar, "meta.json")
         meta = json.loads(meta_bytes.decode("utf-8"))
         expected_sha = meta.get("sha256") or {}
+        names = tar.getnames()
 
         credentials_bytes = _read_tar_member(tar, "credentials.json")
         if expected_sha.get("credentials.json") != _sha256_hex(credentials_bytes):
             raise ValueError("备份校验失败（文件可能被篡改）")
 
         runtime_data = None
-        if "runtime.json" in tar.getnames():
+        if "runtime.json" in names:
             runtime_bytes = _read_tar_member(tar, "runtime.json")
             if expected_sha.get("runtime.json") != _sha256_hex(runtime_bytes):
                 raise ValueError("备份校验失败（文件可能被篡改）")
             runtime_data = json.loads(runtime_bytes.decode("utf-8"))
 
         app_db_bytes = None
-        if "app.db" in tar.getnames():
+        if "app.db" in names:
             app_db_bytes = _read_tar_member(tar, "app.db")
             if expected_sha.get("app.db") != _sha256_hex(app_db_bytes):
                 raise ValueError("备份校验失败（文件可能被篡改）")
 
         recipes_db_bytes = None
-        if "recipes.db" in tar.getnames():
+        if "recipes.db" in names:
             recipes_db_bytes = _read_tar_member(tar, "recipes.db")
             if expected_sha.get("recipes.db") != _sha256_hex(recipes_db_bytes):
                 raise ValueError("备份校验失败（文件可能被篡改）")
+
+        raw_photos = _read_photo_members(tar)
+
+    # 归档内一致性：清单声明与归档内容必须对得上（不一致 = 这份备份坏了）
+    photos: Dict[str, Dict[str, bytes]] = {PHOTO_STANDARD: {}, PHOTO_OTHER: {}}
+    for kind, member_dir in PHOTO_MEMBER_DIRS.items():
+        prefix = member_dir + "/"
+        photos[kind] = {
+            name[len(prefix):]: data
+            for name, data in raw_photos.items()
+            if name.startswith(prefix)
+        }
+
+    integrity_errors = archive_integrity_errors(
+        meta, {kind: len(blobs) for kind, blobs in photos.items()}
+    )
+    integrity_errors.extend(
+        row_count_mismatches(meta.get("row_counts"), row_counts_from_db_bytes(app_db_bytes))
+    )
 
     credentials = json.loads(credentials_bytes.decode("utf-8"))
     return {
@@ -238,7 +720,11 @@ def parse_backup(blob: bytes, passphrase: str) -> dict:
         "runtime": runtime_data,
         "app_db_bytes": app_db_bytes,
         "recipes_db_bytes": recipes_db_bytes,
+        "standard_photos": photos[PHOTO_STANDARD],
+        "other_photos": photos[PHOTO_OTHER],
+        "archive_integrity_errors": integrity_errors,
     }
+
 
 
 # ==================== 快照（明文回滚点）====================
@@ -257,24 +743,100 @@ def _sqlite_backup_sync(src_path: str, dst_path: str) -> None:
         src.close()
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """照片文件内容不可变，优先硬链接复用；失败时退回复制。"""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        return
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def _write_snapshot_photos(
+    snap_dir: Path,
+    *,
+    app_db_path: str,
+    capture_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """把两类卫生照片以硬链接（或复制）放入快照，返回清单。"""
+    root = capture_root or get_hygiene_capture_root()
+    collected = collect_hygiene_photo_members(app_db_path, root)
+    manifest: Dict[str, Any] = {}
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+        prefix = PHOTO_MEMBER_DIRS[kind] + "/"
+        written = 0
+        for name in collected["members"]:
+            if not name.startswith(prefix):
+                continue
+            capture_id = name[len(prefix):]
+            _link_or_copy(root / capture_id, snap_dir / name)
+            written += 1
+        entry = dict(collected["manifest"].get(kind) or {})
+        entry["written"] = written
+        # 快照与归档不同：文件以硬链接落盘，清单只记录数量/字节/缺项
+        manifest[kind] = entry
+    return {
+        "manifest": manifest,
+        "missing": {k: v for k, v in collected["missing"].items() if v},
+    }
+
+
+def photo_consistency(
+    manifest: Dict[str, Any],
+    missing: Dict[str, List[str]],
+) -> Dict[str, Any]:
+    """备份点内一致性：库引用的照片是否都在这份备份里（不一致 = 备份损坏）。"""
+    errors: List[str] = []
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+        gone = missing.get(kind) or []
+        if gone:
+            label = (
+                CONTENT_LABELS[CONTENT_STANDARD_PHOTOS]
+                if kind == PHOTO_STANDARD
+                else CONTENT_LABELS[CONTENT_OTHER_PHOTOS]
+            )
+            errors.append(f"{label}缺失 {len(gone)} 个文件")
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "standard": manifest.get(PHOTO_STANDARD, {}),
+        "other": manifest.get(PHOTO_OTHER, {}),
+    }
+
+
 def create_restore_snapshot(
     app_db_path: str,
     recipes_db_path: str,
     cred_file_path: str,
+    *,
+    provenance: str = PROVENANCE_MANUAL,
+    include_photos: bool = True,
+    keep: Optional[int] = None,
 ) -> str:
-    """创建本地明文回滚快照，保留最新 SNAPSHOT_KEEP 份。"""
+    """创建本机回滚快照（库 + 凭据 + 两类卫生照片），按保留配置清理旧快照。
+
+    ``provenance`` 标注这次快照是谁在什么场景下建的，供清理保护与页面展示识别。
+    ``keep`` 为 ``None`` 时使用保留配置中的本机回滚快照份数。
+    """
     ts = datetime.now(CHINA_TZ).strftime("%Y%m%d_%H%M%S")
     snap_dir = _snapshot_root() / ts
     snap_dir.mkdir(parents=True, exist_ok=True)
 
+    contents: List[str] = []
     if os.path.isfile(app_db_path):
         _sqlite_backup_sync(app_db_path, str(snap_dir / "app.db"))
+        contents.append(CONTENT_APP_DB)
+        # 运行配置存在 app.db 的 app_settings 表里，随业务数据一并覆盖
+        contents.append(CONTENT_RUNTIME)
 
     if (
         os.path.isfile(recipes_db_path)
         and os.path.abspath(recipes_db_path) != os.path.abspath(app_db_path)
     ):
         _sqlite_backup_sync(recipes_db_path, str(snap_dir / "recipes.db"))
+        contents.append(CONTENT_RECIPES)
 
     if os.path.isfile(cred_file_path):
         dest = snap_dir / "credentials.enc"
@@ -283,6 +845,7 @@ def create_restore_snapshot(
             os.chmod(dest, 0o600)
         except OSError:
             pass
+        contents.append(CONTENT_CREDENTIALS)
 
     key_file_path = Path(cred_file_path).parent / ".cred_key"
     if os.path.isfile(key_file_path):
@@ -293,36 +856,166 @@ def create_restore_snapshot(
         except OSError:
             pass
 
+    photo_info: Dict[str, Any] = {
+        "manifest": {},
+        "missing": {},
+    }
+    consistency: Optional[dict] = None
+    if include_photos:
+        photo_info = _write_snapshot_photos(snap_dir, app_db_path=app_db_path)
+        manifest = photo_info["manifest"]
+        for kind, content_key in (
+            (PHOTO_STANDARD, CONTENT_STANDARD_PHOTOS),
+            (PHOTO_OTHER, CONTENT_OTHER_PHOTOS),
+        ):
+            if int(manifest.get(kind, {}).get("written") or 0) > 0:
+                contents.append(content_key)
+        consistency = photo_consistency(manifest, photo_info["missing"])
+
     meta = {
         "ts": ts,
         "created_at": datetime.now(CHINA_TZ).isoformat(),
-        "files": [p.name for p in snap_dir.iterdir() if p.is_file()],
+        "provenance": provenance,
+        "contents": contents,
+        "photos": photo_info["manifest"],
+        "row_counts": key_table_row_counts(app_db_path),
+        "files": sorted(
+            str(p.relative_to(snap_dir))
+            for p in snap_dir.rglob("*")
+            if p.is_file()
+        ),
     }
+    if consistency is not None:
+        meta["consistency"] = consistency
+    if photo_info["missing"]:
+        meta["photos_missing"] = photo_info["missing"]
     (snap_dir / "snapshot_meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    _prune_old_snapshots()
-    logger.info("📸 [审计] 已创建回滚快照 ts=%s", ts)
+    _prune_old_snapshots(keep=keep)
+    logger.info("📸 [审计] 已创建回滚快照 ts=%s 来由=%s", ts, provenance)
     return ts
 
 
-def _prune_old_snapshots() -> None:
+def _snapshot_keep_default() -> int:
+    """快照保留份数的默认值；运行配置不可读时退回同一个常量。"""
+    try:
+        from services import backup_retention
+
+        return backup_retention.cache_get().snapshot_keep
+    except Exception:
+        return backup_retention.SNAPSHOT_KEEP_DEFAULT
+
+
+def _prune_old_snapshots(keep: Optional[int] = None) -> None:
+    """按清理计划删除超出保留份数的本机回滚快照（受保护项不动）。"""
+    plan = plan_snapshot_cleanup(keep)
+    for entry in plan["delete"]:
+        shutil.rmtree(_snapshot_root() / entry["ts"], ignore_errors=True)
+
+
+def _protected_snapshot_names(dirs: List[Path]) -> set:
+    """永不自动清理：更新作业前快照 + 最近一份。"""
+    protected: set = set()
+    if not dirs:
+        return protected
+    protected.add(dirs[0].name)
+    for snap_dir in dirs:
+        meta = _read_snapshot_meta(snap_dir)
+        if meta.get("provenance") == PROVENANCE_PRE_UPDATE:
+            protected.add(snap_dir.name)
+    return protected
+
+
+def _split_by_retention(
+    dirs: List[Path],
+    limit: int,
+    protected_names: set,
+) -> tuple:
+    """按保留份数把「最新在前」的备份点目录切成 ``(kept, delete)``。
+
+    唯一规则，预览与实际清理共用：从最新往旧遍历，受保护项永远保留；
+    非受保护项在总保留数未达 ``keep`` 前保留，其余进入删除集合。受保护项多于
+    ``keep`` 时总数会超过 ``keep``——这是「永不自动删」的必然结果，预览会如实列出。
+    """
+    kept: List[Path] = []
+    delete: List[Path] = []
+    for entry in dirs:
+        if entry.name in protected_names or len(kept) < max(0, limit):
+            kept.append(entry)
+        else:
+            delete.append(entry)
+    return kept, delete
+
+
+def plan_snapshot_cleanup(keep: Optional[int] = None) -> Dict[str, Any]:
+    """本机回滚快照的清理计划（预览与实际删除的唯一来源）。"""
+    limit = _snapshot_keep_default() if keep is None else int(keep)
     root = _snapshot_root()
-    if not root.is_dir():
-        return
-    dirs = sorted(
-        [d for d in root.iterdir() if d.is_dir()],
-        key=lambda p: p.name,
-        reverse=True,
+    dirs = (
+        sorted(
+            [d for d in root.iterdir() if d.is_dir()],
+            key=lambda p: p.name,
+            reverse=True,
+        )
+        if root.is_dir()
+        else []
     )
-    for old in dirs[SNAPSHOT_KEEP:]:
-        shutil.rmtree(old, ignore_errors=True)
+    protected_names = _protected_snapshot_names(dirs)
+    kept, delete = _split_by_retention(dirs, limit, protected_names)
+
+    def _entry(snap_dir: Path, protected: bool) -> Dict[str, Any]:
+        meta = _read_snapshot_meta(snap_dir)
+        provenance = meta.get("provenance") or PROVENANCE_MANUAL
+        entry: Dict[str, Any] = {
+            "ts": snap_dir.name,
+            "created_at": meta.get("created_at"),
+            "size_bytes": _dir_size(snap_dir),
+            "provenance": provenance,
+            "provenance_label": PROVENANCE_LABELS.get(provenance, "手动"),
+            "protected": protected,
+        }
+        if protected:
+            entry["reason"] = (
+                "更新前快照，永不自动清理"
+                if provenance == PROVENANCE_PRE_UPDATE
+                else "最近一份备份点，永不自动清理"
+            )
+        return entry
+
+    return {
+        "keep": max(0, limit),
+        "kept": [d.name for d in kept],
+        "protected": [_entry(d, True) for d in dirs if d.name in protected_names],
+        "delete": [_entry(d, False) for d in delete],
+    }
+
+
+def _read_snapshot_meta(snap_dir: Path) -> dict:
+    meta_path = snap_dir / "snapshot_meta.json"
+    if not meta_path.is_file():
+        return {}
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for entry in path.rglob("*"):
+        try:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def list_snapshots() -> List[dict]:
-    """列出本地快照（时间倒序）。"""
+    """列出本地快照（时间倒序），带上介质、来由、体积与覆盖内容。"""
     root = _snapshot_root()
     if not root.is_dir():
         return []
@@ -331,64 +1024,457 @@ def list_snapshots() -> List[dict]:
     for snap_dir in root.iterdir():
         if not snap_dir.is_dir():
             continue
-        files = [p.name for p in snap_dir.iterdir() if p.is_file()]
-        size_bytes = sum(
-            p.stat().st_size for p in snap_dir.iterdir() if p.is_file()
+        meta = _read_snapshot_meta(snap_dir)
+        files = sorted(
+            str(p.relative_to(snap_dir))
+            for p in snap_dir.rglob("*")
+            if p.is_file()
         )
+        size_bytes = _dir_size(snap_dir)
         created_at = datetime.fromtimestamp(
             snap_dir.stat().st_mtime, tz=CHINA_TZ
         ).isoformat()
-        meta_path = snap_dir / "snapshot_meta.json"
-        if meta_path.is_file():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                created_at = meta.get("created_at", created_at)
-            except Exception:
-                pass
+        created_at = meta.get("created_at", created_at)
+        contents = meta.get("contents")
+        if contents is None:
+            # 旧快照没有覆盖内容清单：按文件推断，缺项留给备份点层标注
+            contents = _infer_snapshot_contents(files)
         items.append({
             "ts": snap_dir.name,
             "created_at": created_at,
             "size_bytes": size_bytes,
-            "files": sorted(files),
+            "files": files,
+            "provenance": meta.get("provenance"),
+            "contents": contents,
+            "photos": meta.get("photos") or {},
+            "photos_missing": meta.get("photos_missing") or {},
+            "row_counts": meta.get("row_counts") or {},
+            "consistency": meta.get("consistency"),
         })
 
     items.sort(key=lambda x: x["ts"], reverse=True)
     return items
 
 
-def restore_from_snapshot(ts: str) -> None:
-    """从指定快照恢复 app.db / recipes.db / credentials.enc（文件级 + 在线库需另行 ATTACH）。"""
-    import re
+def _infer_snapshot_contents(files: Sequence[str]) -> List[str]:
+    contents: List[str] = []
+    names = set(files)
+    if "app.db" in names:
+        contents.append(CONTENT_APP_DB)
+        contents.append(CONTENT_RUNTIME)
+    if "recipes.db" in names:
+        contents.append(CONTENT_RECIPES)
+    if "credentials.enc" in names:
+        contents.append(CONTENT_CREDENTIALS)
+    if any(f.startswith(PHOTO_MEMBER_DIRS[PHOTO_STANDARD] + "/") for f in files):
+        contents.append(CONTENT_STANDARD_PHOTOS)
+    if any(f.startswith(PHOTO_MEMBER_DIRS[PHOTO_OTHER] + "/") for f in files):
+        contents.append(CONTENT_OTHER_PHOTOS)
+    return contents
 
-    if not re.fullmatch(r"\d{8}_\d{6}", ts):
-        raise FileNotFoundError(ts)
 
+def restore_snapshot_photos(ts: str, kinds: Sequence[str]) -> Dict[str, int]:
+    """把快照里的指定照片类别复制回运行实例，返回各类恢复数量。"""
     snap_dir = _snapshot_root() / ts
-    if not snap_dir.is_dir():
-        raise FileNotFoundError(ts)
+    root = get_hygiene_capture_root()
+    root.mkdir(parents=True, exist_ok=True)
+    restored: Dict[str, int] = {}
+    for kind in kinds:
+        member_dir = PHOTO_MEMBER_DIRS.get(kind)
+        if member_dir is None:
+            continue
+        src_dir = snap_dir / member_dir
+        count = 0
+        if src_dir.is_dir():
+            for src in src_dir.iterdir():
+                if not src.is_file():
+                    continue
+                dst = root / src.name
+                try:
+                    if not dst.exists():
+                        shutil.copy2(src, dst)
+                    count += 1
+                except OSError:
+                    logger.warning("恢复卫生照片失败: %s", src)
+        restored[kind] = count
+    return restored
 
-    app_db_path = settings.APP_DB_PATH
-    recipes_db_path = get_recipes_db_path()
-    cred_file_path = get_credentials_file_path()
 
-    snap_app = snap_dir / "app.db"
-    if snap_app.is_file():
-        _sqlite_backup_sync(str(snap_app), app_db_path)
+# ==================== 导出备份侧车清单 ====================
 
-    snap_recipes = snap_dir / "recipes.db"
-    if snap_recipes.is_file():
-        _sqlite_backup_sync(str(snap_recipes), recipes_db_path)
+def export_sidecar_path(archive_path: Path) -> Path:
+    return archive_path.with_suffix(archive_path.suffix + ".json")
 
-    snap_cred = snap_dir / "credentials.enc"
-    if snap_cred.is_file():
-        os.makedirs(os.path.dirname(cred_file_path), exist_ok=True)
-        shutil.copy2(str(snap_cred), cred_file_path)
+
+def write_export_sidecar(archive_path: Path, meta: dict) -> None:
+    payload = {
+        "name": archive_path.name,
+        "size_bytes": archive_path.stat().st_size,
+        "archive_sha256": meta.get("archive_sha256"),
+        "created_at": meta.get("exported_at"),
+        "provenance": meta.get("provenance") or PROVENANCE_MANUAL,
+        "meta": meta,
+    }
+    export_sidecar_path(archive_path).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def read_export_sidecar(archive_path: Path) -> Optional[dict]:
+    path = export_sidecar_path(archive_path)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def list_export_archives() -> List[dict]:
+    """列出本机保留的导出备份（时间倒序）。"""
+    root = _export_root()
+    if not root.is_dir():
+        return []
+    items: List[dict] = []
+    for archive in root.glob("*.luyunbak"):
+        sidecar = read_export_sidecar(archive)
+        meta = (sidecar or {}).get("meta") or {}
+        created_at = (sidecar or {}).get("created_at") or datetime.fromtimestamp(
+            archive.stat().st_mtime, tz=CHINA_TZ
+        ).isoformat()
+        items.append({
+            "path": str(archive),
+            "name": archive.name,
+            "created_at": created_at,
+            "size_bytes": archive.stat().st_size,
+            "provenance": (sidecar or {}).get("provenance") or PROVENANCE_MANUAL,
+            "archive_sha256": (sidecar or {}).get("archive_sha256"),
+            "meta": meta,
+            "has_sidecar": sidecar is not None,
+        })
+    items.sort(key=lambda x: x["created_at"], reverse=True)
+    return items
+
+
+# ==================== 冷备归档与状态 ====================
+
+def build_cold_backup_archive(
+    *,
+    app_db_path: Optional[str] = None,
+    cred_file_path: Optional[str] = None,
+    capture_root: Optional[Path] = None,
+    app_version: str = "",
+    include_standard_photos: bool = True,
+    include_other_photos: bool = True,
+    runtime_data: Optional[dict] = None,
+) -> Tuple[Path, dict]:
+    """生成冷备单一归档（库快照 + 凭据 + 密钥 + 卫生照片 + 清单 + 校验和）。
+
+    归档是明文 tar：凭据以 ``credentials.enc`` 形式随附，密钥文件 ``.cred_key``
+    也一并归档，因此备份目录权限必须受控。全程使用 SQLite 在线 backup API，
+    不引入停写窗口。
+    """
+    app_db_path = app_db_path or settings.APP_DB_PATH
+    cred_file_path = cred_file_path or get_credentials_file_path()
+    backup_dir = get_cold_backup_dir()
+    ts = datetime.now(CHINA_TZ).strftime("%Y%m%d_%H%M%S")
+    out_dir = backup_dir / ts
+    out_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = out_dir / COLD_ARCHIVE_NAME
+
+    fd, tmp_db = tempfile.mkstemp(suffix=".db", prefix="luyun-cold-")
+    os.close(fd)
+    try:
+        if os.path.isfile(app_db_path):
+            _sqlite_backup_sync(app_db_path, tmp_db)
+            with open(tmp_db, "rb") as handle:
+                app_db_bytes: Optional[bytes] = handle.read()
+        else:
+            app_db_bytes = None
+    finally:
         try:
-            os.chmod(cred_file_path, 0o600)
+            os.unlink(tmp_db)
         except OSError:
             pass
 
-    logger.info("⏪ [审计] 已从快照回滚 ts=%s", ts)
+    photo_info = collect_hygiene_photo_members(app_db_path, capture_root)
+    members: Dict[str, bytes] = {}
+    if app_db_bytes is not None:
+        members["app.db"] = app_db_bytes
+    if os.path.isfile(cred_file_path):
+        with open(cred_file_path, "rb") as handle:
+            members["credentials.enc"] = handle.read()
+    key_file = Path(cred_file_path).parent / ".cred_key"
+    if key_file.is_file():
+        with open(key_file, "rb") as handle:
+            members[".cred_key"] = handle.read()
+    if runtime_data is not None:
+        members["runtime.json"] = json.dumps(
+            runtime_data, ensure_ascii=False
+        ).encode("utf-8")
+    for name, data in photo_info["members"].items():
+        members[name] = data
+
+    consistency = _cold_consistency(
+        app_db_path, photo_info["manifest"], photo_info["missing"]
+    )
+    raw_contents = [
+        content
+        for content, present in (
+            (CONTENT_APP_DB, app_db_bytes is not None),
+            # 运行配置存在 app.db 的 app_settings 表里，随库快照一并带走
+            (CONTENT_RUNTIME, app_db_bytes is not None or runtime_data is not None),
+            (CONTENT_CREDENTIALS, "credentials.enc" in members),
+            (
+                CONTENT_STANDARD_PHOTOS,
+                bool(photo_info["manifest"].get(PHOTO_STANDARD, {}).get("count")),
+            ),
+            (
+                CONTENT_OTHER_PHOTOS,
+                bool(photo_info["manifest"].get(PHOTO_OTHER, {}).get("count")),
+            ),
+        )
+        if present
+    ]
+    manifest = {
+        "version": BACKUP_VERSION,
+        "created_at": datetime.now(CHINA_TZ).isoformat(),
+        "app_version": app_version,
+        "provenance": PROVENANCE_MANUAL,
+        "kind": "cold_backup",
+        "contents": raw_contents,
+        "contents_labels": [CONTENT_LABELS[c] for c in raw_contents],
+        "photos": photo_info["manifest"],
+        "row_counts": key_table_row_counts(app_db_path),
+        "photos_missing": {
+            k: v for k, v in photo_info["missing"].items() if v
+        },
+        "consistency": consistency,
+    }
+
+    checksums = {
+        name: _sha256_hex(data)
+        for name, data in members.items()
+    }
+    members[COLD_MANIFEST_NAME] = json.dumps(
+        manifest, ensure_ascii=False, indent=2
+    ).encode("utf-8")
+    checksum_lines = [
+        f"{digest}  {name}" for name, digest in sorted(checksums.items())
+    ]
+    members[COLD_CHECKSUMS_NAME] = ("\n".join(checksum_lines) + "\n").encode("utf-8")
+
+    tmp_archive = out_dir / f".{COLD_ARCHIVE_NAME}.tmp"
+    with tarfile.open(tmp_archive, mode="w") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    os.replace(tmp_archive, archive_path)
+
+    manifest["archive"] = str(archive_path)
+    manifest["archive_bytes"] = archive_path.stat().st_size
+    manifest["archive_sha256"] = sha256_file(archive_path)
+    return archive_path, manifest
+
+
+def _cold_consistency(
+    app_db_path: str,
+    photo_manifest: Dict[str, Any],
+    missing: Dict[str, List[str]],
+) -> Dict[str, Any]:
+    return photo_consistency(photo_manifest, missing)
+
+
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_cold_backup_status(
+    *,
+    ok: bool,
+    archive: Optional[Path],
+    error: Optional[str] = None,
+    manifest: Optional[dict] = None,
+    backup_dir: Optional[Path] = None,
+) -> dict:
+    """冷备任务每次运行写出的状态文件（时间、结果、归档名、体积、校验结论）。"""
+    target_dir = backup_dir or get_cold_backup_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    manifest = manifest or {}
+    status = {
+        "ran_at": datetime.now(CHINA_TZ).isoformat(),
+        "ok": bool(ok),
+        "archive": str(archive) if archive else None,
+        "archive_name": Path(archive).name if archive else None,
+        "ts": Path(archive).parent.name if archive else None,
+        "size_bytes": manifest.get("archive_bytes"),
+        "sha256": manifest.get("archive_sha256"),
+        "checksum_ok": bool(ok and archive and manifest.get("archive_sha256")),
+        "contents": manifest.get("contents") or [],
+        "consistency": manifest.get("consistency"),
+        "error": error,
+    }
+    cold_status_path(target_dir).write_text(
+        json.dumps(status, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return status
+
+
+def read_cold_backup_status(backup_dir: Optional[Path] = None) -> Optional[dict]:
+    path = cold_status_path(backup_dir)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _cold_run_dirs(backup_dir: Optional[Path] = None) -> List[Path]:
+    root = backup_dir or get_cold_backup_dir()
+    if not root.is_dir():
+        return []
+    return sorted(
+        [
+            d
+            for d in root.iterdir()
+            if d.is_dir() and re.fullmatch(r"\d{8}_\d{6}", d.name or "")
+        ],
+        key=lambda p: p.name,
+        reverse=True,
+    )
+
+
+def plan_cold_cleanup(
+    keep: int,
+    backup_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """冷备的清理计划（预览与实际删除的唯一来源）；最近一份永不自动删。"""
+    limit = max(1, int(keep))
+    dirs = _cold_run_dirs(backup_dir)
+    protected_names = {dirs[0].name} if dirs else set()
+    kept, delete = _split_by_retention(dirs, limit, protected_names)
+
+    def _entry(run_dir: Path, is_protected: bool) -> Dict[str, Any]:
+        archive = run_dir / COLD_ARCHIVE_NAME
+        entry: Dict[str, Any] = {
+            "ts": run_dir.name,
+            "created_at": None,
+            "size_bytes": archive.stat().st_size if archive.is_file() else _dir_size(run_dir),
+            "path": str(archive) if archive.is_file() else str(run_dir),
+            "protected": is_protected,
+        }
+        if is_protected:
+            entry["reason"] = "最近一份备份点，永不自动清理"
+        return entry
+
+    return {
+        "keep": limit,
+        "kept": [d.name for d in kept],
+        "protected": [_entry(d, True) for d in dirs if d.name in protected_names],
+        "delete": [_entry(d, False) for d in delete],
+    }
+
+
+def plan_export_cleanup(
+    keep: int,
+    backup_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """导出备份（本机保留的副本）的清理计划；最近一份永不自动删。"""
+    limit = max(1, int(keep))
+    items = list_export_archives()
+    protected = items[:1]
+    delete = items[limit:]
+
+    def _entry(item: dict, is_protected: bool) -> Dict[str, Any]:
+        entry: Dict[str, Any] = {
+            "name": item["name"],
+            "created_at": item.get("created_at"),
+            "size_bytes": item.get("size_bytes") or 0,
+            "path": item["path"],
+            "protected": is_protected,
+        }
+        if is_protected:
+            entry["reason"] = "最近一份备份点，永不自动清理"
+        return entry
+
+    delete_names = {entry["name"] for entry in delete}
+    return {
+        "keep": limit,
+        "kept": [item["name"] for item in items if item["name"] not in delete_names],
+        "protected": [_entry(item, True) for item in protected],
+        "delete": [_entry(item, False) for item in delete],
+    }
+
+
+def prune_export_backups(keep: int) -> List[str]:
+    """删除超出保留份数的本机导出备份副本（连同侧车清单）。"""
+    deleted: List[str] = []
+    for entry in plan_export_cleanup(keep)["delete"]:
+        path = Path(entry["path"])
+        path.unlink(missing_ok=True)
+        export_sidecar_path(path).unlink(missing_ok=True)
+        deleted.append(entry["name"])
+    return deleted
+
+
+def prune_cold_backups(
+    keep: int,
+    backup_dir: Optional[Path] = None,
+) -> List[str]:
+    """按清理计划删除超出保留份数的冷备，返回被删除的时间戳。"""
+    plan = plan_cold_cleanup(keep, backup_dir)
+    root = backup_dir or get_cold_backup_dir()
+    for entry in plan["delete"]:
+        shutil.rmtree(root / entry["ts"], ignore_errors=True)
+    return [entry["ts"] for entry in plan["delete"]]
+
+
+def scan_cold_backup_dirs(backup_dir: Optional[Path] = None) -> List[dict]:
+    """状态文件缺失时退回目录扫描，让旧部署也有可见状态。"""
+    root = backup_dir or get_cold_backup_dir()
+    if not root.is_dir():
+        return []
+    items: List[dict] = []
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        archive = entry / COLD_ARCHIVE_NAME
+        legacy_files = sorted(
+            p.name for p in entry.iterdir() if p.is_file()
+        )
+        if archive.is_file():
+            items.append({
+                "ts": entry.name,
+                "archive": str(archive),
+                "size_bytes": archive.stat().st_size,
+                "legacy": False,
+                "contents": [CONTENT_APP_DB],
+            })
+        elif legacy_files:
+            items.append({
+                "ts": entry.name,
+                "archive": str(entry),
+                "size_bytes": _dir_size(entry),
+                "legacy": True,
+                "files": legacy_files,
+                "contents": [
+                    CONTENT_LABELS[CONTENT_APP_DB]
+                ],
+            })
+    items.sort(key=lambda x: x["ts"], reverse=True)
+    return items
+
 
 
 # ==================== app.db 覆盖 / 合并 ====================

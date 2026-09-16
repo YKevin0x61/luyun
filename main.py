@@ -36,6 +36,7 @@ from api.auth import router as auth_router
 from api.hygiene import router as hygiene_router
 from services import auth_service
 from services import backup_import_staging
+from services import backup_points, backup_retention
 from scraper.restaurant_scraper import create_restaurant_scraper
 from services import credentials_store
 from services.dish_catalog import DishCatalog
@@ -265,6 +266,22 @@ async def lifespan(app: FastAPI):
         )
         unmapped_watchdog_task = asyncio.create_task(run_unmapped_dish_watchdog(_runtime_db))
         startup_results.append("数据质量调度")
+
+        # 备份点：加载保留配置，并在启动时算一次备份健康
+        if db_manager:
+            try:
+                await backup_retention.load_retention(db_manager)
+                backup_points.refresh_backup_health()
+                startup_results.append("备份健康")
+            except Exception as exc:
+                logger.warning(f"⚠️ 备份健康计算失败（不影响启动）: {exc}")
+
+        # 启动标识：更新健康确认据此判断「当前进程是否晚于本次重启」
+        from services.release_update.readiness import runtime_readiness
+
+        runtime_readiness.mark_started(
+            migrations_complete=bool(db_manager and db_manager.migrations_complete())
+        )
 
         # 统一输出启动结果
         logger.info(f"🎉 系统启动完成 - 已初始化: {', '.join(startup_results)}")
@@ -789,8 +806,21 @@ async def get_system_status():
 
 @app.get("/api/system/health")
 async def health_check():
-    """健康检查"""
-    return {"status": "healthy", "timestamp": datetime.now(CHINA_TZ)}
+    """就绪口径的健康检查：数据层可用 + 可比较的启动标识。
+
+    Update Job 只负责「已切换发行包并发出重启」，更新是否成功由管理后台用这里的
+    结论回写。KDS 等外部客户端只依赖 200 状态码，因此未就绪时仍返回 200。
+    """
+    from services.release_update.readiness import AppReadinessAdapter
+
+    adapter = AppReadinessAdapter(lambda: db_manager)
+    readiness = await adapter.inspect_readiness()
+    return {
+        "status": "healthy" if readiness.ready else "unhealthy",
+        **adapter.readiness_payload(readiness),
+        "version": settings.APP_VERSION,
+        "timestamp": datetime.now(CHINA_TZ),
+    }
 
 
 @app.get("/api/system/scraper-health")

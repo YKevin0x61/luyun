@@ -24,6 +24,7 @@ CREDENTIALS_FILENAME = "credentials.json"
 RUNTIME_FILENAME = "runtime.json"
 APP_DB_FILENAME = "app.db"
 RECIPES_DB_FILENAME = "recipes.db"
+PHOTO_DIRNAME = "photos"
 TTL_SECONDS = 15 * 60
 
 
@@ -159,6 +160,20 @@ def create_staging(owner: str, parsed: dict) -> str:
     if recipes_db_bytes:
         _write_private_bytes(staging_dir / RECIPES_DB_FILENAME, recipes_db_bytes)
 
+    for kind, member_key in (
+        ("standard", "standard_photos"),
+        ("other", "other_photos"),
+    ):
+        blobs = parsed.get(member_key) or {}
+        if not blobs:
+            continue
+        kind_dir = staging_dir / PHOTO_DIRNAME / kind
+        kind_dir.mkdir(parents=True, exist_ok=True)
+        for capture_id, data in blobs.items():
+            if "/" in capture_id or capture_id.startswith("."):
+                continue
+            _write_private_bytes(kind_dir / capture_id, data)
+
     return token
 
 
@@ -215,12 +230,24 @@ def load_parsed_from_staging(token: str, owner: str) -> dict:
     if recipes_db_path.is_file():
         recipes_db_bytes = recipes_db_path.read_bytes()
 
+    standard_photos: dict = {}
+    other_photos: dict = {}
+    for kind, target in (("standard", standard_photos), ("other", other_photos)):
+        kind_dir = staging_dir / PHOTO_DIRNAME / kind
+        if not kind_dir.is_dir():
+            continue
+        for entry in kind_dir.iterdir():
+            if entry.is_file():
+                target[entry.name] = entry.read_bytes()
+
     return {
         "meta": _read_json(meta_path),
         "credentials": _read_json(cred_path),
         "runtime": runtime_data,
         "app_db_bytes": app_db_bytes,
         "recipes_db_bytes": recipes_db_bytes,
+        "standard_photos": standard_photos,
+        "other_photos": other_photos,
     }
 
 

@@ -136,8 +136,24 @@ class BackupImportStagingTest(unittest.TestCase):
         parsed = backup_service.parse_backup(blob, "pass1234")
         token = backup_import_staging.create_staging("session-a", parsed)
         loaded = backup_import_staging.consume_staging(token, "session-a")
-        self.assertEqual(loaded["meta"]["version"], 2)
+        self.assertEqual(loaded["meta"]["version"], 3)
         self.assertEqual(loaded["credentials"]["shop_id"], "100001")
+
+    def test_staging_round_trips_hygiene_photos_per_class(self):
+        parsed = _sample_parsed()
+        parsed["standard_photos"] = {"s1": b"S1"}
+        parsed["other_photos"] = {"o1": b"O1", "o2": b"O2"}
+        token = backup_import_staging.create_staging("session-a", parsed)
+        loaded = backup_import_staging.consume_staging(token, "session-a")
+        self.assertEqual(loaded["standard_photos"], {"s1": b"S1"})
+        self.assertEqual(loaded["other_photos"], {"o1": b"O1", "o2": b"O2"})
+
+    def test_staging_without_photos_loads_empty_classes(self):
+        parsed = _sample_parsed()
+        token = backup_import_staging.create_staging("session-a", parsed)
+        loaded = backup_import_staging.consume_staging(token, "session-a")
+        self.assertEqual(loaded["standard_photos"], {})
+        self.assertEqual(loaded["other_photos"], {})
 
 
 if __name__ == "__main__":

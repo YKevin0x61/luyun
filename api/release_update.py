@@ -140,13 +140,41 @@ async def version_check(
 async def job_status(
     release_update: ReleaseUpdate = Depends(get_release_update),
 ) -> dict[str, Any]:
-    """Poll Update Job state from the data/ state file (+ log pointer / tail)."""
+    """Poll Update Job state; complete the health-confirmation half of success.
+
+    The job itself only switches the Release Bundle and asks for a restart. Each
+    poll re-checks readiness so the job lands on ``succeeded`` /
+    ``succeeded_but_unhealthy``, never on "the process came back" alone.
+    """
+    await release_update.confirm_health()
     job = release_update.job_status()
     return {
         "success": True,
         "job": _job_payload(job),
         "log_tail": read_log_tail(job.log_path),
     }
+
+
+@router.post("/job/health-check")
+async def recheck_job_health(
+    release_update: ReleaseUpdate = Depends(get_release_update),
+    _session_id: str = Depends(require_session),
+) -> dict[str, Any]:
+    """Manual readiness re-check for a job waiting on health confirmation."""
+    job = await release_update.confirm_health()
+    return {
+        "success": True,
+        "job": _job_payload(job),
+        "log_tail": read_log_tail(job.log_path),
+    }
+
+
+@router.get("/history")
+async def update_history(
+    release_update: ReleaseUpdate = Depends(get_release_update),
+) -> dict[str, Any]:
+    """Recent Update History (target / previous / result / rollback / duration)."""
+    return {"success": True, "entries": release_update.history()}
 
 
 @router.post("/job/cancel")

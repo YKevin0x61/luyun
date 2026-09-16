@@ -114,3 +114,4 @@ docs/adr/*
 !docs/adr/0011-release-bundle-update.md
 !docs/adr/0012-repo-layout.md
 !docs/adr/0013-frontend-pwa-cache-update.md
+!docs/adr/0082-backup-points-and-update-confirmation.md

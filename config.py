@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # 数据库配置 — 单库 app.db（WAL），仅 logs 因写入量大保持独立文件
     DATABASE_DIR: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     APP_DB_FILENAME: str = "app.db"
+    # 冷备输出根目录（宿主机定时任务的归档落点，仓库根下的 backups/）；
+    # BACKUP_DIR 环境变量优先
+    COLD_BACKUP_DIR: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "backups"
+    )
 
     @property
     def APP_DB_PATH(self) -> str:

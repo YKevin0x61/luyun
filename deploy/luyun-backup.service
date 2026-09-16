@@ -32,10 +32,11 @@ Group=luyun
 # 逻辑是相对脚本自身路径，所以此处路径本身才是关键）
 WorkingDirectory=/opt/luyun
 
-# 可选：覆盖 deploy/backup.sh 里的默认值（备份目录、保留份数），不设置则用
-# 脚本内的默认值（./backups、保留最近 14 份）
+# 可选：覆盖默认值。保留份数默认读取运行配置中的「冷备保留份数」
+# （管理后台「备份中心 → 保留与清理」可改，默认 14、上限 90）；
+# 也可在此用 --retention 参数临时覆盖，或设置 PYTHON_BIN 指定解释器。
 # Environment=BACKUP_DIR=/opt/luyun/backups
-# Environment=BACKUP_RETENTION_COUNT=14
+# Environment=PYTHON_BIN=/opt/luyun/venv/bin/python
 
 ExecStart=/opt/luyun/deploy/backup.sh
 

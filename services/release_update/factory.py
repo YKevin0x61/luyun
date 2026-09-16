@@ -8,15 +8,23 @@ from pathlib import Path
 from typing import Optional
 
 from config import settings
+from services.app_runtime import get_runtime
 from services.github_release_config import get_effective_config
 from services.release_update import PeakHoursPort, ReleaseUpdate
 from services.release_update.github_releases import GitHubReleasesAdapter
+from services.release_update.history import FileUpdateHistory
 from services.release_update.job_control import build_job_stopper
 from services.release_update.job_state import FileJobStateStore
 from services.release_update.manifest_identity import ReleaseManifestAdapter
 from services.release_update.oneshot import build_oneshot_starter
 from services.release_update.peak_hours import BusinessHoursPeakAdapter
 from services.release_update.preflight_env import DefaultPreflightEnvAdapter
+from services.release_update.readiness import AppReadinessAdapter
+
+
+def _live_db():
+    runtime = get_runtime()
+    return runtime.db if runtime is not None else None
 
 
 def default_deploy_dir() -> Path:
@@ -50,4 +58,6 @@ def build_release_update(
         job_stopper=build_job_stopper(),
         peak_hours=peak_hours or BusinessHoursPeakAdapter(),
         preflight_env=DefaultPreflightEnvAdapter(deploy_dir),
+        readiness=AppReadinessAdapter(_live_db),
+        history=FileUpdateHistory(),
     )

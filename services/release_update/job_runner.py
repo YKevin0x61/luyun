@@ -16,7 +16,6 @@ from services.release_update import (
     STAGE_INSTALLING,
     STAGE_QUEUED,
     STAGE_RESTARTING,
-    STAGE_SUCCEEDED,
     STAGE_SYNCING_DEPS,
     JobStateStorePort,
     UpdateJobState,
@@ -160,19 +159,20 @@ class UpdateJobRunner:
             base = self._store.read()
 
             self._raise_if_cancelled()
-            self._set(base, STAGE_RESTARTING, "Restarting main service")
-            # Persist succeeded BEFORE restart. Docker self-restart kills this
-            # process; writing after restart() would leave the job stuck at
-            # restarting even though the new Release is already live.
-            final = replace(
+            # The job only switches the Release Bundle and asks for a restart.
+            # "Update succeeded" is a second fact confirmed by the Admin after the
+            # restarted service proves ready (see ReleaseUpdate.confirm_health).
+            # Persist this BEFORE restart: a Docker self-restart kills this process.
+            switched = replace(
                 self._store.read(),
-                stage=STAGE_SUCCEEDED,
-                message="Update Job succeeded",
-                finished_at=_now_iso(),
+                stage=STAGE_RESTARTING,
+                message="已切换发行包，正在重启服务；等待健康确认",
                 error=None,
+                finished_at=None,
                 cancel_requested=False,
+                restart_requested_at=_now_iso(),
             )
-            self._store.write(final)
+            self._store.write(switched)
             try:
                 self._service.restart()
             except Exception as exc:
@@ -180,7 +180,7 @@ class UpdateJobRunner:
                     self._store.read(),
                     error=f"restart failed: {exc}",
                 )
-            return final
+            return switched
         except JobCancelled as exc:
             if not left_previous:
                 return self._fail_before_leave(self._store.read(), error=str(exc))

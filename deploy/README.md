@@ -237,14 +237,18 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ## 4. 备份配置
 
-Update Job 在切换应用树前会**强制**跑一轮与 `backup.sh` 同类的备份；日常仍建议
-装 timer 做定期冷备。
+备份在管理后台「系统配置 → 备份中心」统一呈现为一份**备份点**列表：本机回滚
+快照、导出备份与宿主机冷备三种介质。页面备份与冷备走同一套创建逻辑
+（`services/backup_service.py`），两条路径不会给出互相矛盾的结论。
+
+Update Job 在切换应用树前会**强制**创建一份来由为「更新作业前」的本机回滚
+快照（该快照与最近一份备份点永不自动清理）；日常仍建议装 timer 做定期冷备。
 
 ```bash
 # 手动跑一次试试
 cd /opt/luyun
 ./deploy/backup.sh
-ls backups/    # 每次运行生成一个时间戳目录，含 *.db 及（若存在）credentials.enc / .cred_key
+# 产出 backups/<timestamp>/luyun_cold_backup.tar 与 backups/cold_backup_status.json
 
 # 用 systemd timer 每日自动跑（推荐）：
 sudo cp deploy/luyun-backup.service /etc/systemd/system/luyun-backup.service
@@ -259,23 +263,34 @@ journalctl -u luyun-backup
 ```
 
 不用 systemd timer 的话，`deploy/backup.sh` 内也附了等价的 crontab 示例
-（文件末尾注释）。
+（文件末尾注释）。脚本只是调度入口，应用侧逻辑在 `scripts/cold_backup.py`。
 
-备份原理：对 `data/` 下每个 `*.db` 执行 `sqlite3 <db> ".backup <目标>"`——
-这是 sqlite3 官方在线备份 API，即使数据库处于 WAL 模式且正被 `luyun.service`
-写入，也能拿到一致性快照，**不需要停服务**。若已配置 POS 登录，脚本还会把
-`data/credentials.enc` 与 `data/.cred_key` 复制进同一时间戳目录（备份含加密
-密钥，请确保 `backups/` 权限受控）。恢复时需将 `.db` 与上述凭据文件一并还原
-到 `data/`。默认保留最近 14 份（每份一个时间戳目录），可通过
-`BACKUP_RETENTION_COUNT` 环境变量调整。
+冷备产物是**一份可校验的单一归档**：`app.db` 快照 + `credentials.enc` +
+`.cred_key` + 两类卫生照片（标准图含全部历史版本、其它照片）+ `manifest.json`
+清单 + `SHA256SUMS` 校验和。库快照用 sqlite3 官方在线备份 API 取得——即使数据库
+处于 WAL 模式且正被 `luyun.service` 写入，也能拿到一致性快照，**不需要停服务**。
+每次运行还会在固定位置写一份 `backups/cold_backup_status.json`（时间、结果、
+归档名、体积、校验结论、错误信息），备份中心据此显示最近一次冷备结论；状态文件
+缺失时（旧部署）退回扫描 `backups/*/` 目录兜底。
+
+归档内含 `.cred_key`（凭据加密密钥），请确保 `backups/` 权限受控。保留份数由
+运行配置决定（管理后台「备份中心 → 保留与清理」可改：本机回滚快照默认 5、上限 20；
+导出备份本机副本默认 5、上限 20；冷备默认 14、上限 90），也可用
+`./deploy/backup.sh --retention 30` 临时覆盖冷备份数；最近一份冷备永不自动删。
+任一步失败时退出码非零、状态文件记录失败原因，且不留下会被误认为有效备份的
+半成品。恢复时优先用管理后台「备份中心 → 恢复」；手工还原需把归档内的
+`app.db` 与凭据文件一并放回 `data/`。
 
 > 建议再把 `backups/` 目录定期同步到异地存储（对象存储、另一台机器等），
 > 单机备份只能防误删/误改，防不了硬盘/整机故障。这部分本项目暂未提供
 > 现成脚本，需要按你实际使用的存储服务自行补充（比如在 `backup.sh` 跑完后
 > 加一行 `rsync`/`rclone` 命令）。
 
-> `sqlite3` 命令行工具需已安装（`deploy/backup.sh` 与 Update Job 备份依赖它）：
-> `sqlite3 --version`；没有的话 `sudo apt install sqlite3`（Debian/Ubuntu）。
+> 冷备不再需要 `sqlite3` 命令行工具：脚本通过 Python 的 sqlite3 在线备份 API
+> 直接生成归档。`PYTHON_BIN` 可覆盖执行用的解释器。
+
+> **不在备份范围内**（页面会明确列出）：日志库 `logs.db`、采集状态文件、
+> 更新访问凭据 `github_release.enc`、更新作业状态与更新历史。
 
 ---
 

@@ -1,0 +1,608 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""备份点：统一清单、两层校验、保留清理、恢复前置快照与冷备状态。"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from config import settings
+from services import backup_points, backup_retention, backup_service
+from services.backup_service import (
+    CONTENT_APP_DB,
+    CONTENT_CREDENTIALS,
+    CONTENT_OTHER_PHOTOS,
+    CONTENT_STANDARD_PHOTOS,
+    PHOTO_OTHER,
+    PHOTO_STANDARD,
+    PROVENANCE_MANUAL,
+    PROVENANCE_PRE_UPDATE,
+)
+from services.credentials_store import CredentialBundle
+
+_HYGIENE_SCHEMA = """
+CREATE TABLE orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business_flow_id TEXT
+);
+CREATE TABLE tables (id INTEGER PRIMARY KEY, table_number TEXT);
+CREATE TABLE dish_stations (id INTEGER PRIMARY KEY, dish_name TEXT);
+CREATE TABLE hygiene_standards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL,
+    capture_id TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    byte_size INTEGER,
+    content_sha256 TEXT,
+    markup_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE hygiene_daily_submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id INTEGER,
+    capture_id TEXT NOT NULL
+);
+CREATE TABLE hygiene_deep_clean_submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    before_capture_id TEXT NOT NULL,
+    after_capture_id TEXT NOT NULL
+);
+CREATE TABLE hygiene_fix_tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capture_id TEXT NOT NULL
+);
+CREATE TABLE hygiene_fix_reshoots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id INTEGER,
+    capture_id TEXT NOT NULL
+);
+CREATE TABLE hygiene_teaching_examples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    left_capture_id TEXT NOT NULL,
+    right_capture_id TEXT NOT NULL
+);
+CREATE TABLE hygiene_capture_variants (
+    source_capture_id TEXT NOT NULL,
+    variant TEXT NOT NULL,
+    capture_id TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    byte_size INTEGER NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (source_capture_id, variant)
+);
+"""
+
+
+def _sample_bundle() -> CredentialBundle:
+    return CredentialBundle(
+        phone="13800000000",
+        password="s3cret-pw",
+        shop_id="100001",
+        company_id="200002",
+        shop_name="LuckIn",
+        delivery_shop_id="200002",
+    )
+
+
+class BackupPointTestCase(unittest.TestCase):
+    def setUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._old_cold_dir = settings.COLD_BACKUP_DIR
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        settings.COLD_BACKUP_DIR = os.path.join(self._tmpdir.name, "backups")
+        self.app_db = os.path.join(self._tmpdir.name, "app.db")
+        self.capture_root = Path(self._tmpdir.name) / "hygiene-captures"
+        self.capture_root.mkdir(parents=True, exist_ok=True)
+        self._saved_cache = backup_retention.cache_get()
+        backup_retention.cache_set(backup_retention.RetentionConfig())
+        self._saved_creds = None
+        from services import credentials_store
+
+        self._credentials_store = credentials_store
+        self._saved_creds = credentials_store._cache
+        credentials_store._cache = _sample_bundle()
+        self._write_cred_file()
+
+    def tearDown(self):
+        self._credentials_store._cache = self._saved_creds
+        backup_retention.cache_set(self._saved_cache)
+        backup_points.set_health_cache(None)
+        settings.DATABASE_DIR = self._old_database_dir
+        settings.COLD_BACKUP_DIR = self._old_cold_dir
+        self._tmpdir.cleanup()
+
+    # —— 建库与种子数据 ——
+
+    def _write_cred_file(self) -> None:
+        path = Path(self._tmpdir.name) / "credentials.enc"
+        path.write_bytes(b"enc-blob")
+
+    def _seed_db(self, *, standards=(), others=(), variants=()) -> None:
+        conn = sqlite3.connect(self.app_db)
+        try:
+            conn.executescript(_HYGIENE_SCHEMA)
+            for capture_id in standards:
+                conn.execute(
+                    "INSERT INTO hygiene_standards (item_id, capture_id, content_type,"
+                    " created_at) VALUES (1, ?, 'image/jpeg', '2026-01-01T00:00:00')",
+                    (capture_id,),
+                )
+            for capture_id in others:
+                conn.execute(
+                    "INSERT INTO hygiene_daily_submissions (instance_id, capture_id)"
+                    " VALUES (1, ?)",
+                    (capture_id,),
+                )
+            for source_id, variant_id in variants:
+                conn.execute(
+                    "INSERT INTO hygiene_capture_variants (source_capture_id, variant,"
+                    " capture_id, content_type, width, height, byte_size, content_sha256,"
+                    " created_at) VALUES (?, 'thumb', ?, 'image/jpeg', 10, 10, 4, 'x',"
+                    " '2026-01-01T00:00:00')",
+                    (source_id, variant_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _write_photo(self, capture_id: str, data: bytes = b"jpeg-bytes") -> None:
+        (self.capture_root / capture_id).write_bytes(data)
+
+    def _build_export(self, *, standard=(), other=(), declared_standard=None):
+        for capture_id in standard:
+            self._write_photo(capture_id, b"standard-" + capture_id.encode())
+        for capture_id in other:
+            self._write_photo(capture_id, b"other-" + capture_id.encode())
+        manifest = {
+            PHOTO_STANDARD: {
+                "count": len(standard) if declared_standard is None else declared_standard,
+                "bytes": 10,
+                "sha256": "s",
+                "referenced": len(standard),
+                "missing": 0,
+            },
+            PHOTO_OTHER: {
+                "count": len(other),
+                "bytes": 10,
+                "sha256": "o",
+                "referenced": len(other),
+                "missing": 0,
+            },
+        }
+        members = {}
+        for name in standard:
+            members[f"photos/standard/{name}"] = b"standard-" + name.encode()
+        for name in other:
+            members[f"photos/other/{name}"] = b"other-" + name.encode()
+        blob, meta = backup_service.build_export_backup(
+            "pass1234",
+            include_runtime=False,
+            runtime_data=None,
+            include_app_db=True,
+            app_db_bytes=b"",
+            include_recipes=False,
+            recipes_db_bytes=None,
+            include_standard_photos=bool(standard),
+            include_other_photos=bool(other),
+            photo_members=members,
+            photo_manifest=manifest,
+            app_version="0.1.0",
+        )
+        return blob, meta
+
+    def _make_snapshot(self, provenance=PROVENANCE_MANUAL, *, ts=None):
+        with mock.patch.object(backup_service, "_prune_old_snapshots"):
+            real_ts = backup_service.create_restore_snapshot(
+                self.app_db,
+                self.app_db,
+                str(Path(self._tmpdir.name) / "credentials.enc"),
+                provenance=provenance,
+            )
+        if ts:
+            old = backup_service._snapshot_root() / real_ts
+            new = backup_service._snapshot_root() / ts
+            if old != new:
+                shutil.move(str(old), str(new))
+            real_ts = ts
+        return real_ts
+
+
+class PhotoClassificationTest(BackupPointTestCase):
+    def test_two_classes_and_variants_follow_source(self):
+        self._seed_db(
+            standards=["s1", "s2"],
+            others=["o1"],
+            variants=[("s1", "s1_thumb"), ("o1", "o1_thumb")],
+        )
+        classified = backup_service.classify_hygiene_capture_ids(self.app_db)
+        self.assertEqual(classified[PHOTO_STANDARD], ["s1", "s1_thumb", "s2"])
+        self.assertEqual(classified[PHOTO_OTHER], ["o1", "o1_thumb"])
+
+    def test_missing_table_is_not_an_error(self):
+        conn = sqlite3.connect(self.app_db)
+        conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+        classified = backup_service.classify_hygiene_capture_ids(self.app_db)
+        self.assertEqual(classified[PHOTO_STANDARD], [])
+        self.assertEqual(classified[PHOTO_OTHER], [])
+
+
+class ExportPhotoMemberTest(BackupPointTestCase):
+    def test_export_carries_both_classes_and_manifest(self):
+        self._seed_db(standards=["s1"], others=["o1"])
+        blob, meta = self._build_export(standard=["s1"], other=["o1"])
+        parsed = backup_service.parse_backup(blob, "pass1234")
+        self.assertEqual(set(parsed["standard_photos"]), {"s1"})
+        self.assertEqual(set(parsed["other_photos"]), {"o1"})
+        self.assertTrue(meta["includes"]["standard_photos"])
+        self.assertTrue(meta["includes"]["other_photos"])
+        self.assertEqual(meta["photos"][PHOTO_STANDARD]["count"], 1)
+        self.assertEqual(parsed["archive_integrity_errors"], [])
+
+    def test_manifest_mismatch_is_in_backup_inconsistency(self):
+        self._seed_db(standards=["s1"])
+        blob, _meta = self._build_export(standard=["s1"], declared_standard=3)
+        parsed = backup_service.parse_backup(blob, "pass1234")
+        self.assertTrue(parsed["archive_integrity_errors"])
+
+    def test_legacy_v2_backup_parses_without_photo_members(self):
+        blob = backup_service.build_backup(
+            "pass1234",
+            include_runtime=False,
+            runtime_data=None,
+            include_app_db=False,
+            app_db_bytes=None,
+            include_recipes=False,
+            recipes_db_bytes=None,
+            app_version="0.1.0",
+        )
+        parsed = backup_service.parse_backup(blob, "pass1234")
+        self.assertEqual(parsed["standard_photos"], {})
+        self.assertEqual(parsed["other_photos"], {})
+        self.assertFalse(parsed["meta"]["includes"].get("standard_photos"))
+
+
+class PhotoRestoreTest(BackupPointTestCase):
+    def test_restore_only_requested_class(self):
+        self._write_photo("s1", b"S")
+        self._write_photo("o1", b"O")
+        backup_points.restore_photos({}, {})
+        (self.capture_root / "s1").unlink()
+        (self.capture_root / "o1").unlink()
+
+        counts = backup_points.restore_photos({"s1": b"S"}, {})
+        self.assertEqual(counts[PHOTO_STANDARD], 1)
+        self.assertTrue((self.capture_root / "s1").is_file())
+        self.assertFalse((self.capture_root / "o1").is_file())
+
+    def test_restore_does_not_delete_existing_photos(self):
+        self._write_photo("keep", b"K")
+        backup_points.restore_photos({}, {"new": b"N"})
+        self.assertTrue((self.capture_root / "keep").is_file())
+
+
+class CrossPointDifferenceTest(BackupPointTestCase):
+    def test_difference_reports_current_only_photos(self):
+        self._seed_db(standards=["s1"], others=["o1", "o2"])
+        diff = backup_points.photo_difference(
+            {PHOTO_STANDARD: ["s1"], PHOTO_OTHER: ["o2"]}
+        )
+        self.assertTrue(diff["has_difference"])
+        self.assertEqual(diff["missing"][PHOTO_OTHER], ["o1"])
+        self.assertEqual(diff["standard_missing"], 0)
+
+    def test_no_difference_when_backup_covers_current(self):
+        self._seed_db(standards=["s1"], others=["o1"])
+        diff = backup_points.photo_difference(
+            {PHOTO_STANDARD: ["s1"], PHOTO_OTHER: ["o1"]}
+        )
+        self.assertFalse(diff["has_difference"])
+
+
+class SnapshotProvenanceTest(BackupPointTestCase):
+    def test_snapshot_records_provenance_contents_and_photos(self):
+        self._seed_db(standards=["s1"], others=["o1"])
+        self._write_photo("s1", b"S")
+        self._write_photo("o1", b"O")
+        ts = self._make_snapshot(PROVENANCE_PRE_UPDATE)
+
+        meta = json.loads(
+            (backup_service._snapshot_root() / ts / "snapshot_meta.json").read_text()
+        )
+        self.assertEqual(meta["provenance"], PROVENANCE_PRE_UPDATE)
+        self.assertIn(CONTENT_APP_DB, meta["contents"])
+        self.assertIn(CONTENT_CREDENTIALS, meta["contents"])
+        self.assertIn(CONTENT_STANDARD_PHOTOS, meta["contents"])
+        self.assertIn(CONTENT_OTHER_PHOTOS, meta["contents"])
+        self.assertTrue(meta["consistency"]["ok"])
+
+    def test_snapshot_photos_are_linked_not_copied_when_possible(self):
+        self._seed_db(standards=["s1"])
+        self._write_photo("s1", b"S")
+        ts = self._make_snapshot()
+        snap_photo = backup_service._snapshot_root() / ts / "photos/standard/s1"
+        self.assertTrue(snap_photo.is_file())
+        self.assertEqual(
+            snap_photo.stat().st_ino,
+            (self.capture_root / "s1").stat().st_ino,
+        )
+
+    def test_snapshot_flags_missing_photo_as_inconsistent(self):
+        self._seed_db(standards=["gone"])
+        ts = self._make_snapshot()
+        listed = {s["ts"]: s for s in backup_service.list_snapshots()}[ts]
+        self.assertFalse(listed["consistency"]["ok"])
+        self.assertTrue(listed["consistency"]["errors"])
+
+
+class RetentionCleanupTest(BackupPointTestCase):
+    def test_validation_rejects_both_one(self):
+        with self.assertRaises(ValueError):
+            backup_retention.validate_retention({"snapshot_keep": 1, "cold_keep": 1})
+
+    def test_validation_enforces_upper_bounds(self):
+        with self.assertRaises(ValueError):
+            backup_retention.validate_retention({"snapshot_keep": 21, "cold_keep": 14})
+        with self.assertRaises(ValueError):
+            backup_retention.validate_retention({"snapshot_keep": 5, "cold_keep": 91})
+        with self.assertRaises(ValueError):
+            backup_retention.validate_retention({"export_keep": 21})
+
+    def test_export_retention_bounds_local_copies(self):
+        self._seed_db()
+        archive_dir = backup_service._export_root()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(4):
+            name = f"luyun_backup_20260101_00000{index}.luyunbak"
+            (archive_dir / name).write_bytes(b"archive")
+            backup_service.export_sidecar_path(archive_dir / name).write_text(
+                '{"created_at": "2026-01-01T00:00:0%d+08:00"}' % index,
+                encoding="utf-8",
+            )
+
+        config = backup_retention.RetentionConfig(
+            snapshot_keep=5, export_keep=2, cold_keep=14
+        )
+        preview = backup_points.cleanup_preview(config)
+        delete_names = [d["name"] for d in preview["export"]["delete"]]
+        self.assertEqual(len(delete_names), 2)
+        backup_points.apply_cleanup(config)
+        remaining = sorted(p.name for p in archive_dir.glob("*.luyunbak"))
+        self.assertEqual(len(remaining), 2)
+        for name in delete_names:
+            self.assertFalse(backup_service.export_sidecar_path(archive_dir / name).exists())
+
+    def test_preview_and_apply_delete_the_same_points(self):
+        self._seed_db()
+        for ts in ("20260101_000001", "20260101_000002", "20260101_000003"):
+            self._make_snapshot(ts=ts)
+        self._make_snapshot(PROVENANCE_PRE_UPDATE, ts="20260101_000004")
+        # pre_update is newest here; add one newer manual snapshot so the
+        # protected "newest" and the protected pre_update are different rows.
+        self._make_snapshot(ts="20260101_000005")
+
+        config = backup_retention.RetentionConfig(snapshot_keep=2, cold_keep=14)
+        preview = backup_points.cleanup_preview(config)
+        delete_ids = [d["ts"] for d in preview["snapshot"]["delete"]]
+        protected = {p["ts"] for p in preview["snapshot"]["protected"]}
+        self.assertIn("20260101_000004", protected)
+        self.assertIn("20260101_000005", protected)
+        self.assertNotIn("20260101_000004", delete_ids)
+
+        backup_points.apply_cleanup(config)
+        remaining = {s["ts"] for s in backup_service.list_snapshots()}
+        self.assertEqual(remaining, protected)
+        for ts in delete_ids:
+            self.assertFalse((backup_service._snapshot_root() / ts).exists())
+
+    def test_recent_backup_is_never_deleted(self):
+        self._seed_db()
+        self._make_snapshot(ts="20260101_000001")
+        config = backup_retention.RetentionConfig(snapshot_keep=1, cold_keep=14)
+        preview = backup_points.cleanup_preview(config)
+        self.assertEqual(preview["snapshot"]["delete"], [])
+        self.assertEqual(
+            [p["ts"] for p in preview["snapshot"]["protected"]], ["20260101_000001"]
+        )
+
+    def test_preview_kept_set_equals_survivors_with_scattered_protected(self):
+        """删除预览必须与实际删除完全一致，含受保护项分散在旧端的情形。"""
+        self._seed_db()
+        for index in range(1, 9):
+            ts = f"20260101_0000{index:02d}"
+            provenance = PROVENANCE_PRE_UPDATE if index in (2, 8) else PROVENANCE_MANUAL
+            self._make_snapshot(provenance, ts=ts)
+
+        config = backup_retention.RetentionConfig(snapshot_keep=5, cold_keep=14)
+        preview = backup_points.cleanup_preview(config)
+        preview_kept = set(preview["snapshot"]["kept"])
+        preview_delete = {d["ts"] for d in preview["snapshot"]["delete"]}
+        self.assertTrue(preview_kept.isdisjoint(preview_delete))
+        # 更新前快照永不进入删除集合
+        self.assertNotIn("20260101_000002", preview_delete)
+        self.assertNotIn("20260101_000008", preview_delete)
+
+        backup_points.apply_cleanup(config)
+        survivors = {s["ts"] for s in backup_service.list_snapshots()}
+        self.assertEqual(survivors, preview_kept)
+        for ts in preview_delete:
+            self.assertFalse((backup_service._snapshot_root() / ts).exists())
+
+
+class ColdBackupTest(BackupPointTestCase):
+    def test_archive_and_status_round_trip(self):
+        self._seed_db(standards=["s1"], others=["o1"])
+        self._write_photo("s1", b"S")
+        self._write_photo("o1", b"O")
+        key_path = Path(self._tmpdir.name) / ".cred_key"
+        key_path.write_bytes(b"fernet-key")
+
+        archive, manifest = backup_service.build_cold_backup_archive(
+            app_db_path=self.app_db,
+            app_version="0.1.0",
+        )
+        self.assertTrue(archive.is_file())
+        self.assertEqual(archive.name, backup_service.COLD_ARCHIVE_NAME)
+        self.assertIn(CONTENT_STANDARD_PHOTOS, manifest["contents"])
+        self.assertIn(CONTENT_OTHER_PHOTOS, manifest["contents"])
+
+        status = backup_service.write_cold_backup_status(
+            ok=True, archive=archive, manifest=manifest
+        )
+        self.assertTrue(status["ok"])
+
+        points = [p for p in backup_points.list_backup_points() if p["medium"] == "cold_backup"]
+        self.assertEqual(len(points), 1)
+        self.assertTrue(points[0]["recoverable"])
+        self.assertFalse(points[0]["restorable"])
+        self.assertIn(CONTENT_STANDARD_PHOTOS, points[0]["contents"])
+
+    def test_status_file_missing_falls_back_to_scan(self):
+        self._seed_db()
+        archive, _manifest = backup_service.build_cold_backup_archive(app_db_path=self.app_db)
+        backup_service.cold_status_path().unlink(missing_ok=True)
+
+        points = [p for p in backup_points.list_backup_points() if p["medium"] == "cold_backup"]
+        self.assertEqual(len(points), 1)
+        self.assertFalse(points[0]["detail"]["reported"])
+
+    def test_failed_run_is_reported_as_not_recoverable(self):
+        """脚本失败时 archive=None；失败运行仍必须作为一条冷备结论出现。"""
+        self._seed_db()
+        backup_service.write_cold_backup_status(
+            ok=False, archive=None, error="sqlite backup failed"
+        )
+        points = [p for p in backup_points.list_backup_points() if p["medium"] == "cold_backup"]
+        self.assertEqual(len(points), 1)
+        self.assertFalse(points[0]["recoverable"])
+        self.assertTrue(points[0]["detail"]["reported"])
+        self.assertIn("失败", " ".join(points[0]["basic_check"]["messages"]))
+        self.assertIn("sqlite backup failed", " ".join(points[0]["basic_check"]["messages"]))
+
+        health = backup_points.compute_backup_health()
+        self.assertNotEqual(health["status"], "ok")
+        self.assertEqual(health["counts"]["unusable"], 1)
+
+    def test_failed_run_still_lists_older_archives(self):
+        self._seed_db()
+        good_archive, manifest = backup_service.build_cold_backup_archive(
+            app_db_path=self.app_db
+        )
+        backup_service.write_cold_backup_status(
+            ok=True, archive=good_archive, manifest=manifest
+        )
+        # A later run fails; the previous good archive must stay visible.
+        backup_service.write_cold_backup_status(
+            ok=False, archive=None, error="newer run failed"
+        )
+        points = [p for p in backup_points.list_backup_points() if p["medium"] == "cold_backup"]
+        self.assertEqual(len(points), 2)
+        by_reported = {p["detail"]["reported"]: p for p in points}
+        self.assertFalse(by_reported[True]["recoverable"])
+        self.assertTrue(by_reported[False]["recoverable"])
+
+    def test_corrupt_cold_archive_is_not_recoverable_without_status(self):
+        self._seed_db()
+        archive, _manifest = backup_service.build_cold_backup_archive(app_db_path=self.app_db)
+        archive.write_bytes(b"corrupted archive bytes")
+        backup_service.cold_status_path().unlink(missing_ok=True)
+
+        points = [p for p in backup_points.list_backup_points() if p["medium"] == "cold_backup"]
+        self.assertEqual(len(points), 1)
+        self.assertFalse(points[0]["recoverable"])
+        self.assertIn("无法打开", " ".join(points[0]["basic_check"]["messages"]))
+
+    def test_cold_cleanup_preview_covers_every_archive_on_disk(self):
+        self._seed_db()
+        backup_dir = backup_service.get_cold_backup_dir()
+        for ts in ("20260101_000001", "20260101_000002", "20260101_000003"):
+            run_dir = backup_dir / ts
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / backup_service.COLD_ARCHIVE_NAME).write_bytes(b"archive")
+
+        config = backup_retention.RetentionConfig(snapshot_keep=5, cold_keep=2)
+        preview = backup_points.cleanup_preview(config)
+        delete_ts = [d["ts"] for d in preview["cold"]["delete"]]
+        self.assertEqual(delete_ts, ["20260101_000001"])
+        self.assertEqual(
+            [p["ts"] for p in preview["cold"]["protected"]], ["20260101_000003"]
+        )
+
+        backup_points.apply_cleanup(config)
+        remaining = sorted(d.name for d in backup_dir.iterdir() if d.is_dir())
+        self.assertEqual(remaining, ["20260101_000002", "20260101_000003"])
+
+
+class BackupHealthTest(BackupPointTestCase):
+    def test_no_backup_conclusion(self):
+        self._seed_db()
+        health = backup_points.compute_backup_health()
+        self.assertEqual(health["status"], "no_backup")
+        self.assertFalse(health["checks"][0]["ok"])
+
+    def test_legacy_snapshot_only_reports_legacy(self):
+        self._seed_db()
+        self._make_snapshot()
+        health = backup_points.compute_backup_health()
+        self.assertEqual(health["status"], "legacy_only")
+        self.assertTrue(health["last_success_at"])
+
+    def test_ok_when_export_covers_photos(self):
+        self._seed_db(standards=["s1"], others=["o1"])
+        self._build_export(standard=["s1"], other=["o1"])
+        blob, meta = self._build_export(standard=["s1"], other=["o1"])
+        archive = backup_service._export_root() / "luyun_backup_20260101_000000.luyunbak"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(blob)
+        backup_service.write_export_sidecar(archive, meta)
+
+        health = backup_points.compute_backup_health()
+        self.assertEqual(health["status"], "ok")
+        self.assertIn(CONTENT_STANDARD_PHOTOS, health["coverage"])
+        self.assertIn(CONTENT_OTHER_PHOTOS, health["coverage"])
+
+    def test_corrupt_export_is_unusable(self):
+        self._seed_db()
+        blob, meta = self._build_export()
+        archive = backup_service._export_root() / "luyun_backup_20260101_000000.luyunbak"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(blob + b"tampered")
+        backup_service.write_export_sidecar(archive, meta)
+
+        points = [p for p in backup_points.list_backup_points() if p["medium"] == "export_backup"]
+        self.assertFalse(points[0]["recoverable"])
+        self.assertIn("校验和", " ".join(points[0]["basic_check"]["messages"]))
+
+
+class ExportPointListingTest(BackupPointTestCase):
+    def test_missing_summary_marks_absent_classes(self):
+        self._seed_db()
+        blob, meta = self._build_export()
+        archive = backup_service._export_root() / "luyun_backup_20260101_000000.luyunbak"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(blob)
+        backup_service.write_export_sidecar(archive, meta)
+
+        point = [
+            p for p in backup_points.list_backup_points() if p["medium"] == "export_backup"
+        ][0]
+        missing = {m["content"] for m in point["missing"]}
+        self.assertIn(CONTENT_STANDARD_PHOTOS, missing)
+        self.assertIn(CONTENT_OTHER_PHOTOS, missing)
+        self.assertEqual(point["provenance"], PROVENANCE_MANUAL)
+
+
+if __name__ == "__main__":
+    unittest.main()

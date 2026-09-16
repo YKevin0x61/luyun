@@ -8,7 +8,7 @@ DatabaseManager 的连接/生命周期职责：
 import logging
 import os
 import asyncio
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import aiosqlite
 from config import settings
@@ -42,6 +42,8 @@ class _ConnectionMixin:
         # Legacy: always empty under single-db architecture (ATTACH removed).
         self._attached_tables: set[str] = set()
         self._write_lock = None
+        # Set once connect() has finished schema creation + migrations.
+        self._migrations_complete = False
 
         self.stats = {
             'queries_executed': 0,
@@ -52,6 +54,7 @@ class _ConnectionMixin:
     async def connect(self) -> bool:
         """建立单一 app.db 连接（WAL），建齐全部表结构 + 索引；各表共享该连接。"""
         logger.info("🔗 正在连接单库 app.db (WAL)...")
+        self._migrations_complete = False
         try:
             app_db_path = settings.APP_DB_PATH
             os.makedirs(os.path.dirname(app_db_path), exist_ok=True)
@@ -86,11 +89,57 @@ class _ConnectionMixin:
                 self._table_views[table] = TableView(table, self._main_conn)
 
             self.stats['connection_count'] += 1
+            self._migrations_complete = True
             logger.info(f"✅ 单库连接成功 ({len(self._table_views)} 表 → {app_db_path})")
             return True
         except Exception as e:
             logger.error(f"❌ 单库连接失败: {e}")
             return False
+
+    # ── 就绪探针（只读，供健康检查使用） ──
+
+    def is_connected(self) -> bool:
+        """主连接是否已建立。"""
+        return self._main_conn is not None
+
+    def migrations_complete(self) -> bool:
+        """建表与迁移是否已全部完成（``connect()`` 成功后才为真）。"""
+        return self._migrations_complete
+
+    async def readable_tables(self, tables) -> Dict[str, Any]:
+        """只读探测若干关键表是否存在且可查询。
+
+        返回 ``{"readable": bool, "missing": [...], "errors": [...]}``；不修改任何数据。
+        """
+        missing: list = []
+        errors: list = []
+        if self._main_conn is None:
+            return {"readable": False, "missing": list(tables), "errors": ["数据库未连接"]}
+        try:
+            async with self._main_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ) as cursor:
+                names = {row[0] for row in await cursor.fetchall()}
+        except Exception as exc:  # pragma: no cover - defensive
+            return {"readable": False, "missing": list(tables), "errors": [str(exc)]}
+
+        for table in tables:
+            if table not in names:
+                missing.append(table)
+                continue
+            try:
+                async with self._main_conn.execute(
+                    f"SELECT 1 FROM {table} LIMIT 1"
+                ) as cursor:
+                    await cursor.fetchone()
+            except Exception as exc:
+                errors.append(f"{table}: {exc}")
+
+        return {
+            "readable": not missing and not errors,
+            "missing": missing,
+            "errors": errors,
+        }
 
     async def export_merged_sqlite_file(self, output_path: str) -> None:
         """
@@ -111,6 +160,7 @@ class _ConnectionMixin:
             await self._main_conn.close()
             self._main_conn = None
         self._table_views.clear()
+        self._migrations_complete = False
         logger.info("🔒 数据库连接已关闭")
 
     # ── 主连接（所有表已同库，跨表查询可直接 JOIN） ──

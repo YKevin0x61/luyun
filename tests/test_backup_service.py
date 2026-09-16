@@ -58,7 +58,7 @@ class BackupServiceV2Test(unittest.TestCase):
         self.assertEqual(parsed["credentials"]["password"], "s3cret-pw")
         self.assertIsNone(parsed["runtime"])
         self.assertIsNone(parsed["app_db_bytes"])
-        self.assertEqual(parsed["meta"]["version"], 2)
+        self.assertEqual(parsed["meta"]["version"], 3)
 
     def test_round_trip_with_runtime(self):
         runtime = {"work_start": "08:00", "work_end": "20:00"}

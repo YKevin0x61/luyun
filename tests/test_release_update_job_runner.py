@@ -180,8 +180,11 @@ class UpdateJobRunnerTest(unittest.TestCase):
         self.assertEqual(bundle.activated_tag, "v0.2.0")
         self.assertTrue(deps.synced)
         self.assertEqual(service.restarts, 1)
-        self.assertEqual(final.stage, "succeeded")
+        # The job never declares success itself: the restarted service must prove
+        # ready first (ReleaseUpdate.confirm_health).
+        self.assertEqual(final.stage, "restarting")
         self.assertEqual(final.snapshot_ts, "20260810_120000")
+        self.assertIsNotNone(final.restart_requested_at)
         self.assertFalse(final.rollback_attempted)
         stages = [w.stage for w in store.writes]
         self.assertEqual(
@@ -192,15 +195,12 @@ class UpdateJobRunnerTest(unittest.TestCase):
                 "installing",
                 "syncing_deps",
                 "restarting",
-                "succeeded",
             ],
         )
 
-    def test_persists_succeeded_before_restart_so_docker_self_kill_is_ok(self):
-        """Docker restart kills the in-container job; success must be on disk first.
-
-        Symptom without this: UI stuck at restarting while installed tag already matches.
-        """
+    def test_persists_awaiting_health_before_restart_so_docker_self_kill_is_ok(self):
+        """Docker restart kills the in-container job; the switched+restarting fact
+        must be on disk first so the Admin can still confirm health afterwards."""
         store = FakeJobStore(_queued())
         stage_at_restart: list[str] = []
 
@@ -217,8 +217,8 @@ class UpdateJobRunnerTest(unittest.TestCase):
 
         final = runner.run()
 
-        self.assertEqual(stage_at_restart, ["succeeded"])
-        self.assertEqual(final.stage, "succeeded")
+        self.assertEqual(stage_at_restart, ["restarting"])
+        self.assertEqual(final.stage, "restarting")
         self.assertEqual(probe.restarts, 1)
 
     def test_deps_skipped_when_requirements_fingerprint_unchanged(self):
@@ -230,7 +230,7 @@ class UpdateJobRunnerTest(unittest.TestCase):
 
         final = runner.run()
 
-        self.assertEqual(final.stage, "succeeded")
+        self.assertEqual(final.stage, "restarting")
         self.assertFalse(deps.synced)
         self.assertEqual(service.restarts, 1)
         stages = [w.stage for w in store.writes]
@@ -262,7 +262,7 @@ class UpdateJobRunnerTest(unittest.TestCase):
 
         final = runner.run()
 
-        self.assertEqual(final.stage, "succeeded")
+        self.assertEqual(final.stage, "restarting")
         self.assertTrue(deps.synced)
 
     def test_failure_after_leaving_tree_restores_previous(self):

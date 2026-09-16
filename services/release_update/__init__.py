@@ -4,9 +4,15 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import List, Optional, Protocol, Sequence, Tuple
 import time
+
+from database import CHINA_TZ
+
+logger = logging.getLogger(__name__)
 
 # Stages written by Apply Update / Update Job (stable for Admin UI polling).
 # Bundle path (ADR 0011): queued → backing_up → fetching_bundle → installing
@@ -19,6 +25,7 @@ STAGE_INSTALLING = "installing"
 STAGE_SYNCING_DEPS = "syncing_deps"
 STAGE_RESTARTING = "restarting"
 STAGE_SUCCEEDED = "succeeded"
+STAGE_SUCCEEDED_BUT_UNHEALTHY = "succeeded_but_unhealthy"
 STAGE_FAILED = "failed"
 
 # Legacy git/split-asset stage names (ADR 0010) — still recognized as in-progress
@@ -26,6 +33,7 @@ STAGE_FAILED = "failed"
 STAGE_FETCHING = "fetching"
 STAGE_INSTALLING_ASSETS = "installing_assets"
 
+# Job is switched over but the restarted service has not confirmed readiness yet.
 IN_PROGRESS_STAGES = frozenset(
     {
         STAGE_QUEUED,
@@ -39,6 +47,14 @@ IN_PROGRESS_STAGES = frozenset(
     }
 )
 
+TERMINAL_STAGES = frozenset(
+    {STAGE_SUCCEEDED, STAGE_SUCCEEDED_BUT_UNHEALTHY, STAGE_FAILED}
+)
+
+# How long the Admin keeps confirming readiness before declaring the new
+# Release switched-but-unhealthy.
+HEALTH_CONFIRM_GRACE_SECONDS = 180.0
+
 REASON_BUSY = "busy"
 REASON_PEAK_HOURS = "peak_hours"
 REASON_INVALID_TARGET = "invalid_target"
@@ -51,6 +67,7 @@ PREFLIGHT_RESTART = "restart"
 PREFLIGHT_CREDENTIALS = "credentials"
 PREFLIGHT_JOB_IDLE = "job_idle"
 PREFLIGHT_TREE_CLEAN = "tree_clean"
+PREFLIGHT_LAST_UPDATE = "last_update"
 
 
 @dataclass(frozen=True)
@@ -131,6 +148,25 @@ class UpdateJobState:
     rollback_ok: Optional[bool] = None
     snapshot_ts: Optional[str] = None
     cancel_requested: bool = False
+    # Two-stage success: the job only switches the bundle and asks for a restart;
+    # the Admin completes readiness confirmation after the restart.
+    restart_requested_at: Optional[str] = None
+    health_confirmed_at: Optional[str] = None
+    startup_id: Optional[str] = None
+    health_detail: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RuntimeReadiness:
+    """Readiness-probe result used to confirm a restarted service is healthy."""
+
+    ready: bool
+    startup_id: Optional[str]
+    started_at: Optional[str]
+    db_connected: bool
+    migrations_complete: bool
+    key_tables_readable: bool
+    details: List[str]
 
 
 @dataclass(frozen=True)
@@ -184,6 +220,31 @@ class PreflightEnvPort(Protocol):
     def inspect_env(self) -> PreflightEnv: ...
 
 
+class ReadinessPort(Protocol):
+    async def inspect_readiness(self) -> RuntimeReadiness: ...
+
+
+class UpdateHistoryPort(Protocol):
+    def read(self) -> List[dict]: ...
+
+    def latest_failure(self) -> Optional[dict]: ...
+
+    def record_state(self, state: UpdateJobState) -> None: ...
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO timestamp, assuming China time when naive; None if unparseable."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=CHINA_TZ)
+    return parsed
+
+
 def _semver_key(tag: str) -> Optional[Tuple[int, ...]]:
     """Parse v1.2.3 / 1.2.3 into a comparable tuple; None if not plain semver."""
     raw = tag[1:] if tag[:1] in ("v", "V") else tag
@@ -228,6 +289,7 @@ def _build_preflight(
     env: PreflightEnv,
     *,
     job_idle: bool,
+    last_failure: Optional[dict] = None,
 ) -> UpdatePreflight:
     """Aggregate env + job facts into Admin-facing Update Preflight lights."""
     dirty = bool(env.dirty_tree)
@@ -269,6 +331,20 @@ def _build_preflight(
             ),
         ),
     ]
+    if last_failure:
+        target = last_failure.get("target_tag") or "未知版本"
+        label = last_failure.get("result_label") or "失败"
+        log_hint = last_failure.get("log_path") or "data/update_job.log"
+        checks.append(
+            PreflightCheck(
+                code=PREFLIGHT_LAST_UPDATE,
+                ok=True,
+                message=(
+                    f"上一次更新（{target}）结果为「{label}」；仅提示，不阻塞本次更新。"
+                    f"日志：{log_hint}"
+                ),
+            )
+        )
     healthy_runtime = bool(env.restart_ready and env.credentials_ready)
     # Restart + credentials + idle job are hard gates; dirty may be overridden.
     gates_ok_without_dirty = healthy_runtime and job_idle
@@ -297,6 +373,8 @@ class ReleaseUpdate:
         job_stopper: Optional[JobStopperPort] = None,
         peak_hours: Optional[PeakHoursPort] = None,
         preflight_env: Optional[PreflightEnvPort] = None,
+        readiness: Optional[ReadinessPort] = None,
+        history: Optional[UpdateHistoryPort] = None,
     ) -> None:
         self._installed = installed
         self._github = github
@@ -306,6 +384,8 @@ class ReleaseUpdate:
         self._job_stopper = job_stopper
         self._peak_hours = peak_hours
         self._preflight_env = preflight_env
+        self._readiness = readiness
+        self._history = history
 
     def _inspect_preflight_env(self) -> PreflightEnv:
         if self._preflight_env is None:
@@ -316,6 +396,22 @@ class ReleaseUpdate:
         if self._job_store is None:
             return True
         return self._job_store.read().stage not in IN_PROGRESS_STAGES
+
+    def _latest_failure(self) -> Optional[dict]:
+        if self._history is None:
+            return None
+        try:
+            return self._history.latest_failure()
+        except Exception:
+            return None
+
+    def _record_history(self, state: UpdateJobState) -> None:
+        if self._history is None:
+            return
+        try:
+            self._history.record_state(state)
+        except Exception:
+            pass
 
     def version_check(self) -> VersionCheckResult:
         """Compare local Release Manifest identity to the formal GitHub catalogue.
@@ -366,7 +462,11 @@ class ReleaseUpdate:
                 credentials_ready=False,
                 dirty_tree=env.dirty_tree,
             )
-        preflight = _build_preflight(env, job_idle=self._job_is_idle())
+        preflight = _build_preflight(
+            env,
+            job_idle=self._job_is_idle(),
+            last_failure=self._latest_failure(),
+        )
         return VersionCheckResult(
             installed_tag=installed_tag,
             degraded=degraded,
@@ -378,37 +478,130 @@ class ReleaseUpdate:
             preflight=preflight,
         )
 
-    def job_status(self) -> UpdateJobState:
-        """Read Update Job state from the persisted store.
+    def history(self) -> List[dict]:
+        """Recent Update History (newest first), outside the business database."""
+        if self._history is None:
+            return []
+        try:
+            return self._history.read()
+        except Exception:
+            return []
 
-        Heals a known Docker hazard: job wrote ``restarting`` then the
-        container restart killed the oneshot before ``succeeded`` landed, while
-        the installed Release Manifest already matches ``target_tag``.
+    def job_status(self) -> UpdateJobState:
+        """Read the persisted Update Job state.
+
+        Terminal states are recorded to Update History on the way out so a
+        failed/cancelled job still leaves a trace. Readiness confirmation is a
+        separate step (``confirm_health``) — reading state never declares success.
+        """
+        if self._job_store is None:
+            return UpdateJobState(stage=STAGE_IDLE)
+        state = self._job_store.read()
+        if state.stage in TERMINAL_STAGES:
+            self._record_history(state)
+        return state
+
+    async def confirm_health(
+        self,
+        *,
+        grace_seconds: float = HEALTH_CONFIRM_GRACE_SECONDS,
+        force: bool = False,
+    ) -> UpdateJobState:
+        """Complete the second half of 「更新成功」: did the restarted service come up?
+
+        The job only switches the Release Bundle and asks for a restart. Here the
+        Admin confirms readiness (database connected, migrations complete, key
+        tables readable) *and* that the running process started after this
+        restart was requested. Until then the job stays ``restarting``; once the
+        grace window expires without readiness it becomes
+        ``succeeded_but_unhealthy``. Never retries and never rolls back on its own.
         """
         if self._job_store is None:
             return UpdateJobState(stage=STAGE_IDLE)
         state = self._job_store.read()
         if state.stage != STAGE_RESTARTING or not state.target_tag:
+            if state.stage in TERMINAL_STAGES:
+                self._record_history(state)
             return state
+
         try:
             identity = self._installed.inspect_installed()
-        except Exception:
+        except Exception as exc:
+            identity = None
+            logger.warning("读取已装发行版身份失败: %s", exc)
+        if identity is None or not identity.tag or identity.tag != state.target_tag:
+            # Bundle not switched (or identity unreadable) — leave the job alone;
+            # the runner decides failure/rollback.
             return state
-        if not identity.tag or identity.tag != state.target_tag:
-            return state
-        from datetime import datetime, timedelta, timezone
 
-        healed = replace(
-            state,
-            stage=STAGE_SUCCEEDED,
-            message="Update Job succeeded",
-            error=None,
-            finished_at=state.finished_at
-            or datetime.now(timezone(timedelta(hours=8))).isoformat(),
-            cancel_requested=False,
-        )
-        self._job_store.write(healed)
-        return healed
+        readiness = None
+        if self._readiness is not None:
+            try:
+                readiness = await self._readiness.inspect_readiness()
+            except Exception as exc:
+                logger.warning("就绪检查失败: %s", exc)
+
+        from datetime import datetime
+
+        now = datetime.now(CHINA_TZ)
+        if readiness is not None and readiness.ready and self._started_after_restart(
+            readiness, state
+        ):
+            confirmed = replace(
+                state,
+                stage=STAGE_SUCCEEDED,
+                message="Update Job succeeded",
+                error=None,
+                finished_at=state.finished_at or now.isoformat(),
+                cancel_requested=False,
+                health_confirmed_at=now.isoformat(),
+                startup_id=readiness.startup_id,
+                health_detail="；".join(readiness.details) or "就绪检查通过",
+            )
+            self._job_store.write(confirmed)
+            self._record_history(confirmed)
+            return confirmed
+
+        detail = "；".join(readiness.details) if readiness and readiness.details else "服务尚未恢复健康"
+        elapsed = self._seconds_since(state.restart_requested_at, now)
+        if force or (elapsed is not None and elapsed >= grace_seconds):
+            unhealthy = replace(
+                state,
+                stage=STAGE_SUCCEEDED_BUT_UNHEALTHY,
+                message="已切换到新版本，但服务未恢复健康",
+                finished_at=state.finished_at or now.isoformat(),
+                health_confirmed_at=now.isoformat(),
+                startup_id=readiness.startup_id if readiness else None,
+                health_detail=detail,
+            )
+            self._job_store.write(unhealthy)
+            self._record_history(unhealthy)
+            return unhealthy
+
+        # Still within the grace window: keep showing 「已切换、重启中」.
+        return replace(state, health_detail=detail)
+
+    @staticmethod
+    def _started_after_restart(
+        readiness: RuntimeReadiness,
+        state: UpdateJobState,
+    ) -> bool:
+        """True when the running process started after this restart was requested."""
+        requested = _parse_iso(state.restart_requested_at)
+        started = _parse_iso(readiness.started_at)
+        if started is None:
+            return False
+        if requested is None:
+            # No recorded restart time (legacy state file): accept a ready service.
+            return True
+        return started > requested
+
+    @staticmethod
+    def _seconds_since(value: Optional[str], now) -> Optional[float]:
+        parsed = _parse_iso(value)
+        if parsed is None:
+            return None
+        return max(0.0, (now - parsed).total_seconds())
 
     def cancel(
         self,

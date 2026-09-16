@@ -257,12 +257,21 @@ luyun-install() {
         ↓
 Apply Update（Web 只写意图；systemd：`systemctl start --no-block luyun-update`；Docker：后台跑 `scripts/run_update_job.py`）
         ↓
-Update Job：备份 → 下载/校验发行包 → 旁路解压并原子切换 → 条件 pip → 重启（systemd：`luyun`；Docker：`docker.sock` 重启容器）
+Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 → 旁路解压并原子切换 → 条件 pip → 重启（systemd：`luyun`；Docker：`docker.sock` 重启容器）
         ↓
-页面轮询 data/update_job.json 至 succeeded / failed
+作业进入「已切换、重启中」（`restarting`），**不直接落成功**
+        ↓
+页面轮询 data/update_job.json；管理后台按就绪口径完成**健康确认**（`succeeded` / `succeeded_but_unhealthy`）
 ```
 
 主服务会短暂中断；WebSocket / 采集会随进程重启恢复。宜避开极端高峰；急事可覆盖警告。
+
+**「更新成功」是两个事实**（ADR 0082）：作业只负责「已切换发行包并发出重启」；
+重启后的健康确认由管理后台完成——数据库已连接、迁移已完成、关键表可读，且
+当前进程的启动标识晚于本次重启请求。两者都满足才落 `succeeded`；宽限期内未就绪
+则落 `succeeded_but_unhealthy`（页面显示「已切换到新版本，但服务未恢复健康」，
+保留回退点与日志，提供查看日志 / 重新检测 / 回到上一版本三条出路）。健康确认
+失败不会自动重试，也不会自动回滚。
 
 **Docker / 1Panel（进程外壳）：** 用 `deploy/docker-compose.yml` / `./scripts/docker_up.sh`。  
 必须绑定挂载**直播应用目录的父目录**（默认 `deploy/runtime` → `/srv/luyun`，直播树 `/srv/luyun/app`），并挂载 `/var/run/docker.sock`；设置 `LUYUN_DEPLOY_MODE=docker`、`LUYUN_DOCKER_CONTAINER=<容器名>`（与 `container_name` 一致）。详见 `deploy/README.md` §1.1。**不要求**挂载 `.git`；交付仍是发行包，不是 `docker pull` 镜像。
@@ -290,22 +299,24 @@ Update Job：备份 → 下载/校验发行包 → 旁路解压并原子切换 �
 | `fetching_bundle` | 下载 `luyun-release-bundle.tar.gz` + `SHA256SUMS` 并硬校验 |
 | `installing` | 旁路解压、保留上一版目录后原子切换；不覆盖店内 `data/` / 凭据 |
 | `syncing_deps` | 仅当版本清单 `requirements_fingerprint` 变化时 pip；否则跳过 |
-| `restarting` | systemd：`systemctl restart luyun`；Docker：Engine API restart 容器 |
-| `succeeded` / `failed` | 终态；失败且已离开旧树时切回上一版目录并尽量拉起主服务；`error` 含日志指针 |
+| `restarting` | systemd：`systemctl restart luyun`；Docker：Engine API restart 容器。语义是「已切换发行包、正在重启，等待健康确认」 |
+| `succeeded` / `succeeded_but_unhealthy` / `failed` | 终态。`succeeded` = 切换 + 重启后健康确认通过；`succeeded_but_unhealthy` = 已切换但服务未恢复健康（保留回退点与日志）；失败且已离开旧树时切回上一版目录并尽量拉起主服务，`error` 含日志指针 |
 
 
 并发：已有进行中的作业时，新的 Apply 会被拒绝。  
 终止：Admin「终止更新」→ `POST /api/release-update/job/cancel`（写取消标志并 stop oneshot/pid；协作取消在已切树后会回滚；若进程已僵死则强制标 `failed`）。  
-进度：`GET /api/release-update/job` 附带 `log_tail`（含 pip 实时输出）。  
-排障：`data/update_job.json`、`data/update_job.log`；systemd 另看 `journalctl -u luyun-update`。
+进度：`GET /api/release-update/job` 附带 `log_tail`（含 pip 实时输出），每次轮询都会顺带完成一次健康确认。  
+手动重检：`POST /api/release-update/job/health-check`。  
+更新历史：`GET /api/release-update/history`，逐条记录目标版本、更新前版本、结果（成功 / 失败 / 取消 / 已切换但未健康）、是否回滚、耗时与日志位置，落在业务库之外的旁路 JSON `data/update_history.json`（默认保留 30 条）；上一次失败会在更新环境自检里作为提示出现，只展示不阻塞。  
+排障：`data/update_job.json`、`data/update_job.log`、`data/update_history.json`；systemd 另看 `journalctl -u luyun-update`。
 
 ### 5.4 回滚
 
 
 | 类型 | 做法 |
 | --- | --- |
-| **软件回滚** | 「系统更新」对更旧正式 Release 再 Apply Update 一次（再装该版发行包） |
-| **数据回滚** | `systemctl stop luyun` 后，用备份目录中的 `.db` / 凭据覆盖 `data/`，再 start（见 `deploy/backup.sh`） |
+| **版本回滚** | 「系统更新」对更旧正式 Release 再 Apply Update 一次（再装该版发行包）。作业未健康时页面直接提供「回到上一版本」入口，只是预填 `previous_ref`，仍走同一套预检与应用更新流程 |
+| **数据回滚** | 「备份中心 → 恢复」选一个本机回滚快照或导出备份（覆盖导入会先自动建一份来由「回滚前」/「覆盖导入前」的前置快照）；也可手工用归档内的 `app.db` / 凭据覆盖 `data/`（见 `deploy/backup.sh`） |
 
 
 
@@ -338,9 +349,15 @@ Update Job：备份 → 下载/校验发行包 → 旁路解压并原子切换 �
 | --- | --- | --- |
 | 发新版本 | 开发机 `scripts/publish_release.sh vX.Y.Z` | GitHub Release + 发行包 + `SHA256SUMS` + `install.sh` |
 | 新机器 | `curl …/install.sh \| sudo -E bash` + 人工反代/env/POS | 可启动的运行实例（版本清单已落盘） |
-| 店内升级/软件回滚 | `/setup` →「系统更新」 | Update Job 切到目标发行版 |
-| 看进度/失败 | 同页轮询；或 `data/update_job.*` / `journalctl -u luyun-update` | 阶段与错误信息 |
-| 日常数据冷备 | `deploy/backup.sh` 或 backup timer | `backups/<timestamp>/` |
+| 店内升级/软件回滚 | `/setup` →「系统更新」 | Update Job 切到目标发行版；重启后由管理后台完成健康确认 |
+| 看进度/失败 | 同页轮询；或 `data/update_job.*` / `journalctl -u luyun-update` | 阶段与错误信息；最近若干次结果见「更新历史」 |
+| 数据回滚 | `/setup` →「备份中心」→ 恢复 | 先建前置快照，再按内容类别恢复 |
+| 日常数据冷备 | `deploy/backup.sh` 或 backup timer | `backups/<timestamp>/luyun_cold_backup.tar` + `backups/cold_backup_status.json` |
+
+> 备份点保留份数在「备份中心 → 保留与清理」配置：本机回滚快照默认 5（上限 20）、
+> 导出备份的本机副本默认 5（上限 20）、冷备默认 14（上限 90）。本机回滚快照与冷备
+> 不能同时设为 1；更新作业前的本机回滚快照与最近一份永不自动清理；保存前会先展示
+> 「将删除哪些备份点」的预览，预览与实际删除一致。
 
 
 ---

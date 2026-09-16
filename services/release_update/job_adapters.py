@@ -50,7 +50,12 @@ class SnapshotBackupAdapter:
         recipes = backup_service.get_recipes_db_path()
         creds = backup_service.get_credentials_file_path()
         try:
-            return backup_service.create_restore_snapshot(app_db, recipes, creds)
+            return backup_service.create_restore_snapshot(
+                app_db,
+                recipes,
+                creds,
+                provenance=backup_service.PROVENANCE_PRE_UPDATE,
+            )
         except Exception as exc:
             raise RuntimeError(f"backup failed: {exc}") from exc
 
