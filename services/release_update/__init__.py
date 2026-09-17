@@ -69,6 +69,7 @@ PREFLIGHT_JOB_IDLE = "job_idle"
 PREFLIGHT_TREE_CLEAN = "tree_clean"
 PREFLIGHT_LAST_UPDATE = "last_update"
 PREFLIGHT_DISK_SPACE = "disk_space"
+PREFLIGHT_DATABASE = "database"
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,10 @@ class PreflightEnv:
     # 满盘时执行 pip sync 会把 .venv 写坏（现场复合故障的成因之一），故设为硬门禁。
     disk_ok: bool = True
     disk_free_mb: Optional[float] = None
+    # 业务库可达性。默认 SQLite 时恒为 True；PG 后端下探测失败不该反过来挡住
+    # 更新（与磁盘同一原则），所以默认 True，由 adapter 在能确定时置 False。
+    database_ok: bool = True
+    database_detail: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -355,6 +360,18 @@ def _build_preflight(
             code=PREFLIGHT_DISK_SPACE,
             ok=disk_ok,
             message=disk_message,
+        ),
+        PreflightCheck(
+            code=PREFLIGHT_DATABASE,
+            ok=bool(env.database_ok),
+            message=(
+                env.database_detail
+                or (
+                    "业务库可访问"
+                    if env.database_ok
+                    else "业务库不可访问（PostgreSQL 后端请检查服务与 POSTGRES_DSN）"
+                )
+            ),
         ),
     ]
     if last_failure:

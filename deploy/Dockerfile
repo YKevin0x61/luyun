@@ -16,6 +16,7 @@ RUN apt-get update \
         curl \
         tar \
         sqlite3 \
+        postgresql-client \
         tini \
     && rm -rf /var/lib/apt/lists/*
 

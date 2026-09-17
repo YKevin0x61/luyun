@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,13 +29,46 @@ class DefaultPreflightEnvAdapter:
 
     def inspect_env(self) -> PreflightEnv:
         disk_ok, disk_free_mb = self._disk_state()
+        database_ok, database_detail = self._database_state()
         return PreflightEnv(
             restart_ready=self._restart_ready(),
             credentials_ready=self._credentials_ready(),
             dirty_tree=self._deploy_tree_dirty(),
             disk_ok=disk_ok,
             disk_free_mb=disk_free_mb,
+            database_ok=database_ok,
+            database_detail=database_detail,
         )
+
+    def _database_state(self) -> tuple[bool, Optional[str]]:
+        """业务库可达性。
+
+        SQLite：只需确认数据目录还在（更新不替换库文件）。
+        PostgreSQL：用 pg_isready 探测。与磁盘同一原则——探测工具缺失或超时
+        判为可用，不让探测本身的缺陷反过来挡住更新。
+        """
+        backend = (getattr(settings, "DATABASE_BACKEND", "sqlite") or "sqlite").lower()
+        if backend != "postgres":
+            return True, f"SQLite（{getattr(settings, 'DATABASE_DIR', 'data')}）"
+
+        dsn = os.environ.get("LUYUN_POSTGRES_DSN") or getattr(settings, "POSTGRES_DSN", "")
+        if not dsn:
+            return False, "DATABASE_BACKEND=postgres，但 POSTGRES_DSN 未配置"
+        if not shutil.which("pg_isready"):
+            return True, "PostgreSQL（未安装 pg_isready，跳过探测）"
+        try:
+            completed = subprocess.run(
+                ["pg_isready", "-d", dsn, "-q"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return True, "PostgreSQL（探测超时，跳过）"
+        if completed.returncode == 0:
+            return True, "PostgreSQL 可访问"
+        return False, "PostgreSQL 不可访问（检查数据库服务与 POSTGRES_DSN）"
 
     def _disk_state(self) -> tuple[bool, Optional[float]]:
         """更新会跑 pip sync 写 .venv，必须先确认还有空间。

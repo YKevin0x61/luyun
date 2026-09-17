@@ -32,6 +32,11 @@
 [Unit]
 Description=LuckIn 订单系统（FastAPI / uvicorn，单机单 worker）
 After=network.target
+# PostgreSQL 后端（DATABASE_BACKEND=postgres）时，库要先于应用可用，否则启动即
+# 连接失败。这里用 Wants（弱依赖）而不是 Requires：默认的 SQLite 部署根本没有
+# postgresql.service，写成 Requires 会让那些机器起不来。After 只排序、不拉活。
+After=postgresql.service
+Wants=postgresql.service
 # 崩溃时避免无限重启刷屏：60 秒内累计重启超过 5 次则停止自动重启，
 # 需要人工介入排查（见下方 journalctl 命令）。
 StartLimitIntervalSec=60

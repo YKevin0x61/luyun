@@ -175,6 +175,10 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 并发：已有进行中的 Update Job 时，新的 Apply Update 会被拒绝。
 `data/` 业务库与凭据在代码更新过程中保留；备份另见第 4 节。
 
+> **PostgreSQL 后端（可选）**：切到 `DATABASE_BACKEND=postgres` 后，上面
+> `backing_up` 阶段的强制备份会改为 `pg_dump` 产出 `app.pgdump`，不再是
+> `app.db`。切换步骤、恢复与回滚见 [第 10 节](#10-postgresql-后端可选多店形态)。
+
 ### 依赖与浏览器的版本一致性
 
 Playwright 的 Python 包与浏览器 build 一一对应（如 lib 1.63.0 ↔
@@ -425,6 +429,9 @@ sudo systemctl enable luyun-update.service   # oneshot，按需 start
 - **单实例、单 worker**：不要给 `uvicorn`/`gunicorn` 配置多进程，也不要在
   多台机器上同时跑这套代码指向同一份 `data/`（SQLite 文件锁 + 内存态 hub
   都不支持这种拓扑）。
+  PostgreSQL 后端放宽了「同一份数据目录」这条（库在服务端，多机可连），但
+  **单 worker 仍然成立**——realtime hub、日志缓冲、爬虫计数器还在进程内存里，
+  除非先把它们外置到 Redis（尚未接入）。
 - **Docker 仅可作进程外壳**：见「Docker 部署」；**不要**把 `docker pull`
   镜像当作本产品的店内交付真相。
   裸机/VM 上用 systemd + venv 仍是默认路径。
@@ -436,3 +443,105 @@ sudo systemctl enable luyun-update.service   # oneshot，按需 start
 - CORS（`main.py` 硬编码 `allow_origins=["*"]`）和爬虫营业时间
   （`scraper/adapter.py` 硬编码 07:30–21:30）目前都不支持环境变量覆盖，
   属于代码常量，改动需要改代码而不是这份部署配置。
+
+---
+
+## 10. PostgreSQL 后端（可选，多店形态）
+
+默认后端是 SQLite（单文件、零外部依赖）。**不切换的机器完全不受本节影响**——
+这也是 0.6.0 升级对现有门店零风险的原因。决策背景见
+[ADR 0084](../docs/adr/0084-multi-store-reintroduce-postgres-redis.md)。
+
+### 10.1 能力现状（0.6.0）
+
+| 能力 | SQLite | PostgreSQL |
+|---|---|---|
+| 读写 / KDS / admin 表格编辑 | ✓ | ✓ |
+| 更新前强制备份（`backing_up`） | ✓ `app.db` | ✓ `pg_dump` → `app.pgdump` |
+| 定时冷备（`deploy/backup.sh`） | ✓ | ✓ 同上 |
+| Admin「备份导出 / 导入」 | ✓ | ✗ 明确报错，改用手工 `pg_dump` / `pg_restore` |
+| 必须单 worker | ✓ | **仍是**——realtime hub / 日志缓冲 / 爬虫计数器还在进程内 |
+
+Redis 容器已在 `docker-compose.yml` 的 `pg` profile 里备好，但**代码尚未接入**，
+先起它不改变任何行为。
+
+### 10.2 新机器：直接上 PostgreSQL
+
+```bash
+# 1) 装 PostgreSQL 16 + client（pg_dump/pg_isready 是备份与预检依赖）
+sudo apt-get install -y postgresql-16 postgresql-client-16
+
+# 2) 建库建用户
+sudo -u postgres psql -c "CREATE USER luyun WITH PASSWORD '<强密码>';"
+sudo -u postgres psql -c "CREATE DATABASE luyun OWNER luyun;"
+
+# 3) 应用 schema（这一步建表；应用本身不会建表）
+psql "postgresql://luyun:<强密码>@127.0.0.1:5432/luyun" \
+     -v ON_ERROR_STOP=1 -f migrations/pg/0001_initial_schema.sql
+
+# 4) 配置环境变量（deploy/env.production）
+#    DATABASE_BACKEND=postgres
+#    POSTGRES_DSN=postgresql://luyun:<强密码>@127.0.0.1:5432/luyun
+
+# 5) 启动并冒烟
+sudo systemctl restart luyun
+curl -s localhost:8000/api/healthz
+```
+
+`deploy/luyun.service` 已声明 `After=postgresql.service` + `Wants=postgresql.service`
+（弱依赖：SQLite 机器没有这个 unit 也能启动）。
+
+Docker 形态用 profile 起 PG/Redis：
+
+```bash
+docker compose -f deploy/docker-compose.yml --profile pg up -d
+```
+
+### 10.3 已部署机器：升级到 0.6.0
+
+**情况 A：继续用 SQLite（绝大多数门店）**
+
+零额外步骤：管理后台 →「系统更新」→ 版本检测 → 应用更新。升级作业会自动备份
+`app.db`、原子切换代码、保留 `data/`。`syncing_deps` 阶段会装上新声明的
+`asyncpg` / `redis`（无副作用）。
+
+**情况 B：升级完再切 PostgreSQL**
+
+```bash
+# 1) 先按情况 A 把代码升到 0.6.0，确认应用正常
+# 2) 按 10.2 装好 PostgreSQL 并应用 schema
+# 3) 停机窗口内搬数据（脚本对源库只读，回滚无损）
+sudo systemctl stop luyun
+sqlite3 data/app.db ".backup 'backups/pre-pg-migration.db'"   # 额外手工备份
+.venv/bin/python scripts/archive/migrate_sqlite_to_postgres.py --dry-run
+.venv/bin/python scripts/archive/migrate_sqlite_to_postgres.py --apply
+# 4) 改 deploy/env.production：DATABASE_BACKEND=postgres + POSTGRES_DSN
+# 5) 启动并冒烟：/api/healthz → 后台订单列表 → KDS → admin 表格编辑 → 原密码登录
+sudo systemctl start luyun
+```
+
+完整前置条件、冒烟清单与排错见
+[`migrations/pg/README.md`](../migrations/pg/README.md)。
+
+### 10.4 从 PG 快照恢复（手工）
+
+Admin 界面不支持 PG 恢复，用 `pg_restore`：
+
+```bash
+# 快照位置：data/snapshots/<ts>/app.pgdump（更新前快照）
+#           backups/<ts>/luyun_cold_backup.tar 内的 app.pgdump（冷备）
+sudo systemctl stop luyun
+pg_restore --clean --if-exists --no-owner --no-acl \
+  -d "postgresql://luyun:<密码>@127.0.0.1:5432/luyun" data/snapshots/<ts>/app.pgdump
+sudo systemctl start luyun
+```
+
+恢复后如遇主键冲突，说明序列没跟上——按
+[`migrations/pg/README.md`](../migrations/pg/README.md) 的 setval 段落重置。
+
+### 10.5 回滚
+
+- **未切 PG**：照旧装回更旧发行包即可。
+- **已切 PG**：把 `DATABASE_BACKEND` 改回 `sqlite` 重启。迁移脚本全程只读源库，
+  `data/app.db` 仍在原位，因此**回滚不丢数据**；但停机切换到切回之间的 PG 新增
+  数据不会回到 SQLite，需要人工取舍。观察期结束前不要删 `data/app.db`。
