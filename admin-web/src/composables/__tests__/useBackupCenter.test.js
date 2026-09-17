@@ -436,6 +436,53 @@ describe('useBackupCenter', () => {
     expect(confirmChecked.overwrite).toBeUndefined()
   })
 
+  it('warns when the restored library references photos missing on disk', async () => {
+    apiUpload.mockResolvedValueOnce(previewPayload()).mockResolvedValueOnce({
+      success: true,
+      mode: 'merge',
+      applied: { credentials: false, runtime: false, app_db: true, recipes_db: false, standard_photos: false, other_photos: false },
+      applied_labels: ['业务数据'],
+      photos_restored: { standard: 0, other: 0 },
+      photo_consistency: {
+        ok: false,
+        missing: { standard: ['s1'], other: ['o1', 'o2'] },
+        standard_missing: 1,
+        other_missing: 2,
+        checked_at: '2026-09-01T12:00:00+08:00',
+      },
+      snapshot_ts: '20260901_120000',
+      session_invalidated: false,
+    })
+    apiGet.mockImplementation((path) => {
+      if (path === '/api/backup/points') return Promise.resolve(pointsPayload())
+      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
+      return Promise.resolve({})
+    })
+    const {
+      importState,
+      onImportFileChange,
+      onPreviewImport,
+      onApplyImport,
+      forceContinue,
+      onConfirmClick,
+      importSuccessModal,
+    } = makeHarness()
+
+    onImportFileChange({ name: 'backup.luyunbak' })
+    importState.passphrase = 'secret1'
+    await onPreviewImport()
+    importState.apply_standard_photos = true
+    forceContinue.value = true
+    onApplyImport()
+    await onConfirmClick()
+
+    expect(importSuccessModal.show).toBe(true)
+    expect(importSuccessModal.message).toContain('恢复成功')
+    expect(importSuccessModal.message).toContain('1 张标准图')
+    expect(importSuccessModal.message).toContain('2 张其它照片')
+    expect(importSuccessModal.message).toContain('冷备归档')
+  })
+
   it('rolls back a 本机回滚快照 through the two-step confirm with photo query params', async () => {
     apiGet.mockResolvedValue(pointsPayload({ points: [exportPoint] }))
     apiPost.mockResolvedValue({
@@ -487,6 +534,42 @@ describe('useBackupCenter', () => {
     expect(confirmState.open).toBe(false)
     expect(rollingBackTs.value).toBe('')
     expect(showAlert).toHaveBeenCalledWith('success', expect.stringContaining('数据回滚成功'))
+  })
+
+  it('escalates a 回滚 whose library references photos missing on disk', async () => {
+    apiGet.mockResolvedValue(pointsPayload({ points: [exportPoint] }))
+    apiPost.mockResolvedValue({
+      success: true,
+      ts: '20260901_100000',
+      applied: { app_db: true },
+      applied_labels: ['业务数据'],
+      photos_restored: { standard: 0, other: 0 },
+      photo_consistency: {
+        ok: false,
+        missing: { standard: ['s1'], other: [] },
+        standard_missing: 1,
+        other_missing: 0,
+      },
+      snapshot_ts: '20260901_130000',
+      session_invalidated: false,
+    })
+    const showAlert = vi.fn()
+    const {
+      loadSnapshots,
+      onRollbackSnapshot,
+      confirmChecked,
+      onConfirmClick,
+    } = useBackupCenter({ showAlert, clearAlert: vi.fn() })
+
+    await loadSnapshots()
+    onRollbackSnapshot('20260901_100000')
+    confirmChecked.rollback = true
+    await onConfirmClick()
+
+    expect(showAlert).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('1 张标准图'),
+    )
   })
 
   it('saves 保留配置 only after showing the deletion preview', async () => {

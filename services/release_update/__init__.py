@@ -68,6 +68,7 @@ PREFLIGHT_CREDENTIALS = "credentials"
 PREFLIGHT_JOB_IDLE = "job_idle"
 PREFLIGHT_TREE_CLEAN = "tree_clean"
 PREFLIGHT_LAST_UPDATE = "last_update"
+PREFLIGHT_DISK_SPACE = "disk_space"
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,10 @@ class PreflightEnv:
     restart_ready: bool
     credentials_ready: bool
     dirty_tree: bool
+    # 磁盘余量：adapter 读不到时保持 True/None，探测失败不该挡住更新。
+    # 满盘时执行 pip sync 会把 .venv 写坏（现场复合故障的成因之一），故设为硬门禁。
+    disk_ok: bool = True
+    disk_free_mb: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -293,6 +298,22 @@ def _build_preflight(
 ) -> UpdatePreflight:
     """Aggregate env + job facts into Admin-facing Update Preflight lights."""
     dirty = bool(env.dirty_tree)
+    disk_ok = bool(env.disk_ok)
+    if env.disk_free_mb is None:
+        disk_message = (
+            "磁盘可用空间充足"
+            if disk_ok
+            else "磁盘可用空间不足，安装依赖可能把 .venv 写坏"
+        )
+    else:
+        disk_message = (
+            f"磁盘可用空间充足（{env.disk_free_mb:.0f}MB）"
+            if disk_ok
+            else (
+                f"磁盘可用空间不足（仅 {env.disk_free_mb:.0f}MB）；"
+                "更新会执行 pip sync，满盘可能写坏 .venv，请先清理磁盘"
+            )
+        )
     checks = [
         PreflightCheck(
             code=PREFLIGHT_RESTART,
@@ -330,6 +351,11 @@ def _build_preflight(
                 else "部署目录有本地改动；默认禁止应用更新，需明确确认丢弃后才可继续"
             ),
         ),
+        PreflightCheck(
+            code=PREFLIGHT_DISK_SPACE,
+            ok=disk_ok,
+            message=disk_message,
+        ),
     ]
     if last_failure:
         target = last_failure.get("target_tag") or "未知版本"
@@ -346,8 +372,8 @@ def _build_preflight(
             )
         )
     healthy_runtime = bool(env.restart_ready and env.credentials_ready)
-    # Restart + credentials + idle job are hard gates; dirty may be overridden.
-    gates_ok_without_dirty = healthy_runtime and job_idle
+    # Restart + credentials + idle job + free disk are hard gates; dirty may be overridden.
+    gates_ok_without_dirty = healthy_runtime and job_idle and disk_ok
     apply_allowed = gates_ok_without_dirty and not dirty
     discard_local_changes_allowed = gates_ok_without_dirty and dirty
     return UpdatePreflight(
@@ -457,11 +483,7 @@ class ReleaseUpdate:
             update_available = False
 
         if not catalogue_ok:
-            env = PreflightEnv(
-                restart_ready=env.restart_ready,
-                credentials_ready=False,
-                dirty_tree=env.dirty_tree,
-            )
+            env = replace(env, credentials_ready=False)
         preflight = _build_preflight(
             env,
             job_idle=self._job_is_idle(),

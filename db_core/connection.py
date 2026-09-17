@@ -89,6 +89,11 @@ class _ConnectionMixin:
             # 「今日 + GROUP BY 菜品/档口」这类聚合退化成全索引扫描（18 万行）。
             await self._ensure_query_statistics()
 
+            # 3.6 启动体检：quick_check 只做页级校验。业务库（订单/结算）绝不
+            # 自动隔离——发现损坏只告警，交由人工决定，避免把唯一数据搬走。
+            if settings.SQLITE_QUICK_CHECK_ON_START:
+                await self._quick_check_or_warn(app_db_path)
+
             # 4. 各表共享同一连接的 TableView
             for table in ALL_TABLES:
                 self._table_views[table] = TableView(table, self._main_conn)
@@ -102,6 +107,32 @@ class _ConnectionMixin:
             return False
 
     # ── 就绪探针（只读，供健康检查使用） ──
+
+    async def _quick_check_or_warn(self, app_db_path: str) -> None:
+        """对 app.db 做一次页级体检；损坏只告警，不隔离。
+
+        logs.db 损坏可以隔离重建（日志可丢），业务库不行：自动隔离会把订单/
+        结算数据搬走。这里只把结论写进日志，让人来决定下一步。
+        """
+        assert self._main_conn is not None
+        started = time.time()
+        try:
+            async with self._main_conn.execute("PRAGMA quick_check(1)") as cur:
+                rows = await cur.fetchall()
+        except Exception as exc:
+            logger.error(
+                "❌ app.db quick_check 执行失败（业务库不做自动隔离）: %s", exc
+            )
+            return
+        problems = [str(r[0]) for r in rows if str(r[0]).strip().lower() != "ok"]
+        elapsed = (time.time() - started) * 1000
+        if problems:
+            logger.error(
+                "❌ app.db quick_check 未通过（业务库不做自动隔离，请人工处理）: %s",
+                "; ".join(problems),
+            )
+            return
+        logger.info(f"✅ app.db quick_check 通过（{elapsed:.0f}ms, {app_db_path}）")
 
     async def _orders_has_statistics(self) -> bool:
         """orders 表是否已有 sqlite_stat1 记录（空表 ANALYZE 不会写入记录）。"""

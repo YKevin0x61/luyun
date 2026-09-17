@@ -294,6 +294,27 @@ def _staging_http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
+def _after_restore_photo_consistency(touched: bool) -> Optional[dict]:
+    """恢复后核对「库引用的照片」是否真的在磁盘上。
+
+    库和照片是两份数据，恢复时可以只换其中一份（旧归档不带照片、只勾选恢复
+    业务数据、跨机搬运 app.db 都会如此）。这里把恢复结果落成结论，缺图不再
+    静默成功。``touched`` 为假（本次没有写库也没写照片）时不做检查。
+    """
+    if not touched:
+        return None
+    result = backup_service.missing_hygiene_capture_ids()
+    if not result["ok"]:
+        logger.warning(
+            "⚠️ [审计] 恢复后照片不一致：标准图缺 %s 张、其它照片缺 %s 张"
+            "（库已引用但磁盘上找不到，标准图清单会缺这些项，"
+            "请重新上传标准图或从冷备归档补齐）",
+            result["standard_missing"],
+            result["other_missing"],
+        )
+    return result
+
+
 async def _apply_parsed_backup(
     parsed: dict,
     *,
@@ -430,6 +451,14 @@ async def _apply_parsed_backup(
         applied[CONTENT_STANDARD_PHOTOS] = bool(apply_standard_photos)
         applied[CONTENT_OTHER_PHOTOS] = bool(apply_other_photos)
 
+    photo_consistency = _after_restore_photo_consistency(
+        bool(
+            applied[CONTENT_APP_DB]
+            or applied[CONTENT_STANDARD_PHOTOS]
+            or applied[CONTENT_OTHER_PHOTOS]
+        )
+    )
+
     logger.info(
         "📥 [审计] 已导入系统备份 mode=%s applied=%s snapshot=%s",
         mode,
@@ -451,6 +480,7 @@ async def _apply_parsed_backup(
             CONTENT_LABELS[c] for c, done in applied.items() if done
         ],
         "photos_restored": restored_photos,
+        "photo_consistency": photo_consistency,
         "snapshot_ts": snapshot_ts,
         "session_invalidated": session_invalidated,
     }
@@ -636,6 +666,14 @@ async def rollback_snapshot(
         applied[CONTENT_STANDARD_PHOTOS] = bool(apply_standard_photos)
         applied[CONTENT_OTHER_PHOTOS] = bool(apply_other_photos)
 
+    photo_consistency = _after_restore_photo_consistency(
+        bool(
+            applied[CONTENT_APP_DB]
+            or applied[CONTENT_STANDARD_PHOTOS]
+            or applied[CONTENT_OTHER_PHOTOS]
+        )
+    )
+
     logger.info(
         "⏪ [审计] 快照回滚完成 ts=%s applied=%s pre_snapshot=%s",
         ts,
@@ -651,6 +689,7 @@ async def rollback_snapshot(
         "applied": applied,
         "applied_labels": [CONTENT_LABELS[c] for c, done in applied.items() if done],
         "photos_restored": restored_photos,
+        "photo_consistency": photo_consistency,
         "snapshot_ts": pre_ts,
         "session_invalidated": applied[CONTENT_APP_DB] or applied[CONTENT_CREDENTIALS],
     }

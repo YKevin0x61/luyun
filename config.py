@@ -73,6 +73,29 @@ class Settings(BaseSettings):
     LOG_RETENTION_DAYS: int = 7  # 日志保留天数（0 = 永久保留）
     LOG_QUEUE_BATCH_SIZE: int = 200  # 异步写库批量大小
     LOG_QUEUE_FLUSH_INTERVAL: float = 1.0  # 异步写库刷新间隔（秒）
+    # 运行期维护间隔：清理过期日志 + WAL checkpoint。启动期清理只发生一次，
+    # 长期不重启的实例必须靠这个循环把 logs.db 的大小控制住。
+    LOG_MAINTENANCE_INTERVAL_SECONDS: int = 6 * 3600
+    # 损坏日志库（quarantine 副本）保留份数上限，0 = 不限制。
+    # 每份是几百 MB 的快照，无上限保留会反过来加剧磁盘满。
+    LOG_CORRUPT_KEEP: int = 2
+    # 启动期 SQLite quick_check：logs.db 不通过则隔离重建，app.db 不通过只告警
+    # （业务库是订单/结算数据，绝不自动搬走）。
+    SQLITE_QUICK_CHECK_ON_START: bool = True
+
+    # 磁盘守护（进程内）：阈值告警 + 健康端点暴露
+    DISK_GUARD_ENABLED: bool = True
+    DISK_GUARD_INTERVAL_SECONDS: int = 300
+    DISK_WARN_PCT: int = 85
+    DISK_CRITICAL_PCT: int = 92
+    # 应用更新前要求的最小可用空间（MB）。低于它直接拒绝更新，避免在满盘时
+    # 执行 pip sync 把 .venv 写坏（现场复合故障的成因之一）。
+    UPDATE_MIN_FREE_MB: int = 2048
+
+    # 爬虫浏览器自愈：launch 报 "Executable doesn't exist" 时自动执行
+    # `python -m playwright install chromium` 并重试一次。
+    SCRAPER_BROWSER_AUTO_INSTALL: bool = True
+    PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS: int = 900
 
     # 兼容旧属性
     @property
@@ -189,7 +212,7 @@ settings = Settings()
 KITCHEN_STATIONS = settings.KITCHEN_STATIONS
 PRIORITY_LEVELS = settings.PRIORITY_LEVELS
 
-# 订单行营业额 SQL 表达式（全系统统一口径，见 docs/DATA_REVENUE.md）
+# 订单行营业额 SQL 表达式（全系统统一口径，见 docs/pos/DATA_REVENUE.md）
 ORDER_LINE_REVENUE_SQL = (
     "CASE WHEN total_amount IS NOT NULL AND total_amount != 0 "
     "THEN total_amount ELSE quantity * COALESCE(price, 0) END"

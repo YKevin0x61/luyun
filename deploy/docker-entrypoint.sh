@@ -134,10 +134,52 @@ EOF
 
 ensure_venv() {
   cd "$APP_DIR"
+  local fp_file=".venv/.requirements.fingerprint"
   if [[ ! -x .venv/bin/python ]]; then
     log "create .venv + pip install"
     python3 -m venv .venv
     .venv/bin/pip install -r requirements.txt
+    file_sha256 requirements.txt > "$fp_file" || true
+    return 0
+  fi
+  # 已存在的 .venv 也必须跟随发行包：Release Bundle 每次都带全新 requirements.txt，
+  # 只在 .venv 缺失时装依赖会让新依赖永远装不上。
+  local expected current
+  expected="$(file_sha256 requirements.txt)"
+  current="$(cat "$fp_file" 2>/dev/null || true)"
+  if [[ "$expected" != "$current" ]]; then
+    log "requirements.txt changed → pip install"
+    .venv/bin/pip install -r requirements.txt
+    printf '%s\n' "$expected" > "$fp_file"
+  fi
+}
+
+ensure_playwright_browsers() {
+  # 用 .venv 的 playwright 真跑一次 launch：lib 与浏览器 build 漂移时
+  # （Dockerfile 预装的 build 与 .venv 解析出的 lib 版本不一致）这里就会失败，
+  # 必须当场补齐，否则 scraper 报 Executable doesn't exist。
+  # 只比对 executable_path 是不够的：headless 启动走的是 chromium_headless_shell。
+  local py="$APP_DIR/.venv/bin/python"
+  [[ -x "$py" ]] || return 0
+  local probe
+  probe="$(cat <<'PY'
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    p.chromium.launch(headless=True).close()
+print("ok")
+PY
+)"
+  if "$py" -c "$probe" >/dev/null 2>&1; then
+    log "playwright chromium OK"
+    return 0
+  fi
+  log "playwright chromium missing/broken → .venv/bin/python -m playwright install chromium"
+  # 失败不阻断启动：主服务启动时的 scraper 自愈会再试一次。
+  "$py" -m playwright install chromium || log "警告: chromium 安装失败，scraper 启动时会自愈重试"
+  if "$py" -c "$probe" >/dev/null 2>&1; then
+    log "playwright chromium OK (after install)"
+  else
+    log "警告: chromium 仍不可用"
   fi
 }
 
@@ -171,6 +213,7 @@ case "$cmd" in
     export RELEASE_UPDATE_REPO_DIR="${RELEASE_UPDATE_REPO_DIR:-$APP_DIR}"
     export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"
     ensure_venv
+    ensure_playwright_browsers
     log "uvicorn main:app (workers=1) cwd=${APP_DIR}"
     cd "$APP_DIR"
     exec .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1

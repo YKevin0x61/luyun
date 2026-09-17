@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest import mock
 
 import aiosqlite
@@ -19,7 +20,12 @@ import aiosqlite
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services import backup_service, credentials_store
-from services.backup_service import BACKUP_MAGIC, SNAPSHOT_KEEP
+from services.backup_service import (
+    BACKUP_MAGIC,
+    PHOTO_OTHER,
+    PHOTO_STANDARD,
+    SNAPSHOT_KEEP,
+)
 from services.credentials_store import CredentialBundle
 
 
@@ -454,6 +460,76 @@ class ExportRecipesDbBytesTest(unittest.TestCase):
         self.assertIsNone(
             backup_service.export_recipes_db_bytes("/no/such/path/x.db")
         )
+
+
+class MissingHygieneCaptureIdsTest(unittest.TestCase):
+    """恢复后一致性检查：库引用的原始照片缺了就必须报出来。"""
+
+    def setUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        self.app_db = os.path.join(self._tmpdir.name, "app.db")
+        self.capture_root = Path(self._tmpdir.name) / "hygiene-captures"
+        self.capture_root.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.app_db)
+        conn.execute(
+            "CREATE TABLE hygiene_standards (id INTEGER PRIMARY KEY, capture_id TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE hygiene_daily_submissions"
+            " (id INTEGER PRIMARY KEY, capture_id TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE hygiene_capture_variants"
+            " (source_capture_id TEXT, capture_id TEXT)"
+        )
+        conn.execute("INSERT INTO hygiene_standards (capture_id) VALUES ('std-1')")
+        conn.execute("INSERT INTO hygiene_daily_submissions (capture_id) VALUES ('other-1')")
+        conn.execute(
+            "INSERT INTO hygiene_capture_variants (source_capture_id, capture_id)"
+            " VALUES ('std-1', 'thumb-1')"
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        settings.DATABASE_DIR = self._old_database_dir
+        self._tmpdir.cleanup()
+
+    def _touch(self, capture_id):
+        (self.capture_root / capture_id).write_bytes(b"photo")
+
+    def test_reports_missing_original_photos(self):
+        self._touch("std-1")
+
+        result = backup_service.missing_hygiene_capture_ids()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["standard_missing"], 0)
+        self.assertEqual(result["other_missing"], 1)
+        self.assertEqual(result["missing"][PHOTO_OTHER], ["other-1"])
+        self.assertTrue(result["checked_at"])
+
+    def test_ok_when_every_referenced_photo_exists(self):
+        self._touch("std-1")
+        self._touch("other-1")
+
+        result = backup_service.missing_hygiene_capture_ids()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["missing"], {})
+        self.assertEqual(result["standard_missing"], 0)
+
+    def test_missing_derivative_does_not_count_as_inconsistent(self):
+        """派生图缺失时接口会回退到原图，不算库与照片不一致。"""
+        self._touch("std-1")
+        self._touch("other-1")
+
+        result = backup_service.missing_hygiene_capture_ids()
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("thumb-1", result["missing"].get(PHOTO_STANDARD, []))
 
 
 if __name__ == "__main__":

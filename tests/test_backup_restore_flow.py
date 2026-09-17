@@ -215,6 +215,51 @@ class RestoreFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertFalse(result["applied"][CONTENT_OTHER_PHOTOS])
 
+    async def test_restore_flags_library_photos_missing_on_disk(self):
+        """换库不换照片的典型情形：恢复后库引用的照片目标机上并不存在。"""
+        await self._seed_hygiene(standard=["s1"], other=["o1"])
+        parsed = await self._build_parsed(standard=["s1"], other=["o1"])
+        # 目标机没有这两张照片（跨机搬运 app.db、或文件已被删）
+        (self.capture_root / "s1").unlink()
+        (self.capture_root / "o1").unlink()
+
+        with self.assertLogs("api.backup", level="WARNING") as logs:
+            result = await self._apply(
+                parsed,
+                apply_standard_photos=False,
+                apply_other_photos=False,
+            )
+
+        self.assertTrue(result["success"])
+        consistency = result["photo_consistency"]
+        self.assertFalse(consistency["ok"])
+        self.assertEqual(consistency["standard_missing"], 1)
+        self.assertEqual(consistency["other_missing"], 1)
+        self.assertEqual(consistency["missing"][PHOTO_STANDARD], ["s1"])
+        self.assertIn("恢复后照片不一致", "\n".join(logs.output))
+
+    async def test_restore_reports_consistent_photos(self):
+        await self._seed_hygiene(standard=["s1"])
+        parsed = await self._build_parsed(standard=["s1"])
+
+        result = await self._apply(parsed, apply_standard_photos=False)
+
+        self.assertTrue(result["photo_consistency"]["ok"])
+        self.assertEqual(result["photo_consistency"]["missing"], {})
+
+    async def test_restore_without_writing_anything_skips_consistency_check(self):
+        parsed = await self._build_parsed(standard=["s1"])
+
+        result = await self._apply(
+            parsed,
+            apply_credentials=False,
+            apply_app_db=False,
+            apply_standard_photos=False,
+            apply_other_photos=False,
+        )
+
+        self.assertIsNone(result["photo_consistency"])
+
     async def test_pre_snapshot_failure_refuses_restore(self):
         await self._seed_hygiene(standard=["s1"])
         parsed = await self._build_parsed(standard=["s1"])

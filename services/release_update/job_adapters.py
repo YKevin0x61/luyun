@@ -22,6 +22,7 @@ from typing import Callable, Optional
 
 from config import settings
 from services import backup_service
+from services.playwright_env import ensure_chromium_installed_sync
 from services.release_update.job_runner import BundleInstallResult
 from services.release_update.job_state import is_cancel_requested, job_log_path
 from services.release_update.manifest_identity import MANIFEST_NAME
@@ -397,6 +398,16 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
             pass
 
 
+def resolve_deploy_python(
+    deploy_dir: Path, python_bin: Optional[str] = None
+) -> str:
+    """Deploy venv interpreter, falling back to python3 when the venv is absent."""
+    if python_bin:
+        return python_bin
+    venv_python = Path(deploy_dir) / ".venv" / "bin" / "python"
+    return str(venv_python) if venv_python.is_file() else "python3"
+
+
 class PipDepsSyncAdapter:
     """Sync Python deps into the deploy venv after bundle activation."""
 
@@ -410,11 +421,7 @@ class PipDepsSyncAdapter:
         timeout_seconds: int = PIP_SYNC_TIMEOUT_SECONDS,
     ) -> None:
         self._deploy = Path(deploy_dir)
-        if python_bin:
-            self._python = python_bin
-        else:
-            venv_python = self._deploy / ".venv" / "bin" / "python"
-            self._python = str(venv_python) if venv_python.is_file() else "python3"
+        self._python = resolve_deploy_python(self._deploy, python_bin)
         self._is_cancelled = is_cancelled or is_cancel_requested
         self._log_path = Path(log_path) if log_path is not None else job_log_path()
         self._timeout_seconds = timeout_seconds
@@ -473,6 +480,43 @@ class PipDepsSyncAdapter:
             raise RuntimeError(f"pip sync failed: {exc}") from exc
         if rc != 0:
             raise RuntimeError(f"pip sync failed: exit {rc} (see update_job.log)")
+
+
+class PlaywrightBrowserSyncAdapter:
+    """Keep the deploy venv's Playwright browsers aligned with its lib version.
+
+    升级 playwright lib 后浏览器 build 必须同步更换，否则 scraper 报
+    ``Executable doesn't exist at /ms-playwright/chromium_headless_shell-<rev>/...``。
+    失败只告警不抛：浏览器缺失由主服务启动后的自愈兜底，不该让一次网络抖动
+    卡死整台店的更新。
+    """
+
+    def __init__(
+        self,
+        deploy_dir: Path,
+        *,
+        python_bin: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
+    ) -> None:
+        self._deploy = Path(deploy_dir)
+        self._python = resolve_deploy_python(self._deploy, python_bin)
+        self._timeout_seconds = (
+            timeout_seconds or settings.PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS
+        )
+
+    def sync(self) -> None:
+        logger.info("Ensuring Playwright browsers match %s", self._python)
+        ok = ensure_chromium_installed_sync(
+            python_bin=self._python,
+            timeout_seconds=self._timeout_seconds,
+            log=logger,
+        )
+        if not ok:
+            logger.warning(
+                "Playwright browser sync failed; the main service self-heals on "
+                "startup (lib=%s)",
+                self._python,
+            )
 
 
 class SystemdMainServiceAdapter:

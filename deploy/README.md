@@ -168,12 +168,38 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 | `backing_up` | **强制备份**（失败则不改动线上应用树） |
 | `fetching_bundle` | 下载发行包 + `SHA256SUMS` 并硬校验 |
 | `installing` | 旁路解压后原子切换（保留上一版目录；不覆盖 `data/` / 凭据） |
-| `syncing_deps` | 仅当 `requirements_fingerprint` 变化时 pip；否则跳过 |
+| `syncing_deps` | 仅当 `requirements_fingerprint` 变化时 pip；随后幂等同步 Playwright 浏览器（失败只告警，不阻断更新） |
 | `restarting` | 重启主服务（systemd 或 Docker socket） |
 | `succeeded` / `failed` | 终态；失败且已离开旧树时切回上一版并尽量拉起主服务 |
 
 并发：已有进行中的 Update Job 时，新的 Apply Update 会被拒绝。
 `data/` 业务库与凭据在代码更新过程中保留；备份另见第 4 节。
+
+### 依赖与浏览器的版本一致性
+
+Playwright 的 Python 包与浏览器 build 一一对应（如 lib 1.63.0 ↔
+`chromium` / `chromium_headless_shell` build 1243）。两者分开升级就会出现
+`BrowserType.launch: Executable doesn't exist at /ms-playwright/chromium_headless_shell-1243/...`。
+因此：
+
+- `requirements.txt` 钉死 `playwright==1.63.0`；升级该版本时必须同步浏览器；
+- 更新作业在 `syncing_deps` 阶段用部署 venv 的解释器执行
+  `.venv/bin/python -m playwright install chromium`（幂等，目标 build 已存在则秒退）；
+- Docker 入口在启动 uvicorn 前用 `.venv` 的 playwright 真跑一次 `chromium.launch()`，
+  失败则补装（只比对 `executable_path` 不够：headless 启动走的是 `chromium_headless_shell`）；
+- 爬虫自身在 launch 报「Executable doesn't exist」时也会自动补装并重试一次，可用
+  `SCRAPER_BROWSER_AUTO_INSTALL=0` 关闭。
+
+### 磁盘水位
+
+- 「更新环境自检」包含磁盘余量：可用空间低于 `UPDATE_MIN_FREE_MB`（默认 2048MB）
+  时禁止应用更新——满盘跑 pip sync 会把 `.venv` 写坏；
+- 进程内磁盘守护每 `DISK_GUARD_INTERVAL_SECONDS`（默认 300s）检查一次，达到
+  `DISK_WARN_PCT` / `DISK_CRITICAL_PCT`（默认 85% / 92%）时写日志并通过 realtime
+  `admin` nudge 提示管理端；`DISK_GUARD_ENABLED=0` 可关闭；
+- `GET /api/healthz`（免鉴权、只读，返回 DB 状态与聚合磁盘水位）可供 Docker
+  `HEALTHCHECK` 或反向代理探针使用。磁盘水位高**不**改状态码：重启容器腾不出空间，
+  只会变成重启循环。
 
 **Docker / 1Panel：** 见下方「Docker 部署」；交付仍是发行包，不是镜像 pull。
 
@@ -326,6 +352,13 @@ Bootstrap **不**填写 POS 凭据；反代就绪后：
 - 备份任务日志：`journalctl -u luyun-backup`
 - 应用内近期日志（写入 `data/logs.db`，带级别/logger 过滤）：管理后台
   「实时日志」页面（`/logs`，需要登录），或 `GET /api/logs/*` 系列接口。
+  - `logs.db` 为 WAL + `synchronous=NORMAL`，启动时做 `quick_check`，运行期每
+    `LOG_MAINTENANCE_INTERVAL_SECONDS`（默认 6h）清理过期日志并回收 WAL；
+  - 判定损坏时隔离为 `logs.db.corrupt.<时间戳>` 并重建新库，副本旁写
+    `.forensics.txt`（记录磁盘水位与各文件大小），用于区分「满盘导致」与「真损坏」；
+    副本只保留最近 `LOG_CORRUPT_KEEP`（默认 2）份，避免副本本身再把磁盘写满；
+  - **磁盘满不会被当成损坏**：那类写入失败只丢弃当批日志并计入 `queue_dropped`
+    （`GET /api/logs/stats`），不会隔离数据库、不会清空历史。
 - Caddy/Nginx 访问日志：各自默认日志位置（`/var/log/caddy/`、
   `/var/log/nginx/`），或按需在 Caddyfile/nginx.conf 里加 `log` 配置。
 
@@ -397,8 +430,9 @@ sudo systemctl enable luyun-update.service   # oneshot，按需 start
   裸机/VM 上用 systemd + venv 仍是默认路径。
 - **生产机无 Node / 无运行时前端构建**：日常升级走发行包 + Update Job；
   发版用 `scripts/publish_release.sh`（见第 7 节与 ADR 0011）。
-- **`WorkingDirectory` 必须是应用根目录**：`services/recipes/store.py` 的
-  默认数据库路径 `data/recipes.db` 是相对路径，依赖进程 cwd。
+- **`WorkingDirectory` 必须是应用根目录**：`services/recipes/store.py` 默认
+  跟随 `settings.APP_DB_PATH`（`data/app.db`，相对路径），依赖进程 cwd。
+  配方表 `sop_*` 已并入单库，不再有独立的 `data/recipes.db`。
 - CORS（`main.py` 硬编码 `allow_origins=["*"]`）和爬虫营业时间
   （`scraper/adapter.py` 硬编码 07:30–21:30）目前都不支持环境变量覆盖，
   属于代码常量，改动需要改代码而不是这份部署配置。

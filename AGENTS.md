@@ -170,6 +170,9 @@ Single-machine, single-instance, **single uvicorn worker** deployment — no Pos
 - **No more per-table `.db` files or `ATTACH DATABASE`.** Everything except `logs.db` is one `data/app.db`.
 - **Admin UI is not static HTML anymore.** Don't add pages under `public/`; add a Vue route/view under `admin-web/src/` and rebuild (`npm run build`) so `admin-web/dist` picks it up. `public/` now only holds the KDS build output, vendored JS/CSS, and `recipe.css`.
 - **Realtime payloads carry no data.** Don't expect fields beyond `topic`/`scope` on a `nudge` message — always re-fetch via HTTP after receiving one. Because there's no server-side ATTACH/multi-db lock contention anymore, cross-table queries are just normal SQL, but the app is still single-worker only (see `deploy/README.md`) because of the in-memory realtime hub/log buffer/scraper state.
+- **Playwright lib 与浏览器 build 强绑定。** `requirements.txt` 钉死 `playwright==1.63.0`；升该版本时必须同时执行 `.venv/bin/python -m playwright install chromium`（更新作业的 `syncing_deps` 阶段与 Docker entrypoint 已内置，开发机要手动）。只升 lib 不升浏览器会报 `Executable doesn't exist at /ms-playwright/chromium_headless_shell-<rev>/...`，缺失的是浏览器而不是代码路径。
+- **`logs.db` 是 WAL + `synchronous=NORMAL`**（`app.db` 保持默认 `FULL`）。启动做 `quick_check`，损坏时隔离为 `logs.db.corrupt.<stamp>`（保留最近 `LOG_CORRUPT_KEEP` 份 + `.forensics.txt`）；**磁盘满不会被当成损坏**，只丢当批日志并计入 `queue_dropped`。业务库 `app.db` 体检失败只告警、绝不自动隔离。运行期每 `LOG_MAINTENANCE_INTERVAL_SECONDS` 清理过期日志 + 回收 WAL。
+- **`GET /api/healthz`**（免鉴权、只读）返回 DB 状态与聚合磁盘水位，供探针使用；磁盘水位高**不**改状态码（重启容器腾不出空间）。进程内磁盘守护见 `services/disk_guard.py`，阈值由 `DISK_WARN_PCT` / `DISK_CRITICAL_PCT` 控制。
 
 ---
 

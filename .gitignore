@@ -64,12 +64,14 @@ env/
 htmlcov/
 coverage.xml
 *.egg
+.pycache-local/
 
 # ===== Node =====
 node_modules/
 
 # ===== Playwright / 调试缓存 =====
 .playwright-mcp/
+.playwright-cli/
 playwright-report/
 test-results/
 output/
@@ -107,6 +109,7 @@ config.local.*
 
 # ===== Design / internal docs (keep research notes local) =====
 docs/*
+!docs/README.md
 !docs/RELEASE_AND_DEPLOY.md
 !docs/release-asset-layout.md
 !docs/adr/

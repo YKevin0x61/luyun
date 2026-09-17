@@ -187,11 +187,18 @@ def _query_capture_ids(conn: sqlite3.Connection, sql: str) -> List[str]:
     return [row[0] for row in rows if row and row[0]]
 
 
-def classify_hygiene_capture_ids(app_db_path: str) -> Dict[str, List[str]]:
+def classify_hygiene_capture_ids(
+    app_db_path: str,
+    *,
+    include_variants: bool = True,
+) -> Dict[str, List[str]]:
     """按业务身份把库中引用的照片分成标准图与其它照片两类。
 
     分类在备份创建时确定并写入清单，不在读取时猜测。返回 ``capture_id``
     列表（保持稳定顺序，便于测试与清单比对）。
+
+    ``include_variants=False`` 只返回业务表的原始照片，不含派生图；恢复后
+    一致性检查只关心原始照片（派生图缺失时接口会回退到原图）。
     """
     result: Dict[str, List[str]] = {PHOTO_STANDARD: [], PHOTO_OTHER: []}
     if not os.path.isfile(app_db_path):
@@ -210,10 +217,12 @@ def classify_hygiene_capture_ids(app_db_path: str) -> Dict[str, List[str]]:
         other -= standard
 
         # 派生图跟随源照片归类
-        try:
-            variants = conn.execute(_VARIANT_QUERY).fetchall()
-        except sqlite3.Error:
-            variants = []
+        variants = []
+        if include_variants:
+            try:
+                variants = conn.execute(_VARIANT_QUERY).fetchall()
+            except sqlite3.Error:
+                variants = []
         for source_id, variant_id in variants:
             if not variant_id:
                 continue
@@ -246,6 +255,40 @@ def collect_photo_blobs(
         except OSError:
             missing.append(capture_id)
     return blobs, missing
+
+
+def missing_hygiene_capture_ids(
+    app_db_path: Optional[str] = None,
+    capture_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """核对「库里引用的照片」是否真的在磁盘上（只做存在性检查，不读字节）。
+
+    恢复/回滚之后调用：库可以被单独换掉，照片文件却不会跟着来，于是库指向
+    不存在的图片，前端清单里这些标准图静默缺失。这里把缺口显式报出来。
+    """
+    root = Path(capture_root) if capture_root is not None else get_hygiene_capture_root()
+    classified = classify_hygiene_capture_ids(
+        app_db_path or settings.APP_DB_PATH,
+        include_variants=False,
+    )
+    missing: Dict[str, List[str]] = {}
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+        gone = []
+        for capture_id in classified[kind]:
+            try:
+                if not (root / capture_id).is_file():
+                    gone.append(capture_id)
+            except OSError:
+                gone.append(capture_id)
+        if gone:
+            missing[kind] = gone
+    return {
+        "ok": not missing,
+        "missing": missing,
+        "standard_missing": len(missing.get(PHOTO_STANDARD, [])),
+        "other_missing": len(missing.get(PHOTO_OTHER, [])),
+        "checked_at": datetime.now(CHINA_TZ).isoformat(),
+    }
 
 
 def collect_hygiene_photo_members(

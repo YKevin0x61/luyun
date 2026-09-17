@@ -19,6 +19,7 @@ from services import credentials_store
 from typing import Any, Dict, List, Optional
 from services.dish_normalize import strip_trailing_dash_suffix
 from services.credentials_store import CredentialBundle
+from services.playwright_env import ensure_chromium_installed, is_browser_missing_error
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -411,18 +412,7 @@ class PosSession:
 
             # 重新初始化
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
-                headless=headless,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--no-first-run',
-                    '--no-zygote',
-                    '--disable-gpu'
-                ]
-            )
+            self.browser = await self._launch_browser(headless=headless)
             self.context = await self.browser.new_context(
                 user_agent=CY7MM_ANDROID_UA,
                 viewport={"width": 1920, "height": 1080},
@@ -436,6 +426,37 @@ class PosSession:
         except Exception as e:
             self.logger.error(f"❌ 浏览器初始化失败: {e}")
             raise
+
+    async def _launch_browser(self, *, headless: bool):
+        """launch Chromium；浏览器二进制缺失时补装一次并重试。
+
+        lib 与浏览器 build 漂移（升级了 playwright 但没换浏览器）会报
+        "Executable doesn't exist"——这属于环境问题，不该等人工进容器处理。
+        """
+        assert self.playwright is not None
+        args = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu',
+        ]
+        try:
+            return await self.playwright.chromium.launch(headless=headless, args=args)
+        except Exception as exc:
+            if not (
+                settings.SCRAPER_BROWSER_AUTO_INSTALL
+                and is_browser_missing_error(exc)
+            ):
+                raise
+            self.logger.warning(
+                "⚠️ Chromium 二进制缺失，自动补装后重试一次: %s", exc
+            )
+            if not await ensure_chromium_installed(log=self.logger):
+                raise
+            return await self.playwright.chromium.launch(headless=headless, args=args)
 
     async def _login(self, phone: str, password: str) -> bool:
         """2.0 auth-center 登录 + Playwright cy7mm tempPage SSO 建立 Cookie 会话。"""

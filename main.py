@@ -43,6 +43,7 @@ from services.dish_catalog import DishCatalog
 from services.app_runtime import AppRuntime, set_runtime
 from services.memory_manager import memory_manager
 from services.log_storage import log_storage, LogStorageHandler
+from services.disk_guard import disk_guard, min_free_mb
 from services.wecom_push_service import wecom_push_service
 from services.scraper_failure_tracker import ScraperFailureTracker
 from services.data_quality_scheduler import run_reconcile_scheduler, run_unmapped_dish_watchdog
@@ -234,6 +235,10 @@ async def lifespan(app: FastAPI):
         # 启动内存管理器
         await memory_manager.start_background_tasks()
         startup_results.append("内存管理器")
+
+        # 启动磁盘守护（阈值告警 + /api/healthz 的数据源）
+        disk_guard.start()
+        startup_results.append("磁盘守护")
         
         # 创建餐厅爬虫适配器
         restaurant_scraper = await create_restaurant_scraper(dish_catalog)
@@ -361,6 +366,10 @@ async def lifespan(app: FastAPI):
         await memory_manager.stop_background_tasks()
         logger.info("✅ 内存管理器已停止")
 
+        # 停止磁盘守护
+        await disk_guard.stop()
+        logger.info("✅ 磁盘守护已停止")
+
         # 停止日志持久化（flush 残余 + 关闭连接）
         try:
             await log_storage.stop()
@@ -380,6 +389,38 @@ app = FastAPI(
     description="LuckIn 订单数据采集与查询系统",
     lifespan=lifespan
 )
+
+
+@app.get("/api/healthz", include_in_schema=False)
+async def healthz():
+    """只读健康探针：进程存活 + 数据库可读 + 磁盘水位。
+
+    不加鉴权（Docker HEALTHCHECK 与反向代理探针要能直接打），因此刻意不返回
+    路径等环境细节，只给聚合水位。磁盘水位高**不**改状态码：重启容器腾不出
+    空间，只会变成重启循环；真正该做的是告警和宿主侧清理。
+    """
+    db_status = "uninitialized"
+    current = db_manager
+    if current is not None:
+        try:
+            result = await current.health_check()
+            db_status = str(result.get("status", "unknown"))
+        except Exception as exc:
+            db_status = f"error: {exc}"
+    healthy = db_status == "healthy"
+    level = disk_guard.worst_level()
+    free_mb = min_free_mb()
+    return JSONResponse(
+        status_code=200 if healthy else 503,
+        content={
+            "status": "ok" if healthy and level == "ok" else "degraded",
+            "db": db_status,
+            "disk": {
+                "level": level,
+                "free_mb": None if free_mb is None else round(free_mb, 1),
+            },
+        },
+    )
 
 
 _LEGACY_EVENT_TOPIC_MAP = {

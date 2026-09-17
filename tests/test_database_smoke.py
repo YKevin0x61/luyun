@@ -3,9 +3,11 @@
 """Lightweight smoke tests for the multi-database manager."""
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 
 import aiosqlite
 
@@ -350,6 +352,33 @@ class DatabaseManagerSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {item["station_id"]: item["count"] for item in stats},
             {"shulong": 2, "changfen": 1},
+        )
+
+    async def test_quick_check_passes_without_touching_the_file(self):
+        """启动体检对健康业务库放行，且不搬移任何文件。"""
+        db_path = settings.APP_DB_PATH
+
+        await self.db._quick_check_or_warn(db_path)
+
+        self.assertTrue(os.path.exists(db_path))
+        self.assertEqual(
+            [n for n in os.listdir(self._tmpdir.name) if "corrupt" in n], []
+        )
+
+    async def test_quick_check_failure_is_logged_only(self):
+        """业务库体检失败只告警：绝不自动隔离（订单/结算数据不能自动搬走）。"""
+        db_path = settings.APP_DB_PATH
+
+        with patch.object(
+            self.db._main_conn,
+            "execute",
+            side_effect=sqlite3.DatabaseError("database disk image is malformed"),
+        ):
+            await self.db._quick_check_or_warn(db_path)
+
+        self.assertTrue(os.path.exists(db_path))
+        self.assertEqual(
+            [n for n in os.listdir(self._tmpdir.name) if "corrupt" in n], []
         )
 
 

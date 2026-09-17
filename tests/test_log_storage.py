@@ -25,9 +25,17 @@ class LogStorageRecoveryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(await self.storage.start())
 
-        quarantined = list(self.db_path.parent.glob("logs.db.corrupt.*"))
+        quarantined = [
+            path
+            for path in self.db_path.parent.glob("logs.db.corrupt.*")
+            if not path.name.endswith(".forensics.txt")
+        ]
         self.assertEqual(len(quarantined), 1)
         self.assertEqual(quarantined[0].read_bytes(), b"\xff" * 4096)
+        # 取证 sidecar：下次能判断是满盘导致还是真损坏。
+        self.assertTrue(
+            list(self.db_path.parent.glob("logs.db.corrupt.*.forensics.txt"))
+        )
         stats = await self.storage.stats()
         self.assertEqual(stats["total"], 0)
         self.assertFalse(stats["degraded"])

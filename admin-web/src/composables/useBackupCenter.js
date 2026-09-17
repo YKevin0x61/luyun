@@ -502,6 +502,12 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     }
     if (data?.snapshot_ts) parts.push(`已生成新的本机回滚快照 ${data.snapshot_ts}`)
     let msg = `${verb}成功。${parts.join('；')}。`
+    const consistency = data?.photo_consistency
+    if (consistency && consistency.ok === false) {
+      msg += `⚠️ 但库里引用的照片有 ${consistency.standard_missing || 0} 张标准图、`
+        + `${consistency.other_missing || 0} 张其它照片在磁盘上找不到，标准图清单会缺这些项；`
+        + '请重新上传这些标准图，或用含照片的冷备归档补齐。'
+    }
     if (data?.session_invalidated) msg += '当前登录会话已失效，请点击确认后重新登录。'
     return msg
   }
@@ -650,7 +656,10 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
         {},
         photoFlags,
       )
-      showAlert('success', importSuccessMessage(data, '数据回滚'))
+      showAlert(
+        data?.photo_consistency && data.photo_consistency.ok === false ? 'error' : 'success',
+        importSuccessMessage(data, '数据回滚'),
+      )
       if (typeof onAfterRollback === 'function') await onAfterRollback()
       await Promise.all([loadPoints(), loadHealth()])
     } catch (err) {

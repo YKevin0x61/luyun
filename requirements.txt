@@ -12,7 +12,12 @@ bcrypt>=4.0.1,<5
 python-dotenv==1.0.0
 aiofiles==23.2.1
 httpx==0.25.2
-playwright>=1.40.0
+# 钉死：playwright 的 lib 与浏览器 build 强绑定（1.63.0 ↔ chromium/headless-shell 1243）。
+# 放开上界会让「系统更新」的 pip sync 单方面升级 lib，而浏览器二进制不会跟着换，
+# 直接导致 scraper 报 Executable doesn't exist。升级 lib 时必须同步执行
+# `.venv/bin/python -m playwright install chromium`
+# （更新作业与 Docker entrypoint 已内置该步骤，见 services/playwright_env.py）。
+playwright==1.63.0
 beautifulsoup4==4.12.2
 lxml==4.9.3
 requests==2.31.0

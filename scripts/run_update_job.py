@@ -25,6 +25,7 @@ from services.github_release_config import get_effective_config  # noqa: E402
 from services.release_update.factory import default_deploy_dir  # noqa: E402
 from services.release_update.job_adapters import (  # noqa: E402
     PipDepsSyncAdapter,
+    PlaywrightBrowserSyncAdapter,
     ReleaseBundleInstallAdapter,
     SnapshotBackupAdapter,
     build_main_service_adapter,
@@ -70,6 +71,7 @@ def build_runner(deploy_dir: Path) -> UpdateJobRunner:
             is_cancelled=is_cancel_requested,
             log_path=job_log_path(),
         ),
+        browser=PlaywrightBrowserSyncAdapter(deploy_dir),
         service=build_main_service_adapter(),
         is_cancelled=is_cancel_requested,
     )

@@ -92,6 +92,14 @@ class FakeService:
         self.restarts += 1
 
 
+@dataclass
+class FakeBrowser:
+    synced: bool = False
+
+    def sync(self) -> None:
+        self.synced = True
+
+
 def _queued(target: str = "v0.2.0", previous: str = "v0.1.0") -> UpdateJobState:
     return UpdateJobState(
         stage="queued",
@@ -109,6 +117,7 @@ def _runner(
     bundle: Optional[FakeBundle] = None,
     deps: Optional[FakeDeps] = None,
     service: Optional[FakeService] = None,
+    browser: Optional[FakeBrowser] = None,
     is_cancelled=None,
 ) -> tuple[UpdateJobRunner, FakeBackup, FakeBundle, FakeDeps, FakeService]:
     b = backup or FakeBackup()
@@ -121,6 +130,7 @@ def _runner(
         bundle=bund,
         deps=d,
         service=s,
+        browser=browser,
         is_cancelled=is_cancelled,
     )
     return runner, b, bund, d, s
@@ -235,6 +245,40 @@ class UpdateJobRunnerTest(unittest.TestCase):
         self.assertEqual(service.restarts, 1)
         stages = [w.stage for w in store.writes]
         self.assertIn("syncing_deps", stages)
+
+    def test_browser_sync_runs_without_changing_stage_sequence(self):
+        store = FakeJobStore(_queued())
+        browser = FakeBrowser()
+        runner, _, _, _, _ = _runner(store, browser=browser)
+
+        runner.run()
+
+        self.assertTrue(browser.synced)
+        self.assertEqual(
+            [w.stage for w in store.writes],
+            [
+                "backing_up",
+                "fetching_bundle",
+                "installing",
+                "syncing_deps",
+                "restarting",
+            ],
+        )
+
+    def test_browser_sync_runs_even_when_deps_are_skipped(self):
+        """指纹没变也要查浏览器：手动删过浏览器 / 换过镜像同样是缺失。"""
+        store = FakeJobStore(_queued())
+        browser = FakeBrowser()
+        runner, _, _, deps, _ = _runner(
+            store,
+            bundle=FakeBundle(previous_fp="sha256:same", new_fp="sha256:same"),
+            browser=browser,
+        )
+
+        runner.run()
+
+        self.assertFalse(deps.synced)
+        self.assertTrue(browser.synced)
 
     def test_activate_failure_aborts_without_rollback(self):
         store = FakeJobStore(_queued())

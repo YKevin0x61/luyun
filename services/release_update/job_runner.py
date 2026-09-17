@@ -53,6 +53,10 @@ class DepsSyncPort(Protocol):
     def sync(self) -> None: ...
 
 
+class BrowserSyncPort(Protocol):
+    def sync(self) -> None: ...
+
+
 class MainServicePort(Protocol):
     def restart(self) -> None: ...
 
@@ -82,6 +86,7 @@ class UpdateJobRunner:
         bundle: BundleInstallPort,
         deps: DepsSyncPort,
         service: MainServicePort,
+        browser: Optional[BrowserSyncPort] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._store = job_store
@@ -89,6 +94,7 @@ class UpdateJobRunner:
         self._bundle = bundle
         self._deps = deps
         self._service = service
+        self._browser = browser
         self._is_cancelled = is_cancelled or (lambda: False)
 
     def _raise_if_cancelled(self) -> None:
@@ -157,6 +163,12 @@ class UpdateJobRunner:
                     "Skipping Python dependency sync (requirements fingerprint unchanged)",
                 )
             base = self._store.read()
+
+            # 浏览器二进制必须与 venv 里的 playwright lib 一致，否则 scraper 报
+            # Executable doesn't exist。幂等（build 已存在时秒退），且无论
+            # requirements 指纹是否变化都要跑：手动删过浏览器/换过镜像同样要修。
+            if self._browser is not None:
+                self._browser.sync()
 
             self._raise_if_cancelled()
             # The job only switches the Release Bundle and asks for a restart.

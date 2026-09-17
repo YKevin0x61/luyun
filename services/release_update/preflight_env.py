@@ -7,7 +7,10 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Optional
 
+from config import settings
+from services.disk_guard import min_free_mb
 from services.github_release_config import get_effective_config
 from services.release_update import PreflightEnv
 from services.release_update.deploy_mode import (
@@ -24,11 +27,24 @@ class DefaultPreflightEnvAdapter:
         self._deploy_dir = Path(deploy_dir)
 
     def inspect_env(self) -> PreflightEnv:
+        disk_ok, disk_free_mb = self._disk_state()
         return PreflightEnv(
             restart_ready=self._restart_ready(),
             credentials_ready=self._credentials_ready(),
             dirty_tree=self._deploy_tree_dirty(),
+            disk_ok=disk_ok,
+            disk_free_mb=disk_free_mb,
         )
+
+    def _disk_state(self) -> tuple[bool, Optional[float]]:
+        """更新会跑 pip sync 写 .venv，必须先确认还有空间。
+
+        读不到用量时判为可用：探测失败（权限、异常路径）不该反过来挡住更新。
+        """
+        free_mb = min_free_mb()
+        if free_mb is None:
+            return True, None
+        return free_mb >= settings.UPDATE_MIN_FREE_MB, free_mb
 
     def _restart_ready(self) -> bool:
         mode = resolve_deploy_mode()
