@@ -49,6 +49,9 @@ _COLLATE_NOCASE = re.compile(
     r"([\w.\"]+)\s+COLLATE\s+NOCASE", re.IGNORECASE
 )
 _ROWID = re.compile(r"\browid\b", re.IGNORECASE)
+# 一次扫描同时处理两种形态：`rowid AS rowid`（保留别名，admin 靠它定位行）优先于
+# 裸 `rowid`。分开两次替换会让刚生成的 `AS rowid` 被第二次替换再改掉。
+_ROWID_ANY = re.compile(r"\browid\s+AS\s+rowid\b|\browid\b", re.IGNORECASE)
 
 DIALECT_RULES = (
     "? → $n（跳过字符串字面量）",
@@ -56,7 +59,7 @@ DIALECT_RULES = (
     "INSERT OR IGNORE → ON CONFLICT DO NOTHING",
     "strftime('%H'|'%Y-%m'|'%Y-W%W') → EXTRACT / to_char",
     "COLLATE NOCASE → lower()",
-    "rowid → id",
+    "rowid → 该表的行标识列（默认 id；rowid AS rowid 保留别名）",
 )
 
 
@@ -88,10 +91,16 @@ def _rewrite_collate(sql: str) -> str:
     return _COLLATE_NOCASE.sub(r"lower(\1)", sql)
 
 
-def _rewrite_rowid(sql: str) -> str:
-    # 全部业务表都是 `id INTEGER PRIMARY KEY`，此形态下 SQLite 的隐式 rowid
-    # 与 id 完全等价。
-    return _ROWID.sub("id", sql)
+def _rewrite_rowid(sql: str, column: str = "id") -> str:
+    # SQLite 的隐式 rowid 对**任何**表都存在；PG 只有显式列。所以 rowid 要映射到
+    # 「该表的行标识列」——有 id 列就是 id，否则是主键第一列（sessions→session_id、
+    # api_tokens→token_hash、sop_stations→slug...）。列名由调用方查 schema 提供。
+    def replace(match: "re.Match[str]") -> str:
+        if " as " in match.group(0).lower():
+            return f"{column} AS rowid"
+        return column
+
+    return _ROWID_ANY.sub(replace, sql)
 
 
 def _rewrite_placeholders(sql: str) -> str:
@@ -123,10 +132,49 @@ def _rewrite_placeholders(sql: str) -> str:
     return "".join(out)
 
 
-def translate(sql: str) -> str:
-    """把一条 SQLite 方言的 SQL 转成 PostgreSQL 方言。"""
+_TABLE_INFO = re.compile(
+    r"PRAGMA\s+(?:\w+\.)?table_info\(\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?\s*\)",
+    re.IGNORECASE,
+)
+# PRAGMA table_info 的 PG 等价物。列序必须与 SQLite 一致（cid, name, type,
+# notnull, dflt_value, pk）——调用方按位置取值（r[1] 名称 / r[2] 类型 / r[5] 主键）。
+_TABLE_INFO_PG = (
+    "SELECT (c.ordinal_position - 1)::int AS cid,"
+    " c.column_name AS name,"
+    " c.data_type AS type,"
+    " CASE WHEN c.is_nullable = 'NO' THEN 1 ELSE 0 END AS notnull,"
+    " c.column_default AS dflt_value,"
+    " CASE WHEN pk.attname IS NOT NULL THEN 1 ELSE 0 END AS pk"
+    " FROM information_schema.columns c"
+    " LEFT JOIN (SELECT a.attname, t.relname FROM pg_index i"
+    "   JOIN pg_class t ON t.oid = i.indrelid"
+    "   JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (i.indkey)"
+    "   WHERE i.indisprimary) pk"
+    "  ON pk.attname = c.column_name AND pk.relname = c.table_name"
+    " WHERE c.table_name = '{table}'"
+    " AND c.table_schema = ANY (current_schemas(false))"
+    " ORDER BY c.ordinal_position"
+)
+
+
+def _rewrite_pragma(sql: str) -> str:
+    """把 ``PRAGMA table_info(x)`` 换成 information_schema 查询。
+
+    其余 PRAGMA（journal_mode / busy_timeout / optimize / quick_check…）都是
+    SQLite 连接级或维护语句，PG 分支本就不会走到，不在此处理。
+    """
+    return _TABLE_INFO.sub(lambda m: _TABLE_INFO_PG.format(table=m.group(1)), sql)
+
+
+def translate(sql: str, rowid_column: str = "id") -> str:
+    """把一条 SQLite 方言的 SQL 转成 PostgreSQL 方言。
+
+    ``rowid_column`` 是该 SQL 涉及表的行标识列，由调用方查 schema 后传入
+    （见 :meth:`db_core.backend.pg.PgConnection.row_key_column`）。
+    """
+    sql = _rewrite_pragma(sql)
     sql = _rewrite_insert_or_ignore(sql)
     sql = _rewrite_functions(sql)
     sql = _rewrite_collate(sql)
-    sql = _rewrite_rowid(sql)
+    sql = _rewrite_rowid(sql, rowid_column)
     return _rewrite_placeholders(sql)

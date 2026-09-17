@@ -138,6 +138,11 @@ def main() -> None:
                 continue
 
             parts = [f'    {q(name)} {col_type}']
+            # 单列**非整数**主键（sessions.session_id / api_tokens.token_hash /
+            # sop_stations.slug / app_settings.key...）也要显式声明，否则 PG 侧
+            # 整张表没有主键——行定位、唯一性与 admin 的 rowid 映射都会失效。
+            if pk_cols == [name]:
+                parts.append("PRIMARY KEY")
             if c["notnull"]:
                 parts.append("NOT NULL")
             if c["dflt_value"] is not None:

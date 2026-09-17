@@ -32,7 +32,7 @@ CREATE TABLE "admin_user" (
 );
 
 CREATE TABLE "api_tokens" (
-    "token_hash" TEXT,
+    "token_hash" TEXT PRIMARY KEY,
     "label" TEXT DEFAULT '',
     "expires_at" TEXT,
     "created_at" TEXT NOT NULL,
@@ -41,7 +41,7 @@ CREATE TABLE "api_tokens" (
 
 CREATE TABLE "app_settings" (
     tenant_id BIGINT NOT NULL DEFAULT 1 REFERENCES tenants(id),
-    "key" TEXT,
+    "key" TEXT PRIMARY KEY,
     "value" TEXT NOT NULL,
     "updated_at" TEXT NOT NULL
 );
@@ -146,7 +146,7 @@ CREATE TABLE "hygiene_deep_clean_items" (
 
 CREATE TABLE "hygiene_deep_clean_overdue_notices" (
     tenant_id BIGINT NOT NULL DEFAULT 1 REFERENCES tenants(id),
-    "business_date" TEXT NOT NULL,
+    "business_date" TEXT PRIMARY KEY NOT NULL,
     "notified_at" TEXT NOT NULL
 );
 
@@ -233,7 +233,7 @@ CREATE TABLE "hygiene_overdue_notices" (
 
 CREATE TABLE "hygiene_settings" (
     tenant_id BIGINT NOT NULL DEFAULT 1 REFERENCES tenants(id),
-    "key" TEXT NOT NULL,
+    "key" TEXT PRIMARY KEY NOT NULL,
     "value" TEXT NOT NULL,
     "updated_at" TEXT NOT NULL
 );
@@ -252,7 +252,7 @@ CREATE TABLE "hygiene_shift_picks" (
 
 CREATE TABLE "hygiene_staff_sessions" (
     tenant_id BIGINT NOT NULL DEFAULT 1 REFERENCES tenants(id),
-    "session_id" TEXT NOT NULL,
+    "session_id" TEXT PRIMARY KEY NOT NULL,
     "employee_id" BIGINT NOT NULL,
     "expires_at" TEXT NOT NULL,
     "created_at" TEXT NOT NULL,
@@ -457,7 +457,7 @@ CREATE TABLE "semi_finished_rules" (
 );
 
 CREATE TABLE "sessions" (
-    "session_id" TEXT,
+    "session_id" TEXT PRIMARY KEY,
     "expires_at" TEXT NOT NULL,
     "created_at" TEXT NOT NULL,
     "last_seen_at" TEXT NOT NULL
@@ -503,7 +503,7 @@ CREATE TABLE "sop_recipes_history" (
 
 CREATE TABLE "sop_stations" (
     tenant_id BIGINT NOT NULL DEFAULT 1 REFERENCES tenants(id),
-    "slug" TEXT NOT NULL,
+    "slug" TEXT PRIMARY KEY NOT NULL,
     "title" TEXT NOT NULL,
     "updated_at" TEXT NOT NULL
 );

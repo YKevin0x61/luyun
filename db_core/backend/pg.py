@@ -72,6 +72,31 @@ def insert_target_table(translated: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+_TABLE_RE = re.compile(
+    r"\b(?:FROM|UPDATE|INTO|JOIN)\s+\"?([A-Za-z_][A-Za-z0-9_]*)\"?", re.IGNORECASE
+)
+# 行标识列：有 id 列就是 id，否则取主键第一列（sessions→session_id、
+# api_tokens→token_hash、sop_stations→slug...）。
+_PRIMARY_KEY_SQL = """
+    SELECT a.attname
+    FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY (i.indkey)
+    WHERE i.indisprimary
+      AND c.relname = $1
+      AND n.nspname = ANY (current_schemas(false))
+    ORDER BY array_position(i.indkey, a.attnum)
+    LIMIT 1
+"""
+
+
+def first_table_name(sql: str) -> Optional[str]:
+    """取 SQL 里第一个表名（admin 的通用表格语句都是单表）。"""
+    match = _TABLE_RE.search(sql)
+    return match.group(1) if match else None
+
+
 def rowcount_from_status(status: str) -> int:
     """解析 asyncpg 的 command tag：'UPDATE 2' / 'DELETE 0' / 'INSERT 0 1'。"""
     parts = (status or "").split()
@@ -180,6 +205,14 @@ class PgCursor:
         return None
 
     # -- 执行 ------------------------------------------------------------
+    async def _translate(self, sql: str) -> str:
+        """翻译方言；含 rowid 时按目标表的行标识列解析。"""
+        if "rowid" not in sql.lower():
+            return translate(sql)
+        table = first_table_name(sql)
+        column = await self._connection.row_key_column(table) if table else "id"
+        return translate(sql, rowid_column=column)
+
     async def _run(self, runner, translated: str, params: Sequence[Any]):
         """执行，并在 asyncpg 抱怨参数类型时按需收敛后重试。"""
         try:
@@ -196,7 +229,7 @@ class PgCursor:
         # 连查三条 COUNT），游标位置必须重置，否则第二次 fetchone() 会返回 None。
         self._index = 0
         self.lastrowid = None
-        translated = translate(sql)
+        translated = await self._translate(sql)
         raw = self._connection.raw
         self._connection.bump_query_count()
 
@@ -284,6 +317,21 @@ class PgCursor:
             return remaining
         return []
 
+    @property
+    def description(self):
+        """DB-API 风格的列信息。
+
+        admin 的表格列表用 ``[d[0] for d in cursor.description]`` 取列名；asyncpg
+        的 Record 没有这个接口，这里从 keys 重建。空结果集返回 None（没有行要
+        渲染，与 aiosqlite 的行为差异不影响调用方）。
+        """
+        if not self._rows:
+            return None
+        return [
+            (name, None, None, None, None, None, None)
+            for name in self._rows[0].keys()
+        ]
+
     def __aiter__(self):
         self._index = 0
         return self
@@ -313,7 +361,27 @@ class PgConnection:
         # 表名 → 是否有 id 列。有 id 才能用 RETURNING id 支撑 lastrowid；
         # 探测结果缓存起来，避免每条 INSERT 都试错。
         self._table_has_id: Dict[str, bool] = {}
+        # 表名 → 行标识列（rowid 的 PG 等价物）
+        self._row_keys: Dict[str, str] = {}
         self.stats_queries = 0
+
+    async def row_key_column(self, table: str) -> str:
+        """该表的「行标识列」——SQLite ``rowid`` 的 PG 等价物。
+
+        SQLite 的 rowid 对任何表都存在，PG 只有显式列，所以按「有 id 用 id，
+        否则用主键第一列」解析。结果缓存，避免每条 SQL 都查一次目录。
+        """
+        if table in self._row_keys:
+            return self._row_keys[table]
+        column = "id"
+        try:
+            row = await self._raw.fetchrow(_PRIMARY_KEY_SQL, table)
+            if row:
+                column = row["attname"]
+        except Exception:
+            logger.debug("解析行标识列失败，回退 id: %s", table, exc_info=True)
+        self._row_keys[table] = column
+        return column
 
     @property
     def raw(self) -> asyncpg.Connection:

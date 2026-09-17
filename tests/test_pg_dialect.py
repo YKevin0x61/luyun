@@ -100,6 +100,34 @@ class RowidTest(unittest.TestCase):
     def test_rowid_uppercase(self):
         self.assertEqual(translate("WHERE ROWID = ?"), "WHERE id = $1")
 
+    def test_rowid_alias_is_preserved(self):
+        """admin 靠 rowid 字段定位行编辑/删除，别名不能被换成 id。"""
+        self.assertEqual(
+            translate("SELECT rowid AS rowid, * FROM orders LIMIT ?"),
+            "SELECT id AS rowid, * FROM orders LIMIT $1",
+        )
+
+    def test_custom_row_key_column(self):
+        """无 id 列的表用主键第一列——SQLite 的 rowid 对这些表也存在。"""
+        self.assertEqual(
+            translate(
+                "SELECT rowid AS rowid, * FROM sessions LIMIT ?",
+                rowid_column="session_id",
+            ),
+            "SELECT session_id AS rowid, * FROM sessions LIMIT $1",
+        )
+        self.assertEqual(
+            translate("DELETE FROM sop_stations WHERE rowid = ?", rowid_column="slug"),
+            "DELETE FROM sop_stations WHERE slug = $1",
+        )
+        self.assertEqual(
+            translate(
+                "UPDATE api_tokens SET label = ? WHERE rowid = ?",
+                rowid_column="token_hash",
+            ),
+            "UPDATE api_tokens SET label = $1 WHERE token_hash = $2",
+        )
+
 
 class InsertOrIgnoreTest(unittest.TestCase):
     def test_appends_on_conflict_do_nothing(self):
