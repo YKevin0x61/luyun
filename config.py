@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # 数据库配置 — 单库 app.db（WAL），仅 logs 因写入量大保持独立文件
     DATABASE_DIR: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     APP_DB_FILENAME: str = "app.db"
+    # 数据库后端：sqlite（默认，单店部署形态）| postgres（多店，见 ADR 0084）。
+    # 切到 postgres 时表的建立由 migrations/pg/ 负责，不在启动期建表。
+    DATABASE_BACKEND: str = "sqlite"
+    POSTGRES_DSN: str = "postgresql://localhost:5432/luyun"
     # 冷备输出根目录（宿主机定时任务的归档落点，仓库根下的 backups/）；
     # BACKUP_DIR 环境变量优先
     COLD_BACKUP_DIR: str = os.path.join(

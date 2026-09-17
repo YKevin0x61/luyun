@@ -35,8 +35,13 @@ DEFAULT_DSN = "postgresql://localhost:5432/luyun"
 
 
 def dsn_from_env() -> str:
-    """PG 连接串。刻意不走 config.py——那里正被另一批未提交改动修改。"""
-    return os.environ.get("LUYUN_POSTGRES_DSN", DEFAULT_DSN)
+    """PG 连接串：环境变量 ``LUYUN_POSTGRES_DSN`` 优先，其次 ``settings.POSTGRES_DSN``。"""
+    override = os.environ.get("LUYUN_POSTGRES_DSN")
+    if override:
+        return override
+    from config import settings
+
+    return getattr(settings, "POSTGRES_DSN", "") or DEFAULT_DSN
 
 
 def _normalize_value(value):

@@ -16,6 +16,8 @@ from config import settings
 
 from db_core.schema import (
     ALL_TABLES,
+    HYGIENE_TABLES,
+    RECIPE_TABLES,
     _INDEX_DEFINITIONS,
     _TABLE_SCHEMAS,
     apply_hygiene_schema,
@@ -53,6 +55,15 @@ class _ConnectionMixin:
         }
 
     async def connect(self) -> bool:
+        """建立业务库连接；后端由 ``settings.DATABASE_BACKEND`` 决定。
+
+        默认仍是 sqlite，切到 postgres 需要显式配置——见 ADR 0084。
+        """
+        if getattr(settings, "DATABASE_BACKEND", "sqlite") == "postgres":
+            return await self._connect_postgres()
+        return await self._connect_sqlite()
+
+    async def _connect_sqlite(self) -> bool:
         """建立单一 app.db 连接（WAL），建齐全部表结构 + 索引；各表共享该连接。"""
         logger.info("🔗 正在连接单库 app.db (WAL)...")
         self._migrations_complete = False
@@ -104,6 +115,33 @@ class _ConnectionMixin:
             return True
         except Exception as e:
             logger.error(f"❌ 单库连接失败: {e}")
+            return False
+
+    async def _connect_postgres(self) -> bool:
+        """连接 PostgreSQL（多租户形态）。
+
+        与 SQLite 分支的关键差异：**不在启动期建表**。schema 由
+        ``migrations/pg/0001_initial_schema.sql`` 建立——启动期改结构会让
+        「schema 是谁改的」不可追溯。这里只做连接与表视图绑定。
+        """
+        from db_core.backend import pg as pg_backend
+
+        logger.info("🔗 正在连接 PostgreSQL...")
+        self._migrations_complete = False
+        try:
+            dsn = getattr(settings, "POSTGRES_DSN", "") or None
+            self._main_conn = await pg_backend.connect(dsn)
+
+            tables = list(ALL_TABLES) + list(RECIPE_TABLES) + list(HYGIENE_TABLES)
+            for table in tables:
+                self._table_views[table] = TableView(table, self._main_conn)
+
+            self.stats['connection_count'] += 1
+            self._migrations_complete = True
+            logger.info("✅ PostgreSQL 连接成功 (%d 表)", len(self._table_views))
+            return True
+        except Exception as e:
+            logger.error(f"❌ PostgreSQL 连接失败: {e}")
             return False
 
     # ── 就绪探针（只读，供健康检查使用） ──
@@ -236,13 +274,15 @@ class _ConnectionMixin:
     async def close(self):
         """关闭单一连接"""
         if self._main_conn is not None:
-            # SQLite 官方建议：关闭前跑一次 PRAGMA optimize，由它判断哪些表的
-            # 统计信息因大量写入而过期（爬虫持续 INSERT 时尤其必要）。
-            try:
-                await self._main_conn.execute("PRAGMA optimize")
-                await self._main_conn.commit()
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(f"⚠️ 关闭前 PRAGMA optimize 失败（忽略）: {exc}")
+            if getattr(settings, "DATABASE_BACKEND", "sqlite") == "sqlite":
+                # SQLite 官方建议：关闭前跑一次 PRAGMA optimize，由它判断哪些表的
+                # 统计信息因大量写入而过期（爬虫持续 INSERT 时尤其必要）。
+                # PostgreSQL 没有 PRAGMA，跳过而不是让它报警告。
+                try:
+                    await self._main_conn.execute("PRAGMA optimize")
+                    await self._main_conn.commit()
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(f"⚠️ 关闭前 PRAGMA optimize 失败（忽略）: {exc}")
             await self._main_conn.close()
             self._main_conn = None
         self._table_views.clear()
