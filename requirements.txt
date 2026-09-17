@@ -1,6 +1,13 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 aiosqlite>=0.19.0
+# PostgreSQL 后端（DATABASE_BACKEND=postgres，见 ADR 0084）。默认仍是 SQLite，
+# 但依赖必须在这里声明：更新作业只在 requirements 指纹变化时才 pip sync，
+# 漏掉的话店内升级不会安装它们，切后端时直接 ImportError。
+# 不钉死版本：这两个包没有 playwright 那种「lib 与外部构建强绑定」的问题。
+asyncpg>=0.29,<1
+# Redis：多 worker 时外置 realtime hub / 日志缓冲 / 爬虫计数器要用。
+redis>=5,<9
 pandas>=2.0.0
 openpyxl>=3.1.0
 pydantic==2.5.0

@@ -6,9 +6,43 @@
 补测试——PG 后端遇到未登记的方言不会报错，而是静默给出错误结果。
 """
 
+import os
+import subprocess
+import sys
 import unittest
 
 from db_core.backend.dialect import translate
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class ImportIsolationTest(unittest.TestCase):
+    def test_dialect_import_does_not_pull_asyncpg(self):
+        """方言层必须能独立导入。
+
+        `db_core/backend/__init__.py` 若在模块级 eager import pg，asyncpg 就成了
+        硬依赖——CI 只装 requirements.txt，跑方言测试会直接 ImportError。
+        用子进程隔离验证，避免污染测试进程的 sys.meta_path。
+        """
+        code = (
+            "import sys\n"
+            "class Blocker:\n"
+            "    def find_module(self, name, path=None):\n"
+            "        return self if name == 'asyncpg' else None\n"
+            "    def load_module(self, name):\n"
+            "        raise ImportError('asyncpg blocked')\n"
+            "sys.meta_path.insert(0, Blocker())\n"
+            "from db_core.backend.dialect import translate\n"
+            "print(translate('SELECT rowid FROM t WHERE a = ?'))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("$1", result.stdout)
 
 
 class PlaceholderTest(unittest.TestCase):
