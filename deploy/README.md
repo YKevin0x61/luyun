@@ -467,6 +467,29 @@ Redis 容器已在 `docker-compose.yml` 的 `pg` profile 里备好，但**代码
 
 ### 10.2 新机器：直接上 PostgreSQL
 
+### 10.2 一键切换（推荐）
+
+```bash
+sudo bash deploy/enable_postgres.sh --dry-run   # 先预览它要做什么
+sudo bash deploy/enable_postgres.sh             # 实际执行
+```
+
+这一条命令会自动完成：装 PostgreSQL（apt/dnf/yum 自动识别）→ 建库建用户（密码
+自动生成）→ 应用 schema → 停应用 → 备份 SQLite → 迁移数据 → 重置序列 → 写
+`env.production` → 启动 → 冒烟检查（healthz + orders 行数比对）。
+
+脚本**幂等**，可重复执行；已完成的步骤会跳过。任何一步失败即中止，且
+`data/app.db` 全程只读，所以失败后直接重跑或按 10.5 回滚。
+
+> 为什么要单独一条 `sudo` 命令，而不是在管理后台点一下？因为装系统包、以
+> postgres 身份建库、改 systemd 服务都需要 root，而更新作业
+> （`luyun-update.service`）刻意以 `luyun` 用户运行——那是安全设计，不应该为了
+> 方便把 root 权限交给 Web 触发的作业。所以切换做成一次显式提权。
+
+### 10.3 手工步骤（脚本不适用时）
+
+脚本覆盖不到的场景（离线环境、已有的外部数据库、非 systemd 部署）按下面手工走。
+
 ```bash
 # 1) 装 PostgreSQL 16 + client（pg_dump/pg_isready 是备份与预检依赖）
 sudo apt-get install -y postgresql-16 postgresql-client-16
@@ -479,49 +502,41 @@ sudo -u postgres psql -c "CREATE DATABASE luyun OWNER luyun;"
 psql "postgresql://luyun:<强密码>@127.0.0.1:5432/luyun" \
      -v ON_ERROR_STOP=1 -f migrations/pg/0001_initial_schema.sql
 
-# 4) 配置环境变量（deploy/env.production）
+# 4) 停机窗口内搬数据（脚本对源库只读，回滚无损）
+sudo systemctl stop luyun
+sqlite3 data/app.db ".backup 'backups/pre-pg-migration.db'"
+.venv/bin/python scripts/archive/migrate_sqlite_to_postgres.py --dry-run
+.venv/bin/python scripts/archive/migrate_sqlite_to_postgres.py --dsn "postgresql://luyun:<强密码>@127.0.0.1:5432/luyun" --apply
+
+# 5) 配置环境变量（deploy/env.production）
 #    DATABASE_BACKEND=postgres
 #    POSTGRES_DSN=postgresql://luyun:<强密码>@127.0.0.1:5432/luyun
 
-# 5) 启动并冒烟
-sudo systemctl restart luyun
+# 6) 启动并冒烟：/api/healthz → 后台订单列表 → KDS → admin 表格编辑 → 原密码登录
+sudo systemctl start luyun
 curl -s localhost:8000/api/healthz
 ```
 
 `deploy/luyun.service` 已声明 `After=postgresql.service` + `Wants=postgresql.service`
 （弱依赖：SQLite 机器没有这个 unit 也能启动）。
 
-Docker 形态用 profile 起 PG/Redis：
+Docker 形态用 profile 起 PG/Redis（无需 root、无需改 env 之外的系统状态）：
 
 ```bash
 docker compose -f deploy/docker-compose.yml --profile pg up -d
 ```
 
-### 10.3 已部署机器：升级到 0.6.0
-
-**情况 A：继续用 SQLite（绝大多数门店）**
-
-零额外步骤：管理后台 →「系统更新」→ 版本检测 → 应用更新。升级作业会自动备份
-`app.db`、原子切换代码、保留 `data/`。`syncing_deps` 阶段会装上新声明的
-`asyncpg` / `redis`（无副作用）。
-
-**情况 B：升级完再切 PostgreSQL**
-
-```bash
-# 1) 先按情况 A 把代码升到 0.6.0，确认应用正常
-# 2) 按 10.2 装好 PostgreSQL 并应用 schema
-# 3) 停机窗口内搬数据（脚本对源库只读，回滚无损）
-sudo systemctl stop luyun
-sqlite3 data/app.db ".backup 'backups/pre-pg-migration.db'"   # 额外手工备份
-.venv/bin/python scripts/archive/migrate_sqlite_to_postgres.py --dry-run
-.venv/bin/python scripts/archive/migrate_sqlite_to_postgres.py --apply
-# 4) 改 deploy/env.production：DATABASE_BACKEND=postgres + POSTGRES_DSN
-# 5) 启动并冒烟：/api/healthz → 后台订单列表 → KDS → admin 表格编辑 → 原密码登录
-sudo systemctl start luyun
-```
-
 完整前置条件、冒烟清单与排错见
 [`migrations/pg/README.md`](../migrations/pg/README.md)。
+
+### 10.3.1 已有门店升级到 0.6.0
+
+**继续用 SQLite（绝大多数门店）**：零额外步骤——管理后台 →「系统更新」→ 版本
+检测 → 应用更新。升级作业会自动备份 `app.db`、原子切换代码、保留 `data/`；
+`syncing_deps` 阶段会装上新声明的 `asyncpg` / `redis`（无副作用）。
+
+**要切 PostgreSQL**：先按上面完成「系统更新」升到 0.6.0（切换脚本是 0.6.0 才有
+的），确认应用正常后，再跑 `sudo bash deploy/enable_postgres.sh`。
 
 ### 10.4 从 PG 快照恢复（手工）
 

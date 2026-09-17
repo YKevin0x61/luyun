@@ -147,14 +147,15 @@ The kitchen display is a uni-app project (`kds/`, H5 build), no longer HTTP-poll
 
 ## Deployment (`deploy/`)
 
-Single-machine, single-instance, **single uvicorn worker** deployment — no Postgres/Redis; Docker may host the process with bind mounts but image pull is not delivery. Delivery follows **ADR 0011** (supersedes ADR 0010): GitHub Release **发行包 (Release Bundle)** (app tree + prebuilt Admin/KDS + **版本清单**/checksums) + Admin「系统更新」（版本检测 · **更新环境自检** · 应用更新）→ 更新作业; shop machines stay Node-free (no Deploy Key / clone). `deploy/` contains:
+Single-machine, single-instance, **single uvicorn worker** deployment. Storage is **SQLite by default** (single `data/app.db`, zero external services); a **PostgreSQL backend is available** for the multi-store shape via `DATABASE_BACKEND=postgres` (ADR 0084) — see `migrations/pg/` and `deploy/enable_postgres.sh`. Redis is prepared in the Docker `pg` profile but **not wired into the code yet**, so the single-worker constraint still holds. Docker may host the process with bind mounts but image pull is not delivery. Delivery follows **ADR 0011** (supersedes ADR 0010): GitHub Release **发行包 (Release Bundle)** (app tree + prebuilt Admin/KDS + **版本清单**/checksums) + Admin「系统更新」（版本检测 · **更新环境自检** · 应用更新）→ 更新作业; shop machines stay Node-free (no Deploy Key / clone). `deploy/` contains:
 
 - `luyun.service` — systemd unit running `uvicorn main:app --workers 1` (must stay single-worker: the realtime hub, in-memory log buffer, and scraper failure counters all live in one process's memory).
 - `luyun-update.service` — systemd oneshot Update Job started by Admin Apply Update.
 - `Dockerfile` / `docker-compose.yml` / `docker-entrypoint.sh` — Docker process-shell (bind-mount Release Bundle tree under parent volume; upgrades still via Admin「系统更新」). Helper: `scripts/docker_up.sh`.
 - `Caddyfile` / `nginx.conf` — reverse proxy + TLS termination, forwarding `/api/*` and `/ws/*` to the backend and serving `admin-web/dist` directly at the proxy layer.
-- `backup.sh` + `luyun-backup.service`/`luyun-backup.timer` — SQLite online backup (`sqlite3 .backup`) on a systemd timer, with retention policy.
-- `env.production.example` — production environment variable template (GitHub Releases PAT optional for the public repo).
+- `backup.sh` + `luyun-backup.service`/`luyun-backup.timer` — online backup on a systemd timer with retention policy. Backend-aware since 0.6.0: SQLite via `sqlite3 .backup`, PostgreSQL via `pg_dump → app.pgdump`.
+- `enable_postgres.sh` — one-shot `sudo` script that switches a machine to the PostgreSQL backend end to end (install PG → create db/user → apply `migrations/pg/` schema → stop app → back up SQLite → migrate data → write `env.production` → restart → smoke). Idempotent; `--dry-run` previews. Needed as a root script because the Update Job deliberately runs as the unprivileged app user.
+- `env.production.example` — production environment variable template (GitHub Releases PAT optional for the public repo; `DATABASE_BACKEND` / `POSTGRES_DSN` for the multi-store backend).
 - `deploy/README.md` — Bootstrap Install, Docker Compose, upgrade via Version Check / Update Preflight / Apply Update, reverse proxy, backup. Publish: `scripts/publish_release.sh`. Operator flow: `docs/RELEASE_AND_DEPLOY.md`; bundle contract: `docs/release-asset-layout.md`.
 
 ---
@@ -162,7 +163,7 @@ Single-machine, single-instance, **single uvicorn worker** deployment — no Pos
 ## Important Gotchas
 
 - **uvicorn `--reload` resets globals.** Every API route must use `db=Depends(_get_db)` so `db_manager` is resolved fresh per request — never captured at module load time.
-- **`SELECT rowid, *`** on a table with `INTEGER PRIMARY KEY` returns the `id` column twice (once as `id`, once as `rowid` alias), producing duplicate keys → `JSON.stringify()` fails. Always filter/handle this in the API layer.
+- **`SELECT rowid, *`** on a table with `INTEGER PRIMARY KEY` returns the `id` column twice (once as `id`, once as `rowid` alias), producing duplicate keys → `JSON.stringify()` fails. Always filter/handle this in the API layer. Under the PostgreSQL backend the dialect layer rewrites `rowid` to that table's row-identity column and keeps the alias (`SELECT id AS rowid, *`), so admin row-edit keeps working — see `db_core/backend/dialect.py`.
 - **CORS:** `allow_credentials=True` with `allow_origins=["*"]` is incompatible. Use `allow_credentials=False`. Still true — `main.py` sets `allow_origins=["*"]` + `allow_credentials=False`.
 - **Batch station sync (`sync-stations`):** Updates orders table in batches of 200 rows, commits after each batch. The `updated` count reflects matched dishes; `skipped_no_match` are dishes with no mapping entry.
 - **dish_stations primary key:** Uses `dish_name TEXT UNIQUE`, not an auto-increment ID. The API endpoint is `/api/dish-stations/{dish_name}` (path param, not ID).
