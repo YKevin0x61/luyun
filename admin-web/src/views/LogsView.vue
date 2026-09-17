@@ -1,8 +1,9 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useLogs } from '../composables/useLogs'
 import SvgIcon from '../components/SvgIcon.vue'
 import LuyunNumberInput from '../components/ui/LuyunNumberInput.vue'
+import { buildLogsCopyText, selectLogsForCopy } from '../utils/logCopy'
 
 const {
   mode, playing, filters, items, resultCountText, facets, stats, history, filterLabel,
@@ -29,15 +30,39 @@ function closeSidebar() {
 }
 
 const LEVELS = ['ALL', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-const COPY_LABEL_DEFAULT = '复制全部'
 const COPY_LABEL_RESET_MS = 1200
+const COPY_LABELS = {
+  all: '复制全部',
+  error: '仅复制错误日志',
+  warning: '仅复制警告日志',
+}
+const COPY_EMPTY_MESSAGES = {
+  error: '当前视图暂无错误日志',
+  warning: '当前视图暂无警告日志',
+}
 
-const copyLabel = ref(COPY_LABEL_DEFAULT)
-let copyLabelTimer = null
+const copyLabels = reactive({ ...COPY_LABELS })
+const copyLabelTimers = new Map()
 
 const statRangeText = computed(() => {
   if (!stats.value?.earliest) return '—'
   return `${fmtTs(stats.value.earliest)} → ${fmtTs(stats.value.latest)}`
+})
+
+const hasActiveFilters = computed(() => (
+  filters.level !== 'ALL'
+  || !!filters.logger
+  || !!filters.q
+  || !!filters.sinceMin
+  || !!filters.untilMin
+))
+
+const emptyStateText = computed(() => {
+  if (resultCountText.value === '加载失败') return '日志加载失败，请稍后重试'
+  if (hasActiveFilters.value) return '没有符合当前筛选条件的日志'
+  if (mode.value === 'history') return '当前时间范围内没有日志'
+  if (!playing.value) return '日志接收已暂停'
+  return '等待新日志…'
 })
 
 const statsDbPathText = computed(() => {
@@ -105,11 +130,19 @@ function handleScroll() {
   showScrollBtn.value = mode.value === 'realtime' ? !isAtTop() : !isAtBottom()
 }
 
-function toggleExpand(id) {
-  if (!id) return
+function logItemKey(item, index = 0) {
+  return item?.id ?? item?.ts ?? item?.timestamp ?? `row-${index}`
+}
+
+function isExpanded(item, index) {
+  return expandedIds.value.has(logItemKey(item, index))
+}
+
+function toggleExpand(item, index) {
+  const key = logItemKey(item, index)
   const next = new Set(expandedIds.value)
-  if (next.has(id)) next.delete(id)
-  else next.add(id)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
   expandedIds.value = next
 }
 
@@ -139,16 +172,26 @@ async function handleCleanup() {
   window.alert(`已删除 ${data.deleted} 条日志`)
 }
 
-async function copyAll() {
-  const text = items.value.map((it) => {
-    const lvl = (it.level || 'INFO').toUpperCase()
-    return `${fmtTs(it.timestamp || it.ts)} [${lvl}] ${it.logger || ''} ${it.message || ''}`
-  }).join('\n')
+function flashCopied(scope) {
+  copyLabels[scope] = '已复制'
+  if (copyLabelTimers.has(scope)) clearTimeout(copyLabelTimers.get(scope))
+  copyLabelTimers.set(scope, setTimeout(() => {
+    copyLabels[scope] = COPY_LABELS[scope]
+    copyLabelTimers.delete(scope)
+  }, COPY_LABEL_RESET_MS))
+}
+
+async function copySelection(scope) {
+  const selected = selectLogsForCopy(items.value, scope)
+  if (scope !== 'all' && !selected.length) {
+    window.alert(COPY_EMPTY_MESSAGES[scope])
+    return
+  }
+
+  const text = buildLogsCopyText(selected, fmtTs)
   try {
     await navigator.clipboard.writeText(text)
-    copyLabel.value = '已复制'
-    if (copyLabelTimer) clearTimeout(copyLabelTimer)
-    copyLabelTimer = setTimeout(() => { copyLabel.value = COPY_LABEL_DEFAULT }, COPY_LABEL_RESET_MS)
+    flashCopied(scope)
   } catch (e) {
     window.alert('复制失败，请手动选择')
   }
@@ -172,7 +215,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (copyLabelTimer) clearTimeout(copyLabelTimer)
+  for (const timer of copyLabelTimers.values()) clearTimeout(timer)
+  copyLabelTimers.clear()
   mobileFilterMql?.removeEventListener('change', closeSidebar)
 })
 </script>
@@ -262,7 +306,7 @@ onBeforeUnmount(() => {
           <span>{{ mode === 'realtime' ? '实时跟踪' : '历史查询' }}</span>
           <span style="color:var(--text-dim)">{{ filterLabel }}</span>
         </div>
-        <div style="display:flex;gap:6px;align-items:center">
+        <div class="logs-toolbar-actions">
           <button type="button" class="btn btn-sm logs-mobile-filter-toggle" @click="toggleSidebar">
             <SvgIcon name="menu" :size="14" />
             筛选
@@ -271,28 +315,63 @@ onBeforeUnmount(() => {
             <SvgIcon :name="playing ? 'pause' : 'play'" :size="13" /> {{ playing ? '暂停' : '继续' }}
           </button>
           <button class="btn btn-sm" @click="items.length = 0" title="清空当前视图（不影响数据库）">清空视图</button>
-          <button class="btn btn-sm" @click="copyAll">{{ copyLabel }}</button>
+          <button class="btn btn-sm" @click="copySelection('all')">{{ copyLabels.all }}</button>
+          <button class="btn btn-sm" @click="copySelection('error')" title="复制当前视图中的错误日志（含 CRITICAL）">{{ copyLabels.error }}</button>
+          <button class="btn btn-sm" @click="copySelection('warning')" title="复制当前视图中的警告日志">{{ copyLabels.warning }}</button>
         </div>
       </div>
 
       <div ref="logWrapRef" class="logs-wrap luyun-scrollbar" @scroll="handleScroll">
-        <div v-if="!items.length" class="empty-state">等待日志…</div>
+        <div v-if="!items.length" class="logs-empty empty-state">{{ emptyStateText }}</div>
+        <div v-else class="logs-columns" aria-hidden="true">
+          <span>时间</span>
+          <span>级别</span>
+          <span>Logger</span>
+          <span>消息</span>
+          <span></span>
+        </div>
         <div
-          v-for="it in items"
-          :key="it.id || it.ts || it.timestamp"
+          v-for="(it, index) in items"
+          :key="logItemKey(it, index)"
           class="logs-line"
-          :class="[`lvl-${(it.level || 'INFO').toUpperCase()}`, { 'has-exception': !!it.exception }]"
-          @click="it.exception && toggleExpand(it.id)"
+          :class="`lvl-${(it.level || 'INFO').toUpperCase()}`"
         >
-          <div class="ts" :title="it.timestamp || it.ts">{{ fmtTs(it.timestamp || it.ts) }}</div>
-          <div class="lvl">{{ (it.level || 'INFO').toUpperCase() }}</div>
-          <div class="lg" :title="it.logger" @click.stop="clickLogger(it.logger)">{{ it.logger }}</div>
+          <time class="ts" :datetime="it.timestamp || it.ts" :title="it.timestamp || it.ts">{{ fmtTs(it.timestamp || it.ts) }}</time>
+          <span class="lvl">{{ (it.level || 'INFO').toUpperCase() }}</span>
+          <button
+            type="button"
+            class="lg"
+            :title="`按 logger ${it.logger || '未标注'} 筛选`"
+            :aria-label="`按 logger ${it.logger || '未标注'} 筛选`"
+            @click="clickLogger(it.logger)"
+          >{{ it.logger || '未标注' }}</button>
           <div class="msg">
             <template v-for="(part, i) in highlightParts(it.message, filters.q)" :key="i">
               <span :class="{ hit: part.hit }">{{ part.text }}</span>
             </template>
           </div>
-          <div v-if="it.exception && expandedIds.has(it.id)" class="ex">{{ it.exception }}</div>
+          <div class="log-actions">
+            <button
+              v-if="it.exception"
+              type="button"
+              class="ex-toggle"
+              :class="{ active: isExpanded(it, index) }"
+              :aria-expanded="isExpanded(it, index)"
+              :aria-controls="`log-exception-${index}`"
+              @click="toggleExpand(it, index)"
+            >
+              <SvgIcon :name="isExpanded(it, index) ? 'chevron-up' : 'chevron-down'" :size="12" />
+              {{ isExpanded(it, index) ? '收起' : '异常' }}
+            </button>
+          </div>
+          <div v-if="it.exception && isExpanded(it, index)" :id="`log-exception-${index}`" class="ex">
+            <div class="ex-title">异常堆栈</div>
+            <div class="ex-body">
+              <template v-for="(part, i) in highlightParts(it.exception, filters.q)" :key="i">
+                <span :class="{ hit: part.hit }">{{ part.text }}</span>
+              </template>
+            </div>
+          </div>
         </div>
       </div>
       <button
@@ -328,34 +407,48 @@ onBeforeUnmount(() => {
 .logs-db-path { font-size: 9.5px; color: #4b5563; text-transform: none; letter-spacing: 0; }
 
 .logs-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; position: relative; }
-.logs-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 10px 10px 0 0; gap: 10px; flex-shrink: 0; font-size: 11.5px; color: var(--text-dim); }
+.logs-toolbar { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; padding: 8px 14px; background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 10px 10px 0 0; gap: 8px 10px; flex-shrink: 0; font-size: 11.5px; color: var(--text-dim); }
+.logs-toolbar-left, .logs-toolbar-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.logs-toolbar-actions { justify-content: flex-end; margin-left: auto; }
 .logs-auto-state { display: inline-flex; align-items: center; gap: 5px; }
 .logs-auto-state .dot { width: 6px; height: 6px; border-radius: 99px; background: var(--green); box-shadow: 0 0 6px var(--green); }
 .logs-auto-state.paused .dot { background: var(--text-dim); box-shadow: none; }
 .logs-mobile-filter-toggle { display: none; }
 .logs-wrap { flex: 1; overflow-y: auto; background: #07090f; font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace; font-size: 11.5px; line-height: 1.55; border: 1px solid var(--border); border-top: none; border-radius: 0 0 10px 10px; }
-.logs-line { display: grid; grid-template-columns: 170px 60px 200px 1fr; gap: 10px; padding: 2px 14px; border-bottom: 1px solid rgba(31,41,55,0.4); align-items: start; word-break: break-word; white-space: pre-wrap; }
-.logs-line:hover { background: rgba(99,102,241,0.06); }
-.logs-line .ts { color: #6b7280; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.logs-line .lvl { font-size: 10.5px; font-weight: 600; text-align: center; border-radius: 3px; padding: 0 4px; line-height: 18px; align-self: center; }
-.logs-line .lg { color: #9ca3af; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.logs-empty { min-height: 180px; display: grid; place-items: center; }
+.logs-columns { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 166px 58px minmax(120px, 190px) minmax(0, 1fr) 58px; gap: 10px; padding: 6px 14px; background: rgba(11,16,26,0.98); border-bottom: 1px solid var(--border); color: #7f8a9b; font-family: system-ui, sans-serif; font-size: 10px; letter-spacing: .04em; }
+.logs-line { display: grid; grid-template-columns: 166px 58px minmax(120px, 190px) minmax(0, 1fr) 58px; gap: 10px; padding: 4px 14px; border-bottom: 1px solid rgba(31,41,55,0.4); align-items: start; word-break: break-word; white-space: pre-wrap; }
+.logs-line.lvl-WARNING { background: rgba(245,158,11,0.025); }
+.logs-line.lvl-ERROR { background: rgba(239,68,68,0.035); }
+.logs-line.lvl-CRITICAL { background: rgba(239,68,68,0.065); }
+.logs-line:hover { background: rgba(99,102,241,0.08); }
+.logs-line .ts { color: #8b95a5; font-size: 10.5px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.logs-line .lvl { min-width: 58px; font-size: 10.5px; font-weight: 600; text-align: center; border-radius: 4px; padding: 0 5px; line-height: 18px; align-self: center; }
+.logs-line .lg { min-width: 0; padding: 0; border: 0; background: transparent; color: #9ca3af; font-family: inherit; font-size: 10.5px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .logs-line .lg:hover { color: var(--accent); }
-.logs-line .msg { color: #d1d5db; white-space: pre-wrap; word-break: break-word; }
+.logs-line .lg:focus-visible, .logs-line .ex-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.logs-line .msg { color: #d7dee8; font-size: 12px; overflow-wrap: anywhere; }
 .logs-line .msg .hit { background: rgba(245,158,11,0.25); color: #fde68a; border-radius: 2px; padding: 0 2px; }
 .logs-line.lvl-INFO .lvl { color: #22c55e; background: rgba(34,197,94,0.12); }
 .logs-line.lvl-WARNING .lvl { color: #f59e0b; background: rgba(245,158,11,0.12); }
 .logs-line.lvl-ERROR .lvl { color: #ef4444; background: rgba(239,68,68,0.12); }
 .logs-line.lvl-CRITICAL .lvl { color: #fff; background: var(--red); }
-.logs-line.lvl-DEBUG .lvl { color: #6b7280; background: rgba(107,114,128,0.12); }
-.logs-line .ex { grid-column: 1 / -1; padding: 6px 10px; background: rgba(239,68,68,0.06); color: #fca5a5; font-size: 10.5px; border-top: 1px solid rgba(239,68,68,0.15); white-space: pre-wrap; }
-.logs-line.has-exception { cursor: help; }
-.logs-line.has-exception .msg { border-bottom: 1px dashed var(--border); }
+.logs-line.lvl-DEBUG .lvl { color: #9ca3af; background: rgba(107,114,128,0.16); }
+.logs-line .log-actions { display: flex; justify-content: flex-end; align-items: center; min-height: 20px; }
+.logs-line .ex-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 3px; min-height: 20px; padding: 1px 5px; border: 1px solid rgba(239,68,68,0.3); border-radius: 4px; background: rgba(239,68,68,0.07); color: #fca5a5; font-family: inherit; font-size: 10px; cursor: pointer; }
+.logs-line .ex-toggle:hover, .logs-line .ex-toggle.active { border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.13); color: #fecaca; }
+.logs-line .ex { grid-column: 1 / -1; overflow: hidden; margin: 2px 0 4px; border: 1px solid rgba(239,68,68,0.18); border-radius: 6px; background: rgba(127,29,29,0.12); }
+.logs-line .ex-title { padding: 5px 10px; border-bottom: 1px solid rgba(239,68,68,0.15); color: #fca5a5; font-family: system-ui, sans-serif; font-size: 10px; font-weight: 600; }
+.logs-line .ex-body { padding: 7px 10px; color: #fca5a5; font-size: 10.5px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.logs-line .ex-body .hit { background: rgba(245,158,11,0.25); color: #fde68a; border-radius: 2px; padding: 0 2px; }
 
 .logs-scroll-jump { position: absolute; right: 18px; bottom: 18px; background: var(--accent); color: #fff; border: none; border-radius: 99px; width: 34px; height: 34px; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; }
 
 /* 移动端：侧栏筛选折叠为滑出抽屉（对齐旧页 760px 断点，见 public/logs.html:664-674） */
 @media (max-width: 760px) {
   .logs-mobile-filter-toggle { display: inline-flex; }
+  .logs-toolbar-left, .logs-toolbar-actions { width: 100%; }
+  .logs-toolbar-actions { justify-content: flex-start; margin-left: 0; }
 
   .logs-sidebar {
     position: fixed;
@@ -389,7 +482,13 @@ onBeforeUnmount(() => {
     pointer-events: auto;
   }
 
-  .logs-line { grid-template-columns: 120px 50px 1fr; }
-  .logs-line .lg { display: none; }
+  .logs-columns { display: none; }
+  .logs-line { grid-template-columns: minmax(0, 1fr) auto auto; gap: 5px 8px; padding: 8px 10px; }
+  .logs-line .ts { grid-column: 1; grid-row: 1; align-self: center; }
+  .logs-line .lvl { grid-column: 2; grid-row: 1; align-self: center; }
+  .logs-line .log-actions { grid-column: 3; grid-row: 1; }
+  .logs-line .lg { grid-column: 1 / -1; grid-row: 2; display: block; color: #8994a6; }
+  .logs-line .msg { grid-column: 1 / -1; grid-row: 3; font-size: 12px; line-height: 1.6; }
+  .logs-line .ex { grid-column: 1 / -1; grid-row: 4; }
 }
 </style>

@@ -132,6 +132,9 @@ async def get_facets():
         data = await log_storage.facets()
         return {"success": True, **data}
     except Exception as exc:
+        if log_storage.is_corruption_error(exc):
+            logger.warning("日志存储不可用: %s", exc)
+            raise HTTPException(status_code=503, detail="日志存储不可用")
         logger.error("获取日志 facets 失败: %s", exc)
         raise HTTPException(status_code=500, detail=f"获取 facets 失败: {exc}")
 
@@ -142,6 +145,9 @@ async def get_stats():
     try:
         return {"success": True, **(await log_storage.stats())}
     except Exception as exc:
+        if log_storage.is_corruption_error(exc):
+            logger.warning("日志存储不可用: %s", exc)
+            raise HTTPException(status_code=503, detail="日志存储不可用")
         logger.error("获取日志统计失败: %s", exc)
         raise HTTPException(status_code=500, detail=f"获取统计失败: {exc}")
 

@@ -67,11 +67,17 @@ class _OrdersRepoMixin:
                          start_time: Optional[datetime] = None,
                          end_time: Optional[datetime] = None,
                          dish_status: Optional[str] = None,
-                         limit: int = 10000) -> List[Dict]:
+                         limit: int = 10000,
+                         dish_name: Optional[str] = None) -> List[Dict]:
         try:
             conditions, params = [], []
             if station and station != 'all':
                 conditions.append("station = ?"); params.append(station)
+            if dish_name is not None:
+                # 精确菜品名（走 idx_orders_dish_name）：给「按菜品挑候选」的
+                # 调用方把范围从整段历史收窄到单个菜品。空串按空串匹配，不
+                # 等于「不过滤」。
+                conditions.append("dish_name = ?"); params.append(dish_name)
             if table_number:
                 conditions.append("table_number = ?"); params.append(table_number)
             if start_time:

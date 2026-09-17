@@ -41,6 +41,21 @@ async def _load(orders, order_id, *, steamer_id="1", port_index=3):
     )
 
 
+class _RecordingOrders:
+    """包一层 OrdersPort，记录 get_orders 的调用参数（用于断言查询范围）。"""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = []
+
+    async def get_orders(self, *args, **kwargs):
+        self.calls.append(dict(kwargs))
+        return await self._inner.get_orders(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._old = settings.DATABASE_DIR
@@ -847,3 +862,63 @@ class FloorConsoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((sub.get("placement") or {}).get("steamer_id"), "1")
         self.assertFalse(is_hold(no_onion))
         self.assertIsNone(no_onion.get("placement"))
+
+    async def test_hold_candidate_pool_is_scoped_to_the_target_dish(self):
+        """等叫挑替补必须按菜品收窄查询。
+
+        历史实现取回全部「待出餐」行（线上 17.3 万行 / 890ms / 单次 ~500MB），
+        而 `_pick_substitute` 只按 dish_name 精确匹配，所以候选池按菜品查询
+        结果不变但代价从全库降到单菜品。
+        """
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="steam", table_number="8"),
+                _order(business_flow_id="same_dish", table_number="9"),
+                _order(business_flow_id="other_dish", table_number="7", dish_name="叉烧包"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await _load(self.db.orders, by_flow["steam"]["_id"])
+
+        recorder = _RecordingOrders(self.db.orders)
+        result = await hold_portions(recorder, {"order_ids": [by_flow["steam"]["_id"]]})
+
+        self.assertEqual(
+            result["substituted"],
+            [
+                {
+                    "held_id": str(by_flow["steam"]["_id"]),
+                    "substitute_id": str(by_flow["same_dish"]["_id"]),
+                }
+            ],
+        )
+        pools = [call for call in recorder.calls if call.get("dish_status") == "待出餐"]
+        self.assertEqual(len(pools), 1, "同一菜品只应查询一次候选池")
+        self.assertEqual(pools[0].get("dish_name"), "虾饺")
+        self.assertNotIn("叉烧包", [pools[0].get("dish_name")])
+
+    async def test_hold_reuses_one_candidate_query_per_dish(self):
+        await self.db.orders.batch_insert_orders(
+            [
+                _order(business_flow_id="steam_a", table_number="8"),
+                _order(business_flow_id="steam_b", table_number="9"),
+                _order(business_flow_id="await_a", table_number="10"),
+                _order(business_flow_id="await_b", table_number="11"),
+            ]
+        )
+        by_flow = await self._by_flow()
+        await _load(self.db.orders, by_flow["steam_a"]["_id"])
+        await _load(self.db.orders, by_flow["steam_b"]["_id"], port_index=4)
+
+        recorder = _RecordingOrders(self.db.orders)
+        result = await hold_portions(
+            recorder,
+            {"order_ids": [by_flow["steam_a"]["_id"], by_flow["steam_b"]["_id"]]},
+        )
+
+        self.assertEqual(result["updated_count"], 2)
+        self.assertEqual(len(result["substituted"]), 2)
+        pools = [call for call in recorder.calls if call.get("dish_status") == "待出餐"]
+        self.assertEqual(len(pools), 1, "同一菜品应复用候选池，不重复查询")
+        substitute_ids = {item["substitute_id"] for item in result["substituted"]}
+        self.assertEqual(len(substitute_ids), 2, "两条在蒸不能挑到同一个替补")

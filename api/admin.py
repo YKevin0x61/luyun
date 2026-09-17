@@ -21,6 +21,7 @@ from starlette.background import BackgroundTask
 
 from config import settings
 from database import ALL_TABLES, get_db
+from db_core.schema import AUTH_PHYSICAL_TABLES, HYGIENE_TABLES, RECIPE_TABLES
 from api.security import verify_admin_token
 from services.dish_catalog import get_dish_catalog
 
@@ -29,8 +30,34 @@ audit_logger = logging.getLogger("admin_audit")
 
 CHINA_TZ = timezone(timedelta(hours=8))
 
-# Generic Admin DataTable may read these; writes must go through DishCatalog.
-_READ_ONLY_ADMIN_TABLES = frozenset({"dish_stations"})
+_ADMIN_READ_ONLY_TABLES = frozenset({
+    "dish_stations",
+    *AUTH_PHYSICAL_TABLES,
+    *RECIPE_TABLES,
+    *HYGIENE_TABLES,
+})
+_ADMIN_WRITABLE_TABLES = frozenset(
+    table for table in ALL_TABLES
+    if table != "auth" and table not in _ADMIN_READ_ONLY_TABLES
+)
+_ADMIN_TABLE_GROUPS = (
+    ("business", "业务数据", tuple(t for t in ALL_TABLES if t not in ("auth", "logs"))),
+    ("recipe", "配方库", RECIPE_TABLES),
+    ("hygiene", "卫生管理", HYGIENE_TABLES),
+    ("auth", "登录认证", AUTH_PHYSICAL_TABLES),
+    ("external", "其他数据源", ("logs",)),
+)
+_ADMIN_DB_TABLES = frozenset(
+    table
+    for key, _label, tables in _ADMIN_TABLE_GROUPS
+    if key != "external"
+    for table in tables
+)
+_ADMIN_REDACTED_COLUMNS = {
+    "admin_user": frozenset({"password_hash"}),
+    "sessions": frozenset({"session_id"}),
+    "api_tokens": frozenset({"token_hash"}),
+}
 
 router = APIRouter(
     prefix="/api/admin",
@@ -40,11 +67,70 @@ router = APIRouter(
 
 
 def _reject_read_only_table_write(table_name: str) -> None:
-    if table_name in _READ_ONLY_ADMIN_TABLES:
+    if table_name == "dish_stations":
         raise HTTPException(
             status_code=403,
             detail="dish_stations 为只读表，请通过 /api/dish-stations 维护映射",
         )
+    if table_name in AUTH_PHYSICAL_TABLES:
+        raise HTTPException(status_code=403, detail="认证表为只读表，仅在数据管理中查看")
+    if table_name in RECIPE_TABLES:
+        raise HTTPException(status_code=403, detail="配方表为只读表，请通过配方管理页面维护")
+    if table_name in HYGIENE_TABLES:
+        raise HTTPException(status_code=403, detail="卫生表为只读表，请通过卫生管理页面维护")
+    if table_name not in _ADMIN_WRITABLE_TABLES:
+        raise HTTPException(status_code=403, detail="系统表禁止修改")
+
+
+def _admin_catalog() -> Dict[str, Any]:
+    groups = []
+    tables: List[str] = []
+    table_meta: Dict[str, Dict[str, Any]] = {}
+
+    for key, label, group_tables in _ADMIN_TABLE_GROUPS:
+        names = list(group_tables)
+        groups.append({"key": key, "label": label, "tables": names})
+        tables.extend(names)
+        for table in names:
+            read_only = table == "logs" or table in _ADMIN_READ_ONLY_TABLES
+            meta: Dict[str, Any] = {
+                "group": key,
+                "source": "logs.db" if table == "logs" else "app.db",
+                "read_only": read_only,
+            }
+            if table == "logs":
+                meta["route"] = "/logs"
+                meta["read_only_reason"] = "请在运行日志页面查看"
+            elif table == "dish_stations":
+                meta["read_only_reason"] = "请用「快捷添加 / 批量分类」维护映射"
+            elif table in AUTH_PHYSICAL_TABLES:
+                meta["read_only_reason"] = "敏感系统表，仅供查看"
+            elif table in RECIPE_TABLES:
+                meta["read_only_reason"] = "请通过配方管理页面维护"
+            elif table in HYGIENE_TABLES:
+                meta["read_only_reason"] = "请通过卫生管理页面维护"
+            redacted = sorted(_ADMIN_REDACTED_COLUMNS.get(table, ()))
+            if redacted:
+                meta["redacted_columns"] = redacted
+            table_meta[table] = meta
+
+    return {
+        "tables": tables,
+        "groups": groups,
+        "table_meta": table_meta,
+    }
+
+
+def _ensure_admin_readable(table_name: str) -> None:
+    if table_name == "logs":
+        raise HTTPException(status_code=400, detail="运行日志请前往 /logs 页面查看")
+    if table_name not in _ADMIN_DB_TABLES:
+        raise HTTPException(status_code=403, detail="系统表禁止访问")
+
+
+def _ensure_not_redacted(table_name: str, column: str) -> None:
+    if column.lower() in _ADMIN_REDACTED_COLUMNS.get(table_name, ()):
+        raise HTTPException(status_code=403, detail=f"字段 {column} 已隐藏")
 
 
 # ==================== Pydantic 模型 ====================
@@ -89,10 +175,14 @@ class ReconcileRequest(BaseModel):
 
 def _table_conn(db, table_name: str):
     """经 DatabaseManager.table() 取得连接，避免调用方直碰内部字典。"""
-    try:
-        return db.table(table_name).conn
-    except KeyError:
-        raise HTTPException(status_code=400, detail=f"未知表: {table_name}")
+    view = db.table_or_none(table_name)
+    if view is not None:
+        return view.conn
+    if table_name in _ADMIN_READ_ONLY_TABLES:
+        conn = getattr(db, "_conn", None)
+        if conn is not None:
+            return conn
+    raise HTTPException(status_code=400, detail=f"未知表: {table_name}")
 
 
 async def _load_table_columns(conn, table_name: str) -> List[Dict[str, Any]]:
@@ -144,8 +234,8 @@ async def _broadcast_admin_event(action: str, table_name: str = "-", **payload):
 
 @router.get("/tables")
 async def list_tables(db=Depends(get_db)):
-    """列出所有数据表"""
-    return {"success": True, "tables": ALL_TABLES}
+    """列出数据管理可见的全部表（业务、配方、卫生、认证与日志入口）。"""
+    return {"success": True, **_admin_catalog()}
 
 
 @router.get("/tables/{table_name}/schema")
@@ -153,8 +243,7 @@ async def get_table_schema(table_name: str, db=Depends(get_db)):
     """获取表结构"""
     if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
         raise HTTPException(status_code=400, detail="无效的表名")
-    if table_name not in ALL_TABLES:
-        raise HTTPException(status_code=403, detail="系统表禁止访问")
+    _ensure_admin_readable(table_name)
 
     try:
         conn = _table_conn(db, table_name)
@@ -165,7 +254,13 @@ async def get_table_schema(table_name: str, db=Depends(get_db)):
             "cid": r[0], "name": r[1], "type": r[2],
             "notnull": bool(r[3]), "dflt_value": r[4], "pk": bool(r[5])
         } for r in rows]
-        return {"success": True, "table": table_name, "columns": columns}
+        return {
+            "success": True,
+            "table": table_name,
+            "columns": columns,
+            "read_only": table_name in _ADMIN_READ_ONLY_TABLES,
+            "redacted_columns": sorted(_ADMIN_REDACTED_COLUMNS.get(table_name, ())),
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -187,8 +282,7 @@ async def get_table_rows(
     """分页获取表数据"""
     if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
         raise HTTPException(status_code=400, detail="无效的表名")
-    if table_name not in ALL_TABLES:
-        raise HTTPException(status_code=403, detail="系统表禁止访问")
+    _ensure_admin_readable(table_name)
 
     try:
         conn = _table_conn(db, table_name)
@@ -197,6 +291,7 @@ async def get_table_rows(
             if search_field and search_value:
                 if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', search_field):
                     raise HTTPException(status_code=400, detail="无效的搜索字段")
+                _ensure_not_redacted(table_name, search_field)
                 conditions.append(f"{search_field} LIKE ?")
                 params.append(f"%{search_value}%")
 
@@ -205,6 +300,7 @@ async def get_table_rows(
             if sort_field:
                 if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', sort_field):
                     raise HTTPException(status_code=400, detail="无效的排序字段")
+                _ensure_not_redacted(table_name, sort_field)
                 order = f"ORDER BY {sort_field} {sort_dir.upper()}"
 
             await cursor.execute(f"SELECT COUNT(*) FROM {table_name} {where}", params)
@@ -219,10 +315,15 @@ async def get_table_rows(
             columns = [d[0] for d in cursor.description] if cursor.description else []
 
         results = []
+        redacted_columns = _ADMIN_REDACTED_COLUMNS.get(table_name, ())
         for row in rows:
             d = {}
             for i, col in enumerate(columns):
                 val = row[i]
+                if col in redacted_columns and val not in (None, ""):
+                    val = "已隐藏"
+                    d[col] = val
+                    continue
                 if isinstance(val, str) and val:
                     try:
                         val = datetime.fromisoformat(val)
@@ -235,6 +336,8 @@ async def get_table_rows(
             "success": True, "table": table_name, "rows": results,
             "total": total, "page": page, "page_size": page_size,
             "pages": (total + page_size - 1) // page_size if total > 0 else 1,
+            "read_only": table_name in _ADMIN_READ_ONLY_TABLES,
+            "redacted_columns": sorted(redacted_columns),
         }
     except HTTPException:
         raise
@@ -558,6 +661,7 @@ async def get_table_stats(table_name: str, db=Depends(get_db)):
     """获取表统计信息"""
     if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
         raise HTTPException(status_code=400, detail="无效的表名")
+    _ensure_admin_readable(table_name)
 
     try:
         conn = _table_conn(db, table_name)

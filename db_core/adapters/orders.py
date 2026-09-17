@@ -22,6 +22,7 @@ class OrdersPortAdapter:
         end_time: Optional[datetime] = None,
         dish_status: Optional[str] = None,
         limit: int = 10000,
+        dish_name: Optional[str] = None,
     ) -> List[Dict]:
         return await self._db.get_orders(
             station=station,
@@ -30,6 +31,7 @@ class OrdersPortAdapter:
             end_time=end_time,
             dish_status=dish_status,
             limit=limit,
+            dish_name=dish_name,
         )
 
     async def get_order_by_id(

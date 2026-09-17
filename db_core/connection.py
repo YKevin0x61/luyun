@@ -8,6 +8,7 @@ DatabaseManager 的连接/生命周期职责：
 import logging
 import os
 import asyncio
+import time
 from typing import Any, Dict, Optional
 
 import aiosqlite
@@ -84,6 +85,10 @@ class _ConnectionMixin:
             await apply_hygiene_schema(self._main_conn)
             await self._main_conn.commit()
 
+            # 3.5 查询统计信息：没有 sqlite_stat1 时优化器只能猜索引，实测会让
+            # 「今日 + GROUP BY 菜品/档口」这类聚合退化成全索引扫描（18 万行）。
+            await self._ensure_query_statistics()
+
             # 4. 各表共享同一连接的 TableView
             for table in ALL_TABLES:
                 self._table_views[table] = TableView(table, self._main_conn)
@@ -97,6 +102,49 @@ class _ConnectionMixin:
             return False
 
     # ── 就绪探针（只读，供健康检查使用） ──
+
+    async def _orders_has_statistics(self) -> bool:
+        """orders 表是否已有 sqlite_stat1 记录（空表 ANALYZE 不会写入记录）。"""
+        assert self._main_conn is not None
+        async with self._main_conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1'"
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row or not row[0]:
+            return False
+        async with self._main_conn.execute(
+            "SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl = 'orders'"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return bool(row and row[0])
+
+    async def _ensure_query_statistics(self) -> None:
+        """保证优化器有统计信息可用。
+
+        没有统计信息时 SQLite 只能按内置猜测选索引：对
+        `WHERE order_time >= ? AND station != 'loumian' GROUP BY dish_name, station`
+        这类查询会选 idx_orders_dish_name 做全索引扫描（线上 18.4 万行），实测
+        dashboard 聚合 133ms vs 0.4ms（详见 .scratch/perf-stress-test/PERF_REPORT.md）。
+
+        注意：对空表执行 ANALYZE 不会写任何 sqlite_stat1 记录，所以判据是
+        「orders 有没有统计记录」而不是「sqlite_stat1 表是否存在」；否则全新
+        安装会在爬虫灌满数据后一直沿用错误计划。已有统计时改用 `PRAGMA optimize`
+        由 SQLite 判断增量刷新，开销可忽略。
+        """
+        assert self._main_conn is not None
+        if await self._orders_has_statistics():
+            await self._main_conn.execute("PRAGMA optimize")
+            await self._main_conn.commit()
+            logger.info("📊 查询统计信息已存在，PRAGMA optimize 维护完成")
+            return
+        t0 = time.perf_counter()
+        await self._main_conn.execute("ANALYZE")
+        await self._main_conn.commit()
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        if await self._orders_has_statistics():
+            logger.info(f"📊 已生成查询统计信息 (ANALYZE, {elapsed_ms:.0f}ms)")
+        else:
+            logger.info("📊 orders 暂无数据，跳过统计信息生成（下次启动再试）")
 
     def is_connected(self) -> bool:
         """主连接是否已建立。"""
@@ -157,6 +205,13 @@ class _ConnectionMixin:
     async def close(self):
         """关闭单一连接"""
         if self._main_conn is not None:
+            # SQLite 官方建议：关闭前跑一次 PRAGMA optimize，由它判断哪些表的
+            # 统计信息因大量写入而过期（爬虫持续 INSERT 时尤其必要）。
+            try:
+                await self._main_conn.execute("PRAGMA optimize")
+                await self._main_conn.commit()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(f"⚠️ 关闭前 PRAGMA optimize 失败（忽略）: {exc}")
             await self._main_conn.close()
             self._main_conn = None
         self._table_views.clear()

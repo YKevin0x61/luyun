@@ -15,14 +15,34 @@ import LuyunNumberInput from '../ui/LuyunNumberInput.vue'
 import TableIcon from './TableIcon.vue'
 
 const {
-  tables, currentTable, schema, columns, rows, total, page, pageSize, pages,
+  tables, tableGroups, tableMeta, currentTable, schema, columns, rows, total, page, pageSize, pages,
   sortField, sortDir, searchField, searchValue, loading, error,
   loadTables, loadRows, switchTable, sortBy, goToPage, createRow, updateRow, deleteRow, deleteRows, updateRows,
   addColumn, dropColumn, rowKey,
 } = useAdminTable()
 
 const activePlugin = computed(() => resolveTablePlugin(currentTable.value))
-const tableReadOnly = computed(() => Boolean(activePlugin.value?.readOnly))
+const activeTableMeta = computed(() => tableMeta.value[currentTable.value] || {})
+const tableReadOnly = computed(() =>
+  Boolean(activePlugin.value?.readOnly || activeTableMeta.value.read_only),
+)
+const tableReadOnlyHint = computed(() => {
+  if (activePlugin.value?.readOnly) {
+    return '请用「快捷添加 / 批量分类」维护映射'
+  }
+  return activeTableMeta.value.read_only_reason || '仅供查看'
+})
+const sidebarGroups = computed(() => {
+  if (tableGroups.value.length) return tableGroups.value
+  return [{ key: 'all', label: '数据表', tables: tables.value }]
+})
+
+function tableBadge(table) {
+  const meta = tableMeta.value[table]
+  if (!meta) return ''
+  if (meta.route) return '入口'
+  return meta.read_only ? '只读' : ''
+}
 
 const router = useRouter()
 
@@ -76,6 +96,12 @@ function closeSidebar() {
   sidebarOpen.value = false
 }
 async function selectTable(t) {
+  const meta = tableMeta.value[t]
+  if (meta?.route) {
+    closeSidebar()
+    router.push(meta.route)
+    return
+  }
   if (t !== currentTable.value) await switchTable(t)
   closeSidebar()
 }
@@ -235,14 +261,23 @@ function formatCellText(col, val) {
       <div class="dt-sidebar-header">数据表</div>
       <div class="dt-table-list luyun-scrollbar">
         <div
-          v-for="t in tables"
-          :key="t"
-          class="dt-table-item"
-          :class="{ active: t === currentTable }"
-          @click="selectTable(t)"
+          v-for="group in sidebarGroups"
+          :key="group.key"
+          class="dt-table-group"
         >
-          <TableIcon :name="getTableIcon(t)" :size="15" />
-          <span>{{ getTableLabel(t) }}</span>
+          <div class="dt-table-group-label">{{ group.label }}</div>
+          <div
+            v-for="t in group.tables"
+            :key="t"
+            class="dt-table-item"
+            :class="{ active: t === currentTable }"
+            :title="tableMeta[t]?.read_only_reason || getTableLabel(t)"
+            @click="selectTable(t)"
+          >
+            <TableIcon :name="getTableIcon(t)" :size="15" />
+            <span class="dt-table-name">{{ getTableLabel(t) }}</span>
+            <span v-if="tableBadge(t)" class="dt-table-badge">{{ tableBadge(t) }}</span>
+          </div>
         </div>
       </div>
     </aside>
@@ -274,7 +309,7 @@ function formatCellText(col, val) {
           <button class="btn btn-sm btn-danger" @click="handleBatchDelete"><SvgIcon name="trash-2" :size="12" /> 批量删除</button>
           <button class="btn btn-sm" @click="clearSelection">取消选择</button>
         </template>
-        <span v-else-if="tableReadOnly" class="dt-batch-hint">只读表 · 请用「快捷添加 / 批量分类」维护映射</span>
+        <span v-else-if="tableReadOnly" class="dt-batch-hint">只读表 · {{ tableReadOnlyHint }}</span>
         <component
           :is="activePlugin.Extras"
           v-if="activePlugin?.Extras"
@@ -442,6 +477,18 @@ function formatCellText(col, val) {
   flex-shrink: 0;
 }
 .dt-table-list { flex: 1; overflow-y: auto; padding: 6px; }
+.dt-table-group + .dt-table-group {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.dt-table-group-label {
+  padding: 2px 9px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
 .dt-table-item {
   padding: 7px 9px;
   border-radius: 6px;
@@ -458,6 +505,22 @@ function formatCellText(col, val) {
 .dt-table-item.active { background: var(--accent); color: #fff; }
 .dt-table-item :deep(.dt-svg-icon) { opacity: .75; }
 .dt-table-item.active :deep(.dt-svg-icon) { opacity: 1; }
+.dt-table-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dt-table-badge {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 9px;
+  line-height: 1.35;
+  opacity: .72;
+}
 
 .dt-sidebar-toggle { display: none; }
 

@@ -18,6 +18,7 @@ from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
 from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
+from services.hygiene.captures import FileCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import HygieneWork
 
@@ -130,6 +131,48 @@ def test_original_endpoint_remains_backward_compatible(image_http):
     )
     assert response.status_code == 200
     assert response.content == original
+
+
+def test_stale_standard_byte_size_does_not_set_wrong_content_length(tmp_path):
+    old = settings.DATABASE_DIR
+    settings.DATABASE_DIR = str(tmp_path)
+    try:
+        db = DatabaseManager()
+        _run(db.connect())
+        set_runtime(AppRuntime(db=db))
+        work = HygieneWork(
+            db,
+            captures=FileCaptureStore(tmp_path / "hygiene-captures"),
+            now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+            image_variants=ImageVariantGenerator(),
+        )
+        _run(work.prepare())
+        item = _add_item(work, jpeg_bytes())
+        _run(
+            db._conn.execute(
+                "UPDATE hygiene_standards SET byte_size = ? WHERE id = ?",
+                (1, item["current_standard_id"]),
+            )
+        )
+        _run(db._conn.commit())
+
+        app = FastAPI()
+        app.include_router(hygiene_module.router)
+        app.dependency_overrides[hygiene_module._get_work] = lambda: work
+        app.dependency_overrides[
+            hygiene_module.require_standard_cache_session
+        ] = lambda: {"kind": "admin"}
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/hygiene/standards/{item['current_standard_id']}/image"
+            )
+            assert response.status_code == 200
+            assert int(response.headers["content-length"]) == len(response.content)
+            assert len(response.content) > 1
+    finally:
+        _run(db.close())
+        set_runtime(None)
+        settings.DATABASE_DIR = old
 
 
 def test_staff_upload_rejects_oversized_file_before_domain_write(

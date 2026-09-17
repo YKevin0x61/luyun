@@ -6,6 +6,9 @@ describe('getTableLabel', () => {
     expect(getTableLabel('orders')).toBe('订单记录')
     expect(getTableLabel('wecom_push_jobs')).toBe('企微推送任务')
     expect(getTableLabel('auth')).toBe('登录认证')
+    expect(getTableLabel('sop_recipes')).toBe('配方内容')
+    expect(getTableLabel('hygiene_zones')).toBe('卫生区域')
+    expect(getTableLabel('logs')).toBe('运行日志')
   })
 
   it('映射缺失时回退为原始表名', () => {
@@ -19,6 +22,9 @@ describe('getColumnLabel', () => {
     expect(getColumnLabel('wecom_push_logs', 'webhook_name')).toBe('Webhook名称')
     expect(getColumnLabel('wecom_push_logs', 'sent_at')).toBe('发送时间')
     expect(getColumnLabel('app_settings', 'key')).toBe('配置键')
+    expect(getColumnLabel('sop_recipes', 'needs_review')).toBe('待复核')
+    expect(getColumnLabel('hygiene_daily_items', 'zone_id')).toBe('区域ID')
+    expect(getColumnLabel('hygiene_capture_variants', 'content_sha256')).toBe('内容SHA256')
   })
 
   it('映射缺失时回退为原始列名', () => {

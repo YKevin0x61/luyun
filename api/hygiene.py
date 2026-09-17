@@ -402,8 +402,6 @@ async def _image_response(
         "Cache-Control": cache_control,
         "Content-Encoding": "identity",
     }
-    if view.get("byte_size") is not None:
-        headers["Content-Length"] = str(int(view["byte_size"]))
     if view.get("sha256"):
         headers["ETag"] = f'"{view["sha256"]}"'
     if view.get("fallback"):
@@ -412,6 +410,9 @@ async def _image_response(
         return Response(status_code=304, headers=headers)
     content_type = view.get("content_type") or "image/jpeg"
     if view.get("path") is not None:
+        # Let FileResponse derive Content-Length from the file itself. The
+        # stored byte_size can lag behind a restored/copied capture and a
+        # stale value makes uvicorn abort the stream mid-response.
         return FileResponse(
             path=view["path"],
             media_type=content_type,

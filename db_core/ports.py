@@ -22,6 +22,7 @@ class OrdersPort(Protocol):
         end_time: Optional[datetime] = None,
         dish_status: Optional[str] = None,
         limit: int = 10000,
+        dish_name: Optional[str] = None,
     ) -> List[Dict]: ...
 
     async def get_order_by_id(

@@ -3,6 +3,8 @@ import { api } from '../api/client'
 
 export function useAdminTable() {
   const tables = ref([])
+  const tableGroups = ref([])
+  const tableMeta = ref({})
   const currentTable = ref('')
   const schema = ref([])
   const rows = ref([])
@@ -28,6 +30,8 @@ export function useAdminTable() {
     try {
       const res = await api.get('/api/admin/tables')
       tables.value = res.tables || []
+      tableGroups.value = Array.isArray(res.groups) ? res.groups : []
+      tableMeta.value = res.table_meta || {}
       if (!currentTable.value && tables.value.length) {
         currentTable.value = tables.value.includes('orders') ? 'orders' : tables.value[0]
       }
@@ -148,7 +152,7 @@ export function useAdminTable() {
   }
 
   return {
-    tables, currentTable, schema, columns, rows, total, page, pageSize, pages,
+    tables, tableGroups, tableMeta, currentTable, schema, columns, rows, total, page, pageSize, pages,
     sortField, sortDir, searchField, searchValue, loading, error,
     loadTables, loadRows, switchTable, sortBy, goToPage,
     createRow, updateRow, deleteRow, deleteRows, updateRows, addColumn, dropColumn,

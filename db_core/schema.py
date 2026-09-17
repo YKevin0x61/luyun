@@ -323,8 +323,9 @@ _INDEX_DEFINITIONS = {
 # 所有表名（按数据量从小到大排列）
 ALL_TABLES = list(_TABLE_SCHEMAS.keys())
 
-# Recipe tables live in app.db but stay out of ALL_TABLES: Admin CRUD and
-# app.db overwrite/merge must not treat them as generic business tables.
+# Recipe tables live in app.db but stay out of ALL_TABLES: generic Admin writes
+# and app.db overwrite/merge must not treat them as business tables. The Admin
+# data browser lists them read-only through its separate catalog.
 RECIPE_TABLES = ("sop_stations", "sop_recipes", "sop_recipes_history")
 
 _RECIPE_TABLE_SCHEMAS = {
@@ -431,8 +432,9 @@ async def apply_recipe_schema(conn) -> None:
     await migrate_recipe_columns(conn)
 
 
-# Hygiene tables live in app.db but stay out of ALL_TABLES: Admin generic
-# CRUD must not be the write path (EmployeeAccounts / HygieneWork own writes).
+# Hygiene tables live in app.db but stay out of ALL_TABLES: Admin generic writes
+# must not be the write path (EmployeeAccounts / HygieneWork own writes). The
+# Admin data browser lists them read-only through its separate catalog.
 HYGIENE_TABLES = (
     "hygiene_employees",
     "hygiene_staff_sessions",
@@ -454,6 +456,17 @@ HYGIENE_TABLES = (
     "hygiene_fix_overdue_notices",
     "hygiene_teaching_examples",
     "hygiene_capture_variants",
+)
+
+AUTH_PHYSICAL_TABLES = ("admin_user", "sessions", "api_tokens")
+
+# Admin DataTable exposes these tables read-only; their owning feature pages
+# remain the only supported write paths.
+ADMIN_READ_ONLY_TABLES = (
+    "dish_stations",
+    *AUTH_PHYSICAL_TABLES,
+    *RECIPE_TABLES,
+    *HYGIENE_TABLES,
 )
 
 _HYGIENE_TABLE_SCHEMAS = {

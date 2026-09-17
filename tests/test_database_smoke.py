@@ -89,6 +89,48 @@ class DatabaseManagerSmokeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(row)
 
+    async def test_connect_generates_orders_query_statistics(self):
+        """有数据的 orders 必须留下 sqlite_stat1 记录。
+
+        没有统计信息时优化器会给「今日 + GROUP BY 菜品/档口」的聚合选错索引
+        （全索引扫 18 万行，实测 dashboard 聚合 133ms vs 0.4ms）。
+        """
+        await self.db.orders.batch_insert_orders(
+            [
+                {
+                    "business_flow_id": f"stat-{i}",
+                    "table_number": "1",
+                    "dish_name": "虾饺",
+                    "quantity": 1,
+                    "order_time": datetime(2026, 5, 1, 10, i % 60, tzinfo=CHINA_TZ),
+                    "station": "shulong",
+                }
+                for i in range(5)
+            ]
+        )
+        # 重新连接：此时 orders 有数据但没有统计信息，connect() 必须补齐
+        await self.db.close()
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect())
+
+        async with self.db._conn.cursor() as cursor:
+            await cursor.execute("SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl = 'orders'")
+            rows = (await cursor.fetchone())[0]
+        self.assertGreater(rows, 0, "orders 缺少查询统计信息，优化器会选错索引")
+
+    async def test_reconnect_with_existing_statistics_stays_healthy(self):
+        """已有统计信息时走 PRAGMA optimize，重复连接不应报错或丢统计。"""
+        await self.db.close()
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect())
+        await self.db.close()
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect())
+
+        async with self.db._conn.cursor() as cursor:
+            await cursor.execute("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'")
+            self.assertIsNotNone(await cursor.fetchone())
+
     async def test_save_orders_deduplicates_by_business_flow_id(self):
         order = {
             "business_flow_id": "smoke-001",

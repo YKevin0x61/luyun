@@ -66,6 +66,8 @@ class LogStorage:
         self._dropped: int = 0
         self._last_error: Optional[str] = None
         self._last_flush_at: float = 0.0
+        self._recovery_attempted: bool = False
+        self._degraded: bool = False
 
     # ── 生命周期 ─────────────────────────────────
 
@@ -73,13 +75,13 @@ class LogStorage:
         """建表 + 启动后台消费者协程。"""
         try:
             os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-            self._conn = await aiosqlite.connect(self._db_path)
-            self._conn.row_factory = aiosqlite.Row
-            await self._conn.executescript(_LOGS_SCHEMA)
-            for idx_sql in _LOG_INDEXES:
-                await self._conn.execute(idx_sql)
-            await self._conn.commit()
+            try:
+                await self._open_and_prepare()
+            except Exception as exc:
+                if not await self._rebuild_after_corruption(exc):
+                    raise
             logger.info(f"✅ 日志数据库已就绪: {self._db_path}")
+            self._degraded = False
 
             # 清理过期日志
             if settings.LOG_RETENTION_DAYS > 0:
@@ -105,6 +107,78 @@ class LogStorage:
         except Exception as exc:
             logger.error(f"❌ 启动日志存储失败: {exc}")
             return False
+
+    async def _open_and_prepare(self) -> None:
+        self._conn = await aiosqlite.connect(self._db_path)
+        self._conn.row_factory = aiosqlite.Row
+        await self._conn.executescript(_LOGS_SCHEMA)
+        for idx_sql in _LOG_INDEXES:
+            await self._conn.execute(idx_sql)
+        await self._conn.commit()
+
+    async def _rebuild_after_corruption(self, exc: Exception) -> bool:
+        """Quarantine a malformed logs.db and start a fresh one.
+
+        Logs are non-critical operational data. A corrupt store must not take
+        down the app or pin every health check in a retry loop, so rebuild it
+        once and keep the damaged file for offline inspection.
+        """
+        if self._recovery_attempted or not self._is_corruption(exc):
+            return False
+        self._recovery_attempted = True
+        logger.error(
+            "logs.db appears malformed; quarantining it and starting a fresh log store: %s",
+            exc,
+        )
+        if self._conn is not None:
+            try:
+                await self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+        stamp = datetime.now(CHINA_TZ).strftime("%Y%m%d_%H%M%S")
+        corrupt_path = f"{self._db_path}.corrupt.{stamp}"
+        for suffix in ("", "-wal", "-shm"):
+            src = f"{self._db_path}{suffix}"
+            if not os.path.exists(src):
+                continue
+            dst = f"{corrupt_path}{suffix}"
+            try:
+                await asyncio.to_thread(os.replace, src, dst)
+            except OSError:
+                logger.exception("failed to quarantine logs database %s", src)
+                return False
+        try:
+            await self._open_and_prepare()
+        except Exception:
+            logger.exception("failed to recreate logs database after quarantine")
+            return False
+        self._last_error = None
+        self._degraded = False
+        logger.warning("fresh logs database created; damaged copy kept at %s", corrupt_path)
+        return True
+
+    @staticmethod
+    def _is_corruption(exc: Exception) -> bool:
+        return LogStorage.is_corruption_error(exc)
+
+    @staticmethod
+    def is_corruption_error(exc: Exception) -> bool:
+        """Whether an exception indicates a damaged SQLite log store."""
+        message = str(exc).lower()
+        return "malformed" in message or "not a database" in message
+
+    async def _recover_once(self, exc: Exception) -> bool:
+        """Handle corruption discovered after startup without retrying forever."""
+        if not self._is_corruption(exc):
+            return False
+        recovered = await self._rebuild_after_corruption(exc)
+        if not recovered:
+            self._degraded = True
+            self._last_error = str(exc)
+            logger.warning("log database is degraded; persistent log writes are unavailable")
+        return recovered
 
     async def stop(self) -> None:
         """停止消费者并 flush 残余日志。"""
@@ -194,7 +268,8 @@ class LogStorage:
             self._write_total += len(batch)
         except Exception as exc:
             self._last_error = str(exc)
-            logger.error(f"批量写入日志失败: {exc}")
+            if not await self._recover_once(exc):
+                logger.error(f"批量写入日志失败: {exc}")
 
     async def _flush_remaining(self) -> None:
         """stop 时把队列里所有记录写完。"""
@@ -229,14 +304,27 @@ class LogStorage:
             since_epoch=since_epoch,
             until_epoch=until_epoch,
         )
+        try:
+            return await self._query_rows(where, params, limit=limit, offset=offset)
+        except Exception as exc:
+            if not await self._recover_once(exc):
+                raise
+            return await self._query_rows(where, params, limit=limit, offset=offset)
 
-        # 总数
+    async def _query_rows(
+        self,
+        where: str,
+        params: list,
+        *,
+        limit: int,
+        offset: int,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        assert self._conn is not None
         count_sql = f"SELECT COUNT(*) AS c FROM logs{where}"
         async with self._conn.execute(count_sql, params) as cur:
             row = await cur.fetchone()
         total = int(row["c"]) if row else 0
 
-        # 分页
         sql = (
             "SELECT id, ts, ts_epoch, level, logger, message, exception "
             f"FROM logs{where} "
@@ -266,6 +354,16 @@ class LogStorage:
         """返回可选的 level / logger 维度及各自计数。"""
         assert self._conn is not None
         result: Dict[str, List[Dict[str, Any]]] = {"levels": [], "loggers": []}
+        try:
+            return await self._facets_rows()
+        except Exception as exc:
+            if not await self._recover_once(exc):
+                raise
+            return await self._facets_rows()
+
+    async def _facets_rows(self) -> Dict[str, List[Dict[str, Any]]]:
+        assert self._conn is not None
+        result: Dict[str, List[Dict[str, Any]]] = {"levels": [], "loggers": []}
         async with self._conn.execute(
             "SELECT level, COUNT(*) AS c FROM logs GROUP BY level ORDER BY c DESC"
         ) as cur:
@@ -281,6 +379,15 @@ class LogStorage:
         return result
 
     async def stats(self) -> Dict[str, Any]:
+        assert self._conn is not None
+        try:
+            return await self._stats_rows()
+        except Exception as exc:
+            if not await self._recover_once(exc):
+                raise
+            return await self._stats_rows()
+
+    async def _stats_rows(self) -> Dict[str, Any]:
         assert self._conn is not None
         async with self._conn.execute("SELECT COUNT(*) AS c FROM logs") as cur:
             row = await cur.fetchone()
@@ -314,6 +421,7 @@ class LogStorage:
             "queue_dropped": self._dropped,
             "queue_size": self._queue.qsize(),
             "last_error": self._last_error,
+            "degraded": self._degraded,
             "retention_days": settings.LOG_RETENTION_DAYS,
         }
 

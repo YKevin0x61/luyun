@@ -192,11 +192,23 @@ async def hold_portions(orders: OrdersPort, payload: Dict) -> Dict[str, Any]:
         raise ValueError("订单行不能为空")
 
     rows_by_id = await _load_rows(orders, order_ids)
-    pending_pool = await orders.get_orders(dish_status="待出餐", limit=-1)
     taken: Set[str] = set(order_ids)
     conflicts: List[Dict[str, str]] = []
     direct_holds: List[str] = []
     substitutes: List[Tuple[str, str]] = []
+
+    # 候选替补池按菜品懒加载。老实现是一次性取回全部「待出餐」历史
+    # （线上 17.3 万行 / 890ms / 单次请求约 500MB 瞬时内存），而
+    # _pick_substitute 本来就只按 `dish_name` 精确匹配，所以改成每个菜品
+    # 走一条 idx_orders_dish_name 索引查询，候选集完全一致。
+    pending_pools: Dict[str, List[Dict]] = {}
+
+    async def _candidates(dish_name: str) -> List[Dict]:
+        if dish_name not in pending_pools:
+            pending_pools[dish_name] = await orders.get_orders(
+                dish_status="待出餐", dish_name=dish_name, limit=-1
+            )
+        return pending_pools[dish_name]
 
     unloaded: List[str] = []
     steaming: List[str] = []
@@ -227,7 +239,9 @@ async def hold_portions(orders: OrdersPort, payload: Dict) -> Dict[str, Any]:
 
     for oid in steaming:
         target = rows_by_id[oid]
-        sub = _pick_substitute(target, pending_pool, taken_ids=taken)
+        dish_name = target.get("dish_name") or ""
+        pool = await _candidates(dish_name)
+        sub = _pick_substitute(target, pool, taken_ids=taken)
         if not sub:
             conflicts.append(_conflict(oid, "在蒸且无替补"))
             continue
@@ -235,7 +249,7 @@ async def hold_portions(orders: OrdersPort, payload: Dict) -> Dict[str, Any]:
         taken.add(sub_id)
         substitutes.append((oid, sub_id))
         # Substitute leaves the awaiting pool (now 在蒸).
-        pending_pool = [row for row in pending_pool if line_id(row) != sub_id]
+        pending_pools[dish_name] = [row for row in pool if line_id(row) != sub_id]
 
     if not direct_holds and not substitutes:
         _raise_if_all_failed(conflicts, 0, "等叫")
