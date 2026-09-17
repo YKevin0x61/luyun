@@ -28,6 +28,9 @@ deploy/runtime/
 
 # ===== 数据 / 运行时状态 =====
 data/*
+# 冷备归档落点（COLD_BACKUP_DIR，默认仓库根下的 backups/）。归档是明文 tar，
+# 内含凭据密文与 .cred_key 密钥，绝不能进版本库。
+backups/
 # Optional: keep an empty placeholder in clones (uncomment + add the file)
 # !data/.gitkeep
 *.db

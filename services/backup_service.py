@@ -19,6 +19,7 @@ import re
 import shutil
 import sqlite3
 import struct
+import subprocess
 import tarfile
 import tempfile
 from datetime import datetime
@@ -71,6 +72,9 @@ PROVENANCE_LABELS = {
 CONTENT_CREDENTIALS = "credentials"
 CONTENT_RUNTIME = "runtime"
 CONTENT_APP_DB = "app_db"
+# PostgreSQL 后端下业务数据是整库 pg_dump 出来的，不是可挂载的 app.db 文件。
+# 单独一个类别，避免恢复流程把 .pgdump 当成 SQLite 文件去 copy。
+CONTENT_APP_PG = "app_pg"
 CONTENT_RECIPES = "recipes_db"
 CONTENT_STANDARD_PHOTOS = "standard_photos"
 CONTENT_OTHER_PHOTOS = "other_photos"
@@ -78,6 +82,7 @@ CONTENT_LABELS = {
     CONTENT_CREDENTIALS: "凭据",
     CONTENT_RUNTIME: "运行配置",
     CONTENT_APP_DB: "业务数据",
+    CONTENT_APP_PG: "业务数据 (PostgreSQL)",
     CONTENT_RECIPES: "配方数据",
     CONTENT_STANDARD_PHOTOS: "标准图",
     CONTENT_OTHER_PHOTOS: "其它照片",
@@ -786,6 +791,83 @@ def _sqlite_backup_sync(src_path: str, dst_path: str) -> None:
         src.close()
 
 
+def is_postgres_backend() -> bool:
+    return (getattr(settings, "DATABASE_BACKEND", "sqlite") or "sqlite").lower() == "postgres"
+
+
+def _pg_dump_sync(dst_path: str) -> None:
+    """用 pg_dump 导出整库（custom format）。
+
+    选 custom format 而不是 plain SQL：它能配合 ``pg_restore`` 做单表/选择性恢复，
+    也自带压缩。``--no-owner --no-acl`` 让备份在换用户/换机器的恢复场景下不报权限错。
+    """
+    dsn = os.environ.get("LUYUN_POSTGRES_DSN") or getattr(settings, "POSTGRES_DSN", "")
+    if not dsn:
+        raise RuntimeError("POSTGRES_DSN 未配置，无法备份 PostgreSQL")
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    if os.path.exists(dst_path):
+        os.unlink(dst_path)
+    cmd = [
+        "pg_dump",
+        "--format=custom",
+        "--no-owner",
+        "--no-acl",
+        "--file",
+        dst_path,
+        dsn,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "未找到 pg_dump —— PostgreSQL 后端需要安装 postgresql-client"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("pg_dump 超时（1800s）") from exc
+    if proc.returncode != 0:
+        # 别把 stderr 原样抛出：连接串可能含密码
+        raise RuntimeError(f"pg_dump 失败（退出码 {proc.returncode}）")
+
+
+def _scan_capture_members(root: Path) -> Dict[str, Any]:
+    """PG 后端下的照片收集：直接扫目录，不查库。
+
+    SQLite 后端靠 ``classify_hygiene_capture_ids`` 读库里的引用关系来分类；
+    PG 下没有必要为此再连一次库——照片全部落在同一个目录里，恢复也是整目录
+    写回。多带上几个孤儿文件（库里已删、磁盘未清）比漏带业务照片安全得多。
+    """
+    members: Dict[str, bytes] = {}
+    kind_dir = PHOTO_MEMBER_DIRS[PHOTO_OTHER]
+    total_bytes = 0
+    if root.is_dir():
+        for entry in sorted(root.iterdir()):
+            if not entry.is_file():
+                continue
+            try:
+                data = entry.read_bytes()
+            except OSError:
+                continue
+            members[f"{kind_dir}/{entry.name}"] = data
+            total_bytes += len(data)
+    digest = hashlib.sha256()
+    for name in sorted(members):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(members[name])
+    return {
+        "members": members,
+        "manifest": {
+            PHOTO_STANDARD: {"count": 0, "bytes": 0},
+            PHOTO_OTHER: {
+                "count": len(members),
+                "bytes": total_bytes,
+                "sha256": digest.hexdigest(),
+            },
+        },
+        "missing": {PHOTO_STANDARD: [], PHOTO_OTHER: []},
+    }
+
+
 def _link_or_copy(src: Path, dst: Path) -> None:
     """照片文件内容不可变，优先硬链接复用；失败时退回复制。"""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -819,6 +901,28 @@ def _write_snapshot_photos(
         entry = dict(collected["manifest"].get(kind) or {})
         entry["written"] = written
         # 快照与归档不同：文件以硬链接落盘，清单只记录数量/字节/缺项
+        manifest[kind] = entry
+    return {
+        "manifest": manifest,
+        "missing": {k: v for k, v in collected["missing"].items() if v},
+    }
+
+
+def _write_snapshot_photos_pg(snap_dir: Path) -> Dict[str, Any]:
+    """PG 后端的照片入快照：扫目录，不查库（理由见 _scan_capture_members）。"""
+    root = get_hygiene_capture_root()
+    collected = _scan_capture_members(root)
+    manifest: Dict[str, Any] = {}
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+        prefix = PHOTO_MEMBER_DIRS[kind] + "/"
+        written = 0
+        for name in collected["members"]:
+            if not name.startswith(prefix):
+                continue
+            _link_or_copy(root / name[len(prefix):], snap_dir / name)
+            written += 1
+        entry = dict(collected["manifest"].get(kind) or {})
+        entry["written"] = written
         manifest[kind] = entry
     return {
         "manifest": manifest,
@@ -868,14 +972,21 @@ def create_restore_snapshot(
     snap_dir.mkdir(parents=True, exist_ok=True)
 
     contents: List[str] = []
-    if os.path.isfile(app_db_path):
+    pg_backend = is_postgres_backend()
+    if pg_backend:
+        # PG：整库 pg_dump。recipe 表也在同一个库里，因此不再单独导出 recipes.db。
+        _pg_dump_sync(str(snap_dir / "app.pgdump"))
+        contents.append(CONTENT_APP_PG)
+        contents.append(CONTENT_RUNTIME)
+    elif os.path.isfile(app_db_path):
         _sqlite_backup_sync(app_db_path, str(snap_dir / "app.db"))
         contents.append(CONTENT_APP_DB)
         # 运行配置存在 app.db 的 app_settings 表里，随业务数据一并覆盖
         contents.append(CONTENT_RUNTIME)
 
     if (
-        os.path.isfile(recipes_db_path)
+        not pg_backend
+        and os.path.isfile(recipes_db_path)
         and os.path.abspath(recipes_db_path) != os.path.abspath(app_db_path)
     ):
         _sqlite_backup_sync(recipes_db_path, str(snap_dir / "recipes.db"))
@@ -905,7 +1016,10 @@ def create_restore_snapshot(
     }
     consistency: Optional[dict] = None
     if include_photos:
-        photo_info = _write_snapshot_photos(snap_dir, app_db_path=app_db_path)
+        if pg_backend:
+            photo_info = _write_snapshot_photos_pg(snap_dir)
+        else:
+            photo_info = _write_snapshot_photos(snap_dir, app_db_path=app_db_path)
         manifest = photo_info["manifest"]
         for kind, content_key in (
             (PHOTO_STANDARD, CONTENT_STANDARD_PHOTOS),
@@ -921,7 +1035,8 @@ def create_restore_snapshot(
         "provenance": provenance,
         "contents": contents,
         "photos": photo_info["manifest"],
-        "row_counts": key_table_row_counts(app_db_path),
+        # PG 快照是整库 pg_dump，没有逐表对账的恢复路径，留空而不是硬连库统计
+        "row_counts": {} if pg_backend else key_table_row_counts(app_db_path),
         "files": sorted(
             str(p.relative_to(snap_dir))
             for p in snap_dir.rglob("*")
@@ -1105,6 +1220,9 @@ def _infer_snapshot_contents(files: Sequence[str]) -> List[str]:
     if "app.db" in names:
         contents.append(CONTENT_APP_DB)
         contents.append(CONTENT_RUNTIME)
+    if "app.pgdump" in names:
+        contents.append(CONTENT_APP_PG)
+        contents.append(CONTENT_RUNTIME)
     if "recipes.db" in names:
         contents.append(CONTENT_RECIPES)
     if "credentials.enc" in names:
@@ -1226,10 +1344,18 @@ def build_cold_backup_archive(
     out_dir.mkdir(parents=True, exist_ok=True)
     archive_path = out_dir / COLD_ARCHIVE_NAME
 
-    fd, tmp_db = tempfile.mkstemp(suffix=".db", prefix="luyun-cold-")
+    pg_backend = is_postgres_backend()
+    member_name = "app.pgdump" if pg_backend else "app.db"
+    fd, tmp_db = tempfile.mkstemp(
+        suffix=".pgdump" if pg_backend else ".db", prefix="luyun-cold-"
+    )
     os.close(fd)
     try:
-        if os.path.isfile(app_db_path):
+        if pg_backend:
+            _pg_dump_sync(tmp_db)
+            with open(tmp_db, "rb") as handle:
+                app_db_bytes: Optional[bytes] = handle.read()
+        elif os.path.isfile(app_db_path):
             _sqlite_backup_sync(app_db_path, tmp_db)
             with open(tmp_db, "rb") as handle:
                 app_db_bytes: Optional[bytes] = handle.read()
@@ -1241,10 +1367,13 @@ def build_cold_backup_archive(
         except OSError:
             pass
 
-    photo_info = collect_hygiene_photo_members(app_db_path, capture_root)
+    if pg_backend:
+        photo_info = _scan_capture_members(capture_root or get_hygiene_capture_root())
+    else:
+        photo_info = collect_hygiene_photo_members(app_db_path, capture_root)
     members: Dict[str, bytes] = {}
     if app_db_bytes is not None:
-        members["app.db"] = app_db_bytes
+        members[member_name] = app_db_bytes
     if os.path.isfile(cred_file_path):
         with open(cred_file_path, "rb") as handle:
             members["credentials.enc"] = handle.read()
@@ -1259,13 +1388,19 @@ def build_cold_backup_archive(
     for name, data in photo_info["members"].items():
         members[name] = data
 
-    consistency = _cold_consistency(
-        app_db_path, photo_info["manifest"], photo_info["missing"]
+    # PG 的一致性核对要从库里查照片引用，这里不做（备份本身是整库 pg_dump，
+    # 照片按目录全量带走，不存在「库引用了但没备份」的情况）。
+    consistency = (
+        None
+        if pg_backend
+        else _cold_consistency(
+            app_db_path, photo_info["manifest"], photo_info["missing"]
+        )
     )
     raw_contents = [
         content
         for content, present in (
-            (CONTENT_APP_DB, app_db_bytes is not None),
+            (CONTENT_APP_PG if pg_backend else CONTENT_APP_DB, app_db_bytes is not None),
             # 运行配置存在 app.db 的 app_settings 表里，随库快照一并带走
             (CONTENT_RUNTIME, app_db_bytes is not None or runtime_data is not None),
             (CONTENT_CREDENTIALS, "credentials.enc" in members),
@@ -1289,7 +1424,7 @@ def build_cold_backup_archive(
         "contents": raw_contents,
         "contents_labels": [CONTENT_LABELS[c] for c in raw_contents],
         "photos": photo_info["manifest"],
-        "row_counts": key_table_row_counts(app_db_path),
+        "row_counts": {} if pg_backend else key_table_row_counts(app_db_path),
         "photos_missing": {
             k: v for k, v in photo_info["missing"].items() if v
         },

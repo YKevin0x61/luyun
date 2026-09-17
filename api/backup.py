@@ -180,6 +180,16 @@ async def _collect_export_payload(payload: BackupExportIn, db: DatabaseManager) 
 
     app_db_bytes = None
     if payload.include_app_db:
+        if backup_service.is_postgres_backend():
+            # 明确拒绝而不是静默产出空内容：PG 后端的业务数据不是可导出的
+            # SQLite 文件，这里给出手工路径。
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "PostgreSQL 后端不支持从管理后台导出业务数据文件，"
+                    "请用 pg_dump（命令见 migrations/pg/README.md）"
+                ),
+            )
         fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-export-")
         os.close(fd)
         try:
@@ -407,6 +417,17 @@ async def _apply_parsed_backup(
             applied[CONTENT_RUNTIME] = True
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"备份中的运行配置无效：{exc}")
+
+    if apply_app_db and backup_service.is_postgres_backend():
+        # 不静默跳过：PG 快照里是 app.pgdump，用 SQLite 的覆盖/合并路径处理不了，
+        # 静默 pass 会让操作者以为业务数据已恢复。
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "PostgreSQL 后端不支持从管理后台恢复业务数据，"
+                "请用 pg_restore（命令见 migrations/pg/README.md）"
+            ),
+        )
 
     if apply_app_db and parsed["app_db_bytes"] is not None:
         try:
