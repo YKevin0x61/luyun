@@ -180,6 +180,21 @@ class EmployeeAccounts:
             return None
         if not _as_bool(mapping["approved"]) or _as_bool(mapping["disabled"]):
             return None
+        if password_hash.needs_rehash(mapping["password_hash"]):
+            # legacy 无前缀哈希：验证通过后按现行格式重写，下次登录只需一次
+            # bcrypt。老密码可能不满足当前长度策略，此时放弃升级但不阻断登录。
+            # 与下面的 session 写入共用同一次 commit。
+            try:
+                upgraded = await password_hash.hash_password_async(password)
+            except ValueError as exc:
+                logger.warning(
+                    "hygiene legacy hash upgrade skipped id=%s: %s", mapping["id"], exc
+                )
+            else:
+                await self._conn.execute(
+                    "UPDATE hygiene_employees SET password_hash = ?, updated_at = ? WHERE id = ?",
+                    (upgraded, self._now_iso(), int(mapping["id"])),
+                )
         session_id = secrets.token_urlsafe(32)
         now_dt = self._now_dt()
         expires_dt = now_dt + timedelta(hours=settings.SESSION_TTL_HOURS)

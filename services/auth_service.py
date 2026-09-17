@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, Tuple
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.password_hash import hash_password_async as _hash_password
+from services.password_hash import needs_rehash as _needs_rehash
 from services.password_hash import validate_password as _validate_password
 from services.password_hash import verify_password_async as _verify_password
 
@@ -68,6 +69,30 @@ async def init_user(username: str, password: str) -> None:
     logger.info("Auth initialized for user=%s", username.strip())
 
 
+async def _upgrade_legacy_hash(username: str, password: str) -> None:
+    """legacy 无前缀哈希验证通过后按现行格式重写。
+
+    重写失败不影响本次登录——它只是让下次验证少跑一次 bcrypt。
+    """
+    try:
+        new_hash = await _hash_password(password)
+        async with _conn().cursor() as cursor:
+            await cursor.execute(
+                "UPDATE admin_user SET password_hash = ?, updated_at = ? "
+                "WHERE id = 1 AND username = ?",
+                (new_hash, _now_iso(), username),
+            )
+        await _conn().commit()
+        logger.info("Auth upgraded legacy password hash for user=%s", username)
+    except Exception as exc:
+        logger.warning("Auth legacy hash upgrade skipped for user=%s: %s", username, exc)
+        # 全进程共用一条连接，失败后必须回滚，否则未提交事务会污染后续请求。
+        try:
+            await _conn().rollback()
+        except Exception:
+            logger.debug("Auth legacy hash upgrade rollback failed", exc_info=True)
+
+
 async def authenticate(username: str, password: str) -> Optional[Dict[str, Any]]:
     async with _conn().cursor() as cursor:
         await cursor.execute(
@@ -77,8 +102,11 @@ async def authenticate(username: str, password: str) -> Optional[Dict[str, Any]]
         row = await cursor.fetchone()
     if not row:
         return None
-    if not await _verify_password(password, row["password_hash"]):
+    stored_hash = row["password_hash"]
+    if not await _verify_password(password, stored_hash):
         return None
+    if _needs_rehash(stored_hash):
+        await _upgrade_legacy_hash(row["username"], password)
     return {"username": row["username"]}
 
 
