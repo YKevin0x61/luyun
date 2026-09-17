@@ -25,6 +25,7 @@ Day-to-day entry scripts live here. One-off migration, debug, and smoke utilitie
 |--------|---------|
 | `consolidate_dbs.py` (+ `consolidate_dbs.rollback.md`) | One-time multi-db → `app.db` migration |
 | `sqlite_to_pg_schema.py` | Generate PostgreSQL DDL (with `tenant_id`) from the SQLite schema → `migrations/pg/` |
+| `migrate_sqlite_to_postgres.py` | One-time SQLite `app.db` → PostgreSQL data migration (`--dry-run` first; runbook in `migrations/pg/README.md`) |
 | `mitm_pos_login_filter.py` | mitmproxy addon for POS login capture |
 | `test_pos_auth.py` | POS auth smoke (A/B/C) |
 | `smoke_public_pages.py` | Playwright public-page smoke |

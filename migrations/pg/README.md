@@ -57,6 +57,38 @@ END $$;
 
 `0001_initial_schema.sql` 只对 `tenants` 做了 setval——建表时其余表都是空的。
 
+## 停机迁移流程
+
+前置：目标 PG 库已应用 `0001_initial_schema.sql`；已确认可停机（多店前提下的
+一次性切换）。
+
+```bash
+# 1. 停应用（迁移期间源库必须静止，否则会漏掉增量）
+systemctl stop luyun          # 或 docker compose -f deploy/docker-compose.yml stop luyun
+
+# 2. 备份源库——回滚靠它
+sqlite3 data/app.db ".backup 'backups/pre-pg-migration.db'"
+
+# 3. 预演：只统计两侧行数与依赖顺序，不写库
+.venv/bin/python scripts/archive/migrate_sqlite_to_postgres.py --dry-run
+
+# 4. 执行（每表 TRUNCATE + COPY，可重复执行；结束后自动重置 identity 序列）
+.venv/bin/python scripts/archive/migrate_sqlite_to_postgres.py --apply
+
+# 5. 切换后端并启动
+DATABASE_BACKEND=postgres .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+**冒烟清单**：`/api/healthz` 200 → 后台订单列表有数据 → KDS 厨房屏正常 →
+admin 数据浏览器能翻页与编辑一行 → 用原密码能登录后台。
+
+**回滚**：把 `DATABASE_BACKEND` 改回 `sqlite` 重启即可。迁移脚本对源库全程只读
+（`mode=ro`），源库未被改动，所以回滚没有数据损失。观察期结束前不要删源库。
+
+迁移脚本本身**不做增量同步**——它是停机窗口内的一次性全量搬运。若将来需要
+零停机，要另做双写或逻辑复制，不在此脚本范围内。
+
+
 ## 已知取舍
 
 - **时间戳保持 `TEXT`**（ISO 字符串）、**金额保持 `DOUBLE PRECISION`**，以兼容
