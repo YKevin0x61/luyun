@@ -132,7 +132,8 @@ class _AggregationMixin:
                 await cursor.execute(
                     f"""SELECT id, business_flow_id, table_number, dish_name, quantity,
                                order_time, station, priority, price, category, updated_at
-                        FROM orders WHERE {where} ORDER BY order_time DESC LIMIT ? OFFSET ?""",
+                        FROM orders WHERE {where}
+                        ORDER BY order_time DESC, id DESC LIMIT ? OFFSET ?""",
                     params + [limit, skip]
                 )
                 rows = await cursor.fetchall()
@@ -349,7 +350,8 @@ class _AggregationMixin:
                                AVG(price) as avg_price, MIN(order_time) as earliest_order
                         FROM orders WHERE order_time >= ?{station_clause}
                         GROUP BY dish_name, station
-                        ORDER BY total_quantity DESC, order_count DESC LIMIT ?""",
+                        ORDER BY total_quantity DESC, order_count DESC, dish_name ASC
+                        LIMIT ?""",
                     params + [limit_n]
                 )
                 rows = await cursor.fetchall()

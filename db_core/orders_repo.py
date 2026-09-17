@@ -94,7 +94,8 @@ class _OrdersRepoMixin:
                        dish_status, ready_time, steamer_id, port_index,
                        stack_order, loaded_at, source, is_hold, is_rushed,
                        fired_at, notes, updated_at
-                FROM orders WHERE {where} ORDER BY order_time DESC
+                FROM orders WHERE {where}
+                ORDER BY order_time DESC, id DESC
             """
             if limit > 0:
                 sql += f" LIMIT {limit}"
@@ -661,7 +662,8 @@ class _OrdersRepoMixin:
             tdb = self.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
-                    f"SELECT * FROM orders WHERE {where} ORDER BY order_time DESC LIMIT ?",
+                    f"SELECT * FROM orders WHERE {where} "
+                    f"ORDER BY order_time DESC, id DESC LIMIT ?",
                     params + [limit]
                 )
                 rows = await cursor.fetchall()
@@ -711,8 +713,12 @@ class _OrdersRepoMixin:
         try:
             tdb = self.table("orders")
             async with tdb.conn.cursor() as cursor:
+                # 用 GROUP BY + MAX(id) 而不是 DISTINCT + ORDER BY rowid：
+                # PG 不允许 ORDER BY 引用不在 SELECT DISTINCT 列表中的列，
+                # 这个写法在 SQLite 与 PG 下语义一致（按最近出现排序去重）。
                 await cursor.execute(
-                    "SELECT DISTINCT dish_name FROM orders ORDER BY rowid DESC LIMIT ?",
+                    "SELECT dish_name FROM orders GROUP BY dish_name "
+                    "ORDER BY MAX(id) DESC LIMIT ?",
                     (limit,),
                 )
                 rows = await cursor.fetchall()
