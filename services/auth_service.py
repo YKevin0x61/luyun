@@ -12,9 +12,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
-from services.password_hash import hash_password as _hash_password
+from services.password_hash import hash_password_async as _hash_password
 from services.password_hash import validate_password as _validate_password
-from services.password_hash import verify_password as _verify_password
+from services.password_hash import verify_password_async as _verify_password
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ async def init_user(username: str, password: str) -> None:
         raise ValueError("already_initialized")
     _validate_password(password)
     now = _now_iso()
-    password_hash = _hash_password(password)
+    password_hash = await _hash_password(password)
     async with _conn().cursor() as cursor:
         await cursor.execute(
             """INSERT INTO admin_user (id, username, password_hash, created_at, updated_at)
@@ -77,7 +77,7 @@ async def authenticate(username: str, password: str) -> Optional[Dict[str, Any]]
         row = await cursor.fetchone()
     if not row:
         return None
-    if not _verify_password(password, row["password_hash"]):
+    if not await _verify_password(password, row["password_hash"]):
         return None
     return {"username": row["username"]}
 
@@ -91,10 +91,11 @@ async def change_password(old_password: str, new_password: str) -> None:
         raise ValueError("invalid_password")
     _validate_password(new_password)
     now = _now_iso()
+    new_hash = await _hash_password(new_password)
     async with _conn().cursor() as cursor:
         await cursor.execute(
             "UPDATE admin_user SET password_hash = ?, updated_at = ? WHERE id = 1",
-            (_hash_password(new_password), now),
+            (new_hash, now),
         )
     await _conn().commit()
 

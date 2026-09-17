@@ -150,7 +150,7 @@ class EmployeeAccounts:
         if existing is not None:
             raise EmployeeAccountsError("duplicate_phone", "duplicate_phone")
         now = self._now_iso()
-        hashed = password_hash.hash_password(password)
+        hashed = await password_hash.hash_password_async(password)
         try:
             cur = await self._conn.execute(
                 """INSERT INTO hygiene_employees
@@ -176,7 +176,7 @@ class EmployeeAccounts:
         if row is None:
             return None
         mapping = dict(row)
-        if not password_hash.verify_password(password, mapping["password_hash"]):
+        if not await password_hash.verify_password_async(password, mapping["password_hash"]):
             return None
         if not _as_bool(mapping["approved"]) or _as_bool(mapping["disabled"]):
             return None
@@ -351,13 +351,13 @@ class EmployeeAccounts:
         row = await cur.fetchone()
         if row is None:
             raise EmployeeAccountsError("employee_not_found", "employee_not_found")
-        if not password_hash.verify_password(current_password, dict(row)["password_hash"]):
+        if not await password_hash.verify_password_async(current_password, dict(row)["password_hash"]):
             raise EmployeeAccountsError(
                 "invalid_current_password",
                 "invalid_current_password",
             )
         password_hash.validate_password(new_password)
-        hashed = password_hash.hash_password(new_password)
+        hashed = await password_hash.hash_password_async(new_password)
         await self._conn.execute(
             "UPDATE hygiene_employees SET password_hash = ?, updated_at = ? WHERE id = ?",
             (hashed, self._now_iso(), int(employee_id)),

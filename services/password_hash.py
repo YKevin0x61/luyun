@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
 import bcrypt
@@ -41,3 +42,18 @@ def verify_password(password: str, stored_hash: str) -> bool:
         except (ValueError, TypeError):
             continue
     return False
+
+
+# bcrypt(rounds=12) 是纯 CPU 同步调用，实测单次约 168ms。本项目强制单 worker
+# 单事件循环部署（见 deploy/luyun.service），在协程里直接调用会把整个后端冻结
+# 同样时长——KDS 心跳、WS 广播、爬虫循环一起卡住。凡在 async 路径上使用，一律
+# 走下面两个包装，把 CPU 计算挪到线程池。
+
+async def hash_password_async(password: str) -> str:
+    """``hash_password`` 的异步包装；``ValueError`` 会原样透传。"""
+    return await asyncio.to_thread(hash_password, password)
+
+
+async def verify_password_async(password: str, stored_hash: str) -> bool:
+    """``verify_password`` 的异步包装，理由同 ``hash_password_async``。"""
+    return await asyncio.to_thread(verify_password, password, stored_hash)

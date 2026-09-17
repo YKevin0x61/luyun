@@ -43,6 +43,26 @@ logger = logging.getLogger(__name__)
 _ADMIN_WRITE = [Depends(verify_admin_token)]
 router = APIRouter(prefix="/api/orders", tags=["订单管理"])
 
+# HTTP 边界的单次订单返回硬上限。实测 18.4 万行的一次响应会让事件循环连续
+# 占用约 5 秒（SQL 0.8s + 逐行标注 0.3s + 序列化 0.5s + JSON 编码），而这期间
+# 整个后端被冻结——KDS 心跳、WS 广播、其他所有请求一起排队（实测并发
+# /api/healthz 从 1ms 恶化到 5027ms）。limit<=0 原本表示「无限制」，等于把这
+# 条路径暴露给任何宽时间范围查询，因此在 HTTP 层统一钳制。
+# 内部调用方直接走 db.orders.get_orders，不受此限。
+MAX_ORDERS_LIMIT = 5000
+
+
+def _clamp_orders_limit(limit: int) -> int:
+    """把 limit 收进 [1, MAX_ORDERS_LIMIT]；limit<=0（无限制）按上限处理。"""
+    if limit <= 0 or limit > MAX_ORDERS_LIMIT:
+        logger.warning(
+            "订单查询 limit=%s 超出安全范围，已钳制为 %s（防止单次响应阻塞事件循环）",
+            limit,
+            MAX_ORDERS_LIMIT,
+        )
+        return MAX_ORDERS_LIMIT
+    return limit
+
 
 def _kitchen_http(exc: Exception) -> HTTPException:
     if isinstance(exc, ConflictError):
@@ -68,7 +88,10 @@ async def get_orders(
     table_number: Optional[str] = Query(None, description="桌号筛选"),
     start_time: Optional[str] = Query(None, description="开始时间 (ISO格式)"),
     end_time: Optional[str] = Query(None, description="结束时间 (ISO格式)"),
-    limit: int = Query(10000, description="限制返回数量，设置为-1表示无限制"),
+    limit: int = Query(
+        MAX_ORDERS_LIMIT,
+        description=f"限制返回数量，上限 {MAX_ORDERS_LIMIT}；limit<=0 按上限处理",
+    ),
     dish_status: Optional[str] = Query(None, description="KDS控菜状态筛选"),
     db: DatabaseManager = Depends(get_db)
 ):
@@ -111,13 +134,14 @@ async def get_orders(
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=f"无效的结束时间格式: {e}")
 
+        applied_limit = _clamp_orders_limit(limit)
         orders = await db.orders.get_orders(
             station=station,
             table_number=table_number,
             start_time=parsed_start_time,
             end_time=parsed_end_time,
             dish_status=dish_status,
-            limit=limit
+            limit=applied_limit
         )
 
         stamped = []
@@ -132,6 +156,7 @@ async def get_orders(
             "success": True,
             "data": stamped,
             "count": len(orders),
+            "truncated": len(orders) >= applied_limit,
             "timestamp": datetime.now(CHINA_TZ).isoformat()
         }
 
@@ -165,7 +190,7 @@ async def get_table_orders(
             table_number=table_number,
             start_time=parsed_start,
             end_time=parsed_end,
-            limit=-1
+            limit=_clamp_orders_limit(-1)
         )
         return orders
     except Exception as e:
@@ -248,7 +273,7 @@ async def get_urgent_orders(
             table_number=None,
             start_time=start,
             end_time=end,
-            limit=-1
+            limit=_clamp_orders_limit(-1)
         )
 
         urgent_orders = []
