@@ -292,9 +292,32 @@ class UpdatePreflightCatalogueFailureTest(unittest.TestCase):
         self.assertEqual(result.releases, [])
         self.assertIsNone(result.latest_tag)
         self.assertFalse(result.update_available)
+        # 目录没读到 ≠ 已是最新：payload 必须能区分，否则后台会报「已是最新正式发行版」
+        self.assertFalse(result.catalogue_ok)
         self.assertFalse(pf.healthy_runtime)
         self.assertFalse(pf.apply_allowed)
         self.assertFalse(_check_map(pf)["credentials"].ok)
+
+    def test_catalogue_ok_true_on_a_successful_read(self):
+        class OkGitHub:
+            def list_releases(self):
+                return []
+
+            def get_tag_commit(self, tag: str):
+                return None
+
+        result = ReleaseUpdate(
+            installed=FakeInstalled(
+                InstalledIdentity(tag="v0.1.0", degraded=False, reason=None, commit="abc")
+            ),
+            github=OkGitHub(),
+            app_version="0.1.0",
+            job_store=FakeJobStore(),
+            oneshot=FakeOneshot(),
+            preflight_env=FakePreflightEnv(),
+        ).version_check()
+
+        self.assertTrue(result.catalogue_ok)
 
 
 class UpdatePreflightApplyTest(unittest.TestCase):

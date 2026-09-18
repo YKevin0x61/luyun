@@ -775,6 +775,16 @@ def get_health_cache() -> Optional[dict]:
     return _health_cache
 
 
+def invalidate_health_cache() -> None:
+    """让下一次读取重算备份健康。
+
+    导出、导入恢复与快照回滚都会新增/替换备份点，而 GET /points 与 /health 默认
+    返回进程内缓存；不失效的话页面会拿着旧结论（例如「还没有可用于恢复的备份」）
+    和刚刷出来的列表自相矛盾。只清缓存、不立刻重算，避免写请求里做一次全量扫描。
+    """
+    set_health_cache(None)
+
+
 def refresh_backup_health() -> dict:
     health = compute_backup_health()
     set_health_cache(health)

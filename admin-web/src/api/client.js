@@ -104,7 +104,10 @@ function upload(path, formData, onProgress) {
       }
       // 413 由反向代理/CDN 返回，响应体通常是 HTML 而非 JSON（data 为 null），
       // 给出可操作的提示而不是笼统的「上传失败」。
-      let message = data && data.detail
+      // detail 可能是字符串（FastAPI 默认）或对象（备份恢复用 reason/message/missing
+      // 表达结构性失败）；对象要取 message，并把 detail 原样挂到 err 上供调用方分派。
+      const detail = data ? data.detail : null
+      let message = typeof detail === 'string' ? detail : detail?.message
       if (!message) {
         message = xhr.status === 413
           ? '文件过大，超过服务器上传上限（413）。请调大反向代理 client_max_body_size / CDN 上传上限后重试'
@@ -112,6 +115,7 @@ function upload(path, formData, onProgress) {
       }
       const err = new Error(message)
       err.status = xhr.status
+      if (detail !== undefined) err.detail = detail
       reject(err)
     }
 

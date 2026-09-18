@@ -286,6 +286,8 @@ async def export_backup(
         payload.include_standard_photos,
         payload.include_other_photos,
     )
+    # 本机新增了一个导出备份点：让健康结论下次读取时重算，别和列表打架。
+    backup_points.invalidate_health_cache()
 
     return StreamingResponse(
         iter([blob]),
@@ -429,6 +431,9 @@ async def _apply_parsed_backup(
             ),
         )
 
+    # 合并模式的逐表报告：失败行数会随响应带出，前端据此提示「有 N 行没恢复成功」。
+    merge_reports: Dict[str, dict] = {}
+
     if apply_app_db and parsed["app_db_bytes"] is not None:
         try:
             if mode == "overwrite":
@@ -436,7 +441,7 @@ async def _apply_parsed_backup(
                     db, parsed["app_db_bytes"]
                 )
             else:
-                await backup_service.merge_app_db_from_bytes(
+                merge_reports["app_db"] = await backup_service.merge_app_db_from_bytes(
                     db, parsed["app_db_bytes"]
                 )
             applied[CONTENT_APP_DB] = True
@@ -455,7 +460,7 @@ async def _apply_parsed_backup(
                     recipe_store, parsed["recipes_db_bytes"]
                 )
             else:
-                await backup_service.merge_recipes_from_bytes(
+                merge_reports["recipes_db"] = await backup_service.merge_recipes_from_bytes(
                     recipe_store, parsed["recipes_db_bytes"]
                 )
             applied[CONTENT_RECIPES] = True
@@ -493,6 +498,11 @@ async def _apply_parsed_backup(
         await _notify_scraper_reload_runtime(db)
 
     session_invalidated = applied[CONTENT_APP_DB] or applied[CONTENT_CREDENTIALS]
+    merge_failed_rows = sum(
+        int(report.get("total_failed") or 0) for report in merge_reports.values()
+    )
+    if merge_failed_rows:
+        logger.warning("📥 [审计] 合并导入有 %s 行未写入", merge_failed_rows)
     return {
         "success": True,
         "mode": mode,
@@ -504,6 +514,8 @@ async def _apply_parsed_backup(
         "photo_consistency": photo_consistency,
         "snapshot_ts": snapshot_ts,
         "session_invalidated": session_invalidated,
+        "merge_failed_rows": merge_failed_rows,
+        "merge_reports": merge_reports,
     }
 
 
@@ -575,12 +587,14 @@ async def import_backup_apply(
         raise HTTPException(status_code=400, detail="mode 必须是 merge 或 overwrite")
 
     backup_import_staging.cleanup_expired_staging()
+    # 先读取、成功后再丢弃：photo_mismatch 409 时前端会带着 force 重试同一个
+    # import_token，提前删暂存会让那次重试必然 404，强制继续这条安全阀就走不通。
     try:
-        parsed = backup_import_staging.consume_staging(import_token, session_id)
+        parsed = backup_import_staging.load_parsed_from_staging(import_token, session_id)
     except (FileNotFoundError, PermissionError, TimeoutError) as exc:
         raise _staging_http_error(exc) from exc
 
-    return await _apply_parsed_backup(
+    result = await _apply_parsed_backup(
         parsed,
         mode=mode,
         apply_credentials=apply_credentials,
@@ -592,6 +606,10 @@ async def import_backup_apply(
         force=force,
         db=db,
     )
+    backup_import_staging.discard_staging(import_token)
+    # 恢复会写出一份前置快照备份点：健康结论需要重算。
+    backup_points.invalidate_health_cache()
+    return result
 
 
 @router.get("/snapshots")
@@ -703,6 +721,8 @@ async def rollback_snapshot(
     )
     await _notify_scraper_reload()
     await _notify_scraper_reload_runtime(db)
+    # 回滚本身会新建一份前置快照备份点：健康结论需要重算。
+    backup_points.invalidate_health_cache()
 
     return {
         "success": True,

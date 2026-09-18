@@ -228,9 +228,22 @@ class ApplyUpdateTest(unittest.TestCase):
         self.assertEqual(result.job.stage, "queued")
         self.assertEqual(result.job.target_tag, "v0.2.0")
         self.assertEqual(result.job.previous_ref, "v0.1.0")
+        self.assertEqual(result.job.previous_tag, "v0.1.0")
         self.assertTrue(oneshot.started)
         self.assertEqual(store.state.stage, "queued")
         self.assertEqual(store.state.target_tag, "v0.2.0")
+
+    def test_apply_without_tag_identity_keeps_ref_but_no_rollback_target(self):
+        """只有 commit 身份时不可回退：apply 只收正式 tag，previous_tag 必须为空。"""
+        ru, _, oneshot = _build(tag=None)
+
+        result = ru.apply("v0.2.0", peak_override=True)
+
+        self.assertTrue(result.accepted)
+        assert result.job is not None
+        self.assertEqual(result.job.previous_ref, "abc")
+        self.assertIsNone(result.job.previous_tag)
+        self.assertTrue(oneshot.started)
 
     def test_apply_rejected_during_peak_hours_without_override(self):
         ru, store, oneshot = _build(peak=FakePeak(True))
@@ -385,6 +398,51 @@ class ApplyUpdateTest(unittest.TestCase):
 
         self.assertEqual(status.stage, "restarting")
         self.assertIn("数据库未连接", status.health_detail or "")
+
+    def test_confirm_health_stays_restarting_before_identity_switches(self):
+        """宽限期内身份还没变成目标 tag：继续等，不提前下结论。"""
+        store = FakeJobStore(
+            UpdateJobState(
+                stage="restarting",
+                target_tag="v0.5.2",
+                log_path="data/update_job.log",
+                restart_requested_at="2099-01-01T00:00:00+08:00",
+            )
+        )
+        ru, _, _ = _build(job_store=store, tag=None, readiness=FakeReadiness(ready=True))
+
+        status = asyncio.run(ru.confirm_health(grace_seconds=60))
+
+        self.assertEqual(status.stage, "restarting")
+
+    def test_confirm_health_leaves_unhealthy_when_identity_never_switches(self):
+        """发行包始终没切到目标版本时，宽限期一过必须落终态，不能永久停在 restarting。"""
+        store = FakeJobStore(
+            UpdateJobState(
+                stage="restarting",
+                target_tag="v0.5.2",
+                previous_ref="v0.5.3",
+                log_path="data/update_job.log",
+                restart_requested_at="2026-08-10T12:00:00+08:00",
+            )
+        )
+        history = FakeHistory()
+        ru, _, _ = _build(
+            job_store=store,
+            tag="v0.4.0",
+            readiness=FakeReadiness(ready=True),
+            history=history,
+        )
+
+        status = asyncio.run(ru.confirm_health(grace_seconds=1))
+
+        self.assertEqual(status.stage, "succeeded_but_unhealthy")
+        self.assertIn("v0.5.2", status.health_detail or "")
+        self.assertIn("v0.4.0", status.health_detail or "")
+        self.assertIsNotNone(status.health_confirmed_at)
+        self.assertEqual(
+            [e["result"] for e in history.entries], ["succeeded_but_unhealthy"]
+        )
 
     def test_confirm_health_marks_unhealthy_after_grace(self):
         store = FakeJobStore(

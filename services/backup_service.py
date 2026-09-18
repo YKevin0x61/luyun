@@ -107,6 +107,9 @@ TABLE_DEDUP_KEY: Dict[str, str] = {
     "stations": "station_id",
 }
 
+# 合并导入时最多回报多少条失败样本（只用于展示，计数是完整的）。
+MAX_MERGE_FAILURE_SAMPLES = 5
+
 
 def _snapshot_root() -> Path:
     return Path(settings.DATABASE_DIR) / SNAPSHOT_DIRNAME
@@ -1684,9 +1687,9 @@ def scan_cold_backup_dirs(backup_dir: Optional[Path] = None) -> List[dict]:
                 "size_bytes": _dir_size(entry),
                 "legacy": True,
                 "files": legacy_files,
-                "contents": [
-                    CONTENT_LABELS[CONTENT_APP_DB]
-                ],
+                # contents 是内容代码（其它分支都填 CONTENT_APP_DB）；填中文标签会让
+                # 「缺项」与健康覆盖结论判定失真。
+                "contents": [CONTENT_APP_DB],
             })
     items.sort(key=lambda x: x["ts"], reverse=True)
     return items
@@ -1711,24 +1714,49 @@ async def _tables_in_attached_db(conn, alias: str) -> set[str]:
     return {row[0] for row in rows}
 
 
-async def _copy_table_overwrite(conn, table: str, alias: str = "src") -> None:
-    """逐表覆盖：只复制两边都有的列，避免 schema 差异导致 INSERT SELECT * 失败。"""
-    cursor = await conn.execute(f"PRAGMA {alias}.table_info({table})")
-    src_cols = [row[1] for row in await cursor.fetchall()]
-    if not src_cols:
-        return
+async def _build_overwrite_script(conn, tables: Sequence[str], alias: str = "src") -> str:
+    """把「逐表覆盖」拼成一段可一次执行的 SQL 脚本。
 
-    cursor = await conn.execute(f"PRAGMA main.table_info({table})")
-    main_cols = [row[1] for row in await cursor.fetchall()]
-    common_cols = [c for c in src_cols if c in main_cols]
-    if not common_cols:
-        return
+    列交集必须先探（PRAGMA 要 await），真正的写语句则集中到一段脚本里，交给一次
+    ``executescript`` 调用执行。原因：全库只有一条共享连接，覆盖导入原来用
+    ``BEGIN`` + 逐表 ``execute`` + ``commit``，中间每张表都会让出事件循环，采集侧
+    或 Admin 的写入（以及它们的 ``commit()``）就会挤进这个未完成的事务里 ——
+    轻则半截覆盖被提交，重则采集的事务被连带回滚。一次 executescript 在连接的
+    执行线程里一次跑完，其它语句只能在它前后排队。
 
-    cols_str = ", ".join(common_cols)
-    await conn.execute(f"DELETE FROM main.{table}")
-    await conn.execute(
-        f"INSERT INTO main.{table} ({cols_str}) SELECT {cols_str} FROM {alias}.{table}"
-    )
+    ``BEGIN IMMEDIATE`` / ``COMMIT`` 写进脚本内：executescript 自身不做事务控制，
+    不加就退化成逐条 autocommit。
+    """
+    lines = ["BEGIN IMMEDIATE;"]
+    for table in tables:
+        cursor = await conn.execute(f"PRAGMA {alias}.table_info({table})")
+        src_cols = [row[1] for row in await cursor.fetchall()]
+        if not src_cols:
+            continue
+        cursor = await conn.execute(f"PRAGMA main.table_info({table})")
+        main_cols = [row[1] for row in await cursor.fetchall()]
+        common_cols = [c for c in src_cols if c in main_cols]
+        if not common_cols:
+            continue
+        cols_str = ", ".join(common_cols)
+        lines.append(f"DELETE FROM main.{table};")
+        lines.append(
+            f"INSERT INTO main.{table} ({cols_str}) SELECT {cols_str} FROM {alias}.{table};"
+        )
+    lines.append("COMMIT;")
+    return "\n".join(lines)
+
+
+async def _run_overwrite_script(conn, script: str) -> None:
+    """执行覆盖脚本；脚本内事务失败时显式回滚，别把连接留在打开的事务里。"""
+    try:
+        await conn.executescript(script)
+    except Exception:
+        try:
+            await conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
 
 
 async def overwrite_app_db_from_bytes(db, app_db_bytes: bytes) -> None:
@@ -1738,17 +1766,11 @@ async def overwrite_app_db_from_bytes(db, app_db_bytes: bytes) -> None:
     try:
         escaped = tmp_path.replace("'", "''")
         await db._conn.execute(f"ATTACH DATABASE '{escaped}' AS src")
-        src_tables = await _tables_in_attached_db(db._conn, "src")
-        tables_to_copy = sorted(target_tables & src_tables)
-
-        await db._conn.execute("BEGIN")
         try:
-            for table in tables_to_copy:
-                await _copy_table_overwrite(db._conn, table, alias="src")
-            await db._conn.commit()
-        except Exception:
-            await db._conn.rollback()
-            raise
+            src_tables = await _tables_in_attached_db(db._conn, "src")
+            tables_to_copy = sorted(target_tables & src_tables)
+            script = await _build_overwrite_script(db._conn, tables_to_copy, alias="src")
+            await _run_overwrite_script(db._conn, script)
         finally:
             await db._conn.execute("DETACH DATABASE src")
     finally:
@@ -1808,6 +1830,8 @@ async def merge_app_db_from_file(
                     existing_keys = {r[0] for r in rows if r[0]}
 
             imported = 0
+            failed_count = 0
+            failed_samples: List[dict] = []
             cols_str = ", ".join(common_cols)
             placeholders = ", ".join(["?"] * len(common_cols))
             insert_sql = (
@@ -1829,16 +1853,35 @@ async def merge_app_db_from_file(
                         imported += 1
                         if key_val is not None:
                             existing_keys.add(key_val)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 不静默丢行：约束冲突 / 类型不匹配 / 磁盘错误都计数并留下样本，
+                        # 让接口能如实回报「恢复了多少、漏了多少」，而不是一律 OK。
+                        failed_count += 1
+                        if len(failed_samples) < MAX_MERGE_FAILURE_SAMPLES:
+                            failed_samples.append({
+                                "table": table,
+                                "key": None if key_val is None else str(key_val),
+                                "error": str(exc) or exc.__class__.__name__,
+                            })
 
             await dst_tdb.commit()
-            results.append({"table": table, "status": "OK", "imported": imported})
+            results.append({
+                "table": table,
+                "status": "PARTIAL" if failed_count else "OK",
+                "imported": imported,
+                "failed": failed_count,
+                "errors": failed_samples,
+            })
     finally:
         await src_conn.close()
 
     total_imported = sum(r.get("imported", 0) for r in results)
-    return {"total_imported": total_imported, "results": results}
+    total_failed = sum(r.get("failed", 0) for r in results)
+    return {
+        "total_imported": total_imported,
+        "total_failed": total_failed,
+        "results": results,
+    }
 
 
 async def merge_app_db_from_bytes(db, app_db_bytes: bytes) -> dict:
@@ -1861,17 +1904,11 @@ async def overwrite_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) ->
     try:
         escaped = tmp_path.replace("'", "''")
         await conn.execute(f"ATTACH DATABASE '{escaped}' AS src")
-        src_tables = await _tables_in_attached_db(conn, "src")
-        tables_to_copy = [t for t in RECIPE_TABLES if t in src_tables]
-
-        await conn.execute("BEGIN")
         try:
-            for table in tables_to_copy:
-                await _copy_table_overwrite(conn, table, alias="src")
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
+            src_tables = await _tables_in_attached_db(conn, "src")
+            tables_to_copy = [t for t in RECIPE_TABLES if t in src_tables]
+            script = await _build_overwrite_script(conn, tables_to_copy, alias="src")
+            await _run_overwrite_script(conn, script)
         finally:
             await conn.execute("DETACH DATABASE src")
     finally:
@@ -1888,6 +1925,7 @@ async def merge_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> dic
     src_conn.row_factory = aiosqlite.Row
     conn = recipe_store.conn
     imported_total = 0
+    total_failed = 0
     results: List[dict] = []
 
     recipe_dedup = {
@@ -1925,6 +1963,8 @@ async def merge_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> dic
                     existing_keys = {r[0] for r in rows if r[0]}
 
             imported = 0
+            failed_count = 0
+            failed_samples: List[dict] = []
             cols_str = ", ".join(common_cols)
             placeholders = ", ".join(["?"] * len(common_cols))
             insert_sql = (
@@ -1945,12 +1985,26 @@ async def merge_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> dic
                         imported += 1
                         if key_val is not None:
                             existing_keys.add(key_val)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 同 app.db 合并：丢行必须计数并留样本，不能静默报 OK。
+                        failed_count += 1
+                        if len(failed_samples) < MAX_MERGE_FAILURE_SAMPLES:
+                            failed_samples.append({
+                                "table": table,
+                                "key": None if key_val is None else str(key_val),
+                                "error": str(exc) or exc.__class__.__name__,
+                            })
 
             await conn.commit()
             imported_total += imported
-            results.append({"table": table, "status": "OK", "imported": imported})
+            total_failed += failed_count
+            results.append({
+                "table": table,
+                "status": "PARTIAL" if failed_count else "OK",
+                "imported": imported,
+                "failed": failed_count,
+                "errors": failed_samples,
+            })
     finally:
         await src_conn.close()
         try:
@@ -1958,7 +2012,11 @@ async def merge_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> dic
         except OSError:
             pass
 
-    return {"total_imported": imported_total, "results": results}
+    return {
+        "total_imported": imported_total,
+        "total_failed": total_failed,
+        "results": results,
+    }
 
 
 def export_recipes_db_bytes(recipes_db_path: str) -> Optional[bytes]:

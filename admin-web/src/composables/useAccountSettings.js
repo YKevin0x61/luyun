@@ -5,19 +5,24 @@ import { formatTs } from '../utils/backupProgress'
 /** Setup page — session / password / API tokens. */
 export function useAccountSettings({ showAlert, clearAlert }) {
   const sessionUserHint = ref('加载中…')
+  /** 只放用户名：总览条的事实列需要短值，完整说明走 hint 文案。 */
+  const sessionUsername = ref('')
 
   async function loadSessionInfo() {
     try {
       const data = await api.get('/api/auth/status')
       if (!data.logged_in) {
+        sessionUsername.value = ''
         sessionUserHint.value = '当前未登录，请刷新页面或重新登录。'
         return
       }
+      sessionUsername.value = data.username || ''
       sessionUserHint.value = data.username
         ? `已登录为 ${data.username}。退出后需重新输入密码才能访问管理页面。`
         : '已登录。退出后需重新输入密码才能访问管理页面。'
     } catch (err) {
       // Previous raw fetch treated any non-OK as "未登录"; keep that for HTTP errors.
+      sessionUsername.value = ''
       if (err && err.status) {
         sessionUserHint.value = '当前未登录，请刷新页面或重新登录。'
         return
@@ -26,8 +31,8 @@ export function useAccountSettings({ showAlert, clearAlert }) {
     }
   }
 
+  /** 危险动作：确认弹窗由页面层的两步确认负责（不用浏览器原生 confirm）。 */
   async function handleLogout() {
-    if (!window.confirm('确定要退出登录吗？')) return
     try {
       await api.post('/api/auth/logout')
     } catch (err) {
@@ -99,8 +104,8 @@ export function useAccountSettings({ showAlert, clearAlert }) {
     }
   }
 
+  /** 危险动作：确认弹窗由页面层的两步确认负责（不用浏览器原生 confirm）。 */
   async function revokeToken(prefix) {
-    if (!window.confirm(`确认撤销 Token ${prefix}… ？`)) return
     try {
       await api.delete('/api/auth/token/' + encodeURIComponent(prefix))
       showAlert('success', 'Token 已撤销')
@@ -130,6 +135,7 @@ export function useAccountSettings({ showAlert, clearAlert }) {
 
   return {
     sessionUserHint,
+    sessionUsername,
     loadSessionInfo,
     handleLogout,
     changePwdForm,

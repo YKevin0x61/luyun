@@ -122,7 +122,7 @@ class ReleaseBundleInstallAdapter:
 
         try:
             with tarfile.open(self._verified_bundle, "r:gz") as tar:
-                tar.extractall(path=next_dir)
+                _safe_extract_bundle(tar, next_dir)
             _assert_bundle_tree(next_dir)
             # Never activate bundle-shipped shop state even if a bad archive contains it.
             for name in _PRESERVE_DIR_NAMES:
@@ -279,6 +279,28 @@ def read_requirements_fingerprint(deploy_dir: Path) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _safe_extract_bundle(tar: tarfile.TarFile, dest: Path) -> None:
+    """把发行包解到 dest，拒绝任何逃出 dest 的成员。
+
+    下载字节与 SHA256SUMS 同源，校验和防不住被投毒的发行包；这里再挡一层：
+    绝对路径、`..` 逃逸、符号/硬链接与设备文件一律拒绝，普通文件与目录才解包。
+    （Python 3.12+ 的 extractall(filter="data") 语义类似，这里手写以便跨版本一致并可单测。）
+    """
+    dest = Path(dest).resolve()
+    for member in tar.getmembers():
+        name = member.name
+        if not name or name.startswith("/") or Path(name).is_absolute():
+            raise RuntimeError(f"发行包含非法成员路径：{name}")
+        if ".." in Path(name).parts:
+            raise RuntimeError(f"发行包成员试图逃出安装目录：{name}")
+        if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+            raise RuntimeError(f"发行包含不支持的成员类型：{name}")
+        target = (dest / name).resolve()
+        if target != dest and dest not in target.parents:
+            raise RuntimeError(f"发行包成员逃出安装目录：{name}")
+    tar.extractall(path=dest)
 
 
 def _assert_bundle_tree(root: Path) -> None:

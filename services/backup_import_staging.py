@@ -256,3 +256,15 @@ def consume_staging(token: str, owner: str) -> dict:
     parsed = load_parsed_from_staging(token, owner)
     _remove_dir(_staging_dir_for_token(token))
     return parsed
+
+
+def discard_staging(token: str) -> None:
+    """应用成功后丢弃暂存。
+
+    只有成功才丢弃：apply 可能因为照片不匹配返回 409（需要操作者勾选「强制继续」
+    后重试同一份预览），提前删目录会让这次重试必然 404 —— 那套安全阀就走不通了。
+    未丢弃的暂存由 cleanup_expired_staging 按 TTL 兜底清理。
+    """
+    if not _is_valid_token(token):
+        return
+    _remove_dir(_staging_dir_for_token(token))

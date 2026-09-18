@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 import tarfile
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from services.release_update.job_adapters import (
     BUNDLE_ASSET,
     CHECKSUMS_ASSET,
     ReleaseBundleInstallAdapter,
+    _safe_extract_bundle,
     sha256_file,
     verify_bundle_checksum,
 )
@@ -243,3 +246,82 @@ class ReleaseBundleInstallAdapterTest(unittest.TestCase):
             with patch("services.credentials_store._DATA_DIR", live / "data"), \
                  patch("services.credentials_store._KEY_FILE", new_key):
                 self.assertEqual(decrypt_webhook_url(encrypted), valid)
+
+
+def _bundle_with_extra_member(tmp: Path, mutate) -> Path:
+    """正常发行包 + 一个由 mutate 追加的成员，用于安全解包测试。"""
+    tree = tmp / "tree"
+    tree.mkdir()
+    _write_bundle_tree(tree, tag="v0.2.0", fingerprint="sha256:new", marker="new-app")
+    archive = tmp / BUNDLE_ASSET
+    with tarfile.open(archive, "w:gz") as tar:
+        for path in tree.rglob("*"):
+            if path.is_file():
+                tar.add(path, arcname=str(path.relative_to(tree)))
+        mutate(tar)
+    return archive
+
+
+class SafeExtractBundleTest(unittest.TestCase):
+    def _extract(self, archive: Path, dest: Path):
+        with tarfile.open(archive, "r:gz") as tar:
+            _safe_extract_bundle(tar, dest)
+
+    def test_rejects_parent_escape_member(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            payload = b"pwned\n"
+
+            def add(tar):
+                info = tarfile.TarInfo("../pwned.txt")
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+
+            dest = tmp / "out"
+            dest.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "逃出安装目录"):
+                self._extract(_bundle_with_extra_member(tmp, add), dest)
+            self.assertFalse((tmp / "pwned.txt").exists())
+
+    def test_rejects_absolute_member(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            payload = b"pwned\n"
+
+            def add(tar):
+                info = tarfile.TarInfo("/tmp/luyun-pwned")
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+
+            dest = tmp / "out"
+            dest.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "非法成员路径"):
+                self._extract(_bundle_with_extra_member(tmp, add), dest)
+
+    def test_rejects_symlink_member(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+
+            def add(tar):
+                info = tarfile.TarInfo("evil-link")
+                info.type = tarfile.SYMTYPE
+                info.linkname = "/etc/passwd"
+                tar.addfile(info)
+
+            dest = tmp / "out"
+            dest.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "不支持的成员类型"):
+                self._extract(_bundle_with_extra_member(tmp, add), dest)
+
+    def test_extracts_a_normal_bundle(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            archive = _bundle_with_extra_member(tmp, lambda tar: None)
+            dest = tmp / "out"
+            dest.mkdir()
+            self._extract(archive, dest)
+            self.assertEqual((dest / "APP_MARKER").read_text(encoding="utf-8"), "new-app\n")
+            self.assertEqual(
+                (dest / "RELEASE_MANIFEST.json").is_file(),
+                True,
+            )

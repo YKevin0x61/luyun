@@ -391,3 +391,83 @@ class ReleaseUpdateApiTest(unittest.TestCase):
         self.assertEqual(job["target_tag"], "v0.1.0")
         self.assertEqual(job["previous_ref"], "v0.2.0")
         self.assertEqual(job["log_path"], "data/update_job.log")
+
+
+class ReleaseUpdateNonBlockingApiTest(unittest.IsolatedAsyncioTestCase):
+    """单 worker 部署下，同步阻塞的作业调用不能占住事件循环。"""
+
+    async def asyncSetUp(self):
+        import httpx
+
+        self._httpx = httpx
+        self._old_database_dir = settings.DATABASE_DIR
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        self.db = DatabaseManager()
+        await self.db.connect()
+        set_runtime(AppRuntime(db=self.db))
+
+        self.app = FastAPI()
+        self.app.include_router(release_update_router)
+        self.app.dependency_overrides[verify_admin_token] = lambda: True
+        self.app.dependency_overrides[require_session] = lambda: "test-session"
+
+    async def asyncTearDown(self):
+        self.app.dependency_overrides.clear()
+        await self.db.close()
+        set_runtime(None)
+        settings.DATABASE_DIR = self._old_database_dir
+        self._tmpdir.cleanup()
+
+    async def test_cancel_does_not_block_other_requests(self):
+        import time
+
+        def slow_cancel():
+            time.sleep(1.0)
+            return CancelResult(accepted=True, job=UpdateJobState(stage="failed"))
+
+        fake = mock.Mock(spec=ReleaseUpdate)
+        fake.cancel.side_effect = slow_cancel
+        fake.job_status.return_value = UpdateJobState(stage="idle")
+        fake.confirm_health = mock.AsyncMock(return_value=UpdateJobState(stage="idle"))
+        self.app.dependency_overrides[get_release_update] = lambda: fake
+
+        transport = self._httpx.ASGITransport(app=self.app)
+        async with self._httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            started = time.monotonic()
+            cancel_task = asyncio.create_task(client.post("/api/release-update/job/cancel"))
+            await asyncio.sleep(0.05)
+            job_resp = await client.get("/api/release-update/job")
+            elapsed = time.monotonic() - started
+            cancel_resp = await cancel_task
+
+        self.assertEqual(cancel_resp.status_code, 200)
+        self.assertEqual(job_resp.status_code, 200)
+        # 另一个请求在 cancel 的 1s 同步等待期间就该返回，而不是排在它后面
+        self.assertLess(elapsed, 0.5, f"cancel blocked the event loop for {elapsed:.2f}s")
+
+    async def test_version_check_does_not_block_other_requests(self):
+        import time
+
+        def slow_version_check():
+            time.sleep(1.0)
+            return _sample_result()
+
+        fake = mock.Mock(spec=ReleaseUpdate)
+        fake.version_check.side_effect = slow_version_check
+        fake.job_status.return_value = UpdateJobState(stage="idle")
+        fake.confirm_health = mock.AsyncMock(return_value=UpdateJobState(stage="idle"))
+        self.app.dependency_overrides[get_release_update] = lambda: fake
+
+        transport = self._httpx.ASGITransport(app=self.app)
+        async with self._httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            started = time.monotonic()
+            check_task = asyncio.create_task(client.get("/api/release-update/version-check"))
+            await asyncio.sleep(0.05)
+            job_resp = await client.get("/api/release-update/job")
+            elapsed = time.monotonic() - started
+            check_resp = await check_task
+
+        self.assertEqual(check_resp.status_code, 200)
+        self.assertEqual(job_resp.status_code, 200)
+        self.assertLess(elapsed, 0.5, f"version-check blocked the event loop for {elapsed:.2f}s")

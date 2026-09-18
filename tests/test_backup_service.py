@@ -273,6 +273,234 @@ class OverwriteAppDbTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row[1], "虾饺")
 
 
+class MergeAppDbFailureReportTest(unittest.IsolatedAsyncioTestCase):
+    """合并导入的逐表报告：失败行必须计数并带出样本，不能静默报 OK。"""
+
+    async def asyncSetUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._old_backend = settings.DATABASE_BACKEND
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        # 合并是 SQLite 语义（临时库 + PRAGMA 去重）：固定后端，别被本机 .env 影响。
+        settings.DATABASE_BACKEND = "sqlite"
+
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect())
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        settings.DATABASE_DIR = self._old_database_dir
+        settings.DATABASE_BACKEND = self._old_backend
+        self._tmpdir.cleanup()
+
+    def _source_bytes(self, count: int = 2) -> bytes:
+        fd, tmp_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = sqlite3.connect(tmp_path)
+        conn.executescript(
+            """
+            CREATE TABLE orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                business_flow_id TEXT,
+                table_number TEXT NOT NULL,
+                dish_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                order_time TEXT NOT NULL,
+                price REAL DEFAULT 0.0,
+                total_amount REAL DEFAULT 0.0,
+                status TEXT DEFAULT '未结',
+                category TEXT DEFAULT '',
+                station TEXT DEFAULT '',
+                priority TEXT DEFAULT 'normal',
+                notes TEXT,
+                dish_status TEXT DEFAULT '待出餐',
+                ready_time TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        now = datetime(2026, 5, 1, 10, 0, tzinfo=CHINA_TZ).isoformat()
+        for i in range(count):
+            conn.execute(
+                """
+                INSERT INTO orders (
+                    business_flow_id, table_number, dish_name, quantity,
+                    order_time, price, total_amount, status, category, station,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (f"mg-{i}", "1", "虾饺", 1, now, 1.0, 1.0, "未结", "点心", "点心", now, now),
+            )
+        conn.commit()
+        conn.close()
+        with open(tmp_path, "rb") as fh:
+            data = fh.read()
+        os.unlink(tmp_path)
+        return data
+
+    async def test_failed_rows_are_counted_with_samples(self):
+        # 目标库上让 INSERT 必然失败，模拟约束冲突 / 类型不匹配 / 磁盘错误
+        await self.db._conn.execute(
+            "CREATE TRIGGER block_orders BEFORE INSERT ON orders "
+            "BEGIN SELECT RAISE(ABORT, 'blocked by test'); END"
+        )
+        await self.db._conn.commit()
+
+        report = await backup_service.merge_app_db_from_bytes(
+            self.db, self._source_bytes(2)
+        )
+
+        self.assertEqual(report["total_imported"], 0)
+        self.assertEqual(report["total_failed"], 2)
+        orders = next(r for r in report["results"] if r["table"] == "orders")
+        self.assertEqual(orders["status"], "PARTIAL")
+        self.assertEqual(orders["failed"], 2)
+        self.assertEqual(len(orders["errors"]), 2)
+        self.assertIn("blocked by test", orders["errors"][0]["error"])
+        self.assertEqual(orders["errors"][0]["key"], "mg-0")
+
+    async def test_clean_merge_reports_ok_and_zero_failures(self):
+        report = await backup_service.merge_app_db_from_bytes(
+            self.db, self._source_bytes(2)
+        )
+
+        self.assertEqual(report["total_imported"], 2)
+        self.assertEqual(report["total_failed"], 0)
+        orders = next(r for r in report["results"] if r["table"] == "orders")
+        self.assertEqual(orders["status"], "OK")
+        self.assertEqual(orders["failed"], 0)
+        self.assertEqual(orders["errors"], [])
+
+
+class SqliteOverwriteImportTest(unittest.IsolatedAsyncioTestCase):
+    """覆盖导入：写成一段脚本、一次执行，避免与采集写入共用连接时被插进事务。"""
+
+    async def asyncSetUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._old_backend = settings.DATABASE_BACKEND
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        settings.DATABASE_BACKEND = "sqlite"
+
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect())
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        settings.DATABASE_DIR = self._old_database_dir
+        settings.DATABASE_BACKEND = self._old_backend
+        self._tmpdir.cleanup()
+
+    def _source_bytes(self, rows: int = 1) -> bytes:
+        fd, tmp_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = sqlite3.connect(tmp_path)
+        conn.executescript(
+            """
+            CREATE TABLE orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                business_flow_id TEXT,
+                table_number TEXT NOT NULL,
+                dish_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                order_time TEXT NOT NULL,
+                price REAL DEFAULT 0.0,
+                total_amount REAL DEFAULT 0.0,
+                status TEXT DEFAULT '未结',
+                category TEXT DEFAULT '',
+                station TEXT DEFAULT '',
+                priority TEXT DEFAULT 'normal',
+                notes TEXT,
+                dish_status TEXT DEFAULT '待出餐',
+                ready_time TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        now = datetime(2026, 5, 1, 10, 0, tzinfo=CHINA_TZ).isoformat()
+        for i in range(rows):
+            conn.execute(
+                """
+                INSERT INTO orders (
+                    business_flow_id, table_number, dish_name, quantity,
+                    order_time, price, total_amount, status, category, station,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (f"ow-{i}", "1", "虾饺", 1, now, 1.0, 1.0, "未结", "点心", "点心", now, now),
+            )
+        conn.commit()
+        conn.close()
+        with open(tmp_path, "rb") as fh:
+            data = fh.read()
+        os.unlink(tmp_path)
+        return data
+
+    async def _insert_local_order(self, flow_id: str) -> None:
+        now = datetime(2026, 5, 1, 11, 0, tzinfo=CHINA_TZ).isoformat()
+        await self.db._conn.execute(
+            """
+            INSERT INTO orders (
+                business_flow_id, table_number, dish_name, quantity,
+                order_time, created_at, updated_at
+            ) VALUES (?, '2', '烧卖', 1, ?, ?, ?)
+            """,
+            (flow_id, now, now, now),
+        )
+        await self.db._conn.commit()
+
+    async def test_overwrite_replaces_rows(self):
+        await self._insert_local_order("local-1")
+        await backup_service.overwrite_app_db_from_bytes(self.db, self._source_bytes(2))
+
+        async with self.db._conn.execute(
+            "SELECT business_flow_id FROM orders ORDER BY business_flow_id"
+        ) as cur:
+            flows = [r[0] for r in await cur.fetchall()]
+        self.assertEqual(flows, ["ow-0", "ow-1"])
+
+    async def test_overwrite_runs_as_a_single_script(self):
+        """覆盖必须一次 executescript 跑完：中间不再让出事件循环给别的写入。"""
+        scripts: List[str] = []
+        original = self.db._conn.executescript
+
+        async def spy(script):
+            scripts.append(script)
+            return await original(script)
+
+        self.db._conn.executescript = spy
+        await backup_service.overwrite_app_db_from_bytes(self.db, self._source_bytes(2))
+
+        self.assertEqual(len(scripts), 1)
+        script = scripts[0]
+        self.assertIn("BEGIN IMMEDIATE;", script)
+        self.assertIn("COMMIT;", script)
+        self.assertIn("DELETE FROM main.orders;", script)
+        self.assertIn("INSERT INTO main.orders (", script)
+        self.assertIn("FROM src.orders;", script)
+
+    async def test_failed_script_rolls_back_and_keeps_previous_rows(self):
+        await self._insert_local_order("local-1")
+        source = self._source_bytes(1)
+
+        # 让脚本在插入阶段失败（目标库上的触发器），覆盖必须整体回滚
+        await self.db._conn.execute(
+            "CREATE TRIGGER block_orders BEFORE INSERT ON orders "
+            "BEGIN SELECT RAISE(ABORT, 'blocked by test'); END"
+        )
+        await self.db._conn.commit()
+
+        with self.assertRaises(Exception):
+            await backup_service.overwrite_app_db_from_bytes(self.db, source)
+
+        async with self.db._conn.execute("SELECT business_flow_id FROM orders") as cur:
+            flows = [r[0] for r in await cur.fetchall()]
+        # 原有的本地行还在：DELETE 与 INSERT 在同一事务里被一起回滚
+        self.assertEqual(flows, ["local-1"])
+
+
 class SnapshotTest(unittest.TestCase):
     def setUp(self):
         self._old_database_dir = settings.DATABASE_DIR

@@ -60,6 +60,85 @@ describe('useSystemUpdate', () => {
     expect(showAlert).not.toHaveBeenCalled()
   })
 
+  it('正式发行版目录直接列最新 3 个，其余折叠并标出是否含当前版本', async () => {
+    const releases = ['v0.7.0', 'v0.6.3', 'v0.6.2', 'v0.6.1', 'v0.6.0'].map((tag) => ({
+      tag,
+      name: tag,
+      published_at: '2026-09-01T00:00:00Z',
+      prerelease: false,
+    }))
+    apiGet.mockResolvedValue({
+      success: true,
+      installed_tag: 'v0.6.1',
+      degraded: false,
+      app_version: '0.6.1',
+      latest_tag: 'v0.7.0',
+      update_available: true,
+      releases,
+    })
+    const {
+      loadVersionCheck,
+      visibleReleases,
+      hiddenReleases,
+      hiddenReleasesHasInstalled,
+    } = useSystemUpdate({ showAlert: vi.fn(), clearAlert: vi.fn() })
+
+    await loadVersionCheck()
+
+    expect(visibleReleases.value.map((r) => r.tag)).toEqual(['v0.7.0', 'v0.6.3', 'v0.6.2'])
+    expect(hiddenReleases.value.map((r) => r.tag)).toEqual(['v0.6.1', 'v0.6.0'])
+    // 当前版本落在折叠区：展开提示里要点出来，否则想回滚的人不知道去哪找
+    expect(hiddenReleasesHasInstalled.value).toBe(true)
+  })
+
+  it('发行版不足 3 个时没有折叠区；当前版本在可见区时不提示', async () => {
+    apiGet.mockResolvedValue({
+      success: true,
+      installed_tag: 'v0.2.0',
+      degraded: false,
+      app_version: '0.2.0',
+      latest_tag: 'v0.2.0',
+      update_available: false,
+      releases: [
+        { tag: 'v0.2.0', name: '0.2.0', published_at: '2026-09-01T00:00:00Z' },
+        { tag: 'v0.1.0', name: '0.1.0', published_at: '2026-08-01T00:00:00Z' },
+      ],
+    })
+    const {
+      loadVersionCheck,
+      visibleReleases,
+      hiddenReleases,
+      hiddenReleasesHasInstalled,
+    } = useSystemUpdate({ showAlert: vi.fn(), clearAlert: vi.fn() })
+
+    await loadVersionCheck()
+
+    expect(visibleReleases.value).toHaveLength(2)
+    expect(hiddenReleases.value).toEqual([])
+    expect(hiddenReleasesHasInstalled.value).toBe(false)
+  })
+
+  it('payload 没有 releases 字段时目录为空而不是报错', async () => {
+    apiGet.mockResolvedValue({
+      success: true,
+      installed_tag: null,
+      degraded: true,
+      degraded_reason: 'missing_manifest',
+      app_version: '0.1.0',
+      latest_tag: null,
+      update_available: false,
+    })
+    const { loadVersionCheck, visibleReleases, hiddenReleases } = useSystemUpdate({
+      showAlert: vi.fn(),
+      clearAlert: vi.fn(),
+    })
+
+    await loadVersionCheck()
+
+    expect(visibleReleases.value).toEqual([])
+    expect(hiddenReleases.value).toEqual([])
+  })
+
   it('surfaces degraded identity clearly', async () => {
     apiGet.mockResolvedValue({
       success: true,
@@ -359,6 +438,7 @@ describe('useSystemUpdate', () => {
           stage: 'restarting',
           target_tag: 'v0.2.0',
           previous_ref: 'v0.1.0',
+          previous_tag: 'v0.1.0',
           message: 'restart requested',
           log_path: 'data/update_job.log',
         },
@@ -369,6 +449,7 @@ describe('useSystemUpdate', () => {
           stage: 'succeeded_but_unhealthy',
           target_tag: 'v0.2.0',
           previous_ref: 'v0.1.0',
+          previous_tag: 'v0.1.0',
           health_detail: '数据库未连接',
           log_path: 'data/update_job.log',
         },
@@ -421,6 +502,37 @@ describe('useSystemUpdate', () => {
     expect(confirmOpen.value).toBe(true)
   })
 
+  it('没有 previous_tag（本机身份只有 commit）时不给回退入口', async () => {
+    apiGet.mockResolvedValue({
+      success: true,
+      job: {
+        stage: 'failed',
+        target_tag: 'v0.2.0',
+        previous_ref: 'abc1234',
+        log_path: 'data/update_job.log',
+      },
+    })
+    const {
+      loadJobStatus,
+      previousRef,
+      previousTag,
+      canRollbackToPrevious,
+      rollbackToPrevious,
+      selectedTag,
+      confirmOpen,
+    } = useSystemUpdate({ showAlert: vi.fn(), clearAlert: vi.fn() })
+
+    await loadJobStatus()
+
+    // commit 仍用于展示「回退点」，但不能作为 apply 目标（那必然 400）
+    expect(previousRef.value).toBe('abc1234')
+    expect(previousTag.value).toBe('')
+    expect(canRollbackToPrevious.value).toBe(false)
+    rollbackToPrevious()
+    expect(selectedTag.value).toBe('')
+    expect(confirmOpen.value).toBe(false)
+  })
+
   it('auto-rechecks readiness on a cooldown while restarting and stops after success', async () => {
     vi.useFakeTimers()
     apiGet.mockResolvedValue({
@@ -429,6 +541,7 @@ describe('useSystemUpdate', () => {
         stage: 'restarting',
         target_tag: 'v0.2.0',
         previous_ref: 'v0.1.0',
+        previous_tag: 'v0.1.0',
         log_path: 'data/update_job.log',
       },
     })
@@ -438,6 +551,7 @@ describe('useSystemUpdate', () => {
         stage: 'succeeded',
         target_tag: 'v0.2.0',
         previous_ref: 'v0.1.0',
+        previous_tag: 'v0.1.0',
         log_path: 'data/update_job.log',
       },
       log_tail: '[update] ready\n',
@@ -477,6 +591,7 @@ describe('useSystemUpdate', () => {
         stage: 'restarting',
         target_tag: 'v0.2.0',
         previous_ref: 'v0.1.0',
+        previous_tag: 'v0.1.0',
         log_path: 'data/update_job.log',
       },
     })
@@ -486,6 +601,7 @@ describe('useSystemUpdate', () => {
         stage: 'succeeded_but_unhealthy',
         target_tag: 'v0.2.0',
         previous_ref: 'v0.1.0',
+        previous_tag: 'v0.1.0',
         health_detail: '就绪检查未通过',
         log_path: 'data/update_job.log',
       },

@@ -140,6 +140,9 @@ class VersionCheckResult:
     latest_tag: Optional[str]
     update_available: bool
     preflight: UpdatePreflight
+    # False = 这次没能读到 GitHub 发行目录（断网 / 限流 / 仓库不可达）。
+    # 此时 update_available 恒为 False，但那不等于「已是最新」，页面必须能区分。
+    catalogue_ok: bool = True
 
 
 @dataclass(frozen=True)
@@ -149,6 +152,9 @@ class UpdateJobState:
     stage: str
     target_tag: Optional[str] = None
     previous_ref: Optional[str] = None
+    # 「回到上一版本」只能对正式发行 tag 再走一次 apply；本机若没有 tag 身份
+    # （只有 commit），previous_ref 会带上 commit 供排查，但这里置空表示不可回退。
+    previous_tag: Optional[str] = None
     message: str = ""
     error: Optional[str] = None
     log_path: Optional[str] = None
@@ -515,6 +521,7 @@ class ReleaseUpdate:
             latest_tag=latest_tag,
             update_available=update_available,
             preflight=preflight,
+            catalogue_ok=catalogue_ok,
         )
 
     def history(self) -> List[dict]:
@@ -568,10 +575,36 @@ class ReleaseUpdate:
         except Exception as exc:
             identity = None
             logger.warning("读取已装发行版身份失败: %s", exc)
+
+        from datetime import datetime
+
+        now = datetime.now(CHINA_TZ)
         if identity is None or not identity.tag or identity.tag != state.target_tag:
-            # Bundle not switched (or identity unreadable) — leave the job alone;
-            # the runner decides failure/rollback.
-            return state
+            # 发行包没切到目标版本（或身份读不出来）。作业进程在写出 restarting 之后
+            # 就已经退出，没有任何角色再推动状态；如果这里一直 return，作业会永远停在
+            # 「重启中」——页面每 2s 无限轮询、restarting ∈ IN_PROGRESS 又把回滚入口锁住。
+            # 所以宽限期一过同样落成 succeeded_but_unhealthy，让操作者拿到日志与回退点。
+            elapsed = self._seconds_since(state.restart_requested_at, now)
+            if elapsed is None:
+                elapsed = self._seconds_since(state.started_at, now)
+            if not (force or (elapsed is not None and elapsed >= grace_seconds)):
+                return state
+            if identity is None:
+                actual = "读取失败"
+            else:
+                actual = identity.tag or "未读到 tag（本机只有 commit）"
+            unhealthy = replace(
+                state,
+                stage=STAGE_SUCCEEDED_BUT_UNHEALTHY,
+                message="发行包未切换到目标版本，健康确认无法继续",
+                finished_at=state.finished_at or now.isoformat(),
+                health_confirmed_at=now.isoformat(),
+                startup_id=None,
+                health_detail=f"未读到目标版本身份（期望 {state.target_tag}，实际 {actual}）",
+            )
+            self._job_store.write(unhealthy)
+            self._record_history(unhealthy)
+            return unhealthy
 
         readiness = None
         if self._readiness is not None:
@@ -580,9 +613,6 @@ class ReleaseUpdate:
             except Exception as exc:
                 logger.warning("就绪检查失败: %s", exc)
 
-        from datetime import datetime
-
-        now = datetime.now(CHINA_TZ)
         if readiness is not None and readiness.ready and self._started_after_restart(
             readiness, state
         ):
@@ -763,12 +793,16 @@ class ReleaseUpdate:
 
         identity = self._installed.inspect_installed()
         previous_ref = identity.tag or identity.commit
+        # previous_tag 才是「回到上一版本」的合法目标：apply 只接受 GitHub 正式 tag，
+        # 而 previous_ref 可能是个 commit（本地可读，但 apply 必然 400）。
+        previous_tag = identity.tag
         # Prefer store's existing log pointer when present (FileJobStateStore fills it).
         prior = current if current.log_path else None
         job = UpdateJobState(
             stage=STAGE_QUEUED,
             target_tag=tag,
             previous_ref=previous_ref,
+            previous_tag=previous_tag,
             message="Update Job queued",
             log_path=prior.log_path if prior else None,
             cancel_requested=False,
@@ -783,6 +817,7 @@ class ReleaseUpdate:
                     stage=STAGE_FAILED,
                     target_tag=tag,
                     previous_ref=previous_ref,
+                    previous_tag=previous_tag,
                     message="Failed to start Update Job oneshot",
                     error="oneshot start failed",
                     log_path=prior.log_path if prior else None,

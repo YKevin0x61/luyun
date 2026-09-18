@@ -155,6 +155,26 @@ class BackupImportStagingTest(unittest.TestCase):
         self.assertEqual(loaded["standard_photos"], {})
         self.assertEqual(loaded["other_photos"], {})
 
+    def test_load_then_discard_keeps_token_usable_until_success(self):
+        """apply 失败（如 409 照片不匹配）时必须还能用同一个 token 重试。"""
+        parsed = _sample_parsed(with_app_db=True)
+        token = backup_import_staging.create_staging("session-a", parsed)
+
+        first = backup_import_staging.load_parsed_from_staging(token, "session-a")
+        self.assertEqual(first["app_db_bytes"], parsed["app_db_bytes"])
+        # 还没 discard（模拟校验失败返回 409），token 仍然可用
+        retry = backup_import_staging.load_parsed_from_staging(token, "session-a")
+        self.assertEqual(retry["credentials"], parsed["credentials"])
+
+        backup_import_staging.discard_staging(token)
+        self.assertFalse((self._staging_root / token).exists())
+        with self.assertRaises(FileNotFoundError):
+            backup_import_staging.load_parsed_from_staging(token, "session-a")
+
+    def test_discard_staging_tolerates_unknown_token(self):
+        backup_import_staging.discard_staging("")
+        backup_import_staging.discard_staging("../../etc/passwd")
+
 
 if __name__ == "__main__":
     unittest.main()

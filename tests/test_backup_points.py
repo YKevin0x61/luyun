@@ -477,6 +477,9 @@ class ColdBackupTest(BackupPointTestCase):
         points = [p for p in backup_points.list_backup_points() if p["medium"] == "cold_backup"]
         self.assertEqual(len(points), 1)
         self.assertFalse(points[0]["detail"]["reported"])
+        # 扫描兜底分支的 contents 必须是内容代码：填中文标签会把 app_db 自己标成缺失
+        self.assertEqual(points[0]["contents"], [CONTENT_APP_DB])
+        self.assertNotIn(CONTENT_APP_DB, {m["content"] for m in points[0]["missing"]})
 
     def test_failed_run_is_reported_as_not_recoverable(self):
         """脚本失败时 archive=None；失败运行仍必须作为一条冷备结论出现。"""
@@ -584,6 +587,22 @@ class BackupHealthTest(BackupPointTestCase):
         points = [p for p in backup_points.list_backup_points() if p["medium"] == "export_backup"]
         self.assertFalse(points[0]["recoverable"])
         self.assertIn("校验和", " ".join(points[0]["basic_check"]["messages"]))
+
+    def test_invalidate_cache_forces_recompute_on_next_read(self):
+        """导出 / 恢复 / 回滚后只失效缓存，让下一次读取重算，而不是一直返回旧结论。"""
+        self._seed_db()
+        cached = backup_points.refresh_backup_health()
+        self.assertEqual(cached["status"], "no_backup")
+        self.assertIsNotNone(backup_points.get_health_cache())
+
+        # 磁盘上多了一份可用备份点，但缓存还在
+        self._make_snapshot()
+        self.assertEqual(backup_points.get_health_cache()["status"], "no_backup")
+
+        backup_points.invalidate_health_cache()
+        self.assertIsNone(backup_points.get_health_cache())
+        recomputed = backup_points.refresh_backup_health()
+        self.assertEqual(recomputed["status"], "legacy_only")
 
 
 class ExportPointListingTest(BackupPointTestCase):

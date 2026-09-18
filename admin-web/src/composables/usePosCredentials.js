@@ -303,8 +303,8 @@ export function usePosCredentials({ showAlert, clearAlert }) {
     }
   }
 
+  /** 危险动作：确认弹窗由页面层的两步确认负责（不用浏览器原生 confirm）。 */
   async function onClearCredentials() {
-    if (!window.confirm('确认清空当前登录凭据？爬虫将进入待机状态，直到下次保存新凭据。')) return
     try {
       await api.delete('/api/credentials')
       showAlert('success', '已清空凭据，爬虫进入待机')

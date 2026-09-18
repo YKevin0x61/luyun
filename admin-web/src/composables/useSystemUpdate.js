@@ -51,6 +51,9 @@ const DEFAULT_POLL_INTERVAL_MS = 2000
 const DEFAULT_RECHECK_INTERVAL_MS = 10_000
 const RECHECK_TICK_MS = 1000
 
+/** 正式发行版目录默认直接列出多少个（其余进「展开」区）。 */
+export const RELEASE_PREVIEW_LIMIT = 3
+
 /** Human-readable label for Version Check degraded_reason codes. */
 export function degradedReasonLabel(reason) {
   if (!reason) return ''
@@ -131,6 +134,18 @@ export function useSystemUpdate({
       && !job.value?.cancel_requested,
   )
 
+  // 正式发行版目录默认只列最新几个（后端已按新→旧排序），其余折叠展开。
+  const releases = computed(() =>
+    (Array.isArray(versionCheck.value?.releases) ? versionCheck.value.releases : []))
+  const visibleReleases = computed(() => releases.value.slice(0, RELEASE_PREVIEW_LIMIT))
+  const hiddenReleases = computed(() => releases.value.slice(RELEASE_PREVIEW_LIMIT))
+  /** 折叠区里是否含当前安装版本：回滚时最关心的就是它在哪一段。 */
+  const hiddenReleasesHasInstalled = computed(() => {
+    const installed = versionCheck.value?.installed_tag
+    if (!installed) return false
+    return hiddenReleases.value.some((release) => release?.tag === installed)
+  })
+
   /** 已切换发行包并发出重启，但健康确认还没通过。 */
   const unhealthy = computed(() => job.value?.stage === 'succeeded_but_unhealthy')
   const healthPending = computed(() => HEALTH_PENDING.has(job.value?.stage))
@@ -154,10 +169,15 @@ export function useSystemUpdate({
     }
   })
 
-  /** 版本回滚入口：回到上一版本＝对 previous_ref 再走一次应用更新。 */
+  /** 展示用的「回退点」：可能是 tag，本机身份缺 tag 时也可能是 commit（仅供排查）。 */
   const previousRef = computed(() => job.value?.previous_ref || '')
+  /**
+   * 可回退目标：apply 只接受 GitHub 正式发行 tag。previous_ref 若是 commit，
+   * 点了必然 400，所以只有后端给出 previous_tag 时才给「回到上一版本」入口。
+   */
+  const previousTag = computed(() => job.value?.previous_tag || '')
   const canRollbackToPrevious = computed(
-    () => !!previousRef.value && !applying.value && !jobInProgress.value,
+    () => !!previousTag.value && !applying.value && !jobInProgress.value,
   )
 
   function applyJobPayload(data) {
@@ -203,6 +223,11 @@ export function useSystemUpdate({
   const statusSummary = computed(() => {
     const vc = versionCheck.value
     if (!vc) return ''
+    // 目录没读到 ≠ 已是最新：断网/限流时 latest_tag 为空、update_available 为 false，
+    // 若照旧报「已是最新正式发行版」，管理员会漏掉真实更新。
+    if (vc.catalogue_ok === false) {
+      return '无法访问发行目录，版本对比不可用'
+    }
     if (vc.degraded) {
       return '已装身份异常，版本检测结果仅供参考'
     }
@@ -476,11 +501,11 @@ export function useSystemUpdate({
 
   /**
    * 回到上一版本：复用既有「应用更新」确认与预检，不新开更新通道。
-   * 目标就是作业记录里的 previous_ref（通常是切换前的 tag / commit）。
+   * 目标必须是正式发行 tag（previous_tag）；只有 commit 时没有可回退的入口。
    */
   function rollbackToPrevious() {
-    if (!previousRef.value) return
-    openApplyConfirm(previousRef.value)
+    if (!previousTag.value) return
+    openApplyConfirm(previousTag.value)
   }
 
   async function confirmApply() {
@@ -532,6 +557,9 @@ export function useSystemUpdate({
   return {
     stopPolling,
     versionCheck,
+    visibleReleases,
+    hiddenReleases,
+    hiddenReleasesHasInstalled,
     versionLoading,
     updateAvailable,
     statusSummary,
@@ -582,6 +610,7 @@ export function useSystemUpdate({
     stopAutoRecheck,
     // 版本回滚入口
     previousRef,
+    previousTag,
     canRollbackToPrevious,
     rollbackToPrevious,
     // 更新历史

@@ -9,6 +9,7 @@ from dataclasses import asdict
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from api.security import require_session, verify_admin_token
@@ -84,6 +85,7 @@ def _version_check_payload(result: VersionCheckResult) -> dict[str, Any]:
         "app_version": result.app_version,
         "latest_tag": result.latest_tag,
         "update_available": result.update_available,
+        "catalogue_ok": result.catalogue_ok,
         "releases": [asdict(r) for r in result.releases],
         "preflight": _preflight_payload(result.preflight),
         **public_deploy_status(),
@@ -125,8 +127,10 @@ async def version_check(
     release_update: ReleaseUpdate = Depends(get_release_update),
 ) -> dict[str, Any]:
     """Read-only Version Check — does not start an Update Job."""
+    # version_check 内部是同步 httpx 调用（最长约 15s×2）；单 worker 部署下在事件
+    # 循环里直接跑会把 /healthz、/ws/realtime 和采集接口一起卡住，所以丢线程池。
     try:
-        result = release_update.version_check()
+        result = await run_in_threadpool(release_update.version_check)
     except GitHubReleasesError as exc:
         logger.warning("Version Check GitHub failure: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -183,8 +187,10 @@ async def cancel_update_job(
     _session_id: str = Depends(require_session),
 ) -> dict[str, Any]:
     """Request abort of an in-progress Update Job (session-hardened)."""
+    # cancel 会同步等待作业退出（最多数秒）并同步跑 systemctl stop；
+    # 放在事件循环里会让整个主服务在这段时间不响应任何请求。
     try:
-        result = release_update.cancel()
+        result = await run_in_threadpool(release_update.cancel)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
@@ -204,7 +210,9 @@ async def apply_update(
     Session-required mutate (same hardening pattern as backup import).
     """
     try:
-        result = release_update.apply(
+        # apply 内部要读 GitHub 正式发行目录（同步 httpx），同样不能占用事件循环。
+        result = await run_in_threadpool(
+            release_update.apply,
             payload.target_tag,
             peak_override=payload.peak_override,
             discard_local_changes=payload.discard_local_changes,

@@ -436,6 +436,139 @@ describe('useBackupCenter', () => {
     expect(confirmChecked.overwrite).toBeUndefined()
   })
 
+  it('只恢复照片这类不动业务库的内容时，不强制登出', async () => {
+    apiUpload.mockResolvedValueOnce(previewPayload()).mockResolvedValueOnce({
+      success: true,
+      mode: 'merge',
+      applied: { credentials: false, runtime: false, app_db: false, recipes_db: false, standard_photos: false, other_photos: true },
+      applied_labels: ['其它照片'],
+      photos_restored: { standard: 0, other: 3 },
+      session_invalidated: false,
+    })
+    apiGet.mockResolvedValue({})
+    const location = { href: '/setup?section=backup' }
+    vi.stubGlobal('window', { location })
+    try {
+      const {
+        importState,
+        onImportFileChange,
+        onPreviewImport,
+        onApplyImport,
+        onConfirmClick,
+        importSuccessModal,
+        confirmImportSuccessRedirect,
+      } = makeHarness()
+
+      onImportFileChange({ name: 'backup.luyunbak' })
+      importState.passphrase = 'secret1'
+      await onPreviewImport()
+      // other_photos 在 default_apply 里默认勾选，且没有跨备份点差异 → 不需要强制继续
+      expect(importState.apply_other_photos).toBe(true)
+      onApplyImport()
+      await onConfirmClick()
+
+      expect(importSuccessModal.show).toBe(true)
+      expect(importSuccessModal.sessionInvalidated).toBe(false)
+
+      apiPost.mockClear()
+      await confirmImportSuccessRedirect()
+      expect(importSuccessModal.show).toBe(false)
+      expect(apiPost).not.toHaveBeenCalled()
+      expect(location.href).toBe('/setup?section=backup')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('还原了业务库（会话已失效）时才登出并跳登录页', async () => {
+    apiUpload.mockResolvedValueOnce(previewPayload()).mockResolvedValueOnce({
+      success: true,
+      mode: 'merge',
+      applied: { credentials: false, runtime: false, app_db: true, recipes_db: false, standard_photos: false, other_photos: false },
+      applied_labels: ['业务数据'],
+      photos_restored: { standard: 0, other: 0 },
+      session_invalidated: true,
+    })
+    apiGet.mockResolvedValue({})
+    apiPost.mockResolvedValue({ success: true })
+    const location = { href: '/setup?section=backup' }
+    vi.stubGlobal('window', { location })
+    try {
+      const {
+        importState,
+        onImportFileChange,
+        onPreviewImport,
+        onApplyImport,
+        onConfirmClick,
+        importSuccessModal,
+        confirmImportSuccessRedirect,
+      } = makeHarness()
+
+      onImportFileChange({ name: 'backup.luyunbak' })
+      importState.passphrase = 'secret1'
+      await onPreviewImport()
+      onApplyImport()
+      await onConfirmClick()
+
+      expect(importSuccessModal.sessionInvalidated).toBe(true)
+      await confirmImportSuccessRedirect()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/auth/logout')
+      expect(location.href).toBe('/login')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('合并导入有未写入的行时如实提示，不只说成功', async () => {
+    apiUpload.mockResolvedValueOnce(previewPayload()).mockResolvedValueOnce({
+      success: true,
+      mode: 'merge',
+      applied: { credentials: false, runtime: false, app_db: true, recipes_db: false, standard_photos: false, other_photos: false },
+      applied_labels: ['业务数据'],
+      photos_restored: { standard: 0, other: 0 },
+      snapshot_ts: '20260901_120000',
+      session_invalidated: false,
+      merge_failed_rows: 3,
+      merge_reports: {
+        app_db: {
+          total_imported: 10,
+          total_failed: 3,
+          results: [
+            {
+              table: 'orders',
+              status: 'PARTIAL',
+              imported: 10,
+              failed: 3,
+              errors: [
+                { table: 'orders', key: 'mf-1', error: 'NOT NULL constraint failed' },
+              ],
+            },
+          ],
+        },
+      },
+    })
+    apiGet.mockResolvedValue({})
+    const {
+      importState,
+      onImportFileChange,
+      onPreviewImport,
+      onApplyImport,
+      onConfirmClick,
+      importSuccessModal,
+    } = makeHarness()
+
+    onImportFileChange({ name: 'backup.luyunbak' })
+    importState.passphrase = 'secret1'
+    await onPreviewImport()
+    onApplyImport()
+    await onConfirmClick()
+
+    expect(importSuccessModal.show).toBe(true)
+    expect(importSuccessModal.message).toContain('3 行没能写入')
+    expect(importSuccessModal.message).toContain('orders（mf-1）：NOT NULL constraint failed')
+  })
+
   it('warns when the restored library references photos missing on disk', async () => {
     apiUpload.mockResolvedValueOnce(previewPayload()).mockResolvedValueOnce({
       success: true,

@@ -12,6 +12,8 @@ import {
   CONTENT_OTHER_PHOTOS,
   CONTENT_STANDARD_PHOTOS,
   PHOTO_CONTENTS,
+  backupPointRow,
+  backupPointsEmptyHint,
   cleanupDeleteSummary,
 } from '../utils/backupPoints'
 
@@ -198,11 +200,7 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     points.value.filter((p) => p.medium === 'cold_backup'))
 
   /** 空列表时给一句可操作的话，而不是一张空表。 */
-  const pointsEmptyHint = computed(() => {
-    if (points.value.length) return ''
-    if (!coldPoints.value.length) return '还没有可用于恢复的备份'
-    return '还没有可用于恢复的备份（下方冷备只读，不能在页面直接恢复）'
-  })
+  const pointsEmptyHint = computed(() => backupPointsEmptyHint(points.value))
 
   async function loadPoints() {
     pointsLoading.value = true
@@ -252,26 +250,11 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
   }
 
   function pointDisplay(point) {
-    const result = validateResults[point?.id]
-    const check = point?.basic_check || null
-    return {
-      mediumLabel: point?.medium_label
-        || mediumLabels.value[point?.medium]
-        || point?.medium
-        || '—',
-      purpose: point?.purpose || mediumPurposes.value[point?.medium] || '—',
-      provenanceLabel: point?.provenance_label || '—',
-      sizeLabel: formatBytes(point?.size_bytes),
-      createdLabel: point?.created_at ? formatTs(point.created_at) : '（时间未知）',
-      contentsLabels: Array.isArray(point?.contents_labels) ? point.contents_labels : [],
-      missingLabels: (point?.missing || []).map((m) => m.label || m.content),
-      photoSummary: point?.photos || {},
-      // 校验结论优先用刚刚手动跑出来的结果，其次用列表里的基础校验。
-      checkOk: result ? !!result.ok : (check ? !!check.ok : null),
-      checkMessages: result?.messages || check?.messages || [],
-      recoverable: result ? !!result.recoverable : point?.recoverable !== false,
-      checkAt: result?.checked_at || null,
-    }
+    return backupPointRow(point, {
+      mediumLabels: mediumLabels.value,
+      mediumPurposes: mediumPurposes.value,
+      validateResult: validateResults[point?.id] || null,
+    })
   }
 
   // ==================== 导入 / 恢复预览 ====================
@@ -490,7 +473,7 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     }
   }
 
-  const importSuccessModal = reactive({ show: false, message: '' })
+  const importSuccessModal = reactive({ show: false, message: '', sessionInvalidated: false })
 
   function importSuccessMessage(data, verb) {
     const parts = []
@@ -509,6 +492,22 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
         + '请重新上传这些标准图，或用含照片的冷备归档补齐。'
     }
     if (data?.session_invalidated) msg += '当前登录会话已失效，请点击确认后重新登录。'
+    // 合并模式可能有个别行写不进去（约束冲突 / 类型不匹配 / 磁盘错误）：
+    // 后端会带回逐表报告，这里如实说明，不能只说「恢复成功」。
+    const failedRows = Number(data?.merge_failed_rows) || 0
+    if (failedRows) {
+      const samples = []
+      for (const report of Object.values(data?.merge_reports || {})) {
+        for (const table of report?.results || []) {
+          for (const err of table?.errors || []) {
+            samples.push(`${table.table}${err.key ? `（${err.key}）` : ''}：${err.error}`)
+          }
+        }
+      }
+      msg += `⚠️ 有 ${failedRows} 行没能写入，这些行没有恢复成功`
+        + (samples.length ? `。例如 ${samples.slice(0, 3).join('；')}` : '')
+        + '。'
+    }
     return msg
   }
 
@@ -537,6 +536,7 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       importState.passphrase = ''
       forceContinue.value = false
       importSuccessModal.message = importSuccessMessage(data, '恢复')
+      importSuccessModal.sessionInvalidated = !!data?.session_invalidated
       importSuccessModal.show = true
       await Promise.all([loadPoints(), loadHealth()])
     } catch (err) {
@@ -603,8 +603,13 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     )
   }
 
+  /**
+   * 只恢复了照片 / 配方这类不碰 app.db 的内容时，会话并没有失效：这时关掉弹窗
+   * 留在本页即可。只有后端明确说会话已失效（还原了 app.db）才登出并跳登录页。
+   */
   async function confirmImportSuccessRedirect() {
     importSuccessModal.show = false
+    if (!importSuccessModal.sessionInvalidated) return
     try {
       await api.post('/api/auth/logout')
     } catch (_) {
