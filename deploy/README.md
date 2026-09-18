@@ -563,3 +563,31 @@ sudo systemctl start luyun
 - **已切 PG**：把 `DATABASE_BACKEND` 改回 `sqlite` 重启。迁移脚本全程只读源库，
   `data/app.db` 仍在原位，因此**回滚不丢数据**；但停机切换到切回之间的 PG 新增
   数据不会回到 SQLite，需要人工取舍。观察期结束前不要删 `data/app.db`。
+
+### 10.6 后台重置数据库密码
+
+后台「设置 → 数据库凭据」可以查看当前连接信息并一键重置 PostgreSQL 业务角色的
+密码，不需要登录服务器。
+
+它依次做四件事：`ALTER USER`（用当前 DSN，只改自己这个角色）→ 用新密码另建连接
+验证 → 把新 DSN 原子写回 `deploy/env.production` → 重启应用让新 DSN 生效。
+**任何一步失败都会把密码改回原值**，不会留下「文件写了但库没改」这种下次重启就
+连不上库的状态。
+
+| 场景 | 行为 |
+| --- | --- |
+| 当前后端是 SQLite | 面板说明无需密码，按钮禁用 |
+| 连接串里没有密码（本机 trust 认证） | 拒绝重置（无法回滚），面板给出说明 |
+| 设了 `LUYUN_POSTGRES_DSN` 环境变量 | 拒绝并提示：它优先于 `deploy/env.production`，写文件不生效 |
+| 当前密码短于 16 位 | 面板警示，建议重置为 32 位随机密码 |
+
+**安全约定**：与其它管理接口同一鉴权；重置需**二次输入后台管理员密码**；新密码由
+服务端用 `secrets` 生成 32 位 DSN 安全字符（`A–Z a–z 0–9`），**响应里不回显**，
+只落 `deploy/env.production`；审计日志只记「谁改了哪个角色」，不记密码。
+
+> 密码在 `deploy/env.production` 里是明文（文件权限 600）。这个文件属于「更新时
+> 保留」清单，升级不会覆盖它；Docker 形态下 entrypoint 启动时会 source 它并覆盖
+> compose 注入的同名变量，所以改它就等于改了下一次启动用的 DSN。
+>
+> 前提：镜像里的 `pg_dump` 客户端版本必须 ≥ 服务端（否则更新前备份会失败），见
+> `deploy/Dockerfile` 的注释与 `tests/test_docker_compose_contract.py` 的契约测试。

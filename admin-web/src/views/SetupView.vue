@@ -11,6 +11,8 @@ import { useRuntimeSettings } from '../composables/useRuntimeSettings'
 import { useBackupCenter } from '../composables/useBackupCenter'
 import { useAccountSettings } from '../composables/useAccountSettings'
 import { useSystemUpdate } from '../composables/useSystemUpdate'
+import { useDbCredentials } from '../composables/useDbCredentials'
+import { useSystemHealth } from '../composables/useSystemHealth'
 
 const route = useRoute()
 const router = useRouter()
@@ -27,8 +29,10 @@ function goBack() {
 const SECTIONS = [
   { id: 'pos', label: 'POS 凭据', icon: 'settings' },
   { id: 'runtime', label: '运行配置', icon: 'settings' },
+  { id: 'health', label: '系统健康状态', icon: 'settings' },
   { id: 'backup', label: '备份中心', icon: 'settings' },
   { id: 'update', label: '系统更新', icon: 'settings' },
+  { id: 'database', label: '数据库凭据', icon: 'settings' },
   { id: 'account', label: '账号与 API Token', icon: 'settings' },
 ]
 const activeSection = ref('pos')
@@ -262,10 +266,64 @@ const {
   failureCount,
 } = useSystemUpdate({ showAlert, clearAlert })
 
+const {
+  dbCred,
+  dbCredLoading,
+  dbCredError,
+  loadDbCred,
+  dbIsPostgres,
+  dbEnvOverride,
+  dbPasswordLengthLabel,
+  dbEnvFileWritable,
+  dbPasswordWarning,
+  dbPasswordWarningType,
+  dbResetDisabled,
+  dbResetDisabledReason,
+  dbResetConfirm,
+  dbResetShowPassword,
+  dbResetToggleLabel,
+  dbResetting,
+  dbResetBtnLabel,
+  openDbReset,
+  closeDbReset,
+  dbResetSubmit,
+  dbResetResult,
+} = useDbCredentials({ showAlert, clearAlert })
+
+const {
+  sysHealthLoading,
+  sysHealthError,
+  sysHealthReady,
+  sysHealthProbe,
+  sysHealthProcess,
+  loadSysHealth,
+  sysHealthProbeDbLabel,
+  sysHealthProbeStatusLabel,
+  sysHealthReadyLabel,
+  sysHealthDiskLevel,
+  sysHealthDiskLabel,
+  sysHealthDiskFreeLabel,
+  sysHealthReadyChecks,
+  sysHealthReadyDetails,
+  sysHealthOverallLabel,
+  sysHealthOverallPillClass,
+  sysHealthUptimeLabel,
+  sysHealthVersion,
+  sysHealthRssLabel,
+  sysHealthMemoryPressureLabel,
+  sysHealthLastCleanup,
+  sysHealthCounts,
+  sysHealthScraperHealth,
+  sysHealthReconcileRunning,
+  sysHealthReconcileProgressLabel,
+} = useSystemHealth({ clearAlert })
+
 function switchSection(id) {
   activeSection.value = id
   if (id === 'account') loadTokenList()
   if (id === 'runtime') loadRuntimeSettings()
+  if (id === 'health') loadSysHealth()
+  if (id === 'database') loadDbCred()
   if (id === 'backup') {
     loadPoints()
     loadHealth()
@@ -485,6 +543,107 @@ onMounted(() => {
               <button type="button" class="btn" @click="resetRuntimeDefaults">恢复默认</button>
               <button type="button" class="btn btn-primary" :disabled="runtimeSaving" @click="saveRuntimeSettings">{{ runtimeSaveLabel }}</button>
             </div>
+          </div>
+
+          <div v-show="activeSection === 'health'" class="section-panel">
+            <fieldset>
+              <legend>总体状态</legend>
+              <div class="actions" style="justify-content:flex-start;align-items:center;">
+                <span class="status-pill" :class="sysHealthOverallPillClass">{{ sysHealthOverallLabel }}</span>
+                <button type="button" class="btn" :disabled="sysHealthLoading" @click="loadSysHealth">
+                  {{ sysHealthLoading ? '检查中…' : '重新检查' }}
+                </button>
+              </div>
+              <p class="hint" style="margin-top:10px;">
+                只读聚合运行时就绪、访问探针、进程资源与采集健康；本页不触发任何写操作。
+              </p>
+              <div v-if="sysHealthError" class="alert error show" style="margin-top:12px;">
+                部分检查不可用：{{ sysHealthError }}
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend>运行时就绪</legend>
+              <div v-if="!sysHealthReady" class="hint">未获取到就绪信息。</div>
+              <template v-else>
+                <div class="meta-grid" style="margin-bottom:12px;">
+                  <div><span class="k">状态</span><span class="v">{{ sysHealthReadyLabel }}</span></div>
+                  <div><span class="k">版本</span><span class="v">{{ sysHealthVersion }}</span></div>
+                  <div><span class="k">启动时间</span><span class="v">{{ formatTs(sysHealthReady.started_at) || '—' }}</span></div>
+                  <div><span class="k">启动标识</span><span class="v">{{ sysHealthReady.startup_id || '—' }}</span></div>
+                </div>
+                <div
+                  v-for="c in sysHealthReadyChecks"
+                  :key="c.key"
+                  class="hint"
+                  style="display:flex;align-items:center;gap:8px;margin-top:6px;"
+                >
+                  <span class="status-pill" :class="c.ok ? 'ok' : 'error'">{{ c.ok ? '通过' : '未通过' }}</span>
+                  <span>{{ c.label }}</span>
+                </div>
+                <ul v-if="sysHealthReadyDetails.length" class="confirm-details" style="margin-top:10px;">
+                  <li v-for="(d, i) in sysHealthReadyDetails" :key="i">{{ d }}</li>
+                </ul>
+              </template>
+            </fieldset>
+
+            <fieldset>
+              <legend>访问探针与磁盘</legend>
+              <div v-if="!sysHealthProbe" class="hint">未获取到探针结果。</div>
+              <template v-else>
+                <div class="meta-grid">
+                  <div><span class="k">数据库</span><span class="v">{{ sysHealthProbeDbLabel }}</span></div>
+                  <div><span class="k">磁盘水位</span><span class="v">{{ sysHealthDiskLabel }}</span></div>
+                  <div><span class="k">剩余空间</span><span class="v">{{ sysHealthDiskFreeLabel }}</span></div>
+                  <div><span class="k">探针结论</span><span class="v">{{ sysHealthProbeStatusLabel }}</span></div>
+                </div>
+                <div v-if="sysHealthDiskLevel === 'critical'" class="alert error show" style="margin-top:12px;">
+                  磁盘剩余空间严重不足，采集与备份可能失败，请尽快在宿主机清理。
+                </div>
+                <div v-else-if="sysHealthDiskLevel === 'warning'" class="alert show" style="margin-top:12px;">
+                  磁盘剩余空间偏低，建议尽快清理或扩容。
+                </div>
+              </template>
+            </fieldset>
+
+            <fieldset>
+              <legend>进程与资源</legend>
+              <div v-if="!sysHealthProcess" class="hint">未获取到进程状态。</div>
+              <template v-else>
+                <div class="meta-grid" :style="sysHealthCounts.length ? 'margin-bottom:12px;' : ''">
+                  <div><span class="k">运行时长</span><span class="v">{{ sysHealthUptimeLabel }}</span></div>
+                  <div><span class="k">进程内存</span><span class="v">{{ sysHealthRssLabel }}</span></div>
+                  <div><span class="k">内存压力</span><span class="v">{{ sysHealthMemoryPressureLabel }}</span></div>
+                  <div><span class="k">上次内存清理</span><span class="v">{{ formatTs(sysHealthLastCleanup) || '—' }}</span></div>
+                </div>
+                <div v-if="sysHealthCounts.length" class="meta-grid">
+                  <div v-for="c in sysHealthCounts" :key="c.key"><span class="k">{{ c.label }}</span><span class="v">{{ c.value }}</span></div>
+                </div>
+              </template>
+            </fieldset>
+
+            <fieldset>
+              <legend>采集与对账</legend>
+              <div v-if="!sysHealthScraperHealth" class="hint">未获取到采集健康数据。</div>
+              <template v-else>
+                <div class="meta-grid" style="margin-bottom:12px;">
+                  <div><span class="k">营业日</span><span class="v">{{ sysHealthScraperHealth.biz_date || '—' }}</span></div>
+                  <div>
+                    <span class="k">API 失败数</span>
+                    <span class="v" :style="(sysHealthScraperHealth.api_failures || 0) > 0 ? 'color:var(--yellow)' : 'color:var(--green)'">
+                      {{ sysHealthScraperHealth.api_failures ?? 0 }}
+                    </span>
+                  </div>
+                  <div><span class="k">最后采集</span><span class="v">{{ formatTs(sysHealthScraperHealth.last_scrape_at) || '—' }}</span></div>
+                  <div><span class="k">最后对账</span><span class="v">{{ formatTs(sysHealthScraperHealth.last_reconcile?.at) || '—' }}</span></div>
+                  <div><span class="k">对账状态</span><span class="v">{{ sysHealthReconcileRunning ? '进行中' : '空闲' }}</span></div>
+                </div>
+                <div v-if="sysHealthReconcileProgressLabel" class="hint">对账进度：{{ sysHealthReconcileProgressLabel }}</div>
+                <div v-if="sysHealthScraperHealth.last_reconcile?.report_md" class="hint">
+                  报告：<code>{{ sysHealthScraperHealth.last_reconcile.report_md }}</code>
+                </div>
+              </template>
+            </fieldset>
           </div>
 
           <div v-show="activeSection === 'backup'" class="section-panel">
@@ -1422,6 +1581,80 @@ onMounted(() => {
             </fieldset>
           </div>
 
+          <div v-show="activeSection === 'database'" class="section-panel">
+            <fieldset>
+              <legend>当前数据库连接</legend>
+              <p class="hint" style="margin-bottom:12px;">
+                仅展示连接信息与脱敏 DSN；数据库密码不会在页面显示或索取，重置后的新密码只写入下方 env 文件。
+              </p>
+              <div v-if="dbCredLoading" class="hint">加载中…</div>
+              <div v-else-if="dbCredError" class="hint" style="color:var(--red);">
+                加载失败：{{ dbCredError }}
+                <button type="button" class="btn btn-sm" style="margin-left:8px;" @click="loadDbCred">重试</button>
+              </div>
+              <template v-else-if="dbCred">
+                <div class="meta-grid" style="margin-bottom:12px;">
+                  <div><span class="k">后端</span><span class="v">{{ dbCred.backend || '—' }}</span></div>
+                  <div><span class="k">用户</span><span class="v">{{ dbCred.user || '—' }}</span></div>
+                  <div><span class="k">主机</span><span class="v">{{ dbCred.host || '—' }}</span></div>
+                  <div><span class="k">端口</span><span class="v">{{ dbCred.port || '—' }}</span></div>
+                  <div><span class="k">数据库</span><span class="v">{{ dbCred.database || '—' }}</span></div>
+                  <div><span class="k">密码长度</span><span class="v">{{ dbPasswordLengthLabel }}</span></div>
+                  <div style="grid-column:1 / -1;">
+                    <span class="k">DSN（脱敏）</span>
+                    <span class="v" style="word-break:break-all;text-align:right;">{{ dbCred.dsn || '—' }}</span>
+                  </div>
+                  <div style="grid-column:1 / -1;">
+                    <span class="k">env 文件</span>
+                    <span class="v" style="word-break:break-all;text-align:right;">{{ dbCred.env_file || '—' }}<span v-if="!dbEnvFileWritable" class="dim">（不可写）</span></span>
+                  </div>
+                </div>
+
+                <div
+                  v-if="dbPasswordWarning && dbIsPostgres"
+                  class="alert show"
+                  :class="dbPasswordWarningType"
+                  style="margin-bottom:12px;"
+                >
+                  {{ dbPasswordWarning }}
+                </div>
+                <div v-if="dbEnvOverride" class="alert error show" style="margin-bottom:12px;">
+                  检测到环境变量 <code>LUYUN_POSTGRES_DSN</code> 已被显式设置，其优先级高于 env 文件
+                  <code>{{ dbCred.env_file || 'env 文件' }}</code>，重置写文件不会生效。<template v-if="dbCred.env_override_target">当前生效的连接来自 <code>{{ dbCred.env_override_target }}</code>。</template>
+                  请先移除该环境变量并重启应用，再回来重置。
+                </div>
+                <div v-else-if="!dbIsPostgres" class="alert info show" style="margin-bottom:12px;">
+                  当前为 SQLite 后端，无需数据库密码。
+                </div>
+                <div v-else-if="!dbEnvFileWritable" class="alert info show" style="margin-bottom:12px;">
+                  env 文件当前不可写，重置可能失败；请先修好文件权限（{{ dbCred.env_file || 'env 文件' }}）。
+                </div>
+
+                <div class="actions" style="justify-content:flex-start;">
+                  <button type="button" class="btn" :disabled="dbCredLoading" @click="loadDbCred">刷新连接信息</button>
+                  <button type="button" class="btn btn-danger" :disabled="dbResetDisabled || dbResetting" @click="openDbReset">重置密码</button>
+                </div>
+                <div v-if="dbResetDisabledReason" class="hint">{{ dbResetDisabledReason }}</div>
+                <div v-else class="hint">重置会生成 32 位随机密码并写入 env 文件，需要二次确认当前后台管理员密码。</div>
+
+                <div
+                  v-if="dbResetResult.show"
+                  class="alert show"
+                  :class="dbResetResult.restartError ? 'error' : 'success'"
+                  style="margin-top:12px;"
+                >
+                  <div>
+                    新密码已生成并写入 <code>{{ dbResetResult.envFile || '—' }}</code><template v-if="dbResetResult.passwordLength">（{{ dbResetResult.passwordLength }} 位）</template>；页面不会显示密码明文。
+                  </div>
+                  <div v-if="dbResetResult.restartTriggered">应用正在重启，页面稍后会自动重连。</div>
+                  <div v-if="dbResetResult.restartError">
+                    自动重启未成功：{{ dbResetResult.restartError }}，请手动重启应用使新密码生效。
+                  </div>
+                </div>
+              </template>
+            </fieldset>
+          </div>
+
           <div v-show="activeSection === 'account'" class="section-panel">
         <fieldset>
           <legend>当前登录</legend>
@@ -1531,6 +1764,40 @@ onMounted(() => {
       </div>
     </div>
 
+    <!-- 重置数据库密码：二次确认必须输入当前后台管理员密码，不使用浏览器原生 prompt -->
+    <div v-if="dbResetConfirm.open" class="modal-overlay show" role="dialog" aria-modal="true">
+      <div class="modal-box">
+        <h3>重置数据库密码</h3>
+        <p>
+          将为 <code>{{ dbCred?.user || '当前数据库角色' }}</code> 生成 32 位随机密码并写入
+          <code>{{ dbCred?.env_file || 'env 文件' }}</code>。页面不会显示新密码明文，写入后需重启应用才生效。
+          请输入当前后台管理员密码以确认本次重置。
+        </p>
+        <div class="grid">
+          <div class="full">
+            <label for="dbResetPassword">当前后台管理员密码</label>
+            <div class="password-row">
+              <input
+                class="input"
+                id="dbResetPassword"
+                v-model="dbResetConfirm.password"
+                :type="dbResetShowPassword ? 'text' : 'password'"
+                autocomplete="current-password"
+                placeholder="输入当前登录后台的密码"
+                @keyup.enter="dbResetSubmit"
+              >
+              <button type="button" class="toggle" @click="dbResetShowPassword = !dbResetShowPassword">{{ dbResetToggleLabel }}</button>
+            </div>
+          </div>
+        </div>
+        <div v-if="dbResetConfirm.error" class="alert error show" style="margin-top:12px;">{{ dbResetConfirm.error }}</div>
+        <div class="actions">
+          <button type="button" class="btn" :disabled="dbResetting" @click="closeDbReset">取消</button>
+          <button type="button" class="btn btn-danger" :disabled="dbResetting" @click="dbResetSubmit">{{ dbResetBtnLabel }}</button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="tokenModal.show" class="modal-overlay show" role="dialog" aria-modal="true">
       <div class="modal-box">
         <h3>API Token 已生成</h3>
@@ -1584,6 +1851,7 @@ h1 { font-size: 20px; margin-bottom: 6px; display: flex; align-items: center; ga
 }
 .status-pill.ok { background: rgba(34, 197, 94, 0.15); color: var(--green); }
 .status-pill.empty { background: rgba(245, 158, 11, 0.15); color: var(--yellow); }
+.status-pill.error { background: rgba(239, 68, 68, 0.15); color: var(--red); }
 
 .alert {
   padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px;

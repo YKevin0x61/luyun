@@ -54,6 +54,9 @@ async function request(path, { method = 'GET', params, body, signal, cache } = {
     const err = new Error(message)
     err.status = res.status
     err.detail = detail
+    // 非 2xx 也带上已解析的响应体：/api/healthz 未就绪时返回 503，
+    // 但 db/disk 水位只在 body 里，调用方需要能读到。
+    err.data = data
     throw err
   }
   return data

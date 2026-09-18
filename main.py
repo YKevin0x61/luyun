@@ -24,6 +24,7 @@ from api import orders, dishes, dish_stations, semi_rules, report_dishes, prep_p
 from api.admin import router as admin_router
 from api.recipes import router as recipes_router
 from api.credentials import router as credentials_router
+from api.db_credentials import router as db_credentials_router
 from api.backup import router as backup_router
 from api.release_update import router as release_update_router
 from api.runtime_settings import router as runtime_settings_router
@@ -659,6 +660,7 @@ app.include_router(prep_plan.router)
 app.include_router(wecom_push.router)
 app.include_router(admin_router)
 app.include_router(credentials_router)
+app.include_router(db_credentials_router)
 app.include_router(backup_router)
 app.include_router(release_update_router)
 app.include_router(runtime_settings_router)
