@@ -227,16 +227,30 @@ class _ConnectionMixin:
         """只读探测若干关键表是否存在且可查询。
 
         返回 ``{"readable": bool, "missing": [...], "errors": [...]}``；不修改任何数据。
+
+        两处必须兼容两种后端，否则 PG 下会把所有关键表都判为不可读
+        （现场 0.6.0 → 0.6.2 升级后就这样卡在「已切换但未健康」）：
+
+        - **表名目录**：SQLite 在 ``sqlite_master``，PG 在 ``pg_tables``；
+        - **执行姿势**：用 ``cursor = await conn.execute(...)``，而不是
+          ``async with conn.execute(...)`` —— PG 后端的 ``execute`` 是 ``async def``，
+          返回 coroutine，不满足异步上下文管理器协议（SQLite 的 aiosqlite 返回
+          Cursor，所以这个写法一直没暴露）。
         """
         missing: list = []
         errors: list = []
         if self._main_conn is None:
             return {"readable": False, "missing": list(tables), "errors": ["数据库未连接"]}
+
+        backend = (getattr(settings, "DATABASE_BACKEND", "sqlite") or "sqlite").lower()
+        if backend == "postgres":
+            names_sql = "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+        else:
+            names_sql = "SELECT name FROM sqlite_master WHERE type='table'"
+
         try:
-            async with self._main_conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ) as cursor:
-                names = {row[0] for row in await cursor.fetchall()}
+            cursor = await self._main_conn.execute(names_sql)
+            names = {row[0] for row in await cursor.fetchall()}
         except Exception as exc:  # pragma: no cover - defensive
             return {"readable": False, "missing": list(tables), "errors": [str(exc)]}
 
@@ -245,10 +259,8 @@ class _ConnectionMixin:
                 missing.append(table)
                 continue
             try:
-                async with self._main_conn.execute(
-                    f"SELECT 1 FROM {table} LIMIT 1"
-                ) as cursor:
-                    await cursor.fetchone()
+                cursor = await self._main_conn.execute(f"SELECT 1 FROM {table} LIMIT 1")
+                await cursor.fetchone()
             except Exception as exc:
                 errors.append(f"{table}: {exc}")
 
