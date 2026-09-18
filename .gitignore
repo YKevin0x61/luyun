@@ -114,6 +114,7 @@ config.local.*
 docs/*
 !docs/README.md
 !docs/RELEASE_AND_DEPLOY.md
+!docs/UPGRADE_TO_0_6_0.md
 !docs/release-asset-layout.md
 !docs/adr/
 docs/adr/*

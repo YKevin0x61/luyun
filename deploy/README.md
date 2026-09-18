@@ -467,6 +467,9 @@ Redis 容器已在 `docker-compose.yml` 的 `pg` profile 里备好，但**代码
 
 ### 10.2 新机器：直接上 PostgreSQL
 
+> **0.5.19 → 0.6.0 的完整升级方案**（含 Docker 形态、切 PG 前置、回滚、排查表）
+> 见 [UPGRADE_TO_0_6_0.md](../docs/UPGRADE_TO_0_6_0.md)。
+
 ### 10.2 一键切换（推荐）
 
 ```bash

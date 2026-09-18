@@ -9,6 +9,7 @@
 | 文档 | 内容 |
 |------|------|
 | [RELEASE_AND_DEPLOY.md](./RELEASE_AND_DEPLOY.md) | **发行规范与部署流程**（发版清单、Bootstrap、店内升级/回滚；入口文档） |
+| [UPGRADE_TO_0_6_0.md](./UPGRADE_TO_0_6_0.md) | **升级到 0.6.0 操作方案**（Docker/systemd、切 PG、回滚、排查） |
 | [release-asset-layout.md](./release-asset-layout.md) | GitHub Release 前端资产契约（Admin / KDS tar.gz） |
 | [MULTI_STORE_PLAN.md](./MULTI_STORE_PLAN.md) | **多店 / 多人 / 三方接入改造方案**（规划中，含性能地基实测与迁移路径） |
 | [adr/](./adr/) | 架构决策记录（编号 0001–0083）；仓库布局规则见 [ADR 0012](./adr/0012-repo-layout.md) |
