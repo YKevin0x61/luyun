@@ -57,6 +57,40 @@ def hygiene_business_date(now: datetime) -> str:
     return local.date().isoformat()
 
 
+def shift_pick_conflict_target() -> str:
+    """hygiene_shift_picks 的 upsert 冲突目标，必须与当前后端的唯一索引一致。
+
+    SQLite 的表没有 tenant_id 列（唯一约束 = employee_id + business_date），
+    PG schema 的唯一索引则是 (tenant_id, employee_id, business_date)。写错会报
+    「there is no unique or exclusion constraint matching the ON CONFLICT
+    specification」——现场 0.6.0 + PG 上就是这么炸的。
+    """
+    backend = (getattr(settings, "DATABASE_BACKEND", "sqlite") or "sqlite").lower()
+    if backend == "postgres":
+        return "tenant_id, employee_id, business_date"
+    return "employee_id, business_date"
+
+
+def shift_pick_upsert_sql(with_zone: bool) -> str:
+    """hygiene_shift_picks 的 upsert 语句（冲突目标随后端，见上）。"""
+    target = shift_pick_conflict_target()
+    if with_zone:
+        return (
+            "INSERT INTO hygiene_shift_picks "
+            "(employee_id, business_date, shift, zone_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            f"ON CONFLICT({target}) DO UPDATE SET "
+            "shift = excluded.shift, zone_id = excluded.zone_id, updated_at = excluded.updated_at"
+        )
+    return (
+        "INSERT INTO hygiene_shift_picks "
+        "(employee_id, business_date, shift, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        f"ON CONFLICT({target}) DO UPDATE SET "
+        "shift = excluded.shift, updated_at = excluded.updated_at"
+    )
+
+
 class EmployeeAccountsError(ValueError):
     def __init__(self, code: str, message: str = ""):
         self.code = code
@@ -572,13 +606,7 @@ class EmployeeAccounts:
         business_date = self._business_date()
         now = self._now_iso()
         await self._conn.execute(
-            """INSERT INTO hygiene_shift_picks
-               (employee_id, business_date, shift, zone_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(employee_id, business_date) DO UPDATE SET
-                 shift = excluded.shift,
-                 zone_id = excluded.zone_id,
-                 updated_at = excluded.updated_at""",
+            shift_pick_upsert_sql(with_zone=True),
             (employee_id, business_date, shift, int(zone_id), now, now),
         )
         await self._conn.commit()
@@ -644,12 +672,7 @@ class EmployeeAccounts:
         business_date = self._business_date()
         now = self._now_iso()
         await self._conn.execute(
-            """INSERT INTO hygiene_shift_picks
-               (employee_id, business_date, shift, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(employee_id, business_date) DO UPDATE SET
-                 shift = excluded.shift,
-                 updated_at = excluded.updated_at""",
+            shift_pick_upsert_sql(with_zone=False),
             (employee_id, business_date, shift, now, now),
         )
         await self._conn.commit()
@@ -668,13 +691,7 @@ class EmployeeAccounts:
         business_date = self._business_date()
         now = self._now_iso()
         await self._conn.execute(
-            """INSERT INTO hygiene_shift_picks
-               (employee_id, business_date, shift, zone_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(employee_id, business_date) DO UPDATE SET
-                 shift = excluded.shift,
-                 zone_id = excluded.zone_id,
-                 updated_at = excluded.updated_at""",
+            shift_pick_upsert_sql(with_zone=True),
             (employee_id, business_date, shift, int(zone_id), now, now),
         )
         await self._conn.commit()
