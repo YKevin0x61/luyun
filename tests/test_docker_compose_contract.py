@@ -72,6 +72,33 @@ class DockerComposeContractTest(unittest.TestCase):
                 f"export {var}=", text, f"docker_up.sh 应把 {var} 绝对化后导出"
             )
 
+    def test_pg_dump_client_matches_compose_server_version(self):
+        """pg_dump 客户端版本必须 ≥ compose 里的服务端版本。
+
+        pg_dump 拒绝 dump 比它新的服务端（aborting because of server version
+        mismatch）。Debian 12 官方源的 postgresql-client 是 15，而 compose 起的是
+        postgres:16 —— 现场更新作业就卡死在 backing_up 的 pg_dump 上。
+        """
+        import re
+
+        compose = COMPOSE.read_text(encoding="utf-8")
+        match = re.search(r"image:\s*postgres:(\d+)", compose)
+        self.assertIsNotNone(match, "compose 里找不到 postgres 镜像版本")
+        server_major = match.group(1)
+
+        df = DOCKERFILE.read_text(encoding="utf-8")
+        self.assertIn(
+            f"postgresql-client-{server_major}",
+            df,
+            f"Dockerfile 必须装与服务端同大版本的 postgresql-client-{server_major}",
+        )
+        self.assertIn("apt.postgresql.org", df, "Debian 官方源没有新版本，需要 PGDG 源")
+        self.assertNotRegex(
+            df,
+            r"postgresql-client(?![-\w])",
+            "不能再装 postgresql-client 元包（会拉 Debian 自带的旧版本）",
+        )
+
 
 class ReleaseUpdateFactoryDockerWiringTest(unittest.TestCase):
     def test_factory_uses_docker_oneshot_when_mode_docker(self):

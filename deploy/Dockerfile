@@ -10,14 +10,25 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LUYUN_APP_DIR=/srv/luyun/app \
     LUYUN_DEPLOY_MODE=docker
 
+# pg_dump 客户端版本必须 ≥ 服务端：它拒绝 dump 比它新的服务端
+# （aborting because of server version mismatch），而 PostgreSQL 后端的「更新前
+# 备份」正是靠 pg_dump。Debian 12 官方源只有 15，compose 起的却是 postgres:16，
+# 所以从 PGDG 源装 16。**升级 compose 里的 PG 大版本时必须同步改这里**，否则更新
+# 会卡在 backing_up 阶段（tests/test_docker_compose_contract.py 会拦住这种漂移）。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         tar \
         sqlite3 \
-        postgresql-client \
         tini \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+         -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+         > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-16 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python deps + Chromium into the image so first boot and scraper

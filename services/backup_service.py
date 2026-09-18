@@ -795,6 +795,37 @@ def is_postgres_backend() -> bool:
     return (getattr(settings, "DATABASE_BACKEND", "sqlite") or "sqlite").lower() == "postgres"
 
 
+def _redact_dsn_password(text: str, dsn: str) -> str:
+    """抹掉文本里可能出现的 DSN 密码。
+
+    pg_dump 偶尔会把连接串回显进 stderr；错误信息会进更新作业日志、后台页面和
+    运维报告，密码不能跟着走。
+    """
+    if not text or not dsn:
+        return text
+    match = re.search(r"://[^:/@]+:([^@]*)@", dsn)
+    if match and match.group(1):
+        text = text.replace(match.group(1), "***")
+    return text
+
+
+def _pg_dump_failure_hint(stderr: str) -> str:
+    """把 pg_dump 的常见失败翻译成可执行的下一步。"""
+    low = (stderr or "").lower()
+    if "version mismatch" in low:
+        return (
+            "（pg_dump 版本低于服务端：镜像里的 postgresql-client 需与服务端同大版本，"
+            "重建镜像后重试）"
+        )
+    if "password authentication failed" in low or "authentication" in low:
+        return "（认证失败：核对 POSTGRES_DSN 的用户名/密码，以及 pg_hba.conf 是否已 reload）"
+    if "could not connect" in low or "connection refused" in low or "could not translate host" in low:
+        return "（连不上服务端：核对 DSN 的主机/端口与 postgres 容器状态）"
+    if "permission denied" in low:
+        return "（权限不足：确认该角色能读取全部表）"
+    return ""
+
+
 def _pg_dump_sync(dst_path: str) -> None:
     """用 pg_dump 导出整库（custom format）。
 
@@ -825,8 +856,15 @@ def _pg_dump_sync(dst_path: str) -> None:
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("pg_dump 超时（1800s）") from exc
     if proc.returncode != 0:
-        # 别把 stderr 原样抛出：连接串可能含密码
-        raise RuntimeError(f"pg_dump 失败（退出码 {proc.returncode}）")
+        # 只脱敏密码，stderr 原文要带出来：否则现场只剩「退出码 1」，根因全靠猜。
+        detail = _redact_dsn_password((proc.stderr or "").strip(), dsn)
+        hint = _pg_dump_failure_hint(detail)
+        message = f"pg_dump 失败（退出码 {proc.returncode}）"
+        if detail:
+            message = f"{message}：{detail}"
+        if hint:
+            message = f"{message} {hint}"
+        raise RuntimeError(message)
 
 
 def _scan_capture_members(root: Path) -> Dict[str, Any]:

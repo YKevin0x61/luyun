@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -67,8 +68,65 @@ class DefaultPreflightEnvAdapter:
         except (OSError, subprocess.TimeoutExpired):
             return True, "PostgreSQL（探测超时，跳过）"
         if completed.returncode == 0:
-            return True, "PostgreSQL 可访问"
+            return self._pg_dump_state(dsn)
         return False, "PostgreSQL 不可访问（检查数据库服务与 POSTGRES_DSN）"
+
+    def _pg_dump_state(self, dsn: str) -> tuple[bool, Optional[str]]:
+        """更新前备份在 PG 后端下靠 pg_dump，而 pg_dump 拒绝 dump 比它新的服务端。
+
+        pg_dump 15 对上服务端 16 会直接 `aborting because of server version
+        mismatch` —— 现场更新作业就是这样卡在 backing_up 的。镜像里的客户端来自
+        基础镜像的 apt 源，很容易落后于 compose 起的 postgres 大版本，所以这里提前
+        红灯，而不是等更新走到一半失败。
+
+        注意与 pg_isready 的差别：pg_dump **缺失**同样意味着备份必失败，因此判红，
+        不能套用「探测工具缺失就放过」的原则。
+        """
+        exe = shutil.which("pg_dump")
+        if not exe:
+            return False, "未找到 pg_dump（PostgreSQL 后端需要 postgresql-client）"
+        client = self._tool_major_version(exe)
+        server = self._server_major_version(dsn)
+        if client is None or server is None:
+            return True, f"PostgreSQL 可访问（pg_dump {client or '?'}，未能比对服务端版本）"
+        if client < server:
+            return False, (
+                f"pg_dump {client} 低于服务端 {server}：更新前备份会失败，"
+                "请重建镜像（镜像里的 postgresql-client 需与服务端同大版本）"
+            )
+        return True, f"PostgreSQL 可访问（pg_dump {client} ≥ 服务端 {server}）"
+
+    @staticmethod
+    def _tool_major_version(exe: str) -> Optional[int]:
+        try:
+            completed = subprocess.run(
+                [exe, "--version"], capture_output=True, text=True, timeout=10, check=False
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        match = re.search(r"(\d+)\.", completed.stdout or "")
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _server_major_version(dsn: str) -> Optional[int]:
+        """用 psql 读服务端版本；psql 本身不做版本检查，旧客户端也能连新服务端。"""
+        psql = shutil.which("psql")
+        if not psql:
+            return None
+        try:
+            completed = subprocess.run(
+                [psql, "-d", dsn, "-tAc", "SHOW server_version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode != 0:
+            return None
+        match = re.search(r"(\d+)", completed.stdout or "")
+        return int(match.group(1)) if match else None
 
     def _disk_state(self) -> tuple[bool, Optional[float]]:
         """更新会跑 pip sync 写 .venv，必须先确认还有空间。
