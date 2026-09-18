@@ -9,6 +9,11 @@ CI 环境通常没有 PostgreSQL，整组自动跳过。
 import asyncio
 import unittest
 
+try:  # asyncpg 是 PG 后端依赖；缺失时整组测试跳过（见 pg_available）
+    import asyncpg
+except ImportError:  # pragma: no cover
+    asyncpg = None  # type: ignore[assignment]
+
 from db_core.backend import pg as pg_backend
 
 PROBE_DDL = (
@@ -20,9 +25,7 @@ PROBE_DDL = (
 
 
 def pg_available() -> bool:
-    try:
-        import asyncpg  # noqa: F401
-    except ImportError:
+    if asyncpg is None:
         return False
 
     async def probe() -> bool:
@@ -209,6 +212,39 @@ class PgConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         cur = await self.conn.execute("SELECT count(*) FROM probe")
         # 1 条在 setUp 里写入 + 10 条并发写入
         self.assertEqual((await cur.fetchone())[0], 11)
+
+    async def test_failed_statement_releases_connection(self):
+        """事务内语句报错 → PG 事务已 aborted，必须立刻回滚。
+
+        否则 aborted 事务会占着串行锁：其他任务全被挡在锁外（全站卡死），
+        持有者自己的后续语句也只会收到 InFailedSQLTransactionError。
+        """
+        with self.assertRaises(asyncpg.exceptions.UniqueViolationError):
+            # probe.id 是 IDENTITY，setUp 已占用 id=1
+            await self.conn.execute("INSERT INTO probe (id, name) VALUES (?, ?)", (1, "冲突"))
+
+        self.assertFalse(self.conn.in_transaction(), "报错后事务应已被丢弃")
+
+        async def read() -> int:
+            cur = await self.conn.execute("SELECT count(*) FROM probe")
+            return (await cur.fetchone())[0]
+
+        self.assertEqual(await asyncio.wait_for(read(), timeout=5), 1)
+
+    async def test_stale_transaction_is_cleaned_on_takeover(self):
+        """持有事务的任务异常结束后，后续任务不能被那个悬挂事务污染。"""
+
+        async def writer() -> None:
+            await self.conn.execute("INSERT INTO probe (name) VALUES (?)", ("悬挂",))
+            raise RuntimeError("模拟写路径异常退出（未 commit/rollback）")
+
+        with self.assertRaises(RuntimeError):
+            await asyncio.create_task(writer())
+
+        # 新任务接管：悬挂事务必须被回滚，未提交的那条不能出现
+        cur = await self.conn.execute("SELECT count(*) FROM probe")
+        self.assertEqual((await cur.fetchone())[0], 1)
+        self.assertFalse(self.conn.in_transaction())
 
     async def test_open_transaction_blocks_other_tasks_until_commit(self):
         """事务未提交时，其他任务的操作必须在锁上等待，不能落进别人的事务。"""

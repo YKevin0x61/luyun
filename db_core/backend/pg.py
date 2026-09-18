@@ -234,26 +234,31 @@ class PgCursor:
         # 整条语句在串行锁内执行：方言解析也要读 raw（rowid → 行标识列），
         # 外层不加锁的话同一条连接仍会被并发使用。
         async with self._connection.guard():
-            translated = await self._translate(sql)
-            raw = self._connection.raw
-            self._connection.bump_query_count()
+            try:
+                translated = await self._translate(sql)
+                raw = self._connection.raw
+                self._connection.bump_query_count()
 
-            # 写操作进入显式事务（对齐 aiosqlite 语义），commit/rollback 由调用方决定
-            if self._connection.is_write_sql(translated):
-                await self._connection.ensure_transaction()
+                # 写操作进入显式事务（对齐 aiosqlite 语义），commit/rollback 由调用方决定
+                if self._connection.is_write_sql(translated):
+                    await self._connection.ensure_transaction()
 
-            if _INSERT_RE.match(translated):
-                return await self._execute_insert(raw, translated, params)
+                if _INSERT_RE.match(translated):
+                    return await self._execute_insert(raw, translated, params)
 
-            if _SELECT_RE.match(translated):
-                self._rows = [PgRow(r) for r in await self._run(raw.fetch, translated, params)]
-                self.rowcount = len(self._rows)
+                if _SELECT_RE.match(translated):
+                    self._rows = [PgRow(r) for r in await self._run(raw.fetch, translated, params)]
+                    self.rowcount = len(self._rows)
+                    return self
+
+                # UPDATE / DELETE / DDL：asyncpg 返回 command tag，需解析出真实行数
+                status = await self._run(raw.execute, translated, params)
+                self.rowcount = rowcount_from_status(status)
                 return self
-
-            # UPDATE / DELETE / DDL：asyncpg 返回 command tag，需解析出真实行数
-            status = await self._run(raw.execute, translated, params)
-            self.rowcount = rowcount_from_status(status)
-            return self
+            except asyncpg.PostgresError:
+                # 服务端报错会让事务进入 aborted 并占住串行锁，立刻回滚释放。
+                await self._connection.discard_aborted_transaction()
+                raise
 
     async def _execute_insert(self, raw, translated: str, params) -> "PgCursor":
         """INSERT：按需追加 ``RETURNING id`` 以支撑 ``lastrowid``。
@@ -366,19 +371,23 @@ class _TaskGuard:
         self._owner: Optional[asyncio.Task] = None
         self._depth = 0
 
-    async def acquire(self) -> None:
+    async def acquire(self) -> bool:
+        """取得锁；返回值表示是否强制接管了「已结束的持有者」留下的锁。"""
         task = asyncio.current_task()
         if self._owner is task:
             self._depth += 1
-            return
+            return False
+        stole = False
         # 持有者已结束却没归还（写路径异常退出）：强制接管，否则后续所有
         # 数据库操作都会永久卡在这把锁上。
         if self._owner is not None and self._owner.done():
             logger.warning("PG 连接锁的持有者已结束但未释放，强制接管")
             self._reset()
+            stole = True
         await self._lock.acquire()
         self._owner = task
         self._depth = 1
+        return stole
 
     def release(self) -> None:
         if self._depth <= 0:
@@ -480,6 +489,40 @@ class PgConnection:
             self._tx_guard_held = False
             self._guard.release()
 
+    async def discard_aborted_transaction(self) -> None:
+        """语句报错后丢弃已 aborted 的事务，并把事务持有的锁还回去。
+
+        PG 的事务一旦有语句报错就进入 aborted：除 ROLLBACK 外任何语句都失败。
+        此时若不回滚，aborted 事务会一直占着串行锁——其他任务全部被挡在锁外
+        （等于全站卡死），持有者自己的后续语句也只会不断报
+        ``InFailedSQLTransactionError``。所以这里立刻回滚，异常仍照原样抛给调用方。
+        """
+        if self._tx is None:
+            return
+        logger.warning("PG 事务内语句报错，已回滚该事务以避免 aborted 状态占住连接")
+        try:
+            await self.rollback()
+        except Exception:
+            logger.debug("回滚 aborted 事务失败", exc_info=True)
+            self._tx = None
+            self._release_tx_guard()
+
+    async def _discard_stale_transaction(self) -> None:
+        """清理上一个（已结束的）任务留下的悬挂事务。
+
+        锁被强制接管时，连接上可能还挂着别人的事务；不回滚的话，当前任务会误以为
+        自己已在事务里，语句会落进那个陈旧事务。这里**不动当前任务的锁**。
+        """
+        if self._tx is None:
+            return
+        logger.warning("接管陈旧连接锁时发现悬挂事务，已回滚")
+        tx, self._tx = self._tx, None
+        self._tx_guard_held = False  # 陈旧标记清零，不能把当前任务的锁带走
+        try:
+            await tx.rollback()
+        except Exception:
+            logger.debug("回滚悬挂事务失败", exc_info=True)
+
     @classmethod
     def is_write_sql(cls, translated: str) -> bool:
         return translated.lstrip()[:8].upper().startswith(cls._WRITE_PREFIXES)
@@ -495,7 +538,9 @@ class PgConnection:
     @asynccontextmanager
     async def guard(self) -> AsyncIterator[None]:
         """把一次连接操作放进串行锁内；同一任务内嵌套获取是安全的。"""
-        await self._guard.acquire()
+        stole = await self._guard.acquire()
+        if stole:
+            await self._discard_stale_transaction()
         try:
             yield
         finally:
