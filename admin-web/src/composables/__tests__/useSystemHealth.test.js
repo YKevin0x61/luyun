@@ -198,6 +198,200 @@ describe('useSystemHealth 结论推导', () => {
   })
 })
 
+describe('useSystemHealth 图表派生', () => {
+  const realDisk = {
+    level: 'ok',
+    threshold_free_mb: 2048,
+    worst: {
+      path: '/srv/luyun/data',
+      total_mb: 471482.1,
+      used_mb: 360969.6,
+      free_mb: 110512.5,
+      used_pct: 76.6,
+      level: 'ok',
+    },
+    paths: [
+      { path: '/srv/luyun/data', total_mb: 471482.1, used_mb: 360969.6, free_mb: 110512.5, used_pct: 76.6, level: 'ok' },
+    ],
+  }
+
+  it('磁盘明细优先取 /api/system/status，与探针的 free_mb 合并成一张容量图', async () => {
+    mockRoutes(
+      happyRoutes({
+        '/api/healthz': probePayload({ disk: { level: 'ok', free_mb: 110512.5 } }),
+        '/api/system/status': processPayload({ disk: realDisk }),
+      }),
+    )
+    const h = useSystemHealth({ clearAlert: vi.fn() })
+
+    await h.loadSysHealth()
+
+    expect(h.sysHealthDisk.value).toMatchObject({
+      level: 'ok',
+      total_mb: 471482.1,
+      used_mb: 360969.6,
+      free_mb: 110512.5,
+      used_pct: 76.6,
+      threshold_free_mb: 2048,
+      path: '/srv/luyun/data',
+    })
+    expect(h.sysHealthDiskFreeLabel.value).toBe('107.92 GB')
+    expect(h.sysHealthDiskGauge.value.mode).toBe('capacity')
+    expect(h.sysHealthDiskGauge.value.pct).toBeCloseTo(76.6, 3)
+    expect(h.sysHealthDiskGauge.value.thresholdText).toBe('空闲门槛 2.00 GB')
+    expect(h.sysHealthDiskGauge.value.ariaLabel).toContain('空闲门槛 2.00 GB')
+  })
+
+  it('worst 缺 used_pct 时用 used/total 推算，探针没有总量时退化为空闲量表', async () => {
+    mockRoutes(
+      happyRoutes({
+        '/api/system/status': processPayload({
+          disk: { level: 'warning', threshold_free_mb: 2048, worst: { total_mb: 1000, used_mb: 750, free_mb: 250 } },
+        }),
+      }),
+    )
+    const h = useSystemHealth({ clearAlert: vi.fn() })
+
+    await h.loadSysHealth()
+
+    expect(h.sysHealthDisk.value.used_pct).toBeCloseTo(75, 3)
+    expect(h.sysHealthDiskGauge.value.mode).toBe('capacity')
+
+    // 只有探针（无总量）时退化为空闲量表
+    mockRoutes(happyRoutes({ '/api/healthz': probePayload({ disk: { level: 'ok', free_mb: 4096 } }) }))
+    const probeOnly = useSystemHealth({ clearAlert: vi.fn() })
+    await probeOnly.loadSysHealth()
+
+    expect(probeOnly.sysHealthDiskGauge.value.mode).toBe('free')
+    expect(probeOnly.sysHealthDiskGauge.value.valueText).toBe('空闲 4.00 GB')
+  })
+
+  it('内存量表带三档阈值，数据量条按最大值等比并给千分位数字', async () => {
+    mockRoutes(
+      happyRoutes({
+        '/api/system/status': processPayload({
+          database: { orders: { count: 182345 }, tables: { count: 21 }, dish_stations: { count: 7 } },
+          memory: {
+            pressure_level: 'normal',
+            peak_memory_mb: 780.1,
+            cleanups: 2,
+            current_usage: { rss_mb: 412.3 },
+            thresholds: { warning_mb: 1536, cleanup_mb: 2048, critical_mb: 2560 },
+          },
+        }),
+      }),
+    )
+    const h = useSystemHealth({ clearAlert: vi.fn() })
+
+    await h.loadSysHealth()
+
+    expect(h.sysHealthMemoryGauge.value.zones).toHaveLength(4)
+    expect(h.sysHealthMemoryGauge.value.peak.label).toBe('峰值 780.1 MB')
+    expect(h.sysHealthMemoryGauge.value.thresholdText).toContain('2.50 GB')
+    expect(h.sysHealthCounts.value.map((c) => c.display)).toEqual(['182,345', '21', '7'])
+    expect(h.sysHealthCounts.value[0].pct).toBe(100)
+    expect(h.sysHealthCounts.value[1].pct).toBeLessThan(0.02)
+  })
+
+  it('失败量表在缺门槛时给出数量与「未知」，就绪检查带符号', async () => {
+    mockRoutes(
+      happyRoutes({
+        '/api/system/scraper-health': scraperPayload({ api_failures: 3 }),
+        '/api/system/health': readyPayload({ db_connected: false }),
+      }),
+    )
+    const h = useSystemHealth({ clearAlert: vi.fn() })
+
+    await h.loadSysHealth()
+
+    expect(h.sysHealthFailureGauge.value.valueText).toBe('当前 3 次')
+    expect(h.sysHealthFailureGauge.value.level).toBe('warning')
+    expect(h.sysHealthFailureGauge.value.thresholdText).toBe('告警门槛未知')
+    expect(h.sysHealthReadyChecks.value.find((c) => c.key === 'db_connected')).toMatchObject({
+      symbol: '✗',
+      statusText: '未通过',
+    })
+    expect(h.sysHealthReadyHasFailure.value).toBe(true)
+  })
+
+  it('对账接口不可用但 scraper-health 说在跑时，按运行中（总量未知）显示', async () => {
+    mockRoutes(
+      happyRoutes({
+        '/api/admin/reconcile-status': new Error('对账状态不可用'),
+        '/api/system/scraper-health': scraperPayload({ reconcile_running: true }),
+      }),
+    )
+    const h = useSystemHealth({ clearAlert: vi.fn() })
+
+    await h.loadSysHealth()
+
+    expect(h.sysHealthReconcileRunning.value).toBe(true)
+    expect(h.sysHealthReconcileProgress.value.running).toBe(true)
+    expect(h.sysHealthReconcileProgress.value.indeterminate).toBe(true)
+  })
+
+  it('对账接口明确说空闲时，不因 scraper-health 的旧标记而误报在跑', async () => {
+    mockRoutes(
+      happyRoutes({ '/api/system/scraper-health': scraperPayload({ reconcile_running: true }) }),
+    )
+    const h = useSystemHealth({ clearAlert: vi.fn() })
+
+    await h.loadSysHealth()
+
+    expect(h.sysHealthReconcileRunning.value).toBe(false)
+    expect(h.sysHealthReconcileProgress.value.message).toBe('当前没有对账任务在跑')
+  })
+
+  it('原始指标分组保留峰值内存、GC、清理时间、分区与采集时间', async () => {
+    mockRoutes(
+      happyRoutes({
+        '/api/system/status': processPayload({
+          disk: realDisk,
+          memory: {
+            pressure_level: 'normal',
+            peak_memory_mb: 780.1,
+            cleanup_count: 4,
+            gc_collections: 12,
+            last_cleanup: '2026-09-19T04:00:00+08:00',
+            current_usage: { rss_mb: 412.3 },
+          },
+        }),
+        '/api/system/scraper-health': scraperPayload({
+          delivery_bills_pending: 2,
+          updated_at: '2026-09-19T05:00:00+08:00',
+        }),
+      }),
+    )
+    const h = useSystemHealth({ clearAlert: vi.fn() })
+
+    await h.loadSysHealth()
+
+    const groups = Object.fromEntries(h.sysHealthRawFacts.value.map((g) => [g.key, g.items]))
+    expect(groups.process).toEqual(
+      expect.arrayContaining([
+        { k: '峰值内存', v: '780.1 MB' },
+        { k: 'GC 次数', v: '12' },
+        { k: '内存清理次数', v: '4' },
+        { k: '上次内存清理', v: '2026-09-19 04:00:00' },
+      ]),
+    )
+    expect(groups['disk-paths'][0].k).toBe('/srv/luyun/data')
+    expect(groups['disk-paths'][0].v).toContain('空闲 107.92 GB')
+    expect(groups.scraper).toEqual(
+      expect.arrayContaining([
+        { k: '待结配送单', v: '2' },
+        { k: '状态更新时间', v: '2026-09-19 05:00:00' },
+      ]),
+    )
+    expect(groups.counts).toEqual(
+      expect.arrayContaining([
+        { k: '订单', v: '10' },
+        { k: '桌台', v: '2' },
+      ]),
+    )
+  })
+})
+
 describe('useSystemHealth 格式化', () => {
   it('formatUptime 覆盖秒/分/时/天与非法值', () => {
     expect(formatUptime(45)).toBe('45 秒')

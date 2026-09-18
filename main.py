@@ -828,6 +828,21 @@ async def get_system_status():
         
         # 🆕 获取内存统计
         memory_stats = memory_manager.get_memory_stats()
+
+        # 🆕 磁盘水位：健康页要画水位图，需要分母（total/used_pct）。healthz 按设计
+        # 只给聚合 free_mb（它服务探针），所以放在这里。探测失败不能让整个接口 500。
+        try:
+            disk_items = disk_guard.snapshot()
+            worst = min(disk_items, key=lambda item: item["free_mb"]) if disk_items else None
+            disk_stats = {
+                "level": disk_guard.worst_level(),
+                "threshold_free_mb": settings.UPDATE_MIN_FREE_MB,
+                "worst": worst,
+                "paths": disk_items,
+            }
+        except Exception as exc:
+            logger.warning(f"读取磁盘水位失败: {exc}")
+            disk_stats = {"error": "无法读取磁盘水位"}
         
         # 计算运行时间
         startup_time = getattr(app, 'startup_time', datetime.now(CHINA_TZ))
@@ -839,6 +854,7 @@ async def get_system_status():
             "version": settings.APP_VERSION,
             "database": db_stats,
             "memory": memory_stats,
+            "disk": disk_stats,
             "last_update": datetime.now(CHINA_TZ)
         }
         return serialize_all(result)
@@ -878,6 +894,8 @@ async def get_public_scraper_health():
         "health": {
             "biz_date": health.get("biz_date") or current_biz_date_str(),
             "api_failures": health.get("api_failures", 0),
+            # 阈值一并给出：健康页要在图里画阈值线，前端自己硬编码会与配置漂移
+            "api_failures_threshold": settings.SCRAPER_ALERT_FAILURE_THRESHOLD,
             "delivery_bills_pending": health.get("delivery_bills_pending"),
             "last_scrape_at": health.get("last_scrape_at"),
             "last_reconcile": health.get("last_reconcile"),

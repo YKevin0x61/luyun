@@ -13,6 +13,13 @@ import { useAccountSettings } from '../composables/useAccountSettings'
 import { useSystemUpdate } from '../composables/useSystemUpdate'
 import { useDbCredentials } from '../composables/useDbCredentials'
 import { useSystemHealth } from '../composables/useSystemHealth'
+import { formatCount, formatMb } from '../utils/systemHealthFormat'
+import SvgIcon from '../components/SvgIcon.vue'
+import HealthSummary from '../components/system/HealthSummary.vue'
+import BulletGauge from '../components/system/BulletGauge.vue'
+import UsageBar from '../components/system/UsageBar.vue'
+import ReadinessGrid from '../components/system/ReadinessGrid.vue'
+import ReconcileProgress from '../components/system/ReconcileProgress.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -299,23 +306,21 @@ const {
   loadSysHealth,
   sysHealthProbeDbLabel,
   sysHealthProbeStatusLabel,
-  sysHealthReadyLabel,
-  sysHealthDiskLevel,
-  sysHealthDiskLabel,
-  sysHealthDiskFreeLabel,
   sysHealthReadyChecks,
   sysHealthReadyDetails,
+  sysHealthReadyHasFailure,
   sysHealthOverallLabel,
   sysHealthOverallPillClass,
   sysHealthUptimeLabel,
   sysHealthVersion,
-  sysHealthRssLabel,
-  sysHealthMemoryPressureLabel,
-  sysHealthLastCleanup,
+  sysHealthDisk,
+  sysHealthDiskGauge,
+  sysHealthMemoryGauge,
+  sysHealthFailureGauge,
   sysHealthCounts,
   sysHealthScraperHealth,
-  sysHealthReconcileRunning,
-  sysHealthReconcileProgressLabel,
+  sysHealthReconcileProgress,
+  sysHealthRawFacts,
 } = useSystemHealth({ clearAlert })
 
 function switchSection(id) {
@@ -546,104 +551,175 @@ onMounted(() => {
           </div>
 
           <div v-show="activeSection === 'health'" class="section-panel">
-            <fieldset>
-              <legend>总体状态</legend>
-              <div class="actions" style="justify-content:flex-start;align-items:center;">
-                <span class="status-pill" :class="sysHealthOverallPillClass">{{ sysHealthOverallLabel }}</span>
-                <button type="button" class="btn" :disabled="sysHealthLoading" @click="loadSysHealth">
-                  {{ sysHealthLoading ? '检查中…' : '重新检查' }}
-                </button>
-              </div>
-              <p class="hint" style="margin-top:10px;">
-                只读聚合运行时就绪、访问探针、进程资源与采集健康；本页不触发任何写操作。
-              </p>
-              <div v-if="sysHealthError" class="alert error show" style="margin-top:12px;">
-                部分检查不可用：{{ sysHealthError }}
-              </div>
-            </fieldset>
+            <HealthSummary
+              :pill-class="sysHealthOverallPillClass"
+              :overall-label="sysHealthOverallLabel"
+              :version="sysHealthVersion"
+              :uptime-label="sysHealthUptimeLabel"
+              :loading="sysHealthLoading"
+              :error="sysHealthError"
+              @refresh="loadSysHealth"
+            />
+            <p class="hint health-panel__note">
+              只读聚合运行时就绪、访问探针、进程资源与采集健康；本页不触发任何写操作，图表为当前值对照阈值的量表。
+            </p>
 
-            <fieldset>
-              <legend>运行时就绪</legend>
-              <div v-if="!sysHealthReady" class="hint">未获取到就绪信息。</div>
-              <template v-else>
-                <div class="meta-grid" style="margin-bottom:12px;">
-                  <div><span class="k">状态</span><span class="v">{{ sysHealthReadyLabel }}</span></div>
-                  <div><span class="k">版本</span><span class="v">{{ sysHealthVersion }}</span></div>
-                  <div><span class="k">启动时间</span><span class="v">{{ formatTs(sysHealthReady.started_at) || '—' }}</span></div>
-                  <div><span class="k">启动标识</span><span class="v">{{ sysHealthReady.startup_id || '—' }}</span></div>
-                </div>
-                <div
-                  v-for="c in sysHealthReadyChecks"
-                  :key="c.key"
-                  class="hint"
-                  style="display:flex;align-items:center;gap:8px;margin-top:6px;"
-                >
-                  <span class="status-pill" :class="c.ok ? 'ok' : 'error'">{{ c.ok ? '通过' : '未通过' }}</span>
-                  <span>{{ c.label }}</span>
-                </div>
-                <ul v-if="sysHealthReadyDetails.length" class="confirm-details" style="margin-top:10px;">
-                  <li v-for="(d, i) in sysHealthReadyDetails" :key="i">{{ d }}</li>
-                </ul>
-              </template>
-            </fieldset>
-
-            <fieldset>
-              <legend>访问探针与磁盘</legend>
-              <div v-if="!sysHealthProbe" class="hint">未获取到探针结果。</div>
-              <template v-else>
-                <div class="meta-grid">
-                  <div><span class="k">数据库</span><span class="v">{{ sysHealthProbeDbLabel }}</span></div>
-                  <div><span class="k">磁盘水位</span><span class="v">{{ sysHealthDiskLabel }}</span></div>
-                  <div><span class="k">剩余空间</span><span class="v">{{ sysHealthDiskFreeLabel }}</span></div>
-                  <div><span class="k">探针结论</span><span class="v">{{ sysHealthProbeStatusLabel }}</span></div>
-                </div>
-                <div v-if="sysHealthDiskLevel === 'critical'" class="alert error show" style="margin-top:12px;">
+            <div class="health-cards">
+              <section class="health-card" aria-labelledby="health-card-disk">
+                <h3 id="health-card-disk" class="health-card__title">
+                  <SvgIcon name="database" :size="14" />磁盘水位
+                </h3>
+                <BulletGauge
+                  title="磁盘空闲"
+                  :level="sysHealthDiskGauge.level"
+                  :level-label="sysHealthDiskGauge.levelLabel"
+                  :pct="sysHealthDiskGauge.pct"
+                  :zones="sysHealthDiskGauge.zones"
+                  :marker-pct="sysHealthDiskGauge.markerPct"
+                  :value-text="sysHealthDiskGauge.valueText"
+                  :threshold-text="sysHealthDiskGauge.thresholdText"
+                  :caption="sysHealthDiskGauge.caption"
+                  :aria-label="sysHealthDiskGauge.ariaLabel"
+                />
+                <dl v-if="sysHealthDisk" class="health-facts">
+                  <div><dt>挂载点</dt><dd>{{ sysHealthDisk.path || '—' }}</dd></div>
+                  <div><dt>空闲</dt><dd>{{ formatMb(sysHealthDisk.free_mb) }}</dd></div>
+                </dl>
+                <p v-else class="hint">未获取到磁盘明细。</p>
+                <p v-if="sysHealthDiskGauge.level === 'critical'" class="health-warn is-critical">
                   磁盘剩余空间严重不足，采集与备份可能失败，请尽快在宿主机清理。
-                </div>
-                <div v-else-if="sysHealthDiskLevel === 'warning'" class="alert show" style="margin-top:12px;">
+                </p>
+                <p v-else-if="sysHealthDiskGauge.level === 'warning'" class="health-warn is-warning">
                   磁盘剩余空间偏低，建议尽快清理或扩容。
-                </div>
-              </template>
-            </fieldset>
+                </p>
+              </section>
 
-            <fieldset>
-              <legend>进程与资源</legend>
-              <div v-if="!sysHealthProcess" class="hint">未获取到进程状态。</div>
-              <template v-else>
-                <div class="meta-grid" :style="sysHealthCounts.length ? 'margin-bottom:12px;' : ''">
-                  <div><span class="k">运行时长</span><span class="v">{{ sysHealthUptimeLabel }}</span></div>
-                  <div><span class="k">进程内存</span><span class="v">{{ sysHealthRssLabel }}</span></div>
-                  <div><span class="k">内存压力</span><span class="v">{{ sysHealthMemoryPressureLabel }}</span></div>
-                  <div><span class="k">上次内存清理</span><span class="v">{{ formatTs(sysHealthLastCleanup) || '—' }}</span></div>
-                </div>
-                <div v-if="sysHealthCounts.length" class="meta-grid">
-                  <div v-for="c in sysHealthCounts" :key="c.key"><span class="k">{{ c.label }}</span><span class="v">{{ c.value }}</span></div>
-                </div>
-              </template>
-            </fieldset>
+              <section class="health-card" aria-labelledby="health-card-memory">
+                <h3 id="health-card-memory" class="health-card__title">
+                  <SvgIcon name="bar-chart" :size="14" />内存用量
+                </h3>
+                <BulletGauge
+                  title="进程内存（RSS）"
+                  :level="sysHealthMemoryGauge.level"
+                  :level-label="sysHealthMemoryGauge.levelLabel"
+                  :pct="sysHealthMemoryGauge.pct"
+                  :zones="sysHealthMemoryGauge.zones"
+                  :marker-pct="sysHealthMemoryGauge.markerPct"
+                  :value-text="sysHealthMemoryGauge.valueText"
+                  :threshold-text="sysHealthMemoryGauge.thresholdText"
+                  :caption="sysHealthMemoryGauge.caption"
+                  :peak="sysHealthMemoryGauge.peak"
+                  :aria-label="sysHealthMemoryGauge.ariaLabel"
+                />
+                <dl v-if="sysHealthProcess?.memory" class="health-facts">
+                  <div><dt>峰值内存</dt><dd>{{ formatMb(sysHealthProcess.memory.peak_memory_mb) }}</dd></div>
+                  <div><dt>上次内存清理</dt><dd>{{ formatTs(sysHealthProcess.memory.last_cleanup) || '—' }}</dd></div>
+                  <div><dt>内存清理次数</dt><dd>{{ formatCount(sysHealthProcess.memory.cleanup_count) }}</dd></div>
+                  <div><dt>GC 次数</dt><dd>{{ formatCount(sysHealthProcess.memory.gc_collections) }}</dd></div>
+                </dl>
+                <p v-else class="hint">未获取到进程内存信息。</p>
+              </section>
 
-            <fieldset>
-              <legend>采集与对账</legend>
-              <div v-if="!sysHealthScraperHealth" class="hint">未获取到采集健康数据。</div>
-              <template v-else>
-                <div class="meta-grid" style="margin-bottom:12px;">
-                  <div><span class="k">营业日</span><span class="v">{{ sysHealthScraperHealth.biz_date || '—' }}</span></div>
+              <section class="health-card" aria-labelledby="health-card-failures">
+                <h3 id="health-card-failures" class="health-card__title">
+                  <SvgIcon name="alert-triangle" :size="14" />采集失败
+                </h3>
+                <BulletGauge
+                  title="API 失败次数"
+                  :level="sysHealthFailureGauge.level"
+                  :level-label="sysHealthFailureGauge.levelLabel"
+                  :pct="sysHealthFailureGauge.pct"
+                  :zones="sysHealthFailureGauge.zones"
+                  :marker-pct="sysHealthFailureGauge.markerPct"
+                  :value-text="sysHealthFailureGauge.valueText"
+                  :threshold-text="sysHealthFailureGauge.thresholdText"
+                  :caption="sysHealthFailureGauge.caption"
+                  :aria-label="sysHealthFailureGauge.ariaLabel"
+                />
+                <dl v-if="sysHealthScraperHealth" class="health-facts">
+                  <div><dt>营业日</dt><dd>{{ sysHealthScraperHealth.biz_date || '—' }}</dd></div>
+                  <div><dt>最后采集</dt><dd>{{ formatTs(sysHealthScraperHealth.last_scrape_at) || '—' }}</dd></div>
+                  <div><dt>待结配送单</dt><dd>{{ formatCount(sysHealthScraperHealth.delivery_bills_pending) }}</dd></div>
+                  <div><dt>状态更新</dt><dd>{{ formatTs(sysHealthScraperHealth.updated_at) || '—' }}</dd></div>
+                </dl>
+                <p v-else class="hint">未获取到采集健康数据。</p>
+              </section>
+
+              <section class="health-card" aria-labelledby="health-card-counts">
+                <h3 id="health-card-counts" class="health-card__title">
+                  <SvgIcon name="layout-grid" :size="14" />数据量
+                </h3>
+                <div v-if="sysHealthCounts.length" class="health-usage">
+                  <UsageBar
+                    v-for="c in sysHealthCounts"
+                    :key="c.key"
+                    :label="c.label"
+                    :display="c.display"
+                    :pct="c.pct"
+                    :aria-label="c.ariaLabel"
+                  />
+                  <p class="hint">条长按三者最大值等比，真实数量以右侧数字为准。</p>
+                </div>
+                <p v-else class="hint">未获取到数据量统计。</p>
+              </section>
+
+              <section class="health-card" aria-labelledby="health-card-readiness">
+                <h3 id="health-card-readiness" class="health-card__title">
+                  <SvgIcon name="check-circle" :size="14" />就绪检查
+                </h3>
+                <ReadinessGrid
+                  :items="sysHealthReadyChecks"
+                  :details="sysHealthReadyDetails"
+                  :has-failure="sysHealthReadyHasFailure"
+                />
+                <dl v-if="sysHealthReady" class="health-facts">
+                  <div><dt>版本</dt><dd>{{ sysHealthVersion }}</dd></div>
+                  <div><dt>启动时间</dt><dd>{{ formatTs(sysHealthReady.started_at) || '—' }}</dd></div>
+                  <div><dt>启动标识</dt><dd>{{ sysHealthReady.startup_id || '—' }}</dd></div>
+                </dl>
+                <dl v-if="sysHealthProbe" class="health-facts">
+                  <div><dt>探针结论</dt><dd>{{ sysHealthProbeStatusLabel }}</dd></div>
+                  <div><dt>数据库</dt><dd>{{ sysHealthProbeDbLabel }}</dd></div>
+                </dl>
+              </section>
+
+              <section class="health-card" aria-labelledby="health-card-reconcile">
+                <h3 id="health-card-reconcile" class="health-card__title">
+                  <SvgIcon name="refresh-cw" :size="14" />对账进度
+                </h3>
+                <ReconcileProgress :state="sysHealthReconcileProgress" />
+                <dl v-if="sysHealthScraperHealth" class="health-facts">
+                  <div><dt>最后对账</dt><dd>{{ formatTs(sysHealthScraperHealth.last_reconcile?.at) || '—' }}</dd></div>
+                  <div><dt>漏单数量</dt><dd>{{ formatCount(sysHealthScraperHealth.last_reconcile?.missed_qty) }}</dd></div>
                   <div>
-                    <span class="k">API 失败数</span>
-                    <span class="v" :style="(sysHealthScraperHealth.api_failures || 0) > 0 ? 'color:var(--yellow)' : 'color:var(--green)'">
-                      {{ sysHealthScraperHealth.api_failures ?? 0 }}
-                    </span>
+                    <dt>漏单率</dt>
+                    <dd>
+                      {{ typeof sysHealthScraperHealth.last_reconcile?.miss_rate_pct === 'number'
+                        ? `${sysHealthScraperHealth.last_reconcile.miss_rate_pct}%` : '—' }}
+                    </dd>
                   </div>
-                  <div><span class="k">最后采集</span><span class="v">{{ formatTs(sysHealthScraperHealth.last_scrape_at) || '—' }}</span></div>
-                  <div><span class="k">最后对账</span><span class="v">{{ formatTs(sysHealthScraperHealth.last_reconcile?.at) || '—' }}</span></div>
-                  <div><span class="k">对账状态</span><span class="v">{{ sysHealthReconcileRunning ? '进行中' : '空闲' }}</span></div>
-                </div>
-                <div v-if="sysHealthReconcileProgressLabel" class="hint">对账进度：{{ sysHealthReconcileProgressLabel }}</div>
-                <div v-if="sysHealthScraperHealth.last_reconcile?.report_md" class="hint">
+                </dl>
+                <p v-if="sysHealthScraperHealth?.last_reconcile?.report_md" class="hint">
                   报告：<code>{{ sysHealthScraperHealth.last_reconcile.report_md }}</code>
-                </div>
-              </template>
-            </fieldset>
+                </p>
+              </section>
+            </div>
+
+            <details v-if="sysHealthRawFacts.length" class="health-raw">
+              <summary>全部原始指标</summary>
+              <div
+                v-for="g in sysHealthRawFacts"
+                :key="g.key"
+                class="health-raw__group"
+              >
+                <h4>{{ g.title }}</h4>
+                <dl class="health-facts">
+                  <div v-for="item in g.items" :key="`${g.key}-${item.k}`">
+                    <dt>{{ item.k }}</dt><dd>{{ item.v }}</dd>
+                  </div>
+                </dl>
+              </div>
+            </details>
           </div>
 
           <div v-show="activeSection === 'backup'" class="section-panel">
@@ -1974,6 +2050,59 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 }
 .confirm-details li { margin-bottom: 2px; }
 
+/* ===== 系统健康状态（图表化运维面板）===== */
+.health-panel__note { margin: 0 0 12px; }
+
+.health-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.health-card {
+  display: flex; flex-direction: column; gap: 8px;
+  min-width: 0;
+  padding: 12px 14px 14px;
+  background: rgba(10, 13, 22, 0.5);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.health-card__title {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0; font-size: 12px; font-weight: 700; letter-spacing: 0.4px; color: var(--text-dim);
+}
+
+/* 明细一律「标签 + 等宽数字」，长路径换行而不是撑出横向滚动。 */
+.health-facts { display: grid; gap: 4px; margin: 0; font-size: 11px; }
+.health-facts > div { display: flex; justify-content: space-between; gap: 10px; min-width: 0; }
+.health-facts dt { color: var(--text-dim); white-space: nowrap; }
+.health-facts dd {
+  margin: 0; min-width: 0; text-align: right; color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.health-warn { margin: 0; padding: 8px 10px; border-radius: 8px; font-size: 11px; line-height: 1.5; }
+.health-warn.is-critical { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
+.health-warn.is-warning { background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3); color: #fde68a; }
+
+.health-usage { display: flex; flex-direction: column; gap: 8px; }
+
+.health-raw {
+  padding: 10px 14px;
+  background: rgba(10, 13, 22, 0.5);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+}
+.health-raw > summary {
+  display: flex; align-items: center; min-height: 36px;
+  cursor: pointer; font-weight: 600; color: var(--text-dim);
+}
+.health-raw > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.health-raw__group { margin-top: 10px; }
+.health-raw__group h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: 0.4px; color: var(--text-dim); }
+
 @media (max-width: 700px) {
   .container { padding: 20px 18px; }
   .grid { grid-template-columns: 1fr; }
@@ -1984,5 +2113,7 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
     position: static; border-bottom: 1px solid var(--border); padding-bottom: 8px;
   }
   .setup-nav .nav-item { white-space: nowrap; }
+  .health-cards { grid-template-columns: minmax(0, 1fr); }
 }
 </style>
+
