@@ -20,11 +20,13 @@ SQL 文本在进入 asyncpg 前统一过 :func:`db_core.backend.dialect.translat
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Sequence
 
 import asyncpg
 
@@ -229,26 +231,29 @@ class PgCursor:
         # 连查三条 COUNT），游标位置必须重置，否则第二次 fetchone() 会返回 None。
         self._index = 0
         self.lastrowid = None
-        translated = await self._translate(sql)
-        raw = self._connection.raw
-        self._connection.bump_query_count()
+        # 整条语句在串行锁内执行：方言解析也要读 raw（rowid → 行标识列），
+        # 外层不加锁的话同一条连接仍会被并发使用。
+        async with self._connection.guard():
+            translated = await self._translate(sql)
+            raw = self._connection.raw
+            self._connection.bump_query_count()
 
-        # 写操作进入显式事务（对齐 aiosqlite 语义），commit/rollback 由调用方决定
-        if self._connection.is_write_sql(translated):
-            await self._connection.ensure_transaction()
+            # 写操作进入显式事务（对齐 aiosqlite 语义），commit/rollback 由调用方决定
+            if self._connection.is_write_sql(translated):
+                await self._connection.ensure_transaction()
 
-        if _INSERT_RE.match(translated):
-            return await self._execute_insert(raw, translated, params)
+            if _INSERT_RE.match(translated):
+                return await self._execute_insert(raw, translated, params)
 
-        if _SELECT_RE.match(translated):
-            self._rows = [PgRow(r) for r in await self._run(raw.fetch, translated, params)]
-            self.rowcount = len(self._rows)
+            if _SELECT_RE.match(translated):
+                self._rows = [PgRow(r) for r in await self._run(raw.fetch, translated, params)]
+                self.rowcount = len(self._rows)
+                return self
+
+            # UPDATE / DELETE / DDL：asyncpg 返回 command tag，需解析出真实行数
+            status = await self._run(raw.execute, translated, params)
+            self.rowcount = rowcount_from_status(status)
             return self
-
-        # UPDATE / DELETE / DDL：asyncpg 返回 command tag，需解析出真实行数
-        status = await self._run(raw.execute, translated, params)
-        self.rowcount = rowcount_from_status(status)
-        return self
 
     async def _execute_insert(self, raw, translated: str, params) -> "PgCursor":
         """INSERT：按需追加 ``RETURNING id`` 以支撑 ``lastrowid``。
@@ -297,7 +302,8 @@ class PgCursor:
         return self
 
     async def executescript(self, script: str) -> "PgCursor":
-        await self._connection.raw.execute(script)
+        async with self._connection.guard():
+            await self._connection.raw.execute(script)
         return self
 
     # -- 取数 ------------------------------------------------------------
@@ -344,6 +350,60 @@ class PgCursor:
         return row
 
 
+class _TaskGuard:
+    """按 asyncio 任务可重入的串行锁。
+
+    asyncpg 的**单条连接不允许并发操作**（``InterfaceError: another operation
+    is in progress``），而调用方——FastAPI 请求与后台调度器——天然并发；SQLite
+    后端由 aiosqlite 在内部串行化，所以这个差异只有 PG 会暴露。
+
+    可重入是必需的：一条写路径会嵌套获取同一把锁（``PgCursor.execute`` →
+    ``ensure_transaction`` → ``PgConnection.execute``）。
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: Optional[asyncio.Task] = None
+        self._depth = 0
+
+    async def acquire(self) -> None:
+        task = asyncio.current_task()
+        if self._owner is task:
+            self._depth += 1
+            return
+        # 持有者已结束却没归还（写路径异常退出）：强制接管，否则后续所有
+        # 数据库操作都会永久卡在这把锁上。
+        if self._owner is not None and self._owner.done():
+            logger.warning("PG 连接锁的持有者已结束但未释放，强制接管")
+            self._reset()
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+
+    def release(self) -> None:
+        if self._depth <= 0:
+            return
+        self._depth -= 1
+        if self._depth == 0:
+            self._reset()
+
+    @property
+    def depth(self) -> int:
+        return self._depth
+
+    def force_release(self) -> None:
+        """连接关闭时的兜底：未归还的锁不能拖死后续操作。"""
+        if self._depth > 0:
+            logger.warning("PG 连接关闭时强制释放未归还的连接锁 (depth=%d)", self._depth)
+        self._reset()
+
+    def _reset(self) -> None:
+        self._owner = None
+        self._depth = 0
+        if self._lock.locked():
+            self._lock.release()
+
+
 class PgConnection:
     """模拟 aiosqlite.Connection，含**显式事务语义**。
 
@@ -358,6 +418,10 @@ class PgConnection:
     def __init__(self, raw: asyncpg.Connection):
         self._raw = raw
         self._tx = None
+        # 单连接的串行锁：asyncpg 不允许一条连接并发操作，见 _TaskGuard。
+        self._guard = _TaskGuard()
+        # 事务期间是否由本连接持有锁（开始事务时取得，commit/rollback 时归还）
+        self._tx_guard_held = False
         # 表名 → 是否有 id 列。有 id 才能用 RETURNING id 支撑 lastrowid；
         # 探测结果缓存起来，避免每条 INSERT 都试错。
         self._table_has_id: Dict[str, bool] = {}
@@ -394,10 +458,27 @@ class PgConnection:
         return self._tx is not None
 
     async def ensure_transaction(self) -> None:
-        """写操作前调用：没有活动事务就开一个。"""
-        if self._tx is None:
-            self._tx = self._raw.transaction()
+        """写操作前调用：没有活动事务就开一个。
+
+        事务期间**一直持有串行锁**，直到 commit/rollback：否则其他任务的语句会
+        落进别人的事务，跟着一起被提交或一起被回滚（静默丢数据）。
+        """
+        if self._tx is not None:
+            return
+        await self._guard.acquire()
+        self._tx_guard_held = True
+        self._tx = self._raw.transaction()
+        try:
             await self._tx.start()
+        except Exception:
+            self._tx = None
+            self._release_tx_guard()
+            raise
+
+    def _release_tx_guard(self) -> None:
+        if self._tx_guard_held:
+            self._tx_guard_held = False
+            self._guard.release()
 
     @classmethod
     def is_write_sql(cls, translated: str) -> bool:
@@ -410,6 +491,16 @@ class PgConnection:
     def remember_table_has_id(self, table: str, has_id: bool) -> None:
         self._table_has_id[table] = has_id
 
+    # -- 并发串行化 ------------------------------------------------------
+    @asynccontextmanager
+    async def guard(self) -> AsyncIterator[None]:
+        """把一次连接操作放进串行锁内；同一任务内嵌套获取是安全的。"""
+        await self._guard.acquire()
+        try:
+            yield
+        finally:
+            self._guard.release()
+
     # -- 兼容两种调用姿势 ------------------------------------------------
     def cursor(self) -> PgCursor:
         return PgCursor(self)
@@ -421,21 +512,28 @@ class PgConnection:
 
     async def executemany(self, sql: str, seq: Iterable[Sequence[Any]]) -> None:
         translated = translate(sql)
-        if self.is_write_sql(translated):
-            await self.ensure_transaction()
-        await self._raw.executemany(translated, [tuple(p) for p in seq])
+        async with self.guard():
+            if self.is_write_sql(translated):
+                await self.ensure_transaction()
+            await self._raw.executemany(translated, [tuple(p) for p in seq])
 
     async def commit(self) -> None:
         if self._tx is None:
             return
         tx, self._tx = self._tx, None
-        await tx.commit()
+        try:
+            await tx.commit()
+        finally:
+            self._release_tx_guard()
 
     async def rollback(self) -> None:
         if self._tx is None:
             return
         tx, self._tx = self._tx, None
-        await tx.rollback()
+        try:
+            await tx.rollback()
+        finally:
+            self._release_tx_guard()
 
     async def close(self) -> None:
         if self._tx is not None:
@@ -445,6 +543,7 @@ class PgConnection:
                 await self.rollback()
             except Exception:
                 logger.debug("关闭前回滚失败", exc_info=True)
+        self._guard.force_release()
         try:
             await self._raw.close()
         except Exception:  # 已关闭 / 连接丢失

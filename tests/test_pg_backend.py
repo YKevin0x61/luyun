@@ -160,5 +160,77 @@ class PgWritePathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 1)
 
 
+@unittest.skipUnless(pg_available(), "PostgreSQL 不可用，跳过 PG 后端测试")
+class PgConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    """同一连接被并发使用时的串行化。
+
+    asyncpg 的单条连接**不允许并发操作**（报 ``InterfaceError: another
+    operation is in progress``），而调用方（FastAPI 请求 + 后台调度器）天然
+    并发；SQLite 后端由 aiosqlite 内部串行化，所以这个差异只有 PG 会暴露。
+    """
+
+    async def asyncSetUp(self):
+        self.conn = await pg_backend.connect()
+        await self.conn.execute(PROBE_DDL)
+        await self.conn.execute("INSERT INTO probe (name) VALUES (?)", ("并发",))
+        await self.conn.commit()
+
+    async def asyncTearDown(self):
+        await self.conn.close()
+
+    async def test_concurrent_reads_all_succeed(self):
+        """并发读同一条连接：不允许出现 InterfaceError。"""
+
+        async def read() -> int:
+            cur = await self.conn.execute("SELECT count(*) FROM probe")
+            return (await cur.fetchone())[0]
+
+        results = await asyncio.gather(*(read() for _ in range(20)), return_exceptions=True)
+
+        failures = [r for r in results if isinstance(r, BaseException)]
+        self.assertEqual(
+            failures,
+            [],
+            f"并发读失败 {len(failures)}/20，首个异常: {type(failures[0]).__name__}: {failures[0]}"
+            if failures
+            else "",
+        )
+        self.assertEqual(results, [1] * 20)
+
+    async def test_concurrent_writes_all_land(self):
+        """并发写同一条连接：全部写入且行数正确（可重入锁不得丢操作）。"""
+
+        async def write(name: str) -> None:
+            await self.conn.execute("INSERT INTO probe (name) VALUES (?)", (name,))
+            await self.conn.commit()
+
+        await asyncio.gather(*(write(f"w{i}") for i in range(10)))
+
+        cur = await self.conn.execute("SELECT count(*) FROM probe")
+        # 1 条在 setUp 里写入 + 10 条并发写入
+        self.assertEqual((await cur.fetchone())[0], 11)
+
+    async def test_open_transaction_blocks_other_tasks_until_commit(self):
+        """事务未提交时，其他任务的操作必须在锁上等待，不能落进别人的事务。"""
+        await self.conn.execute("INSERT INTO probe (name) VALUES (?)", ("事务中",))
+        self.assertTrue(self.conn.in_transaction())
+
+        observed: list[int] = []
+
+        async def competing_read() -> None:
+            cur = await self.conn.execute("SELECT count(*) FROM probe")
+            observed.append((await cur.fetchone())[0])
+
+        reader = asyncio.create_task(competing_read())
+        await asyncio.sleep(0.05)
+        # 事务仍在进行：读者应被挡住，看不到未提交数据
+        self.assertEqual(observed, [])
+
+        await self.conn.commit()
+        await asyncio.wait_for(reader, timeout=5)
+        # 提交后读者才拿到锁，看到 setUP 那条 + 事务里那条
+        self.assertEqual(observed, [2])
+
+
 if __name__ == "__main__":
     unittest.main()
