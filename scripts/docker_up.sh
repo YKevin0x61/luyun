@@ -26,14 +26,25 @@ set -a
 source "$ENV_FILE"
 set +a
 HOST_PARENT="${LUYUN_HOST_PARENT:-./runtime}"
-# Resolve relative to deploy/ (compose project dir for relative volumes).
-case "$HOST_PARENT" in
-  /*) PARENT_ABS="$HOST_PARENT" ;;
-  *) PARENT_ABS="$ROOT/deploy/$HOST_PARENT" ;;
-esac
+
+# 卷路径一律绝对化后导出给 compose：compose 对相对路径按项目目录解析，而项目目录
+# 又随调用方式/cwd 变化，曾经把父目录挂到 runtime/app/runtime/ 下的空目录——应用
+# 连上一份新建的空库却不报错。相对值统一按 deploy/（compose 文件所在目录）解析。
+abs_volume_path() {
+  case "$1" in
+    /*) printf '%s' "$1" ;;
+    *) printf '%s' "$ROOT/deploy/$1" ;;
+  esac
+}
+
+PARENT_ABS="$(abs_volume_path "$HOST_PARENT")"
+export LUYUN_HOST_PARENT="$PARENT_ABS"
+export LUYUN_PG_DATA="$(abs_volume_path "${LUYUN_PG_DATA:-./runtime/pgdata}")"
+export LUYUN_REDIS_DATA="$(abs_volume_path "${LUYUN_REDIS_DATA:-./runtime/redisdata}")"
 mkdir -p "$PARENT_ABS/app"
 
 log "docker compose up (parent mount=${PARENT_ABS}, live app=${PARENT_ABS}/app)"
+log "volumes: pg=${LUYUN_PG_DATA} redis=${LUYUN_REDIS_DATA}"
 cd "$ROOT"
 docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build "$@"
 log "started. Admin: http://127.0.0.1:${LUYUN_HOST_PORT:-8000}/admin/"

@@ -38,7 +38,10 @@ services:
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
     volumes:
       # Parent mount — live tree is /srv/luyun/app on this volume.
-      - ${LUYUN_HOST_PARENT:-./runtime}:/srv/luyun
+      # 必须给绝对路径：相对路径由 compose 按项目目录解析，一旦调用方式/cwd 变了
+      # 就会静默挂到别的目录（现场踩过：连上一份新建的空 SQLite 且不报错）。
+      # scripts/docker_up.sh 会绝对化后导出；手工 compose 请自己给绝对路径。
+      - ${LUYUN_HOST_PARENT:?请在 .env.docker 里设置绝对路径，例如 /opt/luyun/deploy/runtime}:/srv/luyun
       - /var/run/docker.sock:/var/run/docker.sock
     # Single worker is enforced in entrypoint CMD; do not scale replicas.
     # deploy.replicas intentionally omitted (Compose v2 ignore is fine).
@@ -67,7 +70,7 @@ services:
       # 与业务侧 CHINA_TZ 对齐，避免时间戳字面量因时区不同产生偏差
       TZ: Asia/Shanghai
     volumes:
-      - ${LUYUN_PG_DATA:-./runtime/pgdata}:/var/lib/postgresql/data
+      - ${LUYUN_PG_DATA:?请设置绝对路径，例如 /opt/luyun/deploy/runtime/pgdata}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-luyun} -d ${POSTGRES_DB:-luyun}"]
       interval: 10s
@@ -83,7 +86,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
-      - ${LUYUN_REDIS_DATA:-./runtime/redisdata}:/data
+      - ${LUYUN_REDIS_DATA:?请设置绝对路径，例如 /opt/luyun/deploy/runtime/redisdata}:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

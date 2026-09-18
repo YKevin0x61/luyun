@@ -50,6 +50,28 @@ class DockerComposeContractTest(unittest.TestCase):
         self.assertIn("docker-compose.yml", text)
         self.assertIn(".env.docker", text)
 
+    def test_volume_paths_do_not_rely_on_relative_defaults(self):
+        """卷路径必须显式给出，不能退回相对默认值。
+
+        现场踩过：`${LUYUN_HOST_PARENT:-./runtime}` 在 cwd 为
+        /opt/luyun/deploy/runtime/app 时被解析成 runtime/app/runtime/，compose
+        新建了空目录并复制了一份空 SQLite —— 应用连到了「另一个库」，而且不报错。
+        """
+        text = COMPOSE.read_text(encoding="utf-8")
+        for var in ("LUYUN_HOST_PARENT", "LUYUN_PG_DATA", "LUYUN_REDIS_DATA"):
+            self.assertNotIn(
+                f"${{{var}:-./runtime", text, f"{var} 不应保留相对路径默认值"
+            )
+            self.assertIn(f"${{{var}:?", text, f"{var} 应改为必填（:?），缺失即报错")
+
+    def test_docker_up_exports_absolute_volume_paths(self):
+        """docker_up.sh 负责把三个卷路径绝对化后导出，compose 不再猜 cwd。"""
+        text = DOCKER_UP.read_text(encoding="utf-8")
+        for var in ("LUYUN_HOST_PARENT", "LUYUN_PG_DATA", "LUYUN_REDIS_DATA"):
+            self.assertIn(
+                f"export {var}=", text, f"docker_up.sh 应把 {var} 绝对化后导出"
+            )
+
 
 class ReleaseUpdateFactoryDockerWiringTest(unittest.TestCase):
     def test_factory_uses_docker_oneshot_when_mode_docker(self):

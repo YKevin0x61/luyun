@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -45,6 +46,15 @@ DEFAULT_SQLITE = os.path.join(
     "app.db",
 )
 DEFAULT_DSN = "postgresql://localhost:5432/luyun"
+
+
+def redact_dsn(dsn: str) -> str:
+    """把 DSN 里的密码换成 ``***``。
+
+    脚本的输出会被贴进运维报告、工单和聊天记录（现场报告里 DSN 就连着密码一起
+    被贴出去了），所以密码不能跟着日志走。
+    """
+    return re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", dsn)
 
 SETVAL_SQL = """
 DO $$
@@ -123,7 +133,16 @@ async def migrate(
 
     order = topological_order(src, tables)
 
-    conn = await asyncpg.connect(dsn)
+    # dry-run 与 --apply 都会真连目标库：连不上就直接退出，不给假阳性
+    # （现场曾把「预演通过」当成「连接没问题」）。
+    try:
+        conn = await asyncpg.connect(dsn)
+    except Exception as exc:
+        print(f"✗ 连不上目标库 {redact_dsn(dsn)}：{type(exc).__name__}: {exc}")
+        print("  检查 DSN 的主机/端口/库名/密码（dry-run 同样会连库）。")
+        src.close()
+        return 1
+
     try:
         pg_tables = {
             r["tablename"]
@@ -137,7 +156,7 @@ async def migrate(
             return 1
 
         print(f"源库: {sqlite_path}")
-        print(f"目标: {dsn}")
+        print(f"目标: {redact_dsn(dsn)}   （已连接 ✓）")
         print(f"表数: {len(order)}   模式: {'APPLY' if apply else 'DRY-RUN'}")
         print()
         print(f"  {'表':<34}{'源':>9}{'目标':>9}  说明")

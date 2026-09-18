@@ -128,6 +128,116 @@ app_path() {
   esac
 }
 
+# ── PostgreSQL 辅助：探活 / pg_hba 认证 ────────────────────────────────
+# 以 postgres 超级用户身份执行命令（建库建用户、探活、reload 都用它）。
+as_postgres() {
+  if [[ "$MODE" == "docker" ]]; then
+    docker exec -i "$PG_CONTAINER" "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    runuser -u postgres -- "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -u postgres "$@"
+  else
+    su postgres -s /bin/sh -c "$(printf '%q ' "$@")"
+  fi
+}
+
+# 探活查询连 postgres 库（它一定存在），不依赖目标库已建好。
+pg_query() {
+  case "$MODE" in
+    docker) docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d postgres -qtAX -c "$1" 2>/dev/null ;;
+    *)      as_postgres psql -d postgres -qtAX -c "$1" 2>/dev/null ;;
+  esac
+}
+
+pg_probe() { [[ "$(pg_query 'SELECT 1' || true)" == "1" ]]; }
+
+# 等 PG 真正稳定可查。
+#
+# 不能只用 pg_isready：它只回答「postmaster 是否接受连接」。postgres 镜像首次
+# 启动走 initdb 慢路径时会短暂返回 0，紧接着 initdb 完成触发一次 fast-shutdown
+# + restart —— 脚本此时往下走就撞上 "the database system is shutting down"
+# （现场 19:09 那次失败正是如此）。所以要求连续 PG_READY_STREAK 次查询成功。
+PG_READY_STREAK="${PG_READY_STREAK:-3}"
+
+wait_for_pg_ready() {
+  local tries="${1:-60}" streak=0
+  for _ in $(seq 1 "$tries"); do
+    if pg_probe; then
+      streak=$((streak + 1))
+      (( streak >= PG_READY_STREAK )) && return 0
+    else
+      streak=0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+pg_hba_path() {
+  local out=""
+  case "$MODE" in
+    docker) out="$(docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d postgres -qtAX -c 'SHOW hba_file' 2>/dev/null || true)" ;;
+    *)      out="$(as_postgres psql -qtAX -c 'SHOW hba_file' 2>/dev/null || true)" ;;
+  esac
+  printf '%s' "$out" | tr -d '\r'
+}
+
+pg_hba_has_host_trust() {
+  local f="$1"
+  case "$MODE" in
+    docker) docker exec "$PG_CONTAINER" sh -c "grep -E '^[[:space:]]*host[[:space:]]' '$f' | grep -q trust" ;;
+    *)      grep -E '^[[:space:]]*host[[:space:]]' "$f" | grep -q trust ;;
+  esac
+}
+
+tighten_pg_hba() {
+  local f="$1"
+  case "$MODE" in
+    docker)
+      docker exec "$PG_CONTAINER" sh -c "cp -n '$f' '$f.trust.bak' 2>/dev/null || true; sed -i -E 's/^([[:space:]]*host[[:space:]].*)trust[[:space:]]*\$/\1scram-sha-256/' '$f'"
+      ;;
+    *)
+      cp -n "$f" "$f.trust.bak" 2>/dev/null || true
+      sed -i -E 's/^([[:space:]]*host[[:space:]].*)trust[[:space:]]*$/\1scram-sha-256/' "$f"
+      ;;
+  esac
+}
+
+reload_pg_conf() {
+  case "$MODE" in
+    docker) docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d postgres -qtAX -c 'SELECT pg_reload_conf()' >/dev/null ;;
+    *)      as_postgres psql -qtAX -c 'SELECT pg_reload_conf()' >/dev/null ;;
+  esac
+}
+
+# 只要 pg_hba 里还有一条 host trust 行，POSTGRES_PASSWORD 就是摆设：现场用错密码
+# 也能连上。发现 trust 就收紧成 scram-sha-256 并 reload（改文件本身不会生效，
+# 必须 pg_reload_conf()）。
+ensure_password_auth() {
+  local f
+  f="$(pg_hba_path)"
+  if [[ -z "$f" ]]; then
+    warn "拿不到 pg_hba.conf 路径，跳过密码认证检查"
+    return 0
+  fi
+  if ! pg_hba_has_host_trust "$f"; then
+    ok "pg_hba 无 host trust 行，密码认证生效"
+    return 0
+  fi
+  warn "pg_hba.conf 里仍有 host ... trust 行 —— POSTGRES_PASSWORD 目前不生效"
+  if (( DRY_RUN )); then
+    printf '   [dry-run] 收紧 %s 的 host trust → scram-sha-256 并 pg_reload_conf()\n' "$f"
+    return 0
+  fi
+  tighten_pg_hba "$f"
+  reload_pg_conf
+  if pg_hba_has_host_trust "$f"; then
+    die "pg_hba 收紧失败：$f 仍存在 host trust 行，请人工处理后再跑"
+  fi
+  ok "已收紧 pg_hba（原文件备份为 $f.trust.bak）并 reload"
+}
+
 # ── 前置检查 ───────────────────────────────────────────────────────────
 [[ -f "$ENV_FILE" ]] || die "找不到 $ENV_FILE —— 请先完成 Bootstrap 安装"
 [[ -f "$SCHEMA_SQL" ]] || die "找不到 $SCHEMA_SQL"
@@ -174,17 +284,11 @@ if [[ "$MODE" == "docker" ]]; then
     docker compose -f "$COMPOSE_FILE" --profile pg up -d postgres 2>&1 | tail -3
   fi
 
-  # 等库就绪
+  # 等库稳定就绪：连续多次实际查询成功，躲开 initdb 期间的 pg_isready 假阳性
   if (( ! DRY_RUN )); then
-    for _ in $(seq 1 60); do
-      if docker exec "$PG_CONTAINER" pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>&1; then
-        break
-      fi
-      sleep 1
-    done
-    docker exec "$PG_CONTAINER" pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>&1 \
-      || die "PostgreSQL 容器未就绪，检查 docker logs $PG_CONTAINER"
-    ok "PostgreSQL 已就绪"
+    wait_for_pg_ready 90 \
+      || die "PostgreSQL 容器未稳定就绪（initdb 可能仍在进行）：docker logs $PG_CONTAINER"
+    ok "PostgreSQL 已就绪（连续 ${PG_READY_STREAK} 次查询成功）"
   fi
 
   # Docker 形态下容器内用服务名互访
@@ -222,25 +326,13 @@ else
       pg_isready -q 2>/dev/null && break
       sleep 1
     done
-    pg_isready -q 2>/dev/null || die "PostgreSQL 安装后仍不可达"
-    ok "PostgreSQL 已就绪"
+    wait_for_pg_ready 40 || die "PostgreSQL 安装后仍不可达（连续 ${PG_READY_STREAK} 次查询未成功）"
+    ok "PostgreSQL 已就绪（连续 ${PG_READY_STREAK} 次查询成功）"
   fi
   DB_HOST="${POSTGRES_HOST:-127.0.0.1}"
 fi
 
 # ── 建库 + 建用户 ──────────────────────────────────────────────────────
-as_postgres() {
-  if [[ "$MODE" == "docker" ]]; then
-    docker exec -i "$PG_CONTAINER" "$@"
-  elif command -v runuser >/dev/null 2>&1; then
-    runuser -u postgres -- "$@"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo -u postgres "$@"
-  else
-    su postgres -s /bin/sh -c "$(printf '%q ' "$@")"
-  fi
-}
-
 psql_super() { as_postgres psql -v ON_ERROR_STOP=1 -qtAX -c "$1"; }
 
 if [[ "$(psql_super "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'")" == "1" ]]; then
@@ -290,6 +382,9 @@ else
   warn "  psql \"postgresql://${DB_USER}:<密码>@${DB_HOST}:${DB_PORT}/${DB_NAME}\" -f $SCHEMA_SQL"
 fi
 
+# ── 收紧 pg_hba：trust 会让 POSTGRES_PASSWORD 形同虚设 ────────────────
+ensure_password_auth
+
 # ── 停应用 → 备份 → 迁移 ───────────────────────────────────────────────
 if [[ -f "$SQLITE_DB" && -n "$DSN" ]]; then
   # 目标库 orders 行数（已迁移过就跳过，保证幂等）
@@ -305,6 +400,9 @@ if [[ -f "$SQLITE_DB" && -n "$DSN" ]]; then
     run mkdir -p "$APP_DIR/backups"
     STAMP="$(date +%Y%m%d_%H%M%S)"
     log "备份源库 → backups/pre-pg-migration-$STAMP.db"
+    # 停机已确认，先把 WAL 合并回主库：主库文件自洽后，无论后续用 .backup 还是
+    # 直接搬运文件都不会漏掉已提交数据（现场手工 cp 的备份就少了 27 行）。
+    run sqlite3 "$SQLITE_DB" "PRAGMA wal_checkpoint(TRUNCATE);"
     run sqlite3 "$SQLITE_DB" ".backup '$APP_DIR/backups/pre-pg-migration-$STAMP.db'"
     log "预演迁移"
     run in_app "$(app_path "$MIGRATE_REL")" --dsn "$DSN" --dry-run
