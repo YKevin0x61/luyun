@@ -122,15 +122,24 @@ export function useDbCredentials({ showAlert, clearAlert } = {}) {
       dbResetResult.user = data.user || ''
       dbResetResult.envFile = data.env_file || ''
       dbResetResult.passwordLength = typeof data.password_length === 'number' ? data.password_length : null
-      dbResetResult.restartTriggered = !!data.restart_triggered
+      // restart_scheduled 是新字段（重启安排在响应之后）；restart_triggered 兼容旧后端
+      dbResetResult.restartTriggered = !!(data.restart_scheduled || data.restart_triggered)
       dbResetResult.restartError = data.restart_error || ''
       closeDbReset()
       showAlert?.('success', '数据库密码已重置，新密码已写入 env 文件')
     } catch (err) {
       // 后端 detail 已是中文（403 密码不对 / 400 环境变量优先等），原文展示，保持弹窗以便重试。
-      const detail = err?.message || '重置失败'
-      dbResetConfirm.error = detail
-      showAlert?.('error', '重置失败：' + detail)
+      const status = err?.status
+      if (status === undefined || status === null || status >= 502) {
+        // 没有状态码（网络错误）或 502/503/504：很可能是重启把响应切断了 —— 反代返回的
+        // 是 HTML 错误页，直接贴出来只会让人更迷惑，这里给可执行的判断依据。
+        dbResetConfirm.error =
+          '没有收到服务器响应（应用可能正在重启）。密码可能已经重置成功：请稍后刷新页面，' +
+          '并在服务器日志里确认是否出现「数据库密码已重置」。'
+      } else {
+        dbResetConfirm.error = err?.message || '重置失败'
+      }
+      showAlert?.('error', '重置未确认：' + dbResetConfirm.error)
     } finally {
       dbResetting.value = false
     }

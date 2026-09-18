@@ -73,7 +73,7 @@ class DbCredentialsApiTest(unittest.TestCase):
             "database": "luyun",
             "password_length": 32,
             "env_file": "/srv/luyun/app/deploy/env.production",
-            "restart_triggered": True,
+            "restart_triggered": False,
             "restart_error": None,
         }
         with mock.patch(
@@ -81,15 +81,46 @@ class DbCredentialsApiTest(unittest.TestCase):
         ), mock.patch(
             "api.db_credentials.auth_service.authenticate", return_value={"username": "admin"}
         ), mock.patch(
-            "api.db_credentials.reset_database_password", return_value=result
-        ) as reset:
+            "api.db_credentials.reset_database_password", return_value=dict(result)
+        ) as reset, mock.patch(
+            "api.db_credentials._restart_after_response"
+        ):
             resp = self.client.post(f"{ENDPOINT}/reset", json={"confirm_password": "right"})
         self.assertEqual(resp.status_code, 200)
-        reset.assert_awaited_once_with(actor="admin")
+        reset.assert_awaited_once_with(actor="admin", restart=False)
         body = resp.json()
-        self.assertTrue(body["restart_triggered"])
+        self.assertTrue(body["restart_scheduled"])
         self.assertNotIn("password", body)
         self.assertNotIn("dsn", body)
+
+    def test_reset_schedules_restart_after_response(self):
+        """重启必须安排在响应之后。
+
+        原来重启同步跑在请求处理里：容器一重启，反代就把 502 页面返回给浏览器，
+        用户看到的是 openresty 的 HTML 而不是「重置成功」，也分不清到底成没成。
+        """
+        payload = {
+            "ok": True,
+            "user": "luyun",
+            "host": "postgres",
+            "database": "luyun",
+            "password_length": 32,
+            "env_file": "/srv/luyun/app/deploy/env.production",
+            "restart_triggered": False,
+            "restart_error": None,
+        }
+        with mock.patch(
+            "api.db_credentials.auth_service.get_admin_username", return_value="admin"
+        ), mock.patch(
+            "api.db_credentials.auth_service.authenticate", return_value={"username": "admin"}
+        ), mock.patch(
+            "api.db_credentials.reset_database_password", return_value=dict(payload)
+        ), mock.patch(
+            "api.db_credentials._restart_after_response"
+        ) as restart_task:
+            resp = self.client.post(f"{ENDPOINT}/reset", json={"confirm_password": "right"})
+        self.assertEqual(resp.status_code, 200)
+        restart_task.assert_awaited_once()
 
     def test_reset_maps_service_error_to_400(self):
         with mock.patch(

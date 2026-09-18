@@ -187,12 +187,30 @@ describe('useDbCredentials 重置流程', () => {
 
     h.openDbReset()
     h.dbResetConfirm.password = 'admin-secret'
-    apiPost.mockRejectedValue(
-      new Error('检测到环境变量 LUYUN_POSTGRES_DSN 被显式设置，优先级高于 deploy/env.production'),
+    const http400 = new Error(
+      '检测到环境变量 LUYUN_POSTGRES_DSN 被显式设置，优先级高于 deploy/env.production',
     )
+    http400.status = 400 // 真实请求里 client.js 会带上状态码
+    apiPost.mockRejectedValue(http400)
     await h.dbResetSubmit()
 
     expect(h.dbResetConfirm.error).toContain('优先级高于')
+  })
+
+  it('502 / 网络错误时提示应用可能正在重启，而不是贴反代 HTML', async () => {
+    apiGet.mockResolvedValue(statusPayload())
+    const h = makeHarness()
+    await h.loadDbCred()
+
+    h.openDbReset()
+    h.dbResetConfirm.password = 'admin-secret'
+    const gateway = new Error('<html><head><title>502 Bad Gateway</title></head>...</html>')
+    gateway.status = 502
+    apiPost.mockRejectedValue(gateway)
+    await h.dbResetSubmit()
+
+    expect(h.dbResetConfirm.error).toContain('可能正在重启')
+    expect(h.dbResetConfirm.error).not.toContain('502 Bad Gateway')
   })
 
   it('restart_error 非空时记录原文供提示手动重启', async () => {

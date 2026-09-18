@@ -1770,7 +1770,7 @@ onMounted(() => {
         <h3>重置数据库密码</h3>
         <p>
           将为 <code>{{ dbCred?.user || '当前数据库角色' }}</code> 生成 32 位随机密码并写入
-          <code>{{ dbCred?.env_file || 'env 文件' }}</code>。页面不会显示新密码明文，写入后需重启应用才生效。
+          <code>{{ dbCred?.env_file || 'env 文件' }}</code>。页面不会显示新密码明文，写入成功后会自动重启应用使其生效。
           请输入当前后台管理员密码以确认本次重置。
         </p>
         <div class="grid">
