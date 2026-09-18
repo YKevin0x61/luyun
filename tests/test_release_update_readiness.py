@@ -18,6 +18,12 @@ from services.release_update.readiness import (
 class ReadinessTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._old_database_dir = settings.DATABASE_DIR
+        self._old_backend = settings.DATABASE_BACKEND
+        # DATABASE_DIR 的临时目录隔离**只对 SQLite 有效**：PG 后端连的是
+        # POSTGRES_DSN 指向的真实库，测试会直接改到开发/生产数据。这个用例只考就绪
+        # 口径，与后端无关，所以显式钉死 SQLite（曾经因为没钉，DROP TABLE 删掉了真实
+        # 库里的 dish_stations）。
+        settings.DATABASE_BACKEND = "sqlite"
         self._tmpdir = tempfile.TemporaryDirectory()
         settings.DATABASE_DIR = self._tmpdir.name
         self.db = DatabaseManager()
@@ -27,6 +33,7 @@ class ReadinessTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.db.close()
         settings.DATABASE_DIR = self._old_database_dir
+        settings.DATABASE_BACKEND = self._old_backend
         self._tmpdir.cleanup()
 
     async def test_not_ready_when_db_missing(self):
@@ -54,14 +61,18 @@ class ReadinessTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(readiness.started_at)
 
     async def test_not_ready_when_key_table_missing(self):
+        """用一个不存在的表名模拟缺表——不要 DROP 真表（那会删掉开发库里的数据）。
+
+        AppReadinessAdapter 支持传入 key_tables，正是为此。
+        """
         self.tracker.mark_started(migrations_complete=True)
-        await self.db._conn.execute("DROP TABLE dish_stations")
-        await self.db._conn.commit()
-        adapter = AppReadinessAdapter(lambda: self.db, tracker=self.tracker)
+        adapter = AppReadinessAdapter(
+            lambda: self.db, tracker=self.tracker, key_tables=("definitely_missing_table",)
+        )
         readiness = await adapter.inspect_readiness()
         self.assertFalse(readiness.key_tables_readable)
         self.assertFalse(readiness.ready)
-        self.assertIn("dish_stations", " ".join(readiness.details))
+        self.assertIn("definitely_missing_table", " ".join(readiness.details))
 
     async def test_startup_id_differs_per_mark(self):
         self.tracker.mark_started(migrations_complete=True)
