@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """系统完整备份 v2 服务测试。"""
 
+import base64
 import io
 import json
 import os
@@ -17,6 +18,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 import aiosqlite
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import padding as sym_padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.hmac import HMAC
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
@@ -689,6 +695,76 @@ class ExportRecipesDbBytesTest(unittest.TestCase):
         self.assertIsNone(
             backup_service.export_recipes_db_bytes("/no/such/path/x.db")
         )
+
+
+class FernetStreamEquivalenceTest(unittest.TestCase):
+    """分块加密必须与标准 Fernet 逐字节等价：否则旧版本解不开新包，回滚就没退路。"""
+
+    IV = bytes(range(16))
+    TS = 1_700_000_000
+
+    def _encrypt(self, data: bytes, key: bytes, *, chunk_size: int) -> bytes:
+        fd, src_path = tempfile.mkstemp(suffix=".bin")
+        os.close(fd)
+        with open(src_path, "wb") as handle:
+            handle.write(data)
+        out = io.BytesIO()
+        try:
+            backup_service._fernet_encrypt_stream(
+                src_path, out, key, iv=self.IV, timestamp=self.TS, chunk_size=chunk_size
+            )
+        finally:
+            os.unlink(src_path)
+        return out.getvalue()
+
+    def _reference_token(self, data: bytes, key: bytes) -> bytes:
+        """照 Fernet 规范手工拼一遍（与 cryptography 源码同样的步骤）。"""
+        raw = base64.urlsafe_b64decode(key)
+        signing_key, encryption_key = raw[:16], raw[16:]
+        padder = sym_padding.PKCS7(128).padder()
+        encryptor = Cipher(algorithms.AES(encryption_key), modes.CBC(self.IV)).encryptor()
+        ciphertext = (
+            encryptor.update(padder.update(data) + padder.finalize())
+            + encryptor.finalize()
+        )
+        parts = b"\x80" + struct.pack(">Q", self.TS) + self.IV + ciphertext
+        hasher = HMAC(signing_key, hashes.SHA256())
+        hasher.update(parts)
+        return base64.urlsafe_b64encode(parts + hasher.finalize())
+
+    def test_chunk_size_does_not_change_output(self):
+        key = Fernet.generate_key()
+        data = os.urandom(10_000)
+        baseline = self._encrypt(data, key, chunk_size=4096)
+        for chunk_size in (1, 3, 15, 16, 17, 1024, 10_000, 100_000):
+            self.assertEqual(
+                self._encrypt(data, key, chunk_size=chunk_size),
+                baseline,
+                f"chunk_size={chunk_size} 改变了输出字节",
+            )
+
+    def test_matches_standard_fernet_bytes(self):
+        key = Fernet.generate_key()
+        for size in (0, 1, 15, 16, 17, 4096, 9999):
+            data = os.urandom(size)
+            self.assertEqual(
+                self._encrypt(data, key, chunk_size=333),
+                self._reference_token(data, key),
+                f"长度 {size} 的明文输出与标准 Fernet 不一致",
+            )
+
+    def test_standard_fernet_can_decrypt_our_token(self):
+        key = Fernet.generate_key()
+        data = os.urandom(5000)
+        self.assertEqual(Fernet(key).decrypt(self._encrypt(data, key, chunk_size=777)), data)
+
+    def test_other_key_cannot_decrypt(self):
+        """格式等价不等于放松校验：换 key 必须解不开。"""
+        from cryptography.fernet import InvalidToken as _InvalidToken
+
+        token = self._encrypt(os.urandom(1000), Fernet.generate_key(), chunk_size=64)
+        with self.assertRaises(_InvalidToken):
+            Fernet(Fernet.generate_key()).decrypt(token)
 
 
 class ExportRecipesDbBytesFromConnTest(unittest.IsolatedAsyncioTestCase):

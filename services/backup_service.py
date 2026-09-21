@@ -23,6 +23,7 @@ import struct
 import subprocess
 import tarfile
 import tempfile
+import time
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -30,6 +31,10 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import padding as sym_padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.hmac import HMAC
 
 from config import settings
 from db_core.schema import ALL_TABLES, RECIPE_TABLES
@@ -510,6 +515,88 @@ def row_count_mismatches(
 # 导出成员来源：小成员直接给 bytes，大成员给磁盘路径（流式读，不驻留内存）
 MemberSource = Union[bytes, str, Path]
 
+# —— 分块 Fernet ——
+#
+# 导出包可能上百 MB，而 ``Fernet.encrypt()`` 要求整包 bytes：它内部会同时持有密文、
+# base64 串与最终 token（base64 还让体积涨三分之一），实测 200MB 成品要 ~1.1GB 峰值。
+# 下面按 Fernet 规范分块产出**同样的字节流**：
+#
+#   token = base64url(0x80 || timestamp(8) || iv(16) || AES128-CBC(PKCS7(data)) || HMAC-SHA256)
+#
+# 同一 key/iv/timestamp 下输出与 ``Fernet.encrypt`` 逐字节相同，所以旧版本照样能解开
+# 新包（回滚安全），解析路径也完全不用改。
+_FERNET_VERSION = b"\x80"
+_EXPORT_CHUNK_SIZE = 4 * 1024 * 1024
+
+
+class _Base64ChunkWriter:
+    """按 3 字节对齐分块做 urlsafe base64，输出与一次性编码逐字节相同。"""
+
+    def __init__(self, out) -> None:
+        self._out = out
+        self._pending = b""
+
+    def write(self, data: bytes) -> None:
+        if not data:
+            return
+        self._pending += data
+        usable = len(self._pending) - (len(self._pending) % 3)
+        if usable:
+            self._out.write(base64.urlsafe_b64encode(self._pending[:usable]))
+            self._pending = self._pending[usable:]
+
+    def close(self) -> None:
+        if self._pending:
+            self._out.write(base64.urlsafe_b64encode(self._pending))
+            self._pending = b""
+
+
+def _fernet_encrypt_stream(
+    src_path: str,
+    out_handle,
+    key: bytes,
+    *,
+    iv: Optional[bytes] = None,
+    timestamp: Optional[int] = None,
+    chunk_size: int = _EXPORT_CHUNK_SIZE,
+) -> None:
+    """把 ``src_path`` 的内容加密成 Fernet token 写进 ``out_handle``。
+
+    分块读、分块加密、增量 HMAC、分块 base64：内存占用只与 ``chunk_size`` 有关，
+    与包大小无关。``iv`` / ``timestamp`` / ``chunk_size`` 只为测试注入——生产路径用
+    随机 IV 与当前时间，输出与分块大小无关。
+    """
+    raw_key = base64.urlsafe_b64decode(key)
+    signing_key, encryption_key = raw_key[:16], raw_key[16:]
+    iv = iv if iv is not None else os.urandom(16)
+    stamp = int(time.time()) if timestamp is None else int(timestamp)
+
+    hasher = HMAC(signing_key, hashes.SHA256())
+    encryptor = Cipher(algorithms.AES(encryption_key), modes.CBC(iv)).encryptor()
+    padder = sym_padding.PKCS7(algorithms.AES.block_size).padder()
+
+    writer = _Base64ChunkWriter(out_handle)
+    head = _FERNET_VERSION + struct.pack(">Q", stamp) + iv
+    hasher.update(head)
+    writer.write(head)
+
+    with open(src_path, "rb") as src:
+        while True:
+            chunk = src.read(chunk_size)
+            if not chunk:
+                break
+            piece = encryptor.update(padder.update(chunk))
+            if piece:
+                hasher.update(piece)
+                writer.write(piece)
+
+    tail = encryptor.update(padder.finalize()) + encryptor.finalize()
+    if tail:
+        hasher.update(tail)
+        writer.write(tail)
+    writer.write(hasher.finalize())
+    writer.close()
+
 
 class _HashingReader:
     """给 tarfile 用的分块读取器：边喂数据边算 sha256，不把整个成员读进内存。"""
@@ -724,10 +811,6 @@ def build_export_backup_to_file(
         salt = os.urandom(credentials_store.BACKUP_SALT_BYTES)
         iterations = credentials_store.BACKUP_KDF_ITERATIONS
         key = _derive_backup_key(passphrase, salt, iterations)
-        with open(tar_path, "rb") as handle:
-            tar_bytes = handle.read()
-        token = Fernet(key).encrypt(tar_bytes)
-        del tar_bytes
 
         header_obj = {
             "salt": base64.b64encode(salt).decode("ascii"),
@@ -736,12 +819,12 @@ def build_export_backup_to_file(
         }
         header_bytes = json.dumps(header_obj, ensure_ascii=False).encode("utf-8")
 
-        _report("saving")
         with open(dst_path, "wb") as out:
             out.write(BACKUP_MAGIC)
             out.write(struct.pack(">I", len(header_bytes)))
             out.write(header_bytes)
-            out.write(token)
+            # 分块加密直接写进目标文件的 token 段：tar 不会整包留在内存里
+            _fernet_encrypt_stream(tar_path, out, key)
 
         meta["archive_bytes"] = os.path.getsize(dst_path)
         meta["archive_sha256"] = sha256_file(Path(dst_path))
