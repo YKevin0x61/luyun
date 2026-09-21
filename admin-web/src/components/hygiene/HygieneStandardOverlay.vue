@@ -98,7 +98,7 @@ onBeforeUnmount(() => {
   <div class="std-frame">
     <div v-if="missingOffline" class="std-empty">
       <p>尚未缓存，需联网下载</p>
-      <button type="button" @click="standardPhotoCache.checkForUpdates({ force: true })">重试下载</button>
+      <button type="button" @click="standardPhotoCache.checkForUpdates({ download: true })">重试下载</button>
     </div>
     <p v-else-if="!resolvedSrc" class="std-empty">还没有标准图</p>
     <div

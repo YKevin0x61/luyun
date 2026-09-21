@@ -168,17 +168,25 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
     cancelDownload() {
       if (firstDownloadController) firstDownloadController.abort()
     },
-    async checkForUpdates({ force = false, silent = false, manifest = null } = {}) {
+    /**
+     * 核对标准图有没有新版本。
+     *
+     * 默认**只核对、不下载**：拉回清单、比对本机缓存，缺哪几张记进 `deferred`
+     * 让界面提示「有 N 张待更新 · 立即更新」。真正拉图要显式 `download: true`
+     * （由员工点按钮触发）——自动更新会在员工不知情时吃流量，也让他看不出
+     * 「标准图换版了」。首次下载仍走 firstPromptOpen 弹窗，也是员工点的。
+     */
+    async checkForUpdates({ download = false, silent = false, manifest = null } = {}) {
       if (this.busy) return null
       if (!this.stats.totalCount) return null
-      if (!this.stats.baselineReady && !force) return null
+      if (!this.stats.baselineReady && !download) return null
       this.busy = true
       this.errorText = ''
       try {
         this.manifest = manifest || await getBrowserCache().loadManifest()
         const result = await getBrowserCache().sync({
           manifest: this.manifest,
-          force,
+          download,
         })
         if (result.status === 'deferred') {
           this.deferred = result

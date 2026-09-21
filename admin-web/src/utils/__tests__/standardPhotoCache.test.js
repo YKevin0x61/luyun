@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  classifyNetwork,
   createStandardPhotoCache,
   formatChinaSyncTime,
   inspectManifest,
-  shouldAutoDownload,
   standardVersionChanged,
   STANDARD_PHOTO_DOWNLOAD_CONCURRENCY,
 } from '../standardPhotoCache.js'
@@ -88,17 +86,8 @@ function cacheHarness({ networkKind = 'wifi', files = {}, now = () => 1_700_000_
 }
 
 describe('standardPhotoCache policy', () => {
-  it('classifies Wi-Fi, cellular, unknown and offline without treating unknown as free', () => {
-    expect(classifyNetwork({ type: 'wifi' }, true)).toBe('wifi')
-    expect(classifyNetwork({ effectiveType: '4g' }, true)).toBe('cellular')
-    expect(classifyNetwork({}, true)).toBe('unknown')
-    expect(classifyNetwork({}, false)).toBe('offline')
-    expect(shouldAutoDownload([entry(1, '123')], 'unknown')).toBe(true)
-    expect(shouldAutoDownload([entry(1, '123'), entry(2, '456')], 'unknown')).toBe(true)
-    expect(shouldAutoDownload([
-      { ...entry(1, '123'), byte_size: 6 * 1024 * 1024 },
-      { ...entry(2, '456'), byte_size: 6 * 1024 * 1024 },
-    ], 'unknown')).toBe(false)
+  it('flags a version change and formats the sync stamp', () => {
+    // 「按网络类型决定要不要自动下载」的判据已整条移除：现在只提示、手动更新。
     expect(standardVersionChanged(3, 4)).toBe(true)
     expect(standardVersionChanged(4, '4')).toBe(false)
     expect(formatChinaSyncTime('2026-09-14T17:06:00.000Z')).toBe(
@@ -169,7 +158,7 @@ describe('createStandardPhotoCache', () => {
     expect(state.missing).toEqual([first])
   })
 
-  it('defers a large batch on unknown network but supports a forced update', async () => {
+  it('inspects by default and only downloads when the user asks', async () => {
     const one = { ...entry(1, 'A', 'hash-A'), byte_size: 6 * 1024 * 1024 }
     const two = { ...entry(2, 'B', 'hash-B'), byte_size: 6 * 1024 * 1024 }
     const storage = fakeStorage()
@@ -181,14 +170,16 @@ describe('createStandardPhotoCache', () => {
         return new Blob([bytes], { type: 'image/jpeg' })
       },
       storage,
-      network: { getKind: async () => 'unknown' },
       hashBytes: async (bytes) => hashCharacter(bytes),
     })
-    const deferred = await cache.sync()
-    expect(deferred.status).toBe('deferred')
-    const forced = await cache.sync({ force: true })
-    expect(forced.status).toBe('updated')
-    expect(forced.updated).toBe(2)
+    // 默认只核对：有缺图就返回 deferred 让界面提示，不偷偷下载。
+    const inspected = await cache.sync()
+    expect(inspected.status).toBe('deferred')
+    expect(inspected.missing).toHaveLength(2)
+    // 员工点了「立即更新」才真的拉。
+    const applied = await cache.sync({ download: true })
+    expect(applied.status).toBe('updated')
+    expect(applied.updated).toBe(2)
     expect(storage.index.lastSyncAt).toBeTruthy()
   })
 

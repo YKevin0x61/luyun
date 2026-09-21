@@ -525,7 +525,12 @@ async def standard_manifest(
     identity=Depends(require_standard_cache_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    manifest = await work.standard_manifest(_standard_cache_actor(identity))
+    # 清单声明的必须是**实际下发的这一份**（preview 变体）的字节数与摘要：
+    # 声明原图、下发变体的话，员工端按清单校验必然判「图片大小不一致」。
+    manifest = await work.standard_manifest(
+        _standard_cache_actor(identity),
+        variant=STANDARD_CACHE_VARIANT,
+    )
     for entry in manifest["standards"]:
         # 员工端会把整份清单离线缓存下来，而页面上这些图最大只显示到 440px 高：
         # 缓存 1600px 的 preview（250–450KB）而不是原图（2.5–4MB）。缺变体的老图

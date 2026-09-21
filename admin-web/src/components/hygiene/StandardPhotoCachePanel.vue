@@ -140,7 +140,7 @@ onBeforeUnmount(() => {
       v-if="store.deferred"
       type="button"
       class="std-cache-banner"
-      @click="store.checkForUpdates({ force: true })"
+      @click="store.checkForUpdates({ download: true })"
     >
       有 {{ store.deferred.missing.length }} 张标准图待更新 · 立即更新
     </button>

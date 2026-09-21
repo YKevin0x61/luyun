@@ -1,7 +1,6 @@
 export const STANDARD_PHOTO_CACHE_NAME = 'luyun-hygiene-standard-photos-v1'
 export const STANDARD_PHOTO_INDEX_KEY = 'luyun.hygiene.standardPhotoCache.index'
 export const STANDARD_PHOTO_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-export const STANDARD_PHOTO_BATCH_LIMIT_BYTES = 10 * 1024 * 1024
 export const STANDARD_PHOTO_DOWNLOAD_CONCURRENCY = 2
 
 const STANDARD_PHOTO_TOUCH_THROTTLE_MS = 60 * 1000
@@ -115,16 +114,6 @@ export async function sha256Hex(value) {
   return toHex(new Uint8Array(digest))
 }
 
-export function classifyNetwork(connection = {}, online = true) {
-  if (!online) return 'offline'
-  const type = String(connection.type || '').toLowerCase()
-  if (type === 'wifi') return 'wifi'
-  if (type === 'cellular') return 'cellular'
-  const effective = String(connection.effectiveType || '').toLowerCase()
-  if (['slow-2g', '2g', '3g', '4g'].includes(effective)) return 'cellular'
-  return 'unknown'
-}
-
 export function inspectManifest(index, manifest) {
   const current = normalizeIndex(index)
   const standards = Array.isArray(manifest && manifest.standards) ? manifest.standards : []
@@ -146,16 +135,6 @@ export function inspectManifest(index, manifest) {
     obsolete,
     totalBytes: standards.reduce((sum, entry) => sum + Number(entry.byte_size || 0), 0),
   }
-}
-
-export function shouldAutoDownload(entries, networkKind) {
-  const list = Array.isArray(entries) ? entries : []
-  if (!list.length) return false
-  if (networkKind === 'wifi') return true
-  if (networkKind === 'offline') return false
-  if (list.length === 1) return true
-  const total = list.reduce((sum, entry) => sum + Number(entry.byte_size || 0), 0)
-  return total <= STANDARD_PHOTO_BATCH_LIMIT_BYTES
 }
 
 export function standardVersionChanged(seenStandardId, latestStandardId) {
@@ -183,7 +162,6 @@ export function createStandardPhotoCache({
   manifestLoader,
   imageLoader,
   storage,
-  network = {},
   now = () => Date.now(),
   hashBytes = sha256Hex,
   createObjectUrl = (blob) => URL.createObjectURL(blob),
@@ -430,7 +408,7 @@ export function createStandardPhotoCache({
     return { ...result, manifest: effective, missing: result.failures }
   }
 
-  async function sync({ manifest, force = false, onProgress } = {}) {
+  async function sync({ manifest, download = false, onProgress } = {}) {
     const effective = manifest || (await loadManifest())
     await withIndex(async (index) => {
       applyManifestInPlace(index, effective)
@@ -445,8 +423,10 @@ export function createStandardPhotoCache({
       })
       return { status: 'up-to-date', updated: 0, failures: [], missing: [] }
     }
-    const networkKind = network.getKind ? await network.getKind() : 'unknown'
-    if (!force && !shouldAutoDownload(state.missing, networkKind)) {
+    // 只提示、不自动下载：原来按网络类型判——wifi 直接下、移动网不足 10MB 也直接
+    // 下，员工既不知情（后台悄悄吃流量），也看不到「有新版本」。现在一律返回
+    // deferred 让界面提示，真要拉图必须由用户点「立即更新」（download=true）。
+    if (!download) {
       return {
         status: 'deferred',
         updated: 0,
@@ -661,12 +641,6 @@ export function createBrowserStandardPhotoCache({
       }
     },
   }
-  const network = {
-    async getKind() {
-      const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection || {}
-      return classifyNetwork(connection, navigator.onLine !== false)
-    },
-  }
   async function loadManifest() {
     const response = await fetch('/api/hygiene/standard-manifest', {
       credentials: 'include',
@@ -691,6 +665,5 @@ export function createBrowserStandardPhotoCache({
     manifestLoader: loadManifest,
     imageLoader: loadImage,
     storage,
-    network,
   })
 }

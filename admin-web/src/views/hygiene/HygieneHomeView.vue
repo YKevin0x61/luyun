@@ -572,6 +572,9 @@ async function pickAssignment() {
     })
     changingAssignment.value = false
     await loadMe()
+    // 清单是按责任区切片的：换了区还拿着上一份，提示的「待更新」张数就是别的区的。
+    // 这里重新核对一次（只核对、不下载），deferred 提示才对得上。
+    await standardPhotoCache.checkForUpdates()
   } catch (err) {
     errorText.value = err.message || '选择区域和班次失败'
   } finally {

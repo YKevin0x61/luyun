@@ -898,12 +898,22 @@ class HygieneWork:
             raise HygieneWorkError("item_not_found", "item_not_found")
         return int(dict(item)["zone_id"])
 
-    async def standard_manifest(self, actor: Optional[dict] = None) -> dict:
+    async def standard_manifest(
+        self,
+        actor: Optional[dict] = None,
+        variant: str = "original",
+    ) -> dict:
         """当前标准图清单（员工端离线缓存用）。
 
         传入员工 actor 时只返回该员工当天责任区的项：这份清单会被整包离线缓存，
         「缓存即越权」——不做切片就等于把全店标准图发给每个员工。未选责任区时
         返回空清单而不是报错，避免刚打开页面就被 400 挡住。
+
+        ``variant`` 决定清单声明的是哪一份字节：员工端下的是 ``?variant=preview``
+        的缩放图，客户端拿字节后会按清单里的 ``byte_size``/``sha256`` 校验。声明原图
+        的摘要却下发变体，那边必然判「图片大小不一致」——缓存永远建立不起来，而
+        且每次重试都一样。所以这里必须跟着实际会下发的那一份走：变体记录存在且
+        文件还在就用变体的元数据，否则退回原图（服务端此时也会回落到原图）。
         """
         zone_id: Optional[int] = None
         if actor is not None and actor.get("kind") == "staff":
@@ -911,15 +921,37 @@ class HygieneWork:
             if not picked:
                 return self._empty_standard_manifest()
             zone_id = int(picked)
-        sql = """SELECT i.id AS item_id, i.name AS item_name,
-                      i.current_standard_id AS standard_id,
-                      s.capture_id, s.byte_size, s.content_sha256, s.content_type
-               FROM hygiene_daily_items i
-               JOIN hygiene_standards s ON s.id = i.current_standard_id
-               WHERE i.current_standard_id IS NOT NULL
-                 AND s.byte_size IS NOT NULL
-                 AND s.content_sha256 IS NOT NULL"""
-        params: list = []
+        want_variant = (variant or "original").strip().lower()
+        if want_variant != "original":
+            sql = """SELECT i.id AS item_id, i.name AS item_name,
+                          i.current_standard_id AS standard_id,
+                          s.capture_id, s.byte_size, s.content_sha256, s.content_type,
+                          v.capture_id AS variant_capture_id,
+                          v.byte_size AS variant_byte_size,
+                          v.content_sha256 AS variant_sha256,
+                          v.content_type AS variant_content_type
+                   FROM hygiene_daily_items i
+                   JOIN hygiene_standards s ON s.id = i.current_standard_id
+                   LEFT JOIN hygiene_capture_variants v
+                     ON v.source_capture_id = s.capture_id AND v.variant = ?
+                   WHERE i.current_standard_id IS NOT NULL
+                     AND s.byte_size IS NOT NULL
+                     AND s.content_sha256 IS NOT NULL"""
+            params: list = [want_variant]
+        else:
+            sql = """SELECT i.id AS item_id, i.name AS item_name,
+                          i.current_standard_id AS standard_id,
+                          s.capture_id, s.byte_size, s.content_sha256, s.content_type,
+                          NULL AS variant_capture_id,
+                          NULL AS variant_byte_size,
+                          NULL AS variant_sha256,
+                          NULL AS variant_content_type
+                   FROM hygiene_daily_items i
+                   JOIN hygiene_standards s ON s.id = i.current_standard_id
+                   WHERE i.current_standard_id IS NOT NULL
+                     AND s.byte_size IS NOT NULL
+                     AND s.content_sha256 IS NOT NULL"""
+            params = []
         if zone_id is not None:
             sql += " AND i.zone_id = ?"
             params.append(zone_id)
@@ -931,7 +963,19 @@ class HygieneWork:
             readable_ids = await self._readable_capture_ids()
         standards = []
         for mapping in rows:
-            if str(mapping["capture_id"]) not in readable_ids:
+            capture_id = str(mapping["capture_id"])
+            byte_size = mapping["byte_size"]
+            sha256 = mapping["content_sha256"]
+            content_type = mapping["content_type"]
+            variant_id = mapping.get("variant_capture_id")
+            # 变体记录可能指向已经被清理掉的文件：那种情况服务端会回落到原图，
+            # 清单也得跟着声明原图，否则又对不上。
+            if variant_id and str(variant_id) in readable_ids:
+                capture_id = str(variant_id)
+                byte_size = mapping["variant_byte_size"]
+                sha256 = mapping["variant_sha256"]
+                content_type = mapping.get("variant_content_type") or content_type
+            if capture_id not in readable_ids:
                 logger.warning(
                     "hygiene current standard capture missing standard=%s",
                     mapping["standard_id"],
@@ -942,9 +986,9 @@ class HygieneWork:
                 "item_id": int(mapping["item_id"]),
                 "item_name": mapping["item_name"],
                 "standard_id": standard_id,
-                "byte_size": int(mapping["byte_size"]),
-                "sha256": mapping["content_sha256"],
-                "content_type": mapping["content_type"],
+                "byte_size": int(byte_size),
+                "sha256": sha256,
+                "content_type": content_type,
             })
         return self._standard_manifest_payload(standards)
 
