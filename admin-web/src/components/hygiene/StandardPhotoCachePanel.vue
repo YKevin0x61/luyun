@@ -94,7 +94,7 @@ onBeforeUnmount(() => {
 
     <div
       v-if="store.firstPromptOpen && store.stats.totalCount > 0 && store.stats.missingCount > 0"
-      class="std-cache-mask"
+      class="std-cache-mask is-first-prompt"
       role="presentation"
     >
       <section class="std-cache-card" role="dialog" aria-modal="true" aria-label="下载全部标准图">
@@ -105,6 +105,7 @@ onBeforeUnmount(() => {
           共约 {{ formatBytes(store.stats.missingBytes) }}。
           下载后可更快打开，并在短时断网时继续查看。
         </p>
+        <p v-if="store.errorText" class="std-cache-error">{{ store.errorText }}</p>
         <div class="std-cache-actions">
           <button type="button" class="btn btn-primary" :disabled="store.busy" @click="store.startFirstDownload()">开始下载</button>
           <button type="button" class="btn" :disabled="store.busy" @click="store.skipFirstRun()">稍后下载</button>
@@ -211,6 +212,12 @@ onBeforeUnmount(() => {
   padding: 18px;
   background: rgba(3, 11, 10, .72);
   backdrop-filter: blur(8px);
+}
+/* 首次下载提示必须低于拍摄/对照弹层（.staff-preview 是 60）：它是启动时自动弹的，
+   z-index 高于相机时会直接压在取景画面上，员工点不到快门。管理面板是用户主动打开
+   的，保持在上层。 */
+.std-cache-mask.is-first-prompt {
+  z-index: 55;
 }
 .std-cache-card {
   width: min(520px, 100%);

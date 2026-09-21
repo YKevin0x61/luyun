@@ -59,6 +59,10 @@
 - [ ] 功能在开发机验证通过；相关测试已跑
 - [ ] `config.py` 的 `APP_VERSION` 已改成即将发布的版本
 - [ ] 工作区干净（无未提交改动）；需要进 Release 的提交已 push
+- [ ] 若本次改了 `db_core/schema.py` 的表结构或索引定义：已新增 `migrations/pg/000N_*.sql`
+      （**只做加成性变更**：加列带默认值 / 加索引 / 建新表），并且**已提交**。
+      发行包按 `git archive HEAD` 打包，没提交的迁移脚本不会进包，PG 门店的面板就看不到它
+      （那时面板会显示「本发行包内没有增量迁移脚本」，详见 `migrations/pg/README.md`）
 - [ ] 已登录 GitHub CLI：`gh auth status`（账号对仓库有写 Release 权限）
 - [ ] 发版机已装 Node/npm（Admin）、以及 KDS 构建所需工具（见 `scripts/build_kds.sh`）
 - [ ] 先跑契约校验：`./scripts/publish_release.sh --dry-run vX.Y.Z`
@@ -262,6 +266,9 @@ Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 �
 作业进入「已切换、重启中」（`restarting`），**不直接落成功**
         ↓
 页面轮询 data/update_job.json；管理后台按就绪口径完成**健康确认**（`succeeded` / `succeeded_but_unhealthy`）
+        ↓
+PG 部署：「系统更新」→「数据库迁移」→「应用待执行迁移」
+（SQLite 跳过这一步：schema 由应用启动时自愈）
 ```
 
 主服务会短暂中断；WebSocket / 采集会随进程重启恢复。宜避开极端高峰；急事可覆盖警告。
@@ -272,6 +279,15 @@ Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 �
 则落 `succeeded_but_unhealthy`（页面显示「已切换到新版本，但服务未恢复健康」，
 保留回退点与日志，提供查看日志 / 重新检测 / 回到上一版本三条出路）。健康确认
 失败不会自动重试，也不会自动回滚。
+
+**数据库 schema 变更（PG 部署多一步）**：SQLite 的 schema 在应用启动时自愈
+（`apply_hygiene_schema` / `migrate_hygiene_columns`），而 PG 按设计**不在启动期改结构**
+（结构变更要可追溯，见 `db_core/connection.py::_connect_postgres` 的说明），所以 PG 门店
+在健康确认之后还要应用一次迁移：「系统更新」→「数据库迁移」→「应用待执行迁移」。
+
+版本检测会把待应用条数直接显示在版本状态卡上（状态灯转黄），不必靠记性；应用记录写在库里的
+`schema_migrations`，随时能看出当前到哪一版。漏应用的后果通常不是报错，而是变慢或某个功能
+悄悄降级——这正是把它显式写进流程的原因。细节见 `migrations/pg/README.md`。
 
 **Docker / 1Panel（进程外壳）：** 用 `deploy/docker-compose.yml` / `./scripts/docker_up.sh`。  
 必须绑定挂载**直播应用目录的父目录**（默认 `deploy/runtime` → `/srv/luyun`，直播树 `/srv/luyun/app`），并挂载 `/var/run/docker.sock`；设置 `LUYUN_DEPLOY_MODE=docker`、`LUYUN_DOCKER_CONTAINER=<容器名>`（与 `container_name` 一致）。详见 `deploy/README.md` §1.1。**不要求**挂载 `.git`；交付仍是发行包，不是 `docker pull` 镜像。

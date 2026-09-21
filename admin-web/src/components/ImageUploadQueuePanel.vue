@@ -1,10 +1,23 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
+import ConfirmDialog from './admin/ConfirmDialog.vue'
 import SvgIcon from './SvgIcon.vue'
 import { useImageUploadQueueStore } from '../stores/imageUploadQueue'
 
 const store = useImageUploadQueueStore()
 const collapsed = ref(false)
+// 待确认「移除」的任务。只有失败项才拦——成功项的照片已经在服务端了，移除只是清
+// 列表；失败项的移除等于当场放弃这张照片，且草稿也会一起删掉。
+const removeTarget = ref(null)
+
+function askRemove(task) {
+  removeTarget.value = task
+}
+
+function confirmRemove() {
+  if (removeTarget.value) store.remove(removeTarget.value.id)
+  removeTarget.value = null
+}
 
 const headline = computed(() => {
   if (store.activeTasks.length) {
@@ -116,7 +129,7 @@ function closePanel() {
               type="button"
               class="image-upload-icon-btn"
               :aria-label="`移除 ${task.label} 上传记录`"
-              @click="store.remove(task.id)"
+              @click="task.status === 'error' ? askRemove(task) : store.remove(task.id)"
             >
               <SvgIcon name="x" :size="15" />
             </button>
@@ -137,6 +150,16 @@ function closePanel() {
       </footer>
     </section>
   </div>
+
+  <ConfirmDialog
+    v-if="removeTarget"
+    title="放弃这张照片？"
+    :message="`「${removeTarget.label}」还没传上去，移除后本地草稿也会一起删掉，需要重新拍。`"
+    confirm-label="放弃"
+    danger
+    @confirm="confirmRemove"
+    @cancel="removeTarget = null"
+  />
 </template>
 
 <style scoped>
@@ -144,7 +167,9 @@ function closePanel() {
   position: fixed;
   top: calc(var(--global-nav-height, 46px) + 12px);
   right: 14px;
-  z-index: 95;
+  /* 必须低于拍摄/对照弹层（.staff-preview 是 60）：原来 95 会盖住弹层里的照片预览，
+     员工看不到自己刚拍的那张。仍高于底部 tabbar（30），收起态也还能点到。 */
+  z-index: 55;
   width: min(360px, calc(100vw - 28px));
 }
 .image-upload-queue.is-collapsed { width: auto; }

@@ -8,6 +8,7 @@ import {
   progressLabel,
 } from '../utils/backupProgress'
 import {
+  CONTENT_APP_PG,
   CONTENT_LABELS,
   CONTENT_OTHER_PHOTOS,
   CONTENT_STANDARD_PHOTOS,
@@ -698,19 +699,30 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       `恢复内容：${contents.length ? contents.join('、') : '（该快照没有覆盖内容清单）'}`,
       '会先自动生成一份新的本机回滚快照',
     ]
+    // PG 快照是整库 pg_restore：会 drop 并重建对象，恢复期间采集会中断一轮，
+    // 后台会话表也被一起替换，所以要把代价说清楚，而不是只说「数据回滚」。
+    const hasPgDump = contentCodes.includes(CONTENT_APP_PG)
+    if (hasPgDump) {
+      details.push('恢复方式：pg_restore --clean，会先删除并重建数据库对象')
+      details.push('恢复期间采集会中断，恢复完成后需要重新登录后台')
+    }
     if (!hasStandard && !hasOther) {
       details.push('该快照不含卫生照片，恢复后标准图与其它照片保持现状')
     }
     requestConfirm(
       {
-        title: '确认数据回滚',
-        message: `将把当前业务数据替换为本机回滚快照 ${ts} 的内容，并先为当前状态新建一份本机回滚快照。`,
+        title: hasPgDump ? '确认恢复整库数据' : '确认数据回滚',
+        message: hasPgDump
+          ? `将用 pg_restore 把 PostgreSQL 整库替换为本机回滚快照 ${ts} 的内容，并先为当前状态新建一份本机回滚快照。恢复期间服务会短暂无法写库。`
+          : `将把当前业务数据替换为本机回滚快照 ${ts} 的内容，并先为当前状态新建一份本机回滚快照。`,
         details,
         danger: true,
-        confirmLabel: '确认数据回滚',
+        confirmLabel: hasPgDump ? '确认恢复整库数据' : '确认数据回滚',
         checkboxes: [{
           key: 'rollback',
-          label: '我确认用这份本机回滚快照替换当前数据',
+          label: hasPgDump
+            ? '我确认用这份快照替换 PostgreSQL 整库（会重建数据库对象）'
+            : '我确认用这份本机回滚快照替换当前数据',
           required: true,
         }],
       },

@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { isLoggedIn } from '../utils/authStatus'
 import { buildLoginNextFromRoute } from '../utils/loginNext'
-import { isStaffLoggedIn } from '../utils/hygieneStaff'
+import { staffSessionState } from '../utils/hygieneStaff'
 
 const RECIPE_READER_META = { public: true, standalone: true }
 const HYGIENE_STAFF_META = { public: true, standalone: true, staffPhone: true }
@@ -60,7 +60,10 @@ const router = createRouter({
 // 员工卫生首页另查员工会话；其余未登录跳 /login?next=
 router.beforeEach(async (to) => {
   if (to.meta.staffAuth) {
-    if (await isStaffLoggedIn()) return true
+    const state = await staffSessionState()
+    // 网络不明（断网 / 后端刚重启 / 超时）时放行到页面：那里会显示"网络不好，
+    // 正在重试"并退避重试。把这种情况也判成未登录，弱网下就会把员工反复甩到登录页。
+    if (state !== 'unauthenticated') return true
     return { path: '/hygiene/login' }
   }
   if (to.meta.public) return true

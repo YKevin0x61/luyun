@@ -59,10 +59,13 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
     },
     setTaskSheetOpen(open) {
       this.taskSheetOpen = Boolean(open)
-      if (!this.taskSheetOpen && this.queuedNotice) {
-        this.notice = this.queuedNotice
-        this.queuedNotice = null
-      }
+      if (this.taskSheetOpen || !this.queuedNotice) return
+      const queued = this.queuedNotice
+      this.queuedNotice = null
+      // 首次下载失败：重新把首次下载弹窗打开（弹窗里会显示 errorText），而不是把它
+      // 当成一条普通 notice——普通 notice 在拍摄弹层关闭后弹出，反而会再挡一次画面。
+      if (queued.reopenFirstPrompt) this.firstPromptOpen = true
+      else this.notice = queued
     },
     dismissNotice() {
       this.notice = null
@@ -143,7 +146,18 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
         return result
       } catch (error) {
         this.errorText = error && error.message ? error.message : '标准图下载失败'
-        this.firstPromptOpen = true
+        // 走 _publishNotice 而不是直接 firstPromptOpen = true：拍摄弹层开着时它会把
+        // 提示排进 queuedNotice，等弹层关掉再弹。原来的写法绕过了这套排队机制，
+        // 而弹窗的 z-index 又高于拍摄弹层，下载一失败就压在相机画面上。
+        if (this.taskSheetOpen) {
+          this.queuedNotice = {
+            type: 'warning',
+            message: this.errorText,
+            reopenFirstPrompt: true,
+          }
+        } else {
+          this.firstPromptOpen = true
+        }
         return null
       } finally {
         firstDownloadController = null

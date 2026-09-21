@@ -41,6 +41,10 @@ const mode = ref('circle')
 const captionText = ref('')
 const arrowStart = ref(null)
 const replacingId = ref(null)
+// 「编辑标注」模式：不换图，只改圈注/箭头/批注。服务层会新插一版标准并把
+// current_standard_id 指过去，历史冻结标准不动。
+const markupEditing = ref(false)
+const savingMarkup = ref(false)
 const imageUploads = useImageUploadQueueStore()
 
 const selected = computed(() => {
@@ -64,7 +68,10 @@ const editorSrc = computed(() => {
 })
 
 const canSave = computed(() => {
-  if (!selected.value || !file.value) return false
+  if (!selected.value) return false
+  // 只改标注时不需要选文件——这正是这个模式存在的理由。
+  if (markupEditing.value) return Boolean(replacingId.value)
+  if (!file.value) return false
   if (replacingId.value) return true
   return Boolean(itemName.value.trim())
 })
@@ -256,6 +263,7 @@ function clearEditor() {
   markup.value = []
   arrowStart.value = null
   replacingId.value = null
+  markupEditing.value = false
 }
 
 function onFile(event) {
@@ -292,6 +300,7 @@ function removeMark(index) {
 
 function startReplace(item) {
   replacingId.value = item.id
+  markupEditing.value = false
   itemName.value = item.name
   markup.value = parseMarkup(item.markup)
   file.value = null
@@ -299,8 +308,42 @@ function startReplace(item) {
   arrowStart.value = null
 }
 
+function startEditMarkup(item) {
+  replacingId.value = item.id
+  markupEditing.value = true
+  itemName.value = item.name
+  markup.value = parseMarkup(item.markup)
+  file.value = null
+  clearPreview()
+  arrowStart.value = null
+  mode.value = 'circle'
+  captionText.value = ''
+  errorText.value = ''
+}
+
+async function saveMarkup() {
+  if (savingMarkup.value || !replacingId.value) return
+  savingMarkup.value = true
+  errorText.value = ''
+  try {
+    await api.patch(`/api/hygiene/admin/items/${replacingId.value}/standard/markup`, {
+      markup: markup.value,
+    })
+    clearEditor()
+    await loadZones()
+  } catch (err) {
+    errorText.value = err.message || '无法保存标准图标注'
+  } finally {
+    savingMarkup.value = false
+  }
+}
+
 function saveItem() {
   if (!canSave.value) return
+  if (markupEditing.value) {
+    void saveMarkup()
+    return
+  }
   errorText.value = ''
   const replacing = Boolean(replacingId.value)
   const itemLabel = replacingItem.value ? replacingItem.value.name : itemName.value.trim()
@@ -317,6 +360,8 @@ function saveItem() {
       label: replacing ? `更新标准图 · ${itemLabel}` : `标准图 · ${itemLabel}`,
       detail: file.value.name,
       onSuccess: loadZones,
+      // 建检查项 / 换标准图都是无条件 INSERT：自动重试会重复建行，只允许人工重试。
+      autoRetry: false,
     })
     clearEditor()
   } catch (err) {
@@ -450,6 +495,7 @@ function markLabel(mark) {
               <div class="item-meta">
                 <strong>{{ item.name }}</strong>
                 <div class="item-actions">
+                  <button type="button" class="btn btn-sm" @click="startEditMarkup(item)">编辑标注</button>
                   <button type="button" class="btn btn-sm" @click="startReplace(item)">换标准图</button>
                   <button
                     type="button"
@@ -463,9 +509,12 @@ function markLabel(mark) {
           </ul>
 
           <form class="item-editor" @submit.prevent="saveItem">
-            <h4>{{ replacingId ? '更新标准图' : '新增检查项' }}</h4>
-            <p class="editor-lead">标准图保存后检查项才会出现在员工端。可在图上画圆圈、箭头和批注。</p>
-            <label class="editor-field">
+            <h4>{{ markupEditing ? '编辑标准图标注' : (replacingId ? '更新标准图' : '新增检查项') }}</h4>
+            <p v-if="markupEditing" class="editor-lead">
+              只改标注、不换图：保存后会生成新一版标准图，员工端会提示重新对照；已经交过的记录仍看当时那一版。
+            </p>
+            <p v-else class="editor-lead">标准图保存后检查项才会出现在员工端。可在图上画圆圈、箭头和批注。</p>
+            <label v-if="!markupEditing" class="editor-field">
               检查项名称
               <input
                 v-model="itemName"
@@ -476,7 +525,7 @@ function markLabel(mark) {
                 placeholder="比如案板表面"
               >
             </label>
-            <label class="editor-field">
+            <label v-if="!markupEditing" class="editor-field">
               标准图
               <input class="input" type="file" accept="image/*" @change="onFile">
             </label>
@@ -510,8 +559,8 @@ function markLabel(mark) {
             </ul>
             <div class="editor-actions">
               <button v-if="replacingId" type="button" class="btn" @click="clearEditor">取消</button>
-              <button type="submit" class="btn btn-primary" :disabled="!canSave">
-                {{ replacingId ? '保存新标准图' : '新增检查项' }}
+              <button type="submit" class="btn btn-primary" :disabled="!canSave || savingMarkup">
+                {{ markupEditing ? (savingMarkup ? '保存中…' : '保存标注') : (replacingId ? '保存新标准图' : '新增检查项') }}
               </button>
             </div>
           </form>

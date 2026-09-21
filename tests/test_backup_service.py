@@ -760,5 +760,220 @@ class MissingHygieneCaptureIdsTest(unittest.TestCase):
         self.assertNotIn("thumb-1", result["missing"].get(PHOTO_STANDARD, []))
 
 
+class ContentEquivalenceTest(unittest.TestCase):
+    """PG 的整库 pg_dump 同时覆盖业务数据与配方数据。"""
+
+    def test_app_pg_satisfies_business_and_recipes_but_not_credentials(self):
+        from services.backup_service import (
+            CONTENT_APP_DB,
+            CONTENT_APP_PG,
+            CONTENT_CREDENTIALS,
+            CONTENT_RECIPES,
+        )
+
+        self.assertTrue(backup_service.contents_cover([CONTENT_APP_PG], CONTENT_APP_DB))
+        self.assertTrue(backup_service.contents_cover([CONTENT_APP_PG], CONTENT_RECIPES))
+        self.assertFalse(backup_service.contents_cover([CONTENT_APP_PG], CONTENT_CREDENTIALS))
+
+    def test_sqlite_contents_do_not_satisfy_each_other(self):
+        from services.backup_service import CONTENT_APP_DB, CONTENT_APP_PG, CONTENT_RECIPES
+
+        self.assertTrue(backup_service.contents_cover([CONTENT_APP_DB], CONTENT_APP_DB))
+        self.assertFalse(backup_service.contents_cover([CONTENT_APP_DB], CONTENT_RECIPES))
+        self.assertFalse(backup_service.contents_cover([CONTENT_APP_DB], CONTENT_APP_PG))
+
+
+class PhotoConsistencySemanticsTest(unittest.TestCase):
+    """源磁盘缺失是「不完整」，不是「备份坏了」：不阻断恢复。"""
+
+    def test_source_missing_is_advisory_not_blocking(self):
+        result = backup_service.photo_consistency(
+            {PHOTO_STANDARD: {"count": 0}},
+            {PHOTO_STANDARD: ["gone-1", "gone-2"]},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["blocking"])
+        self.assertEqual(result["missing_total"], 2)
+        self.assertIn("源磁盘", " ".join(result["errors"]))
+
+    def test_complete_photos_report_ok_without_missing(self):
+        result = backup_service.photo_consistency(
+            {PHOTO_STANDARD: {"count": 3}, PHOTO_OTHER: {"count": 1}},
+            {},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["missing_total"], 0)
+        self.assertEqual(result["errors"], [])
+
+
+class PgSnapshotPhotoTest(unittest.TestCase):
+    """PG 快照的照片按库引用分类（psql），psql 不可用时退化并标注未分类。"""
+
+    def setUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._old_backend = settings.DATABASE_BACKEND
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        settings.DATABASE_BACKEND = "postgres"
+
+        self.capture_root = Path(settings.DATABASE_DIR) / "hygiene-captures"
+        self.capture_root.mkdir(parents=True, exist_ok=True)
+        self.snap_dir = Path(settings.DATABASE_DIR) / "snapshots" / "20260919_051032"
+        self.snap_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        settings.DATABASE_DIR = self._old_database_dir
+        settings.DATABASE_BACKEND = self._old_backend
+        self._tmpdir.cleanup()
+
+    def _photo(self, capture_id: str, payload: bytes = b"JPEG") -> None:
+        (self.capture_root / capture_id).write_bytes(payload)
+
+    def _fake_psql(self, standard, other, variants=()):
+        def fake(sql):
+            if "hygiene_standards" in sql:
+                return [[cid] for cid in standard]
+            if "hygiene_capture_variants" in sql:
+                return [list(row) for row in variants]
+            if "hygiene_" in sql:
+                return [[cid] for cid in other]
+            return []
+
+        return fake
+
+    def test_photos_are_classified_by_db_references(self):
+        self._photo("std-1", b"S")
+        self._photo("other-1", b"O")
+        self._photo("orphan-1", b"X")
+
+        with mock.patch.object(
+            backup_service, "_pg_psql_rows", side_effect=self._fake_psql(["std-1"], ["other-1"])
+        ):
+            result = backup_service._write_snapshot_photos_pg(self.snap_dir)
+
+        self.assertEqual(result["manifest"][PHOTO_STANDARD]["count"], 1)
+        self.assertEqual(result["manifest"][PHOTO_OTHER]["count"], 1)
+        self.assertFalse(result["manifest"][PHOTO_STANDARD]["unclassified"])
+        self.assertTrue((self.snap_dir / "photos" / "standard" / "std-1").is_file())
+        self.assertTrue((self.snap_dir / "photos" / "other" / "other-1").is_file())
+        # 分类口径 = 库引用：孤儿文件不进快照
+        self.assertFalse((self.snap_dir / "photos" / "other" / "orphan-1").exists())
+
+    def test_variants_follow_their_source_photo(self):
+        self._photo("std-1")
+        self._photo("thumb-1")
+
+        with mock.patch.object(
+            backup_service,
+            "_pg_psql_rows",
+            side_effect=self._fake_psql(["std-1"], [], variants=[("std-1", "thumb-1")]),
+        ):
+            result = backup_service._write_snapshot_photos_pg(self.snap_dir)
+
+        self.assertEqual(result["manifest"][PHOTO_STANDARD]["count"], 2)
+        self.assertTrue((self.snap_dir / "photos" / "standard" / "thumb-1").is_file())
+
+    def test_referenced_but_missing_photo_is_recorded(self):
+        with mock.patch.object(
+            backup_service, "_pg_psql_rows", side_effect=self._fake_psql(["gone-1"], [])
+        ):
+            result = backup_service._write_snapshot_photos_pg(self.snap_dir)
+
+        self.assertEqual(result["manifest"][PHOTO_STANDARD]["count"], 0)
+        self.assertEqual(result["manifest"][PHOTO_STANDARD]["referenced"], 1)
+        self.assertEqual(result["manifest"][PHOTO_STANDARD]["missing"], 1)
+        self.assertEqual(result["missing"][PHOTO_STANDARD], ["gone-1"])
+
+    def test_psql_unavailable_falls_back_to_scan_and_marks_unclassified(self):
+        self._photo("a")
+        self._photo("b")
+
+        with mock.patch.object(backup_service, "_classify_capture_ids_pg", return_value=None):
+            result = backup_service._write_snapshot_photos_pg(self.snap_dir)
+
+        self.assertEqual(result["manifest"][PHOTO_OTHER]["count"], 2)
+        self.assertTrue(result["manifest"][PHOTO_OTHER]["unclassified"])
+        self.assertTrue(result["manifest"][PHOTO_STANDARD]["unclassified"])
+        self.assertEqual(result["manifest"][PHOTO_STANDARD]["count"], 0)
+
+    def test_psql_missing_table_is_treated_as_no_photos(self):
+        with mock.patch.object(backup_service, "_pg_psql_rows", return_value=[]):
+            classified = backup_service._classify_capture_ids_pg()
+
+        self.assertEqual(classified[PHOTO_STANDARD], [])
+        self.assertEqual(classified[PHOTO_OTHER], [])
+
+
+class RestorePgDumpTest(unittest.TestCase):
+    """PG 整库恢复：pg_restore 参数、失败脱敏、成功后重置序列。"""
+
+    DSN = "postgresql://luyun:sup3r-secret@127.0.0.1:5432/luyun"
+
+    def setUp(self):
+        self._old_dsn = getattr(settings, "POSTGRES_DSN", "")
+        settings.POSTGRES_DSN = self.DSN
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.dump = Path(self._tmpdir.name) / "app.pgdump"
+        self.dump.write_bytes(b"PGDMP-fake")
+
+    def tearDown(self):
+        settings.POSTGRES_DSN = self._old_dsn
+        self._tmpdir.cleanup()
+
+    def _completed(self, returncode=0, stderr=""):
+        proc = mock.Mock()
+        proc.returncode = returncode
+        proc.stderr = stderr
+        proc.stdout = ""
+        return proc
+
+    def test_missing_dump_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "app.pgdump"):
+            backup_service.restore_pg_dump_sync(str(Path(self._tmpdir.name) / "nope.pgdump"))
+
+    def test_missing_pg_restore_binary_is_reported(self):
+        with mock.patch.object(backup_service.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "pg_restore"):
+                backup_service.restore_pg_dump_sync(str(self.dump))
+
+    def test_success_runs_pg_restore_then_resets_sequences(self):
+        with mock.patch.object(
+            backup_service.shutil, "which", return_value="/usr/bin/pg_restore"
+        ), mock.patch.object(
+            backup_service.subprocess, "run", return_value=self._completed()
+        ) as run:
+            backup_service.restore_pg_dump_sync(str(self.dump))
+
+        first_cmd = run.call_args_list[0][0][0]
+        self.assertEqual(first_cmd[0], "pg_restore")
+        self.assertIn("--clean", first_cmd)
+        self.assertIn("--if-exists", first_cmd)
+        self.assertEqual(first_cmd[-1], str(self.dump))
+        # 第二条命令是序列重置（psql）
+        self.assertEqual(run.call_args_list[1][0][0][0], "psql")
+
+    def test_failure_keeps_reason_but_not_password(self):
+        with mock.patch.object(
+            backup_service.shutil, "which", return_value="/usr/bin/pg_restore"
+        ), mock.patch.object(
+            backup_service.subprocess,
+            "run",
+            return_value=self._completed(
+                returncode=1,
+                stderr=f"pg_restore: error: could not connect to {self.DSN}",
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                backup_service.restore_pg_dump_sync(str(self.dump))
+
+        message = str(ctx.exception)
+        self.assertIn("pg_restore 失败", message)
+        self.assertIn("could not connect", message)
+        self.assertNotIn("sup3r-secret", message)
+        self.assertIn("***", message)
+
+
 if __name__ == "__main__":
     unittest.main()

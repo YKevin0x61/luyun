@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
+import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
@@ -68,7 +69,22 @@ async function selectRow(row) {
   }
 }
 
-async function decide(action) {
+// 驳回是不可撤销的：状态直接回到"待拍"，员工得重拍。按钮就挨着"通过"，
+// 手机上很容易误触，所以走一次确认。
+const rejectOpen = ref(false)
+
+function askReject() {
+  if (!selected.value || busy.value) return
+  rejectOpen.value = true
+}
+
+
+async function confirmReject(reason) {
+  rejectOpen.value = false
+  await decide('reject', reason)
+}
+
+async function decide(action, reason = '') {
   if (!selected.value || busy.value) return
   const current = selected.value
   const previous = items.value
@@ -77,6 +93,8 @@ async function decide(action) {
   try {
     await api.post(`/api/hygiene/admin/daily/${selected.value.item_id}/${action}`, {
       shift: selected.value.shift,
+      // 只在驳回时带上原因：员工端会把它显示在待办行上。
+      ...(action === 'reject' && reason ? { reason } : {}),
     })
     if (action === 'accept') {
       lastPassed.value = {
@@ -147,6 +165,7 @@ async function markTeaching() {
           <h3>待验收 <span>{{ items.length }}</span></h3>
         </div>
         <div v-if="loading" class="roster-empty">正在加载…</div>
+        <div v-else-if="errorText" class="roster-empty">加载失败，点上方「刷新」重试。</div>
         <div v-else-if="!items.length" class="roster-empty">现在没有待验收的日常检查。</div>
         <ul v-else class="queue-list">
           <li v-for="row in items" :key="`${row.item_id}-${row.shift}`">
@@ -182,11 +201,22 @@ async function markTeaching() {
           />
           <div class="review-actions">
             <button type="button" class="btn btn-primary" :disabled="busy" @click="decide('accept')">通过</button>
-            <button type="button" class="btn btn-danger" :disabled="busy" @click="decide('reject')">驳回</button>
+            <button type="button" class="btn btn-danger" :disabled="busy" @click="askReject">驳回</button>
           </div>
         </div>
       </div>
     </div>
+
+    <ConfirmDialog
+      v-if="rejectOpen"
+      title="驳回这一项"
+      :message="`驳回「${selected ? selected.item_name : ''}」后状态回到待拍，员工要重新拍；本周红黑榜会记一次驳回。`"
+      confirm-label="驳回"
+      danger
+      :prompt="{ label: '哪里不合格（可选，员工能看到）', placeholder: '例如：台面还有油渍、角落没擦到', maxlength: 120 }"
+      @confirm="confirmReject"
+      @cancel="rejectOpen = false"
+    />
   </div>
 </template>
 

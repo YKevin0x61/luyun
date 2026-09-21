@@ -69,6 +69,7 @@ async function submit() {
           type="tel"
           inputmode="numeric"
           maxlength="11"
+          pattern="1[3-9]\d{9}"
           required
           autocomplete="username"
           placeholder="11 位中国大陆手机号"

@@ -17,7 +17,9 @@ from config import settings
 from services import backup_points, backup_retention, backup_service
 from services.backup_service import (
     CONTENT_APP_DB,
+    CONTENT_APP_PG,
     CONTENT_CREDENTIALS,
+    CONTENT_RUNTIME,
     CONTENT_OTHER_PHOTOS,
     CONTENT_STANDARD_PHOTOS,
     PHOTO_OTHER,
@@ -621,6 +623,73 @@ class ExportPointListingTest(BackupPointTestCase):
         self.assertIn(CONTENT_STANDARD_PHOTOS, missing)
         self.assertIn(CONTENT_OTHER_PHOTOS, missing)
         self.assertEqual(point["provenance"], PROVENANCE_MANUAL)
+
+
+class PgSnapshotPointTest(BackupPointTestCase):
+    """PG 快照的内容清单 / 基础校验 / 照片缺失语义。"""
+
+    def test_pg_contents_do_not_report_business_or_recipes_missing(self):
+        missing = backup_points.missing_contents(
+            [CONTENT_APP_PG, CONTENT_RUNTIME, CONTENT_CREDENTIALS]
+        )
+        labels = [item["label"] for item in missing]
+
+        # 整库 pg_dump 同时覆盖业务数据与配方数据
+        self.assertNotIn("业务数据", labels)
+        self.assertNotIn("配方数据", labels)
+        # 照片确实不在里面
+        self.assertIn("标准图", labels)
+        self.assertIn("其它照片", labels)
+
+    def test_pg_dump_snapshot_is_not_reported_as_credentials_only(self):
+        ts = "20260919_051032"
+        snap = backup_service._snapshot_root() / ts
+        snap.mkdir(parents=True, exist_ok=True)
+        dump = snap / "app.pgdump"
+        dump.write_bytes(b"PGDMP-fake")
+
+        check = backup_points._snapshot_basic_check(
+            {"ts": ts, "size_bytes": dump.stat().st_size}
+        )
+
+        self.assertTrue(check["ok"])
+        messages = " ".join(check["messages"])
+        self.assertIn("pg_restore", messages)
+        self.assertNotIn("仅含凭据", messages)
+
+    def test_empty_pg_dump_is_not_recoverable(self):
+        ts = "20260919_051033"
+        snap = backup_service._snapshot_root() / ts
+        snap.mkdir(parents=True, exist_ok=True)
+        (snap / "app.pgdump").write_bytes(b"")
+
+        check = backup_points._snapshot_basic_check({"ts": ts, "size_bytes": 1})
+
+        self.assertFalse(check["ok"])
+        self.assertIn("体积为零", " ".join(check["messages"]))
+
+    def test_source_missing_photos_warn_instead_of_blocking(self):
+        merged = backup_points._merge_in_backup_consistency(
+            {"ok": True, "messages": []},
+            {
+                "ok": False,
+                "blocking": False,
+                "errors": ["标准图有 2 个文件在源磁盘上已缺失（备份里没有，恢复后仍缺）"],
+            },
+        )
+
+        self.assertTrue(merged["ok"])
+        self.assertEqual(len(merged["warnings"]), 1)
+        self.assertIn("源磁盘", merged["warnings"][0])
+
+    def test_blocking_inconsistency_still_blocks(self):
+        merged = backup_points._merge_in_backup_consistency(
+            {"ok": True, "messages": []},
+            {"ok": False, "blocking": True, "errors": ["归档校验和不一致"]},
+        )
+
+        self.assertFalse(merged["ok"])
+        self.assertIn("归档校验和不一致", merged["messages"])
 
 
 if __name__ == "__main__":

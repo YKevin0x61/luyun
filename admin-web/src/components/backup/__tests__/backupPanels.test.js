@@ -64,6 +64,15 @@ describe('BackupPointList 契约', () => {
     expect(src).toContain("point.medium==='local_snapshot'&&row.recoverable")
     expect(src).toContain('@click="$emit(\'rollback\',point)"')
     expect(src).toContain('@click="$emit(\'validate\',point.id)"')
+    // PG 快照搬不动业务数据，按钮文案要说准
+    expect(src).toContain('row.rollbackLabel')
+  })
+
+  it('源磁盘缺失只作警告展示，并标出照片未分类', () => {
+    const src = compact(list)
+    expect(src).toContain('v-for="(warning,wi)inrow.checkWarnings"')
+    expect(src).toContain('row.photosUnclassified')
+    expect(src).toContain('未能按库引用分类')
   })
 
   it('冷备只读：不给校验/回滚按钮，并显示只读胶囊', () => {

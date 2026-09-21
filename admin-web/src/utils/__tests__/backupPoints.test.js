@@ -105,6 +105,73 @@ describe('backupPointRow', () => {
     expect(row.photoLines[1].text).toBe('3 张')
   })
 
+  it('0 张且无缺失的照片分类不渲染（不与「缺少」重复）', () => {
+    const row = backupPointRow({
+      id: 'snapshot:pg',
+      medium: 'local_snapshot',
+      photos: {
+        standard: { count: 0, missing: 0 },
+        other: { count: 252, missing: 0 },
+      },
+    })
+    expect(row.photoLines.map((line) => line.kind)).toEqual(['other'])
+  })
+
+  it('有缺失引用但 0 张的分类也不单独列（缺失由「缺少」「提示」表达）', () => {
+    const row = backupPointRow({
+      id: 'snapshot:pg2',
+      medium: 'local_snapshot',
+      photos: { standard: { count: 0, missing: 5 }, other: { count: 2, missing: 0 } },
+    })
+    expect(row.photoLines.map((line) => line.kind)).toEqual(['other'])
+    // 缺失数量仍然带在行模型里，前端「提示」行用的是它
+    expect(row.checkWarnings).toEqual([])
+  })
+
+  it('未按库引用分类时明确标注，不假装这份备份没有标准图', () => {
+    const row = backupPointRow({
+      id: 'snapshot:pg3',
+      medium: 'local_snapshot',
+      photos: {
+        standard: { count: 0, unclassified: true },
+        other: { count: 4, unclassified: true },
+      },
+    })
+    expect(row.photosUnclassified).toBe(true)
+    expect(backupPointRow(SNAPSHOT).photosUnclassified).toBe(false)
+  })
+
+  it('把基础校验的 warnings 带出来（源磁盘缺失不阻断恢复）', () => {
+    const row = backupPointRow({
+      id: 'snapshot:pg4',
+      medium: 'local_snapshot',
+      basic_check: { ok: true, messages: [], warnings: ['标准图有 2 个文件在源磁盘上已缺失'] },
+    })
+    expect(row.recoverable).toBe(true)
+    expect(row.checkWarnings).toEqual(['标准图有 2 个文件在源磁盘上已缺失'])
+    expect(backupPointRow(SNAPSHOT).checkWarnings).toEqual([])
+  })
+
+  it('PG 快照的回滚按钮标明是整库恢复，SQLite 仍叫数据回滚', () => {
+    const pgRow = backupPointRow({
+      id: 'snapshot:pg5',
+      medium: 'local_snapshot',
+      contents: ['app_pg', 'runtime', 'credentials'],
+      contents_labels: ['业务数据 (PostgreSQL)', '运行配置', '凭据'],
+    })
+    expect(pgRow.rollbackIsPgRestore).toBe(true)
+    expect(pgRow.rollbackLabel).toBe('恢复整库数据')
+
+    const sqliteRow = backupPointRow({
+      id: 'snapshot:sqlite',
+      medium: 'local_snapshot',
+      contents: ['app_db', 'runtime'],
+      contents_labels: ['业务数据', '运行配置'],
+    })
+    expect(sqliteRow.rollbackIsPgRestore).toBe(false)
+    expect(sqliteRow.rollbackLabel).toBe('数据回滚')
+  })
+
   it('未校验时给出中性三态，而不是假装通过', () => {
     const row = backupPointRow({ id: 'export:a.luyunbak', medium: 'export_backup' })
     expect(row.checkOk).toBe(null)

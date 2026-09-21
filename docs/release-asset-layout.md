@@ -54,6 +54,18 @@ Never included in the Release Bundle:
 - Playwright browser binaries (`ms-playwright/`, etc.)
 - Frontend `node_modules/` and other build caches
 
+## Database migrations ride along
+
+The bundle is produced with `git archive HEAD` (tracked application tree only), so
+`migrations/pg/*.sql` are shipped **only if they are committed**. PG shops read them from
+the active tree in Admin「系统更新」→「数据库迁移」, so an uncommitted migration script is
+simply absent in the field.
+
+Because of that the panel distinguishes two states that would otherwise look identical:
+when no incremental script is found at all it says 「本发行包内没有增量迁移脚本」 instead of
+「数据库 schema 已是最新」. When adding a schema change, commit the `000N_*.sql` file in the
+same release (see `migrations/pg/README.md`).
+
 ## Checksums
 
 `SHA256SUMS` lists a SHA-256 digest for `luyun-release-bundle.tar.gz` in the common `sha256sum` two-space form:

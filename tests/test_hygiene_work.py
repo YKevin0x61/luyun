@@ -395,7 +395,7 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
         second = await self.work.submit_daily(day, xian["id"], self._live(SHOT_B))
         self.assertEqual(second["status"], "待验收")
         self.assertNotEqual(second["capture_id"], first["capture_id"])
-        review = await self.work.get_daily_review(xian["id"], "白班")
+        review = await self.work.get_daily_review(xian["id"], "白班", actor=SUPER)
         self.assertEqual(self.captures.get(review["capture_id"]), SHOT_B)
         self.assertNotEqual(self.captures.get(review["capture_id"]), SHOT_A)
         inbox = await self.work.list_daily_work(day)
@@ -430,7 +430,7 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.captures.get(old["capture_id"]), OLD_BYTES)
         replaced = await self.work.replace_standard(SUPER, anban["id"], self._capture(NEW_BYTES))
         self.assertNotEqual(replaced["current_standard_id"], frozen_id)
-        review = await self.work.get_daily_review(anban["id"], "白班")
+        review = await self.work.get_daily_review(anban["id"], "白班", actor=SUPER)
         self.assertEqual(review["frozen_standard_id"], frozen_id)
         frozen = await self.work.standard_by_id(review["frozen_standard_id"])
         self.assertEqual(self.captures.get(frozen["capture_id"]), OLD_BYTES)
@@ -455,7 +455,7 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(row["frozen_standard_id"])
         self.assertIsNone(row["watermark"])
         with self.assertRaises(HygieneWorkError) as raised:
-            await self.work.get_daily_review(anban["id"], "白班")
+            await self.work.get_daily_review(anban["id"], "白班", actor=SUPER)
         self.assertEqual(raised.exception.code, "not_pending")
         again = await self.work.submit_daily(day, anban["id"], self._live(SHOT_B))
         self.assertEqual(again["status"], "待验收")
@@ -485,7 +485,7 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
                 "photographer": "张三",
             },
         )
-        review = await self.work.get_daily_review(xian["id"], "白班")
+        review = await self.work.get_daily_review(xian["id"], "白班", actor=SUPER)
         self.assertEqual(review["watermark"]["time"], "2026-09-13T10:00:00+08:00")
         self.assertEqual(review["watermark"]["zone"], "馅档")
         self.assertEqual(review["watermark"]["photographer"], "张三")

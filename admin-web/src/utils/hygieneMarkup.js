@@ -1,5 +1,7 @@
 /** Standard-photo overlay marks. Positions are 0–1 fractions of the image. */
 
+import { formatHygieneStamp } from './hygieneTime'
+
 export const MARK_KINDS = ['circle', 'arrow', 'caption']
 
 export function clamp01(value) {
@@ -145,10 +147,7 @@ export function teachingShotUrl(kind, example, which, variant = 'original') {
 }
 
 export function formatWatermarkTime(value) {
-  const raw = String(value || '')
-  const matched = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(raw)
-  if (matched) return `${matched[1]} ${matched[2]}`
-  return raw
+  return formatHygieneStamp(value)
 }
 
 export function chinaNowIso(now = new Date()) {

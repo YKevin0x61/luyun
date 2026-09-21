@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import SvgIcon from '../../components/SvgIcon.vue'
@@ -11,6 +11,7 @@ import HygieneWatermarkOverlay from '../../components/hygiene/HygieneWatermarkOv
 import StandardPhotoCachePanel from '../../components/hygiene/StandardPhotoCachePanel.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
+import { FALLBACK_GRACE_MS } from '../../composables/useConnectionFallback'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
 import {
@@ -78,6 +79,7 @@ const profilePhone = ref('')
 const profileSaving = ref(false)
 const profileError = ref('')
 const profileFlash = ref('')
+const profilePhoneConfirmOpen = ref(false)
 const passwordEditing = ref(false)
 const currentPassword = ref('')
 const newPassword = ref('')
@@ -171,6 +173,23 @@ const deepDue = computed(() => (deepClock.value && deepClock.value.hhmm) || '')
 
 const isManager = computed(() => employee.value && employee.value.permission === '管理员')
 const liveOk = computed(() => hasLiveCamera())
+// 已入队、还没确认上传成功的任务（键与 buildWorkQueue 的 task.key 一致）：让待办
+// 立刻把这一项当"交过了"，避免员工在慢网下重拍。
+//
+// 从 store 的任务列表派生，而不是本组件的 ref：刷新页面 / 回收 webview 之后草稿会被
+// 恢复继续传，那时若用局部状态，这一项会重新出现在待办里，员工就会重拍一遍——恰好
+// 是这套机制要防的事。任务成功或落到终态失败后不再是 activeTasks，标记自动消失。
+const pendingKeys = computed(() => new Set(
+  imageUploads.activeTasks
+    .map((task) => task.pendingKey)
+    .filter(Boolean),
+))
+
+/** 上传最终失败：点名提示，让员工知道要重试哪一项（标记由 pendingKeys 自动撤销）。 */
+function notifySubmitFailed(label) {
+  errorText.value = `「${label}」上传失败，可在上传列表里重试`
+}
+
 const workQueue = computed(() => buildWorkQueue({
   inbox: inbox.value,
   deepInbox: deepInbox.value,
@@ -179,6 +198,7 @@ const workQueue = computed(() => buildWorkQueue({
   deepDue: deepDue.value,
   now: nowTick.value,
   isManager: isManager.value,
+  pendingKeys: pendingKeys.value,
 }))
 const nextWork = computed(() => workQueue.value[0] || null)
 const restWorkGroups = computed(() => {
@@ -316,9 +336,22 @@ useHygieneRealtime({
       if (resource === 'daily') await loadInbox()
       if (resource === 'deep') await loadDeepClean()
       if (resource === 'fix') await loadFixTickets()
-      if (resource === 'boards') await loadBoards({ force: true })
-      if (resource === 'teaching') await loadTeaching({ force: true })
-      if (resource === 'zones') await loadZones({ force: true })
+      // 别人的拍照/开单会广播 boards：只有正开着「榜」那一屏时才需要跟着拉。
+      // 切到该 tab 时本来就会强制拉一次（见 watch(tab)），所以这里不拉不会漏。
+      if (resource === 'boards' && tab.value === 'boards') {
+        await loadBoards({ force: true })
+      }
+      if (resource === 'teaching' && tab.value === 'boards') {
+        await loadTeaching({ force: true })
+      }
+      // `zones` 这个 resource 承载两件事：责任区列表变更，以及**标准图换版 / 改标注**
+      // （action=standard_updated）。已选区的员工不必跟着刷新责任区列表，但必须刷新
+      // 待办——否则他手里的标准图与标注还是旧的，而服务端已经换了版本，拍摄前的
+      // 「标准图已更新」守卫也就不会触发。
+      if (resource === 'zones') {
+        if (!employee.value.zone_id) await loadZones({ force: true })
+        if (event?.scope?.action === 'standard_updated') await loadInbox()
+      }
       if (!resource && employee.value.shift && employee.value.zone_id) {
         await Promise.allSettled([
           loadInbox(),
@@ -339,6 +372,73 @@ function openImageLightbox(src, alt, watermark = null, markup = []) {
   lightboxOpen.value = true
 }
 
+// 断连提示。nudge 驱动失效时页面会一直停在旧数据上——员工看不出「今天做完了」是
+// 不是真的做过，只会照着过期画面判断。8s 宽限避免瞬时抖动闪一下；恢复连接立即消失。
+// 兜底轮询（useConnectionFallback）仍在跑，横幅只是把状态说清楚并给一个手动入口。
+const wsConnected = inject('wsConnected', null)
+const connectionLost = ref(false)
+let connectionTimer = null
+
+/** 手动刷新：不挑 resource，全部重拉——断线期间任何变更都可能漏掉。 */
+async function refreshAll() {
+  errorText.value = ''
+  await Promise.allSettled([
+    loadMe(),
+    loadInbox(),
+    loadDeepClean(),
+    loadFixTickets(),
+    loadZones({ force: true }),
+  ])
+}
+
+function handleConnectionChange(connected) {
+  if (connectionTimer) {
+    window.clearTimeout(connectionTimer)
+    connectionTimer = null
+  }
+  if (connected) {
+    connectionLost.value = false
+    return
+  }
+  connectionTimer = window.setTimeout(() => {
+    connectionTimer = null
+    connectionLost.value = true
+  }, FALLBACK_GRACE_MS)
+}
+
+// App.vue 通过 provide 下发连接状态；单测里可能没挂载 App，缺失时静默跳过。
+if (wsConnected) {
+  watch(wsConnected, handleConnectionChange, { immediate: true })
+}
+
+// 会话失效才回登录页；网络抖动只重试，不动上传队列。原来两者走同一条路，
+// 店员在厨房断两秒信号就会丢掉刚拍的照片并被踢出去重登。
+const ME_RETRY_DELAYS_MS = [2000, 4000, 8000]
+let meRetryTimer = null
+let meRetryIndex = 0
+
+function isAuthError(err) {
+  return Boolean(err && err.status === 401)
+}
+
+function leaveForStaffLogin() {
+  imageUploads.clearTasksByTransport('staff')
+  router.replace({
+    path: '/hygiene/login',
+    query: { next: router.currentRoute.value.fullPath },
+  })
+}
+
+function scheduleMeRetry() {
+  if (meRetryTimer || meRetryIndex >= ME_RETRY_DELAYS_MS.length) return
+  const delay = ME_RETRY_DELAYS_MS[meRetryIndex]
+  meRetryIndex += 1
+  meRetryTimer = window.setTimeout(() => {
+    meRetryTimer = null
+    void loadMe()
+  }, delay)
+}
+
 onMounted(() => {
   tickClock()
   clockTimer = window.setInterval(tickClock, 30_000)
@@ -348,6 +448,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (clockTimer) window.clearInterval(clockTimer)
+  if (meRetryTimer) window.clearTimeout(meRetryTimer)
+  meRetryTimer = null
+  if (connectionTimer) window.clearTimeout(connectionTimer)
+  connectionTimer = null
   window.removeEventListener('keydown', onKeydown)
   standardPhotoCache.setTaskSheetOpen(false)
   document.body.style.overflow = ''
@@ -366,10 +470,25 @@ async function loadMe() {
     }
     dailyClocks.value = data.daily_clocks || null
     deepClock.value = data.deep_clock || null
+    meRetryIndex = 0
+    // 取消还没到点的重试：否则成功之后它仍会多跑一次 /me + loadDeepClean。
+    if (meRetryTimer) {
+      window.clearTimeout(meRetryTimer)
+      meRetryTimer = null
+    }
   } catch (err) {
-    errorText.value = err.message || '无法读取登录状态'
-    imageUploads.clearTasksByTransport('staff')
-    router.replace('/hygiene/login')
+    if (isAuthError(err)) {
+      errorText.value = err.message || '登录已过期，请重新登录'
+      leaveForStaffLogin()
+      return
+    }
+    // 网络问题：留在本页、保住待上传照片，退避重试。
+    // 预算用尽后不能再谎称"正在重试"——页面没有手动刷新入口，得把话说明白。
+    const exhausted = meRetryIndex >= ME_RETRY_DELAYS_MS.length
+    errorText.value = exhausted
+      ? '网络还是不通，请走到信号好的地方后重新打开页面'
+      : (err.message || '网络不好，正在重试…')
+    scheduleMeRetry()
     return
   }
   const jobs = [loadDeepClean]
@@ -382,6 +501,10 @@ async function loadMe() {
   const results = await Promise.allSettled(jobs.map((fn) => fn()))
   const failed = results.find((result) => result.status === 'rejected')
   if (failed) {
+    if (isAuthError(failed.reason)) {
+      leaveForStaffLogin()
+      return
+    }
     errorText.value = (failed.reason && failed.reason.message) || '无法加载卫生待办'
   }
 }
@@ -485,8 +608,27 @@ function cancelProfileEdit() {
   profileError.value = ''
 }
 
+const PHONE_PATTERN = /^1[3-9]\d{9}$/
+
+/** 手机号是登录账号，改错一位 = 下次登不进来。改号必须先确认。 */
+function phoneChanged() {
+  const current = String((employee.value && employee.value.phone) || '')
+  return profilePhone.value.trim() !== current
+}
+
 async function saveProfile() {
   if (profileSaving.value || !employee.value) return
+  const nextPhone = profilePhone.value.trim()
+  if (!PHONE_PATTERN.test(nextPhone)) {
+    profileError.value = '手机号格式不对，应该是 11 位、以 1 开头的号码。'
+    return
+  }
+  // 姓名随便改，手机号不行：它是登录账号，且 30 天内只能靠管理员救回来。
+  if (phoneChanged() && !profilePhoneConfirmOpen.value) {
+    profilePhoneConfirmOpen.value = true
+    return
+  }
+  profilePhoneConfirmOpen.value = false
   profileSaving.value = true
   profileError.value = ''
   profileFlash.value = ''
@@ -495,7 +637,7 @@ async function saveProfile() {
       method: 'PATCH',
       body: {
         name: profileName.value.trim(),
-        phone: profilePhone.value.trim(),
+        phone: nextPhone,
       },
     })
     employee.value = { ...employee.value, ...(data.employee || {}) }
@@ -556,8 +698,22 @@ async function savePassword() {
   }
 }
 
+// 登出会清掉本机的上传队列（换人用同一台手机必须清），但店员可能是手滑点到的：
+// 队列里还有照片时先问一句，别让他白拍一轮。
+const logoutConfirmOpen = ref(false)
+
+function askLogout() {
+  if (loggingOut.value) return
+  if (imageUploads.activeTasks.length || imageUploads.failedTasks.length) {
+    logoutConfirmOpen.value = true
+    return
+  }
+  void logout()
+}
+
 async function logout() {
   if (loggingOut.value) return
+  logoutConfirmOpen.value = false
   loggingOut.value = true
   imageUploads.clearTasksByTransport('staff')
   try {
@@ -896,7 +1052,8 @@ function closeSheet(force = false) {
 function continueDaily(current) {
   const next = nextShootRow(inbox.value, current)
   if (next) {
-    flashText.value = `已交，下一项：${next.zone_name} · ${next.item_name}`
+    // 「已上传」而不是「已交」：此时只是进了本地上传队列，服务端还没确认。
+    flashText.value = `已上传，下一项：${next.zone_name} · ${next.item_name}`
     sheet.value = { mode: 'standard', row: next }
     return
   }
@@ -907,7 +1064,7 @@ function continueDeep(current) {
   const next = nextDeepShootRow(deepInbox.value, current)
   if (next) {
     openDeepCapture(next)
-    flashText.value = `已交，下一项：${next.item_name}`
+    flashText.value = `已上传，下一项：${next.item_name}`
     return
   }
   closeSheet(true)
@@ -925,8 +1082,8 @@ function continueFix(current) {
     openFixOriginal(next)
   }
   flashText.value = next.status === '待验收'
-    ? `已交，下一张对照：${next.zone_name}`
-    : `已交，下一张回拍：${next.zone_name}`
+    ? `已上传，下一张对照：${next.zone_name}`
+    : `已上传，下一张回拍：${next.zone_name}`
 }
 
 function submitCapture() {
@@ -945,6 +1102,7 @@ function submitCapture() {
     }
     return
   }
+  const pendingKey = `daily:${row.item_id}:${row.shift}`
   errorText.value = ''
   try {
     const form = new FormData()
@@ -952,12 +1110,14 @@ function submitCapture() {
     form.append('live', 'true')
     form.append('shift', row.shift)
     imageUploads.enqueue({
+      pendingKey,
       transport: 'staff',
       path: `/api/hygiene/staff/daily/${row.item_id}/submit`,
       formData: form,
       label: `日常实拍 · ${row.item_name}`,
       detail: `${row.zone_name} · ${row.shift}`,
       onSuccess: loadInbox,
+      onError: () => notifySubmitFailed(row.item_name),
     })
     clearPreview()
     continueDaily(row)
@@ -987,6 +1147,10 @@ function submitFixOpen() {
       label: `整改开单 · ${zone ? zone.name : '卫生责任区'}`,
       detail: current.ticketType,
       onSuccess: loadFixTickets,
+      // 开单是新增，待办里本来没有这一项，所以只提示失败、不占 pending 位。
+      onError: () => {
+        errorText.value = '整改开单上传失败，可在上传列表里重试'
+      },
     })
     closeSheet(true)
   } catch (err) {
@@ -998,17 +1162,20 @@ function submitFixReshoot() {
   if (!sheet.value || !sheet.value.blob || !sheet.value.row || busy.value) return
   errorText.value = ''
   const current = sheet.value.row
+  const pendingKey = `fix:${current.id}`
   try {
     const form = new FormData()
     form.append('file', sheet.value.blob, 'capture.jpg')
     form.append('live', 'true')
     imageUploads.enqueue({
+      pendingKey,
       transport: 'staff',
       path: `/api/hygiene/staff/fix/${current.id}/reshoot`,
       formData: form,
       label: `整改回拍 · ${current.zone_name || '卫生责任区'}`,
       detail: current.ticket_type || '',
       onSuccess: loadFixTickets,
+      onError: () => notifySubmitFailed(`整改回拍 · ${current.zone_name || ''}`.trim()),
     })
     clearPreview()
     continueFix(current)
@@ -1020,6 +1187,7 @@ function submitFixReshoot() {
 function submitDeepPair() {
   if (!sheet.value || !sheet.value.beforeBlob || !sheet.value.afterBlob || busy.value) return
   const row = sheet.value.row
+  const pendingKey = `deep:${row.item_id}`
   errorText.value = ''
   try {
     const form = new FormData()
@@ -1027,12 +1195,14 @@ function submitDeepPair() {
     form.append('after', sheet.value.afterBlob, 'after.jpg')
     form.append('live', 'true')
     imageUploads.enqueue({
+      pendingKey,
       transport: 'staff',
       path: `/api/hygiene/staff/deep-clean/${row.item_id}/submit`,
       formData: form,
       label: `专项前后 · ${row.item_name}`,
       detail: '清理前 + 清理后',
       onSuccess: loadDeepClean,
+      onError: () => notifySubmitFailed(row.item_name),
     })
     clearPreview()
     continueDeep(row)
@@ -1041,17 +1211,35 @@ function submitDeepPair() {
   }
 }
 
-async function decide(action) {
+// 管理员在手机上验收时的驳回：与管理后台的三个视图保持一致——不可撤销的操作要确认，
+// 并且可以写一句原因（员工端会显示在待办行上）。这屏的"驳回"紧挨着"通过"，误触代价一样。
+const rejectConfirmOpen = ref(false)
+
+function askReject() {
+  if (busy.value || !sheet.value) return
+  rejectConfirmOpen.value = true
+}
+
+async function confirmReject(reason) {
+  rejectConfirmOpen.value = false
+  await decide('reject', reason)
+}
+
+async function decide(action, reason = '') {
   if (!sheet.value || busy.value) return
   if (sheet.value.kind !== 'fix' && !sheet.value.review) return
   const row = sheet.value.row
   const deep = isDeepSheet()
   busy.value = true
   errorText.value = ''
+  // 驳回可以带一句原因，员工端会显示出来。管理员在手机上（走这条路径）与在管理后台
+  // 走的是同一套后端接口，行为要一致。
+  const rejectBody = action === 'reject' && reason ? { reason } : undefined
   try {
     if (deep) {
       await staffRequest(`/api/hygiene/staff/deep-clean/${row.item_id}/${action}`, {
         method: 'POST',
+        body: rejectBody,
       })
       closeSheet(true)
       await loadDeepClean()
@@ -1060,6 +1248,7 @@ async function decide(action) {
     } else if (sheet.value.kind === 'fix') {
       await staffRequest(`/api/hygiene/staff/fix/${row.id}/${action}`, {
         method: 'POST',
+        body: rejectBody,
       })
       closeSheet(true)
       await loadFixTickets()
@@ -1074,7 +1263,7 @@ async function decide(action) {
     } else {
       await staffRequest(`/api/hygiene/staff/daily/${row.item_id}/${action}`, {
         method: 'POST',
-        body: { shift: row.shift },
+        body: { shift: row.shift, ...(rejectBody || {}) },
       })
       closeSheet(true)
       await loadInbox()
@@ -1125,6 +1314,10 @@ async function decide(action) {
     </header>
 
     <main id="hygiene-work-main" class="hy-work-main" :inert="Boolean(sheet)">
+      <p v-if="connectionLost && !sheet" class="hy-staff-alert hy-staff-offline" role="status">
+        和服务器断了，这一页上的数据可能不是最新的。
+        <button type="button" class="btn" @click="refreshAll">刷新</button>
+      </p>
       <p v-if="errorText && !sheet" class="hy-staff-alert" role="alert">{{ errorText }}</p>
       <p
         v-if="needsAssignment && tab !== 'inbox'"
@@ -1226,6 +1419,9 @@ async function decide(action) {
               <span class="hy-work-copy">
                 <strong>{{ task.title }}</strong>
                 <span>{{ task.context }}</span>
+              </span>
+              <span v-if="task.rejected" class="hy-work-reject">
+                {{ task.rejectReason ? `已驳回：${task.rejectReason}` : '已驳回，请重拍' }}
               </span>
               <span class="hy-work-due">{{ task.dueText || task.status }}</span>
               <SvgIcon name="chevron-right" :size="18" />
@@ -1416,10 +1612,11 @@ async function decide(action) {
                 type="tel"
                 inputmode="numeric"
                 maxlength="11"
+                pattern="1[3-9]\d{9}"
                 autocomplete="username"
               >
             </label>
-            <p class="hy-staff-lead">手机号也是登录账号；保存后请用新手机号登录。</p>
+            <p class="hy-staff-lead">手机号也是登录账号；保存后请用新手机号登录。改号前会再确认一次。</p>
             <div class="staff-decide">
               <button type="button" class="btn btn-primary" :disabled="profileSaving" @click="saveProfile">
                 {{ profileSaving ? '正在保存…' : '保存' }}
@@ -1517,7 +1714,7 @@ async function decide(action) {
             type="button"
             class="btn btn-block hy-staff-submit"
             :disabled="loggingOut"
-            @click="logout"
+            @click="askLogout"
           >
             {{ loggingOut ? '正在退出…' : '退出登录' }}
           </button>
@@ -1783,7 +1980,7 @@ async function decide(action) {
           <p v-if="isManager && !canDecideFix(sheet.row)" class="staff-lead">时限还没到，只有开单人能验。</p>
           <div v-if="canDecideFix(sheet.row)" class="staff-decide">
             <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="decide('accept')">通过</button>
-            <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="decide('reject')">驳回</button>
+            <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="askReject">驳回</button>
           </div>
         </template>
 
@@ -1803,7 +2000,7 @@ async function decide(action) {
           <p v-if="isManager && !canDecide(sheet.review)" class="staff-lead">交这一组的人不能自己验收。</p>
           <div v-if="canDecide(sheet.review)" class="staff-decide">
             <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="decide('accept')">通过</button>
-            <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="decide('reject')">驳回</button>
+            <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="askReject">驳回</button>
           </div>
         </template>
 
@@ -1821,7 +2018,7 @@ async function decide(action) {
           <p v-if="isManager && !canDecide(sheet.review)" class="staff-lead">交这张的人不能自己验收。</p>
           <div v-if="canDecide(sheet.review)" class="staff-decide">
             <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="decide('accept')">通过</button>
-            <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="decide('reject')">驳回</button>
+            <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="askReject">驳回</button>
           </div>
         </template>
       </div>
@@ -1834,6 +2031,37 @@ async function decide(action) {
       danger
       @confirm="closeSheet(true)"
       @cancel="confirmCloseOpen = false"
+    />
+
+    <ConfirmDialog
+      v-if="logoutConfirmOpen"
+      title="还有照片没传完"
+      :message="`还有 ${imageUploads.activeTasks.length + imageUploads.failedTasks.length} 张照片在上传队列里。退出登录会清掉它们，需要重新拍。`"
+      confirm-label="仍然退出"
+      danger
+      @confirm="logout"
+      @cancel="logoutConfirmOpen = false"
+    />
+
+    <ConfirmDialog
+      v-if="rejectConfirmOpen"
+      title="驳回这一项"
+      :message="`驳回「${sheet ? (sheet.row.item_name || sheet.row.zone_name || '这一项') : '这一项'}」后要重新拍；本周红黑榜会记一次驳回。`"
+      confirm-label="驳回"
+      danger
+      :prompt="{ label: '哪里不合格（可选，员工能看到）', placeholder: '例如：台面还有油渍', maxlength: 120 }"
+      @confirm="confirmReject"
+      @cancel="rejectConfirmOpen = false"
+    />
+
+    <ConfirmDialog
+      v-if="profilePhoneConfirmOpen"
+      title="确认改手机号"
+      :message="`手机号是登录账号。改成 ${profilePhone.trim()} 之后，下次登录要用新号；打错一位就得找管理员改回来。`"
+      confirm-label="确认改号"
+      danger
+      @confirm="saveProfile"
+      @cancel="profilePhoneConfirmOpen = false"
     />
   </div>
 </template>

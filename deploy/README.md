@@ -146,7 +146,7 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 
 ---
 
-## 2. 升级：Version Check → Update Preflight → Apply Update → Update Job
+## 2. 升级：Version Check → Update Preflight → Apply Update → Update Job →（PG）应用数据库迁移
 
 店内日常升级**不要** SSH 上去 `git checkout` 再 `npm run build`。正确路径：
 
@@ -175,6 +175,14 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 并发：已有进行中的 Update Job 时，新的 Apply Update 会被拒绝。
 `data/` 业务库与凭据在代码更新过程中保留；备份另见第 4 节。
 
+5. **（仅 PostgreSQL 后端）应用数据库迁移**：健康确认之后进「系统更新」→「数据库迁移」
+   →「应用待执行迁移」。SQLite 门店跳过这一步——schema 由应用启动时自愈。
+
+   更新作业按设计**不碰数据库结构**（`_connect_postgres` 明确不在启动期改结构，结构变更
+   要可追溯），所以 schema 变更得单独应用一次。版本检测已把待应用条数显示在版本状态卡上，
+   不用靠记性；应用记录写在 `schema_migrations` 表，能看出当前到哪一版。详见
+   `migrations/pg/README.md`。
+
 > **PostgreSQL 后端（可选）**：切到 `DATABASE_BACKEND=postgres` 后，上面
 > `backing_up` 阶段的强制备份会改为 `pg_dump` 产出 `app.pgdump`，不再是
 > `app.db`。切换步骤、恢复与回滚见 [第 10 节](#10-postgresql-后端可选多店形态)。
@@ -193,6 +201,22 @@ Playwright 的 Python 包与浏览器 build 一一对应（如 lib 1.63.0 ↔
   失败则补装（只比对 `executable_path` 不够：headless 启动走的是 `chromium_headless_shell`）；
 - 爬虫自身在 launch 报「Executable doesn't exist」时也会自动补装并重试一次，可用
   `SCRAPER_BROWSER_AUTO_INSTALL=0` 关闭。
+
+### 别用一次性脚本碰生产库（特别是 `DATABASE_BACKEND=postgres` 的机器）
+
+`tests/conftest.py` 只保护 `pytest` 那条路径：它把 `DATABASE_BACKEND` 钉死为
+`sqlite`。**任何绕过 `pytest` 的代码都不会被保护**——`python -c`、REPL、临时
+验证脚本、没写隔离的 `scripts/` 运维脚本，都会按 `.env` 里的
+`DATABASE_BACKEND=postgres` **直接连上生产库**，写进去的行没人会注意到。
+
+要在本机做验证（环境变量必须**早于** `from config import settings`——pydantic-settings
+的优先级是 env > `.env`）：
+
+```bash
+DATABASE_BACKEND=sqlite DATABASE_DIR=$(mktemp -d) .venv/bin/python -c "..."
+```
+
+确实需要连生产库时只读、只 `SELECT`，并先打印 `settings.DATABASE_BACKEND` 确认。
 
 ### 磁盘水位
 
@@ -541,21 +565,32 @@ docker compose -f deploy/docker-compose.yml --profile pg up -d
 **要切 PostgreSQL**：先按上面完成「系统更新」升到 0.6.0（切换脚本是 0.6.0 才有
 的），确认应用正常后，再跑 `sudo bash deploy/enable_postgres.sh`。
 
-### 10.4 从 PG 快照恢复（手工）
+### 10.4 从 PG 快照恢复
 
-Admin 界面不支持 PG 恢复，用 `pg_restore`：
+**页面内恢复（推荐，本机回滚快照）**：管理后台 →「配置 → 备份中心 → 备份点 →
+本机回滚快照」，点「恢复整库数据」。这条路径会：
+
+1. 先自动生成一份前置快照（同样的 `app.pgdump`，恢复失败可回退）；
+2. 断开应用自己的数据库连接，再跑 `pg_restore --clean --if-exists --no-owner --no-acl`；
+3. 重建连接并重置所有 identity 序列（避免恢复后新写入撞主键）；
+4. 让当前后台会话失效——`auth` 表被一起替换，需要重新登录。
+
+恢复期间服务短暂无法写库（采集会中断一轮），**不要在营业高峰做**。
+
+**手工恢复（冷备归档、或页面不可用时）**：
 
 ```bash
-# 快照位置：data/snapshots/<ts>/app.pgdump（更新前快照）
+# 快照位置：data/restore_snapshots/<ts>/app.pgdump（本机回滚快照）
 #           backups/<ts>/luyun_cold_backup.tar 内的 app.pgdump（冷备）
 sudo systemctl stop luyun
 pg_restore --clean --if-exists --no-owner --no-acl \
-  -d "postgresql://luyun:<密码>@127.0.0.1:5432/luyun" data/snapshots/<ts>/app.pgdump
+  -d "postgresql://luyun:<密码>@127.0.0.1:5432/luyun" data/restore_snapshots/<ts>/app.pgdump
 sudo systemctl start luyun
 ```
 
-恢复后如遇主键冲突，说明序列没跟上——按
-[`migrations/pg/README.md`](../migrations/pg/README.md) 的 setval 段落重置。
+手工路径恢复后如遇主键冲突，说明序列没跟上——按
+[`migrations/pg/README.md`](../migrations/pg/README.md) 的 setval 段落重置
+（页面内恢复会自动做这一步）。
 
 ### 10.5 回滚
 

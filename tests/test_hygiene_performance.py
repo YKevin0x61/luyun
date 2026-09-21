@@ -107,6 +107,9 @@ class HygieneQueryBudgetTest(QueryBudgetMixin, unittest.IsolatedAsyncioTestCase)
 
     async def test_daily_work_has_fixed_query_budget(self):
         await self._add_daily_items(1)
+        # 预热：hygiene_board_events.reason 的列探测只在进程内首次发生，
+        # 属于一次性开销，不该混进"查询次数随数据量增长"的判据里。
+        await self.work.list_daily_work(SUPER)
         one = await self._query_count(lambda: self.work.list_daily_work(SUPER))
         await self._add_daily_items(49)
         fifty = await self._query_count(lambda: self.work.list_daily_work(SUPER))

@@ -27,12 +27,13 @@ from api.credentials import router as credentials_router
 from api.db_credentials import router as db_credentials_router
 from api.backup import router as backup_router
 from api.release_update import router as release_update_router
+from api.db_migrations import router as db_migrations_router
 from api.runtime_settings import router as runtime_settings_router
 from api.logs import router as logs_router
 from api.tables import router as tables_router
 from api.analytics import router as analytics_router
 from api.export_api import router as export_router
-from api.security import authenticate_ws, warn_if_admin_open
+from api.security import authenticate_ws, csrf_origin_rejected, warn_if_admin_open
 from api.auth import router as auth_router
 from api.hygiene import router as hygiene_router
 from services import auth_service
@@ -202,6 +203,7 @@ async def lifespan(app: FastAPI):
         from pathlib import Path
         if db_manager and db_manager._conn is not None:
             employee_accounts = EmployeeAccounts(db_manager)
+            await employee_accounts.prepare()
             startup_results.append("员工账号")
             capture_root = Path(settings.DATABASE_DIR) / "hygiene-captures"
             hygiene_work = HygieneWork(
@@ -626,6 +628,25 @@ app.add_middleware(PerformanceMiddleware)
 app.add_middleware(HtmlAuthMiddleware)
 
 
+@app.middleware("http")
+async def csrf_origin_guard(request: Request, call_next):
+    """跨站写请求拦截（CSRF 纵深，判定逻辑见 ``api.security.csrf_origin_rejected``）。
+
+    主要屏障仍是会话 cookie 的 ``SameSite=Lax``；这一层是为了「哪天为了跨站嵌入把
+    cookie 放宽成 SameSite=None」时不至于写接口裸奔。
+    """
+    if csrf_origin_rejected(request):
+        logger.warning(
+            "拒绝跨站写请求 %s %s origin=%s sec-fetch-site=%s",
+            request.method,
+            request.url.path,
+            request.headers.get("origin"),
+            request.headers.get("sec-fetch-site"),
+        )
+        return JSONResponse(status_code=403, content={"detail": "跨站请求被拒绝"})
+    return await call_next(request)
+
+
 @app.websocket("/ws/realtime")
 async def realtime_ws(websocket: WebSocket):
     """实时订阅通道：客户端按 topic + 过滤条件订阅，服务端只推送“有变”nudge
@@ -663,6 +684,7 @@ app.include_router(credentials_router)
 app.include_router(db_credentials_router)
 app.include_router(backup_router)
 app.include_router(release_update_router)
+app.include_router(db_migrations_router)
 app.include_router(runtime_settings_router)
 app.include_router(logs_router)
 app.include_router(tables_router)
@@ -791,8 +813,18 @@ async def recipe_css():
 @app.get("/hygiene-admin.css")
 async def hygiene_admin_css():
     spa_css = os.path.join(spa_dir, "hygiene-admin.css")
-    target = spa_css if os.path.exists(spa_css) else os.path.join(public_dir, "hygiene-admin.css")
-    return FileResponse(target, media_type="text/css")
+    if os.path.exists(spa_css):
+        return FileResponse(spa_css, media_type="text/css")
+    # admin-web/dist 还没构建时回落到仓库根 public/ 的同名副本（内容由
+    # admin-web 的契约测试强制与 canonical 一致）。这条回落路径以前是静默的：
+    # 两份文件分叉成相反主题，落到这里就是浅底浅字、拍照页几乎不可读，所以留日志。
+    logger.warning(
+        "admin-web/dist 未构建，/hygiene-admin.css 回落到 public/hygiene-admin.css"
+    )
+    return FileResponse(
+        os.path.join(public_dir, "hygiene-admin.css"),
+        media_type="text/css",
+    )
 
 vendor_dir = os.path.join(public_dir, "vendor")
 if os.path.isdir(vendor_dir):

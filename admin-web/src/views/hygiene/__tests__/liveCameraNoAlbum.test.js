@@ -54,3 +54,18 @@ describe('fix tickets use live camera only', () => {
     expect(admin).not.toMatch(/toISOString\(\)/)
   })
 })
+
+describe('ADR 0050：先看标准图，再开相机（不做同屏分屏）', () => {
+  it('标准图弹层里只有标准图与「打开相机」，没有取景框', () => {
+    const home = readFileSync(FILES[0], 'utf8')
+    const branch = home.slice(
+      home.indexOf("sheet.mode === 'standard'"),
+      home.indexOf("sheet.mode === 'before-camera'"),
+    )
+    expect(branch).toMatch(/HygieneStandardOverlay/)
+    expect(branch).toMatch(/打开相机/)
+    // ADR 0050 明说 "A live split (standard on top, camera on the bottom) is out"：
+    // 这里一旦出现取景框就说明又把两步合成一屏了。
+    expect(branch).not.toMatch(/HygieneLiveCamera/)
+  })
+})

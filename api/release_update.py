@@ -74,7 +74,10 @@ def _preflight_payload(preflight: UpdatePreflight) -> dict[str, Any]:
     return asdict(preflight)
 
 
-def _version_check_payload(result: VersionCheckResult) -> dict[str, Any]:
+def _version_check_payload(
+    result: VersionCheckResult,
+    migrations: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     from services.release_update.deploy_mode import public_deploy_status
 
     return {
@@ -88,7 +91,40 @@ def _version_check_payload(result: VersionCheckResult) -> dict[str, Any]:
         "catalogue_ok": result.catalogue_ok,
         "releases": [asdict(r) for r in result.releases],
         "preflight": _preflight_payload(result.preflight),
+        # 顺带告知待应用的数据库迁移。**不放进 preflight**：那是「不通过就不许更新」
+        # 的硬门槛，把迁移塞进去会把「忘了点迁移」升级成「不能发版」，更难解。
+        "pending_migrations": migrations
+        or {"supported": False, "count": 0, "versions": [], "filenames": [], "note": ""},
         **public_deploy_status(),
+    }
+
+
+async def _migration_hint(db: DatabaseManager) -> dict[str, Any]:
+    """版本检测顺带读一次迁移状态。
+
+    数据库读不出来不该让版本检测整体失败（后者才是这个接口的主职），所以全程兜底。
+    """
+    from services.db_migrations import migration_status
+
+    try:
+        status = await migration_status(db)
+    except Exception as exc:
+        logger.warning("读取数据库迁移状态失败: %s", exc)
+        return {
+            "supported": False,
+            "count": 0,
+            "versions": [],
+            "filenames": [],
+            "note": "",
+            "error": str(exc),
+        }
+    data = status.as_dict()
+    return {
+        "supported": data["supported"],
+        "count": len(data["pending"]),
+        "versions": [item["version"] for item in data["pending"]],
+        "filenames": [item["filename"] for item in data["pending"]],
+        "note": data["note"],
     }
 
 
@@ -125,6 +161,7 @@ async def put_github_config(
 @router.get("/version-check")
 async def version_check(
     release_update: ReleaseUpdate = Depends(get_release_update),
+    db: DatabaseManager = Depends(get_db),
 ) -> dict[str, Any]:
     """Read-only Version Check — does not start an Update Job."""
     # version_check 内部是同步 httpx 调用（最长约 15s×2）；单 worker 部署下在事件
@@ -137,7 +174,7 @@ async def version_check(
     except Exception as exc:
         logger.error("Version Check failed: %s", exc)
         raise HTTPException(status_code=500, detail="版本检测失败") from exc
-    return _version_check_payload(result)
+    return _version_check_payload(result, await _migration_hint(db))
 
 
 @router.get("/job")

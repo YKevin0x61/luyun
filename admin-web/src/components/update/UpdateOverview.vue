@@ -17,10 +17,19 @@ const props = defineProps({
 
 defineEmits(['refresh'])
 
+// 待应用的数据库迁移（版本检测顺带返回）：漏了通常不报错，只会变慢或某个功能
+// 悄悄降级，所以放在版本状态这一屏里提示，而不是等人想起去翻迁移面板。
+const pendingMigrations = computed(() => props.versionCheck?.pending_migrations || null)
+const pendingMigrationCount = computed(() => Number(pendingMigrations.value?.count) || 0)
+const pendingMigrationVersions = computed(
+  () => (pendingMigrations.value?.versions || []).join('、'),
+)
+
 const tone = computed(() => {
   if (!props.versionCheck) return 'neutral'
   if (props.versionCheck.catalogue_ok === false) return 'warn'
   if (props.versionCheck.degraded) return 'warn'
+  if (pendingMigrationCount.value) return 'warn'
   if (props.updateAvailable) return 'info'
   return 'ok'
 })
@@ -69,6 +78,16 @@ const deployModeText = computed(() => {
         <dd>{{ deployModeText }}</dd>
       </div>
     </dl>
+
+    <div
+      v-if="pendingMigrationCount"
+      class="update-overview__alert is-warn"
+      data-role="pending-migrations"
+    >
+      数据库有 {{ pendingMigrationCount }} 条迁移待应用（{{ pendingMigrationVersions }}）。
+      升级后请在下方「数据库迁移」里点一次「应用待执行迁移」——漏了通常不报错，
+      只会变慢或某个功能悄悄降级。
+    </div>
 
     <div v-if="versionCheck?.catalogue_ok === false" class="update-overview__alert is-warn">
       读取 GitHub 发行目录失败（断网、API 限流或仓库不可达），本次结果不反映有没有更新。

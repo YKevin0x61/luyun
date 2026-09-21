@@ -44,7 +44,10 @@ class _ConnectionMixin:
         self._main_conn: Optional[aiosqlite.Connection] = None
         # Legacy: always empty under single-db architecture (ATTACH removed).
         self._attached_tables: set[str] = set()
-        self._write_lock = None
+        # 全局写锁，由 connect() 真正建出来（asyncio.Lock 必须在事件循环里创建）。
+        # HygieneWork / EmployeeAccounts 通过 owner 共享这一把；这里要是 None，它们
+        # 就各自退回一把局部锁，两个 service 的隐式事务会互相穿插、互相 rollback。
+        self._write_lock: Optional[asyncio.Lock] = None
         # Set once connect() has finished schema creation + migrations.
         self._migrations_complete = False
 
@@ -59,6 +62,9 @@ class _ConnectionMixin:
 
         默认仍是 sqlite，切到 postgres 需要显式配置——见 ADR 0084。
         """
+        # 全局写锁在这里建：asyncio.Lock 需要运行中的事件循环，而且必须早于任何
+        # service 取用（service 的 _write_lock property 见到它就共享，见 #2.2）。
+        self._write_lock = asyncio.Lock()
         if getattr(settings, "DATABASE_BACKEND", "sqlite") == "postgres":
             return await self._connect_postgres()
         return await self._connect_sqlite()

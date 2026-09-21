@@ -1,5 +1,6 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { nextTick, onMounted, ref } from 'vue'
+import QRCode from 'qrcode'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
@@ -18,6 +19,35 @@ const errorText = ref('')
 const drafts = ref({})
 const busyId = ref(null)
 const disableTarget = ref(null)
+
+// 员工入口：全仓只有导航栏指向 /hygiene-roster，没人知道店员该扫哪个地址。这里把
+// 绝对 URL 和二维码一起摆出来，新店员不用管理员口述。
+const staffEntryUrl = ref('')
+const entryCopied = ref(false)
+const qrCanvas = ref(null)
+
+async function renderStaffEntry() {
+  // 用当前 origin：门店可能是内网 IP、也可能是域名，写死哪个都会有一半人打不开。
+  staffEntryUrl.value = `${window.location.origin}/hygiene`
+  entryCopied.value = false
+  await nextTick()
+  if (!qrCanvas.value) return
+  try {
+    await QRCode.toCanvas(qrCanvas.value, staffEntryUrl.value, { width: 148, margin: 1 })
+  } catch {
+    // 画不出二维码不影响复制链接，静默降级（下面那行 URL 仍然可读）。
+  }
+}
+
+async function copyStaffEntry() {
+  try {
+    await navigator.clipboard.writeText(staffEntryUrl.value)
+    entryCopied.value = true
+  } catch {
+    // 内网明文 http 不是安全上下文，没有 clipboard API：URL 就在旁边，手动抄。
+    entryCopied.value = false
+  }
+}
 
 function draftFor(row) {
   return drafts.value[row.id]
@@ -64,6 +94,7 @@ function onShiftChange(row) {
 }
 
 onMounted(loadRoster)
+onMounted(renderStaffEntry)
 
 useHygieneRealtime({
   id: 'hygiene-admin-roster',
@@ -173,9 +204,26 @@ async function changeAssignment(row) {
 
     <div class="table-card">
       <div class="table-card-header">
+        <h3>员工入口</h3>
+      </div>
+      <p class="editor-lead">店员用手机扫这个码进卫生系统，登录用手机号 + 密码。链接也可以直接在手机浏览器里打开。</p>
+      <div class="staff-entry">
+        <canvas ref="qrCanvas" class="staff-entry-qr" role="img" aria-label="员工入口二维码"></canvas>
+        <div class="staff-entry-copy">
+          <code>{{ staffEntryUrl }}</code>
+          <button type="button" class="btn" @click="copyStaffEntry">
+            {{ entryCopied ? '已复制' : '复制链接' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="table-card">
+      <div class="table-card-header">
         <h3>员工 <span>{{ employees.length }}</span></h3>
       </div>
       <div v-if="loading" class="roster-empty">正在加载…</div>
+      <div v-else-if="errorText" class="roster-empty">加载失败，点上方「刷新」重试。</div>
       <div v-else-if="!employees.length" class="roster-empty">还没有人注册。</div>
       <div v-else class="hy-person-list">
         <article v-for="row in employees" :key="row.id" class="hy-person">

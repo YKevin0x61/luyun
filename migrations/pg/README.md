@@ -16,6 +16,38 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0001_initial_schema.sql
 
 ⚠️ 该脚本是 `DROP TABLE` + `CREATE TABLE`，**会清空目标库**，只能用于初次建立。
 
+## 增量迁移（既有库）
+
+`0001` 之后新增的索引/列放在带序号的小脚本里，全部写成幂等 DDL（`IF NOT EXISTS`），
+可重复执行。
+
+**推荐做法：用 Admin 界面应用**——「系统更新」区块里有一块「数据库迁移」，会列出
+待应用的脚本并支持一键应用，应用记录写进库里的 `schema_migrations` 表，随时能看出
+当前到哪一版（`GET/POST /api/db-migrations`）。这样发版时不必记得敲 psql，也不会
+出现「代码升了、schema 没升」这种只在运行期才暴露的错位。
+
+想手工应用也可以：
+
+```bash
+psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
+```
+
+| 脚本 | 内容 | 不执行的后果 |
+|---|---|---|
+| `0002_hygiene_indexes.sql` | 卫生系统 8 个索引（capture_id 反查、驳回判据、事件保留）+ `hygiene_board_events.reason` | 不报错，但原图接口退化成每请求 6 次全表扫描；驳回原因功能降级为不显示 |
+
+**`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
+Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，
+别删）。
+
+**为什么不在启动时自动补**：`_connect_postgres` 明确不承担结构变更（见其 docstring），
+「schema 是谁改的」要可追溯。SQLite 侧没有这个约束——它由 `apply_hygiene_schema()` /
+`migrate_hygiene_columns()` 在启动时补齐，所以两边行为不对称是**有意**的。
+
+**发布新版时的检查清单**：如果本次改动了 `db_core/schema.py` 的 `_HYGIENE_TABLE_SCHEMAS`
+或 `_HYGIENE_INDEX_DEFINITIONS`，就要同时出一个 `000N_*.sql` 并在发布说明里写清楚——
+PG 部署不会自动获得这些变更。
+
 运行期的 SQL 仍由代码按 SQLite 方言书写，在驱动边界转换——见
 `db_core/backend/dialect.py` 与 ADR 0084。
 

@@ -602,7 +602,9 @@ _HYGIENE_TABLE_SCHEMAS = {
             item_id INTEGER,
             shift TEXT,
             business_date TEXT,
-            occurred_at TEXT NOT NULL
+            occurred_at TEXT NOT NULL,
+            reason TEXT,
+            ticket_id INTEGER
         )
     """,
     "hygiene_deep_clean_items": """
@@ -748,6 +750,10 @@ _HYGIENE_INDEX_DEFINITIONS = {
     "hygiene_standards": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_standards_item "
         "ON hygiene_standards(item_id)",
+        # 原图接口按 capture_id 反查来源（_original_capture_meta 的 6 路 UNION ALL）。
+        # 缺这些索引时每张图片请求都是 6 次全表扫描，随提交量线性恶化。
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_standards_capture "
+        "ON hygiene_standards(capture_id)",
     ],
     "hygiene_daily_instances": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_daily_instances_date "
@@ -756,6 +762,8 @@ _HYGIENE_INDEX_DEFINITIONS = {
     "hygiene_daily_submissions": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_daily_submissions_instance "
         "ON hygiene_daily_submissions(instance_id, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_daily_submissions_capture "
+        "ON hygiene_daily_submissions(capture_id)",
     ],
     "hygiene_overdue_notices": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_overdue_notices_date "
@@ -766,6 +774,13 @@ _HYGIENE_INDEX_DEFINITIONS = {
         "ON hygiene_board_events(board, occurred_at)",
         "CREATE INDEX IF NOT EXISTS idx_hygiene_board_events_board_time_id "
         "ON hygiene_board_events(board, occurred_at, id)",
+        # accept_daily 判「这一项今天有没有被打回过」用：只靠 board 前缀的话
+        # 每次验收都要扫全部个人事件。
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_board_events_reject "
+        "ON hygiene_board_events(board, item_id, shift, business_date, event_type)",
+        # 保留策略按 occurred_at 删旧事件：上面两条复合索引前导是 board，用不上。
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_board_events_time "
+        "ON hygiene_board_events(occurred_at)",
     ],
     "hygiene_deep_clean_items": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_deep_clean_items_weekday "
@@ -778,14 +793,25 @@ _HYGIENE_INDEX_DEFINITIONS = {
     "hygiene_deep_clean_submissions": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_deep_clean_submissions_instance "
         "ON hygiene_deep_clean_submissions(instance_id, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_deep_clean_sub_before "
+        "ON hygiene_deep_clean_submissions(before_capture_id)",
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_deep_clean_sub_after "
+        "ON hygiene_deep_clean_submissions(after_capture_id)",
     ],
     "hygiene_fix_tickets": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_fix_tickets_status "
         "ON hygiene_fix_tickets(status, deadline)",
+        # 注：list_fix_tickets 是「status != 已通过」+ ORDER BY id，不等条件用不上
+        # 索引（EXPLAIN 仍是 SCAN），要提速得把查询改成正面枚举状态。这里不建
+        # 一条永远不被选中的索引，免得白白增加写入成本。
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_fix_tickets_capture "
+        "ON hygiene_fix_tickets(capture_id)",
     ],
     "hygiene_fix_reshoots": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_fix_reshoots_ticket "
         "ON hygiene_fix_reshoots(ticket_id, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_hygiene_fix_reshoots_capture "
+        "ON hygiene_fix_reshoots(capture_id)",
     ],
     "hygiene_teaching_examples": [
         "CREATE INDEX IF NOT EXISTS idx_hygiene_teaching_created "
@@ -857,3 +883,20 @@ async def migrate_hygiene_columns(conn) -> None:
         await conn.execute(
             "ALTER TABLE hygiene_standards ADD COLUMN content_sha256 TEXT"
         )
+    cur = await conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hygiene_board_events'"
+    )
+    if await cur.fetchone() is not None:
+        cur = await conn.execute("PRAGMA table_info(hygiene_board_events)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if "reason" not in cols:
+            # 驳回原因：员工端要能看到"哪里不合格"，否则只能原样重拍。
+            await conn.execute(
+                "ALTER TABLE hygiene_board_events ADD COLUMN reason TEXT"
+            )
+        if "ticket_id" not in cols:
+            # 整改驳回的关联键：整改单 id 与检查项不是一套编号，不能塞进 item_id，
+            # 否则员工端认不出"这一张单被打回过"。
+            await conn.execute(
+                "ALTER TABLE hygiene_board_events ADD COLUMN ticket_id INTEGER"
+            )

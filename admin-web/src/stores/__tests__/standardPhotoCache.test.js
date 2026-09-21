@@ -115,4 +115,54 @@ describe('standard photo cache store', () => {
     expect(store.firstPromptOpen).toBe(false)
     expect(mocks.cache.sync).not.toHaveBeenCalled()
   })
+
+  describe('首次下载失败时的弹窗排队', () => {
+    async function storeWithFailedDownload() {
+      Object.assign(mocks.cache, fakeCache({
+        downloadAll: vi.fn(async () => { throw new Error('网络中断') }),
+      }))
+      const store = useStandardPhotoCacheStore()
+      await store.initialize()
+      expect(store.firstPromptOpen).toBe(true)
+      return store
+    }
+
+    it('弹层关着时直接重开首次下载弹窗', async () => {
+      const store = await storeWithFailedDownload()
+      await store.startFirstDownload()
+      expect(store.errorText).toBe('网络中断')
+      expect(store.firstPromptOpen).toBe(true)
+      expect(store.queuedNotice).toBeNull()
+    })
+
+    it('拍摄弹层开着时排队，不压在相机上', async () => {
+      const store = await storeWithFailedDownload()
+      // 模拟员工已经打开拍摄弹层（store 只记状态，层级由组件负责）。
+      store.setTaskSheetOpen(true)
+      await store.startFirstDownload()
+
+      expect(store.firstPromptOpen).toBe(false)
+      expect(store.queuedNotice).toMatchObject({ reopenFirstPrompt: true })
+
+      store.setTaskSheetOpen(false)
+      expect(store.firstPromptOpen).toBe(true)
+      expect(store.queuedNotice).toBeNull()
+      // 排队期间不能顺手把它当成普通 notice 弹一次（那等于又挡一次画面）。
+      expect(store.notice).toBeNull()
+    })
+
+    it('普通通知仍然走 notice，不会被当成首次下载弹窗', async () => {
+      const store = useStandardPhotoCacheStore()
+      await store.initialize()
+      store.skipFirstRun()
+      store.setTaskSheetOpen(true)
+      store._publishNotice({ type: 'success', message: '已缓存 3 张' })
+
+      expect(store.firstPromptOpen).toBe(false)
+      store.setTaskSheetOpen(false)
+
+      expect(store.notice).toEqual({ type: 'success', message: '已缓存 3 张' })
+      expect(store.firstPromptOpen).toBe(false)
+    })
+  })
 })

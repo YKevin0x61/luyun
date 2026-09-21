@@ -23,7 +23,10 @@
   --hy-line-strong: rgba(133, 205, 198, .28);
   --hy-ink: #e4f0ee;
   --hy-muted: #85aaa7;
-  --hy-faint: #5d7e7b;
+  /* 原来的 #5d7e7b 对 --hy-surface 只有 3.59:1，用在底部 tab 未选中标签和
+     「已停用」状态胶囊这类小字上不满足 AA（需 4.5:1）。#739d98 对 --hy-surface
+     是 5.30:1，对叠了 rgba(133,170,167,.08) 的胶囊底也是 4.64:1。 */
+  --hy-faint: #739d98;
 
   /* 信号色 */
   --hy-mint: #3fe0b0;
@@ -1108,6 +1111,35 @@
   border: 1px solid var(--hy-line);
   color: var(--hy-faint);
 }
+/* 员工入口：二维码给店员扫，链接给管理员复制。 */
+.hygiene-admin .staff-entry {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: .2rem 0 .5rem;
+}
+.hygiene-admin .staff-entry-qr {
+  flex: 0 0 auto;
+  width: 148px;
+  height: 148px;
+  padding: 6px;
+  border-radius: var(--hy-radius-sm);
+  background: #fff;
+}
+.hygiene-admin .staff-entry-copy {
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+  align-items: flex-start;
+  min-width: 0;
+}
+.hygiene-admin .staff-entry-copy code {
+  font-family: var(--font-mono);
+  font-size: .86rem;
+  color: var(--hy-ink);
+  word-break: break-all;
+}
 .hygiene-admin .hy-person-fields {
   display: flex;
   flex-direction: column;
@@ -1281,6 +1313,29 @@
 .hygiene-staff input[type="tel"].input {
   font-family: var(--font-mono);
   letter-spacing: .04em;
+}
+.hygiene-staff .hy-staff-remember {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin: .2rem 0 .35rem;
+  font-size: .95rem;
+  font-weight: 650;
+  color: var(--hy-muted);
+  cursor: pointer;
+}
+.hygiene-staff .hy-staff-remember input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--hy-pool);
+  cursor: pointer;
+}
+.hygiene-staff .hy-staff-remember-hint {
+  margin: 0 0 .9rem;
+  font-size: .82rem;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--hy-muted);
 }
 .hygiene-staff .hy-staff-submit {
   min-height: 50px;
@@ -1627,6 +1682,18 @@
 .hygiene-work .hy-work-row.is-overdue .hy-work-due { color: var(--hy-seal-bright); }
 .hygiene-work .hy-work-row.is-soon .hy-work-due { color: var(--hy-amber); }
 .hygiene-work .hy-work-row > .svg-icon { color: var(--hy-faint); flex: 0 0 auto; }
+/* 今天这一项被打回过：员工看不到驳回原因，至少要知道这不是“从没拍过”。 */
+.hygiene-work .hy-work-reject {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 2px 8px;
+  border: 1px solid var(--hy-seal);
+  border-radius: 999px;
+  color: var(--hy-seal-bright);
+  font-size: .68rem;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
 
 /* 任务卡（专项/整改/榜） */
 .hygiene-work .hy-task {
@@ -1806,6 +1873,14 @@
   padding: 0 .8rem;
   font-size: .8rem;
 }
+/* 断连提示：用警示色而不是报错色——断网不是「操作失败」，但页面上的数据不再可信，
+   员工不应该照着过期画面判断今天做没做完。 */
+.hygiene-work .hy-staff-offline {
+  background: var(--hy-amber-soft);
+  border-color: var(--hy-amber-line);
+  color: var(--hy-amber);
+}
+
 
 /* 底部 tabbar */
 .hygiene-work .hy-tabbar {
@@ -1977,6 +2052,13 @@
   padding: .72rem .85rem;
   font-size: .84rem;
   margin: 0 0 1rem;
+}
+/* 「我」页的编辑表单容器。这个 class 原来在样式表里根本不存在，于是编辑态和上方
+   的提示/资料卡贴在一起。字段本身已有下边距，这里只补容器与上下的间距。 */
+.hygiene-work .staff-profile-edit {
+  display: flex;
+  flex-direction: column;
+  margin: .35rem 0 .85rem;
 }
 .hygiene-work .staff-field {
   display: flex;

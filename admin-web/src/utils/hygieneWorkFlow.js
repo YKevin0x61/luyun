@@ -1,5 +1,7 @@
 /** Staff-phone and admin-queue task flow. Domain rules stay on the server. */
 
+import { formatHygieneShortStamp, formatHygieneStamp } from './hygieneTime'
+
 export const STATUS_TODO = '待拍'
 export const STATUS_PENDING = '待验收'
 export const STATUS_PASSED = '已通过'
@@ -115,10 +117,9 @@ export function shiftClock(shift, clocks) {
   return ''
 }
 
+/** @deprecated 新代码用 `hygieneTime.formatHygieneStamp`；旧名保留给既有调用方。 */
 export function formatStamp(iso) {
-  const raw = String(iso || '')
-  const matched = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(raw)
-  return matched ? `${matched[1]} ${matched[2]}` : raw
+  return formatHygieneStamp(iso)
 }
 
 export function deadlineUrgency(iso, now = Date.now()) {
@@ -189,8 +190,8 @@ export function deadlineText(iso, now = Date.now()) {
   if (delta <= 24 * HOUR_MS) {
     return `还剩 ${Math.max(1, Math.ceil(delta / HOUR_MS))} 小时`
   }
-  const matched = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(iso || ''))
-  return matched ? `${matched[2]}-${matched[3]} ${matched[4]}:${matched[5]} 前` : ''
+  const short = formatHygieneShortStamp(iso)
+  return short ? `${short} 前` : ''
 }
 
 function queueBucket(dueAt, status, now) {
@@ -222,6 +223,8 @@ function queueTask({
   dueAt,
   primaryLabel,
   now,
+  rejected = false,
+  rejectReason = '',
 }) {
   const bucket = queueBucket(dueAt, status, now)
   const dueText = bucket === 'waiting'
@@ -241,6 +244,10 @@ function queueTask({
     bucket,
     bucketLabel: (QUEUE_BUCKETS.find((item) => item.id === bucket) || {}).label || '',
     priority: queuePriority(kind, bucket),
+    // 这一项今天被打回过：员工端要明说，否则他只会看到状态回到"待拍"并原样重拍。
+    rejected: Boolean(rejected),
+    // 验收人写的原因（可能为空）：显示出来才知道该改什么。
+    rejectReason: rejectReason || '',
   }
 }
 
@@ -252,15 +259,22 @@ export function buildWorkQueue({
   deepDue = '',
   now = Date.now(),
   isManager = false,
+  pendingKeys = null,
 } = {}) {
   const tasks = []
+  // 已经入队、还没确认上传成功的任务先从待办里拿掉：3G 下一张图要传几十秒，
+  // 不拿掉的话员工切回待办会看到"还没拍"，然后重拍一遍。
+  const pending = pendingKeys instanceof Set ? pendingKeys : null
+  const isPending = (key) => Boolean(pending && pending.has(key))
 
   for (const row of openRows(inbox)) {
+    const key = `daily:${row.item_id}:${row.shift}`
+    if (isPending(key)) continue
     const dueAt = clockDueAt(shiftDue, row.business_date)
     tasks.push(queueTask({
       kind: 'daily',
       row,
-      key: `daily:${row.item_id}:${row.shift}`,
+      key,
       title: row.item_name,
       context: `${row.zone_name} · ${row.shift}`,
       typeLabel: '日常',
@@ -270,15 +284,19 @@ export function buildWorkQueue({
         ? (isManager ? '验收' : '查看')
         : '拍摄',
       now,
+      rejected: row.rejected,
+      rejectReason: row.reject_reason,
     }))
   }
 
   for (const row of openRows(deepInbox)) {
+    const key = `deep:${row.item_id}`
+    if (isPending(key)) continue
     const dueAt = clockDueAt(deepDue, row.business_date)
     tasks.push(queueTask({
       kind: 'deep',
       row,
-      key: `deep:${row.item_id}`,
+      key,
       title: row.item_name,
       context: '专项卫生 · 前后对照',
       typeLabel: '专项',
@@ -288,14 +306,18 @@ export function buildWorkQueue({
         ? (isManager ? '验收' : '查看')
         : '拍前后',
       now,
+      rejected: row.rejected,
+      rejectReason: row.reject_reason,
     }))
   }
 
   for (const row of (fixInbox || [])) {
+    const key = `fix:${row.id}`
+    if (isPending(key)) continue
     tasks.push(queueTask({
       kind: 'fix',
       row,
-      key: `fix:${row.id}`,
+      key,
       title: `${row.zone_name} · ${row.ticket_type}`,
       context: row.body_text || '整改单',
       typeLabel: '整改',
@@ -303,6 +325,8 @@ export function buildWorkQueue({
       dueAt: row.deadline,
       primaryLabel: fixPrimaryAction(row, { isManager }) === 'review' ? '验收' : '回拍',
       now,
+      rejected: row.rejected,
+      rejectReason: row.reject_reason,
     }))
   }
 

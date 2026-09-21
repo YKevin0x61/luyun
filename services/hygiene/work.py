@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
@@ -46,6 +47,37 @@ SETTING_DEEP_CLEAN_OVERDUE = "deep_clean_overdue_hhmm"
 DEFAULT_DEEP_CLEAN_OVERDUE_HHMM = "21:30"
 MAX_STANDARD_BYTES = 20 * 1024 * 1024
 MAX_CAPTURE_BYTES = MAX_STANDARD_BYTES
+# 标注（圆圈/箭头/批注）。形状与 admin-web/src/utils/hygieneMarkup.js 一致，
+# 上限对齐前端：批注 40 字（input maxlength）、条数给足余量。
+MARKUP_KINDS = ("circle", "arrow", "caption")
+MAX_MARKUP_MARKS = 50
+MAX_CAPTION_LENGTH = 40
+MIN_CIRCLE_RADIUS = 0.02
+MAX_CIRCLE_RADIUS = 0.4
+
+
+def _clamp01(value) -> float:
+    """坐标夹到 0–1（图片内的比例位置）。非数字按 0 处理。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if number != number:  # NaN
+        return 0.0
+    return min(1.0, max(0.0, number))
+
+
+def _clamp_radius(value) -> float:
+    """圆圈半径夹到前后端约定的区间。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.08
+    if number != number:  # NaN
+        return 0.08
+    return min(MAX_CIRCLE_RADIUS, max(MIN_CIRCLE_RADIUS, number))
+
+
 CAPTURE_VARIANTS = ("thumb", "preview")
 ORPHAN_CAPTURE_MIN_AGE_SECONDS = 24 * 60 * 60
 # Keep every `IN (...)` well under SQLITE_MAX_VARIABLE_NUMBER (999 on old builds,
@@ -56,13 +88,26 @@ CALENDAR_TODO = "待办"
 CALENDAR_DONE = "已完成"
 CALENDAR_MISSED = "未完成"
 OVERDUE_SWEEP_INTERVAL_SECONDS = 30
+# 标准图清单里"文件是否还在"的核对间隔：文件消失是罕见事件，不值得每个请求扫一遍目录。
+STANDARD_MANIFEST_FILE_TTL_SECONDS = 60
+# 看板事件只增不减（每次提交/驳回/逾期一条，一年几十万行）。红黑榜按周读取，
+# 留 12 周足够覆盖"本周 + 上季"的追溯，超出部分定期清掉。
+BOARD_EVENT_RETENTION_DAYS = 84
+BOARD_EVENT_PURGE_INTERVAL_SECONDS = 6 * 3600
+# 看板事件流的默认返回条数：接口目前没有前端消费者，但一旦接上就是 O(历史) 响应体。
+BOARD_EVENT_DEFAULT_LIMIT = 200
+BOARD_EVENT_MAX_LIMIT = 1000
 BOARD_ZONE = "zone"
 BOARD_PERSON = "person"
 EVENT_MISSED_DAILY = "逾期"
 EVENT_CAPTURE = "实拍"
 EVENT_REJECT = "驳回"
 EVENT_FIRST_PASS = "一次通过"
-PERSON_COUNT_KEYS = ("实拍", "驳回", "一次通过", "逾期")
+# 员工当天自行换责任区的留痕事件。责任区是分工而不是安全边界（员工可以自由换区，
+# 见 .scratch/hygiene-audit/2026-09-20-review.md §1.1），所以不阻止换区，但要把
+# "谁越了区"记进个人榜，让红黑榜的实拍数字可解释。
+EVENT_ZONE_SWITCH = "换区"
+PERSON_COUNT_KEYS = ("实拍", "驳回", "一次通过", "逾期", "换区")
 ZONE_COUNT_KEYS = ("逾期",)
 TEACHING_DAILY = "daily"
 TEACHING_DEEP_CLEAN = "deep_clean"
@@ -73,7 +118,15 @@ def serialized_write(method):
     @functools.wraps(method)
     async def wrapper(self, *args, **kwargs):
         async with self._write_lock:
-            return await method(self, *args, **kwargs)
+            try:
+                return await method(self, *args, **kwargs)
+            except Exception:
+                # 兜底回滚：aiosqlite 是隐式事务，方法里任何未处理异常（磁盘满、
+                # 外键冲突、图片解码失败…）都会把半截写留在连接上——下一个协程的
+                # commit 会把它一起提交，别人的 rollback 会回滚掉无关的写。
+                # 无事务时 rollback 是 no-op，所以这里无条件调用是安全的。
+                await self._conn.rollback()
+                raise
 
     return wrapper
 
@@ -101,6 +154,17 @@ def _chunked(items, size: int):
     """Yield bounded slices so a single statement never binds too many variables."""
     for start in range(0, len(items), size):
         yield items[start : start + size]
+
+
+MAX_REJECT_REASON_LENGTH = 120
+
+
+def _clean_reject_reason(reason) -> Optional[str]:
+    """驳回原因归一化：去空白、限长；没填就是 None（不写空串进库）。"""
+    text = (reason or "").strip()
+    if not text:
+        return None
+    return text[:MAX_REJECT_REASON_LENGTH]
 
 
 class HygieneWorkError(ValueError):
@@ -132,6 +196,15 @@ class HygieneWork:
         self._on_change = on_change
         self._write_lock_owner = conn_or_db
         self._local_write_lock = None
+        # capture 文件集合的 TTL 缓存，见 _readable_capture_ids。
+        self._readable_capture_cache = None
+        # 看板事件清理的上次执行时间（monotonic），见 _maybe_purge_board_events。
+        self._last_board_purge = 0.0
+        # hygiene_board_events 的两个扩展列是否存在（PG 既有库可能只跑了其中一次迁移）。
+        # 分开缓存：只应用了 0002（reason）而没应用 0003（ticket_id）时，
+        # 驳回原因不该跟着一起降级。
+        self._has_event_reason: Optional[bool] = None
+        self._has_event_ticket: Optional[bool] = None
 
     @property
     def _write_lock(self):
@@ -156,6 +229,11 @@ class HygieneWork:
             raise HygieneWorkError("forbidden", "forbidden")
 
     async def prepare(self) -> None:
+        # 先探扩展列是否存在（此时没有任何写事务，探测失败回滚是无害的）。
+        # 不能留到写路径里去探：PG 缺列时那次探测必须 rollback，会把同一事务里已经
+        # 写好的状态更新一起回滚掉——驳回就成了"记了一笔事件、状态却没变"。
+        await self._event_reason_supported()
+        await self._event_ticket_supported()
         await self._backfill_standard_metadata()
         await self._seed_zones_if_empty()
         await self._seed_overdue_clocks_if_empty()
@@ -170,6 +248,7 @@ class HygieneWork:
         capture_id = await self._captures.put_async(data, content_type=content_type)
         generated: dict[str, tuple[str, GeneratedVariant]] = {}
         if self._image_variants is None:
+            self._remember_capture_ids(capture_id)
             return capture_id, generated
         try:
             variants = await asyncio.to_thread(self._image_variants.generate, data)
@@ -178,12 +257,14 @@ class HygieneWork:
                 await self._captures.delete_async(capture_id)
                 raise HygieneWorkError("invalid_image", "invalid_image")
             logger.warning("hygiene capture is not decodable capture=%s", capture_id)
+            self._remember_capture_ids(capture_id)
             return capture_id, generated
         except Exception:
             logger.exception("hygiene derivative generation failed capture=%s", capture_id)
             if require_image:
                 await self._captures.delete_async(capture_id)
                 raise
+            self._remember_capture_ids(capture_id)
             return capture_id, generated
         try:
             for variant_name, variant in variants.items():
@@ -197,6 +278,9 @@ class HygieneWork:
                 [capture_id, *(item[0] for item in generated.values())]
             )
             raise
+        self._remember_capture_ids(
+            capture_id, *(item[0] for item in generated.values())
+        )
         return capture_id, generated
 
     async def _insert_variants(
@@ -442,6 +526,24 @@ class HygieneWork:
             f"DELETE FROM hygiene_daily_items WHERE id IN ({placeholders})",
             item_ids,
         )
+        await self._drop_teaching_examples(TEACHING_DAILY, item_ids)
+
+    async def _drop_teaching_examples(self, kind: str, item_ids: list[int]) -> None:
+        """清掉引用被删检查项的卫生教材。
+
+        教材的左右图就是这些检查项的 capture：留着行会让教材页 404，而且
+        ``_referenced_capture_ids`` 会把它们继续算作"被引用"，文件永远不回收。
+        capture 文件本身交给常规孤儿清理，避免误删仍被别处引用的图。
+        """
+        ids = [int(item_id) for item_id in item_ids if item_id is not None]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        await self._conn.execute(
+            f"DELETE FROM hygiene_teaching_examples "
+            f"WHERE kind = ? AND item_id IN ({placeholders})",
+            [kind, *ids],
+        )
 
     async def _drop_zone_fix_tickets(self, zone_id: int) -> None:
         cur = await self._conn.execute(
@@ -496,6 +598,14 @@ class HygieneWork:
         mapping = dict(zone)
         try:
             item_ids = await self._item_ids_for_zone(int(zone_id))
+            # hygiene_shift_picks.zone_id 有外键指向 hygiene_zones，先解绑再删区，
+            # 否则只要当天有人选过这个区就必然 IntegrityError（现场老库没这条外键，
+            # 只有从源码新建的库会踩到，所以新门店/CI 一删就 500）。
+            await self._conn.execute(
+                "UPDATE hygiene_shift_picks SET zone_id = NULL, updated_at = ? "
+                "WHERE zone_id = ?",
+                (self._now_iso(), int(zone_id)),
+            )
             await self._drop_daily_items(item_ids)
             await self._drop_zone_fix_tickets(int(zone_id))
             await self._drop_board_events(zone_id=int(zone_id), item_ids=item_ids)
@@ -544,11 +654,54 @@ class HygieneWork:
             raise HygieneWorkError("standard_too_large", "standard_too_large")
         return data
 
+    def _normalize_markup(self, raw) -> list:
+        """标注入库前的归一化。
+
+        前端 `hygieneMarkup.js` 已经保证形状（坐标 0–1、批注 ≤40 字、kind 三选一），
+        但标注会渲染在员工手机上，而管理员可以直接 POST/PATCH 这两条写路径——所以
+        在服务端再兜一层：丢掉认不出的 kind、夹住坐标、截断批注、限制条数。
+
+        只做「前端本来就保证的事」，不改真实流量的语义。
+        """
+        if not isinstance(raw, list):
+            return []
+        marks = []
+        for item in raw:
+            if len(marks) >= MAX_MARKUP_MARKS:
+                break
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+            if kind not in MARKUP_KINDS:
+                continue
+            if kind == "circle":
+                marks.append({
+                    "kind": "circle",
+                    "x": _clamp01(item.get("x")),
+                    "y": _clamp01(item.get("y")),
+                    "r": _clamp_radius(item.get("r")),
+                })
+            elif kind == "arrow":
+                marks.append({
+                    "kind": "arrow",
+                    "x1": _clamp01(item.get("x1")),
+                    "y1": _clamp01(item.get("y1")),
+                    "x2": _clamp01(item.get("x2")),
+                    "y2": _clamp01(item.get("y2")),
+                })
+            else:
+                text = str(item.get("text") or "").strip()[:MAX_CAPTION_LENGTH]
+                marks.append({
+                    "kind": "caption",
+                    "x": _clamp01(item.get("x")),
+                    "y": _clamp01(item.get("y")),
+                    "text": text,
+                })
+        return marks
+
     def _markup_json(self, capture) -> str:
         markup = [] if capture is None else capture.get("markup")
-        if not isinstance(markup, list):
-            markup = []
-        return json.dumps(markup, ensure_ascii=False)
+        return json.dumps(self._normalize_markup(markup), ensure_ascii=False)
 
     def _parse_markup(self, raw: str):
         try:
@@ -728,28 +881,54 @@ class HygieneWork:
             "created_at": std["created_at"],
         }
 
-    async def standard_version(self, standard_id: int) -> dict:
-        return await self.standard_by_id(standard_id)
+    async def standard_version(self, standard_id: int, actor: Optional[dict] = None) -> dict:
+        """单张标准图。传入员工 actor 时按该员工的责任区校验归属。
 
-    async def standard_manifest(self) -> dict:
-        cur = await self._conn.execute(
-            """SELECT i.id AS item_id, i.name AS item_name,
+        同一条数据在 ``/staff/items/{item_id}/standard`` 上是有责任区校验的，
+        这里不能成为绕过它的第二扇门（员工可以按 id 遍历下载全店标准图）。
+        """
+        standard = await self.standard_by_id(standard_id)
+        if actor is not None:
+            self._require_zone_access(actor, await self._item_zone_id(standard["item_id"]))
+        return standard
+
+    async def _item_zone_id(self, item_id: int) -> int:
+        item = await self._fetch_item(item_id)
+        if item is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        return int(dict(item)["zone_id"])
+
+    async def standard_manifest(self, actor: Optional[dict] = None) -> dict:
+        """当前标准图清单（员工端离线缓存用）。
+
+        传入员工 actor 时只返回该员工当天责任区的项：这份清单会被整包离线缓存，
+        「缓存即越权」——不做切片就等于把全店标准图发给每个员工。未选责任区时
+        返回空清单而不是报错，避免刚打开页面就被 400 挡住。
+        """
+        zone_id: Optional[int] = None
+        if actor is not None and actor.get("kind") == "staff":
+            picked = actor.get("zone_id")
+            if not picked:
+                return self._empty_standard_manifest()
+            zone_id = int(picked)
+        sql = """SELECT i.id AS item_id, i.name AS item_name,
                       i.current_standard_id AS standard_id,
                       s.capture_id, s.byte_size, s.content_sha256, s.content_type
                FROM hygiene_daily_items i
                JOIN hygiene_standards s ON s.id = i.current_standard_id
                WHERE i.current_standard_id IS NOT NULL
                  AND s.byte_size IS NOT NULL
-                 AND s.content_sha256 IS NOT NULL
-               ORDER BY s.id ASC"""
-        )
+                 AND s.content_sha256 IS NOT NULL"""
+        params: list = []
+        if zone_id is not None:
+            sql += " AND i.zone_id = ?"
+            params.append(zone_id)
+        sql += " ORDER BY s.id ASC"
+        cur = await self._conn.execute(sql, params)
         rows = [dict(row) for row in await cur.fetchall()]
         readable_ids = set()
         if rows:
-            readable_ids = {
-                str(capture_id)
-                for capture_id in await self._captures.list_ids_async()
-            }
+            readable_ids = await self._readable_capture_ids()
         standards = []
         for mapping in rows:
             if str(mapping["capture_id"]) not in readable_ids:
@@ -767,6 +946,9 @@ class HygieneWork:
                 "sha256": mapping["content_sha256"],
                 "content_type": mapping["content_type"],
             })
+        return self._standard_manifest_payload(standards)
+
+    def _standard_manifest_payload(self, standards: list) -> dict:
         digest_input = json.dumps(
             standards,
             ensure_ascii=False,
@@ -778,6 +960,42 @@ class HygieneWork:
             "generated_at": self._now_iso(),
             "standards": standards,
         }
+
+    def _empty_standard_manifest(self) -> dict:
+        """还没选责任区的员工拿到空清单（有稳定的 version，不是错误）。"""
+        return self._standard_manifest_payload([])
+
+    async def _readable_capture_ids(self) -> set:
+        """磁盘上实际存在的 capture 文件集合，带 TTL 缓存。
+
+        manifest 要判断"标准图文件还在不在"，原来是每个请求 iterdir + 逐文件 stat：
+        文件上到几万时单次请求就是几百毫秒，而这份清单在每次卫生路由切换时都会被拉。
+        文件消失属于罕见事件（磁盘故障、人工清理），缓存 60 秒足够。
+        """
+        now = time.monotonic()
+        cached = self._readable_capture_cache
+        if cached is not None and now - cached[0] < STANDARD_MANIFEST_FILE_TTL_SECONDS:
+            return cached[1]
+        ids = {str(capture_id) for capture_id in await self._captures.list_ids_async()}
+        self._readable_capture_cache = (now, ids)
+        return ids
+
+    def _remember_capture_ids(self, *capture_ids) -> None:
+        """新写入的 capture 立刻并进 TTL 缓存。
+
+        不这么做的话，TTL 窗口内 manifest 认不出刚换版的标准图，员工端会短暂看到
+        旧图或空清单（``test_manifest_lists_current_version_and_keeps_old_version_addressable``
+        就是这样抓到的）。删除方向不需要特殊处理：文件消失是罕见事件，等 TTL 过期。
+        """
+        cached = self._readable_capture_cache
+        if cached is None:
+            return
+        stamp, ids = cached
+        merged = set(ids)
+        for capture_id in capture_ids:
+            if capture_id:
+                merged.add(str(capture_id))
+        self._readable_capture_cache = (stamp, merged)
 
     async def capture_bytes(self, capture_id: str) -> bytes:
         return await self._captures.get_async(capture_id)
@@ -949,10 +1167,16 @@ class HygieneWork:
                 logger.exception("hygiene variant backfill loop failed")
                 await asyncio.sleep(300)
 
+    @serialized_write
     async def sweep_capture_orphans(
         self,
         max_age_seconds: int = ORPHAN_CAPTURE_MIN_AGE_SECONDS,
     ) -> int:
+        """删掉没人引用的 capture。
+
+        必须拿写锁：它会 ``commit()``，而在共享连接上无锁 commit 会把另一个协程
+        写了一半的事务顺手提交掉（锁在这里就是事务边界）。
+        """
         referenced = await self._referenced_capture_ids()
         await self._drop_unrooted_variant_rows(referenced)
         keep = referenced | await self._variant_capture_ids()
@@ -1064,6 +1288,78 @@ class HygieneWork:
             "capture_id": capture_id,
         }
 
+    @serialized_write
+    async def update_standard_markup(self, actor: dict, item_id: int, markup) -> dict:
+        """只改当前标准图的标注，不重新上传图片。
+
+        做法是**新插一行 `hygiene_standards`**（复用当前行的 capture_id / 类型 /
+        字节数 / sha256，只换 markup_json），再把 `current_standard_id` 指过去：
+
+        * 图片文件、缩略图/预览变体都不用重做，`standard-manifest` 的 sha256 也不变，
+          员工端不会因为改了个圈就把几百兆标准图重下一遍；
+        * 已经提交的日常记录握着**旧的** frozen_standard_id，它们看到的仍是当时那版
+          标注——「冻结标准真冻结」不被这次编辑破坏；
+        * `current_standard_id` 变了，员工端正在拍摄时会照常提示「标准图已更新，请先
+          查看新版再拍摄」，这正是我们要的：标注变了就该重新看一眼。
+        """
+        self._require_super(actor)
+        item = await self._fetch_item(item_id)
+        if item is None:
+            raise HygieneWorkError("item_not_found", "item_not_found")
+        current_id = dict(item)["current_standard_id"]
+        if not current_id:
+            raise HygieneWorkError("standard_not_found", "standard_not_found")
+        cur = await self._conn.execute(
+            """SELECT capture_id, content_type, byte_size, content_sha256
+               FROM hygiene_standards WHERE id = ?""",
+            (int(current_id),),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise HygieneWorkError("standard_not_found", "standard_not_found")
+        current = dict(row)
+        now = self._now_iso()
+        try:
+            std_cur = await self._conn.execute(
+                """INSERT INTO hygiene_standards
+                   (item_id, capture_id, content_type, byte_size,
+                    content_sha256, markup_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    int(item_id),
+                    current["capture_id"],
+                    current["content_type"],
+                    current["byte_size"],
+                    current["content_sha256"],
+                    json.dumps(self._normalize_markup(markup), ensure_ascii=False),
+                    now,
+                ),
+            )
+            standard_id = int(std_cur.lastrowid)
+            await self._conn.execute(
+                """UPDATE hygiene_daily_items
+                   SET current_standard_id = ?, updated_at = ?
+                   WHERE id = ?""",
+                (standard_id, now, int(item_id)),
+            )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        logger.info(
+            "hygiene standard markup updated item=%s standard=%s from=%s",
+            item_id,
+            standard_id,
+            current_id,
+        )
+        return {
+            "id": int(item_id),
+            "zone_id": int(dict(item)["zone_id"]),
+            "name": dict(item)["name"],
+            "current_standard_id": standard_id,
+            "capture_id": current["capture_id"],
+        }
+
     def _actor_shift(self, actor: dict, requested: Optional[str] = None) -> str:
         if not actor or actor.get("kind") != "staff":
             raise HygieneWorkError("forbidden", "forbidden")
@@ -1091,6 +1387,18 @@ class HygieneWork:
         selected = self._actor_zone_id(actor)
         if selected is not None and selected != int(zone_id):
             raise HygieneWorkError("zone_mismatch", "zone_mismatch")
+
+    def _require_zone_access_for(self, actor: Optional[dict], zone_id: int) -> None:
+        """带 actor 的读接口守卫：actor 缺失按**拒绝**处理。
+
+        原来写的是 ``actor or {"kind": "super"}``——功能上等于「没传 actor 就是
+        全权超管」。当前调用点都传了非空 actor，所以不可利用；但这是「默认放开」
+        的形状：将来多一个忘了传 actor 的调用点，横向隔离会静默消失。管理员路径
+        必须显式传 ``{"kind": "super"}``。
+        """
+        if not actor:
+            raise HygieneWorkError("forbidden", "forbidden")
+        self._require_zone_access(actor, zone_id)
 
     def _require_live_capture(self, capture) -> bytes:
         if not capture or capture.get("live") is not True:
@@ -1162,7 +1470,16 @@ class HygieneWork:
         row = await cur.fetchone()
         return None if row is None else dict(row)
 
-    def _inbox_from_parts(self, item: dict, shift: str, business_date: str, instance, submission) -> dict:
+    def _inbox_from_parts(
+        self,
+        item: dict,
+        shift: str,
+        business_date: str,
+        instance,
+        submission,
+        rejected: bool = False,
+        reject_reason: Optional[str] = None,
+    ) -> dict:
         status = STATUS_TODO
         if instance is not None:
             status = instance["status"]
@@ -1181,6 +1498,10 @@ class HygieneWork:
             "shift": shift,
             "business_date": business_date,
             "status": status,
+            # 今天这一项被打回过：员工端据此提示"上次被驳回，请重拍"，
+            # 不然他只看到状态回到待拍，会照着原样再拍一遍。
+            "rejected": bool(rejected),
+            "reject_reason": reject_reason or None,
             "submitter_id": None if submission is None else int(submission["submitter_id"]),
             "submitter_phone": None if submission is None else submission["submitter_phone"],
             "capture_id": None if submission is None else submission["capture_id"],
@@ -1192,7 +1513,6 @@ class HygieneWork:
             "watermark": watermark,
         }
 
-    @serialized_write
     async def submit_daily(
         self,
         actor: dict,
@@ -1200,6 +1520,12 @@ class HygieneWork:
         capture,
         shift: Optional[str] = None,
     ) -> dict:
+        """交一张日常实拍。
+
+        校验与图片落盘都在写锁**外面**：``_store_capture`` 只碰磁盘（3 次 fsync +
+        PIL 编解码，12MP 实测约 100ms），原来它被 ``@serialized_write`` 罩着，等于
+        每次拍照都把全局写锁与一个打开的写事务占住，注册、选班、验收、开单全排队。
+        """
         target_shift = self._actor_shift(actor, shift)
         data = self._require_live_capture(capture)
         item_row = await self._fetch_item_with_zone(item_id)
@@ -1216,59 +1542,142 @@ class HygieneWork:
         if not photographer:
             raise HygieneWorkError("photographer_required", "photographer_required")
         business_date = hygiene_business_date(self._now_dt())
+        content_type = (capture.get("content_type") or "image/jpeg").strip()
+        capture_id, generated = await self._store_capture(data, content_type)
+        try:
+            return await self._commit_daily_submission(
+                actor=actor,
+                item=item,
+                item_id=item_id,
+                target_shift=target_shift,
+                business_date=business_date,
+                standard_id=int(standard_id),
+                photographer=photographer,
+                capture_id=capture_id,
+                generated=generated,
+                content_type=content_type,
+            )
+        except Exception:
+            # 事务没落库就把刚写下的文件收拾掉，别给孤儿清理留活。
+            await self._delete_capture_files(
+                [capture_id, *(variant[0] for variant in generated.values())]
+            )
+            raise
+
+    @serialized_write
+    async def _commit_daily_submission(
+        self,
+        *,
+        actor: dict,
+        item: dict,
+        item_id: int,
+        target_shift: str,
+        business_date: str,
+        standard_id: int,
+        photographer: str,
+        capture_id: str,
+        generated: dict,
+        content_type: str,
+    ) -> dict:
+        """``submit_daily`` 的纯 SQL 段：拿写锁做事务，不碰磁盘。"""
         instance = await self._ensure_instance(business_date, target_shift, item_id)
         if instance["status"] == STATUS_PASSED:
             raise HygieneWorkError("already_accepted", "already_accepted")
-        content_type = (capture.get("content_type") or "image/jpeg").strip()
-        capture_id, generated = await self._store_capture(data, content_type)
         now = self._now_iso()
+        # 待验收状态下的再次提交＝同一张实拍的重传（弱网重发、上传成功但响应丢了
+        # 之后的客户端重试）。覆盖原来那条 pending 提交：不新增行、也不再记一次
+        # 「实拍」事件，否则红黑榜的实拍次数会平白多出来。被打回后实例回到"待拍"，
+        # 那时再交属于新一次实拍，走 INSERT 保留历史。
+        previous = None
+        if instance["status"] == STATUS_PENDING and instance.get("pending_submission_id"):
+            previous = await self._fetch_submission(instance.get("pending_submission_id"))
+        if previous is not None and int(previous["submitter_id"]) != int(actor["id"]):
+            # 待验收的那条是同事交的：不能覆盖他的证据。换区只留痕、不阻断（§1.1 的
+            # 既定决策），所以同区出现别人的待验收是正常情形——按"又一次实拍"处理，
+            # 两条提交与两次实拍计数都留着，管理员能看到是谁拍的哪一张。
+            previous = None
         try:
-            cur = await self._conn.execute(
-                """INSERT INTO hygiene_daily_submissions
-                   (instance_id, capture_id, content_type, frozen_standard_id,
-                    submitter_id, submitter_phone, zone_name, captured_at, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    instance["id"],
-                    capture_id,
-                    content_type,
-                    int(standard_id),
-                    int(actor["id"]),
-                    photographer,
-                    item["zone_name"],
-                    now,
-                    now,
-                ),
-            )
-            submission_id = int(cur.lastrowid)
-            await self._conn.execute(
-                """UPDATE hygiene_daily_instances
-                   SET status = ?, pending_submission_id = ?, updated_at = ?
-                   WHERE id = ?""",
-                (STATUS_PENDING, submission_id, now, instance["id"]),
-            )
-            await self._insert_variants(capture_id, generated)
-            await self._insert_board_event(
-                BOARD_PERSON,
-                EVENT_CAPTURE,
-                zone_id=int(item["zone_id"]),
-                employee_id=int(actor["id"]),
-                item_id=int(item_id),
-                shift=target_shift,
-                business_date=business_date,
-            )
-            await self._conn.commit()
+            if previous is not None:
+                submission_id = int(previous["id"])
+                await self._conn.execute(
+                    """UPDATE hygiene_daily_submissions
+                       SET capture_id = ?, content_type = ?, frozen_standard_id = ?,
+                           submitter_id = ?, submitter_phone = ?, zone_name = ?,
+                           captured_at = ?
+                       WHERE id = ?""",
+                    (
+                        capture_id,
+                        content_type,
+                        standard_id,
+                        int(actor["id"]),
+                        photographer,
+                        item["zone_name"],
+                        now,
+                        submission_id,
+                    ),
+                )
+                await self._conn.execute(
+                    """UPDATE hygiene_daily_instances
+                       SET status = ?, pending_submission_id = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (STATUS_PENDING, submission_id, now, instance["id"]),
+                )
+                await self._insert_variants(capture_id, generated)
+                await self._conn.commit()
+                # 被替换掉的那张已无任何行引用，交给常规孤儿清理回收（含变体），
+                # 比在这里手删文件安全：万一还有别处引用它就不会误删。
+                #
+                # 已知取舍：并发提交同一项时两个请求都在锁外落盘，锁内后到的那个替换
+                # 掉先到的，先到者的文件要等孤儿清理（最长一小时）才回收。只是磁盘
+                # 垃圾，计数与证据链都正确（替换分支不记实拍事件）。
+                #
+                # 只有本人能走到这里：同事交的待验收在上面已被重置成 None、改走
+                # INSERT 新增一条，否则换区之后就能把别人的证据无声顶掉。
+            else:
+                cur = await self._conn.execute(
+                    """INSERT INTO hygiene_daily_submissions
+                       (instance_id, capture_id, content_type, frozen_standard_id,
+                        submitter_id, submitter_phone, zone_name, captured_at, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        instance["id"],
+                        capture_id,
+                        content_type,
+                        standard_id,
+                        int(actor["id"]),
+                        photographer,
+                        item["zone_name"],
+                        now,
+                        now,
+                    ),
+                )
+                submission_id = int(cur.lastrowid)
+                await self._conn.execute(
+                    """UPDATE hygiene_daily_instances
+                       SET status = ?, pending_submission_id = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (STATUS_PENDING, submission_id, now, instance["id"]),
+                )
+                await self._insert_variants(capture_id, generated)
+                await self._insert_board_event(
+                    BOARD_PERSON,
+                    EVENT_CAPTURE,
+                    zone_id=int(item["zone_id"]),
+                    employee_id=int(actor["id"]),
+                    item_id=int(item_id),
+                    shift=target_shift,
+                    business_date=business_date,
+                )
+                await self._conn.commit()
         except Exception:
             await self._conn.rollback()
-            await self._delete_capture_files(
-                [capture_id, *(item[0] for item in generated.values())]
-            )
             raise
         logger.info(
-            "hygiene daily submitted item=%s shift=%s capture=%s",
+            "hygiene daily submitted item=%s shift=%s capture=%s%s",
             item_id,
             target_shift,
             capture_id,
+            " (replaced pending)" if previous is not None else "",
         )
         return {
             "item_id": int(item_id),
@@ -1277,7 +1686,7 @@ class HygieneWork:
             "status": STATUS_PENDING,
             "zone_name": item["zone_name"],
             "capture_id": capture_id,
-            "frozen_standard_id": int(standard_id),
+            "frozen_standard_id": standard_id,
             "submitter_id": int(actor["id"]),
             "submitter_phone": photographer,
             "watermark": self._watermark(now, item["zone_name"], photographer),
@@ -1329,6 +1738,9 @@ class HygieneWork:
             params.append(zone_id)
         sql += " ORDER BY i.id ASC, sh.shift ASC"
         cur = await self._conn.execute(sql, params)
+        rejected_reasons = await self._rejected_reasons(
+            business_date, tuple(shifts), zone_id
+        )
         inbox = []
         for row in await cur.fetchall():
             mapping = dict(row)
@@ -1361,6 +1773,7 @@ class HygieneWork:
                     "zone_name": mapping["submission_zone_name"],
                     "captured_at": mapping["captured_at"],
                 }
+            key = (int(mapping["item_id"]), mapping["shift"])
             inbox.append(
                 self._inbox_from_parts(
                     item,
@@ -1368,6 +1781,8 @@ class HygieneWork:
                     business_date,
                     instance,
                     submission,
+                    rejected=key in rejected_reasons,
+                    reject_reason=rejected_reasons.get(key),
                 )
             )
         return inbox
@@ -1392,7 +1807,7 @@ class HygieneWork:
             raise HygieneWorkError("not_pending", "not_pending")
         item = await self._fetch_item_with_zone(item_id)
         if item is not None:
-            self._require_zone_access(actor or {"kind": "super"}, item["zone_id"])
+            self._require_zone_access_for(actor, item["zone_id"])
         standard = await self.standard_by_id(int(submission["frozen_standard_id"]))
         return {
             "item_id": int(item_id),
@@ -1449,6 +1864,83 @@ class HygieneWork:
         )
         return await cur.fetchone() is not None
 
+    async def _deep_clean_rejected_reasons(self, business_date: str, item_ids) -> dict:
+        """当天被驳回过的专项项 → 最近一次原因。
+
+        专项驳回事件的 shift 留空（那是对日常的判据），所以这里按 item_id + shift IS NULL
+        区分；一次查完，不在行循环里逐条查。
+        """
+        ids = [int(item_id) for item_id in item_ids if item_id is not None]
+        if not ids or self._has_event_reason is not True:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        cur = await self._conn.execute(
+            f"""SELECT item_id, reason FROM hygiene_board_events
+                WHERE board = ? AND event_type = ? AND business_date = ?
+                  AND shift IS NULL AND item_id IN ({placeholders})
+                ORDER BY id DESC""",
+            [BOARD_PERSON, EVENT_REJECT, business_date, *ids],
+        )
+        found: dict = {}
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            found.setdefault(int(mapping["item_id"]), mapping.get("reason"))
+        return found
+
+    async def _fix_rejected_reasons(self, business_date: str, ticket_ids) -> dict:
+        """当天被驳回过的整改单 → 最近一次原因（按事件上的 ticket_id 关联）。"""
+        ids = [int(ticket_id) for ticket_id in ticket_ids if ticket_id is not None]
+        if not ids or self._has_event_ticket is not True:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        cur = await self._conn.execute(
+            f"""SELECT ticket_id, reason FROM hygiene_board_events
+                WHERE board = ? AND event_type = ? AND business_date = ?
+                  AND ticket_id IN ({placeholders})
+                ORDER BY id DESC""",
+            [BOARD_PERSON, EVENT_REJECT, business_date, *ids],
+        )
+        found: dict = {}
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            found.setdefault(int(mapping["ticket_id"]), mapping.get("reason"))
+        return found
+
+    async def _rejected_reasons(
+        self,
+        business_date: str,
+        shifts: tuple,
+        zone_id: Optional[int] = None,
+    ) -> dict:
+        """当天被驳回过的 (item_id, shift) → 最近一次的原因（可能为 None）。
+
+        员工端要能看出"这一项是上次被打回的、哪里不合格"，否则他只看到状态回到
+        待拍，会照着原样重拍。这里一次查完，不在 list_daily_work 的行循环里逐条查。
+        """
+        if not shifts:
+            return {}
+        # 只用 prepare() 预热的缓存：读路径无锁，绝不能触发探测——探测失败要
+        # rollback，会把并发写者未提交的事务一起回滚掉（见 _event_reason_supported）。
+        has_reason = self._has_event_reason is True
+        columns = "item_id, shift, reason" if has_reason else "item_id, shift, NULL AS reason"
+        placeholders = ",".join("?" * len(shifts))
+        sql = f"""SELECT {columns} FROM hygiene_board_events
+                  WHERE board = ? AND event_type = ? AND business_date = ?
+                    AND item_id IS NOT NULL AND shift IN ({placeholders})"""
+        params: list = [BOARD_PERSON, EVENT_REJECT, business_date, *shifts]
+        if zone_id is not None:
+            sql += " AND zone_id = ?"
+            params.append(int(zone_id))
+        # id DESC：同一个 key 第一次出现的就是最近一次驳回。
+        sql += " ORDER BY id DESC"
+        cur = await self._conn.execute(sql, params)
+        found: dict = {}
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            key = (int(mapping["item_id"]), mapping["shift"])
+            found.setdefault(key, mapping.get("reason"))
+        return found
+
     @serialized_write
     async def accept_daily(self, actor: dict, item_id: int, shift: str) -> dict:
         instance, submission = await self._pending_instance(item_id, shift)
@@ -1490,7 +1982,13 @@ class HygieneWork:
         }
 
     @serialized_write
-    async def reject_daily(self, actor: dict, item_id: int, shift: str) -> dict:
+    async def reject_daily(
+        self,
+        actor: dict,
+        item_id: int,
+        shift: str,
+        reason: Optional[str] = None,
+    ) -> dict:
         instance, submission = await self._pending_instance(item_id, shift)
         item_row = await self._fetch_item_with_zone(item_id)
         if item_row is not None:
@@ -1516,9 +2014,15 @@ class HygieneWork:
             item_id=int(item_id),
             shift=shift,
             business_date=instance["business_date"],
+            reason=_clean_reject_reason(reason),
         )
         await self._conn.commit()
-        logger.info("hygiene daily rejected item=%s shift=%s", item_id, shift)
+        logger.info(
+            "hygiene daily rejected item=%s shift=%s reason=%s",
+            item_id,
+            shift,
+            "yes" if _clean_reject_reason(reason) else "no",
+        )
         return {
             "item_id": int(item_id),
             "shift": shift,
@@ -1697,6 +2201,11 @@ class HygieneWork:
             "shift": mapping.get("shift"),
             "business_date": mapping.get("business_date"),
             "occurred_at": mapping["occurred_at"],
+            # 驳回原因与关联的整改单：不带出来的话它们只进库、任何读取接口都看不到。
+            "reason": mapping.get("reason"),
+            "ticket_id": (
+                None if mapping.get("ticket_id") is None else int(mapping["ticket_id"])
+            ),
         }
 
     async def _insert_board_event(
@@ -1709,49 +2218,223 @@ class HygieneWork:
         item_id=None,
         shift=None,
         business_date=None,
+        reason: Optional[str] = None,
+        ticket_id: Optional[int] = None,
     ) -> None:
+        columns = [
+            "board",
+            "event_type",
+            "zone_id",
+            "employee_id",
+            "item_id",
+            "shift",
+            "business_date",
+            "occurred_at",
+        ]
+        values: list = [
+            board,
+            event_type,
+            zone_id,
+            employee_id,
+            item_id,
+            shift,
+            business_date,
+            self._now_iso(),
+        ]
+        if reason and self._has_event_reason is True:
+            # 只用缓存结果，绝不在写事务里探测：探测失败要 rollback，而它跑在
+            # 同一事务的中途，会把前面刚写好的状态更新一起回滚掉（见 prepare）。
+            columns.append("reason")
+            values.append(reason)
+        if ticket_id is not None and self._has_event_ticket is True:
+            # 整改单的关联键：整改 id 与检查项不是一套编号，只能单独存。
+            columns.append("ticket_id")
+            values.append(int(ticket_id))
+        placeholders = ",".join("?" * len(columns))
         await self._conn.execute(
-            """INSERT INTO hygiene_board_events
-               (board, event_type, zone_id, employee_id, item_id, shift,
-                business_date, occurred_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                board,
-                event_type,
-                zone_id,
-                employee_id,
-                item_id,
-                shift,
-                business_date,
-                self._now_iso(),
-            ),
+            f"INSERT INTO hygiene_board_events ({', '.join(columns)}) "
+            f"VALUES ({placeholders})",
+            values,
         )
 
-    async def list_zone_board_events(self, zone_id=None) -> list:
-        sql = """SELECT id, board, event_type, zone_id, employee_id, item_id,
-                        shift, business_date, occurred_at
+    async def _event_reason_supported(self) -> bool:
+        """``hygiene_board_events.reason`` 是否可用（只探一次）。
+
+        SQLite 侧由 ``migrate_hygiene_columns()`` 在启动时补列；PG 按设计不在启动期
+        改结构，既有库需要跑 ``migrations/pg/0002_hygiene_indexes.sql``。缺列时降级
+        成「能标出被驳回、但没有原因文字」，而不是让驳回本身报错。
+
+        **只允许在无事务上下文里调用（即 ``prepare()``）**：探测失败必须 rollback
+        （PG 下 aborted 事务不 rollback 就没法继续用连接），而这条连接是和写请求
+        共用的——在读路径里 rollback 会把另一个协程写了一半的事务一起回滚掉
+        （实测：并发写者的 UPDATE 会静默丢失）。所以写路径与读路径都只用缓存值。
+        """
+        if self._has_event_reason is None:
+            self._has_event_reason = await self._probe_event_column("reason")
+        return bool(self._has_event_reason)
+
+    async def _event_ticket_supported(self) -> bool:
+        """``hygiene_board_events.ticket_id`` 是否可用（只探一次）。
+
+        与 reason 分开探测：用户可能只应用了 0002 而没应用 0003，那时整改驳回的
+        标记降级为"认不出"，但日常/专项的驳回原因仍然可用。
+        同样只允许在无事务上下文（``prepare()``）里调用。
+        """
+        if self._has_event_ticket is None:
+            self._has_event_ticket = await self._probe_event_column("ticket_id")
+        return bool(self._has_event_ticket)
+
+    async def _probe_event_column(self, column: str) -> bool:
+        """探一列在不在。列名只来自代码里的两个字面量，不接受外部输入。"""
+        try:
+            cur = await self._conn.execute(
+                f"SELECT {column} FROM hygiene_board_events LIMIT 0"
+            )
+            await cur.fetchall()
+            return True
+        except Exception:
+            await self._conn.rollback()
+            logger.error(
+                "hygiene_board_events.%s 不存在，相关功能降级；"
+                "PG 部署请应用 migrations/pg/ 下的增量迁移",
+                column,
+            )
+            return False
+
+    @serialized_write
+    async def record_zone_switch(
+        self,
+        actor: dict,
+        *,
+        from_zone_id: int,
+        from_zone_name: str,
+        to_zone_id: int,
+        to_zone_name: str,
+    ) -> dict:
+        """留痕：员工当天自己把责任区从 A 换成 B。
+
+        换区本身允许（门店临时换岗是真实需求），这里只记录事件，让个人榜能显示
+        换区次数、事件流能还原时间线——否则一个跨区刷实拍的人，数字与只在本区干活
+        的人看起来一样。管理员改派走 super_set_assignment，不经过这里。
+        """
+        if not actor or actor.get("id") is None:
+            raise HygieneWorkError("forbidden", "forbidden")
+        business_date = hygiene_business_date(self._now_dt())
+        employee_id = int(actor["id"])
+        await self._insert_board_event(
+            BOARD_PERSON,
+            EVENT_ZONE_SWITCH,
+            zone_id=int(to_zone_id),
+            employee_id=employee_id,
+            business_date=business_date,
+        )
+        await self._conn.commit()
+        logger.info(
+            "hygiene zone switched employee=%s date=%s from=%s(%s) to=%s(%s)",
+            employee_id,
+            business_date,
+            from_zone_id,
+            from_zone_name,
+            to_zone_id,
+            to_zone_name,
+        )
+        return {
+            "employee_id": employee_id,
+            "business_date": business_date,
+            "from_zone_id": int(from_zone_id),
+            "from_zone_name": from_zone_name,
+            "to_zone_id": int(to_zone_id),
+            "to_zone_name": to_zone_name,
+        }
+
+    async def list_zone_board_events(
+        self,
+        zone_id=None,
+        since: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list:
+        reason_col = "reason" if self._has_event_reason is True else "NULL AS reason"
+        ticket_col = (
+            "ticket_id" if self._has_event_ticket is True else "NULL AS ticket_id"
+        )
+        columns = (
+            "id, board, event_type, zone_id, employee_id, item_id, "
+            f"shift, business_date, occurred_at, {reason_col}, {ticket_col}"
+        )
+        sql = f"""SELECT {columns}
                  FROM hygiene_board_events
                  WHERE board = ?"""
-        params = [BOARD_ZONE]
+        params: list = [BOARD_ZONE]
         if zone_id is not None:
             sql += " AND zone_id = ?"
             params.append(int(zone_id))
+        if since:
+            sql += " AND occurred_at >= ?"
+            params.append(since)
         sql += " ORDER BY id ASC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(1, int(limit)))
         cur = await self._conn.execute(sql, params)
         return [self._event_from_row(row) for row in await cur.fetchall()]
 
-    async def list_person_board_events(self, employee_id=None) -> list:
-        sql = """SELECT id, board, event_type, zone_id, employee_id, item_id,
-                        shift, business_date, occurred_at
+    async def list_person_board_events(
+        self,
+        employee_id=None,
+        since: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list:
+        reason_col = "reason" if self._has_event_reason is True else "NULL AS reason"
+        ticket_col = (
+            "ticket_id" if self._has_event_ticket is True else "NULL AS ticket_id"
+        )
+        columns = (
+            "id, board, event_type, zone_id, employee_id, item_id, "
+            f"shift, business_date, occurred_at, {reason_col}, {ticket_col}"
+        )
+        sql = f"""SELECT {columns}
                  FROM hygiene_board_events
                  WHERE board = ?"""
-        params = [BOARD_PERSON]
+        params: list = [BOARD_PERSON]
         if employee_id is not None:
             sql += " AND employee_id = ?"
             params.append(int(employee_id))
+        if since:
+            sql += " AND occurred_at >= ?"
+            params.append(since)
         sql += " ORDER BY id ASC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(1, int(limit)))
         cur = await self._conn.execute(sql, params)
         return [self._event_from_row(row) for row in await cur.fetchall()]
+
+    @serialized_write
+    async def purge_old_board_events(self, now: Optional[datetime] = None) -> int:
+        """清掉保留期之外的看板事件，返回删除行数。"""
+        clock = now or self._now_dt()
+        cutoff = (clock - timedelta(days=BOARD_EVENT_RETENTION_DAYS)).isoformat()
+        cur = await self._conn.execute(
+            "DELETE FROM hygiene_board_events WHERE occurred_at < ?",
+            (cutoff,),
+        )
+        removed = int(cur.rowcount or 0)
+        await self._conn.commit()
+        if removed:
+            logger.info("卫生看板事件清理 removed=%s cutoff=%s", removed, cutoff)
+        return removed
+
+    async def _maybe_purge_board_events(self) -> None:
+        now = time.monotonic()
+        if now - self._last_board_purge < BOARD_EVENT_PURGE_INTERVAL_SECONDS:
+            return
+        self._last_board_purge = now
+        try:
+            await self.purge_old_board_events()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("卫生看板事件清理失败: %s", exc)
 
     def _week_bounds(self, now: Optional[datetime] = None) -> tuple[datetime, datetime]:
         clock = now or self._now_dt()
@@ -2121,6 +2804,7 @@ class HygieneWork:
             "name": cleaned,
         }
 
+    @serialized_write
     async def remove_deep_clean_item(self, actor: dict, item_id: int) -> dict:
         self._require_super(actor)
         cur = await self._conn.execute(
@@ -2131,16 +2815,53 @@ class HygieneWork:
         if row is None:
             raise HygieneWorkError("item_not_found", "item_not_found")
         mapping = dict(row)
-        await self._conn.execute(
-            "DELETE FROM hygiene_deep_clean_items WHERE id = ?",
-            (int(item_id),),
+        try:
+            # 提交过一次的专项项都有 instance 行，外键指向 item：必须先按依赖顺序清
+            # 干净，否则超管删一个用过的专项项必然 IntegrityError（当时是 500）。
+            await self._drop_deep_clean_item_rows(int(item_id))
+            await self._conn.execute(
+                "DELETE FROM hygiene_deep_clean_items WHERE id = ?",
+                (int(item_id),),
+            )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        logger.info(
+            "hygiene deep clean item removed id=%s weekday=%s",
+            mapping["id"],
+            mapping["weekday"],
         )
-        await self._conn.commit()
         return {
             "id": int(mapping["id"]),
             "weekday": int(mapping["weekday"]),
             "name": mapping["name"],
         }
+
+    async def _drop_deep_clean_item_rows(self, item_id: int) -> None:
+        """按依赖顺序清掉专项项的实例与提交（capture 文件交给常规孤儿清理）。"""
+        cur = await self._conn.execute(
+            "SELECT id FROM hygiene_deep_clean_instances WHERE item_id = ?",
+            (int(item_id),),
+        )
+        instance_ids = [int(dict(row)["id"]) for row in await cur.fetchall()]
+        if instance_ids:
+            placeholders = ",".join("?" * len(instance_ids))
+            await self._conn.execute(
+                f"UPDATE hygiene_deep_clean_instances SET pending_submission_id = NULL "
+                f"WHERE id IN ({placeholders})",
+                instance_ids,
+            )
+            await self._conn.execute(
+                f"DELETE FROM hygiene_deep_clean_submissions "
+                f"WHERE instance_id IN ({placeholders})",
+                instance_ids,
+            )
+            await self._conn.execute(
+                f"DELETE FROM hygiene_deep_clean_instances WHERE id IN ({placeholders})",
+                instance_ids,
+            )
+        await self._drop_teaching_examples(TEACHING_DEEP_CLEAN, [int(item_id)])
 
     async def list_deep_clean_items(self, weekday=None) -> list:
         sql = """SELECT id, weekday, name FROM hygiene_deep_clean_items"""
@@ -2196,7 +2917,15 @@ class HygieneWork:
         row = await cur.fetchone()
         return None if row is None else dict(row)
 
-    def _deep_clean_row(self, item: dict, business_date: str, instance, submission) -> dict:
+    def _deep_clean_row(
+        self,
+        item: dict,
+        business_date: str,
+        instance,
+        submission,
+        rejected: bool = False,
+        reject_reason=None,
+    ) -> dict:
         status = STATUS_TODO
         if instance is not None:
             status = instance["status"]
@@ -2214,6 +2943,9 @@ class HygieneWork:
                 submission["submitter_phone"],
             )
         return {
+            # 今天这一项被打回过：员工端要明说，否则他只看到状态回到"待回拍"。
+            "rejected": bool(rejected),
+            "reject_reason": reject_reason or None,
             "item_id": int(item["id"]),
             "item_name": item["name"],
             "weekday": int(item["weekday"]),
@@ -2250,9 +2982,12 @@ class HygieneWork:
                ORDER BY i.id ASC""",
             (business_date, weekday),
         )
+        raw_rows = [dict(row) for row in await cur.fetchall()]
+        rejected_reasons = await self._deep_clean_rejected_reasons(
+            business_date, [row["item_id"] for row in raw_rows]
+        )
         rows = []
-        for row in await cur.fetchall():
-            mapping = dict(row)
+        for mapping in raw_rows:
             item = {
                 "id": mapping["item_id"],
                 "weekday": mapping["weekday"],
@@ -2279,7 +3014,16 @@ class HygieneWork:
                     "before_captured_at": mapping["before_captured_at"],
                     "after_captured_at": mapping["after_captured_at"],
                 }
-            rows.append(self._deep_clean_row(item, business_date, instance, submission))
+            rows.append(
+                self._deep_clean_row(
+                    item,
+                    business_date,
+                    instance,
+                    submission,
+                    rejected=int(mapping["item_id"]) in rejected_reasons,
+                    reject_reason=rejected_reasons.get(int(mapping["item_id"])),
+                )
+            )
         status = CALENDAR_DONE if rows and all(
             row["status"] == STATUS_PASSED for row in rows
         ) else CALENDAR_TODO
@@ -2464,7 +3208,12 @@ class HygieneWork:
         }
 
     @serialized_write
-    async def reject_deep_clean_pair(self, actor: dict, item_id: int) -> dict:
+    async def reject_deep_clean_pair(
+        self,
+        actor: dict,
+        item_id: int,
+        reason: Optional[str] = None,
+    ) -> dict:
         instance, submission = await self._pending_deep_clean(item_id)
         self._require_reviewer(actor, submission["submitter_id"])
         now = self._now_iso()
@@ -2477,8 +3226,22 @@ class HygieneWork:
         if cur.rowcount != 1:
             await self._conn.rollback()
             raise HygieneWorkError("not_pending", "not_pending")
+        # 专项驳回原来一条事件都不写：红黑榜的「驳回」只统计得到日常，员工端也完全
+        # 看不出被打回过。shift 留空，免得与日常的 (item_id, shift) 判据撞车。
+        await self._insert_board_event(
+            BOARD_PERSON,
+            EVENT_REJECT,
+            employee_id=int(submission["submitter_id"]),
+            item_id=int(item_id),
+            business_date=instance["business_date"],
+            reason=_clean_reject_reason(reason),
+        )
         await self._conn.commit()
-        logger.info("hygiene deep-clean rejected item=%s", item_id)
+        logger.info(
+            "hygiene deep-clean rejected item=%s reason=%s",
+            item_id,
+            "yes" if _clean_reject_reason(reason) else "no",
+        )
         return {
             "item_id": int(item_id),
             "business_date": instance["business_date"],
@@ -2553,7 +3316,13 @@ class HygieneWork:
             "已到时限仍未完成，请到员工卫生入口处理。"
         )
 
-    def _fix_row(self, ticket: dict, reshoot=None) -> dict:
+    def _fix_row(
+        self,
+        ticket: dict,
+        reshoot=None,
+        rejected: bool = False,
+        reject_reason=None,
+    ) -> dict:
         opener_id = ticket.get("opener_id")
         open_watermark = self._watermark(
             ticket.get("created_at") or self._now_iso(),
@@ -2570,6 +3339,9 @@ class HygieneWork:
                 reshoot["photographer_phone"],
             )
         return {
+            # 这张单被打回过：员工端要能区分"被打回"与"从没回拍过"。
+            "rejected": bool(rejected),
+            "reject_reason": reject_reason or None,
             "id": int(ticket["id"]),
             "zone_id": int(ticket["zone_id"]),
             "zone_name": ticket["zone_name"],
@@ -2750,9 +3522,13 @@ class HygieneWork:
             params.append(zone_id)
         sql += " ORDER BY t.id ASC"
         cur = await self._conn.execute(sql, params)
+        raw_rows = [dict(row) for row in await cur.fetchall()]
+        rejected_reasons = await self._fix_rejected_reasons(
+            hygiene_business_date(self._now_dt()),
+            [row["id"] for row in raw_rows],
+        )
         rows = []
-        for row in await cur.fetchall():
-            ticket = dict(row)
+        for ticket in raw_rows:
             reshoot = None
             if ticket.get("reshoot_id") is not None:
                 reshoot = {
@@ -2764,7 +3540,14 @@ class HygieneWork:
                     "zone_name": ticket["reshoot_zone_name"],
                     "captured_at": ticket["reshoot_captured_at"],
                 }
-            rows.append(self._fix_row(ticket, reshoot))
+            rows.append(
+                self._fix_row(
+                    ticket,
+                    reshoot,
+                    rejected=int(ticket["id"]) in rejected_reasons,
+                    reject_reason=rejected_reasons.get(int(ticket["id"])),
+                )
+            )
         return rows
 
     async def get_fix_ticket(
@@ -2775,7 +3558,7 @@ class HygieneWork:
         ticket = await self._fetch_fix_ticket(ticket_id)
         if ticket is None:
             raise HygieneWorkError("ticket_not_found", "ticket_not_found")
-        self._require_zone_access(actor or {"kind": "super"}, ticket["zone_id"])
+        self._require_zone_access_for(actor, ticket["zone_id"])
         reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
         return self._fix_row(ticket, reshoot)
 
@@ -2787,7 +3570,7 @@ class HygieneWork:
         ticket = await self._fetch_fix_ticket(ticket_id)
         if ticket is None:
             raise HygieneWorkError("ticket_not_found", "ticket_not_found")
-        self._require_zone_access(actor or {"kind": "super"}, ticket["zone_id"])
+        self._require_zone_access_for(actor, ticket["zone_id"])
         if ticket["status"] != STATUS_PENDING:
             raise HygieneWorkError("not_pending", "not_pending")
         reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
@@ -2894,8 +3677,13 @@ class HygieneWork:
         }
 
     @serialized_write
-    async def reject_fix(self, actor: dict, ticket_id: int) -> dict:
-        ticket, _reshoot = await self._pending_fix(ticket_id)
+    async def reject_fix(
+        self,
+        actor: dict,
+        ticket_id: int,
+        reason: Optional[str] = None,
+    ) -> dict:
+        ticket, reshoot = await self._pending_fix(ticket_id)
         self._require_zone_access(actor, ticket["zone_id"])
         self._require_fix_reviewer(actor, ticket)
         now_dt = self._now_dt()
@@ -2910,8 +3698,30 @@ class HygieneWork:
         if cur.rowcount != 1:
             await self._conn.rollback()
             raise HygieneWorkError("not_pending", "not_pending")
+        # 与专项同理：整改回拍被驳回也不写事件，红黑榜统计不到。记在回拍人名下
+        # （没有 item_id，整改单的 id 与检查项不是一套编号，不混用）。
+        photographer_id = None
+        if reshoot is not None and reshoot.get("photographer_id") is not None:
+            try:
+                photographer_id = int(reshoot["photographer_id"])
+            except (TypeError, ValueError):
+                photographer_id = None
+        await self._insert_board_event(
+            BOARD_PERSON,
+            EVENT_REJECT,
+            zone_id=int(ticket["zone_id"]),
+            employee_id=photographer_id,
+            business_date=hygiene_business_date(now_dt),
+            reason=_clean_reject_reason(reason),
+            ticket_id=int(ticket_id),
+        )
         await self._conn.commit()
-        logger.info("hygiene fix rejected ticket=%s deadline=%s", ticket_id, deadline)
+        logger.info(
+            "hygiene fix rejected ticket=%s deadline=%s reason=%s",
+            ticket_id,
+            deadline,
+            "yes" if _clean_reject_reason(reason) else "no",
+        )
         return {
             "id": int(ticket_id),
             "status": STATUS_FIX_TODO,
@@ -3070,6 +3880,7 @@ class HygieneWork:
         while True:
             try:
                 await self.sweep_overdue()
+                await self._maybe_purge_board_events()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

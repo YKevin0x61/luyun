@@ -4,7 +4,7 @@
 
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiosqlite
 
@@ -42,6 +42,26 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         await self.accounts.register(PHONE, PASSWORD, NAME)
         result = await self.accounts.login(PHONE, PASSWORD)
         self.assertIsNone(result)
+
+    async def test_remember_login_session_outlives_shift_ttl(self):
+        """勾了「记住密码，自动登录」的员工会话活 30 天；不勾仍是 8 小时班次级。"""
+        employee = await self.accounts.register(PHONE, PASSWORD, NAME)
+        await self.accounts.approve(employee["id"])
+        remembered = await self.accounts.login(PHONE, PASSWORD, remember=True)
+        session_only = await self.accounts.login(PHONE, PASSWORD)
+
+        after_shift = EmployeeAccounts(
+            self.db,
+            now=lambda: self.fixed_now + timedelta(hours=settings.SESSION_TTL_HOURS + 1),
+        )
+        self.assertIsNotNone(await after_shift.get_staff_session(remembered["session_id"]))
+        self.assertIsNone(await after_shift.get_staff_session(session_only["session_id"]))
+
+        after_month = EmployeeAccounts(
+            self.db,
+            now=lambda: self.fixed_now + timedelta(days=settings.SESSION_REMEMBER_DAYS + 1),
+        )
+        self.assertIsNone(await after_month.get_staff_session(remembered["session_id"]))
 
     async def test_login_succeeds_after_super_approves(self):
         employee = await self.accounts.register(PHONE, PASSWORD, NAME)

@@ -27,6 +27,18 @@ VALID_TOPICS = {
 
 _VALID_ACTIONS = {"subscribe", "unsubscribe", "ping"}
 
+# 员工（staff）会话只允许订阅卫生主题。nudge 不带数据，但 orders/tables/logs/admin
+# 的**时序**本身就是门店经营信息（几点来了几单、什么时候在改档口），而员工端没有
+# 任何页面需要它们。管理员会话不受限制。
+STAFF_ALLOWED_TOPICS = frozenset({"hygiene"})
+
+
+def allowed_topics(auth: str):
+    """该鉴权方式能订阅的 topic 集合。"""
+    if auth == "staff":
+        return STAFF_ALLOWED_TOPICS
+    return VALID_TOPICS
+
 # dashboard 汇总接口开销较大，orders/tables 变更后合并该窗口内的多次
 # 变更为一次 `dashboard` nudge，而非每条变更都触发一次。
 DASHBOARD_DEBOUNCE_SECONDS = 0.3
@@ -138,7 +150,7 @@ class RealtimeHub:
         if not isinstance(topics, list) or not topics:
             await self._send_error(websocket, "INVALID_SUBSCRIBE", "topics 必须是非空数组")
             return
-        invalid_topics = set(topics) - VALID_TOPICS
+        invalid_topics = set(topics) - allowed_topics(state.auth)
         if invalid_topics:
             await self._send_error(websocket, "INVALID_SUBSCRIBE", f"不支持的 topic: {sorted(invalid_topics)}")
             return

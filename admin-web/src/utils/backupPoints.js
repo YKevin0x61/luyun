@@ -11,6 +11,8 @@ import { formatBytes, formatTs } from './backupProgress'
 export const CONTENT_CREDENTIALS = 'credentials'
 export const CONTENT_RUNTIME = 'runtime'
 export const CONTENT_APP_DB = 'app_db'
+/** PG 后端的业务数据是整库 pg_dump：页面回滚搬不动它，只能提示走 pg_restore。 */
+export const CONTENT_APP_PG = 'app_pg'
 export const CONTENT_RECIPES = 'recipes_db'
 export const CONTENT_STANDARD_PHOTOS = 'standard_photos'
 export const CONTENT_OTHER_PHOTOS = 'other_photos'
@@ -116,19 +118,35 @@ export function backupPointRow(point, { mediumLabels = {}, mediumPurposes = {}, 
       .filter(({ kind }) => photos && photos[kind])
       .map(({ kind, label }) => {
         const info = photos[kind]
+        const count = Number(info.count) || 0
         const missing = Number(info.missing) || 0
         return {
           kind,
+          count,
+          missing,
           label: info.label || label,
-          text: `${info.count || 0} 张${missing ? `（缺失引用 ${missing}）` : ''}`,
+          text: `${count} 张${missing ? `（缺失引用 ${missing}）` : ''}`,
         }
-      }),
+      })
+      // 只列真正有文件的分类：「0 张」不是信息，会让同一件事在
+      // 「缺少」与「提示」两行之外再说第三遍（缺失本身由那两行表达）。
+      .filter((line) => line.count > 0),
+    // psql 不可用时 PG 快照只能整目录计入其它照片：标准图 0 张是「没分类」，
+    // 必须说出来，别让页面把它当成「这份备份没有标准图」。
+    photosUnclassified: PHOTO_KINDS.some(({ kind }) => !!photos?.[kind]?.unclassified),
     checkOk,
     checkTone,
     checkLabel,
     checkMessages: validateResult?.messages || check?.messages || [],
+    // 源磁盘缺失这类完整度问题不阻断恢复，只作警告展示
+    checkWarnings: Array.isArray(check?.warnings) ? check.warnings : [],
     checkAt: validateResult?.checked_at || null,
     recoverable: validateResult ? !!validateResult.recoverable : point?.recoverable !== false,
+    /** PG 是整库 pg_restore（drop 重建对象），措辞要与 SQLite 的原地替换区分开。 */
+    rollbackLabel: (point?.contents || []).includes(CONTENT_APP_PG)
+      ? '恢复整库数据'
+      : '数据回滚',
+    rollbackIsPgRestore: (point?.contents || []).includes(CONTENT_APP_PG),
   }
 }
 

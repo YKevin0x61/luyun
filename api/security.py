@@ -4,6 +4,7 @@
 
 import logging
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import Header, HTTPException, Request
 
@@ -12,6 +13,50 @@ from services import auth_service
 
 logger = logging.getLogger(__name__)
 _warned_open_admin = False
+
+# 会改状态的方法。GET/HEAD/OPTIONS 不在其中（OPTIONS 还要留给 CORS 预检）。
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+# 带这些头的调用不是「浏览器自动附带凭据」，不构成 CSRF 面。
+_CSRF_EXEMPT_HEADERS = ("authorization", "x-admin-token")
+
+
+def csrf_origin_rejected(request: Request) -> bool:
+    """跨站写请求判定（CSRF 纵深防御）。
+
+    只对**浏览器会自动附带凭据**的请求生效：带会话 cookie、且没有显式 token 头。
+
+    判定优先看 `Sec-Fetch-Site`——现代浏览器都发，而且**不受反向代理改写 Host 的
+    影响**（部署里的 nginx/Caddy 都转发原 Host，但 Vite 开发代理是
+    ``changeOrigin: true``，用 Origin/Host 比较会把本机开发全拦掉）：
+
+    * ``cross-site`` → 拒绝；
+    * ``same-origin`` / ``same-site`` / ``none`` → 放行；
+    * 缺失（老浏览器、curl、脚本）→ 退回比较 ``Origin`` 与 ``Host``；两者都缺则放行。
+
+    `SameSite=Lax` 仍是主要屏障，这里是纵深：一旦将来为了让员工页嵌进别的站点而把
+    cookie 放宽成 ``SameSite=None``，写接口不会被跨站表单直接打穿。
+    """
+    if request.method not in _UNSAFE_METHODS:
+        return False
+    cookies = request.cookies
+    if not (
+        cookies.get(settings.SESSION_COOKIE_NAME)
+        or cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    ):
+        return False
+    for header in _CSRF_EXEMPT_HEADERS:
+        if request.headers.get(header):
+            return False
+
+    fetch_site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+    if fetch_site:
+        return fetch_site == "cross-site"
+
+    origin = (request.headers.get("origin") or "").strip()
+    host = (request.headers.get("host") or "").strip()
+    if not origin or not host:
+        return False
+    return urlparse(origin).netloc.lower() != host.lower()
 
 
 def warn_if_admin_open() -> None:

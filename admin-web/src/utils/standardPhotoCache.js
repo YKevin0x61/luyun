@@ -676,9 +676,12 @@ export function createBrowserStandardPhotoCache({
     return response.json()
   }
   async function loadImage(entry, { signal } = {}) {
+    // 不再强制 no-store：URL 里带着 standard_id（换版就是新 id）与 variant，服务端
+    // 也按 immutable 下发，所以放行 HTTP 缓存是安全的。好处是 Cache Storage 被清掉
+    // 之后还能从 HTTP 缓存立刻恢复，不必重下几百 MB。
     const response = await fetch(entry.image_url, {
       credentials: 'include',
-      cache: 'no-store',
+      cache: 'default',
       signal,
     })
     if (!response.ok) throw new Error(`标准图下载失败 (${response.status})`)

@@ -669,6 +669,35 @@ describe('useBackupCenter', () => {
     expect(showAlert).toHaveBeenCalledWith('success', expect.stringContaining('数据回滚成功'))
   })
 
+  it('PG 快照的回滚确认说明业务数据不在范围内', async () => {
+    const pgPoint = {
+      id: 'snapshot:20260919_051032',
+      medium: 'local_snapshot',
+      medium_label: '本机回滚快照',
+      provenance_label: '更新作业前',
+      size_bytes: 87 * 1024 * 1024,
+      contents: ['app_pg', 'runtime', 'credentials', 'other_photos'],
+      contents_labels: ['业务数据 (PostgreSQL)', '运行配置', '凭据', '其它照片'],
+      detail: { ts: '20260919_051032' },
+      created_at: '2026-09-19T05:10:34+08:00',
+      recoverable: true,
+    }
+    apiGet.mockResolvedValue(pointsPayload({ points: [pgPoint] }))
+    const { loadPoints, onRollbackSnapshot, confirmState, snapshots } = makeHarness()
+
+    await loadPoints()
+    onRollbackSnapshot('20260919_051032')
+
+    expect(snapshots.value[0].contents).toContain('app_pg')
+    // PG 是整库 pg_restore：标题、代价说明与勾选项都要说清会重建数据库对象
+    expect(confirmState.title).toContain('恢复整库数据')
+    expect(confirmState.message).toContain('pg_restore')
+    const details = confirmState.details.join('；')
+    expect(details).toContain('pg_restore --clean')
+    expect(details).toContain('需要重新登录后台')
+    expect(confirmState.checkboxes[0].label).toContain('重建数据库对象')
+  })
+
   it('escalates a 回滚 whose library references photos missing on disk', async () => {
     apiGet.mockResolvedValue(pointsPayload({ points: [exportPoint] }))
     apiPost.mockResolvedValue({

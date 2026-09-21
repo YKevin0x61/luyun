@@ -15,6 +15,9 @@ const snapping = ref(false)
 const switchingCamera = ref(false)
 const wideAvailable = ref(false)
 const errorText = ref('')
+// 提示性质的文字：不能写进 errorText —— 那个非空会把「拍一张」「广角」都禁掉，
+// 而这条提示恰恰是让店员改用「拍一张」的。
+const hintText = ref('')
 let stream = null
 let wideMode = false
 let standardDeviceId = ''
@@ -162,17 +165,37 @@ function stopCamera() {
   if (videoEl.value) videoEl.value.srcObject = null
 }
 
+// 抓拍尺寸：相机给的是 1920×1080（或更高），而这张图只用来看清脏污 + 存档，
+// 长边 1600 / q0.75 足够。原来按视频原始尺寸 1:1 画布 + q0.92，一张 0.5–1.2MB，
+// 弱网下传一张要几十秒。
+const CAPTURE_LONG_EDGE = 1600
+const CAPTURE_QUALITY = 0.75
+// 服务端上限（services/hygiene/work.py 的 MAX_STANDARD_BYTES）：超了会在传完之后
+// 才被 413 拒掉，白耗流量，所以在选图这一步就先挡。
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
 async function snap() {
   if (snapping.value || !videoEl.value || !stream) return
   snapping.value = true
   try {
     const video = videoEl.value
+    const sourceWidth = video.videoWidth || 1280
+    const sourceHeight = video.videoHeight || 720
+    const scale = Math.min(
+      1,
+      CAPTURE_LONG_EDGE / Math.max(sourceWidth, sourceHeight),
+    )
+    const width = Math.max(1, Math.round(sourceWidth * scale))
+    const height = Math.max(1, Math.round(sourceHeight * scale))
     const canvas = document.createElement('canvas')
-    canvas.width = video.videoWidth || 1280
-    canvas.height = video.videoHeight || 720
-    const ctx = canvas.getContext('2d')
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+    canvas.width = width
+    canvas.height = height
+    // 直接把视频帧缩放到目标尺寸：画布的 backing store 也只有目标大小，
+    // 不必先画一张全尺寸位图再缩（那会多占 ~8MB 并多一次重采样）。
+    canvas.getContext('2d').drawImage(video, 0, 0, width, height)
+    const blob = await new Promise((resolve) => (
+      canvas.toBlob(resolve, 'image/jpeg', CAPTURE_QUALITY)
+    ))
     if (!blob) {
       errorText.value = '拍照失败，请再拍一张'
       return
@@ -190,9 +213,17 @@ function openNativeCamera() {
 function onNativeCameraChange(event) {
   const input = event.target
   const file = input && input.files && input.files[0]
-  if (!file) return
-  emit('captured', file)
   input.value = ''
+  if (!file) return
+  hintText.value = ''
+  if (file.size > MAX_UPLOAD_BYTES) {
+    // iPhone 的 HEIC / 高像素 JPEG 很容易超 20MB：与其等它慢慢传完再被 413 拒掉，
+    // 不如当场告诉店员换「拍一张」。
+    const sizeMb = (file.size / 1024 / 1024).toFixed(1)
+    hintText.value = `这张照片 ${sizeMb}MB，超过 20MB 上限。请改用「拍一张」，或把手机相机设置改成「兼容性最佳」。`
+    return
+  }
+  emit('captured', file)
 }
 
 onMounted(startCamera)
@@ -202,6 +233,7 @@ onBeforeUnmount(stopCamera)
 <template>
   <div class="live-camera">
     <p v-if="errorText" class="live-alert">{{ errorText }}</p>
+    <p v-else-if="hintText" class="live-hint is-warn">{{ hintText }}</p>
     <p v-else-if="starting" class="live-hint">正在打开后置相机…</p>
     <video ref="videoEl" class="live-video" playsinline muted autoplay></video>
     <div class="live-actions">

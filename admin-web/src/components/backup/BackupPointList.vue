@@ -121,6 +121,12 @@ function photoText(row) {
               <p v-if="row.photoLines.length" class="point__line">
                 <span class="point__key">照片</span>{{ photoText(row) }}
               </p>
+              <p v-if="row.photosUnclassified" class="point__line is-warn">
+                <span class="point__key">照片</span>未能按库引用分类（psql 不可用），全部计入「其它照片」
+              </p>
+              <p v-for="(warning, wi) in row.checkWarnings" :key="`warn-${wi}`" class="point__line is-warn">
+                <span class="point__key">提示</span>{{ warning }}
+              </p>
               <p v-if="row.checkMessages.length" class="point__line is-dim">
                 {{ row.checkMessages.join('；') }}
               </p>
@@ -140,7 +146,7 @@ function photoText(row) {
                 class="btn btn-sm btn-danger"
                 :disabled="rollingBackTs === row.ts"
                 @click="$emit('rollback', point)"
-              >{{ rollingBackTs === row.ts ? '回滚中…' : '数据回滚' }}</button>
+              >{{ rollingBackTs === row.ts ? '回滚中…' : row.rollbackLabel }}</button>
             </div>
           </li>
         </ul>

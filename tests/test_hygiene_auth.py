@@ -3,6 +3,7 @@
 """HTTP: which session may call hygiene staff vs admin roster routes."""
 
 import asyncio
+import re
 from datetime import datetime
 from unittest.mock import AsyncMock
 
@@ -48,6 +49,14 @@ def _get_loop():
 
 def _run(coro):
     return _get_loop().run_until_complete(coro)
+
+
+def _cookie_max_age(resp) -> int:
+    """Set-Cookie 里的 Max-Age——httpx 的 resp.cookies 不暴露它。"""
+    header = resp.headers["set-cookie"]
+    match = re.search(r"max-age=(\d+)", header, flags=re.IGNORECASE)
+    assert match, header
+    return int(match.group(1))
 
 
 @pytest.fixture
@@ -107,6 +116,28 @@ def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http)
         "/api/hygiene/admin/roster/1/shift",
         json={"shift": "夜班", "zone_id": 1},
     ).status_code == 401
+
+
+def test_staff_login_remember_extends_cookie(hygiene_http):
+    """员工勾「记住密码，自动登录」拿到 30 天 cookie；不勾仍是班次级。"""
+    client, _db, accounts, _work = hygiene_http
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
+    _run(accounts.approve(employee["id"]))
+
+    remembered = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD, "remember": True},
+    )
+    assert remembered.status_code == 200
+    assert _cookie_max_age(remembered) == settings.SESSION_REMEMBER_DAYS * 86400
+
+    client.cookies.clear()
+    session_only = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    )
+    assert session_only.status_code == 200
+    assert _cookie_max_age(session_only) == settings.SESSION_TTL_HOURS * 3600
 
 
 def test_staff_session_can_me_not_admin_roster_writes(hygiene_http):
@@ -525,7 +556,10 @@ def test_standard_manifest_and_immutable_image_contract(hygiene_http):
     assert entry["item_id"] == item["id"]
     assert entry["standard_id"] == item["current_standard_id"]
     assert entry["byte_size"] == len(b"STD-OLD")
-    assert entry["image_url"].endswith(f"/standards/{item['current_standard_id']}/image")
+    assert entry["image_url"].startswith(
+        f"/api/hygiene/standards/{item['current_standard_id']}/image"
+    )
+    assert entry["image_url"].endswith("?variant=preview"), "清单下发的是 preview 变体"
 
     old_image = client.get(entry["image_url"], headers={"Accept-Encoding": "gzip"})
     assert old_image.status_code == 200

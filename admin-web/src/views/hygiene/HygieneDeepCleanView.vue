@@ -191,14 +191,31 @@ async function selectRow(row) {
   }
 }
 
-async function decide(action) {
+// 驳回不可撤销：专项回到"待回拍"，员工得重新拍前后对照。走一次确认。
+const rejectOpen = ref(false)
+
+function askReject() {
+  if (!selected.value || busy.value) return
+  rejectOpen.value = true
+}
+
+
+async function confirmReject(reason) {
+  rejectOpen.value = false
+  await decide('reject', reason)
+}
+
+async function decide(action, reason = '') {
   if (!selected.value || busy.value) return
   const current = selected.value
   const previous = queue.value
   busy.value = true
   errorText.value = ''
   try {
-    await api.post(`/api/hygiene/admin/deep-clean/${selected.value.item_id}/${action}`)
+    await api.post(
+      `/api/hygiene/admin/deep-clean/${selected.value.item_id}/${action}`,
+      action === 'reject' && reason ? { reason } : undefined,
+    )
     if (action === 'accept') {
       lastPassed.value = {
         item_id: selected.value.item_id,
@@ -388,11 +405,22 @@ async function markTeaching() {
           />
           <div class="review-actions">
             <button type="button" class="btn btn-primary" :disabled="busy" @click="decide('accept')">通过</button>
-            <button type="button" class="btn btn-danger" :disabled="busy" @click="decide('reject')">驳回</button>
+            <button type="button" class="btn btn-danger" :disabled="busy" @click="askReject">驳回</button>
           </div>
         </div>
       </div>
     </div>
+
+    <ConfirmDialog
+      v-if="rejectOpen"
+      title="驳回这次前后对照"
+      :message="`驳回「${selected ? selected.item_name : ''}」后要重新拍清理前后；本周红黑榜会记一次驳回。`"
+      confirm-label="驳回"
+      danger
+      :prompt="{ label: '哪里不合格（可选，员工能看到）', placeholder: '例如：滤网没拆下来洗', maxlength: 120 }"
+      @confirm="confirmReject"
+      @cancel="rejectOpen = false"
+    />
 
     <ConfirmDialog
       v-if="removeTarget"

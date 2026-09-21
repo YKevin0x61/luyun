@@ -1,6 +1,11 @@
 -- PostgreSQL schema generated from the current SQLite schema.
 -- Regenerate with scripts/archive/sqlite_to_pg_schema.py (one-off tool).
 --
+-- luyun:bootstrap-only
+-- 本脚本是 DROP TABLE + CREATE TABLE，会清空目标库，只用于初次建立。
+-- Admin「数据库迁移」面板靠上面那行标记把它永久排除在待应用清单之外——
+-- 少了这个标记，一个手滑就会把线上库清掉。
+--
 -- 时间戳与金额沿用 SQLite 的存储形态（TEXT ISO 字符串 / DOUBLE PRECISION），
 -- 以保持现有查询代码可用；后续可单独迁移为 TIMESTAMPTZ / NUMERIC。
 -- 外键后置为 ALTER TABLE，避免 PG 对建表顺序的要求。

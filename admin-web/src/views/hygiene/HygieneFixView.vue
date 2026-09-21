@@ -145,6 +145,9 @@ function submitOpen() {
       label: `整改原图 · ${zone ? zone.name : '卫生责任区'}`,
       detail: ticketType.value,
       onSuccess: loadTickets,
+      // 开单是无条件 INSERT、没有幂等键：自动重试会在"已提交但响应丢了"时
+      // 再开一张单，所以这里只允许人工重试。
+      autoRetry: false,
     })
     bodyText.value = ''
     durationHours.value = 2
@@ -166,14 +169,32 @@ function canDecide(ticket) {
   return canAcceptFixTicket({ kind: 'super' }, ticket)
 }
 
-async function decide(action) {
+// 驳回不可撤销：整改单回到"待回拍"，员工得重新回拍。按钮紧挨着"通过"，
+// 手机上容易误触，所以走一次确认。
+const rejectOpen = ref(false)
+
+function askReject() {
+  if (!selected.value || busy.value) return
+  rejectOpen.value = true
+}
+
+
+async function confirmReject(reason) {
+  rejectOpen.value = false
+  await decide('reject', reason)
+}
+
+async function decide(action, reason = '') {
   if (!selected.value || busy.value) return
   const current = selected.value
   const previous = pending.value
   busy.value = true
   errorText.value = ''
   try {
-    await api.post(`/api/hygiene/admin/fix/${selected.value.id}/${action}`)
+    await api.post(
+      `/api/hygiene/admin/fix/${selected.value.id}/${action}`,
+      action === 'reject' && reason ? { reason } : undefined,
+    )
     selected.value = null
     review.value = null
     await loadTickets()
@@ -374,7 +395,7 @@ async function confirmDelete() {
           <div class="review-actions">
             <template v-if="canDecide(selected)">
               <button type="button" class="btn btn-primary" :disabled="busy" @click="decide('accept')">通过</button>
-              <button type="button" class="btn btn-danger" :disabled="busy" @click="decide('reject')">驳回</button>
+              <button type="button" class="btn btn-danger" :disabled="busy" @click="askReject">驳回</button>
             </template>
             <button
               type="button"
@@ -386,6 +407,17 @@ async function confirmDelete() {
         </div>
       </div>
     </div>
+
+    <ConfirmDialog
+      v-if="rejectOpen"
+      title="驳回这次回拍"
+      :message="`驳回「${selected ? selected.zone_name : ''} · ${selected ? selected.ticket_type : ''}」后要重新回拍；本周红黑榜会记一次驳回。`"
+      confirm-label="驳回"
+      danger
+      :prompt="{ label: '哪里不合格（可选，员工能看到）', placeholder: '例如：回拍角度不对，看不出整改结果', maxlength: 120 }"
+      @confirm="confirmReject"
+      @cancel="rejectOpen = false"
+    />
 
     <ConfirmDialog
       v-if="deleteTarget"

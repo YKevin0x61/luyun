@@ -6,28 +6,43 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import Any, Dict, Optional
+from collections import defaultdict
 import json
+import logging
+import sqlite3
+import time
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.security import require_session
 from config import settings
 from services import auth_service
-from services.hygiene.accounts import EmployeeAccounts, EmployeeAccountsError
+from services.hygiene.accounts import (
+    EmployeeAccounts,
+    EmployeeAccountsError,
+    normalize_phone,
+)
+from services.hygiene.images import sniff_image_content_type
 from services.hygiene.work import (
+    BOARD_EVENT_DEFAULT_LIMIT,
+    BOARD_EVENT_MAX_LIMIT,
     MAX_STANDARD_BYTES,
     HygieneWork,
     HygieneWorkError,
 )
 from services.realtime.hub import realtime_hub
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/hygiene", tags=["hygiene"])
 
 SUPER_ACTOR = {"kind": "super"}
 MAX_UPLOAD_BYTES = MAX_STANDARD_BYTES
 UPLOAD_CHUNK_BYTES = 1024 * 1024
+# 员工端离线缓存标准图时用的变体：页面里这些图最大显示到 440px 高，没必要下发原图。
+STANDARD_CACHE_VARIANT = "preview"
 
 
 def _upload_too_large_detail(label: str) -> str:
@@ -124,13 +139,27 @@ def _get_work() -> HygieneWork:
     return hygiene_work
 
 
+def _error_detail(code: str) -> str:
+    """错误码 → 给客户端看的中文文案。
+
+    缺映射时**不回显原始 code**：code 是内部标识，一旦哪天有人把异常信息拼进
+    code（``f"bad_x: {value}"``），回显就等于把内部细节漏给客户端。原 code 只进
+    日志，客户端拿固定文案。
+    """
+    mapped = _ERROR_DETAILS.get(code)
+    if mapped is not None:
+        return mapped
+    logger.warning("卫生接口出现未映射的错误码：%s", code)
+    return "操作失败，请稍后重试"
+
+
 def _http_error(exc: EmployeeAccountsError) -> HTTPException:
     status = 404 if exc.code == "employee_not_found" else 400
     if exc.code == "zone_not_found":
         status = 404
     if exc.code == "duplicate_phone" or exc.code == "shift_already_picked":
         status = 409
-    return HTTPException(status_code=status, detail=_ERROR_DETAILS.get(exc.code, exc.code))
+    return HTTPException(status_code=status, detail=_error_detail(exc.code))
 
 
 def _work_http_error(exc: HygieneWorkError) -> HTTPException:
@@ -152,18 +181,41 @@ def _work_http_error(exc: HygieneWorkError) -> HTTPException:
         status = 413
     else:
         status = 400
-    return HTTPException(status_code=status, detail=_ERROR_DETAILS.get(exc.code, exc.code))
+    return HTTPException(status_code=status, detail=_error_detail(exc.code))
 
 
-def _set_staff_cookie(response: Response, session_id: str) -> None:
+async def _delete_or_conflict(coro, detail: str):
+    """删除类端点的统一兜底：还有没清干净的外键引用时给 409 而不是 500。
+
+    正常路径已经在服务层按依赖顺序清了子行，这里是防止将来漏掉一张子表就
+    把 500「服务器内部错误」抛给管理员。注意 PG 后端的完整性异常目前没有映射到
+    ``sqlite3.IntegrityError``，所以这条兜底只在 SQLite 下生效。
+    """
+    try:
+        return await coro
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    except sqlite3.IntegrityError as exc:
+        logger.warning("hygiene delete blocked by integrity error: %s", exc)
+        raise HTTPException(status_code=409, detail=detail) from exc
+
+
+def _set_staff_cookie(response: Response, session_id: str, remember: bool = False) -> None:
+    # 勾了「记住密码，自动登录」就把 cookie 延到 30 天，与服务端会话有效期保持一致；
+    # 否则维持班次级（SESSION_TTL_HOURS）会话。
+    max_age = (
+        settings.SESSION_REMEMBER_DAYS * 86400
+        if remember
+        else settings.SESSION_TTL_HOURS * 3600
+    )
     response.set_cookie(
         key=settings.STAFF_SESSION_COOKIE_NAME,
         value=session_id,
         httponly=True,
         samesite="lax",
         path="/",
-        max_age=settings.SESSION_TTL_HOURS * 3600,
-        secure=not settings.DEBUG,
+        max_age=max_age,
+        secure=settings.session_cookie_secure,
     )
 
 
@@ -206,6 +258,7 @@ class StaffRegisterIn(BaseModel):
 class StaffLoginIn(BaseModel):
     phone: str
     password: str
+    remember: bool = False
 
 
 class StaffProfileIn(BaseModel):
@@ -227,6 +280,14 @@ class RosterPatchIn(BaseModel):
 
 class ShiftIn(BaseModel):
     shift: str
+    # 驳回时可附一句原因：员工端会显示出来，否则他只能原样重拍。
+    reason: Optional[str] = None
+
+
+class RejectIn(BaseModel):
+    """专项/整改驳回的可选说明；不传就是只驳回、不给原因。"""
+
+    reason: Optional[str] = None
 
 
 class AssignmentIn(BaseModel):
@@ -263,6 +324,12 @@ class TeachingMarkIn(BaseModel):
     shift: Optional[str] = None
 
 
+class StandardMarkupIn(BaseModel):
+    """只改标注、不换图时的请求体（形状由服务层归一化，这里不重复校验）。"""
+
+    markup: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 def _parse_markup_field(raw: Optional[str]) -> list:
     if not raw:
         return []
@@ -279,14 +346,21 @@ async def _capture_from_upload(file: UploadFile, markup_raw: Optional[str]) -> d
     data = await _read_upload_bounded(file, "标准图")
     if not data:
         raise HTTPException(status_code=400, detail="请上传标准图")
-    content_type = (file.content_type or "image/jpeg").split(";")[0].strip()
-    if not content_type.startswith("image/"):
-        content_type = "image/jpeg"
     return {
         "bytes": data,
-        "content_type": content_type,
+        "content_type": _stored_content_type(data),
         "markup": _parse_markup_field(markup_raw),
     }
+
+
+def _stored_content_type(data: bytes) -> str:
+    """落库用的图片类型：由内容决定，不用客户端声明的 Content-Type。
+
+    只信客户端的话，``image/svg+xml`` 会被原样存下来、再以同源
+    ``Content-Type: image/svg+xml`` 发回去，里面的 ``<script>`` 就成了存储型
+    XSS。认不出来的一律按二进制流存，浏览器不会当文档渲染它。
+    """
+    return sniff_image_content_type(data) or "application/octet-stream"
 
 
 def _staff_actor(employee: Dict[str, Any]) -> Dict[str, Any]:
@@ -308,12 +382,9 @@ def _live_flag(raw: Optional[str]) -> bool:
 
 async def _live_capture_from_upload(file: UploadFile, live_raw: Optional[str]) -> dict:
     data = await _read_upload_bounded(file, "照片")
-    content_type = (file.content_type or "image/jpeg").split(";")[0].strip()
-    if not content_type.startswith("image/"):
-        content_type = "image/jpeg"
     return {
         "bytes": data,
-        "content_type": content_type,
+        "content_type": _stored_content_type(data),
         "live": _live_flag(live_raw),
     }
 
@@ -401,6 +472,9 @@ async def _image_response(
     headers = {
         "Cache-Control": cache_control,
         "Content-Encoding": "identity",
+        # 类型已经由内容裁决（见 _stored_content_type），这里禁止浏览器再自行
+        # 嗅探成可执行文档 —— 这是 SVG/HTML 伪装成图片那条路的第二道闸。
+        "X-Content-Type-Options": "nosniff",
     }
     if view.get("sha256"):
         headers["ETag"] = f'"{view["sha256"]}"'
@@ -409,6 +483,12 @@ async def _image_response(
     if _etag_matches(request, headers.get("ETag")):
         return Response(status_code=304, headers=headers)
     content_type = view.get("content_type") or "image/jpeg"
+    # 认不出内容的字节按附件下发：浏览器不会在页面上下文里渲染它。
+    headers["Content-Disposition"] = (
+        'attachment; filename="capture.bin"'
+        if content_type == "application/octet-stream"
+        else 'inline; filename="capture.jpg"'
+    )
     if view.get("path") is not None:
         # Let FileResponse derive Content-Length from the file itself. The
         # stored byte_size can lag behind a restored/copied capture and a
@@ -422,16 +502,35 @@ async def _image_response(
     return Response(content=body, media_type=content_type, headers=headers)
 
 
+def _standard_cache_actor(identity: Dict[str, Any]) -> Dict[str, Any]:
+    """把 require_standard_cache_session 的身份翻成 HygieneWork 的 actor。
+
+    管理员会话不限责任区；员工会话按当天所选责任区切片，否则这份「可整包离线
+    缓存」的清单就等于把全店标准图发给每个员工。
+    """
+    if isinstance(identity, dict) and identity.get("kind") == "staff":
+        return _staff_actor(identity["employee"])
+    return SUPER_ACTOR
+
+
 @router.get("/standard-manifest")
 async def standard_manifest(
-    _identity=Depends(require_standard_cache_session),
+    response: Response,
+    identity=Depends(require_standard_cache_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    manifest = await work.standard_manifest()
+    manifest = await work.standard_manifest(_standard_cache_actor(identity))
     for entry in manifest["standards"]:
+        # 员工端会把整份清单离线缓存下来，而页面上这些图最大只显示到 440px 高：
+        # 缓存 1600px 的 preview（250–450KB）而不是原图（2.5–4MB）。缺变体的老图
+        # 由 _image_response 回落到原图，不会拿不到。
         entry["image_url"] = (
             f"/api/hygiene/standards/{int(entry['standard_id'])}/image"
+            f"?variant={STANDARD_CACHE_VARIANT}"
         )
+    # 每次切卫生路由都会拉这份清单：30 秒内让浏览器直接用缓存，标准图换版是低频操作。
+    response.headers["Cache-Control"] = "private, max-age=30"
+    response.headers["ETag"] = f'"{manifest["version"]}"'
     return manifest
 
 
@@ -440,11 +539,14 @@ async def standard_version_image(
     standard_id: int,
     request: Request,
     variant: str = "original",
-    _identity=Depends(require_standard_cache_session),
+    identity=Depends(require_standard_cache_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
     try:
-        standard = await work.standard_version(standard_id)
+        standard = await work.standard_version(
+            standard_id,
+            _standard_cache_actor(identity),
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     return await _image_response(
@@ -466,25 +568,117 @@ async def staff_register(
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
     except ValueError as exc:
-        code = str(exc)
         raise HTTPException(
             status_code=400,
-            detail=_ERROR_DETAILS.get(code, code),
+            detail=_error_detail(str(exc)),
         ) from exc
     await _hygiene_nudge("roster", "registered")
     return {"employee": employee}
 
 
+# 员工登录限流。管理员登录早就有一把（api/auth.py 的 _check_rate_limit），员工侧
+# 一直是可以无限次猜的。两把尺子都要有：只按 IP 会被分布式绕过，只按手机号会被
+# 人拿来锁死同事的账号。
+_STAFF_LOGIN_WINDOW_SECONDS = 60
+_STAFF_LOGIN_MAX_PER_IP = 10
+_STAFF_LOGIN_MAX_PER_PHONE = 5
+# 限流表的键数上限。模块级 dict 没有上限的话，攻击者用大量不同 IP / 手机号各失败
+# 一次就能把它撑起来（每键约 200 字节，百万级就是几百 MB），而单 worker 进程扛不住。
+_STAFF_LOGIN_MAX_TRACKED_KEYS = 5000
+_staff_login_failures: Dict[str, list] = defaultdict(list)
+
+
+def _prune_staff_login_failures(now: float) -> None:
+    """表太大时清掉窗口外的键；仍然过大就按最旧淘汰到 80% 水位。
+
+    淘汰而不是整体清空：清空会把正在被限流的桶（包括受害者账号）一起重置，
+    等于给攻击者一次重置全场计数的机会。
+    """
+    if len(_staff_login_failures) < _STAFF_LOGIN_MAX_TRACKED_KEYS:
+        return
+    stale = [
+        key
+        for key, stamps in _staff_login_failures.items()
+        if not any(now - ts < _STAFF_LOGIN_WINDOW_SECONDS for ts in stamps)
+    ]
+    for key in stale:
+        _staff_login_failures.pop(key, None)
+    if len(_staff_login_failures) >= _STAFF_LOGIN_MAX_TRACKED_KEYS:
+        # 仍然超限：按"最近一次失败"从旧到新淘汰到 80% 水位。
+        # 不用 clear()：那会把正在被限流的桶（包括受害者账号）一起清掉，等于给攻击者
+        # 一次重置全场计数的机会，比按最旧淘汰更弱。
+        ordered = sorted(
+            _staff_login_failures.items(),
+            key=lambda item: max(item[1]) if item[1] else 0.0,
+        )
+        target = int(_STAFF_LOGIN_MAX_TRACKED_KEYS * 0.8)
+        for key, _stamps in ordered[: max(0, len(ordered) - target)]:
+            _staff_login_failures.pop(key, None)
+        logger.warning(
+            "员工登录限流表超过 %s 个键，已按最旧淘汰到 %s 个",
+            _STAFF_LOGIN_MAX_TRACKED_KEYS,
+            len(_staff_login_failures),
+        )
+
+
+def _staff_login_keys(request: Request, phone: str) -> list:
+    ip = request.client.host if request.client else "unknown"
+    keys = [f"ip:{ip}"]
+    # 必须归一化：`+8613800138000`、`138-0013-8000`、`8613800138000` 打的是同一个
+    # 账号，按原样当键的话每种写法各占一个桶，这一维（防分布式撞库）就白设了。
+    normalized = normalize_phone(phone)
+    if normalized:
+        keys.append(f"phone:{normalized}")
+    return keys
+
+
+def _check_staff_login_limit(keys: list) -> None:
+    now = time.time()
+    _prune_staff_login_failures(now)
+    for key in keys:
+        recent = [
+            ts for ts in _staff_login_failures.get(key, [])
+            if now - ts < _STAFF_LOGIN_WINDOW_SECONDS
+        ]
+        if recent:
+            _staff_login_failures[key] = recent
+        else:
+            _staff_login_failures.pop(key, None)
+        limit = (
+            _STAFF_LOGIN_MAX_PER_PHONE
+            if key.startswith("phone:")
+            else _STAFF_LOGIN_MAX_PER_IP
+        )
+        if len(recent) >= limit:
+            raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
+
+
+def _record_staff_login_failure(keys: list) -> None:
+    now = time.time()
+    for key in keys:
+        _staff_login_failures[key].append(now)
+
+
+def _clear_staff_login_failures(keys: list) -> None:
+    for key in keys:
+        _staff_login_failures.pop(key, None)
+
+
 @router.post("/staff/login")
 async def staff_login(
     body: StaffLoginIn,
+    request: Request,
     response: Response,
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
-    result = await accounts.login(body.phone, body.password)
+    keys = _staff_login_keys(request, body.phone)
+    _check_staff_login_limit(keys)
+    result = await accounts.login(body.phone, body.password, remember=body.remember)
     if result is None:
+        _record_staff_login_failure(keys)
         raise HTTPException(status_code=401, detail="手机号或密码错误，或账号未批准、已停用")
-    _set_staff_cookie(response, result["session_id"])
+    _clear_staff_login_failures(keys)
+    _set_staff_cookie(response, result["session_id"], remember=body.remember)
     return {"success": True, "employee": result["employee"]}
 
 
@@ -517,10 +711,9 @@ async def staff_update_me(
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
     except ValueError as exc:
-        code = str(exc)
         raise HTTPException(
             status_code=400,
-            detail=_ERROR_DETAILS.get(code, code),
+            detail=_error_detail(str(exc)),
         ) from exc
     await _hygiene_nudge("roster", "profile_updated")
     return {"employee": employee}
@@ -544,10 +737,9 @@ async def staff_change_password(
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
     except ValueError as exc:
-        code = str(exc)
         raise HTTPException(
             status_code=400,
-            detail=_ERROR_DETAILS.get(code, code),
+            detail=_error_detail(str(exc)),
         ) from exc
     await _hygiene_nudge("roster", "password_changed")
     return {"success": True}
@@ -564,19 +756,53 @@ async def staff_logout(
     return {"success": True}
 
 
+async def _record_zone_switch(
+    work: HygieneWork,
+    employee: Dict[str, Any],
+    picked: Dict[str, Any],
+) -> bool:
+    """员工当天自己换责任区时留痕。
+
+    首次选择（previous 为空）与同区重选都不算换区；只有"本来在 A、现在改成 B"
+    才记一条换区事件，用于红黑榜个人榜与事件流追溯。管理员改派不走这里。
+
+    "改之前"用 `pick_assignment` 在写锁内读到的 `previous_zone_id`，而不是在调用
+    之前预读——两个并发选班请求预读会拿到同一个旧值，后完成的那次就可能漏记。
+    """
+    previous_zone = picked.get("previous_zone_id")
+    current_zone = picked.get("zone_id")
+    if previous_zone is None or current_zone is None:
+        return False
+    if int(previous_zone) == int(current_zone):
+        return False
+    await work.record_zone_switch(
+        employee,
+        from_zone_id=int(previous_zone),
+        from_zone_name=picked.get("previous_zone_name") or "",
+        to_zone_id=int(current_zone),
+        to_zone_name=picked.get("zone_name") or "",
+    )
+    return True
+
+
 async def _pick_assignment(
     body: AssignmentIn,
     staff=Depends(require_staff_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
+    work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
+    employee_id = staff["employee"]["id"]
     try:
         picked = await accounts.pick_assignment(
-            staff["employee"]["id"],
+            employee_id,
             body.shift,
             body.zone_id,
         )
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
+    if await _record_zone_switch(work, staff["employee"], picked):
+        # 换区后个人榜的实拍归属需要重新解释，让看板刷新。
+        await _hygiene_nudge("boards", "changed")
     return picked
 
 
@@ -585,8 +811,9 @@ async def staff_pick_assignment(
     body: AssignmentIn,
     staff=Depends(require_staff_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
+    work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    picked = await _pick_assignment(body, staff, accounts)
+    picked = await _pick_assignment(body, staff, accounts, work)
     await _hygiene_nudge("assignment", "changed", employee_id=staff["employee"]["id"])
     return picked
 
@@ -596,8 +823,9 @@ async def staff_pick_shift(
     body: AssignmentIn,
     staff=Depends(require_staff_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
+    work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    picked = await _pick_assignment(body, staff, accounts)
+    picked = await _pick_assignment(body, staff, accounts, work)
     await _hygiene_nudge("assignment", "changed", employee_id=staff["employee"]["id"])
     return picked
 
@@ -761,10 +989,10 @@ async def admin_delete_zone(
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    try:
-        zone = await work.delete_zone(SUPER_ACTOR, zone_id)
-    except HygieneWorkError as exc:
-        raise _work_http_error(exc) from exc
+    zone = await _delete_or_conflict(
+        work.delete_zone(SUPER_ACTOR, zone_id),
+        "该卫生责任区还有关联数据没清干净，暂时不能删",
+    )
     await _hygiene_nudge("zones", "deleted", zone_id=zone_id)
     return {"zone": zone}
 
@@ -795,12 +1023,27 @@ async def admin_set_overdue_clocks(
 
 @router.get("/admin/board-events")
 async def admin_board_events(
+    since: Optional[str] = Query(None, description="只返回该时间之后的事件（ISO 时间戳）"),
+    limit: int = Query(
+        BOARD_EVENT_DEFAULT_LIMIT,
+        ge=1,
+        le=BOARD_EVENT_MAX_LIMIT,
+        description="每个榜最多返回多少条",
+    ),
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
+    # 事件表只增不减（一年几十万行），整包吐出去就是 O(历史) 响应体，所以带上
+    # 时间窗与条数上限；不传时给一个保守的默认值。
     return {
-        "zones": await work.list_zone_board_events(),
-        "people": await work.list_person_board_events(),
+        "zones": await work.list_zone_board_events(
+            since=since,
+            limit=limit,
+        ),
+        "people": await work.list_person_board_events(
+            since=since,
+            limit=limit,
+        ),
     }
 
 
@@ -844,10 +1087,10 @@ async def admin_delete_daily_item(
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    try:
-        item = await work.delete_daily_item(SUPER_ACTOR, item_id)
-    except HygieneWorkError as exc:
-        raise _work_http_error(exc) from exc
+    item = await _delete_or_conflict(
+        work.delete_daily_item(SUPER_ACTOR, item_id),
+        "该检查项还有关联数据没清干净，暂时不能删",
+    )
     await _hygiene_nudge("zones", "deleted", item_id=item["id"])
     return {"item": item}
 
@@ -878,6 +1121,27 @@ async def admin_current_standard_image(
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
     return await _standard_image_response(work, item_id, variant, request)
+
+
+@router.patch("/admin/items/{item_id}/standard/markup")
+async def admin_update_standard_markup(
+    item_id: int,
+    body: StandardMarkupIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    """只改当前标准图的标注，不重新上传图片。
+
+    原来的唯一入口是 ``POST /admin/items/{id}/standard``（``file`` 必填），想补一个
+    圈就得把同一张图再传一遍。这里复用同一份图片、只换 markup，服务层会新插一版
+    标准并把 current_standard_id 指过去（历史冻结标准不动）。
+    """
+    try:
+        item = await work.update_standard_markup(SUPER_ACTOR, item_id, body.markup)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    await _hygiene_nudge("zones", "standard_updated", item_id=item["id"])
+    return {"item": item}
 
 
 @router.get("/staff/daily-catalog")
@@ -962,7 +1226,7 @@ async def staff_reject_daily(
 ) -> Dict[str, Any]:
     try:
         rejected = await work.reject_daily(
-            _staff_actor(staff["employee"]), item_id, body.shift
+            _staff_actor(staff["employee"]), item_id, body.shift, reason=body.reason
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
@@ -1060,7 +1324,9 @@ async def admin_reject_daily(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        rejected = await work.reject_daily(SUPER_ACTOR, item_id, body.shift)
+        rejected = await work.reject_daily(
+            SUPER_ACTOR, item_id, body.shift, reason=body.reason
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     await _hygiene_nudge("daily", "rejected", item_id=item_id)
@@ -1190,12 +1456,15 @@ async def staff_accept_deep_clean(
 @router.post("/staff/deep-clean/{item_id}/reject")
 async def staff_reject_deep_clean(
     item_id: int,
+    body: Optional[RejectIn] = None,
     staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
         rejected = await work.reject_deep_clean_pair(
-            _staff_actor(staff["employee"]), item_id
+            _staff_actor(staff["employee"]),
+            item_id,
+            reason=(body.reason if body else None),
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
@@ -1265,10 +1534,10 @@ async def admin_remove_deep_clean_item(
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    try:
-        item = await work.remove_deep_clean_item(SUPER_ACTOR, item_id)
-    except HygieneWorkError as exc:
-        raise _work_http_error(exc) from exc
+    item = await _delete_or_conflict(
+        work.remove_deep_clean_item(SUPER_ACTOR, item_id),
+        "该专项卫生项还有关联数据没清干净，暂时不能删",
+    )
     await _hygiene_nudge("deep", "configured", weekday=item["weekday"])
     return item
 
@@ -1332,11 +1601,14 @@ async def admin_accept_deep_clean(
 @router.post("/admin/deep-clean/{item_id}/reject")
 async def admin_reject_deep_clean(
     item_id: int,
+    body: Optional[RejectIn] = None,
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        rejected = await work.reject_deep_clean_pair(SUPER_ACTOR, item_id)
+        rejected = await work.reject_deep_clean_pair(
+            SUPER_ACTOR, item_id, reason=(body.reason if body else None)
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     await _hygiene_nudge("deep", "rejected", item_id=item_id)
@@ -1530,11 +1802,14 @@ async def staff_accept_fix(
 @router.post("/staff/fix/{ticket_id}/reject")
 async def staff_reject_fix(
     ticket_id: int,
+    body: Optional[RejectIn] = None,
     staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        rejected = await work.reject_fix(_staff_actor(staff["employee"]), ticket_id)
+        rejected = await work.reject_fix(
+            _staff_actor(staff["employee"]), ticket_id, reason=(body.reason if body else None)
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     await _hygiene_nudge("fix", "rejected", ticket_id=ticket_id)
@@ -1639,11 +1914,14 @@ async def admin_accept_fix(
 @router.post("/admin/fix/{ticket_id}/reject")
 async def admin_reject_fix(
     ticket_id: int,
+    body: Optional[RejectIn] = None,
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        rejected = await work.reject_fix(SUPER_ACTOR, ticket_id)
+        rejected = await work.reject_fix(
+            SUPER_ACTOR, ticket_id, reason=(body.reason if body else None)
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     await _hygiene_nudge("fix", "rejected", ticket_id=ticket_id)

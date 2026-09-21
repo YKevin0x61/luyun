@@ -6,7 +6,7 @@ import unittest
 
 import aiosqlite
 from config import settings
-from database import DatabaseManager
+from database import CHINA_TZ, DatabaseManager
 
 
 class AuthSchemaTest(unittest.IsolatedAsyncioTestCase):
@@ -36,12 +36,34 @@ class AuthSchemaTest(unittest.IsolatedAsyncioTestCase):
 
 
 import asyncio
+import re
+from datetime import datetime, timedelta
+
 from services import auth_service
 from services.app_runtime import AppRuntime, set_runtime
 
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _cookie_max_age(resp) -> int:
+    """Set-Cookie 里的 Max-Age——httpx 的 resp.cookies 不暴露它。"""
+    header = resp.headers["set-cookie"]
+    match = re.search(r"max-age=(\d+)", header, flags=re.IGNORECASE)
+    assert match, header
+    return int(match.group(1))
+
+
+async def _session_expires_at(db: DatabaseManager, session_id: str) -> datetime:
+    async with db.table("auth").conn.cursor() as cursor:
+        await cursor.execute(
+            "SELECT expires_at FROM sessions WHERE session_id = ?", (session_id,)
+        )
+        row = await cursor.fetchone()
+    assert row is not None, "session 未落库"
+    expires_at = datetime.fromisoformat(row["expires_at"])
+    return expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=CHINA_TZ)
 
 
 class AuthServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -169,6 +191,46 @@ def test_auth_login_issue_api_token(auth_client):
     body = resp.json()
     assert body["success"] is True
     assert body.get("api_token")
+
+
+def test_login_remember_extends_cookie_and_session(auth_client):
+    """「记住密码，自动登录」= 30 天会话 + 同长度 cookie；不勾选仍是班次级 TTL。"""
+    client, db = auth_client
+    client.post("/api/auth/init", json={
+        "username": "admin",
+        "password": "password123",
+        "confirm_password": "password123",
+    })
+    client.cookies.clear()
+
+    remembered = client.post("/api/auth/login", json={
+        "username": "admin",
+        "password": "password123",
+        "remember": True,
+    })
+    assert remembered.status_code == 200
+    assert _cookie_max_age(remembered) == settings.SESSION_REMEMBER_DAYS * 86400
+    remembered_expires = _run(
+        _session_expires_at(db, remembered.cookies.get(settings.SESSION_COOKIE_NAME))
+    )
+    assert remembered_expires - datetime.now(CHINA_TZ) > timedelta(
+        days=settings.SESSION_REMEMBER_DAYS - 1
+    )
+
+    client.cookies.clear()
+    session_only = client.post("/api/auth/login", json={
+        "username": "admin",
+        "password": "password123",
+        "remember": False,
+    })
+    assert session_only.status_code == 200
+    assert _cookie_max_age(session_only) == settings.SESSION_TTL_HOURS * 3600
+    session_expires = _run(
+        _session_expires_at(db, session_only.cookies.get(settings.SESSION_COOKIE_NAME))
+    )
+    assert session_expires - datetime.now(CHINA_TZ) <= timedelta(
+        hours=settings.SESSION_TTL_HOURS
+    )
 
 
 def test_verify_admin_token_accepts_session_cookie(auth_client):

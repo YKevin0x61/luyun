@@ -26,6 +26,7 @@ import PanelHeader from '../components/ui/PanelHeader.vue'
 import BackupOverview from '../components/backup/BackupOverview.vue'
 import BackupPointList from '../components/backup/BackupPointList.vue'
 import UpdateOverview from '../components/update/UpdateOverview.vue'
+import DatabaseMigrations from '../components/update/DatabaseMigrations.vue'
 import UpdateStageProgress from '../components/update/UpdateStageProgress.vue'
 import ReleaseRow from '../components/update/ReleaseRow.vue'
 
@@ -1193,6 +1194,8 @@ onMounted(() => {
                 部署目录有本地改动，默认禁止更新。若确认丢弃这些改动，请在确认对话框中勾选后再继续。
               </div>
             </fieldset>
+
+            <DatabaseMigrations />
 
             <fieldset>
               <legend>正式发行版目录</legend>

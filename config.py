@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     # 基础配置
     APP_NAME: str = "LuyunOrder"
     APP_VERSION: str = "0.6.4"
-    DEBUG: bool = True
+    # 安全默认：不开 /docs、cookie 带 Secure。开发机在 .env 里显式写 DEBUG=true。
+    DEBUG: bool = False
     
     # 服务器配置
     HOST: str = "0.0.0.0"
@@ -26,6 +27,14 @@ class Settings(BaseSettings):
     STAFF_SESSION_COOKIE_NAME: str = "luyun_staff_session"
     SESSION_TTL_HOURS: int = 8
     SESSION_REMEMBER_DAYS: int = 30
+    # 卫生端员工的闲置上限：last_seen_at 超过这个时长就作废会话（0 = 不启用）。
+    # 勾了「记住密码」的会话有效期 30 天，这条把「手机一直挂着没人用」的窗口收窄；
+    # 在用的会话每个请求都会刷新 last_seen_at，正常排班碰不到这条线。
+    SESSION_IDLE_HOURS: int = 336
+    # 会话 cookie 是否带 Secure。留空 = 跟随 DEBUG（开发机跑明文 http 时不带，
+    # 否则浏览器不回传 cookie、登录表现为"登不进"）。内网明文 http 部署要显式
+    # 写 SESSION_COOKIE_SECURE=false，别靠改 DEBUG 来达成。
+    SESSION_COOKIE_SECURE: Optional[bool] = None
     AUTH_MIN_PASSWORD_LENGTH: int = 8
     AUTH_MAX_PASSWORD_BYTES: int = 1024
     # 数据库配置 — 单库 app.db（WAL），仅 logs 因写入量大保持独立文件
@@ -205,6 +214,17 @@ class Settings(BaseSettings):
         }
     }
     
+    @property
+    def session_cookie_secure(self) -> bool:
+        """会话 cookie 的 Secure 属性：显式配置优先，否则跟随 DEBUG。
+
+        与 DEBUG 解耦是为了不让"内网明文 http 部署"逼着人把 DEBUG 打开——
+        DEBUG 还管着 /docs 与错误详情，两件事不该绑在一起。
+        """
+        if self.SESSION_COOKIE_SECURE is not None:
+            return bool(self.SESSION_COOKIE_SECURE)
+        return not self.DEBUG
+
     class Config:
         env_file = ".env"
         case_sensitive = True

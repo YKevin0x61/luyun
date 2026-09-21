@@ -10,6 +10,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -208,6 +209,105 @@ class BackupApiTest(unittest.TestCase):
         response = self.client.post("/api/backup/snapshots/20260101_000001/rollback")
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"]["reason"], "backup_corrupt")
+
+
+class PgSnapshotRollbackApiTest(unittest.TestCase):
+    """PG 快照的页面内整库恢复：调 pg_restore、重建连接、会话失效。"""
+
+    def setUp(self):
+        import asyncio
+
+        self._old_database_dir = settings.DATABASE_DIR
+        self._old_cold_dir = settings.COLD_BACKUP_DIR
+        self._old_backend = settings.DATABASE_BACKEND
+        self._saved_retention = backup_retention.cache_get()
+        backup_retention.cache_set(backup_retention.RetentionConfig())
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        settings.COLD_BACKUP_DIR = os.path.join(self._tmpdir.name, "backups")
+        # 连接本身走 sqlite（快、不依赖外部 PG），「当前是不是 PG 后端」由 mock 决定
+        settings.DATABASE_BACKEND = "sqlite"
+        self.db = DatabaseManager()
+        self.assertTrue(asyncio.run(self.db.connect()))
+        self.client = TestClient(_make_app(self.db))
+        backup_points.set_health_cache(None)
+
+    def tearDown(self):
+        import asyncio
+
+        asyncio.run(self.db.close())
+        backup_retention.cache_set(self._saved_retention)
+        backup_points.set_health_cache(None)
+        settings.DATABASE_DIR = self._old_database_dir
+        settings.COLD_BACKUP_DIR = self._old_cold_dir
+        settings.DATABASE_BACKEND = self._old_backend
+        self._tmpdir.cleanup()
+
+    def _pg_snapshot(self, ts: str) -> None:
+        root = Path(self._tmpdir.name) / "restore_snapshots" / ts
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "app.pgdump").write_bytes(b"PGDMP-fake")
+        (root / "snapshot_meta.json").write_text(
+            json.dumps(
+                {
+                    "ts": ts,
+                    "created_at": "2026-01-01T00:00:00+08:00",
+                    "provenance": "manual",
+                    "contents": ["app_pg", "runtime", "credentials"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _rollback(self, ts: str, *, postgres: bool = True, side_effect=None):
+        with mock.patch.object(
+            backup_points, "create_pre_restore_snapshot", return_value="20260101_000099"
+        ), mock.patch.object(
+            backup_service, "is_postgres_backend", return_value=postgres
+        ), mock.patch.object(
+            backup_service, "restore_pg_dump_sync", side_effect=side_effect
+        ) as restore:
+            response = self.client.post(
+                f"/api/backup/snapshots/{ts}/rollback"
+                "?apply_standard_photos=false&apply_other_photos=false"
+            )
+        return response, restore
+
+    def test_pg_snapshot_rollback_runs_pg_restore_and_reconnects(self):
+        self._pg_snapshot("20260101_000001")
+
+        response, restore = self._rollback("20260101_000001")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["applied"]["app_pg"])
+        self.assertIn("业务数据 (PostgreSQL)", body["applied_labels"])
+        # 整库被替换（含 auth 表）：当前会话必须失效
+        self.assertTrue(body["session_invalidated"])
+        restore.assert_called_once()
+        # drop/重建过对象，连接必须已重建且可用
+        self.assertTrue(self.db.is_connected())
+
+    def test_pg_restore_failure_returns_500_with_reason(self):
+        self._pg_snapshot("20260101_000002")
+
+        response, _ = self._rollback(
+            "20260101_000002",
+            side_effect=RuntimeError("pg_restore 失败（退出码 1）：relation \"orders\" does not exist"),
+        )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("pg_restore", response.json()["detail"])
+        self.assertIn("orders", response.json()["detail"])
+
+    def test_pg_snapshot_rejected_on_non_postgres_backend(self):
+        self._pg_snapshot("20260101_000003")
+
+        response, restore = self._rollback("20260101_000003", postgres=False)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("PostgreSQL", response.json()["detail"])
+        restore.assert_not_called()
 
 
 class BackupExportImportRoundTripTest(unittest.TestCase):

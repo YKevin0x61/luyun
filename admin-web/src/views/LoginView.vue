@@ -3,6 +3,7 @@ import { nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
 import { clearAuthStatusCache, setAuthLoggedIn } from '../utils/authStatus'
+import { loadLoginPrefs, saveLoginPrefs } from '../utils/loginPrefs'
 import { resolveLoginNext } from '../utils/loginNext'
 
 // 迁移自 public/login.html：登录 / 首次初始化管理员 / 已登录三态页面。
@@ -14,7 +15,7 @@ const router = useRouter()
 
 // phase: 'loading' | 'error' | 'loggedIn' | 'login' | 'init'
 const phase = ref('loading')
-const pageSubtitle = ref('正在加载…')
+const pageSubtitle = ref('正在检查登录状态…')
 
 const alert = ref({ show: false, type: 'error', message: '' })
 
@@ -23,11 +24,19 @@ const loggedInUsername = ref('')
 const initForm = ref({ username: '', password: '', confirmPassword: '' })
 const initSubmitting = ref(false)
 
-const loginForm = ref({ username: '', password: '', remember: false })
+// 「记住登录」偏好与上次账号来自本地存储：勾选状态跨会话保留，账号预填，
+// 密码交给浏览器密码管理器自动填充（见 loginPrefs.js）。
+const loginPrefs = loadLoginPrefs('admin')
+const loginForm = ref({
+  username: loginPrefs.account,
+  password: '',
+  remember: loginPrefs.remember,
+})
 const loginSubmitting = ref(false)
 
 const initUsernameInput = ref(null)
 const loginUsernameInput = ref(null)
+const loginPasswordInput = ref(null)
 
 function showAlert(message, type = 'error') {
   alert.value = { show: true, type, message }
@@ -55,6 +64,17 @@ function parseErrorDetail(data) {
 function redirectAfterSuccess() {
   setAuthLoggedIn(true)
   router.push(resolveLoginNext(route.query.next, '/'))
+}
+
+/** `?switch=1`：已登录时仍停在面板上换账号，而不是被自动带进系统。 */
+function wantsAccountSwitch() {
+  const value = route.query.switch
+  return value === '1' || value === 'true'
+}
+
+/** 浏览器自动填充有时只改 DOM 不触发 input 事件，取值时以 DOM 兜底。 */
+function fieldValue(model, inputRef) {
+  return model || inputRef.value?.value || ''
 }
 
 async function focusField(inputRef) {
@@ -86,8 +106,14 @@ async function loadStatus() {
     if (!resp.ok) throw new Error('无法获取登录状态')
     const data = await resp.json()
     if (data.logged_in) {
-      showLoggedInPanel(data.username)
       setAuthLoggedIn(true)
+      if (wantsAccountSwitch()) {
+        showLoggedInPanel(data.username)
+        return
+      }
+      // 会话仍有效就直接进系统——门店机器打开书签/PWA 图标即用，不必再点一次。
+      pageSubtitle.value = '已登录，正在自动进入…'
+      redirectAfterSuccess()
       return
     }
     if (data.initialized) showLoginForm()
@@ -129,9 +155,11 @@ async function submitInit() {
 async function submitLogin() {
   hideAlert()
   loginSubmitting.value = true
+  const username = fieldValue(loginForm.value.username, loginUsernameInput).trim()
+  const password = fieldValue(loginForm.value.password, loginPasswordInput)
   const payload = {
-    username: loginForm.value.username.trim(),
-    password: loginForm.value.password,
+    username,
+    password,
     remember: loginForm.value.remember,
   }
   try {
@@ -146,6 +174,7 @@ async function submitLogin() {
       showAlert(parseErrorDetail(data))
       return
     }
+    saveLoginPrefs('admin', { remember: loginForm.value.remember, account: username })
     redirectAfterSuccess()
   } catch (err) {
     showAlert(err.message || '网络错误')
@@ -177,7 +206,7 @@ onMounted(loadStatus)
 
       <div v-if="alert.show" class="login-alert" :class="alert.type" role="alert">{{ alert.message }}</div>
 
-      <div v-if="phase === 'loading'" class="loading">正在检查登录状态…</div>
+      <div v-if="phase === 'loading'" class="loading">{{ pageSubtitle }}</div>
 
       <div v-else-if="phase === 'loggedIn'">
         <p class="hint" style="margin-bottom:16px;">
@@ -231,7 +260,8 @@ onMounted(loadStatus)
         <button type="submit" class="btn btn-primary btn-block" :disabled="initSubmitting">创建账号并登录</button>
       </form>
 
-      <form v-else-if="phase === 'login'" autocomplete="off" @submit.prevent="submitLogin">
+      <!-- 不设 autocomplete="off"：这里要让浏览器密码管理器保存并自动填充账号密码。 -->
+      <form v-else-if="phase === 'login'" @submit.prevent="submitLogin">
         <div class="form-row">
           <label for="loginUsername">用户名</label>
           <input
@@ -249,6 +279,7 @@ onMounted(loadStatus)
           <label for="loginPassword">密码</label>
           <input
             id="loginPassword"
+            ref="loginPasswordInput"
             v-model="loginForm.password"
             class="input"
             type="password"
@@ -259,8 +290,9 @@ onMounted(loadStatus)
         </div>
         <label class="remember-row">
           <LuyunCheckbox v-model="loginForm.remember" />
-          <span>记住登录（30 天）</span>
+          <span>记住密码，自动登录（30 天）</span>
         </label>
+        <p class="hint remember-hint">密码由浏览器保存并自动填充，本系统不存储明文密码。</p>
         <button type="submit" class="btn btn-primary btn-block" :disabled="loginSubmitting">登录</button>
       </form>
     </div>
@@ -339,10 +371,14 @@ onMounted(loadStatus)
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 4px 0 16px;
+  margin: 4px 0 6px;
   font-size: 13px;
   color: var(--text-dim);
   cursor: pointer;
+}
+
+.remember-hint {
+  margin: 0 0 16px;
 }
 
 .loading {

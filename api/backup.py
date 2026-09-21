@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -26,6 +27,7 @@ from services import (
     runtime_settings,
 )
 from services.backup_service import (
+    CONTENT_APP_PG,
     CONTENT_APP_DB,
     CONTENT_CREDENTIALS,
     CONTENT_LABELS,
@@ -164,7 +166,13 @@ def _validation(parsed: dict) -> dict:
     }
     diff = backup_points.photo_difference(backup_ids)
     declared_consistency = meta.get("consistency") or {}
-    if declared_consistency and not declared_consistency.get("ok", True):
+    # 只有「备份自身坏了」（blocking）才算 in_backup 失败；照片在源磁盘上缺失
+    # 这类完整度问题不阻断恢复（跨备份点差异另走 cross_point + 强制继续那条路）。
+    if (
+        declared_consistency
+        and declared_consistency.get("blocking")
+        and not declared_consistency.get("ok", True)
+    ):
         errors.extend(declared_consistency.get("errors") or [])
 
     return {
@@ -421,13 +429,14 @@ async def _apply_parsed_backup(
             raise HTTPException(status_code=400, detail=f"备份中的运行配置无效：{exc}")
 
     if apply_app_db and backup_service.is_postgres_backend():
-        # 不静默跳过：PG 快照里是 app.pgdump，用 SQLite 的覆盖/合并路径处理不了，
-        # 静默 pass 会让操作者以为业务数据已恢复。
+        # 不静默跳过：这份 .luyunbak 里的业务数据是 SQLite 库，SQLite 覆盖/合并路径
+        # 灌不进 PostgreSQL。PG 门店要恢复业务数据请走本机回滚快照（整库 pg_restore）。
         raise HTTPException(
             status_code=400,
             detail=(
-                "PostgreSQL 后端不支持从管理后台恢复业务数据，"
-                "请用 pg_restore（命令见 migrations/pg/README.md）"
+                "这份备份里的业务数据是 SQLite 库（app.db），不能直接灌进 PostgreSQL。"
+                "PG 门店请在「备份中心 → 备份点 → 本机回滚快照」用「恢复整库数据」，"
+                "冷备归档用 pg_restore（见 deploy/README.md 10.4）"
             ),
         )
 
@@ -497,7 +506,11 @@ async def _apply_parsed_backup(
     if applied[CONTENT_RUNTIME]:
         await _notify_scraper_reload_runtime(db)
 
-    session_invalidated = applied[CONTENT_APP_DB] or applied[CONTENT_CREDENTIALS]
+    session_invalidated = (
+        applied[CONTENT_APP_DB]
+        or applied[CONTENT_APP_PG]
+        or applied[CONTENT_CREDENTIALS]
+    )
     merge_failed_rows = sum(
         int(report.get("total_failed") or 0) for report in merge_reports.values()
     )
@@ -661,6 +674,37 @@ async def rollback_snapshot(
             await backup_service.overwrite_app_db_from_bytes(db, f.read())
         applied[CONTENT_APP_DB] = True
 
+    snap_pg = snap_dir / "app.pgdump"
+    if snap_pg.is_file():
+        if not backup_service.is_postgres_backend():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "这份快照的业务数据是 PostgreSQL 整库备份，"
+                    "但当前后端不是 PostgreSQL，无法在本机恢复"
+                ),
+            )
+        # 先断开自己的连接：pg_restore --clean 要 drop 并重建对象，我方连接上的
+        # 未提交事务会持有表锁、让 drop 卡住。断开后采集侧的写入会直接失败一轮
+        # （各自的错误处理会记失败计数），这是整库恢复的固有代价。
+        await db.close()
+        try:
+            await asyncio.to_thread(backup_service.restore_pg_dump_sync, str(snap_pg))
+        except Exception as exc:
+            logger.error("PostgreSQL 整库恢复失败: %s", exc)
+            # 尽力把连接恢复回来，让服务还能提供只读状态与再次尝试的入口
+            await db.connect()
+            raise HTTPException(
+                status_code=500,
+                detail=f"PostgreSQL 整库恢复失败：{exc}",
+            ) from exc
+        if not await db.connect():
+            raise HTTPException(
+                status_code=500,
+                detail="整库已恢复，但数据库重连失败；请重启应用后再操作",
+            )
+        applied[CONTENT_APP_PG] = True
+
     snap_recipes = snap_dir / "recipes.db"
     if snap_recipes.is_file():
         from main import recipe_store
@@ -732,7 +776,11 @@ async def rollback_snapshot(
         "photos_restored": restored_photos,
         "photo_consistency": photo_consistency,
         "snapshot_ts": pre_ts,
-        "session_invalidated": applied[CONTENT_APP_DB] or applied[CONTENT_CREDENTIALS],
+        "session_invalidated": (
+            applied[CONTENT_APP_DB]
+            or applied[CONTENT_APP_PG]
+            or applied[CONTENT_CREDENTIALS]
+        ),
     }
 
 

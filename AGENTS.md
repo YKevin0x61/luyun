@@ -123,7 +123,7 @@ Stations are defined in `KITCHEN_STATIONS` dict. When adding a new station:
 
 Realtime updates use a **nudge + pull** model, not push-the-payload: the server only ever broadcasts a tiny `{"type": "nudge", "topic": "...", "scope": {...}}` message with no data, sequence number, or delta. Clients that receive a nudge re-fetch via the existing HTTP REST APIs.
 
-- `RealtimeHub` (`services/realtime/hub.py`) tracks per-connection subscriptions (`{id, topics, filters}`) and dispatches `broadcast_nudge(topic, scope)` only to matching subscribers. Valid topics: `orders`, `tables`, `scraper`, `dashboard`, `logs`, `admin`.
+- `RealtimeHub` (`services/realtime/hub.py`) tracks per-connection subscriptions (`{id, topics, filters}`) and dispatches `broadcast_nudge(topic, scope)` only to matching subscribers. Valid topics: `orders`, `tables`, `scraper`, `dashboard`, `logs`, `admin`, `hygiene`. **员工（`auth == "staff"`）只允许订 `hygiene`**（`allowed_topics()`）——nudge 不带数据，但订单/档口/日志的时序本身就是经营信息。
 - `orders`/`tables` nudges also debounce-trigger a combined `dashboard` nudge (`DASHBOARD_DEBOUNCE_SECONDS = 0.3s`) so the (expensive) dashboard summary endpoint isn't hit on every single change.
 - Single endpoint `@app.websocket("/ws/realtime")` in `main.py` handles both auth modes: **Cookie session** (Admin SPA, browser) or **`?token=<api_token>`** query param (KDS and other non-cookie clients). See `authenticate_ws()`.
 - There is no delta/seq/snapshot-cache protocol — clients are expected to be resilient to missed nudges (see KDS's 60s reconciliation poll below).
@@ -143,11 +143,12 @@ The kitchen display is a uni-app project (`kds/`, H5 build), no longer HTTP-poll
 ## Testing & CI
 
 - Test suite lives in `tests/` and mixes `unittest`-style and `pytest`-style tests; run with `pytest tests/` (collects both styles). Plain `python -m unittest discover -s tests` no longer collects the full suite.
+- **测试强制跑 SQLite**：`tests/conftest.py` 在收集用例前把 `DATABASE_BACKEND` 钉死为 `sqlite`，并在 `pytest_configure` 里断言。各测试靠 `settings.DATABASE_DIR` 指向临时目录取隔离，而那个隔离**只对 SQLite 生效**——本机 `.env` 若是 `DATABASE_BACKEND=postgres`，`pytest tests/` 会经 asyncpg 连上真实库，把测试注册的员工、会话写进真库。
 - CI (`.github/workflows/`) runs three jobs: Python (`pip install -r requirements.txt` + `pytest tests/ -v`), `admin-web` (`npm ci` + build/PWA artifact checks + Vitest), and `kds` (`npm ci` + Vitest).
 
 ## Deployment (`deploy/`)
 
-Single-machine, single-instance, **single uvicorn worker** deployment. Storage is **SQLite by default** (single `data/app.db`, zero external services); a **PostgreSQL backend is available** for the multi-store shape via `DATABASE_BACKEND=postgres` (ADR 0084) — see `migrations/pg/` and `deploy/enable_postgres.sh`. Redis is prepared in the Docker `pg` profile but **not wired into the code yet**, so the single-worker constraint still holds. Docker may host the process with bind mounts but image pull is not delivery. Delivery follows **ADR 0011** (supersedes ADR 0010): GitHub Release **发行包 (Release Bundle)** (app tree + prebuilt Admin/KDS + **版本清单**/checksums) + Admin「系统更新」（版本检测 · **更新环境自检** · 应用更新）→ 更新作业; shop machines stay Node-free (no Deploy Key / clone). `deploy/` contains:
+Single-machine, single-instance, **single uvicorn worker** deployment. Storage is **SQLite by default** (single `data/app.db`, zero external services); a **PostgreSQL backend is available** for the multi-store shape via `DATABASE_BACKEND=postgres` (ADR 0084) — see `migrations/pg/` and `deploy/enable_postgres.sh`. Redis is prepared in the Docker `pg` profile but **not wired into the code yet**, so the single-worker constraint still holds. Docker may host the process with bind mounts but image pull is not delivery. Delivery follows **ADR 0011** (supersedes ADR 0010): GitHub Release **发行包 (Release Bundle)** (app tree + prebuilt Admin/KDS + **版本清单**/checksums) + Admin「系统更新」（版本检测 · **更新环境自检** · 应用更新 · **数据库迁移**）→ 更新作业; shop machines stay Node-free (no Deploy Key / clone). `deploy/` contains:
 
 - `luyun.service` — systemd unit running `uvicorn main:app --workers 1` (must stay single-worker: the realtime hub, in-memory log buffer, and scraper failure counters all live in one process's memory).
 - `luyun-update.service` — systemd oneshot Update Job started by Admin Apply Update.
@@ -174,6 +175,10 @@ Single-machine, single-instance, **single uvicorn worker** deployment. Storage i
 - **Playwright lib 与浏览器 build 强绑定。** `requirements.txt` 钉死 `playwright==1.63.0`；升该版本时必须同时执行 `.venv/bin/python -m playwright install chromium`（更新作业的 `syncing_deps` 阶段与 Docker entrypoint 已内置，开发机要手动）。只升 lib 不升浏览器会报 `Executable doesn't exist at /ms-playwright/chromium_headless_shell-<rev>/...`，缺失的是浏览器而不是代码路径。
 - **`logs.db` 是 WAL + `synchronous=NORMAL`**（`app.db` 保持默认 `FULL`）。启动做 `quick_check`，损坏时隔离为 `logs.db.corrupt.<stamp>`（保留最近 `LOG_CORRUPT_KEEP` 份 + `.forensics.txt`）；**磁盘满不会被当成损坏**，只丢当批日志并计入 `queue_dropped`。业务库 `app.db` 体检失败只告警、绝不自动隔离。运行期每 `LOG_MAINTENANCE_INTERVAL_SECONDS` 清理过期日志 + 回收 WAL。
 - **`GET /api/healthz`**（免鉴权、只读）返回 DB 状态与聚合磁盘水位，供探针使用；磁盘水位高**不**改状态码（重启容器腾不出空间）。进程内磁盘守护见 `services/disk_guard.py`，阈值由 `DISK_WARN_PCT` / `DISK_CRITICAL_PCT` 控制。
+- **PG 的 schema 变更不随重启生效，也不随更新作业生效。** SQLite 由启动时自愈（`apply_hygiene_schema()` / `migrate_hygiene_columns()`），而 PG 按设计**不在启动期改结构**（结构变更要可追溯，见 `_connect_postgres` 的 docstring）。所以改了 `db_core/schema.py` 的表或索引定义，就要**同时**出 `migrations/pg/000N_*.sql`（**只做加成性变更**：加列带默认值 / 加索引 / 建新表）并**提交**——发行包按 `git archive HEAD` 打包，没提交的脚本不会进包。门店在 Admin「系统更新」→「数据库迁移」应用（`/api/db-migrations`），版本检测会把待应用条数显示在版本状态卡上。`0001` 带 `luyun:bootstrap-only` 标记（含 `DROP TABLE`），永远不进待应用清单。详见 `migrations/pg/README.md`。
+- **卫生端会话 id 只存哈希。** `hygiene_staff_sessions.session_id` 存的是 `sha256(cookie)`（`accounts.hash_session_id`），cookie 本身发原文——拿 cookie 原值直接查库永远查不到，必须走 `EmployeeAccounts.get_staff_session()`。存量明文行由 `EmployeeAccounts.prepare()` 在启动期（`main.py`，两种后端都跑）**原地哈希化**，员工不需要重登；这一项**不改 schema**，不需要新的 `migrations/pg/000N`。额外还有 `SESSION_IDLE_HOURS`（默认 336 = 14 天，0 = 关闭）的闲置上限，靠每次请求节流刷新 `last_seen_at` 判定。
+- **写请求有跨站拦截。** `main.py` 的 `csrf_origin_guard` 中间件：带会话 cookie、且浏览器报 `Sec-Fetch-Site: cross-site` 的 POST/PUT/PATCH/DELETE 直接 403。判定**优先看 `Sec-Fetch-Site`**（不受反向代理改写 Host 影响），缺失才退回比较 `Origin` 与 `Host`，两者都缺放行。带 `Authorization` / `X-Admin-Token` 的调用和无 cookie 的调用不受影响，所以 TestClient 与 KDS 的 `?token=` 链路照常。
+- **`tests/conftest.py` 只保护 `pytest`。** `python -c`、REPL、临时验证脚本、没写隔离的 `scripts/` 脚本都会按 `.env` 的 `DATABASE_BACKEND` 直接连库——本机 `.env` 是 `postgres` 时就是**生产库**（审查期间真发生过一次误写）。做任何验证前先设 `DATABASE_BACKEND=sqlite`（**必须在 `from config import settings` 之前**，env 优先级高于 `.env`）+ 临时 `DATABASE_DIR`。要连生产库时只读、只 `SELECT`，并先打印 `settings.DATABASE_BACKEND` 确认。
 
 ---
 

@@ -89,14 +89,29 @@ def _add_item(work, data):
     )
 
 
-def test_staff_can_fetch_variant_and_etag_round_trip(image_http):
-    client, _db, _accounts, work = image_http
-    original = jpeg_bytes()
-    item = _add_item(work, original)
+def _login_and_pick_zone(client, work):
+    """登录并选当天责任区。
+
+    ``/standards/{id}/image`` 现在按责任区切片（同一条数据在
+    ``/staff/items/{id}/standard`` 上一直是有校验的），未选区的员工会被 400
+    挡下——这些用例测的是变体与 ETag，所以先把前置条件补上。
+    """
     assert client.post(
         "/api/hygiene/staff/login",
         json={"phone": PHONE, "password": PASSWORD},
     ).status_code == 200
+    zone = _run(work.list_zones())[0]
+    assert client.post(
+        "/api/hygiene/staff/assignment",
+        json={"shift": "白班", "zone_id": zone["id"]},
+    ).status_code == 200
+
+
+def test_staff_can_fetch_variant_and_etag_round_trip(image_http):
+    client, _db, _accounts, work = image_http
+    original = jpeg_bytes()
+    item = _add_item(work, original)
+    _login_and_pick_zone(client, work)
 
     thumb = client.get(
         f"/api/hygiene/standards/{item['current_standard_id']}/image",
@@ -121,10 +136,7 @@ def test_original_endpoint_remains_backward_compatible(image_http):
     client, _db, _accounts, work = image_http
     original = jpeg_bytes()
     item = _add_item(work, original)
-    assert client.post(
-        "/api/hygiene/staff/login",
-        json={"phone": PHONE, "password": PASSWORD},
-    ).status_code == 200
+    _login_and_pick_zone(client, work)
 
     response = client.get(
         f"/api/hygiene/standards/{item['current_standard_id']}/image"

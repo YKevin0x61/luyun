@@ -80,12 +80,24 @@ def _now_iso() -> str:
 
 
 def _merge_in_backup_consistency(basic: dict, consistency: Optional[dict]) -> dict:
-    """备份点内不一致 = 这份备份坏了：基础校验直接判负并给出可读原因。"""
-    if not consistency or consistency.get("ok", True):
+    """把备份点的照片完整度结论并进基础校验。
+
+    只有 ``blocking`` 的结论才判负（那才是「这份备份自身坏了」）；照片在源磁盘上
+    本来就缺失这类完整度问题降级成 ``warnings``，不拦下数据回滚。
+    """
+    if not consistency:
         return basic
-    messages = list(basic.get("messages") or [])
-    messages.extend(consistency.get("errors") or [])
-    return {"ok": False, "messages": messages}
+    if consistency.get("blocking") and not consistency.get("ok", True):
+        messages = list(basic.get("messages") or [])
+        messages.extend(consistency.get("errors") or [])
+        return {"ok": False, "messages": messages}
+    if consistency.get("ok", True):
+        return basic
+    merged = dict(basic)
+    merged["warnings"] = list(basic.get("warnings") or []) + list(
+        consistency.get("errors") or []
+    )
+    return merged
 
 
 def _snapshot_points() -> List[dict]:
@@ -272,7 +284,11 @@ def _contents_from_includes(includes: Dict[str, Any]) -> List[str]:
 
 
 def missing_contents(contents: Sequence[str]) -> List[dict]:
-    """缺项摘要：这份备份点缺了哪些内容类别（公开给 API 层复用）。"""
+    """缺项摘要：这份备份点缺了哪些内容类别（公开给 API 层复用）。
+
+    走 ``contents_cover`` 而不是直接比较：PG 的整库 pg_dump（``app_pg``）同时
+    覆盖业务数据与配方数据，直接比较会把一份完好的 PG 快照报成两项缺失。
+    """
     missing = []
     for content in (
         CONTENT_CREDENTIALS,
@@ -282,7 +298,7 @@ def missing_contents(contents: Sequence[str]) -> List[dict]:
         CONTENT_STANDARD_PHOTOS,
         CONTENT_OTHER_PHOTOS,
     ):
-        if content not in contents:
+        if not backup_service.contents_cover(contents, content):
             missing.append({"content": content, "label": CONTENT_LABELS[content]})
     return missing
 
@@ -373,6 +389,20 @@ def _snapshot_basic_check(item: dict) -> dict:
     db_path = snap_dir / "app.db"
     if db_path.is_file():
         return _sqlite_basic_check(db_path, expected_rows=item.get("row_counts") or {})
+    # PG 后端的业务数据是整库 pg_dump，没有 app.db。不认这个文件会把它误判成
+    # 「仅含凭据」，与「内容：业务数据 (PostgreSQL)」自相矛盾。
+    pg_dump_path = snap_dir / "app.pgdump"
+    if pg_dump_path.is_file():
+        if pg_dump_path.stat().st_size <= 0:
+            return {"ok": False, "messages": ["PostgreSQL 整库备份体积为零"]}
+        return {
+            "ok": True,
+            "messages": [
+                "业务数据是 PostgreSQL 整库备份（app.pgdump）：页面内「恢复整库数据」"
+                "用 pg_restore --clean 重建数据库对象，恢复期间采集会中断一轮，"
+                "完成后需要重新登录后台"
+            ],
+        }
     if (snap_dir / "credentials.enc").is_file():
         return {"ok": True, "messages": ["仅含凭据，不含业务数据库"]}
     return {"ok": False, "messages": ["备份点内没有任何可恢复内容"]}

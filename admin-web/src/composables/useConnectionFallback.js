@@ -1,7 +1,7 @@
 import { inject, onBeforeUnmount, watch } from 'vue'
 
 export const FALLBACK_POLL_MS = 30000
-const FALLBACK_GRACE_MS = 8000
+export const FALLBACK_GRACE_MS = 8000
 
 /**
  * WS 断线低频轮询兜底：可靠性兜底，不是常态轮询。

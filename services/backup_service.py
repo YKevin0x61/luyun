@@ -88,6 +88,21 @@ CONTENT_LABELS = {
     CONTENT_OTHER_PHOTOS: "其它照片",
 }
 
+# 内容类别的等价覆盖关系：PG 后端的整库 pg_dump 同时含业务数据与配方数据
+# （recipe 表就在同一个库里），因此它满足 app_db 与 recipes_db 两类。
+# 缺项判定与展示都必须走这里，否则 PG 快照会一边列出「业务数据 (PostgreSQL)」，
+# 一边报「缺少业务数据 / 配方数据」。
+CONTENT_SATISFIED_BY: Dict[str, Tuple[str, ...]] = {
+    CONTENT_APP_DB: (CONTENT_APP_DB, CONTENT_APP_PG),
+    CONTENT_RECIPES: (CONTENT_RECIPES, CONTENT_APP_PG),
+}
+
+
+def contents_cover(contents: Sequence[str], content: str) -> bool:
+    """contents 是否覆盖某个内容类别（考虑 PG 整库备份这类等价形式）。"""
+    options = CONTENT_SATISFIED_BY.get(content, (content,))
+    return any(option in contents for option in options)
+
 # 基础校验读取的关键表；缺失任一即视为不可恢复
 KEY_TABLES = ("orders", "tables", "dish_stations")
 
@@ -870,6 +885,80 @@ def _pg_dump_sync(dst_path: str) -> None:
         raise RuntimeError(message)
 
 
+# 整库恢复后重置 identity 序列：pg_restore 只灌数据，不动序列当前值，
+# 不重置会让下一条 INSERT 撞主键（deploy/README.md 10.4 手工流程的最后一步）。
+PG_SEQUENCE_RESET_SQL = """
+DO $$
+DECLARE r RECORD; seq TEXT;
+BEGIN
+  FOR r IN
+    SELECT c.relname FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'r' AND n.nspname = 'public'
+      AND EXISTS (SELECT 1 FROM pg_attribute a
+                  WHERE a.attrelid = c.oid AND a.attname = 'id' AND a.attnum > 0)
+  LOOP
+    seq := pg_get_serial_sequence('public.' || quote_ident(r.relname), 'id');
+    IF seq IS NOT NULL THEN
+      EXECUTE format(
+        'SELECT setval(%L, COALESCE((SELECT MAX(id) FROM public.%I), 1))',
+        seq, r.relname);
+    END IF;
+  END LOOP;
+END $$;
+"""
+
+
+def restore_pg_dump_sync(dump_path: str) -> None:
+    """用 pg_restore 把整库 dump 灌回 PostgreSQL（覆盖当前库内容）。
+
+    ``--clean --if-exists`` 会先 drop 再重建对象，因此调用方必须保证：
+    恢复期间不再有人写库，恢复完成后重建数据库连接（drop/重建会让既有连接上的
+    prepared statement 失效），并让当前后台会话失效（auth 表被一起替换）。
+
+    失败时把 stderr 脱敏后原样带出；密码不落日志、也不进异常消息。
+    """
+    if not os.path.isfile(dump_path):
+        raise RuntimeError("快照里没有 PostgreSQL 整库备份（app.pgdump）")
+    dsn = os.environ.get("LUYUN_POSTGRES_DSN") or getattr(settings, "POSTGRES_DSN", "")
+    if not dsn:
+        raise RuntimeError("POSTGRES_DSN 未配置，无法恢复 PostgreSQL")
+    if shutil.which("pg_restore") is None:
+        raise RuntimeError(
+            "未找到 pg_restore —— PostgreSQL 后端需要安装 postgresql-client"
+        )
+    cmd = [
+        "pg_restore",
+        "--clean",
+        "--if-exists",
+        "--no-owner",
+        "--no-acl",
+        "-d",
+        dsn,
+        dump_path,
+    ]
+    logger.warning("⏮ [审计] 开始 PostgreSQL 整库恢复（会 drop 并重建对象）: %s", dump_path)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("pg_restore 超时（3600s）") from exc
+    if proc.returncode != 0:
+        detail = _redact_dsn_password((proc.stderr or "").strip(), dsn)
+        message = f"pg_restore 失败（退出码 {proc.returncode}）"
+        if detail:
+            message = f"{message}：{detail}"
+        message = (
+            f"{message}。当前库可能处于部分恢复状态，"
+            "请用恢复前自动生成的那份本机回滚快照重试，或按 deploy/README.md 手工恢复"
+        )
+        raise RuntimeError(message)
+
+    # 序列跟上数据：失败只告警，不回滚已经完成的整库恢复
+    if _pg_psql_rows(PG_SEQUENCE_RESET_SQL) is None:
+        logger.warning("⚠️ 整库恢复完成，但 identity 序列重置失败（新写入可能撞主键）")
+    logger.warning("✅ [审计] PostgreSQL 整库恢复完成")
+
+
 def _scan_capture_members(root: Path) -> Dict[str, Any]:
     """PG 后端下的照片收集：直接扫目录，不查库。
 
@@ -949,9 +1038,112 @@ def _write_snapshot_photos(
     }
 
 
+def _pg_psql_rows(sql: str) -> Optional[List[List[str]]]:
+    """用 psql 同步查询 PG（DSN 与 pg_dump 同一来源）。
+
+    返回每行的列列表；psql 缺失或查询失败返回 ``None``（调用方退化为目录扫描）；
+    表不存在按「没有这类照片」返回空列表（旧库 / 未启用卫生模块属正常情况）。
+    """
+    dsn = os.environ.get("LUYUN_POSTGRES_DSN") or getattr(settings, "POSTGRES_DSN", "")
+    if not dsn or shutil.which("psql") is None:
+        return None
+    cmd = ["psql", dsn, "-At", "-F", "\t", "-c", sql]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("照片分类查询执行失败，退化为目录扫描: %s", exc)
+        return None
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip()
+        if "does not exist" in detail or "不存在" in detail:
+            return []
+        logger.warning(
+            "照片分类查询失败，退化为目录扫描: %s",
+            _redact_dsn_password(detail[:200], dsn),
+        )
+        return None
+    return [line.split("\t") for line in (proc.stdout or "").splitlines() if line.strip()]
+
+
+def _classify_capture_ids_pg() -> Optional[Dict[str, List[str]]]:
+    """PG 后端：按库引用把 capture_id 分成标准图 / 其它照片。
+
+    与 SQLite 路径用同一批 SQL（表名、列名同构），只是换成 psql 同步查询；
+    恢复端只按 capture_id 写回同一目录，因此分类只影响清单与覆盖结论。
+    """
+    standard: set = set()
+    other: set = set()
+    for sql in _STANDARD_PHOTO_QUERIES:
+        rows = _pg_psql_rows(sql)
+        if rows is None:
+            return None
+        standard.update(row[0] for row in rows if row and row[0])
+    for sql in _OTHER_PHOTO_QUERIES:
+        rows = _pg_psql_rows(sql)
+        if rows is None:
+            return None
+        other.update(row[0] for row in rows if row and row[0])
+    # 一张照片同时被两类引用时标准图优先（与 SQLite 分类口径一致）
+    other -= standard
+
+    variants = _pg_psql_rows(_VARIANT_QUERY)
+    if variants is None:
+        return None
+    for row in variants:
+        if len(row) < 2 or not row[1]:
+            continue
+        source_id, variant_id = row[0], row[1]
+        if source_id in standard:
+            standard.add(variant_id)
+        elif source_id in other:
+            other.add(variant_id)
+
+    return {PHOTO_STANDARD: sorted(standard), PHOTO_OTHER: sorted(other)}
+
+
 def _write_snapshot_photos_pg(snap_dir: Path) -> Dict[str, Any]:
-    """PG 后端的照片入快照：扫目录，不查库（理由见 _scan_capture_members）。"""
+    """PG 后端的照片入快照：按库引用分类（占位符与 SQLite 路径一致）。
+
+    psql 不可用 / 查询失败时退化为「目录扫描 + 全部计入其它照片」，并把
+    ``unclassified`` 标出来：标准图恒为 0 是「没分类」，不是「本来就没有」。
+    """
     root = get_hygiene_capture_root()
+    classified = _classify_capture_ids_pg()
+    if classified is None:
+        logger.warning(
+            "PG 照片分类不可用（psql 缺失或查询失败），退化为目录扫描：照片全部计入其它照片"
+        )
+        return _write_snapshot_photos_scan(snap_dir, root)
+
+    manifest: Dict[str, Any] = {}
+    missing: Dict[str, List[str]] = {}
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+        blobs, gone = collect_photo_blobs(root, classified[kind])
+        if gone:
+            missing[kind] = gone
+        for capture_id, data in blobs.items():
+            target = snap_dir / PHOTO_MEMBER_DIRS[kind] / capture_id
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _link_or_copy(root / capture_id, target)
+        digest = hashlib.sha256()
+        for capture_id in sorted(blobs):
+            digest.update(capture_id.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(blobs[capture_id])
+        manifest[kind] = {
+            "count": len(blobs),
+            "bytes": sum(len(blob) for blob in blobs.values()),
+            "sha256": digest.hexdigest(),
+            "referenced": len(classified[kind]),
+            "missing": len(gone),
+            "written": len(blobs),
+            "unclassified": False,
+        }
+    return {"manifest": manifest, "missing": missing}
+
+
+def _write_snapshot_photos_scan(snap_dir: Path, root: Path) -> Dict[str, Any]:
+    """目录扫描兜底：capture 目录里的文件平铺存放，全部计入其它照片。"""
     collected = _scan_capture_members(root)
     manifest: Dict[str, Any] = {}
     for kind in (PHOTO_STANDARD, PHOTO_OTHER):
@@ -963,7 +1155,9 @@ def _write_snapshot_photos_pg(snap_dir: Path) -> Dict[str, Any]:
             _link_or_copy(root / name[len(prefix):], snap_dir / name)
             written += 1
         entry = dict(collected["manifest"].get(kind) or {})
+        entry["count"] = written
         entry["written"] = written
+        entry["unclassified"] = True
         manifest[kind] = entry
     return {
         "manifest": manifest,
@@ -975,20 +1169,31 @@ def photo_consistency(
     manifest: Dict[str, Any],
     missing: Dict[str, List[str]],
 ) -> Dict[str, Any]:
-    """备份点内一致性：库引用的照片是否都在这份备份里（不一致 = 备份损坏）。"""
-    errors: List[str] = []
+    """照片完整度：库引用了、但**备份创建时源磁盘上就已经没有**的文件。
+
+    这**不是**「这份备份坏了」：照片是逐个 ``_link_or_copy`` 落盘的，拷贝失败会
+    直接抛错、快照根本建不出来。能走到这里的缺失说明源文件本来就不在，因此
+    ``blocking=False`` —— 恢复数据不该被它拦下（页面上只作警告展示）。
+    """
+    messages: List[str] = []
+    missing_total = 0
     for kind in (PHOTO_STANDARD, PHOTO_OTHER):
         gone = missing.get(kind) or []
+        missing_total += len(gone)
         if gone:
             label = (
                 CONTENT_LABELS[CONTENT_STANDARD_PHOTOS]
                 if kind == PHOTO_STANDARD
                 else CONTENT_LABELS[CONTENT_OTHER_PHOTOS]
             )
-            errors.append(f"{label}缺失 {len(gone)} 个文件")
+            messages.append(
+                f"{label}有 {len(gone)} 个文件在源磁盘上已缺失（备份里没有，恢复后仍缺）"
+            )
     return {
-        "ok": not errors,
-        "errors": errors,
+        "ok": not messages,
+        "blocking": False,
+        "missing_total": missing_total,
+        "errors": messages,
         "standard": manifest.get(PHOTO_STANDARD, {}),
         "other": manifest.get(PHOTO_OTHER, {}),
     }

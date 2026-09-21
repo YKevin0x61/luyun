@@ -112,7 +112,7 @@ def _set_session_cookie(response: Response, session_id: str, remember: bool) -> 
         samesite="lax",
         path="/",
         max_age=max_age,
-        secure=not settings.DEBUG,
+        secure=settings.session_cookie_secure,
     )
 
 
