@@ -59,4 +59,22 @@ describe('hygiene staff work app', () => {
     expect(home).toMatch(/left-label="清理前"/)
     expect(home).toMatch(/right-label="清理后"/)
   })
+
+  it('names the zone when the daily inbox has nothing at all', () => {
+    const home = read('../HygieneHomeView.vue')
+    const empty = home.slice(
+      home.indexOf('class="hy-staff-done"'),
+      home.indexOf('hy-queue-group'),
+    )
+    // 日常清单按所选责任区过滤（ADR-0075）。空清单原来只说「还没有带标准图的日常
+    // 检查项」，管理员在别的区建完标准图过来核对，读到的就是「图丢了」。这里必须
+    // 点出是哪个区没有，并留一个换区出口。
+    expect(empty).toMatch(
+      /当前区域「\{\{ employee\.zone_name \|\| '未选区域' \}\}」没有带标准图的日常检查项/,
+    )
+    expect(empty).toMatch(/这一屏只列你选的这个区/)
+    expect(empty).toMatch(/@click="openAssignmentPicker">换个区域看看/)
+    // 旧的裸文案（不带区名）不许再作为正文出现；注释里提到它不算。
+    expect(empty).not.toMatch(/>\s*还没有带标准图的日常检查项。/)
+  })
 })

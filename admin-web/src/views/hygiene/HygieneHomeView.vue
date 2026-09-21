@@ -1399,10 +1399,18 @@ async function decide(action, reason = '') {
             >{{ nextWork.primaryLabel }}</button>
           </article>
 
-          <p v-else class="hy-staff-done">
-            <template v-if="dailyStats.total">今天的卫生待办都交了。等验收不算逾期。</template>
-            <template v-else>还没有带标准图的日常检查项。</template>
-          </p>
+          <div v-else class="hy-staff-done">
+            <p v-if="dailyStats.total">今天的卫生待办都交了。等验收不算逾期。</p>
+            <template v-else>
+              <!-- 说清是「你选的这个区没有」：原来只写「还没有带标准图的日常检查项」，
+                   管理者在别的区建好标准图后到这一屏核对，会以为图丢了。 -->
+              <p>当前区域「{{ employee.zone_name || '未选区域' }}」没有带标准图的日常检查项。</p>
+              <p class="hy-staff-lead">
+                日常检查项挂在责任区下，这一屏只列你选的这个区；管理端能看到全部区。
+              </p>
+              <button type="button" class="btn" @click="openAssignmentPicker">换个区域看看</button>
+            </template>
+          </div>
 
           <section v-for="group in restWorkGroups" :key="group.id" class="hy-queue-group">
             <h2>{{ group.label }} <span>{{ group.rows.length }}</span></h2>
