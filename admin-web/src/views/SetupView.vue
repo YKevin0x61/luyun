@@ -116,8 +116,9 @@ const {
   exporting,
   exportBtnLabel,
   exportHasLargePayload,
-  // 后端能力位：PG 门店不允许把业务数据打进导出包
+  // 后端能力位：业务数据能否打进包（两种后端都能，形态不同），以及形态本身
   exportAppDbSupported,
+  appDbExportFormat,
   onExportBackup,
   // 备份健康（总览条）
   healthView,
@@ -155,6 +156,8 @@ const {
   importProgress,
   progressLabel,
   importIncludes,
+  importHasPgAppDb,
+  importModeOptions,
   importPreviewItems,
   importPhotoItems,
   importMissing,
@@ -893,11 +896,11 @@ onMounted(() => {
 
             <fieldset>
               <legend>导出备份</legend>
-              <p v-if="exportAppDbSupported" class="hint section-lead">
+              <p v-if="appDbExportFormat !== 'pgdump'" class="hint section-lead">
                 导出为口令加密的 <code>.luyunbak</code> 文件，可打包 POS 凭据、运行配置、业务数据与两类卫生照片。口令遗失将无法解密恢复，请牢记。
               </p>
               <p v-else class="hint section-lead">
-                导出为口令加密的 <code>.luyunbak</code> 文件，可打包 POS 凭据、运行配置、配方数据与两类卫生照片（PostgreSQL 的业务数据请走冷备/本机回滚快照）。口令遗失将无法解密恢复，请牢记。
+                导出为口令加密的 <code>.luyunbak</code> 文件，可打包 POS 凭据、运行配置、业务数据（PostgreSQL 整库快照）、配方数据与两类卫生照片。口令遗失将无法解密恢复，请牢记。
               </p>
               <div class="grid">
                 <div>
@@ -919,8 +922,8 @@ onMounted(() => {
                     <LuyunCheckbox v-model="exportForm.include_app_db" :disabled="!exportAppDbSupported" />
                     <span>同时打包业务数据库（订单、档口映射等）</span>
                   </label>
-                  <div v-if="!exportAppDbSupported" class="hint">
-                    PostgreSQL 门店的业务数据不在导出包内，请用宿主机冷备（<code>pg_dump</code>，命令见 <code>deploy/README.md</code> 第 10.4 节）或「备份点 → 本机回滚快照」。
+                  <div v-if="appDbExportFormat === 'pgdump'" class="hint">
+                    PostgreSQL 门店的业务数据以整库快照（<code>pg_dump</code>）打包，恢复时是<strong>整库覆盖</strong>、不能合并导入；宿主机冷备命令见 <code>deploy/README.md</code> 第 10.4 节。
                   </div>
                 </div>
                 <div class="full">
@@ -943,9 +946,7 @@ onMounted(() => {
                 </div>
               </div>
               <div v-if="exportHasLargePayload" class="hint">
-                {{ exportAppDbSupported
-                  ? '已勾选业务数据或配方，备份文件可能较大，导出耗时会更长。'
-                  : '已勾选配方，备份文件可能较大，导出耗时会更长。' }}
+                已勾选业务数据或配方，备份文件可能较大，导出耗时会更长。
               </div>
               <div class="actions">
                 <button type="button" class="btn btn-primary" :disabled="exporting" @click="onExportBackup">{{ exportBtnLabel }}</button>
@@ -1018,11 +1019,11 @@ onMounted(() => {
                 <div class="hint">恢复模式</div>
                 <LuyunRadioGroup
                   v-model="importState.mode"
-                  :options="[
-                    { value: 'merge', label: '合并去重追加' },
-                    { value: 'overwrite', label: '覆盖恢复 · 整库替换' },
-                  ]"
+                  :options="importModeOptions"
                 />
+                <div v-if="importHasPgAppDb" class="hint">
+                  这份备份的业务数据是 PostgreSQL 整库快照，只能整库覆盖恢复，<strong>不能与现有数据合并</strong>。
+                </div>
               </div>
 
               <div v-if="importPreview" class="import-block">
@@ -1037,7 +1038,7 @@ onMounted(() => {
                     <span>运行配置</span>
                   </label>
                   <label class="luyun-check-row">
-                    <LuyunCheckbox v-model="importState.apply_app_db" :disabled="!importIncludes.app_db" />
+                    <LuyunCheckbox v-model="importState.apply_app_db" :disabled="!importIncludes.app_db && !importIncludes.app_pg" />
                     <span>业务数据</span>
                   </label>
                   <label class="luyun-check-row">

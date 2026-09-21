@@ -449,10 +449,13 @@ class BackupExportImportRoundTripTest(unittest.TestCase):
 
 
 class BackupExportBackendCapabilityTest(unittest.TestCase):
-    """导出面板按后端能力渲染的依据：PG 不导出业务数据，但配方必须来自当前库。"""
+    """两种后端的导出/导入形态：都能带走业务数据，但 PG 只能整库覆盖恢复。"""
 
     def setUp(self):
         import asyncio
+
+        from services import credentials_store
+        from services.credentials_store import CredentialBundle
 
         self._old_database_dir = settings.DATABASE_DIR
         self._old_cold_dir = settings.COLD_BACKUP_DIR
@@ -461,6 +464,20 @@ class BackupExportBackendCapabilityTest(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         settings.DATABASE_DIR = self._tmpdir.name
         settings.COLD_BACKUP_DIR = os.path.join(self._tmpdir.name, "backups")
+
+        # 导出要打包凭据：没有 bundle 时 _build_backup_members 会直接拒绝
+        self._credentials_store = credentials_store
+        self._saved_creds = credentials_store._cache
+        credentials_store._cache = CredentialBundle(
+            phone="13800000000",
+            password="pw",
+            shop_id="1",
+            company_id="2",
+            shop_name="LuckIn",
+            delivery_shop_id="2",
+        )
+        (Path(self._tmpdir.name) / "credentials.enc").write_bytes(b"enc")
+
         self.db = DatabaseManager()
         self.assertTrue(asyncio.run(self.db.connect()))
         self.client = TestClient(_make_app(self.db))
@@ -470,6 +487,7 @@ class BackupExportBackendCapabilityTest(unittest.TestCase):
         import asyncio
 
         asyncio.run(self.db.close())
+        self._credentials_store._cache = self._saved_creds
         backup_retention.cache_set(self._saved_retention)
         backup_points.set_health_cache(None)
         settings.DATABASE_DIR = self._old_database_dir
@@ -514,25 +532,38 @@ class BackupExportBackendCapabilityTest(unittest.TestCase):
         ):
             body = self.client.get("/api/backup/points").json()
         self.assertEqual(body["backend"], "postgres")
-        self.assertFalse(body["export_app_db_supported"])
+        # 业务数据两种后端都能进包，差别在形态：PG 是整库 dump，只能覆盖恢复
+        self.assertTrue(body["export_app_db_supported"])
+        self.assertEqual(body["app_db_export_format"], "pgdump")
+        self.assertEqual(body["app_db_restore_mode"], "overwrite_only")
 
-    def test_pg_export_rejects_app_db_with_actionable_hint(self):
+    def test_pg_export_packs_pg_dump_member(self):
+        """PG 门店导出：业务数据成员是 app.pgdump，而不是拒之门外。"""
         with mock.patch.object(
             backup_service, "is_postgres_backend", return_value=True
+        ), mock.patch.object(
+            backup_service,
+            "export_pg_dump_bytes",
+            new=mock.AsyncMock(return_value=b"PGDUMP-CONTENT"),
         ):
             response = self.client.post(
                 "/api/backup/export", json=self._export_body(include_app_db=True)
             )
 
-        self.assertEqual(response.status_code, 400)
-        detail = response.json()["detail"]
-        # 光说「不支持」会让用户以为整个导出备份都不可用，必须给出下一步
-        self.assertIn("取消勾选", detail)
-        self.assertIn("pg_dump", detail)
+        self.assertEqual(response.status_code, 200)
+        parsed = backup_service.parse_backup(response.content, "pass1234")
+        self.assertEqual(parsed["app_pg_bytes"], b"PGDUMP-CONTENT")
+        self.assertEqual(parsed["meta"]["includes"]["app_pg"], True)
+        self.assertEqual(parsed["meta"]["includes"]["app_db"], False)
 
-        export_dir = Path(settings.DATABASE_DIR) / "backup_exports"
-        leftovers = list(export_dir.glob("*.luyunbak")) if export_dir.is_dir() else []
-        self.assertEqual(leftovers, [])
+        exported = [
+            p
+            for p in self.client.get("/api/backup/points").json()["points"]
+            if p["medium"] == "export_backup"
+        ]
+        self.assertEqual(len(exported), 1)
+        self.assertIn("app_pg", exported[0]["contents"])
+        self.assertTrue(exported[0]["recoverable"])
 
     def test_pg_export_draws_recipes_from_live_connection(self):
         self._seed_recipe()
@@ -574,6 +605,97 @@ class BackupExportBackendCapabilityTest(unittest.TestCase):
         exported = [p for p in points if p["medium"] == "export_backup"]
         self.assertEqual(len(exported), 1)
         self.assertIn("recipes_db", exported[0]["contents"])
+
+    # ---- PG 门店的导入：整库覆盖，且不能与 SQLite 包互灌 ----
+
+    def _pg_backup_blob(self) -> bytes:
+        blob, _meta = backup_service.build_export_backup(
+            "pass1234",
+            include_runtime=False,
+            runtime_data=None,
+            include_app_db=True,
+            app_db_bytes=None,
+            app_pg_bytes=b"PGDUMP-CONTENT",
+            include_recipes=False,
+            recipes_db_bytes=None,
+            include_standard_photos=False,
+            include_other_photos=False,
+            app_version="0.6.11",
+        )
+        return blob
+
+    def _preview(self, blob: bytes) -> dict:
+        response = self.client.post(
+            "/api/backup/import/preview",
+            files={"file": ("b.luyunbak", blob, "application/octet-stream")},
+            data={"passphrase": "pass1234"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def _apply_body(self, token: str, *, mode: str) -> dict:
+        return {
+            "import_token": token,
+            "mode": mode,
+            "apply_credentials": "false",
+            "apply_runtime": "false",
+            "apply_app_db": "true",
+            "apply_recipes": "false",
+            "apply_standard_photos": "false",
+            "apply_other_photos": "false",
+            "force": "false",
+        }
+
+    def test_pg_backup_preview_reports_pg_member_and_snapshot(self):
+        preview = self._preview(self._pg_backup_blob())
+        self.assertTrue(preview["has_app_pg"])
+        self.assertFalse(preview["has_app_db"])
+        self.assertTrue(preview["default_apply"]["app_pg"])
+        # 会写库就要先建前置快照——少了 app_pg 这一项判断，PG 包会被当成「不碰库」
+        self.assertTrue(preview["pre_snapshot"]["will_create"])
+
+    def test_pg_backup_merge_mode_is_rejected(self):
+        preview = self._preview(self._pg_backup_blob())
+        with mock.patch.object(
+            backup_service, "is_postgres_backend", return_value=True
+        ):
+            response = self.client.post(
+                "/api/backup/import/apply",
+                data=self._apply_body(preview["import_token"], mode="merge"),
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("覆盖", response.json()["detail"])
+
+    def test_pg_backup_on_sqlite_backend_is_rejected(self):
+        preview = self._preview(self._pg_backup_blob())
+        # 当前后端是 SQLite（测试环境），PG 整库 dump 灌不进来
+        response = self.client.post(
+            "/api/backup/import/apply",
+            data=self._apply_body(preview["import_token"], mode="overwrite"),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("PostgreSQL", response.json()["detail"])
+
+    def test_pg_backup_apply_goes_through_pg_restore(self):
+        preview = self._preview(self._pg_backup_blob())
+        with mock.patch.object(
+            backup_service, "is_postgres_backend", return_value=True
+        ), mock.patch.object(
+            backup_points, "create_pre_restore_snapshot", return_value="20260101_000000"
+        ), mock.patch.object(
+            backup_service,
+            "restore_app_pg_from_bytes",
+            new=mock.AsyncMock(),
+        ) as restore:
+            response = self.client.post(
+                "/api/backup/import/apply",
+                data=self._apply_body(preview["import_token"], mode="overwrite"),
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        restore.assert_awaited_once()
+        self.assertEqual(restore.await_args.args[1], b"PGDUMP-CONTENT")
+        self.assertTrue(response.json()["applied"]["app_pg"])
 
 
 if __name__ == "__main__":

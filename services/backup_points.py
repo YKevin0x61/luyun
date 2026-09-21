@@ -26,6 +26,7 @@ from config import settings
 from services import backup_retention, backup_service
 from services.backup_service import (
     CONTENT_APP_DB,
+    CONTENT_APP_PG,
     CONTENT_CREDENTIALS,
     CONTENT_LABELS,
     CONTENT_OTHER_PHOTOS,
@@ -271,14 +272,17 @@ def _contents_from_includes(includes: Dict[str, Any]) -> List[str]:
     mapping = (
         (CONTENT_RUNTIME, "runtime"),
         (CONTENT_APP_DB, "app_db"),
+        (CONTENT_APP_PG, "app_pg"),
         (CONTENT_RECIPES, "recipes_db"),
         (CONTENT_STANDARD_PHOTOS, "standard_photos"),
         (CONTENT_OTHER_PHOTOS, "other_photos"),
     )
     contents = [content for content, key in mapping if includes.get(key)]
-    # 运行配置（营业时段 / 轮询间隔等）落在 app.db 的 app_settings 表里，
-    # 因此只要带了业务数据，运行配置就随之一并恢复。
-    if CONTENT_APP_DB in contents and CONTENT_RUNTIME not in contents:
+    # 运行配置（营业时段 / 轮询间隔等）落在 app_settings 表里，两种后端的整库
+    # 副本都会带上它，因此只要带了业务数据，运行配置就随之一并恢复。
+    if (
+        CONTENT_APP_DB in contents or CONTENT_APP_PG in contents
+    ) and CONTENT_RUNTIME not in contents:
         contents.append(CONTENT_RUNTIME)
     return contents
 

@@ -38,6 +38,11 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
    * 不支持，才关掉业务数据，避免误伤 SQLite 门店的既有行为。
    */
   const exportAppDbSupported = ref(true)
+  /**
+   * 业务数据的打包形态：'sqlite'（app.db 文件，可合并导入）或 'pgdump'
+   * （PostgreSQL 整库快照，只能整库覆盖）。未知时按 sqlite 处理。
+   */
+  const appDbExportFormat = ref('sqlite')
   const exportForm = reactive({
     passphrase: '',
     passphrase2: '',
@@ -232,6 +237,7 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       mediumPurposes.value = data?.medium_purposes || {}
       dbBackend.value = typeof data?.backend === 'string' ? data.backend : ''
       exportAppDbSupported.value = data?.export_app_db_supported !== false
+      appDbExportFormat.value = data?.app_db_export_format === 'pgdump' ? 'pgdump' : 'sqlite'
       // 刷新后必须继续保持 PG 下的关闭状态，不能把已禁用的项又打开。
       applyExportAppDbCapability()
       applyHealth(data?.health)
@@ -330,6 +336,17 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     importValidation.value?.in_backup?.errors || [])
   const importHasErrors = computed(() =>
     importValidation.value?.in_backup?.ok === false)
+  /** 这份包的「业务数据」是 PG 整库 dump：只能整库覆盖，没有合并语义。 */
+  const importHasPgAppDb = computed(() => importPreview.value?.has_app_pg === true)
+  /** 恢复模式选项：PG 整库快照下直接不给「合并去重追加」，避免选了必然 400。 */
+  const importModeOptions = computed(() =>
+    importHasPgAppDb.value
+      ? [{ value: 'overwrite', label: '覆盖恢复 · 整库替换' }]
+      : [
+          { value: 'merge', label: '合并去重追加' },
+          { value: 'overwrite', label: '覆盖恢复 · 整库替换' },
+        ],
+  )
 
   const importCrossPoint = computed(() => importValidation.value?.cross_point || null)
   const crossPointStandardMissing = computed(() =>
@@ -389,7 +406,8 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     if (defaults) {
       importState.apply_credentials = !!defaults.credentials
       importState.apply_runtime = !!defaults.runtime
-      importState.apply_app_db = !!defaults.app_db
+      // 两种后端的业务数据共用这一个勾选（成员分别是 app.db / app.pgdump）
+      importState.apply_app_db = !!(defaults.app_db || defaults.app_pg)
       importState.apply_recipes = !!defaults.recipes_db
       importState.apply_standard_photos = !!defaults.standard_photos
       importState.apply_other_photos = !!defaults.other_photos
@@ -398,7 +416,7 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     const includes = importIncludes.value
     importState.apply_credentials = true
     importState.apply_runtime = !!includes.runtime
-    importState.apply_app_db = !!includes.app_db
+    importState.apply_app_db = !!(includes.app_db || includes.app_pg)
     importState.apply_recipes = !!includes.recipes_db
     importState.apply_standard_photos = !!includes.standard_photos
     importState.apply_other_photos = !!includes.other_photos
@@ -476,6 +494,8 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       importPreview.value = data
       importToken.value = data.import_token || ''
       forceContinue.value = false
+      // PG 整库快照只有覆盖一种恢复方式：预览一出来就把模式摆正
+      if (data?.has_app_pg) importState.mode = 'overwrite'
       syncImportApplyOptions()
       finishProgress(previewProgress, 'preview', true)
       if (data?.validation?.in_backup?.ok === false) {
@@ -540,7 +560,7 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     try {
       const formData = new FormData()
       formData.append('import_token', importToken.value)
-      formData.append('mode', importState.mode)
+      formData.append('mode', importHasPgAppDb.value ? 'overwrite' : importState.mode)
       formData.append('apply_credentials', importState.apply_credentials ? 'true' : 'false')
       formData.append('apply_runtime', importState.apply_runtime ? 'true' : 'false')
       formData.append('apply_app_db', importState.apply_app_db ? 'true' : 'false')
@@ -917,6 +937,7 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     // 导出备份
     dbBackend,
     exportAppDbSupported,
+    appDbExportFormat,
     exportForm,
     exporting,
     exportBtnLabel,
@@ -966,6 +987,8 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     importPreviewMeta,
     importPreviewCredentials,
     importIncludes,
+    importHasPgAppDb,
+    importModeOptions,
     importPreviewItems,
     importPhotos,
     importPhotoItems,

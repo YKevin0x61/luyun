@@ -23,6 +23,7 @@ BACKUP_META_FILENAME = "meta.json"
 CREDENTIALS_FILENAME = "credentials.json"
 RUNTIME_FILENAME = "runtime.json"
 APP_DB_FILENAME = "app.db"
+APP_PG_FILENAME = "app.pgdump"
 RECIPES_DB_FILENAME = "recipes.db"
 PHOTO_DIRNAME = "photos"
 TTL_SECONDS = 15 * 60
@@ -156,6 +157,12 @@ def create_staging(owner: str, parsed: dict) -> str:
     if app_db_bytes:
         _write_private_bytes(staging_dir / APP_DB_FILENAME, app_db_bytes)
 
+    # PG 门店的业务数据成员是整库 dump（app.pgdump）：漏了这一步，预览看到的
+    # 内容与真正能恢复的内容就会不一致（apply 时会当成「包里没有业务数据」）。
+    app_pg_bytes = parsed.get("app_pg_bytes")
+    if app_pg_bytes:
+        _write_private_bytes(staging_dir / APP_PG_FILENAME, app_pg_bytes)
+
     recipes_db_bytes = parsed.get("recipes_db_bytes")
     if recipes_db_bytes:
         _write_private_bytes(staging_dir / RECIPES_DB_FILENAME, recipes_db_bytes)
@@ -225,6 +232,11 @@ def load_parsed_from_staging(token: str, owner: str) -> dict:
     if app_db_path.is_file():
         app_db_bytes = app_db_path.read_bytes()
 
+    app_pg_bytes = None
+    app_pg_path = staging_dir / APP_PG_FILENAME
+    if app_pg_path.is_file():
+        app_pg_bytes = app_pg_path.read_bytes()
+
     recipes_db_bytes = None
     recipes_db_path = staging_dir / RECIPES_DB_FILENAME
     if recipes_db_path.is_file():
@@ -245,6 +257,7 @@ def load_parsed_from_staging(token: str, owner: str) -> dict:
         "credentials": _read_json(cred_path),
         "runtime": runtime_data,
         "app_db_bytes": app_db_bytes,
+        "app_pg_bytes": app_pg_bytes,
         "recipes_db_bytes": recipes_db_bytes,
         "standard_photos": standard_photos,
         "other_photos": other_photos,

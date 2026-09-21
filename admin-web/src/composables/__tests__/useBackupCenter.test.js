@@ -443,6 +443,59 @@ describe('useBackupCenter', () => {
     expect(canApplyImport.value).toBe(true)
   })
 
+  it('reads 业务数据打包形态 from points（PG 是整库快照）', async () => {
+    apiGet.mockImplementation((path) => {
+      if (path === '/api/backup/points') {
+        return Promise.resolve(pointsPayload({
+          backend: 'postgres',
+          export_app_db_supported: true,
+          app_db_export_format: 'pgdump',
+          app_db_restore_mode: 'overwrite_only',
+        }))
+      }
+      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
+      return Promise.resolve({})
+    })
+    const { appDbExportFormat, loadPoints } = makeHarness()
+
+    // 未知时按 SQLite 处理，别把老后端的界面文案带偏
+    expect(appDbExportFormat.value).toBe('sqlite')
+    await loadPoints()
+    expect(appDbExportFormat.value).toBe('pgdump')
+  })
+
+  it('PG 整库快照的包：恢复模式只给覆盖，业务数据默认勾上', async () => {
+    const pgIncludes = {
+      runtime: false, app_db: false, app_pg: true,
+      recipes_db: false, standard_photos: false, other_photos: false,
+    }
+    apiUpload.mockResolvedValue(previewPayload({
+      meta: { exported_at: '2026-09-21T22:00:00+08:00', app_version: '0.6.11', includes: pgIncludes },
+      includes: pgIncludes,
+      has_app_db: false,
+      has_app_pg: true,
+      has_recipes: false,
+      default_apply: {
+        credentials: true, runtime: false, app_db: false, app_pg: true,
+        recipes_db: false, standard_photos: false, other_photos: false,
+      },
+      requires_force: false,
+      validation: { in_backup: { ok: true, errors: [] }, cross_point: { has_difference: false, missing: {} } },
+    }))
+    const harness = makeHarness()
+    harness.importState.mode = 'merge'
+    harness.onImportFileChange({ name: 'pg.luyunbak' })
+    harness.importState.passphrase = 'secret1'
+    await harness.onPreviewImport()
+
+    // 整库 dump 没有合并语义：预览一出来就把模式摆正，选项里也不给合并
+    expect(harness.importHasPgAppDb.value).toBe(true)
+    expect(harness.importState.mode).toBe('overwrite')
+    expect(harness.importModeOptions.value.map((o) => o.value)).toEqual(['overwrite'])
+    // 业务数据勾选对 app_pg 成员同样生效（两个成员共用这一个开关）
+    expect(harness.importState.apply_app_db).toBe(true)
+  })
+
   it('blocks apply when the 备份 itself is corrupt (cannot be overridden)', async () => {
     apiUpload.mockResolvedValue(previewPayload({
       validation: {

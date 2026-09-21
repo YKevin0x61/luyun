@@ -115,17 +115,27 @@ describe('SetupView 备份中心接线契约', () => {
     expect(src).not.toContain('<th>时间戳</th>')
   })
 
-  it('PG 门店导出面板禁用业务数据，并指路冷备 / 本机回滚快照', () => {
+  it('PG 门店导出面板说明业务数据走整库快照，并指路冷备命令', () => {
     const src = compact(setupView)
-    // 勾选框按后端能力位禁用，旁边给出替代路径
+    // 业务数据两种后端都能勾（能力位保留给未来限制），形态差异靠 appDbExportFormat 表达
     expect(src).toContain(':disabled="!exportAppDbSupported"')
-    expect(src).toContain('PostgreSQL门店的业务数据不在导出包内')
+    expect(src).toContain("appDbExportFormat==='pgdump'")
+    expect(src).toContain('PostgreSQL门店的业务数据以整库快照')
+    expect(src).toContain('整库覆盖')
     expect(src).toContain('pg_dump')
     expect(src).toContain('deploy/README.md')
     expect(src).toContain('第10.4节')
-    expect(src).toContain('「备份点→本机回滚快照」')
-    // 面板顶部说明按能力切换：PG 下不再声称能打包业务数据
+    // 面板顶部说明按形态切换：PG 下要写明业务数据是整库快照
     expect(src).toContain('业务数据与两类卫生照片')
-    expect(src).toContain('配方数据与两类卫生照片（PostgreSQL的业务数据请走冷备/本机回滚快照）')
+    expect(src).toContain('业务数据（PostgreSQL整库快照）')
+  })
+
+  it('PG 备份的恢复模式只给覆盖，并说明不能合并', () => {
+    const src = compact(setupView)
+    expect(src).toContain(':options="importModeOptions"')
+    expect(src).toContain('这份备份的业务数据是PostgreSQL整库快照')
+    expect(src).toContain('不能与现有数据合并')
+    // 导入面板的业务数据勾选对两种成员都放行（app_db / app_pg）
+    expect(src).toContain('!importIncludes.app_db&&!importIncludes.app_pg')
   })
 })

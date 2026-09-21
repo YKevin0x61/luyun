@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -454,6 +455,7 @@ def _build_backup_members(
     app_db_bytes: Optional[bytes],
     include_recipes: bool,
     recipes_db_bytes: Optional[bytes],
+    app_pg_bytes: Optional[bytes] = None,
     include_standard_photos: bool = False,
     include_other_photos: bool = False,
     photo_members: Optional[Dict[str, bytes]] = None,
@@ -484,6 +486,7 @@ def _build_backup_members(
     includes = {
         "runtime": False,
         "app_db": False,
+        "app_pg": False,
         "recipes_db": False,
         CONTENT_STANDARD_PHOTOS: False,
         CONTENT_OTHER_PHOTOS: False,
@@ -498,6 +501,12 @@ def _build_backup_members(
     if include_app_db and app_db_bytes:
         members["app.db"] = app_db_bytes
         includes["app_db"] = True
+
+    # PostgreSQL 门店的业务数据是整库 pg_dump：成员名与冷备保持一致，恢复端按
+    # 成员名区分「SQLite 文件」与「PG 整库 dump」，两者不能互相灌。
+    if include_app_db and app_pg_bytes:
+        members["app.pgdump"] = app_pg_bytes
+        includes["app_pg"] = True
 
     if include_recipes and recipes_db_bytes:
         members["recipes.db"] = recipes_db_bytes
@@ -571,6 +580,7 @@ def build_export_backup(
     app_db_bytes: Optional[bytes],
     include_recipes: bool,
     recipes_db_bytes: Optional[bytes],
+    app_pg_bytes: Optional[bytes] = None,
     include_standard_photos: bool = False,
     include_other_photos: bool = False,
     photo_members: Optional[Dict[str, bytes]] = None,
@@ -590,6 +600,7 @@ def build_export_backup(
         runtime_data=runtime_data,
         include_app_db=include_app_db,
         app_db_bytes=app_db_bytes,
+        app_pg_bytes=app_pg_bytes,
         include_recipes=include_recipes,
         recipes_db_bytes=recipes_db_bytes,
         include_standard_photos=include_standard_photos,
@@ -634,6 +645,7 @@ def build_backup(
     app_db_bytes: Optional[bytes],
     include_recipes: bool,
     recipes_db_bytes: Optional[bytes],
+    app_pg_bytes: Optional[bytes] = None,
     include_standard_photos: bool = False,
     include_other_photos: bool = False,
     photo_members: Optional[Dict[str, bytes]] = None,
@@ -650,6 +662,7 @@ def build_backup(
         runtime_data=runtime_data,
         include_app_db=include_app_db,
         app_db_bytes=app_db_bytes,
+        app_pg_bytes=app_pg_bytes,
         include_recipes=include_recipes,
         recipes_db_bytes=recipes_db_bytes,
         include_standard_photos=include_standard_photos,
@@ -755,6 +768,12 @@ def parse_backup(blob: bytes, passphrase: str) -> dict:
             if expected_sha.get("app.db") != _sha256_hex(app_db_bytes):
                 raise ValueError("备份校验失败（文件可能被篡改）")
 
+        app_pg_bytes = None
+        if "app.pgdump" in names:
+            app_pg_bytes = _read_tar_member(tar, "app.pgdump")
+            if expected_sha.get("app.pgdump") != _sha256_hex(app_pg_bytes):
+                raise ValueError("备份校验失败（文件可能被篡改）")
+
         recipes_db_bytes = None
         if "recipes.db" in names:
             recipes_db_bytes = _read_tar_member(tar, "recipes.db")
@@ -786,6 +805,7 @@ def parse_backup(blob: bytes, passphrase: str) -> dict:
         "credentials": credentials,
         "runtime": runtime_data,
         "app_db_bytes": app_db_bytes,
+        "app_pg_bytes": app_pg_bytes,
         "recipes_db_bytes": recipes_db_bytes,
         "standard_photos": photos[PHOTO_STANDARD],
         "other_photos": photos[PHOTO_OTHER],
@@ -958,6 +978,57 @@ def restore_pg_dump_sync(dump_path: str) -> None:
     if _pg_psql_rows(PG_SEQUENCE_RESET_SQL) is None:
         logger.warning("⚠️ 整库恢复完成，但 identity 序列重置失败（新写入可能撞主键）")
     logger.warning("✅ [审计] PostgreSQL 整库恢复完成")
+
+
+async def export_pg_dump_bytes() -> Optional[bytes]:
+    """把整个 PostgreSQL 库打成 custom-format dump 的字节串。
+
+    这是 PG 门店导出包里的「业务数据」成员（``app.pgdump``）：SQLite 那边是
+    ``app.db`` 文件，这边是一份 ``pg_dump``。两者不能互换——恢复时按成员名判定。
+
+    dump 走临时文件：pg_dump 只能写文件，不产出 stdout 流。
+    """
+    fd, tmp_path = tempfile.mkstemp(suffix=".pgdump", prefix="luyun-export-")
+    os.close(fd)
+    try:
+        await asyncio.to_thread(_pg_dump_sync, tmp_path)
+        with open(tmp_path, "rb") as handle:
+            return handle.read()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+async def restore_app_pg_from_bytes(db, dump_bytes: bytes) -> None:
+    """用整库 dump 覆盖当前 PostgreSQL（``pg_restore --clean``）。
+
+    调用方负责前置快照与恢复后的会话失效。这里只管两件必须有的事：
+
+    - **先断开我们自己的连接**：``--clean`` 要 drop 并重建对象，我方的未提交事务
+      会持表锁让 drop 卡住；
+    - **再把连接接回来**：恢复失败时后台还要能报错、能重试（连接留着的话其上的
+      prepared statement 也已失效）。
+
+    对照 ``overwrite_app_db_from_bytes``（SQLite 那条 ATTACH 路径）：语义一样是整库
+    替换，只是 PG 没有「合并导入」这种粒度。
+    """
+    fd, tmp_path = tempfile.mkstemp(suffix=".pgdump", prefix="luyun-restore-")
+    os.close(fd)
+    try:
+        with open(tmp_path, "wb") as handle:
+            handle.write(dump_bytes)
+        await db.close()
+        try:
+            await asyncio.to_thread(restore_pg_dump_sync, tmp_path)
+        finally:
+            await db.connect()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _scan_capture_members(root: Path) -> Dict[str, Any]:

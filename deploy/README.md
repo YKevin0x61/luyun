@@ -483,7 +483,7 @@ sudo systemctl enable luyun-update.service   # oneshot，按需 start
 | 读写 / KDS / admin 表格编辑 | ✓ | ✓ |
 | 更新前强制备份（`backing_up`） | ✓ `app.db` | ✓ `pg_dump` → `app.pgdump` |
 | 定时冷备（`deploy/backup.sh`） | ✓ | ✓ 同上 |
-| Admin「备份导出 / 导入」 | ✓ 含业务数据 | 导出**不含业务数据**（凭据 / 运行配置 / 配方 / 照片照常打包），业务数据见 10.4 的手工 `pg_dump`；导入照常可用 |
+| Admin「备份导出 / 导入」 | ✓ 业务数据是 `app.db` 文件 | ✓ 业务数据是 `app.pgdump` 整库快照；导入走 `pg_restore`，**只能整库覆盖**（无合并） |
 | 必须单 worker | ✓ | **仍是**——realtime hub / 日志缓冲 / 爬虫计数器还在进程内 |
 
 Redis 容器已在 `docker-compose.yml` 的 `pg` profile 里备好，但**代码尚未接入**，
@@ -577,10 +577,9 @@ docker compose -f deploy/docker-compose.yml --profile pg up -d
 
 恢复期间服务短暂无法写库（采集会中断一轮），**不要在营业高峰做**。
 
-**手工冷备（`pg_dump`）**：管理后台的「导出备份」（`.luyunbak`）在 PG 门店
-**不含业务数据**——那份成员是 SQLite 文件，灌不进 PostgreSQL。要一份能整体回退
-的业务数据副本，用 `pg_dump`（与更新作业的 `backing_up` 阶段、`deploy/backup.sh`
-是同一条命令）：
+**手工冷备（`pg_dump`）**：管理后台的「导出备份」（`.luyunbak`）在 PG 门店会把业务
+数据打包成整库快照（`app.pgdump`），恢复时按成员名走 `pg_restore --clean` 整库覆盖。
+同样的命令也可以手工跑（与更新作业的 `backing_up` 阶段、`deploy/backup.sh` 是同一条）：
 
 ```bash
 mkdir -p backups/manual
@@ -589,8 +588,9 @@ pg_dump --format=custom --no-owner --no-acl \
   "postgresql://luyun:<密码>@127.0.0.1:5432/luyun"
 ```
 
-> `.luyunbak` 里仍然带着凭据、运行配置、配方数据与两类卫生照片（页面导出照旧可用），
-> 缺的只是业务数据这一项；管理后台会在导出面板里把「业务数据」置灰并说明原因。
+> `.luyunbak` 里同时带着凭据、运行配置、配方数据与两类卫生照片；PG 门店的业务数据
+> 是整库快照，所以「业务数据」这一项的恢复粒度是**整库覆盖**，不是逐表合并——
+> 导入面板会据此只提供「覆盖恢复」。
 
 **手工恢复（冷备归档、或页面不可用时）**：
 
