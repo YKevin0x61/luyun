@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,6 +16,7 @@ from unittest import mock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from api import backup as backup_api
 from api.backup import router as backup_router
 from api.security import require_session, verify_admin_token
 from config import settings
@@ -493,6 +495,7 @@ class BackupExportBackendCapabilityTest(unittest.TestCase):
         settings.DATABASE_DIR = self._old_database_dir
         settings.COLD_BACKUP_DIR = self._old_cold_dir
         self._tmpdir.cleanup()
+        backup_api._EXPORT_JOBS.clear()
 
     def _seed_recipe(self) -> None:
         import asyncio
@@ -539,12 +542,17 @@ class BackupExportBackendCapabilityTest(unittest.TestCase):
 
     def test_pg_export_packs_pg_dump_member(self):
         """PG 门店导出：业务数据成员是 app.pgdump，而不是拒之门外。"""
+
+        async def _fake_dump(dst_path: str) -> None:
+            with open(dst_path, "wb") as handle:
+                handle.write(b"PGDUMP-CONTENT")
+
         with mock.patch.object(
             backup_service, "is_postgres_backend", return_value=True
         ), mock.patch.object(
             backup_service,
-            "export_pg_dump_bytes",
-            new=mock.AsyncMock(return_value=b"PGDUMP-CONTENT"),
+            "export_pg_dump_to_file",
+            side_effect=_fake_dump,
         ):
             response = self.client.post(
                 "/api/backup/export", json=self._export_body(include_app_db=True)
@@ -696,6 +704,77 @@ class BackupExportBackendCapabilityTest(unittest.TestCase):
         restore.assert_awaited_once()
         self.assertEqual(restore.await_args.args[1], b"PGDUMP-CONTENT")
         self.assertTrue(response.json()["applied"]["app_pg"])
+
+
+    # ---- 任务式导出：进度可见 + 完成后才下载 ----
+
+    def _wait_job(self, client: TestClient, job_id: str, timeout: float = 15.0) -> dict:
+        deadline = time.time() + timeout
+        state: dict = {}
+        while time.time() < deadline:
+            state = client.get(f"/api/backup/export/jobs/{job_id}").json()
+            if state["state"] in ("done", "failed"):
+                return state
+            time.sleep(0.05)
+        self.fail(f"导出任务超时未结束：{state}")
+
+    def test_export_job_reports_progress_then_downloads(self):
+        self._seed_recipe()
+
+        # 用 with 进入 lifespan：后台任务跑在 TestClient 的 loop 上，
+        # 不进入上下文的话每请求一个 loop，任务会被丢掉。
+        with TestClient(_make_app(self.db)) as client:
+            start = client.post(
+                "/api/backup/export/jobs", json=self._export_body(include_app_db=False)
+            )
+            self.assertEqual(start.status_code, 200, start.text)
+            job_id = start.json()["job_id"]
+
+            state = self._wait_job(client, job_id)
+            self.assertEqual(state["state"], "done", state)
+            self.assertEqual(state["stage"], "done")
+            self.assertGreater(state["bytes"], 0)
+            self.assertTrue(state["name"].endswith(".luyunbak"))
+
+            download = client.get(f"/api/backup/export/jobs/{job_id}/download")
+            self.assertEqual(download.status_code, 200)
+            parsed = backup_service.parse_backup(download.content, "pass1234")
+            self.assertTrue(parsed["recipes_db_bytes"])
+            # 完成后的包同时登记成本机导出备份点
+            exported = [
+                p
+                for p in client.get("/api/backup/points").json()["points"]
+                if p["medium"] == "export_backup"
+            ]
+            self.assertEqual(len(exported), 1)
+
+    def test_export_job_limits_concurrency_and_surfaces_failure(self):
+        def _slow_failure(*args, **kwargs):
+            time.sleep(0.4)
+            raise ValueError("导出口令至少 6 位")
+
+        with TestClient(_make_app(self.db)) as client, mock.patch.object(
+            backup_service, "build_export_backup_to_file", side_effect=_slow_failure
+        ):
+            first = client.post(
+                "/api/backup/export/jobs", json=self._export_body(include_app_db=False)
+            )
+            self.assertEqual(first.status_code, 200)
+            second = client.post(
+                "/api/backup/export/jobs", json=self._export_body(include_app_db=False)
+            )
+            self.assertEqual(second.status_code, 429)
+
+            state = self._wait_job(client, first.json()["job_id"])
+            self.assertEqual(state["state"], "failed")
+            self.assertIn("口令至少", state["error"])
+            # 失败的任务不给下载
+            self.assertEqual(
+                client.get(
+                    f"/api/backup/export/jobs/{first.json()['job_id']}/download"
+                ).status_code,
+                409,
+            )
 
 
 if __name__ == "__main__":

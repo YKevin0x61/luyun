@@ -115,6 +115,10 @@ const {
   exportForm,
   exporting,
   exportBtnLabel,
+  exportJob,
+  exportStageText,
+  exportPercent,
+  exportIndeterminate,
   exportHasLargePayload,
   // 后端能力位：业务数据能否打进包（两种后端都能，形态不同），以及形态本身
   exportAppDbSupported,
@@ -950,6 +954,17 @@ onMounted(() => {
               </div>
               <div class="actions">
                 <button type="button" class="btn btn-primary" :disabled="exporting" @click="onExportBackup">{{ exportBtnLabel }}</button>
+              </div>
+              <!-- 导出是服务端后台任务：按 stage 显示阶段文案，照片阶段还有 done/total -->
+              <div v-if="exporting" class="upload-progress">
+                <div class="upload-progress__track">
+                  <div
+                    class="upload-progress__bar"
+                    :class="{ indeterminate: exportIndeterminate }"
+                    :style="{ width: exportPercent + '%' }"
+                  ></div>
+                </div>
+                <span class="upload-progress__label">{{ exportStageText }}</span>
               </div>
             </fieldset>
 

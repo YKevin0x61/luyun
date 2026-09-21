@@ -9,11 +9,14 @@ import logging
 import os
 import re
 import tempfile
+import time
+import uuid
 from datetime import datetime
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from config import settings
@@ -183,98 +186,136 @@ def _validation(parsed: dict) -> dict:
     }
 
 
-async def _collect_export_payload(payload: BackupExportIn, db: DatabaseManager) -> dict:
+def _cleanup_temp_files(paths: Sequence[str]) -> None:
+    """删除导出过程中落下的临时成员文件（成品包不在其中）。"""
+    for path in paths:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _read_temp_bytes(path: Optional[str]) -> Optional[bytes]:
+    if not path:
+        return None
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def _report_progress(
+    progress: Optional[Callable[[str, int, int], None]],
+    stage: str,
+    done: int = 0,
+    total: int = 0,
+) -> None:
+    if progress is None:
+        return
+    try:
+        progress(stage, done, total)
+    except Exception:  # noqa: BLE001 —— 进度上报不该把导出搞挂
+        logger.debug("导出进度回调失败 stage=%s", stage, exc_info=True)
+
+
+async def _collect_export_payload(
+    payload: BackupExportIn,
+    db: DatabaseManager,
+    progress: Optional[Callable[[str, int, int], None]] = None,
+) -> dict:
+    """收集导出成员。
+
+    大成员（``app.db`` / ``app.pgdump`` / 照片）只给**磁盘路径**：打包时 tar 直接
+    流式读走，不再先把它们读成 bytes 堆在内存里。调用方负责用返回的 ``temp_paths``
+    清理临时文件。
+    """
+    _report_progress(progress, "collecting")
     runtime_data = None
     if payload.include_runtime:
         runtime_data = await runtime_settings.load_runtime_settings(db)
 
-    app_db_bytes = None
-    app_pg_bytes = None
-    if payload.include_app_db:
-        if backup_service.is_postgres_backend():
-            # PG 的业务数据不是可导出的 SQLite 文件：这里打一份整库 pg_dump 当成员
-            # （app.pgdump），恢复端按成员名走 pg_restore 整库覆盖。
-            app_pg_bytes = await backup_service.export_pg_dump_bytes()
-        else:
-            fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-export-")
-            os.close(fd)
-            try:
-                await db.export_merged_sqlite_file(tmp_path)
-                with open(tmp_path, "rb") as f:
-                    app_db_bytes = f.read()
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+    temp_paths: List[str] = []
+    app_db_path: Optional[str] = None
+    app_pg_path: Optional[str] = None
+    recipes_db_bytes: Optional[bytes] = None
+    photo_info: dict = {"members": [], "manifest": {}, "missing": {}}
+    try:
+        if payload.include_app_db:
+            _report_progress(progress, "app_data")
+            if backup_service.is_postgres_backend():
+                # PG 的业务数据不是可导出的 SQLite 文件：打一份整库 pg_dump 当成员
+                # （app.pgdump），恢复端按成员名走 pg_restore 整库覆盖。
+                fd, app_pg_path = tempfile.mkstemp(
+                    suffix=".pgdump", prefix="luyun-export-"
+                )
+                os.close(fd)
+                temp_paths.append(app_pg_path)
+                await backup_service.export_pg_dump_to_file(app_pg_path)
+            else:
+                fd, app_db_path = tempfile.mkstemp(suffix=".db", prefix="luyun-export-")
+                os.close(fd)
+                temp_paths.append(app_db_path)
+                await db.export_merged_sqlite_file(app_db_path)
 
-    recipes_db_bytes = None
-    if payload.include_recipes:
-        # 走当前连接而不是 settings.APP_DB_PATH：PG 后端下那个文件是迁移遗留的
-        # SQLite 副本，配方早与当前库分叉，打进去等于导出一份旧配方。
-        recipes_db_bytes = await backup_service.export_recipes_db_bytes_from_conn(
-            getattr(db, "_conn", None)
-        )
+        if payload.include_recipes:
+            _report_progress(progress, "recipes")
+            # 走当前连接而不是 settings.APP_DB_PATH：PG 后端下那个文件是迁移遗留的
+            # SQLite 副本，配方早与当前库分叉，打进去等于导出一份旧配方。
+            recipes_db_bytes = await backup_service.export_recipes_db_bytes_from_conn(
+                getattr(db, "_conn", None)
+            )
 
-    photo_info: dict = {"members": {}, "manifest": {}, "missing": {}}
-    if payload.include_standard_photos or payload.include_other_photos:
-        photo_info = backup_service.collect_hygiene_photo_members()
+        if payload.include_standard_photos or payload.include_other_photos:
+            _report_progress(progress, "photos_scan")
+            photo_info = backup_service.collect_hygiene_photo_paths()
+    except Exception:
+        _cleanup_temp_files(temp_paths)
+        raise
 
     return {
         "runtime_data": runtime_data,
-        "app_db_bytes": app_db_bytes,
-        "app_pg_bytes": app_pg_bytes,
+        "app_db_path": app_db_path,
+        "app_pg_path": app_pg_path,
         "recipes_db_bytes": recipes_db_bytes,
         "photo_info": photo_info,
+        "temp_paths": temp_paths,
     }
 
 
-@router.post("/export")
-async def export_backup(
-    payload: BackupExportIn,
-    db: DatabaseManager = Depends(get_db),
-    session_id: str = Depends(require_session),
-):
-    """导出口令加密备份包，并在本机登记为一条导出备份点。"""
-    collected = await _collect_export_payload(payload, db)
-    photo_info = collected["photo_info"]
-    consistency = backup_service.photo_consistency(
-        photo_info.get("manifest") or {},
-        photo_info.get("missing") or {},
-    )
+# ==================== 任务式导出（进度可见）====================
 
-    try:
-        blob, meta = backup_service.build_export_backup(
-            payload.passphrase,
-            include_runtime=payload.include_runtime,
-            runtime_data=collected["runtime_data"],
-            include_app_db=payload.include_app_db,
-            app_db_bytes=collected["app_db_bytes"],
-            app_pg_bytes=collected["app_pg_bytes"],
-            include_recipes=payload.include_recipes,
-            recipes_db_bytes=collected["recipes_db_bytes"],
-            include_standard_photos=payload.include_standard_photos,
-            include_other_photos=payload.include_other_photos,
-            photo_members=photo_info.get("members"),
-            photo_manifest=photo_info.get("manifest"),
-            photo_missing=photo_info.get("missing"),
-            consistency=consistency,
-            provenance=PROVENANCE_MANUAL,
-            app_version=settings.APP_VERSION,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        logger.error("导出系统备份失败: %s", exc)
-        raise HTTPException(status_code=500, detail="导出系统备份失败")
+_EXPORT_JOBS: Dict[str, Dict[str, Any]] = {}
+_EXPORT_JOB_TTL_SECONDS = 30 * 60
+# 导出是重活（pg_dump、tar、加密都可能跑到分钟级），串行更稳也更好解释
+_EXPORT_MAX_RUNNING = 1
 
-    ts = datetime.now(credentials_store.CHINA_TZ).strftime("%Y%m%d_%H%M%S")
-    filename = f"luyun_backup_{ts}.luyunbak"
-    export_dir = backup_service._export_root()
-    export_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = export_dir / filename
+
+def _prune_export_jobs(now: float) -> None:
+    """清掉过期任务记录。**不删成品包**：它是本机导出备份点，归保留配置管。"""
+    for job_id, job in list(_EXPORT_JOBS.items()):
+        if now - job["started_at"] < _EXPORT_JOB_TTL_SECONDS:
+            continue
+        _cleanup_temp_files(job.get("temp_paths") or [])
+        _EXPORT_JOBS.pop(job_id, None)
+
+
+def _job_public_state(job: dict) -> dict:
+    return {
+        "state": job["state"],
+        "stage": job["stage"],
+        "done": job["done"],
+        "total": job["total"],
+        "error": job["error"],
+        "bytes": job.get("bytes") or 0,
+        "name": job.get("name") or "",
+    }
+
+
+async def _register_export_archive(
+    archive_path: Path,
+    meta: dict,
+    db: DatabaseManager,
+) -> None:
+    """写侧车清单 + 按保留配置收敛本机副本（同步端点与任务共用）。"""
     try:
-        archive_path.write_bytes(blob)
         backup_service.write_export_sidecar(archive_path, meta)
         # 本机副本按保留配置收敛，避免导出备份无限占用磁盘
         config = await backup_retention.load_retention(db)
@@ -289,11 +330,226 @@ async def export_backup(
         except OSError:
             pass
 
+
+async def _run_export_job(
+    job_id: str,
+    payload: BackupExportIn,
+    db: DatabaseManager,
+) -> None:
+    """后台把导出包写进 backup_exports，进度写在任务表里供前端轮询。"""
+    job = _EXPORT_JOBS[job_id]
+    collected: dict = {}
+
+    def _progress(stage: str, done: int = 0, total: int = 0) -> None:
+        job["stage"] = stage
+        job["done"] = done
+        job["total"] = total
+
+    archive_path: Optional[Path] = None
+    try:
+        collected = await _collect_export_payload(payload, db, _progress)
+        job["temp_paths"] = collected["temp_paths"]
+        photo_info = collected["photo_info"]
+        consistency = backup_service.photo_consistency(
+            photo_info.get("manifest") or {},
+            photo_info.get("missing") or {},
+        )
+
+        ts = datetime.now(credentials_store.CHINA_TZ).strftime("%Y%m%d_%H%M%S")
+        filename = f"luyun_backup_{ts}.luyunbak"
+        export_dir = backup_service._export_root()
+        export_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = export_dir / filename
+
+        # tar + 加密是同步重活：扔进线程跑，别把事件循环（KDS、爬虫）堵住
+        meta = await asyncio.to_thread(
+            backup_service.build_export_backup_to_file,
+            str(archive_path),
+            payload.passphrase,
+            include_runtime=payload.include_runtime,
+            runtime_data=collected["runtime_data"],
+            include_app_db=payload.include_app_db,
+            app_db_source=collected["app_db_path"],
+            app_pg_source=collected["app_pg_path"],
+            include_recipes=payload.include_recipes,
+            recipes_db_bytes=collected["recipes_db_bytes"],
+            include_standard_photos=payload.include_standard_photos,
+            include_other_photos=payload.include_other_photos,
+            photo_members=photo_info.get("members"),
+            photo_manifest=photo_info.get("manifest"),
+            photo_missing=photo_info.get("missing"),
+            consistency=consistency,
+            provenance=PROVENANCE_MANUAL,
+            app_version=settings.APP_VERSION,
+            progress=_progress,
+        )
+        await _register_export_archive(archive_path, meta, db)
+
+        job.update(
+            state="done",
+            stage="done",
+            done=job["total"],
+            name=filename,
+            bytes=meta.get("archive_bytes") or 0,
+            path=str(archive_path),
+        )
+        logger.info(
+            "📦 [审计] 导出系统备份（runtime=%s app_db=%s app_pg=%s recipes=%s "
+            "标准图=%s 其它照片=%s，%.1f MB）",
+            payload.include_runtime,
+            payload.include_app_db,
+            bool(collected.get("app_pg_path")),
+            payload.include_recipes,
+            payload.include_standard_photos,
+            payload.include_other_photos,
+            (meta.get("archive_bytes") or 0) / 1024 / 1024,
+        )
+        # 本机新增了一个导出备份点：让健康结论下次读取时重算，别和列表打架。
+        backup_points.invalidate_health_cache()
+    except ValueError as exc:
+        if archive_path is not None:
+            archive_path.unlink(missing_ok=True)
+        job.update(state="failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 —— 后台任务必须自己收口，否则永远 running
+        logger.exception("导出系统备份失败 job=%s", job_id)
+        if archive_path is not None:
+            archive_path.unlink(missing_ok=True)
+        job.update(state="failed", error=f"导出失败：{exc}")
+    finally:
+        _cleanup_temp_files(collected.get("temp_paths") or [])
+        job["temp_paths"] = []
+
+
+@router.post("/export/jobs")
+async def start_export_backup(
+    payload: BackupExportIn,
+    db: DatabaseManager = Depends(get_db),
+    session_id: str = Depends(require_session),
+) -> Dict[str, Any]:
+    """起一个导出任务，立刻返回 job_id；打包进度由状态接口轮询。
+
+    同步返回会让浏览器干等（100 MB 级的库，实测 4 秒起步，大库更久），期间界面上
+    没有任何反馈。这里改成任务：POST 立刻返回，前端按 stage/done/total 显示进度，
+    完成后再去下载。
+    """
+    now = time.time()
+    _prune_export_jobs(now)
+    running = sum(1 for job in _EXPORT_JOBS.values() if job["state"] == "running")
+    if running >= _EXPORT_MAX_RUNNING:
+        raise HTTPException(status_code=429, detail="已有一个导出任务在跑，请稍候")
+
+    job_id = uuid.uuid4().hex
+    _EXPORT_JOBS[job_id] = {
+        "state": "running",
+        "stage": "collecting",
+        "done": 0,
+        "total": 0,
+        "error": "",
+        "started_at": now,
+        "path": None,
+        "name": "",
+        "bytes": 0,
+        "temp_paths": [],
+    }
+    asyncio.create_task(_run_export_job(job_id, payload, db))
+    return {"job_id": job_id, "state": "running"}
+
+
+@router.get("/export/jobs/{job_id}")
+async def read_export_backup(job_id: str) -> Dict[str, Any]:
+    """导出任务进度：state + stage + done/total。"""
+    job = _EXPORT_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
+    return _job_public_state(job)
+
+
+@router.get("/export/jobs/{job_id}/download")
+async def download_export_backup(job_id: str) -> FileResponse:
+    """下载已完成的导出包。包同时留在 backup_exports 里作为本机备份点。"""
+    job = _EXPORT_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
+    if job["state"] == "failed":
+        raise HTTPException(status_code=409, detail=job["error"] or "导出失败")
+    if job["state"] != "done":
+        raise HTTPException(status_code=409, detail="还在打包，请稍候")
+    path = job.get("path")
+    if not path or not Path(path).is_file():
+        raise HTTPException(status_code=410, detail="导出文件已被清理，请重新导出")
+    filename = job.get("name") or "luyun_backup.luyunbak"
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/export")
+async def export_backup(
+    payload: BackupExportIn,
+    db: DatabaseManager = Depends(get_db),
+    session_id: str = Depends(require_session),
+):
+    """同步导出口令加密备份包，并在本机登记为一条导出备份点。
+
+    兼容入口：管理后台走 ``/export/jobs`` 任务式（能看到进度、内存更省）。这条路径
+    要把成品整包读回内存当响应体，只适合小包或脚本调用。
+    """
+    collected: dict = {}
+    try:
+        collected = await _collect_export_payload(payload, db)
+        photo_info = collected["photo_info"]
+        consistency = backup_service.photo_consistency(
+            photo_info.get("manifest") or {},
+            photo_info.get("missing") or {},
+        )
+        blob, meta = backup_service.build_export_backup(
+            payload.passphrase,
+            include_runtime=payload.include_runtime,
+            runtime_data=collected["runtime_data"],
+            include_app_db=payload.include_app_db,
+            app_db_bytes=_read_temp_bytes(collected["app_db_path"]),
+            app_pg_bytes=_read_temp_bytes(collected["app_pg_path"]),
+            include_recipes=payload.include_recipes,
+            recipes_db_bytes=collected["recipes_db_bytes"],
+            include_standard_photos=payload.include_standard_photos,
+            include_other_photos=payload.include_other_photos,
+            photo_members={
+                name: path.read_bytes()
+                for name, path in (photo_info.get("members") or [])
+            },
+            photo_manifest=photo_info.get("manifest"),
+            photo_missing=photo_info.get("missing"),
+            consistency=consistency,
+            provenance=PROVENANCE_MANUAL,
+            app_version=settings.APP_VERSION,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("导出系统备份失败: %s", exc)
+        raise HTTPException(status_code=500, detail="导出系统备份失败")
+    finally:
+        _cleanup_temp_files(collected.get("temp_paths") or [])
+
+    ts = datetime.now(credentials_store.CHINA_TZ).strftime("%Y%m%d_%H%M%S")
+    filename = f"luyun_backup_{ts}.luyunbak"
+    export_dir = backup_service._export_root()
+    export_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = export_dir / filename
+    try:
+        archive_path.write_bytes(blob)
+    except OSError as exc:
+        logger.error("写本机导出副本失败: %s", exc)
+    else:
+        await _register_export_archive(archive_path, meta, db)
+
     logger.info(
         "📦 [审计] 导出系统备份（runtime=%s app_db=%s app_pg=%s recipes=%s 标准图=%s 其它照片=%s）",
         payload.include_runtime,
         payload.include_app_db,
-        bool(collected["app_pg_bytes"]),
+        bool(collected.get("app_pg_path")),
         payload.include_recipes,
         payload.include_standard_photos,
         payload.include_other_photos,

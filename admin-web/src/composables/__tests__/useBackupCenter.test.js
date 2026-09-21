@@ -5,6 +5,7 @@ const apiPost = vi.fn()
 const apiPut = vi.fn()
 const apiUpload = vi.fn()
 const downloadPost = vi.fn()
+const download = vi.fn()
 
 vi.mock('../../api/client', () => ({
   api: {
@@ -13,6 +14,7 @@ vi.mock('../../api/client', () => ({
     put: (...args) => apiPut(...args),
     upload: (...args) => apiUpload(...args),
     downloadPost: (...args) => downloadPost(...args),
+    download: (...args) => download(...args),
   },
 }))
 
@@ -182,7 +184,32 @@ describe('useBackupCenter', () => {
     apiPut.mockReset()
     apiUpload.mockReset()
     downloadPost.mockReset()
+    download.mockReset()
   })
+
+  /**
+   * 任务式导出的标准桩：POST 拿 job_id → 轮询一次就 done → 下载。
+   * 返回的 points 可覆盖（用于断言后端能力位）。
+   */
+  function stubExportJob({ points = pointsPayload(), jobState } = {}) {
+    apiPost.mockResolvedValue({ job_id: 'job-1', state: 'running' })
+    download.mockResolvedValue('luyun_backup_x.luyunbak')
+    apiGet.mockImplementation((path) => {
+      if (path === '/api/backup/export/jobs/job-1') {
+        return Promise.resolve(jobState || {
+          state: 'done',
+          stage: 'done',
+          done: 0,
+          total: 0,
+          bytes: 10,
+          name: 'luyun_backup_x.luyunbak',
+        })
+      }
+      if (path === '/api/backup/points') return Promise.resolve(points)
+      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
+      return Promise.resolve({})
+    })
+  }
 
   it('loads 备份健康 and exposes render-ready summary / checks / counts', async () => {
     apiGet.mockResolvedValue(healthPayload())
@@ -281,15 +308,10 @@ describe('useBackupCenter', () => {
     expect(showAlert).toHaveBeenCalledWith('error', expect.stringContaining('校验未通过'))
   })
 
-  it('exports with the two new photo switches and reloads points + health', async () => {
-    downloadPost.mockResolvedValue('luyun_backup_x.luyunbak')
-    apiGet.mockImplementation((path) => {
-      if (path === '/api/backup/points') return Promise.resolve(pointsPayload())
-      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
-      return Promise.resolve({})
-    })
+  it('exports through the job API and reloads points + health', async () => {
+    stubExportJob()
     const showAlert = vi.fn()
-    const { exportForm, onExportBackup } = useBackupCenter({ showAlert, clearAlert: vi.fn() })
+    const { exportForm, onExportBackup, exportJob } = useBackupCenter({ showAlert, clearAlert: vi.fn() })
 
     expect(exportForm.include_standard_photos).toBe(true)
     expect(exportForm.include_other_photos).toBe(true)
@@ -301,31 +323,84 @@ describe('useBackupCenter', () => {
 
     await onExportBackup()
 
-    expect(downloadPost).toHaveBeenCalledWith(
-      '/api/backup/export',
-      {
-        passphrase: 'secret1',
-        include_runtime: true,
-        include_app_db: true,
-        include_recipes: true,
-        include_standard_photos: false,
-        include_other_photos: true,
-      },
-      'luyun_backup.luyunbak',
+    expect(apiPost).toHaveBeenCalledWith('/api/backup/export/jobs', {
+      passphrase: 'secret1',
+      include_runtime: true,
+      include_app_db: true,
+      include_recipes: true,
+      include_standard_photos: false,
+      include_other_photos: true,
+    })
+    // 打包完成才下载，文件名用服务端给的那个
+    expect(download).toHaveBeenCalledWith(
+      '/api/backup/export/jobs/job-1/download',
+      'luyun_backup_x.luyunbak',
     )
     expect(apiGet).toHaveBeenCalledWith('/api/backup/points', null, null, 'no-store')
     expect(apiGet).toHaveBeenCalledWith('/api/backup/health', null, null, 'no-store')
     expect(exportForm.passphrase).toBe('')
+    // 任务收尾后进度状态清空
+    expect(exportJob.value).toBe(null)
+  })
+
+  it('shows server-reported export progress while the job is still packing', async () => {
+    let polls = 0
+    apiPost.mockResolvedValue({ job_id: 'job-1' })
+    download.mockResolvedValue('luyun_backup_x.luyunbak')
+    apiGet.mockImplementation((path) => {
+      if (path === '/api/backup/export/jobs/job-1') {
+        polls += 1
+        if (polls === 1) {
+          return Promise.resolve({ state: 'running', stage: 'photos', done: 12, total: 40 })
+        }
+        return Promise.resolve({
+          state: 'done',
+          stage: 'done',
+          done: 40,
+          total: 40,
+          bytes: 10,
+          name: 'luyun_backup_x.luyunbak',
+        })
+      }
+      if (path === '/api/backup/points') return Promise.resolve(pointsPayload())
+      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
+      return Promise.resolve({})
+    })
+    const { exportForm, onExportBackup, exportStageText, exportPercent, exportIndeterminate, exporting } =
+      makeHarness()
+    exportForm.passphrase = 'secret1'
+    exportForm.passphrase2 = 'secret1'
+
+    const pending = onExportBackup()
+    await vi.waitFor(() => {
+      expect(exportStageText.value).toBe('正在打包照片 12/40…')
+    })
+    expect(exportPercent.value).toBe(48)
+    expect(exportIndeterminate.value).toBe(false)
+    expect(exporting.value).toBe(true)
+
+    await pending
+    expect(download).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces a failed export job as an error alert', async () => {
+    const showAlert = vi.fn()
+    stubExportJob({
+      jobState: { state: 'failed', stage: 'app_data', done: 0, total: 0, error: '未找到 pg_dump' },
+    })
+    const { exportForm, onExportBackup } = useBackupCenter({ showAlert, clearAlert: vi.fn() })
+    exportForm.passphrase = 'secret1'
+    exportForm.passphrase2 = 'secret1'
+
+    await onExportBackup()
+
+    expect(showAlert).toHaveBeenCalledWith('error', expect.stringContaining('未找到 pg_dump'))
+    expect(download).not.toHaveBeenCalled()
   })
 
   it('PG 后端下业务数据被禁用：提交始终不带 include_app_db，刷新也不会重新打开', async () => {
-    downloadPost.mockResolvedValue('luyun_backup_x.luyunbak')
-    apiGet.mockImplementation((path) => {
-      if (path === '/api/backup/points') {
-        return Promise.resolve(pointsPayload({ backend: 'postgres', export_app_db_supported: false }))
-      }
-      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
-      return Promise.resolve({})
+    stubExportJob({
+      points: pointsPayload({ backend: 'postgres', export_app_db_supported: false }),
     })
     const {
       dbBackend, exportAppDbSupported, exportForm, exportHasLargePayload, loadPoints, onExportBackup,
@@ -347,8 +422,8 @@ describe('useBackupCenter', () => {
     exportForm.passphrase2 = 'secret1'
     await onExportBackup()
 
-    expect(downloadPost).toHaveBeenCalledTimes(1)
-    expect(downloadPost.mock.calls[0][1].include_app_db).toBe(false)
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost.mock.calls[0][1].include_app_db).toBe(false)
     // 导出成功后的 loadPoints 刷新不会把 PG 下已禁用的项又打开
     expect(exportForm.include_app_db).toBe(false)
     expect(exportAppDbSupported.value).toBe(false)
@@ -361,13 +436,8 @@ describe('useBackupCenter', () => {
   })
 
   it('后端明确说支持（sqlite）时按用户勾选提交业务数据', async () => {
-    downloadPost.mockResolvedValue('luyun_backup_x.luyunbak')
-    apiGet.mockImplementation((path) => {
-      if (path === '/api/backup/points') {
-        return Promise.resolve(pointsPayload({ backend: 'sqlite', export_app_db_supported: true }))
-      }
-      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
-      return Promise.resolve({})
+    stubExportJob({
+      points: pointsPayload({ backend: 'sqlite', export_app_db_supported: true }),
     })
     const { dbBackend, exportAppDbSupported, exportForm, loadPoints, onExportBackup } = makeHarness()
 
@@ -379,17 +449,12 @@ describe('useBackupCenter', () => {
     exportForm.passphrase = 'secret1'
     exportForm.passphrase2 = 'secret1'
     await onExportBackup()
-    expect(downloadPost.mock.calls[0][1].include_app_db).toBe(true)
+    expect(apiPost.mock.calls[0][1].include_app_db).toBe(true)
     expect(exportForm.include_app_db).toBe(true)
   })
 
   it('能力字段缺失（老后端）时行为不变：业务数据默认勾选并照常提交', async () => {
-    downloadPost.mockResolvedValue('luyun_backup_x.luyunbak')
-    apiGet.mockImplementation((path) => {
-      if (path === '/api/backup/points') return Promise.resolve(pointsPayload())
-      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
-      return Promise.resolve({})
-    })
+    stubExportJob()
     const { dbBackend, exportAppDbSupported, exportForm, loadPoints, onExportBackup } = makeHarness()
 
     expect(exportAppDbSupported.value).toBe(true)
@@ -401,7 +466,7 @@ describe('useBackupCenter', () => {
     exportForm.passphrase = 'secret1'
     exportForm.passphrase2 = 'secret1'
     await onExportBackup()
-    expect(downloadPost.mock.calls[0][1].include_app_db).toBe(true)
+    expect(apiPost.mock.calls[0][1].include_app_db).toBe(true)
   })
 
   it('previews 恢复 and seeds apply switches from default_apply', async () => {

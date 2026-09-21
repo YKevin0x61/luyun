@@ -130,6 +130,14 @@ describe('SetupView 备份中心接线契约', () => {
     expect(src).toContain('业务数据（PostgreSQL整库快照）')
   })
 
+  it('导出面板显示服务端打包进度（阶段文案 + 进度条）', () => {
+    const src = compact(setupView)
+    expect(src).toContain('exportStageText')
+    expect(src).toContain('exportPercent')
+    expect(src).toContain('exportIndeterminate')
+    expect(src).toContain('upload-progress')
+  })
+
   it('PG 备份的恢复模式只给覆盖，并说明不能合并', () => {
     const src = compact(setupView)
     expect(src).toContain(':options="importModeOptions"')

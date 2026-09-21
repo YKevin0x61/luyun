@@ -3,10 +3,43 @@ import {
   PROGRESS_FLASH_MS,
   createProgressController,
   createProgressState,
+  exportStageIndeterminate,
+  exportStageLabel,
+  exportStagePercent,
   formatBytes,
   formatTs,
   progressLabel,
 } from '../backupProgress.js'
+
+describe('exportStageLabel / exportStagePercent', () => {
+  it('maps server stages to Chinese labels', () => {
+    expect(exportStageLabel('collecting')).toBe('正在收集数据…')
+    expect(exportStageLabel('app_data')).toBe('正在导出业务数据…')
+    expect(exportStageLabel('archiving')).toBe('正在归档…')
+    expect(exportStageLabel('encrypting')).toBe('正在加密…')
+    expect(exportStageLabel('downloading')).toBe('正在下载…')
+    // 未知阶段也得有话说，不能显示空白
+    expect(exportStageLabel('')).toBe('正在导出…')
+  })
+
+  it('shows photo counts only when the server reports a total', () => {
+    expect(exportStageLabel('photos', 12, 40)).toBe('正在打包照片 12/40…')
+    expect(exportStageLabel('photos', 0, 0)).toBe('正在打包照片…')
+  })
+
+  it('advances the bar by photo count and otherwise by coarse stage', () => {
+    expect(exportStagePercent('photos', 0, 40)).toBe(30)
+    expect(exportStagePercent('photos', 40, 40)).toBe(90)
+    expect(exportStagePercent('app_data')).toBe(25)
+    expect(exportStagePercent('done')).toBe(100)
+  })
+
+  it('marks every stage without a real total as indeterminate', () => {
+    expect(exportStageIndeterminate('photos', 40)).toBe(false)
+    expect(exportStageIndeterminate('photos', 0)).toBe(true)
+    expect(exportStageIndeterminate('app_data', 0)).toBe(true)
+  })
+})
 
 describe('progressLabel', () => {
   it('covers phases', () => {

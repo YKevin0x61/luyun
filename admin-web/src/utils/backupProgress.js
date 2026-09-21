@@ -57,6 +57,67 @@ export function createProgressController(clock = {}) {
   return { startProgress, makeProgressHandler, finishProgress, timers }
 }
 
+/**
+ * 导出任务（服务端后台打包）的阶段文案。
+ *
+ * 与上传进度不同：导出没有字节级进度，服务端只报「阶段 + 可选的 done/total」
+ * （目前只有照片按张报数）。阶段码的中文映射留在前端，后端只给机器可读的 stage。
+ */
+export function exportStageLabel(stage, done = 0, total = 0) {
+  switch (stage) {
+    case 'collecting':
+      return '正在收集数据…'
+    case 'app_data':
+      return '正在导出业务数据…'
+    case 'recipes':
+      return '正在导出配方数据…'
+    case 'photos_scan':
+      return '正在核对照片…'
+    case 'photos':
+      return total ? `正在打包照片 ${done}/${total}…` : '正在打包照片…'
+    case 'archiving':
+      return '正在归档…'
+    case 'encrypting':
+      return '正在加密…'
+    case 'saving':
+      return '正在写入本机副本…'
+    case 'downloading':
+      return '正在下载…'
+    case 'done':
+      return '✓ 已生成'
+    default:
+      return '正在导出…'
+  }
+}
+
+/**
+ * 进度条百分比。只有照片阶段有真实的 done/total，其余阶段给一个粗粒度推进值——
+ * 不假装精确，配合进度条的 indeterminate 动画表示「在动，但说不准多久」。
+ */
+export function exportStagePercent(stage, done = 0, total = 0) {
+  if (stage === 'photos') {
+    if (!total) return 30
+    return Math.min(90, 30 + Math.round((done / total) * 60))
+  }
+  const byStage = {
+    collecting: 8,
+    app_data: 25,
+    recipes: 45,
+    photos_scan: 50,
+    archiving: 92,
+    encrypting: 96,
+    saving: 98,
+    downloading: 99,
+    done: 100,
+  }
+  return byStage[stage] ?? 5
+}
+
+/** 进度条是否该走不确定动画：没有真实 done/total 的阶段都算。 */
+export function exportStageIndeterminate(stage, total = 0) {
+  return !(stage === 'photos' && total > 0)
+}
+
 export function formatBytes(n) {
   if (!n) return '0 B'
   const KB = 1024

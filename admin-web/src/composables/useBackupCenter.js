@@ -3,6 +3,9 @@ import { api } from '../api/client'
 import {
   createProgressController,
   createProgressState,
+  exportStageIndeterminate,
+  exportStageLabel,
+  exportStagePercent,
   formatBytes,
   formatTs,
   progressLabel,
@@ -54,6 +57,28 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
   })
   const exporting = ref(false)
   const exportBtnLabel = computed(() => (exporting.value ? '导出中…' : '生成并下载备份'))
+  /**
+   * 导出任务状态（服务端后台打包）。导出改任务式的原因：100 MB 级的库要跑
+   * pg_dump + 归档 + 加密，同步请求期间界面上什么都没有，用户只会以为按钮没反应。
+   */
+  const exportJob = ref(null)
+  const exportStageText = computed(() =>
+    exportStageLabel(
+      exportJob.value?.stage || '',
+      exportJob.value?.done || 0,
+      exportJob.value?.total || 0,
+    ),
+  )
+  const exportPercent = computed(() =>
+    exportStagePercent(
+      exportJob.value?.stage || '',
+      exportJob.value?.done || 0,
+      exportJob.value?.total || 0,
+    ),
+  )
+  const exportIndeterminate = computed(() =>
+    exportStageIndeterminate(exportJob.value?.stage || '', exportJob.value?.total || 0),
+  )
   /** 业务数据不可导出时不再算大负载，配方仍然是。 */
   const exportHasLargePayload = computed(
     () => (exportAppDbSupported.value && exportForm.include_app_db) || exportForm.include_recipes,
@@ -62,6 +87,29 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
   /** PG 门店不允许把业务数据打进导出包：每次拿到能力位后都强制关掉该项。 */
   function applyExportAppDbCapability() {
     if (!exportAppDbSupported.value) exportForm.include_app_db = false
+  }
+
+  /** 轮询间隔与上限：导出是分钟级的活，但也不能无限等下去。 */
+  const EXPORT_POLL_INTERVAL_MS = 700
+  const EXPORT_JOB_TIMEOUT_MS = 30 * 60 * 1000
+
+  /** 轮询导出任务直到 done / failed；间隔可注入，测试里传 0 免等。 */
+  async function waitForExportJob(jobId, intervalMs = EXPORT_POLL_INTERVAL_MS) {
+    const deadline = Date.now() + EXPORT_JOB_TIMEOUT_MS
+    for (;;) {
+      const state = await api.get(`/api/backup/export/jobs/${jobId}`, null, null, 'no-store')
+      exportJob.value = state
+      if (state?.state === 'failed') throw new Error(state.error || '导出失败')
+      if (state?.state === 'done') return state
+      if (Date.now() > deadline) {
+        throw new Error('导出超时，请稍后到备份点列表确认是否已生成')
+      }
+      if (intervalMs > 0) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, intervalMs)
+        })
+      }
+    }
   }
 
   async function onExportBackup() {
@@ -75,21 +123,27 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       return
     }
     exporting.value = true
+    exportJob.value = { state: 'running', stage: 'collecting', done: 0, total: 0 }
     try {
       // 兜底：表单被改回 true 也不允许在 PG 下带 include_app_db: true。
       const includeAppDb = exportAppDbSupported.value && exportForm.include_app_db
       if (!exportAppDbSupported.value) exportForm.include_app_db = false
-      await api.downloadPost(
-        '/api/backup/export',
-        {
-          passphrase: exportForm.passphrase,
-          include_runtime: exportForm.include_runtime,
-          include_app_db: includeAppDb,
-          include_recipes: exportForm.include_recipes,
-          include_standard_photos: exportForm.include_standard_photos,
-          include_other_photos: exportForm.include_other_photos,
-        },
-        'luyun_backup.luyunbak',
+      const started = await api.post('/api/backup/export/jobs', {
+        passphrase: exportForm.passphrase,
+        include_runtime: exportForm.include_runtime,
+        include_app_db: includeAppDb,
+        include_recipes: exportForm.include_recipes,
+        include_standard_photos: exportForm.include_standard_photos,
+        include_other_photos: exportForm.include_other_photos,
+      })
+      const jobId = started?.job_id
+      if (!jobId) throw new Error('导出任务创建失败')
+      // 打包在服务端后台跑：这里按 stage/done/total 把进度显示出来，打完才下载。
+      const state = await waitForExportJob(jobId)
+      exportJob.value = { ...state, stage: 'downloading' }
+      await api.download(
+        `/api/backup/export/jobs/${jobId}/download`,
+        state?.name || 'luyun_backup.luyunbak',
       )
       showAlert('success', '已生成加密导出备份，请务必牢记口令（遗失将无法解密恢复）')
       exportForm.passphrase = ''
@@ -100,6 +154,7 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       showAlert('error', '导出失败：' + err.message)
     } finally {
       exporting.value = false
+      exportJob.value = null
     }
   }
 
@@ -941,6 +996,10 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     exportForm,
     exporting,
     exportBtnLabel,
+    exportJob,
+    exportStageText,
+    exportPercent,
+    exportIndeterminate,
     exportHasLargePayload,
     onExportBackup,
     // 备份健康

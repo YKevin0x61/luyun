@@ -26,7 +26,7 @@ import tempfile
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
@@ -356,6 +356,66 @@ def collect_hygiene_photo_members(
     return {"members": members, "manifest": manifest, "missing": missing}
 
 
+def collect_hygiene_photo_paths(
+    app_db_path: Optional[str] = None,
+    capture_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """与 :func:`collect_hygiene_photo_members` 同口径，但只给路径、不读字节。
+
+    照片动辄几十上百 MB，导出时没必要先全读进内存再写进 tar：tarfile 可以直接从
+    文件流式读（``addfile`` 分块），校验和边读边算。返回
+    ``members = [(归档内路径, 磁盘路径)]``，顺序稳定（类别内按 capture_id 排序），
+    与字节版的 ``manifest.sha256`` 口径一致。
+    """
+    db_path = app_db_path or settings.APP_DB_PATH
+    root = Path(capture_root) if capture_root is not None else get_hygiene_capture_root()
+    classified = classify_hygiene_capture_ids(db_path)
+
+    members: List[Tuple[str, Path]] = []
+    manifest: Dict[str, Any] = {}
+    missing: Dict[str, List[str]] = {PHOTO_STANDARD: [], PHOTO_OTHER: []}
+
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+        member_dir = PHOTO_MEMBER_DIRS[kind]
+        # 先探一遍可用性：摘要一旦开始喂数据就没法回退，读不了的照片必须在这一步
+        # 就排除掉，否则 manifest.sha256 会与归档内容对不上。
+        available: List[Tuple[str, Path, int]] = []
+        for capture_id in sorted(classified[kind]):
+            path = root / capture_id
+            try:
+                if not path.is_file():
+                    raise OSError("照片文件不存在")
+                with open(path, "rb") as probe:
+                    probe.read(1)
+                size = path.stat().st_size
+            except OSError:
+                missing[kind].append(capture_id)
+                continue
+            available.append((capture_id, path, size))
+
+        digest = hashlib.sha256()
+        total_bytes = 0
+        for capture_id, path, size in available:
+            digest.update(capture_id.encode("utf-8"))
+            digest.update(b"\0")
+            # 这里不再吞 OSError：探测之后文件消失属于异常，宁可让导出失败，
+            # 也不要产出一份 sha256 与内容不符的备份。
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            members.append((f"{member_dir}/{capture_id}", path))
+            total_bytes += size
+        manifest[kind] = {
+            "count": len(available),
+            "bytes": total_bytes,
+            "sha256": digest.hexdigest(),
+            "referenced": len(classified[kind]),
+            "missing": len(missing[kind]),
+        }
+
+    return {"members": members, "manifest": manifest, "missing": missing}
+
+
 def photo_included_kinds(manifest: Optional[dict]) -> List[str]:
     """清单里实际包含照片的类别（count > 0）。"""
     if not manifest:
@@ -447,25 +507,113 @@ def row_count_mismatches(
 
 # ==================== 口令加密归档 ====================
 
-def _build_backup_members(
+# 导出成员来源：小成员直接给 bytes，大成员给磁盘路径（流式读，不驻留内存）
+MemberSource = Union[bytes, str, Path]
+
+
+class _HashingReader:
+    """给 tarfile 用的分块读取器：边喂数据边算 sha256，不把整个成员读进内存。"""
+
+    def __init__(self, path: Path):
+        self._handle = open(path, "rb")
+        self.digest = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._handle.read(size if size and size > 0 else 1024 * 1024)
+        if chunk:
+            self.digest.update(chunk)
+        return chunk
+
+    def close(self) -> None:
+        self._handle.close()
+
+
+def _add_member(
+    tar: tarfile.TarFile,
+    name: str,
+    source: MemberSource,
+) -> Tuple[str, int]:
+    """把一个成员写进 tar，返回 ``(sha256, 字节数)``。
+
+    bytes 直接写；路径走 :class:`_HashingReader` 分块流式写——``app.db`` /
+    ``app.pgdump`` / 几十上百 MB 的照片因此不需要先读进内存。
+    """
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        size = path.stat().st_size
+        reader = _HashingReader(path)
+        try:
+            info = tarfile.TarInfo(name=name)
+            info.size = size
+            tar.addfile(info, reader)
+        finally:
+            reader.close()
+        return reader.digest.hexdigest(), size
+
+    data = source if isinstance(source, bytes) else b""
+    info = tarfile.TarInfo(name=name)
+    info.size = len(data)
+    tar.addfile(info, io.BytesIO(data))
+    return _sha256_hex(data), len(data)
+
+
+def build_export_backup_to_file(
+    dst_path: str,
+    passphrase: str,
     *,
     include_runtime: bool,
     runtime_data: Optional[dict],
     include_app_db: bool,
-    app_db_bytes: Optional[bytes],
     include_recipes: bool,
     recipes_db_bytes: Optional[bytes],
-    app_pg_bytes: Optional[bytes] = None,
+    app_version: str,
+    app_db_source: Optional[MemberSource] = None,
+    app_pg_source: Optional[MemberSource] = None,
     include_standard_photos: bool = False,
     include_other_photos: bool = False,
-    photo_members: Optional[Dict[str, bytes]] = None,
+    photo_members: Optional[Sequence[Tuple[str, MemberSource]]] = None,
     photo_manifest: Optional[dict] = None,
     photo_missing: Optional[dict] = None,
     consistency: Optional[dict] = None,
     provenance: str = PROVENANCE_MANUAL,
-    app_version: str,
-) -> Tuple[bytes, dict]:
-    """组装归档成员与 ``meta.json``，返回 ``(未加密 tar 字节, meta)``。"""
+    progress: Optional[Callable[[str, int, int], None]] = None,
+) -> dict:
+    """构建口令加密的导出包并**直接写到 dst_path**，返回 meta。
+
+    与一次性堆内存的老实现相比只有"边算边写"这一点不同：
+
+    - 成员逐个写进临时 tar（大成员流式，见 :func:`_add_member`），不再先把所有
+      成员塞进一个 dict、再整体 tar 进内存；
+    - 加密时只把 tar 读一份进内存（``Fernet`` 要求严格 bytes，喂不了 mmap），
+      输出直接落盘；
+    - ``archive_sha256`` 对最终文件分块计算，不再为算哈希多留一份整包。
+
+    ``progress(stage, done, total)`` 上报进度：``collecting`` / ``archiving`` /
+    ``photos``（按张报数）/ ``encrypting`` / ``saving``。回调异常只记日志，
+    不影响导出本身。
+    """
+
+    def _report(stage: str, done: int = 0, total: int = 0) -> None:
+        if progress is None:
+            return
+        try:
+            progress(stage, done, total)
+        except Exception:  # noqa: BLE001 —— 进度上报不该把导出搞挂
+            logger.debug("导出进度回调失败 stage=%s", stage, exc_info=True)
+
+    passphrase = (passphrase or "").strip()
+    if len(passphrase) < credentials_store.BACKUP_PASSPHRASE_MIN_LENGTH:
+        raise ValueError(
+            f"导出口令至少 {credentials_store.BACKUP_PASSPHRASE_MIN_LENGTH} 位"
+        )
+
+    bundle = credentials_store.get_credentials()
+    if bundle is None:
+        raise ValueError("当前未配置凭据")
+    credentials_bytes = json.dumps(
+        bundle.to_storage(), ensure_ascii=False
+    ).encode("utf-8")
+
     if include_standard_photos and include_other_photos:
         want_photo_kinds = {PHOTO_STANDARD, PHOTO_OTHER}
     elif include_standard_photos:
@@ -475,14 +623,6 @@ def _build_backup_members(
     else:
         want_photo_kinds = set()
 
-    bundle = credentials_store.get_credentials()
-    if bundle is None:
-        raise ValueError("当前未配置凭据")
-    credentials_bytes = json.dumps(
-        bundle.to_storage(), ensure_ascii=False
-    ).encode("utf-8")
-
-    members: Dict[str, bytes] = {"credentials.json": credentials_bytes}
     includes = {
         "runtime": False,
         "app_db": False,
@@ -492,30 +632,33 @@ def _build_backup_members(
         CONTENT_OTHER_PHOTOS: False,
     }
 
+    _report("collecting")
+    members: List[Tuple[str, MemberSource]] = [("credentials.json", credentials_bytes)]
     if include_runtime and runtime_data is not None:
-        members["runtime.json"] = json.dumps(
-            runtime_data, ensure_ascii=False
-        ).encode("utf-8")
+        members.append(
+            ("runtime.json", json.dumps(runtime_data, ensure_ascii=False).encode("utf-8"))
+        )
         includes["runtime"] = True
-
-    if include_app_db and app_db_bytes:
-        members["app.db"] = app_db_bytes
+    if include_app_db and app_db_source is not None:
+        members.append(("app.db", app_db_source))
         includes["app_db"] = True
-
     # PostgreSQL 门店的业务数据是整库 pg_dump：成员名与冷备保持一致，恢复端按
     # 成员名区分「SQLite 文件」与「PG 整库 dump」，两者不能互相灌。
-    if include_app_db and app_pg_bytes:
-        members["app.pgdump"] = app_pg_bytes
+    if include_app_db and app_pg_source is not None:
+        members.append(("app.pgdump", app_pg_source))
         includes["app_pg"] = True
-
     if include_recipes and recipes_db_bytes:
-        members["recipes.db"] = recipes_db_bytes
+        members.append(("recipes.db", recipes_db_bytes))
         includes["recipes_db"] = True
 
-    photos_meta: Dict[str, Any] = {
-        PHOTO_STANDARD: {"included": False, "count": 0, "bytes": 0, "sha256": None},
-        PHOTO_OTHER: {"included": False, "count": 0, "bytes": 0, "sha256": None},
-    }
+    prefix_ok = {kind: PHOTO_MEMBER_DIRS[kind] + "/" for kind in want_photo_kinds}
+    photo_list: List[Tuple[str, MemberSource]] = [
+        (name, source)
+        for name, source in (photo_members or [])
+        if any(name.startswith(prefix) for prefix in prefix_ok.values())
+    ]
+
+    photos_meta: Dict[str, Any] = {}
     member_manifest = photo_manifest or {}
     for kind in (PHOTO_STANDARD, PHOTO_OTHER):
         entry = dict(member_manifest.get(kind) or {})
@@ -530,45 +673,84 @@ def _build_backup_members(
             ] = True
         photos_meta[kind] = entry
 
-    if want_photo_kinds and photo_members:
-        prefix_ok = {
-            kind: PHOTO_MEMBER_DIRS[kind] + "/"
-            for kind in want_photo_kinds
+    fd, tar_path = tempfile.mkstemp(suffix=".tar", prefix="luyun-export-")
+    os.close(fd)
+    try:
+        digests: Dict[str, str] = {}
+        with tarfile.open(tar_path, mode="w") as tar:
+            _report("archiving")
+            for name, source in members:
+                digests[name] = _add_member(tar, name, source)[0]
+
+            total_photos = len(photo_list)
+            for index, (name, source) in enumerate(photo_list, start=1):
+                digests[name] = _add_member(tar, name, source)[0]
+                _report("photos", index, total_photos)
+
+            if isinstance(app_db_source, (str, Path)):
+                row_counts = key_table_row_counts(str(app_db_source))
+            elif isinstance(app_db_source, bytes):
+                row_counts = row_counts_from_db_bytes(app_db_source)
+            else:
+                row_counts = {}
+
+            meta: Dict[str, Any] = {
+                "version": BACKUP_VERSION,
+                "exported_at": datetime.now(CHINA_TZ).isoformat(),
+                "app_version": app_version,
+                "provenance": provenance,
+                "includes": includes,
+                "photos": photos_meta,
+                "row_counts": row_counts,
+                "sha256": {
+                    name: digest
+                    for name, digest in digests.items()
+                    if not name.startswith("photos/")
+                },
+            }
+            if photo_missing:
+                meta["photos_missing"] = {
+                    kind: list(ids) for kind, ids in photo_missing.items() if ids
+                }
+            if consistency is not None:
+                meta["consistency"] = consistency
+
+            meta_bytes = json.dumps(meta, ensure_ascii=False).encode("utf-8")
+            info = tarfile.TarInfo(name="meta.json")
+            info.size = len(meta_bytes)
+            tar.addfile(info, io.BytesIO(meta_bytes))
+
+        _report("encrypting")
+        salt = os.urandom(credentials_store.BACKUP_SALT_BYTES)
+        iterations = credentials_store.BACKUP_KDF_ITERATIONS
+        key = _derive_backup_key(passphrase, salt, iterations)
+        with open(tar_path, "rb") as handle:
+            tar_bytes = handle.read()
+        token = Fernet(key).encrypt(tar_bytes)
+        del tar_bytes
+
+        header_obj = {
+            "salt": base64.b64encode(salt).decode("ascii"),
+            "iterations": iterations,
+            "created_at": datetime.now(CHINA_TZ).isoformat(),
         }
-        for name, data in photo_members.items():
-            if any(name.startswith(prefix) for prefix in prefix_ok.values()):
-                members[name] = data
+        header_bytes = json.dumps(header_obj, ensure_ascii=False).encode("utf-8")
 
-    meta = {
-        "version": BACKUP_VERSION,
-        "exported_at": datetime.now(CHINA_TZ).isoformat(),
-        "app_version": app_version,
-        "provenance": provenance,
-        "includes": includes,
-        "photos": photos_meta,
-        "row_counts": row_counts_from_db_bytes(app_db_bytes) if app_db_bytes else {},
-        "sha256": {
-            name: _sha256_hex(data)
-            for name, data in members.items()
-            if not name.startswith("photos/")
-        },
-    }
-    if photo_missing:
-        meta["photos_missing"] = {
-            kind: list(ids) for kind, ids in photo_missing.items() if ids
-        }
-    if consistency is not None:
-        meta["consistency"] = consistency
+        _report("saving")
+        with open(dst_path, "wb") as out:
+            out.write(BACKUP_MAGIC)
+            out.write(struct.pack(">I", len(header_bytes)))
+            out.write(header_bytes)
+            out.write(token)
 
-    members["meta.json"] = json.dumps(meta, ensure_ascii=False).encode("utf-8")
-
-    tar_buffer = io.BytesIO()
-    with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
-        for name, data in members.items():
-            info = tarfile.TarInfo(name=name)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-    return tar_buffer.getvalue(), meta
+        meta["archive_bytes"] = os.path.getsize(dst_path)
+        meta["archive_sha256"] = sha256_file(Path(dst_path))
+        return meta
+    finally:
+        try:
+            os.unlink(tar_path)
+        except OSError:
+            pass
 
 
 def build_export_backup(
@@ -590,50 +772,45 @@ def build_export_backup(
     provenance: str = PROVENANCE_MANUAL,
     app_version: str,
 ) -> Tuple[bytes, dict]:
-    """构建口令加密备份包与它的 ``meta``（调用方据此写导出侧车清单）。"""
+    """构建口令加密备份包与它的 ``meta``（调用方据此写导出侧车清单）。
+
+    内存版：把成员字节落成临时文件后调用流式实现，再把成品读回来。导出端点用的是
+    :func:`build_export_backup_to_file`；这个入口留给测试与小包调用方，签名不变。
+    """
     passphrase = (passphrase or "").strip()
     if len(passphrase) < credentials_store.BACKUP_PASSPHRASE_MIN_LENGTH:
         raise ValueError(f"导出口令至少 {credentials_store.BACKUP_PASSPHRASE_MIN_LENGTH} 位")
 
-    tar_bytes, meta = _build_backup_members(
-        include_runtime=include_runtime,
-        runtime_data=runtime_data,
-        include_app_db=include_app_db,
-        app_db_bytes=app_db_bytes,
-        app_pg_bytes=app_pg_bytes,
-        include_recipes=include_recipes,
-        recipes_db_bytes=recipes_db_bytes,
-        include_standard_photos=include_standard_photos,
-        include_other_photos=include_other_photos,
-        photo_members=photo_members,
-        photo_manifest=photo_manifest,
-        photo_missing=photo_missing,
-        consistency=consistency,
-        provenance=provenance,
-        app_version=app_version,
-    )
-
-    salt = os.urandom(credentials_store.BACKUP_SALT_BYTES)
-    iterations = credentials_store.BACKUP_KDF_ITERATIONS
-    key = _derive_backup_key(passphrase, salt, iterations)
-    token = Fernet(key).encrypt(tar_bytes)
-
-    header_obj = {
-        "salt": base64.b64encode(salt).decode("ascii"),
-        "iterations": iterations,
-        "created_at": datetime.now(CHINA_TZ).isoformat(),
-    }
-    header_bytes = json.dumps(header_obj, ensure_ascii=False).encode("utf-8")
-
-    blob = (
-        BACKUP_MAGIC
-        + struct.pack(">I", len(header_bytes))
-        + header_bytes
-        + token
-    )
-    meta["archive_bytes"] = len(blob)
-    meta["archive_sha256"] = _sha256_hex(blob)
-    return blob, meta
+    fd, tmp_path = tempfile.mkstemp(suffix=".luyunbak", prefix="luyun-export-")
+    os.close(fd)
+    try:
+        meta = build_export_backup_to_file(
+            tmp_path,
+            passphrase,
+            include_runtime=include_runtime,
+            runtime_data=runtime_data,
+            include_app_db=include_app_db,
+            app_db_source=app_db_bytes,
+            app_pg_source=app_pg_bytes,
+            include_recipes=include_recipes,
+            recipes_db_bytes=recipes_db_bytes,
+            include_standard_photos=include_standard_photos,
+            include_other_photos=include_other_photos,
+            photo_members=[(name, data) for name, data in (photo_members or {}).items()],
+            photo_manifest=photo_manifest,
+            photo_missing=photo_missing,
+            consistency=consistency,
+            provenance=provenance,
+            app_version=app_version,
+        )
+        with open(tmp_path, "rb") as handle:
+            blob = handle.read()
+        return blob, meta
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def build_backup(
@@ -978,6 +1155,14 @@ def restore_pg_dump_sync(dump_path: str) -> None:
     if _pg_psql_rows(PG_SEQUENCE_RESET_SQL) is None:
         logger.warning("⚠️ 整库恢复完成，但 identity 序列重置失败（新写入可能撞主键）")
     logger.warning("✅ [审计] PostgreSQL 整库恢复完成")
+
+
+async def export_pg_dump_to_file(dst_path: str) -> None:
+    """把整个 PostgreSQL 库打成 custom-format dump **直接写进 dst_path**。
+
+    导出任务走这条：pg_dump 只能写文件，落到磁盘后由 tar 流式读走，中间不经过内存。
+    """
+    await asyncio.to_thread(_pg_dump_sync, dst_path)
 
 
 async def export_pg_dump_bytes() -> Optional[bytes]:
