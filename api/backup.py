@@ -203,15 +203,16 @@ def _read_temp_bytes(path: Optional[str]) -> Optional[bytes]:
 
 
 def _report_progress(
-    progress: Optional[Callable[[str, int, int], None]],
+    progress: Optional[Callable[[str, int, int, str], None]],
     stage: str,
     done: int = 0,
     total: int = 0,
+    unit: str = "count",
 ) -> None:
     if progress is None:
         return
     try:
-        progress(stage, done, total)
+        progress(stage, done, total, unit)
     except Exception:  # noqa: BLE001 —— 进度上报不该把导出搞挂
         logger.debug("导出进度回调失败 stage=%s", stage, exc_info=True)
 
@@ -248,7 +249,12 @@ async def _collect_export_payload(
                 )
                 os.close(fd)
                 temp_paths.append(app_pg_path)
-                await backup_service.export_pg_dump_to_file(app_pg_path)
+                await backup_service.export_pg_dump_to_file(
+                    app_pg_path,
+                    lambda written: _report_progress(
+                        progress, "app_data", written, 0, "bytes"
+                    ),
+                )
             else:
                 fd, app_db_path = tempfile.mkstemp(suffix=".db", prefix="luyun-export-")
                 os.close(fd)
@@ -303,6 +309,8 @@ def _job_public_state(job: dict) -> dict:
         "stage": job["stage"],
         "done": job["done"],
         "total": job["total"],
+        # unit 决定前端怎么读 done/total："count" 是张数（照片），"bytes" 是字节
+        "unit": job.get("unit") or "count",
         "error": job["error"],
         "bytes": job.get("bytes") or 0,
         "name": job.get("name") or "",
@@ -340,10 +348,16 @@ async def _run_export_job(
     job = _EXPORT_JOBS[job_id]
     collected: dict = {}
 
-    def _progress(stage: str, done: int = 0, total: int = 0) -> None:
+    def _progress(
+        stage: str,
+        done: int = 0,
+        total: int = 0,
+        unit: str = "count",
+    ) -> None:
         job["stage"] = stage
         job["done"] = done
         job["total"] = total
+        job["unit"] = unit
 
     archive_path: Optional[Path] = None
     try:
@@ -444,6 +458,7 @@ async def start_export_backup(
         "stage": "collecting",
         "done": 0,
         "total": 0,
+        "unit": "count",
         "error": "",
         "started_at": now,
         "path": None,

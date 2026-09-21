@@ -543,9 +543,11 @@ class BackupExportBackendCapabilityTest(unittest.TestCase):
     def test_pg_export_packs_pg_dump_member(self):
         """PG 门店导出：业务数据成员是 app.pgdump，而不是拒之门外。"""
 
-        async def _fake_dump(dst_path: str) -> None:
+        async def _fake_dump(dst_path: str, progress=None) -> None:
             with open(dst_path, "wb") as handle:
                 handle.write(b"PGDUMP-CONTENT")
+            if progress is not None:
+                progress(14)
 
         with mock.patch.object(
             backup_service, "is_postgres_backend", return_value=True

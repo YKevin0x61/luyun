@@ -57,18 +57,36 @@ export function createProgressController(clock = {}) {
   return { startProgress, makeProgressHandler, finishProgress, timers }
 }
 
+/** 字节数的短标签（12.3 MB），用于「已写多少」这类文案。 */
+function shortBytes(n) {
+  if (!n) return '0 B'
+  const KB = 1024
+  const MB = KB * 1024
+  return n >= MB ? `${(n / MB).toFixed(1)} MB` : `${Math.round(n / KB)} KB`
+}
+
+function ratioPercent(done, total) {
+  if (!total) return 0
+  return Math.min(100, Math.max(0, Math.round((done / total) * 100)))
+}
+
 /**
  * 导出任务（服务端后台打包）的阶段文案。
  *
- * 与上传进度不同：导出没有字节级进度，服务端只报「阶段 + 可选的 done/total」
- * （目前只有照片按张报数）。阶段码的中文映射留在前端，后端只给机器可读的 stage。
+ * 服务端报「阶段 + done/total + unit」：`unit === 'bytes'` 时 done/total 是字节数
+ * （归档、加密、pg_dump 已写量），`'count'` 是张数（照片）。归档与加密的总量在
+ * 服务端打包前就能算出来，所以给的是真实百分比，不是转圈动画。
  */
-export function exportStageLabel(stage, done = 0, total = 0) {
+export function exportStageLabel(stage, done = 0, total = 0, unit = 'count') {
+  const isBytes = unit === 'bytes'
   switch (stage) {
     case 'collecting':
       return '正在收集数据…'
     case 'app_data':
-      return '正在导出业务数据…'
+      // pg_dump 事先不知道总量：只报"已经写了多少"
+      return isBytes && done > 0
+        ? `正在导出业务数据… 已写 ${shortBytes(done)}`
+        : '正在导出业务数据…'
     case 'recipes':
       return '正在导出配方数据…'
     case 'photos_scan':
@@ -76,9 +94,9 @@ export function exportStageLabel(stage, done = 0, total = 0) {
     case 'photos':
       return total ? `正在打包照片 ${done}/${total}…` : '正在打包照片…'
     case 'archiving':
-      return '正在归档…'
+      return isBytes && total ? `正在归档 ${ratioPercent(done, total)}%` : '正在归档…'
     case 'encrypting':
-      return '正在加密…'
+      return isBytes && total ? `正在加密 ${ratioPercent(done, total)}%` : '正在加密…'
     case 'saving':
       return '正在写入本机副本…'
     case 'downloading':
@@ -91,31 +109,46 @@ export function exportStageLabel(stage, done = 0, total = 0) {
 }
 
 /**
- * 进度条百分比。只有照片阶段有真实的 done/total，其余阶段给一个粗粒度推进值——
- * 不假装精确，配合进度条的 indeterminate 动画表示「在动，但说不准多久」。
+ * 进度条百分比：按阶段切分整条 0–100%，阶段内部用真实的 done/total。
+ *
+ * `app_data`（pg_dump）没有总量，用「已写字节」做一条单调有界的渐近曲线——它随
+ * 真实写入前进、不会随时间空转，也不会越过该阶段的上限。
  */
-export function exportStagePercent(stage, done = 0, total = 0) {
-  if (stage === 'photos') {
-    if (!total) return 30
-    return Math.min(90, 30 + Math.round((done / total) * 60))
-  }
-  const byStage = {
-    collecting: 8,
-    app_data: 25,
-    recipes: 45,
-    photos_scan: 50,
-    archiving: 92,
-    encrypting: 96,
-    saving: 98,
-    downloading: 99,
-    done: 100,
-  }
-  return byStage[stage] ?? 5
+const STAGE_SPAN = {
+  collecting: [0, 3],
+  app_data: [3, 45],
+  recipes: [45, 48],
+  photos_scan: [48, 50],
+  photos: [50, 75],
+  archiving: [75, 92],
+  encrypting: [92, 99],
+  saving: [99, 99],
+  downloading: [99, 100],
+  done: [100, 100],
 }
 
-/** 进度条是否该走不确定动画：没有真实 done/total 的阶段都算。 */
-export function exportStageIndeterminate(stage, total = 0) {
-  return !(stage === 'photos' && total > 0)
+export function exportStagePercent(stage, done = 0, total = 0, unit = 'count') {
+  const span = STAGE_SPAN[stage] || [0, 0]
+  const [lo, hi] = span
+  if (stage === 'app_data') {
+    // 64MB 的尺度：写满 64MB 到该阶段的 ~63%，再往上逐渐逼近上限
+    const ratio = 1 - Math.exp(-Math.max(0, done) / (64 * 1024 * 1024))
+    return Math.round(lo + (hi - lo) * ratio)
+  }
+  if (!total) return lo
+  return Math.round(lo + (hi - lo) * Math.min(1, Math.max(0, done / total)))
+}
+
+/**
+ * 进度条是否该走不确定动画。只有"说得出总量"的阶段才有确定进度：照片（张数）、
+ * 归档与加密（字节）；其余阶段很短，用不确定动画表示"在动"。
+ */
+export function exportStageIndeterminate(stage, total = 0, unit = 'count') {
+  if (stage === 'app_data') return false
+  if (stage === 'photos' || stage === 'archiving' || stage === 'encrypting') {
+    return !(total > 0)
+  }
+  return true
 }
 
 export function formatBytes(n) {

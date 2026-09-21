@@ -183,6 +183,24 @@ async function download(path, fallbackFilename = 'download') {
   return filename
 }
 
+/**
+ * 用浏览器原生下载（`<a download>`）取文件，不在 JS 里中转。
+ *
+ * 大文件（备份包动辄上百 MB）不能走 fetch + blob：整包先进 JS 内存，再经
+ * objectURL 落盘，等于多拷两遍——用户感受到的就是「下载好慢」，而且页面里也
+ * 拿不到真实进度。原生下载由浏览器流式写盘，自带进度条、可暂停续传。
+ * 同源 GET，浏览器会带上会话 cookie。
+ */
+export function downloadUrl(path, filename) {
+  const anchor = document.createElement('a')
+  anchor.href = path
+  if (filename) anchor.download = filename
+  anchor.rel = 'noopener'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+}
+
 // POST + JSON body 下载（如加密备份导出）：与 download 相同地解析 Content-Disposition 并触发保存。
 async function downloadPost(path, body, fallbackFilename = 'download') {
   const res = await fetch(path, {
@@ -232,4 +250,5 @@ export const api = {
   upload,
   download,
   downloadPost,
+  downloadUrl,
 }

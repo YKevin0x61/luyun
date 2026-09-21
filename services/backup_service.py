@@ -559,12 +559,13 @@ def _fernet_encrypt_stream(
     iv: Optional[bytes] = None,
     timestamp: Optional[int] = None,
     chunk_size: int = _EXPORT_CHUNK_SIZE,
+    progress: Optional[Callable[[int], None]] = None,
 ) -> None:
     """把 ``src_path`` 的内容加密成 Fernet token 写进 ``out_handle``。
 
     分块读、分块加密、增量 HMAC、分块 base64：内存占用只与 ``chunk_size`` 有关，
     与包大小无关。``iv`` / ``timestamp`` / ``chunk_size`` 只为测试注入——生产路径用
-    随机 IV 与当前时间，输出与分块大小无关。
+    随机 IV 与当前时间，输出与分块大小无关。``progress(已读字节)`` 用于上报进度。
     """
     raw_key = base64.urlsafe_b64decode(key)
     signing_key, encryption_key = raw_key[:16], raw_key[16:]
@@ -580,15 +581,19 @@ def _fernet_encrypt_stream(
     hasher.update(head)
     writer.write(head)
 
+    read_bytes = 0
     with open(src_path, "rb") as src:
         while True:
             chunk = src.read(chunk_size)
             if not chunk:
                 break
+            read_bytes += len(chunk)
             piece = encryptor.update(padder.update(chunk))
             if piece:
                 hasher.update(piece)
                 writer.write(piece)
+            if progress is not None:
+                progress(read_bytes)
 
     tail = encryptor.update(padder.finalize()) + encryptor.finalize()
     if tail:
@@ -596,29 +601,45 @@ def _fernet_encrypt_stream(
         writer.write(tail)
     writer.write(hasher.finalize())
     writer.close()
+    if progress is not None:
+        progress(read_bytes)
 
 
 class _HashingReader:
     """给 tarfile 用的分块读取器：边喂数据边算 sha256，不把整个成员读进内存。"""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, on_bytes: Optional[Callable[[int], None]] = None):
         self._handle = open(path, "rb")
+        self._on_bytes = on_bytes
         self.digest = hashlib.sha256()
 
     def read(self, size: int = -1) -> bytes:
         chunk = self._handle.read(size if size and size > 0 else 1024 * 1024)
         if chunk:
             self.digest.update(chunk)
+            if self._on_bytes is not None:
+                self._on_bytes(len(chunk))
         return chunk
 
     def close(self) -> None:
         self._handle.close()
 
 
+def _tar_member_size(source: MemberSource) -> int:
+    """成员的字节数（打包前算总量用，不读内容）。"""
+    if isinstance(source, (str, Path)):
+        try:
+            return Path(source).stat().st_size
+        except OSError:
+            return 0
+    return len(source) if isinstance(source, bytes) else 0
+
+
 def _add_member(
     tar: tarfile.TarFile,
     name: str,
     source: MemberSource,
+    on_bytes: Optional[Callable[[int], None]] = None,
 ) -> Tuple[str, int]:
     """把一个成员写进 tar，返回 ``(sha256, 字节数)``。
 
@@ -628,7 +649,7 @@ def _add_member(
     if isinstance(source, (str, Path)):
         path = Path(source)
         size = path.stat().st_size
-        reader = _HashingReader(path)
+        reader = _HashingReader(path, on_bytes)
         try:
             info = tarfile.TarInfo(name=name)
             info.size = size
@@ -641,6 +662,8 @@ def _add_member(
     info = tarfile.TarInfo(name=name)
     info.size = len(data)
     tar.addfile(info, io.BytesIO(data))
+    if on_bytes is not None and data:
+        on_bytes(len(data))
     return _sha256_hex(data), len(data)
 
 
@@ -675,16 +698,21 @@ def build_export_backup_to_file(
       输出直接落盘；
     - ``archive_sha256`` 对最终文件分块计算，不再为算哈希多留一份整包。
 
-    ``progress(stage, done, total)`` 上报进度：``collecting`` / ``archiving`` /
-    ``photos``（按张报数）/ ``encrypting`` / ``saving``。回调异常只记日志，
-    不影响导出本身。
+    ``progress(stage, done, total, unit)`` 上报进度。``unit`` 是 ``"count"``（张数）
+    或 ``"bytes"``（字节）——归档与加密都给真实字节数，界面因此能显示真实百分比，
+    而不是一直转圈。回调异常只记日志，不影响导出本身。
     """
 
-    def _report(stage: str, done: int = 0, total: int = 0) -> None:
+    def _report(
+        stage: str,
+        done: int = 0,
+        total: int = 0,
+        unit: str = "count",
+    ) -> None:
         if progress is None:
             return
         try:
-            progress(stage, done, total)
+            progress(stage, done, total, unit)
         except Exception:  # noqa: BLE001 —— 进度上报不该把导出搞挂
             logger.debug("导出进度回调失败 stage=%s", stage, exc_info=True)
 
@@ -764,14 +792,25 @@ def build_export_backup_to_file(
     os.close(fd)
     try:
         digests: Dict[str, str] = {}
+        # 归档进度按**字节**上报：总量在打包前就能算出来（成员大小之和），
+        # 所以界面显示的是真实百分比，而不是一直转圈。
+        total_bytes = sum(_tar_member_size(source) for _n, source in members) + sum(
+            _tar_member_size(source) for _n, source in photo_list
+        )
+        written = {"bytes": 0}
+
+        def _on_member_bytes(count: int) -> None:
+            written["bytes"] += count
+            _report("archiving", written["bytes"], total_bytes, "bytes")
+
         with tarfile.open(tar_path, mode="w") as tar:
-            _report("archiving")
+            _report("archiving", 0, total_bytes, "bytes")
             for name, source in members:
-                digests[name] = _add_member(tar, name, source)[0]
+                digests[name] = _add_member(tar, name, source, _on_member_bytes)[0]
 
             total_photos = len(photo_list)
             for index, (name, source) in enumerate(photo_list, start=1):
-                digests[name] = _add_member(tar, name, source)[0]
+                digests[name] = _add_member(tar, name, source, _on_member_bytes)[0]
                 _report("photos", index, total_photos)
 
             if isinstance(app_db_source, (str, Path)):
@@ -807,7 +846,6 @@ def build_export_backup_to_file(
             info.size = len(meta_bytes)
             tar.addfile(info, io.BytesIO(meta_bytes))
 
-        _report("encrypting")
         salt = os.urandom(credentials_store.BACKUP_SALT_BYTES)
         iterations = credentials_store.BACKUP_KDF_ITERATIONS
         key = _derive_backup_key(passphrase, salt, iterations)
@@ -819,12 +857,19 @@ def build_export_backup_to_file(
         }
         header_bytes = json.dumps(header_obj, ensure_ascii=False).encode("utf-8")
 
+        # 加密进度同样按字节：tar 大小已知，读多少就是多少
+        tar_size = os.path.getsize(tar_path)
+        _report("encrypting", 0, tar_size, "bytes")
+
+        def _on_encrypt_bytes(read_bytes: int) -> None:
+            _report("encrypting", read_bytes, tar_size, "bytes")
+
         with open(dst_path, "wb") as out:
             out.write(BACKUP_MAGIC)
             out.write(struct.pack(">I", len(header_bytes)))
             out.write(header_bytes)
             # 分块加密直接写进目标文件的 token 段：tar 不会整包留在内存里
-            _fernet_encrypt_stream(tar_path, out, key)
+            _fernet_encrypt_stream(tar_path, out, key, progress=_on_encrypt_bytes)
 
         meta["archive_bytes"] = os.path.getsize(dst_path)
         meta["archive_sha256"] = sha256_file(Path(dst_path))
@@ -1240,12 +1285,87 @@ def restore_pg_dump_sync(dump_path: str) -> None:
     logger.warning("✅ [审计] PostgreSQL 整库恢复完成")
 
 
-async def export_pg_dump_to_file(dst_path: str) -> None:
+def _pg_dump_with_progress(
+    dst_path: str,
+    on_bytes: Callable[[int], None],
+    interval: float = 0.3,
+) -> None:
+    """跑 pg_dump，边跑边报"已写入多少字节"。
+
+    pg_dump 没有进度输出，custom format 的总量事先也不知道——所以这里不给百分比，
+    只盯输出文件大小：界面显示「正在导出业务数据… 12.3 MB」，比一直转圈诚实。
+    """
+    dsn = os.environ.get("LUYUN_POSTGRES_DSN") or getattr(settings, "POSTGRES_DSN", "")
+    if not dsn:
+        raise RuntimeError("POSTGRES_DSN 未配置，无法备份 PostgreSQL")
+    os.makedirs(os.path.dirname(dst_path) or ".", exist_ok=True)
+    if os.path.exists(dst_path):
+        os.unlink(dst_path)
+    cmd = [
+        "pg_dump",
+        "--format=custom",
+        "--no-owner",
+        "--no-acl",
+        "--file",
+        dst_path,
+        dsn,
+    ]
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "未找到 pg_dump —— PostgreSQL 后端需要安装 postgresql-client"
+        ) from exc
+
+    deadline = time.time() + 1800
+    stderr_text = ""
+    try:
+        while proc.poll() is None:
+            try:
+                on_bytes(os.path.getsize(dst_path))
+            except OSError:
+                pass
+            if time.time() > deadline:
+                proc.kill()
+                raise RuntimeError("pg_dump 超时（1800s）")
+            time.sleep(interval)
+        stderr_text = proc.communicate()[1] or ""
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+    try:
+        on_bytes(os.path.getsize(dst_path))
+    except OSError:
+        pass
+
+    if proc.returncode != 0:
+        # 只脱敏密码，stderr 原文要带出来：否则现场只剩「退出码 1」，根因全靠猜。
+        detail = _redact_dsn_password(stderr_text.strip(), dsn)
+        hint = _pg_dump_failure_hint(detail)
+        message = f"pg_dump 失败（退出码 {proc.returncode}）"
+        if detail:
+            message = f"{message}：{detail}"
+        if hint:
+            message = f"{message} {hint}"
+        raise RuntimeError(message)
+
+
+async def export_pg_dump_to_file(
+    dst_path: str,
+    progress: Optional[Callable[[int], None]] = None,
+) -> None:
     """把整个 PostgreSQL 库打成 custom-format dump **直接写进 dst_path**。
 
     导出任务走这条：pg_dump 只能写文件，落到磁盘后由 tar 流式读走，中间不经过内存。
+    ``progress(已写字节)`` 可选，用来让界面显示"导出了多少"。
     """
-    await asyncio.to_thread(_pg_dump_sync, dst_path)
+    if progress is None:
+        await asyncio.to_thread(_pg_dump_sync, dst_path)
+        return
+    await asyncio.to_thread(_pg_dump_with_progress, dst_path, progress)
 
 
 async def export_pg_dump_bytes() -> Optional[bytes]:

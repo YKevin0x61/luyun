@@ -27,17 +27,37 @@ describe('exportStageLabel / exportStagePercent', () => {
     expect(exportStageLabel('photos', 0, 0)).toBe('正在打包照片…')
   })
 
-  it('advances the bar by photo count and otherwise by coarse stage', () => {
-    expect(exportStagePercent('photos', 0, 40)).toBe(30)
-    expect(exportStagePercent('photos', 40, 40)).toBe(90)
-    expect(exportStagePercent('app_data')).toBe(25)
-    expect(exportStagePercent('done')).toBe(100)
+  it('renders real byte progress for pg_dump / 归档 / 加密', () => {
+    // pg_dump 事先没有总量：只报"已经写了多少"
+    expect(exportStageLabel('app_data', 12 * 1024 * 1024, 0, 'bytes')).toBe(
+      '正在导出业务数据… 已写 12.0 MB',
+    )
+    // 归档与加密的总量在服务端打包前就算得出来：给真实百分比
+    expect(exportStageLabel('archiving', 50, 100, 'bytes')).toBe('正在归档 50%')
+    expect(exportStageLabel('encrypting', 1, 4, 'bytes')).toBe('正在加密 25%')
   })
 
-  it('marks every stage without a real total as indeterminate', () => {
+  it('advances the bar by real progress inside each stage span', () => {
+    expect(exportStagePercent('photos', 0, 40)).toBe(50)
+    expect(exportStagePercent('photos', 40, 40)).toBe(75)
+    expect(exportStagePercent('archiving', 50, 100, 'bytes')).toBe(84)
+    expect(exportStagePercent('encrypting', 0, 100, 'bytes')).toBe(92)
+    expect(exportStagePercent('done')).toBe(100)
+    // app_data 按已写字节渐近推进：单调、有界，不随时间空转
+    const small = exportStagePercent('app_data', 8 * 1024 * 1024, 0, 'bytes')
+    const large = exportStagePercent('app_data', 200 * 1024 * 1024, 0, 'bytes')
+    expect(small).toBeGreaterThan(3)
+    expect(large).toBeGreaterThan(small)
+    expect(large).toBeLessThanOrEqual(45)
+  })
+
+  it('only stages with a real total get a determinate bar', () => {
     expect(exportStageIndeterminate('photos', 40)).toBe(false)
+    expect(exportStageIndeterminate('archiving', 100, 'bytes')).toBe(false)
+    expect(exportStageIndeterminate('encrypting', 100, 'bytes')).toBe(false)
     expect(exportStageIndeterminate('photos', 0)).toBe(true)
-    expect(exportStageIndeterminate('app_data', 0)).toBe(true)
+    // pg_dump 有已写字节，条子会动，不该闪
+    expect(exportStageIndeterminate('app_data', 0, 'bytes')).toBe(false)
   })
 })
 

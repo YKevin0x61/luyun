@@ -67,6 +67,7 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       exportJob.value?.stage || '',
       exportJob.value?.done || 0,
       exportJob.value?.total || 0,
+      exportJob.value?.unit || 'count',
     ),
   )
   const exportPercent = computed(() =>
@@ -74,10 +75,15 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       exportJob.value?.stage || '',
       exportJob.value?.done || 0,
       exportJob.value?.total || 0,
+      exportJob.value?.unit || 'count',
     ),
   )
   const exportIndeterminate = computed(() =>
-    exportStageIndeterminate(exportJob.value?.stage || '', exportJob.value?.total || 0),
+    exportStageIndeterminate(
+      exportJob.value?.stage || '',
+      exportJob.value?.total || 0,
+      exportJob.value?.unit || 'count',
+    ),
   )
   /** 业务数据不可导出时不再算大负载，配方仍然是。 */
   const exportHasLargePayload = computed(
@@ -140,12 +146,16 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       if (!jobId) throw new Error('导出任务创建失败')
       // 打包在服务端后台跑：这里按 stage/done/total 把进度显示出来，打完才下载。
       const state = await waitForExportJob(jobId)
-      exportJob.value = { ...state, stage: 'downloading' }
-      await api.download(
+      // 原生下载：整包交给浏览器流式落盘（下载进度由浏览器自己的下载列表给，
+      // 页面里不再假装一条"下载进度条"）
+      api.downloadUrl(
         `/api/backup/export/jobs/${jobId}/download`,
         state?.name || 'luyun_backup.luyunbak',
       )
-      showAlert('success', '已生成加密导出备份，请务必牢记口令（遗失将无法解密恢复）')
+      showAlert(
+        'success',
+        '已开始下载加密导出备份（进度见浏览器下载列表）；口令遗失将无法解密恢复，请牢记',
+      )
       exportForm.passphrase = ''
       exportForm.passphrase2 = ''
       // 导出同时在本机登记一条导出备份点，列表与健康结论都需要刷新。

@@ -6,6 +6,7 @@ const apiPut = vi.fn()
 const apiUpload = vi.fn()
 const downloadPost = vi.fn()
 const download = vi.fn()
+const downloadUrl = vi.fn()
 
 vi.mock('../../api/client', () => ({
   api: {
@@ -15,6 +16,7 @@ vi.mock('../../api/client', () => ({
     upload: (...args) => apiUpload(...args),
     downloadPost: (...args) => downloadPost(...args),
     download: (...args) => download(...args),
+    downloadUrl: (...args) => downloadUrl(...args),
   },
 }))
 
@@ -185,6 +187,7 @@ describe('useBackupCenter', () => {
     apiUpload.mockReset()
     downloadPost.mockReset()
     download.mockReset()
+    downloadUrl.mockReset()
   })
 
   /**
@@ -193,7 +196,7 @@ describe('useBackupCenter', () => {
    */
   function stubExportJob({ points = pointsPayload(), jobState } = {}) {
     apiPost.mockResolvedValue({ job_id: 'job-1', state: 'running' })
-    download.mockResolvedValue('luyun_backup_x.luyunbak')
+    downloadUrl.mockReturnValue(undefined)
     apiGet.mockImplementation((path) => {
       if (path === '/api/backup/export/jobs/job-1') {
         return Promise.resolve(jobState || {
@@ -332,7 +335,7 @@ describe('useBackupCenter', () => {
       include_other_photos: true,
     })
     // 打包完成才下载，文件名用服务端给的那个
-    expect(download).toHaveBeenCalledWith(
+    expect(downloadUrl).toHaveBeenCalledWith(
       '/api/backup/export/jobs/job-1/download',
       'luyun_backup_x.luyunbak',
     )
@@ -346,7 +349,7 @@ describe('useBackupCenter', () => {
   it('shows server-reported export progress while the job is still packing', async () => {
     let polls = 0
     apiPost.mockResolvedValue({ job_id: 'job-1' })
-    download.mockResolvedValue('luyun_backup_x.luyunbak')
+    downloadUrl.mockReturnValue(undefined)
     apiGet.mockImplementation((path) => {
       if (path === '/api/backup/export/jobs/job-1') {
         polls += 1
@@ -375,12 +378,12 @@ describe('useBackupCenter', () => {
     await vi.waitFor(() => {
       expect(exportStageText.value).toBe('正在打包照片 12/40…')
     })
-    expect(exportPercent.value).toBe(48)
+    expect(exportPercent.value).toBe(58)
     expect(exportIndeterminate.value).toBe(false)
     expect(exporting.value).toBe(true)
 
     await pending
-    expect(download).toHaveBeenCalledTimes(1)
+    expect(downloadUrl).toHaveBeenCalledTimes(1)
   })
 
   it('surfaces a failed export job as an error alert', async () => {
@@ -395,7 +398,7 @@ describe('useBackupCenter', () => {
     await onExportBackup()
 
     expect(showAlert).toHaveBeenCalledWith('error', expect.stringContaining('未找到 pg_dump'))
-    expect(download).not.toHaveBeenCalled()
+    expect(downloadUrl).not.toHaveBeenCalled()
   })
 
   it('PG 后端下业务数据被禁用：提交始终不带 include_app_db，刷新也不会重新打开', async () => {
