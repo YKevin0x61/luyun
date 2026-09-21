@@ -128,6 +128,27 @@ function upload(path, formData, onProgress) {
 
 // 下载文件型响应（如 DB 导出）：从 Content-Disposition 取原始文件名，
 // 触发浏览器保存对话框；返回实际使用的文件名供调用方展示提示。
+/**
+ * 从 Content-Disposition 取文件名。
+ *
+ * 必须优先 RFC 5987 的 `filename*=UTF-8''…`：服务端把它放在 `filename="…"` 之后
+ * （那个 ASCII 名只是给老浏览器兜底），而一个宽松的正则从左往右扫会先撞上 ASCII
+ * 名，中文文件名就被顶掉了。
+ */
+export function downloadFilename(header, fallback = 'download') {
+  const value = String(header || '')
+  const utf8 = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;\n]+)/.exec(value)
+  const plain = /filename\s*=\s*"?([^;"\n]+)"?/.exec(value)
+  const trimmed = ((utf8 && utf8[1]) || (plain && plain[1]) || '').trim()
+  if (!trimmed) return fallback
+  try {
+    return decodeURIComponent(trimmed) || fallback
+  } catch (_) {
+    // 不是合法的百分号编码（服务端直接写了原文），按原文用。
+    return trimmed
+  }
+}
+
 async function download(path, fallbackFilename = 'download') {
   const res = await fetch(path, { method: 'GET', credentials: 'include', cache: 'no-store' })
   if (res.status === 401 && !isStandaloneAuthRoute()) {
@@ -145,9 +166,10 @@ async function download(path, fallbackFilename = 'download') {
     throw new Error(message)
   }
 
-  const cd = res.headers.get('Content-Disposition') || ''
-  const match = /filename\*?=(?:UTF-8''|)"?([^;"\n]+)"?/i.exec(cd)
-  const filename = match && match[1] ? decodeURIComponent(match[1].trim()) : fallbackFilename
+  const filename = downloadFilename(
+    res.headers.get('Content-Disposition'),
+    fallbackFilename,
+  )
 
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
@@ -184,9 +206,10 @@ async function downloadPost(path, body, fallbackFilename = 'download') {
     throw new Error(message)
   }
 
-  const cd = res.headers.get('Content-Disposition') || ''
-  const match = /filename\*?=(?:UTF-8''|)"?([^;"\n]+)"?/i.exec(cd)
-  const filename = match && match[1] ? decodeURIComponent(match[1].trim()) : fallbackFilename
+  const filename = downloadFilename(
+    res.headers.get('Content-Disposition'),
+    fallbackFilename,
+  )
 
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)

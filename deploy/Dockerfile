@@ -15,10 +15,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # 备份」正是靠 pg_dump。Debian 12 官方源只有 15，compose 起的却是 postgres:16，
 # 所以从 PGDG 源装 16。**升级 compose 里的 PG 大版本时必须同步改这里**，否则更新
 # 会卡在 backing_up 阶段（tests/test_docker_compose_contract.py 会拦住这种漂移）。
+# 导出标准图时服务端要用 PIL 把「批注」文字画进图片，镜像里没有中文字体的话
+# 中文会渲染成方块（圆圈和箭头不受影响）。挑体积小的 wqy-zenhei；候选列表见
+# services/hygiene/standards_export.py 的 FONT_CANDIDATES。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        fonts-wqy-zenhei \
         tar \
         sqlite3 \
         tini \

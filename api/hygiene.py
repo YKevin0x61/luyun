@@ -4,17 +4,22 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from collections import defaultdict
+from pathlib import Path
+from urllib.parse import quote
+import asyncio
 import json
 import logging
 import sqlite3
+import tempfile
 import time
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from api.security import require_session
 from config import settings
@@ -25,6 +30,7 @@ from services.hygiene.accounts import (
     normalize_phone,
 )
 from services.hygiene.images import sniff_image_content_type
+from services.hygiene.standards_export import write_archive
 from services.hygiene.work import (
     BOARD_EVENT_DEFAULT_LIMIT,
     BOARD_EVENT_MAX_LIMIT,
@@ -944,6 +950,78 @@ async def admin_set_shift(
     picked = await _admin_set_assignment(employee_id, body, accounts)
     await _hygiene_nudge("assignment", "changed", employee_id=employee_id)
     return picked
+
+
+async def _standard_export_entries(work: HygieneWork, variant: str) -> list:
+    """收集 (责任区, 检查项, 图片路径, 标注)，只取各检查项的当前标准图。
+
+    给的是路径不是字节：门店标准图上百张时，一次性把原图读进内存就是几百 MB，
+    烘焙在线程里逐张读盘更稳。
+    """
+    entries: list = []
+    for zone in await work.list_staff_daily_items():
+        for item in zone.get("items") or []:
+            capture_id = item.get("capture_id")
+            if not capture_id:
+                continue
+            try:
+                view = await work.capture_view(capture_id, variant)
+            except (HygieneWorkError, FileNotFoundError) as exc:
+                logger.warning(
+                    "导出标准图：取不到这张图，已跳过 item=%s: %s", item.get("id"), exc
+                )
+                continue
+            path = view.get("path")
+            if path is None:
+                continue
+            entries.append(
+                (zone["name"], item["name"], Path(path), item.get("markup") or [])
+            )
+    return entries
+
+
+@router.get("/admin/standards-export")
+async def admin_export_standards(
+    size: str = Query("original", pattern="^(original|preview)$"),
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Response:
+    """把当前标准图连同圆圈/箭头/批注烘焙进图片，按责任区打包成 zip 下载。
+
+    ``size=original`` 出原图（存档、打印），``size=preview`` 出 1600px 变体
+    （包小、下载快）。烘焙走 ``asyncio.to_thread``：PIL 解码/绘制/编码是纯 CPU 的
+    同步调用，放在事件循环里会把整个后端（KDS、实时广播）一起冻住。
+    """
+    entries = await _standard_export_entries(work, size)
+    if not entries:
+        raise HTTPException(status_code=404, detail="还没有带标准图的日常检查项")
+    with tempfile.NamedTemporaryFile(
+        prefix="hygiene-standards-", suffix=".zip", delete=False
+    ) as handle:
+        archive_path = Path(handle.name)
+    try:
+        written, failed = await asyncio.to_thread(write_archive, entries, archive_path)
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+    if not written:
+        archive_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=404, detail="标准图文件读不出来，无法导出")
+    stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d")
+    logger.info("📦 [审计] 导出标准图 %s 张（跳过 %s 张，变体=%s）", written, failed, size)
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        headers={
+            # ASCII 名兜底老浏览器；filename* 让前端拿到中文文件名。
+            "Content-Disposition": (
+                'attachment; filename="hygiene-standards.zip"; '
+                f"filename*=UTF-8''{quote(f'标准图-{stamp}.zip')}"
+            ),
+            "X-Hygiene-Export-Count": str(written),
+        },
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
+    )
 
 
 @router.get("/admin/zones")

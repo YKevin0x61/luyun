@@ -18,6 +18,7 @@ import {
 const zones = ref([])
 const selectedId = ref(null)
 const loading = ref(true)
+const exporting = ref(false)
 const errorText = ref('')
 const newZoneName = ref('')
 const newZoneShifts = ref([...HYGIENE_SHIFTS])
@@ -99,6 +100,23 @@ useHygieneRealtime({
 
 async function refreshPage() {
   await Promise.all([loadZones(), loadClocks(), loadBoardPreview()])
+}
+
+/**
+ * 导出标准图：服务端把圆圈/箭头/批注烘焙进图片，按责任区分成子文件夹打包。
+ * 几十张图要解码、绘制、重编码，慢是正常的——按钮文案要知道自己在等什么。
+ */
+async function exportStandards() {
+  if (exporting.value) return
+  exporting.value = true
+  errorText.value = ''
+  try {
+    await api.download('/api/hygiene/admin/standards-export', 'hygiene-standards.zip')
+  } catch (err) {
+    errorText.value = err.message || '导出标准图失败'
+  } finally {
+    exporting.value = false
+  }
 }
 
 async function loadZones() {
@@ -388,7 +406,15 @@ function markLabel(mark) {
           <p>卫生责任区与档口、配方岗位相互独立。每个责任区可选白班、夜班或只跑其中一个班次；没有当前标准图的检查项不会出现在员工端；更换标准图后，新检查使用新图。删除责任区或检查项会同时删除进行中的待办和该区未闭环整改单。</p>
         </details>
       </div>
-      <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
+      <div class="roster-head-actions">
+        <button
+          type="button"
+          class="btn"
+          :disabled="exporting"
+          @click="exportStandards"
+        >{{ exporting ? '正在打包…' : '导出标准图' }}</button>
+        <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
+      </div>
     </div>
 
     <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>

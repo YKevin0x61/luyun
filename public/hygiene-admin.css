@@ -556,6 +556,13 @@
   width: 3px;
   background: linear-gradient(180deg, var(--hy-mint), rgba(63, 224, 176, 0));
 }
+/* 责任区页头部：导出标准图 + 刷新并排，窄屏时换行。 */
+.hygiene-admin .roster-head-actions {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 .hygiene-admin .hy-eyebrow {
   margin: 0 0 .4rem;
   display: flex;
