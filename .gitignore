@@ -110,6 +110,10 @@ dump.rdb
 config.local.*
 .settings.local.*
 
+# Agent 会话附件（用户上传的截图等）：本地诊断素材，不进仓库。
+# 未忽略时它会以 untracked 身份让工作区变脏，发布脚本因而拒绝出包。
+.dsh-im/
+
 # ===== Design / internal docs (keep research notes local) =====
 docs/*
 !docs/README.md
