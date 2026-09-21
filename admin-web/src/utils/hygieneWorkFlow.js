@@ -95,9 +95,9 @@ export function nextFixWorkRow(rows, current, { isManager } = {}) {
 }
 
 export function tabWorkCount(tabId, { inbox = [], deepInbox = [], fixInbox = [] } = {}) {
-  if (tabId === 'inbox') {
-    return openRows(inbox).length + openRows(deepInbox).length + (fixInbox || []).length
-  }
+  // 待办页只列日常，角标跟同一口径走：三项相加会出现「角标 3、页面上只有 1 项」
+  // 这种对不上的情况。专项、整改各自有 tab，角标也各自算。
+  if (tabId === 'inbox') return openRows(inbox).length
   if (tabId === 'deep') return openRows(deepInbox).length
   if (tabId === 'fix') return (fixInbox || []).length
   return 0

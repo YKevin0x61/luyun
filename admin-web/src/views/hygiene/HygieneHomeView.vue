@@ -190,12 +190,11 @@ function notifySubmitFailed(label) {
   errorText.value = `「${label}」上传失败，可在上传列表里重试`
 }
 
+// 待办页就是「日常」页：专项、整改各自有 tab 与角标，不再混进这一屏的队列。
+// 它们仍照常加载（loadDeepClean / loadFixTickets 喂各自的 tab），只是不参与这条队列。
 const workQueue = computed(() => buildWorkQueue({
   inbox: inbox.value,
-  deepInbox: deepInbox.value,
-  fixInbox: fixInbox.value,
   shiftDue: shiftDue.value,
-  deepDue: deepDue.value,
   now: nowTick.value,
   isManager: isManager.value,
   pendingKeys: pendingKeys.value,
@@ -1368,14 +1367,12 @@ async function decide(action, reason = '') {
           <h1>今天还差什么</h1>
           <div class="hy-work-facts">
             <span>日常 {{ dailyStats.passed }}/{{ dailyStats.total }}</span>
-            <span v-if="deepStats.total">专项 {{ deepStats.passed }}/{{ deepStats.total }}</span>
-            <span v-if="fixInbox.length">整改 {{ fixInbox.length }}</span>
             <span v-if="queueSummary.overdue" class="is-overdue">超时 {{ queueSummary.overdue }}</span>
             <span v-else-if="queueSummary.soon" class="is-soon">快到时 {{ queueSummary.soon }}</span>
             <span v-if="queueSummary.waiting">等验收 {{ queueSummary.waiting }}</span>
           </div>
           <p class="hy-staff-lead">
-            <template v-if="shiftDue">本班 {{ shiftDue }} 前交。专项不跟班次；整改跟区域、不跟班次。</template>
+            <template v-if="shiftDue">本班 {{ shiftDue }} 前交。专项和整改在各自那一屏。</template>
             <template v-else>按超时、快到截止、待拍的顺序排好，照下一个做就行。</template>
           </p>
 

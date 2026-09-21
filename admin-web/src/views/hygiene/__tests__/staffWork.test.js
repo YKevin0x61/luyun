@@ -77,4 +77,25 @@ describe('hygiene staff work app', () => {
     // 旧的裸文案（不带区名）不许再作为正文出现；注释里提到它不算。
     expect(empty).not.toMatch(/>\s*还没有带标准图的日常检查项。/)
   })
+
+  it('keeps the 待办 screen to daily work only', () => {
+    const home = read('../HygieneHomeView.vue')
+    const queue = home.slice(
+      home.indexOf('const workQueue = computed'),
+      home.indexOf('const nextWork = computed'),
+    )
+    // 待办页就是日常页：专项、整改各自有 tab 与角标。混进这条队列会让员工在这一屏
+    // 看到不属于日常的活，待办角标也会和列表对不上（tabWorkCount 同一口径）。
+    expect(queue).toMatch(/inbox: inbox\.value/)
+    expect(queue).not.toMatch(/deepInbox/)
+    expect(queue).not.toMatch(/fixInbox/)
+
+    const facts = home.slice(
+      home.indexOf('hy-work-facts'),
+      home.indexOf('hy-staff-lead', home.indexOf('hy-work-facts')),
+    )
+    expect(facts).toMatch(/日常 \{\{ dailyStats\.passed \}\}/)
+    expect(facts).not.toMatch(/专项/)
+    expect(facts).not.toMatch(/整改/)
+  })
 })

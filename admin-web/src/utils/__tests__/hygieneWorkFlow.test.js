@@ -43,11 +43,12 @@ describe('hygieneWorkFlow', () => {
     })
     expect(openRows(items).map((row) => row.item_id)).toEqual([1, 2, 3])
     expect(groupByZone(openRows(items)).map((zone) => zone.name)).toEqual(['案板', '馅档'])
+    // 待办页只列日常：专项、整改不进待办角标，各自 tab 单独算（见下面两行）。
     expect(tabWorkCount('inbox', {
       inbox: items,
       deepInbox: [{ status: '待拍' }],
       fixInbox: [{ id: 8 }],
-    })).toBe(5)
+    })).toBe(3)
     expect(tabWorkCount('deep', { deepInbox: [{ status: '已通过' }, { status: '待拍' }] })).toBe(1)
     expect(tabWorkCount('fix', { fixInbox: [{ id: 8 }, { id: 9 }] })).toBe(2)
     expect(tabWorkCount('boards', { inbox: items })).toBe(0)
