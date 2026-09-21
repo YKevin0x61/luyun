@@ -563,6 +563,35 @@
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+/* 导出规格：预览图（1600px，几十 MB 的包）还是原图（最清晰，可能上百 MB）。 */
+.hygiene-admin .export-size {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  font-size: .82rem;
+  color: var(--hy-muted);
+}
+.hygiene-admin .export-size select {
+  border: 1px solid var(--hy-line);
+  border-radius: 8px;
+  background: rgba(8, 22, 20, .6);
+  color: var(--hy-ink);
+  padding: .35rem .5rem;
+  font: inherit;
+}
+/* 打包进度：几十张图要解码重编码，给一条能看出在动的细进度条。 */
+.hygiene-admin .export-progress {
+  height: 4px;
+  margin: 0 0 .9rem;
+  border-radius: 999px;
+  background: rgba(63, 224, 176, .16);
+  overflow: hidden;
+}
+.hygiene-admin .export-progress-bar {
+  height: 100%;
+  background: var(--hy-mint);
+  transition: width .3s ease;
+}
 .hygiene-admin .hy-eyebrow {
   margin: 0 0 .4rem;
   display: flex;

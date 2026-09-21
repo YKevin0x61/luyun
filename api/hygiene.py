@@ -15,11 +15,11 @@ import logging
 import sqlite3
 import tempfile
 import time
+import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from starlette.background import BackgroundTask
 
 from api.security import require_session
 from config import settings
@@ -985,47 +985,142 @@ async def _standard_export_entries(work: HygieneWork, variant: str) -> list:
     return entries
 
 
-@router.get("/admin/standards-export")
-async def admin_export_standards(
-    size: str = Query("original", pattern="^(original|preview)$"),
+# 导出任务表：单 worker 进程内存在内存里（部署约束就是一个 worker），重启即丢——
+# 导出是"点一下、等几秒、下载"的操作，丢了重来即可，不值得落库。
+_EXPORT_JOBS: Dict[str, Dict[str, Any]] = {}
+_EXPORT_JOB_TTL_SECONDS = 30 * 60
+_EXPORT_MAX_RUNNING = 2
+
+
+def _prune_export_jobs(now: float) -> None:
+    for job_id, job in list(_EXPORT_JOBS.items()):
+        if now - job["started_at"] < _EXPORT_JOB_TTL_SECONDS:
+            continue
+        path = job.get("path")
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("清理导出临时文件失败 job=%s", job_id, exc_info=True)
+        _EXPORT_JOBS.pop(job_id, None)
+
+
+async def _run_export_job(job_id: str, work: HygieneWork, size: str) -> None:
+    """后台把标准图烘焙进图片并按责任区打包。进度写在任务表里，前端轮询。"""
+    job = _EXPORT_JOBS[job_id]
+    archive_path: Optional[Path] = None
+    try:
+        entries = await _standard_export_entries(work, size)
+        if not entries:
+            job.update(state="failed", error="还没有带标准图的日常检查项")
+            return
+        job["total"] = len(entries)
+        with tempfile.NamedTemporaryFile(
+            prefix="hygiene-standards-", suffix=".zip", delete=False
+        ) as handle:
+            archive_path = Path(handle.name)
+
+        def report(done: int, total: int) -> None:
+            job["done"] = done
+            job["total"] = total
+
+        written, failed = await asyncio.to_thread(
+            write_archive, entries, archive_path, report
+        )
+        if not written:
+            archive_path.unlink(missing_ok=True)
+            job.update(state="failed", error="标准图文件读不出来，无法导出")
+            return
+        stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d")
+        job.update(
+            state="done",
+            path=archive_path,
+            count=written,
+            skipped=failed,
+            filename=f"标准图-{stamp}.zip",
+            bytes=archive_path.stat().st_size,
+        )
+        logger.info(
+            "📦 [审计] 导出标准图 %s 张（跳过 %s 张，变体=%s，%.1f MB）",
+            written, failed, size, job["bytes"] / 1024 / 1024,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 后台任务必须自己收口，否则任务永远 running
+        logger.exception("导出标准图失败 job=%s", job_id)
+        if archive_path is not None:
+            archive_path.unlink(missing_ok=True)
+        job.update(state="failed", error=f"导出失败：{exc}")
+
+
+@router.post("/admin/standards-export/jobs")
+async def start_standards_export(
+    size: str = Query("preview", pattern="^(original|preview)$"),
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
-) -> Response:
-    """把当前标准图连同圆圈/箭头/批注烘焙进图片，按责任区打包成 zip 下载。
+) -> Dict[str, Any]:
+    """起一个导出任务，立刻返回 job_id；打包进度由状态接口轮询。
 
-    ``size=original`` 出原图（存档、打印），``size=preview`` 出 1600px 变体
-    （包小、下载快）。烘焙走 ``asyncio.to_thread``：PIL 解码/绘制/编码是纯 CPU 的
-    同步调用，放在事件循环里会把整个后端（KDS、实时广播）一起冻住。
+    同步返回会让浏览器干等十几秒（几十张原图要解码重编码 + 下载几十 MB），
+    期间界面上没有任何反馈。这里改成任务：POST 立刻返回，前端按 done/total 显示
+    进度，完成后再去下载。
     """
-    entries = await _standard_export_entries(work, size)
-    if not entries:
-        raise HTTPException(status_code=404, detail="还没有带标准图的日常检查项")
-    with tempfile.NamedTemporaryFile(
-        prefix="hygiene-standards-", suffix=".zip", delete=False
-    ) as handle:
-        archive_path = Path(handle.name)
-    try:
-        written, failed = await asyncio.to_thread(write_archive, entries, archive_path)
-    except Exception:
-        archive_path.unlink(missing_ok=True)
-        raise
-    if not written:
-        archive_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=404, detail="标准图文件读不出来，无法导出")
-    stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d")
-    logger.info("📦 [审计] 导出标准图 %s 张（跳过 %s 张，变体=%s）", written, failed, size)
+    now = time.time()
+    _prune_export_jobs(now)
+    running = sum(1 for job in _EXPORT_JOBS.values() if job["state"] == "running")
+    if running >= _EXPORT_MAX_RUNNING:
+        raise HTTPException(status_code=429, detail="已有一个导出任务在跑，请稍候")
+    job_id = uuid.uuid4().hex
+    _EXPORT_JOBS[job_id] = {
+        "state": "running",
+        "done": 0,
+        "total": 0,
+        "error": "",
+        "started_at": now,
+        "path": None,
+        "size": size,
+    }
+    asyncio.create_task(_run_export_job(job_id, work, size))
+    return {"job_id": job_id, "state": "running"}
+
+
+@router.get("/admin/standards-export/jobs/{job_id}")
+async def read_standards_export(job_id: str) -> Dict[str, Any]:
+    job = _EXPORT_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
+    return {
+        "state": job["state"],
+        "done": job["done"],
+        "total": job["total"],
+        "error": job["error"],
+        "count": job.get("count"),
+        "bytes": job.get("bytes"),
+    }
+
+
+@router.get("/admin/standards-export/jobs/{job_id}/download")
+async def download_standards_export(job_id: str) -> Response:
+    job = _EXPORT_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
+    if job["state"] == "failed":
+        raise HTTPException(status_code=409, detail=job["error"] or "导出失败")
+    if job["state"] != "done":
+        raise HTTPException(status_code=409, detail="还在打包，请稍候")
+    path = job["path"]
+    if path is None or not Path(path).exists():
+        raise HTTPException(status_code=410, detail="导出文件已被清理，请重新导出")
+    filename = job.get("filename") or "hygiene-standards.zip"
     return FileResponse(
-        archive_path,
+        path,
         media_type="application/zip",
         headers={
             # ASCII 名兜底老浏览器；filename* 让前端拿到中文文件名。
             "Content-Disposition": (
                 'attachment; filename="hygiene-standards.zip"; '
-                f"filename*=UTF-8''{quote(f'标准图-{stamp}.zip')}"
+                f"filename*=UTF-8''{quote(filename)}"
             ),
-            "X-Hygiene-Export-Count": str(written),
+            "X-Hygiene-Export-Count": str(job.get("count") or 0),
         },
-        background=BackgroundTask(archive_path.unlink, missing_ok=True),
     )
 
 

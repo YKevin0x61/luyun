@@ -11,6 +11,7 @@
 
 import asyncio
 import io
+import time
 import zipfile
 from datetime import datetime
 
@@ -31,7 +32,7 @@ SUPER = {"kind": "super"}
 CIRCLE = {"kind": "circle", "x": 0.5, "y": 0.5, "r": 0.15}
 CAPTION = {"kind": "caption", "x": 0.4, "y": 0.3, "text": "台面要干净"}
 MARK_RGB = (63, 224, 176)
-EXPORT_PATH = "/api/hygiene/admin/standards-export"
+EXPORT_JOBS = "/api/hygiene/admin/standards-export/jobs"
 
 
 def _run(coro):
@@ -119,10 +120,31 @@ def empty_http(tmp_path):
     settings.DATABASE_DIR = old
 
 
-def test_export_returns_zip_grouped_by_zone(export_http):
-    client, zones = export_http
-    response = client.get(EXPORT_PATH)
+def _start(client, query: str = "") -> str:
+    response = client.post(f"{EXPORT_JOBS}{query}")
+    assert response.status_code == 200, response.text
+    return response.json()["job_id"]
 
+
+def _wait(client, job_id: str, timeout: float = 30.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = client.get(f"{EXPORT_JOBS}/{job_id}").json()
+        if state["state"] != "running":
+            return state
+        time.sleep(0.05)
+    raise AssertionError("导出任务超时未结束")
+
+
+def test_export_job_reports_progress_and_downloads_zip(export_http):
+    client, zones = export_http
+    job_id = _start(client)
+
+    state = _wait(client, job_id)
+    assert state["state"] == "done", state
+    assert state["done"] == 2 and state["total"] == 2
+
+    response = client.get(f"{EXPORT_JOBS}/{job_id}/download")
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/zip"
     # 中文文件名走 RFC 5987，前端 api.download 才会解析出「标准图-YYYYMMDD.zip」
@@ -140,23 +162,45 @@ def test_export_returns_zip_grouped_by_zone(export_http):
     assert _mark_pixels(plain) == 0, "没标注的检查项不该被画上东西"
 
 
-def test_export_preview_variant_is_smaller(export_http):
+def test_preview_export_is_smaller_than_original(export_http):
     client, _zones = export_http
-    original = client.get(f"{EXPORT_PATH}?size=original")
-    preview = client.get(f"{EXPORT_PATH}?size=preview")
+    preview_id = _start(client, "?size=preview")
+    original_id = _start(client, "?size=original")
+    assert _wait(client, preview_id)["state"] == "done"
+    assert _wait(client, original_id)["state"] == "done"
 
-    assert original.status_code == 200
-    assert preview.status_code == 200
+    preview = client.get(f"{EXPORT_JOBS}/{preview_id}/download")
+    original = client.get(f"{EXPORT_JOBS}/{original_id}/download")
+
+    assert preview.status_code == 200 and original.status_code == 200
     assert len(preview.content) <= len(original.content)
 
 
 def test_export_rejects_unknown_size(export_http):
     client, _zones = export_http
-    assert client.get(f"{EXPORT_PATH}?size=huge").status_code == 422
+    assert client.post(f"{EXPORT_JOBS}?size=huge").status_code == 422
 
 
-def test_export_without_any_standard_returns_404(empty_http):
-    response = empty_http.get(EXPORT_PATH)
+def test_export_without_any_standard_fails_the_job(empty_http):
+    job_id = _start(empty_http)
 
-    assert response.status_code == 404
-    assert "标准图" in response.json()["detail"]
+    state = _wait(empty_http, job_id)
+    assert state["state"] == "failed"
+    assert "标准图" in state["error"]
+
+
+def test_unknown_job_is_404(export_http):
+    client, _zones = export_http
+    assert client.get(f"{EXPORT_JOBS}/nope").status_code == 404
+    assert client.get(f"{EXPORT_JOBS}/nope/download").status_code == 404
+
+
+def test_download_before_done_is_409(export_http):
+    client, _zones = export_http
+    job_id = _start(client)
+    response = client.get(f"{EXPORT_JOBS}/{job_id}/download")
+    # 打包可能已经结束（小样本），那时 200 也合理；只钉住「没打完不能给空文件」。
+    assert response.status_code in (200, 409)
+    if response.status_code == 409:
+        assert "打包" in response.json()["detail"]
+    _wait(client, job_id)

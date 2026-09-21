@@ -19,6 +19,10 @@ const zones = ref([])
 const selectedId = ref(null)
 const loading = ref(true)
 const exporting = ref(false)
+// 默认预览图：门店 36 个检查项的原图合计 80+ MB，打包和解码都慢一个量级，
+// 而预览图是 1600px，页面显示 440px、打印 A4 都够用。
+const exportSize = ref('preview')
+const exportProgress = ref(null)
 const errorText = ref('')
 const newZoneName = ref('')
 const newZoneShifts = ref([...HYGIENE_SHIFTS])
@@ -104,20 +108,53 @@ async function refreshPage() {
 
 /**
  * 导出标准图：服务端把圆圈/箭头/批注烘焙进图片，按责任区分成子文件夹打包。
- * 几十张图要解码、绘制、重编码，慢是正常的——按钮文案要知道自己在等什么。
+ *
+ * 走任务式而不是一个同步请求：几十张图要解码、绘制、重编码（有的门店上百 MB），
+ * 同步请求期间界面上什么都没有，员工只会以为按钮没反应。这里先 POST 拿 job_id，
+ * 再按 done/total 轮询打包进度，打完才去下载。
  */
 async function exportStandards() {
   if (exporting.value) return
   exporting.value = true
   errorText.value = ''
+  exportProgress.value = { done: 0, total: 0, phase: 'packing' }
   try {
-    await api.download('/api/hygiene/admin/standards-export', 'hygiene-standards.zip')
+    const job = await api.post(
+      `/api/hygiene/admin/standards-export/jobs?size=${exportSize.value}`,
+    )
+    for (;;) {
+      await new Promise((resolve) => { setTimeout(resolve, 700) })
+      const state = await api.get(`/api/hygiene/admin/standards-export/jobs/${job.job_id}`)
+      if (state.state === 'failed') throw new Error(state.error || '导出失败')
+      exportProgress.value = { done: state.done, total: state.total, phase: 'packing' }
+      if (state.state === 'done') break
+    }
+    exportProgress.value = { done: 0, total: 0, phase: 'downloading' }
+    await api.download(
+      `/api/hygiene/admin/standards-export/jobs/${job.job_id}/download`,
+      'hygiene-standards.zip',
+    )
   } catch (err) {
     errorText.value = err.message || '导出标准图失败'
   } finally {
     exporting.value = false
+    exportProgress.value = null
   }
 }
+
+const exportPercent = computed(() => {
+  const progress = exportProgress.value
+  if (!progress || !progress.total) return 0
+  return Math.min(100, Math.round((progress.done / progress.total) * 100))
+})
+
+const exportLabel = computed(() => {
+  const progress = exportProgress.value
+  if (!exporting.value || !progress) return '导出标准图'
+  if (progress.phase === 'downloading') return '正在下载…'
+  if (progress.total) return `正在打包 ${progress.done}/${progress.total}…`
+  return '正在准备…'
+})
 
 async function loadZones() {
   loading.value = true
@@ -407,14 +444,30 @@ function markLabel(mark) {
         </details>
       </div>
       <div class="roster-head-actions">
+        <label class="export-size">
+          图片
+          <select v-model="exportSize" :disabled="exporting" aria-label="导出图片规格">
+            <option value="preview">预览图（快）</option>
+            <option value="original">原图（最清晰）</option>
+          </select>
+        </label>
         <button
           type="button"
           class="btn"
           :disabled="exporting"
           @click="exportStandards"
-        >{{ exporting ? '正在打包…' : '导出标准图' }}</button>
+        >{{ exportLabel }}</button>
         <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
       </div>
+    </div>
+
+    <div
+      v-if="exporting && exportProgress && exportProgress.total"
+      class="export-progress"
+      role="status"
+      :aria-label="exportLabel"
+    >
+      <div class="export-progress-bar" :style="{ width: exportPercent + '%' }"></div>
     </div>
 
     <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>

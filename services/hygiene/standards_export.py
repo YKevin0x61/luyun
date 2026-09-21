@@ -16,10 +16,12 @@ from __future__ import annotations
 import io
 import logging
 import math
+import os
 import re
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -32,7 +34,15 @@ CAPTION_BG = (8, 22, 20, 235)
 CAPTION_LINE = (63, 224, 176, 160)
 GLOW_ALPHA = 60
 JPEG_QUALITY = 90
-ARCHIVE_COMPRESS_LEVEL = 6
+# optimize=True 会让 libjpeg 跑多轮霍夫曼表优化，单张多花约四成时间；导出是几十张
+# 的批量活儿，这点体积收益不值得。实测 1254px 的图 4ms → 2ms。
+JPEG_OPTIMIZE = False
+# 存进去的本来就是压过的 JPEG，deflate 的体积收益接近 0，CPU 却照烧——几十 MB
+# 就是一两秒。直接 STORED。
+ARCHIVE_COMPRESSION = zipfile.ZIP_STORED
+# 并发渲染张数。PIL 的解码/编码在 C 层会放掉 GIL，所以多线程是真并行；但门店机器
+# 通常 2-4 核，而且要留出余量给同一进程里的 KDS 与爬虫，所以封顶 4。
+MAX_RENDER_WORKERS = 4
 
 # 中文字体候选：先 Linux（生产/Docker），再 macOS（开发机）。都找不到就只能
 # 用默认位图字体，中文会失真——日志里会说明，不让整包导出失败。
@@ -186,7 +196,7 @@ def render_markup(data: bytes, markup: Optional[Iterable[dict]]) -> bytes:
             # 一条画不出来的标注不该毁掉整包导出。
             logger.debug("导出标准图：跳过一条画不出来的标注 %r", mark, exc_info=True)
     buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+    image.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=JPEG_OPTIMIZE)
     return buffer.getvalue()
 
 
@@ -197,37 +207,59 @@ def safe_component(raw: str, fallback: str) -> str:
     return cleaned[:80] or fallback
 
 
+def render_workers() -> int:
+    return max(1, min(MAX_RENDER_WORKERS, os.cpu_count() or 1))
+
+
 def write_archive(
     entries: Iterable[tuple[str, str, Path, Optional[list]]],
     target: Path,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+    workers: Optional[int] = None,
 ) -> tuple[int, int]:
     """把 (责任区, 检查项, 原图路径, 标注) 逐张烘焙后写进 zip。
 
     逐张读盘再写，不把整包图片同时留在内存里——门店标准图上百张时那是好几百 MB。
+    渲染走线程池（`ThreadPoolExecutor.map` 保序，zip 只能顺序写），比串行快数倍；
+    完成后立刻落进 zip，不驻留整包。
+
+    ``on_progress(已完成, 总数)`` 每张调一次，供调用方报进度。
 
     返回 ``(写入张数, 读取失败张数)``；单张读不出来只跳过它，不让整包失败。
     """
+    items = list(entries)
+    total = len(items)
     written = 0
     failed = 0
     used: set[str] = set()
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED,
-                         compresslevel=ARCHIVE_COMPRESS_LEVEL) as archive:
-        for zone_name, item_name, path, markup in entries:
-            try:
-                blob = render_markup(Path(path).read_bytes(), markup)
-            except (OSError, ValueError) as exc:
-                failed += 1
-                logger.warning(
-                    "导出标准图：读不出或解不开这张图，已跳过 zone=%s item=%s: %s",
-                    zone_name, item_name, exc,
-                )
-                continue
-            written += 1
-            folder = safe_component(zone_name, "未命名责任区")
-            stem = safe_component(item_name, f"标准图-{written}")
-            member = f"{folder}/{stem}.jpg"
-            if member in used:
-                member = f"{folder}/{stem}-{written}.jpg"
-            used.add(member)
-            archive.writestr(member, blob)
+
+    def render_one(item):
+        zone_name, item_name, path, markup = item
+        try:
+            return zone_name, item_name, render_markup(Path(path).read_bytes(), markup)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "导出标准图：读不出或解不开这张图，已跳过 zone=%s item=%s: %s",
+                zone_name, item_name, exc,
+            )
+            return zone_name, item_name, None
+
+    pool_size = max(1, workers or render_workers())
+    with zipfile.ZipFile(target, "w", ARCHIVE_COMPRESSION) as archive:
+        with ThreadPoolExecutor(max_workers=pool_size) as pool:
+            for zone_name, item_name, blob in pool.map(render_one, items, chunksize=1):
+                if blob is None:
+                    failed += 1
+                else:
+                    written += 1
+                    folder = safe_component(zone_name, "未命名责任区")
+                    stem = safe_component(item_name, f"标准图-{written}")
+                    member = f"{folder}/{stem}.jpg"
+                    if member in used:
+                        member = f"{folder}/{stem}-{written}.jpg"
+                    used.add(member)
+                    archive.writestr(member, blob)
+                if on_progress:
+                    on_progress(written + failed, total)
     return written, failed
+
