@@ -49,8 +49,12 @@ describe('标准图缓存：只提示，手动更新', () => {
     expect(layout).not.toMatch(/checkForUpdates\(\{ download: true \}\)/)
   })
 
-  it('只有用户点「立即更新」/「重试下载」才带 download', () => {
-    expect(panel).toMatch(/@click="store\.checkForUpdates\(\{ download: true \}\)"/)
+  it('只有用户点「立即更新」/「下载」/「重试下载」才带 download', () => {
+    // 面板里那个按钮是「下载 N 张」——后台只提示，动手下载就是靠它。
+    expect(panel).toMatch(/@click="downloadStandards"/)
+    expect(panel).toMatch(/downloadStandards[\s\S]*?checkForUpdates\(\{ download: true \}\)/)
+    expect(panel).toMatch(/下载 \$\{store\.stats\.missingCount\} 张/)
+    expect(panel).toMatch(/checkForUpdates\(\{ download: true \}\)/)
     expect(panel).toMatch(/有 \{\{ store\.deferred\.missing\.length \}\} 张标准图待更新/)
     expect(overlay).toMatch(/checkForUpdates\(\{ download: true \}\)/)
   })

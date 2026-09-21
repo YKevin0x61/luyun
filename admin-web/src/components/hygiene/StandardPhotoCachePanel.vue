@@ -43,13 +43,19 @@ function clearCache() {
   }
 }
 
-function checkUpdates() {
+/**
+ * 「下载」：用户主动把缺的 / 待更新的标准图拉下来。
+ *
+ * 后台核对只提示不下载（ADR-0086），所以这个按钮就是员工动手的那个入口——
+ * 必须带 download: true，否则它只会再核对一遍、什么也不下。
+ */
+function downloadStandards() {
   if (!store.stats.totalCount) return
   if (!store.stats.baselineReady) {
     store.firstPromptOpen = true
     return
   }
-  store.checkForUpdates()
+  store.checkForUpdates({ download: true })
 }
 
 watch(
@@ -166,7 +172,12 @@ onBeforeUnmount(() => {
         </dl>
         <p v-if="store.errorText" class="std-cache-error">{{ store.errorText }}</p>
         <div class="std-cache-actions">
-          <button type="button" class="btn btn-primary" :disabled="store.busy" @click="checkUpdates">检查更新</button>
+          <button
+            type="button"
+            class="btn btn-primary"
+            :disabled="store.busy || !store.stats.missingCount"
+            @click="downloadStandards"
+          >{{ store.stats.missingCount ? `下载 ${store.stats.missingCount} 张` : '已是最新' }}</button>
           <button type="button" class="btn" :disabled="store.busy || !store.stats.failureCount" @click="store.retryFailed()">重试失败</button>
           <button
             type="button"
