@@ -81,24 +81,32 @@ export function dailyItemStandardUrl(kind, row, variant = 'original') {
   }, variant)
 }
 
-export function dailyCaptureUrl(kind, row, variant = 'original') {
+// 管理端可以指定营业日（历史回看，ADR-0088）；员工端永远只有当天，不带这个参数。
+function businessDateQuery(kind, businessDate) {
+  if (kind !== 'admin' || !businessDate) return ''
+  return `&date=${encodeURIComponent(businessDate)}`
+}
+
+export function dailyCaptureUrl(kind, row, variant = 'original', businessDate = '') {
   const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
   const itemId = row && row.item_id
   const shift = encodeURIComponent((row && row.shift) || '')
   const version = encodeURIComponent((row && row.capture_id) || '')
+  const date = businessDateQuery(kind, businessDate)
   return appendImageVariant(
-    `${prefix}/daily/${itemId}/capture?shift=${shift}&v=${version}`,
+    `${prefix}/daily/${itemId}/capture?shift=${shift}&v=${version}${date}`,
     variant,
   )
 }
 
-export function frozenStandardUrl(kind, row, variant = 'original') {
+export function frozenStandardUrl(kind, row, variant = 'original', businessDate = '') {
   const prefix = kind === 'admin' ? '/api/hygiene/admin' : '/api/hygiene/staff'
   const itemId = row && row.item_id
   const shift = encodeURIComponent((row && row.shift) || '')
   const version = encodeURIComponent((row && row.frozen_standard_id) || '')
+  const date = businessDateQuery(kind, businessDate)
   return appendImageVariant(
-    `${prefix}/daily/${itemId}/frozen-standard?shift=${shift}&v=${version}`,
+    `${prefix}/daily/${itemId}/frozen-standard?shift=${shift}&v=${version}${date}`,
     variant,
   )
 }

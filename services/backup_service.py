@@ -25,7 +25,6 @@ import tarfile
 import tempfile
 import time
 from datetime import date, datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -37,6 +36,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.hmac import HMAC
 
 from config import settings
+from db_core.backend.sqlite_export import sqlite_bindable, sqlite_column_type
 from db_core.schema import ALL_TABLES, RECIPE_TABLES
 from services import backup_retention, credentials_store
 from services.credentials_store import CHINA_TZ, _derive_backup_key
@@ -2621,45 +2621,6 @@ async def merge_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> dic
     }
 
 
-def _sqlite_column_type(sql_type: str) -> str:
-    """把源库列类型折算成 SQLite 存储类。
-
-    导出成员只要求「可读 + 可回灌」，不追求还原源库的精确类型：两种恢复路径都按
-    列名做交集（``merge_recipes_from_bytes`` / ``overwrite_recipes_from_bytes``）。
-    """
-    normalized = (sql_type or "").lower()
-    if "int" in normalized:
-        return "INTEGER"
-    if any(
-        token in normalized
-        for token in ("real", "double", "numeric", "decimal", "float")
-    ):
-        return "REAL"
-    if any(token in normalized for token in ("blob", "bytea")):
-        return "BLOB"
-    return "TEXT"
-
-
-def _sqlite_bindable(value: Any) -> Any:
-    """把源库取回的值收敛成 sqlite3 能绑定的类型。
-
-    配方表在两种后端里刻意保持同样的列类型（时间戳 TEXT、金额 REAL/DOUBLE），
-    但加成性迁移可能引入 ``timestamptz`` / ``numeric`` / ``boolean``——asyncpg
-    会给出 datetime / Decimal / bool 对象，直接交给 sqlite3 会 ``InterfaceError``。
-    """
-    if value is None or isinstance(value, (str, int, float, bytes)):
-        return value
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, Decimal):
-        if value == value.to_integral_value():
-            return int(value)
-        return float(value)
-    return str(value)
-
-
 async def export_recipes_db_bytes_from_conn(conn) -> Optional[bytes]:
     """从**当前连接**导出「仅配方表」的精简 sqlite 库字节串。
 
@@ -2691,7 +2652,7 @@ async def export_recipes_db_bytes_from_conn(conn) -> Optional[bytes]:
             names = [name for name, _ in columns]
             definitions = []
             for name, sql_type in columns:
-                definition = f'"{name}" {_sqlite_column_type(sql_type)}'
+                definition = f'"{name}" {sqlite_column_type(sql_type)}'
                 if name == "id":
                     definition += " PRIMARY KEY"
                 definitions.append(definition)
@@ -2705,7 +2666,7 @@ async def export_recipes_db_bytes_from_conn(conn) -> Optional[bytes]:
                 dst.executemany(
                     f'INSERT INTO "{table}" ({quoted}) VALUES ({placeholders})',
                     [
-                        tuple(_sqlite_bindable(value) for value in row)
+                        tuple(sqlite_bindable(value) for value in row)
                         for row in data_rows
                     ],
                 )

@@ -76,7 +76,7 @@ describe('hygieneCopy', () => {
     expect(canAcceptFixTicket({ id: 10, permission: '普通员工' }, ticket, after)).toBe(false)
   })
 
-  it('管理端六页合成一个卫生板块，不把员工手机入口算进去', () => {
+  it('管理端七页合成一个卫生板块，不把员工手机入口算进去', () => {
     expect(HYGIENE_BRAND_TITLE).toBe('卫生')
     expect(hygieneDocumentTitle('花名册')).toBe('花名册 · 卫生')
     expect(HYGIENE_ADMIN_NAV.map((item) => item.path)).toEqual([
@@ -86,14 +86,16 @@ describe('hygieneCopy', () => {
       '/hygiene-deep-clean',
       '/hygiene-fix',
       '/hygiene-boards',
+      '/hygiene-data',
     ])
     expect(isHygieneAdminPath('/hygiene-roster')).toBe(true)
     expect(isHygieneAdminPath('/hygiene-boards')).toBe(true)
+    expect(isHygieneAdminPath('/hygiene-data')).toBe(true)
     expect(isHygieneAdminPath('/hygiene')).toBe(false)
     expect(isHygieneAdminPath('/hygiene/login')).toBe(false)
     expect(isHygieneAdminPath('/hygiene/register')).toBe(false)
     expect(HYGIENE_ADMIN_NAV.map((item) => item.shortTitle)).toEqual([
-      '人员', '责任区', '日常', '专项', '整改', '榜',
+      '人员', '责任区', '日常', '专项', '整改', '榜', '数据',
     ])
     expect(HYGIENE_STAFF_TABS.map((item) => item.id)).toEqual([
       'inbox', 'deep', 'fix', 'boards', 'me',

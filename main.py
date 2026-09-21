@@ -139,6 +139,8 @@ unmapped_watchdog_task = None
 recipe_store = None
 employee_accounts = None
 hygiene_work = None
+# 管理端数据与照片视图（ADR-0087）：只读，与 hygiene_work 一起在 lifespan 里建。
+hygiene_archive = None
 
 def serialize_all(obj):
     if isinstance(obj, dict):
@@ -156,6 +158,7 @@ async def lifespan(app: FastAPI):
     global db_manager, dish_catalog, restaurant_scraper, scraper_task, wecom_push_task
     global reconcile_scheduler_task, unmapped_watchdog_task
     global recipe_store, employee_accounts, hygiene_work, hygiene_overdue_task
+    global hygiene_archive
     global hygiene_variant_task, hygiene_maintenance_task
     
     try:
@@ -196,6 +199,7 @@ async def lifespan(app: FastAPI):
             startup_results.append("配方库")
 
         from services.hygiene.accounts import EmployeeAccounts
+        from services.hygiene.archive import HygieneDataArchive
         from services.hygiene.captures import FileCaptureStore
         from services.hygiene.images import ImageVariantGenerator
         from services.hygiene.notifier import WeComGroupTextNotifier
@@ -215,6 +219,11 @@ async def lifespan(app: FastAPI):
             )
             await hygiene_work.prepare()
             startup_results.append("卫生待办")
+            # 同一份 capture 目录，各持有自己的 store 实例（FileCaptureStore 无状态）。
+            hygiene_archive = HygieneDataArchive(
+                db_manager, captures=FileCaptureStore(capture_root)
+            )
+            startup_results.append("卫生数据视图")
             hygiene_overdue_task = asyncio.create_task(
                 hygiene_work.overdue_scheduler_loop()
             )

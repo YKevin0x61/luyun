@@ -44,6 +44,7 @@ const routes = [
   hygieneAdminPage('/hygiene-deep-clean', 'hygiene-deep-clean', () => import('../views/hygiene/HygieneDeepCleanView.vue')),
   hygieneAdminPage('/hygiene-fix', 'hygiene-fix', () => import('../views/hygiene/HygieneFixView.vue')),
   hygieneAdminPage('/hygiene-boards', 'hygiene-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
+  hygieneAdminPage('/hygiene-data', 'hygiene-data', () => import('../views/hygiene/HygieneDataView.vue')),
   { path: '/hygiene', name: 'hygiene-home', component: () => import('../views/hygiene/HygieneHomeView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, realtime: true } },
   hygieneStaffAuthPage('/hygiene/login', 'hygiene-login', () => import('../views/hygiene/HygieneLoginView.vue'), '员工登录'),
   hygieneStaffAuthPage('/hygiene/register', 'hygiene-register', () => import('../views/hygiene/HygieneRegisterView.vue'), '员工注册'),

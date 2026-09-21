@@ -23,11 +23,22 @@ from pydantic import BaseModel, Field
 
 from api.security import require_session
 from config import settings
+from database import CHINA_TZ
 from services import auth_service
 from services.hygiene.accounts import (
     EmployeeAccounts,
     EmployeeAccountsError,
     normalize_phone,
+)
+from services.hygiene.archive import (
+    KIND_DAILY,
+    KIND_DEEP,
+    KIND_FIX_RESHOOT,
+    KIND_STANDARD,
+    KIND_TEACHING,
+    ArchiveQueryError,
+    parse_archive_range,
+    write_ledger_zip,
 )
 from services.hygiene.images import sniff_image_content_type
 from services.hygiene.standards_export import write_archive
@@ -78,6 +89,21 @@ async def _hygiene_nudge(resource: str, action: str, **scope) -> None:
         {"resource": resource, "action": action, **scope},
     )
 
+
+def _clean_business_date(raw) -> str:
+    text = str(raw or "").strip()
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date().isoformat()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD") from exc
+
+
+def _optional_business_date(raw) -> Optional[str]:
+    """没给日期就当今天（验收动线），给了就必须是合法日期。"""
+    if raw is None or not str(raw).strip():
+        return None
+    return _clean_business_date(raw)
+
 _ERROR_DETAILS = {
     "invalid_phone": "请输入有效的中国大陆手机号",
     "password_too_short": f"密码至少 {settings.AUTH_MIN_PASSWORD_LENGTH} 位",
@@ -126,6 +152,19 @@ _ERROR_DETAILS = {
     "not_passed": "只有已通过的对照才能标成卫生教材",
     "invalid_teaching": "请选择已通过的日常或专项对照",
     "teaching_not_found": "卫生教材不存在",
+    # 数据与照片管理（ADR-0087）
+    "record_not_found": "这条记录不存在或已经被删了",
+    "kind_required": "请选择要清理的类型",
+    "bad_kind": "不支持的类型",
+    "standard_in_use": "当前标准图，或被提交当作对照用过的版本，不能删",
+    "bad_date": "日期格式应为 YYYY-MM-DD",
+    "bad_range": "开始日期晚于结束日期",
+    "range_too_wide": "一次最多查 366 天，请收窄区间",
+    "bad_capture": "缺少照片标识",
+    "capture_unknown": "这张照片不属于卫生记录",
+    "capture_missing": "照片文件已经不在磁盘上",
+    "export_empty": "这个范围里没有可导出的记录",
+    "export_running": "已经有一个导出任务在跑，请稍候",
 }
 
 
@@ -177,6 +216,7 @@ def _work_http_error(exc: HygieneWorkError) -> HTTPException:
         "ticket_not_found",
         "teaching_not_found",
         "standard_not_found",
+        "record_not_found",
     ):
         status = 404
     elif exc.code in ("duplicate_zone", "duplicate_item"):
@@ -402,9 +442,12 @@ async def _daily_capture_response(
     actor: Dict[str, Any],
     variant: str = "original",
     request: Optional[Request] = None,
+    business_date: Optional[str] = None,
 ) -> Response:
     try:
-        review = await work.get_daily_review(item_id, shift, actor=actor)
+        review = await work.get_daily_review(
+            item_id, shift, actor=actor, business_date=business_date
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     return await _image_response(
@@ -422,9 +465,12 @@ async def _frozen_standard_response(
     actor: Dict[str, Any],
     variant: str = "original",
     request: Optional[Request] = None,
+    business_date: Optional[str] = None,
 ) -> Response:
     try:
-        review = await work.get_daily_review(item_id, shift, actor=actor)
+        review = await work.get_daily_review(
+            item_id, shift, actor=actor, business_date=business_date
+        )
         standard = await work.standard_by_id(review["frozen_standard_id"])
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
@@ -1470,12 +1516,30 @@ async def staff_daily_review(
 
 @router.get("/admin/daily-queue")
 async def admin_daily_queue(
+    date: Optional[str] = None,
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    items = await work.list_daily_work(SUPER_ACTOR)
-    pending = [row for row in items if row["status"] == "待验收"]
-    return {"items": pending}
+    """某个营业日的日常检查。
+
+    不带日期时与验收动线一致：只回「待验收」。带日期是历史回看（ADR-0088）：
+    回当天全部检查项与状态，让管理员看见漏拍与已通过的，但那边不能验收。
+    """
+    today = work.business_date()
+    if date is None or not str(date).strip():
+        items = await work.list_daily_work(SUPER_ACTOR)
+        return {
+            "date": today,
+            "is_today": True,
+            "items": [row for row in items if row.get("status") == "待验收"],
+        }
+    target = _clean_business_date(date)
+    items = await work.list_daily_work(SUPER_ACTOR, target)
+    return {
+        "date": target,
+        "is_today": target == today,
+        "items": items,
+    }
 
 
 @router.post("/admin/daily/{item_id}/accept")
@@ -1518,6 +1582,7 @@ async def admin_daily_capture(
     shift: str,
     request: Request,
     variant: str = "original",
+    date: Optional[str] = None,
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
@@ -1528,6 +1593,7 @@ async def admin_daily_capture(
         SUPER_ACTOR,
         variant,
         request,
+        business_date=_optional_business_date(date),
     )
 
 
@@ -1537,6 +1603,7 @@ async def admin_daily_frozen_standard(
     shift: str,
     request: Request,
     variant: str = "original",
+    date: Optional[str] = None,
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
@@ -1547,6 +1614,7 @@ async def admin_daily_frozen_standard(
         SUPER_ACTOR,
         variant,
         request,
+        business_date=_optional_business_date(date),
     )
 
 
@@ -1554,11 +1622,17 @@ async def admin_daily_frozen_standard(
 async def admin_daily_review(
     item_id: int,
     shift: str,
+    date: Optional[str] = None,
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.get_daily_review(item_id, shift, actor=SUPER_ACTOR)
+        return await work.get_daily_review(
+            item_id,
+            shift,
+            actor=SUPER_ACTOR,
+            business_date=_optional_business_date(date),
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
 
@@ -2280,3 +2354,319 @@ async def admin_teaching_right(
     work: HygieneWork = Depends(_get_work),
 ) -> Response:
     return await _teaching_shot_response(work, example_id, "right", variant, request)
+
+
+# ---- 数据与照片（ADR-0087）--------------------------------------------------
+#
+# 浏览 / 导出 / 删除三类操作在这里收口。删除是硬删除且不可逆：前端必须二次确认，
+# 服务端只负责挡住越权与非法输入。查询与打包在 services/hygiene/archive.py，
+# 删除在 HygieneWork（写路径唯一）。
+
+_ARCHIVE_EXPORT_JOBS: Dict[str, Dict[str, Any]] = {}
+_ARCHIVE_EXPORT_JOB_TTL_SECONDS = 30 * 60
+_ARCHIVE_EXPORT_MAX_RUNNING = 1
+# 一次能导出多少张照片。原图 1-2MB 起，几千张就是几个 GB——门店机器磁盘经不起
+# 「手一滑导出全部」，超了让用户缩小区间重来。
+ARCHIVE_EXPORT_MAX_PHOTOS = 2000
+
+# 删除后要通知哪些资源。员工端待办会因删日常提交而变化，其余只是管理端自己刷新。
+_ARCHIVE_NUDGE_RESOURCES = {
+    KIND_DAILY: "daily",
+    KIND_DEEP: "deep",
+    KIND_FIX_RESHOOT: "fix",
+    KIND_TEACHING: "teaching",
+    KIND_STANDARD: "zones",
+}
+
+
+class ArchivePurgeIn(BaseModel):
+    kinds: list[str] = Field(default_factory=list)
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+
+
+def _get_archive():
+    from main import hygiene_archive
+
+    if hygiene_archive is None:
+        raise HTTPException(status_code=500, detail="卫生数据视图未初始化")
+    return hygiene_archive
+
+
+def _archive_http_error(exc: ArchiveQueryError) -> HTTPException:
+    status = 404 if exc.code in ("capture_unknown", "capture_missing") else 400
+    return HTTPException(status_code=status, detail=_error_detail(exc.code))
+
+
+def _archive_kinds(raw: Optional[str]) -> Optional[list]:
+    """`kinds=daily,deep` → ['daily', 'deep']；空串当没选（等于全部）。"""
+    if raw is None:
+        return None
+    values = [item.strip() for item in str(raw).split(",") if item.strip()]
+    return values or None
+
+
+async def _notify_archive_change(kinds) -> None:
+    for resource in dict.fromkeys(
+        _ARCHIVE_NUDGE_RESOURCES.get(str(kind), "daily") for kind in kinds
+    ):
+        await _hygiene_nudge(resource, "deleted")
+
+
+@router.get("/admin/data/records")
+async def admin_data_records(
+    kinds: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    zone_id: Optional[int] = None,
+    page: int = 1,
+    page_size: int = 24,
+    _session_id: str = Depends(require_session),
+    archive=Depends(_get_archive),
+) -> Dict[str, Any]:
+    try:
+        return await archive.list_records(
+            kinds=_archive_kinds(kinds),
+            date_from=date_from,
+            date_to=date_to,
+            zone_id=zone_id,
+            page=page,
+            page_size=page_size,
+        )
+    except ArchiveQueryError as exc:
+        raise _archive_http_error(exc) from exc
+
+
+@router.get("/admin/data/storage")
+async def admin_data_storage(
+    _session_id: str = Depends(require_session),
+    archive=Depends(_get_archive),
+) -> Dict[str, Any]:
+    return await archive.storage_summary()
+
+
+@router.get("/admin/data/photo/{capture_id}")
+async def admin_data_photo(
+    capture_id: str,
+    variant: str = Query("original", pattern="^(original|thumb|preview)$"),
+    _session_id: str = Depends(require_session),
+    archive=Depends(_get_archive),
+) -> Response:
+    try:
+        view = await archive.photo_path(capture_id, variant)
+    except ArchiveQueryError as exc:
+        raise _archive_http_error(exc) from exc
+    headers = {
+        "Cache-Control": "no-store",
+        "Content-Encoding": "identity",
+        # 与其它取图接口同口径：类型由内容裁决，禁止浏览器再嗅探。
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": 'inline; filename="capture.jpg"',
+    }
+    return FileResponse(
+        path=view["path"],
+        media_type=view["content_type"],
+        headers=headers,
+    )
+
+
+def _prune_archive_export_jobs(now: float) -> None:
+    for job_id, job in list(_ARCHIVE_EXPORT_JOBS.items()):
+        if now - job["started_at"] < _ARCHIVE_EXPORT_JOB_TTL_SECONDS:
+            continue
+        path = job.get("path")
+        if path is not None:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                logger.debug("清理导出临时文件失败 job=%s", job_id, exc_info=True)
+        _ARCHIVE_EXPORT_JOBS.pop(job_id, None)
+
+
+async def _run_archive_export(job_id: str, archive, filters: dict) -> None:
+    """后台打包：记录 CSV + 照片。进度写在任务表里，前端轮询。"""
+    job = _ARCHIVE_EXPORT_JOBS[job_id]
+    archive_path: Optional[Path] = None
+    try:
+        records = await archive.iter_records(**filters)
+        total_photos = sum(len(record["photos"]) for record in records)
+        if not records:
+            job.update(state="failed", error=_error_detail("export_empty"))
+            return
+        if total_photos > ARCHIVE_EXPORT_MAX_PHOTOS:
+            job.update(
+                state="failed",
+                error=(
+                    f"这个范围有 {total_photos} 张照片，超过一次导出的上限 "
+                    f"{ARCHIVE_EXPORT_MAX_PHOTOS} 张，请缩小日期范围或类型"
+                ),
+            )
+            return
+        job["total"] = total_photos
+        entries = []
+        for record in records:
+            photos = []
+            for photo in record["photos"]:
+                try:
+                    view = await archive.photo_path(photo["capture_id"], "original")
+                    photos.append({**photo, "path": view["path"]})
+                except ArchiveQueryError:
+                    # 文件已经没了就让它在 CSV 里留个名，别让整包导出失败。
+                    photos.append({**photo, "path": None})
+            entries.append({"record": record, "photos": photos})
+        with tempfile.NamedTemporaryFile(
+            prefix="hygiene-data-", suffix=".zip", delete=False
+        ) as handle:
+            archive_path = Path(handle.name)
+
+        def report(done: int, total: int) -> None:
+            job["done"] = done
+            job["total"] = total
+
+        written, skipped = await asyncio.to_thread(
+            write_ledger_zip, entries, archive_path, report
+        )
+        stamp = datetime.now(CHINA_TZ).strftime("%Y%m%d")
+        job.update(
+            state="done",
+            path=archive_path,
+            count=written,
+            skipped=skipped,
+            records=len(records),
+            filename=f"卫生数据-{stamp}.zip",
+            bytes=archive_path.stat().st_size,
+        )
+        logger.info(
+            "📦 [审计] 导出卫生数据 %s 条 / %s 张照片（跳过 %s 张，%.1f MB）",
+            len(records),
+            written,
+            skipped,
+            job["bytes"] / 1024 / 1024,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 后台任务必须自己收口，否则永远 running
+        logger.exception("导出卫生数据失败 job=%s", job_id)
+        if archive_path is not None:
+            archive_path.unlink(missing_ok=True)
+        job.update(state="failed", error=f"导出失败：{exc}")
+
+
+@router.post("/admin/data/export/jobs")
+async def start_archive_export(
+    kinds: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    zone_id: Optional[int] = None,
+    _session_id: str = Depends(require_session),
+    archive=Depends(_get_archive),
+) -> Dict[str, Any]:
+    now = time.time()
+    _prune_archive_export_jobs(now)
+    running = sum(
+        1 for job in _ARCHIVE_EXPORT_JOBS.values() if job["state"] == "running"
+    )
+    if running >= _ARCHIVE_EXPORT_MAX_RUNNING:
+        raise HTTPException(status_code=429, detail=_error_detail("export_running"))
+    filters = {
+        "kinds": _archive_kinds(kinds),
+        "date_from": date_from,
+        "date_to": date_to,
+        "zone_id": zone_id,
+    }
+    try:
+        # 先校验区间，别让任务起来才失败——前端在轮询里看到 400 更慢。
+        parse_archive_range(date_from, date_to)
+    except ArchiveQueryError as exc:
+        raise _archive_http_error(exc) from exc
+    job_id = uuid.uuid4().hex
+    _ARCHIVE_EXPORT_JOBS[job_id] = {
+        "state": "running",
+        "done": 0,
+        "total": 0,
+        "error": "",
+        "started_at": now,
+        "path": None,
+    }
+    asyncio.create_task(_run_archive_export(job_id, archive, filters))
+    return {"job_id": job_id, "state": "running"}
+
+
+@router.get("/admin/data/export/jobs/{job_id}")
+async def read_archive_export(
+    job_id: str,
+    _session_id: str = Depends(require_session),
+) -> Dict[str, Any]:
+    job = _ARCHIVE_EXPORT_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
+    return {
+        "state": job["state"],
+        "done": job["done"],
+        "total": job["total"],
+        "error": job["error"],
+        "count": job.get("count"),
+        "skipped": job.get("skipped"),
+        "records": job.get("records"),
+        "bytes": job.get("bytes"),
+    }
+
+
+@router.get("/admin/data/export/jobs/{job_id}/download")
+async def download_archive_export(
+    job_id: str,
+    _session_id: str = Depends(require_session),
+) -> Response:
+    job = _ARCHIVE_EXPORT_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
+    if job["state"] == "failed":
+        raise HTTPException(status_code=409, detail=job["error"] or "导出失败")
+    if job["state"] != "done":
+        raise HTTPException(status_code=409, detail="还在打包，请稍候")
+    path = job["path"]
+    if path is None or not Path(path).exists():
+        raise HTTPException(status_code=410, detail="导出文件已被清理，请重新导出")
+    filename = job.get("filename") or "hygiene-data.zip"
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="hygiene-data.zip"; '
+                f"filename*=UTF-8''{quote(filename)}"
+            ),
+            "X-Hygiene-Export-Count": str(job.get("count") or 0),
+        },
+    )
+
+
+@router.delete("/admin/data/records/{kind}/{record_id}")
+async def admin_delete_data_record(
+    kind: str,
+    record_id: int,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        result = await work.delete_archive_record(SUPER_ACTOR, kind, record_id)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    await _notify_archive_change([kind])
+    return result
+
+
+@router.post("/admin/data/purge")
+async def admin_purge_data(
+    body: ArchivePurgeIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    try:
+        result = await work.purge_archive_records(
+            SUPER_ACTOR, body.kinds, body.date_from, body.date_to
+        )
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    except ArchiveQueryError as exc:
+        raise _archive_http_error(exc) from exc
+    await _notify_archive_change([item["kind"] for item in result["kinds"]])
+    return result

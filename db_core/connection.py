@@ -280,6 +280,9 @@ class _ConnectionMixin:
         """
         导出单库 app.db 到指定路径（供后台「导出 DB」功能使用）。
         走 SQLite 官方 backup API：WAL 模式下也能拿到一致快照，无需手工建表/流式拷贝。
+
+        PG 后端没有页级 backup 可用，改由 ``PgConnection.backup`` 按表重建（列定义 +
+        数据）；两条路径产出的都是能直接回灌的 .db 文件。
         """
         if os.path.exists(output_path):
             os.unlink(output_path)

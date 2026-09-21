@@ -10,7 +10,7 @@ export const HYGIENE_FIX_TYPES = ['卫生', '摆放', '标签']
 export const HYGIENE_BRAND_MARK = '卫'
 export const HYGIENE_BRAND_TITLE = '卫生'
 export const HYGIENE_BRAND_TAGLINE = '对照实拍验收'
-export const HYGIENE_DASHBOARD_BLURB = '花名册、责任区、验收、整改、红黑榜'
+export const HYGIENE_DASHBOARD_BLURB = '花名册、责任区、验收、整改、红黑榜、数据与照片'
 export const HYGIENE_ADMIN_NAV = [
   { path: '/hygiene-roster', title: '花名册', shortTitle: '人员', icon: 'clipboard', code: 'ROSTER' },
   { path: '/hygiene-zones', title: '卫生责任区', shortTitle: '责任区', icon: 'layout-grid', code: 'ZONES' },
@@ -18,6 +18,7 @@ export const HYGIENE_ADMIN_NAV = [
   { path: '/hygiene-deep-clean', title: '专项卫生', shortTitle: '专项', icon: 'calendar', code: 'DEEP' },
   { path: '/hygiene-fix', title: '整改单', shortTitle: '整改', icon: 'siren', code: 'FIX' },
   { path: '/hygiene-boards', title: '红黑榜', shortTitle: '榜', icon: 'star', code: 'BOARDS' },
+  { path: '/hygiene-data', title: '数据与照片', shortTitle: '数据', icon: 'folder', code: 'ARCHIVE' },
 ]
 
 export const HYGIENE_STAFF_TABS = [

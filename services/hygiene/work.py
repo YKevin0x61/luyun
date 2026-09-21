@@ -27,6 +27,17 @@ from services.hygiene.accounts import (
     hygiene_business_date,
 )
 from services.hygiene.images import GeneratedVariant, InvalidImageError
+from services.hygiene.archive import (
+    ARCHIVE_DELETE_KINDS,
+    KIND_DAILY,
+    KIND_DEEP,
+    KIND_FIX_RESHOOT,
+    KIND_STANDARD,
+    KIND_TEACHING,
+    created_range,
+    normalize_kinds,
+    parse_archive_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +161,30 @@ def hygiene_week_start(now: datetime) -> datetime:
     )
 
 
+def _archive_result(
+    kind: str,
+    records: int,
+    photos: int,
+    status_reset: int = 0,
+    blocked: int = 0,
+    files: Optional[int] = None,
+) -> dict:
+    """删除/清理的返回形状。
+
+    ``photos`` 是原图张数——用户嘴里的"照片"；``files`` 是实际删掉的文件数（含
+    缩略图与 preview 变体），给日志和"释放了多少空间"用。``blocked`` 目前只有标准图
+    版本用得上：被占用而没删掉的条数。
+    """
+    return {
+        "kind": kind,
+        "records": records,
+        "photos": photos,
+        "files": photos if files is None else files,
+        "status_reset": status_reset,
+        "blocked": blocked,
+    }
+
+
 def _chunked(items, size: int):
     """Yield bounded slices so a single statement never binds too many variables."""
     for start in range(0, len(items), size):
@@ -223,6 +258,15 @@ class HygieneWork:
 
     def _now_iso(self) -> str:
         return self._now_dt().isoformat()
+
+    def business_date(self) -> str:
+        """当前营业日（06:00 切）。
+
+        管理端要判断"某天是不是今天"时必须问这里，不要各自取一次 now：两处时钟一旦
+        不同源（测试注入、将来的多店时钟），"今天"就会漂移，而漂移的后果是历史回看
+        被当成可验收。
+        """
+        return hygiene_business_date(self._now_dt())
 
     def _require_super(self, actor: dict) -> None:
         if not actor or actor.get("kind") != "super":
@@ -1514,6 +1558,22 @@ class HygieneWork:
         row = await cur.fetchone()
         return None if row is None else dict(row)
 
+    async def _fetch_latest_submission(self, instance_id: int):
+        """该实例最近一次提交，不论它是否还挂在实例上。
+
+        历史回看要用（ADR-0088）：被驳回后 `pending_submission_id` 会清空，但那天确实
+        交过一张照片，管理端要能看见它。
+        """
+        cur = await self._conn.execute(
+            """SELECT id, instance_id, capture_id, content_type, frozen_standard_id,
+                      submitter_id, submitter_phone, zone_name, captured_at
+               FROM hygiene_daily_submissions WHERE instance_id = ?
+               ORDER BY id DESC LIMIT 1""",
+            (int(instance_id),),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
+
     def _inbox_from_parts(
         self,
         item: dict,
@@ -1748,8 +1808,15 @@ class HygieneWork:
             return (picked,), zone_id
         return DAILY_SHIFTS, None
 
-    async def list_daily_work(self, actor: dict) -> list[dict]:
-        business_date = hygiene_business_date(self._now_dt())
+    async def list_daily_work(
+        self, actor: dict, business_date: Optional[str] = None
+    ) -> list[dict]:
+        """列出一个营业日的日常检查。
+
+        不给日期就是当天。带历史日期是管理端回看（ADR-0088）：实例与提交照旧，
+        只是不再限定「待验收」——回看要能看见那天交没交、漏了哪些。
+        """
+        target = business_date or hygiene_business_date(self._now_dt())
         shifts, zone_id = self._inbox_filter(actor)
         if not shifts:
             return []
@@ -1776,14 +1843,14 @@ class HygieneWork:
                  LEFT JOIN hygiene_daily_submissions sub
                    ON sub.id = inst.pending_submission_id
                  WHERE i.current_standard_id IS NOT NULL"""
-        params: list = [*shifts, business_date]
+        params: list = [*shifts, target]
         if zone_id is not None:
             sql += " AND i.zone_id = ?"
             params.append(zone_id)
         sql += " ORDER BY i.id ASC, sh.shift ASC"
         cur = await self._conn.execute(sql, params)
         rejected_reasons = await self._rejected_reasons(
-            business_date, tuple(shifts), zone_id
+            target, tuple(shifts), zone_id
         )
         inbox = []
         for row in await cur.fetchall():
@@ -1822,7 +1889,7 @@ class HygieneWork:
                 self._inbox_from_parts(
                     item,
                     mapping["shift"],
-                    business_date,
+                    target,
                     instance,
                     submission,
                     rejected=key in rejected_reasons,
@@ -1836,32 +1903,52 @@ class HygieneWork:
         item_id: int,
         shift: str,
         actor: Optional[dict] = None,
+        business_date: Optional[str] = None,
     ) -> dict:
+        """取一次日常提交的对照资料。
+
+        当天：实例必须是「待验收」，否则报 not_pending（验收路径不变）。
+        历史（ADR-0088）：任何状态都能看，被驳回后取最近一次提交，只读。
+        """
         if shift not in DAILY_SHIFTS:
             raise HygieneWorkError("shift_mismatch", "shift_mismatch")
-        business_date = hygiene_business_date(self._now_dt())
-        instance_row = await self._fetch_instance(business_date, shift, item_id)
+        today = hygiene_business_date(self._now_dt())
+        target = business_date or today
+        instance_row = await self._fetch_instance(target, shift, item_id)
         if instance_row is None:
             raise HygieneWorkError("not_pending", "not_pending")
         instance = dict(instance_row)
-        if instance["status"] != STATUS_PENDING:
+        if target == today and instance["status"] != STATUS_PENDING:
             raise HygieneWorkError("not_pending", "not_pending")
         submission = await self._fetch_submission(instance.get("pending_submission_id"))
+        if submission is None and target != today:
+            submission = await self._fetch_latest_submission(instance["id"])
         if submission is None:
             raise HygieneWorkError("not_pending", "not_pending")
         item = await self._fetch_item_with_zone(item_id)
         if item is not None:
             self._require_zone_access_for(actor, item["zone_id"])
-        standard = await self.standard_by_id(int(submission["frozen_standard_id"]))
+        # 那一版标准图可能已经被「数据与照片」清掉（ADR-0087）：历史回看照常打开，
+        # 只是左边没有对照图可显示。
+        try:
+            standard = await self.standard_by_id(int(submission["frozen_standard_id"]))
+        except HygieneWorkError:
+            standard = None
         return {
             "item_id": int(item_id),
             "shift": shift,
-            "business_date": business_date,
-            "status": STATUS_PENDING,
+            "business_date": target,
+            "status": instance["status"],
+            "historical": target != today,
             "capture_id": submission["capture_id"],
+            # 照片与对照图都可能已经被清掉（ADR-0087），
+            # 前端据此显示占位而不是破图。
+            "capture_available": await self._captures.exists_async(submission["capture_id"]),
             "content_type": submission["content_type"],
             "frozen_standard_id": int(submission["frozen_standard_id"]),
-            "frozen_markup": standard["markup"],
+            "frozen_markup": (standard or {}).get("markup") or [],
+            "standard_available": bool(standard)
+            and await self._captures.exists_async(standard["capture_id"]),
             "submitter_id": int(submission["submitter_id"]),
             "submitter_phone": submission["submitter_phone"],
             "zone_name": submission["zone_name"],
@@ -4114,3 +4201,415 @@ class HygieneWork:
         if row is None:
             raise HygieneWorkError("teaching_not_found", "teaching_not_found")
         return self._teaching_from_row(row)
+
+    # ---- 数据与照片的管理端删除（ADR-0087）-----------------------------------
+    #
+    # 删除只走这里：写锁、状态回退、照片与变体文件的清理都在同一个地方，别处不要再
+    # 拼一套 DELETE。查询与打包在 services/hygiene/archive.py，那边只读。
+    #
+    # 一致性口径：先删库、commit，再删文件。反过来的话，文件删了而事务回滚，记录就
+    # 指向一张不存在的图；库先删则最坏是留下一个孤儿文件，由 sweep_capture_orphans 收。
+
+    @serialized_write
+    async def delete_archive_record(self, actor: dict, kind: str, record_id: int) -> dict:
+        """删一条卫生记录连同它的照片。"""
+        self._require_super(actor)
+        normalized = str(kind or "").strip()
+        if normalized not in ARCHIVE_DELETE_KINDS:
+            raise HygieneWorkError("bad_kind", "bad_kind")
+        target = int(record_id)
+        if normalized == KIND_DAILY:
+            return await self._archive_drop_daily_submissions("s.id = ?", (target,), required=True)
+        if normalized == KIND_DEEP:
+            return await self._archive_drop_deep_submissions("d.id = ?", (target,), required=True)
+        if normalized == KIND_FIX_RESHOOT:
+            return await self._archive_drop_fix_reshoots("r.id = ?", (target,), required=True)
+        if normalized == KIND_TEACHING:
+            return await self._archive_drop_teaching_examples("e.id = ?", (target,), required=True)
+        return await self._archive_drop_standard_versions("st.id = ?", (target,), required=True)
+
+    @serialized_write
+    async def purge_archive_records(
+        self,
+        actor: dict,
+        kinds,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> dict:
+        """按营业日区间清理记录与照片。
+
+        不含整改单整单：那仍然是整改页的能力（ADR-0081），免得"清旧照片"顺手删掉还
+        没做完的工作单。红黑榜事件与逾期通知也不回滚——它们只记"当时发生过"。
+        """
+        self._require_super(actor)
+        # 查询时空列表等于"全部类型"，删除时不能沿用它：那会变成"清空这一段的一切"。
+        requested = [
+            str(value).strip() for value in (kinds or []) if str(value or "").strip()
+        ]
+        if not requested:
+            raise HygieneWorkError("kind_required", "kind_required")
+        selected = [k for k in normalize_kinds(requested) if k in ARCHIVE_DELETE_KINDS]
+        if not selected:
+            raise HygieneWorkError("kind_required", "kind_required")
+        start, end = parse_archive_range(date_from, date_to)
+        results = []
+        for kind in selected:
+            if kind == KIND_DAILY:
+                results.append(
+                    await self._archive_drop_daily_submissions(
+                        "i.business_date BETWEEN ? AND ?", (start, end)
+                    )
+                )
+            elif kind == KIND_DEEP:
+                results.append(
+                    await self._archive_drop_deep_submissions(
+                        "i.business_date BETWEEN ? AND ?", (start, end)
+                    )
+                )
+            elif kind == KIND_FIX_RESHOOT:
+                results.append(
+                    await self._archive_drop_fix_reshoots(
+                        "r.captured_at >= ? AND r.captured_at < ?",
+                        created_range(start, end),
+                    )
+                )
+            elif kind == KIND_TEACHING:
+                results.append(
+                    await self._archive_drop_teaching_examples(
+                        "e.created_at >= ? AND e.created_at < ?",
+                        created_range(start, end),
+                    )
+                )
+            else:
+                results.append(
+                    await self._archive_drop_standard_versions(
+                        "st.created_at >= ? AND st.created_at < ?",
+                        created_range(start, end),
+                    )
+                )
+        summary = {
+            "date_from": start,
+            "date_to": end,
+            "kinds": results,
+            "records": sum(item["records"] for item in results),
+            "photos": sum(item["photos"] for item in results),
+            "files": sum(item["files"] for item in results),
+        }
+        logger.info(
+            "hygiene archive purged %s..%s records=%s photos=%s",
+            start,
+            end,
+            summary["records"],
+            summary["photos"],
+        )
+        return summary
+
+    async def _archive_rows(self, sql: str, params) -> list[dict]:
+        cur = await self._conn.execute(sql, params)
+        return [dict(row) for row in await cur.fetchall()]
+
+    async def _archive_one(self, sql: str, params) -> Optional[dict]:
+        cur = await self._conn.execute(sql, params)
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
+
+    async def _archive_derivatives(self, roots) -> list[str]:
+        """原图对应的缩略图/preview 文件 id。它们不出现在业务表里，只能反查。"""
+        unique = [str(item) for item in dict.fromkeys(roots) if item]
+        found: list[str] = []
+        for chunk in _chunked(unique, SQL_ID_CHUNK_SIZE):
+            placeholders = ",".join("?" * len(chunk))
+            rows = await self._archive_rows(
+                f"""SELECT capture_id FROM hygiene_capture_variants
+                    WHERE source_capture_id IN ({placeholders})""",
+                tuple(chunk),
+            )
+            found.extend(str(row["capture_id"]) for row in rows)
+        return found
+
+    async def _archive_drop_variants(self, roots) -> None:
+        unique = [str(item) for item in dict.fromkeys(roots) if item]
+        for chunk in _chunked(unique, SQL_ID_CHUNK_SIZE):
+            placeholders = ",".join("?" * len(chunk))
+            await self._conn.execute(
+                f"""DELETE FROM hygiene_capture_variants
+                    WHERE source_capture_id IN ({placeholders})""",
+                tuple(chunk),
+            )
+
+    async def _archive_delete_rows(self, table: str, ids) -> int:
+        """按主键删行。表名只来自本模块常量，值全部参数化。"""
+        unique = [int(item) for item in dict.fromkeys(ids)]
+        for chunk in _chunked(unique, SQL_ID_CHUNK_SIZE):
+            placeholders = ",".join("?" * len(chunk))
+            await self._conn.execute(
+                f"DELETE FROM {table} WHERE id IN ({placeholders})", tuple(chunk)
+            )
+        return len(unique)
+
+    async def _archive_finish(self, roots, derivatives) -> None:
+        await self._archive_drop_variants(roots)
+        await self._conn.commit()
+        # 文件删除放在 commit 之后，且它自己吞异常只告警。
+        await self._delete_capture_files([*roots, *derivatives])
+
+    async def _archive_drop_daily_submissions(
+        self, where: str, params, required: bool = False
+    ) -> dict:
+        rows = await self._archive_rows(
+            f"""SELECT s.id, s.capture_id, s.instance_id, i.pending_submission_id
+                FROM hygiene_daily_submissions s
+                JOIN hygiene_daily_instances i ON i.id = s.instance_id
+                WHERE {where}""",
+            params,
+        )
+        if not rows:
+            if required:
+                raise HygieneWorkError("record_not_found", "record_not_found")
+            return _archive_result(KIND_DAILY, 0, 0)
+        ids = [int(row["id"]) for row in rows]
+        roots = [str(row["capture_id"]) for row in rows]
+        derivatives = await self._archive_derivatives(roots)
+        resets = [
+            row for row in rows
+            if int(row["pending_submission_id"] or 0) == int(row["id"])
+        ]
+        now = self._now_iso()
+        try:
+            await self._archive_delete_rows("hygiene_daily_submissions", ids)
+            for row in resets:
+                # 照片没了就不能还算完成或待验收：退回待拍等重拍。
+                await self._conn.execute(
+                    """UPDATE hygiene_daily_instances
+                       SET status = ?, pending_submission_id = NULL, updated_at = ?
+                       WHERE id = ? AND pending_submission_id = ?""",
+                    (STATUS_TODO, now, int(row["instance_id"]), int(row["id"])),
+                )
+            await self._archive_finish(roots, derivatives)
+        except Exception:
+            await self._conn.rollback()
+            raise
+        logger.info(
+            "hygiene archive deleted daily submissions=%s reset=%s photos=%s",
+            len(ids),
+            len(resets),
+            len(roots) + len(derivatives),
+        )
+        return _archive_result(
+            KIND_DAILY,
+            len(ids),
+            len(roots),
+            status_reset=len(resets),
+            files=len(roots) + len(derivatives),
+        )
+
+    async def _archive_drop_deep_submissions(
+        self, where: str, params, required: bool = False
+    ) -> dict:
+        rows = await self._archive_rows(
+            f"""SELECT d.id, d.before_capture_id, d.after_capture_id, d.instance_id,
+                       i.pending_submission_id
+                FROM hygiene_deep_clean_submissions d
+                JOIN hygiene_deep_clean_instances i ON i.id = d.instance_id
+                WHERE {where}""",
+            params,
+        )
+        if not rows:
+            if required:
+                raise HygieneWorkError("record_not_found", "record_not_found")
+            return _archive_result(KIND_DEEP, 0, 0)
+        ids = [int(row["id"]) for row in rows]
+        roots = [
+            str(value)
+            for row in rows
+            for value in (row["before_capture_id"], row["after_capture_id"])
+            if value
+        ]
+        derivatives = await self._archive_derivatives(roots)
+        resets = [
+            row for row in rows
+            if int(row["pending_submission_id"] or 0) == int(row["id"])
+        ]
+        now = self._now_iso()
+        try:
+            await self._archive_delete_rows("hygiene_deep_clean_submissions", ids)
+            for row in resets:
+                await self._conn.execute(
+                    """UPDATE hygiene_deep_clean_instances
+                       SET status = ?, pending_submission_id = NULL, updated_at = ?
+                       WHERE id = ? AND pending_submission_id = ?""",
+                    (STATUS_TODO, now, int(row["instance_id"]), int(row["id"])),
+                )
+            await self._archive_finish(roots, derivatives)
+        except Exception:
+            await self._conn.rollback()
+            raise
+        logger.info(
+            "hygiene archive deleted deep submissions=%s reset=%s photos=%s",
+            len(ids),
+            len(resets),
+            len(roots) + len(derivatives),
+        )
+        return _archive_result(
+            KIND_DEEP,
+            len(ids),
+            len(roots),
+            status_reset=len(resets),
+            files=len(roots) + len(derivatives),
+        )
+
+    async def _archive_drop_fix_reshoots(
+        self, where: str, params, required: bool = False
+    ) -> dict:
+        rows = await self._archive_rows(
+            f"""SELECT r.id, r.capture_id, r.ticket_id, t.pending_reshoot_id
+                FROM hygiene_fix_reshoots r
+                JOIN hygiene_fix_tickets t ON t.id = r.ticket_id
+                WHERE {where}""",
+            params,
+        )
+        if not rows:
+            if required:
+                raise HygieneWorkError("record_not_found", "record_not_found")
+            return _archive_result(KIND_FIX_RESHOOT, 0, 0)
+        ids = [int(row["id"]) for row in rows]
+        roots = [str(row["capture_id"]) for row in rows]
+        derivatives = await self._archive_derivatives(roots)
+        resets = [
+            row for row in rows
+            if int(row["pending_reshoot_id"] or 0) == int(row["id"])
+        ]
+        now = self._now_iso()
+        try:
+            await self._archive_delete_rows("hygiene_fix_reshoots", ids)
+            for row in resets:
+                await self._conn.execute(
+                    """UPDATE hygiene_fix_tickets
+                       SET status = ?, pending_reshoot_id = NULL, updated_at = ?
+                       WHERE id = ? AND pending_reshoot_id = ?""",
+                    (STATUS_FIX_TODO, now, int(row["ticket_id"]), int(row["id"])),
+                )
+            await self._archive_finish(roots, derivatives)
+        except Exception:
+            await self._conn.rollback()
+            raise
+        logger.info(
+            "hygiene archive deleted fix reshoots=%s reset=%s photos=%s",
+            len(ids),
+            len(resets),
+            len(roots) + len(derivatives),
+        )
+        return _archive_result(
+            KIND_FIX_RESHOOT,
+            len(ids),
+            len(roots),
+            status_reset=len(resets),
+            files=len(roots) + len(derivatives),
+        )
+
+    async def _archive_drop_teaching_examples(
+        self, where: str, params, required: bool = False
+    ) -> dict:
+        rows = await self._archive_rows(
+            f"""SELECT e.id, e.left_capture_id, e.right_capture_id
+                FROM hygiene_teaching_examples e
+                WHERE {where}""",
+            params,
+        )
+        if not rows:
+            if required:
+                raise HygieneWorkError("record_not_found", "record_not_found")
+            return _archive_result(KIND_TEACHING, 0, 0)
+        ids = [int(row["id"]) for row in rows]
+        roots = [
+            str(value)
+            for row in rows
+            for value in (row["left_capture_id"], row["right_capture_id"])
+            if value
+        ]
+        derivatives = await self._archive_derivatives(roots)
+        try:
+            await self._archive_delete_rows("hygiene_teaching_examples", ids)
+            await self._archive_finish(roots, derivatives)
+        except Exception:
+            await self._conn.rollback()
+            raise
+        logger.info(
+            "hygiene archive deleted teaching examples=%s photos=%s",
+            len(ids),
+            len(roots) + len(derivatives),
+        )
+        return _archive_result(
+            KIND_TEACHING, len(ids), len(roots), files=len(roots) + len(derivatives)
+        )
+
+    async def _standard_referenced(self, standard_id: int) -> bool:
+        """这张标准图有没有被任何一次提交冻结成对照依据。
+
+        有就不能删：一是外键本来就挡着（SQLite 与 PG 都建了
+        `hygiene_daily_submissions.frozen_standard_id`），二是历史回看要靠它还原
+        「提交当时的标准图」——删了那次对照就永远缺一半。
+        """
+        row = await self._archive_one(
+            """SELECT COUNT(*) AS n FROM hygiene_daily_submissions
+               WHERE frozen_standard_id = ?""",
+            (int(standard_id),),
+        )
+        return bool(int((row or {}).get("n") or 0))
+
+    async def _archive_drop_standard_versions(
+        self, where: str, params, required: bool = False
+    ) -> dict:
+        """删标准图的历史版本。
+
+        当前版本不能删：日常检查项必须有当前标准图（ADR-0055）。被任何一次提交冻结成
+        对照的版本也不能删（ADR-0069）——那既是外键约束，也是历史回看的依据。所以真正
+        删得掉的只有"换过图、但还没被谁拿来对照过"的那几版。
+        """
+        rows = await self._archive_rows(
+            f"""SELECT st.id, st.capture_id, st.item_id, it.current_standard_id
+                FROM hygiene_standards st
+                JOIN hygiene_daily_items it ON it.id = st.item_id
+                WHERE {where}""",
+            params,
+        )
+        if not rows:
+            if required:
+                raise HygieneWorkError("record_not_found", "record_not_found")
+            return _archive_result(KIND_STANDARD, 0, 0)
+        droppable = []
+        blocked = 0
+        for row in rows:
+            if int(row["current_standard_id"] or 0) == int(row["id"]):
+                blocked += 1
+                continue
+            if await self._standard_referenced(int(row["id"])):
+                blocked += 1
+                continue
+            droppable.append(row)
+        if required and not droppable:
+            raise HygieneWorkError("standard_in_use", "standard_in_use")
+        if not droppable:
+            return _archive_result(KIND_STANDARD, 0, 0)
+        ids = [int(row["id"]) for row in droppable]
+        roots = [str(row["capture_id"]) for row in droppable]
+        derivatives = await self._archive_derivatives(roots)
+        try:
+            await self._archive_delete_rows("hygiene_standards", ids)
+            await self._archive_finish(roots, derivatives)
+        except Exception:
+            await self._conn.rollback()
+            raise
+        logger.info(
+            "hygiene archive deleted standard versions=%s blocked=%s photos=%s",
+            len(ids),
+            blocked,
+            len(roots) + len(derivatives),
+        )
+        return _archive_result(
+            KIND_STANDARD,
+            len(ids),
+            len(roots),
+            blocked=blocked,
+            files=len(roots) + len(derivatives),
+        )

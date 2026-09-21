@@ -31,6 +31,7 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Sequence
 import asyncpg
 
 from db_core.backend.dialect import translate
+from db_core.backend.sqlite_export import export_tables_to_sqlite
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,14 @@ _PRIMARY_KEY_SQL = """
     ORDER BY array_position(i.indkey, a.attnum)
     LIMIT 1
 """
+
+# 整库导出的表名目录：pg_tables 只有表、不含视图。current_schemas(false) 不返回
+# 隐式的 pg_temp，所以会话级 TEMP 表不会被导出带上（它们是测试用的临时表）。
+_TABLE_NAMES_SQL = (
+    "SELECT tablename FROM pg_tables"
+    " WHERE schemaname = ANY (current_schemas(false))"
+    " ORDER BY tablename"
+)
 
 
 def first_table_name(sql: str) -> Optional[str]:
@@ -565,6 +574,25 @@ class PgConnection:
             if self.is_write_sql(translated):
                 await self.ensure_transaction()
             await self._raw.executemany(translated, [tuple(p) for p in seq])
+
+    async def backup(self, target, *, tables: Optional[Sequence[str]] = None) -> None:
+        """把当前库导出到 ``target``（aiosqlite 连接），对齐 aiosqlite 的 ``backup``。
+
+        SQLite 的 ``backup`` 是页级整库拷贝，PG 没有等价物，只能按表重建：读列定义
+        → 建表 → 分批搬数据（见 :mod:`db_core.backend.sqlite_export`）。产出与源库的
+        表结构、数据等价，只是没有源库的索引——导入侧按列名交集与业务唯一键工作，
+        不依赖索引。
+
+        ``tables`` 省略时导出当前 search_path 下的全部表。缺了这个方法时
+        ``DatabaseManager.export_merged_sqlite_file``（后台「导出 DB」）在 PG 后端下
+        会直接 AttributeError → 500。
+        """
+        if tables is None:
+            cursor = await self.execute(_TABLE_NAMES_SQL)
+            names = [row[0] for row in await cursor.fetchall()]
+        else:
+            names = list(tables)
+        await export_tables_to_sqlite(self, names, target)
 
     async def commit(self) -> None:
         if self._tx is None:
