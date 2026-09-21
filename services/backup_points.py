@@ -139,7 +139,7 @@ def _export_points() -> List[dict]:
     for item in backup_service.list_export_archives():
         meta = item.get("meta") or {}
         includes = meta.get("includes") or {}
-        contents = _contents_from_includes(includes)
+        contents = export_contents(includes)
         point = {
             "id": f"export:{item['name']}",
             "medium": MEDIUM_EXPORT,
@@ -284,6 +284,19 @@ def _contents_from_includes(includes: Dict[str, Any]) -> List[str]:
         CONTENT_APP_DB in contents or CONTENT_APP_PG in contents
     ) and CONTENT_RUNTIME not in contents:
         contents.append(CONTENT_RUNTIME)
+    return contents
+
+
+def export_contents(includes: Dict[str, Any]) -> List[str]:
+    """导出包（``.luyunbak``）的内容清单。
+
+    ``credentials.json`` 由构建端**无条件**打包，解析端也强制要求它存在
+    （``parse_backup`` 读不到就直接判为无效包），但 ``meta.includes`` 里没有这一项。
+    不在这里补上，每个导出备份点都会被误报「缺凭据」。
+    """
+    contents = _contents_from_includes(includes)
+    if CONTENT_CREDENTIALS not in contents:
+        contents.insert(0, CONTENT_CREDENTIALS)
     return contents
 
 

@@ -663,6 +663,8 @@ class BackupExportBackendCapabilityTest(unittest.TestCase):
         self.assertTrue(preview["default_apply"]["app_pg"])
         # 会写库就要先建前置快照——少了 app_pg 这一项判断，PG 包会被当成「不碰库」
         self.assertTrue(preview["pre_snapshot"]["will_create"])
+        # 凭据是导出包必备成员，不该出现在「备份中不含」里
+        self.assertNotIn("凭据", [m["label"] for m in preview["missing"]])
 
     def test_pg_backup_merge_mode_is_rejected(self):
         preview = self._preview(self._pg_backup_blob())

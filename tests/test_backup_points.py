@@ -220,6 +220,36 @@ class BackupPointTestCase(unittest.TestCase):
         return real_ts
 
 
+class ExportContentsTest(BackupPointTestCase):
+    """凭据是构建端无条件打包的：内容清单必须如实反映，否则列表会误报「缺凭据」。"""
+
+    def _write_export(self, blob: bytes, meta: dict, name: str):
+        archive_dir = backup_service._export_root()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive = archive_dir / name
+        archive.write_bytes(blob)
+        backup_service.write_export_sidecar(archive, meta)
+        return archive
+
+    def test_export_point_counts_credentials(self):
+        blob, meta = self._build_export()
+        self._write_export(blob, meta, "luyun_backup_20260101_000000.luyunbak")
+
+        points = [
+            p for p in backup_points.list_backup_points() if p["medium"] == "export_backup"
+        ]
+        self.assertEqual(len(points), 1)
+        self.assertIn("credentials", points[0]["contents"])
+        # 包里带了业务数据，凭据也在——不该有任何"缺失"
+        self.assertNotIn("凭据", [m["label"] for m in points[0]["missing"]])
+
+    def test_export_contents_helper_keeps_other_categories(self):
+        contents = backup_points.export_contents({"runtime": True, "app_pg": True})
+        self.assertEqual(contents[0], "credentials")
+        self.assertIn("app_pg", contents)
+        self.assertIn("runtime", contents)
+
+
 class PhotoClassificationTest(BackupPointTestCase):
     def test_two_classes_and_variants_follow_source(self):
         self._seed_db(

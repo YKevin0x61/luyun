@@ -127,19 +127,8 @@ def _photo_summary(parsed: dict) -> Dict[str, dict]:
 
 def _missing_contents(parsed: dict) -> List[dict]:
     includes = (parsed.get("meta") or {}).get("includes") or {}
-    contents = [
-        content
-        for content, key in (
-            (CONTENT_RUNTIME, "runtime"),
-            (CONTENT_APP_DB, "app_db"),
-            (CONTENT_APP_PG, "app_pg"),
-            (CONTENT_RECIPES, "recipes_db"),
-            (CONTENT_STANDARD_PHOTOS, "standard_photos"),
-            (CONTENT_OTHER_PHOTOS, "other_photos"),
-        )
-        if includes.get(key)
-    ]
-    return backup_points.missing_contents(contents)
+    # 与备份点列表共用同一份口径：导出包必然含凭据（构建端无条件打包）
+    return backup_points.missing_contents(backup_points.export_contents(includes))
 
 
 def _default_apply(parsed: dict, diff: dict) -> Dict[str, bool]:
