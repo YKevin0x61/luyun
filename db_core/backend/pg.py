@@ -40,7 +40,11 @@ _INSERT_TABLE_RE = re.compile(
     r"INSERT\s+INTO\s+\"?([A-Za-z_][A-Za-z0-9_]*)\"?", re.IGNORECASE
 )
 _INSERT_RE = re.compile(r"^\s*INSERT\b", re.IGNORECASE)
-_SELECT_RE = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
+# CTE 也是只读查询的形态（`WITH x AS (...) SELECT ...`）。只认 `^SELECT` 会把整条
+# CTE 判成 UPDATE/DDL、走 raw.execute——那只拿得到 command tag，结果集被丢掉，
+# fetchall() 恒为空且不报错。卫生端的员工端日常清单（services/hygiene/work.py 的
+# list_daily_work）正是这种写法：PG 后端下它永远返回空，员工端一项都看不到。
+_SELECT_RE = re.compile(r"^\s*(?:SELECT|WITH)\b", re.IGNORECASE)
 _ARG_INDEX_RE = re.compile(r"query argument \$(\d+)")
 
 

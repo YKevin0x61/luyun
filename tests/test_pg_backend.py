@@ -125,6 +125,25 @@ class PgWritePathTest(unittest.IsolatedAsyncioTestCase):
         rows = await (await self.conn.execute("SELECT val FROM noid WHERE code = ?", ("a",))).fetchall()
         self.assertEqual(len(rows), 1)
 
+    async def test_cte_select_returns_rows(self):
+        """CTE（`WITH ... SELECT`）是只读查询，结果集必须照常返回。
+
+        原来只按 `^SELECT` 判定，CTE 被当成 UPDATE/DDL 走 raw.execute：只拿得到
+        command tag，结果集丢掉、fetchall() 恒空，而且不报错。卫生端员工端日常清单
+        （list_daily_work，全库唯一一处 CTE）因此在 PG 后端下一直返回空——员工端
+        一项日常检查都看不到，管理端却正常。
+        """
+        await self.conn.execute("INSERT INTO probe (name, qty) VALUES (?, ?)", ("乙", 3))
+        await self.conn.commit()
+        cur = await self.conn.execute(
+            "WITH picked AS (SELECT name, qty FROM probe WHERE qty = ?) "
+            "SELECT name, qty FROM picked",
+            (3,),
+        )
+        rows = await cur.fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "乙")
+
     async def test_update_and_delete_report_rowcount(self):
         await self.conn.execute("INSERT INTO probe (name, qty) VALUES (?, ?)", ("甲", 1))
         await self.conn.execute("INSERT INTO probe (name, qty) VALUES (?, ?)", ("甲", 2))
