@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # 基础配置
     APP_NAME: str = "LuyunOrder"
-    APP_VERSION: str = "0.6.6"
+    APP_VERSION: str = "0.6.7"
     # 安全默认：不开 /docs、cookie 带 Secure。开发机在 .env 里显式写 DEBUG=true。
     DEBUG: bool = False
     
