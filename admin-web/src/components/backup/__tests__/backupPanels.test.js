@@ -114,4 +114,18 @@ describe('SetupView 备份中心接线契约', () => {
     // 旧快照表用的列头已从这里消失，回滚入口只剩备份点列表一处
     expect(src).not.toContain('<th>时间戳</th>')
   })
+
+  it('PG 门店导出面板禁用业务数据，并指路冷备 / 本机回滚快照', () => {
+    const src = compact(setupView)
+    // 勾选框按后端能力位禁用，旁边给出替代路径
+    expect(src).toContain(':disabled="!exportAppDbSupported"')
+    expect(src).toContain('PostgreSQL门店的业务数据不在导出包内')
+    expect(src).toContain('pg_dump')
+    expect(src).toContain('deploy/README.md')
+    expect(src).toContain('第10.4节')
+    expect(src).toContain('「备份点→本机回滚快照」')
+    // 面板顶部说明按能力切换：PG 下不再声称能打包业务数据
+    expect(src).toContain('业务数据与两类卫生照片')
+    expect(src).toContain('配方数据与两类卫生照片（PostgreSQL的业务数据请走冷备/本机回滚快照）')
+  })
 })

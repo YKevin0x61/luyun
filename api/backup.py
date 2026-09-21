@@ -190,12 +190,15 @@ async def _collect_export_payload(payload: BackupExportIn, db: DatabaseManager) 
     if payload.include_app_db:
         if backup_service.is_postgres_backend():
             # 明确拒绝而不是静默产出空内容：PG 后端的业务数据不是可导出的
-            # SQLite 文件，这里给出手工路径。
+            # SQLite 文件。这里同时给出「还能导出什么」与替代路径——只说
+            # 不支持的话，用户会以为整个导出备份都不可用。
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "PostgreSQL 后端不支持从管理后台导出业务数据文件，"
-                    "请用 pg_dump（命令见 migrations/pg/README.md）"
+                    "PostgreSQL 门店的业务数据不在导出包内。请取消勾选「业务数据」"
+                    "后重试（凭据、运行配置、配方数据与两类卫生照片照常导出）；"
+                    "业务数据请用宿主机冷备的 pg_dump 或「本机回滚快照」，"
+                    "命令见 deploy/README.md 10.4"
                 ),
             )
         fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-export-")
@@ -212,8 +215,11 @@ async def _collect_export_payload(payload: BackupExportIn, db: DatabaseManager) 
 
     recipes_db_bytes = None
     if payload.include_recipes:
-        recipes_path = backup_service.get_recipes_db_path()
-        recipes_db_bytes = backup_service.export_recipes_db_bytes(recipes_path)
+        # 走当前连接而不是 settings.APP_DB_PATH：PG 后端下那个文件是迁移遗留的
+        # SQLite 副本，配方早与当前库分叉，打进去等于导出一份旧配方。
+        recipes_db_bytes = await backup_service.export_recipes_db_bytes_from_conn(
+            getattr(db, "_conn", None)
+        )
 
     photo_info: dict = {"members": {}, "manifest": {}, "missing": {}}
     if payload.include_standard_photos or payload.include_other_photos:
@@ -793,6 +799,7 @@ async def list_points(db: DatabaseManager = Depends(get_db)):
     health = backup_points.get_health_cache()
     if health is None:
         health = backup_points.refresh_backup_health()
+    pg_backend = backup_service.is_postgres_backend()
     return {
         "success": True,
         "points": points,
@@ -800,6 +807,10 @@ async def list_points(db: DatabaseManager = Depends(get_db)):
         "not_backed_up": backup_points.NOT_BACKED_UP,
         "medium_labels": backup_points.MEDIUM_LABELS,
         "medium_purposes": backup_points.MEDIUM_PURPOSES,
+        # 导出面板据此按后端能力渲染：PG 门店的业务数据不是可导出的 SQLite
+        # 文件，勾了必然 400，界面不该让用户先撞一次墙。
+        "backend": "postgres" if pg_backend else "sqlite",
+        "export_app_db_supported": not pg_backend,
     }
 
 

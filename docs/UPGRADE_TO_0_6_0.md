@@ -221,7 +221,7 @@ systemctl start luyun
 | 切 PG 后启动报连接失败 | 容器内 DNS 或密码错 | `docker exec luyun env \| grep POSTGRES`；确认 `pg_hba.conf` 允许该网络 |
 | 迁移报主键冲突 | 序列未推进 | 跑 `migrations/pg/README.md` 的 `setval` 段 |
 | `syncing_deps` 耗时很长（2C4G）| 装机 + chromium 安装 | 正常，属一次性成本；`ensure_playwright_browsers` 失败不阻断启动 |
-| Admin 导出备份报 400 | PG 后端不支持 | 属预期，用第 6 节的手工命令 |
+| Admin 导出备份报 400 | PG 门店的业务数据不是可导出的 SQLite 文件 | 属预期：取消勾选「业务数据」后导出照常可用（凭据 / 运行配置 / 配方 / 照片）；业务数据用第 6 节的手工命令 |
 
 ---
 
@@ -229,7 +229,8 @@ systemctl start luyun
 
 1. **PG 后端仍是单 worker**。Redis 容器已备（compose `pg` profile）但代码未接入，
    realtime hub / 日志缓冲 / 爬虫计数器还在进程内存里。
-2. **Admin 备份导出/导入不支持 PG**。更新前备份与定时冷备已支持。
+2. **Admin 备份导出/导入在 PG 下不含业务数据**（0.6.0 当时是整块报错，随后收敛为
+   「导出照常可用、业务数据那一项置灰」）。更新前备份与定时冷备从一开始就支持。
 3. **`hygiene_*` 表不在 Admin 备份范围内**（既有缺陷，与本次升级无关）。日常备份会
    漏掉卫生模块的结构化数据；整机迁移请直接搬 `data/` 目录或用 `pg_dump`。
 4. **时间戳仍是 TEXT、金额仍是浮点**。切换到 `TIMESTAMPTZ` / `NUMERIC` 是独立议题。

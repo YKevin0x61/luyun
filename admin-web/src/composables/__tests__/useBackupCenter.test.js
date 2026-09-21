@@ -318,6 +318,92 @@ describe('useBackupCenter', () => {
     expect(exportForm.passphrase).toBe('')
   })
 
+  it('PG 后端下业务数据被禁用：提交始终不带 include_app_db，刷新也不会重新打开', async () => {
+    downloadPost.mockResolvedValue('luyun_backup_x.luyunbak')
+    apiGet.mockImplementation((path) => {
+      if (path === '/api/backup/points') {
+        return Promise.resolve(pointsPayload({ backend: 'postgres', export_app_db_supported: false }))
+      }
+      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
+      return Promise.resolve({})
+    })
+    const {
+      dbBackend, exportAppDbSupported, exportForm, exportHasLargePayload, loadPoints, onExportBackup,
+    } = makeHarness()
+
+    await loadPoints()
+    expect(dbBackend.value).toBe('postgres')
+    expect(exportAppDbSupported.value).toBe(false)
+    expect(exportForm.include_app_db).toBe(false)
+    // 业务数据不再算大负载，配方仍然算
+    expect(exportHasLargePayload.value).toBe(true)
+    exportForm.include_recipes = false
+    expect(exportHasLargePayload.value).toBe(false)
+    exportForm.include_recipes = true
+
+    // 就算有人手动把表单项改回 true，提交时也必须是 false
+    exportForm.include_app_db = true
+    exportForm.passphrase = 'secret1'
+    exportForm.passphrase2 = 'secret1'
+    await onExportBackup()
+
+    expect(downloadPost).toHaveBeenCalledTimes(1)
+    expect(downloadPost.mock.calls[0][1].include_app_db).toBe(false)
+    // 导出成功后的 loadPoints 刷新不会把 PG 下已禁用的项又打开
+    expect(exportForm.include_app_db).toBe(false)
+    expect(exportAppDbSupported.value).toBe(false)
+
+    // 刷新失败同样不能把已禁用的项重新打开
+    apiGet.mockRejectedValueOnce(new Error('网络错误'))
+    await loadPoints()
+    expect(exportAppDbSupported.value).toBe(false)
+    expect(exportForm.include_app_db).toBe(false)
+  })
+
+  it('后端明确说支持（sqlite）时按用户勾选提交业务数据', async () => {
+    downloadPost.mockResolvedValue('luyun_backup_x.luyunbak')
+    apiGet.mockImplementation((path) => {
+      if (path === '/api/backup/points') {
+        return Promise.resolve(pointsPayload({ backend: 'sqlite', export_app_db_supported: true }))
+      }
+      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
+      return Promise.resolve({})
+    })
+    const { dbBackend, exportAppDbSupported, exportForm, loadPoints, onExportBackup } = makeHarness()
+
+    await loadPoints()
+    expect(dbBackend.value).toBe('sqlite')
+    expect(exportAppDbSupported.value).toBe(true)
+    expect(exportForm.include_app_db).toBe(true)
+
+    exportForm.passphrase = 'secret1'
+    exportForm.passphrase2 = 'secret1'
+    await onExportBackup()
+    expect(downloadPost.mock.calls[0][1].include_app_db).toBe(true)
+    expect(exportForm.include_app_db).toBe(true)
+  })
+
+  it('能力字段缺失（老后端）时行为不变：业务数据默认勾选并照常提交', async () => {
+    downloadPost.mockResolvedValue('luyun_backup_x.luyunbak')
+    apiGet.mockImplementation((path) => {
+      if (path === '/api/backup/points') return Promise.resolve(pointsPayload())
+      if (path === '/api/backup/health') return Promise.resolve(healthPayload())
+      return Promise.resolve({})
+    })
+    const { dbBackend, exportAppDbSupported, exportForm, loadPoints, onExportBackup } = makeHarness()
+
+    expect(exportAppDbSupported.value).toBe(true)
+    await loadPoints()
+    expect(dbBackend.value).toBe('')
+    expect(exportAppDbSupported.value).toBe(true)
+    expect(exportForm.include_app_db).toBe(true)
+
+    exportForm.passphrase = 'secret1'
+    exportForm.passphrase2 = 'secret1'
+    await onExportBackup()
+    expect(downloadPost.mock.calls[0][1].include_app_db).toBe(true)
+  })
+
   it('previews 恢复 and seeds apply switches from default_apply', async () => {
     apiUpload.mockResolvedValue(previewPayload())
     const { importState, onImportFileChange, onPreviewImport, importPhotos, importMissing, importValidation, restoreAllowed, requiresForce, canApplyImport, forceRequired, forceContinue } =

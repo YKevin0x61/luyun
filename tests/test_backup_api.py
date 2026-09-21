@@ -448,5 +448,133 @@ class BackupExportImportRoundTripTest(unittest.TestCase):
         self.assertTrue((self.capture_root / "o1").is_file())
 
 
+class BackupExportBackendCapabilityTest(unittest.TestCase):
+    """导出面板按后端能力渲染的依据：PG 不导出业务数据，但配方必须来自当前库。"""
+
+    def setUp(self):
+        import asyncio
+
+        self._old_database_dir = settings.DATABASE_DIR
+        self._old_cold_dir = settings.COLD_BACKUP_DIR
+        self._saved_retention = backup_retention.cache_get()
+        backup_retention.cache_set(backup_retention.RetentionConfig())
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        settings.COLD_BACKUP_DIR = os.path.join(self._tmpdir.name, "backups")
+        self.db = DatabaseManager()
+        self.assertTrue(asyncio.run(self.db.connect()))
+        self.client = TestClient(_make_app(self.db))
+        backup_points.set_health_cache(None)
+
+    def tearDown(self):
+        import asyncio
+
+        asyncio.run(self.db.close())
+        backup_retention.cache_set(self._saved_retention)
+        backup_points.set_health_cache(None)
+        settings.DATABASE_DIR = self._old_database_dir
+        settings.COLD_BACKUP_DIR = self._old_cold_dir
+        self._tmpdir.cleanup()
+
+    def _seed_recipe(self) -> None:
+        import asyncio
+
+        async def seed():
+            await self.db._conn.execute(
+                "INSERT INTO sop_stations (slug, title, updated_at) VALUES (?, ?, ?)",
+                ("shulong", "熟笼档", "2026-05-01T10:00:00"),
+            )
+            await self.db._conn.execute(
+                "INSERT INTO sop_recipes (station_slug, section, recipe_name, "
+                "body_markdown, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("shulong", "点心", "虾饺", "# 虾饺", 1, "2026-05-01T10:00:00"),
+            )
+            await self.db._conn.commit()
+
+        asyncio.run(seed())
+
+    def _export_body(self, *, include_app_db: bool) -> dict:
+        return {
+            "passphrase": "pass1234",
+            "include_runtime": False,
+            "include_app_db": include_app_db,
+            "include_recipes": True,
+            "include_standard_photos": False,
+            "include_other_photos": False,
+        }
+
+    def test_points_reports_sqlite_capability(self):
+        body = self.client.get("/api/backup/points").json()
+        self.assertEqual(body["backend"], "sqlite")
+        self.assertTrue(body["export_app_db_supported"])
+
+    def test_points_reports_postgres_capability(self):
+        with mock.patch.object(
+            backup_service, "is_postgres_backend", return_value=True
+        ):
+            body = self.client.get("/api/backup/points").json()
+        self.assertEqual(body["backend"], "postgres")
+        self.assertFalse(body["export_app_db_supported"])
+
+    def test_pg_export_rejects_app_db_with_actionable_hint(self):
+        with mock.patch.object(
+            backup_service, "is_postgres_backend", return_value=True
+        ):
+            response = self.client.post(
+                "/api/backup/export", json=self._export_body(include_app_db=True)
+            )
+
+        self.assertEqual(response.status_code, 400)
+        detail = response.json()["detail"]
+        # 光说「不支持」会让用户以为整个导出备份都不可用，必须给出下一步
+        self.assertIn("取消勾选", detail)
+        self.assertIn("pg_dump", detail)
+
+        export_dir = Path(settings.DATABASE_DIR) / "backup_exports"
+        leftovers = list(export_dir.glob("*.luyunbak")) if export_dir.is_dir() else []
+        self.assertEqual(leftovers, [])
+
+    def test_pg_export_draws_recipes_from_live_connection(self):
+        self._seed_recipe()
+
+        with mock.patch.object(
+            backup_service, "is_postgres_backend", return_value=True
+        ), mock.patch.object(
+            backup_service,
+            "export_recipes_db_bytes",
+            side_effect=AssertionError("PG 下不得再按文件路径读 recipes"),
+        ) as legacy:
+            response = self.client.post(
+                "/api/backup/export", json=self._export_body(include_app_db=False)
+            )
+
+        self.assertEqual(response.status_code, 200)
+        legacy.assert_not_called()
+
+        parsed = backup_service.parse_backup(response.content, "pass1234")
+        self.assertIsNotNone(parsed["recipes_db_bytes"])
+        fd, tmp_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with open(tmp_path, "wb") as handle:
+                handle.write(parsed["recipes_db_bytes"])
+            conn = sqlite3.connect(tmp_path)
+            try:
+                recipes = conn.execute("SELECT COUNT(*) FROM sop_recipes").fetchone()[0]
+                stations = conn.execute("SELECT COUNT(*) FROM sop_stations").fetchone()[0]
+            finally:
+                conn.close()
+        finally:
+            os.unlink(tmp_path)
+
+        self.assertEqual(recipes, 1)
+        self.assertEqual(stations, 1)
+
+        points = self.client.get("/api/backup/points").json()["points"]
+        exported = [p for p in points if p["medium"] == "export_backup"]
+        self.assertEqual(len(exported), 1)
+        self.assertIn("recipes_db", exported[0]["contents"])
+
+
 if __name__ == "__main__":
     unittest.main()

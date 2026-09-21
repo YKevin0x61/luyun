@@ -116,6 +116,8 @@ const {
   exporting,
   exportBtnLabel,
   exportHasLargePayload,
+  // 后端能力位：PG 门店不允许把业务数据打进导出包
+  exportAppDbSupported,
   onExportBackup,
   // 备份健康（总览条）
   healthView,
@@ -891,8 +893,11 @@ onMounted(() => {
 
             <fieldset>
               <legend>导出备份</legend>
-              <p class="hint section-lead">
+              <p v-if="exportAppDbSupported" class="hint section-lead">
                 导出为口令加密的 <code>.luyunbak</code> 文件，可打包 POS 凭据、运行配置、业务数据与两类卫生照片。口令遗失将无法解密恢复，请牢记。
+              </p>
+              <p v-else class="hint section-lead">
+                导出为口令加密的 <code>.luyunbak</code> 文件，可打包 POS 凭据、运行配置、配方数据与两类卫生照片（PostgreSQL 的业务数据请走冷备/本机回滚快照）。口令遗失将无法解密恢复，请牢记。
               </p>
               <div class="grid">
                 <div>
@@ -911,9 +916,12 @@ onMounted(() => {
                 </div>
                 <div class="full">
                   <label class="luyun-check-row">
-                    <LuyunCheckbox v-model="exportForm.include_app_db" />
+                    <LuyunCheckbox v-model="exportForm.include_app_db" :disabled="!exportAppDbSupported" />
                     <span>同时打包业务数据库（订单、档口映射等）</span>
                   </label>
+                  <div v-if="!exportAppDbSupported" class="hint">
+                    PostgreSQL 门店的业务数据不在导出包内，请用宿主机冷备（<code>pg_dump</code>，命令见 <code>deploy/README.md</code> 第 10.4 节）或「备份点 → 本机回滚快照」。
+                  </div>
                 </div>
                 <div class="full">
                   <label class="luyun-check-row">
@@ -935,7 +943,9 @@ onMounted(() => {
                 </div>
               </div>
               <div v-if="exportHasLargePayload" class="hint">
-                已勾选业务数据或配方，备份文件可能较大，导出耗时会更长。
+                {{ exportAppDbSupported
+                  ? '已勾选业务数据或配方，备份文件可能较大，导出耗时会更长。'
+                  : '已勾选配方，备份文件可能较大，导出耗时会更长。' }}
               </div>
               <div class="actions">
                 <button type="button" class="btn btn-primary" :disabled="exporting" @click="onExportBackup">{{ exportBtnLabel }}</button>

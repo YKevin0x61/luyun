@@ -483,7 +483,7 @@ sudo systemctl enable luyun-update.service   # oneshot，按需 start
 | 读写 / KDS / admin 表格编辑 | ✓ | ✓ |
 | 更新前强制备份（`backing_up`） | ✓ `app.db` | ✓ `pg_dump` → `app.pgdump` |
 | 定时冷备（`deploy/backup.sh`） | ✓ | ✓ 同上 |
-| Admin「备份导出 / 导入」 | ✓ | ✗ 明确报错，改用手工 `pg_dump` / `pg_restore` |
+| Admin「备份导出 / 导入」 | ✓ 含业务数据 | 导出**不含业务数据**（凭据 / 运行配置 / 配方 / 照片照常打包），业务数据见 10.4 的手工 `pg_dump`；导入照常可用 |
 | 必须单 worker | ✓ | **仍是**——realtime hub / 日志缓冲 / 爬虫计数器还在进程内 |
 
 Redis 容器已在 `docker-compose.yml` 的 `pg` profile 里备好，但**代码尚未接入**，
@@ -565,7 +565,7 @@ docker compose -f deploy/docker-compose.yml --profile pg up -d
 **要切 PostgreSQL**：先按上面完成「系统更新」升到 0.6.0（切换脚本是 0.6.0 才有
 的），确认应用正常后，再跑 `sudo bash deploy/enable_postgres.sh`。
 
-### 10.4 从 PG 快照恢复
+### 10.4 PG 的备份与恢复
 
 **页面内恢复（推荐，本机回滚快照）**：管理后台 →「配置 → 备份中心 → 备份点 →
 本机回滚快照」，点「恢复整库数据」。这条路径会：
@@ -576,6 +576,21 @@ docker compose -f deploy/docker-compose.yml --profile pg up -d
 4. 让当前后台会话失效——`auth` 表被一起替换，需要重新登录。
 
 恢复期间服务短暂无法写库（采集会中断一轮），**不要在营业高峰做**。
+
+**手工冷备（`pg_dump`）**：管理后台的「导出备份」（`.luyunbak`）在 PG 门店
+**不含业务数据**——那份成员是 SQLite 文件，灌不进 PostgreSQL。要一份能整体回退
+的业务数据副本，用 `pg_dump`（与更新作业的 `backing_up` 阶段、`deploy/backup.sh`
+是同一条命令）：
+
+```bash
+mkdir -p backups/manual
+pg_dump --format=custom --no-owner --no-acl \
+  -f "backups/manual/app-$(date +%Y%m%d_%H%M%S).pgdump" \
+  "postgresql://luyun:<密码>@127.0.0.1:5432/luyun"
+```
+
+> `.luyunbak` 里仍然带着凭据、运行配置、配方数据与两类卫生照片（页面导出照旧可用），
+> 缺的只是业务数据这一项；管理后台会在导出面板里把「业务数据」置灰并说明原因。
 
 **手工恢复（冷备归档、或页面不可用时）**：
 

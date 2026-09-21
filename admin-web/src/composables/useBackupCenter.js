@@ -31,6 +31,13 @@ const BACKUP_PASSPHRASE_MIN_LENGTH = 6
  */
 export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
   // ==================== 导出备份 ====================
+  /** 后端数据库形态（"sqlite" | "postgres"）与「业务数据能否打进导出包」的能力位。 */
+  const dbBackend = ref('')
+  /**
+   * 初始与未知（老后端没有该字段、请求失败）时都按 true 处理：只有后端明确说
+   * 不支持，才关掉业务数据，避免误伤 SQLite 门店的既有行为。
+   */
+  const exportAppDbSupported = ref(true)
   const exportForm = reactive({
     passphrase: '',
     passphrase2: '',
@@ -42,7 +49,15 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
   })
   const exporting = ref(false)
   const exportBtnLabel = computed(() => (exporting.value ? '导出中…' : '生成并下载备份'))
-  const exportHasLargePayload = computed(() => exportForm.include_app_db || exportForm.include_recipes)
+  /** 业务数据不可导出时不再算大负载，配方仍然是。 */
+  const exportHasLargePayload = computed(
+    () => (exportAppDbSupported.value && exportForm.include_app_db) || exportForm.include_recipes,
+  )
+
+  /** PG 门店不允许把业务数据打进导出包：每次拿到能力位后都强制关掉该项。 */
+  function applyExportAppDbCapability() {
+    if (!exportAppDbSupported.value) exportForm.include_app_db = false
+  }
 
   async function onExportBackup() {
     clearAlert()
@@ -56,12 +71,15 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
     }
     exporting.value = true
     try {
+      // 兜底：表单被改回 true 也不允许在 PG 下带 include_app_db: true。
+      const includeAppDb = exportAppDbSupported.value && exportForm.include_app_db
+      if (!exportAppDbSupported.value) exportForm.include_app_db = false
       await api.downloadPost(
         '/api/backup/export',
         {
           passphrase: exportForm.passphrase,
           include_runtime: exportForm.include_runtime,
-          include_app_db: exportForm.include_app_db,
+          include_app_db: includeAppDb,
           include_recipes: exportForm.include_recipes,
           include_standard_photos: exportForm.include_standard_photos,
           include_other_photos: exportForm.include_other_photos,
@@ -212,6 +230,10 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
       notBackedUp.value = Array.isArray(data?.not_backed_up) ? data.not_backed_up : []
       mediumLabels.value = data?.medium_labels || {}
       mediumPurposes.value = data?.medium_purposes || {}
+      dbBackend.value = typeof data?.backend === 'string' ? data.backend : ''
+      exportAppDbSupported.value = data?.export_app_db_supported !== false
+      // 刷新后必须继续保持 PG 下的关闭状态，不能把已禁用的项又打开。
+      applyExportAppDbCapability()
       applyHealth(data?.health)
     } catch (err) {
       pointsError.value = err.message || '加载失败'
@@ -893,6 +915,8 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
 
   return {
     // 导出备份
+    dbBackend,
+    exportAppDbSupported,
     exportForm,
     exporting,
     exportBtnLabel,

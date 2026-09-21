@@ -226,7 +226,10 @@ class Settings(BaseSettings):
         return not self.DEBUG
 
     class Config:
-        env_file = ".env"
+        # 绝对路径：`.env` 在仓库根，而 uvicorn 之外的入口（scripts/start.py 等）
+        # 的工作目录常常不是仓库根，相对路径会**静默读不到**配置——本机就因此出现
+        # 「.env 写着 postgres，实例实际连 SQLite」的错配。
+        env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
         case_sensitive = True
 
 # 创建全局配置实例

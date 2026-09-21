@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import aiosqlite
@@ -688,6 +689,214 @@ class ExportRecipesDbBytesTest(unittest.TestCase):
         self.assertIsNone(
             backup_service.export_recipes_db_bytes("/no/such/path/x.db")
         )
+
+
+class ExportRecipesDbBytesFromConnTest(unittest.IsolatedAsyncioTestCase):
+    """配方成员必须取自「当前连接」，而不是磁盘上那份可能已分叉的 SQLite 副本。"""
+
+    async def asyncSetUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._old_backend = settings.DATABASE_BACKEND
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        settings.DATABASE_BACKEND = "sqlite"
+
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect())
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        settings.DATABASE_DIR = self._old_database_dir
+        settings.DATABASE_BACKEND = self._old_backend
+        self._tmpdir.cleanup()
+
+    async def _seed(self) -> None:
+        now = datetime(2026, 5, 1, 10, 0, tzinfo=CHINA_TZ).isoformat()
+        await self.db._conn.execute(
+            "INSERT INTO sop_stations (slug, title, updated_at) VALUES (?, ?, ?)",
+            ("shulong", "熟笼档", now),
+        )
+        await self.db._conn.execute(
+            "INSERT INTO sop_recipes (station_slug, section, recipe_name, "
+            "body_markdown, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("shulong", "点心", "虾饺", "# 虾饺", 1, now),
+        )
+        await self.db._conn.commit()
+
+    def _inspect(self, data: bytes) -> dict:
+        fd, out_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with open(out_path, "wb") as handle:
+                handle.write(data)
+            conn = sqlite3.connect(out_path)
+            try:
+                tables = [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                ]
+                counts = {
+                    table: conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                    for table in tables
+                }
+                columns = {
+                    table: [
+                        r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')
+                    ]
+                    for table in tables
+                }
+                return {"tables": tables, "counts": counts, "columns": columns}
+            finally:
+                conn.close()
+        finally:
+            os.unlink(out_path)
+
+    async def test_exports_only_recipe_tables_from_connection(self):
+        await self._seed()
+        data = await backup_service.export_recipes_db_bytes_from_conn(self.db._conn)
+        self.assertIsNotNone(data)
+
+        info = self._inspect(data)
+        self.assertIn("sop_stations", info["tables"])
+        self.assertIn("sop_recipes", info["tables"])
+        self.assertNotIn("orders", info["tables"])
+        self.assertEqual(info["counts"]["sop_stations"], 1)
+        self.assertEqual(info["counts"]["sop_recipes"], 1)
+        # id 列要跟着走：覆盖恢复按列交集回灌，丢了 id 就换了主键。
+        self.assertIn("id", info["columns"]["sop_recipes"])
+
+    async def test_returns_none_when_connection_has_no_recipe_tables(self):
+        fd, tmp_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = await aiosqlite.connect(tmp_path)
+        try:
+            await conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY)")
+            await conn.commit()
+            self.assertIsNone(
+                await backup_service.export_recipes_db_bytes_from_conn(conn)
+            )
+        finally:
+            await conn.close()
+            os.unlink(tmp_path)
+
+    async def test_returns_none_without_connection(self):
+        self.assertIsNone(
+            await backup_service.export_recipes_db_bytes_from_conn(None)
+        )
+
+
+class PostgresOverwriteRecipesTest(unittest.IsolatedAsyncioTestCase):
+    """PG 覆盖恢复配方：没有 ATTACH，走逐表 DELETE + INSERT，失败必须整体回滚。"""
+
+    async def asyncSetUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._old_backend = settings.DATABASE_BACKEND
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        settings.DATABASE_BACKEND = "sqlite"
+
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect())
+        # RecipeStore 的最小替身：这条路径只用到 .conn
+        self.store = SimpleNamespace(conn=self.db._conn)
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        settings.DATABASE_DIR = self._old_database_dir
+        settings.DATABASE_BACKEND = self._old_backend
+        self._tmpdir.cleanup()
+
+    async def _seed_local(self) -> None:
+        now = datetime(2026, 5, 1, 9, 0, tzinfo=CHINA_TZ).isoformat()
+        await self.db._conn.execute(
+            "INSERT INTO sop_stations (slug, title, updated_at) VALUES (?, ?, ?)",
+            ("old-station", "旧档口", now),
+        )
+        await self.db._conn.execute(
+            "INSERT INTO sop_recipes (station_slug, section, recipe_name, "
+            "body_markdown, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("old-station", "点心", "旧配方", "# 旧", 1, now),
+        )
+        await self.db._conn.commit()
+
+    def _source_bytes(self, title: str = "新档口") -> bytes:
+        fd, tmp_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = sqlite3.connect(tmp_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE sop_stations (
+                    slug TEXT PRIMARY KEY,
+                    title TEXT,
+                    updated_at TEXT
+                );
+                CREATE TABLE sop_recipes (
+                    id INTEGER PRIMARY KEY,
+                    station_slug TEXT,
+                    section TEXT,
+                    recipe_name TEXT,
+                    body_markdown TEXT,
+                    sort_order INTEGER,
+                    updated_at TEXT,
+                    tenant_id INTEGER
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO sop_stations (slug, title, updated_at) VALUES (?, ?, ?)",
+                ("shulong", title, "2026-05-01T10:00:00"),
+            )
+            # tenant_id 只存在于源（PG 侧加成性迁移的列）：按列交集回灌时应该被忽略
+            conn.execute(
+                "INSERT INTO sop_recipes (id, station_slug, section, recipe_name, "
+                "body_markdown, sort_order, updated_at, tenant_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (7, "shulong", "点心", "虾饺", "# 虾饺", 1, "2026-05-01T10:00:00", 1),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with open(tmp_path, "rb") as handle:
+            data = handle.read()
+        os.unlink(tmp_path)
+        return data
+
+    async def _rows(self, sql: str) -> list:
+        async with self.db._conn.execute(sql) as cur:
+            return [tuple(row) for row in await cur.fetchall()]
+
+    async def test_overwrite_replaces_recipes_through_source_member(self):
+        await self._seed_local()
+
+        with mock.patch.object(
+            backup_service, "is_postgres_backend", return_value=True
+        ):
+            await backup_service.overwrite_recipes_from_bytes(
+                self.store, self._source_bytes()
+            )
+
+        stations = await self._rows("SELECT slug, title FROM sop_stations")
+        self.assertEqual(stations, [("shulong", "新档口")])
+        recipes = await self._rows("SELECT id, recipe_name FROM sop_recipes")
+        self.assertEqual(recipes, [(7, "虾饺")])
+
+    async def test_failed_insert_rolls_back_and_keeps_previous_rows(self):
+        await self._seed_local()
+
+        # 源里的 title 为 NULL：目标列 NOT NULL，插入阶段失败，整次覆盖必须回滚
+        with mock.patch.object(
+            backup_service, "is_postgres_backend", return_value=True
+        ):
+            with self.assertRaises(Exception):
+                await backup_service.overwrite_recipes_from_bytes(
+                    self.store, self._source_bytes(title=None)
+                )
+
+        stations = await self._rows("SELECT slug FROM sop_stations")
+        self.assertEqual(stations, [("old-station",)])
 
 
 class MissingHygieneCaptureIdsTest(unittest.TestCase):

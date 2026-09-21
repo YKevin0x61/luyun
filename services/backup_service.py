@@ -22,7 +22,8 @@ import struct
 import subprocess
 import tarfile
 import tempfile
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -2104,8 +2105,14 @@ async def merge_app_db_from_bytes(db, app_db_bytes: bytes) -> dict:
 
 async def overwrite_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> None:
     """在 RecipeStore 连接上逐表替换配方数据。"""
-    tmp_path = await _write_temp_db(recipes_db_bytes)
     conn = recipe_store.conn
+    if is_postgres_backend():
+        # PG 没有 ATTACH DATABASE，下面那条 ATTACH + `src.x` / `main.x` 跨库引用的
+        # 路径在 PG 上必然语法报错（覆盖模式恢复配方会直接 500）。
+        await _overwrite_recipes_from_source(conn, recipes_db_bytes)
+        return
+
+    tmp_path = await _write_temp_db(recipes_db_bytes)
     try:
         escaped = tmp_path.replace("'", "''")
         await conn.execute(f"ATTACH DATABASE '{escaped}' AS src")
@@ -2117,6 +2124,57 @@ async def overwrite_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) ->
         finally:
             await conn.execute("DETACH DATABASE src")
     finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+async def _overwrite_recipes_from_source(conn, recipes_db_bytes: bytes) -> None:
+    """逐表 DELETE + INSERT 覆盖配方（PostgreSQL 路径）。
+
+    替代 SQLite 那条 ATTACH + ``executescript`` 的写法：PG 没有 ATTACH，也没有
+    ``main.`` / ``src.`` 这样的跨库限定名。原子性靠 PgConnection 自己的事务语义
+    兜住——DELETE 属于写语句，执行时它开启事务并一直持有串行锁到 commit，因此
+    采集侧或 Admin 的并发写入不会挤进这次覆盖的中间态。
+    """
+    tmp_path = await _write_temp_db(recipes_db_bytes)
+    src_conn = await aiosqlite.connect(tmp_path)
+    src_conn.row_factory = aiosqlite.Row
+    try:
+        for table in RECIPE_TABLES:
+            async with src_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ) as cur:
+                if not await cur.fetchone():
+                    continue
+
+            async with src_conn.execute(f'PRAGMA table_info("{table}")') as cur:
+                src_cols = [row[1] for row in await cur.fetchall()]
+            # 目标库可能是 PG：它的 execute 是 async def，返回 coroutine，不满足
+            # 异步上下文管理器协议（见 db_core/connection.py 的同款说明）。
+            cur = await conn.execute(f"PRAGMA table_info({table})")
+            dst_cols = [row[1] for row in await cur.fetchall()]
+            common_cols = [c for c in src_cols if c in dst_cols]
+            if not common_cols:
+                continue
+
+            cols_str = ", ".join(common_cols)
+            placeholders = ", ".join(["?"] * len(common_cols))
+            await conn.execute(f"DELETE FROM {table}")
+            async with src_conn.execute(f"SELECT {cols_str} FROM {table}") as cur:
+                async for row in cur:
+                    await conn.execute(
+                        f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders})",
+                        tuple(row),
+                    )
+        await conn.commit()
+    except Exception:
+        await conn.rollback()
+        raise
+    finally:
+        await src_conn.close()
         try:
             os.unlink(tmp_path)
         except OSError:
@@ -2152,8 +2210,8 @@ async def merge_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> dic
             async with src_conn.execute(f"PRAGMA table_info({table})") as cur:
                 src_cols = [r[1] for r in await cur.fetchall()]
 
-            async with conn.execute(f"PRAGMA table_info({table})") as cur:
-                dst_cols = [r[1] for r in await cur.fetchall()]
+            cur = await conn.execute(f"PRAGMA table_info({table})")
+            dst_cols = [r[1] for r in await cur.fetchall()]
 
             common_cols = [c for c in src_cols if c in dst_cols and c != "id"]
             if not common_cols:
@@ -2163,9 +2221,9 @@ async def merge_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> dic
             dedup_key = recipe_dedup.get(table)
             existing_keys: set = set()
             if dedup_key and dedup_key in common_cols:
-                async with conn.execute(f"SELECT {dedup_key} FROM {table}") as cur:
-                    rows = await cur.fetchall()
-                    existing_keys = {r[0] for r in rows if r[0]}
+                cur = await conn.execute(f"SELECT {dedup_key} FROM {table}")
+                rows = await cur.fetchall()
+                existing_keys = {r[0] for r in rows if r[0]}
 
             imported = 0
             failed_count = 0
@@ -2222,6 +2280,108 @@ async def merge_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> dic
         "total_failed": total_failed,
         "results": results,
     }
+
+
+def _sqlite_column_type(sql_type: str) -> str:
+    """把源库列类型折算成 SQLite 存储类。
+
+    导出成员只要求「可读 + 可回灌」，不追求还原源库的精确类型：两种恢复路径都按
+    列名做交集（``merge_recipes_from_bytes`` / ``overwrite_recipes_from_bytes``）。
+    """
+    normalized = (sql_type or "").lower()
+    if "int" in normalized:
+        return "INTEGER"
+    if any(
+        token in normalized
+        for token in ("real", "double", "numeric", "decimal", "float")
+    ):
+        return "REAL"
+    if any(token in normalized for token in ("blob", "bytea")):
+        return "BLOB"
+    return "TEXT"
+
+
+def _sqlite_bindable(value: Any) -> Any:
+    """把源库取回的值收敛成 sqlite3 能绑定的类型。
+
+    配方表在两种后端里刻意保持同样的列类型（时间戳 TEXT、金额 REAL/DOUBLE），
+    但加成性迁移可能引入 ``timestamptz`` / ``numeric`` / ``boolean``——asyncpg
+    会给出 datetime / Decimal / bool 对象，直接交给 sqlite3 会 ``InterfaceError``。
+    """
+    if value is None or isinstance(value, (str, int, float, bytes)):
+        return value
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    return str(value)
+
+
+async def export_recipes_db_bytes_from_conn(conn) -> Optional[bytes]:
+    """从**当前连接**导出「仅配方表」的精简 sqlite 库字节串。
+
+    与 :func:`export_recipes_db_bytes` 的差别是数据来源：后者按文件路径读 SQLite，
+    PostgreSQL 后端下读到的是 ``data/app.db`` 这份迁移遗留副本——它的配方与当前库
+    早已分叉，打进导出包再恢复就会把旧配方灌回去。这里只认调用方给的连接，两种
+    后端拿到的都是「当前生效的那份配方」。
+
+    连接不可用、或源库没有任何配方表时返回 None（调用方据此少打一个成员）。
+    """
+    if conn is None:
+        return None
+
+    tables: Dict[str, List[Tuple[str, str]]] = {}
+    for table in RECIPE_TABLES:
+        cursor = await conn.execute(f"PRAGMA table_info({table})")
+        rows = await cursor.fetchall()
+        columns = [(str(row[1]), str(row[2] or "")) for row in rows]
+        if columns:
+            tables[table] = columns
+    if not tables:
+        return None
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-recipes-export-")
+    os.close(fd)
+    dst = sqlite3.connect(tmp_path)
+    try:
+        for table, columns in tables.items():
+            names = [name for name, _ in columns]
+            definitions = []
+            for name, sql_type in columns:
+                definition = f'"{name}" {_sqlite_column_type(sql_type)}'
+                if name == "id":
+                    definition += " PRIMARY KEY"
+                definitions.append(definition)
+            dst.execute(f'CREATE TABLE "{table}" ({", ".join(definitions)})')
+
+            quoted = ", ".join(f'"{name}"' for name in names)
+            placeholders = ", ".join(["?"] * len(names))
+            cursor = await conn.execute(f'SELECT {quoted} FROM "{table}"')
+            data_rows = await cursor.fetchall()
+            if data_rows:
+                dst.executemany(
+                    f'INSERT INTO "{table}" ({quoted}) VALUES ({placeholders})',
+                    [
+                        tuple(_sqlite_bindable(value) for value in row)
+                        for row in data_rows
+                    ],
+                )
+        dst.commit()
+    finally:
+        dst.close()
+
+    try:
+        with open(tmp_path, "rb") as handle:
+            return handle.read()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def export_recipes_db_bytes(recipes_db_path: str) -> Optional[bytes]:
