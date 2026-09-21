@@ -1,0 +1,40 @@
+# 镜像只提供**运行时**：Python 依赖 + Playwright + PostgreSQL 客户端 + 中文字体。
+# 应用代码不在镜像里 —— 它由发行包 bind mount 到 /srv/luyun/app（ADR 0011）。
+# Dockerfile 只 COPY 两样东西：requirements.txt 与 deploy/docker-entrypoint.sh，
+# 所以其余一律排除：既省掉每次构建都要传输上 GB 的上下文，也避免把门店数据与
+# 凭据送进 Docker daemon（Dockerfile 虽然不会 COPY 它们，但会随 context 传过去，
+# 并可能在构建缓存里留下副本）。
+
+# 业务数据与凭据：绝不进构建上下文
+data/
+backups/
+secrets/
+logs/
+*.db
+.env
+.env.*
+deploy/env.production
+deploy/env.production.local
+
+# 宿主机提供、镜像不需要的依赖与构建产物
+.venv/
+venv/
+admin-web/node_modules/
+admin-web/dist/
+kds/node_modules/
+kds/unpackage/
+public/kds/
+ms-playwright/
+.playwright-mcp/
+runtime/
+
+# 版本控制、开发脚手架与文档
+.git/
+.github/
+tests/
+docs/
+.scratch/
+.dsh-im/
+scripts/archive/
+
+# 注意：deploy/ 不能被整体排除 —— Dockerfile 与 docker-entrypoint.sh 都在里面。

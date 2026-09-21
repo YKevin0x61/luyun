@@ -50,6 +50,33 @@ class DockerComposeContractTest(unittest.TestCase):
         self.assertIn("docker-compose.yml", text)
         self.assertIn(".env.docker", text)
 
+    def test_dockerignore_keeps_data_out_of_build_context(self):
+        """构建上下文不能带上门店数据与宿主机依赖。
+
+        镜像只 COPY ``requirements.txt`` 与 ``deploy/docker-entrypoint.sh``；没有
+        ``.dockerignore`` 时上下文是 1.6GB（``data/`` 503M 含业务库/POS 凭据/加密密钥、
+        ``.venv`` 399M、``admin-web/node_modules`` 220M、``kds/unpackage`` 200M、
+        ``.git`` 27M），每次构建都要传一遍，还会把 ``.git`` 里的 fsmonitor socket 塞给
+        daemon（``archive/tar: sockets not supported``）。
+        """
+        ignore = REPO_ROOT / ".dockerignore"
+        self.assertTrue(ignore.is_file(), "缺 .dockerignore 会让构建上下文膨胀到 GB 级")
+        text = ignore.read_text(encoding="utf-8")
+        for entry in (
+            "data/",
+            ".venv/",
+            "admin-web/node_modules/",
+            "kds/unpackage/",
+            ".git/",
+            "deploy/env.production",
+        ):
+            self.assertIn(entry, text, f"应排除 {entry}")
+
+    def test_dockerignore_does_not_exclude_deploy_dir(self):
+        """deploy/ 不能被整体排除 —— Dockerfile 与 entrypoint 都在里面，排掉就构建不了。"""
+        text = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
+        self.assertNotRegex(text, r"(?m)^deploy/\s*$")
+
     def test_volume_paths_do_not_rely_on_relative_defaults(self):
         """卷路径必须显式给出，不能退回相对默认值。
 
