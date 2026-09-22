@@ -253,7 +253,12 @@ def _case_timeout_handler(signum, frame):
 
 # 用例级别的墙钟上限：PG 化之后，某些用例会卡在锁等待或「等后台任务完成」的
 # 轮询上，而不带超时的挂起会让整个套件失去意义（现场：跑到备份用例就永久停住）。
-_CASE_TIMEOUT_SECONDS = 90
+#
+# 必须**明显小于** _WATCHDOG_SECONDS（见下方看门狗一节）：SIGALRM 的处理器在主线程
+# 抛异常，实测能打断 time.sleep / Thread.join / await（epoll 等待被 EINTR 唤醒后，
+# 按 PEP 475 传播处理器异常而不再重试），所以它是第一道防线——代价只有**一条**用例
+# 记 failed，同批后续用例照常跑完、结果照常产出。余量 15s 留给超时后的报告与 teardown。
+_CASE_TIMEOUT_SECONDS = 45
 
 
 def _arm_case_timeout() -> None:
@@ -287,11 +292,23 @@ def pytest_runtest_teardown(item, nextitem):
 
 
 # ── 看门狗 ───────────────────────────────────────────────────────────
-# SIGALRM 墙钟超时在 asyncio / 线程 join 路径上不一定能中断（现场：备份用例
-# 等后台导出作业时仍旧挂死）。看门狗跑在独立线程里：超过阈值没收到用例心跳，
-# 就打印当时的调用栈再退出，让「卡在哪」可见，而不是整个套件无限等待。
+# 用例级 SIGALRM 之外的最后一道防线：跑在独立线程里，超过阈值没收到用例心跳就
+# 打印当时的调用栈再退出，让「卡在哪」可见，而不是整个套件无限等待。它兜的是
+# SIGALRM 打不断的路径——C 扩展里长时间不回到字节码的调用，以及信号处理器根本
+# 不在其中执行的非主线程（心跳只在 pytest_runtest_logstart 更新，语义是「上一个
+# 用例开始」，所以下面这个阈值实际就是单个用例的墙钟上限）。
+#
+# 不变量：_WATCHDOG_SECONDS > _CASE_TIMEOUT_SECONDS。倒挂（旧值 60 < 90）会让用例级
+# 超时变成死代码——任何一条 60s+ 的慢用例先撞上看门狗的 os._exit(3)，整场 pytest
+# （后面几百条用例的结果）一起丢掉。60s 同时还不算大，真挂死时仍会收场。
 _WATCHDOG_SECONDS = 60
-_WATCHDOG_REPORT = os.path.join(tempfile.gettempdir(), "luyun-pytest-watchdog.txt")
+# 按 PID 区分：这份 dump 是排障现场，而并行会话（各自把 LUYUN_TEST_DSN 指向不同
+# 测试库）共用固定路径会互相覆盖。旧路径 ``luyun-pytest-watchdog.txt``（不带 PID）
+# 不再写；前缀沿用 tempfile.gettempdir()——macOS 上是 ``$TMPDIR``（/var/folders/…），
+# 不是字面上的 /tmp。
+_WATCHDOG_REPORT = os.path.join(
+    tempfile.gettempdir(), f"luyun-pytest-watchdog.{os.getpid()}.txt"
+)
 _last_heartbeat = time.monotonic()
 _watchdog_started = False
 
