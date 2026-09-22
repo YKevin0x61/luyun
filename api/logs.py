@@ -31,6 +31,29 @@ router = APIRouter(
 )
 
 
+def _reason(exc: Exception) -> str:
+    """异常的可读原因：`str(exc)` 为空时兜底成异常类型名。
+
+    断言类异常（`AssertionError`）、部分驱动异常（`asyncpg.InterfaceError()`）的
+    message 是空的，`f"...: {exc}"` 拼出来就是 `"查询日志失败: "`——门店现场只看到
+    500 和一段空白，等于没有原因。
+    """
+    return str(exc).strip() or type(exc).__name__
+
+
+def _storage_error(exc: Exception, what: str) -> HTTPException:
+    """把日志存储的异常映射成 HTTP 状态码。
+
+    契约：存储**不可用**（没连上 / 连接已断 / 库或表不存在）是 503「日志存储不可用」，
+    其余才是 500。两类都必须带非空、可读的原因。
+    """
+    if log_storage.is_corruption_error(exc):
+        logger.warning("日志存储不可用: %s", exc)
+        return HTTPException(status_code=503, detail="日志存储不可用")
+    logger.error("%s: %s", what, exc)
+    return HTTPException(status_code=500, detail=f"{what}: {_reason(exc)}")
+
+
 def _parse_since(value: Optional[str]) -> Optional[float]:
     if not value:
         return None
@@ -82,8 +105,7 @@ async def list_logs(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("查询日志失败: %s", exc)
-        raise HTTPException(status_code=500, detail=f"查询日志失败: {exc}")
+        raise _storage_error(exc, "查询日志失败") from exc
 
 
 @router.get("/recent")
@@ -121,8 +143,7 @@ async def get_persisted_recent(limit: int = Query(50, ge=1, le=200)):
         items = await log_storage.latest(limit=limit)
         return {"success": True, "items": items, "count": len(items)}
     except Exception as exc:
-        logger.error("获取持久化日志失败: %s", exc)
-        raise HTTPException(status_code=500, detail=f"获取持久化日志失败: {exc}")
+        raise _storage_error(exc, "获取持久化日志失败") from exc
 
 
 @router.get("/facets")
@@ -132,11 +153,7 @@ async def get_facets():
         data = await log_storage.facets()
         return {"success": True, **data}
     except Exception as exc:
-        if log_storage.is_corruption_error(exc):
-            logger.warning("日志存储不可用: %s", exc)
-            raise HTTPException(status_code=503, detail="日志存储不可用")
-        logger.error("获取日志 facets 失败: %s", exc)
-        raise HTTPException(status_code=500, detail=f"获取 facets 失败: {exc}")
+        raise _storage_error(exc, "获取 facets 失败") from exc
 
 
 @router.get("/stats")
@@ -145,11 +162,7 @@ async def get_stats():
     try:
         return {"success": True, **(await log_storage.stats())}
     except Exception as exc:
-        if log_storage.is_corruption_error(exc):
-            logger.warning("日志存储不可用: %s", exc)
-            raise HTTPException(status_code=503, detail="日志存储不可用")
-        logger.error("获取日志统计失败: %s", exc)
-        raise HTTPException(status_code=500, detail=f"获取统计失败: {exc}")
+        raise _storage_error(exc, "获取统计失败") from exc
 
 
 @router.post("/cleanup")
@@ -160,5 +173,4 @@ async def cleanup_logs(days: int = Query(7, ge=1, le=365)):
         logger.info(f"🧹 手动清理日志: 删除 {deleted} 条 {days} 天前的记录")
         return {"success": True, "deleted": deleted, "days": days}
     except Exception as exc:
-        logger.error("清理日志失败: %s", exc)
-        raise HTTPException(status_code=500, detail=f"清理失败: {exc}")
+        raise _storage_error(exc, "清理失败") from exc

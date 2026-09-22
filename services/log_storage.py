@@ -59,9 +59,22 @@ _CONNECTION_MARKERS = (
     "another operation is in progress",
 )
 
+
+class LogStorageUnavailable(RuntimeError):
+    """日志存储此刻没有可用连接（start() 没跑成功 / 已 stop / 连接已丢弃）。
+
+    查询入口在 `_conn is None` 时抛它，而不是 `assert self._conn is not None`：
+    断言失败抛的是空 message 的 `AssertionError`，既不属于「存储不可用」的异常
+    白名单，也没有任何可匹配的连接标记，于是被 api/logs.py 映射成 500 + 空 detail，
+    把「日志存储不可用」这个可执行的信号丢掉了。断言是给程序员的，不是给调用方的
+    控制流。
+    """
+
+
 # 「日志存储此刻不可用」：连接之外还包括 DSN/迁移层面的不可用。api/logs.py 据此把
 # 异常映射成 503 而不是 500。这些重连也没用，所以不参与 _flush 的重连补偿。
 _UNAVAILABLE_EXC_TYPES = _CONNECTION_EXC_TYPES + (
+    LogStorageUnavailable,  # 压根没有可用连接（start 失败 / 已 stop）
     asyncpg.InvalidCatalogNameError,  # DSN 指向的库不存在
     asyncpg.InvalidPasswordError,
     # logs 表不存在（迁移没应用）同样是写不进去，而且指向一个可执行的动作。
@@ -170,6 +183,20 @@ class LogStorage:
             return True
         self._next_reconnect_at = time.monotonic() + _RECONNECT_BACKOFF_SECONDS
         return False
+
+    def _require_conn(self) -> PgConnection:
+        """取当前连接；没有可用连接时抛 :class:`LogStorageUnavailable`。
+
+        查询 / 维护入口都走这里：`start()` 失败、已 `stop()`、连接被丢弃之后，
+        调用方拿到的是一个能映射成 503「日志存储不可用」的异常，而不是断言错误。
+        写入路径不走这里——写不进去是丢当批日志（见 `_flush`），不该抛给调用方。
+        """
+        conn = self._conn
+        if conn is None:
+            raise LogStorageUnavailable(
+                "日志存储不可用：没有可用连接（start() 未成功或已停止）"
+            )
+        return conn
 
     async def _warn_if_table_missing(self) -> None:
         if self._conn is None:
@@ -432,7 +459,7 @@ class LogStorage:
         offset: int = 0,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """条件查询日志。返回 (rows, total_count)。"""
-        assert self._conn is not None
+        self._require_conn()
         where, params = self._build_where(
             level=level,
             logger_name=logger_name,
@@ -454,9 +481,9 @@ class LogStorage:
         limit: int,
         offset: int,
     ) -> Tuple[List[Dict[str, Any]], int]:
-        assert self._conn is not None
+        conn = self._require_conn()
         count_sql = f"SELECT COUNT(*) AS c FROM logs{where}"
-        cur = await self._conn.execute(count_sql, params)
+        cur = await conn.execute(count_sql, params)
         row = await cur.fetchone()
         total = int(row["c"]) if row else 0
 
@@ -465,7 +492,7 @@ class LogStorage:
             f"FROM logs{where} "
             "ORDER BY id DESC LIMIT ? OFFSET ?"
         )
-        cur = await self._conn.execute(sql, (*params, limit, offset))
+        cur = await conn.execute(sql, (*params, limit, offset))
         rows = await cur.fetchall()
         items = [
             {
@@ -487,7 +514,7 @@ class LogStorage:
 
     async def facets(self) -> Dict[str, List[Dict[str, Any]]]:
         """返回可选的 level / logger 维度及各自计数。"""
-        assert self._conn is not None
+        self._require_conn()
         try:
             return await self._facets_rows()
         except Exception as exc:
@@ -495,15 +522,15 @@ class LogStorage:
             raise
 
     async def _facets_rows(self) -> Dict[str, List[Dict[str, Any]]]:
-        assert self._conn is not None
+        conn = self._require_conn()
         result: Dict[str, List[Dict[str, Any]]] = {"levels": [], "loggers": []}
-        cur = await self._conn.execute(
+        cur = await conn.execute(
             "SELECT level, COUNT(*) AS c FROM logs GROUP BY level ORDER BY c DESC"
         )
         result["levels"] = [
             {"value": r["level"], "count": r["c"]} for r in await cur.fetchall()
         ]
-        cur = await self._conn.execute(
+        cur = await conn.execute(
             "SELECT logger AS name, COUNT(*) AS c FROM logs "
             "GROUP BY logger ORDER BY c DESC LIMIT 50"
         )
@@ -513,7 +540,7 @@ class LogStorage:
         return result
 
     async def stats(self) -> Dict[str, Any]:
-        assert self._conn is not None
+        self._require_conn()
         try:
             return await self._stats_rows()
         except Exception as exc:
@@ -521,12 +548,12 @@ class LogStorage:
             raise
 
     async def _stats_rows(self) -> Dict[str, Any]:
-        assert self._conn is not None
-        cur = await self._conn.execute("SELECT COUNT(*) AS c FROM logs")
+        conn = self._require_conn()
+        cur = await conn.execute("SELECT COUNT(*) AS c FROM logs")
         row = await cur.fetchone()
         total = int(row["c"]) if row else 0
 
-        cur = await self._conn.execute(
+        cur = await conn.execute(
             "SELECT level, COUNT(*) AS c FROM logs "
             "WHERE ts_epoch > ? GROUP BY level",
             ((datetime.now(CHINA_TZ) - timedelta(hours=1)).timestamp(),),
@@ -534,7 +561,7 @@ class LogStorage:
         last_hour = {r["level"]: r["c"] for r in await cur.fetchall()}
 
         # 最早/最晚一条的时间
-        cur = await self._conn.execute(
+        cur = await conn.execute(
             "SELECT MIN(ts_epoch) AS m, MAX(ts_epoch) AS x FROM logs"
         )
         row = await cur.fetchone()
@@ -562,14 +589,14 @@ class LogStorage:
     async def cleanup_older_than(self, days: int) -> int:
         if days <= 0:
             return 0
-        assert self._conn is not None
+        conn = self._require_conn()
         cutoff = (datetime.now(CHINA_TZ) - timedelta(days=days)).timestamp()
         try:
-            cur = await self._conn.execute(
+            cur = await conn.execute(
                 "DELETE FROM logs WHERE ts_epoch < ?", (cutoff,)
             )
             deleted = cur.rowcount or 0
-            await self._conn.commit()
+            await conn.commit()
         except Exception as exc:
             self._note_unavailable(exc)
             raise

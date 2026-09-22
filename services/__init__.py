@@ -8,7 +8,12 @@ from services.business import (
 )
 from services.dish_normalize import normalize_dish_name
 from services.prep_plan_service import prep_plan_service
-from services.log_storage import log_storage, LogStorage, LogStorageHandler
+from services.log_storage import (
+    log_storage,
+    LogStorage,
+    LogStorageHandler,
+    LogStorageUnavailable,
+)
 
 __all__ = [
     "dish_merger_service",
@@ -18,4 +23,5 @@ __all__ = [
     "log_storage",
     "LogStorage",
     "LogStorageHandler",
+    "LogStorageUnavailable",
 ]
