@@ -5,6 +5,10 @@
 后台「系统健康状态」页要画磁盘水位图，需要**分母**（总量 / 使用率），而
 `/api/healthz` 按设计只给聚合的 free_mb（它服务探针，刻意不暴露环境细节）。
 所以把磁盘水位放进 status 接口：disk_guard 本来就有 total/used/used_pct。
+
+status 自 SEC-02 起要管理员凭据（它带库表行数 / 内存 / 磁盘路径）；这里的用例只
+关心磁盘水位段怎么拼，所以把鉴权依赖替换成放行——鉴权本身由
+`tests/test_api_read_auth.py` 钉住。
 """
 
 import unittest
@@ -16,7 +20,10 @@ from fastapi.testclient import TestClient
 class SystemStatusDiskTest(unittest.TestCase):
     def setUp(self):
         from main import app
+        from api.security import verify_admin_token
 
+        app.dependency_overrides[verify_admin_token] = lambda: True
+        self.addCleanup(app.dependency_overrides.pop, verify_admin_token, None)
         self.client = TestClient(app)
 
     def test_status_exposes_disk_watermark(self):
@@ -64,7 +71,10 @@ class SystemStatusDiskTest(unittest.TestCase):
 class ScraperHealthThresholdTest(unittest.TestCase):
     def setUp(self):
         from main import app
+        from api.security import verify_admin_token
 
+        app.dependency_overrides[verify_admin_token] = lambda: True
+        self.addCleanup(app.dependency_overrides.pop, verify_admin_token, None)
         self.client = TestClient(app)
 
     def test_scraper_health_exposes_failure_threshold(self):

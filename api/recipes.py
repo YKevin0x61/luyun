@@ -29,6 +29,13 @@ from api.security import verify_admin_token
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 
+# 扫码即看的公开阅读面（admin-web 的 /recipe、/recipe/detail、/recipe/print、
+# /recipe/qr 都是免登录页面，router/index.js 里标了 RECIPE_READER_META.public）。
+# 这些读接口**不带**管理员凭据：后厨扫码进来是白屏还是配方，全看它们。
+# 与阅读面相对的是管理面（岗位增删改、全量行、导出、历史），走 router ——
+# main.py 在注册处给 router 统一挂 verify_admin_token。
+public_router = APIRouter(prefix="/api/recipes", tags=["recipes"])
+
 CSV_IMPORT_MAX_BYTES = 2 * 1024 * 1024
 CSV_IMPORT_MAX_ROWS = 2_000
 CSV_REQUIRED_FIELDS = {"section", "recipe_name", "body_markdown", "sort_order", "is_new"}
@@ -220,18 +227,18 @@ async def preview_recipe_body(payload: RecipePreviewBody):
     }
 
 
-@router.get("/search")
+@public_router.get("/search")
 async def search_recipes(q: str = "", include_inactive: bool = False,
                          store: RecipeStore = Depends(_get_recipe_store)):
     return {"groups": await store.search_recipes(q, include_inactive=include_inactive)}
 
 
-@router.get("/stations")
+@public_router.get("/stations")
 async def list_stations(store: RecipeStore = Depends(_get_recipe_store)):
     return {"stations": await store.list_stations()}
 
 
-@router.get("/stations/{slug}")
+@public_router.get("/stations/{slug}")
 async def station_detail(slug: str, include_inactive: bool = False,
                          store: RecipeStore = Depends(_get_recipe_store)):
     station = await store.get_station(slug)

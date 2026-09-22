@@ -119,7 +119,7 @@ class AuthServiceTest(unittest.IsolatedAsyncioTestCase):
 
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 import api.auth as auth_module
@@ -411,6 +411,7 @@ def test_html_auth_preserves_query_in_next(auth_app_client):
 import api.orders as orders_module
 from datetime import datetime
 from database import CHINA_TZ
+from api.security import verify_admin_token
 
 
 @pytest.fixture
@@ -425,7 +426,11 @@ def orders_client(tmp_path):
     admin_headers = {"X-Admin-Token": plain}
 
     app = FastAPI()
-    app.include_router(orders_module.router)
+    # 按 main.py 的注册方式挂载：业务面（含读接口）在 include_router 处统一挂凭据，
+    # 见 SEC-02 / tests/test_api_read_auth.py。
+    app.include_router(
+        orders_module.router, dependencies=[Depends(verify_admin_token)]
+    )
 
     async def _get_db():
         return db
@@ -468,8 +473,22 @@ def test_complete_cooking_requires_auth(orders_client):
     assert resp.status_code == 401
 
 
-def test_orders_get_without_auth(orders_client):
+def test_orders_get_without_auth_is_rejected(orders_client):
+    """SEC-02：订单列表是业务数据，无凭据必须 401（以前这里断言的是 200）。"""
     client, db, _ = orders_client
     _seed_pending(db)
     resp = client.get("/api/orders/")
+    assert resp.status_code == 401
+    assert resp.json() == {"detail": "未授权"}
+
+
+def test_orders_get_with_token_still_works(orders_client):
+    client, db, admin_headers = orders_client
+    _seed_pending(db)
+    resp = client.get(
+        "/api/orders/",
+        params={"start_time": "2026-06-30", "end_time": "2026-06-30"},
+        headers=admin_headers,
+    )
     assert resp.status_code == 200
+    assert [row["dish_name"] for row in resp.json()["data"]] == ["虾饺"]

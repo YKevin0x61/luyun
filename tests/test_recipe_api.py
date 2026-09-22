@@ -47,6 +47,9 @@ def client():
     """TestClient + 注入 store 的 PG 连接（连接、种子、store 都建在 client 的循环里）。"""
     db = DatabaseManager()
     app = FastAPI()
+    # 阅读面（公开）与管理面（带凭据）在 main.py 里分开注册：SEC-02 之后
+    # /api/recipes 的读接口分属两个 router，这里按同样的方式拼。
+    app.include_router(recipes_module.public_router)
     app.include_router(recipes_module.router)
     with TestClient(app) as c:
         # DatabaseManager 的连接属性是 _conn（main.py 的装配同样用它），没有公开的 conn。

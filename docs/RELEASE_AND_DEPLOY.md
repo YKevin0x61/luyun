@@ -226,7 +226,7 @@ luyun-install() {
   ```bash
    sudo systemctl start luyun.service
    systemctl status luyun
-   curl -s http://127.0.0.1:8000/api/system/status
+   curl -s http://127.0.0.1:8000/api/healthz
   ```
 4. **首次初始化**：浏览器打开 `/login` 建管理员账号；`/setup` 填 POS 凭据；同一页「系统更新」可做版本检测 / 更新环境自检（公开仓无需 PAT）。
 5. **（建议）** 启用每日冷备 timer：`deploy/README.md` 备份章节。

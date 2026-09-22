@@ -117,7 +117,7 @@ curl -fsSL \
 # Bootstrap 只 enable 单元；确认 env 后由人工 start 主服务
 sudo systemctl start luyun.service
 systemctl status luyun
-curl -s http://127.0.0.1:8000/api/system/status | head
+curl -s http://127.0.0.1:8000/api/healthz | head
 ```
 
 ### 1.1 Docker / Compose（进程外壳）

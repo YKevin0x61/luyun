@@ -120,6 +120,8 @@ class TestRecipesWriteRequiresAuth(unittest.TestCase):
         _run(self.store.connect())
 
         self.app = FastAPI()
+        # 与 main.py 一致：公开阅读面走 public_router，管理面走 router（SEC-02）。
+        self.app.include_router(recipes_module.public_router)
         self.app.include_router(recipes_module.router)
         self.app.dependency_overrides[recipes_module._get_recipe_store] = lambda: self.store
 

@@ -22,6 +22,7 @@ from config import settings
 from database import DatabaseManager
 from api import orders, dishes, dish_stations, semi_rules, report_dishes, prep_plan, wecom_push
 from api.admin import router as admin_router
+from api.recipes import public_router as recipes_public_router
 from api.recipes import router as recipes_router
 from api.credentials import router as credentials_router
 from api.db_credentials import router as db_credentials_router
@@ -731,15 +732,58 @@ async def realtime_ws(websocket: WebSocket):
     except Exception:
         realtime_hub.unregister(websocket)
 
+# ==================== API 鉴权边界（SEC-02） ====================
+# 登录墙（HtmlAuthMiddleware）只拦「看起来像页面」的请求，API 请求天然绕过它。
+# 于是业务读接口以前依赖树里只有 get_db：门店局域网里任何未登录设备都能拉走
+# 订单明细、营业额、桌台占用、档口映射、备货计划与配方内容。
+#
+# 现在的规则：**业务/管理面在注册处统一挂 verify_admin_token，公开面必须登记在
+# 下面这份清单里**。清单是唯一的例外入口——要开洞先回答三个问题（谁在读、带什么
+# 凭据、漏了会怎样），再把它写进来；别在各路由文件里零散开洞，那样没人看得全。
+# tests/test_api_read_auth.py 会拿这份清单去核对真实路由表：清单外的 /api 路由
+# 必须带守卫，否则用例变红。
+PUBLIC_API_SURFACE: tuple[tuple[str, str], ...] = (
+    # 探针：Docker HEALTHCHECK / 反代 / 部署冒烟脚本，刻意免鉴权且只给聚合水位
+    ("GET", "/api/healthz"),
+    # 就绪探针：KDS 设置页「测试连接」在还没配 Token 时就要能打（换地址先探活），
+    # 更新作业与部署验收清单也 curl 它
+    ("GET", "/api/system/health"),
+    # SEC-01 的决定：只读的采集状态供运维探针，保持开放
+    ("GET", "/api/scraper/status"),
+    # 登录墙自己的入口：不开放就没人能登录 / 初始化
+    ("GET", "/api/auth/status"),
+    ("POST", "/api/auth/init"),
+    ("POST", "/api/auth/login"),
+    # 卫生员工端入口：员工手机没有管理端会话，这里靠按 IP / 手机号的登录限流兜底
+    ("POST", "/api/hygiene/staff/login"),
+    ("POST", "/api/hygiene/staff/register"),
+    # 配方阅读面：/recipe、/recipe/detail、/recipe/print、/recipe/qr 是扫码即看的
+    # 免登录页面（RECIPE_READER_META.public），这些读接口断了后厨就白屏。
+    # 同模块的管理面（岗位增删改、全量行、导出、历史）不在此列，见 api/recipes.py。
+    ("GET", "/api/recipes/search"),
+    ("GET", "/api/recipes/stations"),
+    ("GET", "/api/recipes/stations/{slug}"),
+    # API 信息页：只有版本号与 docs 链接
+    ("GET", "/api"),
+)
+
 # 注册API路由
-app.include_router(auth_router)
-app.include_router(hygiene_router)
-app.include_router(orders.router)
-app.include_router(dishes.router)
-app.include_router(dish_stations.router)
-app.include_router(semi_rules.router)
-app.include_router(report_dishes.router)
-app.include_router(prep_plan.router)
+# —— 公开面（清单见 PUBLIC_API_SURFACE）——
+app.include_router(auth_router)          # 登录 / 初始化
+app.include_router(hygiene_router)       # 员工端走 require_staff_session，管理端走 require_session
+app.include_router(recipes_public_router)  # 扫码即看的配方阅读面
+# —— 业务面：统一挂管理员凭据（会话 cookie / X-Admin-Token / Bearer）——
+app.include_router(orders.router, dependencies=[Depends(verify_admin_token)])
+app.include_router(dishes.router, dependencies=[Depends(verify_admin_token)])
+app.include_router(dish_stations.router, dependencies=[Depends(verify_admin_token)])
+app.include_router(semi_rules.router, dependencies=[Depends(verify_admin_token)])
+app.include_router(report_dishes.router, dependencies=[Depends(verify_admin_token)])
+app.include_router(prep_plan.router, dependencies=[Depends(verify_admin_token)])
+app.include_router(tables_router, dependencies=[Depends(verify_admin_token)])
+app.include_router(analytics_router, dependencies=[Depends(verify_admin_token)])
+app.include_router(export_router, dependencies=[Depends(verify_admin_token)])
+app.include_router(recipes_router, dependencies=[Depends(verify_admin_token)])
+# —— 管理面：各自在 APIRouter(dependencies=...) 里已带凭据 ——
 app.include_router(wecom_push.router)
 app.include_router(admin_router)
 app.include_router(credentials_router)
@@ -749,10 +793,6 @@ app.include_router(release_update_router)
 app.include_router(db_migrations_router)
 app.include_router(runtime_settings_router)
 app.include_router(logs_router)
-app.include_router(tables_router)
-app.include_router(analytics_router)
-app.include_router(export_router)
-app.include_router(recipes_router)
 
 # 静态文件（仪表盘 + 管理后台）
 from fastapi.staticfiles import StaticFiles
@@ -907,9 +947,9 @@ async def kds_root():
     return RedirectResponse("/kds/", status_code=307)
 
 # 系统状态API
-@app.get("/api/system/status")
+@app.get("/api/system/status", dependencies=[Depends(verify_admin_token)])
 async def get_system_status():
-    """获取系统状态"""
+    """获取系统状态（含库表行数、内存与磁盘路径，故需管理员凭据）。"""
     try:
         # 获取数据库统计
         db_stats = {}
@@ -963,6 +1003,9 @@ async def health_check():
 
     Update Job 只负责「已切换发行包并发出重启」，更新是否成功由管理后台用这里的
     结论回写。KDS 等外部客户端只依赖 200 状态码，因此未就绪时仍返回 200。
+
+    免鉴权（见 PUBLIC_API_SURFACE）：KDS 设置页的「测试连接」要在**还没配 Token**
+    时探活，更新作业与部署验收清单也要 curl 它；这里只回就绪口径，不含业务数据。
     """
     from services.release_update.readiness import AppReadinessAdapter
 
@@ -976,9 +1019,9 @@ async def health_check():
     }
 
 
-@app.get("/api/system/scraper-health")
-async def get_public_scraper_health():
-    """采集与对账健康（只读，供监控大屏）。"""
+@app.get("/api/system/scraper-health", dependencies=[Depends(verify_admin_token)])
+async def get_scraper_health():
+    """采集与对账健康（只读，供后台健康页 / 监控大屏）。"""
     from services.scraper_health import read_health, current_biz_date_str
     from services.reconcile_job import is_reconcile_running
 
@@ -999,9 +1042,9 @@ async def get_public_scraper_health():
     }
 
 
-@app.get("/api/dashboard/summary")
+@app.get("/api/dashboard/summary", dependencies=[Depends(verify_admin_token)])
 async def get_dashboard_summary():
-    """首页仪表盘聚合接口，减少前端轮询请求数量。"""
+    """首页仪表盘聚合接口，减少前端轮询请求数量（含营业额与近期订单）。"""
     try:
         if db_manager is None:
             raise HTTPException(status_code=500, detail="数据库未初始化")
@@ -1067,13 +1110,13 @@ async def get_dashboard_summary():
         raise HTTPException(status_code=500, detail="获取仪表盘聚合数据失败")
 
 # 档口配置API
-@app.get("/api/stations")
+@app.get("/api/stations", dependencies=[Depends(verify_admin_token)])
 async def get_stations():
-    """获取档口配置"""
+    """获取档口配置（admin-web 走会话 cookie，KDS 走 X-Admin-Token）"""
     from config import KITCHEN_STATIONS
     return list(KITCHEN_STATIONS.values())
 
-@app.get("/api/stations/{station_id}")
+@app.get("/api/stations/{station_id}", dependencies=[Depends(verify_admin_token)])
 async def get_station_info(station_id: str):
     """获取档口信息"""
     from config import KITCHEN_STATIONS
@@ -1123,7 +1166,7 @@ async def stop_scraper():
 
 @app.get("/api/scraper/status")
 async def get_scraper_status():
-    """获取爬虫状态"""
+    """获取爬虫状态（免鉴权，见 PUBLIC_API_SURFACE：SEC-01 保留的运维探针）"""
     global scraper_task, restaurant_scraper
     
     try:
