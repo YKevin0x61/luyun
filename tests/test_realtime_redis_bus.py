@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`services.realtime.redis_bus` 单测——**不依赖真实 Redis**。
+"""`services.realtime.redis_bus` 单测——绝大多数用进程内假 Redis，另有一条真 Redis 集成用例。
 
 覆盖四件事：
 
@@ -15,17 +15,31 @@
 假 Redis 只实现总线用到的那一小撮命令（`ping` / `pubsub` / `publish` / `close`），
 通过 `RedisBus(client_factory=...)` 注入，所以被测的仍是真实的 `RedisBus` 代码
 路径（订阅循环、退避、自过滤都在里面），而不是一个仿造的 bus。
+
+假替身覆盖不到的一样东西是**真 redis-py 的行为**：`RedisTimeoutContractTest` 里
+"安静频道不会被判超时"这条现场教训，原本只有一条结构断言（kwargs 里不许有
+`socket_timeout`）保着。所以这里补了 `RedisRealServerQuietChannelTest`——真连
+`localhost:6379`（db 15 + 随机频道名），静默等 `op_timeout * 4` 秒，盯**后果**：
+订阅在安静期间没有被重建。真 Redis 不可达时该用例 skip，其余用例不受影响。
 """
 
 import asyncio
 import json
+import logging
 import os
 import unittest
+import uuid
+
+try:  # redis 是运行期依赖（requirements.txt 的 redis>=5,<9）；缺失时真 Redis 用例跳过
+    from redis import asyncio as redis_asyncio
+except ImportError:  # pragma: no cover
+    redis_asyncio = None  # type: ignore[assignment]
 
 from config import settings
 from services.realtime.hub import RealtimeHub
 from services.realtime.redis_bus import (
     NUDGE_CHANNEL,
+    OP_TIMEOUT_SECONDS,
     RECONNECT_BACKOFF_INITIAL_SECONDS,
     REDIS_REQUIRED_HINT,
     RedisBus,
@@ -550,10 +564,6 @@ class RedisTimeoutContractTest(unittest.IsolatedAsyncioTestCase):
     def test_client_is_created_without_socket_timeout(self):
         from unittest import mock
 
-        from redis import asyncio as redis_asyncio
-
-        from services.realtime.redis_bus import OP_TIMEOUT_SECONDS
-
         bus = RedisBus(url="redis://127.0.0.1:6379/0")
         with mock.patch.object(
             redis_asyncio, "from_url", return_value=object()
@@ -564,6 +574,14 @@ class RedisTimeoutContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("socket_timeout", kwargs)
         self.assertEqual(kwargs["socket_connect_timeout"], OP_TIMEOUT_SECONDS)
         self.assertTrue(kwargs["decode_responses"])
+        # 黑名单只挡住 `socket_timeout` 这一个**名字**；同类根因还能换个写法回来
+        # （读侧超时、`health_check_interval` 之类），所以再钉一条白名单：允许的
+        # kwargs 就这三个，多一个都得在这里显式确认"它不会作用到订阅的空闲读上"。
+        self.assertEqual(
+            set(kwargs),
+            {"decode_responses", "socket_connect_timeout"},
+            "新建的 client 多了 kwargs：先确认它不会把超时加到 pubsub 的空闲读上",
+        )
 
     async def test_publish_timeout_does_not_hang_the_request(self):
         server = _FakeRedisServer()
@@ -609,6 +627,144 @@ class RedisTimeoutContractTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await bus.stop()
         self.assertFalse(bus.connected)
+
+
+# ── 真 Redis 集成 ──────────────────────────────────────────────────────
+# 上面的用例全部注入进程内假替身，测不到"真 redis-py + 真服务端"下的订阅行为。
+# 这里按 `test_pg_backend.py::pg_available` 的同款做法探活，连不上就跳过。
+#
+# 隔离：本机 `.env` 的 REDIS_URL 指的是 **db 0**（用户的实例在用），所以这里固定
+# 走 **db 15**；频道名再带随机后缀，避免与并行会话串台。用例只 SUBSCRIBE，不 PUBLISH，
+# 也不写任何键，结束后 `stop()`。
+REDIS_TEST_URL = "redis://localhost:6379/15"
+_REDIS_PROBE_TIMEOUT_SECONDS = 1.0
+
+
+def redis_available() -> bool:
+    """真 Redis 探活：连不上（或没装 redis 包）就跳过真 Redis 集成用例。"""
+    if redis_asyncio is None:
+        return False
+
+    async def probe() -> bool:
+        client = redis_asyncio.from_url(
+            REDIS_TEST_URL,
+            decode_responses=True,
+            socket_connect_timeout=_REDIS_PROBE_TIMEOUT_SECONDS,
+        )
+        try:
+            await client.ping()
+        except Exception:
+            return False
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+        return True
+
+    try:
+        return asyncio.run(probe())
+    except Exception:
+        return False
+
+
+class _WarningCollector(logging.Handler):
+    """收集 `redis_bus` 自己打的 WARNING（重连与发送失败都走 `logger.warning`）。"""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@unittest.skipUnless(
+    redis_available(),
+    f"本机没有可连的 Redis（{REDIS_TEST_URL}），跳过真 Redis 集成用例",
+)
+class RedisRealServerQuietChannelTest(unittest.IsolatedAsyncioTestCase):
+    """真 Redis（不是进程内替身）：安静的频道**不**是故障。
+
+    2026-09 现场：redis-py 5.0.x 把客户端的 `socket_timeout` 作用到 pubsub 的空闲
+    读上，频道安静超过 N 秒就抛 `TimeoutError: Timeout reading from ...`，订阅循环
+    跟着重连——日志刷屏，而且重连窗口内的 nudge 直接丢（pub/sub 没有重放）。
+
+    `RedisTimeoutContractTest` 的 kwargs 断言只能挡住"把 `socket_timeout` 写回来"
+    这一种形态；这条用例盯的是**后果**：静默窗口里订阅必须原样活着。判据全部来自
+    连接外部看得见的东西：
+
+    - `bus.connected` 采样恒为 True——重连会先置 False 再退避（1s 起），必然被采到；
+    - 真 Redis 侧 `PUBSUB NUMSUB` 采样恒为 1——重连是 unsubscribe → subscribe，
+      订阅数会掉到 0；
+    - 总线 logger 在窗口内没有任何 WARNING——重连必打"⚠️ ... 总线不可用"。
+    """
+
+    # 静默观察窗口：`op_timeout * 4`（默认 2.0s → 8s）。任何"把空闲读判成超时"的
+    # 写法都会在这个窗口里重连至少一次，而重连还自带 1s 起的退避。
+    QUIET_SECONDS = OP_TIMEOUT_SECONDS * 4
+
+    async def asyncSetUp(self):
+        from unittest import mock
+
+        from services.realtime import redis_bus
+
+        self.channel = f"{redis_bus.NUDGE_CHANNEL}:test-{uuid.uuid4().hex}"
+        patcher = mock.patch.object(redis_bus, "NUDGE_CHANNEL", self.channel)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.bus = RedisBus(url=REDIS_TEST_URL)
+        # 外部观察点：直接问真 Redis「这个频道现在有几个订阅者」。
+        self.probe = redis_asyncio.from_url(
+            REDIS_TEST_URL,
+            decode_responses=True,
+            socket_connect_timeout=_REDIS_PROBE_TIMEOUT_SECONDS,
+        )
+        self.collector = _WarningCollector()
+        self.bus_logger = logging.getLogger("services.realtime.redis_bus")
+        self.bus_logger.addHandler(self.collector)
+        self.addCleanup(self.bus_logger.removeHandler, self.collector)
+
+    async def asyncTearDown(self):
+        await self.bus.stop()
+        await self.probe.aclose()
+
+    async def _subscriber_count(self) -> int:
+        counts = await self.probe.pubsub_numsub(self.channel)
+        return counts[0][1] if counts else 0
+
+    async def test_idle_channel_does_not_trigger_a_reconnect(self):
+        await self.bus.start()
+        self.assertTrue(
+            await _wait_for(lambda: self.bus.connected),
+            f"连不上 {REDIS_TEST_URL}：确认 redis-server 在 localhost:6379 上跑着",
+        )
+        self.assertEqual(await self._subscriber_count(), 1)  # 订阅确实生效了
+
+        loop = asyncio.get_running_loop()
+        connected_samples = []
+        subscriber_samples = []
+        deadline = loop.time() + self.QUIET_SECONDS
+        while loop.time() < deadline:
+            connected_samples.append(self.bus.connected)
+            subscriber_samples.append(await self._subscriber_count())
+            if not self.bus.connected or subscriber_samples[-1] != 1:
+                break  # 已经能判失败，不必等满窗口
+            await asyncio.sleep(0.1)
+
+        self.assertEqual(
+            self.collector.messages, [], "安静期间总线打了 WARNING：多半是被判超时重连"
+        )
+        self.assertTrue(
+            all(connected_samples), "bus.connected 掉过：安静频道被判成故障重连了"
+        )
+        self.assertEqual(
+            set(subscriber_samples),
+            {1},
+            f"真 Redis 侧的订阅数不是恒为 1（采样 {len(subscriber_samples)} 次）："
+            "订阅被重建过，重建窗口里的 nudge 会丢",
+        )
 
 
 if __name__ == "__main__":
