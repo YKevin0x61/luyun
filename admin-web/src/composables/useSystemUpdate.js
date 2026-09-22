@@ -47,6 +47,24 @@ const IN_PROGRESS = new Set([
  */
 const HEALTH_PENDING = new Set(['restarting'])
 
+/**
+ * 未健康（`succeeded_but_unhealthy`）时给操作者的「下一步」清单。
+ *
+ * 这个面板只在主服务活着时打得开，而最典型的病根恰恰是**主服务起不来**
+ * （没配 `REDIS_URL` → lifespan 直接抛错，`StartLimitBurst=5` 用尽后 unit 进
+ * failed，此后 `systemctl start` / `restart` 都会被拒绝）。操作者那时看不到本页，
+ * 所以宿主机路径必须写进清单：先 `reset-failed`，再判「改环境」还是「回退版本」。
+ */
+export const UNHEALTHY_NEXT_STEPS = [
+  '本页打不开、或 systemctl status luyun 显示 failed：先在宿主机执行 '
+    + 'sudo systemctl reset-failed luyun.service，再 sudo systemctl start luyun.service'
+    + '（失败计数用尽后 start / restart 都会被拒绝）。',
+  '看原因：journalctl -u luyun -n 100 --no-pager 与本页日志；缺 REDIS_URL、'
+    + 'POSTGRES_DSN 写错这类环境问题，改好 deploy/env.production 重启即可，不必回退版本。',
+  '新版本自身起不来才回退：点上面的「回到上一版本」重装旧发行包；页面打不开时按 '
+    + 'deploy/README.md 的「更新后起不来」在 SSH 上换回保留的上一版应用树。',
+]
+
 const DEFAULT_POLL_INTERVAL_MS = 2000
 const DEFAULT_RECHECK_INTERVAL_MS = 10_000
 const RECHECK_TICK_MS = 1000
@@ -599,6 +617,7 @@ export function useSystemUpdate({
     // 健康确认（succeeded_but_unhealthy）
     unhealthy,
     healthPending,
+    unhealthyNextSteps: UNHEALTHY_NEXT_STEPS,
     healthDetailView,
     healthChecking,
     healthCheckError,

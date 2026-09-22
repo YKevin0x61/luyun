@@ -173,8 +173,10 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 | `fetching_bundle` | 下载发行包 + `SHA256SUMS` 并硬校验 |
 | `installing` | 旁路解压后原子切换（保留上一版目录；不覆盖 `data/` / 凭据） |
 | `syncing_deps` | 仅当 `requirements_fingerprint` 变化时 pip；随后幂等同步 Playwright 浏览器（失败只告警，不阻断更新） |
-| `restarting` | 重启主服务（systemd 或 Docker socket） |
-| `succeeded` / `failed` | 终态；失败且已离开旧树时切回上一版并尽量拉起主服务 |
+| `restarting` | 重启主服务（systemd 或 Docker socket）；重启后由管理后台轮询完成**健康确认**，不直接算成功 |
+| `succeeded` | 终态之一：已切换 + 重启后健康确认通过 |
+| `succeeded_but_unhealthy` | 终态之一：已切换但服务未恢复健康（保留回退点与日志；**不自动重试、不自动回滚**，处置见下方「更新后起不来」） |
+| `failed` | 终态之一；失败且已离开旧树时切回上一版并尽量拉起主服务 |
 
 并发：已有进行中的 Update Job 时，新的 Apply Update 会被拒绝。
 `data/` 业务库与凭据在代码更新过程中保留；备份另见第 4 节。
@@ -242,16 +244,46 @@ POSTGRES_DSN=postgresql://localhost:5432/luyun_test .venv/bin/python -c "..."
 ### 回滚
 
 - **软件回滚（首选）**：在「系统更新」里对**更旧的正式 Release**再执行一次
-  Apply Update（再下载该版发行包）。
+  Apply Update（再下载该版发行包）。作业未健康（`succeeded_but_unhealthy`）时
+  页面上有现成的「回到上一版本」入口，走的是同一套预检 + Apply 流程。
 - **数据回滚**：库数据用备份里的整库快照（`app.pgdump`）走 `pg_restore` 覆盖回
   PostgreSQL（见 §10.4；没有可覆盖回 `data/` 的 `.db` 文件了）；凭据文件
   `credentials.enc` / `.cred_key` 仍是从归档覆盖回 `data/`——先
   `sudo systemctl stop luyun`，再覆盖，避免与运行中进程写冲突。
 
+### 更新后起不来（服务打不开）
+
+更新之后 `/setup` 整页打不开、`curl 127.0.0.1:8000/api/healthz` 无响应、
+`systemctl status luyun` 是 `failed`：主服务没起来，页面上的「回到上一版本」也就点不到，
+只能上宿主机。`deploy/luyun.service` 的 `Restart=always` + `RestartSec=5` 会在 60 秒内
+重试 5 次（`StartLimitIntervalSec=60` / `StartLimitBurst=5`），用尽后 unit 进
+`failed`（`start-limit-hit`）——**这之后 `systemctl start` / `restart` 都会被拒绝，
+必须先清失败计数**：
+
+```bash
+sudo systemctl reset-failed luyun.service
+sudo systemctl start luyun.service      # 只有 reset-failed 之后才会被接受
+```
+
+先判因再决定要不要回退版本（顺序、判据与换树命令见
+[`docs/RELEASE_AND_DEPLOY.md` §5.7](../docs/RELEASE_AND_DEPLOY.md)）：
+
+- **环境类**（典型：没配 `REDIS_URL`，`main._require_startup_config()` 在 lifespan 直接抛错；
+  或 `POSTGRES_DSN` 写错、Redis 没起）：改好 `deploy/env.production` 再用上面两条命令起身，
+  **不要**回退版本；服务起来后回「系统更新」，健康确认会自己走完（`restarting` → `succeeded`）。
+- **新版本自身起不来**（日志是 import/依赖错误）：回退版本。此时作业状态可能停在
+  `restarting`（健康确认要靠页面轮询），上一版应用树仍在部署根目录的 `.prev` 兄弟目录
+  （如 `/opt/luyun.prev`；Docker 形态 `deploy/runtime/app.prev`）；页面起不来就在
+  SSH 上换回旧树——务必连 `data/`、`.venv`、`secrets/`、`.env`、`deploy/env.production`
+  一起搬（`.prev` 里没有它们），漏搬会丢凭据或让 unit 的 `ExecStart` 指不到解释器。
+- **Docker 形态**没有 systemd 单元，也就没有 `reset-failed`：看
+  `docker compose -f deploy/docker-compose.yml --env-file deploy/.env.docker logs -f`，
+  改好 `deploy/runtime/app/deploy/env.production` 后 `./scripts/docker_up.sh`。
+
 ### SSH 应急（非日常）
 
-仅在 Admin 不可用等应急场景下，可对照 Update Job 逻辑手动排查；**仍不要**在
-生产机跑 Admin/KDS 构建。日常升级以「系统更新」为准。
+仅在 Admin 不可用等应急场景下，可对照 Update Job 逻辑手动排查（上面「更新后起不来」是
+最常见的一种）；**仍不要**在生产机跑 Admin/KDS 构建。日常升级以「系统更新」为准。
 
 ---
 

@@ -274,6 +274,7 @@ const {
   unhealthy,
   healthPending,
   healthDetailView,
+  unhealthyNextSteps,
   healthChecking,
   healthCheckError,
   recheckHealth,
@@ -1409,6 +1410,11 @@ onMounted(() => {
               <div v-else class="hint section-lead">
                 主服务已切换、正在重启，等待健康确认（数据库已连接、迁移完成、关键表可读）。
               </div>
+              <!-- 未健康时把「下一步」写全：本页打不开（主服务没起来）是这类故障的常见形态，
+                   操作者那时看不到这个面板，所以宿主机路径必须在这里也留下。 -->
+              <ul v-if="unhealthy" class="hint unhealthy-next-steps">
+                <li v-for="step in unhealthyNextSteps" :key="step">{{ step }}</li>
+              </ul>
               <div class="meta-grid job-facts">
                 <div>
                   <span class="k">阶段</span>
@@ -1880,6 +1886,9 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 .hint.is-error { color: #fca5a5; opacity: 1; }
 /* fieldset 开头的说明段：与下方控件拉开，避免和 .hint 的 4px 顶距混在一起。 */
 .section-lead { margin: 0 0 12px; }
+/* 未健康时的「下一步」清单：列表项本身有行高，别再叠 .hint 的顶距。 */
+.unhealthy-next-steps { margin: 8px 0 0; padding-left: 18px; }
+.unhealthy-next-steps li + li { margin-top: 4px; }
 
 .upload-progress {
   display: flex; align-items: center; gap: 10px;

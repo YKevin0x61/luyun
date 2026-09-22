@@ -466,6 +466,7 @@ describe('useSystemUpdate', () => {
       unhealthy,
       healthPending,
       healthDetailView,
+      unhealthyNextSteps,
       previousRef,
       canRollbackToPrevious,
       rollbackToPrevious,
@@ -491,6 +492,8 @@ describe('useSystemUpdate', () => {
     expect(healthPending.value).toBe(false)
     expect(healthDetailView.value.healthDetail).toBe('数据库未连接')
     expect(healthDetailView.value.logPath).toBe('data/update_job.log')
+    // 「下一步」清单随未健康状态一起给到页面（模板只在 unhealthy 时渲染）。
+    expect(unhealthyNextSteps.join('')).toContain('reset-failed')
     // 未健康不弹成功提示。
     expect(showAlert).not.toHaveBeenCalledWith('success', expect.stringContaining('成功'))
 
@@ -500,6 +503,23 @@ describe('useSystemUpdate', () => {
     rollbackToPrevious()
     expect(selectedTag.value).toBe('v0.1.0')
     expect(confirmOpen.value).toBe(true)
+  })
+
+  it('未健康时给出「下一步」清单：主服务打不开的宿主机路径（reset-failed）不能缺', () => {
+    const { unhealthyNextSteps } = useSystemUpdate({
+      showAlert: vi.fn(),
+      clearAlert: vi.fn(),
+    })
+
+    expect(Array.isArray(unhealthyNextSteps)).toBe(true)
+    expect(unhealthyNextSteps.length).toBeGreaterThanOrEqual(3)
+    const copy = unhealthyNextSteps.join('\n')
+    // 票面最典型的恢复步骤：unit 进 failed 后必须先 reset-failed 才能再 start。
+    expect(copy).toContain('sudo systemctl reset-failed luyun.service')
+    expect(copy).toContain('sudo systemctl start luyun.service')
+    // 判因分流：环境问题先改 env，不急着回退版本；真回退才用上一版本。
+    expect(copy).toContain('deploy/env.production')
+    expect(copy).toContain('回到上一版本')
   })
 
   it('没有 previous_tag（本机身份只有 commit）时不给回退入口', async () => {

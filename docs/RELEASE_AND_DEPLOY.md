@@ -342,6 +342,7 @@ Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 �
 | --- | --- |
 | **版本回滚** | 「系统更新」对更旧正式 Release 再 Apply Update 一次（再装该版发行包）。作业未健康时页面直接提供「回到上一版本」入口，只是预填 `previous_ref`，仍走同一套预检与应用更新流程 |
 | **数据回滚** | 「备份中心 → 恢复」选一个本机回滚快照或导出备份（覆盖导入会先自动建一份来由「回滚前」/「覆盖导入前」的前置快照）；手工路径是把归档内的 `app.pgdump` 走 `pg_restore`、凭据文件覆盖回 `data/`（见 `deploy/backup.sh` 与 `deploy/README.md` §10.4）。没有「把后端改回 sqlite」这种回滚 |
+| **服务起不来时的回滚** | 页面打不开就没有「回到上一版本」可点：先按 §5.7 把主服务救起来（`reset-failed` + 判因），确实要退回旧版本再按 §5.7 在 SSH 上换回 `<deploy>.prev` |
 
 
 
@@ -362,6 +363,71 @@ Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 �
 - 指望以 `docker pull` 镜像作为本产品的标准升级路径  
 
 应急 SSH 仅用于 Admin 不可用时的排障；恢复后仍应回到发行包 +「系统更新」。
+
+### 5.7 更新后服务起不来（故障处理）
+
+现象：Apply Update 之后 `/setup` 整页打不开、`curl 127.0.0.1:8000/api/healthz` 无响应，
+`systemctl status luyun` 显示 `failed`。作业状态可能一直停在 `restarting`——健康确认由
+页面轮询 `/api/release-update/job` 时顺带完成，主服务没起来就没人做这一步；上一版应用树
+仍在 `<deploy>.prev`（`<deploy>` 就是部署根目录，Docker 形态是 `deploy/runtime/app`）。
+
+最典型的病根是**新版本起不来**：门店没配 `REDIS_URL` 时 `main._require_startup_config()`
+会在 lifespan 直接抛错（ADR 0090 的硬前置），`Restart=always` + `RestartSec=5` 每 5 秒重试，
+`StartLimitIntervalSec=60` + `StartLimitBurst=5` 用尽后 unit 进 `failed`（`start-limit-hit`）。
+**此后 `systemctl start` / `restart` 都会被拒绝**，必须先清掉失败计数：
+
+```bash
+sudo systemctl reset-failed luyun.service
+sudo systemctl start luyun.service      # 只有 reset-failed 之后才会被接受
+```
+
+顺序建议——先判因，再决定要不要回退版本：
+
+1. **看原因**：`journalctl -u luyun -n 100 --no-pager`；作业侧看
+   `cat <deploy>/data/update_job.json`、`journalctl -u luyun-update -n 100 --no-pager`、
+   `<deploy>/data/update_job.log`。
+2. **环境/配置类**（缺 `REDIS_URL`、`POSTGRES_DSN` 写错、Redis 没起、`deploy/env.production`
+   被改坏）：**先修配置，不要回退版本**——回退只是把同一个坑推到下一次更新。改完执行上面两条
+   命令；服务起来后回 `/setup` →「系统更新」，「更新成功」的第二半（健康确认）会自己走完，
+   状态从 `restarting` 收敛到 `succeeded`。
+3. **发行包/代码类**（日志是 import 错误、新版本自身缺依赖等）：回退版本。页面能打开就点页面上的
+   「回到上一版本」（§5.4）；页面打不开就按下面换回旧树。
+4. **换回旧树后页面会再报一次「已切换但未健康」**：健康确认比对的是本次更新的 `target_tag`
+   （在 `<deploy>/data/update_job.json` 里），而实际跑的是旧版本，属预期，不是新故障；更新历史
+   里这一条也会记为 `succeeded_but_unhealthy`。
+
+**在 SSH 上换回 `<deploy>.prev`**（仅当页面打不开、且 `<deploy>.prev` 还在时用）：
+
+```bash
+DEPLOY=/opt/luyun                  # 实际部署目录；Docker 形态是 deploy/runtime/app
+ls -d "$DEPLOY.prev"               # 不在了就只能等 Admin 起来后走「回到上一版本」
+sudo systemctl stop luyun
+sudo mv "$DEPLOY" "$DEPLOY.broken" # .broken 若已存在，先自行改名/清理
+sudo mv "$DEPLOY.prev" "$DEPLOY"
+# 店内状态与运行环境不在 .prev 里（作业激活新树时已删掉），必须从破损树搬回来：
+#   data（凭据/采集状态/作业状态）、.venv（unit 的 ExecStart 指向它）、secrets、
+#   .env、deploy/env.production
+for p in data .venv venv secrets .env deploy/env.production; do
+  [ -e "$DEPLOY.broken/$p" ] && sudo mv -T "$DEPLOY.broken/$p" "$DEPLOY/$p"
+done
+sudo systemctl reset-failed luyun.service
+sudo systemctl start luyun.service
+```
+
+这套顺序与作业自身的回滚一致（`ReleaseBundleInstallAdapter.restore_previous_tree()`：
+先 `_carry_preserved` 搬上面那几项、再两次 `rename`）。**漏搬 `data/` 会丢凭据与采集状态，
+漏搬 `.venv` 则 unit 的 `ExecStart` 指不到解释器。** 破损树留在 `<deploy>.broken` 里供事后取证，
+确认无碍后自行删除；下一次 Apply Update 会重新产生 `<deploy>.prev`。
+
+**Docker 形态没有 systemd 单元**（也就没有 `reset-failed` 这一步）：失败重启由 Docker
+restart policy 决定，排查用
+`docker compose -f deploy/docker-compose.yml --env-file deploy/.env.docker logs -f`，
+改好 `deploy/runtime/app/deploy/env.production` 后 `./scripts/docker_up.sh`。要换树，
+上面的搬移命令同样适用（把 `$DEPLOY` 换成 `deploy/runtime/app`），只是先 `docker compose … stop`
+停容器、再动树，且整段没有 `systemctl` 步骤。
+
+> 「更新后起不来」不会自动回滚（ADR 0082 的双事实口径）：作业只切发行包并请求重启，
+> 健康确认与回退都由人决定。带时限的自动回滚是未采纳的后续选项，别指望它。
 
 ---
 
@@ -435,6 +501,9 @@ cp deploy/.env.docker.example deploy/.env.docker
 journalctl -u luyun -n 100 --no-pager
 journalctl -u luyun-update -n 100 --no-pager
 cat /opt/luyun/data/update_job.json
+# 更新后起不来：重置失败计数是 start/restart 生效的前提（见 §5.7）
+sudo systemctl reset-failed luyun.service
+sudo systemctl start luyun.service
 # Docker:
 # docker compose -f deploy/docker-compose.yml --env-file deploy/.env.docker logs -f
 ```
