@@ -18,6 +18,7 @@ import glob
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -150,6 +151,32 @@ def _kill_stuck_backends() -> None:
     )
 
 
+def _drop_dead_loop_connections() -> None:
+    """把绑在已关闭事件循环上的全局连接丢掉。
+
+    asyncpg 连接不能跨事件循环：用例里 ``asyncio.run(db.connect())`` 建好连接后，
+    它会留在 ``services.app_runtime`` / ``main.db_manager`` 这两个进程级单例上；下一个
+    用例换了新 loop，一碰就是「got Future attached to a different loop」。SQLite 时代
+    每个用例一个临时库文件，天然没这个问题。
+
+    这里只丢弃**绑在已关闭 loop 上**的连接，所以类级 TestClient（其 portal 线程里跑着
+    活着的 loop）不受影响——早先「无条件重置单例」的做法正是因此把连接搞挂的。
+    """
+    from services.app_runtime import get_runtime, set_runtime
+
+    runtime = get_runtime()
+    db = getattr(runtime, "db", None) if runtime is not None else None
+    if db is None:
+        return
+    raw = getattr(getattr(db, "_conn", None), "_raw", None)
+    loop = getattr(raw, "_loop", None)
+    if loop is None or loop.is_closed():
+        set_runtime(None)
+        module = sys.modules.get("main")
+        if module is not None:
+            module.db_manager = None
+
+
 def _truncate_all() -> None:
     global _TRUNCATE_SQL
     if _TRUNCATE_SQL is None:
@@ -242,7 +269,15 @@ def _disarm_case_timeout() -> None:
 
 
 def pytest_runtest_setup(item):
-    """每个用例从干净库开始：只清数据，不动测试进程自己的连接。"""
+    """每个用例从干净库开始：先丢掉绑在已关闭 loop 上的连接，再清数据。"""
+    _drop_dead_loop_connections()
+    # 单点防线：任何用例把后端改回 sqlite 又没恢复（setUp 抛错时 tearDown 不会执行，
+    # 现场 `test_release_update_readiness.py` 就是这么把后面所有文件带崩的），
+    # 会让后续每个 connect() 都抛「SQLite 后端已移除」。
+    from config import settings as _settings
+
+    if _settings.DATABASE_BACKEND != "postgres":
+        _settings.DATABASE_BACKEND = "postgres"
     _truncate_all()
     _arm_case_timeout()
 

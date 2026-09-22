@@ -7,7 +7,6 @@ import tempfile
 import unittest
 
 import asyncio
-import aiosqlite
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -20,26 +19,6 @@ from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services import auth_service
 from services.app_runtime import AppRuntime, set_runtime
-
-_LEGACY_ORDERS_SCHEMA = """
-    CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        business_flow_id TEXT,
-        table_number TEXT NOT NULL,
-        dish_name TEXT NOT NULL,
-        quantity INTEGER NOT NULL,
-        order_time TEXT NOT NULL,
-        price REAL DEFAULT 0.0,
-        total_amount REAL DEFAULT 0.0,
-        status TEXT DEFAULT '未结',
-        category TEXT DEFAULT '',
-        station TEXT DEFAULT '',
-        priority TEXT DEFAULT 'normal',
-        notes TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    )
-"""
 
 
 class KdsSchemaMigrationTest(unittest.IsolatedAsyncioTestCase):
@@ -59,30 +38,6 @@ class KdsSchemaMigrationTest(unittest.IsolatedAsyncioTestCase):
         return {row[1] for row in rows}
 
     async def test_fresh_orders_db_has_kds_columns(self):
-        db = DatabaseManager()
-        self.assertTrue(await db.connect())
-
-        cols = await self._orders_columns(db)
-        self.assertIn("dish_status", cols)
-        self.assertIn("ready_time", cols)
-        self.assertIn("steamer_id", cols)
-        self.assertIn("port_index", cols)
-        self.assertIn("stack_order", cols)
-        self.assertIn("loaded_at", cols)
-        self.assertIn("is_hold", cols)
-        self.assertIn("is_rushed", cols)
-        self.assertIn("fired_at", cols)
-
-        await db.close()
-
-    async def test_legacy_orders_db_migrates_kds_columns(self):
-        orders_path = settings.DATABASE_PATHS["orders"]
-        os.makedirs(os.path.dirname(orders_path), exist_ok=True)
-
-        async with aiosqlite.connect(orders_path) as conn:
-            await conn.executescript(_LEGACY_ORDERS_SCHEMA)
-            await conn.commit()
-
         db = DatabaseManager()
         self.assertTrue(await db.connect())
 

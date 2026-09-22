@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
-import aiosqlite
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager

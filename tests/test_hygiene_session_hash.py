@@ -10,7 +10,6 @@ cookie 不变，校验时哈希后照样匹配，不需要重新登录。这条�
 """
 
 import asyncio
-import sqlite3
 from datetime import datetime, timedelta
 
 import pytest
@@ -211,11 +210,10 @@ def test_no_plaintext_survives_a_reconnect(tmp_path):
         cookie = _run(accounts.login(PHONE, PASSWORD))["session_id"]
         _run(db.close())
 
-        raw = sqlite3.connect(str(tmp_path) + "/app.db")
-        try:
-            rows = raw.execute("SELECT session_id FROM hygiene_staff_sessions").fetchall()
-        finally:
-            raw.close()
+        # PG 唯一后端：不再有 data/app.db，直接查同一个业务库（同步探针内部自建连接）。
+        import pg_probe
+
+        rows = pg_probe.fetch_all("SELECT session_id FROM hygiene_staff_sessions")
         assert [row[0] for row in rows] == [hash_session_id(cookie)]
     finally:
         settings.DATABASE_DIR = old_dir

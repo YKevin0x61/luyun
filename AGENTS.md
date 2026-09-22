@@ -63,16 +63,16 @@ async def get_rows(table_name: str, db): ...
 
 - `database.py` is now a thin (~130-line) facade: `DatabaseManager` is composed from mixins in `db_core/`, re-exporting the same public names (`DatabaseManager`, `get_db`, `CHINA_TZ`, `ALL_TABLES`, `ensure_beijing_datetime`) so callers are unaffected.
 - `db_core/` module layout:
-  - `connection.py` — `_ConnectionMixin`: PostgreSQL connection lifecycle (connect/close). `connect()` rejects any backend other than `postgres`; no DDL runs at startup. `export_merged_sqlite_file()` survives only for the legacy `.db` export/import paths in `api/admin.py` / `api/backup.py`.
+  - `connection.py` — `_ConnectionMixin`: PostgreSQL connection lifecycle (connect/close). `connect()` rejects any backend other than `postgres`; no DDL runs at startup.
   - `table_db.py` — `TableView`: per-table view sharing the one `PgConnection`; no startup column migrations (`migrate_orders_kds_columns` retired with SQLite).
   - `ports.py` — `OrdersPort` / `DishStationsPort` / `ReportsPort`; access via `db.orders` / `db.dish_stations` / `db.reports`.
   - `adapters/` — `orders.py` / `dish_stations.py` / `reports.py`: the port adapters exposed by `DatabaseManager`.
   - `schema.py` — table-name lists only (`ALL_TABLES`, `RECIPE_TABLES`, `HYGIENE_TABLES`, `ADMIN_READ_ONLY_TABLES`). The SQLite DDL, `apply_recipe_schema()`, `apply_hygiene_schema()` and the `migrate_*_columns()` helpers are gone: schema lives in `migrations/pg/*.sql`.
   - `orders_repo.py`, `tables_repo.py`, `dish_stations_repo.py`, `semi_rules_repo.py`, `report_dishes_repo.py`, `wecom_repo.py`, `settings_repo.py` — per-domain repo mixins (`app_settings` lives in `settings_repo.py`).
   - `aggregation.py`, `reports.py`, `stats.py` — cross-table aggregation, sales-report/business analytics, and perf/health-check mixins.
-  - `backend/` — dialect layer at the driver boundary: `dialect.py` (rowid/placeholder rewriting on the way to PostgreSQL), `pg.py` (PostgreSQL connection, `PgConnection`, `pg_dump`), `sqlite_export.py` (SQLite export helpers — residual, still used by the `.db` export/import paths in `api/admin.py` / `services/backup_service.py`).
+  - `backend/` — dialect layer at the driver boundary: `dialect.py` (rowid/placeholder rewriting on the way to PostgreSQL), `pg.py` (PostgreSQL connection, `PgConnection`, `pg_dump`).
   - `utils.py` — `CHINA_TZ`, `ensure_beijing_datetime`, `to_sql_datetime`, `row_to_dict`. `errors.py` holds the shared error mapping — integrity conflicts go through `is_integrity_violation()`, which recognises both the asyncpg and the legacy `sqlite3` exception families. `order_notes.py` holds order-note parsing.
-- Runs on `asyncpg` through `db_core/backend/pg.py` (it mimics the old aiosqlite surface so existing mixins keep working); all DB operations go through `DatabaseManager`, never a raw driver call in routes. `aiosqlite` is still in `requirements.txt` as a SQLite-era leftover — the remaining real uses are the legacy `.db` export/import paths and `scripts/migrate_recipes_structured.py`, both pending cleanup.
+- Runs on `asyncpg` through `db_core/backend/pg.py` (it mimics the old aiosqlite surface so existing mixins keep working); all DB operations go through `DatabaseManager`, never a raw driver call in routes. `aiosqlite` is no longer a dependency: ADR 0089 removed the last legacy `.db` export/import paths, and the one-off `scripts/migrate_recipes_structured.py` was retired.
 - `dish_stations` table: `dish_name TEXT UNIQUE` (not MongoDB ObjectId).
 - Orders use `id INTEGER PRIMARY KEY` — editing goes through `rowid`. **When querying for display/editing, always use `SELECT rowid, * FROM orders`**; the dialect layer rewrites it to `SELECT id AS rowid, *` for PostgreSQL, keeping the alias that admin row-edit depends on.
 - `CHINA_TZ = timezone(timedelta(hours=8))` is the standard timezone constant used everywhere.

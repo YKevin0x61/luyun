@@ -7,7 +7,6 @@ import tempfile
 import unittest
 from datetime import datetime
 
-import aiosqlite
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
@@ -54,10 +53,10 @@ class DeliveryRepoTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_source_column_persisted(self):
         await self.db.save_orders([_delivery_order("YY001301-260720-0064", "香煎腊味萝卜糕")])
-        async with self.db._conn.execute(
+        cur = await self.db._conn.execute(
             "SELECT source FROM orders WHERE business_flow_id LIKE 'YY001301-260720-0064_%'"
-        ) as cur:
-            row = await cur.fetchone()
+        )
+        row = await cur.fetchone()
         self.assertEqual(row["source"], "delivery")
 
     async def test_mark_cancelled_zeroes_and_soft_deletes(self):
@@ -74,12 +73,12 @@ class DeliveryRepoTest(unittest.IsolatedAsyncioTestCase):
         affected = await self.db.mark_delivery_cancelled(bs)
         self.assertEqual(affected, 2)
 
-        async with self.db._conn.execute(
+        cur = await self.db._conn.execute(
             "SELECT quantity, total_amount, status, dish_status FROM orders "
             "WHERE source='delivery' AND business_flow_id LIKE ?",
             (f"{bs}_%",),
-        ) as cur:
-            rows = await cur.fetchall()
+        )
+        rows = await cur.fetchall()
         for row in rows:
             self.assertEqual(row["quantity"], 0)
             self.assertEqual(row["total_amount"], 0)
@@ -87,10 +86,10 @@ class DeliveryRepoTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row["dish_status"], "已取消")
 
         # 堂食行不受影响
-        async with self.db._conn.execute(
+        cur = await self.db._conn.execute(
             "SELECT quantity, status FROM orders WHERE source='' AND dish_name='堂食菜'"
-        ) as cur:
-            dine = await cur.fetchone()
+        )
+        dine = await cur.fetchone()
         self.assertEqual(dine["quantity"], 1)
         self.assertEqual(dine["status"], "已结")
 
@@ -126,12 +125,12 @@ class DeliveryRepoTest(unittest.IsolatedAsyncioTestCase):
 
         restored = await self.db.revert_delivery_cancelled([order])
         self.assertEqual(restored, 1)
-        async with self.db._conn.execute(
+        cur = await self.db._conn.execute(
             "SELECT quantity, total_amount, price, order_time, status, dish_status FROM orders "
             "WHERE business_flow_id = ?",
             (f"{bs}_肠粉_001",),
-        ) as cur:
-            row = await cur.fetchone()
+        )
+        row = await cur.fetchone()
         self.assertEqual(row["quantity"], 1)
         self.assertEqual(row["total_amount"], 15.0)
         self.assertEqual(row["price"], 15.0)
@@ -153,11 +152,11 @@ class DeliveryRepoTest(unittest.IsolatedAsyncioTestCase):
 
         restored = await self.db.revert_delivery_cancelled([fresh])
         self.assertEqual(restored, 1)
-        async with self.db._conn.execute(
+        cur = await self.db._conn.execute(
             "SELECT price, total_amount, order_time FROM orders WHERE business_flow_id = ?",
             (f"{bs}_凤爪_001",),
-        ) as cur:
-            row = await cur.fetchone()
+        )
+        row = await cur.fetchone()
         self.assertEqual(row["price"], 9.5)
         self.assertEqual(row["total_amount"], 9.5)
         self.assertEqual(row["order_time"], fresh["order_time"].isoformat())

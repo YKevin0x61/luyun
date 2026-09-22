@@ -18,12 +18,10 @@ from services.release_update.readiness import (
 class ReadinessTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._old_database_dir = settings.DATABASE_DIR
-        self._old_backend = settings.DATABASE_BACKEND
-        # DATABASE_DIR 的临时目录隔离**只对 SQLite 有效**：PG 后端连的是
-        # POSTGRES_DSN 指向的真实库，测试会直接改到开发/生产数据。这个用例只考就绪
-        # 口径，与后端无关，所以显式钉死 SQLite（曾经因为没钉，DROP TABLE 删掉了真实
-        # 库里的 dish_stations）。
-        settings.DATABASE_BACKEND = "sqlite"
+        # 后端由 conftest 统一钉在 PostgreSQL 测试库（luyun_test）上：这里只考就绪
+        # 口径，不再像 SQLite 时代那样为了隔离临时目录而把后端改回 sqlite
+        # （ADR 0089 后那样写会让 setUp 直接失败，而 setUp 失败不会走 tearDown，
+        # 于是 DATABASE_BACKEND 被永久留在 sqlite 上，把后面所有文件带崩）。
         self._tmpdir = tempfile.TemporaryDirectory()
         settings.DATABASE_DIR = self._tmpdir.name
         self.db = DatabaseManager()
@@ -33,7 +31,6 @@ class ReadinessTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.db.close()
         settings.DATABASE_DIR = self._old_database_dir
-        settings.DATABASE_BACKEND = self._old_backend
         self._tmpdir.cleanup()
 
     async def test_not_ready_when_db_missing(self):

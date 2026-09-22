@@ -4,7 +4,6 @@ import os
 import tempfile
 import unittest
 
-import aiosqlite
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 
@@ -19,20 +18,22 @@ class AuthSchemaTest(unittest.IsolatedAsyncioTestCase):
         settings.DATABASE_DIR = self._old_database_dir
         self._tmpdir.cleanup()
 
-    async def test_auth_db_has_required_tables(self):
+    async def test_auth_tables_live_in_the_business_database(self):
+        """auth 三张表与业务表同库（PG 唯一后端，ADR 0089 起没有独立的 auth .db）。"""
+        import pg_probe
+
         db = DatabaseManager()
         self.assertTrue(await db.connect())
-        auth_path = settings.DATABASE_PATHS["auth"]
-        self.assertTrue(os.path.isfile(auth_path))
-        async with aiosqlite.connect(auth_path) as conn:
-            cursor = await conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
+        try:
+            rows = await pg_probe.fetch_all_async(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
             )
-            tables = {row[0] for row in await cursor.fetchall()}
+            tables = {row[0] for row in rows}
+        finally:
+            await db.close()
         self.assertIn("admin_user", tables)
         self.assertIn("sessions", tables)
         self.assertIn("api_tokens", tables)
-        await db.close()
 
 
 import asyncio

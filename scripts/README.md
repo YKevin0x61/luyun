@@ -17,7 +17,6 @@ Day-to-day entry scripts live here. One-off migration, debug, and smoke utilitie
 | `run_update_job.py` | Out-of-process Update Job runner |
 | `cold_backup.py` | 冷备归档入口（库快照 + 凭据 + 密钥 + 卫生照片 + 清单 + 校验和 + 状态文件）；由 `deploy/backup.sh` 调度 |
 | `reconcile_settled_bills.py` | Settled-bill reconciliation utility |
-| `migrate_recipes_structured.py` (+ `migrate_recipes_structured.rollback.md`) | One-time SOP `body_markdown` → structured JSON (dry-run first; move to `archive/` after a real-shop verify) |
 | `prototype_kds_hub_settings.sh` / `prototype_prep_revenue_nowcast/` | One-off prototypes (KDS hub settings UI; prep revenue nowcast). Artifacts live in each `out/` and never enter the Release Bundle |
 
 ## Archive (`archive/`)

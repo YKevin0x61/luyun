@@ -82,11 +82,6 @@ class ReadableTablesSqlSelectionTest(unittest.TestCase):
         self.assertTrue(result["readable"], f"表都在却判为不可读：{result}")
         self.assertEqual(result["missing"], [])
 
-    def test_sqlite_still_uses_sqlite_master(self):
-        executed, result = self._probe("sqlite")
-        self.assertIn("sqlite_master", executed[0])
-        self.assertTrue(result["readable"])
-
     def test_not_connected_reports_all_missing(self):
         db = DatabaseManager.__new__(DatabaseManager)
         db._main_conn = None

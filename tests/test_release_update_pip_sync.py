@@ -65,8 +65,16 @@ class PipDepsSyncAdapterTest(unittest.TestCase):
             cancelled = {"n": 0}
 
             def is_cancelled() -> bool:
+                # 等子进程真把那一行打出来再取消：只看调用次数的话，机器一忙
+                # 取消会抢在 fake pip 输出之前，日志里就没有 "starting slow install"
+                # 这行，断言会变成偶发假红（实测本机跑全量时踩到过）。
                 cancelled["n"] += 1
-                return cancelled["n"] >= 3
+                try:
+                    if "starting slow install" in log_path.read_text(encoding="utf-8"):
+                        return True
+                except OSError:
+                    pass
+                return cancelled["n"] >= 50  # 兜底：万一输出一直没来也别拖到超时
 
             adapter = PipDepsSyncAdapter(
                 root,

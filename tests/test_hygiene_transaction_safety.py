@@ -118,7 +118,7 @@ def test_failed_capture_leaves_no_open_transaction(runtime):
                 )
             )
 
-    assert db._conn.in_transaction is False, "异常后连接上不能挂着未提交事务"
+    assert db._conn.in_transaction() is False, "异常后连接上不能挂着未提交事务"
     assert _count(db, "SELECT COUNT(*) AS n FROM hygiene_daily_instances") == 0
     assert _count(db, "SELECT COUNT(*) AS n FROM hygiene_daily_submissions") == 0
 
@@ -195,7 +195,7 @@ def test_serialized_write_rolls_back_on_any_exception(runtime):
     with pytest.raises(OSError):
         _run(writer.half_write())
 
-    assert db._conn.in_transaction is False, "异常后连接上不能挂着未提交事务"
+    assert db._conn.in_transaction() is False, "异常后连接上不能挂着未提交事务"
     assert _count(
         db, "SELECT COUNT(*) AS n FROM hygiene_zones WHERE name = ?", ("半截区",)
     ) == 0, "半截写必须被回滚"

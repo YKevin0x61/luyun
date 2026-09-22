@@ -12,7 +12,6 @@
 """
 
 import asyncio
-import sqlite3
 import tempfile
 import unittest
 
@@ -90,22 +89,6 @@ class TestLogsReadRequiresAuth(unittest.TestCase):
         self.assertEqual(resp.status_code, 401)
 
 
-def _seed_recipe_db(path: str) -> None:
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        """
-        CREATE TABLE sop_stations (slug TEXT PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL);
-        CREATE TABLE sop_recipes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, station_slug TEXT NOT NULL, section TEXT NOT NULL,
-            recipe_name TEXT NOT NULL, body_markdown TEXT NOT NULL, sort_order INTEGER NOT NULL,
-            is_new INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
-        INSERT INTO sop_stations VALUES ('changfen','肠粉档','2026-01-01T00:00:00+00:00');
-        """
-    )
-    conn.commit()
-    conn.close()
-
-
 class TestRecipesWriteRequiresAuth(unittest.TestCase):
     """Task 1.3：/api/recipes 写操作需要鉴权，只读路由保持公开。"""
 
@@ -122,9 +105,18 @@ class TestRecipesWriteRequiresAuth(unittest.TestCase):
         import api.recipes as recipes_module
         self.recipes_module = recipes_module
 
-        self._recipe_db_path = f"{self._tmpdir.name}/recipes.db"
-        _seed_recipe_db(self._recipe_db_path)
-        self.store = RecipeStore(self._recipe_db_path)
+        # 配方表与业务表同库（PG 唯一后端，ADR 0089）：种子直接写测试库，
+        # RecipeStore 借 DatabaseManager 的连接，不再自建 SQLite 库文件。
+        async def _seed_station() -> None:
+            await self.db._conn.execute(
+                "INSERT INTO sop_stations (slug, title, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (slug) DO NOTHING",
+                ("changfen", "肠粉档", "2026-01-01T00:00:00+00:00"),
+            )
+            await self.db._conn.commit()
+
+        _run(_seed_station())
+        self.store = RecipeStore(conn=self.db._conn)
         _run(self.store.connect())
 
         self.app = FastAPI()
