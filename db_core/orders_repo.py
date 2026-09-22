@@ -114,13 +114,20 @@ class _OrdersRepoMixin:
     async def get_order_by_id(self, order_id: str, dish_name: Optional[str] = None) -> Optional[Dict]:
         try:
             tdb = self.table("orders")
-            cursor = await tdb.execute(
-                "SELECT * FROM orders WHERE id = ?", (order_id,)
-            )
-            row = await cursor.fetchone()
+            row = None
+            # 调用方可能传主键 id，也可能传 business_flow_id（见下面的回退查询）。
+            # PostgreSQL 是强类型：把 'YY01101-…_虾饺_001' 这种文本丢给 bigint 主键会直接
+            # 抛 "invalid input for query argument"，被 except 吞掉后**永远返回 None**，
+            # 回退查询根本走不到（SQLite 只是查不到，所以当年没暴露）。所以先判断是不是
+            # 纯数字，是才按主键查。
+            if str(order_id).isdigit():
+                cursor = await tdb.execute(
+                    "SELECT * FROM orders WHERE id = ?", (int(order_id),)
+                )
+                row = await cursor.fetchone()
             if not row:
                 cursor = await tdb.execute(
-                    "SELECT * FROM orders WHERE business_flow_id = ?", (order_id,)
+                    "SELECT * FROM orders WHERE business_flow_id = ?", (str(order_id),)
                 )
                 row = await cursor.fetchone()
             return _shape_order_placement(self._row_to_dict(row)) if row else None

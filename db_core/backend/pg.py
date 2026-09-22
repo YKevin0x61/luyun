@@ -234,6 +234,8 @@ class PgCursor:
         # 连查三条 COUNT），游标位置必须重置，否则第二次 fetchone() 会返回 None。
         self._index = 0
         self.lastrowid = None
+        # 连接可能绑在别的事件循环上（见 ensure_loop），先对齐再取锁。
+        await self._connection.ensure_loop()
         # 整条语句在串行锁内执行：方言解析也要读 raw（rowid → 行标识列），
         # 外层不加锁的话同一条连接仍会被并发使用。
         async with self._connection.guard():
@@ -427,8 +429,20 @@ class PgConnection:
 
     _WRITE_PREFIXES = ("INSERT", "UPDATE", "DELETE", "REPLACE")
 
-    def __init__(self, raw: asyncpg.Connection):
+    def __init__(
+        self,
+        raw: asyncpg.Connection,
+        *,
+        dsn: Optional[str] = None,
+        connect_kwargs: Optional[dict] = None,
+    ):
         self._raw = raw
+        self._dsn = dsn
+        self._connect_kwargs = dict(connect_kwargs or {})
+        try:
+            self._loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - 同步上下文里构造（测试替身）
+            self._loop = None
         self._tx = None
         # 单连接的串行锁：asyncpg 不允许一条连接并发操作，见 _TaskGuard。
         self._guard = _TaskGuard()
@@ -440,6 +454,43 @@ class PgConnection:
         # 表名 → 行标识列（rowid 的 PG 等价物）
         self._row_keys: Dict[str, str] = {}
         self.stats_queries = 0
+
+    async def ensure_loop(self) -> None:
+        """连接绑定的 event loop 变了就按原 DSN 重连。
+
+        asyncpg 连接不能跨事件循环使用。三种真实场景都会撞上：
+
+        * 测试里 ``asyncio.run(db.connect())`` 建好连接、随后交给 TestClient 的
+          portal 线程处理请求（两个循环）；
+        * uvicorn ``--reload`` 重建事件循环；
+        * 任何"连接留在进程级单例里、执行却换了循环"的写法。
+
+        不处理时的表现是 ``got Future attached to a different loop``——排查成本极高。
+        这里换循环即重连；未提交的事务随旧连接一起丢弃（跨循环本来也没有有意义的事务）。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # 没有运行中的循环，交给调用方自然报错
+            return
+        if self._loop is loop:
+            return
+        old, self._raw = self._raw, None
+        self._tx = None
+        self._tx_guard_held = False
+        self._guard.force_release()
+        if old is not None:
+            try:
+                await old.close()
+            except Exception:
+                # 旧连接绑在已关闭（或别人的）循环上，关不掉是预期内的
+                pass
+        if not self._dsn:
+            raise RuntimeError(
+                "PostgreSQL 连接被跨事件循环使用，且这条连接没有可用于重连的 DSN"
+            )
+        self._raw = await asyncpg.connect(self._dsn, **self._connect_kwargs)
+        self._loop = loop
+        logger.info("🔁 PostgreSQL 连接已按新的事件循环重建")
 
     async def row_key_column(self, table: str) -> str:
         """该表的「行标识列」——SQLite ``rowid`` 的 PG 等价物。
@@ -559,6 +610,7 @@ class PgConnection:
         return cur
 
     async def executemany(self, sql: str, seq: Iterable[Sequence[Any]]) -> None:
+        await self.ensure_loop()
         translated = translate(sql)
         async with self.guard():
             if self.is_write_sql(translated):
@@ -566,6 +618,7 @@ class PgConnection:
             await self._raw.executemany(translated, [tuple(p) for p in seq])
 
     async def commit(self) -> None:
+        await self.ensure_loop()
         if self._tx is None:
             return
         tx, self._tx = self._tx, None
@@ -575,6 +628,7 @@ class PgConnection:
             self._release_tx_guard()
 
     async def rollback(self) -> None:
+        await self.ensure_loop()
         if self._tx is None:
             return
         tx, self._tx = self._tx, None
@@ -621,4 +675,4 @@ async def connect(dsn: Optional[str] = None) -> PgConnection:
         connect_kwargs["server_settings"] = {"statement_timeout": str(int(timeout_ms))}
     raw = await asyncpg.connect(target, **connect_kwargs)
     logger.info("🐘 已连接 PostgreSQL: %s", target.rsplit("@", 1)[-1])
-    return PgConnection(raw)
+    return PgConnection(raw, dsn=target, connect_kwargs=connect_kwargs)
