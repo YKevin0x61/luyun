@@ -1,5 +1,5 @@
-# systemd 一次性任务单元：执行 deploy/backup.sh 做一次冷备（后端由
-# DATABASE_BACKEND 决定：SQLite 走官方 backup API，PostgreSQL 走 pg_dump）。
+# systemd 一次性任务单元：执行 deploy/backup.sh 做一次冷备。唯一后端是
+# PostgreSQL（ADR 0089）：库快照走整库 pg_dump，没有 SQLite 分支。
 # 本身不常驻，由 deploy/luyun-backup.timer 按日触发（Type=oneshot）。
 #
 # 安装步骤（占位路径 /opt/luyun 需替换为实际部署目录，与 deploy/luyun.service
@@ -17,9 +17,13 @@
 
 [Unit]
 Description=LuckIn 数据库定时备份（一次性任务，由 luyun-backup.timer 触发）
-# 备份依赖 data/ 下的库文件（SQLite）或 data/app.db 的存在（PG 门店的保留份数
-# 仍从该库读），是在线备份、不需要 luyun.service 停机，但仍建议放在其后，
-# 避免开机瞬间数据目录还没就绪：
+# 冷备的前置条件只有 PostgreSQL（pg_dump 能连上库）与 data/ 下的凭据
+# （credentials.enc）、密钥（.cred_key）与两类卫生照片；保留份数从 PostgreSQL 的
+# app_settings 表读取（services/backup_retention.load_from_pg_sync）。
+# data/app.db 与冷备无关：SQLite 随 ADR 0089 退役，该文件只剩老门店的迁移输入与
+# 只读回滚源。
+# 冷备是在线备份、不需要 luyun.service 停机，但仍建议放在其后，避免开机瞬间
+# 数据目录还没就绪：
 After=luyun.service
 
 [Service]
