@@ -18,7 +18,9 @@ pip install -r requirements.txt
 playwright install chromium
 
 # Start the backend (uvicorn auto-reload only when DEBUG=true)
-python3 scripts/start.py
+# 用仓库 `.venv` 的解释器：系统 `python3` 也能起（仍然支持），但三方库版本与
+# 测试/生产差一个大版本（PERF-04），`scripts/start.py` 会就此打印解释器漂移告警。
+.venv/bin/python scripts/start.py
 # or
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 

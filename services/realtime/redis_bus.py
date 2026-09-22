@@ -48,6 +48,11 @@ RECONNECT_BACKOFF_MAX_SECONDS = 30.0
 # `TimeoutError: Timeout reading from ...`，订阅循环于是每 N 秒重连一次（日志刷屏、
 # 重连窗口内的 nudge 直接丢，pub/sub 没有重放）。所以这里只在**连接期与发送**上
 # 用 `asyncio.wait_for` 兜超时，订阅的 `listen()` 必须保持"无限等"。
+#
+# 版本适用范围：以上现象与对策只在 **redis-py 5.0.x** 上实测过（2026-09 开发机
+# 系统 python3 装的是 5.0.1，测试/生产 .venv 是 8.1.0——解释器与依赖漂移见
+# PERF-04）；**8.x 未复核**。redis-py 若哪天把 `socket_timeout` 的语义改回
+# 「只管命令收发」，这条约束才可以重新评估；在那之前不要动。
 OP_TIMEOUT_SECONDS = 2.0
 
 # handler 签名：`async def handler(topic: str, scope: dict) -> None`
@@ -286,6 +291,7 @@ class RedisBus:
         # 只给**连接**设超时，不给 socket 设 `socket_timeout`：redis-py 5.0.x 会把
         # 它作用到 pubsub 的空闲读上，安静的频道会让订阅每 N 秒被判超时重连一次
         # （详见 OP_TIMEOUT_SECONDS 的注释）。连接期与发送的超时改由 wait_for 兜。
+        # 结论的适用版本：redis-py 5.0.x 实测，8.x 未复核（PERF-04）。
         return redis_asyncio.from_url(
             self._url,
             decode_responses=True,
