@@ -61,11 +61,24 @@ class ShiftPickUpsertPostgresTest(unittest.IsolatedAsyncioTestCase):
         """PG 的唯一索引带 tenant_id，冲突目标必须带上它。"""
         conn = await pg_backend.connect()
         try:
-            cur = await conn.execute("SELECT id FROM hygiene_employees ORDER BY id LIMIT 1")
-            rows = await cur.fetchall()
-            if not rows:
-                self.skipTest("hygiene_employees 为空，无法满足外键约束")
-            employee_id = int(rows[0][0])  # PG 侧有外键，必须用真实员工
+            # hygiene_shift_picks.employee_id 有外键指向 hygiene_employees，而 conftest
+            # 每例前 TRUNCATE 全部业务表（tenants 除外），hygiene_employees 恒为空——
+            # 所以这里自己插一行哨兵员工，别去等一个永远不存在的 seed 行，否则用例
+            # 在任何机器、任何 CI 上都只会跳过。
+            #
+            # 只给 NOT NULL 且无默认值的列：phone / password_hash / created_at /
+            # updated_at（tenant_id 默认 1，指向 0001 seed 的默认门店行）。手机号复用
+            # 同一个哨兵值，免得再引入一套命名；真实手机号是 1[3-9] 开头的 11 位，撞不上。
+            #
+            # 写语句会开显式事务（db_core/backend/pg.py 的 ensure_transaction），
+            # finally 里的 rollback 把它和下面的哨兵 pick 一起撤掉，不落库。
+            await conn.execute(
+                "INSERT INTO hygiene_employees "
+                "(id, phone, password_hash, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (EMP_ID, str(EMP_ID), "", BIZ_DATE, BIZ_DATE),
+            )
+            employee_id = EMP_ID
 
             for with_zone in (True, False):
                 with self.subTest(with_zone=with_zone):
