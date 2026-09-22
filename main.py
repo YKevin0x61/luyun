@@ -887,33 +887,48 @@ async def kds_manifest():
 
 # ---- admin-web SPA 页面路由（Phase 4.6：统一服务同一 SPA，登录/配置也走 SPA） ----
 # 未登录访问由 HtmlAuthMiddleware 服务端重定向到 /login（配方阅读面、KDS、/login 豁免）。
-@app.get("/")
-@app.get("/index.html")
-@app.get("/admin")
-@app.get("/admin/")
-@app.get("/login")
-@app.get("/setup")
-@app.get("/stations-speed")
-@app.get("/sales-report")
-@app.get("/prep-plan")
-@app.get("/wecom-push")
-@app.get("/recipe")
-@app.get("/recipe/detail")
-@app.get("/recipe/print")
-@app.get("/recipe/manage")
-@app.get("/recipe/qr")
-@app.get("/logs")
-@app.get("/hygiene")
-@app.get("/hygiene/login")
-@app.get("/hygiene/register")
-@app.get("/hygiene-roster")
-@app.get("/hygiene-zones")
-@app.get("/hygiene-daily")
-@app.get("/hygiene-deep-clean")
-@app.get("/hygiene-fix")
-@app.get("/hygiene-boards")
+#
+# 清单是模块级常量：注册与 tests/test_spa_page_routes.py 的前后端契约测试共用同一份，
+# 新增 vue-router 页面时必须同步补这里。main.py 没有 catch-all，反代的
+# `try_files … /index.html` 也只写在 admin|sales-report|logs|prep-plan|wecom-push|recipe
+# 六个前缀的白名单块里（deploy/nginx.conf、deploy/Caddyfile），hygiene 页面一律落到
+# 反代兜底转发 —— 漏一条就是直连/反代硬导航 404（DOC-01 的 /hygiene-data 就是这么漏的）。
+SPA_PAGE_ROUTES = (
+    "/",
+    "/index.html",
+    "/admin",
+    "/admin/",
+    "/login",
+    "/setup",
+    "/stations-speed",
+    "/sales-report",
+    "/prep-plan",
+    "/wecom-push",
+    "/recipe",
+    "/recipe/detail",
+    "/recipe/print",
+    "/recipe/manage",
+    "/recipe/qr",
+    "/logs",
+    "/hygiene",
+    "/hygiene/login",
+    "/hygiene/register",
+    "/hygiene-roster",
+    "/hygiene-zones",
+    "/hygiene-daily",
+    "/hygiene-deep-clean",
+    "/hygiene-fix",
+    "/hygiene-boards",
+    "/hygiene-data",
+)
+
+
 async def spa_page():
     return _spa_index()
+
+
+for _spa_page_path in SPA_PAGE_ROUTES:
+    app.get(_spa_page_path)(spa_page)
 
 @app.get("/README.md")
 async def readme_page():
