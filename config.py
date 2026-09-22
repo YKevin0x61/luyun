@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     # 回落：值不是 postgres 时 DatabaseManager.connect() 直接失败（见 ADR 0089）。
     DATABASE_BACKEND: str = "postgres"
     POSTGRES_DSN: str = "postgresql://localhost:5432/luyun"
+    # 连接期超时（PG 会话级 GUC，单位毫秒）：**默认值即安全默认**。全进程只有一条
+    # PgConnection、写事务全程持全局串行锁，没有超时的话一条挂起的写事务（长事务 /
+    # 被锁的 DDL / 半死连接）会把 API、/api/healthz 与全部后台循环一起排住且无法
+    # 打断，单 worker 架构下无法水平规避（PERF-01）。
+    # 环境变量 LUYUN_PG_STATEMENT_TIMEOUT_MS / LUYUN_PG_LOCK_TIMEOUT_MS 优先于这两项
+    # （写法同 POSTGRES_DSN），0 = 关闭该项、回到 PG 的无限等待。
+    # 30s 的余量依据：21 万行 orders（生产 204,297 行）上最重的合法查询实测约 0.6s
+    # （180 天区间报表，db_core/reports.py::aggregate_table_operations）。
+    PG_STATEMENT_TIMEOUT_MS: int = 30000
+    PG_LOCK_TIMEOUT_MS: int = 5000
     # 冷备输出根目录（宿主机定时任务的归档落点，仓库根下的 backups/）；
     # BACKUP_DIR 环境变量优先
     COLD_BACKUP_DIR: str = os.path.join(

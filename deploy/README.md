@@ -582,6 +582,72 @@ REDIS_URL=redis://127.0.0.1:6379/0          # 裸机 / 宿主机 Redis
 本进程的 nudge 不会丢（本地派发在 publish 之前完成且不经过总线），日志里的 URL 会
 脱敏 userinfo、密码不落盘。
 
+### 10.1.2 连接级语句 / 锁超时（`statement_timeout` / `lock_timeout`）
+
+**背景**：全进程只有一条 `PgConnection`，写事务（`ensure_transaction()`）在事务全程
+持着全局串行锁，所有 API 请求与后台循环都要先拿这把锁。连接级超时是这条链路上唯一
+能打断「挂起」的机制——等 `asyncio.Lock` 本身是等不到超时的。没有它，一条挂起的写
+事务（长事务、被锁的 DDL、半死连接）会把 API、`/api/healthz` 与全部后台循环一起排住，
+单 worker 架构下没有水平规避手段。
+
+**默认值即安全默认**（不配也生效，配了可覆盖，单位毫秒）：
+
+| env 变量 | 对应 `config.py` 字段 | 默认 | 含义 |
+|---|---|---|---|
+| `LUYUN_PG_STATEMENT_TIMEOUT_MS` | `PG_STATEMENT_TIMEOUT_MS` | `30000`（30s） | 单条语句的最长执行时间 |
+| `LUYUN_PG_LOCK_TIMEOUT_MS` | `PG_LOCK_TIMEOUT_MS` | `5000`（5s） | 单条语句等锁的最长时间 |
+
+`0` = 关闭该项、回到 PostgreSQL 的无限等待（只在这两项确实误杀合法查询时才用）。
+值必须是毫秒整数：写成 `30s` 这类会**连接失败并在启动时报错**，刻意不静默降级
+——静默关掉超时正好回到本票要消掉的那个形态。两项都是**会话级** GUC，在
+`db_core/backend/pg.py::connect()` 建连接时通过 asyncpg 的 `server_settings` 下发，
+并且会跟着重连一起带上（`ensure_loop()` 复用同一份 `connect_kwargs`，换事件循环重连
+后超时不会丢）。
+
+**30s 够不够**：够。测试库造到生产量级（21 万行 `orders`，生产 204,297 行）实测最重
+的合法查询约 **0.6s**（180 天区间报表
+`db_core/reports.py::aggregate_table_operations`，`EXPLAIN (ANALYZE, BUFFERS)`
+590ms，主要成本是一次 10MB 的外部归并排序）；同量级下 `aggregate_sales_trend` 约
+0.25s、`get_station_stats` 约 0.13s、`compute_sales_report` 约 0.07s，管理端表浏览的
+全表 `COUNT(*)` 约 20ms（应用侧计时 7ms，票面生产参考值 4.3ms）。30s 留了约 50 倍
+余量，正常的 30s 超时只会打到真正挂起的语句。
+
+**怎么配**：
+
+```bash
+# deploy/env.production（模板 deploy/env.production.example 里就是这两个默认值）
+LUYUN_PG_STATEMENT_TIMEOUT_MS=30000
+LUYUN_PG_LOCK_TIMEOUT_MS=5000
+```
+
+裸机走 `deploy/luyun.service` 的 `EnvironmentFile=`；Docker 走挂载树里
+`<LUYUN_HOST_PARENT>/app/deploy/env.production`（由 entrypoint `source` 进应用进程）。
+**注意 `deploy/.env.docker` 不参与**：那是 compose 的变量插值文件，不会被注入容器的
+应用进程。
+
+**怎么确认生效**：看启动日志
+
+```
+🐘 已连接 PostgreSQL: 127.0.0.1:5432/luyun（statement_timeout=30000, lock_timeout=5000）
+```
+
+或在应用连接上（`db_core.backend.pg.connect()` 拿到的连接）查：
+
+```sql
+SHOW statement_timeout;  -- 期望 30s
+SHOW lock_timeout;       -- 期望 5s
+```
+
+**踩到超时的表现**：语句被 PG 取消，报 `QueryCanceledError`（statement_timeout）或
+`LockNotAvailableError`（lock_timeout）。两者都会让当前事务进入 aborted 并由
+`PgCursor.execute()` 的 `asyncpg.PostgresError` 分支立刻回滚、释放串行锁——这正是把
+「全站排队」换成「一条语句失败」的地方。此时看 PG 侧：
+
+```sql
+SELECT pid, state, wait_event_type, wait_event, now() - query_start AS runtime, query
+FROM pg_stat_activity WHERE datname = current_database() ORDER BY runtime DESC;
+```
+
 ### 10.2 从遗留 SQLite 迁移（推荐）
 
 > **0.5.19 → 0.6.0 的完整升级方案**（含 Docker 形态、切 PG 前置、回滚、排查表）

@@ -124,6 +124,63 @@ def dsn_from_env() -> str:
     return getattr(settings, "POSTGRES_DSN", "") or DEFAULT_DSN
 
 
+# 连接期超时的 env 覆盖名（写法与 LUYUN_POSTGRES_DSN / LUYUN_REDIS_URL 一致）。
+PG_STATEMENT_TIMEOUT_ENV = "LUYUN_PG_STATEMENT_TIMEOUT_MS"
+PG_LOCK_TIMEOUT_ENV = "LUYUN_PG_LOCK_TIMEOUT_MS"
+
+# (PG 会话 GUC, env 覆盖名, config.Settings 字段名)
+_TIMEOUT_SETTINGS = (
+    ("statement_timeout", PG_STATEMENT_TIMEOUT_ENV, "PG_STATEMENT_TIMEOUT_MS"),
+    ("lock_timeout", PG_LOCK_TIMEOUT_ENV, "PG_LOCK_TIMEOUT_MS"),
+)
+
+
+def _timeout_ms(env_name: str, field: str) -> int:
+    """一项超时的毫秒值：env 优先于 ``settings``；0 = 关闭该项。
+
+    解析不出、或是负数都是配置错误，**直接报错、不静默降级**：静默把超时关掉正好
+    回到「生产零语句超时」那个形态，而那正是本票要消掉的东西（配置问题在这里跟
+    ``DATABASE_BACKEND`` / ``REDIS_URL`` 同款处理——不猜、不兜）。
+    """
+    raw = os.environ.get(env_name)
+    source = env_name
+    if raw is None or not str(raw).strip():
+        from config import settings
+
+        raw = getattr(settings, field, None)
+        source = field
+    if raw is None or not str(raw).strip():
+        return 0
+    try:
+        ms = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{source} 必须是毫秒整数（例如 30000），当前是 {raw!r}；"
+            "0 = 关闭该项超时"
+        ) from None
+    if ms < 0:
+        raise ValueError(f"{source} 不能是负数（0 = 关闭该项超时），当前是 {ms}")
+    return ms
+
+
+def server_timeouts_from_env() -> Dict[str, str]:
+    """连接期超时（asyncpg ``server_settings`` 形态：GUC 名 → 字符串毫秒值）。
+
+    默认值来自 ``config.Settings.PG_STATEMENT_TIMEOUT_MS``（30s）与
+    ``PG_LOCK_TIMEOUT_MS``（5s）——**默认值即安全默认**，不是"测试才有的开关"：
+    全进程只有一条连接、写事务全程持全局串行锁，没有超时的话一条挂起的写事务会把
+    API、``/api/healthz`` 与全部后台循环一起排住且无法打断（见
+    ``.scratch/project-review-2026-09-22`` 的 PERF-01）。显式设 0 = 不设该 GUC，
+    回到 PG 默认的无限等待。
+    """
+    settings_map: Dict[str, str] = {}
+    for guc, env_name, field in _TIMEOUT_SETTINGS:
+        ms = _timeout_ms(env_name, field)
+        if ms > 0:
+            settings_map[guc] = str(ms)
+    return settings_map
+
+
 def _normalize_value(value):
     """把 PG 侧类型收敛到 SQLite 等价形态。
 
@@ -664,15 +721,26 @@ class PgConnection:
 async def connect(dsn: Optional[str] = None) -> PgConnection:
     """建立一条 PG 连接并包成 aiosqlite 形态。
 
-    ``LUYUN_PG_STATEMENT_TIMEOUT_MS`` 设置时给这条连接加 statement_timeout：
-    测试用它把「等锁等成挂起」变成「超时失败」（测试库上用例之间共享连接，
-    一个没提交的事务就能让下一条语句永久等待）。
+    连接期超时**默认生效**（见 :func:`server_timeouts_from_env`）：
+    ``statement_timeout`` 默认 30s、``lock_timeout`` 默认 5s，配置项是
+    ``settings.PG_STATEMENT_TIMEOUT_MS`` / ``PG_LOCK_TIMEOUT_MS``，环境变量
+    ``LUYUN_PG_STATEMENT_TIMEOUT_MS`` / ``LUYUN_PG_LOCK_TIMEOUT_MS`` 优先（测试侧
+    ``tests/conftest.py`` 的 ``setdefault(..., "30000")`` 走的就是这条 env 通道，
+    语义不变）；显式设 0 = 关闭该项。
+
+    这两项是会话级设置，并且随 ``connect_kwargs`` 一起带到 ``ensure_loop()``
+    的重连上——否则换事件循环重连一次，超时就悄悄没了。
     """
     target = dsn or dsn_from_env()
     connect_kwargs: dict = {}
-    timeout_ms = os.environ.get("LUYUN_PG_STATEMENT_TIMEOUT_MS")
-    if timeout_ms:
-        connect_kwargs["server_settings"] = {"statement_timeout": str(int(timeout_ms))}
+    server_settings = server_timeouts_from_env()
+    if server_settings:
+        connect_kwargs["server_settings"] = server_settings
     raw = await asyncpg.connect(target, **connect_kwargs)
-    logger.info("🐘 已连接 PostgreSQL: %s", target.rsplit("@", 1)[-1])
+    logger.info(
+        "🐘 已连接 PostgreSQL: %s（statement_timeout=%s, lock_timeout=%s）",
+        target.rsplit("@", 1)[-1],
+        server_settings.get("statement_timeout", "0"),
+        server_settings.get("lock_timeout", "0"),
+    )
     return PgConnection(raw, dsn=target, connect_kwargs=connect_kwargs)
