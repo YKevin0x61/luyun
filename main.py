@@ -291,7 +291,9 @@ async def lifespan(app: FastAPI):
         # 整段与那些常驻循环一样受 DISABLE_BACKGROUND_TASKS 管——测试不连 Redis。
         if background_enabled:
             await realtime_hub.start_bus()
-            startup_results.append("realtime 总线")
+            # `start_bus()` 刻意不 await 连接，所以这里只能说「订阅任务已起」，
+            # 不能说「总线已连上」：连接状态看 /api/healthz 的 redis 段或日志。
+            startup_results.append("realtime 订阅任务（连接状态见 /api/healthz 与日志）")
         else:
             logger.info("⏭️ 已跳过 realtime 总线（DISABLE_BACKGROUND_TASKS=true），nudge 仅进程内派发")
         
@@ -459,11 +461,16 @@ app = FastAPI(
 
 @app.get("/api/healthz", include_in_schema=False)
 async def healthz():
-    """只读健康探针：进程存活 + 数据库可读 + 磁盘水位。
+    """只读健康探针：进程存活 + 数据库可读 + 磁盘水位 + realtime 总线状态。
 
     不加鉴权（Docker HEALTHCHECK 与反向代理探针要能直接打），因此刻意不返回
     路径等环境细节，只给聚合水位。磁盘水位高**不**改状态码：重启容器腾不出
     空间，只会变成重启循环；真正该做的是告警和宿主侧清理。
+
+    `redis` 段同理：只读总线上的现成状态位（`RedisBus.enabled` / `connected`），
+    **不做主动 ping**——探针必须轻量、免鉴权、只读。总线掉线也**不**改状态码：
+    本地派发不经过总线，重启进程既腾不出 Redis，又会打断门店的采集与打印；
+    跨进程 nudge 失效是「降级可见」，不是「进程该被重启」。
     """
     db_status = "uninitialized"
     current = db_manager
@@ -476,6 +483,7 @@ async def healthz():
     healthy = db_status == "healthy"
     level = disk_guard.worst_level()
     free_mb = min_free_mb()
+    bus = realtime_hub.bus
     return JSONResponse(
         status_code=200 if healthy else 503,
         content={
@@ -484,6 +492,13 @@ async def healthz():
             "disk": {
                 "level": level,
                 "free_mb": None if free_mb is None else round(free_mb, 1),
+            },
+            # bus 为 None = 本进程没起订阅任务（未配 REDIS_URL 时启动已 fail-fast，
+            # 只剩 DISABLE_BACKGROUND_TASKS 这类形态），跨进程 nudge 整体不可用，
+            # 所以 configured 也报 False；反过来它不代表 URL 配没配。
+            "redis": {
+                "configured": bool(bus is not None and bus.enabled),
+                "connected": bool(bus is not None and bus.connected),
             },
         },
     )
