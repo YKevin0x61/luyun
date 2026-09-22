@@ -118,35 +118,39 @@ async def save_retention_config(db, config: RetentionConfig) -> RetentionConfig:
     return config
 
 
-def load_from_db_sync(app_db_path: str) -> RetentionConfig:
+def load_from_pg_sync(dsn: Optional[str] = None) -> RetentionConfig:
     """同步读取保留配置（冷备脚本等无事件循环的调用方使用）。
 
-    只读打开；读不到或校验失败时退回默认值，不影响冷备本身。
+    只读；连不上库、读不到或校验失败时退回默认值，不影响冷备本身。
+    SQLite 退场前这里读的是 ``app.db`` 的 ``app_settings``（ADR 0089），现在直接
+    连 PostgreSQL 读同一张表。
     """
+    import asyncio
     import json
-    import sqlite3
-    from pathlib import Path
 
-    path = Path(app_db_path)
-    if not path.is_file():
+    async def _read() -> Optional[str]:
+        import asyncpg
+
+        from db_core.backend.pg import dsn_from_env
+
+        conn = await asyncpg.connect(dsn or dsn_from_env())
+        try:
+            return await conn.fetchval(
+                "SELECT value FROM app_settings WHERE key = $1",
+                RETENTION_SETTINGS_KEY,
+            )
+        finally:
+            await conn.close()
+
+    try:
+        raw = asyncio.run(_read())
+    except Exception as exc:  # pragma: no cover - 连不上库不是冷备的致命错误
+        logger.warning("⚠️ 冷备读取保留配置失败（%s），回退默认值", exc)
+        return _DEFAULT
+    if not raw:
         return _DEFAULT
     try:
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?immutable=1", uri=True)
-    except sqlite3.Error:
-        return _DEFAULT
-    try:
-        row = conn.execute(
-            "SELECT value FROM app_settings WHERE key = ?",
-            (RETENTION_SETTINGS_KEY,),
-        ).fetchone()
-    except sqlite3.Error:
-        return _DEFAULT
-    finally:
-        conn.close()
-    if not row or not row[0]:
-        return _DEFAULT
-    try:
-        return validate_retention(json.loads(row[0]))
+        return validate_retention(json.loads(raw))
     except (ValueError, TypeError):
         logger.warning("⚠️ 冷备读取保留配置失败，回退默认值")
         return _DEFAULT

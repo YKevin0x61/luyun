@@ -44,13 +44,17 @@ class DefaultPreflightEnvAdapter:
     def _database_state(self) -> tuple[bool, Optional[str]]:
         """业务库可达性。
 
-        SQLite：只需确认数据目录还在（更新不替换库文件）。
-        PostgreSQL：用 pg_isready 探测。与磁盘同一原则——探测工具缺失或超时
+        后端只剩 PostgreSQL（SQLite 已在 ADR 0089 退场）：``DATABASE_BACKEND``
+        不是 postgres 就直接判红，别让老部署在「新代码 + 老库」的错配下把更新
+        点下去。随后用 pg_isready 探测。与磁盘同一原则——探测工具缺失或超时
         判为可用，不让探测本身的缺陷反过来挡住更新。
         """
-        backend = (getattr(settings, "DATABASE_BACKEND", "sqlite") or "sqlite").lower()
+        backend = (getattr(settings, "DATABASE_BACKEND", "") or "").strip().lower()
         if backend != "postgres":
-            return True, f"SQLite（{getattr(settings, 'DATABASE_DIR', 'data')}）"
+            return False, (
+                f"DATABASE_BACKEND={backend or '(空)'}：SQLite 后端已移除，"
+                "请先迁移到 PostgreSQL（deploy/enable_postgres.sh）再更新"
+            )
 
         dsn = os.environ.get("LUYUN_POSTGRES_DSN") or getattr(settings, "POSTGRES_DSN", "")
         if not dsn:

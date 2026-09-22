@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,22 +38,7 @@ class ColdBackupScriptTest(unittest.TestCase):
             os.environ["BACKUP_DIR"] = self._old_backup_env
         self._tmpdir.cleanup()
 
-    def _make_app_db(self) -> None:
-        import sqlite3
-
-        conn = sqlite3.connect(settings.APP_DB_PATH)
-        conn.executescript(
-            """
-            CREATE TABLE orders (id INTEGER PRIMARY KEY, business_flow_id TEXT);
-            CREATE TABLE tables (id INTEGER PRIMARY KEY);
-            CREATE TABLE dish_stations (id INTEGER PRIMARY KEY, dish_name TEXT);
-            """
-        )
-        conn.commit()
-        conn.close()
-
     def test_success_exits_zero_and_writes_status(self):
-        self._make_app_db()
         code = cold_backup.main([])
         self.assertEqual(code, 0)
 
@@ -64,17 +50,25 @@ class ColdBackupScriptTest(unittest.TestCase):
         self.assertEqual(Path(status["archive"]).name, backup_service.COLD_ARCHIVE_NAME)
         self.assertIsNone(status["error"])
 
-    def test_missing_database_exits_nonzero_and_records_failure(self):
+    def test_archive_packs_pg_dump_not_sqlite_files(self):
+        """冷备不再需要 data/app.db：业务数据成员是整库 pg_dump。"""
         code = cold_backup.main([])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
+
         status = json.loads(
             backup_service.cold_status_path().read_text(encoding="utf-8")
         )
-        self.assertFalse(status["ok"])
-        self.assertIn("业务数据库不存在", status["error"] or "")
+        with tarfile.open(status["archive"], mode="r") as tar:
+            names = set(tar.getnames())
+            dump = tar.extractfile("app.pgdump").read()
+
+        self.assertTrue(dump)
+        self.assertNotIn("app.db", names)
+        self.assertNotIn("recipes.db", names)
+        self.assertIn(backup_service.COLD_MANIFEST_NAME, names)
+        self.assertIn(backup_service.COLD_CHECKSUMS_NAME, names)
 
     def test_retention_argument_prunes_old_runs(self):
-        self._make_app_db()
         backup_dir = Path(settings.COLD_BACKUP_DIR)
         for ts in ("20260101_000001", "20260101_000002", "20260101_000003"):
             (backup_dir / ts).mkdir(parents=True, exist_ok=True)
@@ -90,7 +84,6 @@ class ColdBackupScriptTest(unittest.TestCase):
         self.assertNotIn("20260101_000001", remaining)
 
     def test_failed_run_removes_half_written_product(self):
-        self._make_app_db()
         backup_dir = Path(settings.COLD_BACKUP_DIR)
         backup_dir.mkdir(parents=True, exist_ok=True)
         (backup_dir / "20260101_000001").mkdir()

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-系统完整备份：口令加密 tar 归档、快照回滚、数据库覆盖/合并、卫生照片、冷备归档。
+系统完整备份：口令加密 tar 归档、快照回滚、卫生照片、冷备归档。
 
 归档格式向后兼容：magic 保持 ``LUYUNBK2``，``meta.json`` 的 ``version`` 递增。
-新增成员（两类卫生照片）都是可选成员，v2 备份仍可解析与恢复。
+新增成员（两类卫生照片）都是可选成员，v2 备份仍可解析。
+
+业务数据只有整库 ``pg_dump`` 一种形态（成员 ``app.pgdump``）：SQLite 时代的
+``app.db`` / ``recipes.db`` 成员随 ADR 0089 退场，解析端仍能识别旧成员，但恢复端
+会明确拒绝（SQLite 库灌不进 PostgreSQL）。
 """
 
 from __future__ import annotations
@@ -18,17 +22,16 @@ import logging
 import os
 import re
 import shutil
-import sqlite3
 import struct
 import subprocess
 import tarfile
 import tempfile
 import time
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-import aiosqlite
+import asyncpg
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import padding as sym_padding
@@ -36,8 +39,6 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.hmac import HMAC
 
 from config import settings
-from db_core.backend.sqlite_export import sqlite_bindable, sqlite_column_type
-from db_core.schema import ALL_TABLES, RECIPE_TABLES
 from services import backup_retention, credentials_store
 from services.credentials_store import CHINA_TZ, _derive_backup_key
 
@@ -45,9 +46,6 @@ logger = logging.getLogger(__name__)
 
 # 快照保留份数的默认值单一来源在 backup_retention；这里保留旧名以兼容调用方
 SNAPSHOT_KEEP = backup_retention.SNAPSHOT_KEEP_DEFAULT
-
-# auth 在 ALL_TABLES 里是虚拟项，实际表名如下
-AUTH_PHYSICAL_TABLES = ("admin_user", "sessions", "api_tokens")
 
 # —— 备份格式 ——
 BACKUP_MAGIC = b"LUYUNBK2"
@@ -119,19 +117,6 @@ COLD_ARCHIVE_NAME = "luyun_cold_backup.tar"
 COLD_MANIFEST_NAME = "manifest.json"
 COLD_CHECKSUMS_NAME = "SHA256SUMS"
 
-# 每张表的去重键（与 api/admin.py 导入逻辑一致）
-TABLE_DEDUP_KEY: Dict[str, str] = {
-    "orders": "business_flow_id",
-    "dish_stations": "dish_name",
-    "semi_finished_rules": "dish_name",
-    "report_dishes": "dish_name",
-    "tables": "table_number",
-    "stations": "station_id",
-}
-
-# 合并导入时最多回报多少条失败样本（只用于展示，计数是完整的）。
-MAX_MERGE_FAILURE_SAMPLES = 5
-
 
 def _snapshot_root() -> Path:
     return Path(settings.DATABASE_DIR) / SNAPSHOT_DIRNAME
@@ -144,11 +129,6 @@ def _export_root() -> Path:
 def get_hygiene_capture_root() -> Path:
     """卫生照片文件目录（与启动时 FileCaptureStore 使用同一路径）。"""
     return Path(settings.DATABASE_DIR) / "hygiene-captures"
-
-
-def get_recipes_db_path() -> str:
-    """Recipe tables live in app.db; backup extracts sop_* into a recipes.db member."""
-    return settings.APP_DB_PATH
 
 
 def get_credentials_file_path() -> str:
@@ -165,13 +145,6 @@ def get_cold_backup_dir() -> Path:
 
 def cold_status_path(backup_dir: Optional[Path] = None) -> Path:
     return (backup_dir or get_cold_backup_dir()) / COLD_STATUS_FILENAME
-
-
-def _app_db_target_tables() -> List[str]:
-    """覆盖/合并 app.db 时涉及的真实表名（排除 logs 与虚拟 auth）。"""
-    tables = [t for t in ALL_TABLES if t not in ("logs", "auth")]
-    tables.extend(AUTH_PHYSICAL_TABLES)
-    return tables
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -208,21 +181,48 @@ _OTHER_PHOTO_QUERIES: Tuple[str, ...] = (
 _VARIANT_QUERY = "SELECT source_capture_id, capture_id FROM hygiene_capture_variants"
 
 
-def _query_capture_ids(conn: sqlite3.Connection, sql: str) -> List[str]:
+def _business_conn(db):
+    """取业务库共享连接。
+
+    ``db`` 通常是 ``DatabaseManager``（全部表共用一条连接）；也接受直接传入
+    ``PgConnection`` / ``TableView``，谁的 ``execute`` 可用就用谁。
+    """
+    conn = getattr(db, "_conn", None)
+    if conn is not None and hasattr(conn, "execute"):
+        return conn
+    return db
+
+
+async def _query_capture_ids(conn, sql: str) -> List[str]:
     try:
-        rows = conn.execute(sql).fetchall()
-    except sqlite3.Error:
+        cursor = await conn.execute(sql)
+        rows = await cursor.fetchall()
+    except asyncpg.UndefinedTableError:
         # 表不存在（旧库/未启用卫生模块）不算错误，按「没有这类照片」处理
         return []
     return [row[0] for row in rows if row and row[0]]
 
 
-def classify_hygiene_capture_ids(
-    app_db_path: str,
+async def _variant_rows(conn) -> List[Tuple[Any, Any]]:
+    try:
+        cursor = await conn.execute(_VARIANT_QUERY)
+        rows = await cursor.fetchall()
+    except asyncpg.UndefinedTableError:
+        return []
+    return [(row[0], row[1]) for row in rows]
+
+
+async def classify_hygiene_capture_ids(
+    db,
     *,
     include_variants: bool = True,
 ) -> Dict[str, List[str]]:
-    """按业务身份把库中引用的照片分成标准图与其它照片两类。
+    """按业务身份把库里引用的照片分成标准图与其它照片两类。
+
+    **查询走业务库连接**（``db`` 是 ``DatabaseManager`` 或它下面的连接）。SQLite
+    时代这里按文件路径打开 ``data/app.db``：PG 门店上那个文件并不存在，分类于是
+    静默返回空，照片差异 / 恢复后缺图两类检查全部「通过」。分类必须落在真正的
+    业务库上，缺表（未启用卫生模块）才按「没有这类照片」处理。
 
     分类在备份创建时确定并写入清单，不在读取时猜测。返回 ``capture_id``
     列表（保持稳定顺序，便于测试与清单比对）。
@@ -230,30 +230,22 @@ def classify_hygiene_capture_ids(
     ``include_variants=False`` 只返回业务表的原始照片，不含派生图；恢复后
     一致性检查只关心原始照片（派生图缺失时接口会回退到原图）。
     """
+    conn = _business_conn(db)
     result: Dict[str, List[str]] = {PHOTO_STANDARD: [], PHOTO_OTHER: []}
-    if not os.path.isfile(app_db_path):
-        return result
 
-    conn = sqlite3.connect(app_db_path)
-    try:
-        standard: set = set()
-        for sql in _STANDARD_PHOTO_QUERIES:
-            standard.update(_query_capture_ids(conn, sql))
+    standard: set = set()
+    for sql in _STANDARD_PHOTO_QUERIES:
+        standard.update(await _query_capture_ids(conn, sql))
 
-        other: set = set()
-        for sql in _OTHER_PHOTO_QUERIES:
-            other.update(_query_capture_ids(conn, sql))
-        # 一张照片同时被两类引用时，标准图优先（标准图更严格）
-        other -= standard
+    other: set = set()
+    for sql in _OTHER_PHOTO_QUERIES:
+        other.update(await _query_capture_ids(conn, sql))
+    # 一张照片同时被两类引用时，标准图优先（标准图更严格）
+    other -= standard
 
-        # 派生图跟随源照片归类
-        variants = []
-        if include_variants:
-            try:
-                variants = conn.execute(_VARIANT_QUERY).fetchall()
-            except sqlite3.Error:
-                variants = []
-        for source_id, variant_id in variants:
+    # 派生图跟随源照片归类
+    if include_variants:
+        for source_id, variant_id in await _variant_rows(conn):
             if not variant_id:
                 continue
             if source_id in standard:
@@ -261,10 +253,8 @@ def classify_hygiene_capture_ids(
             elif source_id in other:
                 other.add(variant_id)
 
-        result[PHOTO_STANDARD] = sorted(standard)
-        result[PHOTO_OTHER] = sorted(other)
-    finally:
-        conn.close()
+    result[PHOTO_STANDARD] = sorted(standard)
+    result[PHOTO_OTHER] = sorted(other)
     return result
 
 
@@ -287,8 +277,8 @@ def collect_photo_blobs(
     return blobs, missing
 
 
-def missing_hygiene_capture_ids(
-    app_db_path: Optional[str] = None,
+async def missing_hygiene_capture_ids(
+    db,
     capture_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """核对「库里引用的照片」是否真的在磁盘上（只做存在性检查，不读字节）。
@@ -297,10 +287,7 @@ def missing_hygiene_capture_ids(
     不存在的图片，前端清单里这些标准图静默缺失。这里把缺口显式报出来。
     """
     root = Path(capture_root) if capture_root is not None else get_hygiene_capture_root()
-    classified = classify_hygiene_capture_ids(
-        app_db_path or settings.APP_DB_PATH,
-        include_variants=False,
-    )
+    classified = await classify_hygiene_capture_ids(db, include_variants=False)
     missing: Dict[str, List[str]] = {}
     for kind in (PHOTO_STANDARD, PHOTO_OTHER):
         gone = []
@@ -321,60 +308,19 @@ def missing_hygiene_capture_ids(
     }
 
 
-def collect_hygiene_photo_members(
-    app_db_path: Optional[str] = None,
+async def collect_hygiene_photo_paths(
+    db,
     capture_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """收集两类卫生照片，返回归档成员、清单与缺项。
-
-    ``members`` 的键是归档内路径（``photos/standard/<capture_id>``），值是字节；
-    ``manifest`` 记录每类的文件数、总字节与校验和；``missing`` 记录库中有引用
-    但磁盘上找不到的照片。
-    """
-    db_path = app_db_path or settings.APP_DB_PATH
-    root = capture_root or get_hygiene_capture_root()
-    classified = classify_hygiene_capture_ids(db_path)
-
-    members: Dict[str, bytes] = {}
-    manifest: Dict[str, Any] = {}
-    missing: Dict[str, List[str]] = {PHOTO_STANDARD: [], PHOTO_OTHER: []}
-
-    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
-        blobs, gone = collect_photo_blobs(root, classified[kind])
-        missing[kind] = gone
-        member_dir = PHOTO_MEMBER_DIRS[kind]
-        for capture_id, data in blobs.items():
-            members[f"{member_dir}/{capture_id}"] = data
-        digest = hashlib.sha256()
-        for capture_id in sorted(blobs):
-            digest.update(capture_id.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(blobs[capture_id])
-        manifest[kind] = {
-            "count": len(blobs),
-            "bytes": sum(len(b) for b in blobs.values()),
-            "sha256": digest.hexdigest(),
-            "referenced": len(classified[kind]),
-            "missing": len(gone),
-        }
-
-    return {"members": members, "manifest": manifest, "missing": missing}
-
-
-def collect_hygiene_photo_paths(
-    app_db_path: Optional[str] = None,
-    capture_root: Optional[Path] = None,
-) -> Dict[str, Any]:
-    """与 :func:`collect_hygiene_photo_members` 同口径，但只给路径、不读字节。
+    """收集两类卫生照片的**路径**（不读字节）。
 
     照片动辄几十上百 MB，导出时没必要先全读进内存再写进 tar：tarfile 可以直接从
     文件流式读（``addfile`` 分块），校验和边读边算。返回
     ``members = [(归档内路径, 磁盘路径)]``，顺序稳定（类别内按 capture_id 排序），
-    与字节版的 ``manifest.sha256`` 口径一致。
+    与 ``manifest`` 的口径一致。
     """
-    db_path = app_db_path or settings.APP_DB_PATH
     root = Path(capture_root) if capture_root is not None else get_hygiene_capture_root()
-    classified = classify_hygiene_capture_ids(db_path)
+    classified = await classify_hygiene_capture_ids(db)
 
     members: List[Tuple[str, Path]] = []
     manifest: Dict[str, Any] = {}
@@ -431,83 +377,6 @@ def photo_included_kinds(manifest: Optional[dict]) -> List[str]:
         if int((manifest.get(kind) or {}).get("count") or 0) > 0
     ]
 
-
-# ==================== 表行数快照（一致性校验的一半）====================
-
-def key_table_row_counts(app_db_path: str) -> Dict[str, int]:
-    """记录关键表的行数快照（备份创建时写入清单，校验时逐表对账）。"""
-    if not os.path.isfile(app_db_path):
-        return {}
-    try:
-        conn = sqlite3.connect(app_db_path)
-    except sqlite3.Error:
-        return {}
-    try:
-        return _count_rows(conn)
-    finally:
-        conn.close()
-
-
-def row_counts_from_db_bytes(db_bytes: Optional[bytes]) -> Dict[str, int]:
-    if not db_bytes:
-        return {}
-    fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-rows-")
-    os.close(fd)
-    try:
-        with open(tmp_path, "wb") as handle:
-            handle.write(db_bytes)
-        conn = sqlite3.connect(f"{Path(tmp_path).resolve().as_uri()}?immutable=1", uri=True)
-        try:
-            return _count_rows(conn)
-        finally:
-            conn.close()
-    except (OSError, sqlite3.Error):
-        return {}
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
-def _count_rows(conn: sqlite3.Connection) -> Dict[str, int]:
-    try:
-        names = {
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-    except sqlite3.Error:
-        return {}
-    counts: Dict[str, int] = {}
-    for table in KEY_TABLES:
-        if table not in names:
-            continue
-        try:
-            counts[table] = int(
-                conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            )
-        except sqlite3.Error:
-            continue
-    return counts
-
-
-def row_count_mismatches(
-    expected: Optional[dict],
-    actual: Optional[dict],
-) -> List[str]:
-    """清单记录的行数快照与实际不符 = 这份备份在创建后被改动/截断。"""
-    if not expected:
-        return []
-    mismatches: List[str] = []
-    for table, count in expected.items():
-        seen = (actual or {}).get(table)
-        if seen is None or int(seen) != int(count):
-            mismatches.append(
-                f"关键表 {table} 行数与清单不符（清单 {count}，归档 {seen}）"
-            )
-    return mismatches
 
 
 # ==================== 口令加密归档 ====================
@@ -674,10 +543,7 @@ def build_export_backup_to_file(
     include_runtime: bool,
     runtime_data: Optional[dict],
     include_app_db: bool,
-    include_recipes: bool,
-    recipes_db_bytes: Optional[bytes],
     app_version: str,
-    app_db_source: Optional[MemberSource] = None,
     app_pg_source: Optional[MemberSource] = None,
     include_standard_photos: bool = False,
     include_other_photos: bool = False,
@@ -740,9 +606,7 @@ def build_export_backup_to_file(
 
     includes = {
         "runtime": False,
-        "app_db": False,
         "app_pg": False,
-        "recipes_db": False,
         CONTENT_STANDARD_PHOTOS: False,
         CONTENT_OTHER_PHOTOS: False,
     }
@@ -754,16 +618,14 @@ def build_export_backup_to_file(
             ("runtime.json", json.dumps(runtime_data, ensure_ascii=False).encode("utf-8"))
         )
         includes["runtime"] = True
-    if include_app_db and app_db_source is not None:
-        members.append(("app.db", app_db_source))
-        includes["app_db"] = True
-    # PostgreSQL 门店的业务数据是整库 pg_dump：成员名与冷备保持一致，恢复端按
-    # 成员名区分「SQLite 文件」与「PG 整库 dump」，两者不能互相灌。
+    # 业务数据只有一种形态：整库 pg_dump（成员名与冷备一致，恢复端走 pg_restore）。
+    # SQLite 时代的 app.db / recipes.db 成员已随 ADR 0089 退场：配方表就在同一个库里，
+    # 随 app.pgdump 一起走。
     if include_app_db and app_pg_source is not None:
         members.append(("app.pgdump", app_pg_source))
         includes["app_pg"] = True
-    if include_recipes and recipes_db_bytes:
-        members.append(("recipes.db", recipes_db_bytes))
+        # 配方表（sop_*）就在同一个库里：整库 dump 确实含配方，清单如实标出来，
+        # 页面才不会一边打包了配方、一边显示「含配方：否」。
         includes["recipes_db"] = True
 
     prefix_ok = {kind: PHOTO_MEMBER_DIRS[kind] + "/" for kind in want_photo_kinds}
@@ -813,13 +675,6 @@ def build_export_backup_to_file(
                 digests[name] = _add_member(tar, name, source, _on_member_bytes)[0]
                 _report("photos", index, total_photos)
 
-            if isinstance(app_db_source, (str, Path)):
-                row_counts = key_table_row_counts(str(app_db_source))
-            elif isinstance(app_db_source, bytes):
-                row_counts = row_counts_from_db_bytes(app_db_source)
-            else:
-                row_counts = {}
-
             meta: Dict[str, Any] = {
                 "version": BACKUP_VERSION,
                 "exported_at": datetime.now(CHINA_TZ).isoformat(),
@@ -827,7 +682,6 @@ def build_export_backup_to_file(
                 "provenance": provenance,
                 "includes": includes,
                 "photos": photos_meta,
-                "row_counts": row_counts,
                 "sha256": {
                     name: digest
                     for name, digest in digests.items()
@@ -887,9 +741,6 @@ def build_export_backup(
     include_runtime: bool,
     runtime_data: Optional[dict],
     include_app_db: bool,
-    app_db_bytes: Optional[bytes],
-    include_recipes: bool,
-    recipes_db_bytes: Optional[bytes],
     app_pg_bytes: Optional[bytes] = None,
     include_standard_photos: bool = False,
     include_other_photos: bool = False,
@@ -918,10 +769,7 @@ def build_export_backup(
             include_runtime=include_runtime,
             runtime_data=runtime_data,
             include_app_db=include_app_db,
-            app_db_source=app_db_bytes,
             app_pg_source=app_pg_bytes,
-            include_recipes=include_recipes,
-            recipes_db_bytes=recipes_db_bytes,
             include_standard_photos=include_standard_photos,
             include_other_photos=include_other_photos,
             photo_members=[(name, data) for name, data in (photo_members or {}).items()],
@@ -947,9 +795,6 @@ def build_backup(
     include_runtime: bool,
     runtime_data: Optional[dict],
     include_app_db: bool,
-    app_db_bytes: Optional[bytes],
-    include_recipes: bool,
-    recipes_db_bytes: Optional[bytes],
     app_pg_bytes: Optional[bytes] = None,
     include_standard_photos: bool = False,
     include_other_photos: bool = False,
@@ -966,10 +811,7 @@ def build_backup(
         include_runtime=include_runtime,
         runtime_data=runtime_data,
         include_app_db=include_app_db,
-        app_db_bytes=app_db_bytes,
         app_pg_bytes=app_pg_bytes,
-        include_recipes=include_recipes,
-        recipes_db_bytes=recipes_db_bytes,
         include_standard_photos=include_standard_photos,
         include_other_photos=include_other_photos,
         photo_members=photo_members,
@@ -1017,7 +859,12 @@ def archive_integrity_errors(
 
 
 def parse_backup(blob: bytes, passphrase: str) -> dict:
-    """解密并校验备份包，返回各成员内容（照片按类别分开）。"""
+    """解密并校验备份包，返回各成员内容（照片按类别分开）。
+
+    成员形态只剩一种业务数据：``app.pgdump``（整库，配方表在其中）。旧包里的
+    ``app.db`` / ``recipes.db`` 成员会被读出来但不参与恢复——SQLite 库灌不进
+    PostgreSQL，导入侧据此明确报错并给指引。
+    """
     passphrase = (passphrase or "").strip()
     if not passphrase:
         raise ValueError("请输入解密口令")
@@ -1079,12 +926,6 @@ def parse_backup(blob: bytes, passphrase: str) -> dict:
             if expected_sha.get("app.pgdump") != _sha256_hex(app_pg_bytes):
                 raise ValueError("备份校验失败（文件可能被篡改）")
 
-        recipes_db_bytes = None
-        if "recipes.db" in names:
-            recipes_db_bytes = _read_tar_member(tar, "recipes.db")
-            if expected_sha.get("recipes.db") != _sha256_hex(recipes_db_bytes):
-                raise ValueError("备份校验失败（文件可能被篡改）")
-
         raw_photos = _read_photo_members(tar)
 
     # 归档内一致性：清单声明与归档内容必须对得上（不一致 = 这份备份坏了）
@@ -1100,43 +941,23 @@ def parse_backup(blob: bytes, passphrase: str) -> dict:
     integrity_errors = archive_integrity_errors(
         meta, {kind: len(blobs) for kind, blobs in photos.items()}
     )
-    integrity_errors.extend(
-        row_count_mismatches(meta.get("row_counts"), row_counts_from_db_bytes(app_db_bytes))
-    )
 
     credentials = json.loads(credentials_bytes.decode("utf-8"))
     return {
         "meta": meta,
         "credentials": credentials,
         "runtime": runtime_data,
+        # SQLite 时代的 app.db 成员只用于识别与明确拒绝（灌不进 PostgreSQL），
+        # 新备份里不会再有它。
         "app_db_bytes": app_db_bytes,
         "app_pg_bytes": app_pg_bytes,
-        "recipes_db_bytes": recipes_db_bytes,
         "standard_photos": photos[PHOTO_STANDARD],
         "other_photos": photos[PHOTO_OTHER],
         "archive_integrity_errors": integrity_errors,
     }
 
 
-
 # ==================== 快照（明文回滚点）====================
-
-def _sqlite_backup_sync(src_path: str, dst_path: str) -> None:
-    """同步 sqlite3 backup API 复制整库。"""
-    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    if os.path.exists(dst_path):
-        os.unlink(dst_path)
-    src = sqlite3.connect(src_path)
-    dst = sqlite3.connect(dst_path)
-    try:
-        src.backup(dst)
-    finally:
-        dst.close()
-        src.close()
-
-
-def is_postgres_backend() -> bool:
-    return (getattr(settings, "DATABASE_BACKEND", "sqlite") or "sqlite").lower() == "postgres"
 
 
 def _redact_dsn_password(text: str, dsn: str) -> str:
@@ -1371,10 +1192,8 @@ async def export_pg_dump_to_file(
 async def export_pg_dump_bytes() -> Optional[bytes]:
     """把整个 PostgreSQL 库打成 custom-format dump 的字节串。
 
-    这是 PG 门店导出包里的「业务数据」成员（``app.pgdump``）：SQLite 那边是
-    ``app.db`` 文件，这边是一份 ``pg_dump``。两者不能互换——恢复时按成员名判定。
-
-    dump 走临时文件：pg_dump 只能写文件，不产出 stdout 流。
+    这是导出包里的「业务数据」成员（``app.pgdump``）。dump 走临时文件：
+    pg_dump 只能写文件，不产出 stdout 流。
     """
     fd, tmp_path = tempfile.mkstemp(suffix=".pgdump", prefix="luyun-export-")
     os.close(fd)
@@ -1399,8 +1218,7 @@ async def restore_app_pg_from_bytes(db, dump_bytes: bytes) -> None:
     - **再把连接接回来**：恢复失败时后台还要能报错、能重试（连接留着的话其上的
       prepared statement 也已失效）。
 
-    对照 ``overwrite_app_db_from_bytes``（SQLite 那条 ATTACH 路径）：语义一样是整库
-    替换，只是 PG 没有「合并导入」这种粒度。
+    整库替换，没有「合并导入」这种粒度：``pg_restore --clean`` 是库级操作。
     """
     fd, tmp_path = tempfile.mkstemp(suffix=".pgdump", prefix="luyun-restore-")
     os.close(fd)
@@ -1420,11 +1238,12 @@ async def restore_app_pg_from_bytes(db, dump_bytes: bytes) -> None:
 
 
 def _scan_capture_members(root: Path) -> Dict[str, Any]:
-    """PG 后端下的照片收集：直接扫目录，不查库。
+    """照片收集兜底：直接扫目录，不查库。
 
-    SQLite 后端靠 ``classify_hygiene_capture_ids`` 读库里的引用关系来分类；
-    PG 下没有必要为此再连一次库——照片全部落在同一个目录里，恢复也是整目录
-    写回。多带上几个孤儿文件（库里已删、磁盘未清）比漏带业务照片安全得多。
+    ``_write_snapshot_photos_pg`` 在分类不可用（psql 缺失 / 查询失败）时退到这里：
+    照片全部落在同一个目录里，恢复也是整目录写回。多带上几个孤儿文件（库里已删、
+    磁盘未清）比漏带业务照片安全得多——但清单会标 ``unclassified``，不假装分成
+    了两类。
     """
     members: Dict[str, bytes] = {}
     kind_dir = PHOTO_MEMBER_DIRS[PHOTO_OTHER]
@@ -1469,35 +1288,6 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def _write_snapshot_photos(
-    snap_dir: Path,
-    *,
-    app_db_path: str,
-    capture_root: Optional[Path] = None,
-) -> Dict[str, Any]:
-    """把两类卫生照片以硬链接（或复制）放入快照，返回清单。"""
-    root = capture_root or get_hygiene_capture_root()
-    collected = collect_hygiene_photo_members(app_db_path, root)
-    manifest: Dict[str, Any] = {}
-    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
-        prefix = PHOTO_MEMBER_DIRS[kind] + "/"
-        written = 0
-        for name in collected["members"]:
-            if not name.startswith(prefix):
-                continue
-            capture_id = name[len(prefix):]
-            _link_or_copy(root / capture_id, snap_dir / name)
-            written += 1
-        entry = dict(collected["manifest"].get(kind) or {})
-        entry["written"] = written
-        # 快照与归档不同：文件以硬链接落盘，清单只记录数量/字节/缺项
-        manifest[kind] = entry
-    return {
-        "manifest": manifest,
-        "missing": {k: v for k, v in collected["missing"].items() if v},
-    }
-
-
 def _pg_psql_rows(sql: str) -> Optional[List[List[str]]]:
     """用 psql 同步查询 PG（DSN 与 pg_dump 同一来源）。
 
@@ -1526,9 +1316,11 @@ def _pg_psql_rows(sql: str) -> Optional[List[List[str]]]:
 
 
 def _classify_capture_ids_pg() -> Optional[Dict[str, List[str]]]:
-    """PG 后端：按库引用把 capture_id 分成标准图 / 其它照片。
+    """同步版分类：psql 查业务库，按库引用把 capture_id 分成标准图 / 其它照片。
 
-    与 SQLite 路径用同一批 SQL（表名、列名同构），只是换成 psql 同步查询；
+    快照创建是同步路径（更新作业在独立进程里跑，没有事件循环可用），所以这里用
+    ``psql`` 而不是 ``DatabaseManager``；SQL 与 :func:`classify_hygiene_capture_ids`
+    共用同一批常量，口径一致（标准图优先、派生图跟随源图）。
     恢复端只按 capture_id 写回同一目录，因此分类只影响清单与覆盖结论。
     """
     standard: set = set()
@@ -1543,7 +1335,7 @@ def _classify_capture_ids_pg() -> Optional[Dict[str, List[str]]]:
         if rows is None:
             return None
         other.update(row[0] for row in rows if row and row[0])
-    # 一张照片同时被两类引用时标准图优先（与 SQLite 分类口径一致）
+    # 一张照片同时被两类引用时标准图优先（与异步分类口径一致）
     other -= standard
 
     variants = _pg_psql_rows(_VARIANT_QUERY)
@@ -1562,7 +1354,7 @@ def _classify_capture_ids_pg() -> Optional[Dict[str, List[str]]]:
 
 
 def _write_snapshot_photos_pg(snap_dir: Path) -> Dict[str, Any]:
-    """PG 后端的照片入快照：按库引用分类（占位符与 SQLite 路径一致）。
+    """照片入快照：按库引用分类，文件以硬链接（或复制）落盘。
 
     psql 不可用 / 查询失败时退化为「目录扫描 + 全部计入其它照片」，并把
     ``unclassified`` 标出来：标准图恒为 0 是「没分类」，不是「本来就没有」。
@@ -1660,43 +1452,30 @@ def photo_consistency(
 
 
 def create_restore_snapshot(
-    app_db_path: str,
-    recipes_db_path: str,
     cred_file_path: str,
     *,
     provenance: str = PROVENANCE_MANUAL,
     include_photos: bool = True,
     keep: Optional[int] = None,
 ) -> str:
-    """创建本机回滚快照（库 + 凭据 + 两类卫生照片），按保留配置清理旧快照。
+    """创建本机回滚快照（整库 dump + 凭据 + 两类卫生照片），按保留配置清理旧快照。
 
     ``provenance`` 标注这次快照是谁在什么场景下建的，供清理保护与页面展示识别。
     ``keep`` 为 ``None`` 时使用保留配置中的本机回滚快照份数。
+
+    业务数据只有一条路径：整库 ``pg_dump``（成员 ``app.pgdump``）；配方表在同一个
+    库里，因此不再单独导出 ``recipes.db``。这里保持**同步**：更新作业是独立进程
+    （无事件循环、不持有 DatabaseManager），升级前必须能建出这份快照。
     """
     ts = datetime.now(CHINA_TZ).strftime("%Y%m%d_%H%M%S")
     snap_dir = _snapshot_root() / ts
     snap_dir.mkdir(parents=True, exist_ok=True)
 
     contents: List[str] = []
-    pg_backend = is_postgres_backend()
-    if pg_backend:
-        # PG：整库 pg_dump。recipe 表也在同一个库里，因此不再单独导出 recipes.db。
-        _pg_dump_sync(str(snap_dir / "app.pgdump"))
-        contents.append(CONTENT_APP_PG)
-        contents.append(CONTENT_RUNTIME)
-    elif os.path.isfile(app_db_path):
-        _sqlite_backup_sync(app_db_path, str(snap_dir / "app.db"))
-        contents.append(CONTENT_APP_DB)
-        # 运行配置存在 app.db 的 app_settings 表里，随业务数据一并覆盖
-        contents.append(CONTENT_RUNTIME)
-
-    if (
-        not pg_backend
-        and os.path.isfile(recipes_db_path)
-        and os.path.abspath(recipes_db_path) != os.path.abspath(app_db_path)
-    ):
-        _sqlite_backup_sync(recipes_db_path, str(snap_dir / "recipes.db"))
-        contents.append(CONTENT_RECIPES)
+    _pg_dump_sync(str(snap_dir / "app.pgdump"))
+    contents.append(CONTENT_APP_PG)
+    # 运行配置存在同一个库的 app_settings 表里，随整库 dump 一并带走
+    contents.append(CONTENT_RUNTIME)
 
     if os.path.isfile(cred_file_path):
         dest = snap_dir / "credentials.enc"
@@ -1722,10 +1501,7 @@ def create_restore_snapshot(
     }
     consistency: Optional[dict] = None
     if include_photos:
-        if pg_backend:
-            photo_info = _write_snapshot_photos_pg(snap_dir)
-        else:
-            photo_info = _write_snapshot_photos(snap_dir, app_db_path=app_db_path)
+        photo_info = _write_snapshot_photos_pg(snap_dir)
         manifest = photo_info["manifest"]
         for kind, content_key in (
             (PHOTO_STANDARD, CONTENT_STANDARD_PHOTOS),
@@ -1741,8 +1517,6 @@ def create_restore_snapshot(
         "provenance": provenance,
         "contents": contents,
         "photos": photo_info["manifest"],
-        # PG 快照是整库 pg_dump，没有逐表对账的恢复路径，留空而不是硬连库统计
-        "row_counts": {} if pg_backend else key_table_row_counts(app_db_path),
         "files": sorted(
             str(p.relative_to(snap_dir))
             for p in snap_dir.rglob("*")
@@ -2028,7 +1802,6 @@ def list_export_archives() -> List[dict]:
 
 def build_cold_backup_archive(
     *,
-    app_db_path: Optional[str] = None,
     cred_file_path: Optional[str] = None,
     capture_root: Optional[Path] = None,
     app_version: str = "",
@@ -2039,10 +1812,10 @@ def build_cold_backup_archive(
     """生成冷备单一归档（库快照 + 凭据 + 密钥 + 卫生照片 + 清单 + 校验和）。
 
     归档是明文 tar：凭据以 ``credentials.enc`` 形式随附，密钥文件 ``.cred_key``
-    也一并归档，因此备份目录权限必须受控。全程使用 SQLite 在线 backup API，
-    不引入停写窗口。
+    也一并归档，因此备份目录权限必须受控。库快照走 ``pg_dump``（成员
+    ``app.pgdump``）：它是事务一致的快照，不需要停写窗口；配方表在同一个库里，
+    随整库 dump 一起带走。
     """
-    app_db_path = app_db_path or settings.APP_DB_PATH
     cred_file_path = cred_file_path or get_credentials_file_path()
     backup_dir = get_cold_backup_dir()
     ts = datetime.now(CHINA_TZ).strftime("%Y%m%d_%H%M%S")
@@ -2050,36 +1823,24 @@ def build_cold_backup_archive(
     out_dir.mkdir(parents=True, exist_ok=True)
     archive_path = out_dir / COLD_ARCHIVE_NAME
 
-    pg_backend = is_postgres_backend()
-    member_name = "app.pgdump" if pg_backend else "app.db"
-    fd, tmp_db = tempfile.mkstemp(
-        suffix=".pgdump" if pg_backend else ".db", prefix="luyun-cold-"
-    )
+    fd, tmp_db = tempfile.mkstemp(suffix=".pgdump", prefix="luyun-cold-")
     os.close(fd)
     try:
-        if pg_backend:
-            _pg_dump_sync(tmp_db)
-            with open(tmp_db, "rb") as handle:
-                app_db_bytes: Optional[bytes] = handle.read()
-        elif os.path.isfile(app_db_path):
-            _sqlite_backup_sync(app_db_path, tmp_db)
-            with open(tmp_db, "rb") as handle:
-                app_db_bytes: Optional[bytes] = handle.read()
-        else:
-            app_db_bytes = None
+        _pg_dump_sync(tmp_db)
+        with open(tmp_db, "rb") as handle:
+            app_db_bytes: Optional[bytes] = handle.read()
     finally:
         try:
             os.unlink(tmp_db)
         except OSError:
             pass
 
-    if pg_backend:
-        photo_info = _scan_capture_members(capture_root or get_hygiene_capture_root())
-    else:
-        photo_info = collect_hygiene_photo_members(app_db_path, capture_root)
+    # 照片按目录全量带走：整库 dump 里虽然有引用关系，但冷备跑在独立进程里，
+    # 分类要另开数据库连接，收益不抵复杂度（多带几个孤儿文件比漏带安全）。
+    photo_info = _scan_capture_members(capture_root or get_hygiene_capture_root())
     members: Dict[str, bytes] = {}
     if app_db_bytes is not None:
-        members[member_name] = app_db_bytes
+        members["app.pgdump"] = app_db_bytes
     if os.path.isfile(cred_file_path):
         with open(cred_file_path, "rb") as handle:
             members["credentials.enc"] = handle.read()
@@ -2094,20 +1855,14 @@ def build_cold_backup_archive(
     for name, data in photo_info["members"].items():
         members[name] = data
 
-    # PG 的一致性核对要从库里查照片引用，这里不做（备份本身是整库 pg_dump，
-    # 照片按目录全量带走，不存在「库引用了但没备份」的情况）。
-    consistency = (
-        None
-        if pg_backend
-        else _cold_consistency(
-            app_db_path, photo_info["manifest"], photo_info["missing"]
-        )
-    )
+    # 一致性核对要从库里查照片引用，这里不做（整库 pg_dump + 全量照片目录，
+    # 不存在「库引用了但没备份」的情况）。
+    consistency = None
     raw_contents = [
         content
         for content, present in (
-            (CONTENT_APP_PG if pg_backend else CONTENT_APP_DB, app_db_bytes is not None),
-            # 运行配置存在 app.db 的 app_settings 表里，随库快照一并带走
+            (CONTENT_APP_PG, app_db_bytes is not None),
+            # 运行配置存在同一个库的 app_settings 表里，随整库 dump 一并带走
             (CONTENT_RUNTIME, app_db_bytes is not None or runtime_data is not None),
             (CONTENT_CREDENTIALS, "credentials.enc" in members),
             (
@@ -2130,7 +1885,6 @@ def build_cold_backup_archive(
         "contents": raw_contents,
         "contents_labels": [CONTENT_LABELS[c] for c in raw_contents],
         "photos": photo_info["manifest"],
-        "row_counts": {} if pg_backend else key_table_row_counts(app_db_path),
         "photos_missing": {
             k: v for k, v in photo_info["missing"].items() if v
         },
@@ -2161,14 +1915,6 @@ def build_cold_backup_archive(
     manifest["archive_bytes"] = archive_path.stat().st_size
     manifest["archive_sha256"] = sha256_file(archive_path)
     return archive_path, manifest
-
-
-def _cold_consistency(
-    app_db_path: str,
-    photo_manifest: Dict[str, Any],
-    missing: Dict[str, List[str]],
-) -> Dict[str, Any]:
-    return photo_consistency(photo_manifest, missing)
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -2343,7 +2089,7 @@ def scan_cold_backup_dirs(backup_dir: Optional[Path] = None) -> List[dict]:
                 "archive": str(archive),
                 "size_bytes": archive.stat().st_size,
                 "legacy": False,
-                "contents": [CONTENT_APP_DB],
+                "contents": [CONTENT_APP_PG],
             })
         elif legacy_files:
             items.append({
@@ -2352,518 +2098,10 @@ def scan_cold_backup_dirs(backup_dir: Optional[Path] = None) -> List[dict]:
                 "size_bytes": _dir_size(entry),
                 "legacy": True,
                 "files": legacy_files,
-                # contents 是内容代码（其它分支都填 CONTENT_APP_DB）；填中文标签会让
+                # contents 是内容代码（其它分支都填 CONTENT_APP_PG）；填中文标签会让
                 # 「缺项」与健康覆盖结论判定失真。
-                "contents": [CONTENT_APP_DB],
+                "contents": [CONTENT_APP_PG],
             })
     items.sort(key=lambda x: x["ts"], reverse=True)
     return items
 
-
-
-# ==================== app.db 覆盖 / 合并 ====================
-
-async def _write_temp_db(db_bytes: bytes) -> str:
-    fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-bak-")
-    os.close(fd)
-    with open(tmp_path, "wb") as f:
-        f.write(db_bytes)
-    return tmp_path
-
-
-async def _tables_in_attached_db(conn, alias: str) -> set[str]:
-    cursor = await conn.execute(
-        f"SELECT name FROM {alias}.sqlite_master WHERE type='table'"
-    )
-    rows = await cursor.fetchall()
-    return {row[0] for row in rows}
-
-
-async def _build_overwrite_script(conn, tables: Sequence[str], alias: str = "src") -> str:
-    """把「逐表覆盖」拼成一段可一次执行的 SQL 脚本。
-
-    列交集必须先探（PRAGMA 要 await），真正的写语句则集中到一段脚本里，交给一次
-    ``executescript`` 调用执行。原因：全库只有一条共享连接，覆盖导入原来用
-    ``BEGIN`` + 逐表 ``execute`` + ``commit``，中间每张表都会让出事件循环，采集侧
-    或 Admin 的写入（以及它们的 ``commit()``）就会挤进这个未完成的事务里 ——
-    轻则半截覆盖被提交，重则采集的事务被连带回滚。一次 executescript 在连接的
-    执行线程里一次跑完，其它语句只能在它前后排队。
-
-    ``BEGIN IMMEDIATE`` / ``COMMIT`` 写进脚本内：executescript 自身不做事务控制，
-    不加就退化成逐条 autocommit。
-    """
-    lines = ["BEGIN IMMEDIATE;"]
-    for table in tables:
-        cursor = await conn.execute(f"PRAGMA {alias}.table_info({table})")
-        src_cols = [row[1] for row in await cursor.fetchall()]
-        if not src_cols:
-            continue
-        cursor = await conn.execute(f"PRAGMA main.table_info({table})")
-        main_cols = [row[1] for row in await cursor.fetchall()]
-        common_cols = [c for c in src_cols if c in main_cols]
-        if not common_cols:
-            continue
-        cols_str = ", ".join(common_cols)
-        lines.append(f"DELETE FROM main.{table};")
-        lines.append(
-            f"INSERT INTO main.{table} ({cols_str}) SELECT {cols_str} FROM {alias}.{table};"
-        )
-    lines.append("COMMIT;")
-    return "\n".join(lines)
-
-
-async def _run_overwrite_script(conn, script: str) -> None:
-    """执行覆盖脚本；脚本内事务失败时显式回滚，别把连接留在打开的事务里。"""
-    try:
-        await conn.executescript(script)
-    except Exception:
-        try:
-            await conn.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
-
-
-async def overwrite_app_db_from_bytes(db, app_db_bytes: bytes) -> None:
-    """在存活连接上逐表替换 app.db 数据（ATTACH 临时源库）。"""
-    tmp_path = await _write_temp_db(app_db_bytes)
-    target_tables = set(_app_db_target_tables())
-    try:
-        escaped = tmp_path.replace("'", "''")
-        await db._conn.execute(f"ATTACH DATABASE '{escaped}' AS src")
-        try:
-            src_tables = await _tables_in_attached_db(db._conn, "src")
-            tables_to_copy = sorted(target_tables & src_tables)
-            script = await _build_overwrite_script(db._conn, tables_to_copy, alias="src")
-            await _run_overwrite_script(db._conn, script)
-        finally:
-            await db._conn.execute("DETACH DATABASE src")
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
-async def merge_app_db_from_file(
-    db,
-    src_db_path: str,
-    tables: Optional[Sequence[str]] = None,
-) -> dict:
-    """
-    按唯一键去重合并源 .db 文件到当前库（与 admin 导入 execute 行为一致）。
-    返回 {total_imported, results}。
-    """
-    want_tables = list(tables) if tables else list(ALL_TABLES)
-    want_tables = [t for t in want_tables if t in ALL_TABLES]
-
-    src_conn = await aiosqlite.connect(src_db_path)
-    src_conn.row_factory = aiosqlite.Row
-
-    results: List[dict] = []
-    try:
-        for table in want_tables:
-            dedup_key = TABLE_DEDUP_KEY.get(table)
-
-            async with src_conn.execute(f"PRAGMA table_info({table})") as cur:
-                rows = await cur.fetchall()
-                if not rows:
-                    results.append({"table": table, "status": "表不存在", "imported": 0})
-                    continue
-                src_cols = [r[1] for r in rows]
-
-            dst_tdb = db.table_or_none(table)
-            if dst_tdb is None:
-                results.append({"table": table, "status": "目标表不可用", "imported": 0})
-                continue
-
-            async with dst_tdb.conn.cursor() as cur:
-                await cur.execute(f"PRAGMA table_info({table})")
-                rows = await cur.fetchall()
-                dst_cols = [r[1] for r in rows]
-
-            common_cols = [c for c in src_cols if c in dst_cols and c != "id"]
-            if not common_cols:
-                results.append({"table": table, "status": "无匹配列", "imported": 0})
-                continue
-
-            existing_keys: set = set()
-            if dedup_key and dedup_key in common_cols:
-                async with dst_tdb.conn.cursor() as cur:
-                    await cur.execute(f"SELECT {dedup_key} FROM {table}")
-                    rows = await cur.fetchall()
-                    existing_keys = {r[0] for r in rows if r[0]}
-
-            imported = 0
-            failed_count = 0
-            failed_samples: List[dict] = []
-            cols_str = ", ".join(common_cols)
-            placeholders = ", ".join(["?"] * len(common_cols))
-            insert_sql = (
-                f"INSERT OR IGNORE INTO {table} ({cols_str}) VALUES ({placeholders})"
-            )
-
-            async with src_conn.execute(f"SELECT {cols_str} FROM {table}") as src_cur:
-                async for row in src_cur:
-                    key_val = (
-                        row[common_cols.index(dedup_key)]
-                        if dedup_key and dedup_key in common_cols
-                        else None
-                    )
-                    if key_val is not None and key_val in existing_keys:
-                        continue
-                    try:
-                        async with dst_tdb.conn.cursor() as dst_cur:
-                            await dst_cur.execute(insert_sql, row)
-                        imported += 1
-                        if key_val is not None:
-                            existing_keys.add(key_val)
-                    except Exception as exc:
-                        # 不静默丢行：约束冲突 / 类型不匹配 / 磁盘错误都计数并留下样本，
-                        # 让接口能如实回报「恢复了多少、漏了多少」，而不是一律 OK。
-                        failed_count += 1
-                        if len(failed_samples) < MAX_MERGE_FAILURE_SAMPLES:
-                            failed_samples.append({
-                                "table": table,
-                                "key": None if key_val is None else str(key_val),
-                                "error": str(exc) or exc.__class__.__name__,
-                            })
-
-            await dst_tdb.commit()
-            results.append({
-                "table": table,
-                "status": "PARTIAL" if failed_count else "OK",
-                "imported": imported,
-                "failed": failed_count,
-                "errors": failed_samples,
-            })
-    finally:
-        await src_conn.close()
-
-    total_imported = sum(r.get("imported", 0) for r in results)
-    total_failed = sum(r.get("failed", 0) for r in results)
-    return {
-        "total_imported": total_imported,
-        "total_failed": total_failed,
-        "results": results,
-    }
-
-
-async def merge_app_db_from_bytes(db, app_db_bytes: bytes) -> dict:
-    tmp_path = await _write_temp_db(app_db_bytes)
-    try:
-        return await merge_app_db_from_file(db, tmp_path)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
-# ==================== recipes 覆盖 / 合并 ====================
-
-async def overwrite_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> None:
-    """在 RecipeStore 连接上逐表替换配方数据。"""
-    conn = recipe_store.conn
-    if is_postgres_backend():
-        # PG 没有 ATTACH DATABASE，下面那条 ATTACH + `src.x` / `main.x` 跨库引用的
-        # 路径在 PG 上必然语法报错（覆盖模式恢复配方会直接 500）。
-        await _overwrite_recipes_from_source(conn, recipes_db_bytes)
-        return
-
-    tmp_path = await _write_temp_db(recipes_db_bytes)
-    try:
-        escaped = tmp_path.replace("'", "''")
-        await conn.execute(f"ATTACH DATABASE '{escaped}' AS src")
-        try:
-            src_tables = await _tables_in_attached_db(conn, "src")
-            tables_to_copy = [t for t in RECIPE_TABLES if t in src_tables]
-            script = await _build_overwrite_script(conn, tables_to_copy, alias="src")
-            await _run_overwrite_script(conn, script)
-        finally:
-            await conn.execute("DETACH DATABASE src")
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
-async def _overwrite_recipes_from_source(conn, recipes_db_bytes: bytes) -> None:
-    """逐表 DELETE + INSERT 覆盖配方（PostgreSQL 路径）。
-
-    替代 SQLite 那条 ATTACH + ``executescript`` 的写法：PG 没有 ATTACH，也没有
-    ``main.`` / ``src.`` 这样的跨库限定名。原子性靠 PgConnection 自己的事务语义
-    兜住——DELETE 属于写语句，执行时它开启事务并一直持有串行锁到 commit，因此
-    采集侧或 Admin 的并发写入不会挤进这次覆盖的中间态。
-    """
-    tmp_path = await _write_temp_db(recipes_db_bytes)
-    src_conn = await aiosqlite.connect(tmp_path)
-    src_conn.row_factory = aiosqlite.Row
-    try:
-        for table in RECIPE_TABLES:
-            async with src_conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                (table,),
-            ) as cur:
-                if not await cur.fetchone():
-                    continue
-
-            async with src_conn.execute(f'PRAGMA table_info("{table}")') as cur:
-                src_cols = [row[1] for row in await cur.fetchall()]
-            # 目标库可能是 PG：它的 execute 是 async def，返回 coroutine，不满足
-            # 异步上下文管理器协议（见 db_core/connection.py 的同款说明）。
-            cur = await conn.execute(f"PRAGMA table_info({table})")
-            dst_cols = [row[1] for row in await cur.fetchall()]
-            common_cols = [c for c in src_cols if c in dst_cols]
-            if not common_cols:
-                continue
-
-            cols_str = ", ".join(common_cols)
-            placeholders = ", ".join(["?"] * len(common_cols))
-            await conn.execute(f"DELETE FROM {table}")
-            async with src_conn.execute(f"SELECT {cols_str} FROM {table}") as cur:
-                async for row in cur:
-                    await conn.execute(
-                        f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders})",
-                        tuple(row),
-                    )
-        await conn.commit()
-    except Exception:
-        await conn.rollback()
-        raise
-    finally:
-        await src_conn.close()
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
-async def merge_recipes_from_bytes(recipe_store, recipes_db_bytes: bytes) -> dict:
-    """配方库合并：有则按主键/唯一键跳过重复，无表则跳过。"""
-    tmp_path = await _write_temp_db(recipes_db_bytes)
-    src_conn = await aiosqlite.connect(tmp_path)
-    src_conn.row_factory = aiosqlite.Row
-    conn = recipe_store.conn
-    imported_total = 0
-    total_failed = 0
-    results: List[dict] = []
-
-    recipe_dedup = {
-        "sop_stations": "slug",
-        "sop_recipes": None,
-        "sop_recipes_history": None,
-    }
-
-    try:
-        for table in RECIPE_TABLES:
-            async with src_conn.execute(
-                f"SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                (table,),
-            ) as cur:
-                if not await cur.fetchone():
-                    results.append({"table": table, "status": "表不存在", "imported": 0})
-                    continue
-
-            async with src_conn.execute(f"PRAGMA table_info({table})") as cur:
-                src_cols = [r[1] for r in await cur.fetchall()]
-
-            cur = await conn.execute(f"PRAGMA table_info({table})")
-            dst_cols = [r[1] for r in await cur.fetchall()]
-
-            common_cols = [c for c in src_cols if c in dst_cols and c != "id"]
-            if not common_cols:
-                results.append({"table": table, "status": "无匹配列", "imported": 0})
-                continue
-
-            dedup_key = recipe_dedup.get(table)
-            existing_keys: set = set()
-            if dedup_key and dedup_key in common_cols:
-                cur = await conn.execute(f"SELECT {dedup_key} FROM {table}")
-                rows = await cur.fetchall()
-                existing_keys = {r[0] for r in rows if r[0]}
-
-            imported = 0
-            failed_count = 0
-            failed_samples: List[dict] = []
-            cols_str = ", ".join(common_cols)
-            placeholders = ", ".join(["?"] * len(common_cols))
-            insert_sql = (
-                f"INSERT OR IGNORE INTO {table} ({cols_str}) VALUES ({placeholders})"
-            )
-
-            async with src_conn.execute(f"SELECT {cols_str} FROM {table}") as src_cur:
-                async for row in src_cur:
-                    key_val = (
-                        row[common_cols.index(dedup_key)]
-                        if dedup_key and dedup_key in common_cols
-                        else None
-                    )
-                    if key_val is not None and key_val in existing_keys:
-                        continue
-                    try:
-                        await conn.execute(insert_sql, tuple(row))
-                        imported += 1
-                        if key_val is not None:
-                            existing_keys.add(key_val)
-                    except Exception as exc:
-                        # 同 app.db 合并：丢行必须计数并留样本，不能静默报 OK。
-                        failed_count += 1
-                        if len(failed_samples) < MAX_MERGE_FAILURE_SAMPLES:
-                            failed_samples.append({
-                                "table": table,
-                                "key": None if key_val is None else str(key_val),
-                                "error": str(exc) or exc.__class__.__name__,
-                            })
-
-            await conn.commit()
-            imported_total += imported
-            total_failed += failed_count
-            results.append({
-                "table": table,
-                "status": "PARTIAL" if failed_count else "OK",
-                "imported": imported,
-                "failed": failed_count,
-                "errors": failed_samples,
-            })
-    finally:
-        await src_conn.close()
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-    return {
-        "total_imported": imported_total,
-        "total_failed": total_failed,
-        "results": results,
-    }
-
-
-async def export_recipes_db_bytes_from_conn(conn) -> Optional[bytes]:
-    """从**当前连接**导出「仅配方表」的精简 sqlite 库字节串。
-
-    与 :func:`export_recipes_db_bytes` 的差别是数据来源：后者按文件路径读 SQLite，
-    PostgreSQL 后端下读到的是 ``data/app.db`` 这份迁移遗留副本——它的配方与当前库
-    早已分叉，打进导出包再恢复就会把旧配方灌回去。这里只认调用方给的连接，两种
-    后端拿到的都是「当前生效的那份配方」。
-
-    连接不可用、或源库没有任何配方表时返回 None（调用方据此少打一个成员）。
-    """
-    if conn is None:
-        return None
-
-    tables: Dict[str, List[Tuple[str, str]]] = {}
-    for table in RECIPE_TABLES:
-        cursor = await conn.execute(f"PRAGMA table_info({table})")
-        rows = await cursor.fetchall()
-        columns = [(str(row[1]), str(row[2] or "")) for row in rows]
-        if columns:
-            tables[table] = columns
-    if not tables:
-        return None
-
-    fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-recipes-export-")
-    os.close(fd)
-    dst = sqlite3.connect(tmp_path)
-    try:
-        for table, columns in tables.items():
-            names = [name for name, _ in columns]
-            definitions = []
-            for name, sql_type in columns:
-                definition = f'"{name}" {sqlite_column_type(sql_type)}'
-                if name == "id":
-                    definition += " PRIMARY KEY"
-                definitions.append(definition)
-            dst.execute(f'CREATE TABLE "{table}" ({", ".join(definitions)})')
-
-            quoted = ", ".join(f'"{name}"' for name in names)
-            placeholders = ", ".join(["?"] * len(names))
-            cursor = await conn.execute(f'SELECT {quoted} FROM "{table}"')
-            data_rows = await cursor.fetchall()
-            if data_rows:
-                dst.executemany(
-                    f'INSERT INTO "{table}" ({quoted}) VALUES ({placeholders})',
-                    [
-                        tuple(sqlite_bindable(value) for value in row)
-                        for row in data_rows
-                    ],
-                )
-        dst.commit()
-    finally:
-        dst.close()
-
-    try:
-        with open(tmp_path, "rb") as handle:
-            return handle.read()
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
-def export_recipes_db_bytes(recipes_db_path: str) -> Optional[bytes]:
-    """把「仅配方表」导出为一个精简 sqlite 库的字节串。
-
-    配方表现与业务表同库存放于 app.db，因此不能直接整库拷贝（否则 recipes 成员会
-    是 app.db 的完整副本，与 app.db 成员重复，备份体积翻倍）。这里只把 RECIPE_TABLES
-    的表结构与数据复制进一个新建的临时库，恢复逻辑（overwrite/merge_recipes）只读这些表，
-    行为不变。源库不含任何配方表时返回 None。
-    """
-    if not os.path.isfile(recipes_db_path):
-        return None
-
-    src = sqlite3.connect(recipes_db_path)
-    try:
-        placeholders = ", ".join(["?"] * len(RECIPE_TABLES))
-        existing_rows = src.execute(
-            f"SELECT name FROM sqlite_master WHERE type='table' AND name IN ({placeholders})",
-            RECIPE_TABLES,
-        ).fetchall()
-        existing = {row[0] for row in existing_rows}
-        if not existing:
-            return None
-
-        fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-recipes-export-")
-        os.close(fd)
-        dst = sqlite3.connect(tmp_path)
-        try:
-            for table in RECIPE_TABLES:
-                if table not in existing:
-                    continue
-                ddl_row = src.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
-                    (table,),
-                ).fetchone()
-                if not ddl_row or not ddl_row[0]:
-                    continue
-                dst.execute(ddl_row[0])
-
-                col_rows = src.execute(f"PRAGMA table_info({table})").fetchall()
-                col_names = [c[1] for c in col_rows]
-                if not col_names:
-                    continue
-                cols_str = ", ".join(col_names)
-                data_rows = src.execute(f"SELECT {cols_str} FROM {table}").fetchall()
-                if data_rows:
-                    row_placeholders = ", ".join(["?"] * len(col_names))
-                    dst.executemany(
-                        f"INSERT INTO {table} ({cols_str}) VALUES ({row_placeholders})",
-                        data_rows,
-                    )
-            dst.commit()
-        finally:
-            dst.close()
-
-        try:
-            with open(tmp_path, "rb") as f:
-                return f.read()
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-    finally:
-        src.close()

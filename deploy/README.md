@@ -3,9 +3,12 @@
 > **发版与部署操作规范（推荐先读）**：[`docs/RELEASE_AND_DEPLOY.md`](../docs/RELEASE_AND_DEPLOY.md)  
 > 本文侧重组件安装细节（反代、备份 timer、手工对照）；升级心智与发版清单以那份为准。
 
-本系统已定为**单机、单实例、单 uvicorn worker**部署：没有 Postgres、没有
-Redis、没有以容器镜像 pull 为真相的编排。数据是 `data/` 目录下的一组 SQLite
-文件（见 `config.py` 的 `DATABASE_PATHS`）。`main:app` 这一个 FastAPI 进程同时提供：
+本系统已定为**单机、单实例、单 uvicorn worker**部署：没有以容器镜像 pull 为
+真相的编排（Docker 只作进程外壳）。数据后端**只有 PostgreSQL**（ADR 0089）：
+业务表、`sop_*`、`hygiene_*` 与日志表 `logs` 同在**一个库**里，`DATABASE_BACKEND`
+默认 `postgres`，值不是 `postgres` 时应用启动即失败并打印迁移指引。结构由
+`migrations/pg/*.sql` 建立，新装与从遗留 SQLite 迁移见第 10 节。
+`main:app` 这一个 FastAPI 进程同时提供：
 
 - REST API（`/api/*`）
 - WebSocket 实时推送（`/ws/realtime`）
@@ -49,7 +52,8 @@ worker/多进程会导致状态分裂、WebSocket 订阅收不到推送、甚至
 | `Caddyfile` | Caddy 反向代理配置（首选，自动 HTTPS） |
 | `nginx.conf` | Nginx 反向代理配置示例（与 Caddyfile 等价） |
 | `env.production.example` | 生产环境变量示例（含 GitHub Release 说明；PAT 可选） |
-| `backup.sh` | SQLite 在线冷备脚本（`sqlite3 .backup`），含凭据文件/密钥 + 保留策略 |
+| `enable_postgres.sh` | 一键切到 PostgreSQL 后端（装库 → 建库建用户 → 应用 schema → 迁移数据 → 写 env → 重启 → 冒烟；幂等，`--dry-run` 可预览） |
+| `backup.sh` | 冷备脚本（`pg_dump` → `app.pgdump` 整库快照），含凭据文件/密钥 + 保留策略 |
 | `luyun-backup.service` / `luyun-backup.timer` | systemd timer，每日调用 `backup.sh` |
 | `README.md` | 本文档 |
 
@@ -175,17 +179,16 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 并发：已有进行中的 Update Job 时，新的 Apply Update 会被拒绝。
 `data/` 业务库与凭据在代码更新过程中保留；备份另见第 4 节。
 
-5. **（仅 PostgreSQL 后端）应用数据库迁移**：健康确认之后进「系统更新」→「数据库迁移」
-   →「应用待执行迁移」。SQLite 门店跳过这一步——schema 由应用启动时自愈。
+5. **应用数据库迁移**：健康确认之后进「系统更新」→「数据库迁移」→「应用待执行迁移」。
 
    更新作业按设计**不碰数据库结构**（`_connect_postgres` 明确不在启动期改结构，结构变更
    要可追溯），所以 schema 变更得单独应用一次。版本检测已把待应用条数显示在版本状态卡上，
    不用靠记性；应用记录写在 `schema_migrations` 表，能看出当前到哪一版。详见
    `migrations/pg/README.md`。
 
-> **PostgreSQL 后端（可选）**：切到 `DATABASE_BACKEND=postgres` 后，上面
-> `backing_up` 阶段的强制备份会改为 `pg_dump` 产出 `app.pgdump`，不再是
-> `app.db`。切换步骤、恢复与回滚见 [第 10 节](#10-postgresql-后端可选多店形态)。
+> **数据库是 PostgreSQL**：上面 `backing_up` 阶段的强制备份走 `pg_dump` 产出
+> `app.pgdump`（不再有 `app.db`）。首次部署、从遗留 SQLite 迁移、恢复与回滚见
+> [第 10 节](#10-postgresql唯一后端)。
 
 ### 依赖与浏览器的版本一致性
 
@@ -202,21 +205,21 @@ Playwright 的 Python 包与浏览器 build 一一对应（如 lib 1.63.0 ↔
 - 爬虫自身在 launch 报「Executable doesn't exist」时也会自动补装并重试一次，可用
   `SCRAPER_BROWSER_AUTO_INSTALL=0` 关闭。
 
-### 别用一次性脚本碰生产库（特别是 `DATABASE_BACKEND=postgres` 的机器）
+### 别用一次性脚本碰生产库
 
-`tests/conftest.py` 只保护 `pytest` 那条路径：它把 `DATABASE_BACKEND` 钉死为
-`sqlite`。**任何绕过 `pytest` 的代码都不会被保护**——`python -c`、REPL、临时
-验证脚本、没写隔离的 `scripts/` 运维脚本，都会按 `.env` 里的
-`DATABASE_BACKEND=postgres` **直接连上生产库**，写进去的行没人会注意到。
+`tests/conftest.py` 只保护 `pytest` 那条路径：它把 DSN 钉死到专用测试库
+`luyun_test`。**任何绕过 `pytest` 的代码都不会被保护**——`python -c`、REPL、临时
+验证脚本、没写隔离的 `scripts/` 运维脚本，都会按 `.env` 里的 `POSTGRES_DSN`
+**直接连上生产库**，写进去的行没人会注意到。
 
 要在本机做验证（环境变量必须**早于** `from config import settings`——pydantic-settings
-的优先级是 env > `.env`）：
+的优先级是 env > `.env`；库不存在就先跑一次 `pytest`，conftest 会建）：
 
 ```bash
-DATABASE_BACKEND=sqlite DATABASE_DIR=$(mktemp -d) .venv/bin/python -c "..."
+POSTGRES_DSN=postgresql://localhost:5432/luyun_test .venv/bin/python -c "..."
 ```
 
-确实需要连生产库时只读、只 `SELECT`，并先打印 `settings.DATABASE_BACKEND` 确认。
+确实需要连生产库时只读、只 `SELECT`，并先打印 `settings.POSTGRES_DSN` 确认。
 
 ### 磁盘水位
 
@@ -240,9 +243,10 @@ DATABASE_BACKEND=sqlite DATABASE_DIR=$(mktemp -d) .venv/bin/python -c "..."
 
 - **软件回滚（首选）**：在「系统更新」里对**更旧的正式 Release**再执行一次
   Apply Update（再下载该版发行包）。
-- **数据回滚**：用第 4 节备份目录把 `.db` 与（若有）`credentials.enc` /
-  `.cred_key` 覆盖回 `data/`——先 `sudo systemctl stop luyun`，再覆盖，避免
-  与运行中进程写冲突。
+- **数据回滚**：库数据用备份里的整库快照（`app.pgdump`）走 `pg_restore` 覆盖回
+  PostgreSQL（见 §10.4；没有可覆盖回 `data/` 的 `.db` 文件了）；凭据文件
+  `credentials.enc` / `.cred_key` 仍是从归档覆盖回 `data/`——先
+  `sudo systemctl stop luyun`，再覆盖，避免与运行中进程写冲突。
 
 ### SSH 应急（非日常）
 
@@ -291,7 +295,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ## 4. 备份配置
 
-备份在管理后台「系统配置 → 备份中心」统一呈现为一份**备份点**列表：本机回滚
+备份在管理后台 `/setup` → 「备份中心」统一呈现为一份**备份点**列表：本机回滚
 快照、导出备份与宿主机冷备三种介质。页面备份与冷备走同一套创建逻辑
 （`services/backup_service.py`），两条路径不会给出互相矛盾的结论。
 
@@ -319,10 +323,12 @@ journalctl -u luyun-backup
 不用 systemd timer 的话，`deploy/backup.sh` 内也附了等价的 crontab 示例
 （文件末尾注释）。脚本只是调度入口，应用侧逻辑在 `scripts/cold_backup.py`。
 
-冷备产物是**一份可校验的单一归档**：`app.db` 快照 + `credentials.enc` +
+冷备产物是**一份可校验的单一归档**：库快照 + `credentials.enc` +
 `.cred_key` + 两类卫生照片（标准图含全部历史版本、其它照片）+ `manifest.json`
-清单 + `SHA256SUMS` 校验和。库快照用 sqlite3 官方在线备份 API 取得——即使数据库
-处于 WAL 模式且正被 `luyun.service` 写入，也能拿到一致性快照，**不需要停服务**。
+清单 + `SHA256SUMS` 校验和。库快照由 `pg_dump --format=custom` 产出整库快照（成员
+`app.pgdump`）——`data/app.db` 不再是冷备的前置条件，也不再有任何 SQLite 分支
+（ADR 0089）。冷备**不需要停服务**，保留份数从 PostgreSQL 的 `app_settings` 读取
+（`services/backup_retention.load_from_pg_sync`）。
 每次运行还会在固定位置写一份 `backups/cold_backup_status.json`（时间、结果、
 归档名、体积、校验结论、错误信息），备份中心据此显示最近一次冷备结论；状态文件
 缺失时（旧部署）退回扫描 `backups/*/` 目录兜底。
@@ -332,18 +338,19 @@ journalctl -u luyun-backup
 导出备份本机副本默认 5、上限 20；冷备默认 14、上限 90），也可用
 `./deploy/backup.sh --retention 30` 临时覆盖冷备份数；最近一份冷备永不自动删。
 任一步失败时退出码非零、状态文件记录失败原因，且不留下会被误认为有效备份的
-半成品。恢复时优先用管理后台「备份中心 → 恢复」；手工还原需把归档内的
-`app.db` 与凭据文件一并放回 `data/`。
+半成品。恢复时优先用管理后台 `/setup` →「备份中心」→ 恢复；手工还原把归档内的
+`app.pgdump` 走 `pg_restore`、凭据文件放回 `data/`，见 §10.4。
 
 > 建议再把 `backups/` 目录定期同步到异地存储（对象存储、另一台机器等），
 > 单机备份只能防误删/误改，防不了硬盘/整机故障。这部分本项目暂未提供
 > 现成脚本，需要按你实际使用的存储服务自行补充（比如在 `backup.sh` 跑完后
 > 加一行 `rsync`/`rclone` 命令）。
 
-> 冷备不再需要 `sqlite3` 命令行工具：脚本通过 Python 的 sqlite3 在线备份 API
-> 直接生成归档。`PYTHON_BIN` 可覆盖执行用的解释器。
+> 冷备依赖 `pg_dump`（`postgresql-client`，版本需 ≥ 服务端）。`PYTHON_BIN` 可覆盖
+> 执行用的解释器。
 
-> **不在备份范围内**（页面会明确列出）：日志库 `logs.db`、采集状态文件、
+> **不在备份范围内**（页面会明确列出，清单见 `services/backup_points.NOT_BACKED_UP`）：
+> 日志（`logs` 表；与业务表同库，不再有独立的 `logs.db` 文件）、采集状态文件、
 > 更新访问凭据 `github_release.enc`、更新作业状态与更新历史。
 
 ---
@@ -378,15 +385,16 @@ Bootstrap **不**填写 POS 凭据；反代就绪后：
 - Update Job：`journalctl -u luyun-update`，以及 `data/update_job.log` /
   `data/update_job.json`
 - 备份任务日志：`journalctl -u luyun-backup`
-- 应用内近期日志（写入 `data/logs.db`，带级别/logger 过滤）：管理后台
+- 应用内近期日志（`logs` 表，与业务表同库；带级别/logger 过滤）：管理后台
   「实时日志」页面（`/logs`，需要登录），或 `GET /api/logs/*` 系列接口。
-  - `logs.db` 为 WAL + `synchronous=NORMAL`，启动时做 `quick_check`，运行期每
-    `LOG_MAINTENANCE_INTERVAL_SECONDS`（默认 6h）清理过期日志并回收 WAL；
-  - 判定损坏时隔离为 `logs.db.corrupt.<时间戳>` 并重建新库，副本旁写
-    `.forensics.txt`（记录磁盘水位与各文件大小），用于区分「满盘导致」与「真损坏」；
-    副本只保留最近 `LOG_CORRUPT_KEEP`（默认 2）份，避免副本本身再把磁盘写满；
+  - 写入走 `queue.Queue` 批量落库（`services/log_storage.py`，纯 PG 实现）；
+    启动与运行期每 `LOG_MAINTENANCE_INTERVAL_SECONDS`（默认 6h）按
+    `LOG_RETENTION_DAYS` 清理过期日志（空间回收交给 PG autovacuum）；
+  - SQLite 时代的 WAL / `synchronous=NORMAL` / 启动 `quick_check` / 损坏隔离
+    `logs.db.corrupt.<时间戳>` / `.forensics.txt` 已随 SQLite 一起退役（ADR 0089），
+    `data/logs.db` 不再创建；
   - **磁盘满不会被当成损坏**：那类写入失败只丢弃当批日志并计入 `queue_dropped`
-    （`GET /api/logs/stats`），不会隔离数据库、不会清空历史。
+    （`GET /api/logs/stats`），不会清空历史。
 - Caddy/Nginx 访问日志：各自默认日志位置（`/var/log/caddy/`、
   `/var/log/nginx/`），或按需在 Caddyfile/nginx.conf 里加 `log` 配置。
 
@@ -450,51 +458,58 @@ sudo systemctl enable luyun-update.service   # oneshot，按需 start
 
 ## 9. 关键约束回顾
 
-- **单实例、单 worker**：不要给 `uvicorn`/`gunicorn` 配置多进程，也不要在
-  多台机器上同时跑这套代码指向同一份 `data/`（SQLite 文件锁 + 内存态 hub
-  都不支持这种拓扑）。
-  PostgreSQL 后端放宽了「同一份数据目录」这条（库在服务端，多机可连），但
-  **单 worker 仍然成立**——realtime hub、日志缓冲、爬虫计数器还在进程内存里，
+- **单实例、单 worker**：不要给 `uvicorn`/`gunicorn` 配置多进程。库在 PostgreSQL
+  服务端，多机可连——SQLite 文件锁那条约束随 SQLite 退场（ADR 0089）——但
+  **单 worker 仍然成立**：realtime hub、日志缓冲、爬虫计数器还在进程内存里，
   除非先把它们外置到 Redis（尚未接入）。
 - **Docker 仅可作进程外壳**：见「Docker 部署」；**不要**把 `docker pull`
   镜像当作本产品的店内交付真相。
   裸机/VM 上用 systemd + venv 仍是默认路径。
 - **生产机无 Node / 无运行时前端构建**：日常升级走发行包 + Update Job；
   发版用 `scripts/publish_release.sh`（见第 7 节与 ADR 0011）。
-- **`WorkingDirectory` 必须是应用根目录**：`services/recipes/store.py` 默认
-  跟随 `settings.APP_DB_PATH`（`data/app.db`，相对路径），依赖进程 cwd。
-  配方表 `sop_*` 已并入单库，不再有独立的 `data/recipes.db`。
+- **`WorkingDirectory` 必须是应用根目录**：`data/`、`backups/` 与各状态文件都按
+  进程 cwd 解析相对路径。配方表 `sop_*` 与业务表同库（不再有独立的
+  `data/recipes.db`），`RecipeStore` 的连接由 `main.py` 注入，已不自建 SQLite 文件。
 - CORS（`main.py` 硬编码 `allow_origins=["*"]`）和爬虫营业时间
-  （`scraper/adapter.py` 硬编码 07:30–21:30）目前都不支持环境变量覆盖，
+  （`scraper/pos_session.py` 硬编码 07:30–21:30）目前都不支持环境变量覆盖，
   属于代码常量，改动需要改代码而不是这份部署配置。
 
 ---
 
-## 10. PostgreSQL 后端（可选，多店形态）
+## 10. PostgreSQL（唯一后端）
 
-默认后端是 SQLite（单文件、零外部依赖）。**不切换的机器完全不受本节影响**——
-这也是 0.6.0 升级对现有门店零风险的原因。决策背景见
-[ADR 0084](../docs/adr/0084-multi-store-reintroduce-postgres-redis.md)。
+PostgreSQL 是唯一后端（ADR 0089）：`DATABASE_BACKEND` 默认 `postgres`，值不是
+`postgres` 时应用启动即失败并打印迁移指引，结构只能在 `migrations/pg/*.sql` 里改。
+新机器先有一个可连的 PostgreSQL 并应用 `0001_initial_schema.sql`；从遗留 SQLite
+门店迁移见 10.2 / 10.3。决策背景见
+[ADR 0084](../docs/adr/0084-multi-store-reintroduce-postgres-redis.md)（引入 PG）与
+[ADR 0089](../docs/adr/0089-retire-sqlite-postgres-only.md)（SQLite 退场）。
 
-### 10.1 能力现状（0.6.0）
+### 10.1 能力现状
 
-| 能力 | SQLite | PostgreSQL |
-|---|---|---|
-| 读写 / KDS / admin 表格编辑 | ✓ | ✓ |
-| 更新前强制备份（`backing_up`） | ✓ `app.db` | ✓ `pg_dump` → `app.pgdump` |
-| 定时冷备（`deploy/backup.sh`） | ✓ | ✓ 同上 |
-| Admin「备份导出 / 导入」 | ✓ 业务数据是 `app.db` 文件 | ✓ 业务数据是 `app.pgdump` 整库快照；导入走 `pg_restore`，**只能整库覆盖**（无合并） |
-| 必须单 worker | ✓ | **仍是**——realtime hub / 日志缓冲 / 爬虫计数器还在进程内 |
+| 能力 | 现状 |
+|---|---|
+| 读写 / KDS / admin 表格编辑 | ✓ |
+| 更新前强制备份（`backing_up`） | ✓ `pg_dump` → `app.pgdump` |
+| 定时冷备（`deploy/backup.sh`） | ✓ 同一条 `pg_dump` 路径 |
+| Admin「备份导出 / 导入」 | 业务数据是 `app.pgdump` 整库快照；导入走 `pg_restore`，**只能整库覆盖**（无合并） |
+| 必须单 worker | **是**——realtime hub / 日志缓冲 / 爬虫计数器还在进程内 |
 
-Redis 容器已在 `docker-compose.yml` 的 `pg` profile 里备好，但**代码尚未接入**，
+> **冷备没有前置条件**：`scripts/cold_backup.py` 不再要求 `data/app.db` 存在，保留
+> 份数也从 PostgreSQL 的 `app_settings` 读取，纯 PG 新装机器可直接跑
+> `deploy/backup.sh`。
+>
+> `api/admin.py` 里的 `.db` 导出 / 导入与表结构管理目前仍在（依赖
+> `db_core/backend/sqlite_export.py`），是待退役的残留路径。
+
+Redis 容器仍在 `docker-compose.yml` 的 `pg` profile 里（默认不起），**代码尚未接入**，
 先起它不改变任何行为。
 
-### 10.2 新机器：直接上 PostgreSQL
+### 10.2 从遗留 SQLite 迁移（推荐）
 
 > **0.5.19 → 0.6.0 的完整升级方案**（含 Docker 形态、切 PG 前置、回滚、排查表）
-> 见 [UPGRADE_TO_0_6_0.md](../docs/UPGRADE_TO_0_6_0.md)。
-
-### 10.2 一键切换（推荐）
+> 见 [UPGRADE_TO_0_6_0.md](../docs/UPGRADE_TO_0_6_0.md)。该文是历史方案：0.6.x
+> 之后 SQLite 已退场，文中的「继续用 SQLite」场景不再适用，只保留迁移路径供参考。
 
 ```bash
 sudo bash deploy/enable_postgres.sh --dry-run   # 先预览它要做什么
@@ -502,11 +517,13 @@ sudo bash deploy/enable_postgres.sh             # 实际执行
 ```
 
 这一条命令会自动完成：装 PostgreSQL（apt/dnf/yum 自动识别）→ 建库建用户（密码
-自动生成）→ 应用 schema → 停应用 → 备份 SQLite → 迁移数据 → 重置序列 → 写
-`env.production` → 启动 → 冒烟检查（healthz + orders 行数比对）。
+自动生成）→ 应用 `0001` bootstrap schema → 停应用 → 备份 SQLite → 迁移数据 →
+重置序列 → 写 `env.production` → 启动 → 冒烟检查（healthz + orders 行数比对）。
+`0002` 起的增量脚本不在这一步应用——切完之后在后台 `/setup` →「系统更新」→
+「数据库迁移」里应用。
 
 脚本**幂等**，可重复执行；已完成的步骤会跳过。任何一步失败即中止，且
-`data/app.db` 全程只读，所以失败后直接重跑或按 10.5 回滚。
+`data/app.db` 全程只读，所以失败后直接重跑；已切库之后的数据回滚见 10.4 / 10.5。
 
 > 为什么要单独一条 `sudo` 命令，而不是在管理后台点一下？因为装系统包、以
 > postgres 身份建库、改 systemd 服务都需要 root，而更新作业
@@ -545,9 +562,11 @@ curl -s localhost:8000/api/healthz
 ```
 
 `deploy/luyun.service` 已声明 `After=postgresql.service` + `Wants=postgresql.service`
-（弱依赖：SQLite 机器没有这个 unit 也能启动）。
+（弱依赖而非 `Requires`：写成强依赖会让没有这个 unit 的机器直接起不来；库在本机
+自建还是外部实例都可以）。
 
-Docker 形态用 profile 起 PG/Redis（无需 root、无需改 env 之外的系统状态）：
+Docker 形态下 `postgres` 服务随 compose 一起起（已去掉 profile），Redis 仍在 `pg`
+profile 里，需要时显式带上（无需 root、无需改 env 之外的系统状态）：
 
 ```bash
 docker compose -f deploy/docker-compose.yml --profile pg up -d
@@ -556,18 +575,20 @@ docker compose -f deploy/docker-compose.yml --profile pg up -d
 完整前置条件、冒烟清单与排错见
 [`migrations/pg/README.md`](../migrations/pg/README.md)。
 
-### 10.3.1 已有门店升级到 0.6.0
+### 10.3.1 已有门店的升级
 
-**继续用 SQLite（绝大多数门店）**：零额外步骤——管理后台 →「系统更新」→ 版本
-检测 → 应用更新。升级作业会自动备份 `app.db`、原子切换代码、保留 `data/`；
-`syncing_deps` 阶段会装上新声明的 `asyncpg` / `redis`（无副作用）。
+**仍跑在遗留 SQLite 上**：更新预检对非 `postgres` 后端判红（ADR 0089），所以先按
+10.2 或 10.3 把数据迁到 PostgreSQL，再走管理后台「系统更新」。迁移脚本对源库只读，
+`data/app.db` 原样保留；0.5.19 → 0.6.0 的历史方案见
+[UPGRADE_TO_0_6_0.md](../docs/UPGRADE_TO_0_6_0.md)。
 
-**要切 PostgreSQL**：先按上面完成「系统更新」升到 0.6.0（切换脚本是 0.6.0 才有
-的），确认应用正常后，再跑 `sudo bash deploy/enable_postgres.sh`。
+**已经跑在 PostgreSQL 上**：零额外步骤——管理后台 →「系统更新」→ 版本检测 → 应用
+更新。升级作业会自动 `pg_dump` 备份、原子切换代码、保留 `data/`；`syncing_deps`
+阶段会装上新声明的依赖。
 
-### 10.4 PG 的备份与恢复
+### 10.4 备份与恢复
 
-**页面内恢复（推荐，本机回滚快照）**：管理后台 →「配置 → 备份中心 → 备份点 →
+**页面内恢复（推荐，本机回滚快照）**：管理后台 `/setup` →「备份中心」→「备份点 →
 本机回滚快照」，点「恢复整库数据」。这条路径会：
 
 1. 先自动生成一份前置快照（同样的 `app.pgdump`，恢复失败可回退）；
@@ -577,8 +598,8 @@ docker compose -f deploy/docker-compose.yml --profile pg up -d
 
 恢复期间服务短暂无法写库（采集会中断一轮），**不要在营业高峰做**。
 
-**手工冷备（`pg_dump`）**：管理后台的「导出备份」（`.luyunbak`）在 PG 门店会把业务
-数据打包成整库快照（`app.pgdump`），恢复时按成员名走 `pg_restore --clean` 整库覆盖。
+**手工冷备（`pg_dump`）**：管理后台的「导出备份」（`.luyunbak`）会把业务数据打包成
+整库快照（`app.pgdump`），恢复时按成员名走 `pg_restore --clean` 整库覆盖。
 同样的命令也可以手工跑（与更新作业的 `backing_up` 阶段、`deploy/backup.sh` 是同一条）：
 
 ```bash
@@ -588,7 +609,7 @@ pg_dump --format=custom --no-owner --no-acl \
   "postgresql://luyun:<密码>@127.0.0.1:5432/luyun"
 ```
 
-> `.luyunbak` 里同时带着凭据、运行配置、配方数据与两类卫生照片；PG 门店的业务数据
+> `.luyunbak` 里同时带着凭据、运行配置、配方数据与两类卫生照片；业务数据
 > 是整库快照，所以「业务数据」这一项的恢复粒度是**整库覆盖**，不是逐表合并——
 > 导入面板会据此只提供「覆盖恢复」。
 
@@ -609,14 +630,17 @@ sudo systemctl start luyun
 
 ### 10.5 回滚
 
-- **未切 PG**：照旧装回更旧发行包即可。
-- **已切 PG**：把 `DATABASE_BACKEND` 改回 `sqlite` 重启。迁移脚本全程只读源库，
-  `data/app.db` 仍在原位，因此**回滚不丢数据**；但停机切换到切回之间的 PG 新增
-  数据不会回到 SQLite，需要人工取舍。观察期结束前不要删 `data/app.db`。
+- **软件回滚**：在「系统更新」里对更旧的正式 Release 再执行一次 Apply Update，
+  照旧装回更旧发行包。
+- **数据回滚**：只有 PG 快照一条路——本机回滚快照 / `.luyunbak` / 冷备归档里的
+  `app.pgdump` 走 `pg_restore`（见 10.4）。**没有「把 `DATABASE_BACKEND` 改回
+  `sqlite`」这一招**：SQLite 已退场（ADR 0089），那样改只会让应用启动直接失败。
+  `data/app.db` / `data/logs.db` 是历史遗留文件：`app.db` 只剩迁移脚本
+  （`scripts/archive/migrate_sqlite_to_postgres.py`）与待退役的备份/导出路径会读。
 
 ### 10.6 后台重置数据库密码
 
-后台「设置 → 数据库凭据」可以查看当前连接信息并一键重置 PostgreSQL 业务角色的
+后台 `/setup` →「数据库凭据」可以查看当前连接信息并一键重置 PostgreSQL 业务角色的
 密码，不需要登录服务器。
 
 它依次做四件事：`ALTER USER`（用当前 DSN，只改自己这个角色）→ 用新密码另建连接
@@ -626,7 +650,7 @@ sudo systemctl start luyun
 
 | 场景 | 行为 |
 | --- | --- |
-| 当前后端是 SQLite | 面板说明无需密码，按钮禁用 |
+| 后端不是 `postgres`（代码里仍有这个分支，实际到不了：应用启动就会失败） | 面板只读展示，重置被拒：「当前后端不是 PostgreSQL，无法重置数据库密码」 |
 | 连接串里没有密码（本机 trust 认证） | 拒绝重置（无法回滚），面板给出说明 |
 | 设了 `LUYUN_POSTGRES_DSN` 环境变量 | 拒绝并提示：它优先于 `deploy/env.production`，写文件不生效 |
 | 当前密码短于 16 位 | 面板警示，建议重置为 32 位随机密码 |

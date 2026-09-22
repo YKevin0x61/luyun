@@ -7,11 +7,7 @@ CI 环境通常没有 PostgreSQL，整组自动跳过。
 """
 
 import asyncio
-import os
-import tempfile
 import unittest
-
-import aiosqlite
 
 try:  # asyncpg 是 PG 后端依赖；缺失时整组测试跳过（见 pg_available）
     import asyncpg
@@ -289,76 +285,6 @@ class PgConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(reader, timeout=5)
         # 提交后读者才拿到锁，看到 setUP 那条 + 事务里那条
         self.assertEqual(observed, [2])
-
-
-@unittest.skipUnless(pg_available(), "PostgreSQL 不可用，跳过 PG 后端测试")
-class PgBackupExportTest(unittest.IsolatedAsyncioTestCase):
-    """「导出 DB」（``PgConnection.backup``）在 PG 后端下的端到端验证。
-
-    全程只读：导出走 SELECT，不写业务数据。用最小的 app_settings 而不是 orders
-    （十几万行）以免拖慢测试。
-    """
-
-    async def asyncSetUp(self):
-        self.conn = await pg_backend.connect()
-        fd, self._dump_path = tempfile.mkstemp(suffix=".sqlite")
-        os.close(fd)
-
-    async def asyncTearDown(self):
-        await self.conn.close()
-        try:
-            os.unlink(self._dump_path)
-        except OSError:
-            pass
-
-    async def _source_columns(self, table: str) -> list:
-        cursor = await self.conn.execute(f"PRAGMA table_info({table})")
-        return [row[1] for row in await cursor.fetchall()]
-
-    async def test_backup_exports_schema_and_rows(self):
-        target = await aiosqlite.connect(self._dump_path)
-        try:
-            await self.conn.backup(target, tables=["app_settings"])
-        finally:
-            await target.close()
-
-        async with aiosqlite.connect(self._dump_path) as dump:
-            dump.row_factory = aiosqlite.Row
-            cursor = await dump.execute("PRAGMA table_info(app_settings)")
-            dumped_columns = [row["name"] for row in await cursor.fetchall()]
-            cursor = await dump.execute("SELECT count(*) FROM app_settings")
-            dumped_rows = (await cursor.fetchone())[0]
-
-        cursor = await self.conn.execute("SELECT count(*) FROM app_settings")
-        source_rows = (await cursor.fetchone())[0]
-
-        self.assertEqual(dumped_columns, await self._source_columns("app_settings"))
-        self.assertEqual(dumped_rows, source_rows)
-
-    async def test_backup_skips_tables_absent_from_source(self):
-        target = await aiosqlite.connect(self._dump_path)
-        try:
-            await self.conn.backup(target, tables=["app_settings", "no_such_table"])
-        finally:
-            await target.close()
-
-        async with aiosqlite.connect(self._dump_path) as dump:
-            cursor = await dump.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-            tables = {row[0] for row in await cursor.fetchall()}
-
-        self.assertEqual(tables, {"app_settings"})
-
-    async def test_full_backup_catalogue_has_business_tables_but_no_temp_tables(self):
-        """整库导出（tables 省略）的表目录：含业务表，不含会话级 TEMP 表。"""
-        await self.conn.execute("CREATE TEMP TABLE backup_probe (id BIGINT)")
-
-        cursor = await self.conn.execute(pg_backend._TABLE_NAMES_SQL)
-        names = {row[0] for row in await cursor.fetchall()}
-
-        self.assertIn("orders", names)
-        self.assertNotIn("backup_probe", names)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,6 @@ RUN apt-get update \
         curl \
         fonts-wqy-zenhei \
         tar \
-        sqlite3 \
         tini \
     && install -d /usr/share/postgresql-common/pgdg \
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \

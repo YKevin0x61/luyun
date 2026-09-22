@@ -13,9 +13,13 @@ class Settings(BaseSettings):
 
     # 基础配置
     APP_NAME: str = "LuyunOrder"
-    APP_VERSION: str = "0.6.13"
+    APP_VERSION: str = "0.7.0"
     # 安全默认：不开 /docs、cookie 带 Secure。开发机在 .env 里显式写 DEBUG=true。
     DEBUG: bool = False
+    # 关掉 lifespan 里的常驻后台循环（爬虫轮询、卫生调度、企微推送、数据质量调度）。
+    # 给测试用：这些循环会长期占用与业务库同一条 PostgreSQL 连接，共享测试库上
+    # 会互相干扰（TRUNCATE 撞锁、跨用例状态污染）。生产不要打开。
+    DISABLE_BACKGROUND_TASKS: bool = False
     
     # 服务器配置
     HOST: str = "0.0.0.0"
@@ -37,12 +41,12 @@ class Settings(BaseSettings):
     SESSION_COOKIE_SECURE: Optional[bool] = None
     AUTH_MIN_PASSWORD_LENGTH: int = 8
     AUTH_MAX_PASSWORD_BYTES: int = 1024
-    # 数据库配置 — 单库 app.db（WAL），仅 logs 因写入量大保持独立文件
+    # 数据库配置 — PostgreSQL 是唯一后端（SQLite 已在 ADR 0089 退场）
     DATABASE_DIR: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     APP_DB_FILENAME: str = "app.db"
-    # 数据库后端：sqlite（默认，单店部署形态）| postgres（多店，见 ADR 0084）。
-    # 切到 postgres 时表的建立由 migrations/pg/ 负责，不在启动期建表。
-    DATABASE_BACKEND: str = "sqlite"
+    # 只接受 postgres。这一项保留是为了让老部署在启动时拿到明确指引，而不是静默
+    # 回落：值不是 postgres 时 DatabaseManager.connect() 直接失败（见 ADR 0089）。
+    DATABASE_BACKEND: str = "postgres"
     POSTGRES_DSN: str = "postgresql://localhost:5432/luyun"
     # 冷备输出根目录（宿主机定时任务的归档落点，仓库根下的 backups/）；
     # BACKUP_DIR 环境变量优先
@@ -77,8 +81,6 @@ class Settings(BaseSettings):
             "wecom_push_logs": app_db_path,
             # 应用运行配置（营业时段 / 轮询间隔等）
             "app_settings": app_db_path,
-            # 日志写入量大，独立文件，不并入 app.db
-            "logs": os.path.join(self.DATABASE_DIR, "logs.db"),
             "auth": app_db_path,
         }
 
@@ -86,15 +88,9 @@ class Settings(BaseSettings):
     LOG_RETENTION_DAYS: int = 7  # 日志保留天数（0 = 永久保留）
     LOG_QUEUE_BATCH_SIZE: int = 200  # 异步写库批量大小
     LOG_QUEUE_FLUSH_INTERVAL: float = 1.0  # 异步写库刷新间隔（秒）
-    # 运行期维护间隔：清理过期日志 + WAL checkpoint。启动期清理只发生一次，
-    # 长期不重启的实例必须靠这个循环把 logs.db 的大小控制住。
+    # 运行期维护间隔：按保留天数清理过期日志。启动期清理只发生一次，长期不重启
+    # 的实例必须靠这个循环把保留天数落到实处（空间回收交给 PG 的 autovacuum）。
     LOG_MAINTENANCE_INTERVAL_SECONDS: int = 6 * 3600
-    # 损坏日志库（quarantine 副本）保留份数上限，0 = 不限制。
-    # 每份是几百 MB 的快照，无上限保留会反过来加剧磁盘满。
-    LOG_CORRUPT_KEEP: int = 2
-    # 启动期 SQLite quick_check：logs.db 不通过则隔离重建，app.db 不通过只告警
-    # （业务库是订单/结算数据，绝不自动搬走）。
-    SQLITE_QUICK_CHECK_ON_START: bool = True
 
     # 磁盘守护（进程内）：阈值告警 + 健康端点暴露
     DISK_GUARD_ENABLED: bool = True
@@ -129,8 +125,11 @@ class Settings(BaseSettings):
     RECONCILE_MISS_QTY_ALERT: float = 10.0
     UNMAPPED_DISH_ALERT_ENABLED: bool = True
     UNMAPPED_ALERT_INTERVAL_HOURS: int = 2
-    # 爬虫主循环连续失败达到该次数（或其整数倍）时触发一次企微健康告警，避免静默挂死
+    # 爬虫主循环连续失败达到该次数后才开始告警（首次故障的门槛，避免偶发抖动）
     SCRAPER_ALERT_FAILURE_THRESHOLD: int = 3
+    # 同一场故障里两条健康告警之间的最小间隔（秒）：持续挂死时**每小时最多一条**，
+    # 而不是每累计满一个阈值就发一条（失败间隔约 60s 时那样会是每 3 分钟一条）。
+    SCRAPER_ALERT_MIN_INTERVAL_SECONDS: int = 3600
     RECONCILE_SCHEDULE_ENABLED: bool = False
     RECONCILE_SCHEDULE_TIME: str = "22:05"
     RECONCILE_AUTO_FIX: bool = True
@@ -228,7 +227,7 @@ class Settings(BaseSettings):
     class Config:
         # 绝对路径：`.env` 在仓库根，而 uvicorn 之外的入口（scripts/start.py 等）
         # 的工作目录常常不是仓库根，相对路径会**静默读不到**配置——本机就因此出现
-        # 「.env 写着 postgres，实例实际连 SQLite」的错配。
+        # 「.env 写着 postgres，实例却连了另一个库」的错配。
         env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
         case_sensitive = True
 

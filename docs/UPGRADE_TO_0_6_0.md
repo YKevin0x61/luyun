@@ -1,5 +1,10 @@
 # 升级到 0.6.0 操作方案
 
+> **本文是 0.5.19 → 0.6.0 的历史方案。** 0.6.x 之后 SQLite 已退场（PostgreSQL 成为
+> 唯一后端，见 [ADR 0089](adr/0089-retire-sqlite-postgres-only.md)）：文中场景 A
+> （只升级、继续用 SQLite）**不再适用**，阅读时只把场景 B 的迁移路径当参考；当前
+> 做法以 `deploy/README.md` §10 与 `migrations/pg/README.md` 为准。
+>
 > 适用：云端 **0.5.19**（Docker 或 systemd 部署）→ **0.6.0**
 > 相关：ADR 0011（发行包）、ADR 0084（PostgreSQL 后端）、`migrations/pg/README.md`
 
@@ -73,8 +78,10 @@ sqlite3 data/app.db ".backup 'backups/pre-0.6.0-$(date +%Y%m%d_%H%M%S).db'"
    （`pg_dump` / `psql`），而「系统更新」只替换 app 树、**不重建镜像**。不重建的话，
    切到 PG 后下次更新的 `backing_up` 阶段会因找不到 `pg_dump` 失败，把后续更新全部堵死。
    `enable_postgres.sh` 已把重建作为第一步。
-2. **Admin 的「备份导出/导入」不支持 PG**，会明确报错。PG 下用 `pg_dump` / `pg_restore`
-   （见第 6 节）。**但更新前强制备份与定时冷备是支持的**（产出 `app.pgdump`）。
+2. **Admin 的「备份导出/导入」在 0.6.0 当时的 PG 后端不支持**（会明确报错）；
+   v0.6.11 起改为把业务数据打包成 `app.pgdump` 整库快照（恢复即整库覆盖，且不能与
+   SQLite 的备份包互灌）。更新前强制备份与定时冷备从一开始就支持（产出
+   `app.pgdump`，见第 6 节）。
 3. **回滚有取舍**：切回 `sqlite` 能回到旧库，但切到 PG 之后新增的数据**不会**回到 SQLite。
 
 ### 3.1 Docker：一键切换
@@ -187,7 +194,7 @@ systemctl restart luyun       # 或 docker restart luyun
 |---|---|
 | 更新前强制备份 | ✅ 产出 `app.pgdump`（`pg_dump --format=custom`）|
 | 定时冷备 | ✅ 归档内含 `app.pgdump` |
-| Admin 备份导出/导入 | ❌ 明确报错，走手工 |
+| Admin 备份导出/导入 | ✅ v0.6.11 起业务数据为 `app.pgdump` 整库快照（恢复只能整库覆盖）；0.6.0 当时会报错，那时走手工 |
 
 **手工备份**：
 
@@ -203,7 +210,7 @@ pg_dump --format=custom --no-owner --no-acl \
 systemctl stop luyun          # 或 docker stop luyun
 pg_restore --clean --if-exists --no-owner --no-acl \
   -d "postgresql://luyun:<pw>@127.0.0.1:5432/luyun" \
-  data/snapshots/<ts>/app.pgdump
+  data/restore_snapshots/<ts>/app.pgdump
 systemctl start luyun
 ```
 
@@ -232,7 +239,5 @@ systemctl start luyun
 2. **Admin 备份导出/导入在 PG 下的业务数据是整库快照**。0.6.0 当时整块报错，之后先
    收敛为「导出照常可用、业务数据置灰」，v0.6.11 起改为打包 `app.pgdump`
    整库快照（恢复即整库覆盖，不支持合并导入）。更新前备份与定时冷备从一开始就支持。
-3. **`hygiene_*` 表不在 Admin 备份范围内**（既有缺陷，与本次升级无关）。日常备份会
-   漏掉卫生模块的结构化数据；整机迁移请直接搬 `data/` 目录或用 `pg_dump`。
-4. **时间戳仍是 TEXT、金额仍是浮点**。切换到 `TIMESTAMPTZ` / `NUMERIC` 是独立议题。
-5. **迁移脚本不做增量同步**，必须在停机窗口内执行。
+3. **时间戳仍是 TEXT、金额仍是浮点**。切换到 `TIMESTAMPTZ` / `NUMERIC` 是独立议题。
+4. **迁移脚本不做增量同步**，必须在停机窗口内执行。

@@ -143,15 +143,14 @@ def test_empty_package_is_distinguishable_from_up_to_date(pg):
     assert [item.version for item in status.bootstrap_only] == ["0001"]
 
 
-def test_sqlite_backend_says_it_needs_nothing(pg, monkeypatch):
+def test_non_postgres_backend_still_reports_migrations(pg, monkeypatch):
+    """SQLite 退场后（ADR 0089）迁移面板不再有「由启动自愈」的短路分支。"""
     monkeypatch.setattr(settings, "DATABASE_BACKEND", "sqlite")
     conn = FakeConn()
     status = _run(migration_status(FakeDb(conn)))
 
-    assert status.supported is False
-    assert status.pending == []
-    assert "启动时自动" in status.note
-    assert conn.calls == [], "SQLite 下不该去查迁移记录表"
+    assert status.supported is True
+    assert conn.calls, "任何后端都要去查迁移记录表"
 
 
 def test_apply_runs_in_order_and_records_each(pg):

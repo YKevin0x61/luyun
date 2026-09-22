@@ -10,14 +10,10 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, Any
 from functools import wraps
 
-import aiosqlite
-
 logger = logging.getLogger(__name__)
 
 CHINA_TZ = timezone(timedelta(hours=8))
 ORDER_DEDUP_BATCH_SIZE = 900
-SQLITE_JOURNAL_MODE_WAL = "WAL"
-SQLITE_BUSY_TIMEOUT_MS = 5000
 
 
 def timing_decorator(func):
@@ -78,8 +74,8 @@ def to_sql_datetime(value: Any) -> Optional[str]:
     return str(value)
 
 
-def row_to_dict(row: aiosqlite.Row) -> Dict:
-    """将 aiosqlite.Row 转为 dict，id 转为字符串"""
+def row_to_dict(row: Any) -> Dict:
+    """把驱动返回的行（``PgRow``）转为 dict，id 转为字符串"""
     d = dict(row)
     if 'id' in d:
         d['_id'] = str(d.pop('id'))

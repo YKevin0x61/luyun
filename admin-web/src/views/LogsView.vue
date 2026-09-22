@@ -66,9 +66,9 @@ const emptyStateText = computed(() => {
 })
 
 const statsDbPathText = computed(() => {
-  const dbPath = stats.value?.db_path
-  if (!dbPath) return ''
-  return String(dbPath).split('/').slice(-2).join('/')
+  // 日志已随 ADR 0089 进 PostgreSQL：不再有 logs.db 路径，只显示后端。
+  const backend = stats.value?.backend
+  return backend ? String(backend) : ''
 })
 
 function fmtTs(ts) {

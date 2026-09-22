@@ -6,7 +6,7 @@ status: accepted
 
 Admin SPA and KDS H5 use Service Workers to cache only application resources: generated HTML, JavaScript, CSS, fonts, manifests, and icons. Business APIs, WebSocket traffic, uploads, downloads, credentials, and protected images remain network-only. A successful first visit installs the shell; later visits can open from Cache Storage and an unavailable API still fails normally rather than serving stale business data.
 
-The Admin build uses `vite-plugin-pwa` with `generateSW` in prompt mode. Its root-scope worker precaches the complete Admin build and excludes `/kds/`, `/api/`, `/ws/`, documentation, and other non-SPA routes from navigation fallback. Three role manifests select the installed identity by route: Admin at `/`, hygiene staff at `/hygiene`, and recipe readers at `/recipe`.
+The Admin build uses `vite-plugin-pwa` with `generateSW` in prompt mode. Its root-scope worker precaches the complete Admin build and excludes `/kds/`, `/api/`, `/ws/`, documentation, and other non-SPA routes from navigation fallback. Three role manifests select the installed identity by route: Admin at `/`, hygiene staff at `/hygiene`, and recipe readers at `/recipe`. Those manifests are static files (`admin-web/public/pwa/manifests/`) served by FastAPI at `/pwa/manifests/*.webmanifest`; the plugin's own manifest generation is disabled.
 
 KDS uses a separate `/kds/sw.js` scoped to `/kds/`. `scripts/build_kds.sh` invokes `scripts/generate_kds_pwa.py` after the uni-app H5 build to inject the manifest and a cache name derived from `APP_VERSION` plus the complete build fingerprint. Navigation and hashed assets are cache-first; Google Fonts are best-effort stale-while-revalidate. API and WebSocket requests are never cached.
 

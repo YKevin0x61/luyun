@@ -1,13 +1,14 @@
 # admin-web
 
-全栈性能重构 阶段三：Admin 前端重写（Vite + Vue3 + Pinia），替代原 `public/*.html`
-多页面方案。
+管理端 SPA（Vite + Vue3 + Pinia）：全栈性能重构阶段三的重写产物，替代原
+`public/*.html` 多页面方案。管理后台、卫生管理端、员工手机端入口与配方阅读面
+共用这一个构建产物。
 
-## 迁移范围（已全部完成）
+## 功能范围
 
 - 仪表盘（`/`）：汇总卡片、热销菜品、最新订单、档口进单速率图表、系统状态
 - 数据管理（`/admin`）：业务表通用 CRUD，并按业务 / 配方 / 卫生 / 认证分组浏览
-  其余只读表；`logs.db` 的运行日志提供 `/logs` 入口。含批量菜品分类弹窗、
+  其余只读表；运行日志（PostgreSQL 的 `logs` 表，不再有 `logs.db`）提供 `/logs` 入口。含批量菜品分类弹窗、
   表结构管理（新增/删除列）
 - 销售报表（`/sales-report`）：汇总卡、趋势图、档口占比、菜品明细、半成品换算规则、
   退款、企微推送、文字导出
@@ -17,7 +18,15 @@
 - 企微推送（`/wecom-push`）：Webhook 管理、推送任务管理、消息预览与立即发送、发送记录
 - 备货计划（`/prep-plan`）：一键生成执行清单、档口执行板、辅助信息
 - 实时日志（`/logs`）：实时跟踪 / 历史查询、级别与 logger 过滤、统计面板
-- WebSocket 实时事件驱动刷新（订单/餐桌变化）
+- 卫生管理端（`/hygiene-roster`、`/hygiene-zones`、`/hygiene-daily`、
+  `/hygiene-deep-clean`、`/hygiene-fix`、`/hygiene-boards`、`/hygiene-data`）：
+  排班、责任区、日常与专项计划、整改单、红黑榜、卫生数据台账（浏览 / 导出 / 清理）
+- 员工手机端（`/hygiene`、`/hygiene/login`、`/hygiene/register`）：独立员工会话、
+  实时 nudge 刷新、离线重试
+- 初始设置（`/setup`）：POS 凭据、数据库凭据、备份中心、系统更新（版本检测 /
+  环境自检 / 应用更新 / 数据库迁移）。数据库只支持 PostgreSQL（ADR 0089），
+  数据库凭据面板也按 PostgreSQL 连接展示
+- WebSocket 实时事件驱动刷新（订单 / 餐桌 / 卫生）
 - 档口常量统一从 `/api/stations` 拉取，不再硬编码
 
 **生产环境路由**：反向代理配置见 `deploy/Caddyfile` / `deploy/nginx.conf`（把页面路径交给
@@ -58,35 +67,31 @@ npm run build        # 产出 dist/（含 sw.js、多角色 manifest 与 PWA 图
 ```
 src/
   api/client.js            # fetch 封装（Cookie 会话、401 跳转登录页）
+  router/index.js          # 路由与登录守卫（hygiene 管理端 / 员工端分支）
   stores/
     stations.js            # 档口常量（替代原硬编码 STATIONS_MAP）
-  composables/
-    useRealtime.js          # WebSocket 连接与重连（subscribe/unsubscribe/nudge）
-    useDashboardData.js     # 仪表盘数据 nudge + pull 刷新
-    useAdminTable.js        # 通用表格 CRUD + 表结构管理
-    useSalesReport.js       # 销售报表数据与交互
-    useSemiRules.js         # 半成品换算规则
-    useLogs.js               # 实时日志 / 历史查询状态管理
-    usePrepPlan.js           # 备货计划状态管理
-    useWecomPush.js          # 企微推送状态管理
-    useScopedStylesheet.js   # 按需加载/卸载独立页面样式（recipe.css）
-  utils/
-    dateRange.js
-    recipeCore.js            # 配方 slugify/用量缩放等纯函数（移植自 recipe-core.js）
-    salesReportText.js
+    standardPhotoCache.js  # 卫生标准图缓存状态
+    imageUploadQueue.js    # 图片上传队列（弱网重试）
+  composables/             # 页面级状态，如 useRealtime / useNudgePull / useDashboardData /
+                           # useAdminTable / useSalesReport / useSemiRules / useLogs /
+                           # usePrepPlan / useWecomPush / useSystemUpdate / useBackupCenter /
+                           # useDbCredentials / usePosCredentials / useRuntimeSettings /
+                           # useSystemHealth / useHygieneRealtime / usePwaUpdate
+  utils/                    # 纯函数，如 dateRange / recipeCore / salesReportText /
+                           # hygieneWorkFlow / hygieneMarkup / backupPoints / updateProgress
   components/
-    NavBar.vue
-    dashboard/*.vue
-    admin/*.vue               # DataTable、RowEditModal、ClassifyDishesModal、ColumnManageModal
-    salesreport/*.vue
+    NavBar.vue / SvgIcon.vue / PwaUpdateBanner.vue / ImageUploadQueuePanel.vue
+    admin/*.vue             # DataTable、RowEditModal、ClassifyDishesModal、ColumnManageModal
+    dashboard/*.vue         # 汇总卡、热销、实时桌态、系统状态等面板
+    salesreport/*.vue       # 报表表格、图表、规则与导出弹窗
+    hygiene/*.vue           # 卫生专有组件（取景 / 标准图 / 任务卡等）
+    backup/ system/ update/ ui/  # 备份中心、健康水位、版本更新、通用控件
   views/
-    DashboardView.vue
-    AdminView.vue
-    SalesReportView.vue
-    LogsView.vue
-    PrepPlanView.vue
-    WecomPushView.vue
-    recipe/*.vue              # RecipeStationsView / RecipeDetailView / RecipeManageView / RecipePrintView / RecipeQrView
+    DashboardView.vue / AdminView.vue / SalesReportView.vue / LogsView.vue /
+    PrepPlanView.vue / WecomPushView.vue / LoginView.vue / SetupView.vue
+    recipe/*.vue            # RecipeStationsView / RecipeDetailView / RecipeManageView /
+                            # RecipePrintView / RecipeQrView
+    hygiene/*.vue           # 管理端 7 页 + 员工端 Home/Login/Register + 两个 Layout
 ```
 
 ## 已知限制 / 后续可优化项

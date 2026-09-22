@@ -1,5 +1,5 @@
-"""配方库异步数据访问层（aiosqlite）。配方表与其它业务表同库存放于
-data/app.db（WAL）。生产借 DatabaseManager 的连接；测试可按路径自开连接。
+"""配方库异步数据访问层。配方表与其它业务表同库存放于同一个 PostgreSQL 库；
+生产借 DatabaseManager 的连接（注入 ``conn``），不再支持自开 SQLite 连接（ADR 0089）。
 """
 
 from __future__ import annotations
@@ -10,11 +10,8 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-import aiosqlite
-
 from config import settings
-from db_core.schema import apply_recipe_schema
-from db_core.utils import SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE_WAL
+from db_core.backend.pg import PgConnection
 
 from .sections import DEFAULT_RECIPE_SECTION, canonicalize_section
 from .sop_parse import (
@@ -217,7 +214,7 @@ class RecipeStore:
         self,
         db_path: str | os.PathLike | None = None,
         *,
-        conn: aiosqlite.Connection | None = None,
+        conn: PgConnection | None = None,
     ):
         if conn is not None:
             self._conn = conn
@@ -229,17 +226,15 @@ class RecipeStore:
         self.db_path = str(db_path) if db_path is not None else settings.APP_DB_PATH
 
     async def connect(self) -> bool:
-        if not self._owns_conn:
-            await self.prepare()
-            return True
-        self._conn = await aiosqlite.connect(self.db_path)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute(f"PRAGMA journal_mode={SQLITE_JOURNAL_MODE_WAL}")
-        await self._conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-        await self._conn.execute("PRAGMA foreign_keys = ON")
-        await apply_recipe_schema(self._conn)
+        if self._owns_conn:
+            # SQLite 退场（ADR 0089）：配方表与业务表同库，连接由装配方注入
+            # （main.py 把 DatabaseManager 的连接交给 RecipeStore）。自建
+            # SQLite 连接、PRAGMA 与建表已移除。
+            raise RuntimeError(
+                "RecipeStore 必须注入 PostgreSQL 连接（见 main.py 的装配）；"
+                "SQLite 独立建连/建表已随 ADR 0089 移除"
+            )
         await self.prepare()
-        await self._conn.commit()
         return True
 
     async def prepare(self) -> None:
@@ -253,7 +248,7 @@ class RecipeStore:
             self._conn = None
 
     @property
-    def conn(self) -> aiosqlite.Connection:
+    def conn(self) -> PgConnection:
         if self._conn is None:
             raise RuntimeError("RecipeStore 未连接")
         return self._conn

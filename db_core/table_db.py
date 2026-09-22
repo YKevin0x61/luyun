@@ -1,77 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Per-table view (TableView) over the shared app.db connection.
+Per-table view (TableView) over the shared PostgreSQL connection.
 
 All business tables share the connection from ``_ConnectionMixin.connect()``.
 ``TableView`` keeps the ``.conn`` / ``.execute()`` / ``.commit()`` / ``.get_count()``
 surface used by repo mixins and ``DatabaseManager.table()``.
+
+SQLite 退场（ADR 0089）后这里不再有启动期列迁移：``migrate_orders_kds_columns``
+当年靠 ``PRAGMA table_info`` + ``ALTER TABLE`` 给老库补 KDS 列，现在结构由
+``migrations/pg/000N_*.sql`` 负责，启动期不改结构。
 """
 
 import logging
 
-import aiosqlite
+from db_core.backend.pg import PgConnection
 
 logger = logging.getLogger(__name__)
 
 
-async def migrate_orders_kds_columns(conn: aiosqlite.Connection) -> None:
-    """为已有 orders 表补 KDS 控菜字段。爬虫 INSERT-only 不写这些列。"""
-    async with conn.cursor() as cursor:
-        await cursor.execute("PRAGMA table_info(orders)")
-        cols = {row[1] for row in await cursor.fetchall()}
-        if "dish_status" not in cols:
-            await cursor.execute(
-                "ALTER TABLE orders ADD COLUMN dish_status TEXT DEFAULT '待出餐'"
-            )
-        if "ready_time" not in cols:
-            await cursor.execute("ALTER TABLE orders ADD COLUMN ready_time TEXT")
-        if "source" not in cols:
-            await cursor.execute(
-                "ALTER TABLE orders ADD COLUMN source TEXT DEFAULT ''"
-            )
-        # 历史空值：notes 带外卖平台的标外卖，其余标堂食
-        await cursor.execute(
-            "UPDATE orders SET source = 'delivery' "
-            "WHERE COALESCE(source, '') = '' AND notes LIKE '外卖平台:%'"
-        )
-        await cursor.execute(
-            "UPDATE orders SET source = 'dine_in' "
-            "WHERE COALESCE(source, '') = ''"
-        )
-        if "steamer_id" not in cols:
-            await cursor.execute("ALTER TABLE orders ADD COLUMN steamer_id TEXT")
-        if "port_index" not in cols:
-            await cursor.execute("ALTER TABLE orders ADD COLUMN port_index INTEGER")
-        if "stack_order" not in cols:
-            await cursor.execute("ALTER TABLE orders ADD COLUMN stack_order INTEGER")
-        if "loaded_at" not in cols:
-            await cursor.execute("ALTER TABLE orders ADD COLUMN loaded_at TEXT")
-        if "is_hold" not in cols:
-            await cursor.execute(
-                "ALTER TABLE orders ADD COLUMN is_hold INTEGER DEFAULT 0"
-            )
-        if "is_rushed" not in cols:
-            await cursor.execute(
-                "ALTER TABLE orders ADD COLUMN is_rushed INTEGER DEFAULT 0"
-            )
-        if "fired_at" not in cols:
-            await cursor.execute("ALTER TABLE orders ADD COLUMN fired_at TEXT")
-    await conn.commit()
-
-
 class TableView:
-    """单表访问视图，内部持有单库 app.db 的共享连接。"""
+    """单表访问视图，内部持有业务库的共享连接。"""
 
-    def __init__(self, table: str, conn: aiosqlite.Connection):
+    def __init__(self, table: str, conn: PgConnection):
         self.table = table
         self._conn = conn
 
     @property
-    def conn(self) -> aiosqlite.Connection:
+    def conn(self) -> PgConnection:
         return self._conn
 
-    async def execute(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:
+    async def execute(self, sql: str, params: tuple = ()):
         cursor = await self._conn.cursor()
         await cursor.execute(sql, params)
         return cursor
@@ -81,6 +40,5 @@ class TableView:
 
     async def get_count(self, extra_sql: str = "") -> int:
         sql = f"SELECT COUNT(*) FROM {self.table}" + (f" WHERE {extra_sql}" if extra_sql else "")
-        async with self._conn.cursor() as c:
-            await c.execute(sql)
-            return (await c.fetchone())[0]
+        cursor = await self.execute(sql)
+        return (await cursor.fetchone())[0]

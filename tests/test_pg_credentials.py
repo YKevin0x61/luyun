@@ -19,6 +19,7 @@ from config import settings
 from services.pg_credentials import (
     PasswordResetError,
     build_dsn,
+    credentials_status,
     generate_password,
     parse_dsn,
     render_env_production,
@@ -244,11 +245,17 @@ class ResetPasswordOrchestrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.code, "env_override")
         self.assertIn("优先级", str(ctx.exception))
 
-    async def test_sqlite_backend_is_rejected(self):
+    def test_status_is_postgres_only(self):
+        """后端只剩 PostgreSQL（ADR 0089）：状态字段不再跟着死配置值变。
+
+        原先这里守的是「非 PG 后端拒绝重置密码」；那个分支随 SQLite 一起退场，
+        改为钉住状态口径——即使环境里还留着 DATABASE_BACKEND=sqlite，也如实报
+        postgres，避免界面出现一个并不存在的后端。
+        """
         with mock.patch.object(settings, "DATABASE_BACKEND", "sqlite"):
-            with self.assertRaises(PasswordResetError) as ctx:
-                await reset_database_password(actor="admin")
-        self.assertEqual(ctx.exception.code, "not_postgres")
+            status = credentials_status()
+        self.assertEqual(status["backend"], "postgres")
+        self.assertTrue(status["is_postgres"])
 
     async def test_dsn_without_password_is_rejected(self):
         with mock.patch.object(settings, "DATABASE_BACKEND", "postgres"), mock.patch.object(

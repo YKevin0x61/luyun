@@ -2,11 +2,10 @@
 # -*- coding: utf-8 -*-
 """PostgreSQL 增量迁移的应用入口（Admin 手动触发）。
 
-为什么需要它：SQLite 部署的 schema 变更由应用启动时自愈（``apply_hygiene_schema`` /
-``migrate_hygiene_columns`` 等），而 PG 按设计**不在启动期改结构**
-（见 ``db_core/connection.py::_connect_postgres`` 的说明：启动期改结构会让「schema
-是谁改的」不可追溯）。于是既有库要靠人应用 ``migrations/pg/000N_*.sql``——升级后
-没人记得敲 psql，就是运行时报错或者悄悄退化（少一条索引不会报错，只是一直慢）。
+为什么需要它：应用**不在启动期改结构**（见 ``db_core/connection.py::_connect_postgres``
+的说明：启动期改结构会让「schema 是谁改的」不可追溯）。所以结构变更只能靠人应用
+``migrations/pg/000N_*.sql``——升级后没人记得敲 psql，就是运行时报错或者悄悄退化
+（少一条索引不会报错，只是一直慢）。
 
 这里把「有哪些待应用、点一下应用」做成 Admin 能力，同时保留可追溯性：
 应用记录写进 ``schema_migrations`` 表，界面能看出当前到了哪一版。
@@ -150,10 +149,6 @@ async def _read_applied(conn) -> dict:
     return applied
 
 
-def _backend_supported() -> bool:
-    return getattr(settings, "DATABASE_BACKEND", "sqlite") == "postgres"
-
-
 # SQLite 与 PG（asyncpg 包装后）对"表不存在"的措辞。
 _MISSING_TABLE_MARKERS = ("no such table", "undefinedtable", "does not exist")
 
@@ -164,21 +159,10 @@ def _is_missing_table_error(exc: Exception) -> bool:
 
 
 async def migration_status(db) -> MigrationStatus:
-    """当前后端的迁移状态：待应用、已应用、只能手工 bootstrap 的。"""
-    backend = getattr(settings, "DATABASE_BACKEND", "sqlite")
+    """当前迁移状态：待应用、已应用、只能手工 bootstrap 的。"""
+    backend = getattr(settings, "DATABASE_BACKEND", "postgres")
     files = list_migration_files()
     incremental_total = len([item for item in files if not item.bootstrap_only])
-    if not _backend_supported():
-        return MigrationStatus(
-            backend=backend,
-            supported=False,
-            note=(
-                "当前是 SQLite 后端：schema 变更由应用启动时自动补齐"
-                "（apply_hygiene_schema / migrate_hygiene_columns），无需手工应用。"
-            ),
-            bootstrap_only=[item for item in files if item.bootstrap_only],
-            incremental_total=incremental_total,
-        )
 
     applied = await _read_applied(db._conn)
     pending = [
@@ -257,12 +241,6 @@ async def _apply_pending_migrations(db, *, only: Optional[list] = None) -> Migra
     失败的文件不会写进记录表（幂等 DDL 也保证重试安全）。
     """
     result = MigrationApplyResult()
-    if not _backend_supported():
-        result.skipped.append(
-            MigrationFile("", "SQLite 后端由启动时自动迁移", Path())
-        )
-        return result
-
     status = await migration_status(db)
     targets = status.pending
     if only:

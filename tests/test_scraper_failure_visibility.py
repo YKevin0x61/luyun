@@ -99,27 +99,71 @@ class ScraperFailureTrackerTest(unittest.IsolatedAsyncioTestCase):
             await tracker.run_once(failing_scrape)
         self.assertEqual(len(alert_sender.messages), 1, "刚跨过阈值应告警一次")
 
-    async def test_alert_debounced_and_repeats_every_threshold_multiple(self):
-        threshold = 2
-        settings.SCRAPER_ALERT_FAILURE_THRESHOLD = threshold
+    async def test_alert_rate_limited_to_one_per_interval(self):
+        """持续故障：过了阈值先告警一次，之后同一最小间隔内不再重复。
+
+        失败轮次间隔约 60s，只按次数去抖（阈值 3）会变成每 3 分钟一条；这里锁住
+        「每小时最多一条」这条产品约定。
+        """
+        settings.SCRAPER_ALERT_FAILURE_THRESHOLD = 3
         alert_sender = RecordingAlertSender()
-        tracker = ScraperFailureTracker(alert_sender=alert_sender)
+        tracker = ScraperFailureTracker(alert_sender=alert_sender, min_interval_seconds=3600)
         failing_scrape = FailingScrape()
 
-        for _ in range(threshold * 2):
+        for _ in range(10):
             with self.assertRaises(RuntimeError):
                 await tracker.run_once(failing_scrape)
 
-        # 阈值=2：第2次、第4次失败各告警一次，中间不刷屏
-        self.assertEqual(len(alert_sender.messages), 2)
+        self.assertEqual(len(alert_sender.messages), 1, "同一小时内最多一条告警")
+        self.assertIsNotNone(tracker.last_alert_at)
 
-    def test_should_alert_scraper_failure_threshold_boundaries(self):
+    async def test_alert_resumes_after_interval_and_after_recovery(self):
+        """间隔为 0（不限流）时每轮达标都提醒；成功一轮后计数与限流一并复位。"""
+        settings.SCRAPER_ALERT_FAILURE_THRESHOLD = 1
+        alert_sender = RecordingAlertSender()
+        tracker = ScraperFailureTracker(alert_sender=alert_sender, min_interval_seconds=0)
+        failing_scrape = FailingScrape()
+
+        for _ in range(3):
+            with self.assertRaises(RuntimeError):
+                await tracker.run_once(failing_scrape)
+        self.assertEqual(len(alert_sender.messages), 3)
+
+        async def ok_scrape():
+            return "ok"
+
+        await tracker.run_once(ok_scrape)
+        self.assertEqual(tracker.consecutive_failures, 0)
+        self.assertIsNone(tracker.last_alert_at, "恢复后限流窗口应复位")
+
+        with self.assertRaises(RuntimeError):
+            await tracker.run_once(failing_scrape)
+        self.assertEqual(len(alert_sender.messages), 4, "新一场故障可以立刻提醒")
+
+    def test_should_alert_scraper_failure_threshold_and_interval(self):
+        # 次数门槛：达阈值即可告警，之后次数继续增长不再受次数限制
         self.assertFalse(should_alert_scraper_failure(0, threshold=3))
         self.assertFalse(should_alert_scraper_failure(2, threshold=3))
         self.assertTrue(should_alert_scraper_failure(3, threshold=3))
-        self.assertFalse(should_alert_scraper_failure(4, threshold=3))
-        self.assertFalse(should_alert_scraper_failure(5, threshold=3))
-        self.assertTrue(should_alert_scraper_failure(6, threshold=3))
+        self.assertTrue(should_alert_scraper_failure(4, threshold=3))
+        self.assertTrue(should_alert_scraper_failure(9, threshold=3))
+        # 最小间隔：距上次告警不足一小时不再发，满一小时才发
+        self.assertFalse(
+            should_alert_scraper_failure(
+                9, threshold=3, last_alert_at=1000.0, now=1060.0, min_interval_seconds=3600
+            )
+        )
+        self.assertTrue(
+            should_alert_scraper_failure(
+                9, threshold=3, last_alert_at=1000.0, now=4600.0, min_interval_seconds=3600
+            )
+        )
+        # 间隔 <= 0 表示不限流（测试与排障用）
+        self.assertTrue(
+            should_alert_scraper_failure(
+                9, threshold=3, last_alert_at=1000.0, now=1000.1, min_interval_seconds=0
+            )
+        )
 
     def test_build_scraper_failure_alert_message_contains_key_info(self):
         message = build_scraper_failure_alert_message(5, "Timeout waiting for selector")

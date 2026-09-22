@@ -9,7 +9,7 @@ import LuyunTimePicker from '../components/ui/LuyunTimePicker.vue'
 const {
   webhooks, jobs, logs, meta, selectedJobId, previewContent, previewMeta, loading, error,
   webhookForm, jobForm, resetWebhookForm, resetJobForm,
-  loadAll, loadJobs, loadLogs, editWebhook, saveWebhook, deleteWebhook, testWebhook,
+  loadAll, loadJobs, loadLogs, editWebhook, saveWebhook, deleteWebhook, toggleWebhookEnabled, testWebhook,
   editJob, applyJobTemplate, saveJob, deleteJob, previewSelectedJob, sendSelectedJob,
 } = useWecomPush()
 
@@ -38,6 +38,12 @@ async function handleDeleteWebhook(id) {
   try {
     await deleteWebhook(id)
     flash('Webhook 已删除', 'success')
+  } catch (e) { flash(e.message, 'error') }
+}
+async function handleToggleWebhook(item) {
+  try {
+    await toggleWebhookEnabled(item)
+    flash(item.enabled ? `已停用「${item.name}」` : `已启用「${item.name}」`, 'success')
   } catch (e) { flash(e.message, 'error') }
 }
 async function handleTestWebhook(id) {
@@ -155,6 +161,7 @@ onMounted(async () => {
               <div v-if="item.notes" style="color:var(--text-dim);font-size:12px">{{ item.notes }}</div>
               <div style="display:flex;gap:6px;margin-top:8px">
                 <button class="btn btn-sm" @click="editWebhook(item)">编辑</button>
+                <button class="btn btn-sm" @click="handleToggleWebhook(item)">{{ item.enabled ? '停用' : '启用' }}</button>
                 <button class="btn btn-sm" @click="handleTestWebhook(item.id)">测试</button>
                 <button class="btn btn-sm btn-danger" @click="handleDeleteWebhook(item.id)">删除</button>
               </div>

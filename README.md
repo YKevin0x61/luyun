@@ -1,23 +1,25 @@
 # LuckIn 订单系统（luyun）
 
-餐厅订单采集与查询系统，服务 **LuckIn**。从 POS 定时抓取点菜数据，落本地 SQLite，提供管理后台、厨房显示（KDS）与 REST API。
+餐厅订单采集与查询系统，服务 **LuckIn**。从 POS 定时抓取点菜数据，落 PostgreSQL（唯一后端，需自备 PG 实例，见 [deploy/README.md](deploy/README.md) 第 10 节），提供管理后台、厨房显示（KDS）与 REST API。
 
-**技术栈：** FastAPI · SQLite（WAL）· Playwright · Vue3 Admin · uni-app KDS  
+**技术栈：** FastAPI · PostgreSQL · Playwright · Vue3 Admin · uni-app KDS  
 
 **交付方式：** 公开 GitHub Release **发行包**（应用树 + 预构建前端 + 版本清单）。店内机器不装 Node、不 clone、不强制 PAT。升级走后台「系统更新」，不是 `git pull` / `docker pull`。
 
 | 能力 | 说明 |
 |------|------|
 | 订单采集 | 营业时段轮询 POS，退菜检测，档口映射 |
-| 管理后台 | 仪表盘、数据管理、销售报表、备货、企微推送、配方 SOP |
+| 管理后台 | 仪表盘、数据管理、销售报表、备货、企微推送、配方 SOP、卫生管理端 |
+| 卫生检查 | 员工手机端拍照闭环（先看标准图再开相机）、整改单、红黑榜、数据台账 |
 | 厨房 KDS | WebSocket 驱动，断连告警，打印队列 |
 | 系统更新 | 版本检测 → 环境自检 → 应用发行包 |
+| 备份恢复 | 冷备归档 + 后台备份中心（PostgreSQL 整库 `pg_dump` 快照） |
 
 ---
 
 ## 部署
 
-单机、单实例、**单 uvicorn worker**。不要多 worker、不要多机共用同一份 `data/`。
+单机、单实例、**单 uvicorn worker**。不要多 worker。数据库在 PostgreSQL 服务端（多机可连），但单 worker 仍成立。
 
 ### 方式 A：systemd（推荐）
 
@@ -43,7 +45,7 @@ sudo chmod 600 /opt/luyun/deploy/env.production
 # 3) 启动
 sudo systemctl start luyun.service
 systemctl status luyun
-curl -s http://127.0.0.1:8000/api/system/health
+curl -s http://127.0.0.1:8000/api/healthz
 
 # 4) 浏览器
 #    /login  建管理员
@@ -64,7 +66,7 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口
 ./scripts/docker_up.sh
 ```
 
-**必须挂父目录**（默认 `deploy/runtime` → 容器 `/srv/luyun`），直播树是其中的 `app/`。不要把 `runtime/app` 单独挂成 volume，否则系统更新无法原子切换目录。
+**必须挂父目录**（默认 `deploy/runtime` → 容器 `/srv/luyun`），正式运行树（live tree）是其中的 `app/`。不要把 `runtime/app` 单独挂成 volume，否则系统更新无法原子切换目录。
 
 | 宿主机（默认） | 容器 |
 |----------------|------|
@@ -84,7 +86,7 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口
 
 ### 备份（建议）
 
-见 `deploy/backup.sh` 与 `luyun-backup.timer`。systemd 路径可按 `deploy/README.md` 启用每日冷备。
+见 `deploy/backup.sh` 与 `luyun-backup.timer`。冷备走整库 `pg_dump`（归档成员 `app.pgdump`，非 `.db` 文件）；systemd 路径可按 `deploy/README.md` 启用每日冷备。
 
 ---
 
@@ -99,6 +101,8 @@ cd admin-web && npm ci && npm run build && cd ..
 python3 scripts/start.py
 # 或：uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+后端只剩 PostgreSQL：本地也要有一个可连的 PG 实例，在 `.env` 里配 `POSTGRES_DSN`（表结构见 `migrations/pg/`）。
 
 | 地址 | 用途 |
 |------|------|

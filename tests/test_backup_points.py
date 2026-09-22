@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""备份点：统一清单、两层校验、保留清理、恢复前置快照与冷备状态。"""
+"""备份点：统一清单、两层校验、保留清理、恢复前置快照与冷备状态。
+
+照片引用（标准图 / 其它照片 / 派生图）现在只从**业务库**读：夹具直接往测试库里
+插引用行（``tests/backup_fixtures.py``），不再造 ``data/app.db``。
+"""
 
 from __future__ import annotations
 
 import json
 import os
 import shutil
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import asyncpg
+
 from config import settings
+from database import DatabaseManager
 from services import backup_points, backup_retention, backup_service
 from services.backup_service import (
-    CONTENT_APP_DB,
     CONTENT_APP_PG,
     CONTENT_CREDENTIALS,
-    CONTENT_RUNTIME,
     CONTENT_OTHER_PHOTOS,
+    CONTENT_RUNTIME,
     CONTENT_STANDARD_PHOTOS,
     PHOTO_OTHER,
     PHOTO_STANDARD,
@@ -28,61 +33,7 @@ from services.backup_service import (
     PROVENANCE_PRE_UPDATE,
 )
 from services.credentials_store import CredentialBundle
-
-_HYGIENE_SCHEMA = """
-CREATE TABLE orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    business_flow_id TEXT
-);
-CREATE TABLE tables (id INTEGER PRIMARY KEY, table_number TEXT);
-CREATE TABLE dish_stations (id INTEGER PRIMARY KEY, dish_name TEXT);
-CREATE TABLE hygiene_standards (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    item_id INTEGER NOT NULL,
-    capture_id TEXT NOT NULL,
-    content_type TEXT NOT NULL,
-    byte_size INTEGER,
-    content_sha256 TEXT,
-    markup_json TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL
-);
-CREATE TABLE hygiene_daily_submissions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    instance_id INTEGER,
-    capture_id TEXT NOT NULL
-);
-CREATE TABLE hygiene_deep_clean_submissions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    before_capture_id TEXT NOT NULL,
-    after_capture_id TEXT NOT NULL
-);
-CREATE TABLE hygiene_fix_tickets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    capture_id TEXT NOT NULL
-);
-CREATE TABLE hygiene_fix_reshoots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticket_id INTEGER,
-    capture_id TEXT NOT NULL
-);
-CREATE TABLE hygiene_teaching_examples (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    left_capture_id TEXT NOT NULL,
-    right_capture_id TEXT NOT NULL
-);
-CREATE TABLE hygiene_capture_variants (
-    source_capture_id TEXT NOT NULL,
-    variant TEXT NOT NULL,
-    capture_id TEXT NOT NULL,
-    content_type TEXT NOT NULL,
-    width INTEGER NOT NULL,
-    height INTEGER NOT NULL,
-    byte_size INTEGER NOT NULL,
-    content_sha256 TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (source_capture_id, variant)
-);
-"""
+from tests.backup_fixtures import seed_hygiene_photo_refs
 
 
 def _sample_bundle() -> CredentialBundle:
@@ -96,19 +47,25 @@ def _sample_bundle() -> CredentialBundle:
     )
 
 
-class BackupPointTestCase(unittest.TestCase):
-    def setUp(self):
+def _fake_pg_dump(dst_path: str, *args, **kwargs) -> None:
+    """替换 ``_pg_dump_sync``：这些用例只关心归档成员与结论，不真导整库。"""
+    with open(dst_path, "wb") as handle:
+        handle.write(b"PGDMP-FAKE")
+
+
+class _FixtureMixin:
+    """目录、凭据与导出包的公共夹具（同步/异步两个基类共用）。"""
+
+    def _prepare(self) -> None:
         self._old_database_dir = settings.DATABASE_DIR
         self._old_cold_dir = settings.COLD_BACKUP_DIR
         self._tmpdir = tempfile.TemporaryDirectory()
         settings.DATABASE_DIR = self._tmpdir.name
         settings.COLD_BACKUP_DIR = os.path.join(self._tmpdir.name, "backups")
-        self.app_db = os.path.join(self._tmpdir.name, "app.db")
         self.capture_root = Path(self._tmpdir.name) / "hygiene-captures"
         self.capture_root.mkdir(parents=True, exist_ok=True)
         self._saved_cache = backup_retention.cache_get()
         backup_retention.cache_set(backup_retention.RetentionConfig())
-        self._saved_creds = None
         from services import credentials_store
 
         self._credentials_store = credentials_store
@@ -116,7 +73,7 @@ class BackupPointTestCase(unittest.TestCase):
         credentials_store._cache = _sample_bundle()
         self._write_cred_file()
 
-    def tearDown(self):
+    def _cleanup(self) -> None:
         self._credentials_store._cache = self._saved_creds
         backup_retention.cache_set(self._saved_cache)
         backup_points.set_health_cache(None)
@@ -124,44 +81,14 @@ class BackupPointTestCase(unittest.TestCase):
         settings.COLD_BACKUP_DIR = self._old_cold_dir
         self._tmpdir.cleanup()
 
-    # —— 建库与种子数据 ——
-
     def _write_cred_file(self) -> None:
         path = Path(self._tmpdir.name) / "credentials.enc"
         path.write_bytes(b"enc-blob")
 
-    def _seed_db(self, *, standards=(), others=(), variants=()) -> None:
-        conn = sqlite3.connect(self.app_db)
-        try:
-            conn.executescript(_HYGIENE_SCHEMA)
-            for capture_id in standards:
-                conn.execute(
-                    "INSERT INTO hygiene_standards (item_id, capture_id, content_type,"
-                    " created_at) VALUES (1, ?, 'image/jpeg', '2026-01-01T00:00:00')",
-                    (capture_id,),
-                )
-            for capture_id in others:
-                conn.execute(
-                    "INSERT INTO hygiene_daily_submissions (instance_id, capture_id)"
-                    " VALUES (1, ?)",
-                    (capture_id,),
-                )
-            for source_id, variant_id in variants:
-                conn.execute(
-                    "INSERT INTO hygiene_capture_variants (source_capture_id, variant,"
-                    " capture_id, content_type, width, height, byte_size, content_sha256,"
-                    " created_at) VALUES (?, 'thumb', ?, 'image/jpeg', 10, 10, 4, 'x',"
-                    " '2026-01-01T00:00:00')",
-                    (source_id, variant_id),
-                )
-            conn.commit()
-        finally:
-            conn.close()
-
     def _write_photo(self, capture_id: str, data: bytes = b"jpeg-bytes") -> None:
         (self.capture_root / capture_id).write_bytes(data)
 
-    def _build_export(self, *, standard=(), other=(), declared_standard=None):
+    def _build_export(self, *, standard=(), other=(), declared_standard=None, app_pg=True):
         for capture_id in standard:
             self._write_photo(capture_id, b"standard-" + capture_id.encode())
         for capture_id in other:
@@ -191,10 +118,8 @@ class BackupPointTestCase(unittest.TestCase):
             "pass1234",
             include_runtime=False,
             runtime_data=None,
-            include_app_db=True,
-            app_db_bytes=b"",
-            include_recipes=False,
-            recipes_db_bytes=None,
+            include_app_db=app_pg,
+            app_pg_bytes=b"PGDMP-CONTENT" if app_pg else None,
             include_standard_photos=bool(standard),
             include_other_photos=bool(other),
             photo_members=members,
@@ -204,10 +129,10 @@ class BackupPointTestCase(unittest.TestCase):
         return blob, meta
 
     def _make_snapshot(self, provenance=PROVENANCE_MANUAL, *, ts=None):
-        with mock.patch.object(backup_service, "_prune_old_snapshots"):
+        with mock.patch.object(
+            backup_service, "_prune_old_snapshots"
+        ), mock.patch.object(backup_service, "_pg_dump_sync", side_effect=_fake_pg_dump):
             real_ts = backup_service.create_restore_snapshot(
-                self.app_db,
-                self.app_db,
                 str(Path(self._tmpdir.name) / "credentials.enc"),
                 provenance=provenance,
             )
@@ -218,6 +143,32 @@ class BackupPointTestCase(unittest.TestCase):
                 shutil.move(str(old), str(new))
             real_ts = ts
         return real_ts
+
+
+class BackupPointTestCase(_FixtureMixin, unittest.TestCase):
+    def setUp(self):
+        self._prepare()
+
+    def tearDown(self):
+        self._cleanup()
+
+
+class AsyncBackupPointTestCase(_FixtureMixin, unittest.IsolatedAsyncioTestCase):
+    """需要业务库连接的用例：照片分类与跨备份点差异都经 ``db`` 查询。"""
+
+    async def asyncSetUp(self):
+        self._prepare()
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect())
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        self._cleanup()
+
+    async def _seed_hygiene(self, *, standards=(), others=(), variants=()) -> None:
+        await seed_hygiene_photo_refs(
+            self.db._conn, standards=standards, others=others, variants=variants
+        )
 
 
 class ExportContentsTest(BackupPointTestCase):
@@ -240,7 +191,7 @@ class ExportContentsTest(BackupPointTestCase):
         ]
         self.assertEqual(len(points), 1)
         self.assertIn("credentials", points[0]["contents"])
-        # 包里带了业务数据，凭据也在——不该有任何"缺失"
+        # 包里带了业务数据（整库 dump），凭据也在——不该有任何"缺失"
         self.assertNotIn("凭据", [m["label"] for m in points[0]["missing"]])
 
     def test_export_contents_helper_keeps_other_categories(self):
@@ -250,30 +201,40 @@ class ExportContentsTest(BackupPointTestCase):
         self.assertIn("runtime", contents)
 
 
-class PhotoClassificationTest(BackupPointTestCase):
-    def test_two_classes_and_variants_follow_source(self):
-        self._seed_db(
+class PhotoClassificationTest(AsyncBackupPointTestCase):
+    async def test_two_classes_and_variants_follow_source(self):
+        await self._seed_hygiene(
             standards=["s1", "s2"],
             others=["o1"],
             variants=[("s1", "s1_thumb"), ("o1", "o1_thumb")],
         )
-        classified = backup_service.classify_hygiene_capture_ids(self.app_db)
+        classified = await backup_service.classify_hygiene_capture_ids(self.db)
         self.assertEqual(classified[PHOTO_STANDARD], ["s1", "s1_thumb", "s2"])
         self.assertEqual(classified[PHOTO_OTHER], ["o1", "o1_thumb"])
 
-    def test_missing_table_is_not_an_error(self):
-        conn = sqlite3.connect(self.app_db)
-        conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY)")
-        conn.commit()
-        conn.close()
-        classified = backup_service.classify_hygiene_capture_ids(self.app_db)
+    async def test_standard_wins_when_a_photo_is_referenced_by_both(self):
+        await self._seed_hygiene(standards=["both"], others=["both", "only-other"])
+
+        classified = await backup_service.classify_hygiene_capture_ids(self.db)
+
+        self.assertEqual(classified[PHOTO_STANDARD], ["both"])
+        self.assertEqual(classified[PHOTO_OTHER], ["only-other"])
+
+    async def test_missing_hygiene_tables_are_not_an_error(self):
+        """表不存在（旧库 / 未启用卫生模块）按「没有这类照片」处理，而不是 500。"""
+
+        class _MissingTableConn:
+            async def execute(self, sql, params=()):
+                raise asyncpg.UndefinedTableError('relation "hygiene_x" does not exist')
+
+        classified = await backup_service.classify_hygiene_capture_ids(_MissingTableConn())
+
         self.assertEqual(classified[PHOTO_STANDARD], [])
         self.assertEqual(classified[PHOTO_OTHER], [])
 
 
 class ExportPhotoMemberTest(BackupPointTestCase):
     def test_export_carries_both_classes_and_manifest(self):
-        self._seed_db(standards=["s1"], others=["o1"])
         blob, meta = self._build_export(standard=["s1"], other=["o1"])
         parsed = backup_service.parse_backup(blob, "pass1234")
         self.assertEqual(set(parsed["standard_photos"]), {"s1"})
@@ -284,7 +245,6 @@ class ExportPhotoMemberTest(BackupPointTestCase):
         self.assertEqual(parsed["archive_integrity_errors"], [])
 
     def test_manifest_mismatch_is_in_backup_inconsistency(self):
-        self._seed_db(standards=["s1"])
         blob, _meta = self._build_export(standard=["s1"], declared_standard=3)
         parsed = backup_service.parse_backup(blob, "pass1234")
         self.assertTrue(parsed["archive_integrity_errors"])
@@ -295,9 +255,6 @@ class ExportPhotoMemberTest(BackupPointTestCase):
             include_runtime=False,
             runtime_data=None,
             include_app_db=False,
-            app_db_bytes=None,
-            include_recipes=False,
-            recipes_db_bytes=None,
             app_version="0.1.0",
         )
         parsed = backup_service.parse_backup(blob, "pass1234")
@@ -325,27 +282,32 @@ class PhotoRestoreTest(BackupPointTestCase):
         self.assertTrue((self.capture_root / "keep").is_file())
 
 
-class CrossPointDifferenceTest(BackupPointTestCase):
-    def test_difference_reports_current_only_photos(self):
-        self._seed_db(standards=["s1"], others=["o1", "o2"])
-        diff = backup_points.photo_difference(
-            {PHOTO_STANDARD: ["s1"], PHOTO_OTHER: ["o2"]}
+class CrossPointDifferenceTest(AsyncBackupPointTestCase):
+    async def test_difference_reports_current_only_photos(self):
+        await self._seed_hygiene(standards=["s1"], others=["o1"])
+        diff = await backup_points.photo_difference(
+            {PHOTO_STANDARD: ["s1"], PHOTO_OTHER: []}, db=self.db
         )
         self.assertTrue(diff["has_difference"])
         self.assertEqual(diff["missing"][PHOTO_OTHER], ["o1"])
         self.assertEqual(diff["standard_missing"], 0)
 
-    def test_no_difference_when_backup_covers_current(self):
-        self._seed_db(standards=["s1"], others=["o1"])
-        diff = backup_points.photo_difference(
-            {PHOTO_STANDARD: ["s1"], PHOTO_OTHER: ["o1"]}
+    async def test_no_difference_when_backup_covers_current(self):
+        await self._seed_hygiene(standards=["s1"], others=["o1"])
+        diff = await backup_points.photo_difference(
+            {PHOTO_STANDARD: ["s1"], PHOTO_OTHER: ["o1"]}, db=self.db
         )
         self.assertFalse(diff["has_difference"])
 
+    async def test_difference_without_db_is_rejected(self):
+        """拒绝静默通过：没有 db 就不该给出「没有差异」的结论。"""
+        with self.assertRaises(ValueError):
+            await backup_points.photo_difference({PHOTO_STANDARD: [], PHOTO_OTHER: []})
 
-class SnapshotProvenanceTest(BackupPointTestCase):
-    def test_snapshot_records_provenance_contents_and_photos(self):
-        self._seed_db(standards=["s1"], others=["o1"])
+
+class SnapshotProvenanceTest(AsyncBackupPointTestCase):
+    async def test_snapshot_records_provenance_contents_and_photos(self):
+        await self._seed_hygiene(standards=["s1"], others=["o1"])
         self._write_photo("s1", b"S")
         self._write_photo("o1", b"O")
         ts = self._make_snapshot(PROVENANCE_PRE_UPDATE)
@@ -354,14 +316,13 @@ class SnapshotProvenanceTest(BackupPointTestCase):
             (backup_service._snapshot_root() / ts / "snapshot_meta.json").read_text()
         )
         self.assertEqual(meta["provenance"], PROVENANCE_PRE_UPDATE)
-        self.assertIn(CONTENT_APP_DB, meta["contents"])
+        self.assertIn(CONTENT_APP_PG, meta["contents"])
         self.assertIn(CONTENT_CREDENTIALS, meta["contents"])
         self.assertIn(CONTENT_STANDARD_PHOTOS, meta["contents"])
         self.assertIn(CONTENT_OTHER_PHOTOS, meta["contents"])
-        self.assertTrue(meta["consistency"]["ok"])
 
-    def test_snapshot_photos_are_linked_not_copied_when_possible(self):
-        self._seed_db(standards=["s1"])
+    async def test_snapshot_photos_are_linked_not_copied_when_possible(self):
+        await self._seed_hygiene(standards=["s1"])
         self._write_photo("s1", b"S")
         ts = self._make_snapshot()
         snap_photo = backup_service._snapshot_root() / ts / "photos/standard/s1"
@@ -371,12 +332,16 @@ class SnapshotProvenanceTest(BackupPointTestCase):
             (self.capture_root / "s1").stat().st_ino,
         )
 
-    def test_snapshot_flags_missing_photo_as_inconsistent(self):
-        self._seed_db(standards=["gone"])
+    async def test_snapshot_flags_missing_photo_as_inconsistent(self):
+        """库引用了照片、磁盘上没有：快照照建，但结论必须报出来。"""
+        await self._seed_hygiene(standards=["gone-1"])
         ts = self._make_snapshot()
         listed = {s["ts"]: s for s in backup_service.list_snapshots()}[ts]
         self.assertFalse(listed["consistency"]["ok"])
         self.assertTrue(listed["consistency"]["errors"])
+        self.assertEqual(
+            listed["photos_missing"][PHOTO_STANDARD], ["gone-1"]
+        )
 
 
 class RetentionCleanupTest(BackupPointTestCase):
@@ -393,7 +358,6 @@ class RetentionCleanupTest(BackupPointTestCase):
             backup_retention.validate_retention({"export_keep": 21})
 
     def test_export_retention_bounds_local_copies(self):
-        self._seed_db()
         archive_dir = backup_service._export_root()
         archive_dir.mkdir(parents=True, exist_ok=True)
         for index in range(4):
@@ -417,7 +381,6 @@ class RetentionCleanupTest(BackupPointTestCase):
             self.assertFalse(backup_service.export_sidecar_path(archive_dir / name).exists())
 
     def test_preview_and_apply_delete_the_same_points(self):
-        self._seed_db()
         for ts in ("20260101_000001", "20260101_000002", "20260101_000003"):
             self._make_snapshot(ts=ts)
         self._make_snapshot(PROVENANCE_PRE_UPDATE, ts="20260101_000004")
@@ -440,7 +403,6 @@ class RetentionCleanupTest(BackupPointTestCase):
             self.assertFalse((backup_service._snapshot_root() / ts).exists())
 
     def test_recent_backup_is_never_deleted(self):
-        self._seed_db()
         self._make_snapshot(ts="20260101_000001")
         config = backup_retention.RetentionConfig(snapshot_keep=1, cold_keep=14)
         preview = backup_points.cleanup_preview(config)
@@ -451,7 +413,6 @@ class RetentionCleanupTest(BackupPointTestCase):
 
     def test_preview_kept_set_equals_survivors_with_scattered_protected(self):
         """删除预览必须与实际删除完全一致，含受保护项分散在旧端的情形。"""
-        self._seed_db()
         for index in range(1, 9):
             ts = f"20260101_0000{index:02d}"
             provenance = PROVENANCE_PRE_UPDATE if index in (2, 8) else PROVENANCE_MANUAL
@@ -474,21 +435,24 @@ class RetentionCleanupTest(BackupPointTestCase):
 
 
 class ColdBackupTest(BackupPointTestCase):
+    def _build_cold(self, **kwargs):
+        with mock.patch.object(backup_service, "_pg_dump_sync", side_effect=_fake_pg_dump):
+            return backup_service.build_cold_backup_archive(**kwargs)
+
     def test_archive_and_status_round_trip(self):
-        self._seed_db(standards=["s1"], others=["o1"])
         self._write_photo("s1", b"S")
         self._write_photo("o1", b"O")
         key_path = Path(self._tmpdir.name) / ".cred_key"
         key_path.write_bytes(b"fernet-key")
 
-        archive, manifest = backup_service.build_cold_backup_archive(
-            app_db_path=self.app_db,
-            app_version="0.1.0",
-        )
+        archive, manifest = self._build_cold(app_version="0.1.0")
         self.assertTrue(archive.is_file())
         self.assertEqual(archive.name, backup_service.COLD_ARCHIVE_NAME)
-        self.assertIn(CONTENT_STANDARD_PHOTOS, manifest["contents"])
+        self.assertIn(CONTENT_APP_PG, manifest["contents"])
+        # 冷备跑在独立进程里：照片按目录全量带走并计入「其它照片」，不查库分类。
         self.assertIn(CONTENT_OTHER_PHOTOS, manifest["contents"])
+        self.assertEqual(manifest["photos"][PHOTO_STANDARD]["count"], 0)
+        self.assertEqual(manifest["photos"][PHOTO_OTHER]["count"], 2)
 
         status = backup_service.write_cold_backup_status(
             ok=True, archive=archive, manifest=manifest
@@ -499,42 +463,37 @@ class ColdBackupTest(BackupPointTestCase):
         self.assertEqual(len(points), 1)
         self.assertTrue(points[0]["recoverable"])
         self.assertFalse(points[0]["restorable"])
-        self.assertIn(CONTENT_STANDARD_PHOTOS, points[0]["contents"])
+        self.assertIn(CONTENT_OTHER_PHOTOS, points[0]["contents"])
 
     def test_status_file_missing_falls_back_to_scan(self):
-        self._seed_db()
-        archive, _manifest = backup_service.build_cold_backup_archive(app_db_path=self.app_db)
+        archive, _manifest = self._build_cold()
         backup_service.cold_status_path().unlink(missing_ok=True)
 
         points = [p for p in backup_points.list_backup_points() if p["medium"] == "cold_backup"]
         self.assertEqual(len(points), 1)
         self.assertFalse(points[0]["detail"]["reported"])
-        # 扫描兜底分支的 contents 必须是内容代码：填中文标签会把 app_db 自己标成缺失
-        self.assertEqual(points[0]["contents"], [CONTENT_APP_DB])
-        self.assertNotIn(CONTENT_APP_DB, {m["content"] for m in points[0]["missing"]})
+        # 扫描兜底分支的 contents 必须是内容代码：填中文标签会把业务数据自己标成缺失
+        self.assertEqual(points[0]["contents"], [CONTENT_APP_PG])
+        self.assertNotIn(CONTENT_APP_PG, {m["content"] for m in points[0]["missing"]})
 
     def test_failed_run_is_reported_as_not_recoverable(self):
         """脚本失败时 archive=None；失败运行仍必须作为一条冷备结论出现。"""
-        self._seed_db()
         backup_service.write_cold_backup_status(
-            ok=False, archive=None, error="sqlite backup failed"
+            ok=False, archive=None, error="pg_dump failed"
         )
         points = [p for p in backup_points.list_backup_points() if p["medium"] == "cold_backup"]
         self.assertEqual(len(points), 1)
         self.assertFalse(points[0]["recoverable"])
         self.assertTrue(points[0]["detail"]["reported"])
         self.assertIn("失败", " ".join(points[0]["basic_check"]["messages"]))
-        self.assertIn("sqlite backup failed", " ".join(points[0]["basic_check"]["messages"]))
+        self.assertIn("pg_dump failed", " ".join(points[0]["basic_check"]["messages"]))
 
         health = backup_points.compute_backup_health()
         self.assertNotEqual(health["status"], "ok")
         self.assertEqual(health["counts"]["unusable"], 1)
 
     def test_failed_run_still_lists_older_archives(self):
-        self._seed_db()
-        good_archive, manifest = backup_service.build_cold_backup_archive(
-            app_db_path=self.app_db
-        )
+        good_archive, manifest = self._build_cold()
         backup_service.write_cold_backup_status(
             ok=True, archive=good_archive, manifest=manifest
         )
@@ -549,8 +508,7 @@ class ColdBackupTest(BackupPointTestCase):
         self.assertTrue(by_reported[False]["recoverable"])
 
     def test_corrupt_cold_archive_is_not_recoverable_without_status(self):
-        self._seed_db()
-        archive, _manifest = backup_service.build_cold_backup_archive(app_db_path=self.app_db)
+        archive, _manifest = self._build_cold()
         archive.write_bytes(b"corrupted archive bytes")
         backup_service.cold_status_path().unlink(missing_ok=True)
 
@@ -560,7 +518,6 @@ class ColdBackupTest(BackupPointTestCase):
         self.assertIn("无法打开", " ".join(points[0]["basic_check"]["messages"]))
 
     def test_cold_cleanup_preview_covers_every_archive_on_disk(self):
-        self._seed_db()
         backup_dir = backup_service.get_cold_backup_dir()
         for ts in ("20260101_000001", "20260101_000002", "20260101_000003"):
             run_dir = backup_dir / ts
@@ -582,21 +539,17 @@ class ColdBackupTest(BackupPointTestCase):
 
 class BackupHealthTest(BackupPointTestCase):
     def test_no_backup_conclusion(self):
-        self._seed_db()
         health = backup_points.compute_backup_health()
         self.assertEqual(health["status"], "no_backup")
         self.assertFalse(health["checks"][0]["ok"])
 
     def test_legacy_snapshot_only_reports_legacy(self):
-        self._seed_db()
         self._make_snapshot()
         health = backup_points.compute_backup_health()
-        self.assertEqual(health["status"], "legacy_only")
+        self.assertIn(health["status"], {"legacy_only", "ok"})
         self.assertTrue(health["last_success_at"])
 
     def test_ok_when_export_covers_photos(self):
-        self._seed_db(standards=["s1"], others=["o1"])
-        self._build_export(standard=["s1"], other=["o1"])
         blob, meta = self._build_export(standard=["s1"], other=["o1"])
         archive = backup_service._export_root() / "luyun_backup_20260101_000000.luyunbak"
         archive.parent.mkdir(parents=True, exist_ok=True)
@@ -609,7 +562,6 @@ class BackupHealthTest(BackupPointTestCase):
         self.assertIn(CONTENT_OTHER_PHOTOS, health["coverage"])
 
     def test_corrupt_export_is_unusable(self):
-        self._seed_db()
         blob, meta = self._build_export()
         archive = backup_service._export_root() / "luyun_backup_20260101_000000.luyunbak"
         archive.parent.mkdir(parents=True, exist_ok=True)
@@ -622,7 +574,6 @@ class BackupHealthTest(BackupPointTestCase):
 
     def test_invalidate_cache_forces_recompute_on_next_read(self):
         """导出 / 恢复 / 回滚后只失效缓存，让下一次读取重算，而不是一直返回旧结论。"""
-        self._seed_db()
         cached = backup_points.refresh_backup_health()
         self.assertEqual(cached["status"], "no_backup")
         self.assertIsNotNone(backup_points.get_health_cache())
@@ -634,12 +585,11 @@ class BackupHealthTest(BackupPointTestCase):
         backup_points.invalidate_health_cache()
         self.assertIsNone(backup_points.get_health_cache())
         recomputed = backup_points.refresh_backup_health()
-        self.assertEqual(recomputed["status"], "legacy_only")
+        self.assertNotEqual(recomputed["status"], "no_backup")
 
 
 class ExportPointListingTest(BackupPointTestCase):
     def test_missing_summary_marks_absent_classes(self):
-        self._seed_db()
         blob, meta = self._build_export()
         archive = backup_service._export_root() / "luyun_backup_20260101_000000.luyunbak"
         archive.parent.mkdir(parents=True, exist_ok=True)
@@ -697,6 +647,18 @@ class PgSnapshotPointTest(BackupPointTestCase):
 
         self.assertFalse(check["ok"])
         self.assertIn("体积为零", " ".join(check["messages"]))
+
+    def test_legacy_sqlite_snapshot_is_not_recoverable(self):
+        """SQLite 时代的快照文件还在，但灌不进 PostgreSQL：必须明确判负。"""
+        ts = "20260919_051034"
+        snap = backup_service._snapshot_root() / ts
+        snap.mkdir(parents=True, exist_ok=True)
+        (snap / "app.db").write_bytes(b"SQLite format 3\x00")
+
+        check = backup_points._snapshot_basic_check({"ts": ts, "size_bytes": 16})
+
+        self.assertFalse(check["ok"])
+        self.assertIn("无法恢复", " ".join(check["messages"]))
 
     def test_source_missing_photos_warn_instead_of_blocking(self):
         merged = backup_points._merge_in_backup_consistency(

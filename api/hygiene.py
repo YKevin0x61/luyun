@@ -12,7 +12,6 @@ from urllib.parse import quote
 import asyncio
 import json
 import logging
-import sqlite3
 import tempfile
 import time
 import uuid
@@ -24,6 +23,7 @@ from pydantic import BaseModel, Field
 from api.security import require_session
 from config import settings
 from database import CHINA_TZ
+from db_core.errors import is_integrity_violation
 from services import auth_service
 from services.hygiene.accounts import (
     EmployeeAccounts,
@@ -234,14 +234,16 @@ async def _delete_or_conflict(coro, detail: str):
     """删除类端点的统一兜底：还有没清干净的外键引用时给 409 而不是 500。
 
     正常路径已经在服务层按依赖顺序清了子行，这里是防止将来漏掉一张子表就
-    把 500「服务器内部错误」抛给管理员。注意 PG 后端的完整性异常目前没有映射到
-    ``sqlite3.IntegrityError``，所以这条兜底只在 SQLite 下生效。
+    把 500「服务器内部错误」抛给管理员。完整性异常按类名判定（`is_integrity_violation`），
+    PostgreSQL 的 ``ForeignKeyViolationError`` 与 SQLite 的 ``IntegrityError`` 都算。
     """
     try:
         return await coro
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
-    except sqlite3.IntegrityError as exc:
+    except Exception as exc:
+        if not is_integrity_violation(exc):
+            raise
         logger.warning("hygiene delete blocked by integrity error: %s", exc)
         raise HTTPException(status_code=409, detail=detail) from exc
 

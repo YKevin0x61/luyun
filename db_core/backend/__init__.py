@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 """数据库后端适配层。
 
-现在有 SQLite（既有 aiosqlite 路径）与 PostgreSQL（:mod:`db_core.backend.pg`）
-两种形态；方言差异集中在 :mod:`db_core.backend.dialect`。
+后端只剩 PostgreSQL（:mod:`db_core.backend.pg`，SQLite 已随 ADR 0089 退场）；
+`?` → `$n` 与 `rowid` 这类方言差异集中在 :mod:`db_core.backend.dialect`。
 
-``pg`` 走延迟导入：它依赖 ``asyncpg``，而默认的 SQLite 部署并不需要装它。
-模块级 eager import 会让 asyncpg 变成硬依赖——CI 只装 ``requirements.txt``，
-跑方言测试时就会 ImportError。
+``pg`` 走延迟导入：它依赖 ``asyncpg``，延迟导入让不需要数据库的纯工具（例如
+只跑方言转换的测试）不必在 import 期就加载驱动。
 """
 
 from db_core.backend import dialect

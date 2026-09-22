@@ -1,7 +1,5 @@
-import asyncio
 import csv
 import io
-import sqlite3
 
 import pytest
 from fastapi import FastAPI
@@ -9,75 +7,69 @@ from fastapi.testclient import TestClient
 
 import api.recipes as recipes_module
 from services.recipes.store import RecipeStore
-from config import settings
 from database import DatabaseManager
 from services import auth_service
 from services.app_runtime import AppRuntime, set_runtime
 
-
-def _get_loop():
-    try:
-        return asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
+SEED_UPDATED_AT = "2026-01-01T00:00:00+00:00"
 
 
-def _run(coro):
-    return _get_loop().run_until_complete(coro)
+async def _seed_recipes(conn):
+    """旧 ``_seed`` 的等价物：表由 migrations/pg 建好，这里只插同样语义的种子。
 
-
-def _seed(path):
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        """
-        CREATE TABLE sop_stations (slug TEXT PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL);
-        CREATE TABLE sop_recipes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, station_slug TEXT NOT NULL, section TEXT NOT NULL,
-            recipe_name TEXT NOT NULL, body_markdown TEXT NOT NULL, sort_order INTEGER NOT NULL,
-            is_new INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
-        INSERT INTO sop_stations VALUES ('changfen','肠粉档','2026-01-01T00:00:00+00:00');
-        INSERT INTO sop_recipes (station_slug,section,recipe_name,body_markdown,sort_order,is_new,is_active,updated_at)
-        VALUES ('changfen','配方','肠粉酱油','酱油：100g',0,0,1,'2026-01-01T00:00:00+00:00');
-        """
+    种子配方 id=1——``test_station_detail_stamps_recipe_id_on_cards`` 依赖它
+    （conftest 每个用例 ``TRUNCATE ... RESTART IDENTITY``）。
+    """
+    await conn.execute(
+        "INSERT INTO sop_stations (slug, title, updated_at) VALUES (?, ?, ?)",
+        ("changfen", "肠粉档", SEED_UPDATED_AT),
     )
-    conn.commit()
-    conn.close()
+    await conn.execute(
+        "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, "
+        "is_new, is_active, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("changfen", "配方", "肠粉酱油", "酱油：100g", 0, 0, 1, SEED_UPDATED_AT),
+    )
+    await conn.commit()
+
+
+def _run(client, coro):
+    """在 TestClient 的事件循环里 await 协程。
+
+    asyncpg 连接绑定**创建它**的事件循环，而 TestClient 在独立线程的事件循环里处理
+    请求；测试里对库的直接操作也必须回到那个循环（``client.portal``），否则会撞上
+    "got Future attached to a different loop"。
+    """
+    return client.portal.call(lambda: coro)
 
 
 @pytest.fixture
-def recipe_store(tmp_path):
-    db_path = tmp_path / "recipes.db"
-    _seed(str(db_path))
-    store = RecipeStore(str(db_path))
-    _run(store.connect())
-    yield store
-    _run(store.close())
-
-
-@pytest.fixture
-def client(recipe_store, tmp_path):
-    store = recipe_store
-
-    old_database_dir = settings.DATABASE_DIR
-    settings.DATABASE_DIR = str(tmp_path)
-    auth_db = DatabaseManager()
-    _run(auth_db.connect())
-    set_runtime(AppRuntime(db=auth_db))
-    _run(auth_service.init_user("admin", "password123"))
-    token, _meta = _run(auth_service.issue_api_token(label="test-recipe-api"))
-
+def client():
+    """TestClient + 注入 store 的 PG 连接（连接、种子、store 都建在 client 的循环里）。"""
+    db = DatabaseManager()
     app = FastAPI()
     app.include_router(recipes_module.router)
-    app.dependency_overrides[recipes_module._get_recipe_store] = lambda: store
     with TestClient(app) as c:
+        # DatabaseManager 的连接属性是 _conn（main.py 的装配同样用它），没有公开的 conn。
+        _run(c, db.connect())
+        store = RecipeStore(conn=db._conn)
+        _run(c, _seed_recipes(db._conn))
+        _run(c, store.connect())
+        app.dependency_overrides[recipes_module._get_recipe_store] = lambda: store
+        set_runtime(AppRuntime(db=db))
+        _run(c, auth_service.init_user("admin", "password123"))
+        token, _meta = _run(c, auth_service.issue_api_token(label="test-recipe-api"))
         c.headers.update({"X-Admin-Token": token})
+        c.recipe_store = store
         yield c
+        set_runtime(None)
+        app.dependency_overrides.clear()
+        _run(c, db.close())
 
-    _run(auth_db.close())
-    set_runtime(None)
-    settings.DATABASE_DIR = old_database_dir
+
+@pytest.fixture
+def recipe_store(client):
+    """client 用的那条 store（连接建在 client 的事件循环里）。"""
+    return client.recipe_store
 
 
 def test_list_stations(client):
@@ -349,11 +341,7 @@ def test_station_detail_needs_review_renders_markdown_not_structured(client, rec
             "steps": ["不该出现在待复核阅读里"],
         },
     ).json()["id"]
-    _run(recipe_store.conn.execute(
-        "UPDATE sop_recipes SET needs_review=1, legacy_markdown=? WHERE id=?",
-        ("面粉 200g\n水 300ml", rid),
-    ))
-    _run(recipe_store.conn.commit())
+    _run(client, _flag_review(recipe_store, rid, legacy_markdown="面粉 200g\n水 300ml"))
     html = client.get("/api/recipes/stations/changfen").json()["content_html"]
     assert "recipe-ingredients" not in html
     assert "不该出现在待复核阅读里" not in html
@@ -1026,14 +1014,12 @@ def test_update_negative_base_servings_qty_returns_400(client):
     assert r.json()["detail"] == "基准份数不能为负数"
 
 
-def _flag_review(store, recipe_id, *, needs_review=1, legacy_markdown="旧正文\n第二行"):
-    conn = sqlite3.connect(store.db_path)
-    conn.execute(
+async def _flag_review(store, recipe_id, *, needs_review=1, legacy_markdown="旧正文\n第二行"):
+    await store.conn.execute(
         "UPDATE sop_recipes SET needs_review=?, legacy_markdown=? WHERE id=?",
         (needs_review, legacy_markdown, recipe_id),
     )
-    conn.commit()
-    conn.close()
+    await store.conn.commit()
 
 
 def test_list_get_history_include_needs_review_and_legacy_markdown(client, recipe_store):
@@ -1046,7 +1032,7 @@ def test_list_get_history_include_needs_review_and_legacy_markdown(client, recip
     assert current["legacy_markdown"] is None
 
     snapshot = "面粉 200g\n混合"
-    _flag_review(recipe_store, rid, legacy_markdown=snapshot)
+    _run(client, _flag_review(recipe_store, rid, legacy_markdown=snapshot))
     listed = next(
         row for row in client.get("/api/recipes/stations/changfen/recipes").json()["recipes"]
         if row["id"] == rid
@@ -1064,7 +1050,7 @@ def test_list_stations_includes_needs_review_count(client, recipe_store):
     assert stations[0]["needs_review_count"] == 0
 
     rid = client.get("/api/recipes/stations/changfen/recipes").json()["recipes"][0]["id"]
-    _flag_review(recipe_store, rid)
+    _run(client, _flag_review(recipe_store, rid))
     stations = client.get("/api/recipes/stations").json()["stations"]
     assert stations[0]["needs_review_count"] == 1
 
@@ -1087,7 +1073,7 @@ def test_confirm_review_sets_flag_zero_and_preserves_other_fields(client, recipe
     assert created.status_code == 200
     rid = created.json()["id"]
     snapshot = "迁移前原文\n盐 2g"
-    _flag_review(recipe_store, rid, legacy_markdown=snapshot)
+    _run(client, _flag_review(recipe_store, rid, legacy_markdown=snapshot))
 
     r = client.post(f"/api/recipes/recipes/{rid}/confirm-review")
     assert r.status_code == 200

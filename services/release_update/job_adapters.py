@@ -47,13 +47,9 @@ class SnapshotBackupAdapter:
     """Mandatory backup via local restore snapshot (no passphrase export)."""
 
     def run_backup(self) -> str:
-        app_db = settings.APP_DB_PATH
-        recipes = backup_service.get_recipes_db_path()
         creds = backup_service.get_credentials_file_path()
         try:
             return backup_service.create_restore_snapshot(
-                app_db,
-                recipes,
                 creds,
                 provenance=backup_service.PROVENANCE_PRE_UPDATE,
             )

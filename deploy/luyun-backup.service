@@ -1,4 +1,5 @@
-# systemd 一次性任务单元：执行 deploy/backup.sh 做一次 SQLite 冷备。
+# systemd 一次性任务单元：执行 deploy/backup.sh 做一次冷备（后端由
+# DATABASE_BACKEND 决定：SQLite 走官方 backup API，PostgreSQL 走 pg_dump）。
 # 本身不常驻，由 deploy/luyun-backup.timer 按日触发（Type=oneshot）。
 #
 # 安装步骤（占位路径 /opt/luyun 需替换为实际部署目录，与 deploy/luyun.service
@@ -15,9 +16,10 @@
 #   journalctl -u luyun-backup
 
 [Unit]
-Description=LuckIn SQLite 数据库定时备份（一次性任务，由 luyun-backup.timer 触发）
-# 备份依赖 data/ 下的 .db 文件，虽然 sqlite3 .backup 支持在线备份（不需要
-# luyun.service 停机），但仍建议放在其后，避免开机瞬间数据目录还没就绪：
+Description=LuckIn 数据库定时备份（一次性任务，由 luyun-backup.timer 触发）
+# 备份依赖 data/ 下的库文件（SQLite）或 data/app.db 的存在（PG 门店的保留份数
+# 仍从该库读），是在线备份、不需要 luyun.service 停机，但仍建议放在其后，
+# 避免开机瞬间数据目录还没就绪：
 After=luyun.service
 
 [Service]

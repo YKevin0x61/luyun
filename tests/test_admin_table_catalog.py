@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Data-management catalog covers every physical app.db table read-only where needed."""
+"""Data-management catalog covers every physical table read-only where needed."""
 
-import asyncio
+from contextlib import asynccontextmanager, contextmanager
 
 import pytest
 from fastapi import FastAPI
@@ -14,25 +14,51 @@ from config import settings
 from database import DatabaseManager, get_db
 
 
-def _run(coro):
-    return asyncio.run(coro)
+def _make_app(seed=None) -> FastAPI:
+    """连接、种子与请求都跑在 TestClient 的同一个事件循环里。
+
+    ``TestClient`` 在独立线程的 loop 里执行应用，而 asyncpg 的连接与建它的 loop
+    绑定：用例里另外 ``asyncio.run(db.connect())`` 再发请求会报
+    「attached to a different loop」。所以连接放进 lifespan（随 ``with TestClient``
+    在 portal loop 里启动），需要写种子的用例把协程交给 ``seed`` 一起进去。
+    """
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        db = DatabaseManager()
+        assert await db.connect()
+        app.state.db = db
+        try:
+            if seed is not None:
+                await seed(db)
+            yield
+        finally:
+            await db.close()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(admin_router)
+    app.dependency_overrides[get_db] = lambda: app.state.db
+    app.dependency_overrides[verify_admin_token] = lambda: True
+    return app
+
+
+@contextmanager
+def _client(tmp_path, seed=None):
+    old_dir = settings.DATABASE_DIR
+    settings.DATABASE_DIR = str(tmp_path)
+    app = _make_app(seed)
+    try:
+        with TestClient(app) as client:
+            yield client, app.state.db
+    finally:
+        app.dependency_overrides.clear()
+        settings.DATABASE_DIR = old_dir
 
 
 @pytest.fixture
 def admin_client(tmp_path):
-    old_dir = settings.DATABASE_DIR
-    settings.DATABASE_DIR = str(tmp_path)
-    db = DatabaseManager()
-    _run(db.connect())
-    app = FastAPI()
-    app.include_router(admin_router)
-    app.dependency_overrides[get_db] = lambda: db
-    app.dependency_overrides[verify_admin_token] = lambda: True
-    with TestClient(app) as client:
+    with _client(tmp_path) as (client, db):
         yield client, db
-    _run(db.close())
-    app.dependency_overrides.clear()
-    settings.DATABASE_DIR = old_dir
 
 
 def test_catalog_includes_physical_tables_and_groups(admin_client):
@@ -59,10 +85,8 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
     assert group_keys == ["business", "recipe", "hygiene", "auth", "external"]
 
 
-def test_read_only_physical_tables_can_be_browsed(admin_client):
-    client, db = admin_client
-
-    async def seed():
+def test_read_only_physical_tables_can_be_browsed(tmp_path):
+    async def seed(db):
         await db._conn.execute(
             """INSERT INTO hygiene_zones
                (name, day_shift, night_shift, created_at, updated_at)
@@ -70,23 +94,23 @@ def test_read_only_physical_tables_can_be_browsed(admin_client):
         )
         await db._conn.commit()
 
-    _run(seed())
+    with _client(tmp_path, seed) as (client, _db):
+        schema = client.get("/api/admin/tables/hygiene_zones/schema")
+        assert schema.status_code == 200
+        assert schema.json()["read_only"] is True
+        # 表结构来自 information_schema：列名与类型都要如实带出来
+        columns = {col["name"]: col for col in schema.json()["columns"]}
+        assert columns["name"]["type"] == "text"
+        assert columns["id"]["pk"] is True
 
-    schema = client.get("/api/admin/tables/hygiene_zones/schema")
-    assert schema.status_code == 200
-    assert schema.json()["read_only"] is True
-    assert any(col["name"] == "name" for col in schema.json()["columns"])
-
-    rows = client.get("/api/admin/tables/hygiene_zones/rows?page=1&page_size=10")
-    assert rows.status_code == 200
-    assert rows.json()["read_only"] is True
-    assert rows.json()["rows"][0]["name"] == "后厨"
+        rows = client.get("/api/admin/tables/hygiene_zones/rows?page=1&page_size=10")
+        assert rows.status_code == 200
+        assert rows.json()["read_only"] is True
+        assert rows.json()["rows"][0]["name"] == "后厨"
 
 
-def test_auth_secret_columns_are_redacted(admin_client):
-    client, db = admin_client
-
-    async def seed():
+def test_auth_secret_columns_are_redacted(tmp_path):
+    async def seed(db):
         await db._conn.execute(
             """INSERT INTO admin_user
                (id, username, password_hash, created_at, updated_at)
@@ -94,17 +118,49 @@ def test_auth_secret_columns_are_redacted(admin_client):
         )
         await db._conn.commit()
 
-    _run(seed())
+    with _client(tmp_path, seed) as (client, _db):
+        rows = client.get("/api/admin/tables/admin_user/rows?page=1&page_size=10")
+        assert rows.status_code == 200
+        assert rows.json()["rows"][0]["password_hash"] == "已隐藏"
 
-    rows = client.get("/api/admin/tables/admin_user/rows?page=1&page_size=10")
-    assert rows.status_code == 200
-    assert rows.json()["rows"][0]["password_hash"] == "已隐藏"
+        blocked = client.get(
+            "/api/admin/tables/admin_user/rows",
+            params={"search_field": "password_hash", "search_value": "secret"},
+        )
+        assert blocked.status_code == 403
 
-    blocked = client.get(
-        "/api/admin/tables/admin_user/rows",
-        params={"search_field": "password_hash", "search_value": "secret"},
-    )
-    assert blocked.status_code == 403
+
+def test_add_and_drop_column_use_pg_ddl(tmp_path):
+    """加列 / 删列走 PG 的 ALTER TABLE，不再有重建表那一步。"""
+    with _client(tmp_path) as (client, _db):
+        added = client.post(
+            "/api/admin/tables/tables/columns",
+            json={"column_name": "remark", "column_type": "TEXT"},
+        )
+        assert added.status_code == 200, added.text
+
+        schema = client.get("/api/admin/tables/tables/schema").json()["columns"]
+        assert any(col["name"] == "remark" for col in schema)
+
+        dropped = client.delete("/api/admin/tables/tables/columns/remark")
+        assert dropped.status_code == 200, dropped.text
+
+        schema = client.get("/api/admin/tables/tables/schema").json()["columns"]
+        assert not any(col["name"] == "remark" for col in schema)
+
+
+def test_add_column_rejects_non_numeric_default(tmp_path):
+    with _client(tmp_path) as (client, _db):
+        response = client.post(
+            "/api/admin/tables/tables/columns",
+            json={
+                "column_name": "seats",
+                "column_type": "INTEGER",
+                "default_value": "1; DROP TABLE orders",
+            },
+        )
+        assert response.status_code == 400
+        assert "数字" in response.json()["detail"]
 
 
 @pytest.mark.parametrize(

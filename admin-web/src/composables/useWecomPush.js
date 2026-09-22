@@ -93,6 +93,18 @@ export function useWecomPush() {
     await loadAll()
   }
 
+  async function toggleWebhookEnabled(item) {
+    // 列表上的快捷开关：只切 enabled，webhook_url 传 null 表示不动原地址
+    // （后端 `if payload.webhook_url:` 才覆盖，见 api/wecom_push.py）。
+    await api.put(`/api/wecom-push/webhooks/${item.id}`, {
+      name: item.name,
+      webhook_url: null,
+      enabled: !item.enabled,
+      notes: item.notes || '',
+    })
+    await loadWebhooks()
+  }
+
   async function testWebhook(id) {
     const result = await api.post(`/api/wecom-push/webhooks/${id}/test`, {})
     await loadLogs()
@@ -162,7 +174,7 @@ export function useWecomPush() {
     webhooks, jobs, logs, meta, selectedJobId, previewContent, previewMeta, loading, error,
     webhookForm, jobForm, resetWebhookForm, resetJobForm,
     loadAll, loadWebhooks, loadJobs, loadLogs,
-    editWebhook, saveWebhook, deleteWebhook, testWebhook,
+    editWebhook, saveWebhook, deleteWebhook, toggleWebhookEnabled, testWebhook,
     editJob, applyJobTemplate, saveJob, deleteJob,
     previewSelectedJob, sendSelectedJob,
   }

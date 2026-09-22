@@ -22,10 +22,10 @@ Human- and agent-facing layout rules for this repo. Goal: each top-level area ha
 | `docs/archive/` | One-off reports and dated snapshots — not living design docs; **no** shop operational data or DB dumps |
 | `scripts/` | Day-to-day entry scripts only; see `scripts/README.md` |
 | `scripts/archive/` | One-off migration, debug, and smoke utilities kept for reference |
-| `tests/` | Automated tests; flat `test_*.py` at this level (no `conftest.py`) — grouping into subpackages breaks `from tests.test_* import`, so it needs its own ADR |
+| `tests/` | Automated tests; flat `test_*.py` at this level — grouping into subpackages breaks `from tests.test_* import`, so it needs its own ADR. `conftest.py` only pins the test database to the PostgreSQL test database (`luyun_test`) and cookie/debug switches, so it does not change that rule |
 | `data/` | Runtime state/DBs/credentials — **not** source of truth in git (`data/*` gitignored) |
 | `data/archive/` | Local one-off artifacts (dated comparison reports, superseded DBs such as pre-merge `recipes.db`) — deliberately **not** under `docs/archive/`, which must stay free of operational data |
-| `.scratch/` | Local markdown issue tracker (open features only); see `docs/agents/issue-tracker.md` |
+| `.scratch/` | Local markdown issue tracker (open features plus resolved history); see `docs/agents/issue-tracker.md` |
 | `AGENTS.md` | Canonical agent guide for this repo |
 | `CLAUDE.md` | Short pointer to `AGENTS.md` (tool entry file only) |
 | `CONTEXT.md` | Ubiquitous language / domain terms |

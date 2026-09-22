@@ -17,7 +17,7 @@ from config import settings
 from database import DatabaseManager
 from services import backup_points, backup_retention, backup_service
 from services.backup_service import (
-    CONTENT_APP_DB,
+    CONTENT_APP_PG,
     CONTENT_CREDENTIALS,
     CONTENT_OTHER_PHOTOS,
     CONTENT_STANDARD_PHOTOS,
@@ -26,6 +26,7 @@ from services.backup_service import (
     PROVENANCE_PRE_IMPORT,
 )
 from services.credentials_store import CredentialBundle
+from tests.backup_fixtures import seed_hygiene_photo_refs
 
 
 def _bundle() -> CredentialBundle:
@@ -69,41 +70,15 @@ class RestoreFlowTest(unittest.IsolatedAsyncioTestCase):
         self._tmpdir.cleanup()
 
     async def _seed_hygiene(self, *, standard=(), other=()):
-        now = "2026-01-01T00:00:00"
-        # Seeding references capture rows without their parent business rows; the
-        # FK checks are irrelevant to what these tests assert.
-        await self.db._conn.execute("PRAGMA foreign_keys=OFF")
-        for capture_id in standard:
-            await self.db._conn.execute(
-                "INSERT INTO hygiene_standards (item_id, capture_id, content_type,"
-                " created_at) VALUES (1, ?, 'image/jpeg', ?)",
-                (capture_id, now),
-            )
-        for capture_id in other:
-            await self.db._conn.execute(
-                "INSERT INTO hygiene_daily_submissions (instance_id, capture_id,"
-                " content_type, frozen_standard_id, submitter_id, submitter_phone,"
-                " zone_name, captured_at, created_at)"
-                " VALUES (1, ?, 'image/jpeg', 1, 1, '13800000000', 'zone', ?, ?)",
-                (capture_id, now, now),
-            )
-        await self.db._conn.commit()
-        await self.db._conn.execute("PRAGMA foreign_keys=ON")
+        """照片引用插进**业务库**：分类与一致性检查都只认这条路径。"""
+        await seed_hygiene_photo_refs(
+            self.db._conn, standards=standard, others=other
+        )
         for capture_id in list(standard) + list(other):
             (self.capture_root / capture_id).write_bytes(b"photo-" + capture_id.encode())
 
-    async def _app_db_bytes(self) -> bytes:
-        fd, tmp_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        try:
-            await self.db.export_merged_sqlite_file(tmp_path)
-            with open(tmp_path, "rb") as handle:
-                return handle.read()
-        finally:
-            os.unlink(tmp_path)
-
     async def _build_parsed(self, *, standard=(), other=(), declared_standard=None):
-        app_bytes = await self._app_db_bytes()
+        app_bytes = b"PGDMP-CONTENT"
         manifest = {
             PHOTO_STANDARD: {
                 "count": len(standard) if declared_standard is None else declared_standard,
@@ -131,9 +106,7 @@ class RestoreFlowTest(unittest.IsolatedAsyncioTestCase):
             include_runtime=False,
             runtime_data=None,
             include_app_db=True,
-            app_db_bytes=app_bytes,
-            include_recipes=False,
-            recipes_db_bytes=None,
+            app_pg_bytes=app_bytes,
             include_standard_photos=bool(standard),
             include_other_photos=bool(other),
             photo_members=members,
@@ -167,7 +140,7 @@ class RestoreFlowTest(unittest.IsolatedAsyncioTestCase):
         result = await self._apply(parsed)
 
         self.assertTrue(result["success"])
-        self.assertTrue(result["applied"][CONTENT_APP_DB])
+        self.assertTrue(result["applied"][CONTENT_APP_PG])
         self.assertTrue(result["applied"][CONTENT_STANDARD_PHOTOS])
         self.assertTrue(result["applied"][CONTENT_OTHER_PHOTOS])
         self.assertFalse(result["applied"][CONTENT_CREDENTIALS])
@@ -274,15 +247,12 @@ class RestoreFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_export_without_photos_restores_and_is_flagged(self):
         await self._seed_hygiene(standard=["s1"], other=["o1"])
-        app_bytes = await self._app_db_bytes()
         blob = backup_service.build_backup(
             "pass1234",
             include_runtime=False,
             runtime_data=None,
             include_app_db=True,
-            app_db_bytes=app_bytes,
-            include_recipes=False,
-            recipes_db_bytes=None,
+            app_pg_bytes=b"PGDMP-CONTENT",
             app_version="0.1.0",
         )
         parsed = backup_service.parse_backup(blob, "pass1234")
@@ -297,7 +267,7 @@ class RestoreFlowTest(unittest.IsolatedAsyncioTestCase):
             parsed, apply_standard_photos=False, apply_other_photos=False
         )
         self.assertTrue(result["success"])
-        self.assertTrue(result["applied"][CONTENT_APP_DB])
+        self.assertTrue(result["applied"][CONTENT_APP_PG])
 
 
 if __name__ == "__main__":

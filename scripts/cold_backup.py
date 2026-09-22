@@ -2,15 +2,19 @@
 # -*- coding: utf-8 -*-
 """宿主机冷备入口：调度 + 退出码，应用侧逻辑全部走备份服务。
 
-冷备产物是一份可校验的单一归档（库快照 + 凭据 + 密钥 + 两类卫生照片 + 清单 +
-校验和），并在固定位置写一份状态文件，供管理后台「备份中心」读取。脚本本身不再
-自带任何数据库复制实现。
+冷备产物是一份可校验的单一归档（PostgreSQL 整库快照 + 凭据 + 密钥 + 两类卫生
+照片 + 清单 + 校验和），并在固定位置写一份状态文件，供管理后台「备份中心」读取。
+脚本本身不再自带任何数据库复制实现。
+
+SQLite 退场后（ADR 0089）这里不再要求 ``data/app.db`` 存在：库快照由
+``pg_dump`` 产出（成员 ``app.pgdump``），保留份数也从 PostgreSQL 的
+``app_settings`` 读取。
 
 用法：
     python3 scripts/cold_backup.py [--retention N]
 
 环境变量（与 deploy/backup.sh 一致）：
-    DATA_DIR     源数据目录，默认 ./data
+    DATA_DIR     源数据目录（凭据、密钥、卫生照片），默认 ./data
     BACKUP_DIR   冷备输出根目录，默认 <仓库根>/backups
 
 退出码：0 成功；非 0 失败（失败也会写状态文件，且不留下半成品归档）。
@@ -54,21 +58,13 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     _configure_paths()
 
-    app_db_path = settings.APP_DB_PATH
-    if not os.path.isfile(app_db_path):
-        message = f"业务数据库不存在: {app_db_path}"
-        backup_service.write_cold_backup_status(ok=False, archive=None, error=message)
-        logger.error("❌ %s", message)
-        return 1
-
     keep = args.retention
     if keep is None:
-        keep = backup_retention.load_from_db_sync(app_db_path).cold_keep
+        keep = backup_retention.load_from_pg_sync().cold_keep
 
     logger.info("📦 生成冷备归档 → %s", backup_service.get_cold_backup_dir())
     try:
         archive, manifest = backup_service.build_cold_backup_archive(
-            app_db_path=app_db_path,
             app_version=settings.APP_VERSION,
         )
     except Exception as exc:

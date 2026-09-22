@@ -95,7 +95,7 @@ def _admin_catalog() -> Dict[str, Any]:
             read_only = table == "logs" or table in _ADMIN_READ_ONLY_TABLES
             meta: Dict[str, Any] = {
                 "group": key,
-                "source": "logs.db" if table == "logs" else "app.db",
+                "source": "postgresql",
                 "read_only": read_only,
             }
             if table == "logs":
@@ -185,11 +185,64 @@ def _table_conn(db, table_name: str):
     raise HTTPException(status_code=400, detail=f"未知表: {table_name}")
 
 
+# 表结构走 information_schema（ADR 0089 后不再有 PRAGMA/SQLite 方言）。列序即
+# ordinal_position；主键判定与 db_core 的方言层同源（pg_index + pg_attribute）。
+_TABLE_COLUMNS_SQL = (
+    "SELECT c.ordinal_position, c.column_name, c.data_type, c.is_nullable,"
+    " c.column_default,"
+    " CASE WHEN pk.attname IS NOT NULL THEN 1 ELSE 0 END AS pk"
+    " FROM information_schema.columns c"
+    " LEFT JOIN (SELECT a.attname, t.relname FROM pg_index i"
+    "   JOIN pg_class t ON t.oid = i.indrelid"
+    "   JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (i.indkey)"
+    "   WHERE i.indisprimary) pk"
+    "  ON pk.attname = c.column_name AND pk.relname = c.table_name"
+    " WHERE c.table_schema = ANY (current_schemas(false)) AND c.table_name = ?"
+    " ORDER BY c.ordinal_position"
+)
+
+
+# 页面上给的是 SQLite 时代的类型名（TEXT/INTEGER/REAL/BLOB/NUMERIC）；落到 PG
+# 时按下面的映射折算——INTEGER 走 BIGINT，与本库 id/外键的既有约定一致。
+_PG_COLUMN_TYPES = {
+    "TEXT": "TEXT",
+    "INTEGER": "BIGINT",
+    "REAL": "DOUBLE PRECISION",
+    "NUMERIC": "NUMERIC",
+    "BLOB": "BYTEA",
+}
+
+# DDL 的 DEFAULT 不能走绑定参数，只能内联；数字字面量必须先过这一关。
+_NUMERIC_LITERAL_RE = re.compile(r"^[+-]?(\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+
+
+def _sql_literal(value: str, col_type: str) -> str:
+    """把页面给的默认值渲染成 SQL 字面量（DDL 里没有绑定参数可用）。"""
+    text = str(value)
+    if col_type == "TEXT":
+        return "'" + text.replace("'", "''") + "'"
+    if col_type in ("INTEGER", "REAL", "NUMERIC"):
+        if not _NUMERIC_LITERAL_RE.match(text.strip()):
+            raise HTTPException(status_code=400, detail="默认值必须是数字")
+        return text.strip()
+    raise HTTPException(status_code=400, detail=f"{col_type} 字段不支持默认值")
+
+
+def _column_entry(row) -> Dict[str, Any]:
+    """information_schema 一行 → 与旧 PRAGMA 口径一致的列描述。"""
+    return {
+        "cid": int(row[0]) - 1,
+        "name": row[1],
+        "type": row[2],
+        "notnull": row[3] == "NO",
+        "dflt_value": row[4],
+        "pk": bool(row[5]),
+    }
+
+
 async def _load_table_columns(conn, table_name: str) -> List[Dict[str, Any]]:
-    async with conn.cursor() as cursor:
-        await cursor.execute(f"PRAGMA table_info({table_name})")
-        rows = await cursor.fetchall()
-    return [{"name": r[1], "type": r[2], "pk": bool(r[5])} for r in rows]
+    cursor = await conn.execute(_TABLE_COLUMNS_SQL, (table_name,))
+    return [_column_entry(row) for row in await cursor.fetchall()]
 
 
 def _validate_batch_update_column(column: str, table_columns: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -247,13 +300,7 @@ async def get_table_schema(table_name: str, db=Depends(get_db)):
 
     try:
         conn = _table_conn(db, table_name)
-        async with conn.cursor() as cursor:
-            await cursor.execute(f"PRAGMA table_info({table_name})")
-            rows = await cursor.fetchall()
-        columns = [{
-            "cid": r[0], "name": r[1], "type": r[2],
-            "notnull": bool(r[3]), "dflt_value": r[4], "pk": bool(r[5])
-        } for r in rows]
+        columns = await _load_table_columns(conn, table_name)
         return {
             "success": True,
             "table": table_name,
@@ -582,32 +629,38 @@ async def batch_update_rows(table_name: str, body: RowBatchUpdate, db=Depends(ge
 
 @router.post("/tables/{table_name}/columns")
 async def add_column(table_name: str, col: ColumnAdd, db=Depends(get_db)):
-    """添加字段"""
+    """添加字段（PG 的 ALTER TABLE ADD COLUMN）。"""
     if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
         raise HTTPException(status_code=400, detail="无效的表名")
     _reject_read_only_table_write(table_name)
     if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', col.column_name):
         raise HTTPException(status_code=400, detail="无效的字段名")
     col_type = col.column_type.upper()
-    if col_type not in ("TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"):
+    pg_type = _PG_COLUMN_TYPES.get(col_type)
+    if pg_type is None:
         raise HTTPException(status_code=400, detail="不支持的字段类型")
 
     try:
-        sql = f"ALTER TABLE {table_name} ADD COLUMN {col.column_name} {col_type}"
+        # 表名/字段名已过白名单正则，再加引号只是防保留字（orders 有 status/source）。
+        sql = (
+            f'ALTER TABLE "{table_name}" ADD COLUMN "{col.column_name}" {pg_type}'
+        )
+        # DDL 里不能放绑定参数（PG 只允许表达式位置用参数），默认值只能内联，
+        # 因此按类型严格校验后再落成字面量。
+        if col.default_value is not None:
+            sql += f" DEFAULT {_sql_literal(col.default_value, col_type)}"
         if not col.nullable:
             sql += " NOT NULL"
-        if col.default_value is not None:
-            sql += f" DEFAULT {'?' if col_type in ('TEXT',) else col.default_value}"
 
         conn = _table_conn(db, table_name)
-        async with conn.cursor() as cursor:
-            await cursor.execute(sql)
+        cursor = await conn.execute(sql)
+        await cursor.close()
         await db.table(table_name).commit()
 
-        logger.info(f"✅ 添加字段 {table_name}.{col.column_name} ({col_type}) 成功")
-        _audit("add_column", table_name, f"column={col.column_name}, type={col_type}")
+        logger.info(f"✅ 添加字段 {table_name}.{col.column_name} ({pg_type}) 成功")
+        _audit("add_column", table_name, f"column={col.column_name}, type={pg_type}")
         await _broadcast_admin_event("add_column", table_name, column=col.column_name)
-        return {"success": True, "message": f"字段 {col.column_name} ({col_type}) 添加成功"}
+        return {"success": True, "message": f"字段 {col.column_name} ({pg_type}) 添加成功"}
     except HTTPException:
         raise
     except Exception as e:
@@ -617,7 +670,7 @@ async def add_column(table_name: str, col: ColumnAdd, db=Depends(get_db)):
 
 @router.delete("/tables/{table_name}/columns/{column_name}")
 async def drop_column(table_name: str, column_name: str, db=Depends(get_db)):
-    """删除字段（重建表）"""
+    """删除字段（PG 的 ALTER TABLE DROP COLUMN，不再重建表）。"""
     if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
         raise HTTPException(status_code=400, detail="无效的表名")
     _reject_read_only_table_write(table_name)
@@ -629,20 +682,15 @@ async def drop_column(table_name: str, column_name: str, db=Depends(get_db)):
 
     try:
         conn = _table_conn(db, table_name)
-        async with conn.cursor() as cursor:
-            await cursor.execute(f"PRAGMA table_info({table_name})")
-            old_cols = [r[1] for r in await cursor.fetchall()]
-
+        columns = await _load_table_columns(conn, table_name)
+        old_cols = [c["name"] for c in columns]
         if column_name not in old_cols:
             raise HTTPException(status_code=404, detail=f"字段 {column_name} 不存在")
 
-        new_cols = [c for c in old_cols if c != column_name]
-        tmp_table = f"{table_name}_tmp_{datetime.now().strftime('%H%M%S')}"
-
-        async with conn.cursor() as cursor:
-            await cursor.execute(f"CREATE TABLE {tmp_table} AS SELECT {', '.join(new_cols)} FROM {table_name}")
-            await cursor.execute(f"DROP TABLE {table_name}")
-            await cursor.execute(f"ALTER TABLE {tmp_table} RENAME TO {table_name}")
+        cursor = await conn.execute(
+            f'ALTER TABLE "{table_name}" DROP COLUMN "{column_name}"'
+        )
+        await cursor.close()
         await db.table(table_name).commit()
 
         logger.info(f"✅ 删除字段 {table_name}.{column_name} 成功")
@@ -665,11 +713,12 @@ async def get_table_stats(table_name: str, db=Depends(get_db)):
 
     try:
         conn = _table_conn(db, table_name)
-        async with conn.cursor() as cursor:
-            await cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-            count = (await cursor.fetchone())[0]
-            await cursor.execute(f"PRAGMA table_info({table_name})")
-            columns = [{"name": r[1], "type": r[2], "pk": bool(r[5])} for r in await cursor.fetchall()]
+        cursor = await conn.execute(f"SELECT COUNT(*) FROM {table_name}")
+        count = (await cursor.fetchone())[0]
+        columns = [
+            {"name": c["name"], "type": c["type"], "pk": c["pk"]}
+            for c in await _load_table_columns(conn, table_name)
+        ]
         return {"success": True, "table": table_name, "row_count": count, "columns": columns}
     except HTTPException:
         raise
@@ -700,11 +749,20 @@ async def get_unmapped_dishes(dish_catalog=Depends(get_dish_catalog)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ─── DB 文件导入 / 导出 ───────────────────────────────────
+# ─── DB 备份导出 / 导入 ───────────────────────────────────
+#
+# SQLite 退场（ADR 0089）后不再有可互操作的 .db 文件：
+#   * 「导出 DB」直接给整库 pg_dump（app.pgdump），与冷备/备份中心的业务数据成员同源；
+#   * 上传导入统一走「备份中心 → 导入备份」（``.luyunbak``，口令加密 + 逐项校验），
+#     这里只负责把旧的 .db 请求明确挡回去并给指引，不再静默失败。
 
-import aiosqlite
+from services.backup_service import export_pg_dump_to_file
 
-from services.backup_service import TABLE_DEDUP_KEY, merge_app_db_from_file
+_DB_IMPORT_GUIDANCE = (
+    "SQLite 的 .db 导入已随 ADR 0089 退场（业务库是 PostgreSQL）。"
+    "请在「备份中心 → 导入备份」上传 .luyunbak 备份包（口令加密，"
+    "恢复前会做两层校验并自动建本机回滚快照）"
+)
 
 
 def _unlink_export_temp(path: str) -> None:
@@ -716,21 +774,19 @@ def _unlink_export_temp(path: str) -> None:
 
 @router.get("/export/db")
 async def export_db(db=Depends(get_db)):
-    """
-    导出合并后的单个 .db 文件（含 ALL_TABLES），可与「导入 DB」互操作。
-    """
+    """导出整库 pg_dump（成员名与备份/冷备一致：app.pgdump）。"""
     ts = datetime.now(CHINA_TZ).strftime("%Y%m%d-%H%M%S")
-    filename = f"luyun-export-{ts}.db"
-    fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-export-")
+    filename = f"luyun-export-{ts}.pgdump"
+    fd, tmp_path = tempfile.mkstemp(suffix=".pgdump", prefix="luyun-export-")
     os.close(fd)
     try:
-        await db.export_merged_sqlite_file(tmp_path)
-        _audit("export_db", "merged", f"path={filename}")
-        await _broadcast_admin_event("export_db", "merged")
+        await export_pg_dump_to_file(tmp_path)
+        _audit("export_db", "pgdump", f"path={filename}")
+        await _broadcast_admin_event("export_db", "pgdump")
         return FileResponse(
             tmp_path,
             filename=filename,
-            media_type="application/vnd.sqlite3",
+            media_type="application/octet-stream",
             background=BackgroundTask(_unlink_export_temp, tmp_path),
         )
     except Exception as e:
@@ -741,115 +797,14 @@ async def export_db(db=Depends(get_db)):
 
 @router.post("/import/preview")
 async def import_db_preview(file: UploadFile, db=Depends(get_db)):
-    """
-    预览上传的 .db 文件内容。
-    返回每个表的：源行数、目标行数、预计导入行数。
-    """
-    if not file.filename.endswith('.db'):
-        raise HTTPException(status_code=400, detail="仅支持 .db 文件")
-
-    content = await file.read()
-    if len(content) == 0:
-        raise HTTPException(status_code=400, detail="文件为空")
-
-    # 在临时文件中打开只读连接
-    fd = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
-    fd.write(content)
-    fd.close()
-
-    try:
-        src_conn = await aiosqlite.connect(fd.name)
-        src_conn.row_factory = aiosqlite.Row
-
-        preview = []
-        for table in ALL_TABLES:
-            src_cur = await src_conn.execute(
-                f"SELECT COUNT(*) FROM {table}"
-            )
-            src_cnt = (await src_cur.fetchone())[0]
-
-            dst_tdb = db.table_or_none(table)
-            if dst_tdb is None:
-                continue
-            async with dst_tdb.conn.cursor() as dst_cur:
-                await dst_cur.execute(f"SELECT COUNT(*) FROM {table}")
-                dst_cnt = (await dst_cur.fetchone())[0]
-
-            dedup_key = TABLE_DEDUP_KEY.get(table)
-            missing = src_cnt
-            if dedup_key and src_cnt > 0:
-                src_keys = set()
-                async with src_conn.execute(f"SELECT {dedup_key} FROM {table}") as cur:
-                    rows = await cur.fetchall()
-                    src_keys = {row[0] for row in rows if row[0]}
-
-                async with dst_tdb.conn.cursor() as dst_cur:
-                    await dst_cur.execute(f"SELECT {dedup_key} FROM {table}")
-                    rows = await dst_cur.fetchall()
-                    dst_keys = {row[0] for row in rows if row[0]}
-
-                missing = len(src_keys - dst_keys)
-
-            preview.append({
-                "table": table,
-                "src_rows": src_cnt,
-                "dst_rows": dst_cnt,
-                "will_import": missing,
-                "dedup_key": dedup_key,
-            })
-
-        await src_conn.close()
-        return {"success": True, "file_size": len(content), "preview": preview}
-
-    except Exception as e:
-        logger.error(f"预览导入失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        import os
-        os.unlink(fd.name)
+    """已退场：.db 合并导入没有对应物，统一给指引。"""
+    raise HTTPException(status_code=400, detail=_DB_IMPORT_GUIDANCE)
 
 
 @router.post("/import/execute")
-async def import_db_execute(
-    file: UploadFile,
-    tables: str = "",   # 逗号分隔的表名列表，空=全部
-    db=Depends(get_db),
-):
-    """
-    执行 DB 文件导入。
-    按唯一键去重（business_flow_id / dish_name 等），
-    只导入目标库中不存在的行，不会覆盖已有数据。
-    """
-    if not file.filename.endswith('.db'):
-        raise HTTPException(status_code=400, detail="仅支持 .db 文件")
-
-    content = await file.read()
-    if len(content) == 0:
-        raise HTTPException(status_code=400, detail="文件为空")
-
-    want_tables = [t.strip() for t in tables.split(",") if t.strip()] if tables else ALL_TABLES
-    want_tables = [t for t in want_tables if t in ALL_TABLES]
-
-    fd = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
-    fd.write(content)
-    fd.close()
-
-    try:
-        merge_result = await merge_app_db_from_file(db, fd.name, tables=want_tables)
-        total_imported = merge_result["total_imported"]
-        results = merge_result["results"]
-        if "dish_stations" in want_tables:
-            get_dish_catalog().invalidate()
-        _audit("import_db", ",".join(want_tables), f"total_imported={total_imported}")
-        await _broadcast_admin_event("import_db", ",".join(want_tables), total_imported=total_imported)
-        return {"success": True, "total_imported": total_imported, "results": results}
-
-    except Exception as e:
-        logger.error(f"执行导入失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        import os
-        os.unlink(fd.name)
+async def import_db_execute(file: UploadFile, db=Depends(get_db)):
+    """已退场：.db 合并导入没有对应物，统一给指引。"""
+    raise HTTPException(status_code=400, detail=_DB_IMPORT_GUIDANCE)
 
 
 @router.get("/scraper-health")

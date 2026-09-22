@@ -43,16 +43,16 @@ services:
       # scripts/docker_up.sh 会绝对化后导出；手工 compose 请自己给绝对路径。
       - ${LUYUN_HOST_PARENT:?请在 .env.docker 里设置绝对路径，例如 /opt/luyun/deploy/runtime}:/srv/luyun
       - /var/run/docker.sock:/var/run/docker.sock
+    # 应用起不来应该是「库没起来」而不是「连不上库」：等 PG healthcheck 过了再起。
+    depends_on:
+      postgres:
+        condition: service_healthy
     # Single worker is enforced in entrypoint CMD; do not scale replicas.
     # deploy.replicas intentionally omitted (Compose v2 ignore is fine).
 
-# ── PostgreSQL 后端（多店形态，ADR 0084）───────────────────────────────
-# 默认 SQLite 部署不需要这两个服务，所以用 profile 圈起来：不带 --profile 时
-# `docker compose up` 只起 luyun，行为与从前完全一致。
-#
-# 启用：
-#   docker compose -f deploy/docker-compose.yml --profile pg up -d
-# 并在 deploy/env.production 里设置：
+# ── PostgreSQL（唯一后端，ADR 0089）────────────────────────────────────
+# SQLite 退场后 PG 不再是可选组件：`docker compose up` 会连同 luyun 一起起它，
+# 应用侧配置在 deploy/env.production 里：
 #   DATABASE_BACKEND=postgres
 #   POSTGRES_DSN=postgresql://luyun:<密码>@postgres:5432/luyun
 #
@@ -60,13 +60,12 @@ services:
 # migrations/pg/0001_initial_schema.sql 负责（见 migrations/pg/README.md）。
   postgres:
     image: postgres:16-alpine
-    profiles: ["pg"]
     container_name: ${LUYUN_PG_CONTAINER:-luyun-postgres}
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-luyun}
       POSTGRES_USER: ${POSTGRES_USER:-luyun}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?启用 pg profile 时必须设置 POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}
       # 与业务侧 CHINA_TZ 对齐，避免时间戳字面量因时区不同产生偏差
       TZ: Asia/Shanghai
     volumes:

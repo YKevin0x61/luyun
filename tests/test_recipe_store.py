@@ -1,8 +1,9 @@
 import asyncio
-import sqlite3
 
 import pytest
 
+import pg_probe
+from database import DatabaseManager
 from services.recipes.store import (
     LAST_RECIPE_PLACEHOLDER_BODY,
     LAST_RECIPE_PLACEHOLDER_NAME,
@@ -13,28 +14,44 @@ from services.recipes.store import (
     RecipeStore,
 )
 
+SEED_UPDATED_AT = "2026-01-01T00:00:00+00:00"
 
-def _seed_db(path):
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        """
-            CREATE TABLE sop_stations (
-                slug TEXT PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL
-            );
-            CREATE TABLE sop_recipes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                station_slug TEXT NOT NULL, section TEXT NOT NULL, recipe_name TEXT NOT NULL,
-                body_markdown TEXT NOT NULL, sort_order INTEGER NOT NULL,
-                is_new INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL,
-                FOREIGN KEY (station_slug) REFERENCES sop_stations(slug) ON DELETE CASCADE
-            );
-        INSERT INTO sop_stations VALUES ('changfen','肠粉档','2026-01-01T00:00:00+00:00');
-        INSERT INTO sop_recipes (station_slug,section,recipe_name,body_markdown,sort_order,is_new,is_active,updated_at)
-        VALUES ('changfen','配方','肠粉酱油','酱油：100g',0,0,1,'2026-01-01T00:00:00+00:00');
-        """
+
+async def _insert_recipe(conn, slug, section, name, body, sort_order, *, is_new=0, is_active=1):
+    await conn.execute(
+        "INSERT INTO sop_recipes (station_slug, section, recipe_name, body_markdown, sort_order, "
+        "is_new, is_active, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (slug, section, name, body, sort_order, is_new, is_active, SEED_UPDATED_AT),
     )
-    conn.commit()
-    conn.close()
+
+
+async def _seed_recipes(conn):
+    """旧 ``_seed_db`` 的等价物：表由 migrations/pg 建好，这里只插同样语义的种子。
+
+    第一条配方 id=1（conftest 每个用例 ``TRUNCATE ... RESTART IDENTITY``）。
+    """
+    await conn.execute(
+        "INSERT INTO sop_stations (slug, title, updated_at) VALUES (?, ?, ?)",
+        ("changfen", "肠粉档", SEED_UPDATED_AT),
+    )
+    await _insert_recipe(conn, "changfen", "配方", "肠粉酱油", "酱油：100g", 0)
+    await conn.commit()
+
+
+async def _seed_legacy_sections(conn):
+    """种子 + 两条历史章节名（旧库遗留），供 ``connect()`` 的规范化用例使用。"""
+    await _seed_recipes(conn)
+    await _insert_recipe(conn, "changfen", "二十大招牌检核", "咸蛋黄肉松蛋挞", "x", 1)
+    await _insert_recipe(conn, "changfen", "常规检核", "仪容", "x", 2)
+    await conn.commit()
+
+
+async def _set_recipe_column(store, recipe_id, column, value):
+    """直接改库（连接与 store 共用同一条）。``column`` 只传本文件里的字面量。"""
+    await store.conn.execute(
+        f"UPDATE sop_recipes SET {column} = ? WHERE id = ?", (value, recipe_id)
+    )
+    await store.conn.commit()
 
 
 def _get_loop():
@@ -51,43 +68,49 @@ def _run(coro):
 
 
 @pytest.fixture
-def store(tmp_path):
-    db = tmp_path / "recipes.db"
-    _seed_db(str(db))
-    s = RecipeStore(str(db))
+def db():
+    """业务库连接（PG 测试库）。
+
+    ``RecipeStore`` 不再自建连接，测试里必须注入这一条；``DatabaseManager`` 的连接
+    属性是 ``_conn``（main.py 的装配同样用它），没有公开的 ``conn``。
+    """
+    manager = DatabaseManager()
+    assert _run(manager.connect()) is True
+    yield manager
+    _run(manager.close())
+
+
+@pytest.fixture
+def store(db):
+    conn = db._conn
+    _run(_seed_recipes(conn))
+    s = RecipeStore(conn=conn)
     _run(s.connect())
     yield s
     _run(s.close())
 
 
-def test_constructor_ignores_recipes_db_path_env(tmp_path, monkeypatch):
+def test_store_without_injected_conn_refuses_to_connect(tmp_path, monkeypatch):
+    """自持模式（未注入 conn）不再自建连接：``connect()`` 直接失败。
+
+    旧用例断言的是 ``RECIPES_DB_PATH`` 不影响 ``db_path``；独立库文件随 ADR 0089
+    退场后 ``db_path`` 已不参与建连，这里改断言新的可见契约。
+    """
     monkeypatch.setenv("RECIPES_DB_PATH", str(tmp_path / "other.db"))
-    owned = RecipeStore(str(tmp_path / "mine.db"))
-    assert owned.db_path == str(tmp_path / "mine.db")
-    from config import settings
-    default = RecipeStore()
-    assert default.db_path == settings.APP_DB_PATH
+    with pytest.raises(RuntimeError, match="必须注入 PostgreSQL 连接"):
+        _run(RecipeStore().connect())
+    with pytest.raises(RuntimeError, match="必须注入 PostgreSQL 连接"):
+        _run(RecipeStore(str(tmp_path / "mine.db")).connect())
 
 
-def test_borrowed_connection_close_does_not_close_shared(tmp_path):
-    from config import settings
-    from database import DatabaseManager
-
-    old_dir = settings.DATABASE_DIR
-    settings.DATABASE_DIR = str(tmp_path)
-    db = DatabaseManager()
-    try:
-        assert _run(db.connect())
-        store = RecipeStore(conn=db._conn)
-        _run(store.prepare())
-        _run(store.create_station("cf", "肠粉档"))
-        _run(store.close())
-        cur = _run(db._conn.execute("SELECT title FROM sop_stations WHERE slug = ?", ("cf",)))
-        row = _run(cur.fetchone())
-        assert dict(row)["title"] == "肠粉档"
-    finally:
-        _run(db.close())
-        settings.DATABASE_DIR = old_dir
+def test_borrowed_connection_close_does_not_close_shared(db):
+    store = RecipeStore(conn=db._conn)
+    _run(store.prepare())
+    _run(store.create_station("cf", "肠粉档"))
+    _run(store.close())
+    cur = _run(db._conn.execute("SELECT title FROM sop_stations WHERE slug = ?", ("cf",)))
+    row = _run(cur.fetchone())
+    assert dict(row)["title"] == "肠粉档"
 
 
 def test_delete_station_cascades_recipes_and_history(store):
@@ -126,27 +149,15 @@ def test_create_recipe_canonicalizes_legacy_section(store):
     assert _run(store.get_recipe(rid))["section"] == "配方"
 
 
-def test_connect_rewrites_legacy_sections(tmp_path):
-    db = tmp_path / "legacy-sections.db"
-    _seed_db(str(db))
-    conn = sqlite3.connect(db)
-    conn.execute(
-        "INSERT INTO sop_recipes (station_slug,section,recipe_name,body_markdown,sort_order,is_new,is_active,updated_at) "
-        "VALUES ('changfen','二十大招牌检核','咸蛋黄肉松蛋挞','x',1,0,1,'2026-01-01T00:00:00+00:00')"
-    )
-    conn.execute(
-        "INSERT INTO sop_recipes (station_slug,section,recipe_name,body_markdown,sort_order,is_new,is_active,updated_at) "
-        "VALUES ('changfen','常规检核','仪容','x',2,0,1,'2026-01-01T00:00:00+00:00')"
-    )
-    conn.commit()
-    conn.close()
-    store = RecipeStore(str(db))
+def test_connect_rewrites_legacy_sections(db):
+    conn = db._conn
+    _run(_seed_legacy_sections(conn))
+    store = RecipeStore(conn=conn)
     _run(store.connect())
     by_name = {row["recipe_name"]: row["section"] for row in _run(store.list_recipes("changfen"))}
     assert by_name["肠粉酱油"] == "配方"
     assert by_name["咸蛋黄肉松蛋挞"] == "检核要求"
     assert by_name["仪容"] == "检核要求"
-    _run(store.close())
 
 
 def test_create_does_not_infer_is_new_from_name_or_body(store):
@@ -315,13 +326,7 @@ def test_create_drops_blank_ingredient_rows(store):
 
 def test_invalid_stored_ingredients_json_returns_empty_list(store):
     row = _run(store.list_recipes("changfen"))[0]
-    conn = sqlite3.connect(store.db_path)
-    conn.execute(
-        "UPDATE sop_recipes SET ingredients_json = ? WHERE id = ?",
-        ("{not json", row["id"]),
-    )
-    conn.commit()
-    conn.close()
+    _run(_set_recipe_column(store, row["id"], "ingredients_json", "{not json"))
     assert _run(store.get_recipe(row["id"]))["ingredients"] == []
     assert _run(store.list_recipes("changfen"))[0]["ingredients"] == []
 
@@ -395,26 +400,14 @@ def test_update_omitting_ingredients_preserves_steps_and_ingredients(store):
 
 def test_invalid_stored_steps_json_returns_empty_list(store):
     row = _run(store.list_recipes("changfen"))[0]
-    conn = sqlite3.connect(store.db_path)
-    conn.execute(
-        "UPDATE sop_recipes SET steps_json = ? WHERE id = ?",
-        ("{not json", row["id"]),
-    )
-    conn.commit()
-    conn.close()
+    _run(_set_recipe_column(store, row["id"], "steps_json", "{not json"))
     assert _run(store.get_recipe(row["id"]))["steps"] == []
     assert _run(store.list_recipes("changfen"))[0]["steps"] == []
 
 
 def test_non_list_stored_steps_json_returns_empty_list(store):
     row = _run(store.list_recipes("changfen"))[0]
-    conn = sqlite3.connect(store.db_path)
-    conn.execute(
-        "UPDATE sop_recipes SET steps_json = ? WHERE id = ?",
-        ("{}", row["id"]),
-    )
-    conn.commit()
-    conn.close()
+    _run(_set_recipe_column(store, row["id"], "steps_json", "{}"))
     assert _run(store.get_recipe(row["id"]))["steps"] == []
 
 
@@ -490,26 +483,14 @@ def test_update_omitting_steps_preserves_tips_and_steps(store):
 
 def test_invalid_stored_tips_json_returns_empty_list(store):
     row = _run(store.list_recipes("changfen"))[0]
-    conn = sqlite3.connect(store.db_path)
-    conn.execute(
-        "UPDATE sop_recipes SET tips_json = ? WHERE id = ?",
-        ("{not json", row["id"]),
-    )
-    conn.commit()
-    conn.close()
+    _run(_set_recipe_column(store, row["id"], "tips_json", "{not json"))
     assert _run(store.get_recipe(row["id"]))["tips"] == []
     assert _run(store.list_recipes("changfen"))[0]["tips"] == []
 
 
 def test_non_list_stored_tips_json_returns_empty_list(store):
     row = _run(store.list_recipes("changfen"))[0]
-    conn = sqlite3.connect(store.db_path)
-    conn.execute(
-        "UPDATE sop_recipes SET tips_json = ? WHERE id = ?",
-        ("{}", row["id"]),
-    )
-    conn.commit()
-    conn.close()
+    _run(_set_recipe_column(store, row["id"], "tips_json", "{}"))
     assert _run(store.get_recipe(row["id"]))["tips"] == []
 
 
@@ -588,26 +569,38 @@ def test_update_explicit_null_clears_base_servings(store):
     assert updated["base_servings_unit"] is None
 
 
-def test_connect_adds_legacy_markdown_and_needs_review_columns(store):
-    conn = sqlite3.connect(store.db_path)
-    cols = {row[1]: row for row in conn.execute("PRAGMA table_info(sop_recipes)")}
-    conn.close()
-    assert "legacy_markdown" in cols
-    assert cols["legacy_markdown"][2].upper() == "TEXT"
-    assert "needs_review" in cols
-    assert cols["needs_review"][2].upper() == "INTEGER"
-    assert cols["needs_review"][4] == "0"
-    assert cols["needs_review"][3] == 1
+def test_schema_has_legacy_markdown_and_needs_review_columns():
+    """两列（及 ``needs_review`` 的 NOT NULL DEFAULT 0）现在由 migration 保证。
+
+    旧用例断言 ``store.connect()`` 会 ``ALTER TABLE`` 补列——ADR 0089 后启动期不改
+    结构，这里改成断言测试库 schema 里这两列确实按契约存在（替代 ``PRAGMA table_info``）。
+    """
+    cols = {
+        row[0]: row
+        for row in pg_probe.fetch_all(
+            "SELECT column_name, data_type, is_nullable, column_default "
+            "FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = ?",
+            ("sop_recipes",),
+        )
+    }
+    assert cols["legacy_markdown"][1] == "text"
+    assert cols["legacy_markdown"][2] == "YES"
+    assert cols["needs_review"][1] == "bigint"
+    assert cols["needs_review"][2] == "NO"
+    assert cols["needs_review"][3] == "0"
 
 
-def _flag_review(store, recipe_id, *, needs_review=1, legacy_markdown="旧正文\n第二行"):
-    conn = sqlite3.connect(store.db_path)
-    conn.execute(
+async def _flag_review_sql(store, recipe_id, *, needs_review=1, legacy_markdown="旧正文\n第二行"):
+    await store.conn.execute(
         "UPDATE sop_recipes SET needs_review=?, legacy_markdown=? WHERE id=?",
         (needs_review, legacy_markdown, recipe_id),
     )
-    conn.commit()
-    conn.close()
+    await store.conn.commit()
+
+
+def _flag_review(store, recipe_id, **kwargs):
+    _run(_flag_review_sql(store, recipe_id, **kwargs))
 
 
 def test_list_and_get_include_needs_review_and_legacy_markdown(store):

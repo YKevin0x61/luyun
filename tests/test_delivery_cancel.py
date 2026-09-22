@@ -11,7 +11,6 @@ import aiosqlite
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
-from db_core.table_db import migrate_orders_kds_columns
 from scraper.delivery_bill_tracker import DELIVERY_CANCEL_MISS_THRESHOLD, DeliveryBillTracker
 from scraper.settled_reconcile import sweep_cancelled_delivery_for_biz_date
 
@@ -162,54 +161,6 @@ class DeliveryRepoTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["price"], 9.5)
         self.assertEqual(row["total_amount"], 9.5)
         self.assertEqual(row["order_time"], fresh["order_time"].isoformat())
-
-
-class SourceMigrationBackfillTest(unittest.IsolatedAsyncioTestCase):
-    """旧库无 source 列 → 迁移新增列并按 notes 回填外卖行。"""
-
-    async def test_migration_adds_source_and_backfills(self):
-        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
-            async with aiosqlite.connect(tmp.name) as conn:
-                await conn.execute(
-                    """CREATE TABLE orders (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        business_flow_id TEXT, table_number TEXT NOT NULL,
-                        dish_name TEXT NOT NULL, quantity INTEGER NOT NULL,
-                        order_time TEXT NOT NULL, price REAL DEFAULT 0.0,
-                        total_amount REAL DEFAULT 0.0, status TEXT DEFAULT '未结',
-                        category TEXT DEFAULT '', station TEXT DEFAULT '',
-                        priority TEXT DEFAULT 'normal', notes TEXT,
-                        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                    )"""
-                )
-                await conn.execute(
-                    "INSERT INTO orders (business_flow_id, table_number, dish_name, quantity, "
-                    "order_time, notes, created_at, updated_at) VALUES "
-                    "('b1_菜_001','美团1','菜',1,'t','外卖平台:美团|来源:美团1','t','t')"
-                )
-                await conn.execute(
-                    "INSERT INTO orders (business_flow_id, table_number, dish_name, quantity, "
-                    "order_time, notes, created_at, updated_at) VALUES "
-                    "('t1_菜_001','8','菜',1,'t',NULL,'t','t')"
-                )
-                await conn.commit()
-
-                await migrate_orders_kds_columns(conn)
-
-                async with conn.execute("PRAGMA table_info(orders)") as cur:
-                    cols = {row[1] for row in await cur.fetchall()}
-                self.assertIn("source", cols)
-
-                async with conn.execute(
-                    "SELECT source FROM orders WHERE business_flow_id='b1_菜_001'"
-                ) as cur:
-                    delivery_row = await cur.fetchone()
-                async with conn.execute(
-                    "SELECT source FROM orders WHERE business_flow_id='t1_菜_001'"
-                ) as cur:
-                    table_row = await cur.fetchone()
-                self.assertEqual(delivery_row[0], "delivery")
-                self.assertEqual(table_row[0], "dine_in")
 
 
 class _FakeSession:

@@ -2,48 +2,35 @@
 # -*- coding: utf-8 -*-
 """
 DatabaseManager 的连接/生命周期职责：
-建立单一 app.db 连接（WAL），按表缓存 TableView，关闭连接、备份导出。
+建立 PostgreSQL 连接，按表缓存 TableView，关闭连接。
+
+SQLite 已在 ADR 0089 退场：这里不再有建表自愈、`PRAGMA` 体检、统计信息维护与
+导出 .db（「导出 DB」现在直接给整库 pg_dump，见 :mod:`services.backup_service`）。
 """
 
 import logging
-import os
 import asyncio
-import time
 from typing import Any, Dict, Optional
 
-import aiosqlite
 from config import settings
 
-from db_core.schema import (
-    ALL_TABLES,
-    HYGIENE_TABLES,
-    RECIPE_TABLES,
-    _INDEX_DEFINITIONS,
-    _TABLE_SCHEMAS,
-    apply_hygiene_schema,
-    apply_recipe_schema,
-)
-from db_core.table_db import TableView, migrate_orders_kds_columns
-from db_core.utils import (
-    SQLITE_BUSY_TIMEOUT_MS,
-    SQLITE_JOURNAL_MODE_WAL,
-    ensure_beijing_datetime,
-    row_to_dict,
-)
+from db_core.schema import ALL_TABLES, HYGIENE_TABLES, RECIPE_TABLES
+from db_core.table_db import TableView
+from db_core.utils import ensure_beijing_datetime, row_to_dict
 
 logger = logging.getLogger(__name__)
 
 
 class _ConnectionMixin:
-    """单库 app.db 连接建立、关闭与备份导出。"""
+    """单库连接建立与关闭。"""
 
     def __init__(self):
         self.paths: Dict[str, str] = settings.DATABASE_PATHS
         # Internal cache for TableView instances (shared connection).
         self._table_views: Dict[str, TableView] = {}
-        self._main_conn: Optional[aiosqlite.Connection] = None
-        # Legacy: always empty under single-db architecture (ATTACH removed).
-        self._attached_tables: set[str] = set()
+        # 实际类型是 db_core.backend.pg.PgConnection；这里按鸭子类型标注，
+        # 免得为一条注解把驱动导入到连接生命周期模块里。
+        self._main_conn: Optional[Any] = None
         # 全局写锁，由 connect() 真正建出来（asyncio.Lock 必须在事件循环里创建）。
         # HygieneWork / EmployeeAccounts 通过 owner 共享这一把；这里要是 None，它们
         # 就各自退回一把局部锁，两个 service 的隐式事务会互相穿插、互相 rollback。
@@ -58,70 +45,24 @@ class _ConnectionMixin:
         }
 
     async def connect(self) -> bool:
-        """建立业务库连接；后端由 ``settings.DATABASE_BACKEND`` 决定。
+        """建立业务库连接（PostgreSQL，唯一后端）。
 
-        默认仍是 sqlite，切到 postgres 需要显式配置——见 ADR 0084。
+        SQLite 后端已在 ADR 0089 退场：``DATABASE_BACKEND`` 不是 ``postgres`` 时
+        这里直接失败，不做静默回落——老部署需要先迁移再升级（见
+        `deploy/enable_postgres.sh` 与 `docs/adr/0089-retire-sqlite-postgres-only.md`）。
         """
         # 全局写锁在这里建：asyncio.Lock 需要运行中的事件循环，而且必须早于任何
         # service 取用（service 的 _write_lock property 见到它就共享，见 #2.2）。
         self._write_lock = asyncio.Lock()
-        if getattr(settings, "DATABASE_BACKEND", "sqlite") == "postgres":
-            return await self._connect_postgres()
-        return await self._connect_sqlite()
-
-    async def _connect_sqlite(self) -> bool:
-        """建立单一 app.db 连接（WAL），建齐全部表结构 + 索引；各表共享该连接。"""
-        logger.info("🔗 正在连接单库 app.db (WAL)...")
-        self._migrations_complete = False
-        try:
-            app_db_path = settings.APP_DB_PATH
-            os.makedirs(os.path.dirname(app_db_path), exist_ok=True)
-
-            self._main_conn = await aiosqlite.connect(app_db_path)
-            self._main_conn.row_factory = aiosqlite.Row
-            await self._main_conn.execute(f"PRAGMA journal_mode={SQLITE_JOURNAL_MODE_WAL}")
-            await self._main_conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-            await self._main_conn.execute("PRAGMA foreign_keys = ON")
-
-            # 1. 建齐全部表结构（含 auth），CREATE TABLE IF NOT EXISTS 对已存在表安全无害
-            for table in ALL_TABLES:
-                schema = _TABLE_SCHEMAS.get(table, "")
-                if schema:
-                    await self._main_conn.executescript(schema)
-
-            # 2. 迁移旧数据缺失的 KDS 列（orders 表）
-            await migrate_orders_kds_columns(self._main_conn)
-
-            # 3. 建齐索引
-            for table in ALL_TABLES:
-                for idx_sql in _INDEX_DEFINITIONS.get(table, []):
-                    await self._main_conn.execute(idx_sql)
-
-            # Recipe + hygiene tables: same file, not ALL_TABLES / TableView / Admin CRUD.
-            await apply_recipe_schema(self._main_conn)
-            await apply_hygiene_schema(self._main_conn)
-            await self._main_conn.commit()
-
-            # 3.5 查询统计信息：没有 sqlite_stat1 时优化器只能猜索引，实测会让
-            # 「今日 + GROUP BY 菜品/档口」这类聚合退化成全索引扫描（18 万行）。
-            await self._ensure_query_statistics()
-
-            # 3.6 启动体检：quick_check 只做页级校验。业务库（订单/结算）绝不
-            # 自动隔离——发现损坏只告警，交由人工决定，避免把唯一数据搬走。
-            if settings.SQLITE_QUICK_CHECK_ON_START:
-                await self._quick_check_or_warn(app_db_path)
-
-            # 4. 各表共享同一连接的 TableView
-            for table in ALL_TABLES:
-                self._table_views[table] = TableView(table, self._main_conn)
-
-            self.stats['connection_count'] += 1
-            self._migrations_complete = True
-            logger.info(f"✅ 单库连接成功 ({len(self._table_views)} 表 → {app_db_path})")
-            return True
-        except Exception as e:
-            logger.error(f"❌ 单库连接失败: {e}")
-            return False
+        backend = (getattr(settings, "DATABASE_BACKEND", "") or "").strip().lower()
+        if backend != "postgres":
+            raise RuntimeError(
+                "SQLite 后端已移除（ADR 0089）：请把 DATABASE_BACKEND 设为 postgres 并配置 "
+                f"POSTGRES_DSN；当前值为 {backend or '(空)'!r}。"
+                "SQLite → PostgreSQL 的迁移步骤见 deploy/enable_postgres.sh 与 "
+                "docs/adr/0089-retire-sqlite-postgres-only.md。"
+            )
+        return await self._connect_postgres()
 
     async def _connect_postgres(self) -> bool:
         """连接 PostgreSQL（多租户形态）。
@@ -152,75 +93,6 @@ class _ConnectionMixin:
 
     # ── 就绪探针（只读，供健康检查使用） ──
 
-    async def _quick_check_or_warn(self, app_db_path: str) -> None:
-        """对 app.db 做一次页级体检；损坏只告警，不隔离。
-
-        logs.db 损坏可以隔离重建（日志可丢），业务库不行：自动隔离会把订单/
-        结算数据搬走。这里只把结论写进日志，让人来决定下一步。
-        """
-        assert self._main_conn is not None
-        started = time.time()
-        try:
-            async with self._main_conn.execute("PRAGMA quick_check(1)") as cur:
-                rows = await cur.fetchall()
-        except Exception as exc:
-            logger.error(
-                "❌ app.db quick_check 执行失败（业务库不做自动隔离）: %s", exc
-            )
-            return
-        problems = [str(r[0]) for r in rows if str(r[0]).strip().lower() != "ok"]
-        elapsed = (time.time() - started) * 1000
-        if problems:
-            logger.error(
-                "❌ app.db quick_check 未通过（业务库不做自动隔离，请人工处理）: %s",
-                "; ".join(problems),
-            )
-            return
-        logger.info(f"✅ app.db quick_check 通过（{elapsed:.0f}ms, {app_db_path}）")
-
-    async def _orders_has_statistics(self) -> bool:
-        """orders 表是否已有 sqlite_stat1 记录（空表 ANALYZE 不会写入记录）。"""
-        assert self._main_conn is not None
-        async with self._main_conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1'"
-        ) as cursor:
-            row = await cursor.fetchone()
-        if not row or not row[0]:
-            return False
-        async with self._main_conn.execute(
-            "SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl = 'orders'"
-        ) as cursor:
-            row = await cursor.fetchone()
-        return bool(row and row[0])
-
-    async def _ensure_query_statistics(self) -> None:
-        """保证优化器有统计信息可用。
-
-        没有统计信息时 SQLite 只能按内置猜测选索引：对
-        `WHERE order_time >= ? AND station != 'loumian' GROUP BY dish_name, station`
-        这类查询会选 idx_orders_dish_name 做全索引扫描（线上 18.4 万行），实测
-        dashboard 聚合 133ms vs 0.4ms（详见 .scratch/perf-stress-test/PERF_REPORT.md）。
-
-        注意：对空表执行 ANALYZE 不会写任何 sqlite_stat1 记录，所以判据是
-        「orders 有没有统计记录」而不是「sqlite_stat1 表是否存在」；否则全新
-        安装会在爬虫灌满数据后一直沿用错误计划。已有统计时改用 `PRAGMA optimize`
-        由 SQLite 判断增量刷新，开销可忽略。
-        """
-        assert self._main_conn is not None
-        if await self._orders_has_statistics():
-            await self._main_conn.execute("PRAGMA optimize")
-            await self._main_conn.commit()
-            logger.info("📊 查询统计信息已存在，PRAGMA optimize 维护完成")
-            return
-        t0 = time.perf_counter()
-        await self._main_conn.execute("ANALYZE")
-        await self._main_conn.commit()
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        if await self._orders_has_statistics():
-            logger.info(f"📊 已生成查询统计信息 (ANALYZE, {elapsed_ms:.0f}ms)")
-        else:
-            logger.info("📊 orders 暂无数据，跳过统计信息生成（下次启动再试）")
-
     def is_connected(self) -> bool:
         """主连接是否已建立。"""
         return self._main_conn is not None
@@ -234,25 +106,19 @@ class _ConnectionMixin:
 
         返回 ``{"readable": bool, "missing": [...], "errors": [...]}``；不修改任何数据。
 
-        两处必须兼容两种后端，否则 PG 下会把所有关键表都判为不可读
-        （现场 0.6.0 → 0.6.2 升级后就这样卡在「已切换但未健康」）：
+        两个仍然要注意的点（PG 下踩过）：
 
-        - **表名目录**：SQLite 在 ``sqlite_master``，PG 在 ``pg_tables``；
+        - **表名目录**：走 ``pg_tables``（SQLite 的 ``sqlite_master`` 已随 ADR 0089 退场）；
         - **执行姿势**：用 ``cursor = await conn.execute(...)``，而不是
           ``async with conn.execute(...)`` —— PG 后端的 ``execute`` 是 ``async def``，
-          返回 coroutine，不满足异步上下文管理器协议（SQLite 的 aiosqlite 返回
-          Cursor，所以这个写法一直没暴露）。
+          返回 coroutine，不满足异步上下文管理器协议。
         """
         missing: list = []
         errors: list = []
         if self._main_conn is None:
             return {"readable": False, "missing": list(tables), "errors": ["数据库未连接"]}
 
-        backend = (getattr(settings, "DATABASE_BACKEND", "sqlite") or "sqlite").lower()
-        if backend == "postgres":
-            names_sql = "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
-        else:
-            names_sql = "SELECT name FROM sqlite_master WHERE type='table'"
+        names_sql = "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
 
         try:
             cursor = await self._main_conn.execute(names_sql)
@@ -276,34 +142,9 @@ class _ConnectionMixin:
             "errors": errors,
         }
 
-    async def export_merged_sqlite_file(self, output_path: str) -> None:
-        """
-        导出单库 app.db 到指定路径（供后台「导出 DB」功能使用）。
-        走 SQLite 官方 backup API：WAL 模式下也能拿到一致快照，无需手工建表/流式拷贝。
-
-        PG 后端没有页级 backup 可用，改由 ``PgConnection.backup`` 按表重建（列定义 +
-        数据）；两条路径产出的都是能直接回灌的 .db 文件。
-        """
-        if os.path.exists(output_path):
-            os.unlink(output_path)
-        export_conn = await aiosqlite.connect(output_path)
-        try:
-            await self._main_conn.backup(export_conn)
-        finally:
-            await export_conn.close()
-
     async def close(self):
         """关闭单一连接"""
         if self._main_conn is not None:
-            if getattr(settings, "DATABASE_BACKEND", "sqlite") == "sqlite":
-                # SQLite 官方建议：关闭前跑一次 PRAGMA optimize，由它判断哪些表的
-                # 统计信息因大量写入而过期（爬虫持续 INSERT 时尤其必要）。
-                # PostgreSQL 没有 PRAGMA，跳过而不是让它报警告。
-                try:
-                    await self._main_conn.execute("PRAGMA optimize")
-                    await self._main_conn.commit()
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning(f"⚠️ 关闭前 PRAGMA optimize 失败（忽略）: {exc}")
             await self._main_conn.close()
             self._main_conn = None
         self._table_views.clear()
@@ -313,14 +154,14 @@ class _ConnectionMixin:
     # ── 主连接（所有表已同库，跨表查询可直接 JOIN） ──
 
     @property
-    def _conn(self) -> aiosqlite.Connection:
-        """主连接；所有表均位于同一 app.db，跨表查询直接引用表名即可，无需 ATTACH。"""
+    def _conn(self):
+        """主连接；所有表都在同一个库里，跨表查询直接写表名即可。"""
         return self._main_conn
 
     # ── 表访问器 ──
 
     def table(self, name: str) -> TableView:
-        """Public per-table view over the shared app.db connection."""
+        """Public per-table view over the shared database connection."""
         try:
             return self._table_views[name]
         except KeyError as exc:
@@ -335,10 +176,10 @@ class _ConnectionMixin:
     def _ensure_beijing_datetime(self, dt_input):
         return ensure_beijing_datetime(dt_input)
 
-    def _row_to_dict(self, row: aiosqlite.Row) -> Dict:
+    def _row_to_dict(self, row) -> Dict:
         return row_to_dict(row)
 
-    async def _execute(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:
+    async def _execute(self, sql: str, params: tuple = ()):
         cursor = await self._main_conn.cursor()
         await cursor.execute(sql, params)
         return cursor

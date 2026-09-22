@@ -10,7 +10,6 @@ import aiosqlite
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
-from db_core.schema import migrate_hygiene_columns
 from services.hygiene.accounts import (
     EmployeeAccounts,
     EmployeeAccountsError,
@@ -124,43 +123,6 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
             hygiene_business_date(datetime(2026, 9, 13, 6, 0, tzinfo=CHINA_TZ)),
             "2026-09-13",
         )
-
-    async def test_legacy_employee_table_gets_name_column(self):
-        conn = await aiosqlite.connect(":memory:")
-        try:
-            await conn.execute(
-                "CREATE TABLE hygiene_employees (id INTEGER PRIMARY KEY, phone TEXT)"
-            )
-            await migrate_hygiene_columns(conn)
-            cur = await conn.execute("PRAGMA table_info(hygiene_employees)")
-            columns = {row[1] for row in await cur.fetchall()}
-            self.assertIn("name", columns)
-            cur = await conn.execute(
-                "CREATE TABLE hygiene_shift_picks (id INTEGER PRIMARY KEY, employee_id INTEGER)"
-            )
-            await migrate_hygiene_columns(conn)
-            cur = await conn.execute("PRAGMA table_info(hygiene_shift_picks)")
-            columns = {row[1] for row in await cur.fetchall()}
-            self.assertIn("zone_id", columns)
-        finally:
-            await conn.close()
-
-    async def test_legacy_zone_table_gets_shift_columns(self):
-        conn = await aiosqlite.connect(":memory:")
-        try:
-            await conn.execute(
-                "CREATE TABLE hygiene_employees (id INTEGER PRIMARY KEY, phone TEXT)"
-            )
-            await conn.execute(
-                "CREATE TABLE hygiene_zones (id INTEGER PRIMARY KEY, name TEXT)"
-            )
-            await migrate_hygiene_columns(conn)
-            cur = await conn.execute("PRAGMA table_info(hygiene_zones)")
-            columns = {row[1] for row in await cur.fetchall()}
-            self.assertIn("day_shift", columns)
-            self.assertIn("night_shift", columns)
-        finally:
-            await conn.close()
 
     async def _approved_employee(self, phone=PHONE):
         employee = await self.accounts.register(phone, PASSWORD, NAME)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capture bytes live on disk, referenced from app.db. Not SQLite WAL blobs."""
+"""Capture bytes live on disk, referenced by rows in the business database (not DB blobs)."""
 
 from __future__ import annotations
 

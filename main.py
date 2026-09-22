@@ -116,7 +116,7 @@ in_memory_log_handler.setLevel(logging.INFO)
 in_memory_log_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
 logging.getLogger().addHandler(in_memory_log_handler)
 
-# 持久化 handler：把日志投递到 LogStorage 队列，由后台协程批量写入 SQLite。
+# 持久化 handler：把日志投递到 LogStorage 队列，由后台协程批量写入 PostgreSQL。
 # 注意：handler 实例在 logging 模块层面注册，等到 lifespan 内 log_storage.start() 后
 # 第一条入队的日志才会被消费（队列在线程间安全共享）。
 log_storage_handler = LogStorageHandler(log_storage, level=logging.INFO)
@@ -191,7 +191,7 @@ async def lifespan(app: FastAPI):
             dish_catalog = DishCatalog(db_manager)
             set_runtime(AppRuntime(db=db_manager, dish_catalog=dish_catalog, scraper=None))
 
-        # 初始化配方库（与 db_manager 共用 app.db 连接）
+        # 初始化配方库（注入业务库连接：配方表与业务表同库，SQLite 独立库已退场）
         from services.recipes.store import RecipeStore
         if db_manager and db_manager._conn is not None:
             recipe_store = RecipeStore(conn=db_manager._conn)
@@ -224,36 +224,43 @@ async def lifespan(app: FastAPI):
                 db_manager, captures=FileCaptureStore(capture_root)
             )
             startup_results.append("卫生数据视图")
-            hygiene_overdue_task = asyncio.create_task(
-                hygiene_work.overdue_scheduler_loop()
-            )
-            startup_results.append("卫生逾期调度器")
-            hygiene_variant_task = asyncio.create_task(
-                hygiene_work.variant_backfill_loop()
-            )
-            hygiene_maintenance_task = asyncio.create_task(
-                hygiene_work.capture_maintenance_loop()
-            )
-            startup_results.append("卫生图片后台任务")
+            # 常驻后台循环在测试里关掉（见 settings.DISABLE_BACKGROUND_TASKS）
+            background_enabled = not getattr(settings, "DISABLE_BACKGROUND_TASKS", False)
+            if background_enabled:
+                hygiene_overdue_task = asyncio.create_task(
+                    hygiene_work.overdue_scheduler_loop()
+                )
+                startup_results.append("卫生逾期调度器")
+                hygiene_variant_task = asyncio.create_task(
+                    hygiene_work.variant_backfill_loop()
+                )
+                hygiene_maintenance_task = asyncio.create_task(
+                    hygiene_work.capture_maintenance_loop()
+                )
+                startup_results.append("卫生图片后台任务")
 
-        if db_manager:
+        background_enabled = not getattr(settings, "DISABLE_BACKGROUND_TASKS", False)
+        if db_manager and background_enabled:
             wecom_push_task = asyncio.create_task(wecom_push_service.scheduler_loop(db_manager))
             startup_results.append("企微推送调度器")
 
-        # 启动日志持久化（独立 logs.db）
-        if await log_storage.start():
+        # 启动日志持久化（PostgreSQL logs 表，与业务表同库）
+        if background_enabled and await log_storage.start():
             startup_results.append("日志存储")
 
         # 启动内存管理器
-        await memory_manager.start_background_tasks()
-        startup_results.append("内存管理器")
+        if background_enabled:
+            await memory_manager.start_background_tasks()
+            startup_results.append("内存管理器")
 
         # 启动磁盘守护（阈值告警 + /api/healthz 的数据源）
-        disk_guard.start()
-        startup_results.append("磁盘守护")
+        if background_enabled:
+            disk_guard.start()
+            startup_results.append("磁盘守护")
         
-        # 创建餐厅爬虫适配器
-        restaurant_scraper = await create_restaurant_scraper(dish_catalog)
+        # 创建餐厅爬虫适配器（测试里关掉：后台循环会在共享测试库上长期驻留）
+        if background_enabled:
+            restaurant_scraper = await create_restaurant_scraper(dish_catalog)
         if restaurant_scraper:
             # 从 app_settings 表加载运行配置（营业时段/轮询间隔/浏览器选项），覆盖内存默认值
             if db_manager and hasattr(restaurant_scraper, "reload_runtime_settings"):
@@ -278,11 +285,12 @@ async def lifespan(app: FastAPI):
         def _runtime_scraper():
             return restaurant_scraper
 
-        reconcile_scheduler_task = asyncio.create_task(
-            run_reconcile_scheduler(_runtime_db, _runtime_scraper)
-        )
-        unmapped_watchdog_task = asyncio.create_task(run_unmapped_dish_watchdog(_runtime_db))
-        startup_results.append("数据质量调度")
+        if background_enabled:
+            reconcile_scheduler_task = asyncio.create_task(
+                run_reconcile_scheduler(_runtime_db, _runtime_scraper)
+            )
+            unmapped_watchdog_task = asyncio.create_task(run_unmapped_dish_watchdog(_runtime_db))
+            startup_results.append("数据质量调度")
 
         # 备份点：加载保留配置，并在启动时算一次备份健康
         if db_manager:

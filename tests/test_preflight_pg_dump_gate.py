@@ -80,12 +80,13 @@ class PreflightPgDumpGateTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("不可访问", detail)
 
-    def test_sqlite_backend_is_untouched(self):
+    def test_non_postgres_backend_is_blocked(self):
+        """SQLite 退场后（ADR 0089）非 postgres 后端必须在预检就判红。"""
         adapter = DefaultPreflightEnvAdapter(Path("/tmp/deploy"))
         with mock.patch.object(settings, "DATABASE_BACKEND", "sqlite"):
             ok, detail = adapter._database_state()
-        self.assertTrue(ok)
-        self.assertIn("SQLite", detail)
+        self.assertFalse(ok)
+        self.assertIn("SQLite 后端已移除", detail)
 
 
 if __name__ == "__main__":

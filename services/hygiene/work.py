@@ -13,12 +13,12 @@ import hashlib
 import json
 import logging
 import re
-import sqlite3
 import time
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from database import CHINA_TZ
+from db_core.errors import is_integrity_violation
 from services.hygiene.accounts import (
     BUSINESS_DAY_CUT_HOUR,
     PERMISSION_ADMIN,
@@ -474,7 +474,9 @@ class HygieneWork:
                 (cleaned, day_shift, night_shift, now, now),
             )
             await self._conn.commit()
-        except sqlite3.IntegrityError as exc:
+        except Exception as exc:
+            if not is_integrity_violation(exc):
+                raise
             await self._conn.rollback()
             raise HygieneWorkError("duplicate_zone", "duplicate_zone") from exc
         shifts_enabled = self._zone_shifts_from_flags(
@@ -811,7 +813,9 @@ class HygieneWork:
             )
             await self._insert_variants(capture_id, generated)
             await self._conn.commit()
-        except sqlite3.IntegrityError as exc:
+        except Exception as exc:
+            if not is_integrity_violation(exc):
+                raise
             await self._conn.rollback()
             await self._delete_capture_files(
                 [capture_id, *(item[0] for item in generated.values())]
@@ -2391,8 +2395,8 @@ class HygieneWork:
     async def _event_reason_supported(self) -> bool:
         """``hygiene_board_events.reason`` 是否可用（只探一次）。
 
-        SQLite 侧由 ``migrate_hygiene_columns()`` 在启动时补列；PG 按设计不在启动期
-        改结构，既有库需要跑 ``migrations/pg/0002_hygiene_indexes.sql``。缺列时降级
+        结构变更不在启动期做（ADR 0089 之后一律走 ``migrations/pg/000N``）：既有库
+        需要跑 ``migrations/pg/0002_hygiene_indexes.sql``。缺列时降级
         成「能标出被驳回、但没有原因文字」，而不是让驳回本身报错。
 
         **只允许在无事务上下文里调用（即 ``prepare()``）**：探测失败必须 rollback
@@ -2919,7 +2923,9 @@ class HygieneWork:
                 (day, cleaned, now, now),
             )
             await self._conn.commit()
-        except sqlite3.IntegrityError as exc:
+        except Exception as exc:
+            if not is_integrity_violation(exc):
+                raise
             await self._conn.rollback()
             raise HygieneWorkError("duplicate_item", "duplicate_item") from exc
         logger.info(

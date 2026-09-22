@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 餐厅订单数据采集系统数据库管理器
-单库 app.db（WAL）架构；`logs` 表独立在 logs.db。配方表也在 app.db，
-由 RecipeStore 借用这条连接访问（不进 Admin 通用写表名单，数据管理只读展示）。
-跨表查询在同一连接上写 SQL JOIN 即可。
+单库架构，且只有 PostgreSQL 一种后端（ADR 0089，SQLite 已退场）：业务表、`logs`
+日志表、`hygiene_*` 与配方表 `sop_*` 全在同一个库里，结构由 `migrations/pg/*.sql`
+建立，启动期不改结构。配方表由 RecipeStore 借用这条连接访问（不进 Admin 通用写表
+名单，数据管理只读展示）。跨表查询在同一连接上写 SQL JOIN 即可。
 
 本模块是对外统一门面：`DatabaseManager` 由 db_core/ 下的多个职责 Mixin 组合而成，
 具体实现按职责拆分在 db_core/ 包中；对外导出的名称（DatabaseManager、get_db、
@@ -69,13 +70,13 @@ class DatabaseManager(
     _StatsMixin,
 ):
     """
-    SQLite 单库管理器（app.db）。
+    PostgreSQL 单库管理器。
     各表共享同一连接；外部调用方用 ``table(name)`` / ``table_or_none(name)``
     取得 ``TableView``。领域入口：``orders`` / ``dish_stations`` / ``reports``
     （各为独立 adapter，非 identity 别名）。
 
     具体方法按职责拆分在 db_core/ 各 Mixin 中：
-    - _ConnectionMixin: 连接生命周期、WAL、备份导出
+    - _ConnectionMixin: 连接生命周期、备份导出
     - _OrdersRepoMixin: 订单查询/保存/批量写入
     - _TablesRepoMixin: 餐桌快照保存与统计
     - _DishStationsRepoMixin: 菜品档口映射的集合式操作

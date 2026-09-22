@@ -14,13 +14,11 @@ PRIMARY KEY or UNIQUE constraint」。现场 0.6.0 + PG 上的
 """
 
 import asyncio
-import sqlite3
 import unittest
 from unittest import mock
 
 from config import settings
 from db_core.backend import pg as pg_backend
-from db_core.schema import _HYGIENE_TABLE_SCHEMAS
 from services.hygiene.accounts import shift_pick_upsert_sql
 
 try:  # asyncpg 是 PG 后端依赖；缺失时 PG 侧断言跳过
@@ -55,33 +53,6 @@ def pg_available() -> bool:
         return asyncio.run(probe())
     except Exception:
         return False
-
-
-class ShiftPickUpsertSqliteTest(unittest.TestCase):
-    def test_conflict_target_matches_sqlite_unique_constraint(self):
-        conn = sqlite3.connect(":memory:")
-        try:
-            conn.executescript(_HYGIENE_TABLE_SCHEMAS["hygiene_shift_picks"])
-            for with_zone in (True, False):
-                with self.subTest(with_zone=with_zone):
-                    sql = sql_for_backend("sqlite", with_zone)
-                    self.assertNotIn("tenant_id", sql, "SQLite 表没有 tenant_id 列")
-                    if with_zone:
-                        first = (EMP_ID, BIZ_DATE, "白班", None, "t0", "t0")
-                        second = (EMP_ID, BIZ_DATE, "夜班", None, "t1", "t1")
-                    else:
-                        first = (EMP_ID, BIZ_DATE, "白班", "t0", "t0")
-                        second = (EMP_ID, BIZ_DATE, "夜班", "t1", "t1")
-                    conn.execute(sql, first)
-                    conn.execute(sql, second)  # 第二次必须走 ON CONFLICT DO UPDATE
-            rows = conn.execute(
-                "SELECT shift FROM hygiene_shift_picks "
-                "WHERE employee_id = ? AND business_date = ?",
-                (EMP_ID, BIZ_DATE),
-            ).fetchall()
-            self.assertEqual([r[0] for r in rows], ["夜班"])
-        finally:
-            conn.close()
 
 
 @unittest.skipUnless(pg_available(), "PostgreSQL 不可用，跳过 PG 侧断言")

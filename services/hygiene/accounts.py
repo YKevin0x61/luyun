@@ -13,12 +13,12 @@ import functools
 import hashlib
 import re
 import secrets
-import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
 from config import settings
 from database import CHINA_TZ
+from db_core.errors import is_integrity_violation
 from services import password_hash
 
 logger = logging.getLogger(__name__)
@@ -112,17 +112,14 @@ def hygiene_business_date(now: datetime) -> str:
 
 
 def shift_pick_conflict_target() -> str:
-    """hygiene_shift_picks 的 upsert 冲突目标，必须与当前后端的唯一索引一致。
+    """hygiene_shift_picks 的 upsert 冲突目标，必须与唯一索引一致。
 
-    SQLite 的表没有 tenant_id 列（唯一约束 = employee_id + business_date），
-    PG schema 的唯一索引则是 (tenant_id, employee_id, business_date)。写错会报
-    「there is no unique or exclusion constraint matching the ON CONFLICT
-    specification」——现场 0.6.0 + PG 上就是这么炸的。
+    PostgreSQL schema 的唯一索引是 (tenant_id, employee_id, business_date)。
+    写错会报「there is no unique or exclusion constraint matching the ON CONFLICT
+    specification」——现场 0.6.0 + PG 上就是这么炸的。SQLite 时代这里按后端分支
+    （那张表没有 tenant_id），ADR 0089 之后只剩 PG 一种目标。
     """
-    backend = (getattr(settings, "DATABASE_BACKEND", "sqlite") or "sqlite").lower()
-    if backend == "postgres":
-        return "tenant_id, employee_id, business_date"
-    return "employee_id, business_date"
+    return "tenant_id, employee_id, business_date"
 
 
 def shift_pick_upsert_sql(with_zone: bool) -> str:
@@ -272,7 +269,9 @@ class EmployeeAccounts:
                 (normalized, employee_name, hashed, PERMISSION_STAFF, now, now),
             )
             await self._conn.commit()
-        except sqlite3.IntegrityError as exc:
+        except Exception as exc:
+            if not is_integrity_violation(exc):
+                raise
             await self._conn.rollback()
             raise EmployeeAccountsError("duplicate_phone", "duplicate_phone") from exc
         logger.info("hygiene employee registered id=%s", cur.lastrowid)
@@ -461,7 +460,9 @@ class EmployeeAccounts:
                 params,
             )
             await self._conn.commit()
-        except sqlite3.IntegrityError as exc:
+        except Exception as exc:
+            if not is_integrity_violation(exc):
+                raise
             await self._conn.rollback()
             raise EmployeeAccountsError("duplicate_phone", "duplicate_phone") from exc
         logger.info("hygiene employee profile updated id=%s", employee_id)
@@ -760,7 +761,9 @@ class EmployeeAccounts:
                 (employee_id, business_date, shift, now, now),
             )
             await self._conn.commit()
-        except sqlite3.IntegrityError as exc:
+        except Exception as exc:
+            if not is_integrity_violation(exc):
+                raise
             await self._conn.rollback()
             raise EmployeeAccountsError(
                 "shift_already_picked", "shift_already_picked"

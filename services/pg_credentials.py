@@ -28,7 +28,6 @@ from typing import Optional
 from urllib.parse import quote, unquote, urlsplit
 
 from config import settings
-from services.backup_service import is_postgres_backend
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +130,10 @@ def credentials_status() -> dict:
     if path.parent.is_dir():
         writable = os.access(path if path.exists() else path.parent, os.W_OK)
     return {
-        "backend": (getattr(settings, "DATABASE_BACKEND", "sqlite") or "sqlite").lower(),
-        "is_postgres": is_postgres_backend(),
+        # 后端只剩 PostgreSQL（ADR 0089）：这两个字段留着是为了不改前端契约，
+        # 值不再随配置变化。
+        "backend": "postgres",
+        "is_postgres": True,
         "user": parts.user if parts else None,
         "host": parts.host if parts else None,
         "port": parts.port if parts else None,
@@ -206,8 +207,6 @@ async def reset_database_password(*, actor: str, restart: bool = True) -> dict:
 
     顺序：ALTER → 用新密码验证 → 写文件 → 重启。任何一步失败都回滚密码。
     """
-    if not is_postgres_backend():
-        raise PasswordResetError("not_postgres", "当前后端不是 PostgreSQL，无法重置数据库密码")
     override = _dsn_env_override()
     if override:
         raise PasswordResetError(

@@ -13,16 +13,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import shutil
-import sqlite3
 import tarfile
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from config import settings
 from services import backup_retention, backup_service
 from services.backup_service import (
     CONTENT_APP_DB,
@@ -33,7 +29,6 @@ from services.backup_service import (
     CONTENT_RECIPES,
     CONTENT_RUNTIME,
     CONTENT_STANDARD_PHOTOS,
-    KEY_TABLES,
     PHOTO_OTHER,
     PHOTO_STANDARD,
     PROVENANCE_LABELS,
@@ -278,8 +273,8 @@ def _contents_from_includes(includes: Dict[str, Any]) -> List[str]:
         (CONTENT_OTHER_PHOTOS, "other_photos"),
     )
     contents = [content for content, key in mapping if includes.get(key)]
-    # 运行配置（营业时段 / 轮询间隔等）落在 app_settings 表里，两种后端的整库
-    # 副本都会带上它，因此只要带了业务数据，运行配置就随之一并恢复。
+    # 运行配置（营业时段 / 轮询间隔等）落在 app_settings 表里，整库副本会带上它，
+    # 因此只要带了业务数据，运行配置就随之一并恢复。
     if (
         CONTENT_APP_DB in contents or CONTENT_APP_PG in contents
     ) and CONTENT_RUNTIME not in contents:
@@ -326,88 +321,12 @@ _missing_from_contents = missing_contents
 
 # ==================== 基础校验（只读）====================
 
-def _open_backup_sqlite(db_path: Path) -> sqlite3.Connection:
-    """以真正只读的方式打开备份内的库（不产生 -shm/-wal，不修改备份点）。
-
-    备份点里的库由 SQLite backup API 生成，是自洽单文件；``immutable=1`` 因此既
-    安全又不会就地写入。若文件仍被判定不可读，退回复制到临时目录再打开。
-    """
-    uri = db_path.resolve().as_uri() + "?immutable=1"
-    try:
-        conn = sqlite3.connect(uri, uri=True)
-        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        return conn
-    except sqlite3.Error:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-    import tempfile
-
-    tmp_dir = tempfile.mkdtemp(prefix="luyun-validate-")
-    tmp_path = Path(tmp_dir) / "app.db"
-    shutil.copy2(db_path, tmp_path)
-    conn = sqlite3.connect(f"{tmp_path.resolve().as_uri()}?immutable=1", uri=True)
-    try:
-        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-    except sqlite3.Error:
-        conn.close()
-        raise
-    return conn
-
-
-def _sqlite_basic_check(db_path: Path, *, expected_rows: Optional[dict] = None) -> dict:
-    messages: List[str] = []
-    if not db_path.is_file():
-        return {"ok": False, "messages": ["备份内没有业务数据库"]}
-    if db_path.stat().st_size <= 0:
-        return {"ok": False, "messages": ["业务数据库体积为零"]}
-    try:
-        conn = _open_backup_sqlite(db_path)
-    except sqlite3.Error as exc:
-        return {"ok": False, "messages": [f"业务数据库无法打开：{exc}"]}
-    try:
-        names = {
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-    except sqlite3.Error as exc:
-        conn.close()
-        return {"ok": False, "messages": [f"业务数据库无法读取：{exc}"]}
-    try:
-        if "orders" not in names:
-            return {"ok": False, "messages": ["缺少关键表 orders，备份不可恢复"]}
-        for table in KEY_TABLES:
-            if table not in names:
-                messages.append(f"关键表 {table} 不存在（旧备份）")
-                continue
-            try:
-                conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
-            except sqlite3.Error as exc:
-                return {"ok": False, "messages": [f"关键表 {table} 不可读：{exc}"]}
-        if expected_rows:
-            mismatches = backup_service.row_count_mismatches(
-                expected_rows, backup_service._count_rows(conn)
-            )
-            if mismatches:
-                return {"ok": False, "messages": mismatches}
-    finally:
-        conn.close()
-    return {"ok": True, "messages": messages}
-
-
 def _snapshot_basic_check(item: dict) -> dict:
     snap_dir = backup_service._snapshot_root() / item["ts"]
     if item["size_bytes"] <= 0:
         return {"ok": False, "messages": ["备份点体积为零"]}
-    db_path = snap_dir / "app.db"
-    if db_path.is_file():
-        return _sqlite_basic_check(db_path, expected_rows=item.get("row_counts") or {})
-    # PG 后端的业务数据是整库 pg_dump，没有 app.db。不认这个文件会把它误判成
-    # 「仅含凭据」，与「内容：业务数据 (PostgreSQL)」自相矛盾。
+    # 业务数据只有整库 pg_dump 一种形态。不认 app.pgdump 会把它误判成「仅含凭据」，
+    # 与「内容：业务数据 (PostgreSQL)」自相矛盾。
     pg_dump_path = snap_dir / "app.pgdump"
     if pg_dump_path.is_file():
         if pg_dump_path.stat().st_size <= 0:
@@ -418,6 +337,16 @@ def _snapshot_basic_check(item: dict) -> dict:
                 "业务数据是 PostgreSQL 整库备份（app.pgdump）：页面内「恢复整库数据」"
                 "用 pg_restore --clean 重建数据库对象，恢复期间采集会中断一轮，"
                 "完成后需要重新登录后台"
+            ],
+        }
+    legacy = snap_dir / "app.db"
+    if legacy.is_file():
+        # SQLite 时代的快照：文件还在（回滚源），但灌不进 PostgreSQL。
+        return {
+            "ok": False,
+            "messages": [
+                "这份快照的业务数据是 SQLite 库（app.db），"
+                "当前后端是 PostgreSQL，无法恢复；请改用 app.pgdump 的快照"
             ],
         }
     if (snap_dir / "credentials.enc").is_file():
@@ -463,7 +392,7 @@ def _cold_status_basic_check(status: dict) -> dict:
 
 
 def _verify_cold_archive(archive_path: Path) -> dict:
-    """只读校验冷备归档：tar 可打开、清单可读、校验和一致、关键表可读。"""
+    """只读校验冷备归档：tar 可打开、清单可读、校验和一致、库快照非空。"""
     messages: List[str] = []
     errors: List[str] = []
     try:
@@ -511,24 +440,18 @@ def _verify_cold_archive(archive_path: Path) -> dict:
         else:
             errors.append("归档缺少校验和清单")
 
-        if "app.db" in names and not errors:
-            fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="luyun-cold-verify-")
-            os.close(fd)
-            try:
-                with open(tmp_path, "wb") as handle:
-                    handle.write(tar.extractfile("app.db").read())
-                db_check = _sqlite_basic_check(
-                    Path(tmp_path), expected_rows=manifest.get("row_counts") or {}
-                )
-                if not db_check["ok"]:
-                    errors.extend(db_check["messages"])
-                else:
-                    messages.extend(db_check["messages"])
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+        # 库快照是整库 pg_dump（custom format）：没有 pg_restore 就跑不出一致性结论，
+        # 这里只核对成员存在且非空——完整恢复验证发生在真恢复时。
+        if "app.pgdump" in names:
+            size = tar.getmember("app.pgdump").size
+            if size <= 0:
+                errors.append("冷备内的 PostgreSQL 整库备份体积为零")
+        elif "app.db" in names:
+            errors.append(
+                "冷备内的业务数据是 SQLite 库（app.db），当前后端是 PostgreSQL，无法恢复"
+            )
+        else:
+            errors.append("冷备内没有业务数据（app.pgdump）")
 
     if errors:
         return {"ok": False, "messages": messages + errors}
@@ -538,9 +461,22 @@ def _verify_cold_archive(archive_path: Path) -> dict:
 def _cold_scan_basic_check(item: dict) -> dict:
     if item.get("legacy"):
         path = Path(item["archive"])
-        db_path = path / "app.db"
-        if db_path.is_file():
-            return _sqlite_basic_check(db_path)
+        dump = path / "app.pgdump"
+        if dump.is_file():
+            if dump.stat().st_size <= 0:
+                return {"ok": False, "messages": ["PostgreSQL 整库备份体积为零"]}
+            return {
+                "ok": True,
+                "messages": ["旧格式冷备目录（任务未报告结果），库快照为 app.pgdump"],
+            }
+        if (path / "app.db").is_file():
+            return {
+                "ok": False,
+                "messages": [
+                    "旧格式冷备目录里的业务数据是 SQLite 库（app.db），"
+                    "当前后端是 PostgreSQL，无法恢复"
+                ],
+            }
         return {"ok": True, "messages": ["旧格式冷备目录（任务未报告结果）"]}
     path = Path(item["archive"])
     if not path.is_file() or path.stat().st_size <= 0:
@@ -567,19 +503,27 @@ def validate_backup_point(point_id: str) -> dict:
 
 # ==================== 跨备份点差异 ====================
 
-def current_photo_ids(app_db_path: Optional[str] = None) -> Dict[str, List[str]]:
-    return backup_service.classify_hygiene_capture_ids(
-        app_db_path or settings.APP_DB_PATH
-    )
+async def current_photo_ids(db) -> Dict[str, List[str]]:
+    """当前业务库里引用的照片（经业务库连接查询，不读任何本地库文件）。"""
+    return await backup_service.classify_hygiene_capture_ids(db)
 
 
-def photo_difference(
+async def photo_difference(
     backup_ids: Dict[str, Sequence[str]],
     *,
     current: Optional[Dict[str, Sequence[str]]] = None,
+    db=None,
 ) -> dict:
-    """当前数据库引用的照片中，这一备份点里没有的部分（只提示，不阻止）。"""
-    current = current or current_photo_ids()
+    """当前数据库引用的照片中，这一备份点里没有的部分（只提示，不阻止）。
+
+    ``current`` 缺省时经 ``db`` 查当前业务库；两者都不给会抛 ValueError——SQLite
+    时代这里退回 ``settings.APP_DB_PATH``，PG 门店上那个文件不存在，于是差异检查
+    静默通过。
+    """
+    if current is None:
+        if db is None:
+            raise ValueError("photo_difference 需要 db 或 current 才能算出差异")
+        current = await current_photo_ids(db)
     diff: Dict[str, List[str]] = {}
     for kind in (PHOTO_STANDARD, PHOTO_OTHER):
         present = set(backup_ids.get(kind) or [])
@@ -633,8 +577,6 @@ def restore_photos(
 def create_pre_restore_snapshot(provenance: str) -> str:
     """恢复动作的前置快照；失败即抛异常，由调用方拒绝该次恢复。"""
     ts = backup_service.create_restore_snapshot(
-        settings.APP_DB_PATH,
-        backup_service.get_recipes_db_path(),
         backup_service.get_credentials_file_path(),
         provenance=provenance,
     )

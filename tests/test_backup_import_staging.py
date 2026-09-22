@@ -128,9 +128,6 @@ class BackupImportStagingTest(unittest.TestCase):
             include_runtime=True,
             runtime_data={"poll_min_seconds": 5},
             include_app_db=False,
-            app_db_bytes=None,
-            include_recipes=False,
-            recipes_db_bytes=None,
             app_version="test",
         )
         parsed = backup_service.parse_backup(blob, "pass1234")

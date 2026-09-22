@@ -18,14 +18,14 @@ Day-to-day entry scripts live here. One-off migration, debug, and smoke utilitie
 | `cold_backup.py` | 冷备归档入口（库快照 + 凭据 + 密钥 + 卫生照片 + 清单 + 校验和 + 状态文件）；由 `deploy/backup.sh` 调度 |
 | `reconcile_settled_bills.py` | Settled-bill reconciliation utility |
 | `migrate_recipes_structured.py` (+ `migrate_recipes_structured.rollback.md`) | One-time SOP `body_markdown` → structured JSON (dry-run first; move to `archive/` after a real-shop verify) |
+| `prototype_kds_hub_settings.sh` / `prototype_prep_revenue_nowcast/` | One-off prototypes (KDS hub settings UI; prep revenue nowcast). Artifacts live in each `out/` and never enter the Release Bundle |
 
 ## Archive (`archive/`)
 
 | Script | Purpose |
 |--------|---------|
-| `consolidate_dbs.py` (+ `consolidate_dbs.rollback.md`) | One-time multi-db → `app.db` migration |
-| `sqlite_to_pg_schema.py` | Generate PostgreSQL DDL (with `tenant_id`) from the SQLite schema → `migrations/pg/` |
-| `migrate_sqlite_to_postgres.py` | One-time SQLite `app.db` → PostgreSQL data migration (`--dry-run` first; runbook in `migrations/pg/README.md`) |
+| `backtest_prep_forecast.py` | Read-only backtest / calibration tool for the prep forecast |
+| `migrate_sqlite_to_postgres.py` | 遗留 SQLite 门店的迁移工具：`data/app.db` → PostgreSQL（唯一还能读遗留 `app.db` 的代码；先 `--dry-run`，跑法见 `migrations/pg/README.md`）。`0001_initial_schema.sql` 已冻结，不再有从 SQLite 生成 PG DDL 的脚本 |
 | `mitm_pos_login_filter.py` | mitmproxy addon for POS login capture |
 | `test_pos_auth.py` | POS auth smoke (A/B/C) |
 | `smoke_public_pages.py` | Playwright public-page smoke |

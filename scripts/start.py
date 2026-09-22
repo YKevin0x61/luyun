@@ -35,6 +35,10 @@ if __name__ == "__main__":
             host=settings.HOST,
             port=settings.PORT,
             reload=settings.DEBUG,
+            # 不指定 reload_dirs 的话 uvicorn 只监视 cwd——本脚本从 scripts/ 启动，
+            # 于是改 services/、config.py 都不会触发热重载（现场踩过：改了代码
+            # 以为已生效，其实进程还跑着旧逻辑）。这里显式盯仓库根。
+            reload_dirs=[str(project_root)] if settings.DEBUG else None,
             workers=settings.WORKERS,
             log_level="info"
         )

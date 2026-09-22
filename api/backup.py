@@ -68,8 +68,9 @@ PHOTO_KINDS = (
 class BackupExportIn(BaseModel):
     passphrase: str = Field(..., description="导出加密口令")
     include_runtime: bool = Field(False, description="是否打包运行配置")
-    include_app_db: bool = Field(True, description="是否打包 app.db")
-    include_recipes: bool = Field(True, description="是否打包配方库")
+    # 业务数据只有整库 pg_dump 一种形态（成员 app.pgdump）；配方表在同一个库里，
+    # 随它一起走，因此没有单独的「配方库」开关。
+    include_app_db: bool = Field(True, description="是否打包业务数据（整库 pg_dump）")
     include_standard_photos: bool = Field(True, description="是否打包标准图（含历史版本）")
     include_other_photos: bool = Field(True, description="是否打包其它卫生照片")
 
@@ -147,7 +148,7 @@ def _default_apply(parsed: dict, diff: dict) -> Dict[str, bool]:
     }
 
 
-def _validation(parsed: dict) -> dict:
+async def _validation(parsed: dict, db: DatabaseManager) -> dict:
     """两层校验：备份点内不一致阻止恢复；跨备份点差异只提示。"""
     meta = parsed.get("meta") or {}
     counts = _photo_counts(parsed)
@@ -158,7 +159,7 @@ def _validation(parsed: dict) -> dict:
         PHOTO_STANDARD: sorted((parsed.get("standard_photos") or {}).keys()),
         PHOTO_OTHER: sorted((parsed.get("other_photos") or {}).keys()),
     }
-    diff = backup_points.photo_difference(backup_ids)
+    diff = await backup_points.photo_difference(backup_ids, db=db)
     declared_consistency = meta.get("consistency") or {}
     # 只有「备份自身坏了」（blocking）才算 in_backup 失败；照片在源磁盘上缺失
     # 这类完整度问题不阻断恢复（跨备份点差异另走 cross_point + 强制继续那条路）。
@@ -213,8 +214,8 @@ async def _collect_export_payload(
 ) -> dict:
     """收集导出成员。
 
-    大成员（``app.db`` / ``app.pgdump`` / 照片）只给**磁盘路径**：打包时 tar 直接
-    流式读走，不再先把它们读成 bytes 堆在内存里。调用方负责用返回的 ``temp_paths``
+    大成员（``app.pgdump`` / 照片）只给**磁盘路径**：打包时 tar 直接流式读走，
+    不再先把它们读成 bytes 堆在内存里。调用方负责用返回的 ``temp_paths``
     清理临时文件。
     """
     _report_progress(progress, "collecting")
@@ -223,53 +224,35 @@ async def _collect_export_payload(
         runtime_data = await runtime_settings.load_runtime_settings(db)
 
     temp_paths: List[str] = []
-    app_db_path: Optional[str] = None
     app_pg_path: Optional[str] = None
-    recipes_db_bytes: Optional[bytes] = None
     photo_info: dict = {"members": [], "manifest": {}, "missing": {}}
     try:
         if payload.include_app_db:
             _report_progress(progress, "app_data")
-            if backup_service.is_postgres_backend():
-                # PG 的业务数据不是可导出的 SQLite 文件：打一份整库 pg_dump 当成员
-                # （app.pgdump），恢复端按成员名走 pg_restore 整库覆盖。
-                fd, app_pg_path = tempfile.mkstemp(
-                    suffix=".pgdump", prefix="luyun-export-"
-                )
-                os.close(fd)
-                temp_paths.append(app_pg_path)
-                await backup_service.export_pg_dump_to_file(
-                    app_pg_path,
-                    lambda written: _report_progress(
-                        progress, "app_data", written, 0, "bytes"
-                    ),
-                )
-            else:
-                fd, app_db_path = tempfile.mkstemp(suffix=".db", prefix="luyun-export-")
-                os.close(fd)
-                temp_paths.append(app_db_path)
-                await db.export_merged_sqlite_file(app_db_path)
-
-        if payload.include_recipes:
-            _report_progress(progress, "recipes")
-            # 走当前连接而不是 settings.APP_DB_PATH：PG 后端下那个文件是迁移遗留的
-            # SQLite 副本，配方早与当前库分叉，打进去等于导出一份旧配方。
-            recipes_db_bytes = await backup_service.export_recipes_db_bytes_from_conn(
-                getattr(db, "_conn", None)
+            # 业务数据 = 整库 pg_dump（成员 app.pgdump），恢复端走 pg_restore 覆盖。
+            # 配方表在同一个库里，随这份 dump 一起走。
+            fd, app_pg_path = tempfile.mkstemp(
+                suffix=".pgdump", prefix="luyun-export-"
+            )
+            os.close(fd)
+            temp_paths.append(app_pg_path)
+            await backup_service.export_pg_dump_to_file(
+                app_pg_path,
+                lambda written: _report_progress(
+                    progress, "app_data", written, 0, "bytes"
+                ),
             )
 
         if payload.include_standard_photos or payload.include_other_photos:
             _report_progress(progress, "photos_scan")
-            photo_info = backup_service.collect_hygiene_photo_paths()
+            photo_info = await backup_service.collect_hygiene_photo_paths(db)
     except Exception:
         _cleanup_temp_files(temp_paths)
         raise
 
     return {
         "runtime_data": runtime_data,
-        "app_db_path": app_db_path,
         "app_pg_path": app_pg_path,
-        "recipes_db_bytes": recipes_db_bytes,
         "photo_info": photo_info,
         "temp_paths": temp_paths,
     }
@@ -372,10 +355,7 @@ async def _run_export_job(
             include_runtime=payload.include_runtime,
             runtime_data=collected["runtime_data"],
             include_app_db=payload.include_app_db,
-            app_db_source=collected["app_db_path"],
             app_pg_source=collected["app_pg_path"],
-            include_recipes=payload.include_recipes,
-            recipes_db_bytes=collected["recipes_db_bytes"],
             include_standard_photos=payload.include_standard_photos,
             include_other_photos=payload.include_other_photos,
             photo_members=photo_info.get("members"),
@@ -397,12 +377,11 @@ async def _run_export_job(
             path=str(archive_path),
         )
         logger.info(
-            "📦 [审计] 导出系统备份（runtime=%s app_db=%s app_pg=%s recipes=%s "
+            "📦 [审计] 导出系统备份（runtime=%s app_db=%s 整库 dump=%s "
             "标准图=%s 其它照片=%s，%.1f MB）",
             payload.include_runtime,
             payload.include_app_db,
             bool(collected.get("app_pg_path")),
-            payload.include_recipes,
             payload.include_standard_photos,
             payload.include_other_photos,
             (meta.get("archive_bytes") or 0) / 1024 / 1024,
@@ -513,10 +492,7 @@ async def export_backup(
             include_runtime=payload.include_runtime,
             runtime_data=collected["runtime_data"],
             include_app_db=payload.include_app_db,
-            app_db_bytes=_read_temp_bytes(collected["app_db_path"]),
             app_pg_bytes=_read_temp_bytes(collected["app_pg_path"]),
-            include_recipes=payload.include_recipes,
-            recipes_db_bytes=collected["recipes_db_bytes"],
             include_standard_photos=payload.include_standard_photos,
             include_other_photos=payload.include_other_photos,
             photo_members={
@@ -550,11 +526,10 @@ async def export_backup(
         await _register_export_archive(archive_path, meta, db)
 
     logger.info(
-        "📦 [审计] 导出系统备份（runtime=%s app_db=%s app_pg=%s recipes=%s 标准图=%s 其它照片=%s）",
+        "📦 [审计] 导出系统备份（runtime=%s app_db=%s 整库 dump=%s 标准图=%s 其它照片=%s）",
         payload.include_runtime,
         payload.include_app_db,
         bool(collected.get("app_pg_path")),
-        payload.include_recipes,
         payload.include_standard_photos,
         payload.include_other_photos,
     )
@@ -578,16 +553,18 @@ def _staging_http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
-def _after_restore_photo_consistency(touched: bool) -> Optional[dict]:
+async def _after_restore_photo_consistency(
+    touched: bool, db: DatabaseManager
+) -> Optional[dict]:
     """恢复后核对「库引用的照片」是否真的在磁盘上。
 
     库和照片是两份数据，恢复时可以只换其中一份（旧归档不带照片、只勾选恢复
-    业务数据、跨机搬运 app.db 都会如此）。这里把恢复结果落成结论，缺图不再
+    业务数据、跨机搬运整库 dump 都会如此）。这里把恢复结果落成结论，缺图不再
     静默成功。``touched`` 为假（本次没有写库也没写照片）时不做检查。
     """
     if not touched:
         return None
-    result = backup_service.missing_hygiene_capture_ids()
+    result = await backup_service.missing_hygiene_capture_ids(db)
     if not result["ok"]:
         logger.warning(
             "⚠️ [审计] 恢复后照片不一致：标准图缺 %s 张、其它照片缺 %s 张"
@@ -613,7 +590,7 @@ async def _apply_parsed_backup(
     db: DatabaseManager,
 ) -> dict:
     """将已解密的备份内容写入系统（merge 或 overwrite）。"""
-    validation = _validation(parsed)
+    validation = await _validation(parsed, db)
     if not validation["in_backup"]["ok"]:
         raise HTTPException(
             status_code=409,
@@ -647,34 +624,23 @@ async def _apply_parsed_backup(
             },
         )
 
-    # 跨后端不兼容必须在**建前置快照之前**判掉：留到应用阶段才发现，会白建一份快照，
-    # 而那时快照里已经含了刚写进去的凭据/运行配置。
-    pg_backend = backup_service.is_postgres_backend()
+    # 不兼容 / 不可恢复的组合必须在**建前置快照之前**判掉：留到应用阶段才发现，
+    # 会白建一份快照，而那时快照里已经含了刚写进去的凭据/运行配置。
     app_db_bytes = parsed["app_db_bytes"]
     app_pg_bytes = parsed.get("app_pg_bytes")
 
-    if apply_app_db and app_db_bytes is not None and pg_backend:
-        # 不静默跳过：这份备份里的业务数据是 SQLite 库，SQLite 的覆盖/合并路径
-        # 灌不进 PostgreSQL。PG 门店要恢复业务数据，用带 app.pgdump 的那份备份。
+    if apply_app_db and app_db_bytes is not None and app_pg_bytes is None:
+        # 不静默跳过：SQLite 时代的包（业务数据成员是 app.db）灌不进 PostgreSQL。
         raise HTTPException(
             status_code=400,
             detail=(
                 "这份备份里的业务数据是 SQLite 库（app.db），不能直接灌进 PostgreSQL。"
-                "请改用 PG 门店自己导出的备份（业务数据成员是 app.pgdump），"
+                "请改用业务数据成员是 app.pgdump 的备份（当前后端导出的包即是），"
                 "或在「备份中心 → 备份点 → 本机回滚快照」用「恢复整库数据」"
             ),
         )
-    if apply_app_db and app_pg_bytes is not None and not pg_backend:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "这份备份里的业务数据是 PostgreSQL 整库 dump（app.pgdump），"
-                "当前后端不是 PostgreSQL，无法恢复。SQLite 门店请用业务数据成员是 "
-                "app.db 的备份"
-            ),
-        )
     if apply_app_db and app_pg_bytes is not None and mode != "overwrite":
-        # pg_restore --clean 是库级操作，没有 SQLite 那种逐表合并的粒度
+        # pg_restore --clean 是库级操作，没有逐表合并的粒度
         raise HTTPException(
             status_code=400,
             detail=(
@@ -682,11 +648,18 @@ async def _apply_parsed_backup(
                 "不支持合并导入。请把恢复模式改成「覆盖」后重试"
             ),
         )
+    if apply_recipes and not (apply_app_db and app_pg_bytes is not None):
+        # 配方表在业务库里，没有独立的恢复路径：只勾配方、不恢复业务数据什么也不会发生，
+        # 静默跳过等于骗调用方。
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "配方数据随业务数据（整库 app.pgdump）一起恢复，没有单独的配方成员。"
+                "请改为勾选「业务数据」"
+            ),
+        )
 
-    will_touch_db = (
-        (apply_app_db and (app_db_bytes is not None or app_pg_bytes is not None))
-        or (apply_recipes and parsed["recipes_db_bytes"] is not None)
-    )
+    will_touch_db = apply_app_db and app_pg_bytes is not None
     will_touch_photos = (
         (apply_standard_photos and bool(parsed.get("standard_photos")))
         or (apply_other_photos and bool(parsed.get("other_photos")))
@@ -728,7 +701,8 @@ async def _apply_parsed_backup(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"备份中的运行配置无效：{exc}")
 
-    # 合并模式的逐表报告：失败行数会随响应带出，前端据此提示「有 N 行没恢复成功」。
+    # 逐表合并报告只属于 SQLite 的逐表合并路径；整库恢复没有「部分成功」，
+    # 保留空 dict 是为了不改动响应结构。
     merge_reports: Dict[str, dict] = {}
 
     if apply_app_db and app_pg_bytes is not None:
@@ -747,37 +721,10 @@ async def _apply_parsed_backup(
                 ),
             )
 
-    if apply_app_db and app_db_bytes is not None:
-        try:
-            if mode == "overwrite":
-                await backup_service.overwrite_app_db_from_bytes(db, app_db_bytes)
-            else:
-                merge_reports["app_db"] = await backup_service.merge_app_db_from_bytes(
-                    db, app_db_bytes
-                )
-            applied[CONTENT_APP_DB] = True
-        except Exception as exc:
-            logger.error("应用 app.db 备份失败: %s", exc)
-            raise HTTPException(status_code=500, detail="应用 app.db 备份失败")
-
-    if apply_recipes and parsed["recipes_db_bytes"] is not None:
-        from main import recipe_store
-
-        if recipe_store is None:
-            raise HTTPException(status_code=503, detail="配方库未就绪")
-        try:
-            if mode == "overwrite":
-                await backup_service.overwrite_recipes_from_bytes(
-                    recipe_store, parsed["recipes_db_bytes"]
-                )
-            else:
-                merge_reports["recipes_db"] = await backup_service.merge_recipes_from_bytes(
-                    recipe_store, parsed["recipes_db_bytes"]
-                )
-            applied[CONTENT_RECIPES] = True
-        except Exception as exc:
-            logger.error("应用配方库备份失败: %s", exc)
-            raise HTTPException(status_code=500, detail="应用配方库备份失败")
+    # 整库恢复同时覆盖业务数据与配方数据：配方表与业务表在同一个库里，
+    # 没有「只恢复配方」的粒度。
+    if apply_recipes and applied[CONTENT_APP_PG]:
+        applied[CONTENT_RECIPES] = True
 
     restored_photos = {PHOTO_STANDARD: 0, PHOTO_OTHER: 0}
     if apply_standard_photos or apply_other_photos:
@@ -788,13 +735,13 @@ async def _apply_parsed_backup(
         applied[CONTENT_STANDARD_PHOTOS] = bool(apply_standard_photos)
         applied[CONTENT_OTHER_PHOTOS] = bool(apply_other_photos)
 
-    photo_consistency = _after_restore_photo_consistency(
+    photo_consistency = await _after_restore_photo_consistency(
         bool(
-            applied[CONTENT_APP_DB]
-            or applied[CONTENT_APP_PG]
+            applied[CONTENT_APP_PG]
             or applied[CONTENT_STANDARD_PHOTOS]
             or applied[CONTENT_OTHER_PHOTOS]
-        )
+        ),
+        db,
     )
 
     logger.info(
@@ -810,15 +757,11 @@ async def _apply_parsed_backup(
         await _notify_scraper_reload_runtime(db)
 
     session_invalidated = (
-        applied[CONTENT_APP_DB]
-        or applied[CONTENT_APP_PG]
-        or applied[CONTENT_CREDENTIALS]
+        applied[CONTENT_APP_PG] or applied[CONTENT_CREDENTIALS]
     )
     merge_failed_rows = sum(
         int(report.get("total_failed") or 0) for report in merge_reports.values()
     )
-    if merge_failed_rows:
-        logger.warning("📥 [审计] 合并导入有 %s 行未写入", merge_failed_rows)
     return {
         "success": True,
         "mode": mode,
@@ -840,6 +783,7 @@ async def import_backup_preview(
     file: UploadFile = File(...),
     passphrase: str = Form(...),
     session_id: str = Depends(require_session),
+    db: DatabaseManager = Depends(get_db),
 ):
     """解密备份、写入导入暂存并返回解析结果与两层校验结论。"""
     backup_import_staging.cleanup_expired_staging()
@@ -852,12 +796,10 @@ async def import_backup_preview(
     import_token = backup_import_staging.create_staging(session_id, parsed)
     meta = parsed["meta"]
     includes = meta.get("includes") or {}
-    validation = _validation(parsed)
+    validation = await _validation(parsed, db)
     diff = validation["cross_point"]
     will_touch = bool(
-        parsed["app_db_bytes"]
-        or parsed.get("app_pg_bytes")
-        or parsed["recipes_db_bytes"]
+        parsed.get("app_pg_bytes")
         or parsed.get("standard_photos")
         or parsed.get("other_photos")
     )
@@ -868,9 +810,8 @@ async def import_backup_preview(
         "includes": includes,
         "credentials_preview": _credentials_preview(parsed["credentials"]),
         "has_runtime": parsed["runtime"] is not None,
-        "has_app_db": parsed["app_db_bytes"] is not None,
+        "has_sqlite_app_db": parsed["app_db_bytes"] is not None,
         "has_app_pg": parsed.get("app_pg_bytes") is not None,
-        "has_recipes": parsed["recipes_db_bytes"] is not None,
         "photos": _photo_summary(parsed),
         "missing": _missing_contents(parsed),
         "validation": validation,
@@ -973,22 +914,8 @@ async def rollback_snapshot(
         )
 
     applied: Dict[str, bool] = {content: False for content in CONTENT_LABELS}
-    snap_app = snap_dir / "app.db"
-    if snap_app.is_file():
-        with open(snap_app, "rb") as f:
-            await backup_service.overwrite_app_db_from_bytes(db, f.read())
-        applied[CONTENT_APP_DB] = True
-
     snap_pg = snap_dir / "app.pgdump"
     if snap_pg.is_file():
-        if not backup_service.is_postgres_backend():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "这份快照的业务数据是 PostgreSQL 整库备份，"
-                    "但当前后端不是 PostgreSQL，无法在本机恢复"
-                ),
-            )
         # 先断开自己的连接：pg_restore --clean 要 drop 并重建对象，我方连接上的
         # 未提交事务会持有表锁、让 drop 卡住。断开后采集侧的写入会直接失败一轮
         # （各自的错误处理会记失败计数），这是整库恢复的固有代价。
@@ -1009,15 +936,7 @@ async def rollback_snapshot(
                 detail="整库已恢复，但数据库重连失败；请重启应用后再操作",
             )
         applied[CONTENT_APP_PG] = True
-
-    snap_recipes = snap_dir / "recipes.db"
-    if snap_recipes.is_file():
-        from main import recipe_store
-
-        if recipe_store is None:
-            raise HTTPException(status_code=503, detail="配方库未就绪")
-        with open(snap_recipes, "rb") as f:
-            await backup_service.overwrite_recipes_from_bytes(recipe_store, f.read())
+        # 配方表在同一个库里：整库恢复即覆盖了配方数据。
         applied[CONTENT_RECIPES] = True
 
     snap_cred = snap_dir / "credentials.enc"
@@ -1054,13 +973,13 @@ async def rollback_snapshot(
         applied[CONTENT_STANDARD_PHOTOS] = bool(apply_standard_photos)
         applied[CONTENT_OTHER_PHOTOS] = bool(apply_other_photos)
 
-    photo_consistency = _after_restore_photo_consistency(
+    photo_consistency = await _after_restore_photo_consistency(
         bool(
-            applied[CONTENT_APP_DB]
-            or applied[CONTENT_APP_PG]
+            applied[CONTENT_APP_PG]
             or applied[CONTENT_STANDARD_PHOTOS]
             or applied[CONTENT_OTHER_PHOTOS]
-        )
+        ),
+        db,
     )
 
     logger.info(
@@ -1083,9 +1002,7 @@ async def rollback_snapshot(
         "photo_consistency": photo_consistency,
         "snapshot_ts": pre_ts,
         "session_invalidated": (
-            applied[CONTENT_APP_DB]
-            or applied[CONTENT_APP_PG]
-            or applied[CONTENT_CREDENTIALS]
+            applied[CONTENT_APP_PG] or applied[CONTENT_CREDENTIALS]
         ),
     }
 
@@ -1099,7 +1016,6 @@ async def list_points(db: DatabaseManager = Depends(get_db)):
     health = backup_points.get_health_cache()
     if health is None:
         health = backup_points.refresh_backup_health()
-    pg_backend = backup_service.is_postgres_backend()
     return {
         "success": True,
         "points": points,
@@ -1107,12 +1023,12 @@ async def list_points(db: DatabaseManager = Depends(get_db)):
         "not_backed_up": backup_points.NOT_BACKED_UP,
         "medium_labels": backup_points.MEDIUM_LABELS,
         "medium_purposes": backup_points.MEDIUM_PURPOSES,
-        # 导出面板据此按后端能力渲染。两种后端都能把业务数据打进包，差别在形态：
-        # SQLite 是 app.db 文件（可合并导入），PG 是 app.pgdump（只能整库覆盖）。
-        "backend": "postgres" if pg_backend else "sqlite",
+        # 导出面板据此渲染。后端只剩 PostgreSQL（ADR 0089）：业务数据成员固定是
+        # app.pgdump，只能整库覆盖恢复。
+        "backend": "postgres",
         "export_app_db_supported": True,
-        "app_db_export_format": "pgdump" if pg_backend else "sqlite",
-        "app_db_restore_mode": "overwrite_only" if pg_backend else "merge_or_overwrite",
+        "app_db_export_format": "pgdump",
+        "app_db_restore_mode": "overwrite_only",
     }
 
 
