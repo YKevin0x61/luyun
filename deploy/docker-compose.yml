@@ -87,8 +87,8 @@ services:
   # 这里**没有**发布端口：只有同一 compose 网络里的容器连得上。要让宿主机上的
   # 进程（裸机 uvicorn）也连它，自行加一行
   #   ports: ["127.0.0.1:6379:6379"]
-  # 「必须单 worker」仍未被解除：日志缓冲、爬虫计数器与那 7 个常驻后台循环都还
-  # 没有外置 / 选主，多开 worker 仍会重复采集、重复推送。
+  # 「必须单 worker」仍未被解除：日志缓冲、爬虫计数器与 lifespan 里那 7 个业务循环
+  # （外加 5 个辅助 task）都还没有外置 / 选主，多开 worker 仍会重复采集、重复推送。
   redis:
     image: redis:7-alpine
     container_name: ${LUYUN_REDIS_CONTAINER:-luyun-redis}

@@ -1131,7 +1131,10 @@ async def start_standards_export(
 
 
 @router.get("/admin/standards-export/jobs/{job_id}")
-async def read_standards_export(job_id: str) -> Dict[str, Any]:
+async def read_standards_export(
+    job_id: str,
+    _session_id: str = Depends(require_session),
+) -> Dict[str, Any]:
     job = _EXPORT_JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
@@ -1146,7 +1149,10 @@ async def read_standards_export(job_id: str) -> Dict[str, Any]:
 
 
 @router.get("/admin/standards-export/jobs/{job_id}/download")
-async def download_standards_export(job_id: str) -> Response:
+async def download_standards_export(
+    job_id: str,
+    _session_id: str = Depends(require_session),
+) -> Response:
     job = _EXPORT_JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="导出任务不存在或已过期")

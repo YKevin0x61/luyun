@@ -373,6 +373,7 @@ _Avoid_: 以部署目录 git tag、或以单独的 `APP_VERSION` 字段作为「
 
 ### 运行实例 (Runtime Instance)
 单机上正在运行的一套本系统部署（单实例、单 uvicorn worker）。版本检测与应用更新的作用对象是运行实例，不是开发机。
+单 worker 是硬约束：lifespan 常驻 task 12 个 = 业务循环 7 个（爬虫采集、企微推送、hygiene overdue/variant/maintenance、日终对账、未映射菜品看门狗）+ 辅助 task 5 个（内存监控、内存清理、磁盘守护、realtime Redis 订阅、日志落库消费者），全部没有分布式选主，多开 worker 会重复采集 / 重复推送。
 仅通过更新环境自检的运行实例才允许应用更新；开发机、脏工作区等非运行实例在界面上不提供应用更新。
 
 ### 版本检测 (Version Check)

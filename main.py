@@ -149,6 +149,74 @@ hygiene_work = None
 # 管理端数据与照片视图（ADR-0087）：只读，与 hygiene_work 一起在 lifespan 里建。
 hygiene_archive = None
 
+# ---------------------------------------------------------------------------
+# 常驻后台 task 的显式清单（PERF-06）
+# ---------------------------------------------------------------------------
+# 「必须单 worker」这条硬约束的论据是"这些循环没有分布式选主"，所以数目必须能被核对，
+# 而不是文档里各写各的。数量 = 本清单里的 7 个业务循环 + 5 个辅助 task，两处都在下面
+# 列明白；`_register_resident_task()` 是唯一入口，启动日志按清单长度输出。
+#
+# 业务循环（**有副作用，多 worker 会重复采集/重复推送**）：
+#   1 卫生逾期调度  2 卫生图片补全  3 卫生图片维护  4 企微推送调度
+#   5 餐厅爬虫      6 日终对账调度  7 未映射菜品巡检
+# 辅助 task（幂等或本身可多实例，但仍是常驻协程）：
+#   8 内存监控  9 内存清理  10 磁盘守护  11 realtime Redis 订阅  12 日志落库消费者
+#
+# 8/9/10/12 由各自的组件在内部创建（`memory_manager.start_background_tasks()`、
+# `disk_guard.start()`、`log_storage.start()`），11 由 `realtime_hub.start_bus()` 起；
+# 它们都登记进 `_resident_tasks` 供计数，句柄由各组件自己管（见
+# `_register_auxiliary_resident_tasks`）。
+BUSINESS_LOOP_TASK_COUNT = 7
+AUXILIARY_RESIDENT_TASK_COUNT = 5
+RESIDENT_TASK_TOTAL = BUSINESS_LOOP_TASK_COUNT + AUXILIARY_RESIDENT_TASK_COUNT
+
+# 本次 lifespan 实际注册的常驻 task，元素是 (label, task)。启动日志按它计数，
+# 关闭按它统一 cancel（辅助 task 除外，见 `_AUXILIARY_TASK_LABELS`）。
+_resident_tasks: "list[tuple[str, asyncio.Task]]" = []
+
+
+def _register_resident_task(label: str, task) -> None:
+    """把常驻 task 登记进显式清单；只做记账，不起 task、不改句柄归属。"""
+    _resident_tasks.append((label, task))
+
+
+def _start_resident_task(label: str, coro):
+    """起一个常驻 task 并登记。返回 task 方便调用方继续持有自己的全局句柄。"""
+    task = asyncio.create_task(coro)
+    _register_resident_task(label, task)
+    return task
+
+
+def _register_auxiliary_resident_tasks() -> None:
+    """把辅助组件内部起的常驻 task 也登记进清单（句柄仍由各组件自己管）。
+
+    这些 task 由 `memory_manager.start_background_tasks()` / `disk_guard.start()` /
+    `log_storage.start()` / `realtime_hub.start_bus()` 在内部 `create_task`，main.py
+    拿不到返回值——但"常驻 task 有几个"必须能被核对（PERF-06），所以按各组件自己的
+    只读访问器记账。
+    """
+    for label, task in (
+        ("内存监控", memory_manager.monitoring_task),
+        ("内存清理", memory_manager.cleanup_task),
+        ("磁盘守护", disk_guard.task),
+        ("realtime Redis 订阅", realtime_hub.bus and realtime_hub.bus.task),
+        ("日志落库消费者", log_storage.consumer_task),
+    ):
+        if task is not None:
+            _register_resident_task(label, task)
+
+
+# 辅助 task 的标签集合：关闭时由各组件自己收尾（要 flush 日志、要断 Redis），
+# `finally` 里的统一循环跳过它们，避免重复 cancel 打断收尾逻辑。
+_AUXILIARY_TASK_LABELS = frozenset({
+    "内存监控",
+    "内存清理",
+    "磁盘守护",
+    "realtime Redis 订阅",
+    "日志落库消费者",
+})
+
+
 def serialize_all(obj):
     if isinstance(obj, dict):
         return {k: serialize_all(v) for k, v in obj.items()}
@@ -181,6 +249,10 @@ async def lifespan(app: FastAPI):
     global recipe_store, employee_accounts, hygiene_work, hygiene_overdue_task
     global hygiene_archive
     global hygiene_variant_task, hygiene_maintenance_task
+
+    # 每次 lifespan 从空清单开始：uvicorn --reload 会重置全局，旧清单里的 task 已随
+    # 上一个进程/上一个 loop 结束，留着只会让计数失真。
+    _resident_tasks.clear()
     
     try:
         logger.info("🚀 启动订单数据采集系统...")
@@ -254,21 +326,23 @@ async def lifespan(app: FastAPI):
             # 常驻后台循环在测试里关掉（见 settings.DISABLE_BACKGROUND_TASKS）
             background_enabled = not getattr(settings, "DISABLE_BACKGROUND_TASKS", False)
             if background_enabled:
-                hygiene_overdue_task = asyncio.create_task(
-                    hygiene_work.overdue_scheduler_loop()
+                hygiene_overdue_task = _start_resident_task(
+                    "卫生逾期调度", hygiene_work.overdue_scheduler_loop()
                 )
                 startup_results.append("卫生逾期调度器")
-                hygiene_variant_task = asyncio.create_task(
-                    hygiene_work.variant_backfill_loop()
+                hygiene_variant_task = _start_resident_task(
+                    "卫生图片补全", hygiene_work.variant_backfill_loop()
                 )
-                hygiene_maintenance_task = asyncio.create_task(
-                    hygiene_work.capture_maintenance_loop()
+                hygiene_maintenance_task = _start_resident_task(
+                    "卫生图片维护", hygiene_work.capture_maintenance_loop()
                 )
                 startup_results.append("卫生图片后台任务")
 
         background_enabled = not getattr(settings, "DISABLE_BACKGROUND_TASKS", False)
         if db_manager and background_enabled:
-            wecom_push_task = asyncio.create_task(wecom_push_service.scheduler_loop(db_manager))
+            wecom_push_task = _start_resident_task(
+                "企微推送调度", wecom_push_service.scheduler_loop(db_manager)
+            )
             startup_results.append("企微推送调度器")
 
         # 启动日志持久化（PostgreSQL logs 表，与业务表同库）
@@ -307,7 +381,7 @@ async def lifespan(app: FastAPI):
                     await restaurant_scraper.reload_runtime_settings(db_manager)
                 except Exception as exc:
                     logger.warning(f"⚠️ 加载运行配置失败，沿用默认值: {exc}")
-            scraper_task = asyncio.create_task(run_restaurant_scraper())
+            scraper_task = _start_resident_task("餐厅爬虫采集", run_restaurant_scraper())
             startup_results.append("餐厅爬虫")
         else:
             logger.warning("⚠️ 餐厅爬虫适配器创建失败")
@@ -325,10 +399,12 @@ async def lifespan(app: FastAPI):
             return restaurant_scraper
 
         if background_enabled:
-            reconcile_scheduler_task = asyncio.create_task(
-                run_reconcile_scheduler(_runtime_db, _runtime_scraper)
+            reconcile_scheduler_task = _start_resident_task(
+                "日终对账调度", run_reconcile_scheduler(_runtime_db, _runtime_scraper)
             )
-            unmapped_watchdog_task = asyncio.create_task(run_unmapped_dish_watchdog(_runtime_db))
+            unmapped_watchdog_task = _start_resident_task(
+                "未映射菜品巡检", run_unmapped_dish_watchdog(_runtime_db)
+            )
             startup_results.append("数据质量调度")
 
         # 备份点：加载保留配置，并在启动时算一次备份健康
@@ -347,6 +423,20 @@ async def lifespan(app: FastAPI):
             migrations_complete=bool(db_manager and db_manager.migrations_complete())
         )
 
+        # 常驻 task 清单收口后再计数：下面的数字必须能被 `_resident_tasks` 逐条核对
+        # （PERF-06）。业务循环由本文件起、辅助 task 由各组件内部起，两类都登记。
+        _register_auxiliary_resident_tasks()
+        _registered = len(_resident_tasks)
+        if _registered:
+            logger.info(
+                "🧵 常驻后台 task：业务循环 %d 个 + 辅助 %d 个 = 实际注册 %d 个"
+                "（清单见 main.py 顶部 RESIDENT_TASK 说明）；"
+                "「必须单 worker」的原因就是它们没有分布式选主",
+                BUSINESS_LOOP_TASK_COUNT,
+                AUXILIARY_RESIDENT_TASK_COUNT,
+                _registered,
+            )
+
         # 统一输出启动结果
         logger.info(f"🎉 系统启动完成 - 已初始化: {', '.join(startup_results)}")
         
@@ -357,50 +447,20 @@ async def lifespan(app: FastAPI):
         raise
     finally:
         set_runtime(None)
-        # 关闭餐厅爬虫任务
-        if scraper_task and not scraper_task.done():
-            scraper_task.cancel()
+        # 常驻 task 统一按 `_resident_tasks` 清单收口（PERF-06）：清单之外的循环没被
+        # 取消的话，进程会留着它们，所以让"清单"与"关闭"是同一份东西。
+        # 只处理**本进程起的**业务循环；辅助 task（内存/磁盘/总线/日志）各自的组件在
+        # 下面有自己的收尾（要 flush 残余日志、要断开 Redis），不在这里抢着 cancel。
+        for label, task in _resident_tasks:
+            if label in _AUXILIARY_TASK_LABELS:
+                continue
+            if task is None or task.done():
+                continue
+            task.cancel()
             try:
-                await scraper_task
+                await task
             except asyncio.CancelledError:
-                logger.info("✅ 餐厅爬虫任务已停止")
-
-        if wecom_push_task and not wecom_push_task.done():
-            wecom_push_task.cancel()
-            try:
-                await wecom_push_task
-            except asyncio.CancelledError:
-                logger.info("✅ 企微推送调度器已停止")
-
-        if hygiene_overdue_task and not hygiene_overdue_task.done():
-            hygiene_overdue_task.cancel()
-            try:
-                await hygiene_overdue_task
-            except asyncio.CancelledError:
-                logger.info("✅ 卫生逾期调度器已停止")
-
-        for task, label in (
-            (hygiene_variant_task, "卫生图片补全任务"),
-            (hygiene_maintenance_task, "卫生图片维护任务"),
-        ):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    logger.info("✅ %s已停止", label)
-
-        for task_name, task in (
-            ("日终对账调度", reconcile_scheduler_task),
-            ("未映射菜品巡检", unmapped_watchdog_task),
-        ):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    logger.info("✅ %s已停止", task_name)
-        
+                logger.info("✅ %s已停止", label)
         # 关闭餐厅爬虫
         if restaurant_scraper:
             try:
@@ -900,7 +960,6 @@ SPA_PAGE_ROUTES = (
     "/admin/",
     "/login",
     "/setup",
-    "/stations-speed",
     "/sales-report",
     "/prep-plan",
     "/wecom-push",
@@ -1256,49 +1315,12 @@ async def get_scraper_status():
         raise HTTPException(status_code=500, detail="获取爬虫状态失败")
 
 
-@app.get("/api/logs/recent")
-async def get_recent_logs(
-    limit: int = 200,
-    after_id: int = 0,
-    level: Optional[str] = None,
-    logger_name: Optional[str] = None,
-    q: Optional[str] = None,
-):
-    """获取近期日志，支持按日志 ID 增量拉取；可选 level/logger/关键词过滤。"""
-    try:
-        safe_limit = max(1, min(limit, 500))
-        safe_after_id = max(0, after_id)
-        if safe_after_id > 0:
-            logs = in_memory_log_handler.after(safe_after_id, safe_limit * 3)
-        else:
-            logs = in_memory_log_handler.recent(safe_limit * 3)
-
-        level_u = (level or "").strip().upper()
-        logger_f = (logger_name or "").strip().lower()
-        q_l = (q or "").strip().lower()
-        if level_u or logger_f or q_l:
-            filtered = []
-            for item in logs:
-                if level_u and (item.get("level") or "").upper() != level_u:
-                    continue
-                if logger_f and logger_f not in (item.get("logger") or "").lower():
-                    continue
-                if q_l and q_l not in (item.get("message") or "").lower():
-                    continue
-                filtered.append(item)
-            logs = filtered[:safe_limit]
-        else:
-            logs = logs[:safe_limit]
-
-        return {
-            "success": True,
-            "items": logs,
-            "latest_id": in_memory_log_handler.latest_id,
-            "count": len(logs),
-        }
-    except Exception as exc:
-        logger.error("获取实时日志失败: %s", exc)
-        raise HTTPException(status_code=500, detail="获取实时日志失败")
+# `/api/logs/recent` 定义在 api/logs.py（router 级 `dependencies=[Depends(verify_admin_token)]`，
+# 见 main.py 上方的 include_router）。这里原来**另有一条同路径的无鉴权 handler**：两条各注册
+# 一次，生效者取决于声明顺序（include_router 在前，所以安全的那条当时胜出）。留着它就是
+# 一个静默降级开关——把这条 `@app.get` 挪到 include_router 之前，同一 URL 立刻匿名可读，
+# 而没有任何测试会红。已删除；契约由 tests/test_logs_recent_route_contract.py 钉住
+# （路径唯一 + 依赖树含 verify_admin_token）。
 
 async def _send_scraper_health_alert(message: str) -> None:
     """经既有企微告警通道推送爬虫健康告警。

@@ -20,6 +20,7 @@ from config import settings
 from database import CHINA_TZ
 from db_core.errors import is_integrity_violation
 from services import password_hash
+from services.business_day import BUSINESS_DAY_CUT_HOUR, business_date_of
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ def normalize_phone(phone: str) -> Optional[str]:
         return None
     return digits
 
-BUSINESS_DAY_CUT_HOUR = 6
+# 切点常量从 services.business_day 导入（上面已 import），这里不再重复定义。
 SHIFT_DAY = "白班"
 SHIFT_NIGHT = "夜班"
 ALLOWED_SHIFTS = frozenset({SHIFT_DAY, SHIFT_NIGHT})
@@ -101,14 +102,12 @@ def serialized_write(method):
 
 
 def hygiene_business_date(now: datetime) -> str:
-    """营业日 YYYY-MM-DD. Cuts at 06:00 China time, same idea as POS."""
-    if now.tzinfo is None:
-        local = now.replace(tzinfo=CHINA_TZ)
-    else:
-        local = now.astimezone(CHINA_TZ)
-    if local.hour < BUSINESS_DAY_CUT_HOUR:
-        local = local - timedelta(days=1)
-    return local.date().isoformat()
+    """营业日 YYYY-MM-DD，06:00 切（与 POS 同一规则）。
+
+    切日规则与实现统一在 `services.business_day`（CORR-05）；这里保留函数名给卫生端
+    调用方，朴素 datetime 按北京时解释、aware 的先转北京时。
+    """
+    return business_date_of(now)
 
 
 def shift_pick_conflict_target() -> str:

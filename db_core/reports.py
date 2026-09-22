@@ -13,6 +13,7 @@ from typing import List, Dict, Optional, Any
 from config import ORDER_LINE_REVENUE_SQL
 
 from db_core.utils import CHINA_TZ, ensure_beijing_datetime
+from services.business_day import BUSINESS_DAY_CUT_HOUR
 
 logger = logging.getLogger(__name__)
 
@@ -26,19 +27,26 @@ class _ReportsMixin:
         end_date: str,
         station: Optional[str] = None
     ) -> Dict:
-        """基于数据库订单计算销售报表（跨表查询）"""
+        """基于数据库订单计算销售报表（跨表查询）。
+
+        两个日期是**营业日**（06:00 切），区间是 ``[start_date 06:00, end_date+1 06:00)``
+        ——与采集/对账/卫生同一口径（CORR-05）。原先按日历日翻成
+        ``[00:00:00, 23:59:59.999]``：门店 06:00 前那段的单属于前一营业日，两种切法在
+        凌晨对不上（生产库当期 06:00 前订单 0 行，所以没有实际数据被算错，属口径隐患）。
+        """
         from services.dish_normalize import normalize_dish_name as normalize
 
-        def to_local_dt(date_str: str, end_of_day: bool = False):
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            if end_of_day:
-                dt = dt.replace(hour=23, minute=59, second=59, microsecond=999000)
-            else:
-                dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        def to_local_dt(date_str: str, end_of_range: bool = False):
+            """营业日 → 北京时时间戳。``end_of_range`` 时取**次日** 06:00（开区间右端）。"""
+            dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                hour=BUSINESS_DAY_CUT_HOUR, minute=0, second=0, microsecond=0
+            )
+            if end_of_range:
+                dt = dt + timedelta(days=1)
             return dt.replace(tzinfo=CHINA_TZ)
 
         start_dt = to_local_dt(start_date)
-        end_dt = to_local_dt(end_date, end_of_day=True)
+        end_dt = to_local_dt(end_date, end_of_range=True)
 
         params: List[Any] = [start_dt.isoformat(), end_dt.isoformat()]
         station_clause = ""
@@ -47,13 +55,14 @@ class _ReportsMixin:
         else:
             station_clause = " AND station != 'loumian'"
 
-        # 1. 菜品销量（查 orders 表）
+        # 1. 菜品销量（查 orders 表）。右端是**开区间**（次日 06:00），与
+        # `business_date_range` 的 [cut, 次日 cut) 语义一致。
         orders_tdb = self.table("orders")
         async with orders_tdb.conn.cursor() as cursor:
             await cursor.execute(
                 f"""SELECT dish_name, station, SUM(quantity) as total_qty,
                            SUM({ORDER_LINE_REVENUE_SQL}) as total_amount, COUNT(*) as order_count
-                    FROM orders WHERE order_time >= ? AND order_time <= ?{station_clause}
+                    FROM orders WHERE order_time >= ? AND order_time < ?{station_clause}
                     GROUP BY dish_name, station ORDER BY total_qty DESC""",
                 params
             )

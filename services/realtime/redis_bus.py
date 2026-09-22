@@ -216,6 +216,11 @@ class RedisBus:
         return bool(self._url)
 
     @property
+    def task(self) -> Optional[asyncio.Task]:
+        """订阅 task（未启动为 None）。只读访问器：`main.py` 用它登记常驻 task 清单。"""
+        return self._task
+
+    @property
     def connected(self) -> bool:
         """当前是否已连接并订阅成功（退避重连期间为 False）。"""
         return self._connected

@@ -37,7 +37,6 @@ ROUTER_JS = REPO_ROOT / "admin-web" / "src" / "router" / "index.js"
 BACKEND_ONLY_PAGE_EXCEPTIONS = {
     "/index.html": "SPA 外壳的静态文件名；同一页面在 vue-router 里叫 '/'，不是独立路由。",
     "/admin/": "尾斜杠变体；vue-router 只注册 '/admin'（strict 默认 false，'/admin/' 照样匹配）。",
-    "/stations-speed": "前端已无该页面，后端是死路由 —— 由 DOC-02（low 批量票）负责删除，本票不动。",
 }
 
 

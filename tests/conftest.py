@@ -220,9 +220,21 @@ def pytest_configure(config):
     from db_core.backend.pg import dsn_from_env
 
     dsn = dsn_from_env() or ""
-    if not dsn.rstrip("/").endswith(TEST_DB_NAME):
+    # 判定落在**解析后的库名**上，不是整串 DSN。`dsn.endswith("luyun_test")` 会把
+    # 库名**以 luyun_test 开头**的派生库（`luyun_test_a`）也拒掉，而报错说"必须指向
+    # 测试库 luyun_test"——DSN 看上去正指向测试库，人只会以为守卫坏了（TEST-04）。
+    # 改成对库名做同一件事，顺序就对了：放行 `luyun_test` 与 `<前缀>_luyun_test`
+    # （并行会话各开一个库的既有用法），仍拒绝真库 `luyun`。
+    # 已知取舍（有意为之）：`luyun_test_<后缀>` 这类**库名前缀**形态仍被拒，因为
+    # "库名以 luyun_test 结尾"这条规则本身排除了它；放行它就得改成子串匹配，那样
+    # `not_luyun_test_backup` 之类的库名也会被放行，反而削弱对真库的保护。
+    if not _TEST_DB_NAME.endswith(TEST_DB_NAME):
         raise RuntimeError(
-            f"测试 DSN 必须指向测试库 {TEST_DB_NAME}，当前是 {dsn!r}——拒绝在真实库上跑测试"
+            f"测试 DSN 必须指向测试库：库名以 {TEST_DB_NAME} 结尾，当前是 {_TEST_DB_NAME!r}"
+            f"（DSN={dsn!r}）——拒绝在真实库上跑测试。"
+            f"可用示例：postgresql://localhost:5432/{TEST_DB_NAME}、"
+            f"postgresql://localhost:5432/impl_{TEST_DB_NAME}、"
+            f"postgresql://localhost:5432/local_{TEST_DB_NAME}"
         )
 
     # 文件类数据（凭据、照片等）落到临时目录，别污染仓库 data/。

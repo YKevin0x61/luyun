@@ -103,9 +103,12 @@ class Settings(BaseSettings):
             "auth": app_db_path,
         }
 
-    # realtime nudge 的跨进程广播总线（Redis pub/sub）。留空 = 不启用：nudge 只在
-    # 本进程内派发——默认部署（compose 里 redis 在 `pg` profile 下，默认不起）就是
-    # 这个形态，也是 Redis 连不上时的降级形态（见 services/realtime/redis_bus.py）。
+    # realtime nudge 的跨进程广播总线（Redis pub/sub），**部署必需组件**（ADR 0090）。
+    # 留空 = 部署不完整：启动期 `_require_startup_config()` 会当场 RuntimeError 并打印
+    # 安装/配置指引，与 `DATABASE_BACKEND` 不是 postgres 时同款硬切——不存在"留空也能
+    # 跑"的形态。**连不上**是另一回事：订阅任务退避重连，本地派发不经过总线，门店
+    # 照常营业（见 services/realtime/redis_bus.py）。
+    # `DISABLE_BACKGROUND_TASKS=true`（测试、一次性脚本）没有常驻循环，跳过这项要求。
     # 环境变量 `LUYUN_REDIS_URL` 优先于本项，写法同 POSTGRES_DSN。
     REDIS_URL: str = ""
 

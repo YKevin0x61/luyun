@@ -205,6 +205,19 @@ class WeComWebhookHelperTest(unittest.TestCase):
         self.assertEqual(resolve_report_dates("today", now), ("2026-05-02", "2026-05-02"))
         self.assertEqual(resolve_report_dates("yesterday", now), ("2026-05-01", "2026-05-01"))
 
+    def test_early_morning_belongs_to_the_previous_business_day(self):
+        """05:00 的「今天」是前一营业日（CORR-05）：采集/对账/卫生都这么切。"""
+        now = datetime(2026, 5, 2, 5, 0, tzinfo=CHINA_TZ)
+        self.assertEqual(resolve_report_dates("today", now), ("2026-05-01", "2026-05-01"))
+        self.assertEqual(resolve_report_dates("yesterday", now), ("2026-04-30", "2026-04-30"))
+
+    def test_cut_hour_boundary(self):
+        """05:59 还是前一营业日，06:00 起算当天。"""
+        before = datetime(2026, 5, 2, 5, 59, tzinfo=CHINA_TZ)
+        after = datetime(2026, 5, 2, 6, 0, tzinfo=CHINA_TZ)
+        self.assertEqual(resolve_report_dates("today", before)[0], "2026-05-01")
+        self.assertEqual(resolve_report_dates("today", after)[0], "2026-05-02")
+
 
 class WeComStorageAndSchedulerTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -259,6 +272,34 @@ class WeComStorageAndSchedulerTest(unittest.IsolatedAsyncioTestCase):
             dispatched = await wecom_push_service.dispatch_due_jobs(self.db, now=now)
 
         self.assertEqual(dispatched, 0)
+        mocked_send.assert_not_called()
+
+    async def test_dispatch_skips_by_business_day_not_calendar_day(self):
+        """`last_sent_date` 是营业日：01:00 那次推送挡住了 05:00 的同一场营业（CORR-05）。
+
+        日历日排重下这两个时刻同属前一天，恰好也挡得住；真正的差别在跨零点：22:00 推过
+        之后，次日 01:00 按日历日是新的一天、按营业日还是同一场营业。
+        """
+        webhook_id = await self.db.wecom_webhook_create({
+            "name": "测试群",
+            "webhook_url_encrypted": encrypt_webhook_url(VALID_WEBHOOK),
+            "webhook_url_masked": mask_webhook_url(VALID_WEBHOOK),
+            "enabled": True,
+            "notes": "",
+        })
+        # 5/2 22:00 推过 → 营业日 2026-05-02；5/3 01:00 仍属该营业日。
+        await self.db.wecom_job_create({
+            "name": "每日报表",
+            "webhook_id": webhook_id,
+            "schedule_time": "01:00",
+            "last_sent_date": "2026-05-02",
+        })
+
+        now = datetime(2026, 5, 3, 1, 0, tzinfo=CHINA_TZ)
+        with patch.object(wecom_push_service, "send_job", new=AsyncMock()) as mocked_send:
+            dispatched = await wecom_push_service.dispatch_due_jobs(self.db, now=now)
+
+        self.assertEqual(dispatched, 0, "同一营业日不该再推一次")
         mocked_send.assert_not_called()
 
     async def test_dispatch_sends_due_job_once(self):

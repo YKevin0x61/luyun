@@ -31,6 +31,7 @@ import asyncio
 import logging
 import subprocess
 import sys
+import weakref
 from typing import Optional
 
 from config import settings
@@ -44,7 +45,26 @@ _BROWSER_MISSING_MARKERS = (
     "looks like playwright was just installed or updated",
 )
 
-_install_lock = asyncio.Lock()
+# 补装浏览器用的进程内串行锁：**每个事件循环一把**，弱引用持有。
+#
+# 不要在模块级 `asyncio.Lock()`：它在**发生竞争**时绑定首个使用它的 loop，之后在别的
+# loop 上一竞争就抛 "is bound to a different event loop"（`services/db_migrations.py`
+# 记录的正是这个形状）。也**不能只做惰性创建**：锁一旦创建就常驻，第二个 loop 上照样
+# 会撞同一句话（实测：两个 `asyncio.run(main())` + 4 路并发，第二次必炸）。
+# 按 loop 分桶才真的等价于"同进程内同一时刻只有一次补装"，同时不携带跨 loop 状态。
+_install_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _get_install_lock() -> asyncio.Lock:
+    """取当前事件循环的补装锁（首次调用时创建）。"""
+    loop = asyncio.get_running_loop()
+    lock = _install_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _install_locks[loop] = lock
+    return lock
 
 
 def is_browser_missing_error(exc: "BaseException | str") -> bool:
@@ -113,7 +133,7 @@ async def ensure_chromium_installed(
     多个任务同时下载同一个浏览器。
     """
     log = log or logger
-    async with _install_lock:
+    async with _get_install_lock():
         python_bin = python_bin or sys.executable
         timeout = timeout_seconds or _timeout()
         cmd = _install_command(python_bin)

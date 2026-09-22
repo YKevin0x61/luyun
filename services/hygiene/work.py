@@ -19,8 +19,8 @@ from typing import Callable, Optional
 
 from database import CHINA_TZ
 from db_core.errors import is_integrity_violation
+from services.business_day import BUSINESS_DAY_CUT_HOUR, to_china_tz
 from services.hygiene.accounts import (
-    BUSINESS_DAY_CUT_HOUR,
     PERMISSION_ADMIN,
     SHIFT_DAY,
     SHIFT_NIGHT,
@@ -144,10 +144,7 @@ def serialized_write(method):
 
 def hygiene_week_start(now: datetime) -> datetime:
     """Monday 06:00 China of the hygiene week containing `now`."""
-    if now.tzinfo is None:
-        local = now.replace(tzinfo=CHINA_TZ)
-    else:
-        local = now.astimezone(CHINA_TZ)
+    local = to_china_tz(now)
     if local.hour < BUSINESS_DAY_CUT_HOUR:
         local = local - timedelta(days=1)
     monday = local.date() - timedelta(days=local.weekday())

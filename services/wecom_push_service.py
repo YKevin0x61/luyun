@@ -16,6 +16,7 @@ import httpx
 from cryptography.fernet import InvalidToken
 
 from database import CHINA_TZ, DatabaseManager
+from services.business_day import business_date_of, previous_business_date
 from services.credentials_store import _fernet
 from services.dish_normalize import normalize_dish_name
 
@@ -85,14 +86,22 @@ def validate_schedule_time(schedule_time: str) -> str:
 
 
 def resolve_report_dates(date_range_mode: str, now: Optional[datetime] = None) -> tuple[str, str]:
+    """把「今天 / 昨天」翻成报表区间端点（两段都是**营业日**）。
+
+    门店的「今天」是 06:00 切日的营业日，与采集 / 对账 / 卫生同一口径（CORR-05）。
+    原先这里按日历日切：`resolve_report_dates("today", 01:00)` 会给出**当天**日期，
+    而采集侧那一刻还在写前一营业日的单 —— 两边对不上。
+
+    返回的是同一个日期两次（`start == end`）：区间端点由调用方翻成时间戳，`db_core.reports`
+    会把它展开成 `[当日 06:00, 次日 06:00)` 的半开区间。保留 ``(start, end)`` 的元组形状是
+    因为既有调用方按两段解包。
+    """
     current_time = now or datetime.now(CHINA_TZ)
+    business_date = business_date_of(current_time)
     mode = (date_range_mode or "today").strip()
     if mode == "yesterday":
-        target_date = current_time.date() - timedelta(days=1)
-    else:
-        target_date = current_time.date()
-    date_text = target_date.isoformat()
-    return date_text, date_text
+        business_date = previous_business_date(business_date)
+    return business_date, business_date
 
 
 def _format_qty(value: Any) -> str:
@@ -412,8 +421,15 @@ class WeComPushService:
         }
 
     async def dispatch_due_jobs(self, db: DatabaseManager, now: Optional[datetime] = None) -> int:
+        """到点就推，但**每个营业日只推一次**。
+
+        `last_sent_date` 存的是**营业日**（06:00 切），不是日历日（CORR-05）：定时任务
+        的 `schedule_time` 可以落在 06:00 之后（正常营业时段），也可以落在 00:00–06:00
+        ——后者按日历日排重会在同一场营业里推两次（跨零点前后各一次）。与
+        `resolve_report_dates` 用同一把尺子，报表内容与排重键才不会错位。
+        """
         current_time = now or datetime.now(CHINA_TZ)
-        current_date = current_time.date().isoformat()
+        current_date = business_date_of(current_time)
         current_minute = current_time.strftime("%H:%M")
         jobs = await db.wecom_jobs_all(include_disabled=False)
         dispatched_count = 0

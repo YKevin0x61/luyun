@@ -284,8 +284,42 @@ function standardMissingOffline(itemId, fallback = null) {
   return Boolean(standardId && !standardPhotoCache.online && standardPhotoCache.isMissing(standardId))
 }
 
+/**
+ * 待办队列的「现在」：**量化到分钟**。
+ *
+ * `workQueue` 依赖 `nowTick`，而 buildWorkQueue 的桶（超时 / 快到期 / 等待）判据是
+ * 分钟级的 deadline —— 秒级抖动只会让 computed 白重算一遍。量化之后每 30s 的定时器
+ * 每分钟最多产生一个新值。
+ */
 function tickClock() {
-  nowTick.value = Date.now()
+  nowTick.value = Math.floor(Date.now() / 60_000) * 60_000
+}
+
+/** 起 30s 时钟；重复调用是 no-op（避免可见性切换时叠出多个定时器）。 */
+function startClock() {
+  if (clockTimer) window.clearInterval(clockTimer)
+  tickClock()
+  clockTimer = window.setInterval(tickClock, 30_000)
+}
+
+/** 停 30s 时钟。页面不可见时不需要它：员工锁屏 / 切走后没人看这些桶。 */
+function stopClock() {
+  if (clockTimer) window.clearInterval(clockTimer)
+  clockTimer = null
+}
+
+/**
+ * 页面可见性门控（台账 §3.9 / §0 第 18 条）。
+ *
+ * 不可见时停掉 30s 时钟，回来时立刻补一次 —— 后台那段时间的 deadline 变化在回来的
+ * 那一刻一次算清，而不是等下一个 30s（员工切回来看见的会是过期半分钟的队列）。
+ */
+function onVisibilityChange() {
+  if (document.hidden) {
+    stopClock()
+    return
+  }
+  startClock()
 }
 
 function onKeydown(event) {
@@ -439,19 +473,20 @@ function scheduleMeRetry() {
 }
 
 onMounted(() => {
-  tickClock()
-  clockTimer = window.setInterval(tickClock, 30_000)
+  startClock()
   window.addEventListener('keydown', onKeydown)
+  document.addEventListener('visibilitychange', onVisibilityChange)
   loadMe()
 })
 
 onBeforeUnmount(() => {
-  if (clockTimer) window.clearInterval(clockTimer)
+  stopClock()
   if (meRetryTimer) window.clearTimeout(meRetryTimer)
   meRetryTimer = null
   if (connectionTimer) window.clearTimeout(connectionTimer)
   connectionTimer = null
   window.removeEventListener('keydown', onKeydown)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   standardPhotoCache.setTaskSheetOpen(false)
   document.body.style.overflow = ''
   clearPreview()

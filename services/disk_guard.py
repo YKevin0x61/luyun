@@ -122,6 +122,11 @@ class DiskGuard:
         self._task: Optional[asyncio.Task] = None
         self._last_levels: Dict[str, str] = {}
 
+    @property
+    def task(self) -> Optional[asyncio.Task]:
+        """常驻巡检 task（未启动为 None）。只读访问器：`main.py` 用它登记常驻 task 清单。"""
+        return self._task
+
     # ── 快照 ─────────────────────────────────
 
     def snapshot(self) -> List[Dict[str, Any]]:

@@ -493,8 +493,8 @@ sudo systemctl enable luyun-update.service   # oneshot，按需 start
 - **单实例、单 worker**：不要给 `uvicorn`/`gunicorn` 配置多进程。库在 PostgreSQL
   服务端，多机可连——SQLite 文件锁那条约束随 SQLite 退场（ADR 0089）——但
   **单 worker 仍然成立**：realtime nudge 已经能跨进程广播（`REDIS_URL`，见 10.1.1），
-  可日志缓冲、爬虫计数器与那 7 个常驻后台循环还没有分布式选主，多开 worker 仍会
-  重复采集 / 重复推送。
+  可日志缓冲、爬虫计数器与 lifespan 里的 7 个业务循环（外加 5 个辅助 task）还没有
+  分布式选主，多开 worker 仍会重复采集 / 重复推送。
 - **两个外部服务都是必需的**：PostgreSQL（ADR 0089）与 Redis（ADR 0090，nudge 跨进程
   广播）。Redis 没配 `REDIS_URL` 时应用**启动即失败**；但 Redis 只是暂时连不上不拦
   启动，订阅任务在后台重连。见 10.1.1。
@@ -534,7 +534,7 @@ PostgreSQL 是唯一后端（ADR 0089）：`DATABASE_BACKEND` 默认 `postgres`�
 | 定时冷备（`deploy/backup.sh`） | ✓ 同一条 `pg_dump` 路径 |
 | Admin「备份导出 / 导入」 | 业务数据是 `app.pgdump` 整库快照；导入走 `pg_restore`，**只能整库覆盖**（无合并） |
 | Redis（nudge 跨进程广播） | **必需**（ADR 0090，见 10.1.1）：没配 `REDIS_URL` 启动即失败；只是暂时连不上会退避重连、不拦启动 |
-| 必须单 worker | **是**——realtime hub 的订阅状态 / 日志缓冲 / 爬虫计数器还在进程内，7 个常驻后台循环也没有分布式选主 |
+| 必须单 worker | **是**——realtime hub 的订阅状态 / 日志缓冲 / 爬虫计数器还在进程内，lifespan 那 12 个常驻 task（7 个业务循环 + 5 个辅助 task）也没有分布式选主 |
 
 > **冷备没有前置条件**：`scripts/cold_backup.py` 不再要求 `data/app.db` 存在，保留
 > 份数也从 PostgreSQL 的 `app_settings` 读取，纯 PG 新装机器可直接跑
@@ -561,8 +561,9 @@ nudge 跨进程广播的通道：`broadcast_nudge()` 在本地派发之后，把
 本地派发不经过总线，门店照常营业。这条区分是刻意的：Redis 抖动不该让采集与企微推送
 停摆，那比"nudge 暂时到不了别的进程"严重得多。
 
-> 换个角度说清楚它现在的定位：nudge 能跨进程 ≠ 可以开多 worker。那 7 个常驻后台
-> 循环还没有分布式选主，`--workers > 1` 仍会重复采集 / 重复推送（见 §9 与 10.1）。
+> 换个角度说清楚它现在的定位：nudge 能跨进程 ≠ 可以开多 worker。lifespan 里的
+> 7 个业务循环 + 5 个辅助 task 还没有分布式选主，`--workers > 1` 仍会重复采集 /
+> 重复推送（见 §9 与 10.1）。
 
 **怎么起**
 

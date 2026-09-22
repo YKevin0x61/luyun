@@ -5,12 +5,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from config import settings
 from database import CHINA_TZ
+from services.business_day import business_date_of
 
 HEALTH_FILENAME = "scraper_health.json"
 
@@ -44,11 +45,8 @@ def merge_health(**updates: Any) -> Dict[str, Any]:
 
 
 def current_biz_date_str() -> str:
-    now = datetime.now(CHINA_TZ)
-    biz_day = now.date()
-    if now.hour < 6:
-        biz_day = biz_day - timedelta(days=1)
-    return biz_day.isoformat()
+    """当前营业日；切日规则与实现统一在 `services.business_day`（CORR-05）。"""
+    return business_date_of(datetime.now(CHINA_TZ))
 
 
 def update_runtime_health(

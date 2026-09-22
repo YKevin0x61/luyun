@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -20,6 +20,7 @@ from scraper.settled_reconcile import (
     sweep_cancelled_delivery_for_biz_date,
     write_reconcile_outputs,
 )
+from services.business_day import business_date_of
 from services.data_quality_alerts import maybe_send_data_quality_alerts
 from services.realtime.hub import realtime_hub
 from services.scraper_health import record_reconcile_summary, update_runtime_health
@@ -85,11 +86,8 @@ async def _set_stage(
 
 
 def default_biz_date() -> str:
-    now = datetime.now(CHINA_TZ)
-    biz_day = now.date()
-    if now.hour < 6:
-        biz_day = biz_day - timedelta(days=1)
-    return biz_day.isoformat()
+    """当前营业日；切日规则与实现统一在 `services.business_day`（CORR-05）。"""
+    return business_date_of(datetime.now(CHINA_TZ))
 
 
 async def execute_reconcile(

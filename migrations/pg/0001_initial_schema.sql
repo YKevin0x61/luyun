@@ -1,5 +1,6 @@
--- PostgreSQL schema generated from the current SQLite schema.
--- Regenerate with scripts/archive/sqlite_to_pg_schema.py (one-off tool).
+-- PostgreSQL schema generated once from the then-current SQLite schema.
+-- The one-off generator script retired with ADR 0089 — do NOT regenerate;
+-- later structure changes are additive scripts only (see migrations/pg/README.md).
 --
 -- luyun:bootstrap-only
 -- 本脚本是 DROP TABLE + CREATE TABLE，会清空目标库，只用于初次建立。

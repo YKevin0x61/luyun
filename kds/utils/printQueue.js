@@ -183,7 +183,6 @@ async function runProcessingLoop() {
   isProcessing = true
 
   try {
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       const job = findNextReadyJob()
       if (job) {

@@ -7,10 +7,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from typing import Dict, Optional
 
 from scraper._common import CHINA_TZ, DATA_DIR
+from services.business_day import business_date_of, previous_business_date
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,29 @@ def _json_default(obj):
 
 
 def previous_biz_date_of(biz_date: str) -> str:
-    year, month, day = (int(part) for part in biz_date.split("-"))
-    return (date(year, month, day) - timedelta(days=1)).isoformat()
+    """前一营业日。切日规则与实现统一在 `services.business_day`（CORR-05）。"""
+    return previous_business_date(biz_date)
+
+
+def _write_json_atomic(path: str, payload: dict) -> None:
+    """先写同目录的 `.tmp` 再 `os.replace()`，与 `release_update/job_state.py` 同款。
+
+    直接 `open(path, "w")` 覆盖写不是原子的：断电 / `kill -9` / 盘满会在原地留下半截
+    JSON。读侧虽然只 warning，但 `is_first_run=True` 会被保留下来，下一轮把所有在座
+    桌台按「新增」重放（CORR-06）。`os.replace` 在同一文件系统内是原子的，读者要么
+    看到旧内容、要么看到新内容。
+
+    临时文件必须与目标**同目录**（跨设备 rename 不原子），名字固定成 `<name>.tmp`：
+    同一进程内状态保存是串行的，不需要唯一后缀；固定名字还能让"有没有残留"一眼可见。
+    """
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, default=_json_default)
+        # 先把内容刷到盘再 rename：否则断电后可能留下一个"已改名但内容为空"的文件，
+        # 那正是这套改动要消除的形态。
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
 
 
 class ScraperStateStore:
@@ -49,16 +71,17 @@ class ScraperStateStore:
         self.collected_delivery_bills: set = set()
         self.last_prev_day_cancel_sweep_biz_date: str = ""
 
+        # 「首次运行」只在**加载成功且文件里就是这么写**时为真（或根本没有状态文件）。
+        # 状态文件存在但读不出来（截断 / 权限 / 盘错）是「状态丢了」，不是「第一次跑」：
+        # 把它当成首次运行会让下一轮把在座桌台全部按新增重放。见 load_table_state。
+        self._state_file_unreadable = False
+
         self.load_table_state()
         self.collected_delivery_bills = self.load_delivery_bills()
 
     def current_biz_date(self) -> str:
-        now = datetime.now(CHINA_TZ)
-        if now.hour < 6:
-            d = now.date() - timedelta(days=1)
-        else:
-            d = now.date()
-        return d.isoformat()
+        """当前营业日（06:00 前算前一天）。规则见 `services.business_day`。"""
+        return business_date_of(datetime.now(CHINA_TZ))
 
     def previous_biz_date(self) -> str:
         return previous_biz_date_of(self.current_biz_date())
@@ -66,6 +89,7 @@ class ScraperStateStore:
     def load_table_state(self) -> None:
         biz_date = self.current_biz_date()
         if not os.path.exists(self._table_state_file):
+            # 真的没有状态文件：确实是首次运行，is_first_run 保持 True。
             return
         try:
             with open(self._table_state_file, "r", encoding="utf-8") as f:
@@ -87,7 +111,14 @@ class ScraperStateStore:
                 f"is_first_run={self.is_first_run}"
             )
         except Exception as e:
-            self.logger.warning(f"⚠️  加载餐桌状态失败: {e}")
+            # 文件在、但读不出来（截断 / 权限 / 盘错）：**这不是首次运行**，而是状态丢了。
+            # 保持 is_first_run=False 让 table_change_detector 走"有变化才报"的保守分支，
+            # 而不是把在座桌台全部当新增重放一遍。
+            self._state_file_unreadable = True
+            self.is_first_run = False
+            self.logger.error(
+                f"❌ 加载餐桌状态失败（按状态丢失处理，不重放全量）: {e}"
+            )
 
     def save_table_state(self) -> None:
         try:
@@ -95,10 +126,10 @@ class ScraperStateStore:
                 "biz_date": self.current_biz_date(),
                 "table_states": self.previous_tables_state,
                 "table_orders": self.previous_table_orders,
-                "is_first_run": self.is_first_run,
+                # 读不出来过就别把"首次运行"写进文件：这个标志是给下一轮的重放判据用的。
+                "is_first_run": False if self._state_file_unreadable else self.is_first_run,
             }
-            with open(self._table_state_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, default=_json_default)
+            _write_json_atomic(self._table_state_file, data)
         except Exception as e:
             self.logger.warning(f"⚠️  保存餐桌状态失败: {e}")
 
@@ -144,7 +175,6 @@ class ScraperStateStore:
                     self.last_prev_day_cancel_sweep_biz_date or ""
                 ),
             }
-            with open(self._delivery_bills_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, default=_json_default)
+            _write_json_atomic(self._delivery_bills_file, data)
         except Exception as e:
             self.logger.warning(f"⚠️  保存外卖账单记录失败: {e}")

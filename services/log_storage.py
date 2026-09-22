@@ -105,6 +105,11 @@ class LogStorage:
         self._started: bool = False
         self._next_reconnect_at: float = 0.0
 
+    @property
+    def consumer_task(self) -> Optional[asyncio.Task]:
+        """落库消费者 task（未启动为 None）。只读访问器：`main.py` 用它登记常驻 task 清单。"""
+        return self._consumer_task
+
     # ── 生命周期 ─────────────────────────────────
 
     async def start(self) -> bool:

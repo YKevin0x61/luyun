@@ -133,6 +133,35 @@ def _ensure_not_redacted(table_name: str, column: str) -> None:
         raise HTTPException(status_code=403, detail=f"字段 {column} 已隐藏")
 
 
+# ==================== 写路径日志的脱敏 ====================
+# 读路径按 `_ADMIN_REDACTED_COLUMNS` 把值换成"已隐藏"，写路径原来把**全部原值**打进
+# WARNING（SEC-06）。两个入口对同一份数据的可见性必须一致：日志落 `logs` 表，可经
+# `/api/logs/*` 读、并随备份/导出离开机器。三张含脱敏列的表当前都被
+# `_reject_read_only_table_write` 挡在写路径外（所以没有真的漏出去过），但这条日志
+# 不该依赖那个巧合。
+_REDACTED_PLACEHOLDER = "已隐藏"
+
+
+def _redacted_values_for_log(table_name: str, values: dict) -> dict:
+    """按读路径同一份清单替换脱敏列的值；其余字段原样保留。"""
+    redacted = _ADMIN_REDACTED_COLUMNS.get(table_name, frozenset())
+    if not redacted:
+        return dict(values)
+    return {
+        column: (_REDACTED_PLACEHOLDER if column.lower() in redacted else value)
+        for column, value in values.items()
+    }
+
+
+def _update_log_line(table_name: str, row_id, values: dict) -> str:
+    """`[UPDATE]` 那条 WARNING 的正文（抽出来是为了能被单测直接断言）。"""
+    logged = _redacted_values_for_log(table_name, values)
+    return (
+        f"[UPDATE] {table_name} rowid={row_id} "
+        f"cols={list(values.keys())} values={list(logged.values())}"
+    )
+
+
 # ==================== Pydantic 模型 ====================
 
 class ColumnAdd(BaseModel):
@@ -323,7 +352,7 @@ async def get_table_rows(
     search_field: Optional[str] = None,
     search_value: Optional[str] = None,
     sort_field: Optional[str] = None,
-    sort_dir: str = Query("asc", regex="^(asc|desc)$"),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
     db=Depends(get_db),
 ):
     """分页获取表数据"""
@@ -459,7 +488,8 @@ async def update_row(table_name: str, row_id: int, row: RowUpdate, db=Depends(ge
 
         set_clause = ", ".join([f"{c} = ?" for c in cols])
         values = [row.values[c] for c in cols] + [row_id]
-        logger.warning(f"[UPDATE] {table_name} rowid={row_id} cols={cols} values={[row.values[c] for c in cols]}")
+        # 只记**脱敏后**的值：与读路径共用 `_ADMIN_REDACTED_COLUMNS`（SEC-06）。
+        logger.warning(_update_log_line(table_name, row_id, {c: row.values[c] for c in cols}))
 
         conn = _table_conn(db, table_name)
         async with conn.cursor() as cursor:
