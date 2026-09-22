@@ -11,7 +11,19 @@ pandas>=2.0.0
 openpyxl>=3.1.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
-python-multipart==0.0.6
+# 0.0.6 命中 CVE-2024-24762：解析 multipart 的 Content-Type 时正则灾难性回溯，
+# 占住主事件循环（本项目强制单 uvicorn worker = 整站停摆），0.0.7 修复。
+# 下界 0.0.31 是 python-multipart 全部 9 条已知安全公告里最高的一档修复落点：
+# 0.0.18（CVE-2024-53981，preamble/epilogue 逐字节刷日志）、0.0.22（CVE-2026-24486，
+# 路径穿越）、0.0.26（CVE-2026-40347，preamble/epilogue DoS）、0.0.27（CVE-2026-42561，
+# part header 数量/长度无上限 DoS）、0.0.30（CVE-2026-53537/53538/53539，header 解析
+# 差异与 urlencoded 分隔符二次扫描）、0.0.31（CVE-2026-53540，负数 Content-Length 让
+# 分块读退化成读到底）。依据 GitHub Advisory DB / Debian security tracker（核于
+# 2026-09）：0.0.31 之后只有性能改进、没有新公告。
+# 不能只写 0.0.18：pip 默认 only-if-needed，已经停在 0.0.18~0.0.30 的环境不会因为
+# 约束放宽就自动再升，下界必须直接落在覆盖全部修复的那一档。
+# 上界 <1：0.1 起 API 可能不兼容，而 0.0.x 的补丁版仍能自动跟进。
+python-multipart>=0.0.31,<1
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt>=4.0.1,<5

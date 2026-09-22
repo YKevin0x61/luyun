@@ -27,15 +27,37 @@
 your-domain.example.com {
 	encode gzip zstd
 
-	# 说明：Caddy 默认不限制请求体大小，备份恢复（/api/backup/import/*）上传
-	# 几十~几百 MB 的 .luyunbak 不会被 Caddy 挡回 413。若你此前显式配置过
-	# `request_body { max_size ... }`，请确保其值 ≥ 最大备份体积（否则会 413）。
+	# ── 请求体体积上限（纵深防御，对齐应用侧闸门）──
+	# 应用侧的单文件闸门是 MAX_UPLOAD_BYTES = 20MiB
+	# （api/hygiene.py:59 ← services/hygiene/work.py:59 的 MAX_STANDARD_BYTES），
+	# 而 /api/hygiene/staff/deep-clean/{item_id}/submit 一次要传 before + after
+	# 两张（各 20MiB），所以业务接口统一取 64MiB：够 2×20MiB 与 multipart 包装
+	# 余量，又不至于把一个无上限的请求体交给 multipart 解析器（解析发生在应用侧
+	# 的体积闸门之前）。
+	# 备份恢复（/api/backup/import/*）传的是整包 .luyunbak（整库 pg_dump + 凭据
+	# + 配方 + 两类卫生照片，几十~几百 MB），单独放宽到 512MiB，对齐
+	# deploy/nginx.conf:53 的 `client_max_body_size 512m`。
+	# Caddy 的 handle 块按声明顺序匹配、第一个命中的生效，所以大体积那条必须
+	# 排在 @api 之前。若你此前显式配置过更小的 `request_body { max_size ... }`，
+	# 请确保其值 ≥ 最大备份体积（否则会 413）。
 	# 另注意：若域名走了 Cloudflare 等 CDN，上传还受 CDN 自身上限约束
 	# （Cloudflare 免费/Pro 版单请求约 100MB），需在 CDN 侧另行放宽。
+
+	# ── 大体积上传：备份恢复整包导入（必须先于 @api 匹配）──
+	@backup_import path /api/backup/import/*
+	handle @backup_import {
+		request_body {
+			max_size 512MiB
+		}
+		reverse_proxy 127.0.0.1:8000
+	}
 
 	# ── REST API ──
 	@api path /api/*
 	handle @api {
+		request_body {
+			max_size 64MiB
+		}
 		reverse_proxy 127.0.0.1:8000
 	}
 
