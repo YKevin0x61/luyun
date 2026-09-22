@@ -1045,36 +1045,49 @@ class PosSession:
         """Backward-compatible alias for resolve_point_id."""
         return self.resolve_point_id(table_number)
 
-    async def fetch_table_orders(self, table_number: str, point_id: str) -> List[Dict]:
-        """Public: pull one table's dish detail and expand to intake order rows."""
+    async def fetch_table_orders(
+        self, table_number: str, point_id: str
+    ) -> Optional[List[Dict]]:
+        """Public: pull one table's dish detail and expand to intake order rows.
+
+        返回值语义（调用方按此区分「取材失败」与「这桌真的没有菜」）：
+        - ``None``：明细没拿到——缺 pointId / HTTP 非 200 / 响应非 JSON /
+          ``success=false`` / 解析抛异常。以前这些分支一律返回 ``[]``，与下面那种
+          「真的没有菜」同形，调用方会把空列表读成「菜品全被退了」并整桌软删。
+        - ``[]``：接口正常回答，但这一桌当前没有任何明细行。
+        """
         try:
             if not point_id:
                 self.logger.error("❌ 餐桌 %s 缺少 pointId，跳过点菜明细", table_number)
-                return []
+                return None
 
             status, data = await self._bs_detail_api_request_raw(point_id)
             if status != 200:
                 self.logger.error(f"❌ 获取餐桌{table_number}订单失败，状态码: {status}")
-                return []
+                return None
             if not isinstance(data, dict):
                 self.logger.error(f"❌ 获取餐桌{table_number}订单失败，响应非 JSON")
-                return []
+                return None
 
             if not data.get("success", False):
                 self.logger.error(f"❌ API业务逻辑错误: {data.get('errorMsg', '未知错误')}")
-                return []
+                return None
 
             return await self._parse_api_order_response(data, table_number)
 
         except Exception as e:
             self.logger.error(f"❌ 获取餐桌{table_number}订单出错: {e}")
-            return []
+            return None
 
-    async def _get_table_orders(self, table_number: str, point_id: str) -> List[Dict]:
+    async def _get_table_orders(
+        self, table_number: str, point_id: str
+    ) -> Optional[List[Dict]]:
         """Backward-compatible alias for fetch_table_orders."""
         return await self.fetch_table_orders(table_number, point_id)
 
-    async def _parse_api_order_response(self, data: Dict, table_number: str) -> List[Dict]:
+    async def _parse_api_order_response(
+        self, data: Dict, table_number: str
+    ) -> Optional[List[Dict]]:
         """解析桌情 API → RawOrderLine → OrderLineBuilder 入库行。"""
         from scraper.order_line_builder import (
             FLOW_MODE_COMBO,
@@ -1183,5 +1196,6 @@ class PosSession:
 
             return await self.order_lines.expand_many(raws)
         except Exception as e:
+            # 解析期异常同样是「没拿到明细」，不能返回空列表冒充「这桌没菜」
             self.logger.error(f"❌ 解析API响应失败: {e}")
-            return []
+            return None
