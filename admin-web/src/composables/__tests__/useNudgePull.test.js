@@ -177,6 +177,22 @@ describe('useNudgePull', () => {
     expect(pull).toHaveBeenCalled()
   })
 
+  it('pulls once when the connection recovers inside the grace window', () => {
+    const pull = vi.fn()
+    useNudgePull({ id: 't9', topics: ['dashboard'], pull })
+    flushMount()
+
+    // 短断连：grace 未到，兜底轮询从未启动，断连期间的 nudge 全部丢失
+    connected.value = false
+    watchCallback?.(false)
+    vi.advanceTimersByTime(4000)
+    expect(pull).not.toHaveBeenCalled()
+
+    connected.value = true
+    watchCallback?.(true)
+    expect(pull).toHaveBeenCalledTimes(1)
+  })
+
   it('connection fallback pulls on interval without needing coalesce flush', () => {
     const pull = vi.fn()
     useNudgePull({ id: 't8', topics: ['orders'], pull })
