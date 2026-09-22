@@ -12,7 +12,7 @@
 | [UPGRADE_TO_0_6_0.md](./UPGRADE_TO_0_6_0.md) | **升级到 0.6.0 操作方案（历史）**（Docker/systemd、切 PG、回滚、排查；0.6.x 后 SQLite 已退场，只保留迁移路径供参考） |
 | [release-asset-layout.md](./release-asset-layout.md) | GitHub Release 发行包附件契约（`luyun-release-bundle.tar.gz` / `SHA256SUMS` / `install.sh`；旧的分拆前端 tar.gz 已退役） |
 | [MULTI_STORE_PLAN.md](./MULTI_STORE_PLAN.md) | **多店 / 多人 / 三方接入改造方案**（规划中，含性能地基实测与迁移路径） |
-| [adr/](./adr/) | 架构决策记录（编号 0001–0089；数据库后端现状见 [ADR 0089](./adr/0089-retire-sqlite-postgres-only.md)）；仓库布局规则见 [ADR 0012](./adr/0012-repo-layout.md) |
+| [adr/](./adr/) | 架构决策记录（编号 0001–0090；数据库后端现状见 [ADR 0089](./adr/0089-retire-sqlite-postgres-only.md)，Redis 只做 nudge 跨进程广播见 [ADR 0090](./adr/0090-redis-nudge-bus.md)）；仓库布局规则见 [ADR 0012](./adr/0012-repo-layout.md) |
 | [agents/](./agents/) | agent 工作流：issue tracker / triage 标签 / domain 文档 |
 | [superpowers/](./superpowers/) | 历史实施计划（`plans/`）与设计稿（`specs/`），按日期命名，只读不改 |
 | [archive/](./archive/) | 一次性报告目录（勿提交真实营业数据；见 [archive/README.md](./archive/README.md)） |

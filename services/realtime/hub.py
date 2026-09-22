@@ -5,6 +5,15 @@
 只做"有变"通知（nudge：`{type, topic, scope}`，不带数据），不做 delta / 全局
 seq / 跳号重订阅 / snapshot 缓存——客户端收到 nudge 后自行复用现有 HTTP API
 拉取最新数据。
+
+订阅状态还是进程内的，但 nudge 的**跨进程传播**交给了
+`services.realtime.redis_bus.RedisBus`：配了 `REDIS_URL` 时 `broadcast_nudge()`
+会先把 nudge 发一份到 Redis 频道，别的进程收到后只做本地派发（不再转发，否则
+消息会在实例间来回弹）。未配置或 Redis 不可用时总线整体退化成 no-op，本模块的
+行为与纯进程内派发逐字一致。
+
+**单 worker 约束仍未解除**：nudge 能跨进程了，但那 7 个常驻后台循环还没有分布式
+选主，开 `--workers > 1` 仍会重复采集 / 重复推送（见 deploy/README.md）。
 """
 
 import asyncio
@@ -12,6 +21,8 @@ import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+from services.realtime.redis_bus import RedisBus
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +96,44 @@ def _scope_matches_filters(scope: dict, filters: dict) -> bool:
 
 
 class RealtimeHub:
-    """管理所有 WS 连接的订阅状态，并把 nudge 精确推给匹配的订阅方。"""
+    """管理所有 WS 连接的订阅状态，并把 nudge 精确推给匹配的订阅方。
 
-    def __init__(self, dashboard_debounce_seconds: float = DASHBOARD_DEBOUNCE_SECONDS):
+    `bus`（Redis 跨进程总线）可以注入：不注入时由 `start_bus()` 按配置建一个；
+    没调用 `start_bus()` 就一直为 None，此时行为与没有 Redis 的版本一致。
+    """
+
+    def __init__(
+        self,
+        dashboard_debounce_seconds: float = DASHBOARD_DEBOUNCE_SECONDS,
+        bus: Optional[RedisBus] = None,
+    ):
         self._connections: dict = {}
         self._dashboard_debounce_seconds = dashboard_debounce_seconds
         self._dashboard_debounce_task: Optional[asyncio.Task] = None
+        self._bus = bus
+
+    @property
+    def bus(self) -> Optional[RedisBus]:
+        """跨进程 nudge 总线；未配置 / 未启动时为 None。"""
+        return self._bus
+
+    async def start_bus(self) -> None:
+        """启动跨进程 nudge 总线（Redis pub/sub）。
+
+        `REDIS_URL` 未配置或 Redis 不可用时整体退化为 no-op：只记日志，不影响
+        启动，也不影响本地派发。
+        """
+        if self._bus is None:
+            self._bus = RedisBus(handler=self._dispatch_from_bus)
+        else:
+            self._bus.subscribe(self._dispatch_from_bus)
+        await self._bus.start()
+
+    async def stop_bus(self) -> None:
+        """停止跨进程 nudge 总线；未启动 / 未配置时是 no-op。"""
+        if self._bus is None:
+            return
+        await self._bus.stop()
 
     async def register(self, websocket, auth: str) -> ConnectionState:
         """加入连接集合（不 accept，accept 由端点在调用本方法前完成一次）。"""
@@ -164,8 +207,28 @@ class RealtimeHub:
         await self._send(websocket, {"type": "subscribed", "id": sub_id})
 
     async def broadcast_nudge(self, topic: str, scope: Optional[dict] = None) -> None:
-        """向订阅了 `topic` 且过滤匹配的连接推 `{type:nudge, topic, scope}`；
-        推送失败的死连接会被清理，不影响其它连接。"""
+        """本地派发 + 跨进程广播。
+
+        本地派发永远先做（总线坏掉也不影响本进程的订阅者）；Redis 只是把同一个
+        nudge 捎给别的 worker 上的订阅者。
+        """
+        scope = scope or {}
+        await self._dispatch_local(topic, scope)
+        bus = self._bus
+        if bus is not None:
+            await bus.publish(topic, scope)
+
+    async def _dispatch_from_bus(self, topic: str, scope: Optional[dict] = None) -> None:
+        """收到**别的进程**发来的 nudge：只做本地派发。
+
+        这里刻意不再 publish——转发会让同一条消息在实例间来回弹。
+        """
+        await self._dispatch_local(topic, scope)
+
+    async def _dispatch_local(self, topic: str, scope: Optional[dict] = None) -> None:
+        """向订阅了 `topic` 且过滤匹配的**本进程**连接推
+        `{type:nudge, topic, scope}`；推送失败的死连接会被清理，不影响其它连接。
+        """
         scope = scope or {}
         message = {"type": "nudge", "topic": topic, "scope": scope}
         dead = []
@@ -194,7 +257,10 @@ class RealtimeHub:
     async def _debounced_dashboard_nudge(self) -> None:
         await asyncio.sleep(self._dashboard_debounce_seconds)
         self._dashboard_debounce_task = None
-        await self.broadcast_nudge("dashboard")
+        # debounce 是**本地时钟**上的合并：产物只在本地派发。若在这里回 publish，
+        # 每个实例都会把自己合并出来的 dashboard 再广播一遍，别的实例就收到重复
+        # 的 dashboard nudge（它们的 debounce 定时器本来也会各自触发一次）。
+        await self._dispatch_local("dashboard")
 
 
 realtime_hub = RealtimeHub()

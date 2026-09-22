@@ -135,14 +135,12 @@ PG。观察期结束前不要删源库。
 手工路径（宿主机冷备、页面不可用时）见
 [`deploy/README.md` 第 10.4 节](../../deploy/README.md)。
 
-**别把两条链路混起来**：上面的 `.luyunbak` 是整库快照（覆盖恢复）；管理后台的
-「导出 DB」（`/api/admin/export/db`，产出 `.db` 文件）则是另一条逐表业务数据导出
-——由 `PgConnection.backup` 按表重建（列定义 + 数据，分批读取），导出的 `.db` 可以经
-「导入 DB」逐表合并回去。代价是这条链路按 `TABLE_DEDUP_KEY` 去重（`orders` 按
-`business_flow_id`），同一订单的多行菜品只进第一行。
-
-> 这条 `.db` 导出/导入链路（连同 `db_core/backend/sqlite_export.py`）是 SQLite 时代的
-> 残留，仍在待退役清单上；新部署不要把它当成备份方案，用 `.luyunbak` / 冷备。
+**遗留的「导出 DB / 导入 DB」已收口**：管理后台的 `/api/admin/export/db` 现在打的
+也是整库 `pg_dump`（下载名 `luyun-export-<时间戳>.pgdump`，与 `.luyunbak`、更新前
+备份、`deploy/backup.sh` 是同一条路径），不再产出 SQLite 时代的 `.db` 逐表导出——
+`PgConnection.backup`、`TABLE_DEDUP_KEY` 与 `db_core/backend/sqlite_export.py` 都随
+SQLite 一起退场（ADR 0089）。`/api/admin/import/{preview,execute}` 固定返回 400 +
+指引，因为逐表合并导入没有对应物：**恢复只剩 `.luyunbak` 整库覆盖这一条路**。
 
 **配方数据取自当前连接**（PG 里的 `sop_*`），不是 `data/app.db` 那份迁移遗留副本。
 两者在切换后就会分叉——源库按上面的流程只读保留，配方却继续在 PG 里改——把遗留

@@ -76,8 +76,14 @@ services:
       timeout: 5s
       retries: 10
 
-  # Redis：解除「必须单 worker」的前提（realtime hub / 日志缓冲 / 爬虫计数器
-  # 外置）。当前代码尚未接入，这个服务为切换预留——先起容器不改变任何行为。
+  # Redis：realtime nudge 的跨进程广播已接入（services/realtime/redis_bus.py；
+  # 应用侧配 REDIS_URL，见 deploy/README.md 10.1.1）。不配 URL 时它是惰性组件
+  # ——先起容器不改变任何行为，配上 URL 才生效。
+  # 这里**没有**发布端口：只有同一 compose 网络里的容器连得上，URL 用服务名
+  # `redis://redis:6379/0`。要让宿主机上的进程也连它，自行加一行
+  #   ports: ["127.0.0.1:6379:6379"]
+  # 「必须单 worker」仍未解除：日志缓冲、爬虫计数器与那 7 个常驻后台循环都还
+  # 没有外置 / 选主，多开 worker 仍会重复采集、重复推送。
   redis:
     image: redis:7-alpine
     profiles: ["pg"]

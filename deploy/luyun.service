@@ -1,13 +1,16 @@
 # systemd 单元：单机单进程运行 FastAPI 应用（main:app），单 uvicorn worker。
 #
 # 为什么必须单 worker（禁止 --workers > 1 或多进程）：
-#   - 实时推送依赖进程内内存态的 hub（services/realtime/hub.py），WebSocket
-#     连接与订阅关系保存在单个 Python 进程里，多 worker 会导致订阅者分散在
-#     不同进程、互相收不到 nudge。
+#   - 7 个常驻后台循环（爬虫采集、企微推送、hygiene overdue/variant/maintenance、
+#     日终对账、未映射菜看门狗）在 lifespan 里各自起一个 asyncio task，**没有分布式
+#     选主**：多 worker 会重复采集、重复推送。realtime nudge 已经能经 Redis 跨进程
+#     广播（REDIS_URL，见 deploy/README.md 10.1.1），但"nudge 能跨进程到达"不等于
+#     "采集/推送只执行一次"，两件事要分开看。
 #   - 近期日志缓冲区（main.py 的 InMemoryLogHandler）、爬虫失败计数
-#     （services/scraper_failure_tracker.py）等状态同理，都是单进程内存态。
+#     （services/scraper_failure_tracker.py）等状态仍是单进程内存态。
 #   - 爬虫任务（scraper/adapter.py）在 lifespan 里作为后台 asyncio task 启动，
-#     若有多个 worker 进程会重复采集、产生重复订单数据。
+#     若有多个 worker 进程会重复采集、产生重复订单数据；此外
+#     scraper/state_store.py 的表/配送状态文件是文件级共享，多进程会互相覆盖。
 #
 # 安装步骤（下面出现的 /opt/luyun 均为占位路径，请替换为实际部署目录；
 # 该目录应与本仓库根目录一致，即 main.py 所在目录）：

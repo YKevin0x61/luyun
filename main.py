@@ -257,6 +257,17 @@ async def lifespan(app: FastAPI):
         if background_enabled:
             disk_guard.start()
             startup_results.append("磁盘守护")
+
+        # 启动 realtime 跨进程 nudge 总线（Redis pub/sub）：REDIS_URL 未配置或
+        # Redis 不可用时自动降级为进程内广播（见 services/realtime/redis_bus.py），
+        # 绝不影响启动。订阅任务和那些常驻循环一样受 DISABLE_BACKGROUND_TASKS 管
+        # ——测试不该去连 Redis。
+        if background_enabled:
+            await realtime_hub.start_bus()
+            if realtime_hub.bus is not None and realtime_hub.bus.enabled:
+                startup_results.append("realtime 总线")
+        else:
+            logger.info("⏭️ 已跳过 realtime 总线（DISABLE_BACKGROUND_TASKS=true），nudge 仅进程内派发")
         
         # 创建餐厅爬虫适配器（测试里关掉：后台循环会在共享测试库上长期驻留）
         if background_enabled:
@@ -389,6 +400,15 @@ async def lifespan(app: FastAPI):
         # 停止磁盘守护
         await disk_guard.stop()
         logger.info("✅ 磁盘守护已停止")
+
+        # 停止 realtime 跨进程总线（未配置 / 未启动时是 no-op；Redis 抖动不得
+        # 影响关闭流程）
+        try:
+            await realtime_hub.stop_bus()
+            if realtime_hub.bus is not None and realtime_hub.bus.enabled:
+                logger.info("✅ realtime 总线已停止")
+        except Exception as e:
+            logger.error(f"❌ 关闭 realtime 总线失败: {e}")
 
         # 停止日志持久化（flush 残余 + 关闭连接）
         try:

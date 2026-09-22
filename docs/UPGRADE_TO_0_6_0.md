@@ -234,8 +234,9 @@ systemctl start luyun
 
 ## 8. 已知限制
 
-1. **PG 后端仍是单 worker**。Redis 容器已备（compose `pg` profile）但代码未接入，
-   realtime hub / 日志缓冲 / 爬虫计数器还在进程内存里。
+1. **PG 后端仍是单 worker**。Redis 容器已备（compose `pg` profile）；0.7.0 起 realtime
+   nudge 已经它跨进程广播（`REDIS_URL`，见 `deploy/README.md` 10.1.1），但日志缓冲 /
+   爬虫计数器仍在进程内存里，7 个常驻后台循环也还没有分布式选主。
 2. **Admin 备份导出/导入在 PG 下的业务数据是整库快照**。0.6.0 当时整块报错，之后先
    收敛为「导出照常可用、业务数据置灰」，v0.6.11 起改为打包 `app.pgdump`
    整库快照（恢复即整库覆盖，不支持合并导入）。更新前备份与定时冷备从一开始就支持。

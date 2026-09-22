@@ -460,8 +460,9 @@ sudo systemctl enable luyun-update.service   # oneshot，按需 start
 
 - **单实例、单 worker**：不要给 `uvicorn`/`gunicorn` 配置多进程。库在 PostgreSQL
   服务端，多机可连——SQLite 文件锁那条约束随 SQLite 退场（ADR 0089）——但
-  **单 worker 仍然成立**：realtime hub、日志缓冲、爬虫计数器还在进程内存里，
-  除非先把它们外置到 Redis（尚未接入）。
+  **单 worker 仍然成立**：realtime nudge 已经能跨进程广播（`REDIS_URL`，见 10.1.1），
+  可日志缓冲、爬虫计数器与那 7 个常驻后台循环还没有分布式选主，多开 worker 仍会
+  重复采集 / 重复推送。
 - **Docker 仅可作进程外壳**：见「Docker 部署」；**不要**把 `docker pull`
   镜像当作本产品的店内交付真相。
   裸机/VM 上用 systemd + venv 仍是默认路径。
@@ -493,17 +494,75 @@ PostgreSQL 是唯一后端（ADR 0089）：`DATABASE_BACKEND` 默认 `postgres`�
 | 更新前强制备份（`backing_up`） | ✓ `pg_dump` → `app.pgdump` |
 | 定时冷备（`deploy/backup.sh`） | ✓ 同一条 `pg_dump` 路径 |
 | Admin「备份导出 / 导入」 | 业务数据是 `app.pgdump` 整库快照；导入走 `pg_restore`，**只能整库覆盖**（无合并） |
-| 必须单 worker | **是**——realtime hub / 日志缓冲 / 爬虫计数器还在进程内 |
+| 必须单 worker | **是**——realtime hub 的订阅状态 / 日志缓冲 / 爬虫计数器还在进程内，7 个常驻后台循环也没有分布式选主 |
 
 > **冷备没有前置条件**：`scripts/cold_backup.py` 不再要求 `data/app.db` 存在，保留
 > 份数也从 PostgreSQL 的 `app_settings` 读取，纯 PG 新装机器可直接跑
 > `deploy/backup.sh`。
 >
-> `api/admin.py` 里的 `.db` 导出 / 导入与表结构管理目前仍在（依赖
-> `db_core/backend/sqlite_export.py`），是待退役的残留路径。
+> Admin 侧的遗留路径已经收口：`/api/admin/export/db` 现在打的也是整库
+> `pg_dump`（文件名 `luyun-export-*.pgdump`），`.db` 逐表导出 /
+> `PgConnection.backup` 已随 SQLite 退场；`/api/admin/import/{preview,execute}`
+> 固定返回 400 + 指引（改用「备份中心 → 导入备份」的 `.luyunbak`）。
+> 仍保留的是表结构管理（`POST`/`DELETE /api/admin/tables/{table}/columns`），
+> 走 `information_schema` + PG `ALTER TABLE`，与 SQLite 无关。
 
-Redis 容器仍在 `docker-compose.yml` 的 `pg` profile 里（默认不起），**代码尚未接入**，
-先起它不改变任何行为。
+### 10.1.1 Redis（可选）：让 nudge 跨进程广播
+
+**默认不需要**。不配 `REDIS_URL` 时 nudge 只在本进程内派发，与接入 Redis 之前逐字
+一致；`docker compose` 里那个 `redis` 服务也一直默认不起。只有「同一份库上跑不止
+一个应用进程」才用得上它——目前唯一被支持的形态仍是单机单进程，所以它是给后续
+「多 worker / 后台循环选主」铺的地基，**不是现在的必需组件**。
+
+**它做什么**：`broadcast_nudge()` 在本地派发之后，再把
+`{type, topic, scope, origin}` 发到 Redis 频道 `luyun:nudge`（`origin` 是发送方实例
+id）；别的进程订阅到后**只做本地派发、不再转发**，否则同一条消息会在实例间来回弹。
+消息里依旧没有任何业务数据，客户端收到 nudge 照旧回 HTTP 拉取。
+
+**怎么起**
+
+- 裸机（systemd + venv，默认路径）：`sudo apt-get install -y redis-server`。
+  默认只监听 `127.0.0.1:6379`，应用与 Redis 同机够用——**不要把 6379 暴露到公网**。
+- Docker compose：`redis` 服务在 `pg` profile 下，需要显式带上，并且必须先给
+  `LUYUN_REDIS_DATA` 一个绝对路径（与 `LUYUN_PG_DATA` 同理）：
+
+  ```bash
+  docker compose -f deploy/docker-compose.yml --profile pg up -d
+  ```
+
+  **注意这个服务没有发布端口**：只有同一个 compose 网络里的容器连得上它，应用也
+  跑在 compose 里时 URL 用服务名 `redis://redis:6379/0`；宿主机上跑的 uvicorn
+  **连不到**它——要么自己给 `redis` 服务加 `ports: ["127.0.0.1:6379:6379"]`，要么
+  改用宿主机的 Redis（上一条）。
+
+**怎么配**（写进 `deploy/env.production`，模板见 `deploy/env.production.example`）：
+
+```bash
+REDIS_URL=redis://127.0.0.1:6379/0          # 裸机 / 宿主机 Redis
+# REDIS_URL=redis://redis:6379/0            # 应用也在同一个 compose 网络里
+# REDIS_URL=redis://:PASSWORD@host:6379/0   # 带密码
+```
+
+环境变量 `LUYUN_REDIS_URL` 优先于这一项；留空或纯空白 = 不启用。
+
+**怎么确认生效**（看应用日志）：
+
+| 日志 | 含义 |
+|---|---|
+| `✅ realtime nudge 总线已连接：redis://…（频道 luyun:nudge）` | 已连上并订阅 |
+| `ℹ️ 未配置 REDIS_URL，realtime nudge 只在进程内派发` | 按配置关闭（正常） |
+| `⚠️ Redis nudge 总线不可用（…），Ns 后重连` | 连不上或掉线，正在退避重连（1s 起、翻倍、封顶 30s） |
+
+也可以从 Redis 侧反查订阅有没有挂上：`redis-cli PUBSUB CHANNELS 'luyun:*'` 应列出
+`luyun:nudge`（每个已连上的应用进程算一个订阅者）；应用退出后这个频道会自己消失。
+
+**失败语义（可降级是第一要求）**：连不上、中途断开、发送失败一律只记日志——
+不阻塞启动（`start()` 不在启动路径上等连接，订阅在后台任务里重连）、不让请求报错
+（`publish()` 带 2s socket 超时并吞掉异常）、不丢本进程的 nudge（本地派发在 publish
+之前完成且不经过总线）。日志里的 URL 会脱敏 userinfo，密码不会落盘。
+
+**它不解除单 worker 限制**：见 §9 与 10.1——7 个常驻后台循环还没有分布式选主，
+`--workers > 1` 仍会重复采集 / 重复推送。
 
 ### 10.2 从遗留 SQLite 迁移（推荐）
 
@@ -569,8 +628,15 @@ Docker 形态下 `postgres` 服务随 compose 一起起（已去掉 profile）�
 profile 里，需要时显式带上（无需 root、无需改 env 之外的系统状态）：
 
 ```bash
+export LUYUN_REDIS_DATA=/opt/luyun/deploy/runtime/redisdata   # 必须绝对路径
 docker compose -f deploy/docker-compose.yml --profile pg up -d
 ```
+
+起来之后再把 `REDIS_URL` / `LUYUN_REDIS_URL` 指过去，nudge 才走跨进程广播：
+应用容器在同一 compose 网络里用服务名 `redis://redis:6379/0`；裸机 uvicorn 连不到
+这个容器（**它没有发布端口**），要么在宿主机上装 Redis，要么自己给 `redis` 服务加
+`ports: ["127.0.0.1:6379:6379"]`。不配就一直走进程内派发，与今天完全一致——详见
+10.1.1。
 
 完整前置条件、冒烟清单与排错见
 [`migrations/pg/README.md`](../migrations/pg/README.md)。

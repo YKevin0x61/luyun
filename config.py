@@ -84,6 +84,12 @@ class Settings(BaseSettings):
             "auth": app_db_path,
         }
 
+    # realtime nudge 的跨进程广播总线（Redis pub/sub）。留空 = 不启用：nudge 只在
+    # 本进程内派发——默认部署（compose 里 redis 在 `pg` profile 下，默认不起）就是
+    # 这个形态，也是 Redis 连不上时的降级形态（见 services/realtime/redis_bus.py）。
+    # 环境变量 `LUYUN_REDIS_URL` 优先于本项，写法同 POSTGRES_DSN。
+    REDIS_URL: str = ""
+
     # 日志存储配置
     LOG_RETENTION_DAYS: int = 7  # 日志保留天数（0 = 永久保留）
     LOG_QUEUE_BATCH_SIZE: int = 200  # 异步写库批量大小

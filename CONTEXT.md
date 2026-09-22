@@ -400,7 +400,7 @@ _Avoid_: 引导安装以私有仓 clone 或强制 PAT 为必经步骤；把 Dock
 
 ### 数据库后端 (Database Backend)
 运行实例的数据落点：**只有 PostgreSQL 一种**（ADR 0089，SQLite 已退场）。`DATABASE_BACKEND` 默认 `postgres`，值不是 `postgres` 时应用启动即失败并打印迁移指引，不做静默回落；结构由 `migrations/pg/*.sql` 建立，业务表、`sop_*`、`hygiene_*` 与日志表 `logs` 同在**一个库**里，不再有独立的日志库文件。从遗留 SQLite 迁到 PostgreSQL 是整机一次性的运维动作（`deploy/enable_postgres.sh`），不是页面里可来回切的开关。
-_Avoid_: 以为还能把 `DATABASE_BACKEND` 改回 `sqlite`（那是启动失败，不是回滚路径）；把 SQLite 的「临时目录里的一个库文件」当成测试隔离；把 Redis 当成已接入（容器已备，代码未接）。
+_Avoid_: 以为还能把 `DATABASE_BACKEND` 改回 `sqlite`（那是启动失败，不是回滚路径）；把 SQLite 的「临时目录里的一个库文件」当成测试隔离；把 Redis 当成必需组件（它只让 nudge 跨进程广播，不配 `REDIS_URL` 就是进程内派发；单 worker 约束不受影响）。
 
 ### 数据库迁移 (Database Migration)
 对库结构的**可追溯**变更：新增或修改表/索引时提交一份 `migrations/pg/000N_*.sql`（只做加成性变更），由管理员在后台「系统更新 → 数据库迁移」应用，记录落在 `schema_migrations` 表。应用**不在启动期改结构**——`db_core/schema.py` 只剩表名清单，DDL 只在 `migrations/pg` 里。
