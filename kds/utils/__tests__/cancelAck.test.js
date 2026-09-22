@@ -48,7 +48,8 @@ describe('cancelAck', () => {
   })
 
   it('acks every watched never-loaded cancel and skips 退菜占位 plus plucked cages', () => {
-    const now = new Date(2026, 7, 18, 12, 0, 0)
+    // 绝对时刻：营业日键按中国日历日算，别用设备本地构造（TZ 会渗进断言）
+    const now = new Date('2026-08-18T12:00:00+08:00')
     const ids = acknowledgeNeverLoadedCancels({
       now,
       watchedStations: ['shulong'],

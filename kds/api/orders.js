@@ -3,6 +3,7 @@
  */
 
 import { request } from '../utils/request.js'
+import { chinaDayRange } from '../utils/businessDay.js'
 
 export const ordersAPI = {
   /**
@@ -35,15 +36,13 @@ export const ordersAPI = {
    * @returns {Promise} API响应
    */
   async getTodayOrders(params = {}) {
-    const today = new Date()
-    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0, 0)
-    const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999)
+    const { start, end } = chinaDayRange()
 
-    console.log(`[获取当天订单] 时间范围: ${startOfDay.toISOString()} 到 ${endOfDay.toISOString()}`)
+    console.log(`[获取当天订单] 时间范围: ${start} 到 ${end}`)
 
     return await this.getOrders({
-      start_time: startOfDay.toISOString(),
-      end_time: endOfDay.toISOString(),
+      start_time: start,
+      end_time: end,
       ...params
     })
   },

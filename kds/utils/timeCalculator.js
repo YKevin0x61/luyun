@@ -4,6 +4,7 @@
  */
 
 import { TIME_THRESHOLDS } from './constants.js'
+import { chinaDayRange, isChinaToday } from './businessDay.js'
 
 export class TimeCalculator {
   /**
@@ -242,31 +243,19 @@ export class TimeCalculator {
   }
 
   /**
-   * 检查是否是今天
+   * 检查是否是"今天"（营业日 = 中国时间日历日，不按设备时区）
    * @param {String|Date} time 时间
-   * @returns {Boolean} 是否是今天
+   * @returns {Boolean} 是否是中国时间的今天
    */
   static isToday(time) {
-    const today = new Date()
-    const target = new Date(time)
-    
-    return today.getFullYear() === target.getFullYear() &&
-           today.getMonth() === target.getMonth() &&
-           today.getDate() === target.getDate()
+    return isChinaToday(time)
   }
 
   /**
-   * 获取今天的开始和结束时间
+   * 获取今天的开始和结束时间（营业日 = 中国时间日历日，不按设备时区）
    * @returns {Object} 今天的时间范围
    */
   static getTodayRange() {
-    const today = new Date()
-    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate())
-    const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999)
-    
-    return {
-      start: startOfDay.toISOString(),
-      end: endOfDay.toISOString()
-    }
+    return chinaDayRange()
   }
 } 

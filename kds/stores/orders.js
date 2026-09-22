@@ -5,6 +5,7 @@
 
 import { defineStore } from 'pinia'
 import { ordersAPI } from '../api/orders.js'
+import { chinaDayRange } from '../utils/businessDay.js'
 import { TimeCalculator } from '../utils/timeCalculator.js'
 import { groupOrdersByDish } from '../utils/dishMerge.js'
 import { TIME_THRESHOLDS } from '../utils/constants.js'
@@ -241,17 +242,13 @@ export const useOrdersStore = defineStore('orders', {
      * @param {Object} params 查询参数
      */
     async fetchTodayOrders(params = {}) {
-      const today = new Date()
-      // 设置当天的开始时间 (00:00:00)
-      const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0, 0)
-      // 设置当天的结束时间 (23:59:59)  
-      const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999)
+      const { start, end } = chinaDayRange()
 
-      console.log(`[订单Store] 获取当天订单，时间范围: ${startOfDay.toISOString()} 到 ${endOfDay.toISOString()}`)
+      console.log(`[订单Store] 获取当天订单，时间范围: ${start} 到 ${end}`)
 
       return await this.fetchOrders({
-        start_time: startOfDay.toISOString(),
-        end_time: endOfDay.toISOString(),
+        start_time: start,
+        end_time: end,
         ...params
       })
     },

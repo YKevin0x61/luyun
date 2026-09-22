@@ -509,6 +509,10 @@ sudo systemctl enable luyun-update.service   # oneshot，按需 start
 - CORS（`main.py` 硬编码 `allow_origins=["*"]`）和爬虫营业时间
   （`scraper/pos_session.py` 硬编码 07:30–21:30）目前都不支持环境变量覆盖，
   属于代码常量，改动需要改代码而不是这份部署配置。
+- **门店设备时区须为 `Asia/Shanghai`**：KDS 的"今天订单"窗口与 `isToday`
+  已按东八区固定偏移计算（`kds/utils/businessDay.js`），不读设备时区；但屏幕上的
+  时刻显示仍按设备本地时钟格式化，设备时区设错会让厨房看到的时刻整体平移。
+  装机时把系统时区与 NTP 一起配好，作为时区口径的纵深防御。
 
 ---
 

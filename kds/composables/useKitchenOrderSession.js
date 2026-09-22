@@ -8,6 +8,7 @@
 
 import { computed, ref } from 'vue'
 import { ScreenSettingsManager } from '../utils/storage.js'
+import { chinaDayRange } from '../utils/businessDay.js'
 import { getTimeThresholdsMs } from '../utils/timeThresholds.js'
 import { buildCurrentStationStats } from '../utils/kitchenStationStats.js'
 import { useKitchenAlerts } from './useKitchenAlerts.js'
@@ -55,28 +56,10 @@ export function useKitchenOrderSession({ ordersStore }) {
     loading.value = true
     try {
       reloadDeviceSettings()
-      const today = new Date()
-      const startOfDay = new Date(
-        today.getFullYear(),
-        today.getMonth(),
-        today.getDate(),
-        0,
-        0,
-        0,
-        0
-      )
-      const endOfDay = new Date(
-        today.getFullYear(),
-        today.getMonth(),
-        today.getDate(),
-        23,
-        59,
-        59,
-        999
-      )
+      const { start, end } = chinaDayRange()
       await ordersStore.fetchOrders({
-        start_time: startOfDay.toISOString(),
-        end_time: endOfDay.toISOString()
+        start_time: start,
+        end_time: end
       })
       const cancelClaimed = Boolean(deliveryCancel.syncOrders(ordersStore.orders))
       kitchenAlerts.syncOrders(ordersStore.orders, { cancelClaimed })

@@ -1,7 +1,9 @@
 /**
  * Device-local 退菜已确认. Not a server field.
- * Keyed by 营业日 (local calendar date). Another screen has its own storage.
+ * Keyed by 营业日 (中国日历日, 见 businessDay.js). Another screen has its own storage.
  */
+
+import { chinaDateKey } from './businessDay.js'
 
 export const CANCEL_ACK_STORAGE_KEY = 'kds_cancel_ack'
 
@@ -14,16 +16,12 @@ export function cancelAckLineId(order) {
 }
 
 /**
- * Local calendar date YYYY-MM-DD, matching kitchen startOfDay.
+ * 中国日历日 YYYY-MM-DD, matching the kitchen 拉单窗口.
  * @param {number|Date} [now]
  * @returns {string}
  */
 export function businessDateKey(now = Date.now()) {
-  const date = now instanceof Date ? now : new Date(now)
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
+  return chinaDateKey(now)
 }
 
 function readPayload() {
