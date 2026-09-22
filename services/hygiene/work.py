@@ -3715,8 +3715,13 @@ class HygieneWork:
             raise HygieneWorkError("not_pending", "not_pending")
         return self._fix_row(ticket, reshoot)
 
-    @serialized_write
     async def reshoot_fix(self, actor: dict, ticket_id: int, live_capture) -> dict:
+        """员工重拍一张回拍照片（覆盖待验收的那张）。
+
+        校验与落盘都在写锁**外面**（与 ``submit_daily`` 同一条取舍，见 §3.4：
+        ``_store_capture`` 是 3 次 fsync + PIL 编解码），纯 SQL 段在
+        ``_commit_fix_reshoot`` 里拿锁；被顶替的那张照片的文件也在锁外删。
+        """
         self._require_staff_submitter(actor)
         data = self._require_live_capture(live_capture)
         ticket = await self._fetch_fix_ticket(ticket_id)
@@ -3730,7 +3735,66 @@ class HygieneWork:
             raise HygieneWorkError("photographer_required", "photographer_required")
         content_type = (live_capture.get("content_type") or "image/jpeg").strip()
         capture_id, generated = await self._store_capture(data, content_type)
+        try:
+            reshoot, replaced_files = await self._commit_fix_reshoot(
+                actor=actor,
+                ticket_id=int(ticket_id),
+                capture_id=capture_id,
+                generated=generated,
+                content_type=content_type,
+                photographer=photographer,
+            )
+        except Exception:
+            await self._delete_capture_files(
+                [capture_id, *(item[0] for item in generated.values())]
+            )
+            raise
+        # 被顶替的那张已经没有任何行引用（见 _commit_fix_reshoot）。文件 IO 不在
+        # 锁内：它只是 unlink，但没理由让全局写锁陪着等磁盘。
+        await self._delete_capture_files(replaced_files)
+        logger.info(
+            "hygiene fix reshot ticket=%s capture=%s replaced_files=%s",
+            ticket_id,
+            capture_id,
+            len(replaced_files),
+        )
+        return reshoot
+
+    @serialized_write
+    async def _commit_fix_reshoot(
+        self,
+        *,
+        actor: dict,
+        ticket_id: int,
+        capture_id: str,
+        generated: dict,
+        content_type: str,
+        photographer: str,
+    ) -> tuple[dict, list]:
+        """``reshoot_fix`` 的纯 SQL 段：拿写锁做事务，返回 (结果, 待删文件列表)。"""
+        ticket = await self._fetch_fix_ticket(ticket_id)
+        if ticket is None:
+            raise HygieneWorkError("ticket_not_found", "ticket_not_found")
+        if ticket["status"] == STATUS_PASSED:
+            # 锁外校验到落盘之间可能有人验收通过，锁内再判一次。
+            raise HygieneWorkError("already_accepted", "already_accepted")
         now = self._now_iso()
+        # 待验收状态下的再次回拍＝同一张"待回拍"的重拍（员工嫌照片糊、弱网重传、
+        # 误操作）。验收只看 pending_reshoot_id，被顶替的那行从此没人看得到，可它
+        # 仍在 hygiene_fix_reshoots 里，而 _referenced_capture_ids 把这张表整表
+        # 算作"被引用"——留着就是原图 + 变体的永久占盘。按 delete_fix_ticket 的
+        # 顺序清掉旧行与旧变体行，旧文件交给锁外的调用方删。
+        #
+        # 被打回时 pending_reshoot_id 已被 reject_fix 清空，那张是驳回证据：
+        # 这里读不到它，于是不会删（员工重拍一次，历史就少一张的不可能）。
+        replaced = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
+        replaced_files: list = []
+        if replaced is not None:
+            replaced_capture_id = str(replaced["capture_id"])
+            replaced_files = [
+                replaced_capture_id,
+                *await self._derivative_capture_ids([replaced_capture_id]),
+            ]
         try:
             cur = await self._conn.execute(
                 """INSERT INTO hygiene_fix_reshoots
@@ -3756,18 +3820,20 @@ class HygieneWork:
                 (STATUS_PENDING, reshoot_id, now, int(ticket_id)),
             )
             await self._insert_variants(capture_id, generated)
+            if replaced is not None:
+                await self._conn.execute(
+                    "DELETE FROM hygiene_fix_reshoots WHERE id = ?",
+                    (int(replaced["id"]),),
+                )
+                await self._conn.execute(
+                    """DELETE FROM hygiene_capture_variants
+                       WHERE source_capture_id = ?""",
+                    (str(replaced["capture_id"]),),
+                )
             await self._conn.commit()
         except Exception:
             await self._conn.rollback()
-            await self._delete_capture_files(
-                [capture_id, *(item[0] for item in generated.values())]
-            )
             raise
-        logger.info(
-            "hygiene fix reshot ticket=%s capture=%s",
-            ticket_id,
-            capture_id,
-        )
         ticket["status"] = STATUS_PENDING
         ticket["pending_reshoot_id"] = reshoot_id
         reshoot = {
@@ -3777,7 +3843,7 @@ class HygieneWork:
             "zone_name": ticket["zone_name"],
             "captured_at": now,
         }
-        return self._fix_row(ticket, reshoot)
+        return self._fix_row(ticket, reshoot), replaced_files
 
     async def _pending_fix(self, ticket_id: int) -> tuple:
         ticket = await self._fetch_fix_ticket(ticket_id)
@@ -3866,6 +3932,18 @@ class HygieneWork:
             "reshoot_capture_id": None,
         }
 
+    async def _derivative_capture_ids(self, source_ids: list) -> list:
+        """给定原图 capture ids，返回它们在 ``hygiene_capture_variants`` 里的变体文件 ids。"""
+        if not source_ids:
+            return []
+        placeholders = ",".join("?" * len(source_ids))
+        cur = await self._conn.execute(
+            f"""SELECT capture_id FROM hygiene_capture_variants
+                WHERE source_capture_id IN ({placeholders})""",
+            source_ids,
+        )
+        return [str(dict(row)["capture_id"]) for row in await cur.fetchall()]
+
     async def _fix_ticket_capture_ids(self, ticket_id: int, ticket: dict) -> tuple[list[str], list[str]]:
         """Return (original captures, derivative captures) owned by one fix ticket."""
         cur = await self._conn.execute(
@@ -3875,14 +3953,7 @@ class HygieneWork:
         )
         roots = [str(ticket["capture_id"])]
         roots.extend(str(dict(row)["capture_id"]) for row in await cur.fetchall())
-        placeholders = ",".join("?" * len(roots))
-        cur = await self._conn.execute(
-            f"""SELECT capture_id FROM hygiene_capture_variants
-                WHERE source_capture_id IN ({placeholders})""",
-            roots,
-        )
-        derivatives = [str(dict(row)["capture_id"]) for row in await cur.fetchall()]
-        return roots, derivatives
+        return roots, await self._derivative_capture_ids(roots)
 
     @serialized_write
     async def delete_fix_ticket(self, actor: dict, ticket_id: int) -> dict:
