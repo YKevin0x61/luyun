@@ -12,7 +12,7 @@ from collections import deque
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from urllib.parse import quote
@@ -33,7 +33,12 @@ from api.logs import router as logs_router
 from api.tables import router as tables_router
 from api.analytics import router as analytics_router
 from api.export_api import router as export_router
-from api.security import authenticate_ws, csrf_origin_rejected, warn_if_admin_open
+from api.security import (
+    authenticate_ws,
+    csrf_origin_rejected,
+    verify_admin_token,
+    warn_if_admin_open,
+)
 from api.auth import router as auth_router
 from api.hygiene import router as hygiene_router
 from services import auth_service
@@ -1078,9 +1083,9 @@ async def get_station_info(station_id: str):
     return station
 
 # 餐厅爬虫控制API
-@app.post("/api/scraper/start")
+@app.post("/api/scraper/start", dependencies=[Depends(verify_admin_token)])
 async def start_scraper():
-    """启动餐厅数据爬取"""
+    """启动餐厅数据爬取（需管理员凭据，见 SEC-01）"""
     global scraper_task
     
     try:
@@ -1095,9 +1100,9 @@ async def start_scraper():
         logger.error(f"启动爬虫失败: {e}")
         raise HTTPException(status_code=500, detail="启动爬虫失败")
 
-@app.post("/api/scraper/stop")
+@app.post("/api/scraper/stop", dependencies=[Depends(verify_admin_token)])
 async def stop_scraper():
-    """停止餐厅数据爬取"""
+    """停止餐厅数据爬取（需管理员凭据，见 SEC-01）"""
     global scraper_task
     
     try:
