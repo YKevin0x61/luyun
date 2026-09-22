@@ -111,21 +111,33 @@ EOF
   fi
 
   # Upsert Docker deploy settings without echoing secrets.
+  # REDIS_URL 单独处理：Redis 是必需组件（ADR 0090），容器里的地址是 compose
+  # 的服务名 `redis`（不是 127.0.0.1）。只在**缺失或为空**时补上——用户显式
+  # 指向外部实例时不覆盖。env.production 是从 env.production.example 复制来的，
+  # 模板里那一项是空的，所以这一步决定容器第一次能不能起来。
   awk -v repo="$REPO" \
       -v mode="docker" \
       -v container="$CONTAINER_NAME" \
-      -v deploy_dir="$APP_DIR" '
-    BEGIN { done_repo=0; done_mode=0; done_ctr=0; done_dir=0 }
+      -v deploy_dir="$APP_DIR" \
+      -v redis_url="redis://redis:6379/0" '
+    BEGIN { done_repo=0; done_mode=0; done_ctr=0; done_dir=0; done_redis=0 }
     /^GITHUB_REPO=/ { print "GITHUB_REPO=" repo; done_repo=1; next }
     /^LUYUN_DEPLOY_MODE=/ { print "LUYUN_DEPLOY_MODE=" mode; done_mode=1; next }
     /^LUYUN_DOCKER_CONTAINER=/ { print "LUYUN_DOCKER_CONTAINER=" container; done_ctr=1; next }
     /^RELEASE_UPDATE_REPO_DIR=/ { print "RELEASE_UPDATE_REPO_DIR=" deploy_dir; done_dir=1; next }
+    /^REDIS_URL=/ {
+      if ($0 ~ /^REDIS_URL=[[:space:]]*$/) { print "REDIS_URL=" redis_url }
+      else { print }
+      done_redis=1
+      next
+    }
     { print }
     END {
       if (!done_repo) print "GITHUB_REPO=" repo
       if (!done_mode) print "LUYUN_DEPLOY_MODE=" mode
       if (!done_ctr) print "LUYUN_DOCKER_CONTAINER=" container
       if (!done_dir) print "RELEASE_UPDATE_REPO_DIR=" deploy_dir
+      if (!done_redis) print "REDIS_URL=" redis_url
     }
   ' "$env_file" > "${env_file}.tmp"
   mv "${env_file}.tmp" "$env_file"

@@ -50,6 +50,7 @@ from services.wecom_push_service import wecom_push_service
 from services.scraper_failure_tracker import ScraperFailureTracker
 from services.data_quality_scheduler import run_reconcile_scheduler, run_unmapped_dish_watchdog
 from services.realtime.hub import realtime_hub
+from services.realtime.redis_bus import require_redis_url
 from services.realtime.logs_bridge import LogsNudgeScheduler
 
 # 配置日志
@@ -152,6 +153,20 @@ def serialize_all(obj):
     else:
         return obj
 
+def _require_startup_config() -> None:
+    """启动期硬前置：Redis 是部署必需组件（ADR 0090）。
+
+    没配 `REDIS_URL` 就是部署没做完——`require_redis_url()` 抛错，应用启动失败
+    并打印安装/配置指引，与 `DATABASE_BACKEND` 不是 postgres 时同款硬切。抽成
+    函数是为了能在不起整个 lifespan（会拉起爬虫）的前提下测这条契约。
+
+    `DISABLE_BACKGROUND_TASKS=true`（测试、一次性工具）没有常驻后台任务，也就
+    不需要 nudge 的总线，直接跳过。
+    """
+    if not getattr(settings, "DISABLE_BACKGROUND_TASKS", False):
+        require_redis_url()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
@@ -163,6 +178,12 @@ async def lifespan(app: FastAPI):
     
     try:
         logger.info("🚀 启动订单数据采集系统...")
+
+        # Redis 是部署必需组件（realtime nudge 的跨进程广播，ADR 0090）：没配
+        # REDIS_URL 就当场失败，别等建了半个运行时再炸——已经起来的循环会挂在
+        # 进程里。放在最前面是为了失败信息干净。
+        _require_startup_config()
+
         warn_if_admin_open()
         backup_import_staging.cleanup_expired_staging()
         app.startup_time = datetime.now(CHINA_TZ)
@@ -258,14 +279,13 @@ async def lifespan(app: FastAPI):
             disk_guard.start()
             startup_results.append("磁盘守护")
 
-        # 启动 realtime 跨进程 nudge 总线（Redis pub/sub）：REDIS_URL 未配置或
-        # Redis 不可用时自动降级为进程内广播（见 services/realtime/redis_bus.py），
-        # 绝不影响启动。订阅任务和那些常驻循环一样受 DISABLE_BACKGROUND_TASKS 管
-        # ——测试不该去连 Redis。
+        # 启动 realtime 跨进程 nudge 总线（Redis pub/sub）。Redis 是部署必需
+        # 组件，配置在前面已经校验过；这里只是把订阅任务起起来。**连不上不拦
+        # 启动**：订阅任务在后台退避重连，本地派发不经过总线，门店照常跑。
+        # 整段与那些常驻循环一样受 DISABLE_BACKGROUND_TASKS 管——测试不连 Redis。
         if background_enabled:
             await realtime_hub.start_bus()
-            if realtime_hub.bus is not None and realtime_hub.bus.enabled:
-                startup_results.append("realtime 总线")
+            startup_results.append("realtime 总线")
         else:
             logger.info("⏭️ 已跳过 realtime 总线（DISABLE_BACKGROUND_TASKS=true），nudge 仅进程内派发")
         

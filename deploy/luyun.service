@@ -41,6 +41,13 @@ After=network.target
 # After 只排序、不拉活。
 After=postgresql.service
 Wants=postgresql.service
+# Redis 是必需组件（realtime nudge 跨进程广播，ADR 0090），应用没配 REDIS_URL 会
+# 直接启动失败。同样是**弱依赖**：unit 名随发行版不同（Debian/Ubuntu 是
+# redis-server.service，RHEL/Fedora 是 redis.service），两个名字都写上，机器上
+# 没有的那个只会让 systemd 打一行 warning。顺序只影响首次连接是"一上来就连上"
+# 还是"先退避重连一次"，连不上也不会让应用起不来。
+After=redis-server.service redis.service
+Wants=redis-server.service redis.service
 # 崩溃时避免无限重启刷屏：60 秒内累计重启超过 5 次则停止自动重启，
 # 需要人工介入排查（见下方 journalctl 命令）。
 StartLimitIntervalSec=60

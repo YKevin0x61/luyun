@@ -33,6 +33,11 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements.txt
+      # Redis 是部署必需组件（ADR 0090，realtime nudge 跨进程广播）：应用没配
+      # REDIS_URL 启动即失败，Bootstrap 的前置检查也会硬失败，所以 runner 上必须
+      # 有 redis-server/redis-cli。测试本身不连 Redis（DISABLE_BACKGROUND_TASKS=true）。
+      - name: Install redis (required component)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-server
       - name: Run unit tests
         run: python3 -m pytest tests/ -v
 

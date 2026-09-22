@@ -159,9 +159,16 @@
 
 ### 4.1 目标与边界
 
+**机器前置**（两个外部服务都是**必需**组件，Bootstrap 会做前置检查）：
+PostgreSQL（ADR 0089，唯一数据后端）与 **Redis**（ADR 0090，realtime nudge 的跨进程广播）。
+本机没有 Redis 时，`scripts/bootstrap_install.sh` 会直接拒绝继续并给出安装命令
+（`apt-get install -y redis-server` / `dnf install -y redis`），或在 env 文件里先写好
+`REDIS_URL` 指向现成实例；装完还要在 `deploy/env.production` 里配 `REDIS_URL`——
+**没配这一项应用启动即失败**。细节见 [`deploy/README.md`](../deploy/README.md) 10.1.1。
+
 **做到**：从选定正式 Release 下载并硬校验**同款发行包**、解压到部署目录、venv + Playwright、版本清单就位、`luyun` + `luyun-update` 单元已 enable（脚本默认不替你 start 主服务，以结束时打印为准）。
 
-**不做**：反代 / TLS / 域名、POS 凭据填写、日常冷备 timer 启用、装 Node、Deploy Key、git clone。
+**不做**：装 PostgreSQL / Redis 本身（Ubuntu 走 `deploy/enable_postgres.sh` 或 §10.3 手工步骤）、反代 / TLS / 域名、POS 凭据填写、日常冷备 timer 启用、装 Node、Deploy Key、git clone。
 
 ### 4.2 一键安装（推荐：`curl | bash`）
 
@@ -300,6 +307,8 @@ Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 �
 - 具备重启能力（systemd 路径，或 Docker 模式下的 socket + 容器名）  
 - 无进行中的更新作业  
 - 部署树默认须干净；脏树默认红灯，仅管理员明确确认丢弃本地改动后方可 Apply  
+- 业务库（PostgreSQL）可访问；**Redis 已配置**——`REDIS_URL` 没配是**硬门禁**（推上去的
+  新代码起不来，见 ADR 0090），配了但此刻探测不通只红灯提示、不拦（应用会退避重连）
 
 未通过更新环境自检的机器（典型：开发机 checkout）上，界面隐藏或禁用应用更新。
 

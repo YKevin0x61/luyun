@@ -13,6 +13,10 @@ usage() {
 依赖、写入版本清单身份、启用 systemd（luyun + luyun-update）。
 不装 Node；不 clone；不需要 Deploy Key / PAT；不含反代/TLS/POS 凭据。
 
+不装系统包：Redis 是部署必需项（应用没有 REDIS_URL 起不来），所以本机既没有
+redis-server/redis-cli、env 里又没有非空 REDIS_URL 时，前置检查直接失败退出，
+并按下面的错误提示手工装 Redis 或先写 env 文件。
+
 一键（curl|bash）请用 Release 资产 install.sh / scripts/curl_install.sh，
 见 docs/RELEASE_AND_DEPLOY.md。
 
@@ -29,6 +33,8 @@ usage() {
   GITHUB_REPO / GITHUB_RELEASES_TOKEN（可选）
   LUYUN_BOOTSTRAP_SKIP_PLAYWRIGHT_DEPS=1     跳过 playwright --with-deps（测试用）
   LUYUN_BOOTSTRAP_SKIP_SYSTEMD_ROOT_CHECK=1  测试用：跳过非 root 装单元检查
+  LUYUN_BOOTSTRAP_SKIP_REDIS_CHECK=1         测试/受控环境用：跳过 Redis 前置检查
+                                             （正常部署不要设，Redis 是必需的）
 
 配置落盘（供 Update Job / Version Check 复用，mode 600，不入 git）:
   <deploy-dir>/deploy/env.production   （含 GITHUB_REPO；TOKEN 可为空）
@@ -46,6 +52,9 @@ RELEASES_TOKEN="${GITHUB_RELEASES_TOKEN:-}"
 
 BUNDLE_ASSET="luyun-release-bundle.tar.gz"
 CHECKSUMS_ASSET="SHA256SUMS"
+# Redis 是部署必需组件（realtime nudge 的跨进程广播）：应用没有 REDIS_URL 起不来。
+# 同机部署时的默认地址，与 deploy/env.production.example、deploy/enable_postgres.sh 一致。
+REDIS_URL_DEFAULT="redis://127.0.0.1:6379/0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -107,13 +116,18 @@ plan:
   - download Release Bundle ${BUNDLE_ASSET} + ${CHECKSUMS_ASSET}
   - hard-verify checksum (fail closed on mismatch/missing)
   - extract bundle into deploy dir (prebuilt Admin/KDS + RELEASE_MANIFEST.json)
+  - preflight Redis (required: the app cannot start without it): local redis-server /
+    redis-cli, or a non-empty REDIS_URL already in env.production — otherwise fail
   - write GITHUB_REPO (+ optional token) in env.production
+  - set REDIS_URL in env.production when a local Redis is detected
   - python3 -m venv .venv && pip install -r requirements.txt
   - playwright install chromium (no Node; once at bootstrap)
   - Release Manifest remains installed identity
   - install+enable systemd units: luyun.service + luyun-update.service
 manual_followups:
   - edit ${ENV_FILE} (fill LUYUN_CRED_KEY etc; GITHUB_RELEASES_TOKEN optional for public repo)
+  - Redis is required: keep REDIS_URL in ${ENV_FILE} pointing at a reachable instance
+    (install redis-server/redis on this machine, or use an existing instance)
   - configure reverse proxy + TLS (deploy/Caddyfile or deploy/nginx.conf)
   - enter POS credentials via /setup
 EOF
@@ -125,9 +139,12 @@ print_manual_followups() {
 ==> Bootstrap finished (units enabled / startable). Manual follow-ups:
   1. Edit env file: ${ENV_FILE}
      (fill LUYUN_CRED_KEY etc; GITHUB_REPO set; GITHUB_RELEASES_TOKEN optional for public repo)
-  2. Configure reverse proxy + TLS (Caddy/Nginx; see deploy/Caddyfile or deploy/nginx.conf)
-  3. Start main service: sudo systemctl start luyun.service
-  4. Enter POS credentials in Admin /setup
+  2. Keep Redis reachable — it is required, the app cannot start without it:
+     redis-server/redis must be running and REDIS_URL must be set in ${ENV_FILE}
+     (Bootstrap writes REDIS_URL=${REDIS_URL_DEFAULT} when it finds a local Redis)
+  3. Configure reverse proxy + TLS (Caddy/Nginx; see deploy/Caddyfile or deploy/nginx.conf)
+  4. Start main service: sudo systemctl start luyun.service
+  5. Enter POS credentials in Admin /setup
   (If Bootstrap was not run as root: create user luyun, install staged units from
    ${DEPLOY_DIR}/deploy/systemd-staged/ into /etc/systemd/system/, then enable.)
 
@@ -157,6 +174,64 @@ require_tools() {
   [[ "$missing" -eq 0 ]] || die "请先安装缺失工具后再运行 Bootstrap Install"
 }
 
+# 本机是否已有 Redis（redis-server / redis-cli）。找到就打路径，找不到返回 1。
+redis_binary_path() {
+  local cmd dir
+  for cmd in redis-server redis-cli; do
+    if command -v "$cmd" >/dev/null 2>&1; then command -v "$cmd"; return 0; fi
+  done
+  # PATH 之外再探一遍常见安装前缀：Bootstrap 常以 `curl | bash` 跑，那种最小化
+  # 环境的 PATH 里未必有 /usr/local/bin、/snap/bin（Homebrew 前缀同理）。
+  # 这里只做存在性判断，不执行任何东西。
+  for dir in /usr/local/bin /usr/bin /bin /opt/homebrew/bin /snap/bin; do
+    for cmd in redis-server redis-cli; do
+      if [[ -x "${dir}/${cmd}" ]]; then printf '%s' "${dir}/${cmd}"; return 0; fi
+    done
+  done
+  return 1
+}
+
+# env 文件里是否已配非空的 Redis 地址（`REDIS_URL=` 空值算没配）。
+# LUYUN_REDIS_URL 也认：config.py 里它的优先级高于 REDIS_URL，配了它应用同样起得来，
+# 不能把这种机器误判成「没配」。
+env_has_redis_url() {
+  [[ -f "$1" ]] && grep -qE '^[[:space:]]*(LUYUN_)?REDIS_URL=[^[:space:]]' "$1"
+}
+
+# Redis 前置检查。Bootstrap 不装系统包，所以这里只判定 + 给出两条出路，判定不过
+# 就硬失败：应用没有 Redis 起不来，装完也白装。
+# 判定顺序：本机自带 redis → env 文件里已指向现成实例 → 失败。
+require_redis() {
+  if [[ "${LUYUN_BOOTSTRAP_SKIP_REDIS_CHECK:-}" == "1" ]]; then
+    log "Redis 前置检查已跳过（LUYUN_BOOTSTRAP_SKIP_REDIS_CHECK=1）"
+    return 0
+  fi
+
+  local redis_bin
+  if redis_bin="$(redis_binary_path)"; then
+    log "Redis 前置检查通过：本机自带 ${redis_bin}"
+    return 0
+  fi
+  if env_has_redis_url "$ENV_FILE"; then
+    log "Redis 前置检查通过：${ENV_FILE} 里已配 REDIS_URL / LUYUN_REDIS_URL"
+    return 0
+  fi
+
+  cat >&2 <<EOF
+错误: 本机没有 Redis，${ENV_FILE} 里也没有非空的 REDIS_URL。
+      应用没有 Redis 起不来 —— realtime nudge 的跨进程广播走它，缺这一项会
+      直接启动失败（部署必需组件，不再是可选项）。先满足下面任意一条再重跑：
+
+  (a) 在本机装一个 Redis：
+        sudo apt-get install -y redis-server && sudo systemctl enable --now redis-server
+        sudo dnf install -y redis          && sudo systemctl enable --now redis
+  (b) 或者先建好 ${ENV_FILE} 并写上现成实例的地址，再重跑本脚本：
+        REDIS_URL=redis://127.0.0.1:6379/0          # 同机实例
+        REDIS_URL=redis://:密码@10.0.0.5:6379/0     # 另一台机器上的实例
+EOF
+  exit 1
+}
+
 write_env_secrets() {
   # Prefer the extracted example; keep an existing env.production if already edited.
   mkdir -p "$(dirname "$ENV_FILE")"
@@ -172,21 +247,38 @@ EOF
     fi
   fi
 
+  # Redis 是部署必需项（应用没有 REDIS_URL 起不来），但可能指向别处的现成实例：
+  # 已有非空 REDIS_URL 就不动，缺了才在本机确实有 redis 时补同机默认值。
+  local redis_url=""
+  if ! env_has_redis_url "$ENV_FILE" && redis_binary_path >/dev/null; then
+    redis_url="$REDIS_URL_DEFAULT"
+  fi
+
   # Upsert GitHub settings without echoing the token to logs.
   # Drop legacy GIT_SSH_COMMAND — Bootstrap/Update Job no longer use Deploy Key.
-  awk -v repo="$REPO" -v token="$RELEASES_TOKEN" '
-    BEGIN { done_repo=0; done_tok=0 }
+  # REDIS_URL 同一个 awk 里 upsert（BSD/GNU sed 的 -i 参数形式不同，awk 才跨平台）。
+  awk -v repo="$REPO" -v token="$RELEASES_TOKEN" -v redis_url="$redis_url" '
+    BEGIN { done_repo=0; done_tok=0; done_redis=0 }
     /^GITHUB_REPO=/ { print "GITHUB_REPO=" repo; done_repo=1; next }
     /^GITHUB_RELEASES_TOKEN=/ { print "GITHUB_RELEASES_TOKEN=" token; done_tok=1; next }
     /^GIT_SSH_COMMAND=/ { next }
+    /^REDIS_URL=/ {
+      if (redis_url != "") { print "REDIS_URL=" redis_url; done_redis=1; next }
+      print; next
+    }
     { print }
     END {
       if (!done_repo) print "GITHUB_REPO=" repo
       if (!done_tok) print "GITHUB_RELEASES_TOKEN=" token
+      if (redis_url != "" && !done_redis) print "REDIS_URL=" redis_url
     }
   ' "$ENV_FILE" > "$ENV_FILE.tmp"
   mv "$ENV_FILE.tmp" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
+
+  if [[ -n "$redis_url" ]]; then
+    log "wrote REDIS_URL=${redis_url} (local Redis detected)"
+  fi
 }
 
 download_release_asset() {
@@ -355,6 +447,7 @@ EOF
 
 # --- main ---
 require_tools
+require_redis
 print_contract
 
 if [[ "$DRY_RUN" -eq 1 ]]; then

@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import unittest
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from config import settings
 from services.release_update import (
     FormalRelease,
     InstalledIdentity,
@@ -224,6 +227,121 @@ class CredentialsProbeTest(unittest.TestCase):
             ):
                 env = adapter.inspect_env()
             self.assertFalse(env.credentials_ready)
+
+
+class RedisProbeTest(unittest.TestCase):
+    """Redis 探测：没配判红（硬门禁），配了连不上只提示，探测工具缺失放过。"""
+
+    def _adapter(self):
+        import tempfile
+        from pathlib import Path
+
+        from services.release_update.preflight_env import DefaultPreflightEnvAdapter
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return DefaultPreflightEnvAdapter(Path(tmp.name))
+
+    def test_missing_url_is_not_configured(self):
+        from unittest import mock
+
+        adapter = self._adapter()
+        with mock.patch.dict(os.environ, {"LUYUN_REDIS_URL": ""}):
+            with mock.patch.object(settings, "REDIS_URL", ""):
+                configured, reachable, detail = adapter._redis_state()
+
+        self.assertFalse(configured)
+        self.assertIsNone(reachable)
+        self.assertIn("REDIS_URL", detail)
+        self.assertIn("必需", detail)
+
+    def test_env_override_wins_over_settings(self):
+        from unittest import mock
+
+        adapter = self._adapter()
+        with mock.patch.dict(os.environ, {"LUYUN_REDIS_URL": "redis://from-env:6379/1"}):
+            with mock.patch.object(settings, "REDIS_URL", ""):
+                with mock.patch(
+                    "services.release_update.preflight_env.shutil.which", return_value=None
+                ):
+                    configured, reachable, _ = adapter._redis_state()
+
+        self.assertTrue(configured)
+        self.assertIsNone(reachable)
+
+    def test_missing_redis_cli_skips_probe(self):
+        from unittest import mock
+
+        adapter = self._adapter()
+        with mock.patch.object(settings, "REDIS_URL", "redis://127.0.0.1:6379/0"):
+            with mock.patch(
+                "services.release_update.preflight_env.shutil.which", return_value=None
+            ):
+                with mock.patch(
+                    "services.release_update.preflight_env.subprocess.run"
+                ) as run:
+                    configured, reachable, detail = adapter._redis_state()
+
+        run.assert_not_called()
+        self.assertTrue(configured)
+        self.assertIsNone(reachable)
+        self.assertIn("redis-cli", detail)
+
+    def test_ping_pong_means_reachable(self):
+        from unittest import mock
+
+        adapter = self._adapter()
+        with mock.patch.object(settings, "REDIS_URL", "redis://127.0.0.1:6379/0"):
+            with mock.patch(
+                "services.release_update.preflight_env.shutil.which",
+                return_value="/usr/bin/redis-cli",
+            ):
+                with mock.patch(
+                    "services.release_update.preflight_env.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0, "PONG\n", ""),
+                ):
+                    configured, reachable, _ = adapter._redis_state()
+
+        self.assertTrue(configured)
+        self.assertTrue(reachable)
+
+    def test_ping_failure_is_reachable_false_but_still_configured(self):
+        from unittest import mock
+
+        adapter = self._adapter()
+        with mock.patch.object(settings, "REDIS_URL", "redis://127.0.0.1:6379/0"):
+            with mock.patch(
+                "services.release_update.preflight_env.shutil.which",
+                return_value="/usr/bin/redis-cli",
+            ):
+                with mock.patch(
+                    "services.release_update.preflight_env.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 1, "", "Could not connect"),
+                ):
+                    configured, reachable, detail = adapter._redis_state()
+
+        self.assertTrue(configured)
+        self.assertFalse(reachable)
+        self.assertIn("不可访问", detail)
+
+    def test_probe_timeout_does_not_block(self):
+        from unittest import mock
+
+        adapter = self._adapter()
+        with mock.patch.object(settings, "REDIS_URL", "redis://127.0.0.1:6379/0"):
+            with mock.patch(
+                "services.release_update.preflight_env.shutil.which",
+                return_value="/usr/bin/redis-cli",
+            ):
+                with mock.patch(
+                    "services.release_update.preflight_env.subprocess.run",
+                    side_effect=subprocess.TimeoutExpired("redis-cli", 10),
+                ):
+                    configured, reachable, detail = adapter._redis_state()
+
+        self.assertTrue(configured)
+        self.assertIsNone(reachable)
+        self.assertIn("跳过", detail)
 
 
 class DirtyTreeProbeTest(unittest.TestCase):

@@ -31,6 +31,7 @@ class DefaultPreflightEnvAdapter:
     def inspect_env(self) -> PreflightEnv:
         disk_ok, disk_free_mb = self._disk_state()
         database_ok, database_detail = self._database_state()
+        redis_configured, redis_reachable, redis_detail = self._redis_state()
         return PreflightEnv(
             restart_ready=self._restart_ready(),
             credentials_ready=self._credentials_ready(),
@@ -39,7 +40,45 @@ class DefaultPreflightEnvAdapter:
             disk_free_mb=disk_free_mb,
             database_ok=database_ok,
             database_detail=database_detail,
+            redis_configured=redis_configured,
+            redis_reachable=redis_reachable,
+            redis_detail=redis_detail,
         )
+
+    def _redis_state(self) -> tuple[bool, Optional[bool], Optional[str]]:
+        """Redis 可达性，返回 ``(已配置, 是否可达, 说明)``。
+
+        Redis 是部署必需组件（realtime nudge 的跨进程广播，ADR 0090）：没配
+        `REDIS_URL` 时应用**启动即失败**，所以那种情况回 `(False, None, ...)`
+        ——由 `_build_preflight` 当硬门禁拦下更新。配了但探测不通回
+        `(True, False, ...)`，只提示不拦：应用会退避重连，一次抖动不该挡住更新。
+
+        探测走 `redis-cli -u <url> ping`（与 `pg_isready` 同一路数，不引入 Python
+        端连接）。`redis-cli` 缺失按「跳过探测」放过——探测工具本身的缺陷不该反过来
+        挡住更新，与 pg_isready 一致；但**没配 REDIS_URL 不同**，那是配置问题。
+        说明里刻意不回显 URL：它可能带密码。
+        """
+        url = (os.environ.get("LUYUN_REDIS_URL") or getattr(settings, "REDIS_URL", "") or "").strip()
+        if not url:
+            return False, None, (
+                "REDIS_URL 未配置：Redis 是部署必需组件（realtime nudge 跨进程广播），"
+                "更新后应用将无法启动；请先安装 Redis 并在 env.production 配置 REDIS_URL"
+            )
+        if not shutil.which("redis-cli"):
+            return True, None, "Redis 已配置（未安装 redis-cli，跳过探测）"
+        try:
+            completed = subprocess.run(
+                ["redis-cli", "-u", url, "ping"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return True, None, "Redis 已配置（探测超时，跳过）"
+        if completed.returncode == 0 and "PONG" in (completed.stdout or "").upper():
+            return True, True, "Redis 可访问（跨进程 nudge 广播可用）"
+        return True, False, "Redis 已配置但不可访问（检查 Redis 服务；应用仍能启动并在后台重连）"
 
     def _database_state(self) -> tuple[bool, Optional[str]]:
         """业务库可达性。

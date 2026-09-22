@@ -70,6 +70,7 @@ PREFLIGHT_TREE_CLEAN = "tree_clean"
 PREFLIGHT_LAST_UPDATE = "last_update"
 PREFLIGHT_DISK_SPACE = "disk_space"
 PREFLIGHT_DATABASE = "database"
+PREFLIGHT_REDIS = "redis"
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,12 @@ class PreflightEnv:
     # 更新（与磁盘同一原则），所以默认 True，由 adapter 在能确定时置 False。
     database_ok: bool = True
     database_detail: Optional[str] = None
+    # Redis 跨进程 nudge 总线：**部署必需组件**（ADR 0090），没配 REDIS_URL 应用
+    # 启动即失败，所以「未配置」是硬门禁——更新上去就起不来，必须提前拦。反过来说
+    # 「配了但探测不通」只提示不拦：运行期会退避重连，不该因为一次抖动挡住更新。
+    redis_configured: bool = True
+    redis_reachable: Optional[bool] = None
+    redis_detail: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -379,6 +386,18 @@ def _build_preflight(
                 )
             ),
         ),
+        PreflightCheck(
+            code=PREFLIGHT_REDIS,
+            ok=bool(env.redis_configured and env.redis_reachable is not False),
+            message=(
+                env.redis_detail
+                or (
+                    "Redis 已配置"
+                    if env.redis_configured
+                    else "REDIS_URL 未配置：Redis 是部署必需组件，更新后应用将无法启动"
+                )
+            ),
+        ),
     ]
     if last_failure:
         target = last_failure.get("target_tag") or "未知版本"
@@ -395,8 +414,12 @@ def _build_preflight(
             )
         )
     healthy_runtime = bool(env.restart_ready and env.credentials_ready)
-    # Restart + credentials + idle job + free disk are hard gates; dirty may be overridden.
-    gates_ok_without_dirty = healthy_runtime and job_idle and disk_ok
+    # Restart + credentials + idle job + free disk + Redis **配置**是硬门禁；dirty 可以
+    # 被显式确认覆盖。只拦「REDIS_URL 没配」——配了但此刻连不上只提示不拦：应用会
+    # 退避重连，一次抖动不该挡住更新（与 database_ok 只提示同一原则）。
+    gates_ok_without_dirty = (
+        healthy_runtime and job_idle and disk_ok and bool(env.redis_configured)
+    )
     apply_allowed = gates_ok_without_dirty and not dirty
     discard_local_changes_allowed = gates_ok_without_dirty and dirty
     return UpdatePreflight(

@@ -6,21 +6,30 @@
 #     sudo bash deploy/enable_postgres.sh              # 实际执行
 #
 # 支持两种部署形态，自动识别：
-#   systemd（裸机/VM）—— systemctl 停启 luyun，PG 装在本机
-#   Docker（compose）  —— docker stop/start 容器，PG 起在 compose 的 pg profile
+#   systemd（裸机/VM）—— systemctl 停启 luyun，PG 与 Redis 都装在本机
+#   Docker（compose）  —— docker stop/start 容器，PG/Redis 都起在 compose 里
 #
 # 做这些事（幂等，可重复执行；已完成的步骤会跳过）：
-#     systemd: 装 PostgreSQL → 建库建用户 → 应用 schema → 停应用 → 备份 → 迁移
-#              → 写 env.production → 启动 → 冒烟
-#     docker:  重建镜像（为了拿到 pg_dump）→ 起 postgres 服务 → 建库 → 应用
-#              schema → 停应用 → 备份 → 迁移（容器内执行）→ 写 env.production
-#              → 启动 → 冒烟
+#     systemd: 装 PostgreSQL + Redis → 建库建用户 → 应用 schema → 停应用 → 备份
+#              → 迁移 → 写 env.production（含 REDIS_URL）→ 启动 → 冒烟
+#     docker:  重建镜像（为了拿到 pg_dump）→ 起 postgres + redis 服务 → 建库 →
+#              应用 schema → 停应用 → 备份 → 迁移（容器内执行）→ 写
+#              env.production（REDIS_URL 用服务名）→ 启动 → 冒烟
+#
+# Redis 是部署必需组件（realtime nudge 的跨进程广播走它）：应用在没有 REDIS_URL
+# 时启动即失败，只是「暂时连不上」才退避重连、不拦启动。所以 systemd 形态顺手把
+# redis-server/redis 装上并 enable --now；docker 形态由 compose 的 redis 服务提供。
+# 但本脚本的主职责是搬库 —— Redis 装不上/起不来只警告并继续，最后在总结里显著
+# 提示「Redis 未就绪，应用起不来」。
 #
 # 为什么必须 root：装系统包、以 postgres 身份建库、改 systemd/docker 状态。
 # 更新作业（luyun-update.service）刻意以非特权用户跑，这些权限不给它。
 #
 # 回滚：把 deploy/env.production 里 DATABASE_BACKEND 改回 sqlite 并重启。
 #       本脚本对 data/app.db 全程只读，回滚不丢数据。
+#       Redis 这一项不参与回滚：REDIS_URL 是必需的，删空它应用反而起不来；不想
+#       用本机 Redis 时，把这一项改成可用实例的地址（或让 compose 提供实例）。
+#       本脚本对 Redis 只做「装 + enable --now + 写 URL」，不动任何已有数据。
 
 set -euo pipefail
 
@@ -37,6 +46,15 @@ PG_CONTAINER="${LUYUN_PG_CONTAINER:-luyun-postgres}"
 DB_NAME="${POSTGRES_DB:-luyun}"
 DB_USER="${POSTGRES_USER:-luyun}"
 DB_PORT="${POSTGRES_PORT:-5432}"
+# Redis（realtime nudge 的跨进程广播，部署必需）。默认是「同机部署」：
+# Redis 装在本机、应用在宿主机上跑。环境变量 REDIS_URL 可以覆盖这个默认值
+# （Redis 在别的机器上，或 Docker 形态要用 compose 服务名 redis://redis:6379/0）。
+REDIS_URL_DEFAULT="redis://127.0.0.1:6379/0"
+REDIS_URL_VALUE="${REDIS_URL:-$REDIS_URL_DEFAULT}"
+REDIS_UNIT=""
+# Redis 就绪状态：ok = 已确认可用（或 dry-run 计划可行）；fail = 确认没起来
+# （总结里要显著提示「应用起不来」）。
+REDIS_STATUS="ok"
 DRY_RUN=0
 MODE=""
 CONTAINER=""
@@ -53,7 +71,7 @@ run() {
   fi
 }
 
-usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
 
 for arg in "$@"; do
   case "$arg" in
@@ -238,6 +256,125 @@ ensure_password_auth() {
   ok "已收紧 pg_hba（原文件备份为 $f.trust.bak）并 reload"
 }
 
+# ── Redis 辅助：unit 探测 / 安装 / 就绪探测 ────────────────────────────
+# Redis 承载 realtime nudge 的跨进程广播，是部署必需组件（应用没有 REDIS_URL
+# 启动即失败）。但本脚本的主职责是搬库 —— 所以这里所有失败都只 warn 并返回非 0，
+# 由调用方决定怎么提示，绝不 die。
+#
+# unit 名随发行版不同（Debian/Ubuntu 是 redis-server，RHEL/Fedora 是 redis），
+# 所以探测「存在哪一个」，不写死一个名字。加 --no-legend 后不存在的 unit 输出为空，
+# 只看输出不看退出码，比单看 list-unit-files 的退出码可靠。
+redis_unit_name() {
+  local unit out
+  for unit in redis-server redis; do
+    out="$(systemctl list-unit-files --no-legend "${unit}.service" 2>/dev/null || true)"
+    if [[ -n "$out" ]]; then printf '%s' "$unit"; return 0; fi
+  done
+  return 1
+}
+
+# URL 里可能带密码（redis://:PASSWORD@host:6379/0），写日志前抹掉 userinfo。
+mask_url() {
+  local url="$1"
+  if [[ "$url" == *"@"* ]]; then
+    printf '%s://***@%s' "${url%%://*}" "${url##*@}"
+  else
+    printf '%s' "$url"
+  fi
+}
+
+# 就绪探测连的是配置里那一个 Redis（host/port 从 REDIS_URL 解析），
+# 而不是硬编码 127.0.0.1:6379。
+redis_url_host() {
+  local url="${1#*://}"
+  url="${url#*@}"; url="${url%%/*}"; url="${url%%:*}"
+  printf '%s' "${url:-127.0.0.1}"
+}
+
+redis_url_port() {
+  local url="${1#*://}" port
+  url="${url#*@}"; url="${url%%/*}"; port="${url##*:}"
+  if [[ "$port" =~ ^[0-9]+$ ]]; then printf '%s' "$port"; else printf '6379'; fi
+}
+
+# unit 在跑，且（装了 redis-cli 时）真能 ping 通 —— 只看 is-active 会漏掉
+# 「unit active 但端口没起来」这种情况。
+redis_probe() {
+  [[ -n "$REDIS_UNIT" ]] || return 1
+  systemctl is-active --quiet "$REDIS_UNIT" 2>/dev/null || return 1
+  if command -v redis-cli >/dev/null 2>&1; then
+    [[ "$(redis-cli -h "$(redis_url_host "$REDIS_URL_VALUE")" \
+                      -p "$(redis_url_port "$REDIS_URL_VALUE")" ping 2>/dev/null || true)" == "PONG" ]]
+  fi
+}
+
+wait_for_redis_ready() {
+  local tries="${1:-15}"
+  for _ in $(seq 1 "$tries"); do
+    if redis_probe; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+# 确保本机 Redis 已装、已 enable --now。返回 0 = 就绪；非 0 只表示「没搞定」，
+# 调用方 warn 一下继续搬库。
+ensure_redis_systemd() {
+  local unit install_failed=0
+  if unit="$(redis_unit_name)"; then
+    REDIS_UNIT="$unit"
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      ok "Redis 已在运行（$unit），跳过安装"
+      return 0
+    fi
+    log "启用并启动 Redis（$unit）"
+    # 失败必须就地返回，不能让 set -e 掀桌子 —— 本脚本的主职责是搬库。
+    run systemctl enable --now "$unit" \
+      || { warn "systemctl enable --now $unit 失败"; return 1; }
+  elif command -v redis-server >/dev/null 2>&1 || command -v redis-cli >/dev/null 2>&1; then
+    # 二进制在但没 unit（例如手工编译装的）：不重复装包，也没法 enable --now
+    warn "本机有 redis 二进制，但找不到 redis-server/redis 的 systemd unit，无法 enable --now"
+    return 1
+  else
+    if command -v apt-get >/dev/null 2>&1; then
+      log "安装 Redis（apt）"
+      run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server \
+        || install_failed=1
+    elif command -v dnf >/dev/null 2>&1; then
+      log "安装 Redis（dnf）"
+      run dnf install -y -q redis || install_failed=1
+    elif command -v yum >/dev/null 2>&1; then
+      log "安装 Redis（yum）"
+      run yum install -y -q redis || install_failed=1
+    else
+      warn "未识别到包管理器，无法自动安装 Redis"
+      return 1
+    fi
+    if (( install_failed )); then
+      warn "Redis 安装失败（见上面的包管理器输出）"
+      return 1
+    fi
+    if (( DRY_RUN )); then
+      printf '   [dry-run] systemctl enable --now <redis-server|redis>（按装完实际存在的 unit）\n'
+    elif unit="$(redis_unit_name)"; then
+      REDIS_UNIT="$unit"
+      run systemctl enable --now "$unit" \
+        || { warn "systemctl enable --now $unit 失败"; return 1; }
+    else
+      warn "装完仍找不到 redis-server/redis 的 systemd unit，无法 enable --now"
+      return 1
+    fi
+  fi
+
+  if (( DRY_RUN )); then
+    printf '   [dry-run] 等 Redis 就绪（systemctl is-active + redis-cli ping）\n'
+    return 0
+  fi
+  if wait_for_redis_ready 15; then return 0; fi
+  warn "Redis unit 已 enable，但 15 秒内探活没通过（${REDIS_UNIT:-unit 未知}）"
+  return 1
+}
+
 # ── 前置检查 ───────────────────────────────────────────────────────────
 [[ -f "$ENV_FILE" ]] || die "找不到 $ENV_FILE —— 请先完成 Bootstrap 安装"
 [[ -f "$SCHEMA_SQL" ]] || die "找不到 $SCHEMA_SQL"
@@ -274,14 +411,18 @@ if [[ "$MODE" == "docker" ]]; then
     fi
   fi
 
-  log "启动 PostgreSQL（compose pg profile）"
+  log "启动 PostgreSQL 与 Redis（compose）"
   if (( DRY_RUN )); then
-    printf '   [dry-run] docker compose -f %s --profile pg up -d postgres\n' "$COMPOSE_FILE"
+    printf '   [dry-run] docker compose -f %s up -d postgres redis\n' "$COMPOSE_FILE"
   else
-    if [[ -z "${POSTGRES_PASSWORD:-}" ]]; then
-      die "启用 pg profile 需要 POSTGRES_PASSWORD。请先 export POSTGRES_PASSWORD=<强密码> 再跑本脚本"
-    fi
-    docker compose -f "$COMPOSE_FILE" --profile pg up -d postgres 2>&1 | tail -3
+    # 两个服务都是必需组件：PG（ADR 0089）与 Redis（ADR 0090，nudge 跨进程广播）。
+    # 卷路径是 compose 里的必填项，缺了 compose 直接报错 —— 这里先给更清楚的话。
+    for required in POSTGRES_PASSWORD LUYUN_PG_DATA LUYUN_REDIS_DATA; do
+      if [[ -z "${!required:-}" ]]; then
+        die "启动 postgres/redis 容器需要 $required。通常先 source deploy/.env.docker 再跑本脚本"
+      fi
+    done
+    docker compose -f "$COMPOSE_FILE" up -d postgres redis 2>&1 | tail -3
   fi
 
   # 等库稳定就绪：连续多次实际查询成功，躲开 initdb 期间的 pg_isready 假阳性
@@ -294,6 +435,13 @@ if [[ "$MODE" == "docker" ]]; then
   # Docker 形态下容器内用服务名互访
   DB_HOST="postgres"
   DB_PASSWORD="${POSTGRES_PASSWORD:-}"
+  # Redis 由 compose 的 redis 服务提供（服务名 redis，**没有发布端口**）。容器里的
+  # 127.0.0.1 指的是容器自己，所以这个形态的默认 URL 必须是服务名 —— 写前端那个
+  # 默认值会把容器配坏。容器首次起来时 docker-entrypoint.sh 也会把空的 REDIS_URL
+  # 补成同一个值。已经显式给了 REDIS_URL 就尊重它（指向外部实例的场景）。
+  REDIS_URL_VALUE="${REDIS_URL:-redis://redis:6379/0}"
+  REDIS_STATUS="ok"
+  REDIS_UNIT="compose 服务 redis"
 else
   # ── systemd 形态：装 PG ──
   if command -v pg_isready >/dev/null 2>&1 && pg_isready -q 2>/dev/null; then
@@ -330,6 +478,18 @@ else
     ok "PostgreSQL 已就绪（连续 ${PG_READY_STREAK} 次查询成功）"
   fi
   DB_HOST="${POSTGRES_HOST:-127.0.0.1}"
+
+  # ── Redis（与 PG 同段：本机装 + enable --now）──
+  # 装不上/起不来不 die：搬库才是这个脚本的主职责，Redis 的问题在总结里显著提示。
+  if ensure_redis_systemd; then
+    ok "Redis 已就绪${REDIS_UNIT:+（$REDIS_UNIT）}"
+  else
+    REDIS_STATUS="fail"
+    warn "Redis 未就绪 —— 应用起不来。请手工安装 Redis 并把 REDIS_URL 写进 $ENV_FILE："
+    warn "  apt-get:  sudo apt-get install -y redis-server && sudo systemctl enable --now redis-server"
+    warn "  dnf/yum:  sudo dnf install -y redis && sudo systemctl enable --now redis"
+    warn "  $ENV_FILE 里写：REDIS_URL=$REDIS_URL_DEFAULT"
+  fi
 fi
 
 # ── 建库 + 建用户 ──────────────────────────────────────────────────────
@@ -442,6 +602,29 @@ else
   fi
 fi
 
+# ── 写 REDIS_URL ───────────────────────────────────────────────────────
+# Redis 是部署必需组件：应用没有 REDIS_URL 会启动即失败，所以这一项与搬库结果
+# 无关 —— 即使上面没拿到 DSN（要人工补 DSN），URL 也照样写。写法与上面
+# DATABASE_BACKEND/POSTGRES_DSN 完全一致：已存在就原地替换，不存在才追加。
+if (( DRY_RUN )); then
+  printf '   [dry-run] REDIS_URL=%s\n' "$(mask_url "$REDIS_URL_VALUE")"
+else
+  # 写失败也不 die（搬库已经完成），但必须把状态降级成 fail，总结里显著提示。
+  redis_write_ok=1
+  if grep -qE '^REDIS_URL=' "$ENV_FILE"; then
+    sed -i "s|^REDIS_URL=.*|REDIS_URL=${REDIS_URL_VALUE}|" "$ENV_FILE" || redis_write_ok=0
+  else
+    printf 'REDIS_URL=%s\n' "$REDIS_URL_VALUE" >> "$ENV_FILE" || redis_write_ok=0
+  fi
+  if (( redis_write_ok )); then
+    chmod 600 "$ENV_FILE" || true
+    ok "REDIS_URL 已写入（$(mask_url "$REDIS_URL_VALUE")）"
+  else
+    REDIS_STATUS="fail"
+    warn "写 $ENV_FILE 失败 —— 请手工加一行 REDIS_URL=$REDIS_URL_DEFAULT（应用没有它起不来）"
+  fi
+fi
+
 # ── 启动 + 冒烟 ────────────────────────────────────────────────────────
 log "启动应用"
 app_start
@@ -482,5 +665,24 @@ case "$MODE" in
 esac
 echo "    curl -s localhost:8000/api/healthz"
 echo
+echo "Redis（部署必需，realtime nudge 的跨进程广播）："
+case "$REDIS_STATUS" in
+  fail)
+    warn "Redis 未就绪 —— 应用起不来。"
+    echo "    手工安装：sudo apt-get install -y redis-server（RHEL 系：sudo dnf install -y redis）"
+    echo "    再 enable --now：sudo systemctl enable --now redis-server   # RHEL 系 unit 名是 redis"
+    echo "    然后把 REDIS_URL=$REDIS_URL_DEFAULT 写进 $ENV_FILE 并重启应用。"
+    ;;
+  *)
+    if (( DRY_RUN )); then
+      echo "    dry-run：计划如上（未实际执行）；REDIS_URL 将写入 $ENV_FILE。"
+    else
+      echo "    已就绪${REDIS_UNIT:+（$REDIS_UNIT）}；REDIS_URL 已写入 $ENV_FILE。"
+    fi
+    ;;
+esac
+echo
 echo "回滚：把 $ENV_FILE 里 DATABASE_BACKEND 改回 sqlite 并重启应用。"
 echo "      源库 $SQLITE_DB 全程未被修改。"
+echo "      Redis 不参与回滚：REDIS_URL 是必需项，删空它应用反而起不来；不想用本机"
+echo "      Redis，就把这一项换成可用实例的地址（或让 compose 提供实例）。"

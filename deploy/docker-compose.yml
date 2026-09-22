@@ -43,9 +43,12 @@ services:
       # scripts/docker_up.sh 会绝对化后导出；手工 compose 请自己给绝对路径。
       - ${LUYUN_HOST_PARENT:?请在 .env.docker 里设置绝对路径，例如 /opt/luyun/deploy/runtime}:/srv/luyun
       - /var/run/docker.sock:/var/run/docker.sock
-    # 应用起不来应该是「库没起来」而不是「连不上库」：等 PG healthcheck 过了再起。
+    # 应用起不来应该是「库没起来」而不是「连不上库」：等 PG 与 Redis 的
+    # healthcheck 都过了再起（两者都是必需组件，见 deploy/README.md 10.1.1）。
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     # Single worker is enforced in entrypoint CMD; do not scale replicas.
     # deploy.replicas intentionally omitted (Compose v2 ignore is fine).
@@ -76,17 +79,18 @@ services:
       timeout: 5s
       retries: 10
 
-  # Redis：realtime nudge 的跨进程广播已接入（services/realtime/redis_bus.py；
-  # 应用侧配 REDIS_URL，见 deploy/README.md 10.1.1）。不配 URL 时它是惰性组件
-  # ——先起容器不改变任何行为，配上 URL 才生效。
-  # 这里**没有**发布端口：只有同一 compose 网络里的容器连得上，URL 用服务名
-  # `redis://redis:6379/0`。要让宿主机上的进程也连它，自行加一行
+  # Redis：**必需组件**（ADR 0090）。realtime nudge 的跨进程广播走它，没有它
+  # 应用启动即失败（services/realtime/redis_bus.py 的 require_redis_url）。
+  # 应用侧配置在 deploy/env.production 里：
+  #   REDIS_URL=redis://redis:6379/0        # 服务名，同一个 compose 网络
+  # 已去掉 profile：`docker compose up` 会连同 luyun / postgres 一起起它。
+  # 这里**没有**发布端口：只有同一 compose 网络里的容器连得上。要让宿主机上的
+  # 进程（裸机 uvicorn）也连它，自行加一行
   #   ports: ["127.0.0.1:6379:6379"]
-  # 「必须单 worker」仍未解除：日志缓冲、爬虫计数器与那 7 个常驻后台循环都还
+  # 「必须单 worker」仍未被解除：日志缓冲、爬虫计数器与那 7 个常驻后台循环都还
   # 没有外置 / 选主，多开 worker 仍会重复采集、重复推送。
   redis:
     image: redis:7-alpine
-    profiles: ["pg"]
     container_name: ${LUYUN_REDIS_CONTAINER:-luyun-redis}
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]

@@ -27,10 +27,12 @@ from services.realtime.hub import RealtimeHub
 from services.realtime.redis_bus import (
     NUDGE_CHANNEL,
     RECONNECT_BACKOFF_INITIAL_SECONDS,
+    REDIS_REQUIRED_HINT,
     RedisBus,
     decode_nudge,
     encode_nudge,
     redis_url_from_env,
+    require_redis_url,
 )
 
 
@@ -467,6 +469,146 @@ class NudgeCodecTest(unittest.TestCase):
         ]
         for raw in bad:
             self.assertIsNone(decode_nudge(raw), repr(raw))
+
+
+class RedisRequiredTest(_NoRedisConfigCase, unittest.TestCase):
+    """部署契约：Redis 是必需组件——没配 `REDIS_URL` 就是部署没做完。
+
+    fail-fast 落在**启动路径**上（`main._require_startup_config`），不是落在
+    `RedisBus` 上：配置问题判死，运行期连不上只退避重连。
+    """
+
+    def test_require_redis_url_raises_with_install_guidance(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            require_redis_url()
+        message = str(ctx.exception)
+        self.assertIs(message, REDIS_REQUIRED_HINT)
+        # 指引必须给全：装什么、配哪里、怎么临时跳过
+        for hint in ("redis-server", "REDIS_URL", "env.production", "DISABLE_BACKGROUND_TASKS"):
+            self.assertIn(hint, message)
+
+    def test_whitespace_url_counts_as_not_configured(self):
+        settings.REDIS_URL = "   "
+        with self.assertRaises(RuntimeError):
+            require_redis_url()
+        self.assertFalse(RedisBus(handler=None).enabled)
+
+    def test_require_redis_url_returns_configured_url(self):
+        settings.REDIS_URL = "redis://127.0.0.1:6379/0"
+        self.assertEqual(require_redis_url(), "redis://127.0.0.1:6379/0")
+
+    def test_env_override_satisfies_the_contract(self):
+        os.environ["LUYUN_REDIS_URL"] = "redis://from-env:6379/1"
+        self.assertEqual(require_redis_url(), "redis://from-env:6379/1")
+
+
+class StartupRequiresRedisTest(_NoRedisConfigCase, unittest.TestCase):
+    """启动期硬前置：`main._require_startup_config()`。
+
+    刻意只调这个薄函数、不进 lifespan —— 真的进 lifespan 会拉起爬虫去连真实 POS。
+    代价是"lifespan 里确实调了它"只靠代码可见性保证（一行调用，评审看得见）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._orig_bg = settings.DISABLE_BACKGROUND_TASKS
+        settings.DISABLE_BACKGROUND_TASKS = False
+        self.addCleanup(self._restore_bg)
+
+    def _restore_bg(self):
+        settings.DISABLE_BACKGROUND_TASKS = self._orig_bg
+
+    def test_missing_redis_url_fails_startup(self):
+        import main
+
+        with self.assertRaises(RuntimeError) as ctx:
+            main._require_startup_config()
+        self.assertIs(str(ctx.exception), REDIS_REQUIRED_HINT)
+
+    def test_configured_redis_url_passes(self):
+        import main
+
+        settings.REDIS_URL = "redis://127.0.0.1:6379/0"
+        main._require_startup_config()  # 不抛即通过
+
+    def test_disabled_background_tasks_skips_the_requirement(self):
+        import main
+
+        settings.DISABLE_BACKGROUND_TASKS = True
+        main._require_startup_config()  # 测试 / 一次性工具不需要 Redis
+
+
+class RedisTimeoutContractTest(unittest.IsolatedAsyncioTestCase):
+    """超时只兜「连接期 + 发送」，**绝不**兜订阅的读。
+
+    2026-09 现场踩过：redis-py 5.0.x 把客户端的 `socket_timeout` 作用到 pubsub 的
+    空闲读上，安静的频道每 N 秒就抛一次 `TimeoutError: Timeout reading from ...`，
+    订阅循环跟着重连——日志刷屏，而且重连窗口内的 nudge 直接丢（pub/sub 没有重放）。
+    所以这里把「不给 client 设 socket_timeout」钉成契约。
+    """
+
+    def test_client_is_created_without_socket_timeout(self):
+        from unittest import mock
+
+        from redis import asyncio as redis_asyncio
+
+        from services.realtime.redis_bus import OP_TIMEOUT_SECONDS
+
+        bus = RedisBus(url="redis://127.0.0.1:6379/0")
+        with mock.patch.object(
+            redis_asyncio, "from_url", return_value=object()
+        ) as from_url:
+            bus._create_client()
+
+        kwargs = from_url.call_args.kwargs
+        self.assertNotIn("socket_timeout", kwargs)
+        self.assertEqual(kwargs["socket_connect_timeout"], OP_TIMEOUT_SECONDS)
+        self.assertTrue(kwargs["decode_responses"])
+
+    async def test_publish_timeout_does_not_hang_the_request(self):
+        server = _FakeRedisServer()
+
+        class _HangingPublishRedis(_FakeRedis):
+            async def publish(self, channel, data):
+                await asyncio.sleep(3600)  # 模拟"半死"：TCP 通、不回包
+
+        bus = RedisBus(
+            url="redis://fake",
+            client_factory=lambda: _HangingPublishRedis(server),
+            op_timeout=0.05,
+            backoff_initial=0.01,
+        )
+        await bus.start()
+        try:
+            self.assertTrue(await _wait_for(lambda: bus.connected))
+            started = asyncio.get_running_loop().time()
+            self.assertFalse(await bus.publish("orders", {"station": "A"}))
+            self.assertLess(asyncio.get_running_loop().time() - started, 1.0)
+        finally:
+            await bus.stop()
+
+    async def test_connect_probe_timeout_keeps_retrying(self):
+        """连接期探测也要有超时，否则半死连接会把订阅循环永久挂住。"""
+        server = _FakeRedisServer()
+
+        class _HangingPingRedis(_FakeRedis):
+            async def ping(self):
+                await asyncio.sleep(3600)
+
+        bus = RedisBus(
+            url="redis://fake",
+            client_factory=lambda: _HangingPingRedis(server),
+            op_timeout=0.05,
+            backoff_initial=0.01,
+        )
+        await bus.start()
+        try:
+            await asyncio.sleep(0.2)
+            self.assertFalse(bus.connected)  # 连不上，但循环还活着（没被挂死）
+            self.assertFalse(bus._task.done())
+        finally:
+            await bus.stop()
+        self.assertFalse(bus.connected)
 
 
 if __name__ == "__main__":

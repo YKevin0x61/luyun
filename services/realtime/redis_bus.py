@@ -7,12 +7,14 @@ scraper 所在进程的变更通知到别的 worker 上的 WS 连接，就需要
 通道——这里用 Redis pub/sub，消息体就是 nudge 协议本身（`topic` + `scope`）加上
 发送方实例 id，**不带**数据、不带序号。
 
-设计约束（可降级是第一要求）：
+设计约束：
 
-- `REDIS_URL` / `LUYUN_REDIS_URL` 未配置 → `enabled is False`，所有方法退化成
-  no-op，行为与"没有这个模块"完全一致；
-- 连不上、连上后断开、发不出去 → 只记日志 + 退避重连（1s 起、翻倍、封顶 30s），
-  **绝不**抛给调用方，也**绝不**影响应用启动与请求；
+- **`REDIS_URL` 未配置 = 部署不完整**：启动路径用 `require_redis_url()` fail-fast
+  （RuntimeError + 安装指引），与 `DATABASE_BACKEND` 不是 postgres 时同款硬切。
+  所以本模块的 `RedisBus` 自己仍然是"配置了才动"，判断落在启动路径上；
+- **配置了但连不上 / 连上后断开 / 发不出去** → 只记日志 + 退避重连（1s 起、翻倍、
+  封顶 30s），**绝不**抛给调用方，也**绝不**影响应用启动与请求。这条是刻意的：
+  Redis 抖动不该让门店的采集与推送停摆，那比"nudge 暂时到不了别的进程"严重得多；
 - 本地派发不经过本模块（见 `hub.RealtimeHub._dispatch_local`），所以总线坏掉只
   影响跨进程传播，不丢本进程的 nudge。
 
@@ -38,9 +40,15 @@ NUDGE_CHANNEL = "luyun:nudge"
 RECONNECT_BACKOFF_INITIAL_SECONDS = 1.0
 RECONNECT_BACKOFF_MAX_SECONDS = 30.0
 
-# 单条命令的 socket 超时。`publish()` 在请求路径上被 await，Redis "半死"（TCP
-# 连上了但不回包）时不能把业务请求拖住。
-SOCKET_TIMEOUT_SECONDS = 2.0
+# 单次 Redis 操作的超时（连接就绪探测、SUBSCRIBE、publish）。`publish()` 在请求
+# 路径上被 await，Redis "半死"（TCP 连上了但不回包）时不能把业务请求拖住。
+#
+# **不要把它当成 redis-py 的 `socket_timeout` 用**（2026-09 现场踩过）：redis-py
+# 5.0.x 的 `socket_timeout` 会作用到 pubsub 的空闲读上——频道安静超过 N 秒就抛
+# `TimeoutError: Timeout reading from ...`，订阅循环于是每 N 秒重连一次（日志刷屏、
+# 重连窗口内的 nudge 直接丢，pub/sub 没有重放）。所以这里只在**连接期与发送**上
+# 用 `asyncio.wait_for` 兜超时，订阅的 `listen()` 必须保持"无限等"。
+OP_TIMEOUT_SECONDS = 2.0
 
 # handler 签名：`async def handler(topic: str, scope: dict) -> None`
 NudgeHandler = Callable[[str, dict], Any]
@@ -60,6 +68,33 @@ def redis_url_from_env(config: Any = None) -> str:
 
         config = settings
     return getattr(config, "REDIS_URL", "") or ""
+
+
+# 部署契约：Redis 是**必需组件**（realtime nudge 的跨进程广播）。`REDIS_URL` 没配
+# 就是部署没做完——启动直接失败，与 `DATABASE_BACKEND` 不是 postgres 时
+# `connect()` 的处理一致。注意区分两类失败：**没配置**判死（配置问题，重试没有
+# 意义），**连不上**只退避重连（运行期抖动，绝不能因此停掉门店）。
+REDIS_REQUIRED_HINT = (
+    "REDIS_URL 未配置：Redis 是部署必需组件（realtime nudge 的跨进程广播）。"
+    "装一个：Ubuntu/Debian `sudo apt-get install -y redis-server`；"
+    "RHEL/Fedora `sudo dnf install -y redis`；"
+    "Docker `docker compose -f deploy/docker-compose.yml up -d`。"
+    "然后在 deploy/env.production 里设置 REDIS_URL=redis://127.0.0.1:6379/0"
+    "（模板 deploy/env.production.example，说明 deploy/README.md 10.1.1）。"
+    "本地调试 / 测试若确实不需要常驻后台任务，可设 DISABLE_BACKGROUND_TASKS=true 跳过。"
+)
+
+
+def require_redis_url(config: Any = None) -> str:
+    """返回配置好的 Redis 连接串；没配置就抛 `RuntimeError`（部署契约）。
+
+    启动路径调它做 fail-fast：没配 Redis 属于**部署不完整**，不是运行期故障。
+    运行期（连不上、中途掉线）不走这里——`RedisBus` 一律退避重连、不抛。
+    """
+    url = redis_url_from_env(config).strip()
+    if not url:
+        raise RuntimeError(REDIS_REQUIRED_HINT)
+    return url
 
 
 def encode_nudge(topic: str, scope: Optional[dict] = None, origin: str = "") -> str:
@@ -153,7 +188,7 @@ class RedisBus:
         client_factory: Optional[Callable[[], Any]] = None,
         backoff_initial: float = RECONNECT_BACKOFF_INITIAL_SECONDS,
         backoff_max: float = RECONNECT_BACKOFF_MAX_SECONDS,
-        socket_timeout: float = SOCKET_TIMEOUT_SECONDS,
+        op_timeout: float = OP_TIMEOUT_SECONDS,
     ):
         # 进程实例 id：订阅回调据此跳过自己发的消息，避免"自己派发一次 + 订阅
         # 回来再派发一次"的重复。
@@ -165,7 +200,7 @@ class RedisBus:
         self._client_factory = client_factory
         self._backoff_initial = backoff_initial
         self._backoff_max = backoff_max
-        self._socket_timeout = socket_timeout
+        self._op_timeout = op_timeout
         self._task: Optional[asyncio.Task] = None
         self._client: Any = None
         self._connected = False
@@ -214,19 +249,29 @@ class RedisBus:
     async def publish(self, topic: str, scope: Optional[dict] = None) -> bool:
         """把 nudge 发到频道，返回是否真的发出去了。
 
-        未启用 / 未连接 / 发送失败都只记日志：调用方（hub）已经完成本地派发，
-        总线只负责把它捎给别的进程，Redis 抖动不该让业务请求报错。
+        未启用 / 未连接 / 发送失败 / 发送超时都只记日志：调用方（hub）已经完成
+        本地派发，总线只负责把它捎给别的进程，Redis 抖动不该让业务请求报错。
+        超时用 `wait_for` 兜（不是 redis-py 的 `socket_timeout`，理由见
+        `OP_TIMEOUT_SECONDS`）：Redis "半死"时不能让请求挂在 publish 上。
         """
         client = self._client
         if not self.enabled or client is None:
             logger.debug("Redis nudge 总线未就绪，跳过跨进程广播（topic=%s）", topic)
             return False
         try:
-            await client.publish(
-                NUDGE_CHANNEL, encode_nudge(topic, scope, self.instance_id)
+            await asyncio.wait_for(
+                client.publish(
+                    NUDGE_CHANNEL, encode_nudge(topic, scope, self.instance_id)
+                ),
+                timeout=self._op_timeout,
             )
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError:
+            logger.warning(
+                "⚠️ Redis nudge 总线发送超时（topic=%s，%.1fs）", topic, self._op_timeout
+            )
+            return False
         except Exception as exc:
             logger.warning("⚠️ Redis nudge 总线发送失败（topic=%s）: %s", topic, exc)
             return False
@@ -238,12 +283,23 @@ class RedisBus:
         # 惰性 import：没装 redis 包时降级为"总线不可用"，而不是让应用起不来。
         from redis import asyncio as redis_asyncio
 
+        # 只给**连接**设超时，不给 socket 设 `socket_timeout`：redis-py 5.0.x 会把
+        # 它作用到 pubsub 的空闲读上，安静的频道会让订阅每 N 秒被判超时重连一次
+        # （详见 OP_TIMEOUT_SECONDS 的注释）。连接期与发送的超时改由 wait_for 兜。
         return redis_asyncio.from_url(
             self._url,
             decode_responses=True,
-            socket_connect_timeout=self._socket_timeout,
-            socket_timeout=self._socket_timeout,
+            socket_connect_timeout=self._op_timeout,
         )
+
+    async def _connect_and_subscribe(self, client: Any, pubsub: Any) -> None:
+        """连接就绪探测：PING + SUBSCRIBE。
+
+        用 `wait_for` 兜"半死"连接（TCP 通、不回包）。`pubsub` 由调用方先建好再
+        传进来，这样超时被取消时外层 `finally` 仍拿得到它去做清理。
+        """
+        await client.ping()
+        await pubsub.subscribe(NUDGE_CHANNEL)
 
     async def _run(self) -> None:
         """订阅循环：连上就收消息，断了就退避重连；每次连上都重新订阅一次。"""
@@ -253,9 +309,11 @@ class RedisBus:
             pubsub = None
             try:
                 client = self._create_client()
-                await client.ping()
                 pubsub = client.pubsub()
-                await pubsub.subscribe(NUDGE_CHANNEL)
+                await asyncio.wait_for(
+                    self._connect_and_subscribe(client, pubsub),
+                    timeout=self._op_timeout,
+                )
                 self._client = client
                 self._connected = True
                 backoff = self._backoff_initial
@@ -264,6 +322,7 @@ class RedisBus:
                     _redact_url(self._url),
                     NUDGE_CHANNEL,
                 )
+                # 这里的读**必须**无限等：频道安静是常态，不是故障。
                 async for message in pubsub.listen():
                     if not isinstance(message, dict):
                         continue
