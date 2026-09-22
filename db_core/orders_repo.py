@@ -338,16 +338,20 @@ class _OrdersRepoMixin:
             tdb = self.table("orders")
             async with tdb.conn.cursor() as cursor:
                 for oid in order_ids:
-                    if dish_name:
-                        await cursor.execute(
-                            "DELETE FROM orders WHERE (id = ? OR business_flow_id = ?) AND dish_name = ?",
-                            (oid, oid, dish_name)
-                        )
+                    # 调用方可能传主键 id，也可能传 business_flow_id。不能把同一个 oid 绑给
+                    # 两种类型的列（`id = ? OR business_flow_id = ?`）：dialect 会逐位编号成
+                    # $1/$2，同一个 oid 传了两遍，而 $1 按 bigint 编码，传业务号时 asyncpg
+                    # 直接抛 "invalid input for query argument"，整条 DELETE 失败（回退分支
+                    # 根本执行不到），异常还被外层 except 吞成 success=False。所以与
+                    # get_order_by_id 一致：纯数字才按主键删，否则只用独立语句按业务号删。
+                    if str(oid).isdigit():
+                        sql, params = "DELETE FROM orders WHERE id = ?", (int(oid),)
                     else:
-                        await cursor.execute(
-                            "DELETE FROM orders WHERE id = ? OR business_flow_id = ?",
-                            (oid, oid)
-                        )
+                        sql, params = "DELETE FROM orders WHERE business_flow_id = ?", (str(oid),)
+                    if dish_name:
+                        sql += " AND dish_name = ?"
+                        params += (dish_name,)
+                    await cursor.execute(sql, params)
                     deleted_count += cursor.rowcount
             await tdb.commit()
             logger.info(f"✅ 批量删除完成 - 删除: {deleted_count}条")
