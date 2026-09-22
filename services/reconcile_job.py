@@ -122,6 +122,11 @@ async def execute_reconcile(
             await _set_stage(resolved_date, "error", running=False, error="爬虫未初始化，请检查凭据")
             return {"success": False, "error": "爬虫未初始化，请检查凭据"}
 
+        # `api_failures` 在 PosHttpClient 上是进程内累计值，健康状态里放的必须是
+        # 本次对账的增量——与采集轮同一口径（见 CORR-03）。登录走 Playwright、
+        # 不经 post_form，所以这个起点已经覆盖本次对账发起的全部 POS 请求。
+        api_failures_before = adapter.settled_api_failures
+
         await _set_stage(resolved_date, "fetching_bills")
         result, bills_meta = await run_settled_reconcile(
             adapter, db, resolved_date, on_progress=_on_bill_progress
@@ -158,7 +163,9 @@ async def execute_reconcile(
 
         await _set_stage(resolved_date, "writing_report")
         md_path, json_path = write_reconcile_outputs(result, out_dir)
-        update_runtime_health(api_failures=adapter.settled_api_failures)
+        update_runtime_health(
+            api_failures=max(adapter.settled_api_failures - api_failures_before, 0)
+        )
         record_reconcile_summary(
             resolved_date,
             missed_keys=result.missed_keys,

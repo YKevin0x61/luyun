@@ -1293,7 +1293,12 @@ async def run_restaurant_scraper():
     """运行餐厅数据爬取任务"""
     global restaurant_scraper
 
-    failure_tracker = ScraperFailureTracker(alert_sender=_send_scraper_health_alert)
+    # 只看「有没有抛异常」会把 run_cycle 吞掉的明细接口硬失败记成成功（CORR-03），
+    # 所以把进程内的 POS 失败计数交给 tracker：本轮增量为 0 才算干净的一轮。
+    failure_tracker = ScraperFailureTracker(
+        alert_sender=_send_scraper_health_alert,
+        api_failures_fn=lambda: restaurant_scraper.settled_api_failures,
+    )
 
     try:
         logger.info("🔄 开始餐厅数据爬取任务")

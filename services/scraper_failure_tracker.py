@@ -3,9 +3,13 @@
 """爬虫主循环连续失败计数与健康告警（不依赖 Playwright/网络，可独立单测）。
 
 `run_restaurant_scraper()` 的主循环把每轮抓取委托给
-`ScraperFailureTracker.run_once()`：异常时计数 +1、写入 `scraper_health`，
+`ScraperFailureTracker.run_once()`：失败时计数 +1、写入 `scraper_health`，
 并按「次数门槛 + 最小间隔」两道门去抖后经企微通道推送一次健康告警；
 成功一轮则清零计数。
+
+「失败」不等于「抛异常」：`run_cycle` 会把明细接口的硬失败吞成 `None` 照常返回
+（CORR-03），所以另按本轮 `api_failures` 增量判定——注入的 `api_failures_fn` 读的是
+`PosHttpClient` 的进程内累计计数，本轮增量为 0 才算干净的一轮。
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from services.scraper_health import record_scraper_failure, record_scraper_succe
 logger = logging.getLogger(__name__)
 
 AlertSender = Callable[[str], Awaitable[Any]]
+ApiFailuresFn = Callable[[], int]
 
 
 def should_alert_scraper_failure(
@@ -69,8 +74,9 @@ def build_scraper_failure_alert_message(consecutive_failures: int, error: str) -
 class ScraperFailureTracker:
     """维护爬虫主循环的连续失败计数，写健康状态并按阈值去抖发送企微告警。
 
-    调用方注入实际抓取逻辑（`scrape_fn`）与告警发送回调（`alert_sender`），
-    因此单测可用抛异常的假抓取函数与假告警通道，无需真实 Playwright/网络。
+    调用方注入实际抓取逻辑（`scrape_fn`）、告警发送回调（`alert_sender`），以及
+    读取 POS 失败计数的探针（`api_failures_fn`），因此单测可用假抓取函数、假告警
+    通道与假计数，无需真实 Playwright/网络。
     """
 
     def __init__(
@@ -79,6 +85,7 @@ class ScraperFailureTracker:
         alert_sender: Optional[AlertSender] = None,
         threshold: Optional[int] = None,
         min_interval_seconds: Optional[int] = None,
+        api_failures_fn: Optional[ApiFailuresFn] = None,
     ) -> None:
         self._alert_sender = alert_sender
         self._threshold = settings.SCRAPER_ALERT_FAILURE_THRESHOLD if threshold is None else threshold
@@ -87,6 +94,9 @@ class ScraperFailureTracker:
             if min_interval_seconds is None
             else min_interval_seconds
         )
+        # 进程内累计的 POS 请求失败计数（生产上指向 restaurant_scraper.settled_api_failures）。
+        # 为 None 时退回旧口径：只有抛异常才算失败。
+        self._api_failures_fn = api_failures_fn
         self.consecutive_failures = 0
         # 上一次告警的时间（time.monotonic）；成功一轮会连同计数一起复位，
         # 这样「好了又坏」是新的一场故障，可以立刻再提醒一次。
@@ -95,30 +105,67 @@ class ScraperFailureTracker:
     async def run_once(self, scrape_fn: Callable[[], Awaitable[Any]]) -> Any:
         """执行一轮抓取。
 
-        成功：清零连续失败计数并写入健康状态为 "ok"，返回 `scrape_fn` 的结果。
-        异常：连续失败计数 +1，写入健康状态为 "error"，过了「次数门槛 + 最小间隔」
-        才推送企微告警，随后重新抛出异常，交由调用方（主循环）保持原有的日志与
-        sleep 重试逻辑。
+        成功（本轮无硬失败）：清零连续失败计数并写入健康状态为 "ok"，返回 `scrape_fn` 的结果。
+
+        失败：连续失败计数 +1，写入健康状态为 "error"，过了「次数门槛 + 最小间隔」
+        才推送企微告警。两种失败等价：
+
+        - `scrape_fn` 抛异常：随后重新抛出，交由调用方（主循环）保持原有的日志与
+          sleep 重试逻辑；
+        - 本轮 `api_failures` 有增量但不抛异常：不重抛（整轮本来就跑完了），只记失败。
         """
+        api_failures_before = self._read_api_failures()
         try:
             result = await scrape_fn()
         except Exception as exc:
             self.consecutive_failures += 1
             record_scraper_failure(self.consecutive_failures, str(exc))
-            if should_alert_scraper_failure(
-                self.consecutive_failures,
-                self._threshold,
-                last_alert_at=self.last_alert_at,
-                min_interval_seconds=self._min_interval_seconds,
-            ):
-                self.last_alert_at = time.monotonic()
-                await self._send_alert(self.consecutive_failures, str(exc))
+            await self._alert_if_needed(str(exc))
             raise
-        else:
-            self.consecutive_failures = 0
-            self.last_alert_at = None
-            record_scraper_success()
+
+        # 没抛异常不等于这一轮干净：run_cycle 会把明细接口的硬失败吞成 None 照常返回，
+        # 只看异常会让健康状态恒为 ok（CORR-03：现场 api_failures=1 与 status=ok 并存）。
+        round_failures = self._round_api_failures(api_failures_before)
+        if round_failures:
+            error = f"本轮 POS 明细 API 失败 {round_failures} 次（未抛异常，见采集日志）"
+            self.consecutive_failures += 1
+            record_scraper_failure(self.consecutive_failures, error)
+            await self._alert_if_needed(error)
             return result
+
+        self.consecutive_failures = 0
+        self.last_alert_at = None
+        record_scraper_success()
+        return result
+
+    def _read_api_failures(self) -> Optional[int]:
+        """读 POS 失败计数；未注入探针（或探针自身失败）时返回 None。"""
+        if self._api_failures_fn is None:
+            return None
+        try:
+            return int(self._api_failures_fn())
+        except Exception as exc:
+            logger.warning("读取 POS API 失败计数失败，本轮按无硬失败判定: %s", exc)
+            return None
+
+    def _round_api_failures(self, before: Optional[int]) -> int:
+        """本轮硬失败次数 = 计数增量（累计值本身不该判成败）。"""
+        if before is None:
+            return 0
+        after = self._read_api_failures()
+        if after is None:
+            return 0
+        return max(after - before, 0)
+
+    async def _alert_if_needed(self, error: str) -> None:
+        if should_alert_scraper_failure(
+            self.consecutive_failures,
+            self._threshold,
+            last_alert_at=self.last_alert_at,
+            min_interval_seconds=self._min_interval_seconds,
+        ):
+            self.last_alert_at = time.monotonic()
+            await self._send_alert(self.consecutive_failures, error)
 
     async def _send_alert(self, consecutive_failures: int, error: str) -> None:
         if self._alert_sender is None:

@@ -178,6 +178,10 @@ class RestaurantScraper:
         from services.realtime.hub import realtime_hub
         from services.scraper_health import update_runtime_health
 
+        # 本轮起点：`api_failures` 是进程内累计值，健康状态里写的是本轮增量
+        # （消费方拿它判断「这一轮有没有硬失败」，见 CORR-03）。
+        api_failures_before = self.settled_api_failures
+
         if not await self.ensure_ready():
             login_failures = self.session.consecutive_login_failures
             if login_failures >= settings.SCRAPER_ALERT_FAILURE_THRESHOLD:
@@ -231,7 +235,7 @@ class RestaurantScraper:
             )
 
         update_runtime_health(
-            api_failures=self.settled_api_failures,
+            api_failures=max(self.settled_api_failures - api_failures_before, 0),
             last_scrape_at=datetime.now(CHINA_TZ).isoformat(),
         )
 

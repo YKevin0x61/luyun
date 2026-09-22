@@ -123,7 +123,7 @@ def build_data_quality_status_message(
     """企微定时任务 / 预览用的数据质量摘要（非阈值过滤）。"""
     lines = [f"【数据质量日报】{biz_date}"]
     api_failures = int(health.get("api_failures") or 0)
-    lines.append(f"采集 API 失败累计: {api_failures}")
+    lines.append(f"采集 API 失败（最近一轮）: {api_failures}")
     if health.get("last_scrape_at"):
         lines.append(f"最后采集: {health['last_scrape_at']}")
     summary = reconcile_summary or {}

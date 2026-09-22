@@ -25,6 +25,22 @@ class FailingScrape:
         raise RuntimeError(f"{self._message_prefix}-{self.calls}")
 
 
+class SoftFailingScrape:
+    """模拟 `run_cycle` 把内部失败吞掉的那一轮：api_failures +1，但不抛异常。
+
+    现场路径：餐桌明细 POST 硬失败 → `pos_http_client.post_form()` 计数 +1 并抛出 →
+    `pos_session.fetch_table_orders()` 捕获后返回 None → 整轮照常跑完。
+    """
+
+    def __init__(self, counter: dict, result: str = "cycle-done"):
+        self._counter = counter
+        self._result = result
+
+    async def __call__(self):
+        self._counter["api_failures"] += 1
+        return self._result
+
+
 class RecordingAlertSender:
     """记录已发送的告警文本，代替真实企微 webhook 通道。"""
 
@@ -82,6 +98,75 @@ class ScraperFailureTrackerTest(unittest.IsolatedAsyncioTestCase):
         health = read_health()
         self.assertEqual(health["consecutive_failures"], 0)
         self.assertEqual(health["status"], "ok")
+
+    async def test_round_with_api_failures_but_no_exception_is_not_recorded_as_success(self):
+        """本轮有硬失败（api_failures 增量）但不抛异常时，不许记成成功那一轮。
+
+        CORR-03：`run_cycle` 吞掉明细接口失败后照常返回，旧实现只看「有没有抛异常」，
+        于是写 `status="ok"`、清零连续失败——看板全绿、企微告警不响。
+        """
+        settings.SCRAPER_ALERT_FAILURE_THRESHOLD = 3
+        counter = {"api_failures": 0}
+        tracker = ScraperFailureTracker(
+            alert_sender=None,
+            api_failures_fn=lambda: counter["api_failures"],
+        )
+
+        with self.assertRaises(RuntimeError):
+            await tracker.run_once(FailingScrape())
+        self.assertEqual(tracker.consecutive_failures, 1)
+
+        result = await tracker.run_once(SoftFailingScrape(counter))
+
+        self.assertEqual(result, "cycle-done")
+        self.assertEqual(tracker.consecutive_failures, 2, "连续失败计数不许被清零")
+        health = read_health()
+        self.assertNotEqual(health["status"], "ok")
+        self.assertEqual(health["consecutive_failures"], 2)
+        self.assertIn("API 失败", health["last_error"])
+
+    async def test_clean_round_records_success_even_with_nonzero_cumulative_failures(self):
+        """干净一轮仍写 status=ok：判据是本轮增量，而不是进程累计值。
+
+        `api_failures` 是进程启动以来的累计计数（PosHttpClient），早先几轮的失败
+        不该把之后每一轮都判成失败。
+        """
+        counter = {"api_failures": 5}
+        tracker = ScraperFailureTracker(
+            alert_sender=None,
+            api_failures_fn=lambda: counter["api_failures"],
+        )
+
+        async def ok_scrape():
+            return "ok"
+
+        result = await tracker.run_once(ok_scrape)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(tracker.consecutive_failures, 0)
+        health = read_health()
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(health["consecutive_failures"], 0)
+
+    async def test_soft_failure_rounds_reach_alert_threshold(self):
+        """软失败轮同样把连续失败推到门槛并触发企微告警（CORR-03 的核心影响）。"""
+        settings.SCRAPER_ALERT_FAILURE_THRESHOLD = 2
+        counter = {"api_failures": 0}
+        alert_sender = RecordingAlertSender()
+        tracker = ScraperFailureTracker(
+            alert_sender=alert_sender,
+            api_failures_fn=lambda: counter["api_failures"],
+            min_interval_seconds=0,
+        )
+        soft_failing_scrape = SoftFailingScrape(counter)
+
+        await tracker.run_once(soft_failing_scrape)
+        self.assertEqual(len(alert_sender.messages), 0, "未达阈值前不应告警")
+
+        await tracker.run_once(soft_failing_scrape)
+        self.assertEqual(len(alert_sender.messages), 1, "软失败达阈值也应告警一次")
+        self.assertIn("2", alert_sender.messages[0])
+        self.assertIn("API 失败", alert_sender.messages[0])
 
     async def test_alert_sent_exactly_once_when_first_crossing_threshold(self):
         threshold = 3
