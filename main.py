@@ -10,7 +10,7 @@ import uvicorn
 from contextlib import asynccontextmanager
 from collections import deque
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -161,6 +161,8 @@ hygiene_archive = None
 #   5 餐厅爬虫      6 日终对账调度  7 未映射菜品巡检
 # 辅助 task（幂等或本身可多实例，但仍是常驻协程）：
 #   8 内存监控  9 内存清理  10 磁盘守护  11 realtime Redis 订阅  12 日志落库消费者
+#   —— 这份名单（含标签）的唯一来源是下面的 `_AUXILIARY_RESIDENT_TASKS`，
+#   `AUXILIARY_RESIDENT_TASK_COUNT` 必须与它等长（有测试钉着）。
 #
 # 8/9/10/12 由各自的组件在内部创建（`memory_manager.start_background_tasks()`、
 # `disk_guard.start()`、`log_storage.start()`），11 由 `realtime_hub.start_bus()` 起；
@@ -187,34 +189,37 @@ def _start_resident_task(label: str, coro):
     return task
 
 
+# 辅助常驻 task 的 `(label, 句柄访问器)` 清单：**标签的唯一来源**。
+# 注册（`_register_auxiliary_resident_tasks`）与关闭时的跳过判定
+# （`_AUXILIARY_TASK_LABELS`）都从它派生——同一组字面量抄三遍时，漏改任何一处都会
+# 静默失配：标签对不上的辅助 task 会在 `finally` 里被当业务循环 cancel，打断它的收尾
+# （日志 flush、断 Redis）。
+# 存访问器而不是句柄：这些组件在 lifespan 里才起 task，import 时取不到值。
+_AUXILIARY_RESIDENT_TASKS: "tuple[tuple[str, Callable[[], object]], ...]" = (
+    ("内存监控", lambda: memory_manager.monitoring_task),
+    ("内存清理", lambda: memory_manager.cleanup_task),
+    ("磁盘守护", lambda: disk_guard.task),
+    ("realtime Redis 订阅", lambda: realtime_hub.bus and realtime_hub.bus.task),
+    ("日志落库消费者", lambda: log_storage.consumer_task),
+)
+
+# 辅助 task 的标签集合：关闭时由各组件自己收尾（要 flush 日志、要断 Redis），
+# `finally` 里的统一循环跳过它们，避免重复 cancel 打断收尾逻辑。
+_AUXILIARY_TASK_LABELS = frozenset(label for label, _ in _AUXILIARY_RESIDENT_TASKS)
+
+
 def _register_auxiliary_resident_tasks() -> None:
     """把辅助组件内部起的常驻 task 也登记进清单（句柄仍由各组件自己管）。
 
     这些 task 由 `memory_manager.start_background_tasks()` / `disk_guard.start()` /
     `log_storage.start()` / `realtime_hub.start_bus()` 在内部 `create_task`，main.py
     拿不到返回值——但"常驻 task 有几个"必须能被核对（PERF-06），所以按各组件自己的
-    只读访问器记账。
+    只读访问器记账；清单见 `_AUXILIARY_RESIDENT_TASKS`。
     """
-    for label, task in (
-        ("内存监控", memory_manager.monitoring_task),
-        ("内存清理", memory_manager.cleanup_task),
-        ("磁盘守护", disk_guard.task),
-        ("realtime Redis 订阅", realtime_hub.bus and realtime_hub.bus.task),
-        ("日志落库消费者", log_storage.consumer_task),
-    ):
+    for label, handle in _AUXILIARY_RESIDENT_TASKS:
+        task = handle()
         if task is not None:
             _register_resident_task(label, task)
-
-
-# 辅助 task 的标签集合：关闭时由各组件自己收尾（要 flush 日志、要断 Redis），
-# `finally` 里的统一循环跳过它们，避免重复 cancel 打断收尾逻辑。
-_AUXILIARY_TASK_LABELS = frozenset({
-    "内存监控",
-    "内存清理",
-    "磁盘守护",
-    "realtime Redis 订阅",
-    "日志落库消费者",
-})
 
 
 def serialize_all(obj):

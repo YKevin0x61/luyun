@@ -6,7 +6,7 @@
 
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # 基础模型
 class OrderBase(BaseModel):
@@ -37,8 +37,9 @@ class OrderResponse(OrderBase):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
-    class Config:
-        populate_by_name = True
+    # 与 pydantic v2 的 `class Config` 写法等价，但不再触发
+    # PydanticDeprecatedSince20（v3 会移除旧写法）。
+    model_config = ConfigDict(populate_by_name=True)
 
 
 # 档口统计模型

@@ -13,7 +13,7 @@ from typing import List, Dict, Optional, Any
 from config import ORDER_LINE_REVENUE_SQL
 
 from db_core.utils import CHINA_TZ, ensure_beijing_datetime
-from services.business_day import BUSINESS_DAY_CUT_HOUR
+from services.business_day import business_date_range
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +37,16 @@ class _ReportsMixin:
         from services.dish_normalize import normalize_dish_name as normalize
 
         def to_local_dt(date_str: str, end_of_range: bool = False):
-            """营业日 → 北京时时间戳。``end_of_range`` 时取**次日** 06:00（开区间右端）。"""
-            dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
-                hour=BUSINESS_DAY_CUT_HOUR, minute=0, second=0, microsecond=0
-            )
-            if end_of_range:
-                dt = dt + timedelta(days=1)
-            return dt.replace(tzinfo=CHINA_TZ)
+            """营业日 → 北京时时间戳。``end_of_range`` 时取**次日** 06:00（开区间右端）。
+
+            06:00 切点与"次日"不在这里手算：`business_date_range` 给的就是
+            ``[当日 06:00, 次日 06:00)`` 这个半开区间的两端（切日的唯一实现，CORR-05）。
+            解析仍走 `strptime`：它比 `date.fromisoformat` 宽容（接受 `2026-9-2` 这类
+            不补零写法），换掉解析方式等于改了既有输入面。
+            """
+            day = datetime.strptime(date_str, "%Y-%m-%d").date()
+            start, end = business_date_range(day.isoformat())
+            return end if end_of_range else start
 
         start_dt = to_local_dt(start_date)
         end_dt = to_local_dt(end_date, end_of_range=True)

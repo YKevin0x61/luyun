@@ -5,7 +5,8 @@
 后端已收敛为 PostgreSQL（ADR 0089）：SQLite 的「临时目录里的一个库文件」隔离
 不再存在，测试改为
 
-1. 把 ``DATABASE_BACKEND`` 与 DSN 钉死到专用测试库 ``luyun_test``；
+1. 把 ``DATABASE_BACKEND`` 与 DSN 钉死到专用测试库（``luyun_test`` 及其派生名，
+   见 ``TEST_DB_NAME_RE``）；
 2. 会话开始时用 ``migrations/pg/*.sql`` 重建 schema（0001 是 DROP + CREATE）；
 3. 每个用例开始前 ``TRUNCATE`` 全部表（``RESTART IDENTITY CASCADE``）；
 4. ``DATABASE_DIR`` 指向临时目录，让凭据/照片这类文件不落到仓库 ``data/``。
@@ -16,6 +17,7 @@
 
 import glob
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -25,6 +27,15 @@ import time
 import pytest
 
 TEST_DB_NAME = "luyun_test"
+
+# 可接受的库名只有两种**有界**形态（判定对象是解析后的库名，见 pytest_configure）：
+#   1. `<前缀>_luyun_test`（前缀可省）—— 并行会话各开一个库的既有用法，库名以它结尾；
+#   2. `luyun_test_<后缀>` —— 同一件事的另一种命名（TEST-04：`luyun_test_a` 曾因
+#      守卫写成 `dsn.endswith("luyun_test")` 而被拒，报错却说自己"必须指向测试库"）。
+# 刻意**不给"前后都带东西"的名字留位置**：`not_luyun_test_backup` 这类名字中间夹着
+# `luyun_test`、两头都有字，放行它就等于把真库的备份当测试库用。
+TEST_DB_NAME_RE = re.compile(r"^(?:\w*_)?luyun_test$|^luyun_test_\w+$")
+
 # 建库/建 schema 用管理连接；CI 与本地默认都走本机 trust 认证。
 _TEST_DSN = os.environ.get(
     "LUYUN_TEST_DSN", f"postgresql://localhost:5432/{TEST_DB_NAME}"
@@ -32,7 +43,7 @@ _TEST_DSN = os.environ.get(
 _ADMIN_DSN = os.environ.get("LUYUN_TEST_ADMIN_DSN", "postgresql://localhost:5432/postgres")
 
 # 库名以 DSN 为准（不是常量）：并行干活时各会话可以把 LUYUN_TEST_DSN 指向自己的
-# 库（名字仍须以 luyun_test 结尾，断言见 pytest_configure），避免共用同一个库时
+# 库（名字仍须匹配 TEST_DB_NAME_RE，断言见 pytest_configure），避免共用同一个库时
 # 互相 TRUNCATE / 撞唯一键。
 from urllib.parse import urlparse  # noqa: E402
 
@@ -220,21 +231,20 @@ def pytest_configure(config):
     from db_core.backend.pg import dsn_from_env
 
     dsn = dsn_from_env() or ""
-    # 判定落在**解析后的库名**上，不是整串 DSN。`dsn.endswith("luyun_test")` 会把
-    # 库名**以 luyun_test 开头**的派生库（`luyun_test_a`）也拒掉，而报错说"必须指向
-    # 测试库 luyun_test"——DSN 看上去正指向测试库，人只会以为守卫坏了（TEST-04）。
-    # 改成对库名做同一件事，顺序就对了：放行 `luyun_test` 与 `<前缀>_luyun_test`
-    # （并行会话各开一个库的既有用法），仍拒绝真库 `luyun`。
-    # 已知取舍（有意为之）：`luyun_test_<后缀>` 这类**库名前缀**形态仍被拒，因为
-    # "库名以 luyun_test 结尾"这条规则本身排除了它；放行它就得改成子串匹配，那样
-    # `not_luyun_test_backup` 之类的库名也会被放行，反而削弱对真库的保护。
-    if not _TEST_DB_NAME.endswith(TEST_DB_NAME):
+    # 判定落在**解析后的库名**上，不是整串 DSN（TEST-04）。原先 `dsn.endswith("luyun_test")`
+    # 把库名以 `luyun_test_` 开头的派生库（`luyun_test_a`）也拒掉，而报错说"必须指向
+    # 测试库 luyun_test"——DSN 看上去正指向测试库，人只会以为守卫坏了。现在按
+    # TEST_DB_NAME_RE 的两种有界形态判定，仍然拒绝真库 `luyun` / `luyun_prod` /
+    # `postgres`，以及 `not_luyun_test_backup` 这种"中间夹着 luyun_test"的名字。
+    if not TEST_DB_NAME_RE.match(_TEST_DB_NAME):
         raise RuntimeError(
-            f"测试 DSN 必须指向测试库：库名以 {TEST_DB_NAME} 结尾，当前是 {_TEST_DB_NAME!r}"
+            f"测试 DSN 必须指向测试库：库名以 {TEST_DB_NAME} 结尾"
+            f"（如 impl_{TEST_DB_NAME}），或以 {TEST_DB_NAME}_ 开头"
+            f"（如 {TEST_DB_NAME}_a），当前是 {_TEST_DB_NAME!r}"
             f"（DSN={dsn!r}）——拒绝在真实库上跑测试。"
             f"可用示例：postgresql://localhost:5432/{TEST_DB_NAME}、"
             f"postgresql://localhost:5432/impl_{TEST_DB_NAME}、"
-            f"postgresql://localhost:5432/local_{TEST_DB_NAME}"
+            f"postgresql://localhost:5432/{TEST_DB_NAME}_a"
         )
 
     # 文件类数据（凭据、照片等）落到临时目录，别污染仓库 data/。

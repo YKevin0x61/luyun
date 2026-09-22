@@ -19,7 +19,7 @@ from typing import Callable, Optional
 
 from database import CHINA_TZ
 from db_core.errors import is_integrity_violation
-from services.business_day import BUSINESS_DAY_CUT_HOUR, to_china_tz
+from services.business_day import business_date_range
 from services.hygiene.accounts import (
     PERMISSION_ADMIN,
     SHIFT_DAY,
@@ -144,18 +144,10 @@ def serialized_write(method):
 
 def hygiene_week_start(now: datetime) -> datetime:
     """Monday 06:00 China of the hygiene week containing `now`."""
-    local = to_china_tz(now)
-    if local.hour < BUSINESS_DAY_CUT_HOUR:
-        local = local - timedelta(days=1)
-    monday = local.date() - timedelta(days=local.weekday())
-    return datetime(
-        monday.year,
-        monday.month,
-        monday.day,
-        BUSINESS_DAY_CUT_HOUR,
-        0,
-        tzinfo=CHINA_TZ,
-    )
+    # 先落到「现在所属营业日」（06:00 切的唯一实现在 services.business_day），
+    # 再回退到那天所在周的周一 06:00 —— 这里不再自己比 `hour < 6`（CORR-05）。
+    day_start, _ = business_date_range(hygiene_business_date(now))
+    return day_start - timedelta(days=day_start.weekday())
 
 
 def _archive_result(
@@ -2234,18 +2226,12 @@ class HygieneWork:
     def _clock_reached(self, now: datetime, hhmm: str) -> bool:
         local = now.astimezone(CHINA_TZ) if now.tzinfo else now.replace(tzinfo=CHINA_TZ)
         hour, minute = (int(part) for part in hhmm.split(":"))
-        business = datetime.strptime(hygiene_business_date(local), "%Y-%m-%d").date()
-        deadline_date = business
-        if hour < BUSINESS_DAY_CUT_HOUR:
-            deadline_date = business + timedelta(days=1)
-        deadline = datetime(
-            deadline_date.year,
-            deadline_date.month,
-            deadline_date.day,
-            hour,
-            minute,
-            tzinfo=CHINA_TZ,
-        )
+        # 截止钟点用营业日区间归位：早于营业日起点（06:00）的钟点落在**次日**凌晨。
+        # 起点的算法交给 `business_date_range`，这里不再自己比 `hour < 6`（CORR-05）。
+        business_start, _ = business_date_range(hygiene_business_date(local))
+        deadline = business_start.replace(hour=hour, minute=minute)
+        if deadline < business_start:
+            deadline += timedelta(days=1)
         return local >= deadline
 
     async def _catalog_daily_items(self) -> list:

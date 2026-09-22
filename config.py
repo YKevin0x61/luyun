@@ -6,7 +6,7 @@
 
 import os
 from typing import Dict, List, Optional
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """应用配置类"""
@@ -252,12 +252,15 @@ class Settings(BaseSettings):
             return bool(self.SESSION_COOKIE_SECURE)
         return not self.DEBUG
 
-    class Config:
+    # `SettingsConfigDict` 与 `BaseSettings` 的默认 `model_config`（`extra="forbid"`
+    # 等）**合并**，所以这里只写需要覆盖的两项，行为与旧的 class-based `Config` 一致。
+    model_config = SettingsConfigDict(
         # 绝对路径：`.env` 在仓库根，而 uvicorn 之外的入口（scripts/start.py 等）
         # 的工作目录常常不是仓库根，相对路径会**静默读不到**配置——本机就因此出现
         # 「.env 写着 postgres，实例却连了另一个库」的错配。
-        env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-        case_sensitive = True
+        env_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        case_sensitive=True,
+    )
 
 # 创建全局配置实例
 settings = Settings()

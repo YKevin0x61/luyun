@@ -20,7 +20,7 @@ from config import settings
 from database import CHINA_TZ
 from db_core.errors import is_integrity_violation
 from services import password_hash
-from services.business_day import BUSINESS_DAY_CUT_HOUR, business_date_of
+from services.business_day import business_date_of
 
 logger = logging.getLogger(__name__)
 

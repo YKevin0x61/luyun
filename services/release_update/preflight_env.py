@@ -143,9 +143,13 @@ class DefaultPreflightEnvAdapter:
         ——由 `_build_preflight` 当硬门禁拦下更新。配了但探测不通回
         `(True, False, ...)`，只提示不拦：应用会退避重连，一次抖动不该挡住更新。
 
-        探测走 `redis-cli -u <url> ping`（与 `pg_isready` 同一路数，不引入 Python
-        端连接）。`redis-cli` 缺失按「跳过探测」放过——探测工具本身的缺陷不该反过来
-        挡住更新，与 pg_isready 一致；但**没配 REDIS_URL 不同**，那是配置问题。
+        探测走 `redis-cli -h <host> -p <port> ping`（与 `pg_isready` 同一路数，不引入
+        Python 端连接）。**URL 不进 argv**：`REDIS_URL` 按惯例可以写成
+        `redis://:password@host:port/db`，而 argv 里的字符串对同机其它用户可见
+        （`ps -ef` / `/proc/<pid>/cmdline`）；口令改走 `REDISCLI_AUTH` 环境变量，
+        主机与端口由 `_redis_client_probe` 拆出来单独给出。`redis-cli` 缺失按
+        「跳过探测」放过——探测工具本身的缺陷不该反过来挡住更新，与 pg_isready
+        一致；但**没配 REDIS_URL 不同**，那是配置问题。
         说明里刻意不回显 URL：它可能带密码。
         """
         url = (os.environ.get("LUYUN_REDIS_URL") or getattr(settings, "REDIS_URL", "") or "").strip()

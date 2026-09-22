@@ -44,7 +44,32 @@ class ResidentTaskAccountingTest(unittest.TestCase):
             main_module.BUSINESS_LOOP_TASK_COUNT + main_module.AUXILIARY_RESIDENT_TASK_COUNT,
         )
         self.assertEqual(main_module.RESIDENT_TASK_TOTAL, 12)
-        self.assertEqual(len(main_module._AUXILIARY_TASK_LABELS), 5)
+        # 断言**内容集合**而不只是数量：标签是注册与关闭共用的键，少一个/写错一个字
+        # 都会让某个常驻 task 在关闭时被当成业务循环 cancel，或反过来漏登记。
+        self.assertEqual(
+            set(main_module._AUXILIARY_TASK_LABELS),
+            {
+                "内存监控",
+                "内存清理",
+                "磁盘守护",
+                "realtime Redis 订阅",
+                "日志落库消费者",
+            },
+        )
+
+    def test_auxiliary_labels_come_from_one_source(self):
+        """辅助 task 的标签只许有一份字面量：注册清单与关闭用的集合必须同源。"""
+        import main as main_module
+
+        registry = main_module._AUXILIARY_RESIDENT_TASKS
+        self.assertEqual(len(registry), main_module.AUXILIARY_RESIDENT_TASK_COUNT)
+        self.assertEqual(
+            {label for label, _ in registry},
+            set(main_module._AUXILIARY_TASK_LABELS),
+            "注册清单与 _AUXILIARY_TASK_LABELS 不是同一组标签——迟早各改各的",
+        )
+        for label, handle in registry:
+            self.assertTrue(callable(handle), f"{label} 的句柄访问器不可调用：{handle!r}")
 
     def test_every_lifespan_task_goes_through_the_registry(self):
         """lifespan 里不许有裸 `asyncio.create_task` —— 漏登记的循环不会被关闭，也不计数。"""

@@ -66,12 +66,12 @@ PUBLIC_PATHS = (
 # 鉴权门的 401 body。用它把「鉴权拒绝」和业务自己的 401（如员工登录密码错误）区分开。
 AUTH_GATE_BODY = {"detail": "未授权"}
 
-# 已确认仍未鉴权、但属于**其它票**的历史面，不在本票顺手改：
-# SEC-03 = 卫生标准图导出任务的「状态 / 下载」两个 GET，靠 122bit job_id 能力 URL 兜底。
-UNGUARDED_OWNED_BY_OTHER_TICKETS = {
-    ("GET", "/api/hygiene/admin/standards-export/jobs/{job_id}"),
-    ("GET", "/api/hygiene/admin/standards-export/jobs/{job_id}/download"),
-}
+# 这里曾有一份 `UNGUARDED_OWNED_BY_OTHER_TICKETS` 豁免清单：SEC-02 期间
+# `/api/hygiene/admin/standards-export/jobs/{job_id}` 与它的 `/download` 还没有守卫
+# （属别的票 SEC-03，当时靠 122bit job_id 能力 URL 兜底）。SEC-03 已给两条加上
+# `require_session`，豁免随之失效——继续留着它们，下面那条契约就会**跳过**这两条
+# 路由，等于给未来的"裸读接口"留了后门。整份清单删除：现在「清单外 /api 必须带
+# 守卫」对全部 /api 路由生效。
 
 # 认得的守卫：管理员凭据、管理端会话、员工会话、卫生标准图缓存会话。
 GUARD_CALLABLES = {
@@ -422,7 +422,6 @@ def test_every_api_route_is_guarded_or_declared_public():
         f"{method} {path}"
         for (method, path), route in _effective_api_routes(main_module.app).items()
         if (method, path) not in declared_public
-        and (method, path) not in UNGUARDED_OWNED_BY_OTHER_TICKETS
         and not (_guard_names(route) & GUARD_CALLABLES)
     )
 
