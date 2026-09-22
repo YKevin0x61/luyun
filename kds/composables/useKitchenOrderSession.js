@@ -6,7 +6,7 @@
  * Print / serve / disconnect stay in the page.
  */
 
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { ScreenSettingsManager } from '../utils/storage.js'
 import { getTimeThresholdsMs } from '../utils/timeThresholds.js'
 import { buildCurrentStationStats } from '../utils/kitchenStationStats.js'
@@ -18,6 +18,11 @@ import { useDeliveryCancelAlert } from './useDeliveryCancelAlert.js'
  */
 export function useKitchenOrderSession({ ordersStore }) {
   const loading = ref(false)
+  /**
+   * 最近一次拉取的失败原因；唯一真相源是 ordersStore.error
+   * （fetchOrders 失败时置位、下一次拉取开始时清除），页面据此渲染持久错误态。
+   */
+  const loadError = computed(() => ordersStore.error || null)
   const watchedStationIds = ref([...ScreenSettingsManager.getWatchedStations()])
   const thresholdsMs = ref(getTimeThresholdsMs())
   /** 0 = no dish-card split (today’s one card per dish name). */
@@ -139,6 +144,7 @@ export function useKitchenOrderSession({ ordersStore }) {
 
   return {
     loading,
+    loadError,
     watchedStationIds,
     thresholdsMs,
     dishCardQuantityCap,

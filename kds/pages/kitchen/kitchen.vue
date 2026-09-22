@@ -164,8 +164,23 @@
       </view> -->
       
       <scroll-view scroll-y class="orders-scroll">
+        <!-- 持久错误态：WS 正常但 HTTP 拉单失败时，屏幕绝不能伪装成"暂无待制作订单" -->
+        <view v-if="loadError && currentStationMergedDishes.length > 0" class="load-error-banner">
+          <text class="load-error-banner-text">订单加载失败，以下列表可能不是最新：{{ loadError }}</text>
+          <button class="load-error-retry-btn" @click="refreshData">
+            <text>重试</text>
+          </button>
+        </view>
         <view v-if="loading && currentStationMergedDishes.length === 0" class="loading-container">
           <text class="loading-text">加载中...</text>
+        </view>
+        <view v-else-if="loadError && currentStationMergedDishes.length === 0" class="load-error-container">
+          <text class="load-error-title">订单加载失败</text>
+          <text class="load-error-detail">{{ loadError }}</text>
+          <text class="load-error-hint">未取到订单数据，不代表当前没有待制作订单</text>
+          <button class="load-error-retry-btn" @click="refreshData">
+            <text>重试</text>
+          </button>
         </view>
         <view v-else-if="currentStationMergedDishes.length === 0" class="empty-container">
           <view class="empty-text"><SvgIcon name="sparkles" :size="20" color="#22c55e" /><text>暂无待制作订单</text></view>
@@ -337,6 +352,7 @@ export default {
     const orderSession = useKitchenOrderSession({ ordersStore })
     const {
       loading,
+      loadError,
       watchedStationIds,
       thresholdsMs,
       dishCardQuantityCap,
@@ -921,10 +937,14 @@ export default {
         debugLog('[厨房页面] 当天数据刷新完成')
       } catch (error) {
         console.error('[厨房页面] 刷新数据失败:', error)
-        uni.showToast({
-          title: '刷新失败',
-          icon: 'error'
-        })
+        // 拉单失败已由 ordersStore.error 留下持久错误态（模板 loadError 分支），
+        // 不再弹数秒即消失的 toast；只有非拉单来源的失败（如告警引擎同步）才兜底提示。
+        if (!loadError.value) {
+          uni.showToast({
+            title: '刷新失败',
+            icon: 'error'
+          })
+        }
       }
     }
     
@@ -1163,6 +1183,7 @@ export default {
     return {
       // 响应式数据
       loading,
+      loadError,
       currentTimeShort,
       currentTimestamp,
       currentStation,
@@ -1973,6 +1994,72 @@ export default {
 .empty-container {
   padding: 150upx;
   text-align: center;
+}
+
+/* 拉取失败：无数据时替代空态，有数据时改用列表顶部的 .load-error-banner */
+.load-error-container {
+  padding: 150upx 40upx;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16upx;
+}
+
+.load-error-title {
+  font-size: 48upx;
+  font-weight: 700;
+  color: #CF1322;
+}
+
+.load-error-detail {
+  font-size: 28upx;
+  color: #CF1322;
+  word-break: break-all;
+}
+
+.load-error-hint {
+  font-size: 26upx;
+  color: #8C8C8C;
+}
+
+.load-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16upx;
+  padding: 8upx 16upx;
+  min-height: 72upx;
+  background: linear-gradient(135deg, #CF1322, #FF4D4F);
+}
+
+.load-error-banner-text {
+  flex: 1;
+  min-width: 0;
+  color: white;
+  font-size: 24upx;
+  font-weight: 700;
+}
+
+.load-error-retry-btn {
+  flex-shrink: 0;
+  padding: 4upx 24upx;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 12upx;
+  color: #CF1322;
+  font-size: 24upx;
+  font-weight: 700;
+  min-height: 64upx;
+  touch-action: manipulation;
+}
+
+.load-error-retry-btn text {
+  color: #CF1322;
+}
+
+.load-error-retry-btn:active {
+  background: white;
+  transform: scale(0.95);
 }
 
 .loading-text,
