@@ -50,7 +50,7 @@ class _DishStationsRepoMixin:
     ) -> int:
         try:
             where, params = self._dish_stations_where(query, dish_name_contains=dish_name_contains)
-            tdb = self.table("dish_stations")
+            tdb = self._connection.table("dish_stations")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(f"SELECT COUNT(*) FROM dish_stations WHERE {where}", params)
                 return (await cursor.fetchone())[0]
@@ -62,7 +62,7 @@ class _DishStationsRepoMixin:
 
     async def dish_stations_stats_by_station(self) -> List[Dict[str, Any]]:
         try:
-            tdb = self.table("dish_stations")
+            tdb = self._connection.table("dish_stations")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     "SELECT station_id, COUNT(*) as count FROM dish_stations GROUP BY station_id"
@@ -87,7 +87,7 @@ class _DishStationsRepoMixin:
             where, params = self._dish_stations_where(query, dish_name_contains=dish_name_contains)
             order = f"ORDER BY {sort_field} {'ASC' if sort_dir > 0 else 'DESC'}"
             lim = f"LIMIT {limit} OFFSET {skip}" if limit > 0 else ""
-            tdb = self.table("dish_stations")
+            tdb = self._connection.table("dish_stations")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     f"SELECT * FROM dish_stations WHERE {where} {order} {lim}", params
@@ -108,7 +108,7 @@ class _DishStationsRepoMixin:
             if 'station_id' in query:
                 conditions.append("station_id = ?"); params.append(query['station_id'])
             where = " AND ".join(conditions) if conditions else "1=1"
-            tdb = self.table("dish_stations")
+            tdb = self._connection.table("dish_stations")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     f"SELECT * FROM dish_stations WHERE {where} LIMIT 1", params
@@ -130,7 +130,7 @@ class _DishStationsRepoMixin:
                 return []
             group_field = group_stage.get('_id', 'station_id')
             is_count = 'count' in str(group_stage)
-            tdb = self.table("dish_stations")
+            tdb = self._connection.table("dish_stations")
             async with tdb.conn.cursor() as cursor:
                 if is_count:
                     await cursor.execute(
@@ -146,7 +146,7 @@ class _DishStationsRepoMixin:
 
     async def dish_stations_insert(self, document: Dict[str, Any]) -> None:
         now = datetime.now(CHINA_TZ).isoformat()
-        tdb = self.table("dish_stations")
+        tdb = self._connection.table("dish_stations")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """INSERT INTO dish_stations (dish_name, station_id, notes, created_at, updated_at)
@@ -167,7 +167,7 @@ class _DishStationsRepoMixin:
         if not update_fields:
             return 0
         set_clause = ", ".join([f"{k} = ?" for k in update_fields.keys()])
-        tdb = self.table("dish_stations")
+        tdb = self._connection.table("dish_stations")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 f"UPDATE dish_stations SET {set_clause} WHERE dish_name = ?",
@@ -178,7 +178,7 @@ class _DishStationsRepoMixin:
         return rowcount
 
     async def dish_stations_delete(self, dish_name: str) -> int:
-        tdb = self.table("dish_stations")
+        tdb = self._connection.table("dish_stations")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 "DELETE FROM dish_stations WHERE dish_name = ?",

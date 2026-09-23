@@ -93,6 +93,28 @@ class ReadinessTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(key, payload)
 
+    async def test_not_ready_after_connection_closed(self):
+        """连接断掉之后必须报 not ready——判据不能是「连接对象还在」。
+
+        ``DatabaseManager.close()`` **刻意不丢连接对象**（持有者还捏着它，见
+        `PgConnection.rebind`），所以旧判据 ``_conn.raw is not None`` 在关闭之后
+        一直报「已连接」，更新健康确认会据此认为数据库还活着。``is_connected()``
+        现在问 asyncpg 的 ``is_closed()``；这条用例把那个行为钉在真实调用路径上
+        （``inspect_readiness`` 是 ``readiness.py:79`` 的唯一生产消费者）。
+        """
+        self.tracker.mark_started(migrations_complete=True)
+        adapter = AppReadinessAdapter(lambda: self.db, tracker=self.tracker)
+        self.assertTrue(
+            (await adapter.inspect_readiness()).ready, "前置：连上时应当就绪"
+        )
+
+        await self.db.close()
+
+        readiness = await adapter.inspect_readiness()
+        self.assertFalse(readiness.db_connected, "断开后 db_connected 必须为假")
+        self.assertFalse(readiness.ready, "断开后不能报就绪")
+        self.assertIn("数据库未连接", " ".join(readiness.details))
+
 
 if __name__ == "__main__":
     unittest.main()

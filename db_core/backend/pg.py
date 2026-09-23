@@ -299,6 +299,13 @@ class PgCursor:
             try:
                 translated = await self._translate(sql)
                 raw = self._connection.raw
+                if raw is None:
+                    # `_reconnect_raw()` 会把 `_raw` 摘成 None 再重连，中间有个
+                    # await 窗口。撞进这个窗口时报连接状态，而不是让 raw.fetch
+                    # 抛 "NoneType has no attribute 'fetch'"（读起来像代码 bug）。
+                    # 连接已关闭（非 None）仍交给 asyncpg 自己的
+                    # InterfaceError("connection is closed")，那个信息更准。
+                    raise RuntimeError("PostgreSQL 连接正在重连，请稍后重试")
                 self._connection.bump_query_count()
 
                 # 写操作进入显式事务（对齐 aiosqlite 语义），commit/rollback 由调用方决定
@@ -503,6 +510,12 @@ class PgConnection:
         self._tx = None
         # 单连接的串行锁：asyncpg 不允许一条连接并发操作，见 _TaskGuard。
         self._guard = _TaskGuard()
+        # 重连锁（惰性创建，因为 asyncio.Lock 需要运行中的事件循环）。
+        # `_reconnect_raw()` 中间有多个 await（关旧连接、建新连接），两个并发重连
+        # 会互相踩：后一个把前一个刚赋给 `_raw` 的连接又摘掉，那条连接就泄漏了
+        # （没人持有、也没被关闭）。整库恢复是人工动作，但它与 `ensure_loop`
+        # （换事件循环）完全可能同时发生。
+        self._reconnect_lock: Optional[asyncio.Lock] = None
         # 事务期间是否由本连接持有锁（开始事务时取得，commit/rollback 时归还）
         self._tx_guard_held = False
         # 表名 → 是否有 id 列。有 id 才能用 RETURNING id 支撑 lastrowid；
@@ -511,6 +524,12 @@ class PgConnection:
         # 表名 → 行标识列（rowid 的 PG 等价物）
         self._row_keys: Dict[str, str] = {}
         self.stats_queries = 0
+
+    def _reconnect_guard(self) -> asyncio.Lock:
+        """重连锁，惰性创建（``asyncio.Lock`` 必须在事件循环里建）。"""
+        if self._reconnect_lock is None:
+            self._reconnect_lock = asyncio.Lock()
+        return self._reconnect_lock
 
     async def ensure_loop(self) -> None:
         """连接绑定的 event loop 变了就按原 DSN 重连。
@@ -531,7 +550,53 @@ class PgConnection:
             return
         if self._loop is loop:
             return
+        async with self._reconnect_guard():
+            # 等锁期间可能已经有人换好了（重连中间有好几个 await）。
+            if self._loop is loop:
+                return
+            await self._reconnect_raw(loop, "🔁 PostgreSQL 连接已按新的事件循环重建")
+
+    async def rebind(self, dsn: Optional[str] = None) -> None:
+        """原地换成一条新连接，**对象本身不变**。
+
+        之所以是「原地」：连接对象在装配期就被分发给了持有者——``main.py`` 把
+        ``db_manager._conn`` 注入 ``RecipeStore``，``TableView`` 也各自捏着一份。
+        换对象等于把这些引用全变成僵尸（2026-09-23：整库恢复里 ``db.close()`` +
+        ``db.connect()`` 之后，所有配方接口稳定 500，报
+        ``asyncpg.exceptions.InterfaceError: connection is closed``）。
+        原地换掉 ``_raw``，老引用自然跟着新连接走。
+
+        与 ``ensure_loop`` 的重连同一条路径：未提交事务回滚丢弃、表结构缓存
+        （``table_has_id`` / ``row_key_column``）保留——重连后数据库可能已经被
+        ``pg_restore --clean`` 整库替换，但表形态是同一套迁移建的。
+
+        ``dsn`` 传 None 时沿用原有 DSN；只有确实要换库才需要传。
+        """
+        if dsn:
+            self._dsn = dsn
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError as exc:  # pragma: no cover - 同步上下文调用是用法错误
+            raise RuntimeError("PgConnection.rebind 必须在事件循环内调用") from exc
+        async with self._reconnect_guard():
+            # 与 ensure_loop 不同，这里**不跳过**：rebind 的语义就是「换成指向当前
+            # 库的一条新连接」（整库恢复刚把库替换过），等锁后照换。
+            await self._reconnect_raw(loop, "🔁 PostgreSQL 连接已重建")
+
+    async def _reconnect_raw(
+        self, loop: asyncio.AbstractEventLoop, log_message: str
+    ) -> None:
+        """丢掉当前 ``_raw`` 并按 ``_dsn`` 重连；连接对象与缓存保持不变。"""
         old, self._raw = self._raw, None
+        if self._tx is not None:
+            # 未提交的事务不能静默跨连接：先留线索再丢弃（跨循环/整库恢复本来
+            # 也没有有意义的事务可保）。
+            logger.warning("PG 连接重连时存在未提交事务，已回滚")
+            tx, self._tx = self._tx, None
+            try:
+                await tx.rollback()
+            except Exception:
+                logger.debug("重连前回滚未提交事务失败", exc_info=True)
         self._tx = None
         self._tx_guard_held = False
         self._guard.force_release()
@@ -543,33 +608,59 @@ class PgConnection:
                 pass
         if not self._dsn:
             raise RuntimeError(
-                "PostgreSQL 连接被跨事件循环使用，且这条连接没有可用于重连的 DSN"
+                "PostgreSQL 连接需要重连，但这条连接没有可用于重连的 DSN"
             )
         self._raw = await asyncpg.connect(self._dsn, **self._connect_kwargs)
         self._loop = loop
-        logger.info("🔁 PostgreSQL 连接已按新的事件循环重建")
+        logger.info(log_message)
 
     async def row_key_column(self, table: str) -> str:
         """该表的「行标识列」——SQLite ``rowid`` 的 PG 等价物。
 
         SQLite 的 rowid 对任何表都存在，PG 只有显式列，所以按「有 id 用 id，
-        否则用主键第一列」解析。结果缓存，避免每条 SQL 都查一次目录。
+        否则用主键第一列」解析。
+
+        **只缓存探测成功的结论**：回退 ``"id"`` 本身是方言层该有的容错（PG 业务
+        表都有 id），但把回退值也写进缓存，等于让一次瞬态失败（连接恰在重连窗口、
+        目录查询偶发报错）**永久**支配这张表的行标识判断——而依据是
+        `db_core/backend/dialect.py` 把 ``rowid`` 重写成它。异常时不缓存，下次重探。
         """
         if table in self._row_keys:
             return self._row_keys[table]
-        column = "id"
         try:
             row = await self._raw.fetchrow(_PRIMARY_KEY_SQL, table)
-            if row:
-                column = row["attname"]
         except Exception:
-            logger.debug("解析行标识列失败，回退 id: %s", table, exc_info=True)
+            logger.debug("解析行标识列失败，本次回退 id（不缓存）: %s", table, exc_info=True)
+            return "id"
+        column = row["attname"] if row else "id"
         self._row_keys[table] = column
         return column
 
     @property
     def raw(self) -> asyncpg.Connection:
         return self._raw
+
+    def alive(self) -> bool:
+        """这条连接现在还能用吗。
+
+        判据交给驱动自己：``asyncpg.Connection.is_closed()`` 同时覆盖「优雅关闭」
+        与「被 abort」两种情况，比自维护一个标志更难说谎——连接也可能被服务端
+        单方面断掉，那种事标志不会知道。
+
+        **不要用 ``_raw is None`` 表达关闭**：``_raw`` 只在 ``_reconnect_raw()``
+        的 await 窗口里短暂为 None，拿它当「没有连接」的判据会让并发的
+        ``connect()`` 误以为该新建对象——而持有者缓存的正是这个对象（见
+        :meth:`rebind`），新建即僵尸。
+        """
+        raw = self._raw
+        if raw is None:
+            return False
+        try:
+            return not raw.is_closed()
+        except Exception:
+            # asyncpg 以异常收场时 _abort() 会把 protocol 摘掉，is_closed() 随之
+            # 不可用；那种连接当然也不算活着。
+            return False
 
     def bump_query_count(self) -> None:
         self.stats_queries += 1
@@ -585,6 +676,11 @@ class PgConnection:
         """
         if self._tx is not None:
             return
+        if not self.alive():
+            # 明确报「连接不可用」。原先会由 self._raw.transaction() 抛
+            # AttributeError——_raw 可能正好处在重连的 await 窗口里，那个报错
+            # 读起来像是代码 bug，而实际是连接状态。
+            raise RuntimeError("PostgreSQL 连接不可用，无法开启写事务")
         await self._guard.acquire()
         self._tx_guard_held = True
         self._tx = self._raw.transaction()
@@ -672,6 +768,11 @@ class PgConnection:
         async with self.guard():
             if self.is_write_sql(translated):
                 await self.ensure_transaction()
+            elif not self.alive():
+                # 读路径没有 ensure_transaction 兜底，这里明确报连接状态，而不是
+                # 让 self._raw.executemany 抛 AttributeError（_raw 可能正好在重连
+                # 的 await 窗口里）。
+                raise RuntimeError("PostgreSQL 连接不可用，无法执行批量语句")
             await self._raw.executemany(translated, [tuple(p) for p in seq])
 
     async def commit(self) -> None:

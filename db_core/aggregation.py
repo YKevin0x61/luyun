@@ -47,7 +47,7 @@ class _AggregationMixin:
                 end_time = now.replace(hour=23, minute=59, second=59, microsecond=999000)
             start_iso, end_iso = start_time.isoformat(), end_time.isoformat()
             urgent_cutoff_iso = urgent_cutoff(now).isoformat()
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
 
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
@@ -125,7 +125,7 @@ class _AggregationMixin:
                 conditions.append("order_time >= ?")
                 params.append(today_start)
             where = " AND ".join(conditions)
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(f"SELECT COUNT(*) FROM orders WHERE {where}", params)
                 total_count = (await cursor.fetchone())[0]
@@ -153,7 +153,7 @@ class _AggregationMixin:
             station_clause = ""
             if station and station != 'all':
                 station_clause = " AND station = ?"; params.append(station)
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     f"""SELECT COUNT(*) as total_orders, SUM(quantity) as total_quantity,
@@ -174,7 +174,7 @@ class _AggregationMixin:
         """按档口统计指定起始时间之后的订单数。"""
         try:
             start_dt = ensure_beijing_datetime(start_time)
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT station, COUNT(*) as cnt
@@ -203,7 +203,7 @@ class _AggregationMixin:
             all_dates = [target_str] + list(compare_dates.values())
 
             rows_by_date: Dict[str, List[Any]] = {}
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 for date_str in all_dates:
                     day_start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=CHINA_TZ)
@@ -317,7 +317,7 @@ class _AggregationMixin:
             station_clause = ""
             if station and station != 'all':
                 station_clause = " AND station = ?"; params.append(station)
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     f"""SELECT station, COUNT(*) as dish_count, SUM(quantity) as total_quantity,
@@ -342,7 +342,7 @@ class _AggregationMixin:
                 station_clause = " AND station = ?"; params.append(station)
             else:
                 station_clause = " AND station != 'loumian'"
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     f"""SELECT dish_name, station, SUM(quantity) as total_quantity,

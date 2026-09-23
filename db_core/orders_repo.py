@@ -100,7 +100,7 @@ class _OrdersRepoMixin:
             if limit > 0:
                 sql += f" LIMIT {limit}"
 
-            async with self.table("orders").conn.cursor() as cursor:
+            async with self._connection.table("orders").conn.cursor() as cursor:
                 await cursor.execute(sql, params)
                 rows = await cursor.fetchall()
             orders = [_shape_order_placement(self._row_to_dict(row)) for row in rows]
@@ -113,7 +113,7 @@ class _OrdersRepoMixin:
     @timing_decorator
     async def get_order_by_id(self, order_id: str, dish_name: Optional[str] = None) -> Optional[Dict]:
         try:
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             row = None
             # 调用方可能传主键 id，也可能传 business_flow_id（见下面的回退查询）。
             # PostgreSQL 是强类型：把 'YY01101-…_虾饺_001' 这种文本丢给 bigint 主键会直接
@@ -152,7 +152,7 @@ class _OrdersRepoMixin:
                     return order
 
         if table_number and dish_name:
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             cursor = await tdb.execute(
                 """SELECT * FROM orders
                    WHERE table_number = ? AND dish_name = ? AND dish_status = '待出餐'
@@ -186,7 +186,7 @@ class _OrdersRepoMixin:
                 FROM orders WHERE {where}
                 GROUP BY dish_name, station
             """
-            async with self.table("orders").conn.cursor() as cursor:
+            async with self._connection.table("orders").conn.cursor() as cursor:
                 await cursor.execute(sql, params)
                 rows = await cursor.fetchall()
 
@@ -231,7 +231,7 @@ class _OrdersRepoMixin:
             return True
         try:
             inserted = 0
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             business_flow_ids = [
                 order.get('business_flow_id', '')
                 for order in orders_data
@@ -292,7 +292,7 @@ class _OrdersRepoMixin:
                 return {"success": True, "inserted_count": 0, "errors": []}
             inserted_count, errors = 0, []
             now = datetime.now(CHINA_TZ).isoformat()
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 for order in orders:
                     try:
@@ -335,7 +335,7 @@ class _OrdersRepoMixin:
             if not order_ids:
                 return {"success": True, "deleted_count": 0}
             deleted_count = 0
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 for oid in order_ids:
                     # 调用方可能传主键 id，也可能传 business_flow_id。不能把同一个 oid 绑给
@@ -370,7 +370,7 @@ class _OrdersRepoMixin:
             return 0
         try:
             now = datetime.now(CHINA_TZ).isoformat()
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """UPDATE orders
@@ -401,7 +401,7 @@ class _OrdersRepoMixin:
             return 0
         try:
             now = datetime.now(CHINA_TZ).isoformat()
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             restored = 0
             async with tdb.conn.cursor() as cursor:
                 for order in orders:
@@ -447,7 +447,7 @@ class _OrdersRepoMixin:
             return 0
         wanted_notes = canonical_order_notes(notes)
         try:
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT id, notes FROM orders
@@ -533,7 +533,7 @@ class _OrdersRepoMixin:
         status = fields.get("status") or "未结"
         try:
             now = datetime.now(CHINA_TZ).isoformat()
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT id, notes FROM orders
@@ -621,7 +621,7 @@ class _OrdersRepoMixin:
                 conditions.append("order_time <= ?")
                 params.append(end_time.isoformat())
             where = " AND ".join(conditions)
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     f"SELECT business_flow_id FROM orders WHERE {where}", params
@@ -670,7 +670,7 @@ class _OrdersRepoMixin:
                 conditions.append("dish_name LIKE ?")
                 params.append(f"%{contains}%")
             where = " AND ".join(conditions) if conditions else "1=1"
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     f"SELECT * FROM orders WHERE {where} "
@@ -688,7 +688,7 @@ class _OrdersRepoMixin:
     async def _get_dish_station_mapping(self) -> Dict[str, str]:
         """获取每个菜品最常见的档口（从 orders 表统计）"""
         try:
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT dish_name, station, COUNT(*) as cnt
@@ -708,7 +708,7 @@ class _OrdersRepoMixin:
 
     async def get_unique_dish_names(self, limit: int = 500) -> List[str]:
         try:
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     "SELECT DISTINCT dish_name FROM orders ORDER BY dish_name LIMIT ?", (limit,)
@@ -722,7 +722,7 @@ class _OrdersRepoMixin:
     async def list_distinct_order_dish_names(self, limit: int = 100000) -> List[str]:
         """Distinct dish names recently seen on orders (newest rowids first)."""
         try:
-            tdb = self.table("orders")
+            tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
                 # 用 GROUP BY + MAX(id) 而不是 DISTINCT + ORDER BY rowid：
                 # PG 不允许 ORDER BY 引用不在 SELECT DISTINCT 列表中的列，
@@ -748,7 +748,7 @@ class _OrdersRepoMixin:
 
         Each item: ``{"order": <row dict with _id>, "complete_quantity": int}``.
         """
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         now = datetime.now(CHINA_TZ).isoformat()
         updated_count = 0
         stations = set()
@@ -823,7 +823,7 @@ class _OrdersRepoMixin:
 
     async def compact_steamer_hole(self, steamer_id: str, port_index: int) -> None:
         """Reindex remaining cages on a hole to stack_order 1..n. Does not commit."""
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         now = datetime.now(CHINA_TZ).isoformat()
         cursor = await tdb.execute(
             """SELECT id FROM orders
@@ -852,7 +852,7 @@ class _OrdersRepoMixin:
             if not order:
                 continue
             incoming_row_ids.append(int(order["_id"]))
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         hole_port = int(port_index)
         if incoming_row_ids:
             placeholders = ",".join("?" * len(incoming_row_ids))
@@ -893,7 +893,7 @@ class _OrdersRepoMixin:
             order_ids=order_ids,
             capacity=capacity,
         )
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         now = datetime.now(CHINA_TZ).isoformat()
         hole_port = int(port_index)
         cursor = await tdb.execute(
@@ -943,7 +943,7 @@ class _OrdersRepoMixin:
             order_ids=order_ids,
             capacity=capacity,
         )
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         now = datetime.now(CHINA_TZ).isoformat()
         dest_port = int(port_index)
         dest = (str(steamer_id), dest_port)
@@ -994,7 +994,7 @@ class _OrdersRepoMixin:
         order_ids: List[str],
     ) -> Dict[str, Any]:
         """Clear 蒸笼位; compact each source hole. dish_status is unchanged."""
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         now = datetime.now(CHINA_TZ).isoformat()
         updated_count = 0
         stations = set()
@@ -1038,7 +1038,7 @@ class _OrdersRepoMixin:
         dish_status stays cancelled. updated_at is left as the cancel timestamp
         so 待上笼退示 does not restart after 抽笼.
         """
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         updated_count = 0
         stations = set()
         holes_to_compact: Set[Tuple[str, int]] = set()
@@ -1082,7 +1082,7 @@ class _OrdersRepoMixin:
         substitutes: List[Tuple[str, str]],
     ) -> Dict[str, Any]:
         """Apply 等叫 / 叫起 / 加急 / 对调 in one commit. Caller already validated."""
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         stations: Set[str] = set()
         updated_ids: Set[str] = set()
 
@@ -1180,7 +1180,7 @@ class _OrdersRepoMixin:
                 "message": "映射表为空",
             }
 
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 "SELECT rowid, dish_name FROM orders WHERE order_time >= ?",

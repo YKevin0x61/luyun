@@ -21,7 +21,7 @@ class _TablesRepoMixin:
         try:
             if not tables_data:
                 return True
-            tdb = self.table("tables")
+            tdb = self._connection.table("tables")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute("DELETE FROM tables")
                 for table in tables_data:
@@ -45,7 +45,7 @@ class _TablesRepoMixin:
             return False
 
     async def get_table_snapshot_stats(self) -> Dict[str, Any]:
-        tdb = self.table("tables")
+        tdb = self._connection.table("tables")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute("SELECT COUNT(*) FROM tables")
             total = (await cursor.fetchone())[0] or 0
@@ -68,7 +68,7 @@ class _TablesRepoMixin:
 
     async def get_table_live_list(self) -> Dict[str, Any]:
         """当前占用桌台列表，按用餐时长降序。"""
-        tdb = self.table("tables")
+        tdb = self._connection.table("tables")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """SELECT table_number, people, amount, duration, status

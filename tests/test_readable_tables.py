@@ -23,6 +23,7 @@ from unittest import mock
 
 from config import settings
 from database import DatabaseManager
+from db_core.database_connection import DatabaseConnection
 
 try:
     import asyncpg
@@ -64,12 +65,17 @@ class ReadableTablesSqlSelectionTest(unittest.TestCase):
                 return (1,)
 
         class FakeConn:
+            # readable_tables 只向连接所有者要两件事：还活着、能执行。不必再伪造
+            # PgConnection 的内部（_raw / _loop）。
+            def alive(self):
+                return True
+
             async def execute(self, sql, params=()):
                 executed.append(sql)
                 return FakeCursor()
 
         db = DatabaseManager.__new__(DatabaseManager)
-        db._main_conn = FakeConn()
+        db._connection = FakeConn()
         with mock.patch.object(settings, "DATABASE_BACKEND", backend):
             result = asyncio.run(db.readable_tables(KEY_TABLES))
         return executed, result
@@ -84,7 +90,7 @@ class ReadableTablesSqlSelectionTest(unittest.TestCase):
 
     def test_not_connected_reports_all_missing(self):
         db = DatabaseManager.__new__(DatabaseManager)
-        db._main_conn = None
+        db._connection = DatabaseConnection()  # 未 connect：alive() 为假
         result = asyncio.run(db.readable_tables(KEY_TABLES))
         self.assertFalse(result["readable"])
         self.assertEqual(result["missing"], KEY_TABLES)

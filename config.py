@@ -45,9 +45,10 @@ class Settings(BaseSettings):
     DATABASE_DIR: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     # 遗留（SQLite 时代）配置面：不进任何运行期数据访问路径，业务数据只在
     # PostgreSQL 里，data/app.db 仅作为老门店的迁移输入/只读回滚源存在。保留这两个
-    # 名字是因为 APP_DB_PATH 还被 RecipeStore 的默认值参数（services/recipes/store.py，
-    # 其自建连接分支已直接抛 RuntimeError）与 db_core/stats.py 回显的 db_paths（经
-    # DATABASE_PATHS）引用；同名但独立的一份常量在 services/backup_import_staging.py（上传包里的旧 app.db
+    # 名字是因为 DATABASE_PATHS 会展开 APP_DB_PATH，而 db_core/stats.py 把它当
+    # db_paths 回显出去（纯诊断信息）。RecipeStore 当年那个「默认 db_path 参数」
+    # 已在 2026-09-23 删掉——它的自建连接分支早已不可达，误用现在在构造期就报错。
+    # 同名但独立的一份常量在 services/backup_import_staging.py（上传包里的旧 app.db
     # 成员，只用于识别并明确拒绝，见 api/backup.py）。不要删。
     APP_DB_FILENAME: str = "app.db"
     # 只接受 postgres。这一项保留是为了让老部署在启动时拿到明确指引，而不是静默
@@ -74,7 +75,8 @@ class Settings(BaseSettings):
     def APP_DB_PATH(self) -> str:
         """遗留单库路径（SQLite 时代的 data/app.db）：纯拼路径，不保证文件存在。
 
-        冷备与运行期都不再读它，见上面 APP_DB_FILENAME 的说明。
+        现在唯一的读者是 :attr:`DATABASE_PATHS`（它被连接层取来给 ``db_core/stats.py``
+        回显诊断信息）；冷备与运行期都不再读它，见上面 ``APP_DB_FILENAME`` 的说明。
         """
         return os.path.join(self.DATABASE_DIR, self.APP_DB_FILENAME)
 

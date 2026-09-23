@@ -18,7 +18,7 @@ class _ReportDishesRepoMixin:
 
     async def report_dishes_all(self) -> List[Dict]:
         try:
-            tdb = self.table("report_dishes")
+            tdb = self._connection.table("report_dishes")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     "SELECT id, dish_name, display_order, notes FROM report_dishes ORDER BY display_order ASC, id ASC"
@@ -31,7 +31,7 @@ class _ReportDishesRepoMixin:
 
     async def report_dishes_add(self, dish_name: str, notes: str = "") -> int:
         try:
-            tdb = self.table("report_dishes")
+            tdb = self._connection.table("report_dishes")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute("SELECT MAX(display_order) FROM report_dishes")
                 row = await cursor.fetchone()
@@ -52,7 +52,7 @@ class _ReportDishesRepoMixin:
 
     async def report_dishes_remove(self, id: int) -> bool:
         try:
-            tdb = self.table("report_dishes")
+            tdb = self._connection.table("report_dishes")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute("DELETE FROM report_dishes WHERE id = ?", (id,))
             await tdb.commit()
@@ -63,7 +63,7 @@ class _ReportDishesRepoMixin:
 
     async def report_dishes_reorder(self, ids: List[int]) -> bool:
         try:
-            tdb = self.table("report_dishes")
+            tdb = self._connection.table("report_dishes")
             async with tdb.conn.cursor() as cursor:
                 for i, rid in enumerate(ids):
                     await cursor.execute(

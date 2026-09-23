@@ -18,7 +18,7 @@ class _SemiRulesRepoMixin:
 
     async def semi_rules_all(self) -> List[Dict]:
         try:
-            tdb = self.table("semi_finished_rules")
+            tdb = self._connection.table("semi_finished_rules")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute("SELECT * FROM semi_finished_rules ORDER BY dish_name")
                 rows = await cursor.fetchall()
@@ -29,7 +29,7 @@ class _SemiRulesRepoMixin:
 
     async def semi_rules_get(self, rule_id: int) -> Optional[Dict]:
         try:
-            tdb = self.table("semi_finished_rules")
+            tdb = self._connection.table("semi_finished_rules")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     "SELECT * FROM semi_finished_rules WHERE id = ?", (rule_id,)
@@ -43,7 +43,7 @@ class _SemiRulesRepoMixin:
     async def semi_rules_upsert(self, rule: Dict) -> int:
         try:
             now = datetime.now(CHINA_TZ).isoformat()
-            tdb = self.table("semi_finished_rules")
+            tdb = self._connection.table("semi_finished_rules")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """INSERT INTO semi_finished_rules
@@ -62,7 +62,7 @@ class _SemiRulesRepoMixin:
 
     async def semi_rules_delete(self, rule_id: int) -> bool:
         try:
-            tdb = self.table("semi_finished_rules")
+            tdb = self._connection.table("semi_finished_rules")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     "DELETE FROM semi_finished_rules WHERE id = ?", (rule_id,)
@@ -77,7 +77,7 @@ class _SemiRulesRepoMixin:
         count = 0
         for r in rules:
             try:
-                tdb = self.table("semi_finished_rules")
+                tdb = self._connection.table("semi_finished_rules")
                 async with tdb.conn.cursor() as cursor:
                     await cursor.execute(
                         "SELECT 1 FROM semi_finished_rules WHERE dish_name = ? AND semi_name = ?",

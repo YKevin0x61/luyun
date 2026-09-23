@@ -270,5 +270,66 @@ class RestoreFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["applied"][CONTENT_APP_PG])
 
 
+class RestoreNotifiesLogStorageTest(unittest.IsolatedAsyncioTestCase):
+    """整库恢复必须通知日志那条**独立**连接。
+
+    ``services/log_storage.py`` 自己建了第二条 ``PgConnection``（理由见它的
+    ``_connect``：日志是高频后台写入，不想和业务查询互相排队）。两条恢复路径
+    （``api/backup.py`` 的快照回滚、``services/backup_service.py`` 的整库导入）
+    都只关它们注入的那个 ``db``，**碰不到这条连接**。不通知的话，
+    ``pg_restore --clean`` 掉 ``logs`` 表时它只能走「丢当批 + 置降级」，恢复完成后
+    第一批日志白丢。这个缺口原先没有任何地方写明，所以在这里钉住。
+    """
+
+    async def asyncSetUp(self):
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect(), "测试库连接失败")
+
+    async def asyncTearDown(self):
+        await self.db.close()
+
+    async def test_restore_app_pg_from_bytes_notifies_log_storage(self):
+        """真编排（只把 pg_restore 换成替身）必须通知日志换连接。
+
+        真实现由 ``tests/conftest.py`` 的 ``_no_real_database_restore`` 另存为
+        ``_real_restore_app_pg_from_bytes``——共享测试库不能被整库覆盖，所以模块
+        属性被换成了 ``AsyncMock``；这里取回真身，只替换最里层的 ``pg_restore``。
+        """
+        calls = []
+
+        async def _spy():
+            calls.append(True)
+            return True
+
+        real = getattr(backup_service, "_real_restore_app_pg_from_bytes")
+        with mock.patch.object(
+            backup_service, "restore_pg_dump_sync", lambda _path: None
+        ), mock.patch.object(backup_service, "notify_log_storage_reconnect", _spy):
+            await real(self.db, b"not-a-real-dump")
+
+        self.assertEqual(calls, [True], "整库恢复必须通知日志存储换连接")
+        self.assertTrue(self.db.is_connected(), "恢复后业务连接必须接回来")
+
+    async def test_notify_log_storage_reconnect_calls_through(self):
+        """那个通知真的传到了 ``log_storage.reconnect()``。
+
+        与上一条合起来构成完整链条：恢复编排 → 通知函数 → 日志那条独立连接。
+        ``api/backup.py`` 的快照回滚走的是同一个通知函数，所以链路的这一半只需
+        在这里钉一次。
+        """
+        calls = []
+
+        async def _spy():
+            calls.append(True)
+            return True
+
+        from services.log_storage import log_storage
+
+        with mock.patch.object(log_storage, "reconnect", _spy):
+            await backup_service.notify_log_storage_reconnect()
+
+        self.assertEqual(calls, [True], "通知函数必须调用 log_storage.reconnect()")
+
+
 if __name__ == "__main__":
     unittest.main()

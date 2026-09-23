@@ -292,6 +292,26 @@ class LogStorage:
         await self._close_conn()
         self._started = False
 
+    async def reconnect(self) -> bool:
+        """换一条新连接。**供整库恢复流程显式调用**。
+
+        这条连接是独立的第二条（理由见 :meth:`_connect`）：``api/backup.py`` 的恢复
+        只关它自己注入的那个 ``db``，碰不到这里。而 ``pg_restore --clean`` 会 drop
+        并重建 ``logs`` 表，于是恢复期间这里的写入要么撞 ``UndefinedTableError``
+        （只告警不重连，丢当批 + 置降级），要么连接被服务端断掉。表回建后确实能
+        自愈，但恢复完成后第一批日志会白丢——恢复流程在 ``db.close()`` 之后、
+        ``pg_restore`` 之前叫一次这里，两个连接的断开窗口就对齐了。
+
+        **不抛**：日志是尽力而为的旁路，通知失败只置降级标记，不能挡住恢复。
+        返回值只表示这次换连接成没成。
+
+        没启动过时（测试环境 ``DISABLE_BACKGROUND_TASKS=true``、或 ``start()`` 失败）
+        它什么都不做：没有连接要换，也不该替它凭空建一条。
+        """
+        if self._conn is None and not self._started:
+            return False
+        return await self._reconnect()
+
     # ── 写入（线程/协程安全） ─────────────────
 
     def enqueue(self, record: Dict[str, Any]) -> bool:

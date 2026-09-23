@@ -60,7 +60,7 @@ class _ReportsMixin:
 
         # 1. 菜品销量（查 orders 表）。右端是**开区间**（次日 06:00），与
         # `business_date_range` 的 [cut, 次日 cut) 语义一致。
-        orders_tdb = self.table("orders")
+        orders_tdb = self._connection.table("orders")
         async with orders_tdb.conn.cursor() as cursor:
             await cursor.execute(
                 f"""SELECT dish_name, station, SUM(quantity) as total_qty,
@@ -84,7 +84,7 @@ class _ReportsMixin:
             })
 
         # 2. 半成品换算规则（查 semi_finished_rules 表）
-        semi_tdb = self.table("semi_finished_rules")
+        semi_tdb = self._connection.table("semi_finished_rules")
         async with semi_tdb.conn.cursor() as cursor:
             await cursor.execute(
                 "SELECT dish_name, semi_name, position, factor, unit, category FROM semi_finished_rules"
@@ -181,7 +181,7 @@ class _ReportsMixin:
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         overdue_cutoff = (now - timedelta(minutes=self.KDS_OVERDUE_MINUTES)).isoformat()
 
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """SELECT station,
@@ -256,7 +256,7 @@ class _ReportsMixin:
         now = datetime.now(CHINA_TZ)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         urgent_cutoff = (now - timedelta(minutes=20)).isoformat()
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """SELECT COUNT(DISTINCT CASE
@@ -279,7 +279,7 @@ class _ReportsMixin:
             )
             urgent_count = (await cursor.fetchone())[0] or 0
 
-        ttables = self.table("tables")
+        ttables = self._connection.table("tables")
         async with ttables.conn.cursor() as cursor:
             await cursor.execute("SELECT COUNT(*) FROM tables")
             total_tables = (await cursor.fetchone())[0] or 0
@@ -306,7 +306,7 @@ class _ReportsMixin:
             hour=23, minute=59, second=59, microsecond=999000, tzinfo=CHINA_TZ
         )
         snapshot = await self.get_table_snapshot_stats()
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 f"""SELECT table_number,
@@ -361,7 +361,7 @@ class _ReportsMixin:
             bucket_expr = "strftime('%Y-W%W', order_time)"
         else:
             bucket_expr = "date(order_time)"
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 f"""SELECT {bucket_expr} as bucket,
@@ -399,7 +399,7 @@ class _ReportsMixin:
         if station and station != "all":
             station_clause = " AND station = ?"
             params.append(station)
-        tdb = self.table("orders")
+        tdb = self._connection.table("orders")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 f"""SELECT COUNT(*) FROM orders

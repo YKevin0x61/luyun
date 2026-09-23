@@ -179,8 +179,7 @@ def _drop_dead_loop_connections() -> None:
     db = getattr(runtime, "db", None) if runtime is not None else None
     if db is None:
         return
-    raw = getattr(getattr(db, "_conn", None), "_raw", None)
-    loop = getattr(raw, "_loop", None)
+    loop = db.bound_loop() if db is not None else None
     if loop is None or loop.is_closed():
         set_runtime(None)
         module = sys.modules.get("main")
@@ -389,6 +388,10 @@ def _no_real_database_restore(monkeypatch):
         target = getattr(backup_service, name, None)
         if target is None or isinstance(target, mock.Mock):
             continue
+        # 真实现另存一份：需要「跑真编排、只把 pg_restore 换成替身」的用例从这里
+        # 取回（见 tests/test_backup_restore_flow.py 的通知断言）。用 setattr 而非
+        # monkeypatch——它跨用例共享，而下面的替换本来就会被撤销。
+        setattr(backup_service, f"_real_{name}", target)
         replacement = (
             mock.AsyncMock() if inspect.iscoroutinefunction(target) else mock.Mock()
         )

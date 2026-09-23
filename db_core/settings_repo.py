@@ -24,7 +24,7 @@ class _SettingsRepoMixin:
     async def settings_get_json(self, key: str, default: Any = None) -> Any:
         """读取某个配置键的 JSON 值，不存在或解析失败时返回 ``default``。"""
         try:
-            tdb = self.table("app_settings")
+            tdb = self._connection.table("app_settings")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     "SELECT value FROM app_settings WHERE key = ?", (key,)
@@ -45,7 +45,7 @@ class _SettingsRepoMixin:
         try:
             payload = json.dumps(value, ensure_ascii=False)
             now = datetime.now(CHINA_TZ).isoformat()
-            tdb = self.table("app_settings")
+            tdb = self._connection.table("app_settings")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """
@@ -66,7 +66,7 @@ class _SettingsRepoMixin:
     async def settings_updated_at(self, key: str) -> Optional[str]:
         """返回某配置键的最后更新时间，不存在时返回 None。"""
         try:
-            tdb = self.table("app_settings")
+            tdb = self._connection.table("app_settings")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     "SELECT updated_at FROM app_settings WHERE key = ?", (key,)

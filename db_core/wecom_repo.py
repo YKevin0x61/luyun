@@ -18,7 +18,7 @@ class _WecomRepoMixin:
 
     async def wecom_webhooks_all(self, include_disabled: bool = True) -> List[Dict]:
         try:
-            tdb = self.table("wecom_push_webhooks")
+            tdb = self._connection.table("wecom_push_webhooks")
             sql = """SELECT id, name, webhook_url_encrypted, webhook_url_masked,
                             enabled, notes, created_at, updated_at
                      FROM wecom_push_webhooks"""
@@ -37,7 +37,7 @@ class _WecomRepoMixin:
 
     async def wecom_webhook_get(self, webhook_id: int) -> Optional[Dict]:
         try:
-            tdb = self.table("wecom_push_webhooks")
+            tdb = self._connection.table("wecom_push_webhooks")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT id, name, webhook_url_encrypted, webhook_url_masked,
@@ -54,7 +54,7 @@ class _WecomRepoMixin:
     async def wecom_webhook_create(self, item: Dict[str, Any]) -> int:
         try:
             now = datetime.now(CHINA_TZ).isoformat()
-            tdb = self.table("wecom_push_webhooks")
+            tdb = self._connection.table("wecom_push_webhooks")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """INSERT INTO wecom_push_webhooks
@@ -88,7 +88,7 @@ class _WecomRepoMixin:
             enabled = item.get("enabled", bool(existing["enabled"]))
             notes = item.get("notes", existing.get("notes", ""))
             now = datetime.now(CHINA_TZ).isoformat()
-            tdb = self.table("wecom_push_webhooks")
+            tdb = self._connection.table("wecom_push_webhooks")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """UPDATE wecom_push_webhooks
@@ -105,7 +105,7 @@ class _WecomRepoMixin:
 
     async def wecom_webhook_delete(self, webhook_id: int) -> bool:
         try:
-            tdb = self.table("wecom_push_webhooks")
+            tdb = self._connection.table("wecom_push_webhooks")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute("DELETE FROM wecom_push_webhooks WHERE id = ?", (webhook_id,))
             await tdb.commit()
@@ -116,7 +116,7 @@ class _WecomRepoMixin:
 
     async def wecom_jobs_all(self, include_disabled: bool = True) -> List[Dict]:
         try:
-            tdb = self.table("wecom_push_jobs")
+            tdb = self._connection.table("wecom_push_jobs")
             sql = """SELECT id, name, webhook_id, push_type, schedule_time,
                             date_range_mode, station, enabled, last_sent_date,
                             notes, created_at, updated_at
@@ -136,7 +136,7 @@ class _WecomRepoMixin:
 
     async def wecom_job_get(self, job_id: int) -> Optional[Dict]:
         try:
-            tdb = self.table("wecom_push_jobs")
+            tdb = self._connection.table("wecom_push_jobs")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT id, name, webhook_id, push_type, schedule_time,
@@ -154,7 +154,7 @@ class _WecomRepoMixin:
     async def wecom_job_create(self, item: Dict[str, Any]) -> int:
         try:
             now = datetime.now(CHINA_TZ).isoformat()
-            tdb = self.table("wecom_push_jobs")
+            tdb = self._connection.table("wecom_push_jobs")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """INSERT INTO wecom_push_jobs
@@ -188,7 +188,7 @@ class _WecomRepoMixin:
             if not existing:
                 return False
             now = datetime.now(CHINA_TZ).isoformat()
-            tdb = self.table("wecom_push_jobs")
+            tdb = self._connection.table("wecom_push_jobs")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """UPDATE wecom_push_jobs
@@ -218,7 +218,7 @@ class _WecomRepoMixin:
 
     async def wecom_job_delete(self, job_id: int) -> bool:
         try:
-            tdb = self.table("wecom_push_jobs")
+            tdb = self._connection.table("wecom_push_jobs")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute("DELETE FROM wecom_push_jobs WHERE id = ?", (job_id,))
             await tdb.commit()
@@ -232,7 +232,7 @@ class _WecomRepoMixin:
 
     async def wecom_log_add(self, item: Dict[str, Any]) -> int:
         try:
-            tdb = self.table("wecom_push_logs")
+            tdb = self._connection.table("wecom_push_logs")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """INSERT INTO wecom_push_logs
@@ -261,7 +261,7 @@ class _WecomRepoMixin:
     async def wecom_logs_recent(self, limit: int = 50) -> List[Dict]:
         try:
             safe_limit = max(1, min(int(limit), 200))
-            tdb = self.table("wecom_push_logs")
+            tdb = self._connection.table("wecom_push_logs")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT id, job_id, webhook_id, webhook_name, push_type, status,

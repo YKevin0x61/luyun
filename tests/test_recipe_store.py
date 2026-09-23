@@ -90,17 +90,20 @@ def store(db):
     _run(s.close())
 
 
-def test_store_without_injected_conn_refuses_to_connect(tmp_path, monkeypatch):
-    """自持模式（未注入 conn）不再自建连接：``connect()`` 直接失败。
+def test_store_requires_injected_conn(tmp_path, monkeypatch):
+    """连接只能在装配期注入——**构造期**就要求它。
 
-    旧用例断言的是 ``RECIPES_DB_PATH`` 不影响 ``db_path``；独立库文件随 ADR 0089
-    退场后 ``db_path`` 已不参与建连，这里改断言新的可见契约。
+    以前的「自持模式」（``RecipeStore()`` / ``RecipeStore(db_path)``）随 ADR 0089
+    退场：那条路 ``connect()`` 必定 raise，所以它只是一个构造得出来、永远不可用的
+    状态。收成必填参数后，误用从「运行期报错」提前到「构造期报错」，同时
+    ``db_path`` / ``APP_DB_PATH`` 这条遗留引用一起消失。``RECIPES_DB_PATH`` 环境
+    变量也不再有任何影响。
     """
     monkeypatch.setenv("RECIPES_DB_PATH", str(tmp_path / "other.db"))
-    with pytest.raises(RuntimeError, match="必须注入 PostgreSQL 连接"):
-        _run(RecipeStore().connect())
-    with pytest.raises(RuntimeError, match="必须注入 PostgreSQL 连接"):
-        _run(RecipeStore(str(tmp_path / "mine.db")).connect())
+    with pytest.raises(TypeError):
+        RecipeStore()
+    with pytest.raises(TypeError):
+        RecipeStore(str(tmp_path / "mine.db"))
 
 
 def test_borrowed_connection_close_does_not_close_shared(db):

@@ -153,9 +153,9 @@ class AppConnectionTimeoutsTest(unittest.IsolatedAsyncioTestCase):
         db = DatabaseManager()
         self.assertTrue(await db.connect(), "应用连接建立失败")
         try:
-            raw = db._conn  # 应用唯一连接；这里只读 SHOW，不碰任何表
-            statement = await raw.raw.fetchval("SHOW statement_timeout")
-            lock = await raw.raw.fetchval("SHOW lock_timeout")
+            raw = db._connection.native_connection()  # 应用唯一连接；只读 SHOW，不碰任何表
+            statement = await raw.fetchval("SHOW statement_timeout")
+            lock = await raw.fetchval("SHOW lock_timeout")
         finally:
             await db.close()
 

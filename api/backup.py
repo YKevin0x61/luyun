@@ -920,6 +920,10 @@ async def rollback_snapshot(
         # 未提交事务会持有表锁、让 drop 卡住。断开后采集侧的写入会直接失败一轮
         # （各自的错误处理会记失败计数），这是整库恢复的固有代价。
         await db.close()
+        # 日志存储是独立的第二条连接（services/log_storage.py 的 _connect 讲了为什么），
+        # 恢复流程碰不到它；这里显式通知，让两个连接的断开窗口对齐。见那个函数的
+        # docstring。不抛异常，也不阻塞恢复。
+        await backup_service.notify_log_storage_reconnect()
         try:
             await asyncio.to_thread(backup_service.restore_pg_dump_sync, str(snap_pg))
         except Exception as exc:

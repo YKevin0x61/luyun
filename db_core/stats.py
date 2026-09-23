@@ -18,9 +18,9 @@ class _StatsMixin:
 
     async def get_performance_stats(self) -> Dict[str, Any]:
         try:
-            order_count = await self.table("orders").get_count()
-            table_count = await self.table("tables").get_count()
-            mapping_count = await self.table("dish_stations").get_count()
+            order_count = await self._connection.table("orders").get_count()
+            table_count = await self._connection.table("tables").get_count()
+            mapping_count = await self._connection.table("dish_stations").get_count()
             return {
                 'database_stats': self.stats,
                 'connection_stats': {
@@ -38,7 +38,7 @@ class _StatsMixin:
 
     async def health_check(self) -> Dict[str, Any]:
         try:
-            await self._main_conn.execute("SELECT 1")
+            await self._connection.execute("SELECT 1")
             return {
                 "status": "healthy", "health_score": 100,
                 "db_paths": self.paths,
@@ -50,9 +50,9 @@ class _StatsMixin:
 
     async def get_connection_stats(self) -> Dict[str, Any]:
         try:
-            order_count = await self.table("orders").get_count()
-            table_count = await self.table("tables").get_count()
-            mapping_count = await self.table("dish_stations").get_count()
+            order_count = await self._connection.table("orders").get_count()
+            table_count = await self._connection.table("tables").get_count()
+            mapping_count = await self._connection.table("dish_stations").get_count()
             return {
                 "total_orders": order_count,
                 "total_tables": table_count,
@@ -68,9 +68,9 @@ class _StatsMixin:
 
     async def get_collection_stats(self) -> Dict[str, Any]:
         try:
-            order_count = await self.table("orders").get_count()
-            table_count = await self.table("tables").get_count()
-            mapping_count = await self.table("dish_stations").get_count()
+            order_count = await self._connection.table("orders").get_count()
+            table_count = await self._connection.table("tables").get_count()
+            mapping_count = await self._connection.table("dish_stations").get_count()
             return {
                 "orders": {"count": order_count},
                 "tables": {"count": table_count},

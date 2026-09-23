@@ -297,7 +297,7 @@ async def lifespan(app: FastAPI):
 
         # 初始化配方库（注入业务库连接：配方表与业务表同库，SQLite 独立库已退场）
         from services.recipes.store import RecipeStore
-        if db_manager and db_manager._conn is not None:
+        if db_manager and db_manager.is_connected():
             recipe_store = RecipeStore(conn=db_manager._conn)
             await recipe_store.prepare()
             startup_results.append("配方库")
@@ -309,7 +309,7 @@ async def lifespan(app: FastAPI):
         from services.hygiene.notifier import WeComGroupTextNotifier
         from services.hygiene.work import HygieneWork
         from pathlib import Path
-        if db_manager and db_manager._conn is not None:
+        if db_manager and db_manager.is_connected():
             employee_accounts = EmployeeAccounts(db_manager)
             await employee_accounts.prepare()
             startup_results.append("员工账号")

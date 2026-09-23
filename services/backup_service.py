@@ -1208,6 +1208,27 @@ async def export_pg_dump_bytes() -> Optional[bytes]:
             pass
 
 
+async def notify_log_storage_reconnect() -> None:
+    """整库恢复时通知日志存储换一条连接。
+
+    ``services/log_storage.py`` 自己建了**第二条** ``PgConnection``（理由见它的
+    ``_connect``：日志是高频后台写入，不想和业务查询互相排队）。两条恢复路径都
+    只关自己注入的那个 ``db``，碰不到这条连接；而 ``pg_restore --clean`` 会 drop
+    并重建 ``logs`` 表，于是恢复期间它的写入只能走「丢当批 + 置降级」，恢复完成后
+    第一批日志白丢。恢复流程在 ``db.close()`` 之后、``pg_restore`` 之前叫一次这里，
+    两个连接的断开窗口就对齐了。
+
+    **不抛**：日志是尽力而为的旁路，通知失败只置它的降级标记，不能挡住恢复。
+
+    抽成具名函数是为了让编排可测：真实现里的 ``pg_restore`` 在测试进程里被
+    ``tests/conftest.py`` 换成替身（共享测试库不能被整库覆盖），所以「有没有通知」
+    这件事只能在单独的函数上钉住——见 ``tests/test_backup_restore_flow.py``。
+    """
+    from services.log_storage import log_storage
+
+    await log_storage.reconnect()
+
+
 async def restore_app_pg_from_bytes(db, dump_bytes: bytes) -> None:
     """用整库 dump 覆盖当前 PostgreSQL（``pg_restore --clean``）。
 
@@ -1226,6 +1247,7 @@ async def restore_app_pg_from_bytes(db, dump_bytes: bytes) -> None:
         with open(tmp_path, "wb") as handle:
             handle.write(dump_bytes)
         await db.close()
+        await notify_log_storage_reconnect()
         try:
             await asyncio.to_thread(restore_pg_dump_sync, tmp_path)
         finally:

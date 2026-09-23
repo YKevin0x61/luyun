@@ -6,12 +6,8 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from datetime import datetime, timezone
 from typing import Optional
-
-from config import settings
-from db_core.backend.pg import PgConnection
 
 from .sections import DEFAULT_RECIPE_SECTION, canonicalize_section
 from .sop_parse import (
@@ -210,30 +206,21 @@ def utc_now_iso() -> str:
 
 
 class RecipeStore:
-    def __init__(
-        self,
-        db_path: str | os.PathLike | None = None,
-        *,
-        conn: PgConnection | None = None,
-    ):
-        if conn is not None:
-            self._conn = conn
-            self._owns_conn = False
-            self.db_path = None
-            return
-        self._conn = None
-        self._owns_conn = True
-        self.db_path = str(db_path) if db_path is not None else settings.APP_DB_PATH
+    def __init__(self, *, conn):
+        """配方表与业务表同库，连接由装配方注入（见 ``main.py`` 的 lifespan）。
+
+        以前还有一个「自持模式」：``RecipeStore()`` / ``RecipeStore(db_path)`` 自己
+        建 SQLite 连接。它随 ADR 0089 退场后只剩一个「构造得出来但永远不可用」的
+        状态（``connect()`` 必定 raise），所以直接收成必填参数——**少一个不可达
+        分支，也少一个 ``settings.APP_DB_PATH`` 遗留引用**。
+
+        ``conn`` 是 :class:`db_core.database_connection.DatabaseConnection`（连接
+        所有者），不是驱动连接：所有者原地不变，整库恢复换掉内部连接时这份引用
+        不会僵尸。
+        """
+        self._conn = conn
 
     async def connect(self) -> bool:
-        if self._owns_conn:
-            # SQLite 退场（ADR 0089）：配方表与业务表同库，连接由装配方注入
-            # （main.py 把 DatabaseManager 的连接交给 RecipeStore）。自建
-            # SQLite 连接、PRAGMA 与建表已移除。
-            raise RuntimeError(
-                "RecipeStore 必须注入 PostgreSQL 连接（见 main.py 的装配）；"
-                "SQLite 独立建连/建表已随 ADR 0089 移除"
-            )
         await self.prepare()
         return True
 
@@ -243,14 +230,11 @@ class RecipeStore:
         await self.conn.commit()
 
     async def close(self) -> None:
-        if self._owns_conn and self._conn is not None:
-            await self._conn.close()
-            self._conn = None
+        """借来的连接不归这里关——它的所有者是 ``DatabaseManager``。"""
+        return None
 
     @property
-    def conn(self) -> PgConnection:
-        if self._conn is None:
-            raise RuntimeError("RecipeStore 未连接")
+    def conn(self):
         return self._conn
 
     async def _canonicalize_stored_sections(self) -> None:

@@ -111,7 +111,7 @@ def _plan(db, sql, params=(), *, force_index=True):
     """
 
     async def _explain() -> str:
-        raw = db._conn.raw
+        raw = db._connection.native_connection()
         if not force_index:
             rows = await raw.fetch("EXPLAIN " + sql, *params)
             return "\n".join(row[0] for row in rows)

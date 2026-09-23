@@ -33,6 +33,14 @@ _Avoid_: 把订单历史频次推断当成档口目录的一部分。
 服务层依赖 Protocol；Admin 通用 CRUD 仍走 TableView，不进 domain port。
 _Avoid_: 把 port 当成 DatabaseManager 的 identity 别名，或在服务里再开 `table().conn` 旁路。
 
+### 数据库连接 (Database Connection)
+进程内**唯一**拥有业务库连接的东西：建立、替换、关闭，以及回答「现在这条连接还能用吗」。
+持有者（`TableView`、`RecipeStore`、卫生的 `HygieneWork` / `EmployeeAccounts` / `HygieneDataArchive`）拿到的是一个**稳定句柄**——
+连接在整库恢复等场景下被换掉时，句柄不变，持有者的引用不会变成僵尸。
+「对象是否存在」与「驱动连接是否活着」是两件事：前者决定要不要新建句柄，后者只回答能不能用。
+`PgConnection`（`db_core/backend/pg.py`）是它内部的驱动适配（aiosqlite 形态 shim），不是同一个概念，也不该出现在持有者的视野里。
+_Avoid_: 把连接当值分发给多个持有者；用 `_raw is None` 表达「关闭」；在持有者里缓存驱动连接或它的 `_raw` / `_loop` / `_tx`。
+
 ### 等待紧急度 (Wait Urgency)
 按「等待时长」把待出餐工作量标为紧急 / 较急 / 普通。语义对齐（默认较急 15 分钟、紧急 20 分钟），但两端各自取阈值：
 - 后端：读 `config.PRIORITY_LEVELS`（经 urgency policy）。
