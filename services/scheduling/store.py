@@ -6,15 +6,18 @@
 也不认识卫生的表名；它从公共层取「这个人是谁」（`services.identity`）、算自己的规则，
 把结果**物化**进 `staff_assignments`。下游只读那份数据，两边靠数据对接而不靠调用。
 
-四件事在这一层：
+五件事在这一层：
 
 - **班次**（`staff_shifts`）：白班、夜班是**数据**不是常量，加第三个班次是改数据。
 - **规则**（`scheduling_rules`）：一人一条轮转规则 —— `cycle` 的长度就是周期天数，
   每格是班次 id、`None` 表示休；`anchor_date` 是周期起点，相位由它和营业日之差算。
 - **展开**（`expand`）：把规则铺成 `staff_assignments` 的行，滚动铺未来 90 天。
-- **请假**（`scheduling_requests`）：员工提申请、店长批 / 驳（票 08）。批准的那几天写成
-  **单日覆盖**（`kind=leave`、没有班次），于是「请假」与「本来就休」在结果表里有据可查
+- **请假**（`scheduling_requests`，`kind=leave`）：员工提申请、店长批 / 驳（票 08）。批准的那几天
+  写成**单日覆盖**（`kind=leave`、没有班次），于是「请假」与「本来就休」在结果表里有据可查
   —— 两者的 `shift_id` 都是空，区别只在覆盖记录的 `kind`。
+- **换班**（同一张表，`kind=swap`）：员工指一个同事和一天，**对方先同意**才进店长待办，
+  店长批了两人那天的班对调（票 09；责任区跟着各自的新班次走）。对方拒绝或申请人撤回，
+  排班一个字不变。
 
 **已经写下的行不重算**：展开时窗口内哪天（哪个人）已经有行就跳过。所以「改规则只影响
 今天以后」是这个做法本身的结果，不是额外加的一段逻辑 —— 过去那些行早就写在那儿了，
@@ -66,6 +69,7 @@ __all__ = [
     "EXPANSION_DAYS",
     "KIND_LEAVE",
     "KIND_MANUAL",
+    "KIND_SWAP",
     "MAX_CYCLE_DAYS",
     "MAX_REQUEST_NOTE",
     "REST",
@@ -74,6 +78,7 @@ __all__ = [
     "STATUS_APPROVED",
     "STATUS_CANCELLED",
     "STATUS_PENDING_MANAGER",
+    "STATUS_PENDING_PEER",
     "STATUS_REJECTED",
     "SchedulingError",
     "SchedulingStore",
@@ -91,9 +96,12 @@ SOURCE_OVERRIDE = "override"
 # （见 `migrations/pg/0007_scheduling_overrides.sql`），不用再出一次迁移。
 KIND_MANUAL = "manual"
 KIND_LEAVE = "leave"
+KIND_SWAP = "swap"
 
-# 申请的状态（`spec.md` 的状态机）。`pending_peer` 是换班专用（票 09 才写得出来）；
-# 请假从「等店长批」直接到批 / 驳，申请人自己撤回落 `cancelled`。
+# 申请的状态（`spec.md` 的状态机）。`pending_peer` 是换班专用（票 09）：提出来先等对方
+# 点头，对方同意了才轮到店长（`pending_manager`）；请假从「等店长批」直接到批 / 驳，
+# 申请人自己撤回落 `cancelled`。
+STATUS_PENDING_PEER = "pending_peer"
 STATUS_PENDING_MANAGER = "pending_manager"
 STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
@@ -104,7 +112,13 @@ STATUS_CANCELLED = "cancelled"
 MAX_REQUEST_NOTE = 50
 
 # 读申请时选的列：`_request_rows` 与 `_request_by_id` 共用一份，免得两处列名漂移。
+# `peer_employee_id`（0009）另有一份「没有它」的写法：半迁移（0008 应用了、0009 没应用）
+# 时申请要照常读得出来，见 `_select_request_rows`。
 _REQUEST_COLUMNS = (
+    "id, employee_id, kind, start_date, end_date, status, note, decided_at, created_at, updated_at,"
+    " peer_employee_id"
+)
+_REQUEST_COLUMNS_NO_PEER = (
     "id, employee_id, kind, start_date, end_date, status, note, decided_at, created_at, updated_at"
 )
 
@@ -238,6 +252,9 @@ class SchedulingStore:
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._write_lock_owner = conn_or_db
         self._local_write_lock = None
+        # 读申请时先按「有换班那一列」（0009）读；缺列就退一步、记住这一次降级，
+        # 别每读一次都白撞一回（半迁移时请假要照常能用，见 `_select_request_rows`）。
+        self._requests_have_peer = True
 
     @property
     def _write_lock(self):
@@ -1251,41 +1268,68 @@ class SchedulingStore:
 
     @_needs_migration
     async def my_requests(self, employee_id: int) -> dict:
-        """我自己提过的申请，新的在前（票 08 的验收项：每条现在到哪一步）。
+        """我自己提过的申请 + **等我回应的换班**，新的在前（票 08 / 09 的验收项）。
+
+        两个方向都在这里：`requests` 是我提的（每条现在到哪一步），`incoming` 是别人问我
+        换班的（`pending_peer`、还没回应的），后者带两个人那天的班，好在手机上直接决定。
 
         `status` 是机器可读的那个（前端翻成人话），`decided_at` 只在批 / 驳 / 撤之后才有。
+        换班那条多一个 `peer_name`：员工端要写「等王五同意」，而它手上没有花名册。
         """
-        rows = await self._request_rows(employee_id=int(employee_id))
-        return {"today": self.today(), "requests": rows}
+        employee_id = int(employee_id)
+        rows = await self._request_rows(employee_id=employee_id)
+        names = await self._name_index()
+        for row in rows:
+            peer_id = row.get("peer_employee_id")
+            row["peer_name"] = None if peer_id is None else names.get(int(peer_id), "")
+        return {
+            "today": self.today(),
+            "requests": rows,
+            "incoming": await self._incoming_swaps(employee_id),
+        }
 
     @_needs_migration
     async def cancel_request(self, employee_id: int, request_id: int) -> dict:
-        """申请人撤回自己**还没被批**的申请（票 08 的验收项）。
+        """申请人撤回自己**还没被批**的申请（票 08 / 09 的验收项）。
 
         撤回只动申请这一行：排班一个字不改 —— 还没批的申请本来就没写进排班。
+
+        待决的两个状态都能撤：请假只有「等店长批」，换班还有「等对方同意」；对方已经
+        同意、店长还没批的时候也能撤（票 09 的验收项）。
 
         别人的申请一律当作「不存在」：不告诉调用方「这条在，但不是你的」。
         """
         row = await self._request_by_id(request_id)
         if row is None or int(row["employee_id"]) != int(employee_id):
             raise SchedulingError("unknown_request", "unknown_request")
-        if row["status"] != STATUS_PENDING_MANAGER:
+        if row["status"] not in (STATUS_PENDING_PEER, STATUS_PENDING_MANAGER):
             # 批完 / 驳完 / 已撤回都不再动：状态机只往前走（`spec.md` 的状态机）。
             raise SchedulingError("request_not_pending", "request_not_pending")
         return await self._decide(int(row["id"]), STATUS_CANCELLED)
 
     @_needs_migration
     async def inbox(self) -> dict:
-        """店长待办（票 08）：等他批的请假 + 还没配规则的人。
+        """店长待办（票 08 / 09）：等他批的申请 + 还没配规则的人。
 
-        每条请假带一份**预览**：批了之后那天每个班次还剩几个人（`days[*].after`）。
+        两种申请进的是同一个队列，卡的形状不一样：请假（`kind=leave`）带一份**预览**
+        —— 批了之后那天每个班次还剩几个人（`days[*].after`）；换班（`kind=swap`）摊开
+        **两个人那天的班**（`days[*].current_shift_*` 是申请人的，`peer_*` 是对方的），
+        批了就是对调，没有人数可算。两种卡都带 `peer_employee_id` / `peer_name`（请假是空），
+        前端少一处分支。
+
         人手够不够只把数字摊开 —— 服务层没有「最少几个人」这个配置，也就没有阈值可判，
         「只提示、不阻止」在实现上就是**根本没有那道闸**（票面的口径）。
 
-        `days` 是申请区间的每一天（两端都算），`past=True` 的那几天批了也不会动：
-        过去不改写（跟票 07 同一条口径），先说清楚，别让店长以为批了就改了历史。
+        `days` 是申请区间的每一天（两端都算；换班就一天），`past=True` 的那几天批了也
+        不会动：过去不改写（跟票 07 同一条口径），先说清楚，别让店长以为批了就改了历史。
 
-        旧申请在前（先来先处理）：这是待办队列，不是「最新动态」。
+        **等对方点头的换班不在这里**（`pending_peer`）：那就是票 09 要的那条规矩 ——
+        对方还没点，店长看不到。旧申请在前（先来先处理）：这是待办队列，不是「最新动态」。
+
+        缺 0009 那一列时，读会降级成「没有换班」，可表里排上队的换班仍旧渲染不出来 ——
+        那种情况报 `not_migrated`（让人去应用迁移）；而列在、这一行的对方却是空的
+        （0009 被撤过又补回来的残骸）只是**跳过那一行**：它是修不回来的死数据，
+        不该把整页待办连着别人的请假一起 503 掉。
         """
         await self.expand()
         today = self.today()
@@ -1318,6 +1362,13 @@ class SchedulingStore:
         requests = []
         for row in rows:
             employee_id = int(row["employee_id"])
+            if row["kind"] == KIND_SWAP:
+                # 换班是另一种卡：两个人的班摊开、批了对调，没有「剩几个人」可算
+                # （对调不改变任何班次的人数）。摆不出来的那一行给 `None`（跳过）。
+                card = await self._swap_card(row, day_roster, names, shift_names, today)
+                if card is not None:
+                    requests.append(card)
+                continue
             days = []
             for day in _each_day_between(row["start_date"], row["end_date"]):
                 people = await day_roster(day)
@@ -1356,6 +1407,9 @@ class SchedulingStore:
                 "end_date": row["end_date"],
                 "note": row["note"],
                 "created_at": row["created_at"],
+                # 请假没有「对方」，这两格照样给出来：两种卡形状一样，前端少一处分支。
+                "peer_employee_id": None,
+                "peer_name": "",
                 "days": days,
             })
 
@@ -1381,10 +1435,13 @@ class SchedulingStore:
 
     @_needs_migration
     async def approve_request(self, request_id: int) -> dict:
-        """批一条请假：那几天变成请假，并记下什么时候批的（票 08 的验收项）。
+        """批一条申请：请假那几天变成请假，换班两个人那天对调（票 08 / 09 的验收项）。
 
-        写的是**覆盖行**（`kind=leave`、`shift_id` 空）而不是改结果表的列：结果表里
-        「请假」与「休」都是没有班次，区别只在覆盖记录的 `kind`。
+        请假写的是**覆盖行**（`kind=leave`、`shift_id` 空）而不是改结果表的列：结果表里
+        「请假」与「休」都是没有班次，区别只在覆盖记录的 `kind`。换班写两条覆盖行
+        （`kind=swap`）+ 两条结果行：谁的班去了谁那里，见 `_approve_swap`。
+
+        两种都只认 `pending_manager`：对方的点头（换班）是进这道门的条件，不是能跳过的一步。
 
         已经过去的日子**不重写**（票 07 同一条「过去不改」）：批得晚了就是晚了，那天当时
         怎么排的就留着。申请照样记成已批准，`applied_days` 说清写了哪几天 ——
@@ -1399,7 +1456,11 @@ class SchedulingStore:
 
     @_needs_migration
     async def reject_request(self, request_id: int) -> dict:
-        """驳回一条请假：**排班一个字不改**（票 08 的验收项），只把申请记为驳回。"""
+        """驳回一条申请：**排班一个字不改**（票 08 的验收项），只把申请记为驳回。
+
+        换班也一样：店长驳的是「这两个人对调」这件事，两人那天的班照旧。对方自己
+        拒绝的那一步走的是 `answer_swap`（那条根本不进店长的队列）。
+        """
         row = await self._request_by_id(request_id)
         if row is None:
             raise SchedulingError("unknown_request", "unknown_request")
@@ -1407,13 +1468,191 @@ class SchedulingStore:
             raise SchedulingError("request_not_pending", "request_not_pending")
         return await self._decide(int(row["id"]), STATUS_REJECTED)
 
+    # ── 换班（票 09） ───────────────────────────────────────────────────
+    #
+    # 换班比请假多一道门：**先过对方**。员工指一个同事和一天（`kind=swap`，
+    # `peer_employee_id` 是 0009 加的那一列），落 `pending_peer`；对方在手机上同意之后
+    # 才变成 `pending_manager` 进店长待办 —— 在那之前店长看不到它。店长批了，两个人
+    # 那天的班对调（`_approve_swap`），对方拒绝或申请人撤回则一个字不写。
+
+    @_needs_migration
+    async def submit_swap(
+        self,
+        employee_id: int,
+        peer_employee_id: int,
+        business_date: str,
+        note: Optional[str] = None,
+    ) -> dict:
+        """请一个同事跟自己换某一天的班（票 09 的第一步）。
+
+        落 `pending_peer`：对方同意才轮到店长。申请本身**不碰排班** —— 批下来才动，
+        所以对方拒绝、或申请人自己撤回，其他人的排班一个字都不变（验收项）。
+
+        换的是「那天两个人各自的样子」：对方那天本来就休（或还没排到，新人没配规则），
+        批了就是他接走你的班、你那天空出来 —— 这也是一种换班。但**提的人那天得有一行**：
+        手上没有班就没什么可换的（`nothing_to_swap`），先让店长配上规则再说。
+        """
+        employee_id = int(employee_id)
+        peer_id = int(peer_employee_id or 0)
+        if peer_id <= 0:
+            # 字段整个没给：跟「这个人不存在」分开说（跟 `missing_swap_day` 同一条口径）。
+            raise SchedulingError("missing_peer", "missing_peer")
+        if peer_id == employee_id:
+            raise SchedulingError("swap_with_self", "swap_with_self")
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        people = {employee["id"]: employee for employee in roster}
+        if employee_id not in people:
+            raise SchedulingError("unknown_employee", "unknown_employee")
+        peer = people.get(peer_id)
+        if peer is None:
+            raise SchedulingError("unknown_peer", "unknown_peer")
+        if peer["disabled"] or not peer["approved"]:
+            # 停用 / 还没批准的人不进排班名单，也不该被拉来换班：跟「找不到这个人」
+            # 是两件事（一个是名字错了，一个是人现在不在），分两句说。
+            raise SchedulingError("peer_unavailable", "peer_unavailable")
+        if not str(business_date or "").strip():
+            # 字段整个没给：跟「格式不对」分开说（跟请假 `missing_day` 同一条口径）。
+            raise SchedulingError("missing_swap_day", "missing_swap_day")
+        day = _require_business_date(business_date)
+        if day < self.today():
+            raise SchedulingError("past_swap", "past_swap")
+        if day > self._window()[1]:
+            # 第二参填进那句提示的 `{}`：报真实的窗口末日（跟票 07、请假同一条口径）。
+            raise SchedulingError("beyond_swap", self._window()[1])
+        # 先把自己那天铺出来再问「有没有班」：规则配了但还没展开时不能误判成「没班」。
+        await self.expand(employee_id)
+        if not (await self._day_shift(employee_id, day))[0]:
+            raise SchedulingError("nothing_to_swap", "nothing_to_swap")
+        for row in await self._request_rows(employee_id=employee_id):
+            if row["status"] not in (STATUS_PENDING_PEER, STATUS_PENDING_MANAGER):
+                # 已经落定的（批了 / 拒了 / 撤了）不挡：同一对同一天可以过些日子再换一次。
+                continue
+            peer_of_row = row.get("peer_employee_id")
+            if (
+                peer_of_row is not None
+                and int(peer_of_row) == peer_id
+                and row["start_date"] == day
+            ):
+                # 同一件事问两遍：对方手机上会出现两条一样的请求。对方同意之后
+                # （`pending_manager`）也算挂着的 —— 那条还在店长待办里，再提一条会让
+                # 店长看到两张同一天的卡，两条都批等于又换了回去，而两次回执都写「对调了」。
+                # 挡在这里，而不是靠前端按钮灰着（手写的调用方也该读到一句话）。
+                raise SchedulingError("already_asked", "already_asked")
+        try:
+            return await self._insert_request(
+                employee_id,
+                KIND_SWAP,
+                day,
+                day,
+                _clean_note(note),
+                STATUS_PENDING_PEER,
+                peer_id,
+            )
+        except asyncpg.UniqueViolationError:
+            # 上面那次扫描在写锁外（`submit_swap` 只有 `@_needs_migration`），挡不住
+            # 同一瞬间进来的第二条；0009 的局部唯一索引是最后一道闸，落库失败就说人话。
+            raise SchedulingError("already_asked", "already_asked") from None
+
+    @_needs_migration
+    async def answer_swap(self, employee_id: int, request_id: int, agree: bool) -> dict:
+        """对方回一句「同意」或「拒绝」（票 09）。
+
+        同意 → 这条申请进店长待办（`pending_manager`）；拒绝 → 直接结束（`rejected`），
+        **店长那边从头到尾看不到它**，排班也一个字不改。
+
+        不是问我的（`peer_employee_id` 不是我）一律当作「不存在」：跟撤回同一条口径，
+        不告诉调用方「这条在，但不是问你的」。
+        """
+        me = int(employee_id)
+        row = await self._request_by_id(request_id)
+        if row is None or row.get("peer_employee_id") is None or int(row["peer_employee_id"]) != me:
+            raise SchedulingError("unknown_request", "unknown_request")
+        if row["status"] != STATUS_PENDING_PEER:
+            # 已经回过的、被撤回的、批完的都不再动：状态机只往前走。
+            raise SchedulingError("request_not_pending", "request_not_pending")
+        return await self._decide(
+            int(row["id"]), STATUS_PENDING_MANAGER if agree else STATUS_REJECTED
+        )
+
+    async def colleagues(self, employee_id: int) -> list[dict]:
+        """员工能找谁换班：名单里**在上班**的其他人（停用 / 还没批准的不给选）。
+
+        只给 `id` / `name` / `job_title`：员工端要的是「选一个人」，不是一份花名册 ——
+        手机号、排班权限这些不该跟着这扇门出去。顺序就是名单顺序（前端要排自己排）。
+        """
+        me = int(employee_id)
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        return [
+            {
+                "id": employee["id"],
+                "name": employee["name"] or employee["phone"],
+                "job_title": employee["job_title"],
+            }
+            for employee in roster
+            if employee["id"] != me and employee["approved"] and not employee["disabled"]
+        ]
+
+    async def _incoming_swaps(self, employee_id: int) -> list[dict]:
+        """等我回应的换班（票 09）：`status='pending_peer'` 且那一列是我。
+
+        每条带两个人那天的班（`their_*` 是申请人、`my_*` 是我），好让对方在手机上直接
+        看清楚「他那天白班、我那天夜班，同意就是对调」。先来先回（旧的在前）。
+
+        `scheduled=False` 是「那天还没排到」（新人没配规则），跟「本来就休」分开说 ——
+        两者批下来都会真的对调，但说给员工听的话不一样。
+
+        0009 没应用时返回空：换班那时根本提不出来（写那条路会明说去应用 0009），
+        请假照常能用（票 08 那几条读路径不碰这一列）。
+        """
+        me = int(employee_id)
+        try:
+            rows = await self._request_rows(
+                peer_id=me, status=STATUS_PENDING_PEER, oldest_first=True
+            )
+        except asyncpg.UndefinedColumnError as exc:
+            await self._rollback_quietly()
+            logger.warning("换班列读不了（0009 未应用？），「等我回应」按空处理: %s", exc)
+            return []
+        names = await self._name_index()
+        shift_names = {shift["id"]: shift["name"] for shift in await self.list_shifts()}
+        cards = []
+        for row in rows:
+            day = row["start_date"]
+            their_scheduled, their_shift = await self._day_shift(int(row["employee_id"]), day)
+            my_scheduled, my_shift = await self._day_shift(me, day)
+
+            def label(shift_id: Optional[int]) -> Optional[str]:
+                return None if shift_id is None else shift_names.get(shift_id)
+
+            cards.append({
+                "id": int(row["id"]),
+                "employee_id": int(row["employee_id"]),
+                "employee_name": names.get(int(row["employee_id"]), ""),
+                "kind": row["kind"],
+                "business_date": day,
+                "note": row["note"],
+                "created_at": row["created_at"],
+                "their_scheduled": their_scheduled,
+                "their_shift_id": their_shift,
+                "their_shift_name": label(their_shift),
+                "my_scheduled": my_scheduled,
+                "my_shift_id": my_shift,
+                "my_shift_name": label(my_shift),
+            })
+        return cards
+
     @serialized_write
     async def _approve(self, row: dict) -> dict:
-        """批准一条申请：那几天写覆盖行 + 结果行，最后把申请置成已批准。一次提交。
+        """批准一条申请：写覆盖行 + 结果行，最后把申请置成已批准。一次提交。
+
+        两种申请在这一层分岔：请假在区间里每一天写成「没有班次」（`kind=leave`），
+        换班只动那一天、两个人的班对调（`kind=swap`，见 `_approve_swap`）。
 
         一次提交是有意的：批一半（写了三天、申请还是待批）比不批更糟 —— 店长会再点
         一次「批准」，或者以为没批成而重复处理。
         """
+        if row["kind"] == KIND_SWAP:
+            return await self._approve_swap(row)
         employee_id = int(row["employee_id"])
         today = self.today()
         last_day = self._window()[1]
@@ -1443,6 +1682,148 @@ class SchedulingStore:
             "skipped_days": skipped,
         }
 
+    @staticmethod
+    def _peer_of_swap(row: dict) -> int:
+        """换班申请里的「对方」（票 09）。
+
+        0009 没应用时这一列读不出来（读路径按「没有换班」处理，见 `_select_request_rows`），
+        可**列被撤掉之前**已经排上队的换班还躺在表里：这时候卡片渲染不出来、也批不了。
+        老实报一条点名迁移文件的 503 —— 别拿 None 去查库：那样待办上会印出一句
+        「对方那天休」的假话，点批准还会在 `int(None)` 上抛成清不掉的 500。
+        """
+        peer_id = row.get("peer_employee_id")
+        if peer_id is None:
+            raise SchedulingError("not_migrated", 'column "peer_employee_id" does not exist')
+        return int(peer_id)
+
+    async def _approve_swap(self, row: dict) -> dict:
+        """把两个人那天的班对调（票 09 的验收项）。调用方持写锁、负责提交。
+
+        写的是**覆盖行**（`kind=swap`）+ 结果行（`source=override`），两个人都写 ——
+        跟店长手改、批准请假走的是同一条路，于是那天之后规则再重铺也改不动它。
+
+        责任区按各自**新班次**的固定区取（验收：区跟着班次走）；新班次是「休 / 没排到」
+        时区也留空。当天已经过去 / 超出展开窗口的那一天只记「没动」：批得晚了就是晚了
+        （跟请假那一支、票 07 同一条「过去不改」）。
+        """
+        employee_id = int(row["employee_id"])
+        peer_id = self._peer_of_swap(row)
+        day = row["start_date"]
+        stamp = self._now_iso()
+        applied: list[str] = []
+        skipped: list[str] = []
+        if day < self.today() or day > self._window()[1]:
+            skipped.append(day)
+        else:
+            _, mine_now = await self._day_shift(employee_id, day)
+            _, theirs_now = await self._day_shift(peer_id, day)
+            mine_zone = await self._zone_for(employee_id, theirs_now)
+            theirs_zone = await self._zone_for(peer_id, mine_now)
+            await self._write_override_row(
+                employee_id, day, theirs_now, mine_zone, KIND_SWAP, stamp
+            )
+            await self._write_day_row(
+                employee_id, day, theirs_now, mine_zone, SOURCE_OVERRIDE, stamp
+            )
+            await self._write_override_row(peer_id, day, mine_now, theirs_zone, KIND_SWAP, stamp)
+            await self._write_day_row(peer_id, day, mine_now, theirs_zone, SOURCE_OVERRIDE, stamp)
+            applied.append(day)
+        await self._conn.execute(
+            """UPDATE scheduling_requests
+               SET status = ?, decided_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_APPROVED, stamp, stamp, int(row["id"])),
+        )
+        await self._conn.commit()
+        return {
+            "id": int(row["id"]),
+            "employee_id": employee_id,
+            "peer_employee_id": peer_id,
+            "status": STATUS_APPROVED,
+            "decided_at": stamp,
+            "applied_days": applied,
+            "skipped_days": skipped,
+        }
+
+    async def _zone_for(self, employee_id: int, shift_id: Optional[int]) -> Optional[int]:
+        """这个人在这个班次上的固定区（票 03 配的那张表）；班次是空的就没有区。"""
+        if shift_id is None:
+            return None
+        return (await self._zone_defaults_for(int(employee_id))).get(int(shift_id))
+
+    async def _day_shift(self, employee_id: int, day: str) -> tuple[bool, Optional[int]]:
+        """某人某天现在的结果行：``(那天排没排到, 班次 id)``。
+
+        没有那一行 = 那天还没排到（新人没配规则，或窗口还没铺到），跟
+        「有行、班次为空」= 那天休 是两件事 —— 换班卡片上要说给员工听的不一样。
+        """
+        cur = await self._conn.execute(
+            """SELECT shift_id FROM staff_assignments
+               WHERE employee_id = ? AND business_date = ?""",
+            (int(employee_id), day),
+        )
+        found = await cur.fetchone()
+        if found is None:
+            return False, None
+        shift_id = dict(found)["shift_id"]
+        return True, (None if shift_id is None else int(shift_id))
+
+    async def _swap_card(
+        self, row: dict, day_roster, names: dict, shift_names: dict, today: str
+    ) -> Optional[dict]:
+        """店长待办里换班那张卡：两个人那天的班摊开，批了就是对调。
+
+        `days` 跟请假卡同形（就一天）：`scheduled` / `current_shift_*` 是**申请人**的，
+        `peer_*` 是**对方**的。`scheduled=False` 是那天还没排到（新人没配规则）——
+        批下来照样对调：他接走申请人的班。没有「剩几个人」这一项：对调走两个人、
+        来两个人，哪个班次的人数都不变。
+
+        摆不了桌的那一行返回 `None`（见下面那段）：一张卡摆不出来，不该让整页待办
+        跟着倒下 —— 同一队列里还压着别人的请假。
+        """
+        employee_id = int(row["employee_id"])
+        if self._requests_have_peer and row.get("peer_employee_id") is None:
+            # 列读得出来，这一行的对方却是空的：0009 被撤掉又加回来留下的死数据
+            # （`DROP COLUMN` 连值一起丢），对方是谁已经无从考证，这行永远批不了。
+            # 跳过它、留一条日志，而不是把整页待办 503 掉 —— 它已经不是「等着批的活」，
+            # 是修不回来的残骸。（列真的不在时 `_requests_have_peer` 是 False，
+            # 那种情况仍旧报 `not_migrated`：照做能修好，别混为一谈。）
+            logger.warning(
+                "换班 #%s 没有对方（0009 被撤过？），这张卡跳过不摆", row.get("id")
+            )
+            return None
+        peer_id = self._peer_of_swap(row)
+        day = row["start_date"]
+        people = await day_roster(day)
+        mine = people.get(employee_id)
+        theirs = people.get(peer_id)
+
+        def label(shift_id: Optional[int]) -> Optional[str]:
+            return None if shift_id is None else shift_names.get(shift_id)
+
+        return {
+            "id": int(row["id"]),
+            "employee_id": employee_id,
+            "employee_name": names.get(employee_id, ""),
+            "kind": row["kind"],
+            "peer_employee_id": peer_id,
+            "peer_name": names.get(peer_id, ""),
+            "start_date": row["start_date"],
+            "end_date": row["end_date"],
+            "note": row["note"],
+            "created_at": row["created_at"],
+            "days": [{
+                "business_date": day,
+                "past": day < today,
+                "scheduled": employee_id in people,
+                "current_shift_id": mine,
+                "current_shift_name": label(mine),
+                "peer_scheduled": peer_id in people,
+                "peer_shift_id": theirs,
+                "peer_shift_name": label(theirs),
+            }],
+        }
+
     @serialized_write
     async def _decide(self, request_id: int, status: str) -> dict:
         """把申请置成 `status` 并记下时间（驳回 / 撤回共用）。排班一个字不改。"""
@@ -1456,38 +1837,65 @@ class SchedulingStore:
         await self._conn.commit()
         return {"id": int(request_id), "status": status, "decided_at": stamp}
 
+    async def _select_request_rows(
+        self, clause: str, params: tuple, order: str = ""
+    ) -> list[dict]:
+        """读申请行（语句由调用方拼：筛选与排序各不一样，列名只此一处）。
+
+        0009 没应用时**退一步**：按没有换班那一列读，请假那几条照常能用 —— 换班那时
+        根本提不出来（写的那条路会明说去应用 0009），「等我回应的换班」当然是空的。
+        降级只发生一次（`_requests_have_peer` 记住）；失败的事务先回滚，否则这条连接
+        后面的查询会全跟着报 `current transaction is aborted`（同 `_needs_migration`）。
+        """
+        tail = f" ORDER BY {order}" if order else ""
+        columns = _REQUEST_COLUMNS if self._requests_have_peer else _REQUEST_COLUMNS_NO_PEER
+        try:
+            cur = await self._conn.execute(
+                f"SELECT {columns} FROM scheduling_requests{clause}{tail}", params
+            )
+        except asyncpg.UndefinedColumnError as exc:
+            await self._rollback_quietly()
+            if not self._requests_have_peer:
+                raise
+            self._requests_have_peer = False
+            logger.warning("换班列读不了（0009 未应用？），申请按没有换班处理: %s", exc)
+            cur = await self._conn.execute(
+                f"SELECT {_REQUEST_COLUMNS_NO_PEER} FROM scheduling_requests{clause}{tail}",
+                params,
+            )
+        rows = [dict(row) for row in await cur.fetchall()]
+        for row in rows:
+            row.setdefault("peer_employee_id", None)
+        return rows
+
     async def _request_rows(
         self,
         employee_id: Optional[int] = None,
         status: Optional[str] = None,
         oldest_first: bool = False,
+        peer_id: Optional[int] = None,
     ) -> list[dict]:
-        """读申请（可按人、按状态筛）。排序由调用方选：我的申请新的在前，待办旧的在前。"""
+        """读申请（可按人、按状态、按「对方是谁」筛）。排序由调用方选。"""
         where: list[str] = []
         params: list[Any] = []
         if employee_id is not None:
             where.append("employee_id = ?")
             params.append(int(employee_id))
+        if peer_id is not None:
+            # 「等我回应的换班」：这一列（0009）按 `peer_employee_id` 领头读，
+            # 索引 `idx_scheduling_requests_peer` 就是给这条路径建的。
+            where.append("peer_employee_id = ?")
+            params.append(int(peer_id))
         if status is not None:
             where.append("status = ?")
             params.append(status)
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         order = "created_at ASC, id ASC" if oldest_first else "created_at DESC, id DESC"
-        cur = await self._conn.execute(
-            f"""SELECT {_REQUEST_COLUMNS}
-                FROM scheduling_requests{clause}
-                ORDER BY {order}""",
-            tuple(params),
-        )
-        return [dict(row) for row in await cur.fetchall()]
+        return await self._select_request_rows(clause, tuple(params), order)
 
     async def _request_by_id(self, request_id: int) -> Optional[dict]:
-        cur = await self._conn.execute(
-            f"SELECT {_REQUEST_COLUMNS} FROM scheduling_requests WHERE id = ?",
-            (int(request_id),),
-        )
-        row = await cur.fetchone()
-        return None if row is None else dict(row)
+        rows = await self._select_request_rows(" WHERE id = ?", (int(request_id),))
+        return rows[0] if rows else None
 
     @serialized_write
     async def _insert_request(
@@ -1498,15 +1906,42 @@ class SchedulingStore:
         last: str,
         note: Optional[str],
         status: str,
+        peer_employee_id: Optional[int] = None,
     ) -> dict:
         stamp = self._now_iso()
-        cur = await self._conn.execute(
-            """INSERT INTO scheduling_requests
-                   (employee_id, kind, start_date, end_date, status, note, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               RETURNING id""",
-            (employee_id, kind, first, last, status, note, stamp, stamp),
+        with_peer = (
+            "(employee_id, kind, start_date, end_date, status, note, created_at, updated_at,"
+            " peer_employee_id)"
         )
+        without_peer = (
+            "(employee_id, kind, start_date, end_date, status, note, created_at, updated_at)"
+        )
+        base = (employee_id, kind, first, last, status, note, stamp, stamp)
+        cur = None
+        if self._requests_have_peer:
+            try:
+                cur = await self._conn.execute(
+                    f"INSERT INTO scheduling_requests {with_peer}"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                    (*base, peer_employee_id),
+                )
+            except asyncpg.UndefinedColumnError:
+                # 0009 还没应用：请假不靠这一列，照常落库（退回没有它的写法，并记住）；
+                # 换班非得记「跟谁换」，抛给调用方的 `_needs_migration` 变成 503，
+                # 点名 `0009_scheduling_swap.sql`。
+                if peer_employee_id is not None:
+                    raise
+                await self._rollback_quietly()
+                self._requests_have_peer = False
+                logger.warning("换班列写不了（0009 未应用？），请假按没有换班落库")
+        if cur is None:
+            if peer_employee_id is not None:
+                raise SchedulingError("not_migrated", 'column "peer_employee_id" does not exist')
+            cur = await self._conn.execute(
+                f"INSERT INTO scheduling_requests {without_peer}"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                base,
+            )
         created = await cur.fetchone()
         await self._conn.commit()
         return {
@@ -1517,6 +1952,7 @@ class SchedulingStore:
             "end_date": last,
             "status": status,
             "note": note,
+            "peer_employee_id": peer_employee_id,
             "decided_at": None,
             "created_at": stamp,
         }

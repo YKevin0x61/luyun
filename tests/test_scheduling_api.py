@@ -4,8 +4,8 @@
 
 薄缝只回答「谁能打、打进去会怎样」：管理端会话能配规则并立刻在月历上看见；
 匿名两边都不行。票 05 起有两扇门 —— 店长那几条只认管理端会话，员工那几条
-（`/me`、`/me/month`、票 08 的 `/me/requests`）只认手机端 cookie
-（票 02 时这里断言的是「一条员工路由都没有」）。
+（`/me`、`/me/month`、票 08 的 `/me/requests`、票 09 的 `/me/colleagues` 与
+`/me/swaps`）只认手机端 cookie（票 02 时这里断言的是「一条员工路由都没有」）。
 """
 
 import asyncio
@@ -500,10 +500,18 @@ def test_the_two_doors_do_not_open_each_other(scheduling_http, monkeypatch):
     assert client.post(
         "/api/scheduling/me/requests", json={"start_date": "2026-09-28"}
     ).status_code == 401
+    # 票 09 的换班四条同理：能找谁换、提一条、替对方点头 / 摇头，都只认员工自己的 cookie。
+    assert client.get("/api/scheduling/me/colleagues").status_code == 401
+    assert client.post(
+        "/api/scheduling/me/swaps", json={"peer_employee_id": 2, "business_date": "2026-09-28"}
+    ).status_code == 401
+    assert client.post("/api/scheduling/me/swaps/1/accept").status_code == 401
+    assert client.post("/api/scheduling/me/swaps/1/reject").status_code == 401
 
     _staff_cookie(client, accounts)
     assert client.get("/api/scheduling/me").status_code == 200
     assert client.get("/api/scheduling/me/requests").status_code == 200
+    assert client.get("/api/scheduling/me/colleagues").status_code == 200
     # 反过来也一样：员工会话读不到店长的任何一条（待办也在里面）。
     assert client.get("/api/scheduling/roster").status_code == 401
     assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 401
@@ -994,3 +1002,417 @@ def test_missing_requests_table_is_a_503_that_names_it(scheduling_http, monkeypa
         assert client.get("/api/scheduling/roster").status_code == 200
     finally:
         _run(_rename("scheduling_requests_tmp", "scheduling_requests"))
+
+
+# ── 换班申请（票 09）───────────────────────────────────────────────────────
+
+
+def _swap_scene(client, accounts, monkeypatch):
+    """两个人：张三白班、李四夜班（都从今天起每天），然后切到张三的员工 cookie。
+
+    返回 `(管理端会话, 张三 id, 李四 id, 白班 id, 夜班 id)`。
+    """
+    shifts = {
+        shift["name"]: shift["id"]
+        for shift in client.get("/api/scheduling/shifts").json()["shifts"]
+    }
+    day_id, night_id = shifts["白班"], shifts["夜班"]
+    first = _employee_id(accounts, phone=PHONE, name=NAME)
+    second = _employee_id(accounts, phone="13800138001", name="李四")
+    for employee_id, shift_id in ((first, day_id), (second, night_id)):
+        saved = client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [shift_id]})
+        assert saved.status_code == 200, saved.text
+    admin = _admin_cookie(client)
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts, phone=PHONE)
+    return admin, first, second, day_id, night_id
+
+
+def test_staff_proposes_a_swap_and_the_peer_answers(scheduling_http, monkeypatch):
+    """验收 1/2/3/7：提一条 → 只有对方看得见 → 对方点头才进店长待办。"""
+    client, _db, accounts = scheduling_http
+    admin, me, peer, day_id, night_id = _swap_scene(client, accounts, monkeypatch)
+
+    # 能找谁换：名单里在上班的别人，只给 id / 姓名 / 职位。
+    people = client.get("/api/scheduling/me/colleagues")
+    assert people.status_code == 200, people.text
+    assert people.json()["employee"] == {"id": me, "name": NAME}
+    assert people.json()["colleagues"] == [
+        {"id": peer, "name": "李四", "job_title": people.json()["colleagues"][0]["job_title"]}
+    ]
+    assert "13800138001" not in people.text
+
+    proposed = client.post(
+        "/api/scheduling/me/swaps",
+        json={"peer_employee_id": peer, "business_date": "2026-09-25", "note": "想换个班"},
+    )
+
+    assert proposed.status_code == 200, proposed.text
+    body = proposed.json()
+    assert body["employee"] == {"id": me, "name": NAME}
+    request = body["request"]
+    assert (request["kind"], request["status"], request["peer_employee_id"]) == (
+        "swap",
+        "pending_peer",
+        peer,
+    )
+    assert (request["start_date"], request["end_date"]) == ("2026-09-25", "2026-09-25")
+    assert request["decided_at"] is None
+    request_id = request["id"]
+
+    # 验收 7：申请人自己看得到「卡在谁那里」，也还撤得回。
+    mine = client.get("/api/scheduling/me/requests").json()
+    assert mine["incoming"] == []
+    assert [(row["id"], row["status"], row["peer_name"]) for row in mine["requests"]] == [
+        (request_id, "pending_peer", "李四")
+    ]
+
+    # 验收 3：对方还没点，店长的待办里看不到这条（排班也一个字没改）。
+    _as_manager(client, admin)
+    assert client.get("/api/scheduling/inbox").json()["requests"] == []
+
+    # 验收 2：对方看到的是一张卡片 —— 他那天白班、我那天夜班。
+    _staff_cookie(client, accounts, phone="13800138001")
+    incoming = client.get("/api/scheduling/me/requests").json()
+    assert incoming["requests"] == []
+    assert [
+        (
+            card["id"],
+            card["employee_name"],
+            card["their_shift_name"],
+            card["my_shift_name"],
+            card["note"],
+        )
+        for card in incoming["incoming"]
+    ] == [(request_id, NAME, "白班", "夜班", "想换个班")]
+
+    agreed = client.post(f"/api/scheduling/me/swaps/{request_id}/accept")
+
+    assert agreed.status_code == 200, agreed.text
+    assert agreed.json()["status"] == "pending_manager"
+    assert client.get("/api/scheduling/me/requests").json()["incoming"] == []
+
+    # 两边都点过头了：这才轮到店长，卡片上摊开两个人那天的班。
+    _as_manager(client, admin)
+    cards = client.get("/api/scheduling/inbox").json()["requests"]
+    assert len(cards) == 1
+    card = cards[0]
+    assert (card["id"], card["kind"], card["employee_name"], card["peer_name"]) == (
+        request_id,
+        "swap",
+        NAME,
+        "李四",
+    )
+    assert card["days"] == [
+        {
+            "business_date": "2026-09-25",
+            "past": False,
+            "scheduled": True,
+            "current_shift_id": day_id,
+            "current_shift_name": "白班",
+            "peer_scheduled": True,
+            "peer_shift_id": night_id,
+            "peer_shift_name": "夜班",
+        }
+    ]
+
+
+def test_a_refusal_ends_it_without_the_manager(scheduling_http, monkeypatch):
+    """验收 2/6：对方拒绝 → 这件事到此为止，店长看不到，排班一个字不改。"""
+    client, _db, accounts = scheduling_http
+    admin, _me, _peer, _day_id, _night_id = _swap_scene(client, accounts, monkeypatch)
+
+    _as_manager(client, admin)
+    before_calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    before_day = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
+
+    _staff_cookie(client, accounts)
+    request_id = client.post(
+        "/api/scheduling/me/swaps",
+        json={"peer_employee_id": _peer, "business_date": "2026-09-25"},
+    ).json()["request"]["id"]
+
+    _staff_cookie(client, accounts, phone="13800138001")
+    refused = client.post(f"/api/scheduling/me/swaps/{request_id}/reject")
+
+    assert refused.status_code == 200, refused.text
+    assert refused.json()["status"] == "rejected"
+    assert refused.json()["decided_at"]
+    # 回过的不能再回，申请人自己去「同意」也不行。
+    again = client.post(f"/api/scheduling/me/swaps/{request_id}/accept")
+    assert again.status_code == 400
+    assert again.json()["detail"] == "这条申请已经处理过了：刷新看看它现在到哪一步"
+    _staff_cookie(client, accounts)
+    stranger = client.post(f"/api/scheduling/me/swaps/{request_id}/accept")
+    assert stranger.status_code == 404
+    assert stranger.json()["detail"] == "这条申请不存在：可能已经被撤回，刷新看看"
+
+    _as_manager(client, admin)
+    assert client.get("/api/scheduling/inbox").json()["requests"] == []
+    assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json() == before_calendar
+    assert client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json() == before_day
+    # 店长也批不动它：它从来没进过待批那一档。
+    denied = client.post(f"/api/scheduling/inbox/{request_id}/approve")
+    assert denied.status_code == 400
+    assert denied.json()["detail"] == "这条申请已经处理过了：刷新看看它现在到哪一步"
+
+
+def test_approving_a_swap_swaps_the_two_days(scheduling_http, monkeypatch):
+    """验收 4/5：批了两个人那天的班对调，责任区跟着各自的新班次走。"""
+    client, db, accounts = scheduling_http
+    admin, me, peer, day_id, night_id = _swap_scene(client, accounts, monkeypatch)
+    board = _zone(db, "案板")
+    cold = _zone(db, "凉菜")
+    pastry = _zone(db, "面点")
+    # 配固定区是店长那扇门的事：先换回管理端 cookie（场景末尾停在员工的 cookie 上）。
+    _as_manager(client, admin)
+    for employee_id, shift_id, zone_id in (
+        (me, day_id, board),
+        (me, night_id, cold),
+        (peer, day_id, pastry),
+        (peer, night_id, board),
+    ):
+        pinned = client.put(
+            f"/api/scheduling/zone-defaults/{employee_id}",
+            json={"shift_id": shift_id, "zone_id": zone_id},
+        )
+        assert pinned.status_code == 200, pinned.text
+
+    _staff_cookie(client, accounts)
+    request_id = client.post(
+        "/api/scheduling/me/swaps",
+        json={"peer_employee_id": peer, "business_date": "2026-09-25"},
+    ).json()["request"]["id"]
+    _staff_cookie(client, accounts, phone="13800138001")
+    assert client.post(f"/api/scheduling/me/swaps/{request_id}/accept").status_code == 200
+
+    _as_manager(client, admin)
+    approved = client.post(f"/api/scheduling/inbox/{request_id}/approve")
+
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["applied_days"] == ["2026-09-25"]
+    assert approved.json()["skipped_days"] == []
+    assert client.get("/api/scheduling/inbox").json()["requests"] == []
+
+    # 那天白班上的是李四（在他白班那个区），夜班上是张三（在他夜班那个区）。
+    after = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
+    groups = {group["shift"]["name"]: group for group in after["groups"]}
+    assert [
+        (person["name"], person["zone"]) for person in groups["白班"]["people"]
+    ] == [("李四", "面点")]
+    assert [
+        (person["name"], person["zone"]) for person in groups["夜班"]["people"]
+    ] == [("张三", "凉菜")]
+    assert (groups["白班"]["count"], groups["夜班"]["count"]) == (1, 1)
+    # 月历上那天留着「被改过」的手改痕迹：对调是两个人的两行，标记数是 2。
+    cells = {
+        day["business_date"]: day
+        for day in client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()["days"]
+    }
+    assert cells["2026-09-25"]["overridden"] == 2
+
+    # 员工各看各的：张三那天换成夜班，李四那天换成白班；前后两天照旧。
+    _staff_cookie(client, accounts)
+    days = {day["business_date"]: day for day in client.get("/api/scheduling/me").json()["days"]}
+    assert (days["2026-09-24"]["shift_name"], days["2026-09-25"]["shift_name"]) == ("白班", "夜班")
+    _staff_cookie(client, accounts, phone="13800138001")
+    days = {day["business_date"]: day for day in client.get("/api/scheduling/me").json()["days"]}
+    assert (days["2026-09-24"]["shift_name"], days["2026-09-25"]["shift_name"]) == ("夜班", "白班")
+
+
+def test_swap_errors_are_readable_400s(scheduling_http, monkeypatch):
+    """提不了、回不了的几种情形各说各的 —— 不是一个「参数不合法」打包。"""
+    client, _db, accounts = scheduling_http
+    _admin, me, peer, _day_id, _night_id = _swap_scene(client, accounts, monkeypatch)
+    base = "/api/scheduling/me/swaps"
+
+    cases = [
+        (
+            {"peer_employee_id": me, "business_date": "2026-09-25"},
+            "换班得找别人：不能跟自己换",
+        ),
+        ({"business_date": "2026-09-25"}, "请先选一位同事：换班得跟人说好"),
+        ({"peer_employee_id": None, "business_date": "2026-09-25"}, "请先选一位同事：换班得跟人说好"),
+        ({"peer_employee_id": 987654, "business_date": "2026-09-25"}, "找不到这位同事：刷新一下名单再选"),
+        ({"peer_employee_id": peer, "business_date": ""}, "请先选换哪一天"),
+        ({"peer_employee_id": peer}, "请先选换哪一天"),
+        ({"peer_employee_id": peer, "business_date": "9-25"}, "日期格式应该是 YYYY-MM-DD"),
+        (
+            {"peer_employee_id": peer, "business_date": "2026-09-23"},
+            "已经过去的日子换不了班：请从今天起选",
+        ),
+        (
+            {"peer_employee_id": peer, "business_date": "2026-12-23"},
+            "排班还没铺到那么远：最多换到 2026-12-22",
+        ),
+        (
+            {"peer_employee_id": peer, "business_date": "2026-09-25", "note": "换" * 51},
+            "事由最多 50 个字：请缩短一点再提交",
+        ),
+    ]
+    for payload, detail in cases:
+        with_payload = client.post(base, json=payload)
+        assert with_payload.status_code == 400, payload
+        assert with_payload.json()["detail"] == detail, payload
+
+    # 还没批准的同事不能选（停用的同理：都不在排班名单里）。
+    pending = _run(accounts.register("13800138002", PASSWORD, "赵六"))
+    waiting = client.post(
+        base, json={"peer_employee_id": pending["id"], "business_date": "2026-09-25"}
+    )
+    assert waiting.status_code == 400
+    assert waiting.json()["detail"] == "这位同事现在不在排班名单里（已停用或还没批准）：换个人吧"
+
+    # 那天自己手上没班：先让店长配规则，而不是提一条换不成的。
+    ruleless = _employee_id(accounts, phone="13800138003", name="王五")
+    _staff_cookie(client, accounts, phone="13800138003")
+    empty = client.post(
+        base, json={"peer_employee_id": peer, "business_date": "2026-09-25"}
+    )
+    assert empty.status_code == 400
+    assert empty.json()["detail"] == "那天你手上没有班可换：先让店长给你配上轮转规则"
+    assert ruleless != peer
+
+    # 同一天同一个人只挂一条：对方手机上不该出现两条一样的请求。
+    _staff_cookie(client, accounts)
+    first = client.post(base, json={"peer_employee_id": peer, "business_date": "2026-09-25"})
+    assert first.status_code == 200, first.text
+    twice = client.post(base, json={"peer_employee_id": peer, "business_date": "2026-09-25"})
+    assert twice.status_code == 400
+    assert twice.json()["detail"] == "你刚跟这位同事提过这一天的换班：等对方回应，或先撤回那条"
+
+    # 回一条不存在的：跟请假那条一样是 404 一句人话。
+    gone = client.post(f"{base}/987654/accept")
+    assert gone.status_code == 404
+    assert gone.json()["detail"] == "这条申请不存在：可能已经被撤回，刷新看看"
+    # 提不成的都没落库（列表里只剩刚提成的那一条）。
+    assert [row["status"] for row in client.get("/api/scheduling/me/requests").json()["requests"]] == [
+        "pending_peer"
+    ]
+
+
+# 撤掉 0009 那一列的用例，跑完必须原样补回来 —— **索引也要补**：`DROP COLUMN` 会把
+# `idx_scheduling_requests_peer` 和 `idx_scheduling_requests_swap_once` 一起带走，
+# 而后面还有用例靠那条唯一索引挡住重复提交（补列不补索引 = 悄悄少一道闸）。
+_RESTORE_PEER_COLUMN = (
+    "ALTER TABLE scheduling_requests ADD COLUMN IF NOT EXISTS peer_employee_id BIGINT",
+    "CREATE INDEX IF NOT EXISTS idx_scheduling_requests_peer "
+    "ON scheduling_requests (peer_employee_id, status)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduling_requests_swap_once "
+    "ON scheduling_requests (employee_id, peer_employee_id, start_date) "
+    "WHERE kind = 'swap' AND status IN ('pending_peer', 'pending_manager')",
+)
+
+
+def _restore_peer_column(db):
+    async def _restore():
+        for statement in _RESTORE_PEER_COLUMN:
+            await db._conn.execute(statement)
+        await db._conn.commit()
+
+    _run(_restore())
+
+
+def test_missing_peer_column_is_a_503_that_names_it(scheduling_http, monkeypatch):
+    """0009 还没应用：换班提不了（503 点名脚本），请假照常提、照常读。"""
+    client, db, accounts = scheduling_http
+    admin, me, peer, _day_id, _night_id = _swap_scene(client, accounts, monkeypatch)
+
+    async def _drop(statement):
+        await db._conn.execute(statement)
+        await db._conn.commit()
+
+    _run(_drop("ALTER TABLE scheduling_requests DROP COLUMN peer_employee_id"))
+    try:
+        proposed = client.post(
+            "/api/scheduling/me/swaps",
+            json={"peer_employee_id": peer, "business_date": "2026-09-25"},
+        )
+        assert proposed.status_code == 503, proposed.text
+        assert "0009_scheduling_swap.sql" in proposed.json()["detail"]
+        # 「等我回应」与「我提的」都照常读得到（那条读路径退回没有换班的写法）。
+        mine = client.get("/api/scheduling/me/requests")
+        assert mine.status_code == 200
+        assert mine.json()["incoming"] == []
+        # 请假完全不靠这一列：提得成、读得到。
+        leave = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+        assert leave.status_code == 200, leave.text
+        assert leave.json()["request"]["status"] == "pending_manager"
+        assert [
+            row["kind"] for row in client.get("/api/scheduling/me/requests").json()["requests"]
+        ] == ["leave"]
+        # 店长那边的待办与日历也不受影响（请假那条照常出）。
+        _as_manager(client, admin)
+        cards = client.get("/api/scheduling/inbox").json()["requests"]
+        assert [(card["kind"], card["employee_name"]) for card in cards] == [("leave", NAME)]
+        assert client.get("/api/scheduling/day", params={"date": "2026-09-25"}).status_code == 200
+        assert me != peer
+    finally:
+        _restore_peer_column(db)
+
+
+def test_a_queued_swap_is_unrenderable_without_the_column(scheduling_http, monkeypatch):
+    """0009 被撤掉时，**已经排上队**的换班不是「看不见」而是「办不了」：待办与批准都 503
+    点名这个脚本，而不是印一张假的卡、也不是批准时抛成 500。"""
+    client, db, accounts = scheduling_http
+    admin, _me, peer, _day_id, _night_id = _swap_scene(client, accounts, monkeypatch)
+    proposed = client.post(
+        "/api/scheduling/me/swaps",
+        json={"peer_employee_id": peer, "business_date": "2026-09-25", "note": "想换个班"},
+    )
+    assert proposed.status_code == 200, proposed.text
+    request_id = proposed.json()["request"]["id"]
+    # 对方点头，这条才进店长待办（挡板在渲染那一步）。
+    _staff_cookie(client, accounts, phone="13800138001")
+    answered = client.post(f"/api/scheduling/me/swaps/{request_id}/accept")
+    assert answered.status_code == 200, answered.text
+    # 两条回应路由直接回那条申请本身（没有 `{"request": …}` 这层包装）。
+    assert answered.json()["status"] == "pending_manager"
+
+    # 同一队列里再压一条请假（李四提的）：它不靠 0009 那一列，等下用来证明
+    # 「一张换班残骸不该把整页待办拖下水」。
+    leave = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-26", "note": "家里有事"}
+    )
+    assert leave.status_code == 200, leave.text
+    leave_id = leave.json()["request"]["id"]
+
+    async def _drop(statement):
+        await db._conn.execute(statement)
+        await db._conn.commit()
+
+    _run(_drop("ALTER TABLE scheduling_requests DROP COLUMN peer_employee_id"))
+    try:
+        _as_manager(client, admin)
+        inbox = client.get("/api/scheduling/inbox")
+        assert inbox.status_code == 503, inbox.text
+        assert "0009_scheduling_swap.sql" in inbox.json()["detail"]
+        approved = client.post(f"/api/scheduling/inbox/{request_id}/approve")
+        assert approved.status_code == 503, approved.text
+        assert "0009_scheduling_swap.sql" in approved.json()["detail"]
+    finally:
+        _restore_peer_column(db)
+        # 补列不等于把值补回来（`DROP COLUMN` 连对方一起丢了）：那条已经成了残骸，
+        # 摆不上桌、也批不了 —— 但它**不该把整页待办拖下水**：同一队列里李四的请假
+        # 还等着批，所以这一页照常开，只是少了那张换班卡。
+        _as_manager(client, admin)
+        healed = client.get("/api/scheduling/inbox")
+        assert healed.status_code == 200, healed.text
+        assert [(card["id"], card["kind"]) for card in healed.json()["requests"]] == [
+            (leave_id, "leave")
+        ]
+        # 迁移补回来之后，新提的一条换班照常走完全程（不是「一次坏掉，永远 503」）。
+        _staff_cookie(client, accounts, phone=PHONE)
+        again = client.post(
+            "/api/scheduling/me/swaps",
+            json={"peer_employee_id": peer, "business_date": "2026-09-25", "note": None},
+        )
+        assert again.status_code == 200, again.text
+        second_id = again.json()["request"]["id"]
+        _staff_cookie(client, accounts, phone="13800138001")
+        assert client.post(f"/api/scheduling/me/swaps/{second_id}/accept").status_code == 200
+        _as_manager(client, admin)
+        approved = client.post(f"/api/scheduling/inbox/{second_id}/approve")
+        assert approved.status_code == 200, approved.text
+        # 批准这条路由也直接回结果本身（`applied_days` 在顶层）。
+        assert approved.json()["applied_days"] == ["2026-09-25"]

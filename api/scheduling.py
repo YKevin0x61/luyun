@@ -55,10 +55,24 @@ _ERROR_DETAILS = {
     # 「不存在」也用在「这条是别人的」上：不告诉员工「它在，但不是你的」。
     "unknown_request": "这条申请不存在：可能已经被撤回，刷新看看",
     "request_not_pending": "这条申请已经处理过了：刷新看看它现在到哪一步",
+    # 换班（票 09）：找谁换、哪天换、那天有没有班换，各说各的。跟请假一样，字段整个没给
+    # （`{}`）也落到服务层那道闸上，不变成 pydantic 的英文 422。
+    "swap_with_self": "换班得找别人：不能跟自己换",
+    "missing_peer": "请先选一位同事：换班得跟人说好",
+    "unknown_peer": "找不到这位同事：刷新一下名单再选",
+    "peer_unavailable": "这位同事现在不在排班名单里（已停用或还没批准）：换个人吧",
+    "missing_swap_day": "请先选换哪一天",
+    # 「过去不改」这条口径跟票 07、请假是同一条，话是对员工说的。
+    "past_swap": "已经过去的日子换不了班：请从今天起选",
+    # 带一个 `{}`：服务层把展开窗口的末日放在 `args[0]`（跟 `beyond_leave` 同一条口径）。
+    "beyond_swap": "排班还没铺到那么远：最多换到 {}",
+    "nothing_to_swap": "那天你手上没有班可换：先让店长给你配上轮转规则",
+    "already_asked": "你刚跟这位同事提过这一天的换班：等对方回应，或先撤回那条",
     "not_migrated": (
         "排班表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
         "migrations/pg/0005_scheduling.sql、0006_scheduling_zone_defaults.sql、"
-        "0007_scheduling_overrides.sql 与 0008_scheduling_requests.sql，然后刷新本页"
+        "0007_scheduling_overrides.sql、0008_scheduling_requests.sql 与 "
+        "0009_scheduling_swap.sql，然后刷新本页"
     ),
 }
 
@@ -104,6 +118,21 @@ class LeaveRequest(BaseModel):
 
     start_date: Optional[str] = None
     end_date: Optional[str] = None
+    note: Optional[str] = None
+
+
+class SwapRequest(BaseModel):
+    """换班（票 09）：跟哪位同事换哪一天。
+
+    只这一天（不是区间）：换班是「你对我的这一天、我对你的这一天」，跨天换班没有对应的
+    现实场景。`note` 与请假共用一条上限（`MAX_REQUEST_NOTE`），超了报 `note_too_long`。
+
+    `peer_employee_id` / `business_date` 都不是必填（同 `LeaveRequest.start_date` 的
+    理由）：缺字段、空串落到服务层，回一句中文 400，而不是英文的 422 字段错误。
+    """
+
+    peer_employee_id: Optional[int] = None
+    business_date: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -179,10 +208,14 @@ async def my_requests(
     db=Depends(get_db),
     employee: dict = Depends(require_staff_session),
 ) -> dict:
-    """我提过的请假申请，新的在前（「今天」页的「我的申请」看的就是这条）。
+    """我的申请，新的在前（「今天」页的「我的申请」看的就是这条）。
 
     跟 `/me`、`/me/month` 同一扇门，**接口上同样没有 `employee_id`**：员工会话读得到
-    的只有自己的申请。每条带 `status`（等店长批 / 批了 / 驳了 / 撤回了）与 `decided_at`。
+    的只有自己的申请。每条带 `status`（等对方 / 等店长批 / 批了 / 驳了 / 撤回了）与
+    `decided_at`；换班那条还带 `peer_name`（「等王五同意」要说得出是谁）。
+
+    `incoming` 是**别人问我换班的**（票 09）：还没回应的那几条，带两个人那天的班 ——
+    对方在手机上直接点同意 / 拒绝，不用去别处找。
     """
     store = SchedulingStore(db)
     try:
@@ -193,6 +226,7 @@ async def my_requests(
         "employee": {"id": employee["id"], "name": employee["name"]},
         "today": data["today"],
         "requests": data["requests"],
+        "incoming": data["incoming"],
     }
 
 
@@ -233,6 +267,79 @@ async def cancel_request(
     store = SchedulingStore(db)
     try:
         return await store.cancel_request(employee["id"], request_id)
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get("/me/colleagues")
+async def my_colleagues(
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """换班能找谁（票 09）：名单里在上班的其他人，只给 id / 姓名 / 职位。
+
+    **不给手机号，也不给别人的排班**：员工端要的是「选一个人」，不是一份花名册。
+    """
+    store = SchedulingStore(db)
+    try:
+        people = await store.colleagues(employee["id"])
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+    return {"employee": {"id": employee["id"], "name": employee["name"]}, "colleagues": people}
+
+
+@router.post("/me/swaps")
+async def submit_swap(
+    payload: SwapRequest,
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """提一条换班：跟哪位同事、换哪一天（票 09 的第一步）。
+
+    落「等对方同意」（`pending_peer`）——**申请本身不改排班**：对方点了同意才轮到店长，
+    店长批了两人那天的班才对调；对方拒绝或自己撤回，排班一个字都不写。
+    """
+    store = SchedulingStore(db)
+    try:
+        request = await store.submit_swap(
+            employee["id"], payload.peer_employee_id, payload.business_date, payload.note
+        )
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+    return {
+        "employee": {"id": employee["id"], "name": employee["name"]},
+        "request": request,
+    }
+
+
+@router.post("/me/swaps/{request_id}/accept")
+async def accept_swap(
+    request_id: int,
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """同意跟我换班：这条申请这才进店长待办（票 09 的验收项）。
+
+    两条没有 body 的路由（同意 / 拒绝）而不是一条带布尔值的：没有 body 就没有
+    pydantic 校验，手机端点一下就完事，少一处能报 422 的地方。
+    """
+    store = SchedulingStore(db)
+    try:
+        return await store.answer_swap(employee["id"], request_id, True)
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.post("/me/swaps/{request_id}/reject")
+async def reject_swap(
+    request_id: int,
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """拒绝跟我换班：这件事到此为止 —— 店长那边从头到尾看不到它，排班一个字不改。"""
+    store = SchedulingStore(db)
+    try:
+        return await store.answer_swap(employee["id"], request_id, False)
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
 
@@ -390,10 +497,13 @@ async def clear_override(
 
 @router.get("/inbox")
 async def inbox(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
-    """店长待办：等他批的请假 + 还没配规则的人（票 08 的待办页）。
+    """店长待办：等他批的申请 + 还没配规则的人（票 08 的待办页，票 09 起也收换班）。
 
     每条请假带一份预览（`days[*].after`：批了之后那天每个班次还剩几个人）。人手够不够
     **只摊开数字、不拦** —— 服务层没有「最少几个人」这个配置，批准是店长的事。
+
+    换班那张卡摊开两个人那天的班（`peer_*`），批了就是对调 —— 对调走两个人、来两个人，
+    哪个班次的人数都不变，所以没有「剩几个人」这一项。**对方还没点头的换班不在这里**。
     """
     store = SchedulingStore(db)
     try:
@@ -408,8 +518,9 @@ async def approve_request(
     db=Depends(get_db),
     _: str = Depends(require_session),
 ) -> dict:
-    """批一条请假：那几天变成请假（和「本来就休」在当日分工里分得开）。
+    """批一条申请：请假那几天变成请假，换班两个人那天对调。
 
+    换班批的是「两个人都点过头」的那条：对方那一步（`answer_swap`）是它进这扇门的条件。
     已经过去的日子不重写（票 07 的「过去不改」）：响应里的 `applied_days` / `skipped_days`
     说清到底写了哪几天，界面照实说，不假装。
     """
@@ -426,7 +537,7 @@ async def reject_request(
     db=Depends(get_db),
     _: str = Depends(require_session),
 ) -> dict:
-    """驳回一条请假：排班一个字不改，只把申请记为驳回（票 08 的验收项）。"""
+    """驳回一条申请：排班一个字不改，只把申请记为驳回（票 08 的验收项；换班同理）。"""
     store = SchedulingStore(db)
     try:
         return await store.reject_request(request_id)

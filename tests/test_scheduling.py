@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
@@ -18,6 +19,7 @@ from db_core.schema import ADMIN_READ_ONLY_TABLES, SCHEDULING_TABLES
 from services.hygiene.accounts import EmployeeAccounts
 from services.scheduling.store import (
     EXPANSION_DAYS,
+    MAX_REQUEST_NOTE,
     SchedulingError,
     SchedulingStore,
 )
@@ -115,6 +117,18 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
                FROM scheduling_overrides ORDER BY employee_id ASC, business_date ASC""",
         )
         return [dict(row) for row in await cur.fetchall()]
+
+    async def _peer_of(self, request_id):
+        """某条申请「想跟谁换」（0009 加的那一列）。
+
+        单独一条查询而不是塞进 `_requests()`：那份快照是票 08 定下的形状，两边一起改会
+        让票 08 的用例跟着变红（它们整字典比对）。
+        """
+        cur = await self.db._conn.execute(
+            "SELECT peer_employee_id FROM scheduling_requests WHERE id = ?", (request_id,)
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)["peer_employee_id"]
 
     # ── 验收 1：配「固定白班」，从今天起每天都算进白班 ──────────────────
 
@@ -1522,6 +1536,489 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             )
             await self.db._conn.commit()
 
+    # ── 验收 5：换班申请（票 09）────────────────────────────────────────
+    #
+    # 换班比请假多一道门：**先过对方**。所以下面既断言状态机（等对方 → 等店长 → 批），
+    # 也断言「对方还没点的时候店长看不到这条」，还要断言批了以后两个人的班对调、
+    # 责任区跟着各自的新班次走。
+
+    async def _two_people(self):
+        """两个人：张三白班、李四夜班（都从今天起每天）。"""
+        first = await self._employee()
+        second = await self._employee(phone="13800138001", name="李四")
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(first["id"], [day])
+        await self.store.set_rule(second["id"], [night])
+        return first, second, day, night
+
+    async def test_a_swap_request_waits_for_the_other_side(self):
+        """验收 1/3：提一条换班先落在「等对方」；对方没点之前店长待办里看不到。"""
+        first, second, day, night = await self._two_people()
+        before_first = await self._full_rows(first["id"])
+        before_second = await self._full_rows(second["id"])
+
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+
+        self.assertEqual(
+            (request["kind"], request["status"], request["start_date"], request["end_date"]),
+            ("swap", "pending_peer", "2026-09-25", "2026-09-25"),
+        )
+        self.assertIsNone(request["decided_at"])
+        self.assertEqual(await self._peer_of(request["id"]), second["id"])
+        # 申请本身不碰排班：两个人的结果行一个字不变，覆盖表还是空的。
+        self.assertEqual(await self._full_rows(first["id"]), before_first)
+        self.assertEqual(await self._full_rows(second["id"]), before_second)
+        self.assertEqual(await self._overrides(), [])
+        # 验收 3：对方还没点，店长的待办里没有这条。
+        self.assertEqual((await self.store.inbox())["requests"], [])
+
+    async def test_the_other_side_agrees_and_then_the_manager_sees_it(self):
+        """验收 4 的前半步：对方同意 → 进店长待办，卡上摊开两个人那天的班。"""
+        first, second, day, night = await self._two_people()
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+
+        answered = await self.store.answer_swap(second["id"], request["id"], True)
+
+        self.assertEqual(answered["status"], "pending_manager")
+        cards = (await self.store.inbox())["requests"]
+        self.assertEqual(len(cards), 1)
+        card = cards[0]
+        self.assertEqual(
+            (card["kind"], card["employee_name"], card["peer_name"]),
+            ("swap", "张三", "李四"),
+        )
+        self.assertEqual(
+            [
+                (
+                    day_card["business_date"],
+                    day_card["scheduled"],
+                    day_card["current_shift_name"],
+                    day_card["peer_scheduled"],
+                    day_card["peer_shift_name"],
+                )
+                for day_card in card["days"]
+            ],
+            [("2026-09-25", True, "白班", True, "夜班")],
+        )
+        # 验收 7：申请人自己看得到这条卡在谁那里（对方点头之后就轮到店长）。
+        mine = (await self.store.my_requests(first["id"]))["requests"][0]
+        self.assertEqual((mine["status"], mine["peer_name"]), ("pending_manager", "李四"))
+
+    async def test_the_other_side_sees_the_request_with_both_shifts(self):
+        """验收 2/7：对方在手机上看到「谁、哪天、他那天什么班、我那天什么班」。"""
+        first, second, day, night = await self._two_people()
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+
+        card = (await self.store.my_requests(second["id"]))["incoming"][0]
+
+        self.assertEqual(
+            (
+                card["id"],
+                card["employee_name"],
+                card["their_scheduled"],
+                card["their_shift_name"],
+                card["my_scheduled"],
+                card["my_shift_name"],
+            ),
+            (request["id"], "张三", True, "白班", True, "夜班"),
+        )
+        # 申请人自己那边没有「等我回应」；对方回过之后，那条也从「等我回应」里出去。
+        self.assertEqual((await self.store.my_requests(first["id"]))["incoming"], [])
+        await self.store.answer_swap(second["id"], request["id"], True)
+        self.assertEqual((await self.store.my_requests(second["id"]))["incoming"], [])
+
+    async def test_a_refusal_ends_it_without_the_manager(self):
+        """验收 2：对方拒绝 → 这件事到此为止，店长看不到、排班一个字不改。"""
+        first, second, day, night = await self._two_people()
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        before_first = await self._full_rows(first["id"])
+        before_second = await self._full_rows(second["id"])
+
+        refused = await self.store.answer_swap(second["id"], request["id"], False)
+
+        self.assertEqual(refused["status"], "rejected")
+        self.assertIsNotNone(refused["decided_at"])
+        self.assertEqual((await self.store.inbox())["requests"], [])
+        self.assertEqual(await self._full_rows(first["id"]), before_first)
+        self.assertEqual(await self._full_rows(second["id"]), before_second)
+        self.assertEqual(await self._overrides(), [])
+        # 回过的不能再回；不是问我的当作不存在（申请人自己去「同意」也不行）。
+        with self.assertRaises(SchedulingError) as again:
+            await self.store.answer_swap(second["id"], request["id"], True)
+        self.assertEqual(again.exception.code, "request_not_pending")
+        with self.assertRaises(SchedulingError) as stranger:
+            await self.store.answer_swap(first["id"], request["id"], True)
+        self.assertEqual(stranger.exception.code, "unknown_request")
+        # 店长也批不动它：它从来没进过待批那一档。
+        with self.assertRaises(SchedulingError) as denied:
+            await self.store.approve_request(request["id"])
+        self.assertEqual(denied.exception.code, "request_not_pending")
+
+    async def test_approval_swaps_the_two_shifts_and_the_zones_follow(self):
+        """验收 4/5：批了两个人那天的班对调，责任区跟着各自的**新**班次走。"""
+        first, second, day, night = await self._two_people()
+        board = await self._zone("案板")
+        cold = await self._zone("凉菜")
+        pastry = await self._zone("面点")
+        # 每人两个班次各配一个区：换完之后取的是新班次那个区，不是原来那个。
+        await self.store.set_zone_default(first["id"], day, board)
+        await self.store.set_zone_default(first["id"], night, cold)
+        await self.store.set_zone_default(second["id"], day, pastry)
+        await self.store.set_zone_default(second["id"], night, board)
+        await self.store.set_rule(first["id"], [day])
+        await self.store.set_rule(second["id"], [night])
+
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        await self.store.answer_swap(second["id"], request["id"], True)
+        approved = await self.store.approve_request(request["id"])
+
+        self.assertEqual(
+            (approved["status"], approved["applied_days"], approved["skipped_days"]),
+            ("approved", ["2026-09-25"], []),
+        )
+        mine = {row["business_date"]: row for row in await self._rows(first["id"])}
+        theirs = {row["business_date"]: row for row in await self._rows(second["id"])}
+        self.assertEqual(
+            (mine["2026-09-25"]["shift_id"], mine["2026-09-25"]["source"]), (night, "override")
+        )
+        self.assertEqual(
+            (theirs["2026-09-25"]["shift_id"], theirs["2026-09-25"]["source"]),
+            (day, "override"),
+        )
+        # 换的是那一天：前后两天照旧。
+        self.assertEqual((mine["2026-09-24"]["shift_id"], mine["2026-09-26"]["shift_id"]), (day, day))
+        self.assertEqual(
+            (theirs["2026-09-24"]["shift_id"], theirs["2026-09-26"]["shift_id"]), (night, night)
+        )
+        # 覆盖记的是 `swap`：跟店长手改（`manual`）、请假（`leave`）在同一张表里分得开。
+        self.assertEqual(
+            await self._overrides(),
+            [
+                {
+                    "employee_id": first["id"],
+                    "business_date": "2026-09-25",
+                    "shift_id": night,
+                    "zone_id": cold,
+                    "kind": "swap",
+                },
+                {
+                    "employee_id": second["id"],
+                    "business_date": "2026-09-25",
+                    "shift_id": day,
+                    "zone_id": pastry,
+                    "kind": "swap",
+                },
+            ],
+        )
+        zones_mine = await self._zone_ids(first["id"])
+        zones_theirs = await self._zone_ids(second["id"])
+        self.assertEqual((zones_mine["2026-09-25"], zones_mine["2026-09-24"]), (cold, board))
+        self.assertEqual(
+            (zones_theirs["2026-09-25"], zones_theirs["2026-09-24"]), (pastry, board)
+        )
+        # 当日分工也跟着换：那天白班上的是李四（在他白班那个区里）。
+        self.assertEqual(
+            [
+                (person["name"], person["zone"])
+                for person in (await self.store.day_detail("2026-09-25"))["groups"][0]["people"]
+            ],
+            [("李四", "面点")],
+        )
+
+    async def test_a_swap_with_someone_who_is_off_that_day(self):
+        """对方那天本来就休：批了他接走这个班，提的人那天空出来（这也是一种换班）。"""
+        first = await self._employee()
+        second = await self._employee(phone="13800138001", name="李四")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(first["id"], [day])
+        await self.store.set_rule(second["id"], [None])  # 李四天天休
+        pastry = await self._zone("面点")
+        await self.store.set_zone_default(second["id"], day, pastry)
+
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        await self.store.answer_swap(second["id"], request["id"], True)
+        await self.store.approve_request(request["id"])
+
+        mine = {row["business_date"]: row for row in await self._rows(first["id"])}
+        theirs = {row["business_date"]: row for row in await self._rows(second["id"])}
+        self.assertEqual(
+            (mine["2026-09-25"]["shift_id"], mine["2026-09-25"]["source"]), (None, "override")
+        )
+        self.assertEqual(
+            (theirs["2026-09-25"]["shift_id"], theirs["2026-09-25"]["source"]),
+            (day, "override"),
+        )
+        # 李四接的是白班 → 区按他白班的固定区（他接过来的班次），不是「休」那个空值。
+        self.assertEqual((await self._zone_ids(second["id"]))["2026-09-25"], pastry)
+        detail = await self.store.day_detail("2026-09-25")
+        self.assertEqual([person["name"] for person in detail["groups"][0]["people"]], ["李四"])
+
+    async def test_a_swap_validates_its_people_and_its_day(self):
+        """每道闸各说各的：跟自己换、缺人、人不在了、没选日期、过去、太远、那天没班。"""
+        first, second, day, night = await self._two_people()
+        stranger = await self._employee(phone="13800138009", name="赵六")
+        pending = await self.accounts.register("13800138008", PASSWORD, "钱七")
+
+        cases = [
+            ((first["id"], first["id"], "2026-09-25"), "swap_with_self"),
+            ((first["id"], None, "2026-09-25"), "missing_peer"),
+            ((first["id"], 987654, "2026-09-25"), "unknown_peer"),
+            ((first["id"], pending["id"], "2026-09-25"), "peer_unavailable"),
+            ((first["id"], second["id"], ""), "missing_swap_day"),
+            ((first["id"], second["id"], "2026-9-25"), "invalid_business_date"),
+            ((first["id"], second["id"], "2026-09-23"), "past_swap"),
+            ((stranger["id"], first["id"], "2026-09-25"), "nothing_to_swap"),
+        ]
+        for args, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(SchedulingError) as caught:
+                    await self.store.submit_swap(*args)
+                self.assertEqual(caught.exception.code, code)
+        # 窗口末日之后：报的是真实的末日（不把 90 天写死进文案）。
+        with self.assertRaises(SchedulingError) as far:
+            await self.store.submit_swap(first["id"], second["id"], "2026-12-23")
+        self.assertEqual((far.exception.code, far.exception.args[0]), ("beyond_swap", LAST_DAY))
+        # 事由跟请假共用一条上限。
+        with self.assertRaises(SchedulingError) as long_note:
+            await self.store.submit_swap(
+                first["id"], second["id"], "2026-09-26", "长" * (MAX_REQUEST_NOTE + 1)
+            )
+        self.assertEqual(long_note.exception.code, "note_too_long")
+        # 被挡下来的都没落库。
+        self.assertEqual(await self._requests(), [])
+
+    async def test_asking_the_same_thing_twice_is_refused(self):
+        """同一天同一个人只挂一条：对方手机上不该出现两条一样的请求。"""
+        first, second, day, night = await self._two_people()
+        other = await self._employee(phone="13800138002", name="王五")
+        await self.store.set_rule(other["id"], [night])
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        self.assertEqual(caught.exception.code, "already_asked")
+        # 换一天、换个人都还能提（挡的是「同时挂着两条一样的」）。
+        self.assertEqual(
+            (await self.store.submit_swap(first["id"], other["id"], "2026-09-25"))["status"],
+            "pending_peer",
+        )
+        self.assertEqual(
+            (await self.store.submit_swap(first["id"], second["id"], "2026-09-26"))["status"],
+            "pending_peer",
+        )
+        # 撤掉之后可以再提同一条：挡的是「同时挂着」，不是「这辈子只能提一次」。
+        await self.store.cancel_request(first["id"], request["id"])
+        self.assertEqual(
+            (await self.store.submit_swap(first["id"], second["id"], "2026-09-25"))["status"],
+            "pending_peer",
+        )
+
+    async def test_asking_again_is_refused_while_the_first_one_is_still_queued(self):
+        """对方点头之后那条还挂在店长那儿：再提一条同人同日，店长会看到两张同一天的卡。"""
+        first, second, day, night = await self._two_people()
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        await self.store.answer_swap(second["id"], request["id"], True)
+
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        self.assertEqual(caught.exception.code, "already_asked")
+        # 撤掉之后同一对同一天可以再提：挡的是「还挂着」，不是「提过」。
+        await self.store.cancel_request(first["id"], request["id"])
+        self.assertEqual(
+            (await self.store.submit_swap(first["id"], second["id"], "2026-09-25"))["status"],
+            "pending_peer",
+        )
+
+    async def test_the_database_is_the_last_gate_against_a_double_submit(self):
+        """那次扫描在写锁外（`submit_swap` 只有 `@_needs_migration`）：把它挡掉，
+        同一瞬间挤进来的第二条必须被 0009 的局部唯一索引拦下，而且报同一句人话。"""
+        first, second, day, night = await self._two_people()
+        await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+
+        async def nothing(self, **_kwargs):
+            return []
+
+        with mock.patch.object(SchedulingStore, "_request_rows", nothing):
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        self.assertEqual(caught.exception.code, "already_asked")
+
+    async def test_the_scan_stands_on_its_own_when_the_index_is_missing(self):
+        """0009 只应用了一半（列在、索引没建）：落库那道闸不在时，服务层那次扫描
+        就是唯一的闸 —— 得自己站得住，不能全靠索引兜。"""
+        first, second, _day, _night = await self._two_people()
+        await self.db._conn.execute("DROP INDEX IF EXISTS idx_scheduling_requests_swap_once")
+        await self.db._conn.commit()
+        try:
+            await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+            self.assertEqual(caught.exception.code, "already_asked")
+
+            # 对方点头之后那条还挂在店长那儿：索引不在时这一条只能靠扫描挡。
+            request = (await self.store.my_requests(first["id"]))["requests"][0]
+            await self.store.answer_swap(second["id"], request["id"], True)
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+            self.assertEqual(caught.exception.code, "already_asked")
+        finally:
+            # 补回来的定义要与 0009 逐字相同：后面的用例还靠这条索引当最后一道闸。
+            await self.db._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduling_requests_swap_once "
+                "ON scheduling_requests (employee_id, peer_employee_id, start_date) "
+                "WHERE kind = 'swap' AND status IN ('pending_peer', 'pending_manager')"
+            )
+            await self.db._conn.commit()
+
+    async def test_the_owner_can_take_back_a_swap_at_either_step(self):
+        """验收 6：申请人撤回 —— 对方点头前后都能撤，撤回后别人排班一个字不变。"""
+        first, second, day, night = await self._two_people()
+        before_first = await self._full_rows(first["id"])
+        before_second = await self._full_rows(second["id"])
+
+        early = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        self.assertEqual(
+            (await self.store.cancel_request(first["id"], early["id"]))["status"], "cancelled"
+        )
+        # 撤了之后对方那边看不到、也回不了。
+        self.assertEqual((await self.store.my_requests(second["id"]))["incoming"], [])
+        with self.assertRaises(SchedulingError) as late:
+            await self.store.answer_swap(second["id"], early["id"], True)
+        self.assertEqual(late.exception.code, "request_not_pending")
+
+        # 对方已经点头、还在等店长的时候也能撤：撤回只动申请这一行。
+        later = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        await self.store.answer_swap(second["id"], later["id"], True)
+        self.assertEqual(
+            (await self.store.cancel_request(first["id"], later["id"]))["status"], "cancelled"
+        )
+        self.assertEqual((await self.store.inbox())["requests"], [])
+        self.assertEqual(await self._full_rows(first["id"]), before_first)
+        self.assertEqual(await self._full_rows(second["id"]), before_second)
+        self.assertEqual(await self._overrides(), [])
+
+    async def test_a_late_swap_approval_does_not_rewrite_the_past(self):
+        """批得晚了：那天已经过去，两个人的班都不动，申请照样记成已批准。"""
+        first, second, day, night = await self._two_people()
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        await self.store.answer_swap(second["id"], request["id"], True)
+        before_first = await self._full_rows(first["id"])
+        before_second = await self._full_rows(second["id"])
+
+        self.fixed_now = datetime(2026, 9, 26, 10, 0, tzinfo=CHINA_TZ)
+        approved = await self.store.approve_request(request["id"])
+
+        self.assertEqual(
+            (approved["status"], approved["applied_days"], approved["skipped_days"]),
+            ("approved", [], ["2026-09-25"]),
+        )
+        self.assertEqual(await self._full_rows(first["id"]), before_first)
+        self.assertEqual(await self._full_rows(second["id"]), before_second)
+        self.assertEqual(await self._overrides(), [])
+        # 那天他还是白班（过去怎么排就怎么留着）。
+        self.assertEqual(
+            [row["shift_id"] for row in await self._rows(first["id"]) if row["business_date"] == "2026-09-25"],
+            [day],
+        )
+
+    async def test_colleagues_lists_only_the_people_at_work(self):
+        """换班名单：不给自己、不给停用的、不给还没批准的，也不给手机号。"""
+        first, second, day, night = await self._two_people()
+        disabled = await self._employee(phone="13800138003", name="王五")
+        await self.accounts.disable(disabled["id"])
+        await self.accounts.register("13800138004", PASSWORD, "钱七")
+
+        people = await self.store.colleagues(first["id"])
+
+        self.assertEqual([person["name"] for person in people], ["李四"])
+        self.assertEqual(set(people[0]), {"id", "name", "job_title"})
+
+    async def test_swap_reads_fall_back_when_the_peer_column_is_missing(self):
+        """0009 没应用：请假那几条照常读（「等我回应」当作空），再提换班明说去应用它。"""
+        first, second, day, night = await self._two_people()
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        await self.store.answer_swap(second["id"], request["id"], True)
+
+        await self.db._conn.execute(
+            "ALTER TABLE scheduling_requests DROP COLUMN peer_employee_id"
+        )
+        await self.db._conn.commit()
+        try:
+            mine = await self.store.my_requests(first["id"])
+            self.assertEqual([row["status"] for row in mine["requests"]], ["pending_manager"])
+            self.assertIsNone(mine["requests"][0]["peer_employee_id"])
+            self.assertEqual(mine["incoming"], [])
+            # 请假不靠这一列：0009 缺着也能照常提、照常读（换班才非得有它）。
+            leave = await self.store.submit_leave(first["id"], "2026-09-26", note="家里有事")
+            self.assertEqual((leave["kind"], leave["status"]), ("leave", "pending_manager"))
+            self.assertEqual(
+                [row["id"] for row in (await self.store.my_requests(first["id"]))["requests"]],
+                [leave["id"], request["id"]],
+            )
+            # 写的那条路仍然要明说缺哪一支迁移（不是 500，也不是悄悄成功）。
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.submit_swap(first["id"], second["id"], "2026-09-26")
+            self.assertEqual(caught.exception.code, "not_migrated")
+            # 已经排上队（对方已同意）的那条：渲染不出来，也不能批 —— 报缺哪一支迁移。
+            # 不许印出一句「对方那天休」的假话，更不许在 `int(None)` 上抛成清不掉的 500。
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.inbox()
+            self.assertEqual(caught.exception.code, "not_migrated")
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.approve_request(request["id"])
+            self.assertEqual(caught.exception.code, "not_migrated")
+            # 批准没落地：两条都还挂在「等店长」，迁移补回来就能照常批。
+            self.assertEqual(
+                {
+                    row["id"]: row["status"]
+                    for row in (await self.store.my_requests(first["id"]))["requests"]
+                },
+                {leave["id"]: "pending_manager", request["id"]: "pending_manager"},
+            )
+        finally:
+            # 索引也要补回来：`DROP COLUMN` 把它们一起带走了（补列不补索引 = 少一道闸）。
+            for statement in (
+                "ALTER TABLE scheduling_requests ADD COLUMN IF NOT EXISTS peer_employee_id BIGINT",
+                "CREATE INDEX IF NOT EXISTS idx_scheduling_requests_peer "
+                "ON scheduling_requests (peer_employee_id, status)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduling_requests_swap_once "
+                "ON scheduling_requests (employee_id, peer_employee_id, start_date) "
+                "WHERE kind = 'swap' AND status IN ('pending_peer', 'pending_manager')",
+            ):
+                await self.db._conn.execute(statement)
+            await self.db._conn.commit()
+
+    async def test_a_swap_that_lost_its_peer_is_skipped_not_fatal(self):
+        """列在、这一行的对方却是空的（0009 被撤掉又补回来，`DROP COLUMN` 把值带走了）：
+        那一行摆不出来、也批不了 —— 跳过它，别让一张残骸把整页待办拖成 503
+        （同一队列里别人的请假还等着批）。"""
+        first, second, _day, _night = await self._two_people()
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        await self.store.answer_swap(second["id"], request["id"], True)
+        leave = await self.store.submit_leave(second["id"], "2026-09-26", note="家里有事")
+        await self.db._conn.execute(
+            "UPDATE scheduling_requests SET peer_employee_id = NULL WHERE id = ?",
+            (request["id"],),
+        )
+        await self.db._conn.commit()
+
+        cards = (await self.store.inbox())["requests"]
+        self.assertEqual([card["id"] for card in cards], [leave["id"]])
+
+        # 直接批那一行仍旧明说是哪一支迁移的事：绝不拿 NULL 当「对方」写进排班。
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.approve_request(request["id"])
+        self.assertEqual(caught.exception.code, "not_migrated")
+        self.assertEqual(
+            {
+                row["id"]: row["status"]
+                for row in await self._requests()
+                if row["kind"] == "swap"
+            },
+            {request["id"]: "pending_manager"},
+        )
+
     async def test_prepare_keeps_renamed_shifts(self):
         await self.db._conn.execute("UPDATE staff_shifts SET name = '早班' WHERE name = '白班'")
         await self.db._conn.commit()
@@ -1562,7 +2059,8 @@ class SchedulingLayeringTest(unittest.TestCase):
         票 02 时这里断言「一条员工路由都没有」；票 05 开了 `/me`、票 06 又开了
         `/me/month` 之后，边界从「零条」变成「两扇门互不通用」—— 店长那几条只认
         管理端会话，员工那几条只认手机端 cookie。票 08 在两边各加了请假申请的路由
-        （员工提/撤回、店长批/驳），员工那扇门仍然全挂在 `/me` 底下。
+        （员工提/撤回、店长批/驳），票 09 又加了换班那几条（找谁换、提、对方同意/拒绝），
+        员工那扇门仍然全挂在 `/me` 底下。
 
         断言路由表本身，不是源码文本 —— 文本比对会被注释或文档字符串误伤
         （写一句「这里不用 require_staff_session」就红了）。
@@ -1575,6 +2073,11 @@ class SchedulingLayeringTest(unittest.TestCase):
             # 票 08：我的请假申请（提、看、撤回）。
             "/api/scheduling/me/requests",
             "/api/scheduling/me/requests/{request_id}",
+            # 票 09：换班 —— 能找谁换、提一条、对方同意 / 拒绝。
+            "/api/scheduling/me/colleagues",
+            "/api/scheduling/me/swaps",
+            "/api/scheduling/me/swaps/{request_id}/accept",
+            "/api/scheduling/me/swaps/{request_id}/reject",
         }
         manager_paths = {
             "/api/scheduling/shifts",
@@ -1585,7 +2088,7 @@ class SchedulingLayeringTest(unittest.TestCase):
             "/api/scheduling/zone-defaults/{employee_id}",
             # 票 07：单日覆盖的改与撤。
             "/api/scheduling/overrides/{employee_id}/{business_date}",
-            # 票 08：待办（请假申请进来，批或驳出去）。
+            # 票 08：待办（申请进来，批或驳出去）；票 09 的换班批完在对调两个人那天的班。
             "/api/scheduling/inbox",
             "/api/scheduling/inbox/{request_id}/approve",
             "/api/scheduling/inbox/{request_id}/reject",

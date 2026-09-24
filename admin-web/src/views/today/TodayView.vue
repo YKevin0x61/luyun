@@ -7,16 +7,17 @@
  * 「今天上不上班」）：下面那块卫生待办卡下一张票接，这会儿留一条去老入口的路，
  * 不然员工登录后只剩这一张卡，卫生的活就没地方看了。
  *
- * 数据只有两个来源，都只认员工自己的 cookie（接口上没有 `employee_id` 可填）：
- * `GET /api/scheduling/me`（今天往后几天的班）与票 08 加的
- * `GET|POST|DELETE /api/scheduling/me/requests`（自己提的请假）。整屏没有钟点 ——
- * 班次没有起止时刻，钟点只在卫生那边。
+ * 数据只有三个来源，都只认员工自己的 cookie（接口上没有 `employee_id` 可填）：
+ * `GET /api/scheduling/me`（今天往后几天的班）、票 08 加的
+ * `GET|POST|DELETE /api/scheduling/me/requests`（自己提的请假）与票 09 加的
+ * `GET /api/scheduling/me/colleagues` + `POST /api/scheduling/me/swaps*`（换班：
+ * 提一条、替对方点头或摇头）。整屏没有钟点 —— 班次没有起止时刻，钟点只在卫生那边。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { staffRequest } from '../../utils/hygieneStaff'
-import { canCancel, requestLine } from '../../utils/leaveRequest'
+import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
 import {
   dayLabel,
   nextTwoLine,
@@ -48,6 +49,17 @@ const leaveBusy = ref(false)
 const requests = ref([])
 const requestsError = ref('')
 
+// 换班（票 09）：自己提的那些跟请假在同一张卡里（`requests` 按 `kind` 分流），
+// 这里多两块 —— 提名同事的一张表单，以及「别人问我换班」的待回应清单。
+const swapSheet = ref(false)
+const colleagues = ref([])
+const swapPeer = ref('')
+const swapDay = ref('')
+const swapNote = ref('')
+const swapError = ref('')
+const swapBusy = ref(false)
+const incoming = ref([])
+
 
 const today = computed(() => days.value[0] || null)
 const after = computed(() => days.value.slice(1, 4))
@@ -62,7 +74,7 @@ const nextLine = computed(() => nextTwoLine(after.value))
 const ENTRIES = [
   { key: 'leave', label: '请假' },
   { key: 'swap', label: '换班' },
-  // 整月有地方可去了（票 06）；请假（票 08）在下面打开一张表单；换班等第 9 张票。
+  // 整月有地方可去了（票 06）；请假（票 08）与换班（票 09）都在下面打开一张表单。
   { key: 'month', label: '整月', to: '/today/month' },
 ]
 
@@ -85,6 +97,10 @@ function open(entry) {
     openLeave()
     return
   }
+  if (entry.key === 'swap') {
+    openSwap()
+    return
+  }
   note.value = `「${entry.label}」还没开放`
 }
 
@@ -95,6 +111,31 @@ function openLeave() {
   leaveNote.value = ''
   sheet.value = true
   loadRequests()
+}
+
+/** 换班表单（票 09）：选一位同事、选一天。日期同样默认取服务端的营业日。 */
+function openSwap() {
+  swapError.value = ''
+  swapPeer.value = ''
+  swapDay.value = (today.value && today.value.business_date) || ''
+  swapNote.value = ''
+  swapSheet.value = true
+  loadColleagues()
+}
+
+/** 能跟谁换：服务端只回在上班的别人（停用/未批准的已经滤掉），这里不再筛一遍。 */
+async function loadColleagues() {
+  try {
+    const data = await staffRequest('/api/scheduling/me/colleagues')
+    colleagues.value = data.colleagues || []
+  } catch (err) {
+    if (err.status === 401) {
+      leaveForStaffLogin()
+      return
+    }
+    colleagues.value = []
+    swapError.value = err.message || '同事名单读不出来'
+  }
 }
 
 async function load() {
@@ -114,15 +155,16 @@ async function load() {
   }
 }
 
-/** 读自己提过的请假。
+/** 读自己提过的申请（请假 + 换班）与「别人问我换班」的那几条。
  *
- *  `quiet` 是进页面那一次用的：员工只是来看今天上不上班，请假列表读不出来
- *  （比如管理员还没应用 0008）不该在首页顶一行红字 —— 真要提的时候表单里会说。
+ *  `quiet` 是进页面那一次用的：员工只是来看今天上不上班，申请列表读不出来
+ *  （比如管理员还没应用 0008 / 0009）不该在首页顶一行红字 —— 真要提的时候表单里会说。
  */
 async function loadRequests(quiet = false) {
   try {
     const data = await staffRequest('/api/scheduling/me/requests')
     requests.value = data.requests || []
+    incoming.value = data.incoming || []
     requestsError.value = ''
   } catch (err) {
     if (err.status === 401) {
@@ -183,10 +225,63 @@ async function cancelLeave(request) {
   }
 }
 
+async function submitSwap() {
+  if (swapBusy.value) return
+  swapBusy.value = true
+  swapError.value = ''
+  try {
+    await staffRequest('/api/scheduling/me/swaps', {
+      method: 'POST',
+      body: {
+        peer_employee_id: Number(swapPeer.value) || null,
+        business_date: swapDay.value,
+        note: swapNote.value || null,
+      },
+    })
+    swapSheet.value = false
+    note.value = '换班提上去了，等对方同意'
+    await loadRequests()
+  } catch (err) {
+    if (err.status === 401) {
+      leaveForStaffLogin()
+      return
+    }
+    swapError.value = err.message || '没提交成'
+  } finally {
+    swapBusy.value = false
+  }
+}
+
+/** 别人问我换班：同意 / 拒绝（票 09 的验收 2）。
+ *
+ *  同意之后这条才进店长待办；拒绝就到此为止 —— 两种走法都由服务端说了算，
+ *  这一页只把结果说回给人听，然后重读一遍（对方可能自己撤了）。
+ */
+async function answerSwap(card, agree) {
+  if (swapBusy.value) return
+  swapBusy.value = true
+  requestsError.value = ''
+  try {
+    await staffRequest(`/api/scheduling/me/swaps/${card.id}/${agree ? 'accept' : 'reject'}`, {
+      method: 'POST',
+    })
+    note.value = agree ? '你同意了，接下来等店长批' : '你拒绝了，这件事到此为止'
+  } catch (err) {
+    if (err.status === 401) {
+      leaveForStaffLogin()
+      return
+    }
+    requestsError.value = err.message || '没回成'
+  } finally {
+    swapBusy.value = false
+    await loadRequests(true)
+  }
+}
+
 onMounted(() => {
   document.title = '今天'
   load()
-  // 顺手读一次自己的请假：有等着批的时候，首页就能看见（读不出来不吭声）。
+  // 顺手读一次自己的申请：有等着批的、或别人问我换班的，首页就能看见（读不出来不吭声）。
   loadRequests(true)
 })
 </script>
@@ -237,10 +332,39 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 自己的请假（票 08）：只在提过或读出错时才占地方。 -->
+        <!-- 别人问我换班（票 09）：他还没等到我点头，店长那边看不见这条。 -->
+        <section v-if="incoming.length" class="tA-card swap">
+          <div class="tA-hd">
+            <span class="tag swap">换班</span>
+            <em>{{ incoming.length }} 条等我回应</em>
+          </div>
+          <ul class="tL-list">
+            <li v-for="card in incoming" :key="card.id">
+              <span class="tL-line">{{ incomingLine(card) }}</span>
+              <span class="tL-acts">
+                <button
+                  class="btn tL-cancel"
+                  type="button"
+                  :disabled="swapBusy"
+                  @click="answerSwap(card, true)"
+                >同意</button>
+                <button
+                  class="btn tL-cancel"
+                  type="button"
+                  :disabled="swapBusy"
+                  @click="answerSwap(card, false)"
+                >拒绝</button>
+              </span>
+              <span v-if="card.note" class="tL-note">事由：{{ card.note }}</span>
+            </li>
+          </ul>
+          <p class="tA-sub">你点了同意才会轮到店长批；不点，这件事就停在你这里。</p>
+        </section>
+
+        <!-- 我自己提的申请（票 08 请假、票 09 换班）：只在提过或读出错时才占地方。 -->
         <section v-if="requests.length || requestsError" class="tA-card leave">
           <div class="tA-hd">
-            <span class="tag leave">请假</span>
+            <span class="tag leave">我的申请</span>
             <em>{{ requests.length }} 条</em>
           </div>
           <p v-if="requestsError" class="tA-sub">{{ requestsError }}</p>
@@ -256,7 +380,9 @@ onMounted(() => {
               >撤回</button>
             </li>
           </ul>
-          <p class="tA-sub">批了才算请假：批完那天在班表上写「请假」。</p>
+          <p class="tA-sub">
+            请假批了那天写「请假」；换班要对方先同意、店长再批，批完两个人才对调。
+          </p>
         </section>
 
         <!-- 卫生那块（原型 A 的下半张卡）下一张票接上。 -->
@@ -324,6 +450,59 @@ onMounted(() => {
             type="button"
             :disabled="leaveBusy || !leaveStart"
             @click="submitLeave"
+          >提交</button>
+        </div>
+      </div>
+    </div>
+    <!-- 换班表单（票 09）：选一位同事 + 选一天。跟请假同一个弹层底子。 -->
+    <div
+      v-if="swapSheet"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="swap-sheet-title"
+      @click.self="swapSheet = false"
+    >
+      <div class="modal-box">
+        <div class="modal-header">
+          <h3 id="swap-sheet-title">换班</h3>
+          <button class="btn" type="button" @click="swapSheet = false">关闭</button>
+        </div>
+        <p class="tA-sub">
+          跟谁换、换哪一天：对方在手机上点同意，店长才看得到这条；两边都点头之后才轮到店长批。
+        </p>
+        <div class="form-row">
+          <label for="swap-peer">跟谁换</label>
+          <select id="swap-peer" v-model="swapPeer" class="input">
+            <option value="">选一位同事</option>
+            <option v-for="person in colleagues" :key="person.id" :value="person.id">
+              {{ person.name }}<template v-if="person.job_title"> · {{ person.job_title }}</template>
+            </option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label for="swap-day">换哪天</label>
+          <input id="swap-day" v-model="swapDay" class="input" type="date">
+        </div>
+        <div class="form-row">
+          <label for="swap-note">事由（可空，最多 50 字）</label>
+          <input
+            id="swap-note"
+            v-model="swapNote"
+            class="input"
+            type="text"
+            maxlength="50"
+            placeholder="例如：那天有事，想跟他换个班"
+          >
+        </div>
+        <p v-if="swapError" class="tL-err" role="alert">{{ swapError }}</p>
+        <div class="modal-footer">
+          <button class="btn" type="button" @click="swapSheet = false">取消</button>
+          <button
+            class="btn btn-primary"
+            type="button"
+            :disabled="swapBusy || !swapPeer || !swapDay"
+            @click="submitSwap"
           >提交</button>
         </div>
       </div>
@@ -406,6 +585,14 @@ onMounted(() => {
     var(--hy-surface-2);
 }
 
+/* 别人问我换班（票 09）：暖色 —— 跟「我自己提的」那张冷色的分开，
+   手机上一眼看出这条是等我动手的。 */
+.tA-card.swap {
+  border-color: var(--hy-amber);
+  background: linear-gradient(168deg, rgba(245, 196, 81, .08), transparent 58%),
+    var(--hy-surface-2);
+}
+
 .tA-hd {
   display: flex;
   align-items: center;
@@ -444,6 +631,13 @@ onMounted(() => {
   color: var(--hy-aqua);
   background: rgba(94, 234, 212, .12);
   border-color: var(--hy-aqua);
+}
+
+/* 换班（票 09）：跟「等我回应」那张卡同一个暖色。 */
+.tag.swap {
+  color: var(--hy-amber);
+  background: rgba(245, 196, 81, .12);
+  border-color: var(--hy-amber);
 }
 
 .shift {
@@ -599,6 +793,26 @@ onMounted(() => {
   min-height: 32px;
   padding: 0 12px;
   font-size: 12px;
+}
+
+/* 换班那条的两个按钮（同意 / 拒绝）挨在一起，不各自贴右边。 */
+.tL-acts {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+
+.tL-acts .tL-cancel {
+  margin-left: 0;
+}
+
+/* 换班那条的事由：小一号，跟在那一行下面。 */
+.tL-note {
+  flex-basis: 100%;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--hy-muted);
 }
 
 .tL-err {

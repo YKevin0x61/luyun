@@ -1,16 +1,18 @@
-/** 请假申请（票 08）的人话翻译层。
+/** 请假 / 换班申请（票 08、09）的人话翻译层。
  *
  * 服务端给的是机器可读的 `status` / `kind` 加一串日期（`GET|POST|DELETE
- * /api/scheduling/me/requests`、店长那三条 `/api/scheduling/inbox*`）：这层只负责翻成人话，
- * 页面里不再各写一份。**放在 util 里而不是页面里**是为了能用真单测钉住状态表 ——
- * 页面模板的 grep 断言抓不住「rejected 被写成了等店长批」。
+ * /api/scheduling/me/requests`、票 09 的 `/me/colleagues` 与 `/me/swaps*`、店长那三条
+ * `/api/scheduling/inbox*`）：这层只负责翻成人话，页面里不再各写一份。**放在 util 里
+ * 而不是页面里**是为了能用真单测钉住状态表 —— 页面模板的 grep 断言抓不住
+ * 「rejected 被写成了等店长批」。
  */
 
 import { dayLabel } from './todayShift'
 
 // 状态机（`.scratch/scheduling/spec.md`）：请假只走「等店长批」这一跳，
-// 换班（票 09）多一步「等对方确认」（`pending_peer`），所以只认这三个 + 撤回。
+// 换班（票 09）多一步「等对方确认」（`pending_peer`），所以只认这四个 + 撤回。
 export const REQUEST_STATUS = {
+  pendingPeer: 'pending_peer',
   pendingManager: 'pending_manager',
   approved: 'approved',
   rejected: 'rejected',
@@ -18,6 +20,7 @@ export const REQUEST_STATUS = {
 }
 
 const STATUS_TEXT = {
+  pending_peer: '等对方同意',
   pending_manager: '等店长批',
   approved: '批了',
   rejected: '驳回了',
@@ -25,6 +28,7 @@ const STATUS_TEXT = {
 }
 
 const STATUS_TONE = {
+  pending_peer: 'wait',
   pending_manager: 'wait',
   approved: 'ok',
   rejected: 'no',
@@ -41,9 +45,13 @@ export function statusTone(status) {
   return STATUS_TONE[status] || 'off'
 }
 
-/** 还能撤回吗：只有「等店长批」的申请能撤（批完/驳完/撤过的都撤不动）。 */
+/** 还能撤回吗：等对方与等店长这两种都撤得回（批完/驳完/撤过的都撤不动）。 */
 export function canCancel(request) {
-  return !!request && request.status === REQUEST_STATUS.pendingManager
+  return (
+    !!request &&
+    (request.status === REQUEST_STATUS.pendingManager ||
+      request.status === REQUEST_STATUS.pendingPeer)
+  )
 }
 
 /** 申请的种类。换班是票 09 的，这里先把词备好：同一张表靠 `kind` 分开。 */
@@ -83,7 +91,71 @@ export function requestLine(request) {
   const when = request.start_date === request.end_date || !request.end_date
     ? dayLabel(request.start_date)
     : `${dayLabel(request.start_date)} 起 ${dayLabel(request.end_date)}`
+  if (request.kind === 'swap') return `换班 · ${when} · ${swapStatusText(request)}`
   return `${kindText(request.kind)} · ${when} · ${statusText(request.status)}`
+}
+
+/** 换班那条现在卡在谁那里（票 09 的验收 7）——「等对方」必须点名，光说「等对方同意」不够。
+ *
+ *  `peer_name` 是服务端给的（`my_requests` 会补上）；拿不到名字时说「对方」，
+ *  不编一个名字出来。
+ */
+export function swapStatusText(request) {
+  const who = (request && request.peer_name) || '对方'
+  switch (request && request.status) {
+    case REQUEST_STATUS.pendingPeer:
+      return `等 ${who} 同意`
+    case REQUEST_STATUS.pendingManager:
+      return `${who} 同意了 · 等店长批`
+    case REQUEST_STATUS.approved:
+      return '换成了'
+    case REQUEST_STATUS.rejected:
+      return `${who} 没同意`
+    case REQUEST_STATUS.cancelled:
+      return '已撤回'
+    default:
+      return statusText(request && request.status)
+  }
+}
+
+/** 别人问我换班的那张卡（票 09 的验收 2）：谁、哪天、他那天什么班、我那天什么班。
+ *
+ *  先说「他那天」，再说「我那天」：员工要先看懂对方拿什么来换，才谈得上同意不同意。
+ */
+export function incomingLine(card) {
+  if (!card) return ''
+  const when = dayLabel(card.business_date)
+  const theirs = card.their_scheduled ? card.their_shift_name || '班次已调整' : '那天没班'
+  const mine = card.my_scheduled ? `你那天 ${card.my_shift_name || '班次已调整'}` : '你那天休'
+  return `${card.employee_name || '同事'} 想跟你换 ${when} · 他那天 ${theirs} · ${mine}`
+}
+
+/** 店长待办里换班卡的那一句「批了会怎样」：两个人那天的班对调，谁上哪个班说清楚。 */
+export function swapPreviewLine(day, applicant, peer) {
+  if (!day) return ''
+  const when = shortDay(day.business_date)
+  if (day.past) return `${when} 已经过去：批了也不改历史`
+  const mine = day.current_shift_name || ''
+  const theirs = day.peer_scheduled ? day.peer_shift_name || '班次已调整' : ''
+  const one = applicant || '申请人'
+  const two = peer || '对方'
+  if (mine && theirs) return `${when} ${mine} ⇄ ${theirs}：批了 ${one} 上${theirs}、${two} 上${mine}`
+  if (mine && !theirs) return `${when} ${two} 那天休：批了 ${two} 接${mine}，${one} 那天没班`
+  if (!mine && theirs) return `${when} ${one} 那天没班：批了 ${one} 接${theirs}，${two} 那天没班`
+  return `${when} 两个人那天都没有班：批了也不改什么`
+}
+
+/** 批完换班给店长的一句回执（跟请假的 `approveReceipt` 同一个道理）。
+ *
+ *  「批了」不等于「改了」：批准一条已经过去的换班，服务层照样记成已批准，
+ *  但两个人的排班一个字不动。
+ */
+export function swapApproveReceipt(result) {
+  const applied = ((result && result.applied_days) || []).map(shortDay).join('、')
+  const skipped = ((result && result.skipped_days) || []).map(shortDay).join('、')
+  if (applied && !skipped) return `批了：${applied} 两个人的班对调了`
+  if (applied && skipped) return `批了：${applied} 对调了；${skipped} 已经过去，排班没动`
+  return `批了，但这天已经过去：排班没动${skipped ? `（${skipped}）` : ''}`
 }
 
 /** 待办卡片上那一行「批了会怎样」（票 08 的验收 2）：一天一句。

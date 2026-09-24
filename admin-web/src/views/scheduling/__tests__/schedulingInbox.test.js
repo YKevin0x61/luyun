@@ -12,7 +12,7 @@ const router = readFileSync(join(here, '../../../router/index.js'), 'utf8')
 const navBar = readFileSync(join(here, '../../../components/NavBar.vue'), 'utf8')
 const mainPy = readFileSync(join(here, '../../../../../main.py'), 'utf8')
 
-describe('店长端排班待办（票 08）', () => {
+describe('店长端排班待办（票 08、09）', () => {
   it('借共享样式表的令牌，不进卫生模块', () => {
     // 跟月历同一套深青墨配色：令牌住在 public/hygiene-admin.css，但那是共享样式表，
     // 不是卫生模块（不 import 它的 Python、不挂它的菜单）。
@@ -40,13 +40,16 @@ describe('店长端排班待办（票 08）', () => {
     // 批了之后那天每个班次还剩几个人：一行一天，句子的判据在 util 里
     // （leaveRequest.test.js 钉着「过去 / 没排 / 正常」三种说法）。
     expect(view).toMatch(/v-for="day in request\.days"/)
-    expect(view).toMatch(/\{\{ previewLine\(day\) \}\}/)
     expect(view).toMatch(/:class="\{ past: day\.past, none: !day\.scheduled \}"/)
+    // 请假与换班一句话不同：请假说「批了之后剩几个人」，换班说「两个人的班怎么对调」。
+    expect(view).toMatch(/previewLine\(day\)/)
+    expect(view).toMatch(/swapPreviewLine\(day, request\.employee_name, request\.peer_name\)/)
     // 事由与区间也一起摊开（店长不该点开才知道是谁请哪天）。
     expect(view).toMatch(/noteText\(request\.note\)/)
     expect(view).toMatch(/requestRangeText\(request\.start_date, request\.end_date\)/)
-    // 回执把「批了」和「改了」分开说，不写一句笼统的「已批准」。
+    // 回执把「批了」和「改了」分开说，不写一句笼统的「已批准」；两种申请各一句。
     expect(view).toMatch(/approveReceipt\(data\)/)
+    expect(view).toMatch(/swapApproveReceipt\(data\)/)
     expect(copy).toContain('已经过去，排班没动')
     // 人手够不够只提示不拦：页面代码里没有「最少几个人」的闸（那句话只在头注释里
     // 说明口径，所以把模板切出来查）。先确认真的切到了模板 —— `indexOf` 返回 -1 时
@@ -56,9 +59,23 @@ describe('店长端排班待办（票 08）', () => {
     expect(tpl).not.toMatch(/最少/)
   })
 
-  it('驳回走确认框，框里点名是谁', () => {
+  it('换班卡跟请假卡同一张，只多一行「跟谁换」（票 09 验收 3/4）', () => {
+    // 验收 3：对方没点同意之前这里根本不会有这张卡 —— 服务端只把 `pending_manager`
+    // 的换班放进 `/inbox`，页面上不必再过滤一次，但卡片得说清是谁跟谁换。
+    expect(view).toMatch(/<span v-if="request\.kind === 'swap'" class="iPeer">⇄ \{\{ request\.peer_name/)
+    expect(view).toMatch(/kindText\(request\.kind\)/)
+    // 两种申请共用一个计数与一处「等你批」，别为换班再抄一份列表。
+    expect((view.match(/v-for="request in requests"/g) || []).length).toBe(1)
+    expect(view).toContain('申请等着批')
+    expect(view).toContain('换班要对方先点同意，才会轮到这儿')
+    expect(view).toMatch(/\.iPeer \{[\s\S]{0,60}--hy-amber/)
+  })
+
+  it('驳回走确认框，框里点名是谁、驳的是哪一种', () => {
     expect(view).toMatch(/<ConfirmDialog/)
-    expect(view).toMatch(/title="驳回这次请假"/)
+    // 标题与正文按种类说（请假的驳了是「继续按规则排」，换班的驳了是「那两个人不动」）。
+    expect(view).toMatch(/:title="`驳回这次\$\{kindText\(rejectTarget\.kind\)\}`"/)
+    expect(view).toMatch(/:message="`驳回「\$\{rejectTarget\.employee_name \|\| '这位员工'\}」的\$\{kindText\(rejectTarget\.kind\)\}后/)
     expect(view).toMatch(/rejectTarget\.employee_name/)
     expect(view).toMatch(/confirm-label="驳回"/)
     expect(view).toMatch(/danger/)

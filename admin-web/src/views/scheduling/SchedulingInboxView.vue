@@ -1,10 +1,13 @@
 <script setup>
-// 店长端「排班 · 待办」（票 08）：等店长批的请假，加一份「谁还没配规则」的提醒。
+// 店长端「排班 · 待办」（票 08 请假、票 09 换班）：等店长批的申请，
+// 加一份「谁还没配规则」的提醒。
 //
-// 请假是员工在手机上提的（`POST /api/scheduling/me/requests`），审批落在店长手里：
-// 这一页就是那张审批台。每条申请**先把结果摊开再让店长按**（票 08 的验收 2）：
-// 批了之后那天每个班次还剩几个人，一行一天写清楚；已经过去的日子明说「批了也不改历史」。
+// 申请是员工在手机上提的（`POST /api/scheduling/me/requests`、`/me/swaps`），审批落在
+// 店长手里：这一页就是那张审批台。每条申请**先把结果摊开再让店长按**（票 08 的验收 2）：
+// 请假批了之后那天每个班次还剩几个人，一行一天写清楚；换班批了两个人那天的班怎么对调，
+// 一行一天写清楚。已经过去的日子明说「批了也不改历史」。
 // 人手够不够只提示、不拦（服务层没有「最少几个人」这个配置，也就没有那道闸）。
+// 换班比请假多一道门：**对方先同意**，那条才会出现在这里（服务层的 `pending_peer`）。
 //
 // 视觉沿用 `public/hygiene-admin.css` 的深青墨令牌 —— 那是**共享的样式表**，不是卫生
 // 模块：排班不 import 卫生的 Python 模块、不挂它的菜单，只是同一套验收台配色。
@@ -20,6 +23,8 @@ import {
   previewLine,
   requestRangeText,
   splitRuleless,
+  swapApproveReceipt,
+  swapPreviewLine,
 } from '../../utils/leaveRequest'
 
 useScopedStylesheet('/hygiene-admin.css')
@@ -61,9 +66,11 @@ async function decide(request, action) {
   receipt.value = ''
   try {
     const data = await api.post(`/api/scheduling/inbox/${request.id}/${action}`, {})
-    receipt.value = action === 'approve'
-      ? approveReceipt(data)
-      : `${request.employee_name} 的请假驳回了，排班没动`
+    if (action === 'approve') {
+      receipt.value = request.kind === 'swap' ? swapApproveReceipt(data) : approveReceipt(data)
+    } else {
+      receipt.value = `${request.employee_name} 的${kindText(request.kind)}驳回了，排班没动`
+    }
     await load()
   } catch (err) {
     errorText.value = err.message || '没处理成'
@@ -94,7 +101,7 @@ onMounted(() => {
         <p class="iKicker">排班</p>
         <h1>待办</h1>
         <p class="iSub">
-          <template v-if="today">今天 {{ today }} · </template>请假在这里批；批完那天就记成请假，月历上带青点。
+          <template v-if="today">今天 {{ today }} · </template>请假与换班都在这里批；批完那天就记成请假 / 对调，月历上带青点。
         </p>
       </div>
       <button class="btn" type="button" @click="router.push('/scheduling')">回到月历</button>
@@ -108,16 +115,17 @@ onMounted(() => {
 
       <section class="iCard">
         <div class="iCard-hd">
-          <h2>请假等着批</h2>
+          <h2>申请等着批</h2>
           <span class="iCount">{{ requests.length }}</span>
         </div>
         <p v-if="!requests.length" class="iEmpty">
-          没有等着批的申请。员工在手机上提了请假，会出现在这里。
+          没有等着批的申请。员工在手机上提了请假会出现在这里；换班要对方先点同意，才会轮到这儿。
         </p>
         <ul v-else class="iList">
           <li v-for="request in requests" :key="request.id" class="iItem">
             <div class="iItem-hd">
               <b>{{ request.employee_name || '（没有名字）' }}</b>
+              <span v-if="request.kind === 'swap'" class="iPeer">⇄ {{ request.peer_name || '（对方）' }}</span>
               <span class="iKind">{{ kindText(request.kind) }}</span>
               <span class="iWhen">{{ requestRangeText(request.start_date, request.end_date) }}</span>
               <span class="iDays">{{ (request.days || []).length }} 天</span>
@@ -129,7 +137,9 @@ onMounted(() => {
                 v-for="day in request.days"
                 :key="day.business_date"
                 :class="{ past: day.past, none: !day.scheduled }"
-              >{{ previewLine(day) }}</li>
+              >{{ request.kind === 'swap'
+                ? swapPreviewLine(day, request.employee_name, request.peer_name)
+                : previewLine(day) }}</li>
             </ul>
             <div class="iAct">
               <button
@@ -174,8 +184,8 @@ onMounted(() => {
 
     <ConfirmDialog
       v-if="rejectTarget"
-      title="驳回这次请假"
-      :message="`驳回「${rejectTarget.employee_name || '这位员工'}」的请假后，这条申请就结束了（员工看得到）。排班一个字不改。`"
+      :title="`驳回这次${kindText(rejectTarget.kind)}`"
+      :message="`驳回「${rejectTarget.employee_name || '这位员工'}」的${kindText(rejectTarget.kind)}后，这条申请就结束了（员工看得到）。排班一个字不改。`"
       confirm-label="驳回"
       danger
       @confirm="confirmReject"
@@ -227,6 +237,8 @@ onMounted(() => {
   color: var(--hy-aqua); border: 1px solid var(--hy-aqua); background: rgba(94, 234, 212, .10);
 }
 .iWhen { font-family: var(--font-mono); font-size: 12.5px; color: var(--hy-ink); }
+/* 换班卡上的「⇄ 对方」：这件事是两个人，姓名并排写才看得懂谁跟谁换。 */
+.iPeer { font-size: 13px; color: var(--hy-amber); }
 .iDays { font-size: 11.5px; color: var(--hy-muted); }
 .iPend { margin-left: auto; font-size: 11.5px; color: var(--hy-amber); }
 .iNote { margin: 8px 0 0; font-size: 12.5px; line-height: 1.7; color: var(--hy-muted); }

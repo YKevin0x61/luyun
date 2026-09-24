@@ -126,7 +126,10 @@ describe('员工端请假（票 08）', () => {
     // 谁的身份由 cookie 定：管理端那几条 `/api/scheduling/inbox*` 不许出现在员工页上；
     // 请求路径里也不许出现 employee_id（只有注释里那句「没有 employee_id 可填」）。
     expect(view).not.toContain('/api/scheduling/inbox')
-    expect(view).not.toMatch(/employee_id`?[,)\]}]|employee_id\s*[:=]/)
+    // 判的是「有没有在填这个字段」，不是「有没有提到这个词」——头注释里就写着
+    // 「接口上没有 `employee_id` 可填」这句口径；`peer_employee_id`（票 09 的换班）
+    // 前面多一个下划线，落不进这条正则。
+    expect(view).not.toMatch(/(^|[^_a-zA-Z])employee_id\s*[:=]/)
   })
 
   it('表单里那两天默认是服务端给的营业日，不是手机上的今天', () => {
@@ -152,18 +155,67 @@ describe('员工端请假（票 08）', () => {
     expect(view).toMatch(/requestLine\(request\)/)
     expect(view).toMatch(/v-if="canCancel\(request\)"/)
     expect(view).toMatch(/@click="cancelLeave\(request\)"/)
-    expect(view).toContain('批了才算请假')
+    expect(view).toContain('请假批了那天写')
+    expect(view).toContain('换班要对方先同意、店长再批')
     // 出错了要说出来（不吞）：钉住那一处 —— 只写 `role="alert"` 的话，将来别处再加一个
     // 无障碍标记，这里就退化成恒真了。
     expect(view).toMatch(/v-if="leaveError"[\s\S]{0,40}role="alert"/)
   })
 
-  it('「换班」还是那句「还没开放」，「请假」已经不是了', () => {
-    // 票 06 时三个入口点进去都是「还没开放」；票 08 把请假接上了 ——
-    // 这两句得分开走，别把换班也一块写成开放。
+  it('「换班」也不是那句「还没开放」了，请假与换班各走各的表单', () => {
+    // 票 06 时三个入口点进去都是「还没开放」；票 08 把请假接上了、票 09 把换班接上了 ——
+    // 这三句得分开走，别把哪个入口一块写成开放（`open()` 里最后那句仍是兜底）。
     expect(view).toMatch(/if \(entry\.key === 'leave'\) \{\s*openLeave\(\)/)
+    expect(view).toMatch(/if \(entry\.key === 'swap'\) \{\s*openSwap\(\)/)
     expect(view).toMatch(/note\.value = `「\$\{entry\.label\}」还没开放`/)
     expect(copy).toContain('今天请假')
     expect(copy).toContain("if (day.leave) return '请假'")
+  })
+})
+
+describe('员工端换班（票 09）', () => {
+  it('四条请求都走员工门：名单、提一条、替对方同意 / 拒绝', () => {
+    expect(view).toMatch(/staffRequest\('\/api\/scheduling\/me\/colleagues'\)/)
+    expect(view).toMatch(/staffRequest\('\/api\/scheduling\/me\/swaps'/)
+    expect(view).toMatch(/staffRequest\(`\/api\/scheduling\/me\/swaps\/\$\{card\.id\}\/\$\{agree \? 'accept' : 'reject'\}`/)
+    // 身份由 cookie 定：路径上只有申请号，没有 employee_id。
+    // `peer_employee_id`（票 09 的换班）不算：那是同事的 id，不是「我的 id」。
+    expect(view).not.toMatch(/(^|[^_a-zA-Z])employee_id\s*[:=]/)
+    // 表单里发的是「跟谁换」的同事 id，不是姓名（姓名可以重）。
+    expect(view).toMatch(/peer_employee_id: Number\(swapPeer\.value\) \|\| null/)
+  })
+
+  it('别人问我换班的那几条看得见、点得动，店长那边在此之前看不见', () => {
+    expect(view).toMatch(/v-if="incoming\.length"/)
+    expect(view).toMatch(/incomingLine\(card\)/)
+    expect(view).toMatch(/@click="answerSwap\(card, true\)"/)
+    expect(view).toMatch(/@click="answerSwap\(card, false\)"/)
+    expect(view).toContain('你点了同意才会轮到店长批')
+    // 同意/拒绝之后两边都要重读（对方可能自己撤了），也各有一句回执。
+    expect(view).toMatch(/note\.value = agree \? '你同意了，接下来等店长批' : '你拒绝了，这件事到此为止'/)
+    // 那次重读要钉在 `answerSwap` 里：`cancelLeave` 里也有一句 `await loadRequests(true)`，
+    // 全文匹配会被它顶替（删掉这里的重读，断言照样绿）。
+    const answer = view.slice(view.indexOf('async function answerSwap'), view.indexOf('onMounted('))
+    expect(answer).toContain('await loadRequests(true)')
+  })
+
+  it('换班表单：同事下拉 + 哪一天 + 事由，日期默认服务端营业日', () => {
+    expect(view).toMatch(/swapDay\.value = \(today\.value && today\.value\.business_date\) \|\| ''/)
+    expect(view).toMatch(/v-for="person in colleagues"/)
+    expect(view).toMatch(/:value="person\.id"/)
+    // 事由的长度上限钉在换班那个输入框上：`maxlength="50"` 请假表单里也有一个。
+    const noteBox = view.slice(view.indexOf('id="swap-note"'))
+    expect(noteBox.slice(0, 200)).toMatch(/maxlength="50"/)
+    // 三样缺一样就不让提交（同事、日期）。
+    expect(view).toMatch(/:disabled="swapBusy \|\| !swapPeer \|\| !swapDay"/)
+    expect(view).toMatch(/body: \{\s*peer_employee_id: Number\(swapPeer\.value\) \|\| null,\s*business_date: swapDay\.value/)
+    // 出错了要说出来，跟请假那一处一样的钉法。
+    expect(view).toMatch(/v-if="swapError"[\s\S]{0,40}role="alert"/)
+  })
+
+  it('换班那条与我提的那些分开：暖色卡 + 自己的 tag', () => {
+    expect(view).toContain('tA-card swap')
+    expect(view).toMatch(/\.tA-card\.swap \{[\s\S]{0,80}--hy-amber/)
+    expect(view).toMatch(/\.tag\.swap \{/)
   })
 })
