@@ -56,6 +56,20 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/未配区/)
   })
 
+  it('edits a rotation cycle made of shift names and 休 (票 04)', () => {
+    // 周期编辑：一格一天，写班次名或「休」，起点默认今天。天数的上限来自服务端
+    // （`max_cycle_days`），示例按当前班次名拼 —— 都不许在页面里写死第二份。
+    expect(view).toContain('gC-in')
+    expect(view).toMatch(/:placeholder="cyclePlaceholder"/)
+    expect(view).toMatch(/const cyclePlaceholder = computed/)
+    expect(view).toMatch(/parseCycle/)
+    expect(view).toMatch(/REST_WORDS/)
+    expect(view).toMatch(/data\.max_cycle_days/)
+    expect(view).toMatch(/anchor_date: cycleAnchor\.value \|\| null/)
+    // 「固定某个班」和「编周期」走同一个 PUT /rules，不是两套逻辑。
+    expect(view.match(/api\.put\(`\/api\/scheduling\/rules\//g)).toHaveLength(2)
+  })
+
   it('uses only tokens the shared stylesheet defines', () => {
     // 少一个 var() 就是一处静默失效的样式（无色/无圆角），而 scoped 样式块
     // 不会因为引用了不存在的自定义属性而报错。

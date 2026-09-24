@@ -87,6 +87,15 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
         return {dict(row)["business_date"]: dict(row)["zone_id"] for row in await cur.fetchall()}
 
+    async def _full_rows(self, employee_id):
+        """整行快照（`business_date → 全字段`）：用来证明「过去一个字都没动」。"""
+        cur = await self.db._conn.execute(
+            """SELECT business_date, shift_id, zone_id, source, created_at, updated_at
+               FROM staff_assignments WHERE employee_id = ?""",
+            (employee_id,),
+        )
+        return {dict(row)["business_date"]: dict(row) for row in await cur.fetchall()}
+
     # ── 验收 1：配「固定白班」，从今天起每天都算进白班 ──────────────────
 
     async def test_fixed_day_shift_covers_every_day_from_today(self):
@@ -128,6 +137,86 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         detail = await self.store.day_detail("2026-09-25")
         self.assertEqual(detail["total"], 0)
         self.assertEqual(detail["off_count"], 1)
+
+    # ── 票 04：轮转周期「白白白夜夜休休」────────────────────────────────
+
+    async def test_seven_day_cycle_wraps_on_the_eighth_day(self):
+        """第 8 天回到周期第 1 格；再往后每一轮都对得齐（错位最容易在这儿露出来）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        cycle = [day, day, day, night, night, None, None]
+
+        await self.store.set_rule(employee["id"], cycle)
+
+        rows = await self._rows(employee["id"])
+        self.assertEqual([row["shift_id"] for row in rows[:7]], cycle)
+        self.assertEqual(rows[7]["shift_id"], day)  # 第 8 天 = 周期第 1 格
+        self.assertEqual([row["shift_id"] for row in rows[7:14]], cycle)
+
+    async def test_rest_day_disappears_from_every_shift_count(self):
+        """周期里的「休」：那天不进任何班次的人数，只进 `off_count`。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+
+        await self.store.set_rule(employee["id"], [day, None, night])
+
+        calendar = await self.store.month_calendar("2026-09")
+        days = {item["business_date"]: item for item in calendar["days"]}
+        self.assertEqual(days["2026-09-25"]["counts"].get(str(day), 0), 0)
+        self.assertEqual(days["2026-09-25"]["counts"].get(str(night), 0), 0)
+        self.assertEqual(days["2026-09-26"]["counts"][str(night)], 1)
+
+        detail = await self.store.day_detail("2026-09-25")
+        self.assertEqual(detail["total"], 0)
+        self.assertEqual(detail["off_count"], 1)
+        self.assertEqual([group for group in detail["groups"] if group["count"]], [])
+
+    async def test_cycle_of_one_is_the_same_rule_as_the_fixed_shift(self):
+        """长度 1 的周期就是「固定某个班」：老写法（`cycle: [shift]`）不用改数据。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+
+        await self.store.set_rule(employee["id"], [day])
+
+        rows = await self._rows(employee["id"])
+        self.assertEqual(len(rows), EXPANSION_DAYS)
+        self.assertEqual({row["shift_id"] for row in rows}, {day})
+        rules = await self.store.list_rules()
+        self.assertEqual(rules[employee["id"]]["cycle"], [day])
+        self.assertEqual(rules[employee["id"]]["anchor_date"], TODAY)  # 不传起点 = 今天
+
+    async def test_dirty_anchor_date_is_an_input_error_not_a_crash(self):
+        """人工 SQL 把起点写成垃圾：报一条输入错误，而不是让整个月历 500。
+
+        月历/当天两个接口都是先 `expand()` 再读（`api/scheduling.py:89,104`），所以
+        这里照着调 `expand()`。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.db._conn.execute(
+            "UPDATE scheduling_rules SET anchor_date = ? WHERE employee_id = ?",
+            ("昨天", employee["id"]),
+        )
+        await self.db._conn.commit()
+
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.expand()
+        self.assertEqual(caught.exception.code, "invalid_anchor")
+
+    async def test_unknown_shift_in_a_cycle_says_which_slot(self):
+        """周期里引用了不存在的班次：错误要说清是第几格（规则页照着这句话报错）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.set_rule(employee["id"], [day, 999999, day])
+
+        self.assertEqual(caught.exception.code, "unknown_shift_in_cycle")
+        self.assertEqual(caught.exception.args[0], "2")
+        self.assertEqual(await self._rows(employee["id"]), [])  # 半个周期都不落库
 
     # ── 验收 2：月历每格显示当天白班、夜班各几人 ────────────────────────
 
@@ -395,11 +484,16 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dict(await cur.fetchone())["created_at"], stamp_before)
 
     async def test_rule_change_rewrites_only_today_and_later(self):
-        """改规则只影响今天以后：之前写下的行一行不动（「过去不改」是做法本身）。"""
+        """改规则只影响今天以后：之前写下的行**整行**不动（「过去不改」是做法本身）。
+
+        比的是整行（含 `created_at` / `updated_at`），不只是 `shift_id` —— 否则哪天有人
+        把铺行改成 upsert、或把删除条件的 `>=` 写成 `>`，这条例题照样绿。
+        """
         employee = await self._employee()
         day = await self._shift_id("白班")
         night = await self._shift_id("夜班")
         await self.store.set_rule(employee["id"], [day])
+        before = await self._full_rows(employee["id"])
 
         later = SchedulingStore(
             self.db, now=lambda: self.fixed_now + timedelta(days=10)
@@ -413,6 +507,18 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(past[-1]["business_date"], "2026-10-03")
         self.assertEqual({row["shift_id"] for row in past}, {day})
         self.assertEqual({row["shift_id"] for row in future}, {night})
+
+        after = await self._full_rows(employee["id"])
+        untouched = {date: row for date, row in before.items() if date < "2026-10-04"}
+        self.assertEqual(
+            {date: after[date] for date in untouched},
+            untouched,
+            "今天以前的行被改写了",
+        )
+        # 今天以后的每一行都换过了（说明上面那份快照不是「什么都没发生」）
+        self.assertTrue(
+            any(after[date] != row for date, row in before.items() if date >= "2026-10-04")
+        )
 
     # ── 验收 5：没配规则的人不出现，也不报错 ────────────────────────────
 
@@ -467,10 +573,13 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({row["shift_id"] for row in rows}, {night})
 
     async def test_unknown_shift_is_rejected(self):
+        """整条周期都是不存在的班次：第 1 格就报错（`unknown_shift` 现在只留给
+        责任区那边——「配区时选了个不存在的班次」）。"""
         employee = await self._employee()
         with self.assertRaises(SchedulingError) as caught:
             await self.store.set_rule(employee["id"], [999])
-        self.assertEqual(caught.exception.code, "unknown_shift")
+        self.assertEqual(caught.exception.code, "unknown_shift_in_cycle")
+        self.assertEqual(caught.exception.args[0], "1")
         self.assertEqual(await self._rows(employee["id"]), [])
 
     async def test_unknown_employee_is_rejected(self):

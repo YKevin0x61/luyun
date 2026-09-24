@@ -5,7 +5,7 @@
 //
 // 视觉沿用 `public/hygiene-admin.css` 的深青墨令牌 —— 那是**共享的样式表**，不是卫生
 // 模块：排班不 import 卫生的 Python 模块、不挂它的菜单，只是同一套验收台配色。
-// 本期（票 02）只做「配固定班次」：轮转周期的编辑在票 04，班次表的增删改在票 11。
+// 票 02 做「配固定班次」、票 03 加责任区、票 04 加轮转周期编辑；班次表的增删改在票 11。
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../../api/client'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
@@ -15,6 +15,8 @@ useScopedStylesheet('/hygiene-admin.css')
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
 // 每个班次一个颜色，按排序位循环取（原型里白班薄荷、夜班水青）。N 个班次都够用。
 const SHIFT_TONES = ['mint', 'aqua', 'amber', 'seal']
+// 周期天数的真上限在服务端（`MAX_CYCLE_DAYS`，随 /roster 下来）；这个只是它没下来时的兜底。
+const MAX_CYCLE_FALLBACK = 60
 
 const loading = ref(true)
 const errorText = ref('')
@@ -134,6 +136,7 @@ async function loadRoster() {
     // 责任区名单来自公共层（读的是卫生建的那份），所以卫生那边新建一个区，
     // 这里刷新一下就能选到 —— 不需要重启，也不用在排班这边再建一份。
     zones.value = data.zones || []
+    if (data.max_cycle_days) maxCycleDays.value = data.max_cycle_days
   } catch (err) {
     errorText.value = err.message || '名单读不出来'
   }
@@ -171,7 +174,9 @@ function ruleLabel(rule) {
   const parts = rule.cycle.map((id) => (id === null ? '休' : (shiftById.value[id] || {}).name || '?'))
   const unique = new Set(parts)
   if (unique.size === 1) return `固定${parts[0]}`
-  return parts.join('')
+  // 长周期（最多 60 格）不能整串铺在名单行上：只出前 8 格 + 一共几天。
+  if (parts.length > 8) return `${parts.slice(0, 8).join('')}…（${parts.length} 天）`
+  return `${parts.join('')}（${parts.length} 天）`
 }
 
 async function setFixedShift(employee, shiftId) {
@@ -199,6 +204,99 @@ async function clearRule(employee) {
     await loadPendingCount()
   } catch (err) {
     errorText.value = err.message || '规则没清掉'
+  } finally {
+    busyEmployeeId.value = null
+  }
+}
+
+// ── 轮转周期（票 04）─────────────────────────────────────────────────
+// 一格 = 一个营业日，格子里是班次名或「休」。店长在输入框里按天写下来（空格隔开），
+// 起点默认今天；周期长度 1 就是「固定某个班」，上面那些「固定白班」按钮是这条路径的
+// 快捷方式，走的还是同一个 PUT —— 不是另一套逻辑。
+const cycleOpenId = ref(null)
+const cycleText = ref('')
+const cycleAnchor = ref('')
+const cycleError = ref('')
+// 最多写多少天由服务端说了算（`MAX_CYCLE_DAYS`，随 /roster 一起下来）。
+const maxCycleDays = ref(MAX_CYCLE_FALLBACK)
+const REST_WORDS = ['休', '休息', '空', 'x', 'X', '-', '—']
+// 输入框的示例按**当前班次名**拼，不把「白班/夜班」写死在文案里（班次可配置，票 11）。
+const cyclePlaceholder = computed(() => {
+  const names = (shifts.value || []).map((shift) => shift.name)
+  const first = names[0] || '班次'
+  const second = names[1] || first
+  return [first, first, second, '休'].join(' ')
+})
+
+function openCycle(employee) {
+  cycleOpenId.value = employee.id
+  cycleError.value = ''
+  const rule = employee.rule
+  // 查不到的班次 id 写成 `#5` 这种**解析器一定会拒**的占位，而不是空串：
+  // 空串会在保存时被安静地丢掉，周期就少一格、后面每一格整体前移一天
+  // （班次被停用后 `/roster` 不再下发它，规则行里却还留着那个 id）。
+  cycleText.value = rule && rule.cycle
+    ? rule.cycle.map((id) => (id === null ? '休' : (shiftById.value[id] || {}).name || `#${id}`)).join(' ')
+    : ''
+  cycleAnchor.value = (rule && rule.anchor_date) || ''
+}
+
+function closeCycle() {
+  cycleOpenId.value = null
+  cycleError.value = ''
+}
+
+// 输入框里的字 → 服务端要的 `cycle` 数组。错在哪一格就用「第 N 格」说出来，
+// 别让店长对着「排班参数不合法」猜。
+function parseCycle(text) {
+  const tokens = String(text || '').split(/[\s,，、·/]+/).filter(Boolean)
+  if (!tokens.length) return { error: '周期不能空着：至少写一天，例如「白班 夜班 休」' }
+  if (tokens.length > maxCycleDays.value) {
+    return { error: `周期最多 ${maxCycleDays.value} 天，现在写了 ${tokens.length} 天` }
+  }
+  const byName = new Map((shifts.value || []).map((shift) => [shift.name, shift.id]))
+  const names = (shifts.value || []).map((shift) => shift.name).join('、')
+  const cycle = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    // 班次名**先于**「休」的别名判：班次名是数据（票 11 能改），万一店里真有个
+    // 班次叫「休」，写「休」应当指那个班次而不是静默变成休息日。代价是那种店里
+    // 不能再用「休」写休息（还有 休息/空/x/- 这些别名），票 11 建班次时再禁止
+    // 这些保留词，见票 04 的「转出」。
+    if (byName.has(token)) {
+      cycle.push(byName.get(token))
+    } else if (REST_WORDS.includes(token)) {
+      cycle.push(null)
+    } else if (token.startsWith('#')) {
+      // `openCycle` 给已停用/已不存在的班次留的占位。这里必须挡住，不能当没写。
+      return { error: `第 ${index + 1} 格引用的班次已停用或不存在（${token}）：请把这一格改成现在的班次` }
+    } else {
+      return { error: `第 ${index + 1} 格「${token}」不是班次：只能填 ${names || '班次名'}，或「休」` }
+    }
+  }
+  return { cycle }
+}
+
+async function saveCycle(employee) {
+  const parsed = parseCycle(cycleText.value)
+  if (parsed.error) {
+    cycleError.value = parsed.error
+    return
+  }
+  busyEmployeeId.value = employee.id
+  cycleError.value = ''
+  errorText.value = ''
+  try {
+    await api.put(`/api/scheduling/rules/${employee.id}`, {
+      cycle: parsed.cycle,
+      anchor_date: cycleAnchor.value || null,
+    })
+    closeCycle()
+    await loadRoster()
+    await loadCalendar(monthValue.value)
+    await loadPendingCount()
+  } catch (err) {
+    cycleError.value = err.message || '周期没存上'
   } finally {
     busyEmployeeId.value = null
   }
@@ -360,6 +458,38 @@ onMounted(async () => {
                   :disabled="busyEmployeeId === employee.id"
                   @click="clearRule(employee)"
                 >清空</button>
+                <button
+                  type="button"
+                  class="gBtn ghost"
+                  :class="{ on: cycleOpenId === employee.id }"
+                  :disabled="busyEmployeeId === employee.id"
+                  @click="cycleOpenId === employee.id ? closeCycle() : openCycle(employee)"
+                >{{ cycleOpenId === employee.id ? '收起' : '编周期' }}</button>
+              </div>
+              <div v-if="cycleOpenId === employee.id" class="gC">
+                <input
+                  v-model="cycleText"
+                  class="gC-in"
+                  type="text"
+                  spellcheck="false"
+                  :placeholder="cyclePlaceholder"
+                  @keyup.enter="saveCycle(employee)"
+                >
+                <label class="gC-anchor">
+                  <span>起点</span>
+                  <input v-model="cycleAnchor" type="date">
+                </label>
+                <div class="gC-act">
+                  <button
+                    type="button"
+                    class="gBtn"
+                    :disabled="busyEmployeeId === employee.id"
+                    @click="saveCycle(employee)"
+                  >保存周期</button>
+                  <button type="button" class="gBtn ghost" @click="closeCycle()">取消</button>
+                </div>
+                <p class="gC-hint">空格隔开，一格一天，从起点那天算第 1 格；「休」= 那天不排班。起点留空就是今天。</p>
+                <p v-if="cycleError" class="gC-err">{{ cycleError }}</p>
               </div>
               <div class="gZ">
                 <label v-for="shift in shifts" :key="shift.id" class="gZ-pick">
@@ -378,7 +508,7 @@ onMounted(async () => {
               </div>
             </div>
             <p v-if="!roster.length" class="gB-empty">名单是空的</p>
-            <p class="gB-note">轮转周期（白白白夜夜休休）在下一张票里编；这里只配「固定一个班」和每个班的固定责任区。</p>
+            <p class="gB-note">「固定一个班」和「编周期」（白白白夜夜休休）配的是同一样东西：一人一条轮转规则。规则改了只重排今天以后，过去的日子不动。</p>
           </div>
         </template>
       </div>
@@ -461,6 +591,7 @@ onMounted(async () => {
 }
 .gBtn:disabled { opacity: .45; cursor: default; }
 .gBtn.ghost { color: var(--hy-faint); }
+.gBtn.on { color: var(--hy-mint); border-color: var(--hy-mint-line); background: var(--hy-mint-soft); }
 .gAct {
   margin-left: auto; font: inherit; font-size: 11px; color: var(--hy-mint);
   border: 1px solid var(--hy-mint-line); background: var(--hy-mint-soft);
@@ -484,6 +615,24 @@ onMounted(async () => {
 }
 .gZ-sel:disabled { opacity: .45; cursor: default; }
 .gZ-none { font-size: 11px; color: var(--hy-faint); }
+/* 轮转周期编辑器（票 04）。原型 B 的名单行里没有这一块 —— 展开后长在那一行下面。 */
+.gC {
+  margin-top: 8px; padding: 9px 10px; display: flex; flex-direction: column; gap: 7px;
+  border: 1px solid var(--hy-line); border-radius: var(--hy-radius-md); background: var(--hy-surface-2);
+}
+.gC-in {
+  font: inherit; font-family: var(--font-mono); font-size: 12px; color: var(--hy-ink);
+  background: var(--hy-surface); border: 1px solid var(--hy-line); border-radius: 7px; padding: 6px 8px;
+  letter-spacing: .06em;
+}
+.gC-anchor { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--hy-faint); }
+.gC-anchor input {
+  font: inherit; font-size: 11px; color: var(--hy-ink); background: var(--hy-surface);
+  border: 1px solid var(--hy-line); border-radius: 7px; padding: 3px 6px;
+}
+.gC-act { display: flex; gap: 6px; }
+.gC-hint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.6; }
+.gC-err { margin: 0; font-size: 11px; color: var(--hy-seal-bright); line-height: 1.6; }
 .gB-zone {
   margin-left: 5px; font-style: normal; font-family: var(--font-mono); font-size: 10px;
   color: var(--hy-mint);

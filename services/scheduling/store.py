@@ -428,9 +428,12 @@ class SchedulingStore:
         if employee_id not in {employee["id"] for employee in roster}:
             raise SchedulingError("unknown_employee", "unknown_employee")
         known = {shift["id"] for shift in await self.list_shifts()}
-        unknown = {sid for sid in normalized if sid is not REST and sid not in known}
-        if unknown:
-            raise SchedulingError("unknown_shift", "unknown_shift")
+        for slot, shift_id in enumerate(normalized, start=1):
+            if shift_id is not REST and shift_id not in known:
+                # 说清是**第几格**：规则编辑页照这个数字就能指出错在哪一天
+                # （票 04 的验收项）。`unknown_shift` 留给责任区那条路
+                # （`set_zone_default`：给某人某个班次配区时选了个不存在的班次）。
+                raise SchedulingError("unknown_shift_in_cycle", str(slot))
         anchor = self.today() if anchor_date in (None, "") else _require_business_date(anchor_date)
 
         await self._apply_rule(employee_id, normalized, anchor)
@@ -526,7 +529,12 @@ class SchedulingStore:
         """铺窗口内还缺的那些天，返回写了几行。不自己上锁、不提交（调用方管）。"""
         first, last = self._window()
         cycle = rule["cycle"]
-        anchor = date.fromisoformat(rule["anchor_date"])
+        try:
+            # `anchor_date` 是 TEXT 列，人工 SQL 能写进任何东西。跟 `_decode_cycle`
+            # 一样，脏数据在这里变成一条明确的输入错误，不是一路冒成 500。
+            anchor = date.fromisoformat(rule["anchor_date"])
+        except (TypeError, ValueError):
+            raise SchedulingError("invalid_anchor", "invalid_anchor")
 
         cur = await self._conn.execute(
             """SELECT business_date FROM staff_assignments

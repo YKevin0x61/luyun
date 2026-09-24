@@ -145,6 +145,44 @@ def test_admin_can_configure_and_see_it_on_the_calendar(scheduling_http):
     assert all(day["total"] == 0 for day in after["days"])
 
 
+def test_cycle_editor_round_trip(scheduling_http):
+    """票 04：店长编一条「白白夜休」的周期，月历按周期走，写错要说清第几格。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    shifts = client.get("/api/scheduling/shifts").json()["shifts"]
+    day_id, night_id = shifts[0]["id"], shifts[1]["id"]
+
+    # 规则编辑页的天数上限跟服务端常量一起下来，前端不写死一份。
+    roster = client.get("/api/scheduling/roster").json()
+    assert roster["max_cycle_days"] >= 7
+
+    cycle = [day_id, day_id, night_id, None]
+    saved = client.put(
+        f"/api/scheduling/rules/{employee_id}",
+        json={"cycle": cycle, "anchor_date": TODAY},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["anchor_date"] == TODAY
+
+    calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    cells = {item["business_date"]: item for item in calendar["days"]}
+    assert cells["2026-09-24"]["counts"][str(day_id)] == 1  # 周期第 1 格
+    assert cells["2026-09-26"]["counts"][str(night_id)] == 1  # 第 3 格
+    assert cells["2026-09-27"]["total"] == 0  # 第 4 格 = 休
+    assert cells["2026-09-28"]["counts"][str(day_id)] == 1  # 第 5 天回到第 1 格
+
+    rest = client.get("/api/scheduling/day", params={"date": "2026-09-27"}).json()
+    assert rest["total"] == 0
+    assert rest["off_count"] == 1
+
+    bad = client.put(
+        f"/api/scheduling/rules/{employee_id}",
+        json={"cycle": [day_id, 999999, day_id]},
+    )
+    assert bad.status_code == 400, bad.text
+    assert "第 2 格" in bad.json()["detail"]
+
+
 def test_admin_can_pin_a_fixed_zone_per_shift(scheduling_http):
     """票 03：配了固定区之后，当天名单上就写着「谁 · 在哪个区」。"""
     client, db, accounts = scheduling_http
@@ -212,7 +250,8 @@ def test_bad_input_is_a_400_and_unknown_employee_is_a_404(scheduling_http):
     assert client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": []}).status_code == 422
     shift = client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [999]})
     assert shift.status_code == 400
-    assert shift.json()["detail"] == "班次不存在或已停用"
+    # 票 04 起这句话带格号：规则编辑页要能指出错在哪一天。
+    assert shift.json()["detail"] == "轮转周期第 1 格引用的班次不存在或已停用：请重新选那一天的班次"
     missing = client.put("/api/scheduling/rules/9999", json={"cycle": [1]})
     assert missing.status_code == 404
     assert missing.json()["detail"] == "员工不存在"
@@ -226,6 +265,39 @@ def test_missing_table_is_a_503_with_instructions():
     exc = _bad_request(SchedulingError("not_migrated", "UndefinedTableError: staff_shifts"))
     assert exc.status_code == 503
     assert "0005_scheduling.sql" in exc.detail
+
+
+def test_dirty_rule_data_is_a_400_not_a_500(scheduling_http):
+    """人工改库把起点写成垃圾：接口给一句人话的 400，不是一个 500。"""
+    client, db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    day_id = client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
+    saved = client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]})
+    assert saved.status_code == 200, saved.text
+
+    async def _dirty():
+        await db._conn.execute(
+            "UPDATE scheduling_rules SET anchor_date = ? WHERE employee_id = ?",
+            ("昨天", employee_id),
+        )
+        await db._conn.commit()
+
+    _run(_dirty())
+    calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"})
+    assert calendar.status_code == 400, calendar.text
+    assert calendar.json()["detail"] == "轮转规则的起点日不合法（应该是 YYYY-MM-DD）：请重新配一遍这条规则"
+
+
+def test_error_details_never_leak_the_placeholder():
+    """`{}` 是给「说清哪里错」用的：缺细节时不能把字面 `{}` 端给店长看。"""
+    from api.scheduling import _ERROR_DETAILS, _bad_request
+    from services.scheduling import SchedulingError
+
+    for code in _ERROR_DETAILS:
+        detail = _bad_request(SchedulingError(code)).detail
+        assert "{}" not in detail, code
+    formatted = _bad_request(SchedulingError("unknown_shift_in_cycle", "3")).detail
+    assert "第 3 格" in formatted
 
 
 def test_half_migrated_store_still_serves_the_calendar(scheduling_http):

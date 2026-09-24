@@ -24,9 +24,14 @@ router = APIRouter(prefix="/api/scheduling", tags=["排班"])
 # 打错了」说成同一件事（票 04 的规则编辑页要能说清哪里错）。
 _ERROR_DETAILS = {
     "invalid_cycle": f"轮转周期不合法：1 到 {MAX_CYCLE_DAYS} 天，每格是班次或休",
+    "invalid_anchor": "轮转规则的起点日不合法（应该是 YYYY-MM-DD）：请重新配一遍这条规则",
     "invalid_month": "月份格式应该是 YYYY-MM",
     "invalid_business_date": "日期格式应该是 YYYY-MM-DD",
     "unknown_shift": "班次不存在或已停用",
+    # 带一个 `{}`：服务层会把出错的那一格序号放在 `SchedulingError.args[0]`（票 04 要求
+    # 「说清哪里错」——「排班参数不合法」说不出是第 3 格写错了）。同一个事实只在下面
+    # `_bad_request` 里解释一次。
+    "unknown_shift_in_cycle": "轮转周期第 {} 格引用的班次不存在或已停用：请重新选那一天的班次",
     "unknown_employee": "员工不存在",
     "unknown_zone": "责任区不存在：请先在卫生的责任区页面新建，或刷新本页",
     "not_migrated": (
@@ -53,6 +58,16 @@ class SetZoneDefaultRequest(BaseModel):
 
 def _bad_request(exc: SchedulingError) -> HTTPException:
     detail = _ERROR_DETAILS.get(exc.code, "排班参数不合法")
+    if "{}" in detail:
+        # `SchedulingError(code, message)` 的 message 放在 args[0]（默认等于 code），
+        # 服务层用它带「哪里错」的细节，例如周期里出错的那一格序号。
+        # 用 `str.replace` 而不是 `str.format`：模板里多一个花括号、或哪天文案里出现
+        # 字面 `{...}`，`format` 会抛 KeyError/IndexError/ValueError 变成 500 —— `replace`
+        # 没有这些语义。服务层没给细节时填「？」，绝不把字面的 `{}` 端给店长看。
+        raw = exc.args[0] if exc.args else ""
+        if not raw or raw == exc.code:
+            logger.warning("排班错误缺细节，用「？」占位: code=%s", exc.code)
+        detail = detail.replace("{}", raw if raw and raw != exc.code else "？")
     logger.info("排班请求被拒: code=%s", exc.code)
     return HTTPException(status_code=_ERROR_STATUS.get(exc.code, 400), detail=detail)
 
@@ -106,9 +121,12 @@ async def roster(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
     """
     store = SchedulingStore(db)
     try:
-        return await store.roster_with_rules()
+        data = await store.roster_with_rules()
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
+    # 周期能写多少天由服务层的常量说了算：规则编辑页照这个数校验，别在前端再写死一份。
+    data["max_cycle_days"] = MAX_CYCLE_DAYS
+    return data
 
 
 @router.put("/zone-defaults/{employee_id}")
