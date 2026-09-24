@@ -236,9 +236,9 @@ class OrdersPortAdapter:
         return await self._db.aggregate_orders_stats(station=station)
 
     async def aggregate_station_counts(
-        self, start_time: datetime
+        self, start_time: datetime, end_time: Optional[datetime] = None
     ) -> List[Dict[str, Any]]:
-        return await self._db.aggregate_station_counts(start_time)
+        return await self._db.aggregate_station_counts(start_time, end_time=end_time)
 
     async def aggregate_station_speed(self, target: datetime) -> Dict[str, Any]:
         return await self._db.aggregate_station_speed(target)

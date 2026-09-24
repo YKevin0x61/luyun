@@ -189,20 +189,38 @@ class _AggregationMixin:
             logger.error(f"❌ 统计聚合失败: {e}")
             raise RuntimeError(f"统计聚合失败: {e}") from e
 
-    async def aggregate_station_counts(self, start_time: datetime) -> List[Dict[str, Any]]:
-        """按档口统计指定起始时间之后的订单数。"""
+    async def aggregate_station_counts(
+        self, start_time: datetime, end_time: Optional[datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """按档口统计指定时间窗内的订单数（R3R-V1/V2 / 票 22）。
+
+        `start_time` 为闭端、`end_time` 为开区间（`order_time < end_time`）；
+        省略 `end_time` 时只判下界，行为与旧版一致（兼容单参数调用方）。
+        """
         try:
             start_dt = ensure_beijing_datetime(start_time)
+            end_dt = ensure_beijing_datetime(end_time) if end_time is not None else None
             tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
-                await cursor.execute(
-                    """SELECT station, COUNT(*) as cnt
-                       FROM orders
-                       WHERE order_time >= ?
-                       GROUP BY station
-                       ORDER BY cnt DESC""",
-                    (start_dt.isoformat(),),
-                )
+                if end_dt is None:
+                    await cursor.execute(
+                        """SELECT station, COUNT(*) as cnt
+                           FROM orders
+                           WHERE order_time >= ?
+                           GROUP BY station
+                           ORDER BY cnt DESC""",
+                        (start_dt.isoformat(),),
+                    )
+                else:
+                    await cursor.execute(
+                        """SELECT station, COUNT(*) as cnt
+                           FROM orders
+                           WHERE order_time >= ?
+                             AND order_time < ?
+                           GROUP BY station
+                           ORDER BY cnt DESC""",
+                        (start_dt.isoformat(), end_dt.isoformat()),
+                    )
                 rows = await cursor.fetchall()
             return [{"station_id": row["station"] or "", "count": row["cnt"]} for row in rows]
         except Exception as e:

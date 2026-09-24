@@ -197,17 +197,18 @@ export const useStationsStore = defineStore('stations', {
 
     /**
      * 获取档口统计数据
+     * 服务端窗口是营业日 06:00–次日 06:00（start_time/end_time），没有 date 参数，
+     * 所以这里不传日期（票 24）。
      * @param {String} stationId 档口ID，不传则获取所有档口
-     * @param {String} date 日期，默认当天
      */
-    async fetchStationStats(stationId = null, date = null) {
+    async fetchStationStats(stationId = null) {
       this.loading = true
       this.error = null
 
       try {
         if (stationId) {
           // 获取单个档口统计
-          const response = await stationsAPI.getStationStats(stationId, date)
+          const response = await stationsAPI.getStationStats(stationId)
           if (response.success) {
             this.stationStats[stationId] = response.data
           }
@@ -215,7 +216,7 @@ export const useStationsStore = defineStore('stations', {
           // 获取所有档口统计
           const promises = Object.keys(this.stations).map(async (id) => {
             try {
-              const response = await stationsAPI.getStationStats(id, date)
+              const response = await stationsAPI.getStationStats(id)
               if (response.success) {
                 this.stationStats[id] = response.data
               }

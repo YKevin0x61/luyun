@@ -18,20 +18,15 @@ export const stationsAPI = {
 
   /**
    * 获取档口统计信息
+   * 服务端契约只有 start_time/end_time 两个可选窗口参数，没有 date（票 24），
+   * 因此这里不再接受/透传日期参数。
    * @param {String} stationId 档口ID
-   * @param {String} date 日期 (YYYY-MM-DD)
    * @returns {Promise} API响应
    */
-  async getStationStats(stationId, date = null) {
-    const params = {}
-    if (date) {
-      params.date = date
-    }
-
+  async getStationStats(stationId) {
     return await request({
       url: `/api/orders/station/${stationId}/stats`,
-      method: 'GET',
-      params
+      method: 'GET'
     })
   }
 }

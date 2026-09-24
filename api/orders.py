@@ -207,10 +207,11 @@ async def get_table_orders(
 async def get_stations_today_stats(db: DatabaseManager = Depends(get_db)):
     """获取今日各档口订单数量统计（按营业日 06:00 起，R-T3-03 / 票 21）"""
     try:
-        # 档口路径走营业日：凌晨 00:00–06:00 归前一个营业日，与档口面板/报表同一把尺子。
-        today_start = business_day_window(datetime.now(CHINA_TZ))[0]
-        stats = await db.orders.aggregate_station_counts(today_start)
-        return {"success": True, "date": today_start.strftime("%Y-%m-%d"), "stats": stats}
+        # 档口路径走营业日半开区间 [06:00, 次日 06:00)：凌晨 00:00–06:00 归前一个营业日，
+        # 与档口面板/报表同一把尺子；右端必须显式传给聚合，否则计数会跨营业日只增不减（票 22）。
+        business_day_start, business_day_end = business_day_window(datetime.now(CHINA_TZ))
+        stats = await db.orders.aggregate_station_counts(business_day_start, business_day_end)
+        return {"success": True, "date": business_day_start.strftime("%Y-%m-%d"), "stats": stats}
     except Exception as e:
         logger.error(f"获取今日档口统计失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -270,13 +271,10 @@ async def get_station_order_stats(
 async def get_urgent_orders(
     db: DatabaseManager = Depends(get_db)
 ):
-    """获取紧急订单（今日、等待超过 urgent 阈值）"""
+    """获取紧急订单（当前营业日、等待超过 urgent 阈值）"""
     try:
-        today = datetime.now(CHINA_TZ)
-        # 票 21 备注：本端点与 urgent_cutoff 耦合，本轮**刻意**保留日历日窗口（已记
-        # issues/18-low-backlog.md）；下面这行是校验脚本里唯一允许保留的字面量。
-        start = today.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = today.replace(hour=23, minute=59, second=59, microsecond=999000)
+        # 窗口与档口面板同口径：当前营业日半开区间 [06:00, 次日 06:00)（票 23）。
+        start, end = business_day_window(datetime.now(CHINA_TZ))
         orders = await db.orders.get_orders(
             station=None,
             table_number=None,

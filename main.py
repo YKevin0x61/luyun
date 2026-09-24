@@ -21,6 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from config import settings
 from database import DatabaseManager
 from db_core.backend.pg import DatabaseUnavailable
+from db_core.business_day import business_day_window
 from api import orders, dishes, dish_stations, semi_rules, report_dishes, prep_plan, wecom_push
 from api.admin import router as admin_router
 from api.recipes import public_router as recipes_public_router
@@ -1253,11 +1254,13 @@ async def get_dashboard_summary():
         if db_manager is None:
             raise HTTPException(status_code=500, detail="数据库未初始化")
 
-        today_start = datetime.now(CHINA_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+        # 仪表盘口径 = 当前营业日半开区间 [06:00, 次日 06:00)（票 22）：
+        # 近期订单与档口计数共用同一个起点，档口计数同时传右端。
+        business_day_start, business_day_end = business_day_window(datetime.now(CHINA_TZ))
         orders_stats = await db_manager.orders.aggregate_orders_stats()
         hot_dishes = await db_manager.orders.aggregate_hot_dishes(limit_n=10)
-        recent_orders = await db_manager.orders.get_orders(start_time=today_start, limit=30)
-        station_stats = await db_manager.orders.aggregate_station_counts(today_start)
+        recent_orders = await db_manager.orders.get_orders(start_time=business_day_start, limit=30)
+        station_stats = await db_manager.orders.aggregate_station_counts(business_day_start, business_day_end)
         dashboard_extras = await db_manager.reports.aggregate_dashboard_extras()
         kds_backlog = await db_manager.reports.aggregate_kds_backlog()
 
