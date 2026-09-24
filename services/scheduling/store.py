@@ -123,6 +123,24 @@ def _month_start(month: Any) -> date:
         raise SchedulingError("invalid_month", "invalid_month")
 
 
+def _month_bounds(month: Any) -> tuple[date, date]:
+    """月历的两端：本月第一天、下月第一天（店长与员工两版月历共用）。
+
+    下月靠 `date` 自己进位：先把日期挪到 28 号再加 4 天，一定落到下个月，
+    所以不用管本月是 28/29/30/31 天。格式不对由 `_month_start` 抛 `invalid_month`。
+    """
+    start = _month_start(month)
+    return start, (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+
+def _each_day(start: date, next_month: date):
+    """按月历顺序吐出这个月的每一天（含 `start`、不含 `next_month`）。"""
+    day = start
+    while day < next_month:
+        yield day
+        day += timedelta(days=1)
+
+
 class SchedulingStore:
     """排班的读写口。构造要一个已打开的库连接（同 `EmployeeAccounts` 的口径）。"""
 
@@ -574,22 +592,47 @@ class SchedulingStore:
 
     # ── 读 ──────────────────────────────────────────────────────────────
 
+    async def _rows_and_shifts(self, cur) -> tuple[dict[str, dict], dict[int, dict]]:
+        """把排班行按营业日索引，并取出这些行用到的班次（员工端两条门共用）。
+
+        班次索引是在 `_shifts_for_display` 之后建的：`staff_assignments.shift_id` 没有外键，
+        班次行被硬删掉时这里查不到，调用方 `.get()` 得 None 而不是 KeyError
+        （员工页不该为一个别人手工删掉的名字 500；票 11 管班次增删）。
+        """
+        rows = {dict(row)["business_date"]: dict(row) for row in await cur.fetchall()}
+        used = {int(row["shift_id"]) for row in rows.values() if row["shift_id"] is not None}
+        shifts = {int(shift["id"]): shift for shift in await self._shifts_for_display(used)}
+        return rows, shifts
+
+    def _month_frame(self, start: date, today: str, days: list) -> dict:
+        """两版月历共用的外壳：同一个 `lead` 算法与同一个展开窗口末日。
+
+        `lead` = 第一格前面空几格（表头周日开头，周日=0）。`window_end` 之后的日子注定是空的 ——
+        前端得说出来这是「还没铺到」，不是「那天没人上班」/「那天休」。
+        """
+        return {
+            "month": start.isoformat()[:7],
+            "first_date": start.isoformat(),
+            "today": today,
+            "lead": start.isoweekday() % 7,
+            "window_end": self._window()[1],
+            "days": days,
+        }
+
     @_needs_migration
     async def month_calendar(self, month: str) -> dict:
         """一个月的月历：每天各班的**人数**（票 02 的验收项）。
 
         只数 `shift_id IS NOT NULL` 的行：休不是「上了某个班」，人数不该把它算进去。
         """
-        start = _month_start(month)
+        start, next_month = _month_bounds(month)
         first = start.isoformat()
-        next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
-        last = next_month.isoformat()
 
         cur = await self._conn.execute(
             """SELECT business_date, shift_id, COUNT(*) AS n FROM staff_assignments
                WHERE business_date >= ? AND business_date < ? AND shift_id IS NOT NULL
                GROUP BY business_date, shift_id""",
-            (first, last),
+            (first, next_month.isoformat()),
         )
         counted: dict[str, dict[int, int]] = {}
         for row in await cur.fetchall():
@@ -602,8 +645,7 @@ class SchedulingStore:
 
         today = self.today()
         days = []
-        day = start
-        while day < next_month:
+        for day in _each_day(start, next_month):
             key = day.isoformat()
             per_shift = counted.get(key, {})
             days.append({
@@ -613,20 +655,8 @@ class SchedulingStore:
                 "counts": {str(s["id"]): per_shift.get(s["id"], 0) for s in shifts},
                 "total": sum(per_shift.get(s["id"], 0) for s in shifts),
             })
-            day += timedelta(days=1)
 
-        return {
-            "month": first[:7],
-            "first_date": first,
-            "today": today,
-            # 月历第一格前面空几格：周日开头的表头，周日=0。
-            "lead": start.isoweekday() % 7,
-            # 展开窗口的末日。翻到那个月的时候，末日之后的格子注定是空的 ——
-            # 前端得说出来这是「还没铺到」，不是「那天没人上班」。
-            "window_end": self._window()[1],
-            "shifts": shifts,
-            "days": days,
-        }
+        return {**self._month_frame(start, today, days), "shifts": shifts}
 
     @_needs_migration
     async def day_detail(self, business_date: str) -> dict:
@@ -705,9 +735,7 @@ class SchedulingStore:
                ORDER BY business_date""",
             (employee_id, first, shift_business_date(first, count - 1)),
         )
-        rows = {dict(row)["business_date"]: dict(row) for row in await cur.fetchall()}
-        used = {int(row["shift_id"]) for row in rows.values() if row["shift_id"] is not None}
-        shifts = {int(shift["id"]): shift for shift in await self._shifts_for_display(used)}
+        rows, shifts = await self._rows_and_shifts(cur)
         zone_names = await self._zone_name_index()
 
         out = []
@@ -734,6 +762,50 @@ class SchedulingStore:
                 "zone_name": None if zone_id is None else zone_names.get(zone_id),
             })
         return {"today": first, "days": out}
+
+    @_needs_migration
+    async def my_month(self, employee_id: int, month: Optional[str] = None) -> dict:
+        """员工自己的一个月：一天一格，格子里是那天的班别（票 06，「今天」页点进整月）。
+
+        跟 `month_calendar`（店长那一版数的是各班**人数**）不是一回事：这条只回答
+        「我那天上什么班」。`scheduled` / `shift_id` / `shift_name` 跟 `my_days` 是
+        同一套口径 —— 休（行在、`shift_id` 空）、还没铺到（没有行）、班次被删（行在、
+        名字 None）三种状态在服务层分好，前端只翻成人话。
+
+        格子只写班别、不带责任区：手机一行七格放不下「白班 · 案板」，责任区在「今天」
+        页那张卡上（`spec.md` 留给第 6 步的那个待定项按这个口径定）。
+
+        翻到过去的月份只显示已经铺过的日子（展开只往今天以后补，不回头），`window_end`
+        之后的格子注定是「还没排」—— 跟店长月历同一个说法。
+        """
+        await self.expand(employee_id)
+        start, next_month = _month_bounds(self.today()[:7] if month is None else month)
+
+        cur = await self._conn.execute(
+            """SELECT business_date, shift_id FROM staff_assignments
+               WHERE employee_id = ? AND business_date >= ? AND business_date < ?
+               ORDER BY business_date""",
+            (employee_id, start.isoformat(), next_month.isoformat()),
+        )
+        rows, shifts = await self._rows_and_shifts(cur)
+
+        today = self.today()
+        days = []
+        for day in _each_day(start, next_month):
+            key = day.isoformat()
+            row = rows.get(key)
+            shift_id = None if row is None or row["shift_id"] is None else int(row["shift_id"])
+            shift = shifts.get(shift_id) if shift_id is not None else None
+            days.append({
+                "business_date": key,
+                "day": day.day,
+                "is_today": key == today,
+                "scheduled": row is not None,
+                "shift_id": shift_id,
+                "shift_name": None if shift is None else shift["name"],
+            })
+
+        return self._month_frame(start, today, days)
 
     @_needs_migration
     async def roster_with_rules(self) -> dict:

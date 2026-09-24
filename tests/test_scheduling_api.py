@@ -3,8 +3,8 @@
 """排班 HTTP 面（薄缝）：一条真实请求链路，铺排班的服务层测试不用重跑。
 
 薄缝只回答「谁能打、打进去会怎样」：管理端会话能配规则并立刻在月历上看见；
-匿名两边都不行。票 05 起有两扇门 —— 店长的七条只认管理端会话，员工那条 `/me`
-只认手机端 cookie（票 02 时这里断言的是「一条员工路由都没有」）。
+匿名两边都不行。票 05 起有两扇门 —— 店长那七条（六条路径）只认管理端会话，员工那两条
+（`/me` 与 `/me/month`）只认手机端 cookie（票 02 时这里断言的是「一条员工路由都没有」）。
 """
 
 import asyncio
@@ -335,9 +335,9 @@ def _wire_staff_accounts(monkeypatch, accounts):
     monkeypatch.setattr(main, "employee_accounts", accounts)
 
 
-def _staff_cookie(client, accounts):
+def _staff_cookie(client, accounts, phone=PHONE):
     """换员工那个 cookie（跟管理端是两个名字），登录用的是同一套账号。"""
-    session_id = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+    session_id = _run(accounts.login(phone, PASSWORD))["session_id"]
     client.cookies.clear()
     client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, session_id)
     return session_id
@@ -466,5 +466,74 @@ def test_staff_door_says_503_while_the_account_service_is_not_ready(
     resp = client.get("/api/scheduling/me")
     assert resp.status_code == 503
     assert resp.json()["detail"] == "员工账号服务未就绪（服务正在启动）"
-    # 店长那七条不受影响：它们不查员工账号。
+    # 店长那几条不受影响：它们不查员工账号。
     assert client.get("/api/scheduling/shifts").status_code == 200
+
+
+def test_staff_month_returns_their_own_calendar(scheduling_http, monkeypatch):
+    """票 06 验收 1/2/5：员工拿自己的 cookie 读整月，格子里是班别（休是空班名）。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    day_id = client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
+    night_id = client.get("/api/scheduling/shifts").json()["shifts"][1]["id"]
+    assert client.put(
+        f"/api/scheduling/rules/{employee_id}",
+        json={"cycle": [day_id, night_id, None]},
+    ).status_code == 200
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+
+    resp = client.get("/api/scheduling/me/month", params={"month": "2026-09"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["employee"]["id"] == employee_id
+    assert body["month"] == "2026-09"
+    assert body["today"] == TODAY
+    assert [item["day"] for item in body["days"]] == list(range(1, 31))
+    assert body["lead"] == 2  # 2026-09-01 是周二，表头周日开头
+    around_today = [item for item in body["days"] if item["day"] >= 24][:3]
+    assert [(item["shift_name"], item["scheduled"]) for item in around_today] == [
+        ("白班", True),
+        ("夜班", True),
+        (None, True),  # 休：行在、班次是空的
+    ]
+    assert [item["day"] for item in body["days"] if item["is_today"]] == [24]
+    # 只读自己：这条门没有 employee_id 参数，换个人读也只能读到自己。
+    other = _employee_id(accounts, phone="13800138001", name="李四")
+    assert other != employee_id
+    assert client.get("/api/scheduling/me/month").json()["employee"]["id"] == employee_id
+    # 换成李四的 cookie：读到的就是他（没配规则 → 整月都还没排），张三那几行一个字不露。
+    _staff_cookie(client, accounts, phone="13800138001")
+    theirs = client.get("/api/scheduling/me/month", params={"month": "2026-09"}).json()
+    assert theirs["employee"]["id"] == other
+    assert {item["shift_name"] for item in theirs["days"] if item["scheduled"]} == set()
+
+
+def test_staff_month_is_still_the_staff_door(scheduling_http, monkeypatch):
+    """同一扇门：管理端会话打不开它，匿名也打不开（验收 4 的另一半）。"""
+    client, _db, accounts = scheduling_http
+    _employee_id(accounts)
+    _wire_staff_accounts(monkeypatch, accounts)
+
+    denied = client.get("/api/scheduling/me/month", params={"month": "2026-09"})
+    assert denied.status_code == 401
+    assert denied.json()["detail"] == "需要员工登录"
+
+    _staff_cookie(client, accounts)
+    assert client.get("/api/scheduling/me/month").status_code == 200
+    client.cookies.clear()
+    assert client.get("/api/scheduling/me/month").status_code == 401
+
+
+def test_a_bad_month_is_a_400_not_a_500(scheduling_http, monkeypatch):
+    """月份写错是输入错误：400 + 一句给员工看的话（不是 500，也不是空白月）。"""
+    client, _db, accounts = scheduling_http
+    _employee_id(accounts)
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+
+    resp = client.get("/api/scheduling/me/month", params={"month": "2026-9"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "月份格式应该是 YYYY-MM"

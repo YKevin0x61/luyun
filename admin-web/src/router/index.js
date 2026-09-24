@@ -51,6 +51,9 @@ const routes = [
   // `staffProbe: false`：这一页自己那一次请求就分得清 401 与断网（见 TodayView 的
   // `load()`），不必先陪守卫白等一次探针超时（弱网下最多 4 秒）。
   { path: '/today', name: 'today', component: () => import('../views/today/TodayView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, staffProbe: false } },
+  // 整月（票 06）：从「今天」页那张排班卡的「整月」按钮进来，看自己这个月每天上什么班。
+  // 跟 `/today` 同一套 meta —— 同一扇门（员工的 cookie）、同样的 `staffProbe: false`。
+  { path: '/today/month', name: 'today-month', component: () => import('../views/today/TodayMonthView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, staffProbe: false } },
   { path: '/hygiene', name: 'hygiene-home', component: () => import('../views/hygiene/HygieneHomeView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, realtime: true } },
   hygieneStaffAuthPage('/hygiene/login', 'hygiene-login', () => import('../views/hygiene/HygieneLoginView.vue'), '员工登录'),
   hygieneStaffAuthPage('/hygiene/register', 'hygiene-register', () => import('../views/hygiene/HygieneRegisterView.vue'), '员工注册'),

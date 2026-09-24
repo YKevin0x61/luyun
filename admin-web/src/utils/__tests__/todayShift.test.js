@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
+  MONTH_HEADS,
+  dayBeyondWindow,
   dayLabel,
+  monthCell,
+  monthLabel,
   nextTwoLine,
+  shiftMonth,
   shiftText,
+  shiftTone,
+  stepMonth,
   todayHeadline,
   todaySubline,
   todayTone,
@@ -80,7 +87,11 @@ describe('「休」和「还没排」是两件事（验收 3）', () => {
     expect(shiftText(ORPHAN)).toBe('班次已调整')
     expect(todayHeadline(ORPHAN)).toBe('班次已调整')
     expect(shiftText(ORPHAN)).not.toBe('休')
-    expect(todayTone(ORPHAN)).toBe('none')
+    // 「已调整」有自己的语气（琥珀），不能跟「休」共用最弱的那一档 ——
+    // 那天的班次没了，不等于那天不上班。
+    expect(todayTone(ORPHAN)).toBe('moved')
+    expect(shiftTone(ORPHAN)).toBe('moved')
+    expect(shiftTone(ORPHAN)).not.toBe(shiftTone(REST))
   })
 
   it('一天都没有（接口给了空数组）也不炸', () => {
@@ -111,7 +122,76 @@ describe('整屏没有钟点（验收 5）', () => {
       todayHeadline(MORNING),
       todaySubline(MORNING),
       nextTwoLine([REST, MORNING]),
+      monthLabel('2026-09', '2026-09-24'),
+      monthCell(MORNING).text,
+      monthCell(ORPHAN).text,
     ].join(' ')
     expect(all).not.toMatch(/\d{1,2}:\d{2}/)
+  })
+})
+
+describe('员工端「整月」（票 06）', () => {
+  it('表头周日开头，七格', () => {
+    // 服务端给的 `lead = isoweekday() % 7` 就是这个开头（周日第 0 格）。
+    expect(MONTH_HEADS).toEqual(['日', '一', '二', '三', '四', '五', '六'])
+    expect(MONTH_HEADS).toHaveLength(7)
+  })
+
+  it('月份写成「9月」，跨年了才带年份', () => {
+    expect(monthLabel('2026-09', '2026-09-24')).toBe('9月')
+    expect(monthLabel('2026-12', '2026-09-24')).toBe('12月')
+    expect(monthLabel('2027-01', '2026-09-24')).toBe('2027年1月')
+    expect(monthLabel('', '2026-09-24')).toBe('')
+    expect(monthLabel('九月', '2026-09-24')).toBe('')
+  })
+
+  it('翻月份会跨年，也不会翻出 13 月', () => {
+    expect(shiftMonth('2026-09', 1)).toBe('2026-10')
+    expect(shiftMonth('2026-09', -1)).toBe('2026-08')
+    expect(shiftMonth('2026-12', 1)).toBe('2027-01')
+    expect(shiftMonth('2027-01', -1)).toBe('2026-12')
+    expect(shiftMonth('2026-01', -1)).toBe('2025-12')
+    expect(shiftMonth('', 1)).toBe('')
+    expect(shiftMonth('九月', 1)).toBe('')
+  })
+
+  it('格子里四态各写各的，休不被写成空、已调整不跟休同色', () => {
+    expect(monthCell(MORNING)).toEqual({ text: '白班', tone: 'shift' })
+    expect(monthCell(REST)).toEqual({ text: '休', tone: 'rest' })
+    expect(monthCell(ORPHAN)).toEqual({ text: '已调整', tone: 'moved' })
+    expect(monthCell(NOT_ROSTERED)).toEqual({ text: '', tone: 'none' })
+    expect(monthCell(null)).toEqual({ text: '', tone: 'none' })
+    // 空格子（还没排）跟「休」不许长得一样。
+    expect(monthCell(NOT_ROSTERED).tone).not.toBe(monthCell(REST).tone)
+    expect(monthCell(NOT_ROSTERED).text).not.toBe(monthCell(REST).text)
+  })
+
+  it('格子里的语气就是「今天」页那张表的语气，不是另抄一份', () => {
+    // 四态只在 `shiftTone` 里判一次：这条钉住 `monthCell` 是它的翻译，不是第二张表。
+    for (const day of [MORNING, REST, ORPHAN, NOT_ROSTERED, null]) {
+      expect(monthCell(day).tone).toBe(shiftTone(day))
+    }
+  })
+
+  it('往后翻到展开窗口末日就停，往前不设底', () => {
+    // 验收 2：能翻上个月、下个月；窗口末 (`window_end`) 那一步之后不再往后。
+    expect(stepMonth('2026-09', -1, '2026-12-22')).toBe('2026-08')
+    expect(stepMonth('2026-12', -1, '2026-12-22')).toBe('2026-11')
+    expect(stepMonth('2026-09', 1, '2026-12-22')).toBe('2026-10')
+    expect(stepMonth('2026-12', 1, '2026-12-22')).toBeNull() // 末日所在的月：再往后就是空月
+    expect(stepMonth('2027-01', 1, '2026-12-22')).toBeNull()
+    // 往前没有底（早于装机日期的月份本来就是空的）。
+    expect(stepMonth('2026-01', -1, '2026-12-22')).toBe('2025-12')
+    // 服务端没说窗口末（老版本/坏数据）时不设限，别把翻月整条堵死。
+    expect(stepMonth('2030-01', 1, '')).toBe('2030-02')
+    expect(stepMonth('', 1, '2026-12-22')).toBeNull()
+  })
+
+  it('认得出窗口外面的那些格子（淡掉，不是「那天没排」）', () => {
+    expect(dayBeyondWindow({ business_date: '2026-12-23' }, '2026-12-22')).toBe(true)
+    expect(dayBeyondWindow({ business_date: '2026-12-22' }, '2026-12-22')).toBe(false)
+    expect(dayBeyondWindow({ business_date: '2026-12-01' }, '2026-12-22')).toBe(false)
+    expect(dayBeyondWindow({ business_date: '2026-12-23' }, '')).toBe(false)
+    expect(dayBeyondWindow(null, '2026-12-22')).toBe(false)
   })
 })

@@ -362,6 +362,126 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(no_shift["scheduled"])
         self.assertIsNone(no_shift["shift_name"])
 
+    # ── 票 06：员工自己的整月 ──────────────────────────────────────────
+
+    async def test_my_month_covers_every_day_of_that_month(self):
+        """验收 1/2/5：一个月一天一格，休的那天一眼能分辨（`scheduled` 真、班名空）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day, night, None])
+
+        month = await self.store.my_month(employee["id"], "2026-09")
+
+        self.assertEqual(month["month"], "2026-09")
+        self.assertEqual(month["today"], TODAY)
+        self.assertEqual([item["day"] for item in month["days"]], list(range(1, 31)))
+        self.assertEqual(month["days"][0]["business_date"], "2026-09-01")
+        # 9/1 是周二：表头周日开头，第一格前空两格。
+        self.assertEqual(month["lead"], 2)
+        # 相位：配规则那天（营业日 9/24）是 cycle[0]（白班），9/25 夜班，9/26 休……
+        today_index = [item["day"] for item in month["days"]].index(24)
+        self.assertEqual(
+            [(item["scheduled"], item["shift_name"]) for item in month["days"][today_index : today_index + 4]],
+            [(True, "白班"), (True, "夜班"), (True, None), (True, "白班")],
+        )
+        today_row = [item for item in month["days"] if item["is_today"]]
+        self.assertEqual(len(today_row), 1)
+        self.assertEqual(today_row[0]["business_date"], TODAY)
+        # 本月已经过去的日子：这一台是新装机（规则刚配），过去那些天没有结果行 ——
+        # 展开只往今天以后铺，不回头补（见 `test_my_month_past_days_show_what_was_written`）。
+        self.assertEqual(
+            [item["scheduled"] for item in month["days"][:today_index]], [False] * today_index
+        )
+
+    async def test_my_month_defaults_to_this_business_month(self):
+        """不填月份就是本营业月（凌晨一点看到的和店长看到的是同一个月）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+
+        month = await self.store.my_month(employee["id"])
+
+        self.assertEqual(month["month"], TODAY[:7])
+        self.assertEqual([item["day"] for item in month["days"]], list(range(1, 31)))
+
+    async def test_my_month_shows_no_shift_not_an_error_for_a_ruleless_person(self):
+        """一条规则都没配的人：整月都在，全是「还没排」（`scheduled` 假），不报错。"""
+        idle = await self._employee("13800138001", "李四")
+
+        month = await self.store.my_month(idle["id"], "2026-09")
+
+        self.assertEqual(len(month["days"]), 30)
+        self.assertEqual([item["scheduled"] for item in month["days"]], [False] * 30)
+        self.assertEqual([item["shift_name"] for item in month["days"]], [None] * 30)
+
+    async def test_my_month_is_this_person_only(self):
+        """验收 4：同一段日子，两个人的格子各是各的。"""
+        first = await self._employee()
+        second = await self._employee("13800138001", "李四")
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(first["id"], [day])
+        await self.store.set_rule(second["id"], [night])
+
+        mine = await self.store.my_month(first["id"], "2026-09")
+        theirs = await self.store.my_month(second["id"], "2026-09")
+
+        # 只看有结果行的那几天（本月过去的日子是空的，见上一个用例的说明）。
+        self.assertEqual(
+            {item["shift_name"] for item in mine["days"] if item["scheduled"]}, {"白班"}
+        )
+        self.assertEqual(
+            {item["shift_name"] for item in theirs["days"] if item["scheduled"]}, {"夜班"}
+        )
+
+    async def test_my_month_past_days_show_what_was_written(self):
+        """翻到过去的月份：只显示已经铺过的日子（展开不回头补），不报错。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+
+        past = await self.store.my_month(employee["id"], "2026-08")
+
+        self.assertEqual(past["month"], "2026-08")
+        self.assertEqual(len(past["days"]), 31)
+        self.assertEqual([item["scheduled"] for item in past["days"]], [False] * 31)
+
+    async def test_my_month_rejects_a_bad_month(self):
+        """月份写错是输入错误（`invalid_month`），不是 500。"""
+        employee = await self._employee()
+        for bad in ("2026-9", "2026-13", "九月", "", "2026/09"):
+            with self.subTest(month=bad):
+                with self.assertRaises(SchedulingError) as ctx:
+                    await self.store.my_month(employee["id"], bad)
+                self.assertEqual(ctx.exception.code, "invalid_month")
+
+    async def test_my_month_after_the_window_is_all_unscheduled(self):
+        """窗口（今天 + 90 天）之外的月份整月都是「还没排」，不是「休」。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+
+        window_end = (await self.store.my_month(employee["id"], "2026-09"))["window_end"]
+        self.assertEqual(window_end, LAST_DAY)  # 今天 + 89 天
+        far = await self.store.my_month(employee["id"], "2027-01")
+        self.assertEqual([item["scheduled"] for item in far["days"]], [False] * 31)
+
+    async def test_my_month_gives_no_name_when_the_shift_row_is_gone(self):
+        """班次被硬删（票 11 管那张表）：行还在、名字给 None，不 500。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.my_month(employee["id"], "2026-09")  # 先把行铺出来
+
+        await self.db._conn.execute("DELETE FROM staff_shifts WHERE id = ?", (day,))
+        await self.db._conn.commit()
+        row = (await self.store.my_month(employee["id"], "2026-09"))["days"][23]
+
+        self.assertEqual(row["business_date"], TODAY)
+        self.assertTrue(row["scheduled"])
+        self.assertIsNone(row["shift_name"])
+
     # ── 票 03：每人每班次一个固定责任区 ────────────────────────────────
 
     async def test_zone_default_is_written_into_new_rows(self):
@@ -742,15 +862,16 @@ class SchedulingLayeringTest(unittest.TestCase):
     def test_scheduling_http_doors_are_separate(self):
         """票 05：排班的 HTTP 面有两扇门，员工那扇只读自己。
 
-        票 02 时这里断言「一条员工路由都没有」；票 05 开了 `/me` 之后，边界从「零条」
-        变成「两扇门互不通用」—— 店长的七条只认管理端会话，员工那一条只认手机端 cookie。
+        票 02 时这里断言「一条员工路由都没有」；票 05 开了 `/me`、票 06 又开了
+        `/me/month` 之后，边界从「零条」变成「两扇门互不通用」—— 店长那七条（六条路径）
+        只认管理端会话，员工那两条只认手机端 cookie。
 
         断言路由表本身，不是源码文本 —— 文本比对会被注释或文档字符串误伤
         （写一句「这里不用 require_staff_session」就红了）。
         """
         from api.scheduling import router
 
-        staff_paths = {"/api/scheduling/me"}
+        staff_paths = {"/api/scheduling/me", "/api/scheduling/me/month"}
         manager_paths = {
             "/api/scheduling/shifts",
             "/api/scheduling/calendar",
@@ -779,9 +900,10 @@ class SchedulingLayeringTest(unittest.TestCase):
                 self.assertIn("require_session", names, route.path)
                 self.assertNotIn("require_staff_session", names, route.path)
 
-        # 员工那条门上没有路径参数：读谁不由调用方说了算。
-        staff_route = [route for route in router.routes if route.path in staff_paths][0]
-        self.assertNotIn("{", staff_route.path)
+        # 员工那两条门上都没有路径参数：读谁不由调用方说了算。
+        for route in router.routes:
+            if route.path in staff_paths:
+                self.assertNotIn("{", route.path)
 
     def test_new_tables_are_registered_read_only(self):
         """验收 4：新表进表名清单，Admin 的数据浏览器只读能看到。"""

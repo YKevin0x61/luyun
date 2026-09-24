@@ -18,6 +18,7 @@ import {
   dayLabel,
   nextTwoLine,
   shiftText,
+  shiftTone,
   todayHeadline,
   todaySubline,
   todayTone,
@@ -45,10 +46,15 @@ const nextLine = computed(() => nextTwoLine(after.value))
 const ENTRIES = [
   { key: 'leave', label: '请假' },
   { key: 'swap', label: '换班' },
-  { key: 'month', label: '整月' },
+  // 整月有地方可去了（票 06）；请假、换班等第 8、9 张票。
+  { key: 'month', label: '整月', to: '/today/month' },
 ]
 
-function announce(entry) {
+function open(entry) {
+  if (entry.to) {
+    router.push(entry.to)
+    return
+  }
   note.value = `「${entry.label}」还没开放`
 }
 
@@ -111,7 +117,7 @@ onMounted(() => {
               :key="entry.key"
               class="btn"
               type="button"
-              @click="announce(entry)"
+              @click="open(entry)"
             >
               {{ entry.label }}
             </button>
@@ -123,7 +129,7 @@ onMounted(() => {
         <div class="next3">
           <div v-for="day in after" :key="day.business_date">
             <span class="d">{{ dayLabel(day.business_date) }}</span>
-            <span class="s" :class="{ r: !day.shift_name }">{{ shiftText(day) }}</span>
+            <span class="s" :class="shiftTone(day)">{{ shiftText(day) }}</span>
           </div>
         </div>
 
@@ -264,6 +270,13 @@ onMounted(() => {
   color: var(--hy-faint);
 }
 
+/* 行上那个班次已经没了（票 11 管删除）：跟「休」分开说、分开上色。 */
+.shift.moved {
+  font-size: 24px;
+  line-height: 1.4;
+  color: var(--hy-amber);
+}
+
 /* 「今天没有你的班」是一句话不是两个大字：这句按正文大小排，不然会顶出屏幕。 */
 .shift.none {
   font-size: 20px;
@@ -334,8 +347,20 @@ onMounted(() => {
   color: var(--hy-jade);
 }
 
-.next3 .s.r {
+.next3 .s.r,
+.next3 .s.rest {
   color: var(--hy-faint);
+}
+
+/* 班次被删了（票 11 能删班次）：那天的班次没了，不等于那天不上班 —— 不要跟「休」同色。 */
+.next3 .s.moved {
+  color: var(--hy-amber);
+  font-size: 13px;
+}
+
+.next3 .s.none {
+  color: var(--hy-faint);
+  opacity: .72;
 }
 
 .tA-foot {

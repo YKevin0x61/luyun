@@ -38,11 +38,21 @@ export function todayHeadline(day) {
   return day.shift_name || '班次已调整'
 }
 
-/** 大字的语气：'none'（没有你的班）/ 'rest'（休）/ ''（这天有班次）。 */
-export function todayTone(day) {
+/** 那天的语气（四态四色）：'shift' 上班 / 'rest' 休 / 'moved' 班次被删 / 'none' 还没排。
+ *
+ *  票 05 审查记过一条：原来「班次已调整」跟「休」共用最弱的灰色，看着像那天休息。
+ *  这里把四态拆开，「已调整」给琥珀色 —— 那天的班次没了，不等于那天不上班。
+ */
+export function shiftTone(day) {
   if (!day || !day.scheduled) return 'none'
   if (day.shift_id == null) return 'rest'
-  return day.shift_name ? '' : 'none'
+  return day.shift_name ? 'shift' : 'moved'
+}
+
+/** 大字那一行的语气类名：上班那态用页面默认色，所以给空串。 */
+export function todayTone(day) {
+  const tone = shiftTone(day)
+  return tone === 'shift' ? '' : tone
 }
 
 /** 大字下面那行小字。 */
@@ -61,4 +71,62 @@ export function nextTwoLine(afterDays) {
     .slice(0, 2)
     .map((day, index) => `${words[index]} ${shiftText(day)}`)
     .join(' · ')
+}
+
+// ── 整月（票 06）────────────────────────────────────────────────────────
+
+/** 月历表头：周日开头（服务端给的 `lead` 就是这个算法：`isoweekday() % 7`）。 */
+export const MONTH_HEADS = ['日', '一', '二', '三', '四', '五', '六']
+
+/** 'YYYY-MM' → 「2026年9月」；跟今天同一年就只说「9月」（手机上省一格字）。 */
+export function monthLabel(month, today) {
+  const [year, mon] = String(month || '').split('-').map(Number)
+  if (!year || !mon) return ''
+  const thisYear = Number(String(today || '').slice(0, 4))
+  return year === thisYear ? `${mon}月` : `${year}年${mon}月`
+}
+
+/** 翻月份：'2026-09' + 1 → '2026-10'（跨年也对）。 */
+export function shiftMonth(month, delta) {
+  const [year, mon] = String(month || '').split('-').map(Number)
+  if (!year || !mon) return ''
+  // 用月首那天做加减：`Date` 会把 13 月进位成次年 1 月，跨年不用自己算。
+  const moved = new Date(Date.UTC(year, mon - 1 + Number(delta || 0), 1))
+  const out = `${moved.getUTCFullYear()}-${String(moved.getUTCMonth() + 1).padStart(2, '0')}`
+  return out
+}
+
+/** 翻月份的下一步：'2026-09' + 1 → '2026-10'；该停下时返回 `null`。
+ *
+ *  停下的条件只有一个：往后翻会翻出服务端给的展开窗口（`window_end`，随每个响应下来）。
+ *  窗口只铺到那一天，再往后整片都是空的 —— 翻过去只会看见一个空月，还白跑一次请求。
+ *  往前没有底：早于装机日期的月份本来就是空的（票 06 口径 4），翻回去是员工自己的事。
+ */
+export function stepMonth(month, delta, windowEnd) {
+  const next = shiftMonth(month, delta)
+  if (!next) return null
+  const last = String(windowEnd || '').slice(0, 7)
+  if (last && Number(delta) > 0 && next > last) return null
+  return next
+}
+
+/** 这一格在展开窗口之外吗（窗口外 = 排班还没铺到，跟「过去没有记录」不是一回事）。 */
+export function dayBeyondWindow(day, windowEnd) {
+  const end = String(windowEnd || '')
+  if (!end || !day || !day.business_date) return false
+  return String(day.business_date) > end
+}
+
+/** 整月格子里写什么：班别 / 「休」/ 「已调整」/ 空（还没排）。
+ *
+ *  语气只有一张表（上面的 `shiftTone`）：这里只负责把语气翻成小格子里的话 ——
+ *  休 → 「休」，班次被删 → 「已调整」（不许假装那天是休），还没铺到 → 空着。
+ *  两处各写一份四态的话，改一处忘另一处就会漂（票 02 审查记过同一类问题）。
+ */
+export function monthCell(day) {
+  const tone = shiftTone(day)
+  if (tone === 'none') return { text: '', tone }
+  if (tone === 'rest') return { text: '休', tone }
+  if (tone === 'moved') return { text: '已调整', tone }
+  return { text: day.shift_name, tone }
 }

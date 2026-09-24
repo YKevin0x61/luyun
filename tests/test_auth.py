@@ -380,11 +380,20 @@ def test_kds_html_not_redirected_to_login(auth_app_client):
 
 
 def test_staff_phone_pages_accessible_without_admin_session(auth_app_client):
-    # 员工手机上那两块的页（票 05 起落点是排班的 /today）：没有管理端会话也不许被
-    # 甩到 /login —— 管理端登录表单只认管理端账号，员工在那儿登不进去。
-    # `/today/` 是书签/外链/手输带来的尾斜杠，走 HTML_AUTH_PREFIXES 那条放行。
+    # 员工手机上那两块的页（票 05 起落点是排班的 /today，票 06 多了 /today/month）：
+    # 没有管理端会话也不许被甩到 /login —— 管理端登录表单只认管理端账号，员工在那儿登不进去。
+    # `/today/`、`/today/month` 都不是精确表里的条目：前者靠尾斜杠、后者靠 `/today/` 前缀
+    # （书签/外链/手输都可能带来）。
     client, _ = auth_app_client
-    for path in ("/hygiene", "/hygiene/login", "/hygiene/register", "/today", "/today/"):
+    for path in (
+        "/hygiene",
+        "/hygiene/login",
+        "/hygiene/register",
+        "/today",
+        "/today/",
+        "/today/month",
+        "/today/month/",
+    ):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         loc = resp.headers.get("location", "")
         assert resp.status_code != 302 or "/login" not in loc, path

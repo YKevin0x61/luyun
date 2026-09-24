@@ -79,8 +79,8 @@ async def my_days(
 ) -> dict:
     """员工自己这几天的班（「今天」页读的就是这一条）。
 
-    跟旁边七条不是一扇门：那七条是店长的（管理端会话），这条是员工自己的（手机端
-    cookie）。**接口上故意没有 `employee_id` 参数** —— 员工会话能读到的只有自己，
+    跟旁边那七条不是一扇门：那七条是店长的（管理端会话，六条路径），这条是员工自己的
+    （手机端 cookie）。**接口上故意没有 `employee_id` 参数** —— 员工会话能读到的只有自己，
     想读别人的班也没地方填。
     """
     store = SchedulingStore(db)
@@ -91,6 +91,34 @@ async def my_days(
     return {
         "employee": {"id": employee["id"], "name": employee["name"]},
         "today": data["today"],
+        "days": data["days"],
+    }
+
+
+@router.get("/me/month")
+async def my_month(
+    month: Optional[str] = Query(None, description="YYYY-MM；不填就是本营业月"),
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """员工自己那一个月的班（「今天」页点「整月」进来）。
+
+    跟 `/me` 同一扇门、同一套口径（`scheduled` / `shift_id` / `shift_name`），只是
+    窗口一个月；`month` 只决定看哪个月，决定不了看谁 —— **接口上同样没有
+    `employee_id`**。月份写错是 400（`invalid_month`），不是 500。
+    """
+    store = SchedulingStore(db)
+    try:
+        data = await store.my_month(employee["id"], month)
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+    return {
+        "employee": {"id": employee["id"], "name": employee["name"]},
+        "month": data["month"],
+        "first_date": data["first_date"],
+        "today": data["today"],
+        "lead": data["lead"],
+        "window_end": data["window_end"],
         "days": data["days"],
     }
 

@@ -1109,6 +1109,7 @@ SPA_PAGE_ROUTES = (
     "/hygiene/login",
     "/hygiene/register",
     "/today",
+    "/today/month",
     "/hygiene-roster",
     "/hygiene-zones",
     "/hygiene-daily",
