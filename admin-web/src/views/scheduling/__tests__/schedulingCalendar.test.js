@@ -102,7 +102,7 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/\.gB-d\.over::after/)
     expect(view).toMatch(/<span v-if="overriddenDays" class="gB-ov"><i><\/i>这天有改动<\/span>/)
     // 休的人不是一行计数：规则铺出来的休、被改成休的人，都得点得开（不然改错了没处撤）。
-    expect(view).toMatch(/v-for="person in dayDetail\.off_people"/)
+    expect(view).toMatch(/v-for="person in restPeople"/)
     expect(view).toMatch(/@click="openDayEdit\(person, 'rest'\)"/)
     // 「撤销」只在本来就改过、且还撤得动的日子给；过去的日子给的是一句实话，不是
     // 一个点了也不变的按钮。后端说得出为什么改不了，原话转给店长。
@@ -127,5 +127,30 @@ describe('店长端排班月历（原型 B）', () => {
     expect(router).toMatch(/views\/scheduling\/SchedulingCalendarView\.vue/)
     expect(navBar).toMatch(/to="\/scheduling"/)
     expect(navBar).toMatch(/prefix: '\/scheduling'/)
+  })
+
+  it('底部那条待处理里接着「请假待办」（票 08）', () => {
+    // 底下原来只有「N 个人还没配规则」那一条。请假是员工在手机上提的、店长在待办页批，
+    // 月历上得有条路走过去 —— 否则没人知道有假等着批（页面上也不许弹窗提醒）。
+    expect(view).toMatch(/class="gPend gTodo"/)
+    expect(view).toMatch(/router\.push\('\/scheduling\/inbox'\)/)
+    expect(view).toContain('请假待办')
+    // 那一条是按钮不是链接：跟旁边那条同一个形状，点哪儿都算。
+    expect(view).toMatch(/<button class="gPend gTodo" type="button"/)
+    expect(view).toMatch(/\.gTodo \{[\s\S]{0,120}?var\(--hy-aqua\)/)
+  })
+
+  it('批过的请假自成一组，不跟「休」混（票 08）', () => {
+    // 服务端在 day_detail 里已经分好了（`person.leave` 来自覆盖记录的 kind）：请假与「本来就休」
+    // 在结果表里同形（都没有班次），页面上再不分，店长就分不清「他请假了」和「他今天本来就休」，
+    // 更分不清它跟票 07 手动改成的休 —— 后者的青点标记是同一个。
+    expect(view).toMatch(
+      /const leavePeople = computed\(\(\) => offPeople\.value\.filter\(\(person\) => person\.leave\)\)/
+    )
+    expect(view).toMatch(/v-for="person in leavePeople"/)
+    expect(view).toMatch(/<b>请假<\/b><i>\{\{ leavePeople\.length \}\}<\/i>/)
+    expect(view).toMatch(/<em class="gB-zone leave">请假<\/em>/)
+    expect(view).toMatch(/\.gB-grp-t\.leave \{ color: var\(--hy-aqua\); \}/)
+    expect(view).toMatch(/\.gB-zone\.leave \{ color: var\(--hy-aqua\); \}/)
   })
 })

@@ -39,6 +39,9 @@ const routes = [
   { path: '/prep-plan', name: 'prep-plan', component: () => import('../views/PrepPlanView.vue') },
   { path: '/wecom-push', name: 'wecom-push', component: () => import('../views/WecomPushView.vue') },
   { path: '/scheduling', name: 'scheduling', component: () => import('../views/scheduling/SchedulingCalendarView.vue') },
+  // 待办（票 08）：店长批请假的地方。从月历页底下那根「请假等着批」的条进来。
+  // 跟 `/scheduling` 同一扇门（管理端 cookie，没有 meta.public）。
+  { path: '/scheduling/inbox', name: 'scheduling-inbox', component: () => import('../views/scheduling/SchedulingInboxView.vue') },
   hygieneAdminPage('/hygiene-roster', 'hygiene-roster', () => import('../views/hygiene/HygieneRosterView.vue')),
   hygieneAdminPage('/hygiene-zones', 'hygiene-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
   hygieneAdminPage('/hygiene-daily', 'hygiene-daily', () => import('../views/hygiene/HygieneDailyView.vue')),

@@ -1118,6 +1118,7 @@ SPA_PAGE_ROUTES = (
     "/hygiene-boards",
     "/hygiene-data",
     "/scheduling",
+    "/scheduling/inbox",
 )
 
 

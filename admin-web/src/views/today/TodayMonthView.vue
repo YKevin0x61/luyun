@@ -10,7 +10,8 @@
  *
  * 两条口径写在页脚里，免得员工自己猜：
  *   · 空格子 = 那天还没排（新装机的本月前半月就是这样：铺班只往今天以后走，不回头补）；
- *   · 请假/换班的角标这一票还没有（那两块的数据在第 8、9 张票里）。
+ *   · 「请假」是票 08 起的一态：批过的假跟排班给的「休」分开上色分开放（都是没有班，
+ *     但一个是自己提的、店长批的）；换班的角标还在第 9 张票里。
  *
  * 翻月只在服务端给的展开窗口里走（`stepMonth`）：往后到 `window_end` 所在的月为止，
  * 那之后的格子算「窗口外」，淡出并单独说一句 —— 淡 = 还没铺到，不是「那天没排」。
@@ -146,6 +147,7 @@ onMounted(() => {
         <div class="mLegend">
           <span><i class="dot shift" />上班</span>
           <span><i class="dot rest" />休</span>
+          <span><i class="dot leave" />请假</span>
           <span><i class="dot moved" />班次已调整</span>
           <span><i class="dot none" />还没排</span>
         </div>
@@ -164,7 +166,8 @@ onMounted(() => {
         <p class="mFoot">
           只看得到你自己的班。<br />
           空着的格子是那天还没排（不是休）—— 休的那天写着「休」。<br />
-          请假、换班的角标等那两块做好再加；钟点只有卫生那边才有。
+          批过的假写「请假」（自己提的、店长批的），跟排班给的「休」不是一回事。<br />
+          换班的角标等那张票做好再加；钟点只有卫生那边才有。
         </p>
       </template>
     </div>
@@ -309,6 +312,11 @@ onMounted(() => {
   color: var(--hy-faint);
 }
 
+/* 请假（票 08）：批过的假。跟「休」分开上色 —— 休是排班给的，假是自己提的。 */
+.mD.leave .s {
+  color: var(--hy-aqua);
+}
+
 .mD.moved .s {
   color: var(--hy-amber);
   font-size: 10.5px;
@@ -369,6 +377,10 @@ onMounted(() => {
 
 .dot.rest {
   background: var(--hy-faint);
+}
+
+.dot.leave {
+  background: var(--hy-aqua);
 }
 
 .dot.moved {

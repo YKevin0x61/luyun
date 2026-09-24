@@ -110,11 +110,25 @@ describe('员工端「整月」页（票 06）', () => {
   it('says what an empty cell is, and what is not built yet', () => {
     // 空格子 = 还没排（新装机时本月前半月就是空的）：页脚直说，别让人以为是「休」。
     expect(view).toContain('空着的格子是那天还没排')
-    // 验收 3 的角标这一票没有数据源（请假/换班在第 8、9 张票）：页面上说清楚。
-    expect(view).toContain('请假、换班的角标')
+    // 票 08：请假已经接上了（批过的假写「请假」，跟排班给的「休」分开）；
+    // 换班的角标还在第 9 张票里，页脚也得这么说。
+    expect(view).toContain('批过的假写「请假」')
+    expect(view).toContain('换班的角标等那张票做好再加')
+    expect(view).not.toContain('请假、换班的角标')
     // 翻到展开窗口之外的那些月：整片空要解释，不是排班丢了。
     expect(view).toMatch(/data\.window_end/)
     expect(view).toContain('还没铺到')
+  })
+
+  it('请假那格有自己的颜色与图例，不跟「休」混（票 08）', () => {
+    // 语气与文案的判据在 util 里（todayShift.test.js）；这一页只管上色与图例。
+    expect(view).toMatch(/\.mD\.leave \.s\s*\{[^}]*var\(--hy-aqua\)/)
+    expect(view).toMatch(/\.dot\.leave\s*\{[^}]*var\(--hy-aqua\)/)
+    // 图例三条排开：上班 / 休 / 请假（少一条员工就猜「这格子什么意思」）。
+    expect(view).toMatch(/class="dot shift"[^<]*\/>上班/)
+    expect(view).toMatch(/class="dot rest"[^<]*\/>休/)
+    expect(view).toMatch(/class="dot leave"[^<]*\/>请假/)
+    expect(copy).toContain("if (tone === 'leave') return { text: '请假', tone }")
   })
 
   it('is registered as a staff page on both sides', () => {

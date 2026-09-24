@@ -100,6 +100,22 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
         return {dict(row)["business_date"]: dict(row) for row in await cur.fetchall()}
 
+    async def _requests(self):
+        """申请表的整表快照：排序固定，方便整体比对（新用例大多只落一条）。"""
+        cur = await self.db._conn.execute(
+            """SELECT id, employee_id, kind, start_date, end_date, status, note, decided_at
+               FROM scheduling_requests ORDER BY id ASC""",
+        )
+        return [dict(row) for row in await cur.fetchall()]
+
+    async def _overrides(self):
+        """覆盖表的整表快照：`kind` 是「手改 / 请假」的判据（票 08 用它分辨不是「休」）。"""
+        cur = await self.db._conn.execute(
+            """SELECT employee_id, business_date, shift_id, zone_id, kind
+               FROM scheduling_overrides ORDER BY employee_id ASC, business_date ASC""",
+        )
+        return [dict(row) for row in await cur.fetchall()]
+
     # ── 验收 1：配「固定白班」，从今天起每天都算进白班 ──────────────────
 
     async def test_fixed_day_shift_covers_every_day_from_today(self):
@@ -903,6 +919,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
                     # 区也按 id 给一份：编辑器要按 id 预填下拉（名字没有唯一约束）。
                     "zone_id": other,
                     "overridden": True,
+                    # 票 08：那天在上班，`leave` 是「批了请假的没班」那个标记。
+                    "leave": False,
                 }
             ],
         )
@@ -1153,6 +1171,357 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
     # ── 启动期：班次表只在空的时候放默认值 ──────────────────────────────
 
+    # ── 验收 5：请假申请（票 08） ────────────────────────────────────────
+
+    async def test_a_pending_leave_request_touches_no_roster(self):
+        """验收 1：员工能提一天或一段日期 —— 提的时候排班一个字不动。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        before = await self._full_rows(employee["id"])
+
+        request = await self.store.submit_leave(
+            employee["id"], "2026-09-28", "2026-09-29", "家里有事"
+        )
+
+        self.assertEqual(request["kind"], "leave")
+        self.assertEqual(request["status"], "pending_manager")
+        self.assertEqual(
+            (
+                request["start_date"],
+                request["end_date"],
+                request["note"],
+                request["decided_at"],
+            ),
+            ("2026-09-28", "2026-09-29", "家里有事", None),
+        )
+        self.assertGreater(request["id"], 0)
+        # 待批的申请不写排班：结果行快照（含 id）逐字节不变，也没有覆盖记录。
+        self.assertEqual(await self._full_rows(employee["id"]), before)
+        self.assertEqual(await self._overrides(), [])
+        self.assertEqual(
+            [row["status"] for row in await self._requests()], ["pending_manager"]
+        )
+
+    async def test_a_single_day_request_is_one_day_long(self):
+        """验收 1 的前半句：「一天」就是 start = end，不是「从这天起一直请」。"""
+        employee = await self._employee()
+
+        request = await self.store.submit_leave(employee["id"], "2026-09-28")
+
+        self.assertEqual(
+            (request["start_date"], request["end_date"]),
+            ("2026-09-28", "2026-09-28"),
+        )
+
+    async def test_a_leave_request_validates_its_dates_and_note(self):
+        """四道闸（格式 / 顺序 / 过去 / 窗口外）+ 事由长度；被拒的申请不留半行。"""
+        employee = await self._employee()
+        cases = [
+            (("",), "missing_day"),
+            (("2026-9-28",), "invalid_business_date"),
+            (("2026-09-29", "2026-09-28"), "bad_range"),
+            (("2026-09-23",), "past_leave"),
+            ((LAST_DAY, "2026-12-23"), "beyond_leave"),
+        ]
+        for args, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(SchedulingError) as caught:
+                    await self.store.submit_leave(employee["id"], *args)
+                self.assertEqual(caught.exception.code, code)
+        # 窗口外那句话报**真实的窗口末日**（票 07 复核 P4 的口径），不写死 90 天。
+        with self.assertRaises(SchedulingError) as beyond:
+            await self.store.submit_leave(employee["id"], "2026-12-23")
+        self.assertEqual(beyond.exception.args[0], LAST_DAY)
+        with self.assertRaises(SchedulingError) as long_note:
+            await self.store.submit_leave(employee["id"], "2026-09-28", note="家" * 51)
+        self.assertEqual(long_note.exception.code, "note_too_long")
+        with self.assertRaises(SchedulingError) as stranger:
+            await self.store.submit_leave(987654, "2026-09-28")
+        self.assertEqual(stranger.exception.code, "unknown_employee")
+        self.assertEqual(await self._requests(), [])
+
+        # 事由正好 50 字是收的；空白事由当没写（不给一句「 」的备注）。
+        full = await self.store.submit_leave(employee["id"], "2026-09-28", note="家" * 50)
+        self.assertEqual(len(full["note"]), 50)
+        blank = await self.store.submit_leave(employee["id"], "2026-09-29", note="   ")
+        self.assertIsNone(blank["note"])
+
+    async def test_a_range_that_starts_in_the_past_can_still_be_submitted(self):
+        """「过去请不了假」的基准是**末日**：一段从昨天跨到今天的申请提得了。
+
+        批的时候只把今天以后那几天写进去，已经过去的那天进 `skipped_days`（票 07 的
+        「过去不改」）。这条钉住 `submit_leave` 里那道闸的基准 —— 改成 `first < today`
+        时既有用例全绿（它们都是单日，first == last），这段行为就没人守着。
+        """
+        employee = await self._employee()
+        await self.store.set_rule(employee["id"], [await self._shift_id("白班")])
+
+        request = await self.store.submit_leave(employee["id"], "2026-09-23", "2026-09-25")
+        result = await self.store.approve_request(request["id"])
+
+        self.assertEqual(result["applied_days"], ["2026-09-24", "2026-09-25"])
+        self.assertEqual(result["skipped_days"], ["2026-09-23"])
+
+    async def test_the_owner_can_take_back_a_request_that_is_not_decided(self):
+        """验收 1 的后半句：撤回自己还没被批的申请；别人的、批过的都撤不动。"""
+        owner = await self._employee("13800138001", "李四")
+        other = await self._employee("13800138002", "王五")
+        request = await self.store.submit_leave(owner["id"], "2026-09-28")
+
+        # 别人的申请一律当作「不存在」：不告诉调用方「这条在，但不是你的」。
+        with self.assertRaises(SchedulingError) as stranger:
+            await self.store.cancel_request(other["id"], request["id"])
+        self.assertEqual(stranger.exception.code, "unknown_request")
+
+        cancelled = await self.store.cancel_request(owner["id"], request["id"])
+
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertIsNotNone(cancelled["decided_at"])
+        self.assertEqual([row["status"] for row in await self._requests()], ["cancelled"])
+        # 状态机只往前走：撤回过的撤不了、也批不了。
+        with self.assertRaises(SchedulingError) as again:
+            await self.store.cancel_request(owner["id"], request["id"])
+        self.assertEqual(again.exception.code, "request_not_pending")
+        with self.assertRaises(SchedulingError) as late:
+            await self.store.approve_request(request["id"])
+        self.assertEqual(late.exception.code, "request_not_pending")
+        with self.assertRaises(SchedulingError) as unknown:
+            await self.store.approve_request(987654)
+        self.assertEqual(unknown.exception.code, "unknown_request")
+
+    async def test_the_inbox_previews_who_is_left_on_each_shift(self):
+        """验收 2/3：待办列着等他批的请假，并摊开「批了以后每个班次还剩几个人」。"""
+        leaver = await self._employee("13800138001", "李四")
+        stayer = await self._employee("13800138002", "王五")
+        await self._employee("13800138003", "赵六")  # 没配规则 → 待办里的新人
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(leaver["id"], [day])
+        await self.store.set_rule(stayer["id"], [day])
+        await self.store.submit_leave(leaver["id"], "2026-09-28", "2026-09-29", "家里有事")
+
+        inbox = await self.store.inbox()
+
+        self.assertEqual(inbox["today"], TODAY)
+        self.assertEqual([person["name"] for person in inbox["without_rule"]], ["赵六"])
+        self.assertEqual(len(inbox["requests"]), 1)
+        card = inbox["requests"][0]
+        self.assertEqual(
+            (card["employee_name"], card["note"], card["start_date"], card["end_date"]),
+            ("李四", "家里有事", "2026-09-28", "2026-09-29"),
+        )
+        self.assertEqual(
+            [item["business_date"] for item in card["days"]],
+            ["2026-09-28", "2026-09-29"],
+        )
+        for item in card["days"]:
+            with self.subTest(day=item["business_date"]):
+                self.assertEqual(
+                    (item["scheduled"], item["past"], item["current_shift_name"]),
+                    (True, False, "白班"),
+                )
+                # 那天本来只有白班有人：批了李四之后白班只剩王五；
+                # 夜班那天一个人都没有，就不往卡上堆一行「0 人」。
+                self.assertEqual(
+                    item["after"],
+                    [{"shift_id": day, "shift_name": "白班", "count": 1}],
+                )
+                self.assertNotIn(
+                    night, [shift["shift_id"] for shift in item["after"]]
+                )
+
+    async def test_a_ruleless_person_can_ask_for_leave(self):
+        """没配规则的人也能请假：那天本来就「还没排到」，批了照样记成请假。"""
+        newcomer = await self._employee()
+        request = await self.store.submit_leave(newcomer["id"], "2026-09-28")
+
+        card = (await self.store.inbox())["requests"][0]
+        self.assertEqual((card["days"][0]["scheduled"], card["days"][0]["after"]), (False, []))
+
+        await self.store.approve_request(request["id"])
+
+        detail = await self.store.day_detail("2026-09-28")
+        self.assertEqual(
+            [(person["name"], person["leave"]) for person in detail["off_people"]],
+            [("张三", True)],
+        )
+
+    async def test_approving_a_leave_turns_those_days_into_leave(self):
+        """验收 5：批了以后那几天变成请假，和本来就休「看得出区别」。"""
+        leaver = await self._employee("13800138001", "李四")
+        rester = await self._employee("13800138002", "王五")
+        stayer = await self._employee("13800138003", "赵六")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(leaver["id"], [day])
+        await self.store.set_rule(rester["id"], [day, None])  # 9/25 本来就休
+        await self.store.set_rule(stayer["id"], [day])
+        request = await self.store.submit_leave(
+            leaver["id"], "2026-09-25", "2026-09-26", "家里有事"
+        )
+        rester_before = await self._full_rows(rester["id"])
+
+        approved = await self.store.approve_request(request["id"])
+
+        self.assertEqual(
+            (approved["status"], approved["applied_days"], approved["skipped_days"]),
+            ("approved", ["2026-09-25", "2026-09-26"], []),
+        )
+        self.assertIsNotNone(approved["decided_at"])
+        # 覆盖记录是「这天为什么没有班」的唯一判据：kind=leave、班次与区都是空。
+        self.assertEqual(
+            await self._overrides(),
+            [
+                {
+                    "employee_id": leaver["id"],
+                    "business_date": day_key,
+                    "shift_id": None,
+                    "zone_id": None,
+                    "kind": "leave",
+                }
+                for day_key in ("2026-09-25", "2026-09-26")
+            ],
+        )
+        # 结果行照旧走票 07 那条路：没有班次，来源是覆盖。
+        self.assertEqual(
+            [
+                (row["shift_id"], row["source"])
+                for row in await self._rows(leaver["id"])
+                if row["business_date"] in ("2026-09-25", "2026-09-26")
+            ],
+            [(None, "override"), (None, "override")],
+        )
+        first = await self.store.day_detail("2026-09-25")
+        self.assertEqual([person["name"] for person in first["groups"][0]["people"]], ["赵六"])
+        self.assertEqual((first["total"], first["off_count"]), (1, 2))
+        # 两位「这天没有班」的人：请假的 leave=True，本来就休的 leave=False。
+        self.assertEqual(
+            {person["name"]: (person["leave"], person["overridden"]) for person in first["off_people"]},
+            {"李四": (True, True), "王五": (False, False)},
+        )
+        # 第二天王五本来就上班：请假只盖住申请的那几天，不碰别人、也不碰别的日子。
+        second = await self.store.day_detail("2026-09-26")
+        self.assertEqual(
+            [person["name"] for person in second["groups"][0]["people"]], ["王五", "赵六"]
+        )
+        self.assertEqual(await self._full_rows(rester["id"]), rester_before)
+        # 批过的不能再批。
+        with self.assertRaises(SchedulingError) as again:
+            await self.store.approve_request(request["id"])
+        self.assertEqual(again.exception.code, "request_not_pending")
+        # 员工页与员工月历上，那天是「请假」而不是「休」。
+        mine = await self.store.my_days(leaver["id"])
+        by_date = {item["business_date"]: item for item in mine["days"]}
+        self.assertEqual(
+            (
+                by_date["2026-09-25"]["leave"],
+                by_date["2026-09-25"]["shift_id"],
+                by_date["2026-09-25"]["scheduled"],
+            ),
+            (True, None, True),
+        )
+        month = await self.store.my_month(leaver["id"], "2026-09")
+        cell = {item["business_date"]: item for item in month["days"]}["2026-09-25"]
+        self.assertTrue(cell["leave"])
+
+    async def test_rejecting_a_leave_leaves_every_row_untouched(self):
+        """验收 6：驳回后排班一个字不变。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        before = await self._full_rows(employee["id"])
+        request = await self.store.submit_leave(employee["id"], "2026-09-28", "2026-09-29")
+
+        rejected = await self.store.reject_request(request["id"])
+
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertIsNotNone(rejected["decided_at"])
+        self.assertEqual(await self._full_rows(employee["id"]), before)
+        self.assertEqual(await self._overrides(), [])
+        self.assertEqual([row["status"] for row in await self._requests()], ["rejected"])
+        with self.assertRaises(SchedulingError) as late:
+            await self.store.approve_request(request["id"])
+        self.assertEqual(late.exception.code, "request_not_pending")
+
+    async def test_the_owner_sees_where_each_request_stands(self):
+        """验收 8：员工看得到自己每条申请到哪一步 —— 而且只看得到自己的。"""
+        owner = await self._employee("13800138001", "李四")
+        other = await self._employee("13800138002", "王五")
+        first = await self.store.submit_leave(owner["id"], "2026-09-28")
+        second = await self.store.submit_leave(owner["id"], "2026-09-29", "2026-09-30")
+        await self.store.reject_request(second["id"])
+        self.fixed_now = datetime(2026, 9, 25, 10, 0, tzinfo=CHINA_TZ)
+        await self.store.approve_request(first["id"])
+
+        mine = await self.store.my_requests(owner["id"])
+
+        self.assertEqual(mine["today"], "2026-09-25")
+        # 新的在前：后提的那条（已驳回）排在上面；时间戳是同一条时钟，靠 id 定序。
+        self.assertEqual(
+            [(row["id"], row["status"]) for row in mine["requests"]],
+            [(second["id"], "rejected"), (first["id"], "approved")],
+        )
+        self.assertTrue(all(row["decided_at"] for row in mine["requests"]))
+        self.assertEqual((await self.store.my_requests(other["id"]))["requests"], [])
+
+        pending = await self.store.submit_leave(other["id"], "2026-10-01")
+
+        self.assertEqual(pending["status"], "pending_manager")
+        self.assertEqual(
+            [
+                (row["status"], row["decided_at"])
+                for row in (await self.store.my_requests(other["id"]))["requests"]
+            ],
+            [("pending_manager", None)],
+        )
+
+    async def test_a_late_approval_does_not_rewrite_past_days(self):
+        """批得晚了：过去那几天不重写（票 07 的「过去不改」），申请照样记成已批准。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        request = await self.store.submit_leave(employee["id"], TODAY, "2026-09-25")
+        before = await self._full_rows(employee["id"])
+
+        self.fixed_now = datetime(2026, 9, 26, 10, 0, tzinfo=CHINA_TZ)
+        approved = await self.store.approve_request(request["id"])
+
+        self.assertEqual(
+            (approved["status"], approved["applied_days"], approved["skipped_days"]),
+            ("approved", [], ["2026-09-24", "2026-09-25"]),
+        )
+        self.assertEqual(await self._full_rows(employee["id"]), before)
+        self.assertEqual(await self._overrides(), [])
+        # 那两天他是上班的：「批了」只记在申请上，不假装改过历史。
+        detail = await self.store.day_detail("2026-09-25")
+        self.assertEqual(
+            [person["name"] for person in detail["groups"][0]["people"]], ["张三"]
+        )
+
+    async def test_leave_marks_fall_back_to_rest_when_overrides_are_missing(self):
+        """0007 没应用时：请假的标记读不出来，当日分工与员工页照常（那天按「休」显示）。"""
+        employee = await self._employee()
+        request = await self.store.submit_leave(employee["id"], "2026-09-28")
+        await self.store.approve_request(request["id"])
+
+        await self.db._conn.execute(
+            "ALTER TABLE scheduling_overrides RENAME TO scheduling_overrides_tmp"
+        )
+        await self.db._conn.commit()
+        try:
+            detail = await self.store.day_detail("2026-09-28")
+            self.assertEqual(
+                [(person["name"], person["leave"]) for person in detail["off_people"]],
+                [("张三", False)],
+            )
+            mine = await self.store.my_days(employee["id"])
+            self.assertFalse(any(item["leave"] for item in mine["days"]))
+        finally:
+            await self.db._conn.execute(
+                "ALTER TABLE scheduling_overrides_tmp RENAME TO scheduling_overrides"
+            )
+            await self.db._conn.commit()
+
     async def test_prepare_keeps_renamed_shifts(self):
         await self.db._conn.execute("UPDATE staff_shifts SET name = '早班' WHERE name = '白班'")
         await self.db._conn.commit()
@@ -1191,15 +1560,22 @@ class SchedulingLayeringTest(unittest.TestCase):
         """票 05：排班的 HTTP 面有两扇门，员工那扇只读自己。
 
         票 02 时这里断言「一条员工路由都没有」；票 05 开了 `/me`、票 06 又开了
-        `/me/month` 之后，边界从「零条」变成「两扇门互不通用」—— 店长那九条（七条路径）
-        只认管理端会话，员工那两条只认手机端 cookie。
+        `/me/month` 之后，边界从「零条」变成「两扇门互不通用」—— 店长那几条只认
+        管理端会话，员工那几条只认手机端 cookie。票 08 在两边各加了请假申请的路由
+        （员工提/撤回、店长批/驳），员工那扇门仍然全挂在 `/me` 底下。
 
         断言路由表本身，不是源码文本 —— 文本比对会被注释或文档字符串误伤
         （写一句「这里不用 require_staff_session」就红了）。
         """
         from api.scheduling import router
 
-        staff_paths = {"/api/scheduling/me", "/api/scheduling/me/month"}
+        staff_paths = {
+            "/api/scheduling/me",
+            "/api/scheduling/me/month",
+            # 票 08：我的请假申请（提、看、撤回）。
+            "/api/scheduling/me/requests",
+            "/api/scheduling/me/requests/{request_id}",
+        }
         manager_paths = {
             "/api/scheduling/shifts",
             "/api/scheduling/calendar",
@@ -1209,6 +1585,10 @@ class SchedulingLayeringTest(unittest.TestCase):
             "/api/scheduling/zone-defaults/{employee_id}",
             # 票 07：单日覆盖的改与撤。
             "/api/scheduling/overrides/{employee_id}/{business_date}",
+            # 票 08：待办（请假申请进来，批或驳出去）。
+            "/api/scheduling/inbox",
+            "/api/scheduling/inbox/{request_id}/approve",
+            "/api/scheduling/inbox/{request_id}/reject",
         }
         self.assertEqual(
             {route.path for route in router.routes}, staff_paths | manager_paths
@@ -1230,10 +1610,12 @@ class SchedulingLayeringTest(unittest.TestCase):
                 self.assertIn("require_session", names, route.path)
                 self.assertNotIn("require_staff_session", names, route.path)
 
-        # 员工那两条门上都没有路径参数：读谁不由调用方说了算。
+        # 员工那扇门全挂在 `/me` 底下：读谁、动谁的申请都由会话决定，路径里不许出现
+        # 员工号（票 08 的撤回带的是申请号 —— 申请号不是身份，拿别人的号也改不动）。
         for route in router.routes:
             if route.path in staff_paths:
-                self.assertNotIn("{", route.path)
+                self.assertTrue(route.path.startswith("/api/scheduling/me"), route.path)
+                self.assertNotIn("employee_id", route.path)
 
     def test_new_tables_are_registered_read_only(self):
         """验收 4：新表进表名清单，Admin 的数据浏览器只读能看到。"""
@@ -1246,6 +1628,8 @@ class SchedulingLayeringTest(unittest.TestCase):
                 "scheduling_zone_defaults",
                 # 票 07：单日覆盖记在这张表里（`source='override'` 的结果行由它解释）。
                 "scheduling_overrides",
+                # 票 08：请假申请（批准时才写上面那张覆盖表）。
+                "scheduling_requests",
             },
         )
         for table in SCHEDULING_TABLES:

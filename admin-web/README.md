@@ -21,11 +21,14 @@
 - 卫生管理端（`/hygiene-roster`、`/hygiene-zones`、`/hygiene-daily`、
   `/hygiene-deep-clean`、`/hygiene-fix`、`/hygiene-boards`、`/hygiene-data`）：
   排班、责任区、日常与专项计划、整改单、红黑榜、卫生数据台账（浏览 / 导出 / 清理）
-- 排班（店长端 `/scheduling`、员工端 `/today` 与 `/today/month`）：固定班次、责任区默认、
-  轮转周期，由系统展开成月历；店长能点某天的某人**就地改那一天**（票 07：换班次 / 改成休 /
-  只换区，只动这一天、规则一个字不改，改过的日子带青点、撤掉覆盖就回到规则）；
+- 排班（店长端 `/scheduling` 与 `/scheduling/inbox`、员工端 `/today` 与 `/today/month`）：
+  固定班次、责任区默认、轮转周期，由系统展开成月历；店长能点某天的某人**就地改那一天**
+  （票 07：换班次 / 改成休 / 只换区，只动这一天、规则一个字不改，改过的日子带青点、
+  撤掉覆盖就回到规则）；员工在「今天」页**提请假**（一天或一段，没批之前能撤回），
+  店长在「待办」页批（票 08：批之前就写着那天每个班次还剩几个人，人手够不够只提示不拦；
+  批了那几天变成请假、跟本来就休分开说，驳回排班一个字不变）；
   员工端「今天」页是员工登录后的落点，「整月」页（票 06）
-  按日历列出自己这个月的班别，两页都只读自己的班（请假 / 换班两个入口还没有数据，
+  按日历列出自己这个月的班别，两页都只读自己的班（换班那个入口还没有数据，
   卫生那块下一张票接到「今天」页上）
 - 员工手机端（`/today`、`/today/month`、`/hygiene`、`/hygiene/login`、`/hygiene/register`）：
   独立员工会话、实时 nudge 刷新、离线重试；票 05 起登录后落在「今天」页（排班的员工入口），
@@ -99,9 +102,9 @@ src/
     recipe/*.vue            # RecipeStationsView / RecipeDetailView / RecipeManageView /
                             # RecipePrintView / RecipeQrView
     hygiene/*.vue           # 管理端 7 页 + 员工端 Home/Login/Register + 两个 Layout
-    scheduling/*.vue        # 排班日历（店长端，独立系统，不 import 卫生）
-    today/*.vue             # 员工端「今天」+「整月」两页（登录后的落点，
-                            # 读 /api/scheduling/me 与 /api/scheduling/me/month）
+    scheduling/*.vue        # 排班日历 + 待办（店长端，独立系统，不 import 卫生）
+    today/*.vue             # 员工端「今天」（含请假表单）+「整月」两页（登录后的落点，
+                            # 读 /api/scheduling/me、/me/month 与 /me/requests）
 ```
 
 ## 已知限制 / 后续可优化项

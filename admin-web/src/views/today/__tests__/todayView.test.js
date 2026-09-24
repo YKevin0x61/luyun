@@ -15,7 +15,9 @@ describe('员工端「今天」页（原型 A）', () => {
     // 员工会话读的是排班自己那条门：路径写死 `/me`，不带模板参数 ——
     // 读谁由服务端按 cookie 定，页面上没有 employee_id 可以填。
     expect(view).toMatch(/staffRequest\('\/api\/scheduling\/me'\)/)
-    expect(view).not.toMatch(/\/api\/scheduling\/[^'"\s]*\$\{/)
+    // 路径里唯一带变量的是「撤回自己那条申请」的申请号（票 08）：
+    // 归属还是服务端按 cookie 判（别人的申请撤回只会拿到 404）。
+    expect(view).not.toMatch(/\/api\/scheduling\/[^'"\s]*employee_id/)
     expect(view).not.toMatch(/\/api\/hygiene/)
     // 401 回员工登录（同一个登录页），把当前地址整个带过去（跟卫生首页一个走法）。
     expect(view).toMatch(/path: '\/hygiene\/login'/)
@@ -110,5 +112,58 @@ describe('员工端「今天」页（原型 A）', () => {
     // 而在 `utils/loginNext.js` 的 `resolveStaffNext` —— 真单测在 loginNext.test.js。
     expect(login).toMatch(/resolveStaffNext\(route\.query\.next\)/)
     expect(login).not.toContain('hygiene|today')
+  })
+})
+
+describe('员工端请假（票 08）', () => {
+  it('三条请求都走员工门，路径上只有自己的申请号', () => {
+    // 提/看/撤：`GET|POST /api/scheduling/me/requests`、`DELETE .../<申请号>`。
+    // 都只认员工 cookie，页面上没有 employee_id 可填。
+    expect(view).toMatch(/staffRequest\('\/api\/scheduling\/me\/requests'\)/)
+    expect(view).toMatch(/staffRequest\(`\/api\/scheduling\/me\/requests\/\$\{request\.id\}`/)
+    expect(view).toMatch(/method: 'POST'/)
+    expect(view).toMatch(/method: 'DELETE'/)
+    // 谁的身份由 cookie 定：管理端那几条 `/api/scheduling/inbox*` 不许出现在员工页上；
+    // 请求路径里也不许出现 employee_id（只有注释里那句「没有 employee_id 可填」）。
+    expect(view).not.toContain('/api/scheduling/inbox')
+    expect(view).not.toMatch(/employee_id`?[,)\]}]|employee_id\s*[:=]/)
+  })
+
+  it('表单里那两天默认是服务端给的营业日，不是手机上的今天', () => {
+    // 手机时区可能不在东八区，而「过去的日子请不了假」是服务端按营业日判的。
+    expect(view).toMatch(/leaveStart\.value = \(today\.value && today\.value\.business_date\) \|\| ''/)
+    // 只请一天时后一格空着就不发那个字段（服务端把 None 与空串都当单日）。
+    expect(view).toMatch(/end_date: leaveEnd\.value \|\| null/)
+    // 事由最多 50 字：跟前端的 maxlength 与服务端的 MAX_REQUEST_NOTE 是同一个数。
+    expect(view).toMatch(/maxlength="50"/)
+    expect(view).toMatch(/note: leaveNote\.value \|\| null/)
+  })
+
+  it('提完/撤回都重读一次列表，店长那边先动过也不会留一条假记录', () => {
+    expect(view).toMatch(/note\.value = '请假提上去了，等店长批'/)
+    expect(view).toMatch(/await loadRequests\(\)/)
+    expect(view).toMatch(/await loadRequests\(true\)/)
+    // 进页面那一次读不出来不吭声（管理员还没应用 0008 时，首页不该顶一行红字）。
+    expect(view).toMatch(/if \(!quiet\) requestsError\.value = err\.message/)
+  })
+
+  it('自己那条申请在页面上看得见、能撤回，批了才写成请假', () => {
+    // 验收 4：员工看得见每条申请到哪一步（等店长批 / 批了 / 驳回了 / 已撤回）。
+    expect(view).toMatch(/requestLine\(request\)/)
+    expect(view).toMatch(/v-if="canCancel\(request\)"/)
+    expect(view).toMatch(/@click="cancelLeave\(request\)"/)
+    expect(view).toContain('批了才算请假')
+    // 出错了要说出来（不吞）：钉住那一处 —— 只写 `role="alert"` 的话，将来别处再加一个
+    // 无障碍标记，这里就退化成恒真了。
+    expect(view).toMatch(/v-if="leaveError"[\s\S]{0,40}role="alert"/)
+  })
+
+  it('「换班」还是那句「还没开放」，「请假」已经不是了', () => {
+    // 票 06 时三个入口点进去都是「还没开放」；票 08 把请假接上了 ——
+    // 这两句得分开走，别把换班也一块写成开放。
+    expect(view).toMatch(/if \(entry\.key === 'leave'\) \{\s*openLeave\(\)/)
+    expect(view).toMatch(/note\.value = `「\$\{entry\.label\}」还没开放`/)
+    expect(copy).toContain('今天请假')
+    expect(copy).toContain("if (day.leave) return '请假'")
   })
 })

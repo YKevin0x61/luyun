@@ -3,8 +3,9 @@
 """排班 HTTP 面（薄缝）：一条真实请求链路，铺排班的服务层测试不用重跑。
 
 薄缝只回答「谁能打、打进去会怎样」：管理端会话能配规则并立刻在月历上看见；
-匿名两边都不行。票 05 起有两扇门 —— 店长那九条（七条路径）只认管理端会话，员工那两条
-（`/me` 与 `/me/month`）只认手机端 cookie（票 02 时这里断言的是「一条员工路由都没有」）。
+匿名两边都不行。票 05 起有两扇门 —— 店长那几条只认管理端会话，员工那几条
+（`/me`、`/me/month`、票 08 的 `/me/requests`）只认手机端 cookie
+（票 02 时这里断言的是「一条员工路由都没有」）。
 """
 
 import asyncio
@@ -105,6 +106,10 @@ def test_scheduling_routes_require_admin_session(scheduling_http):
     # 票 07 的两条单日覆盖也挂同一扇门（读写都算店长的动作）。
     assert client.put("/api/scheduling/overrides/1/2026-09-25", json={}).status_code == 401
     assert client.delete("/api/scheduling/overrides/1/2026-09-25").status_code == 401
+    # 票 08 的待办三条同理：批 / 驳是店长的动作。
+    assert client.get("/api/scheduling/inbox").status_code == 401
+    assert client.post("/api/scheduling/inbox/1/approve").status_code == 401
+    assert client.post("/api/scheduling/inbox/1/reject").status_code == 401
 
     # 员工会话不是店长的门：换一个 cookie 名字照样 401（排班只认管理端会话）。
     employee_id = _employee_id(accounts)
@@ -217,6 +222,7 @@ def test_admin_can_pin_a_fixed_zone_per_shift(scheduling_http):
     detail = client.get("/api/scheduling/day", params={"date": TODAY}).json()
     # `overridden`/`zone_id` 是票 07 加的：这一行是规则铺的，不是店长手改的；
     # 区按 id 也给一份，编辑器要按 id 预填下拉（名字没有唯一约束）。
+    # `leave` 是票 08 加的：请假批下来之后那天没有班次，但和「本来就休」分得开。
     assert detail["groups"][0]["people"] == [
         {
             "id": employee_id,
@@ -224,6 +230,7 @@ def test_admin_can_pin_a_fixed_zone_per_shift(scheduling_http):
             "zone": "案板",
             "zone_id": zone_id,
             "overridden": False,
+            "leave": False,
         }
     ]
 
@@ -383,6 +390,16 @@ def _staff_cookie(client, accounts, phone=PHONE):
     return session_id
 
 
+def _admin_cookie(client):
+    """先把管理端会话记下来：`_staff_cookie` 会清掉所有 cookie，往返两边时要把它换回来。"""
+    return client.cookies.get(settings.SESSION_COOKIE_NAME)
+
+
+def _as_manager(client, session_id):
+    client.cookies.clear()
+    client.cookies.set(settings.SESSION_COOKIE_NAME, session_id)
+
+
 def test_staff_me_returns_their_own_next_days(scheduling_http, monkeypatch):
     """验收 2/3/5/7：员工拿手机端那个 cookie 读到自己的班，跟店长配的是同一件事。"""
     client, db, accounts = scheduling_http
@@ -478,16 +495,25 @@ def test_the_two_doors_do_not_open_each_other(scheduling_http, monkeypatch):
     denied = client.get("/api/scheduling/me")
     assert denied.status_code == 401
     assert denied.json()["detail"] == "需要员工登录"
+    # 票 08：请假申请那三条也是员工门 —— 店长的会话读不到、也提不了。
+    assert client.get("/api/scheduling/me/requests").status_code == 401
+    assert client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-28"}
+    ).status_code == 401
 
     _staff_cookie(client, accounts)
     assert client.get("/api/scheduling/me").status_code == 200
-    # 反过来也一样：员工会话读不到店长的任何一条。
+    assert client.get("/api/scheduling/me/requests").status_code == 200
+    # 反过来也一样：员工会话读不到店长的任何一条（待办也在里面）。
     assert client.get("/api/scheduling/roster").status_code == 401
     assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 401
+    assert client.get("/api/scheduling/inbox").status_code == 401
+    assert client.post("/api/scheduling/inbox/1/approve").status_code == 401
 
     client.cookies.clear()
     assert client.get("/api/scheduling/me").status_code == 401
     assert client.get("/api/scheduling/roster").status_code == 401
+    assert client.get("/api/scheduling/inbox").status_code == 401
 
 
 def test_staff_door_says_503_while_the_account_service_is_not_ready(
@@ -698,3 +724,273 @@ def test_override_errors_are_readable_400s(scheduling_http):
     undo_bad_date = client.delete(f"{base}/9-25")
     assert undo_bad_date.status_code == 400
     assert undo_bad_date.json()["detail"] == "日期格式应该是 YYYY-MM-DD"
+
+
+# ── 请假申请（票 08）───────────────────────────────────────────────────────
+
+
+def _leave_scene(client, accounts, monkeypatch, people=((PHONE, NAME),)):
+    """建人 + 配「每天都白班」，然后切到第一个人的员工 cookie。
+
+    返回 `(管理端会话, [员工 id...], 白班 id)`。店长与员工是两扇门，来回走要换 cookie
+    （`_as_manager` 换回去），所以管理端会话先在切换之前存下来。
+    """
+    day_id = client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
+    employee_ids = []
+    for phone, name in people:
+        employee_id = _employee_id(accounts, phone=phone, name=name)
+        saved = client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]})
+        assert saved.status_code == 200, saved.text
+        employee_ids.append(employee_id)
+    admin = _admin_cookie(client)
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts, phone=people[0][0])
+    return admin, employee_ids, day_id
+
+
+def test_staff_asks_for_leave_and_takes_it_back(scheduling_http, monkeypatch):
+    """验收 1：提一天或一段、看得见状态、批之前能撤回；提的时候排班一个字不改。"""
+    client, _db, accounts = scheduling_http
+    _admin, (employee_id,), _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    submitted = client.post(
+        "/api/scheduling/me/requests",
+        json={"start_date": "2026-09-25", "end_date": "2026-09-26", "note": "家里有事"},
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    body = submitted.json()
+    assert body["employee"] == {"id": employee_id, "name": NAME}
+    assert body["request"]["kind"] == "leave"
+    assert body["request"]["status"] == "pending_manager"
+    assert body["request"]["decided_at"] is None
+    assert (body["request"]["start_date"], body["request"]["end_date"]) == (
+        "2026-09-25",
+        "2026-09-26",
+    )
+    request_id = body["request"]["id"]
+
+    # 还没批：我那几天照旧（申请本身不碰排班）。
+    days = client.get("/api/scheduling/me").json()["days"]
+    assert [(day["business_date"], day["shift_name"], day["leave"]) for day in days[:2]] == [
+        ("2026-09-24", "白班", False),
+        ("2026-09-25", "白班", False),
+    ]
+    mine = client.get("/api/scheduling/me/requests")
+    assert mine.status_code == 200, mine.text
+    assert mine.json()["employee"] == {"id": employee_id, "name": NAME}
+    assert mine.json()["today"] == TODAY
+    assert [(row["id"], row["status"]) for row in mine.json()["requests"]] == [
+        (request_id, "pending_manager")
+    ]
+
+    cancelled = client.delete(f"/api/scheduling/me/requests/{request_id}")
+
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+    assert [row["status"] for row in client.get("/api/scheduling/me/requests").json()["requests"]] == [
+        "cancelled"
+    ]
+    # 撤回过的不能再撤：状态机只往前走。
+    again = client.delete(f"/api/scheduling/me/requests/{request_id}")
+    assert again.status_code == 400
+    assert again.json()["detail"] == "这条申请已经处理过了：刷新看看它现在到哪一步"
+
+
+def test_manager_inbox_previews_the_headcount_after_approval(scheduling_http, monkeypatch):
+    """验收 2：卡片上直接写着「批了之后那天每个班次还剩几个人」，还有没配规则的新人。"""
+    client, _db, accounts = scheduling_http
+    admin, (leaver, _stayer), day_id = _leave_scene(
+        client, accounts, monkeypatch, people=((PHONE, NAME), ("13800138001", "李四"))
+    )
+    # 一个还没配规则的新人（名单里有、规则里没有）——待办要把他列出来。
+    _employee_id(accounts, phone="13800138002", name="赵六")
+
+    request_id = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-25", "note": "家里有事"}
+    ).json()["request"]["id"]
+
+    _as_manager(client, admin)
+    inbox = client.get("/api/scheduling/inbox")
+
+    assert inbox.status_code == 200, inbox.text
+    body = inbox.json()
+    assert body["today"] == TODAY
+    assert [(row["name"], row["approved"], row["disabled"]) for row in body["without_rule"]] == [
+        ("赵六", True, False)
+    ]
+    card = body["requests"][0]
+    assert (card["id"], card["employee_id"], card["employee_name"]) == (request_id, leaver, NAME)
+    assert (card["kind"], card["note"]) == ("leave", "家里有事")
+    assert [day["business_date"] for day in card["days"]] == ["2026-09-25"]
+    preview = card["days"][0]
+    assert (preview["past"], preview["scheduled"], preview["current_shift_name"]) == (
+        False,
+        True,
+        "白班",
+    )
+    # 那天本来两个人在白班：批了她（她走）就只剩一个 —— 数字摊开，不拦。
+    assert preview["after"] == [{"shift_id": day_id, "shift_name": "白班", "count": 1}]
+
+
+def test_approving_a_leave_turns_those_days_into_leave(scheduling_http, monkeypatch):
+    """验收 3 + 5：批了那几天就变成请假 —— 店长的当日分工与员工那一页都看得出来。"""
+    client, _db, accounts = scheduling_http
+    admin, (leaver, stayer), day_id = _leave_scene(
+        client, accounts, monkeypatch, people=((PHONE, NAME), ("13800138001", "李四"))
+    )
+
+    _as_manager(client, admin)
+    before = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
+    assert (before["total"], before["off_count"]) == (2, 0)
+
+    _staff_cookie(client, accounts)
+    request_id = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-25", "end_date": "2026-09-26"}
+    ).json()["request"]["id"]
+
+    _as_manager(client, admin)
+    approved = client.post(f"/api/scheduling/inbox/{request_id}/approve")
+
+    assert approved.status_code == 200, approved.text
+    result = approved.json()
+    assert (result["id"], result["employee_id"], result["status"]) == (
+        request_id,
+        leaver,
+        "approved",
+    )
+    assert result["applied_days"] == ["2026-09-25", "2026-09-26"]
+    assert result["skipped_days"] == []
+    assert result["decided_at"]
+
+    after = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
+    groups = {group["shift"]["name"]: group for group in after["groups"]}
+    assert (after["total"], after["off_count"], groups["白班"]["count"]) == (1, 1, 1)
+    assert [person["name"] for person in groups["白班"]["people"]] == ["李四"]
+    # 「请假」和「本来就休」都是没有班次，`off_people` 里分得开（票面的验收 5）。
+    leave = [person for person in after["off_people"] if person["name"] == NAME][0]
+    assert (leave["leave"], leave["overridden"]) == (True, True)
+    assert [person["name"] for person in after["off_people"]] == [NAME]
+    # 月历上那两天留着「被改过」：批出来的一天也是手改过的一天。
+    cells = {
+        day["business_date"]: day
+        for day in client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()["days"]
+    }
+    assert (cells["2026-09-25"]["counts"][str(day_id)], cells["2026-09-25"]["overridden"]) == (1, 1)
+    # 待办清空了：这条不再是「等店长批」。
+    assert client.get("/api/scheduling/inbox").json()["requests"] == []
+
+    # 员工那一页：那两天显示请假（不是「休」），申请也变成批了。
+    _staff_cookie(client, accounts)
+    days = {day["business_date"]: day for day in client.get("/api/scheduling/me").json()["days"]}
+    assert (days["2026-09-25"]["shift_name"], days["2026-09-25"]["leave"]) == (None, True)
+    assert (days["2026-09-26"]["shift_name"], days["2026-09-26"]["leave"]) == (None, True)
+    assert (days["2026-09-27"]["shift_name"], days["2026-09-27"]["leave"]) == ("白班", False)
+    requests = client.get("/api/scheduling/me/requests").json()["requests"]
+    assert [(row["status"], bool(row["decided_at"])) for row in requests] == [("approved", True)]
+    assert stayer != leaver
+
+
+def test_rejecting_a_leave_leaves_the_roster_untouched(scheduling_http, monkeypatch):
+    """验收 6：驳回只改申请的状态 —— 月历与当日分工一个字不变。"""
+    client, _db, accounts = scheduling_http
+    admin, _ids, _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    _as_manager(client, admin)
+    before_calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    before_day = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
+
+    _staff_cookie(client, accounts)
+    request_id = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-25"}
+    ).json()["request"]["id"]
+
+    _as_manager(client, admin)
+    rejected = client.post(f"/api/scheduling/inbox/{request_id}/reject")
+
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["status"] == "rejected"
+    assert bool(rejected.json()["decided_at"])
+    assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json() == before_calendar
+    assert client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json() == before_day
+    assert client.get("/api/scheduling/inbox").json()["requests"] == []
+    # 驳过的不再回到待办：再批一次是 400 一句人话，不是 500。
+    again = client.post(f"/api/scheduling/inbox/{request_id}/approve")
+    assert again.status_code == 400
+    assert again.json()["detail"] == "这条申请已经处理过了：刷新看看它现在到哪一步"
+
+
+def test_leave_errors_are_readable_400s(scheduling_http, monkeypatch):
+    """提不了的几种情形各说各的 —— 不是一个「参数不合法」打包（跟票 07 一样的口径）。"""
+    client, _db, accounts = scheduling_http
+    _leave_scene(client, accounts, monkeypatch)
+    base = "/api/scheduling/me/requests"
+
+    backwards = client.post(base, json={"start_date": "2026-09-26", "end_date": "2026-09-25"})
+    assert backwards.status_code == 400
+    assert backwards.json()["detail"] == "结束日期不能早于开始日期：请重新选一遍这几天"
+
+    past = client.post(base, json={"start_date": "2026-09-23"})
+    assert past.status_code == 400
+    # 员工读到的是「请不了假」，不是店长那句「排班写下的历史不重写」。
+    assert past.json()["detail"] == "已经过去的日子请不了假：请从今天起选"
+
+    beyond = client.post(base, json={"start_date": "2026-12-23"})
+    assert beyond.status_code == 400
+    assert beyond.json()["detail"] == "排班还没铺到那么远：最多请到 2026-12-22"
+
+    long_note = client.post(base, json={"start_date": "2026-09-25", "note": "家" * 51})
+    assert long_note.status_code == 400
+    assert long_note.json()["detail"] == "事由最多 50 个字：请缩短一点再提交"
+
+    bad_date = client.post(base, json={"start_date": "9-25"})
+    assert bad_date.status_code == 400
+    assert bad_date.json()["detail"] == "日期格式应该是 YYYY-MM-DD"
+
+    # 日期没给：缺字段、空串、显式 `null` 都落到服务层那道闸上，400 一句中文 ——
+    # 而不是 pydantic 的 422（那个 `detail` 是一串英文的字段错误）。
+    for payload in ({}, {"start_date": ""}, {"start_date": None}):
+        missing = client.post(base, json=payload)
+        assert missing.status_code == 400
+        assert missing.json()["detail"] == "请先选一个开始日期：请假从哪天开始"
+
+    gone = client.delete(f"{base}/987654")
+    assert gone.status_code == 404
+    assert gone.json()["detail"] == "这条申请不存在：可能已经被撤回，刷新看看"
+
+    # 别人的申请也是同一个 404：接口不区分「不存在」与「不是你的」。
+    _employee_id(accounts, phone="13800138001", name="李四")
+    _staff_cookie(client, accounts, phone="13800138001")
+    theirs = client.post(base, json={"start_date": "2026-09-26"}).json()["request"]["id"]
+    _staff_cookie(client, accounts)
+    not_mine = client.delete(f"{base}/{theirs}")
+    assert not_mine.status_code == 404
+    assert not_mine.json()["detail"] == "这条申请不存在：可能已经被撤回，刷新看看"
+    # 提不成的申请一行都没留下（李四那条是别人撤不掉的，不是没提成）。
+    assert [row["id"] for row in client.get(base).json()["requests"]] == []
+
+
+def test_missing_requests_table_is_a_503_that_names_it(scheduling_http, monkeypatch):
+    """0008 还没应用：请假那几条 503 并点名脚本；排班本身照常 —— 它不读新表。"""
+    client, db, accounts = scheduling_http
+    admin, _ids, _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    async def _rename(source, target):
+        await db._conn.execute(f"ALTER TABLE {source} RENAME TO {target}")
+        await db._conn.commit()
+
+    _run(_rename("scheduling_requests", "scheduling_requests_tmp"))
+    try:
+        posted = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+        assert posted.status_code == 503, posted.text
+        assert "0008_scheduling_requests.sql" in posted.json()["detail"]
+        assert client.get("/api/scheduling/me/requests").status_code == 503
+        # 员工「今天」那页与店长那几页都不读申请表：照常 200。
+        assert client.get("/api/scheduling/me").status_code == 200
+        _as_manager(client, admin)
+        assert client.get("/api/scheduling/inbox").status_code == 503
+        assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 200
+        assert client.get("/api/scheduling/day", params={"date": "2026-09-25"}).status_code == 200
+        assert client.get("/api/scheduling/roster").status_code == 200
+    finally:
+        _run(_rename("scheduling_requests_tmp", "scheduling_requests"))

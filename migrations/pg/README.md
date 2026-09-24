@@ -41,6 +41,7 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0005_scheduling.sql` | 排班系统第一批表：`staff_shifts`（班次表，含白班/夜班两行）、`staff_assignments`（排出来的结果）、`scheduling_rules`（一人一条轮转规则） | 排班页面与 `/api/scheduling/*` 全部报错（`relation "staff_shifts" does not exist`），店长打不开月历 |
 | `0006_scheduling_zone_defaults.sql` | `scheduling_zone_defaults`：每人每班次一个固定责任区（区名单仍在 `hygiene_zones`，不搬表） | 店长在排班页配不了责任区，排出来的行 `zone_id` 恒为空 |
 | `0007_scheduling_overrides.sql` | `scheduling_overrides`：单日覆盖（某人某天跟规则不一样的那一天，班次+责任区整天快照） | 店长改某天（改班次/改成休/换区）与改规则都 503 并点名这个文件（展开要先读覆盖表）；月历与当日接口照常 200，只是「这天被改过」的青点永远不会出现（标记数的是 `staff_assignments.source`） |
+| `0008_scheduling_requests.sql` | `scheduling_requests`：请假申请（一次申请一条，同一个人可以有多条，`kind`/起止日/状态/事由），批准后那几天写成 `kind=leave` 的单日覆盖 | 员工端提不了假、看不了自己的申请，店长的「待办」页 503 并点名这个文件；月历、当日、`/me` 与改某天照常工作（那几条读路径根本不查这张表：请假标记来自 0007 的覆盖记录，读不到就当没有） |
 
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，

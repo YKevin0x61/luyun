@@ -6,12 +6,15 @@
 也不认识卫生的表名；它从公共层取「这个人是谁」（`services.identity`）、算自己的规则，
 把结果**物化**进 `staff_assignments`。下游只读那份数据，两边靠数据对接而不靠调用。
 
-三件事在这一层：
+四件事在这一层：
 
 - **班次**（`staff_shifts`）：白班、夜班是**数据**不是常量，加第三个班次是改数据。
 - **规则**（`scheduling_rules`）：一人一条轮转规则 —— `cycle` 的长度就是周期天数，
   每格是班次 id、`None` 表示休；`anchor_date` 是周期起点，相位由它和营业日之差算。
 - **展开**（`expand`）：把规则铺成 `staff_assignments` 的行，滚动铺未来 90 天。
+- **请假**（`scheduling_requests`）：员工提申请、店长批 / 驳（票 08）。批准的那几天写成
+  **单日覆盖**（`kind=leave`、没有班次），于是「请假」与「本来就休」在结果表里有据可查
+  —— 两者的 `shift_id` 都是空，区别只在覆盖记录的 `kind`。
 
 **已经写下的行不重算**：展开时窗口内哪天（哪个人）已经有行就跳过。所以「改规则只影响
 今天以后」是这个做法本身的结果，不是额外加的一段逻辑 —— 过去那些行早就写在那儿了，
@@ -61,11 +64,17 @@ def _needs_migration(method):
 __all__ = [
     "DEFAULT_SHIFTS",
     "EXPANSION_DAYS",
+    "KIND_LEAVE",
     "KIND_MANUAL",
     "MAX_CYCLE_DAYS",
+    "MAX_REQUEST_NOTE",
     "REST",
     "SOURCE_OVERRIDE",
     "SOURCE_RULE",
+    "STATUS_APPROVED",
+    "STATUS_CANCELLED",
+    "STATUS_PENDING_MANAGER",
+    "STATUS_REJECTED",
     "SchedulingError",
     "SchedulingStore",
 ]
@@ -77,10 +86,27 @@ EXPANSION_DAYS = 90
 SOURCE_RULE = "rule"
 SOURCE_OVERRIDE = "override"
 
-# 单日覆盖是谁写的（`scheduling_overrides.kind`）：本票唯一会写的是店长在月历上
-# 点着改的。票 08 的请假、票 09 的换班各写各的值 —— 它们进的是同一张表
+# 单日覆盖是谁写的（`scheduling_overrides.kind`）：`manual` 是店长在月历上点着改的，
+# `leave` 是批准请假写下的（票 08）。票 09 的换班写 `swap` —— 它们进的是同一张表
 # （见 `migrations/pg/0007_scheduling_overrides.sql`），不用再出一次迁移。
 KIND_MANUAL = "manual"
+KIND_LEAVE = "leave"
+
+# 申请的状态（`spec.md` 的状态机）。`pending_peer` 是换班专用（票 09 才写得出来）；
+# 请假从「等店长批」直接到批 / 驳，申请人自己撤回落 `cancelled`。
+STATUS_PENDING_MANAGER = "pending_manager"
+STATUS_APPROVED = "approved"
+STATUS_REJECTED = "rejected"
+STATUS_CANCELLED = "cancelled"
+
+# 事由限长：界面上那张卡是一行话的地方，不是留言板。超了报错而不是悄悄截断 ——
+# 员工写的东西不该被系统改掉。
+MAX_REQUEST_NOTE = 50
+
+# 读申请时选的列：`_request_rows` 与 `_request_by_id` 共用一份，免得两处列名漂移。
+_REQUEST_COLUMNS = (
+    "id, employee_id, kind, start_date, end_date, status, note, decided_at, created_at, updated_at"
+)
 
 # 员工「今天」页往后看几天：今天、明天、后天、大后天（原型 A 的「往后三天」）。
 # 窗口长度是服务层的数，前端不再写一份 —— 以后要改成「往后一周」只动这里。
@@ -145,6 +171,32 @@ def _each_day(start: date, next_month: date):
     while day < next_month:
         yield day
         day += timedelta(days=1)
+
+
+def _each_day_between(first: str, last: str) -> list[str]:
+    """吐出 `first` 到 `last` 之间的每一天（**两端都算**，ISO 文本进、ISO 文本出）。
+
+    请假的区间是闭区间：员工说「9/28 到 9/29」就是这两天都不上班
+    （原型 C 的「请假 9/28–9/29」也是这个说法）。
+    """
+    start = date.fromisoformat(first)
+    end = date.fromisoformat(last)
+    out = []
+    day = start
+    while day <= end:
+        out.append(day.isoformat())
+        day += timedelta(days=1)
+    return out
+
+
+def _clean_note(note: Any) -> Optional[str]:
+    """事由：去掉两端空白；空串就是「没写」（存 NULL，不存一个空字符串）。"""
+    text = str(note or "").strip()
+    if not text:
+        return None
+    if len(text) > MAX_REQUEST_NOTE:
+        raise SchedulingError("note_too_long", str(MAX_REQUEST_NOTE))
+    return text
 
 
 def _rule_anchor(rule: dict) -> date:
@@ -631,8 +683,29 @@ class SchedulingStore:
         day: str,
         shift_id: Optional[int],
         zone_id: Optional[int],
+        kind: str = KIND_MANUAL,
     ) -> None:
         stamp = self._now_iso()
+        await self._write_override_row(employee_id, day, shift_id, zone_id, kind, stamp)
+        await self._write_day_row(employee_id, day, shift_id, zone_id, SOURCE_OVERRIDE, stamp)
+        await self._conn.commit()
+
+    async def _write_override_row(
+        self,
+        employee_id: int,
+        day: str,
+        shift_id: Optional[int],
+        zone_id: Optional[int],
+        kind: str,
+        stamp: str,
+    ) -> None:
+        """把覆盖记录写成给定样子（有则改、无则插）。不自己上锁、不提交。
+
+        再写一次就是**替换**这一天的样子（不是叠加）：`kind` 也跟着换成这次写的那个 ——
+        请假批过的那天，店长又点着改了一次，那天现在就是店长定的（换回 `manual`）。
+        `kind` 是参数而不是写死的 `manual`：批准请假写的就是同一条记录、另一个来源
+        （票 08），两者进的是同一张表、同一行。
+        """
         cur = await self._conn.execute(
             """SELECT id FROM scheduling_overrides
                WHERE employee_id = ? AND business_date = ?""",
@@ -644,19 +717,15 @@ class SchedulingStore:
                 """INSERT INTO scheduling_overrides
                        (employee_id, business_date, shift_id, zone_id, kind, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (employee_id, day, shift_id, zone_id, KIND_MANUAL, stamp, stamp),
+                (employee_id, day, shift_id, zone_id, kind, stamp, stamp),
             )
         else:
-            # 再改一次就是**替换**这一天的样子（不是叠加）：`kind` 也跟着回到手改 ——
-            # 请假改过的那天，店长又点着改了一次，那天现在就是店长定的。
             await self._conn.execute(
                 """UPDATE scheduling_overrides
                    SET shift_id = ?, zone_id = ?, kind = ?, updated_at = ?
                    WHERE employee_id = ? AND business_date = ?""",
-                (shift_id, zone_id, KIND_MANUAL, stamp, employee_id, day),
+                (shift_id, zone_id, kind, stamp, employee_id, day),
             )
-        await self._write_day_row(employee_id, day, shift_id, zone_id, SOURCE_OVERRIDE, stamp)
-        await self._conn.commit()
 
     @_needs_migration
     async def clear_override(self, employee_id: int, business_date: str) -> dict:
@@ -914,6 +983,10 @@ class SchedulingStore:
 
         休的人不只给一个数：`off_people` 是跟 `groups` 同形的一份名单。他们也要能被点开
         —— 店长把某人改成休之后，得从那格再把他改回上班（或者撤掉那次改动）。
+
+        同样是「这天没有班」，每人还带一个 `leave`：`True` 是**批了请假**，`False` 是本来
+        就休。结果行里两者都是 `shift_id` 空，区别只在覆盖记录的 `kind`（票 08）——
+        这个字段就是为那句「和本来就休看得出区别」给的判据，前端不自己猜。
         """
         day = _require_business_date(business_date)
         names = await self._name_index()
@@ -932,7 +1005,12 @@ class SchedulingStore:
             overridden = mapping["source"] == SOURCE_OVERRIDE
             by_shift.setdefault(key, []).append((int(mapping["employee_id"]), zone, overridden))
 
-        def person(employee_id: int, zone: Optional[int], overridden: bool) -> dict:
+        def person(
+            employee_id: int,
+            zone: Optional[int],
+            overridden: bool,
+            leave: bool = False,
+        ) -> dict:
             return {
                 "id": employee_id,
                 "name": names.get(employee_id, ""),
@@ -943,6 +1021,8 @@ class SchedulingStore:
                 # （`hygiene_zones` 的名字没有唯一约束，重名会挑错那个）。
                 "zone_id": zone,
                 "overridden": overridden,
+                # 只有不上班的人可能是请假；上班的人这里恒为 False（票 08）。
+                "leave": leave,
             }
 
         shifts = await self._shifts_for_display({key for key in by_shift if key is not REST})
@@ -958,12 +1038,18 @@ class SchedulingStore:
                 "people": [person(*item) for item in people],
             })
         rest_ids = sorted(by_shift.get(REST, []), key=lambda item: names.get(item[0], ""))
+        # 「休」这一组里谁是请假：只问这些人（名单不长），而且查询按 employee_id 领头 ——
+        # 跟 0007 那条索引的前导列对齐（复核 F7 的结论）。
+        leave_ids = await self._leave_ids([item[0] for item in rest_ids], day)
         return {
             "business_date": day,
             "groups": groups,
             "total": sum(group["count"] for group in groups),
             "off_count": len(rest_ids),
-            "off_people": [person(*item) for item in rest_ids],
+            "off_people": [
+                person(employee_id, zone, overridden, employee_id in leave_ids)
+                for employee_id, zone, overridden in rest_ids
+            ],
             # 过去的日子不改写（口径 5）：这天的覆盖撤不掉 —— 前端据此把「撤销」收起来，
             # 而不是给一个按了没反应的按钮。
             "undoable": day >= self.today(),
@@ -982,18 +1068,23 @@ class SchedulingStore:
         没铺过的日子**也占一行**：`scheduled=False` 是「还没有你的班」，`scheduled=True`
         而 `shift_id=None` 是「那天休」。两者在员工页上是两句话，不能让调用方从
         「缺行」里去猜 —— 判据在服务层，前端只翻译。
+
+        `leave=True` 是第三种「没有班」：**批了的请假**（票 08）。员工自己提的那条申请
+        批下来那天，他该看到的不是「休」而是「请假」。
         """
         await self.expand(employee_id)
         first = self.today()
         count = max(int(days), 1)
+        last = shift_business_date(first, count - 1)
         cur = await self._conn.execute(
             """SELECT business_date, shift_id, zone_id FROM staff_assignments
                WHERE employee_id = ? AND business_date >= ? AND business_date <= ?
                ORDER BY business_date""",
-            (employee_id, first, shift_business_date(first, count - 1)),
+            (employee_id, first, last),
         )
         rows, shifts = await self._rows_and_shifts(cur)
         zone_names = await self._zone_name_index()
+        leave_days = await self._leave_days(employee_id, first, last)
 
         out = []
         for offset in range(count):
@@ -1017,6 +1108,8 @@ class SchedulingStore:
                 # 区名来自结果行上的 zone_id：那天写在行上的是哪个区就是哪个区，
                 # 事后改固定区不改写过去（跟 `day_detail` 同一条口径）。
                 "zone_name": None if zone_id is None else zone_names.get(zone_id),
+                # 批了的请假（票 08）：「那天休」与「那天请假」是两句话。
+                "leave": key in leave_days,
             })
         return {"today": first, "days": out}
 
@@ -1045,6 +1138,11 @@ class SchedulingStore:
             (employee_id, start.isoformat(), next_month.isoformat()),
         )
         rows, shifts = await self._rows_and_shifts(cur)
+        # 整月里批了请假的那几天（票 08）：`_leave_days` 的两端都含，所以末界是下月一号
+        # 的前一天 —— 用 `shift_business_date` 退一天，不自己算月份长度。
+        leave_days = await self._leave_days(
+            employee_id, start.isoformat(), shift_business_date(next_month.isoformat(), -1)
+        )
 
         today = self.today()
         days = []
@@ -1060,6 +1158,8 @@ class SchedulingStore:
                 "scheduled": row is not None,
                 "shift_id": shift_id,
                 "shift_name": None if shift is None else shift["name"],
+                # 跟 `my_days` 同一个字段、同一条口径：格子里的「请假」不是「休」。
+                "leave": key in leave_days,
             })
 
         return self._month_frame(start, today, days)
@@ -1100,3 +1200,364 @@ class SchedulingStore:
             employee["id"]: (employee["name"] or employee["phone"])
             for employee in employees
         }
+
+    # ── 请假申请（票 08） ───────────────────────────────────────────────
+    #
+    # 申请挂在 `scheduling_requests`（0008），**批准才写进排班**：批准那天写一条覆盖
+    # 记录（`kind=leave`、`shift_id` 空）+ 一行结果（`source=override`）。结果表里
+    # 「请假」和「本来就休」都是没有班次，区别只记在覆盖记录的 `kind` 上 —— 当日分工
+    # 与员工页都从那里读 `leave`（见 `day_detail`、`my_days`）。驳回与撤回一个字都不写。
+
+    @_needs_migration
+    async def submit_leave(
+        self,
+        employee_id: int,
+        start_date: str,
+        end_date: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> dict:
+        """员工给自己提一条请假：一天，或一段日期（**两端都算**）。
+
+        落 `pending_manager` —— 请假不经过换班那一步「等对方确认」（`spec.md` 的状态机）。
+        申请本身**不碰排班**：批了才写覆盖行，驳回与撤回一个字都不写。
+
+        提前量限制还没定（`spec.md` 的待定项）：现在只要求不是过去的日期、末日还在展开
+        窗口里 —— 窗口外那天本来就「还没排到」，批了也没有一行可以变成请假。
+        """
+        employee_id = int(employee_id)
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        if employee_id not in {employee["id"] for employee in roster}:
+            raise SchedulingError("unknown_employee", "unknown_employee")
+        if not str(start_date or "").strip():
+            # 字段整个没给（前端提交按钮本来就是灰的，这是给手写的调用方兜一句中文）：
+            # 跟「格式不对」分开说，不然员工读到的是「日期格式应该是 YYYY-MM-DD」，
+            # 而他手里根本没有一个日期可以改。
+            raise SchedulingError("missing_day", "missing_day")
+        first = _require_business_date(start_date)
+        last = first if end_date in (None, "") else _require_business_date(end_date)
+        if last < first:
+            raise SchedulingError("bad_range", "bad_range")
+        if last < self.today():
+            # 跟票 07 的 `past_day` 是同一条口径，但错的是「给过去提申请」而不是
+            # 「改过去的排班」：文案分开，别让员工读到「排班写下的历史不重写」。
+            raise SchedulingError("past_leave", "past_leave")
+        if last > self._window()[1]:
+            # 第二参填进那句提示的 `{}`：报**真实的窗口末日**（跟票 07 同一条口径，
+            # 别把 `EXPANSION_DAYS` 写死在文案里）。
+            raise SchedulingError("beyond_leave", self._window()[1])
+        return await self._insert_request(
+            employee_id, KIND_LEAVE, first, last, _clean_note(note), STATUS_PENDING_MANAGER
+        )
+
+    @_needs_migration
+    async def my_requests(self, employee_id: int) -> dict:
+        """我自己提过的申请，新的在前（票 08 的验收项：每条现在到哪一步）。
+
+        `status` 是机器可读的那个（前端翻成人话），`decided_at` 只在批 / 驳 / 撤之后才有。
+        """
+        rows = await self._request_rows(employee_id=int(employee_id))
+        return {"today": self.today(), "requests": rows}
+
+    @_needs_migration
+    async def cancel_request(self, employee_id: int, request_id: int) -> dict:
+        """申请人撤回自己**还没被批**的申请（票 08 的验收项）。
+
+        撤回只动申请这一行：排班一个字不改 —— 还没批的申请本来就没写进排班。
+
+        别人的申请一律当作「不存在」：不告诉调用方「这条在，但不是你的」。
+        """
+        row = await self._request_by_id(request_id)
+        if row is None or int(row["employee_id"]) != int(employee_id):
+            raise SchedulingError("unknown_request", "unknown_request")
+        if row["status"] != STATUS_PENDING_MANAGER:
+            # 批完 / 驳完 / 已撤回都不再动：状态机只往前走（`spec.md` 的状态机）。
+            raise SchedulingError("request_not_pending", "request_not_pending")
+        return await self._decide(int(row["id"]), STATUS_CANCELLED)
+
+    @_needs_migration
+    async def inbox(self) -> dict:
+        """店长待办（票 08）：等他批的请假 + 还没配规则的人。
+
+        每条请假带一份**预览**：批了之后那天每个班次还剩几个人（`days[*].after`）。
+        人手够不够只把数字摊开 —— 服务层没有「最少几个人」这个配置，也就没有阈值可判，
+        「只提示、不阻止」在实现上就是**根本没有那道闸**（票面的口径）。
+
+        `days` 是申请区间的每一天（两端都算），`past=True` 的那几天批了也不会动：
+        过去不改写（跟票 07 同一条口径），先说清楚，别让店长以为批了就改了历史。
+
+        旧申请在前（先来先处理）：这是待办队列，不是「最新动态」。
+        """
+        await self.expand()
+        today = self.today()
+        rows = await self._request_rows(status=STATUS_PENDING_MANAGER, oldest_first=True)
+        names = await self._name_index()
+        shifts = await self.list_shifts()
+        shift_names = {shift["id"]: shift["name"] for shift in shifts}
+        rules = await self.list_rules()
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+
+        # 一天只查一次：同一批申请常指着同几天（一个人请的那几天，别人也可能请）。
+        on_duty: dict[str, dict[int, Optional[int]]] = {}
+
+        async def day_roster(day: str) -> dict[int, Optional[int]]:
+            if day not in on_duty:
+                cur = await self._conn.execute(
+                    """SELECT employee_id, shift_id FROM staff_assignments
+                       WHERE business_date = ?""",
+                    (day,),
+                )
+                mapping: dict[int, Optional[int]] = {}
+                for item in await cur.fetchall():
+                    record = dict(item)
+                    mapping[int(record["employee_id"])] = (
+                        None if record["shift_id"] is None else int(record["shift_id"])
+                    )
+                on_duty[day] = mapping
+            return on_duty[day]
+
+        requests = []
+        for row in rows:
+            employee_id = int(row["employee_id"])
+            days = []
+            for day in _each_day_between(row["start_date"], row["end_date"]):
+                people = await day_roster(day)
+                counts: dict[int, int] = {}
+                for shift_id in people.values():
+                    if shift_id is not None:
+                        counts[shift_id] = counts.get(shift_id, 0) + 1
+                mine = people.get(employee_id)
+                after = []
+                for shift in shifts:
+                    if counts.get(shift["id"]) is None and mine != shift["id"]:
+                        # 那天本来就没这个班的人：不往卡上堆「0 人」。
+                        continue
+                    left = counts.get(shift["id"], 0) - (1 if mine == shift["id"] else 0)
+                    after.append({
+                        "shift_id": shift["id"],
+                        "shift_name": shift["name"],
+                        "count": max(left, 0),
+                    })
+                days.append({
+                    "business_date": day,
+                    "past": day < today,
+                    # 那天她原本在哪：`scheduled=False` 是「那天还没排到」，
+                    # `scheduled=True` 而 `current_shift_id` 空是「本来就休」。
+                    "scheduled": employee_id in people,
+                    "current_shift_id": mine,
+                    "current_shift_name": None if mine is None else shift_names.get(mine),
+                    "after": after,
+                })
+            requests.append({
+                "id": int(row["id"]),
+                "employee_id": employee_id,
+                "employee_name": names.get(employee_id, ""),
+                "kind": row["kind"],
+                "start_date": row["start_date"],
+                "end_date": row["end_date"],
+                "note": row["note"],
+                "created_at": row["created_at"],
+                "days": days,
+            })
+
+        return {
+            "today": today,
+            "requests": requests,
+            # 「还没配规则的新人」：判据就是名单里没有规则的那几个（`rule is None`）。
+            # `approved` / `disabled` 一起给出去，由前端决定要不要提醒 —— 停用的人
+            # 不该天天挂在待办上，但「谁停用了」是名单的事，服务层不替它下结论。
+            "without_rule": [
+                {
+                    "id": employee["id"],
+                    "name": employee["name"],
+                    "phone": employee["phone"],
+                    "job_title": employee["job_title"],
+                    "approved": employee["approved"],
+                    "disabled": employee["disabled"],
+                }
+                for employee in roster
+                if employee["id"] not in rules
+            ],
+        }
+
+    @_needs_migration
+    async def approve_request(self, request_id: int) -> dict:
+        """批一条请假：那几天变成请假，并记下什么时候批的（票 08 的验收项）。
+
+        写的是**覆盖行**（`kind=leave`、`shift_id` 空）而不是改结果表的列：结果表里
+        「请假」与「休」都是没有班次，区别只在覆盖记录的 `kind`。
+
+        已经过去的日子**不重写**（票 07 同一条「过去不改」）：批得晚了就是晚了，那天当时
+        怎么排的就留着。申请照样记成已批准，`applied_days` 说清写了哪几天 ——
+        调用方把 `skipped_days` 明说出来，而不是假装那几天也改了。
+        """
+        row = await self._request_by_id(request_id)
+        if row is None:
+            raise SchedulingError("unknown_request", "unknown_request")
+        if row["status"] != STATUS_PENDING_MANAGER:
+            raise SchedulingError("request_not_pending", "request_not_pending")
+        return await self._approve(row)
+
+    @_needs_migration
+    async def reject_request(self, request_id: int) -> dict:
+        """驳回一条请假：**排班一个字不改**（票 08 的验收项），只把申请记为驳回。"""
+        row = await self._request_by_id(request_id)
+        if row is None:
+            raise SchedulingError("unknown_request", "unknown_request")
+        if row["status"] != STATUS_PENDING_MANAGER:
+            raise SchedulingError("request_not_pending", "request_not_pending")
+        return await self._decide(int(row["id"]), STATUS_REJECTED)
+
+    @serialized_write
+    async def _approve(self, row: dict) -> dict:
+        """批准一条申请：那几天写覆盖行 + 结果行，最后把申请置成已批准。一次提交。
+
+        一次提交是有意的：批一半（写了三天、申请还是待批）比不批更糟 —— 店长会再点
+        一次「批准」，或者以为没批成而重复处理。
+        """
+        employee_id = int(row["employee_id"])
+        today = self.today()
+        last_day = self._window()[1]
+        stamp = self._now_iso()
+        applied: list[str] = []
+        skipped: list[str] = []
+        for day in _each_day_between(row["start_date"], row["end_date"]):
+            if day < today or day > last_day:
+                skipped.append(day)
+                continue
+            await self._write_override_row(employee_id, day, None, None, KIND_LEAVE, stamp)
+            await self._write_day_row(employee_id, day, None, None, SOURCE_OVERRIDE, stamp)
+            applied.append(day)
+        await self._conn.execute(
+            """UPDATE scheduling_requests
+               SET status = ?, decided_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (STATUS_APPROVED, stamp, stamp, int(row["id"])),
+        )
+        await self._conn.commit()
+        return {
+            "id": int(row["id"]),
+            "employee_id": employee_id,
+            "status": STATUS_APPROVED,
+            "decided_at": stamp,
+            "applied_days": applied,
+            "skipped_days": skipped,
+        }
+
+    @serialized_write
+    async def _decide(self, request_id: int, status: str) -> dict:
+        """把申请置成 `status` 并记下时间（驳回 / 撤回共用）。排班一个字不改。"""
+        stamp = self._now_iso()
+        await self._conn.execute(
+            """UPDATE scheduling_requests
+               SET status = ?, decided_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (status, stamp, stamp, int(request_id)),
+        )
+        await self._conn.commit()
+        return {"id": int(request_id), "status": status, "decided_at": stamp}
+
+    async def _request_rows(
+        self,
+        employee_id: Optional[int] = None,
+        status: Optional[str] = None,
+        oldest_first: bool = False,
+    ) -> list[dict]:
+        """读申请（可按人、按状态筛）。排序由调用方选：我的申请新的在前，待办旧的在前。"""
+        where: list[str] = []
+        params: list[Any] = []
+        if employee_id is not None:
+            where.append("employee_id = ?")
+            params.append(int(employee_id))
+        if status is not None:
+            where.append("status = ?")
+            params.append(status)
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        order = "created_at ASC, id ASC" if oldest_first else "created_at DESC, id DESC"
+        cur = await self._conn.execute(
+            f"""SELECT {_REQUEST_COLUMNS}
+                FROM scheduling_requests{clause}
+                ORDER BY {order}""",
+            tuple(params),
+        )
+        return [dict(row) for row in await cur.fetchall()]
+
+    async def _request_by_id(self, request_id: int) -> Optional[dict]:
+        cur = await self._conn.execute(
+            f"SELECT {_REQUEST_COLUMNS} FROM scheduling_requests WHERE id = ?",
+            (int(request_id),),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
+
+    @serialized_write
+    async def _insert_request(
+        self,
+        employee_id: int,
+        kind: str,
+        first: str,
+        last: str,
+        note: Optional[str],
+        status: str,
+    ) -> dict:
+        stamp = self._now_iso()
+        cur = await self._conn.execute(
+            """INSERT INTO scheduling_requests
+                   (employee_id, kind, start_date, end_date, status, note, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               RETURNING id""",
+            (employee_id, kind, first, last, status, note, stamp, stamp),
+        )
+        created = await cur.fetchone()
+        await self._conn.commit()
+        return {
+            "id": int(dict(created)["id"]),
+            "employee_id": employee_id,
+            "kind": kind,
+            "start_date": first,
+            "end_date": last,
+            "status": status,
+            "note": note,
+            "decided_at": None,
+            "created_at": stamp,
+        }
+
+    async def _leave_ids(self, employee_ids: Any, day: str) -> set[int]:
+        """这天这些人里，哪些是**请假**（覆盖记录的 `kind` 是 `leave`）而不是本来就休。
+
+        按 `employee_id` 领头查 —— 0007 那条索引 `idx_scheduling_overrides_employee`
+        的前导列就是它（票 07 复核 F7 的结论），别写成先按 `business_date` 筛的形态。
+
+        `scheduling_overrides` 还没建（0007 没应用）时返回空集，不把整个当日分工变成
+        503：那张表不在就**不可能**有请假标记，那天所有人本来就只是「休」（写请假那条
+        路仍然会明说去应用迁移 —— 见 `migrations/pg/README.md`）。
+        """
+        ids = [int(item) for item in employee_ids]
+        if not ids:
+            return set()
+        marks = ", ".join("?" for _ in ids)
+        try:
+            cur = await self._conn.execute(
+                f"""SELECT employee_id FROM scheduling_overrides
+                    WHERE employee_id IN ({marks}) AND business_date = ? AND kind = ?""",
+                (*ids, day, KIND_LEAVE),
+            )
+            return {int(dict(row)["employee_id"]) for row in await cur.fetchall()}
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            await self._rollback_quietly()
+            logger.warning("请假标记读不了（0007 未应用？），这天按「休」显示: %s", exc)
+            return set()
+
+    async def _leave_days(self, employee_id: int, first: str, last: str) -> set[str]:
+        """某人一段日期里批了请假的那几天（两端都算）。缺 0007 时同 `_leave_ids` 返回空集。"""
+        try:
+            cur = await self._conn.execute(
+                """SELECT business_date FROM scheduling_overrides
+                   WHERE employee_id = ? AND business_date >= ? AND business_date <= ?
+                     AND kind = ?""",
+                (int(employee_id), first, last, KIND_LEAVE),
+            )
+            return {dict(row)["business_date"] for row in await cur.fetchall()}
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            await self._rollback_quietly()
+            logger.warning("请假标记读不了（0007 未应用？），按「休」显示: %s", exc)
+            return set()

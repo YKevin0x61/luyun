@@ -32,6 +32,14 @@ const NOT_ROSTERED = {
 }
 // 行上写着 shift_id、但那条班次已经被删（票 11 管增删）：名字取不到。
 const ORPHAN = { business_date: '2026-09-25', scheduled: true, shift_id: 9, shift_name: null }
+// 票 08：批过的请假。结果行跟「本来就休」长得一样（都没有班次），只有 `leave` 分得出。
+const LEAVE = {
+  business_date: '2026-09-25',
+  scheduled: true,
+  shift_id: null,
+  shift_name: null,
+  leave: true,
+}
 
 describe('营业日写成「9/25 周五」', () => {
   it('按 UTC 算星期几，手机时区挪不动它', () => {
@@ -102,6 +110,39 @@ describe('「休」和「还没排」是两件事（验收 3）', () => {
   })
 })
 
+describe('请假跟「休」是两件事（票 08）', () => {
+  it('批过的假说请假，不许说成休', () => {
+    expect(shiftText(LEAVE)).toBe('请假')
+    expect(todayHeadline(LEAVE)).toBe('请假')
+    expect(todaySubline(LEAVE)).toBe('今天请假')
+    expect(shiftTone(LEAVE)).toBe('leave')
+    expect(todayTone(LEAVE)).toBe('leave')
+    // 都是「那天没有班次」，但一个是自己提的、店长批的，一个是排班给的。
+    expect(shiftText(LEAVE)).not.toBe(shiftText(REST))
+    expect(todayHeadline(LEAVE)).not.toBe(todayHeadline(REST))
+    expect(shiftTone(LEAVE)).not.toBe(shiftTone(REST))
+    expect(todayTone(LEAVE)).not.toBe(todayTone(REST))
+  })
+
+  it('整月格子里写「请假」，跟「休」不同字不同色', () => {
+    expect(monthCell(LEAVE)).toEqual({ text: '请假', tone: 'leave' })
+    expect(monthCell(LEAVE).text).not.toBe(monthCell(REST).text)
+    expect(monthCell(LEAVE).tone).not.toBe(monthCell(REST).tone)
+  })
+
+  it('往后三天那三格也认得出是假不是休', () => {
+    expect(nextTwoLine([LEAVE, MORNING])).toBe('明天 请假 · 后天 白班')
+  })
+
+  it('没有 leave 这一位的老数据还是老样子', () => {
+    // 服务端一定会给这个字段（`/me`、`/me/month` 都给了）；万一没有，
+    // 不许把「休」猜成「请假」。
+    expect(shiftText(REST)).toBe('休')
+    expect(shiftText({ ...REST, leave: false })).toBe('休')
+    expect(shiftTone({ ...REST, leave: false })).toBe('rest')
+  })
+})
+
 describe('卡顶那句「明天 X · 后天 Y」（验收 3）', () => {
   it('两句一顿点，第三格留给「往后三天」', () => {
     expect(nextTwoLine([REST, MORNING, NOT_ROSTERED])).toBe('明天 休 · 后天 白班')
@@ -167,8 +208,8 @@ describe('员工端「整月」（票 06）', () => {
   })
 
   it('格子里的语气就是「今天」页那张表的语气，不是另抄一份', () => {
-    // 四态只在 `shiftTone` 里判一次：这条钉住 `monthCell` 是它的翻译，不是第二张表。
-    for (const day of [MORNING, REST, ORPHAN, NOT_ROSTERED, null]) {
+    // 五态只在 `shiftTone` 里判一次：这条钉住 `monthCell` 是它的翻译，不是第二张表。
+    for (const day of [MORNING, REST, LEAVE, ORPHAN, NOT_ROSTERED, null]) {
       expect(monthCell(day).tone).toBe(shiftTone(day))
     }
   })

@@ -41,15 +41,35 @@ _ERROR_DETAILS = {
     "beyond_window": "这天还没排到：排班只铺到 {}，等它进窗口再改",
     "missing_shift": "要改班次就得给一个班次；班次留空表示那天休，请用「改成休」",
     "rest_with_details": "「改成休」的那天不能再带班次或责任区：请把这两项留空",
+    # 请假申请（票 08）：日期没给、区间反了、事由太长、申请不存在 / 已经处理过，各说各的。
+    # 字段整个没给（`{}`）也走这条：模型里 `start_date` 有默认值，缺字段不会变成
+    # pydantic 的 422 —— 那个 `detail` 是一串英文的字段错误，员工看不懂。
+    "missing_day": "请先选一个开始日期：请假从哪天开始",
+    "bad_range": "结束日期不能早于开始日期：请重新选一遍这几天",
+    # 「过去不改」这条口径跟票 07 是同一条，但话得对员工说：他不是在改排班，是在提申请。
+    "past_leave": "已经过去的日子请不了假：请从今天起选",
+    # 带一个 `{}`：服务层把展开窗口的末日放在 `args[0]`（跟 `beyond_window` 同一条口径）。
+    "beyond_leave": "排班还没铺到那么远：最多请到 {}",
+    # 带一个 `{}`：服务层把上限（`MAX_REQUEST_NOTE`）放在 `args[0]`。
+    "note_too_long": "事由最多 {} 个字：请缩短一点再提交",
+    # 「不存在」也用在「这条是别人的」上：不告诉员工「它在，但不是你的」。
+    "unknown_request": "这条申请不存在：可能已经被撤回，刷新看看",
+    "request_not_pending": "这条申请已经处理过了：刷新看看它现在到哪一步",
     "not_migrated": (
         "排班表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
-        "migrations/pg/0005_scheduling.sql、0006_scheduling_zone_defaults.sql 与 "
-        "0007_scheduling_overrides.sql，然后刷新本页"
+        "migrations/pg/0005_scheduling.sql、0006_scheduling_zone_defaults.sql、"
+        "0007_scheduling_overrides.sql 与 0008_scheduling_requests.sql，然后刷新本页"
     ),
 }
 
-# `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
-_ERROR_STATUS = {"unknown_employee": 404, "not_migrated": 503}
+_ERROR_STATUS = {
+    # 找不到的那一行：人、申请。撤别人的申请也走这里（接口不区分「不存在」与「不是你的」）。
+    "unknown_employee": 404,
+    "unknown_request": 404,
+    # 其余一律 400（`request_not_pending` 就是这一类：那一行在，只是不再是「等你批」）；
+    # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
+    "not_migrated": 503,
+}
 
 
 class SetRuleRequest(BaseModel):
@@ -70,6 +90,21 @@ class SetOverrideRequest(BaseModel):
     is_rest: bool = False
     shift_id: Optional[int] = None
     zone_id: Optional[int] = None
+
+
+class LeaveRequest(BaseModel):
+    """员工请假：一天（不填 `end_date`）或一段日期（**两端都算**）。
+
+    `note` 是可选的事由，长度上限在服务层（`MAX_REQUEST_NOTE`）—— 那边超了报
+    `note_too_long`，这里不重复一遍数字，免得两处漂移。
+
+    `start_date` 特意不是必填（默认 `None`）：缺字段、空串、显式 `null` 都落到服务层那道闸上，
+    回一句中文的 400，而不是 pydantic 那串英文的 422 字段错误。
+    """
+
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    note: Optional[str] = None
 
 
 def _bad_request(exc: SchedulingError) -> HTTPException:
@@ -95,8 +130,8 @@ async def my_days(
 ) -> dict:
     """员工自己这几天的班（「今天」页读的就是这一条）。
 
-    跟旁边那七条不是一扇门：那七条是店长的（管理端会话，六条路径），这条是员工自己的
-    （手机端 cookie）。**接口上故意没有 `employee_id` 参数** —— 员工会话能读到的只有自己，
+    跟店长那扇门不是一回事：那边要管理端会话（`require_session`），这边要员工自己的手机端
+    cookie（`require_staff_session`）。**接口上故意没有 `employee_id` 参数** —— 员工会话能读到的只有自己，
     想读别人的班也没地方填。
     """
     store = SchedulingStore(db)
@@ -137,6 +172,69 @@ async def my_month(
         "window_end": data["window_end"],
         "days": data["days"],
     }
+
+
+@router.get("/me/requests")
+async def my_requests(
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """我提过的请假申请，新的在前（「今天」页的「我的申请」看的就是这条）。
+
+    跟 `/me`、`/me/month` 同一扇门，**接口上同样没有 `employee_id`**：员工会话读得到
+    的只有自己的申请。每条带 `status`（等店长批 / 批了 / 驳了 / 撤回了）与 `decided_at`。
+    """
+    store = SchedulingStore(db)
+    try:
+        data = await store.my_requests(employee["id"])
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+    return {
+        "employee": {"id": employee["id"], "name": employee["name"]},
+        "today": data["today"],
+        "requests": data["requests"],
+    }
+
+
+@router.post("/me/requests")
+async def submit_leave(
+    payload: LeaveRequest,
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """提一条请假：一天，或一段日期（两端都算）。
+
+    落「等店长批」——**申请本身不改排班**：批了才写覆盖行（那几天变成请假），
+    驳回与撤回一个字都不写。
+    """
+    store = SchedulingStore(db)
+    try:
+        request = await store.submit_leave(
+            employee["id"], payload.start_date, payload.end_date, payload.note
+        )
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+    return {
+        "employee": {"id": employee["id"], "name": employee["name"]},
+        "request": request,
+    }
+
+
+@router.delete("/me/requests/{request_id}")
+async def cancel_request(
+    request_id: int,
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """撤回自己**还没被批**的申请。排班一个字不改。
+
+    别人的申请一律 404（`unknown_request`）：接口不区分「不存在」与「不是你的」。
+    """
+    store = SchedulingStore(db)
+    try:
+        return await store.cancel_request(employee["id"], request_id)
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
 
 
 @router.get("/shifts")
@@ -287,4 +385,50 @@ async def clear_override(
         return await store.clear_override(employee_id, business_date)
     except SchedulingError as exc:
         # 日期格式不对、管理员没应用 0007 都会走到这里 —— 跟 PUT 那条一样的出口。
+        raise _bad_request(exc) from exc
+
+
+@router.get("/inbox")
+async def inbox(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
+    """店长待办：等他批的请假 + 还没配规则的人（票 08 的待办页）。
+
+    每条请假带一份预览（`days[*].after`：批了之后那天每个班次还剩几个人）。人手够不够
+    **只摊开数字、不拦** —— 服务层没有「最少几个人」这个配置，批准是店长的事。
+    """
+    store = SchedulingStore(db)
+    try:
+        return await store.inbox()
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.post("/inbox/{request_id}/approve")
+async def approve_request(
+    request_id: int,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """批一条请假：那几天变成请假（和「本来就休」在当日分工里分得开）。
+
+    已经过去的日子不重写（票 07 的「过去不改」）：响应里的 `applied_days` / `skipped_days`
+    说清到底写了哪几天，界面照实说，不假装。
+    """
+    store = SchedulingStore(db)
+    try:
+        return await store.approve_request(request_id)
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.post("/inbox/{request_id}/reject")
+async def reject_request(
+    request_id: int,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """驳回一条请假：排班一个字不改，只把申请记为驳回（票 08 的验收项）。"""
+    store = SchedulingStore(db)
+    try:
+        return await store.reject_request(request_id)
+    except SchedulingError as exc:
         raise _bad_request(exc) from exc

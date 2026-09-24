@@ -6,12 +6,16 @@
 // 视觉沿用 `public/hygiene-admin.css` 的深青墨令牌 —— 那是**共享的样式表**，不是卫生
 // 模块：排班不 import 卫生的 Python 模块、不挂它的菜单，只是同一套验收台配色。
 // 票 02 做「配固定班次」、票 03 加责任区、票 04 加轮转周期编辑、票 07 加单日覆盖
-// （点当天卡里的一个人就地改那一天）；班次表的增删改在票 11。
+// （点当天卡里的一个人就地改那一天）、票 08 加底下那根「请假待办」的条
+// （批假在 `/scheduling/inbox` 那一页：这一页只管排班怎么铺）；班次表的增删改在票 11。
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '../../api/client'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 
 useScopedStylesheet('/hygiene-admin.css')
+
+const router = useRouter()
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
 // 每个班次一个颜色，按排序位循环取（原型里白班薄荷、夜班水青）。N 个班次都够用。
@@ -53,6 +57,13 @@ const shiftById = computed(() => {
 const overriddenDays = computed(() =>
   ((calendar.value && calendar.value.days) || []).filter((day) => day.overridden > 0).length
 )
+
+// 没有班的人分两拨：批过假的（`leave`，服务层从覆盖记录的 `kind` 认出来）与本来就休的。
+// 两者在结果表里长得一样（`shift_id` 都是空），只有这里分得开 —— 不然店长分不清
+// 「这人请假了」和「这人今天本来就休」，也分不清它跟票 07 手动改成的休。
+const offPeople = computed(() => (dayDetail.value && dayDetail.value.off_people) || [])
+const leavePeople = computed(() => offPeople.value.filter((person) => person.leave))
+const restPeople = computed(() => offPeople.value.filter((person) => !person.leave))
 
 // 展开只铺未来若干天（长度归服务层的 `EXPANSION_DAYS`，票 02 的验收项）。翻到窗口尽头那个月时，
 // 剩下一周注定是空的 —— 不说清楚的话，店长会把它读成「那天没人上班」。
@@ -530,15 +541,39 @@ onMounted(async () => {
                 </div>
                 <p v-else class="gB-empty">这天没人排{{ group.shift.name }}</p>
               </div>
-              <!-- 休的人也要能点开：规则铺出来的休也好、已经被改成休也好，都得有个入口
-                   把那天改回班次，或者把「改成休」这个覆盖撤掉（票 07）。 -->
-              <div v-if="dayDetail.off_people && dayDetail.off_people.length" class="gB-grp">
-                <div class="gB-grp-t off">
-                  <span class="d"></span><b>休</b><i>{{ dayDetail.off_count }}</i>
+              <!-- 批过假的人自成一组（票 08）：跟「本来就休」在数据里同形（都没有班次），
+                   只有 `person.leave` 分得开。混在一个「休」里，店长就分不清
+                   「这人请假了」和「这人今天本来就休」。 -->
+              <div v-if="leavePeople.length" class="gB-grp">
+                <div class="gB-grp-t leave">
+                  <span class="d"></span><b>请假</b><i>{{ leavePeople.length }}</i>
                 </div>
                 <div class="gB-names">
                   <button
-                    v-for="person in dayDetail.off_people"
+                    v-for="person in leavePeople"
+                    :key="person.id"
+                    type="button"
+                    class="gB-name"
+                    :class="{
+                      over: person.overridden,
+                      on: editing && editing.id === person.id,
+                    }"
+                    @click="openDayEdit(person, 'rest')"
+                  >
+                    {{ person.name }}
+                    <em class="gB-zone leave">请假</em>
+                  </button>
+                </div>
+              </div>
+              <!-- 休的人也要能点开：规则铺出来的休也好、已经被改成休也好，都得有个入口
+                   把那天改回班次，或者把「改成休」这个覆盖撤掉（票 07）。 -->
+              <div v-if="restPeople.length" class="gB-grp">
+                <div class="gB-grp-t off">
+                  <span class="d"></span><b>休</b><i>{{ restPeople.length }}</i>
+                </div>
+                <div class="gB-names">
+                  <button
+                    v-for="person in restPeople"
                     :key="person.id"
                     type="button"
                     class="gB-name"
@@ -605,6 +640,13 @@ onMounted(async () => {
               <p v-if="editError" class="gC-err">{{ editError }}</p>
             </div>
           </div>
+
+          <button class="gPend gTodo" type="button" @click="router.push('/scheduling/inbox')">
+            <span class="n">假</span>
+            <b>请假待办</b>
+            <span>员工提的请假在这儿批：批完那天记成请假，先看清批了还剩几个人</span>
+            <span class="go">›</span>
+          </button>
 
           <button class="gPend" type="button" @click="openPanel('roster')">
             <span class="n">{{ pendingCount }}</span>
@@ -766,6 +808,7 @@ onMounted(async () => {
 .gB-grp-t b { font-family: var(--font-song); font-size: 12.5px; letter-spacing: .08em; }
 .gB-grp-t i { font-style: normal; font-family: var(--font-mono); color: var(--hy-ink); }
 .gB-grp-t.off { color: var(--hy-faint); }  /* 「休」那一组：没有班次色，就是不在班上 */
+.gB-grp-t.leave { color: var(--hy-aqua); }  /* 「请假」那一组（票 08）：批过的假，跟「休」分开 */
 .gB-names { display: flex; flex-wrap: wrap; gap: 6px; }
 /* 名字是一颗可以按的棋子（票 07）：点它就地改这一天。 */
 .gB-name {
@@ -786,6 +829,11 @@ onMounted(async () => {
 .gPend b { font-weight: 600; color: var(--hy-ink); font-size: 12.5px; }
 .gPend span { color: var(--hy-muted); font-size: 12.5px; }
 .gPend .go { margin-left: auto; color: var(--hy-amber); font-size: 14px; }
+/* 请假待办（票 08）：同一根条换个色 —— 青=请假，琥珀=要配规则。
+   两根条的活不一样：这根是去另一页批假，那根是在本页开名单。 */
+.gTodo { border-color: var(--hy-aqua); background: rgba(94, 234, 212, .08); }
+.gTodo .n { color: var(--hy-night); background: var(--hy-aqua); }
+.gTodo .go { color: var(--hy-aqua); }
 .gBtn {
   font: inherit; font-size: 11px; color: var(--hy-muted); background: var(--hy-surface-2);
   border: 1px solid var(--hy-line); border-radius: 999px; padding: 4px 10px; cursor: pointer;
@@ -839,6 +887,7 @@ onMounted(async () => {
   color: var(--hy-mint);
 }
 .gB-zone.off { color: var(--hy-faint); }
+.gB-zone.leave { color: var(--hy-aqua); }  /* 批过的假：跟「休」和「未配区」都不一个色 */
 /* 单日覆盖编辑器（票 07）：点当天卡里的一个人，就地展开 —— 原型 B 里没有这一块，
    它是「那一天跟规则不一样」的唯一入口。 */
 .gD {
