@@ -2,13 +2,49 @@
 # -*- coding: utf-8 -*-
 """Dashboard kds_backlog aggregation and table live list."""
 
+import contextlib
 import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from unittest import mock
 
+import db_core.reports as reports_module
 from config import settings
 from database import CHINA_TZ, DatabaseManager
+from db_core.business_day import business_day_window
+
+# 票 25：面板聚合的窗口现在是**营业日**（06:00 切），用例不能再拿墙钟当基准
+# ——旧写法 `now - 45min` / `now - 1 day` 在 00:00–06:00 会掉到窗口外（这正是
+# 已知的凌晨假红），改营业日后同样会在 06:00–06:45 复现。所以：
+#   ① 相对时刻造的用例把 db_core.reports 的 datetime 冻在营业日内的固定时刻；
+#   ② 窗口排除类用例按 business_day_window(now) 的边界造数据。
+_PANEL_NOW = datetime(2026, 5, 2, 12, 0, tzinfo=CHINA_TZ)
+
+
+class _FrozenDatetime(datetime):
+    """冻结 now() 的 datetime 子类。
+
+    db_core/reports.py 内没有对 datetime 取值做 isinstance 判断（只有
+    db_core/utils.py 的 ensure_beijing_datetime 做，而它在自己的命名空间里
+    引用真 datetime），所以普通子类替换即可，不需要 __instancecheck__ 委派。
+    """
+
+    frozen: datetime = _PANEL_NOW
+
+    @classmethod
+    def now(cls, tz=None):
+        if tz is None:
+            return cls.frozen.replace(tzinfo=None)
+        return cls.frozen.astimezone(tz)
+
+
+@contextlib.contextmanager
+def _frozen_panel_clock(moment=_PANEL_NOW):
+    """把 db_core.reports 模块里的 datetime 冻到 moment（默认营业日内正午）。"""
+    frozen_cls = type("_FrozenPanelDatetime", (_FrozenDatetime,), {"frozen": moment})
+    with mock.patch.object(reports_module, "datetime", frozen_cls):
+        yield moment
 
 
 class DashboardOpsPanelsTest(unittest.IsolatedAsyncioTestCase):
@@ -18,7 +54,8 @@ class DashboardOpsPanelsTest(unittest.IsolatedAsyncioTestCase):
         settings.DATABASE_DIR = self._tmpdir.name
         self.db = DatabaseManager()
         self.assertTrue(await self.db.connect())
-        self.now = datetime.now(CHINA_TZ)
+        # 冻结的基准时刻（只用于造数据与 created_at，聚合时钟见 _frozen_panel_clock）
+        self.now = _PANEL_NOW
 
     async def asyncTearDown(self):
         await self.db.close()
@@ -74,7 +111,9 @@ class DashboardOpsPanelsTest(unittest.IsolatedAsyncioTestCase):
             order_time=(self.now - timedelta(minutes=30)).isoformat(),
         )
 
-        backlog = await self.db.aggregate_kds_backlog()
+        # 聚合时钟冻在 12:00（营业日内），四条相对时刻全部在窗口里
+        with _frozen_panel_clock():
+            backlog = await self.db.aggregate_kds_backlog()
 
         self.assertEqual(backlog["total_pending"], 3)
         self.assertEqual(backlog["overdue_count"], 1)
@@ -113,7 +152,8 @@ class DashboardOpsPanelsTest(unittest.IsolatedAsyncioTestCase):
             )
         await tdb.commit()
 
-        backlog = await self.db.aggregate_kds_backlog()
+        with _frozen_panel_clock():
+            backlog = await self.db.aggregate_kds_backlog()
         changfen = next(s for s in backlog["stations"] if s["station_id"] == "changfen")
         self.assertEqual(changfen["pending"], 8)
         self.assertEqual(changfen["load_level"], "medium")
@@ -135,20 +175,27 @@ class DashboardOpsPanelsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live["tables"][1]["amount"], 120.0)
 
     async def test_aggregate_kds_backlog_excludes_loumian_and_yesterday(self):
+        # 票 25：数据按**当前营业日**的边界造，与墙钟无关。
+        # 旧写法（now - 5min / now - 1day）在 00:00–06:00 会让"前一营业日"的行落进
+        # 自然日窗口，这条用例因此假红。
+        business_start, _business_end = business_day_window(datetime.now(CHINA_TZ))
+        in_window = (business_start + timedelta(hours=1)).isoformat()
+        previous_business_day = (business_start - timedelta(minutes=1)).isoformat()
+
         await self._insert_order(
             business_flow_id="kitchen-today",
             station="shulong",
-            order_time=(self.now - timedelta(minutes=5)).isoformat(),
+            order_time=in_window,
         )
         await self._insert_order(
             business_flow_id="loumian-today",
             station="loumian",
-            order_time=(self.now - timedelta(minutes=5)).isoformat(),
+            order_time=in_window,
         )
         await self._insert_order(
             business_flow_id="kitchen-yesterday",
             station="shulong",
-            order_time=(self.now - timedelta(days=1)).isoformat(),
+            order_time=previous_business_day,
         )
 
         backlog = await self.db.aggregate_kds_backlog()

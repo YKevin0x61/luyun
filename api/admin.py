@@ -21,6 +21,7 @@ from starlette.background import BackgroundTask
 
 from config import settings
 from database import ALL_TABLES, get_db
+from db_core.business_day import business_day_window
 from db_core.schema import (
     AUTH_PHYSICAL_TABLES,
     HYGIENE_TABLES,
@@ -770,11 +771,13 @@ async def get_table_stats(table_name: str, db=Depends(get_db)):
 @router.post("/sync-stations")
 async def sync_orders_stations(dish_catalog=Depends(get_dish_catalog)):
     """
-    从 dish_stations 映射表同步 orders 表档口字段（今日订单）
+    从 dish_stations 映射表同步 orders 表档口字段（当前营业日订单，06:00 切）
     """
     try:
-        today_start = datetime.now(CHINA_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-        return await dish_catalog.sync_orders_since(today_start)
+        # 票 25：自然日的 [今日 00:00) 会在 00:00–06:00 漏掉前一营业日 06:00 之后的订单，
+        # 凌晨改档口映射时那批订单不会再同步；这里改为当前营业日起点。
+        business_day_start = business_day_window(datetime.now(CHINA_TZ))[0]
+        return await dish_catalog.sync_orders_since(business_day_start)
     except Exception as e:
         logger.error(f"同步档口失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

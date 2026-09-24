@@ -25,6 +25,7 @@ from config import ORDER_LINE_REVENUE_SQL
 from db_core.business_day import (
     BUSINESS_DAY_CUT_HOUR,
     business_day_range as _business_day_range,
+    business_day_window,
 )
 from db_core.utils import CHINA_TZ, ensure_beijing_datetime
 
@@ -190,9 +191,13 @@ class _ReportsMixin:
     KDS_EXCLUDED_STATION = "loumian"
 
     async def aggregate_kds_backlog(self) -> Dict[str, Any]:
-        """各档口今日待出餐队列，口径与 KDS pendingCount / load level 一致；排除楼面。"""
+        """当前营业日（06:00 切）各档口待出餐队列，口径与 KDS pendingCount / load level 一致；排除楼面。"""
         now = datetime.now(CHINA_TZ)
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        # 票 25：窗口 = 当前营业日 [06:00, 次日 06:00)，右端开区间；
+        # 旧的自然日 [今日 00:00, 现在] 会在 00:00–06:00 丢掉前一夜 06:00 之后入单的待出餐项。
+        business_start, business_end = business_day_window(now)
+        start_iso = business_start.isoformat()
+        end_iso = business_end.isoformat()
         overdue_cutoff = (now - timedelta(minutes=self.KDS_OVERDUE_MINUTES)).isoformat()
 
         tdb = self._connection.table("orders")
@@ -208,10 +213,11 @@ class _ReportsMixin:
                      AND status != '退菜'
                      AND business_flow_id NOT LIKE '%_refund_%'
                      AND order_time >= ?
+                     AND order_time < ?
                      AND station != ?
                    GROUP BY station
                    ORDER BY pending DESC, station ASC""",
-                (overdue_cutoff, today_start, self.KDS_EXCLUDED_STATION),
+                (overdue_cutoff, start_iso, end_iso, self.KDS_EXCLUDED_STATION),
             )
             rows = [dict(r) for r in await cursor.fetchall()]
 
@@ -266,9 +272,13 @@ class _ReportsMixin:
         }
 
     async def aggregate_dashboard_extras(self) -> Dict[str, Any]:
-        """今日菜品分类数、餐桌占用、紧急订单数。"""
+        """当前营业日（06:00 切）菜品分类数、餐桌占用、紧急订单数。"""
         now = datetime.now(CHINA_TZ)
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        # 票 25：分类数与菜品名兜底走当前营业日 [06:00, 次日 06:00)；
+        # 紧急订单数右端仍是最新 20 分钟（now - 20min），只是左端改营业日起点。
+        business_start, business_end = business_day_window(now)
+        start_iso = business_start.isoformat()
+        end_iso = business_end.isoformat()
         urgent_cutoff = (now - timedelta(minutes=20)).isoformat()
         tdb = self._connection.table("orders")
         async with tdb.conn.cursor() as cursor:
@@ -276,20 +286,21 @@ class _ReportsMixin:
                 """SELECT COUNT(DISTINCT CASE
                        WHEN category IS NOT NULL AND TRIM(category) != '' THEN category
                        ELSE NULL END) FROM orders
-                   WHERE order_time >= ?""",
-                (today_start,),
+                   WHERE order_time >= ? AND order_time < ?""",
+                (start_iso, end_iso),
             )
             category_count = (await cursor.fetchone())[0] or 0
             if category_count == 0:
                 await cursor.execute(
-                    """SELECT COUNT(DISTINCT dish_name) FROM orders WHERE order_time >= ?""",
-                    (today_start,),
+                    """SELECT COUNT(DISTINCT dish_name) FROM orders
+                       WHERE order_time >= ? AND order_time < ?""",
+                    (start_iso, end_iso),
                 )
                 category_count = min((await cursor.fetchone())[0] or 0, 50)
             await cursor.execute(
                 """SELECT COUNT(*) FROM orders
                    WHERE order_time >= ? AND order_time < ?""",
-                (today_start, urgent_cutoff),
+                (start_iso, urgent_cutoff),
             )
             urgent_count = (await cursor.fetchone())[0] or 0
 

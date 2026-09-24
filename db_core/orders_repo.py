@@ -92,7 +92,9 @@ class _OrdersRepoMixin:
             if start_time:
                 conditions.append("order_time >= ?"); params.append(start_time.isoformat())
             if end_time:
-                conditions.append("order_time <= ?"); params.append(end_time.isoformat())
+                # 票 25：右端是**开区间**，与 business_day_window / settled_reconcile
+                # 的营业日窗口 [start, end) 对齐；整点入单只归属一个窗口。
+                conditions.append("order_time < ?"); params.append(end_time.isoformat())
             if dish_status:
                 conditions.append("dish_status = ?"); params.append(dish_status)
             where = " AND ".join(conditions) if conditions else "1=1"
@@ -627,7 +629,8 @@ class _OrdersRepoMixin:
                 conditions.append("order_time >= ?")
                 params.append(start_time.isoformat())
             if end_time:
-                conditions.append("order_time <= ?")
+                # 票 25：同 get_orders，右端开区间；调用方传的是切日窗口 [start, end)。
+                conditions.append("order_time < ?")
                 params.append(end_time.isoformat())
             where = " AND ".join(conditions)
             tdb = self._connection.table("orders")
@@ -672,7 +675,8 @@ class _OrdersRepoMixin:
                 conditions.append("order_time >= ?")
                 params.append(start_sql)
             if end_sql is not None:
-                conditions.append("order_time <= ?")
+                # 票 25：右端开区间，与营业日/日历日窗口统一（调用方传的是 [start, end)）。
+                conditions.append("order_time < ?")
                 params.append(end_sql)
             contains = (dish_name_contains or "").strip()
             if contains:
