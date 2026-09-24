@@ -35,8 +35,11 @@ ALL_TABLES = [
 # The Admin data browser lists them read-only through its separate catalog.
 RECIPE_TABLES = ("sop_stations", "sop_recipes", "sop_recipes_history")
 
-# Hygiene tables: owned by EmployeeAccounts / HygieneWork, which are the only write
-# paths. The Admin data browser lists them read-only through its separate catalog.
+# Hygiene tables: the identity rows (hygiene_employees / hygiene_staff_sessions) are
+# written by the public-layer services/identity/accounts.py; the rest by
+# services/hygiene/accounts.py (HygieneEmployeeAccounts) / HygieneWork, which are the
+# only write paths. The Admin data browser lists them read-only through its separate
+# catalog.
 HYGIENE_TABLES = (
     "hygiene_employees",
     "hygiene_staff_sessions",

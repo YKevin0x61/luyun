@@ -106,6 +106,22 @@ class HygieneConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0].code, "duplicate_phone")
 
+    async def test_concurrent_shift_pick_returns_one_already_picked(self):
+        employee = await self.accounts.register(PHONE, PASSWORD, "张三")
+        await self.accounts.approve(employee["id"])
+        results = await asyncio.gather(
+            self.accounts.pick_shift(employee["id"], "白班"),
+            self.accounts.pick_shift(employee["id"], "夜班"),
+            return_exceptions=True,
+        )
+        successes = [result for result in results if not isinstance(result, Exception)]
+        errors = [result for result in results if isinstance(result, Exception)]
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], EmployeeAccountsError)
+        self.assertEqual(errors[0].code, "shift_already_picked")
+        self.assertIsNotNone(await self.accounts.current_shift(employee["id"]))
+
     async def test_roster_field_update_is_atomic(self):
         employee = await self.accounts.register(PHONE, PASSWORD, "张三")
         await self.accounts.approve(employee["id"])

@@ -35,7 +35,7 @@ _Avoid_: 把 port 当成 DatabaseManager 的 identity 别名，或在服务里�
 
 ### 数据库连接 (Database Connection)
 进程内**唯一**拥有业务库连接的东西：建立、替换、关闭，以及回答「现在这条连接还能用吗」。
-持有者（`TableView`、`RecipeStore`、卫生的 `HygieneWork` / `EmployeeAccounts` / `HygieneDataArchive`）拿到的是一个**稳定句柄**——
+持有者（`TableView`、`RecipeStore`、公共层的 `EmployeeAccounts`（`services/identity/accounts.py`）、卫生的 `HygieneWork` / `HygieneEmployeeAccounts` / `HygieneDataArchive`）拿到的是一个**稳定句柄**——
 连接在整库恢复等场景下被换掉时，句柄不变，持有者的引用不会变成僵尸。
 「对象是否存在」与「驱动连接是否活着」是两件事：前者决定要不要新建句柄，后者只回答能不能用。
 `PgConnection`（`db_core/backend/pg.py`）是它内部的驱动适配（aiosqlite 形态 shim），不是同一个概念，也不该出现在持有者的视野里。
