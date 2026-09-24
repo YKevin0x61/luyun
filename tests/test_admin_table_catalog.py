@@ -71,6 +71,7 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
     assert "admin_user" in body["tables"]
     assert "sop_recipes" in body["tables"]
     assert "hygiene_zones" in body["tables"]
+    assert "staff_shifts" in body["tables"]
     assert "logs" in body["tables"]
 
     meta = body["table_meta"]
@@ -82,7 +83,7 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
     assert meta["admin_user"]["redacted_columns"] == ["password_hash"]
 
     group_keys = [group["key"] for group in body["groups"]]
-    assert group_keys == ["business", "recipe", "hygiene", "auth", "external"]
+    assert group_keys == ["business", "recipe", "hygiene", "scheduling", "auth", "external"]
 
 
 def test_read_only_physical_tables_can_be_browsed(tmp_path):

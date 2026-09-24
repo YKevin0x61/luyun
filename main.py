@@ -33,6 +33,7 @@ from api.release_update import router as release_update_router
 from api.db_migrations import router as db_migrations_router
 from api.runtime_settings import router as runtime_settings_router
 from api.logs import router as logs_router
+from api.scheduling import router as scheduling_router
 from api.tables import router as tables_router
 from api.analytics import router as analytics_router
 from api.export_api import router as export_router
@@ -344,6 +345,17 @@ async def lifespan(app: FastAPI):
             )
             await hygiene_work.prepare()
             startup_results.append("卫生待办")
+            # 排班是独立系统：班次表空的时候放默认两条（白班 / 夜班）。
+            #
+            # 表还不存在（0005 没应用）时 prepare() 返回 False，只记日志 —— 不能在这里
+            # 抛出去：补迁移的唯一入口是 Admin 的「系统更新 → 数据库迁移」面板，服务器
+            # 起不来就进不去，成了死循环。同样的口径见 services/log_storage.py（0004 缺表
+            # 时降级）。PG 不在启动期改结构（ADR 0089）。
+            from services.scheduling.store import SchedulingStore
+            if await SchedulingStore(db_manager).prepare():
+                startup_results.append("排班班次")
+            else:
+                startup_results.append("排班班次(待迁移)")
             # 同一份 capture 目录，各持有自己的 store 实例（FileCaptureStore 无状态）。
             hygiene_archive = HygieneDataArchive(
                 db_manager, captures=FileCaptureStore(capture_root)
@@ -984,6 +996,9 @@ app.include_router(release_update_router)
 app.include_router(db_migrations_router)
 app.include_router(runtime_settings_router)
 app.include_router(logs_router)
+# 排班自己带 require_session（管理端页面用），不挂 verify_admin_token：
+# 店长用的是浏览器会话，不是 API token。
+app.include_router(scheduling_router)
 
 # 静态文件（仪表盘 + 管理后台）
 from fastapi.staticfiles import StaticFiles
@@ -1095,6 +1110,7 @@ SPA_PAGE_ROUTES = (
     "/hygiene-fix",
     "/hygiene-boards",
     "/hygiene-data",
+    "/scheduling",
 )
 
 

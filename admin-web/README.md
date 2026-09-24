@@ -7,7 +7,7 @@
 ## 功能范围
 
 - 仪表盘（`/`）：汇总卡片、热销菜品、最新订单、档口进单速率图表、系统状态
-- 数据管理（`/admin`）：业务表通用 CRUD，并按业务 / 配方 / 卫生 / 认证分组浏览
+- 数据管理（`/admin`）：业务表通用 CRUD，并按业务 / 配方 / 卫生 / 排班 / 认证分组浏览
   其余只读表；运行日志（PostgreSQL 的 `logs` 表，不再有 `logs.db`）提供 `/logs` 入口。含批量菜品分类弹窗、
   表结构管理（新增/删除列）
 - 销售报表（`/sales-report`）：汇总卡、趋势图、档口占比、菜品明细、半成品换算规则、
@@ -92,6 +92,7 @@ src/
     recipe/*.vue            # RecipeStationsView / RecipeDetailView / RecipeManageView /
                             # RecipePrintView / RecipeQrView
     hygiene/*.vue           # 管理端 7 页 + 员工端 Home/Login/Register + 两个 Layout
+    scheduling/*.vue        # 排班日历（店长端，独立系统，不 import 卫生）
 ```
 
 ## 已知限制 / 后续可优化项

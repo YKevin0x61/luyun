@@ -38,6 +38,7 @@ const routes = [
   { path: '/logs', name: 'logs', component: () => import('../views/LogsView.vue') },
   { path: '/prep-plan', name: 'prep-plan', component: () => import('../views/PrepPlanView.vue') },
   { path: '/wecom-push', name: 'wecom-push', component: () => import('../views/WecomPushView.vue') },
+  { path: '/scheduling', name: 'scheduling', component: () => import('../views/scheduling/SchedulingCalendarView.vue') },
   hygieneAdminPage('/hygiene-roster', 'hygiene-roster', () => import('../views/hygiene/HygieneRosterView.vue')),
   hygieneAdminPage('/hygiene-zones', 'hygiene-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
   hygieneAdminPage('/hygiene-daily', 'hygiene-daily', () => import('../views/hygiene/HygieneDailyView.vue')),

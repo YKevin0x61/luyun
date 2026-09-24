@@ -21,7 +21,12 @@ from starlette.background import BackgroundTask
 
 from config import settings
 from database import ALL_TABLES, get_db
-from db_core.schema import AUTH_PHYSICAL_TABLES, HYGIENE_TABLES, RECIPE_TABLES
+from db_core.schema import (
+    AUTH_PHYSICAL_TABLES,
+    HYGIENE_TABLES,
+    RECIPE_TABLES,
+    SCHEDULING_TABLES,
+)
 from api.security import verify_admin_token
 from services.dish_catalog import get_dish_catalog
 
@@ -35,6 +40,7 @@ _ADMIN_READ_ONLY_TABLES = frozenset({
     *AUTH_PHYSICAL_TABLES,
     *RECIPE_TABLES,
     *HYGIENE_TABLES,
+    *SCHEDULING_TABLES,
 })
 _ADMIN_WRITABLE_TABLES = frozenset(
     table for table in ALL_TABLES
@@ -44,6 +50,7 @@ _ADMIN_TABLE_GROUPS = (
     ("business", "业务数据", tuple(t for t in ALL_TABLES if t not in ("auth", "logs"))),
     ("recipe", "配方库", RECIPE_TABLES),
     ("hygiene", "卫生管理", HYGIENE_TABLES),
+    ("scheduling", "排班", SCHEDULING_TABLES),
     ("auth", "登录认证", AUTH_PHYSICAL_TABLES),
     ("external", "其他数据源", ("logs",)),
 )
@@ -78,6 +85,8 @@ def _reject_read_only_table_write(table_name: str) -> None:
         raise HTTPException(status_code=403, detail="配方表为只读表，请通过配方管理页面维护")
     if table_name in HYGIENE_TABLES:
         raise HTTPException(status_code=403, detail="卫生表为只读表，请通过卫生管理页面维护")
+    if table_name in SCHEDULING_TABLES:
+        raise HTTPException(status_code=403, detail="排班表为只读表，请通过排班页面维护")
     if table_name not in _ADMIN_WRITABLE_TABLES:
         raise HTTPException(status_code=403, detail="系统表禁止修改")
 
@@ -109,6 +118,8 @@ def _admin_catalog() -> Dict[str, Any]:
                 meta["read_only_reason"] = "请通过配方管理页面维护"
             elif table in HYGIENE_TABLES:
                 meta["read_only_reason"] = "请通过卫生管理页面维护"
+            elif table in SCHEDULING_TABLES:
+                meta["read_only_reason"] = "请通过排班页面维护"
             redacted = sorted(_ADMIN_REDACTED_COLUMNS.get(table, ()))
             if redacted:
                 meta["redacted_columns"] = redacted
