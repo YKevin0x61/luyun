@@ -19,6 +19,7 @@ const SHIFT_TONES = ['mint', 'aqua', 'amber', 'seal']
 const loading = ref(true)
 const errorText = ref('')
 const shifts = ref([])
+const zones = ref([])
 const calendar = ref(null)
 const selectedDate = ref('')
 const dayDetail = ref(null)
@@ -130,6 +131,9 @@ async function loadRoster() {
     const data = await api.get('/api/scheduling/roster')
     roster.value = data.employees || []
     if (data.shifts && data.shifts.length) shifts.value = data.shifts
+    // 责任区名单来自公共层（读的是卫生建的那份），所以卫生那边新建一个区，
+    // 这里刷新一下就能选到 —— 不需要重启，也不用在排班这边再建一份。
+    zones.value = data.zones || []
   } catch (err) {
     errorText.value = err.message || '名单读不出来'
   }
@@ -195,6 +199,32 @@ async function clearRule(employee) {
     await loadPendingCount()
   } catch (err) {
     errorText.value = err.message || '规则没清掉'
+  } finally {
+    busyEmployeeId.value = null
+  }
+}
+
+// 每人每班次一个固定区（票 03）：白班在案板的人就一直排案板。没配 = 空串，
+// 下拉里显示「未配区」—— 那是个正常状态，不是错误。
+function zoneOf(employee, shiftId) {
+  const value = (employee.zone_defaults || {})[shiftId]
+  return value === undefined || value === null ? '' : String(value)
+}
+
+async function setZoneDefault(employee, shiftId, value) {
+  busyEmployeeId.value = employee.id
+  errorText.value = ''
+  try {
+    await api.put(`/api/scheduling/zone-defaults/${employee.id}`, {
+      shift_id: shiftId,
+      zone_id: value === '' ? null : Number(value),
+    })
+    await loadRoster()
+    // 后端把今天以后已经铺好的行一起改了，所以底下那张当天卡要重读一遍。
+    await loadDay(selectedDate.value)
+  } catch (err) {
+    errorText.value = err.message || '责任区没存上'
+    await loadRoster()
   } finally {
     busyEmployeeId.value = null
   }
@@ -277,8 +307,12 @@ onMounted(async () => {
                 <div class="gB-grp-t" :class="toneOf(group.shift.id)">
                   <span class="d"></span><b>{{ group.shift.name }}</b><i>{{ group.count }}</i>
                 </div>
-                <div v-if="group.names.length" class="gB-names">
-                  <span v-for="name in group.names" :key="name">{{ name }}</span>
+                <div v-if="group.people.length" class="gB-names">
+                  <span v-for="person in group.people" :key="person.id">
+                    {{ person.name }}
+                    <em v-if="person.zone" class="gB-zone">{{ person.zone }}</em>
+                    <em v-else class="gB-zone off">未配区</em>
+                  </span>
                 </div>
                 <p v-else class="gB-empty">这天没人排{{ group.shift.name }}</p>
               </div>
@@ -327,9 +361,24 @@ onMounted(async () => {
                   @click="clearRule(employee)"
                 >清空</button>
               </div>
+              <div class="gZ">
+                <label v-for="shift in shifts" :key="shift.id" class="gZ-pick">
+                  <span>{{ shift.name }}</span>
+                  <select
+                    class="gZ-sel"
+                    :value="zoneOf(employee, shift.id)"
+                    :disabled="busyEmployeeId === employee.id"
+                    @change="setZoneDefault(employee, shift.id, $event.target.value)"
+                  >
+                    <option value="">未配区</option>
+                    <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
+                  </select>
+                </label>
+                <span v-if="!zones.length" class="gZ-none">还没有责任区，先去卫生的责任区页面建一个</span>
+              </div>
             </div>
             <p v-if="!roster.length" class="gB-empty">名单是空的</p>
-            <p class="gB-note">轮转周期（白白白夜夜休休）在下一张票里编；这里只配「固定一个班」。</p>
+            <p class="gB-note">轮转周期（白白白夜夜休休）在下一张票里编；这里只配「固定一个班」和每个班的固定责任区。</p>
           </div>
         </template>
       </div>
@@ -426,4 +475,18 @@ onMounted(async () => {
 .gR-main em { margin-left: auto; font-style: normal; font-family: var(--font-mono); font-size: 11px; color: var(--hy-faint); }
 .gR-main em.on { color: var(--hy-mint); }
 .gR-act { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+/* 每个班的固定责任区（票 03）。一行两个班次的下拉，窄屏自动换行。 */
+.gZ { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 7px; }
+.gZ-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--hy-faint); }
+.gZ-sel {
+  font: inherit; font-size: 11px; color: var(--hy-ink); background: var(--hy-surface-2);
+  border: 1px solid var(--hy-line); border-radius: 7px; padding: 3px 6px; cursor: pointer;
+}
+.gZ-sel:disabled { opacity: .45; cursor: default; }
+.gZ-none { font-size: 11px; color: var(--hy-faint); }
+.gB-zone {
+  margin-left: 5px; font-style: normal; font-family: var(--font-mono); font-size: 10px;
+  color: var(--hy-mint);
+}
+.gB-zone.off { color: var(--hy-faint); }
 </style>

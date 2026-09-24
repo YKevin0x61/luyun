@@ -68,6 +68,25 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
         return [dict(row) for row in await cur.fetchall()]
 
+    async def _zone(self, name="案板"):
+        """建一个责任区。表是卫生那条线建的（`hygiene_zones`），这里只当数据用 ——
+        排班读它要走公共层的 `ZoneDirectory`，测试里也不假装是排班自己的表。"""
+        now = self.fixed_now.isoformat()
+        cur = await self.db._conn.execute(
+            """INSERT INTO hygiene_zones (name, day_shift, night_shift, created_at, updated_at)
+               VALUES (?, 1, 1, ?, ?)""",
+            (name, now, now),
+        )
+        await self.db._conn.commit()
+        return int(cur.lastrowid)
+
+    async def _zone_ids(self, employee_id):
+        cur = await self.db._conn.execute(
+            "SELECT business_date, zone_id FROM staff_assignments WHERE employee_id = ?",
+            (employee_id,),
+        )
+        return {dict(row)["business_date"]: dict(row)["zone_id"] for row in await cur.fetchall()}
+
     # ── 验收 1：配「固定白班」，从今天起每天都算进白班 ──────────────────
 
     async def test_fixed_day_shift_covers_every_day_from_today(self):
@@ -146,7 +165,134 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(detail["total"], 1)
         group = [item for item in detail["groups"] if item["shift"]["name"] == "白班"][0]
-        self.assertEqual(group["names"], ["张三"])
+        self.assertEqual([person["name"] for person in group["people"]], ["张三"])
+        # 没配区的人照样出现在名单里，只是区是空的（票 03 的验收项）。
+        self.assertIsNone(group["people"][0]["zone"])
+
+    # ── 票 03：每人每班次一个固定责任区 ────────────────────────────────
+
+    async def test_zone_default_is_written_into_new_rows(self):
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+
+        await self.store.set_zone_default(employee["id"], day, zone)
+        await self.store.set_rule(employee["id"], [day])
+
+        self.assertEqual(set((await self._zone_ids(employee["id"])).values()), {zone})
+
+    async def test_setting_a_zone_updates_today_and_later_only(self):
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        first = await self._zone("案板")
+        second = await self._zone("熟笼")
+        await self.store.set_zone_default(employee["id"], day, first)
+        await self.store.set_rule(employee["id"], [day])
+
+        # 两天后再改区：已经写下来的那两个营业日不动，今天及以后跟着走。
+        self.store._now = lambda: self.fixed_now + timedelta(days=2)
+        await self.store.set_zone_default(employee["id"], day, second)
+
+        zones = await self._zone_ids(employee["id"])
+        self.assertEqual(zones["2026-09-24"], first)
+        self.assertEqual(zones["2026-09-25"], first)
+        self.assertEqual(zones["2026-09-26"], second)
+        self.assertEqual(zones[LAST_DAY], second)
+
+    async def test_past_days_keep_the_zone_they_were_written_with(self):
+        """读的那一侧也守住「过去不改」：那天写下来是什么区，点开就是什么区。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        first = await self._zone("案板")
+        second = await self._zone("熟笼")
+        await self.store.set_zone_default(employee["id"], day, first)
+        await self.store.set_rule(employee["id"], [day])
+
+        self.store._now = lambda: self.fixed_now + timedelta(days=2)
+        await self.store.set_zone_default(employee["id"], day, second)
+
+        def zone_of(detail):
+            return [
+                item for item in detail["groups"] if item["shift"]["name"] == "白班"
+            ][0]["people"][0]["zone"]
+
+        self.assertEqual(zone_of(await self.store.day_detail("2026-09-24")), "案板")
+        self.assertEqual(zone_of(await self.store.day_detail("2026-09-26")), "熟笼")
+
+    async def test_zone_follows_the_shift_when_the_rule_changes(self):
+        """白班换夜班：区跟着新班次走 —— 区是挂在「班次」上的，不是挂在人身上。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        day_zone = await self._zone("案板")
+        night_zone = await self._zone("熟笼")
+        await self.store.set_zone_default(employee["id"], day, day_zone)
+        await self.store.set_zone_default(employee["id"], night, night_zone)
+        await self.store.set_rule(employee["id"], [day])
+        self.assertEqual(set((await self._zone_ids(employee["id"])).values()), {day_zone})
+
+        await self.store.set_rule(employee["id"], [night])
+
+        self.assertEqual(set((await self._zone_ids(employee["id"])).values()), {night_zone})
+
+    async def test_zone_default_can_be_cleared(self):
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone()
+        await self.store.set_zone_default(employee["id"], day, zone)
+        await self.store.set_rule(employee["id"], [day])
+
+        await self.store.set_zone_default(employee["id"], day, None)
+
+        self.assertEqual(await self.store.zone_defaults(), {})
+        self.assertEqual(set((await self._zone_ids(employee["id"])).values()), {None})
+
+    async def test_unknown_zone_is_rejected(self):
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+
+        with self.assertRaises(SchedulingError) as ctx:
+            await self.store.set_zone_default(employee["id"], day, 987654)
+
+        self.assertEqual(ctx.exception.code, "unknown_zone")
+
+    async def test_zone_default_rejects_unknown_shift_and_employee(self):
+        employee = await self._employee()
+        zone = await self._zone()
+        day = await self._shift_id("白班")
+
+        with self.assertRaises(SchedulingError) as ctx:
+            await self.store.set_zone_default(employee["id"], 987654, zone)
+        self.assertEqual(ctx.exception.code, "unknown_shift")
+
+        with self.assertRaises(SchedulingError) as ctx:
+            await self.store.set_zone_default(987654, day, zone)
+        self.assertEqual(ctx.exception.code, "unknown_employee")
+
+    async def test_roster_carries_zones_and_each_persons_default(self):
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("熟笼")
+        await self.store.set_zone_default(employee["id"], day, zone)
+
+        roster = await self.store.roster_with_rules()
+
+        self.assertIn({"id": zone, "name": "熟笼"}, roster["zones"])
+        self.assertEqual(roster["employees"][0]["zone_defaults"], {day: zone})
+
+    async def test_zone_created_in_hygiene_is_pickable_at_once(self):
+        """名单只有一份（卫生建的那张表），排班经公共层读它 —— 新建完不用重启。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        before = await self.store.roster_with_rules()
+
+        zone = await self._zone("肠粉")
+
+        after = await self.store.roster_with_rules()
+        self.assertNotIn(zone, [item["id"] for item in before["zones"]])
+        self.assertIn({"id": zone, "name": "肠粉"}, after["zones"])
+        await self.store.set_zone_default(employee["id"], day, zone)
+        self.assertEqual((await self.store.zone_defaults())[employee["id"]], {day: zone})
 
     # ── 验收 3：只铺 90 天，已写下的行不重算 ────────────────────────────
 
@@ -365,7 +511,11 @@ class SchedulingLayeringTest(unittest.TestCase):
     """验收 6/7：排班是独立系统 —— 不 import 卫生，也不动员工端。"""
 
     def test_scheduling_never_imports_hygiene(self):
-        for path in sorted((REPO_ROOT / "services" / "scheduling").glob("*.py")):
+        # 服务层和它的 HTTP 面都扫：票 03 起公共层多了 `services/identity/zones.py`，
+        # 排班侧真正碰责任区的调用点在 `store.py` 与 `api/scheduling.py` 两处。
+        paths = sorted((REPO_ROOT / "services" / "scheduling").glob("*.py"))
+        paths.append(REPO_ROOT / "api" / "scheduling.py")
+        for path in paths:
             tree = ast.parse(path.read_text(encoding="utf-8"))
             imported = set()
             for node in ast.walk(tree):
@@ -392,6 +542,7 @@ class SchedulingLayeringTest(unittest.TestCase):
                 "/api/scheduling/day",
                 "/api/scheduling/roster",
                 "/api/scheduling/rules/{employee_id}",
+                "/api/scheduling/zone-defaults/{employee_id}",
             },
         )
 
@@ -411,7 +562,12 @@ class SchedulingLayeringTest(unittest.TestCase):
         """验收 4：新表进表名清单，Admin 的数据浏览器只读能看到。"""
         self.assertEqual(
             set(SCHEDULING_TABLES),
-            {"staff_shifts", "staff_assignments", "scheduling_rules"},
+            {
+                "staff_shifts",
+                "staff_assignments",
+                "scheduling_rules",
+                "scheduling_zone_defaults",
+            },
         )
         for table in SCHEDULING_TABLES:
             self.assertIn(table, ADMIN_READ_ONLY_TABLES)

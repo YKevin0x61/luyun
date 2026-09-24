@@ -34,7 +34,7 @@ import asyncpg
 
 from db_core.utils import CHINA_TZ
 from services.business_day import current_business_date, shift_business_date
-from services.identity import EmployeeAccounts, serialized_write
+from services.identity import EmployeeAccounts, ZoneDirectory, serialized_write
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +185,18 @@ class SchedulingStore:
                 "migrations/pg/0005_scheduling.sql（PG 不在启动期改结构，见 ADR 0089）"
             )
             return False
+        # 班次表在、固定责任区表不在：半迁移（0005 应用了、0006 没应用）。启动照旧，
+        # 但名单面板会 503，日志里先把该跑哪个脚本说清楚。
+        try:
+            await (await self._conn.execute("SELECT 1 FROM scheduling_zone_defaults LIMIT 1")).fetchone()
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
+            await self._rollback_quietly()
+            logger.error(
+                "❌ scheduling_zone_defaults 表不存在：请在 Admin「系统更新 → 数据库迁移」"
+                "应用 migrations/pg/0006_scheduling_zone_defaults.sql"
+                "（缺它时排班的名单面板打不开，配不了固定责任区）"
+            )
+            return False
         if row is not None and int(dict(row)["n"] or 0) > 0:
             return True
         stamp = self._now_iso()
@@ -242,6 +254,114 @@ class SchedulingStore:
             if not shift["is_active"] and shift["id"] in seen_ids
         ]
         return active + retired
+
+    # ── 责任区 ──────────────────────────────────────────────────────────
+
+    @_needs_migration
+    async def zone_defaults(self) -> dict[int, dict[int, Optional[int]]]:
+        """``employee_id → {shift_id: zone_id}``：每人每班次一个**固定区**（票 03）。
+
+        没配过的人/班次不在里面 —— 那表示「这个人这个班次在哪」还没定，不是错误。
+        """
+        defaults: dict[int, dict[int, Optional[int]]] = {}
+        for row in await (await self._conn.execute(
+            "SELECT employee_id, shift_id, zone_id FROM scheduling_zone_defaults"
+        )).fetchall():
+            mapping = dict(row)
+            defaults.setdefault(int(mapping["employee_id"]), {})[int(mapping["shift_id"])] = (
+                None if mapping["zone_id"] is None else int(mapping["zone_id"])
+            )
+        return defaults
+
+    async def _zone_defaults_for(self, employee_id: int) -> dict[int, Optional[int]]:
+        """一个人的固定区，铺行的时候用。不自己上锁（调用方管）。"""
+        rows = await (await self._conn.execute(
+            "SELECT shift_id, zone_id FROM scheduling_zone_defaults WHERE employee_id = ?",
+            (int(employee_id),),
+        )).fetchall()
+        return {
+            int(dict(row)["shift_id"]): (
+                None if dict(row)["zone_id"] is None else int(dict(row)["zone_id"])
+            )
+            for row in rows
+        }
+
+    @_needs_migration
+    async def set_zone_default(
+        self,
+        employee_id: int,
+        shift_id: int,
+        zone_id: Optional[int] = None,
+    ) -> dict:
+        """给「某人 × 某班次」定一个固定区（`zone_id=None` = 清掉这个配置）。
+
+        配完要**顺手把今天以后那些已经铺出来的行改掉** —— 不然店长改完区，月历上
+        还是旧的（那些行是老早铺的，`set_rule` 才会重铺）。过去一行不动，同
+        `_delete_future_rule_rows` 的口径。
+
+        校验在锁外，写 + 改行在**一次**写锁、一次提交里。
+        """
+        employee_id = int(employee_id)
+        shift_id = int(shift_id)
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        if employee_id not in {employee["id"] for employee in roster}:
+            raise SchedulingError("unknown_employee", "unknown_employee")
+        if shift_id not in {shift["id"] for shift in await self.list_shifts()}:
+            raise SchedulingError("unknown_shift", "unknown_shift")
+        zone = None if zone_id in (None, "") else int(zone_id)
+        if zone is not None and zone not in {
+            item["id"] for item in await self._zone_directory().list_zones()
+        }:
+            raise SchedulingError("unknown_zone", "unknown_zone")
+
+        await self._apply_zone_default(employee_id, shift_id, zone)
+        return {"employee_id": employee_id, "shift_id": shift_id, "zone_id": zone}
+
+    @serialized_write
+    async def _apply_zone_default(
+        self, employee_id: int, shift_id: int, zone_id: Optional[int]
+    ) -> None:
+        stamp = self._now_iso()
+        if zone_id is None:
+            # 清掉 = 把这行删掉，不留一条「值为空」的配置：`zone_defaults()` 里
+            # 「有这个人这个班次」和「配了区」于是是同一件事。
+            await self._conn.execute(
+                "DELETE FROM scheduling_zone_defaults WHERE employee_id = ? AND shift_id = ?",
+                (employee_id, shift_id),
+            )
+        else:
+            cur = await self._conn.execute(
+                "SELECT id FROM scheduling_zone_defaults WHERE employee_id = ? AND shift_id = ?",
+                (employee_id, shift_id),
+            )
+            existing = await cur.fetchone()
+            if existing is None:
+                await self._conn.execute(
+                    """INSERT INTO scheduling_zone_defaults
+                           (employee_id, shift_id, zone_id, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (employee_id, shift_id, zone_id, stamp, stamp),
+                )
+            else:
+                await self._conn.execute(
+                    """UPDATE scheduling_zone_defaults SET zone_id = ?, updated_at = ?
+                       WHERE employee_id = ? AND shift_id = ?""",
+                    (zone_id, stamp, employee_id, shift_id),
+                )
+        await self._conn.execute(
+            """UPDATE staff_assignments SET zone_id = ?, updated_at = ?
+               WHERE employee_id = ? AND shift_id = ? AND business_date >= ?
+                 AND source = ?""",
+            (zone_id, stamp, employee_id, shift_id, self.today(), SOURCE_RULE),
+        )
+        await self._conn.commit()
+
+    def _zone_directory(self) -> ZoneDirectory:
+        """公共层的责任区名单。写锁跟着走 —— 它只读，但共用同一个连接。"""
+        return ZoneDirectory(self._write_lock_owner)
+
+    async def _zone_name_index(self) -> dict[int, str]:
+        return {zone["id"]: zone["name"] for zone in await self._zone_directory().list_zones()}
 
     # ── 规则 ────────────────────────────────────────────────────────────
 
@@ -414,6 +534,9 @@ class SchedulingStore:
             (employee_id, first, last),
         )
         already = {dict(row)["business_date"] for row in await cur.fetchall()}
+        # 每人每班次的固定区：铺行的时候一并写进结果，下游（卫生的当日分工）读这一列，
+        # 不用自己去推「谁今天在哪」。
+        zone_by_shift = await self._zone_defaults_for(employee_id)
 
         stamp = self._now_iso()
         written = 0
@@ -427,11 +550,12 @@ class SchedulingStore:
             # 所以 anchor 在未来（先有规则后改回来）时照样算得对。
             day = date.fromisoformat(business_date)
             shift_id = cycle[(day - anchor).days % len(cycle)]
+            zone_id = None if shift_id is REST else zone_by_shift.get(shift_id)
             await self._conn.execute(
                 """INSERT INTO staff_assignments
                        (employee_id, business_date, shift_id, zone_id, source, created_at, updated_at)
-                   VALUES (?, ?, ?, NULL, ?, ?, ?)""",
-                (employee_id, business_date, shift_id, SOURCE_RULE, stamp, stamp),
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (employee_id, business_date, shift_id, zone_id, SOURCE_RULE, stamp, stamp),
             )
             written += 1
         return written
@@ -494,32 +618,49 @@ class SchedulingStore:
 
     @_needs_migration
     async def day_detail(self, business_date: str) -> dict:
-        """某一天：各班**是谁**（月历点开那天看的就是这个）。
+        """某一天：各班**是谁、在哪个区**（月历点开那天看的就是这个）。
 
         键叫 `groups` 而不是 `shifts`：`/calendar` 的 `shifts` 是班次列表，这里每一组
         还带人数和名字，同名会让调用方以为形状一样。
+
+        责任区读的是**结果行上的 `zone_id`**，不是现在的固定区配置：那天写下来是什么
+        就是什么 —— 事后改固定区不该改写已经过去的日子（`spec.md` 的「过去不改」）。
         """
         day = _require_business_date(business_date)
         names = await self._name_index()
+        zone_names = await self._zone_name_index()
 
         cur = await self._conn.execute(
-            "SELECT employee_id, shift_id FROM staff_assignments WHERE business_date = ?",
+            "SELECT employee_id, shift_id, zone_id FROM staff_assignments WHERE business_date = ?",
             (day,),
         )
-        by_shift: dict[Any, list[int]] = {}
+        by_shift: dict[Any, list[tuple[int, Optional[int]]]] = {}
         for row in await cur.fetchall():
             mapping = dict(row)
             key = REST if mapping["shift_id"] is None else int(mapping["shift_id"])
-            by_shift.setdefault(key, []).append(int(mapping["employee_id"]))
+            zone = None if mapping["zone_id"] is None else int(mapping["zone_id"])
+            by_shift.setdefault(key, []).append((int(mapping["employee_id"]), zone))
 
         shifts = await self._shifts_for_display({key for key in by_shift if key is not REST})
         groups = []
         for shift in shifts:
-            ids = sorted(by_shift.get(shift["id"], []), key=lambda i: names.get(i, ""))
+            people = sorted(
+                by_shift.get(shift["id"], []),
+                key=lambda item: names.get(item[0], ""),
+            )
             groups.append({
                 "shift": shift,
-                "count": len(ids),
-                "names": [names.get(i, "") for i in ids],
+                "count": len(people),
+                "people": [
+                    {
+                        "id": employee_id,
+                        "name": names.get(employee_id, ""),
+                        # 没配区就是 None，前端渲染成「（未配区）」——
+                        # 「这个人这天在哪」还没定，不是错误。
+                        "zone": zone_names.get(zone) if zone is not None else None,
+                    }
+                    for employee_id, zone in people
+                ],
             })
         rest_ids = by_shift.get(REST, [])
         return {
@@ -531,15 +672,18 @@ class SchedulingStore:
 
     @_needs_migration
     async def roster_with_rules(self) -> dict:
-        """名单：全体花名册 + 每人当前那条规则（没配的人 `rule` 是 `None`）。
+        """名单：全体花名册 + 每人当前那条规则 + 每人每班次的固定区。
 
-        花名册来自**公共层**（`EmployeeAccounts.list_roster`），排班不自己去 join
-        `hygiene_employees` —— 表名是公共层的实现细节（`spec.md` 的「分层」）。
+        花名册来自**公共层**（`EmployeeAccounts.list_roster`），责任区名单也来自公共层
+        （`ZoneDirectory.list_zones`，读的是卫生建的那张 `hygiene_zones`）；排班不自己去
+        join `hygiene_employees` —— 表名是公共层的实现细节（`spec.md` 的「分层」）。
         """
         employees = await EmployeeAccounts(self._write_lock_owner).list_roster()
         rules = await self.list_rules()
+        defaults = await self.zone_defaults()
         return {
             "shifts": await self.list_shifts(),
+            "zones": await self._zone_directory().list_zones(),
             "employees": [
                 {
                     "id": employee["id"],
@@ -549,6 +693,8 @@ class SchedulingStore:
                     "approved": employee["approved"],
                     "disabled": employee["disabled"],
                     "rule": rules.get(employee["id"]),
+                    # {班次 id: 责任区 id}；没配过就是空对象
+                    "zone_defaults": defaults.get(employee["id"], {}),
                 }
                 for employee in employees
             ],

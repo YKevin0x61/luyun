@@ -39,6 +39,7 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0003_hygiene_board_ticket.sql` | `hygiene_board_events.ticket_id` 列 + `idx_hygiene_board_events_ticket` 索引（整改驳回的关联键） | 员工端看不到整改单被驳回，也拿不到驳回原因 |
 | `0004_logs.sql` | 日志表 `logs` 进 PostgreSQL（SQLite 的 `data/logs.db` 已退场） | 日志写入全部失败（`relation "logs" does not exist`），`/logs` 页面与 `GET /api/logs/*` 无数据 |
 | `0005_scheduling.sql` | 排班系统第一批表：`staff_shifts`（班次表，含白班/夜班两行）、`staff_assignments`（排出来的结果）、`scheduling_rules`（一人一条轮转规则） | 排班页面与 `/api/scheduling/*` 全部报错（`relation "staff_shifts" does not exist`），店长打不开月历 |
+| `0006_scheduling_zone_defaults.sql` | `scheduling_zone_defaults`：每人每班次一个固定责任区（区名单仍在 `hygiene_zones`，不搬表） | 店长在排班页配不了责任区，排出来的行 `zone_id` 恒为空 |
 
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，

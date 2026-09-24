@@ -65,14 +65,17 @@ HYGIENE_TABLES = (
 
 # Scheduling tables: `staff_shifts` / `staff_assignments` are the shared vocabulary
 # (what shifts exist; who works which day) that the public layer and every downstream
-# reader agree on, `scheduling_rules` is the scheduling system's own input. All three
-# are written only through `services/scheduling/store.py`; the Admin data browser
+# reader agree on, `scheduling_rules` is the scheduling system's own input, and
+# `scheduling_zone_defaults` is "who × which shift → which zone" (the zone names
+# themselves stay in `hygiene_zones`, read through the public layer). All four are
+# written only through `services/scheduling/store.py`; the Admin data browser
 # lists them read-only through its separate catalog, and the generic business-table
 # write paths must not touch them.
 SCHEDULING_TABLES = (
     "staff_shifts",
     "staff_assignments",
     "scheduling_rules",
+    "scheduling_zone_defaults",
 )
 
 AUTH_PHYSICAL_TABLES = ("admin_user", "sessions", "api_tokens")

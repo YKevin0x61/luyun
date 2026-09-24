@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""公共层：员工身份（花名册、登录、会话）。
+"""公共层：员工身份（花名册、登录、会话）+ 责任区名单。
 
-卫生和排班都从这里取「这个人是谁」；两边谁都不认识对方的业务。
+卫生和排班都从这里取「这个人是谁」「有哪些区」；两边谁都不认识对方的业务。
 """
 
 from services.identity.accounts import (
@@ -19,6 +19,8 @@ from services.identity.accounts import (
     serialized_write,
 )
 
+from services.identity.zones import ZoneDirectory
+
 __all__ = [
     "ALLOWED_PERMISSIONS",
     "FORBIDDEN_SUPER_PERMISSION",
@@ -28,6 +30,7 @@ __all__ = [
     "PERMISSION_STAFF",
     "EmployeeAccounts",
     "EmployeeAccountsError",
+    "ZoneDirectory",
     "hash_session_id",
     "normalize_phone",
     "serialized_write",

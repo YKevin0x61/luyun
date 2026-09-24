@@ -28,9 +28,10 @@ _ERROR_DETAILS = {
     "invalid_business_date": "日期格式应该是 YYYY-MM-DD",
     "unknown_shift": "班次不存在或已停用",
     "unknown_employee": "员工不存在",
+    "unknown_zone": "责任区不存在：请先在卫生的责任区页面新建，或刷新本页",
     "not_migrated": (
         "排班表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
-        "migrations/pg/0005_scheduling.sql，然后刷新本页"
+        "migrations/pg/0005_scheduling.sql 与 0006_scheduling_zone_defaults.sql，然后刷新本页"
     ),
 }
 
@@ -44,6 +45,12 @@ class SetRuleRequest(BaseModel):
     anchor_date: Optional[str] = None
 
 
+class SetZoneDefaultRequest(BaseModel):
+    # 哪个班次配哪个区；`zone_id=None` = 清掉这个配置（这个人这个班次「还没定在哪」）。
+    shift_id: int
+    zone_id: Optional[int] = None
+
+
 def _bad_request(exc: SchedulingError) -> HTTPException:
     detail = _ERROR_DETAILS.get(exc.code, "排班参数不合法")
     logger.info("排班请求被拒: code=%s", exc.code)
@@ -53,7 +60,11 @@ def _bad_request(exc: SchedulingError) -> HTTPException:
 @router.get("/shifts")
 async def list_shifts(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
     """班次表（白班、夜班……）。UI 按 N 个班次渲染，不写死两个。"""
-    return {"shifts": await SchedulingStore(db).list_shifts()}
+    store = SchedulingStore(db)
+    try:
+        return {"shifts": await store.list_shifts()}
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
 
 
 @router.get("/calendar")
@@ -88,8 +99,34 @@ async def day_detail(
 
 @router.get("/roster")
 async def roster(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
-    """全体花名册 + 每人当前那条规则（没配的人 `rule` 是 `null`）。"""
-    return await SchedulingStore(db).roster_with_rules()
+    """全体花名册 + 每人当前那条规则 + 每人每班次的固定责任区（没配就是 `{}`）。
+
+    名单面板会一起读固定责任区（票 03），所以缺 0006 时这里也要出 503 那句话 ——
+    不然「已更新代码、还没应用迁移」这段窗口里，店长看到的是 500。
+    """
+    store = SchedulingStore(db)
+    try:
+        return await store.roster_with_rules()
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.put("/zone-defaults/{employee_id}")
+async def set_zone_default(
+    employee_id: int,
+    payload: SetZoneDefaultRequest,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """给「某人 × 某班次」定一个固定责任区；今天以后已经铺好的行一起改。
+
+    责任区名单是卫生建的那份（公共层读出来），所以这边新建完区不用重启就能选到。
+    """
+    store = SchedulingStore(db)
+    try:
+        return await store.set_zone_default(employee_id, payload.shift_id, payload.zone_id)
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
 
 
 @router.put("/rules/{employee_id}")

@@ -45,6 +45,17 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).not.toMatch(/['"]夜班['"]/)
   })
 
+  it('pins a fixed zone per person and per shift (票 03)', () => {
+    // 区名单只有一份（卫生建的那张表），排班经公共层读出来 → 页面按 N 个区渲染，
+    // 一个区名字都不写死。
+    expect(view).toMatch(/\/api\/scheduling\/zone-defaults\/\$\{employee\.id\}/)
+    expect(view).toMatch(/data\.zones/)
+    expect(view).toMatch(/v-for="zone in zones"/)
+    expect(view).toMatch(/v-for="person in group\.people"/)
+    expect(view).toMatch(/person\.zone/)
+    expect(view).toMatch(/未配区/)
+  })
+
   it('uses only tokens the shared stylesheet defines', () => {
     // 少一个 var() 就是一处静默失效的样式（无色/无圆角），而 scoped 样式块
     // 不会因为引用了不存在的自定义属性而报错。
