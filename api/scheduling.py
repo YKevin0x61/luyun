@@ -34,9 +34,17 @@ _ERROR_DETAILS = {
     "unknown_shift_in_cycle": "轮转周期第 {} 格引用的班次不存在或已停用：请重新选那一天的班次",
     "unknown_employee": "员工不存在",
     "unknown_zone": "责任区不存在：请先在卫生的责任区页面新建，或刷新本页",
+    # 单日覆盖（票 07）三种「这天改不了」的原因，各说各的：
+    "past_day": "已经过去的日子改不了：排班写下的历史不重写",
+    # 带一个 `{}`：服务层把展开窗口的末日放在 `args[0]`。**不写死「90 天」** ——
+    # 窗口长度是 `EXPANSION_DAYS` 的事，改那个数不该让文案说谎。
+    "beyond_window": "这天还没排到：排班只铺到 {}，等它进窗口再改",
+    "missing_shift": "要改班次就得给一个班次；班次留空表示那天休，请用「改成休」",
+    "rest_with_details": "「改成休」的那天不能再带班次或责任区：请把这两项留空",
     "not_migrated": (
         "排班表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
-        "migrations/pg/0005_scheduling.sql 与 0006_scheduling_zone_defaults.sql，然后刷新本页"
+        "migrations/pg/0005_scheduling.sql、0006_scheduling_zone_defaults.sql 与 "
+        "0007_scheduling_overrides.sql，然后刷新本页"
     ),
 }
 
@@ -53,6 +61,14 @@ class SetRuleRequest(BaseModel):
 class SetZoneDefaultRequest(BaseModel):
     # 哪个班次配哪个区；`zone_id=None` = 清掉这个配置（这个人这个班次「还没定在哪」）。
     shift_id: int
+    zone_id: Optional[int] = None
+
+
+class SetOverrideRequest(BaseModel):
+    # 某人某一天改成什么。`is_rest=True` 时班次与责任区都得留空（那天就是休）；
+    # 否则 `shift_id` 必给、`zone_id=None` 表示「跟这个班次的固定区」。
+    is_rest: bool = False
+    shift_id: Optional[int] = None
     zone_id: Optional[int] = None
 
 
@@ -226,3 +242,49 @@ async def clear_rule(
     except SchedulingError as exc:  # pragma: no cover - 现在不会抛，留个一致的出口
         raise _bad_request(exc) from exc
     return {"employee_id": employee_id, "rule": None}
+
+
+@router.put("/overrides/{employee_id}/{business_date}")
+async def set_override(
+    employee_id: int,
+    business_date: str,
+    payload: SetOverrideRequest,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """改某人某一天：换班次、改成休、或只换责任区 —— **只动这一天**（票 07）。
+
+    改过的那天在月历上有标记，改规则不会把它冲掉；撤掉覆盖（`DELETE` 同一条路径）
+    那天就回到规则铺出来的样子。过去的日子不给改（400 `past_day`）。
+    """
+    store = SchedulingStore(db)
+    try:
+        return await store.set_override(
+            employee_id,
+            business_date,
+            is_rest=payload.is_rest,
+            shift_id=payload.shift_id,
+            zone_id=payload.zone_id,
+        )
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.delete("/overrides/{employee_id}/{business_date}")
+async def clear_override(
+    employee_id: int,
+    business_date: str,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """撤掉某人某天的覆盖，那天回到规则铺出来的样子（票 07）。
+
+    今天以后按**现在的规则**重算；已经过去的日子只把覆盖记录摘掉，结果行不动
+    （过去就是过去：撤销不重写历史，界面靠 `day_detail.undoable` 把按钮收起来）。
+    """
+    store = SchedulingStore(db)
+    try:
+        return await store.clear_override(employee_id, business_date)
+    except SchedulingError as exc:
+        # 日期格式不对、管理员没应用 0007 都会走到这里 —— 跟 PUT 那条一样的出口。
+        raise _bad_request(exc) from exc

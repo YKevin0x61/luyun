@@ -3,7 +3,7 @@
 """排班 HTTP 面（薄缝）：一条真实请求链路，铺排班的服务层测试不用重跑。
 
 薄缝只回答「谁能打、打进去会怎样」：管理端会话能配规则并立刻在月历上看见；
-匿名两边都不行。票 05 起有两扇门 —— 店长那七条（六条路径）只认管理端会话，员工那两条
+匿名两边都不行。票 05 起有两扇门 —— 店长那九条（七条路径）只认管理端会话，员工那两条
 （`/me` 与 `/me/month`）只认手机端 cookie（票 02 时这里断言的是「一条员工路由都没有」）。
 """
 
@@ -102,6 +102,9 @@ def test_scheduling_routes_require_admin_session(scheduling_http):
     assert client.put(
         "/api/scheduling/zone-defaults/1", json={"shift_id": 1, "zone_id": 1}
     ).status_code == 401
+    # 票 07 的两条单日覆盖也挂同一扇门（读写都算店长的动作）。
+    assert client.put("/api/scheduling/overrides/1/2026-09-25", json={}).status_code == 401
+    assert client.delete("/api/scheduling/overrides/1/2026-09-25").status_code == 401
 
     # 员工会话不是店长的门：换一个 cookie 名字照样 401（排班只认管理端会话）。
     employee_id = _employee_id(accounts)
@@ -212,8 +215,16 @@ def test_admin_can_pin_a_fixed_zone_per_shift(scheduling_http):
         == 200
     )
     detail = client.get("/api/scheduling/day", params={"date": TODAY}).json()
+    # `overridden`/`zone_id` 是票 07 加的：这一行是规则铺的，不是店长手改的；
+    # 区按 id 也给一份，编辑器要按 id 预填下拉（名字没有唯一约束）。
     assert detail["groups"][0]["people"] == [
-        {"id": employee_id, "name": NAME, "zone": "案板"}
+        {
+            "id": employee_id,
+            "name": NAME,
+            "zone": "案板",
+            "zone_id": zone_id,
+            "overridden": False,
+        }
     ]
 
     # 挑了一个不存在的区：说得出「责任区不存在」，不是一句「参数不合法」。
@@ -323,6 +334,35 @@ def test_half_migrated_store_still_serves_the_calendar(scheduling_http):
         assert client.get("/api/scheduling/shifts").status_code == 200
     finally:
         _run(_rename("scheduling_zone_defaults_tmp", "scheduling_zone_defaults"))
+
+
+def test_missing_overrides_table_is_a_503_that_names_it(scheduling_http):
+    """0007 还没应用：单日覆盖整条给 503，并且点名该跑哪个脚本。
+
+    这是票 07 引入的新耦合 —— 展开（`_expand_rows`）现在要读覆盖表，所以
+    「配轮转规则」也跟着一起 503。**不说清楚的话，店长只会看到「保存失败」**：
+    文案里三个脚本都点名（0005/0006/0007），照着跑哪个都对。
+    """
+    client, db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    day_id = client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
+
+    async def _rename(source, target):
+        await db._conn.execute(f"ALTER TABLE {source} RENAME TO {target}")
+        await db._conn.commit()
+
+    _run(_rename("scheduling_overrides", "scheduling_overrides_tmp"))
+    try:
+        saved = client.put("/api/scheduling/overrides/1/2026-09-25", json={"is_rest": True})
+        assert saved.status_code == 503, saved.text
+        assert "0007_scheduling_overrides.sql" in saved.json()["detail"]
+        # 展开要读覆盖表 → 配规则也撞同一堵墙（读月历/当日不读它，照旧 200）。
+        rule = client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]})
+        assert rule.status_code == 503, rule.text
+        assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 200
+        assert client.get("/api/scheduling/day", params={"date": TODAY}).status_code == 200
+    finally:
+        _run(_rename("scheduling_overrides_tmp", "scheduling_overrides"))
 
 
 # ── 票 05：员工那条门 ────────────────────────────────────────────────────
@@ -537,3 +577,124 @@ def test_a_bad_month_is_a_400_not_a_500(scheduling_http, monkeypatch):
 
     assert resp.status_code == 400
     assert resp.json()["detail"] == "月份格式应该是 YYYY-MM"
+
+
+# ── 单日覆盖（票 07）───────────────────────────────────────────────────────
+
+
+def test_manager_changes_one_day_and_undoes_it(scheduling_http):
+    """验收 1/4/5 的 HTTP 面：改一天 → 月历上有标记 → 撤掉回到规则。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    shifts = client.get("/api/scheduling/shifts").json()["shifts"]
+    day_id, night_id = shifts[0]["id"], shifts[1]["id"]
+    assert client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]}).status_code == 200
+
+    changed = client.put(
+        f"/api/scheduling/overrides/{employee_id}/2026-09-25",
+        json={"shift_id": night_id},
+    )
+
+    assert changed.status_code == 200, changed.text
+    assert changed.json() == {
+        "employee_id": employee_id,
+        "business_date": "2026-09-25",
+        "shift_id": night_id,
+        "zone_id": None,
+        "is_rest": False,
+    }
+    # 只动那一天：月历上 9/24 与 9/26 还是白班，9/25 是夜班 + 一个覆盖标记。
+    calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    cells = {day["business_date"]: day for day in calendar["days"]}
+    assert cells["2026-09-24"]["counts"] == {str(day_id): 1, str(night_id): 0}
+    assert cells["2026-09-25"]["counts"] == {str(day_id): 0, str(night_id): 1}
+    assert cells["2026-09-26"]["counts"] == {str(day_id): 1, str(night_id): 0}
+    assert [cells[day]["overridden"] for day in ("2026-09-24", "2026-09-25", "2026-09-26")] == [
+        0,
+        1,
+        0,
+    ]
+    detail = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
+    # 那天两组都在（启用的班次各占一组，没人那组 count=0）：人从白班挪到了夜班。
+    groups = {group["shift"]["name"]: group for group in detail["groups"]}
+    assert (groups["白班"]["count"], groups["夜班"]["count"]) == (0, 1)
+    assert groups["夜班"]["people"][0]["overridden"] is True
+
+    undone = client.delete(f"/api/scheduling/overrides/{employee_id}/2026-09-25")
+
+    assert undone.status_code == 200, undone.text
+    assert undone.json() == {"employee_id": employee_id, "business_date": "2026-09-25"}
+    back = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
+    groups = {group["shift"]["name"]: group for group in back["groups"]}
+    assert (groups["白班"]["count"], groups["夜班"]["count"]) == (1, 0)
+    assert groups["白班"]["people"][0]["overridden"] is False
+    calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    cells = {day["business_date"]: day for day in calendar["days"]}
+    assert cells["2026-09-25"]["overridden"] == 0
+
+
+def test_rest_override_leaves_the_headcount_and_keeps_its_mark(scheduling_http):
+    """验收 2 + 4：改成休 —— 白班人数少一个，格子上仍留一个「这天被改过」。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    day_id = client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
+    assert client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]}).status_code == 200
+
+    rest = client.put(
+        f"/api/scheduling/overrides/{employee_id}/2026-09-25",
+        json={"is_rest": True},
+    )
+
+    assert rest.status_code == 200, rest.text
+    assert rest.json()["shift_id"] is None and rest.json()["is_rest"] is True
+    calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    cells = {day["business_date"]: day for day in calendar["days"]}
+    assert cells["2026-09-25"]["counts"][str(day_id)] == 0
+    assert cells["2026-09-25"]["overridden"] == 1
+    detail = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
+    assert (detail["total"], detail["off_count"]) == (0, 1)
+
+
+def test_override_errors_are_readable_400s(scheduling_http):
+    """改不了的三种情形各说各的 —— 不是一个「参数不合法」打包（票 07 的验收 7）。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    shifts = client.get("/api/scheduling/shifts").json()["shifts"]
+    day_id = shifts[0]["id"]
+    base = f"/api/scheduling/overrides/{employee_id}"
+
+    past = client.put(f"{base}/2026-09-23", json={"shift_id": day_id})
+    assert past.status_code == 400
+    assert past.json()["detail"] == "已经过去的日子改不了：排班写下的历史不重写"
+
+    beyond = client.put(f"{base}/2026-12-23", json={"shift_id": day_id})
+    assert beyond.status_code == 400
+    # 报的是**真实的窗口末日**（`{}` 由服务层填），不是把「90 天」写死在文案里。
+    assert beyond.json()["detail"] == (
+        "这天还没排到：排班只铺到 2026-12-22，等它进窗口再改"
+    )
+
+    both = client.put(f"{base}/2026-09-25", json={"is_rest": True, "shift_id": day_id})
+    assert both.status_code == 400
+    assert both.json()["detail"] == "「改成休」的那天不能再带班次或责任区：请把这两项留空"
+
+    blank = client.put(f"{base}/2026-09-25", json={})
+    assert blank.status_code == 400
+    assert blank.json()["detail"] == "要改班次就得给一个班次；班次留空表示那天休，请用「改成休」"
+
+    gone = client.put(f"{base}/2026-09-25", json={"shift_id": 987654, "zone_id": 987654})
+    assert gone.status_code == 400
+    assert gone.json()["detail"] == "班次不存在或已停用"
+
+    missing_person = client.put("/api/scheduling/overrides/9999/2026-09-25", json={"shift_id": day_id})
+    assert missing_person.status_code == 404
+    assert missing_person.json()["detail"] == "员工不存在"
+
+    bad_date = client.put(f"{base}/9-25", json={"shift_id": day_id})
+    assert bad_date.status_code == 400
+    assert bad_date.json()["detail"] == "日期格式应该是 YYYY-MM-DD"
+
+    # 撤销也过同一道日期校验（这条原来被一句「现在不会抛」的 pragma 盖住了）。
+    undo_bad_date = client.delete(f"{base}/9-25")
+    assert undo_bad_date.status_code == 400
+    assert undo_bad_date.json()["detail"] == "日期格式应该是 YYYY-MM-DD"

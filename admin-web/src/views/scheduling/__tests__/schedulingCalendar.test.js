@@ -70,6 +70,49 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view.match(/api\.put\(`\/api\/scheduling\/rules\//g)).toHaveLength(2)
   })
 
+  it('changes one day without touching the rule (票 07)', () => {
+    // 单日覆盖：点当天卡里的一个人 → 就地改这一天。写的是 `/overrides/<人>/<哪天>`，
+    // 跟规则那条路分开 —— 「固定一个班 / 编周期」改的是规则，「改这一天」改的是那天的快照。
+    expect(view).toMatch(/api\.put\(`\/api\/scheduling\/overrides\/\$\{person\.id\}\/\$\{day\}`/)
+    expect(view).toMatch(/api\.delete\(`\/api\/scheduling\/overrides\/\$\{person\.id\}\/\$\{day\}`\)/)
+    // 改成休走 `is_rest`，不是「班次留空」；不给责任区 = 跟这个班次的固定区。
+    expect(view).toMatch(/is_rest: true/)
+    expect(view).toMatch(/zone_id: editZone\.value === '' \? null : Number\(editZone\.value\)/)
+    // 名字是一颗可以按的棋子；点开的是那一天的那个人。
+    expect(view).toMatch(/class="gB-name"/)
+    expect(view).toMatch(/@click="openDayEdit\(person, group\.shift\.id\)"/)
+    expect(view).toMatch(/person\.overridden/)
+    // 名单不在手边就先补：反过来（先预填再补名单）这个会话里第一次打开编辑器必然落回
+    // 「跟固定区」，保存时 `zone_id: null` 把那天自己挑过的区悄悄退回。
+    expect(view).toMatch(/if \(!zones\.value\.length\) await loadRoster\(\)/)
+    // 预填按 id：`hygiene_zones` 的区名字没有唯一约束，按名字反查会指到别人身上。
+    expect(view).toMatch(/person\.zone_id === null \|\| person\.zone_id === undefined/)
+    // 哪一天冻在打开那一刻，且换一天就把编辑器收起来 —— 否则开着编辑器点月历另一天，
+    // 保存会把上一个人的改动写到新那一天。
+    expect(view).toMatch(/day: selectedDate\.value/)
+    expect(view).toMatch(/watch\(selectedDate,/)
+    expect(view).toMatch(/const day = person && person\.day/)
+    expect(view).toMatch(/formatDayLabel\(editing\.day\)/)
+  })
+
+  it('marks the days that were changed by hand (票 07)', () => {
+    // 格子右上角一个点 + 图例里一句解释：「改成休」在人数里根本看不出来，
+    // 只有这个跟人数无关的标记记得住。图例那句只在当月真有过改动时出现。
+    expect(view).toMatch(/over: day\.overridden > 0/)
+    expect(view).toMatch(/\.gB-d\.over::after/)
+    expect(view).toMatch(/<span v-if="overriddenDays" class="gB-ov"><i><\/i>这天有改动<\/span>/)
+    // 休的人不是一行计数：规则铺出来的休、被改成休的人，都得点得开（不然改错了没处撤）。
+    expect(view).toMatch(/v-for="person in dayDetail\.off_people"/)
+    expect(view).toMatch(/@click="openDayEdit\(person, 'rest'\)"/)
+    // 「撤销」只在本来就改过、且还撤得动的日子给；过去的日子给的是一句实话，不是
+    // 一个点了也不变的按钮。后端说得出为什么改不了，原话转给店长。
+    expect(view).toMatch(/v-if="editing\.overridden && editing\.undoable"/)
+    expect(view).toMatch(/撤销覆盖，回到规则/)
+    expect(view).toMatch(/v-if="editing\.overridden && !editing\.undoable"/)
+    expect(view).toMatch(/这天的改动已经是历史了/)
+    expect(view).toMatch(/editError\.value = err\.message/)
+  })
+
   it('uses only tokens the shared stylesheet defines', () => {
     // 少一个 var() 就是一处静默失效的样式（无色/无圆角），而 scoped 样式块
     // 不会因为引用了不存在的自定义属性而报错。

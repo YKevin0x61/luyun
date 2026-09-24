@@ -5,8 +5,9 @@
 //
 // 视觉沿用 `public/hygiene-admin.css` 的深青墨令牌 —— 那是**共享的样式表**，不是卫生
 // 模块：排班不 import 卫生的 Python 模块、不挂它的菜单，只是同一套验收台配色。
-// 票 02 做「配固定班次」、票 03 加责任区、票 04 加轮转周期编辑；班次表的增删改在票 11。
-import { computed, onMounted, ref } from 'vue'
+// 票 02 做「配固定班次」、票 03 加责任区、票 04 加轮转周期编辑、票 07 加单日覆盖
+// （点当天卡里的一个人就地改那一天）；班次表的增删改在票 11。
+import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api/client'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 
@@ -29,6 +30,16 @@ const monthValue = ref('')
 const panel = ref('month') // 'month' | 'roster'
 const roster = ref([])
 const busyEmployeeId = ref(null)
+// 单日覆盖（票 07）：点当天卡里的一个人，就地改这一天。
+// `day` 是**打开编辑器那一刻的那一天**（冻在这里）：换一天看名单时 `selectedDate` 会变，
+// 而保存/撤销必须写回他点开的那一天 —— 读实时的 `selectedDate` 会把改动写到隔壁那天去。
+// `undoable` 是当天整天的：过去的日子记录撤了也不重写历史（服务层只删记录），
+// 那种情况不给「撤销」按钮，改成一句实话。
+const editing = ref(null) // { id, name, day, overridden, undoable } | null
+const editShift = ref('') // 班次 id 的字符串，或 'rest'（那天休）
+const editZone = ref('') // 责任区 id 的字符串；'' = 跟这个班次的固定区
+const editError = ref('')
+const overrideBusy = ref(false)
 
 const today = computed(() => (calendar.value && calendar.value.today) || '')
 const shiftById = computed(() => {
@@ -37,14 +48,21 @@ const shiftById = computed(() => {
   return index
 })
 
-// 展开只铺未来 90 天（票 02 的验收项）。翻到窗口尽头那个月时，剩下一周注定是空的 ——
-// 不说清楚的话，店长会把它读成「那天没人上班」。
+// 这个月有几天是被单日覆盖改过的（票 07）：>0 时图例里多一句「青点 = 这天有改动」，
+// 免得那个点看起来像装饰。
+const overriddenDays = computed(() =>
+  ((calendar.value && calendar.value.days) || []).filter((day) => day.overridden > 0).length
+)
+
+// 展开只铺未来若干天（长度归服务层的 `EXPANSION_DAYS`，票 02 的验收项）。翻到窗口尽头那个月时，
+// 剩下一周注定是空的 —— 不说清楚的话，店长会把它读成「那天没人上班」。
 const beyondNote = computed(() => {
   const data = calendar.value
   if (!data || !data.window_end) return ''
   const last = data.days.length ? data.days[data.days.length - 1].business_date : ''
   if (!last || last <= data.window_end) return ''
-  return `只铺到 ${data.window_end}（今天起 90 天），之后的格子还没排`
+  // 只报服务端给的末日（复核 N5：这里原先自己写一句「今天起 90 天」，窗口长度一改就是假的）。
+  return `只铺到 ${data.window_end}，之后的格子还没排`
 })
 
 function currentMonthValue() {
@@ -328,6 +346,92 @@ async function setZoneDefault(employee, shiftId, value) {
   }
 }
 
+// 单日覆盖（票 07）：这一天跟规则不一样 —— 换班次、改成休、或只换责任区。
+// 覆盖是**整天的快照**：保存时把这一天的班次和责任区一起定下来，规则以后怎么变都不再
+// 动它（想让它回到规则就「撤销覆盖」）。所以「只改责任区」也走同一条路：班次不动、
+// 只把下拉里的区换掉，提交时带着当天那个班次一起发过去。
+async function openDayEdit(person, shiftId) {
+  // 责任区名单只在名单面板里读过（`loadRoster`）：**先把名单补齐，再决定下拉停在哪一项**。
+  // 反过来的话，这个会话里第一次打开编辑器时 `zones` 还是空的 → 预填必然落回「跟固定区」
+  // → 保存时 `zone_id: null` → 服务层按固定区回填：那天原本自己挑过的区被悄悄退回。
+  if (!zones.value.length) await loadRoster()
+  editing.value = {
+    id: person.id,
+    name: person.name,
+    day: selectedDate.value,
+    overridden: !!person.overridden,
+    // 过去的日子：记录还在，但撤销不重写历史 —— 那种情况不摆「撤销」按钮。
+    undoable: !!dayDetail.value && dayDetail.value.undoable !== false,
+  }
+  editShift.value = String(shiftId)
+  // 预填按 **id**（不是按名字）：`hygiene_zones` 的名字没有唯一约束，同名两个区时
+  // 按名字反查会指到别人身上。休的人没有区，`zone_id` 是 null → 停在「跟固定区」。
+  editZone.value = person.zone_id === null || person.zone_id === undefined ? '' : String(person.zone_id)
+  editError.value = ''
+}
+
+function closeDayEdit() {
+  editing.value = null
+  editError.value = ''
+}
+
+// 换了一天看名单，编辑器就收起来：它冻着的是上一天，留在屏幕上会让人以为改的是新这天。
+// （`loadCalendar` 直接给 `selectedDate` 赋值那条路走不到 `loadDay`，只有这里盖得住。）
+watch(selectedDate, () => {
+  if (editing.value) closeDayEdit()
+})
+
+// 写完之后底下那张当天卡要重读：`loadCalendar` 会把选中那天拨回「今天/1 号」，
+// 所以再把店长刚才改的那天读回来（他刚改完还要看结果）。
+async function refreshAfterWrite(day) {
+  await loadCalendar(monthValue.value)
+  if (day) await loadDay(day)
+}
+
+async function saveOverride() {
+  const person = editing.value
+  // 写的是**打开编辑器那一刻**那一天，不是「现在选中的那天」。
+  const day = person && person.day
+  if (!person || !day) return
+  overrideBusy.value = true
+  editError.value = ''
+  try {
+    const payload =
+      editShift.value === 'rest'
+        ? { is_rest: true }
+        : {
+            shift_id: Number(editShift.value),
+            zone_id: editZone.value === '' ? null : Number(editZone.value),
+          }
+    await api.put(`/api/scheduling/overrides/${person.id}/${day}`, payload)
+    closeDayEdit()
+    await refreshAfterWrite(day)
+  } catch (err) {
+    // 后端把「为什么改不了」说全了（过去的日子、还没铺到的天、休不能带班次…），
+    // 原话转给店长，别拿一句「保存失败」盖掉。
+    editError.value = err.message || '这一天没改上'
+  } finally {
+    overrideBusy.value = false
+  }
+}
+
+async function undoOverride() {
+  const person = editing.value
+  const day = person && person.day
+  if (!person || !day) return
+  overrideBusy.value = true
+  editError.value = ''
+  try {
+    await api.delete(`/api/scheduling/overrides/${person.id}/${day}`)
+    closeDayEdit()
+    await refreshAfterWrite(day)
+  } catch (err) {
+    editError.value = err.message || '撤销没成功'
+  } finally {
+    overrideBusy.value = false
+  }
+}
+
 onMounted(async () => {
   monthValue.value = currentMonthValue()
   await loadCalendar(monthValue.value)
@@ -373,6 +477,7 @@ onMounted(async () => {
                 today: day.is_today,
                 sel: day.business_date === selectedDate,
                 mute: !!(calendar && calendar.window_end && day.business_date > calendar.window_end),
+                over: day.overridden > 0,
               }"
               @click="loadDay(day.business_date)"
             >
@@ -391,6 +496,7 @@ onMounted(async () => {
             <span v-for="shift in shifts" :key="shift.id">
               <i :class="toneClass(shift.id)"></i>{{ shift.name }}
             </span>
+            <span v-if="overriddenDays" class="gB-ov"><i></i>这天有改动</span>
           </div>
           <p v-if="beyondNote" class="gB-note">{{ beyondNote }}</p>
 
@@ -406,17 +512,98 @@ onMounted(async () => {
                   <span class="d"></span><b>{{ group.shift.name }}</b><i>{{ group.count }}</i>
                 </div>
                 <div v-if="group.people.length" class="gB-names">
-                  <span v-for="person in group.people" :key="person.id">
+                  <button
+                    v-for="person in group.people"
+                    :key="person.id"
+                    type="button"
+                    class="gB-name"
+                    :class="{
+                      over: person.overridden,
+                      on: editing && editing.id === person.id,
+                    }"
+                    @click="openDayEdit(person, group.shift.id)"
+                  >
                     {{ person.name }}
                     <em v-if="person.zone" class="gB-zone">{{ person.zone }}</em>
                     <em v-else class="gB-zone off">未配区</em>
-                  </span>
+                  </button>
                 </div>
                 <p v-else class="gB-empty">这天没人排{{ group.shift.name }}</p>
               </div>
-              <p v-if="dayDetail.off_count" class="gB-empty">休 {{ dayDetail.off_count }} 人</p>
+              <!-- 休的人也要能点开：规则铺出来的休也好、已经被改成休也好，都得有个入口
+                   把那天改回班次，或者把「改成休」这个覆盖撤掉（票 07）。 -->
+              <div v-if="dayDetail.off_people && dayDetail.off_people.length" class="gB-grp">
+                <div class="gB-grp-t off">
+                  <span class="d"></span><b>休</b><i>{{ dayDetail.off_count }}</i>
+                </div>
+                <div class="gB-names">
+                  <button
+                    v-for="person in dayDetail.off_people"
+                    :key="person.id"
+                    type="button"
+                    class="gB-name"
+                    :class="{
+                      over: person.overridden,
+                      on: editing && editing.id === person.id,
+                    }"
+                    @click="openDayEdit(person, 'rest')"
+                  >
+                    {{ person.name }}
+                    <em class="gB-zone off">休</em>
+                  </button>
+                </div>
+              </div>
             </template>
             <p v-else class="gB-empty">{{ loading ? '读取中……' : '选一天看是谁' }}</p>
+
+            <div v-if="editing" class="gD">
+              <div class="gD-hd">
+                <b>{{ editing.name }}</b>
+                <span>{{ formatDayLabel(editing.day) }}</span>
+                <em v-if="editing.overridden">这天被改过</em>
+              </div>
+              <label class="gD-pick">
+                <span>班次</span>
+                <select v-model="editShift" class="gZ-sel">
+                  <option value="rest">休</option>
+                  <option v-for="shift in shifts" :key="shift.id" :value="String(shift.id)">
+                    {{ shift.name }}
+                  </option>
+                </select>
+              </label>
+              <label class="gD-pick">
+                <span>责任区</span>
+                <select v-model="editZone" class="gZ-sel" :disabled="editShift === 'rest'">
+                  <option value="">跟固定区</option>
+                  <option v-for="zone in zones" :key="zone.id" :value="String(zone.id)">
+                    {{ zone.name }}
+                  </option>
+                </select>
+              </label>
+              <div class="gD-act">
+                <button class="gBtn on" type="button" :disabled="overrideBusy" @click="saveOverride()">
+                  只改这一天
+                </button>
+                <button
+                  v-if="editing.overridden && editing.undoable"
+                  class="gBtn ghost"
+                  type="button"
+                  :disabled="overrideBusy"
+                  @click="undoOverride()"
+                >
+                  撤销覆盖，回到规则
+                </button>
+                <button class="gBtn ghost" type="button" @click="closeDayEdit()">取消</button>
+              </div>
+              <!-- 过去的日子：记录还在，但历史不重写 —— 不给一个点了也不变的按钮。 -->
+              <p v-if="editing.overridden && !editing.undoable" class="gD-hint">
+                这天的改动已经是历史了：撤销只对今天以后的日子生效，过去怎么排就怎么留着。
+              </p>
+              <p class="gD-hint">
+                改的是这一天，不是规则：规则以后怎么变都不动它。撤掉覆盖，这天就回到规则铺出来的样子。
+              </p>
+              <p v-if="editError" class="gC-err">{{ editError }}</p>
+            </div>
           </div>
 
           <button class="gPend" type="button" @click="openPanel('roster')">
@@ -553,6 +740,12 @@ onMounted(async () => {
 .gB-d.today { border-color: var(--hy-mint-line); background: var(--hy-mint-soft); }
 .gB-d.today .n { color: var(--hy-jade); font-weight: 700; }
 .gB-d.sel { border-color: var(--hy-mint); box-shadow: var(--hy-glow-mint); }
+/* 这天被单日覆盖改过（票 07）：右上角一个青点 —— 人数会变，但「改成休」那种改动
+   在人数里根本看不出来，得有个跟人数无关的标记。 */
+.gB-d.over::after {
+  content: ""; position: absolute; top: 6px; right: 6px; width: 5px; height: 5px;
+  border-radius: 50%; background: var(--hy-aqua);
+}
 .tone-mint { color: var(--hy-mint); }
 .tone-aqua { color: var(--hy-aqua); }
 .tone-amber { color: var(--hy-amber); }
@@ -560,6 +753,7 @@ onMounted(async () => {
 .gB-legend { display: flex; align-items: center; gap: 12px; margin-top: 11px; font-size: 10.5px; color: var(--hy-faint); padding: 0 2px; flex-wrap: wrap; }
 .gB-legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: middle; background: currentColor; }
 .gB-legend span { color: var(--hy-faint); }
+.gB-legend .gB-ov i { background: var(--hy-aqua); }
 .gB-card { margin-top: 14px; border: 1px solid var(--hy-line); border-radius: var(--hy-radius-lg); background: var(--hy-surface); padding: 13px 14px; }
 .gB-card-plain { margin-top: 0; }
 .gB-card-hd { display: flex; align-items: baseline; gap: 9px; padding-bottom: 11px; border-bottom: 1px solid var(--hy-line); }
@@ -571,8 +765,15 @@ onMounted(async () => {
 .gB-grp-t .d { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .gB-grp-t b { font-family: var(--font-song); font-size: 12.5px; letter-spacing: .08em; }
 .gB-grp-t i { font-style: normal; font-family: var(--font-mono); color: var(--hy-ink); }
+.gB-grp-t.off { color: var(--hy-faint); }  /* 「休」那一组：没有班次色，就是不在班上 */
 .gB-names { display: flex; flex-wrap: wrap; gap: 6px; }
-.gB-names span { font-size: 11.5px; color: var(--hy-ink); background: var(--hy-surface-2); border: 1px solid var(--hy-line); border-radius: 7px; padding: 3px 8px; }
+/* 名字是一颗可以按的棋子（票 07）：点它就地改这一天。 */
+.gB-name {
+  font: inherit; font-size: 11.5px; color: var(--hy-ink); background: var(--hy-surface-2);
+  border: 1px solid var(--hy-line); border-radius: 7px; padding: 3px 8px; cursor: pointer;
+}
+.gB-name.over { border-color: var(--hy-aqua); }  /* 这天跟规则不一样 */
+.gB-name.on { border-color: var(--hy-mint); box-shadow: var(--hy-glow-mint); }
 .gB-empty { margin: 6px 0 0; font-size: 11.5px; color: var(--hy-faint); }
 .gB-note { margin: 14px 0 0; font-size: 11px; color: var(--hy-faint); line-height: 1.7; }
 .gPend {
@@ -638,4 +839,18 @@ onMounted(async () => {
   color: var(--hy-mint);
 }
 .gB-zone.off { color: var(--hy-faint); }
+/* 单日覆盖编辑器（票 07）：点当天卡里的一个人，就地展开 —— 原型 B 里没有这一块，
+   它是「那一天跟规则不一样」的唯一入口。 */
+.gD {
+  margin-top: 11px; padding: 9px 10px; display: flex; flex-direction: column; gap: 7px;
+  border: 1px solid var(--hy-mint-line); border-radius: var(--hy-radius-md);
+  background: var(--hy-mint-soft);
+}
+.gD-hd { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.gD-hd b { font-size: 12.5px; }
+.gD-hd span { font-size: 11px; color: var(--hy-muted); }
+.gD-hd em { margin-left: auto; font-style: normal; font-size: 10.5px; color: var(--hy-aqua); }
+.gD-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--hy-faint); }
+.gD-act { display: flex; gap: 6px; flex-wrap: wrap; }
+.gD-hint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.6; }
 </style>

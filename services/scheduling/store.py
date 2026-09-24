@@ -61,6 +61,7 @@ def _needs_migration(method):
 __all__ = [
     "DEFAULT_SHIFTS",
     "EXPANSION_DAYS",
+    "KIND_MANUAL",
     "MAX_CYCLE_DAYS",
     "REST",
     "SOURCE_OVERRIDE",
@@ -75,6 +76,11 @@ EXPANSION_DAYS = 90
 # 排班结果这一行是谁写的。
 SOURCE_RULE = "rule"
 SOURCE_OVERRIDE = "override"
+
+# 单日覆盖是谁写的（`scheduling_overrides.kind`）：本票唯一会写的是店长在月历上
+# 点着改的。票 08 的请假、票 09 的换班各写各的值 —— 它们进的是同一张表
+# （见 `migrations/pg/0007_scheduling_overrides.sql`），不用再出一次迁移。
+KIND_MANUAL = "manual"
 
 # 员工「今天」页往后看几天：今天、明天、后天、大后天（原型 A 的「往后三天」）。
 # 窗口长度是服务层的数，前端不再写一份 —— 以后要改成「往后一周」只动这里。
@@ -139,6 +145,34 @@ def _each_day(start: date, next_month: date):
     while day < next_month:
         yield day
         day += timedelta(days=1)
+
+
+def _rule_anchor(rule: dict) -> date:
+    """规则的周期起点。
+
+    `anchor_date` 是 TEXT 列，人工 SQL 能写进任何东西 —— 跟 `_decode_cycle` 一样，
+    脏数据在这里变成一条明确的输入错误，而不是一路冒到接口层变成 500。
+    """
+    try:
+        return date.fromisoformat(rule["anchor_date"])
+    except (TypeError, ValueError):
+        raise SchedulingError("invalid_anchor", "invalid_anchor")
+
+
+def _cycle_shift(rule: dict, business_date: str, anchor: Optional[date] = None) -> Optional[int]:
+    """规则在那一天排的是哪个班（`None` = 休）。
+
+    **相位只有这一份算法**：展开（`_expand_rows`）和撤销覆盖后重算（`_restore_day`）
+    都走它 —— 两边算出不一样的班次是这套东西最不该有的事。
+
+    `anchor` 已经解析过就传进来（展开一天算一次，别在循环里反复 `fromisoformat`）；
+    Python 的 `%` 对负数也给非负结果，所以起点在未来（先有规则、后把起点改回来）
+    时照样算得对。
+    """
+    start = _rule_anchor(rule) if anchor is None else anchor
+    cycle = rule["cycle"]
+    day = date.fromisoformat(business_date)
+    return cycle[(day - start).days % len(cycle)]
 
 
 class SchedulingStore:
@@ -522,6 +556,183 @@ class SchedulingStore:
             (employee_id,),
         )
 
+    # ── 单日覆盖 ────────────────────────────────────────────────────────
+
+    @_needs_migration
+    async def set_override(
+        self,
+        employee_id: int,
+        business_date: str,
+        is_rest: bool = False,
+        shift_id: Optional[int] = None,
+        zone_id: Optional[int] = None,
+    ) -> dict:
+        """把某人某一天改成「跟规则不一样」，**只改这一天**（票 07）。
+
+        覆盖是**整天的快照**：这一天的班次和责任区由这次调用定下来 ——
+        `scheduling_overrides` 记一条、`staff_assignments` 写一行（`source='override'`）。
+        规则以后怎么变都不再动这一天（`_delete_future_rule_rows` 只删 `source='rule'`
+        的行），想让它回到规则就撤掉覆盖（`clear_override`）。
+
+        `is_rest=True` = 那天休，班次与责任区都要留空（同 `staff_assignments` 的口径：
+        `shift_id IS NULL` 就是休）；否则 `shift_id` 必给。`zone_id` 不给时跟这个班次的
+        **固定区**（`scheduling_zone_defaults`），跟展开时是同一条口径。
+
+        校验在锁外（都是读）；写覆盖记录与写结果行在**一次**写锁、一次提交里。
+        """
+        employee_id = int(employee_id)
+        day = _require_business_date(business_date)
+        if day < self.today():
+            # 过去不改（`spec.md`）：那时那天是什么样就是什么样，改它等于改历史。
+            raise SchedulingError("past_day", "past_day")
+        if day > self._window()[1]:
+            # 窗口尽头之后是「还没铺到」。在那里写一行，月历上就会出现一个
+            # 「规则还没算到、却已经有人上班」的格子 —— 那是另一件事（先配规则）。
+            # 第二参填进那句提示的 `{}`：报**真实的窗口末日**，别把 `EXPANSION_DAYS`
+            # 写死在文案里（那个数一改，店长看到的就是假话）。
+            raise SchedulingError("beyond_window", self._window()[1])
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        if employee_id not in {employee["id"] for employee in roster}:
+            raise SchedulingError("unknown_employee", "unknown_employee")
+
+        shift: Optional[int] = None
+        zone: Optional[int] = None
+        if is_rest:
+            if shift_id not in (None, "") or zone_id not in (None, ""):
+                raise SchedulingError("rest_with_details", "rest_with_details")
+        else:
+            if shift_id in (None, ""):
+                raise SchedulingError("missing_shift", "missing_shift")
+            shift = int(shift_id)
+            if shift not in {item["id"] for item in await self.list_shifts()}:
+                raise SchedulingError("unknown_shift", "unknown_shift")
+            zone = None if zone_id in (None, "") else int(zone_id)
+            if zone is not None and zone not in {
+                item["id"] for item in await self._zone_directory().list_zones()
+            }:
+                raise SchedulingError("unknown_zone", "unknown_zone")
+            if zone is None:
+                # 没点名要哪个区 → 跟这个班次的固定区（没配过就是没有区，不是错误）
+                zone = (await self._zone_defaults_for(employee_id)).get(shift)
+
+        await self._apply_override(employee_id, day, shift, zone)
+        return {
+            "employee_id": employee_id,
+            "business_date": day,
+            "shift_id": shift,
+            "zone_id": zone,
+            "is_rest": shift is REST,
+        }
+
+    @serialized_write
+    async def _apply_override(
+        self,
+        employee_id: int,
+        day: str,
+        shift_id: Optional[int],
+        zone_id: Optional[int],
+    ) -> None:
+        stamp = self._now_iso()
+        cur = await self._conn.execute(
+            """SELECT id FROM scheduling_overrides
+               WHERE employee_id = ? AND business_date = ?""",
+            (employee_id, day),
+        )
+        existing = await cur.fetchone()
+        if existing is None:
+            await self._conn.execute(
+                """INSERT INTO scheduling_overrides
+                       (employee_id, business_date, shift_id, zone_id, kind, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (employee_id, day, shift_id, zone_id, KIND_MANUAL, stamp, stamp),
+            )
+        else:
+            # 再改一次就是**替换**这一天的样子（不是叠加）：`kind` 也跟着回到手改 ——
+            # 请假改过的那天，店长又点着改了一次，那天现在就是店长定的。
+            await self._conn.execute(
+                """UPDATE scheduling_overrides
+                   SET shift_id = ?, zone_id = ?, kind = ?, updated_at = ?
+                   WHERE employee_id = ? AND business_date = ?""",
+                (shift_id, zone_id, KIND_MANUAL, stamp, employee_id, day),
+            )
+        await self._write_day_row(employee_id, day, shift_id, zone_id, SOURCE_OVERRIDE, stamp)
+        await self._conn.commit()
+
+    @_needs_migration
+    async def clear_override(self, employee_id: int, business_date: str) -> dict:
+        """撤掉某人某天的覆盖，那天回到规则铺出来的样子（票 07 的验收项）。
+
+        今天以后按**现在的规则**重算一遍；已经过去的日期只把覆盖记录摘掉、结果行不动
+        —— 那天当时确实是被改过的，写下来的历史就是那样（`spec.md` 的「过去不改」）。
+        """
+        employee_id = int(employee_id)
+        day = _require_business_date(business_date)
+        await self._clear_override(employee_id, day)
+        return {"employee_id": employee_id, "business_date": day}
+
+    @serialized_write
+    async def _clear_override(self, employee_id: int, day: str) -> None:
+        await self._conn.execute(
+            "DELETE FROM scheduling_overrides WHERE employee_id = ? AND business_date = ?",
+            (employee_id, day),
+        )
+        if day >= self.today():
+            await self._restore_day(employee_id, day)
+        await self._conn.commit()
+
+    async def _restore_day(self, employee_id: int, day: str) -> None:
+        """把某一天按**现在的规则**重算回 `source='rule'`。不自己上锁、不提交。
+
+        没有规则、或那天已经在窗口外：把这一行删掉，那天回到「还没铺到」——
+        跟月历上窗口尽头的空格是同一个状态，不是「那天休」。
+        """
+        rule = (await self.list_rules()).get(employee_id)
+        if rule is None or day > self._window()[1]:
+            await self._conn.execute(
+                """DELETE FROM staff_assignments
+                   WHERE employee_id = ? AND business_date = ? AND source = ?""",
+                (employee_id, day, SOURCE_OVERRIDE),
+            )
+            return
+        shift_id = _cycle_shift(rule, day)
+        zone_id = None
+        if shift_id is not REST:
+            zone_id = (await self._zone_defaults_for(employee_id)).get(shift_id)
+        await self._write_day_row(
+            employee_id, day, shift_id, zone_id, SOURCE_RULE, self._now_iso()
+        )
+
+    async def _write_day_row(
+        self,
+        employee_id: int,
+        day: str,
+        shift_id: Optional[int],
+        zone_id: Optional[int],
+        source: str,
+        stamp: str,
+    ) -> None:
+        """把某人某天的结果行写成给定样子（有则改、无则插）。不自己上锁、不提交。"""
+        cur = await self._conn.execute(
+            """SELECT id FROM staff_assignments
+               WHERE employee_id = ? AND business_date = ?""",
+            (employee_id, day),
+        )
+        existing = await cur.fetchone()
+        if existing is None:
+            await self._conn.execute(
+                """INSERT INTO staff_assignments
+                       (employee_id, business_date, shift_id, zone_id, source, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (employee_id, day, shift_id, zone_id, source, stamp, stamp),
+            )
+        else:
+            await self._conn.execute(
+                """UPDATE staff_assignments
+                   SET shift_id = ?, zone_id = ?, source = ?, updated_at = ?
+                   WHERE employee_id = ? AND business_date = ?""",
+                (shift_id, zone_id, source, stamp, employee_id, day),
+            )
+
     # ── 展开 ────────────────────────────────────────────────────────────
 
     @_needs_migration
@@ -548,15 +759,14 @@ class SchedulingStore:
         return written
 
     async def _expand_rows(self, employee_id: int, rule: dict) -> int:
-        """铺窗口内还缺的那些天，返回写了几行。不自己上锁、不提交（调用方管）。"""
+        """铺窗口内还缺的那些天，返回写了几行。不自己上锁、不提交（调用方管）。
+
+        只管「还缺的天」：已经存在的行（含单日覆盖写下的）一律不碰。
+        """
         first, last = self._window()
-        cycle = rule["cycle"]
-        try:
-            # `anchor_date` 是 TEXT 列，人工 SQL 能写进任何东西。跟 `_decode_cycle`
-            # 一样，脏数据在这里变成一条明确的输入错误，不是一路冒成 500。
-            anchor = date.fromisoformat(rule["anchor_date"])
-        except (TypeError, ValueError):
-            raise SchedulingError("invalid_anchor", "invalid_anchor")
+        # 先把起点解析出来，哪怕这一天都不缺：脏数据该在第一次展开时就报出来，
+        # 而不是等到某个「正好缺一天」的时刻。
+        anchor = _rule_anchor(rule)
 
         cur = await self._conn.execute(
             """SELECT business_date FROM staff_assignments
@@ -564,6 +774,16 @@ class SchedulingStore:
             (employee_id, first, last),
         )
         already = {dict(row)["business_date"] for row in await cur.fetchall()}
+        # 单日覆盖（票 07）：被覆盖过的天，样子以 `scheduling_overrides` 为准。
+        # 结果行还在时下面 `already` 就挡住了（覆盖行是 `source='override'`，
+        # 规则改动删不到它）；万一结果行丢了（换了库、手工清过），照记录补回来的
+        # 是「那天被改成什么」，而不是照规则铺一个跟记录不符的班次。
+        cur = await self._conn.execute(
+            """SELECT business_date, shift_id, zone_id FROM scheduling_overrides
+               WHERE employee_id = ? AND business_date >= ? AND business_date <= ?""",
+            (employee_id, first, last),
+        )
+        overrides = {dict(row)["business_date"]: dict(row) for row in await cur.fetchall()}
         # 每人每班次的固定区：铺行的时候一并写进结果，下游（卫生的当日分工）读这一列，
         # 不用自己去推「谁今天在哪」。
         zone_by_shift = await self._zone_defaults_for(employee_id)
@@ -576,16 +796,20 @@ class SchedulingStore:
                 break
             if business_date in already:
                 continue
-            # 相位：起点那天是 cycle[0]。Python 的 % 对负数也给非负结果，
-            # 所以 anchor 在未来（先有规则后改回来）时照样算得对。
-            day = date.fromisoformat(business_date)
-            shift_id = cycle[(day - anchor).days % len(cycle)]
-            zone_id = None if shift_id is REST else zone_by_shift.get(shift_id)
+            override = overrides.get(business_date)
+            if override is not None:
+                shift_id = override["shift_id"]
+                zone_id = override["zone_id"]
+                source = SOURCE_OVERRIDE
+            else:
+                shift_id = _cycle_shift(rule, business_date, anchor)
+                zone_id = None if shift_id is REST else zone_by_shift.get(shift_id)
+                source = SOURCE_RULE
             await self._conn.execute(
                 """INSERT INTO staff_assignments
                        (employee_id, business_date, shift_id, zone_id, source, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (employee_id, business_date, shift_id, zone_id, SOURCE_RULE, stamp, stamp),
+                (employee_id, business_date, shift_id, zone_id, source, stamp, stamp),
             )
             written += 1
         return written
@@ -624,6 +848,9 @@ class SchedulingStore:
         """一个月的月历：每天各班的**人数**（票 02 的验收项）。
 
         只数 `shift_id IS NOT NULL` 的行：休不是「上了某个班」，人数不该把它算进去。
+        `overridden` 是那天有几行是**单日覆盖**写的（票 07）：月历靠它在格子上打个点，
+        点开看「谁被改了、改了成什么」—— 它和人数走的是两条查询，「改成休」那种改动
+        在人数里看不出来，在这个计数里看得出来。
         """
         start, next_month = _month_bounds(month)
         first = start.isoformat()
@@ -643,6 +870,19 @@ class SchedulingStore:
         used = {shift_id for per_shift in counted.values() for shift_id in per_shift}
         shifts = await self._shifts_for_display(used)
 
+        # 那天有几行是被单日覆盖写下的（票 07 的标记）：>0 就是「这一天跟规则不一样」。
+        # 休也算 —— 「被改成休」正是店长最需要一眼看到的那种改动，而它不在人数里。
+        cur = await self._conn.execute(
+            """SELECT business_date, COUNT(*) AS n FROM staff_assignments
+               WHERE business_date >= ? AND business_date < ? AND source = ?
+               GROUP BY business_date""",
+            (first, next_month.isoformat(), SOURCE_OVERRIDE),
+        )
+        overridden: dict[str, int] = {}
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            overridden[mapping["business_date"]] = int(mapping["n"])
+
         today = self.today()
         days = []
         for day in _each_day(start, next_month):
@@ -654,6 +894,7 @@ class SchedulingStore:
                 "is_today": key == today,
                 "counts": {str(s["id"]): per_shift.get(s["id"], 0) for s in shifts},
                 "total": sum(per_shift.get(s["id"], 0) for s in shifts),
+                "overridden": overridden.get(key, 0),
             })
 
         return {**self._month_frame(start, today, days), "shifts": shifts}
@@ -667,21 +908,42 @@ class SchedulingStore:
 
         责任区读的是**结果行上的 `zone_id`**，不是现在的固定区配置：那天写下来是什么
         就是什么 —— 事后改固定区不该改写已经过去的日子（`spec.md` 的「过去不改」）。
+
+        每个人带一个 `overridden`：这一行的 `source` 是 `override`（票 07 的单日覆盖），
+        也就是「这天他跟规则不一样」。面板靠它标出来、并给出「撤销覆盖」这个动作。
+
+        休的人不只给一个数：`off_people` 是跟 `groups` 同形的一份名单。他们也要能被点开
+        —— 店长把某人改成休之后，得从那格再把他改回上班（或者撤掉那次改动）。
         """
         day = _require_business_date(business_date)
         names = await self._name_index()
         zone_names = await self._zone_name_index()
 
         cur = await self._conn.execute(
-            "SELECT employee_id, shift_id, zone_id FROM staff_assignments WHERE business_date = ?",
+            """SELECT employee_id, shift_id, zone_id, source FROM staff_assignments
+               WHERE business_date = ?""",
             (day,),
         )
-        by_shift: dict[Any, list[tuple[int, Optional[int]]]] = {}
+        by_shift: dict[Any, list[tuple[int, Optional[int], bool]]] = {}
         for row in await cur.fetchall():
             mapping = dict(row)
             key = REST if mapping["shift_id"] is None else int(mapping["shift_id"])
             zone = None if mapping["zone_id"] is None else int(mapping["zone_id"])
-            by_shift.setdefault(key, []).append((int(mapping["employee_id"]), zone))
+            overridden = mapping["source"] == SOURCE_OVERRIDE
+            by_shift.setdefault(key, []).append((int(mapping["employee_id"]), zone, overridden))
+
+        def person(employee_id: int, zone: Optional[int], overridden: bool) -> dict:
+            return {
+                "id": employee_id,
+                "name": names.get(employee_id, ""),
+                # 没配区就是 None，前端渲染成「（未配区）」——
+                # 「这个人这天在哪」还没定，不是错误。
+                "zone": zone_names.get(zone) if zone is not None else None,
+                # 区也按 **id** 给一份：编辑器要预填下拉，按名字反查不可靠
+                # （`hygiene_zones` 的名字没有唯一约束，重名会挑错那个）。
+                "zone_id": zone,
+                "overridden": overridden,
+            }
 
         shifts = await self._shifts_for_display({key for key in by_shift if key is not REST})
         groups = []
@@ -693,23 +955,18 @@ class SchedulingStore:
             groups.append({
                 "shift": shift,
                 "count": len(people),
-                "people": [
-                    {
-                        "id": employee_id,
-                        "name": names.get(employee_id, ""),
-                        # 没配区就是 None，前端渲染成「（未配区）」——
-                        # 「这个人这天在哪」还没定，不是错误。
-                        "zone": zone_names.get(zone) if zone is not None else None,
-                    }
-                    for employee_id, zone in people
-                ],
+                "people": [person(*item) for item in people],
             })
-        rest_ids = by_shift.get(REST, [])
+        rest_ids = sorted(by_shift.get(REST, []), key=lambda item: names.get(item[0], ""))
         return {
             "business_date": day,
             "groups": groups,
             "total": sum(group["count"] for group in groups),
             "off_count": len(rest_ids),
+            "off_people": [person(*item) for item in rest_ids],
+            # 过去的日子不改写（口径 5）：这天的覆盖撤不掉 —— 前端据此把「撤销」收起来，
+            # 而不是给一个按了没反应的按钮。
+            "undoable": day >= self.today(),
         }
 
     @_needs_migration

@@ -88,9 +88,13 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         return {dict(row)["business_date"]: dict(row)["zone_id"] for row in await cur.fetchall()}
 
     async def _full_rows(self, employee_id):
-        """整行快照（`business_date → 全字段`）：用来证明「过去一个字都没动」。"""
+        """整行快照（`business_date → 全字段`）：用来证明「过去一个字都没动」。
+
+        `id` 也在里面：删掉再插一行、字段看着一样时，换过行这件事只有它记得
+        （时钟是注入的固定值，`created_at`/`updated_at` 分不出来）。
+        """
         cur = await self.db._conn.execute(
-            """SELECT business_date, shift_id, zone_id, source, created_at, updated_at
+            """SELECT id, business_date, shift_id, zone_id, source, created_at, updated_at
                FROM staff_assignments WHERE employee_id = ?""",
             (employee_id,),
         )
@@ -823,6 +827,330 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             await self.store.month_calendar("2026-9")
         self.assertEqual(caught.exception.code, "invalid_month")
 
+    # ── 验收：单日覆盖（票 07）──────────────────────────────────────────
+    #
+    # 覆盖是「整天的快照」：这一天的班次与责任区由那次改动定下来，规则以后怎么变都不再
+    # 动它（想回去就撤掉覆盖）。所以下面既要断言「改的那天变了」，也要断言
+    # 「别的时候没变」。
+
+    async def test_override_changes_only_that_one_day(self):
+        """验收 1：改某天的某人，只影响那一天。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+
+        await self.store.set_override(employee["id"], "2026-09-25", shift_id=night)
+
+        rows = {row["business_date"]: row for row in await self._rows(employee["id"])}
+        self.assertEqual(len(rows), EXPANSION_DAYS)  # 不多不少，还是这个窗口
+        self.assertEqual(
+            (rows["2026-09-24"]["shift_id"], rows["2026-09-24"]["source"]), (day, "rule")
+        )
+        self.assertEqual(
+            (rows["2026-09-25"]["shift_id"], rows["2026-09-25"]["source"]), (night, "override")
+        )
+        self.assertEqual(
+            (rows["2026-09-26"]["shift_id"], rows["2026-09-26"]["source"]), (day, "rule")
+        )
+        # 今天也能改：只有**过去**不行。把 `day < self.today()` 写成 `<=` 就会红在这里。
+        saved = await self.store.set_override(employee["id"], TODAY, shift_id=night)
+        self.assertEqual(saved["business_date"], TODAY)
+        rows = {row["business_date"]: row for row in await self._rows(employee["id"])}
+        self.assertEqual((rows[TODAY]["shift_id"], rows[TODAY]["source"]), (night, "override"))
+
+    async def test_override_to_rest_takes_the_person_out_of_the_count(self):
+        """验收 2：改成休 —— 那天少一个人、多一个「休」，别的时候不受影响。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        before = await self.store.day_detail("2026-09-25")
+        self.assertEqual((before["total"], before["off_count"]), (1, 0))
+
+        saved = await self.store.set_override(employee["id"], "2026-09-25", is_rest=True)
+
+        self.assertEqual((saved["shift_id"], saved["is_rest"]), (None, True))
+        after = await self.store.day_detail("2026-09-25")
+        self.assertEqual((after["total"], after["off_count"]), (0, 1))
+        tomorrow = await self.store.day_detail("2026-09-26")
+        self.assertEqual((tomorrow["total"], tomorrow["off_count"]), (1, 0))
+        # 休的那天人是「那天休」，不是「没排到」：行还在，班次为空。
+        self.assertEqual(
+            (await self._rows(employee["id"]))[1]["shift_id"],
+            None,
+        )
+
+    async def test_override_can_move_only_the_zone(self):
+        """验收 3：只换责任区 —— 班次还是白班，那天换到别的区，固定区配置不动。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        other = await self._zone("凉菜")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_zone_default(employee["id"], day, zone)
+
+        await self.store.set_override(employee["id"], "2026-09-25", shift_id=day, zone_id=other)
+
+        detail = await self.store.day_detail("2026-09-25")
+        self.assertEqual(detail["groups"][0]["shift"]["name"], "白班")
+        self.assertEqual(
+            detail["groups"][0]["people"],
+            [
+                {
+                    "id": employee["id"],
+                    "name": "张三",
+                    "zone": "凉菜",
+                    # 区也按 id 给一份：编辑器要按 id 预填下拉（名字没有唯一约束）。
+                    "zone_id": other,
+                    "overridden": True,
+                }
+            ],
+        )
+        # 「固定区」是配置，覆盖只是那一天：第二天照旧回到案板。
+        self.assertEqual(
+            (await self.store.day_detail("2026-09-26"))["groups"][0]["people"][0]["zone"],
+            "案板",
+        )
+
+    async def test_override_without_a_zone_follows_the_shifts_fixed_zone(self):
+        """不给区 = 「跟这个班次的固定区」—— 跟展开时是同一条口径。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_zone_default(employee["id"], day, zone)
+
+        saved = await self.store.set_override(employee["id"], "2026-09-25", shift_id=day)
+
+        self.assertEqual(saved["zone_id"], zone)
+        self.assertEqual((await self._zone_ids(employee["id"]))["2026-09-25"], zone)
+
+    async def test_month_calendar_marks_the_overridden_day(self):
+        """验收 4：被覆盖过的天在月历上有标记（`overridden`），别人别的天没有。"""
+        employee = await self._employee()
+        other = await self._employee(phone="13800138001", name="李四")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_rule(other["id"], [day])
+
+        await self.store.set_override(employee["id"], "2026-09-25", is_rest=True)
+
+        days = (await self.store.month_calendar("2026-09"))["days"]
+        marked = {item["business_date"]: item for item in days}
+        self.assertEqual(marked["2026-09-25"]["overridden"], 1)
+        self.assertEqual(marked["2026-09-24"]["overridden"], 0)
+        self.assertEqual(marked["2026-09-26"]["overridden"], 0)
+        # 「被改成休」在人数里看不出来（那天他本来就不占白班的名额），标记里看得出来。
+        self.assertEqual(marked["2026-09-25"]["total"], 1)  # 只剩李四
+        # 标记读的是**结果行的 `source`**，所以被改成休的人也带着它 —— 而且休的人
+        # 不能只给一个数：他还得能被点开改回来（`off_people`）。
+        detail = await self.store.day_detail("2026-09-25")
+        self.assertEqual(
+            [(item["name"], item["overridden"]) for item in detail["groups"][0]["people"]],
+            [("李四", False)],
+        )
+        self.assertEqual(
+            [(item["name"], item["zone_id"], item["overridden"]) for item in detail["off_people"]],
+            [("张三", None, True)],
+        )
+        self.assertEqual((detail["total"], detail["off_count"]), (1, 1))
+
+    async def test_clearing_an_override_puts_the_rule_back(self):
+        """验收 5：撤掉覆盖 → 那天回到规则铺出来的样子（连责任区一起）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_zone_default(employee["id"], day, zone)
+        await self.store.set_override(employee["id"], "2026-09-25", is_rest=True)
+
+        await self.store.clear_override(employee["id"], "2026-09-25")
+
+        row = (await self._full_rows(employee["id"]))["2026-09-25"]
+        self.assertEqual((row["shift_id"], row["zone_id"], row["source"]), (day, zone, "rule"))
+        detail = await self.store.day_detail("2026-09-25")
+        self.assertEqual(detail["total"], 1)
+        self.assertEqual(detail["groups"][0]["people"][0]["overridden"], False)
+        days = (await self.store.month_calendar("2026-09"))["days"]
+        self.assertEqual([d["overridden"] for d in days if d["business_date"] == "2026-09-25"], [0])
+
+    async def test_clearing_a_past_override_keeps_the_history(self):
+        """撤销只对今天以后生效：过去那天的结果行一个字都不改（记录还是会删）。
+
+        这是「过去不改」在撤销这条路的样子。店长不该看到一个点了没反应的按钮 ——
+        所以 `day_detail` 顺手给出 `undoable`，前端据此把撤销收起来。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_override(employee["id"], "2026-09-25", shift_id=night)
+        stamp = (await self._full_rows(employee["id"]))["2026-09-25"]
+        self.assertEqual(stamp["source"], "override")
+        self.assertEqual((await self.store.day_detail("2026-09-25"))["undoable"], True)
+
+        # 时钟推到那天之后：9/25 成了过去（把 `if day >= self.today()` 改成 `if True` 会红）。
+        self.fixed_now = datetime(2026, 9, 28, 10, 0, tzinfo=CHINA_TZ)
+        self.assertEqual((await self.store.day_detail("2026-09-25"))["undoable"], False)
+
+        await self.store.clear_override(employee["id"], "2026-09-25")
+
+        self.assertEqual((await self._full_rows(employee["id"]))["2026-09-25"], stamp)
+        cur = await self.db._conn.execute(
+            "SELECT COUNT(*) AS n FROM scheduling_overrides WHERE employee_id = ?",
+            (employee["id"],),
+        )
+        self.assertEqual(dict(await cur.fetchone())["n"], 0)
+
+    async def test_rule_change_does_not_wipe_an_overridden_day(self):
+        """验收 6：改规则时已被覆盖的那天不被冲掉（一个字都不动，含 `updated_at`）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_override(employee["id"], "2026-09-25", is_rest=True)
+        stamp = (await self._full_rows(employee["id"]))["2026-09-25"]
+
+        await self.store.set_rule(employee["id"], [night])  # 新规则：那天本该上夜班
+
+        self.assertEqual((await self._full_rows(employee["id"]))["2026-09-25"], stamp)
+        rows = {row["business_date"]: row for row in await self._rows(employee["id"])}
+        self.assertEqual(rows["2026-09-24"]["shift_id"], night)
+        self.assertEqual(rows["2026-09-25"]["shift_id"], None)
+        self.assertEqual(rows["2026-09-26"]["shift_id"], night)
+
+    async def test_clearing_the_rule_does_not_wipe_an_overridden_day(self):
+        """验收 6（第二种规则变动）：删掉规则时，手改过的那天照样留着。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_override(employee["id"], "2026-09-25", shift_id=night)
+        stamp = (await self._full_rows(employee["id"]))["2026-09-25"]
+
+        await self.store.clear_rule(employee["id"])
+
+        rows = await self._full_rows(employee["id"])
+        # 规则铺的全撤了（今天及以后），只剩手改的那天。
+        self.assertEqual(sorted(rows), ["2026-09-25"])
+        self.assertEqual(rows["2026-09-25"], stamp)
+        detail = await self.store.day_detail("2026-09-25")
+        # 挂在夜班那组：`day_detail` 把所有在用的班次都列出来，`groups[0]` 可能是空组。
+        people = {
+            item["name"]: item
+            for group in detail["groups"]
+            for item in group["people"]
+        }
+        self.assertEqual(people["张三"]["overridden"], True)
+
+    async def test_changing_the_fixed_zone_does_not_wipe_an_overridden_day(self):
+        """验收 6（第三种规则变动）：改固定区时，手改过的那天也不动。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        other = await self._zone("凉菜")
+        third = await self._zone("面点")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_zone_default(employee["id"], day, zone)
+        await self.store.set_override(employee["id"], "2026-09-25", shift_id=day, zone_id=other)
+        stamp = (await self._full_rows(employee["id"]))["2026-09-25"]
+
+        await self.store.set_zone_default(employee["id"], day, third)
+
+        # 手改那天照旧是「凉菜」（改的那一刻定下的），别的日子跟新的固定区走。
+        self.assertEqual((await self._full_rows(employee["id"]))["2026-09-25"], stamp)
+        zone_ids = await self._zone_ids(employee["id"])
+        self.assertEqual((zone_ids["2026-09-25"], zone_ids["2026-09-24"]), (other, third))
+
+    async def test_override_refuses_a_past_day_and_a_day_past_the_window(self):
+        """验收 7：只影响今天以后 —— 昨天不给改（`past_day`），窗口外不给改。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        before = await self._full_rows(employee["id"])
+
+        with self.assertRaises(SchedulingError) as past:
+            await self.store.set_override(employee["id"], "2026-09-23", shift_id=day)
+        self.assertEqual(past.exception.code, "past_day")
+        with self.assertRaises(SchedulingError) as beyond:
+            await self.store.set_override(employee["id"], "2026-12-23", shift_id=day)
+        self.assertEqual(beyond.exception.code, "beyond_window")
+        with self.assertRaises(SchedulingError) as bad_date:
+            await self.store.set_override(employee["id"], "9/25", shift_id=day)
+        self.assertEqual(bad_date.exception.code, "invalid_business_date")
+
+        self.assertEqual(await self._full_rows(employee["id"]), before)
+        # 窗口最后一天还是能改的（边界是含的，跟展开的窗口同一口径）。
+        saved = await self.store.set_override(employee["id"], LAST_DAY, is_rest=True)
+        self.assertEqual(saved["business_date"], LAST_DAY)
+
+    async def test_override_validates_its_own_payload(self):
+        """「改成休」不能顺带带班次或区；改班次必须给班次；人、班次、区都得存在。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        await self.store.set_rule(employee["id"], [day])
+
+        cases = [
+            ({"is_rest": True, "shift_id": day}, "rest_with_details"),
+            ({"is_rest": True, "zone_id": zone}, "rest_with_details"),
+            ({}, "missing_shift"),
+            ({"shift_id": 999}, "unknown_shift"),
+            ({"shift_id": day, "zone_id": 999}, "unknown_zone"),
+        ]
+        for payload, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(SchedulingError) as caught:
+                    await self.store.set_override(employee["id"], "2026-09-25", **payload)
+                self.assertEqual(caught.exception.code, code)
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.set_override(9999, "2026-09-25", shift_id=day)
+        self.assertEqual(caught.exception.code, "unknown_employee")
+
+        # 一次都没落盘：那天还是规则铺的，覆盖记录一条都没有。
+        detail = await self.store.day_detail("2026-09-25")
+        self.assertEqual(detail["groups"][0]["people"][0]["overridden"], False)
+        days = (await self.store.month_calendar("2026-09"))["days"]
+        self.assertEqual([d["overridden"] for d in days if d["business_date"] == "2026-09-25"], [0])
+
+    async def test_a_ruleless_person_can_be_given_a_day_off_and_undo_leaves_nothing(self):
+        """没有规则的人也能单改一天；撤掉之后那天回到「还没铺到」，不留空行。"""
+        employee = await self._employee()
+        self.assertEqual(await self._rows(employee["id"]), [])
+
+        await self.store.set_override(employee["id"], "2026-09-25", is_rest=True)
+
+        self.assertEqual(
+            [
+                (row["business_date"], row["shift_id"], row["source"])
+                for row in await self._rows(employee["id"])
+            ],
+            [("2026-09-25", None, "override")],
+        )
+        await self.store.clear_override(employee["id"], "2026-09-25")
+        self.assertEqual(await self._rows(employee["id"]), [])
+
+    async def test_expand_brings_a_lost_override_row_back_from_the_record(self):
+        """结果行丢了也照覆盖记录补回来 —— 记录才是「那天被改成什么」的真源。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_override(employee["id"], "2026-09-25", shift_id=night)
+        await self.db._conn.execute(
+            "DELETE FROM staff_assignments WHERE employee_id = ? AND business_date = ?",
+            (employee["id"], "2026-09-25"),
+        )
+        await self.db._conn.commit()
+
+        await self.store.expand(employee["id"])
+
+        rows = {row["business_date"]: row for row in await self._rows(employee["id"])}
+        self.assertEqual(
+            (rows["2026-09-25"]["shift_id"], rows["2026-09-25"]["source"]), (night, "override")
+        )
+        self.assertEqual(rows["2026-09-26"]["shift_id"], day)  # 别的天照旧按规则
+
     # ── 启动期：班次表只在空的时候放默认值 ──────────────────────────────
 
     async def test_prepare_keeps_renamed_shifts(self):
@@ -863,7 +1191,7 @@ class SchedulingLayeringTest(unittest.TestCase):
         """票 05：排班的 HTTP 面有两扇门，员工那扇只读自己。
 
         票 02 时这里断言「一条员工路由都没有」；票 05 开了 `/me`、票 06 又开了
-        `/me/month` 之后，边界从「零条」变成「两扇门互不通用」—— 店长那七条（六条路径）
+        `/me/month` 之后，边界从「零条」变成「两扇门互不通用」—— 店长那九条（七条路径）
         只认管理端会话，员工那两条只认手机端 cookie。
 
         断言路由表本身，不是源码文本 —— 文本比对会被注释或文档字符串误伤
@@ -879,6 +1207,8 @@ class SchedulingLayeringTest(unittest.TestCase):
             "/api/scheduling/roster",
             "/api/scheduling/rules/{employee_id}",
             "/api/scheduling/zone-defaults/{employee_id}",
+            # 票 07：单日覆盖的改与撤。
+            "/api/scheduling/overrides/{employee_id}/{business_date}",
         }
         self.assertEqual(
             {route.path for route in router.routes}, staff_paths | manager_paths
@@ -914,6 +1244,8 @@ class SchedulingLayeringTest(unittest.TestCase):
                 "staff_assignments",
                 "scheduling_rules",
                 "scheduling_zone_defaults",
+                # 票 07：单日覆盖记在这张表里（`source='override'` 的结果行由它解释）。
+                "scheduling_overrides",
             },
         )
         for table in SCHEDULING_TABLES:
