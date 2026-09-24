@@ -258,6 +258,110 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         # 没配区的人照样出现在名单里，只是区是空的（票 03 的验收项）。
         self.assertIsNone(group["people"][0]["zone"])
 
+    # ── 票 05：员工自己的「今天」 ────────────────────────────────────────
+
+    async def test_my_days_carries_today_shift_and_zone(self):
+        """验收 2/3/5：员工看到的那一行跟店长配的是同一件事，日期是营业日。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        await self.store.set_zone_default(employee["id"], day, zone)
+        await self.store.set_rule(employee["id"], [day])
+
+        mine = await self.store.my_days(employee["id"])
+
+        self.assertEqual(mine["today"], TODAY)
+        self.assertEqual(
+            [item["business_date"] for item in mine["days"]],
+            ["2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27"],
+        )
+        self.assertEqual(
+            [
+                (item["is_today"], item["scheduled"], item["shift_name"], item["zone_name"])
+                for item in mine["days"]
+            ],
+            [(True, True, "白班", "案板")] + [(False, True, "白班", "案板")] * 3,
+        )
+
+    async def test_my_days_distinguishes_a_rest_day_from_no_roster(self):
+        """休和「还没排」不是一回事：休那天有行（`scheduled`）但没有班次。"""
+        employee = await self._employee()
+        idle = await self._employee("13800138001", "李四")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day, None])
+
+        days = (await self.store.my_days(employee["id"]))["days"]
+        self.assertEqual([item["scheduled"] for item in days], [True] * 4)
+        self.assertEqual(
+            [item["shift_name"] for item in days], ["白班", None, "白班", None]
+        )
+
+        # 一条规则都没配的人：四天都在，只是都还没排 —— 不是报错，也不是空列表。
+        empty = (await self.store.my_days(idle["id"]))["days"]
+        self.assertEqual([item["scheduled"] for item in empty], [False] * 4)
+        self.assertEqual([item["shift_name"] for item in empty], [None] * 4)
+        self.assertEqual([item["business_date"] for item in empty], [
+            "2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27",
+        ])
+
+    async def test_my_days_fills_the_window_for_this_person_only(self):
+        """员工页自己会补齐：店长配完规则、月历还没人打开过，这一眼也得是对的。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.db._conn.execute(
+            "DELETE FROM staff_assignments WHERE employee_id = ?", (employee["id"],)
+        )
+        await self.db._conn.commit()
+        self.assertEqual(await self._rows(employee["id"]), [])
+
+        days = (await self.store.my_days(employee["id"]))["days"]
+
+        self.assertEqual(days[0]["shift_name"], "白班")
+        # 只铺这一人：窗口 90 天，不是「今天 + 4 天」那几行。
+        self.assertEqual(len(await self._rows(employee["id"])), EXPANSION_DAYS)
+
+    async def test_my_days_reads_back_a_changed_zone_default(self):
+        """验收 2 的另一半：店长换了默认责任区，员工这一眼跟着变（不是只在月历里变）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        board = await self._zone("案板")
+        steamer = await self._zone("蒸柜")
+        await self.store.set_zone_default(employee["id"], day, board)
+        await self.store.set_rule(employee["id"], [day])
+        self.assertEqual(
+            (await self.store.my_days(employee["id"]))["days"][0]["zone_name"], "案板"
+        )
+
+        await self.store.set_zone_default(employee["id"], day, steamer)
+
+        self.assertEqual(
+            (await self.store.my_days(employee["id"]))["days"][0]["zone_name"], "蒸柜"
+        )
+
+    async def test_my_days_gives_no_name_when_the_shift_row_is_gone(self):
+        """班次/责任区被硬删（票 11 与卫生那边管这两张表）不该冒 500：
+        行还在、名字取不到就给 None，页面自己翻成「班次已调整」——不许假装那天是休。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        await self.store.set_zone_default(employee["id"], day, zone)
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.my_days(employee["id"])  # 先把行铺出来
+
+        await self.db._conn.execute("DELETE FROM hygiene_zones WHERE id = ?", (zone,))
+        await self.db._conn.commit()
+        no_zone = (await self.store.my_days(employee["id"]))["days"][0]
+        self.assertTrue(no_zone["scheduled"])
+        self.assertEqual(no_zone["shift_name"], "白班")
+        self.assertIsNone(no_zone["zone_name"])
+
+        await self.db._conn.execute("DELETE FROM staff_shifts WHERE id = ?", (day,))
+        await self.db._conn.commit()
+        no_shift = (await self.store.my_days(employee["id"]))["days"][0]
+        self.assertTrue(no_shift["scheduled"])
+        self.assertIsNone(no_shift["shift_name"])
+
     # ── 票 03：每人每班次一个固定责任区 ────────────────────────────────
 
     async def test_zone_default_is_written_into_new_rows(self):
@@ -635,24 +739,28 @@ class SchedulingLayeringTest(unittest.TestCase):
             offenders = sorted(name for name in imported if name.startswith("services.hygiene"))
             self.assertEqual(offenders, [], f"{path.name} 不该 import 卫生")
 
-    def test_scheduling_api_has_no_staff_route(self):
-        """员工端这一票一个字不改：排班的 HTTP 面只有管理端会话。
+    def test_scheduling_http_doors_are_separate(self):
+        """票 05：排班的 HTTP 面有两扇门，员工那扇只读自己。
+
+        票 02 时这里断言「一条员工路由都没有」；票 05 开了 `/me` 之后，边界从「零条」
+        变成「两扇门互不通用」—— 店长的七条只认管理端会话，员工那一条只认手机端 cookie。
 
         断言路由表本身，不是源码文本 —— 文本比对会被注释或文档字符串误伤
         （写一句「这里不用 require_staff_session」就红了）。
         """
         from api.scheduling import router
 
+        staff_paths = {"/api/scheduling/me"}
+        manager_paths = {
+            "/api/scheduling/shifts",
+            "/api/scheduling/calendar",
+            "/api/scheduling/day",
+            "/api/scheduling/roster",
+            "/api/scheduling/rules/{employee_id}",
+            "/api/scheduling/zone-defaults/{employee_id}",
+        }
         self.assertEqual(
-            {route.path for route in router.routes},
-            {
-                "/api/scheduling/shifts",
-                "/api/scheduling/calendar",
-                "/api/scheduling/day",
-                "/api/scheduling/roster",
-                "/api/scheduling/rules/{employee_id}",
-                "/api/scheduling/zone-defaults/{employee_id}",
-            },
+            {route.path for route in router.routes}, staff_paths | manager_paths
         )
 
         def dependency_names(dependant) -> set[str]:
@@ -664,8 +772,16 @@ class SchedulingLayeringTest(unittest.TestCase):
 
         for route in router.routes:
             names = dependency_names(route.dependant)
-            self.assertIn("require_session", names, route.path)
-            self.assertNotIn("require_staff_session", names, route.path)
+            if route.path in staff_paths:
+                self.assertIn("require_staff_session", names, route.path)
+                self.assertNotIn("require_session", names, route.path)
+            else:
+                self.assertIn("require_session", names, route.path)
+                self.assertNotIn("require_staff_session", names, route.path)
+
+        # 员工那条门上没有路径参数：读谁不由调用方说了算。
+        staff_route = [route for route in router.routes if route.path in staff_paths][0]
+        self.assertNotIn("{", staff_route.path)
 
     def test_new_tables_are_registered_read_only(self):
         """验收 4：新表进表名清单，Admin 的数据浏览器只读能看到。"""

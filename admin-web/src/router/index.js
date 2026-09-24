@@ -46,6 +46,11 @@ const routes = [
   hygieneAdminPage('/hygiene-fix', 'hygiene-fix', () => import('../views/hygiene/HygieneFixView.vue')),
   hygieneAdminPage('/hygiene-boards', 'hygiene-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
   hygieneAdminPage('/hygiene-data', 'hygiene-data', () => import('../views/hygiene/HygieneDataView.vue')),
+  // 员工手机端的入口是「今天」页（票 05）：登录后落到这里，第一眼是自己的班。
+  // 卫生那张卡还没接上（下一张票），这会儿页面上只有排班这一块。
+  // `staffProbe: false`：这一页自己那一次请求就分得清 401 与断网（见 TodayView 的
+  // `load()`），不必先陪守卫白等一次探针超时（弱网下最多 4 秒）。
+  { path: '/today', name: 'today', component: () => import('../views/today/TodayView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, staffProbe: false } },
   { path: '/hygiene', name: 'hygiene-home', component: () => import('../views/hygiene/HygieneHomeView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, realtime: true } },
   hygieneStaffAuthPage('/hygiene/login', 'hygiene-login', () => import('../views/hygiene/HygieneLoginView.vue'), '员工登录'),
   hygieneStaffAuthPage('/hygiene/register', 'hygiene-register', () => import('../views/hygiene/HygieneRegisterView.vue'), '员工注册'),
@@ -62,6 +67,9 @@ const router = createRouter({
 // 员工卫生首页另查员工会话；其余未登录跳 /login?next=
 router.beforeEach(async (to) => {
   if (to.meta.staffAuth) {
+    // 页面自己会拉数据的（`staffProbe: false`）跳过探针：那一次请求本来就分得清
+    // 401 与断网，探针只是让员工在白屏前多等一次超时。
+    if (to.meta.staffProbe === false) return true
     const state = await staffSessionState()
     // 网络不明（断网 / 后端刚重启 / 超时）时放行到页面：那里会显示"网络不好，
     // 正在重试"并退避重试。把这种情况也判成未登录，弱网下就会把员工反复甩到登录页。

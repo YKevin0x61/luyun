@@ -669,10 +669,12 @@ from starlette.requests import Request
 
 # The SPA shell is public (it only boots the client router); protected pages are
 # still enforced by the router/API. The Service Worker also needs to precache it.
-HTML_AUTH_EXACT = {"/login", "/login.html", "/index.html", "/hygiene"}
+# 员工页面也在里面：手机上没有管理端会话，拦在服务端就永远进不去（员工会话由客户端
+# 守卫查那个 cookie）。`/hygiene` 是卫生那块的入口，`/today` 是排班的「今天」页。
+HTML_AUTH_EXACT = {"/login", "/login.html", "/index.html", "/hygiene", "/today"}
 # Keep in lockstep with admin-web/src/utils/loginNext.js RECIPE_READER_PATHS.
 # Do not use a /recipe prefix — /recipe/manage still requires a session.
-# Staff-phone lives under /hygiene and /hygiene/... ; /hygiene-roster is Admin SPA.
+# Staff-phone lives under /hygiene, /hygiene/... and /today ; /hygiene-roster is Admin SPA.
 HTML_AUTH_PUBLIC_PAGES = frozenset({
     "/recipe",
     "/recipe/detail",
@@ -686,6 +688,9 @@ HTML_AUTH_PREFIXES = (
     "/assets/",
     "/pwa/",
     "/hygiene/",
+    # 员工页带尾斜杠时也放行：`/today/` 精确表兜不住，被甩到 /login 的话员工
+    # 在管理端登录页登不进去。放行之后照 SPA 那套 307 回不带尾斜杠的那条。
+    "/today/",
 )
 HTML_AUTH_SUFFIXES = (
     ".css",
@@ -1103,6 +1108,7 @@ SPA_PAGE_ROUTES = (
     "/hygiene",
     "/hygiene/login",
     "/hygiene/register",
+    "/today",
     "/hygiene-roster",
     "/hygiene-zones",
     "/hygiene-daily",

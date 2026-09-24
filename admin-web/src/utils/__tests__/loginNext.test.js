@@ -3,6 +3,7 @@ import {
   buildLoginNextFromRoute,
   isRecipeReaderPath,
   resolveLoginNext,
+  resolveStaffNext,
   shouldSkipLoginRedirect,
 } from '../loginNext.js'
 
@@ -27,7 +28,9 @@ describe('shouldSkipLoginRedirect', () => {
     expect(shouldSkipLoginRedirect('/recipe/detail')).toBe(true)
   })
 
-  it('员工手机卫生入口不因 401 跳后台登录', () => {
+  it('员工手机端的页不因 401 跳后台登录（今天页与卫生）', () => {
+    expect(shouldSkipLoginRedirect('/today')).toBe(true)
+    expect(shouldSkipLoginRedirect('/today/')).toBe(true)
     expect(shouldSkipLoginRedirect('/hygiene')).toBe(true)
     expect(shouldSkipLoginRedirect('/hygiene/login')).toBe(true)
     expect(shouldSkipLoginRedirect('/hygiene/register')).toBe(true)
@@ -75,5 +78,47 @@ describe('resolveLoginNext', () => {
   it('空值回退', () => {
     expect(resolveLoginNext(null, '/recipe')).toBe('/recipe')
     expect(resolveLoginNext('', '/recipe')).toBe('/recipe')
+  })
+})
+
+describe('resolveStaffNext', () => {
+  it('员工那两块页面原样放行（含子页面与 query）', () => {
+    expect(resolveStaffNext('/today')).toBe('/today')
+    expect(resolveStaffNext('/hygiene')).toBe('/hygiene')
+    expect(resolveStaffNext('/hygiene/login')).toBe('/hygiene/login')
+    expect(resolveStaffNext('/hygiene/daily?tab=2')).toBe('/hygiene/daily?tab=2')
+    expect(resolveStaffNext('/today/')).toBe('/today/')
+  })
+
+  it('站外地址与协议相对地址一律回落到今天页', () => {
+    expect(resolveStaffNext('https://evil.example/phish')).toBe('/today')
+    expect(resolveStaffNext('//evil.example')).toBe('/today')
+    expect(resolveStaffNext('/\\evil.example')).toBe('/today')
+    expect(resolveStaffNext('javascript:alert(1)')).toBe('/today')
+  })
+
+  it('管理端页面不算员工落点（连名字像的也不算）', () => {
+    expect(resolveStaffNext('/admin')).toBe('/today')
+    expect(resolveStaffNext('/hygiene-roster')).toBe('/today')
+    expect(resolveStaffNext('/hygiene-zones')).toBe('/today')
+    expect(resolveStaffNext('/todayx')).toBe('/today')
+    expect(resolveStaffNext('/login?next=/admin')).toBe('/today')
+  })
+
+  it('默认落在今天页；也认调用方给的兜底', () => {
+    expect(resolveStaffNext(null)).toBe('/today')
+    expect(resolveStaffNext('')).toBe('/today')
+    expect(resolveStaffNext(undefined)).toBe('/today')
+    expect(resolveStaffNext(undefined, '/hygiene')).toBe('/hygiene')
+    expect(resolveStaffNext('/admin', '/hygiene')).toBe('/hygiene')
+  })
+
+  it('数组取第一个（vue-router 的 query 可能是数组）', () => {
+    expect(resolveStaffNext(['/today', '/admin'])).toBe('/today')
+    expect(resolveStaffNext(['/admin', '/today'])).toBe('/today')
+  })
+
+  it('误伤的双重编码照旧解开', () => {
+    expect(resolveStaffNext('/today?next=%252Ftoday')).toBe('/today?next=%2Ftoday')
   })
 })

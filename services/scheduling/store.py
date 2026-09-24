@@ -76,6 +76,10 @@ EXPANSION_DAYS = 90
 SOURCE_RULE = "rule"
 SOURCE_OVERRIDE = "override"
 
+# 员工「今天」页往后看几天：今天、明天、后天、大后天（原型 A 的「往后三天」）。
+# 窗口长度是服务层的数，前端不再写一份 —— 以后要改成「往后一周」只动这里。
+MY_WINDOW_DAYS = 4
+
 # 规则里「那天休」那一格。
 REST = None
 
@@ -677,6 +681,59 @@ class SchedulingStore:
             "total": sum(group["count"] for group in groups),
             "off_count": len(rest_ids),
         }
+
+    @_needs_migration
+    async def my_days(self, employee_id: int, days: int = MY_WINDOW_DAYS) -> dict:
+        """员工自己的今天和往后几天：一天一行，带那天写下的班次与责任区。
+
+        「今天」是排班自己那个 06:00 切日的今天（`self.today()`），跟月历、当日分工
+        读的是同一个日期 —— 员工凌晨一点看到的和店长看到的必须是同一天。
+
+        每人先单独补齐（只这一人，不是全店）：店长刚配完规则、月历还没人打开过，
+        员工这一眼也得是对的。窗口尽头的天数就是「还没排」，不报错。
+
+        没铺过的日子**也占一行**：`scheduled=False` 是「还没有你的班」，`scheduled=True`
+        而 `shift_id=None` 是「那天休」。两者在员工页上是两句话，不能让调用方从
+        「缺行」里去猜 —— 判据在服务层，前端只翻译。
+        """
+        await self.expand(employee_id)
+        first = self.today()
+        count = max(int(days), 1)
+        cur = await self._conn.execute(
+            """SELECT business_date, shift_id, zone_id FROM staff_assignments
+               WHERE employee_id = ? AND business_date >= ? AND business_date <= ?
+               ORDER BY business_date""",
+            (employee_id, first, shift_business_date(first, count - 1)),
+        )
+        rows = {dict(row)["business_date"]: dict(row) for row in await cur.fetchall()}
+        used = {int(row["shift_id"]) for row in rows.values() if row["shift_id"] is not None}
+        shifts = {int(shift["id"]): shift for shift in await self._shifts_for_display(used)}
+        zone_names = await self._zone_name_index()
+
+        out = []
+        for offset in range(count):
+            key = shift_business_date(first, offset)
+            row = rows.get(key)
+            shift_id = None
+            zone_id = None
+            if row is not None:
+                shift_id = None if row["shift_id"] is None else int(row["shift_id"])
+                zone_id = None if row["zone_id"] is None else int(row["zone_id"])
+            # 班次行被硬删掉（`staff_assignments.shift_id` 没有外键）时名字给 None：
+            # 员工页不该为了一个别人手工删掉的名字 500（票 11 管班次增删）。
+            shift = shifts.get(shift_id) if shift_id is not None else None
+            out.append({
+                "business_date": key,
+                "is_today": offset == 0,
+                "scheduled": row is not None,
+                "shift_id": shift_id,
+                "shift_name": None if shift is None else shift["name"],
+                "zone_id": zone_id,
+                # 区名来自结果行上的 zone_id：那天写在行上的是哪个区就是哪个区，
+                # 事后改固定区不改写过去（跟 `day_detail` 同一条口径）。
+                "zone_name": None if zone_id is None else zone_names.get(zone_id),
+            })
+        return {"today": first, "days": out}
 
     @_needs_migration
     async def roster_with_rules(self) -> dict:

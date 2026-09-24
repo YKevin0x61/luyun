@@ -41,10 +41,15 @@ describe('员工端弱网与未登录的分流', () => {
     expect(home).toMatch(/query: \{ next: router\.currentRoute\.value\.fullPath \}/)
   })
 
-  it('uses that return path on the login page, but only inside /hygiene', () => {
-    // 直接把 query 拿去 replace 就是开放重定向：必须限定站内 /hygiene 前缀。
+  it('uses that return path on the login page, but only inside the staff pages', () => {
+    // 直接把 query 拿去 replace 就是开放重定向：必须限定站内前缀。票 05 起员工
+    // 有两条落点 —— 卫生那块的 /hygiene 和排班的「今天」页 /today。
+    // 判据只在 utils/loginNext.js 的 `resolveStaffNext` 里写一遍（真单测在
+    // utils/__tests__/loginNext.test.js）：页面里手写正则等于第二份更弱的判据，
+    // 放松了也没人拦。
     const login = readFileSync(join(here, '../HygieneLoginView.vue'), 'utf8')
-    expect(login).toContain('^\\/hygiene')
+    expect(login).toMatch(/resolveStaffNext\(route\.query\.next\)/)
+    expect(login).not.toContain('hygiene|today')
     expect(login).toMatch(/router\.replace\(nextPath\)/)
     expect(login).not.toMatch(/router\.replace\(route\.query\.next\)/)
     expect(login).not.toMatch(/router\.replace\('\/hygiene'\)/)

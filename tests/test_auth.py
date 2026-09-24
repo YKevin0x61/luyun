@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import asyncio
 import os
+import re
 import tempfile
 import unittest
+from datetime import datetime, timedelta
+from pathlib import Path
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
@@ -42,6 +46,11 @@ from datetime import datetime, timedelta
 
 from services import auth_service
 from services.app_runtime import AppRuntime, set_runtime
+
+# 员工端路径名单前端那一份（服务端那两张表照它对表，见本文件末尾的契约用例）。
+STAFF_PATHS_JS = (
+    Path(__file__).resolve().parents[1] / "admin-web" / "src" / "utils" / "staffPaths.js"
+)
 
 
 def _run(coro):
@@ -370,12 +379,37 @@ def test_kds_html_not_redirected_to_login(auth_app_client):
     assert "/login" not in loc
 
 
-def test_hygiene_staff_pages_accessible_without_admin_session(auth_app_client):
+def test_staff_phone_pages_accessible_without_admin_session(auth_app_client):
+    # 员工手机上那两块的页（票 05 起落点是排班的 /today）：没有管理端会话也不许被
+    # 甩到 /login —— 管理端登录表单只认管理端账号，员工在那儿登不进去。
+    # `/today/` 是书签/外链/手输带来的尾斜杠，走 HTML_AUTH_PREFIXES 那条放行。
     client, _ = auth_app_client
-    for path in ("/hygiene", "/hygiene/login", "/hygiene/register"):
+    for path in ("/hygiene", "/hygiene/login", "/hygiene/register", "/today", "/today/"):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         loc = resp.headers.get("location", "")
         assert resp.status_code != 302 or "/login" not in loc, path
+
+
+def test_staff_path_list_matches_the_frontend_copy():
+    """员工端路径名单前端也有一份：两边必须对得上。
+
+    名单的唯一一份判据在 `admin-web/src/utils/staffPaths.js`（路由守卫、401 白名单、
+    PWA 清单归属都从它出发）。服务端这边少登记一条，员工手机硬导航那一页就被 302 到
+    管理端 `/login`（票 05 的 `/today` 正是这么漏过一次）；前端多一条，管理端页面就被
+    当成员工页。所以这里按 JS 那份逐条对 `main.py` 的两张表，而不是各写一份清单。
+    """
+    import main as main_module
+
+    source = STAFF_PATHS_JS.read_text(encoding="utf-8")
+    block = re.search(r"STAFF_PHONE_PREFIXES = \[(.*?)\]", source, re.S)
+    assert block, STAFF_PATHS_JS
+    prefixes = re.findall(r"'([^']+)'", block.group(1))
+    assert prefixes, "名单是空的：解析规则或文件结构变了，这条契约要跟着改"
+
+    for prefix in prefixes:
+        assert prefix in main_module.HTML_AUTH_EXACT, prefix
+        # 尾斜杠变体走前缀表（书签/外链/手输带来的 `/today/`）。
+        assert f"{prefix}/" in main_module.HTML_AUTH_PREFIXES, prefix
 
 
 def test_hygiene_roster_html_requires_admin_session(auth_app_client):

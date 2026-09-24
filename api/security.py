@@ -135,3 +135,34 @@ async def require_session(request: Request) -> str:
     if not await auth_service.validate_session_id(session_id):
         raise HTTPException(status_code=401, detail="需要登录")
     return session_id
+
+
+def _staff_accounts():
+    """员工账号服务：`main` 启动时装配（测试里也会替换它）。
+
+    真正会撞上「还没装配好」的是**服务刚起的那几秒**：那时候 `main.employee_accounts`
+    还是 None，员工手机上第一条请求就落在这一支。这里给 503（稍后再试）而不是 500 ——
+    这不是代码错。`ImportError` 那一支才是「没经由 main 起」的场景（命令行脚本）。
+    """
+    try:
+        from main import employee_accounts
+    except ImportError:  # pragma: no cover - 只在不经由 main 起的脚本里发生
+        employee_accounts = None
+    if employee_accounts is None:
+        raise HTTPException(status_code=503, detail="员工账号服务未就绪（服务正在启动）")
+    return employee_accounts
+
+
+async def require_staff_session(request: Request) -> dict:
+    """员工会话（手机端那个 cookie），卫生与排班两个 HTTP 面共用。
+
+    身份本身在公共层（`services.identity.accounts`）：排班不该 import 卫生的路由模块
+    去蹭它那个同名依赖 —— `tests/test_scheduling.py` 的分层测试盯的就是这条边界。
+    """
+    accounts = _staff_accounts()
+    employee = await accounts.get_staff_session(
+        request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    )
+    if employee is None:
+        raise HTTPException(status_code=401, detail="需要员工登录")
+    return employee

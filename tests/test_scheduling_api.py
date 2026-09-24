@@ -3,7 +3,8 @@
 """排班 HTTP 面（薄缝）：一条真实请求链路，铺排班的服务层测试不用重跑。
 
 薄缝只回答「谁能打、打进去会怎样」：管理端会话能配规则并立刻在月历上看见；
-匿名和**员工会话**都不行（排班是店长的门，员工端这一票一个字不改）。
+匿名两边都不行。票 05 起有两扇门 —— 店长的七条只认管理端会话，员工那条 `/me`
+只认手机端 cookie（票 02 时这里断言的是「一条员工路由都没有」）。
 """
 
 import asyncio
@@ -322,3 +323,148 @@ def test_half_migrated_store_still_serves_the_calendar(scheduling_http):
         assert client.get("/api/scheduling/shifts").status_code == 200
     finally:
         _run(_rename("scheduling_zone_defaults_tmp", "scheduling_zone_defaults"))
+
+
+# ── 票 05：员工那条门 ────────────────────────────────────────────────────
+
+
+def _wire_staff_accounts(monkeypatch, accounts):
+    """把员工账号挂到 `main.employee_accounts` 上：员工会话的查找口在那里。"""
+    import main
+
+    monkeypatch.setattr(main, "employee_accounts", accounts)
+
+
+def _staff_cookie(client, accounts):
+    """换员工那个 cookie（跟管理端是两个名字），登录用的是同一套账号。"""
+    session_id = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+    client.cookies.clear()
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, session_id)
+    return session_id
+
+
+def test_staff_me_returns_their_own_next_days(scheduling_http, monkeypatch):
+    """验收 2/3/5/7：员工拿手机端那个 cookie 读到自己的班，跟店长配的是同一件事。"""
+    client, db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    day_id = client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
+    zone_id = _zone(db, "案板")
+    assert (
+        client.put(
+            f"/api/scheduling/zone-defaults/{employee_id}",
+            json={"shift_id": day_id, "zone_id": zone_id},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]}).status_code
+        == 200
+    )
+
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+
+    me = client.get("/api/scheduling/me")
+    assert me.status_code == 200, me.text
+    body = me.json()
+    assert body["employee"] == {"id": employee_id, "name": NAME}
+    # 「今天」是排班自己那个 06:00 切日的今天，跟月历同一个日期。
+    assert body["today"] == TODAY
+    assert [item["business_date"] for item in body["days"]] == [
+        "2026-09-24",
+        "2026-09-25",
+        "2026-09-26",
+        "2026-09-27",
+    ]
+    first = body["days"][0]
+    assert (first["is_today"], first["shift_name"], first["zone_name"]) == (
+        True,
+        "白班",
+        "案板",
+    )
+    assert all(item["is_today"] is False for item in body["days"][1:])
+
+
+def test_a_rest_day_still_has_its_own_row(scheduling_http, monkeypatch):
+    """验收 3：休那天有行（`scheduled` 为真、班次为空）——
+
+    「今天休」和「今天没你的班」在员工页上是两句话，判据得从服务端下来。
+    """
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    day_id = client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
+    # 店长配一条「上一天、休一天」：休那天也得有一行下来。
+    assert (
+        client.put(
+            f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id, None]}
+        ).status_code
+        == 200
+    )
+
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+    body = client.get("/api/scheduling/me").json()
+
+    assert [item["scheduled"] for item in body["days"]] == [True] * 4
+    assert [item["shift_name"] for item in body["days"]] == ["白班", None, "白班", None]
+
+
+def test_staff_without_any_rule_sees_no_shift_not_an_error(scheduling_http, monkeypatch):
+    """验收 6：一条规则都没配的人 —— 四天都占着行、都标着「还没排」。"""
+    client, _db, accounts = scheduling_http
+    _employee_id(accounts)
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+
+    body = client.get("/api/scheduling/me").json()
+
+    assert [item["scheduled"] for item in body["days"]] == [False] * 4
+    assert [item["shift_name"] for item in body["days"]] == [None] * 4
+    assert [item["business_date"] for item in body["days"]] == [
+        "2026-09-24",
+        "2026-09-25",
+        "2026-09-26",
+        "2026-09-27",
+    ]
+
+
+def test_the_two_doors_do_not_open_each_other(scheduling_http, monkeypatch):
+    """验收 7：同一套员工账号、同一个 cookie；两扇门看的是两个 cookie 名。"""
+    client, _db, accounts = scheduling_http
+    _employee_id(accounts)
+    _wire_staff_accounts(monkeypatch, accounts)
+
+    # 管理端会话打不开员工的门（薄缝里这会儿挂着的就是管理端会话）。
+    denied = client.get("/api/scheduling/me")
+    assert denied.status_code == 401
+    assert denied.json()["detail"] == "需要员工登录"
+
+    _staff_cookie(client, accounts)
+    assert client.get("/api/scheduling/me").status_code == 200
+    # 反过来也一样：员工会话读不到店长的任何一条。
+    assert client.get("/api/scheduling/roster").status_code == 401
+    assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 401
+
+    client.cookies.clear()
+    assert client.get("/api/scheduling/me").status_code == 401
+    assert client.get("/api/scheduling/roster").status_code == 401
+
+
+def test_staff_door_says_503_while_the_account_service_is_not_ready(
+    scheduling_http, monkeypatch
+):
+    """服务刚起的那几秒 `main.employee_accounts` 还是 None：503（稍后再试）不是 500。
+
+    这是员工手机上第一条请求最可能撞上的那一支（`api/security.py:_staff_accounts`），
+    所以它得真测 —— 不能只留在注释里。
+    """
+    import main
+
+    client, _db, _accounts = scheduling_http
+    monkeypatch.setattr(main, "employee_accounts", None)
+
+    resp = client.get("/api/scheduling/me")
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "员工账号服务未就绪（服务正在启动）"
+    # 店长那七条不受影响：它们不查员工账号。
+    assert client.get("/api/scheduling/shifts").status_code == 200

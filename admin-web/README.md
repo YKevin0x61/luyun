@@ -21,8 +21,12 @@
 - 卫生管理端（`/hygiene-roster`、`/hygiene-zones`、`/hygiene-daily`、
   `/hygiene-deep-clean`、`/hygiene-fix`、`/hygiene-boards`、`/hygiene-data`）：
   排班、责任区、日常与专项计划、整改单、红黑榜、卫生数据台账（浏览 / 导出 / 清理）
-- 员工手机端（`/hygiene`、`/hygiene/login`、`/hygiene/register`）：独立员工会话、
-  实时 nudge 刷新、离线重试
+- 排班（店长端 `/scheduling`、员工端 `/today`）：固定班次、责任区默认、轮转周期，
+  由系统展开成月历；员工端「今天」页是员工登录后的落点，只读自己的班（请假 / 换班 /
+  整月三个入口这一张票还是空的，卫生那块下一张票接到同一页上）
+- 员工手机端（`/today`、`/hygiene`、`/hygiene/login`、`/hygiene/register`）：独立员工会话、
+  实时 nudge 刷新、离线重试；票 05 起登录后落在「今天」页（排班的员工入口），
+  卫生那块也在同一套会话下
 - 初始设置（`/setup`）：POS 凭据、数据库凭据、备份中心、系统更新（版本检测 /
   环境自检 / 应用更新 / 数据库迁移）。数据库只支持 PostgreSQL（ADR 0089），
   数据库凭据面板也按 PostgreSQL 连接展示
@@ -93,6 +97,7 @@ src/
                             # RecipePrintView / RecipeQrView
     hygiene/*.vue           # 管理端 7 页 + 员工端 Home/Login/Register + 两个 Layout
     scheduling/*.vue        # 排班日历（店长端，独立系统，不 import 卫生）
+    today/*.vue             # 员工端「今天」页（登录后的落点，读 /api/scheduling/me）
 ```
 
 ## 已知限制 / 后续可优化项

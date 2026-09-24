@@ -1,7 +1,13 @@
+import { isStaffPhonePath } from './staffPaths.js'
+
+/** 员工手机端的两块（`/today` 与 `/hygiene*`）共用一个清单：一个入口一套登录。
+ *  票 05 把员工落点从卫生首页挪到「今天」页，所以这里必须认 `/today` ——
+ *  否则员工在那一页装出来的是管理端应用（深色主题 + 禄云管理清单）。
+ *  哪些路径算员工端只在 `staffPaths.js` 写一次（名单还要给 401 那条用）。 */
 const ROLE_MANIFESTS = [
   {
     role: 'hygiene',
-    matches: (pathname) => pathname === '/hygiene' || pathname.startsWith('/hygiene/'),
+    matches: isStaffPhonePath,
     manifest: '/pwa/manifests/hygiene.webmanifest',
     appleTouchIcon: '/pwa/icons/hygiene-192.png',
     themeColor: '#16a34a',

@@ -10,7 +10,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from api.security import require_session
+from api.security import require_session, require_staff_session
 from database import get_db
 from services.scheduling import MAX_CYCLE_DAYS
 from services.scheduling.store import SchedulingError, SchedulingStore
@@ -70,6 +70,29 @@ def _bad_request(exc: SchedulingError) -> HTTPException:
         detail = detail.replace("{}", raw if raw and raw != exc.code else "？")
     logger.info("排班请求被拒: code=%s", exc.code)
     return HTTPException(status_code=_ERROR_STATUS.get(exc.code, 400), detail=detail)
+
+
+@router.get("/me")
+async def my_days(
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """员工自己这几天的班（「今天」页读的就是这一条）。
+
+    跟旁边七条不是一扇门：那七条是店长的（管理端会话），这条是员工自己的（手机端
+    cookie）。**接口上故意没有 `employee_id` 参数** —— 员工会话能读到的只有自己，
+    想读别人的班也没地方填。
+    """
+    store = SchedulingStore(db)
+    try:
+        data = await store.my_days(employee["id"])
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+    return {
+        "employee": {"id": employee["id"], "name": employee["name"]},
+        "today": data["today"],
+        "days": data["days"],
+    }
 
 
 @router.get("/shifts")

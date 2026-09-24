@@ -3,6 +3,7 @@ import { nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { isStaffLoggedIn, parseApiDetail, staffRequest } from '../../utils/hygieneStaff'
+import { resolveStaffNext } from '../../utils/loginNext'
 import { loadLoginPrefs, saveLoginPrefs } from '../../utils/loginPrefs'
 
 const route = useRoute()
@@ -13,14 +14,13 @@ const imageUploads = useImageUploadQueueStore()
  * 登录成功后的落点：会话失效时 `leaveForStaffLogin` 会带上 `?next=`，
  * 这里把它用起来，员工不必自己找回去。
  *
- * 只接受站内 `/hygiene` 开头的路径 —— 直接拿 query 去 replace 就是开放重定向。
+ * 判据在 `utils/loginNext.js` 的 `resolveStaffNext`（有真单测）：只认员工手机端的
+ * `/hygiene*` 与 `/today`，别的（含 `//evil.example`）一律回落到 `/today`。
+ * 不在这个文件里手写正则 —— 那份比它弱，放松了也没人拦。
+ *
+ * 没带 `next` 就落到 `/today`（票 05）：员工手机上只有一个入口，第一眼是自己的班。
  */
-const nextPath = (() => {
-  const raw = route.query.next
-  const value = Array.isArray(raw) ? raw[0] : raw
-  if (typeof value === 'string' && /^\/hygiene(\/|\?|$)/.test(value)) return value
-  return '/hygiene'
-})()
+const nextPath = resolveStaffNext(route.query.next)
 
 // 「记住密码，自动登录」偏好与上次手机号来自本地存储：勾选状态跨会话保留、
 // 手机号预填，密码交给浏览器密码管理器自动填充（见 utils/loginPrefs.js）。
