@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """RestaurantScraper composition-root orchestration tests."""
 
+import logging
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -121,6 +122,68 @@ class RestaurantScraperCycleTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(ScraperSessionError):
             await scraper.run_cycle(MagicMock())
+
+
+    async def test_none_table_data_is_a_failed_round_not_an_empty_one(self):
+        """R-T3-01：`None`（取材失败）与 `[]`（取材正常但没桌）在组合根显式分流。
+
+        失败轮：不落库、不广播、不调 monitor_table_orders，且必须留下 warning。
+        """
+        scraper = self._build_scraper()
+        scraper.logger = logging.getLogger("scraper.restaurant_scraper")
+        scraper.scrape_table_data = AsyncMock(return_value=None)
+        scraper.monitor_table_orders = AsyncMock(return_value=[])
+
+        db = MagicMock()
+        db.save_table_data = AsyncMock()
+        db.orders = MagicMock()
+        db.orders.save_orders = AsyncMock()
+
+        with patch(
+            "services.realtime.hub.realtime_hub.broadcast_nudge", new_callable=AsyncMock
+        ) as nudge, self.assertLogs(
+            "scraper.restaurant_scraper", level="WARNING"
+        ) as logs:
+            await scraper.run_cycle(db)
+
+        db.save_table_data.assert_not_awaited()
+        db.orders.save_orders.assert_not_awaited()
+        scraper.monitor_table_orders.assert_not_awaited()
+        nudge.assert_not_awaited()
+        self.assertTrue(
+            any("餐桌取材失败" in line for line in logs.output), logs.output
+        )
+
+    async def test_empty_table_data_is_a_normal_empty_round_without_warning(self):
+        """`[]` = 取材正常但当前没有餐桌：同样不落库/不广播，但**不**留 warning。"""
+        scraper = self._build_scraper()
+        scraper.logger = logging.getLogger("scraper.restaurant_scraper")
+        scraper.scrape_table_data = AsyncMock(return_value=[])
+        scraper.monitor_table_orders = AsyncMock(return_value=[])
+
+        db = MagicMock()
+        db.save_table_data = AsyncMock()
+        db.orders = MagicMock()
+        db.orders.save_orders = AsyncMock()
+
+        with patch(
+            "services.realtime.hub.realtime_hub.broadcast_nudge", new_callable=AsyncMock
+        ) as nudge, self.assertLogs(
+            "scraper.restaurant_scraper", level="INFO"
+        ) as logs:
+            await scraper.run_cycle(db)
+
+        db.save_table_data.assert_not_awaited()
+        db.orders.save_orders.assert_not_awaited()
+        scraper.monitor_table_orders.assert_not_awaited()
+        nudge.assert_not_awaited()
+        self.assertFalse(
+            any("取材失败" in line for line in logs.output),
+            f"空态不该出现取材失败告警: {logs.output}",
+        )
+        self.assertFalse(
+            any(line.startswith("WARNING") for line in logs.output), logs.output
+        )
 
 
 if __name__ == "__main__":

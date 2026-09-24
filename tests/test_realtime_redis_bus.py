@@ -4,8 +4,9 @@
 
 覆盖四件事：
 
-1. 降级路径（默认部署的主路径）：未配置 `REDIS_URL` 时 `enabled is False`、
-   `publish()` 是 no-op、hub 的本地派发照常；
+1. 类级降级路径：`RedisBus` 拿到空 URL 时 `enabled is False`、`publish()` 是
+   no-op、hub 的本地派发照常（部署层走不到这里——`REDIS_URL` 为空时
+   `_require_startup_config()` 启动即硬失败，ADR 0090 把 Redis 列为必需组件）；
 2. 跨进程：两个 hub 各带一个 `RedisBus`，共享一个进程内假 Redis——A 发的 nudge
    能被 B 的订阅回调派发给 B 的本地订阅者，且 A 不会因为"自己的消息被回投"而
    重复派发（origin 自过滤）；
@@ -20,7 +21,9 @@
 "安静频道不会被判超时"这条现场教训，原本只有一条结构断言（kwargs 里不许有
 `socket_timeout`）保着。所以这里补了 `RedisRealServerQuietChannelTest`——真连
 `localhost:6379`（db 15 + 随机频道名），静默等 `op_timeout * 4` 秒，盯**后果**：
-订阅在安静期间没有被重建。真 Redis 不可达时该用例 skip，其余用例不受影响。
+订阅在安静期间没有被重建。真 Redis 不可达时该用例 skip，其余用例不受影响；
+CI 里设了 `LUYUN_TEST_REQUIRE_REDIS=1`，那时不可达就是硬失败（见
+`RedisRealServerRequiredTest`），否则这条回归会退化成假绿。
 """
 
 import asyncio
@@ -273,7 +276,13 @@ class RedisBusDegradedTest(_NoRedisConfigCase, unittest.IsolatedAsyncioTestCase)
         self.assertGreaterEqual(RECONNECT_BACKOFF_INITIAL_SECONDS, 1.0)
 
     def test_redis_url_default_is_empty(self):
-        """新增配置项的默认值：空字符串 = 不启用（compose 的 redis 默认不起）。"""
+        """配置项的默认值是空字符串；运行期空串 = 部署不完整，应用起不来。
+
+        `main.py:235-246` 的 `_require_startup_config()` 调 `require_redis_url()`：
+        `REDIS_URL` 为空即启动硬失败（Redis 是必需组件，ADR 0090）；
+        `DISABLE_BACKGROUND_TASKS=true` 时才跳过这项前置。本用例只守默认值
+        不被静默改动。
+        """
         self.assertEqual(type(settings).model_fields["REDIS_URL"].default, "")
 
 
@@ -666,6 +675,36 @@ def redis_available() -> bool:
         return asyncio.run(probe())
     except Exception:
         return False
+
+
+_LUYUN_TEST_REQUIRE_REDIS = os.environ.get("LUYUN_TEST_REQUIRE_REDIS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+
+@unittest.skipUnless(
+    _LUYUN_TEST_REQUIRE_REDIS or redis_available(),
+    "本机既没有可连的 Redis，也没有显式要求真 Redis（CI 由 "
+    ".github/workflows/test.yml 设 LUYUN_TEST_REQUIRE_REDIS=1）",
+)
+class RedisRealServerRequiredTest(unittest.TestCase):
+    """CI 守卫：真 Redis 回归**不许**被静默跳过。
+
+    `RedisRealServerQuietChannelTest` 是条件跳过的：runner 上 redis 没起、或根本
+    连不上 6379 时，它只记一条 skip，整套测试仍全绿（2026-09-23 检核 TEST-11）。
+    CI 打开这个开关后，真 Redis 不可达就是**失败**——跳过等于覆盖缺口，不是通过。
+    本机开发不设这个变量时行为照旧：Redis 连得上就跟着一起跑（也是 0 skipped 的
+    证据），连不上才落回一条 skip，不至于让没装 Redis 的机器整套变红。
+    """
+
+    def test_real_redis_is_reachable(self):
+        self.assertTrue(
+            redis_available(),
+            f"连不上真 Redis（{REDIS_TEST_URL}）：真 Redis 的集成用例会被跳过，"
+            "CI 必须在这里红（TEST-11 / ADR 0090；CI 用 LUYUN_TEST_REQUIRE_REDIS=1 强制）。",
+        )
 
 
 class _WarningCollector(logging.Handler):

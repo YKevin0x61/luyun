@@ -28,17 +28,33 @@ import pytest
 
 TEST_DB_NAME = "luyun_test"
 
+
+def _default_test_db_name(pid=None) -> str:
+    """未显式给 ``LUYUN_TEST_DSN`` 时用的默认测试库名：它带**进程号**（MERGE-01）。
+
+    两个并发会话（多 agent / 多 worktree / 并行分片）都落在同一个固定库名上时，
+    各自会话开始 `DROP SCHEMA public CASCADE`、每个用例前 `TRUNCATE`，会互相清空
+    对方——现场表现是一批与改动无关的 failed/error（MERGE-01）。带上 PID 后每个
+    进程拿到自己的库，库名仍是 ``TEST_DB_NAME_RE`` 允许的 `luyun_test_<后缀>` 形态。
+    显式 `LUYUN_TEST_DSN` 仍然优先：CI 与需要固定库名的场景不受影响。
+    """
+    return f"{TEST_DB_NAME}_{os.getpid() if pid is None else pid}"
+
 # 可接受的库名只有两种**有界**形态（判定对象是解析后的库名，见 pytest_configure）：
 #   1. `<前缀>_luyun_test`（前缀可省）—— 并行会话各开一个库的既有用法，库名以它结尾；
 #   2. `luyun_test_<后缀>` —— 同一件事的另一种命名（TEST-04：`luyun_test_a` 曾因
 #      守卫写成 `dsn.endswith("luyun_test")` 而被拒，报错却说自己"必须指向测试库"）。
 # 刻意**不给"前后都带东西"的名字留位置**：`not_luyun_test_backup` 这类名字中间夹着
 # `luyun_test`、两头都有字，放行它就等于把真库的备份当测试库用。
+#
+# 并发会话**必须**各用一个库名（见 `_default_test_db_name`）：库名相同则两边的
+# `DROP SCHEMA` / `TRUNCATE` 互相清空，红的是对方，不是你的改动。
 TEST_DB_NAME_RE = re.compile(r"^(?:\w*_)?luyun_test$|^luyun_test_\w+$")
 
 # 建库/建 schema 用管理连接；CI 与本地默认都走本机 trust 认证。
-_TEST_DSN = os.environ.get(
-    "LUYUN_TEST_DSN", f"postgresql://localhost:5432/{TEST_DB_NAME}"
+# 没给 LUYUN_TEST_DSN 时按 PID 派生唯一库名（MERGE-01）；给了就完全以它为准。
+_TEST_DSN = os.environ.get("LUYUN_TEST_DSN") or (
+    f"postgresql://localhost:5432/{_default_test_db_name()}"
 )
 _ADMIN_DSN = os.environ.get("LUYUN_TEST_ADMIN_DSN", "postgresql://localhost:5432/postgres")
 
@@ -219,6 +235,22 @@ def _truncate_all() -> None:
 def pytest_configure(config):
     """兜底断言：确实跑在测试库上，否则宁可让整个会话失败，也不连真库。"""
     _start_watchdog()
+
+    # 会话一开始就打出实际测试库与它的来源（MERGE-01）：并发会话各跑各的库，
+    # 出问题时第一眼要能确认"这次连的是哪个库"。用 terminalreporter 而不是 print，
+    # 免得被 pytest 的输出捕获吞掉。
+    _db_source = (
+        "LUYUN_TEST_DSN"
+        if os.environ.get("LUYUN_TEST_DSN")
+        else f"未设置 LUYUN_TEST_DSN，按 PID 派生（pid={os.getpid()}）"
+    )
+    _announce = f"[conftest] 测试库: {_TEST_DB_NAME}（来源: {_db_source}）"
+    _reporter = config.pluginmanager.getplugin("terminalreporter")
+    if _reporter is not None:
+        _reporter.write_line(_announce)
+    else:  # pragma: no cover - 只有非终端插件环境（如嵌进别的 runner）会走到
+        print(_announce)
+
     from config import settings
 
     if settings.DATABASE_BACKEND != "postgres":
@@ -384,7 +416,9 @@ def _no_real_database_restore(monkeypatch):
 
     from services import backup_service
 
-    for name in ("restore_app_pg_from_bytes", "restore_app_db_from_bytes"):
+    # 只列**实际存在**的替身目标（DATA-04）：`restore_app_db_from_bytes` 是 SQLite
+    # 退场（ADR 0089）后实现已删除的死名字，留着会让人以为还有一条 SQLite 恢复路径。
+    for name in ("restore_app_pg_from_bytes",):
         target = getattr(backup_service, name, None)
         if target is None or isinstance(target, mock.Mock):
             continue

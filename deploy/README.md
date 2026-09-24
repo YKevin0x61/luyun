@@ -16,7 +16,11 @@
 - KDS 看板构建产物（`public/kds/`，挂载在 `/kds`）
 
 生产交付与升级遵循 **ADR 0011**（详见 `docs/adr/0011-release-bundle-update.md`、
-`CONTEXT.md`「部署与更新」；[ADR 0010](../docs/adr/0010-github-release-update-job.md) 已取代）：
+`CONTEXT.md`「部署与更新」；`docs/adr/0010-github-release-update-job.md` 已取代）：
+
+> **ADR 引用只给路径、不给链接**：`docs/adr/` 里随发行包发布的只有 0011 / 0012 / 0013 / 0082
+> （规则见 `.gitignore` 的 `docs/*` 段），0010 / 0084 / 0089 / 0090 等其余 ADR **只在本机仓库**——
+> 写成 markdown 链接，在发行包里就是死链。
 
 | 概念 | 含义 |
 |---|---|
@@ -194,18 +198,31 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 
 ### 依赖与浏览器的版本一致性
 
-Playwright 的 Python 包与浏览器 build 一一对应（如 lib 1.63.0 ↔
-`chromium` / `chromium_headless_shell` build 1243）。两者分开升级就会出现
-`BrowserType.launch: Executable doesn't exist at /ms-playwright/chromium_headless_shell-1243/...`。
+Playwright 的 Python 包与浏览器 build 一一对应，但**具体 build 号别手抄**：它随 lib 版本变，
+唯一事实来源是 lib 自带的 `playwright/driver/package/browsers.json`（装机后可用下面的守卫命令
+自查）。两者分开升级就会出现
+`BrowserType.launch: Executable doesn't exist at /ms-playwright/chromium_headless_shell-<build>/...`。
 因此：
 
-- `requirements.txt` 钉死 `playwright==1.63.0`；升级该版本时必须同步浏览器；
+- `requirements.txt` 钉死 `playwright==1.63.0`；升级该版本时必须同步浏览器（该文件里
+  playwright 那条注释写着同一个事实来源）；
+- 升级后自查本机缓存里是否真有当前 lib 期望的 build（离线、只读；缺任何 build 时**退出码非 0**，
+  加 `--json` 输出结构化结果）：
+
+  ```bash
+  .venv/bin/python -m services.playwright_env --check
+  ```
 - 更新作业在 `syncing_deps` 阶段用部署 venv 的解释器执行
   `.venv/bin/python -m playwright install chromium`（幂等，目标 build 已存在则秒退）；
+  同步后仍缺 build 时会往 `data/update_job.log` 写一行 `[update][DEGRADED]` 结构化告警
+  （管理后台「系统更新」面板可见；`LUYUN_PLAYWRIGHT_STRICT_BROWSERS=1` 时「补装自称成功却仍
+  缺 build」直接判作业失败）；
 - Docker 入口在启动 uvicorn 前用 `.venv` 的 playwright 真跑一次 `chromium.launch()`，
   失败则补装（只比对 `executable_path` 不够：headless 启动走的是 `chromium_headless_shell`）；
 - 爬虫自身在 launch 报「Executable doesn't exist」时也会自动补装并重试一次，可用
-  `SCRAPER_BROWSER_AUTO_INSTALL=0` 关闭。
+  `SCRAPER_BROWSER_AUTO_INSTALL=0` 关闭；
+- 开发机上手动升级 playwright 时同理：自己跑一次 `playwright install chromium`（更新作业与
+  Docker entrypoint 已内置这一步，手动改 `.venv` 不会有人替你补），再用上面的 `--check` 确认补齐。
 
 ### 别用一次性脚本碰生产库
 
@@ -522,8 +539,8 @@ PostgreSQL 是唯一后端（ADR 0089）：`DATABASE_BACKEND` 默认 `postgres`�
 `postgres` 时应用启动即失败并打印迁移指引，结构只能在 `migrations/pg/*.sql` 里改。
 新机器先有一个可连的 PostgreSQL 并应用 `0001_initial_schema.sql`；从遗留 SQLite
 门店迁移见 10.2 / 10.3。决策背景见
-[ADR 0084](../docs/adr/0084-multi-store-reintroduce-postgres-redis.md)（引入 PG）与
-[ADR 0089](../docs/adr/0089-retire-sqlite-postgres-only.md)（SQLite 退场）。
+`docs/adr/0084-multi-store-reintroduce-postgres-redis.md`（引入 PG，仅本机）与
+`docs/adr/0089-retire-sqlite-postgres-only.md`（SQLite 退场，仅本机）。
 
 ### 10.1 能力现状
 

@@ -12,8 +12,21 @@ from typing import List, Dict, Optional, Any
 
 from config import ORDER_LINE_REVENUE_SQL
 
+# 营业日切点与窗口函数的**唯一定义**在 `db_core/business_day.py`（R-T3-03 / 票 21 从本
+# 模块的局部实现提上去）：一个营业日 = ``[当日 06:00, 次日 06:00)``。`BUSINESS_DAY_CUT_HOUR`
+# 与 `_business_day_range` 仍从本模块 re-export，既有调用点与
+# tests/test_sales_report_business_day.py 的交叉核对用例不受影响。
+#
+# DOC-07：db_core 不得 import services —— `services/business_day.py` 自己
+# `from db_core.utils import CHINA_TZ`，db_core 再反向 import 就构成 db_core ↔ services 的
+# 真环（全仓唯一一处真的环）。口径下沉到 db_core 后这个环消失；改切点时要同时改
+# `db_core/business_day.py` 的常数与 services/business_day.BUSINESS_DAY_CUT_HOUR，
+# 两边由 tests/test_sales_report_business_day.py 的边界用例同测。
+from db_core.business_day import (
+    BUSINESS_DAY_CUT_HOUR,
+    business_day_range as _business_day_range,
+)
 from db_core.utils import CHINA_TZ, ensure_beijing_datetime
-from services.business_day import business_date_range
 
 logger = logging.getLogger(__name__)
 
@@ -30,22 +43,23 @@ class _ReportsMixin:
         """基于数据库订单计算销售报表（跨表查询）。
 
         两个日期是**营业日**（06:00 切），区间是 ``[start_date 06:00, end_date+1 06:00)``
-        ——与采集/对账/卫生同一口径（CORR-05）。原先按日历日翻成
-        ``[00:00:00, 23:59:59.999]``：门店 06:00 前那段的单属于前一营业日，两种切法在
-        凌晨对不上（生产库当期 06:00 前订单 0 行，所以没有实际数据被算错，属口径隐患）。
+        ——与采集/对账/卫生同一口径（CORR-05），切点由模块级 ``_business_day_range``
+        给出（DOC-07：不再 import `services.business_day`，避免 db_core ↔ services 真环）。
+        原先按日历日翻成 ``[00:00:00, 23:59:59.999]``：门店 06:00 前那段的单属于前一
+        营业日，两种切法在凌晨对不上（生产库当期 06:00 前订单 0 行，所以没有实际数据
+        被算错，属口径隐患）。
         """
         from services.dish_normalize import normalize_dish_name as normalize
 
         def to_local_dt(date_str: str, end_of_range: bool = False):
             """营业日 → 北京时时间戳。``end_of_range`` 时取**次日** 06:00（开区间右端）。
 
-            06:00 切点与"次日"不在这里手算：`business_date_range` 给的就是
-            ``[当日 06:00, 次日 06:00)`` 这个半开区间的两端（切日的唯一实现，CORR-05）。
-            解析仍走 `strptime`：它比 `date.fromisoformat` 宽容（接受 `2026-9-2` 这类
-            不补零写法），换掉解析方式等于改了既有输入面。
+            06:00 切点与"次日"由模块级 ``_business_day_range`` 手算（DOC-07：不再 import
+            `services.business_day`，理由见那里的注释）。解析仍走 `strptime`：它比
+            `date.fromisoformat` 宽容（接受 `2026-9-2` 这类不补零写法），换掉解析方式
+            等于改了既有输入面。
             """
-            day = datetime.strptime(date_str, "%Y-%m-%d").date()
-            start, end = business_date_range(day.isoformat())
+            start, end = _business_day_range(date_str)
             return end if end_of_range else start
 
         start_dt = to_local_dt(start_date)
@@ -59,7 +73,7 @@ class _ReportsMixin:
             station_clause = " AND station != 'loumian'"
 
         # 1. 菜品销量（查 orders 表）。右端是**开区间**（次日 06:00），与
-        # `business_date_range` 的 [cut, 次日 cut) 语义一致。
+        # `_business_day_range` 的 [cut, 次日 cut) 语义一致。
         orders_tdb = self._connection.table("orders")
         async with orders_tdb.conn.cursor() as cursor:
             await cursor.execute(
@@ -301,10 +315,9 @@ class _ReportsMixin:
         }
 
     async def aggregate_table_operations(self, start_date: str, end_date: str) -> Dict[str, Any]:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=CHINA_TZ)
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(
-            hour=23, minute=59, second=59, microsecond=999000, tzinfo=CHINA_TZ
-        )
+        # DATA-03：日期是**营业日**（06:00 切），窗口 = [start 06:00, end+1 06:00)
+        start_dt, _ = _business_day_range(start_date)
+        _, end_dt = _business_day_range(end_date)
         snapshot = await self.get_table_snapshot_stats()
         tdb = self._connection.table("orders")
         async with tdb.conn.cursor() as cursor:
@@ -315,7 +328,7 @@ class _ReportsMixin:
                            SUM({ORDER_LINE_REVENUE_SQL}) as revenue,
                            COUNT(DISTINCT dish_name) as dish_variety
                     FROM orders
-                    WHERE order_time >= ? AND order_time <= ?
+                    WHERE order_time >= ? AND order_time < ?
                       AND table_number IS NOT NULL AND table_number != ''
                     GROUP BY table_number
                     ORDER BY revenue DESC""",
@@ -344,10 +357,9 @@ class _ReportsMixin:
         granularity: str = "day",
         station: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=CHINA_TZ)
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(
-            hour=23, minute=59, second=59, microsecond=999000, tzinfo=CHINA_TZ
-        )
+        # DATA-03：日期是**营业日**（06:00 切），窗口 = [start 06:00, end+1 06:00)
+        start_dt, _ = _business_day_range(start_date)
+        _, end_dt = _business_day_range(end_date)
         params: List[Any] = [start_dt.isoformat(), end_dt.isoformat()]
         station_clause = ""
         if station and station != "all":
@@ -369,7 +381,7 @@ class _ReportsMixin:
                            SUM(quantity) as total_quantity,
                            SUM({ORDER_LINE_REVENUE_SQL}) as revenue
                     FROM orders
-                    WHERE order_time >= ? AND order_time <= ?{station_clause}
+                    WHERE order_time >= ? AND order_time < ?{station_clause}
                     GROUP BY bucket ORDER BY bucket""",
                 params,
             )
@@ -390,10 +402,9 @@ class _ReportsMixin:
         end_date: str,
         station: Optional[str] = None,
     ) -> Dict[str, Any]:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=CHINA_TZ)
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(
-            hour=23, minute=59, second=59, microsecond=999000, tzinfo=CHINA_TZ
-        )
+        # DATA-03：日期是**营业日**（06:00 切），窗口 = [start 06:00, end+1 06:00)
+        start_dt, _ = _business_day_range(start_date)
+        _, end_dt = _business_day_range(end_date)
         params: List[Any] = [start_dt.isoformat(), end_dt.isoformat()]
         station_clause = ""
         if station and station != "all":
@@ -403,7 +414,7 @@ class _ReportsMixin:
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 f"""SELECT COUNT(*) FROM orders
-                    WHERE order_time >= ? AND order_time <= ?{station_clause}
+                    WHERE order_time >= ? AND order_time < ?{station_clause}
                       AND (quantity < 0 OR LOWER(COALESCE(status,'')) LIKE '%退%')""",
                 params,
             )
@@ -411,7 +422,7 @@ class _ReportsMixin:
             await cursor.execute(
                 f"""SELECT dish_name, station, SUM(quantity) as qty, COUNT(*) as cnt
                     FROM orders
-                    WHERE order_time >= ? AND order_time <= ?{station_clause}
+                    WHERE order_time >= ? AND order_time < ?{station_clause}
                       AND (quantity < 0 OR LOWER(COALESCE(status,'')) LIKE '%退%')
                     GROUP BY dish_name, station
                     ORDER BY qty ASC LIMIT 50""",

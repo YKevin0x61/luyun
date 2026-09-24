@@ -4,7 +4,8 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from services.urgency_policy import (
+# DOC-07（ticket 18）：策略函数已下沉到 db_core；断言一字未改，只是换成新家。
+from db_core.urgency_policy import (
     high_cutoff,
     high_threshold_ms,
     level_for_wait_ms,

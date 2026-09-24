@@ -44,6 +44,10 @@ class DatabaseConnection:
         判据是「有没有这个对象」，**不是**「里面那条驱动连接活不活」——后者在
         重连的 await 窗口里会短暂为假（``_reconnect_raw`` 把 ``_raw`` 摘成 None
         再连），拿它当判据会在这里新建对象，而持有者缓存的正是旧对象。
+
+        返回 ``False`` 表示这次没接上，**调用方必须看返回值**：恢复/导入收尾处
+        接不回连接不是「稍后重试就好」——库已经被覆盖、应用连不上，进程会一直
+        停在半恢复状态，所以那两处必须把失败翻译成说得出口的错误（DATA-01）。
         """
         from db_core.backend import pg as pg_backend
         from db_core.table_db import TableView

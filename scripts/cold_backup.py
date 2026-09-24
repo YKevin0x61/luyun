@@ -58,9 +58,19 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     _configure_paths()
 
-    keep = args.retention
-    if keep is None:
-        keep = backup_retention.load_from_pg_sync().cold_keep
+    # SEC-08：宿主机定时任务每次跑先扫一遍恢复/导出的残留临时 dump（进程被强杀时
+    # 服务侧的 finally 跑不到，dump 会一直躺在系统临时目录里）。
+    backup_service.sweep_stale_restore_dumps()
+
+    # 保留份数与它的来源（PERF-10）：命令行显式给了就用它；否则读运行配置，读失败
+    # 时**保留默认值但绝不据此剪除**——拿一个没人选过的数字删别人的冷备是事故。
+    if args.retention is not None:
+        keep = args.retention
+        retention_source = "argument"
+    else:
+        loaded = backup_retention.load_from_pg_sync_detailed()
+        keep = loaded.config.cold_keep
+        retention_source = loaded.source
 
     logger.info("📦 生成冷备归档 → %s", backup_service.get_cold_backup_dir())
     try:
@@ -77,17 +87,33 @@ def main(argv: list[str] | None = None) -> int:
                 shutil.rmtree(entry, ignore_errors=True)
                 break
         backup_service.write_cold_backup_status(
-            ok=False, archive=None, error=str(exc)
+            ok=False,
+            archive=None,
+            error=str(exc),
+            cold_keep=keep,
+            retention_source=retention_source,
         )
         logger.error("❌ 冷备失败：%s", exc)
         return 1
 
     status = backup_service.write_cold_backup_status(
-        ok=True, archive=archive, manifest=manifest
+        ok=True,
+        archive=archive,
+        manifest=manifest,
+        cold_keep=keep,
+        retention_source=retention_source,
     )
-    deleted = backup_service.prune_cold_backups(keep)
-    for name in deleted:
-        logger.info("  🗑️  删除旧冷备: %s", name)
+    if retention_source == backup_retention.RETENTION_SOURCE_FALLBACK:
+        logger.warning(
+            "⚠️  保留配置读取失败（%s），本次回退默认值 %s 并**跳过清理**：不删除任何"
+            "历史冷备，修好数据库连接后下一次冷备会照常按配置剪除",
+            status.get("error") or "见上一次告警",
+            keep,
+        )
+    else:
+        deleted = backup_service.prune_cold_backups(keep)
+        for name in deleted:
+            logger.info("  🗑️  删除旧冷备: %s", name)
 
     size_mb = (manifest.get("archive_bytes") or 0) / (1024 * 1024)
     logger.info("✅ 冷备完成: %s (%.2f MB)", archive, size_mb)

@@ -4,18 +4,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from fastapi import HTTPException
 
+from api import backup as backup_api
 from api.backup import _apply_parsed_backup
 from config import settings
 from database import DatabaseManager
-from services import backup_points, backup_retention, backup_service
+from services import backup_import_staging, backup_points, backup_retention, backup_service
 from services.backup_service import (
     CONTENT_APP_PG,
     CONTENT_CREDENTIALS,
@@ -270,6 +273,170 @@ class RestoreFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["applied"][CONTENT_APP_PG])
 
 
+    async def test_upload_restore_reports_unreconnected_database(self):
+        """DATA-01：上传恢复接不回连接时，响应必须点名「已恢复但连接未接回」。
+
+        以前 ``restore_app_pg_from_bytes`` 收尾的 ``await db.connect()`` 丢返回值，
+        重连失败也照样返回「恢复成功」；用户只会看到「请稍后重试」，而重试永远
+        不会自愈（进程停在半恢复状态）。现在它必须是一个说得出口的失败。
+        """
+        parsed = await self._build_parsed()
+
+        async def _boom(_db, _payload):
+            raise backup_service.RestoreReconnectError(
+                "整库恢复已执行，但数据库连接未能接回"
+            )
+
+        with mock.patch.object(backup_service, "restore_app_pg_from_bytes", _boom):
+            with self.assertRaises(HTTPException) as ctx:
+                await self._apply(parsed)
+
+        self.assertEqual(ctx.exception.status_code, 500)
+        detail = str(ctx.exception.detail)
+        self.assertIn("连接未能接回", detail)
+        self.assertIn("已恢复", detail)
+        self.assertIn("重启应用", detail)
+        self.assertNotIn("成功", detail, "重连失败绝不能报成功")
+
+    async def test_concurrent_restore_is_rejected_with_409(self):
+        """CORR-07：恢复/导入互斥——第二个请求 409，且不让 pg_restore 跑。
+
+        互斥只做进程内（``_restore_guard``）：单 worker 部署下这已经覆盖了
+        真实的并发入口，跨进程并发由部署形态排除（见 deploy/README.md）。
+        """
+        parsed = await self._build_parsed()
+        owner = "sess-corr07"
+        token = backup_import_staging.create_staging(owner, parsed)
+
+        with backup_api._restore_exclusive("快照回滚"):
+            with self.assertRaises(HTTPException) as ctx:
+                await backup_api.import_backup_apply(
+                    import_token=token,
+                    mode="overwrite",
+                    session_id=owner,
+                    db=self.db,
+                )
+
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("已有恢复任务在执行", str(ctx.exception.detail))
+        self.assertEqual(
+            getattr(backup_service.restore_app_pg_from_bytes, "await_count", 0),
+            0,
+            "被拒绝的恢复请求不得执行任何 pg_restore",
+        )
+        self.assertFalse(backup_api._restore_guard.in_progress)
+        self.assertIsNone(backup_api._restore_guard.holder)
+        # 被拒的请求没消费 staging token，用户解决冲突后还能重试。
+        self.assertIsNotNone(backup_import_staging.load_parsed_from_staging(token, owner))
+
+    # ---- 独立验证（verifier-db / V2）----
+    # 上面 test_upload_restore_reports_unreconnected_database 把 restore_pg_dump_sync
+    # 替成了 noop，只覆盖「恢复成功、但接不回连接」。下面两条不替 pg_restore 本身：
+    # 恢复前的快照照旧用真库做完，随后把库换成「连不上」，让 pg_restore 与紧跟着的
+    # db.connect() 都真的失败——这是 DATA-01 在生产里最常见的形态（库连不上），
+    # 也是「响应会不会谎报」的真正分水岭。
+
+    _DEAD_DSN = "postgresql://localhost:5432/luyun_ver2_no_such_db"
+
+    async def _apply_with_dead_dsn_at_pg_restore_time(self):
+        """恢复前置快照照旧（真库），到 pg_restore 那一刻把库换成连不上。
+
+        返回 ``HTTPException``（导入路径的响应）。
+        """
+        real = getattr(backup_service, "_real_restore_app_pg_from_bytes")
+        real_dump = backup_service.restore_pg_dump_sync
+        dead_dsn = self._DEAD_DSN
+
+        def _dump_against_dead_dsn(path):
+            # pg_restore 读 settings.POSTGRES_DSN（每次现读），这里换成死 DSN：
+            # 子进程真的起不来，随后 restore_app_pg_from_bytes 里的 db.connect()
+            # 也会真的失败。
+            settings.POSTGRES_DSN = dead_dsn
+            return real_dump(path)
+
+        async def _noop_notify():
+            return True
+
+        with mock.patch.object(
+            backup_service, "restore_app_pg_from_bytes", real
+        ), mock.patch.object(
+            backup_service, "restore_pg_dump_sync", _dump_against_dead_dsn
+        ), mock.patch.object(
+            backup_service, "notify_log_storage_reconnect", _noop_notify
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                await self._apply(await self._build_parsed())
+        return ctx.exception
+
+    async def _restore_real_with_dead_dsn_at_pg_restore_time(self):
+        """同上，但直接调真 ``restore_app_pg_from_bytes``，不经过导入路径。"""
+        real = getattr(backup_service, "_real_restore_app_pg_from_bytes")
+        real_dump = backup_service.restore_pg_dump_sync
+        dead_dsn = self._DEAD_DSN
+
+        def _dump_against_dead_dsn(path):
+            settings.POSTGRES_DSN = dead_dsn
+            return real_dump(path)
+
+        async def _noop_notify():
+            return True
+
+        with mock.patch.object(
+            backup_service, "restore_pg_dump_sync", _dump_against_dead_dsn
+        ), mock.patch.object(
+            backup_service, "notify_log_storage_reconnect", _noop_notify
+        ):
+            await real(self.db, b"not-a-real-dump")
+
+    async def test_real_pg_restore_failure_is_not_hidden_by_the_reconnect_failure(self):
+        """真编排：pg_restore 的失败必须留在异常链里，不能被重连失败吞掉。"""
+        original_dsn = settings.POSTGRES_DSN
+        try:
+            with self.assertRaises(Exception) as ctx:
+                await self._restore_real_with_dead_dsn_at_pg_restore_time()
+            self.assertFalse(
+                self.db.is_connected(), "重连失败之后连接必须是断的（半恢复状态）"
+            )
+        finally:
+            settings.POSTGRES_DSN = original_dsn
+            await self.db.connect()
+
+        chain = []
+        exc = ctx.exception
+        while exc is not None and len(chain) < 5:
+            chain.append(exc)
+            exc = exc.__cause__ or exc.__context__
+        self.assertTrue(
+            any("pg_restore" in str(item) for item in chain),
+            "pg_restore 从未成功，这个事实却不在异常链里："
+            f"{[type(item).__name__ for item in chain]}",
+        )
+
+    async def test_real_both_failed_restore_must_not_claim_the_data_was_restored(self):
+        """真编排：pg_restore 失败 + 重连失败 ⇒ 响应不得声称「整库数据已恢复」。
+
+        ``_rollback_snapshot_locked``（同一次修复的另一条入口）在这种形态下说的是
+        「PostgreSQL 整库恢复失败，且数据库连接未能接回…库可能已被部分改写」；
+        上传/导入这条入口却经由 ``RestoreReconnectError`` 固定输出「整库数据已恢复…
+        重试前不需要再恢复一次」。对一次都没恢复成功的库说这句，会让运维直接跳过
+        重新恢复。
+        """
+        original_dsn = settings.POSTGRES_DSN
+        try:
+            exc = await self._apply_with_dead_dsn_at_pg_restore_time()
+        finally:
+            settings.POSTGRES_DSN = original_dsn
+            await self.db.connect()
+        self.assertEqual(exc.status_code, 500)
+        detail = str(exc.detail)
+        self.assertFalse(
+            "整库数据已恢复" in detail or "整库已恢复" in detail,
+            "pg_restore 未曾成功（库连不上、什么都没改写），响应却声称数据已恢复："
+            f"{detail}",
+        )
+        self.assertIn("连接", detail, f"文案至少要讲清连接没接回：{detail}")
+
+
 class RestoreNotifiesLogStorageTest(unittest.IsolatedAsyncioTestCase):
     """整库恢复必须通知日志那条**独立**连接。
 
@@ -329,6 +496,171 @@ class RestoreNotifiesLogStorageTest(unittest.IsolatedAsyncioTestCase):
             await backup_service.notify_log_storage_reconnect()
 
         self.assertEqual(calls, [True], "通知函数必须调用 log_storage.reconnect()")
+
+
+class RestoreReconnectFailureTest(unittest.IsolatedAsyncioTestCase):
+    """DATA-01：整库恢复之后接不回连接，编排必须抛出，而不是假报成功。"""
+
+    async def asyncSetUp(self):
+        self._old_dsn = settings.POSTGRES_DSN
+        self.db = DatabaseManager()
+        self.assertTrue(await self.db.connect(), "测试库连接失败")
+
+    async def asyncTearDown(self):
+        settings.POSTGRES_DSN = self._old_dsn
+        # 用例把 DSN 换成了不存在的库，收尾时先接回真身，别把后面的用例带偏。
+        await self.db.connect()
+        await self.db.close()
+
+    async def test_restore_raises_when_reconnect_fails(self):
+        """真编排（只替 pg_restore）：重连失败必须变成 RestoreReconnectError。"""
+
+        async def _noop():
+            return True
+
+        real = getattr(backup_service, "_real_restore_app_pg_from_bytes")
+        with mock.patch.object(
+            settings,
+            "POSTGRES_DSN",
+            "postgresql://localhost:5432/luyun_no_such_db_20260923",
+        ), mock.patch.object(
+            backup_service, "restore_pg_dump_sync", lambda _path: None
+        ), mock.patch.object(
+            backup_service, "notify_log_storage_reconnect", _noop
+        ), mock.patch.object(
+            backup_service, "sweep_stale_restore_dumps", mock.Mock(return_value=[])
+        ) as sweep:
+            with self.assertRaises(backup_service.RestoreReconnectError):
+                await real(self.db, b"not-a-real-dump")
+
+        sweep.assert_called_once()
+        self.assertFalse(self.db.is_connected(), "重连失败后连接必须是断的（半恢复状态）")
+
+
+class _FakeUpload:
+    """最小 UploadFile 替身：记录每次 ``read()`` 请求的长度，不落地任何东西。"""
+
+    def __init__(self, chunks, size=None):
+        self._chunks = list(chunks)
+        self.size = size
+        self.read_sizes: list = []
+
+    async def read(self, size):
+        self.read_sizes.append(size)
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+class BackupUploadBoundTest(unittest.TestCase):
+    """SEC-07：备份上传在读取之前就按上限判定，超限 413 且不整份进内存。"""
+
+    def test_limit_matches_backup_import_tier(self):
+        self.assertEqual(backup_api.MAX_BACKUP_UPLOAD_BYTES, 256 * 1024 * 1024)
+        # 工单里那发 300 MB 的载荷必须在读完之前就被拒掉。
+        self.assertLess(backup_api.MAX_BACKUP_UPLOAD_BYTES, 300 * 1024 * 1024)
+
+    def test_declared_oversize_is_rejected_before_reading(self):
+        upload = _FakeUpload([b"x" * 1024], size=300 * 1024 * 1024)
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(backup_api._read_upload(upload))
+        self.assertEqual(ctx.exception.status_code, 413)
+        self.assertIn("256 MB", str(ctx.exception.detail))
+        self.assertIn(str(300 * 1024 * 1024), str(ctx.exception.detail))
+        self.assertEqual(upload.read_sizes, [], "判定必须发生在任何一次 read 之前")
+
+    def test_chunked_read_stops_at_limit(self):
+        chunk = backup_api.UPLOAD_CHUNK_BYTES
+        upload = _FakeUpload([b"a" * chunk for _ in range(5)])
+        with mock.patch.object(backup_api, "MAX_BACKUP_UPLOAD_BYTES", chunk * 2):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(backup_api._read_upload(upload))
+        self.assertEqual(ctx.exception.status_code, 413)
+        # 上限两块时最多读进三块就超限：占用内存不随载荷长度线性增长。
+        self.assertLessEqual(len(upload.read_sizes) * chunk, chunk * 3)
+
+    def test_within_limit_is_returned(self):
+        upload = _FakeUpload([b"hello", b"world"])
+        self.assertEqual(asyncio.run(backup_api._read_upload(upload)), b"helloworld")
+
+    def test_empty_upload_is_400(self):
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(backup_api._read_upload(_FakeUpload([])))
+        self.assertEqual(ctx.exception.status_code, 400)
+
+
+class StaleRestoreDumpSweepTest(unittest.TestCase):
+    """SEC-08：被强杀留下的临时 dump 会被扫掉，正在写的那份不能碰。"""
+
+    def _make(self, root: Path, name: str, age_seconds: float, now: float) -> Path:
+        path = root / name
+        path.write_bytes(b"dump")
+        stamp = now - age_seconds
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def test_only_old_prefixed_dumps_are_removed(self):
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stale_restore = self._make(root, "luyun-restore-stale.pgdump", 8 * 3600, now)
+            stale_export = self._make(root, "luyun-export-stale.pgdump", 8 * 3600, now)
+            fresh = self._make(root, "luyun-restore-fresh.pgdump", 5, now)
+            unrelated = self._make(root, "app.pgdump", 8 * 3600, now)
+
+            removed = backup_service.sweep_stale_restore_dumps(
+                tmp_dir=str(root), now=now, max_age_seconds=3600
+            )
+
+            self.assertEqual(
+                sorted(Path(p).name for p in removed),
+                ["luyun-export-stale.pgdump", "luyun-restore-stale.pgdump"],
+            )
+            self.assertFalse(stale_restore.exists())
+            self.assertFalse(stale_export.exists())
+            self.assertTrue(fresh.exists(), "另一个进程可能正写着这份 dump")
+            self.assertTrue(unrelated.exists(), "不是我们的前缀就不碰")
+
+    def test_missing_tmp_dir_is_not_an_error(self):
+        self.assertEqual(
+            backup_service.sweep_stale_restore_dumps(
+                tmp_dir="/tmp/luyun-no-such-dir-20260923", max_age_seconds=1
+            ),
+            [],
+        )
+
+
+class StartupRestoreDumpSweepTest(unittest.TestCase):
+    """SEC-08 / T2-V2：应用启动期（业务循环之前）也要扫一次残留 dump。"""
+
+    def test_lifespan_sweeps_before_the_first_business_loop(self):
+        source = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        start = source.index("async def lifespan(")
+        body = source[start:source.index("\n# 创建FastAPI应用", start)]
+        self.assertIn("_sweep_stale_restore_dumps_at_startup()", body)
+        sweep_at = body.index("_sweep_stale_restore_dumps_at_startup()")
+        first_loop = body.index("_start_resident_task(", sweep_at)
+        self.assertLess(sweep_at, first_loop, "残留 dump 要在第一个常驻业务循环之前清掉")
+
+    def test_startup_sweep_calls_the_service_sweep_once(self):
+        import main as main_module
+
+        calls: list = []
+
+        def fake(**_kwargs):
+            calls.append("sweep")
+            return ["/tmp/luyun-restore-old.pgdump"]
+
+        with mock.patch.object(backup_service, "sweep_stale_restore_dumps", new=fake):
+            main_module._sweep_stale_restore_dumps_at_startup()
+        self.assertEqual(calls, ["sweep"])
+
+    def test_startup_sweep_failure_does_not_break_startup(self):
+        import main as main_module
+
+        def boom(**_kwargs):
+            raise OSError("temp 目录不可读")
+
+        with mock.patch.object(backup_service, "sweep_stale_restore_dumps", new=boom):
+            main_module._sweep_stale_restore_dumps_at_startup()  # 只记日志，绝不抛
 
 
 if __name__ == "__main__":

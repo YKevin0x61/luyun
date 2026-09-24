@@ -204,7 +204,7 @@ describe('printQueue 失败保留与手动补打', () => {
 })
 
 describe('printQueue 持久化恢复', () => {
-  it('resets a stored processing job to pending and prints it on import', async () => {
+  it('keeps an interrupted (processing) job as failed instead of reprinting it on import', async () => {
     mocks.printDishTicket.mockResolvedValue(OK_RESULT)
     // 落盘参数是队列里活的任务对象引用，处理循环随后会把 status 改成 processing，
     // 所以要在调用当场留一份深拷贝快照
@@ -228,19 +228,183 @@ describe('printQueue 持久化恢复', () => {
     const queue = await loadPrintQueue(stored)
     await settle()
 
-    // 恢复时必须先把 processing 重置成 pending 再落盘，否则下次崩溃会永远卡在中间态
+    // 磁盘上的 processing 意味着上次进程在打印中途退出：这张小票可能已经出纸了，
+    // 自动重打就是重复出纸 → 转失败任务等人工确认
+    expect(mocks.printDishTicket).not.toHaveBeenCalled()
+
+    // 修正后的队列立刻写回磁盘，避免下次启动又把这条 processing 读进来
     expect(persistedSnapshots[0]).toEqual([
       expect.objectContaining({
         id: 'print_restored_1',
-        status: 'pending',
-        nextAttemptAt: expect.any(Number),
+        status: 'failed',
+        nextAttemptAt: null,
+        lastError: '上次打印中断（应用被关闭或崩溃），请确认这张小票是否已经打出',
       }),
     ])
 
-    // 并且不需要任何外部触发就继续执行
-    expect(mocks.printDishTicket).toHaveBeenCalledTimes(1)
-    expect(mocks.printDishTicket).toHaveBeenCalledWith(expect.objectContaining({ dishName: '恢复菜品' }))
+    const state = queue.getQueueState()
+    expect(state.pendingCount).toBe(0)
+    expect(state.failedCount).toBe(1)
+    expect(state.failedJobs[0]).toMatchObject({
+      id: 'print_restored_1',
+      status: 'failed',
+      ticket: { dishName: '恢复菜品' },
+    })
+  })
+
+  it('persists the job as processing before handing it to the printer', async () => {
+    const persistedSnapshots = []
+    const statusWhenPrinting = []
+    mocks.saveQueue.mockImplementation((jobs) => {
+      persistedSnapshots.push(JSON.parse(JSON.stringify(jobs)))
+    })
+    mocks.printDishTicket.mockImplementation(() => {
+      // 打印器被调用的那一刻，磁盘上必须已经写着 processing
+      statusWhenPrinting.push((persistedSnapshots.at(-1) || []).map((job) => job.status))
+      return Promise.resolve(OK_RESULT)
+    })
+
+    const queue = await loadPrintQueue()
+    queue.enqueuePrintTicket(makeTicket('肠粉'))
+    await settle()
+
+    expect(statusWhenPrinting).toEqual([['processing']])
+    // attempts 也已经计入落盘，崩溃重启后不会从 0 重新数
+    expect(persistedSnapshots[1]).toEqual([
+      expect.objectContaining({ status: 'processing', attempts: 1 }),
+    ])
     expect(queue.getQueueState()).toEqual(EMPTY_STATE)
+  })
+
+  it('normalizes damaged stored records instead of leaving NaN zombies', async () => {
+    mocks.printDishTicket.mockResolvedValue(OK_RESULT)
+    const stored = [
+      // 旧版本落盘：没有 attempts / nextAttemptAt
+      { id: 'print_legacy', ticket: makeTicket('老数据'), status: 'pending' },
+      // 字段类型损坏：attempts / nextAttemptAt 都不是数字
+      {
+        id: 'print_bad_number',
+        ticket: makeTicket('坏数值'),
+        status: 'pending',
+        attempts: '3',
+        nextAttemptAt: 'later',
+      },
+      // 不认识的 status
+      { id: 'print_status', ticket: makeTicket('坏状态'), status: 'printing', attempts: 1 },
+      // 没有 ticket
+      { id: 'print_noticket', status: 'pending', attempts: 0, nextAttemptAt: null },
+      // 没有 id
+      { ticket: makeTicket('无 id'), status: 'pending', attempts: 0, nextAttemptAt: null },
+      // 连对象都不是
+      'garbage',
+      null,
+    ]
+
+    const queue = await loadPrintQueue(stored)
+    await settle()
+
+    // 能补齐的两条照常补打（NaN attempts 会无限重试，NaN nextAttemptAt 会永久 pending）
+    expect(mocks.printDishTicket.mock.calls.map(([ticket]) => ticket.dishName)).toEqual([
+      '老数据',
+      '坏数值',
+    ])
+
+    // 其余三条降级成失败任务进补打列表：既不自动打印，也不会静默消失
+    const state = queue.getQueueState()
+    expect(state.pendingCount).toBe(0)
+    expect(state.failedCount).toBe(3)
+    expect(state.failedJobs.map((job) => job.id)).toEqual(
+      expect.arrayContaining(['print_status', 'print_noticket'])
+    )
+    expect(state.failedJobs.map((job) => job.ticket.dishName)).toEqual(
+      expect.arrayContaining(['坏状态', '（任务记录已损坏）', '无 id'])
+    )
+    for (const job of state.failedJobs) {
+      expect(Number.isFinite(job.attempts)).toBe(true)
+      expect(job.nextAttemptAt).toBeNull()
+      expect(job.lastError).toBe('本地缓存的打印任务已损坏，未自动补打，请确认是否漏打')
+    }
+
+    // 连对象都不是的两条只能丢弃，但必须留下痕迹
+    expect(consoleWarnSpy).toHaveBeenCalledWith(expect.stringContaining('2 条记录无法解析'))
+  })
+
+  it('survives the retry storm of a job whose ticket is missing', async () => {
+    mocks.printDishTicket.mockRejectedValue(new Error('蓝牙写入超时'))
+
+    const queue = await loadPrintQueue()
+    const jobId = queue.enqueuePrintTicket(undefined)
+    await settle()
+
+    await advance(2000) // 第 2 次尝试
+    await advance(4000) // 第 3 次尝试
+
+    expect(mocks.printDishTicket).toHaveBeenCalledTimes(3)
+
+    // ticket 缺失时失败日志不能再解引用 job.ticket：改前这里会二次抛错，
+    // 任务永远转不成 failed（还变成 unhandled rejection）
+    const state = queue.getQueueState()
+    expect(state.pendingCount).toBe(0)
+    expect(state.failedCount).toBe(1)
+    expect(state.failedJobs[0]).toMatchObject({
+      id: jobId,
+      status: 'failed',
+      lastError: '蓝牙写入超时',
+    })
+    expect(consoleErrorSpy.mock.calls.map((args) => String(args[0])).join('\n')).toContain(jobId)
+  })
+
+  it('fails a stored record with missing/damaged attempts once it reaches the retry limit', async () => {
+    mocks.printDishTicket.mockRejectedValue(new Error('蓝牙写入超时'))
+    const stored = [
+      // 旧版本落盘：没有 attempts。归一化若被改回 raw.attempts，这里是 NaN，
+      // `NaN >= 上限` 恒 false —— 任务会永久 pending 而不是转 failed
+      { id: 'print_legacy_fail', ticket: makeTicket('老数据'), status: 'pending' },
+      // 字段类型损坏：attempts 是字符串。不归一化时 `'3' + 1 === '31'`（字符串拼接），
+      // 第一次就"到上限"，第二轮起也不会再重试
+      {
+        id: 'print_bad_attempts',
+        ticket: makeTicket('坏尝试数'),
+        status: 'pending',
+        attempts: '3',
+        nextAttemptAt: 'later',
+      },
+    ]
+
+    const queue = await loadPrintQueue(stored)
+    await settle()
+    const { PRINT_JOB_MAX_ATTEMPTS } = queue.PRINT_QUEUE_CONSTANTS
+
+    // 两条记录都持续失败：每条各跑满上限（首次 + 2000ms/4000ms 退避）后必须转 failed
+    await advance(2000) // 老数据 第 2 次
+    await advance(4000) // 老数据 第 3 次 → 到上限；循环接着处理坏尝试数 第 1 次
+    await advance(2000) // 坏尝试数 第 2 次
+    await advance(4000) // 坏尝试数 第 3 次 → 到上限
+    await advance(12000) // 兜底：真变成僵尸任务的话，这里会继续重试/继续 pending
+
+    const state = queue.getQueueState()
+    // 断言落在 attempts 上：NaN（缺字段）、'31'（字符串拼接）都会让这里红
+    const attemptsById = Object.fromEntries(state.failedJobs.map((job) => [job.id, job.attempts]))
+    expect(attemptsById).toEqual({
+      print_legacy_fail: PRINT_JOB_MAX_ATTEMPTS,
+      print_bad_attempts: PRINT_JOB_MAX_ATTEMPTS,
+    })
+    expect(state.failedCount).toBe(2)
+    for (const job of state.failedJobs) {
+      expect(Number.isFinite(job.attempts)).toBe(true)
+      expect(job.status).toBe('failed')
+      expect(job.nextAttemptAt).toBeNull()
+      expect(job.lastError).toBe('蓝牙写入超时')
+    }
+
+    // 到上限即停：两条加起来正好 2 × 上限 次，pending 清零（僵尸会留下一条 pending）
+    expect(mocks.printDishTicket).toHaveBeenCalledTimes(2 * PRINT_JOB_MAX_ATTEMPTS)
+    const printedDishNames = mocks.printDishTicket.mock.calls.map(([ticket]) => ticket.dishName)
+    expect(printedDishNames.filter((name) => name === '老数据')).toHaveLength(PRINT_JOB_MAX_ATTEMPTS)
+    expect(printedDishNames.filter((name) => name === '坏尝试数')).toHaveLength(
+      PRINT_JOB_MAX_ATTEMPTS
+    )
+    expect(state.pendingCount).toBe(0)
   })
 
   it('restores a stored failed job as failed without reprinting it', async () => {
@@ -271,5 +435,25 @@ describe('printQueue 持久化恢复', () => {
       status: 'failed',
       lastError: '蓝牙写入超时',
     })
+  })
+})
+
+describe('打印链路导入（vitest 的 @ 别名）', () => {
+  it('imports the real bluetooth printer chain through the @ alias', async () => {
+    // bluetoothPrinter.js 在 APP-PLUS 条件编译块里 import '@/uni_modules/kds-bluetooth-printer'，
+    // 而 vitest 不做条件编译，这行在测试里是活代码：@ 别名缺失时这里会直接 "Failed to resolve import"。
+    const printer = await vi.importActual('../bluetoothPrinter.js')
+
+    expect(typeof printer.printText).toBe('function')
+    expect(printer.PrintAlign.CENTER).toBe(1)
+    expect(printer.FontSize.NORMAL).toBe(0)
+    // 源码里的 APP-PLUS 分支还在（H5 构建才会被剥掉），所以平台判断在 vitest 下是 true ——
+    // 这正是打印链路在测试环境也必须能解析 UTS 插件导入的原因
+    expect(printer.isPrinterPlatformSupported()).toBe(true)
+
+    // 别名指向最小 stub：只有真的调用插件能力时才抛"测试环境没有实现"
+    const plugin = await import('@/uni_modules/kds-bluetooth-printer')
+    expect(typeof plugin.printText).toBe('function')
+    expect(() => plugin.printText('测试')).toThrow(/APP-PLUS/)
   })
 })

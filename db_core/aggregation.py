@@ -13,7 +13,13 @@ from typing import List, Dict, Optional, Any
 from config import ORDER_LINE_REVENUE_SQL
 
 from db_core.utils import CHINA_TZ, timing_decorator, ensure_beijing_datetime, to_sql_datetime
-from services.urgency_policy import urgent_cutoff
+# R-T3-03（票 21）：档口统计/速率的默认窗口走营业日 `[06:00, 次日 06:00)`，切点与窗口函数
+# 的唯一定义在 db_core/business_day.py；自然日 helper 只给刻意保留日历日的非档口路径用。
+from db_core.business_day import business_day_window, calendar_day_range
+# DOC-07（ticket 18）：策略函数住在 db_core（`services → db_core` 方向），绝不反向 import
+# services —— `services/__init__.py` 的副作用会把 database → db_core.aggregation 拉进来，
+# 直接 `import db_core.aggregation` 就会撞循环导入。见 db_core/urgency_policy.py。
+from db_core.urgency_policy import urgent_cutoff
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +42,24 @@ class _AggregationMixin:
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
     ) -> Dict:
+        """档口统计（单数/件数/紧急数/平均等待）。
+
+        省略窗口时取**当前营业日** ``[06:00, 次日 06:00)``（06:00 前算前一个营业日，
+        与采集/对账/报表同一把尺子，R-T3-03）；窗口右端为开区间。
+        """
         try:
             from models import StationStats
             from config import settings
             station_name = settings.KITCHEN_STATIONS.get(station_id, {}).get('name', station_id)
             now = datetime.now(CHINA_TZ)
-            if start_time is None:
-                start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            if end_time is None:
-                end_time = now.replace(hour=23, minute=59, second=59, microsecond=999000)
+            # 默认窗口 = 当前营业日：凌晨 00:00–06:00 的单归前一个营业日。只给缺的一侧兜底，
+            # 显式传参的一侧按传入值走（右端统一按开区间处理）。
+            if start_time is None or end_time is None:
+                biz_start, biz_end = business_day_window(now)
+                if start_time is None:
+                    start_time = biz_start
+                if end_time is None:
+                    end_time = biz_end
             start_iso, end_iso = start_time.isoformat(), end_time.isoformat()
             urgent_cutoff_iso = urgent_cutoff(now).isoformat()
             tdb = self._connection.table("orders")
@@ -52,27 +67,27 @@ class _AggregationMixin:
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT COUNT(*) as cnt FROM orders
-                       WHERE station = ? AND order_time >= ? AND order_time <= ?""",
+                       WHERE station = ? AND order_time >= ? AND order_time < ?""",
                     (station_id, start_iso, end_iso),
                 )
                 total_orders = (await cursor.fetchone())[0]
                 await cursor.execute(
                     """SELECT SUM(quantity) as s FROM orders
-                       WHERE station = ? AND order_time >= ? AND order_time <= ?""",
+                       WHERE station = ? AND order_time >= ? AND order_time < ?""",
                     (station_id, start_iso, end_iso),
                 )
                 row = await cursor.fetchone()
                 total_quantity = row[0] or 0 if row else 0
                 await cursor.execute(
                     """SELECT COUNT(*) FROM orders
-                       WHERE station = ? AND order_time >= ? AND order_time <= ?
+                       WHERE station = ? AND order_time >= ? AND order_time < ?
                          AND order_time < ?""",
                     (station_id, start_iso, end_iso, urgent_cutoff_iso),
                 )
                 urgent_count = (await cursor.fetchone())[0]
                 await cursor.execute(
                     """SELECT order_time FROM orders
-                       WHERE station = ? AND order_time >= ? AND order_time <= ?""",
+                       WHERE station = ? AND order_time >= ? AND order_time < ?""",
                     (station_id, start_iso, end_iso),
                 )
                 rows = await cursor.fetchall()
@@ -106,7 +121,9 @@ class _AggregationMixin:
         try:
             self._reject_order_time_dict(match_condition)
             now = datetime.now(CHINA_TZ)
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            # 无参时的兜底「今日」仍是**日历日**：这条是订单列表路径，不在票 21 的档口口径
+            # 范围内（见 db_core/business_day.calendar_day_range 的 docstring）。
+            today_start = calendar_day_range(now)[0].isoformat()
             conditions, params = [], []
             for key, val in match_condition.items():
                 if key == 'station':
@@ -148,7 +165,9 @@ class _AggregationMixin:
     async def aggregate_orders_stats(self, station: Optional[str] = None) -> Dict:
         try:
             now = datetime.now(CHINA_TZ)
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            # 「今日」保持**日历日**：这几处是订单统计/菜品汇总，非档口路径，票 21
+            # 只把档口统计与速率改营业日（见 db_core/business_day.calendar_day_range）。
+            today_start = calendar_day_range(now)[0].isoformat()
             params: List[Any] = [today_start]
             station_clause = ""
             if station and station != 'all':
@@ -193,7 +212,9 @@ class _AggregationMixin:
     async def aggregate_station_speed(self, target: datetime) -> Dict[str, Any]:
         """按 5 分钟粒度聚合档口进单速率，并附带昨日/上周/上月对比。"""
         try:
-            target_dt = ensure_beijing_datetime(target).replace(hour=0, minute=0, second=0, microsecond=0)
+            # speed 的取数窗口按目标日期所在**日历日**取：图表只渲染 07:00–21:00 的槽位，
+            # 营业日窗口（06:00 起）在这段逐点等价，因此刻意不动（票 21 建议修法③）。
+            target_dt = calendar_day_range(target)[0]
             target_str = target_dt.strftime("%Y-%m-%d")
             compare_dates = {
                 "yesterday": (target_dt - timedelta(days=1)).strftime("%Y-%m-%d"),
@@ -312,7 +333,9 @@ class _AggregationMixin:
     async def aggregate_dishes_summary(self, station: Optional[str] = None) -> List[Dict]:
         try:
             now = datetime.now(CHINA_TZ)
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            # 「今日」保持**日历日**：这几处是订单统计/菜品汇总，非档口路径，票 21
+            # 只把档口统计与速率改营业日（见 db_core/business_day.calendar_day_range）。
+            today_start = calendar_day_range(now)[0].isoformat()
             params: List[Any] = [today_start]
             station_clause = ""
             if station and station != 'all':
@@ -335,7 +358,9 @@ class _AggregationMixin:
     async def aggregate_hot_dishes(self, station: Optional[str] = None, limit_n: int = 10) -> List[Dict]:
         try:
             now = datetime.now(CHINA_TZ)
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            # 「今日」保持**日历日**：这几处是订单统计/菜品汇总，非档口路径，票 21
+            # 只把档口统计与速率改营业日（见 db_core/business_day.calendar_day_range）。
+            today_start = calendar_day_range(now)[0].isoformat()
             params: List[Any] = [today_start]
             station_clause = ""
             if station and station != 'all':

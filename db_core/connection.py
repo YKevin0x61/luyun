@@ -51,7 +51,10 @@ class _ConnectionMixin:
         """
         # 全局写锁在这里建：asyncio.Lock 需要运行中的事件循环，而且必须早于任何
         # service 取用（service 的 _write_lock property 见到它就共享，见 #2.2）。
-        self._write_lock = asyncio.Lock()
+        # **只建一次**：每次 connect() 都重建会让「断开前后」两把锁并存，整库恢复
+        # 窗口里 serialized_write 的互斥契约随之失效（CORR-01 的放大器）。
+        if self._write_lock is None:
+            self._write_lock = asyncio.Lock()
         backend = (getattr(settings, "DATABASE_BACKEND", "") or "").strip().lower()
         if backend != "postgres":
             raise RuntimeError(
@@ -77,9 +80,50 @@ class _ConnectionMixin:
         """
         return self._connection.alive()
 
-    def migrations_complete(self) -> bool:
-        """连接是否已建立（``connect()`` 成功后才为真）。"""
-        return self._connection.migrations_complete()
+    def is_reconnecting(self) -> bool:
+        """连接是否正处在「重连窗口」（``_raw`` 已摘空、新连接还没建好）。
+
+        ``main.py`` 用它让业务路由在数据库恢复窗口里快速回 503 + ``retryable``
+        （DATA-02），``/api/healthz`` 用的是同一份判据。
+
+        取态方式与 :meth:`bound_loop` 一致：连接所有者
+        （``db_core/database_connection.py``，本簇不改）没有转出这个属性，而
+        ``native_connection()`` 在窗口里同样是 None（它在「已关闭」时也是 None，
+        分不出两种状态），所以这里只读地看一眼 ``_pg``。
+        """
+        pg = getattr(self._connection, "_pg", None)
+        return bool(getattr(pg, "reconnecting", False))
+
+    async def pending_migration_count(self) -> Optional[int]:
+        """待应用的增量迁移条数；连接不可用时返回 ``None``（= 不可判定）。
+
+        ``migrations/pg/0001`` 是 bootstrap（含 ``DROP TABLE``），不计入待应用清单
+        ——判据统一交给 :func:`services.db_migrations.migration_status`，这里不另
+        立一套。
+        """
+        if not self._connection.alive():
+            return None
+        from services.db_migrations import migration_status
+
+        status = await migration_status(self)
+        return len(status.pending)
+
+    async def migrations_complete(self) -> bool:
+        """所有增量迁移都已应用（``schema_migrations`` 里没有待应用项）。
+
+        旧实现回答的是「连接是否已建立」（``connect()`` 成功即真）——于是带 schema
+        变更的升级、还没点「应用迁移」的门店照样报 ready（PERF-11）。就绪口径里的
+        ``migrations_complete`` 现在由「待应用迁移数 == 0」驱动。
+
+        注：``db_core/database_connection.py::migrations_complete``（``connect()``
+        时置位的那份）因此不再有生产消费者；该文件属于另一个文件簇，本次不动。
+        """
+        try:
+            pending = await self.pending_migration_count()
+        except Exception as exc:
+            logger.warning("读取迁移状态失败，按「迁移未完成」处理: %s", exc)
+            return False
+        return pending == 0
 
     def bound_loop(self):
         """这条连接绑在哪个事件循环上（还没连过就是 None）。

@@ -1,48 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Single source for wait → priority / urgent cutoff (reads config.PRIORITY_LEVELS)."""
+"""兼容壳：等待时长策略的实现在 `db_core.urgency_policy`（DOC-07 / ticket 18）。
 
-from __future__ import annotations
+`db_core` 不得反向 import `services`（`services/__init__.py` 有副作用，
+会让 `import db_core.aggregation` 撞循环导入），所以本模块**只做 re-export**，
+不留任何逻辑——两个名字指向同一个函数对象，阈值/边界语义不会漂移。
+新代码请直接 `from db_core.urgency_policy import …`。
+"""
 
-from datetime import datetime, timedelta
-from typing import Optional
+from db_core.urgency_policy import (
+    high_cutoff,
+    high_threshold_ms,
+    level_for_wait_ms,
+    urgent_cutoff,
+    urgent_threshold_ms,
+)
 
-from config import PRIORITY_LEVELS
-
-_DEFAULT_URGENT_MS = 20 * 60 * 1000
-_DEFAULT_HIGH_MS = 15 * 60 * 1000
-
-
-def urgent_threshold_ms() -> int:
-    return int(PRIORITY_LEVELS.get("urgent", {}).get("threshold", _DEFAULT_URGENT_MS))
-
-
-def high_threshold_ms() -> int:
-    return int(PRIORITY_LEVELS.get("high", {}).get("threshold", _DEFAULT_HIGH_MS))
-
-
-def level_for_wait_ms(wait_ms: float) -> str:
-    """Map wait duration (ms) to urgent / high / normal.
-
-    Uses strict greater-than to match legacy DishMergerService behaviour.
-    """
-    try:
-        ms = float(wait_ms)
-    except (TypeError, ValueError):
-        return "normal"
-    if ms > urgent_threshold_ms():
-        return "urgent"
-    if ms > high_threshold_ms():
-        return "high"
-    return "normal"
-
-
-def urgent_cutoff(now: Optional[datetime] = None) -> datetime:
-    """Orders with order_time earlier than this are urgent."""
-    moment = now if now is not None else datetime.now()
-    return moment - timedelta(milliseconds=urgent_threshold_ms())
-
-
-def high_cutoff(now: Optional[datetime] = None) -> datetime:
-    moment = now if now is not None else datetime.now()
-    return moment - timedelta(milliseconds=high_threshold_ms())
+__all__ = [
+    "high_cutoff",
+    "high_threshold_ms",
+    "level_for_wait_ms",
+    "urgent_cutoff",
+    "urgent_threshold_ms",
+]

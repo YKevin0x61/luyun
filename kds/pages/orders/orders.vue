@@ -294,6 +294,7 @@ import { useStationsStore } from '../../stores/stations.js'
 import SvgIcon from '../../components/SvgIcon/SvgIcon.vue'
 import PwaUpdateBanner from '../../components/PwaUpdateBanner.vue'
 import { canonicalOrderNotes } from '../../utils/orderNotes.js'
+import { chinaDateKey } from '../../utils/businessDay.js'
 
 export default {
   name: 'OrdersPage',
@@ -641,8 +642,11 @@ export default {
     }
 
     onMounted(async () => {
-      const today = new Date()
-      const todayStr = today.toISOString().split('T')[0]
+      // 默认「今天」必须按**中国自然日**算，不能用设备本地日期：
+      // 后端 /api/orders/search 把 start_date/end_date 解释成 CHINA_TZ 的 00:00–23:59（api/orders.py），
+      // 而 kiosk 的设备时区常年是 UTC——`toISOString().split('T')[0]` 取到的是 UTC 日期，
+      // 于是东八区 00:00–08:00 打开页面时默认查的是昨天。
+      const todayStr = chinaDateKey()
       filters.startDate = todayStr
       filters.endDate = todayStr
       await stationsStore.initializeStations()

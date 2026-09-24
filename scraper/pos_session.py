@@ -639,31 +639,39 @@ class PosSession:
         except Exception as e:
             self.logger.error(f"关闭爬虫失败: {e}")
 
-    async def scrape_table_data(self) -> List[Dict]:
-        """获取餐桌数据。
+    async def scrape_table_data(self) -> Optional[List[Dict]]:
+        """获取餐桌数据；**取材失败返回 None**（CORR-06，与 ``fetch_table_orders`` 同一套语义）。
 
         会话 Cookie 存活于 browser context，``page.request`` 与 ``Referer`` 头均不依赖
         当前页面 URL，因此无需每轮重新导航到 tableList 页——实测每轮可省约 3.5s。
         建立会话时（``_establish_cy7mm_session``）已导航过一次。
+
+        返回值语义（调用方必须按此区分，别再读成"餐桌全空了"）：
+        - ``None``：这一轮没拿到餐桌列表——会话没就绪 / API 非 200 / 响应结构不认识 /
+          请求或解析抛异常。调用方要整轮跳过，且**不推进任何桌的状态**。
+        - ``[]``：取材正常，只是当前没有餐桌（非营业时间、餐厅暂时没开台/没订单）。
+        - 其余：正常的餐桌列表。
         """
         try:
             # 确保已初始化
             if not await self._ensure_initialized():
-                return []
+                return None
 
-            # 检查营业时间
+            # 检查营业时间：非营业时间没开台是**正常结果**，不是取材失败
             if not self._is_business_hours():
                 return []
 
             # 通过API获取餐桌数据
             table_data = await self._get_table_data_via_api()
 
+            if table_data is None:
+                self.logger.warning("⚠️  餐桌列表取材失败，本轮跳过（不推进餐桌状态）")
+                return None
             if table_data:
                 self.logger.info(f"✅ 获取到 {len(table_data)} 个餐桌数据")
                 return table_data
-            else:
-                self.logger.info("ℹ️  当前没有餐桌数据，可能是非营业时间或餐厅暂时无订单")
-                return []
+            self.logger.info("ℹ️  当前没有餐桌数据，可能是非营业时间或餐厅暂时无订单")
+            return []
 
         except ScraperSessionError:
             raise
@@ -671,7 +679,7 @@ class PosSession:
             self.logger.error(f"获取餐桌数据失败: {e}")
             import traceback
             self.logger.error(f"详细错误信息: {traceback.format_exc()}")
-            return []
+            return None
 
     BUSY_POINT_API_URL = (
         "https://cy7mm.wuuxiang.com/cy7MobileReports/canyin/mobile/realtimetablestate/getbusypointdata"
@@ -756,7 +764,19 @@ class PosSession:
                         "http_status": status,
                         "message": detail or "餐桌列表 API 返回 success=false",
                     }
-            rows = self._parse_api_response(body) if isinstance(body, (dict, list)) else []
+            rows = (
+                self._parse_api_response(body)
+                if isinstance(body, (dict, list))
+                else None
+            )
+            if rows is None:
+                # CORR-06：接口答了但我们不认识这个结构——采集侧同样取不到餐桌，
+                # 探测不能报 ok=True。
+                return {
+                    "ok": False,
+                    "http_status": status,
+                    "message": "餐桌列表 API 响应结构无法识别，可能是未登录或接口变更",
+                }
             return {
                 "ok": True,
                 "http_status": status,
@@ -933,12 +953,17 @@ class PosSession:
             self.logger.error("getbsdetail API 探测失败: %s", exc)
             return {"ok": False, "http_status": 0, "message": f"getbsdetail API 调用异常: {exc}"}
 
-    async def _get_table_data_via_api(self) -> List[Dict]:
-        """通过 API 获取餐桌数据；会话失效时自动重新登录并重试一次。"""
+    async def _get_table_data_via_api(self) -> Optional[List[Dict]]:
+        """通过 API 获取餐桌数据；会话失效时自动重新登录并重试一次。
+
+        CORR-06：拿不到就是 ``None``，不再用 ``[]`` 冒充。无凭据 / HTTP 非 200 /
+        响应不是 JSON 对象 / 结构不认识，都会走到 ``None``；只有"API 正常回答且结构
+        可识别"才可能返回 ``[]``（那才是真的没餐桌）。
+        """
         try:
             if self._creds is None:
                 self.logger.error("❌ 无登录凭据，跳过 API 调用")
-                return []
+                return None
 
             status, data = await self.http.request_with_recovery(
                 self._busy_point_api_request_raw,
@@ -947,10 +972,13 @@ class PosSession:
 
             if status != 200:
                 self.logger.error(f"❌ API请求失败，状态码: {status}")
-                return []
+                return None
 
             self.logger.debug("✅ API请求成功，获取到餐桌数据")
-            return self._parse_api_response(data) if isinstance(data, (dict, list)) else []
+            if not isinstance(data, (dict, list)):
+                self.logger.error("❌ 餐桌列表 API 响应非 JSON 结构")
+                return None
+            return self._parse_api_response(data)
 
         except ScraperSessionError:
             raise
@@ -958,15 +986,23 @@ class PosSession:
             self.logger.error(f"❌ API请求出错: {e}")
             import traceback
             self.logger.error(f"详细错误信息: {traceback.format_exc()}")
-            return []
+            return None
 
-    def _parse_api_response(self, data: Dict) -> List[Dict]:
-        """解析API响应数据"""
+    def _parse_api_response(self, data: Dict) -> Optional[List[Dict]]:
+        """解析API响应；**结构不认识时返回 None**（不是空列表，CORR-06）。
+
+        认识的三种形态：``{"data": [...]}``、裸列表、以及 ``result/items/tables/list/rows``
+        里第一个列表字段。形态认识但里面没有可解析的餐桌行 → ``[]``（合法空：真的没餐桌）；
+        一个形态都不匹配（例如 ``success=false`` 的错误体）→ ``None``（取材失败），
+        否则调用方会把"接口答错了"当成"餐桌全被清台了"。
+        """
         try:
             table_data = []
+            recognized = False
 
             # 尝试不同的数据结构解析
             if isinstance(data, dict) and 'data' in data:
+                recognized = True
                 tables = data['data']
 
                 if isinstance(tables, list):
@@ -976,6 +1012,7 @@ class PosSession:
                             table_data.append(table_info)
 
             elif isinstance(data, list):
+                recognized = True
                 for i, table in enumerate(data):
                     table_info = self._parse_table_item(table, i)
                     if table_info:
@@ -984,17 +1021,22 @@ class PosSession:
             elif isinstance(data, dict):
                 for key in ['result', 'items', 'tables', 'list', 'rows']:
                     if key in data and isinstance(data[key], list):
+                        recognized = True
                         for i, table in enumerate(data[key]):
                             table_info = self._parse_table_item(table, i)
                             if table_info:
                                 table_data.append(table_info)
                         break
 
+            if not recognized:
+                self.logger.error("❌ 餐桌列表 API 响应结构无法识别，本轮按取材失败处理")
+                return None
+
             return table_data
 
         except Exception as e:
             self.logger.error(f"❌ 解析API响应失败: {e}")
-            return []
+            return None
 
     def _parse_table_item(self, item: Dict, index: int) -> Optional[Dict]:
         """解析单个餐桌数据 - 基于原始爬虫的逻辑"""

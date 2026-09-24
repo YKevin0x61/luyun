@@ -9,7 +9,8 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
 from models import StationStats
 from config import KITCHEN_STATIONS
-from services.urgency_policy import level_for_wait_ms, urgent_threshold_ms
+# DOC-07（ticket 18）：`services → db_core` 是允许的方向；策略函数本体在 db_core。
+from db_core.urgency_policy import level_for_wait_ms, urgent_threshold_ms
 
 logger = logging.getLogger(__name__)
 

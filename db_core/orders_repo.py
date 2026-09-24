@@ -18,9 +18,18 @@ from db_core.utils import (
     ensure_beijing_datetime,
     to_sql_datetime,
 )
-from services.urgency_policy import level_for_wait_ms
+# DOC-07（ticket 18）：等待时长策略的唯一实现在 db_core/urgency_policy.py，方向是
+# `services → db_core`。这里曾经反向 `from services.urgency_policy import …`，虽然
+# services/urgency_policy.py 本身不依赖 db_core，但 `services/__init__.py` 有副作用
+# （→ prep_plan_service → database → db_core.aggregation），会让 `import db_core.aggregation`
+# 撞循环导入。仓储层必须能被单独导入，所以不得再出现任何 `from services …`。
+from db_core.urgency_policy import level_for_wait_ms
 
 logger = logging.getLogger(__name__)
+
+# 菜品 → 最常见档口（回退映射）的缓存时长，见 `_get_dish_station_mapping`（PERF-15）。
+# 数值取"面板刷新周期"的量级：五分钟陈旧对一层展示用兜底映射没有影响。
+DISH_STATION_MAPPING_TTL_SECONDS = 300
 
 
 def _shape_order_placement(order: Optional[Dict]) -> Optional[Dict]:
@@ -686,7 +695,22 @@ class _OrdersRepoMixin:
             return []
 
     async def _get_dish_station_mapping(self) -> Dict[str, str]:
-        """获取每个菜品最常见的档口（从 orders 表统计）"""
+        """获取每个菜品最常见的档口（从 orders 表统计）。
+
+        PERF-15：结果带 ``DISH_STATION_MAPPING_TTL_SECONDS`` 的短 TTL 缓存。原实现每次
+        调用都跑 `orders` 全表 `GROUP BY dish_name, station`（生产库 20 万行量级、百毫秒
+        级），而它挂在 `/api/semi-rules/dishes/grouped` 上，面板每次刷新都重扫一遍。
+        缓存挂在实例上（DatabaseManager 是进程内单实例、单 worker），不引入新依赖；
+        不做时间界是因为这只是一层"历史频次"兜底映射，砍窗口会让老菜品掉回"未知"。
+        空结果同样缓存：orders 为空时也不必每次刷新都扫表。
+        """
+        now = time.monotonic()
+        cached = getattr(self, "_dish_station_mapping_cache", None)
+        if cached is not None:
+            cached_at, cached_mapping = cached
+            if now - cached_at < DISH_STATION_MAPPING_TTL_SECONDS:
+                return dict(cached_mapping)
+
         try:
             tdb = self._connection.table("orders")
             async with tdb.conn.cursor() as cursor:
@@ -701,8 +725,10 @@ class _OrdersRepoMixin:
                 dish, station = row[0], row[1]
                 if dish not in result and station:
                     result[dish] = station
-            return result
+            self._dish_station_mapping_cache = (now, result)
+            return dict(result)
         except Exception as e:
+            # 失败不写缓存：让下一轮能立刻重试，而不是把空映射钉 5 分钟。
             logger.warning(f"⚠️ 获取菜品档口映射失败: {e}")
             return {}
 

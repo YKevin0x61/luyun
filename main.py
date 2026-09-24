@@ -20,6 +20,7 @@ from fastapi.exceptions import RequestValidationError
 
 from config import settings
 from database import DatabaseManager
+from db_core.backend.pg import DatabaseUnavailable
 from api import orders, dishes, dish_stations, semi_rules, report_dishes, prep_plan, wecom_push
 from api.admin import router as admin_router
 from api.recipes import public_router as recipes_public_router
@@ -44,7 +45,7 @@ from api.auth import router as auth_router
 from api.hygiene import router as hygiene_router
 from services import auth_service
 from services import backup_import_staging
-from services import backup_points, backup_retention
+from services import backup_points, backup_retention, backup_service
 from scraper.restaurant_scraper import create_restaurant_scraper
 from services import credentials_store
 from services.dish_catalog import DishCatalog
@@ -246,6 +247,22 @@ def _require_startup_config() -> None:
         require_redis_url()
 
 
+def _sweep_stale_restore_dumps_at_startup() -> None:
+    """启动期清一次残留的恢复/导出临时 dump（SEC-08 / T2-V2）。
+
+    恢复入口与冷备脚本各自会扫一遍，但进程被强杀后留下的 dump 要等到下一次恢复
+    才消失。启动期补一次——但**绝不能**把启动变成可失败点：任何异常只记 warning，
+    清理失败不影响应用起来。
+    """
+    try:
+        removed = backup_service.sweep_stale_restore_dumps()
+    except Exception as exc:  # noqa: BLE001 - 清理失败不阻断启动
+        logger.warning(f"⚠️ 启动期清理残留临时 dump 失败（不影响启动）: {exc}")
+        return
+    if removed:
+        logger.info(f"🧹 启动期清理了 {len(removed)} 份上次残留的临时 dump")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
@@ -269,6 +286,9 @@ async def lifespan(app: FastAPI):
 
         warn_if_admin_open()
         backup_import_staging.cleanup_expired_staging()
+        # SEC-08 / T2-V2：上次进程被强杀留下的恢复/导出 dump 在这里清掉（尽力而为，
+        # 失败只记日志；放在任何常驻业务循环之前，清完再对外服务）。
+        _sweep_stale_restore_dumps_at_startup()
         app.startup_time = datetime.now(CHINA_TZ)
 
         # 捕获运行中的事件循环引用，供 InMemoryLogHandler.emit()（同步、可能
@@ -421,12 +441,18 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning(f"⚠️ 备份健康计算失败（不影响启动）: {exc}")
 
-        # 启动标识：更新健康确认据此判断「当前进程是否晚于本次重启」
+        # 启动标识：更新健康确认据此判断「当前进程是否晚于本次重启」。
+        # migrations_complete 由「待应用迁移数 == 0」驱动（PERF-11），不再是
+        # 「连接已建立」；读不出来就按未完成处理。
         from services.release_update.readiness import runtime_readiness
 
-        runtime_readiness.mark_started(
-            migrations_complete=bool(db_manager and db_manager.migrations_complete())
-        )
+        migrations_ok = False
+        if db_manager:
+            try:
+                migrations_ok = await db_manager.migrations_complete()
+            except Exception as exc:
+                logger.warning(f"⚠️ 迁移状态判定失败（就绪按未完成处理）: {exc}")
+        runtime_readiness.mark_started(migrations_complete=migrations_ok)
 
         # 常驻 task 清单收口后再计数：下面的数字必须能被 `_resident_tasks` 逐条核对
         # （PERF-06）。业务循环由本文件起、辅助 task 由各组件内部起，两类都登记。
@@ -540,11 +566,16 @@ async def healthz():
     db_status = "uninitialized"
     current = db_manager
     if current is not None:
-        try:
-            result = await current.health_check()
-            db_status = str(result.get("status", "unknown"))
-        except Exception as exc:
-            db_status = f"error: {exc}"
+        if _database_is_reconnecting():
+            # 与中间件同一份判据：重连窗口内探针也必须报 503（healthy=False），
+            # 而不是等 health_check 抛异常再拼一个 "error: ..."。
+            db_status = "reconnecting"
+        else:
+            try:
+                result = await current.health_check()
+                db_status = str(result.get("status", "unknown"))
+            except Exception as exc:
+                db_status = f"error: {exc}"
     healthy = db_status == "healthy"
     level = disk_guard.worst_level()
     free_mb = min_free_mb()
@@ -788,6 +819,85 @@ async def csrf_origin_guard(request: Request, call_next):
         )
         return JSONResponse(status_code=403, content={"detail": "跨站请求被拒绝"})
     return await call_next(request)
+
+
+# ── 数据库不可用时的体面出口（DATA-02） ──────────────────────────────────
+# 恢复/重连窗口里，连接层抛的是领域异常 DatabaseUnavailable（含子类
+# DatabaseReconnecting / DatabaseBusy）。这里给它两条出路：中间件在窗口内让业务
+# 路由**快速**回 503 + Retry-After，全局处理器兜住任何漏网的领域异常；两者都不再
+# 逐请求打 traceback，一个窗口只留一条结构化日志。
+_DB_STATUS_PATHS = frozenset({"/api/healthz", "/api/system/health"})
+_DB_RETRY_AFTER_SECONDS = "1"
+_db_unavailable_logged = False
+
+
+def _database_is_reconnecting() -> bool:
+    """连接层是否正处在重连窗口（``/api/healthz`` 与中间件共用这一份判据）。"""
+    if db_manager is None:
+        return False
+    probe = getattr(db_manager, "is_reconnecting", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe())
+    except Exception:  # pragma: no cover - 判据本身不该把请求变成 500
+        return False
+
+
+def _log_database_unavailable(detail: str, *, state: str = "reconnecting") -> None:
+    """每个重连窗口只记一条结构化记录（原先每个请求一条 traceback）。
+
+    ``state`` 带上连接层给出的原因（``reconnecting`` / ``unavailable`` /
+    ``write_lock_timeout``），否则运维只看到「有人 503 了」而看不出是哪一种。
+    """
+    global _db_unavailable_logged
+    if _db_unavailable_logged:
+        return
+    _db_unavailable_logged = True
+    logger.warning(
+        "数据库不可用（%s）：业务请求快速返回 503（同一窗口后续请求不再重复记录） %s",
+        state,
+        detail,
+    )
+
+
+def _database_unavailable_response(exc: Optional[Exception] = None) -> JSONResponse:
+    """503 + ``Retry-After`` + 响应体 ``retryable: true``：调用方可以原样重试。"""
+    detail = (
+        str(exc)
+        if exc is not None
+        else "数据库暂时不可用（正在重连或恢复），请稍后重试"
+    )
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": _DB_RETRY_AFTER_SECONDS},
+        content={
+            "error": "数据库暂时不可用",
+            "detail": detail,
+            "retryable": True,
+            "reason": getattr(exc, "reason", "reconnecting"),
+            "timestamp": datetime.now(CHINA_TZ).isoformat(),
+        },
+    )
+
+
+@app.middleware("http")
+async def database_unavailable_guard(request: Request, call_next):
+    """数据库处于重连/恢复窗口时，业务路由快速回 503（可重试）。
+
+    判据是连接层自己开的那扇窗（``PgConnection._reconnect_raw`` 开窗、新连接建好
+    关窗），与 ``/api/healthz`` 用的是同一份。探针路由不拦：它们的语义就是「库不
+    可用时也给出自己的 503 诊断」。
+    """
+    global _db_unavailable_logged
+    if request.url.path not in _DB_STATUS_PATHS and _database_is_reconnecting():
+        _log_database_unavailable(f"{request.method} {request.url.path}")
+        return _database_unavailable_response()
+    response = await call_next(request)
+    if not _database_is_reconnecting():
+        # 窗口关掉后，下一个窗口重新记一条。
+        _db_unavailable_logged = False
+    return response
 
 
 @app.websocket("/ws/realtime")
@@ -1399,6 +1509,20 @@ async def run_restaurant_scraper():
         logger.error(f"❌ 餐厅数据爬取任务异常: {e}")
 
 # 错误处理
+@app.exception_handler(DatabaseUnavailable)
+async def database_unavailable_handler(request: Request, exc: DatabaseUnavailable):
+    """连接层的领域异常 → 503 + ``Retry-After`` + ``retryable: true``（DATA-02）。
+
+    没有这一层时，恢复窗口里的 ``RuntimeError`` 会落进下面的全局处理器，被压成
+    500「服务器内部错误」——调用方看不出这只是「稍后重试」。
+    """
+    _log_database_unavailable(
+        f"{request.method} {request.url.path}",
+        state=getattr(exc, "reason", "unavailable"),
+    )
+    return _database_unavailable_response(exc)
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """全局异常处理"""

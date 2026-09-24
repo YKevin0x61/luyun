@@ -22,7 +22,15 @@ from typing import Callable, Optional
 
 from config import settings
 from services import backup_service
-from services.playwright_env import ensure_chromium_installed_sync
+from services.playwright_env import (
+    BrowserCacheStatus,
+    PlaywrightBrowserDriftError,
+    browser_cache_status,
+    ensure_chromium_installed_sync,
+    format_degraded_alert,
+    repair_hint,
+    strict_mode_enabled,
+)
 from services.release_update.job_runner import BundleInstallResult
 from services.release_update.job_state import is_cancel_requested, job_log_path
 from services.release_update.manifest_identity import MANIFEST_NAME
@@ -504,9 +512,25 @@ class PlaywrightBrowserSyncAdapter:
     """Keep the deploy venv's Playwright browsers aligned with its lib version.
 
     升级 playwright lib 后浏览器 build 必须同步更换，否则 scraper 报
-    ``Executable doesn't exist at /ms-playwright/chromium_headless_shell-<rev>/...``。
-    失败只告警不抛：浏览器缺失由主服务启动后的自愈兜底，不该让一次网络抖动
-    卡死整台店的更新。
+    ``Executable doesn't exist at .../chromium_headless_shell-<rev>/...``。
+
+    失败**分两类，处理故意不同**（票 10 / PERF-12）：
+
+    - 补装命令失败（网络抖动、超时、磁盘满）：**不抛**。浏览器缺失由主服务启动后的
+      自愈兜底（``PosSession._init_browser``），不该让一次网络抖动卡死整台店的更新
+      （``tests/test_release_update_browser_sync.py`` 也钉住了这一点）。但也不再只是
+      进程日志里的一句 warning：写一行结构化降级告警进**更新作业日志**——
+
+          [update][DEGRADED] {"degraded": "playwright_browser_missing", ...}
+
+      而 ``GET /api/release-update/job`` 的 ``log_tail`` 会把它送进 Admin
+      「系统更新」面板，运维在更新当场就能看到，不必等采集器启动报错才发现方向错了。
+    - 补装命令自称成功、缓存里**仍然**缺目标 build（确定性漂移，例如装到了别的
+      ``PLAYWRIGHT_BROWSERS_PATH``）：同样写结构化告警；若置
+      ``LUYUN_PLAYWRIGHT_STRICT_BROWSERS=1``（:func:`strict_mode_enabled`）则抛
+      :class:`~services.playwright_env.PlaywrightBrowserDriftError`，走 ``job_runner``
+      既有的失败路径（作业标红 + 回滚），把「更新说成功、采集器起不来」扭回来。
+      默认关：与上面同一条决策对齐，但运维留了一把硬开关。
     """
 
     def __init__(
@@ -515,26 +539,64 @@ class PlaywrightBrowserSyncAdapter:
         *,
         python_bin: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
+        log_path: Optional[Path] = None,
+        strict: Optional[bool] = None,
     ) -> None:
         self._deploy = Path(deploy_dir)
         self._python = resolve_deploy_python(self._deploy, python_bin)
         self._timeout_seconds = (
             timeout_seconds or settings.PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS
         )
+        self._log_path = Path(log_path) if log_path is not None else job_log_path()
+        self._strict = strict_mode_enabled() if strict is None else strict
+        #: 最近一次同步的校验结论（手工排查/用例可直接读，不必解析日志）。
+        self.last_status: Optional[BrowserCacheStatus] = None
 
     def sync(self) -> None:
         logger.info("Ensuring Playwright browsers match %s", self._python)
-        ok = ensure_chromium_installed_sync(
+        install_ok = ensure_chromium_installed_sync(
             python_bin=self._python,
             timeout_seconds=self._timeout_seconds,
             log=logger,
         )
-        if not ok:
-            logger.warning(
-                "Playwright browser sync failed; the main service self-heals on "
-                "startup (lib=%s)",
-                self._python,
-            )
+        status = browser_cache_status()
+        self.last_status = status
+        if status.ok:
+            if not install_ok:
+                logger.warning(
+                    "Playwright 补装命令失败，但缓存里目标 build 已存在（%s）；继续更新",
+                    status.cache_dir,
+                )
+            return
+        alert = format_degraded_alert(
+            status,
+            phase="playwright_browser_sync",
+            python_bin=self._python,
+            install_ok=install_ok,
+            strict=self._strict,
+            repair=repair_hint(self._python),
+        )
+        self._append_job_log(alert)
+        if install_ok and self._strict:
+            logger.error("Playwright 浏览器漂移（严格模式）: %s", status.describe())
+            raise PlaywrightBrowserDriftError(status)
+        logger.error(
+            "Playwright 浏览器不可用（install_ok=%s, lib=%s）: %s",
+            install_ok,
+            self._python,
+            status.describe(),
+        )
+
+    def _append_job_log(self, line: str) -> None:
+        """把结构化告警写进更新作业日志；日志写不进去也不能让更新崩掉。"""
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._log_path, "a", encoding="utf-8") as log_fh:
+                log_fh.write("\n--- playwright browser sync ---\n")
+                log_fh.write(line + "\n")
+                log_fh.flush()
+        except OSError as exc:
+            logger.error("写更新作业日志失败（告警只在进程日志里）: %s", exc)
 
 
 class SystemdMainServiceAdapter:

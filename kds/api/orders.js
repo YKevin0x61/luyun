@@ -3,7 +3,7 @@
  */
 
 import { request } from '../utils/request.js'
-import { chinaDayRange } from '../utils/businessDay.js'
+import { chinaDateKey, chinaDayRange } from '../utils/businessDay.js'
 
 export const ordersAPI = {
   /**
@@ -59,7 +59,7 @@ export const ordersAPI = {
       params: {
         station: params.station || 'all',
         sort_by: params.sort_by || 'time',
-        date: params.date || new Date().toISOString().split('T')[0],
+        date: params.date || chinaDateKey(),
         ...params
       }
     })

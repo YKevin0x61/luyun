@@ -1,7 +1,8 @@
 # 升级到 0.6.0 操作方案
 
 > **本文是 0.5.19 → 0.6.0 的历史方案。** 0.6.x 之后 SQLite 已退场（PostgreSQL 成为
-> 唯一后端，见 [ADR 0089](adr/0089-retire-sqlite-postgres-only.md)）：文中场景 A
+> 唯一后端，见 ADR 0089，本机路径 `adr/0089-retire-sqlite-postgres-only.md`；发行包只带
+> `adr/` 的 0011 / 0012 / 0013 / 0082，其余 ADR 只在本机）：文中场景 A
 > （只升级、继续用 SQLite）**不再适用**，阅读时只把场景 B 的迁移路径当参考；当前
 > 做法以 `deploy/README.md` §10 与 `migrations/pg/README.md` 为准。
 >
@@ -236,7 +237,10 @@ systemctl start luyun
 
 1. **PG 后端仍是单 worker**。Redis 容器已备（compose `pg` profile）；0.7.0 起 realtime
    nudge 已经它跨进程广播（`REDIS_URL`，见 `deploy/README.md` 10.1.1），但日志缓冲 /
-   爬虫计数器仍在进程内存里，7 个常驻后台循环也还没有分布式选主。
+   爬虫计数器仍在进程内存里，常驻后台 task 也还没有分布式选主——写这份方案时只数了 7 个
+   业务循环，2026-09-23 起口径是 **12 个**（业务 7 + 辅助 5，见 `main.py` 的
+   `BUSINESS_LOOP_TASK_COUNT` / `AUXILIARY_RESIDENT_TASK_COUNT`；辅助 = 内存监控 / 内存清理 /
+   磁盘守护 / realtime Redis 订阅 / 日志落库消费者）。
 2. **Admin 备份导出/导入在 PG 下的业务数据是整库快照**。0.6.0 当时整块报错，之后先
    收敛为「导出照常可用、业务数据置灰」，v0.6.11 起改为打包 `app.pgdump`
    整库快照（恢复即整库覆盖，不支持合并导入）。更新前备份与定时冷备从一开始就支持。

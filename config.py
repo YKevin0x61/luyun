@@ -65,6 +65,18 @@ class Settings(BaseSettings):
     # （180 天区间报表，db_core/reports.py::aggregate_table_operations）。
     PG_STATEMENT_TIMEOUT_MS: int = 30000
     PG_LOCK_TIMEOUT_MS: int = 5000
+    # 事务开着但连接空闲（持锁方卡在非 PG 的 await 上）时，由服务端掐掉这条会话。
+    # statement_timeout / lock_timeout 在那种姿态下都不计时——它们是「语句在执行」
+    # 才计时——只有这项能兜住，否则串行写锁被永久占住（PERF-08）。
+    # env LUYUN_PG_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS 优先，0 = 关闭该项。
+    PG_IDLE_IN_TRANSACTION_TIMEOUT_MS: int = 60000
+    # 应用侧「等串行写锁」的**排队**上限（毫秒）：不是 PG 的 GUC，而是
+    # _TaskGuard 等待那条单连接的串行锁的上限。statement_timeout / lock_timeout
+    # 管不到排队阶段（PERF-08 实测持写事务时读请求等 6.504s 无返回、且无报错），
+    # 所以这一项必须由应用自己兜：超时抛 DatabaseBusy → HTTP 503 + 可重试。
+    # 默认与 lock_timeout 同量级（5s）；env LUYUN_PG_WRITE_LOCK_TIMEOUT_MS 优先，
+    # 0 = 无限等待（逃生门，不推荐）。
+    PG_WRITE_LOCK_TIMEOUT_MS: int = 5000
     # 冷备输出根目录（宿主机定时任务的归档落点，仓库根下的 backups/）；
     # BACKUP_DIR 环境变量优先
     COLD_BACKUP_DIR: str = os.path.join(

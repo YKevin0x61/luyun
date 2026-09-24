@@ -27,6 +27,12 @@ const PRINT_RETRY_BACKOFF_MULTIPLIER = 2
 // 失败任务最多保留条数，避免长期不补打导致本地存储无限增长（超出后丢弃最旧的失败任务）
 const MAX_FAILED_JOBS_KEPT = 50
 
+// 恢复时写进 lastError 的文案：这两类任务都不会被自动重打，只等人工确认
+const RESTORE_BROKEN_JOB_ERROR = '本地缓存的打印任务已损坏，未自动补打，请确认是否漏打'
+const RESTORE_INTERRUPTED_JOB_ERROR = '上次打印中断（应用被关闭或崩溃），请确认这张小票是否已经打出'
+// 缓存里连 ticket 都没有时的占位：补打列表要能看见"有这么一条坏记录"
+const BROKEN_TICKET_PLACEHOLDER = Object.freeze({ dishName: '（任务记录已损坏）', tableNumber: '' })
+
 /** @type {Array<Object>} 内存中的队列，元素形如 { id, ticket, status, attempts, nextAttemptAt, lastError, createdAt, lastAttemptAt } */
 let queue = []
 let isProcessing = false
@@ -133,6 +139,12 @@ async function attemptJob(job) {
   job.status = 'processing'
   job.attempts += 1
   job.lastAttemptAt = new Date().toISOString()
+  // 先把"处理中"落盘，再真正调打印。这一步之后进程若被杀，磁盘上留下的是 processing
+  // 而不是一条从没打印过的 pending —— 否则重启后会把同一张小票再打一遍
+  // （`restoreQueueFromStorage` 见到 processing 会转成待人工确认的失败任务）。
+  // 打印动作本身（打印 → 切纸）的顺序由 dishTicketPrinter 的票面模板 / 蓝牙指令序列决定，
+  // 这里只是多写一次本地存储，不改动作次序，也不参与打印。仓库里没有约束打印顺序的 ADR。
+  persistQueue()
   notifySubscribers()
 
   try {
@@ -140,7 +152,7 @@ async function attemptJob(job) {
 
     if (result && result.skipped) {
       // H5 或未启用打印：属于预期内的"无需打印"，不计入失败
-      debugLog('[打印队列] 跳过打印:', job.ticket.dishName, result.message)
+      debugLog('[打印队列] 跳过打印:', job.ticket?.dishName ?? job.id, result.message)
       removeJob(job.id)
       return
     }
@@ -149,7 +161,7 @@ async function attemptJob(job) {
       throw new Error(result?.message || '打印未成功')
     }
 
-    debugLog('[打印队列] 打印成功:', job.ticket.dishName, job.ticket.tableNumber)
+    debugLog('[打印队列] 打印成功:', job.ticket?.dishName ?? job.id, job.ticket?.tableNumber)
     removeJob(job.id)
   } catch (error) {
     const message = error?.message || String(error) || '打印失败'
@@ -158,8 +170,10 @@ async function attemptJob(job) {
     if (job.attempts >= PRINT_JOB_MAX_ATTEMPTS) {
       job.status = 'failed'
       job.nextAttemptAt = null
+      // ticket 可能缺失（缓存损坏、调用方传空），日志里不能直接解引用 job.ticket，
+      // 否则失败路径自己再抛一次异常，任务永远转不成 failed
       console.error(
-        `[打印队列] "${job.ticket.dishName}"(${job.ticket.tableNumber}) 打印失败，已达最大尝试次数(${PRINT_JOB_MAX_ATTEMPTS})，转入失败任务待手动补打:`,
+        `[打印队列] "${job.ticket?.dishName ?? job.id}"(${job.ticket?.tableNumber ?? '-'}) 打印失败，已达最大尝试次数(${PRINT_JOB_MAX_ATTEMPTS})，转入失败任务待手动补打:`,
         message
       )
       pruneFailedJobs()
@@ -168,7 +182,7 @@ async function attemptJob(job) {
       job.status = 'pending'
       job.nextAttemptAt = Date.now() + delay
       console.warn(
-        `[打印队列] "${job.ticket.dishName}"(${job.ticket.tableNumber}) 第 ${job.attempts} 次打印失败，${delay}ms 后自动重试:`,
+        `[打印队列] "${job.ticket?.dishName ?? job.id}"(${job.ticket?.tableNumber ?? '-'}) 第 ${job.attempts} 次打印失败，${delay}ms 后自动重试:`,
         message
       )
     }
@@ -286,22 +300,106 @@ export function retryAllFailedJobs() {
   return failedJobs.length
 }
 
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
 /**
- * 从持久化存储恢复队列（App 启动时调用一次）。
- * 恢复时若任务处于 'processing'（上次进程异常终止导致的中间态），重置为 'pending' 并立即可重试；
- * 'failed' 任务保持失败状态，等待用户手动补打；'pending' 任务恢复排队继续自动处理。
+ * 把一条从 storage 读回来的记录归一化成队列内部约定形状的任务。
+ *
+ * 恢复是本地数据进入队列的**唯一**入口，而 storage 里的内容是上一次运行时
+ * `JSON.stringify` 写下的：可能被截断、可能来自旧版本、也可能被外部改坏。不做校验直接
+ * 放进队列，`attempts` 缺失会得到 `NaN`（`NaN >= PRINT_JOB_MAX_ATTEMPTS` 恒为 false，
+ * 永远不会转 failed，无限重试），`nextAttemptAt` 缺失会得到 `undefined`
+ * （`undefined <= now` 恒为 false，任务永久 pending 又不进补打列表）。这类"僵尸任务"
+ * 既打不出来，用户也看不见。
+ *
+ * 归一化后的不变量：id 非空字符串、ticket 是对象、status ∈ pending/failed、
+ * attempts 是 >= 0 的有限数、nextAttemptAt 是有限数或 null（failed）。
+ *
+ * @param {*} raw storage 里的一条记录
+ * @param {number} now 本次恢复的时刻（显式传入，避免与真实时钟/fake timer 纠缠）
+ * @returns {Object|null} 合法任务；null 表示这条记录连任务都算不上，只能丢弃
+ */
+function normalizeStoredJob(raw, now) {
+  if (!isPlainObject(raw)) return null
+
+  const hasId = typeof raw.id === 'string' && raw.id.trim() !== ''
+  const ticket = isPlainObject(raw.ticket) ? raw.ticket : null
+  const status =
+    raw.status === 'pending' || raw.status === 'failed' || raw.status === 'processing'
+      ? raw.status
+      : null
+
+  const job = {
+    id: hasId ? raw.id : generateJobId(),
+    ticket: ticket || BROKEN_TICKET_PLACEHOLDER,
+    status: 'failed',
+    attempts: Number.isFinite(raw.attempts) ? Math.max(0, Math.floor(raw.attempts)) : 0,
+    nextAttemptAt: Number.isFinite(raw.nextAttemptAt) ? raw.nextAttemptAt : now,
+    lastError: typeof raw.lastError === 'string' && raw.lastError ? raw.lastError : null,
+    createdAt:
+      typeof raw.createdAt === 'string' && raw.createdAt
+        ? raw.createdAt
+        : new Date(now).toISOString(),
+    lastAttemptAt:
+      typeof raw.lastAttemptAt === 'string' && raw.lastAttemptAt ? raw.lastAttemptAt : null
+  }
+
+  if (!hasId || !ticket || !status) {
+    // 形状不可用：要么没 id/ticket（补打也打不出这张票），要么 status 不认识。
+    // 一律降级为失败任务进补打列表，既不自动打印，也不会消失得无声无息。
+    job.nextAttemptAt = null
+    job.lastError = RESTORE_BROKEN_JOB_ERROR
+    return job
+  }
+
+  if (status === 'processing') {
+    // 进打印前已经落盘 processing（见 attemptJob），所以磁盘上的 processing 意味着上次
+    // 进程在打印中途退出了：这张小票可能已经打出去、也可能只打了一半。自动重打会重复出纸，
+    // 因此转成失败任务等人工确认，而不是悄悄再打一遍。
+    job.nextAttemptAt = null
+    job.lastError = RESTORE_INTERRUPTED_JOB_ERROR
+    return job
+  }
+
+  job.status = status
+  if (status === 'pending') {
+    job.nextAttemptAt = Number.isFinite(raw.nextAttemptAt) ? raw.nextAttemptAt : now
+  } else {
+    job.nextAttemptAt = null
+  }
+  return job
+}
+
+/**
+ * 从持久化存储恢复队列（模块加载时调用一次）。
+ *
+ * 按"上一轮进程在干什么"分类处理：
+ * - 'pending'：原样恢复排队，继续自动处理（数值字段缺失的按归一化补齐）；
+ * - 'processing'：上次打印中途进程退出 → 转失败任务等人工确认，**不自动重打**；
+ * - 'failed'：保持失败状态，等待用户手动补打；
+ * - 形状损坏的记录：转失败任务并在 lastError 里说明；连对象都不是的只能丢弃。
  */
 function restoreQueueFromStorage() {
   const stored = PrintQueueManager.getQueue()
   if (!Array.isArray(stored) || stored.length === 0) return
 
   const now = Date.now()
-  queue = stored.map((job) => {
-    if (job.status === 'processing') {
-      return { ...job, status: 'pending', nextAttemptAt: now }
-    }
-    return job
+  const restored = []
+  let droppedCount = 0
+
+  stored.forEach((raw) => {
+    const job = normalizeStoredJob(raw, now)
+    if (job) restored.push(job)
+    else droppedCount += 1
   })
+
+  queue = restored
+
+  if (droppedCount > 0) {
+    console.warn(`[打印队列] 本地缓存的 ${droppedCount} 条记录无法解析，已丢弃`)
+  }
 
   pruneFailedJobs()
   persistQueue()

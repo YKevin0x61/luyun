@@ -174,9 +174,10 @@ async def _password_hash(conn, username: str) -> Optional[str]:
 
 
 async def _verify_dsn_connects(dsn: str) -> None:
-    import asyncpg
+    """用新 DSN 真连一次；走旁路连接入口，连接期超时同样生效（PERF-09）。"""
+    from db_core.backend.pg import connect_ephemeral
 
-    conn = await asyncpg.connect(dsn, timeout=15)
+    conn = await connect_ephemeral(dsn, timeout=15)
     try:
         await conn.fetchval("SELECT 1")
     finally:
@@ -221,10 +222,12 @@ async def reset_database_password(*, actor: str, restart: bool = True) -> dict:
     if not parts.password:
         raise PasswordResetError("password_unknown", "当前 DSN 里没有密码，无法回滚，拒绝自动重置")
 
-    import asyncpg
+    # ALTER USER 是 DDL：连接走旁路入口，statement_timeout(30s) / lock_timeout(5s)
+    # 跟着连接一起生效——角色被别的事务锁住时 5s 就放弃，而不是无限等（PERF-09）。
+    from db_core.backend.pg import connect_ephemeral
 
     new_password = generate_password()
-    conn = await asyncpg.connect(parts.to_dsn(), timeout=15)
+    conn = await connect_ephemeral(parts.to_dsn(), timeout=15)
     try:
         before = await _password_hash(conn, parts.user)
         await _apply_password(conn, parts.user, new_password)

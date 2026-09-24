@@ -7,8 +7,12 @@ uvicorn[standard]==0.24.0
 asyncpg>=0.29,<1
 # Redis：多 worker 时外置 realtime hub / 日志缓冲 / 爬虫计数器要用。
 redis>=5,<9
-pandas>=2.0.0
-openpyxl>=3.1.0
+# pandas / openpyxl / aiohttp / requests 已于 2026-09-23 删除（PERF-14）：全仓 0 直接 import，
+# 也没有动态导入点，实测占 site-packages 约 115 MB（pandas 73M + 它带进来的 numpy 36M +
+# openpyxl 2.8M + aiohttp 2.6M + requests 0.5M；整份 `.venv` 399M）。要导出 Excel（openpyxl）
+# 或做数据分析（pandas，会连带拉回 numpy）再按需加回。
+# 注意：更新作业走 `pip install -r requirements.txt`（不卸载），所以**老机器不会自动瘦身**，
+# 只有新装 / 新建 venv 才省得下这份体积。
 pydantic==2.5.0
 pydantic-settings==2.1.0
 # 0.0.6 命中 CVE-2024-24762：解析 multipart 的 Content-Type 时正则灾难性回溯，
@@ -30,16 +34,18 @@ bcrypt>=4.0.1,<5
 python-dotenv==1.0.0
 aiofiles==23.2.1
 httpx==0.25.2
-# 钉死：playwright 的 lib 与浏览器 build 强绑定（1.63.0 ↔ chromium/headless-shell 1243）。
-# 放开上界会让「系统更新」的 pip sync 单方面升级 lib，而浏览器二进制不会跟着换，
-# 直接导致 scraper 报 Executable doesn't exist。升级 lib 时必须同步执行
+# 钉死：playwright 的 lib 与浏览器 build 强绑定。放开上界会让「系统更新」的 pip sync
+# 单方面升级 lib，而浏览器二进制不会跟着换，直接导致 scraper 报
+# Executable doesn't exist。升级 lib 时必须同步执行
 # `.venv/bin/python -m playwright install chromium`
 # （更新作业与 Docker entrypoint 已内置该步骤，见 services/playwright_env.py）。
+# 期望的浏览器 build 号**不在这里维护**——本文件写死它正是漂移的来源（票 10/PERF-12）：
+# 唯一事实来源是 lib 自带的 playwright/driver/package/browsers.json，装机后可以自查：
+#     .venv/bin/python -m services.playwright_env --check
+# 期望 build 不在缓存里时该命令退出码非 0（更新作业在同步后也会核对并写结构化告警）。
 playwright==1.63.0
 beautifulsoup4==4.12.2
 lxml==4.9.3
-requests==2.31.0
-aiohttp==3.9.1
 psutil==5.9.6
 markdown>=3.5,<4
 python-docx>=1.1,<2

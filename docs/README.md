@@ -4,6 +4,15 @@
 
 除少数白名单文件外，本目录默认**不进公开仓**（规则见根 `.gitignore` 的 `docs/*` 段）——公开仓只带发行契约与部分 ADR。
 
+## 先读这一节：发行包里有什么
+
+发行包按 `git archive HEAD` 打包（见 `docs/release-asset-layout.md`），**只带被 git 跟踪的文件**。所以本目录的文档分两类：
+
+- **发行包内（下面给链接，点得开）**：`RELEASE_AND_DEPLOY.md`、`UPGRADE_TO_0_6_0.md`、`release-asset-layout.md`，以及 `adr/` 里被跟踪的 4 篇（0011 / 0012 / 0013 / 0082）。
+- **仅本机仓库可见（发行包不带，下面只写路径、不给链接）**：`MULTI_STORE_PLAN.md`、`adr/` 里其余 ~86 篇（含 0010 更新作业、0028–0036 备货预测、0084 引入 PG、0089 SQLite 退场、0090 Redis nudge 总线）、`agents/`、`superpowers/`、`archive/`、`kds-intro.html`、`pos/`、`prep/`、`hygiene/`。
+
+被忽略的目录（`pos/`、`prep/`、`hygiene/`、`agents/`、`superpowers/`、`archive/`）在本机是存在的，用路径直接打开即可；这里不给 markdown 链接，是因为发行包里它们不存在——链接在发行包里就是死链。
+
 ## 入口
 
 | 文档 | 内容 |
@@ -11,43 +20,43 @@
 | [RELEASE_AND_DEPLOY.md](./RELEASE_AND_DEPLOY.md) | **发行规范与部署流程**（发版清单、Bootstrap、店内升级/回滚；入口文档） |
 | [UPGRADE_TO_0_6_0.md](./UPGRADE_TO_0_6_0.md) | **升级到 0.6.0 操作方案（历史）**（Docker/systemd、切 PG、回滚、排查；0.6.x 后 SQLite 已退场，只保留迁移路径供参考） |
 | [release-asset-layout.md](./release-asset-layout.md) | GitHub Release 发行包附件契约（`luyun-release-bundle.tar.gz` / `SHA256SUMS` / `install.sh`；旧的分拆前端 tar.gz 已退役） |
-| [MULTI_STORE_PLAN.md](./MULTI_STORE_PLAN.md) | **多店 / 多人 / 三方接入改造方案**（规划中，含性能地基实测与迁移路径） |
-| [adr/](./adr/) | 架构决策记录（编号 0001–0090；数据库后端现状见 [ADR 0089](./adr/0089-retire-sqlite-postgres-only.md)，Redis 只做 nudge 跨进程广播见 [ADR 0090](./adr/0090-redis-nudge-bus.md)）；仓库布局规则见 [ADR 0012](./adr/0012-repo-layout.md) |
-| [agents/](./agents/) | agent 工作流：issue tracker / triage 标签 / domain 文档 |
-| [superpowers/](./superpowers/) | 历史实施计划（`plans/`）与设计稿（`specs/`），按日期命名，只读不改 |
-| [archive/](./archive/) | 一次性报告目录（勿提交真实营业数据；见 [archive/README.md](./archive/README.md)） |
-| [kds-intro.html](./kds-intro.html) | KDS 介绍页（静态 HTML） |
+| `MULTI_STORE_PLAN.md`（仅本机） | **多店 / 多人 / 三方接入改造方案**（规划中，含性能地基实测与迁移路径） |
+| [adr/](./adr/) | 架构决策记录（编号 0001–0090）；发行包只带 0011 / 0012 / 0013 / 0082，其余只在本机——数据库后端现状见 ADR 0089、Redis 只做 nudge 跨进程广播见 ADR 0090；仓库布局规则见 [ADR 0012](./adr/0012-repo-layout.md) |
+| `agents/`（仅本机） | agent 工作流：issue tracker / triage 标签 / domain 文档 |
+| `superpowers/`（仅本机） | 历史实施计划（`plans/`）与设计稿（`specs/`），按日期命名，只读不改 |
+| `archive/`（仅本机） | 一次性报告目录（勿提交真实营业数据；说明见 `archive/README.md`） |
+| `kds-intro.html`（仅本机） | KDS 介绍页（静态 HTML） |
 
-## POS 采集与数据口径（`pos/`）
-
-| 文档 | 内容 |
-|------|------|
-| [pos/POS_SCRAPER.md](./pos/POS_SCRAPER.md) | POS 采集系统运作说明（组合根、登录会话、堂食差分、外卖取消、对账、下游 nudge） |
-| [pos/POS_MITM_RESEARCH.md](./pos/POS_MITM_RESEARCH.md) | 龙管家 2.0 MITM 抓包：登录、实时桌态、逐桌占用/点菜明细 |
-| [pos/CY7MM_API_REFERENCE.md](./pos/CY7MM_API_REFERENCE.md) | cy7mm 路由 / API 名录 / 采集字段参考（附 [pos/cy7mm_routes_apis.json](./pos/cy7mm_routes_apis.json)） |
-| [pos/DATA_AND_SALES.md](./pos/DATA_AND_SALES.md) | 数据采集与销售报表架构说明（含已归档 CLI；采集细节以 POS_SCRAPER 为准） |
-| [pos/DATA_REVENUE.md](./pos/DATA_REVENUE.md) | 订单行营业额 SQL 口径（`config.py` 有注释指向本文） |
-| [pos/SETTLED_BILL_DETAIL_FIELDS.md](./pos/SETTLED_BILL_DETAIL_FIELDS.md) | 已结账单明细字段说明（对应 settled_details_*.json） |
-
-## 备货预测（`prep/`）
+## POS 采集与数据口径（`pos/`，仅本机）
 
 | 文档 | 内容 |
 |------|------|
-| [prep/PREP_PLAN.md](./prep/PREP_PLAN.md) | 备货计划功能设计与实现笔记（决议见 ADR 0028 / 0029） |
-| [prep/PREP_REVENUE_NOWCAST.md](./prep/PREP_REVENUE_NOWCAST.md) | 营业额 nowcast 冠军模型（ADR 0030） |
-| [prep/PREP_NEIGHBOR_BLEND.md](./prep/PREP_NEIGHBOR_BLEND.md) | 日内邻居日融合（ADR 0031） |
-| [prep/PREP_PREOPEN_NEIGHBOR.md](./prep/PREP_PREOPEN_NEIGHBOR.md) | 开店前邻居信号（ADR 0032） |
-| [prep/PREP_ITEM_MIX_NEIGHBOR.md](./prep/PREP_ITEM_MIX_NEIGHBOR.md) | 单品结构邻居信号（ADR 0033） |
-| [prep/PREP_CONSUMPTION_RESIDUAL.md](./prep/PREP_CONSUMPTION_RESIDUAL.md) | 消耗残差（ADR 0034） |
-| [prep/PREP_DISH_COOCCUR_REMAINING.md](./prep/PREP_DISH_COOCCUR_REMAINING.md) | 菜品共现与剩余量（ADR 0035） |
-| [prep/PREP_BASE_WEIGHT_CALIBRATION.md](./prep/PREP_BASE_WEIGHT_CALIBRATION.md) | 基础权重标定（ADR 0036） |
+| `pos/POS_SCRAPER.md` | POS 采集系统运作说明（组合根、登录会话、堂食差分、外卖取消、对账、下游 nudge） |
+| `pos/POS_MITM_RESEARCH.md` | 龙管家 2.0 MITM 抓包：登录、实时桌态、逐桌占用/点菜明细 |
+| `pos/CY7MM_API_REFERENCE.md` | cy7mm 路由 / API 名录 / 采集字段参考（附 `pos/cy7mm_routes_apis.json`） |
+| `pos/DATA_AND_SALES.md` | 数据采集与销售报表架构说明（含已归档 CLI；采集细节以 POS_SCRAPER 为准） |
+| `pos/DATA_REVENUE.md` | 订单行营业额 SQL 口径（`config.py` 有注释指向本文） |
+| `pos/SETTLED_BILL_DETAIL_FIELDS.md` | 已结账单明细字段说明（对应 settled_details_*.json） |
+
+## 备货预测（`prep/`，仅本机）
+
+| 文档 | 内容 |
+|------|------|
+| `prep/PREP_PLAN.md` | 备货计划功能设计与实现笔记（决议见 ADR 0028 / 0029） |
+| `prep/PREP_REVENUE_NOWCAST.md` | 营业额 nowcast 冠军模型（ADR 0030） |
+| `prep/PREP_NEIGHBOR_BLEND.md` | 日内邻居日融合（ADR 0031） |
+| `prep/PREP_PREOPEN_NEIGHBOR.md` | 开店前邻居信号（ADR 0032） |
+| `prep/PREP_ITEM_MIX_NEIGHBOR.md` | 单品结构邻居信号（ADR 0033） |
+| `prep/PREP_CONSUMPTION_RESIDUAL.md` | 消耗残差（ADR 0034） |
+| `prep/PREP_DISH_COOCCUR_REMAINING.md` | 菜品共现与剩余量（ADR 0035） |
+| `prep/PREP_BASE_WEIGHT_CALIBRATION.md` | 基础权重标定（ADR 0036） |
 
 后 7 篇是候选信号的评估笔记，原型产物在 `scripts/prototype_prep_revenue_nowcast/out/`（`report.vN.html` + `results.vN.json`）。这些笔记指向的 `VERDICT.vN.md` 已不存在：7 篇笔记各 1 处，另有 ADR 0030–0035 各 1 处，合计 **13 处既有死链**；该原型目录下也只剩 `out/`，回放工具脚本已删除。
 
-## 卫生检查（`hygiene/`）
+## 卫生检查（`hygiene/`，仅本机）
 
 | 文档 | 内容 |
 |------|------|
-| [hygiene/HYGIENE_UX_RESEARCH.md](./hygiene/HYGIENE_UX_RESEARCH.md) | 员工手机卫生检查：行业交互/任务逻辑（拍照闭环、整改 CAPA、厨房操作约束） |
+| `hygiene/HYGIENE_UX_RESEARCH.md` | 员工手机卫生检查：行业交互/任务逻辑（拍照闭环、整改 CAPA、厨房操作约束） |
 
 日常启动与 API 说明见项目根目录 [README.md](../README.md)。

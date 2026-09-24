@@ -1229,6 +1229,81 @@ async def notify_log_storage_reconnect() -> None:
     await log_storage.reconnect()
 
 
+class RestoreReconnectError(RuntimeError):
+    """整库恢复已经落到库里，但业务连接没能接回来（DATA-01）。
+
+    这是一种**必须被说出来**的终态：库被 ``pg_restore --clean`` 换过了，进程手里的
+    连接却是断的——接口会持续失败，而「请稍后重试」永远不会自己好。调用方据此把
+    响应/作业结果标成「已恢复但连接未接回」，并给出可执行的出路（重启应用）。
+    """
+
+
+class RestoreNotAppliedError(RuntimeError):
+    """整库恢复**没有成功**（``pg_restore`` 退出码非 0），且连接也没能接回来（T2-V1）。
+
+    两种终态的出路完全相反，绝不能共用一句话：:class:`RestoreReconnectError` 说的是
+    「数据已经回来了，重启应用接着用、不需要再恢复」；这一类说的是「数据没回来，
+    重启后必须**重新恢复一次**」。把后者说成前者，运维会照提示跳过重新恢复。
+    """
+
+
+# 恢复/导出的临时 dump 前缀（SEC-08）：进程被 kill 时 finally 跑不到，dump 会留在
+# 系统临时目录里。恢复入口与冷备入口都会先扫一遍，按前缀 + mtime 清掉过期的那些。
+RESTORE_TMP_PREFIX = "luyun-restore-"
+RESTORE_TMP_PREFIXES = (RESTORE_TMP_PREFIX, "luyun-export-")
+# 正在进行的恢复可能写着一份大 dump：只有超过这个年龄的才当作残留。
+RESTORE_TMP_MAX_AGE_SECONDS = 6 * 3600
+
+
+def sweep_stale_restore_dumps(
+    *,
+    max_age_seconds: float = RESTORE_TMP_MAX_AGE_SECONDS,
+    now: Optional[float] = None,
+    tmp_dir: Optional[str] = None,
+) -> List[str]:
+    """清理进程被杀后残留的临时 dump，返回被删掉的路径（SEC-08）。
+
+    判据只有「前缀 + mtime 够老」两条：前缀认得出是我们写的，年龄保证不会误删另一
+    个进程正在写入的 dump。清理本身尽力而为——删不掉只记 warning，绝不打断恢复或
+    冷备。调用时机（都在进程内、都发生在真正需要临时目录之前）：
+
+    - 整库恢复开始前（见 :func:`restore_app_pg_from_bytes`）；
+    - 冷备脚本启动时（``scripts/cold_backup.py``，宿主机定时任务）；
+    - 应用启动期由 ``main.py`` 的 lifespan 调一次（业务循环起来之前，T2-V2）：
+      上一次进程被强杀留下的 dump 由此在下一次启动时清掉。
+    """
+    import time as _time
+
+    root = Path(tmp_dir) if tmp_dir else Path(tempfile.gettempdir())
+    reference = _time.time() if now is None else now
+    removed: List[str] = []
+    if not root.is_dir():
+        return removed
+    for entry in sorted(root.iterdir()):
+        name = entry.name or ""
+        if not name.startswith(RESTORE_TMP_PREFIXES):
+            continue
+        try:
+            age = reference - entry.stat().st_mtime
+        except OSError:
+            continue
+        if age < max_age_seconds:
+            continue
+        try:
+            entry.unlink()
+        except OSError as exc:  # 尽力而为：删不掉不影响本次恢复
+            logger.warning("⚠️ 残留临时 dump 清理失败（%s）: %s", entry, exc)
+            continue
+        removed.append(str(entry))
+    if removed:
+        logger.warning(
+            "🧹 清理了 %d 份残留的临时 dump（多半是上次恢复/导出被强杀留下的）: %s",
+            len(removed),
+            "、".join(removed),
+        )
+    return removed
+
+
 async def restore_app_pg_from_bytes(db, dump_bytes: bytes) -> None:
     """用整库 dump 覆盖当前 PostgreSQL（``pg_restore --clean``）。
 
@@ -1239,19 +1314,48 @@ async def restore_app_pg_from_bytes(db, dump_bytes: bytes) -> None:
     - **再把连接接回来**：恢复失败时后台还要能报错、能重试（连接留着的话其上的
       prepared statement 也已失效）。
 
+    接回来这件事**有返回值，且必须检查**（DATA-01）：``db.connect()`` 失败时进程会
+    停在「连接是断的」，以前那个返回值被丢掉，响应只说「恢复失败」，人看不到
+    「重试也不会好」。失败时按恢复本身成没成分两种终态（T2-V1）：
+
+    - 恢复成功、只是连接接不回来 → :class:`RestoreReconnectError`（数据已经在库里，
+      重启应用即可，不需要再恢复一次）；
+    - ``pg_restore`` 自己失败（退出码非 0）、连接也没接回来 →
+      :class:`RestoreNotAppliedError`（数据没回来，重启后必须**重新恢复一次**）。
+
+    两种终态的出路相反，绝不能让响应或日志把后者说成前者。
+
     整库替换，没有「合并导入」这种粒度：``pg_restore --clean`` 是库级操作。
     """
-    fd, tmp_path = tempfile.mkstemp(suffix=".pgdump", prefix="luyun-restore-")
+    # SEC-08：先把上次被强杀留下的残留 dump 扫掉，再写自己这一份。
+    sweep_stale_restore_dumps()
+    fd, tmp_path = tempfile.mkstemp(suffix=".pgdump", prefix=RESTORE_TMP_PREFIX)
     os.close(fd)
     try:
         with open(tmp_path, "wb") as handle:
             handle.write(dump_bytes)
         await db.close()
         await notify_log_storage_reconnect()
+        restore_error: Optional[BaseException] = None
         try:
             await asyncio.to_thread(restore_pg_dump_sync, tmp_path)
-        finally:
-            await db.connect()
+        except BaseException as exc:  # noqa: BLE001 - 含取消：先记下，重连完再抛
+            restore_error = exc
+        # 无论恢复成败都要把连接接回来；接不回来时要分清「库已经换好了」和
+        # 「pg_restore 根本没成功」——两者的出路相反（T2-V1）。
+        reconnected = await db.connect()
+        if not reconnected:
+            if restore_error is not None:
+                raise RestoreNotAppliedError(
+                    "整库恢复未成功（pg_restore 失败），且数据库连接未能接回："
+                    "本次恢复未生效、备份里的数据没有恢复到位，"
+                    "重启应用后请重新执行一次恢复"
+                ) from restore_error
+            raise RestoreReconnectError(
+                "整库恢复已执行，但数据库连接未能接回：应用此刻连不上库，重试也不会自愈"
+            ) from restore_error
+        if restore_error is not None:
+            raise restore_error
     finally:
         try:
             os.unlink(tmp_path)
@@ -1957,8 +2061,15 @@ def write_cold_backup_status(
     error: Optional[str] = None,
     manifest: Optional[dict] = None,
     backup_dir: Optional[Path] = None,
+    cold_keep: Optional[int] = None,
+    retention_source: Optional[str] = None,
 ) -> dict:
-    """冷备任务每次运行写出的状态文件（时间、结果、归档名、体积、校验结论）。"""
+    """冷备任务每次运行写出的状态文件（时间、结果、归档名、体积、校验结论）。
+
+    ``cold_keep`` / ``retention_source`` 记录**本次**用的是哪个保留份数、这个数字
+    从哪来（``backup_retention.RETENTION_SOURCE_*``）：读取失败退默认值时跳过剪除，
+    状态文件里必须能看出「这次没删，因为值没读到」（PERF-10）。
+    """
     target_dir = backup_dir or get_cold_backup_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     manifest = manifest or {}
@@ -1974,6 +2085,8 @@ def write_cold_backup_status(
         "contents": manifest.get("contents") or [],
         "consistency": manifest.get("consistency"),
         "error": error,
+        "cold_keep": cold_keep,
+        "retention_source": retention_source,
     }
     cold_status_path(target_dir).write_text(
         json.dumps(status, ensure_ascii=False, indent=2),

@@ -155,7 +155,13 @@ class RestaurantScraper:
     async def probe_bs_detail_api(self) -> Dict[str, Any]:
         return await self.session.probe_bs_detail_api()
 
-    async def scrape_table_data(self) -> List[Dict]:
+    async def scrape_table_data(self) -> Optional[List[Dict]]:
+        """餐桌取材（与 `PosSession.scrape_table_data` 的三态契约一致）。
+
+        - ``None``：这一轮没拿到（取材失败）——调用方跳过本轮餐桌路径，不推进任何桌的状态；
+        - ``[]``：取材正常，但当前没有餐桌；
+        - 非空列表：正常的餐桌快照。
+        """
         return await self.session.scrape_table_data()
 
     async def monitor_table_orders(
@@ -192,7 +198,11 @@ class RestaurantScraper:
 
         tables_data = await self.scrape_table_data()
 
-        if tables_data and db:
+        if tables_data is None:
+            # 「取材失败」与「取材正常但没桌」（[]）是两件事（PosSession 的三态契约）：
+            # 失败轮跳过餐桌路径——不落库、不广播、不推进任何桌的状态；外卖路径照常跑。
+            self.logger.warning("⚠️ 餐桌取材失败，本轮跳过，不推进任何桌的状态")
+        elif tables_data and db:
             await db.save_table_data(tables_data)
             self.logger.info("✅ 保存 %s 条餐桌数据", len(tables_data))
             await realtime_hub.broadcast_nudge("tables", {"count": len(tables_data)})
@@ -218,6 +228,9 @@ class RestaurantScraper:
                         "source": "dine_in_cancel",
                     },
                 )
+        elif not tables_data:
+            # []：取材正常，只是当前没有餐桌。不落库、不广播，也不告警。
+            self.logger.info("ℹ️ 取材正常但当前没有餐桌，本轮跳过餐桌路径")
 
         delivery_orders = await self.scrape_delivery_orders(db=db)
         if delivery_orders:

@@ -26,6 +26,9 @@ jobs:
     env:
       LUYUN_TEST_DSN: postgresql://postgres:postgres@localhost:5432/luyun_test
       LUYUN_TEST_ADMIN_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+      # CI 上真 Redis 是硬要求：带这个变量时 tests/test_realtime_redis_bus.py 里
+      # 真 Redis 的用例**不许**被条件跳过（跳过了 Redis 回归就等于没跑，见 TEST-11）。
+      LUYUN_TEST_REQUIRE_REDIS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,9 +38,26 @@ jobs:
         run: pip install -r requirements.txt
       # Redis 是部署必需组件（ADR 0090，realtime nudge 跨进程广播）：应用没配
       # REDIS_URL 启动即失败，Bootstrap 的前置检查也会硬失败，所以 runner 上必须
-      # 有 redis-server/redis-cli。测试本身不连 Redis（DISABLE_BACKGROUND_TASKS=true）。
-      - name: Install redis (required component)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-server
+      # 有 redis-server/redis-cli。**而且必须真起起来**：真 Redis 的集成用例是
+      # 条件跳过（`skipUnless(redis_available(), …)`），apt 装完不启动只会记一条
+      # skip、整体仍然全绿——这正是 2026-09-23 检核 TEST-11 的假绿形态。
+      # 所以这里装完就起服务并当场探活，下面再用一步专盯「有跳过就是失败」。
+      - name: Install and start redis (required component)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq redis-server
+          sudo service redis-server start || redis-server --daemonize yes
+          redis-cli ping | grep -q PONG
+      - name: Real-Redis regression must not be skipped
+        run: |
+          if ! out=$(python3 -m pytest tests/test_realtime_redis_bus.py -q -rs); then
+            echo "$out"
+            exit 1
+          fi
+          echo "$out"
+          if echo "$out" | grep -qE '[0-9]+ skipped'; then
+            echo "::error::tests/test_realtime_redis_bus.py 有用例被跳过：真 Redis 回归在 CI 上退化成假绿（TEST-11 / ADR 0090）"
+            exit 1
+          fi
       - name: Run unit tests
         run: python3 -m pytest tests/ -v
 

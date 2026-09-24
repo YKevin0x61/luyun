@@ -27,6 +27,11 @@ from db_core.backend import pg as pg_backend
 # 部署模板（deploy/env.production.example、deploy/.env.docker.example）里的名字。
 STATEMENT_ENV = "LUYUN_PG_STATEMENT_TIMEOUT_MS"
 LOCK_ENV = "LUYUN_PG_LOCK_TIMEOUT_MS"
+# 事务开着但连接空闲时，服务端掐掉会话（PERF-08：持锁方卡在非 PG 的 await 上时
+# 前两项都不计时，只有这项能兜住）。
+IDLE_ENV = "LUYUN_PG_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS"
+# 应用侧「等串行写锁」的排队上限——不是 PG 的 GUC，见 test_write_lock_queue_limit_*。
+WRITE_LOCK_ENV = "LUYUN_PG_WRITE_LOCK_TIMEOUT_MS"
 
 
 def pg_available() -> bool:
@@ -60,15 +65,17 @@ class PgConnectionTimeoutsTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(os.environ):
             os.environ.pop(STATEMENT_ENV, None)
             os.environ.pop(LOCK_ENV, None)
+            os.environ.pop(IDLE_ENV, None)
             os.environ.update({k: v for k, v in env.items() if v is not None})
             return await pg_backend.connect()
 
     async def test_defaults_are_finite(self):
-        """两个 env 都没设时，超时必须非 0——不能是 PG 默认的无限等待。"""
+        """三个 env 都没设时，超时必须非 0——不能是 PG 默认的无限等待。"""
         conn = await self._connect_with()
         try:
             statement = await self._show(conn, "statement_timeout")
             lock = await self._show(conn, "lock_timeout")
+            idle = await self._show(conn, "idle_in_transaction_session_timeout")
         finally:
             await conn.close()
 
@@ -82,9 +89,15 @@ class PgConnectionTimeoutsTest(unittest.IsolatedAsyncioTestCase):
             "0",
             "默认（生产形态）lock_timeout 是 0：等锁会无限等待",
         )
+        self.assertNotEqual(
+            idle,
+            "0",
+            "默认（生产形态）idle_in_transaction_session_timeout 是 0："
+            "持锁方卡在非 PG 的 await 上时没有任何机制能打断它（PERF-08）",
+        )
 
     async def test_defaults_are_the_documented_safe_values(self):
-        """默认值即安全默认：statement_timeout 30s、lock_timeout 5s。
+        """默认值即安全默认：statement_timeout 30s、lock_timeout 5s、idle-in-tx 1min。
 
         依据：测试库 21 万行 orders（生产 204,297 行）上最重的合法查询
         （180 天区间报表，reports.aggregate_table_operations）实测约 0.6s。
@@ -93,6 +106,9 @@ class PgConnectionTimeoutsTest(unittest.IsolatedAsyncioTestCase):
         try:
             self.assertEqual(await self._show(conn, "statement_timeout"), "30s")
             self.assertEqual(await self._show(conn, "lock_timeout"), "5s")
+            self.assertEqual(
+                await self._show(conn, "idle_in_transaction_session_timeout"), "1min"
+            )
         finally:
             await conn.close()
 
@@ -121,6 +137,53 @@ class PgConnectionTimeoutsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self._show(conn, "statement_timeout"), "30s")
         finally:
             await conn.close()
+
+    async def test_idle_in_transaction_env_overrides_default(self):
+        """idle-in-tx 也可配：env 覆盖按毫秒生效，另一项不受影响。"""
+        conn = await self._connect_with(**{IDLE_ENV: "120000"})
+        try:
+            self.assertEqual(
+                await self._show(conn, "idle_in_transaction_session_timeout"), "2min"
+            )
+            self.assertNotEqual(await self._show(conn, "statement_timeout"), "0")
+        finally:
+            await conn.close()
+
+    async def test_write_lock_queue_limit_is_configurable(self):
+        """等串行写锁的排队上限由应用侧配置（不是 PG GUC），0 = 无限等待。
+
+        ``statement_timeout`` / ``lock_timeout`` 只在语句真正执行到 PG 时计时，
+        排队等锁的阶段完全不受它们约束（PERF-08：持写事务时读请求实测等 6.504s
+        无返回）。所以这条上限只能挂在连接对象上，默认与 lock_timeout 同量级。
+        """
+        with mock.patch.dict(os.environ):
+            os.environ.pop(WRITE_LOCK_ENV, None)
+            conn = await pg_backend.connect()
+            try:
+                self.assertEqual(conn.write_lock_timeout, 5.0)
+            finally:
+                await conn.close()
+
+        with mock.patch.dict(os.environ, {WRITE_LOCK_ENV: "1200"}):
+            conn = await pg_backend.connect()
+            try:
+                self.assertEqual(conn.write_lock_timeout, 1.2)
+            finally:
+                await conn.close()
+
+        with mock.patch.dict(os.environ, {WRITE_LOCK_ENV: "0"}):
+            conn = await pg_backend.connect()
+            try:
+                self.assertIsNone(conn.write_lock_timeout, "0 = 无限等待（逃生门）")
+            finally:
+                await conn.close()
+
+    async def test_unparsable_write_lock_env_fails_loudly(self):
+        """排队上限写成「5s」这类非毫秒值时报错，不静默变成无限等待。"""
+        with mock.patch.dict(os.environ, {WRITE_LOCK_ENV: "5s"}):
+            with self.assertRaises(ValueError) as ctx:
+                pg_backend.write_lock_timeout_seconds()
+        self.assertIn(WRITE_LOCK_ENV, str(ctx.exception))
 
     async def test_conftest_still_sets_the_documented_env_var(self):
         """测试侧的设置点不能被搬走：conftest 仍在设这个变量名。"""
@@ -156,11 +219,15 @@ class AppConnectionTimeoutsTest(unittest.IsolatedAsyncioTestCase):
             raw = db._connection.native_connection()  # 应用唯一连接；只读 SHOW，不碰任何表
             statement = await raw.fetchval("SHOW statement_timeout")
             lock = await raw.fetchval("SHOW lock_timeout")
+            idle = await raw.fetchval("SHOW idle_in_transaction_session_timeout")
         finally:
             await db.close()
 
         self.assertNotEqual(statement, "0", "应用连接没有 statement_timeout")
         self.assertNotEqual(lock, "0", "应用连接没有 lock_timeout")
+        self.assertNotEqual(
+            idle, "0", "应用连接没有 idle_in_transaction_session_timeout"
+        )
 
 
 if __name__ == "__main__":

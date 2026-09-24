@@ -34,6 +34,52 @@ from db_core.backend.dialect import translate
 
 logger = logging.getLogger(__name__)
 
+
+class DatabaseUnavailable(RuntimeError):
+    """数据库暂时不可用（连接未建立 / 已断开 / 正在重连）。
+
+    领域异常：调用方与 HTTP 层只认这个类型，不再各自去读 ``RuntimeError`` 的文案
+    分野。``retryable = True`` 表示「稍后重试可能成功」——``main.py`` 的全局处理器
+    据此回 ``503 + Retry-After``，而不是把恢复窗口里的一次 ``RuntimeError`` 压成
+    500「服务器内部错误」（DATA-02）。
+
+    仍然是 ``RuntimeError`` 的子类：历史调用方里 ``except RuntimeError`` 的兜底
+    语义不变。
+    """
+
+    retryable = True
+    reason = "unavailable"
+
+    def __init__(self, message: str, *, reason: Optional[str] = None):
+        super().__init__(message)
+        if reason is not None:
+            self.reason = reason
+
+
+class DatabaseReconnecting(DatabaseUnavailable):
+    """连接正处在重连窗口（``_raw`` 已摘空、新连接还没建好）。
+
+    也用于「写事务被重连/关闭打断」：那种情况下持有者必须拿到明确异常，而不是
+    在一条新连接上把尾段悄悄提交（CORR-01）。
+    """
+
+    reason = "reconnecting"
+
+    def __init__(
+        self, message: str = "PostgreSQL 连接正在重连，请稍后重试", *, reason: Optional[str] = None
+    ):
+        super().__init__(message, reason=reason or "reconnecting")
+
+
+class DatabaseBusy(DatabaseUnavailable):
+    """等全局串行写锁排队超时：库没坏，只是有人长期持锁，稍后重试即可（PERF-08）。"""
+
+    reason = "write_lock_timeout"
+
+    def __init__(self, message: str = "数据库繁忙，请稍后重试"):
+        super().__init__(message, reason="write_lock_timeout")
+
+
 DEFAULT_DSN = "postgresql://localhost:5432/luyun"
 
 _INSERT_TABLE_RE = re.compile(
@@ -127,11 +173,20 @@ def dsn_from_env() -> str:
 # 连接期超时的 env 覆盖名（写法与 LUYUN_POSTGRES_DSN / LUYUN_REDIS_URL 一致）。
 PG_STATEMENT_TIMEOUT_ENV = "LUYUN_PG_STATEMENT_TIMEOUT_MS"
 PG_LOCK_TIMEOUT_ENV = "LUYUN_PG_LOCK_TIMEOUT_MS"
+# 应用侧「等串行写锁」的上限：**不是** PG 的 GUC，见 write_lock_timeout_seconds()。
+PG_WRITE_LOCK_TIMEOUT_ENV = "LUYUN_PG_WRITE_LOCK_TIMEOUT_MS"
+# 事务开着但连接空闲（持锁方卡在非 PG 的 await 上）时由服务端掐掉这条会话。
+PG_IDLE_IN_TRANSACTION_TIMEOUT_ENV = "LUYUN_PG_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS"
 
 # (PG 会话 GUC, env 覆盖名, config.Settings 字段名)
 _TIMEOUT_SETTINGS = (
     ("statement_timeout", PG_STATEMENT_TIMEOUT_ENV, "PG_STATEMENT_TIMEOUT_MS"),
     ("lock_timeout", PG_LOCK_TIMEOUT_ENV, "PG_LOCK_TIMEOUT_MS"),
+    (
+        "idle_in_transaction_session_timeout",
+        PG_IDLE_IN_TRANSACTION_TIMEOUT_ENV,
+        "PG_IDLE_IN_TRANSACTION_TIMEOUT_MS",
+    ),
 )
 
 
@@ -163,11 +218,24 @@ def _timeout_ms(env_name: str, field: str) -> int:
     return ms
 
 
+def write_lock_timeout_seconds() -> Optional[float]:
+    """等全局串行写锁的**排队**上限（秒）；``None`` = 无限等待（显式设 0）。
+
+    ``statement_timeout`` / ``lock_timeout`` 是服务端 GUC，只在语句真正执行到 PG
+    时计时——排队等 ``_TaskGuard`` 的请求完全不受它们约束（PERF-08：持写事务时
+    读请求实测等 6.504s 无返回，而 ``lock_timeout`` 是 5s）。所以这一项必须由
+    应用自己兜，默认与 ``lock_timeout`` 同量级（5s）。
+    """
+    ms = _timeout_ms(PG_WRITE_LOCK_TIMEOUT_ENV, "PG_WRITE_LOCK_TIMEOUT_MS")
+    return None if ms <= 0 else ms / 1000.0
+
+
 def server_timeouts_from_env() -> Dict[str, str]:
     """连接期超时（asyncpg ``server_settings`` 形态：GUC 名 → 字符串毫秒值）。
 
-    默认值来自 ``config.Settings.PG_STATEMENT_TIMEOUT_MS``（30s）与
-    ``PG_LOCK_TIMEOUT_MS``（5s）——**默认值即安全默认**，不是"测试才有的开关"：
+    默认值来自 ``config.Settings.PG_STATEMENT_TIMEOUT_MS``（30s）、
+    ``PG_LOCK_TIMEOUT_MS``（5s）与 ``PG_IDLE_IN_TRANSACTION_TIMEOUT_MS``（60s）
+    ——**默认值即安全默认**，不是"测试才有的开关"：
     全进程只有一条连接、写事务全程持全局串行锁，没有超时的话一条挂起的写事务会把
     API、``/api/healthz`` 与全部后台循环一起排住且无法打断（见
     ``.scratch/project-review-2026-09-22`` 的 PERF-01）。显式设 0 = 不设该 GUC，
@@ -301,11 +369,11 @@ class PgCursor:
                 raw = self._connection.raw
                 if raw is None:
                     # `_reconnect_raw()` 会把 `_raw` 摘成 None 再重连，中间有个
-                    # await 窗口。撞进这个窗口时报连接状态，而不是让 raw.fetch
-                    # 抛 "NoneType has no attribute 'fetch'"（读起来像代码 bug）。
-                    # 连接已关闭（非 None）仍交给 asyncpg 自己的
-                    # InterfaceError("connection is closed")，那个信息更准。
-                    raise RuntimeError("PostgreSQL 连接正在重连，请稍后重试")
+                    # await 窗口。撞进这个窗口时抛领域异常（DatabaseReconnecting），
+                    # 由 main.py 映射成 503 + 可重试，而不是让 raw.fetch 抛
+                    # "NoneType has no attribute 'fetch'"（读起来像代码 bug）或把
+                    # RuntimeError 压成 500（DATA-02）。
+                    raise self._connection.connection_error()
                 self._connection.bump_query_count()
 
                 # 写操作进入显式事务（对齐 aiosqlite 语义），commit/rollback 由调用方决定
@@ -324,6 +392,12 @@ class PgCursor:
                 status = await self._run(raw.execute, translated, params)
                 self.rowcount = rowcount_from_status(status)
                 return self
+            except asyncpg.InterfaceError as exc:
+                # 连接在使用中被关闭（重连窗口 / 整库恢复 / 服务端断连）：统一成
+                # 领域异常，HTTP 层回 503 + 可重试，而不是 500（DATA-02）。
+                raise self._connection.connection_error(
+                    "PostgreSQL 连接在使用中被关闭，本次操作未执行，请重试"
+                ) from exc
             except asyncpg.PostgresError:
                 # 服务端报错会让事务进入 aborted 并占住串行锁，立刻回滚释放。
                 await self._connection.discard_aborted_transaction()
@@ -377,7 +451,10 @@ class PgCursor:
 
     async def executescript(self, script: str) -> "PgCursor":
         async with self._connection.guard():
-            await self._connection.raw.execute(script)
+            raw = self._connection.raw
+            if raw is None:
+                raise self._connection.connection_error()
+            await raw.execute(script)
         return self
 
     # -- 取数 ------------------------------------------------------------
@@ -440,8 +517,14 @@ class _TaskGuard:
         self._owner: Optional[asyncio.Task] = None
         self._depth = 0
 
-    async def acquire(self) -> bool:
-        """取得锁；返回值表示是否强制接管了「已结束的持有者」留下的锁。"""
+    async def acquire(self, timeout: Optional[float] = None) -> bool:
+        """取得锁；返回值表示是否强制接管了「已结束的持有者」留下的锁。
+
+        ``timeout``（秒）是**排队**上限：超时抛 :class:`DatabaseBusy`，由 HTTP 层
+        映射成「503 + 可重试」。没有它的话，``statement_timeout`` /
+        ``lock_timeout`` 都管不到排队阶段，一条卡住的写单元会把所有请求无限期排住
+        （PERF-08 实测 6.504s 无返回且没有任何报错）。
+        """
         task = asyncio.current_task()
         if self._owner is task:
             self._depth += 1
@@ -453,10 +536,27 @@ class _TaskGuard:
             logger.warning("PG 连接锁的持有者已结束但未释放，强制接管")
             self._reset()
             stole = True
-        await self._lock.acquire()
+        if timeout and timeout > 0 and self._lock.locked():
+            try:
+                await asyncio.wait_for(self._lock.acquire(), timeout)
+            except asyncio.TimeoutError:
+                raise DatabaseBusy(
+                    f"数据库写锁排队超过 {timeout:g}s 未获得，本次操作未执行，请稍后重试"
+                ) from None
+        else:
+            await self._lock.acquire()
         self._owner = task
         self._depth = 1
         return stole
+
+    @property
+    def owner(self) -> Optional[asyncio.Task]:
+        """当前持有锁的任务（没人持有就是 None）。"""
+        return self._owner
+
+    def owner_done(self) -> bool:
+        """持有者是不是已经结束（没持有者也算 True）。"""
+        return self._owner is None or self._owner.done()
 
     def release(self) -> None:
         if self._depth <= 0:
@@ -470,7 +570,12 @@ class _TaskGuard:
         return self._depth
 
     def force_release(self) -> None:
-        """连接关闭时的兜底：未归还的锁不能拖死后续操作。"""
+        """兜底释放：**只允许对确认已结束的持有者**使用（见 ``owner_done``）。
+
+        对还活着的持有者调用它等于抢走别人的写锁，``serialized_write`` 的互斥
+        契约随之失效（CORR-01 的事故放大器）。调用点：``_TaskGuard.acquire``
+        的接管路径与 :meth:`PgConnection.close`（只在持有者已结束时）。
+        """
         if self._depth > 0:
             logger.warning("PG 连接关闭时强制释放未归还的连接锁 (depth=%d)", self._depth)
         self._reset()
@@ -508,6 +613,14 @@ class PgConnection:
         except RuntimeError:  # pragma: no cover - 同步上下文里构造（测试替身）
             self._loop = None
         self._tx = None
+        # 事务是否被重连/关闭窗口打断（CORR-01）：打断后**不**在新连接上继续提交，
+        # 持有者下一条写语句或 commit() 会拿到 DatabaseReconnecting，rollback()
+        # 仍可正常收尾。绝不出现「3 句只落最后 1 句」。
+        self._tx_lost = False
+        # 是否正处在重连窗口（_raw 已摘空、新连接还没建好）
+        self._reconnecting = False
+        # 等串行锁的排队上限（秒）；None = 无限等待。构造期读一次配置。
+        self._write_lock_timeout = write_lock_timeout_seconds()
         # 单连接的串行锁：asyncpg 不允许一条连接并发操作，见 _TaskGuard。
         self._guard = _TaskGuard()
         # 重连锁（惰性创建，因为 asyncio.Lock 需要运行中的事件循环）。
@@ -586,33 +699,70 @@ class PgConnection:
     async def _reconnect_raw(
         self, loop: asyncio.AbstractEventLoop, log_message: str
     ) -> None:
-        """丢掉当前 ``_raw`` 并按 ``_dsn`` 重连；连接对象与缓存保持不变。"""
-        old, self._raw = self._raw, None
-        if self._tx is not None:
-            # 未提交的事务不能静默跨连接：先留线索再丢弃（跨循环/整库恢复本来
-            # 也没有有意义的事务可保）。
-            logger.warning("PG 连接重连时存在未提交事务，已回滚")
-            tx, self._tx = self._tx, None
-            try:
-                await tx.rollback()
-            except Exception:
-                logger.debug("重连前回滚未提交事务失败", exc_info=True)
-        self._tx = None
-        self._tx_guard_held = False
-        self._guard.force_release()
-        if old is not None:
-            try:
-                await old.close()
-            except Exception:
-                # 旧连接绑在已关闭（或别人的）循环上，关不掉是预期内的
-                pass
-        if not self._dsn:
-            raise RuntimeError(
-                "PostgreSQL 连接需要重连，但这条连接没有可用于重连的 DSN"
-            )
-        self._raw = await asyncpg.connect(self._dsn, **self._connect_kwargs)
-        self._loop = loop
+        """封存当前连接、按 ``_dsn`` 重连；**不回滚别人的在飞事务，也不抢别人的写锁**。
+
+        旧实现直接 ``rollback()`` 掉 ``self._tx`` 再 ``_guard.force_release()``：
+        别人的写单元前两句已执行、醒来后把尾段提交到新连接上，调用方看到「成功」而
+        前半段凭空消失（2026-09-23 CORR-01 实测「写 3 句只落 ['third']」），那把
+        写锁被夺走，``serialized_write`` 的互斥契约也跟着失效。
+
+        现在改成「封存」（seal）语义：
+
+        * 窗口内新语句 / 新写单元立刻拿到 :class:`DatabaseReconnecting`，不会落在
+          一条「一半旧一半新」的连接上；
+        * 在飞事务**不**在这里回滚，只标记 ``_tx_lost``：持有者的下一条写语句或
+          ``commit()`` 会拿到明确异常（整个单元失败），``rollback()`` 仍能收尾；
+        * 锁交给持有者自己归还；``force_release()`` 只在确认持有者任务已结束时用
+          （``_TaskGuard.acquire`` 的接管路径、:meth:`close`）。
+        """
+        self._reconnecting = True
+        try:
+            old, self._raw = self._raw, None
+            if self._tx is not None:
+                # 在飞事务属于某个仍然活着的任务：留痕 + 标记，不静默回滚、不夺锁。
+                self._tx_lost = True
+                logger.warning(
+                    "PG 连接进入重连窗口：存在在飞事务（锁深度=%d），已标记为被打断"
+                    "（持有者下一条写语句/commit 会收到明确异常）",
+                    self._guard.depth,
+                )
+            else:
+                logger.warning("PG 连接进入重连窗口：无在飞事务")
+            if old is not None:
+                try:
+                    await old.close()
+                except Exception:
+                    # 旧连接绑在已关闭（或别人的）循环上，关不掉是预期内的
+                    pass
+            if not self._dsn:
+                raise DatabaseUnavailable(
+                    "PostgreSQL 连接需要重连，但这条连接没有可用于重连的 DSN"
+                )
+            self._raw = await asyncpg.connect(self._dsn, **self._connect_kwargs)
+            self._loop = loop
+        finally:
+            self._reconnecting = False
         logger.info(log_message)
+
+    @property
+    def reconnecting(self) -> bool:
+        """是否正处在重连窗口（``_raw`` 已摘空、新连接还没建好）。"""
+        return self._reconnecting
+
+    @property
+    def write_lock_timeout(self) -> Optional[float]:
+        """等串行锁的排队上限（秒）；None = 无限等待。"""
+        return self._write_lock_timeout
+
+    def connection_error(self, message: Optional[str] = None) -> DatabaseUnavailable:
+        """按当前连接状态给出领域异常（重连窗口 → :class:`DatabaseReconnecting`）。
+
+        三种「库不可用」形态（``InterfaceError: connection is closed`` / 「无法开启
+        写事务」/「正在重连」）在 HTTP 层只该有一种出路：503 + 可重试（DATA-02）。
+        """
+        if self._reconnecting:
+            return DatabaseReconnecting(message) if message else DatabaseReconnecting()
+        return DatabaseUnavailable(message or "PostgreSQL 连接不可用，请稍后重试")
 
     async def row_key_column(self, table: str) -> str:
         """该表的「行标识列」——SQLite ``rowid`` 的 PG 等价物。
@@ -673,15 +823,24 @@ class PgConnection:
 
         事务期间**一直持有串行锁**，直到 commit/rollback：否则其他任务的语句会
         落进别人的事务，跟着一起被提交或一起被回滚（静默丢数据）。
+
+        两个失败姿态都是领域异常（HTTP 层映射 503 + 可重试）：
+
+        * 事务已被重连/关闭窗口打断（``_tx_lost``）——绝不能接着在新连接上提交
+          尾段，直接报错让整个写单元失败（CORR-01）；
+        * 连接不可用（``DatabaseUnavailable``）——原先由 ``self._raw.transaction()``
+          抛 ``AttributeError``，读起来像代码 bug，其实是连接状态。
         """
         if self._tx is not None:
+            if self._tx_lost:
+                raise DatabaseReconnecting(
+                    "写事务在 PostgreSQL 重连/关闭窗口内被打断，本次写入未提交，请重试",
+                    reason="transaction_lost",
+                )
             return
         if not self.alive():
-            # 明确报「连接不可用」。原先会由 self._raw.transaction() 抛
-            # AttributeError——_raw 可能正好处在重连的 await 窗口里，那个报错
-            # 读起来像是代码 bug，而实际是连接状态。
-            raise RuntimeError("PostgreSQL 连接不可用，无法开启写事务")
-        await self._guard.acquire()
+            raise self.connection_error("PostgreSQL 连接不可用，无法开启写事务")
+        await self._guard.acquire(self._write_lock_timeout)
         self._tx_guard_held = True
         self._tx = self._raw.transaction()
         try:
@@ -724,6 +883,7 @@ class PgConnection:
             return
         logger.warning("接管陈旧连接锁时发现悬挂事务，已回滚")
         tx, self._tx = self._tx, None
+        self._tx_lost = False
         self._tx_guard_held = False  # 陈旧标记清零，不能把当前任务的锁带走
         try:
             await tx.rollback()
@@ -744,8 +904,12 @@ class PgConnection:
     # -- 并发串行化 ------------------------------------------------------
     @asynccontextmanager
     async def guard(self) -> AsyncIterator[None]:
-        """把一次连接操作放进串行锁内；同一任务内嵌套获取是安全的。"""
-        stole = await self._guard.acquire()
+        """把一次连接操作放进串行锁内；同一任务内嵌套获取是安全的。
+
+        排队有上限（``write_lock_timeout``）：超时抛 :class:`DatabaseBusy`，而不是
+        无限期排住（PERF-08）。
+        """
+        stole = await self._guard.acquire(self._write_lock_timeout)
         if stole:
             await self._discard_stale_transaction()
         try:
@@ -772,16 +936,36 @@ class PgConnection:
                 # 读路径没有 ensure_transaction 兜底，这里明确报连接状态，而不是
                 # 让 self._raw.executemany 抛 AttributeError（_raw 可能正好在重连
                 # 的 await 窗口里）。
-                raise RuntimeError("PostgreSQL 连接不可用，无法执行批量语句")
-            await self._raw.executemany(translated, [tuple(p) for p in seq])
+                raise self.connection_error("PostgreSQL 连接不可用，无法执行批量语句")
+            try:
+                await self._raw.executemany(translated, [tuple(p) for p in seq])
+            except asyncpg.InterfaceError as exc:
+                raise self.connection_error(
+                    "PostgreSQL 连接在使用中被关闭，批量语句未执行，请重试"
+                ) from exc
 
     async def commit(self) -> None:
         await self.ensure_loop()
         if self._tx is None:
             return
+        if self._tx_lost:
+            # 事务已被重连/关闭窗口打断：**不**提交（那会只落尾段），报明确异常，
+            # 并把连接状态收干净（锁还给别人）。
+            self._tx = None
+            self._tx_lost = False
+            self._release_tx_guard()
+            raise DatabaseReconnecting(
+                "写事务在 PostgreSQL 重连/关闭窗口内被打断，本次写入未提交，请重试",
+                reason="transaction_lost",
+            )
         tx, self._tx = self._tx, None
         try:
             await tx.commit()
+        except asyncpg.InterfaceError as exc:
+            # 连接在提交前被关闭（重连/整库恢复/服务端断连）：提交没成功，如实报。
+            raise self.connection_error(
+                "PostgreSQL 连接在提交前被关闭，本次写入未提交，请重试"
+            ) from exc
         finally:
             self._release_tx_guard()
 
@@ -789,21 +973,42 @@ class PgConnection:
         await self.ensure_loop()
         if self._tx is None:
             return
+        lost, self._tx_lost = self._tx_lost, False
         tx, self._tx = self._tx, None
         try:
-            await tx.rollback()
+            if not lost:
+                await tx.rollback()
+        except Exception:
+            logger.debug("回滚失败（连接可能已被重连/关闭打断）", exc_info=True)
         finally:
             self._release_tx_guard()
 
     async def close(self) -> None:
+        """关闭连接：不静默回滚**别人**的在飞写单元，也不抢别人的写锁。
+
+        自己（或已结束的任务）留下的未提交事务照旧回滚丢弃；但如果是**另一个还
+        活着的任务**正持有的写单元，就只标记 ``_tx_lost``：它的下一条写语句或
+        ``commit()`` 会收到明确异常，锁也等它自己归还（CORR-01）。
+        """
         if self._tx is not None:
-            # 未提交的事务不能静默丢弃：回滚并留线索，避免「以为写进去了」。
-            logger.warning("PG 连接关闭时存在未提交事务，已回滚")
-            try:
-                await self.rollback()
-            except Exception:
-                logger.debug("关闭前回滚失败", exc_info=True)
-        self._guard.force_release()
+            owner = self._guard.owner
+            current = asyncio.current_task()
+            if owner is not None and owner is not current and not owner.done():
+                self._tx_lost = True
+                logger.warning(
+                    "PG 连接关闭时存在他人持有的在飞事务：已标记为被打断"
+                    "（不回滚、不夺锁，等持有者自己收尾）"
+                )
+            else:
+                # 未提交的事务不能静默丢弃：回滚并留线索，避免「以为写进去了」。
+                logger.warning("PG 连接关闭时存在未提交事务，已回滚")
+                try:
+                    await self.rollback()
+                except Exception:
+                    logger.debug("关闭前回滚失败", exc_info=True)
+        if self._guard.owner_done():
+            # 只有确认持有者已结束才兜底释放（活着的持有者自己会还）。
+            self._guard.force_release()
         try:
             await self._raw.close()
         except Exception:  # 已关闭 / 连接丢失
@@ -823,13 +1028,22 @@ async def connect(dsn: Optional[str] = None) -> PgConnection:
     """建立一条 PG 连接并包成 aiosqlite 形态。
 
     连接期超时**默认生效**（见 :func:`server_timeouts_from_env`）：
-    ``statement_timeout`` 默认 30s、``lock_timeout`` 默认 5s，配置项是
-    ``settings.PG_STATEMENT_TIMEOUT_MS`` / ``PG_LOCK_TIMEOUT_MS``，环境变量
-    ``LUYUN_PG_STATEMENT_TIMEOUT_MS`` / ``LUYUN_PG_LOCK_TIMEOUT_MS`` 优先（测试侧
+    ``statement_timeout`` 默认 30s、``lock_timeout`` 默认 5s、
+    ``idle_in_transaction_session_timeout`` 默认 60s，配置项是
+    ``settings.PG_STATEMENT_TIMEOUT_MS`` / ``PG_LOCK_TIMEOUT_MS`` /
+    ``PG_IDLE_IN_TRANSACTION_TIMEOUT_MS``，环境变量
+    ``LUYUN_PG_STATEMENT_TIMEOUT_MS`` / ``LUYUN_PG_LOCK_TIMEOUT_MS`` /
+    ``LUYUN_PG_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS`` 优先（测试侧
     ``tests/conftest.py`` 的 ``setdefault(..., "30000")`` 走的就是这条 env 通道，
     语义不变）；显式设 0 = 关闭该项。
 
-    这两项是会话级设置，并且随 ``connect_kwargs`` 一起带到 ``ensure_loop()``
+    ``idle_in_transaction_session_timeout`` 兜的是「持锁方卡在非 PG 的 await 上」
+    ——那时 statement/lock timeout 都不计时，只有服务端的空闲事务超时能掐断它。
+
+    应用侧的排队上限 ``LUYUN_PG_WRITE_LOCK_TIMEOUT_MS`` 不是 GUC，由
+    ``PgConnection`` 构造时读取（见 :func:`write_lock_timeout_seconds`）。
+
+    这几项是会话级设置，并且随 ``connect_kwargs`` 一起带到 ``ensure_loop()``
     的重连上——否则换事件循环重连一次，超时就悄悄没了。
     """
     target = dsn or dsn_from_env()
@@ -839,9 +1053,44 @@ async def connect(dsn: Optional[str] = None) -> PgConnection:
         connect_kwargs["server_settings"] = server_settings
     raw = await asyncpg.connect(target, **connect_kwargs)
     logger.info(
-        "🐘 已连接 PostgreSQL: %s（statement_timeout=%s, lock_timeout=%s）",
+        "🐘 已连接 PostgreSQL: %s（statement_timeout=%s, lock_timeout=%s, "
+        "idle_in_transaction_session_timeout=%s）",
         target.rsplit("@", 1)[-1],
         server_settings.get("statement_timeout", "0"),
         server_settings.get("lock_timeout", "0"),
+        server_settings.get("idle_in_transaction_session_timeout", "0"),
     )
     return PgConnection(raw, dsn=target, connect_kwargs=connect_kwargs)
+
+
+async def connect_ephemeral(
+    dsn: Optional[str] = None, timeout: float = 15.0
+) -> "asyncpg.Connection":
+    """旁路连接的统一入口：不入 :class:`PgConnection`，但**同样带连接期超时**。
+
+    业务连接走 :func:`connect`（要能重连、能绑事件循环）。这里服务的是「一条语句
+    做完就关」的调用方：凭据重置的 ``ALTER USER``、新 DSN 的 ``SELECT 1`` 验证、
+    冷备脚本读 ``app_settings`` 的保留配置。它们原先各自 ``asyncpg.connect()``，
+    于是 ``statement_timeout`` / ``lock_timeout`` 全是 0（PERF-09）：一条被锁住的
+    DDL 或一次读配置能一直等下去，而业务连接上的同一件事是 30s / 5s 就放弃。
+
+    ``server_settings`` 与 :func:`connect` 共用 :func:`server_timeouts_from_env`
+    （``LUYUN_PG_STATEMENT_TIMEOUT_MS`` / ``LUYUN_PG_LOCK_TIMEOUT_MS`` 优先于
+    ``settings.PG_*_TIMEOUT_MS``，显式设 0 = 关闭该项），两边的超时不会各走各的。
+    ``timeout`` 是连接建立超时（秒），解析/认证卡住时由它兜底。
+    """
+    target = dsn or dsn_from_env()
+    connect_kwargs: dict = {"timeout": timeout}
+    server_settings = server_timeouts_from_env()
+    if server_settings:
+        connect_kwargs["server_settings"] = server_settings
+    logger.info(
+        "🐘 已连接 PostgreSQL（旁路）: %s（timeout=%ss, statement_timeout=%s, "
+        "lock_timeout=%s, idle_in_transaction_session_timeout=%s）",
+        target.rsplit("@", 1)[-1],
+        timeout,
+        server_settings.get("statement_timeout", "0"),
+        server_settings.get("lock_timeout", "0"),
+        server_settings.get("idle_in_transaction_session_timeout", "0"),
+    )
+    return await asyncpg.connect(target, **connect_kwargs)

@@ -11,11 +11,22 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 RETENTION_SETTINGS_KEY = "backup_retention"
+
+# 同步读取的来源（PERF-10）：冷备脚本只有分出「读到的配置」和「读取失败退回默认」，
+# 才能决定要不要剪除超额冷备——读取失败时拿默认值 14 去删备份，等于用一个没人选过
+# 的数字决定删不删别人的归档。
+RETENTION_SOURCE_CONFIGURED = "configured"      # 库里读到且校验通过
+RETENTION_SOURCE_DEFAULT = "default"            # 库里没有这个键：未配置，用默认值
+RETENTION_SOURCE_FALLBACK = "default-fallback"  # 连不上库 / 值坏了：默认值兜底
+
+# 旁路连接的建立超时与整体读取上限（PERF-09）：冷备脚本无事件循环，靠这两层
+# 把「库不响应」变成一次可记录的失败，而不是永久挂住定时任务。
+RETENTION_READ_TIMEOUT_SECONDS = 15.0
 
 SNAPSHOT_KEEP_DEFAULT = 5
 SNAPSHOT_KEEP_MIN = 1
@@ -46,6 +57,25 @@ class RetentionConfig:
 
 _DEFAULT = RetentionConfig()
 _cache: RetentionConfig = _DEFAULT
+
+
+@dataclass(frozen=True)
+class RetentionLoad:
+    """一次同步读取的结果：配置 + 它是从哪来的。
+
+    ``source`` 取 :data:`RETENTION_SOURCE_CONFIGURED` /
+    :data:`RETENTION_SOURCE_DEFAULT` / :data:`RETENTION_SOURCE_FALLBACK` 之一；
+    ``error`` 只在兜底时有值，用来写进冷备状态文件与告警。
+    """
+
+    config: RetentionConfig
+    source: str
+    error: Optional[str] = None
+
+    @property
+    def is_fallback(self) -> bool:
+        """这份值是不是「读取失败后退回默认」（退默认就不该据它删数据）。"""
+        return self.source == RETENTION_SOURCE_FALLBACK
 
 
 def _coerce(value: Any, field: str, lo: int, hi: int) -> int:
@@ -118,22 +148,24 @@ async def save_retention_config(db, config: RetentionConfig) -> RetentionConfig:
     return config
 
 
-def load_from_pg_sync(dsn: Optional[str] = None) -> RetentionConfig:
-    """同步读取保留配置（冷备脚本等无事件循环的调用方使用）。
+def load_from_pg_sync_detailed(dsn: Optional[str] = None) -> RetentionLoad:
+    """同步读取保留配置，并保留「这份值是哪来的」。
 
-    只读；连不上库、读不到或校验失败时退回默认值，不影响冷备本身。
+    只读。读失败**不抛**：冷备本身照跑（连不上保留配置不是冷备的致命错误），但
+    调用方要能从 ``source`` 看出这是兜底默认值，从而跳过会删数据的清理。读取走
+    ``db_core.backend.pg.connect_ephemeral``：同样的 ``statement_timeout`` /
+    ``lock_timeout``，再加连接超时与 :func:`asyncio.wait_for` 两层上限（PERF-09）。
+
     SQLite 退场前这里读的是 ``app.db`` 的 ``app_settings``（ADR 0089），现在直接
     连 PostgreSQL 读同一张表。
     """
     import asyncio
     import json
 
+    from db_core.backend.pg import connect_ephemeral
+
     async def _read() -> Optional[str]:
-        import asyncpg
-
-        from db_core.backend.pg import dsn_from_env
-
-        conn = await asyncpg.connect(dsn or dsn_from_env())
+        conn = await connect_ephemeral(dsn, timeout=RETENTION_READ_TIMEOUT_SECONDS)
         try:
             return await conn.fetchval(
                 "SELECT value FROM app_settings WHERE key = $1",
@@ -143,17 +175,38 @@ def load_from_pg_sync(dsn: Optional[str] = None) -> RetentionConfig:
             await conn.close()
 
     try:
-        raw = asyncio.run(_read())
-    except Exception as exc:  # pragma: no cover - 连不上库不是冷备的致命错误
-        logger.warning("⚠️ 冷备读取保留配置失败（%s），回退默认值", exc)
-        return _DEFAULT
+        raw = asyncio.run(
+            asyncio.wait_for(_read(), timeout=RETENTION_READ_TIMEOUT_SECONDS)
+        )
+    except Exception as exc:  # noqa: BLE001 - 连不上库不是冷备的致命错误
+        logger.warning(
+            "⚠️ 冷备读取保留配置失败（%s），回退默认值 %s 且本次不剪除冷备",
+            exc,
+            _DEFAULT.cold_keep,
+        )
+        return RetentionLoad(_DEFAULT, RETENTION_SOURCE_FALLBACK, str(exc))
     if not raw:
-        return _DEFAULT
+        return RetentionLoad(_DEFAULT, RETENTION_SOURCE_DEFAULT)
     try:
-        return validate_retention(json.loads(raw))
-    except (ValueError, TypeError):
-        logger.warning("⚠️ 冷备读取保留配置失败，回退默认值")
-        return _DEFAULT
+        return RetentionLoad(
+            validate_retention(json.loads(raw)), RETENTION_SOURCE_CONFIGURED
+        )
+    except (ValueError, TypeError) as exc:
+        logger.warning(
+            "⚠️ 冷备保留配置不可用（%s），回退默认值 %s 且本次不剪除冷备",
+            exc,
+            _DEFAULT.cold_keep,
+        )
+        return RetentionLoad(_DEFAULT, RETENTION_SOURCE_FALLBACK, str(exc))
+
+
+def load_from_pg_sync(dsn: Optional[str] = None) -> RetentionConfig:
+    """同步读取保留配置（冷备脚本等无事件循环的调用方使用）。
+
+    只读；连不上库、读不到或校验失败时退回默认值，不影响冷备本身。需要区分
+    「读到的值」与「兜底默认值」的调用方用 :func:`load_from_pg_sync_detailed`。
+    """
+    return load_from_pg_sync_detailed(dsn).config
 
 
 def limits() -> Dict[str, int]:

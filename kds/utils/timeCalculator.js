@@ -4,7 +4,7 @@
  */
 
 import { TIME_THRESHOLDS } from './constants.js'
-import { chinaDayRange, isChinaToday } from './businessDay.js'
+import { CST_OFFSET_MS, chinaDayRange, isChinaToday } from './businessDay.js'
 
 export class TimeCalculator {
   /**
@@ -181,13 +181,17 @@ export class TimeCalculator {
    */
   static formatTime(time, format = 'HH:mm:ss') {
     const date = new Date(time)
-    
-    const year = date.getFullYear()
-    const month = String(date.getMonth() + 1).padStart(2, '0')
-    const day = String(date.getDate()).padStart(2, '0')
-    const hours = String(date.getHours()).padStart(2, '0')
-    const minutes = String(date.getMinutes()).padStart(2, '0')
-    const seconds = String(date.getSeconds()).padStart(2, '0')
+    // 具名格式一律按东八区锚点渲染：先把时刻平移到东八区，再取 UTC 字段，结果与设备时区无关。
+    // KDS 设备时区不可信（Android 盒子出厂 UTC），旧实现取设备本地字段会少 8 小时，
+    // 00:00–08:00 还会整段显示成昨天。锚点与 businessDay.js / 后端 CHINA_TZ 同一套。
+    const chinaDate = new Date(date.getTime() + CST_OFFSET_MS)
+
+    const year = chinaDate.getUTCFullYear()
+    const month = String(chinaDate.getUTCMonth() + 1).padStart(2, '0')
+    const day = String(chinaDate.getUTCDate()).padStart(2, '0')
+    const hours = String(chinaDate.getUTCHours()).padStart(2, '0')
+    const minutes = String(chinaDate.getUTCMinutes()).padStart(2, '0')
+    const seconds = String(chinaDate.getUTCSeconds()).padStart(2, '0')
 
     switch (format) {
       case 'HH:mm:ss':
@@ -201,6 +205,7 @@ export class TimeCalculator {
       case 'MM-DD HH:mm':
         return `${month}-${day} ${hours}:${minutes}`
       default:
+        // 未识别的格式保留旧的设备本地呈现（当前无调用方），不走东八区锚点
         return date.toLocaleString('zh-CN')
     }
   }

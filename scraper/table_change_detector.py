@@ -51,7 +51,13 @@ class TableChangeDetector:
 
             # 获取当前餐桌状态
             if current_tables_data is None:
-                current_tables_data = await self._session.scrape_table_data()
+                fetched_tables_data = await self._session.scrape_table_data()
+                if fetched_tables_data is None:
+                    # 餐桌列表取材失败（CORR-06）：与「取材成功但没有餐桌」必须区分，
+                    # 否则一轮网络抖动就会被读成"所有桌都清台了"。
+                    self.logger.warning("⚠️  餐桌列表取材失败，本轮跳过（不推进任何桌的状态）")
+                    return []
+                current_tables_data = fetched_tables_data
             if not current_tables_data:
                 self.logger.info("ℹ️  当前没有餐桌数据")
                 return []
@@ -95,12 +101,24 @@ class TableChangeDetector:
 
             # 获取变化餐桌的详情
             all_orders = []
+            # failed_tables 只装「没拿到明细」的桌（pointId 缺失 / 明细接口 None / 抛异常）。
+            # 金额为 0 的「无消费桌」不算取材失败，见 _get_orders_for_changed_tables。
             failed_tables = set()
             if changed_tables:
                 self.logger.info(f"🔍 检测到 {len(changed_tables)} 个餐桌有变化")
 
-                # 获取变化餐桌的订单详情：失败的桌单独收口，绝不与“这桌没菜”混同
-                new_orders, failed_tables = await self._get_orders_for_changed_tables(changed_tables)
+                # 获取变化餐桌的订单详情：取材失败的桌单独收口，绝不与“这桌没菜”混同
+                new_orders, failed_tables, no_consumption_tables = (
+                    await self._get_orders_for_changed_tables(changed_tables)
+                )
+
+                if no_consumption_tables:
+                    # 无消费桌不是取材失败：状态照常推进，退菜与否由下面的金额佐证决定。
+                    self.logger.info(
+                        "ℹ️  %s 张无消费桌（金额=0），本轮按“没有明细”复核、状态照常推进: %s",
+                        len(no_consumption_tables),
+                        "、".join(sorted(no_consumption_tables)),
+                    )
 
                 # 处理每个变化的餐桌
                 for table in changed_tables:
@@ -112,7 +130,8 @@ class TableChangeDetector:
                         # 也不能推进金额/明细快照，否则当天不再复核。
                         continue
 
-                    # 获取当前餐桌的菜品列表（取材已成功，空列表就是“这桌真的没有菜”）
+                    # 当前餐桌的菜品列表：取材成功时，空列表就是“这桌真的没有菜”
+                    # （无消费桌不查明细，这里的空列表同样表示"当前没有菜"）。
                     current_table_orders = [
                         order for order in new_orders
                         if order.get('table_number') == table_number
@@ -160,7 +179,8 @@ class TableChangeDetector:
                 current_time = datetime.now(CHINA_TZ).strftime("%H:%M:%S")
                 self.logger.info(f"✅ [{current_time}] 餐桌状态无变化")
 
-            # 更新餐桌状态：取材失败的桌保留旧金额（新桌则继续缺席），下一轮重新取材
+            # 更新餐桌状态：取材失败的桌保留旧金额（新桌则继续缺席），下一轮重新取材。
+            # 无消费桌不在 failed_tables 里，它们的金额照常推进到 0（票 05）。
             next_tables_state = dict(current_tables_state)
             for table_number in failed_tables:
                 if table_number in self._state.previous_tables_state:
@@ -179,21 +199,31 @@ class TableChangeDetector:
             return []
 
     async def _get_orders_for_changed_tables(self, changed_tables: List[Dict]) -> tuple:
-        """获取变化餐桌的点菜详情，返回 (订单行, 取材失败的桌号集合)。
+        """获取变化餐桌的点菜详情，返回 (订单行, 取材失败的桌号集合, 无消费桌的桌号集合)。
 
-        取材失败（金额不可判断、pointId 缺失、明细接口返回 None、抛异常）必须与
-        「这桌真的没有菜」（取材成功但返回空列表）区分开：调用方对 failed_tables
-        跳过差分、且不推进这些桌的状态，否则单轮取材失败就会被读成“菜品全被退了”。
+        两类「没有明细」必须分开（CORR-06 / CORR-05）：
+        - ``failed_tables``：**取材失败**——pointId 缺失、明细接口返回 None、抛异常。
+          调用方跳过这些桌的差分、且不推进其状态，否则单轮取材失败就会被读成
+          "菜品全被退了"。
+        - ``no_consumption_tables``：**无消费桌**——餐桌列表给的金额是 0（清台后的
+          过渡态，也包含一直没开台的桌）。这不是取材失败：没有金额就没有明细可对，
+          所以不查明细，但状态照常推进到 0；要不要退菜由调用方按「金额确实变小 +
+          连续 ``DINE_IN_CANCEL_MISS_THRESHOLD`` 轮缺席」佐证。
+          ``0c94084`` 曾把金额 <= 0 并进 failed_tables：这些桌的金额永远停在旧值，
+          每轮都被判"有变化"，于是每轮假告警、状态永不推进，该桌后续菜品变化
+          （复用桌号点的新菜）永远检不出。
         """
         all_orders = []
         failed_tables = set()
+        no_consumption_tables = set()
 
         for table in changed_tables:
             table_number = table['table_number']
 
-            # 只查询有金额的餐桌；没有金额就没有明细可对，不能据此退菜
-            if table['amount'] <= 0:
-                failed_tables.add(table_number)
+            # 无消费桌（金额为 0）：不查明细，也不计入取材失败。
+            # 金额为负是异常值（不是"没消费"），照常取材，金额仍作退菜佐证。
+            if table['amount'] == 0:
+                no_consumption_tables.add(table_number)
                 continue
 
             # pointId 优先取 getbusypointdata 的返回值；仅在缺失时才回退到 table_mapping 推导，
@@ -218,7 +248,7 @@ class TableChangeDetector:
 
             all_orders.extend(table_orders)
 
-        return all_orders, failed_tables
+        return all_orders, failed_tables, no_consumption_tables
 
     async def _detect_dish_changes(
         self,

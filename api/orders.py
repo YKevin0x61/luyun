@@ -36,7 +36,11 @@ from services.floor_console import (
     rush_portions as floor_rush_portions,
 )
 from services.kitchen_work import annotate_kitchen_work
-from services.urgency_policy import urgent_cutoff
+# DOC-07（ticket 18）：策略函数的唯一实现在 db_core，services.urgency_policy 只剩 re-export。
+from db_core.urgency_policy import urgent_cutoff
+# R-T3-03（票 21）：档口统计/速率的默认窗口 = 当前营业日 [06:00, 次日 06:00)；calendar_day_range
+# 只给**刻意**保留日历日口径的非档口路径（订单列表/搜索/楼面控制台）用。
+from db_core.business_day import business_day_window, calendar_day_range
 from api.security import verify_admin_token
 
 logger = logging.getLogger(__name__)
@@ -100,10 +104,10 @@ async def get_orders(
         parsed_start_time = None
         parsed_end_time = None
 
-        # 默认查询当天数据
+        # 默认查询当天数据（日历日；订单列表不在票 21 的档口口径内）
         if not start_time and not end_time:
             today_beijing = datetime.now(CHINA_TZ)
-            start_of_day_beijing = today_beijing.replace(hour=0, minute=0, second=0, microsecond=0)
+            start_of_day_beijing = calendar_day_range(today_beijing)[0]
             end_of_day_beijing = today_beijing.replace(hour=23, minute=59, second=59, microsecond=999000)
             parsed_start_time = start_of_day_beijing
             parsed_end_time = end_of_day_beijing
@@ -179,7 +183,8 @@ async def get_table_orders(
         parsed_start, parsed_end = None, None
         if not start_time and not end_time:
             today = datetime.now(CHINA_TZ)
-            parsed_start = today.replace(hour=0, minute=0, second=0, microsecond=0)
+            # 餐桌订单列表仍是日历日（非档口路径，票 21 未改口径）
+            parsed_start = calendar_day_range(today)[0]
             parsed_end = today.replace(hour=23, minute=59, second=59, microsecond=999000)
         if start_time:
             parsed_start = ensure_beijing_datetime(start_time)
@@ -200,9 +205,10 @@ async def get_table_orders(
 
 @router.get("/stations-today-stats")
 async def get_stations_today_stats(db: DatabaseManager = Depends(get_db)):
-    """获取今日各档口订单数量统计"""
+    """获取今日各档口订单数量统计（按营业日 06:00 起，R-T3-03 / 票 21）"""
     try:
-        today_start = datetime.now(CHINA_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+        # 档口路径走营业日：凌晨 00:00–06:00 归前一个营业日，与档口面板/报表同一把尺子。
+        today_start = business_day_window(datetime.now(CHINA_TZ))[0]
         stats = await db.orders.aggregate_station_counts(today_start)
         return {"success": True, "date": today_start.strftime("%Y-%m-%d"), "stats": stats}
     except Exception as e:
@@ -212,10 +218,10 @@ async def get_stations_today_stats(db: DatabaseManager = Depends(get_db)):
 
 @router.get("/station-speed")
 async def get_station_speed(
-    date: Optional[str] = Query(None, description="查询日期，格式 YYYY-MM-DD，默认今天"),
+    date: Optional[str] = Query(None, description="查询日期，格式 YYYY-MM-DD，默认当前营业日（06:00 起）"),
     db: DatabaseManager = Depends(get_db)
 ):
-    """获取档口进单速率（按时段统计，支持多日对比）"""
+    """获取档口进单速率（按时段统计，支持多日对比；默认当前营业日，06:00 起）"""
     try:
         now = datetime.now(CHINA_TZ)
 
@@ -226,7 +232,8 @@ async def get_station_speed(
             except ValueError:
                 raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
         else:
-            target = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            # 默认目标 = 当前营业日起点（06:00 前算前一天）：与档口统计同口径。
+            target = business_day_window(now)[0]
 
         result = await db.orders.aggregate_station_speed(target)
         return {"success": True, **result}
@@ -241,11 +248,11 @@ async def get_station_speed(
 @router.get("/station/{station_id}/stats")
 async def get_station_order_stats(
     station_id: str,
-    start_time: Optional[str] = Query(None, description="开始时间，默认今日 00:00"),
-    end_time: Optional[str] = Query(None, description="结束时间，默认今日 23:59"),
+    start_time: Optional[str] = Query(None, description="开始时间，默认当前营业日 06:00"),
+    end_time: Optional[str] = Query(None, description="结束时间，默认次日 06:00（右端开区间）"),
     db: DatabaseManager = Depends(get_db)
 ):
-    """获取档口统计（默认今日）"""
+    """获取档口统计（默认当前营业日 06:00–次日 06:00，R-T3-03 / 票 21）"""
     try:
         parsed_start, parsed_end = None, None
         if start_time:
@@ -266,6 +273,8 @@ async def get_urgent_orders(
     """获取紧急订单（今日、等待超过 urgent 阈值）"""
     try:
         today = datetime.now(CHINA_TZ)
+        # 票 21 备注：本端点与 urgent_cutoff 耦合，本轮**刻意**保留日历日窗口（已记
+        # issues/18-low-backlog.md）；下面这行是校验脚本里唯一允许保留的字面量。
         start = today.replace(hour=0, minute=0, second=0, microsecond=0)
         end = today.replace(hour=23, minute=59, second=59, microsecond=999000)
         orders = await db.orders.get_orders(
@@ -334,9 +343,9 @@ async def get_orders_paginated(
                 logger.warning(f"时间解析失败: {e}")
                 raise HTTPException(status_code=400, detail=f"无效的时间参数: {e}")
         else:
-            # 默认查询当天
+            # 默认查询当天（日历日；分页订单列表不在票 21 的档口口径内）
             today_beijing = datetime.now(CHINA_TZ)
-            order_time_start = today_beijing.replace(hour=0, minute=0, second=0, microsecond=0)
+            order_time_start = calendar_day_range(today_beijing)[0]
             order_time_end = today_beijing.replace(hour=23, minute=59, second=59, microsecond=999000)
 
         start_ts = time.time()
@@ -415,7 +424,8 @@ async def search_orders(
         # 日期范围
         try:
             start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            start_beijing = start_dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=CHINA_TZ)
+            # 日期范围搜索仍是日历日（非档口路径，票 21 未改口径）
+            start_beijing = calendar_day_range(start_dt)[0]
             start_utc = start_beijing.astimezone(timezone.utc)
 
             end_dt = datetime.strptime(end_date, "%Y-%m-%d") if end_date else start_dt
@@ -624,7 +634,8 @@ async def get_floor_console(
     parsed_end = None
     if not start_time and not end_time:
         today = datetime.now(CHINA_TZ)
-        parsed_start = today.replace(hour=0, minute=0, second=0, microsecond=0)
+        # 楼面控制台仍是日历日（非档口路径，票 21 未改口径）
+        parsed_start = calendar_day_range(today)[0]
         parsed_end = today.replace(hour=23, minute=59, second=59, microsecond=999000)
     if start_time:
         parsed_start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))

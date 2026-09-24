@@ -92,12 +92,27 @@ class AppReadinessAdapter:
             except Exception as exc:
                 details.append(f"关键表不可读：{exc}")
 
-        # 数据层完成迁移（connect 成功）+ 本进程已完成启动，二者缺一不可
+        # 迁移是否完成 = 「待应用迁移数 == 0」（PERF-11）。旧口径是「连接已建立」，
+        # 于是带 schema 变更的升级、还没点「应用迁移」的门店照样报 ready。
+        pending_migrations: Optional[int] = None
+        if db is not None:
+            try:
+                pending_migrations = await db.pending_migration_count()
+            except Exception as exc:
+                details.append(f"迁移状态不可判定：{exc}")
+
         migrations_complete = bool(
-            db is not None and db.migrations_complete() and self._tracker.migrations_complete
+            db is not None
+            and pending_migrations == 0
+            and self._tracker.migrations_complete
         )
         if not migrations_complete:
-            details.append("数据库迁移未完成")
+            if pending_migrations:
+                # 明确给出条数，但不阻断更新（保持 api/release_update.py 的决策：
+                # 迁移不进 preflight）。
+                details.append(f"有 {pending_migrations} 条数据库迁移待应用")
+            else:
+                details.append("数据库迁移未完成")
 
         tracker_notes = list(self._tracker.notes)
         details.extend(tracker_notes)

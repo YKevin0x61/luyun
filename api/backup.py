@@ -11,9 +11,10 @@ import re
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -59,6 +60,60 @@ router = APIRouter(
 
 _SNAPSHOT_TS_RE = re.compile(r"^\d{8}_\d{6}$")
 
+# 备份导入是唯一「整包进内存」的上传：反代（deploy/Caddyfile 的 @backup_import、
+# deploy/nginx.conf 的 client_max_body_size 512m）只限制传输体积，包读完还要解密 +
+# 解析，所以应用侧再低一档，超限在读取前就 413，避免几百 MB 的载荷先把进程内存
+# 吃满（SEC-07）。
+MAX_BACKUP_UPLOAD_BYTES = 256 * 1024 * 1024
+UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+class _RestoreGuard:
+    """恢复/导入互斥：同一时刻只允许一条恢复链路在跑（CORR-07）。
+
+    两条入口（快照回滚、备份导入）都会走 `notify_log_storage_reconnect()` +
+    `pg_restore --clean`，并发跑会互相踩：一条的 DROP 可能落在另一条刚恢复好的库上，
+    而且两边各自持有一份「恢复前快照」。这里用进程内标志把第二个请求挡在 409，
+    不执行任何 pg_restore（多 worker 部署需要外部锁，见工单 CORR-07）。
+    """
+
+    def __init__(self) -> None:
+        self._entry: Optional[str] = None
+
+    @property
+    def in_progress(self) -> bool:
+        return self._entry is not None
+
+    @property
+    def holder(self) -> Optional[str]:
+        return self._entry
+
+    @contextmanager
+    def hold(self, entry: str) -> Iterator[None]:
+        current = self._entry
+        if current is not None:
+            logger.warning(
+                "⚠️ [审计] 拒绝并发恢复请求（%s）：已有 %s 在执行", entry, current
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=f"已有恢复任务在执行（{current}），本次请求未执行；请等它结束后再试",
+            )
+        self._entry = entry
+        try:
+            yield
+        finally:
+            self._entry = None
+
+
+_restore_guard = _RestoreGuard()
+
+
+@contextmanager
+def _restore_exclusive(entry: str) -> Iterator[None]:
+    with _restore_guard.hold(entry):
+        yield
+
 PHOTO_KINDS = (
     (PHOTO_STANDARD, "standard_photos", "标准图"),
     (PHOTO_OTHER, "other_photos", "其它照片"),
@@ -95,7 +150,33 @@ def _credentials_preview(credentials: dict) -> dict:
 
 
 async def _read_upload(file: UploadFile) -> bytes:
-    content = await file.read()
+    """读取备份包：先按上限判定，再分块累计，超限 413（SEC-07）。
+
+    绝不 `await file.read()` 整份读——300 MB 的载荷会在「不是有效的备份文件」之前
+    先把内存吃满。
+    """
+    limit = MAX_BACKUP_UPLOAD_BYTES
+    limit_mb = limit // (1024 * 1024)
+    declared = getattr(file, "size", None)
+    if isinstance(declared, int) and declared > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"备份文件不能超过 {limit_mb} MB（本次 {declared} 字节）",
+        )
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"备份文件不能超过 {limit_mb} MB",
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
     if not content:
         raise HTTPException(status_code=400, detail="文件为空")
     return content
@@ -711,6 +792,30 @@ async def _apply_parsed_backup(
         try:
             await backup_service.restore_app_pg_from_bytes(db, app_pg_bytes)
             applied[CONTENT_APP_PG] = True
+        except backup_service.RestoreNotAppliedError as exc:
+            # T2-V1：``pg_restore`` 自己就失败了（退出码非 0，什么都没改写），重连
+            # 也没成功。这与「已恢复但接不回」的出路正好相反：库还是恢复前的样子
+            # （或只被部分改写），运维必须重新恢复一次，绝不能按「已恢复」跳过。
+            logger.error("应用 PostgreSQL 整库备份恢复失败，且数据库连接未能接回: %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "整库恢复未成功（pg_restore 失败），且数据库连接未能接回（应用此刻不可用）。"
+                    "本次恢复未生效、备份里的数据没有恢复到位（库可能仍是恢复前的样子，"
+                    "也可能已被部分改写）；请重启应用后重新执行一次恢复，不要跳过重新恢复。"
+                ),
+            ) from exc
+        except backup_service.RestoreReconnectError as exc:
+            # DATA-01：库已经恢复，但业务连接没接回来。这条终态不会自愈，
+            # 不能按「请稍后重试」打发——重试也连不上，只能重启应用。
+            logger.error("应用 PostgreSQL 整库备份已恢复，但重连失败: %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "整库数据已恢复，但数据库连接未能接回（应用此刻不可用）。"
+                    "请重启应用后重试；重试前不需要再恢复一次。"
+                ),
+            ) from exc
         except Exception as exc:
             logger.error("应用 PostgreSQL 整库备份失败: %s", exc)
             raise HTTPException(
@@ -853,18 +958,20 @@ async def import_backup_apply(
     except (FileNotFoundError, PermissionError, TimeoutError) as exc:
         raise _staging_http_error(exc) from exc
 
-    result = await _apply_parsed_backup(
-        parsed,
-        mode=mode,
-        apply_credentials=apply_credentials,
-        apply_runtime=apply_runtime,
-        apply_app_db=apply_app_db,
-        apply_recipes=apply_recipes,
-        apply_standard_photos=apply_standard_photos,
-        apply_other_photos=apply_other_photos,
-        force=force,
-        db=db,
-    )
+    # CORR-07：与「本机回滚快照」互斥——两条链路的 pg_restore --clean 会互相踩。
+    with _restore_exclusive("备份导入"):
+        result = await _apply_parsed_backup(
+            parsed,
+            mode=mode,
+            apply_credentials=apply_credentials,
+            apply_runtime=apply_runtime,
+            apply_app_db=apply_app_db,
+            apply_recipes=apply_recipes,
+            apply_standard_photos=apply_standard_photos,
+            apply_other_photos=apply_other_photos,
+            force=force,
+            db=db,
+        )
     backup_import_staging.discard_staging(import_token)
     # 恢复会写出一份前置快照备份点：健康结论需要重算。
     backup_points.invalidate_health_cache()
@@ -904,6 +1011,26 @@ async def rollback_snapshot(
             },
         )
 
+    # CORR-07：与「备份导入」互斥，第二个请求 409 且不执行任何 pg_restore。
+    with _restore_exclusive("快照回滚"):
+        return await _rollback_snapshot_locked(
+            ts,
+            snap_dir,
+            apply_standard_photos=apply_standard_photos,
+            apply_other_photos=apply_other_photos,
+            db=db,
+        )
+
+
+async def _rollback_snapshot_locked(
+    ts: str,
+    snap_dir: Path,
+    *,
+    apply_standard_photos: bool,
+    apply_other_photos: bool,
+    db: DatabaseManager,
+) -> dict:
+    """真正执行回滚（调用方已持恢复互斥、已完成快照校验）。"""
     try:
         pre_ts = backup_points.create_pre_restore_snapshot(PROVENANCE_PRE_ROLLBACK)
     except Exception as exc:
@@ -928,8 +1055,16 @@ async def rollback_snapshot(
             await asyncio.to_thread(backup_service.restore_pg_dump_sync, str(snap_pg))
         except Exception as exc:
             logger.error("PostgreSQL 整库恢复失败: %s", exc)
-            # 尽力把连接恢复回来，让服务还能提供只读状态与再次尝试的入口
-            await db.connect()
+            # 尽力把连接恢复回来，让服务还能提供只读状态与再次尝试的入口；
+            # 但接不回来时必须说出来（DATA-01）：这条终态不会自愈。
+            if not await db.connect():
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "PostgreSQL 整库恢复失败，且数据库连接未能接回（应用此刻不可用）。"
+                        "请重启应用后重试；库可能已被部分改写，重启后请先用回滚快照恢复。"
+                    ),
+                ) from exc
             raise HTTPException(
                 status_code=500,
                 detail=f"PostgreSQL 整库恢复失败：{exc}",
@@ -937,7 +1072,10 @@ async def rollback_snapshot(
         if not await db.connect():
             raise HTTPException(
                 status_code=500,
-                detail="整库已恢复，但数据库重连失败；请重启应用后再操作",
+                detail=(
+                    "整库已恢复，但数据库连接未能接回（应用此刻不可用）；"
+                    "请重启应用后重试，不需要再恢复一次。"
+                ),
             )
         applied[CONTENT_APP_PG] = True
         # 配方表在同一个库里：整库恢复即覆盖了配方数据。

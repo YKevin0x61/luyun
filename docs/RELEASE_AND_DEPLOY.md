@@ -1,7 +1,7 @@
 # 发行规范与部署流程
 
 本文是店内部署与发版的**操作规范**（对齐 [ADR 0011](./adr/0011-release-bundle-update.md)、`CONTEXT.md`「部署与更新」）。  
-[ADR 0010](./adr/0010-github-release-update-job.md)（git checkout + 分拆前端 tar）已被 0011 **取代**，勿再按旧契约操作。  
+ADR 0010（本机路径 `docs/adr/0010-github-release-update-job.md`，git checkout + 分拆前端 tar）已被 0011 **取代**，勿再按旧契约操作。  
 组件级细节（反代、备份 timer 等）见 [`deploy/README.md`](../deploy/README.md)；发行包附件契约见 [`release-asset-layout.md`](./release-asset-layout.md)。
 
 ---
