@@ -166,18 +166,23 @@ def test_kds_backlog_after_the_cut_drops_the_previous_evening(db, monkeypatch):
 
 
 def test_kds_backlog_window_is_half_open_at_both_ends(db, monkeypatch):
-    """左端 06:00:00.000 在窗内；次日 06:00:00.000 整点出窗（右端开区间）。"""
+    """窗口 [05-02 06:00, 05-03 06:00)：左端前一微秒与右端同刻出窗，左端同刻/窗内/右端前一微秒入窗。"""
     _run(
         _seed_lines(
             db,
             [
+                {
+                    "dish_name": "左端前一微秒",
+                    "order_time": _ts(2026, 5, 2, 5, 59, 59, 999999),
+                    "station": "wok",
+                },
                 {"dish_name": "左端同刻", "order_time": _ts(2026, 5, 2, 6, 0)},
                 {"dish_name": "窗内", "order_time": _ts(2026, 5, 2, 6, 5)},
                 {"dish_name": "右端前一微秒", "order_time": _ts(2026, 5, 3, 5, 59, 59, 999999)},
                 {
                     "dish_name": "右端同刻",
                     "order_time": _ts(2026, 5, 3, 6, 0),
-                    "station": "wok",
+                    "station": "tanmian",
                 },
             ],
         )
@@ -187,11 +192,12 @@ def test_kds_backlog_window_is_half_open_at_both_ends(db, monkeypatch):
     backlog = _run(db.aggregate_kds_backlog())
 
     assert backlog["total_pending"] == 3, (
-        "窗口 [05-02 06:00, 05-03 06:00)：左端同刻 3 单在窗内，右端同刻那单出窗；"
+        "窗口 [05-02 06:00, 05-03 06:00)：左端同刻/窗内/右端前一微秒 3 单在窗内，"
+        "左端前一微秒（05-02 05:59:59.999999）与右端同刻（05-03 06:00:00.000）都出窗；"
         f"实际 {backlog['total_pending']}"
     )
     assert {s["station_id"] for s in backlog["stations"]} == {STATION}, (
-        "右端同刻（wok）不应出现在聚合里"
+        "左端前一微秒（wok）与右端同刻（tanmian）都不应出现在聚合里"
     )
 
 
@@ -225,13 +231,23 @@ def test_dashboard_extras_before_the_cut_counts_the_previous_evening(db, monkeyp
 
 
 def test_dashboard_extras_after_the_cut_uses_the_current_business_day(db, monkeypatch):
-    """06:30 时：05:00 与次日 06:00 整点都出窗，且 20 分钟内的单不算紧急。"""
+    """06:30 时：左端前一微秒/05:00/次日整点都出窗，右端前一微秒在窗内，20 分钟内的单不算紧急。"""
     _run(
         _seed_lines(
             db,
             [
                 {"dish_name": "窗内", "order_time": _ts(2026, 5, 2, 6, 10)},
                 {"dish_name": "窗内稍后", "order_time": _ts(2026, 5, 2, 6, 15)},
+                {
+                    "dish_name": "右端前一微秒",
+                    "order_time": _ts(2026, 5, 3, 5, 59, 59, 999999),
+                    "category": "蒸点",
+                },
+                {
+                    "dish_name": "左端前一微秒",
+                    "order_time": _ts(2026, 5, 2, 5, 59, 59, 999999),
+                    "category": "甜品",
+                },
                 {"dish_name": "上一营业日", "order_time": _ts(2026, 5, 2, 5, 0), "category": "甜品"},
                 {"dish_name": "次日整点", "order_time": _ts(2026, 5, 3, 6, 0), "category": "面点"},
             ],
@@ -241,13 +257,51 @@ def test_dashboard_extras_after_the_cut_uses_the_current_business_day(db, monkey
 
     extras = _run(db.aggregate_dashboard_extras())
 
-    assert extras["dish_category_count"] == 1, (
-        "当前营业日只该数到窗内那两类同名点心（去重后 1 类）：05:00 属上一营业日、"
-        f"次日 06:00 整点出窗；实际 {extras['dish_category_count']}"
+    assert extras["dish_category_count"] == 2, (
+        "当前营业日 [05-02 06:00, 05-03 06:00) 只该数到 点心/蒸点 两类：右端前一微秒"
+        "（05-03 05:59:59.999999）在窗内，左端前一微秒（05-02 05:59:59.999999）、05:00、"
+        f"次日 06:00 整点都在窗口外；实际 {extras['dish_category_count']}"
     )
     assert extras["urgent_order_count"] == 0, (
-        "06:10/06:15 都不早于 now-20min（06:10），紧急数应为 0；"
+        "06:10/06:15 都不早于 now-20min（06:10），左端前一微秒在窗口外，紧急数应为 0；"
         f"实际 {extras['urgent_order_count']}"
+    )
+
+
+def test_dashboard_extras_falls_back_to_dish_names_inside_the_window(db, monkeypatch):
+    """分类全为空（历史数据 / 新库）时兜底按 `dish_name` 去重，且兜底查询同样是半开营业日窗口。
+
+    `_DEFAULT_LINE` 带 `"category": "点心"`，所以窗内行必须**显式**给 `"category": None`
+    才会进 `category_count == 0` 的兜底分支；若兜底分支被删/被改坏，这里拿到的会是
+    分类查询的 0（或把窗口外的行算进来的 3），断言即红。
+    """
+    _run(
+        _seed_lines(
+            db,
+            [
+                {"dish_name": "兜底甲", "order_time": _ts(2026, 5, 2, 10, 0), "category": None},
+                {
+                    "dish_name": "兜底乙",
+                    "order_time": _ts(2026, 5, 3, 5, 59, 59, 999999),
+                    "category": None,
+                },
+                {
+                    "dish_name": "兜底丙",
+                    "order_time": _ts(2026, 5, 2, 5, 59, 59, 999999),
+                    "category": None,
+                },
+                {"dish_name": "兜底丁", "order_time": _ts(2026, 5, 3, 6, 0), "category": None},
+            ],
+        )
+    )
+    _freeze(monkeypatch, reports_module, AFTER_CUT)
+
+    extras = _run(db.aggregate_dashboard_extras())
+
+    assert extras["dish_category_count"] == 2, (
+        "分类全空时必须走 dish_name 兜底分支：窗内两条（兜底甲 05-02 10:00、"
+        "兜底乙 05-03 05:59:59.999999）计入 = 2；左端前一微秒（兜底丙）与次日 06:00 "
+        f"整点（兜底丁）在窗口外；实际 {extras['dish_category_count']}"
     )
 
 

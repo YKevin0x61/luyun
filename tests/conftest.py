@@ -23,10 +23,18 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlparse
 
 import pytest
 
 TEST_DB_NAME = "luyun_test"
+
+
+def _dsn_db_name(dsn: str | None) -> str | None:
+    """取 DSN 的**库名**：错误消息里只报库名，不打印可能带口令的 DSN 全文。"""
+    if not dsn:
+        return None
+    return urlparse(dsn).path.lstrip("/") or None
 
 
 def _default_test_db_name(pid=None) -> str:
@@ -51,6 +59,112 @@ def _default_test_db_name(pid=None) -> str:
 # `DROP SCHEMA` / `TRUNCATE` 互相清空，红的是对方，不是你的改动。
 TEST_DB_NAME_RE = re.compile(r"^(?:\w*_)?luyun_test$|^luyun_test_\w+$")
 
+# ── 生产库硬护栏（票 27 / 2026-09-25 真实事故）──────────────────────────────
+# 事故形状：某个 pytest 插件在**导入期** `import config`（或 import 连带 config 的模块，
+# 例如 `db_core.reports`），pydantic-settings 当场把 `.env` 里的生产库读进
+# `settings.POSTGRES_DSN`；本文件下面那次 `os.environ["POSTGRES_DSN"] = _TEST_DSN` 只对
+# **尚未导入**的 config 有效，于是 conftest 照常在测试库建 schema，被测的
+# `DatabaseManager` 却把夹具数据写进真库（2026-09-25 凌晨：生产 `orders` 被写 325 行、
+# `public.tables` 被覆盖 3 行）。
+#
+# 所以判据不能只看"我们打算连的库"（`_TEST_DB_NAME`），必须看**生效值**：
+#   1. `os.environ["POSTGRES_DSN"]` —— 被测应用最终读的就是它；
+#   2. `"config" in sys.modules` 时 `config.settings.POSTGRES_DSN` 的**当前值** —— 这正是
+#      "有人在 conftest 之前导入了 config" 的指纹，也是那次事故里唯一能看出问题的信号。
+# 任一处不是测试库形状（`TEST_DB_NAME_RE`）→ 立即拒跑：不建 schema、不连库。
+#
+# 调用点在 `pytest_configure` 的第一行：在那里 `pytest.exit(returncode=3)` 才会是退出码 3；
+# 写在 conftest **导入期**会被 pytest 包装成 `ImportError while loading conftest`（退出码 4）。
+# 配套的"导入期不许 import config / db_core"禁令写在 AGENTS.md 的「Testing & CI」。
+
+
+def _refuse_to_run(message: str) -> None:
+    """拒跑：先写 stderr（pytest 的 Exit 摘要不保证带全文），再以退出码 3 结束会话。"""
+    sys.stderr.write(f"\n{message}\n")
+    sys.stderr.flush()
+    pytest.exit(message, returncode=3)
+
+
+def _guard_effective_dsn() -> None:
+    """生效的 PostgreSQL DSN 不是测试库 → 拒跑（`pytest_configure` 第一条动作）。
+
+    两处信号都看（票 27）：环境变量 `POSTGRES_DSN`（被测应用读它）与已导入的
+    `config.settings.POSTGRES_DSN`（在 conftest 之前 import config 时被 `.env` 冻结，
+    之后的环境变量覆盖对 pydantic-settings 无效）。错误消息只带库名，不带 DSN 全文。
+    """
+    signals: list[tuple[str, str | None]] = [
+        ("环境变量 POSTGRES_DSN", os.environ.get("POSTGRES_DSN")),
+    ]
+    early_config = sys.modules.get("config")
+    if early_config is not None:
+        signals.append(
+            (
+                "已导入的 config.settings.POSTGRES_DSN",
+                getattr(getattr(early_config, "settings", None), "POSTGRES_DSN", None),
+            )
+        )
+
+    offenders = [
+        f"{source} 的库名 {name!r}"
+        for source, dsn in signals
+        if (name := _dsn_db_name(dsn)) is not None and not TEST_DB_NAME_RE.match(name)
+    ]
+    if not offenders:
+        return
+
+    fingerprint = (
+        "config 已在 conftest 之前被导入（本缺陷的指纹）"
+        if early_config is not None
+        else "config 未被提前导入"
+    )
+    _refuse_to_run(
+        "[conftest] 测试进程指向了非测试库，拒绝运行："
+        + "；".join(offenders)
+        + f"（{fingerprint}）。"
+        + f"测试 DSN 必须指向测试库：库名以 {TEST_DB_NAME} 结尾"
+        + f"（如 impl_{TEST_DB_NAME}），或以 {TEST_DB_NAME}_ 开头"
+        + f"（如 {TEST_DB_NAME}_a）；可用示例："
+        + f"postgresql://localhost:5432/{TEST_DB_NAME}、"
+        + f"postgresql://localhost:5432/impl_{TEST_DB_NAME}、"
+        + f"postgresql://localhost:5432/{TEST_DB_NAME}_a。"
+        + "请把 LUYUN_TEST_DSN 指向测试库，并清掉指向真库的 POSTGRES_DSN；"
+        + "若确实是导入期 import 了 config，改成在 pytest_configure/fixture 里延迟 import"
+        + "（见 AGENTS.md「Testing & CI」）。"
+    )
+
+
+def _assert_live_connection_is_a_test_db(dsn: str | None) -> None:
+    """兜底自证（票 27）：真连一次，让库名自己回答"这次连的是哪个库"。
+
+    上面的判据看的是环境变量与已导入的 settings；万一实际连接来自别处（DSN 又被谁
+    改过、或 config 之外还有一条取 DSN 的路径），只有真连一次才看得见。用**被测应用
+    同一个 DSN** 跑 `SELECT current_database()`，结果必须是本会话认定的测试库。
+    """
+    declared = _dsn_db_name(dsn)
+    if declared is None or not TEST_DB_NAME_RE.match(declared):
+        _refuse_to_run(
+            f"[conftest] 非测试库 DSN，拒绝运行：解析出的库名 {declared!r} 不匹配 "
+            f"TEST_DB_NAME_RE（{TEST_DB_NAME_RE.pattern}）"
+        )
+
+    probe = subprocess.run(
+        ["psql", "-tAc", "SELECT current_database()", dsn or ""],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        _refuse_to_run(
+            f"[conftest] 连不上 PostgreSQL（DSN 库名 {declared!r}），拒绝运行："
+            f"{(probe.stderr or probe.stdout).strip()}"
+        )
+
+    connected = probe.stdout.strip()
+    if connected != _TEST_DB_NAME or not TEST_DB_NAME_RE.match(connected):
+        _refuse_to_run(
+            f"[conftest] 实际连到的库是 {connected!r}，本会话认定的测试库是 "
+            f"{_TEST_DB_NAME!r}（DSN 库名 {declared!r}）——两边不一致，拒绝运行"
+        )
+
 # 建库/建 schema 用管理连接；CI 与本地默认都走本机 trust 认证。
 # 没给 LUYUN_TEST_DSN 时按 PID 派生唯一库名（MERGE-01）；给了就完全以它为准。
 _TEST_DSN = os.environ.get("LUYUN_TEST_DSN") or (
@@ -61,9 +175,7 @@ _ADMIN_DSN = os.environ.get("LUYUN_TEST_ADMIN_DSN", "postgresql://localhost:5432
 # 库名以 DSN 为准（不是常量）：并行干活时各会话可以把 LUYUN_TEST_DSN 指向自己的
 # 库（名字仍须匹配 TEST_DB_NAME_RE，断言见 pytest_configure），避免共用同一个库时
 # 互相 TRUNCATE / 撞唯一键。
-from urllib.parse import urlparse  # noqa: E402
-
-_TEST_DB_NAME = urlparse(_TEST_DSN).path.lstrip("/") or TEST_DB_NAME
+_TEST_DB_NAME = _dsn_db_name(_TEST_DSN) or TEST_DB_NAME
 
 # 必须早于 config 的 import：env 变量优先级高于 .env。
 os.environ["DATABASE_BACKEND"] = "postgres"
@@ -234,6 +346,11 @@ def _truncate_all() -> None:
 
 def pytest_configure(config):
     """兜底断言：确实跑在测试库上，否则宁可让整个会话失败，也不连真库。"""
+    # 硬护栏（票 27）必须是这个 hook 的**第一条动作**：pytest.exit 在这里才会被当成
+    # 退出码 3（在 conftest 导入期调用会被 pytest 包装成 ImportError、退出码 4），而且
+    # 此时还没有建 schema、没有连库。
+    _guard_effective_dsn()
+
     _start_watchdog()
 
     # 会话一开始就打出实际测试库与它的来源（MERGE-01）：并发会话各跑各的库，
@@ -282,6 +399,12 @@ def pytest_configure(config):
     settings.DATABASE_DIR = tempfile.mkdtemp(prefix="luyun-test-data-")
 
     _ensure_test_database()
+    # 端到端自证（票 27）：上面的判据看的是环境变量与常量，真正建连的是被测应用。
+    # 用应用实际会用的 DSN 真连一次，让 `SELECT current_database()` 回答"这次连的是
+    # 哪个库"——放在建库之后（新库刚建出来才连得上）、DROP SCHEMA 之前（不允许在
+    # 未确认库名时先动结构）。
+    _assert_live_connection_is_a_test_db(settings.POSTGRES_DSN)
+
     # 0001 是 bootstrap-only（含 DROP TABLE，但不含 tenants 的 DROP），只在空库可跑：
     # 每次会话先把 public schema 整个丢掉重建，保证从干净状态应用全量脚本。
     subprocess.run(

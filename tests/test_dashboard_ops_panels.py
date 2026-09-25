@@ -175,10 +175,11 @@ class DashboardOpsPanelsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live["tables"][1]["amount"], 120.0)
 
     async def test_aggregate_kds_backlog_excludes_loumian_and_yesterday(self):
-        # 票 25：数据按**当前营业日**的边界造，与墙钟无关。
-        # 旧写法（now - 5min / now - 1day）在 00:00–06:00 会让"前一营业日"的行落进
-        # 自然日窗口，这条用例因此假红。
-        business_start, _business_end = business_day_window(datetime.now(CHINA_TZ))
+        # 票 26 / R-T8-03：窗口与聚合必须冻在**同一时刻**——这里 business_start 按 _PANEL_NOW
+        # 推，聚合调用放进 _frozen_panel_clock()。只冻一侧（例如窗口取墙钟 datetime.now()、
+        # 聚合不冻钟）仍会随墙钟翻页：跨 06:00 的瞬间造数用的是旧营业日窗口、聚合按新窗口
+        # 查，previous_business_day 会掉进（或整段掉出）窗口，断言在这几百毫秒内亚秒级假红。
+        business_start, _business_end = business_day_window(_PANEL_NOW)
         in_window = (business_start + timedelta(hours=1)).isoformat()
         previous_business_day = (business_start - timedelta(minutes=1)).isoformat()
 
@@ -198,7 +199,8 @@ class DashboardOpsPanelsTest(unittest.IsolatedAsyncioTestCase):
             order_time=previous_business_day,
         )
 
-        backlog = await self.db.aggregate_kds_backlog()
+        with _frozen_panel_clock():
+            backlog = await self.db.aggregate_kds_backlog()
 
         self.assertEqual(backlog["total_pending"], 1)
         self.assertEqual(backlog["busiest_station"]["station_id"], "shulong")
