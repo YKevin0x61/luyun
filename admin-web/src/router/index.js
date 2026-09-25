@@ -42,6 +42,9 @@ const routes = [
   // 待办（票 08）：店长批请假的地方。从月历页底下那根「请假等着批」的条进来。
   // 跟 `/scheduling` 同一扇门（管理端 cookie，没有 meta.public）。
   { path: '/scheduling/inbox', name: 'scheduling-inbox', component: () => import('../views/scheduling/SchedulingInboxView.vue') },
+  // 班次表（票 11）：加一条、改名字、调显示顺序、启用停用、删掉建错的那条。
+  // 同样没有 meta —— 跟 `/scheduling`、`/scheduling/inbox` 一扇门（管理端 cookie）。
+  { path: '/scheduling/shifts', name: 'scheduling-shifts', component: () => import('../views/scheduling/SchedulingShiftsView.vue') },
   hygieneAdminPage('/hygiene-roster', 'hygiene-roster', () => import('../views/hygiene/HygieneRosterView.vue')),
   hygieneAdminPage('/hygiene-zones', 'hygiene-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
   hygieneAdminPage('/hygiene-daily', 'hygiene-daily', () => import('../views/hygiene/HygieneDailyView.vue')),

@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from api.security import require_session, require_staff_session
 from database import get_db
-from services.scheduling import MAX_CYCLE_DAYS
+from services.scheduling import MAX_CYCLE_DAYS, MAX_SHIFT_NAME
 from services.scheduling.store import SchedulingError, SchedulingStore
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,23 @@ _ERROR_DETAILS = {
     "beyond_swap": "排班还没铺到那么远：最多换到 {}",
     "nothing_to_swap": "那天你手上没有班可换：先让店长给你配上轮转规则",
     "already_asked": "你刚跟这位同事提过这一天的换班：等对方回应，或先撤回那条",
+    # 班次表的编辑（票 11）：改名、调顺序、停用、删除各自的拦法，各说各的。
+    "missing_shift_name": "请先给班次起个名字",
+    # 带一个 `{}`：服务层把上限（`MAX_SHIFT_NAME`）放在 `args[0]`（同 `note_too_long`）。
+    "shift_name_too_long": "班次名最多 {} 个字：它要出现在月历和当天名单上，短一点",
+    "shift_name_taken": "已经有一个同名的班次了：换个名字，或者把那一条改掉",
+    # 带一个 `{}`：服务层把那个保留词放在 `args[0]`（点名的两句能照做）。
+    "shift_name_reserved": "「{}」这个词留给「那天休息」：周期里写它表示不上班，换个名字",
+    "invalid_shift_order": "显示顺序得是个整数",
+    # 编辑班次表用的「没有这一行」：跟 `unknown_shift`（只能挑在用的班次）分开 ——
+    # 停用的班次照样要能改名、能重新启用。
+    "unknown_shift_id": "找不到这个班次：可能已经被删了，刷新看看",
+    # 带一个 `{}`：服务层把「还有几个人」放在 `args[0]`（票 11 验收项：说清还有多少人在用）。
+    "shift_in_use": "还有 {} 个人的轮转规则里排着这个班次：先改掉他们的规则，再停用",
+    # 带一个 `{}`：服务层说清为什么算「用过」（排过多少天班、多少人的轮转里排着它）。
+    "shift_used": "这个班次已经用过了（{}），删不掉：停用它就行，历史排班照旧显示",
+    "shift_order_mismatch": "班次顺序对不上（可能刚有人加过或删过班次）：刷新一下再调",
+    "last_active_shift": "至少得留一个能用的班次：不然谁都没班可排",
     "not_migrated": (
         "排班表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
         "migrations/pg/0005_scheduling.sql、0006_scheduling_zone_defaults.sql、"
@@ -77,9 +94,10 @@ _ERROR_DETAILS = {
 }
 
 _ERROR_STATUS = {
-    # 找不到的那一行：人、申请。撤别人的申请也走这里（接口不区分「不存在」与「不是你的」）。
+    # 找不到的那一行：人、申请、班次。撤别人的申请也走这里（接口不区分「不存在」与「不是你的」）。
     "unknown_employee": 404,
     "unknown_request": 404,
+    "unknown_shift_id": 404,
     # 其余一律 400（`request_not_pending` 就是这一类：那一行在，只是不再是「等你批」）；
     # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
     "not_migrated": 503,
@@ -90,6 +108,35 @@ class SetRuleRequest(BaseModel):
     # 一格 = 一个营业日：班次 id 或 null（休）。周期天数 = 数组长度。
     cycle: list[Optional[int]] = Field(..., min_length=1, max_length=MAX_CYCLE_DAYS)
     anchor_date: Optional[str] = None
+
+
+class CreateShiftRequest(BaseModel):
+    """加一个班次（票 11）。`sort_order` 不给就排在最后。
+
+    `name` 不是必填（同 `LeaveRequest.start_date` 的理由）：缺字段、空串、显式 `null`
+    都落到服务层那道闸上，回一句中文的 400，而不是 pydantic 那串英文的 422 字段错误。
+    """
+
+    name: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+class UpdateShiftRequest(BaseModel):
+    """改一个班次（票 11）：名字 / 显示顺序 / 启用停用。
+
+    **`None` = 这一项不动**（不是「清空」）：`is_active` 显式给 `false` 才是停用，
+    名字本来也不允许为空，所以「不给」与「给空」在这里是同一件事 —— 不动它。
+    """
+
+    name: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class ShiftOrderRequest(BaseModel):
+    """整表重排（票 11）：所有班次 id 的新顺序（含停用的），一次说完。"""
+
+    ids: list[int] = Field(default_factory=list)
 
 
 class SetZoneDefaultRequest(BaseModel):
@@ -350,6 +397,97 @@ async def list_shifts(db=Depends(get_db), _: str = Depends(require_session)) -> 
     store = SchedulingStore(db)
     try:
         return {"shifts": await store.list_shifts()}
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get("/shifts/manage")
+async def manage_shifts(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
+    """班次表**连停用的一起**，每条带上「有多少人在用」：票 11 的编辑页读这一条。
+
+    编辑页要看到停用的那几条（给它们改名、重新启用、看还有没有历史行），所以不能
+    复用只出启用班次的 `/shifts`。`max_name` 随响应下去（同 `/roster` 的
+    `max_cycle_days`）：班次名的上限是服务层的数，前端不再写死一份。
+    `active_count` 是**还在用**的班次条数：删掉最后一条在用的就没人能排班了，
+    页面照它把「删除」按钮灰掉（服务端还会再判一次，那份才是权威）。
+    """
+    store = SchedulingStore(db)
+    try:
+        usage = await store.shift_usage()
+        shifts = [
+            dict(shift, people=int(usage.get(shift["id"], {}).get("people", 0) or 0),
+                 days=int(usage.get(shift["id"], {}).get("days", 0) or 0))
+            for shift in await store.list_shifts(include_inactive=True)
+        ]
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+    return {
+        "shifts": shifts,
+        "max_name": MAX_SHIFT_NAME,
+        "active_count": len([shift for shift in shifts if shift["is_active"]]),
+    }
+
+
+@router.post("/shifts")
+async def create_shift(
+    payload: CreateShiftRequest,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """加一个班次（票 11）。加完就是一条普通的班次：月历图例、配规则的下拉、员工端
+    的卡片都按 N 个班次渲染，不需要改代码（验收项）。"""
+    store = SchedulingStore(db)
+    try:
+        return {"shift": await store.create_shift(payload.name, payload.sort_order)}
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
+# 声明在 `/shifts/{shift_id}` **之前**：两条都是 PUT，先声明的先匹配，否则
+# `/shifts/order` 会被当成 `shift_id="order"` 去解析，回一个 422（英文的字段错误）。
+@router.put("/shifts/order")
+async def reorder_shifts(
+    payload: ShiftOrderRequest,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """按给定的顺序重铺显示顺序（票 11 的「上移 / 下移」）。要**给全**所有班次 id。"""
+    store = SchedulingStore(db)
+    try:
+        return {"shifts": await store.reorder_shifts(payload.ids)}
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.put("/shifts/{shift_id}")
+async def update_shift(
+    shift_id: int,
+    payload: UpdateShiftRequest,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """改名 / 调顺序 / 启用停用（票 11）。停用还有人在上的班次会被拦下来说清人数。"""
+    store = SchedulingStore(db)
+    try:
+        return {
+            "shift": await store.update_shift(
+                shift_id, payload.name, payload.sort_order, payload.is_active
+            )
+        }
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.delete("/shifts/{shift_id}")
+async def delete_shift(
+    shift_id: int,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """删掉刚建错、还没人用过的班次（票 11）。排过班的删不掉，那句话里说清为什么。"""
+    store = SchedulingStore(db)
+    try:
+        return {"shift": await store.delete_shift(shift_id)}
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
 

@@ -20,6 +20,7 @@ import api.scheduling as scheduling_module
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
+from services.business_day import current_business_date
 from services.hygiene.accounts import EmployeeAccounts
 from services.scheduling.store import SchedulingStore
 
@@ -45,7 +46,24 @@ def _run(coro):
 
 
 @pytest.fixture
-def scheduling_http(tmp_path):
+def scheduling_http(tmp_path, monkeypatch):
+    """一条真实请求链路，钟钉在 `FIXED_NOW` 上。
+
+    路由里现造的 `SchedulingStore(db)` 用的是默认时钟（真实时间），而这份文件里的
+    断言全是围着 2026-09-24 写的（今天、往后四天、月历那个月、换班能到的那一天）。
+    真钟一走过 06:00 那个切日点，写死的日子就整片错位 —— 一次性的注入比在每个
+    用例里现算相对日期更不容易再腐（`tests/test_scheduling.py` 也是注入时钟的）。
+    """
+    real_init = SchedulingStore.__init__
+
+    def _pinned_init(self, *args, **kwargs):
+        # 不抄真实签名：将来 `__init__` 多一个参数，抄下来的那份会以 `TypeError`
+        # 打死这一整个文件；`setdefault` 也让显式传 `now=` 的调用方照旧说了算。
+        kwargs.setdefault("now", lambda: FIXED_NOW)
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(SchedulingStore, "__init__", _pinned_init)
+
     old = settings.DATABASE_DIR
     settings.DATABASE_DIR = str(tmp_path)
     db = DatabaseManager()
@@ -68,6 +86,22 @@ def scheduling_http(tmp_path):
     _run(db.close())
     set_runtime(None)
     settings.DATABASE_DIR = old
+
+
+class _FakeConnection:
+    """`SchedulingStore` 只要求一个带 `_conn` 的对象 —— 哨兵用例不碰库，只要那个形状。"""
+
+    _conn = object()
+
+
+def test_the_default_clock_is_still_the_wall_clock():
+    """上面那个夹具把默认钟钉在 `FIXED_NOW` 上；这一条把「产品代码的默认钟还是真实时间」钉回来。
+
+    没有它的话，全仓再没有一处用 `SchedulingStore(...)` 的默认时钟（其余调用点都显式
+    传 `now=`）—— 哪天默认值被写死、或者传参漏了，日期相关的用例会一起安静地测同一件事。
+    """
+    store = SchedulingStore(_FakeConnection())
+    assert store.today() == current_business_date(datetime.now(CHINA_TZ))
 
 
 def _employee_id(accounts, phone=PHONE, name=NAME):
@@ -110,6 +144,12 @@ def test_scheduling_routes_require_admin_session(scheduling_http):
     assert client.get("/api/scheduling/inbox").status_code == 401
     assert client.post("/api/scheduling/inbox/1/approve").status_code == 401
     assert client.post("/api/scheduling/inbox/1/reject").status_code == 401
+    # 票 11 的班次表编辑：加、改、删、调顺序，连编辑页读的全表都只认店长。
+    assert client.get("/api/scheduling/shifts/manage").status_code == 401
+    assert client.post("/api/scheduling/shifts", json={"name": "中班"}).status_code == 401
+    assert client.put("/api/scheduling/shifts/order", json={"ids": [1, 2]}).status_code == 401
+    assert client.put("/api/scheduling/shifts/1", json={"name": "早班"}).status_code == 401
+    assert client.delete("/api/scheduling/shifts/1").status_code == 401
 
     # 员工会话不是店长的门：换一个 cookie 名字照样 401（排班只认管理端会话）。
     employee_id = _employee_id(accounts)
@@ -507,16 +547,23 @@ def test_the_two_doors_do_not_open_each_other(scheduling_http, monkeypatch):
     ).status_code == 401
     assert client.post("/api/scheduling/me/swaps/1/accept").status_code == 401
     assert client.post("/api/scheduling/me/swaps/1/reject").status_code == 401
+    # 票 11 给店长那扇门加了班次表的编辑：读含停用的全表、加、改、删、调顺序都在这儿。
+    assert client.get("/api/scheduling/shifts/manage").status_code == 200
 
     _staff_cookie(client, accounts)
     assert client.get("/api/scheduling/me").status_code == 200
     assert client.get("/api/scheduling/me/requests").status_code == 200
     assert client.get("/api/scheduling/me/colleagues").status_code == 200
-    # 反过来也一样：员工会话读不到店长的任何一条（待办也在里面）。
+    # 反过来也一样：员工会话读不到店长的任何一条（待办、班次表的编辑都在里面）。
     assert client.get("/api/scheduling/roster").status_code == 401
     assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 401
     assert client.get("/api/scheduling/inbox").status_code == 401
     assert client.post("/api/scheduling/inbox/1/approve").status_code == 401
+    assert client.get("/api/scheduling/shifts/manage").status_code == 401
+    assert client.post("/api/scheduling/shifts", json={"name": "中班"}).status_code == 401
+    assert client.put("/api/scheduling/shifts/order", json={"ids": [1, 2]}).status_code == 401
+    assert client.put("/api/scheduling/shifts/1", json={"name": "早班"}).status_code == 401
+    assert client.delete("/api/scheduling/shifts/1").status_code == 401
 
     client.cookies.clear()
     assert client.get("/api/scheduling/me").status_code == 401
@@ -1416,3 +1463,303 @@ def test_a_queued_swap_is_unrenderable_without_the_column(scheduling_http, monke
         assert approved.status_code == 200, approved.text
         # 批准这条路由也直接回结果本身（`applied_days` 在顶层）。
         assert approved.json()["applied_days"] == ["2026-09-25"]
+
+
+# ── 班次表的编辑（票 11）───────────────────────────────────────────────────
+
+
+def _shift_ids(client):
+    """管理端的班次清单（默认只出启用的）：`{名字: id}`。"""
+    body = client.get("/api/scheduling/shifts").json()
+    return {shift["name"]: shift["id"] for shift in body["shifts"]}
+
+
+def _manage(client):
+    """编辑页读的那一条：连停用的全表 + 每条的用量 + 名字上限。"""
+    response = client.get("/api/scheduling/shifts/manage")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _past_row(db, employee_id, day, shift_id):
+    """手写一行「历史」：展开窗口从今天起，走 API 跑不出过去的日子。
+
+    停用那条验收说的是「**已经写下的**行照旧显示」，所以这里直接落一行 ——
+    它跟三个月前展开出来的那行在数据上长得一样（`source='rule'`）。
+    """
+    async def _insert():
+        stamp = FIXED_NOW.isoformat()
+        await db._conn.execute(
+            """INSERT INTO staff_assignments
+                   (employee_id, business_date, shift_id, zone_id, source, created_at, updated_at)
+               VALUES (?, ?, ?, NULL, 'rule', ?, ?)""",
+            (employee_id, day, shift_id, stamp, stamp),
+        )
+        await db._conn.commit()
+
+    _run(_insert())
+
+
+def test_manager_edits_the_shift_table(scheduling_http):
+    """验收 1、5：改名、调顺序、加一条、把建错的删掉 —— 都走店长那扇门。"""
+    client, _db, _accounts = scheduling_http
+    ids = _shift_ids(client)
+    day_id, night_id = ids["白班"], ids["夜班"]
+
+    manage = _manage(client)
+    assert [(shift["name"], shift["sort_order"], shift["is_active"]) for shift in manage["shifts"]] == [
+        ("白班", 10, True),
+        ("夜班", 20, True),
+    ]
+    # 名字的上限跟着响应下去（跟 /roster 的 max_cycle_days 一个路子），前端不写死；
+    # `active_count` 让页面把「删除最后一条在用的」按钮灰掉（服务端还会再判一次）。
+    assert (manage["max_name"], manage["active_count"]) == (12, 2)
+    assert [(shift["people"], shift["days"]) for shift in manage["shifts"]] == [(0, 0), (0, 0)]
+
+    # 加一条：不给顺序就排在最后。
+    created = client.post("/api/scheduling/shifts", json={"name": "中班"})
+    assert created.status_code == 200, created.text
+    middle = created.json()["shift"]
+    assert (middle["name"], middle["sort_order"], middle["is_active"]) == ("中班", 30, True)
+
+    # 改名：只动那一行（别处引用的都是 id）。
+    renamed = client.put(f"/api/scheduling/shifts/{day_id}", json={"name": "早班"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["shift"]["name"] == "早班"
+    assert [shift["name"] for shift in _manage(client)["shifts"]] == ["早班", "夜班", "中班"]
+
+    # 调显示顺序：一次给全，重铺成 10、20、30…（`/shifts/order` 得排在 `{shift_id}` 前）。
+    ordered = client.put(
+        "/api/scheduling/shifts/order", json={"ids": [middle["id"], day_id, night_id]}
+    )
+    assert ordered.status_code == 200, ordered.text
+    assert [(shift["name"], shift["sort_order"]) for shift in ordered.json()["shifts"]] == [
+        ("中班", 10),
+        ("早班", 20),
+        ("夜班", 30),
+    ]
+    assert [shift["name"] for shift in _manage(client)["shifts"]] == ["中班", "早班", "夜班"]
+    # 配规则的下拉读的是只出启用的那一条 —— 顺序跟着变。
+    assert [shift["name"] for shift in client.get("/api/scheduling/shifts").json()["shifts"]] == [
+        "中班",
+        "早班",
+        "夜班",
+    ]
+
+    # 建错的删得掉（一天班都没排过）。
+    removed = client.delete(f"/api/scheduling/shifts/{middle['id']}")
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["shift"]["name"] == "中班"
+    assert [shift["name"] for shift in _manage(client)["shifts"]] == ["早班", "夜班"]
+
+
+def test_disabling_a_shift_says_how_many_people_are_on_it(scheduling_http):
+    """验收 2、3、6：还有人排着它就不给停用（说清人数）；停用不等于抹掉历史；
+    停用再启用，之前那些行一个字都没动。"""
+    client, db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    ids = _shift_ids(client)
+    day_id, night_id = ids["白班"], ids["夜班"]
+    assert (
+        client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]}).status_code
+        == 200
+    )
+
+    manage = {shift["id"]: shift for shift in _manage(client)["shifts"]}
+    assert (manage[day_id]["people"], manage[day_id]["days"]) == (1, 90)
+
+    blocked = client.put(f"/api/scheduling/shifts/{day_id}", json={"is_active": False})
+    assert blocked.status_code == 400, blocked.text
+    assert blocked.json()["detail"] == (
+        "还有 1 个人的轮转规则里排着这个班次：先改掉他们的规则，再停用"
+    )
+    # 被拦下来 = 什么都没做。
+    assert _manage(client)["shifts"][0]["is_active"] is True
+
+    # 规则挪到夜班：白班没人上了 —— 这时才给停用。
+    assert (
+        client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [night_id]}).status_code
+        == 200
+    )
+    _past_row(db, employee_id, "2026-09-23", day_id)
+
+    def _white_on_the_23rd():
+        """9/23 那天的白班名单（按 id 找那一组：停用的班次排在启用的后面）。"""
+        body = client.get("/api/scheduling/day", params={"date": "2026-09-23"}).json()
+        group = next(item for item in body["groups"] if item["shift"]["id"] == day_id)
+        return [person["name"] for person in group["people"]]
+
+    before = _white_on_the_23rd()
+    assert before == [NAME]
+
+    stopped = client.put(f"/api/scheduling/shifts/{day_id}", json={"is_active": False})
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["shift"]["is_active"] is False
+    # 配规则挑不到它了，编辑页里还在（要能给它改名、重新启用）。
+    assert [shift["name"] for shift in client.get("/api/scheduling/shifts").json()["shifts"]] == [
+        "夜班"
+    ]
+    assert [shift["name"] for shift in _manage(client)["shifts"]] == ["白班", "夜班"]
+    # 历史照旧显示：9/23 那行还是白班（月历上那一格的人数、当天名单里那个人）。
+    calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    assert [shift["name"] for shift in calendar["shifts"]] == ["夜班", "白班"]
+    cells = {day["business_date"]: day for day in calendar["days"]}
+    assert cells["2026-09-23"]["counts"][str(day_id)] == 1
+    assert cells[TODAY]["counts"][str(day_id)] == 0
+    assert _white_on_the_23rd() == before
+
+    # 重新启用：那行历史还在，班次表回到原样。
+    back = client.put(f"/api/scheduling/shifts/{day_id}", json={"is_active": True})
+    assert back.status_code == 200, back.text
+    assert back.json()["shift"]["is_active"] is True
+    assert _white_on_the_23rd() == before
+    assert [shift["name"] for shift in _manage(client)["shifts"]] == ["白班", "夜班"]
+
+
+def test_shift_errors_are_readable_400s(scheduling_http):
+    """每条错都回一句中文：名字空 / 太长 / 重名、顺序对不上、找不到、用过、最后一个。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    ids = _shift_ids(client)
+    day_id, night_id = ids["白班"], ids["夜班"]
+
+    # 恰好到上限（12 个字）要收：前端的 `maxlength` 就让它敲得出来。
+    boundary = client.post("/api/scheduling/shifts", json={"name": "一二三四五六七八九十一二"})
+    assert boundary.status_code == 200, boundary.text
+    assert client.delete(f"/api/scheduling/shifts/{boundary.json()['shift']['id']}").status_code == 200
+
+    for payload, expected in (
+        ({"name": ""}, "请先给班次起个名字"),
+        ({"name": "   "}, "请先给班次起个名字"),
+        ({"name": None}, "请先给班次起个名字"),
+        ({"name": "早班早班早班早班早班早班早"}, "班次名最多 12 个字：它要出现在月历和当天名单上，短一点"),
+        ({"name": "白班"}, "已经有一个同名的班次了：换个名字，或者把那一条改掉"),
+        ({"name": " 白班 "}, "已经有一个同名的班次了：换个名字，或者把那一条改掉"),
+        # 「休」这一族留给「那天休息」（月历的周期编辑先认班次名、认不出才当休息）。
+        ({"name": "休"}, "「休」这个词留给「那天休息」：周期里写它表示不上班，换个名字"),
+        ({"name": " 休息 "}, "「休息」这个词留给「那天休息」：周期里写它表示不上班，换个名字"),
+    ):
+        response = client.post("/api/scheduling/shifts", json=payload)
+        assert response.status_code == 400, (payload, response.text)
+        assert response.json()["detail"] == expected
+
+    created = client.post("/api/scheduling/shifts", json={"name": "中班"})
+    middle = created.json()["shift"]
+    # 改名撞现有的名字也是重名。
+    clash = client.put(f"/api/scheduling/shifts/{middle['id']}", json={"name": "白班"})
+    assert clash.status_code == 400
+    assert clash.json()["detail"].startswith("已经有一个同名的班次了")
+    # 改名也不许用保留词（同一条闸）。
+    reserved = client.put(f"/api/scheduling/shifts/{middle['id']}", json={"name": "休"})
+    assert reserved.status_code == 400
+    assert reserved.json()["detail"] == "「休」这个词留给「那天休息」：周期里写它表示不上班，换个名字"
+    # 顺序对不上（少给、多给、重复、给个没有的）：刷新一下再调，不猜剩下的排哪儿。
+    for payload in (
+        {"ids": [day_id, night_id]},
+        {"ids": [day_id, night_id, middle["id"], 999]},
+        {"ids": [day_id, day_id, night_id]},
+        {"ids": []},
+    ):
+        response = client.put("/api/scheduling/shifts/order", json=payload)
+        assert response.status_code == 400, (payload, response.text)
+        assert response.json()["detail"] == (
+            "班次顺序对不上（可能刚有人加过或删过班次）：刷新一下再调"
+        )
+    # 找不到的那一条：404（跟员工、申请一样是「找不到的那一行」）。
+    assert client.put("/api/scheduling/shifts/987654", json={"name": "没有这个班次"}).status_code == 404
+    missing = client.delete("/api/scheduling/shifts/987654")
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "找不到这个班次：可能已经被删了，刷新看看"
+
+    # 排过班的删不掉：那句话里说清「用过」是什么（排了多少天）。
+    assert (
+        client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]}).status_code
+        == 200
+    )
+    used = client.delete(f"/api/scheduling/shifts/{day_id}")
+    assert used.status_code == 400, used.text
+    # 两个理由一起说：排了多少天 + 还有几个人排着它。
+    assert used.json()["detail"] == (
+        "这个班次已经用过了（已经排过 90 天班，还有 1 个人的轮转里排着它），"
+        "删不掉：停用它就行，历史排班照旧显示"
+    )
+    # 只在别人的轮转里排着、一天班都还没排的，也是「用过」：理由说的是人不是天数。
+    assert (
+        client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [night_id]}).status_code
+        == 200
+    )
+    other = _employee_id(accounts, phone="13800138001", name="李四")
+    assert (
+        client.put(f"/api/scheduling/rules/{other}", json={"cycle": [night_id]}).status_code == 200
+    )
+    assert client.delete(f"/api/scheduling/shifts/{night_id}").status_code == 400
+
+    # 最后一个班次不许停、也不许删：不然谁都没班可排。
+    # 先把两个人的规则撤掉、把前面建的「中班」删掉 —— 不然先撞上的是「还有人在上」
+    # 和「白班还能停」（它们在的时候，夜班确实不是最后一个）。
+    for employee in (employee_id, other):
+        assert client.delete(f"/api/scheduling/rules/{employee}").status_code == 200
+    assert client.delete(f"/api/scheduling/shifts/{middle['id']}").status_code == 200
+    assert client.put(f"/api/scheduling/shifts/{day_id}", json={"is_active": False}).status_code == 200
+    assert client.delete(f"/api/scheduling/shifts/{day_id}").status_code == 200
+    last = client.put(f"/api/scheduling/shifts/{night_id}", json={"is_active": False})
+    assert last.status_code == 400, last.text
+    assert last.json()["detail"] == "至少得留一个能用的班次：不然谁都没班可排"
+    removed = client.delete(f"/api/scheduling/shifts/{night_id}")
+    assert removed.status_code == 400
+    assert removed.json()["detail"] == "至少得留一个能用的班次：不然谁都没班可排"
+    assert [shift["name"] for shift in _manage(client)["shifts"]] == ["夜班"]
+
+
+def test_deleting_the_only_active_shift_is_refused(scheduling_http):
+    """停用一条、再删掉唯一在用的那条也不许：删完一条能用的班次都不剩（谁都没班可排）。
+
+    两道闸得同一个口径 —— 删的那条自己「没人用过」，但它是最后一个在用的。
+    """
+    client, _db, _accounts = scheduling_http
+    ids = _shift_ids(client)
+    day_id, night_id = ids["白班"], ids["夜班"]
+
+    assert client.put(f"/api/scheduling/shifts/{night_id}", json={"is_active": False}).status_code == 200
+    blocked = client.delete(f"/api/scheduling/shifts/{day_id}")
+    assert blocked.status_code == 400, blocked.text
+    assert blocked.json()["detail"] == "至少得留一个能用的班次：不然谁都没班可排"
+    # 被拦下 = 两条原样都在（一在用、一停用）。
+    assert _manage(client)["active_count"] == 1
+    assert [(shift["name"], shift["is_active"]) for shift in _manage(client)["shifts"]] == [
+        ("白班", True),
+        ("夜班", False),
+    ]
+    # 停用的那条删得掉：删它不影响「还有没有人能排班」。
+    assert client.delete(f"/api/scheduling/shifts/{night_id}").status_code == 200
+    assert [shift["name"] for shift in _manage(client)["shifts"]] == ["白班"]
+
+
+def test_a_third_shift_flows_through_calendar_and_staff_card(scheduling_http, monkeypatch):
+    """验收 4：加第三个班次之后，月历图例与员工端卡片自动多出一种班别（前端不改代码）。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    day_id = _shift_ids(client)["白班"]
+    middle = client.post("/api/scheduling/shifts", json={"name": "中班"}).json()["shift"]
+    assert (
+        client.put(
+            f"/api/scheduling/rules/{employee_id}", json={"cycle": [middle["id"]]}
+        ).status_code
+        == 200
+    )
+
+    calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    assert [shift["name"] for shift in calendar["shifts"]] == ["白班", "夜班", "中班"]
+    cells = {day["business_date"]: day for day in calendar["days"]}
+    assert (cells[TODAY]["counts"][str(middle["id"])], cells[TODAY]["counts"][str(day_id)]) == (1, 0)
+    # 当天名单：新班别自己一组，人在里面。
+    day = client.get("/api/scheduling/day", params={"date": TODAY}).json()
+    assert [(group["shift"]["name"], group["count"]) for group in day["groups"] if group["count"]] == [
+        ("中班", 1)
+    ]
+
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+    me = client.get("/api/scheduling/me")
+    assert me.status_code == 200, me.text
+    assert me.json()["days"][0]["shift_name"] == "中班"

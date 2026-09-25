@@ -68,6 +68,10 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/anchor_date: cycleAnchor\.value \|\| null/)
     // 「固定某个班」和「编周期」走同一个 PUT /rules，不是两套逻辑。
     expect(view.match(/api\.put\(`\/api\/scheduling\/rules\//g)).toHaveLength(2)
+    // 空周期的提示也按**当前班次名**拼（票 11 能改名、能加第三个）：写死
+    // 「白班 夜班 休」会让改了名的店对着一句不存在的话猜。
+    expect(view).toMatch(/周期不能空着：至少写一天，例如「\$\{names \|\| '班次'\} 休」/)
+    expect(view).not.toContain('例如「白班')
   })
 
   it('changes one day without touching the rule (票 07)', () => {

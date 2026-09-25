@@ -7,6 +7,7 @@
 """
 
 import ast
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -2028,6 +2029,400 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         names = [shift["name"] for shift in await self.store.list_shifts()]
         self.assertEqual(names, ["早班", "夜班"])
 
+    # ── 班次表的编辑（票 11）────────────────────────────────────────────
+
+    async def _past_row(self, employee_id, day, shift_id):
+        """手写一行「历史」：展开窗口从今天起，跑不出过去的日子。
+
+        停用/改名那几条验收说的是「**已经写下的**行照旧显示」，所以这里直接落一行 ——
+        它跟三个月前展开出来的那行在数据上长得一样（`source='rule'`）。
+        """
+        stamp = self.fixed_now.isoformat()
+        await self.db._conn.execute(
+            """INSERT INTO staff_assignments
+                   (employee_id, business_date, shift_id, zone_id, source, created_at, updated_at)
+               VALUES (?, ?, ?, NULL, 'rule', ?, ?)""",
+            (employee_id, day, shift_id, stamp, stamp),
+        )
+        await self.db._conn.commit()
+
+    async def test_renaming_a_shift_does_not_touch_a_single_row(self):
+        """验收 1：改名字安全 —— 别处引用的都是 id（`staff_assignments.shift_id` 没有外键）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        before = await self._full_rows(employee["id"])
+
+        renamed = await self.store.update_shift(day, name="早班")
+
+        self.assertEqual(
+            (renamed["id"], renamed["name"], renamed["sort_order"], renamed["is_active"]),
+            (day, "早班", 10, True),
+        )
+        self.assertEqual(await self._full_rows(employee["id"]), before)
+        self.assertEqual((await self.store.my_days(employee["id"]))["days"][0]["shift_name"], "早班")
+        # 月历与当天名单按 id 翻译名字：历史行跟着新名字显示，不用回填一行数据。
+        calendar = await self.store.month_calendar("2026-09")
+        self.assertEqual([shift["name"] for shift in calendar["shifts"]], ["早班", "夜班"])
+
+    async def test_shift_names_are_validated_with_readable_reasons(self):
+        await self._employee()
+        day = await self._shift_id("白班")
+        middle = await self.store.create_shift("中班")
+        self.assertEqual((middle["name"], middle["sort_order"], middle["is_active"]), ("中班", 30, True))
+        # 显式给排序位也认（新班次插在两条中间）。
+        self.assertEqual((await self.store.create_shift("打烊班", sort_order=25))["sort_order"], 25)
+
+        for payload in ("", "   ", None):
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.create_shift(payload)
+            self.assertEqual(caught.exception.code, "missing_shift_name")
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.create_shift("早班早班早班早班早班早班早")
+        self.assertEqual((caught.exception.code, caught.exception.args[0]), ("shift_name_too_long", "12"))
+        # 两头的空白不算名字的一部分：`" 中班 "` 跟已有的「中班」是同一条。
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.create_shift(" 中班 ")
+        self.assertEqual(caught.exception.code, "shift_name_taken")
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.update_shift(day, name="中班")
+        self.assertEqual(caught.exception.code, "shift_name_taken")
+        # 改成自己原来的名字不算重名（否则「只调顺序」也会被自己拦下来）。
+        self.assertEqual((await self.store.update_shift(day, name="白班"))["name"], "白班")
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.update_shift(day, sort_order="靠前一点")
+        self.assertEqual(caught.exception.code, "invalid_shift_order")
+        for call in (lambda: self.store.update_shift(987654, name="没有这个班次"),
+                     lambda: self.store.delete_shift(987654)):
+            with self.assertRaises(SchedulingError) as caught:
+                await call()
+            self.assertEqual(caught.exception.code, "unknown_shift_id")
+        # 停用的班次照样能改（改名、重新启用）—— 「不存在」与「已停用」是两件事。
+        await self.store.update_shift(middle["id"], is_active=False)
+        self.assertEqual((await self.store.update_shift(middle["id"], name="晚班"))["name"], "晚班")
+
+    async def test_reordering_is_the_whole_table_at_once(self):
+        """验收 1：调显示顺序 —— 一次给全，落成 10、20、30…（不留半个状态）。"""
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        middle = await self.store.create_shift("中班")
+
+        ordered = await self.store.reorder_shifts([middle["id"], night, day])
+
+        self.assertEqual(
+            [(shift["name"], shift["sort_order"]) for shift in ordered],
+            [("中班", 10), ("夜班", 20), ("白班", 30)],
+        )
+        self.assertEqual(
+            [shift["name"] for shift in await self.store.list_shifts()],
+            ["中班", "夜班", "白班"],
+        )
+        # 少给、多给、给重、给个不存在的：一律「刷新一下再调」，不猜剩下的排哪儿。
+        for payload in ([day, night], [day, night, middle["id"], 999], [day, day, night],
+                        ["白班"], "白班", ["白班", "夜班", "中班"]):
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.reorder_shifts(payload)
+            self.assertEqual(caught.exception.code, "shift_order_mismatch")
+        # 顺序没被那几次失败的调用改掉。
+        self.assertEqual(
+            [shift["name"] for shift in await self.store.list_shifts()],
+            ["中班", "夜班", "白班"],
+        )
+
+    async def test_disabling_a_shift_needs_nobody_on_it(self):
+        """验收 2 + 3：还有人排着它就不给停用（并说清人数）；停用后配规则挑不到它。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.update_shift(day, is_active=False)
+        self.assertEqual((caught.exception.code, caught.exception.args[0]), ("shift_in_use", "1"))
+        self.assertTrue((await self.store.list_shifts(include_inactive=True))[0]["is_active"])
+
+        # 把规则换掉（新排班的来源）之后白班没人上了 —— 这时才给停用。
+        await self.store.set_rule(employee["id"], [night])
+        stopped = await self.store.update_shift(day, is_active=False)
+        self.assertFalse(stopped["is_active"])
+        self.assertEqual([shift["name"] for shift in await self.store.list_shifts()], ["夜班"])
+        # 编辑页要能看见它（给它改名、重新启用），配规则却挑不到它。
+        self.assertEqual(
+            [shift["name"] for shift in await self.store.list_shifts(include_inactive=True)],
+            ["白班", "夜班"],
+        )
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.set_rule(employee["id"], [day])
+        self.assertEqual(caught.exception.code, "unknown_shift_in_cycle")
+
+    async def test_a_stopped_shift_still_shows_the_rows_already_written(self):
+        """验收 2：停用**不等于**把历史抹掉 —— 已经写下的行照旧显示那个班次。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [night])
+        await self._past_row(employee["id"], "2026-09-23", day)
+
+        await self.store.update_shift(day, is_active=False)
+
+        calendar = await self.store.month_calendar("2026-09")
+        # 启用的排前面，停用但这段里有行的跟在后面（`_shifts_for_display` 的老口径）。
+        self.assertEqual([shift["name"] for shift in calendar["shifts"]], ["夜班", "白班"])
+        cells = {item["business_date"]: item for item in calendar["days"]}
+        self.assertEqual(cells["2026-09-23"]["counts"][str(day)], 1)
+        # 今天往后白班一个人都没有：停用后新排班不再用它（规则一展开也不再写回来）；
+        # 唯一一行白班还是 9/23 那行历史，没被谁拿掉。
+        self.assertEqual(cells[TODAY]["counts"][str(day)], 0)
+        rows = await self._rows(employee["id"])
+        self.assertEqual(
+            [
+                row["shift_id"] for row in rows
+                if row["business_date"] >= TODAY and row["shift_id"] == day
+            ],
+            [],
+        )
+        self.assertEqual(
+            [(row["business_date"], row["shift_id"]) for row in rows if row["shift_id"] == day],
+            [("2026-09-23", day)],
+        )
+        groups = {
+            group["shift"]["name"]: group
+            for group in (await self.store.day_detail("2026-09-23"))["groups"]
+        }
+        self.assertEqual([person["name"] for person in groups["白班"]["people"]], ["张三"])
+        # 一个从来没排过班的停用班次不白占一列（「带上它」的条件是那个范围里真有行）。
+        middle = await self.store.create_shift("中班")
+        await self.store.update_shift(middle["id"], is_active=False)
+        self.assertEqual(
+            [shift["name"] for shift in (await self.store.month_calendar("2026-09"))["shifts"]],
+            ["夜班", "白班"],
+        )
+
+    async def test_reactivating_a_shift_keeps_the_rows_it_already_had(self):
+        """验收 6：停用再启用，之前的排班不受影响（一行都没被谁动过）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [night])
+        # 这天他本来上夜班，店长把**那一天**改成白班（单日覆盖）：白班于是有了一行，
+        # 但没有谁的**轮转**里排着它，所以停得掉 —— 停用看的是「还有人在上」。
+        await self.store.set_override(employee["id"], "2026-09-25", shift_id=day)
+        before = await self._full_rows(employee["id"])
+
+        await self.store.update_shift(day, is_active=False)
+        # 停用期间：那天的覆盖照旧显示（它是已经写下的行），但月历图例里不出白班 ——
+        # 白班在 9 月确实还有一行（9/25 的覆盖），所以它照样带上。
+        during = await self.store.day_detail("2026-09-25")
+        self.assertEqual(
+            [group["shift"]["name"] for group in during["groups"] if group["count"]],
+            ["白班"],
+        )
+
+        back = await self.store.update_shift(day, is_active=True)
+
+        self.assertTrue(back["is_active"])
+        self.assertEqual(await self._full_rows(employee["id"]), before)
+        self.assertEqual(
+            [shift["name"] for shift in await self.store.list_shifts()], ["白班", "夜班"]
+        )
+
+    async def test_used_shifts_cannot_be_deleted(self):
+        """验收 5：排过班的删不掉（那句错话里说清为什么）；刚建错的才删得掉。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        mistake = await self.store.create_shift("中班")
+
+        gone = await self.store.delete_shift(mistake["id"])
+        self.assertEqual(gone["name"], "中班")
+        self.assertEqual(
+            [shift["name"] for shift in await self.store.list_shifts()], ["白班", "夜班"]
+        )
+
+        await self.store.set_rule(employee["id"], [day])
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.delete_shift(day)
+        self.assertEqual(caught.exception.code, "shift_used")
+        self.assertIn(f"已经排过 {EXPANSION_DAYS} 天班", caught.exception.args[0])
+        # 那条规则还在（拒绝 = 什么都没做）。
+        self.assertEqual(
+            [row["shift_id"] for row in await self._rows(employee["id"])][:1], [day]
+        )
+        # 只在别人的轮转里、一天班都还没排的，也是「用过」：理由说的是人不是天数。
+        idle = await self._employee("13800138001", "李四")
+        stamp = self.fixed_now.isoformat()
+        await self.db._conn.execute(
+            """INSERT INTO scheduling_rules (employee_id, cycle, anchor_date, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (idle["id"], f"[{night}]", TODAY, stamp, stamp),
+        )
+        await self.db._conn.commit()
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.delete_shift(night)
+        self.assertEqual(caught.exception.code, "shift_used")
+        self.assertIn("还有 1 个人的轮转里排着它", caught.exception.args[0])
+
+    async def test_the_last_usable_shift_cannot_be_removed(self):
+        """停用或删掉最后一个**在用**的班次都拦下来：不然谁都没班可排。"""
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.update_shift(day, is_active=False)
+        await self.store.delete_shift(day)
+
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.update_shift(night, is_active=False)
+        self.assertEqual(caught.exception.code, "last_active_shift")
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.delete_shift(night)
+        self.assertEqual(caught.exception.code, "last_active_shift")
+        # 那次拒绝什么都没删掉。
+        self.assertEqual(
+            [shift["name"] for shift in await self.store.list_shifts()], ["夜班"]
+        )
+
+    async def test_deleting_the_only_active_shift_is_refused_even_if_others_are_stopped(self):
+        """两道闸得同一个口径：先停一条、再删掉唯一在用的那条，也拦得住。
+
+        删的那条自己「没人用过」，但删完就一条在用的都不剩了 —— 数「一共还剩几条」
+        会放它过去（真出现过：删完 `/shifts` 是空的，配规则直接报没有可用班次）。
+        """
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.update_shift(night, is_active=False)  # 白班是唯一在用的
+
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.delete_shift(day)
+        self.assertEqual(caught.exception.code, "last_active_shift")
+        self.assertEqual(
+            [(shift["name"], shift["is_active"]) for shift in await self.store.list_shifts(include_inactive=True)],
+            [("白班", True), ("夜班", False)],
+        )
+        # 停用的那条删得掉（删它不影响「还有没有人能排班」）。
+        self.assertEqual((await self.store.delete_shift(night))["name"], "夜班")
+        self.assertEqual([shift["name"] for shift in await self.store.list_shifts()], ["白班"])
+
+    async def test_a_shift_cannot_be_stopped_while_a_rule_is_being_written(self):
+        """配规则与停用赛跑：不许出现「班次已停用、轮转里还排着它」。
+
+        交错点要卡准：**对方已经在写锁里、规则还没写下去**的那一刻，锁外读到的用量还是
+        0 —— 停用闸如果不在锁里就会放行，接着规则也写成，坏状态成立。所以这里把
+        `_write_rule_row` 按住（Event），等停用那边把「读用量 - 判」跑完再放它继续。
+
+        同时起飞（`asyncio.gather`）测不出这件事：`update_shift` 常常先抢到锁、把班次
+        停掉，`set_rule` 随即在锁里复验拒绝，规则根本没写下去 —— 坏状态没机会成形
+        （复核实测：把停用闸整段搬出写锁，gather 那版用例照样全绿）。
+        """
+        employee = await self._employee()
+        await self.store.create_shift("中班")
+        middle = [shift for shift in await self.store.list_shifts() if shift["name"] == "中班"][0]
+
+        hold = asyncio.Event()
+        real_write_rule = SchedulingStore._write_rule_row
+
+        async def held_write_rule(self, employee_id, cycle, anchor_date):
+            # 停在「锁已经拿到、规则还没写」这一刻。
+            await hold.wait()
+            return await real_write_rule(self, employee_id, cycle, anchor_date)
+
+        with mock.patch.object(SchedulingStore, "_write_rule_row", held_write_rule):
+            rule_task = asyncio.create_task(self.store.set_rule(employee["id"], [middle["id"]]))
+            await asyncio.sleep(0.05)  # set_rule 已经拿着写锁、停在写规则那一步
+            stop_task = asyncio.create_task(
+                self.store.update_shift(middle["id"], is_active=False)
+            )
+            await asyncio.sleep(0.05)  # 让停用那边把它的「读用量 - 判」跑完
+            hold.set()
+            results = await asyncio.gather(rule_task, stop_task, return_exceptions=True)
+
+        # 两种交错都合法，但**只能成一件**：要么规则写不进去（班次先被停用），
+        # 要么停用被拦住（规则已经排着它）。两件都成就是坏状态。
+        done = [result for result in results if not isinstance(result, Exception)]
+        refused = [result for result in results if isinstance(result, Exception)]
+        self.assertEqual(len(done), 1, f"两件都成了：{results}")
+        self.assertEqual(len(refused), 1, f"两件都被拒：{results}")
+        self.assertIn(refused[0].code, {"unknown_shift_in_cycle", "shift_in_use"})
+
+        stopped = [
+            shift for shift in await self.store.list_shifts(include_inactive=True)
+            if shift["id"] == middle["id"]
+        ][0]
+        rules = await self.store.list_rules()
+        in_rule = middle["id"] in rules.get(employee["id"], {}).get("cycle", [])
+        self.assertFalse(
+            not stopped["is_active"] and in_rule,
+            f"坏状态：中班已停用，规则里还排着它（结果 {results}）",
+        )
+
+    async def test_shift_names_cover_the_boundary_and_the_reserved_words(self):
+        """恰好到上限的名字要收（前端 `maxlength` 就让它敲得出来），保留词一律不收。"""
+        day = await self._shift_id("白班")
+
+        # 12 个字：收（上限就是 12）；13 个字：不收。
+        self.assertEqual((await self.store.create_shift("一二三四五六七八九十一二"))["name"], "一二三四五六七八九十一二")
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.create_shift("一二三四五六七八九十一二三")
+        self.assertEqual((caught.exception.code, caught.exception.args[0]), ("shift_name_too_long", "12"))
+        # 改名同一道闸：恰好 12 个字也收。
+        renamed = await self.store.update_shift(day, name="早班早班早班早班早班早班")
+        self.assertEqual(len(renamed["name"]), 12)
+
+        # 「休」这一族留给「那天休息」（月历的周期编辑先认班次名、认不出才当休息）：
+        # 建与改都不许用，且把那两个词回给接口层，好让文案点名。
+        for word in ("休", "休息", "空", "x", "-"):
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.create_shift(word)
+            self.assertEqual((caught.exception.code, caught.exception.args[0]), ("shift_name_reserved", word))
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.update_shift(day, name="休")
+        self.assertEqual((caught.exception.code, caught.exception.args[0]), ("shift_name_reserved", "休"))
+        # 带空白的「 休 」也是同一个词（先去两头空白再判）。
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.create_shift(" 休 ")
+        self.assertEqual(caught.exception.code, "shift_name_reserved")
+        # 名字里含「休」不算（「周末休班」是名字，不是那个保留词）。
+        self.assertEqual((await self.store.create_shift("周末休班"))["name"], "周末休班")
+
+    async def test_usage_counts_people_in_the_rotation_and_days_written(self):
+        """编辑页要看到的两个数：几个人的轮转里排着它、已经排过多少天班。"""
+        first = await self._employee("13800138000", "张三")
+        second = await self._employee("13800138001", "李四")
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(first["id"], [day])
+        await self.store.set_rule(second["id"], [day, day, night])
+
+        usage = await self.store.shift_usage()
+
+        # 李四的周期是「白白夜」：90 天里白班 60 天、夜班 30 天。
+        self.assertEqual(usage[day], {"people": 2, "days": EXPANSION_DAYS + 60})
+        self.assertEqual(usage[night], {"people": 1, "days": 30})
+        # 每个班次都有一项（页面照着自己的班次列表取值，不用补默认值）。
+        middle = await self.store.create_shift("中班")
+        self.assertEqual((await self.store.shift_usage())[middle["id"]], {"people": 0, "days": 0})
+
+    async def test_a_third_shift_flows_through_calendar_and_staff_card(self):
+        """验收 4：加第三个班次之后，月历与员工端卡片自动多出一种班别（不改代码）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        middle = await self.store.create_shift("中班")
+        await self.store.set_rule(employee["id"], [middle["id"]])
+
+        calendar = await self.store.month_calendar("2026-09")
+        # 月历图例按班次列表渲染：新班次自己就多出一列（前端是 `v-for`，没有写死两个）。
+        self.assertEqual(
+            [shift["name"] for shift in calendar["shifts"]], ["白班", "夜班", "中班"]
+        )
+        cells = {item["business_date"]: item for item in calendar["days"]}
+        self.assertEqual(cells[TODAY]["counts"][str(middle["id"])], 1)
+        self.assertEqual(cells[TODAY]["counts"][str(day)], 0)
+        # 员工端那张卡：班次名由结果行的 id 翻译出来，一个新班次不需要谁认识它。
+        self.assertEqual((await self.store.my_days(employee["id"]))["days"][0]["shift_name"], "中班")
+        groups = {
+            group["shift"]["name"]: group
+            for group in (await self.store.day_detail(TODAY))["groups"]
+        }
+        self.assertEqual([person["name"] for person in groups["中班"]["people"]], ["张三"])
+
     async def test_connection_knows_the_new_tables(self):
         """新表也要进连接的 TableView 清单，否则 `db.table("staff_shifts")` 抛「未知表」。"""
         for table in SCHEDULING_TABLES:
@@ -2060,7 +2455,8 @@ class SchedulingLayeringTest(unittest.TestCase):
         `/me/month` 之后，边界从「零条」变成「两扇门互不通用」—— 店长那几条只认
         管理端会话，员工那几条只认手机端 cookie。票 08 在两边各加了请假申请的路由
         （员工提/撤回、店长批/驳），票 09 又加了换班那几条（找谁换、提、对方同意/拒绝），
-        员工那扇门仍然全挂在 `/me` 底下。
+        票 11 再给店长那扇门加了班次表的编辑（增、改、删、调顺序），员工那扇门仍然全挂在
+        `/me` 底下。
 
         断言路由表本身，不是源码文本 —— 文本比对会被注释或文档字符串误伤
         （写一句「这里不用 require_staff_session」就红了）。
@@ -2081,6 +2477,10 @@ class SchedulingLayeringTest(unittest.TestCase):
         }
         manager_paths = {
             "/api/scheduling/shifts",
+            # 票 11：班次表的编辑（看含停用的全表 + 用量、增、改、删、整表调顺序）。
+            "/api/scheduling/shifts/manage",
+            "/api/scheduling/shifts/order",
+            "/api/scheduling/shifts/{shift_id}",
             "/api/scheduling/calendar",
             "/api/scheduling/day",
             "/api/scheduling/roster",

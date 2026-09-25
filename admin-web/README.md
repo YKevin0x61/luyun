@@ -21,14 +21,19 @@
 - 卫生管理端（`/hygiene-roster`、`/hygiene-zones`、`/hygiene-daily`、
   `/hygiene-deep-clean`、`/hygiene-fix`、`/hygiene-boards`、`/hygiene-data`）：
   排班、责任区、日常与专项计划、整改单、红黑榜、卫生数据台账（浏览 / 导出 / 清理）
-- 排班（店长端 `/scheduling` 与 `/scheduling/inbox`、员工端 `/today` 与 `/today/month`）：
+- 排班（店长端 `/scheduling`、`/scheduling/inbox` 与 `/scheduling/shifts`、员工端 `/today` 与
+  `/today/month`）：
   固定班次、责任区默认、轮转周期，由系统展开成月历；店长能点某天的某人**就地改那一天**
   （票 07：换班次 / 改成休 / 只换区，只动这一天、规则一个字不改，改过的日子带青点、
   撤掉覆盖就回到规则）；员工在「今天」页**提请假**（一天或一段，没批之前能撤回），
   店长在「待办」页批（票 08：批之前就写着那天每个班次还剩几个人，人手够不够只提示不拦；
   批了那几天变成请假、跟本来就休分开说，驳回排班一个字不变）；**换班**也在这两页上
   （票 09：员工指定同事与哪一天提一条，对方先在手机上同意或拒绝，**两边都点了才轮到店长**，
-  批了那两个人当天的班对调、责任区各跟着自己的新班次走）；
+  批了那两个人当天的班对调、责任区各跟着自己的新班次走）；班次本身也是店长在
+  **班次表**页上维护的（票 11：加一条、改名字、调显示顺序、启用停用 —— 停用后新排班不再
+  用它、**历史排班照旧显示**，还有人的轮转里排着它时会拦下来说清人数；排过班的删不掉，
+  删除只留给刚建错的那条。加第三个班次不需要改代码：月历图例、规则下拉、员工卡片都按
+  N 个班次渲染）；
   员工端「今天」页是员工登录后的落点，「整月」页（票 06）
   按日历列出自己这个月的班别，两页都只读自己的班（卫生那块下一张票接到「今天」页上）
 - 员工手机端（`/today`、`/today/month`、`/hygiene`、`/hygiene/login`、`/hygiene/register`）：
@@ -89,7 +94,8 @@ src/
                            # useDbCredentials / usePosCredentials / useRuntimeSettings /
                            # useSystemHealth / useHygieneRealtime / usePwaUpdate
   utils/                    # 纯函数，如 dateRange / recipeCore / salesReportText /
-                           # hygieneWorkFlow / hygieneMarkup / backupPoints / updateProgress
+                           # hygieneWorkFlow / hygieneMarkup / backupPoints / updateProgress /
+                           # todayShift / leaveRequest / shiftTable（排班那三页的人话翻译）
   components/
     NavBar.vue / SvgIcon.vue / PwaUpdateBanner.vue / ImageUploadQueuePanel.vue
     admin/*.vue             # DataTable、RowEditModal、ClassifyDishesModal、ColumnManageModal
@@ -103,7 +109,7 @@ src/
     recipe/*.vue            # RecipeStationsView / RecipeDetailView / RecipeManageView /
                             # RecipePrintView / RecipeQrView
     hygiene/*.vue           # 管理端 7 页 + 员工端 Home/Login/Register + 两个 Layout
-    scheduling/*.vue        # 排班日历 + 待办（店长端，独立系统，不 import 卫生）
+    scheduling/*.vue        # 排班日历 + 待办 + 班次表（店长端，独立系统，不 import 卫生）
     today/*.vue             # 员工端「今天」（含请假与换班表单）+「整月」两页（登录后的落点，
                             # 读 /api/scheduling/me、/me/month 与 /me/requests、
                             # /me/colleagues 与 /me/swaps*（换班选人、提、回应））

@@ -279,19 +279,23 @@ function closeCycle() {
 // 别让店长对着「排班参数不合法」猜。
 function parseCycle(text) {
   const tokens = String(text || '').split(/[\s,，、·/]+/).filter(Boolean)
-  if (!tokens.length) return { error: '周期不能空着：至少写一天，例如「白班 夜班 休」' }
+  // 例子按**当前班次名**拼：班次是数据（票 11 能改名、能加第三个），文案里写死
+  // 「白班 夜班 休」会让改了名的店对着一句不存在的话猜。
+  const names = (shifts.value || []).map((shift) => shift.name).join('、')
+  if (!tokens.length) {
+    return { error: `周期不能空着：至少写一天，例如「${names || '班次'} 休」` }
+  }
   if (tokens.length > maxCycleDays.value) {
     return { error: `周期最多 ${maxCycleDays.value} 天，现在写了 ${tokens.length} 天` }
   }
   const byName = new Map((shifts.value || []).map((shift) => [shift.name, shift.id]))
-  const names = (shifts.value || []).map((shift) => shift.name).join('、')
   const cycle = []
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
     // 班次名**先于**「休」的别名判：班次名是数据（票 11 能改），万一店里真有个
     // 班次叫「休」，写「休」应当指那个班次而不是静默变成休息日。代价是那种店里
-    // 不能再用「休」写休息（还有 休息/空/x/- 这些别名），票 11 建班次时再禁止
-    // 这些保留词，见票 04 的「转出」。
+    // 不能再用「休」写休息（还有 休息/空/x/… 这些别名）—— 所以**建班次时就挡住了
+    // 这些保留词**（`RESERVED_SHIFT_NAMES`，服务层的 `_clean_shift_name`）。
     if (byName.has(token)) {
       cycle.push(byName.get(token))
     } else if (REST_WORDS.includes(token)) {
@@ -645,6 +649,13 @@ onMounted(async () => {
             <span class="n">假</span>
             <b>请假待办</b>
             <span>员工提的请假在这儿批：批完那天记成请假，先看清批了还剩几个人</span>
+            <span class="go">›</span>
+          </button>
+
+          <button class="gPend" type="button" @click="router.push('/scheduling/shifts')">
+            <span class="n">班</span>
+            <b>班次表</b>
+            <span>加一个班次、改名字、调顺序、停用 —— 加完月历和员工卡片自己就多一种班别</span>
             <span class="go">›</span>
           </button>
 

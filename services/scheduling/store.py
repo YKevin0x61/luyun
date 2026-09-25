@@ -9,6 +9,8 @@
 五件事在这一层：
 
 - **班次**（`staff_shifts`）：白班、夜班是**数据**不是常量，加第三个班次是改数据。
+  票 11 给了店长编辑它的界面：改名、调显示顺序、启用停用、删掉刚建错的那一条
+  （用过的删不掉，只能停用 —— 历史排班照旧显示）。
 - **规则**（`scheduling_rules`）：一人一条轮转规则 —— `cycle` 的长度就是周期天数，
   每格是班次 id、`None` 表示休；`anchor_date` 是周期起点，相位由它和营业日之差算。
 - **展开**（`expand`）：把规则铺成 `staff_assignments` 的行，滚动铺未来 90 天。
@@ -72,6 +74,7 @@ __all__ = [
     "KIND_SWAP",
     "MAX_CYCLE_DAYS",
     "MAX_REQUEST_NOTE",
+    "MAX_SHIFT_NAME",
     "REST",
     "SOURCE_OVERRIDE",
     "SOURCE_RULE",
@@ -137,6 +140,21 @@ MAX_CYCLE_DAYS = 60
 # 两行，那是给「装完就看」的；见 `prepare()` 为什么还留了一手）。
 DEFAULT_SHIFTS = (("白班", 10), ("夜班", 20))
 
+# 班次名的上限（票 11）：这个名字要出现在月历图例、规则编辑的胶囊、当天名单里，
+# 都是窄地方。上限是服务层的数，编辑页从 `/shifts/manage` 拿到它（`max_name`），
+# 前端不再写死一份 —— 跟 `MAX_CYCLE_DAYS` 随 `/roster` 下去是同一个口径。
+MAX_SHIFT_NAME = 12
+
+# 显示顺序的步长：新班次排在最后（当前最大 + 10）；「上移 / 下移」是整表重排，
+# 按 10、20、30… 重新铺一遍 —— 留出空档，手工插一行不用把后面全改。
+SHIFT_ORDER_STEP = 10
+
+# 「休」这一族写法留给「那天休息」：月历的周期编辑页**先认班次名、认不出才当休息**
+# （`SchedulingCalendarView.vue` 的 `REST_WORDS`），所以店里真有个班次叫「休」的话，
+# 那家店就再也没法用这些词写休息了。票 04 审查把这件事转出给票 11，这里收口：
+# 建班次与改名都不许用这些词（停用的班次一样不许改叫它们）。
+RESERVED_SHIFT_NAMES = ("休", "休息", "空", "x", "X", "-", "—")
+
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
@@ -157,6 +175,32 @@ def _require_business_date(value: Any) -> str:
         return date.fromisoformat(text).isoformat()
     except ValueError:
         raise SchedulingError("invalid_business_date", "invalid_business_date")
+
+
+def _clean_shift_name(value: Any) -> str:
+    """班次名去掉两头空白；空、太长、用了保留词各报一句能照做的错（票 11）。
+
+    不悄悄截断：名字是店长写下的东西，被系统改掉比报错更难受（事由 `_clean_note` 同理）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        raise SchedulingError("missing_shift_name", "missing_shift_name")
+    if len(text) > MAX_SHIFT_NAME:
+        raise SchedulingError("shift_name_too_long", str(MAX_SHIFT_NAME))
+    if text in RESERVED_SHIFT_NAMES:
+        # 把那个词回给接口层，好让文案点名（「休」和「空」的处理办法不一样）。
+        raise SchedulingError("shift_name_reserved", text)
+    return text
+
+
+def _shift_order(value: Any) -> Optional[int]:
+    """显示顺序：空 = 让服务层决定（新班次排最后）；非整数报一句人话，不猜。"""
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise SchedulingError("invalid_shift_order", "invalid_shift_order")
 
 
 def _month_start(month: Any) -> date:
@@ -366,6 +410,223 @@ class SchedulingStore:
             })
         return shifts
 
+    # ── 班次表的编辑（票 11）─────────────────────────────────────────────
+    #
+    # 班次是**数据**不是常量（见文件头）：加一个班次、改个名字、调顺序、停用一条，
+    # 都是店长在这个界面上做的事，不用改库。四件事共同的纪律：
+    #
+    # - 纯输入校验（名字空/太长/保留词、顺序不是整数）在锁外做，为了快也给得早；
+    #   而**「读现状 - 判 - 写」这三步一律在 `@serialized_write` 里**（停用闸、
+    #   删除闸、整表重排的全集校验）—— 中间被别的写请求插一下，判的就作废了
+    #   （例如 `set_rule` 正好把要停用的班次排进某个人的轮转）。
+    # - 报错给人话：能照做的那种（「还有 3 个人的轮转里排着它」），不是「参数不合法」。
+
+    async def _shift_row(self, shift_id: int) -> dict:
+        """按 id 取一行班次（**含停用的**）；没有就报 `unknown_shift_id`。
+
+        跟 `unknown_shift`（责任区那条路：只能挑在用的班次）分开：编辑班次表必须
+        能改到停用的那一条（给它改个名、重新启用），不能因为停用就「不存在」。
+        """
+        cur = await self._conn.execute(
+            "SELECT id, name, sort_order, is_active FROM staff_shifts WHERE id = ?",
+            (int(shift_id),),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise SchedulingError("unknown_shift_id", "unknown_shift_id")
+        mapping = dict(row)
+        return {
+            "id": int(mapping["id"]),
+            "name": mapping["name"],
+            "sort_order": int(mapping["sort_order"]),
+            "is_active": bool(int(mapping["is_active"] or 0)),
+        }
+
+    async def _require_shift_name_free(self, name: str, exclude_id: Optional[int] = None) -> None:
+        """重名先在这里挡一道，为的是给一句人话；最后一道是库里的 UNIQUE。"""
+        for shift in await self.list_shifts(include_inactive=True):
+            if shift["name"] == name and shift["id"] != exclude_id:
+                raise SchedulingError("shift_name_taken", "shift_name_taken")
+
+    @_needs_migration
+    async def shift_usage(self) -> dict[int, dict]:
+        """每个班次有多少人在用（票 11 的编辑页、停用与删除两道闸都读它）。
+
+        - `people`：轮转规则里排着这个班次的人数 —— **未来新排班的来源**。停用前要知道
+          这个数：还有人排着它就停用，等于「停用后新排班不再用它」这句话不成立。
+        - `days`：`staff_assignments` 里这个班次的行数（历史 + 已铺的未来）——
+          「已经被排班用过的班次删不掉」看的是这个数。
+
+        每个班次都有一项（哪怕都是 0）：页面照着自己的班次列表取值，不用补默认值。
+        """
+        people: dict[int, set] = {}
+        for employee_id, rule in (await self.list_rules()).items():
+            for shift_id in rule["cycle"]:
+                if shift_id is not REST:
+                    people.setdefault(int(shift_id), set()).add(int(employee_id))
+        days: dict[int, int] = {}
+        for row in await (await self._conn.execute(
+            """SELECT shift_id, COUNT(*) AS n FROM staff_assignments
+               WHERE shift_id IS NOT NULL GROUP BY shift_id"""
+        )).fetchall():
+            mapping = dict(row)
+            days[int(mapping["shift_id"])] = int(mapping["n"] or 0)
+        return {
+            shift["id"]: {
+                "people": len(people.get(shift["id"], ())),
+                "days": days.get(shift["id"], 0),
+            }
+            for shift in await self.list_shifts(include_inactive=True)
+        }
+
+    @_needs_migration
+    async def create_shift(self, name: Any, sort_order: Any = None) -> dict:
+        """加一个班次（票 11）。不给顺序就排在最后（当前最大 + `SHIFT_ORDER_STEP`）。
+
+        新班次一律**启用**：店长刚建它就是要用它，建完再停用是没有意义的绕路。
+        """
+        text = _clean_shift_name(name)
+        order = _shift_order(sort_order)
+        await self._require_shift_name_free(text)
+        return await self._insert_shift(text, order)
+
+    @serialized_write
+    async def _insert_shift(self, name: str, sort_order: Optional[int]) -> dict:
+        stamp = self._now_iso()
+        if sort_order is None:
+            cur = await self._conn.execute("SELECT COALESCE(MAX(sort_order), 0) AS top FROM staff_shifts")
+            row = await cur.fetchone()
+            sort_order = int(dict(row)["top"] or 0) + SHIFT_ORDER_STEP
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO staff_shifts (name, sort_order, is_active, created_at, updated_at)
+                   VALUES (?, ?, 1, ?, ?) RETURNING id""",
+                (name, sort_order, stamp, stamp),
+            )
+            new_id = int(dict(await cur.fetchone())["id"])
+        except asyncpg.UniqueViolationError:
+            # 上面那次查重在写锁外，挡不住同一瞬间进来的第二条：库里的 UNIQUE 兜底。
+            raise SchedulingError("shift_name_taken", "shift_name_taken") from None
+        await self._conn.commit()
+        return {"id": new_id, "name": name, "sort_order": sort_order, "is_active": True}
+
+    @_needs_migration
+    async def update_shift(
+        self,
+        shift_id: int,
+        name: Any = None,
+        sort_order: Any = None,
+        is_active: Any = None,
+    ) -> dict:
+        """改一个班次：名字 / 显示顺序 / 启用停用（票 11）。`None` = 这一项不动。
+
+        改名的安全性来自「别处引用的是 id」：`staff_assignments.shift_id` 没有外键、
+        也没有谁按名字对齐（票 10 接线时同样别按名字对齐），所以改完名字，历史行
+        跟着新名字显示，一行数据都不用动。
+
+        **停用**是这里唯一有前提的一项（还有人排着它、或者它是最后一个在用的），
+        两道判都在 `_update_shift_row` 的写锁里 —— 「读用量 - 判 - 写」中间被
+        `set_rule` 插一下就白判了（那条规则会把停用掉的班次又铺回来）。
+        """
+        current = await self._shift_row(int(shift_id))
+        text = current["name"] if name is None else _clean_shift_name(name)
+        order = current["sort_order"] if sort_order is None else _shift_order(sort_order)
+        wanted = current["is_active"] if is_active is None else bool(is_active)
+        if text != current["name"]:
+            await self._require_shift_name_free(text, exclude_id=current["id"])
+        return await self._update_shift_row(current["id"], text, order, wanted)
+
+    @serialized_write
+    async def _update_shift_row(self, shift_id: int, name: str, sort_order: int, is_active: bool) -> dict:
+        # 停用那两道闸在锁里读、锁里判（同 `_delete_shift_row`）：不然
+        # `gather(update_shift, set_rule)` 能稳定造出「班次已停用、规则还排着它」
+        # 的坏状态 —— 那正是这两道闸要拦的事。
+        current = await self._shift_row(shift_id)
+        if current["is_active"] and not is_active:
+            usage = await self.shift_usage()
+            in_use = int(usage.get(shift_id, {}).get("people", 0) or 0)
+            if in_use:
+                raise SchedulingError("shift_in_use", str(in_use))
+            if not [shift for shift in await self.list_shifts() if shift["id"] != shift_id]:
+                raise SchedulingError("last_active_shift", "last_active_shift")
+        stamp = self._now_iso()
+        try:
+            await self._conn.execute(
+                """UPDATE staff_shifts SET name = ?, sort_order = ?, is_active = ?, updated_at = ?
+                   WHERE id = ?""",
+                (name, sort_order, 1 if is_active else 0, stamp, shift_id),
+            )
+        except asyncpg.UniqueViolationError:
+            raise SchedulingError("shift_name_taken", "shift_name_taken") from None
+        await self._conn.commit()
+        return {"id": shift_id, "name": name, "sort_order": sort_order, "is_active": is_active}
+
+    @_needs_migration
+    async def delete_shift(self, shift_id: int) -> dict:
+        """删一个班次（票 11）。**用过的删不掉**：那些天在月历上会找不到班次。
+
+        「用过」= `staff_assignments` 里有这个班次的行（历史或已铺的未来），或者还有
+        人的轮转规则排着它。「删」只留给刚建错了、还没人用过的那一条；已经排过班的
+        班次停用就够了（历史照旧显示），这一条写在错误文案里。
+        """
+        return await self._delete_shift_row(int(shift_id))
+
+    @serialized_write
+    async def _delete_shift_row(self, shift_id: int) -> dict:
+        # 读-判-删都在锁里：删之前那个「还没人用」的判断不能被人插进来用掉。
+        current = await self._shift_row(shift_id)
+        numbers = (await self.shift_usage()).get(shift_id, {"people": 0, "days": 0})
+        reasons = []
+        if numbers["days"]:
+            reasons.append(f"已经排过 {numbers['days']} 天班")
+        if numbers["people"]:
+            reasons.append(f"还有 {numbers['people']} 个人的轮转里排着它")
+        if reasons:
+            raise SchedulingError("shift_used", "，".join(reasons))
+        rows = await self.list_shifts(include_inactive=True)
+        # 删掉它之后一个**在用**的班次都不剩 = 谁都没班可排。这里跟 `_update_shift_row`
+        # 的停用闸同一个口径（数还在用的），不能数「一共还剩几条」—— 否则
+        # 「先把一条停用、再把唯一在用的删掉」就溜过去了。
+        if not [shift for shift in rows if shift["id"] != shift_id and shift["is_active"]]:
+            raise SchedulingError("last_active_shift", "last_active_shift")
+        await self._conn.execute("DELETE FROM staff_shifts WHERE id = ?", (shift_id,))
+        await self._conn.commit()
+        return current
+
+    @_needs_migration
+    async def reorder_shifts(self, ids: Any) -> list[dict]:
+        """按给定顺序重铺显示顺序（票 11 的「上移 / 下移」）。
+
+        要求**给全**（所有班次，含停用的）：只给一部分的话「剩下的排哪儿」就成了一个
+        说不清的问题，而页面本来就拿着全表。顺序对不上时报「刷新一下再调」，不猜 ——
+        可能是刚有人加过或删过班次（校验在锁里，见 `_apply_shift_order`）。
+        """
+        if not isinstance(ids, (list, tuple)):
+            raise SchedulingError("shift_order_mismatch", "shift_order_mismatch")
+        order: list[int] = []
+        for item in ids:
+            try:
+                order.append(int(item))
+            except (TypeError, ValueError):
+                raise SchedulingError("shift_order_mismatch", "shift_order_mismatch")
+        if len(set(order)) != len(order):
+            raise SchedulingError("shift_order_mismatch", "shift_order_mismatch")
+        return await self._apply_shift_order(order)
+
+    @serialized_write
+    async def _apply_shift_order(self, order: list[int]) -> list[dict]:
+        known = {shift["id"] for shift in await self.list_shifts(include_inactive=True)}
+        if set(order) != known:
+            raise SchedulingError("shift_order_mismatch", "shift_order_mismatch")
+        stamp = self._now_iso()
+        for index, shift_id in enumerate(order, start=1):
+            await self._conn.execute(
+                "UPDATE staff_shifts SET sort_order = ?, updated_at = ? WHERE id = ?",
+                (index * SHIFT_ORDER_STEP, stamp, shift_id),
+            )
+        await self._conn.commit()
+        return await self.list_shifts(include_inactive=True)
+
     async def _shifts_for_display(self, seen_ids: set) -> list[dict]:
         """要展示的班次列：启用的全要；停用的只在**这个范围里真有行**的时候带上。
 
@@ -544,21 +805,18 @@ class SchedulingStore:
     ) -> dict:
         """给一个人配轮转规则，并把**今天以后**的规则行重铺一遍。
 
-        校验在锁外（都是读）；真正落地的三步 —— 写规则 → 删今天以后的旧行 → 重铺 ——
-        在**一次**写锁、一次提交里做完，中途不会留下「规则改了、行还是旧的」。
+        校验先做一遍（都是读，为了早报「第几格错了」）；真正落地的三步 —— 写规则 →
+        删今天以后的旧行 → 重铺 —— 在**一次**写锁、一次提交里做完，中途不会留下
+        「规则改了、行还是旧的」。**锁里还会再验一次班次**（见 `_require_shifts_usable`）：
+        读出「哪些班次还在用」与写下这条规则之间，正好可能有人把那个班次停用了
+        （票 11 的停用闸只挡反方向：先有规则、再停用）。
         """
         employee_id = int(employee_id)
         normalized = self._normalize_cycle(cycle)
         roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
         if employee_id not in {employee["id"] for employee in roster}:
             raise SchedulingError("unknown_employee", "unknown_employee")
-        known = {shift["id"] for shift in await self.list_shifts()}
-        for slot, shift_id in enumerate(normalized, start=1):
-            if shift_id is not REST and shift_id not in known:
-                # 说清是**第几格**：规则编辑页照这个数字就能指出错在哪一天
-                # （票 04 的验收项）。`unknown_shift` 留给责任区那条路
-                # （`set_zone_default`：给某人某个班次配区时选了个不存在的班次）。
-                raise SchedulingError("unknown_shift_in_cycle", str(slot))
+        await self._require_shifts_usable(normalized)
         anchor = self.today() if anchor_date in (None, "") else _require_business_date(anchor_date)
 
         await self._apply_rule(employee_id, normalized, anchor)
@@ -568,8 +826,23 @@ class SchedulingStore:
             "anchor_date": anchor,
         }
 
+    async def _require_shifts_usable(self, cycle: list) -> None:
+        """轮转里引用的班次都得是**还在用**的，不在就报是第几格。
+
+        说清第几格是票 04 的验收项：规则编辑页照这个数字就能指出错在哪一天。
+        `unknown_shift` 留给责任区那条路（`set_zone_default`：给某人某个班次配区时
+        选了个不存在的班次）。这个方法在锁外与锁里各调一次，理由见 `set_rule`。
+        """
+        known = {shift["id"] for shift in await self.list_shifts()}
+        for slot, shift_id in enumerate(cycle, start=1):
+            if shift_id is not REST and shift_id not in known:
+                raise SchedulingError("unknown_shift_in_cycle", str(slot))
+
     @serialized_write
     async def _apply_rule(self, employee_id: int, cycle: list, anchor_date: str) -> None:
+        # 锁里再验一次：这中间可能有人把某个班次停用了（票 11），那条规则一展开就会
+        # 把停用的班次又铺回来 —— 正是停用那道闸要保证不会发生的事。
+        await self._require_shifts_usable(cycle)
         await self._write_rule_row(employee_id, cycle, anchor_date)
         await self._delete_future_rule_rows(employee_id)
         await self._expand_rows(employee_id, {"cycle": cycle, "anchor_date": anchor_date})
