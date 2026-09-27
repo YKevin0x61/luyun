@@ -590,7 +590,7 @@ function openTeaching(row) {
  *  同样的入口变成「去看那一屏的说明」，所以不再需要拉责任区名单那一步 —— 说明里的话
  *  只跟排班给的值有关。
  */
-async function showWhyNoDuty() {
+async function openDutyNotice() {
   if (!employee.value) return
   tab.value = 'inbox'
   await nextTick()
@@ -1402,7 +1402,7 @@ async function decide(action, reason = '') {
               <p class="hy-staff-lead">
                 日常检查项挂在责任区下，这一屏只列你选的这个区；管理端能看到全部区。
               </p>
-              <button type="button" class="btn" @click="showWhyNoDuty">看看今天怎么安排</button>
+              <button type="button" class="btn" @click="openDutyNotice">看看今天怎么安排</button>
             </template>
           </div>
 
@@ -1724,7 +1724,7 @@ async function decide(action, reason = '') {
             v-if="!profileEditing && !passwordEditing"
             type="button"
             class="btn btn-block hy-staff-submit"
-            @click="showWhyNoDuty"
+            @click="openDutyNotice"
           >重新选择区域和班次</button>
         </template>
         <p v-else class="hy-staff-lead">正在确认登录…</p>
