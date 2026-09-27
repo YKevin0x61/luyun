@@ -21,10 +21,15 @@ from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.captures import FileCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import HygieneWork
+from tests.hygiene_duty import assign_duty
 
 SUPER = {"kind": "super"}
 PHONE = "13800138000"
 PASSWORD = "password123"
+
+# 夹具里 accounts / work 的固定时刻。票 10 的前置数据（`assign_duty`）必须用同一个
+# 时刻造「今天」——排班的营业日跟卫生的营业日差了，员工今天就查不到那一行排班。
+FIXED_NOW = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
 
 
 def _run(coro):
@@ -55,12 +60,12 @@ def image_http(tmp_path):
     set_runtime(AppRuntime(db=db))
     accounts = EmployeeAccounts(
         db,
-        now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        now=lambda: FIXED_NOW,
     )
     work = HygieneWork(
         db,
         captures=FakeCaptureStore(),
-        now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        now=lambda: FIXED_NOW,
         image_variants=ImageVariantGenerator(),
     )
     _run(work.prepare())
@@ -89,29 +94,51 @@ def _add_item(work, data):
     )
 
 
-def _login_and_pick_zone(client, work):
-    """登录并选当天责任区。
+def _staff_id(db) -> int:
+    """夹具注册的那名员工的 id —— ``assign_duty`` 按 id 定位，前置数据都要它。"""
+    cur = _run(
+        db._conn.execute(
+            "SELECT id FROM hygiene_employees WHERE phone = ?",
+            (PHONE,),
+        )
+    )
+    row = _run(cur.fetchone())
+    assert row is not None, f"夹具里应该有手机号 {PHONE} 的员工"
+    return int(dict(row)["id"])
+
+
+def _login_and_pick_zone(client, db, work):
+    """登录并把「今天 · 白班档 · 第一个责任区」**配成排班**（票 10 的唯一入口）。
 
     ``/standards/{id}/image`` 现在按责任区切片（同一条数据在
-    ``/staff/items/{id}/standard`` 上一直是有校验的），未选区的员工会被 400
+    ``/staff/items/{id}/standard`` 上一直是有校验的），未排到区的员工会被 400
     挡下——这些用例测的是变体与 ETag，所以先把前置条件补上。
+
+    票 10 之前这里打的是 ``POST /api/hygiene/staff/assignment``（员工当天自己选班次
+    和责任区），那个入口现在一律 403：分工由**排班结果**决定，前置数据只能从上游配。
+    ``now`` 用夹具那个固定时刻，不然排班的「今天」对不上卫生的营业日。
     """
     assert client.post(
         "/api/hygiene/staff/login",
         json={"phone": PHONE, "password": PASSWORD},
     ).status_code == 200
     zone = _run(work.list_zones())[0]
-    assert client.post(
-        "/api/hygiene/staff/assignment",
-        json={"shift": "白班", "zone_id": zone["id"]},
-    ).status_code == 200
+    _run(
+        assign_duty(
+            db,
+            _staff_id(db),
+            slot="day",
+            zone_id=zone["id"],
+            now=FIXED_NOW,
+        )
+    )
 
 
 def test_staff_can_fetch_variant_and_etag_round_trip(image_http):
-    client, _db, _accounts, work = image_http
+    client, db, _accounts, work = image_http
     original = jpeg_bytes()
     item = _add_item(work, original)
-    _login_and_pick_zone(client, work)
+    _login_and_pick_zone(client, db, work)
 
     thumb = client.get(
         f"/api/hygiene/standards/{item['current_standard_id']}/image",
@@ -133,10 +160,10 @@ def test_staff_can_fetch_variant_and_etag_round_trip(image_http):
 
 
 def test_original_endpoint_remains_backward_compatible(image_http):
-    client, _db, _accounts, work = image_http
+    client, db, _accounts, work = image_http
     original = jpeg_bytes()
     item = _add_item(work, original)
-    _login_and_pick_zone(client, work)
+    _login_and_pick_zone(client, db, work)
 
     response = client.get(
         f"/api/hygiene/standards/{item['current_standard_id']}/image"

@@ -53,13 +53,15 @@ const routes = [
   hygieneAdminPage('/hygiene-boards', 'hygiene-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
   hygieneAdminPage('/hygiene-data', 'hygiene-data', () => import('../views/hygiene/HygieneDataView.vue')),
   // 员工手机端的入口是「今天」页（票 05）：登录后落到这里，第一眼是自己的班。
-  // 卫生那张卡还没接上（下一张票），这会儿页面上只有排班这一块。
+  // 卫生那张卡（票 10）与这颗实时开关一起到齐：`realtime: true` 是给人的页面显式打开的
+  // （`App.vue` 只对**非 public** 的路由默认开），员工页是 public 的，不写就不连。
   // `staffProbe: false`：这一页自己那一次请求就分得清 401 与断网（见 TodayView 的
   // `load()`），不必先陪守卫白等一次探针超时（弱网下最多 4 秒）。
-  { path: '/today', name: 'today', component: () => import('../views/today/TodayView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, staffProbe: false } },
+  { path: '/today', name: 'today', component: () => import('../views/today/TodayView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, staffProbe: false, realtime: true } },
   // 整月（票 06）：从「今天」页那张排班卡的「整月」按钮进来，看自己这个月每天上什么班。
-  // 跟 `/today` 同一套 meta —— 同一扇门（员工的 cookie）、同样的 `staffProbe: false`。
-  { path: '/today/month', name: 'today-month', component: () => import('../views/today/TodayMonthView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, staffProbe: false } },
+  // 跟 `/today` 同一套 meta —— 同一扇门（员工的 cookie）、同样的 `staffProbe: false`，
+  // 也订同一颗实时开关（店长改了某一天，这一页上的格子要跟着变）。
+  { path: '/today/month', name: 'today-month', component: () => import('../views/today/TodayMonthView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, staffProbe: false, realtime: true } },
   { path: '/hygiene', name: 'hygiene-home', component: () => import('../views/hygiene/HygieneHomeView.vue'), meta: { ...HYGIENE_STAFF_META, staffAuth: true, realtime: true } },
   hygieneStaffAuthPage('/hygiene/login', 'hygiene-login', () => import('../views/hygiene/HygieneLoginView.vue'), '员工登录'),
   hygieneStaffAuthPage('/hygiene/register', 'hygiene-register', () => import('../views/hygiene/HygieneRegisterView.vue'), '员工注册'),

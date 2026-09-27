@@ -20,8 +20,13 @@ from services.app_runtime import AppRuntime, set_runtime
 from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.work import HygieneWork, SEED_ZONE_NAMES
+from tests.hygiene_duty import assign_duty
 
 SUPER = {"kind": "super"}
+
+# 卫生与排班共用的那个固定时刻：夹具里的 accounts / work 用它当「现在」，造排班
+# 前置数据的 `assign_duty` 也必须用它 —— 两边的「今天」差了，员工就查不到那一行。
+FIXED_NOW = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
 
 PHONE = "13800138000"
 PHONE_ADMIN = "13800138001"
@@ -66,13 +71,11 @@ def hygiene_http(tmp_path):
     db = DatabaseManager()
     _run(db.connect())
     set_runtime(AppRuntime(db=db))
-    accounts = EmployeeAccounts(
-        db, now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
-    )
+    accounts = EmployeeAccounts(db, now=lambda: FIXED_NOW)
     work = HygieneWork(
         db,
         captures=FakeCaptureStore(),
-        now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        now=lambda: FIXED_NOW,
         notifier=None,
     )
     _run(work.prepare())
@@ -320,7 +323,13 @@ def test_api_token_is_not_staff_session_or_roster_cookie(hygiene_http):
     ).status_code == 401
 
 
-def test_staff_can_self_pick_shift_once_not_admin_fix(hygiene_http):
+def test_staff_cannot_self_pick_shift_or_zone_any_more(hygiene_http):
+    """票 10：员工当天的班次与责任区读**排班**，两个自选入口都得被拒（403 + 那句话）。
+
+    票 10 之前这条测的是「登录后能自己选白班、随后还能改成夜班」。自选撤了之后同一个
+    入口要守相反的承诺：`/staff/assignment` 与 `/staff/shift` 一律 403，`/staff/me`
+    一动不动。真值仍然会出现 —— 但只能从排班来（下半段配了排班之后看同一份 `/staff/me`）。
+    """
     client, _db, accounts, _work = hygiene_http
     employee = _run(accounts.register(PHONE, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
@@ -332,45 +341,65 @@ def test_staff_can_self_pick_shift_once_not_admin_fix(hygiene_http):
     me = client.get("/api/hygiene/staff/me")
     assert me.status_code == 200
     assert me.json()["employee"]["shift"] is None
+    assert me.json()["employee"]["zone_id"] is None
     assert me.json()["daily_clocks"]["day_hhmm"]
     assert me.json()["daily_clocks"]["night_hhmm"]
     assert me.json()["deep_clock"]["hhmm"]
-    picked = client.post(
-        "/api/hygiene/staff/assignment",
-        json={"shift": "白班", "zone_id": 1},
-    )
-    assert picked.status_code == 200
-    assert picked.json()["shift"] == "白班"
-    assert picked.json()["zone_id"] == 1
-    me_after = client.get("/api/hygiene/staff/me").json()["employee"]
-    assert me_after["shift"] == "白班"
-    assert me_after["zone_id"] == 1
-    assert me_after["zone_name"] == "案板"
-    again = client.post(
-        "/api/hygiene/staff/assignment",
-        json={"shift": "夜班", "zone_id": 2},
-    )
-    assert again.status_code == 200
-    assert again.json()["shift"] == "夜班"
-    assert again.json()["zone_id"] == 2
-    changed_me = client.get("/api/hygiene/staff/me").json()["employee"]
-    assert changed_me["shift"] == "夜班"
-    assert changed_me["zone_id"] == 2
-    assert changed_me["zone_name"] == "馅档"
+
+    for path, payload, detail in (
+        (
+            "/api/hygiene/staff/assignment",
+            {"shift": "白班", "zone_id": 1},
+            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长",
+        ),
+        (
+            "/api/hygiene/staff/assignment",
+            {"shift": "夜班", "zone_id": 2},
+            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长",
+        ),
+        # 只改班次那条路答的是自己那句话（各自的服务层入口，各自的说法）——
+        # 两条路都撤了，但说的是各自那件事，不是一句笼统的「都改不了」。
+        (
+            "/api/hygiene/staff/shift",
+            {"shift": "夜班", "zone_id": 2},
+            "今天的班次由排班决定：去「今天」页看你的班，要改请找店长",
+        ),
+    ):
+        refused = client.post(path, json=payload)
+        assert refused.status_code == 403, (path, refused.text)
+        assert refused.json()["detail"] == detail
+    unchanged = client.get("/api/hygiene/staff/me").json()["employee"]
+    assert unchanged["shift"] is None
+    assert unchanged["zone_id"] is None
+    assert unchanged["zone_name"] is None
+
+    _assign_duty(_db, employee["id"], "白班")
+    scheduled = client.get("/api/hygiene/staff/me").json()["employee"]
+    assert scheduled["shift"] == "白班"
+    assert scheduled["zone_id"] == 1
+    assert scheduled["zone_name"] == "案板"
+
     assert client.post(
         f"/api/hygiene/admin/roster/{employee['id']}/shift",
         json={"shift": "夜班", "zone_id": 1},
     ).status_code == 401
 
 
-def test_staff_admin_cannot_change_another_shift_admin_cookie_can(hygiene_http):
+def test_nobody_changes_a_shift_from_the_hygiene_side(hygiene_http):
+    """员工会话越权是 401，卫生管理员 cookie 也是 403 —— 改派在排班那一天，不在这儿。
+
+    票 10 之前这条测的是「有管理员权限的员工改不了别人的班，但站点管理员 cookie 能改」。
+    现在**谁都改不了**：`super_set_assignment` 跟员工自选一样抛 `assignment_from_schedule`
+    （两个管理入口 `shift` / `assignment` 都试一遍），落成 403 + 那句「去今天页看你的班」。
+    台账行的真值仍然来自排班：拒绝之后它还是「白班 · 案板」，没有被偷偷改掉。
+    """
     client, _db, accounts, _work = hygiene_http
     staff = _run(accounts.register(PHONE, PASSWORD, NAME))
     manager = _run(accounts.register(PHONE_ADMIN, PASSWORD, "李四"))
     _run(accounts.approve(staff["id"]))
     _run(accounts.approve(manager["id"]))
     _run(accounts.set_permission(manager["id"], "管理员"))
-    _run(accounts.pick_assignment(staff["id"], "白班", 1))
+    _assign_duty(_db, staff["id"], "白班")
 
     staff_login = client.post(
         "/api/hygiene/staff/login",
@@ -386,17 +415,22 @@ def test_staff_admin_cannot_change_another_shift_admin_cookie_can(hygiene_http):
     client.cookies.clear()
     init = client.post("/api/auth/init", json=ADMIN_INIT)
     assert init.status_code == 200
-    fixed = client.post(
-        f"/api/hygiene/admin/roster/{staff['id']}/shift",
-        json={"shift": "夜班", "zone_id": 1},
-    )
-    assert fixed.status_code == 200
-    assert fixed.json()["shift"] == "夜班"
-    assert fixed.json()["zone_id"] == 1
+    for entry in ("shift", "assignment"):
+        refused = client.post(
+            f"/api/hygiene/admin/roster/{staff['id']}/{entry}",
+            json={"shift": "夜班", "zone_id": 1},
+        )
+        assert refused.status_code == 403, (entry, refused.text)
+        assert refused.json()["detail"] == (
+            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长"
+        )
+    assert _run(accounts.current_shift(staff["id"])) == "白班"
     roster = client.get("/api/hygiene/admin/roster")
     assert roster.status_code == 200
     row = next(item for item in roster.json()["employees"] if item["id"] == staff["id"])
-    assert row["shift"] == "夜班"
+    assert row["shift"] == "白班"
+    assert row["zone_id"] == 1
+    assert row["zone_name"] == "案板"
 
 
 def test_admin_cookie_can_create_zone_staff_cannot(hygiene_http):
@@ -442,8 +476,8 @@ def test_staff_cannot_delete_zone_or_item_admin_cookie_can(hygiene_http):
     assert client.delete(f"/api/hygiene/admin/zones/{extra['id']}").status_code == 401
     assert client.delete(f"/api/hygiene/admin/items/{item['id']}").status_code == 401
 
-    _approve_staff(accounts, PHONE, "白班")
-    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _approve_staff(_db, accounts, PHONE, "白班")
+    _approve_staff(_db, accounts, PHONE_ADMIN, "白班", "管理员")
     _staff_login(client, PHONE)
     assert client.delete(f"/api/hygiene/admin/zones/{extra['id']}").status_code == 401
     assert client.delete(f"/api/hygiene/admin/items/{item['id']}").status_code == 401
@@ -501,11 +535,13 @@ def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
     assert catalog.status_code == 200
     listed = next(zone for zone in catalog.json()["zones"] if zone["name"] == "案板")
     assert [row["name"] for row in listed["items"]] == ["案板表面"]
-    assigned = client.post(
-        "/api/hygiene/staff/assignment",
-        json={"shift": "白班", "zone_id": anban["id"]},
-    )
-    assert assigned.status_code == 200
+    # 没排班 = 今天没有班次，也就没有「我的区」：目录看得见全店，但这一项的标准图不给。
+    no_duty = client.get(f"/api/hygiene/staff/items/{item['id']}/standard")
+    assert no_duty.status_code == 400
+    assert no_duty.json()["detail"] == "请先选择今天的卫生责任区"
+
+    # 排班说「白班 · 案板」之后，同一张标准图才拿得到（票 10：分工读排班，不自选）。
+    _assign_duty(_db, employee["id"], "白班", zone_id=anban["id"])
     image = client.get(f"/api/hygiene/staff/items/{item['id']}/standard")
     assert image.status_code == 200
     assert image.content == photo
@@ -514,7 +550,7 @@ def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
 
 def test_staff_assignment_hides_and_rejects_other_zones(hygiene_http):
     client, _db, accounts, work = hygiene_http
-    _approve_staff(accounts, PHONE, "白班")
+    _approve_staff(_db, accounts, PHONE, "白班")
     anban = next(zone for zone in _run(work.list_zones()) if zone["name"] == "案板")
     xian = next(zone for zone in _run(work.list_zones()) if zone["name"] == "馅档")
     anban_item = _run(
@@ -545,7 +581,7 @@ def test_staff_assignment_hides_and_rejects_other_zones(hygiene_http):
 
 def test_standard_manifest_and_immutable_image_contract(hygiene_http):
     client, _db, accounts, work = hygiene_http
-    _approve_staff(accounts, PHONE, "白班")
+    _approve_staff(_db, accounts, PHONE, "白班")
     item = _add_anban_item(work, b"STD-OLD")
 
     assert client.get("/api/hygiene/standard-manifest").status_code == 401
@@ -586,12 +622,33 @@ def test_standard_manifest_and_immutable_image_contract(hygiene_http):
     assert client.get("/api/hygiene/standard-manifest").status_code == 200
 
 
-def _approve_staff(accounts, phone, shift, permission="普通员工"):
+SHIFT_SLOTS = {"白班": "day", "夜班": "night"}
+
+
+def _assign_duty(db, employee_id, shift, zone_id=1):
+    """某人今天上哪个班、在哪个区 —— 用**排班**造（票 10 的唯一入口）。
+
+    票 10 之前这里调的是 `accounts.pick_assignment(...)`（员工当天自己选）。自选入口
+    撤了之后前置数据只能从上游来：给这个人配一条固定班次的轮转规则 + 一个固定责任区，
+    展开出今天那一行。`zone_id=1` 是种子名单里的第一个区（案板），跟老调用的口径一致。
+    """
+    return _run(
+        assign_duty(
+            db,
+            employee_id,
+            slot=SHIFT_SLOTS[shift],
+            zone_id=zone_id,
+            now=FIXED_NOW,
+        )
+    )
+
+
+def _approve_staff(db, accounts, phone, shift, permission="普通员工"):
     employee = _run(accounts.register(phone, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
     if permission != "普通员工":
         _run(accounts.set_permission(employee["id"], permission))
-    _run(accounts.pick_assignment(employee["id"], shift, 1))
+    _assign_duty(db, employee["id"], shift)
     return employee
 
 
@@ -627,8 +684,8 @@ def _submit_daily(client, item_id, data, shift="白班", live="true"):
 
 def test_staff_submit_allowed_regular_accept_403_admin_cookie_can_accept(hygiene_http):
     client, _db, accounts, work = hygiene_http
-    _approve_staff(accounts, PHONE, "白班")
-    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _approve_staff(_db, accounts, PHONE, "白班")
+    _approve_staff(_db, accounts, PHONE_ADMIN, "白班", "管理员")
     item = _add_anban_item(work)
     _staff_login(client, PHONE)
     inbox = client.get("/api/hygiene/staff/daily-work")
@@ -693,7 +750,7 @@ def test_staff_submit_allowed_regular_accept_403_admin_cookie_can_accept(hygiene
 
 def test_night_staff_http_cannot_submit_day_instance(hygiene_http):
     client, _db, accounts, work = hygiene_http
-    _approve_staff(accounts, PHONE_NIGHT, "夜班")
+    _approve_staff(_db, accounts, PHONE_NIGHT, "夜班")
     item = _add_anban_item(work)
     _staff_login(client, PHONE_NIGHT)
     denied = _submit_daily(client, item["id"], SHOT_A, shift="白班")
@@ -702,7 +759,7 @@ def test_night_staff_http_cannot_submit_day_instance(hygiene_http):
     assert album.status_code == 400
     ok = _submit_daily(client, item["id"], SHOT_A, shift="夜班")
     assert ok.status_code == 200
-    _approve_staff(accounts, PHONE_OTHER_ADMIN, "夜班", "管理员")
+    _approve_staff(_db, accounts, PHONE_OTHER_ADMIN, "夜班", "管理员")
     _staff_login(client, PHONE_OTHER_ADMIN)
     rejected = client.post(
         f"/api/hygiene/staff/daily/{item['id']}/reject", json={"shift": "夜班"}
@@ -717,7 +774,7 @@ def test_staff_admin_cannot_patch_overdue_clocks_admin_cookie_can(hygiene_http):
     assert client.get("/api/hygiene/admin/overdue-clocks").status_code == 401
     assert client.patch("/api/hygiene/admin/overdue-clocks", json=payload).status_code == 401
 
-    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _approve_staff(_db, accounts, PHONE_ADMIN, "白班", "管理员")
     _staff_login(client, PHONE_ADMIN)
     assert client.get("/api/hygiene/admin/overdue-clocks").status_code == 401
     assert client.patch("/api/hygiene/admin/overdue-clocks", json=payload).status_code == 401
@@ -769,9 +826,9 @@ def test_staff_both_shifts_submit_deep_clean_staff_cannot_configure_admin_can(hy
         "/api/hygiene/admin/deep-clean/clock", json={"hhmm": "20:00"}
     ).status_code == 401
 
-    _approve_staff(accounts, PHONE, "白班")
-    _approve_staff(accounts, PHONE_NIGHT, "夜班")
-    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _approve_staff(_db, accounts, PHONE, "白班")
+    _approve_staff(_db, accounts, PHONE_NIGHT, "夜班")
+    _approve_staff(_db, accounts, PHONE_ADMIN, "白班", "管理员")
     _staff_login(client, PHONE)
     assert client.post("/api/hygiene/admin/deep-clean/items", json=template).status_code == 401
     assert client.patch(
@@ -871,9 +928,9 @@ def _open_fix(client, path, zone_id, data=SHOT_A, live="true", ticket_type="卫�
 
 def test_staff_regular_cannot_open_fix_admin_can_super_needs_live(hygiene_http):
     client, _db, accounts, work = hygiene_http
-    _approve_staff(accounts, PHONE, "白班")
-    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
-    _approve_staff(accounts, PHONE_NIGHT, "夜班")
+    _approve_staff(_db, accounts, PHONE, "白班")
+    _approve_staff(_db, accounts, PHONE_ADMIN, "白班", "管理员")
+    _approve_staff(_db, accounts, PHONE_NIGHT, "夜班")
     anban = next(zone for zone in _run(work.list_zones()) if zone["name"] == "案板")
     zone_id = anban["id"]
 
@@ -961,8 +1018,8 @@ def test_unauthenticated_boards_401_regular_staff_gets_both(hygiene_http):
 
 def test_super_can_get_boards_and_mark_teaching_staff_can_list(hygiene_http):
     client, _db, accounts, work = hygiene_http
-    _approve_staff(accounts, PHONE, "白班")
-    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _approve_staff(_db, accounts, PHONE, "白班")
+    _approve_staff(_db, accounts, PHONE_ADMIN, "白班", "管理员")
     item = _add_anban_item(work, data=b"STD-TEACH")
     _staff_login(client, PHONE)
     submitted = _submit_daily(client, item["id"], SHOT_A)
@@ -1018,7 +1075,7 @@ def test_super_can_get_boards_and_mark_teaching_staff_can_list(hygiene_http):
 
 def test_daily_submit_broadcasts_data_less_hygiene_nudges(hygiene_http, monkeypatch):
     client, _db, accounts, work = hygiene_http
-    _approve_staff(accounts, PHONE, "白班")
+    _approve_staff(_db, accounts, PHONE, "白班")
     item = _add_anban_item(work)
     _staff_login(client, PHONE)
     broadcast = AsyncMock()
@@ -1032,8 +1089,8 @@ def test_daily_submit_broadcasts_data_less_hygiene_nudges(hygiene_http, monkeypa
     assert ("hygiene", {"resource": "boards", "action": "changed"}) in calls
 
 
-def test_admin_sets_zone_shifts_and_staff_assignment_rejects_disabled_shift(hygiene_http):
-    client, _db, accounts, _work = hygiene_http
+def test_admin_sets_zone_shifts_staff_cannot_self_pick_any_zone(hygiene_http):
+    client, _db, accounts, work = hygiene_http
     init = client.post("/api/auth/init", json=ADMIN_INIT)
     assert init.status_code == 200
 
@@ -1064,33 +1121,56 @@ def test_admin_sets_zone_shifts_and_staff_assignment_rejects_disabled_shift(hygi
     assert day_only.status_code == 200
     assert day_only.json()["zone"]["shifts"] == ["白班"]
 
-    _approve_staff(accounts, PHONE, "白班")
+    employee = _approve_staff(_db, accounts, PHONE, "白班")
     _staff_login(client, PHONE)
-    mismatch = client.post(
-        "/api/hygiene/staff/assignment",
-        json={"shift": "夜班", "zone_id": zone["id"]},
-    )
-    assert mismatch.status_code == 400
-    assert mismatch.json()["detail"] == "这个责任区没有该班次，请换一个责任区或班次"
+    # 票 10 之前这里先撞 400「这个责任区没有该班次」、再成功选上。自选撤了之后
+    # 两道都被同一个 403 挡在更外面：参数对不对已经不重要，这件事不该在这儿做。
+    for shift in ("夜班", "白班"):
+        refused = client.post(
+            "/api/hygiene/staff/assignment",
+            json={"shift": shift, "zone_id": zone["id"]},
+        )
+        assert refused.status_code == 403, (shift, refused.text)
+        assert refused.json()["detail"] == (
+            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长"
+        )
 
-    picked = client.post(
-        "/api/hygiene/staff/assignment",
-        json={"shift": "白班", "zone_id": zone["id"]},
-    )
-    assert picked.status_code == 200
-    assert picked.json()["zone_id"] == zone["id"]
+    # 被拒之后当天分工还是排班给的那一份：白班 · 案板（不是他刚想选的那个区）。
     me = client.get("/api/hygiene/staff/me")
     assert me.status_code == 200
-    assert me.json()["employee"]["zone_shifts"] == ["白班"]
+    assert me.json()["employee"]["shift"] == "白班"
+    assert me.json()["employee"]["zone_id"] == 1
+    assert me.json()["employee"]["zone_name"] == "案板"
+    # 店长给这个区配的班次名单照常下发（员工按它挑区的那套 UI 已经不在了）。
     catalog = client.get("/api/hygiene/staff/daily-catalog")
     assert catalog.status_code == 200
     listed = next(row for row in catalog.json()["zones"] if row["id"] == zone["id"])
     assert listed["shifts"] == ["白班"]
 
+    # 名单本身仍然算数，只是拦在更后面：店长把夜班的人排进只开白班的区，他拍完
+    # 交上来是 400「这个责任区没有该班次」—— 原来在选班时挡的那一道，现在只剩这里。
+    _assign_duty(_db, employee["id"], "夜班", zone_id=zone["id"])
+    day_only_item = _run(
+        work.add_daily_item(
+            SUPER,
+            zone["id"],
+            "白班才要做的",
+            {"bytes": b"DAY-ONLY", "content_type": "image/jpeg", "markup": []},
+        )
+    )
+    mismatch = _submit_daily(client, day_only_item["id"], SHOT_A, shift="夜班")
+    assert mismatch.status_code == 400
+    assert mismatch.json()["detail"] == "这个责任区没有该班次，请换一个责任区或班次"
+    # 换回这一档就能交 —— 挡住的确实是「这个区没开夜班」，不是这一项本身有问题。
+    _assign_duty(_db, employee["id"], "白班", zone_id=zone["id"])
+    allowed = _submit_daily(client, day_only_item["id"], SHOT_A, shift="白班")
+    assert allowed.status_code == 200
+    assert allowed.json()["status"] == "待验收"
+
 
 def test_admin_can_delete_fix_ticket_staff_cannot(hygiene_http):
     client, _db, accounts, work = hygiene_http
-    _approve_staff(accounts, PHONE_ADMIN, "白班", "管理员")
+    _approve_staff(_db, accounts, PHONE_ADMIN, "白班", "管理员")
     _staff_login(client, PHONE_ADMIN)
     anban = next(zone for zone in _run(work.list_zones()) if zone["name"] == "案板")
     opened = _open_fix(client, "/api/hygiene/staff/fix", anban["id"])

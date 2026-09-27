@@ -3,6 +3,7 @@
 """管理接口鉴权（Session Cookie、API Token、过渡期 ADMIN_API_KEY）。"""
 
 import logging
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -103,18 +104,31 @@ async def verify_admin_token(
     raise HTTPException(status_code=401, detail="未授权")
 
 
-async def authenticate_ws(websocket) -> Optional[str]:
-    """校验 WebSocket 连接：Session Cookie 优先，其次 ?token= 携带的 API Token。
+@dataclass(frozen=True)
+class WsIdentity:
+    """一条 WebSocket 连接的身份：鉴权方式 +（员工会话才有的）员工 id。"""
 
-    返回鉴权方式（"session" / "api_token"），两者皆失败返回 None。
+    auth: str
+    employee_id: Optional[int] = None
+
+
+async def identify_ws(websocket) -> Optional[WsIdentity]:
+    """校验 WebSocket 连接并解析出「这条连接是谁」：鉴权方式 + 员工 id。
+
+    Session Cookie 优先，其次 `?token=` 携带的 API Token，最后员工（卫生/排班手机端）
+    的 Session Cookie。员工那一支必须把 employee_id 一起带出来：实时 hub 靠它做归属
+    隔离（只给本人派发 scope 里带 employee_id 的 nudge），而身份只能在这里——连接
+    建立时、cookie 验过之后——定下来，绝不能听客户端在 subscribe 里自报。
+
+    认不出来返回 None（端点据此 4401 关闭）。
     """
     session_id = websocket.cookies.get(settings.SESSION_COOKIE_NAME)
     if await auth_service.validate_session_id(session_id):
-        return "session"
+        return WsIdentity(auth="session")
 
     token = websocket.query_params.get("token")
     if token and await auth_service.validate_api_token(token):
-        return "api_token"
+        return WsIdentity(auth="api_token")
 
     staff_session_id = websocket.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
     if staff_session_id:
@@ -125,9 +139,23 @@ async def authenticate_ws(websocket) -> Optional[str]:
         if employee_accounts is not None:
             employee = await employee_accounts.get_staff_session(staff_session_id)
             if employee is not None:
-                return "staff"
+                # 取不到 id 也照样算 staff（fail-closed：hub 侧对没有 employee_id 的
+                # 员工连接不派发任何 scope 带 employee_id 的 nudge，只给全店级事件）。
+                return WsIdentity(auth="staff", employee_id=employee.get("id"))
 
     return None
+
+
+async def authenticate_ws(websocket) -> Optional[str]:
+    """校验 WebSocket 连接：Session Cookie 优先，其次 ?token= 携带的 API Token。
+
+    返回鉴权方式（"session" / "api_token" / "staff"），两者皆失败返回 None。
+
+    只关心鉴权方式时用它；需要员工的 employee_id 做归属隔离时用 `identify_ws`
+    ——两者解析路径是同一份代码，不会各查一次库、更不会给出不一致的身份。
+    """
+    identity = await identify_ws(websocket)
+    return None if identity is None else identity.auth
 
 
 async def require_session(request: Request) -> str:

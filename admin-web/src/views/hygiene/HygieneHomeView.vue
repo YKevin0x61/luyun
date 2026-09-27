@@ -19,7 +19,6 @@ import {
   HYGIENE_BRAND_TAGLINE,
   HYGIENE_BRAND_TITLE,
   HYGIENE_FIX_TYPES,
-  HYGIENE_SHIFTS,
   HYGIENE_STAFF_TABS,
   canAcceptFixTicket,
   hasLiveCamera,
@@ -69,10 +68,10 @@ const tab = ref('inbox')
 const employee = ref(null)
 const errorText = ref('')
 const loggingOut = ref(false)
-const picking = ref('')
+// 票 10：员工不再自己选班次和区（`selectedShift` / `selectedZoneId` / `assignableZones`
+// 那一套状态跟着选择器一起撤了）。今天在哪由排班决定，`employee.shift` / `employee.zone_id`
+// 就是从排班结果读来的那两个值。
 const changingAssignment = ref(false)
-const selectedShift = ref('')
-const selectedZoneId = ref('')
 const profileEditing = ref(false)
 const profileName = ref('')
 const profilePhone = ref('')
@@ -127,20 +126,6 @@ const needsAssignment = computed(() => {
   return Boolean(employee.value) && (
     !employee.value.shift || !employee.value.zone_id || assignmentMismatch.value
   )
-})
-const assignableZones = computed(() => {
-  const shift = selectedShift.value
-  if (!shift) return zones.value
-  return zones.value.filter((zone) => (zone.shifts || HYGIENE_SHIFTS).includes(shift))
-})
-watch(assignableZones, (allowed) => {
-  if (!allowed.length) {
-    selectedZoneId.value = ''
-    return
-  }
-  if (!allowed.some((zone) => String(zone.id) === String(selectedZoneId.value))) {
-    selectedZoneId.value = allowed[0].id
-  }
 })
 const sheetDirty = computed(() => {
   const current = sheet.value
@@ -495,16 +480,20 @@ onBeforeUnmount(() => {
 async function loadMe() {
   try {
     const data = await staffRequest('/api/hygiene/staff/me')
+    const previousZoneId = employee.value ? employee.value.zone_id : null
     employee.value = data.employee
-    if (employee.value.shift && !selectedShift.value) {
-      selectedShift.value = employee.value.shift
-    }
-    if (employee.value.zone_id && !selectedZoneId.value) {
-      selectedZoneId.value = employee.value.zone_id
-    }
     dailyClocks.value = data.daily_clocks || null
     deepClock.value = data.deep_clock || null
     meRetryIndex = 0
+    // 换区之后重新核对标准图缓存（只核对、不下载）：清单是按责任区切片的，不核的话被
+    // 临时调到别的区的人，面板上提示的还是上一个区的「待更新」张数。
+    //
+    // 票 10 之前这件事挂在「员工自己点换区」那一次动作上；自选入口撤了之后，换区由店长
+    // 在排班页改（单日覆盖或固定责任区），员工端只能从「读到自己今天在别的区」看出来 ——
+    // 所以触发点搬到这里。首次进页面（上一次没有区）也核一次，代价是一次只读请求。
+    if (String((employee.value && employee.value.zone_id) || '') !== String(previousZoneId || '')) {
+      await standardPhotoCache.checkForUpdates()
+    }
     // 取消还没到点的重试：否则成功之后它仍会多跑一次 /me + loadDeepClean。
     if (meRetryTimer) {
       window.clearTimeout(meRetryTimer)
@@ -591,30 +580,6 @@ function openTeaching(row) {
   errorText.value = ''
   flashText.value = ''
   sheet.value = { kind: 'teaching', mode: 'review', row }
-}
-
-async function pickAssignment() {
-  if (picking.value || !selectedShift.value || !selectedZoneId.value) return
-  errorText.value = ''
-  picking.value = 'assignment'
-  try {
-    await staffRequest('/api/hygiene/staff/assignment', {
-      method: 'POST',
-      body: {
-        shift: selectedShift.value,
-        zone_id: Number(selectedZoneId.value),
-      },
-    })
-    changingAssignment.value = false
-    await loadMe()
-    // 清单是按责任区切片的：换了区还拿着上一份，提示的「待更新」张数就是别的区的。
-    // 这里重新核对一次（只核对、不下载），deferred 提示才对得上。
-    await standardPhotoCache.checkForUpdates()
-  } catch (err) {
-    errorText.value = err.message || '选择区域和班次失败'
-  } finally {
-    picking.value = ''
-  }
 }
 
 async function openAssignmentPicker() {
@@ -826,7 +791,7 @@ function openFixForm() {
   flashText.value = ''
   if (!isManager.value) return
   if (needsAssignment.value) {
-    errorText.value = '先选今天的区域和班次。'
+    errorText.value = '今天没有排到你的班（或者责任区对不上），先找店长确认今天的排班。'
     return
   }
   if (!liveOk.value) {
@@ -1338,15 +1303,18 @@ async function decide(action, reason = '') {
             <span class="hy-brand-tagline">{{ HYGIENE_BRAND_TAGLINE }}</span>
           </span>
         </div>
-        <button
-          v-if="employee"
-          type="button"
-          class="hy-work-shift"
-          aria-label="重新选择区域和班次"
-          @click="openAssignmentPicker"
-        >
-          {{ employee.name || employee.phone }} · {{ employee.zone_name || '未选区域' }} · {{ hygieneShiftLabel(employee.shift) }}
-        </button>
+        <!-- 回「今天」页（票 05 的排班卡）：员工登录后落在 /today，卫生是它的下半张卡。
+             少这条回程就是单行道 —— iOS 的 PWA 独立窗口没有返回键，点进来就出不去了。 -->
+        <router-link class="hy-work-today" to="/today" aria-label="回到「今天」页看我的班">
+          ‹ 今天
+        </router-link>
+        <!-- 今天在哪：**只读**（票 10）。以前点它还能重选，现在班次和责任区由排班决定，
+             要改得去排班页改那一天 —— 所以这里只报「排班说你今天在哪」，点不动。
+             「还没定区」与「今天没排班」是两件事：前者有班次但店长没给他配这个班的固定区
+             （或者那个区被删了），后者是排班压根没排到他。 -->
+        <span v-if="employee" class="hy-work-shift">
+          {{ employee.name || employee.phone }} · {{ employee.zone_name || (employee.shift ? '还没定区' : '今天没排班') }} · {{ hygieneShiftLabel(employee.shift) }}
+        </span>
       </div>
     </header>
 
@@ -1361,45 +1329,34 @@ async function decide(action, reason = '') {
         class="hy-staff-alert"
         role="status"
       >
-        交日常前先选今天区域和班次。
-        <button type="button" class="btn btn-primary" @click="tab = 'inbox'">去选择</button>
+        今天没有排到你的班（或者责任区对不上），日常检查交不了。
+        <button type="button" class="btn" @click="router.push('/today')">去看我的班</button>
       </p>
 
       <section v-if="tab === 'inbox'">
+        <!-- 票 10：班次和责任区不再由员工当天自己选 —— 排班说今天在哪个班、哪个区，
+             卫生就认哪个。这一屏以前是个选择器，现在换成一句实话 + 一条去「今天」页的路：
+             没有班次（新人没配规则 / 今天休 / 那条班次还没标卫生档位）就没有日常可交，
+             与其让人在这里选出一个不生效的答案，不如说清该找谁。 -->
         <template v-if="showAssignmentPicker">
-          <h1>{{ changingAssignment ? '重新选择区域和班次' : '今天负责哪个区域、上哪一班？' }}</h1>
-          <p class="hy-staff-lead">区域和班次可以在当天随时重新选择。只显示和允许提交当前所选区域的日常与整改。</p>
-          <h2>卫生责任区</h2>
-          <div class="hy-shift-choices">
-            <button
-              v-for="zone in assignableZones"
-              :key="zone.id"
-              type="button"
-              class="btn"
-              :class="{ 'btn-primary': String(selectedZoneId) === String(zone.id) }"
-              :disabled="Boolean(picking)"
-              @click="selectedZoneId = zone.id"
-            >{{ zone.name }}</button>
-          </div>
-          <p v-if="selectedShift && !assignableZones.length" class="hy-staff-lead">这个班次暂时没有责任区。</p>
-          <h2>班次</h2>
-          <div class="hy-shift-choices">
-            <button
-              v-for="shift in HYGIENE_SHIFTS"
-              :key="shift"
-              type="button"
-              class="btn"
-              :class="{ 'btn-primary': selectedShift === shift }"
-              :disabled="Boolean(picking)"
-              @click="selectedShift = shift"
-            >{{ shift }}</button>
-          </div>
+          <h1>今天交不了日常检查</h1>
+          <p class="hy-staff-lead">
+            <template v-if="employee && !employee.shift">
+              今天排班没有排到你的班（新同事还没配轮转规则，或者今天休）。日常检查按班次分两档，
+              没有班次就没有可交的那一份。
+            </template>
+            <template v-else>
+              排班给的班次和这个责任区对不上（这个区可能没开这一档）。日常检查交不了。
+            </template>
+          </p>
+          <p class="hy-staff-lead">
+            你的班在「今天」页；要改今天上哪个班、在哪个区，找店长在排班页改那一天。
+          </p>
           <button
             type="button"
             class="btn btn-primary btn-block hy-staff-submit"
-            :disabled="Boolean(picking) || !selectedShift || !assignableZones.some((zone) => String(zone.id) === String(selectedZoneId))"
-            @click="pickAssignment"
-          >{{ picking ? '正在保存…' : (changingAssignment ? '保存区域和班次' : '确认区域和班次') }}</button>
+            @click="router.push('/today')"
+          >去看我的班 ›</button>
         </template>
         <template v-else-if="employee">
           <h1>今天还差什么</h1>

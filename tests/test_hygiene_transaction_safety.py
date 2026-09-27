@@ -27,10 +27,14 @@ from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import HygieneWork, serialized_write
+from tests.hygiene_duty import assign_duty
 
 SUPER = {"kind": "super"}
 PHONE = "13800138000"
 PASSWORD = "password123"
+# 这个文件里卫生与排班必须是同一个「今天」：排班展开用的时钟跟夹具注入的是同一个
+# 固定时刻（票 10），所以提出来给两边共用，免得只有一边被拨过钟。
+FIXED_NOW = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
 
 
 def _run(coro):
@@ -55,13 +59,11 @@ def runtime(tmp_path):
     db = DatabaseManager()
     _run(db.connect())
     set_runtime(AppRuntime(db=db))
-    accounts = EmployeeAccounts(
-        db, now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
-    )
+    accounts = EmployeeAccounts(db, now=lambda: FIXED_NOW)
     work = HygieneWork(
         db,
         captures=FakeCaptureStore(),
-        now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        now=lambda: FIXED_NOW,
         image_variants=ImageVariantGenerator(),
     )
     _run(work.prepare())
@@ -96,7 +98,8 @@ def test_failed_capture_leaves_no_open_transaction(runtime):
     )
     employee = _run(accounts.register(PHONE, PASSWORD, "张三"))
     _run(accounts.approve(employee["id"]))
-    _run(accounts.pick_assignment(employee["id"], "白班", zone["id"]))
+    # 票 10：今天的班次与责任区由**排班**决定（员工端不再自选），前置数据照排班造。
+    _run(assign_duty(db, employee["id"], slot="day", zone_id=zone["id"], now=FIXED_NOW))
     actor = {
         "kind": "staff",
         "id": employee["id"],
@@ -142,7 +145,8 @@ def test_capture_io_runs_outside_the_write_lock(runtime):
     )
     employee = _run(accounts.register(PHONE, PASSWORD, "张三"))
     _run(accounts.approve(employee["id"]))
-    _run(accounts.pick_assignment(employee["id"], "白班", zone["id"]))
+    # 票 10：今天的班次与责任区由**排班**决定（员工端不再自选），前置数据照排班造。
+    _run(assign_duty(db, employee["id"], slot="day", zone_id=zone["id"], now=FIXED_NOW))
     actor = {
         "kind": "staff",
         "id": employee["id"],

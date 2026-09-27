@@ -118,6 +118,10 @@ _ERROR_DETAILS = {
     "employee_not_found": "员工不存在",
     "invalid_shift": "班次只能是白班或夜班",
     "shift_already_picked": "当天班次已选定，不能自己改",
+    # 票 10：员工不再自己选班次和责任区（管理员改派也从卫生这一侧撤了，落到排班的
+    # 单日覆盖上）。这两句说的是「该去哪儿做」，不是「你填错了」。
+    "assignment_from_schedule": "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长",
+    "shift_from_schedule": "今天的班次由排班决定：去「今天」页看你的班，要改请找店长",
     "forbidden": "没有权限做这一步",
     "standard_required": "没有标准图不能上架日常检查项",
     "standard_not_found": "标准图版本不存在",
@@ -204,6 +208,10 @@ def _http_error(exc: EmployeeAccountsError) -> HTTPException:
         status = 404
     if exc.code == "duplicate_phone" or exc.code == "shift_already_picked":
         status = 409
+    # 票 10：员工不再自己选班次和区，管理员改派也不在卫生这一侧做了 —— 403 比 400 诚实：
+    # 这不是「参数写错了」，是这件事换了地方做（排班页 / 「今天」页）。
+    if exc.code in ("assignment_from_schedule", "shift_from_schedule"):
+        status = 403
     return HTTPException(status_code=status, detail=_error_detail(exc.code))
 
 
@@ -815,65 +823,27 @@ async def staff_logout(
     return {"success": True}
 
 
-async def _record_zone_switch(
-    work: HygieneWork,
-    employee: Dict[str, Any],
-    picked: Dict[str, Any],
-) -> bool:
-    """员工当天自己换责任区时留痕。
-
-    首次选择（previous 为空）与同区重选都不算换区；只有"本来在 A、现在改成 B"
-    才记一条换区事件，用于红黑榜个人榜与事件流追溯。管理员改派不走这里。
-
-    "改之前"用 `pick_assignment` 在写锁内读到的 `previous_zone_id`，而不是在调用
-    之前预读——两个并发选班请求预读会拿到同一个旧值，后完成的那次就可能漏记。
-    """
-    previous_zone = picked.get("previous_zone_id")
-    current_zone = picked.get("zone_id")
-    if previous_zone is None or current_zone is None:
-        return False
-    if int(previous_zone) == int(current_zone):
-        return False
-    await work.record_zone_switch(
-        employee,
-        from_zone_id=int(previous_zone),
-        from_zone_name=picked.get("previous_zone_name") or "",
-        to_zone_id=int(current_zone),
-        to_zone_name=picked.get("zone_name") or "",
-    )
-    return True
-
-
-async def _pick_assignment(
-    body: AssignmentIn,
-    staff=Depends(require_staff_session),
-    accounts: EmployeeAccounts = Depends(_get_accounts),
-    work: HygieneWork = Depends(_get_work),
-) -> Dict[str, Any]:
-    employee_id = staff["employee"]["id"]
-    try:
-        picked = await accounts.pick_assignment(
-            employee_id,
-            body.shift,
-            body.zone_id,
-        )
-    except EmployeeAccountsError as exc:
-        raise _http_error(exc) from exc
-    if await _record_zone_switch(work, staff["employee"], picked):
-        # 换区后个人榜的实拍归属需要重新解释，让看板刷新。
-        await _hygiene_nudge("boards", "changed")
-    return picked
-
-
 @router.post("/staff/assignment")
 async def staff_pick_assignment(
     body: AssignmentIn,
     staff=Depends(require_staff_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
-    work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    picked = await _pick_assignment(body, staff, accounts, work)
-    await _hygiene_nudge("assignment", "changed", employee_id=staff["employee"]["id"])
+    """**票 10 起不再可用**：今天上哪个班、在哪个区由排班决定。
+
+    跟 `/staff/shift` 各走各自的服务层入口（两个都必抛），答的话才对得上：这一条回
+    `assignment_from_schedule`。
+
+    这里原来还挂着一串「选成功了要做什么」——记一条换区留痕、再广播一次看板。自选撤了
+    之后那些都不可达了，所以连带 `_record_zone_switch` 一起删掉；`work.py` 的
+    `record_zone_switch` 与「换区」事件类型留着（个人榜还要聚合历史数据）。
+    """
+    try:
+        picked = await accounts.pick_assignment(
+            staff["employee"]["id"], body.shift, body.zone_id
+        )
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
     return picked
 
 
@@ -882,9 +852,17 @@ async def staff_pick_shift(
     body: AssignmentIn,
     staff=Depends(require_staff_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
-    work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    picked = await _pick_assignment(body, staff, accounts, work)
+    """**票 10 起不再可用**：班次由排班决定。
+
+    跟 `/staff/assignment` 各走各的服务层入口（都必抛），答的话才对得上：只改班次的那条
+    路回的是 `shift_from_schedule`（「今天的班次由排班决定」）。两条路都撤了，但说的是
+    各自那件事 —— 合用一个处理器会让这一条答成「班次和责任区都改」。
+    """
+    try:
+        picked = await accounts.pick_shift(staff["employee"]["id"], body.shift)
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
     await _hygiene_nudge("assignment", "changed", employee_id=staff["employee"]["id"])
     return picked
 

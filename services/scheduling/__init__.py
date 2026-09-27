@@ -7,8 +7,10 @@
 
 from services.scheduling.store import (
     DEFAULT_SHIFTS,
+    DUTY_SLOTS,
     EXPANSION_DAYS,
     MAX_CYCLE_DAYS,
+    MAX_REQUEST_NOTE,
     MAX_SHIFT_NAME,
     REST,
     SOURCE_OVERRIDE,
@@ -19,8 +21,10 @@ from services.scheduling.store import (
 
 __all__ = [
     "DEFAULT_SHIFTS",
+    "DUTY_SLOTS",
     "EXPANSION_DAYS",
     "MAX_CYCLE_DAYS",
+    "MAX_REQUEST_NOTE",
     "MAX_SHIFT_NAME",
     "REST",
     "SOURCE_OVERRIDE",

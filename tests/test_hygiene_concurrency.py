@@ -9,9 +9,14 @@ from datetime import datetime, timedelta
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
-from services.hygiene.accounts import EmployeeAccounts, EmployeeAccountsError
+from services.hygiene.accounts import (
+    EmployeeAccounts,
+    EmployeeAccountsError,
+    hygiene_business_date,
+)
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.work import HygieneWork
+from tests.hygiene_duty import assign_duty
 
 SUPER = {"kind": "super"}
 PHONE = "13800138000"
@@ -106,21 +111,59 @@ class HygieneConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0].code, "duplicate_phone")
 
-    async def test_concurrent_shift_pick_returns_one_already_picked(self):
+    async def test_concurrent_shift_pick_is_refused_and_schedule_keeps_one_row(self):
+        """并发改「今天上哪个班」：自选两个请求全被拒，排班那一侧只留一行。
+
+        票 10 之前这条测的是「同一天两个自选并发只有一个能落库，另一个报
+        `shift_already_picked`」（靠 `hygiene_shift_picks` 的唯一键）。自选入口撤了之后，
+        这件事整个搬到了排班：卫生这一侧并发发起的两个写请求都得走同一句拒绝（谁也不能从
+        竞争窗口里溜进去写下状态），而「一天只有一行班」由 `staff_assignments` 的唯一键
+        与全局写锁保证 —— 所以并发改规则之后，当天仍然只有一行，且卫生读到的是那一行。
+        """
         employee = await self.accounts.register(PHONE, PASSWORD, "张三")
         await self.accounts.approve(employee["id"])
-        results = await asyncio.gather(
+
+        refused = await asyncio.gather(
             self.accounts.pick_shift(employee["id"], "白班"),
             self.accounts.pick_shift(employee["id"], "夜班"),
             return_exceptions=True,
         )
-        successes = [result for result in results if not isinstance(result, Exception)]
-        errors = [result for result in results if isinstance(result, Exception)]
-        self.assertEqual(len(successes), 1)
-        self.assertEqual(len(errors), 1)
-        self.assertIsInstance(errors[0], EmployeeAccountsError)
-        self.assertEqual(errors[0].code, "shift_already_picked")
-        self.assertIsNotNone(await self.accounts.current_shift(employee["id"]))
+        self.assertTrue(
+            all(isinstance(result, EmployeeAccountsError) for result in refused),
+            f"两个并发自选都必须被拒，实际: {refused!r}",
+        )
+        self.assertEqual(
+            [result.code for result in refused], ["shift_from_schedule"] * 2
+        )
+        # 一个写都没落：今天没有班，自选表里也没有行。
+        self.assertIsNone(await self.accounts.current_shift(employee["id"]))
+        cur = await self.db._conn.execute("SELECT COUNT(*) AS n FROM hygiene_shift_picks")
+        self.assertEqual(int(dict(await cur.fetchone())["n"]), 0)
+
+        business_date = hygiene_business_date(self.fixed_now)
+        raced = await asyncio.gather(
+            assign_duty(self.db, employee["id"], slot="day", now=self.fixed_now),
+            assign_duty(self.db, employee["id"], slot="night", now=self.fixed_now),
+            return_exceptions=True,
+        )
+        self.assertEqual(
+            [result for result in raced if isinstance(result, Exception)], []
+        )
+        cur = await self.db._conn.execute(
+            """SELECT s.duty_slot
+                 FROM staff_assignments a
+                 LEFT JOIN staff_shifts s ON s.id = a.shift_id
+                WHERE a.employee_id = ? AND a.business_date = ?""",
+            (employee["id"], business_date),
+        )
+        rows = await cur.fetchall()
+        self.assertEqual(len(rows), 1, "并发改规则后，当天只能剩一行排班")
+        slot = dict(rows[0])["duty_slot"]
+        self.assertIn(slot, ("day", "night"))
+        self.assertEqual(
+            await self.accounts.current_shift(employee["id"]),
+            "白班" if slot == "day" else "夜班",
+        )
 
     async def test_roster_field_update_is_atomic(self):
         employee = await self.accounts.register(PHONE, PASSWORD, "张三")

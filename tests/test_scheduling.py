@@ -17,10 +17,12 @@ from unittest import mock
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from db_core.schema import ADMIN_READ_ONLY_TABLES, SCHEDULING_TABLES
+from services.business_day import current_business_date
 from services.hygiene.accounts import EmployeeAccounts
 from services.scheduling.store import (
     EXPANSION_DAYS,
     MAX_REQUEST_NOTE,
+    SOURCE_RULE,
     SchedulingError,
     SchedulingStore,
 )
@@ -31,6 +33,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # 2026-09-24 是周四，10:00 已经过了 06:00 的切日点 → 营业日就是 9/24。
 TODAY = "2026-09-24"
 LAST_DAY = "2026-12-22"  # 今天 + 89 天
+
+
+class AdvancingClock:
+    """一个会推进的假时钟：前 `early_reads` 次读数是切日**之前**的时刻，之后是之后的。
+
+    06:00 是营业日的切日点（`services/business_day.py`）：同一个写请求里前几次读钟
+    算出来的营业日是 9/23、后面的变成 9/24 —— 正好复现「删的时候还是 9/23、铺的时候
+    已经是 9/24」那个竞态（见 `test_a_write_request_reads_the_clock_once_across_the_cut`）。
+    """
+
+    def __init__(self, early: datetime, late: datetime, early_reads: int = 3):
+        self.early = early
+        self.late = late
+        self.early_reads = early_reads
+        self.reads = 0
+
+    def __call__(self) -> datetime:
+        self.reads += 1
+        return self.early if self.reads <= self.early_reads else self.late
 
 
 class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
@@ -62,6 +83,20 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             if shift["name"] == name:
                 return shift["id"]
         raise AssertionError(f"没有班次 {name}")
+
+    async def _raw_rule(self, employee_id, cycle, anchor_date=TODAY):
+        """手工 SQL 写一条规则（票面的「人工 SQL 写坏 cycle / anchor_date」就是这个来源）。
+
+        不走 `set_rule`：那一道闸会把脏数据挡在外面，而缺陷 1 说的正是绕过闸之后写进去的
+        那一行 —— 以前它能让全店的月历、当天、待办和名单一起 400。
+        """
+        stamp = self.fixed_now.isoformat()
+        await self.db._conn.execute(
+            """INSERT INTO scheduling_rules (employee_id, cycle, anchor_date, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (employee_id, cycle, anchor_date, stamp, stamp),
+        )
+        await self.db._conn.commit()
 
     async def _rows(self, employee_id):
         cur = await self.db._conn.execute(
@@ -130,6 +165,16 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
         row = await cur.fetchone()
         return None if row is None else dict(row)["peer_employee_id"]
+
+    async def _day_shift(self, employee_id, business_date=TODAY):
+        """某人某天那一行的班次：没有那一行就是 `None`（那天还没排到他）。"""
+        cur = await self.db._conn.execute(
+            """SELECT shift_id FROM staff_assignments
+               WHERE employee_id = ? AND business_date = ?""",
+            (int(employee_id), business_date),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)["shift_id"]
 
     # ── 验收 1：配「固定白班」，从今天起每天都算进白班 ──────────────────
 
@@ -222,11 +267,13 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rules[employee["id"]]["cycle"], [day])
         self.assertEqual(rules[employee["id"]]["anchor_date"], TODAY)  # 不传起点 = 今天
 
-    async def test_dirty_anchor_date_is_an_input_error_not_a_crash(self):
-        """人工 SQL 把起点写成垃圾：报一条输入错误，而不是让整个月历 500。
+    async def test_dirty_anchor_date_skips_that_person_instead_of_the_whole_store(self):
+        """人工 SQL 把起点写成垃圾：那个人被跳过，名单里标成「读不出来」。
 
-        月历/当天两个接口都是先 `expand()` 再读（`api/scheduling.py:89,104`），所以
-        这里照着调 `expand()`。
+        起点是**算相位时**才算的（`_rule_anchor`），所以 `list_rules()` 照旧把它原样带
+        出来、不在这里抛；会被全店读到的两条路 —— `expand()`（`/calendar`、`/day` 的
+        第一步）与 `roster_with_rules()`（`/roster`，唯一能重配周期的入口）—— 都不许
+        跟着 400。
         """
         employee = await self._employee()
         day = await self._shift_id("白班")
@@ -237,9 +284,106 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
         await self.db._conn.commit()
 
+        # 内部读拿得到那一行（`cycle` 是好的、`anchor_date` 原样带出来）—— 它一被算就报错。
+        self.assertEqual(
+            (await self.store.list_rules())[employee["id"]]["anchor_date"], "昨天"
+        )
+
+        # 展开跳过这个人：把已经铺好的行清掉再展开，一行都不写（不是照脏起点硬铺）。
+        await self.db._conn.execute("DELETE FROM staff_assignments")
+        await self.db._conn.commit()
+        self.assertEqual(await self.store.expand(), 0)
+        self.assertEqual(await self._rows(employee["id"]), [])
+
+        roster = await self.store.roster_with_rules()
+        rule = {item["id"]: item for item in roster["employees"]}[employee["id"]]["rule"]
+        self.assertEqual(rule, {"cycle": None, "anchor_date": None, "invalid": True})
+
+    # ── 缺陷 1：一条脏规则不该打死全店（人工 SQL 会碰 `scheduling_rules`）────
+
+    async def test_a_broken_cycle_does_not_stop_the_rest_of_the_store(self):
+        """某人的 `cycle` 是非法 JSON：别人照常铺，月历与名单都出得来。
+
+        `/calendar` 与 `/day` 都是 `expand()` + 读，`/inbox` 也先 `expand()`；名单面板
+        （`roster_with_rules()`）是唯一能重配周期的入口，它跟着 400 就等于店长自锁 ——
+        只能进库改。所以坏规则要**显示出来**，不是抛错。
+        """
+        broken = await self._employee("13800138000", "张三")
+        healthy = await self._employee("13800138001", "李四")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(healthy["id"], [day])
+        await self._raw_rule(broken["id"], "白班/夜班")  # 人工 SQL：cycle 根本不是 JSON
+
+        # 清掉李四已经铺好的行：接下来这次展开该把他的 90 天补齐，而张三那条坏规则
+        # 一行都不写（跳过）—— 于是「写了几行」这个数就说明了别人没被连坐。
+        await self.db._conn.execute("DELETE FROM staff_assignments")
+        await self.db._conn.commit()
+        written = await self.store.expand()  # `/calendar`、`/day`、`/inbox` 的第一步
+        calendar = await self.store.month_calendar("2026-09")
+
+        # 别人那天照常排出来：只铺了李四那 90 天，张三一行都没有（被跳过）。
+        self.assertEqual(written, EXPANSION_DAYS)
+        self.assertEqual(len(await self._rows(healthy["id"])), EXPANSION_DAYS)
+        self.assertEqual(await self._rows(broken["id"]), [])
+        cells = {item["business_date"]: item for item in calendar["days"]}
+        self.assertEqual(cells[TODAY]["counts"][str(day)], 1)
+        self.assertEqual(cells[TODAY]["total"], 1)
+
+        # 名单：坏规则显示出来，好规则一个字没变（前端 `ruleLabel` 照这个形状渲染）。
+        roster = await self.store.roster_with_rules()
+        by_id = {item["id"]: item for item in roster["employees"]}
+        self.assertEqual(
+            by_id[broken["id"]]["rule"],
+            {"cycle": None, "anchor_date": None, "invalid": True},
+        )
+        self.assertEqual(by_id[healthy["id"]]["rule"], {"cycle": [day], "anchor_date": TODAY})
+
+        # 内部读的口径一个字没改：`list_rules()` 遇到读不出来的 `cycle` 照旧抛
+        # （要降级的是调用方，见那个 docstring）。
         with self.assertRaises(SchedulingError) as caught:
-            await self.store.expand()
-        self.assertEqual(caught.exception.code, "invalid_anchor")
+            await self.store.list_rules()
+        self.assertEqual(caught.exception.code, "invalid_cycle")
+
+        # `/inbox` 那条路也走得通：坏规则的人算「配过规则」，不进「还没配规则」名单。
+        inbox = await self.store.inbox()
+        self.assertEqual(inbox["requests"], [])
+        self.assertEqual([item["id"] for item in inbox["without_rule"]], [])
+
+    async def test_a_cycle_pointing_at_a_missing_shift_writes_no_ghost_rows(self):
+        """周期里引用一个不存在的班次：跳过这个人，也不铺 90 行指向幽灵班次的行。
+
+        `unknown_shift_in_cycle` 本来只在 `set_rule` 那道闸上（票 04），手工 SQL 绕得过去；
+        照那种规则展开，结果行的 `shift_id` 指向一个查不到的班次 —— 月历会多出一列
+        没有名字的计数，清理还得进库。
+        """
+        broken = await self._employee("13800138000", "张三")
+        healthy = await self._employee("13800138001", "李四")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(healthy["id"], [day])
+        await self._raw_rule(broken["id"], "[9999]")
+
+        # 同上：清掉李四的行，让这次展开真的写一遍。
+        await self.db._conn.execute("DELETE FROM staff_assignments")
+        await self.db._conn.commit()
+        written = await self.store.expand()
+
+        self.assertEqual(written, EXPANSION_DAYS)
+        self.assertEqual(len(await self._rows(healthy["id"])), EXPANSION_DAYS)
+        self.assertEqual(await self._rows(broken["id"]), [])
+        cells = {
+            item["business_date"]: item
+            for item in (await self.store.month_calendar("2026-09"))["days"]
+        }
+        self.assertEqual(cells[TODAY]["counts"][str(day)], 1)
+        self.assertNotIn("9999", cells[TODAY]["counts"])  # 没有那一列幽灵班次
+        self.assertEqual(cells[TODAY]["total"], 1)
+
+        roster = await self.store.roster_with_rules()
+        by_id = {item["id"]: item for item in roster["employees"]}
+        self.assertEqual(
+            by_id[broken["id"]]["rule"],
+            {"cycle": None, "anchor_date": None, "invalid": True},
+        )
 
     async def test_unknown_shift_in_a_cycle_says_which_slot(self):
         """周期里引用了不存在的班次：错误要说清是第几格（规则页照着这句话报错）。"""
@@ -693,6 +837,50 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         rows = await self._rows(employee["id"])
         self.assertEqual(rows[0]["business_date"], "2026-09-23")
         self.assertEqual(rows[-1]["business_date"], "2026-12-21")  # 9/23 + 89
+
+    async def test_a_write_request_reads_the_clock_once_across_the_cut(self):
+        """写请求正好跨过 06:00：删与铺必须是**同一个营业日**。
+
+        钟在同一个请求里从 9/24 05:59:59.999（还属于营业日 9/23）推进到 9/24 06:00:00.001
+        （营业日已经是 9/24）。修之前 `_delete_future_rule_rows` 与 `_expand_rows` 各读
+        一次钟 —— 删的是 ≥ 9/23 的行、铺的是 [9/24, …]，刚结束的那个营业日（9/23）被删掉
+        而且**没人补**：月历和员工页上那天从「有班」变成「还没排到」。修之后 `set_rule`
+        在开头取一次 today 往下传。
+
+        `early_reads=3` 是按修之前那条链取的：起点、规则行的 stamp、删除各读一次钟，
+        第 4 次（重铺）已经在切日之后 —— 于是缺口在那一次请求里真的成立。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        # 先在营业日 9/23 把规则配好（凌晨 5:30 还算是 9/23 的营业日）：
+        # 那个营业日本来就有一行（窗口从 9/23 起）。
+        before_cut = SchedulingStore(
+            self.db, now=lambda: datetime(2026, 9, 24, 5, 30, tzinfo=CHINA_TZ)
+        )
+        await before_cut.set_rule(employee["id"], [day])
+        self.assertEqual(before_cut.today(), "2026-09-23")
+        self.assertEqual((await self._rows(employee["id"]))[0]["business_date"], "2026-09-23")
+
+        clock = AdvancingClock(
+            datetime(2026, 9, 24, 5, 59, 59, 999000, tzinfo=CHINA_TZ),
+            datetime(2026, 9, 24, 6, 0, 0, 1000, tzinfo=CHINA_TZ),
+        )
+        # 前提：这两个读数算出来的营业日不一样（05:59 还是 9/23、06:00 已是 9/24）。
+        self.assertEqual(current_business_date(clock.early), "2026-09-23")
+        self.assertEqual(current_business_date(clock.late), "2026-09-24")
+
+        await SchedulingStore(self.db, now=clock).set_rule(employee["id"], [night])
+        self.assertGreater(clock.reads, 1)  # 假钟真的被读了不止一次
+
+        rows = {row["business_date"]: row for row in await self._rows(employee["id"])}
+        # 删与铺用的是同一个营业日（9/23）：那一行是新规则重铺出来的，不是缺口。
+        self.assertIn("2026-09-23", rows)
+        self.assertEqual(rows["2026-09-23"]["shift_id"], night)
+        self.assertEqual(rows["2026-09-23"]["source"], SOURCE_RULE)
+        # 整段窗口一起挪：末日跟着起点走（12/22 是「按 9/24 算」那一版才有的行）。
+        self.assertEqual((min(rows), max(rows)), ("2026-09-23", "2026-12-21"))
+        self.assertEqual(len(rows), EXPANSION_DAYS)
 
     async def test_month_past_the_window_says_where_it_ends(self):
         """翻到窗口尽头那个月：12/22 之前有人，之后是空的 —— 接口得说出边界在哪，
@@ -2382,6 +2570,65 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         # 名字里含「休」不算（「周末休班」是名字，不是那个保留词）。
         self.assertEqual((await self.store.create_shift("周末休班"))["name"], "周末休班")
 
+    async def test_shift_names_cannot_contain_cycle_separators(self):
+        """班次名里不许有空白与 `, ， 、 · /`：周期编辑器按这些字符切词。
+
+        `SchedulingCalendarView.vue` 的 `parseCycle` 用 `/[\\s,，、·/]+/` 切词，所以名字里
+        带了它们，这条班次在界面上**永远写不进周期**；而「白班/夜班」正好切出两个合法
+        班次名，编辑器还会把「固定上这个班」静默读成两班轮转。建与改名同一道闸。
+        """
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+
+        for name, offending in (
+            ("白班/夜班", "/"),
+            ("早 班", "空格"),
+            ("早\u3000班", "空格"),  # 全角空格也是空白（JS 的 `\s` 认它）
+            ("A,B", ","),
+            ("甲，乙", "，"),
+            ("甲、乙", "、"),
+            ("甲·乙", "·"),
+        ):
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.create_shift(name)
+            self.assertEqual(
+                (caught.exception.code, caught.exception.args[0]),
+                ("shift_name_charset", offending),
+            )
+
+        # 改名同一道闸：改成一个带分隔符的名字也要被拒。
+        for name in ("白班/夜班", "早 班", "A,B"):
+            with self.assertRaises(SchedulingError) as caught:
+                await self.store.update_shift(day, name=name)
+            self.assertEqual(caught.exception.code, "shift_name_charset")
+        # 拒绝 = 一个字都没改：两条班次还在原名上。
+        self.assertEqual(
+            [(shift["name"], shift["id"]) for shift in await self.store.list_shifts()],
+            [("白班", day), ("夜班", night)],
+        )
+
+        # 正常名字照常收：中文、数字、字母、连字符、下划线、括号都不在禁用集里。
+        for name in ("早班", "中班2", "A班", "早-班", "早_班", "早(补)"):
+            self.assertEqual((await self.store.create_shift(name))["name"], name)
+
+    async def test_shift_name_charset_error_says_which_characters_are_not_allowed(self):
+        """错误码翻成中文：那句话要说全不能用的字符，并点名这次撞上的那个。
+
+        这条特意穿到 HTTP 适配层 —— 错误码是服务层的，店长读到的那句话是接口层的，
+        两边都对才算数（`_bad_request` 就是所有排班路由共用的那个出口）。
+        """
+        from api.scheduling import _bad_request
+
+        exc = _bad_request(SchedulingError("shift_name_charset", "/"))
+        self.assertEqual(exc.status_code, 400)
+        self.assertIn("空格", exc.detail)
+        for char in (",", "，", "、", "·", "/"):
+            self.assertIn(char, exc.detail)
+        # 点名撞上的那个字符；空白那一种不给店长看一个看不见的东西。
+        self.assertIn("「/」", exc.detail)
+        self.assertIn("「空格」", _bad_request(SchedulingError("shift_name_charset", "空格")).detail)
+        self.assertNotIn("{}", exc.detail)
+
     async def test_usage_counts_people_in_the_rotation_and_days_written(self):
         """编辑页要看到的两个数：几个人的轮转里排着它、已经排过多少天班。"""
         first = await self._employee("13800138000", "张三")
@@ -2427,6 +2674,105 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         """新表也要进连接的 TableView 清单，否则 `db.table("staff_shifts")` 抛「未知表」。"""
         for table in SCHEDULING_TABLES:
             self.assertIsNotNone(self.db.table(table))
+
+    # ── 交错：读在锁外、写在锁里的两处（并发用例） ──────────────────────
+    #
+    # 两处的形状一样 —— 先在锁外读一次（拿到「有哪些人 / 这条是什么状态」），再拿写锁
+    # 去写。两个请求在这中间交错时，锁外那次读的结论已经过期了。下面两个用例把交错点
+    # 钉死在「读完、还没拿锁」的那一刻，断言的是**结果**：已删的规则不许被铺回来，
+    # 同一条换班不许被换两遍。
+
+    async def test_clearing_a_rule_mid_expand_does_not_resurrect_it(self):
+        """展开读到规则之后、拿到写锁之前规则被清掉：不许照旧快照把他铺回来。
+
+        `expand()` 是读接口顺手做的（票 02 的落地口径）：先读全店规则，再逐人拿锁写。
+        `clear_rule` 会删规则行、连今天以后的规则行一起删；展开要是还拿着旧快照写，
+        这个人就成了「名单上没配规则、月历上却有 90 天班」—— 而且不会自愈
+        （`expand()` 只补缺的天，被铺回来的行再没别的路径去删）。
+
+        交错点钉在展开**读名单**那一刻：名单走的是 `_rule_rows()`（原样行、不解码），
+        这样一个人一条脏规则不会把别人一起带走（缺陷 1）。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        # 清掉结果行：让接下来这次展开必须真的写（否则它只是「一天都不缺」）
+        await self.db._conn.execute("DELETE FROM staff_assignments")
+        await self.db._conn.commit()
+
+        original = SchedulingStore._rule_rows
+        snapshot_taken = asyncio.Event()
+        resume = asyncio.Event()
+
+        async def gated(self, *args, **kwargs):
+            rules = await original(self, *args, **kwargs)
+            snapshot_taken.set()
+            await resume.wait()
+            return rules
+
+        SchedulingStore._rule_rows = gated
+        try:
+            task = asyncio.create_task(self.store.expand())
+            await asyncio.wait_for(snapshot_taken.wait(), timeout=5)
+            # 就在「读完规则」与「拿写锁」之间：店长清掉了他的规则。
+            await self.store.clear_rule(employee["id"])
+            resume.set()
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            SchedulingStore._rule_rows = original
+
+        cur = await self.db._conn.execute("SELECT COUNT(*) AS n FROM scheduling_rules")
+        self.assertEqual(int(dict(await cur.fetchone())["n"]), 0)
+        self.assertEqual(await self._rows(employee["id"]), [])
+
+    async def test_a_swap_cannot_be_approved_twice(self):
+        """同一条换班被「批准」两次：第二次不许再换一遍。
+
+        两个标签页、双击、网关重试都会走到这儿。「读出来是待批」那道判断在锁外，
+        所以只有把状态谓词放进锁里那条 UPDATE 才挡得住 —— 第二次要是照样执行
+        `_approve_swap`，它会重读两个人当天的班（已经是换完的样子）再换一次：
+        两次都回「批了」，班却回到原样。
+        """
+        first = await self._employee("13800138001", "甲")
+        second = await self._employee("13800138002", "乙")
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(first["id"], [day])
+        await self.store.set_rule(second["id"], [night])
+
+        request = await self.store.submit_swap(first["id"], second["id"], TODAY, None)
+        await self.store.answer_swap(second["id"], request["id"], True)
+
+        original = SchedulingStore._request_by_id
+        gate = asyncio.Event()
+        readers = []
+
+        async def gated(self, request_id):
+            row = await original(self, request_id)
+            readers.append(1)
+            if len(readers) >= 2:
+                gate.set()
+            await asyncio.wait_for(gate.wait(), timeout=5)
+            return row
+
+        SchedulingStore._request_by_id = gated
+        try:
+            results = await asyncio.gather(
+                SchedulingStore(self.db, now=lambda: self.fixed_now).approve_request(request["id"]),
+                SchedulingStore(self.db, now=lambda: self.fixed_now).approve_request(request["id"]),
+                return_exceptions=True,
+            )
+        finally:
+            SchedulingStore._request_by_id = original
+
+        succeeded = [result for result in results if not isinstance(result, Exception)]
+        refused = [result for result in results if isinstance(result, SchedulingError)]
+        self.assertEqual(len(succeeded), 1, results)
+        self.assertEqual(len(refused), 1, results)
+        self.assertEqual(refused[0].code, "request_not_pending")
+        # 换了一次就停：甲那天是夜班、乙那天是白班（不是又换回去）。
+        self.assertEqual(await self._day_shift(first["id"]), night)
+        self.assertEqual(await self._day_shift(second["id"]), day)
 
 
 class SchedulingLayeringTest(unittest.TestCase):
@@ -2546,3 +2892,4 @@ class SchedulingLayeringTest(unittest.TestCase):
             self.assertTrue(catalog["table_meta"][table]["read_only"])
         groups = {group["key"]: group for group in catalog["groups"]}
         self.assertEqual(set(groups["scheduling"]["tables"]), set(SCHEDULING_TABLES))
+

@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 
 from api.security import require_session, require_staff_session
 from database import get_db
-from services.scheduling import MAX_CYCLE_DAYS, MAX_SHIFT_NAME
+from services.realtime.hub import realtime_hub
+from services.scheduling import MAX_CYCLE_DAYS, MAX_REQUEST_NOTE, MAX_SHIFT_NAME
 from services.scheduling.store import SchedulingError, SchedulingStore
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,18 @@ _ERROR_DETAILS = {
     "shift_name_taken": "已经有一个同名的班次了：换个名字，或者把那一条改掉",
     # 带一个 `{}`：服务层把那个保留词放在 `args[0]`（点名的两句能照做）。
     "shift_name_reserved": "「{}」这个词留给「那天休息」：周期里写它表示不上班，换个名字",
+    # 班次名的字符集（票 11 的收口）：周期编辑器把店长写的字**按空白与这几个符号切词**
+    # （`SchedulingCalendarView.vue` 的 `parseCycle`），名字里带了它们，这条班次在界面上
+    # 永远写不进周期；名字恰好切出两个合法班次名时（「白班/夜班」），还会把「固定上这个
+    # 班」静默读成两班轮转。文案把不能用的字符**列全**，别让店长一个个试。
+    # 带一个 `{}`：服务层把撞上的那个字符放在 `args[0]`（空白回的是「空格」两个字）。
+    "shift_name_charset": (
+        "班次名里不能有空格、, ， 、 · / 这些字符：轮转周期按它们切词，"
+        "名字里带了就永远写不进周期。请去掉「{}」再试"
+    ),
     "invalid_shift_order": "显示顺序得是个整数",
+    # 卫生档位（票 10）：只能是不出日常 / 白班档 / 夜班档 三种。
+    "invalid_duty_slot": "卫生档位只能选白班档、夜班档，或者不出日常：请重新选一次",
     # 编辑班次表用的「没有这一行」：跟 `unknown_shift`（只能挑在用的班次）分开 ——
     # 停用的班次照样要能改名、能重新启用。
     "unknown_shift_id": "找不到这个班次：可能已经被删了，刷新看看",
@@ -85,11 +97,13 @@ _ERROR_DETAILS = {
     "shift_used": "这个班次已经用过了（{}），删不掉：停用它就行，历史排班照旧显示",
     "shift_order_mismatch": "班次顺序对不上（可能刚有人加过或删过班次）：刷新一下再调",
     "last_active_shift": "至少得留一个能用的班次：不然谁都没班可排",
+    # **逐条点名**是票 02 起的验收（503 要说清该跑哪个脚本，测试也按文件名断言），
+    # 所以每加一条排班迁移都要回来补一句 —— 0010 就是收尾时补的。这条注释就是那个提醒。
     "not_migrated": (
         "排班表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
         "migrations/pg/0005_scheduling.sql、0006_scheduling_zone_defaults.sql、"
-        "0007_scheduling_overrides.sql、0008_scheduling_requests.sql 与 "
-        "0009_scheduling_swap.sql，然后刷新本页"
+        "0007_scheduling_overrides.sql、0008_scheduling_requests.sql、"
+        "0009_scheduling_swap.sql 与 0010_shift_duty_slot.sql，然后刷新本页"
     ),
 }
 
@@ -113,24 +127,34 @@ class SetRuleRequest(BaseModel):
 class CreateShiftRequest(BaseModel):
     """加一个班次（票 11）。`sort_order` 不给就排在最后。
 
+    `duty_slot` 是卫生的档位（票 10）：`'day'` / `'night'` / 不给或空 = 这条班次不出
+    日常检查。新加的班次默认不出 —— 加一个「中班」时还没有对应的日常检查项，等店长
+    想清楚它是白班档还是夜班档再标。
+
     `name` 不是必填（同 `LeaveRequest.start_date` 的理由）：缺字段、空串、显式 `null`
     都落到服务层那道闸上，回一句中文的 400，而不是 pydantic 那串英文的 422 字段错误。
     """
 
     name: Optional[str] = None
     sort_order: Optional[int] = None
+    duty_slot: Optional[str] = None
 
 
 class UpdateShiftRequest(BaseModel):
-    """改一个班次（票 11）：名字 / 显示顺序 / 启用停用。
+    """改一个班次（票 11、票 10）：名字 / 显示顺序 / 启用停用 / 卫生档位。
 
     **`None` = 这一项不动**（不是「清空」）：`is_active` 显式给 `false` 才是停用，
     名字本来也不允许为空，所以「不给」与「给空」在这里是同一件事 —— 不动它。
+
+    `duty_slot` 是唯一的例外：「不动」和「清空成不出日常」得分开说，所以
+    **`null` = 不动、空串 `""` = 清空**、`'day'` / `'night'` = 设成那一档。
     """
 
     name: Optional[str] = None
     sort_order: Optional[int] = None
     is_active: Optional[bool] = None
+    # 卫生档位（票 10）：见上面的例外说明 —— `None` 不动、空串清空、day/night 是设置。
+    duty_slot: Optional[str] = None
 
 
 class ShiftOrderRequest(BaseModel):
@@ -197,6 +221,22 @@ def _bad_request(exc: SchedulingError) -> HTTPException:
         detail = detail.replace("{}", raw if raw and raw != exc.code else "？")
     logger.info("排班请求被拒: code=%s", exc.code)
     return HTTPException(status_code=_ERROR_STATUS.get(exc.code, 400), detail=detail)
+
+
+async def _scheduling_nudge(reason: str, *employee_ids: Optional[int]) -> None:
+    """排班或申请动了，叫相关的人自己来拉一次（nudge 不带数据，见 `services/realtime/hub.py`）。
+
+    scope 里带 `employee_id`：员工连接只会收到**自己**那条（hub 的 `_staff_owns_scope`），
+    店长那侧不受限 —— 他本来就要看全店。换班牵两个人、批假牵一个人，所以这里收可变参数：
+    一人一条，不为「多人」在 hub 里开特例（那会让派发侧多一种要判的形状）。
+
+    读路径不广播：`expand()` 那种顺手补行不值得叫醒谁 —— 数据形状没变，谁也没多看到什么。
+    """
+    for employee_id in {int(item) for item in employee_ids if item is not None}:
+        await realtime_hub.broadcast_nudge(
+            "scheduling",
+            {"reason": reason, "employee_id": employee_id},
+        )
 
 
 @router.get("/me")
@@ -274,6 +314,9 @@ async def my_requests(
         "today": data["today"],
         "requests": data["requests"],
         "incoming": data["incoming"],
+        # 事由的长度上限随这一条下去（同 `/roster` 的 `max_cycle_days`、`/shifts/manage`
+        # 的 `max_name`）：前端拿它设 `maxlength` 与文案，不再写死第二份 50。
+        "max_request_note": MAX_REQUEST_NOTE,
     }
 
 
@@ -295,6 +338,8 @@ async def submit_leave(
         )
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
+    # 店长那边等着批：叫他自己来拉一次（nudge 不带数据，只说「有你的事」）。
+    await _scheduling_nudge("leave_submitted", employee["id"])
     return {
         "employee": {"id": employee["id"], "name": employee["name"]},
         "request": request,
@@ -313,9 +358,12 @@ async def cancel_request(
     """
     store = SchedulingStore(db)
     try:
-        return await store.cancel_request(employee["id"], request_id)
+        result = await store.cancel_request(employee["id"], request_id)
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
+    # 撤回也要说一声：店长待办里那条该消失（他可能正开着那一页）。
+    await _scheduling_nudge("request_cancelled", employee["id"])
+    return result
 
 
 @router.get("/me/colleagues")
@@ -353,6 +401,9 @@ async def submit_swap(
         )
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
+    # **对方**要马上知道有人找他换班 —— 这条最需要实时：他不开页面就永远不知道，
+    # 申请人也就一直等（票 09 的整条链路卡在这儿）。一人一条，各收各的。
+    await _scheduling_nudge("swap_submitted", employee["id"], payload.peer_employee_id)
     return {
         "employee": {"id": employee["id"], "name": employee["name"]},
         "request": request,
@@ -372,9 +423,12 @@ async def accept_swap(
     """
     store = SchedulingStore(db)
     try:
-        return await store.answer_swap(employee["id"], request_id, True)
+        result = await store.answer_swap(employee["id"], request_id, True)
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
+    # 申请人要知道对方回话了（他那边没有别的途径看到）；同意之后这条接着进店长待办。
+    await _scheduling_nudge("swap_answered", result.get("employee_id"), employee["id"])
+    return result
 
 
 @router.post("/me/swaps/{request_id}/reject")
@@ -386,9 +440,12 @@ async def reject_swap(
     """拒绝跟我换班：这件事到此为止 —— 店长那边从头到尾看不到它，排班一个字不改。"""
     store = SchedulingStore(db)
     try:
-        return await store.answer_swap(employee["id"], request_id, False)
+        result = await store.answer_swap(employee["id"], request_id, False)
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
+    # 同上：拒绝了也要让申请人知道（这件事到此为止，别让他一直等）。
+    await _scheduling_nudge("swap_answered", result.get("employee_id"), employee["id"])
+    return result
 
 
 @router.get("/shifts")
@@ -438,7 +495,7 @@ async def create_shift(
     的卡片都按 N 个班次渲染，不需要改代码（验收项）。"""
     store = SchedulingStore(db)
     try:
-        return {"shift": await store.create_shift(payload.name, payload.sort_order)}
+        return {"shift": await store.create_shift(payload.name, payload.sort_order, payload.duty_slot)}
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
 
@@ -471,7 +528,7 @@ async def update_shift(
     try:
         return {
             "shift": await store.update_shift(
-                shift_id, payload.name, payload.sort_order, payload.is_active
+                shift_id, payload.name, payload.sort_order, payload.is_active, payload.duty_slot
             )
         }
     except SchedulingError as exc:
@@ -567,9 +624,12 @@ async def set_rule(
     """给一个人配轮转规则；今天以后的规则行立刻重铺，月历随即可见。"""
     store = SchedulingStore(db)
     try:
-        return await store.set_rule(employee_id, payload.cycle, payload.anchor_date)
+        result = await store.set_rule(employee_id, payload.cycle, payload.anchor_date)
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
+    # 店长改了排班：当事人手机上的「今天」页该跟着变 —— 票 10 验收 4 在人机两侧都成立。
+    await _scheduling_nudge("rule_changed", employee_id)
+    return result
 
 
 @router.delete("/rules/{employee_id}")
@@ -584,6 +644,7 @@ async def clear_rule(
         await store.clear_rule(employee_id)
     except SchedulingError as exc:  # pragma: no cover - 现在不会抛，留个一致的出口
         raise _bad_request(exc) from exc
+    await _scheduling_nudge("rule_cleared", employee_id)
     return {"employee_id": employee_id, "rule": None}
 
 
@@ -602,7 +663,7 @@ async def set_override(
     """
     store = SchedulingStore(db)
     try:
-        return await store.set_override(
+        result = await store.set_override(
             employee_id,
             business_date,
             is_rest=payload.is_rest,
@@ -611,6 +672,9 @@ async def set_override(
         )
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
+    # 被临时调走（或被改成休）的人手机上的「今天」页要跟着变 —— 票 10 验收 6 的同一件事。
+    await _scheduling_nudge("override_set", employee_id)
+    return result
 
 
 @router.delete("/overrides/{employee_id}/{business_date}")
@@ -627,10 +691,12 @@ async def clear_override(
     """
     store = SchedulingStore(db)
     try:
-        return await store.clear_override(employee_id, business_date)
+        result = await store.clear_override(employee_id, business_date)
     except SchedulingError as exc:
         # 日期格式不对、管理员没应用 0007 都会走到这里 —— 跟 PUT 那条一样的出口。
         raise _bad_request(exc) from exc
+    await _scheduling_nudge("override_cleared", employee_id)
+    return result
 
 
 @router.get("/inbox")
@@ -664,9 +730,14 @@ async def approve_request(
     """
     store = SchedulingStore(db)
     try:
-        return await store.approve_request(request_id)
+        result = await store.approve_request(request_id)
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
+    # 批完两个人都要知道：申请人（他那几天变了）、换班的对方（两个人的班对调了）。
+    await _scheduling_nudge(
+        "request_approved", result.get("employee_id"), result.get("peer_employee_id")
+    )
+    return result
 
 
 @router.post("/inbox/{request_id}/reject")
@@ -678,6 +749,9 @@ async def reject_request(
     """驳回一条申请：排班一个字不改，只把申请记为驳回（票 08 的验收项；换班同理）。"""
     store = SchedulingStore(db)
     try:
-        return await store.reject_request(request_id)
+        result = await store.reject_request(request_id)
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
+    # 驳回也要让申请人知道（他提的那条有结果了）。
+    await _scheduling_nudge("request_rejected", result.get("employee_id"))
+    return result

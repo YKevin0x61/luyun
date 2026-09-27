@@ -19,11 +19,13 @@ describe('hygiene staff work app', () => {
     expect(home).toMatch(/HYGIENE_STAFF_TABS/)
     expect(home).toMatch(/class="hy-tabbar"/)
     expect(home).toMatch(/aria-label="卫生入口"/)
-    expect(home).toMatch(/今天负责哪个区域、上哪一班/)
-    expect(home).toMatch(/staff\/assignment/)
-    expect(home).toMatch(/重新选择区域和班次/)
-    expect(home).toMatch(/aria-label="重新选择区域和班次"/)
-    expect(home).toMatch(/@click="openAssignmentPicker"/)
+    // 票 10：这一屏原来写的是「今天负责哪个区域、上哪一班？」—— 那是个选择器。自选撤了
+    // 之后，同样的位置换成了「今天交不了日常检查」的实话 + 一条去「今天」页的路；
+    // 那条写回自选的请求也不许再出现。
+    expect(home).toMatch(/今天交不了日常检查/)
+    expect(home).toMatch(/今天排班没有排到你的班/)
+    expect(home).not.toMatch(/staff\/assignment/)
+    expect(home).toMatch(/去看我的班/)
     expect(home).toMatch(/loadZones\(\{ force: true \}\)/)
     expect(home).toMatch(/loadBoardsAndTeaching\(\{ force: true \}\)/)
     expect(home).toMatch(/修改个人信息/)
@@ -97,5 +99,17 @@ describe('hygiene staff work app', () => {
     expect(facts).toMatch(/日常 \{\{ dailyStats\.passed \}\}/)
     expect(facts).not.toMatch(/专项/)
     expect(facts).not.toMatch(/整改/)
+  })
+
+  it('回得到「今天」页：卫生页不是单行道', () => {
+    const home = read('../HygieneHomeView.vue')
+    // 员工登录后落在 `/today`（票 05），卫生只是它的下半张卡。缺了这条回程，员工点进
+    // 卫生就回不到自己的班 —— iPhone 的 PWA 独立窗口没有返回键，那就是真的卡住。
+    expect(home).toMatch(/class="hy-work-today"/)
+    expect(home).toMatch(/to="\/today"/)
+    expect(home).toMatch(/aria-label="回到「今天」页看我的班"/)
+    // 头部那条胶囊的样式得在共享样式表里，否则按钮是裸的。
+    const css = read('../../../../public/hygiene-admin.css')
+    expect(css).toMatch(/\.hygiene-work \.hy-work-today \{/)
   })
 })

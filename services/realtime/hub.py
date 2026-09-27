@@ -14,6 +14,11 @@ seq / 跳号重订阅 / snapshot 缓存——客户端收到 nudge 后自行复�
 
 **单 worker 约束仍未解除**：nudge 能跨进程了，但那 7 个常驻后台循环还没有分布式
 选主，开 `--workers > 1` 仍会重复采集 / 重复推送（见 deploy/README.md）。
+
+**员工连接按归属隔离**（`auth == "staff"`，身份在建连鉴权时确定，见
+`api/security.py` 的 `identify_ws`）：只订 `hygiene`，且只收 scope 里没有
+employee_id 的全店级事件 + scope 里 employee_id 是自己的那条；subscribe 消息里
+客户端自报的 filters 一律作废。管理端连接不受这两条限制。
 """
 
 import asyncio
@@ -34,14 +39,19 @@ VALID_TOPICS = {
     "logs",
     "admin",
     "hygiene",
+    "scheduling",
 }
 
 _VALID_ACTIONS = {"subscribe", "unsubscribe", "ping"}
 
-# 员工（staff）会话只允许订阅卫生主题。nudge 不带数据，但 orders/tables/logs/admin
-# 的**时序**本身就是门店经营信息（几点来了几单、什么时候在改档口），而员工端没有
-# 任何页面需要它们。管理员会话不受限制。
-STAFF_ALLOWED_TOPICS = frozenset({"hygiene"})
+# 员工（staff）会话只允许订阅卫生与排班两个主题。nudge 不带数据，但 orders/tables/logs/admin
+# 的**时序**本身就是门店经营信息（几点来了几单、什么时候在改档口），而员工端没有任何页面
+# 需要它们。管理员会话不受限制。
+#
+# 光限主题还不够：员工订得到 hygiene / scheduling，就得保证**推给他的那条不是别人的事** ——
+# 那由 `_staff_owns_scope` 与订阅时的 filters 覆盖一起兜（见 `_dispatch_local` 与
+# `handle_message`）：scope 里带了别人 employee_id 的一律不推。
+STAFF_ALLOWED_TOPICS = frozenset({"hygiene", "scheduling"})
 
 
 def allowed_topics(auth: str):
@@ -49,6 +59,34 @@ def allowed_topics(auth: str):
     if auth == "staff":
         return STAFF_ALLOWED_TOPICS
     return VALID_TOPICS
+
+
+# 员工连接只订 hygiene 还不够：hygiene 的 nudge 里有相当一部分是**同事的个人事件**
+# （换区 / 换班 / 花名册被审批、停用），scope 里带的是**别人的** employee_id。收到
+# 这些 nudge 就等于拿到「谁在什么时候换了区、谁被驳回了」的时序——和 orders/tables
+# 的时序一样是人的行为信息，而员工端没有任何页面需要同事的那份。所以员工的归属
+# 只看连接建立时鉴权出来的身份，**不看客户端自报**：subscribe 里的 filters 一律
+# 作废（否则员工可以 `{"filters": {"employee_id": 同事}}` 定向监听）。
+# scope 里没有 employee_id 的是全店级事件（档口/看板/配置变更），员工照常收。
+STAFF_SCOPE_OWNER_KEY = "employee_id"
+
+
+def _staff_owns_scope(state: "ConnectionState", scope: dict) -> bool:
+    """这条 nudge 的 scope 是否属于该员工连接。
+
+    非员工的连接（管理端 session / API token）不受限——店长本来就要看全店。
+
+    员工侧：scope 不带 employee_id = 全店级事件，放行；带了就必须等于自己。
+    身份没解析出来（employee_id 为 None，例如连接经由老路径注册）时**一律拒绝**
+    带 employee_id 的 nudge——宁可少推一条让员工自己刷新，也不能猜错人。
+    """
+    if state.auth != "staff":
+        return True
+    owner = scope.get(STAFF_SCOPE_OWNER_KEY)
+    if owner is None:
+        return True
+    return state.employee_id is not None and owner == state.employee_id
+
 
 # dashboard 汇总接口开销较大，orders/tables 变更后合并该窗口内的多次
 # 变更为一次 `dashboard` nudge，而非每条变更都触发一次。
@@ -71,6 +109,10 @@ class Subscription:
 class ConnectionState:
     websocket: Any
     auth: str
+    # 员工会话在连接建立时鉴权出来的员工 id；管理端连接恒为 None。
+    # 只作为「这条连接是谁」的事实来源，绝不从 subscribe 消息里读（见
+    # `_staff_owns_scope` 与 `handle_message` 的 filters 覆盖）。
+    employee_id: Optional[int] = None
     subscriptions: dict = field(default_factory=dict)
 
     def has_topic(self, topic: str) -> bool:
@@ -135,9 +177,18 @@ class RealtimeHub:
             return
         await self._bus.stop()
 
-    async def register(self, websocket, auth: str) -> ConnectionState:
-        """加入连接集合（不 accept，accept 由端点在调用本方法前完成一次）。"""
-        state = ConnectionState(websocket=websocket, auth=auth)
+    async def register(
+        self,
+        websocket,
+        auth: str,
+        employee_id: Optional[int] = None,
+    ) -> ConnectionState:
+        """加入连接集合（不 accept，accept 由端点在调用本方法前完成一次）。
+
+        `employee_id` 由端点在 `authenticate_ws` / `identify_ws` 之后传入：员工
+        连接靠它做归属隔离（见 `_staff_owns_scope`），管理端连接不必传。
+        """
+        state = ConnectionState(websocket=websocket, auth=auth, employee_id=employee_id)
         self._connections[websocket] = state
         return state
 
@@ -202,6 +253,37 @@ class RealtimeHub:
         if not isinstance(filters, dict):
             await self._send_error(websocket, "INVALID_SUBSCRIBE", "filters 必须是对象")
             return
+        if state.auth == "staff":
+            # 员工连接的 filters 由服务端说了算：客户端传什么都不作数，强制换成
+            # 自己的 employee_id。不这么做的话 `{"filters": {"employee_id": B}}`
+            # 就能定向监听同事（`_scope_matches_filters` 只比它认识的字段，scope
+            # 里没有该字段时全收）。传了 employee_id 的按越权尝试记 WARNING，其它
+            # filters（例如只想收某个 resource）只是被丢弃、记 INFO —— 都不静默，
+            # 否则将来"员工说自己收不到 nudge"就没有第一现场。
+            # 身份没解析出来时留空 filters（等于全收），派发侧的 `_staff_owns_scope`
+            # 仍是 fail-closed 的那道闸。
+            forced = (
+                {STAFF_SCOPE_OWNER_KEY: state.employee_id}
+                if state.employee_id is not None
+                else {}
+            )
+            if filters and filters != forced:
+                if STAFF_SCOPE_OWNER_KEY in filters and (
+                    filters[STAFF_SCOPE_OWNER_KEY] != state.employee_id
+                ):
+                    logger.warning(
+                        "员工 WS 连接试图按 employee_id 过滤，已改成本人归属: sub=%s 客户端=%s",
+                        sub_id,
+                        filters,
+                    )
+                else:
+                    logger.info(
+                        "员工 WS 连接的 filters 已按本人归属覆盖: sub=%s 客户端=%s 实际=%s",
+                        sub_id,
+                        filters,
+                        forced,
+                    )
+            filters = forced
 
         state.subscriptions[sub_id] = Subscription(id=sub_id, topics=set(topics), filters=filters)
         await self._send(websocket, {"type": "subscribed", "id": sub_id})
@@ -228,11 +310,17 @@ class RealtimeHub:
     async def _dispatch_local(self, topic: str, scope: Optional[dict] = None) -> None:
         """向订阅了 `topic` 且过滤匹配的**本进程**连接推
         `{type:nudge, topic, scope}`；推送失败的死连接会被清理，不影响其它连接。
+
+        员工连接还多一道归属闸：scope 里的 employee_id 不是自己的直接跳过
+        （`_staff_owns_scope`）。订阅侧的 filters 覆盖只管"员工自己声明关心什么"，
+        这道闸管"这条 nudge 是不是他的"——两层都留着，任一层漏了都还有另一层。
         """
         scope = scope or {}
         message = {"type": "nudge", "topic": topic, "scope": scope}
         dead = []
         for websocket, state in list(self._connections.items()):
+            if not _staff_owns_scope(state, scope):
+                continue
             matched = any(
                 _scope_matches_filters(scope, sub.filters)
                 for sub in state.subscriptions_for_topic(topic)

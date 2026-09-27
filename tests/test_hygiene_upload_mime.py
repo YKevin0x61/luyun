@@ -28,10 +28,15 @@ from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.images import ImageVariantGenerator, sniff_image_content_type
 from services.hygiene.work import HygieneWork
+from tests.hygiene_duty import assign_duty
 
 SUPER = {"kind": "super"}
 PHONE = "13800138000"
 PASSWORD = "password123"
+
+# 夹具里 accounts / work 的固定时刻。票 10 的前置数据（`assign_duty`）必须用同一个
+# 时刻造「今天」——排班的营业日跟卫生的营业日差了，员工今天就查不到那一行排班。
+FIXED_NOW = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
 
 SVG_PAYLOAD = (
     b'<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120">'
@@ -63,12 +68,12 @@ def upload_http(tmp_path):
     _run(db.connect())
     set_runtime(AppRuntime(db=db))
     accounts = EmployeeAccounts(
-        db, now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
+        db, now=lambda: FIXED_NOW
     )
     work = HygieneWork(
         db,
         captures=FakeCaptureStore(),
-        now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        now=lambda: FIXED_NOW,
         image_variants=ImageVariantGenerator(),
     )
     _run(work.prepare())
@@ -103,15 +108,40 @@ def _submit(client, item_id, payload, declared_type):
     )
 
 
-def _prepare_staff(client, zone):
+def _staff_id(db) -> int:
+    """夹具注册的那名员工的 id —— ``assign_duty`` 按 id 定位，前置数据都要它。"""
+    cur = _run(
+        db._conn.execute(
+            "SELECT id FROM hygiene_employees WHERE phone = ?",
+            (PHONE,),
+        )
+    )
+    row = _run(cur.fetchone())
+    assert row is not None, f"夹具里应该有手机号 {PHONE} 的员工"
+    return int(dict(row)["id"])
+
+
+def _prepare_staff(client, db, zone):
+    """登录 + 把「今天 · 白班档 · 这个责任区」**配成排班**（票 10 的分工来源）。
+
+    提交与取图都按员工当天的班次和责任区走。票 10 之前这里打的是
+    ``POST /api/hygiene/staff/assignment``（员工当天自己选），那个入口现在一律 403：
+    分工由**排班结果**决定，前置数据只能从上游配。``now`` 用夹具那个固定时刻，
+    不然排班的「今天」对不上卫生的营业日。
+    """
     assert client.post(
         "/api/hygiene/staff/login",
         json={"phone": PHONE, "password": PASSWORD},
     ).status_code == 200
-    assert client.post(
-        "/api/hygiene/staff/assignment",
-        json={"shift": "白班", "zone_id": zone["id"]},
-    ).status_code == 200
+    _run(
+        assign_duty(
+            db,
+            _staff_id(db),
+            slot="day",
+            zone_id=zone["id"],
+            now=FIXED_NOW,
+        )
+    )
 
 
 def test_sniff_helper_only_trusts_content():
@@ -123,7 +153,7 @@ def test_sniff_helper_only_trusts_content():
 
 def test_svg_upload_is_stored_as_octet_stream_and_never_served_as_svg(upload_http):
     client, db, _work, zone, item = upload_http
-    _prepare_staff(client, zone)
+    _prepare_staff(client, db, zone)
 
     response = _submit(client, item["id"], SVG_PAYLOAD, "image/svg+xml")
     assert response.status_code == 200, response.text
@@ -147,8 +177,8 @@ def test_svg_upload_is_stored_as_octet_stream_and_never_served_as_svg(upload_htt
 
 
 def test_real_jpeg_keeps_image_type_and_stays_inline(upload_http):
-    client, _db, _work, zone, item = upload_http
-    _prepare_staff(client, zone)
+    client, db, _work, zone, item = upload_http
+    _prepare_staff(client, db, zone)
 
     response = _submit(client, item["id"], _jpeg(), "image/jpeg")
     assert response.status_code == 200, response.text
@@ -165,8 +195,8 @@ def test_real_jpeg_keeps_image_type_and_stays_inline(upload_http):
 
 def test_declared_type_cannot_downgrade_a_real_image(upload_http):
     """声明 svg 但内容是 JPEG：按内容走，图片照样能显示。"""
-    client, _db, _work, zone, item = upload_http
-    _prepare_staff(client, zone)
+    client, db, _work, zone, item = upload_http
+    _prepare_staff(client, db, zone)
 
     response = _submit(client, item["id"], _jpeg(), "image/svg+xml")
     assert response.status_code == 200, response.text

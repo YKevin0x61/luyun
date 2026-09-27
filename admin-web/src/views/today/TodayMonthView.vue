@@ -8,18 +8,22 @@
  * 数据只有一个来源：`GET /api/scheduling/me/month`（员工那个 cookie，跟 `/me` 同一扇门，
  * 接口上同样没有 `employee_id` 可填 —— 只看得到自己的班）。
  *
- * 两条口径写在页脚里，免得员工自己猜：
+ * 三条口径写在页脚里，免得员工自己猜：
  *   · 空格子 = 那天还没排（新装机的本月前半月就是这样：铺班只往今天以后走，不回头补）；
  *   · 「请假」是票 08 起的一态：批过的假跟排班给的「休」分开上色分开放（都是没有班，
- *     但一个是自己提的、店长批的）；换班的角标还在第 9 张票里。
+ *     但一个是自己提的、店长批的）；
+ *   · 右上角的小点 = 那天有自己的申请还没落定（票 06 的那条角标验收，等对方点头 /
+ *     等店长批，数据来自 `/me/requests`）。
  *
  * 翻月只在服务端给的展开窗口里走（`stepMonth`）：往后到 `window_end` 所在的月为止，
  * 那之后的格子算「窗口外」，淡出并单独说一句 —— 淡 = 还没铺到，不是「那天没排」。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { staffRequest } from '../../utils/hygieneStaff'
+import { eachDayInRange } from '../../utils/dateRange'
 import {
   MONTH_HEADS,
   dayBeyondWindow,
@@ -50,8 +54,9 @@ const isThisMonth = computed(() => month.value === today.value.slice(0, 7))
 // 往后到展开窗口末就该停：再翻只会看见一个空月（判据在 `stepMonth` 里，页面不自算 90 天）。
 const canNext = computed(() => !!stepMonth(month.value, 1, windowEnd.value))
 
-async function load(target) {
-  state.value = 'loading'
+async function load(target, quiet = false) {
+  // `quiet`：实时 nudge 触发的重读，不把整页打回 loading。
+  if (!quiet) state.value = 'loading'
   try {
     const query = target ? `?month=${encodeURIComponent(target)}` : ''
     const data = await staffRequest(`/api/scheduling/me/month${query}`)
@@ -82,6 +87,30 @@ function step(delta) {
   if (next) load(next)
 }
 
+// 自己提的、**还没落定**的申请覆盖了哪几天（票 06 那条一直没数据源的角标验收）。
+//
+// 员工视角的「待处理」= 还在等对方点头、或等店长批的那几条；批了 / 驳了 / 撤了都不算
+// （那些已经是结果，格子上写的就是结果本身）。读不出来就不标 —— 跟店长月历同一条口径：
+// 宁可少一个记号，也别在一个没读到的日子上标错。
+const pendingDates = ref(new Set())
+async function loadPendingMarks() {
+  try {
+    const data = await staffRequest('/api/scheduling/me/requests')
+    const marks = new Set()
+    for (const request of data.requests || []) {
+      if (request.status !== 'pending_peer' && request.status !== 'pending_manager') continue
+      const days = eachDayInRange(
+        request.start_date,
+        request.end_date || request.start_date,
+      )
+      for (const day of days) marks.add(day)
+    }
+    pendingDates.value = marks
+  } catch (err) {
+    pendingDates.value = new Set()
+  }
+}
+
 function backToThisMonth() {
   if (!isThisMonth.value) load()
 }
@@ -89,6 +118,19 @@ function backToThisMonth() {
 onMounted(() => {
   document.title = '整月'
   load()
+  // 申请那份自己拉（票 06 的角标）：跟月历并行，读不出来只是不标角标。
+  loadPendingMarks()
+})
+
+// 实时（票 10 收尾）：店长改了某一天、批了假，或者我的申请有了结果 —— 格子上的班别
+// 与那个小点都要跟着变。静默整页重读一次（一格一格改不值得）。
+useNudgePull({
+  id: 'today-month',
+  topics: ['scheduling'],
+  pull: () => {
+    load(month.value, true)
+    loadPendingMarks()
+  },
 })
 </script>
 
@@ -141,6 +183,9 @@ onMounted(() => {
           >
             <span class="n">{{ cell.day }}</span>
             <span class="s">{{ cell.text }}</span>
+            <!-- 申请中（票 06 那条一直没数据源的验收）：这天有我自己提的、还没落定的
+                 请假或换班。跟格子里的班别是两件事，所以做成右上角的小点，不挤那一行字。 -->
+            <i v-if="pendingDates.has(cell.business_date)" class="pend" aria-hidden="true" />
           </div>
         </div>
 
@@ -150,6 +195,7 @@ onMounted(() => {
           <span><i class="dot leave" />请假</span>
           <span><i class="dot moved" />班次已调整</span>
           <span><i class="dot none" />还没排</span>
+          <span v-if="pendingDates.size"><i class="dot pending" />申请中</span>
         </div>
 
         <!-- 窗口尽头的两种说法：整月在窗外 vs 只有这个月后半段在窗外（淡掉的那些格子）。 -->
@@ -167,7 +213,7 @@ onMounted(() => {
           只看得到你自己的班。<br />
           空着的格子是那天还没排（不是休）—— 休的那天写着「休」。<br />
           批过的假写「请假」（自己提的、店长批的），跟排班给的「休」不是一回事。<br />
-          换班的角标等那张票做好再加；钟点只有卫生那边才有。
+          右上角的小点 = 那天有你的申请还没落定（等对方点头 / 等店长批）；钟点只有卫生那边才有。
         </p>
       </template>
     </div>
@@ -278,6 +324,7 @@ onMounted(() => {
 }
 
 .mD {
+  position: relative;
   height: 54px;
   border: 1px solid transparent;
   border-radius: 10px;
@@ -287,6 +334,19 @@ onMounted(() => {
   flex-direction: column;
   align-items: center;
   gap: 4px;
+}
+
+/* 申请中（票 06 那条角标）：跟格子里那个班别是两件事，所以做成右上角的小点，
+   不挤「白班 / 休 / 请假」那一行字。颜色用珊瑚：琥珀这一页已经被「已调整」占了
+   （图例里那两个色块挨着看，同色不同义最容易看错）。 */
+.mD .pend {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--hy-coral);
 }
 
 .mD .n {
@@ -390,6 +450,12 @@ onMounted(() => {
 .dot.none {
   border: 1px solid var(--hy-line);
   background: transparent;
+}
+
+/* 申请中：圆点 + 珊瑚色，跟旁边「班次已调整」的琥珀方块区分开（两件事，别同色）。 */
+.dot.pending {
+  border-radius: 50%;
+  background: var(--hy-coral);
 }
 
 .mWarn {

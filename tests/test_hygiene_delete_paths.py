@@ -11,6 +11,11 @@
 
 另外锁住：删检查项要连带清掉引用它的卫生教材行（否则教材页 404，且 capture
 文件因为"仍被引用"永远不回收）。
+
+票 10 之后：员工当天自选班次/责任区的入口撤了（``POST /api/hygiene/staff/assignment``
+一律 403），``hygiene_shift_picks`` 只剩**存量数据**这一个来源 —— 老库升级上来的行还在
+那张表里，``delete_zone`` 的解绑分支（先 ``zone_id = NULL`` 再删区）保护的就是它们。
+所以第 1 条用例的前置数据改成「排班配今天的分工 + 直接种一行存量自选」。
 """
 
 import asyncio
@@ -28,14 +33,19 @@ import api.hygiene as hygiene_module
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
-from services.hygiene.accounts import EmployeeAccounts
+from services.hygiene.accounts import EmployeeAccounts, hygiene_business_date
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import HygieneWork
+from tests.hygiene_duty import assign_duty
 
 SUPER = {"kind": "super"}
 PHONE = "13800138000"
 PASSWORD = "password123"
+
+# 夹具里 accounts / work 的固定时刻。票 10 的前置数据（`assign_duty`）必须用同一个
+# 时刻造「今天」——排班的营业日跟卫生的营业日差了，员工今天就查不到那一行排班。
+FIXED_NOW = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
 
 
 def _run(coro):
@@ -70,12 +80,12 @@ def delete_http(tmp_path):
     _run(db.connect())
     set_runtime(AppRuntime(db=db))
     accounts = EmployeeAccounts(
-        db, now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
+        db, now=lambda: FIXED_NOW
     )
     work = HygieneWork(
         db,
         captures=FakeCaptureStore(),
-        now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        now=lambda: FIXED_NOW,
         image_variants=ImageVariantGenerator(),
     )
     _run(work.prepare())
@@ -106,14 +116,49 @@ def _count(db, sql, params=()):
     return int(dict(_run(cur.fetchone()))["n"])
 
 
+def _seed_shift_pick(db, employee_id, zone_id):
+    """种一行**存量**的当日自选（``hygiene_shift_picks``）。
+
+    票 10 撤掉了员工当天自选的入口（``POST /api/hygiene/staff/assignment`` 现在 403），
+    这张表没有再写入的路径 —— 老库升级上来的人当天选过哪个区就还留在里面，`delete_zone`
+    的解绑分支保护的正是这些行。所以前置数据只能直接种，日期/班次按夹具那个固定时刻走。
+    """
+    stamp = FIXED_NOW.isoformat()
+    _run(
+        db._conn.execute(
+            """INSERT INTO hygiene_shift_picks
+               (employee_id, business_date, shift, zone_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                int(employee_id),
+                hygiene_business_date(FIXED_NOW),
+                "白班",
+                int(zone_id),
+                stamp,
+                stamp,
+            ),
+        )
+    )
+    _run(db._conn.commit())
+
+
 def test_delete_zone_with_picked_assignment_succeeds(delete_http):
     client, db, _accounts, work, employee = delete_http
     zone = _run(work.list_zones())[0]
     _login(client)
-    assert client.post(
-        "/api/hygiene/staff/assignment",
-        json={"shift": "白班", "zone_id": zone["id"]},
-    ).status_code == 200
+    # 票 10：今天在哪个区由排班给（自选入口已 403）。这一行排班指着这个区，删区时它还在
+    # （`staff_assignments.zone_id` 没有外键），删除不该因此失败。
+    _run(
+        assign_duty(
+            db,
+            employee["id"],
+            slot="day",
+            zone_id=zone["id"],
+            now=FIXED_NOW,
+        )
+    )
+    # 存量自选行：`hygiene_shift_picks.zone_id` 那条外键（老库）要求删区前先解绑。
+    _seed_shift_pick(db, employee["id"], zone["id"])
     assert _count(
         db,
         "SELECT COUNT(*) AS n FROM hygiene_shift_picks WHERE zone_id = ?",

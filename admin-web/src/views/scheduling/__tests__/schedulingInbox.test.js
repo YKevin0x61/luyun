@@ -79,16 +79,42 @@ describe('店长端排班待办（票 08、09）', () => {
     expect(view).toMatch(/rejectTarget\.employee_name/)
     expect(view).toMatch(/confirm-label="驳回"/)
     expect(view).toMatch(/danger/)
-    // 批准不弹框（可逆：批错了再改那天）；两条动作都防连点。
-    expect((view.match(/:disabled="busyId === request\.id"/g) || []).length).toBe(2)
+    // 批准不弹框（可逆：批错了再改那天）；两条动作都防连点 —— 而且按「任一动作在飞」
+    // 全灰（见下一条）。
+    expect((view.match(/:disabled="busyId !== 0"/g) || []).length).toBe(2)
+    expect(view).not.toMatch(/:disabled="busyId === request\.id"/)
+  })
+
+  it('一次只批一条：有动作在飞时全灰，回来只清自己占的槽', () => {
+    // busyId 是单槽：只灰被点的那张卡时，批准 A 之后不等返回就能批准 B；A 先回来把槽
+    // 清零，仍在飞的 B 的按钮全部恢复可点、能对 B 再发一次，`receipt` 还会被后到的
+    // 那条覆盖（回执说的是 A，而 A 已经从列表消失）。服务端的 `request_not_pending`
+    // 挡得住数据被改坏，挡不住店长看到「点了没反应 / 回执对不上」。
+    // 两道保险：模板全灰（上一条钉着），动作开头再挡一次重入（键盘/脚本绕过模板）。
+    expect(view).toMatch(
+      /async function decide\(request, action\) \{[\s\S]{0,400}?if \(busyId\.value\) return/,
+    )
+    // 只清自己占的那个槽：不是本次请求的 `finally` 不许把在飞那条的保护撤掉。
+    expect(view).toMatch(
+      /finally \{[\s\S]{0,200}?if \(busyId\.value === request\.id\) busyId\.value = 0/,
+    )
+    expect(view).not.toMatch(/finally \{\s*busyId\.value = 0\s*\}/)
   })
 
   it('点了以后重读待办：别人先批了/员工自己撤了都不留假记录', () => {
     // 成功与失败各重读一次（失败可能是 `request_not_pending`）；进页面那次是
-    // `onMounted` 的 `load()`，不必 await。后端那句原话直接转出来。
+    // `onMounted` 的 `load()`，不必 await。
     expect((view.match(/await load\(\)/g) || []).length).toBe(2)
-    expect(view).toMatch(/errorText\.value = err\.message \|\| '没处理成'/)
+    // **写失败的那句话必须留在重读之后**：`load()` 开头会把 `errorText` 清掉，先写后读
+    // 等于把「这条申请已经处理过了」当场抹掉（真出过这个 bug：店长点了「批准」只看到
+    // 列表闪一下，既没有错误也没有回执，会以为没批成而反复点）。跟班次页 `reportFailure`
+    // 同一个口径 —— 那边早修了，这一页当时没跟上。
+    expect(view).toMatch(/async function reportFailure/)
+    expect(view).toMatch(/await load\(\)\n  errorText\.value = message/)
+    expect(view).toMatch(/await reportFailure\(err, '没处理成'\)/)
+    expect(view).not.toMatch(/errorText\.value = err\.message[\s\S]{0,80}await load\(\)/)
     // 写进 ref 还不够：不渲染出来，批假失败就是静默的（页面上什么都不会变）。
+
     expect(view).toMatch(/v-if="errorText"[\s\S]{0,40}role="alert"/)
   })
 
@@ -123,5 +149,10 @@ describe('店长端排班待办（票 08、09）', () => {
     expect(calendar).toMatch(/router\.push\('\/scheduling\/inbox'\)/)
     expect(calendar).toContain('请假待办')
     expect(view).toMatch(/router\.push\('\/scheduling'\)/)
+  })
+
+  it('订阅排班 nudge：员工提了新申请就自己重读（票 10 收尾）', () => {
+    // 这一页本来就是「等别人动作」的地方 —— 没有实时就只能靠人反复刷新。
+    expect(view).toMatch(/useNudgePull\(\{ id: 'scheduling-inbox', topics: \['scheduling'\], pull: load \}\)/)
   })
 })

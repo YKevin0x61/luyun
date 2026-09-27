@@ -27,14 +27,25 @@ async function request(path, { method = 'GET', params, body, signal, cache } = {
     if (qsStr) url += (url.includes('?') ? '&' : '?') + qsStr
   }
 
-  const res = await fetch(url, {
-    method,
-    credentials: 'include',
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-    signal,
-    cache,
-  })
+  // fetch 只在网络层失败时 reject（断网 / DNS 失败 / 商场 AP 假死）。以前这里直接冒泡，
+  // 店长看到的是 "Failed to fetch"「Load failed」这种英文原文；服务端 400 的中文 `detail`
+  // 走的是下面那条路（带 `status`），两者本来可以分开 —— 冒泡之后 `status` 是 undefined，
+  // 页面无从分派。这里统一翻成中文，并且**不带 status**（口径同 `utils/hygieneStaff.js`
+  // 的 `staffRequest` 与上传那一路的 `xhr.onerror`）：调用方据此知道「没连上，可以重试」，
+  // 而不是「服务端拒绝了这次操作」。
+  let res
+  try {
+    res = await fetch(url, {
+      method,
+      credentials: 'include',
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      signal,
+      cache,
+    })
+  } catch (_err) {
+    throw new Error('网络连不上，请检查网络后重试')
+  }
 
   if (res.status === 401 && !isStandaloneAuthRoute()) {
     redirectToLogin()

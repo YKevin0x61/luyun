@@ -38,8 +38,8 @@ from api.tables import router as tables_router
 from api.analytics import router as analytics_router
 from api.export_api import router as export_router
 from api.security import (
-    authenticate_ws,
     csrf_origin_rejected,
+    identify_ws,
     verify_admin_token,
     warn_if_admin_open,
 )
@@ -922,14 +922,19 @@ async def database_unavailable_guard(request: Request, call_next):
 async def realtime_ws(websocket: WebSocket):
     """实时订阅通道：客户端按 topic + 过滤条件订阅，服务端只推送“有变”nudge
     （不带数据），页面收到后复用现有 HTTP API 拉取最新数据。
-    鉴权支持 Session Cookie（网页端）或 ?token=<api_token>（KDS 等无 Cookie 客户端）。
+    鉴权支持 Session Cookie（网页端）或 ?token=<api_token>（KDS 等无 Cookie 客户端），
+    以及员工（卫生/排班手机端）的 Session Cookie。
+
+    员工连接要把 employee_id 交给 hub：员工只该收到全店级事件和自己的个人事件，
+    scope 里带同事 employee_id 的 nudge 在派发侧直接跳过（`_staff_owns_scope`）。
+    身份只在这里定一次，subscribe 里客户端自报的 filters 不作数。
     """
     await websocket.accept()
-    auth = await authenticate_ws(websocket)
-    if auth is None:
+    identity = await identify_ws(websocket)
+    if identity is None:
         await websocket.close(code=4401)
         return
-    await realtime_hub.register(websocket, auth)
+    await realtime_hub.register(websocket, identity.auth, employee_id=identity.employee_id)
     await websocket.send_json({"type": "connected"})
     try:
         while True:

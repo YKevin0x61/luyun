@@ -15,8 +15,11 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { staffRequest } from '../../utils/hygieneStaff'
+import { buildWorkQueue, dailyProgress, shiftClock } from '../../utils/hygieneWorkFlow'
 import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
 import {
   dayLabel,
@@ -48,6 +51,16 @@ const leaveError = ref('')
 const leaveBusy = ref(false)
 const requests = ref([])
 const requestsError = ref('')
+// 进页面那次申请列表没读出来（`loadRequests(true)`）：换班那张卡是「有才显示」的，
+// 读失败时它整块不在，员工只会以为没人找他换班、也没人等他回应。这一位就是给那种
+// 情况留的一句话 + 一个重试按钮（页面上没别的重来路径，只有整页刷新）。
+const requestsUnread = ref(false)
+// 事由的长度上限由服务端给（`/me/requests` 的 `max_request_note`）：以前这里写死
+// 「最多 50 字」+ `maxlength="50"`，服务端一改就两边不一致（别的上限都是随响应下的）。
+const maxNote = ref(null)
+const noteLabel = computed(
+  () => `事由（可空${maxNote.value ? `，最多 ${maxNote.value} 字` : ''}）`,
+)
 
 // 换班（票 09）：自己提的那些跟请假在同一张卡里（`requests` 按 `kind` 分流），
 // 这里多两块 —— 提名同事的一张表单，以及「别人问我换班」的待回应清单。
@@ -59,6 +72,35 @@ const swapNote = ref('')
 const swapError = ref('')
 const swapBusy = ref(false)
 const incoming = ref([])
+
+// 卫生那块（票 10）：今天的日常检查进度与逾期点，跟上面那张排班卡**各拉各的** ——
+// 一块读不出来，另一块照常显示（票 10 的验收：两块卡各自渲染）。
+// 只摊数字、不摊"下一项该拍哪个"：真正的队列（含"这张图还在传"的状态）在卫生那一屏，
+// 这里要是也列一份，员工会对着正在上传的项再拍一次。
+const hygiene = ref({
+  state: 'loading', // loading | ready | error
+  error: '',
+  items: [],
+  clocks: null,
+  shift: null,
+  zoneName: '',
+  now: 0,
+})
+
+const hygieneStats = computed(() => dailyProgress(hygiene.value.items))
+const hygieneDue = computed(() => shiftClock(hygiene.value.shift, hygiene.value.clocks))
+const hygieneOverdue = computed(() => buildWorkQueue({
+  inbox: hygiene.value.items,
+  shiftDue: hygieneDue.value,
+  now: hygiene.value.now,
+}).filter((task) => task.bucket === 'overdue').length)
+
+// 撤回与「拒绝」不可逆（服务端状态机只往前走：撤回要重提、拒绝对对方就是「没同意」），
+// 手机上一误触没有回头路 —— 两个都先过确认框。同仓库对不可逆动作一律这么办（店长驳回、
+// 删班次、卫生端那几处）。**同意不弹框**：点了之后还有店长那道闸，跟店长端「批准不弹、
+// 驳回弹」同一个口径 —— 三个都拦一道就成了每次都要多点一下。
+const cancelTarget = ref(null)
+const answerTarget = ref(null) // { card, agree }
 
 
 const today = computed(() => days.value[0] || null)
@@ -138,8 +180,9 @@ async function loadColleagues() {
   }
 }
 
-async function load() {
-  state.value = 'loading'
+async function load(quiet = false) {
+  // `quiet`：实时 nudge 触发的重读，别把整页打回 loading（会闪一下「正在读你的班…」）。
+  if (!quiet) state.value = 'loading'
   try {
     const data = await staffRequest('/api/scheduling/me')
     employee.value = data.employee
@@ -159,19 +202,24 @@ async function load() {
  *
  *  `quiet` 是进页面那一次用的：员工只是来看今天上不上班，申请列表读不出来
  *  （比如管理员还没应用 0008 / 0009）不该在首页顶一行红字 —— 真要提的时候表单里会说。
+ *  但**不能装作「没有人等你回应」**：立一个 `requestsUnread` 的牌子，页面上留一句
+ *  能点重试的话（不然那张换班卡就是静默消失的）。
  */
 async function loadRequests(quiet = false) {
   try {
     const data = await staffRequest('/api/scheduling/me/requests')
     requests.value = data.requests || []
     incoming.value = data.incoming || []
+    if (data.max_request_note) maxNote.value = data.max_request_note
     requestsError.value = ''
+    requestsUnread.value = false
   } catch (err) {
     if (err.status === 401) {
       leaveForStaffLogin()
       return
     }
     if (!quiet) requestsError.value = err.message || '你的申请读不出来'
+    if (quiet) requestsUnread.value = true
   }
 }
 
@@ -208,6 +256,7 @@ async function cancelLeave(request) {
   if (leaveBusy.value) return
   leaveBusy.value = true
   requestsError.value = ''
+  let failure = ''
   try {
     await staffRequest(`/api/scheduling/me/requests/${request.id}`, { method: 'DELETE' })
     note.value = '撤回了'
@@ -216,12 +265,16 @@ async function cancelLeave(request) {
       leaveForStaffLogin()
       return
     }
-    requestsError.value = err.message || '没撤成'
+    failure = err.message || '没撤成'
   } finally {
     leaveBusy.value = false
     // 撤没撤成都要重读一次：店长可能刚批了/驳了（那这条就撤不动了），
     // 页面上留一条已经不存在的申请比报错更糟。
     await loadRequests(true)
+    // 「没撤成」那句话留到重读**之后**再说：`loadRequests` 读成功时会把 `requestsError`
+    // 清空（那是给「读不出来」用的），先说等于当场抹掉 —— 员工点了撤回看到界面什么都
+    // 没变，会以为撤回了。服务端那句「已经处理过了」也就一起丢了。
+    if (failure) requestsError.value = failure
   }
 }
 
@@ -261,6 +314,7 @@ async function answerSwap(card, agree) {
   if (swapBusy.value) return
   swapBusy.value = true
   requestsError.value = ''
+  let failure = ''
   try {
     await staffRequest(`/api/scheduling/me/swaps/${card.id}/${agree ? 'accept' : 'reject'}`, {
       method: 'POST',
@@ -271,10 +325,61 @@ async function answerSwap(card, agree) {
       leaveForStaffLogin()
       return
     }
-    requestsError.value = err.message || '没回成'
+    failure = err.message || '没回成'
   } finally {
     swapBusy.value = false
+    // 回没回成都要重读一次（对方可能自己撤了）；「没回成」那句话留到重读之后再说，
+    // 理由同 `cancelLeave`：重读成功会把 `requestsError` 清空。
     await loadRequests(true)
+    if (failure) requestsError.value = failure
+  }
+}
+
+/** 撤回确认框点了「确认」：这才真发那条 DELETE。 */
+async function confirmCancel() {
+  const target = cancelTarget.value
+  cancelTarget.value = null
+  if (target) await cancelLeave(target)
+}
+
+/** 「拒绝」确认框点了「确认」：这才真发。同意那条不走这儿（见 `answerTarget` 的注释）。 */
+async function confirmAnswer() {
+  const target = answerTarget.value
+  answerTarget.value = null
+  if (target) await answerSwap(target.card, target.agree)
+}
+
+/** 读卫生那一块（票 10）：今天的日常清单 + 本班的逾期钟点。
+ *
+ *  与排班那张卡**互不牵连**：它自己一个 try，失败只把这张卡变成一句「读不出来 + 重试」，
+ *  上面那张排班卡照常显示（反过来也一样）。两个请求并行发，弱网下不用等两轮。
+ */
+async function loadHygiene(quiet = false) {
+  // 同上：静默重读不打回 loading 态。
+  if (!quiet) hygiene.value = { ...hygiene.value, state: 'loading', error: '' }
+  try {
+    const [me, work] = await Promise.all([
+      staffRequest('/api/hygiene/staff/me'),
+      staffRequest('/api/hygiene/staff/daily-work'),
+    ])
+    const employee = me.employee || {}
+    hygiene.value = {
+      state: 'ready',
+      error: '',
+      items: work.items || [],
+      clocks: me.daily_clocks || null,
+      shift: employee.shift || null,
+      zoneName: employee.zone_name || '',
+      // 逾期是「现在几点」跟本班钟点比出来的：进页面那一刻取一次，别在 computed 里
+      // 反复取时间（那样每次渲染结果都可能不一样）。
+      now: Date.now(),
+    }
+  } catch (err) {
+    if (err.status === 401) {
+      leaveForStaffLogin()
+      return
+    }
+    hygiene.value = { ...hygiene.value, state: 'error', error: err.message || '卫生待办读不出来' }
   }
 }
 
@@ -283,6 +388,21 @@ onMounted(() => {
   load()
   // 顺手读一次自己的申请：有等着批的、或别人问我换班的，首页就能看见（读不出来不吭声）。
   loadRequests(true)
+  // 卫生那一块自己拉（票 10），跟排班卡并行、失败互不影响。
+  loadHygiene()
+})
+
+// 实时（票 10 收尾）：店长改了我的班、批了我的假、有人找我换班、或者我这区的卫生
+// 待办变了 —— 三块各拉各的（都是轻量 GET，nudge 本身不带数据），一次全刷到。
+// 换班那条尤其要紧：对方不开页面就永远不知道有人找他换。
+useNudgePull({
+  id: 'today-page',
+  topics: ['scheduling', 'hygiene'],
+  pull: () => {
+    load(true)
+    loadRequests(true)
+    loadHygiene(true)
+  },
 })
 </script>
 
@@ -332,6 +452,24 @@ onMounted(() => {
           </div>
         </div>
 
+        <!-- 进页面那次申请列表没读出来：换班卡是「有才显示」的，读失败时它整块不在 ——
+             不说一句，员工只会以为没人找他换班（页面上也没别的重来路径）。 -->
+        <section v-if="requestsUnread" class="tA-card leave">
+          <div class="tA-hd">
+            <span class="tag leave">我的申请</span>
+            <em>没读出来</em>
+          </div>
+          <p class="tA-sub">有没有人找你换班、你的申请到哪一步，这一次没读到（网络不好？）。</p>
+          <div class="acts">
+            <button
+              class="btn"
+              type="button"
+              :disabled="leaveBusy || swapBusy"
+              @click="loadRequests()"
+            >重试</button>
+          </div>
+        </section>
+
         <!-- 别人问我换班（票 09）：他还没等到我点头，店长那边看不见这条。 -->
         <section v-if="incoming.length" class="tA-card swap">
           <div class="tA-hd">
@@ -352,7 +490,7 @@ onMounted(() => {
                   class="btn tL-cancel"
                   type="button"
                   :disabled="swapBusy"
-                  @click="answerSwap(card, false)"
+                  @click="answerTarget = { card, agree: false }"
                 >拒绝</button>
               </span>
               <span v-if="card.note" class="tL-note">事由：{{ card.note }}</span>
@@ -376,7 +514,7 @@ onMounted(() => {
                 class="btn tL-cancel"
                 type="button"
                 :disabled="leaveBusy"
-                @click="cancelLeave(request)"
+                @click="cancelTarget = request"
               >撤回</button>
             </li>
           </ul>
@@ -385,18 +523,47 @@ onMounted(() => {
           </p>
         </section>
 
-        <!-- 卫生那块（原型 A 的下半张卡）下一张票接上。 -->
+        <!-- 卫生那块（原型 A 的下半张卡，票 10 接上）：今天的日常检查进度、逾期点、
+             还差几项。跟上面那张排班卡各拉各的 —— 一块读不出来，另一块照常显示。 -->
         <section class="tA-card hyg">
           <div class="tA-hd">
             <span class="tag hyg">卫生</span>
-            <em>下一张票接上</em>
+            <em v-if="hygiene.state === 'ready' && hygiene.zoneName">{{ hygiene.zoneName }}</em>
           </div>
-          <p class="tA-sub">卫生待办卡还没接上，先用老入口。</p>
-          <div class="acts">
-            <button class="btn" type="button" @click="router.push('/hygiene')">
-              去卫生待办 ›
-            </button>
-          </div>
+
+          <p v-if="hygiene.state === 'loading'" class="tA-sub">正在读今天的日常…</p>
+
+          <template v-else-if="hygiene.state === 'error'">
+            <p class="tA-sub">{{ hygiene.error }}</p>
+            <div class="acts">
+              <button class="btn" type="button" @click="loadHygiene()">重试</button>
+            </div>
+          </template>
+
+          <template v-else>
+            <p v-if="!hygieneStats.total" class="tA-sub">
+              <template v-if="hygiene.shift">今天没有要交的日常检查。</template>
+              <!-- 没班次就没有可交的那一份（票 10：班次由排班决定）——说清该找谁，别让人在这儿等。 -->
+              <template v-else>排班还没给你班次，今天没有可交的日常检查；找店长配一下规则。</template>
+            </p>
+            <template v-else>
+              <p class="shift">日常 {{ hygieneStats.passed }}/{{ hygieneStats.total }}</p>
+              <p class="tA-sub">
+                <template v-if="hygieneStats.remaining">还差 {{ hygieneStats.remaining }} 项</template>
+                <template v-else>今天的日常交齐了</template><template
+                  v-if="hygieneDue"
+                >，本班 {{ hygieneDue }} 前交</template>。
+              </p>
+              <p v-if="hygieneOverdue" class="tL-err" role="status">
+                已经过了本班的钟点，还有 {{ hygieneOverdue }} 项没交。
+              </p>
+            </template>
+            <div class="acts">
+              <button class="btn" type="button" @click="router.push('/hygiene')">
+                {{ hygieneStats.remaining ? '去交 / 继续验收 ›' : '去卫生待办 ›' }}
+              </button>
+            </div>
+          </template>
         </section>
 
         <p class="tA-foot">
@@ -425,20 +592,36 @@ onMounted(() => {
         </p>
         <div class="form-row">
           <label for="leave-start">从哪天</label>
-          <input id="leave-start" v-model="leaveStart" class="input" type="date">
+          <!-- `min` 用**服务端的营业日**（不是手机上的今天）：过去的日子服务端一定会拒
+               （`past_leave`），就在这里先挡住，别让员工拨完日期、提交了才被打回来。
+               上限（排班铺到哪天）不在这里设：`/me` 没下发窗口末日，服务端那句
+               「排班还没铺到那么远：最多请到 X」说得比控件准。 -->
+          <input
+            id="leave-start"
+            v-model="leaveStart"
+            class="input"
+            type="date"
+            :min="today ? today.business_date : undefined"
+          >
         </div>
         <div class="form-row">
           <label for="leave-end">到哪天（可空）</label>
-          <input id="leave-end" v-model="leaveEnd" class="input" type="date">
+          <input
+            id="leave-end"
+            v-model="leaveEnd"
+            class="input"
+            type="date"
+            :min="leaveStart || (today ? today.business_date : undefined)"
+          >
         </div>
         <div class="form-row">
-          <label for="leave-note">事由（可空，最多 50 字）</label>
+          <label for="leave-note">{{ noteLabel }}</label>
           <input
             id="leave-note"
             v-model="leaveNote"
             class="input"
             type="text"
-            maxlength="50"
+            :maxlength="maxNote || undefined"
             placeholder="例如：家里有事"
           >
         </div>
@@ -482,16 +665,22 @@ onMounted(() => {
         </div>
         <div class="form-row">
           <label for="swap-day">换哪天</label>
-          <input id="swap-day" v-model="swapDay" class="input" type="date">
+          <input
+            id="swap-day"
+            v-model="swapDay"
+            class="input"
+            type="date"
+            :min="today ? today.business_date : undefined"
+          >
         </div>
         <div class="form-row">
-          <label for="swap-note">事由（可空，最多 50 字）</label>
+          <label for="swap-note">{{ noteLabel }}</label>
           <input
             id="swap-note"
             v-model="swapNote"
             class="input"
             type="text"
-            maxlength="50"
+            :maxlength="maxNote || undefined"
             placeholder="例如：那天有事，想跟他换个班"
           >
         </div>
@@ -507,6 +696,27 @@ onMounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- 撤回 / 拒绝先过确认框（不可逆，手机上一误触没有回头路）。同意不弹：
+         后面还有店长那道闸，跟店长端「批准不弹、驳回弹」同一个口径。 -->
+    <ConfirmDialog
+      v-if="cancelTarget"
+      title="撤回这条申请"
+      message="撤回后这条申请就结束了，要重新提一次。排班一个字不改。"
+      confirm-label="撤回"
+      danger
+      @confirm="confirmCancel"
+      @cancel="cancelTarget = null"
+    />
+    <ConfirmDialog
+      v-if="answerTarget"
+      title="拒绝这次换班"
+      message="拒绝之后这件事就结束了，对方会看到你拒绝了；你的班照旧。"
+      confirm-label="拒绝"
+      danger
+      @confirm="confirmAnswer"
+      @cancel="answerTarget = null"
+    />
   </div>
 </template>
 
@@ -790,9 +1000,12 @@ onMounted(() => {
 .tL-cancel {
   margin-left: auto;
   flex: none;
-  min-height: 32px;
-  padding: 0 12px;
-  font-size: 12px;
+  /* 员工手机上点的东西：这一排按钮（同意 / 拒绝 / 撤回）都是不可逆动作，手指先得点得中。
+     仓库里员工端其它按钮是 46px；这里给 40px 是因为一行里要并排放两个 —— 32px 太小了，
+     误触的代价是一张换班申请被拒或者一条假被撤回。 */
+  min-height: 40px;
+  padding: 0 14px;
+  font-size: 12.5px;
 }
 
 /* 换班那条的两个按钮（同意 / 拒绝）挨在一起，不各自贴右边。 */

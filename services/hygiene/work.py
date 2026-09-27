@@ -2420,6 +2420,10 @@ class HygieneWork:
             return False
 
     @serialized_write
+    # **票 10 起这个方法没有生产触发路径**：换区现在由店长在排班页做（单日覆盖或固定
+    # 责任区），卫生这一侧只读排班结果，所以「员工自己换区」这件事不再发生。方法与
+    # `EVENT_ZONE_SWITCH` 都留着：个人榜还要聚合**历史**那些换区事件，读链路不能断；
+    # 将来若要有新触发点（比如「卫生发现当天的区跟上一份不同」），接在这里。
     async def record_zone_switch(
         self,
         actor: dict,

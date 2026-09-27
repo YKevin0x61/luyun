@@ -24,10 +24,12 @@ from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import EVENT_CAPTURE, HygieneWork, HygieneWorkError
+from tests.hygiene_duty import assign_duty
 
 SUPER = {"kind": "super"}
 PHONE = "13800138000"
 PASSWORD = "password123"
+CLOCK = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
 
 
 def _run(coro):
@@ -61,13 +63,11 @@ def work_env(tmp_path):
     db = DatabaseManager()
     _run(db.connect())
     set_runtime(AppRuntime(db=db))
-    accounts = EmployeeAccounts(
-        db, now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
-    )
+    accounts = EmployeeAccounts(db, now=lambda: CLOCK)
     work = HygieneWork(
         db,
         captures=FakeCaptureStore(),
-        now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        now=lambda: CLOCK,
         image_variants=ImageVariantGenerator(),
     )
     _run(work.prepare())
@@ -82,15 +82,18 @@ def work_env(tmp_path):
     )
     employee = _run(accounts.register(PHONE, PASSWORD, "张三"))
     _run(accounts.approve(employee["id"]))
-    _run(accounts.pick_assignment(employee["id"], "白班", zone["id"]))
+    # 票 10：今天的班次与责任区由排班给（员工自选入口已撤）。
+    _run(assign_duty(db, employee["id"], slot="day", zone_id=zone["id"], now=CLOCK))
+    duty = _run(accounts.current_assignment(employee["id"]))
+    assert duty["shift"] == "白班" and duty["zone_id"] == zone["id"], "排班没铺出今天的白班"
     actor = {
         "kind": "staff",
         "id": employee["id"],
         "permission": "普通员工",
         "name": "张三",
         "phone": PHONE,
-        "shift": "白班",
-        "zone_id": zone["id"],
+        "shift": duty["shift"],
+        "zone_id": duty["zone_id"],
     }
     yield db, work, item, actor, accounts
     _run(db.close())
@@ -172,15 +175,21 @@ def test_resubmit_does_not_overwrite_a_colleagues_capture(work_env):
 
     colleague = _run(accounts.register("13900139000", PASSWORD, "李四"))
     _run(accounts.approve(colleague["id"]))
-    _run(accounts.pick_assignment(colleague["id"], "白班", actor_a["zone_id"]))
+    _run(
+        assign_duty(
+            db, colleague["id"], slot="day", zone_id=actor_a["zone_id"], now=CLOCK
+        )
+    )
+    colleague_duty = _run(accounts.current_assignment(colleague["id"]))
+    assert colleague_duty["zone_id"] == actor_a["zone_id"], "同事没排到同一个区"
     actor_b = {
         "kind": "staff",
         "id": colleague["id"],
         "permission": "普通员工",
         "name": "李四",
         "phone": "13900139000",
-        "shift": "白班",
-        "zone_id": actor_a["zone_id"],
+        "shift": colleague_duty["shift"],
+        "zone_id": colleague_duty["zone_id"],
     }
     _run(work.submit_daily(actor_b, item["id"], _capture(240)))
 

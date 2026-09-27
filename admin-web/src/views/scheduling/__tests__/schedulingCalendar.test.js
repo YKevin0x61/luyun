@@ -157,4 +157,85 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/\.gB-grp-t\.leave \{ color: var\(--hy-aqua\); \}/)
     expect(view).toMatch(/\.gB-zone\.leave \{ color: var\(--hy-aqua\); \}/)
   })
+
+  it('班次列以月历那份为准，名单那份不把它挤掉（停用班次照旧显示）', () => {
+    // `/roster` 的 shifts 只有启用的（服务层 `list_shifts()`），`/calendar` 那份是
+    // 「启用的全要 + 这个月真有行的停用班次」（`_shifts_for_display`）。以前数「还没配
+    // 规则的人」那一次顺手拿名单那份覆盖了班次列，于是停用班次从这个月的格子与图例上
+    // 消失，点开那天却还列着他 —— 格子数字与卡片合计互相打脸，票 11 的验收②
+    //（停用之后历史排班照旧显示）在界面上就不成立了。
+    expect(view).toMatch(/shifts\.value = data\.shifts \|\| \[\]/)
+    expect(view).toMatch(/mergeShiftList\(shifts\.value, data\.shifts\)/)
+    // 数人那一次只碰计数，不碰班次列。
+    expect(view).toMatch(
+      /async function loadPendingCount\(\) \{[\s\S]{0,400}?pendingCount\.value = countPending/
+    )
+    expect(view).not.toMatch(/async function loadPendingCount\(\) \{[\s\S]{0,400}?shifts\.value =/)
+  })
+
+  it('配规则只挑还在用的班次；当天那个下拉能显示停用的，但不给选', () => {
+    // 「只能用还在用的班次」是服务端的口径（`set_rule` 的 `_require_shifts_usable`，
+    // 单日覆盖那条路也校验）：停用班次出现在周期的解析表或固定责任区的选择里，
+    // 店长选完只会吃一句 400。页面照同一口径把它们挡在选择之外。
+    expect(view).toMatch(/const activeShifts = computed/)
+    expect((view.match(/v-for="shift in activeShifts"/g) || []).length).toBe(2)
+    // 当天卡那个下拉列的是**显示用**那份（他那天可能就是停用的那个班）——
+    // 停用的那条标出来并禁掉。
+    expect(view).toMatch(/v-for="shift in shifts"[\s\S]{0,260}?已停用/)
+    expect(view).toMatch(/:disabled="!shift\.is_active"/)
+  })
+
+  it('月历上标出「哪天有等着批的」—— 数据来自 /inbox，按天摊开（spec US 11）', () => {
+    // 这条验收在票 02 与票 06 之间被转手两次、一直没人接：结果是店长只能滑到底、
+    // 点进待办页才知道有几条在等他批。数据本来就够（`/inbox` 每条申请带
+    // `start_date`/`end_date`），按天摊开数一遍就行，不用后端再出一个接口。
+    expect(view).toMatch(/api\.get\('\/api\/scheduling\/inbox'\)/)
+    expect(view).toMatch(/eachDayInRange\(/)
+    expect(view).toMatch(/v-if="pendingMarks\[day\.business_date\]"/)
+    expect(view).toMatch(/class="pend"/)
+    // 图例里那条记号只在真有角标时出现。
+    expect(view).toMatch(/hasPendingMarks/)
+    // 琥珀给「待批」、青点给「这天被改过」—— 票 07 特意分开的两套记号，不能混。
+    expect(view).toMatch(/\.gB-d \.pend \{/)
+    expect(view).toMatch(/\.gB-legend \.gB-pend i \{ background: var\(--hy-amber\); \}/)
+    expect(view).toMatch(/\.gB-legend \.gB-ov i \{ background: var\(--hy-aqua\); \}/)
+  })
+
+  it('名单读不出来时不写成「全员都配好了」', () => {
+    // 原来 catch 里写 `pendingCount = 0`，页面就显示「0 个人还没配规则 · 全员都配好了」
+    // —— 一句假话，店长会照着它放心。
+    expect(view).toMatch(/pendingCount\.value = null/)
+    expect(view).not.toMatch(/pendingCount\.value = 0\b/)
+    expect(view).toMatch(/名单没读出来：点开重试一次/)
+  })
+
+  it('换一天先清掉上一天的人；月份连点两次也算数', () => {
+    // 换天失败时表头已经是新那天、名单却还列着旧那天的人 —— 店长会照着错的名单改班。
+    expect(view).toMatch(/async function loadDay[\s\S]{0,500}?dayDetail\.value = null/)
+    // 慢网连点时，先到的旧响应不该覆盖后点的那个月；月份要立刻更新，否则第二次点击
+    // 算出来的目标还是同一个月，看起来像没反应。
+    expect(view).toMatch(/calendarSeq/)
+    expect(view).toMatch(/if \(seq !== calendarSeq\) return/)
+    // 首屏失败时 `monthValue` 是空串：`shiftMonth` 不能拼出一个真值的 `'NaN-NaN'`。
+    expect(view).toMatch(/\(value \|\| currentMonthValue\(\)\)\.split\('-'\)/)
+  })
+
+  it('规则读不出来时说清，并且算进「要处理的人」', () => {
+    // 后端收尾时给坏规则换了个形状：`{cycle: null, anchor_date: null, invalid: true}`
+    //（原来它会让 `/roster` 整页 400，而名单面板是唯一能重配规则的入口 —— 等于自锁死）。
+    // 页面得把「没配过」与「配了但读不出来」分开说，否则店长照着配一遍也修不好
+    // （那条坏行还在），也看不出真正的原因。
+    expect(view).toMatch(/if \(rule\.invalid\) return '规则坏了，重配一条'/)
+
+    expect(view).toMatch(/\(!employee\.rule \|\| employee\.rule\.invalid\)/)
+  })
+
+  it('订阅排班 nudge：别人提了申请/改了排班，这一页自己重读（票 10 收尾）', () => {
+    // 没有实时的话，店长只能靠反复刷新手动发现「有人提了假」「另一个页面改了排班」。
+    // nudge 不带数据，所以 pull 里重读；静默（`silent`）—— 每来一条就闪一下 loading 很吵。
+    expect(view).toMatch(/useNudgePull\(\{/)
+    expect(view).toMatch(/id: 'scheduling-calendar'/)
+    expect(view).toMatch(/topics: \['scheduling'\]/)
+    expect(view).toMatch(/loadCalendar\(monthValue\.value, true\)/)
+  })
 })

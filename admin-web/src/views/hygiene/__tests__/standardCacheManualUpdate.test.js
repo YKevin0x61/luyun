@@ -59,12 +59,15 @@ describe('标准图缓存：只提示，手动更新', () => {
     expect(overlay).toMatch(/checkForUpdates\(\{ download: true \}\)/)
   })
 
-  it('换区后重新核对清单，提示才不会是上一个区的图', () => {
-    const fn = home.slice(
-      home.indexOf('async function pickAssignment'),
-      home.indexOf('function openAssignmentPicker'),
-    )
-    expect(fn).toMatch(/await loadMe\(\)/)
-    expect(fn).toMatch(/await standardPhotoCache\.checkForUpdates\(\)/)
+  it('换区之后重新核对清单，提示才不会是上一个区的图', () => {
+    // 票 10：换区由店长在排班页改（员工端已经没有自选入口），所以「区变了要重核」这件事
+    // 从「员工点了换区」那一次动作，搬到了「读到自己今天在别的区」这一步 —— 不核的话，
+    // 被临时调走的人面板上提示的还是上一个区的「待更新」张数。
+    const start = home.indexOf('async function loadMe')
+    const fn = home.slice(start, home.indexOf('\nasync function ', start + 20))
+    expect(fn).toMatch(/previousZoneId/)
+    expect(fn).toMatch(/standardPhotoCache\.checkForUpdates\(\)/)
+    // 只核对、不下载：带 download 的那一次只发生在用户点「立即更新 / 下载」时（上一条守着）。
+    expect(fn).not.toMatch(/download: true/)
   })
 })

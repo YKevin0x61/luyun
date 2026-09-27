@@ -68,6 +68,7 @@ def _needs_migration(method):
 
 __all__ = [
     "DEFAULT_SHIFTS",
+    "DUTY_SLOTS",
     "EXPANSION_DAYS",
     "KIND_LEAVE",
     "KIND_MANUAL",
@@ -137,8 +138,10 @@ REST = None
 MAX_CYCLE_DAYS = 60
 
 # 首次启动时放进班次表的默认两条（`migrations/pg/0005_scheduling.sql` 里也有同样的
-# 两行，那是给「装完就看」的；见 `prepare()` 为什么还留了一手）。
-DEFAULT_SHIFTS = (("白班", 10), ("夜班", 20))
+# 两行，那是给「装完就看」的；见 `prepare()` 为什么还留了一手）。第三个值是**卫生档位**
+# （票 10）：`0010` 迁移回填的是同样两条，表被手工清空后由这里重建出来的也得一样 ——
+# 少了档位，那家店的员工当天就交不了任何日常检查。
+DEFAULT_SHIFTS = (("白班", 10, "day"), ("夜班", 20, "night"))
 
 # 班次名的上限（票 11）：这个名字要出现在月历图例、规则编辑的胶囊、当天名单里，
 # 都是窄地方。上限是服务层的数，编辑页从 `/shifts/manage` 拿到它（`max_name`），
@@ -155,8 +158,22 @@ SHIFT_ORDER_STEP = 10
 # 建班次与改名都不许用这些词（停用的班次一样不许改叫它们）。
 RESERVED_SHIFT_NAMES = ("休", "休息", "空", "x", "X", "-", "—")
 
+# 卫生档位（票 10）：排到这条班次的人，做哪一档卫生日常检查。**按班次 id 认，不按名字** ——
+# 店长把「夜班」改成「晚班」，卫生那边不该跟着断（`migrations/pg/0010_shift_duty_slot.sql`
+# 里写了这一列为什么存在）。空 = 这条班次不出日常检查：新班次默认如此，店长没说是哪一档，
+# 就不替他决定 —— 那天的人交不了日常、页面上说去找店长，比猜错一档、把白班的检查单
+# 发给夜班的人要好。
+DUTY_SLOTS = ("day", "night")
+
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
+
+# 班次名里不许出现的东西：周期编辑器把店长写的那串字**按这些字符切词**
+# （`SchedulingCalendarView.vue` 的 `parseCycle` 用 `/[\s,，、·/]+/`），名字里带了它们，
+# 这条班次在界面上就永远写不进周期；而名字恰好切出两个合法班次名时（「白班/夜班」），
+# 编辑器还会把「固定上这个班」静默读成两班轮转。所以挡在写入这一侧。
+# 空白一律算（含全角空格、NBSP）：JS 的 `\s` 认的那些，Python 的 Unicode `\s` 只多不少。
+_SHIFT_NAME_SEPARATORS = re.compile(r"[\s,，、·/]")
 
 
 class SchedulingError(ValueError):
@@ -178,9 +195,13 @@ def _require_business_date(value: Any) -> str:
 
 
 def _clean_shift_name(value: Any) -> str:
-    """班次名去掉两头空白；空、太长、用了保留词各报一句能照做的错（票 11）。
+    """班次名去掉两头空白；空、太长、保留词、带分隔符各报一句能照做的错（票 11）。
 
     不悄悄截断：名字是店长写下的东西，被系统改掉比报错更难受（事由 `_clean_note` 同理）。
+
+    **分隔符（`_SHIFT_NAME_SEPARATORS`）必须在写入这一侧挡住**：周期编辑器按它们切词，
+    带分隔符的名字写不进周期。报错时把那个字符回给接口层（空白回「空格」，好读），
+    文案在 `api/scheduling.py` 的 `_ERROR_DETAILS` 里点名。
     """
     text = str(value or "").strip()
     if not text:
@@ -190,6 +211,10 @@ def _clean_shift_name(value: Any) -> str:
     if text in RESERVED_SHIFT_NAMES:
         # 把那个词回给接口层，好让文案点名（「休」和「空」的处理办法不一样）。
         raise SchedulingError("shift_name_reserved", text)
+    separator = _SHIFT_NAME_SEPARATORS.search(text)
+    if separator is not None:
+        found = separator.group()
+        raise SchedulingError("shift_name_charset", "空格" if found.isspace() else found)
     return text
 
 
@@ -201,6 +226,20 @@ def _shift_order(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         raise SchedulingError("invalid_shift_order", "invalid_shift_order")
+
+
+def _clean_duty_slot(value: Any) -> Optional[str]:
+    """卫生档位（票 10）：`day` / `night` / 空（这条班次不出日常检查）。
+
+    空串与 `None` 都是「不出日常」—— 调用方用 `None` 表示「这一项不动」（跟班次名、
+    顺序、启用位一个口径），用空串表示「清空成不出日常」，所以这里两种都收。
+    """
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if text not in DUTY_SLOTS:
+        raise SchedulingError("invalid_duty_slot", "invalid_duty_slot")
+    return text
 
 
 def _month_start(month: Any) -> date:
@@ -324,8 +363,16 @@ class SchedulingStore:
 
     def _window(self) -> tuple[str, str]:
         """展开窗口：``[今天, 今天 + EXPANSION_DAYS - 1]``，两端都含。"""
-        first = self.today()
-        return first, shift_business_date(first, EXPANSION_DAYS - 1)
+        return self._window_from(self.today())
+
+    @staticmethod
+    def _window_from(today: str) -> tuple[str, str]:
+        """给一个营业日算它那一版的展开窗口（`today` 是窗口第一天，两端都含）。
+
+        写路径一律拿**请求开头取的那一个** today 来调它 —— 各步各读一次钟的话，
+        请求正好跨过 06:00 的切日点时删和铺会算在不同的营业日上（见 `set_rule`）。
+        """
+        return today, shift_business_date(today, EXPANSION_DAYS - 1)
 
     # ── 班次 ────────────────────────────────────────────────────────────
 
@@ -369,14 +416,14 @@ class SchedulingStore:
         if row is not None and int(dict(row)["n"] or 0) > 0:
             return True
         stamp = self._now_iso()
-        for name, sort_order in DEFAULT_SHIFTS:
+        for name, sort_order, duty_slot in DEFAULT_SHIFTS:
             await self._conn.execute(
-                """INSERT INTO staff_shifts (name, sort_order, is_active, created_at, updated_at)
-                   VALUES (?, ?, 1, ?, ?)""",
-                (name, sort_order, stamp, stamp),
+                """INSERT INTO staff_shifts (name, sort_order, is_active, duty_slot, created_at, updated_at)
+                   VALUES (?, ?, 1, ?, ?, ?)""",
+                (name, sort_order, duty_slot, stamp, stamp),
             )
         await self._conn.commit()
-        logger.info("排班班次表为空，已放入默认班次 %s", "、".join(n for n, _ in DEFAULT_SHIFTS))
+        logger.info("排班班次表为空，已放入默认班次 %s", "、".join(name for name, _, _ in DEFAULT_SHIFTS))
         return True
 
     async def _rollback_quietly(self) -> None:
@@ -394,7 +441,7 @@ class SchedulingStore:
         一起出：月历和「这天是谁」要用它，否则停用一个班次会让**已经写下的历史行**
         在界面上凭空消失（票 11 的验收项）。
         """
-        sql = """SELECT id, name, sort_order, is_active FROM staff_shifts"""
+        sql = """SELECT id, name, sort_order, is_active, duty_slot FROM staff_shifts"""
         if not include_inactive:
             sql += " WHERE is_active = 1"
         sql += " ORDER BY sort_order ASC, id ASC"
@@ -407,6 +454,8 @@ class SchedulingStore:
                 "name": mapping["name"],
                 "sort_order": int(mapping["sort_order"]),
                 "is_active": bool(int(mapping["is_active"] or 0)),
+                # 卫生档位（票 10）：'day' / 'night' / None（这条班次不出日常检查）。
+                "duty_slot": mapping.get("duty_slot"),
             })
         return shifts
 
@@ -428,7 +477,7 @@ class SchedulingStore:
         能改到停用的那一条（给它改个名、重新启用），不能因为停用就「不存在」。
         """
         cur = await self._conn.execute(
-            "SELECT id, name, sort_order, is_active FROM staff_shifts WHERE id = ?",
+            "SELECT id, name, sort_order, is_active, duty_slot FROM staff_shifts WHERE id = ?",
             (int(shift_id),),
         )
         row = await cur.fetchone()
@@ -440,6 +489,7 @@ class SchedulingStore:
             "name": mapping["name"],
             "sort_order": int(mapping["sort_order"]),
             "is_active": bool(int(mapping["is_active"] or 0)),
+            "duty_slot": mapping.get("duty_slot"),
         }
 
     async def _require_shift_name_free(self, name: str, exclude_id: Optional[int] = None) -> None:
@@ -480,18 +530,21 @@ class SchedulingStore:
         }
 
     @_needs_migration
-    async def create_shift(self, name: Any, sort_order: Any = None) -> dict:
+    async def create_shift(self, name: Any, sort_order: Any = None, duty_slot: Any = None) -> dict:
         """加一个班次（票 11）。不给顺序就排在最后（当前最大 + `SHIFT_ORDER_STEP`）。
 
         新班次一律**启用**：店长刚建它就是要用它，建完再停用是没有意义的绕路。
+        卫生档位（票 10）不给就是「不出日常检查」：加一个「中班」时还没有对应的
+        日常检查项，等店长想清楚它是白班档还是夜班档再在这一页上标。
         """
         text = _clean_shift_name(name)
         order = _shift_order(sort_order)
+        slot = _clean_duty_slot(duty_slot)
         await self._require_shift_name_free(text)
-        return await self._insert_shift(text, order)
+        return await self._insert_shift(text, order, slot)
 
     @serialized_write
-    async def _insert_shift(self, name: str, sort_order: Optional[int]) -> dict:
+    async def _insert_shift(self, name: str, sort_order: Optional[int], duty_slot: Optional[str]) -> dict:
         stamp = self._now_iso()
         if sort_order is None:
             cur = await self._conn.execute("SELECT COALESCE(MAX(sort_order), 0) AS top FROM staff_shifts")
@@ -499,16 +552,22 @@ class SchedulingStore:
             sort_order = int(dict(row)["top"] or 0) + SHIFT_ORDER_STEP
         try:
             cur = await self._conn.execute(
-                """INSERT INTO staff_shifts (name, sort_order, is_active, created_at, updated_at)
-                   VALUES (?, ?, 1, ?, ?) RETURNING id""",
-                (name, sort_order, stamp, stamp),
+                """INSERT INTO staff_shifts (name, sort_order, is_active, duty_slot, created_at, updated_at)
+                   VALUES (?, ?, 1, ?, ?, ?) RETURNING id""",
+                (name, sort_order, duty_slot, stamp, stamp),
             )
             new_id = int(dict(await cur.fetchone())["id"])
         except asyncpg.UniqueViolationError:
             # 上面那次查重在写锁外，挡不住同一瞬间进来的第二条：库里的 UNIQUE 兜底。
             raise SchedulingError("shift_name_taken", "shift_name_taken") from None
         await self._conn.commit()
-        return {"id": new_id, "name": name, "sort_order": sort_order, "is_active": True}
+        return {
+            "id": new_id,
+            "name": name,
+            "sort_order": sort_order,
+            "is_active": True,
+            "duty_slot": duty_slot,
+        }
 
     @_needs_migration
     async def update_shift(
@@ -517,8 +576,13 @@ class SchedulingStore:
         name: Any = None,
         sort_order: Any = None,
         is_active: Any = None,
+        duty_slot: Any = None,
     ) -> dict:
-        """改一个班次：名字 / 显示顺序 / 启用停用（票 11）。`None` = 这一项不动。
+        """改一个班次：名字 / 显示顺序 / 启用停用 / 卫生档位（票 11、票 10）。
+
+        `None` = 这一项不动。**卫生档位是唯一的例外**：它对「不动」和「清空成不出日常」
+        得分开说 —— `None` 不动，**空串清空**，`'day'` / `'night'` 是设成那一档
+        （见 `_clean_duty_slot`）。
 
         改名的安全性来自「别处引用的是 id」：`staff_assignments.shift_id` 没有外键、
         也没有谁按名字对齐（票 10 接线时同样别按名字对齐），所以改完名字，历史行
@@ -532,12 +596,20 @@ class SchedulingStore:
         text = current["name"] if name is None else _clean_shift_name(name)
         order = current["sort_order"] if sort_order is None else _shift_order(sort_order)
         wanted = current["is_active"] if is_active is None else bool(is_active)
+        slot = current["duty_slot"] if duty_slot is None else _clean_duty_slot(duty_slot)
         if text != current["name"]:
             await self._require_shift_name_free(text, exclude_id=current["id"])
-        return await self._update_shift_row(current["id"], text, order, wanted)
+        return await self._update_shift_row(current["id"], text, order, wanted, slot)
 
     @serialized_write
-    async def _update_shift_row(self, shift_id: int, name: str, sort_order: int, is_active: bool) -> dict:
+    async def _update_shift_row(
+        self,
+        shift_id: int,
+        name: str,
+        sort_order: int,
+        is_active: bool,
+        duty_slot: Optional[str],
+    ) -> dict:
         # 停用那两道闸在锁里读、锁里判（同 `_delete_shift_row`）：不然
         # `gather(update_shift, set_rule)` 能稳定造出「班次已停用、规则还排着它」
         # 的坏状态 —— 那正是这两道闸要拦的事。
@@ -552,14 +624,21 @@ class SchedulingStore:
         stamp = self._now_iso()
         try:
             await self._conn.execute(
-                """UPDATE staff_shifts SET name = ?, sort_order = ?, is_active = ?, updated_at = ?
+                """UPDATE staff_shifts
+                   SET name = ?, sort_order = ?, is_active = ?, duty_slot = ?, updated_at = ?
                    WHERE id = ?""",
-                (name, sort_order, 1 if is_active else 0, stamp, shift_id),
+                (name, sort_order, 1 if is_active else 0, duty_slot, stamp, shift_id),
             )
         except asyncpg.UniqueViolationError:
             raise SchedulingError("shift_name_taken", "shift_name_taken") from None
         await self._conn.commit()
-        return {"id": shift_id, "name": name, "sort_order": sort_order, "is_active": is_active}
+        return {
+            "id": shift_id,
+            "name": name,
+            "sort_order": sort_order,
+            "is_active": is_active,
+            "duty_slot": duty_slot,
+        }
 
     @_needs_migration
     async def delete_shift(self, shift_id: int) -> dict:
@@ -782,19 +861,73 @@ class SchedulingStore:
         except (TypeError, ValueError):
             raise SchedulingError("invalid_cycle", "invalid_cycle")
 
-    async def list_rules(self) -> dict[int, dict]:
-        """``employee_id → {cycle, anchor_date}``；没配规则的人不在里面。"""
+    async def _rule_rows(self) -> dict[int, dict]:
+        """`scheduling_rules` 的**原样行**：``employee_id → {cycle, anchor_date}``，不解码。
+
+        `list_rules()` 拿它当底、逐条解码并照旧对脏数据抛错；要「一个人坏掉不拖累别人」
+        的调用方用这一版自己降级 —— `expand()` 逐人解码、坏的那个跳过，
+        `roster_with_rules()` 把它标成 `invalid` 显示出来，`inbox()` 只用它判
+        「这个人配没配过规则」（配过就有行，字符串坏不坏它不关心）。
+        """
         cur = await self._conn.execute(
             "SELECT employee_id, cycle, anchor_date FROM scheduling_rules",
         )
-        rules: dict[int, dict] = {}
+        rows: dict[int, dict] = {}
         for row in await cur.fetchall():
             mapping = dict(row)
-            rules[int(mapping["employee_id"])] = {
-                "cycle": self._decode_cycle(mapping["cycle"]),
+            rows[int(mapping["employee_id"])] = {
+                "cycle": mapping["cycle"],
                 "anchor_date": mapping["anchor_date"],
             }
+        return rows
+
+    async def list_rules(self) -> dict[int, dict]:
+        """``employee_id → {cycle, anchor_date}``；没配规则的人不在里面。
+
+        **`cycle` 读不出来时照旧抛 `SchedulingError`**（`invalid_cycle`）—— 这是内部读的
+        口径：拿到的每一格都能直接算，调用方不用自己判。`anchor_date` 只是原样带出来
+        （相位在 `_rule_anchor` 里才算，脏起点在那一步抛）。要降级的调用方**自己做**：
+        `expand()` 逐人 try（解码与起点都在里面）之后跳过那一个，`roster_with_rules()`
+        把那条标成 `invalid` 显示出来（名单面板是唯一能重配周期的入口，它跟着 400
+        就等于店长自锁）。
+
+        `shift_usage()` 也走这一版且**不降级**：它要数「多少人的轮转里排着这个班次」，
+        读不出来的那条算不清 —— 少算一个人就可能放行一次停用，宁可报错。
+        """
+        rules: dict[int, dict] = {}
+        for employee_id, raw in (await self._rule_rows()).items():
+            rules[employee_id] = {
+                "cycle": self._decode_cycle(raw["cycle"]),
+                "anchor_date": raw["anchor_date"],
+            }
         return rules
+
+    def _rule_for_display(self, raw: dict, known_shift_ids: set[int]) -> dict:
+        """名单面板里一条规则的样子：读不出来就**标出来**，不抛错。
+
+        读得出来的照旧是 ``{"cycle": [...], "anchor_date": "YYYY-MM-DD"}``（跟票 04
+        定下的形状一模一样，前端不会因为多一个键而变样）；只要有一处读不出来 ——
+        `cycle` 不是合法周期、`anchor_date` 不是日期、或者周期里引用了一个不存在 /
+        已停用的班次 —— 整条给成::
+
+            {"cycle": None, "anchor_date": None, "invalid": True}
+
+        `cycle` 与 `anchor_date` 一起给 None 而不是只废掉坏的那个：起点读不出来的规则
+        相位算不出来，留着 `cycle` 只会让页面以为它还能用。少了 `invalid` 这一键的老形状
+        就是「读得出来」的规则 —— 前端照 `ruleLabel` 渲染，`invalid` 为真时说
+        「这条规则读不出来，重配一下」。
+        """
+        try:
+            cycle = self._decode_cycle(raw["cycle"])
+            _rule_anchor(raw)
+            if any(
+                shift_id is not REST and int(shift_id) not in known_shift_ids
+                for shift_id in cycle
+            ):
+                raise SchedulingError("unknown_shift_in_cycle", "unknown_shift_in_cycle")
+        except SchedulingError:
+            return {"cycle": None, "anchor_date": None, "invalid": True}
+        return {"cycle": cycle, "anchor_date": raw["anchor_date"]}
 
     @_needs_migration
     async def set_rule(
@@ -810,6 +943,10 @@ class SchedulingStore:
         「规则改了、行还是旧的」。**锁里还会再验一次班次**（见 `_require_shifts_usable`）：
         读出「哪些班次还在用」与写下这条规则之间，正好可能有人把那个班次停用了
         （票 11 的停用闸只挡反方向：先有规则、再停用）。
+
+        **今天只在这里读一次**，往下传给删除与重铺两步：删和铺各读一次钟的话，请求正好
+        跨过 06:00 的切日点时会删 ≥9/23 的行、却从 9/24 起铺 —— 刚结束的那个营业日被
+        删掉而且没人补，月历和员工页上那天变成「还没排到」。
         """
         employee_id = int(employee_id)
         normalized = self._normalize_cycle(cycle)
@@ -817,9 +954,10 @@ class SchedulingStore:
         if employee_id not in {employee["id"] for employee in roster}:
             raise SchedulingError("unknown_employee", "unknown_employee")
         await self._require_shifts_usable(normalized)
-        anchor = self.today() if anchor_date in (None, "") else _require_business_date(anchor_date)
+        today = self.today()
+        anchor = today if anchor_date in (None, "") else _require_business_date(anchor_date)
 
-        await self._apply_rule(employee_id, normalized, anchor)
+        await self._apply_rule(employee_id, normalized, anchor, today)
         return {
             "employee_id": employee_id,
             "cycle": normalized,
@@ -831,7 +969,9 @@ class SchedulingStore:
 
         说清第几格是票 04 的验收项：规则编辑页照这个数字就能指出错在哪一天。
         `unknown_shift` 留给责任区那条路（`set_zone_default`：给某人某个班次配区时
-        选了个不存在的班次）。这个方法在锁外与锁里各调一次，理由见 `set_rule`。
+        选了个不存在的班次）。`set_rule` 在锁外与锁里各调一次（理由见那里）；
+        读路径也调：`_rule_for`（单人重取规则）用它挡住手工 SQL 写进去的幽灵班次 ——
+        跳过那一个人，比铺 90 行指向不存在班次的行好（`expand()` 降级成前者）。
         """
         known = {shift["id"] for shift in await self.list_shifts()}
         for slot, shift_id in enumerate(cycle, start=1):
@@ -839,13 +979,18 @@ class SchedulingStore:
                 raise SchedulingError("unknown_shift_in_cycle", str(slot))
 
     @serialized_write
-    async def _apply_rule(self, employee_id: int, cycle: list, anchor_date: str) -> None:
+    async def _apply_rule(
+        self, employee_id: int, cycle: list, anchor_date: str, today: str
+    ) -> None:
+        """`today` 是调用方在请求开头取的那个营业日（见 `set_rule`）：删与铺共用它。"""
         # 锁里再验一次：这中间可能有人把某个班次停用了（票 11），那条规则一展开就会
         # 把停用的班次又铺回来 —— 正是停用那道闸要保证不会发生的事。
         await self._require_shifts_usable(cycle)
         await self._write_rule_row(employee_id, cycle, anchor_date)
-        await self._delete_future_rule_rows(employee_id)
-        await self._expand_rows(employee_id, {"cycle": cycle, "anchor_date": anchor_date})
+        await self._delete_future_rule_rows(employee_id, today)
+        await self._expand_rows(
+            employee_id, {"cycle": cycle, "anchor_date": anchor_date}, today
+        )
         await self._conn.commit()
 
     async def _write_rule_row(self, employee_id: int, cycle: list, anchor_date: str) -> None:
@@ -869,16 +1014,19 @@ class SchedulingStore:
                 (payload, anchor_date, stamp, employee_id),
             )
 
-    async def _delete_future_rule_rows(self, employee_id: int) -> None:
+    async def _delete_future_rule_rows(self, employee_id: int, today: str) -> None:
         """规则改了 → 今天以后那些「按规则写出来的行」作废重铺；过去一行不动。
 
         `source = 'rule'` 这个条件是为后面的单日覆盖留的：手改/请假写下的行
         （`override`）不归规则管，改规则不该把它们抹掉。
+
+        `today` 由调用方给（见 `set_rule`）：这里和后面的重铺必须是**同一个营业日**，
+        否则请求跨过 06:00 时会删掉刚结束的那一天、却从新的一天起铺。
         """
         await self._conn.execute(
             """DELETE FROM staff_assignments
                WHERE employee_id = ? AND business_date >= ? AND source = ?""",
-            (employee_id, self.today(), SOURCE_RULE),
+            (employee_id, today, SOURCE_RULE),
         )
 
     @_needs_migration
@@ -889,7 +1037,7 @@ class SchedulingStore:
     @serialized_write
     async def _clear_rule(self, employee_id: int) -> None:
         await self._delete_rule_row(employee_id)
-        await self._delete_future_rule_rows(employee_id)
+        await self._delete_future_rule_rows(employee_id, self.today())
         await self._conn.commit()
 
     async def _delete_rule_row(self, employee_id: int) -> None:
@@ -921,18 +1069,24 @@ class SchedulingStore:
         **固定区**（`scheduling_zone_defaults`），跟展开时是同一条口径。
 
         校验在锁外（都是读）；写覆盖记录与写结果行在**一次**写锁、一次提交里。
+
+        **今天与窗口末日只在这里读一次**：两次各读一次钟，请求正好跨过 06:00 的切日点时
+        「过去不改」和「还没排到」会按两个不同的营业日判（`beyond_window` 那句文案里的
+        日期也会跟刚判过的那个不一样）。
         """
         employee_id = int(employee_id)
         day = _require_business_date(business_date)
-        if day < self.today():
+        today = self.today()
+        _, last_day = self._window_from(today)
+        if day < today:
             # 过去不改（`spec.md`）：那时那天是什么样就是什么样，改它等于改历史。
             raise SchedulingError("past_day", "past_day")
-        if day > self._window()[1]:
+        if day > last_day:
             # 窗口尽头之后是「还没铺到」。在那里写一行，月历上就会出现一个
             # 「规则还没算到、却已经有人上班」的格子 —— 那是另一件事（先配规则）。
             # 第二参填进那句提示的 `{}`：报**真实的窗口末日**，别把 `EXPANSION_DAYS`
             # 写死在文案里（那个数一改，店长看到的就是假话）。
-            raise SchedulingError("beyond_window", self._window()[1])
+            raise SchedulingError("beyond_window", last_day)
         roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
         if employee_id not in {employee["id"] for employee in roster}:
             raise SchedulingError("unknown_employee", "unknown_employee")
@@ -1023,30 +1177,37 @@ class SchedulingStore:
 
         今天以后按**现在的规则**重算一遍；已经过去的日期只把覆盖记录摘掉、结果行不动
         —— 那天当时确实是被改过的，写下来的历史就是那样（`spec.md` 的「过去不改」）。
+
+        **今天只读一次**往下传：「这一天算不算过去」与「那天还在不在窗口里」两处各读
+        一次钟的话，请求正好跨过 06:00 时会重算一个已经结束的营业日（或者漏算刚到的
+        那一天）。
         """
         employee_id = int(employee_id)
         day = _require_business_date(business_date)
-        await self._clear_override(employee_id, day)
+        await self._clear_override(employee_id, day, self.today())
         return {"employee_id": employee_id, "business_date": day}
 
     @serialized_write
-    async def _clear_override(self, employee_id: int, day: str) -> None:
+    async def _clear_override(self, employee_id: int, day: str, today: str) -> None:
         await self._conn.execute(
             "DELETE FROM scheduling_overrides WHERE employee_id = ? AND business_date = ?",
             (employee_id, day),
         )
-        if day >= self.today():
-            await self._restore_day(employee_id, day)
+        if day >= today:
+            await self._restore_day(employee_id, day, today)
         await self._conn.commit()
 
-    async def _restore_day(self, employee_id: int, day: str) -> None:
+    async def _restore_day(self, employee_id: int, day: str, today: str) -> None:
         """把某一天按**现在的规则**重算回 `source='rule'`。不自己上锁、不提交。
 
         没有规则、或那天已经在窗口外：把这一行删掉，那天回到「还没铺到」——
         跟月历上窗口尽头的空格是同一个状态，不是「那天休」。
+
+        规则只读**他自己**那一条（`_rule_for`）而不是全店的：别人的规则写坏了，
+        不该把这个人「撤掉覆盖」也一起挡住。`today` 由调用方给，见 `clear_override`。
         """
-        rule = (await self.list_rules()).get(employee_id)
-        if rule is None or day > self._window()[1]:
+        rule = await self._rule_for(employee_id)
+        if rule is None or day > self._window_from(today)[1]:
             await self._conn.execute(
                 """DELETE FROM staff_assignments
                    WHERE employee_id = ? AND business_date = ? AND source = ?""",
@@ -1100,29 +1261,82 @@ class SchedulingStore:
 
         一个人一次上锁、一次提交：第一次铺 90 天就是 90 行，不为此握着全局写锁
         （月历哪天有人第一次打开都会走到这里）。
+
+        **这里读到的规则只当成一份「该看哪些人」的名单**用：真正要铺的那条规则在锁里
+        重取一次，见 `_expand_one` —— 读到这份名单与拿到锁之间，别人可能已经把规则清了。
+
+        **一个人一条脏规则不该拖累全店**：名单走 `_rule_rows()`（原样行、不解码），
+        解码留给下面逐人做。`scheduling_rules` 是人工 SQL 也会碰的表，谁把某一行的
+        `cycle` 或 `anchor_date` 写坏了，以前会让整条 `expand()` 抛错 —— `/calendar`、
+        `/day`、`/inbox` 一起 400，而名单面板（唯一能重配周期的入口）读的是同一批数据，
+        等于店长自锁。现在坏的那一个记一条 warning 日志后**跳过**，别人照常铺；
+        返回值仍旧是这次一共写了多少行。
         """
-        rules = await self.list_rules()
+        rules = await self._rule_rows()
         if employee_id is not None:
             key = int(employee_id)
             rules = {key: rules[key]} if key in rules else {}
         written = 0
-        for emp_id, rule in rules.items():
-            written += await self._expand_one(emp_id, rule)
+        for emp_id in rules:
+            try:
+                written += await self._expand_one(emp_id)
+            except SchedulingError as exc:
+                # `serialized_write` 已经把这个人的半截事务回滚掉了（无写时是 no-op），
+                # 所以下一个人照常能写。日志里点名是谁，运维照 employee_id 就能定位那行。
+                logger.warning(
+                    "排班规则读不出来，跳过这个人（别人照常铺）: employee_id=%s code=%s",
+                    emp_id, exc.code,
+                )
         return written
 
+    async def _rule_for(self, employee_id: int) -> Optional[dict]:
+        """一个人的规则（`list_rules()` 的单人版：展开时只要他自己那一条）。
+
+        引用不存在 / 已停用的班次也在这里报 `unknown_shift_in_cycle`：铺 90 行指向幽灵
+        班次的行比跳过这个人更糟（月历会多出一列查不到名字的班次，清理还得进库）。
+        调用方 `expand()` 把它降级成「跳过这个人」。
+        """
+        cur = await self._conn.execute(
+            "SELECT cycle, anchor_date FROM scheduling_rules WHERE employee_id = ?",
+            (int(employee_id),),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        mapping = dict(row)
+        cycle = self._decode_cycle(mapping["cycle"])
+        await self._require_shifts_usable(cycle)
+        return {
+            "cycle": cycle,
+            "anchor_date": mapping["anchor_date"],
+        }
+
     @serialized_write
-    async def _expand_one(self, employee_id: int, rule: dict) -> int:
-        written = await self._expand_rows(employee_id, rule)
+    async def _expand_one(self, employee_id: int) -> int:
+        """锁里重取规则再铺 —— 锁外那份快照不能拿来写行。
+
+        从 `expand()` 读名单到这儿拿到写锁之间，可能有人把规则清了（`_clear_rule` 删
+        规则行、连今天以后的规则行一起删）。照旧快照展开就会把已经删掉的规则又铺回
+        90 天，而且**不会自愈**（`expand()` 只补缺的天，铺回来的行再没别的路径去删）：
+        名单面板写着「还没配规则」，月历与卫生读到的却是他有班。取不到规则就什么都不写。
+        """
+        rule = await self._rule_for(employee_id)
+        if rule is None:
+            return 0
+        written = await self._expand_rows(employee_id, rule, self.today())
         if written:
             await self._conn.commit()
         return written
 
-    async def _expand_rows(self, employee_id: int, rule: dict) -> int:
+    async def _expand_rows(self, employee_id: int, rule: dict, today: str) -> int:
         """铺窗口内还缺的那些天，返回写了几行。不自己上锁、不提交（调用方管）。
 
         只管「还缺的天」：已经存在的行（含单日覆盖写下的）一律不碰。
+
+        `today` 由调用方给（`set_rule` 的写路径里要和删除那一步用同一个营业日，
+        `expand()` 里就是这个人那一刻的今天）：窗口只按它算一次。
         """
-        first, last = self._window()
+        first, last = self._window_from(today)
         # 先把起点解析出来，哪怕这一天都不缺：脏数据该在第一次展开时就报出来，
         # 而不是等到某个「正好缺一天」的时刻。
         anchor = _rule_anchor(rule)
@@ -1461,12 +1675,18 @@ class SchedulingStore:
         花名册来自**公共层**（`EmployeeAccounts.list_roster`），责任区名单也来自公共层
         （`ZoneDirectory.list_zones`，读的是卫生建的那张 `hygiene_zones`）；排班不自己去
         join `hygiene_employees` —— 表名是公共层的实现细节（`spec.md` 的「分层」）。
+
+        **读不出来的规则显示出来，不抛错**（`_rule_for_display`）：这一页是店长唯一能
+        重配周期的入口，它跟着别人的脏数据 400，那个人就只能进库改。所以这一条走
+        `_rule_rows()`（不解码）而不是 `list_rules()`。
         """
         employees = await EmployeeAccounts(self._write_lock_owner).list_roster()
-        rules = await self.list_rules()
+        raw_rules = await self._rule_rows()
+        shifts = await self.list_shifts()
+        known_shift_ids = {shift["id"] for shift in shifts}
         defaults = await self.zone_defaults()
         return {
-            "shifts": await self.list_shifts(),
+            "shifts": shifts,
             "zones": await self._zone_directory().list_zones(),
             "employees": [
                 {
@@ -1476,7 +1696,13 @@ class SchedulingStore:
                     "job_title": employee["job_title"],
                     "approved": employee["approved"],
                     "disabled": employee["disabled"],
-                    "rule": rules.get(employee["id"]),
+                    # 没配过规则是 None；配过但读不出来是
+                    # {"cycle": None, "anchor_date": None, "invalid": True}。
+                    "rule": (
+                        None
+                        if employee["id"] not in raw_rules
+                        else self._rule_for_display(raw_rules[employee["id"]], known_shift_ids)
+                    ),
                     # {班次 id: 责任区 id}；没配过就是空对象
                     "zone_defaults": defaults.get(employee["id"], {}),
                 }
@@ -1513,6 +1739,9 @@ class SchedulingStore:
 
         提前量限制还没定（`spec.md` 的待定项）：现在只要求不是过去的日期、末日还在展开
         窗口里 —— 窗口外那天本来就「还没排到」，批了也没有一行可以变成请假。
+
+        **今天与窗口末日只读一次**（同 `set_override`）：申请落库那一刻的营业日，跟
+        「不是过去」和「在窗口里」两处判断用的是同一个。
         """
         employee_id = int(employee_id)
         roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
@@ -1527,14 +1756,16 @@ class SchedulingStore:
         last = first if end_date in (None, "") else _require_business_date(end_date)
         if last < first:
             raise SchedulingError("bad_range", "bad_range")
-        if last < self.today():
+        today = self.today()
+        last_day = self._window_from(today)[1]
+        if last < today:
             # 跟票 07 的 `past_day` 是同一条口径，但错的是「给过去提申请」而不是
             # 「改过去的排班」：文案分开，别让员工读到「排班写下的历史不重写」。
             raise SchedulingError("past_leave", "past_leave")
-        if last > self._window()[1]:
+        if last > last_day:
             # 第二参填进那句提示的 `{}`：报**真实的窗口末日**（跟票 07 同一条口径，
             # 别把 `EXPANSION_DAYS` 写死在文案里）。
-            raise SchedulingError("beyond_leave", self._window()[1])
+            raise SchedulingError("beyond_leave", last_day)
         return await self._insert_request(
             employee_id, KIND_LEAVE, first, last, _clean_note(note), STATUS_PENDING_MANAGER
         )
@@ -1578,7 +1809,11 @@ class SchedulingStore:
         if row["status"] not in (STATUS_PENDING_PEER, STATUS_PENDING_MANAGER):
             # 批完 / 驳完 / 已撤回都不再动：状态机只往前走（`spec.md` 的状态机）。
             raise SchedulingError("request_not_pending", "request_not_pending")
-        return await self._decide(int(row["id"]), STATUS_CANCELLED)
+        return await self._decide(
+            int(row["id"]),
+            STATUS_CANCELLED,
+            (STATUS_PENDING_PEER, STATUS_PENDING_MANAGER),
+        )
 
     @_needs_migration
     async def inbox(self) -> dict:
@@ -1610,7 +1845,10 @@ class SchedulingStore:
         names = await self._name_index()
         shifts = await self.list_shifts()
         shift_names = {shift["id"]: shift["name"] for shift in shifts}
-        rules = await self.list_rules()
+        # 「还没配规则的新人」只看**有没有那一行**（`_rule_rows()`），不看它读不读得出来：
+        # 一条读不出来的规则也是配过的规则，把这个人算成新人只会让店长去配第二遍，
+        # 而 `list_rules()` 那条解码路会让整页待办跟着 400（它的口径见那个 docstring）。
+        rules = await self._rule_rows()
         roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
 
         # 一天只查一次：同一批申请常指着同几天（一个人请的那几天，别人也可能请）。
@@ -1739,7 +1977,10 @@ class SchedulingStore:
             raise SchedulingError("unknown_request", "unknown_request")
         if row["status"] != STATUS_PENDING_MANAGER:
             raise SchedulingError("request_not_pending", "request_not_pending")
-        return await self._decide(int(row["id"]), STATUS_REJECTED)
+        result = await self._decide(int(row["id"]), STATUS_REJECTED, (STATUS_PENDING_MANAGER,))
+        # 同上：路由层要照这个 id 广播（被驳回的是**他**那条申请）。
+        result["employee_id"] = int(row["employee_id"])
+        return result
 
     # ── 换班（票 09） ───────────────────────────────────────────────────
     #
@@ -1764,6 +2005,9 @@ class SchedulingStore:
         换的是「那天两个人各自的样子」：对方那天本来就休（或还没排到，新人没配规则），
         批了就是他接走你的班、你那天空出来 —— 这也是一种换班。但**提的人那天得有一行**：
         手上没有班就没什么可换的（`nothing_to_swap`），先让店长配上规则再说。
+
+        **今天与窗口末日只读一次**（同 `set_override`、`submit_leave`）：跨 06:00 的
+        请求里，「那天过去了没有」与「那天还在不在窗口里」用同一个营业日判。
         """
         employee_id = int(employee_id)
         peer_id = int(peer_employee_id or 0)
@@ -1787,11 +2031,13 @@ class SchedulingStore:
             # 字段整个没给：跟「格式不对」分开说（跟请假 `missing_day` 同一条口径）。
             raise SchedulingError("missing_swap_day", "missing_swap_day")
         day = _require_business_date(business_date)
-        if day < self.today():
+        today = self.today()
+        last_day = self._window_from(today)[1]
+        if day < today:
             raise SchedulingError("past_swap", "past_swap")
-        if day > self._window()[1]:
+        if day > last_day:
             # 第二参填进那句提示的 `{}`：报真实的窗口末日（跟票 07、请假同一条口径）。
-            raise SchedulingError("beyond_swap", self._window()[1])
+            raise SchedulingError("beyond_swap", last_day)
         # 先把自己那天铺出来再问「有没有班」：规则配了但还没展开时不能误判成「没班」。
         await self.expand(employee_id)
         if not (await self._day_shift(employee_id, day))[0]:
@@ -1843,9 +2089,15 @@ class SchedulingStore:
         if row["status"] != STATUS_PENDING_PEER:
             # 已经回过的、被撤回的、批完的都不再动：状态机只往前走。
             raise SchedulingError("request_not_pending", "request_not_pending")
-        return await self._decide(
-            int(row["id"]), STATUS_PENDING_MANAGER if agree else STATUS_REJECTED
+        result = await self._decide(
+            int(row["id"]),
+            STATUS_PENDING_MANAGER if agree else STATUS_REJECTED,
+            (STATUS_PENDING_PEER,),
         )
+        # 多带一个「这条是谁提的」：路由层照它广播 —— 对方点头/摇头之后，**申请人**得知道
+        #（他那边没有别的途径看到）。加字段不改既有形状，调用方按需取。
+        result["employee_id"] = int(row["employee_id"])
+        return result
 
     async def colleagues(self, employee_id: int) -> list[dict]:
         """员工能找谁换班：名单里**在上班**的其他人（停用 / 还没批准的不给选）。
@@ -1921,15 +2173,25 @@ class SchedulingStore:
         两种申请在这一层分岔：请假在区间里每一天写成「没有班次」（`kind=leave`），
         换班只动那一天、两个人的班对调（`kind=swap`，见 `_approve_swap`）。
 
-        一次提交是有意的：批一半（写了三天、申请还是待批）比不批更糟 —— 店长会再点
-        一次「批准」，或者以为没批成而重复处理。
+        一次提交是有意的：批一半（写了三天、申请还是待批）比不批更糟。
+
+        **动手写排班之前先把这条申请占住**（`_claim_request` 的状态谓词在锁里）：店长
+        那次「读出来是待批」的判断在锁外，双击 / 两个标签页 / 网关重试会双双通过它 ——
+        到这儿只有第一个改得动状态，第二个连一天的排班都不写。换班那条尤其要看住：
+        `_approve_swap` 是拿**当下**两个人的班去对调，执行两次就是把班换回去，
+        而两次都回「批了」。
+
+        **今天与窗口末日在分岔之前读一次**（快照写法）：两类申请、以及换班那条里的
+        「那天算不算过去 / 还在不在窗口里」，都用同一个营业日判 —— 请求正好跨过 06:00
+        时不再出现「一次批准前半段算今天、后半段算明天」。
         """
-        if row["kind"] == KIND_SWAP:
-            return await self._approve_swap(row)
-        employee_id = int(row["employee_id"])
         today = self.today()
-        last_day = self._window()[1]
+        last_day = self._window_from(today)[1]
+        if row["kind"] == KIND_SWAP:
+            return await self._approve_swap(row, today, last_day)
+        employee_id = int(row["employee_id"])
         stamp = self._now_iso()
+        await self._claim_request(int(row["id"]), STATUS_APPROVED, (STATUS_PENDING_MANAGER,), stamp)
         applied: list[str] = []
         skipped: list[str] = []
         for day in _each_day_between(row["start_date"], row["end_date"]):
@@ -1939,12 +2201,6 @@ class SchedulingStore:
             await self._write_override_row(employee_id, day, None, None, KIND_LEAVE, stamp)
             await self._write_day_row(employee_id, day, None, None, SOURCE_OVERRIDE, stamp)
             applied.append(day)
-        await self._conn.execute(
-            """UPDATE scheduling_requests
-               SET status = ?, decided_at = ?, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_APPROVED, stamp, stamp, int(row["id"])),
-        )
         await self._conn.commit()
         return {
             "id": int(row["id"]),
@@ -1969,7 +2225,7 @@ class SchedulingStore:
             raise SchedulingError("not_migrated", 'column "peer_employee_id" does not exist')
         return int(peer_id)
 
-    async def _approve_swap(self, row: dict) -> dict:
+    async def _approve_swap(self, row: dict, today: str, last_day: str) -> dict:
         """把两个人那天的班对调（票 09 的验收项）。调用方持写锁、负责提交。
 
         写的是**覆盖行**（`kind=swap`）+ 结果行（`source=override`），两个人都写 ——
@@ -1978,14 +2234,21 @@ class SchedulingStore:
         责任区按各自**新班次**的固定区取（验收：区跟着班次走）；新班次是「休 / 没排到」
         时区也留空。当天已经过去 / 超出展开窗口的那一天只记「没动」：批得晚了就是晚了
         （跟请假那一支、票 07 同一条「过去不改」）。
+
+        `today` / `last_day` 是 `_approve` 在分岔前取的那一份快照（见那里）：两处各读
+        一次钟的话，跨 06:00 的请求会按两个不同的营业日判这一天算不算过去。
+
+        动手之前先 `_claim_request` 占住这条申请：对调是拿**当下**的班算的，执行两次
+        就是把班换回去 —— 两条都回「批了」，员工那边看着却白换了。
         """
         employee_id = int(row["employee_id"])
         peer_id = self._peer_of_swap(row)
         day = row["start_date"]
         stamp = self._now_iso()
+        await self._claim_request(int(row["id"]), STATUS_APPROVED, (STATUS_PENDING_MANAGER,), stamp)
         applied: list[str] = []
         skipped: list[str] = []
-        if day < self.today() or day > self._window()[1]:
+        if day < today or day > last_day:
             skipped.append(day)
         else:
             _, mine_now = await self._day_shift(employee_id, day)
@@ -2001,12 +2264,6 @@ class SchedulingStore:
             await self._write_override_row(peer_id, day, mine_now, theirs_zone, KIND_SWAP, stamp)
             await self._write_day_row(peer_id, day, mine_now, theirs_zone, SOURCE_OVERRIDE, stamp)
             applied.append(day)
-        await self._conn.execute(
-            """UPDATE scheduling_requests
-               SET status = ?, decided_at = ?, updated_at = ?
-               WHERE id = ?""",
-            (STATUS_APPROVED, stamp, stamp, int(row["id"])),
-        )
         await self._conn.commit()
         return {
             "id": int(row["id"]),
@@ -2097,16 +2354,41 @@ class SchedulingStore:
             }],
         }
 
-    @serialized_write
-    async def _decide(self, request_id: int, status: str) -> dict:
-        """把申请置成 `status` 并记下时间（驳回 / 撤回共用）。排班一个字不改。"""
-        stamp = self._now_iso()
-        await self._conn.execute(
-            """UPDATE scheduling_requests
-               SET status = ?, decided_at = ?, updated_at = ?
-               WHERE id = ?""",
-            (status, stamp, stamp, int(request_id)),
+    async def _claim_request(
+        self, request_id: int, status: str, expect: tuple[str, ...], stamp: str
+    ) -> None:
+        """把申请从 `expect` 里的某个状态改成 `status`；没抢到就报「已经处理过了」。
+
+        **状态谓词落在写锁里**：调用方那次「读出来是待批 / 是等我回应」的判断在锁外，
+        双击、两个标签页、网关重试会双双通过那道判断。到这儿再比一次状态，只有第一个
+        改得动这一行 —— 后面那个连它要写的排班都不写。
+
+        不提交：调用方把这条 UPDATE 与排班写入放在同一个事务里，要么都成要么都不成。
+
+        判「抢没抢到」用 `rowcount` 而不是 `... RETURNING id`：方言层对 UPDATE 只解析
+        asyncpg 的 command tag（见 `db_core/backend/pg.py` 的 `execute`），RETURNING
+        的行取不出来 —— 写 `RETURNING` 会让这里永远读到「没抢到」。
+        """
+        marks = ", ".join("?" for _ in expect)
+        cur = await self._conn.execute(
+            f"""UPDATE scheduling_requests
+                SET status = ?, decided_at = ?, updated_at = ?
+                WHERE id = ? AND status IN ({marks})""",
+            (status, stamp, stamp, int(request_id), *expect),
         )
+        if cur.rowcount != 1:
+            # 0 = 状态已经被人改了；-1 = command tag 没解析出来（`rowcount_from_status`），
+            # 两种都按「没抢到」办 —— 宁可让店长刷新一次，也不能重复写一遍排班。
+            raise SchedulingError("request_not_pending", "request_not_pending")
+
+    @serialized_write
+    async def _decide(self, request_id: int, status: str, expect: tuple[str, ...]) -> dict:
+        """把申请从 `expect` 置成 `status` 并记下时间（驳回 / 撤回 / 对方回应共用）。
+
+        排班一个字不改；状态谓词在锁里，见 `_claim_request`。
+        """
+        stamp = self._now_iso()
+        await self._claim_request(request_id, status, expect, stamp)
         await self._conn.commit()
         return {"id": int(request_id), "status": status, "decided_at": stamp}
 

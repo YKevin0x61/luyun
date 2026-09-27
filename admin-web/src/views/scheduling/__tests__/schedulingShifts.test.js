@@ -54,12 +54,31 @@ describe('店长端班次表（票 11）', () => {
     expect(view).toMatch(/people/)
     // **写失败的那句话必须留在重读之后**：`load()` 开头会把 `errorText` 清掉，
     // 先写后读等于把「还有 3 个人的轮转里排着它」当场抹掉（真出过这个 bug：
-    // 被拦下来的人只看到一次页面刷新）。四个动作都走 `reportFailure`。
+    // 被拦下来的人只看到一次页面刷新）。会挨服务端拦的那几个动作都走 `reportFailure`
+    // （停用、调顺序、删除、改档位）—— 加一条和改名没这道重读，照旧自己写 `errorText`。
     expect(view).toMatch(/async function reportFailure/)
     expect(view).toMatch(/await load\(\)\n  errorText\.value = message/)
-    expect((view.match(/await reportFailure\(err, /g) || []).length).toBe(3)
+    expect((view.match(/await reportFailure\(err, /g) || []).length).toBe(4)
     expect(view).not.toMatch(/errorText\.value = err\.message[\s\S]{0,80}await load\(\)/)
     expect(view).toMatch(/v-if="errorText"[\s\S]{0,40}role="alert"/)
+  })
+
+  it('任一动作在飞就全表按灰：别让人点了没反应，在飞的那条也不许被覆盖', () => {
+    // 「有动作在飞」与「哪一行在忙」是两个状态：busyId 是后者，模板的 disabled 要按前者。
+    // 以前只灰被点的那一行，别的行的按钮和输入框照常可点 —— 而 `saveName` / `moveShift` /
+    // `setDutySlot` 前置有静默 `if (busyId.value) return`：点下去什么都不发生、也没有提示；
+    // `toggleActive` 连 guard 都没有，直接把 busyId 覆盖成另一行，前面那条请求从此失去
+    // 保护（`finally` 无条件清零，回来时把新动作的槽也清了）。
+    expect(view).toMatch(/const busy = computed\(\(\) => busyId\.value !== 0\)/)
+    expect(view).not.toMatch(/:disabled="[^"]*busyId === /)
+    // 行里每一个写动作的控件都按「有动作在飞」灰：改名保存 / 档位 / ↑ / ↓ / 改名 / 启停 / 删除。
+    expect((view.match(/:disabled="[^"]*\bbusy\b[^"]*"/g) || []).length).toBe(7)
+    // 每个动作开头都留着同一道 guard（按钮已经灰了，这一道是给键盘/脚本兜底的）。
+    expect((view.match(/if \([^)]*busy\.value\) return/g) || []).length).toBe(5)
+    expect(view).toMatch(/async function toggleActive\(shift\) \{[\s\S]{0,80}?if \(busy\.value\) return/)
+    // 只有自己还占着槽才清零。
+    expect((view.match(/if \(busyId\.value === (?:shift|target)\.id\) busyId\.value = 0/g) || []).length).toBe(5)
+    expect(view).not.toMatch(/finally \{\s*busyId\.value = 0\s*\}/)
   })
 
   it('删除按钮照「还有几条在用」灰：最后一个在用的不给删（服务端同一口径）', () => {
@@ -83,8 +102,42 @@ describe('店长端班次表（票 11）', () => {
     // 整篇查（不是只查带引号的字面量）：模板里写一句 `<span>白班</span>` 也算写死。
     for (const name of ['白班', '夜班', '早班', '中班']) {
       expect(view).not.toContain(name)
-      expect(copy).not.toContain(name)
     }
+    // util 里只有一个例外：卫生档位的固定说法（票 10 —— 服务端的值也是 `day` / `night`，
+    // 人话是「白班档」「夜班档」，跟班次叫什么名字无关）。剥掉它们之后，util 里同样一个
+    // 班次名都不许有。
+    const withoutDutyLabels = copy.replace(/[白夜]班档/g, '')
+    for (const name of ['白班', '夜班', '早班', '中班']) {
+      expect(withoutDutyLabels).not.toContain(name)
+    }
+  })
+
+  it('每条班次的卫生档位都看得出、也改得动（票 10）：清空发的是空串', () => {
+    // 一条班次挂卫生的哪一档日常检查（`duty_slot`）。三选一的选项和文案只有 util 一份，
+    // 页面只 v-for —— 模板里不写死档位说法（后端的 400 那句话也在说同一套词）。
+    expect(view).toMatch(/v-for="choice in DUTY_SLOT_CHOICES"/)
+    expect(view).toMatch(/:value="dutySlotValue\(shift\)"/)
+    expect(view).toMatch(/dutySlotText\(data\.shift\)/)
+    expect(copy).toMatch(/export const DUTY_SLOT_CHOICES/)
+    expect(copy).toMatch(/value: 'day'/)
+    expect(copy).toMatch(/value: 'night'/)
+    expect(copy).toMatch(/value: ''/)
+    // 停用的班次也留在这一行里、也改得动：它的历史排班还要照这一档交日常
+    // （整页没有拿 `is_active` 当 `v-if` 的地方 —— 停用只改标签和颜色）。
+    expect(view).toMatch(/class="sDuty"/)
+    expect(view).not.toMatch(/v-if="[^"]*is_active/)
+    expect(view).toMatch(/@change="setDutySlot\(shift, \$event\.target\.value\)"/)
+    // 新动作落在改名那条已有的路由上，body 里只带 `duty_slot`。
+    expect(view).toMatch(
+      /api\.put\(`\/api\/scheduling\/shifts\/\$\{shift\.id\}`, \{\s*duty_slot: dutySlotPayload\(value\)/,
+    )
+    // 三种取值只有 util 那一份：页面不许自己写 `duty_slot: null`（那是「这一项不动」，
+    // 选了「不出日常」发它等于没改，而页面已经显示成清空了）。
+    expect(view).not.toMatch(/duty_slot:\s*null/)
+    expect(view).not.toMatch(/duty_slot:\s*['"]/)
+    // 写失败沿用这一页的口径：先把服务端那句「卫生档位只能选…」留住，重读之后再说。
+    expect(view).toMatch(/async function setDutySlot/)
+    expect(view).toMatch(/await reportFailure\(err, '没改成'\)/)
   })
 
   it('用的每个令牌都在共享样式表里有定义', () => {

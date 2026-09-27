@@ -20,7 +20,9 @@ describe('hygiene roster enable', () => {
     expect(roster).toMatch(/v-model="drafts\[row\.id\]\.name"/)
     expect(roster).toMatch(/name: draft\.name/)
     expect(roster).toMatch(/drafts\[row\.id\]\.zone_id/)
-    expect(roster).toMatch(/\/assignment/)
-    expect(roster).toMatch(/改区域和班次/)
+    // 改派（票 10 起）写的是排班的单日覆盖：卫生那条 /assignment 接口现在固定 403，
+    // 这一行仍然要留着「今天在哪个班、哪个区」的入口。
+    expect(roster).toMatch(/\/api\/scheduling\/overrides\//)
+    expect(roster).toMatch(/改今天/)
   })
 })

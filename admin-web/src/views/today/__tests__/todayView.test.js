@@ -18,7 +18,13 @@ describe('员工端「今天」页（原型 A）', () => {
     // 路径里唯一带变量的是「撤回自己那条申请」的申请号（票 08）：
     // 归属还是服务端按 cookie 判（别人的申请撤回只会拿到 404）。
     expect(view).not.toMatch(/\/api\/scheduling\/[^'"\s]*employee_id/)
-    expect(view).not.toMatch(/\/api\/hygiene/)
+    // 票 10 起这张卡的下半张是卫生待办（今日进度 + 逾期点）：它读的是**员工自己**那两条
+    // 卫生门（`/staff/me`、`/staff/daily-work`）—— 路径里同样没有 employee_id，读谁由
+    // cookie 定；管理端那一侧的卫生接口一个都不该出现在这里。
+    expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/me'\)/)
+    expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/daily-work'\)/)
+    expect(view).not.toMatch(/\/api\/hygiene\/[^'"\s]*employee_id/)
+    expect(view).not.toMatch(/\/api\/hygiene\/admin/)
     // 401 回员工登录（同一个登录页），把当前地址整个带过去（跟卫生首页一个走法）。
     expect(view).toMatch(/path: '\/hygiene\/login'/)
     expect(view).toMatch(/next: router\.currentRoute\.value\.fullPath/)
@@ -137,8 +143,10 @@ describe('员工端请假（票 08）', () => {
     expect(view).toMatch(/leaveStart\.value = \(today\.value && today\.value\.business_date\) \|\| ''/)
     // 只请一天时后一格空着就不发那个字段（服务端把 None 与空串都当单日）。
     expect(view).toMatch(/end_date: leaveEnd\.value \|\| null/)
-    // 事由最多 50 字：跟前端的 maxlength 与服务端的 MAX_REQUEST_NOTE 是同一个数。
-    expect(view).toMatch(/maxlength="50"/)
+    // 事由上限**由服务端下发**（`/me/requests` 的 `max_request_note`）：前端不再写死
+    // 第二份 50 —— 服务端一改就两边不一致（别的上限都是随响应下来的）。
+    expect(view).toMatch(/if \(data\.max_request_note\) maxNote\.value = data\.max_request_note/)
+    expect(view).toMatch(/:maxlength="maxNote \|\| undefined"/)
     expect(view).toMatch(/note: leaveNote\.value \|\| null/)
   })
 
@@ -150,11 +158,66 @@ describe('员工端请假（票 08）', () => {
     expect(view).toMatch(/if \(!quiet\) requestsError\.value = err\.message/)
   })
 
+  it('撤回/回应的失败提示留到重读之后再说，不被重读抹掉', () => {
+    // `loadRequests` 成功时会把 `requestsError` 清空（那是给「读不出来」用的），
+    // 所以「没撤成 / 没回成」那句话必须等重读完了再写：先写后读等于当场抹掉 ——
+    // 员工点了撤回看到界面什么都没变，会以为撤回了（真出过这个 bug）。
+    for (const [start, end] of [
+      ['async function cancelLeave', 'async function submitSwap'],
+      ['async function answerSwap', 'onMounted('],
+    ]) {
+      const body = view.slice(view.indexOf(start), view.indexOf(end))
+      const reread = body.indexOf('await loadRequests(true)')
+      const message = body.indexOf('requestsError.value = failure')
+      expect(reread, start).toBeGreaterThan(-1)
+      expect(message, start).toBeGreaterThan(-1)
+      expect(reread, start).toBeLessThan(message)
+    }
+  })
+
+  it('撤回与拒绝先过确认框，手机上一误触不会直接生效', () => {
+    // 这两个动作服务端只往前走（撤回后要重提、拒绝后这件事就结束），点错没有回头路。
+    // 同仓库对不可逆动作一律弹确认框（店长驳回、删班次、卫生端那几处），员工端这两个
+    // 是全仓少见的裸动作。「同意」不弹：后面还有店长那道闸，跟店长端「批准不弹、
+    // 驳回弹」同一个口径 —— 三个都弹就成了每次都拦一道。
+    expect(view).toMatch(/<ConfirmDialog/)
+    expect(view).toMatch(/@click="cancelTarget = request"/)
+    expect(view).toMatch(/@click="answerTarget = \{ card, agree: false \}"/)
+    expect(view).toMatch(/@click="answerSwap\(card, true\)"/)
+    expect(view).toMatch(/@confirm="confirmCancel"/)
+    expect(view).toMatch(/@confirm="confirmAnswer"/)
+    // 框里说清后果，不是一句「确定吗」。
+    expect(view).toContain('要重新提一次')
+    expect(view).toContain('对方会看到')
+  })
+
+  it('申请列表没读出来时不留一个静默的空页', () => {
+    // 换班那张卡是「有才显示」的：读失败时它整块不在，员工只会以为没人找他换班，
+    // 而页面上唯一能重来的动作是整页刷新。给一句能点的话。
+    expect(view).toMatch(/requestsUnread/)
+    expect(view).toMatch(/v-if="requestsUnread"/)
+    expect(view).toMatch(/@click="loadRequests\(\)"/)
+    expect(view).toContain('没读出来')
+  })
+
+  it('先挡住过去的日子；那一排按钮也放大到点得中', () => {
+    // 过去的日子服务端一定会拒（`past_leave` / `past_swap`）：在控件上先挡住，别让人
+    // 拨完日期、提交了才被打回来。`min` 用的是**服务端的营业日**，不是手机上的今天
+    //（手机时区可能不在东八区，判「过去」的是服务端）。
+    expect(view).toMatch(/:min="today \? today\.business_date : undefined"/)
+    expect(view).toMatch(/:min="leaveStart \|\| \(today \? today\.business_date : undefined\)"/)
+    // 撤回 / 同意 / 拒绝那一排的触摸目标：32px 在手机上太小 —— 挨着的是不可逆动作
+    //（有确认框兜着，但手指先得点得中）。
+
+    expect(view).toMatch(/\.tL-cancel \{[\s\S]{0,260}?min-height: 40px/)
+  })
+
   it('自己那条申请在页面上看得见、能撤回，批了才写成请假', () => {
     // 验收 4：员工看得见每条申请到哪一步（等店长批 / 批了 / 驳回了 / 已撤回）。
     expect(view).toMatch(/requestLine\(request\)/)
     expect(view).toMatch(/v-if="canCancel\(request\)"/)
-    expect(view).toMatch(/@click="cancelLeave\(request\)"/)
+    // 按钮先开确认框（`cancelTarget`），真发那条 DELETE 在 `confirmCancel` 里。
+    expect(view).toMatch(/@click="cancelTarget = request"/)
     expect(view).toContain('请假批了那天写')
     expect(view).toContain('换班要对方先同意、店长再批')
     // 出错了要说出来（不吞）：钉住那一处 —— 只写 `role="alert"` 的话，将来别处再加一个
@@ -189,7 +252,8 @@ describe('员工端换班（票 09）', () => {
     expect(view).toMatch(/v-if="incoming\.length"/)
     expect(view).toMatch(/incomingLine\(card\)/)
     expect(view).toMatch(/@click="answerSwap\(card, true\)"/)
-    expect(view).toMatch(/@click="answerSwap\(card, false\)"/)
+    // 拒绝先开确认框（同意不弹，见确认框那条用例）。
+    expect(view).toMatch(/@click="answerTarget = \{ card, agree: false \}"/)
     expect(view).toContain('你点了同意才会轮到店长批')
     // 同意/拒绝之后两边都要重读（对方可能自己撤了），也各有一句回执。
     expect(view).toMatch(/note\.value = agree \? '你同意了，接下来等店长批' : '你拒绝了，这件事到此为止'/)
@@ -205,7 +269,7 @@ describe('员工端换班（票 09）', () => {
     expect(view).toMatch(/:value="person\.id"/)
     // 事由的长度上限钉在换班那个输入框上：`maxlength="50"` 请假表单里也有一个。
     const noteBox = view.slice(view.indexOf('id="swap-note"'))
-    expect(noteBox.slice(0, 200)).toMatch(/maxlength="50"/)
+    expect(noteBox.slice(0, 200)).toMatch(/:maxlength="maxNote \|\| undefined"/)
     // 三样缺一样就不让提交（同事、日期）。
     expect(view).toMatch(/:disabled="swapBusy \|\| !swapPeer \|\| !swapDay"/)
     expect(view).toMatch(/body: \{\s*peer_employee_id: Number\(swapPeer\.value\) \|\| null,\s*business_date: swapDay\.value/)
@@ -217,5 +281,15 @@ describe('员工端换班（票 09）', () => {
     expect(view).toContain('tA-card swap')
     expect(view).toMatch(/\.tA-card\.swap \{[\s\S]{0,80}--hy-amber/)
     expect(view).toMatch(/\.tag\.swap \{/)
+  })
+
+  it('订阅排班与卫生 nudge：三块一起重读（票 10 收尾）', () => {
+    // 换班那条尤其要紧：对方不开页面就永远不知道有人找他换 —— 这也是这几个页面里
+    // 唯一「别人动作直接影响我」的地方。
+    expect(view).toMatch(/useNudgePull\(\{/)
+    expect(view).toMatch(/topics: \['scheduling', 'hygiene'\]/)
+    expect(view).toMatch(/load\(true\)/)
+    expect(view).toMatch(/loadRequests\(true\)/)
+    expect(view).toMatch(/loadHygiene\(true\)/)
   })
 })

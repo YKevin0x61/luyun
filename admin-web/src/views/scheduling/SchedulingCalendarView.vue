@@ -12,6 +12,9 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../../api/client'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
+import { useNudgePull } from '../../composables/useNudgePull'
+import { mergeShiftList } from '../../utils/shiftTable'
+import { eachDayInRange } from '../../utils/dateRange'
 
 useScopedStylesheet('/hygiene-admin.css')
 
@@ -20,8 +23,6 @@ const router = useRouter()
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
 // 每个班次一个颜色，按排序位循环取（原型里白班薄荷、夜班水青）。N 个班次都够用。
 const SHIFT_TONES = ['mint', 'aqua', 'amber', 'seal']
-// 周期天数的真上限在服务端（`MAX_CYCLE_DAYS`，随 /roster 下来）；这个只是它没下来时的兜底。
-const MAX_CYCLE_FALLBACK = 60
 
 const loading = ref(true)
 const errorText = ref('')
@@ -51,6 +52,12 @@ const shiftById = computed(() => {
   for (const shift of shifts.value) index[shift.id] = shift
   return index
 })
+
+// 配规则用的班次列表：只出**还在用**的（服务端 `_require_shifts_usable` 是同一条口径，
+// 单日覆盖那条路也校验）。`shifts` 那份是显示用的，带着「这个月真有行的停用班次」——
+// 它们必须出现在月历和当天名单上（票 11：停用后历史排班照旧显示），但出现在周期解析
+// 或固定责任区的选择里，店长选完只会吃一句 400。
+const activeShifts = computed(() => shifts.value.filter((shift) => shift.is_active))
 
 // 这个月有几天是被单日覆盖改过的（票 07）：>0 时图例里多一句「青点 = 这天有改动」，
 // 免得那个点看起来像装饰。
@@ -82,7 +89,11 @@ function currentMonthValue() {
 }
 
 function shiftMonth(value, delta) {
-  const [year, month] = value.split('-').map(Number)
+  // 首屏失败时 `monthValue` 还是空串，`''.split('-')` 出来的是 NaN，
+  // `new Date(NaN, …)` 会得到 `'NaN-NaN'` —— 那是个**真值字符串**，上层那句
+  // `month || monthValue || current` 拦不住，点一下「上月」就发一个 `month=NaN-NaN`
+  // 给后端（回一句「月份格式应该是 YYYY-MM」，把真正的病因盖掉）。退回当前月。
+  const [year, month] = (value || currentMonthValue()).split('-').map(Number)
   const base = new Date(year, month - 1 + delta, 1)
   return `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}`
 }
@@ -124,12 +135,23 @@ function cellCounts(day) {
   }))
 }
 
-async function loadCalendar(month) {
+// 月历请求的序号（见 `loadCalendar`）：慢网下只认最后一次请求的响应。
+let calendarSeq = 0
+
+async function loadCalendar(month, silent = false) {
   errorText.value = ''
   const value = month || monthValue.value || currentMonthValue()
-  loading.value = true
+  // 请求序号：慢网下连点「上月」（或「上月」与「本月」并发）时，先到的旧响应会把后点的
+  // 那个月覆盖掉（审查发现的 A9）。只有最后一次请求的响应算数。
+  const seq = (calendarSeq += 1)
+  // 月份**立刻**更新：原来只在成功之后才写 `monthValue`，于是连点两次算出来的目标是
+  // 同一个月，第二次点击看起来像没反应。
+  monthValue.value = value
+  // `silent`：实时 nudge 触发的重读不翻 loading —— 每来一条就闪一下白，很吵。
+  if (!silent) loading.value = true
   try {
     const data = await api.get('/api/scheduling/calendar', { month: value })
+    if (seq !== calendarSeq) return
     calendar.value = data
     shifts.value = data.shifts || []
     monthValue.value = data.month
@@ -138,9 +160,10 @@ async function loadCalendar(month) {
     selectedDate.value = inMonth && data.today ? data.today : (data.days[0] || {}).business_date || ''
     await loadDay(selectedDate.value)
   } catch (err) {
+    if (seq !== calendarSeq) return
     errorText.value = err.message || '排班月历加载失败'
   } finally {
-    loading.value = false
+    if (seq === calendarSeq && !silent) loading.value = false
   }
 }
 
@@ -150,8 +173,14 @@ async function loadDay(businessDate) {
     return
   }
   selectedDate.value = businessDate
+  // 换一天先把上一天的人清掉（模板对 null 有「读取中…」兜底）：请求失败时表头已经是
+  // 新那天、名单却还列着旧那天的人，店长会照着错的名单改班（审查发现的 A2）。
+  dayDetail.value = null
   try {
     dayDetail.value = await api.get('/api/scheduling/day', { date: businessDate })
+    // 成功就把上一次那句错误收掉：原来只有 `loadCalendar` 清 `errorText`，一条失败提示
+    // 会一直挂在页面上，看着像页面坏了。
+    errorText.value = ''
   } catch (err) {
     errorText.value = err.message || '这一天读不出来'
   }
@@ -161,7 +190,9 @@ async function loadRoster() {
   try {
     const data = await api.get('/api/scheduling/roster')
     roster.value = data.employees || []
-    if (data.shifts && data.shifts.length) shifts.value = data.shifts
+    // 并集，不是替换：名单这份只有启用的班次，直接换上去会把「这个月还有行」的停用
+    // 班次从月历的格子、图例和当天卡上挤掉（`mergeShiftList` 里写了为什么不能那么走）。
+    if (data.shifts && data.shifts.length) shifts.value = mergeShiftList(shifts.value, data.shifts)
     // 责任区名单来自公共层（读的是卫生建的那份），所以卫生那边新建一个区，
     // 这里刷新一下就能选到 —— 不需要重启，也不用在排班这边再建一份。
     zones.value = data.zones || []
@@ -179,7 +210,9 @@ async function openPanel(next) {
 // 「还没配的人」= 在职（已批准、没停用）但一条规则都没有。名单面板和底下那根
 // 提示条要用同一个口径，所以只写这一份纯函数。
 function needsRule(employee) {
-  return !employee.rule && !employee.disabled && employee.approved
+  // 「配了但读不出来」也要算进来：那种人在月历上同样不会有新班（`expand()` 会跳过他们），
+  // 而名单上只写「还没配」的话，店长会以为是没配过 —— 两拨都是要处理的人。
+  return (!employee.rule || employee.rule.invalid) && !employee.disabled && employee.approved
 }
 
 function countPending(employees) {
@@ -187,19 +220,68 @@ function countPending(employees) {
 }
 
 // 名单上还没配的人数 —— 进页面时单独问一次，给底下那根条用（原型 B 的 .gPend）。
-const pendingCount = ref(0)
+//
+// 这里**不碰 `shifts`**：那位是「月历显示用的班次列」，归 `/calendar` 管。名单这份只有
+// 启用的班次（`list_shifts()` 不带停用的），覆盖过去会让停用班次从这个月的格子、图例和
+// 当天卡的颜色里凭空消失 —— 而它在这个月明明还有行（票 11 验收②：停用之后历史排班照旧
+// 显示）。数人只需要 `employees`。
+//
+// 读不出来时置 `null`（**不是 0**）：显示成「全员都配好了」是一句假话，店长会照着它放心。
+const pendingCount = ref(null)
+const pendingText = computed(() => {
+  if (pendingCount.value === null) return '名单没读出来：点开重试一次'
+  return pendingCount.value ? '点这里给谁配固定班' : '全员都配好了'
+})
 async function loadPendingCount() {
   try {
     const data = await api.get('/api/scheduling/roster')
-    shifts.value = data.shifts && data.shifts.length ? data.shifts : shifts.value
     pendingCount.value = countPending(data.employees)
   } catch (err) {
-    pendingCount.value = 0
+    pendingCount.value = null
   }
 }
 
+// 月历上的**待批角标**（spec US 11）：哪天有等着批的请假 / 换班。
+//
+// 数据现成 —— `/inbox` 每条申请带 `start_date` / `end_date`，这里按天摊开数一遍就够了，
+// 不用后端再出一个接口。这条验收在票 02 与票 06 之间被转手两次、一直没人接，结果是店长
+// 只能滑到底、点进待办页才知道有几条在等他批。
+//
+// 读不出来就**不标**（空表）：宁可少一个角标，也不能在一个没读到的日子上标错数字。
+const pendingMarks = ref({})
+async function loadPendingMarks() {
+  try {
+    const data = await api.get('/api/scheduling/inbox')
+    const marks = {}
+    for (const request of data.requests || []) {
+      // 换班只有一天（起止同值），请假是一段 —— 同一个展开函数覆盖两种。
+      const days = eachDayInRange(
+        request.start_date,
+        request.end_date || request.start_date,
+      )
+      for (const day of days) marks[day] = (marks[day] || 0) + 1
+    }
+    pendingMarks.value = marks
+  } catch (err) {
+    pendingMarks.value = {}
+  }
+}
+
+/** 底下那根条与月历角标一起刷：批一条、撤回一条都会同时动到这两个。 */
+async function refreshNotes() {
+  await Promise.all([loadPendingCount(), loadPendingMarks()])
+}
+
+// 图例里那条「有申请等着批」：有角标才显示（没角标时图例列一个用不上的记号反而费解）。
+const hasPendingMarks = computed(() => Object.keys(pendingMarks.value).length > 0)
+
 function ruleLabel(rule) {
-  if (!rule || !rule.cycle || !rule.cycle.length) return '还没配'
+  // 三种状态分开说：没配过（`null`）/ 配了但读不出来（`invalid`）/ 正常。
+  // 以前 `!rule.cycle` 一律说「还没配」—— 规则坏掉的人被显示成没配过，店长照着配一遍
+  // 也修不好（那条坏行还在，得先清空再配），真正的原因（脏数据）也看不出来。
+  if (!rule) return '还没配'
+  if (rule.invalid) return '规则坏了，重配一条'
+  if (!rule.cycle || !rule.cycle.length) return '还没配'
   const parts = rule.cycle.map((id) => (id === null ? '休' : (shiftById.value[id] || {}).name || '?'))
   const unique = new Set(parts)
   if (unique.size === 1) return `固定${parts[0]}`
@@ -215,7 +297,7 @@ async function setFixedShift(employee, shiftId) {
     await api.put(`/api/scheduling/rules/${employee.id}`, { cycle: [shiftId] })
     await loadRoster()
     await loadCalendar(monthValue.value)
-    await loadPendingCount()
+    await refreshNotes()
   } catch (err) {
     errorText.value = err.message || '规则没存上'
   } finally {
@@ -230,7 +312,7 @@ async function clearRule(employee) {
     await api.delete(`/api/scheduling/rules/${employee.id}`)
     await loadRoster()
     await loadCalendar(monthValue.value)
-    await loadPendingCount()
+    await refreshNotes()
   } catch (err) {
     errorText.value = err.message || '规则没清掉'
   } finally {
@@ -247,11 +329,15 @@ const cycleText = ref('')
 const cycleAnchor = ref('')
 const cycleError = ref('')
 // 最多写多少天由服务端说了算（`MAX_CYCLE_DAYS`，随 /roster 一起下来）。
-const maxCycleDays = ref(MAX_CYCLE_FALLBACK)
+// 拿不到就**不设上限**（`null`）：前端不再猜一个 60 写死第二份 —— 超了由服务端回
+// 那句中文 400，它的文案里带的才是真实上限。
+const maxCycleDays = ref(null)
 const REST_WORDS = ['休', '休息', '空', 'x', 'X', '-', '—']
 // 输入框的示例按**当前班次名**拼，不把「白班/夜班」写死在文案里（班次可配置，票 11）。
+// 名字取的是**还在用**的那份（`activeShifts`）：示例里出现一个停用班次，等于教店长
+// 写一个保存必被拒的周期。
 const cyclePlaceholder = computed(() => {
-  const names = (shifts.value || []).map((shift) => shift.name)
+  const names = (activeShifts.value || []).map((shift) => shift.name)
   const first = names[0] || '班次'
   const second = names[1] || first
   return [first, first, second, '休'].join(' ')
@@ -262,8 +348,10 @@ function openCycle(employee) {
   cycleError.value = ''
   const rule = employee.rule
   // 查不到的班次 id 写成 `#5` 这种**解析器一定会拒**的占位，而不是空串：
-  // 空串会在保存时被安静地丢掉，周期就少一格、后面每一格整体前移一天
-  // （班次被停用后 `/roster` 不再下发它，规则行里却还留着那个 id）。
+  // 空串会在保存时被安静地丢掉，周期就少一格、后面每一格整体前移一天。
+  // 「查不到」= 这个月没有它的行、又不在启用列表里（显示用的 `shifts` 只带这个月
+  // 真有行的停用班次）。停用但还查得到的，会照名字写出来 —— 那一格由 `parseCycle`
+  // 拦下来（它只认启用班次），店长照样得把它改掉。
   cycleText.value = rule && rule.cycle
     ? rule.cycle.map((id) => (id === null ? '休' : (shiftById.value[id] || {}).name || `#${id}`)).join(' ')
     : ''
@@ -280,15 +368,18 @@ function closeCycle() {
 function parseCycle(text) {
   const tokens = String(text || '').split(/[\s,，、·/]+/).filter(Boolean)
   // 例子按**当前班次名**拼：班次是数据（票 11 能改名、能加第三个），文案里写死
-  // 「白班 夜班 休」会让改了名的店对着一句不存在的话猜。
-  const names = (shifts.value || []).map((shift) => shift.name).join('、')
+  // 「白班 夜班 休」会让改了名的店对着一句不存在的话猜。名字只取还在用的那份。
+  const names = (activeShifts.value || []).map((shift) => shift.name).join('、')
   if (!tokens.length) {
     return { error: `周期不能空着：至少写一天，例如「${names || '班次'} 休」` }
   }
-  if (tokens.length > maxCycleDays.value) {
+  if (maxCycleDays.value && tokens.length > maxCycleDays.value) {
     return { error: `周期最多 ${maxCycleDays.value} 天，现在写了 ${tokens.length} 天` }
   }
-  const byName = new Map((shifts.value || []).map((shift) => [shift.name, shift.id]))
+  // 只认**还在用**的班次名：停用班次写进周期，服务端 `_require_shifts_usable` 会拒
+  // （`unknown_shift_in_cycle`），不如在这一层就说清是第几格 —— 页面上那份不该让
+  // 店长写出一个保存必失败的周期。
+  const byName = new Map((activeShifts.value || []).map((shift) => [shift.name, shift.id]))
   const cycle = []
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
@@ -311,6 +402,9 @@ function parseCycle(text) {
 }
 
 async function saveCycle(employee) {
+  // 输入框上挂着 `@keyup.enter`，而按钮的 disabled 拦不住回车：一个人正在保存时
+  // 再按一次回车会发第二条 PUT（服务端幂等，但界面会跟着重读两次）。
+  if (busyEmployeeId.value) return
   const parsed = parseCycle(cycleText.value)
   if (parsed.error) {
     cycleError.value = parsed.error
@@ -327,7 +421,7 @@ async function saveCycle(employee) {
     closeCycle()
     await loadRoster()
     await loadCalendar(monthValue.value)
-    await loadPendingCount()
+    await refreshNotes()
   } catch (err) {
     cycleError.value = err.message || '周期没存上'
   } finally {
@@ -450,7 +544,18 @@ async function undoOverride() {
 onMounted(async () => {
   monthValue.value = currentMonthValue()
   await loadCalendar(monthValue.value)
-  await loadPendingCount()
+  await refreshNotes()
+})
+
+// 实时（票 10 收尾）：员工提了申请、撤回了、或者改动了排班 —— 月历、待批角标与底下
+// 那根条一起重拉。nudge 不带数据，所以照惯例重读；静默刷新，别每来一条就闪一下。
+useNudgePull({
+  id: 'scheduling-calendar',
+  topics: ['scheduling'],
+  pull: async () => {
+    await loadCalendar(monthValue.value, true)
+    await refreshNotes()
+  },
 })
 </script>
 
@@ -504,6 +609,11 @@ onMounted(async () => {
                   <i v-else :class="item.tone">{{ item.count }}</i>
                 </template>
               </span>
+              <!-- 待批角标（spec US 11）：这天有等着批的申请。票 07 定标记时特意把琥珀留给
+                   「待处理」、青点留给「这天被改过」—— 两种记号不能混。 -->
+              <span v-if="pendingMarks[day.business_date]" class="pend">
+                {{ pendingMarks[day.business_date] }}
+              </span>
             </button>
           </div>
 
@@ -512,6 +622,7 @@ onMounted(async () => {
               <i :class="toneClass(shift.id)"></i>{{ shift.name }}
             </span>
             <span v-if="overriddenDays" class="gB-ov"><i></i>这天有改动</span>
+            <span v-if="hasPendingMarks" class="gB-pend"><i></i>有申请等着批</span>
           </div>
           <p v-if="beyondNote" class="gB-note">{{ beyondNote }}</p>
 
@@ -605,8 +716,16 @@ onMounted(async () => {
                 <span>班次</span>
                 <select v-model="editShift" class="gZ-sel">
                   <option value="rest">休</option>
-                  <option v-for="shift in shifts" :key="shift.id" :value="String(shift.id)">
-                    {{ shift.name }}
+                  <!-- 列的是**显示用**那份：他那天可能就是停用的那个班，下拉里得有它，
+                       否则选择框看着是空的。停用的标出来并禁掉 —— 选了服务端会拒
+                       （`set_override` 只收还在用的班次），不给一个点了必然报错的选项。 -->
+                  <option
+                    v-for="shift in shifts"
+                    :key="shift.id"
+                    :value="String(shift.id)"
+                    :disabled="!shift.is_active"
+                  >
+                    {{ shift.name }}<template v-if="!shift.is_active">（已停用）</template>
                   </option>
                 </select>
               </label>
@@ -660,9 +779,9 @@ onMounted(async () => {
           </button>
 
           <button class="gPend" type="button" @click="openPanel('roster')">
-            <span class="n">{{ pendingCount }}</span>
+            <span class="n">{{ pendingCount === null ? '—' : pendingCount }}</span>
             <b>个人还没配规则</b>
-            <span>{{ pendingCount ? '点这里给谁配固定班' : '全员都配好了' }}</span>
+            <span>{{ pendingText }}</span>
             <span class="go">›</span>
           </button>
         </template>
@@ -684,7 +803,7 @@ onMounted(async () => {
               </div>
               <div class="gR-act">
                 <button
-                  v-for="shift in shifts"
+                  v-for="shift in activeShifts"
                   :key="shift.id"
                   type="button"
                   class="gBtn"
@@ -713,6 +832,7 @@ onMounted(async () => {
                   type="text"
                   spellcheck="false"
                   :placeholder="cyclePlaceholder"
+                  :disabled="busyEmployeeId === employee.id"
                   @keyup.enter="saveCycle(employee)"
                 >
                 <label class="gC-anchor">
@@ -732,7 +852,7 @@ onMounted(async () => {
                 <p v-if="cycleError" class="gC-err">{{ cycleError }}</p>
               </div>
               <div class="gZ">
-                <label v-for="shift in shifts" :key="shift.id" class="gZ-pick">
+                <label v-for="shift in activeShifts" :key="shift.id" class="gZ-pick">
                   <span>{{ shift.name }}</span>
                   <select
                     class="gZ-sel"
@@ -792,6 +912,14 @@ onMounted(async () => {
 .gB-d .c em { font-style: normal; color: var(--hy-faint); font-size: 9px; }
 .gB-d.today { border-color: var(--hy-mint-line); background: var(--hy-mint-soft); }
 .gB-d.today .n { color: var(--hy-jade); font-weight: 700; }
+/* 待批角标（spec US 11）：这天有等着批的申请。琥珀是票 07 特意留给「待处理」的颜色，
+   青点留给「这天被手改过」—— 两种记号各说各的事，不能混。 */
+.gB-d .pend {
+  position: absolute; top: 3px; right: 3px; min-width: 15px; height: 15px;
+  padding: 0 3px; border-radius: 999px; background: var(--hy-amber); color: var(--hy-night);
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 700; line-height: 15px;
+  text-align: center;
+}
 .gB-d.sel { border-color: var(--hy-mint); box-shadow: var(--hy-glow-mint); }
 /* 这天被单日覆盖改过（票 07）：右上角一个青点 —— 人数会变，但「改成休」那种改动
    在人数里根本看不出来，得有个跟人数无关的标记。 */
@@ -807,6 +935,7 @@ onMounted(async () => {
 .gB-legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: middle; background: currentColor; }
 .gB-legend span { color: var(--hy-faint); }
 .gB-legend .gB-ov i { background: var(--hy-aqua); }
+.gB-legend .gB-pend i { background: var(--hy-amber); }
 .gB-card { margin-top: 14px; border: 1px solid var(--hy-line); border-radius: var(--hy-radius-lg); background: var(--hy-surface); padding: 13px 14px; }
 .gB-card-plain { margin-top: 0; }
 .gB-card-hd { display: flex; align-items: baseline; gap: 9px; padding-bottom: 11px; border-bottom: 1px solid var(--hy-line); }

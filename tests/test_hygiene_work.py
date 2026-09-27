@@ -11,6 +11,7 @@ from database import CHINA_TZ, DatabaseManager
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.notifier import FakeNotifier
 from services.hygiene.work import HygieneWork, HygieneWorkError, hygiene_week_start
+from tests.hygiene_duty import assign_duty
 
 SEED_ZONE_NAMES = ["案板", "馅档", "熟笼", "肠粉", "西饼", "明档1", "明档2", "煎炸"]
 SUPER = {"kind": "super"}
@@ -645,13 +646,21 @@ class HygieneDailyOverdueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clocks["day_hhmm"], "16:00")
         self.assertEqual(clocks["night_hhmm"], "21:30")
 
-    async def test_missed_daily_increments_zone_board_not_shift_picker(self):
+    async def test_missed_daily_increments_zone_board_not_the_person_on_duty(self):
+        """漏交的日常记在**责任区**上，不记在当天当班的人头上。
+
+        票 10 之前这里的前置是「员工自己选了白班」；自选入口撤了之后，同一个人改成
+        **排班排到白班**（`assign_duty`，店长还没给他配责任区）—— 要守的仍然是同一件事：
+        `sweep_overdue` 只往责任区看板写一条 `逾期`（`employee_id` 为空），不会因为今天
+        有谁在班就把这次漏交算到谁名下（个人看板是提交/驳回时才动的）。
+        """
         from services.hygiene.accounts import EmployeeAccounts
 
         accounts = EmployeeAccounts(self.db, now=lambda: self.fixed_now)
-        picker = await accounts.register("13800138010", "password123", "张三")
-        await accounts.approve(picker["id"])
-        await accounts.pick_shift(picker["id"], "白班")
+        on_duty = await accounts.register("13800138010", "password123", "张三")
+        await accounts.approve(on_duty["id"])
+        await assign_duty(self.db, on_duty["id"], slot="day", now=self.fixed_now)
+        self.assertEqual(await accounts.current_shift(on_duty["id"]), "白班")
         item = await self._anban_item()
         await self.work.set_daily_overdue_clocks(SUPER, "15:00", "21:30")
         self.fixed_now = datetime(2026, 9, 13, 15, 0, tzinfo=CHINA_TZ)
@@ -660,8 +669,9 @@ class HygieneDailyOverdueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(zone_events), 1)
         self.assertEqual(zone_events[0]["event_type"], "逾期")
         self.assertEqual(zone_events[0]["zone_id"], item["zone_id"])
+        self.assertEqual(zone_events[0]["shift"], "白班")
         self.assertIsNone(zone_events[0]["employee_id"])
-        person_events = await self.work.list_person_board_events(picker["id"])
+        person_events = await self.work.list_person_board_events(on_duty["id"])
         self.assertEqual(person_events, [])
 
     async def test_submit_and_reject_record_person_board_missed_sibling_zone_only(self):

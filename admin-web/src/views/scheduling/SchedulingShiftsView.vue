@@ -1,13 +1,16 @@
 <script setup>
-// 店长端「排班 · 班次表」（票 11）：加一个班次、改名字、调显示顺序、启用停用、
-// 把刚建错的那一条删掉 —— 都不用改库。
+// 店长端「排班 · 班次表」（票 11、票 10）：加一个班次、改名字、调显示顺序、启用停用、
+// 标它属于卫生的哪一档日常检查、把刚建错的那一条删掉 —— 都不用改库。
 //
-// 两件事在这一页上说清楚：
+// 三件事在这一页上说清楚：
 // - **停用不等于删除**：停用之后新排班不再用它，**已经写下的历史排班照旧显示**那个
 //   班次（服务层的 `_shifts_for_display` 保证）。所以「停用」是常规动作，「删除」只
 //   留给一天班都没排过的那一条 —— 按钮该灰就灰，原因写在旁边。
 // - **还有人在上就不给停用**：说清是多少个人、让他们先改规则。那个数字来自服务端
 //   （`/shifts/manage` 的 `people`），页面不自己数 —— 数错了店长会照着错的信息做决定。
+// - **档位认的是 id 不是名字**（票 10）：这条班次排到的人做卫生哪一档的日常检查，记在
+//   这条班次行上（`duty_slot`）。所以这一页要能看清、也能改 —— 店长给班次改名那天，
+//   卫生那边不该跟着断（名字是数据，档位才是那根线）。
 //
 // 班次是**数据**不是常量：这一页按 N 个班次写，加第三个班次之后月历图例、配规则的下拉、
 // 员工端那张卡都会自己多出一种班别，不需要改代码（票面的验收项）。
@@ -20,8 +23,12 @@ import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import {
+  DUTY_SLOT_CHOICES,
   canDelete,
   deleteBlockedReason,
+  dutySlotPayload,
+  dutySlotText,
+  dutySlotValue,
   moveShift as moveShiftOrder,
   statusText,
   toggleLabel,
@@ -44,6 +51,13 @@ const maxName = ref(null)
 // 还在用的班次条数：删掉最后一条在用的就没人能排班了，删除按钮照它灰着。
 const activeCount = ref(0)
 const busyId = ref(0)
+// 「有动作在飞」和「哪一行在忙」是两件事，得分开放：busyId 记的是后者（只在回执/
+// 守卫里定位这次动的是哪一行），模板的 disabled 一律按前者 `busy` 全灰 —— 只要还有
+// 一个写请求没回来，别的行就不该装作能点。以前只灰被点的那一行，别的行的按钮和
+// 输入框照常可点：`saveName` / `moveShift` / `setDutySlot` 的前置 guard 直接静默
+// return（点下去什么都不发生、也没有提示），`toggleActive` 连 guard 都没有，会把
+// busyId 覆盖成另一行 —— 前面那条请求从此失去保护，`finally` 再把它一起清掉。
+const busy = computed(() => busyId.value !== 0)
 const newName = ref('')
 const addBusy = ref(false)
 const editingId = ref(0)
@@ -113,7 +127,7 @@ function cancelRename() {
 
 async function saveName(shift) {
   const name = editName.value.trim()
-  if (!name || busyId.value) return
+  if (!name || busy.value) return
   busyId.value = shift.id
   errorText.value = ''
   receipt.value = ''
@@ -125,11 +139,12 @@ async function saveName(shift) {
   } catch (err) {
     errorText.value = err.message || '没改成'
   } finally {
-    busyId.value = 0
+    if (busyId.value === shift.id) busyId.value = 0
   }
 }
 
 async function toggleActive(shift) {
+  if (busy.value) return
   busyId.value = shift.id
   errorText.value = ''
   receipt.value = ''
@@ -146,7 +161,31 @@ async function toggleActive(shift) {
     // 保证重读之后那句话还在）。
     await reportFailure(err, '没改成')
   } finally {
-    busyId.value = 0
+    if (busyId.value === shift.id) busyId.value = 0
+  }
+}
+
+/** 改档位：三选一里选了什么就发什么，**清空那一项由 `dutySlotPayload` 发成空串**
+ *  （发 `null` 后端当成「这一项不动」，页面会显示成清空了而库里没变）。
+ *
+ *  失败照这一页的口径走 `reportFailure`：服务端对非法值有一句原话（卫生档位只能选…），
+ *  要留在重读之后再说。
+ */
+async function setDutySlot(shift, value) {
+  if (busy.value) return
+  busyId.value = shift.id
+  errorText.value = ''
+  receipt.value = ''
+  try {
+    const data = await api.put(`/api/scheduling/shifts/${shift.id}`, {
+      duty_slot: dutySlotPayload(value),
+    })
+    receipt.value = `改好了：${data.shift.name} 的卫生日常 → ${dutySlotText(data.shift)}`
+    await load()
+  } catch (err) {
+    await reportFailure(err, '没改成')
+  } finally {
+    if (busyId.value === shift.id) busyId.value = 0
   }
 }
 
@@ -154,7 +193,7 @@ async function moveShift(shift, delta) {
   const index = shifts.value.findIndex((item) => item.id === shift.id)
   // 重排要一次给全（服务端 `reorder_shifts` 的口径）：整表的新顺序由 util 算。
   const next = moveShiftOrder(orderIds.value, index, delta)
-  if (!next || busyId.value) return
+  if (!next || busy.value) return
   busyId.value = shift.id
   errorText.value = ''
   receipt.value = ''
@@ -165,14 +204,15 @@ async function moveShift(shift, delta) {
   } catch (err) {
     await reportFailure(err, '没调成')
   } finally {
-    busyId.value = 0
+    if (busyId.value === shift.id) busyId.value = 0
   }
 }
 
 async function confirmDelete() {
   const target = deleteTarget.value
   deleteTarget.value = null
-  if (!target) return
+  // 确认框可能是上一个动作还在飞的时候打开的：按下去之前再挡一道。
+  if (!target || busy.value) return
   busyId.value = target.id
   errorText.value = ''
   receipt.value = ''
@@ -183,7 +223,7 @@ async function confirmDelete() {
   } catch (err) {
     await reportFailure(err, '没删成')
   } finally {
-    busyId.value = 0
+    if (busyId.value === target.id) busyId.value = 0
   }
 }
 
@@ -222,6 +262,11 @@ onMounted(() => {
           顺序就是月历图例、当天名单、员工卡片上的顺序（↑ ↓ 调）。停用的班次留在这里：
           它的历史排班还要照着它显示。
         </p>
+        <p class="sLead">
+          每行那个「卫生日常」是这条班次排到的人做哪一档日常检查。卫生按班次 id 认档、
+          不认名字，所以改名不会把那一档弄丢；新加的班次默认不挂档（那天的人交不了日常），
+          想清楚它算哪一档再回来选。
+        </p>
 
         <div class="sAdd">
           <input
@@ -257,7 +302,7 @@ onMounted(() => {
                 @keyup.esc="cancelRename"
               >
               <span class="sActs">
-                <button class="btn btn-primary" type="button" :disabled="busyId === shift.id || !editName.trim()" @click="saveName(shift)">保存</button>
+                <button class="btn btn-primary" type="button" :disabled="busy || !editName.trim()" @click="saveName(shift)">保存</button>
                 <button class="btn" type="button" @click="cancelRename">取消</button>
               </span>
             </template>
@@ -266,37 +311,50 @@ onMounted(() => {
               <span class="sName">{{ shift.name }}</span>
               <span class="sTag" :class="{ off: !shift.is_active }">{{ statusText(shift) }}</span>
               <span class="sUsage">{{ usageLine(shift) }}</span>
+              <!-- 读和写是同一个控件：选中的那一条就是这条班次现在的档位（停用的也能改 ——
+                   它的历史排班还要照这档交日常）。选项来自 util，模板里不写死档位说法。 -->
+              <label class="sDuty">
+                <span class="sDutyLab">卫生日常</span>
+                <select
+                  class="select sDutySel"
+                  :value="dutySlotValue(shift)"
+                  :disabled="busy"
+                  @change="setDutySlot(shift, $event.target.value)"
+                >
+                  <option v-for="choice in DUTY_SLOT_CHOICES" :key="choice.value" :value="choice.value">{{ choice.label }}</option>
+                </select>
+              </label>
               <span class="sActs">
                 <button
                   class="btn sMini"
                   type="button"
                   title="上移一位"
-                  :disabled="index === 0 || busyId === shift.id"
+                  :disabled="index === 0 || busy"
                   @click="moveShift(shift, -1)"
                 >↑</button>
                 <button
                   class="btn sMini"
                   type="button"
                   title="下移一位"
-                  :disabled="index === shifts.length - 1 || busyId === shift.id"
+                  :disabled="index === shifts.length - 1 || busy"
                   @click="moveShift(shift, 1)"
                 >↓</button>
                 <button
                   class="btn sMini"
                   type="button"
-                  :disabled="busyId === shift.id"
+                  :disabled="busy"
                   @click="startRename(shift)"
                 >改名</button>
                 <button
                   class="btn sMini"
                   type="button"
-                  :disabled="busyId === shift.id"
+                  :disabled="busy"
                   @click="toggleActive(shift)"
                 >{{ toggleLabel(shift) }}</button>
                 <button
                   class="btn btn-danger sMini"
                   type="button"
-                  :disabled="!canDelete(shift, activeCount) || busyId === shift.id"
+                  :disabled="!canDelete(shift, activeCount) || busy"
                   :title="canDelete(shift, activeCount) ? '删掉这个班次' : deleteBlockedReason(shift, activeCount)"
                   @click="deleteTarget = shift"
                 >删除</button>
@@ -391,6 +449,10 @@ onMounted(() => {
   color: var(--hy-faint); border-color: var(--hy-line-strong); background: transparent;
 }
 .sUsage { font-size: 11.5px; color: var(--hy-muted); }
+/* 档位三选一贴着用量、在动作之前：它说的是「这条班次是什么」，不是「拿它做什么」。
+   里层是全局 `.select`（同 `.input`，admin 那一套），这里只把它压到这一行的高度。 */
+.sDuty { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--hy-faint); }
+.sDutySel { min-height: 28px; padding-top: 2px; padding-bottom: 2px; font-size: 11.5px; }
 .sActs { margin-left: auto; display: flex; gap: 6px; flex: none; }
 .sMini { min-height: 30px; padding: 0 10px; font-size: 12px; }
 .sWhy { flex-basis: 100%; font-size: 11px; line-height: 1.7; color: var(--hy-faint); }

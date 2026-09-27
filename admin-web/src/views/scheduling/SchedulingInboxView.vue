@@ -15,6 +15,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
+import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import {
   approveReceipt,
@@ -60,7 +61,24 @@ async function load() {
   }
 }
 
+/** 写失败：先把服务端那句话留住，重读待办，**最后**再说出来。
+ *
+ *  顺序不能反：`load()` 开头会把 `errorText` 清掉（那是给进页面 / 重读用的），先写后读
+ *  等于把「这条申请已经处理过了」这句话当场抹掉 —— 店长点完「批准」什么都看不到
+ *  （既没有错误也没有回执），会以为没批成而反复点。跟班次页 `reportFailure` 同一个口径。
+ */
+async function reportFailure(err, fallback) {
+  const message = err.message || fallback
+  await load()
+  errorText.value = message
+}
+
 async function decide(request, action) {
+  // 单槽 busyId 表示「有动作在飞」，所以这里必须挡住重入：放两条同时飞，先回来的
+  // 那条会在 `finally` 里把槽清零，后一条的按钮就全部恢复可点、能对同一条再发一次；
+  // 后回来的回执还会顶掉前一条（回执说的是 A，而 A 已经从列表上消失了）。服务端的
+  // `request_not_pending` 挡得住数据被改坏，挡不住店长看到「点了没反应 / 回执对不上」。
+  if (busyId.value) return
   busyId.value = request.id
   errorText.value = ''
   receipt.value = ''
@@ -73,12 +91,12 @@ async function decide(request, action) {
     }
     await load()
   } catch (err) {
-    errorText.value = err.message || '没处理成'
     // 可能是别人先批了/员工自己撤了（`request_not_pending`）：重读一次待办，
-    // 别让店长对着一条已经不存在的申请反复点。
-    await load()
+    // 别让店长对着一条已经不存在的申请反复点 —— 服务端那句话留到最后说。
+    await reportFailure(err, '没处理成')
   } finally {
-    busyId.value = 0
+    // 只清自己占的那个槽：不是本次请求的 `finally` 不许把在飞那条的保护撤掉。
+    if (busyId.value === request.id) busyId.value = 0
   }
 }
 
@@ -92,6 +110,10 @@ onMounted(() => {
   document.title = '排班待办'
   load()
 })
+
+// 实时（票 10 收尾）：员工提了新的申请、撤回了、或者对方回了话 —— 待办列表重拉一次。
+// 这一页本来就是「等别人动作」的地方，没有实时就只能靠人反复刷新。
+useNudgePull({ id: 'scheduling-inbox', topics: ['scheduling'], pull: load })
 </script>
 
 <template>
@@ -145,13 +167,13 @@ onMounted(() => {
               <button
                 class="btn btn-primary"
                 type="button"
-                :disabled="busyId === request.id"
+                :disabled="busyId !== 0"
                 @click="decide(request, 'approve')"
               >批准</button>
               <button
                 class="btn btn-danger"
                 type="button"
-                :disabled="busyId === request.id"
+                :disabled="busyId !== 0"
                 @click="rejectTarget = request"
               >驳回</button>
             </div>

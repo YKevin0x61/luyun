@@ -26,6 +26,7 @@ from services.hygiene.work import (
     MAX_REJECT_REASON_LENGTH,
     HygieneWork,
 )
+from tests.hygiene_duty import assign_duty
 
 SUPER = {"kind": "super"}
 PHONE = "13800138000"
@@ -79,15 +80,18 @@ def env(tmp_path):
     deep = _run(work.add_deep_clean_item(SUPER, 6, "抽油烟机"))
     employee = _run(accounts.register(PHONE, PASSWORD, "张三"))
     _run(accounts.approve(employee["id"]))
-    _run(accounts.pick_assignment(employee["id"], "白班", zone["id"]))
+    # 票 10：今天在哪个班、哪个区由**排班**给（员工自选入口已撤），所以前置数据配排班。
+    _run(assign_duty(db, employee["id"], slot="day", zone_id=zone["id"], now=CLOCK))
+    duty = _run(accounts.current_assignment(employee["id"]))
+    assert duty["shift"] == "白班" and duty["zone_id"] == zone["id"], "排班没铺出今天的白班"
     actor = {
         "kind": "staff",
         "id": employee["id"],
         "permission": "普通员工",
         "name": "张三",
         "phone": PHONE,
-        "shift": "白班",
-        "zone_id": zone["id"],
+        "shift": duty["shift"],
+        "zone_id": duty["zone_id"],
     }
     yield db, work, daily, deep, actor
 

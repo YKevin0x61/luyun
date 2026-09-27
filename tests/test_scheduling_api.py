@@ -22,7 +22,7 @@ from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
 from services.business_day import current_business_date
 from services.hygiene.accounts import EmployeeAccounts
-from services.scheduling.store import SchedulingStore
+from services.scheduling.store import MAX_REQUEST_NOTE, SchedulingStore
 
 PASSWORD = "password123"
 ADMIN = {"username": "admin", "password": PASSWORD, "confirm_password": PASSWORD}
@@ -326,8 +326,13 @@ def test_missing_table_is_a_503_with_instructions():
     assert "0005_scheduling.sql" in exc.detail
 
 
-def test_dirty_rule_data_is_a_400_not_a_500(scheduling_http):
-    """人工改库把起点写成垃圾：接口给一句人话的 400，不是一个 500。"""
+def test_dirty_rule_data_skips_that_person_instead_of_a_400(scheduling_http):
+    """人工改库把起点写成垃圾：接口照常 200（那个人被跳过），不是一个 500。
+
+    缺陷 1 之前这里断言的是 400 —— 那条 400 会把**全店**的月历、当天、待办和名单一起
+    带下去，而名单面板是唯一能重配周期的入口（店长等于自锁，只能进库改）。现在脏规则
+    只影响它自己那一个人：别人照常排，名单面板把那条标成「读不出来」让店长重配。
+    """
     client, db, accounts = scheduling_http
     employee_id = _employee_id(accounts)
     day_id = client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
@@ -343,8 +348,17 @@ def test_dirty_rule_data_is_a_400_not_a_500(scheduling_http):
 
     _run(_dirty())
     calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"})
-    assert calendar.status_code == 400, calendar.text
-    assert calendar.json()["detail"] == "轮转规则的起点日不合法（应该是 YYYY-MM-DD）：请重新配一遍这条规则"
+    assert calendar.status_code == 200, calendar.text
+    # 配规则那天铺下的行还在（脏规则只是不再往下铺，不删已经写好的行）。
+    cells = {item["business_date"]: item for item in calendar.json()["days"]}
+    assert cells[TODAY]["total"] == 1
+    # 名单面板照常打开，并且**把那条坏规则标出来** —— 店长就是靠这一页重配的。
+    roster = client.get("/api/scheduling/roster")
+    assert roster.status_code == 200, roster.text
+    rule = [
+        item for item in roster.json()["employees"] if item["id"] == employee_id
+    ][0]["rule"]
+    assert rule == {"cycle": None, "anchor_date": None, "invalid": True}
 
 
 def test_error_details_never_leak_the_placeholder():
@@ -1763,3 +1777,45 @@ def test_a_third_shift_flows_through_calendar_and_staff_card(scheduling_http, mo
     me = client.get("/api/scheduling/me")
     assert me.status_code == 200, me.text
     assert me.json()["days"][0]["shift_name"] == "中班"
+
+
+def test_submitting_a_request_broadcasts_a_scoped_nudge(scheduling_http, monkeypatch):
+    """提申请要叫醒**相关的人**，而且只说自己的事（scope 带 employee_id）。
+
+    这条 nudge 是员工侧唯一能知道「有人找我换班 / 店长批了 / 店长改了我的班」的途径。
+    scope 里不带 id 就成了全店广播（同事的动作时序全泄出去 —— hub 的 `_staff_owns_scope`
+    刚把那条路封上），带错了 id 则谁都收不到、页面永远不刷新。
+    """
+    client, _db, accounts = scheduling_http
+    _admin, (employee_id,), _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    seen = []
+
+    async def _record(topic, scope=None):
+        seen.append((topic, scope))
+
+    monkeypatch.setattr(scheduling_module.realtime_hub, "broadcast_nudge", _record)
+
+    submitted = client.post(
+        "/api/scheduling/me/requests",
+        json={"start_date": "2026-09-25"},
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    assert seen == [
+        ("scheduling", {"reason": "leave_submitted", "employee_id": employee_id}),
+    ]
+
+
+def test_my_requests_carries_the_note_limit(scheduling_http, monkeypatch):
+    """事由的长度上限随 `/me/requests` 下发（同 `/roster` 的 `max_cycle_days`、
+    `/shifts/manage` 的 `max_name`）：前端照它设 `maxlength` 与那句「最多 N 字」，
+    不再写死第二份 —— 服务端一改就两边不一致，而这种不一致没人会立刻发现。
+    """
+    client, _db, accounts = scheduling_http
+    _admin, (_employee_id,), _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    body = client.get("/api/scheduling/me/requests")
+
+    assert body.status_code == 200, body.text
+    assert body.json()["max_request_note"] == MAX_REQUEST_NOTE

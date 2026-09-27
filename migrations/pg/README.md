@@ -43,6 +43,7 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0007_scheduling_overrides.sql` | `scheduling_overrides`：单日覆盖（某人某天跟规则不一样的那一天，班次+责任区整天快照） | 店长改某天（改班次/改成休/换区）与改规则都 503 并点名这个文件（展开要先读覆盖表）；月历与当日接口照常 200，只是「这天被改过」的青点永远不会出现（标记数的是 `staff_assignments.source`） |
 | `0008_scheduling_requests.sql` | `scheduling_requests`：请假申请（一次申请一条，同一个人可以有多条，`kind`/起止日/状态/事由），批准后那几天写成 `kind=leave` 的单日覆盖 | 员工端提不了假、看不了自己的申请，店长的「待办」页 503 并点名这个文件；月历、当日、`/me` 与改某天照常工作（那几条读路径根本不查这张表：请假标记来自 0007 的覆盖记录，读不到就当没有） |
 | `0009_scheduling_swap.sql` | `scheduling_requests."peer_employee_id"` 列（换班跟谁换）+ `idx_scheduling_requests_peer` 索引 + 未落定换班的局部唯一索引 `idx_scheduling_requests_swap_once`（同一对同一天只挂一条）；换班与请假共用 0008 那张表，靠 `kind` 分开 | 员工提不了换班（**请假照常**：读路径捕到缺列就按「没有换班」降级，写路径才 503 并点名这个文件）；店长「待办」里不会再出现**新的**换班卡 —— 这一列不在、表里却已经排上队的换班，会让那期间整页待办 503 并点名这个文件（看着像请假也打不开）。把列补回来页面就照常开：那一行的对方已经随列丢了（`DROP COLUMN` 连值一起走），那张卡补不回来 —— 渲染时会跳过它并记一条日志，不会拿空值当「对方」写排班；新提的换班照常走完 |
+| `0010_shift_duty_slot.sql` | `staff_shifts."duty_slot"` 列（`day`/`night`/NULL）：这条班次的人做哪一档卫生日常检查，按**班次 id** 认而不是按名字（票 10）。回填现有的「白班」「夜班」两条 | 排班页面与 `/api/scheduling/*` 报 503 并点名这个文件（`list_shifts` 要读这一列，缺列就走 `not_migrated` 那条出口）；同时卫生的员工端交不了任何日常检查（公共层那个只读入口捕到缺列就按「还没接上」降级 —— 员工看到的是「今天没有要交的日常」，不是 500）。**这一条要先应用再看页面** |
 
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，

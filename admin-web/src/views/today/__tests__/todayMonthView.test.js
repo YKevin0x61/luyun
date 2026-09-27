@@ -110,10 +110,12 @@ describe('员工端「整月」页（票 06）', () => {
   it('says what an empty cell is, and what is not built yet', () => {
     // 空格子 = 还没排（新装机时本月前半月就是空的）：页脚直说，别让人以为是「休」。
     expect(view).toContain('空着的格子是那天还没排')
-    // 票 08：请假已经接上了（批过的假写「请假」，跟排班给的「休」分开）；
-    // 换班的角标还在第 9 张票里，页脚也得这么说。
+    // 票 08：请假已经接上了（批过的假写「请假」，跟排班给的「休」分开）。
+    // 票 06 那条角标也接上了 —— 页脚原来那句「换班的角标等那张票做好再加」是票 09 时代的
+    // 占位，留着会让人等一个不存在的东西；现在改成说清右上角那个点是什么。
     expect(view).toContain('批过的假写「请假」')
-    expect(view).toContain('换班的角标等那张票做好再加')
+    expect(view).toContain('右上角的小点')
+    expect(view).not.toContain('等那张票做好再加')
     expect(view).not.toContain('请假、换班的角标')
     // 翻到展开窗口之外的那些月：整片空要解释，不是排班丢了。
     expect(view).toMatch(/data\.window_end/)
@@ -151,5 +153,29 @@ describe('员工端「整月」页（票 06）', () => {
     const heads = copy.match(/MONTH_HEADS = (\[[^\]]*\])/)
     const weekdays = manager.match(/const WEEKDAYS = (\[[^\]]*\])/)
     expect(heads && heads[1].replace(/\s/g, '')).toBe(weekdays && weekdays[1].replace(/\s/g, ''))
+  })
+
+  it('标出「申请中」的那几天 —— 票 06 那条一直没有数据源的角标', () => {
+    // 转出时说「这一票没有数据源」；现在有了：`/me/requests` 里自己那几条**还没落定**的
+    // 申请（等对方点头 / 等店长批），按天摊开标在格子上。批了、驳了、撤了都不算 ——
+    // 那些是结果，格子写的就是结果本身。
+    expect(view).toMatch(/api\/scheduling\/me\/requests/)
+    expect(view).toMatch(/eachDayInRange\(/)
+    expect(view).toMatch(/pending_peer/)
+    expect(view).toMatch(/pending_manager/)
+    expect(view).toMatch(/v-if="pendingDates\.has\(cell\.business_date\)"/)
+    expect(view).toMatch(/class="dot pending"/)
+    // 颜色跟「班次已调整」的琥珀分开（两件事，同色最容易看错）。
+    expect(view).toMatch(/\.dot\.pending \{[\s\S]{0,90}?var\(--hy-coral\)/)
+    // 页脚不再说「等那张票做好再加」——那张票早做完了，这句话留着会让人等一个不存在的东西。
+    expect(view).not.toContain('换班的角标等那张票做好再加')
+
+    expect(view).toContain('右上角的小点')
+  })
+
+  it('订阅排班 nudge：店长改了某一天，格子跟着变（票 10 收尾）', () => {
+    expect(view).toMatch(/id: 'today-month'/)
+    expect(view).toMatch(/load\(month\.value, true\)/)
+    expect(view).toMatch(/loadPendingMarks\(\)/)
   })
 })

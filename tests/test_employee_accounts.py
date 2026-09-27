@@ -14,6 +14,8 @@ from services.hygiene.accounts import (
     EmployeeAccountsError,
     hygiene_business_date,
 )
+from services.scheduling.store import SchedulingStore
+from tests.hygiene_duty import assign_duty
 
 PHONE = "13800138000"
 PHONE_ADMIN = "13800138001"
@@ -187,57 +189,35 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.accounts.login(PHONE, PASSWORD))
         self.assertIsNotNone(await self.accounts.login(PHONE, "new-password123"))
 
-    async def test_pick_at_0559_is_previous_business_day_0600_is_new_day(self):
+    async def test_the_business_day_cut_decides_which_schedule_row_is_today(self):
+        """06:00 切日：卫生认的「今天」跟排班展开用的是同一个切法（票 10）。
+
+        票 10 之前这里测的是「05:59 自己选白班算前一天、06:00 选夜班算今天」。自选入口
+        撤了之后，同一件事的另一面要守住：9/12 那天排的是白班、9/13 起改成夜班，那么
+        9/13 05:59（营业日还是 9/12）读到白班，06:00 之后读到夜班。
+        """
         employee = await self._approved_employee()
+        await assign_duty(
+            self.db, employee["id"], slot="day",
+            now=datetime(2026, 9, 12, 10, 0, tzinfo=CHINA_TZ),
+        )
+        await assign_duty(
+            self.db, employee["id"], slot="night",
+            now=datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        )
+
         self.fixed_now = datetime(2026, 9, 13, 5, 59, tzinfo=CHINA_TZ)
-        early = await self.accounts.pick_shift(employee["id"], "白班")
-        self.assertEqual(early["business_date"], "2026-09-12")
-        self.assertEqual(early["shift"], "白班")
         self.assertEqual(await self.accounts.current_shift(employee["id"]), "白班")
 
         self.fixed_now = datetime(2026, 9, 13, 6, 0, tzinfo=CHINA_TZ)
-        self.assertIsNone(await self.accounts.current_shift(employee["id"]))
-        later = await self.accounts.pick_shift(employee["id"], "夜班")
-        self.assertEqual(later["business_date"], "2026-09-13")
-        self.assertEqual(later["shift"], "夜班")
         self.assertEqual(await self.accounts.current_shift(employee["id"]), "夜班")
 
-    async def test_assignment_can_change_shift_and_zone_same_day(self):
-        employee = await self._approved_employee()
-        now = self.fixed_now.isoformat()
-        await self.db._conn.executemany(
-            "INSERT INTO hygiene_zones (name, created_at, updated_at) VALUES (?, ?, ?)",
-            [("案板", now, now), ("馅档", now, now)],
-        )
-        await self.db._conn.commit()
-        picked = await self.accounts.pick_assignment(employee["id"], "白班", 1)
-        self.assertEqual(picked["shift"], "白班")
-        self.assertEqual(picked["zone_id"], 1)
-        self.assertEqual(picked["zone_name"], "案板")
-        self.assertEqual(picked["zone_shifts"], ["白班", "夜班"])
-        current = await self.accounts.current_assignment(employee["id"])
-        self.assertEqual(current["zone_id"], 1)
-        self.assertEqual(current["zone_shifts"], ["白班", "夜班"])
-        changed = await self.accounts.pick_assignment(employee["id"], "夜班", 2)
-        self.assertEqual(changed["shift"], "夜班")
-        self.assertEqual(changed["zone_id"], 2)
-        current = await self.accounts.current_assignment(employee["id"])
-        self.assertEqual(current["shift"], "夜班")
-        self.assertEqual(current["zone_id"], 2)
-        await self.db._conn.execute(
-            "UPDATE hygiene_zones SET day_shift = 1, night_shift = 0 WHERE id = 2"
-        )
-        await self.db._conn.commit()
-        current = await self.accounts.current_assignment(employee["id"])
-        self.assertEqual(current["zone_shifts"], ["白班"])
+    async def test_staff_cannot_pick_their_own_assignment_any_more(self):
+        """票 10：员工当天改不了班次和区 —— 改的是排班那一天，卫生这一侧只读。
 
-    async def test_assignment_rejects_unknown_zone(self):
-        employee = await self._approved_employee()
-        with self.assertRaises(EmployeeAccountsError) as raised:
-            await self.accounts.pick_assignment(employee["id"], "白班", 99999)
-        self.assertEqual(raised.exception.code, "zone_not_found")
-
-    async def test_legacy_shift_only_assignment_can_add_zone_once(self):
+        票 10 之前这条测的是「同一天可以反复改」。自选入口撤了之后，同一个入口要守的是
+        相反的承诺：它必须被拒，而且拒绝码是稳定的那个（前端照它说「去今天页看你的班」）。
+        """
         employee = await self._approved_employee()
         now = self.fixed_now.isoformat()
         await self.db._conn.execute(
@@ -245,36 +225,59 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
             ("案板", now, now),
         )
         await self.db._conn.commit()
-        await self.accounts.pick_shift(employee["id"], "白班")
-        completed = await self.accounts.pick_assignment(employee["id"], "白班", 1)
-        self.assertEqual(completed["shift"], "白班")
-        self.assertEqual(completed["zone_id"], 1)
 
-    async def test_second_self_pick_same_business_day_fails(self):
-        employee = await self._approved_employee()
-        first = await self.accounts.pick_shift(employee["id"], "白班")
-        self.assertEqual(first["shift"], "白班")
-        with self.assertRaises(EmployeeAccountsError) as same:
-            await self.accounts.pick_shift(employee["id"], "白班")
-        self.assertEqual(same.exception.code, "shift_already_picked")
-        with self.assertRaises(EmployeeAccountsError) as other:
-            await self.accounts.pick_shift(employee["id"], "夜班")
-        self.assertEqual(other.exception.code, "shift_already_picked")
-        self.assertEqual(await self.accounts.current_shift(employee["id"]), "白班")
+        with self.assertRaises(EmployeeAccountsError) as raised:
+            await self.accounts.pick_assignment(employee["id"], "白班", 1)
+        self.assertEqual(raised.exception.code, "assignment_from_schedule")
+        self.assertIsNone(await self.accounts.current_shift(employee["id"]))
 
-    async def test_super_set_shift_changes_employee_shift_that_business_day(self):
+    async def test_the_self_pick_entry_is_gone_for_every_input(self):
+        """什么参数都到不了写库那一层 —— 连未知责任区也不再报 `zone_not_found`。
+
+        （票 10 之前这条测的是「未知区被拒」。现在拒的原因只剩一个：这个入口没了。）
+        """
         employee = await self._approved_employee()
-        await self.accounts.pick_shift(employee["id"], "白班")
-        fixed = await self.accounts.super_set_shift(employee["id"], "夜班")
-        self.assertEqual(fixed["business_date"], "2026-09-13")
-        self.assertEqual(fixed["shift"], "夜班")
-        self.assertEqual(await self.accounts.current_shift(employee["id"]), "夜班")
+        with self.assertRaises(EmployeeAccountsError) as raised:
+            await self.accounts.pick_assignment(employee["id"], "白班", 99999)
+        self.assertEqual(raised.exception.code, "assignment_from_schedule")
+
+    async def test_pick_shift_alone_is_gone_too(self):
+        """「先选班次、之后再补责任区」那条老路也走不通了（票 10 之前它可以分两步）。"""
+        employee = await self._approved_employee()
         with self.assertRaises(EmployeeAccountsError) as raised:
             await self.accounts.pick_shift(employee["id"], "白班")
-        self.assertEqual(raised.exception.code, "shift_already_picked")
-        self.assertEqual(await self.accounts.current_shift(employee["id"]), "夜班")
+        self.assertEqual(raised.exception.code, "shift_from_schedule")
 
-    async def test_staff_admin_cannot_change_another_employees_shift(self):
+    async def test_a_second_self_pick_is_the_same_refusal_not_a_conflict(self):
+        """重复自选不再是 409「当天班次已选定」，而是同一个 403：这件事不该在这儿做。"""
+        employee = await self._approved_employee()
+        for code in ("shift_from_schedule", "shift_from_schedule"):
+            with self.assertRaises(EmployeeAccountsError) as raised:
+                await self.accounts.pick_shift(employee["id"], "白班")
+            self.assertEqual(raised.exception.code, code)
+        self.assertIsNone(await self.accounts.current_shift(employee["id"]))
+
+    async def test_super_cannot_fix_a_shift_from_the_hygiene_side_any_more(self):
+        """票 10：管理员改派也不在卫生这一侧做了 —— 它落成**排班的单日覆盖**。
+
+        卫生不 import 排班（DESIGN 决定 3：两边代码不互相 import），所以这条能力搬到了
+        排班接口上（前端直接调 `/api/scheduling/overrides/...`）。这一层留一句明确的错，
+        别让调用方以为改成功了。
+        """
+        employee = await self._approved_employee()
+        with self.assertRaises(EmployeeAccountsError) as raised:
+            await self.accounts.super_set_shift(employee["id"], "夜班")
+        self.assertEqual(raised.exception.code, "assignment_from_schedule")
+        with self.assertRaises(EmployeeAccountsError) as raised:
+            await self.accounts.super_set_assignment(employee["id"], "夜班", 1)
+        self.assertEqual(raised.exception.code, "assignment_from_schedule")
+
+    async def test_a_hygiene_manager_cannot_change_anyones_shift_either(self):
+        """卫生侧的「管理员」是卫生后台的权限，管不到排班：他同样改不了任何人的班。
+
+        票 10 之前这条测的是「管理员权限不妨碍他自己选、也不让他改别人」。现在谁都改不了
+        —— 要改去排班页改那一天，或者让店长改规则。
+        """
         staff = await self._approved_employee()
         manager = await self._approved_employee(PHONE_ADMIN)
         await self.accounts.set_permission(manager["id"], "管理员")
@@ -283,32 +286,39 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
             next(row for row in roster if row["id"] == manager["id"])["permission"],
             "管理员",
         )
-        await self.accounts.pick_shift(staff["id"], "白班")
-        with self.assertRaises(EmployeeAccountsError) as raised:
-            await self.accounts.pick_shift(staff["id"], "夜班")
-        self.assertEqual(raised.exception.code, "shift_already_picked")
-        self.assertEqual(await self.accounts.current_shift(staff["id"]), "白班")
-        await self.accounts.pick_shift(manager["id"], "夜班")
-        self.assertEqual(await self.accounts.current_shift(manager["id"]), "夜班")
+        await assign_duty(self.db, staff["id"], slot="day", now=self.fixed_now)
         self.assertEqual(await self.accounts.current_shift(staff["id"]), "白班")
 
+        for target in (staff["id"], manager["id"]):
+            with self.assertRaises(EmployeeAccountsError) as raised:
+                await self.accounts.pick_shift(target, "夜班")
+            self.assertEqual(raised.exception.code, "shift_from_schedule")
+
+        # 班次还是排班说了算：没排到的那个人依然是 None。
+        self.assertEqual(await self.accounts.current_shift(staff["id"]), "白班")
+        self.assertIsNone(await self.accounts.current_shift(manager["id"]))
+
     async def test_staff_session_exposes_todays_shift_or_null(self):
+        """会话里那份「今天的班」读的是**排班结果**（票 10）：没排到是空，排到就是那一档。"""
         employee = await self._approved_employee()
         login = await self.accounts.login(PHONE, PASSWORD)
         session = await self.accounts.get_staff_session(login["session_id"])
         self.assertIsNone(session["shift"])
-        await self.accounts.pick_shift(employee["id"], "夜班")
+
+        await assign_duty(self.db, employee["id"], slot="night", now=self.fixed_now)
+
         session = await self.accounts.get_staff_session(login["session_id"])
         self.assertEqual(session["shift"], "夜班")
         roster = await self.accounts.list_roster()
         self.assertEqual(roster[0]["shift"], "夜班")
 
-    async def test_shift_must_be_day_or_night(self):
+    async def test_the_old_shift_argument_check_went_with_the_entry(self):
+        """以前这里挡「班次只能是白班或夜班」；入口撤了之后，什么值都到不了那道校验。
+
+        （票 10 之前这条还顺带测 `super_set_shift("中班")` 报 `invalid_shift` —— 两个入口
+        都没了，同一件事由这一条守着。）
+        """
         employee = await self._approved_employee()
-        with self.assertRaises(EmployeeAccountsError) as picked:
+        with self.assertRaises(EmployeeAccountsError) as raised:
             await self.accounts.pick_shift(employee["id"], "早班")
-        self.assertEqual(picked.exception.code, "invalid_shift")
-        with self.assertRaises(EmployeeAccountsError) as fixed:
-            await self.accounts.super_set_shift(employee["id"], "中班")
-        self.assertEqual(fixed.exception.code, "invalid_shift")
-        self.assertIsNone(await self.accounts.current_shift(employee["id"]))
+        self.assertEqual(raised.exception.code, "shift_from_schedule")

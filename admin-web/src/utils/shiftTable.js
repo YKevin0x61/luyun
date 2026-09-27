@@ -1,8 +1,9 @@
-/** 班次表编辑页（票 11）的人话与顺序计算。
+/** 班次表编辑页（票 11、票 10）的人话与顺序计算。
  *
- * 服务端给的是 `{id, name, sort_order, is_active, people, days}`：这层只负责翻成人话、
- * 算「上移 / 下移」之后的新顺序、判断哪些动作现在能做。**放在 util 里而不是页面里**
- * 是为了能用真单测钉住 —— 页面模板的 grep 断言抓不住「删不掉的按钮还是亮的」。
+ * 服务端给的是 `{id, name, sort_order, is_active, duty_slot, people, days}`：这层只负责
+ * 翻成人话、算「上移 / 下移」之后的新顺序、判断哪些动作现在能做、把卫生档位翻成三选一。
+ * **放在 util 里而不是页面里**是为了能用真单测钉住 —— 页面模板的 grep 断言抓不住
+ * 「删不掉的按钮还是亮的」，也抓不住「清空发成了 null」。
  */
 
 /** 用量那一行：几个人的轮转里排着它、已经排过多少天班。
@@ -28,6 +29,58 @@ export function statusText(shift) {
 /** 停用 / 启用的按钮文案（停用的班次给的是「启用」）。 */
 export function toggleLabel(shift) {
   return shift && shift.is_active ? '停用' : '启用'
+}
+
+/** 卫生的日常检查档位（票 10）：这条班次排到的人做白班档还是夜班档的日常检查。
+ *
+ *  认的是**班次 id 上的这一列**（`staff_shifts.duty_slot`，`migrations/pg/0010_shift_duty_slot.sql`），
+ *  不是班次名 —— 店长在班次表上改个名字（票 11 允许）的那天，不该有人突然交不了日常。
+ *
+ *  三选一的**值和文案都放这里**：页面只 v-for 这个数组，模板里一个固定说法都不写死
+ *  （「白班档」这种话是服务端 400 那句话里的口径，抄进模板早晚和后端漂开）。
+ */
+
+/** 第三条：清空成「不出日常」。值必须是**空串**，见 `dutySlotPayload`。 */
+const NO_DUTY = { value: '', label: '不出日常' }
+
+/** 三选一：白班档 / 夜班档 / 不出日常。`value` 就是 PUT 要发的三种取值。 */
+export const DUTY_SLOT_CHOICES = [
+  { value: 'day', label: '白班档' },
+  { value: 'night', label: '夜班档' },
+  NO_DUTY,
+]
+
+/** 值 → 人话。从三选一里长出来，不写第二份（将来多一档只改一处）。 */
+const DUTY_SLOT_LABELS = Object.fromEntries(
+  DUTY_SLOT_CHOICES.map((choice) => [choice.value, choice.label])
+)
+
+/** 这条班次现在的档位，规范化成三选一里的值：`'day'` / `'night'` / `''`。
+ *
+ *  认不出的值（字段缺失、还没应用 0010 的库、以后多出来的档位）一律并到「不出日常」：
+ *  那是唯一不替店长做主的说法 —— 猜成某一档，卫生那边就凭空多出一份日常检查。
+ */
+export function dutySlotValue(shift) {
+  const raw = shift ? shift.duty_slot : null
+  return raw === 'day' || raw === 'night' ? raw : NO_DUTY.value
+}
+
+/** 列表里那一行的人话：白班档 / 夜班档 / 不出日常。 */
+export function dutySlotText(shift) {
+  return DUTY_SLOT_LABELS[dutySlotValue(shift)]
+}
+
+/** 选了之后要 PUT 的 `duty_slot`。
+ *
+ *  **清空发的是空串**：`PUT /shifts/{id}` 里 `null`（或不给这个字段）= 这一项不动、
+ *  空串 = 清空成不出日常（服务层 `_clean_duty_slot` 收两种空，调用方靠 `None` 区分
+ *  「不动」）。选了「不出日常」却发 `null`，后端当没改 —— 页面已经显示成清空了，
+ *  店长以为改好了，卫生那边照旧发检查单。
+ *
+ *  认不出的值同样按「不出日常」发：界面上只有三个选项，多出来的只可能是自己传错。
+ */
+export function dutySlotPayload(value) {
+  return value === 'day' || value === 'night' ? value : NO_DUTY.value
 }
 
 /** 能不能删：没人用过、而且删完还得剩至少一条在用的。
@@ -76,4 +129,26 @@ export function moveShift(ids, index, delta) {
   const [moved] = list.splice(index, 1)
   list.splice(target, 0, moved)
   return list
+}
+
+/** 两份班次列表合成一份（月历的班次列）。
+ *
+ *  月历那份（`/calendar` 的 `shifts`）是「启用的全要 + **这个月真有行**的停用班次」
+ *  （服务层 `_shifts_for_display`）；名单那份（`/roster`）只有启用的。两份都是当前的
+ *  真相，粒度不同 —— 拿名单那份整个替换，停用班次就从格子、图例、当天卡的颜色里消失，
+ *  而它在这个月明明还有行（票 11 验收②：停用之后历史排班照旧显示），于是格子上的数字
+ *  和点开那天的人头对不上。
+ *
+ *  以 `displayed` 的顺序为准，把 `extra` 里没见过的**接在后面**；按 id 去重，不改传进来
+ *  的数组（页面上那份要等重读之后才变）。
+ */
+export function mergeShiftList(displayed, extra) {
+  const merged = Array.isArray(displayed) ? displayed.slice() : []
+  const seen = new Set(merged.map((shift) => shift.id))
+  for (const shift of Array.isArray(extra) ? extra : []) {
+    if (!shift || seen.has(shift.id)) continue
+    seen.add(shift.id)
+    merged.push(shift)
+  }
+  return merged
 }

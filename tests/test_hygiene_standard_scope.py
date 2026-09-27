@@ -25,10 +25,15 @@ from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import HygieneWork
+from tests.hygiene_duty import assign_duty
 
 SUPER = {"kind": "super"}
 PHONE = "13800138000"
 PASSWORD = "password123"
+
+# 夹具里 accounts / work 的固定时刻。票 10 的前置数据（`assign_duty`）必须用同一个
+# 时刻造「今天」——排班的营业日跟卫生的营业日差了，员工今天就查不到那一行排班。
+FIXED_NOW = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
 
 
 def _run(coro):
@@ -58,12 +63,12 @@ def scope_http(tmp_path):
     _run(db.connect())
     set_runtime(AppRuntime(db=db))
     accounts = EmployeeAccounts(
-        db, now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
+        db, now=lambda: FIXED_NOW
     )
     work = HygieneWork(
         db,
         captures=FakeCaptureStore(),
-        now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        now=lambda: FIXED_NOW,
         image_variants=ImageVariantGenerator(),
     )
     _run(work.prepare())
@@ -92,12 +97,36 @@ def _login(client):
     assert response.status_code == 200
 
 
-def _pick(client, zone_id):
-    response = client.post(
-        "/api/hygiene/staff/assignment",
-        json={"shift": "白班", "zone_id": zone_id},
+def _staff_id(db) -> int:
+    """夹具注册的那名员工的 id —— ``assign_duty`` 按 id 定位，前置数据都要它。"""
+    cur = _run(
+        db._conn.execute(
+            "SELECT id FROM hygiene_employees WHERE phone = ?",
+            (PHONE,),
+        )
     )
-    assert response.status_code == 200
+    row = _run(cur.fetchone())
+    assert row is not None, f"夹具里应该有手机号 {PHONE} 的员工"
+    return int(dict(row)["id"])
+
+
+def _assign(client, db, zone_id):
+    """登录 + 把「今天 · 白班档 · 这个责任区」**配成排班**（票 10 的分工来源）。
+
+    票 10 之前这里打的是 ``POST /api/hygiene/staff/assignment``（员工当天自己选区），
+    那个入口现在一律 403：当天的班次与责任区由**排班结果**决定，前置数据只能从上游配。
+    ``now`` 用夹具那个固定时刻，不然排班的「今天」对不上卫生的营业日。
+    """
+    _login(client)
+    _run(
+        assign_duty(
+            db,
+            _staff_id(db),
+            slot="day",
+            zone_id=zone_id,
+            now=FIXED_NOW,
+        )
+    )
 
 
 def _manifest_item_ids(client):
@@ -107,9 +136,8 @@ def _manifest_item_ids(client):
 
 
 def test_staff_manifest_is_sliced_to_own_zone(scope_http):
-    client, _app, _db, _accounts, _work, zones, mine, other = scope_http
-    _login(client)
-    _pick(client, zones[0]["id"])
+    client, _app, db, _accounts, _work, zones, mine, other = scope_http
+    _assign(client, db, zones[0]["id"])
 
     item_ids = _manifest_item_ids(client)
     assert mine["id"] in item_ids
@@ -117,9 +145,8 @@ def test_staff_manifest_is_sliced_to_own_zone(scope_http):
 
 
 def test_staff_cannot_fetch_other_zone_standard_image(scope_http):
-    client, _app, _db, _accounts, _work, zones, mine, other = scope_http
-    _login(client)
-    _pick(client, zones[0]["id"])
+    client, _app, db, _accounts, _work, zones, mine, other = scope_http
+    _assign(client, db, zones[0]["id"])
 
     owned = client.get(f"/api/hygiene/standards/{mine['current_standard_id']}/image")
     assert owned.status_code == 200
@@ -157,9 +184,9 @@ def test_admin_session_still_sees_every_zone(scope_http):
 
 def test_manifest_hands_out_the_preview_variant(scope_http):
     """整份清单会被离线缓存：下发原图就等于让每台手机存几百 MB。"""
-    client, app, _db, _accounts, _work, zones, mine, _other = scope_http
+    client, app, db, _accounts, _work, zones, mine, _other = scope_http
     _login(client)
-    _pick(client, zones[0]["id"])
+    _assign(client, db, zones[0]["id"])
 
     response = client.get("/api/hygiene/standard-manifest")
     entries = response.json()["standards"]

@@ -21,10 +21,12 @@ from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import HygieneWork
+from tests.hygiene_duty import assign_duty
 
 SUPER = {"kind": "super"}
 PHONE = "13800138000"
 PASSWORD = "password123"
+CLOCK = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
 
 
 def _run(coro):
@@ -58,13 +60,11 @@ def env(tmp_path):
     db = DatabaseManager()
     _run(db.connect())
     set_runtime(AppRuntime(db=db))
-    accounts = EmployeeAccounts(
-        db, now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
-    )
+    accounts = EmployeeAccounts(db, now=lambda: CLOCK)
     work = HygieneWork(
         db,
         captures=FakeCaptureStore(),
-        now=lambda: datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
+        now=lambda: CLOCK,
         image_variants=ImageVariantGenerator(),
     )
     _run(work.prepare())
@@ -88,15 +88,18 @@ def env(tmp_path):
     deep_item = _run(work.add_deep_clean_item(SUPER, 6, "抽油烟机"))
     employee = _run(accounts.register(PHONE, PASSWORD, "张三"))
     _run(accounts.approve(employee["id"]))
-    _run(accounts.pick_assignment(employee["id"], "白班", zone["id"]))
+    # 票 10：今天的班次与责任区由排班给，员工端已经不能自己选。
+    _run(assign_duty(db, employee["id"], slot="day", zone_id=zone["id"], now=CLOCK))
+    duty = _run(accounts.current_assignment(employee["id"]))
+    assert duty["shift"] == "白班" and duty["zone_id"] == zone["id"], "排班没铺出今天的白班"
     actor = {
         "kind": "staff",
         "id": employee["id"],
         "permission": "普通员工",
         "name": "张三",
         "phone": PHONE,
-        "shift": "白班",
-        "zone_id": zone["id"],
+        "shift": duty["shift"],
+        "zone_id": duty["zone_id"],
     }
     yield db, work, actor, rejected_item, clean_item, deep_item
 
