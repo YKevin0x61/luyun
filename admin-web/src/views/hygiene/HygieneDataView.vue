@@ -14,6 +14,7 @@ const KINDS = [
   { value: 'fix_reshoot', label: '整改回拍' },
   { value: 'teaching', label: '卫生教材' },
   { value: 'standard', label: '标准图版本' },
+  { value: 'attire', label: '仪容仪表' },
 ]
 // 范围清理不含整改原图：整单删除是整改页的能力（ADR-0087），
 // 免得「清旧照片」顺手删掉还没做完的工作单。
@@ -46,6 +47,7 @@ const purgeOpen = ref(false)
 const purgeKinds = ref(PURGE_KINDS.map((kind) => kind.value))
 
 const exportJob = ref(null)
+const exportToday = ref(false)
 const exportError = ref('')
 const exportHint = ref('')
 let pollTimer = null
@@ -225,7 +227,7 @@ async function startExport() {
   }
 }
 
-async function pollExport(jobId) {
+async function pollExport(jobId, filename = '卫生数据.zip') {
   try {
     const job = await api.get(`/api/hygiene/admin/data/export/jobs/${jobId}`)
     exportJob.value = job
@@ -237,12 +239,37 @@ async function pollExport(jobId) {
       exportError.value = job.error || '导出失败'
       return
     }
-    await api.download(`/api/hygiene/admin/data/export/jobs/${jobId}/download`, '卫生数据.zip')
+    await api.download(
+      `/api/hygiene/admin/data/export/jobs/${jobId}/download`,
+      job.filename || filename,
+    )
     exportHint.value = `已打包 ${job.records || 0} 条记录、${job.count || 0} 张照片${
       job.skipped ? `（跳过 ${job.skipped} 张缺失文件）` : ''
     }。`
   } catch (err) {
     exportError.value = err.message || '导出失败'
+  }
+}
+
+/** 一键保存**今天**的全部照片（日常、专项、整改、仪容仪表……）。
+ *
+ *  故意不看当前筛选：这个按钮就是「今天的都在这里」。也不让前端算「今天」——
+ *  营业日 06:00 切日，只有服务端那个口径跟照片上的日期是同一个（前端算会在凌晨
+ *  那一段差一天）。
+ */
+async function saveTodayPhotos() {
+  if (exportJob.value && exportJob.value.state === 'running') return
+  exportError.value = ''
+  exportHint.value = ''
+  exportToday.value = true
+  try {
+    const job = await api.post('/api/hygiene/admin/data/export/jobs?scope=today')
+    exportJob.value = { ...job, done: 0, total: 0 }
+    pollExport(job.job_id, '今天的卫生照片.zip')
+  } catch (err) {
+    exportError.value = err.message || '无法开始导出'
+  } finally {
+    exportToday.value = false
   }
 }
 
@@ -328,6 +355,19 @@ function gotoPage(next) {
           @click="startExport"
         >
           导出台账
+        </button>
+      </div>
+      <!-- 一键保存今天的照片（票 12 收尾）：不分类型、不看上面的筛选 —— 管理员下班
+           前把今天的存档一次拿走。**不带日期**：营业日由服务端算（06:00 切日），
+           前端算会在凌晨那一段差一天。 -->
+      <div class="filter-actions">
+        <button
+          type="button"
+          class="btn btn-primary"
+          :disabled="exportToday || (exportJob && exportJob.state === 'running')"
+          @click="saveTodayPhotos"
+        >
+          一键保存今天的照片
         </button>
       </div>
       <p v-if="exportJob && exportJob.state === 'running'" class="clocks-hint" role="status">

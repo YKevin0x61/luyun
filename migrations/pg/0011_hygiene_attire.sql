@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS hygiene_attire_shots (
     "shift_id" BIGINT,
     "status" TEXT NOT NULL DEFAULT 'todo',
     "capture_id" TEXT NOT NULL,
+    "content_type" TEXT NOT NULL DEFAULT 'image/jpeg',
     "note" TEXT,
     "created_at" TEXT NOT NULL,
     "updated_at" TEXT NOT NULL,

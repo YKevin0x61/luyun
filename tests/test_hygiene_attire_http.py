@@ -14,6 +14,8 @@
 
 import asyncio
 import io
+import time
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -25,13 +27,18 @@ from PIL import Image
 import api.hygiene as hygiene_module
 from config import settings
 from database import CHINA_TZ, DatabaseManager
+from services.hygiene.archive import HygieneDataArchive
 from services.hygiene.attire import HygieneAttire
 from services.hygiene.captures import FileCaptureStore
 from services.hygiene.images import ImageVariantGenerator
+from services.business_day import business_date_of
 from services.hygiene.work import HygieneWork
 from services.identity.accounts import EmployeeAccounts
 
-NOW = datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)
+# 用**真实当下**：`scope=today` 那条路由由服务端按当下算营业日（06:00 切日），
+# 夹具写死一个过去的日期就会跟它差出十几天，导出来是空的。attire 与排班都注入
+# 同一个 NOW，所以「今天」在整份夹具里仍是同一个营业日。
+NOW = datetime.now(CHINA_TZ)
 DAY_PHONE = "13800000001"
 
 ZHANGSAN = 11
@@ -45,6 +52,7 @@ STAFF_SUBMIT = "/api/hygiene/staff/attire/submit"
 STAFF_STANDARD = "/api/hygiene/staff/attire/standard"
 ADMIN_DAY = "/api/hygiene/admin/attire"
 ADMIN_STANDARD = "/api/hygiene/admin/attire/standard"
+ADMIN_DATA_EXPORT = "/api/hygiene/admin/data/export/jobs"
 
 
 def _run(coro):
@@ -98,14 +106,13 @@ def _build(tmp_path):
             (SHIFT_ID, now_iso, now_iso),
         )
     )
-    # NOW 是 10:00，在 06:00 切日之后 → 这个时刻的营业日就是 2026-09-13。
     _run(
         db._conn.execute(
             """INSERT INTO staff_assignments
                    (employee_id, business_date, shift_id, zone_id, source,
                     created_at, updated_at)
-               VALUES (?, '2026-09-13', ?, NULL, 'manual', ?, ?)""",
-            (ZHANGSAN, SHIFT_ID, now_iso, now_iso),
+               VALUES (?, ?, ?, NULL, 'manual', ?, ?)""",
+            (ZHANGSAN, business_date_of(NOW), SHIFT_ID, now_iso, now_iso),
         )
     )
     # 李四一行都不铺：今天没排到他 —— 员工侧整行不显示，交活也要被拒。
@@ -123,6 +130,11 @@ def _make_app(work, attire, db, *, staff_id=ZHANGSAN, admin=True):
     # 账号走**真实**那一个（没登录时 `get_staff_session(None)` 返回 None → 401）：
     # 「未登录」这条用例要测的就是真鉴权路径，不能把依赖换成一句写死的 401。
     app.dependency_overrides[hygiene_module._get_accounts] = lambda: EmployeeAccounts(db)
+    # 归档也是同一个取值口（`from main import hygiene_archive`）：导出那两条路由要用它，
+    # 不 override 就是 500 —— 现有 data 那套 HTTP 测试也是这么接的。
+    app.dependency_overrides[hygiene_module._get_archive] = lambda: HygieneDataArchive(
+        db, work._captures
+    )
     if admin:
         app.dependency_overrides[hygiene_module.require_session] = lambda: "test-admin"
     if staff_id is not None:
@@ -349,3 +361,50 @@ def test_admin_upload_replaces_the_standard(attire_http):
     # 读的是最新那条：员工照着拍的永远是当前这版（页面上那张图跟着换）。
     assert client.get(STAFF_STANDARD).status_code == 200
     assert client.get(ADMIN_DAY).json()["standard_updated_at"] == second["created_at"]
+
+
+def _wait_export(client, job_id, tries=200):
+    """轮询到任务落定（打包是后台任务，今天这点量通常一两轮就好）。"""
+    job = {}
+    for _ in range(tries):
+        job = client.get(f"{ADMIN_DATA_EXPORT}/{job_id}").json()
+        if job["state"] != "running":
+            return job
+        time.sleep(0.05)
+    return job
+
+
+def test_one_click_saves_todays_photos(attire_http):
+    """一键保存今天的照片：`scope=today` 由服务端算营业日，包里带仪容仪表那一张。
+
+    「日常卫生照片」那一类由既有的导出用例覆盖（同一个 `iter_records`）；这里钉的是
+    新接上的仪容仪表，以及「今天」这个范围口径 —— 前端**不传日期**，就算不出来的
+    东西不该让它算。
+    """
+    client, _attire = attire_http
+    assert _set_standard(client).status_code == 200
+    assert client.post(
+        STAFF_SUBMIT,
+        files={"file": ("live.jpg", _jpeg(), "image/jpeg")},
+        data={"live": "true"},
+    ).status_code == 200
+
+    started = client.post(f"{ADMIN_DATA_EXPORT}?scope=today")
+    assert started.status_code == 200
+    job = _wait_export(client, started.json()["job_id"])
+    assert job["state"] == "done", job
+    assert "今天的卫生照片" in (job["filename"] or "")
+
+    packed = client.get(f"{ADMIN_DATA_EXPORT}/{started.json()['job_id']}/download")
+    assert packed.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(packed.content)) as bundle:
+        names = bundle.namelist()
+    assert any(name.startswith("照片/仪容仪表/") for name in names), names
+
+
+def test_unknown_scope_is_refused(attire_http):
+    """范围只认「今天」——别的值不猜，回一句人话。"""
+    client, _attire = attire_http
+    bad = client.post(f"{ADMIN_DATA_EXPORT}?scope=last-week")
+    assert bad.status_code == 400
+    assert "今天" in bad.json()["detail"]

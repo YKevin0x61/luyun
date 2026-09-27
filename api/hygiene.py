@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from api.security import require_session
 from config import settings
 from database import CHINA_TZ
+from services.business_day import business_date_of
 from db_core.errors import is_integrity_violation
 from services import auth_service
 from services.hygiene.accounts import (
@@ -176,6 +177,7 @@ _ERROR_DETAILS = {
     "capture_missing": "照片文件已经不在磁盘上",
     "export_empty": "这个范围里没有可导出的记录",
     "export_running": "已经有一个导出任务在跑，请稍候",
+    "bad_scope": "只支持「今天」这一个范围",
 }
 
 
@@ -2631,7 +2633,7 @@ def _prune_archive_export_jobs(now: float) -> None:
         _ARCHIVE_EXPORT_JOBS.pop(job_id, None)
 
 
-async def _run_archive_export(job_id: str, archive, filters: dict) -> None:
+async def _run_archive_export(job_id: str, archive, filters: dict, *, today: bool = False) -> None:
     """后台打包：记录 CSV + 照片。进度写在任务表里，前端轮询。"""
     job = _ARCHIVE_EXPORT_JOBS[job_id]
     archive_path: Optional[Path] = None
@@ -2681,7 +2683,9 @@ async def _run_archive_export(job_id: str, archive, filters: dict) -> None:
             count=written,
             skipped=skipped,
             records=len(records),
-            filename=f"卫生数据-{stamp}.zip",
+            filename=(
+                f"今天的卫生照片-{stamp}.zip" if today else f"卫生数据-{stamp}.zip"
+            ),
             bytes=archive_path.stat().st_size,
         )
         logger.info(
@@ -2704,9 +2708,17 @@ async def start_archive_export(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     zone_id: Optional[int] = None,
+    scope: Optional[str] = None,
     _session_id: str = Depends(require_session),
     archive=Depends(_get_archive),
 ) -> Dict[str, Any]:
+    # `scope=today`：一键保存**今天**的照片。营业日由**服务端**算（06:00 切日）——
+    # 让前端算的话，凌晨那一段「今天」会差一天，而照片上的日期是按服务端那个口径
+    # 写的；不传 kinds 就是全部类型（含仪容仪表）。
+    if scope:
+        if scope != "today":
+            raise HTTPException(status_code=400, detail=_error_detail("bad_scope"))
+        date_from = date_to = business_date_of(datetime.now(CHINA_TZ))
     now = time.time()
     _prune_archive_export_jobs(now)
     running = sum(
@@ -2734,7 +2746,9 @@ async def start_archive_export(
         "started_at": now,
         "path": None,
     }
-    asyncio.create_task(_run_archive_export(job_id, archive, filters))
+    asyncio.create_task(
+        _run_archive_export(job_id, archive, filters, today=(scope == "today"))
+    )
     return {"job_id": job_id, "state": "running"}
 
 
@@ -2755,6 +2769,8 @@ async def read_archive_export(
         "skipped": job.get("skipped"),
         "records": job.get("records"),
         "bytes": job.get("bytes"),
+        # 前端拿它当下载的兜底名（正常情况下后端 Content-Disposition 已经定了名）。
+        "filename": job.get("filename"),
     }
 
 

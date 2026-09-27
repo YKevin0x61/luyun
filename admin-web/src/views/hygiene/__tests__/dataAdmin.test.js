@@ -62,7 +62,7 @@ describe('hygiene data & photo admin (ADR-0087)', () => {
     expect(view).toMatch(/api\.post\(\s*`\/api\/hygiene\/admin\/data\/export\/jobs\?/)
     expect(view).toMatch(/api\.get\(`\/api\/hygiene\/admin\/data\/export\/jobs\/\$\{jobId\}`\)/)
     expect(view).toMatch(
-      /api\.download\(`\/api\/hygiene\/admin\/data\/export\/jobs\/\$\{jobId\}\/download`/,
+      /api\.download\(\s*`\/api\/hygiene\/admin\/data\/export\/jobs\/\$\{jobId\}\/download`/,
     )
     expect(view).toMatch(/正在打包/)
     // 轮询必须在组件卸载时停掉，否则离开页面还在打接口。
@@ -79,5 +79,37 @@ describe('hygiene data & photo admin (ADR-0087)', () => {
   it('删除与清理都会提示不可恢复', () => {
     expect(view).toMatch(/硬删除/)
     expect(view).toMatch(/红黑榜的历史计数不回滚/)
+  })
+})
+
+describe('一键保存今天的照片（票 12 收尾）', () => {
+  it('按钮在数据页上，起的是 scope=today 的任务', () => {
+    expect(view).toContain('一键保存今天的照片')
+    expect(view).toMatch(
+      /api\.post\('\/api\/hygiene\/admin\/data\/export\/jobs\?scope=today'\)/,
+    )
+  })
+
+  it('不自己算「今天」：营业日 06:00 切日，只有服务端那个口径跟照片上的日期一致', () => {
+    const fn = view.slice(
+      view.indexOf('async function saveTodayPhotos'),
+      view.indexOf('function gotoPage'),
+    )
+    expect(fn).toMatch(/scope=today/)
+    expect(fn).not.toMatch(/date_from/)
+    expect(fn).not.toMatch(/toISOString\(\)/)
+    expect(fn).not.toMatch(/chinaNow/)
+  })
+
+  it('类型里有仪容仪表 —— 一键不带 kinds，所以日常与仪容都在包里', () => {
+    expect(view).toMatch(/\{ value: 'attire', label: '仪容仪表' \}/)
+  })
+
+  it('下载名听后端给的（今天的包不叫「卫生数据.zip」）', () => {
+    expect(view).toMatch(/job\.filename \|\| filename/)
+  })
+
+  it('打包中不让重复点', () => {
+    expect(view).toMatch(/exportToday \|\| \(exportJob && exportJob\.state === 'running'\)/)
   })
 })

@@ -84,7 +84,7 @@ class HygieneAttire:
     async def _shot(self, employee_id: int, business_date: str) -> Optional[dict]:
         cur = await self._conn.execute(
             """SELECT id, employee_id, business_date, shift_id, status,
-                      capture_id, note, created_at, updated_at
+                      capture_id, content_type, note, created_at, updated_at
                  FROM hygiene_attire_shots
                 WHERE employee_id = ? AND business_date = ?""",
             (int(employee_id), str(business_date)),
@@ -95,7 +95,7 @@ class HygieneAttire:
     async def _shots_for_day(self, business_date: str) -> list[dict]:
         cur = await self._conn.execute(
             """SELECT id, employee_id, business_date, shift_id, status,
-                      capture_id, note, created_at, updated_at
+                      capture_id, content_type, note, created_at, updated_at
                  FROM hygiene_attire_shots
                 WHERE business_date = ?""",
             (str(business_date),),
@@ -154,17 +154,17 @@ class HygieneAttire:
             await self._conn.execute(
                 """INSERT INTO hygiene_attire_shots
                        (employee_id, business_date, shift_id, status,
-                        capture_id, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (int(employee_id), day, shift_id, STATUS_PENDING, capture_id, stamp, stamp),
+                        capture_id, content_type, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (int(employee_id), day, shift_id, STATUS_PENDING, capture_id, content_type, stamp, stamp),
             )
         else:
             await self._conn.execute(
                 """UPDATE hygiene_attire_shots
-                      SET shift_id = ?, status = ?, capture_id = ?,
+                      SET shift_id = ?, status = ?, capture_id = ?, content_type = ?,
                           note = NULL, updated_at = ?
                     WHERE id = ?""",
-                (shift_id, STATUS_PENDING, capture_id, stamp, existing["id"]),
+                (shift_id, STATUS_PENDING, capture_id, content_type, stamp, existing["id"]),
             )
         await self._conn.commit()
         return await self.staff_view(employee_id)

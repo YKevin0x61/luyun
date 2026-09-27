@@ -1170,7 +1170,11 @@ class HygieneWork:
                UNION
                SELECT left_capture_id FROM hygiene_teaching_examples
                UNION
-               SELECT right_capture_id FROM hygiene_teaching_examples"""
+               SELECT right_capture_id FROM hygiene_teaching_examples
+               UNION
+               SELECT capture_id FROM hygiene_attire_shots
+               UNION
+               SELECT capture_id FROM hygiene_attire_standard"""
         )
         return {str(dict(row)["capture_id"]) for row in await cur.fetchall()}
 

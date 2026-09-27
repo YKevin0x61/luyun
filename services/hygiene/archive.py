@@ -32,6 +32,7 @@ KIND_FIX = "fix"
 KIND_FIX_RESHOOT = "fix_reshoot"
 KIND_TEACHING = "teaching"
 KIND_STANDARD = "standard"
+KIND_ATTIRE = "attire"
 
 KIND_LABELS = {
     KIND_DAILY: "日常实拍",
@@ -40,6 +41,7 @@ KIND_LABELS = {
     KIND_FIX_RESHOOT: "整改回拍",
     KIND_TEACHING: "卫生教材",
     KIND_STANDARD: "标准图版本",
+    KIND_ATTIRE: "仪容仪表",
 }
 ARCHIVE_KINDS = tuple(KIND_LABELS)
 
@@ -444,6 +446,32 @@ class HygieneDataArchive:
             no_submitter=True,
         )
 
+    async def _attire_rows(self, start, end, zone_id) -> list[dict]:
+        """仪容仪表：按**人**拍，所以不挂责任区。
+
+        跟专项同一条口径 —— 选了责任区就没有这一类的记录，这是领域事实不是疏漏。
+        只列**交过图**的行：还没拍的人在库里根本没有行（待拍不是一行 `todo`）。
+        """
+        if zone_id is not None:
+            return []
+        sql = """SELECT a.id AS record_id, a.business_date AS business_date,
+                        a.updated_at AS occurred_at, NULL AS zone_id,
+                        '' AS zone_name, '仪容仪表' AS title,
+                        COALESCE(s.name, '') AS subtitle,
+                        CASE a.status
+                             WHEN 'pending' THEN '等验收'
+                             WHEN 'passed' THEN '已通过'
+                             WHEN 'rejected' THEN '已驳回'
+                             ELSE a.status END AS status,
+                        a.employee_id AS submitter_id, '' AS submitter_phone,
+                        a.capture_id AS photo_a, a.content_type AS type_a,
+                        NULL AS photo_b, NULL AS type_b
+                   FROM hygiene_attire_shots a
+                   LEFT JOIN staff_shifts s ON s.id = a.shift_id
+                  WHERE a.business_date BETWEEN ? AND ?
+                    AND a.capture_id IS NOT NULL"""
+        return _tag(await self._fetch(sql, [start, end]), KIND_ATTIRE, roles=("实拍",))
+
     # ---- 内部：元数据 ----
 
     async def _present(self, row: dict) -> dict:
@@ -497,6 +525,8 @@ class HygieneDataArchive:
             (KIND_TEACHING, "SELECT left_capture_id AS capture_id FROM hygiene_teaching_examples"),
             (KIND_TEACHING, "SELECT right_capture_id AS capture_id FROM hygiene_teaching_examples"),
             (KIND_STANDARD, "SELECT capture_id FROM hygiene_standards"),
+            (KIND_ATTIRE, "SELECT capture_id FROM hygiene_attire_shots"),
+            (KIND_ATTIRE, "SELECT capture_id FROM hygiene_attire_standard"),
         )
         for kind, sql in pairs:
             for row in await self._fetch(sql, []):
@@ -548,8 +578,12 @@ class HygieneDataArchive:
                  UNION ALL
                  SELECT right_capture_id, right_content_type FROM hygiene_teaching_examples
                    WHERE right_capture_id = ?
+                 UNION ALL
+                 SELECT capture_id, content_type FROM hygiene_attire_shots WHERE capture_id = ?
+                 UNION ALL
+                 SELECT capture_id, content_type FROM hygiene_attire_standard WHERE capture_id = ?
                  LIMIT 1"""
-        rows = await self._fetch(sql, [capture_id] * 8)
+        rows = await self._fetch(sql, [capture_id] * 10)
         return rows[0] if rows else None
 
     async def _variant_meta(self, capture_id: str, variant: str) -> Optional[dict]:
@@ -593,6 +627,7 @@ _LOADERS = {
     KIND_FIX_RESHOOT: HygieneDataArchive._fix_reshoot_rows,
     KIND_TEACHING: HygieneDataArchive._teaching_rows,
     KIND_STANDARD: HygieneDataArchive._standard_rows,
+    KIND_ATTIRE: HygieneDataArchive._attire_rows,
 }
 
 
