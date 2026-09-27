@@ -1481,6 +1481,26 @@ class HygieneWork:
             raise HygieneWorkError("forbidden", "forbidden")
         self._require_zone_access(actor, zone_id)
 
+    def require_live_capture(self, capture) -> bytes:
+        """现场拍摄校验的**公开入口**：仪容仪表那边也用这一条，别各自再抄一份。
+
+        （它原来只给 `submit_daily` 这一族用；按人的仪容仪表校验的东西一模一样，
+        所以把门开在这儿，而不是让新模块复制一遍常量与三句报错。）
+        """
+        return self._require_live_capture(capture)
+
+    async def store_capture(self, data: bytes, content_type: str, *, require_image: bool = False):
+        """存一张实拍的**公开入口**（同上）。返回 `(capture_id, generated_variants)`。"""
+        return await self._store_capture(data, content_type, require_image=require_image)
+
+    def markup_json_for(self, capture) -> str:
+        """标注序列化的**公开入口**（同上）：仪容仪表的标准图也要存同一份形状。
+
+        走这里而不是自己 `json.dumps`：`_normalize_markup` 会做长度与形状校验，
+        绕开它等于让客户端的任意 JSON 直接落库。
+        """
+        return self._markup_json(capture)
+
     def _require_live_capture(self, capture) -> bytes:
         if not capture or capture.get("live") is not True:
             raise HygieneWorkError("live_required", "live_required")

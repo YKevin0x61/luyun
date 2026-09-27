@@ -42,6 +42,7 @@ from services.hygiene.archive import (
 )
 from services.hygiene.images import sniff_image_content_type
 from services.hygiene.standards_export import write_archive
+from services.hygiene.attire import HygieneAttire
 from services.hygiene.work import (
     BOARD_EVENT_DEFAULT_LIMIT,
     BOARD_EVENT_MAX_LIMIT,
@@ -121,6 +122,12 @@ _ERROR_DETAILS = {
     # 票 10：员工不再自己选班次和责任区（管理员改派也从卫生这一侧撤了，落到排班的
     # 单日覆盖上）。这两句说的是「该去哪儿做」，不是「你填错了」。
     "assignment_from_schedule": "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长",
+    # 仪容仪表（按人，排到班次才要拍）：每一句都说清下一步该做什么。
+    "attire_not_required": "今天没排到你的班次，这一项不用拍",
+    "attire_standard_required": "管理员还没传标准图：等传了再拍，或者找他问一下",
+    "attire_note_required": "请写明哪里不合格：员工要照着这句重拍",
+    "attire_not_found": "这一张不存在：可能还没交，刷新看看",
+    "attire_not_pending": "这一张不在等你验收：可能刚被处理过，刷新看看",
     "shift_from_schedule": "今天的班次由排班决定：去「今天」页看你的班，要改请找店长",
     "forbidden": "没有权限做这一步",
     "standard_required": "没有标准图不能上架日常检查项",
@@ -180,6 +187,14 @@ def _get_accounts() -> EmployeeAccounts:
     return employee_accounts
 
 
+def _get_attire() -> HygieneAttire:
+    from main import hygiene_attire
+
+    if hygiene_attire is None:
+        raise HTTPException(status_code=500, detail="仪容仪表未初始化")
+    return hygiene_attire
+
+
 def _get_work() -> HygieneWork:
     from main import hygiene_work
 
@@ -225,6 +240,7 @@ def _work_http_error(exc: HygieneWorkError) -> HTTPException:
         "teaching_not_found",
         "standard_not_found",
         "record_not_found",
+        "attire_not_found",
     ):
         status = 404
     elif exc.code in ("duplicate_zone", "duplicate_item"):
@@ -1352,6 +1368,152 @@ async def admin_update_standard_markup(
         raise _work_http_error(exc) from exc
     await _hygiene_nudge("zones", "standard_updated", item_id=item["id"])
     return {"item": item}
+
+
+# ── 仪容仪表（按人，今天排到班次才要拍）────────────────────────────────
+#
+# 跟日常 / 专项 / 整改不一样：那三类挂在**责任区**上，这一项挂在**人**上 —— 判据是
+# 排班（今天排到班次），经公共层 `DutyRoster` 读，卫生不 import 排班。**没有截止钟点**
+# （用户口径），所以这一族里没有 overdue、不进看板、不推企微。
+
+
+class AttireRejectIn(BaseModel):
+    note: Optional[str] = None
+
+
+@router.get("/staff/attire")
+async def staff_attire_view(
+    staff=Depends(require_staff_session),
+    attire: HygieneAttire = Depends(_get_attire),
+) -> Dict[str, Any]:
+    """我今天要不要拍、到哪一步、标准图有没有（「今天」页那一行读的就是这一条）。"""
+    return {"attire": await attire.staff_view(staff["employee"]["id"])}
+
+
+@router.get("/staff/attire/standard")
+async def staff_attire_standard(
+    request: Request,
+    variant: str = "original",
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+    attire: HygieneAttire = Depends(_get_attire),
+) -> Response:
+    """员工照着拍的那张标准图。还没传时 404 + 一句人话（不是一张空白图）。"""
+    standard = await attire.current_standard()
+    if standard is None:
+        raise HTTPException(status_code=404, detail=_error_detail("attire_standard_required"))
+    return await _image_response(work, standard["capture_id"], variant=variant, request=request)
+
+
+@router.post("/staff/attire/submit")
+async def staff_submit_attire(
+    live: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    staff=Depends(require_staff_session),
+    attire: HygieneAttire = Depends(_get_attire),
+) -> Dict[str, Any]:
+    """交一张：必须现场拍（`_live_capture_from_upload` 跟日常那条同一个闸）。"""
+    capture = await _live_capture_from_upload(file, live)
+    try:
+        view = await attire.submit(staff["employee"]["id"], capture)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    await _hygiene_nudge("attire", "submitted", employee_id=staff["employee"]["id"])
+    return {"attire": view}
+
+
+@router.get("/admin/attire")
+async def admin_attire_day(
+    date: Optional[str] = None,
+    _session_id: str = Depends(require_session),
+    attire: HygieneAttire = Depends(_get_attire),
+) -> Dict[str, Any]:
+    """某一天：谁要拍、各自到哪一步（名单来自排班，休假的与没排到的不在里面）。"""
+    return await attire.admin_day(date)
+
+
+@router.get("/admin/attire/standard")
+async def admin_attire_standard(
+    request: Request,
+    variant: str = "original",
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+    attire: HygieneAttire = Depends(_get_attire),
+) -> Response:
+    """当前那张标准图（管理员那一侧看自己传了什么）。
+
+    跟员工那条分开：员工读的是「照这个拍」，管理员读的是「我传的这版对不对」——
+    同一张图、两扇门，各自按自己的会话鉴权。
+    """
+    standard = await attire.current_standard()
+    if standard is None:
+        raise HTTPException(status_code=404, detail=_error_detail("attire_standard_required"))
+    return await _image_response(work, standard["capture_id"], variant=variant, request=request)
+
+
+@router.get("/admin/attire/{employee_id}/shot")
+async def admin_attire_shot(
+    employee_id: int,
+    request: Request,
+    variant: str = "original",
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+    attire: HygieneAttire = Depends(_get_attire),
+) -> Response:
+    """某人当天交的那张实拍（验收看的就是它）。"""
+    capture_id = await attire.pending_capture(employee_id)
+    if not capture_id:
+        raise HTTPException(status_code=404, detail=_error_detail("attire_not_found"))
+    return await _image_response(work, capture_id, variant=variant, request=request)
+
+
+@router.post("/admin/attire/{employee_id}/accept")
+async def admin_attire_accept(
+    employee_id: int,
+    date: Optional[str] = None,
+    _session_id: str = Depends(require_session),
+    attire: HygieneAttire = Depends(_get_attire),
+) -> Dict[str, Any]:
+    try:
+        result = await attire.accept(employee_id, date)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    await _hygiene_nudge("attire", "accepted", employee_id=employee_id)
+    return result
+
+
+@router.post("/admin/attire/{employee_id}/reject")
+async def admin_attire_reject(
+    employee_id: int,
+    payload: AttireRejectIn,
+    date: Optional[str] = None,
+    _session_id: str = Depends(require_session),
+    attire: HygieneAttire = Depends(_get_attire),
+) -> Dict[str, Any]:
+    """驳回：原因必填 —— 员工照着这句重拍（跟日常驳回同一条口径）。"""
+    try:
+        result = await attire.reject(employee_id, payload.note, date)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    await _hygiene_nudge("attire", "rejected", employee_id=employee_id)
+    return result
+
+
+@router.post("/admin/attire/standard")
+async def admin_set_attire_standard(
+    markup: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    _session_id: str = Depends(require_session),
+    attire: HygieneAttire = Depends(_get_attire),
+) -> Dict[str, Any]:
+    """传/换标准图。这里**不要求现场拍摄**：它是管理员手里那张样板（跟日常标准图一样）。"""
+    capture = await _capture_from_upload(file, markup)
+    try:
+        standard = await attire.set_standard(capture)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    await _hygiene_nudge("attire", "standard_updated")
+    return {"standard": standard}
 
 
 @router.get("/staff/daily-catalog")

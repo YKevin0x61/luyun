@@ -16,8 +16,11 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
+import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
+import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { buildWorkQueue, dailyProgress, shiftClock } from '../../utils/hygieneWorkFlow'
 import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
@@ -94,6 +97,61 @@ const hygieneOverdue = computed(() => buildWorkQueue({
   shiftDue: hygieneDue.value,
   now: hygiene.value.now,
 }).filter((task) => task.bucket === 'overdue').length)
+
+// 仪容仪表（票 12）：按**人**拍，今天排到班次才要拍 —— 休假的与没排到的连这一行都
+// 不显示（`required` 由排班给，不是「谁有账号」）。它不属于责任区那三类日常，所以是
+// 这块里单独的一行，**不进** `hygieneStats` 的分子分母。
+const attire = ref({
+  state: 'loading', // loading | ready | error
+  error: '',
+  businessDate: '',
+  required: false,
+  status: 'todo', // todo | pending | passed | rejected
+  note: '',
+  hasStandard: false,
+})
+// 拍照是两步（ADR 0050：标准图那一屏与取景器**不能同屏**，也不做分屏）。所以这里存
+// 的是「现在哪一屏」而不是「弹层开没开」：standard → camera 是换屏，不是叠上去。
+const attireSheet = ref('') // '' | 'standard' | 'camera'
+const imageUploads = useImageUploadQueueStore()
+// 「这张正在传」从上传队列派生，不用本组件的 ref：刷新页面 / 回收 webview 之后草稿会
+// 恢复继续传（跟卫生那一屏同一条口径），局部状态会让员工对着正在传的那张再拍一遍。
+const attireKey = computed(() => `attire:${attire.value.businessDate}`)
+const attirePending = computed(() => imageUploads.activeTasks.some(
+  (task) => task.pendingKey === attireKey.value,
+))
+
+function openAttireStandard() {
+  attireSheet.value = 'standard'
+}
+
+function openAttireCamera() {
+  // 相机只能在有标准图时开：员工要照着它拍（没传标准图时服务端也会拒）。
+  if (!attire.value.hasStandard) return
+  attireSheet.value = 'camera'
+}
+
+/** 拍完就进上传队列（不是直接 fetch）：断网/地铁里拍的那张不丢，恢复后自己传。 */
+function onAttireCaptured(blob) {
+  attireSheet.value = ''
+  try {
+    const form = new FormData()
+    form.append('file', blob, 'attire.jpg')
+    form.append('live', 'true')
+    imageUploads.enqueue({
+      transport: 'staff',
+      path: '/api/hygiene/staff/attire/submit',
+      formData: form,
+      label: '仪容仪表 · 现场自拍',
+      detail: attire.value.businessDate ? dayLabel(attire.value.businessDate) : '',
+      pendingKey: attireKey.value,
+      onSuccess: () => loadHygiene(true),
+      onError: () => { attire.value = { ...attire.value, error: '刚才那张没传上去，可在上传列表里重试' } },
+    })
+  } catch (err) {
+    attire.value = { ...attire.value, error: err.message || '无法加入上传队列' }
+  }
+}
 
 // 撤回与「拒绝」不可逆（服务端状态机只往前走：撤回要重提、拒绝对对方就是「没同意」），
 // 手机上一误触没有回头路 —— 两个都先过确认框。同仓库对不可逆动作一律这么办（店长驳回、
@@ -358,11 +416,23 @@ async function loadHygiene(quiet = false) {
   // 同上：静默重读不打回 loading 态。
   if (!quiet) hygiene.value = { ...hygiene.value, state: 'loading', error: '' }
   try {
-    const [me, work] = await Promise.all([
+    const [me, work, attireShot] = await Promise.all([
       staffRequest('/api/hygiene/staff/me'),
       staffRequest('/api/hygiene/staff/daily-work'),
+      // 仪容仪表那一条（票 12）：跟日常一起拉，但**分开存** —— 它没有钟点、不按责任区。
+      staffRequest('/api/hygiene/staff/attire'),
     ])
     const employee = me.employee || {}
+    const shot = attireShot.attire || {}
+    attire.value = {
+      state: 'ready',
+      error: '',
+      businessDate: shot.business_date || '',
+      required: Boolean(shot.required),
+      status: shot.status || 'todo',
+      note: shot.note || '',
+      hasStandard: Boolean(shot.has_standard),
+    }
     hygiene.value = {
       state: 'ready',
       error: '',
@@ -380,6 +450,7 @@ async function loadHygiene(quiet = false) {
       return
     }
     hygiene.value = { ...hygiene.value, state: 'error', error: err.message || '卫生待办读不出来' }
+    attire.value = { ...attire.value, state: 'error', error: err.message || '仪容仪表读不出来' }
   }
 }
 
@@ -558,6 +629,36 @@ useNudgePull({
                 已经过了本班的钟点，还有 {{ hygieneOverdue }} 项没交。
               </p>
             </template>
+            <!-- 仪容仪表（票 12）：按**人**拍，今天排到班次才有这一行 —— 休假的与没
+                 排到的人看不到它。跟上面那份日常分开：它没有钟点、也不挂在责任区上。 -->
+            <template v-if="attire.required">
+              <p class="shift">
+                仪容仪表：<template v-if="attirePending">正在传…</template><template
+                  v-else-if="attire.status === 'passed'"
+                >已通过</template><template
+                  v-else-if="attire.status === 'pending'"
+                >已交，等店长验收</template><template
+                  v-else-if="attire.status === 'rejected'"
+                >被驳回，要重拍</template><template
+                  v-else-if="!attire.hasStandard"
+                >店长还没传标准图</template><template v-else>今天还没拍</template>
+              </p>
+              <p v-if="attire.note" class="tL-err" role="status">店长说：{{ attire.note }}</p>
+              <p v-if="attire.error" class="tL-err" role="status">{{ attire.error }}</p>
+              <!-- 已经通过的不给重拍入口（服务端也会拒 `already_accepted`）：验收过的是
+                   记录，员工端就不该摆一个按了必然失败的按钮。 -->
+              <div v-if="attire.hasStandard && attire.status !== 'passed'" class="acts">
+                <button
+                  class="btn"
+                  type="button"
+                  :disabled="attirePending"
+                  @click="openAttireStandard"
+                >
+                  {{ attire.status === 'todo' ? '对着标准图拍 ›' : '重拍一张 ›' }}
+                </button>
+              </div>
+            </template>
+
             <div class="acts">
               <button class="btn" type="button" @click="router.push('/hygiene')">
                 {{ hygieneStats.remaining ? '去交 / 继续验收 ›' : '去卫生待办 ›' }}
@@ -570,6 +671,36 @@ useNudgePull({
           排班只说班次，不说几点上班 —— 钟点只有卫生那边才有（逾期点）。
         </p>
       </template>
+    </div>
+
+    <!-- 仪容仪表的拍照弹层（票 12）：两步 —— 先看标准图、再开相机。**不同屏**是 ADR
+         0050 的硬规则：标准图与取景器并排，人会照着「上一张」摆姿势而不是看镜头。 -->
+    <div
+      v-if="attireSheet"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="attire-sheet-title"
+      @click.self="attireSheet = ''"
+    >
+      <div class="modal-box">
+        <div class="modal-header">
+          <h3 id="attire-sheet-title">仪容仪表</h3>
+          <button class="btn" type="button" @click="attireSheet = ''">关闭</button>
+        </div>
+        <template v-if="attireSheet === 'standard'">
+          <p class="tA-sub">对着标准图看清再拍。这一屏故意不放取景框。</p>
+          <HygieneStandardOverlay
+            src="/api/hygiene/staff/attire/standard"
+            alt="仪容仪表标准图"
+          />
+          <button class="btn" type="button" @click="openAttireCamera">打开相机</button>
+        </template>
+        <template v-else-if="attireSheet === 'camera'">
+          <p class="tA-sub">拍现在的样子。相册里的旧照片不算，必须现场拍。</p>
+          <HygieneLiveCamera @captured="onAttireCaptured" />
+        </template>
+      </div>
     </div>
 
     <!-- 请假表单（票 08）。容器用主题里那套 `.modal-overlay/.modal-box`：员工端所有

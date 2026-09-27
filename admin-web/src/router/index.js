@@ -52,6 +52,8 @@ const routes = [
   hygieneAdminPage('/hygiene-fix', 'hygiene-fix', () => import('../views/hygiene/HygieneFixView.vue')),
   hygieneAdminPage('/hygiene-boards', 'hygiene-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
   hygieneAdminPage('/hygiene-data', 'hygiene-data', () => import('../views/hygiene/HygieneDataView.vue')),
+  // 仪容仪表（票 12）：按人拍，名单由排班给（休假的与没排到的不在表上）。
+  hygieneAdminPage('/hygiene-attire', 'hygiene-attire', () => import('../views/hygiene/HygieneAttireView.vue')),
   // 员工手机端的入口是「今天」页（票 05）：登录后落到这里，第一眼是自己的班。
   // 卫生那张卡（票 10）与这颗实时开关一起到齐：`realtime: true` 是给人的页面显式打开的
   // （`App.vue` 只对**非 public** 的路由默认开），员工页是 public 的，不写就不连。

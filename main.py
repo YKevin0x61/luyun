@@ -149,6 +149,7 @@ unmapped_watchdog_task = None
 recipe_store = None
 employee_accounts = None
 hygiene_work = None
+hygiene_attire = None
 # 管理端数据与照片视图（ADR-0087）：只读，与 hygiene_work 一起在 lifespan 里建。
 hygiene_archive = None
 
@@ -270,7 +271,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global db_manager, dish_catalog, restaurant_scraper, scraper_task, wecom_push_task
     global reconcile_scheduler_task, unmapped_watchdog_task
-    global recipe_store, employee_accounts, hygiene_work, hygiene_overdue_task
+    global recipe_store, employee_accounts, hygiene_work, hygiene_attire, hygiene_overdue_task
     global hygiene_archive
     global hygiene_variant_task, hygiene_maintenance_task
 
@@ -329,6 +330,7 @@ async def lifespan(app: FastAPI):
         from services.hygiene.captures import FileCaptureStore
         from services.hygiene.images import ImageVariantGenerator
         from services.hygiene.notifier import WeComGroupTextNotifier
+        from services.hygiene.attire import HygieneAttire
         from services.hygiene.work import HygieneWork
         from pathlib import Path
         if db_manager and db_manager.is_connected():
@@ -345,6 +347,9 @@ async def lifespan(app: FastAPI):
             )
             await hygiene_work.prepare()
             startup_results.append("卫生待办")
+            # 仪容仪表（按人按天的一张自拍）：存图与现场拍摄校验借 hygiene_work 那两个
+            # 公开入口，不自己再接一遍 capture store。
+            hygiene_attire = HygieneAttire(hygiene_work)
             # 排班是独立系统：班次表空的时候放默认两条（白班 / 夜班）。
             #
             # 表还不存在（0005 没应用）时 prepare() 返回 False，只记日志 —— 不能在这里
@@ -1122,6 +1127,7 @@ SPA_PAGE_ROUTES = (
     "/hygiene-fix",
     "/hygiene-boards",
     "/hygiene-data",
+    "/hygiene-attire",
     "/scheduling",
     "/scheduling/inbox",
     "/scheduling/shifts",

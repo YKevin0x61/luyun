@@ -293,3 +293,42 @@ describe('员工端换班（票 09）', () => {
     expect(view).toMatch(/loadHygiene\(true\)/)
   })
 })
+
+describe('仪容仪表（票 12）：按人拍、两步、只在排到班次时出现', () => {
+  it('读员工自己那一条，不碰管理端', () => {
+    expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/attire'\)/)
+    expect(view).toMatch(/\/api\/hygiene\/staff\/attire\/submit/)
+    expect(view).not.toMatch(/\/api\/hygiene\/admin\/attire/)
+  })
+
+  it('排到班次才显示这一行', () => {
+    // 判据是服务端给的 `required`（排班那天有班次）：休假的与没排到的整行不显示 ——
+    // 这正是需求那句「排班上面除了休假的都要拍」。
+    expect(view).toMatch(/v-if="attire\.required"/)
+    expect(view).toContain('店长还没传标准图')
+    expect(view).toContain('已交，等店长验收')
+  })
+
+  it('上传带 live=true，并进上传队列（断网不丢）', () => {
+    expect(view).toMatch(/form\.append\('live', 'true'\)/)
+    expect(view).toMatch(/imageUploads\.enqueue\(/)
+    // 「这张正在传」从队列派生，刷新页面之后仍然成立。
+    expect(view).toMatch(/pendingKey: attireKey\.value/)
+  })
+
+  it('ADR 0050：标准图那一屏没有取景框', () => {
+    const branch = view.slice(
+      view.indexOf("attireSheet === 'standard'"),
+      view.indexOf("attireSheet === 'camera'"),
+    )
+    expect(branch).toMatch(/HygieneStandardOverlay/)
+    expect(branch).toMatch(/打开相机/)
+    // 标准图与取景器同屏是 ADR 0050 明说不做的：这里一旦出现就是又并排了。
+    expect(branch).not.toMatch(/HygieneLiveCamera/)
+  })
+
+  it('已经通过的不给重拍入口', () => {
+    // 服务端会拒 `already_accepted`：前端不摆一个按了必然失败的按钮。
+    expect(view).toMatch(/attire\.status !== 'passed'/)
+  })
+})
