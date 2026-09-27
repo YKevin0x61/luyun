@@ -10,11 +10,13 @@ export const HYGIENE_FIX_TYPES = ['卫生', '摆放', '标签']
 export const HYGIENE_BRAND_MARK = '卫'
 export const HYGIENE_BRAND_TITLE = '卫生'
 export const HYGIENE_BRAND_TAGLINE = '对照实拍验收'
-export const HYGIENE_DASHBOARD_BLURB = '花名册、责任区、验收、整改、红黑榜、数据与照片'
+export const HYGIENE_DASHBOARD_BLURB = '花名册、责任区、验收、仪容仪表、整改、红黑榜、数据与照片'
 export const HYGIENE_ADMIN_NAV = [
   { path: '/hygiene-roster', title: '花名册', shortTitle: '人员', icon: 'clipboard', code: 'ROSTER' },
   { path: '/hygiene-zones', title: '卫生责任区', shortTitle: '责任区', icon: 'layout-grid', code: 'ZONES' },
   { path: '/hygiene-daily', title: '日常验收', shortTitle: '日常', icon: 'check-circle', code: 'DAILY' },
+  // 仪容仪表（票 12）：按人拍，名单由排班给（休假的与没排到的不在表上）。
+  { path: '/hygiene-attire', title: '仪容仪表', shortTitle: '仪容', icon: 'sparkles', code: 'ATTIRE' },
   { path: '/hygiene-deep-clean', title: '专项卫生', shortTitle: '专项', icon: 'calendar', code: 'DEEP' },
   { path: '/hygiene-fix', title: '整改单', shortTitle: '整改', icon: 'siren', code: 'FIX' },
   { path: '/hygiene-boards', title: '红黑榜', shortTitle: '榜', icon: 'star', code: 'BOARDS' },
