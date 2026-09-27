@@ -75,7 +75,9 @@ describe('hygiene staff work app', () => {
       /当前区域「\{\{ employee\.zone_name \|\| '未选区域' \}\}」没有带标准图的日常检查项/,
     )
     expect(empty).toMatch(/这一屏只列你选的这个区/)
-    expect(empty).toMatch(/@click="openAssignmentPicker">换个区域看看/)
+    // 票 10：那个按钮不再打开「换个区域」的选择器（员工不自己选了），而是切到待办屏
+    // 让员工看清今天为什么没有日常可交 —— 文案也跟着改了。
+    expect(empty).toMatch(/@click="showWhyNoDuty">看看今天怎么安排/)
     // 旧的裸文案（不带区名）不许再作为正文出现；注释里提到它不算。
     expect(empty).not.toMatch(/>\s*还没有带标准图的日常检查项。/)
   })

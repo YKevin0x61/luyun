@@ -71,7 +71,6 @@ const loggingOut = ref(false)
 // 票 10：员工不再自己选班次和区（`selectedShift` / `selectedZoneId` / `assignableZones`
 // 那一套状态跟着选择器一起撤了）。今天在哪由排班决定，`employee.shift` / `employee.zone_id`
 // 就是从排班结果读来的那两个值。
-const changingAssignment = ref(false)
 const profileEditing = ref(false)
 const profileName = ref('')
 const profilePhone = ref('')
@@ -143,7 +142,10 @@ const sheetDirty = computed(() => {
       || (current.mode && current.mode.endsWith('-preview')),
   )
 })
-const showAssignmentPicker = computed(() => needsAssignment.value || changingAssignment.value)
+// 这一屏要显示「今天为什么交不了日常」：就是 `needsAssignment`（没班次 / 没区 /
+// 排班的班次跟这个区对不上）。以前这里还有个「正在改分工」的开关，员工自选撤掉之后
+// 没有第二种进入方式了，名字也跟着从 `showAssignmentPicker` 换过来。
+const showWhyNoDuty = computed(() => needsAssignment.value)
 
 const dailyStats = computed(() => dailyProgress(inbox.value))
 const groupedPassed = computed(() => groupByZone(passedRows(inbox.value)))
@@ -582,15 +584,15 @@ function openTeaching(row) {
   sheet.value = { kind: 'teaching', mode: 'review', row }
 }
 
-async function openAssignmentPicker() {
+/** 切到「待办」那一屏并滚到顶，让员工看清今天为什么没有日常可交。
+ *
+ *  票 10 之前它叫 `openAssignmentPicker`（打开「重选区域和班次」的选择器）。自选撤了之后
+ *  同样的入口变成「去看那一屏的说明」，所以不再需要拉责任区名单那一步 —— 说明里的话
+ *  只跟排班给的值有关。
+ */
+async function showWhyNoDuty() {
   if (!employee.value) return
-  changingAssignment.value = true
   tab.value = 'inbox'
-  try {
-    await loadZones({ force: true })
-  } catch (err) {
-    errorText.value = err.message || '无法加载卫生责任区'
-  }
   await nextTick()
   const main = document.getElementById('hygiene-work-main')
   if (main) main.scrollTo({ top: 0, behavior: 'smooth' })
@@ -1338,7 +1340,7 @@ async function decide(action, reason = '') {
              卫生就认哪个。这一屏以前是个选择器，现在换成一句实话 + 一条去「今天」页的路：
              没有班次（新人没配规则 / 今天休 / 那条班次还没标卫生档位）就没有日常可交，
              与其让人在这里选出一个不生效的答案，不如说清该找谁。 -->
-        <template v-if="showAssignmentPicker">
+        <template v-if="showWhyNoDuty">
           <h1>今天交不了日常检查</h1>
           <p class="hy-staff-lead">
             <template v-if="employee && !employee.shift">
@@ -1400,7 +1402,7 @@ async function decide(action, reason = '') {
               <p class="hy-staff-lead">
                 日常检查项挂在责任区下，这一屏只列你选的这个区；管理端能看到全部区。
               </p>
-              <button type="button" class="btn" @click="openAssignmentPicker">换个区域看看</button>
+              <button type="button" class="btn" @click="showWhyNoDuty">看看今天怎么安排</button>
             </template>
           </div>
 
@@ -1722,7 +1724,7 @@ async function decide(action, reason = '') {
             v-if="!profileEditing && !passwordEditing"
             type="button"
             class="btn btn-block hy-staff-submit"
-            @click="openAssignmentPicker"
+            @click="showWhyNoDuty"
           >重新选择区域和班次</button>
         </template>
         <p v-else class="hy-staff-lead">正在确认登录…</p>
