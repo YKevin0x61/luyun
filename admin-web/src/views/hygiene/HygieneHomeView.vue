@@ -2,6 +2,7 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+import StaffExitButton from '../../components/staff/StaffExitButton.vue'
 import SvgIcon from '../../components/SvgIcon.vue'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneImageLightbox from '../../components/hygiene/HygieneImageLightbox.vue'
@@ -67,7 +68,6 @@ const standardPhotoCache = useStandardPhotoCacheStore()
 const tab = ref('inbox')
 const employee = ref(null)
 const errorText = ref('')
-const loggingOut = ref(false)
 // 票 10：员工不再自己选班次和区（`selectedShift` / `selectedZoneId` / `assignableZones`
 // 那一套状态跟着选择器一起撤了）。今天在哪由排班决定，`employee.shift` / `employee.zone_id`
 // 就是从排班结果读来的那两个值。
@@ -704,35 +704,8 @@ async function savePassword() {
   }
 }
 
-// 登出会清掉本机的上传队列（换人用同一台手机必须清），但店员可能是手滑点到的：
-// 队列里还有照片时先问一句，别让他白拍一轮。
-const logoutConfirmOpen = ref(false)
-
-function askLogout() {
-  if (loggingOut.value) return
-  if (imageUploads.activeTasks.length || imageUploads.failedTasks.length) {
-    logoutConfirmOpen.value = true
-    return
-  }
-  void logout()
-}
-
-async function logout() {
-  if (loggingOut.value) return
-  logoutConfirmOpen.value = false
-  loggingOut.value = true
-  imageUploads.clearTasksByTransport('staff')
-  try {
-    await staffRequest('/api/hygiene/staff/logout', { method: 'POST' })
-  } catch {
-    // Session may already be gone; still leave the phone entry.
-  }
-  // 退出后落在 `/login` 的员工栏，并把原来这一页带上：重新登录回到原处。
-  router.replace({
-    path: '/login',
-    query: { next: router.currentRoute.value.fullPath },
-  })
-}
+// 退出登录（含「队列里还有照片」那次确认）已抽到 `composables/useStaffLogout.js`，
+// 由顶栏那颗共用的 `StaffExitButton` 承载 —— 三张员工页一处实现（票 10）。
 
 function canShootDeep(row) {
   return Boolean(employee.value && row.status !== '已通过')
@@ -1323,6 +1296,8 @@ async function decide(action, reason = '') {
         <span v-if="employee" class="hy-work-shift">
           {{ employee.name || employee.phone }} · {{ employee.zone_name || (employee.shift ? '还没定区' : '今天没排班') }} · {{ hygieneShiftLabel(employee.shift) }}
         </span>
+        <!-- 三张员工页共用的退出（票 10）：原来只在下面「我」栏里那颗，顶上这颗跟今天/整月页同一套。 -->
+        <StaffExitButton />
       </div>
     </header>
 
@@ -1721,15 +1696,6 @@ async function decide(action, reason = '') {
             v-if="!profileEditing && !passwordEditing"
             type="button"
             class="btn btn-block hy-staff-submit"
-            :disabled="loggingOut"
-            @click="askLogout"
-          >
-            {{ loggingOut ? '正在退出…' : '退出登录' }}
-          </button>
-          <button
-            v-if="!profileEditing && !passwordEditing"
-            type="button"
-            class="btn btn-block hy-staff-submit"
             @click="openDutyNotice"
           >重新选择区域和班次</button>
         </template>
@@ -2039,16 +2005,6 @@ async function decide(action, reason = '') {
       danger
       @confirm="closeSheet(true)"
       @cancel="confirmCloseOpen = false"
-    />
-
-    <ConfirmDialog
-      v-if="logoutConfirmOpen"
-      title="还有照片没传完"
-      :message="`还有 ${imageUploads.activeTasks.length + imageUploads.failedTasks.length} 张照片在上传队列里。退出登录会清掉它们，需要重新拍。`"
-      confirm-label="仍然退出"
-      danger
-      @confirm="logout"
-      @cancel="logoutConfirmOpen = false"
     />
 
     <ConfirmDialog

@@ -15,6 +15,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import StaffExitButton from '../../components/staff/StaffExitButton.vue'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
@@ -483,6 +484,8 @@ useNudgePull({
       <span class="tDay">今天</span>
       <span class="tDate">{{ today ? dayLabel(today.business_date) : '' }}</span>
       <span v-if="employee" class="tMe">{{ employee.name }}</span>
+      <!-- 三张员工页共用的退出（票 10）：顶栏右上角同一颗按钮、同一套逻辑。 -->
+      <StaffExitButton />
     </header>
 
     <div class="tA-body">
@@ -883,7 +886,6 @@ useNudgePull({
 }
 
 .tMe {
-  margin-left: auto;
   font-size: 11.5px;
   color: var(--hy-muted);
   border: 1px solid var(--hy-line);

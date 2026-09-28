@@ -84,12 +84,20 @@ describe('员工端要看出「这一项被打回过」', () => {
 
 describe('登出前要护住没传完的照片', () => {
   it('asks before signing out while the upload queue is not empty', () => {
+    // 票 10：退出收到三张员工页共用的 `StaffExitButton` + `useStaffLogout` 里，
+    // 卫生首页只挂那颗共用按钮，不再自己实现一遍（原来这段判据是钉在首页源码上的）。
+    const button = read('../../../components/staff/StaffExitButton.vue')
+    const logout = read('../../../composables/useStaffLogout.js')
     const home = read('../HygieneHomeView.vue')
-    expect(home).toMatch(/@click="askLogout"/)
-    expect(home).not.toMatch(/@click="logout"/)
-    expect(home).toMatch(/function askLogout\(\)/)
-    expect(home).toMatch(/imageUploads\.activeTasks\.length \|\| imageUploads\.failedTasks\.length/)
-    expect(home).toMatch(/v-if="logoutConfirmOpen"/)
-    expect(home).toMatch(/还有照片没传完/)
+
+    expect(button).toMatch(/@click="ask"/)
+    expect(button).not.toMatch(/@click="logout"/)
+    expect(button).toMatch(/v-if="confirmOpen"/)
+    expect(button).toMatch(/还有照片没传完/)
+    expect(logout).toMatch(/function ask\(\)/)
+    expect(logout).toMatch(/queuedCount\.value/)
+    expect(logout).toMatch(/activeTasks\.length \+ imageUploads\.failedTasks\.length/)
+    expect(home).toMatch(/<StaffExitButton \/>/)
+    expect(home).not.toMatch(/@click="askLogout"/)
   })
 })

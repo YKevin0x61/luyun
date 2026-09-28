@@ -10,10 +10,14 @@ describe('员工端弱网与未登录的分流', () => {
   it('只有确认未登录才清上传队列', () => {
     // 这两处是允许清队列的全部位置：会话失效回登录页、以及员工主动登出。
     // 网络抖动绝不能出现在这份名单里——那些照片是店员现场拍的，重拍代价极高。
+    // 票 10 起主动登出搬到了三页共用的 `useStaffLogout`，首页只剩会话失效那一处；
+    // 两处一起断言，名单强度不变。
+    const logout = readFileSync(join(here, '../../../composables/useStaffLogout.js'), 'utf8')
     const calls = [...home.matchAll(/clearTasksByTransport\('staff'\)/g)]
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(1)
     expect(home).toMatch(/function leaveForStaffLogin\(\)[\s\S]*?clearTasksByTransport\('staff'\)/)
-    expect(home).toMatch(/async function logout\(\)[\s\S]*?clearTasksByTransport\('staff'\)/)
+    expect(home).not.toMatch(/function logout\(\)/)
+    expect(logout).toMatch(/clearTasksByTransport\('staff'\)/)
   })
 
   it('splits the loadMe catch on err.status, not on "anything failed"', () => {
