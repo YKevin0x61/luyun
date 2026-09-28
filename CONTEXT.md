@@ -1,6 +1,6 @@
 # CONTEXT
 
-LuckIn 点餐数据系统的领域词汇表（ubiquitous language）。
+厨务管家 点餐数据系统的领域词汇表（ubiquitous language）。
 只收录领域术语与其精确含义，不含实现细节。
 
 ## 时间口径

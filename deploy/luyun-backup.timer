@@ -2,7 +2,7 @@
 # 安装方式见 deploy/luyun-backup.service 顶部注释。
 
 [Unit]
-Description=每日定时触发LuckIn SQLite 数据库备份
+Description=每日定时触发厨务管家 SQLite 数据库备份
 
 [Timer]
 # 每天凌晨 3:10（本机系统时区）执行，错开营业时间与爬虫高频写入时段

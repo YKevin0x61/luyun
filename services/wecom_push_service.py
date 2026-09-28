@@ -386,7 +386,7 @@ class WeComPushService:
             raise ValueError("webhook 不存在")
         if not webhook.get("enabled"):
             raise ValueError("webhook 已停用")
-        content = f"LuckIn 企业微信推送测试\n时间：{datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')}"
+        content = f"厨务管家 企业微信推送测试\n时间：{datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')}"
         rendered_message = RenderedMessage(content=content, byte_length=len(content.encode("utf-8")))
         assert_message_size(rendered_message)
         webhook_url = decrypt_webhook_url(webhook["webhook_url_encrypted"])

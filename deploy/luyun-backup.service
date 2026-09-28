@@ -16,7 +16,7 @@
 #   journalctl -u luyun-backup
 
 [Unit]
-Description=LuckIn 数据库定时备份（一次性任务，由 luyun-backup.timer 触发）
+Description=厨务管家 数据库定时备份（一次性任务，由 luyun-backup.timer 触发）
 # 冷备的前置条件只有 PostgreSQL（pg_dump 能连上库）与 data/ 下的凭据
 # （credentials.enc）、密钥（.cred_key）与两类卫生照片；保留份数从 PostgreSQL 的
 # app_settings 表读取（services/backup_retention.load_from_pg_sync）。

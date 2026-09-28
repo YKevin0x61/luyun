@@ -9,7 +9,7 @@
 #   # 无需 enable —— 按需 oneshot，由 Admin Apply Update 启动。
 
 [Unit]
-Description=LuckIn 系统更新作业（GitHub Release Apply Update）
+Description=厨务管家 系统更新作业（GitHub Release Apply Update）
 After=network.target
 # 不绑定到 luyun.service：更新过程中会主动重启主服务。
 

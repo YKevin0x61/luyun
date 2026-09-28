@@ -1,6 +1,6 @@
-# LuckIn 订单系统（luyun）
+# 厨务管家 订单系统（luyun）
 
-餐厅订单采集与查询系统，服务 **LuckIn**。从 POS 定时抓取点菜数据，落 PostgreSQL（唯一后端，需自备 PG 实例，见 [deploy/README.md](deploy/README.md) 第 10 节），提供管理后台、厨房显示（KDS）与 REST API。
+餐厅订单采集与查询系统，服务 **厨务管家**。从 POS 定时抓取点菜数据，落 PostgreSQL（唯一后端，需自备 PG 实例，见 [deploy/README.md](deploy/README.md) 第 10 节），提供管理后台、厨房显示（KDS）与 REST API。
 
 **技术栈：** FastAPI · PostgreSQL · Playwright · Vue3 Admin · uni-app KDS  
 
@@ -131,4 +131,4 @@ Admin 热更新：`cd admin-web && npm run dev`（`:5173`，代理 `/api`、`/ws
 
 ## 许可证
 
-[MIT](./LICENSE) © 2026 LuckIn
+[MIT](./LICENSE) © 2026 厨务管家

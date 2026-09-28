@@ -1,8 +1,8 @@
 {
   "id": "/kds/",
-  "name": "禄云 KDS",
+  "name": "厨务管家 KDS",
   "short_name": "KDS",
-  "description": "LuckIn 后厨控菜系统",
+  "description": "厨务管家 后厨控菜系统",
   "start_url": "/kds/",
   "scope": "/kds/",
   "display": "standalone",

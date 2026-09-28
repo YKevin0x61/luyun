@@ -46,7 +46,7 @@ def _configure_paths() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="LuckIn 冷备归档")
+    parser = argparse.ArgumentParser(description="厨务管家 冷备归档")
     parser.add_argument(
         "--retention",
         type=int,

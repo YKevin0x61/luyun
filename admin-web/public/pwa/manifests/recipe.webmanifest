@@ -1,8 +1,8 @@
 {
   "id": "/pwa/manifests/recipe.webmanifest",
-  "name": "禄云配方",
-  "short_name": "禄云配方",
-  "description": "LuckIn 厨房配方与 SOP 阅读",
+  "name": "厨务管家配方",
+  "short_name": "厨务管家配方",
+  "description": "厨务管家 厨房配方与 SOP 阅读",
   "start_url": "/recipe",
   "scope": "/recipe",
   "display": "standalone",

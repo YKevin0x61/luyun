@@ -36,7 +36,7 @@
 #        journalctl -u luyun -f
 
 [Unit]
-Description=LuckIn 订单系统（FastAPI / uvicorn，单机单 worker）
+Description=厨务管家 订单系统（FastAPI / uvicorn，单机单 worker）
 After=network.target
 # PostgreSQL 是唯一后端（ADR 0089），库要先于应用可用，否则启动即连接失败。
 # 这里仍用 Wants（弱依赖）而不是 Requires：PostgreSQL 也可能装在容器里或由外部

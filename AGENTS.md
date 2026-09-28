@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-Restaurant order data collection and query system for **LuckIn**. Scrapes POS system data via Playwright, stores it in PostgreSQL (the only backend since ADR 0089), and exposes REST APIs. Also includes a sales report crawler, a Vue3 admin SPA (`admin-web/`), and a uni-app KDS kitchen display (`kds/`).
+Restaurant order data collection and query system for **厨务管家**. Scrapes POS system data via Playwright, stores it in PostgreSQL (the only backend since ADR 0089), and exposes REST APIs. Also includes a sales report crawler, a Vue3 admin SPA (`admin-web/`), and a uni-app KDS kitchen display (`kds/`).
 
 **Tech stack:** FastAPI + PostgreSQL (asyncpg) + Playwright + Pandas · Admin frontend: Vite + Vue3 + Pinia + vue-router · KDS: uni-app (H5 build)
 

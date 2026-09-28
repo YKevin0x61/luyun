@@ -563,7 +563,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="LuckIn 订单数据采集与查询系统",
+    description="厨务管家 订单数据采集与查询系统",
     lifespan=lifespan
 )
 
@@ -1579,7 +1579,7 @@ async def global_exception_handler(request, exc):
 async def api_root():
     """API 信息"""
     return {
-        "message": "LuckIn 订单数据采集与查询系统",
+        "message": "厨务管家 订单数据采集与查询系统",
         "version": settings.APP_VERSION,
         "docs": "/docs",
         "status": "running"
