@@ -4,7 +4,7 @@ import { buildLoginNextFromRoute } from '../utils/loginNext'
 import { staffSessionState } from '../utils/hygieneStaff'
 
 const RECIPE_READER_META = { public: true, standalone: true }
-const HYGIENE_STAFF_META = { public: true, standalone: true, staffPhone: true }
+const HYGIENE_STAFF_META = { public: true, standalone: true }
 const HygieneAdminLayout = () => import('../views/hygiene/HygieneAdminLayout.vue')
 const HygieneStaffAuthLayout = () => import('../views/hygiene/HygieneStaffAuthLayout.vue')
 

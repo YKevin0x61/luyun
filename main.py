@@ -704,8 +704,9 @@ HTML_AUTH_PREFIXES = (
     # 搬进 `/hygiene/*` 之后它们就对未登录访客放行了 —— 这是本次唯一会造成未授权
     # 访问的地方，`tests/test_auth.py` 里有反向断言（前缀名单里没有 `/hygiene/`）
     # 与正向断言（八个页面未登录仍 302 到 `/login`）各一条。
-    # 员工页带尾斜杠时也放行：`/staff/` 精确表兜不住，被甩到 /login 的话员工
-    # 在管理端登录页登不进去。放行之后照 SPA 那套 307 回不带尾斜杠的那条。
+    # 员工页带尾斜杠时也放行：`/staff/` 与精确表里那条 `/staff` 不是同一条路径
+    # （精确表只认不带斜杠的那个），`/staff/today/` 这类要靠前缀兜住，再交给
+    # Starlette 的 redirect_slashes 307 回不带尾斜杠的那条。
     # 票 04 起整段 `/staff/` 都是员工领土（今天 /staff/today、整月 /staff/month、
     # 卫生首页 /staff/clean），所以前缀就是它本身。
     "/staff/",
@@ -940,8 +941,10 @@ async def database_unavailable_guard(request: Request, call_next):
 async def realtime_ws(websocket: WebSocket):
     """实时订阅通道：客户端按 topic + 过滤条件订阅，服务端只推送“有变”nudge
     （不带数据），页面收到后复用现有 HTTP API 拉取最新数据。
-    鉴权支持 Session Cookie（网页端）或 ?token=<api_token>（KDS 等无 Cookie 客户端），
-    以及员工（卫生/排班手机端）的 Session Cookie。
+    鉴权优先级见 `identify_ws`：显式声明 `?identity=staff|admin` > Session Cookie（网页端）
+    > `?token=<api_token>`（KDS 等无 Cookie 客户端）> 员工（卫生/排班手机端）的 Session
+    Cookie。员工端页面连接时带 `?identity=staff`，免得同一浏览器两套 cookie 时被判成
+    管理端；声明只选凭据、不给身份，验不过一律拒连（不回落到另一支）。
 
     员工连接要把 employee_id 交给 hub：员工只该收到全店级事件和自己的个人事件，
     scope 里带同事 employee_id 的 nudge 在派发侧直接跳过（`_staff_owns_scope`）。

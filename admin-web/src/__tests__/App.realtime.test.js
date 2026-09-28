@@ -32,7 +32,7 @@ const ROUTES = [
   {
     path: '/staff/today',
     component: { template: '<div />' },
-    meta: { public: true, standalone: true, staffPhone: true, staffAuth: true, realtime: true },
+    meta: { public: true, standalone: true, staffAuth: true, realtime: true },
   },
 ]
 
