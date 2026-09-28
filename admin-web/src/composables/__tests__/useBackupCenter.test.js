@@ -653,7 +653,7 @@ describe('useBackupCenter', () => {
       session_invalidated: false,
     })
     apiGet.mockResolvedValue({})
-    const location = { href: '/setup?section=backup' }
+    const location = { href: '/settings?section=backup' }
     vi.stubGlobal('window', { location })
     try {
       const {
@@ -681,7 +681,7 @@ describe('useBackupCenter', () => {
       await confirmImportSuccessRedirect()
       expect(importSuccessModal.show).toBe(false)
       expect(apiPost).not.toHaveBeenCalled()
-      expect(location.href).toBe('/setup?section=backup')
+      expect(location.href).toBe('/settings?section=backup')
     } finally {
       vi.unstubAllGlobals()
     }
@@ -698,7 +698,7 @@ describe('useBackupCenter', () => {
     })
     apiGet.mockResolvedValue({})
     apiPost.mockResolvedValue({ success: true })
-    const location = { href: '/setup?section=backup' }
+    const location = { href: '/settings?section=backup' }
     vi.stubGlobal('window', { location })
     try {
       const {

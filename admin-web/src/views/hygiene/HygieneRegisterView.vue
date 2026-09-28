@@ -41,7 +41,7 @@ async function submit() {
 
   <div v-if="submitted" class="hy-staff-done">
     <p>已提交。请等超级管理员在花名册里批准后再登录。</p>
-    <router-link class="btn btn-primary btn-block hy-staff-submit" to="/hygiene/login">去登录</router-link>
+    <router-link class="btn btn-primary btn-block hy-staff-submit" to="/login">去登录</router-link>
   </div>
 
   <template v-else>
@@ -107,7 +107,7 @@ async function submit() {
     </form>
     <p class="hy-staff-switch">
       已经注册？
-      <router-link to="/hygiene/login">去登录</router-link>
+      <router-link to="/login">去登录</router-link>
     </p>
   </template>
 </template>

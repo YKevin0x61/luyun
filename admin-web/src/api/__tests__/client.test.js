@@ -94,8 +94,8 @@ describe('api.upload', () => {
     expect(global.window.location.href).toContain('/login?next=')
   })
 
-  it('401 且处于 /setup 独立鉴权路由时不跳转，按错误处理', async () => {
-    global.window.location.pathname = '/setup'
+  it('401 且处于 /settings 独立鉴权路由时不跳转，按错误处理', async () => {
+    global.window.location.pathname = '/settings'
     const promise = api.upload('/api/backup/import/apply', new FormData())
     const xhr = FakeXHR.instances[0]
     xhr.emitLoad(401, JSON.stringify({ detail: '会话已过期' }))

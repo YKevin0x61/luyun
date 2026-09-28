@@ -365,11 +365,55 @@ def test_recipe_manage_html_requires_session(auth_app_client):
     assert resp.headers["location"].startswith("/login")
 
 
-def test_setup_html_requires_session(auth_app_client):
+def test_settings_html_requires_session(auth_app_client):
+    """票 06：系统配置页从 `/setup` 改名 `/settings`，它需要登录 —— 从来不是初始化页。
+
+    首次初始化（创建管理员账号）在 `/login` 的管理员栏里。配置页在免登录墙的**两张表
+    之外**，未登录的浏览器硬导航必须被 302 到 `/login`，而不是拿到 SPA 壳；已登录的
+    超级管理员直连则拿到壳（登录墙放行的根据是会话，不是路径）。
+    """
+    import main as main_module
+
     client, _ = auth_app_client
-    resp = client.get("/setup", headers=_html_headers(), follow_redirects=False)
+
+    resp = client.get("/settings", headers=_html_headers(), follow_redirects=False)
     assert resp.status_code == 302
     assert resp.headers["location"].startswith("/login")
+
+    # 反向断言：`/settings` 不许出现在免登录墙的两张表里 —— 放行它就是让未登录访客
+    # 进配置页（POS 凭据 / 数据库凭据 / 账号与 API Token）。
+    assert "/settings" not in main_module.HTML_AUTH_EXACT
+    assert not any(
+        "/settings".startswith(prefix) for prefix in main_module.HTML_AUTH_PREFIXES
+    )
+
+    # 另一半：已登录直连拿到 SPA 壳（页面确实注册成了路由，不是 404）。
+    init = client.post(
+        "/api/auth/init",
+        json={
+            "username": "admin",
+            "password": "password123",
+            "confirm_password": "password123",
+        },
+    )
+    assert init.status_code == 200, init.text
+    assert client.cookies.get(settings.SESSION_COOKIE_NAME)
+    logged_in = client.get("/settings", headers=_html_headers(), follow_redirects=False)
+    assert logged_in.status_code == 200
+    assert "text/html" in logged_in.headers["content-type"]
+
+
+def test_old_setup_path_is_gone(auth_app_client):
+    """票 06：`/setup` 不再注册成页面（旧地址不做兼容），`/settings` 顶替它在清单里的位置。
+
+    非页面请求（accept 不是 text/html）绕开登录墙直接看路由表：旧地址确实没有页面了。
+    """
+    import main as main_module
+
+    client, _ = auth_app_client
+    assert "/setup" not in main_module.SPA_PAGE_ROUTES
+    assert "/settings" in main_module.SPA_PAGE_ROUTES
+    assert client.get("/setup", follow_redirects=False).status_code == 404
 
 
 def test_kds_html_not_redirected_to_login(auth_app_client):
@@ -380,23 +424,135 @@ def test_kds_html_not_redirected_to_login(auth_app_client):
 
 
 def test_staff_phone_pages_accessible_without_admin_session(auth_app_client):
-    # 员工手机上那两块的页（票 05 起落点是排班的 /today，票 06 多了 /today/month）：
-    # 没有管理端会话也不许被甩到 /login —— 管理端登录表单只认管理端账号，员工在那儿登不进去。
-    # `/today/`、`/today/month` 都不是精确表里的条目：前者靠尾斜杠、后者靠 `/today/` 前缀
-    # （书签/外链/手输都可能带来）。
+    # 员工手机上那三页（票 04 起整体住在 `/staff/*`：今天 /staff/today、整月 /staff/month、
+    # 卫生首页 /staff/clean）：没有管理端会话也必须拿到 SPA 外壳 —— 管理端登录表单只认
+    # 管理端账号，服务端把员工拦下来他就永远进不去（员工会话由客户端守卫查那个 cookie）。
+    # 三页都不是精确表里的条目：它们靠 `/staff/` 前缀放行（书签/外链/手输都可能带尾斜杠）。
+    # 员工注册页（票 02）在员工前缀之外，只能逐条精确放行。
     client, _ = auth_app_client
-    for path in (
-        "/hygiene",
-        "/hygiene/login",
-        "/hygiene/register",
-        "/today",
-        "/today/",
-        "/today/month",
-        "/today/month/",
-    ):
+    for path in ("/staff/today", "/staff/month", "/staff/clean", "/register"):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
-        loc = resp.headers.get("location", "")
-        assert resp.status_code != 302 or "/login" not in loc, path
+        assert resp.status_code == 200, (path, resp.headers.get("location"))
+        assert "text/html" in resp.headers["content-type"], path
+
+    # `/staff` 与前缀本身没有页面（票面明确 `/staff` 不进 SPA_PAGE_ROUTES）：免墙、
+    # 但确实没有这一页 —— 404，而不是被甩到 /login。
+    for path in ("/staff", "/staff/"):
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 404, (path, resp.headers.get("location"))
+
+
+def test_old_staff_paths_are_gone(auth_app_client):
+    """票 04：员工三页搬进 `/staff/*`，旧的 `/today`、`/today/month`、`/hygiene` 一律删掉。
+
+    这是 ADR 0091 明知代价的取舍：不加 302、不留前端别名。浏览器硬导航到旧地址既不是
+    员工页也不是兼容跳转 —— 用非页面请求（curl / 探针：Accept 不是 text/html）绕开
+    登录墙，直接看路由表：确实是 404。
+    """
+    import main as main_module
+
+    client, _ = auth_app_client
+    for stale in ("/today", "/today/month", "/hygiene"):
+        assert stale not in main_module.SPA_PAGE_ROUTES, stale
+        assert stale not in main_module.HTML_AUTH_EXACT, stale
+        # 旧路径不再是一个页面（服务端没有 catch-all，也没给它们留兼容跳转）。
+        assert client.get(stale, follow_redirects=False).status_code == 404, stale
+
+    # 新落点反过来都在：三页进页面注册清单，`/staff` 本身只进免墙精确名单。
+    for fresh in ("/staff/today", "/staff/month", "/staff/clean"):
+        assert fresh in main_module.SPA_PAGE_ROUTES, fresh
+    assert "/staff" in main_module.HTML_AUTH_EXACT
+    assert "/staff" not in main_module.SPA_PAGE_ROUTES
+    assert "/staff/" in main_module.HTML_AUTH_PREFIXES
+
+
+def test_register_page_is_public_and_the_old_hygiene_path_is_gone(auth_app_client):
+    """注册页在顶层 `/register`：无会话、无 cookie 也拿到页面（不 302 到 /login）。
+
+    旧路径 `/hygiene/register` 从页面注册清单里删掉，不做兼容跳转（spec：旧地址不做兼容）。
+    只断言外部行为：拿到的状态码与响应体，不是名单常量长什么样。
+    """
+    import main as main_module
+
+    client, _ = auth_app_client
+    assert "/hygiene/register" not in main_module.SPA_PAGE_ROUTES
+
+    resp = client.get("/register", headers=_html_headers(), follow_redirects=False)
+    assert resp.status_code == 200, resp.headers.get("location")
+    assert "text/html" in resp.headers["content-type"]
+
+    # 票 03 起 `/hygiene/` 不再免墙，浏览器的硬导航会被登录墙 302 到 `/login` —— 那也
+    # 不是「兼容跳转」。这一条要断的是「旧路径不再是一个页面」，所以用非页面请求
+    # （curl / 探针：Accept 不是 text/html）绕开登录墙，直接看路由表：确实是 404。
+    stale = client.get("/hygiene/register", follow_redirects=False)
+    assert stale.status_code == 404, stale.headers.get("location")
+
+
+def test_hygiene_login_page_is_gone_and_the_hygiene_prefix_no_longer_skips_the_wall(
+    auth_app_client,
+):
+    """票 03：员工登录页并入 `/login`，`/hygiene/` 那段免墙前缀必须一起删掉。
+
+    这是本次唯一会造成未授权访问的地方：`/hygiene/` 以前是员工登录页的免墙前缀，
+    改完之后它底下已经没有任何员工页 —— 留着它，票 05 把八个卫生管理页搬进
+    `/hygiene/*` 之后，它们就对未登录访客放行了。所以反向（前缀名单里没有它）与
+    正向（八个卫生管理页仍未登录 302 到 `/login`）两条都要断言。
+    """
+    import main as main_module
+
+    client, _ = auth_app_client
+
+    # 反向：免墙前缀名单里不再有 `/hygiene/`，那条旧路径两张表里都不在（它从前是靠
+    # `/hygiene/` 前缀免墙的，不是精确条目）。票 05 把八个管理端卫生页搬进 `/hygiene/*`
+    # 之后这条仍是安全要害：前缀回来了，八页就一起对未登录访客放行。
+    assert "/hygiene/" not in main_module.HTML_AUTH_PREFIXES
+    assert "/hygiene" not in main_module.HTML_AUTH_EXACT
+    assert "/hygiene" not in main_module.SPA_PAGE_ROUTES
+    assert "/hygiene/login" not in main_module.HTML_AUTH_EXACT
+    assert "/hygiene/login" not in main_module.HTML_AUTH_PREFIXES
+
+    # `/hygiene/login` 从页面注册清单里删掉：非页面请求直接 404，不做兼容跳转；
+    # 浏览器硬导航则跟别的受保护页一样被登录墙 302（不再是员工页的免墙待遇）。
+    assert "/hygiene/login" not in main_module.SPA_PAGE_ROUTES
+    stale = client.get("/hygiene/login", follow_redirects=False)
+    assert stale.status_code == 404, stale.headers.get("location")
+    walled = client.get("/hygiene/login", headers=_html_headers(), follow_redirects=False)
+    assert walled.status_code == 302, walled.headers.get("location")
+    assert walled.headers["location"].startswith("/login")
+
+    # 正向：八个卫生管理页收进 `/hygiene/*`（票 05），未登录访问任意一个，服务端仍必须
+    # 302 到 `/login`（而不是放行 SPA 壳 —— 放行之后前端守卫兜不住，直接就是未授权页面）。
+    # 非页面请求（Accept 不是 text/html）绕开登录墙直接看路由表：新路径必须是页面。
+    for path in (
+        "/hygiene/roster",
+        "/hygiene/zones",
+        "/hygiene/daily",
+        "/hygiene/deep-clean",
+        "/hygiene/fix",
+        "/hygiene/boards",
+        "/hygiene/data",
+        "/hygiene/attire",
+    ):
+        assert path in main_module.SPA_PAGE_ROUTES, path
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 302, path
+        assert resp.headers["location"].startswith("/login"), path
+
+    # 旧连字符路径一律删掉（spec：旧地址不做兼容）：既不进页面注册清单，也不在两张
+    # 豁免表里；非页面请求直接 404 —— 不是 200，也不是 302 兼容跳转。
+    for legacy in (
+        "/hygiene-roster",
+        "/hygiene-zones",
+        "/hygiene-daily",
+        "/hygiene-deep-clean",
+        "/hygiene-fix",
+        "/hygiene-boards",
+        "/hygiene-data",
+        "/hygiene-attire",
+    ):
+        assert legacy not in main_module.SPA_PAGE_ROUTES, legacy
+        assert legacy not in main_module.HTML_AUTH_EXACT, legacy
+        assert client.get(legacy, follow_redirects=False).status_code == 404, legacy
 
 
 def test_staff_path_list_matches_the_frontend_copy():
@@ -406,6 +562,16 @@ def test_staff_path_list_matches_the_frontend_copy():
     PWA 清单归属都从它出发）。服务端这边少登记一条，员工手机硬导航那一页就被 302 到
     管理端 `/login`（票 05 的 `/today` 正是这么漏过一次）；前端多一条，管理端页面就被
     当成员工页。所以这里按 JS 那份逐条对 `main.py` 的两张表，而不是各写一份清单。
+
+    票 02 起 JS 那份拆成两层，这里也要分别对：
+    - 前缀名单（`STAFF_PHONE_PREFIXES`）＝ 员工侧界面与登录后落点；
+    - 精确名单（`STAFF_PHONE_EXACT`）＝ 只属于员工侧界面、**不是**落点（`/register`）。
+    两层都进 `HTML_AUTH_EXACT`，精确名单里的条目还必须不被前缀覆盖 —— 被覆盖就说明
+    这一层是白写的，两层语义已经塌回一层。
+
+    票 04 起只有 `/staff` 一条前缀（三个员工页都在它下面），前缀的子树也全是员工页，
+    所以「前缀本身」与「前缀 + `/`」两条都在免墙名单里。反向断言（`/hygiene/` 不在
+    免墙前缀里）在 `test_hygiene_login_page_is_gone_and_the_hygiene_prefix_no_longer_skips_the_wall`。
     """
     import main as main_module
 
@@ -413,27 +579,72 @@ def test_staff_path_list_matches_the_frontend_copy():
     block = re.search(r"STAFF_PHONE_PREFIXES = \[(.*?)\]", source, re.S)
     assert block, STAFF_PATHS_JS
     prefixes = re.findall(r"'([^']+)'", block.group(1))
-    assert prefixes, "名单是空的：解析规则或文件结构变了，这条契约要跟着改"
+    assert prefixes, "前缀名单是空的：解析规则或文件结构变了，这条契约要跟着改"
+
+    exact_block = re.search(r"STAFF_PHONE_EXACT = \[(.*?)\]", source, re.S)
+    assert exact_block, f"{STAFF_PATHS_JS} 里找不到 STAFF_PHONE_EXACT"
+    exact_paths = re.findall(r"'([^']+)'", exact_block.group(1))
+    assert exact_paths, "精确名单是空的：解析规则或文件结构变了，这条契约要跟着改"
 
     for prefix in prefixes:
         assert prefix in main_module.HTML_AUTH_EXACT, prefix
-        # 尾斜杠变体走前缀表（书签/外链/手输带来的 `/today/`）。
+        # 尾斜杠变体走前缀表（书签/外链/手输带来的 `/staff/today/`）。
         assert f"{prefix}/" in main_module.HTML_AUTH_PREFIXES, prefix
+
+    for exact in exact_paths:
+        assert exact in main_module.HTML_AUTH_EXACT, exact
+        assert not any(
+            exact == prefix or exact.startswith(f"{prefix}/") for prefix in prefixes
+        ), f"{exact} 已被前缀名单罩住，不该再进精确名单（两层语义塌回一层）"
 
 
 def test_hygiene_roster_html_requires_admin_session(auth_app_client):
     client, _ = auth_app_client
     for path in (
-        "/hygiene-roster",
-        "/hygiene-zones",
-        "/hygiene-daily",
-        "/hygiene-deep-clean",
-        "/hygiene-fix",
-        "/hygiene-boards",
+        "/hygiene/roster",
+        "/hygiene/zones",
+        "/hygiene/daily",
+        "/hygiene/deep-clean",
+        "/hygiene/fix",
+        "/hygiene/boards",
     ):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         assert resp.status_code == 302, path
         assert resp.headers["location"].startswith("/login"), path
+
+
+def test_logged_in_super_admin_gets_the_spa_shell_on_every_hygiene_page(auth_app_client):
+    """票 05 验收的另一半：八页未登录被拦，已登录的超级管理员直连每一页拿到 SPA 壳。
+
+    `/hygiene/*` 不在任何豁免表里，登录墙放行的根据是会话而不是路径 —— 所以这里走真实
+    登录流程（`/api/auth/init` 发 cookie）再逐页硬导航：登录了还 404 就说明页面路由没登记
+    （反过来没登录还 200 就是未授权，上一条用例盯着）。
+    """
+    client, _ = auth_app_client
+    init = client.post(
+        "/api/auth/init",
+        json={
+            "username": "admin",
+            "password": "password123",
+            "confirm_password": "password123",
+        },
+    )
+    assert init.status_code == 200, init.text
+    assert client.cookies.get(settings.SESSION_COOKIE_NAME)
+
+    for path in (
+        "/hygiene/roster",
+        "/hygiene/zones",
+        "/hygiene/daily",
+        "/hygiene/deep-clean",
+        "/hygiene/fix",
+        "/hygiene/boards",
+        "/hygiene/data",
+        "/hygiene/attire",
+    ):
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 200, path
+        assert "text/html" in resp.headers["content-type"], path
 
 
 def test_html_auth_preserves_query_in_next(auth_app_client):

@@ -11,6 +11,7 @@ import {
   hygieneShiftLabel,
   rosterStatusLabel,
 } from '../../utils/hygieneCopy'
+import { STAFF_ENTRY_PATH } from '../../utils/staffPaths'
 
 // 排班那条班次挂在卫生的哪一档日常检查（`staff_shifts.duty_slot`）→ 卫生认的班次名。
 // 只认这一列、不认名字：排班的班次是**数据**（店长能改名、能加第三个），把「夜班」改成
@@ -34,15 +35,17 @@ const drafts = ref({})
 const busyId = ref(null)
 const disableTarget = ref(null)
 
-// 员工入口：全仓只有导航栏指向 /hygiene-roster，没人知道店员该扫哪个地址。这里把
+// 员工入口：全仓只有导航栏指向 /hygiene/roster，没人知道店员该扫哪个地址。这里把
 // 绝对 URL 和二维码一起摆出来，新店员不用管理员口述。
+// 路径取 `staffPaths.js` 的 `STAFF_ENTRY_PATH`（员工端入口 = 今天页），不在这里写死 ——
+// 票 04 把员工首页搬到 `/staff/*` 时，这里硬编码的 `/hygiene` 漏改，二维码扫出来是死路径。
 const staffEntryUrl = ref('')
 const entryCopied = ref(false)
 const qrCanvas = ref(null)
 
 async function renderStaffEntry() {
   // 用当前 origin：门店可能是内网 IP、也可能是域名，写死哪个都会有一半人打不开。
-  staffEntryUrl.value = `${window.location.origin}/hygiene`
+  staffEntryUrl.value = `${window.location.origin}${STAFF_ENTRY_PATH}`
   entryCopied.value = false
   await nextTick()
   if (!qrCanvas.value) return

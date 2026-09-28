@@ -154,7 +154,7 @@ class Settings(BaseSettings):
         """返回 orders 表路径（向后兼容）"""
         return self.DATABASE_PATHS["orders"]
 
-    # 餐厅爬虫配置（敏感字段已迁移到 services/credentials_store.py，由 /setup 页面维护）
+    # 餐厅爬虫配置（敏感字段已迁移到 services/credentials_store.py，由 /settings 页面维护）
     # 营业时段 / 轮询间隔 / headless / 重试等运行期配置改由 app_settings 表持久化，
     # 见 services/runtime_settings.py，可在「配置 → 运行配置」页面在线修改并热生效。
     RESTAURANT_BASE_URL: str = "https://restaurant.sealosgzg.site"

@@ -12,15 +12,15 @@ export const HYGIENE_BRAND_TITLE = '卫生'
 export const HYGIENE_BRAND_TAGLINE = '对照实拍验收'
 export const HYGIENE_DASHBOARD_BLURB = '花名册、责任区、验收、仪容仪表、整改、红黑榜、数据与照片'
 export const HYGIENE_ADMIN_NAV = [
-  { path: '/hygiene-roster', title: '花名册', shortTitle: '人员', icon: 'clipboard', code: 'ROSTER' },
-  { path: '/hygiene-zones', title: '卫生责任区', shortTitle: '责任区', icon: 'layout-grid', code: 'ZONES' },
-  { path: '/hygiene-daily', title: '日常验收', shortTitle: '日常', icon: 'check-circle', code: 'DAILY' },
+  { path: '/hygiene/roster', title: '花名册', shortTitle: '人员', icon: 'clipboard', code: 'ROSTER' },
+  { path: '/hygiene/zones', title: '卫生责任区', shortTitle: '责任区', icon: 'layout-grid', code: 'ZONES' },
+  { path: '/hygiene/daily', title: '日常验收', shortTitle: '日常', icon: 'check-circle', code: 'DAILY' },
   // 仪容仪表（票 12）：按人拍，名单由排班给（休假的与没排到的不在表上）。
-  { path: '/hygiene-attire', title: '仪容仪表', shortTitle: '仪容', icon: 'sparkles', code: 'ATTIRE' },
-  { path: '/hygiene-deep-clean', title: '专项卫生', shortTitle: '专项', icon: 'calendar', code: 'DEEP' },
-  { path: '/hygiene-fix', title: '整改单', shortTitle: '整改', icon: 'siren', code: 'FIX' },
-  { path: '/hygiene-boards', title: '红黑榜', shortTitle: '榜', icon: 'star', code: 'BOARDS' },
-  { path: '/hygiene-data', title: '数据与照片', shortTitle: '数据', icon: 'folder', code: 'ARCHIVE' },
+  { path: '/hygiene/attire', title: '仪容仪表', shortTitle: '仪容', icon: 'sparkles', code: 'ATTIRE' },
+  { path: '/hygiene/deep-clean', title: '专项卫生', shortTitle: '专项', icon: 'calendar', code: 'DEEP' },
+  { path: '/hygiene/fix', title: '整改单', shortTitle: '整改', icon: 'siren', code: 'FIX' },
+  { path: '/hygiene/boards', title: '红黑榜', shortTitle: '榜', icon: 'star', code: 'BOARDS' },
+  { path: '/hygiene/data', title: '数据与照片', shortTitle: '数据', icon: 'folder', code: 'ARCHIVE' },
 ]
 
 export const HYGIENE_STAFF_TABS = [
@@ -33,8 +33,19 @@ export const HYGIENE_STAFF_TABS = [
 
 export const HYGIENE_BACK_TO_ADMIN_LABEL = '后台'
 
+/** 管理端卫生页的共同前缀（票 05：八个页面从 `/hygiene-roster` 这类连字符路径收进这里）。
+ *
+ *  判据是前缀 + 导航清单两层：`/hygiene/` 这一段先卡住（`/staff/clean`、`/register`
+ *  与旧连字符路径 `/hygiene-roster` 都进不来 —— 后者连前缀都不匹配），再用清单收口，
+ *  这样 `/hygiene` 本路径（没有页面）、`/hygiene/login`、`/hygiene/register`
+ *  （票 02/03 删掉的员工侧两页）不会被当成管理端卫生页。
+ */
+export const HYGIENE_ADMIN_PREFIX = '/hygiene/'
+
 export function isHygieneAdminPath(pathname) {
-  return String(pathname || '').startsWith('/hygiene-')
+  const path = String(pathname || '')
+  if (!path.startsWith(HYGIENE_ADMIN_PREFIX)) return false
+  return HYGIENE_ADMIN_NAV.some((item) => path === item.path || path.startsWith(`${item.path}/`))
 }
 
 export function hygieneDocumentTitle(pageName) {

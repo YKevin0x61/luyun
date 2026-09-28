@@ -112,16 +112,17 @@ class WsIdentity:
     employee_id: Optional[int] = None
 
 
-async def identify_ws(websocket) -> Optional[WsIdentity]:
-    """校验 WebSocket 连接并解析出「这条连接是谁」：鉴权方式 + 员工 id。
+# 连接可以用 `?identity=` 显式声明自己带的是哪套凭据。取值只有这两个——声明
+# **只决定拿哪份凭据去验**，绝不放宽校验本身：声明 staff 时管理端 cookie / token
+# 一律不看，没有有效员工会话就拒绝连接（fail-closed），反之亦然。认不出的值也拒绝，
+# 不静默退回旧优先级——那会让拼错的声明悄悄拿到管理端身份。
+WS_IDENTITY_STAFF = "staff"
+WS_IDENTITY_ADMIN = "admin"
+_WS_IDENTITY_PARAM = "identity"
 
-    Session Cookie 优先，其次 `?token=` 携带的 API Token，最后员工（卫生/排班手机端）
-    的 Session Cookie。员工那一支必须把 employee_id 一起带出来：实时 hub 靠它做归属
-    隔离（只给本人派发 scope 里带 employee_id 的 nudge），而身份只能在这里——连接
-    建立时、cookie 验过之后——定下来，绝不能听客户端在 subscribe 里自报。
 
-    认不出来返回 None（端点据此 4401 关闭）。
-    """
+async def _admin_ws_identity(websocket) -> Optional[WsIdentity]:
+    """管理端凭据：Session Cookie 优先，其次 `?token=` 的 API Token。"""
     session_id = websocket.cookies.get(settings.SESSION_COOKIE_NAME)
     if await auth_service.validate_session_id(session_id):
         return WsIdentity(auth="session")
@@ -130,24 +131,62 @@ async def identify_ws(websocket) -> Optional[WsIdentity]:
     if token and await auth_service.validate_api_token(token):
         return WsIdentity(auth="api_token")
 
-    staff_session_id = websocket.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
-    if staff_session_id:
-        try:
-            from main import employee_accounts
-        except ImportError:
-            employee_accounts = None
-        if employee_accounts is not None:
-            employee = await employee_accounts.get_staff_session(staff_session_id)
-            if employee is not None:
-                # 取不到 id 也照样算 staff（fail-closed：hub 侧对没有 employee_id 的
-                # 员工连接不派发任何 scope 带 employee_id 的 nudge，只给全店级事件）。
-                return WsIdentity(auth="staff", employee_id=employee.get("id"))
-
     return None
 
 
+async def _staff_ws_identity(websocket) -> Optional[WsIdentity]:
+    """员工（卫生/排班手机端）Session Cookie。认不出返回 None。"""
+    staff_session_id = websocket.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    if not staff_session_id:
+        return None
+    try:
+        from main import employee_accounts
+    except ImportError:
+        employee_accounts = None
+    if employee_accounts is None:
+        return None
+    employee = await employee_accounts.get_staff_session(staff_session_id)
+    if employee is None:
+        return None
+    # 取不到 id 也照样算 staff（fail-closed：hub 侧对没有 employee_id 的
+    # 员工连接不派发任何 scope 带 employee_id 的 nudge，只给全店级事件）。
+    return WsIdentity(auth="staff", employee_id=employee.get("id"))
+
+
+async def identify_ws(websocket) -> Optional[WsIdentity]:
+    """校验 WebSocket 连接并解析出「这条连接是谁」：鉴权方式 + 员工 id。
+
+    优先级：**显式声明 > Session Cookie > `?token=` API Token > 员工 Session Cookie**。
+
+    显式声明（`?identity=staff|admin`）是「这台浏览器同时持两套 cookie 时用哪一份」的
+    答案：员工端页面的连接声明自己是员工，于是不会被管理端 cookie 顶掉（那会让
+    `allowed_topics` 全开、`_staff_owns_scope` 失效）。声明**只选凭据、不给身份**——
+    声明的那一支验不过就拒绝连接，不回落到另一支。不带声明时优先级一个字不变。
+
+    员工那一支必须把 employee_id 一起带出来：实时 hub 靠它做归属隔离（只给本人派发
+    scope 里带 employee_id 的 nudge），而身份只能在这里——连接建立时、cookie 验过
+    之后——定下来，绝不能听客户端在 subscribe 里自报。
+
+    认不出来返回 None（端点据此 4401 关闭）。
+    """
+    declared = websocket.query_params.get(_WS_IDENTITY_PARAM)
+    if declared is not None:
+        declared = declared.strip().lower()
+        if declared == WS_IDENTITY_STAFF:
+            return await _staff_ws_identity(websocket)
+        if declared == WS_IDENTITY_ADMIN:
+            return await _admin_ws_identity(websocket)
+        return None
+
+    identity = await _admin_ws_identity(websocket)
+    if identity is not None:
+        return identity
+    return await _staff_ws_identity(websocket)
+
+
 async def authenticate_ws(websocket) -> Optional[str]:
-    """校验 WebSocket 连接：Session Cookie 优先，其次 ?token= 携带的 API Token。
+    """校验 WebSocket 连接：显式声明（`?identity=`）优先，其余按 Session Cookie →
+    `?token=` API Token → 员工 Session Cookie 的优先级（见 `identify_ws`）。
 
     返回鉴权方式（"session" / "api_token" / "staff"），两者皆失败返回 None。
 

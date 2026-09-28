@@ -190,7 +190,7 @@ class PosSession:
         self._no_credentials = bundle is None
         if self._no_credentials:
             self.logger.warning(
-                "⚠️  尚未配置登录凭据，请访问 /setup 页面填写账号 / 密码 / 门店 ID 后再启动爬取"
+                "⚠️  尚未配置登录凭据，请访问 /settings 页面填写账号 / 密码 / 门店 ID 后再启动爬取"
             )
         else:
             self.logger.info(
@@ -374,7 +374,7 @@ class PosSession:
                             )
                             return False
                     else:
-                        self.logger.error("❌ 凭据信息不完整，请到 /setup 页面重新配置")
+                        self.logger.error("❌ 凭据信息不完整，请到 /settings 页面重新配置")
                         return False
 
                 except Exception as e:
@@ -728,7 +728,7 @@ class PosSession:
                 return status, None
 
     async def probe_busy_point_api_login_ok(self) -> Dict[str, Any]:
-        """用餐桌列表 API 校验当前会话是否已登录（供 /setup 验证）。"""
+        """用餐桌列表 API 校验当前会话是否已登录（供 /settings 验证）。"""
         try:
             status, body = await self._busy_point_api_request_raw()
             if status != 200:

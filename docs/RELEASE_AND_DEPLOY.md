@@ -15,7 +15,7 @@ ADR 0010（本机路径 `docs/adr/0010-github-release-update-job.md`，git check
 | 店内交付物是 **发行包 (Release Bundle)** | 单一归档：应用树 + 预构建 Admin/KDS + 版本清单 + 校验材料；装机与升级同款 |
 | 前端**只在发版机构建** | 店内机器**不装 Node**、不跑 `npm` / `uni` / `build_kds.sh` |
 | 已装身份以 **版本清单** 为准 | 不以部署目录 git tag / 单独 `APP_VERSION` 作为「已装发行版」权威 |
-| 日常升级走管理后台 | `/setup` →「系统更新」；真正干活的是旁路 **更新作业**（systemd oneshot 或 Docker 后台进程） |
+| 日常升级走管理后台 | `/settings`（系统配置页）→「系统更新」；真正干活的是旁路 **更新作业**（systemd oneshot 或 Docker 后台进程） |
 | 单机单实例单 worker | 禁止多 uvicorn worker、禁止多机共用同一份 `data/`；Docker 可以是进程外壳，**不是**以镜像 pull 为交付真相 |
 | 数据与代码分离 | 切换应用树时保留 `data/`（库、POS 凭据等）；更新前强制备份 |
 
@@ -127,7 +127,7 @@ ADR 0010（本机路径 `docs/adr/0010-github-release-update-job.md`，git check
 
 ### 2.6 发版后通知店内
 
-告知管理员：新正式 Release tag（如 `v0.2.0`）已发布 → 登录后台 → `/setup` →「系统更新」→ 版本检测（含更新环境自检）→ 应用更新。
+告知管理员：新正式 Release tag（如 `v0.2.0`）已发布 → 登录后台 → `/settings` →「系统更新」→ 版本检测（含更新环境自检）→ 应用更新。
 
 ---
 
@@ -141,7 +141,7 @@ ADR 0010（本机路径 `docs/adr/0010-github-release-update-job.md`，git check
 | 项 | 用途 | 落盘位置 |
 | --- | --- | --- |
 | 仓库名 | 固定在 `config.py`（默认 `YKevin0x61/luyun`） | Bootstrap 可能写入 `deploy/env.production` 的 `GITHUB_REPO` |
-| **可选**只读 PAT | 仅在 API 限流时提高额度 | `GITHUB_RELEASES_TOKEN`（env）或 `/setup` →「系统更新」→「GitHub 连接」（`data/github_release.enc`） |
+| **可选**只读 PAT | 仅在 API 限流时提高额度 | `GITHUB_RELEASES_TOKEN`（env）或 `/settings` →「系统更新」→「GitHub 连接」（`data/github_release.enc`） |
 
 
 公开仓装机不必创建 PAT。若日后需要 Token：权限收窄到本仓库 Contents/Metadata（及下载发行包等）只读即可；在管理后台更换后**无需重启**。  
@@ -228,7 +228,7 @@ luyun-install() {
    systemctl status luyun
    curl -s http://127.0.0.1:8000/api/healthz
   ```
-4. **首次初始化**：浏览器打开 `/login` 建管理员账号；`/setup` 填 POS 凭据；同一页「系统更新」可做版本检测 / 更新环境自检（公开仓无需 PAT）。
+4. **首次初始化**：浏览器打开 `/login` 建管理员账号（**初始化只在这里**）；登录后到系统配置页 `/settings` 填 POS 凭据；同一页「系统更新」可做版本检测 / 更新环境自检（公开仓无需 PAT）。
 5. **（建议）** 启用每日冷备 timer：`deploy/README.md` 备份章节。
 
 
@@ -238,7 +238,7 @@ luyun-install() {
 - [ ] `systemctl is-active luyun` 为 active  
 - [ ] `curl -s http://127.0.0.1:8000/api/system/health` 正常  
 - [ ] 经域名可打开管理后台并登录  
-- [ ] `/setup`「系统更新」能列出远端正式 Release，且更新环境自检可读（公开仓匿名即可）  
+- [ ] `/settings`「系统更新」能列出远端正式 Release，且更新环境自检可读（公开仓匿名即可）  
 - [ ] KDS `/kds` 可打开  
 - [ ] POS 凭据配置后采集循环无鉴权错误（按营业时段）  
 
@@ -255,7 +255,7 @@ luyun-install() {
 ```text
 开发者 publish_release（产出发行包 + SHA256SUMS + install.sh）
         ↓
-管理员登录 → /setup →「系统更新」
+管理员登录 → /settings →「系统更新」
         ↓
 版本检测（本机版本清单 / 可用列表 / 是否有更新）
         + 更新环境自检（红绿灯：重启能力、凭据、进行中作业、脏树等）
@@ -366,7 +366,7 @@ Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 �
 
 ### 5.7 更新后服务起不来（故障处理）
 
-现象：Apply Update 之后 `/setup` 整页打不开、`curl 127.0.0.1:8000/api/healthz` 无响应，
+现象：Apply Update 之后 `/settings` 整页打不开、`curl 127.0.0.1:8000/api/healthz` 无响应，
 `systemctl status luyun` 显示 `failed`。作业状态可能一直停在 `restarting`——健康确认由
 页面轮询 `/api/release-update/job` 时顺带完成，主服务没起来就没人做这一步；上一版应用树
 仍在 `<deploy>.prev`（`<deploy>` 就是部署根目录，Docker 形态是 `deploy/runtime/app`）。
@@ -388,7 +388,7 @@ sudo systemctl start luyun.service      # 只有 reset-failed 之后才会被接
    `<deploy>/data/update_job.log`。
 2. **环境/配置类**（缺 `REDIS_URL`、`POSTGRES_DSN` 写错、Redis 没起、`deploy/env.production`
    被改坏）：**先修配置，不要回退版本**——回退只是把同一个坑推到下一次更新。改完执行上面两条
-   命令；服务起来后回 `/setup` →「系统更新」，「更新成功」的第二半（健康确认）会自己走完，
+   命令；服务起来后回 `/settings` →「系统更新」，「更新成功」的第二半（健康确认）会自己走完，
    状态从 `restarting` 收敛到 `succeeded`。
 3. **发行包/代码类**（日志是 import 错误、新版本自身缺依赖等）：回退版本。页面能打开就点页面上的
    「回到上一版本」（§5.4）；页面打不开就按下面换回旧树。
@@ -440,9 +440,9 @@ restart policy 决定，排查用
 | --- | --- | --- |
 | 发新版本 | 开发机 `scripts/publish_release.sh vX.Y.Z` | GitHub Release + 发行包 + `SHA256SUMS` + `install.sh` |
 | 新机器 | `curl …/install.sh \| sudo -E bash` + 人工反代/env/POS | 可启动的运行实例（版本清单已落盘） |
-| 店内升级/软件回滚 | `/setup` →「系统更新」 | Update Job 切到目标发行版；重启后由管理后台完成健康确认 |
+| 店内升级/软件回滚 | `/settings` →「系统更新」 | Update Job 切到目标发行版；重启后由管理后台完成健康确认 |
 | 看进度/失败 | 同页轮询；或 `data/update_job.*` / `journalctl -u luyun-update` | 阶段与错误信息；最近若干次结果见「更新历史」 |
-| 数据回滚 | `/setup` →「备份中心」→ 恢复 | 先建前置快照，再按内容类别恢复 |
+| 数据回滚 | `/settings` →「备份中心」→ 恢复 | 先建前置快照，再按内容类别恢复 |
 | 日常数据冷备 | `deploy/backup.sh` 或 backup timer | `backups/<timestamp>/luyun_cold_backup.tar` + `backups/cold_backup_status.json` |
 
 > 备份点保留份数在「备份中心 → 保留与清理」配置：本机回滚快照默认 5（上限 20）、
@@ -495,7 +495,7 @@ cp deploy/.env.docker.example deploy/.env.docker
 ./scripts/docker_up.sh
 
 # —— 店内升级 ——
-# 浏览器: https://<域名>/setup → 系统更新
+# 浏览器: https://<域名>/settings → 系统更新
 
 # —— 排障 ——
 journalctl -u luyun -n 100 --no-pager

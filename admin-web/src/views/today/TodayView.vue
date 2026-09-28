@@ -175,15 +175,15 @@ const ENTRIES = [
   { key: 'leave', label: '请假' },
   { key: 'swap', label: '换班' },
   // 整月有地方可去了（票 06）；请假（票 08）与换班（票 09）都在下面打开一张表单。
-  { key: 'month', label: '整月', to: '/today/month' },
+  { key: 'month', label: '整月', to: '/staff/month' },
 ]
 
 // 会话没了（换了手机、店里停了账号、cookie 过期）：回员工登录，回来还是这一页。
-// 跟卫生首页同一个走法（`leaveForStaffLogin`）：把当前地址整个带过去，
-// 员工只有一套登录，登录页也是同一个。
+// 票 03 起员工登录页就是 `/login` 的员工栏（`?next=` 落在员工端前缀内时面板会强制
+// 开员工栏）；跟卫生首页同一个走法（`leaveForStaffLogin`）：把当前地址整个带过去。
 function leaveForStaffLogin() {
   router.replace({
-    path: '/hygiene/login',
+    path: '/login',
     query: { next: router.currentRoute.value.fullPath },
   })
 }
@@ -660,7 +660,7 @@ useNudgePull({
             </template>
 
             <div class="acts">
-              <button class="btn" type="button" @click="router.push('/hygiene')">
+              <button class="btn" type="button" @click="router.push('/staff/clean')">
                 {{ hygieneStats.remaining ? '去交 / 继续验收 ›' : '去卫生待办 ›' }}
               </button>
             </div>

@@ -183,7 +183,7 @@ def _validate_verify_phone_password_shop(
 
 @router.post("/discover-shops")
 async def discover_shops_view(payload: CredentialVerifyIn) -> Dict[str, Any]:
-    """龙管家 2.0 登录后拉取可管理的 cy7mm 门店列表（供 /setup 自动填充）。"""
+    """龙管家 2.0 登录后拉取可管理的 cy7mm 门店列表（供 /settings 自动填充）。"""
     existing = credentials_store.get_credentials()
     phone, password, _, _, _, _ = _resolve_verify_credentials(payload, existing)
     _validate_verify_phone_password_shop(phone, password, "", "", "", require_shop=False)

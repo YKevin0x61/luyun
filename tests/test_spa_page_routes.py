@@ -2,16 +2,16 @@
 # -*- coding: utf-8 -*-
 """前后端 SPA 页面路由契约：vue-router 注册的页面路径必须都能被后端命中。
 
-缺陷背景（`.scratch/project-review-2026-09-22` DOC-01）：`/hygiene-data` 只在
-`admin-web/src/router/index.js:47` 注册，`main.py` 的页面路由清单漏了它，而
-`main.py` 没有 catch-all。直连 uvicorn（Docker 场景 `deploy/docker-entrypoint.sh`、
+缺陷背景（`.scratch/project-review-2026-09-22` DOC-01）：`/hygiene-data`（票 05 起是
+`/hygiene/data`）只在 `admin-web/src/router/index.js` 注册，`main.py` 的页面路由清单漏了
+它，而 `main.py` 没有 catch-all。直连 uvicorn（Docker 场景 `deploy/docker-entrypoint.sh`、
 运维 curl 排查）硬导航或刷新该路径就是 404 —— 管理端里点得进去，一刷新就 404，
 很容易被误判成反代故障。
 
 **为什么不能靠反代兜底**：`deploy/nginx.conf:92` 的
 `location ~ ^/(admin|sales-report|logs|prep-plan|wecom-push|recipe)(/.*)?$` 与
 `deploy/Caddyfile:81-82` 的 `@spa path` 是同样六个前缀，`try_files … /index.html`
-只写在这两个白名单块里；`/hygiene-*`、`/login`、`/setup` 全部落到兜底的
+只写在这两个白名单块里；`/hygiene/*`、`/login`、`/settings` 全部落到兜底的
 `reverse_proxy 127.0.0.1:8000`。所以 hygiene 页面必须在 `main.py` 里逐条注册，
 本文件按这个前提断言。
 
@@ -57,7 +57,8 @@ def _router_page_paths_by_form() -> dict[str, list[str]]:
 
     - `path: '/x'`：直接写的路由对象（含 `/`、`/admin`、`/hygiene` 等）；
     - `hygieneAdminPage('/x', …)`：卫生管理端页面（套 HygieneAdminLayout）；
-    - `hygieneStaffAuthPage('/x', …)`：员工手机端页面（当前是 `/hygiene/login`、`/hygiene/register`）。
+    - `hygieneStaffAuthPage('/x', …)`：员工手机端页面（票 03 起只剩 `/register`；
+      员工登录页已并入 `/login`）。
     """
     block = _router_routes_block()
     return {
@@ -95,17 +96,17 @@ def _registered_get_paths() -> set[str]:
 
 class SpaPageRouteContractTest(unittest.TestCase):
     def test_router_registers_hygiene_data(self):
-        """本票的缺陷锚点：前端确实注册了 /hygiene-data。"""
-        self.assertIn("/hygiene-data", _router_page_paths())
+        """本票的缺陷锚点：前端确实注册了 /hygiene/data（票 05 前的 /hygiene-data）。"""
+        self.assertIn("/hygiene/data", _router_page_paths())
 
     def test_router_parse_covers_all_three_registration_forms(self):
         by_form = _router_page_paths_by_form()
         self.assertGreaterEqual(len(by_form["path:"]), 10)
-        self.assertIn("/hygiene-roster", by_form["hygieneAdminPage"])
-        self.assertIn("/hygiene-data", by_form["hygieneAdminPage"])
+        self.assertIn("/hygiene/roster", by_form["hygieneAdminPage"])
+        self.assertIn("/hygiene/data", by_form["hygieneAdminPage"])
         self.assertEqual(
             {"hygieneStaffAuthPage": sorted(by_form["hygieneStaffAuthPage"])},
-            {"hygieneStaffAuthPage": ["/hygiene/login", "/hygiene/register"]},
+            {"hygieneStaffAuthPage": ["/register"]},
         )
 
     def test_every_router_page_is_registered_on_the_backend(self):
@@ -121,8 +122,8 @@ class SpaPageRouteContractTest(unittest.TestCase):
     def test_hygiene_data_page_route_exists(self):
         import main as main_module
 
-        self.assertIn("/hygiene-data", main_module.SPA_PAGE_ROUTES)
-        self.assertIn("/hygiene-data", _registered_get_paths())
+        self.assertIn("/hygiene/data", main_module.SPA_PAGE_ROUTES)
+        self.assertIn("/hygiene/data", _registered_get_paths())
 
     def test_spa_page_routes_constant_matches_registration(self):
         """常量是注册与测试共用的唯一清单：改了常量却漏注册（或反过来）要红。"""
@@ -146,7 +147,7 @@ class SpaPageRouteContractTest(unittest.TestCase):
         )
 
     def test_hygiene_data_serves_the_spa_shell_instead_of_404(self):
-        """直连 uvicorn 时 /hygiene-data 必须返回 SPA 外壳（而不是 404）。"""
+        """直连 uvicorn 时 /hygiene/data 必须返回 SPA 外壳（而不是 404）。"""
         import main as main_module
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,21 +159,21 @@ class SpaPageRouteContractTest(unittest.TestCase):
                 client = TestClient(main_module.app)
                 # 非页面请求（curl / 探针：Accept 不是 text/html）不经过登录墙，
                 # 直接命中页面路由 —— 修复前这条就是 404。
-                response = client.get("/hygiene-data")
+                response = client.get("/hygiene/data")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("text/html", response.headers["content-type"])
                 self.assertIn("禄云管理后台", response.text)
 
                 # 浏览器硬导航：未登录由 HtmlAuthMiddleware 302 到 /login，也不是 404。
                 navigation = client.get(
-                    "/hygiene-data",
+                    "/hygiene/data",
                     headers={"accept": "text/html"},
                     follow_redirects=False,
                 )
                 self.assertEqual(navigation.status_code, 302)
                 self.assertEqual(
                     navigation.headers["location"],
-                    "/login?next=%2Fhygiene-data",
+                    "/login?next=%2Fhygiene%2Fdata",
                 )
             finally:
                 main_module.spa_index_path = original

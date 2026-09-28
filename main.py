@@ -675,11 +675,18 @@ from starlette.requests import Request
 # The SPA shell is public (it only boots the client router); protected pages are
 # still enforced by the router/API. The Service Worker also needs to precache it.
 # 员工页面也在里面：手机上没有管理端会话，拦在服务端就永远进不去（员工会话由客户端
-# 守卫查那个 cookie）。`/hygiene` 是卫生那块的入口，`/today` 是排班的「今天」页。
-HTML_AUTH_EXACT = {"/login", "/login.html", "/index.html", "/hygiene", "/today"}
+# 守卫查那个 cookie）。票 04 起员工端整体住在 `/staff/*`（今天/整月/卫生首页），
+# 免墙入口是前缀本身那条 `/staff`；`/staff/*` 走下面的前缀表。
+# `/register` 是员工自助注册页（票 02 从 `/hygiene/register` 搬到顶层，在员工前缀之外，
+# 只能逐条精确放行 —— 跟 admin-web/src/utils/staffPaths.js 的 STAFF_PHONE_EXACT 对表）。
+# **系统配置页 `/settings`（票 06 从 `/setup` 改名）不在这张表里，也不许加进来**：它是
+# 需要会话的页面，加进来就是对未登录访客放行 POS 凭据 / 数据库凭据 / API Token。
+# 首次初始化（创建管理员账号）在 `/login` 的管理员栏里，跟这一页无关。
+HTML_AUTH_EXACT = {"/login", "/login.html", "/index.html", "/staff", "/register"}
 # Keep in lockstep with admin-web/src/utils/loginNext.js RECIPE_READER_PATHS.
 # Do not use a /recipe prefix — /recipe/manage still requires a session.
-# Staff-phone lives under /hygiene, /hygiene/... and /today ; /hygiene-roster is Admin SPA.
+# Staff-phone entry pages live under `/staff/*`; `/hygiene/*` (票 05 起八个管理端
+# 卫生页住在这里) is Admin SPA. There is no `/hygiene/` prefix any more (票 03 删掉了它)。
 HTML_AUTH_PUBLIC_PAGES = frozenset({
     "/recipe",
     "/recipe/detail",
@@ -692,10 +699,16 @@ HTML_AUTH_PREFIXES = (
     "/kds",
     "/assets/",
     "/pwa/",
-    "/hygiene/",
-    # 员工页带尾斜杠时也放行：`/today/` 精确表兜不住，被甩到 /login 的话员工
+    # 票 03 删掉了 `/hygiene/`：它以前是员工登录页的免墙前缀，而员工登录页已并入
+    # `/login`，`/hygiene/` 底下再没有任何员工页。留着它，票 05 把八个卫生管理页
+    # 搬进 `/hygiene/*` 之后它们就对未登录访客放行了 —— 这是本次唯一会造成未授权
+    # 访问的地方，`tests/test_auth.py` 里有反向断言（前缀名单里没有 `/hygiene/`）
+    # 与正向断言（八个页面未登录仍 302 到 `/login`）各一条。
+    # 员工页带尾斜杠时也放行：`/staff/` 精确表兜不住，被甩到 /login 的话员工
     # 在管理端登录页登不进去。放行之后照 SPA 那套 307 回不带尾斜杠的那条。
-    "/today/",
+    # 票 04 起整段 `/staff/` 都是员工领土（今天 /staff/today、整月 /staff/month、
+    # 卫生首页 /staff/clean），所以前缀就是它本身。
+    "/staff/",
 )
 HTML_AUTH_SUFFIXES = (
     ".css",
@@ -1099,13 +1112,17 @@ async def kds_manifest():
 # `try_files … /index.html` 也只写在 admin|sales-report|logs|prep-plan|wecom-push|recipe
 # 六个前缀的白名单块里（deploy/nginx.conf、deploy/Caddyfile），hygiene 页面一律落到
 # 反代兜底转发 —— 漏一条就是直连/反代硬导航 404（DOC-01 的 /hygiene-data 就是这么漏的）。
+# 票 05 起八个管理端卫生页住在 `/hygiene/*`（`/hygiene` 本路径没有页面）。
+# 票 06 起系统配置页从 `/setup` 改名 `/settings` —— 它一直不是首次初始化页（建管理员账号
+# 在 `/login` 的管理员栏），旧地址不做兼容、不留别名。
 SPA_PAGE_ROUTES = (
     "/",
     "/index.html",
     "/admin",
     "/admin/",
     "/login",
-    "/setup",
+    "/register",
+    "/settings",
     "/sales-report",
     "/prep-plan",
     "/wecom-push",
@@ -1115,19 +1132,17 @@ SPA_PAGE_ROUTES = (
     "/recipe/manage",
     "/recipe/qr",
     "/logs",
-    "/hygiene",
-    "/hygiene/login",
-    "/hygiene/register",
-    "/today",
-    "/today/month",
-    "/hygiene-roster",
-    "/hygiene-zones",
-    "/hygiene-daily",
-    "/hygiene-deep-clean",
-    "/hygiene-fix",
-    "/hygiene-boards",
-    "/hygiene-data",
-    "/hygiene-attire",
+    "/staff/today",
+    "/staff/month",
+    "/staff/clean",
+    "/hygiene/roster",
+    "/hygiene/zones",
+    "/hygiene/daily",
+    "/hygiene/deep-clean",
+    "/hygiene/fix",
+    "/hygiene/boards",
+    "/hygiene/data",
+    "/hygiene/attire",
     "/scheduling",
     "/scheduling/inbox",
     "/scheduling/shifts",
@@ -1511,9 +1526,9 @@ async def run_restaurant_scraper():
         
         while True:
             try:
-                # 没有登录凭据时进入待机，等待用户在 /setup 配置后由 reload_credentials 唤醒
+                # 没有登录凭据时进入待机，等待用户在 /settings 配置后由 reload_credentials 唤醒
                 if restaurant_scraper.no_credentials:
-                    logger.info("⏸️  无登录凭据，请访问 /setup 页面配置后再启动爬取")
+                    logger.info("⏸️  无登录凭据，请访问 /settings 页面配置后再启动爬取")
                     await asyncio.sleep(60)
                     restaurant_scraper.load_credentials_sync()
                     continue

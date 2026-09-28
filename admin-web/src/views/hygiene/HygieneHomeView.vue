@@ -443,8 +443,10 @@ function isAuthError(err) {
 
 function leaveForStaffLogin() {
   imageUploads.clearTasksByTransport('staff')
+  // 票 03 起员工登录页就是 `/login` 的员工栏：`?next=` 落在员工端前缀内时面板会强制
+  // 开员工栏，登回来还是这一页。
   router.replace({
-    path: '/hygiene/login',
+    path: '/login',
     query: { next: router.currentRoute.value.fullPath },
   })
 }
@@ -725,7 +727,11 @@ async function logout() {
   } catch {
     // Session may already be gone; still leave the phone entry.
   }
-  router.replace('/hygiene/login')
+  // 退出后落在 `/login` 的员工栏，并把原来这一页带上：重新登录回到原处。
+  router.replace({
+    path: '/login',
+    query: { next: router.currentRoute.value.fullPath },
+  })
 }
 
 function canShootDeep(row) {
@@ -1305,9 +1311,9 @@ async function decide(action, reason = '') {
             <span class="hy-brand-tagline">{{ HYGIENE_BRAND_TAGLINE }}</span>
           </span>
         </div>
-        <!-- 回「今天」页（票 05 的排班卡）：员工登录后落在 /today，卫生是它的下半张卡。
+        <!-- 回「今天」页（票 05 的排班卡）：员工登录后落在 /staff/today，卫生是它的下半张卡。
              少这条回程就是单行道 —— iOS 的 PWA 独立窗口没有返回键，点进来就出不去了。 -->
-        <router-link class="hy-work-today" to="/today" aria-label="回到「今天」页看我的班">
+        <router-link class="hy-work-today" to="/staff/today" aria-label="回到「今天」页看我的班">
           ‹ 今天
         </router-link>
         <!-- 今天在哪：**只读**（票 10）。以前点它还能重选，现在班次和责任区由排班决定，
@@ -1332,7 +1338,7 @@ async function decide(action, reason = '') {
         role="status"
       >
         今天没有排到你的班（或者责任区对不上），日常检查交不了。
-        <button type="button" class="btn" @click="router.push('/today')">去看我的班</button>
+        <button type="button" class="btn" @click="router.push('/staff/today')">去看我的班</button>
       </p>
 
       <section v-if="tab === 'inbox'">
@@ -1357,7 +1363,7 @@ async function decide(action, reason = '') {
           <button
             type="button"
             class="btn btn-primary btn-block hy-staff-submit"
-            @click="router.push('/today')"
+            @click="router.push('/staff/today')"
           >去看我的班 ›</button>
         </template>
         <template v-else-if="employee">

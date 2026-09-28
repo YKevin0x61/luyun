@@ -8,6 +8,8 @@ import { useRealtime } from './composables/useRealtime'
 import { usePwaUpdate } from './composables/usePwaUpdate'
 import { useStationsStore } from './stores/stations'
 import { isHygieneAdminPath } from './utils/hygieneCopy'
+import { resolveLoginTab } from './utils/loginNext'
+import { loadLoginTab } from './utils/loginPrefs'
 import { applyPwaManifest } from './utils/pwaManifest'
 
 const route = useRoute()
@@ -16,8 +18,22 @@ const pwaUpdate = usePwaUpdate()
 const isStandalone = computed(() => !!route.meta.standalone)
 const isHygieneAdmin = computed(() => isHygieneAdminPath(route.path))
 const realtimeEnabled = computed(() => route.meta.realtime === true || !route.meta.public)
+// 员工端页面的实时连接显式声明自己是员工（票 08）：同一浏览器可能同时持管理端与
+// 员工端两套 cookie，服务端默认「管理端优先」，不声明就会被判成管理端身份——主题
+// 白名单全开、员工之间「只看得到与自己有关的那条」的隔离失效。判据用页面自己那条
+// `meta.staffAuth`（与路由守卫同一个标记），不另写一份路径正则；管理端页面不带声明，
+// 默认优先级本来就对。声明写在连接 URL 上，路由换了身份就换连接（composable 负责重连）。
+const realtimeIdentity = computed(() => (route.meta.staffAuth ? 'staff' : null))
 
-watch(() => route.path, (path) => applyPwaManifest(path), { immediate: true })
+// PWA 清单归属跟面板用的是同一个判据（`utils/loginNext.js` 的 `resolveLoginTab`）：
+// `/login` 一条路径装两种身份，装出来是哪份应用看当下停在哪一栏 —— 员工栏是员工应用
+// （打开即 `/staff/today`），管理栏是管理应用。`?next=` 会改这一栏，所以也盯着它；
+// 其余路径由路径本身决定归属，多带一个身份不影响（面板里点 Tab 时由 `LoginView.vue` 换）。
+watch(
+  [() => route.path, () => route.query.next],
+  () => applyPwaManifest(route.path, resolveLoginTab(route.query.next, loadLoginTab())),
+  { immediate: true },
+)
 
 const listeners = new Set()
 function onRealtimeEvent(event) {
@@ -30,7 +46,7 @@ provide('onRealtimeEvent', (fn) => {
 
 const { connected, latencyMs, subscribe, unsubscribe } = useRealtime(
   onRealtimeEvent,
-  { enabled: realtimeEnabled },
+  { enabled: realtimeEnabled, identity: realtimeIdentity },
 )
 provide('wsSubscribe', subscribe)
 provide('wsUnsubscribe', unsubscribe)

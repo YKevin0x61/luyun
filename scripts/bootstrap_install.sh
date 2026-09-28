@@ -129,7 +129,7 @@ manual_followups:
   - Redis is required: keep REDIS_URL in ${ENV_FILE} pointing at a reachable instance
     (install redis-server/redis on this machine, or use an existing instance)
   - configure reverse proxy + TLS (deploy/Caddyfile or deploy/nginx.conf)
-  - enter POS credentials via /setup
+  - enter POS credentials via /settings
 EOF
 }
 
@@ -144,7 +144,7 @@ print_manual_followups() {
      (Bootstrap writes REDIS_URL=${REDIS_URL_DEFAULT} when it finds a local Redis)
   3. Configure reverse proxy + TLS (Caddy/Nginx; see deploy/Caddyfile or deploy/nginx.conf)
   4. Start main service: sudo systemctl start luyun.service
-  5. Enter POS credentials in Admin /setup
+  5. Enter POS credentials in Admin /settings
   (If Bootstrap was not run as root: create user luyun, install staged units from
    ${DEPLOY_DIR}/deploy/systemd-staged/ into /etc/systemd/system/, then enable.)
 

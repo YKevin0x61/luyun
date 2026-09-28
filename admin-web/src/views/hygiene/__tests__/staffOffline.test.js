@@ -41,18 +41,19 @@ describe('员工端弱网与未登录的分流', () => {
     expect(home).toMatch(/query: \{ next: router\.currentRoute\.value\.fullPath \}/)
   })
 
-  it('uses that return path on the login page, but only inside the staff pages', () => {
-    // 直接把 query 拿去 replace 就是开放重定向：必须限定站内前缀。票 05 起员工
-    // 有两条落点 —— 卫生那块的 /hygiene 和排班的「今天」页 /today。
+  it('uses that return path on the login panel, but only inside the staff pages', () => {
+    // 直接把 query 拿去 replace 就是开放重定向：必须限定站内前缀。票 03 起员工登录
+    // 就在 `/login` 的员工栏（`?next=` 落在员工端前缀内时面板强制开员工栏）；票 04 起
+    // 员工端三页整体在 `/staff/*`（今天 /staff/today、整月 /staff/month、卫生 /staff/clean）。
     // 判据只在 utils/loginNext.js 的 `resolveStaffNext` 里写一遍（真单测在
     // utils/__tests__/loginNext.test.js）：页面里手写正则等于第二份更弱的判据，
     // 放松了也没人拦。
-    const login = readFileSync(join(here, '../HygieneLoginView.vue'), 'utf8')
+    const login = readFileSync(join(here, '../../LoginView.vue'), 'utf8')
     expect(login).toMatch(/resolveStaffNext\(route\.query\.next\)/)
-    expect(login).not.toContain('hygiene|today')
-    expect(login).toMatch(/router\.replace\(nextPath\)/)
+    expect(login).not.toMatch(/startsWith\('\/staff'\)/)
+    expect(login).toMatch(/router\.replace\(resolveStaffNext\(route\.query\.next\)\)/)
     expect(login).not.toMatch(/router\.replace\(route\.query\.next\)/)
-    expect(login).not.toMatch(/router\.replace\('\/hygiene'\)/)
+    expect(login).not.toMatch(/router\.replace\('\/staff/)
   })
 
   it('also redirects when a post-login fetch comes back 401', () => {

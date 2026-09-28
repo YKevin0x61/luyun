@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   STAFF_REQUEST_TIMEOUT_MS,
-  hygieneLoginUrl,
   staffRequest,
   staffSessionState,
 } from '../hygieneStaff'
@@ -69,14 +68,6 @@ describe('staffRequest', () => {
 
   it('uses an 8 second default budget for JSON calls', () => {
     expect(STAFF_REQUEST_TIMEOUT_MS).toBe(8000)
-  })
-})
-
-describe('hygieneLoginUrl', () => {
-  it('encodes the return path so the staff loses nothing on re-login', () => {
-    expect(hygieneLoginUrl('/hygiene?tab=fix')).toBe(
-      '/hygiene/login?next=%2Fhygiene%3Ftab%3Dfix',
-    )
   })
 })
 

@@ -18,11 +18,13 @@
 - 企微推送（`/wecom-push`）：Webhook 管理、推送任务管理、消息预览与立即发送、发送记录
 - 备货计划（`/prep-plan`）：一键生成执行清单、档口执行板、辅助信息
 - 实时日志（`/logs`）：实时跟踪 / 历史查询、级别与 logger 过滤、统计面板
-- 卫生管理端（`/hygiene-roster`、`/hygiene-zones`、`/hygiene-daily`、
-  `/hygiene-deep-clean`、`/hygiene-fix`、`/hygiene-boards`、`/hygiene-data`）：
-  排班、责任区、日常与专项计划、整改单、红黑榜、卫生数据台账（浏览 / 导出 / 清理）
-- 排班（店长端 `/scheduling`、`/scheduling/inbox` 与 `/scheduling/shifts`、员工端 `/today` 与
-  `/today/month`）：
+- 卫生管理端（`/hygiene/roster`、`/hygiene/zones`、`/hygiene/daily`、
+  `/hygiene/deep-clean`、`/hygiene/fix`、`/hygiene/boards`、`/hygiene/data`、
+  `/hygiene/attire`）：
+  排班、责任区、日常与专项计划、整改单、红黑榜、卫生数据台账（浏览 / 导出 / 清理）、
+  仪容仪表（按人拍，名单由排班给）
+- 排班（店长端 `/scheduling`、`/scheduling/inbox` 与 `/scheduling/shifts`、员工端 `/staff/today` 与
+  `/staff/month`）：
   固定班次、责任区默认、轮转周期，由系统展开成月历；店长能点某天的某人**就地改那一天**
   （票 07：换班次 / 改成休 / 只换区，只动这一天、规则一个字不改，改过的日子带青点、
   撤掉覆盖就回到规则）；员工在「今天」页**提请假**（一天或一段，没批之前能撤回），
@@ -36,10 +38,12 @@
   N 个班次渲染）；
   员工端「今天」页是员工登录后的落点，「整月」页（票 06）
   按日历列出自己这个月的班别，两页都只读自己的班（卫生那块下一张票接到「今天」页上）
-- 员工手机端（`/today`、`/today/month`、`/hygiene`、`/hygiene/login`、`/hygiene/register`）：
+- 员工手机端（票 04 起整体在 `/staff/*`：`/staff/today`、`/staff/month`、`/staff/clean`，
+  另有 `/register`）：登录入口是 `/login`
+  的员工栏（票 03 起一个面板两个 Tab，员工登录页 `/hygiene/login` 已删除）。
   独立员工会话、实时 nudge 刷新、离线重试；票 05 起登录后落在「今天」页（排班的员工入口），
-  卫生那块也在同一套会话下
-- 初始设置（`/setup`）：POS 凭据、数据库凭据、备份中心、系统更新（版本检测 /
+  卫生那块也在同一套会话下。旧的 `/today`、`/today/month`、`/hygiene` 一律删除、不留别名
+- 系统配置页（`/settings`）：POS 凭据、数据库凭据、备份中心、系统更新（版本检测 /
   环境自检 / 应用更新 / 数据库迁移）。数据库只支持 PostgreSQL（ADR 0089），
   数据库凭据面板也按 PostgreSQL 连接展示
 - WebSocket 实时事件驱动刷新（订单 / 餐桌 / 卫生）
@@ -119,4 +123,5 @@ src/
 
 - 主 vendor chunk（Vue/Pinia/Router/ECharts 合并）约 1.1MB，未做手动分包
   （`build.rollupOptions.output.manualChunks`），首屏加载可进一步优化
-- 登录/初始设置已是 SPA 路由（`/login`、`/setup`），不再使用独立静态 HTML
+- 登录、员工注册与系统配置页已是 SPA 路由（`/login`、`/register`、`/settings`），不再使用独立
+  静态 HTML；首次初始化（建管理员账号）在 `/login` 的管理员栏里，系统配置页不是初始化页

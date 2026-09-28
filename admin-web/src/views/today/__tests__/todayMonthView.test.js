@@ -23,8 +23,9 @@ describe('员工端「整月」页（票 06）', () => {
     expect(view).not.toMatch(/staffRequest\([^)]*employee_id/)
     expect(view).not.toMatch(/\/api\/hygiene/)
     expect(view).not.toMatch(/\/api\/scheduling\/(roster|calendar|day|rules)/)
-    // 401 回员工登录（同一个登录页），把当前地址整个带过去。
-    expect(view).toMatch(/path: '\/hygiene\/login'/)
+    // 401 回员工登录（票 03 起是 /login 的员工栏），把当前地址整个带过去。
+    expect(view).toMatch(/path: '\/login'/)
+    expect(view).not.toMatch(/path: '\/hygiene\/login'/)
     expect(view).toMatch(/next: router\.currentRoute\.value\.fullPath/)
   })
 
@@ -134,16 +135,16 @@ describe('员工端「整月」页（票 06）', () => {
   })
 
   it('is registered as a staff page on both sides', () => {
-    expect(router).toMatch(/path: '\/today\/month', name: 'today-month'/)
+    expect(router).toMatch(/path: '\/staff\/month', name: 'today-month'/)
     expect(router).toMatch(/views\/today\/TodayMonthView\.vue/)
-    expect(router).toMatch(/path: '\/today\/month'[\s\S]{0,200}?staffAuth: true/)
-    expect(router).toMatch(/path: '\/today\/month'[\s\S]{0,200}?staffProbe: false/)
+    expect(router).toMatch(/path: '\/staff\/month'[\s\S]{0,200}?staffAuth: true/)
+    expect(router).toMatch(/path: '\/staff\/month'[\s\S]{0,200}?staffProbe: false/)
     // 后端那一侧（`SPA_PAGE_ROUTES`、`HTML_AUTH_PREFIXES`、尾斜杠）由行为级契约盯着：
     // `tests/test_spa_page_routes.py` 拿 `main.app.routes` 的真实路径集合对表、
     // `tests/test_auth.py::test_staff_phone_pages_accessible_without_admin_session` 走请求。
     // 这里不再抓 `main.py` 的源码文本（票 02 #18：弱断言重说一遍强断言的事，改个写法就假红）。
     // 入口：「今天」页那张卡上的「整月」不是一句「还没开放」，而是真的走过去。
-    expect(today).toMatch(/\{\s*key: 'month',\s*label: '整月',\s*to: '\/today\/month'\s*\}/)
+    expect(today).toMatch(/\{\s*key: 'month',\s*label: '整月',\s*to: '\/staff\/month'\s*\}/)
     expect(today).toMatch(/router\.push\(entry\.to\)/)
   })
 

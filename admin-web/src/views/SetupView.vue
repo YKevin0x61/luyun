@@ -40,7 +40,7 @@ function goBack() {
 
 // 迁移自 public/setup.html：POS 凭据配置 + 账号/API Token 管理。
 // 写接口一律走 api/client.js（自带 credentials:'include' 与 401 处理），
-// client.js 已针对 /login、/setup 关闭 401 自动跳转，避免在本页造成重定向死循环。
+// client.js 已针对 /login、/settings 关闭 401 自动跳转，避免在本页造成重定向死循环。
 
 const SECTIONS = [
   { id: 'pos', label: 'POS 凭据', icon: 'store' },

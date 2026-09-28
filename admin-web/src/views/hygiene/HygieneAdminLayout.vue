@@ -43,7 +43,7 @@ watch(
     <a class="hy-skip" href="#hygiene-admin-main">跳到内容</a>
 
     <nav class="hy-tabbar" aria-label="卫生管理">
-      <router-link class="hy-brand hy-brand-rail" to="/hygiene-roster">
+      <router-link class="hy-brand hy-brand-rail" to="/hygiene/roster">
         <span class="hy-brand-mark" aria-hidden="true">{{ HYGIENE_BRAND_MARK }}</span>
         <span class="hy-brand-text">
           <span class="hy-brand-title">{{ HYGIENE_BRAND_TITLE }}</span>
@@ -76,7 +76,7 @@ watch(
     <div class="hy-shell">
       <header class="hy-header">
         <div class="hy-header-inner">
-          <router-link class="hy-brand hy-brand-top" to="/hygiene-roster">
+          <router-link class="hy-brand hy-brand-top" to="/hygiene/roster">
             <span class="hy-brand-mark" aria-hidden="true">{{ HYGIENE_BRAND_MARK }}</span>
             <span class="hy-brand-text">
               <span class="hy-brand-title">{{ HYGIENE_BRAND_TITLE }}</span>

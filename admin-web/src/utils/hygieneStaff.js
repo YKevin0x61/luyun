@@ -45,14 +45,6 @@ export function parseApiDetail(data) {
   return '请求失败'
 }
 
-/** 员工端登录页地址（带 next 回跳）。卫生入口不能复用管理端的 /login。 */
-export function hygieneLoginUrl(next) {
-  const fallback = typeof window === 'undefined'
-    ? '/hygiene'
-    : `${window.location.pathname}${window.location.search}`
-  return `/hygiene/login?next=${encodeURIComponent(next || fallback)}`
-}
-
 export async function staffRequest(
   path,
   { method = 'GET', body, timeoutMs = STAFF_REQUEST_TIMEOUT_MS } = {},

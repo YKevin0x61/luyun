@@ -2,7 +2,7 @@
 /**
  * 员工手机端的「整月」页（票 06）。
  *
- * 从「今天」页那张排班卡的「整月」按钮进来（`/today/month`）。这一页只回答一件事：
+ * 从「今天」页那张排班卡的「整月」按钮进来（`/staff/month`）。这一页只回答一件事：
  * 这个月我哪几天上班、上什么班。格子里是班别，不是钟点（班次本来就没有起止时刻）。
  *
  * 数据只有一个来源：`GET /api/scheduling/me/month`（员工那个 cookie，跟 `/me` 同一扇门，
@@ -69,9 +69,9 @@ async function load(target, quiet = false) {
     state.value = 'ready'
   } catch (err) {
     if (err.status === 401) {
-      // 会话没了：回员工登录，回来还是这一页（跟「今天」页同一个走法）。
+      // 会话没了：回员工登录（`/login` 的员工栏），回来还是这一页（跟「今天」页同一个走法）。
       router.replace({
-        path: '/hygiene/login',
+        path: '/login',
         query: { next: router.currentRoute.value.fullPath },
       })
       return
@@ -139,7 +139,7 @@ useNudgePull({
     <header class="tTop">
       <span class="tDay">整月</span>
       <span class="tDate">{{ employee ? employee.name : '' }}</span>
-      <button class="tBack" type="button" @click="router.push('/today')">‹ 今天</button>
+      <button class="tBack" type="button" @click="router.push('/staff/today')">‹ 今天</button>
     </header>
 
     <div class="mBody">

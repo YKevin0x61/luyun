@@ -109,7 +109,7 @@ curl -fsSL \
 
 - 编辑 `deploy/env.production` 填齐 `LUYUN_CRED_KEY` 等非 GitHub 项
 - 配置反向代理 + TLS（见第 3 节 Caddy/Nginx）
-- 启动主服务后，在 Admin `/setup` 填写 POS 凭据
+- 启动主服务后，在 Admin `/settings` 填写 POS 凭据
 - DNS / 域名申请
 
 > 日常冷备 timer（`luyun-backup.timer`）也不由 Bootstrap 自动启用；需要时按
@@ -160,7 +160,7 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 
 1. **发版**（开发者）：`scripts/publish_release.sh` 创建正式 GitHub Release
    并附带发行包（见第 7 节）。
-2. **版本检测**（店员/管理员）：登录管理后台 → `/setup` →「系统更新」。
+2. **版本检测**（店员/管理员）：登录管理后台 → `/settings` →「系统更新」。
    只读展示本机已装发行版（**版本清单**）、远端正式 Release 列表、是否有更新，
    以及**更新环境自检**红绿灯。
 3. **应用更新**：仅通过更新环境自检的运行实例可点；选定目标正式 Release（**含更旧 tag，即回滚**），
@@ -270,7 +270,7 @@ POSTGRES_DSN=postgresql://localhost:5432/luyun_test .venv/bin/python -c "..."
 
 ### 更新后起不来（服务打不开）
 
-更新之后 `/setup` 整页打不开、`curl 127.0.0.1:8000/api/healthz` 无响应、
+更新之后 `/settings` 整页打不开、`curl 127.0.0.1:8000/api/healthz` 无响应、
 `systemctl status luyun` 是 `failed`：主服务没起来，页面上的「回到上一版本」也就点不到，
 只能上宿主机。`deploy/luyun.service` 的 `Restart=always` + `RestartSec=5` 会在 60 秒内
 重试 5 次（`StartLimitIntervalSec=60` / `StartLimitBurst=5`），用尽后 unit 进
@@ -333,10 +333,20 @@ sudo nginx -t && sudo systemctl reload nginx
 
 - `/api/*`、`/ws/*` → 反代到 `127.0.0.1:8000`（WebSocket 升级：Caddy 自动
   处理；Nginx 需要显式 `proxy_set_header Upgrade/Connection`，配置里已带）。
-- 管理后台各页面（含 `/login`、`/setup`、`/`、`/admin`、`/sales-report`、
-  `/logs`、`/prep-plan`、`/wecom-push`、`/recipe*`）→ 由 `admin-web/dist`
-  提供，history 模式路由用 `try_files` 回退到 `index.html`，交给 vue-router
-  接管。
+- 管理后台各页面分两类落地（完整清单以 `main.py` 的 `SPA_PAGE_ROUTES` 为准，
+  两个方向都不许有差 —— 只差 `tests/test_spa_page_routes.py` 里那两条显式例外：
+  `/index.html` 是外壳文件名、`/admin/` 是 `/admin` 的尾斜杠变体）：
+  - **反代白名单六个前缀**（`admin|sales-report|logs|prep-plan|wecom-push|recipe`）→
+    由 `admin-web/dist` 直接提供，history 模式路由用 `try_files` 回退到
+    `index.html`，交给 vue-router 接管。
+  - **其余页面路由**（`/login`、`/register`、`/settings`、`/staff/today`、
+    `/staff/month`、`/staff/clean`、`/hygiene/roster`、`/hygiene/zones`、
+    `/hygiene/daily`、`/hygiene/deep-clean`、`/hygiene/fix`、`/hygiene/boards`、
+    `/hygiene/data`、`/hygiene/attire`、`/scheduling`、`/scheduling/inbox`、
+    `/scheduling/shifts`、`/`）→ 落到兜底 `reverse_proxy 127.0.0.1:8000`，由
+    `main.py` 的同一条 `spa_page` 路由返回 `admin-web/dist/index.html`。
+    `main.py` 没有 catch-all：这里少登记一条，直连 uvicorn 或经反代硬导航就是 404
+    （旧的 `/hygiene-data` 就这么漏过），新增页面必须同时补进 `SPA_PAGE_ROUTES`。
 - `/kds/*`、Swagger `/docs`、以及仍由后端 `StaticFiles` / `FileResponse`
   提供的路径 → 按各自配置转发或直出（见 Caddyfile / nginx.conf 注释）。
 
@@ -344,7 +354,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ## 4. 备份配置
 
-备份在管理后台 `/setup` → 「备份中心」统一呈现为一份**备份点**列表：本机回滚
+备份在管理后台 `/settings` → 「备份中心」统一呈现为一份**备份点**列表：本机回滚
 快照、导出备份与宿主机冷备三种介质。页面备份与冷备走同一套创建逻辑
 （`services/backup_service.py`），两条路径不会给出互相矛盾的结论。
 
@@ -387,7 +397,7 @@ journalctl -u luyun-backup
 导出备份本机副本默认 5、上限 20；冷备默认 14、上限 90），也可用
 `./deploy/backup.sh --retention 30` 临时覆盖冷备份数；最近一份冷备永不自动删。
 任一步失败时退出码非零、状态文件记录失败原因，且不留下会被误认为有效备份的
-半成品。恢复时优先用管理后台 `/setup` →「备份中心」→ 恢复；手工还原把归档内的
+半成品。恢复时优先用管理后台 `/settings` →「备份中心」→ 恢复；手工还原把归档内的
 `app.pgdump` 走 `pg_restore`、凭据文件放回 `data/`，见 §10.4。
 
 > 建议再把 `backups/` 目录定期同步到异地存储（对象存储、另一台机器等），
@@ -404,18 +414,19 @@ journalctl -u luyun-backup
 
 ---
 
-## 5. 首次 `/login` 与 `/setup` 初始化
+## 5. 首次初始化（`/login`）与系统配置页（`/settings`）
 
 Bootstrap **不**填写 POS 凭据；反代就绪后：
 
-1. 应用鉴权（管理员账号密码）：首次访问 `GET /login`（经反代域名，或直连
-   `http://127.0.0.1:8000/login` 排查），会调用 `POST /api/auth/init` 完成
-   初始化（`api/auth.py`）。初始化前，写接口是否对本机开放取决于
+1. 初始化管理员账号：首次访问 `GET /login`（经反代域名，或直连
+   `http://127.0.0.1:8000/login` 排查），在管理员栏调用 `POST /api/auth/init` 完成
+   初始化（`api/auth.py`）——**首次初始化在 `/login`，不在系统配置页**。初始化前，
+   写接口是否对本机开放取决于
    `ALLOW_UNAUTH_SETUP_FROM_LOCALHOST`——**生产环境必须是 `false`**（已在
    `env.production.example` 里默认给出并解释原因）。
-2. POS 系统登录凭据（账号/密码/门店 ID）：访问 `/setup` 页面填写，加密保存
-   在 `data/credentials.enc`（加密密钥见 `LUYUN_CRED_KEY`，说明见
-   `env.production.example`）。
+2. POS 系统登录凭据（账号/密码/门店 ID）：登录后访问系统配置页 `/settings` 的
+   「POS 凭据」填写，加密保存在 `data/credentials.enc`（加密密钥见
+   `LUYUN_CRED_KEY`，说明见 `env.production.example`）。
 3. 之后同一页「系统更新」可用于版本检测 / 更新环境自检 / 应用更新（公开仓
    无需 PAT；Token 仅在 API 限流时可选）。
 
@@ -716,7 +727,7 @@ sudo bash deploy/enable_postgres.sh             # 实际执行
 这一条命令会自动完成：装 PostgreSQL（apt/dnf/yum 自动识别）→ 建库建用户（密码
 自动生成）→ 应用 `0001` bootstrap schema → 停应用 → 备份 SQLite → 迁移数据 →
 重置序列 → 写 `env.production` → 启动 → 冒烟检查（healthz + orders 行数比对）。
-`0002` 起的增量脚本不在这一步应用——切完之后在后台 `/setup` →「系统更新」→
+`0002` 起的增量脚本不在这一步应用——切完之后在后台 `/settings` →「系统更新」→
 「数据库迁移」里应用。
 
 脚本**幂等**，可重复执行；已完成的步骤会跳过。任何一步失败即中止，且
@@ -803,7 +814,7 @@ systemd 形态也会顺手装），再点更新。
 
 ### 10.4 备份与恢复
 
-**页面内恢复（推荐，本机回滚快照）**：管理后台 `/setup` →「备份中心」→「备份点 →
+**页面内恢复（推荐，本机回滚快照）**：管理后台 `/settings` →「备份中心」→「备份点 →
 本机回滚快照」，点「恢复整库数据」。这条路径会：
 
 1. 先自动生成一份前置快照（同样的 `app.pgdump`，恢复失败可回退）；
@@ -855,7 +866,7 @@ sudo systemctl start luyun
 
 ### 10.6 后台重置数据库密码
 
-后台 `/setup` →「数据库凭据」可以查看当前连接信息并一键重置 PostgreSQL 业务角色的
+后台 `/settings` →「数据库凭据」可以查看当前连接信息并一键重置 PostgreSQL 业务角色的
 密码，不需要登录服务器。
 
 它依次做四件事：`ALTER USER`（用当前 DSN，只改自己这个角色）→ 用新密码另建连接

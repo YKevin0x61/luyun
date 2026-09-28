@@ -318,7 +318,7 @@ function formatCellText(col, val) {
           :after-quick-add="activePlugin.afterQuickAdd"
         />
         <button class="btn" style="margin-left:auto" @click="showDataQualityModal = true"><SvgIcon name="bar-chart" :size="13" /> 数据质量</button>
-        <button class="btn" @click="router.push('/setup?section=backup')"><SvgIcon name="database" :size="13" /> 备份 / 迁移</button>
+        <button class="btn" @click="router.push('/settings?section=backup')"><SvgIcon name="database" :size="13" /> 备份 / 迁移</button>
         <button v-if="!tableReadOnly" class="btn" @click="showColumnModal = true"><SvgIcon name="clipboard" :size="13" /> 表结构</button>
         <button v-if="!tableReadOnly" class="btn btn-primary" @click="openCreate"><SvgIcon name="plus" :size="13" /> 新增记录</button>
       </div>

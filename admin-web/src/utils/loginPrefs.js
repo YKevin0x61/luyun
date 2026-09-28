@@ -9,6 +9,9 @@ const KEY_PREFIX = 'luyun.login.'
 /** 未记录过偏好时默认勾选：门店机器打开即进，是日常用法；取消勾选会写入 '0' 并保持。 */
 export const DEFAULT_REMEMBER = true
 
+/** 没记住过时默认开员工栏：员工手机打开 `/login` 就该直接看到手机号那一栏。 */
+export const DEFAULT_LOGIN_TAB = 'staff'
+
 function resolveStorage(storage) {
   if (storage) return storage
   try {
@@ -68,4 +71,32 @@ export function saveLoginPrefs(namespace, { remember, account } = {}, storage) {
   if (!store) return
   writeRaw(store, fieldKey(namespace, 'remember'), remember ? '1' : '0')
   if (account) writeRaw(store, fieldKey(namespace, 'account'), account)
+}
+
+/**
+ * 读回登录面板上次停在哪一栏（'admin' | 'staff'）。
+ *
+ * 键名沿用同一族（`luyun.login.panel.tab`），不另造一套 localStorage 方案；
+ * 脏值（手改过、别的版本写过）一律回落到默认栏。
+ *
+ * @param {Storage} [storage] 可注入的存储实现，便于测试
+ * @returns {'admin' | 'staff'}
+ */
+export function loadLoginTab(storage) {
+  const store = resolveStorage(storage)
+  if (!store) return DEFAULT_LOGIN_TAB
+  const raw = readRaw(store, fieldKey('panel', 'tab'))
+  return raw === 'admin' ? 'admin' : DEFAULT_LOGIN_TAB
+}
+
+/**
+ * 记住这次选的栏（用户显式点 Tab 时调用；`?next=` 强制的那次不算选择）。
+ *
+ * @param {'admin' | 'staff'} tab
+ * @param {Storage} [storage] 可注入的存储实现，便于测试
+ */
+export function saveLoginTab(tab, storage) {
+  const store = resolveStorage(storage)
+  if (!store) return
+  writeRaw(store, fieldKey('panel', 'tab'), tab === 'admin' ? 'admin' : 'staff')
 }

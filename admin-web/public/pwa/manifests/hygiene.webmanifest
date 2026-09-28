@@ -1,9 +1,9 @@
 {
   "id": "/pwa/manifests/hygiene.webmanifest",
-  "name": "禄云卫生",
-  "short_name": "禄云卫生",
+  "name": "厨务管家卫生",
+  "short_name": "厨务管家卫生",
   "description": "门店日常卫生执行与整改",
-  "start_url": "/today",
+  "start_url": "/staff/today",
   "scope": "/",
   "display": "standalone",
   "background_color": "#f8fafc",

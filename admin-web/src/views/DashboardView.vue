@@ -36,7 +36,7 @@ const lastUpdateText = computed(() => {
           <span class="app-shortcut-title">{{ RECIPE_BRAND_TITLE }}</span>
           <span class="app-shortcut-desc">{{ RECIPE_DASHBOARD_BLURB }}</span>
         </router-link>
-        <router-link to="/hygiene-roster" class="card app-shortcut">
+        <router-link to="/hygiene/roster" class="card app-shortcut">
           <span class="app-shortcut-title">{{ HYGIENE_BRAND_TITLE }}</span>
           <span class="app-shortcut-desc">{{ HYGIENE_DASHBOARD_BLURB }}</span>
         </router-link>

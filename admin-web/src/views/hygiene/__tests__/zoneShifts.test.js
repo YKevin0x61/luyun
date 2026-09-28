@@ -30,7 +30,7 @@ describe('hygiene zone shifts', () => {
     // 判据还在：排班给的班次不在这个区开的档里 → 今天交不了日常（页面说清该找谁）。
     expect(home).toMatch(/assignmentMismatch/)
     expect(home).toMatch(/今天交不了日常检查/)
-    expect(home).toMatch(/router\.push\('\/today'\)/)
+    expect(home).toMatch(/router\.push\('\/staff\/today'\)/)
   })
 
   it('filters the admin roster assignment zones by the chosen shift', () => {

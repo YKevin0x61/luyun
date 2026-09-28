@@ -14,11 +14,11 @@ const view = read('../HygieneDataView.vue')
 describe('hygiene data & photo admin (ADR-0087)', () => {
   it('导航里有第 7 项，并且挂在自己的路由上', () => {
     const copy = read('../../../utils/hygieneCopy.js')
-    expect(copy).toMatch(/path: '\/hygiene-data'/)
+    expect(copy).toMatch(/path: '\/hygiene\/data'/)
     expect(copy).toMatch(/title: '数据与照片'/)
     const router = read('../../../router/index.js')
     expect(router).toMatch(
-      /hygieneAdminPage\('\/hygiene-data', 'hygiene-data', \(\) => import\('\.\.\/views\/hygiene\/HygieneDataView\.vue'\)\)/,
+      /hygieneAdminPage\('\/hygiene\/data', 'hygiene-data', \(\) => import\('\.\.\/views\/hygiene\/HygieneDataView\.vue'\)\)/,
     )
   })
 

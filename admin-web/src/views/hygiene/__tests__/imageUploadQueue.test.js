@@ -45,7 +45,8 @@ describe('hygiene image upload queue', () => {
 
   it('clears staff uploads when the staff session changes', () => {
     const home = read('../HygieneHomeView.vue')
-    const login = read('../HygieneLoginView.vue')
+    // 票 03 起员工登录页并入 `/login` 的员工栏：登录成功与退出登录都要清上一个人的草稿。
+    const login = read('../../LoginView.vue')
 
     expect(home).toMatch(/clearTasksByTransport\('staff'\)/)
     expect(login).toMatch(/clearTasksByTransport\('staff'\)/)

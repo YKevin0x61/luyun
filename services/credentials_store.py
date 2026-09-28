@@ -420,7 +420,7 @@ def migrate_legacy_config() -> Optional[CredentialBundle]:
     target_url = (legacy.get("urls") or {}).get("target_url") or ""
     shop_id, company_id, shop_name = _parse_target_url(target_url)
     if not shop_id or not company_id:
-        logger.warning("⚠️ 无法从 target_url 解析门店 ID，请稍后在 /setup 页面手工填写")
+        logger.warning("⚠️ 无法从 target_url 解析门店 ID，请稍后在 /settings 页面手工填写")
         return None
 
     bundle = CredentialBundle(

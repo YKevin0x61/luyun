@@ -1460,7 +1460,7 @@
   box-shadow: 0 0 8px var(--hy-mint);
   flex: 0 0 auto;
 }
-/* 回「今天」页那条（员工的班在 /today）：形态跟旁边的「区域 · 班次」一致，但它是
+/* 回「今天」页那条（员工的班在 /staff/today）：形态跟旁边的「区域 · 班次」一致，但它是
    **去别处**的入口，所以用中性描边 —— 不抢那个薄荷色的「我现在在哪」。 */
 .hygiene-work .hy-work-today {
   flex: 0 0 auto;

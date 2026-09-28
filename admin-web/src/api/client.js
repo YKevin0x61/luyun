@@ -5,7 +5,7 @@ import { shouldSkipLoginRedirect } from '../utils/loginNext'
 
 // 登录页 / 配置页自身也会调用写接口鉴权（如 /api/credentials、/api/auth/tokens）。
 // 若它们在未登录/会话过期时也触发跳转，会与页面自身的状态机互相打架，
-// 甚至造成 /login <-> /setup 来回跳转，因此这两个路由自己吞掉 401，交给页面处理。
+// 甚至造成 /login <-> /settings 来回跳转，因此这两个路由自己吞掉 401，交给页面处理。
 // 配方阅读面 API 读公开；401 不应把厨房扫码页整页踢去登录。
 function isStandaloneAuthRoute() {
   return shouldSkipLoginRedirect(window.location.pathname)

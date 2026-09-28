@@ -1,13 +1,23 @@
 import { isStaffPhonePath } from './staffPaths.js'
 
-/** 员工手机端的两块（`/today` 与 `/hygiene*`）共用一个清单：一个入口一套登录。
- *  票 05 把员工落点从卫生首页挪到「今天」页，所以这里必须认 `/today` ——
- *  否则员工在那一页装出来的是管理端应用（深色主题 + 禄云管理清单）。
- *  哪些路径算员工端只在 `staffPaths.js` 写一次（名单还要给 401 那条用）。 */
+/** 员工手机端的三个页面（`/staff/today`、`/staff/month`、`/staff/clean`，票 04 起
+ *  整体住在这条前缀下）共用一个清单：一个入口一套登录。
+ *  票 05 把员工落点从卫生首页挪到「今天」页，票 04 又把落点搬进 `/staff/*`，所以这里
+ *  必须认 `/staff/*` —— 否则员工在那一页装出来的是管理端应用（深色主题 + 厨务管家管理清单）。
+ *  哪些路径算员工端只在 `staffPaths.js` 写一次（名单还要给 401 那条用）。
+ *
+ *  **`/login` 一条路径装两种身份**（票 07）：装出来是哪份清单得看面板当下停在哪一栏，
+ *  所以判据是「pathname + 面板身份」两件事。判据只有两处来源，本文件不重算：
+ *  - 面板身份（`'staff'` / `'admin'` / 未知）由 `utils/loginNext.js` 的
+ *    `resolveLoginTab` 给出，调用方算好传进来（`App.vue` 跟路由、`LoginView.vue` 跟点击）；
+ *  - 路径归属仍由 `staffPaths.js` 给出。
+ *  身份未知时 `/login` 兜底管理端那份（跟 `index.html` 的默认清单一致）。
+ *  清单自己的 `start_url` 是员工入口 `STAFF_ENTRY_PATH`（票 07 从 `/today` 订正过来）。 */
 const ROLE_MANIFESTS = [
   {
     role: 'hygiene',
-    matches: isStaffPhonePath,
+    matches: (path, panelTab) =>
+      isStaffPhonePath(path) || (path === '/login' && panelTab === 'staff'),
     manifest: '/pwa/manifests/hygiene.webmanifest',
     appleTouchIcon: '/pwa/icons/hygiene-192.png',
     themeColor: '#16a34a',
@@ -28,13 +38,15 @@ const ROLE_MANIFESTS = [
   },
 ]
 
-export function selectPwaManifest(pathname) {
+/** 按路径（+ `/login` 上的面板身份）选清单。`panelTab` 非法 / 缺失按「身份未知」处理。 */
+export function selectPwaManifest(pathname, panelTab) {
   const path = String(pathname || '/')
-  return ROLE_MANIFESTS.find((entry) => entry.matches(path)) || ROLE_MANIFESTS.at(-1)
+  const tab = panelTab === 'staff' || panelTab === 'admin' ? panelTab : null
+  return ROLE_MANIFESTS.find((entry) => entry.matches(path, tab)) || ROLE_MANIFESTS.at(-1)
 }
 
-export function applyPwaManifest(pathname, documentRef = globalThis.document) {
-  const selected = selectPwaManifest(pathname)
+export function applyPwaManifest(pathname, panelTab, documentRef = globalThis.document) {
+  const selected = selectPwaManifest(pathname, panelTab)
   if (!documentRef || typeof documentRef.getElementById !== 'function') return selected
 
   const manifestLink = documentRef.getElementById('app-manifest')

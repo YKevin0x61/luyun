@@ -7,7 +7,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../TodayView.vue'), 'utf8')
 const copy = readFileSync(join(here, '../../../utils/todayShift.js'), 'utf8')
 const router = readFileSync(join(here, '../../../router/index.js'), 'utf8')
-const login = readFileSync(join(here, '../../hygiene/HygieneLoginView.vue'), 'utf8')
+const login = readFileSync(join(here, '../../LoginView.vue'), 'utf8')
 const mainPy = readFileSync(join(here, '../../../../../main.py'), 'utf8')
 
 describe('员工端「今天」页（原型 A）', () => {
@@ -25,8 +25,9 @@ describe('员工端「今天」页（原型 A）', () => {
     expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/daily-work'\)/)
     expect(view).not.toMatch(/\/api\/hygiene\/[^'"\s]*employee_id/)
     expect(view).not.toMatch(/\/api\/hygiene\/admin/)
-    // 401 回员工登录（同一个登录页），把当前地址整个带过去（跟卫生首页一个走法）。
-    expect(view).toMatch(/path: '\/hygiene\/login'/)
+    // 401 回员工登录（票 03 起是 /login 的员工栏），把当前地址整个带过去（跟卫生首页一个走法）。
+    expect(view).toMatch(/path: '\/login'/)
+    expect(view).not.toMatch(/path: '\/hygiene\/login'/)
     expect(view).toMatch(/next: router\.currentRoute\.value\.fullPath/)
   })
 
@@ -98,18 +99,26 @@ describe('员工端「今天」页（原型 A）', () => {
     // SPA 页面要登记在：vue-router、main.py 的 SPA_PAGE_ROUTES（直连/反代硬导航）、
     // 以及服务端的 HTML 鉴权豁免表（手机上没有管理端会话，拦在服务端就进不去）。
     // 带尾斜杠那条走 HTML_AUTH_PREFIXES（见 tests/test_auth.py 的员工端用例）。
-    expect(router).toMatch(/path: '\/today', name: 'today'/)
+    expect(router).toMatch(/path: '\/staff\/today', name: 'today'/)
     expect(router).toMatch(/views\/today\/TodayView\.vue/)
-    expect(router).toMatch(/path: '\/today'[\s\S]{0,200}?staffAuth: true/)
-    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/today"/)
-    expect(mainPy).toMatch(/HTML_AUTH_EXACT = \{[^}]*"\/today"/)
-    expect(mainPy).toMatch(/HTML_AUTH_PREFIXES = \([\s\S]*?"\/today\/"/)
+    expect(router).toMatch(/path: '\/staff\/today'[\s\S]{0,200}?staffAuth: true/)
+    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/staff\/today"/)
+    // 免墙的是前缀本身 `/staff`（精确）与 `/staff/`（前缀表）：三页都没进精确名单。
+    expect(mainPy).toMatch(/HTML_AUTH_EXACT = \{[^}]*"\/staff"/)
+    expect(mainPy).toMatch(/HTML_AUTH_PREFIXES = \([\s\S]*?"\/staff\/"/)
+    // 旧路径连 vue-router 里的别名都不许留（票 04 的取舍）。
+    expect(router).not.toMatch(/path: '\/today'/)
+    expect(router).not.toMatch(/path: '\/today\/month'/)
+    expect(router).not.toMatch(/path: '\/hygiene'/)
+    // 票 03 起员工登录页是 `/login` 的员工栏：守卫把原目标带上，不再是 `/hygiene/login`。
+    expect(router).not.toMatch(/'\/hygiene\/login'/)
+    expect(router).toMatch(/path: '\/login', query: \{ next: buildLoginNextFromRoute\(to\) \}/)
   })
 
   it('does not wait for the session probe before showing the shift', () => {
     // 这一页自己那次请求就分得清 401 与断网（`load()`），守卫那次探针是重复劳动：
     // 弱网下先白等一次超时（最长 4 秒）才轮到排班那条请求。
-    expect(router).toMatch(/path: '\/today'[\s\S]{0,200}?staffProbe: false/)
+    expect(router).toMatch(/path: '\/staff\/today'[\s\S]{0,200}?staffProbe: false/)
     expect(router).toMatch(/if \(to\.meta\.staffProbe === false\) return true/)
   })
 

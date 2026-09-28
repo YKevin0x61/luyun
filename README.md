@@ -48,8 +48,8 @@ systemctl status luyun
 curl -s http://127.0.0.1:8000/api/healthz
 
 # 4) 浏览器
-#    /login  建管理员
-#    /setup  填 POS 凭据；同一页可做「系统更新」
+#    /login  建管理员（首次初始化只在这里）
+#    /settings  填 POS 凭据；同一页可做「系统更新」
 ```
 
 定点版本：把 URL 里的 `latest` 换成 tag，或设 `LUYUN_TAG=vX.Y.Z`。  
@@ -79,7 +79,7 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口
 ### 日常升级（两种部署通用）
 
 1. 开发者发版：`./scripts/publish_release.sh vX.Y.Z`
-2. 店内：登录后台 → `/setup` → **系统更新** → 检测版本 → 应用更新  
+2. 店内：登录后台 → `/settings` → **系统更新** → 检测版本 → 应用更新  
 3. 旁路作业：备份 → 下载并校验发行包 → 原子切换 → 条件 pip → 重启
 
 公开仓无需 GitHub PAT；限流时可在「系统更新 → GitHub 连接」选填只读 Token。
@@ -109,7 +109,7 @@ python3 scripts/start.py
 | http://localhost:8000/admin/ | 管理后台 |
 | http://localhost:8000/kds/ | 厨房显示 |
 | http://localhost:8000/docs | API 文档 |
-| http://localhost:8000/setup | POS 凭据 / 系统更新 |
+| http://localhost:8000/settings | POS 凭据 / 系统更新 |
 
 Admin 热更新：`cd admin-web && npm run dev`（`:5173`，代理 `/api`、`/ws`）。  
 测试：`pytest tests/` · `cd admin-web && npm run test`

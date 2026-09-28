@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_REMEMBER, loadLoginPrefs, saveLoginPrefs } from '../loginPrefs.js'
+import {
+  DEFAULT_LOGIN_TAB,
+  DEFAULT_REMEMBER,
+  loadLoginPrefs,
+  loadLoginTab,
+  saveLoginPrefs,
+  saveLoginTab,
+} from '../loginPrefs.js'
 
 /** 内存版 Storage，并可选地模拟隐私模式（读写都抛错）。 */
 function memoryStorage({ throwing = false } = {}) {
@@ -58,5 +65,42 @@ describe('saveLoginPrefs', () => {
     const store = memoryStorage()
     saveLoginPrefs('admin', { remember: false, account: 'boss' }, store)
     expect(store.dump()['luyun.login.admin.remember']).toBe('0')
+  })
+})
+
+describe('登录面板上次选的那一栏（票 03）', () => {
+  it('没记住过时默认员工栏：员工手机一打开就落在员工栏', () => {
+    expect(DEFAULT_LOGIN_TAB).toBe('staff')
+    expect(loadLoginTab(memoryStorage())).toBe('staff')
+  })
+
+  it('沿用同一套键名前缀与命名空间风格，不另造一套', () => {
+    const store = memoryStorage()
+    saveLoginTab('admin', store)
+    // 键名跟 loadLoginPrefs/saveLoginPrefs 同一族：`luyun.login.<namespace>.<field>`。
+    expect(store.dump()['luyun.login.panel.tab']).toBe('admin')
+    expect(loadLoginTab(store)).toBe('admin')
+    saveLoginTab('staff', store)
+    expect(loadLoginTab(store)).toBe('staff')
+  })
+
+  it('脏值回落到默认栏', () => {
+    const store = memoryStorage()
+    store.setItem('luyun.login.panel.tab', 'boss')
+    expect(loadLoginTab(store)).toBe('staff')
+  })
+
+  it('存储不可用时退化为默认值而不抛错', () => {
+    const store = memoryStorage({ throwing: true })
+    expect(loadLoginTab(store)).toBe('staff')
+    expect(() => saveLoginTab('admin', store)).not.toThrow()
+  })
+
+  it('栏位偏好与「记住登录」两套字段互不影响', () => {
+    const store = memoryStorage()
+    saveLoginTab('admin', store)
+    saveLoginPrefs('staff', { remember: false, account: '13800138000' }, store)
+    expect(loadLoginTab(store)).toBe('admin')
+    expect(loadLoginPrefs('staff', store)).toEqual({ remember: false, account: '13800138000' })
   })
 })
