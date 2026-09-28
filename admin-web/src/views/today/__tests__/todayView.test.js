@@ -340,4 +340,14 @@ describe('仪容仪表（票 12）：按人拍、两步、只在排到班次时�
     // 服务端会拒 `already_accepted`：前端不摆一个按了必然失败的按钮。
     expect(view).toMatch(/attire\.status !== 'passed'/)
   })
+
+  it('这一行不借英雄数字的字号，且按状态着色', () => {
+    // `.shift` 是 52px 的数值字号（「日常 n/m」那种）：一句话套上去会占两三行。
+    // 这一行有自己的中等字号类，颜色由 `attireTone` 给（与模板那串 v-if 同序）。
+    expect(view).toMatch(/<p class="attire-line" :class="attireTone">/)
+    expect(view).toMatch(/const attireTone = computed/)
+    expect(view).toMatch(/\.attire-line \{/)
+    expect(view).toMatch(/\.attire-line\.rejected \{/)
+    expect(view).toMatch(/\.attire-line\.nostandard \{/)
+  })
 })

@@ -118,6 +118,15 @@ const imageUploads = useImageUploadQueueStore()
 // 「这张正在传」从上传队列派生，不用本组件的 ref：刷新页面 / 回收 webview 之后草稿会
 // 恢复继续传（跟卫生那一屏同一条口径），局部状态会让员工对着正在传的那张再拍一遍。
 const attireKey = computed(() => `attire:${attire.value.businessDate}`)
+// 这一行的色调：没标准图（做不了，得找店长）= 琥珀，被驳回（要重拍）= 珊瑚，
+// 待验收 = 中性，其余（没拍 / 已通过）= 玉色。分支顺序与模板里那串 v-if 一致 ——
+// 「被驳回」先于「没标准图」，两边判据不一致的话颜色和文案会对不上。
+const attireTone = computed(() => {
+  if (attire.value.status === 'rejected') return 'rejected'
+  if (!attire.value.hasStandard) return 'nostandard'
+  if (attire.value.status === 'pending') return 'pending'
+  return ''
+})
 const attirePending = computed(() => imageUploads.activeTasks.some(
   (task) => task.pendingKey === attireKey.value,
 ))
@@ -635,7 +644,7 @@ useNudgePull({
             <!-- 仪容仪表（票 12）：按**人**拍，今天排到班次才有这一行 —— 休假的与没
                  排到的人看不到它。跟上面那份日常分开：它没有钟点、也不挂在责任区上。 -->
             <template v-if="attire.required">
-              <p class="shift">
+              <p class="attire-line" :class="attireTone">
                 仪容仪表：<template v-if="attirePending">正在传…</template><template
                   v-else-if="attire.status === 'passed'"
                 >已通过</template><template
@@ -982,6 +991,22 @@ useNudgePull({
   background: rgba(245, 196, 81, .12);
   border-color: var(--hy-amber);
 }
+
+/* 仪容仪表那一行（票 12 加的功能）自己的字号：它是一句话 + 一个状态，不是数值。
+   原来借用了下面的 `.shift`（52px 的英雄数字），一句话会占两三行、压过「日常 n/m」。
+   中等字号 + 按状态着色，仍看得出「这条要你动手」。 */
+.attire-line {
+  margin: 0;
+  font-family: var(--font-song);
+  font-size: 20px;
+  line-height: 1.3;
+  color: var(--hy-jade);
+  padding: 2px 0;
+}
+
+.attire-line.pending { color: var(--hy-muted); }
+.attire-line.rejected { color: var(--hy-coral); }
+.attire-line.nostandard { color: var(--hy-amber); }
 
 .shift {
   margin: 0;
