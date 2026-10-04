@@ -68,6 +68,9 @@ describe('页面清单（唯一来源）', () => {
       '/workbench/kitchen/recipe/print',
       '/workbench/kitchen/recipe/qr',
       '/workbench/kitchen/recipe/manage',
+      // 票 08：备货计划从管理后台的 `/prep-plan` 搬进后勤组 —— 套的是工作台外壳
+      // （顶栏那条窄栏 + 按身份过滤的导航），后台那条导航不再渲染它。
+      '/workbench/kitchen/prep-plan',
       // 员工三页搬进工作台的「我的」组（票 03）：套工作台外壳，后台导航照样不渲染；
       // 越权落点也是独立一页（一页说明 + 一颗按钮，不套导航）。
       '/workbench/me/today',

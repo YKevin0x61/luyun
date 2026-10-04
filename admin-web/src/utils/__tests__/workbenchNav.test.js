@@ -13,6 +13,7 @@ import {
   workbenchNavFor,
   workbenchPagesOf,
 } from '../workbenchNav.js'
+import { PREP_PLAN_PATH } from '../prepPlanPaths.js'
 
 // 票 04：导航的判据从「这一页的身份」换成「**此刻的身份**」，于是工作台身份那两档
 // （`super` / `staff`）要先映射成清单里的身份词（`admin` / `staff`）。
@@ -106,19 +107,22 @@ describe('工作台的组（票 05：人事 / 现场；票 06 加上首页；票
     }
   })
 
-  it('后勤组是配方五页（票 07），旧的 /recipe* 一条都不在清单里', () => {
+  it('后勤组是配方五页 + 备货计划（票 07 / 08），旧地址一条都不在清单里', () => {
     const kitchen = workbenchPagesOf('kitchen').map((page) => page.path)
-    expect(kitchen.slice(0, 5)).toEqual([
+    expect(kitchen).toEqual([
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/recipe/detail',
       '/workbench/kitchen/recipe/print',
       '/workbench/kitchen/recipe/qr',
       '/workbench/kitchen/recipe/manage',
+      // 票 08：备货计划从 `/prep-plan` 搬进后勤组 —— 换位置、统一导航，读写门不动。
+      '/workbench/kitchen/prep-plan',
     ])
-    // 备货计划在清单里也标着 kitchen，但它今天仍住在 `/prep-plan` —— 那是票 08 的事，
-    // 本票不动它（这里把它写出来，免得下一票以为后勤组里只有配方）。
-    expect(kitchen.slice(5)).toEqual(['/prep-plan'])
-    for (const old of ['/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr', '/recipe/manage']) {
+    for (const old of [
+      '/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr', '/recipe/manage',
+      // 票 08：备货计划的老地址（自然 404，不给别名、不做重定向）。
+      '/prep-plan',
+    ]) {
       expect(pageRow(old), `${old} 又回到清单里了`).toBe(null)
     }
   })
@@ -143,13 +147,38 @@ describe('按身份过滤导航', () => {
     }
   })
 
-  it('店长这一档：今天 / 人事 / 现场 / 后勤四格；员工那一档：今天 / 后勤 / 我的', () => {
-    // 员工那一档就是 spec 故事 8 那三项（配方只读；备货计划在票 08 进来），
-    // 外加两档都看得见的首页「今天」。
-    expect(workbenchNavFor('super').map((item) => item.key)).toEqual([
-      'home', 'hr', 'floor', 'kitchen',
+  it('后勤那一格是「一组两门」：两条链接各自按落点那一页的 audience 过滤', () => {
+    // 票 08 的形态：组表里 `links` 是**一组多条目**的入口，不是把同一组拆成两格
+    // （拆成两格的话 `workbenchGroupOf` 会让两格同时高亮）。每条链接的可见性仍只看
+    // 它自己落点那一页的身份 —— 不另写一份名单。
+    const kitchen = WORKBENCH_NAV_GROUPS.find((group) => group.key === 'kitchen')
+    expect(kitchen.links.map((link) => link.to)).toEqual([
+      '/workbench/kitchen/recipe',
+      PREP_PLAN_PATH,
     ])
-    expect(workbenchNavFor('staff').map((item) => item.key)).toEqual(['home', 'kitchen', 'me'])
+    for (const link of kitchen.links) {
+      const row = pageRow(link.to)
+      expect(row, `后勤的落点 ${link.to} 不在页面清单里`).toBeTruthy()
+      expect(row.group, `后勤的落点 ${link.to} 落在别组`).toBe('kitchen')
+    }
+    // 两页都是 `both` —— 员工这一档两条都看得见（票面验收：员工导航加上备货计划）。
+    expect(pageMeta(PREP_PLAN_PATH).audience).toBe('both')
+
+    const toOf = (identity) => workbenchNavFor(identity)
+      .filter((item) => item.key === 'kitchen')
+      .map((item) => item.to)
+    expect(toOf('super')).toEqual(['/workbench/kitchen/recipe', PREP_PLAN_PATH])
+    expect(toOf('staff')).toEqual(['/workbench/kitchen/recipe', PREP_PLAN_PATH])
+  })
+
+  it('店长这一档：今天 / 人事 / 现场 / 后勤四格；员工那一档：今天 / 后勤 / 我的', () => {
+    // 员工那一档就是 spec 故事 8 那三项（配方与备货计划只读），外加两档都看得见的首页「今天」。
+    // 按**格**（组）断言：后勤那一格现在是两条链接，数格子才是"一格一组"的那条规矩。
+    const keysOf = (identity) => [
+      ...new Set(workbenchNavFor(identity).map((item) => item.key)),
+    ]
+    expect(keysOf('super')).toEqual(['home', 'hr', 'floor', 'kitchen'])
+    expect(keysOf('staff')).toEqual(['home', 'kitchen', 'me'])
     // 首页那一页是 `both`（票 06）：两档都进得去，过滤天然放行。
     expect(pageMeta('/workbench').audience).toBe('both')
     expect(pageMeta(WORKBENCH_HR_HOME).audience).toBe('admin')
@@ -172,6 +201,9 @@ describe('高亮跟着新分组走', () => {
     // 票 07：后勤组里的沉浸页（阅读 / 打印 / 印码）也算在「后勤」那一格上。
     expect(workbenchGroupOf('/workbench/kitchen/recipe/detail')).toBe('kitchen')
     expect(workbenchGroupOf('/workbench/kitchen/recipe/qr')).toBe('kitchen')
+    // 票 08：站在备货计划上时，「后勤」那一格仍然亮 —— 判据是页面的 `group`，
+    // 不是链接自己的路径（后勤那一格现在指着配方列表）。
+    expect(workbenchGroupOf(PREP_PLAN_PATH)).toBe('kitchen')
     // 子应用根（票 06 的首页那一组）不属于人事 / 现场任何一格。
     expect(workbenchGroupOf('/workbench')).toBe('home')
     // 不在清单里的路径（单测里的临时路由）没有组，也就没有高亮。

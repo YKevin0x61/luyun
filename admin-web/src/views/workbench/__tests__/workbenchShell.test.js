@@ -4,6 +4,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenchCopy.js'
+import { PREP_PLAN_PATH } from '../../../utils/prepPlanPaths.js'
 
 // 工作台外壳（票 03 立、票 04 接上身份）：
 // - 导航跟着**此刻的身份**走，不跟着"这一页是谁的"。店长的会话挂在「我的」页上时，
@@ -21,6 +22,8 @@ const ROUTES = [
   { path: '/workbench/floor/daily', component: { template: '<div>日常验收</div>' }, meta: { audience: 'admin', standalone: true } },
   // 票 07：后勤那一格的落点（配方列表，`both` —— 员工也看得见）。
   { path: '/workbench/kitchen/recipe', component: { template: '<div>配方</div>' }, meta: { audience: 'both', standalone: true } },
+  // 票 08：后勤那一格的第二扇门（备货计划，`both`）—— 换位置、统一导航，不扩权。
+  { path: PREP_PLAN_PATH, component: { template: '<div>备货计划</div>' }, meta: { audience: 'both', standalone: true } },
 ]
 
 function jsonResponse(data, status = 200) {
@@ -84,17 +87,44 @@ afterEach(() => {
 })
 
 describe('工作台外壳的导航', () => {
-  it('员工这一档是「今天 / 后勤 / 我的」三格：首页与配方两组都看得见，店长那几页点不到', async () => {
+  it('员工这一档：今天 / 后勤（配方 + 备货计划）/ 我的 —— 店长那几页点不到', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const { wrapper } = await mountShell('/workbench/me/today')
 
     const items = wrapper.findAll('.wb-nav-item')
-    expect(items.map((item) => item.text())).toEqual(['今天', '后勤', '我的'])
+    // 票 08：后勤那一格是**一格两门** —— 配方与备货计划各占一半，都在同一格（同一颗
+    // 胶囊）里，员工两项都看得见（spec 故事 8）。一格两门时标题取各自那一页在清单里的
+    // 名字（「选择岗位」/「备货计划」）：同一颗胶囊里写两遍「后勤」看不出哪一半是哪一页。
+    expect(items.map((item) => item.text())).toEqual(['今天', '选择岗位', '备货计划', '我的'])
     expect(items.map((item) => item.attributes('href'))).toEqual([
-      '/workbench', '/workbench/kitchen/recipe', '/workbench/me/today',
+      '/workbench', '/workbench/kitchen/recipe', PREP_PLAN_PATH, '/workbench/me/today',
     ])
+    expect(wrapper.findAll('.wb-nav-cell.is-multi')).toHaveLength(1)
     // 员工点不到店长那几页（它们在清单里是 admin，导航按身份过滤）。
     expect(wrapper.find('a[href="/workbench/floor/daily"]').exists()).toBe(false)
+    // 配方管理那一页也不在导航里（admin）。
+    expect(wrapper.find('a[href="/workbench/kitchen/recipe/manage"]').exists()).toBe(false)
+  })
+
+  it('站在备货计划上：「后勤」那一格仍然亮（高亮按页面的组算，不按路径前缀比）', async () => {
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    const { wrapper } = await mountShell(PREP_PLAN_PATH)
+
+    // 整格亮：后勤那一格里两扇门都算"当前这一格"（同一组），`aria-current` 也挂在两半上
+    // —— 与单条目那一格的老口径一致（外壳的高亮判据是页面的 `group`）。
+    const on = wrapper.findAll('.wb-nav-item.is-on')
+    expect(on.map((item) => item.text())).toEqual(['选择岗位', '备货计划'])
+    expect(on.map((item) => item.attributes('aria-current'))).toEqual(['page', 'page'])
+
+    // 但只有指到这一页的那半贴着"当前"：另一半不高亮成当前项。
+    const current = wrapper.findAll('.wb-nav-item.is-current')
+    expect(current).toHaveLength(1)
+    expect(current[0].text()).toBe('备货计划')
+    expect(current[0].attributes('href')).toBe(PREP_PLAN_PATH)
+
+    const cell = wrapper.get('.wb-nav-cell.is-multi')
+    expect(cell.findAll('.wb-nav-item')).toHaveLength(2)
+    expect(cell.classes()).toContain('is-on')
   })
 
   it('整组都亮：站在「整月」上，「我的」那一格仍是当前项（首页那一格不亮）', async () => {
@@ -137,11 +167,14 @@ describe('工作台外壳的导航', () => {
     expect(wrapper.get('.wb-id .is-on').text()).toContain('超级管理员')
     // 导航面按**他这一档**渲染：票 06 之后是首页 / 人事 / 现场三格，各自的落点是共享
     // 常量（而不是因为"这一页是员工页"才藏起来）。页面内容按自己的 401 处理 —— 切换器
-    // 不改权限、也不改守卫。
+    // 不改权限、也不改守卫。票 08 起后勤那一格是两扇门（配方 + 备货计划）。
     const items = wrapper.findAll('.wb-nav-item')
-    expect(items.map((item) => item.text())).toEqual(['今天', '人事', '现场', '后勤'])
+    expect(items.map((item) => item.text())).toEqual([
+      '今天', '人事', '现场', '选择岗位', '备货计划',
+    ])
     expect(items.map((item) => item.attributes('href'))).toEqual([
-      '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME, '/workbench/kitchen/recipe',
+      '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
+      '/workbench/kitchen/recipe', PREP_PLAN_PATH,
     ])
   })
 
@@ -153,7 +186,9 @@ describe('工作台外壳的导航', () => {
     await flushPromises()
 
     expect(store.identity).toBe('staff')
-    expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual(['今天', '后勤', '我的'])
+    expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
+      '今天', '选择岗位', '备货计划', '我的',
+    ])
   })
 
   it('切成员工后仍站在店长的页上：送回员工那一档的第一格（不是停在别人的页上）', async () => {

@@ -16,7 +16,8 @@
   岗位列表、配方阅读器（含 TOC/搜索/字号/主题/用量缩放）、配方管理编辑器、打印预览、
   岗位二维码
 - 企微推送（`/wecom-push`）：Webhook 管理、推送任务管理、消息预览与立即发送、发送记录
-- 备货计划（`/prep-plan`）：一键生成执行清单、档口执行板、辅助信息
+- 备货计划（`/workbench/kitchen/prep-plan`，工作台「后勤」组；员工这一档只读）：
+  一键生成执行清单、档口执行板、辅助信息
 - 实时日志（`/logs`）：实时跟踪 / 历史查询、级别与 logger 过滤、统计面板
 - 卫生管理端（`/hygiene/roster`、`/hygiene/zones`、`/hygiene/daily`、
   `/hygiene/deep-clean`、`/hygiene/fix`、`/hygiene/boards`、`/hygiene/data`、

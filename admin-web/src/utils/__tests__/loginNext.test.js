@@ -251,9 +251,23 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
   })
 })
 
-describe('老地址的 ?next= 迁移（票 03/04/05/07）', () => {
+describe('老地址的 ?next= 迁移（票 03/04/05/07/08）', () => {
   // 老路由已经删干净了，`?next=` 里可能还存着搬家前的老地址（旧书签、上一次被挡下来
   // 写进 URL 的那条）——在入口处换成新地址，原样放行就是跳进白屏。
+  it('票 08：管理后台的 /prep-plan 换成后勤组的新地址，query 与 hash 原样带过去', () => {
+    expect(resolveLoginNext('/prep-plan')).toBe('/workbench/kitchen/prep-plan')
+    expect(resolveLoginNext('/prep-plan?day=2026-10-04'))
+      .toBe('/workbench/kitchen/prep-plan?day=2026-10-04')
+    expect(resolveLoginNext('/prep-plan#board')).toBe('/workbench/kitchen/prep-plan#board')
+    expect(resolveLoginNext('/prep-plan/')).toBe('/workbench/kitchen/prep-plan/')
+    // 前缀相同不等于老地址：只按整段（含尾斜杠那一种）匹配。
+    expect(resolveLoginNext('/prep-plans')).toBe('/prep-plans')
+    expect(resolveLoginNext('/prep-plan-x')).toBe('/prep-plan-x')
+    // 员工栏不把它当落点（那是工作台里给管理端与员工共用的页，不是员工端前缀）：
+    // 换了地址之后仍在 `/workbench/` 底下、但不是员工端，落回员工首页。
+    expect(resolveStaffNext('/prep-plan')).toBe('/workbench/me/today')
+  })
+
   it('票 07：独立域的 /recipe* 换成工作台「后勤」组的新地址，query 与 hash 原样带过去', () => {
     // 扫码看岗位配方这条路最值钱：岗位码指向新地址，但**已经贴出去/存下来的**老地址
     // 还在别人手机里（`?next=` 里也可能是上一次被挡下来时写的那条）。
@@ -321,7 +335,9 @@ describe('老地址的 ?next= 迁移（票 03/04/05/07）', () => {
     expect(resolveLoginNext('/workbench/floor/daily')).toBe('/workbench/floor/daily')
     expect(resolveLoginNext('/workbench/hr/calendar')).toBe('/workbench/hr/calendar')
     expect(resolveLoginNext('/logs')).toBe('/logs')
-    expect(resolveLoginNext('/prep-plan?day=2026-10-04')).toBe('/prep-plan?day=2026-10-04')
+    // 新地址（票 08 起备货计划住在工作台里）原样留着。
+    expect(resolveLoginNext('/workbench/kitchen/prep-plan?day=2026-10-04'))
+      .toBe('/workbench/kitchen/prep-plan?day=2026-10-04')
     expect(resolveLoginNext('https://evil.example/hygiene/daily')).toBe('/')
     // 员工端前缀照旧不算管理端落点（老前缀迁过来之后仍然不是）。
     expect(resolveLoginNext('/hygiene/daily') === '/workbench/floor/daily').toBe(true)

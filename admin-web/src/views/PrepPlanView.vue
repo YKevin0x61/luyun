@@ -4,6 +4,7 @@ import ConfirmDialog from '../components/admin/ConfirmDialog.vue'
 import TextExportModal from '../components/salesreport/TextExportModal.vue'
 import LuyunNumberInput from '../components/ui/LuyunNumberInput.vue'
 import { usePrepPlan } from '../composables/usePrepPlan'
+import { usePrepPlanAdmin } from '../composables/usePrepPlanAdmin'
 import { useStationsStore } from '../stores/stations'
 import {
   ALL_STATIONS_LABEL,
@@ -27,6 +28,7 @@ import {
   PREP_PLAN_TITLE,
   PRESET_LABELS,
   PRODUCED_LABEL,
+  READ_ONLY_HINT,
   RECOMMENDED_LABEL,
   RECORD_LABEL,
   RECORD_QTY_LABEL,
@@ -85,6 +87,13 @@ const {
   undoItem,
   discardBatch,
 } = usePrepPlan()
+
+// 票 08：这一页两种身份都能打开（工作台「后勤」组、清单里 `audience: both`），但**写入口
+// 只给管理端那一档**（ADR 0092：进工作台只是换位置与统一导航，不扩权）。判据是工作台身份
+// （`composables/usePrepPlanAdmin.js`，形态照票 07 的配方）；员工这一档页面是只读的，写路径
+// 的入口一颗都不渲染 —— 真去打写接口由服务端那一道 401 兜住，前端这一层只是不给点。
+// 读路径（刷新建议 / 复制清单 / 时间窗 / 档口筛选）两档都在：它们不写库。
+const { readOnly } = usePrepPlanAdmin()
 
 function selectPreset(id) {
   preset.value = id
@@ -236,6 +245,9 @@ function cancelDiscard() {
         <h1 class="prep-title">{{ PREP_PLAN_TITLE }}</h1>
         <p v-if="kitchenItems.length" class="prep-todo">{{ TODO_COUNT_LABEL }} {{ todoCount }} 项</p>
       </header>
+      <!-- 员工这一档：明说这一页只读（票 08）。不是静默少几颗按钮 —— 那样后厨会以为
+           自己看漏了、或者以为页面坏了。 -->
+      <p v-if="readOnly" class="prep-readonly">{{ READ_ONLY_HINT }}</p>
       <div class="prep-toolbar-row prep-preset-row" role="group" aria-label="时间窗">
         <button
           v-for="chip in PRESET_CHIPS"
@@ -333,6 +345,7 @@ function cancelDiscard() {
             </div>
           </div>
           <button
+            v-if="!readOnly"
             type="button"
             class="btn btn-danger prep-discard"
             :disabled="busy"
@@ -391,7 +404,9 @@ function cancelDiscard() {
               </div>
             </div>
             <p v-if="!item.can_record" class="prep-no-master">{{ NO_MASTER_REASON }}</p>
-            <div v-else class="prep-row-actions">
+            <!-- 写入口（票 08）：员工这一档整条收起来 —— 「多做一笔」/「登记」/「撤销」
+                 都是写路径，不是"点不动"，而是不给点。管理端那一档一字未改。 -->
+            <div v-else-if="!readOnly" class="prep-row-actions">
               <button
                 v-if="showExtraRecord(item)"
                 type="button"
@@ -545,6 +560,16 @@ function cancelDiscard() {
   margin: 0;
   font-size: 14px;
   color: var(--prep-mute);
+}
+/* 员工这一档顶上那一句（票 08）：一眼看得出这一页改不了，不占太多地方。 */
+.prep-readonly {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(10, 13, 22, 0.45);
 }
 .prep-toolbar-row {
   display: flex;

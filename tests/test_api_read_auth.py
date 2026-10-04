@@ -21,6 +21,11 @@
 「任一身份」门（``require_any_identity_session``，ADR 0092）—— 扫码看配方保留，但
 扫码的人先登录。这一条把「零鉴权、谁都能拉（连停用配方都能拉）」那个既有缺陷关掉，
 所以下面第 2 节里不再有配方，第 1 节里多出三条。
+
+票 08 把**备货计划的读端点**也换成同一条门（它随页搬进工作台的「后勤」组，后厨要看得见
+今天要备什么），而**写端点一个都没动**：员工 cookie 打写接口仍必须 401、管理端照常
+（第 3b 节两条），ADR 0092 那句「进工作台只是换位置与统一导航，不扩权」在测试里就是这个
+正反两面。
 """
 
 from datetime import datetime
@@ -48,7 +53,6 @@ BUSINESS_READ_PATHS = (
     "/api/dish-stations/stats",
     "/api/semi-rules/",
     "/api/report-dishes/",
-    "/api/prep-plan/current",
     "/api/stations",
     "/api/system/status",
     "/api/system/scraper-health",
@@ -62,6 +66,27 @@ BUSINESS_READ_PATHS = (
     "/api/recipes/stations",
     "/api/recipes/stations/changfen",
 )
+
+# 备货计划的读面（票 08）：搬进工作台的「后勤」组之后，读端点从「仅管理端」改成
+# 「任一身份」门（ADR 0092 那张契约表的「备货计划读端点」一行）。单独列一份是因为
+# 除了「无凭据 401」，它还有两条自己的断言（员工会话 200 拿到同一份内容、写端点仍 401）——
+# 见下面的 `test_prep_plan_reads_accept_any_identity_session`。
+PREP_PLAN_READ_PATHS = (
+    "/api/prep-plan/current",
+    "/api/prep-plan/forecast",
+    "/api/prep-plan/movements",
+    "/api/prep-plan/expiring",
+)
+
+# 备货计划的写面（票 08 不动的部分）：**仍只认管理端**。
+PREP_PLAN_WRITE_PATHS = (
+    ("POST", "/api/prep-plan/generate", {"method": "weighted_history"}),
+    ("POST", "/api/prep-plan/init-items-from-rules", None),
+    ("POST", "/api/prep-plan/batches", {
+        "item_name": "不存在的备货品", "unit": "份", "produced_qty": 1,
+    }),
+)
+
 
 # 公开面：无凭据必须「可达」，即拒绝原因绝不能是鉴权门的 401「未授权」。
 PUBLIC_PATHS = (
@@ -201,6 +226,18 @@ def test_business_read_endpoints_reject_anonymous_requests(api, path):
 
     assert resp.status_code == 401, f"{path} 无凭据居然 {resp.status_code}: {resp.text}"
     # 拒绝必须来自鉴权门：body 就是「未授权」，没有夹带任何业务字段。
+    assert resp.json() == AUTH_GATE_BODY, resp.text
+
+
+@pytest.mark.parametrize("path", PREP_PLAN_READ_PATHS)
+def test_prep_plan_read_endpoints_reject_anonymous_requests(api, path):
+    """票 08：备货计划读面从「仅管理端」改成「任一身份」门 —— 无凭据仍必须 401。
+
+    改成「任一身份」不等于放开：拒绝必须来自鉴权门（body 是「未授权」），而不是业务
+    逻辑碰巧报错。
+    """
+    resp = api.anonymous("GET", path)
+    assert resp.status_code == 401, f"{path} 无凭据居然 {resp.status_code}: {resp.text}"
     assert resp.json() == AUTH_GATE_BODY, resp.text
 
 
@@ -491,6 +528,75 @@ def test_recipe_management_reads_require_credentials(api):
     authorized = api.as_cookie("GET", f"/api/recipes/stations/{slug}/recipes")
     assert authorized.status_code == 200, authorized.text
     assert "鲜虾肠粉" in [r["recipe_name"] for r in authorized.json()["recipes"]]
+
+
+# ---------------------------------------------------------------------------
+# 3b. 备货计划（票 08）：读门「任一身份」，写门仍只认管理端
+# ---------------------------------------------------------------------------
+def _seed_semi_finished_rule(api: ApiAccess) -> None:
+    """落一条半成品规则 —— 写路由的正面断言要它才看得出「真的写进去了」。"""
+    _insert_row(
+        api,
+        "semi_finished_rules",
+        {
+            "dish_name": "鲜虾饺",
+            "semi_name": "虾饺馅",
+            "position": "馅档",
+            "factor": 1,
+            "unit": "份",
+            "category": "",
+            "notes": "",
+            "created_at": datetime.now(CHINA_TZ).isoformat(),
+            "updated_at": datetime.now(CHINA_TZ).isoformat(),
+        },
+    )
+
+
+def test_prep_plan_reads_accept_any_identity_session(api):
+    """票 08：备货计划的读端点从「仅管理端」改成「任一身份」门（ADR 0092）。
+
+    ``/workbench/kitchen/prep-plan`` 是工作台「后勤」组里的一页，两种身份都进得去 ——
+    读端点跟着换成 ``require_any_identity_session``：无凭据 401（拒绝来自鉴权门），
+    管理端会话与员工会话都能读到**同样的**内容。**写端点不在这一档**（下一条钉住）。
+    """
+    for path in PREP_PLAN_READ_PATHS:
+        anonymous = api.anonymous("GET", path)
+        assert anonymous.status_code == 401, f"{path} 无凭据居然 {anonymous.status_code}"
+        assert anonymous.json() == AUTH_GATE_BODY, anonymous.text
+
+        as_admin = api.as_cookie("GET", path)
+        assert as_admin.status_code == 200, f"{path} 管理端会话 {as_admin.status_code}: {as_admin.text}"
+
+    _staff_reader_session(api)
+    for path in PREP_PLAN_READ_PATHS:
+        as_staff = api.as_staff("GET", path)
+        assert as_staff.status_code == 200, f"{path} 员工会话 {as_staff.status_code}: {as_staff.text}"
+
+    # 两把钥匙拿到的是同一份内容（读面不分身份裁剪）。
+    as_admin = api.as_cookie("GET", "/api/prep-plan/current")
+    as_staff = api.as_staff("GET", "/api/prep-plan/current")
+    assert as_admin.json() == as_staff.json()
+
+
+def test_prep_plan_writes_still_require_admin(api):
+    """票 08：进工作台只是换位置，**不扩权** —— 写端点仍只认管理端。
+
+    员工 cookie 打写接口必须 401（拒绝来自鉴权门），管理端 cookie 打同一条接口照常
+    —— 正反两条一起钉，免得「加了读门」顺手把写门也放宽。
+    """
+    _staff_reader_session(api)
+
+    for method, path, payload in PREP_PLAN_WRITE_PATHS:
+        staff_resp = api.as_staff(method, path, json=payload)
+        assert staff_resp.status_code == 401, f"{method} {path} 员工居然 {staff_resp.status_code}"
+        assert staff_resp.json() == AUTH_GATE_BODY, staff_resp.text
+
+    # 管理端照常：`init-items-from-rules` 是一条不依赖业务状态的写路由（空库也是 200），
+    # 拿它证明写面本身没被这一票弄坏 —— 而且真的写进去了（created 计数从 0 变 1）。
+    _seed_semi_finished_rule(api)
+    admin_resp = api.as_cookie("POST", "/api/prep-plan/init-items-from-rules")
+    assert admin_resp.status_code == 200, admin_resp.text
+    assert admin_resp.json()["created"] == 1, admin_resp.text
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ import { useRoute, useRouter } from 'vue-router'
 import WorkbenchExitButton from '../../components/workbench/WorkbenchExitButton.vue'
 import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
-import { pageRow } from '../../router/pageRoutes.js'
+import { pageRow, pageTitle } from '../../router/pageRoutes.js'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
 import { WORKBENCH_TITLE } from '../../utils/workbenchCopy'
 import { workbenchAudienceFor, workbenchGroupOf, workbenchNavFor } from '../../utils/workbenchNav'
@@ -32,6 +32,40 @@ const identityStore = useWorkbenchIdentityStore()
 const identity = computed(() => identityStore.identity)
 const navItems = computed(() => workbenchNavFor(identity.value))
 const currentGroup = computed(() => workbenchGroupOf(route.path))
+
+/** 按**格**把条目分好组（一处渲染）：一格里的条目共享一个 key，键序仍是组表里的顺序。
+ *
+ *  标题的取法跟着"这一格有几扇门"走：
+ *  - **一格一门**（今天 / 人事 / 现场 / 我的）—— 用组表里的 `label`，与票 07 之前一字不差；
+ *  - **一格多门**（票 08 的后勤：配方 + 备货计划）—— 每一半用它**自己那一页在清单里的名字**
+ *    （同一颗胶囊里写两遍「后勤」看不出哪一半是哪一页）。名字从页面清单取（`pageTitle`），
+ *    不在这里另写一份词表。 */
+const navCells = computed(() => {
+  const cells = []
+  for (const item of navItems.value) {
+    let cell = cells.find((row) => row.key === item.key)
+    if (!cell) {
+      cell = { key: item.key, links: [] }
+      cells.push(cell)
+    }
+    cell.links.push(item)
+  }
+  for (const cell of cells) {
+    const titled = cell.links.length > 1
+    cell.links = cell.links.map((item) => ({
+      ...item,
+      label: titled ? pageTitle(item.to) : item.label,
+    }))
+  }
+  return cells
+})
+
+/** 这一扇门算不算"当前"：得同时是**这一格**（`workbenchGroupOf`，判据是页面的 `group`）
+ *  与这一条链接自己指着的路径。同一格里因此只有一扇门亮 —— 后勤那一格两扇门指着两页，
+ *  站在备货计划上时亮的是备货计划那一半，「后勤」整格仍然算当前（`is-on`）。 */
+function isCurrentLink(cell, item) {
+  return cell.key === currentGroup.value && item.to === route.path
+}
 
 /** 此刻这一页还属于当前身份吗（判据是页面清单里那一行的 `audience`，不猜路径前缀）。
  *
@@ -68,14 +102,25 @@ watch(identity, keepViewAllowed)
       <b class="wb-brand">{{ WORKBENCH_TITLE }}</b>
       <WorkbenchIdentitySwitcher class="wb-id-switcher" />
       <nav class="wb-nav" aria-label="工作台导航">
-        <router-link
-          v-for="item in navItems"
-          :key="item.key"
-          class="wb-nav-item"
-          :class="{ 'is-on': item.key === currentGroup }"
-          :aria-current="item.key === currentGroup ? 'page' : undefined"
-          :to="item.to"
-        >{{ item.label }}</router-link>
+        <!-- 一格一颗胶囊（票 03 的规矩）：单条目那一格就是一个链接；多条目那一格
+             （票 08 的后勤）是同一颗里的两条链接，`is-multi` 只收窄内边距。整格是否
+             当前由 `is-on` 判（按页面清单的 group），哪一半贴着"当前"由 `is-current`
+             判（这一格 + 这条链接自己的路径）—— 两个类都挂在链接上，样式里按类取值。 -->
+        <span
+          v-for="cell in navCells"
+          :key="cell.key"
+          class="wb-nav-cell"
+          :class="{ 'is-on': cell.key === currentGroup, 'is-multi': cell.links.length > 1 }"
+        >
+          <router-link
+            v-for="item in cell.links"
+            :key="item.to"
+            class="wb-nav-item"
+            :class="{ 'is-on': cell.key === currentGroup, 'is-current': isCurrentLink(cell, item) }"
+            :aria-current="cell.key === currentGroup ? 'page' : undefined"
+            :to="item.to"
+          >{{ item.label }}</router-link>
+        </span>
       </nav>
       <!-- 退出入口（票 06）：员工那三页原来自带一颗（`StaffExitButton`），首页与切档之后
            的店长视角原先没有 —— 工作台是子应用，页页都得退得出去。行为只有一处
@@ -116,9 +161,22 @@ watch(identity, keepViewAllowed)
   border-radius: 999px; padding: 4px 12px;
 }
 .wb-nav-item:hover { color: var(--hy-ink); border-color: var(--hy-line-strong); }
-/* 高亮按「组」算，不按链接自己的路径（见 `workbenchGroupOf`）。 */
-.wb-nav-item.is-on {
-  color: var(--hy-mint); border-color: var(--hy-mint-line); background: var(--hy-mint-soft);
+/* 高亮按「格」算，不按链接自己的路径（见 `workbenchGroupOf`）。
+   一格里有多扇门时（票 08 的后勤：配方 + 备货计划）两颗链接合成**一颗胶囊**：
+   边框与底色挂在外层，里面那两条只留文字（否则两颗胶囊并排，看着像两个分组）。
+   **整格是否当前**由 `is-on` 判（哪一格亮），**哪一半贴着"当前"**由 `is-current` 判
+   —— 一格两门时两半都算"这一格"（`.wb-nav-cell.is-on` 一起点着），只有指到这一页的
+   那半加粗着色。 */
+.wb-nav-cell {
+  display: inline-flex; align-items: stretch;
+  border: 1px solid var(--hy-line); background: var(--hy-surface-2); border-radius: 999px;
 }
+.wb-nav-cell > .wb-nav-item { border: none; background: none; padding: 4px 12px; }
+.wb-nav-cell.is-multi > .wb-nav-item + .wb-nav-item { border-left: 1px solid var(--hy-line); }
+.wb-nav-cell.is-multi > .wb-nav-item { padding: 4px 10px; }
+.wb-nav-item.is-on { color: var(--hy-mint); }
+.wb-nav-cell.is-on { border-color: var(--hy-mint-line); background: var(--hy-mint-soft); }
+.wb-nav-item.is-current { color: var(--hy-ink); font-weight: 600; }
+.wb-nav-item.is-current.is-on { color: var(--hy-mint); }
 .wb-main { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 </style>

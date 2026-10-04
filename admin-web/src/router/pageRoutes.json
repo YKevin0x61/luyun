@@ -10,7 +10,8 @@
     "standalone 的语义是「不渲染管理后台那条导航」（App.vue 按它决定渲不渲 NavBar），不是「没有外壳」：后勤组里的列表页与配方管理页各自套工作台外壳（WorkbenchLayout，顶栏那条窄栏 + 按身份过滤的导航），阅读 / 打印 / 印码三页是**沉浸页** —— 不套外壳，页面上只有返回 / 打印 / 目录抽屉。两种在这张表里都记 standalone: true。",
     "/workbench/forbidden 是越权落点（票 03）：group 用 entry —— 它不属于任何业务组、不进工作台导航；audience: both 是「两种身份都可能被拦到这里」（谁越权谁看）；standalone: true 是「一页说明 + 一颗回自己首页的按钮」，不套后台导航。",
     "票 05 起工作台的页面按组落在 URL 上：人事 /workbench/hr/*（排班月历 / 排班待办 / 班次表 / 花名册）、现场 /workbench/floor/*（卫生七页）。票 05 之前那批**平铺**地址（/workbench/roster、/workbench/daily、/workbench/inbox …）随这一票作废：不加别名、不做重定向，自然 404（`?next=` 里可能还存着它们，由 admin-web/src/utils/loginNext.js 在入口换成新地址）。",
-    "/workbench 本身是**子应用根**，不许 404：票 06 起它就是「今天」首页（group 标 home、标题「今天」、audience 为 both —— 两种身份都能进，各自看到自己那一套），页面组件是 views/workbench/WorkbenchHomeView.vue，套工作台外壳。月历仍自己占一行（/workbench/hr/calendar，人事组）：两行不再指同一个页面组件（票 05 的过渡态到此结束）。"
+    "/workbench 本身是**子应用根**，不许 404：票 06 起它就是「今天」首页（group 标 home、标题「今天」、audience 为 both —— 两种身份都能进，各自看到自己那一套），页面组件是 views/workbench/WorkbenchHomeView.vue，套工作台外壳。月历仍自己占一行（/workbench/hr/calendar，人事组）：两行不再指同一个页面组件（票 05 的过渡态到此结束）。",
+    "票 08 起备货计划（/workbench/kitchen/prep-plan）从管理后台的 /prep-plan 搬进后勤组，audience 跟着从 admin 改成 both：员工在工作台里能看今天要备什么，**改不了**（ADR 0092 那一条：进工作台只是换位置与统一导航，不扩权）。读端点是「任一身份」门、写端点仍只认管理端、页面在员工这一档收起全部可写控件。旧 /prep-plan 从 vue-router 与 main.py 的 SPA_PAGE_ROUTES 一起删掉（自然 404），老 ?next= 由 admin-web/src/utils/loginNext.js 换成新地址。"
   ],
   "pages": [
     {
@@ -216,11 +217,11 @@
       "public": false
     },
     {
-      "path": "/prep-plan",
+      "path": "/workbench/kitchen/prep-plan",
       "title": "备货计划",
       "group": "kitchen",
-      "audience": "admin",
-      "standalone": false,
+      "audience": "both",
+      "standalone": true,
       "public": false
     },
     {

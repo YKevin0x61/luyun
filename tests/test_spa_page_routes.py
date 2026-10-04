@@ -246,6 +246,9 @@ class SpaPageRouteContractTest(unittest.TestCase):
         票 07 把配方五页（列表 / 沉浸阅读 / 打印 / 印码 / 管理）搬进「后勤」组
         （`/workbench/kitchen/recipe*`）：那一批新地址进 new_paths，旧的 `/recipe*`
         跟着 `/staff/*` 一起进 old_paths（不留别名、不做重定向）。
+
+        票 08 把备货计划从管理后台的 `/prep-plan` 搬进同一组
+        （`/workbench/kitchen/prep-plan`）：新地址进 new_paths，旧地址进 old_paths。
         """
         import main as main_module
 
@@ -271,12 +274,13 @@ class SpaPageRouteContractTest(unittest.TestCase):
             "/workbench/me/month",
             "/workbench/me/clean",
             "/workbench/forbidden",
-            # 后勤组（票 07）：配方五页。
+            # 后勤组（票 07）：配方五页；（票 08）备货计划一并搬进来。
             "/workbench/kitchen/recipe",
             "/workbench/kitchen/recipe/detail",
             "/workbench/kitchen/recipe/print",
             "/workbench/kitchen/recipe/qr",
             "/workbench/kitchen/recipe/manage",
+            "/workbench/kitchen/prep-plan",
         }
         old_paths = {
             "/scheduling",
@@ -312,6 +316,9 @@ class SpaPageRouteContractTest(unittest.TestCase):
             "/recipe/print",
             "/recipe/qr",
             "/recipe/manage",
+            # 票 08：备货计划的老地址（管理后台的 `/prep-plan`）—— 搬进「后勤」组之后
+            # 从 vue-router 与 `SPA_PAGE_ROUTES` 一起删掉，自然 404、不留别名。
+            "/prep-plan",
         }
         router_paths = _router_page_paths()
         self.assertEqual(sorted(new_paths - router_paths), [], "vue-router 少了工作台页面")

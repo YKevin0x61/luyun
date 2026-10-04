@@ -31,10 +31,28 @@ const FLOOR_PAGES = [
   ['/workbench/floor/data', 'HygieneDataView.vue'],
 ]
 
+// 工作台「后勤」那一组里**带工作台导航**的页面（票 07 的配方列表 / 管理，票 08 的备货
+// 计划）；组里的沉浸页（阅读 / 打印 / 印码）不套外壳，不在这一份里。
+const KITCHEN_SHELL_PAGES = [
+  ['/workbench/kitchen/recipe', 'RecipeStationsView.vue'],
+  ['/workbench/kitchen/recipe/manage', 'RecipeManageView.vue'],
+  // 票 08：备货计划从管理后台的 `/prep-plan` 搬进后勤组，与配方列表同一个形态。
+  ['/workbench/kitchen/prep-plan', 'PrepPlanView.vue'],
+]
+
+// 后勤组的沉浸页（票 07）：不套外壳，各挂自己那一行。
+const KITCHEN_IMMERSIVE_PAGES = [
+  ['/workbench/kitchen/recipe/detail', 'RecipeDetailView.vue'],
+  ['/workbench/kitchen/recipe/print', 'RecipePrintView.vue'],
+  ['/workbench/kitchen/recipe/qr', 'RecipeQrView.vue'],
+]
+
 const PAGES = [
   ...HR_PAGES,
   ...FLOOR_PAGES,
   ['/workbench/forbidden', 'ForbiddenView.vue'],
+  ...KITCHEN_SHELL_PAGES,
+  ...KITCHEN_IMMERSIVE_PAGES,
 ]
 
 // 工作台「我的」那一组（员工端）：套 `WorkbenchLayout`（工作台外壳），页面本体在子记录里。
@@ -45,7 +63,7 @@ const STAFF_PAGES = [
 ]
 
 describe('工作台路由（票 05 按分组落位之后）', () => {
-  it('十一个内页各挂在自己那条 /workbench 路径上', () => {
+  it('工作台内页各挂在自己那条 /workbench 路径上', () => {
     for (const [path, view] of PAGES) {
       const line = lineFor(path)
       expect(line, `${path} 没注册`).toBeTruthy()
@@ -53,12 +71,19 @@ describe('工作台路由（票 05 按分组落位之后）', () => {
     }
   })
 
-  it('人事四页走人事壳、现场七页走现场壳（两条工厂各管一组）', () => {
+  it('人事四页走人事壳、现场七页走现场壳、后勤的列表 / 管理 / 备货计划走工作台外壳', () => {
     for (const [path] of HR_PAGES) {
       expect(lineFor(path), `${path} 该走人事壳`).toContain('workbenchHrPage')
     }
     for (const [path] of FLOOR_PAGES) {
       expect(lineFor(path), `${path} 该走现场壳`).toContain('hygieneAdminPage')
+    }
+    for (const [path] of KITCHEN_SHELL_PAGES) {
+      expect(lineFor(path), `${path} 该走工作台外壳`).toContain('workbenchKitchenPage')
+    }
+    // 沉浸页不套外壳（票 07 的规矩）：它们是直接写的路由对象，不走任何工厂。
+    for (const [path] of KITCHEN_IMMERSIVE_PAGES) {
+      expect(lineFor(path), `${path} 该是沉浸页`).not.toContain('Page(')
     }
   })
 
@@ -104,6 +129,12 @@ describe('工作台路由（票 05 按分组落位之后）', () => {
       "'/workbench/boards'", "'/workbench/data'",
     ]) {
       expect(router, `${flat} 又回到路由里了`).not.toContain(flat)
+    }
+    // 票 07 / 08：配方与备货计划的老地址（独立域 `/recipe*`、管理后台的 `/prep-plan`）。
+    // 带着引号查 `/prep-plan` 会连新地址一起命中 —— 所以要查的是**老写法自身**：
+    // `path: '/prep-plan'` 与 `to="/prep-plan"` 两种注册写法。
+    for (const old of ["path: '/prep-plan'", 'to="/prep-plan"', "'/recipe'", "'/recipe/detail'"]) {
+      expect(router, `${old} 又回到路由里了`).not.toContain(old)
     }
     // 老地址靠 `?next=` 迁移，不给它留路由：留了就会跟新前缀漂成两套。
     expect(router).not.toMatch(/alias:/)

@@ -1042,12 +1042,16 @@ PUBLIC_API_SURFACE: tuple[tuple[str, str], ...] = (
 app.include_router(auth_router)          # 登录 / 初始化
 app.include_router(hygiene_router)       # 员工端走 require_staff_session，管理端走 require_session
 app.include_router(recipes_reader_router)  # 配方阅读面：任一身份（管理端或员工会话）
+app.include_router(prep_plan.reader_router)  # 备货计划读面：任一身份（票 08）
 # —— 业务面：统一挂管理员凭据（会话 cookie / X-Admin-Token / Bearer）——
 app.include_router(orders.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(dishes.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(dish_stations.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(semi_rules.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(report_dishes.router, dependencies=[Depends(verify_admin_token)])
+# 备货计划的**写面**（与上面的 reader_router 同一个前缀、分工见 api/prep_plan.py 开头）：
+# 票 08 把读端点开成「任一身份」之后，写端点仍只认管理端 —— ADR 0092 那一条：
+# 它进工作台只是换位置与统一导航，不扩权。
 app.include_router(prep_plan.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(tables_router, dependencies=[Depends(verify_admin_token)])
 app.include_router(analytics_router, dependencies=[Depends(verify_admin_token)])
@@ -1157,8 +1161,8 @@ async def kds_manifest():
 # 六个前缀的白名单块里（deploy/nginx.conf、deploy/Caddyfile），hygiene 页面一律落到
 # 反代兜底转发 —— 漏一条就是直连/反代硬导航 404（DOC-01 的 /hygiene-data 就是这么漏的）。
 # 工作台：票 05 起按组分在 `/workbench/hr/*`（人事：月历 / 待办 / 班次表 / 花名册）、
-# `/workbench/floor/*`（现场：卫生七页）与 `/workbench/kitchen/*`（票 07 的后勤：配方）
-# 三组；平铺的那批旧地址已删干净、不留别名。
+# `/workbench/floor/*`（现场：卫生七页）与 `/workbench/kitchen/*`（后勤：票 07 的配方、
+# 票 08 的备货计划）三组；平铺的那批旧地址已删干净、不留别名。
 # 票 06 起系统配置页从 `/setup` 改名 `/settings` —— 它一直不是首次初始化页（建管理员账号
 # 在 `/login` 的管理员栏），旧地址不做兼容、不留别名。
 SPA_PAGE_ROUTES = (
@@ -1170,7 +1174,6 @@ SPA_PAGE_ROUTES = (
     "/register",
     "/settings",
     "/sales-report",
-    "/prep-plan",
     "/wecom-push",
     "/logs",
     # 工作台（排班 + 卫生 + 员工端，2026-10-04）：一个子应用、两种身份、四块业务。
@@ -1204,6 +1207,10 @@ SPA_PAGE_ROUTES = (
     "/workbench/kitchen/recipe/print",
     "/workbench/kitchen/recipe/qr",
     "/workbench/kitchen/recipe/manage",
+    # 票 08：备货计划从管理后台的 `/prep-plan` 搬进「后勤」组（`audience: both`：
+    # 两种身份都进得去，员工那一档页面是只读的）。旧 `/prep-plan` 从这一份清单与
+    # vue-router 一起删掉 —— 自然 404、不留别名（`?next=` 里的老地址由前端换）。
+    "/workbench/kitchen/prep-plan",
     "/workbench/me/today",
     "/workbench/me/month",
     "/workbench/me/clean",

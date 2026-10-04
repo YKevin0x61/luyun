@@ -818,12 +818,14 @@ WORKBENCH_PAGES = (
     "/workbench/kitchen/recipe/print",
     "/workbench/kitchen/recipe/qr",
     "/workbench/kitchen/recipe/manage",
+    # 票 08：备货计划从管理后台搬进「后勤」组（`audience: both`）—— 服务端对工作台
+    # 前缀一视同仁；它不再是系统管理面的一页。
+    "/workbench/kitchen/prep-plan",
 )
 SYSTEM_PAGES = (
     "/",
     "/admin",
     "/sales-report",
-    "/prep-plan",
     "/wecom-push",
     "/logs",
     "/settings",

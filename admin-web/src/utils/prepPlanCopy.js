@@ -32,6 +32,9 @@ export const NEAR_AVAILABLE_LABEL = '临期可用'
 export const NEAR_EXPIRY_TITLE = '临期批次'
 export const REMAINING_LABEL = '剩余'
 export const EXPIRES_AT_LABEL = '过期时间'
+/** 员工这一档的页面顶上那一句（票 08）：这一页**看得到、改不了** —— 不是静默少了几颗
+ *  按钮（那样员工会以为自己看漏了）。写控件本身在 `PrepPlanView` 里按身份收起。 */
+export const READ_ONLY_HINT = '只读：备货计划的登记与报废由管理端账号操作。'
 
 export const PRESET_LABELS = {
   future24: '未来 24 小时',

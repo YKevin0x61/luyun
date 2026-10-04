@@ -1,7 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-备货计划 API。
+"""备货计划 API。
+
+**票 08 起模块里有两条 router**（形态照票 07 的 `api/recipes.py`）：
+
+- `reader_router` —— 读面。备货计划搬进工作台的「后勤」组
+  （`/workbench/kitchen/prep-plan`，页面清单里是 `audience: both`），后厨在工作台里
+  得看得到"今天要备什么"，所以四条读端点（forecast / current / movements / expiring）
+  挂的是「任一身份」门 `require_any_identity_session`（管理端会话或员工会话）。
+  门本身在 `api/security.py`，注册处是 `main.py`（**不挂** verify_admin_token）。
+- `router` —— 业务面（写端点 + 不属于阅读面的那些）。注册处统一挂
+  `verify_admin_token`：**进工作台只是换位置与统一导航，不扩权**（ADR 0092）。
+
+两条 router 的路径前缀相同，靠"哪条路由挂在哪个 router 上"分工 —— 新增端点时先想清楚
+它是读还是写，别顺手挂错。
 """
 
 import logging
@@ -12,10 +24,20 @@ from pydantic import BaseModel, Field
 
 from database import get_db
 from services.prep_plan_service import prep_plan_service
-from api.security import verify_admin_token
+from api.security import require_any_identity_session, verify_admin_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/prep-plan", tags=["备货计划"])
+
+# 读面（任一身份：管理端会话或员工会话）。与 `router` 同前缀，见模块开头那段说明。
+# 门挂在 **router 级**（一处，四条读端点一起受保护）：读面没有"某一条只给管理端"的分支，
+# 「含停用」那种按身份裁剪的参数备货计划这边不存在 —— 有分支了再往单条路由上挂。
+reader_router = APIRouter(
+    prefix="/api/prep-plan",
+    tags=["备货计划"],
+    dependencies=[Depends(require_any_identity_session)],
+)
+
 _ADMIN_WRITE = [Depends(verify_admin_token)]
 
 
@@ -57,7 +79,7 @@ class CreateMovementRequest(BaseModel):
     source_id: str = ""
 
 
-@router.get("/forecast")
+@reader_router.get("/forecast")
 async def get_forecast(
     target_start: Optional[str] = Query(None, description="ISO 时间，默认 now()"),
     target_end: Optional[str] = Query(None, description="ISO 时间，默认 target_start + 24h"),
@@ -101,7 +123,7 @@ async def generate_plan(payload: GeneratePlanRequest, db=Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"生成计划失败: {exc}")
 
 
-@router.get("/current")
+@reader_router.get("/current")
 async def get_current_plan(db=Depends(get_db)):
     try:
         return await prep_plan_service.get_current_plan(db)
@@ -173,7 +195,7 @@ async def update_batch(batch_id: int, payload: UpdateBatchRequest, db=Depends(ge
         raise HTTPException(status_code=500, detail=f"更新备货批次失败: {exc}")
 
 
-@router.get("/movements")
+@reader_router.get("/movements")
 async def get_movements(
     item_name: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
@@ -218,7 +240,7 @@ async def create_movement(payload: CreateMovementRequest, db=Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"新增库存流水失败: {exc}")
 
 
-@router.get("/expiring")
+@reader_router.get("/expiring")
 async def get_expiring_batches(
     within_hours: int = Query(4, ge=1, le=72),
     db=Depends(get_db),
@@ -239,6 +261,10 @@ async def get_accuracy(
     """
     MVP3 基础版准确率：按计划项聚合统计 abs(预测-实际)/实际。
     实际值暂以 orders + semi_rules 换算（简化版：同周期总量）。
+
+    **这条留在业务 router 上**（票 08）：它是管理端的复盘口径，备货计划页一个字段都不用
+    它 —— 读面开「任一身份」开的是那一页真正要读的四条（forecast / current / movements /
+    expiring），不顺手把没被工作台消费的接口一起放宽。
     """
     try:
         return await prep_plan_service.get_accuracy(db, start_date, end_date)

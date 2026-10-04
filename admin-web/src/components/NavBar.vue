@@ -15,9 +15,9 @@ const route = useRoute()
 // 简单映射，对齐旧原生页各自的 data-subtitle（如 public/logs.html:130）
 const PAGE_SUBTITLES = [
   // 工作台（2026-10-04：排班与卫生合并成一个子系统，票 04 两组同住 `/workbench/*`）。
+  // 票 07 / 08 起配方与备货计划也在这一条前缀底下（后勤组），所以这里不再各留一条。
   { prefix: '/workbench', subtitle: WORKBENCH_TITLE },
   { prefix: '/logs', subtitle: '日志中心' },
-  { prefix: '/prep-plan', subtitle: '备货计划' },
   { prefix: '/wecom-push', subtitle: '企微推送' },
   { prefix: '/sales-report', subtitle: '销售报表' },
   { prefix: '/admin', subtitle: '数据管理' },
@@ -86,9 +86,9 @@ async function handleLogout() {
       >{{ WORKBENCH_TITLE }}</router-link>
       <router-link to="/sales-report" class="nav-tab" :class="{ active: route.path.startsWith('/sales-report') }">销售报表</router-link>
       <!-- 票 07（spec 故事 12）：配方那一格撤掉 —— 它已经在工作台的「后勤」组里，
-           从上面「工作台」那一格进。管理后台的导航为它单列一格只会让人以为有两个配方域。 -->
+           从上面「工作台」那一格进。管理后台的导航为它单列一格只会让人以为有两个配方域。
+           票 08 同理：备货计划那一格也撤掉（后勤组里，与配方同住一格）。 -->
       <router-link to="/wecom-push" class="nav-tab" :class="{ active: route.path.startsWith('/wecom-push') }">企微推送</router-link>
-      <router-link to="/prep-plan" class="nav-tab" :class="{ active: route.path.startsWith('/prep-plan') }">备货计划</router-link>
       <router-link to="/logs" class="nav-tab" :class="{ active: route.path.startsWith('/logs') }">日志</router-link>
     </div>
     <div class="nav-right">

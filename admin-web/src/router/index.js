@@ -80,7 +80,6 @@ const routes = [
   { path: '/admin', name: 'admin', component: () => import('../views/AdminView.vue'), meta: pageMeta('/admin') },
   { path: '/sales-report', name: 'sales-report', component: () => import('../views/SalesReportView.vue'), meta: pageMeta('/sales-report') },
   { path: '/logs', name: 'logs', component: () => import('../views/LogsView.vue'), meta: pageMeta('/logs') },
-  { path: '/prep-plan', name: 'prep-plan', component: () => import('../views/PrepPlanView.vue'), meta: pageMeta('/prep-plan') },
   { path: '/wecom-push', name: 'wecom-push', component: () => import('../views/WecomPushView.vue'), meta: pageMeta('/wecom-push') },
   // ── 工作台（排班 + 卫生合并成一个子系统，2026-10-04）──────────────────────
   // 票 05 起页面按组落在 URL 上，两组各有自己的壳：
@@ -113,13 +112,13 @@ const routes = [
   hygieneAdminPage('/workbench/floor/fix', 'workbench-floor-fix', () => import('../views/hygiene/HygieneFixView.vue')),
   hygieneAdminPage('/workbench/floor/boards', 'workbench-floor-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
   hygieneAdminPage('/workbench/floor/data', 'workbench-floor-data', () => import('../views/hygiene/HygieneDataView.vue')),
-  // ── 工作台 · 后勤（配方，票 07）─────────────────────────────────────────────
+  // ── 工作台 · 后勤（配方票 07；备货计划票 08）────────────────────────────────
   // 配方从独立域 `/recipe*` 搬进「后勤」组，同时**阅读面从免登录改成要登录**
   // （ADR 0092 里那个推翻既有刻意设计的动作）。扫码看岗位配方的路子保留：扫码 →
   // 未登录 → 登录页默认开员工栏 → 回到那条配方（回跳白名单在 `utils/loginNext.js`）。
   //
   // 两种外壳（都不是管理后台那条导航，所以清单里一律 `standalone: true`）：
-  //   带导航 —— 列表页与管理页套 `WorkbenchLayout`（`workbenchKitchenPage`）；
+  //   带导航 —— 列表页 / 管理页 / 备货计划套 `WorkbenchLayout`（`workbenchKitchenPage`）；
   //   沉浸页 —— 阅读 / 打印 / 印码不套外壳，页面上只有返回 / 打印 / 目录抽屉。
   // 旧的 `/recipe*` 一条都不留（自然 404，不给别名、不做重定向）。
   workbenchKitchenPage('/workbench/kitchen/recipe', 'recipe-stations', () => import('../views/recipe/RecipeStationsView.vue')),
@@ -127,6 +126,13 @@ const routes = [
   { path: '/workbench/kitchen/recipe/detail', name: 'recipe-detail', component: () => import('../views/recipe/RecipeDetailView.vue'), meta: pageMeta('/workbench/kitchen/recipe/detail') },
   { path: '/workbench/kitchen/recipe/print', name: 'recipe-print', component: () => import('../views/recipe/RecipePrintView.vue'), meta: pageMeta('/workbench/kitchen/recipe/print') },
   { path: '/workbench/kitchen/recipe/qr', name: 'recipe-qr', component: () => import('../views/recipe/RecipeQrView.vue'), meta: pageMeta('/workbench/kitchen/recipe/qr') },
+  // 备货计划（票 08）：从管理后台的 `/prep-plan` 搬进「后勤」组，**与配方列表同一个形态**
+  // ——套工作台外壳（顶栏那条窄栏 + 按身份过滤的导航），跟随组里的落点常量走（`links` 里
+  // 那一条，页面清单只负责把这一页登记成 `kitchen` / `both`）。它进工作台只是换位置与统一
+  // 导航，**不扩权**：读接口走「任一身份」门、写接口仍只认管理端，员工这一档页面只读
+  // （`composables/usePrepPlanAdmin.js`）。旧 `/prep-plan` 从路由里删干净（自然 404，
+  // 不给别名、不做重定向；`?next=` 里的老地址由 `utils/loginNext.js` 换成新地址）。
+  workbenchKitchenPage('/workbench/kitchen/prep-plan', 'prep-plan', () => import('../views/PrepPlanView.vue')),
   // 子应用根（票 06）：就是「今天」首页 —— 按身份用已有接口聚合今日摘要，只做分流与
   // 摘要、不做业务动作。它套**工作台外壳**（`WorkbenchLayout`：顶栏一条 + 按身份过滤的
   // 导航），跟「我的」那三页同一个壳；月历仍自己占一行（人事组的落点），两行不再指
