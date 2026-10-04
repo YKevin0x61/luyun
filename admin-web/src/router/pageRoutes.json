@@ -3,10 +3,12 @@
     "页面清单的唯一来源 —— 加一页、改标题、改分组、改身份、改外壳/公开标记，都只改这里。",
     "前端：admin-web/src/router/index.js 每条路由的 meta（standalone/public）与页面标题从这张表派生，读取口是 admin-web/src/router/pageRoutes.js。",
     "后端：main.py 的 SPA_PAGE_ROUTES 与两张页面豁免表（HTML_AUTH_EXACT / HTML_AUTH_PUBLIC_PAGES）由 tests/test_spa_page_routes.py 强校验与本表一致（清单相等 + 未登录硬导航的真实请求复核）。",
-    "字段：path 路径 / title 页面标题 / group 所属组（home|hr|floor|kitchen|me|system|entry，home 是工作台首页那一组，票 06 才有行）/ audience 允许的身份（admin 管理端 | staff 员工 | both 两者）/ standalone 是否独立外壳（不渲染后台导航）/ public 是否免登录（未登录也能拿到页面壳：服务端不 302、前端守卫放行）/ aliases 服务端额外注册的路径变体（同一页面的别名，不是独立路由，可选）。",
+    "字段：path 路径 / title 页面标题 / group 所属组（home|hr|floor|kitchen|me|system|entry，home 是工作台首页那一组）/ audience 允许的身份（admin 管理端 | staff 员工 | both 两者）/ standalone 是否独立外壳（不渲染后台导航）/ public 是否免登录（未登录也能拿到页面壳：服务端不 302、前端守卫放行）/ aliases 服务端额外注册的路径变体（同一页面的别名，不是独立路由，可选）。",
     "audience 的分组语义按 2026-10-05 定下的工作台信息架构：人事、现场、后勤（配方 + 备货计划）、我的（员工端，票 03 起住在 /workbench/me/*）。",
     "public 的语义是「未登录也能拿到页面壳」（服务端不 302、前端守卫放行）。工作台是「进去要登录」的页面区（票 02 的页面墙对 /workbench 认任一会话），所以工作台里的页一律 public: false —— 员工三页也不例外：员工自己的会话就是那把钥匙，标成 public 只会把壳也对未登录访客敞开。",
-    "/workbench/forbidden 是越权落点（票 03）：group 用 entry —— 它不属于任何业务组、不进工作台导航；audience: both 是「两种身份都可能被拦到这里」（谁越权谁看）；standalone: true 是「一页说明 + 一颗回自己首页的按钮」，不套后台导航。"
+    "/workbench/forbidden 是越权落点（票 03）：group 用 entry —— 它不属于任何业务组、不进工作台导航；audience: both 是「两种身份都可能被拦到这里」（谁越权谁看）；standalone: true 是「一页说明 + 一颗回自己首页的按钮」，不套后台导航。",
+    "票 05 起工作台的页面按组落在 URL 上：人事 /workbench/hr/*（排班月历 / 排班待办 / 班次表 / 花名册）、现场 /workbench/floor/*（卫生七页）。票 05 之前那批**平铺**地址（/workbench/roster、/workbench/daily、/workbench/inbox …）随这一票作废：不加别名、不做重定向，自然 404（`?next=` 里可能还存着它们，由 admin-web/src/utils/loginNext.js 在入口换成新地址）。",
+    "/workbench 本身是**子应用根**，不许 404：票 06 会把它换成「今天」首页；在那之前它仍渲染排班月历（单独一行、group 标 home、title 仍是「工作台」）—— 月历自己也有一行（/workbench/hr/calendar，人事组），两行指同一个页面组件是过渡期的实情，不是漏删。"
   ],
   "pages": [
     {
@@ -77,6 +79,14 @@
     },
     {
       "path": "/workbench",
+      "title": "工作台",
+      "group": "home",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/hr/calendar",
       "title": "排班月历",
       "group": "hr",
       "audience": "admin",
@@ -84,7 +94,7 @@
       "public": false
     },
     {
-      "path": "/workbench/inbox",
+      "path": "/workbench/hr/inbox",
       "title": "排班待办",
       "group": "hr",
       "audience": "admin",
@@ -92,7 +102,7 @@
       "public": false
     },
     {
-      "path": "/workbench/shifts",
+      "path": "/workbench/hr/shifts",
       "title": "班次表",
       "group": "hr",
       "audience": "admin",
@@ -100,7 +110,7 @@
       "public": false
     },
     {
-      "path": "/workbench/roster",
+      "path": "/workbench/hr/roster",
       "title": "花名册",
       "group": "hr",
       "audience": "admin",
@@ -108,7 +118,7 @@
       "public": false
     },
     {
-      "path": "/workbench/zones",
+      "path": "/workbench/floor/zones",
       "title": "卫生工作区",
       "group": "floor",
       "audience": "admin",
@@ -116,7 +126,7 @@
       "public": false
     },
     {
-      "path": "/workbench/daily",
+      "path": "/workbench/floor/daily",
       "title": "日常验收",
       "group": "floor",
       "audience": "admin",
@@ -124,7 +134,7 @@
       "public": false
     },
     {
-      "path": "/workbench/attire",
+      "path": "/workbench/floor/attire",
       "title": "仪容仪表",
       "group": "floor",
       "audience": "admin",
@@ -132,7 +142,7 @@
       "public": false
     },
     {
-      "path": "/workbench/deep-clean",
+      "path": "/workbench/floor/deep-clean",
       "title": "专项卫生",
       "group": "floor",
       "audience": "admin",
@@ -140,7 +150,7 @@
       "public": false
     },
     {
-      "path": "/workbench/fix",
+      "path": "/workbench/floor/fix",
       "title": "整改单",
       "group": "floor",
       "audience": "admin",
@@ -148,7 +158,7 @@
       "public": false
     },
     {
-      "path": "/workbench/boards",
+      "path": "/workbench/floor/boards",
       "title": "红黑榜",
       "group": "floor",
       "audience": "admin",
@@ -156,7 +166,7 @@
       "public": false
     },
     {
-      "path": "/workbench/data",
+      "path": "/workbench/floor/data",
       "title": "数据与照片",
       "group": "floor",
       "audience": "admin",

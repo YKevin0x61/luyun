@@ -65,12 +65,12 @@ describe('vue-router 登录守卫：未登录时带 ?next= 送到 /login', () =>
     expect(router.currentRoute.value.path).toBe('/workbench/me/clean')
   })
 
-  it('管理端卫生页 /workbench/daily', async () => {
+  it('管理端卫生页 /workbench/floor/daily', async () => {
     const router = await freshRouter()
-    await router.push('/workbench/daily')
+    await router.push('/workbench/floor/daily')
 
     expect(router.currentRoute.value.path).toBe('/login')
-    expect(router.currentRoute.value.query.next).toBe('/workbench/daily')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/floor/daily')
   })
 
   it('系统配置页 /settings', async () => {
@@ -169,10 +169,10 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
     vi.stubGlobal('fetch', staffOnlyFetch())
     const router = await freshRouter()
 
-    await router.push('/workbench/daily')
+    await router.push('/workbench/floor/daily')
 
     expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
-    expect(router.currentRoute.value.query.next).toBe('/workbench/daily')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/floor/daily')
   })
 
   it('员工页：管理端会话不算数，同样落「无权访问」页（这类页没带 staffProbe 标记）', async () => {
@@ -189,10 +189,10 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
     vi.stubGlobal('fetch', staffOnlyFetch())
     const router = await freshRouter()
 
-    await router.push('/workbench/forbidden?next=%2Fworkbench%2Fdaily')
+    await router.push('/workbench/forbidden?next=%2Fworkbench%2Ffloor%2Fdaily')
 
     expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
-    expect(router.currentRoute.value.query.next).toBe('/workbench/daily')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/floor/daily')
   })
 
   it('有会话也会过期：管理端会话没了又只有员工会话时，管理端页落「无权访问」而不是登录页', async () => {

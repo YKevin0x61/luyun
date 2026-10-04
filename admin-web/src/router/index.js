@@ -6,6 +6,7 @@ import { pageMeta, pageTitle } from './pageRoutes.js'
 
 const HygieneAdminLayout = () => import('../views/hygiene/HygieneAdminLayout.vue')
 const HygieneStaffAuthLayout = () => import('../views/hygiene/HygieneStaffAuthLayout.vue')
+const SchedulingLayout = () => import('../views/scheduling/SchedulingLayout.vue')
 const WorkbenchLayout = () => import('../views/workbench/WorkbenchLayout.vue')
 
 // 页面清单（`./pageRoutes.json`）是唯一来源（票 01）：每条路由的「独立外壳 / 免登录」
@@ -25,6 +26,20 @@ function hygieneStaffAuthPage(path, name, loader) {
     path,
     component: HygieneStaffAuthLayout,
     meta: { ...pageMeta(path), staffPageTitle: pageTitle(path) },
+    children: [{ path: '', name, component: loader }],
+  }
+}
+
+/** 工作台「人事」那一组（月历 / 待办 / 班次表 / 花名册）的页面：套人事壳
+ *  （`SchedulingLayout`：窄栏 + 本组四页的导航 + 进「现场」组的门），页面本体在子记录里。
+ *
+ *  花名册是**人事**页（票面口径），所以从卫生那八页里搬了过来 —— 它仍在卫生的数据库与
+ *  接口上跑，只是 URL 与外壳跟着分组走。两组的壳各自留一扇互跳的门（见两个 Layout）。 */
+function workbenchHrPage(path, name, loader) {
+  return {
+    path,
+    component: SchedulingLayout,
+    meta: pageMeta(path),
     children: [{ path: '', name, component: loader }],
   }
 }
@@ -58,38 +73,44 @@ const routes = [
   { path: '/prep-plan', name: 'prep-plan', component: () => import('../views/PrepPlanView.vue'), meta: pageMeta('/prep-plan') },
   { path: '/wecom-push', name: 'wecom-push', component: () => import('../views/WecomPushView.vue'), meta: pageMeta('/wecom-push') },
   // ── 工作台（排班 + 卫生合并成一个子系统，2026-10-04）──────────────────────
-  // 两组同住 `/workbench/*`：首页与待办 / 班次表套 `SchedulingLayout`（独立页，自带
-  // 一条窄栏：‹ 后台 / 工作台 / 现场 / 实时点）；卫生那八页套 `HygieneAdminLayout`
-  // （独立页，自带 rail）。两边的壳都靠 `meta.standalone` 让 `App.vue` 不渲染后台导航
-  // —— 这个标记从页面清单派生，不再写在这里。
+  // 票 05 起页面按组落在 URL 上，两组各有自己的壳：
+  //   人事 `/workbench/hr/*`（月历 / 待办 / 班次表 / 花名册）套 `SchedulingLayout`；
+  //   现场 `/workbench/floor/*`（卫生七页）套 `HygieneAdminLayout`（自带 rail）。
+  // 两个壳都靠 `meta.standalone` 让 `App.vue` 不渲染后台导航 —— 这个标记从页面清单派生。
+  // 两组的落点（`/workbench/hr/calendar`、`/workbench/floor/daily`）写在 `utils/workbenchCopy.js`，
+  // 两个壳与页内跳转都从那一份常量走，不各写一遍。
   //
-  // 前缀搬家走的是"先并存、再迁移跳转、最后删旧的"三步（票 02/03/04）。**旧的
-  // `/scheduling*` 与 `/hygiene/*` 已经删干净、不留别名** —— 用户拍板：门店手机上那些
-  // 旧书签 404 是可以接受的。`?next=` 里可能还存着老地址，由 `utils/loginNext.js` 在
-  // 入口处换成新前缀（不给老路径留路由，那样迟早会漂成两套）。
+  // **票 05 之前那批平铺地址（`/workbench/inbox`、`/workbench/roster` …）随这一票作废**：
+  // 不给别名、不做重定向、自然 404。`?next=` 里可能还存着它们（手机上存着的旧链接），
+  // 由 `utils/loginNext.js` 的 `LEGACY_NEXT_PATHS` 在入口换成新地址 —— 不给老路径留路由，
+  // 那样迟早会漂成两套（`/hygiene/*`、`/scheduling*`、`/staff/*` 走的是同一条路）。
   //
   // 这一段里的路径**都要写成字面量**（或没有插值的模板字符串）：`tests/test_spa_page_routes.py`
   // 按源码解析这些注册写法 —— 变量路径与插值模板它解析不出来，会当场报错而不是静默漏页。
-  hygieneAdminPage('/workbench/roster', 'workbench-roster', () => import('../views/hygiene/HygieneRosterView.vue')),
-  hygieneAdminPage('/workbench/zones', 'workbench-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
-  hygieneAdminPage('/workbench/daily', 'workbench-daily', () => import('../views/hygiene/HygieneDailyView.vue')),
-  hygieneAdminPage('/workbench/deep-clean', 'workbench-deep-clean', () => import('../views/hygiene/HygieneDeepCleanView.vue')),
-  hygieneAdminPage('/workbench/fix', 'workbench-fix', () => import('../views/hygiene/HygieneFixView.vue')),
-  hygieneAdminPage('/workbench/boards', 'workbench-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
-  hygieneAdminPage('/workbench/data', 'workbench-data', () => import('../views/hygiene/HygieneDataView.vue')),
+  workbenchHrPage('/workbench/hr/calendar', 'workbench-hr-calendar', () => import('../views/scheduling/SchedulingCalendarView.vue')),
+  // 待办（票 08）：店长批请假的地方。从月历页底下那根「请假等着批」的条进来。
+  workbenchHrPage('/workbench/hr/inbox', 'workbench-hr-inbox', () => import('../views/scheduling/SchedulingInboxView.vue')),
+  // 班次表（票 11）：加一条、改名字、调显示顺序、启用停用、删掉建错的那条。
+  workbenchHrPage('/workbench/hr/shifts', 'workbench-hr-shifts', () => import('../views/scheduling/SchedulingShiftsView.vue')),
+  // 花名册（票 05 从卫生那八页搬进人事组）：员工注册审核、卫生权限档位、那两班的口径，
+  // 还有发给新店员的那张入口码。页面本体一个字没动，只是换了 URL 与外壳。
+  workbenchHrPage('/workbench/hr/roster', 'workbench-hr-roster', () => import('../views/hygiene/HygieneRosterView.vue')),
+  hygieneAdminPage('/workbench/floor/zones', 'workbench-floor-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
+  hygieneAdminPage('/workbench/floor/daily', 'workbench-floor-daily', () => import('../views/hygiene/HygieneDailyView.vue')),
   // 仪容仪表（票 12）：按人拍，名单由排班给（休假的与没排到的不在表上）。
-  hygieneAdminPage('/workbench/attire', 'workbench-attire', () => import('../views/hygiene/HygieneAttireView.vue')),
+  hygieneAdminPage('/workbench/floor/attire', 'workbench-floor-attire', () => import('../views/hygiene/HygieneAttireView.vue')),
+  hygieneAdminPage('/workbench/floor/deep-clean', 'workbench-floor-deep-clean', () => import('../views/hygiene/HygieneDeepCleanView.vue')),
+  hygieneAdminPage('/workbench/floor/fix', 'workbench-floor-fix', () => import('../views/hygiene/HygieneFixView.vue')),
+  hygieneAdminPage('/workbench/floor/boards', 'workbench-floor-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
+  hygieneAdminPage('/workbench/floor/data', 'workbench-floor-data', () => import('../views/hygiene/HygieneDataView.vue')),
+  // 子应用根（票 06 会把它换成「今天」首页）。在那之前仍渲染排班月历，且**不许 404**：
+  // 它是页面清单里 group 为 home 的那一行，月历自己另有一行（人事组的落点）。
   {
     path: '/workbench',
-    component: () => import('../views/scheduling/SchedulingLayout.vue'),
+    component: SchedulingLayout,
     meta: pageMeta('/workbench'),
     children: [
       { path: '', name: 'workbench', component: () => import('../views/scheduling/SchedulingCalendarView.vue'), meta: pageMeta('/workbench') },
-      // 待办（票 08）：店长批请假的地方。从月历页底下那根「请假等着批」的条进来。
-      // 跟首页同一扇门（管理端 cookie，没有 meta.public）。
-      { path: '/workbench/inbox', name: 'workbench-inbox', component: () => import('../views/scheduling/SchedulingInboxView.vue'), meta: pageMeta('/workbench/inbox') },
-      // 班次表（票 11）：加一条、改名字、调显示顺序、启用停用、删掉建错的那条。
-      { path: '/workbench/shifts', name: 'workbench-shifts', component: () => import('../views/scheduling/SchedulingShiftsView.vue'), meta: pageMeta('/workbench/shifts') },
     ],
   },
   // ── 工作台 · 我的（员工端，票 03）──────────────────────────────────────────

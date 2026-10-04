@@ -60,21 +60,66 @@ function pathnameOf(next) {
   return pathname
 }
 
-/** 老前缀 → 工作台前缀（票 03/04）。**只在 `?next=` 这个入口换，不给老路径留路由。**
+/** 老地址 → 工作台地址。**只在 `?next=` 这个入口换，不给老路径留路由。**
  *
  *  `?next=` 里可能存着搬家前的老地址：别人手机上存着的旧链接、旧书签、旧 PWA 快捷
  *  方式，或者上一次登录被挡下来时写进 URL 的那条。老路由已经删干净了，原样放行就是
- *  跳进一个白屏 —— 所以在这里换掉（前缀对前缀、单条对单条）。
+ *  跳进一个白屏 —— 所以在这里换掉。
  *
- *  票 03 加 `/staff/` → `/workbench/me/`：员工端三页搬进工作台的「我的」组，而
- *  `/staff/today` 是**唯一被发出去过**的地址（花名册页那张二维码、登录页的 `?next=`），
- *  所以这条最值钱。地址本身照旧 404，这里换的只是「登录之后回哪儿」。 */
+ *  **顺序就是优先级，从上到下第一条命中即用**：
+ *  - 票 05（工作台按组分家）那批：票 04 的平铺 `/workbench/*`（刚作废的正式地址）
+ *    与更早的 `/hygiene/*`、`/scheduling*` 一起换成 `/workbench/hr/*` 或
+ *    `/workbench/floor/*`；
+ *  - 票 03 的 `/staff/*` → `/workbench/me/*`：`/staff/today` 是**唯一被发出去过**的
+ *    员工地址（花名册页那张二维码、登录页的 `?next=`），所以这条最值钱；
+ *  - 最后是老的裸前缀兜底（`/hygiene/` → `/workbench/`），挂不上具体某一页的那些。
+ *
+ *  **匹配按整段**（`from` 或 `from/` 两种写法），不按字符串前缀：`/workbench/daily-x`
+ *  不是 `/workbench/daily`，别把不相干的路径也搬走。带尾斜杠的前缀条目（`/staff/`）
+ *  照旧按前缀算 —— 那正是"这个前缀底下的一切"。
+ *  地址本身照旧 404，这里换的只是「登录之后回哪儿」。
+ */
 const LEGACY_NEXT_PATHS = [
-  ['/hygiene/', '/workbench/'],
-  ['/scheduling/', '/workbench/'],
-  ['/scheduling', '/workbench'],
+  // ── 票 05：工作台分成「人事 / 现场」两组，平铺的地址换成新分组 ──────────────
+  ['/workbench/inbox', '/workbench/hr/inbox'],
+  ['/workbench/shifts', '/workbench/hr/shifts'],
+  ['/workbench/roster', '/workbench/hr/roster'],
+  ['/workbench/zones', '/workbench/floor/zones'],
+  ['/workbench/daily', '/workbench/floor/daily'],
+  ['/workbench/attire', '/workbench/floor/attire'],
+  ['/workbench/deep-clean', '/workbench/floor/deep-clean'],
+  ['/workbench/fix', '/workbench/floor/fix'],
+  ['/workbench/boards', '/workbench/floor/boards'],
+  ['/workbench/data', '/workbench/floor/data'],
+  // ── 票 04 / 05 之前那两套老前缀，直接换成新分组（中间那一版平铺地址从不存在于
+  //    它们的 `?next=` 里，所以不必先换成平铺再换一次）────────────────────────
+  ['/hygiene/roster', '/workbench/hr/roster'],
+  ['/hygiene/zones', '/workbench/floor/zones'],
+  ['/hygiene/daily', '/workbench/floor/daily'],
+  ['/hygiene/attire', '/workbench/floor/attire'],
+  ['/hygiene/deep-clean', '/workbench/floor/deep-clean'],
+  ['/hygiene/fix', '/workbench/floor/fix'],
+  ['/hygiene/boards', '/workbench/floor/boards'],
+  ['/hygiene/data', '/workbench/floor/data'],
+  ['/scheduling/inbox', '/workbench/hr/inbox'],
+  ['/scheduling/shifts', '/workbench/hr/shifts'],
+  ['/scheduling', '/workbench/hr/calendar'],
+  // ── 票 03：员工端三页搬进工作台的「我的」组 ─────────────────────────────────
   ['/staff/', '/workbench/me/'],
+  // ── 兜底：老前缀底下别的地址（今天已经没有对应的页了，换过去也是 404，但至少还在
+  //    工作台里，不会把人送进一个连外壳都没有的空路径）────────────────────────
+  ['/hygiene/', '/workbench/'],
 ]
+
+/** 一条老地址规则命中没有：`from` 带尾斜杠 = 前缀规则，否则整段匹配（含尾斜杠写法）。 */
+function legacyHit(pathname, from) {
+  if (from.endsWith('/')) {
+    return pathname.startsWith(from) ? pathname.slice(from.length) : null
+  }
+  if (pathname === from) return ''
+  if (pathname === `${from}/`) return '/'
+  return null
+}
 
 function migrateLegacyPath(next) {
   const raw = String(next)
@@ -82,9 +127,8 @@ function migrateLegacyPath(next) {
   const pathname = cut === -1 ? raw : raw.slice(0, cut)
   const tail = cut === -1 ? '' : raw.slice(cut)
   for (const [from, to] of LEGACY_NEXT_PATHS) {
-    if (pathname === from || pathname.startsWith(from)) {
-      return to + pathname.slice(from.length) + tail
-    }
+    const rest = legacyHit(pathname, from)
+    if (rest !== null) return to + rest + tail
   }
   return raw
 }

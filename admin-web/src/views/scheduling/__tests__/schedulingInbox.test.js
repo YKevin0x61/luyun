@@ -138,21 +138,22 @@ describe('店长端排班待办（票 08、09）', () => {
   })
 
   it('在管理端有一扇自己的门（前端与后端都登记）', () => {
-    expect(router).toMatch(/path: '\/workbench\/inbox', name: 'workbench-inbox'/)
+    expect(router).toMatch(/workbenchHrPage\('\/workbench\/hr\/inbox', 'workbench-hr-inbox'/)
     expect(router).toMatch(/views\/scheduling\/SchedulingInboxView\.vue/)
     // 管理端的门：不带 `HYGIENE_STAFF_META` 那套员工 meta（没有 staffAuth）。
     expect(router).not.toMatch(/scheduling-inbox[\s\S]{0,200}?staffAuth/)
     // 直连/反代硬导航那条路要认得这个地址（服务端 SPA 白名单）。
-    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/workbench\/inbox"/)
+    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/workbench\/hr\/inbox"/)
     // 顶栏那条「排班」按前缀亮：进了待办页，导航上还在排班这一档。
     expect(navBar).toMatch(/prefix: '\/workbench'/)
   })
 
   it('月历页上有一条路走得到这一页（不然没人知道有假要批）', () => {
     expect(calendar).toMatch(/class="gPend gTodo"/)
-    expect(calendar).toMatch(/router\.push\('\/workbench\/inbox'\)/)
+    expect(calendar).toMatch(/router\.push\('\/workbench\/hr\/inbox'\)/)
     expect(calendar).toContain('请假待办')
-    expect(view).toMatch(/router\.push\('\/workbench'\)/)
+    // 「回到月历」与「去配固定班」都回人事组的落点（常量，不写死路径）。
+    expect(view).toMatch(/router\.push\(WORKBENCH_HR_HOME\)/)
   })
 
   it('订阅排班 nudge：员工提了新申请就自己重读（票 10 收尾）', () => {

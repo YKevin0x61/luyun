@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
+import { WORKBENCH_FIELD_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenchCopy.js'
 
 // 工作台外壳（票 03 立、票 04 接上身份）：
 // - 导航跟着**此刻的身份**走，不跟着"这一页是谁的"。店长的会话挂在「我的」页上时，
@@ -14,8 +15,9 @@ const ROUTES = [
   { path: '/workbench/me/today', component: { template: '<div>今天</div>' }, meta: { audience: 'staff', standalone: true } },
   { path: '/workbench/me/month', component: { template: '<div>整月</div>' }, meta: { audience: 'staff', standalone: true } },
   // 店长那几页与清单里一样带 `audience: 'admin'`（这里只压外壳，页面本体给个占位）。
-  { path: '/workbench/daily', component: { template: '<div>日常验收</div>' }, meta: { audience: 'admin', standalone: true } },
-  { path: '/workbench/roster', component: { template: '<div>花名册</div>' }, meta: { audience: 'admin', standalone: true } },
+  // 票 05：工作台按组分家，人事 / 现场各有自己的落点。
+  { path: '/workbench/hr/calendar', component: { template: '<div>排班月历</div>' }, meta: { audience: 'admin', standalone: true } },
+  { path: '/workbench/floor/daily', component: { template: '<div>日常验收</div>' }, meta: { audience: 'admin', standalone: true } },
 ]
 
 function jsonResponse(data, status = 200) {
@@ -26,10 +28,6 @@ function jsonResponse(data, status = 200) {
     json: async () => data,
   }
 }
-
-/** 店长那一档的导航项：票 05 落位之前工作台里还没有他的组，这里借清单里一页**店长
- *  专属**的（`/workbench/daily`）临时插一格，用来压「切档之后人被送回自己那一档」。 */
-const ADMIN_GROUP = { key: 'daily', label: '日常验收', to: '/workbench/daily' }
 
 /** 两套会话都在：店里那台共用电脑。 */
 function bothSessionsFetch() {
@@ -51,14 +49,11 @@ function staffOnlyFetch() {
   })
 }
 
-/** 每个用例换一份崭新的模块图（`authStatus` 有 10 秒状态缓存），并给一份空的记忆。
- *
- *  `prepare` 在 `resetModules` **之后**、挂载**之前**跑：要动模块级常量（借一格导航项）
- *  的用例得在这里动手，拿到的才是组件实际用的那一份模块图。 */
-async function mountShell(path, { prepare } = {}) {
+/** 每个用例换一份崭新的模块图（`authStatus` 有 10 秒状态缓存、身份记忆在 localStorage），
+ *  并给一份空的记忆。 */
+async function mountShell(path) {
   vi.resetModules()
   localStorage.clear()
-  if (prepare) await prepare()
   const [{ default: WorkbenchLayout }, { useWorkbenchIdentityStore }] = await Promise.all([
     import('../WorkbenchLayout.vue'),
     import('../../../stores/workbenchIdentity'),
@@ -81,15 +76,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  // 借来的那一格用完还回去（导航表是模块级常量，别漏给下一个用例）。
-  // 注意跟着 `vi.resetModules()` 走：用例里 import 的是**当前那一份**模块图，
-  // 所以清理也拿当轮的那一份。
-  return import('../../../utils/workbenchNav').then(({ WORKBENCH_NAV_GROUPS }) => {
-    const borrowed = WORKBENCH_NAV_GROUPS.indexOf(ADMIN_GROUP)
-    if (borrowed >= 0) WORKBENCH_NAV_GROUPS.splice(borrowed, 1)
-    vi.unstubAllGlobals()
-    vi.restoreAllMocks()
-  })
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('工作台外壳的导航', () => {
@@ -102,7 +90,7 @@ describe('工作台外壳的导航', () => {
     expect(items[0].text()).toBe('我的')
     expect(items[0].attributes('href')).toBe('/workbench/me/today')
     // 员工点不到店长那几页（它们在清单里是 admin，导航按身份过滤）。
-    expect(wrapper.find('a[href="/workbench/daily"]').exists()).toBe(false)
+    expect(wrapper.find('a[href="/workbench/floor/daily"]').exists()).toBe(false)
   })
 
   it('整组都亮：站在「整月」上，「我的」那一格仍是当前项', async () => {
@@ -140,10 +128,14 @@ describe('工作台外壳的导航', () => {
 
     expect(store.identity).toBe('super')
     expect(wrapper.get('.wb-id .is-on').text()).toContain('超级管理员')
-    // 导航面按**他这一档**渲染：人事 / 现场那两组要等票 05 落位，所以此刻一格都没有
+    // 导航面按**他这一档**渲染：票 05 落位之后是人事 / 现场两格，各自的落点是共享常量
     // （而不是因为"这一页是员工页"才藏起来）。页面内容按自己的 401 处理 —— 切换器
     // 不改权限、也不改守卫。
-    expect(wrapper.findAll('.wb-nav-item')).toHaveLength(0)
+    const items = wrapper.findAll('.wb-nav-item')
+    expect(items.map((item) => item.text())).toEqual(['人事', '现场'])
+    expect(items.map((item) => item.attributes('href'))).toEqual([
+      WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
+    ])
   })
 
   it('在顶栏切成员工：导航面当场跟着换', async () => {
@@ -159,16 +151,10 @@ describe('工作台外壳的导航', () => {
   })
 
   it('切成员工后仍站在店长的页上：送回员工那一档的首页（不是停在别人的页上）', async () => {
-    // 借一格店长专属的导航项（票 05 把人事 / 现场并进来之前工作台里还没有他的组）。
-    // 起点是店长的页 —— 顶栏这一档与导航面按他算。
-    const { wrapper, router, store } = await mountShell('/workbench/daily', {
-      prepare: async () => {
-        const { WORKBENCH_NAV_GROUPS } = await import('../../../utils/workbenchNav')
-        WORKBENCH_NAV_GROUPS.push(ADMIN_GROUP)
-      },
-    })
+    // 起点是店长的页（现场组的落点）—— 顶栏这一档与导航面按他算。
+    const { wrapper, router, store } = await mountShell('/workbench/floor/daily')
     expect(store.identity).toBe('super')
-    expect(wrapper.find('a[href="/workbench/daily"]').exists()).toBe(true)
+    expect(wrapper.find('a[href="/workbench/floor/daily"]').exists()).toBe(true)
 
     const staffOption = wrapper.findAll('.wb-id-opt').find((n) => n.text().includes('员工'))
     await staffOption.trigger('click')

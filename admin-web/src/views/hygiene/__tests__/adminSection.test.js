@@ -28,32 +28,32 @@ describe('hygiene admin section shell', () => {
     expect(nav).not.toMatch(/>红黑榜</)
   })
 
-  it('layout owns the six inner links and loads the section stylesheet', () => {
+  it('layout owns the rail and loads the section stylesheet', () => {
     const layout = read('../HygieneAdminLayout.vue')
     expect(layout).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
     expect(layout).toMatch(/StandardPhotoCachePanel/)
     expect(layout).toMatch(/useStandardPhotoCacheStore/)
     expect(layout).toMatch(/HYGIENE_ADMIN_NAV/)
-    expect(layout).toMatch(/aria-label="卫生管理"/)
     expect(layout).toMatch(/class="hy-tabbar"/)
     expect(layout).toMatch(/HYGIENE_BACK_TO_ADMIN_LABEL/)
     expect(layout).toMatch(/跳到内容/)
     expect(layout).not.toMatch(/hy-nav-link/)
   })
 
-  it('router wraps every admin hygiene path in a standalone shell', () => {
+  it('router wraps every floor page in a standalone shell（现场组七页）', () => {
     const router = read('../../../router/index.js')
     expect(router).toMatch(/HygieneAdminLayout/)
     // 票 01：独立外壳标记不再写死在 router 里，而是每条路由从页面清单派生
     // （`meta: pageMeta(path)`）。值本身在这里对着清单断一次；「注册出来的路由确实
     // 等于清单」由 `router/__tests__/pageRoutes.test.js` 对着真实路由表钉。
     expect(router).toMatch(/meta: pageMeta\(path\)/)
-    expect(pageMeta('/workbench/roster')).toEqual({ standalone: true, public: false, audience: 'admin' })
-    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/roster'/)
-    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/zones'/)
-    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/daily'/)
-    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/deep-clean'/)
-    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/fix'/)
-    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/boards'/)
+    expect(pageMeta('/workbench/floor/daily')).toEqual({ standalone: true, public: false, audience: 'admin' })
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/floor\/zones'/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/floor\/daily'/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/floor\/deep-clean'/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/floor\/fix'/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/floor\/boards'/)
+    // 花名册票 05 起是人事页：走人事壳那条工厂，不在这条 rail 的清单里。
+    expect(router).toMatch(/workbenchHrPage\('\/workbench\/hr\/roster'/)
   })
 })

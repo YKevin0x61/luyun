@@ -546,10 +546,31 @@ def test_hygiene_login_page_is_gone_and_the_hygiene_prefix_no_longer_skips_the_w
     assert walled.status_code == 302, walled.headers.get("location")
     assert walled.headers["location"].startswith("/login")
 
-    # 正向：八个卫生管理页收进 `/hygiene/*`（票 05），未登录访问任意一个，服务端仍必须
-    # 302 到 `/login`（而不是放行 SPA 壳 —— 放行之后前端守卫兜不住，直接就是未授权页面）。
-    # 非页面请求（Accept 不是 text/html）绕开登录墙直接看路由表：新路径必须是页面。
+    # 正向：现场七页（票 05 起按分组落在 `/workbench/floor/*`）未登录访问任意一个，
+    # 服务端仍必须 302 到 `/login`（而不是放行 SPA 壳 —— 放行之后前端守卫兜不住，
+    # 直接就是未授权页面）。非页面请求（Accept 不是 text/html）绕开登录墙直接看路由表：
+    # 新路径必须是页面。
     for path in (
+        "/workbench/floor/zones",
+        "/workbench/floor/daily",
+        "/workbench/floor/deep-clean",
+        "/workbench/floor/fix",
+        "/workbench/floor/boards",
+        "/workbench/floor/data",
+        "/workbench/floor/attire",
+        # 花名册票 05 起是人事页（`/workbench/hr/*`），它照样要登录。
+        "/workbench/hr/roster",
+    ):
+        assert path in main_module.SPA_PAGE_ROUTES, path
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 302, path
+        assert resp.headers["location"].startswith("/login"), path
+
+    # 票 05：工作台里那批**平铺**地址（票 04 的正式地址）随分组重排一起作废 ——
+    # 不留别名、不做重定向、非页面请求自然 404（跟更早的 `/hygiene-*` 一个待遇）。
+    for flat in (
+        "/workbench/inbox",
+        "/workbench/shifts",
         "/workbench/roster",
         "/workbench/zones",
         "/workbench/daily",
@@ -559,10 +580,9 @@ def test_hygiene_login_page_is_gone_and_the_hygiene_prefix_no_longer_skips_the_w
         "/workbench/data",
         "/workbench/attire",
     ):
-        assert path in main_module.SPA_PAGE_ROUTES, path
-        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
-        assert resp.status_code == 302, path
-        assert resp.headers["location"].startswith("/login"), path
+        assert flat not in main_module.SPA_PAGE_ROUTES, flat
+        assert flat not in main_module.HTML_AUTH_EXACT, flat
+        assert client.get(flat, follow_redirects=False).status_code == 404, flat
 
     # 旧连字符路径一律删掉（spec：旧地址不做兼容）：既不进页面注册清单，也不在两张
     # 豁免表里；非页面请求直接 404 —— 不是 200，也不是 302 兼容跳转。
@@ -657,12 +677,13 @@ def test_hygiene_roster_html_requires_a_session(auth_app_client):
     client, _ = auth_app_client
     for path in (
         "/workbench",
-        "/workbench/roster",
-        "/workbench/zones",
-        "/workbench/daily",
-        "/workbench/deep-clean",
-        "/workbench/fix",
-        "/workbench/boards",
+        "/workbench/hr/calendar",
+        "/workbench/hr/roster",
+        "/workbench/floor/zones",
+        "/workbench/floor/daily",
+        "/workbench/floor/deep-clean",
+        "/workbench/floor/fix",
+        "/workbench/floor/boards",
     ):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         assert resp.status_code == 302, path
@@ -676,16 +697,18 @@ def test_hygiene_roster_html_requires_a_session(auth_app_client):
 # 工作台外面，继续只认管理端会话。
 WORKBENCH_PAGES = (
     "/workbench",
-    "/workbench/inbox",
-    "/workbench/shifts",
-    "/workbench/roster",
-    "/workbench/zones",
-    "/workbench/daily",
-    "/workbench/deep-clean",
-    "/workbench/fix",
-    "/workbench/boards",
-    "/workbench/data",
-    "/workbench/attire",
+    # 票 05：人事四页与现场七页各在自己的组里（平铺那批地址已作废）。
+    "/workbench/hr/calendar",
+    "/workbench/hr/inbox",
+    "/workbench/hr/shifts",
+    "/workbench/hr/roster",
+    "/workbench/floor/zones",
+    "/workbench/floor/daily",
+    "/workbench/floor/deep-clean",
+    "/workbench/floor/fix",
+    "/workbench/floor/boards",
+    "/workbench/floor/data",
+    "/workbench/floor/attire",
     # 票 03：员工三页搬进「我的」组，越权落点也是工作台里的一页 —— 服务端对它们一视
     # 同仁（任一会话有效即可拿到壳，页面级权限在前端守卫与各接口 401）。
     "/workbench/me/today",
@@ -777,11 +800,11 @@ def test_workbench_page_wall_fails_closed_before_staff_accounts_are_wired(
     client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, "some-staff-session")
 
     resp = client.get(
-        "/workbench/roster", headers=_html_headers(), follow_redirects=False
+        "/workbench/hr/roster", headers=_html_headers(), follow_redirects=False
     )
 
     assert resp.status_code == 302, resp.text
-    assert resp.headers["location"] == "/login?next=%2Fworkbench%2Froster"
+    assert resp.headers["location"] == "/login?next=%2Fworkbench%2Fhr%2Froster"
 
 
 def test_workbench_page_wall_rejects_a_bogus_staff_cookie(auth_app_client):
@@ -790,11 +813,11 @@ def test_workbench_page_wall_rejects_a_bogus_staff_cookie(auth_app_client):
     client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, "bogus-staff-session")
 
     resp = client.get(
-        "/workbench/roster", headers=_html_headers(), follow_redirects=False
+        "/workbench/hr/roster", headers=_html_headers(), follow_redirects=False
     )
 
     assert resp.status_code == 302, resp.text
-    assert resp.headers["location"] == "/login?next=%2Fworkbench%2Froster"
+    assert resp.headers["location"] == "/login?next=%2Fworkbench%2Fhr%2Froster"
 
 
 def test_logged_in_super_admin_gets_the_spa_shell_on_every_hygiene_page(auth_app_client):
@@ -817,14 +840,15 @@ def test_logged_in_super_admin_gets_the_spa_shell_on_every_hygiene_page(auth_app
     assert client.cookies.get(settings.SESSION_COOKIE_NAME)
 
     for path in (
-        "/workbench/roster",
-        "/workbench/zones",
-        "/workbench/daily",
-        "/workbench/deep-clean",
-        "/workbench/fix",
-        "/workbench/boards",
-        "/workbench/data",
-        "/workbench/attire",
+        "/workbench/hr/calendar",
+        "/workbench/hr/roster",
+        "/workbench/floor/zones",
+        "/workbench/floor/daily",
+        "/workbench/floor/deep-clean",
+        "/workbench/floor/fix",
+        "/workbench/floor/boards",
+        "/workbench/floor/data",
+        "/workbench/floor/attire",
     ):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         assert resp.status_code == 200, path

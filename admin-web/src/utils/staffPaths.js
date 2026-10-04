@@ -9,7 +9,7 @@
  *  服务端**不再为它单独免墙** —— 工作台的页面壳对任一会话都放行（票 02 的
  *  `_is_workbench_page` + `_has_staff_session`），员工自己的会话就是那把钥匙；
  *  `main.py` 里旧的 `/staff` 精确条目与 `/staff/` 前缀同时删掉（工作台是「进去要登录」
- *  的页面区）。`/workbench/roster`、`/workbench/zones` 这些店长页与这条前缀只差一个词，
+ *  的页面区）。`/workbench/hr/roster`、`/workbench/floor/zones` 这些店长页与这条前缀只差一个词，
  *  别被顺手带走。
  *
  *  **名单为什么分两层**（票 02）：员工自助注册页 `/register` 与前缀下的员工页不是一回事。

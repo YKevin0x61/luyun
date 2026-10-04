@@ -30,7 +30,7 @@ class FakeWebSocket {
 const ROUTES = [
   { path: '/', component: { template: '<div />' }, meta: { audience: 'admin' } },
   {
-    path: '/workbench/roster',
+    path: '/workbench/hr/roster',
     component: { template: '<div />' },
     meta: { standalone: true, audience: 'admin' },
   },

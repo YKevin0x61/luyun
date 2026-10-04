@@ -58,9 +58,9 @@ describe('isStaffPhonePath', () => {
     expect(isStaffPhonePath('/staffx')).toBe(false)
     expect(isStaffPhonePath('/hygienex')).toBe(false)
     // 工作台里店长那几页与员工三页只差一个词，别顺手带走。
-    expect(isStaffPhonePath('/workbench/roster')).toBe(false)
-    expect(isStaffPhonePath('/workbench/zones')).toBe(false)
-    expect(isStaffPhonePath('/workbench/daily')).toBe(false)
+    expect(isStaffPhonePath('/workbench/hr/roster')).toBe(false)
+    expect(isStaffPhonePath('/workbench/floor/zones')).toBe(false)
+    expect(isStaffPhonePath('/workbench/floor/daily')).toBe(false)
     // 越权落点是两套身份共用的，不是员工页。
     expect(isStaffPhonePath('/workbench/forbidden')).toBe(false)
   })

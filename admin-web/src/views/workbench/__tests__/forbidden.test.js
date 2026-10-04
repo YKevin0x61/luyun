@@ -8,7 +8,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 // 身份从两套会话的真实探测读出来（与守卫同一套口径），页面不做授权判断。
 //
 // 文案与去向对着页面清单写（目标那一页的身份来自清单那一行），所以这里也按清单里的
-// 标题断言：`/workbench/daily` 是「日常验收」（店长的页），`/workbench/me/today`
+// 标题断言：`/workbench/floor/daily` 是「日常验收」（店长的页），`/workbench/me/today`
 // 是「今天」（员工的页）。
 
 const SESSION_ROUTES = [
@@ -85,7 +85,7 @@ afterEach(() => {
 
 describe('「无权访问」页：说清这页是谁的，给一颗回自己首页的按钮', () => {
   it('员工进店长专属页：说明这页是店长用的，按钮回「我的」首页', async () => {
-    const { wrapper, router } = await mountForbidden('/workbench/daily')
+    const { wrapper, router } = await mountForbidden('/workbench/floor/daily')
 
     expect(wrapper.text()).toContain('无权访问')
     expect(wrapper.text()).toContain('店长')
@@ -119,7 +119,7 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
 
   it('会话已在 (这页上) 过期：不冒充身份，按钮去登录页', async () => {
     vi.stubGlobal('fetch', noSessionFetch())
-    const { wrapper, router } = await mountForbidden('/workbench/daily')
+    const { wrapper, router } = await mountForbidden('/workbench/floor/daily')
 
     expect(wrapper.text()).toContain('未登录')
 

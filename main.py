@@ -1162,7 +1162,8 @@ async def kds_manifest():
 # `try_files … /index.html` 也只写在 admin|sales-report|logs|prep-plan|wecom-push|recipe
 # 六个前缀的白名单块里（deploy/nginx.conf、deploy/Caddyfile），hygiene 页面一律落到
 # 反代兜底转发 —— 漏一条就是直连/反代硬导航 404（DOC-01 的 /hygiene-data 就是这么漏的）。
-# 工作台：八个管理端卫生页与三个排班页同住 `/workbench/*`（票 04 之后旧前缀已删）。
+# 工作台：票 05 起按组分在 `/workbench/hr/*`（人事：月历 / 待办 / 班次表 / 花名册）与
+# `/workbench/floor/*`（现场：卫生七页）两组；平铺的那批旧地址已删干净、不留别名。
 # 票 06 起系统配置页从 `/setup` 改名 `/settings` —— 它一直不是首次初始化页（建管理员账号
 # 在 `/login` 的管理员栏），旧地址不做兼容、不留别名。
 SPA_PAGE_ROUTES = (
@@ -1182,23 +1183,28 @@ SPA_PAGE_ROUTES = (
     "/recipe/manage",
     "/recipe/qr",
     "/logs",
-    # 工作台（排班 + 卫生 + 员工端，2026-10-04）：三组同住一条前缀。旧前缀
-    # `/hygiene/*`、`/scheduling*` 与 `/staff/*` 已删干净、不留别名（用户拍板：旧书签
-    # 404 可接受）。票 03 起员工三页在「我的」组里，`/workbench/forbidden` 是越权落点
-    # —— 它也是一页，`SPA_PAGE_ROUTES` 里必须有它，否则硬导航 404。
+    # 工作台（排班 + 卫生 + 员工端，2026-10-04）：一个子应用、两种身份、四块业务。
+    # 票 05 起页面按组落在 URL 上：人事 `/workbench/hr/*`、现场 `/workbench/floor/*`；
+    # 票 05 之前那批**平铺**地址（`/workbench/roster`、`/workbench/daily` …）随这一票
+    # 作废 —— 跟更早的 `/hygiene/*`、`/scheduling*`、`/staff/*` 一个待遇：删干净、
+    # 不留别名、不做重定向（`?next=` 里的老地址由前端 `utils/loginNext.js` 在入口换成新地址）。
+    # 票 03 起员工三页在「我的」组里，`/workbench/forbidden` 是越权落点 —— 它也是一页，
+    # `SPA_PAGE_ROUTES` 里必须有它，否则硬导航 404。
+    # `/workbench` 本身是子应用根（票 06 换成「今天」首页），今天仍渲染排班月历、不许 404。
     # 这一批**每一条都得在**：漏一条就是"管理端点得进去、手机上一刷新 404"——
     # `/hygiene-data` 那次正是这么栽的。前端侧由 `tests/test_spa_page_routes.py` 双向盯住。
     "/workbench",
-    "/workbench/inbox",
-    "/workbench/shifts",
-    "/workbench/roster",
-    "/workbench/zones",
-    "/workbench/daily",
-    "/workbench/deep-clean",
-    "/workbench/fix",
-    "/workbench/boards",
-    "/workbench/data",
-    "/workbench/attire",
+    "/workbench/hr/calendar",
+    "/workbench/hr/inbox",
+    "/workbench/hr/shifts",
+    "/workbench/hr/roster",
+    "/workbench/floor/zones",
+    "/workbench/floor/daily",
+    "/workbench/floor/deep-clean",
+    "/workbench/floor/fix",
+    "/workbench/floor/boards",
+    "/workbench/floor/attire",
+    "/workbench/floor/data",
     "/workbench/me/today",
     "/workbench/me/month",
     "/workbench/me/clean",

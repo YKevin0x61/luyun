@@ -33,7 +33,7 @@ const ROUTES = [
   { path: '/workbench/me/today', component: { template: '<div />' } },
   { path: '/workbench/me/month', component: { template: '<div />' } },
   { path: '/workbench/me/clean', component: { template: '<div />' } },
-  { path: '/workbench/roster', component: { template: '<div />' } },
+  { path: '/workbench/hr/roster', component: { template: '<div />' } },
   { path: '/register', component: { template: '<div />' } },
 ]
 
@@ -286,7 +286,7 @@ describe('/login 面板：管理员栏', () => {
     expect(buttons).toContain('退出登录')
   })
 
-  it('登录成功后回到 ?next 指定的管理页', async () => {
+  it('登录成功后回到 ?next 指定的管理页（老前缀的花名册地址也算）', async () => {
     fetchMock
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ ok: true }))
@@ -297,7 +297,8 @@ describe('/login 面板：管理员栏', () => {
       'input[type="password"]': 's3cret',
     })
 
-    expect(router.currentRoute.value.path).toBe('/workbench/roster')
+    // `?next=/hygiene/roster` 是搬家前的老地址：入口换成新分组之后的花名册页（票 05）。
+    expect(router.currentRoute.value.path).toBe('/workbench/hr/roster')
   })
 })
 

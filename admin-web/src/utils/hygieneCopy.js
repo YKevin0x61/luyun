@@ -1,28 +1,29 @@
 /** Hygiene roster copy and permission helpers. Rules stay on the server. */
 
 import { supportsNativeCameraCapture } from './cameraCapabilities'
-import { WORKBENCH_TITLE } from './workbenchCopy'
+import { WORKBENCH_TITLE, workbenchDocumentTitle } from './workbenchCopy'
 
 export const HYGIENE_PERMISSIONS = ['普通员工', '管理员']
 export const HYGIENE_SHIFTS = ['白班', '夜班']
 export const HYGIENE_WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 export const HYGIENE_FIX_TYPES = ['卫生', '摆放', '标签']
 
-// 这一组（卫生八页）是「工作台」里的**现场**那一组（2026-10-04 合并）：品牌三件套跟着
-// 子系统走，页面上不再自称另一个系统。名字只写一次，这里引 `workbenchCopy` 那份。
+// 这一组（卫生七页）是「工作台」里的**现场**那一组（2026-10-04 合并，票 05 按分组落位）：
+// 品牌三件套跟着子系统走，页面上不再自称另一个系统。名字只写一次，这里引 `workbenchCopy` 那份。
+// 花名册（票 05 起在人事组的 `/workbench/hr/roster`）**不在这张表里** —— 它是人事页，
+// 外壳也跟着换了；这里只留现场组的 rail。
 export const HYGIENE_BRAND_MARK = '台'
 export const HYGIENE_BRAND_TITLE = WORKBENCH_TITLE
 export const HYGIENE_BRAND_TAGLINE = '现场 · 对照实拍验收'
 export const HYGIENE_ADMIN_NAV = [
-  { path: '/workbench/roster', title: '花名册', shortTitle: '人员', icon: 'clipboard', code: 'ROSTER' },
-  { path: '/workbench/zones', title: '卫生工作区', shortTitle: '工作区', icon: 'layout-grid', code: 'ZONES' },
-  { path: '/workbench/daily', title: '日常验收', shortTitle: '日常', icon: 'check-circle', code: 'DAILY' },
+  { path: '/workbench/floor/zones', title: '卫生工作区', shortTitle: '工作区', icon: 'layout-grid', code: 'ZONES' },
+  { path: '/workbench/floor/daily', title: '日常验收', shortTitle: '日常', icon: 'check-circle', code: 'DAILY' },
   // 仪容仪表（票 12）：按人拍，名单由排班给（休假的与没排到的不在表上）。
-  { path: '/workbench/attire', title: '仪容仪表', shortTitle: '仪容', icon: 'sparkles', code: 'ATTIRE' },
-  { path: '/workbench/deep-clean', title: '专项卫生', shortTitle: '专项', icon: 'calendar', code: 'DEEP' },
-  { path: '/workbench/fix', title: '整改单', shortTitle: '整改', icon: 'siren', code: 'FIX' },
-  { path: '/workbench/boards', title: '红黑榜', shortTitle: '榜', icon: 'star', code: 'BOARDS' },
-  { path: '/workbench/data', title: '数据与照片', shortTitle: '数据', icon: 'folder', code: 'ARCHIVE' },
+  { path: '/workbench/floor/attire', title: '仪容仪表', shortTitle: '仪容', icon: 'sparkles', code: 'ATTIRE' },
+  { path: '/workbench/floor/deep-clean', title: '专项卫生', shortTitle: '专项', icon: 'calendar', code: 'DEEP' },
+  { path: '/workbench/floor/fix', title: '整改单', shortTitle: '整改', icon: 'siren', code: 'FIX' },
+  { path: '/workbench/floor/boards', title: '红黑榜', shortTitle: '榜', icon: 'star', code: 'BOARDS' },
+  { path: '/workbench/floor/data', title: '数据与照片', shortTitle: '数据', icon: 'folder', code: 'ARCHIVE' },
 ]
 
 export const HYGIENE_STAFF_TABS = [
@@ -35,22 +36,24 @@ export const HYGIENE_STAFF_TABS = [
 
 export const HYGIENE_BACK_TO_ADMIN_LABEL = '后台'
 
-/** 这一组（八页）的路径判据。
+/** 这一组（七页）的路径判据。
  *
- *  **不能再只看前缀**：票 04 之后卫生与排班同住 `/workbench/*`（`/workbench/inbox`、
- *  `/workbench/shifts` 是排班那两组、`/workbench` 本身是首页），光比前缀会把它们
- *  一起算成卫生页 —— 那会让它们套上"内部自己滚动"的壳（`.page-body-hygiene`），
- *  工作台首页的吸顶窄栏就废了。所以只认**清单里那八条**。
- *  （`/workbench/me/clean`、`/register` 这些员工侧页面本来就不在清单里。）
+ *  **不能再只看前缀**：票 05 之后工作台按组排（`/workbench/hr/*` 人事、`/workbench/floor/*`
+ *  现场、`/workbench/me/*` 我的），只比 `/workbench` 前缀会把它们一起算成现场页 ——
+ *  那会让它们套上"内部自己滚动"的壳（`.page-body-hygiene`），人事组与员工页的吸顶窄栏
+ *  就废了。所以只认**清单里那七条**。
+ *  （`/workbench/hr/roster` 票 05 起是人事页，也不在清单里；`/register` 这些员工侧页面
+ *  本来就不在。）
  */
 export function isHygieneAdminPath(pathname) {
   const path = String(pathname || '')
   return HYGIENE_ADMIN_NAV.some((item) => path === item.path || path.startsWith(`${item.path}/`))
 }
 
+/** 页面标题：`<页面名> · 工作台`。规格在 `workbenchCopy.js` 写一次，这里只转发
+ *  （三个壳与配方阅读面共用同一份写法）。 */
 export function hygieneDocumentTitle(pageName) {
-  const name = pageName == null ? '' : String(pageName).trim()
-  return name ? `${name} · ${HYGIENE_BRAND_TITLE}` : HYGIENE_BRAND_TITLE
+  return workbenchDocumentTitle(pageName)
 }
 
 export function isAllowedHygienePermission(permission) {

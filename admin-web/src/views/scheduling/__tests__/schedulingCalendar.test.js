@@ -142,18 +142,23 @@ describe('店长端排班月历（原型 B）', () => {
     expect(router).toMatch(/views\/scheduling\/SchedulingLayout\.vue/)
     expect(shell).toMatch(/router\.push\('\/'\)/)
     expect(shell).toMatch(/inject\('wsConnected'/)
-    // 三个 URL 一个字符都没变：后端 `SPA_PAGE_ROUTES` 与 `tests/test_spa_page_routes.py`
+    // 票 05：三条排班页按组落在 `/workbench/hr/*`（月历 / 待办 / 班次表各一行，
+    // 走人事壳那条工厂）。后端 `SPA_PAGE_ROUTES` 与 `tests/test_spa_page_routes.py`
     // 都从页面清单 / 路由源码里读路径（票 01 起解析面也认无插值模板），子路由因此写绝对路径。
-    expect(router).toMatch(/path: '\/workbench\/inbox', name: 'workbench-inbox'/)
-    expect(router).toMatch(/path: '\/workbench\/shifts', name: 'workbench-shifts'/)
+    expect(router).toMatch(/workbenchHrPage\('\/workbench\/hr\/calendar', 'workbench-hr-calendar'/)
+    expect(router).toMatch(/workbenchHrPage\('\/workbench\/hr\/inbox', 'workbench-hr-inbox'/)
+    expect(router).toMatch(/workbenchHrPage\('\/workbench\/hr\/shifts', 'workbench-hr-shifts'/)
+    // 平铺那批旧地址一条都不留（票 05 的收口）。
+    expect(router).not.toMatch(/'\/workbench\/inbox'/)
+    expect(router).not.toMatch(/'\/workbench\/shifts'/)
   })
 
   it('导航上排班与卫生并成一格「工作台」（2026-10-04 合并）', () => {
     // 原来是并排两格（「排班」+「卫生」）。合并成一个子系统之后只留一格，高亮覆盖两组。
     expect(navBar).toMatch(/WORKBENCH_TITLE/)
         expect(navBar).toMatch(/route\.path\.startsWith\('\/workbench'\)/)
-    // 工作台窄栏里有进「现场」那一组的入口（卫生八页从那儿接手）。
-    expect(shell).toMatch(/WORKBENCH_FIELD_HOME/)
+    // 人事壳的窄栏里有进「现场」那一组的门（两组双向可达的这一半；落点是共享常量）。
+    expect(shell).toMatch(/WORKBENCH_FIELD_HOME|workbenchGroup\('floor'\)/)
     expect(shell).toMatch(/class="sched-field"/)
     // 子系统名字只写一次。
     expect(shell).toMatch(/WORKBENCH_TITLE/)
@@ -170,7 +175,7 @@ describe('店长端排班月历（原型 B）', () => {
     // 底下原来只有「N 个人还没配规则」那一条。请假是员工在手机上提的、店长在待办页批，
     // 月历上得有条路走过去 —— 否则没人知道有假等着批（页面上也不许弹窗提醒）。
     expect(view).toMatch(/class="gPend gTodo"/)
-    expect(view).toMatch(/router\.push\('\/workbench\/inbox'\)/)
+    expect(view).toMatch(/router\.push\('\/workbench\/hr\/inbox'\)/)
     expect(view).toContain('请假待办')
     // 那一条是按钮不是链接：跟旁边那条同一个形状，点哪儿都算。
     expect(view).toMatch(/<button class="gPend gTodo" type="button"/)

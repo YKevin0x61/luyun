@@ -78,26 +78,33 @@ describe('hygieneCopy', () => {
     expect(canAcceptFixTicket({ id: 10, permission: '普通员工' }, ticket, after)).toBe(false)
   })
 
-  it('管理端八页合成一个卫生板块，不把员工手机入口算进去', () => {
+  it('现场七页合成一个卫生板块，不把员工手机入口与人事页算进去', () => {
     // 2026-10-04：排班与卫生合并成子系统「工作台」，这一组是它的「现场」那一组，
     // 品牌三件套跟着子系统走（名字只在 workbenchCopy.js 写一次）。
+    // 票 05：这一组按分组落在 `/workbench/floor/*`；花名册是**人事**页，从这条 rail 搬走。
     expect(HYGIENE_BRAND_TITLE).toBe('工作台')
     expect(hygieneDocumentTitle('花名册')).toBe('花名册 · 工作台')
     expect(HYGIENE_BRAND_MARK).toBe('台')
     expect(HYGIENE_BRAND_TAGLINE).toBe('现场 · 对照实拍验收')
     expect(HYGIENE_ADMIN_NAV.map((item) => item.path)).toEqual([
-      '/workbench/roster',
-      '/workbench/zones',
-      '/workbench/daily',
-      '/workbench/attire',
-      '/workbench/deep-clean',
-      '/workbench/fix',
-      '/workbench/boards',
-      '/workbench/data',
+      '/workbench/floor/zones',
+      '/workbench/floor/daily',
+      '/workbench/floor/attire',
+      '/workbench/floor/deep-clean',
+      '/workbench/floor/fix',
+      '/workbench/floor/boards',
+      '/workbench/floor/data',
     ])
-    expect(isHygieneAdminPath('/workbench/roster')).toBe(true)
-    expect(isHygieneAdminPath('/workbench/boards')).toBe(true)
-    expect(isHygieneAdminPath('/workbench/data')).toBe(true)
+    expect(isHygieneAdminPath('/workbench/floor/zones')).toBe(true)
+    expect(isHygieneAdminPath('/workbench/floor/boards')).toBe(true)
+    expect(isHygieneAdminPath('/workbench/floor/data')).toBe(true)
+    // 花名册票 05 起是人事页（`/workbench/hr/*`）：不在这条 rail 上，也不套现场那种
+    // 「内部自己滚动」的壳。
+    expect(isHygieneAdminPath('/workbench/hr/roster')).toBe(false)
+    expect(HYGIENE_ADMIN_NAV.map((item) => item.path)).not.toContain('/workbench/hr/roster')
+    // 平铺那批旧地址（票 04 的正式地址）也一律不是现场页了。
+    expect(isHygieneAdminPath('/workbench/roster')).toBe(false)
+    expect(isHygieneAdminPath('/workbench/daily')).toBe(false)
     // 前缀本身没有页面（票 05 删掉了它）。
     expect(isHygieneAdminPath('/hygiene')).toBe(false)
     // 旧的连字符路径已删除、不留别名，不能再被当成管理端卫生页。
@@ -111,7 +118,7 @@ describe('hygieneCopy', () => {
     // 员工端的卫生待办也不是（票 03 起在 `/workbench/me/clean`）。
     expect(isHygieneAdminPath('/workbench/me/clean')).toBe(false)
     expect(HYGIENE_ADMIN_NAV.map((item) => item.shortTitle)).toEqual([
-      '人员', '工作区', '日常', '仪容', '专项', '整改', '榜', '数据',
+      '工作区', '日常', '仪容', '专项', '整改', '榜', '数据',
     ])
     expect(HYGIENE_STAFF_TABS.map((item) => item.id)).toEqual([
       'inbox', 'deep', 'fix', 'boards', 'me',

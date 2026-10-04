@@ -20,6 +20,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+import { WORKBENCH_HR_HOME } from '../../utils/workbenchCopy'
 import { api } from '../../api/client'
 // 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
 // <link>，壳一层管住就跟卫生管理端一个做法。
@@ -244,7 +245,7 @@ onMounted(() => {
           —— 停用只是让新排班不再用它。
         </p>
       </div>
-      <button class="btn" type="button" @click="router.push('/workbench')">回到月历</button>
+      <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">回到月历</button>
     </header>
 
     <p v-if="state === 'loading'" class="sHint">正在读班次表…</p>

@@ -66,7 +66,7 @@ function fetchFor(session, { name = '张三' } = {}) {
 const ROUTES = [
   '/workbench',
   '/workbench/me/today',
-  '/workbench/daily',
+  '/workbench/floor/daily',
 ]
 
 /**

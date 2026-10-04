@@ -7,7 +7,7 @@
 // 模块：排班不 import 卫生的 Python 模块、不挂它的菜单，只是同一套验收台配色。
 // 票 02 做「配固定班次」、票 03 加工作区、票 04 加轮转周期编辑、票 07 加单日覆盖
 // （点当天卡里的一个人就地改那一天）、票 08 加底下那根「请假待办」的条
-// （批假在 `/workbench/inbox` 那一页：这一页只管排班怎么铺）；班次表的增删改在票 11。
+// （批假在 `/workbench/hr/inbox` 那一页：这一页只管排班怎么铺）；班次表的增删改在票 11。
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../../api/client'
@@ -1291,14 +1291,14 @@ useNudgePull({
             </div>
           </div>
 
-          <button class="gPend gTodo" type="button" @click="router.push('/workbench/inbox')">
+          <button class="gPend gTodo" type="button" @click="router.push('/workbench/hr/inbox')">
             <span class="n">假</span>
             <b>请假待办</b>
             <span>员工提的请假在这儿批：批完那天记成请假，先看清批了还剩几个人</span>
             <span class="go">›</span>
           </button>
 
-          <button class="gPend" type="button" @click="router.push('/workbench/shifts')">
+          <button class="gPend" type="button" @click="router.push('/workbench/hr/shifts')">
             <span class="n">班</span>
             <b>班次表</b>
             <span>加一个班次、改名字、调顺序、停用 —— 加完月历和员工卡片自己就多一种班别</span>

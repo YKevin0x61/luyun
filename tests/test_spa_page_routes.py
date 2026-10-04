@@ -203,15 +203,18 @@ def _spa_shell_index() -> Iterator[None]:
 
 class SpaPageRouteContractTest(unittest.TestCase):
     def test_router_registers_workbench_data(self):
-        """缺陷锚点：前端确实注册了 `/workbench/data`（票 05 前的 `/hygiene-data`，票 04 起在 `/workbench/*`）。"""
-        self.assertIn("/workbench/data", _router_page_paths())
+        """缺陷锚点：前端确实注册了 `/workbench/floor/data`（票 05 前的 `/hygiene-data`，
+        票 04 起在 `/workbench/*`，票 05 起落进「现场」组）。"""
+        self.assertIn("/workbench/floor/data", _router_page_paths())
 
     def test_router_parse_covers_every_registration_form(self):
         """解析面按**写法**分组，每一组都得有东西（票 01 放宽后仍然如此）。"""
         by_form = _router_page_paths_by_form()
         self.assertGreaterEqual(len(by_form["path:"]), 10)
-        self.assertIn("/workbench/roster", by_form["hygieneAdminPage"])
-        self.assertIn("/workbench/data", by_form["hygieneAdminPage"])
+        # 票 05：人事组四页与现场组七页各走一条工厂；花名册（人事）与数据页（现场）
+        # 分属两边 —— 工厂名换了，解析面照样要认得出路径。
+        self.assertIn("/workbench/hr/roster", by_form["workbenchHrPage"])
+        self.assertIn("/workbench/floor/data", by_form["hygieneAdminPage"])
         self.assertEqual(
             {"hygieneStaffAuthPage": sorted(by_form["hygieneStaffAuthPage"])},
             {"hygieneStaffAuthPage": ["/register"]},
@@ -228,27 +231,37 @@ class SpaPageRouteContractTest(unittest.TestCase):
         )
 
     def test_only_the_workbench_prefix_is_registered(self):
-        """票 04 / 03（收口）：旧前缀 `/hygiene/*`、`/scheduling*`、`/staff/*` 已删干净，
-        只剩 `/workbench/*`。
+        """票 05（收口）：工作台只剩「人事 / 现场」两组加员工那半边，旧前缀与**旧的平铺
+        地址**一条都不留。
 
-        两个方向都查：新前缀一条都不能少（少了 → 手机直连/刷新 404），旧前缀一条都不能
+        两个方向都查：新前缀一条都不能少（少了 → 手机直连/刷新 404），旧地址一条都不能
         留（留一半最坏 —— "点得进去、刷新 404"）。前端的字面清单在
         `admin-web/src/router/__tests__/workbenchRoutes.test.js` 里也钉了一遍。
+
+        票 05 之前 `/workbench/roster`、`/workbench/daily` 这些**平铺**地址是正式地址；
+        这一票把它们按组重排到 `/workbench/hr/*` 与 `/workbench/floor/*` 之后，平铺那批
+        就是旧地址了（自然 404、不留别名、不做重定向）—— 所以它们从 new_paths 挪进了
+        old_paths，两个方向都查。
         """
         import main as main_module
 
         new_paths = {
+            # 子应用根：票 06 之前仍渲染排班月历（清单里 group 标 home 的那一行），
+            # 不许 404。
             "/workbench",
-            "/workbench/inbox",
-            "/workbench/shifts",
-            "/workbench/roster",
-            "/workbench/zones",
-            "/workbench/daily",
-            "/workbench/deep-clean",
-            "/workbench/fix",
-            "/workbench/boards",
-            "/workbench/data",
-            "/workbench/attire",
+            # 人事组（票 05）。
+            "/workbench/hr/calendar",
+            "/workbench/hr/inbox",
+            "/workbench/hr/shifts",
+            "/workbench/hr/roster",
+            # 现场组（票 05）。
+            "/workbench/floor/zones",
+            "/workbench/floor/daily",
+            "/workbench/floor/deep-clean",
+            "/workbench/floor/fix",
+            "/workbench/floor/boards",
+            "/workbench/floor/attire",
+            "/workbench/floor/data",
             # 票 03：员工三页搬进「我的」组，越权落点也是工作台里的一页。
             "/workbench/me/today",
             "/workbench/me/month",
@@ -272,6 +285,17 @@ class SpaPageRouteContractTest(unittest.TestCase):
             "/staff/today",
             "/staff/month",
             "/staff/clean",
+            # 票 05：工作台内部的**平铺**地址（重排进 hr / floor 两组之前的正式地址）。
+            "/workbench/inbox",
+            "/workbench/shifts",
+            "/workbench/roster",
+            "/workbench/zones",
+            "/workbench/daily",
+            "/workbench/deep-clean",
+            "/workbench/fix",
+            "/workbench/boards",
+            "/workbench/data",
+            "/workbench/attire",
         }
         router_paths = _router_page_paths()
         self.assertEqual(sorted(new_paths - router_paths), [], "vue-router 少了工作台页面")
@@ -292,8 +316,8 @@ class SpaPageRouteContractTest(unittest.TestCase):
     def test_workbench_data_page_route_exists(self):
         import main as main_module
 
-        self.assertIn("/workbench/data", main_module.SPA_PAGE_ROUTES)
-        self.assertIn("/workbench/data", _registered_get_paths())
+        self.assertIn("/workbench/floor/data", main_module.SPA_PAGE_ROUTES)
+        self.assertIn("/workbench/floor/data", _registered_get_paths())
 
     def test_spa_page_routes_constant_matches_registration(self):
         """常量是注册与测试共用的唯一清单：改了常量却漏注册（或反过来）要红。"""
@@ -305,28 +329,28 @@ class SpaPageRouteContractTest(unittest.TestCase):
         self.assertEqual(unregistered, [], f"SPA_PAGE_ROUTES 里没注册成 GET 的路径：{unregistered}")
 
     def test_workbench_data_serves_the_spa_shell_instead_of_404(self):
-        """直连 uvicorn 时 /workbench/data 必须返回 SPA 外壳（而不是 404）。"""
+        """直连 uvicorn 时 /workbench/floor/data 必须返回 SPA 外壳（而不是 404）。"""
         import main as main_module
 
         with _spa_shell_index():
             client = TestClient(main_module.app)
             # 非页面请求（curl / 探针：Accept 不是 text/html）不经过登录墙，
             # 直接命中页面路由 —— 修复前这条就是 404。
-            response = client.get("/workbench/data")
+            response = client.get("/workbench/floor/data")
             self.assertEqual(response.status_code, 200)
             self.assertIn("text/html", response.headers["content-type"])
             self.assertIn("禄云管理后台", response.text)
 
             # 浏览器硬导航：未登录由 HtmlAuthMiddleware 302 到 /login，也不是 404。
             navigation = client.get(
-                "/workbench/data",
+                "/workbench/floor/data",
                 headers={"accept": "text/html"},
                 follow_redirects=False,
             )
             self.assertEqual(navigation.status_code, 302)
             self.assertEqual(
                 navigation.headers["location"],
-                "/login?next=%2Fworkbench%2Fdata",
+                "/login?next=%2Fworkbench%2Ffloor%2Fdata",
             )
 
 

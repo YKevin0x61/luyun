@@ -16,6 +16,7 @@ import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import { useNudgePull } from '../../composables/useNudgePull'
+import { WORKBENCH_HR_HOME } from '../../utils/workbenchCopy'
 // 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
 // <link>，壳一层管住就跟卫生管理端一个做法。
 import {
@@ -126,7 +127,7 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
           <template v-if="today">今天 {{ today }} · </template>请假与换班都在这里批；批完那天就记成请假 / 对调，月历上带青点。
         </p>
       </div>
-      <button class="btn" type="button" @click="router.push('/workbench')">回到月历</button>
+      <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">回到月历</button>
     </header>
 
     <p v-if="state === 'loading'" class="iHint">正在读待办…</p>
@@ -200,7 +201,7 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
         <p v-if="ruleless.muted.length" class="iMuted">
           另有 {{ ruleless.muted.length }} 个人已停用或还没批准，不提醒。
         </p>
-        <button class="btn" type="button" @click="router.push('/workbench')">去配固定班</button>
+        <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">去配固定班</button>
       </section>
     </template>
 

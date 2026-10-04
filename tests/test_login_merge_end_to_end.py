@@ -70,6 +70,18 @@ OLD_URLS = (
     "/staff/clean",
     "/workbench/login",
     "/workbench/register",
+    # 票 05：工作台里的**平铺**地址（票 04 的正式地址）随分组重排一起作废 ——
+    # 不加 302、不留别名、不再免墙，跟上面那批一个待遇。
+    "/workbench/inbox",
+    "/workbench/shifts",
+    "/workbench/roster",
+    "/workbench/zones",
+    "/workbench/daily",
+    "/workbench/deep-clean",
+    "/workbench/fix",
+    "/workbench/boards",
+    "/workbench/data",
+    "/workbench/attire",
     "/hygiene-roster",
     "/hygiene-zones",
     "/hygiene-daily",
@@ -83,15 +95,23 @@ OLD_URLS = (
 
 STAFF_PAGES = ("/workbench/me/today", "/workbench/me/month", "/workbench/me/clean")
 
+# 票 05：现场七页按分组落在 `/workbench/floor/*`；花名册是人事页（`/workbench/hr/*`），
+# 但它的服务端待遇与现场页一样（工作台的页面壳对任一会话放行，未登录 302 到 `/login`）。
 HYGIENE_ADMIN_PAGES = (
-    "/workbench/roster",
-    "/workbench/zones",
-    "/workbench/daily",
-    "/workbench/deep-clean",
-    "/workbench/fix",
-    "/workbench/boards",
-    "/workbench/data",
-    "/workbench/attire",
+    "/workbench/floor/zones",
+    "/workbench/floor/daily",
+    "/workbench/floor/deep-clean",
+    "/workbench/floor/fix",
+    "/workbench/floor/boards",
+    "/workbench/floor/data",
+    "/workbench/floor/attire",
+)
+
+WORKBENCH_HR_PAGES = (
+    "/workbench/hr/calendar",
+    "/workbench/hr/inbox",
+    "/workbench/hr/shifts",
+    "/workbench/hr/roster",
 )
 
 
@@ -150,7 +170,7 @@ def test_hygiene_admin_pages_are_walled_with_next_not_served_as_the_spa_shell(ap
     """
     client, _main_module = app_client
 
-    for path in HYGIENE_ADMIN_PAGES + ("/settings",):
+    for path in HYGIENE_ADMIN_PAGES + WORKBENCH_HR_PAGES + ("/settings",):
         resp = client.get(path, headers=HTML, follow_redirects=False)
         assert resp.status_code == 302, (path, resp.status_code)
         assert resp.headers["location"] == f"/login?next={quote(path, safe='')}", path

@@ -45,7 +45,7 @@ describe('仪容仪表管理页（票 12）', () => {
 
   it('路由与后端的 SPA 页清单两边都有它', () => {
     // 少一边就是白屏或硬跳 404（AGENTS.md 里那条两个方向都要相等的规矩）。
-    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/attire'/)
-    expect(mainPy).toMatch(/"\/workbench\/attire"/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/floor\/attire'/)
+    expect(mainPy).toMatch(/"\/workbench\/floor\/attire"/)
   })
 })
