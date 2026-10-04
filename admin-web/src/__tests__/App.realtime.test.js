@@ -27,7 +27,7 @@ class FakeWebSocket {
 // 与真实 router 同一套 meta 口径（`/staff/*` 是 public + staffAuth + realtime）。
 const ROUTES = [
   { path: '/', component: { template: '<div />' } },
-  { path: '/hygiene/roster', component: { template: '<div />' }, meta: { standalone: true } },
+  { path: '/workbench/roster', component: { template: '<div />' }, meta: { standalone: true } },
   { path: '/login', component: { template: '<div />' }, meta: { standalone: true, public: true } },
   {
     path: '/staff/today',

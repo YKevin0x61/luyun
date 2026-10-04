@@ -324,7 +324,7 @@ def test_api_token_is_not_staff_session_or_roster_cookie(hygiene_http):
 
 
 def test_staff_cannot_self_pick_shift_or_zone_any_more(hygiene_http):
-    """票 10：员工当天的班次与责任区读**排班**，两个自选入口都得被拒（403 + 那句话）。
+    """票 10：员工当天的班次与工作区读**排班**，两个自选入口都得被拒（403 + 那句话）。
 
     票 10 之前这条测的是「登录后能自己选白班、随后还能改成夜班」。自选撤了之后同一个
     入口要守相反的承诺：`/staff/assignment` 与 `/staff/shift` 一律 403，`/staff/me`
@@ -538,7 +538,7 @@ def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
     # 没排班 = 今天没有班次，也就没有「我的区」：目录看得见全店，但这一项的标准图不给。
     no_duty = client.get(f"/api/hygiene/staff/items/{item['id']}/standard")
     assert no_duty.status_code == 400
-    assert no_duty.json()["detail"] == "请先选择今天的卫生责任区"
+    assert no_duty.json()["detail"] == "请先选择今天的卫生工作区"
 
     # 排班说「白班 · 案板」之后，同一张标准图才拿得到（票 10：分工读排班，不自选）。
     _assign_duty(_db, employee["id"], "白班", zone_id=anban["id"])
@@ -576,7 +576,7 @@ def test_staff_assignment_hides_and_rejects_other_zones(hygiene_http):
     assert client.get(f"/api/hygiene/staff/items/{xian_item['id']}/standard").status_code == 403
     denied = _submit_daily(client, xian_item["id"], SHOT_A)
     assert denied.status_code == 403
-    assert denied.json()["detail"] == "只能查看和提交所选卫生责任区的任务"
+    assert denied.json()["detail"] == "只能查看和提交所选卫生工作区的任务"
 
 
 def test_standard_manifest_and_immutable_image_contract(hygiene_http):
@@ -629,7 +629,7 @@ def _assign_duty(db, employee_id, shift, zone_id=1):
     """某人今天上哪个班、在哪个区 —— 用**排班**造（票 10 的唯一入口）。
 
     票 10 之前这里调的是 `accounts.pick_assignment(...)`（员工当天自己选）。自选入口
-    撤了之后前置数据只能从上游来：给这个人配一条固定班次的轮转规则 + 一个固定责任区，
+    撤了之后前置数据只能从上游来：给这个人配一条固定班次的轮转规则 + 一个固定工作区，
     展开出今天那一行。`zone_id=1` 是种子名单里的第一个区（案板），跟老调用的口径一致。
     """
     return _run(
@@ -1106,7 +1106,7 @@ def test_admin_sets_zone_shifts_staff_cannot_self_pick_any_zone(hygiene_http):
         f"/api/hygiene/admin/zones/{zone['id']}", json={"shifts": []}
     )
     assert empty.status_code == 400
-    assert empty.json()["detail"] == "卫生责任区至少要有一个班次"
+    assert empty.json()["detail"] == "卫生工作区至少要有一个班次"
 
     both = client.patch(
         f"/api/hygiene/admin/zones/{zone['id']}",
@@ -1123,7 +1123,7 @@ def test_admin_sets_zone_shifts_staff_cannot_self_pick_any_zone(hygiene_http):
 
     employee = _approve_staff(_db, accounts, PHONE, "白班")
     _staff_login(client, PHONE)
-    # 票 10 之前这里先撞 400「这个责任区没有该班次」、再成功选上。自选撤了之后
+    # 票 10 之前这里先撞 400「这个工作区没有该班次」、再成功选上。自选撤了之后
     # 两道都被同一个 403 挡在更外面：参数对不对已经不重要，这件事不该在这儿做。
     for shift in ("夜班", "白班"):
         refused = client.post(
@@ -1148,7 +1148,7 @@ def test_admin_sets_zone_shifts_staff_cannot_self_pick_any_zone(hygiene_http):
     assert listed["shifts"] == ["白班"]
 
     # 名单本身仍然算数，只是拦在更后面：店长把夜班的人排进只开白班的区，他拍完
-    # 交上来是 400「这个责任区没有该班次」—— 原来在选班时挡的那一道，现在只剩这里。
+    # 交上来是 400「这个工作区没有该班次」—— 原来在选班时挡的那一道，现在只剩这里。
     _assign_duty(_db, employee["id"], "夜班", zone_id=zone["id"])
     day_only_item = _run(
         work.add_daily_item(
@@ -1160,7 +1160,7 @@ def test_admin_sets_zone_shifts_staff_cannot_self_pick_any_zone(hygiene_http):
     )
     mismatch = _submit_daily(client, day_only_item["id"], SHOT_A, shift="夜班")
     assert mismatch.status_code == 400
-    assert mismatch.json()["detail"] == "这个责任区没有该班次，请换一个责任区或班次"
+    assert mismatch.json()["detail"] == "这个工作区没有该班次，请换一个工作区或班次"
     # 换回这一档就能交 —— 挡住的确实是「这个区没开夜班」，不是这一项本身有问题。
     _assign_duty(_db, employee["id"], "白班", zone_id=zone["id"])
     allowed = _submit_daily(client, day_only_item["id"], SHOT_A, shift="白班")

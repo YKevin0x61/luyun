@@ -38,22 +38,40 @@ const routes = [
   { path: '/logs', name: 'logs', component: () => import('../views/LogsView.vue') },
   { path: '/prep-plan', name: 'prep-plan', component: () => import('../views/PrepPlanView.vue') },
   { path: '/wecom-push', name: 'wecom-push', component: () => import('../views/WecomPushView.vue') },
-  { path: '/scheduling', name: 'scheduling', component: () => import('../views/scheduling/SchedulingCalendarView.vue') },
-  // 待办（票 08）：店长批请假的地方。从月历页底下那根「请假等着批」的条进来。
-  // 跟 `/scheduling` 同一扇门（管理端 cookie，没有 meta.public）。
-  { path: '/scheduling/inbox', name: 'scheduling-inbox', component: () => import('../views/scheduling/SchedulingInboxView.vue') },
-  // 班次表（票 11）：加一条、改名字、调显示顺序、启用停用、删掉建错的那条。
-  // 同样没有 meta —— 跟 `/scheduling`、`/scheduling/inbox` 一扇门（管理端 cookie）。
-  { path: '/scheduling/shifts', name: 'scheduling-shifts', component: () => import('../views/scheduling/SchedulingShiftsView.vue') },
-  hygieneAdminPage('/hygiene/roster', 'hygiene-roster', () => import('../views/hygiene/HygieneRosterView.vue')),
-  hygieneAdminPage('/hygiene/zones', 'hygiene-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
-  hygieneAdminPage('/hygiene/daily', 'hygiene-daily', () => import('../views/hygiene/HygieneDailyView.vue')),
-  hygieneAdminPage('/hygiene/deep-clean', 'hygiene-deep-clean', () => import('../views/hygiene/HygieneDeepCleanView.vue')),
-  hygieneAdminPage('/hygiene/fix', 'hygiene-fix', () => import('../views/hygiene/HygieneFixView.vue')),
-  hygieneAdminPage('/hygiene/boards', 'hygiene-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
-  hygieneAdminPage('/hygiene/data', 'hygiene-data', () => import('../views/hygiene/HygieneDataView.vue')),
+  // ── 工作台（排班 + 卫生合并成一个子系统，2026-10-04）──────────────────────
+  // 两组同住 `/workbench/*`：首页与待办 / 班次表套 `SchedulingLayout`（独立页，自带
+  // 一条窄栏：‹ 后台 / 工作台 / 现场 / 实时点）；卫生那八页套 `HygieneAdminLayout`
+  // （独立页，自带 rail）。两边的壳都靠 `meta.standalone` 让 `App.vue` 不渲染后台导航。
+  //
+  // 前缀搬家走的是"先并存、再迁移跳转、最后删旧的"三步（票 02/03/04）。**旧的
+  // `/scheduling*` 与 `/hygiene/*` 已经删干净、不留别名** —— 用户拍板：门店手机上那些
+  // 旧书签 404 是可以接受的。`?next=` 里可能还存着老地址，由 `utils/loginNext.js` 在
+  // 入口处换成新前缀（不给老路径留路由，那样迟早会漂成两套）。
+  //
+  // 这一段里的路径**都要写成字面量**：`tests/test_spa_page_routes.py` 按字面正则扫源码
+  // ——写模板字符串它就看不见这条路由了，而"前端有后端无"正是那条契约测试要拦的。
+  hygieneAdminPage('/workbench/roster', 'workbench-roster', () => import('../views/hygiene/HygieneRosterView.vue')),
+  hygieneAdminPage('/workbench/zones', 'workbench-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
+  hygieneAdminPage('/workbench/daily', 'workbench-daily', () => import('../views/hygiene/HygieneDailyView.vue')),
+  hygieneAdminPage('/workbench/deep-clean', 'workbench-deep-clean', () => import('../views/hygiene/HygieneDeepCleanView.vue')),
+  hygieneAdminPage('/workbench/fix', 'workbench-fix', () => import('../views/hygiene/HygieneFixView.vue')),
+  hygieneAdminPage('/workbench/boards', 'workbench-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
+  hygieneAdminPage('/workbench/data', 'workbench-data', () => import('../views/hygiene/HygieneDataView.vue')),
   // 仪容仪表（票 12）：按人拍，名单由排班给（休假的与没排到的不在表上）。
-  hygieneAdminPage('/hygiene/attire', 'hygiene-attire', () => import('../views/hygiene/HygieneAttireView.vue')),
+  hygieneAdminPage('/workbench/attire', 'workbench-attire', () => import('../views/hygiene/HygieneAttireView.vue')),
+  {
+    path: '/workbench',
+    component: () => import('../views/scheduling/SchedulingLayout.vue'),
+    meta: { standalone: true },
+    children: [
+      { path: '', name: 'workbench', component: () => import('../views/scheduling/SchedulingCalendarView.vue') },
+      // 待办（票 08）：店长批请假的地方。从月历页底下那根「请假等着批」的条进来。
+      // 跟首页同一扇门（管理端 cookie，没有 meta.public）。
+      { path: '/workbench/inbox', name: 'workbench-inbox', component: () => import('../views/scheduling/SchedulingInboxView.vue') },
+      // 班次表（票 11）：加一条、改名字、调显示顺序、启用停用、删掉建错的那条。
+      { path: '/workbench/shifts', name: 'workbench-shifts', component: () => import('../views/scheduling/SchedulingShiftsView.vue') },
+    ],
+  },
   // 员工手机端的入口是「今天」页（票 05）：登录后落到这里，第一眼是自己的班。
   // 票 04 起员工端整体住在 `/staff/*`（今天 /staff/today、整月 /staff/month、
   // 卫生首页 /staff/clean），旧的 `/today`、`/today/month`、`/hygiene` 已删除且不留别名。

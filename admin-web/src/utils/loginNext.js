@@ -51,13 +51,37 @@ function sanitizeNext(raw) {
   }
   if (!next.startsWith('/') || next.startsWith('//') || next.startsWith('/\\')) return null
   if (next === '/login' || next.startsWith('/login?') || next.startsWith('/login#')) return null
-  return next
+  return migrateLegacyPath(next)
 }
 
 /** 只看路径部分：query / hash 不参与前缀判断。 */
 function pathnameOf(next) {
   const [pathname] = String(next).split(/[?#]/)
   return pathname
+}
+
+/** 老前缀 → 工作台前缀（票 03/04）。**只在 `?next=` 这个入口换，不给老路径留路由。**
+ *
+ *  `?next=` 里可能存着搬家前的老地址：别人手机上存着的旧链接、旧书签、旧 PWA 快捷
+ *  方式，或者上一次登录被挡下来时写进 URL 的那条。老路由已经删干净了，原样放行就是
+ *  跳进一个白屏 —— 所以在这里换掉（前缀对前缀、单条对单条）。 */
+const LEGACY_NEXT_PATHS = [
+  ['/hygiene/', '/workbench/'],
+  ['/scheduling/', '/workbench/'],
+  ['/scheduling', '/workbench'],
+]
+
+function migrateLegacyPath(next) {
+  const raw = String(next)
+  const cut = raw.search(/[?#]/)
+  const pathname = cut === -1 ? raw : raw.slice(0, cut)
+  const tail = cut === -1 ? '' : raw.slice(cut)
+  for (const [from, to] of LEGACY_NEXT_PATHS) {
+    if (pathname === from || pathname.startsWith(from)) {
+      return to + pathname.slice(from.length) + tail
+    }
+  }
+  return raw
 }
 
 /** `?next=` 指定的员工端落点；不是员工端路径（或本身非法）时返回 null。

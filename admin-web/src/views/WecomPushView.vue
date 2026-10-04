@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { useWecomPush, PUSH_TYPE_NAMES } from '../composables/useWecomPush'
+import { useWecomPush, PUSH_TYPE_NAMES, webhookDeleteConfirmText, hygieneFeedWarning } from '../composables/useWecomPush'
 import { useStationsStore } from '../stores/stations'
 import SvgIcon from '../components/SvgIcon.vue'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
@@ -24,6 +24,8 @@ function flash(msg, type = 'info') {
 }
 
 const isEditingWebhook = computed(() => !!webhookForm.id)
+// 没有可用的卫生群时，卫生消息一条都不发 —— 这件事必须在页面上看得见
+const hygieneWarning = computed(() => hygieneFeedWarning(webhooks.value))
 const selectedJob = computed(() => jobs.value.find((j) => j.id === selectedJobId.value))
 const jobStations = computed(() => stationsStore.list.filter((s) => s.id && s.id !== 'loumian'))
 
@@ -34,7 +36,8 @@ async function handleSaveWebhook() {
   } catch (e) { flash(e.message, 'error') }
 }
 async function handleDeleteWebhook(id) {
-  if (!window.confirm('确定删除该 webhook？')) return
+  const target = webhooks.value.find((w) => w.id === id)
+  if (!window.confirm(webhookDeleteConfirmText(target))) return
   try {
     await deleteWebhook(id)
     flash('Webhook 已删除', 'success')
@@ -112,6 +115,7 @@ onMounted(async () => {
 <template>
   <div style="display:flex;flex-direction:column;gap:12px">
     <div v-if="error" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> 企微推送数据加载失败：{{ error }}</div>
+    <div v-if="hygieneWarning" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ hygieneWarning }}</div>
     <div v-if="toastMsg" class="badge" :style="toastType === 'error' ? 'color:var(--red);border-color:var(--red)' : 'color:var(--green);border-color:var(--green)'">
       {{ toastMsg }}
     </div>
@@ -144,6 +148,12 @@ onMounted(async () => {
             <label class="luyun-check-row">
               <LuyunCheckbox v-model="webhookForm.enabled" /> 启用
             </label>
+            <label class="luyun-check-row">
+              <LuyunCheckbox v-model="webhookForm.hygiene_feed" /> 这是卫生群
+            </label>
+            <p style="color:var(--text-dim);font-size:12px;margin:0">
+              卫生提醒与验收照片只发勾选的群；一个都不勾就一条都不发。
+            </p>
             <div style="display:flex;gap:8px">
               <button class="btn btn-primary" type="submit">{{ isEditingWebhook ? '保存修改' : '新增地址' }}</button>
               <button class="btn" type="button" @click="resetWebhookForm">清空 / 新增</button>
@@ -155,7 +165,10 @@ onMounted(async () => {
             <div v-for="item in webhooks" :key="item.id" class="card" style="padding:10px">
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
                 <strong style="font-size:13px">{{ item.name }}</strong>
-                <span class="badge" :style="item.enabled ? 'color:var(--green);border-color:var(--green)' : ''">{{ item.enabled ? '启用' : '停用' }}</span>
+                <span style="display:flex;gap:6px;align-items:center">
+                  <span v-if="item.hygiene_feed" class="badge" style="color:var(--cyan);border-color:var(--cyan)">卫生群</span>
+                  <span class="badge" :style="item.enabled ? 'color:var(--green);border-color:var(--green)' : ''">{{ item.enabled ? '启用' : '停用' }}</span>
+                </span>
               </div>
               <div style="color:var(--text-dim);font-size:12px;word-break:break-all">{{ item.webhook_url_masked }}</div>
               <div v-if="item.notes" style="color:var(--text-dim);font-size:12px">{{ item.notes }}</div>

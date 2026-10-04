@@ -21,7 +21,7 @@ describe('台账上的「改派」写的是排班的单日覆盖（票 10）', (
       /api\.post\(`\/api\/hygiene\/admin\/roster\/\$\{row\.id\}\/assignment`/,
     )
     // 覆盖是**整天的快照**：`zone_id: null` = 跟这个班次的固定区（不再替人挑一个区）；
-    // 「那天休」走 `is_rest`，班次和责任区都得留空（带细节的休服务端会拒）。
+    // 「那天休」走 `is_rest`，班次和工作区都得留空（带细节的休服务端会拒）。
     expect(roster).toMatch(/zone_id: draft\.zone_id === '' \? null : Number\(draft\.zone_id\)/)
     expect(roster).toMatch(/is_rest: true, shift_id: null, zone_id: null/)
     expect(roster).toMatch(/<option value="rest">休（这天不上班）<\/option>/)
@@ -51,7 +51,7 @@ describe('台账上的「改派」写的是排班的单日覆盖（票 10）', (
     expect(roster).toMatch(/v-for="shift in scheduleShifts"/)
     // 选的是排班那份班次表（只出还在用的：停用的服务端会拒），不再是写死的白班/夜班。
     expect(roster).not.toMatch(/v-for="shift in HYGIENE_SHIFTS"/)
-    // 责任区候选：`duty_slot`（day/night）→ 卫生的「白班/夜班」→ `zonesForShift` 那套
+    // 工作区候选：`duty_slot`（day/night）→ 卫生的「白班/夜班」→ `zonesForShift` 那套
     // `day_shift` / `night_shift` 开关；没标档位的班次不筛（列出全部）。
     expect(roster).toMatch(/const DUTY_SLOT_SHIFTS = \{ day: '白班', night: '夜班' \}/)
     expect(roster).toMatch(/const slot = dutyShiftOf\(shiftId\)/)

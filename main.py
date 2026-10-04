@@ -331,6 +331,7 @@ async def lifespan(app: FastAPI):
         from services.hygiene.images import ImageVariantGenerator
         from services.hygiene.notifier import WeComGroupTextNotifier
         from services.hygiene.attire import HygieneAttire
+        from services.hygiene.wecom_share import HygieneCaptureSharer
         from services.hygiene.work import HygieneWork
         from pathlib import Path
         if db_manager and db_manager.is_connected():
@@ -338,10 +339,13 @@ async def lifespan(app: FastAPI):
             await employee_accounts.prepare()
             startup_results.append("员工账号")
             capture_root = Path(settings.DATABASE_DIR) / "hygiene-captures"
+            hygiene_captures = FileCaptureStore(capture_root)
             hygiene_work = HygieneWork(
                 db_manager,
-                captures=FileCaptureStore(capture_root),
+                captures=hygiene_captures,
                 notifier=WeComGroupTextNotifier(db_manager),
+                # 验收通过的实拍 → 卫生群（登记在验收事务里，发送由它自己在写锁外做）
+                capture_sharer=HygieneCaptureSharer(db_manager, hygiene_captures),
                 image_variants=ImageVariantGenerator(),
                 on_change=broadcast_hygiene_change,
             )
@@ -1115,7 +1119,7 @@ async def kds_manifest():
 # `try_files … /index.html` 也只写在 admin|sales-report|logs|prep-plan|wecom-push|recipe
 # 六个前缀的白名单块里（deploy/nginx.conf、deploy/Caddyfile），hygiene 页面一律落到
 # 反代兜底转发 —— 漏一条就是直连/反代硬导航 404（DOC-01 的 /hygiene-data 就是这么漏的）。
-# 票 05 起八个管理端卫生页住在 `/hygiene/*`（`/hygiene` 本路径没有页面）。
+# 工作台：八个管理端卫生页与三个排班页同住 `/workbench/*`（票 04 之后旧前缀已删）。
 # 票 06 起系统配置页从 `/setup` 改名 `/settings` —— 它一直不是首次初始化页（建管理员账号
 # 在 `/login` 的管理员栏），旧地址不做兼容、不留别名。
 SPA_PAGE_ROUTES = (
@@ -1138,17 +1142,21 @@ SPA_PAGE_ROUTES = (
     "/staff/today",
     "/staff/month",
     "/staff/clean",
-    "/hygiene/roster",
-    "/hygiene/zones",
-    "/hygiene/daily",
-    "/hygiene/deep-clean",
-    "/hygiene/fix",
-    "/hygiene/boards",
-    "/hygiene/data",
-    "/hygiene/attire",
-    "/scheduling",
-    "/scheduling/inbox",
-    "/scheduling/shifts",
+    # 工作台（排班 + 卫生，2026-10-04）：两组同住一条前缀。旧前缀 `/hygiene/*` 与
+    # `/scheduling*` 已按票 04 删干净、不留别名（用户拍板：旧书签 404 可接受）。
+    # 这一批**每一条都得在**：漏一条就是"管理端点得进去、手机上一刷新 404"——
+    # `/hygiene-data` 那次正是这么栽的。前端侧由 `tests/test_spa_page_routes.py` 双向盯住。
+    "/workbench",
+    "/workbench/inbox",
+    "/workbench/shifts",
+    "/workbench/roster",
+    "/workbench/zones",
+    "/workbench/daily",
+    "/workbench/deep-clean",
+    "/workbench/fix",
+    "/workbench/boards",
+    "/workbench/data",
+    "/workbench/attire",
 )
 
 

@@ -39,11 +39,14 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0003_hygiene_board_ticket.sql` | `hygiene_board_events.ticket_id` 列 + `idx_hygiene_board_events_ticket` 索引（整改驳回的关联键） | 员工端看不到整改单被驳回，也拿不到驳回原因 |
 | `0004_logs.sql` | 日志表 `logs` 进 PostgreSQL（SQLite 的 `data/logs.db` 已退场） | 日志写入全部失败（`relation "logs" does not exist`），`/logs` 页面与 `GET /api/logs/*` 无数据 |
 | `0005_scheduling.sql` | 排班系统第一批表：`staff_shifts`（班次表，含白班/夜班两行）、`staff_assignments`（排出来的结果）、`scheduling_rules`（一人一条轮转规则） | 排班页面与 `/api/scheduling/*` 全部报错（`relation "staff_shifts" does not exist`），店长打不开月历 |
-| `0006_scheduling_zone_defaults.sql` | `scheduling_zone_defaults`：每人每班次一个固定责任区（区名单仍在 `hygiene_zones`，不搬表） | 店长在排班页配不了责任区，排出来的行 `zone_id` 恒为空 |
-| `0007_scheduling_overrides.sql` | `scheduling_overrides`：单日覆盖（某人某天跟规则不一样的那一天，班次+责任区整天快照） | 店长改某天（改班次/改成休/换区）与改规则都 503 并点名这个文件（展开要先读覆盖表）；月历与当日接口照常 200，只是「这天被改过」的青点永远不会出现（标记数的是 `staff_assignments.source`） |
+| `0006_scheduling_zone_defaults.sql` | `scheduling_zone_defaults`：每人每班次一个固定工作区（区名单仍在 `hygiene_zones`，不搬表） | 店长在排班页配不了工作区，排出来的行 `zone_id` 恒为空 |
+| `0007_scheduling_overrides.sql` | `scheduling_overrides`：单日覆盖（某人某天跟规则不一样的那一天，班次+工作区整天快照） | 店长改某天（改班次/改成休/换区）与改规则都 503 并点名这个文件（展开要先读覆盖表）；月历与当日接口照常 200，只是「这天被改过」的青点永远不会出现（标记数的是 `staff_assignments.source`） |
 | `0008_scheduling_requests.sql` | `scheduling_requests`：请假申请（一次申请一条，同一个人可以有多条，`kind`/起止日/状态/事由），批准后那几天写成 `kind=leave` 的单日覆盖 | 员工端提不了假、看不了自己的申请，店长的「待办」页 503 并点名这个文件；月历、当日、`/me` 与改某天照常工作（那几条读路径根本不查这张表：请假标记来自 0007 的覆盖记录，读不到就当没有） |
 | `0009_scheduling_swap.sql` | `scheduling_requests."peer_employee_id"` 列（换班跟谁换）+ `idx_scheduling_requests_peer` 索引 + 未落定换班的局部唯一索引 `idx_scheduling_requests_swap_once`（同一对同一天只挂一条）；换班与请假共用 0008 那张表，靠 `kind` 分开 | 员工提不了换班（**请假照常**：读路径捕到缺列就按「没有换班」降级，写路径才 503 并点名这个文件）；店长「待办」里不会再出现**新的**换班卡 —— 这一列不在、表里却已经排上队的换班，会让那期间整页待办 503 并点名这个文件（看着像请假也打不开）。把列补回来页面就照常开：那一行的对方已经随列丢了（`DROP COLUMN` 连值一起走），那张卡补不回来 —— 渲染时会跳过它并记一条日志，不会拿空值当「对方」写排班；新提的换班照常走完 |
 | `0010_shift_duty_slot.sql` | `staff_shifts."duty_slot"` 列（`day`/`night`/NULL）：这条班次的人做哪一档卫生日常检查，按**班次 id** 认而不是按名字（票 10）。回填现有的「白班」「夜班」两条 | 排班页面与 `/api/scheduling/*` 报 503 并点名这个文件（`list_shifts` 要读这一列，缺列就走 `not_migrated` 那条出口）；同时卫生的员工端交不了任何日常检查（公共层那个只读入口捕到缺列就按「还没接上」降级 —— 员工看到的是「今天没有要交的日常」，不是 500）。**这一条要先应用再看页面** |
+| `0012_wecom_hygiene_feed.sql` | `wecom_push_webhooks."hygiene_feed"` 列：把某个企业微信群标成「卫生群」，卫生提醒与验收照片只发它 | 「企微推送」页的地址列表变空（查询捕到缺列就按空列表返回），编辑 / 停用报「webhook 不存在」；卫生侧同样挑不出群 —— **卫生消息一条都不发** |
+| `0013_hygiene_wecom_shares.sql` | `hygiene_wecom_shares`：验收照片进群的分享记录（幂等键 + 发送状态 + 重试计数） | **验收照常成功**（代码侧探测到缺表会降级跳过推送，不会让验收事务回滚），但验收照片一张都发不出去，日志里只有一行「未建（迁移 0013 未应用）」 |
+| `0014_hygiene_share_pair_image.sql` | `hygiene_wecom_shares."extra_capture_id"` 列：专项前后对照的「前」那张图（主列存「后」），发送时现拼成一张左前右后的对照图 | flush 的查询要读这一列 —— 缺列时**所有**验收照片都发不出去（每轮 flush 报一次错，日志可见）；验收本身照常成功 |
 
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，

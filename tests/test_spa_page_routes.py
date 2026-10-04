@@ -95,15 +95,15 @@ def _registered_get_paths() -> set[str]:
 
 
 class SpaPageRouteContractTest(unittest.TestCase):
-    def test_router_registers_hygiene_data(self):
-        """本票的缺陷锚点：前端确实注册了 /hygiene/data（票 05 前的 /hygiene-data）。"""
-        self.assertIn("/hygiene/data", _router_page_paths())
+    def test_router_registers_workbench_data(self):
+        """缺陷锚点：前端确实注册了 `/workbench/data`（票 05 前的 `/hygiene-data`，票 04 起在 `/workbench/*`）。"""
+        self.assertIn("/workbench/data", _router_page_paths())
 
     def test_router_parse_covers_all_three_registration_forms(self):
         by_form = _router_page_paths_by_form()
         self.assertGreaterEqual(len(by_form["path:"]), 10)
-        self.assertIn("/hygiene/roster", by_form["hygieneAdminPage"])
-        self.assertIn("/hygiene/data", by_form["hygieneAdminPage"])
+        self.assertIn("/workbench/roster", by_form["hygieneAdminPage"])
+        self.assertIn("/workbench/data", by_form["hygieneAdminPage"])
         self.assertEqual(
             {"hygieneStaffAuthPage": sorted(by_form["hygieneStaffAuthPage"])},
             {"hygieneStaffAuthPage": ["/register"]},
@@ -119,11 +119,62 @@ class SpaPageRouteContractTest(unittest.TestCase):
             "直连 uvicorn（无反代兜底）会 404。",
         )
 
-    def test_hygiene_data_page_route_exists(self):
+    def test_only_the_workbench_prefix_is_registered(self):
+        """票 04（收口）：旧前缀 `/hygiene/*` 与 `/scheduling*` 已删干净，只剩 `/workbench/*`。
+
+        两个方向都查：新前缀一条都不能少（少了 → 手机直连/刷新 404），旧前缀一条都不能
+        留（留一半最坏 —— "点得进去、刷新 404"）。前端的字面清单在
+        `admin-web/src/router/__tests__/workbenchRoutes.test.js` 里也钉了一遍。
+        """
         import main as main_module
 
-        self.assertIn("/hygiene/data", main_module.SPA_PAGE_ROUTES)
-        self.assertIn("/hygiene/data", _registered_get_paths())
+        new_paths = {
+            "/workbench",
+            "/workbench/inbox",
+            "/workbench/shifts",
+            "/workbench/roster",
+            "/workbench/zones",
+            "/workbench/daily",
+            "/workbench/deep-clean",
+            "/workbench/fix",
+            "/workbench/boards",
+            "/workbench/data",
+            "/workbench/attire",
+        }
+        old_paths = {
+            "/scheduling",
+            "/scheduling/inbox",
+            "/scheduling/shifts",
+            "/hygiene/roster",
+            "/hygiene/zones",
+            "/hygiene/daily",
+            "/hygiene/deep-clean",
+            "/hygiene/fix",
+            "/hygiene/boards",
+            "/hygiene/data",
+            "/hygiene/attire",
+        }
+        router_paths = _router_page_paths()
+        self.assertEqual(sorted(new_paths - router_paths), [], "vue-router 少了工作台页面")
+        self.assertEqual(sorted(old_paths & router_paths), [], "旧前缀还留在 vue-router 里")
+        self.assertEqual(
+            sorted(new_paths - set(main_module.SPA_PAGE_ROUTES)), [], "main.py 清单少了工作台页面"
+        )
+        self.assertEqual(
+            sorted(old_paths & set(main_module.SPA_PAGE_ROUTES)), [], "旧前缀还留在 main.py 清单里"
+        )
+        self.assertEqual(
+            sorted(new_paths - _registered_get_paths()), [], "工作台页面没真正注册成 GET 路由"
+        )
+        self.assertEqual(
+            sorted(old_paths & _registered_get_paths()), [], "旧前缀还注册着 GET 路由"
+        )
+
+    def test_workbench_data_page_route_exists(self):
+        import main as main_module
+
+        self.assertIn("/workbench/data", main_module.SPA_PAGE_ROUTES)
+        self.assertIn("/workbench/data", _registered_get_paths())
 
     def test_spa_page_routes_constant_matches_registration(self):
         """常量是注册与测试共用的唯一清单：改了常量却漏注册（或反过来）要红。"""
@@ -146,8 +197,8 @@ class SpaPageRouteContractTest(unittest.TestCase):
             "要么在 BACKEND_ONLY_PAGE_EXCEPTIONS 里写明理由。",
         )
 
-    def test_hygiene_data_serves_the_spa_shell_instead_of_404(self):
-        """直连 uvicorn 时 /hygiene/data 必须返回 SPA 外壳（而不是 404）。"""
+    def test_workbench_data_serves_the_spa_shell_instead_of_404(self):
+        """直连 uvicorn 时 /workbench/data 必须返回 SPA 外壳（而不是 404）。"""
         import main as main_module
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -159,21 +210,21 @@ class SpaPageRouteContractTest(unittest.TestCase):
                 client = TestClient(main_module.app)
                 # 非页面请求（curl / 探针：Accept 不是 text/html）不经过登录墙，
                 # 直接命中页面路由 —— 修复前这条就是 404。
-                response = client.get("/hygiene/data")
+                response = client.get("/workbench/data")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("text/html", response.headers["content-type"])
                 self.assertIn("禄云管理后台", response.text)
 
                 # 浏览器硬导航：未登录由 HtmlAuthMiddleware 302 到 /login，也不是 404。
                 navigation = client.get(
-                    "/hygiene/data",
+                    "/workbench/data",
                     headers={"accept": "text/html"},
                     follow_redirects=False,
                 )
                 self.assertEqual(navigation.status_code, 302)
                 self.assertEqual(
                     navigation.headers["location"],
-                    "/login?next=%2Fhygiene%2Fdata",
+                    "/login?next=%2Fworkbench%2Fdata",
                 )
             finally:
                 main_module.spa_index_path = original

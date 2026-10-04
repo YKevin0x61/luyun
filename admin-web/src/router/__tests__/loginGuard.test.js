@@ -60,10 +60,10 @@ describe('vue-router 登录守卫：未登录时带 ?next= 送到 /login', () =>
 
   it('管理端卫生页 /hygiene/daily', async () => {
     const router = await freshRouter()
-    await router.push('/hygiene/daily')
+    await router.push('/workbench/daily')
 
     expect(router.currentRoute.value.path).toBe('/login')
-    expect(router.currentRoute.value.query.next).toBe('/hygiene/daily')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/daily')
   })
 
   it('系统配置页 /settings', async () => {

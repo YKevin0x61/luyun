@@ -49,7 +49,7 @@ class StandardManifestVariantTest(unittest.IsolatedAsyncioTestCase):
             image_variants=ImageVariantGenerator(),
         )
         await self.work.prepare()
-        # 建库时已经 seed 了 8 个责任区，直接复用，别再建同名区。
+        # 建库时已经 seed 了 8 个工作区，直接复用，别再建同名区。
         zones = await self.work.list_zones()
         self.zone = zones[0]
         self.other_zone = zones[4]

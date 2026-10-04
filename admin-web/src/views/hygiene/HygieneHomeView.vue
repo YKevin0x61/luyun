@@ -364,8 +364,8 @@ useHygieneRealtime({
       if (resource === 'teaching' && tab.value === 'boards') {
         await loadTeaching({ force: true })
       }
-      // `zones` 这个 resource 承载两件事：责任区列表变更，以及**标准图换版 / 改标注**
-      // （action=standard_updated）。已选区的员工不必跟着刷新责任区列表，但必须刷新
+      // `zones` 这个 resource 承载两件事：工作区列表变更，以及**标准图换版 / 改标注**
+      // （action=standard_updated）。已选区的员工不必跟着刷新工作区列表，但必须刷新
       // 待办——否则他手里的标准图与标注还是旧的，而服务端已经换了版本，拍摄前的
       // 「标准图已更新」守卫也就不会触发。
       if (resource === 'zones') {
@@ -489,11 +489,11 @@ async function loadMe() {
     dailyClocks.value = data.daily_clocks || null
     deepClock.value = data.deep_clock || null
     meRetryIndex = 0
-    // 换区之后重新核对标准图缓存（只核对、不下载）：清单是按责任区切片的，不核的话被
+    // 换区之后重新核对标准图缓存（只核对、不下载）：清单是按工作区切片的，不核的话被
     // 临时调到别的区的人，面板上提示的还是上一个区的「待更新」张数。
     //
     // 票 10 之前这件事挂在「员工自己点换区」那一次动作上；自选入口撤了之后，换区由店长
-    // 在排班页改（单日覆盖或固定责任区），员工端只能从「读到自己今天在别的区」看出来 ——
+    // 在排班页改（单日覆盖或固定工作区），员工端只能从「读到自己今天在别的区」看出来 ——
     // 所以触发点搬到这里。首次进页面（上一次没有区）也核一次，代价是一次只读请求。
     if (String((employee.value && employee.value.zone_id) || '') !== String(previousZoneId || '')) {
       await standardPhotoCache.checkForUpdates()
@@ -589,7 +589,7 @@ function openTeaching(row) {
 /** 切到「待办」那一屏并滚到顶，让员工看清今天为什么没有日常可交。
  *
  *  票 10 之前它叫 `openAssignmentPicker`（打开「重选区域和班次」的选择器）。自选撤了之后
- *  同样的入口变成「去看那一屏的说明」，所以不再需要拉责任区名单那一步 —— 说明里的话
+ *  同样的入口变成「去看那一屏的说明」，所以不再需要拉工作区名单那一步 —— 说明里的话
  *  只跟排班给的值有关。
  */
 async function openDutyNotice() {
@@ -772,7 +772,7 @@ function openFixForm() {
   flashText.value = ''
   if (!isManager.value) return
   if (needsAssignment.value) {
-    errorText.value = '今天没有排到你的班（或者责任区对不上），先找店长确认今天的排班。'
+    errorText.value = '今天没有排到你的班（或者工作区对不上），先找店长确认今天的排班。'
     return
   }
   if (!liveOk.value) {
@@ -804,7 +804,7 @@ function openFixOriginal(row) {
 function openFixCameraFromForm() {
   if (!sheet.value || sheet.value.kind !== 'fix') return
   if (!sheet.value.zoneId) {
-    formError.value = '请选择卫生责任区。'
+    formError.value = '请选择卫生工作区。'
     formErrorField.value = 'fix-zone'
   } else if (!sheet.value.ticketType) {
     formError.value = '请选择整改类型。'
@@ -1127,7 +1127,7 @@ function submitFixOpen() {
       transport: 'staff',
       path: '/api/hygiene/staff/fix',
       formData: form,
-      label: `整改开单 · ${zone ? zone.name : '卫生责任区'}`,
+      label: `整改开单 · ${zone ? zone.name : '卫生工作区'}`,
       detail: current.ticketType,
       onSuccess: loadFixTickets,
       // 开单是新增，待办里本来没有这一项，所以只提示失败、不占 pending 位。
@@ -1155,7 +1155,7 @@ function submitFixReshoot() {
       transport: 'staff',
       path: `/api/hygiene/staff/fix/${current.id}/reshoot`,
       formData: form,
-      label: `整改回拍 · ${current.zone_name || '卫生责任区'}`,
+      label: `整改回拍 · ${current.zone_name || '卫生工作区'}`,
       detail: current.ticket_type || '',
       onSuccess: loadFixTickets,
       onError: () => notifySubmitFailed(`整改回拍 · ${current.zone_name || ''}`.trim()),
@@ -1289,7 +1289,7 @@ async function decide(action, reason = '') {
         <router-link class="hy-work-today" to="/staff/today" aria-label="回到「今天」页看我的班">
           ‹ 今天
         </router-link>
-        <!-- 今天在哪：**只读**（票 10）。以前点它还能重选，现在班次和责任区由排班决定，
+        <!-- 今天在哪：**只读**（票 10）。以前点它还能重选，现在班次和工作区由排班决定，
              要改得去排班页改那一天 —— 所以这里只报「排班说你今天在哪」，点不动。
              「还没定区」与「今天没排班」是两件事：前者有班次但店长没给他配这个班的固定区
              （或者那个区被删了），后者是排班压根没排到他。 -->
@@ -1312,12 +1312,12 @@ async function decide(action, reason = '') {
         class="hy-staff-alert"
         role="status"
       >
-        今天没有排到你的班（或者责任区对不上），日常检查交不了。
+        今天没有排到你的班（或者工作区对不上），日常检查交不了。
         <button type="button" class="btn" @click="router.push('/staff/today')">去看我的班</button>
       </p>
 
       <section v-if="tab === 'inbox'">
-        <!-- 票 10：班次和责任区不再由员工当天自己选 —— 排班说今天在哪个班、哪个区，
+        <!-- 票 10：班次和工作区不再由员工当天自己选 —— 排班说今天在哪个班、哪个区，
              卫生就认哪个。这一屏以前是个选择器，现在换成一句实话 + 一条去「今天」页的路：
              没有班次（新人没配规则 / 今天休 / 那条班次还没标卫生档位）就没有日常可交，
              与其让人在这里选出一个不生效的答案，不如说清该找谁。 -->
@@ -1329,7 +1329,7 @@ async function decide(action, reason = '') {
               没有班次就没有可交的那一份。
             </template>
             <template v-else>
-              排班给的班次和这个责任区对不上（这个区可能没开这一档）。日常检查交不了。
+              排班给的班次和这个工作区对不上（这个区可能没开这一档）。日常检查交不了。
             </template>
           </p>
           <p class="hy-staff-lead">
@@ -1381,7 +1381,7 @@ async function decide(action, reason = '') {
                    管理者在别的区建好标准图后到这一屏核对，会以为图丢了。 -->
               <p>当前区域「{{ employee.zone_name || '未选区域' }}」没有带标准图的日常检查项。</p>
               <p class="hy-staff-lead">
-                日常检查项挂在责任区下，这一屏只列你选的这个区；管理端能看到全部区。
+                日常检查项挂在工作区下，这一屏只列你选的这个区；管理端能看到全部区。
               </p>
               <button type="button" class="btn" @click="openDutyNotice">看看今天怎么安排</button>
             </template>
@@ -1433,7 +1433,7 @@ async function decide(action, reason = '') {
           {{ deepStats.passed }}/{{ deepStats.total }}
           <span v-if="deepDue"> · {{ deepDue }} 前做完</span>
         </p>
-        <p class="hy-staff-lead">全店专项，不按责任区或班次。每项拍清理前和清理后。</p>
+        <p class="hy-staff-lead">全店专项，不按工作区或班次。每项拍清理前和清理后。</p>
         <p v-if="!deepInbox.length" class="hy-staff-lead">这一轮没有专项卫生。</p>
         <article
           v-for="row in openDeep"
@@ -1546,8 +1546,8 @@ async function decide(action, reason = '') {
           </article>
         </section>
         <section class="hy-section">
-          <h2>卫生责任区红黑榜</h2>
-          <p v-if="!(boards.zones || []).length" class="hy-staff-lead">这一周还没有卫生责任区的次数。</p>
+          <h2>卫生工作区红黑榜</h2>
+          <p v-if="!(boards.zones || []).length" class="hy-staff-lead">这一周还没有卫生工作区的次数。</p>
           <article v-for="row in boards.zones" :key="`zone-${row.zone_id}`" class="hy-task">
             <div>
               <strong>{{ row.zone_name }}</strong>
@@ -1679,7 +1679,7 @@ async function decide(action, reason = '') {
               <dd>{{ hygienePermissionLabel(employee.permission) }}</dd>
             </div>
           </dl>
-          <p v-if="!profileEditing && !passwordEditing" class="hy-staff-lead">专项全店可用；整改按所选责任区显示。所有现场照片都需实拍。</p>
+          <p v-if="!profileEditing && !passwordEditing" class="hy-staff-lead">专项全店可用；整改按所选工作区显示。所有现场照片都需实拍。</p>
           <button
             v-if="!profileEditing && !passwordEditing"
             type="button"
@@ -1744,7 +1744,7 @@ async function decide(action, reason = '') {
         <template v-if="sheet.mode === 'form'">
           <p v-if="formError" class="staff-alert" role="alert">{{ formError }}</p>
           <label class="staff-field">
-            卫生责任区
+            卫生工作区
             <select
               id="fix-zone"
               v-model="sheet.zoneId"

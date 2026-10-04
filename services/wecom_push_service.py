@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
@@ -23,6 +25,8 @@ from services.dish_normalize import normalize_dish_name
 logger = logging.getLogger(__name__)
 
 WECOM_TEXT_BYTE_LIMIT = 2048
+# 群机器人 image 消息：base64 编码**前**的图片不能超过 2MB（官方口径）。
+WECOM_IMAGE_BYTE_LIMIT = 2 * 1024 * 1024
 WECOM_WEBHOOK_HOST = "qyapi.weixin.qq.com"
 SALES_REPORT_PUSH_TYPE = "sales_report_text"
 DATA_QUALITY_PUSH_TYPE = "data_quality_alert"
@@ -269,8 +273,8 @@ class WeComPushService:
         fixed_dishes = await db.report_dishes_all()
         return render_sales_report_text(report_data, fixed_dishes)
 
-    async def send_text(self, webhook_url: str, content: str) -> tuple[bool, str]:
-        payload = {"msgtype": "text", "text": {"content": content}}
+    async def _post_payload(self, webhook_url: str, payload: Dict[str, Any]) -> tuple[bool, str]:
+        """POST 一条消息给群机器人，按 errcode 判成功失败。"""
         async with httpx.AsyncClient(timeout=SEND_TIMEOUT_SECONDS) as client:
             response = await client.post(
                 webhook_url,
@@ -287,6 +291,34 @@ class WeComPushService:
         errcode = int(data.get("errcode", -1))
         errmsg = str(data.get("errmsg", response_text))
         return errcode == 0, errmsg
+
+    async def send_text(self, webhook_url: str, content: str) -> tuple[bool, str]:
+        return await self._post_payload(
+            webhook_url, {"msgtype": "text", "text": {"content": content}}
+        )
+
+    async def send_image(self, webhook_url: str, image_bytes: bytes) -> tuple[bool, str]:
+        """发一张图。
+
+        群机器人的 `image` 消息只吃 **base64 + md5**，不接受 URL（要 URL 的是图文卡片的
+        `picurl`，那还得是公网可访问的 https）。卫生的照片端点全要会话鉴权，公网本来也
+        取不到 —— 所以只能服务端读文件后走这条路。
+        """
+        if not image_bytes:
+            return False, "图片内容为空"
+        if len(image_bytes) > WECOM_IMAGE_BYTE_LIMIT:
+            return False, (
+                f"图片 {len(image_bytes)} 字节，超过企业微信 image 限制 "
+                f"{WECOM_IMAGE_BYTE_LIMIT} 字节"
+            )
+        payload = {
+            "msgtype": "image",
+            "image": {
+                "base64": base64.b64encode(image_bytes).decode("ascii"),
+                "md5": hashlib.md5(image_bytes).hexdigest(),
+            },
+        }
+        return await self._post_payload(webhook_url, payload)
 
     async def send_messages(self, webhook_url: str, parts: List[str]) -> tuple[bool, str]:
         """按逻辑板块顺序发送；单个板块若超限再按行细分为多条。"""

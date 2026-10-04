@@ -61,6 +61,7 @@ HYGIENE_TABLES = (
     "hygiene_fix_overdue_notices",
     "hygiene_teaching_examples",
     "hygiene_capture_variants",
+    "hygiene_wecom_shares",
 )
 
 # Scheduling tables: `staff_shifts` / `staff_assignments` are the shared vocabulary

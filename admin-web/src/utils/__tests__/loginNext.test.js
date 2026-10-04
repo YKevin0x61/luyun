@@ -51,12 +51,12 @@ describe('shouldSkipLoginRedirect', () => {
   it('管理面和运营页仍跳登录', () => {
     expect(shouldSkipLoginRedirect('/recipe/manage')).toBe(false)
     expect(shouldSkipLoginRedirect('/admin')).toBe(false)
-    expect(shouldSkipLoginRedirect('/hygiene/roster')).toBe(false)
-    expect(shouldSkipLoginRedirect('/hygiene/zones')).toBe(false)
-    expect(shouldSkipLoginRedirect('/hygiene/daily')).toBe(false)
-    expect(shouldSkipLoginRedirect('/hygiene/deep-clean')).toBe(false)
-    expect(shouldSkipLoginRedirect('/hygiene/fix')).toBe(false)
-    expect(shouldSkipLoginRedirect('/hygiene/boards')).toBe(false)
+    expect(shouldSkipLoginRedirect('/workbench/roster')).toBe(false)
+    expect(shouldSkipLoginRedirect('/workbench/zones')).toBe(false)
+    expect(shouldSkipLoginRedirect('/workbench/daily')).toBe(false)
+    expect(shouldSkipLoginRedirect('/workbench/deep-clean')).toBe(false)
+    expect(shouldSkipLoginRedirect('/workbench/fix')).toBe(false)
+    expect(shouldSkipLoginRedirect('/workbench/boards')).toBe(false)
   })
 })
 
@@ -102,7 +102,7 @@ describe('resolveLoginNext', () => {
   })
 
   it('管理员身份照旧放行任意站内管理路径（含 query 与菜谱阅读面）', () => {
-    expect(resolveLoginNext('/hygiene/roster')).toBe('/hygiene/roster')
+    expect(resolveLoginNext('/workbench/roster')).toBe('/workbench/roster')
     expect(resolveLoginNext('/admin?tab=orders')).toBe('/admin?tab=orders')
     expect(resolveLoginNext('/recipe/detail?slug=congee')).toBe('/recipe/detail?slug=congee')
   })
@@ -126,8 +126,8 @@ describe('resolveStaffNext', () => {
 
   it('管理端页面不算员工落点（连名字像的也不算）', () => {
     expect(resolveStaffNext('/admin')).toBe('/staff/today')
-    expect(resolveStaffNext('/hygiene/roster')).toBe('/staff/today')
-    expect(resolveStaffNext('/hygiene/zones')).toBe('/staff/today')
+    expect(resolveStaffNext('/workbench/roster')).toBe('/staff/today')
+    expect(resolveStaffNext('/workbench/zones')).toBe('/staff/today')
     expect(resolveStaffNext('/staffx')).toBe('/staff/today')
     expect(resolveStaffNext('/login?next=/admin')).toBe('/staff/today')
   })
@@ -181,7 +181,7 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
 
   it('管理端路径、站外地址、登录页自身都不强制员工栏', () => {
     expect(resolveLoginTab('/admin', 'admin')).toBe('admin')
-    expect(resolveLoginTab('/hygiene/roster', 'admin')).toBe('admin')
+    expect(resolveLoginTab('/workbench/roster', 'admin')).toBe('admin')
     expect(resolveLoginTab('//evil.example', 'admin')).toBe('admin')
     expect(resolveLoginTab('//evil.example/staff/today', 'admin')).toBe('admin')
     expect(resolveLoginTab('https://evil.example/staff/today', 'admin')).toBe('admin')
@@ -194,5 +194,41 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
   it('数组取第一个', () => {
     expect(resolveLoginTab(['/admin', '/staff/today'], 'staff')).toBe('staff')
     expect(resolveLoginTab(['/staff/today', '/admin'], 'admin')).toBe('staff')
+  })
+})
+
+describe('老前缀的 ?next= 迁移（票 03/04）', () => {
+  // 老路由已经删干净了，`?next=` 里可能还存着搬家前的老地址（旧书签、上一次被挡下来
+  // 写进 URL 的那条）——在入口处换成新前缀，原样放行就是跳进白屏。
+  it('管理端：老前缀换成工作台前缀，query 与 hash 原样带过去', () => {
+    expect(resolveLoginNext('/hygiene/daily')).toBe('/workbench/daily')
+    expect(resolveLoginNext('/hygiene/deep-clean')).toBe('/workbench/deep-clean')
+    expect(resolveLoginNext('/scheduling')).toBe('/workbench')
+    expect(resolveLoginNext('/scheduling/inbox')).toBe('/workbench/inbox')
+    expect(resolveLoginNext('/scheduling/shifts?tab=add')).toBe('/workbench/shifts?tab=add')
+    expect(resolveLoginNext('/hygiene/daily#top')).toBe('/workbench/daily#top')
+  })
+
+  it('编码过的形态到这里是"挡掉"而不是"认下来"（解码在 route.query 那层）', () => {
+    // `?next=%2Fhygiene%2Fdaily` 进来时已被 vue-router 解成 `/hygiene/daily` —— 上一条覆盖的
+    // 就是这个形态。裸的 `%2F…` 不是这条函数的输入，落到这里就按"不是站内路径"安全回落。
+    expect(resolveLoginNext('%2Fhygiene%2Fdaily')).toBe('/')
+    expect(resolveLoginNext('%2Fhygiene%2Fdaily', '/admin')).toBe('/admin')
+  })
+
+  it('新前缀、别的后台页、站外地址都不受影响', () => {
+    expect(resolveLoginNext('/workbench/daily')).toBe('/workbench/daily')
+    expect(resolveLoginNext('/logs')).toBe('/logs')
+    expect(resolveLoginNext('/prep-plan?day=2026-10-04')).toBe('/prep-plan?day=2026-10-04')
+    expect(resolveLoginNext('https://evil.example/hygiene/daily')).toBe('/')
+    // 员工端前缀照旧不算管理端落点（老前缀迁过来之后仍然不是）。
+    expect(resolveLoginNext('/hygiene/daily') === '/workbench/daily').toBe(true)
+    expect(resolveLoginNext('/staff/today')).toBe('/')
+  })
+
+  it('员工栏：老的管理端地址既不是员工端、也不该被当落点', () => {
+    expect(resolveStaffNext('/hygiene/daily')).toBe('/staff/today')
+    expect(resolveLoginTab('/hygiene/daily', 'admin')).toBe('admin')
+    expect(resolveLoginTab('/scheduling/inbox', 'admin')).toBe('admin')
   })
 })

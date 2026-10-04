@@ -107,7 +107,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         return [dict(row) for row in await cur.fetchall()]
 
     async def _zone(self, name="案板"):
-        """建一个责任区。表是卫生那条线建的（`hygiene_zones`），这里只当数据用 ——
+        """建一个工作区。表是卫生那条线建的（`hygiene_zones`），这里只当数据用 ——
         排班读它要走公共层的 `ZoneDirectory`，测试里也不假装是排班自己的表。"""
         now = self.fixed_now.isoformat()
         cur = await self.db._conn.execute(
@@ -411,7 +411,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calendar["month"], "2026-09")
         self.assertEqual(calendar["first_date"], "2026-09-01")
-        self.assertEqual(calendar["lead"], 2)  # 2026-09-01 是周二
+        self.assertEqual(calendar["lead"], 1)  # 2026-09-01 是周二，表头周一开头 → 空 1 格
         self.assertEqual(len(calendar["days"]), 30)
         self.assertEqual(calendar["today"], TODAY)
         self.assertEqual(calendar["window_end"], LAST_DAY)
@@ -501,7 +501,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await self._rows(employee["id"])), EXPANSION_DAYS)
 
     async def test_my_days_reads_back_a_changed_zone_default(self):
-        """验收 2 的另一半：店长换了默认责任区，员工这一眼跟着变（不是只在月历里变）。"""
+        """验收 2 的另一半：店长换了默认工作区，员工这一眼跟着变（不是只在月历里变）。"""
         employee = await self._employee()
         day = await self._shift_id("白班")
         board = await self._zone("案板")
@@ -519,7 +519,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_my_days_gives_no_name_when_the_shift_row_is_gone(self):
-        """班次/责任区被硬删（票 11 与卫生那边管这两张表）不该冒 500：
+        """班次/工作区被硬删（票 11 与卫生那边管这两张表）不该冒 500：
         行还在、名字取不到就给 None，页面自己翻成「班次已调整」——不许假装那天是休。"""
         employee = await self._employee()
         day = await self._shift_id("白班")
@@ -556,8 +556,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(month["today"], TODAY)
         self.assertEqual([item["day"] for item in month["days"]], list(range(1, 31)))
         self.assertEqual(month["days"][0]["business_date"], "2026-09-01")
-        # 9/1 是周二：表头周日开头，第一格前空两格。
-        self.assertEqual(month["lead"], 2)
+        # 9/1 是周二：表头周一开头，第一格前空一格。
+        self.assertEqual(month["lead"], 1)
         # 相位：配规则那天（营业日 9/24）是 cycle[0]（白班），9/25 夜班，9/26 休……
         today_index = [item["day"] for item in month["days"]].index(24)
         self.assertEqual(
@@ -661,7 +661,215 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(row["scheduled"])
         self.assertIsNone(row["shift_name"])
 
-    # ── 票 03：每人每班次一个固定责任区 ────────────────────────────────
+    # ── 票 A：「员工 × 周」矩阵 ────────────────────────────────────────
+
+    async def test_week_grid_normalizes_to_monday_and_covers_seven_days(self):
+        """验收 1：传周中哪天都归一到周一，恰好 7 天、`weekday` 依次 0..6。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+
+        grid = await self.store.week_grid("2026-09-24")  # 周四
+
+        self.assertEqual((grid["start"], grid["end"]), ("2026-09-21", "2026-09-27"))
+        self.assertEqual(
+            [item["business_date"] for item in grid["days"]],
+            [
+                "2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24",
+                "2026-09-25", "2026-09-26", "2026-09-27",
+            ],
+        )
+        self.assertEqual([item["weekday"] for item in grid["days"]], list(range(7)))
+        self.assertEqual([item["is_weekend"] for item in grid["days"]], [False] * 5 + [True] * 2)
+        self.assertEqual(
+            [item["is_today"] for item in grid["days"]],
+            [False, False, False, True, False, False, False],
+        )
+        self.assertEqual((grid["today"], grid["window_end"]), (TODAY, LAST_DAY))
+        self.assertFalse(grid["spans_months"])
+        # 启用的班次一个不少（抽屉要拿这份当班次选择列表），没人排的也出。
+        self.assertEqual([shift["name"] for shift in grid["shifts"]], ["白班", "夜班"])
+        # `start` 不给就是今天那一周 —— 同一个周一。
+        self.assertEqual((await self.store.week_grid())["start"], "2026-09-21")
+
+    async def test_week_grid_spans_months_without_splitting_the_table(self):
+        """验收 2：跨月周照常 7 天，月份各归各的，七个日期键一个不少。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+
+        grid = await self.store.week_grid("2026-09-30")  # 周三
+
+        self.assertEqual((grid["start"], grid["end"]), ("2026-09-28", "2026-10-04"))
+        self.assertEqual([item["month"] for item in grid["days"]], [9, 9, 9, 10, 10, 10, 10])
+        self.assertEqual([item["day"] for item in grid["days"]], [28, 29, 30, 1, 2, 3, 4])
+        self.assertTrue(grid["spans_months"])
+        # 前端按日期取格子，缺键就得自己补 —— 所以七个键都得在，连过去的那几天也一样。
+        self.assertEqual(
+            set(grid["employees"][0]["cells"]),
+            {item["business_date"] for item in grid["days"]},
+        )
+        self.assertEqual(grid["employees"][0]["cells"]["2026-10-01"]["shift_name"], "白班")
+
+    async def test_week_grid_carries_shift_zone_and_the_override_flag(self):
+        """验收 3 + 契约：格子里是班次、工作区与「这天跟规则不一样」；撤掉覆盖回规则。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        zone = await self._zone("案板")
+        await self.store.set_zone_default(employee["id"], night, zone)
+        await self.store.set_rule(employee["id"], [day])
+
+        await self.store.set_override(employee["id"], "2026-09-25", shift_id=night)
+        cells = (await self.store.week_grid("2026-09-24"))["employees"][0]["cells"]
+
+        self.assertEqual(
+            cells["2026-09-25"],
+            {
+                "scheduled": True,
+                "shift_id": night,
+                "shift_name": "夜班",
+                # 不给区就跟这个班次的固定区（跟 `day_detail` 同一条口径）。
+                "zone_id": zone,
+                "zone_name": "案板",
+                "overridden": True,
+                "leave": False,
+            },
+        )
+        # 规则铺的那天：字段同形，只是没有覆盖标记。
+        self.assertEqual(
+            (cells["2026-09-26"]["scheduled"], cells["2026-09-26"]["overridden"]),
+            (True, False),
+        )
+        # 没行的格子也占一个键、字段一个不少：`scheduled=False` 是「还没有你的班」。
+        self.assertEqual(
+            cells["2026-09-21"],
+            {
+                "scheduled": False,
+                "shift_id": None,
+                "shift_name": None,
+                "zone_id": None,
+                "zone_name": None,
+                "overridden": False,
+                "leave": False,
+            },
+        )
+
+        await self.store.clear_override(employee["id"], "2026-09-25")
+        back = (await self.store.week_grid("2026-09-24"))["employees"][0]["cells"]["2026-09-25"]
+
+        self.assertEqual(
+            (back["overridden"], back["shift_id"], back["shift_name"]), (False, day, "白班")
+        )
+
+    async def test_week_grid_tells_leave_apart_from_rest(self):
+        """验收 4：批过的假 `leave=True`，规则铺出来的休 `leave=False`（票 08 的口径）。"""
+        leaver = await self._employee("13800138001", "李四")
+        rester = await self._employee("13800138002", "王五")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(leaver["id"], [day])
+        await self.store.set_rule(rester["id"], [day, None])  # 9/25 本来就休
+        request = await self.store.submit_leave(leaver["id"], "2026-09-25")
+
+        await self.store.approve_request(request["id"])
+
+        grid = await self.store.week_grid("2026-09-24")
+        cells = {row["name"]: row["cells"]["2026-09-25"] for row in grid["employees"]}
+        self.assertEqual(
+            {name: (cell["scheduled"], cell["shift_id"], cell["leave"]) for name, cell in cells.items()},
+            {"李四": (True, None, True), "王五": (True, None, False)},
+        )
+        # 两个人都占着那天的行 —— 请假不是「没有行」。
+        days = {item["business_date"]: item for item in grid["days"]}
+        self.assertEqual(days["2026-09-25"]["row_count"], 2)
+
+    async def test_week_grid_after_the_window_is_empty_but_not_an_error(self):
+        """验收 5：窗口末日之后那一周 `in_window=False`、谁都没有班，不 400 也不 500。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+
+        grid = await self.store.week_grid("2026-12-28")  # 窗口末日（12/22）之后那一周的周一
+
+        self.assertEqual((grid["start"], grid["end"]), ("2026-12-28", "2027-01-03"))
+        self.assertEqual([item["in_window"] for item in grid["days"]], [False] * 7)
+        self.assertEqual([item["row_count"] for item in grid["days"]], [0] * 7)
+        self.assertFalse(grid["employees"][0]["cells"]["2026-12-28"]["scheduled"])
+
+    async def test_week_grid_still_names_a_stopped_shift(self):
+        """验收 6：停用班次的历史格仍给班次名（`_shifts_for_display` 的老口径）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [night])
+        # 把这天改成白班：白班于是有了一行，但没人的**轮转**里排着它，所以停得掉。
+        await self.store.set_override(employee["id"], "2026-09-25", shift_id=day)
+
+        await self.store.update_shift(day, is_active=False)
+
+        grid = await self.store.week_grid("2026-09-24")
+        # 启用的排前面，停用但这一周真有行的跟在后面。
+        self.assertEqual([shift["name"] for shift in grid["shifts"]], ["夜班", "白班"])
+        cell = grid["employees"][0]["cells"]["2026-09-25"]
+        self.assertEqual(
+            (cell["shift_id"], cell["shift_name"], cell["overridden"]), (day, "白班", True)
+        )
+        # 一个从来没排过班的停用班次不白占一列。
+        middle = await self.store.create_shift("中班")
+        await self.store.update_shift(middle["id"], is_active=False)
+        self.assertEqual(
+            [shift["name"] for shift in (await self.store.week_grid("2026-09-24"))["shifts"]],
+            ["夜班", "白班"],
+        )
+
+    async def test_week_grid_says_when_a_day_has_no_rows_at_all(self):
+        """验收 7：那天一行都没有 → `row_count=0`，谁都不是 `scheduled`（不能读成「全员休」）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+
+        grid = await self.store.week_grid("2026-09-02")  # 展开只往今天以后铺，这一周整周在过去
+
+        self.assertEqual((grid["start"], grid["end"]), ("2026-08-31", "2026-09-06"))
+        self.assertEqual([item["row_count"] for item in grid["days"]], [0] * 7)
+        # 过去那一头的 `in_window` 仍是 True（窗口只管往后那一头）：区分「没排」靠 `row_count`。
+        self.assertEqual([item["in_window"] for item in grid["days"]], [True] * 7)
+        every_cell = [
+            cell for row in grid["employees"] for cell in row["cells"].values()
+        ]
+        self.assertEqual([cell["scheduled"] for cell in every_cell], [False] * len(every_cell))
+        # 同一双眼睛看本周：那天有行，0 不是常量。
+        self.assertGreater((await self.store.week_grid("2026-09-24"))["days"][3]["row_count"], 0)
+
+    async def test_week_grid_lists_a_ruleless_person_and_counts_who_is_out(self):
+        """验收 8：没配规则的人仍在表里（`has_rule=False`）；停用/未批准的不出现但计数对得上。"""
+        configured = await self._employee("13800138001", "李四")
+        ruleless = await self._employee("13800138002", "王五")
+        gone = await self._employee("13800138003", "赵六")
+        pending = await self.accounts.register("13800138004", PASSWORD, "钱七")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(configured["id"], [day])
+        await self.accounts.disable(gone["id"])
+
+        grid = await self.store.week_grid(TODAY)
+
+        # 顺序就是 `list_roster()` 的顺序（disabled ASC, approved ASC, id ASC），过滤不改它。
+        self.assertEqual(
+            [(row["name"], row["has_rule"]) for row in grid["employees"]],
+            [("李四", True), ("王五", False)],
+        )
+        self.assertEqual(
+            {row["id"] for row in grid["employees"]},
+            {configured["id"], ruleless["id"]},
+        )
+        self.assertEqual(grid["excluded"], {"disabled": 1, "pending": 1})
+        self.assertEqual(pending["id"] not in {row["id"] for row in grid["employees"]}, True)
+        # 没配规则的人整周都是「还没有你的班」，不是「休」。
+        self.assertEqual(
+            {cell["scheduled"] for cell in grid["employees"][1]["cells"].values()}, {False}
+        )
+
+    # ── 票 03：每人每班次一个固定工作区 ────────────────────────────────
 
     async def test_zone_default_is_written_into_new_rows(self):
         employee = await self._employee()
@@ -1021,7 +1229,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_shift_is_rejected(self):
         """整条周期都是不存在的班次：第 1 格就报错（`unknown_shift` 现在只留给
-        责任区那边——「配区时选了个不存在的班次」）。"""
+        工作区那边——「配区时选了个不存在的班次」）。"""
         employee = await self._employee()
         with self.assertRaises(SchedulingError) as caught:
             await self.store.set_rule(employee["id"], [999])
@@ -1048,7 +1256,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
     # ── 验收：单日覆盖（票 07）──────────────────────────────────────────
     #
-    # 覆盖是「整天的快照」：这一天的班次与责任区由那次改动定下来，规则以后怎么变都不再
+    # 覆盖是「整天的快照」：这一天的班次与工作区由那次改动定下来，规则以后怎么变都不再
     # 动它（想回去就撤掉覆盖）。所以下面既要断言「改的那天变了」，也要断言
     # 「别的时候没变」。
 
@@ -1100,7 +1308,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_override_can_move_only_the_zone(self):
-        """验收 3：只换责任区 —— 班次还是白班，那天换到别的区，固定区配置不动。"""
+        """验收 3：只换工作区 —— 班次还是白班，那天换到别的区，固定区配置不动。"""
         employee = await self._employee()
         day = await self._shift_id("白班")
         zone = await self._zone("案板")
@@ -1177,7 +1385,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((detail["total"], detail["off_count"]), (1, 1))
 
     async def test_clearing_an_override_puts_the_rule_back(self):
-        """验收 5：撤掉覆盖 → 那天回到规则铺出来的样子（连责任区一起）。"""
+        """验收 5：撤掉覆盖 → 那天回到规则铺出来的样子（连工作区一起）。"""
         employee = await self._employee()
         day = await self._shift_id("白班")
         zone = await self._zone("案板")
@@ -1729,7 +1937,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
     #
     # 换班比请假多一道门：**先过对方**。所以下面既断言状态机（等对方 → 等店长 → 批），
     # 也断言「对方还没点的时候店长看不到这条」，还要断言批了以后两个人的班对调、
-    # 责任区跟着各自的新班次走。
+    # 工作区跟着各自的新班次走。
 
     async def _two_people(self):
         """两个人：张三白班、李四夜班（都从今天起每天）。"""
@@ -1845,7 +2053,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied.exception.code, "request_not_pending")
 
     async def test_approval_swaps_the_two_shifts_and_the_zones_follow(self):
-        """验收 4/5：批了两个人那天的班对调，责任区跟着各自的**新**班次走。"""
+        """验收 4/5：批了两个人那天的班对调，工作区跟着各自的**新**班次走。"""
         first, second, day, night = await self._two_people()
         board = await self._zone("案板")
         cold = await self._zone("凉菜")
@@ -2780,7 +2988,7 @@ class SchedulingLayeringTest(unittest.TestCase):
 
     def test_scheduling_never_imports_hygiene(self):
         # 服务层和它的 HTTP 面都扫：票 03 起公共层多了 `services/identity/zones.py`，
-        # 排班侧真正碰责任区的调用点在 `store.py` 与 `api/scheduling.py` 两处。
+        # 排班侧真正碰工作区的调用点在 `store.py` 与 `api/scheduling.py` 两处。
         paths = sorted((REPO_ROOT / "services" / "scheduling").glob("*.py"))
         paths.append(REPO_ROOT / "api" / "scheduling.py")
         for path in paths:
@@ -2801,8 +3009,8 @@ class SchedulingLayeringTest(unittest.TestCase):
         `/me/month` 之后，边界从「零条」变成「两扇门互不通用」—— 店长那几条只认
         管理端会话，员工那几条只认手机端 cookie。票 08 在两边各加了请假申请的路由
         （员工提/撤回、店长批/驳），票 09 又加了换班那几条（找谁换、提、对方同意/拒绝），
-        票 11 再给店长那扇门加了班次表的编辑（增、改、删、调顺序），员工那扇门仍然全挂在
-        `/me` 底下。
+        票 11 再给店长那扇门加了班次表的编辑（增、改、删、调顺序），本次「员工 × 周」
+        视图又加了只读的 `/week`，员工那扇门仍然全挂在 `/me` 底下。
 
         断言路由表本身，不是源码文本 —— 文本比对会被注释或文档字符串误伤
         （写一句「这里不用 require_staff_session」就红了）。
@@ -2829,6 +3037,8 @@ class SchedulingLayeringTest(unittest.TestCase):
             "/api/scheduling/shifts/{shift_id}",
             "/api/scheduling/calendar",
             "/api/scheduling/day",
+            # 票 A：「员工 × 周」矩阵（只读）。
+            "/api/scheduling/week",
             "/api/scheduling/roster",
             "/api/scheduling/rules/{employee_id}",
             "/api/scheduling/zone-defaults/{employee_id}",

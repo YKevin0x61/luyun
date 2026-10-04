@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../SchedulingInboxView.vue'), 'utf8')
+const shell = readFileSync(join(here, '../SchedulingLayout.vue'), 'utf8')
 const calendar = readFileSync(join(here, '../SchedulingCalendarView.vue'), 'utf8')
 const copy = readFileSync(join(here, '../../../utils/leaveRequest.js'), 'utf8')
 const tokens = readFileSync(join(here, '../../../../public/hygiene-admin.css'), 'utf8')
@@ -16,7 +17,10 @@ describe('店长端排班待办（票 08、09）', () => {
   it('借共享样式表的令牌，不进卫生模块', () => {
     // 跟月历同一套深青墨配色：令牌住在 public/hygiene-admin.css，但那是共享样式表，
     // 不是卫生模块（不 import 它的 Python、不挂它的菜单）。
-    expect(view).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    // 共享样式表由**壳**加载一份（`SchedulingLayout.vue`）：三个子页各加载一份会挂出
+    // 重复的 <link>；壳一层管住，跟卫生管理端一个做法（那边也是 layout 加载、子页不管）。
+    expect(shell).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    expect(view).not.toMatch(/useScopedStylesheet\(/)
     expect(view).toMatch(/class="hygiene-admin inbox-page"/)
   })
 
@@ -134,25 +138,25 @@ describe('店长端排班待办（票 08、09）', () => {
   })
 
   it('在管理端有一扇自己的门（前端与后端都登记）', () => {
-    expect(router).toMatch(/path: '\/scheduling\/inbox', name: 'scheduling-inbox'/)
+    expect(router).toMatch(/path: '\/workbench\/inbox', name: 'workbench-inbox'/)
     expect(router).toMatch(/views\/scheduling\/SchedulingInboxView\.vue/)
     // 管理端的门：不带 `HYGIENE_STAFF_META` 那套员工 meta（没有 staffAuth）。
     expect(router).not.toMatch(/scheduling-inbox[\s\S]{0,200}?staffAuth/)
     // 直连/反代硬导航那条路要认得这个地址（服务端 SPA 白名单）。
-    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/scheduling\/inbox"/)
+    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/workbench\/inbox"/)
     // 顶栏那条「排班」按前缀亮：进了待办页，导航上还在排班这一档。
-    expect(navBar).toMatch(/prefix: '\/scheduling'/)
+    expect(navBar).toMatch(/prefix: '\/workbench'/)
   })
 
   it('月历页上有一条路走得到这一页（不然没人知道有假要批）', () => {
     expect(calendar).toMatch(/class="gPend gTodo"/)
-    expect(calendar).toMatch(/router\.push\('\/scheduling\/inbox'\)/)
+    expect(calendar).toMatch(/router\.push\('\/workbench\/inbox'\)/)
     expect(calendar).toContain('请假待办')
-    expect(view).toMatch(/router\.push\('\/scheduling'\)/)
+    expect(view).toMatch(/router\.push\('\/workbench'\)/)
   })
 
   it('订阅排班 nudge：员工提了新申请就自己重读（票 10 收尾）', () => {
     // 这一页本来就是「等别人动作」的地方 —— 没有实时就只能靠人反复刷新。
-    expect(view).toMatch(/useNudgePull\(\{ id: 'scheduling-inbox', topics: \['scheduling'\], pull: load \}\)/)
+    expect(view).toMatch(/useNudgePull\(\{ id: 'workbench-inbox', topics: \['scheduling'\], pull: load \}\)/)
   })
 })

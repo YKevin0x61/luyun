@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../SchedulingShiftsView.vue'), 'utf8')
+const shell = readFileSync(join(here, '../SchedulingLayout.vue'), 'utf8')
 const calendar = readFileSync(join(here, '../SchedulingCalendarView.vue'), 'utf8')
 const copy = readFileSync(join(here, '../../../utils/shiftTable.js'), 'utf8')
 const tokens = readFileSync(join(here, '../../../../public/hygiene-admin.css'), 'utf8')
@@ -14,7 +15,10 @@ const mainPy = readFileSync(join(here, '../../../../../main.py'), 'utf8')
 
 describe('店长端班次表（票 11）', () => {
   it('借共享样式表的令牌，不进卫生模块', () => {
-    expect(view).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    // 共享样式表由**壳**加载一份（`SchedulingLayout.vue`）：三个子页各加载一份会挂出
+    // 重复的 <link>；壳一层管住，跟卫生管理端一个做法（那边也是 layout 加载、子页不管）。
+    expect(shell).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    expect(view).not.toMatch(/useScopedStylesheet\(/)
     expect(view).toMatch(/class="hygiene-admin shifts-page"/)
     expect(view).not.toMatch(/\/api\/hygiene/)
   })
@@ -150,18 +154,18 @@ describe('店长端班次表（票 11）', () => {
   })
 
   it('在管理端有一扇自己的门（前端与后端都登记）', () => {
-    expect(router).toMatch(/path: '\/scheduling\/shifts', name: 'scheduling-shifts'/)
+    expect(router).toMatch(/path: '\/workbench\/shifts', name: 'workbench-shifts'/)
     expect(router).toMatch(/views\/scheduling\/SchedulingShiftsView\.vue/)
     // 管理端的门：不带 `HYGIENE_STAFF_META` 那套员工 meta（没有 staffAuth）。
     expect(router).not.toMatch(/scheduling-shifts[\s\S]{0,200}?staffAuth/)
     // 直连/反代硬导航那条路要认得这个地址（服务端 SPA 白名单）。
-    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/scheduling\/shifts"/)
+    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/workbench\/shifts"/)
     // 顶栏那条「排班」按前缀亮：进了班次表，导航上还在排班这一档。
-    expect(navBar).toMatch(/prefix: '\/scheduling'/)
+    expect(navBar).toMatch(/prefix: '\/workbench'/)
   })
 
   it('月历页上有一条路走得到这一页（不然没人知道班次能改）', () => {
-    expect(calendar).toMatch(/router\.push\('\/scheduling\/shifts'\)/)
+    expect(calendar).toMatch(/router\.push\('\/workbench\/shifts'\)/)
     expect(calendar).toMatch(/<b>班次表<\/b>/)
     // 待办那根条的入口没被这次改动碰掉。
     expect(calendar).toMatch(/class="gPend gTodo"/)

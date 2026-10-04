@@ -100,7 +100,7 @@ const hygieneOverdue = computed(() => buildWorkQueue({
 }).filter((task) => task.bucket === 'overdue').length)
 
 // 仪容仪表（票 12）：按**人**拍，今天排到班次才要拍 —— 休假的与没排到的连这一行都
-// 不显示（`required` 由排班给，不是「谁有账号」）。它不属于责任区那三类日常，所以是
+// 不显示（`required` 由排班给，不是「谁有账号」）。它不属于工作区那三类日常，所以是
 // 这块里单独的一行，**不进** `hygieneStats` 的分子分母。
 const attire = ref({
   state: 'loading', // loading | ready | error
@@ -429,7 +429,7 @@ async function loadHygiene(quiet = false) {
     const [me, work, attireShot] = await Promise.all([
       staffRequest('/api/hygiene/staff/me'),
       staffRequest('/api/hygiene/staff/daily-work'),
-      // 仪容仪表那一条（票 12）：跟日常一起拉，但**分开存** —— 它没有钟点、不按责任区。
+      // 仪容仪表那一条（票 12）：跟日常一起拉，但**分开存** —— 它没有钟点、不按工作区。
       staffRequest('/api/hygiene/staff/attire'),
     ])
     const employee = me.employee || {}
@@ -642,7 +642,7 @@ useNudgePull({
               </p>
             </template>
             <!-- 仪容仪表（票 12）：按**人**拍，今天排到班次才有这一行 —— 休假的与没
-                 排到的人看不到它。跟上面那份日常分开：它没有钟点、也不挂在责任区上。 -->
+                 排到的人看不到它。跟上面那份日常分开：它没有钟点、也不挂在工作区上。 -->
             <template v-if="attire.required">
               <p class="attire-line" :class="attireTone">
                 仪容仪表：<template v-if="attirePending">正在传…</template><template

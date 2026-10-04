@@ -68,7 +68,7 @@ describe('hygiene staff work app', () => {
       home.indexOf('class="hy-staff-done"'),
       home.indexOf('hy-queue-group'),
     )
-    // 日常清单按所选责任区过滤（ADR-0075）。空清单原来只说「还没有带标准图的日常
+    // 日常清单按所选工作区过滤（ADR-0075）。空清单原来只说「还没有带标准图的日常
     // 检查项」，管理员在别的区建完标准图过来核对，读到的就是「图丢了」。这里必须
     // 点出是哪个区没有，并留一个换区出口。
     expect(empty).toMatch(

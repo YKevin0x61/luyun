@@ -13,14 +13,14 @@ describe('hygiene zone shifts', () => {
     expect(zones).toMatch(/newZoneShifts/)
     expect(zones).toMatch(/zoneShifts/)
     expect(zones).toMatch(/保存班次/)
-    expect(zones).toMatch(/卫生责任区至少要有一个班次/)
+    expect(zones).toMatch(/卫生工作区至少要有一个班次/)
     expect(zones).toMatch(
       /api\.patch\(`\/api\/hygiene\/admin\/zones\/\$\{selected\.value\.id\}`/,
     )
   })
 
-  it('员工端不再自己挑班次和责任区：今天在哪由排班说了算（票 10）', () => {
-    // 这一屏原来是「按你选的班次列出能选的责任区」。票 10 起，班次与责任区都来自排班结果
+  it('员工端不再自己挑班次和工作区：今天在哪由排班说了算（票 10）', () => {
+    // 这一屏原来是「按你选的班次列出能选的工作区」。票 10 起，班次与工作区都来自排班结果
     // （`employee.shift` / `employee.zone_id`），选择器整个撤了 —— 这条守着「它没有偷偷
     // 回来」：既没有那份按班次筛出来的候选区，也没有那条写回自选的请求。
     expect(home).not.toMatch(/const assignableZones = computed/)
@@ -34,7 +34,7 @@ describe('hygiene zone shifts', () => {
   })
 
   it('filters the admin roster assignment zones by the chosen shift', () => {
-    // 候选区还是那份按责任区开关筛出来的名单（`zonesForShift`），但台账上选中的「班次」
+    // 候选区还是那份按工作区开关筛出来的名单（`zonesForShift`），但台账上选中的「班次」
     // 现在是**排班的班次 id**（票 10：改派写的是排班的单日覆盖）。排班那条班次只标了
     // `duty_slot`（day/night），先翻成卫生认的「白班/夜班」再喂给它；没标档位的班次不筛
     // （筛只会把区滤空），所以那一步落在 `zoneChoicesForShift` 里。

@@ -6,7 +6,7 @@
  *
  * 服务端照着改的是 `main.py` 的 `HTML_AUTH_EXACT` / `HTML_AUTH_PREFIXES`
  * （精确的 `/staff` 与 `/register`，以及前缀 `/staff/`）—— 两边要一起动。
- * `/hygiene/roster`、`/hygiene/zones` 这些是**管理端**页面，别被前缀顺手带走。
+ * `/workbench/roster`、`/workbench/zones` 这些是**管理端**页面，别被前缀顺手带走。
  *
  * **名单为什么分两层**（票 02）：员工自助注册页 `/register` 与前缀下的员工页不是一回事。
  *  - `isStaffPhonePath` = 前缀 ∪ 精确：这是「员工侧界面」。PWA 清单归属看它 —— 注册页

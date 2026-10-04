@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""HygieneWork: 卫生责任区, 日常检查项, current 标准图."""
+"""HygieneWork: 卫生工作区, 日常检查项, current 标准图."""
 
 import tempfile
 import unittest
@@ -647,11 +647,11 @@ class HygieneDailyOverdueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clocks["night_hhmm"], "21:30")
 
     async def test_missed_daily_increments_zone_board_not_the_person_on_duty(self):
-        """漏交的日常记在**责任区**上，不记在当天当班的人头上。
+        """漏交的日常记在**工作区**上，不记在当天当班的人头上。
 
         票 10 之前这里的前置是「员工自己选了白班」；自选入口撤了之后，同一个人改成
-        **排班排到白班**（`assign_duty`，店长还没给他配责任区）—— 要守的仍然是同一件事：
-        `sweep_overdue` 只往责任区看板写一条 `逾期`（`employee_id` 为空），不会因为今天
+        **排班排到白班**（`assign_duty`，店长还没给他配工作区）—— 要守的仍然是同一件事：
+        `sweep_overdue` 只往工作区看板写一条 `逾期`（`employee_id` 为空），不会因为今天
         有谁在班就把这次漏交算到谁名下（个人看板是提交/驳回时才动的）。
         """
         from services.hygiene.accounts import EmployeeAccounts

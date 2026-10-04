@@ -8,7 +8,8 @@ const view = readFileSync(join(here, '../TodayMonthView.vue'), 'utf8')
 const today = readFileSync(join(here, '../TodayView.vue'), 'utf8')
 const copy = readFileSync(join(here, '../../../utils/todayShift.js'), 'utf8')
 const router = readFileSync(join(here, '../../../router/index.js'), 'utf8')
-// 店长月历那份周表：口径 9 说「员工端表头周日开头，跟店长月历一致」。
+// 店长月历那份周表：口径 9 说「员工端表头跟店长月历一致」；
+// 2026-09-30 两边一起从周日开头改成**周一开头**（店里的口头习惯）。
 const manager = readFileSync(
   join(here, '../../scheduling/SchedulingCalendarView.vue'),
   'utf8',
@@ -25,7 +26,7 @@ describe('员工端「整月」页（票 06）', () => {
     expect(view).not.toMatch(/\/api\/scheduling\/(roster|calendar|day|rules)/)
     // 401 回员工登录（票 03 起是 /login 的员工栏），把当前地址整个带过去。
     expect(view).toMatch(/path: '\/login'/)
-    expect(view).not.toMatch(/path: '\/hygiene\/login'/)
+    expect(view).not.toMatch(/path: '\/workbench\/login'/)
     expect(view).toMatch(/next: router\.currentRoute\.value\.fullPath/)
   })
 
@@ -37,7 +38,7 @@ describe('员工端「整月」页（票 06）', () => {
     for (const cls of ['mNav', 'mHead', 'mGrid', 'mD', 'mLegend', 'mFoot']) {
       expect(view).toContain(cls)
     }
-    // 表头七格从 util 来（周日开头，跟服务端 `lead` 同一套）。
+    // 表头七格从 util 来（周一开头，跟服务端 `lead` 同一套）。
     expect(view).toMatch(/v-for="head in MONTH_HEADS"/)
     // 月首那几格空格：服务端给的 `lead`，页面上不自己算星期几。
     expect(view).toMatch(/v-for="n in lead"/)
@@ -148,7 +149,7 @@ describe('员工端「整月」页（票 06）', () => {
     expect(today).toMatch(/router\.push\(entry\.to\)/)
   })
 
-  it('表头跟店长月历是同一份（口径 9：两边都周日开头）', () => {
+  it('表头跟店长月历是同一份（口径 9：两边都周一开头）', () => {
     // 两边各存一份字面量（仓库里周表数组本来就按作用域各一份），这条把「一起动」钉住：
     // 店长那份改了开头而员工端没跟，这里就红。
     const heads = copy.match(/MONTH_HEADS = (\[[^\]]*\])/)

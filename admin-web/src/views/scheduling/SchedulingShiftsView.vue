@@ -21,7 +21,8 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
+// 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
+// <link>，壳一层管住就跟卫生管理端一个做法。
 import {
   DUTY_SLOT_CHOICES,
   canDelete,
@@ -35,7 +36,6 @@ import {
   usageLine,
 } from '../../utils/shiftTable'
 
-useScopedStylesheet('/hygiene-admin.css')
 
 const router = useRouter()
 
@@ -244,7 +244,7 @@ onMounted(() => {
           —— 停用只是让新排班不再用它。
         </p>
       </div>
-      <button class="btn" type="button" @click="router.push('/scheduling')">回到月历</button>
+      <button class="btn" type="button" @click="router.push('/workbench')">回到月历</button>
     </header>
 
     <p v-if="state === 'loading'" class="sHint">正在读班次表…</p>

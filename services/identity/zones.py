@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""责任区名单的**只读入口**（公共层）。
+"""工作区名单的**只读入口**（公共层）。
 
 「有哪些区」是店里共享的一份名单：排班拿它给每个人配固定区，卫生拿它做当天的分工。
 表的 DDL 是卫生那条线建的（`hygiene_zones`，`migrations/pg/0001_initial_schema.sql`），
@@ -20,7 +20,7 @@ __all__ = ["ZoneDirectory"]
 
 
 class ZoneDirectory:
-    """责任区名单（只读）。
+    """工作区名单（只读）。
 
     构造抄 `EmployeeAccounts`：接受 DatabaseManager 或已经打开的连接。写锁不在这里
     要 —— 这个类没有写操作。
@@ -30,7 +30,7 @@ class ZoneDirectory:
         self._conn = getattr(conn_or_db, "_conn", conn_or_db)
 
     async def list_zones(self) -> list[dict]:
-        """全部责任区，按 id（= 建区的先后）。"""
+        """全部工作区，按 id（= 建区的先后）。"""
         cur = await self._conn.execute(
             "SELECT id, name FROM hygiene_zones ORDER BY id ASC"
         )

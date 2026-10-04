@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""卫生侧的员工身份扩展：当日分工（班次与责任区）。
+"""卫生侧的员工身份扩展：当日分工（班次与工作区）。
 
 身份本身在公共层 `services.identity.accounts`；这里只放卫生业务，并把同一个类名
 继续暴露给卫生端既有的调用方。
@@ -73,7 +73,7 @@ def _duty_shift(duty: dict) -> Optional[str]:
 
 
 class HygieneEmployeeAccounts(_EmployeeIdentity):
-    """身份 + 卫生的当日分工（班次 / 责任区）。"""
+    """身份 + 卫生的当日分工（班次 / 工作区）。"""
 
     def _business_date(self) -> str:
         return hygiene_business_date(self._now_dt())
@@ -107,14 +107,14 @@ class HygieneEmployeeAccounts(_EmployeeIdentity):
         return assignment["shift"]
 
     async def current_assignment(self, employee_id: int) -> dict:
-        """今天的班次与责任区 —— 由**排班结果**决定（票 10）。
+        """今天的班次与工作区 —— 由**排班结果**决定（票 10）。
 
         票 10 之前这里是读 `hygiene_shift_picks`（员工当天自己在手机上选的）。现在上游
         是排班：店长配的轮转规则 + 单日覆盖说了算，员工端不再有自选的入口。读的就是
         `staff_assignments` 那一行（经公共层的只读入口 `DutyRoster`，卫生不 import
         排班模块），所以店长把某天的区改掉之后，这边当天立刻跟着变，不用谁去同步。
 
-        没有班次时连责任区也不给：日常检查是「班次 × 区」两个一起筛的，留一个没有班次的
+        没有班次时连工作区也不给：日常检查是「班次 × 区」两个一起筛的，留一个没有班次的
         区只会让下游多一种要判的组合。
         """
         duty = await DutyRoster(self._write_lock_owner).duty_for(
@@ -127,7 +127,7 @@ class HygieneEmployeeAccounts(_EmployeeIdentity):
         zone_name = duty.get("zone_name")
         if zone_id is not None and zone_name is None:
             # 那个区被删了：排班那张表的 `zone_id` 没有外键，也不追着卫生的删区动作改历史
-            # （CONTEXT.md 的「固定责任区」那条），所以这里按**没配区**渲染 —— 跟排班页
+            # （CONTEXT.md 的「固定工作区」那条），所以这里按**没配区**渲染 —— 跟排班页
             # 同一个口径。不回一个已经不存在、页面又翻译不出名字的 id。
             zone_id = None
         return self._assignment(
@@ -140,7 +140,7 @@ class HygieneEmployeeAccounts(_EmployeeIdentity):
         )
 
     async def _zone_shifts_for(self, zone_id: Optional[int]) -> list[str]:
-        """这个责任区开着哪几档日常（页面照它判「排班给的班次跟这个区对不上」）。
+        """这个工作区开着哪几档日常（页面照它判「排班给的班次跟这个区对不上」）。
 
         区名单只有一份（卫生这张表），排班那边只记 `zone_id` —— 所以这一步在卫生这边做，
         不要求排班认识「白班档 / 夜班档」是怎么开的。区被删掉时给空列表：页面对空列表
@@ -203,7 +203,7 @@ class HygieneEmployeeAccounts(_EmployeeIdentity):
         raise EmployeeAccountsError("assignment_from_schedule", "assignment_from_schedule")
 
     async def _roster_extras(self, employees: list[dict]) -> None:
-        """花名册每行补上今天的班次和责任区（一次查询，不按人循环）。
+        """花名册每行补上今天的班次和工作区（一次查询，不按人循环）。
 
         票 10 起读的是**排班结果**（经公共层的批量只读入口 `duty_map`），跟员工自己
         那一份同源：台账上写「他今天在白班 · 案板」，就该是员工手机上看到的那个答案。

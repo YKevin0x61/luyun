@@ -46,6 +46,11 @@
   --hy-aqua: #5fd6e6;
   --hy-coral: #ff7a5c;
   --hy-paper: #f4e9db;
+  /* 第 5、6 个班次的颜色：排班的 `SHIFT_TONES` 按排序位取色，门店可以配 5 个班次
+     （A/B/C + 主管A两头班 + 主管B两头班）。只有 4 个 tone 时第 5 个与第 1 个撞色，
+     周表的格子与图例就分不出「A班」和「主管B两头班」。 */
+  --hy-violet: #b18cf0;
+  --hy-rose: #f07ab0;
 
   --hy-radius-sm: 8px;
   --hy-radius-md: 12px;
@@ -556,7 +561,7 @@
   width: 3px;
   background: linear-gradient(180deg, var(--hy-mint), rgba(63, 224, 176, 0));
 }
-/* 责任区页头部：导出标准图 + 刷新并排，窄屏时换行。 */
+/* 工作区页头部：导出标准图 + 刷新并排，窄屏时换行。 */
 .hygiene-admin .roster-head-actions {
   display: flex;
   gap: .5rem;

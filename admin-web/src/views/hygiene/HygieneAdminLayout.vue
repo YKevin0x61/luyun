@@ -18,8 +18,17 @@ useScopedStylesheet('/hygiene-admin.css')
 
 const route = useRoute()
 const standardPhotoCache = useStandardPhotoCacheStore()
+
+/** 只取路径最后一段来认"现在在哪一页"：不跟前缀绑死，`/workbench/daily` 与带尾斜杠的
+ *  `/workbench/daily/` 都认。绑前缀的写法在票 02 并存期踩过坑 —— 标题会退回第一项、
+ *  底部导航也不高亮（那一版就是这样被验证抓出来的）。 */
+function navKey(path) {
+  const parts = String(path || '').split('/').filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : ''
+}
+
 const currentNav = computed(() => (
-  HYGIENE_ADMIN_NAV.find((item) => route.path === item.path) || HYGIENE_ADMIN_NAV[0]
+  HYGIENE_ADMIN_NAV.find((item) => navKey(route.path) === navKey(item.path)) || HYGIENE_ADMIN_NAV[0]
 ))
 
 function navIndex(item) {
@@ -43,7 +52,7 @@ watch(
     <a class="hy-skip" href="#hygiene-admin-main">跳到内容</a>
 
     <nav class="hy-tabbar" aria-label="卫生管理">
-      <router-link class="hy-brand hy-brand-rail" to="/hygiene/roster">
+      <router-link class="hy-brand hy-brand-rail" to="/workbench/roster">
         <span class="hy-brand-mark" aria-hidden="true">{{ HYGIENE_BRAND_MARK }}</span>
         <span class="hy-brand-text">
           <span class="hy-brand-title">{{ HYGIENE_BRAND_TITLE }}</span>
@@ -52,10 +61,13 @@ watch(
       </router-link>
 
       <div class="hy-rail-items">
+        <!-- `router-link` 自动高亮是按 `to` 的字面路径比的：并存期在新前缀（`/workbench/...`）
+             上它认不出来，所以再按"最后一段"补一次高亮 —— 两个前缀下都亮，票 04 之后也照旧。 -->
         <router-link
           v-for="item in HYGIENE_ADMIN_NAV"
           :key="item.path"
           class="hy-tab"
+          :class="{ 'router-link-active': navKey(item.path) === navKey(route.path) }"
           :to="item.path"
         >
           <SvgIcon :name="item.icon" :size="19" />
@@ -76,7 +88,7 @@ watch(
     <div class="hy-shell">
       <header class="hy-header">
         <div class="hy-header-inner">
-          <router-link class="hy-brand hy-brand-top" to="/hygiene/roster">
+          <router-link class="hy-brand hy-brand-top" to="/workbench/roster">
             <span class="hy-brand-mark" aria-hidden="true">{{ HYGIENE_BRAND_MARK }}</span>
             <span class="hy-brand-text">
               <span class="hy-brand-title">{{ HYGIENE_BRAND_TITLE }}</span>

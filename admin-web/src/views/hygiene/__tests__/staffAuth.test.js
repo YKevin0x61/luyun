@@ -14,8 +14,8 @@ describe('hygiene staff auth gate', () => {
     const router = read('../../../router/index.js')
     expect(router).toMatch(/hygieneStaffAuthPage\('\/register'/)
     // 票 03：员工登录页并入 `/login` 的员工栏，路径与视图一起删掉。
-    expect(router).not.toMatch(/hygieneStaffAuthPage\('\/hygiene\/login'/)
-    expect(router).not.toMatch(/hygieneAdminPage\('\/hygiene\/login'/)
+    expect(router).not.toMatch(/hygieneStaffAuthPage\('\/workbench\/login'/)
+    expect(router).not.toMatch(/hygieneAdminPage\('\/workbench\/login'/)
     expect(router).not.toMatch(/hygieneAdminPage\('\/register'/)
     expect(existsSync(join(here, '../HygieneLoginView.vue'))).toBe(false)
     // `/login` 仍是公开的独立页（不显示主导航、不连实时）。
@@ -43,7 +43,7 @@ describe('hygiene staff auth gate', () => {
     expect(register).toMatch(/\/api\/hygiene\/staff\/register/)
     // 注册页（票 02 起在顶层 /register）回登录页的入口：票 03 起是 `/login` 的员工栏。
     expect(register).toMatch(/to="\/login"/)
-    expect(register).not.toMatch(/to="\/hygiene\/login"/)
+    expect(register).not.toMatch(/to="\/workbench\/login"/)
     // 员工表单（手机号 + 密码）搬进了 `/login` 的员工栏，仍打员工登录接口。
     expect(login).toMatch(/id="staffPhone"/)
     expect(login).toMatch(/type="tel"/)

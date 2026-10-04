@@ -5,24 +5,31 @@
 //
 // 视觉沿用 `public/hygiene-admin.css` 的深青墨令牌 —— 那是**共享的样式表**，不是卫生
 // 模块：排班不 import 卫生的 Python 模块、不挂它的菜单，只是同一套验收台配色。
-// 票 02 做「配固定班次」、票 03 加责任区、票 04 加轮转周期编辑、票 07 加单日覆盖
+// 票 02 做「配固定班次」、票 03 加工作区、票 04 加轮转周期编辑、票 07 加单日覆盖
 // （点当天卡里的一个人就地改那一天）、票 08 加底下那根「请假待办」的条
-// （批假在 `/scheduling/inbox` 那一页：这一页只管排班怎么铺）；班次表的增删改在票 11。
+// （批假在 `/workbench/inbox` 那一页：这一页只管排班怎么铺）；班次表的增删改在票 11。
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../../api/client'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
+// 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
+// <link>，壳一层管住就跟卫生管理端一个做法。
 import { useNudgePull } from '../../composables/useNudgePull'
 import { mergeShiftList } from '../../utils/shiftTable'
 import { eachDayInRange } from '../../utils/dateRange'
+import { BRUSH_REST, BRUSH_SHIFT, brushPayload, canPaintOn } from '../../utils/schedulingBrush'
 
-useScopedStylesheet('/hygiene-admin.css')
 
 const router = useRouter()
 
-const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
-// 每个班次一个颜色，按排序位循环取（原型里白班薄荷、夜班水青）。N 个班次都够用。
-const SHIFT_TONES = ['mint', 'aqua', 'amber', 'seal']
+// 周一开头（2026-09-30 全模块从周日开头改过来）：服务端 `_month_frame` 的 `lead` 与
+// 员工端月历的 `MONTH_HEADS` 是同一套，三个地方必须一起动，否则同一页两个周框。
+const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日']
+const WEEK_HEADS = ['一', '二', '三', '四', '五', '六', '日'] // 周表：表头就是这个顺序
+// 每个班次一个颜色，按排序位循环取（原型里白班薄荷、夜班水青）。
+// 六个 tone 覆盖到 6 个班次：门店那种「A/B/C + 主管A两头班 + 主管B两头班」是 5 个，
+// 只有四个色时第 5 个会与第 1 个撞色（A班 与 主管B两头班 长得一模一样）。
+// 撞色这件事**永远只能算辅助**：格子里一定留字，图例写全名。
+const SHIFT_TONES = ['mint', 'aqua', 'amber', 'seal', 'violet', 'rose']
 
 const loading = ref(true)
 const errorText = ref('')
@@ -42,7 +49,7 @@ const busyEmployeeId = ref(null)
 // 那种情况不给「撤销」按钮，改成一句实话。
 const editing = ref(null) // { id, name, day, overridden, undoable } | null
 const editShift = ref('') // 班次 id 的字符串，或 'rest'（那天休）
-const editZone = ref('') // 责任区 id 的字符串；'' = 跟这个班次的固定区
+const editZone = ref('') // 工作区 id 的字符串；'' = 跟这个班次的固定区
 const editError = ref('')
 const overrideBusy = ref(false)
 
@@ -56,7 +63,7 @@ const shiftById = computed(() => {
 // 配规则用的班次列表：只出**还在用**的（服务端 `_require_shifts_usable` 是同一条口径，
 // 单日覆盖那条路也校验）。`shifts` 那份是显示用的，带着「这个月真有行的停用班次」——
 // 它们必须出现在月历和当天名单上（票 11：停用后历史排班照旧显示），但出现在周期解析
-// 或固定责任区的选择里，店长选完只会吃一句 400。
+// 或固定工作区的选择里，店长选完只会吃一句 400。
 const activeShifts = computed(() => shifts.value.filter((shift) => shift.is_active))
 
 // 这个月有几天是被单日覆盖改过的（票 07）：>0 时图例里多一句「青点 = 这天有改动」，
@@ -193,7 +200,7 @@ async function loadRoster() {
     // 并集，不是替换：名单这份只有启用的班次，直接换上去会把「这个月还有行」的停用
     // 班次从月历的格子、图例和当天卡上挤掉（`mergeShiftList` 里写了为什么不能那么走）。
     if (data.shifts && data.shifts.length) shifts.value = mergeShiftList(shifts.value, data.shifts)
-    // 责任区名单来自公共层（读的是卫生建的那份），所以卫生那边新建一个区，
+    // 工作区名单来自公共层（读的是卫生建的那份），所以卫生那边新建一个区，
     // 这里刷新一下就能选到 —— 不需要重启，也不用在排班这边再建一份。
     zones.value = data.zones || []
     if (data.max_cycle_days) maxCycleDays.value = data.max_cycle_days
@@ -205,6 +212,12 @@ async function loadRoster() {
 async function openPanel(next) {
   panel.value = next
   if (next === 'roster') await loadRoster()
+  // 周表按需读：默认落在月历上，没切过去就不发这个请求。
+  else if (next === 'week') {
+    await loadWeek(weekStart.value || mondayOf(today.value))
+    // 读完再开笔袋：班次名单在这份数据里，先开就会面对一个空下拉。
+    await openBrush()
+  }
 }
 
 // 「还没配的人」= 在职（已批准、没停用）但一条规则都没有。名单面板和底下那根
@@ -270,6 +283,505 @@ async function loadPendingMarks() {
 /** 底下那根条与月历角标一起刷：批一条、撤回一条都会同时动到这两个。 */
 async function refreshNotes() {
   await Promise.all([loadPendingCount(), loadPendingMarks()])
+}
+
+// ── 周表：员工 × 周（2026-09-30 加，按门店在用的那套排班页的形式）──────────────
+// 月历回答「哪天缺人」，当天卡回答「这天是谁、在哪个区」，名单回答「谁的规则配错了」——
+// 这一块回答第四句：**这个人这一周怎么上**。数据一直都在（`staff_assignments` 一行就是
+// 「人 × 营业日 × 班次 + 区」），只是一次按「人 × 7 天」读出来（`GET /api/scheduling/week`）。
+//
+// 周起点是**周一**：2026-09-30 全模块从周日开头改过来（店里的口头习惯），跟月历的
+// `lead`、员工端月历的 `MONTH_HEADS` 是同一套。服务端会把 `start` 归一到周一，
+// 下面这两个函数只是为了让「上周 / 下周」点下去算的是同一周。
+const week = ref(null)
+const weekStart = ref('')
+const weekError = ref('')
+
+function toLocalDate(value) {
+  const [year, month, day] = String(value || '').split('-').map(Number)
+  return new Date(year, month - 1, day)
+}
+
+function isoDate(date) {
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
+
+/** 归一到那一周的周一（`getDay()` 周日=0，这里换成周一=0，跟服务端 `date.weekday()` 对齐）。 */
+function mondayOf(value) {
+  const base = toLocalDate(value || today.value || isoDate(new Date()))
+  if (Number.isNaN(base.getTime())) return isoDate(new Date())
+  base.setDate(base.getDate() - ((base.getDay() + 6) % 7))
+  return isoDate(base)
+}
+
+function shiftWeek(start, delta) {
+  const base = toLocalDate(start || mondayOf(today.value))
+  base.setDate(base.getDate() + delta * 7)
+  return isoDate(base)
+}
+
+function shortDate(value) {
+  const [, month, day] = String(value || '').split('-').map(Number)
+  return month && day ? `${month}/${day}` : ''
+}
+
+// 标题写**日期区间**，不写「10 月第一周」：跨月周（9/28–10/4）那种写法天生有歧义。
+const weekRangeLabel = computed(() => {
+  const data = week.value
+  if (!data) return ''
+  const same = data.today ? data.start === mondayOf(data.today) : false
+  return `${shortDate(data.start)}–${shortDate(data.end)}${same ? ' · 本周' : ''}`
+})
+
+async function loadWeek(start) {
+  weekError.value = ''
+  try {
+    // `start` 空着就交给服务端按「今天所在周」算：首屏还没读到 today 时也点得动。
+    const data = await api.get('/api/scheduling/week', { start: start || '' })
+    week.value = data
+    weekStart.value = data.start
+    // 并集：周表这份带的是「这 7 天真有行的停用班次」，直接替换会把月历那边的班次列挤掉
+    // （`mergeShiftList` 里写了为什么不能那么走）。
+    if (data.shifts && data.shifts.length) shifts.value = mergeShiftList(shifts.value, data.shifts)
+    // 翻到别的周就把抽屉收起来：它冻着的是上一周的某一天，留在屏幕上会让人以为
+    // 改的是新这周的同一天（票 07 那条「换一天就收编辑器」是同一个道理）。
+    if (sheet.value && !(data.days || []).some((day) => day.business_date === sheet.value.date)) {
+      closeSheet()
+    }
+  } catch (err) {
+    weekError.value = err.message || '周表读不出来'
+  }
+}
+
+const weekDays = computed(() => (week.value && week.value.days) || [])
+const weekEmployees = computed(() => (week.value && week.value.employees) || [])
+
+// 筛人（图片里那个「搜索成员」）：手机上网格一屏只放得下 4 行多，而名单有十几号人，
+// 找人靠翻页太慢。只按姓名筛（前端过滤，服务端一次就给全量），筛掉几个要说出来。
+const weekFind = ref('')
+const weekRows = computed(() => {
+  const keyword = weekFind.value.trim()
+  if (!keyword) return weekEmployees.value
+  return weekEmployees.value.filter((employee) => (employee.name || '').includes(keyword))
+})
+const weekFilteredOut = computed(() => weekEmployees.value.length - weekRows.value.length)
+
+function cellOf(employee, day) {
+  return (employee.cells && employee.cells[day.business_date]) || null
+}
+
+/** 这一格没有班可显示时，**为什么**：写清楚，别让空格子读成「那天全员休」。
+ *  `day` 可能是 null（抽屉开着的时候切了周，那一天已经不在当周里）—— 那种情况也得回答。 */
+function blankReason(day, cell) {
+  if (!day) return '这一格不在当周了'
+  if (!day.in_window) return `还没铺到（只铺到 ${week.value ? week.value.window_end : ''}）`
+  if (!day.row_count) return '那天还没有排班数据'
+  if (!cell || !cell.scheduled) return '还没排到'
+  return ''
+}
+
+// 格子里的班次缩写：**取能把它与别的班次分开的最短前缀**（最多 3 个字）。
+// 原先是死取第一个字，可「主管A两头班」与「主管B两头班」第一个字都是「主」——
+// 有这两个班的店里，两行主管班在格子上就长得一模一样。班次是数据（能改名、能加到第 6 个），
+// 缩写也只能算出来，不能写死。全名在格子的 aria-label 与下面的图例里。
+const weekShortNames = computed(() => {
+  const list = shifts.value
+    .filter((shift) => shift.is_active)
+    .map((shift) => ({ id: shift.id, name: String(shift.name || '') }))
+  const short = {}
+  for (const item of list) {
+    const limit = Math.max(1, Math.min(3, item.name.length))
+    for (let size = 1; size <= limit; size += 1) {
+      const prefix = item.name.slice(0, size)
+      const clash = list.some((other) => other.id !== item.id && other.name.slice(0, size) === prefix)
+      if (!clash || size === limit) {
+        short[item.id] = prefix || '班'
+        break
+      }
+    }
+  }
+  return short
+})
+
+function weekCellText(employee, day) {
+  const cell = cellOf(employee, day)
+  if (!cell || !cell.scheduled) return ''
+  if (cell.shift_id === null || cell.shift_id === undefined) return cell.leave ? '假' : '休'
+  return weekShortNames.value[cell.shift_id] || String(cell.shift_name || '班').slice(0, 1)
+}
+
+function weekCellClass(employee, day) {
+  const cell = cellOf(employee, day)
+  const blank = !cell || !cell.scheduled
+  const off = !blank && (cell.shift_id === null || cell.shift_id === undefined)
+  return {
+    // 两种「空」分开：整列没有数据 / 还没铺到是 `mute`（虚线），
+    // 这天有数据但这个人没排到是 `none`（淡框）。休与假另算。
+    mute: blank && (!day.in_window || !day.row_count),
+    none: blank && day.in_window && !!day.row_count,
+    off: off && !cell.leave,
+    leave: off && !!cell.leave,
+    [blank ? 'tone-blank' : toneClass(cell.shift_id)]: !off,
+    over: !!cell && cell.overridden,
+    // 三个字的缩写（「主管A」这种）在 40px 的格子里会折成两行，缩一号字就一行放得下。
+    long: weekCellText(employee, day).length > 2,
+    today: !!day.is_today,
+    on: !!sheet.value && sheet.value.employeeId === employee.id
+      && sheet.value.date === day.business_date,
+  }
+}
+
+function weekCellLabel(employee, day) {
+  const cell = cellOf(employee, day)
+  const when = `${day.month}月${day.day}日 周${WEEK_HEADS[day.weekday]}`
+  if (!cell || !cell.scheduled) {
+    return `${employee.name} ${when}：${blankReason(day, cell) || '还没排到'}`
+  }
+  const what = cell.shift_id === null || cell.shift_id === undefined
+    ? (cell.leave ? '请假' : '休')
+    : `${cell.shift_name}${cell.zone_name ? `，${cell.zone_name}` : '，未配工作区'}`
+  return `${employee.name} ${when}：${what}${cell.overridden ? '，已手动调整' : ''}`
+}
+
+const weekOverriddenCount = computed(() => {
+  let count = 0
+  for (const employee of weekEmployees.value) {
+    for (const day of weekDays.value) {
+      const cell = cellOf(employee, day)
+      if (cell && cell.overridden) count += 1
+    }
+  }
+  return count
+})
+
+const weekBeyondDays = computed(() => weekDays.value.filter((day) => !day.in_window))
+const weekEmptyDays = computed(() => weekDays.value.filter((day) => day.in_window && !day.row_count))
+const weekNoDataNote = computed(() => {
+  if (!weekEmptyDays.value.length) return ''
+  const names = weekEmptyDays.value.map((day) => shortDate(day.business_date)).join('、')
+  return `${names} 这一列一条排班数据都没有 —— 那是「还没铺到」，不是「那天全员休」。`
+})
+const weekExcludedNote = computed(() => {
+  const data = week.value
+  if (!data || !data.excluded) return ''
+  const parts = []
+  if (data.excluded.disabled) parts.push(`${data.excluded.disabled} 人已停用`)
+  if (data.excluded.pending) parts.push(`${data.excluded.pending} 人还没批准`)
+  return parts.length ? `另有 ${parts.join('、')}，不在表里（去「名单」看）。` : ''
+})
+
+// ── 底部抽屉：点一格从底下弹出来选班次（照门店那套的做法）────────────────────
+// 与图片那套的一处刻意不同：抽屉弹出来时给页面**留出底部空间**（`.gB.sheet-open` 的
+// padding-bottom）—— 不这么做，它压住的正是下面几行员工，而那几行恰好是店长要对照的。
+const sheet = ref(null) // { employeeId, date } | null
+const sheetTab = ref('shift') // 'shift' | 'cycle'
+const sheetFolded = ref(false)
+const sheetError = ref('')
+const sheetBusy = ref(false)
+// 抽屉里的「工作区」下拉（2026-10-04 补）：区字符串 id，'' = 跟这个班次的固定区。
+// 原先抽屉里改不了区，店长得跳去月历那页点这个人才行 —— 周表上发现"今天他不在案板"，
+// 却要换个页面才改得动，路太绕。写路径没变：还是单日覆盖那条（带上当天的班次一起提交）。
+const sheetZone = ref('')
+
+// ── 笔刷：抽屉折叠成那一行时手里的笔（2026-10-04 用户要的交互）──────────────
+// 折叠**不只是收起来**：折叠之后表上单击 = 落笔，长按 = 展开看/改这一格。
+// 为什么要分：给一个人改一天原来是三步（点格子 → 抽屉 → 选班次），排一周要来回二十几次；
+// 但「这一格现在到底是什么」也必须有地方去，所以长按留着。
+const brushKind = ref(BRUSH_SHIFT) // 'shift' | 'rest'
+const brushShiftId = ref(null) // 班次 id；null = 还没选，落笔前先提示
+const brushZoneId = ref('') // 工作区 id 字符串；'' = 跟这个班次的固定区
+
+const sheetEmployee = computed(() => {
+  if (!sheet.value) return null
+  return weekEmployees.value.find((item) => item.id === sheet.value.employeeId) || null
+})
+
+const sheetDay = computed(() => {
+  if (!sheet.value) return null
+  return weekDays.value.find((day) => day.business_date === sheet.value.date) || null
+})
+
+const sheetCell = computed(() => {
+  const employee = sheetEmployee.value
+  const day = sheetDay.value
+  return employee && day ? cellOf(employee, day) : null
+})
+
+const sheetIsRest = computed(() => {
+  const cell = sheetCell.value
+  return !!cell && cell.scheduled && (cell.shift_id === null || cell.shift_id === undefined) && !cell.leave
+})
+
+// 过去的日子不改写（口径 5）：那天可以看，但不能改 —— 服务端也会拒（`past_day`）。
+const sheetUndoable = computed(() => {
+  const data = week.value
+  return !!(sheet.value && data && data.today && sheet.value.date >= data.today)
+})
+
+const sheetNowText = computed(() => {
+  const cell = sheetCell.value
+  if (!cell || !cell.scheduled) return blankReason(sheetDay.value, cell) || '还没排'
+  if (cell.shift_id === null || cell.shift_id === undefined) return cell.leave ? '请假' : '休'
+  return `${cell.shift_name}${cell.zone_name ? ` · ${cell.zone_name}` : ' · 未配区'}`
+})
+
+// 只有"这天真有班次"才谈得上工作区：休、请假、还没排到的格子，区是没有意义的。
+const sheetHasShift = computed(() => {
+  const cell = sheetCell.value
+  return !!cell && cell.scheduled && cell.shift_id !== null && cell.shift_id !== undefined
+})
+
+/** 下拉停在哪一项：按 **id** 预填（区名没有唯一约束，按名字反查会指到别人身上）。 */
+function syncSheetZone() {
+  const cell = sheetCell.value
+  sheetZone.value = cell && cell.zone_id !== null && cell.zone_id !== undefined
+    ? String(cell.zone_id)
+    : ''
+}
+
+/** 班次名单是异步来的：到货时给笔补一个默认班次（早班）。 */
+watch(activeShifts, () => {
+  if (sheetFolded.value) ensureBrushShift()
+})
+
+const sheetRuleText = computed(() => {
+  const employee = sheetEmployee.value
+  if (!employee) return ''
+  const row = roster.value.find((item) => item.id === employee.id)
+  if (row) return ruleLabel(row.rule)
+  return employee.has_rule ? '（去「名单」看这条规则）' : '还没配规则'
+})
+
+async function openSheet(employee, day) {
+  // 点同一格 = 收起来：抽屉不会自己走开，得有个关掉的手势。
+  const same = sheet.value && sheet.value.employeeId === employee.id
+    && sheet.value.date === day.business_date
+  if (same) {
+    closeSheet()
+    return
+  }
+  sheet.value = { employeeId: employee.id, date: day.business_date }
+  sheetTab.value = 'shift'
+  sheetFolded.value = false
+  sheetError.value = ''
+  // 工作区名单只在名单面板里读过：**先把名单补齐，再决定下拉停在哪一项**。反过来的话，
+  // 这个会话里第一次开抽屉时 `zones` 还是空的 → 下拉里没有选项 → 保存时区被悄悄退回
+  // 固定区（跟票 07 当天编辑器踩过的是同一个坑）。
+  if (!zones.value.length) await loadRoster()
+  syncSheetZone()
+  syncBrushFromCell()
+}
+
+/** 打开某一格时把笔**跟着这一格走**：展开看的是它，折叠起来刷的就是"跟它一样"。
+ *  格子里没有班次（休 / 假 / 还没排）时不动笔 —— 看了一眼休假日就把笔也换成"休"，
+ *  接着往下刷会把别人刷成休，那不是店长要的。 */
+function syncBrushFromCell() {
+  const cell = sheetCell.value
+  if (cell && cell.scheduled && cell.shift_id !== null && cell.shift_id !== undefined) {
+    brushShiftId.value = cell.shift_id
+    brushZoneId.value = cell.zone_id === null || cell.zone_id === undefined ? '' : String(cell.zone_id)
+    brushKind.value = BRUSH_SHIFT
+    return
+  }
+  ensureBrushShift()
+}
+
+/** 笔还没选班次时给一个默认值（第一个在用的班次）：进周表笔袋就是开的，
+ *  总不能让店长先面对一个"选班次"的空下拉再点格子。班次表还没读回来时先留空，
+ *  读回来了由下面那个 watch 补上。 */
+function ensureBrushShift() {
+  if (brushShiftId.value === null && activeShifts.value.length) {
+    brushShiftId.value = activeShifts.value[0].id
+  }
+}
+
+/** 开笔袋（2026-10-05 用户要的：**一进周表它就是开的**）。
+ *
+ *  不用先点一格再收起 —— 一进周表底部就是那支笔，选好班次/工作区直接点格子。
+ *  `sheet` 置空：这时候还没有"正在看的那一格"，长按哪一格才展开到哪一格。 */
+async function openBrush() {
+  sheet.value = null
+  sheetFolded.value = true
+  sheetError.value = ''
+  // 工作区名单跟抽屉是同一份、也是懒加载的：不先补齐，笔袋里那个下拉就只有
+  // 「跟固定区」一项 —— 店长选不到区，会以为笔刷不支持选区。
+  if (!zones.value.length) await loadRoster()
+  ensureBrushShift()
+}
+
+function closeSheet() {
+  sheet.value = null
+  sheetFolded.value = false // 收起 = 连笔袋一起收（不然关不干净）
+  sheetError.value = ''
+}
+
+async function openCycleTab() {
+  sheetTab.value = 'cycle'
+  // 周期那栏要的是这个人的规则文本，规则在名单那份数据里（`/roster`）：没读过就补一次，
+  // 不为它多开一个接口。
+  if (!roster.value.length) await loadRoster()
+}
+
+/** 抽屉里改完一天：重读当周（格子与抽屉里的现状都跟着变），再把月历那一份人数补上。 */
+async function refreshAfterWeekWrite(date) {
+  await loadWeek(week.value ? week.value.start : weekStart.value)
+  // 抽屉里的「工作区」下拉按服务端**回写后的结果**重新落位：不给区时后端会回填这个班次的
+  // 固定区，下拉不能停在店长刚才点的那个值上（那会跟格子里显示的对不上）。
+  syncSheetZone()
+  // 月历那一份只补**人数**，不动选中那天（`loadCalendar` 会把选中拨回今天/1 号，
+  // 店长从周表切回月历不该发现自己在月历上挑的那天被换掉了）。
+  await refreshMonthCounts()
+  if (date && date === selectedDate.value) await loadDay(date)
+}
+
+async function refreshMonthCounts() {
+  if (!monthValue.value) return
+  try {
+    const data = await api.get('/api/scheduling/calendar', { month: monthValue.value })
+    calendar.value = data
+    if (data.shifts && data.shifts.length) shifts.value = mergeShiftList(shifts.value, data.shifts)
+  } catch (err) {
+    // 周表已经是最新的；月历这一份下次进页面再补，不拿一句错盖住刚做成的改动。
+  }
+}
+
+/** 写一天的覆盖。抽屉里点班次、表上落笔，走的都是这一条 —— 不新开接口。 */
+async function writeOverride(employeeId, date, payload) {
+  sheetBusy.value = true
+  sheetError.value = ''
+  try {
+    await api.put(`/api/scheduling/overrides/${employeeId}/${date}`, payload)
+    await refreshAfterWeekWrite(date)
+  } catch (err) {
+    // 服务端把「为什么改不了」说全了（过去的日子、还没铺到的天、休不能带班次…），
+    // 原话转给店长，别拿一句「保存失败」盖掉。
+    sheetError.value = err.message || '这一天没改上'
+  } finally {
+    sheetBusy.value = false
+  }
+}
+
+async function writeCell(payload) {
+  const target = sheet.value
+  if (!target) return
+  await writeOverride(target.employeeId, target.date, payload)
+}
+
+function pickShift(shift) {
+  // 工作区留空 = 跟这个班次的固定区（票 03）。要单独改这一天在哪个区，去月历那页点这个人
+  // —— 票 07 的编辑器管那件事，职责没变。
+  writeCell({ shift_id: shift.id, zone_id: null })
+}
+
+function pickRest() {
+  writeCell({ is_rest: true })
+}
+
+/** 只改这一天的区：班次不动，把当天那个班次一起提交（后端「只改区」走的就是这条路）。 */
+function pickZone(value) {
+  const cell = sheetCell.value
+  if (!cell || cell.shift_id === null || cell.shift_id === undefined) return
+  sheetZone.value = value
+  writeCell({ shift_id: cell.shift_id, zone_id: value === '' ? null : Number(value) })
+}
+
+function toggleBrushRest() {
+  if (brushKind.value === BRUSH_REST) {
+    brushKind.value = BRUSH_SHIFT
+    if (brushShiftId.value === null && activeShifts.value.length) {
+      brushShiftId.value = activeShifts.value[0].id
+    }
+    return
+  }
+  brushKind.value = BRUSH_REST
+}
+
+/** 点一格 = 落笔。落完**不关抽屉**：下一格接着点 —— 这就是这个交互的全部意义。 */
+async function paintCell(employee, day) {
+  if (!canPaintOn(day.business_date, week.value ? week.value.today : '')) {
+    sheetError.value = '过去的日子不改写：往前翻只能看。'
+    return
+  }
+  const payload = brushPayload({
+    kind: brushKind.value,
+    shiftId: brushShiftId.value,
+    zoneId: brushZoneId.value,
+  })
+  if (!payload) {
+    sheetError.value = '先在上面选一个班次（或点「休」），再点格子。'
+    return
+  }
+  await writeOverride(employee.id, day.business_date, payload)
+}
+
+// 长按 = 展开看/改这一格。用 pointer 计时，`@click` 仍是唯一语义入口：
+// 长按已经处理过，就把它后面那一次 click 吞掉 —— 不然会"开了抽屉又立刻落笔"。
+const LONG_PRESS_MS = 550
+let pressTimer = null
+let pressFired = false
+
+function onCellDown(employee, day) {
+  pressFired = false
+  if (!sheetFolded.value) return // 展开时点一下本来就是开抽屉
+  pressTimer = setTimeout(() => {
+    pressTimer = null
+    pressFired = true
+    unfoldToCell(employee, day)
+  }, LONG_PRESS_MS)
+}
+
+function cancelCellPress() {
+  if (pressTimer) {
+    clearTimeout(pressTimer)
+    pressTimer = null
+  }
+}
+
+function onCellClick(employee, day) {
+  if (pressFired) {
+    pressFired = false
+    return
+  }
+  if (sheetFolded.value) {
+    paintCell(employee, day)
+    return
+  }
+  openSheet(employee, day)
+}
+
+async function unfoldToCell(employee, day) {
+  const same = sheet.value && sheet.value.employeeId === employee.id
+    && sheet.value.date === day.business_date
+  sheetFolded.value = false
+  sheetError.value = ''
+  if (same) return // 就是当前这一格：展开就行，别再走一次"同一格 = 收起来"
+  await openSheet(employee, day)
+}
+
+async function clearCell() {
+  const target = sheet.value
+  if (!target) return
+  sheetBusy.value = true
+  sheetError.value = ''
+  try {
+    await api.delete(`/api/scheduling/overrides/${target.employeeId}/${target.date}`)
+    await refreshAfterWeekWrite(target.date)
+  } catch (err) {
+    sheetError.value = err.message || '没撤掉'
+  } finally {
+    sheetBusy.value = false
+  }
+}
+
+/** 「周期」栏那句「去名单改」：把人带到名单页，并直接展开他的周期编辑器。 */
+async function gotoRoster() {
+  const id = sheet.value && sheet.value.employeeId
+  closeSheet()
+  await openPanel('roster')
+  const row = roster.value.find((item) => item.id === id)
+  if (row) openCycle(row)
 }
 
 // 图例里那条「有申请等着批」：有角标才显示（没角标时图例列一个用不上的记号反而费解）。
@@ -448,19 +960,19 @@ async function setZoneDefault(employee, shiftId, value) {
     // 后端把今天以后已经铺好的行一起改了，所以底下那张当天卡要重读一遍。
     await loadDay(selectedDate.value)
   } catch (err) {
-    errorText.value = err.message || '责任区没存上'
+    errorText.value = err.message || '工作区没存上'
     await loadRoster()
   } finally {
     busyEmployeeId.value = null
   }
 }
 
-// 单日覆盖（票 07）：这一天跟规则不一样 —— 换班次、改成休、或只换责任区。
-// 覆盖是**整天的快照**：保存时把这一天的班次和责任区一起定下来，规则以后怎么变都不再
-// 动它（想让它回到规则就「撤销覆盖」）。所以「只改责任区」也走同一条路：班次不动、
+// 单日覆盖（票 07）：这一天跟规则不一样 —— 换班次、改成休、或只换工作区。
+// 覆盖是**整天的快照**：保存时把这一天的班次和工作区一起定下来，规则以后怎么变都不再
+// 动它（想让它回到规则就「撤销覆盖」）。所以「只改工作区」也走同一条路：班次不动、
 // 只把下拉里的区换掉，提交时带着当天那个班次一起发过去。
 async function openDayEdit(person, shiftId) {
-  // 责任区名单只在名单面板里读过（`loadRoster`）：**先把名单补齐，再决定下拉停在哪一项**。
+  // 工作区名单只在名单面板里读过（`loadRoster`）：**先把名单补齐，再决定下拉停在哪一项**。
   // 反过来的话，这个会话里第一次打开编辑器时 `zones` 还是空的 → 预填必然落回「跟固定区」
   // → 保存时 `zone_id: null` → 服务层按固定区回填：那天原本自己挑过的区被悄悄退回。
   if (!zones.value.length) await loadRoster()
@@ -555,29 +1067,44 @@ useNudgePull({
   pull: async () => {
     await loadCalendar(monthValue.value, true)
     await refreshNotes()
+    // 周表开着的时候它也得跟着动：员工那边换了班，店长盯着的正是这张表。
+    if (panel.value === 'week') await loadWeek(weekStart.value)
   },
 })
 </script>
 
 <template>
   <div class="hygiene-admin sched-page">
-    <div class="gB">
+    <div class="gB" :class="{ 'sheet-open': !!sheet && !sheetFolded, 'brush-open': sheetFolded && panel === 'week' }">
       <div class="gB-body">
         <div class="gB-mon">
-          <b>{{ monthTitle(monthValue) }}</b>
-          <span>{{ shifts.map((s) => s.name).join(' / ') }} 人数</span>
+          <b v-if="panel === 'week'">{{ weekRangeLabel || '本周' }}</b>
+          <b v-else>{{ monthTitle(monthValue) }}</b>
+          <span v-if="panel === 'week'">{{ weekEmployees.length }} 人 × 7 天</span>
+          <span v-else>{{ shifts.map((s) => s.name).join(' / ') }} 人数</span>
           <em>{{ formatTodayLabel() }}</em>
         </div>
 
         <div class="gB-bar">
-          <button class="gBtn" type="button" @click="loadCalendar(shiftMonth(monthValue, -1))">‹ 上月</button>
-          <button class="gBtn" type="button" @click="loadCalendar(currentMonthValue())">本月</button>
-          <button class="gBtn" type="button" @click="loadCalendar(shiftMonth(monthValue, 1))">下月 ›</button>
-          <button
-            class="gAct"
-            type="button"
-            @click="openPanel(panel === 'month' ? 'roster' : 'month')"
-          >{{ panel === 'month' ? '名单 ›' : '‹ 月历' }}</button>
+          <!-- 三个视角：月历（哪天缺人）· 周表（这个人这周怎么上）· 名单（配规则）。 -->
+          <div class="gSeg">
+            <button class="gBtn" :class="{ on: panel === 'month' }" type="button" @click="openPanel('month')">月历</button>
+            <button class="gBtn" :class="{ on: panel === 'week' }" type="button" @click="openPanel('week')">周表</button>
+            <button class="gBtn" :class="{ on: panel === 'roster' }" type="button" @click="openPanel('roster')">名单</button>
+          </div>
+          <template v-if="panel === 'roster'">
+            <span class="gW-tip">配规则 / 固定区在这里</span>
+          </template>
+          <template v-else-if="panel === 'week'">
+            <button class="gBtn" type="button" @click="loadWeek(shiftWeek(weekStart, -1))">‹ 上周</button>
+            <button class="gBtn" type="button" @click="loadWeek(mondayOf(today))">本周</button>
+            <button class="gBtn" type="button" @click="loadWeek(shiftWeek(weekStart, 1))">下周 ›</button>
+          </template>
+          <template v-else>
+            <button class="gBtn" type="button" @click="loadCalendar(shiftMonth(monthValue, -1))">‹ 上月</button>
+            <button class="gBtn" type="button" @click="loadCalendar(currentMonthValue())">本月</button>
+            <button class="gBtn" type="button" @click="loadCalendar(shiftMonth(monthValue, 1))">下月 ›</button>
+          </template>
         </div>
 
         <p v-if="errorText" class="gMsg">{{ errorText }}</p>
@@ -730,7 +1257,7 @@ useNudgePull({
                 </select>
               </label>
               <label class="gD-pick">
-                <span>责任区</span>
+                <span>工作区</span>
                 <select v-model="editZone" class="gZ-sel" :disabled="editShift === 'rest'">
                   <option value="">跟固定区</option>
                   <option v-for="zone in zones" :key="zone.id" :value="String(zone.id)">
@@ -764,14 +1291,14 @@ useNudgePull({
             </div>
           </div>
 
-          <button class="gPend gTodo" type="button" @click="router.push('/scheduling/inbox')">
+          <button class="gPend gTodo" type="button" @click="router.push('/workbench/inbox')">
             <span class="n">假</span>
             <b>请假待办</b>
             <span>员工提的请假在这儿批：批完那天记成请假，先看清批了还剩几个人</span>
             <span class="go">›</span>
           </button>
 
-          <button class="gPend" type="button" @click="router.push('/scheduling/shifts')">
+          <button class="gPend" type="button" @click="router.push('/workbench/shifts')">
             <span class="n">班</span>
             <b>班次表</b>
             <span>加一个班次、改名字、调顺序、停用 —— 加完月历和员工卡片自己就多一种班别</span>
@@ -786,7 +1313,97 @@ useNudgePull({
           </button>
         </template>
 
-        <template v-else>
+        <!-- 周表：员工 × 周。列是七天，行是人；点一格从底下弹抽屉选班次。 -->
+        <template v-else-if="panel === 'week'">
+          <p v-if="weekError" class="gMsg">{{ weekError }}</p>
+          <p v-if="!week" class="gB-empty">周表读取中……</p>
+          <template v-else>
+            <div class="gW-find">
+              <input v-model="weekFind" type="search" placeholder="搜成员" spellcheck="false">
+              <span v-if="weekFind.trim()">{{ weekRows.length }} 人 · 筛掉 {{ weekFilteredOut }} 人</span>
+            </div>
+            <div class="gW-wrap">
+              <table class="gW">
+                <!-- 姓名列定宽，其余七列平分：手机上不横向滚（跟月历那边同一个做法）。 -->
+                <colgroup>
+                  <col class="gW-cname">
+                  <col v-for="day in weekDays" :key="day.business_date">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th class="gW-name">成员</th>
+                    <th
+                      v-for="day in weekDays"
+                      :key="day.business_date"
+                      :class="{ today: day.is_today, weekend: day.is_weekend, mute: !day.in_window }"
+                    >
+                      <span class="w">周{{ WEEK_HEADS[day.weekday] }}</span>
+                      <span class="d">{{ day.day }}</span>
+                      <em v-if="day.month !== week.days[0].month">{{ day.month }}月</em>
+                      <!-- 待批的天数是一天一条事实，挂在**这一列的表头**上；挂在每一格里
+                           会变成 11 个一模一样的点（一天 11 个人）。 -->
+                      <i
+                        v-if="pendingMarks[day.business_date]"
+                        class="pend"
+                        :title="`${pendingMarks[day.business_date]} 条申请等着批`"
+                      >{{ pendingMarks[day.business_date] }}</i>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="employee in weekRows" :key="employee.id">
+                    <th class="gW-name">
+                      <b>{{ employee.name }}</b>
+                      <!-- 没配规则的人整行都是空的 —— 不在这里说一句，看着像这店不给他排班。 -->
+                      <em v-if="!employee.has_rule" class="gW-norule" title="这个人还没有轮转规则">没规则</em>
+                    </th>
+                    <td v-for="day in weekDays" :key="day.business_date">
+                      <button
+                        type="button"
+                        class="gW-cell"
+                        :class="weekCellClass(employee, day)"
+                        :aria-label="weekCellLabel(employee, day)"
+                        :disabled="!day.in_window"
+                        @pointerdown="onCellDown(employee, day)"
+                        @pointerup="cancelCellPress()"
+                        @pointerleave="cancelCellPress()"
+                        @pointercancel="cancelCellPress()"
+                        @contextmenu.prevent
+                        @click="onCellClick(employee, day)"
+                      >
+                        <span>{{ weekCellText(employee, day) }}</span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p v-if="!weekRows.length" class="gB-empty">没有名字里有「{{ weekFind.trim() }}」的人</p>
+
+            <div class="gB-legend">
+              <span v-for="shift in activeShifts" :key="shift.id">
+                <i :class="toneClass(shift.id)"></i>{{ shift.name }}
+              </span>
+              <span><i class="off"></i>休</span>
+              <span><i class="leave"></i>假（批过的请假）</span>
+              <span v-if="weekOverriddenCount" class="gB-ov"><i></i>青点 = 这天被单独改过（{{ weekOverriddenCount }} 处）</span>
+              <span v-if="hasPendingMarks" class="gB-pend"><i></i>有申请等着批</span>
+            </div>
+
+            <p v-if="weekNoDataNote" class="gB-note">{{ weekNoDataNote }}</p>
+            <p v-if="weekBeyondDays.length" class="gB-note">
+              这一周里有 {{ weekBeyondDays.length }} 天超出了展开窗口（只铺到 {{ week.window_end }}），
+              那几格还是虚的。
+            </p>
+            <p class="gB-note">
+              点一格从底下选班次；「清除班次」只把<span class="gW-em">手改过</span>的那天退回规则。
+              改轮转规则（白白白夜夜休休）在「名单」里，它跟单日改动是两件事。
+            </p>
+            <p v-if="weekExcludedNote" class="gB-note">{{ weekExcludedNote }}</p>
+          </template>
+        </template>
+
+        <template v-else-if="panel === 'roster'">
           <div class="gB-card gB-card-plain">
             <div class="gB-card-hd">
               <b>名单 · 规则</b>
@@ -864,12 +1481,139 @@ useNudgePull({
                     <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
                   </select>
                 </label>
-                <span v-if="!zones.length" class="gZ-none">还没有责任区，先去卫生的责任区页面建一个</span>
+                <span v-if="!zones.length" class="gZ-none">还没有工作区，先去卫生的工作区页面建一个</span>
               </div>
             </div>
             <p v-if="!roster.length" class="gB-empty">名单是空的</p>
             <p class="gB-note">「固定一个班」和「编周期」（白白白夜夜休休）配的是同一样东西：一人一条轮转规则。规则改了只重排今天以后，过去的日子不动。</p>
           </div>
+        </template>
+      </div>
+
+      <!-- 底部抽屉（照门店那套排班页的做法）：点周表里的一格，从底下弹出来选班次。
+           与那套的两处刻意不同：① 弹出来时页面留出底部空间（`.gB.sheet-open`），不然它
+           压住的正是下面几行员工；② 不做顶栏那个「保存」—— 本模块是**即时写**，
+           点一下就落库，多一个保存按钮只会让人以为不点就不生效。 -->
+      <div
+        v-if="(sheet || sheetFolded) && panel === 'week'"
+        class="gSheet"
+        role="dialog"
+        :aria-label="sheetFolded ? '笔刷' : '改这一天'"
+      >
+        <div class="gSheet-bar">
+          <button
+            v-if="sheet"
+            class="gSheet-fold"
+            type="button"
+            :aria-expanded="sheetFolded ? 'false' : 'true'"
+            :title="sheetFolded ? '展开' : '收起'"
+            @click="sheetFolded = !sheetFolded"
+          >{{ sheetFolded ? '⌃' : '⌄' }}</button>
+          <!-- 折叠着 = 手里有笔：这一行就是笔刷条。班次 / 周期那两栏是"看这一格"用的，
+               折叠时让位给笔刷控件；展开回去它们还在。 -->
+          <template v-if="sheetFolded">
+            <span class="gBrush-tag">刷</span>
+            <select
+              v-model="brushShiftId"
+              class="gZ-sel"
+              aria-label="笔刷班次"
+              :disabled="brushKind === BRUSH_REST"
+            >
+              <option :value="null" disabled>选班次</option>
+              <option v-for="shift in activeShifts" :key="shift.id" :value="shift.id">{{ shift.name }}</option>
+            </select>
+            <select
+              v-model="brushZoneId"
+              class="gZ-sel"
+              aria-label="笔刷工作区"
+              :disabled="brushKind === BRUSH_REST"
+            >
+              <option value="">跟固定区</option>
+              <option v-for="zone in zones" :key="zone.id" :value="String(zone.id)">{{ zone.name }}</option>
+            </select>
+            <button
+              class="gChip"
+              type="button"
+              :class="{ on: brushKind === BRUSH_REST }"
+              :aria-pressed="brushKind === BRUSH_REST ? 'true' : 'false'"
+              @click="toggleBrushRest()"
+            ><i class="dt rest"></i>休</button>
+          </template>
+          <div v-else class="gSeg">
+            <button class="gBtn" :class="{ on: sheetTab === 'shift' }" type="button" @click="sheetTab = 'shift'">班次</button>
+            <button class="gBtn" :class="{ on: sheetTab === 'cycle' }" type="button" @click="openCycleTab()">周期</button>
+          </div>
+          <button class="gBtn ghost" type="button" @click="closeSheet()">收起</button>
+        </div>
+        <p v-if="sheetFolded" class="gBrush-hint">点格子就刷上去 · 长按格子看 / 改这一格</p>
+        <p v-if="sheetFolded && sheetError" class="gSheet-err">{{ sheetError }}</p>
+
+        <template v-if="!sheetFolded">
+          <p class="gSheet-hd">
+            <b>{{ sheetEmployee ? sheetEmployee.name : '' }}</b>
+            <span>{{ formatDayLabel(sheet.date) }}</span>
+            <em>{{ sheetNowText }}</em>
+          </p>
+
+          <template v-if="sheetTab === 'shift'">
+            <div class="gSheet-row">
+              <button
+                class="gChip"
+                type="button"
+                :disabled="sheetBusy || !sheetUndoable || !(sheetCell && sheetCell.overridden)"
+                @click="clearCell()"
+              >清除班次</button>
+              <button
+                class="gChip"
+                type="button"
+                :class="{ on: sheetIsRest }"
+                :disabled="sheetBusy || !sheetUndoable"
+                @click="pickRest()"
+              ><i class="dt rest"></i>休息</button>
+            </div>
+            <!-- 工作区（2026-10-04 补）：改这里只动这一天，不动这个班次的固定区。
+                 休 / 请假 / 还没排到的格子没有区可言 → 禁用并说一句。 -->
+            <label class="gZ-pick">
+              <span>工作区</span>
+              <select
+                class="gZ-sel"
+                :value="sheetZone"
+                :disabled="sheetBusy || !sheetUndoable || !sheetHasShift"
+                @change="pickZone($event.target.value)"
+              >
+                <option value="">跟固定区</option>
+                <option v-for="zone in zones" :key="zone.id" :value="String(zone.id)">
+                  {{ zone.name }}
+                </option>
+              </select>
+              <em v-if="!sheetHasShift" class="gSheet-pick-note">休 / 请假的日子没有区</em>
+            </label>
+            <div class="gSheet-list">
+              <button
+                v-for="shift in activeShifts"
+                :key="shift.id"
+                type="button"
+                class="gChip wide"
+                :class="[toneClass(shift.id), { on: !!sheetCell && sheetCell.shift_id === shift.id }]"
+                :disabled="sheetBusy || !sheetUndoable"
+                @click="pickShift(shift)"
+              ><i class="dt"></i>{{ shift.name }}</button>
+            </div>
+            <p v-if="!sheetUndoable" class="gSheet-hint">过去的日子不改写：这天的记录留着，从这里改不了。</p>
+            <p v-else class="gSheet-hint">
+              点一下就落库。「工作区」改的是<span class="gW-em">这一天</span>；
+              要改长期的（他以后每个早班都在哪）去「名单」。
+            </p>
+            <p v-if="sheetError" class="gSheet-err">{{ sheetError }}</p>
+          </template>
+
+          <template v-else>
+            <p class="gSheet-rule">{{ sheetEmployee ? sheetEmployee.name : '' }} 的轮转规则：{{ sheetRuleText }}</p>
+            <div class="gSheet-row">
+              <button class="gBtn on" type="button" @click="gotoRoster()">去「名单」改规则</button>
+            </div>
+            <p class="gSheet-hint">规则一人一条，改了只重排今天以后 —— 所以它不在这张周表上改。</p>
+          </template>
         </template>
       </div>
     </div>
@@ -900,13 +1644,16 @@ useNudgePull({
 .gB-head span { text-align: center; font-size: 10px; color: var(--hy-faint); letter-spacing: .06em; }
 .gB-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
 .gB-d {
-  position: relative; height: 62px; border-radius: 10px; border: 1px solid transparent;
-  background: var(--hy-surface-2); padding: 7px 6px 0; display: flex; flex-direction: column;
+  position: relative; min-height: 62px; border-radius: 10px; border: 1px solid transparent;
+  background: var(--hy-surface-2); padding: 7px 6px 6px; display: flex; flex-direction: column;
   gap: 5px; font: inherit; color: inherit; text-align: left; cursor: pointer;
+  /* 五个班次时「6 · 0 · 2 · 1 · 1」这一行会把格子撑宽（grid 项的 min-width 默认是 auto），
+     七列一起涨就把最后两列顶出屏幕 —— 让它自己在格子里换行。 */
+  min-width: 0;
 }
 .gB-d.mute { background: transparent; border-color: var(--hy-line); opacity: .35; }
 .gB-d .n { font-family: var(--font-mono); font-size: 11px; color: var(--hy-muted); line-height: 1; }
-.gB-d .c { display: flex; align-items: baseline; gap: 3px; font-family: var(--font-mono); font-size: 11.5px; line-height: 1; }
+.gB-d .c { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px; font-family: var(--font-mono); font-size: 11.5px; line-height: 1; }
 .gB-d .c b { font-weight: 600; }
 .gB-d .c i { font-style: normal; font-weight: 600; }
 .gB-d .c em { font-style: normal; color: var(--hy-faint); font-size: 9px; }
@@ -931,6 +1678,8 @@ useNudgePull({
 .tone-aqua { color: var(--hy-aqua); }
 .tone-amber { color: var(--hy-amber); }
 .tone-seal { color: var(--hy-seal-bright); }
+.tone-violet { color: var(--hy-violet); }
+.tone-rose { color: var(--hy-rose); }
 .gB-legend { display: flex; align-items: center; gap: 12px; margin-top: 11px; font-size: 10.5px; color: var(--hy-faint); padding: 0 2px; flex-wrap: wrap; }
 .gB-legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: middle; background: currentColor; }
 .gB-legend span { color: var(--hy-faint); }
@@ -995,7 +1744,7 @@ useNudgePull({
 .gR-main em { margin-left: auto; font-style: normal; font-family: var(--font-mono); font-size: 11px; color: var(--hy-faint); }
 .gR-main em.on { color: var(--hy-mint); }
 .gR-act { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
-/* 每个班的固定责任区（票 03）。一行两个班次的下拉，窄屏自动换行。 */
+/* 每个班的固定工作区（票 03）。一行两个班次的下拉，窄屏自动换行。 */
 .gZ { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 7px; }
 .gZ-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--hy-faint); }
 .gZ-sel {
@@ -1003,6 +1752,12 @@ useNudgePull({
   border: 1px solid var(--hy-line); border-radius: 7px; padding: 3px 6px; cursor: pointer;
 }
 .gZ-sel:disabled { opacity: .45; cursor: default; }
+/* 笔刷条（折叠成一行时的那支笔）：控件直接复用工作区下拉的外观，不另起一套视觉。 */
+.gBrush-tag {
+  font-size: 11px; color: var(--hy-mint); background: var(--hy-surface-2);
+  border: 1px solid var(--hy-line); border-radius: 999px; padding: 2px 8px;
+}
+.gBrush-hint { margin: 6px 0 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.7; }
 .gZ-none { font-size: 11px; color: var(--hy-faint); }
 /* 轮转周期编辑器（票 04）。原型 B 的名单行里没有这一块 —— 展开后长在那一行下面。 */
 .gC {
@@ -1042,4 +1797,139 @@ useNudgePull({
 .gD-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--hy-faint); }
 .gD-act { display: flex; gap: 6px; flex-wrap: wrap; }
 .gD-hint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.6; }
+
+/* ── 周表（员工 × 周，2026-09-30）────────────────────────────────────────
+   版式：表头粘住、姓名列定宽、七列平分 —— 手机上不横向滚（跟月历那边同一个做法）。
+   颜色只做辅助：格子里一定留一个字，因为 `SHIFT_TONES` 只有 4 个，第 5 个班次起会
+   与第 1 个撞色（门店那套的图例就有 5 个班次）。 */
+.gSeg { display: inline-flex; align-items: center; gap: 4px; }
+.gSeg .gBtn.on { color: var(--hy-mint); border-color: var(--hy-mint-line); background: var(--hy-mint-soft); }
+.gW-tip { font-size: 10.5px; color: var(--hy-faint); }
+/* 筛人：一屏只放得下四行多，名单十几号人时靠翻页找人太慢（图片里那套也有这个框）。 */
+.gW-find { display: flex; align-items: center; gap: 9px; padding: 0 2px 8px; }
+.gW-find input {
+  flex: 1; min-width: 0; font: inherit; font-size: 12px; color: var(--hy-ink);
+  background: var(--hy-surface-2); border: 1px solid var(--hy-line);
+  border-radius: 999px; padding: 6px 12px;
+}
+.gW-find input::placeholder { color: var(--hy-faint); }
+.gW-find span { flex: none; font-size: 10.5px; color: var(--hy-faint); }
+.gW { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 4px; }
+.gW-cname { width: 4.6em; }
+/* 表头粘住：滚下去以后还得知道哪一列是哪天（门店那套滚动时表头也在）。 */
+.gW thead th {
+  position: sticky; top: 0; z-index: 3;
+  padding: 3px 0 5px; border-radius: 8px;
+  background: var(--hy-bg);
+  font-weight: 400; font-size: 10px; color: var(--hy-faint); line-height: 1.3;
+}
+.gW thead th .d { display: block; font-family: var(--font-mono); font-size: 12px; color: var(--hy-ink); }
+.gW thead th .m { display: block; font-style: normal; font-size: 9px; color: var(--hy-faint); }
+.gW thead th.today { background: var(--hy-mint-soft); box-shadow: inset 0 0 0 1px var(--hy-mint-line); }
+.gW thead th.today .w { color: var(--hy-mint); }
+.gW thead th.today .d { color: var(--hy-mint-bright); font-weight: 700; }
+.gW thead th.mute { opacity: .45; }
+.gW thead th.weekend .w { color: var(--hy-muted); }
+.gW-name {
+  padding: 0 2px; text-align: left; vertical-align: middle;
+  font-weight: 400; font-size: 11.5px; color: var(--hy-ink); line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.gW-name b { font-weight: 600; }
+/* 没配规则的人整行都是空的 —— 行内就得说一句，不然看着像这店不给他排班。 */
+.gW-norule { display: block; font-style: normal; font-size: 9.5px; color: var(--hy-amber); }
+.gW-cell {
+  position: relative; width: 100%; min-height: 40px; padding: 0;
+  display: grid; place-items: center;
+  border: 1px solid transparent; border-radius: 9px;
+  background: var(--hy-surface-2); color: var(--hy-ink);
+  font: inherit; font-size: 12px; cursor: pointer;
+  /* 长按要看/改这一格：别让手机把它当成"选中文字"或弹放大镜。 */
+  -webkit-touch-callout: none; user-select: none;
+}
+.gW-cell:disabled { cursor: default; }
+.gW-cell.long { font-size: 10px; letter-spacing: -.02em; }
+.gW-cell.tone-mint { color: var(--hy-mint); background: rgba(63, 224, 176, .14); border-color: rgba(63, 224, 176, .3); }
+.gW-cell.tone-aqua { color: var(--hy-aqua); background: rgba(95, 214, 230, .14); border-color: rgba(95, 214, 230, .3); }
+.gW-cell.tone-amber { color: var(--hy-amber); background: rgba(227, 164, 74, .14); border-color: rgba(227, 164, 74, .3); }
+.gW-cell.tone-seal { color: var(--hy-seal-bright); background: rgba(239, 106, 79, .14); border-color: rgba(239, 106, 79, .3); }
+.gW-cell.tone-violet { color: var(--hy-violet); background: rgba(177, 140, 240, .14); border-color: rgba(177, 140, 240, .3); }
+.gW-cell.tone-rose { color: var(--hy-rose); background: rgba(240, 122, 176, .14); border-color: rgba(240, 122, 176, .3); }
+.gW-cell.off { color: var(--hy-faint); background: rgba(133, 205, 198, .07); border-color: var(--hy-line); }
+.gW-cell.leave { color: var(--hy-aqua); background: rgba(95, 214, 230, .1); border-color: rgba(95, 214, 230, .28); }
+/* 两种「空」分开：整列没有数据 / 还没铺到 = 虚线淡掉；这天有数据但这个人没排到 = 淡框。 */
+.gW-cell.mute { background: transparent; border: 1px dashed var(--hy-line); opacity: .5; }
+.gW-cell.none { background: transparent; border: 1px dashed var(--hy-line-strong); }
+.gW-cell.today { box-shadow: inset 0 0 0 1px var(--hy-mint-line); }
+.gW-cell.on { box-shadow: 0 0 0 2px var(--hy-mint); }
+/* 这天被单日覆盖改过（票 07 的青点，跟月历同一个记号）。 */
+.gW-cell.over::after {
+  content: ""; position: absolute; top: 3px; right: 3px;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--hy-aqua);
+}
+/* 这一列有申请等着批（票 02 的琥珀记号）：挂在表头上，一格一个数。 */
+.gW thead th .pend {
+  position: absolute; top: 0; right: 2px;
+  min-width: 14px; height: 14px; padding: 0 3px;
+  border-radius: 999px; background: var(--hy-amber); color: var(--hy-night);
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 700;
+  line-height: 14px; text-align: center; font-style: normal;
+}
+.gW-em { color: var(--hy-ink); }
+.gB-legend i.off { background: var(--hy-faint); }
+.gB-legend i.leave { background: var(--hy-aqua); }
+/* 抽屉弹出来时给页面留出底部空间：不留的话它压住的正是下面几行员工
+   （门店那套就是这个毛病，图片里能看到第 4、5 行被压掉一半）。 */
+.gB.sheet-open { padding-bottom: 320px; }
+/* 笔袋开着（折叠成一行）时只留一条的高度：不占地方，最后一行也滚得上来。 */
+.gB.brush-open { padding-bottom: 88px; }
+
+/* ── 底部抽屉 ─────────────────────────────────────────────────────────── */
+.gSheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  max-width: 560px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 9px;
+  max-height: 64vh; overflow-y: auto;
+  padding: 10px 16px calc(14px + env(safe-area-inset-bottom));
+  background: var(--hy-surface);
+  border-top: 1px solid var(--hy-line-strong);
+  border-radius: var(--hy-radius-lg) var(--hy-radius-lg) 0 0;
+  box-shadow: 0 -18px 40px rgba(0, 0, 0, .55);
+}
+.gSheet-bar { display: flex; align-items: center; gap: 8px; }
+.gSheet-bar .gSeg { margin: 0 auto; }
+.gSheet-fold {
+  width: 30px; height: 26px; flex: none;
+  display: grid; place-items: center;
+  font: inherit; font-size: 13px; line-height: 1; color: var(--hy-muted);
+  background: var(--hy-surface-2); border: 1px solid var(--hy-line);
+  border-radius: 999px; cursor: pointer;
+}
+.gSheet-hd { display: flex; align-items: baseline; gap: 8px; margin: 0; flex-wrap: wrap; }
+.gSheet-hd b { font-family: var(--font-song); font-size: 13.5px; letter-spacing: .06em; }
+.gSheet-hd span { font-size: 11.5px; color: var(--hy-muted); }
+.gSheet-hd em { margin-left: auto; font-style: normal; font-size: 11px; color: var(--hy-mint); }
+.gSheet-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.gSheet-list { display: flex; gap: 8px; flex-wrap: wrap; }
+.gChip {
+  display: inline-flex; align-items: center;
+  font: inherit; font-size: 12px; color: var(--hy-ink);
+  background: var(--hy-surface-2); border: 1px solid var(--hy-line);
+  border-radius: 999px; padding: 7px 14px; cursor: pointer;
+}
+.gChip.wide { min-width: 104px; }
+.gChip:disabled { opacity: .45; cursor: default; }
+.gChip.on { box-shadow: 0 0 0 2px var(--hy-mint); }
+.gChip.tone-mint { color: var(--hy-mint); background: rgba(63, 224, 176, .14); border-color: rgba(63, 224, 176, .3); }
+.gChip.tone-aqua { color: var(--hy-aqua); background: rgba(95, 214, 230, .14); border-color: rgba(95, 214, 230, .3); }
+.gChip.tone-amber { color: var(--hy-amber); background: rgba(227, 164, 74, .14); border-color: rgba(227, 164, 74, .3); }
+.gChip.tone-seal { color: var(--hy-seal-bright); background: rgba(239, 106, 79, .14); border-color: rgba(239, 106, 79, .3); }
+.gChip.tone-violet { color: var(--hy-violet); background: rgba(177, 140, 240, .14); border-color: rgba(177, 140, 240, .3); }
+.gChip.tone-rose { color: var(--hy-rose); background: rgba(240, 122, 176, .14); border-color: rgba(240, 122, 176, .3); }
+.gChip .dt { width: 9px; height: 9px; flex: none; margin-right: 7px; border-radius: 50%; background: currentColor; }
+.gChip .dt.rest { background: var(--hy-faint); }
+.gSheet-rule { margin: 0; font-size: 11.5px; color: var(--hy-ink); line-height: 1.7; }
+.gSheet-pick-note { font-style: normal; color: var(--hy-faint); font-size: 10.5px; }
+.gSheet-hint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.7; }
+.gSheet-err { margin: 0; font-size: 11px; color: var(--hy-seal-bright); line-height: 1.7; }
 </style>

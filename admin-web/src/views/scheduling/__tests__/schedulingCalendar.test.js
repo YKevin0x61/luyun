@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../SchedulingCalendarView.vue'), 'utf8')
+const shell = readFileSync(join(here, '../SchedulingLayout.vue'), 'utf8')
 const tokens = readFileSync(join(here, '../../../../public/hygiene-admin.css'), 'utf8')
 const router = readFileSync(join(here, '../../../router/index.js'), 'utf8')
 const navBar = readFileSync(join(here, '../../../components/NavBar.vue'), 'utf8')
@@ -13,7 +14,10 @@ describe('店长端排班月历（原型 B）', () => {
   it('borrows the shared deep-teal tokens without joining the hygiene module', () => {
     // 令牌住在 public/hygiene-admin.css 里，但那是**共享样式表**：排班不 import
     // 卫生的 Python、不挂卫生菜单，两边各走各的门。
-    expect(view).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    // 共享样式表由**壳**加载一份（`SchedulingLayout.vue`）：三个子页各加载一份会挂出
+    // 重复的 <link>；壳一层管住，跟卫生管理端一个做法（那边也是 layout 加载、子页不管）。
+    expect(shell).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    expect(view).not.toMatch(/useScopedStylesheet\(/)
     expect(view).toMatch(/class="hygiene-admin sched-page"/)
   })
 
@@ -79,7 +83,7 @@ describe('店长端排班月历（原型 B）', () => {
     // 跟规则那条路分开 —— 「固定一个班 / 编周期」改的是规则，「改这一天」改的是那天的快照。
     expect(view).toMatch(/api\.put\(`\/api\/scheduling\/overrides\/\$\{person\.id\}\/\$\{day\}`/)
     expect(view).toMatch(/api\.delete\(`\/api\/scheduling\/overrides\/\$\{person\.id\}\/\$\{day\}`\)/)
-    // 改成休走 `is_rest`，不是「班次留空」；不给责任区 = 跟这个班次的固定区。
+    // 改成休走 `is_rest`，不是「班次留空」；不给工作区 = 跟这个班次的固定区。
     expect(view).toMatch(/is_rest: true/)
     expect(view).toMatch(/zone_id: editZone\.value === '' \? null : Number\(editZone\.value\)/)
     // 名字是一颗可以按的棋子；点开的是那一天的那个人。
@@ -126,18 +130,43 @@ describe('店长端排班月历（原型 B）', () => {
     expect(missing).toEqual([])
   })
 
+  it('排班从后台壳里独立出来：自带窄栏，不再压后台那条导航（2026-10-04）', () => {
+    // 后台导航在手机上要占 86px（`theme.css` 的 ≤720px 那套两行布局），而排班是"当场干活
+    // 的界面"——跟卫生管理端、员工端一个路子：标 standalone，由 SchedulingLayout 提供
+    // 自己的头（回后台的入口、页面名、实时状态，原先这三样都挂在后台导航上）。
+    expect(router).toMatch(/meta: \{ standalone: true \}/)
+    expect(router).toMatch(/views\/scheduling\/SchedulingLayout\.vue/)
+    expect(shell).toMatch(/router\.push\('\/'\)/)
+    expect(shell).toMatch(/inject\('wsConnected'/)
+    // 三个 URL 一个字符都没变：后端 `SPA_PAGE_ROUTES` 与 `tests/test_spa_page_routes.py`
+    // 都按字面读 `path: '/x'`（子路由因此写绝对路径，不写相对段）。
+    expect(router).toMatch(/path: '\/workbench\/inbox', name: 'workbench-inbox'/)
+    expect(router).toMatch(/path: '\/workbench\/shifts', name: 'workbench-shifts'/)
+  })
+
+  it('导航上排班与卫生并成一格「工作台」（2026-10-04 合并）', () => {
+    // 原来是并排两格（「排班」+「卫生」）。合并成一个子系统之后只留一格，高亮覆盖两组。
+    expect(navBar).toMatch(/WORKBENCH_TITLE/)
+        expect(navBar).toMatch(/route\.path\.startsWith\('\/workbench'\)/)
+    // 工作台窄栏里有进「现场」那一组的入口（卫生八页从那儿接手）。
+    expect(shell).toMatch(/WORKBENCH_FIELD_HOME/)
+    expect(shell).toMatch(/class="sched-field"/)
+    // 子系统名字只写一次。
+    expect(shell).toMatch(/WORKBENCH_TITLE/)
+  })
+
   it('has its own door in the admin shell', () => {
-    expect(router).toMatch(/path: '\/scheduling'/)
+    expect(router).toMatch(/path: '\/workbench'/)
     expect(router).toMatch(/views\/scheduling\/SchedulingCalendarView\.vue/)
-    expect(navBar).toMatch(/to="\/scheduling"/)
-    expect(navBar).toMatch(/prefix: '\/scheduling'/)
+    expect(navBar).toMatch(/to="\/workbench"/)
+    expect(navBar).toMatch(/prefix: '\/workbench'/)
   })
 
   it('底部那条待处理里接着「请假待办」（票 08）', () => {
     // 底下原来只有「N 个人还没配规则」那一条。请假是员工在手机上提的、店长在待办页批，
     // 月历上得有条路走过去 —— 否则没人知道有假等着批（页面上也不许弹窗提醒）。
     expect(view).toMatch(/class="gPend gTodo"/)
-    expect(view).toMatch(/router\.push\('\/scheduling\/inbox'\)/)
+    expect(view).toMatch(/router\.push\('\/workbench\/inbox'\)/)
     expect(view).toContain('请假待办')
     // 那一条是按钮不是链接：跟旁边那条同一个形状，点哪儿都算。
     expect(view).toMatch(/<button class="gPend gTodo" type="button"/)
@@ -175,10 +204,15 @@ describe('店长端排班月历（原型 B）', () => {
 
   it('配规则只挑还在用的班次；当天那个下拉能显示停用的，但不给选', () => {
     // 「只能用还在用的班次」是服务端的口径（`set_rule` 的 `_require_shifts_usable`，
-    // 单日覆盖那条路也校验）：停用班次出现在周期的解析表或固定责任区的选择里，
+    // 单日覆盖那条路也校验）：停用班次出现在周期的解析表或固定工作区的选择里，
     // 店长选完只会吃一句 400。页面照同一口径把它们挡在选择之外。
     expect(view).toMatch(/const activeShifts = computed/)
-    expect((view.match(/v-for="shift in activeShifts"/g) || []).length).toBe(2)
+    // 四处按「还在用的班次」渲染：名单行的「固定X班」按钮、每人每班次的固定工作区下拉、
+    // 周表的图例、周表底部抽屉里的班次色卡（后两处是 2026-09-30 加的）。
+    // 多一处少一处都是有意的改动，所以钉住数量。
+    // 五处：月历图例、抽屉里的班次按钮、笔刷条的班次下拉（2026-10-04 加）、
+    // 名单里的固定班次按钮、月历当天卡里的班次选择。
+    expect((view.match(/v-for="shift in activeShifts"/g) || []).length).toBe(5)
     // 当天卡那个下拉列的是**显示用**那份（他那天可能就是停用的那个班）——
     // 停用的那条标出来并禁掉。
     expect(view).toMatch(/v-for="shift in shifts"[\s\S]{0,260}?已停用/)

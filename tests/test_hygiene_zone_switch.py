@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""换责任区要留痕，而且换完之后看板/日常清单仍然对得上（票 10 起由**排班**触发）。
+"""换工作区要留痕，而且换完之后看板/日常清单仍然对得上（票 10 起由**排班**触发）。
 
-票 10 之前员工当天能在手机上把责任区从 A 改成 B（``pick_assignment`` 是 upsert 语义），
+票 10 之前员工当天能在手机上把工作区从 A 改成 B（``pick_assignment`` 是 upsert 语义），
 所以那份留痕记的是「谁自己换过区」。自选入口撤了之后，换区只剩排班侧两条路：
 
 * 店长改**某一天的覆盖**：``SchedulingStore.set_override(employee_id, date, shift_id=…, zone_id=…)``；
-* 店长改**固定责任区**：``SchedulingStore.set_zone_default(employee_id, shift_id, zone_id)``。
+* 店长改**固定工作区**：``SchedulingStore.set_zone_default(employee_id, shift_id, zone_id)``。
 
 卫生这一侧只读排班结果（公共层的 ``DutyRoster``），所以「换区之后数据一致」这件事现在
 要守的是：改完排班那一行，卫生立刻按新的区说话（会话 / 日常清单 / 提交归属），而且
@@ -14,7 +14,7 @@
 （``scheduling_overrides`` 一行 + ``staff_assignments.source='override'``）。
 
 这里的用例锁住五件事：
-1. 单日覆盖换区 → 卫生当天的班次与责任区立刻跟着变，排班侧留下覆盖记录，卫生侧 0 条换区事件；
+1. 单日覆盖换区 → 卫生当天的班次与工作区立刻跟着变，排班侧留下覆盖记录，卫生侧 0 条换区事件；
 2. 管理员那两条路（卫生后台改派已封 403、改固定区）都不算员工自换区，且单日覆盖不被固定区冲掉；
 3. 换区之后每条实拍仍留在**拍摄时**所在的那个区，换区挪不动已经交上去的证据；
 4. 单日覆盖只属于那一天：跨过 06:00 切日点之后回到规则给的区。
@@ -104,7 +104,7 @@ def hygiene_http(tmp_path):
     _run(work.prepare())
     employee = _run(accounts.register(PHONE, PASSWORD, "张三"))
     _run(accounts.approve(employee["id"]))
-    # 前置数据一律配排班（票 10）：今天白班档 + 第一个责任区（案板）。
+    # 前置数据一律配排班（票 10）：今天白班档 + 第一个工作区（案板）。
     first, second = _zone_ids(work)[:2]
     _run(assign_duty(db, employee["id"], slot="day", zone_id=first, now=clock.now))
     duty = _run(accounts.current_assignment(employee["id"]))
@@ -277,7 +277,7 @@ def test_admin_paths_move_the_zone_without_a_self_switch_event(hygiene_http):
     """管理员两条路都不算员工自换区；已经单日覆盖过的那天不被固定区冲掉。
 
     票 10 之前这条测的是「管理员改派不是员工自换区」。现在管理员改派从卫生这一侧
-    撤了（403），落到排班的单日覆盖与固定责任区上 —— 两条路都留在排班侧，都不该
+    撤了（403），落到排班的单日覆盖与固定工作区上 —— 两条路都留在排班侧，都不该
     在卫生的看板上记成「换区」。
     """
     env = hygiene_http

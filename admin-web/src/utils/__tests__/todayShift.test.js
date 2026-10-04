@@ -78,7 +78,7 @@ describe('「休」和「还没排」是两件事（验收 3）', () => {
     expect(todayTone(REST)).not.toBe(todayTone(NOT_ROSTERED))
   })
 
-  it('班次名与责任区都从行上取，页面不写死白班夜班', () => {
+  it('班次名与工作区都从行上取，页面不写死白班夜班', () => {
     expect(shiftText(MORNING)).toBe('白班')
     expect(todayHeadline(MORNING)).toBe('白班')
     expect(todayTone(MORNING)).toBe('')
@@ -172,9 +172,10 @@ describe('整屏没有钟点（验收 5）', () => {
 })
 
 describe('员工端「整月」（票 06）', () => {
-  it('表头周日开头，七格', () => {
-    // 服务端给的 `lead = isoweekday() % 7` 就是这个开头（周日第 0 格）。
-    expect(MONTH_HEADS).toEqual(['日', '一', '二', '三', '四', '五', '六'])
+  it('表头周一开头，七格', () => {
+    // 服务端给的 `lead = date.weekday()` 就是这个开头（周一第 0 格）——
+    // 2026-09-30 全模块从周日开头改成周一开头，跟店长月历一起动。
+    expect(MONTH_HEADS).toEqual(['一', '二', '三', '四', '五', '六', '日'])
     expect(MONTH_HEADS).toHaveLength(7)
   })
 

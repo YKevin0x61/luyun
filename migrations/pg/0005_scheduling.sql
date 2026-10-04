@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS staff_shifts (
 
 -- 算出来的结果：谁在哪天、上什么班、在哪个区。
 -- `shift_id IS NULL` = 那天休（规则里 `NULL` 那一格）；`zone_id` 由排班写、
--- 本期（票 02）一律为 NULL，等责任区默认值那张表落地后填。
+-- 本期（票 02）一律为 NULL，等工作区默认值那张表落地后填。
 -- `source` 记这一行是谁写的：`rule`（规则展开）/ `override`（单日改写，后面的票）。
 CREATE TABLE IF NOT EXISTS staff_assignments (
     tenant_id BIGINT NOT NULL DEFAULT 1 REFERENCES tenants(id),

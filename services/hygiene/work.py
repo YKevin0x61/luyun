@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""卫生责任区、日常检查项、当前标准图、日常提交与验收、专项卫生、整改单、逾期群通知、红黑榜、卫生教材。
+"""卫生工作区、日常检查项、当前标准图、日常提交与验收、专项卫生、整改单、逾期群通知、红黑榜、卫生教材。
 
 Does not hash passwords or issue staff sessions. Captures stay off SQLite WAL.
 """
@@ -114,7 +114,7 @@ EVENT_MISSED_DAILY = "逾期"
 EVENT_CAPTURE = "实拍"
 EVENT_REJECT = "驳回"
 EVENT_FIRST_PASS = "一次通过"
-# 员工当天自行换责任区的留痕事件。责任区是分工而不是安全边界（员工可以自由换区，
+# 员工当天自行换工作区的留痕事件。工作区是分工而不是安全边界（员工可以自由换区，
 # 见 .scratch/hygiene-audit/2026-09-20-review.md §1.1），所以不阻止换区，但要把
 # "谁越了区"记进个人榜，让红黑榜的实拍数字可解释。
 EVENT_ZONE_SWITCH = "换区"
@@ -206,6 +206,7 @@ class HygieneWork:
         notifier=None,
         image_variants=None,
         on_change=None,
+        capture_sharer=None,
     ):
         conn = getattr(conn_or_db, "_conn", conn_or_db)
         if conn is None:
@@ -216,6 +217,8 @@ class HygieneWork:
         self._captures = captures
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._notifier = notifier
+        # 验收通过的实拍 → 卫生群：登记在验收事务里，发送在写锁外（见 wecom_share.py）。
+        self._sharer = capture_sharer
         self._image_variants = image_variants
         self._on_change = on_change
         self._write_lock_owner = conn_or_db
@@ -485,7 +488,7 @@ class HygieneWork:
 
     @serialized_write
     async def set_zone_shifts(self, actor: dict, zone_id: int, shifts) -> dict:
-        """超级管理员设置责任区跑哪些班次。"""
+        """超级管理员设置工作区跑哪些班次。"""
         self._require_super(actor)
         zone = await self._fetch_zone(zone_id)
         if zone is None:
@@ -919,9 +922,9 @@ class HygieneWork:
         }
 
     async def standard_version(self, standard_id: int, actor: Optional[dict] = None) -> dict:
-        """单张标准图。传入员工 actor 时按该员工的责任区校验归属。
+        """单张标准图。传入员工 actor 时按该员工的工作区校验归属。
 
-        同一条数据在 ``/staff/items/{item_id}/standard`` 上是有责任区校验的，
+        同一条数据在 ``/staff/items/{item_id}/standard`` 上是有工作区校验的，
         这里不能成为绕过它的第二扇门（员工可以按 id 遍历下载全店标准图）。
         """
         standard = await self.standard_by_id(standard_id)
@@ -942,8 +945,8 @@ class HygieneWork:
     ) -> dict:
         """当前标准图清单（员工端离线缓存用）。
 
-        传入员工 actor 时只返回该员工当天责任区的项：这份清单会被整包离线缓存，
-        「缓存即越权」——不做切片就等于把全店标准图发给每个员工。未选责任区时
+        传入员工 actor 时只返回该员工当天工作区的项：这份清单会被整包离线缓存，
+        「缓存即越权」——不做切片就等于把全店标准图发给每个员工。未选工作区时
         返回空清单而不是报错，避免刚打开页面就被 400 挡住。
 
         ``variant`` 决定清单声明的是哪一份字节：员工端下的是 ``?variant=preview``
@@ -1043,7 +1046,7 @@ class HygieneWork:
         }
 
     def _empty_standard_manifest(self) -> dict:
-        """还没选责任区的员工拿到空清单（有稳定的 version，不是错误）。"""
+        """还没选工作区的员工拿到空清单（有稳定的 version，不是错误）。"""
         return self._standard_manifest_payload([])
 
     async def _readable_capture_ids(self) -> set:
@@ -2096,6 +2099,21 @@ class HygieneWork:
         if item_row is not None:
             self._require_zone_access(actor, item_row["zone_id"])
         self._require_reviewer(actor, submission["submitter_id"])
+        # 发到群里的那一行说明：哪个区、哪个检查项、什么时候验的（**不带员工姓名**）。
+        # 先算好 —— 下面那个分支会把 item_row 换成只带 zone_id 的那一行。
+        reviewed_item = {} if item_row is None else dict(item_row)
+        head = " · ".join(
+            part
+            for part in (
+                str(reviewed_item.get("zone_name") or "").strip(),
+                str(reviewed_item.get("name") or "").strip(),
+            )
+            if part
+        ) or "日常检查"
+        share_caption = (
+            f"【卫生验收】{head}（{shift}）\n"
+            f"{instance['business_date']} {self._now_dt().strftime('%H:%M')} 验收通过"
+        )
         now = self._now_iso()
         cur = await self._conn.execute(
             """UPDATE hygiene_daily_instances
@@ -2120,7 +2138,18 @@ class HygieneWork:
                 shift=shift,
                 business_date=instance["business_date"],
             )
+        if self._sharer is not None:
+            # 与验收在同一个事务里登记：不存在"验收成功了却没登记"。
+            await self._sharer.enqueue(
+                kind="daily",
+                ref_key=f"{int(item_id)}:{shift}:{instance['business_date']}",
+                capture_id=str(submission.get("capture_id") or ""),
+                caption=share_caption,
+            )
         await self._conn.commit()
+        if self._sharer is not None:
+            # 只触发，不等它跑完：发送是秒级的网络 IO，此刻我们还握着写锁。
+            self._sharer.kick()
         logger.info("hygiene daily accepted item=%s shift=%s", item_id, shift)
         return {
             "item_id": int(item_id),
@@ -2445,7 +2474,7 @@ class HygieneWork:
 
     @serialized_write
     # **票 10 起这个方法没有生产触发路径**：换区现在由店长在排班页做（单日覆盖或固定
-    # 责任区），卫生这一侧只读排班结果，所以「员工自己换区」这件事不再发生。方法与
+    # 工作区），卫生这一侧只读排班结果，所以「员工自己换区」这件事不再发生。方法与
     # `EVENT_ZONE_SWITCH` 都留着：个人榜还要聚合**历史**那些换区事件，读链路不能断；
     # 将来若要有新触发点（比如「卫生发现当天的区跟上一份不同」），接在这里。
     async def record_zone_switch(
@@ -2457,7 +2486,7 @@ class HygieneWork:
         to_zone_id: int,
         to_zone_name: str,
     ) -> dict:
-        """留痕：员工当天自己把责任区从 A 换成 B。
+        """留痕：员工当天自己把工作区从 A 换成 B。
 
         换区本身允许（门店临时换岗是真实需求），这里只记录事件，让个人榜能显示
         换区次数、事件流能还原时间线——否则一个跨区刷实拍的人，数字与只在本区干活
@@ -3335,6 +3364,14 @@ class HygieneWork:
     async def accept_deep_clean_pair(self, actor: dict, item_id: int) -> dict:
         instance, submission = await self._pending_deep_clean(item_id)
         self._require_reviewer(actor, submission["submitter_id"])
+        # 专项一次提交两张图：capture_id 存「后」，extra 存「前」，发出去的是拼好的
+        # 一张对照图（左前右后）—— 所以说明里要写清左右，图上也有标签。
+        deep_clean_name = str(submission.get("item_name") or "").strip() or "专项卫生"
+        share_caption = (
+            f"【卫生验收】{deep_clean_name}（专项前后对照）\n"
+            f"{instance['business_date']} {self._now_dt().strftime('%H:%M')} 验收通过"
+            f" · 左 前 / 右 后"
+        )
         now = self._now_iso()
         cur = await self._conn.execute(
             """UPDATE hygiene_deep_clean_instances
@@ -3345,7 +3382,17 @@ class HygieneWork:
         if cur.rowcount != 1:
             await self._conn.rollback()
             raise HygieneWorkError("not_pending", "not_pending")
+        if self._sharer is not None:
+            await self._sharer.enqueue(
+                kind="deep_clean",
+                ref_key=f"{int(item_id)}:{instance['business_date']}",
+                capture_id=str(submission.get("after_capture_id") or ""),
+                extra_capture_id=str(submission.get("before_capture_id") or ""),
+                caption=share_caption,
+            )
         await self._conn.commit()
+        if self._sharer is not None:
+            self._sharer.kick()
         logger.info("hygiene deep-clean accepted item=%s", item_id)
         work = await self.list_deep_clean_work(actor)
         return {
@@ -3869,9 +3916,18 @@ class HygieneWork:
 
     @serialized_write
     async def accept_fix(self, actor: dict, ticket_id: int) -> dict:
-        ticket, _reshoot = await self._pending_fix(ticket_id)
+        ticket, reshoot = await self._pending_fix(ticket_id)
         self._require_zone_access(actor, ticket["zone_id"])
         self._require_fix_reviewer(actor, ticket)
+        # 发群里的是**回拍**那张（整改后的结果）；开单原图不跟着发 —— 群里要的是
+        # "改好了"，不是"当时有多脏"。
+        ticket_label = str(ticket.get("ticket_type") or "").strip() or "整改"
+        zone_label = str(ticket.get("zone_name") or "").strip() or "工作区"
+        share_caption = (
+            f"【卫生验收】{zone_label} · 整改回拍（{ticket_label}）\n"
+            f"{hygiene_business_date(self._now_dt())} "
+            f"{self._now_dt().strftime('%H:%M')} 验收通过"
+        )
         now = self._now_iso()
         cur = await self._conn.execute(
             """UPDATE hygiene_fix_tickets
@@ -3882,13 +3938,52 @@ class HygieneWork:
         if cur.rowcount != 1:
             await self._conn.rollback()
             raise HygieneWorkError("not_pending", "not_pending")
+        if self._sharer is not None:
+            await self._sharer.enqueue(
+                kind="fix",
+                ref_key=str(int(ticket_id)),
+                capture_id=str(reshoot.get("capture_id") or ""),
+                caption=share_caption,
+            )
         await self._conn.commit()
+        if self._sharer is not None:
+            self._sharer.kick()
         logger.info("hygiene fix accepted ticket=%s", ticket_id)
         return {
             "id": int(ticket_id),
             "status": STATUS_PASSED,
             "deadline": ticket["deadline"],
         }
+
+    async def share_accepted_capture(
+        self,
+        *,
+        kind: str,
+        ref_key: str,
+        capture_id: str,
+        caption: str = "",
+        extra_capture_id: str = "",
+    ) -> bool:
+        """**自己拿写锁**的分享登记入口。
+
+        给那些没有现成写事务的验收路径用 —— 仪容仪表就是那样：它的写路径自己
+        `commit()`，没有 `@serialized_write` 罩着。日常 / 专项 / 整改已经在写锁与
+        事务里，直接调 `self._sharer.enqueue()`，不走这里（那条路要的是"与验收同生共死"）。
+        """
+        if self._sharer is None:
+            return False
+        async with self._write_lock:
+            created = await self._sharer.enqueue(
+                kind=kind,
+                ref_key=ref_key,
+                capture_id=capture_id,
+                caption=caption,
+                extra_capture_id=extra_capture_id,
+            )
+            await self._conn.commit()
+        if created:
+            self._sharer.kick()
+        return created
 
     @serialized_write
     async def reject_fix(
@@ -4098,6 +4193,10 @@ class HygieneWork:
         logger.info("卫生逾期调度器已启动")
         while True:
             try:
+                # 兜底：验收提交时打的那一枪可能没打中（进程刚重启、上次发送失败要重试），
+                # 积压的分享在这里被捡起来。发送本身在写锁外。
+                if self._sharer is not None:
+                    await self._sharer.flush_pending()
                 await self.sweep_overdue()
                 await self._maybe_purge_board_events()
             except asyncio.CancelledError:

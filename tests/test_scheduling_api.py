@@ -132,6 +132,8 @@ def test_scheduling_routes_require_admin_session(scheduling_http):
 
     assert client.get("/api/scheduling/shifts").status_code == 401
     assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 401
+    # 票 A 的周表也在这扇门后面（只读也是店长的动作）。
+    assert client.get("/api/scheduling/week").status_code == 401
     assert client.get("/api/scheduling/roster").status_code == 401
     assert client.put("/api/scheduling/rules/1", json={"cycle": [1]}).status_code == 401
     assert client.put(
@@ -274,13 +276,13 @@ def test_admin_can_pin_a_fixed_zone_per_shift(scheduling_http):
         }
     ]
 
-    # 挑了一个不存在的区：说得出「责任区不存在」，不是一句「参数不合法」。
+    # 挑了一个不存在的区：说得出「工作区不存在」，不是一句「参数不合法」。
     bad = client.put(
         f"/api/scheduling/zone-defaults/{employee_id}",
         json={"shift_id": day_id, "zone_id": 987654},
     )
     assert bad.status_code == 400
-    assert bad.json()["detail"] == "责任区不存在：请先在卫生的责任区页面新建，或刷新本页"
+    assert bad.json()["detail"] == "工作区不存在：请先在卫生的工作区页面新建，或刷新本页"
 
     # 清掉 = 回到「未配区」，人还留在那天的名单上（票 03 的验收项）。
     cleared = client.put(
@@ -568,9 +570,10 @@ def test_the_two_doors_do_not_open_each_other(scheduling_http, monkeypatch):
     assert client.get("/api/scheduling/me").status_code == 200
     assert client.get("/api/scheduling/me/requests").status_code == 200
     assert client.get("/api/scheduling/me/colleagues").status_code == 200
-    # 反过来也一样：员工会话读不到店长的任何一条（待办、班次表的编辑都在里面）。
+    # 反过来也一样：员工会话读不到店长的任何一条（周表、待办、班次表的编辑都在里面）。
     assert client.get("/api/scheduling/roster").status_code == 401
     assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 401
+    assert client.get("/api/scheduling/week").status_code == 401
     assert client.get("/api/scheduling/inbox").status_code == 401
     assert client.post("/api/scheduling/inbox/1/approve").status_code == 401
     assert client.get("/api/scheduling/shifts/manage").status_code == 401
@@ -626,7 +629,7 @@ def test_staff_month_returns_their_own_calendar(scheduling_http, monkeypatch):
     assert body["month"] == "2026-09"
     assert body["today"] == TODAY
     assert [item["day"] for item in body["days"]] == list(range(1, 31))
-    assert body["lead"] == 2  # 2026-09-01 是周二，表头周日开头
+    assert body["lead"] == 1  # 2026-09-01 是周二，表头周一开头
     around_today = [item for item in body["days"] if item["day"] >= 24][:3]
     assert [(item["shift_name"], item["scheduled"]) for item in around_today] == [
         ("白班", True),
@@ -672,6 +675,125 @@ def test_a_bad_month_is_a_400_not_a_500(scheduling_http, monkeypatch):
 
     assert resp.status_code == 400
     assert resp.json()["detail"] == "月份格式应该是 YYYY-MM"
+
+
+# ── 票 0：周起点统一到周一 ─────────────────────────────────────────────────
+
+
+def test_both_month_calendars_start_on_monday(scheduling_http, monkeypatch):
+    """验收 14：两版月历共用 `_month_frame` —— 同一个 `lead`，改一处两边都变。
+
+    2026-09-01 是周二：表头周一开头时前面只空 1 格。只看店长那一版会漏掉「只改了一半」，
+    所以两边都读。
+    """
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    day_id = client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
+    assert client.put(
+        f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]}
+    ).status_code == 200
+
+    calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    assert (calendar["first_date"], calendar["lead"]) == ("2026-09-01", 1)
+
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+    mine = client.get("/api/scheduling/me/month", params={"month": "2026-09"}).json()
+    assert (mine["employee"]["id"], mine["first_date"], mine["lead"]) == (
+        employee_id,
+        "2026-09-01",
+        1,
+    )
+
+
+# ── 票 A：「员工 × 周」矩阵 ──────────────────────────────────────────────
+
+
+def test_manager_reads_the_week_grid(scheduling_http):
+    """验收 1/8：店长读一周 —— 归一到周一、恰好 7 天、契约字段一个不少。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    _run(accounts.set_job_title(employee_id, "炒锅"))
+    ids = _shift_ids(client)
+    assert client.put(
+        f"/api/scheduling/rules/{employee_id}", json={"cycle": [ids["白班"]]}
+    ).status_code == 200
+
+    resp = client.get("/api/scheduling/week", params={"start": "2026-09-24"})  # 周四
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["start"], body["end"]) == ("2026-09-21", "2026-09-27")
+    assert (body["today"], body["window_end"]) == (TODAY, "2026-12-22")
+    assert body["spans_months"] is False
+    assert [item["business_date"] for item in body["days"]] == [
+        "2026-09-21",
+        "2026-09-22",
+        "2026-09-23",
+        "2026-09-24",
+        "2026-09-25",
+        "2026-09-26",
+        "2026-09-27",
+    ]
+    assert [item["weekday"] for item in body["days"]] == list(range(7))
+    assert [item["is_today"] for item in body["days"]] == [False] * 3 + [True] + [False] * 3
+    # 启用的班次一个不少：抽屉拿这份当班次选择列表。
+    assert [shift["name"] for shift in body["shifts"]] == ["白班", "夜班"]
+    assert body["excluded"] == {"disabled": 0, "pending": 0}
+    assert len(body["employees"]) == 1
+    row = body["employees"][0]
+    assert (row["id"], row["name"], row["job_title"], row["has_rule"]) == (
+        employee_id,
+        NAME,
+        "炒锅",
+        True,
+    )
+    # 七个日期键都在，今天那格是白班、没有覆盖标记。
+    assert set(row["cells"]) == {item["business_date"] for item in body["days"]}
+    assert row["cells"][TODAY] == {
+        "scheduled": True,
+        "shift_id": ids["白班"],
+        "shift_name": "白班",
+        "zone_id": None,
+        "zone_name": None,
+        "overridden": False,
+        "leave": False,
+    }
+    # 昨天那格还没有行（展开只往今天以后铺）：`scheduled=False` 但键在。
+    assert row["cells"]["2026-09-21"]["scheduled"] is False
+    assert [item["row_count"] for item in body["days"]] == [0, 0, 0, 1, 1, 1, 1]
+    # `start` 缺省 = 今天所在那周（同一个周一）。
+    assert client.get("/api/scheduling/week").json()["start"] == "2026-09-21"
+
+
+def test_the_week_grid_spans_months_in_one_table(scheduling_http):
+    """验收 2：跨月周照常 7 天 —— 9 月 3 天 + 10 月 4 天都在，`spans_months=True`。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    day_id = _shift_ids(client)["白班"]
+    assert client.put(
+        f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]}
+    ).status_code == 200
+
+    body = client.get("/api/scheduling/week", params={"start": "2026-09-30"}).json()
+
+    assert (body["start"], body["end"]) == ("2026-09-28", "2026-10-04")
+    assert [item["month"] for item in body["days"]] == [9, 9, 9, 10, 10, 10, 10]
+    assert [item["day"] for item in body["days"]] == [28, 29, 30, 1, 2, 3, 4]
+    assert body["spans_months"] is True
+    # 跨到 10 月的那几天照常有格子（不因为换了月份就少一天）。
+    assert body["employees"][0]["cells"]["2026-10-04"]["shift_name"] == "白班"
+
+
+def test_a_bad_week_start_is_a_400_not_a_500(scheduling_http):
+    """日期写错是输入错误：400 + 月历那句现成的话，不是 500，也不是空白表。"""
+    client, _db, accounts = scheduling_http
+    _employee_id(accounts)
+
+    for wrong in ("2026-9-24", "2026-13-01", "not-a-date"):
+        resp = client.get("/api/scheduling/week", params={"start": wrong})
+        assert resp.status_code == 400, (wrong, resp.text)
+        assert resp.json()["detail"] == "日期格式应该是 YYYY-MM-DD"
 
 
 # ── 单日覆盖（票 07）───────────────────────────────────────────────────────
@@ -771,7 +893,7 @@ def test_override_errors_are_readable_400s(scheduling_http):
 
     both = client.put(f"{base}/2026-09-25", json={"is_rest": True, "shift_id": day_id})
     assert both.status_code == 400
-    assert both.json()["detail"] == "「改成休」的那天不能再带班次或责任区：请把这两项留空"
+    assert both.json()["detail"] == "「改成休」的那天不能再带班次或工作区：请把这两项留空"
 
     blank = client.put(f"{base}/2026-09-25", json={})
     assert blank.status_code == 400
@@ -1219,7 +1341,7 @@ def test_a_refusal_ends_it_without_the_manager(scheduling_http, monkeypatch):
 
 
 def test_approving_a_swap_swaps_the_two_days(scheduling_http, monkeypatch):
-    """验收 4/5：批了两个人那天的班对调，责任区跟着各自的新班次走。"""
+    """验收 4/5：批了两个人那天的班对调，工作区跟着各自的新班次走。"""
     client, db, accounts = scheduling_http
     admin, me, peer, day_id, night_id = _swap_scene(client, accounts, monkeypatch)
     board = _zone(db, "案板")

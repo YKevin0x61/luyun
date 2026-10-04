@@ -232,7 +232,7 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.accounts.current_shift(employee["id"]))
 
     async def test_the_self_pick_entry_is_gone_for_every_input(self):
-        """什么参数都到不了写库那一层 —— 连未知责任区也不再报 `zone_not_found`。
+        """什么参数都到不了写库那一层 —— 连未知工作区也不再报 `zone_not_found`。
 
         （票 10 之前这条测的是「未知区被拒」。现在拒的原因只剩一个：这个入口没了。）
         """
@@ -242,7 +242,7 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "assignment_from_schedule")
 
     async def test_pick_shift_alone_is_gone_too(self):
-        """「先选班次、之后再补责任区」那条老路也走不通了（票 10 之前它可以分两步）。"""
+        """「先选班次、之后再补工作区」那条老路也走不通了（票 10 之前它可以分两步）。"""
         employee = await self._approved_employee()
         with self.assertRaises(EmployeeAccountsError) as raised:
             await self.accounts.pick_shift(employee["id"], "白班")

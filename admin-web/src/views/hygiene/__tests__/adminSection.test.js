@@ -10,11 +10,15 @@ function read(rel) {
 }
 
 describe('hygiene admin section shell', () => {
-  it('top nav keeps a single 卫生 entry instead of six sibling tabs', () => {
+  it('顶部导航只有一格工作台入口，不铺开成六个兄弟页签', () => {
     const nav = read('../../../components/NavBar.vue')
-    expect(nav).toMatch(/to="\/hygiene\/roster"/)
-    expect(nav).toMatch(/HYGIENE_BRAND_TITLE/)
-    expect(nav).toMatch(/isHygieneAdminPath\(route\.path\)/)
+    // 2026-10-04：排班与卫生合并成子系统「工作台」，导航上只剩一格，指到工作台；
+    // 卫生那一组从工作台窄栏的「现场」进（自己的 rail 有八页），不再直接挂在顶部导航上。
+    expect(nav).toMatch(/to="\/workbench"/)
+    expect(nav).toMatch(/WORKBENCH_TITLE/)
+    // 票 04：两组同住 `/workbench/*`，高亮只看这一条前缀，不必再分两组判断。
+    expect(nav).toMatch(/route\.path\.startsWith\('\/workbench'\)/)
+    expect(nav).not.toMatch(/to="\/workbench\/roster"/)
     expect(nav).not.toMatch(/>花名册</)
     expect(nav).not.toMatch(/>卫生区</)
     expect(nav).not.toMatch(/>日常验收</)
@@ -40,11 +44,11 @@ describe('hygiene admin section shell', () => {
     const router = read('../../../router/index.js')
     expect(router).toMatch(/HygieneAdminLayout/)
     expect(router).toMatch(/meta: \{ standalone: true \}/)
-    expect(router).toMatch(/hygieneAdminPage\('\/hygiene\/roster'/)
-    expect(router).toMatch(/hygieneAdminPage\('\/hygiene\/zones'/)
-    expect(router).toMatch(/hygieneAdminPage\('\/hygiene\/daily'/)
-    expect(router).toMatch(/hygieneAdminPage\('\/hygiene\/deep-clean'/)
-    expect(router).toMatch(/hygieneAdminPage\('\/hygiene\/fix'/)
-    expect(router).toMatch(/hygieneAdminPage\('\/hygiene\/boards'/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/roster'/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/zones'/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/daily'/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/deep-clean'/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/fix'/)
+    expect(router).toMatch(/hygieneAdminPage\('\/workbench\/boards'/)
   })
 })

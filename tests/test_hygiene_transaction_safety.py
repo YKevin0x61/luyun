@@ -98,7 +98,7 @@ def test_failed_capture_leaves_no_open_transaction(runtime):
     )
     employee = _run(accounts.register(PHONE, PASSWORD, "张三"))
     _run(accounts.approve(employee["id"]))
-    # 票 10：今天的班次与责任区由**排班**决定（员工端不再自选），前置数据照排班造。
+    # 票 10：今天的班次与工作区由**排班**决定（员工端不再自选），前置数据照排班造。
     _run(assign_duty(db, employee["id"], slot="day", zone_id=zone["id"], now=FIXED_NOW))
     actor = {
         "kind": "staff",
@@ -145,7 +145,7 @@ def test_capture_io_runs_outside_the_write_lock(runtime):
     )
     employee = _run(accounts.register(PHONE, PASSWORD, "张三"))
     _run(accounts.approve(employee["id"]))
-    # 票 10：今天的班次与责任区由**排班**决定（员工端不再自选），前置数据照排班造。
+    # 票 10：今天的班次与工作区由**排班**决定（员工端不再自选），前置数据照排班造。
     _run(assign_duty(db, employee["id"], slot="day", zone_id=zone["id"], now=FIXED_NOW))
     actor = {
         "kind": "staff",

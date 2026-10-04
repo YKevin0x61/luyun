@@ -120,7 +120,7 @@ _ERROR_DETAILS = {
     "employee_not_found": "员工不存在",
     "invalid_shift": "班次只能是白班或夜班",
     "shift_already_picked": "当天班次已选定，不能自己改",
-    # 票 10：员工不再自己选班次和责任区（管理员改派也从卫生这一侧撤了，落到排班的
+    # 票 10：员工不再自己选班次和工作区（管理员改派也从卫生这一侧撤了，落到排班的
     # 单日覆盖上）。这两句说的是「该去哪儿做」，不是「你填错了」。
     "assignment_from_schedule": "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长",
     # 仪容仪表（按人，排到班次才要拍）：每一句都说清下一步该做什么。
@@ -135,18 +135,18 @@ _ERROR_DETAILS = {
     "standard_not_found": "标准图版本不存在",
     "standard_too_large": _upload_too_large_detail("标准图"),
     "capture_too_large": _upload_too_large_detail("照片"),
-    "invalid_zone_name": "请填写卫生责任区名称",
-    "zone_shift_required": "卫生责任区至少要有一个班次",
-    "zone_shift_mismatch": "这个责任区没有该班次，请换一个责任区或班次",
+    "invalid_zone_name": "请填写卫生工作区名称",
+    "zone_shift_required": "卫生工作区至少要有一个班次",
+    "zone_shift_mismatch": "这个工作区没有该班次，请换一个工作区或班次",
     "invalid_item_name": "请填写日常检查项名称",
-    "zone_not_found": "卫生责任区不存在",
+    "zone_not_found": "卫生工作区不存在",
     "item_not_found": "日常检查项不存在",
-    "duplicate_zone": "已有同名卫生责任区",
-    "duplicate_item": "该卫生责任区已有同名检查项",
+    "duplicate_zone": "已有同名卫生工作区",
+    "duplicate_item": "该卫生工作区已有同名检查项",
     "shift_required": "请先选择当天班次",
     "shift_mismatch": "只能交自己班次的日常检查",
-    "zone_required": "请先选择今天的卫生责任区",
-    "zone_mismatch": "只能查看和提交所选卫生责任区的任务",
+    "zone_required": "请先选择今天的卫生工作区",
+    "zone_mismatch": "只能查看和提交所选卫生工作区的任务",
     "live_required": "必须现场拍摄，不能从相册选图",
     "capture_required": "请拍摄日常检查照片",
     "cannot_self_accept": "交这张的人不能自己验收",
@@ -585,7 +585,7 @@ async def _image_response(
 def _standard_cache_actor(identity: Dict[str, Any]) -> Dict[str, Any]:
     """把 require_standard_cache_session 的身份翻成 HygieneWork 的 actor。
 
-    管理员会话不限责任区；员工会话按当天所选责任区切片，否则这份「可整包离线
+    管理员会话不限工作区；员工会话按当天所选工作区切片，否则这份「可整包离线
     缓存」的清单就等于把全店标准图发给每个员工。
     """
     if isinstance(identity, dict) and identity.get("kind") == "staff":
@@ -875,7 +875,7 @@ async def staff_pick_shift(
 
     跟 `/staff/assignment` 各走各的服务层入口（都必抛），答的话才对得上：只改班次的那条
     路回的是 `shift_from_schedule`（「今天的班次由排班决定」）。两条路都撤了，但说的是
-    各自那件事 —— 合用一个处理器会让这一条答成「班次和责任区都改」。
+    各自那件事 —— 合用一个处理器会让这一条答成「班次和工作区都改」。
     """
     try:
         picked = await accounts.pick_shift(staff["employee"]["id"], body.shift)
@@ -1002,7 +1002,7 @@ async def admin_set_shift(
 
 
 async def _standard_export_entries(work: HygieneWork, variant: str) -> list:
-    """收集 (责任区, 检查项, 图片路径, 标注)，只取各检查项的当前标准图。
+    """收集 (工作区, 检查项, 图片路径, 标注)，只取各检查项的当前标准图。
 
     给的是路径不是字节：门店标准图上百张时，一次性把原图读进内存就是几百 MB，
     烘焙在线程里逐张读盘更稳。
@@ -1050,7 +1050,7 @@ def _prune_export_jobs(now: float) -> None:
 
 
 async def _run_export_job(job_id: str, work: HygieneWork, size: str) -> None:
-    """后台把标准图烘焙进图片并按责任区打包。进度写在任务表里，前端轮询。"""
+    """后台把标准图烘焙进图片并按工作区打包。进度写在任务表里，前端轮询。"""
     job = _EXPORT_JOBS[job_id]
     archive_path: Optional[Path] = None
     try:
@@ -1219,7 +1219,7 @@ async def admin_delete_zone(
 ) -> Dict[str, Any]:
     zone = await _delete_or_conflict(
         work.delete_zone(SUPER_ACTOR, zone_id),
-        "该卫生责任区还有关联数据没清干净，暂时不能删",
+        "该卫生工作区还有关联数据没清干净，暂时不能删",
     )
     await _hygiene_nudge("zones", "deleted", zone_id=zone_id)
     return {"zone": zone}
@@ -1374,7 +1374,7 @@ async def admin_update_standard_markup(
 
 # ── 仪容仪表（按人，今天排到班次才要拍）────────────────────────────────
 #
-# 跟日常 / 专项 / 整改不一样：那三类挂在**责任区**上，这一项挂在**人**上 —— 判据是
+# 跟日常 / 专项 / 整改不一样：那三类挂在**工作区**上，这一项挂在**人**上 —— 判据是
 # 排班（今天排到班次），经公共层 `DutyRoster` 读，卫生不 import 排班。**没有截止钟点**
 # （用户口径），所以这一族里没有 overdue、不进看板、不推企微。
 

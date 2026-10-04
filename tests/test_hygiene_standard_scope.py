@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""标准图清单与单张标准图必须按责任区切片。
+"""标准图清单与单张标准图必须按工作区切片。
 
 ``/standard-manifest`` 是给员工端整包离线缓存用的：不做切片就等于把全店标准图
 发给每个员工（拿 standard_id 遍历 ``/standards/{id}/image`` 即可下载）。同一条
-数据在 ``/staff/items/{item_id}/standard`` 上是有责任区校验的，两条路径不能一条
+数据在 ``/staff/items/{item_id}/standard`` 上是有工作区校验的，两条路径不能一条
 严一条松。
 """
 
@@ -111,10 +111,10 @@ def _staff_id(db) -> int:
 
 
 def _assign(client, db, zone_id):
-    """登录 + 把「今天 · 白班档 · 这个责任区」**配成排班**（票 10 的分工来源）。
+    """登录 + 把「今天 · 白班档 · 这个工作区」**配成排班**（票 10 的分工来源）。
 
     票 10 之前这里打的是 ``POST /api/hygiene/staff/assignment``（员工当天自己选区），
-    那个入口现在一律 403：当天的班次与责任区由**排班结果**决定，前置数据只能从上游配。
+    那个入口现在一律 403：当天的班次与工作区由**排班结果**决定，前置数据只能从上游配。
     ``now`` 用夹具那个固定时刻，不然排班的「今天」对不上卫生的营业日。
     """
     _login(client)
@@ -141,7 +141,7 @@ def test_staff_manifest_is_sliced_to_own_zone(scope_http):
 
     item_ids = _manifest_item_ids(client)
     assert mine["id"] in item_ids
-    assert other["id"] not in item_ids, "不能把别的责任区的标准图发给员工"
+    assert other["id"] not in item_ids, "不能把别的工作区的标准图发给员工"
 
 
 def test_staff_cannot_fetch_other_zone_standard_image(scope_http):
@@ -155,7 +155,7 @@ def test_staff_cannot_fetch_other_zone_standard_image(scope_http):
     foreign = client.get(
         f"/api/hygiene/standards/{other['current_standard_id']}/image"
     )
-    assert foreign.status_code == 403, "跨责任区必须拒绝（此前是 200）"
+    assert foreign.status_code == 403, "跨工作区必须拒绝（此前是 200）"
 
 
 def test_staff_without_zone_gets_empty_manifest_not_error(scope_http):
@@ -163,7 +163,7 @@ def test_staff_without_zone_gets_empty_manifest_not_error(scope_http):
     _login(client)
 
     response = client.get("/api/hygiene/standard-manifest")
-    assert response.status_code == 200, "还没选责任区不该把页面挡在 400"
+    assert response.status_code == 200, "还没选工作区不该把页面挡在 400"
     assert response.json()["standards"] == []
 
 

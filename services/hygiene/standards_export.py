@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""把当前标准图连同标注烘焙成图片，按责任区打包成 zip。
+"""把当前标准图连同标注烘焙成图片，按工作区打包成 zip。
 
 导出是给人看的成品：圆圈、箭头、批注不能再是前端叠的一层 DOM，必须画进像素里。
 渲染口径对着 ``admin-web/src/components/hygiene/HygieneMarkupOverlay.vue`` 抄 ——
@@ -217,7 +217,7 @@ def write_archive(
     on_progress: Optional[Callable[[int, int], None]] = None,
     workers: Optional[int] = None,
 ) -> tuple[int, int]:
-    """把 (责任区, 检查项, 原图路径, 标注) 逐张烘焙后写进 zip。
+    """把 (工作区, 检查项, 原图路径, 标注) 逐张烘焙后写进 zip。
 
     逐张读盘再写，不把整包图片同时留在内存里——门店标准图上百张时那是好几百 MB。
     渲染走线程池（`ThreadPoolExecutor.map` 保序，zip 只能顺序写），比串行快数倍；
@@ -252,7 +252,7 @@ def write_archive(
                     failed += 1
                 else:
                     written += 1
-                    folder = safe_component(zone_name, "未命名责任区")
+                    folder = safe_component(zone_name, "未命名工作区")
                     stem = safe_component(item_name, f"标准图-{written}")
                     member = f"{folder}/{stem}.jpg"
                     if member in used:

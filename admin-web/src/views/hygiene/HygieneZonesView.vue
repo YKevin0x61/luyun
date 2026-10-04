@@ -107,7 +107,7 @@ async function refreshPage() {
 }
 
 /**
- * 导出标准图：服务端把圆圈/箭头/批注烘焙进图片，按责任区分成子文件夹打包。
+ * 导出标准图：服务端把圆圈/箭头/批注烘焙进图片，按工作区分成子文件夹打包。
  *
  * 走任务式而不是一个同步请求：几十张图要解码、绘制、重编码（有的门店上百 MB），
  * 同步请求期间界面上什么都没有，员工只会以为按钮没反应。这里先 POST 拿 job_id，
@@ -166,7 +166,7 @@ async function loadZones() {
       selectedId.value = zones.value[0] ? zones.value[0].id : null
     }
   } catch (err) {
-    errorText.value = err.message || '无法加载卫生责任区'
+    errorText.value = err.message || '无法加载卫生工作区'
   } finally {
     loading.value = false
   }
@@ -230,7 +230,7 @@ async function createZone() {
   const name = newZoneName.value.trim()
   if (!name || creatingZone.value) return
   if (!newZoneShifts.value.length) {
-    errorText.value = '卫生责任区至少要有一个班次'
+    errorText.value = '卫生工作区至少要有一个班次'
     return
   }
   creatingZone.value = true
@@ -245,7 +245,7 @@ async function createZone() {
     await loadZones()
     if (data.zone) selectedId.value = data.zone.id
   } catch (err) {
-    errorText.value = err.message || '无法新增卫生责任区'
+    errorText.value = err.message || '无法新增卫生工作区'
   } finally {
     creatingZone.value = false
   }
@@ -254,7 +254,7 @@ async function createZone() {
 async function saveZoneShifts() {
   if (!selected.value || savingShifts.value) return
   if (!zoneShifts.value.length) {
-    errorText.value = '卫生责任区至少要有一个班次'
+    errorText.value = '卫生工作区至少要有一个班次'
     return
   }
   savingShifts.value = true
@@ -269,9 +269,9 @@ async function saveZoneShifts() {
       zones.value[index].shifts = [...data.zone.shifts]
     }
     zoneShifts.value = [...data.zone.shifts]
-    shiftsHint.value = '已保存。该责任区只会出现在选中的班次。'
+    shiftsHint.value = '已保存。该工作区只会出现在选中的班次。'
   } catch (err) {
-    errorText.value = err.message || '无法保存责任区班次'
+    errorText.value = err.message || '无法保存工作区班次'
   } finally {
     savingShifts.value = false
   }
@@ -288,7 +288,7 @@ async function confirmDeleteZone() {
     clearEditor()
     await loadZones()
   } catch (err) {
-    errorText.value = err.message || '无法删除卫生责任区'
+    errorText.value = err.message || '无法删除卫生工作区'
   }
 }
 
@@ -435,12 +435,12 @@ function markLabel(mark) {
   <div class="zones-page">
     <div class="card roster-head">
       <div>
-        <p class="hy-eyebrow">Zones · 责任区划</p>
-        <h1>卫生责任区</h1>
-        <p>维护各卫生责任区的日常检查项和当前标准图。</p>
+        <p class="hy-eyebrow">Zones · 工作区</p>
+        <h1>卫生工作区</h1>
+        <p>维护各卫生工作区的日常检查项和当前标准图。</p>
         <details class="rule-help">
           <summary>规则说明</summary>
-          <p>卫生责任区与档口、配方岗位相互独立。每个责任区可选白班、夜班或只跑其中一个班次；没有当前标准图的检查项不会出现在员工端；更换标准图后，新检查使用新图。删除责任区或检查项会同时删除进行中的待办和该区未闭环整改单。</p>
+          <p>卫生工作区与档口、配方岗位相互独立。每个工作区可选白班、夜班或只跑其中一个班次；没有当前标准图的检查项不会出现在员工端；更换标准图后，新检查使用新图。删除工作区或检查项会同时删除进行中的待办和该区未闭环整改单。</p>
         </details>
       </div>
       <div class="roster-head-actions">
@@ -492,7 +492,7 @@ function markLabel(mark) {
     <div class="zones-grid">
       <div class="table-card">
         <div class="table-card-header">
-          <h3>责任区 <span>{{ zones.length }}</span></h3>
+          <h3>工作区 <span>{{ zones.length }}</span></h3>
         </div>
         <div v-if="loading" class="roster-empty">正在加载…</div>
         <ul v-else class="zone-list">
@@ -513,7 +513,7 @@ function markLabel(mark) {
             <button
               type="button"
               class="btn btn-sm btn-danger"
-              :aria-label="`删除卫生责任区 ${zone.name}`"
+              :aria-label="`删除卫生工作区 ${zone.name}`"
               @click="deleteZoneTarget = zone"
             >删除</button>
           </li>
@@ -524,10 +524,10 @@ function markLabel(mark) {
             class="input"
             type="text"
             maxlength="40"
-            placeholder="再加一个卫生责任区，比如卫生间"
-            aria-label="新卫生责任区名称"
+            placeholder="再加一个卫生工作区，比如卫生间"
+            aria-label="新卫生工作区名称"
           >
-          <div class="zone-shift-picks" role="group" aria-label="新责任区班次">
+          <div class="zone-shift-picks" role="group" aria-label="新工作区班次">
             <label
               v-for="shift in HYGIENE_SHIFTS"
               :key="`new-${shift}`"
@@ -649,7 +649,7 @@ function markLabel(mark) {
 
     <ConfirmDialog
       v-if="deleteZoneTarget"
-      title="删除卫生责任区"
+      title="删除卫生工作区"
       :message="`删除「${deleteZoneTarget.name}」会同时删除该区进行中的日常待办和未闭环整改单。`"
       confirm-label="删除"
       danger

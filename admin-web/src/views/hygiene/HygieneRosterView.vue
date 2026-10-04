@@ -15,8 +15,8 @@ import { STAFF_ENTRY_PATH } from '../../utils/staffPaths'
 
 // 排班那条班次挂在卫生的哪一档日常检查（`staff_shifts.duty_slot`）→ 卫生认的班次名。
 // 只认这一列、不认名字：排班的班次是**数据**（店长能改名、能加第三个），把「夜班」改成
-// 「晚班」，这一档仍然是夜班档；责任区正是按这两个开关建的（`hygiene_zones.day_shift` /
-// `night_shift`），所以责任区候选要按它筛。
+// 「晚班」，这一档仍然是夜班档；工作区正是按这两个开关建的（`hygiene_zones.day_shift` /
+// `night_shift`），所以工作区候选要按它筛。
 const DUTY_SLOT_SHIFTS = { day: '白班', night: '夜班' }
 
 const employees = ref([])
@@ -86,7 +86,7 @@ async function loadRoster() {
         // 「改今天」写的是排班的**单日覆盖**，草稿里放的是排班班次 id（或 'rest' = 那天休），
         // 不是写死的「白班/夜班」。
         shift: defaultShiftIdFor(row),
-        // 责任区：'' = 「跟这个班次的固定区」（提交时发 `zone_id: null`）—— 不再替管理员
+        // 工作区：'' = 「跟这个班次的固定区」（提交时发 `zone_id: null`）—— 不再替管理员
         // 挑第一个区，那种默认会把「他今天本来在哪个区」悄悄改掉。
         zone_id: row.zone_id === null || row.zone_id === undefined ? '' : row.zone_id,
       }
@@ -271,7 +271,7 @@ async function saveRow(row) {
 // 「改今天」：写一条排班的**单日覆盖**。卫生原来那条改派接口（
 // `POST /api/hygiene/admin/roster/{id}/assignment`）票 10 起固定 403 ——
 // 今天上哪个班、在哪个区由排班决定，而卫生不 import 排班，所以改派直接写排班那边。
-// 覆盖是**整天的快照**：班次和责任区一起定下来，`zone_id: null` = 跟这个班次的固定区。
+// 覆盖是**整天的快照**：班次和工作区一起定下来，`zone_id: null` = 跟这个班次的固定区。
 async function changeAssignment(row) {
   const draft = draftFor(row)
   if (!draft || !draft.shift || !today.value) return
@@ -279,7 +279,7 @@ async function changeAssignment(row) {
   errorText.value = ''
   try {
     const payload = draft.shift === 'rest'
-      // 「那天休」：班次与责任区都得留空（带细节的休会被服务端拦下来）。
+      // 「那天休」：班次与工作区都得留空（带细节的休会被服务端拦下来）。
       ? { is_rest: true, shift_id: null, zone_id: null }
       : {
           is_rest: false,

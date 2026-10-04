@@ -18,7 +18,7 @@
   写成**单日覆盖**（`kind=leave`、没有班次），于是「请假」与「本来就休」在结果表里有据可查
   —— 两者的 `shift_id` 都是空，区别只在覆盖记录的 `kind`。
 - **换班**（同一张表，`kind=swap`）：员工指一个同事和一天，**对方先同意**才进店长待办，
-  店长批了两人那天的班对调（票 09；责任区跟着各自的新班次走）。对方拒绝或申请人撤回，
+  店长批了两人那天的班对调（票 09；工作区跟着各自的新班次走）。对方拒绝或申请人撤回，
   排班一个字不变。
 
 **已经写下的行不重算**：展开时窗口内哪天（哪个人）已经有行就跳过。所以「改规则只影响
@@ -401,7 +401,7 @@ class SchedulingStore:
                 "migrations/pg/0005_scheduling.sql（PG 不在启动期改结构，见 ADR 0089）"
             )
             return False
-        # 班次表在、固定责任区表不在：半迁移（0005 应用了、0006 没应用）。启动照旧，
+        # 班次表在、固定工作区表不在：半迁移（0005 应用了、0006 没应用）。启动照旧，
         # 但名单面板会 503，日志里先把该跑哪个脚本说清楚。
         try:
             await (await self._conn.execute("SELECT 1 FROM scheduling_zone_defaults LIMIT 1")).fetchone()
@@ -410,7 +410,7 @@ class SchedulingStore:
             logger.error(
                 "❌ scheduling_zone_defaults 表不存在：请在 Admin「系统更新 → 数据库迁移」"
                 "应用 migrations/pg/0006_scheduling_zone_defaults.sql"
-                "（缺它时排班的名单面板打不开，配不了固定责任区）"
+                "（缺它时排班的名单面板打不开，配不了固定工作区）"
             )
             return False
         if row is not None and int(dict(row)["n"] or 0) > 0:
@@ -473,7 +473,7 @@ class SchedulingStore:
     async def _shift_row(self, shift_id: int) -> dict:
         """按 id 取一行班次（**含停用的**）；没有就报 `unknown_shift_id`。
 
-        跟 `unknown_shift`（责任区那条路：只能挑在用的班次）分开：编辑班次表必须
+        跟 `unknown_shift`（工作区那条路：只能挑在用的班次）分开：编辑班次表必须
         能改到停用的那一条（给它改个名、重新启用），不能因为停用就「不存在」。
         """
         cur = await self._conn.execute(
@@ -720,7 +720,7 @@ class SchedulingStore:
         ]
         return active + retired
 
-    # ── 责任区 ──────────────────────────────────────────────────────────
+    # ── 工作区 ──────────────────────────────────────────────────────────
 
     @_needs_migration
     async def zone_defaults(self) -> dict[int, dict[int, Optional[int]]]:
@@ -822,7 +822,7 @@ class SchedulingStore:
         await self._conn.commit()
 
     def _zone_directory(self) -> ZoneDirectory:
-        """公共层的责任区名单。写锁跟着走 —— 它只读，但共用同一个连接。"""
+        """公共层的工作区名单。写锁跟着走 —— 它只读，但共用同一个连接。"""
         return ZoneDirectory(self._write_lock_owner)
 
     async def _zone_name_index(self) -> dict[int, str]:
@@ -968,7 +968,7 @@ class SchedulingStore:
         """轮转里引用的班次都得是**还在用**的，不在就报是第几格。
 
         说清第几格是票 04 的验收项：规则编辑页照这个数字就能指出错在哪一天。
-        `unknown_shift` 留给责任区那条路（`set_zone_default`：给某人某个班次配区时
+        `unknown_shift` 留给工作区那条路（`set_zone_default`：给某人某个班次配区时
         选了个不存在的班次）。`set_rule` 在锁外与锁里各调一次（理由见那里）；
         读路径也调：`_rule_for`（单人重取规则）用它挡住手工 SQL 写进去的幽灵班次 ——
         跳过那一个人，比铺 90 行指向不存在班次的行好（`expand()` 降级成前者）。
@@ -1059,12 +1059,12 @@ class SchedulingStore:
     ) -> dict:
         """把某人某一天改成「跟规则不一样」，**只改这一天**（票 07）。
 
-        覆盖是**整天的快照**：这一天的班次和责任区由这次调用定下来 ——
+        覆盖是**整天的快照**：这一天的班次和工作区由这次调用定下来 ——
         `scheduling_overrides` 记一条、`staff_assignments` 写一行（`source='override'`）。
         规则以后怎么变都不再动这一天（`_delete_future_rule_rows` 只删 `source='rule'`
         的行），想让它回到规则就撤掉覆盖（`clear_override`）。
 
-        `is_rest=True` = 那天休，班次与责任区都要留空（同 `staff_assignments` 的口径：
+        `is_rest=True` = 那天休，班次与工作区都要留空（同 `staff_assignments` 的口径：
         `shift_id IS NULL` 就是休）；否则 `shift_id` 必给。`zone_id` 不给时跟这个班次的
         **固定区**（`scheduling_zone_defaults`），跟展开时是同一条口径。
 
@@ -1404,14 +1404,15 @@ class SchedulingStore:
     def _month_frame(self, start: date, today: str, days: list) -> dict:
         """两版月历共用的外壳：同一个 `lead` 算法与同一个展开窗口末日。
 
-        `lead` = 第一格前面空几格（表头周日开头，周日=0）。`window_end` 之后的日子注定是空的 ——
+        `lead` = 第一格前面空几格（表头周一开头，周一=0，跟周表 `week_grid().days[].weekday`
+        是同一套）。`window_end` 之后的日子注定是空的 ——
         前端得说出来这是「还没铺到」，不是「那天没人上班」/「那天休」。
         """
         return {
             "month": start.isoformat()[:7],
             "first_date": start.isoformat(),
             "today": today,
-            "lead": start.isoweekday() % 7,
+            "lead": start.weekday(),
             "window_end": self._window()[1],
             "days": days,
         }
@@ -1479,7 +1480,7 @@ class SchedulingStore:
         键叫 `groups` 而不是 `shifts`：`/calendar` 的 `shifts` 是班次列表，这里每一组
         还带人数和名字，同名会让调用方以为形状一样。
 
-        责任区读的是**结果行上的 `zone_id`**，不是现在的固定区配置：那天写下来是什么
+        工作区读的是**结果行上的 `zone_id`**，不是现在的固定区配置：那天写下来是什么
         就是什么 —— 事后改固定区不该改写已经过去的日子（`spec.md` 的「过去不改」）。
 
         每个人带一个 `overridden`：这一行的 `source` 是 `override`（票 07 的单日覆盖），
@@ -1560,8 +1561,155 @@ class SchedulingStore:
         }
 
     @_needs_migration
+    async def week_grid(self, start: Optional[str] = None) -> dict:
+        """「员工 × 周」矩阵：这一周每个人每天上什么班、在哪个区（票 A）。
+
+        与 `day_detail` 用的是同一套判据：人名与名单都来自公共层的 `list_roster()`
+        （`_name_index` 也是从它建的，所以不另起一套）、区名走 `_zone_name_index`、
+        班次走 `_shifts_for_display`、请假走 `_leave_ids` ——
+        两个视角在同一个格子上说的必须是同一件事。
+
+        `start` 归一化到那一周的**周一**（`d - timedelta(days=d.weekday())`），跟月历的
+        `lead = start.weekday()` 是同一条周起点；不给就是今天那一周。跨月周照常返回
+        这 7 天，不拆表（`spans_months` 只是给前端一个提示位）。
+
+        每人**七个日期键都在**：没有那一行时 `scheduled=False`，跟 `my_days`/`my_month`
+        一样由服务层说清「还没有你的班」，前端不靠缺键去猜。两种 `False` 也分得开：
+        `in_window=False` 是「还没铺到」（窗口末日之后），其余是这行还没写。
+
+        `days[].row_count` 是那天**全体**的行数（含休）：0 表示那天一行都没有
+        （系统启用前、或谁都没配规则），不能读成「大家都在休」。
+
+        窗口外照样返回 7 天、不报错：店长会往两头翻，翻到的那一周得是空的而不是 400。
+        """
+        today = self.today()
+        if start in (None, ""):
+            anchor = date.fromisoformat(today)
+        else:
+            # 坏格式走 `_require_business_date` 那句 `invalid_business_date`（400），
+            # 不在这里自己拼一句新的。
+            anchor = date.fromisoformat(_require_business_date(start))
+        first = anchor - timedelta(days=anchor.weekday())
+        last = first + timedelta(days=6)
+        window_end = self._window()[1]
+
+        # 7 天一条 SQL：区间右开（`last + 1 天`），`business_date` 是 TEXT 列。
+        cur = await self._conn.execute(
+            """SELECT employee_id, business_date, shift_id, zone_id, source
+               FROM staff_assignments
+               WHERE business_date >= ? AND business_date < ?""",
+            (first.isoformat(), shift_business_date(last.isoformat(), 1)),
+        )
+        by_employee: dict[int, dict[str, dict]] = {}
+        row_count: dict[str, int] = {}
+        used: set[int] = set()
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            key = mapping["business_date"]
+            shift_id = None if mapping["shift_id"] is None else int(mapping["shift_id"])
+            row_count[key] = row_count.get(key, 0) + 1
+            if shift_id is not None:
+                used.add(shift_id)
+            by_employee.setdefault(int(mapping["employee_id"]), {})[key] = {
+                "shift_id": shift_id,
+                "zone_id": None if mapping["zone_id"] is None else int(mapping["zone_id"]),
+                # 跟 `day_detail` 同一个判据：这一行是单日覆盖写的。
+                "overridden": mapping["source"] == SOURCE_OVERRIDE,
+            }
+
+        days = []
+        for offset in range(7):
+            day = first + timedelta(days=offset)
+            key = day.isoformat()
+            days.append({
+                "business_date": key,
+                "day": day.day,
+                "month": day.month,
+                # 0=周一 … 6=周日，与 `_month_frame` 的 `lead`（`date.weekday()`）同一套。
+                "weekday": day.weekday(),
+                "is_today": key == today,
+                "is_weekend": day.weekday() >= 5,
+                # 窗口末日之后注定没有行 —— 但那是「还没铺到」，不是「那天休」。
+                "in_window": key <= window_end,
+                "row_count": row_count.get(key, 0),
+            })
+
+        zone_names = await self._zone_name_index()
+        # 启用的全出 + 停用但这一周真有行的才出（`_shifts_for_display` 的老口径）：
+        # 抽屉要拿它当班次选择列，所以启用的一个不少。
+        shifts = await self._shifts_for_display(used)
+        shift_names = {int(shift["id"]): shift["name"] for shift in shifts}
+        rules = await self._rule_rows()
+
+        # 每天的请假判据：只问那天不上班的人（`day_detail` 就是这么调的 —— 查询按
+        # employee_id 领头，对齐 0007 那条索引）。
+        leave_ids: dict[str, set[int]] = {}
+        for day in days:
+            key = day["business_date"]
+            off = [
+                employee_id
+                for employee_id, by_day in by_employee.items()
+                if by_day.get(key, {}).get("shift_id") is None
+            ]
+            leave_ids[key] = await self._leave_ids(off, key)
+
+        employees = []
+        # 被过滤掉的人也要说一句（§3.7）：静默丢人正是「以为漏排」的来源。
+        excluded = {"disabled": 0, "pending": 0}
+        for employee in await EmployeeAccounts(self._write_lock_owner).list_roster():
+            if employee["disabled"]:
+                excluded["disabled"] += 1
+                continue
+            if not employee["approved"]:
+                excluded["pending"] += 1
+                continue
+            rows = by_employee.get(employee["id"], {})
+            cells = {}
+            for day in days:
+                key = day["business_date"]
+                row = rows.get(key)
+                shift_id = None if row is None else row["shift_id"]
+                zone_id = None if row is None else row["zone_id"]
+                cells[key] = {
+                    "scheduled": row is not None,
+                    "shift_id": shift_id,
+                    # 班次行被硬删掉时名字给 None（没有外键，同 `my_days`）。
+                    "shift_name": None if shift_id is None else shift_names.get(shift_id),
+                    "zone_id": zone_id,
+                    "zone_name": None if zone_id is None else zone_names.get(zone_id),
+                    "overridden": False if row is None else row["overridden"],
+                    # 只有不上班的人可能是请假（跟 `day_detail` 同一条口径）。
+                    "leave": bool(
+                        row is not None
+                        and row["shift_id"] is None
+                        and employee["id"] in leave_ids[key]
+                    ),
+                }
+            employees.append({
+                "id": employee["id"],
+                "name": employee["name"],
+                "job_title": employee["job_title"],
+                # 配过规则就有这一行（`_rule_rows()` 只出配过的，`rule is None` 是没配过）。
+                "has_rule": employee["id"] in rules,
+                "cells": cells,
+            })
+
+        return {
+            "start": first.isoformat(),
+            "end": last.isoformat(),
+            "today": today,
+            "window_end": window_end,
+            # 只是给前端的提示位，不是判据：跨月周照常一张表。
+            "spans_months": first.month != last.month,
+            "days": days,
+            "shifts": shifts,
+            "employees": employees,
+            "excluded": excluded,
+        }
+
+    @_needs_migration
     async def my_days(self, employee_id: int, days: int = MY_WINDOW_DAYS) -> dict:
-        """员工自己的今天和往后几天：一天一行，带那天写下的班次与责任区。
+        """员工自己的今天和往后几天：一天一行，带那天写下的班次与工作区。
 
         「今天」是排班自己那个 06:00 切日的今天（`self.today()`），跟月历、当日分工
         读的是同一个日期 —— 员工凌晨一点看到的和店长看到的必须是同一天。
@@ -1626,7 +1774,7 @@ class SchedulingStore:
         同一套口径 —— 休（行在、`shift_id` 空）、还没铺到（没有行）、班次被删（行在、
         名字 None）三种状态在服务层分好，前端只翻成人话。
 
-        格子只写班别、不带责任区：手机一行七格放不下「白班 · 案板」，责任区在「今天」
+        格子只写班别、不带工作区：手机一行七格放不下「白班 · 案板」，工作区在「今天」
         页那张卡上（`spec.md` 留给第 6 步的那个待定项按这个口径定）。
 
         翻到过去的月份只显示已经铺过的日子（展开只往今天以后补，不回头），`window_end`
@@ -1672,7 +1820,7 @@ class SchedulingStore:
     async def roster_with_rules(self) -> dict:
         """名单：全体花名册 + 每人当前那条规则 + 每人每班次的固定区。
 
-        花名册来自**公共层**（`EmployeeAccounts.list_roster`），责任区名单也来自公共层
+        花名册来自**公共层**（`EmployeeAccounts.list_roster`），工作区名单也来自公共层
         （`ZoneDirectory.list_zones`，读的是卫生建的那张 `hygiene_zones`）；排班不自己去
         join `hygiene_employees` —— 表名是公共层的实现细节（`spec.md` 的「分层」）。
 
@@ -1703,7 +1851,7 @@ class SchedulingStore:
                         if employee["id"] not in raw_rules
                         else self._rule_for_display(raw_rules[employee["id"]], known_shift_ids)
                     ),
-                    # {班次 id: 责任区 id}；没配过就是空对象
+                    # {班次 id: 工作区 id}；没配过就是空对象
                     "zone_defaults": defaults.get(employee["id"], {}),
                 }
                 for employee in employees
@@ -2231,7 +2379,7 @@ class SchedulingStore:
         写的是**覆盖行**（`kind=swap`）+ 结果行（`source=override`），两个人都写 ——
         跟店长手改、批准请假走的是同一条路，于是那天之后规则再重铺也改不动它。
 
-        责任区按各自**新班次**的固定区取（验收：区跟着班次走）；新班次是「休 / 没排到」
+        工作区按各自**新班次**的固定区取（验收：区跟着班次走）；新班次是「休 / 没排到」
         时区也留空。当天已经过去 / 超出展开窗口的那一天只记「没动」：批得晚了就是晚了
         （跟请假那一支、票 07 同一条「过去不改」）。
 

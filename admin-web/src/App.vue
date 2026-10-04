@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, provide, ref, watch } from 'vue'
+import { computed, provide, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import ImageUploadQueuePanel from './components/ImageUploadQueuePanel.vue'
 import NavBar from './components/NavBar.vue'
@@ -53,10 +53,18 @@ provide('wsUnsubscribe', unsubscribe)
 provide('wsConnected', connected)
 provide('wsLatencyMs', latencyMs)
 
+// 档口名单只有后台那几个页面用（数据管理的分类弹窗）。原来是"挂载那一刻不是独立页就拉
+// 一次"——从排班/员工端这类**独立页**进后台、或者直接以独立页为首页（PWA 快捷方式）打开，
+// 那一次就永远不补，弹窗里档口是空的。改成盯着路由：第一次走到非独立页就拉一次
+// （`load()` 自己按 `loaded` 去重，重复调用不发请求）。
 const stationsStore = useStationsStore()
-onMounted(() => {
-  if (!isStandalone.value) stationsStore.load()
-})
+watch(
+  isStandalone,
+  (standalone) => {
+    if (!standalone) stationsStore.load()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>

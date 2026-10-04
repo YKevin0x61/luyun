@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   HYGIENE_ADMIN_NAV,
   HYGIENE_BACK_TO_ADMIN_LABEL,
+  HYGIENE_BRAND_MARK,
+  HYGIENE_BRAND_TAGLINE,
   HYGIENE_BRAND_TITLE,
   HYGIENE_STAFF_TABS,
   HYGIENE_PERMISSIONS,
@@ -77,35 +79,39 @@ describe('hygieneCopy', () => {
   })
 
   it('管理端八页合成一个卫生板块，不把员工手机入口算进去', () => {
-    expect(HYGIENE_BRAND_TITLE).toBe('卫生')
-    expect(hygieneDocumentTitle('花名册')).toBe('花名册 · 卫生')
+    // 2026-10-04：排班与卫生合并成子系统「工作台」，这一组是它的「现场」那一组，
+    // 品牌三件套跟着子系统走（名字只在 workbenchCopy.js 写一次）。
+    expect(HYGIENE_BRAND_TITLE).toBe('工作台')
+    expect(hygieneDocumentTitle('花名册')).toBe('花名册 · 工作台')
+    expect(HYGIENE_BRAND_MARK).toBe('台')
+    expect(HYGIENE_BRAND_TAGLINE).toBe('现场 · 对照实拍验收')
     expect(HYGIENE_ADMIN_NAV.map((item) => item.path)).toEqual([
-      '/hygiene/roster',
-      '/hygiene/zones',
-      '/hygiene/daily',
-      '/hygiene/attire',
-      '/hygiene/deep-clean',
-      '/hygiene/fix',
-      '/hygiene/boards',
-      '/hygiene/data',
+      '/workbench/roster',
+      '/workbench/zones',
+      '/workbench/daily',
+      '/workbench/attire',
+      '/workbench/deep-clean',
+      '/workbench/fix',
+      '/workbench/boards',
+      '/workbench/data',
     ])
-    expect(isHygieneAdminPath('/hygiene/roster')).toBe(true)
-    expect(isHygieneAdminPath('/hygiene/boards')).toBe(true)
-    expect(isHygieneAdminPath('/hygiene/data')).toBe(true)
+    expect(isHygieneAdminPath('/workbench/roster')).toBe(true)
+    expect(isHygieneAdminPath('/workbench/boards')).toBe(true)
+    expect(isHygieneAdminPath('/workbench/data')).toBe(true)
     // 前缀本身没有页面（票 05 删掉了它）。
     expect(isHygieneAdminPath('/hygiene')).toBe(false)
     // 旧的连字符路径已删除、不留别名，不能再被当成管理端卫生页。
     expect(isHygieneAdminPath('/hygiene-roster')).toBe(false)
     expect(isHygieneAdminPath('/hygiene-data')).toBe(false)
     // 前缀里曾经住着员工侧那两页（`/hygiene/login`、`/hygiene/register`），票 02/03 已删。
-    expect(isHygieneAdminPath('/hygiene/login')).toBe(false)
-    expect(isHygieneAdminPath('/hygiene/register')).toBe(false)
+    expect(isHygieneAdminPath('/workbench/login')).toBe(false)
+    expect(isHygieneAdminPath('/workbench/register')).toBe(false)
     // 自助注册页（票 02 起在顶层 /register）不是管理端卫生页。
     expect(isHygieneAdminPath('/register')).toBe(false)
     // 员工端的卫生首页也不是（票 04 起在 `/staff/clean`）。
     expect(isHygieneAdminPath('/staff/clean')).toBe(false)
     expect(HYGIENE_ADMIN_NAV.map((item) => item.shortTitle)).toEqual([
-      '人员', '责任区', '日常', '仪容', '专项', '整改', '榜', '数据',
+      '人员', '工作区', '日常', '仪容', '专项', '整改', '榜', '数据',
     ])
     expect(HYGIENE_STAFF_TABS.map((item) => item.id)).toEqual([
       'inbox', 'deep', 'fix', 'boards', 'me',

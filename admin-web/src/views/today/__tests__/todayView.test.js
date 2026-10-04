@@ -27,7 +27,7 @@ describe('员工端「今天」页（原型 A）', () => {
     expect(view).not.toMatch(/\/api\/hygiene\/admin/)
     // 401 回员工登录（票 03 起是 /login 的员工栏），把当前地址整个带过去（跟卫生首页一个走法）。
     expect(view).toMatch(/path: '\/login'/)
-    expect(view).not.toMatch(/path: '\/hygiene\/login'/)
+    expect(view).not.toMatch(/path: '\/workbench\/login'/)
     expect(view).toMatch(/next: router\.currentRoute\.value\.fullPath/)
   })
 
@@ -44,7 +44,7 @@ describe('员工端「今天」页（原型 A）', () => {
 
   it('renders however many shifts the API returns', () => {
     // 班次可配置（票 11 会加「早班」之类）：页面上不写死白/夜两个名字，
-    // 班次与责任区都从 `/me` 下来的那一行上取。
+    // 班次与工作区都从 `/me` 下来的那一行上取。
     expect(view).not.toMatch(/['"]白班['"]/)
     expect(view).not.toMatch(/['"]夜班['"]/)
     expect(copy).not.toMatch(/['"]白班['"]/)
@@ -111,7 +111,7 @@ describe('员工端「今天」页（原型 A）', () => {
     expect(router).not.toMatch(/path: '\/today\/month'/)
     expect(router).not.toMatch(/path: '\/hygiene'/)
     // 票 03 起员工登录页是 `/login` 的员工栏：守卫把原目标带上，不再是 `/hygiene/login`。
-    expect(router).not.toMatch(/'\/hygiene\/login'/)
+    expect(router).not.toMatch(/'\/workbench\/login'/)
     expect(router).toMatch(/path: '\/login', query: \{ next: buildLoginNextFromRoute\(to\) \}/)
   })
 

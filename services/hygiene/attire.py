@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """仪容仪表：按**人**、按营业日一张自拍（今天排到班次的人才要拍）。
 
-跟卫生现有的三类活不一样：日常 / 专项 / 整改都挂在**责任区**上，这一项挂在**人**上 ——
+跟卫生现有的三类活不一样：日常 / 专项 / 整改都挂在**工作区**上，这一项挂在**人**上 ——
 判据是「排班今天排到他了」（`staff_assignments` 那天 `shift_id` 非空），经公共层只读入口
 `DutyRoster` 读；卫生不 import 排班（DESIGN 决定 3：谁是上游是数据上的事实）。
 
@@ -272,6 +272,18 @@ class HygieneAttire:
             (status, note, stamp, shot["id"]),
         )
         await self._conn.commit()
+        if status == STATUS_PASSED and shot.get("capture_id"):
+            # 说明里**不带**姓名 / 电话 / 职位：这是一张人脸自拍，群里只需要知道
+            # 「这一项今天通过了」，是谁靠照片本身认（系统里也没有工号字段）。
+            await self._work.share_accepted_capture(
+                kind="attire",
+                ref_key=f"{int(employee_id)}:{day}",
+                capture_id=str(shot["capture_id"]),
+                caption=(
+                    f"【卫生验收】仪容仪表\n"
+                    f"{day} {self._now().strftime('%H:%M')} 验收通过"
+                ),
+            )
         logger.info(
             "hygiene attire %s employee=%s date=%s", status, int(employee_id), day
         )

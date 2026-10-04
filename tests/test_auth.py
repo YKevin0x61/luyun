@@ -475,7 +475,7 @@ def test_register_page_is_public_and_the_old_hygiene_path_is_gone(auth_app_clien
     import main as main_module
 
     client, _ = auth_app_client
-    assert "/hygiene/register" not in main_module.SPA_PAGE_ROUTES
+    assert "/workbench/register" not in main_module.SPA_PAGE_ROUTES
 
     resp = client.get("/register", headers=_html_headers(), follow_redirects=False)
     assert resp.status_code == 200, resp.headers.get("location")
@@ -484,7 +484,7 @@ def test_register_page_is_public_and_the_old_hygiene_path_is_gone(auth_app_clien
     # 票 03 起 `/hygiene/` 不再免墙，浏览器的硬导航会被登录墙 302 到 `/login` —— 那也
     # 不是「兼容跳转」。这一条要断的是「旧路径不再是一个页面」，所以用非页面请求
     # （curl / 探针：Accept 不是 text/html）绕开登录墙，直接看路由表：确实是 404。
-    stale = client.get("/hygiene/register", follow_redirects=False)
+    stale = client.get("/workbench/register", follow_redirects=False)
     assert stale.status_code == 404, stale.headers.get("location")
 
 
@@ -505,18 +505,18 @@ def test_hygiene_login_page_is_gone_and_the_hygiene_prefix_no_longer_skips_the_w
     # 反向：免墙前缀名单里不再有 `/hygiene/`，那条旧路径两张表里都不在（它从前是靠
     # `/hygiene/` 前缀免墙的，不是精确条目）。票 05 把八个管理端卫生页搬进 `/hygiene/*`
     # 之后这条仍是安全要害：前缀回来了，八页就一起对未登录访客放行。
-    assert "/hygiene/" not in main_module.HTML_AUTH_PREFIXES
+    assert "/workbench/" not in main_module.HTML_AUTH_PREFIXES
     assert "/hygiene" not in main_module.HTML_AUTH_EXACT
     assert "/hygiene" not in main_module.SPA_PAGE_ROUTES
-    assert "/hygiene/login" not in main_module.HTML_AUTH_EXACT
-    assert "/hygiene/login" not in main_module.HTML_AUTH_PREFIXES
+    assert "/workbench/login" not in main_module.HTML_AUTH_EXACT
+    assert "/workbench/login" not in main_module.HTML_AUTH_PREFIXES
 
     # `/hygiene/login` 从页面注册清单里删掉：非页面请求直接 404，不做兼容跳转；
     # 浏览器硬导航则跟别的受保护页一样被登录墙 302（不再是员工页的免墙待遇）。
-    assert "/hygiene/login" not in main_module.SPA_PAGE_ROUTES
-    stale = client.get("/hygiene/login", follow_redirects=False)
+    assert "/workbench/login" not in main_module.SPA_PAGE_ROUTES
+    stale = client.get("/workbench/login", follow_redirects=False)
     assert stale.status_code == 404, stale.headers.get("location")
-    walled = client.get("/hygiene/login", headers=_html_headers(), follow_redirects=False)
+    walled = client.get("/workbench/login", headers=_html_headers(), follow_redirects=False)
     assert walled.status_code == 302, walled.headers.get("location")
     assert walled.headers["location"].startswith("/login")
 
@@ -524,14 +524,14 @@ def test_hygiene_login_page_is_gone_and_the_hygiene_prefix_no_longer_skips_the_w
     # 302 到 `/login`（而不是放行 SPA 壳 —— 放行之后前端守卫兜不住，直接就是未授权页面）。
     # 非页面请求（Accept 不是 text/html）绕开登录墙直接看路由表：新路径必须是页面。
     for path in (
-        "/hygiene/roster",
-        "/hygiene/zones",
-        "/hygiene/daily",
-        "/hygiene/deep-clean",
-        "/hygiene/fix",
-        "/hygiene/boards",
-        "/hygiene/data",
-        "/hygiene/attire",
+        "/workbench/roster",
+        "/workbench/zones",
+        "/workbench/daily",
+        "/workbench/deep-clean",
+        "/workbench/fix",
+        "/workbench/boards",
+        "/workbench/data",
+        "/workbench/attire",
     ):
         assert path in main_module.SPA_PAGE_ROUTES, path
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
@@ -601,12 +601,12 @@ def test_staff_path_list_matches_the_frontend_copy():
 def test_hygiene_roster_html_requires_admin_session(auth_app_client):
     client, _ = auth_app_client
     for path in (
-        "/hygiene/roster",
-        "/hygiene/zones",
-        "/hygiene/daily",
-        "/hygiene/deep-clean",
-        "/hygiene/fix",
-        "/hygiene/boards",
+        "/workbench/roster",
+        "/workbench/zones",
+        "/workbench/daily",
+        "/workbench/deep-clean",
+        "/workbench/fix",
+        "/workbench/boards",
     ):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         assert resp.status_code == 302, path
@@ -633,14 +633,14 @@ def test_logged_in_super_admin_gets_the_spa_shell_on_every_hygiene_page(auth_app
     assert client.cookies.get(settings.SESSION_COOKIE_NAME)
 
     for path in (
-        "/hygiene/roster",
-        "/hygiene/zones",
-        "/hygiene/daily",
-        "/hygiene/deep-clean",
-        "/hygiene/fix",
-        "/hygiene/boards",
-        "/hygiene/data",
-        "/hygiene/attire",
+        "/workbench/roster",
+        "/workbench/zones",
+        "/workbench/daily",
+        "/workbench/deep-clean",
+        "/workbench/fix",
+        "/workbench/boards",
+        "/workbench/data",
+        "/workbench/attire",
     ):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         assert resp.status_code == 200, path

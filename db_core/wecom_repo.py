@@ -16,16 +16,29 @@ logger = logging.getLogger(__name__)
 class _WecomRepoMixin:
     """企业微信 webhook、推送任务与推送日志的增删改查。"""
 
-    async def wecom_webhooks_all(self, include_disabled: bool = True) -> List[Dict]:
+    async def wecom_webhooks_all(
+        self, include_disabled: bool = True, hygiene_only: bool = False
+    ) -> List[Dict]:
+        """列出 webhook。
+
+        ``hygiene_only`` 只回「卫生群」—— 卫生提醒与验收照片的收件人。卫生侧一律带这个
+        过滤，不再「发给所有启用的群」：测试群、销售日报群不该收到员工的实拍照片。
+        """
         try:
             tdb = self._connection.table("wecom_push_webhooks")
             sql = """SELECT id, name, webhook_url_encrypted, webhook_url_masked,
-                            enabled, notes, created_at, updated_at
+                            enabled, hygiene_feed, notes, created_at, updated_at
                      FROM wecom_push_webhooks"""
             params: List[Any] = []
+            conditions: List[str] = []
             if not include_disabled:
-                sql += " WHERE enabled = ?"
+                conditions.append("enabled = ?")
                 params.append(1)
+            if hygiene_only:
+                conditions.append("hygiene_feed = ?")
+                params.append(1)
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
             sql += " ORDER BY updated_at DESC, id DESC"
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(sql, params)
@@ -41,7 +54,7 @@ class _WecomRepoMixin:
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT id, name, webhook_url_encrypted, webhook_url_masked,
-                              enabled, notes, created_at, updated_at
+                              enabled, hygiene_feed, notes, created_at, updated_at
                        FROM wecom_push_webhooks WHERE id = ?""",
                     (webhook_id,),
                 )
@@ -58,13 +71,15 @@ class _WecomRepoMixin:
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """INSERT INTO wecom_push_webhooks
-                       (name, webhook_url_encrypted, webhook_url_masked, enabled, notes, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       (name, webhook_url_encrypted, webhook_url_masked, enabled,
+                        hygiene_feed, notes, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         item["name"],
                         item["webhook_url_encrypted"],
                         item.get("webhook_url_masked", ""),
                         1 if item.get("enabled", True) else 0,
+                        1 if item.get("hygiene_feed", False) else 0,
                         item.get("notes", ""),
                         now,
                         now,
@@ -86,6 +101,9 @@ class _WecomRepoMixin:
             encrypted_url = item.get("webhook_url_encrypted", existing["webhook_url_encrypted"])
             masked_url = item.get("webhook_url_masked", existing["webhook_url_masked"])
             enabled = item.get("enabled", bool(existing["enabled"]))
+            # 三态由调用方把关：`item` 里**没有**这个键就保持原值 —— 列表上的「停用 / 启用」
+            # 快捷开关与旧的前端 bundle（PWA 缓存）都不会带它，不能因此把标记清掉。
+            hygiene_feed = item.get("hygiene_feed", existing.get("hygiene_feed", 0))
             notes = item.get("notes", existing.get("notes", ""))
             now = datetime.now(CHINA_TZ).isoformat()
             tdb = self._connection.table("wecom_push_webhooks")
@@ -93,9 +111,18 @@ class _WecomRepoMixin:
                 await cursor.execute(
                     """UPDATE wecom_push_webhooks
                        SET name = ?, webhook_url_encrypted = ?, webhook_url_masked = ?,
-                           enabled = ?, notes = ?, updated_at = ?
+                           enabled = ?, hygiene_feed = ?, notes = ?, updated_at = ?
                        WHERE id = ?""",
-                    (name, encrypted_url, masked_url, 1 if enabled else 0, notes, now, webhook_id),
+                    (
+                        name,
+                        encrypted_url,
+                        masked_url,
+                        1 if enabled else 0,
+                        1 if hygiene_feed else 0,
+                        notes,
+                        now,
+                        webhook_id,
+                    ),
                 )
             await tdb.commit()
             return True

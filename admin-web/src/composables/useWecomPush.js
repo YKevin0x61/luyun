@@ -7,6 +7,26 @@ export const PUSH_TYPE_NAMES = {
   test: '测试消息',
 }
 
+/** 删除确认文案：标了卫生群的地址要额外点名 —— 误删之后卫生消息就无处可发了。 */
+export function webhookDeleteConfirmText(item) {
+  if (item && item.hygiene_feed) {
+    return `「${item.name}」是卫生群，删除后卫生提醒与验收照片不会再发到它。确定删除？`
+  }
+  return '确定删除该 webhook？'
+}
+
+/**
+ * 没有「启用中的卫生群」时的顶部提示；有可用的群就返回空串。
+ *
+ * 这条提示是那个空态的可见性兜底：卫生消息这时**一条都不发**，页面上不写出来，
+ * 店长只会以为"今天没有漏拍"。
+ */
+export function hygieneFeedWarning(webhooks) {
+  const usable = (webhooks || []).filter((item) => item.hygiene_feed && item.enabled)
+  if (usable.length) return ''
+  return '还没有指定卫生群：卫生提醒与验收照片当前不会发出。请在下面的地址上勾选「这是卫生群」。'
+}
+
 /** 阶段三：企微推送管理页面状态管理，1:1 迁移自原 public/wecom-push.html。 */
 export function useWecomPush() {
   const webhooks = ref([])
@@ -23,7 +43,7 @@ export function useWecomPush() {
   const jobForm = reactive(emptyJobForm())
 
   function emptyWebhookForm() {
-    return { id: '', name: '', webhook_url: '', notes: '', enabled: true }
+    return { id: '', name: '', webhook_url: '', notes: '', enabled: true, hygiene_feed: false }
   }
   function emptyJobForm() {
     return {
@@ -71,7 +91,10 @@ export function useWecomPush() {
   }
 
   function editWebhook(item) {
-    Object.assign(webhookForm, { id: item.id, name: item.name, webhook_url: '', notes: item.notes || '', enabled: item.enabled })
+    Object.assign(webhookForm, {
+      id: item.id, name: item.name, webhook_url: '', notes: item.notes || '',
+      enabled: item.enabled, hygiene_feed: !!item.hygiene_feed,
+    })
   }
 
   async function saveWebhook() {
@@ -80,6 +103,7 @@ export function useWecomPush() {
       name: webhookForm.name.trim(),
       webhook_url: webhookForm.webhook_url.trim() || null,
       enabled: webhookForm.enabled,
+      hygiene_feed: !!webhookForm.hygiene_feed,
       notes: webhookForm.notes.trim(),
     }
     if (!id && !payload.webhook_url) throw new Error('新建 webhook 必须填写地址')
@@ -96,10 +120,12 @@ export function useWecomPush() {
   async function toggleWebhookEnabled(item) {
     // 列表上的快捷开关：只切 enabled，webhook_url 传 null 表示不动原地址
     // （后端 `if payload.webhook_url:` 才覆盖，见 api/wecom_push.py）。
+    // hygiene_feed 原样回传是双保险：后端只在明确给值时才写这一列，不发也不会被清掉。
     await api.put(`/api/wecom-push/webhooks/${item.id}`, {
       name: item.name,
       webhook_url: null,
       enabled: !item.enabled,
+      hygiene_feed: !!item.hygiene_feed,
       notes: item.notes || '',
     })
     await loadWebhooks()

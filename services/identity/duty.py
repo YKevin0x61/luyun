@@ -4,7 +4,7 @@
 
 排班把「谁在哪天、上什么班、在哪个区」物化进 `staff_assignments`；卫生据此决定员工今天
 能交哪份日常检查。那张表的 DDL 是排班那条线建的（`migrations/pg/0005_scheduling.sql`），
-但读它的代码放在公共层 —— 卫生从这里取当天的班次与责任区，**不去 import 排班的任何东西**
+但读它的代码放在公共层 —— 卫生从这里取当天的班次与工作区，**不去 import 排班的任何东西**
 （`spec.md` 的「分层」：排班 → 卫生 是数据上的上下游，不是调用关系）。
 
 **班次给的是 id 与名字**（`staff_shifts.name`），不是卫生写死的「白班 / 夜班」：排班的班次
@@ -41,7 +41,7 @@ def _blank_duty(available: bool) -> dict:
 
 
 class DutyRoster:
-    """当天的班次与责任区（只读）。构造抄 `ZoneDirectory`：接受 DatabaseManager 或连接。"""
+    """当天的班次与工作区（只读）。构造抄 `ZoneDirectory`：接受 DatabaseManager 或连接。"""
 
     def __init__(self, conn_or_db: Any):
         self._conn = getattr(conn_or_db, "_conn", conn_or_db)
@@ -103,7 +103,7 @@ class DutyRoster:
         }
 
     async def duty_map(self, business_date: str) -> dict[int, dict]:
-        """那一天**所有人**的班次与责任区（花名册台账那种「一次问一批」的读法）。
+        """那一天**所有人**的班次与工作区（花名册台账那种「一次问一批」的读法）。
 
         返回 `{employee_id: duty}`，每一份的形状跟 `duty_for` 一样（`available` 恒为
         `True`：整批读不出来时返回**空字典**，调用方按「谁都没排班」渲染 —— 那时候

@@ -75,8 +75,8 @@ export function todaySubline(day) {
   if (day.leave) return '今天请假'
   if (!day.scheduled) return '店长还没排到你'
   if (day.shift_id == null) return '今天休息'
-  // 验收 2：班次和责任区都落在这张卡上（原型里责任区挂在下面那张卫生卡上，
-  // 那张卡这一票还没有）。责任区没配就只说班次。
+  // 验收 2：班次和工作区都落在这张卡上（原型里工作区挂在下面那张卫生卡上，
+  // 那张卡这一票还没有）。工作区没配就只说班次。
   return day.zone_name ? `今天上班 · ${day.zone_name}` : '今天上班'
 }
 
@@ -91,8 +91,9 @@ export function nextTwoLine(afterDays) {
 
 // ── 整月（票 06）────────────────────────────────────────────────────────
 
-/** 月历表头：周日开头（服务端给的 `lead` 就是这个算法：`isoweekday() % 7`）。 */
-export const MONTH_HEADS = ['日', '一', '二', '三', '四', '五', '六']
+/** 月历表头：**周一开头**（服务端给的 `lead` 就是这个算法：`date.weekday()`，周一=0）。
+ *  2026-09-30 全模块统一到周一（原先是 `isoweekday() % 7` 的周日开头）——店里的口头习惯是周一。 */
+export const MONTH_HEADS = ['一', '二', '三', '四', '五', '六', '日']
 
 /** 'YYYY-MM' → 「2026年9月」；跟今天同一年就只说「9月」（手机上省一格字）。 */
 export function monthLabel(month, today) {

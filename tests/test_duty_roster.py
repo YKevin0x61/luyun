@@ -50,7 +50,7 @@ class DutyRosterTest(unittest.IsolatedAsyncioTestCase):
         raise AssertionError(f"没有班次 {name}")
 
     async def _zone(self, name="案板"):
-        """建一个责任区（表是卫生那条线建的，公共层只读它）。"""
+        """建一个工作区（表是卫生那条线建的，公共层只读它）。"""
         now = self.fixed_now.isoformat()
         cur = await self.db._conn.execute(
             """INSERT INTO hygiene_zones (name, day_shift, night_shift, created_at, updated_at)
@@ -61,7 +61,7 @@ class DutyRosterTest(unittest.IsolatedAsyncioTestCase):
         return int(cur.lastrowid)
 
     async def test_it_reads_exactly_what_the_schedule_wrote(self):
-        """验收 2：卫生拿到的班次与责任区，就是 `staff_assignments` 那一行的值。"""
+        """验收 2：卫生拿到的班次与工作区，就是 `staff_assignments` 那一行的值。"""
         employee = await self._employee()
         day = await self._shift_id("白班")
         zone = await self._zone("案板")

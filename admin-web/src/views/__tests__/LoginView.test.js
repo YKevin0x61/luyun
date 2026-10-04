@@ -33,7 +33,7 @@ const ROUTES = [
   { path: '/staff/today', component: { template: '<div />' } },
   { path: '/staff/month', component: { template: '<div />' } },
   { path: '/staff/clean', component: { template: '<div />' } },
-  { path: '/hygiene/roster', component: { template: '<div />' } },
+  { path: '/workbench/roster', component: { template: '<div />' } },
   { path: '/register', component: { template: '<div />' } },
 ]
 
@@ -297,7 +297,7 @@ describe('/login 面板：管理员栏', () => {
       'input[type="password"]': 's3cret',
     })
 
-    expect(router.currentRoute.value.path).toBe('/hygiene/roster')
+    expect(router.currentRoute.value.path).toBe('/workbench/roster')
   })
 })
 

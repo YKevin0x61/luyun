@@ -39,6 +39,10 @@ class WebhookIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=60)
     webhook_url: Optional[str] = Field(None, max_length=500)
     enabled: bool = True
+    # 三态：None = 不动这一列。列表上的「停用 / 启用」快捷开关和旧的前端 bundle（PWA
+    # 缓存）都不会带这个字段 —— 给它一个 `False` 默认值，点一下「停用」就会把「卫生群」
+    # 标记清掉，而且界面上看不出来。
+    hygiene_feed: Optional[bool] = None
     notes: str = Field("", max_length=200)
 
     @field_validator("name")
@@ -129,6 +133,7 @@ def _safe_webhook(row: Dict[str, Any]) -> Dict[str, Any]:
         "name": row["name"],
         "webhook_url_masked": row.get("webhook_url_masked", ""),
         "enabled": bool(row.get("enabled")),
+        "hygiene_feed": bool(row.get("hygiene_feed")),
         "notes": row.get("notes", ""),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
@@ -166,6 +171,7 @@ async def create_webhook(payload: WebhookIn, db: DatabaseManager = Depends(get_d
         "webhook_url_encrypted": encrypt_webhook_url(payload.webhook_url),
         "webhook_url_masked": mask_webhook_url(payload.webhook_url),
         "enabled": payload.enabled,
+        "hygiene_feed": bool(payload.hygiene_feed),
         "notes": payload.notes,
     })
     if not new_id:
@@ -187,6 +193,9 @@ async def update_webhook(webhook_id: int, payload: WebhookIn, db: DatabaseManage
     if payload.webhook_url:
         update_values["webhook_url_encrypted"] = encrypt_webhook_url(payload.webhook_url)
         update_values["webhook_url_masked"] = mask_webhook_url(payload.webhook_url)
+    # 只有明确给了 true/false 才写这一列：不传（快捷开关、旧 bundle）就是"不动"。
+    if payload.hygiene_feed is not None:
+        update_values["hygiene_feed"] = bool(payload.hygiene_feed)
     ok = await db.wecom_webhook_update(webhook_id, update_values)
     if not ok:
         raise HTTPException(status_code=500, detail="更新 webhook 失败")

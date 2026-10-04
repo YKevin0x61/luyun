@@ -347,7 +347,7 @@ class HygieneDataArchive:
         return _tag(await self._fetch(sql, params), KIND_DAILY, roles=("实拍",))
 
     async def _deep_rows(self, start, end, zone_id) -> list[dict]:
-        # 专项不挂卫生责任区：选了责任区就没有专项记录，这是领域事实不是疏漏。
+        # 专项不挂卫生工作区：选了工作区就没有专项记录，这是领域事实不是疏漏。
         if zone_id is not None:
             return []
         sql = """SELECT d.id AS record_id, inst.business_date AS business_date,
@@ -447,9 +447,9 @@ class HygieneDataArchive:
         )
 
     async def _attire_rows(self, start, end, zone_id) -> list[dict]:
-        """仪容仪表：按**人**拍，所以不挂责任区。
+        """仪容仪表：按**人**拍，所以不挂工作区。
 
-        跟专项同一条口径 —— 选了责任区就没有这一类的记录，这是领域事实不是疏漏。
+        跟专项同一条口径 —— 选了工作区就没有这一类的记录，这是领域事实不是疏漏。
         只列**交过图**的行：还没拍的人在库里根本没有行（待拍不是一行 `todo`）。
         """
         if zone_id is not None:
@@ -631,7 +631,7 @@ _LOADERS = {
 }
 
 
-CSV_HEADER = ("类型", "营业日", "时间", "责任区", "项目/说明", "提交人", "状态", "照片文件")
+CSV_HEADER = ("类型", "营业日", "时间", "工作区", "项目/说明", "提交人", "状态", "照片文件")
 
 
 def ledger_csv(records: Iterable[dict], photo_names: dict[tuple, str]) -> bytes:

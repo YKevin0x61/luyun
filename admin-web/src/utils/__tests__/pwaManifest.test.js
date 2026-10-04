@@ -11,7 +11,7 @@ describe('pwaManifest', () => {
   it('selects role manifests by route', () => {
     expect(selectPwaManifest('/').role).toBe('admin')
     expect(selectPwaManifest('/staff/clean').role).toBe('hygiene')
-    expect(selectPwaManifest('/hygiene/roster').role).toBe('admin')
+    expect(selectPwaManifest('/workbench/roster').role).toBe('admin')
     expect(selectPwaManifest('/recipe/manage').role).toBe('recipe')
     expect(selectPwaManifest('/settings').role).toBe('admin')
   })
@@ -57,7 +57,7 @@ describe('pwaManifest', () => {
   })
 
   it('面板身份只对 /login 生效，别的路径照旧按路径选', () => {
-    expect(selectPwaManifest('/hygiene/roster', 'staff').role).toBe('admin')
+    expect(selectPwaManifest('/workbench/roster', 'staff').role).toBe('admin')
     expect(selectPwaManifest('/settings', 'staff').role).toBe('admin')
     expect(selectPwaManifest('/', 'staff').role).toBe('admin')
     expect(selectPwaManifest('/staff/today', 'admin').role).toBe('hygiene')

@@ -86,7 +86,7 @@ describe('hygieneMarkup', () => {
     )
   })
 
-  it('专项前后实拍地址带专项清单项和版本，不带卫生责任区', () => {
+  it('专项前后实拍地址带专项清单项和版本，不带卫生工作区', () => {
     const row = {
       item_id: 4,
       before_capture_id: 'before-1',

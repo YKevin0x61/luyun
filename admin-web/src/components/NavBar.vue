@@ -4,7 +4,7 @@ import { useRoute } from 'vue-router'
 import { api } from '../api/client'
 import SvgIcon from './SvgIcon.vue'
 import { RECIPE_BRAND_TITLE } from '../utils/recipeCopy'
-import { HYGIENE_BRAND_TITLE, isHygieneAdminPath } from '../utils/hygieneCopy'
+import { WORKBENCH_TITLE } from '../utils/workbenchCopy'
 
 defineProps({
   connected: { type: Boolean, default: false },
@@ -15,8 +15,8 @@ const route = useRoute()
 
 // 简单映射，对齐旧原生页各自的 data-subtitle（如 public/logs.html:130）
 const PAGE_SUBTITLES = [
-  { prefix: '/hygiene/', subtitle: HYGIENE_BRAND_TITLE },
-  { prefix: '/scheduling', subtitle: '排班管理' },
+  // 工作台（2026-10-04：排班与卫生合并成一个子系统，票 04 两组同住 `/workbench/*`）。
+  { prefix: '/workbench', subtitle: WORKBENCH_TITLE },
   { prefix: '/logs', subtitle: '日志中心' },
   { prefix: '/prep-plan', subtitle: '备货计划' },
   { prefix: '/wecom-push', subtitle: '企微推送' },
@@ -79,8 +79,13 @@ async function handleLogout() {
     <div class="global-nav-tabs">
       <router-link to="/" class="nav-tab" :class="{ active: route.path === '/' }">仪表盘</router-link>
       <router-link to="/admin" class="nav-tab" :class="{ active: route.path.startsWith('/admin') }">数据管理</router-link>
-      <router-link to="/scheduling" class="nav-tab" :class="{ active: route.path.startsWith('/scheduling') }">排班</router-link>
-      <router-link to="/hygiene/roster" class="nav-tab" :class="{ active: isHygieneAdminPath(route.path) }">{{ HYGIENE_BRAND_TITLE }}</router-link>
+      <!-- 排班与卫生合成一个子系统「工作台」（2026-10-04）：一格进排班月历，卫生那一组
+           从工作台窄栏里的「现场」进 —— 这里不再并排两格。高亮覆盖两组。 -->
+      <router-link
+        to="/workbench"
+        class="nav-tab"
+        :class="{ active: route.path.startsWith('/workbench') }"
+      >{{ WORKBENCH_TITLE }}</router-link>
       <router-link to="/sales-report" class="nav-tab" :class="{ active: route.path.startsWith('/sales-report') }">销售报表</router-link>
       <router-link to="/recipe" class="nav-tab" :class="{ active: route.path.startsWith('/recipe') }">{{ RECIPE_BRAND_TITLE }}</router-link>
       <router-link to="/wecom-push" class="nav-tab" :class="{ active: route.path.startsWith('/wecom-push') }">企微推送</router-link>

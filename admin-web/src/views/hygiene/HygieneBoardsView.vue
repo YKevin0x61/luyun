@@ -59,7 +59,7 @@ function openTeaching(row) {
         <p>按本周次数公示，不折算评分。</p>
         <details class="rule-help">
           <summary>规则说明</summary>
-          <p>两张榜只记录逾期、驳回、一次通过和实拍次数，按周一 06:00 切周。所有登录员工都能查看。卫生教材由超级管理员从已通过的对照中手动标记。换区指员工当天自己把责任区从 A 改成 B 的次数：换区本身允许（临时换岗），列出来是为了让实拍数字可解释，不是扣分项。</p>
+          <p>两张榜只记录逾期、驳回、一次通过和实拍次数，按周一 06:00 切周。所有登录员工都能查看。卫生教材由超级管理员从已通过的对照中手动标记。换区指员工当天自己把工作区从 A 改成 B 的次数：换区本身允许（临时换岗），列出来是为了让实拍数字可解释，不是扣分项。</p>
         </details>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
@@ -87,11 +87,11 @@ function openTeaching(row) {
 
       <div class="table-card">
         <div class="table-card-header">
-          <h3>卫生责任区红黑榜 <span>{{ boards.zones.length }}</span></h3>
+          <h3>卫生工作区红黑榜 <span>{{ boards.zones.length }}</span></h3>
         </div>
         <div v-if="loading" class="roster-empty">正在加载…</div>
         <div v-else-if="errorText" class="roster-empty">加载失败，点上方「刷新」重试。</div>
-        <div v-else-if="!boards.zones.length" class="roster-empty">这一周还没有卫生责任区的次数。</div>
+        <div v-else-if="!boards.zones.length" class="roster-empty">这一周还没有卫生工作区的次数。</div>
         <ul v-else class="count-list">
           <li v-for="row in boards.zones" :key="row.zone_id" class="count-row">
             <strong>{{ row.zone_name }}</strong>

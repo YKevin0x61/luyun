@@ -16,7 +16,8 @@ import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import { useNudgePull } from '../../composables/useNudgePull'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
+// 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
+// <link>，壳一层管住就跟卫生管理端一个做法。
 import {
   approveReceipt,
   kindText,
@@ -28,7 +29,6 @@ import {
   swapPreviewLine,
 } from '../../utils/leaveRequest'
 
-useScopedStylesheet('/hygiene-admin.css')
 
 const router = useRouter()
 
@@ -113,7 +113,7 @@ onMounted(() => {
 
 // 实时（票 10 收尾）：员工提了新的申请、撤回了、或者对方回了话 —— 待办列表重拉一次。
 // 这一页本来就是「等别人动作」的地方，没有实时就只能靠人反复刷新。
-useNudgePull({ id: 'scheduling-inbox', topics: ['scheduling'], pull: load })
+useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
 </script>
 
 <template>
@@ -126,7 +126,7 @@ useNudgePull({ id: 'scheduling-inbox', topics: ['scheduling'], pull: load })
           <template v-if="today">今天 {{ today }} · </template>请假与换班都在这里批；批完那天就记成请假 / 对调，月历上带青点。
         </p>
       </div>
-      <button class="btn" type="button" @click="router.push('/scheduling')">回到月历</button>
+      <button class="btn" type="button" @click="router.push('/workbench')">回到月历</button>
     </header>
 
     <p v-if="state === 'loading'" class="iHint">正在读待办…</p>
@@ -200,7 +200,7 @@ useNudgePull({ id: 'scheduling-inbox', topics: ['scheduling'], pull: load })
         <p v-if="ruleless.muted.length" class="iMuted">
           另有 {{ ruleless.muted.length }} 个人已停用或还没批准，不提醒。
         </p>
-        <button class="btn" type="button" @click="router.push('/scheduling')">去配固定班</button>
+        <button class="btn" type="button" @click="router.push('/workbench')">去配固定班</button>
       </section>
     </template>
 

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """企业微信推送服务与存储层的轻量测试。"""
 
+import base64
+import hashlib
 import os
 import tempfile
 import unittest
@@ -11,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.wecom_push_service import (
+    WECOM_IMAGE_BYTE_LIMIT,
     WECOM_TEXT_BYTE_LIMIT,
     RenderedMessage,
     assert_message_size,
@@ -217,6 +220,48 @@ class WeComWebhookHelperTest(unittest.TestCase):
         after = datetime(2026, 5, 2, 6, 0, tzinfo=CHINA_TZ)
         self.assertEqual(resolve_report_dates("today", before)[0], "2026-05-01")
         self.assertEqual(resolve_report_dates("today", after)[0], "2026-05-02")
+
+
+class WeComImagePayloadTest(unittest.IsolatedAsyncioTestCase):
+    """群机器人的 image 消息：base64 + md5，超限在发之前就拦下来。"""
+
+    async def test_payload_carries_base64_and_md5_of_the_raw_bytes(self):
+        data = b"\xff\xd8\xff\xe0-JPEG-BYTES"
+
+        with patch.object(
+            wecom_push_service, "_post_payload", new=AsyncMock(return_value=(True, "ok"))
+        ) as poster:
+            ok, message = await wecom_push_service.send_image(VALID_WEBHOOK, data)
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "ok")
+        payload = poster.await_args.args[1]
+        self.assertEqual(payload["msgtype"], "image")
+        self.assertEqual(
+            payload["image"]["base64"], base64.b64encode(data).decode("ascii")
+        )
+        self.assertEqual(payload["image"]["md5"], hashlib.md5(data).hexdigest())
+
+    async def test_oversized_image_is_rejected_without_sending(self):
+        oversized = b"x" * (WECOM_IMAGE_BYTE_LIMIT + 1)
+
+        with patch.object(
+            wecom_push_service, "_post_payload", new=AsyncMock(return_value=(True, "ok"))
+        ) as poster:
+            ok, message = await wecom_push_service.send_image(VALID_WEBHOOK, oversized)
+
+        self.assertFalse(ok)
+        self.assertIn("超过企业微信 image 限制", message)
+        self.assertEqual(poster.await_count, 0)
+
+    async def test_empty_image_is_rejected(self):
+        with patch.object(
+            wecom_push_service, "_post_payload", new=AsyncMock(return_value=(True, "ok"))
+        ) as poster:
+            ok, _message = await wecom_push_service.send_image(VALID_WEBHOOK, b"")
+
+        self.assertFalse(ok)
+        self.assertEqual(poster.await_count, 0)
 
 
 class WeComStorageAndSchedulerTest(unittest.IsolatedAsyncioTestCase):

@@ -62,8 +62,8 @@ OLD_URLS = (
     "/today",
     "/today/month",
     "/hygiene",
-    "/hygiene/login",
-    "/hygiene/register",
+    "/workbench/login",
+    "/workbench/register",
     "/hygiene-roster",
     "/hygiene-zones",
     "/hygiene-daily",
@@ -78,14 +78,14 @@ OLD_URLS = (
 STAFF_PAGES = ("/staff/today", "/staff/month", "/staff/clean")
 
 HYGIENE_ADMIN_PAGES = (
-    "/hygiene/roster",
-    "/hygiene/zones",
-    "/hygiene/daily",
-    "/hygiene/deep-clean",
-    "/hygiene/fix",
-    "/hygiene/boards",
-    "/hygiene/data",
-    "/hygiene/attire",
+    "/workbench/roster",
+    "/workbench/zones",
+    "/workbench/daily",
+    "/workbench/deep-clean",
+    "/workbench/fix",
+    "/workbench/boards",
+    "/workbench/data",
+    "/workbench/attire",
 )
 
 
@@ -287,7 +287,7 @@ def test_exemption_tables_hold_no_leftover_old_addresses(app_client):
     assert not any(
         "/settings".startswith(prefix) for prefix in main_module.HTML_AUTH_PREFIXES
     )
-    assert "/hygiene/" not in main_module.HTML_AUTH_PREFIXES
+    assert "/workbench/" not in main_module.HTML_AUTH_PREFIXES
 
     for old in OLD_URLS:
         assert old not in main_module.HTML_AUTH_EXACT, old

@@ -82,7 +82,7 @@ def work_env(tmp_path):
     )
     employee = _run(accounts.register(PHONE, PASSWORD, "张三"))
     _run(accounts.approve(employee["id"]))
-    # 票 10：今天的班次与责任区由排班给（员工自选入口已撤）。
+    # 票 10：今天的班次与工作区由排班给（员工自选入口已撤）。
     _run(assign_duty(db, employee["id"], slot="day", zone_id=zone["id"], now=CLOCK))
     duty = _run(accounts.current_assignment(employee["id"]))
     assert duty["shift"] == "白班" and duty["zone_id"] == zone["id"], "排班没铺出今天的白班"

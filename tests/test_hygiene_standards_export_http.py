@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""导出标准图的 HTTP 契约：一个 zip、按责任区建子文件夹、标注已经烘焙进像素。
+"""导出标准图的 HTTP 契约：一个 zip、按工作区建子文件夹、标注已经烘焙进像素。
 
 服务层的渲染/打包细节在 ``test_hygiene_standards_export.py``；这里只钉端点行为。
 用 ``FileCaptureStore`` 而不是 ``FakeCaptureStore``：后者 ``path_async`` 返回 None，
 而导出是按文件路径逐张读的，假存储测不出真实链路。
 
-责任区直接用建库时 seed 好的那几个（``SEED_ZONE_NAMES``），不自己建同名区。
+工作区直接用建库时 seed 好的那几个（``SEED_ZONE_NAMES``），不自己建同名区。
 """
 
 import asyncio
@@ -63,7 +63,7 @@ def _mark_pixels(data: bytes) -> int:
 
 
 def _build(tmp_path, items):
-    """起一套最小运行时。``items`` 是 ``(种子责任区下标, 检查项名, 标注)``。"""
+    """起一套最小运行时。``items`` 是 ``(种子工作区下标, 检查项名, 标注)``。"""
     settings.DATABASE_DIR = str(tmp_path)
     db = DatabaseManager()
     _run(db.connect())

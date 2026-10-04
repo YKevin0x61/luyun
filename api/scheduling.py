@@ -34,14 +34,14 @@ _ERROR_DETAILS = {
     # `_bad_request` 里解释一次。
     "unknown_shift_in_cycle": "轮转周期第 {} 格引用的班次不存在或已停用：请重新选那一天的班次",
     "unknown_employee": "员工不存在",
-    "unknown_zone": "责任区不存在：请先在卫生的责任区页面新建，或刷新本页",
+    "unknown_zone": "工作区不存在：请先在卫生的工作区页面新建，或刷新本页",
     # 单日覆盖（票 07）三种「这天改不了」的原因，各说各的：
     "past_day": "已经过去的日子改不了：排班写下的历史不重写",
     # 带一个 `{}`：服务层把展开窗口的末日放在 `args[0]`。**不写死「90 天」** ——
     # 窗口长度是 `EXPANSION_DAYS` 的事，改那个数不该让文案说谎。
     "beyond_window": "这天还没排到：排班只铺到 {}，等它进窗口再改",
     "missing_shift": "要改班次就得给一个班次；班次留空表示那天休，请用「改成休」",
-    "rest_with_details": "「改成休」的那天不能再带班次或责任区：请把这两项留空",
+    "rest_with_details": "「改成休」的那天不能再带班次或工作区：请把这两项留空",
     # 请假申请（票 08）：日期没给、区间反了、事由太长、申请不存在 / 已经处理过，各说各的。
     # 字段整个没给（`{}`）也走这条：模型里 `start_date` 有默认值，缺字段不会变成
     # pydantic 的 422 —— 那个 `detail` 是一串英文的字段错误，员工看不懂。
@@ -170,7 +170,7 @@ class SetZoneDefaultRequest(BaseModel):
 
 
 class SetOverrideRequest(BaseModel):
-    # 某人某一天改成什么。`is_rest=True` 时班次与责任区都得留空（那天就是休）；
+    # 某人某一天改成什么。`is_rest=True` 时班次与工作区都得留空（那天就是休）；
     # 否则 `shift_id` 必给、`zone_id=None` 表示「跟这个班次的固定区」。
     is_rest: bool = False
     shift_id: Optional[int] = None
@@ -579,11 +579,33 @@ async def day_detail(
         raise _bad_request(exc) from exc
 
 
+@router.get("/week")
+async def week(
+    start: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """「员工 × 周」矩阵：这一周每人每天上什么班、在哪个区（票 A，只读）。
+
+    跟 `/calendar`、`/day` 一样进门先补未来 90 天（幂等）：不补的话，翻到还没铺的
+    那一周看到的是一片没有行的空格，而不是规则铺出来的结果。
+
+    `start` 归一化到那一周的周一，缺省 = 今天所在那周；日期格式坏是 400。
+    **读路径不广播 nudge**（见 `_scheduling_nudge` 的 docstring）。
+    """
+    store = SchedulingStore(db)
+    try:
+        await store.expand()
+        return await store.week_grid(start)
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+
+
 @router.get("/roster")
 async def roster(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
-    """全体花名册 + 每人当前那条规则 + 每人每班次的固定责任区（没配就是 `{}`）。
+    """全体花名册 + 每人当前那条规则 + 每人每班次的固定工作区（没配就是 `{}`）。
 
-    名单面板会一起读固定责任区（票 03），所以缺 0006 时这里也要出 503 那句话 ——
+    名单面板会一起读固定工作区（票 03），所以缺 0006 时这里也要出 503 那句话 ——
     不然「已更新代码、还没应用迁移」这段窗口里，店长看到的是 500。
     """
     store = SchedulingStore(db)
@@ -603,9 +625,9 @@ async def set_zone_default(
     db=Depends(get_db),
     _: str = Depends(require_session),
 ) -> dict:
-    """给「某人 × 某班次」定一个固定责任区；今天以后已经铺好的行一起改。
+    """给「某人 × 某班次」定一个固定工作区；今天以后已经铺好的行一起改。
 
-    责任区名单是卫生建的那份（公共层读出来），所以这边新建完区不用重启就能选到。
+    工作区名单是卫生建的那份（公共层读出来），所以这边新建完区不用重启就能选到。
     """
     store = SchedulingStore(db)
     try:
@@ -656,7 +678,7 @@ async def set_override(
     db=Depends(get_db),
     _: str = Depends(require_session),
 ) -> dict:
-    """改某人某一天：换班次、改成休、或只换责任区 —— **只动这一天**（票 07）。
+    """改某人某一天：换班次、改成休、或只换工作区 —— **只动这一天**（票 07）。
 
     改过的那天在月历上有标记，改规则不会把它冲掉；撤掉覆盖（`DELETE` 同一条路径）
     那天就回到规则铺出来的样子。过去的日子不给改（400 `past_day`）。

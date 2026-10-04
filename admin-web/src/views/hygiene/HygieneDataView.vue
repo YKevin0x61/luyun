@@ -328,8 +328,8 @@ function gotoPage(next) {
         <LuyunDatePicker v-model="dateTo" dark placeholder="结束日期" aria-label="数据查询结束日期" />
       </label>
       <label class="clock-field">
-        责任区
-        <select v-model="zoneId" class="input" aria-label="按责任区筛选">
+        工作区
+        <select v-model="zoneId" class="input" aria-label="按工作区筛选">
           <option value="">全部</option>
           <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
         </select>

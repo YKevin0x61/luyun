@@ -158,7 +158,7 @@ class AttireCaptureLifecycleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["title"], "仪容仪表")
         self.assertEqual(item["status"], "等验收")
         self.assertEqual(item["submitter_name"], "张三")
-        # 仪容仪表不挂责任区：那一列是空的，不是「未分类」。
+        # 仪容仪表不挂工作区：那一列是空的，不是「未分类」。
         self.assertEqual(item["zone_name"], "")
         self.assertIsNone(item["zone_id"])
         self.assertEqual([photo["capture_id"] for photo in item["photos"]], [shot_id])
@@ -203,7 +203,7 @@ class AttireCaptureLifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(str(view["content_type"]).startswith("image/"))
 
     async def test_attire_is_empty_when_filtering_by_zone(self):
-        """按责任区筛就没有仪容仪表 —— 它按人，不挂在任何区上（跟专项同一条口径）。"""
+        """按工作区筛就没有仪容仪表 —— 它按人，不挂在任何区上（跟专项同一条口径）。"""
         await self._submit_one()
         page = await self.archive.list_records(
             kinds=[KIND_ATTIRE], date_from=DAY, date_to=DAY, zone_id=1

@@ -52,8 +52,8 @@ describe('isStaffPhonePath', () => {
     expect(isStaffPhonePath('/staffx/today')).toBe(false)
     expect(isStaffPhonePath('/hygienex')).toBe(false)
     // 票 05 起管理端八个卫生页住在 `/hygiene/*`，前缀与 `/staff` 只差一个词，别顺手带走。
-    expect(isStaffPhonePath('/hygiene/roster')).toBe(false)
-    expect(isStaffPhonePath('/hygiene/zones')).toBe(false)
+    expect(isStaffPhonePath('/workbench/roster')).toBe(false)
+    expect(isStaffPhonePath('/workbench/zones')).toBe(false)
   })
 
   it('精确名单不能靠前缀猜中：/register/ 带尾斜杠不算（服务端也没放行它）', () => {
@@ -64,7 +64,7 @@ describe('isStaffPhonePath', () => {
   it('管理端页面不算员工端', () => {
     expect(isStaffPhonePath('/')).toBe(false)
     expect(isStaffPhonePath('/admin')).toBe(false)
-    expect(isStaffPhonePath('/scheduling')).toBe(false)
+    expect(isStaffPhonePath('/workbench')).toBe(false)
     expect(isStaffPhonePath('/login')).toBe(false)
     expect(isStaffPhonePath('/recipe/detail')).toBe(false)
   })

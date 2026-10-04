@@ -142,7 +142,7 @@ function submitOpen() {
     imageUploads.enqueue({
       path: '/api/hygiene/admin/fix',
       formData: form,
-      label: `整改原图 · ${zone ? zone.name : '卫生责任区'}`,
+      label: `整改原图 · ${zone ? zone.name : '卫生工作区'}`,
       detail: ticketType.value,
       onSuccess: loadTickets,
       // 开单是无条件 INSERT、没有幂等键：自动重试会在"已提交但响应丢了"时
@@ -253,11 +253,11 @@ async function confirmDelete() {
       <h3>开整改单</h3>
       <p v-if="!liveOk" class="camera-missing">{{ CAMERA_MISSING }}</p>
       <template v-else>
-        <p class="editor-lead">必选类型、必填哪里脏怎么改、自己填时限、挂一个卫生责任区。画圈可选，画在拍好的静图上，镜头不叠图。</p>
+        <p class="editor-lead">必选类型、必填哪里脏怎么改、自己填时限、挂一个卫生工作区。画圈可选，画在拍好的静图上，镜头不叠图。</p>
         <div class="open-grid">
           <label class="editor-field">
-            卫生责任区
-            <select v-model="zoneId" class="input" aria-label="卫生责任区">
+            卫生工作区
+            <select v-model="zoneId" class="input" aria-label="卫生工作区">
               <option v-for="zone in zones" :key="zone.id" :value="String(zone.id)">{{ zone.name }}</option>
             </select>
           </label>

@@ -1,8 +1,8 @@
 {
   "id": "/pwa/manifests/hygiene.webmanifest",
-  "name": "厨务管家卫生",
-  "short_name": "厨务管家卫生",
-  "description": "门店日常卫生执行与整改",
+  "name": "厨务管家工作台",
+  "short_name": "厨务管家工作台",
+  "description": "门店当班：我的班 · 现场执行与整改",
   "start_url": "/staff/today",
   "scope": "/",
   "display": "standalone",
