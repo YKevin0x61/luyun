@@ -1,31 +1,62 @@
 <script setup>
-// 工作台外壳（票 03：第一次以员工视角渲染）。
+// 工作台外壳（票 03：第一次以员工视角渲染；票 04：顶栏加上身份切换器）。
 //
-// 它只做一件事：顶上一条工作台自己的窄栏（牌子 + 按身份过滤的导航），页面本体挂在
-// `<router-view />` 里 —— 页内结构、五个 tab、各自的顶栏都还是原来的样子（员工端
+// 它只做一件事：顶上一条工作台自己的窄栏（牌子 + 身份切换器 + 按身份过滤的导航），页面
+// 本体挂在 `<router-view />` 里 —— 页内结构、五个 tab、各自的顶栏都还是原来的样子（员工端
 // 「保持现有信息架构」是这次改造的硬约束）。后台那条九个模块的导航不在这里渲染
 // （这些页在页面清单里是 `standalone`，跟 `SchedulingLayout` / `HygieneAdminLayout`
 // 同一个路子）。
 //
-// 导航**一组一格**（`utils/workbenchNav.js`）：员工这一档现在只有「我的」一格，
-// 配方与备货计划在票 07 / 08 并入时加进去，这里不用改。
-import { computed } from 'vue'
-import { useRoute } from 'vue-router'
+// 导航**跟着此刻的身份走**（不再跟着"这一页是谁的"）：身份读 `stores/workbenchIdentity`
+// （票 04），切档时这一条栏与导航面一起变。切换**只改视图与导航面** —— 页面能不能打开
+// 仍是路由守卫与服务端页面墙的事，这里一个字都不碰。
+import { computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
+import { pageRow } from '../../router/pageRoutes.js'
+import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
 import { WORKBENCH_TITLE } from '../../utils/workbenchCopy'
-import { workbenchGroupOf, workbenchNavFor } from '../../utils/workbenchNav'
+import { workbenchAudienceFor, workbenchGroupOf, workbenchNavFor } from '../../utils/workbenchNav'
 
 // 深青墨令牌跟工作台其他两组同一张表（`/hygiene-admin.css`）。
 useScopedStylesheet('/hygiene-admin.css')
 
 const route = useRoute()
+const router = useRouter()
+const identityStore = useWorkbenchIdentityStore()
 
-// 票 04 的「工作台身份」（顶栏切换器、记忆、只降不升）落地之前，这里就按**这一页**的身份
-// 算：票 03 挂在这个外壳下的页都是员工页（清单里 `audience: 'staff'`）。票 04 把这一行换成
-// 读那份身份即可 —— 导航过滤（`workbenchNavFor`）与模板都不动。
-const identity = computed(() => (route.meta.audience === 'admin' ? 'admin' : 'staff'))
+// 探针由切换器自己开场（`onMounted`）。这里只在**已经探出结论**时消费它：没探完时
+// `identity` 是 null，导航不渲染 —— 不给一个可能点不通的入口。
+const identity = computed(() => identityStore.identity)
 const navItems = computed(() => workbenchNavFor(identity.value))
 const currentGroup = computed(() => workbenchGroupOf(route.path))
+
+/** 此刻这一页还属于当前身份吗（判据是页面清单里那一行的 `audience`，不猜路径前缀）。
+ *
+ *  身份还没探出来（`null`）时一律算「属于」：那时候还不知道是哪一档，不该先把人弹走
+ *  —— 真正需要送回的是**切档之后**站在别人的页上那一下。清单里没有的路径（单测里那种
+ *  临时路由）同理，按「属于」算。 */
+function viewAllowedHere() {
+  if (identity.value === null) return true
+  const row = pageRow(route.path)
+  if (!row) return true
+  const audience = workbenchAudienceFor(identity.value)
+  return row.audience === 'both' || row.audience === audience
+}
+
+/** 切档之后人还站在别人的页上时，把他送回**这一档**能看的最近一页；导航里那几格就是
+ *  落点（票 05 把人事 / 现场并进来之前，店长这一档还没有可去的格，于是什么也不做 ——
+ *  这是当前中间态，不是漏判）。**不由这里改权限**：守卫怎么判还是怎么判，这条只负责
+ *  别让人停在一个"不是你现在这档看的"页面上。 */
+function keepViewAllowed() {
+  if (viewAllowedHere()) return
+  const fallback = navItems.value[0]
+  if (fallback) void router.replace(fallback.to)
+}
+
+onMounted(keepViewAllowed)
+watch(identity, keepViewAllowed)
 </script>
 
 <template>
@@ -34,6 +65,7 @@ const currentGroup = computed(() => workbenchGroupOf(route.path))
 
     <header class="wb-top">
       <b class="wb-brand">{{ WORKBENCH_TITLE }}</b>
+      <WorkbenchIdentitySwitcher class="wb-id-switcher" />
       <nav class="wb-nav" aria-label="工作台导航">
         <router-link
           v-for="item in navItems"
@@ -63,9 +95,14 @@ const currentGroup = computed(() => workbenchGroupOf(route.path))
   border-bottom: 1px solid var(--hy-line);
 }
 .wb-brand {
+  /* 牌子占掉剩下的宽度：切换器与导航一起贴在右端（原来靠 `.wb-nav` 的 auto margin，
+     中间插了切换器之后那点间距就不够看了）。 */
+  flex: 1; min-width: 0;
   font-family: var(--font-song); font-size: 14px;
   letter-spacing: .12em; color: var(--hy-ink);
 }
+/* 切换器与导航之间一条细分隔：两件事（我是谁 / 去哪一页），别挤成一团。 */
+.wb-id-switcher { margin-left: 4px; padding-right: 10px; border-right: 1px solid var(--hy-line); }
 .wb-nav { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .wb-nav-item {
   font-size: 12px; color: var(--hy-muted); text-decoration: none;
