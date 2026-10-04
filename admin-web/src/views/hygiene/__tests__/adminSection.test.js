@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { pageMeta } from '../../../router/pageRoutes.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -43,7 +44,11 @@ describe('hygiene admin section shell', () => {
   it('router wraps every admin hygiene path in a standalone shell', () => {
     const router = read('../../../router/index.js')
     expect(router).toMatch(/HygieneAdminLayout/)
-    expect(router).toMatch(/meta: \{ standalone: true \}/)
+    // 票 01：独立外壳标记不再写死在 router 里，而是每条路由从页面清单派生
+    // （`meta: pageMeta(path)`）。值本身在这里对着清单断一次；「注册出来的路由确实
+    // 等于清单」由 `router/__tests__/pageRoutes.test.js` 对着真实路由表钉。
+    expect(router).toMatch(/meta: pageMeta\(path\)/)
+    expect(pageMeta('/workbench/roster')).toEqual({ standalone: true, public: false })
     expect(router).toMatch(/hygieneAdminPage\('\/workbench\/roster'/)
     expect(router).toMatch(/hygieneAdminPage\('\/workbench\/zones'/)
     expect(router).toMatch(/hygieneAdminPage\('\/workbench\/daily'/)

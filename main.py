@@ -687,6 +687,9 @@ from starlette.requests import Request
 # 需要会话的页面，加进来就是对未登录访客放行 POS 凭据 / 数据库凭据 / API Token。
 # 首次初始化（创建管理员账号）在 `/login` 的管理员栏里，跟这一页无关。
 HTML_AUTH_EXACT = {"/login", "/login.html", "/index.html", "/staff", "/register"}
+# 票 01 起这两张页面豁免表与 `SPA_PAGE_ROUTES` 一起，由 `tests/test_spa_page_routes.py`
+# 对着页面清单的唯一来源 `admin-web/src/router/pageRoutes.json` 强校验（表里每条都要有
+# 出处，`public` 字段再用未登录硬导航的真实请求复核一遍）。
 # Keep in lockstep with admin-web/src/utils/loginNext.js RECIPE_READER_PATHS.
 # Do not use a /recipe prefix — /recipe/manage still requires a session.
 # Staff-phone entry pages live under `/staff/*`; `/hygiene/*` (票 05 起八个管理端
@@ -1114,8 +1117,13 @@ async def kds_manifest():
 # ---- admin-web SPA 页面路由（Phase 4.6：统一服务同一 SPA，登录/配置也走 SPA） ----
 # 未登录访问由 HtmlAuthMiddleware 服务端重定向到 /login（配方阅读面、KDS、/login 豁免）。
 #
-# 清单是模块级常量：注册与 tests/test_spa_page_routes.py 的前后端契约测试共用同一份，
-# 新增 vue-router 页面时必须同步补这里。main.py 没有 catch-all，反代的
+# 清单是模块级常量（后端启动不读前端源码），但**不再是第二份事实来源**：页面清单的
+# 唯一来源是 `admin-web/src/router/pageRoutes.json`（`path` / `title` / `group` /
+# `audience` / `standalone` / `public` / `aliases`），本常量与下面两张页面豁免表
+# （`HTML_AUTH_EXACT` / `HTML_AUTH_PUBLIC_PAGES`）由 `tests/test_spa_page_routes.py`
+# 对着那张表强校验：清单相等 + 未登录硬导航的真实请求复核。「是否公开」的语义就是
+# 表里的 `public`：未登录也能拿到页面壳。新增 vue-router 页面时先补那张表，再补这里。
+# main.py 没有 catch-all，反代的
 # `try_files … /index.html` 也只写在 admin|sales-report|logs|prep-plan|wecom-push|recipe
 # 六个前缀的白名单块里（deploy/nginx.conf、deploy/Caddyfile），hygiene 页面一律落到
 # 反代兜底转发 —— 漏一条就是直连/反代硬导航 404（DOC-01 的 /hygiene-data 就是这么漏的）。

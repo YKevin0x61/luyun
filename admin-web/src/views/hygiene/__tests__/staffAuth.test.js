@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { pageMeta } from '../../../router/pageRoutes.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -18,8 +19,11 @@ describe('hygiene staff auth gate', () => {
     expect(router).not.toMatch(/hygieneAdminPage\('\/workbench\/login'/)
     expect(router).not.toMatch(/hygieneAdminPage\('\/register'/)
     expect(existsSync(join(here, '../HygieneLoginView.vue'))).toBe(false)
-    // `/login` 仍是公开的独立页（不显示主导航、不连实时）。
-    expect(router).toMatch(/path: '\/login'[\s\S]{0,200}?standalone: true, public: true/)
+    // `/login` 仍是公开的独立页（不显示主导航、不连实时）。票 01 起这两个标记来自页面
+    // 清单（`meta: pageMeta('/login')`）—— 这里断清单里的值，注册出来对不对由
+    // `router/__tests__/pageRoutes.test.js` 对着真实路由表钉。
+    expect(router).toMatch(/path: '\/login'[\s\S]{0,200}?meta: pageMeta\('\/login'\)/)
+    expect(pageMeta('/login')).toEqual({ standalone: true, public: true })
   })
 
   it('gate loads the shared hygiene stylesheet and the 卫 lockup', () => {

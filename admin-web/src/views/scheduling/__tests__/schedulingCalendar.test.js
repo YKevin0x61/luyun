@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { pageMeta } from '../../../router/pageRoutes.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../SchedulingCalendarView.vue'), 'utf8')
@@ -134,12 +135,15 @@ describe('店长端排班月历（原型 B）', () => {
     // 后台导航在手机上要占 86px（`theme.css` 的 ≤720px 那套两行布局），而排班是"当场干活
     // 的界面"——跟卫生管理端、员工端一个路子：标 standalone，由 SchedulingLayout 提供
     // 自己的头（回后台的入口、页面名、实时状态，原先这三样都挂在后台导航上）。
-    expect(router).toMatch(/meta: \{ standalone: true \}/)
+    // 票 01：这个标记不再写死在 router 里，而是从页面清单派生（`meta: pageMeta('/workbench')`）；
+    // 注册出来的路由确实等于清单，由 `router/__tests__/pageRoutes.test.js` 对着真实路由表钉。
+    expect(router).toMatch(/meta: pageMeta\('\/workbench'\)/)
+    expect(pageMeta('/workbench')).toEqual({ standalone: true, public: false })
     expect(router).toMatch(/views\/scheduling\/SchedulingLayout\.vue/)
     expect(shell).toMatch(/router\.push\('\/'\)/)
     expect(shell).toMatch(/inject\('wsConnected'/)
     // 三个 URL 一个字符都没变：后端 `SPA_PAGE_ROUTES` 与 `tests/test_spa_page_routes.py`
-    // 都按字面读 `path: '/x'`（子路由因此写绝对路径，不写相对段）。
+    // 都从页面清单 / 路由源码里读路径（票 01 起解析面也认无插值模板），子路由因此写绝对路径。
     expect(router).toMatch(/path: '\/workbench\/inbox', name: 'workbench-inbox'/)
     expect(router).toMatch(/path: '\/workbench\/shifts', name: 'workbench-shifts'/)
   })

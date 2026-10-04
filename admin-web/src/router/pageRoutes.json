@@ -1,0 +1,238 @@
+{
+  "_comment": [
+    "页面清单的唯一来源 —— 加一页、改标题、改分组、改身份、改外壳/公开标记，都只改这里。",
+    "前端：admin-web/src/router/index.js 每条路由的 meta（standalone/public）与页面标题从这张表派生，读取口是 admin-web/src/router/pageRoutes.js。",
+    "后端：main.py 的 SPA_PAGE_ROUTES 与两张页面豁免表（HTML_AUTH_EXACT / HTML_AUTH_PUBLIC_PAGES）由 tests/test_spa_page_routes.py 强校验与本表一致（清单相等 + 未登录硬导航的真实请求复核）。",
+    "字段：path 路径 / title 页面标题 / group 所属组（home|hr|floor|kitchen|me|system|entry，home 是工作台首页那一组，票 06 才有行）/ audience 允许的身份（admin 管理端 | staff 员工 | both 两者）/ standalone 是否独立外壳（不渲染后台导航）/ public 是否免登录（未登录也能拿到页面壳：服务端不 302、前端守卫放行）/ aliases 服务端额外注册的路径变体（同一页面的别名，不是独立路由，可选）。",
+    "audience 的分组语义按 2026-10-05 定下的工作台信息架构：人事（排班月历 / 请假待批 / 班次维护 / 花名册）、现场、后勤（配方 + 备货计划）、我的（员工端）。本表只描述现状，不改任何地址 —— 路径重排在后续票。",
+    "本票不改任何 URL、不改任何行为：这张表是当前注册情况的唯一书面形式，改它会立刻被三组契约测试拦下来。"
+  ],
+  "pages": [
+    {
+      "path": "/login",
+      "title": "登录",
+      "group": "entry",
+      "audience": "both",
+      "standalone": true,
+      "public": true
+    },
+    {
+      "path": "/register",
+      "title": "员工注册",
+      "group": "entry",
+      "audience": "staff",
+      "standalone": true,
+      "public": true
+    },
+    {
+      "path": "/",
+      "title": "运营仪表盘",
+      "group": "system",
+      "audience": "admin",
+      "standalone": false,
+      "public": false,
+      "aliases": ["/index.html"]
+    },
+    {
+      "path": "/admin",
+      "title": "数据管理",
+      "group": "system",
+      "audience": "admin",
+      "standalone": false,
+      "public": false,
+      "aliases": ["/admin/"]
+    },
+    {
+      "path": "/sales-report",
+      "title": "销售报表",
+      "group": "system",
+      "audience": "admin",
+      "standalone": false,
+      "public": false
+    },
+    {
+      "path": "/wecom-push",
+      "title": "企微推送",
+      "group": "system",
+      "audience": "admin",
+      "standalone": false,
+      "public": false
+    },
+    {
+      "path": "/logs",
+      "title": "日志中心",
+      "group": "system",
+      "audience": "admin",
+      "standalone": false,
+      "public": false
+    },
+    {
+      "path": "/settings",
+      "title": "系统配置",
+      "group": "system",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench",
+      "title": "排班月历",
+      "group": "hr",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/inbox",
+      "title": "排班待办",
+      "group": "hr",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/shifts",
+      "title": "班次表",
+      "group": "hr",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/roster",
+      "title": "花名册",
+      "group": "hr",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/zones",
+      "title": "卫生工作区",
+      "group": "floor",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/daily",
+      "title": "日常验收",
+      "group": "floor",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/attire",
+      "title": "仪容仪表",
+      "group": "floor",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/deep-clean",
+      "title": "专项卫生",
+      "group": "floor",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/fix",
+      "title": "整改单",
+      "group": "floor",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/boards",
+      "title": "红黑榜",
+      "group": "floor",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/data",
+      "title": "数据与照片",
+      "group": "floor",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/recipe",
+      "title": "选择岗位",
+      "group": "kitchen",
+      "audience": "both",
+      "standalone": true,
+      "public": true
+    },
+    {
+      "path": "/recipe/detail",
+      "title": "配方详情",
+      "group": "kitchen",
+      "audience": "both",
+      "standalone": true,
+      "public": true
+    },
+    {
+      "path": "/recipe/print",
+      "title": "配方打印",
+      "group": "kitchen",
+      "audience": "both",
+      "standalone": true,
+      "public": true
+    },
+    {
+      "path": "/recipe/qr",
+      "title": "岗位二维码",
+      "group": "kitchen",
+      "audience": "both",
+      "standalone": true,
+      "public": true
+    },
+    {
+      "path": "/recipe/manage",
+      "title": "配方管理",
+      "group": "kitchen",
+      "audience": "admin",
+      "standalone": false,
+      "public": false
+    },
+    {
+      "path": "/prep-plan",
+      "title": "备货计划",
+      "group": "kitchen",
+      "audience": "admin",
+      "standalone": false,
+      "public": false
+    },
+    {
+      "path": "/staff/today",
+      "title": "今天",
+      "group": "me",
+      "audience": "staff",
+      "standalone": true,
+      "public": true
+    },
+    {
+      "path": "/staff/month",
+      "title": "整月",
+      "group": "me",
+      "audience": "staff",
+      "standalone": true,
+      "public": true
+    },
+    {
+      "path": "/staff/clean",
+      "title": "卫生待办",
+      "group": "me",
+      "audience": "staff",
+      "standalone": true,
+      "public": true
+    }
+  ]
+}

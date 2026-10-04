@@ -37,8 +37,9 @@ describe('工作台路由（票 04 收口之后）', () => {
   })
 
   it('首页套同一层壳、是独立页，本体挂在空路径子记录上', () => {
+    // 票 01：独立外壳标记从页面清单派生（`meta: pageMeta('/workbench')`），不再写死在这里。
     expect(router).toMatch(
-      /path: '\/workbench',\n\s+component: \(\) => import\('\.\.\/views\/scheduling\/SchedulingLayout\.vue'\),\n\s+meta: \{ standalone: true \},/,
+      /path: '\/workbench',\n\s+component: \(\) => import\('\.\.\/views\/scheduling\/SchedulingLayout\.vue'\),\n\s+meta: pageMeta\('\/workbench'\),/,
     )
     expect(router).toMatch(
       /path: '', name: 'workbench', component: \(\) => import\('\.\.\/views\/scheduling\/SchedulingCalendarView\.vue'\)/,
@@ -46,8 +47,8 @@ describe('工作台路由（票 04 收口之后）', () => {
   })
 
   it('旧前缀一条都不留（不留别名、不留重定向）', () => {
-    // 路径写成字面量是契约测试的前提（`tests/test_spa_page_routes.py` 按字面正则扫源码），
-    // 所以这里也按字面查：带着引号的旧路径一旦回来，就是"又长出了第二套地址"。
+    // 路径写成字面量（或没有插值的模板）是契约测试的前提（`tests/test_spa_page_routes.py`
+    // 解析路由源码），所以这里也按字面查：带着引号的旧路径一旦回来，就是"又长出了第二套地址"。
     expect(router).not.toMatch(/'\/hygiene\//)
     expect(router).not.toMatch(/'\/scheduling'/)
     expect(router).not.toMatch(/'\/scheduling\//)
