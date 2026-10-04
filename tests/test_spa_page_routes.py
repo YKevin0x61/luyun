@@ -8,12 +8,15 @@
 运维 curl 排查）硬导航或刷新该路径就是 404 —— 管理端里点得进去，一刷新就 404，
 很容易被误判成反代故障。
 
-**为什么不能靠反代兜底**：`deploy/nginx.conf:92` 的
-`location ~ ^/(admin|sales-report|logs|prep-plan|wecom-push|recipe)(/.*)?$` 与
-`deploy/Caddyfile:81-82` 的 `@spa path` 是同样六个前缀，`try_files … /index.html`
-只写在这两个白名单块里；`/hygiene/*`、`/login`、`/settings` 全部落到兜底的
-`reverse_proxy 127.0.0.1:8000`。所以 hygiene 页面必须在 `main.py` 里逐条注册，
-本文件按这个前提断言。
+**为什么不能靠反代兜底**：`deploy/nginx.conf` 的
+`location ~ ^/(admin|sales-report|logs|wecom-push|workbench)(/.*)?$` 与
+`deploy/Caddyfile` 的 `@spa path` 是同样这五个前缀（票 11 起：工作台进来了，
+搬走的 `/prep-plan`、`/recipe*` 清出去了），`try_files … /index.html` 只写在这两个
+白名单块里；其余页面路由（`/login`、`/register`、`/settings` 等）落到兜底的
+`reverse_proxy 127.0.0.1:8000`。而 `main.py` 没有 catch-all —— 每一条页面都必须在这里
+逐条注册，否则直连 uvicorn（Docker 场景 `deploy/docker-entrypoint.sh`、运维 curl 排查）
+就是 404。工作台进了反代白名单**也不改变这一点**：白名单只让经反代的那条路拿到静态壳，
+直连后端那条路仍然逐条注册，本文件按这个前提断言。
 
 **票 01 起页面清单只有一份来源**：`admin-web/src/router/pageRoutes.json`
 （Vite 直接 `import`，本文件 `json.load`）。本文件因此同时钉三件事：
