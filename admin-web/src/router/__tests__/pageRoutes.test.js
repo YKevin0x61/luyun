@@ -61,13 +61,18 @@ describe('页面清单（唯一来源）', () => {
       '/recipe/detail',
       '/recipe/print',
       '/recipe/qr',
-      '/staff/today',
-      '/staff/month',
-      '/staff/clean',
+      // 员工三页搬进工作台的「我的」组（票 03）：套工作台外壳，后台导航照样不渲染；
+      // 越权落点也是独立一页（一页说明 + 一颗按钮，不套导航）。
+      '/workbench/me/today',
+      '/workbench/me/month',
+      '/workbench/me/clean',
+      '/workbench/forbidden',
     ])
   })
 
-  it('免登录的页面就是这些（登录页、注册页、配方阅读面、员工手机端三页）', () => {
+  it('免登录的页面就是这些（登录页、注册页、配方阅读面）', () => {
+    // 票 03 起工作台里的页一律不是 public（工作台是「进去要登录」的页面区）：员工三页
+    // 从这份名单里退出，页面壳的放行改由「任一会话有效」决定。
     expect(PAGE_ROUTES.filter((row) => row.public).map((row) => row.path)).toEqual([
       '/login',
       '/register',
@@ -75,9 +80,6 @@ describe('页面清单（唯一来源）', () => {
       '/recipe/detail',
       '/recipe/print',
       '/recipe/qr',
-      '/staff/today',
-      '/staff/month',
-      '/staff/clean',
     ])
   })
 

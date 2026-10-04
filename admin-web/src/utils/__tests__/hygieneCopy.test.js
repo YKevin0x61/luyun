@@ -108,8 +108,8 @@ describe('hygieneCopy', () => {
     expect(isHygieneAdminPath('/workbench/register')).toBe(false)
     // 自助注册页（票 02 起在顶层 /register）不是管理端卫生页。
     expect(isHygieneAdminPath('/register')).toBe(false)
-    // 员工端的卫生首页也不是（票 04 起在 `/staff/clean`）。
-    expect(isHygieneAdminPath('/staff/clean')).toBe(false)
+    // 员工端的卫生待办也不是（票 03 起在 `/workbench/me/clean`）。
+    expect(isHygieneAdminPath('/workbench/me/clean')).toBe(false)
     expect(HYGIENE_ADMIN_NAV.map((item) => item.shortTitle)).toEqual([
       '人员', '工作区', '日常', '仪容', '专项', '整改', '榜', '数据',
     ])

@@ -48,7 +48,7 @@ describe('员工端弱网与未登录的分流', () => {
   it('uses that return path on the login panel, but only inside the staff pages', () => {
     // 直接把 query 拿去 replace 就是开放重定向：必须限定站内前缀。票 03 起员工登录
     // 就在 `/login` 的员工栏（`?next=` 落在员工端前缀内时面板强制开员工栏）；票 04 起
-    // 员工端三页整体在 `/staff/*`（今天 /staff/today、整月 /staff/month、卫生 /staff/clean）。
+    // 员工端三页整体在 `/workbench/me/*`（今天、整月、卫生待办 —— 票 03 搬进工作台）。
     // 判据只在 utils/loginNext.js 的 `resolveStaffNext` 里写一遍（真单测在
     // utils/__tests__/loginNext.test.js）：页面里手写正则等于第二份更弱的判据，
     // 放松了也没人拦。

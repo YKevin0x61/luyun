@@ -678,22 +678,24 @@ from starlette.requests import Request
 
 # The SPA shell is public (it only boots the client router); protected pages are
 # still enforced by the router/API. The Service Worker also needs to precache it.
-# 员工页面也在里面：手机上没有管理端会话，拦在服务端就永远进不去（员工会话由客户端
-# 守卫查那个 cookie）。票 04 起员工端整体住在 `/staff/*`（今天/整月/卫生首页），
-# 免墙入口是前缀本身那条 `/staff`；`/staff/*` 走下面的前缀表。
-# `/register` 是员工自助注册页（票 02 从 `/hygiene/register` 搬到顶层，在员工前缀之外，
+# 员工页面**不再在免墙名单里**：票 03 起员工三页住进工作台的「我的」组
+# （`/workbench/me/*`），工作台的页面壳对任一会话都放行（下面的 `_has_staff_session`），
+# 员工自己的会话就是那把钥匙 —— 工作台是「进去要登录」的页面区，标成免墙就是把壳也对
+# 未登录访客敞开。旧的裸条目 `/staff` 与免墙前缀 `/staff/` 同时删掉（audit 条目 15）。
+# `/register` 是员工自助注册页（票 02 从 `/hygiene/register` 搬到顶层，在工作台之外，
 # 只能逐条精确放行 —— 跟 admin-web/src/utils/staffPaths.js 的 STAFF_PHONE_EXACT 对表）。
 # **系统配置页 `/settings`（票 06 从 `/setup` 改名）不在这张表里，也不许加进来**：它是
 # 需要会话的页面，加进来就是对未登录访客放行 POS 凭据 / 数据库凭据 / API Token。
 # 首次初始化（创建管理员账号）在 `/login` 的管理员栏里，跟这一页无关。
-HTML_AUTH_EXACT = {"/login", "/login.html", "/index.html", "/staff", "/register"}
+HTML_AUTH_EXACT = {"/login", "/login.html", "/index.html", "/register"}
 # 票 01 起这两张页面豁免表与 `SPA_PAGE_ROUTES` 一起，由 `tests/test_spa_page_routes.py`
 # 对着页面清单的唯一来源 `admin-web/src/router/pageRoutes.json` 强校验（表里每条都要有
 # 出处，`public` 字段再用未登录硬导航的真实请求复核一遍）。
 # Keep in lockstep with admin-web/src/utils/loginNext.js RECIPE_READER_PATHS.
 # Do not use a /recipe prefix — /recipe/manage still requires a session.
-# Staff-phone entry pages live under `/staff/*`; `/hygiene/*` (票 05 起八个管理端
-# 卫生页住在这里) is Admin SPA. There is no `/hygiene/` prefix any more (票 03 删掉了它)。
+# Staff-phone entry pages live under `/workbench/me/*` (票 03): they are ordinary
+# workbench pages now (no exemption here) and the page wall lets either session
+# through. There is no `/staff/` prefix any more (票 03 删掉了它).
 HTML_AUTH_PUBLIC_PAGES = frozenset({
     "/recipe",
     "/recipe/detail",
@@ -706,17 +708,15 @@ HTML_AUTH_PREFIXES = (
     "/kds",
     "/assets/",
     "/pwa/",
-    # 票 03 删掉了 `/hygiene/`：它以前是员工登录页的免墙前缀，而员工登录页已并入
-    # `/login`，`/hygiene/` 底下再没有任何员工页。留着它，票 05 把八个卫生管理页
+    # 票 03 删掉了 `/hygiene/`（更早的一张票）：它以前是员工登录页的免墙前缀，而员工登录页
+    # 已并入 `/login`，`/hygiene/` 底下再没有任何员工页。留着它，票 05 把八个卫生管理页
     # 搬进 `/hygiene/*` 之后它们就对未登录访客放行了 —— 这是本次唯一会造成未授权
     # 访问的地方，`tests/test_auth.py` 里有反向断言（前缀名单里没有 `/hygiene/`）
     # 与正向断言（八个页面未登录仍 302 到 `/login`）各一条。
-    # 员工页带尾斜杠时也放行：`/staff/` 与精确表里那条 `/staff` 不是同一条路径
-    # （精确表只认不带斜杠的那个），`/staff/today/` 这类要靠前缀兜住，再交给
-    # Starlette 的 redirect_slashes 307 回不带尾斜杠的那条。
-    # 票 04 起整段 `/staff/` 都是员工领土（今天 /staff/today、整月 /staff/month、
-    # 卫生首页 /staff/clean），所以前缀就是它本身。
-    "/staff/",
+    # 票 03 同时删掉了 `/staff/`：员工三页搬进工作台（`/workbench/me/*`）之后，这条前缀
+    # 底下再没有员工页，而工作台是「进去要登录」的页面区 —— 它现在的放行根据是会话
+    # （`_is_workbench_page` + `_has_staff_session`），不是路径。`tests/test_auth.py`
+    # 有反向断言（前缀表里没有 `/staff/`）与正向断言（三页未登录 302、带员工会话 200）。
 )
 HTML_AUTH_SUFFIXES = (
     ".css",
@@ -1182,11 +1182,10 @@ SPA_PAGE_ROUTES = (
     "/recipe/manage",
     "/recipe/qr",
     "/logs",
-    "/staff/today",
-    "/staff/month",
-    "/staff/clean",
-    # 工作台（排班 + 卫生，2026-10-04）：两组同住一条前缀。旧前缀 `/hygiene/*` 与
-    # `/scheduling*` 已按票 04 删干净、不留别名（用户拍板：旧书签 404 可接受）。
+    # 工作台（排班 + 卫生 + 员工端，2026-10-04）：三组同住一条前缀。旧前缀
+    # `/hygiene/*`、`/scheduling*` 与 `/staff/*` 已删干净、不留别名（用户拍板：旧书签
+    # 404 可接受）。票 03 起员工三页在「我的」组里，`/workbench/forbidden` 是越权落点
+    # —— 它也是一页，`SPA_PAGE_ROUTES` 里必须有它，否则硬导航 404。
     # 这一批**每一条都得在**：漏一条就是"管理端点得进去、手机上一刷新 404"——
     # `/hygiene-data` 那次正是这么栽的。前端侧由 `tests/test_spa_page_routes.py` 双向盯住。
     "/workbench",
@@ -1200,6 +1199,10 @@ SPA_PAGE_ROUTES = (
     "/workbench/boards",
     "/workbench/data",
     "/workbench/attire",
+    "/workbench/me/today",
+    "/workbench/me/month",
+    "/workbench/me/clean",
+    "/workbench/forbidden",
 )
 
 

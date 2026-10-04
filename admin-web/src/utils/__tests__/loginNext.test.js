@@ -33,11 +33,11 @@ describe('shouldSkipLoginRedirect', () => {
     expect(shouldSkipLoginRedirect('/setup')).toBe(false)
   })
 
-  it('员工手机端的页不因 401 跳后台登录（票 04 起在 /staff/*）', () => {
-    expect(shouldSkipLoginRedirect('/staff/today')).toBe(true)
-    expect(shouldSkipLoginRedirect('/staff/today/')).toBe(true)
-    expect(shouldSkipLoginRedirect('/staff/month')).toBe(true)
-    expect(shouldSkipLoginRedirect('/staff/clean')).toBe(true)
+  it('员工手机端的页不因 401 跳后台登录（票 03 起在 /workbench/me/*）', () => {
+    expect(shouldSkipLoginRedirect('/workbench/me/today')).toBe(true)
+    expect(shouldSkipLoginRedirect('/workbench/me/today/')).toBe(true)
+    expect(shouldSkipLoginRedirect('/workbench/me/month')).toBe(true)
+    expect(shouldSkipLoginRedirect('/workbench/me/clean')).toBe(true)
     // 注册页搬到顶层 /register：它没有管理端会话，401 也不该整页跳 /login。
     expect(shouldSkipLoginRedirect('/register')).toBe(true)
   })
@@ -94,11 +94,11 @@ describe('resolveLoginNext', () => {
 
   it('管理员身份不认员工端落点（身份互斥）', () => {
     // 员工页那扇门只认员工 cookie：管理员被送进去也只会被客户端守卫弹回 /login。
-    expect(resolveLoginNext('/staff/today')).toBe('/')
-    expect(resolveLoginNext('/staff/today?day=2')).toBe('/')
-    expect(resolveLoginNext('/staff/month')).toBe('/')
-    expect(resolveLoginNext('/staff/clean')).toBe('/')
-    expect(resolveLoginNext('/staff/today', '/admin')).toBe('/admin')
+    expect(resolveLoginNext('/workbench/me/today')).toBe('/')
+    expect(resolveLoginNext('/workbench/me/today?day=2')).toBe('/')
+    expect(resolveLoginNext('/workbench/me/month')).toBe('/')
+    expect(resolveLoginNext('/workbench/me/clean')).toBe('/')
+    expect(resolveLoginNext('/workbench/me/today', '/admin')).toBe('/admin')
   })
 
   it('管理员身份照旧放行任意站内管理路径（含 query 与菜谱阅读面）', () => {
@@ -110,55 +110,55 @@ describe('resolveLoginNext', () => {
 
 describe('resolveStaffNext', () => {
   it('员工那三页原样放行（含子页面与 query）', () => {
-    expect(resolveStaffNext('/staff/today')).toBe('/staff/today')
-    expect(resolveStaffNext('/staff/clean')).toBe('/staff/clean')
-    expect(resolveStaffNext('/staff/month')).toBe('/staff/month')
-    expect(resolveStaffNext('/staff/month?m=2026-09')).toBe('/staff/month?m=2026-09')
-    expect(resolveStaffNext('/staff/today/')).toBe('/staff/today/')
+    expect(resolveStaffNext('/workbench/me/today')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/workbench/me/clean')).toBe('/workbench/me/clean')
+    expect(resolveStaffNext('/workbench/me/month')).toBe('/workbench/me/month')
+    expect(resolveStaffNext('/workbench/me/month?m=2026-09')).toBe('/workbench/me/month?m=2026-09')
+    expect(resolveStaffNext('/workbench/me/today/')).toBe('/workbench/me/today/')
   })
 
   it('站外地址与协议相对地址一律回落到员工默认落点', () => {
-    expect(resolveStaffNext('https://evil.example/phish')).toBe('/staff/today')
-    expect(resolveStaffNext('//evil.example')).toBe('/staff/today')
-    expect(resolveStaffNext('/\\evil.example')).toBe('/staff/today')
-    expect(resolveStaffNext('javascript:alert(1)')).toBe('/staff/today')
+    expect(resolveStaffNext('https://evil.example/phish')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('//evil.example')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/\\evil.example')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('javascript:alert(1)')).toBe('/workbench/me/today')
   })
 
   it('管理端页面不算员工落点（连名字像的也不算）', () => {
-    expect(resolveStaffNext('/admin')).toBe('/staff/today')
-    expect(resolveStaffNext('/workbench/roster')).toBe('/staff/today')
-    expect(resolveStaffNext('/workbench/zones')).toBe('/staff/today')
-    expect(resolveStaffNext('/staffx')).toBe('/staff/today')
-    expect(resolveStaffNext('/login?next=/admin')).toBe('/staff/today')
+    expect(resolveStaffNext('/admin')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/workbench/roster')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/workbench/zones')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/workbench/mex')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/login?next=/admin')).toBe('/workbench/me/today')
   })
 
   it('旧员工路径不再是落点：搬走之后没留别名', () => {
     for (const stale of ['/today', '/today/month', '/hygiene']) {
-      expect(resolveStaffNext(stale)).toBe('/staff/today')
+      expect(resolveStaffNext(stale)).toBe('/workbench/me/today')
     }
   })
 
   it('注册页是员工侧界面，但不是登录后落点：?next=/register 回落到默认落点', () => {
     // 注册成功还在等超级管理员批准、会话也不存在 —— 把 /register 当落点就是死路。
-    expect(resolveStaffNext('/register')).toBe('/staff/today')
-    expect(resolveStaffNext('/register?from=login')).toBe('/staff/today')
+    expect(resolveStaffNext('/register')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/register?from=login')).toBe('/workbench/me/today')
   })
 
   it('默认落在今天页；也认调用方给的兜底', () => {
-    expect(resolveStaffNext(null)).toBe('/staff/today')
-    expect(resolveStaffNext('')).toBe('/staff/today')
-    expect(resolveStaffNext(undefined)).toBe('/staff/today')
-    expect(resolveStaffNext(undefined, '/staff/clean')).toBe('/staff/clean')
-    expect(resolveStaffNext('/admin', '/staff/clean')).toBe('/staff/clean')
+    expect(resolveStaffNext(null)).toBe('/workbench/me/today')
+    expect(resolveStaffNext('')).toBe('/workbench/me/today')
+    expect(resolveStaffNext(undefined)).toBe('/workbench/me/today')
+    expect(resolveStaffNext(undefined, '/workbench/me/clean')).toBe('/workbench/me/clean')
+    expect(resolveStaffNext('/admin', '/workbench/me/clean')).toBe('/workbench/me/clean')
   })
 
   it('数组取第一个（vue-router 的 query 可能是数组）', () => {
-    expect(resolveStaffNext(['/staff/today', '/admin'])).toBe('/staff/today')
-    expect(resolveStaffNext(['/admin', '/staff/today'])).toBe('/staff/today')
+    expect(resolveStaffNext(['/workbench/me/today', '/admin'])).toBe('/workbench/me/today')
+    expect(resolveStaffNext(['/admin', '/workbench/me/today'])).toBe('/workbench/me/today')
   })
 
   it('误伤的双重编码照旧解开', () => {
-    expect(resolveStaffNext('/staff/today?next=%252Fstaff%252Ftoday')).toBe('/staff/today?next=%2Fstaff%2Ftoday')
+    expect(resolveStaffNext('/workbench/me/today?next=%252Fworkbench%252Fme%252Ftoday')).toBe('/workbench/me/today?next=%2Fworkbench%2Fme%2Ftoday')
   })
 })
 
@@ -172,28 +172,28 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
   })
 
   it('?next 落在员工端前缀内时强制员工栏，优先于记住值', () => {
-    expect(resolveLoginTab('/staff/today', 'admin')).toBe('staff')
-    expect(resolveLoginTab('/staff/month?m=2026-09', 'admin')).toBe('staff')
-    expect(resolveLoginTab('/staff/clean', 'admin')).toBe('staff')
+    expect(resolveLoginTab('/workbench/me/today', 'admin')).toBe('staff')
+    expect(resolveLoginTab('/workbench/me/month?m=2026-09', 'admin')).toBe('staff')
+    expect(resolveLoginTab('/workbench/me/clean', 'admin')).toBe('staff')
     // 误伤的双重编码照旧认得出（`%25` 在路径后面时解一层）。
-    expect(resolveLoginTab('/staff/today?next=%252Fstaff%252Ftoday', 'admin')).toBe('staff')
+    expect(resolveLoginTab('/workbench/me/today?next=%252Fworkbench%252Fme%252Ftoday', 'admin')).toBe('staff')
   })
 
   it('管理端路径、站外地址、登录页自身都不强制员工栏', () => {
     expect(resolveLoginTab('/admin', 'admin')).toBe('admin')
     expect(resolveLoginTab('/workbench/roster', 'admin')).toBe('admin')
     expect(resolveLoginTab('//evil.example', 'admin')).toBe('admin')
-    expect(resolveLoginTab('//evil.example/staff/today', 'admin')).toBe('admin')
-    expect(resolveLoginTab('https://evil.example/staff/today', 'admin')).toBe('admin')
-    expect(resolveLoginTab('/login?next=/staff/today', 'admin')).toBe('admin')
+    expect(resolveLoginTab('//evil.example/workbench/me/today', 'admin')).toBe('admin')
+    expect(resolveLoginTab('https://evil.example/workbench/me/today', 'admin')).toBe('admin')
+    expect(resolveLoginTab('/login?next=/workbench/me/today', 'admin')).toBe('admin')
     // 旧路径也不是员工端了（搬走 + 删除，不留别名）。
     expect(resolveLoginTab('/today', 'admin')).toBe('admin')
     expect(resolveLoginTab(undefined, undefined)).toBe('staff')
   })
 
   it('数组取第一个', () => {
-    expect(resolveLoginTab(['/admin', '/staff/today'], 'staff')).toBe('staff')
-    expect(resolveLoginTab(['/staff/today', '/admin'], 'admin')).toBe('staff')
+    expect(resolveLoginTab(['/admin', '/workbench/me/today'], 'staff')).toBe('staff')
+    expect(resolveLoginTab(['/workbench/me/today', '/admin'], 'admin')).toBe('staff')
   })
 })
 
@@ -223,12 +223,24 @@ describe('老前缀的 ?next= 迁移（票 03/04）', () => {
     expect(resolveLoginNext('https://evil.example/hygiene/daily')).toBe('/')
     // 员工端前缀照旧不算管理端落点（老前缀迁过来之后仍然不是）。
     expect(resolveLoginNext('/hygiene/daily') === '/workbench/daily').toBe(true)
-    expect(resolveLoginNext('/staff/today')).toBe('/')
+    expect(resolveLoginNext('/workbench/me/today')).toBe('/')
   })
 
   it('员工栏：老的管理端地址既不是员工端、也不该被当落点', () => {
-    expect(resolveStaffNext('/hygiene/daily')).toBe('/staff/today')
+    expect(resolveStaffNext('/hygiene/daily')).toBe('/workbench/me/today')
     expect(resolveLoginTab('/hygiene/daily', 'admin')).toBe('admin')
     expect(resolveLoginTab('/scheduling/inbox', 'admin')).toBe('admin')
+  })
+
+  it('员工端：`/staff/*` 换成工作台「我的」组（票 03）——那是唯一发出去过的老地址', () => {
+    // 花名册页那张二维码发出去的就是 `/staff/today`，登录页的 `?next=` 里也可能还存着它。
+    // 地址本身照旧 404（不留路由），这里换的只是「登录之后回哪儿」。
+    expect(resolveStaffNext('/staff/today')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/staff/month?m=2026-09')).toBe('/workbench/me/month?m=2026-09')
+    expect(resolveStaffNext('/staff/clean')).toBe('/workbench/me/clean')
+    expect(resolveLoginTab('/staff/today', 'admin')).toBe('staff')
+    expect(resolveLoginTab('/staff/clean', 'admin')).toBe('staff')
+    // 管理栏照样不认它（换完仍在员工前缀里）。
+    expect(resolveLoginNext('/staff/today')).toBe('/')
   })
 })

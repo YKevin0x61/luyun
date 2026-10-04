@@ -10,24 +10,32 @@ const here = dirname(fileURLToPath(import.meta.url))
 describe('pwaManifest', () => {
   it('selects role manifests by route', () => {
     expect(selectPwaManifest('/').role).toBe('admin')
-    expect(selectPwaManifest('/staff/clean').role).toBe('hygiene')
+    expect(selectPwaManifest('/workbench/me/clean').role).toBe('hygiene')
     expect(selectPwaManifest('/workbench/roster').role).toBe('admin')
     expect(selectPwaManifest('/recipe/manage').role).toBe('recipe')
     expect(selectPwaManifest('/settings').role).toBe('admin')
   })
 
   it('员工端三页挂员工清单，不是管理端那份', () => {
-    // 票 04 起员工端整体在 /staff/*：挂错清单的话手机上装出来的是「厨务管家管理」。
-    for (const path of ['/staff/today', '/staff/today/', '/staff/month', '/staff/clean']) {
+    // 票 03 起员工端在 `/workbench/me/*`：挂错清单的话手机上装出来的是「厨务管家管理」。
+    for (const path of [
+      '/workbench/me/today',
+      '/workbench/me/today/',
+      '/workbench/me/month',
+      '/workbench/me/clean',
+    ]) {
       expect(selectPwaManifest(path).role, path).toBe('hygiene')
     }
-    expect(selectPwaManifest('/staff/today').themeColor).toBe('#16a34a')
-    expect(selectPwaManifest('/staff/today').manifest).toBe('/pwa/manifests/hygiene.webmanifest')
+    expect(selectPwaManifest('/workbench/me/today').themeColor).toBe('#16a34a')
+    expect(selectPwaManifest('/workbench/me/today').manifest).toBe(
+      '/pwa/manifests/hygiene.webmanifest',
+    )
   })
 
   it('旧员工路径已删除：装出来不再是员工清单（旧图标点进去是空壳）', () => {
-    // ADR 0091 的取舍：不给旧地址留别名，所以这里也不该再认它们。
-    for (const stale of ['/today', '/today/month', '/hygiene']) {
+    // ADR 0091 的取舍：不给旧地址留别名，所以这里也不该再认它们。票 03 把三页搬进
+    // 工作台之后，`/staff/*` 也进了这份名单。
+    for (const stale of ['/today', '/today/month', '/hygiene', '/staff/today', '/staff/clean']) {
       expect(selectPwaManifest(stale).role, stale).toBe('admin')
     }
   })
@@ -41,7 +49,7 @@ describe('pwaManifest', () => {
 
   it('/login 上挂哪份清单看面板身份（票 07）', () => {
     // `/login` 一条路径装两种身份：归属只能由面板当下那一栏决定 —— 员工在员工栏上
-    // 「添加到主屏幕」，装出来必须是青绿的员工应用（打开即 /staff/today）。
+    // 「添加到主屏幕」，装出来必须是青绿的员工应用（打开即 /workbench/me/today）。
     expect(selectPwaManifest('/login', 'staff').role).toBe('hygiene')
     expect(selectPwaManifest('/login', 'staff').themeColor).toBe('#16a34a')
     expect(selectPwaManifest('/login', 'staff').manifest).toBe(
@@ -60,22 +68,24 @@ describe('pwaManifest', () => {
     expect(selectPwaManifest('/workbench/roster', 'staff').role).toBe('admin')
     expect(selectPwaManifest('/settings', 'staff').role).toBe('admin')
     expect(selectPwaManifest('/', 'staff').role).toBe('admin')
-    expect(selectPwaManifest('/staff/today', 'admin').role).toBe('hygiene')
+    expect(selectPwaManifest('/workbench/me/today', 'admin').role).toBe('hygiene')
     expect(selectPwaManifest('/register', 'admin').role).toBe('hygiene')
     expect(selectPwaManifest('/recipe/qr', 'staff').role).toBe('recipe')
   })
 
-  it('员工清单的 start_url 就是员工入口（往返语义，票 07 收口）', () => {
-    // 票 04 留下的中间态：`start_url` 还烧在已被删除的 `/today` 上，员工装出来点开是空壳。
-    // 这里断往返 —— 清单的 start_url 必须等于 staffPaths.js 里那个员工入口常量，而且这个
-    // 地址本身确实是一个员工落点、挂的还是员工清单。
+  it('员工清单的 start_url 与员工入口的关系（票 03 之后是**已知的中间态**）', () => {
+    // 票 07 收口时这里断的是「清单的 start_url 等于 staffPaths.js 里那个员工入口常量」。
+    // 票 03 把员工入口搬到了 `/workbench/me/today`，而**清单文件本身归票 09**（三份清单
+    // 收成一份工作台清单）—— 于是现在这两者**不相等**，而且旧地址已经不是员工落点了：
+    // 员工从新地址打开、可装出来的图标仍指着 404 的旧地址。这不是本票要修的，但必须
+    // 显式记着：票 09 收口时把这几行反过来断相等（改清单文件 + 改这里）。
     const manifest = JSON.parse(
       readFileSync(join(here, '../../../public/pwa/manifests/hygiene.webmanifest'), 'utf8'),
     )
-    expect(manifest.start_url).toBe(STAFF_ENTRY_PATH)
-    expect(isStaffLandingPath(manifest.start_url)).toBe(true)
-    expect(selectPwaManifest(manifest.start_url).role).toBe('hygiene')
-    // 身份靠 id 区分，两份 scope 都是 `/`（三页同在 /staff/* 下：只管一页的话页间跳转会跳出应用）。
+    expect(manifest.start_url).toBe('/staff/today')
+    expect(manifest.start_url).not.toBe(STAFF_ENTRY_PATH)
+    expect(isStaffLandingPath(manifest.start_url)).toBe(false)
+    // 身份靠 id 区分，两份 scope 都是 `/`（三页同在工作台里：只管一页的话页间跳转会跳出应用）。
     expect(manifest.id).toBe('/pwa/manifests/hygiene.webmanifest')
     expect(manifest.scope).toBe('/')
 
@@ -102,7 +112,7 @@ describe('pwaManifest', () => {
       querySelector: () => elements.theme,
     }
 
-    const selected = applyPwaManifest('/staff/clean', null, documentRef)
+    const selected = applyPwaManifest('/workbench/me/clean', null, documentRef)
 
     expect(selected.role).toBe('hygiene')
     expect(elements.manifest.setAttribute).toHaveBeenCalledWith(

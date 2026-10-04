@@ -14,6 +14,7 @@ function lineFor(path) {
 // 票 04（收口）：排班 + 卫生合并成「工作台」，两组同住 `/workbench/*`，**只剩这一套**。
 // 旧前缀 `/scheduling*` 与 `/hygiene/*` 已删干净、不留别名 —— 用户拍板：门店手机上
 // 那些旧书签 404 可以接受（`?next=` 里的老地址由 `utils/loginNext.js` 在入口换掉）。
+// 票 03 又把员工三页从 `/staff/*` 搬进工作台的「我的」组，并加了越权落点。
 const PAGES = [
   ['/workbench/inbox', 'SchedulingInboxView.vue'],
   ['/workbench/shifts', 'SchedulingShiftsView.vue'],
@@ -25,6 +26,14 @@ const PAGES = [
   ['/workbench/boards', 'HygieneBoardsView.vue'],
   ['/workbench/data', 'HygieneDataView.vue'],
   ['/workbench/attire', 'HygieneAttireView.vue'],
+  ['/workbench/forbidden', 'ForbiddenView.vue'],
+]
+
+// 工作台「我的」那一组（员工端）：套 `WorkbenchLayout`（工作台外壳），页面本体在子记录里。
+const STAFF_PAGES = [
+  ['/workbench/me/today', 'TodayView.vue'],
+  ['/workbench/me/month', 'TodayMonthView.vue'],
+  ['/workbench/me/clean', 'HygieneHomeView.vue'],
 ]
 
 describe('工作台路由（票 04 收口之后）', () => {
@@ -34,6 +43,19 @@ describe('工作台路由（票 04 收口之后）', () => {
       expect(line, `${path} 没注册`).toBeTruthy()
       expect(line).toContain(view)
     }
+  })
+
+  it('员工三页套同一个工作台外壳（导航按身份渲染），自己不再是一整页', () => {
+    const layout = readFileSync(join(here, '../../views/workbench/WorkbenchLayout.vue'), 'utf8')
+    for (const [path, view] of STAFF_PAGES) {
+      const line = lineFor(path)
+      expect(line, `${path} 没注册`).toBeTruthy()
+      expect(line).toContain(view)
+      expect(line).toContain('workbenchStaffPage')
+    }
+    expect(router).toMatch(/const WorkbenchLayout = \(\) => import\('\.\.\/views\/workbench\/WorkbenchLayout\.vue'\)/)
+    expect(layout).toMatch(/workbenchNavFor/)
+    expect(layout).toMatch(/<router-view \/>/)
   })
 
   it('首页套同一层壳、是独立页，本体挂在空路径子记录上', () => {
@@ -52,6 +74,9 @@ describe('工作台路由（票 04 收口之后）', () => {
     expect(router).not.toMatch(/'\/hygiene\//)
     expect(router).not.toMatch(/'\/scheduling'/)
     expect(router).not.toMatch(/'\/scheduling\//)
+    // 票 03：员工三页搬进工作台，`/staff/*` 与裸 `/staff` 一起作废 —— 同样不留别名。
+    expect(router).not.toMatch(/'\/staff\//)
+    expect(router).not.toMatch(/'\/staff'/)
     // 老地址靠 `?next=` 迁移，不给它留路由：留了就会跟新前缀漂成两套。
     expect(router).not.toMatch(/alias:/)
     expect(router).not.toMatch(/redirect:/)

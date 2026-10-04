@@ -64,11 +64,16 @@ function pathnameOf(next) {
  *
  *  `?next=` 里可能存着搬家前的老地址：别人手机上存着的旧链接、旧书签、旧 PWA 快捷
  *  方式，或者上一次登录被挡下来时写进 URL 的那条。老路由已经删干净了，原样放行就是
- *  跳进一个白屏 —— 所以在这里换掉（前缀对前缀、单条对单条）。 */
+ *  跳进一个白屏 —— 所以在这里换掉（前缀对前缀、单条对单条）。
+ *
+ *  票 03 加 `/staff/` → `/workbench/me/`：员工端三页搬进工作台的「我的」组，而
+ *  `/staff/today` 是**唯一被发出去过**的地址（花名册页那张二维码、登录页的 `?next=`），
+ *  所以这条最值钱。地址本身照旧 404，这里换的只是「登录之后回哪儿」。 */
 const LEGACY_NEXT_PATHS = [
   ['/hygiene/', '/workbench/'],
   ['/scheduling/', '/workbench/'],
   ['/scheduling', '/workbench'],
+  ['/staff/', '/workbench/me/'],
 ]
 
 function migrateLegacyPath(next) {
@@ -100,7 +105,8 @@ export function staffNextTarget(raw) {
 /** 管理员身份的落点：认站内路径，但拒绝员工端前缀（那是员工 cookie 那扇门）与登录页自身。
  *
  *  两个方向都用同一份判据：员工栏只认员工端路径（`resolveStaffNext`），管理栏不认员工端
- *  路径。不这么收，管理端身份会被 `?next=/staff/today` 送进员工页，再被客户端守卫弹回登录页。
+ *  路径。不这么收，管理端身份会被 `?next=/workbench/me/today` 送进员工页，再被客户端守卫
+ *  弹回登录页。
  */
 export function resolveLoginNext(raw, fallback = '/') {
   const fallbackPath = fallback || '/'

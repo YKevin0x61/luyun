@@ -9,13 +9,14 @@ import { createPinia, setActivePinia } from 'pinia'
 // 没有一条真的让守卫跑一遍；这里补上，覆盖票面两条冒烟：
 //
 // - 未登录硬导航受保护页 → 守卫带 `next=<原目标>` 送到 `/login`；
-// - 标了 `public` 的页（员工手机三页、`/register`、配方阅读面）守卫放行，页面自己
-//   那次请求分得清 401 与断网，401 时由页面把 `fullPath` 带回去（见本文件下半段
-//   真实挂载的那条）。
+// - 标了 `public` 的页（`/register`、配方阅读面）守卫放行，页面自己那次请求分得清
+//   401 与断网，401 时由页面把 `fullPath` 带回去（见本文件下半段真实挂载的那条）。
 //
-// 票 02 起判据换成页面清单里的「允许的身份」三态（`meta.audience`），未登录 / 会话
-// 过期 / 身份不匹配都落 `/login?next=`；`/staff/clean` 不再被守卫的会话探针先拦一道
-// —— 它和另外两页一样是 `public`，落点由页面自己那次 401 决定（与表里的 public 一致）。
+// 票 02 起判据换成页面清单里的「允许的身份」三态（`meta.audience`）。
+// **票 03 起「有会话但身份不匹配」不再落登录页**：员工进店长专属页落
+// `/workbench/forbidden?next=<原目标>`（说清这页是谁的 + 一颗回自己首页的按钮），
+// 只有「一个会话都没有」才去 `/login`。员工三页则是 `staffProbe: false`：守卫放行、
+// 落点由页面自己那一次 401 决定（三页一致，见 router 的 `workbenchStaffPage`）。
 
 function jsonResponse(data, status = 200) {
   return {
@@ -55,17 +56,16 @@ afterEach(() => {
 })
 
 describe('vue-router 登录守卫：未登录时带 ?next= 送到 /login', () => {
-  it('公开的员工页 /staff/clean 放行：落点由页面自己那次 401 决定', async () => {
-    // 票 02 的收敛：这一页以前在守卫里先陪探针等一次（同前缀三页两套行为），现在和
-    // `/staff/today` 一样走 public；未登录时 `HygieneHomeView.leaveForStaffLogin`
-    // 拿到 401 再把 `fullPath` 带回 `/login`。
+  it('员工页 /workbench/me/clean 放行：落点由页面自己那次 401 决定', async () => {
+    // 三页现在是 `staffProbe: false`（守卫不先陪探针等一次，弱网下最多 4 秒），未登录时
+    // `HygieneHomeView.leaveForStaffLogin` 拿到 401 再把 `fullPath` 带回 `/login`。
     const router = await freshRouter()
-    await router.push('/staff/clean')
+    await router.push('/workbench/me/clean')
 
-    expect(router.currentRoute.value.path).toBe('/staff/clean')
+    expect(router.currentRoute.value.path).toBe('/workbench/me/clean')
   })
 
-  it('管理端卫生页 /hygiene/daily', async () => {
+  it('管理端卫生页 /workbench/daily', async () => {
     const router = await freshRouter()
     await router.push('/workbench/daily')
 
@@ -98,13 +98,13 @@ describe('vue-router 登录守卫：未登录时带 ?next= 送到 /login', () =>
     expect(router.currentRoute.value.path).toBe('/login')
   })
 
-  it('员工页 /staff/today 是显式例外：守卫放行，落点由页面自己那一次 401 决定', async () => {
+  it('员工页 /workbench/me/today 是显式例外：守卫放行，落点由页面自己那一次 401 决定', async () => {
     const router = await freshRouter()
-    await router.push('/staff/today')
+    await router.push('/workbench/me/today')
 
     // 不是被守卫送到 /login —— meta.staffProbe=false（弱网下别让员工先陪守卫白等一次
     // 探针超时）。页面拿到 401 时自己 replace 到 /login?next=<fullPath>，见下半段。
-    expect(router.currentRoute.value.path).toBe('/staff/today')
+    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
   })
 })
 
@@ -165,24 +165,44 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
     expect(router.currentRoute.value.path).toBe('/tmp/both')
   })
 
-  it('管理端页：员工会话不算数，落 /login?next=<目标>（票 03 换成「无权访问」页）', async () => {
+  it('管理端页：员工会话不算数，落「无权访问」页并带上原目标（票 03，不再静默改道）', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const router = await freshRouter()
 
     await router.push('/workbench/daily')
 
-    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
     expect(router.currentRoute.value.query.next).toBe('/workbench/daily')
   })
 
-  it('员工页：管理端会话不算数（两套会话各认各的门）', async () => {
+  it('员工页：管理端会话不算数，同样落「无权访问」页（这类页没带 staffProbe 标记）', async () => {
     vi.stubGlobal('fetch', adminOnlyFetch())
     const router = await routerWith('/tmp/staff', { audience: 'staff' })
 
     await router.push('/tmp/staff')
 
-    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
     expect(router.currentRoute.value.query.next).toBe('/tmp/staff')
+  })
+
+  it('「无权访问」页本身对两种身份都开：员工会话不被再拦一道（守卫不能自己绕圈）', async () => {
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    const router = await freshRouter()
+
+    await router.push('/workbench/forbidden?next=%2Fworkbench%2Fdaily')
+
+    expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/daily')
+  })
+
+  it('有会话也会过期：管理端会话没了又只有员工会话时，管理端页落「无权访问」而不是登录页', async () => {
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    const router = await freshRouter()
+
+    await router.push('/admin')
+
+    expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
+    expect(router.currentRoute.value.query.next).toBe('/admin')
   })
 
   it('员工页：只有员工会话放行', async () => {
@@ -205,19 +225,19 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
   })
 })
 
-describe('/staff/today 真实挂载：未登录时页面自己把 fullPath 带到 /login', () => {
-  it('页面那次请求 401 → /login?next=%2Fstaff%2Ftoday', async () => {
+describe('/workbench/me/today 真实挂载：未登录时页面自己把 fullPath 带到 /login', () => {
+  it('页面那次请求 401 → /login?next=%2Fworkbench%2Fme%2Ftoday', async () => {
     vi.resetModules()
     const TodayView = (await import('../../views/today/TodayView.vue')).default
 
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
-        { path: '/staff/today', component: TodayView },
+        { path: '/workbench/me/today', component: TodayView },
         { path: '/login', component: { template: '<div />' } },
       ],
     })
-    await router.push('/staff/today')
+    await router.push('/workbench/me/today')
     await router.isReady()
 
     const pinia = createPinia()
@@ -236,7 +256,7 @@ describe('/staff/today 真实挂载：未登录时页面自己把 fullPath 带�
     await flushPromises()
 
     expect(router.currentRoute.value.path).toBe('/login')
-    expect(router.currentRoute.value.query.next).toBe('/staff/today')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
     wrapper.unmount()
   })
 })

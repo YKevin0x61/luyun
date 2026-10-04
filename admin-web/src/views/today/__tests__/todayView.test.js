@@ -96,20 +96,24 @@ describe('员工端「今天」页（原型 A）', () => {
   })
 
   it('is registered as a staff page on both sides', () => {
-    // SPA 页面要登记在：vue-router、main.py 的 SPA_PAGE_ROUTES（直连/反代硬导航）、
-    // 以及服务端的 HTML 鉴权豁免表（手机上没有管理端会话，拦在服务端就进不去）。
-    // 带尾斜杠那条走 HTML_AUTH_PREFIXES（见 tests/test_auth.py 的员工端用例）。
-    expect(router).toMatch(/path: '\/staff\/today', name: 'today'/)
+    // SPA 页面要登记在：vue-router、main.py 的 SPA_PAGE_ROUTES（直连/反代硬导航）。
+    // **票 03 起不再登记进免墙表**：员工页搬进工作台（`/workbench/me/*`）之后，页面壳的
+    // 放行根据是「任一会话有效」（`main.py` 的 `_is_workbench_page` + `_has_staff_session`），
+    // 不是路径 —— 工作台是「进去要登录」的页面区，服务端行为由
+    // `tests/test_auth.py` 的两条请求级用例盯着（未登录 302、带员工会话 200）。
+    expect(router).toMatch(/workbenchStaffPage\('\/workbench\/me\/today', 'today'/)
     expect(router).toMatch(/views\/today\/TodayView\.vue/)
     // 票 02：「这是员工页」不再由路由级的 `staffAuth` 布尔表达，而是页面清单里的
-    // audience（由 `pageMeta('/staff/today')` 带进来，守卫与 App.vue 都按它判）。
-    expect(router).toMatch(/path: '\/staff\/today'[\s\S]{0,200}?pageMeta\('\/staff\/today'\)/)
+    // audience —— 三页共用的工厂 `workbenchStaffPage` 里由 `pageMeta(path)` 带进来
+    // （守卫与 App.vue 都按它判）。
+    expect(router).toMatch(/function workbenchStaffPage\(path, name, loader\)[\s\S]{0,300}?pageMeta\(path\)/)
     expect(router).not.toMatch(/staffAuth/)
-    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/staff\/today"/)
-    // 免墙的是前缀本身 `/staff`（精确）与 `/staff/`（前缀表）：三页都没进精确名单。
-    expect(mainPy).toMatch(/HTML_AUTH_EXACT = \{[^}]*"\/staff"/)
-    expect(mainPy).toMatch(/HTML_AUTH_PREFIXES = \([\s\S]*?"\/staff\/"/)
+    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/workbench\/me\/today"/)
+    // 反向：旧的 `/staff` 与 `/staff/` 一条都不在免墙表里（audit 条目 15 的那条裸条目）。
+    expect(mainPy).not.toMatch(/HTML_AUTH_EXACT = \{[^}]*"\/staff"/)
+    expect(mainPy).not.toMatch(/HTML_AUTH_PREFIXES = \([\s\S]*?"\/staff\/"/)
     // 旧路径连 vue-router 里的别名都不许留（票 04 的取舍）。
+    expect(router).not.toMatch(/path: '\/staff/)
     expect(router).not.toMatch(/path: '\/today'/)
     expect(router).not.toMatch(/path: '\/today\/month'/)
     expect(router).not.toMatch(/path: '\/hygiene'/)
@@ -120,8 +124,9 @@ describe('员工端「今天」页（原型 A）', () => {
 
   it('does not wait for the session probe before showing the shift', () => {
     // 这一页自己那次请求就分得清 401 与断网（`load()`），守卫那次探针是重复劳动：
-    // 弱网下先白等一次超时（最长 4 秒）才轮到排班那条请求。
-    expect(router).toMatch(/path: '\/staff\/today'[\s\S]{0,200}?staffProbe: false/)
+    // 弱网下先白等一次超时（最长 4 秒）才轮到排班那条请求。三页都从同一个工厂拿
+    // 这个标记（票 03 把卫生待办那页也收齐了）。
+    expect(router).toMatch(/function workbenchStaffPage\(path, name, loader\)[\s\S]{0,300}?staffProbe: false/)
     expect(router).toMatch(/if \(to\.meta\.staffProbe === false\) return true/)
   })
 

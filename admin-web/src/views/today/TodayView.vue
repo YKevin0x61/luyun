@@ -185,7 +185,7 @@ const ENTRIES = [
   { key: 'leave', label: '请假' },
   { key: 'swap', label: '换班' },
   // 整月有地方可去了（票 06）；请假（票 08）与换班（票 09）都在下面打开一张表单。
-  { key: 'month', label: '整月', to: '/staff/month' },
+  { key: 'month', label: '整月', to: '/workbench/me/month' },
 ]
 
 // 会话没了（换了手机、店里停了账号、cookie 过期）：回员工登录，回来还是这一页。
@@ -672,7 +672,7 @@ useNudgePull({
             </template>
 
             <div class="acts">
-              <button class="btn" type="button" @click="router.push('/staff/clean')">
+              <button class="btn" type="button" @click="router.push('/workbench/me/clean')">
                 {{ hygieneStats.remaining ? '去交 / 继续验收 ›' : '去卫生待办 ›' }}
               </button>
             </div>

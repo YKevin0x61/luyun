@@ -24,8 +24,9 @@ class FakeWebSocket {
   }
 }
 
-// 与真实 router 同一套 meta 口径（`/staff/*` 是 public + audience 'staff' + realtime；
-// 身份判据是票 02 的 `meta.audience` 三态，不再是 `staffAuth` 布尔）。
+// 与真实 router 同一套 meta 口径（票 03 起员工页在 `/workbench/me/*`：standalone +
+// audience 'staff' + realtime；身份判据是票 02 的 `meta.audience` 三态，不再是 `staffAuth`
+// 布尔。**不是 public** —— 工作台是「进去要登录」的页面区）。
 const ROUTES = [
   { path: '/', component: { template: '<div />' }, meta: { audience: 'admin' } },
   {
@@ -35,9 +36,9 @@ const ROUTES = [
   },
   { path: '/login', component: { template: '<div />' }, meta: { standalone: true, public: true, audience: 'both' } },
   {
-    path: '/staff/today',
+    path: '/workbench/me/today',
     component: { template: '<div />' },
-    meta: { public: true, standalone: true, audience: 'staff', realtime: true },
+    meta: { public: false, standalone: true, audience: 'staff', realtime: true },
   },
 ]
 
@@ -82,7 +83,7 @@ afterEach(() => {
 
 describe('App 实时连接的身份声明', () => {
   it('员工端页面建立的连接带 `?identity=staff`', async () => {
-    const { wrapper } = await mountApp('/staff/today')
+    const { wrapper } = await mountApp('/workbench/me/today')
 
     expect(FakeWebSocket.instances).toHaveLength(1)
     expect(FakeWebSocket.instances[0].url).toBe(`${baseUrl()}?identity=staff`)
@@ -107,7 +108,7 @@ describe('App 实时连接的身份声明', () => {
     const { wrapper, router } = await mountApp('/')
     expect(FakeWebSocket.instances[0].url).toBe(baseUrl())
 
-    await router.push('/staff/today')
+    await router.push('/workbench/me/today')
     await flushPromises()
 
     expect(FakeWebSocket.instances.at(-1).url).toBe(`${baseUrl()}?identity=staff`)

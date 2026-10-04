@@ -105,11 +105,11 @@ describe('hygiene staff work app', () => {
 
   it('回得到「今天」页：卫生页不是单行道', () => {
     const home = read('../HygieneHomeView.vue')
-    // 员工登录后落在 `/staff/today`（票 04），卫生首页（`/staff/clean`）是它的下半张卡。
+    // 员工登录后落在 `/workbench/me/today`（票 03），卫生待办（`/workbench/me/clean`）是它的下半张卡。
     // 缺了这条回程，员工点进卫生就回不到自己的班 —— iPhone 的 PWA 独立窗口没有返回键，
     // 那就是真的卡住。
     expect(home).toMatch(/class="hy-work-today"/)
-    expect(home).toMatch(/to="\/staff\/today"/)
+    expect(home).toMatch(/to="\/workbench\/me\/today"/)
     expect(home).toMatch(/aria-label="回到「今天」页看我的班"/)
     // 头部那条胶囊的样式得在共享样式表里，否则按钮是裸的。
     const css = read('../../../../public/hygiene-admin.css')

@@ -27,7 +27,7 @@ const realtimeIdentity = computed(() => (route.meta.audience === 'staff' ? 'staf
 
 // PWA 清单归属跟面板用的是同一个判据（`utils/loginNext.js` 的 `resolveLoginTab`）：
 // `/login` 一条路径装两种身份，装出来是哪份应用看当下停在哪一栏 —— 员工栏是员工应用
-// （打开即 `/staff/today`），管理栏是管理应用。`?next=` 会改这一栏，所以也盯着它；
+// （打开即 `/workbench/me/today`），管理栏是管理应用。`?next=` 会改这一栏，所以也盯着它；
 // 其余路径由路径本身决定归属，多带一个身份不影响（面板里点 Tab 时由 `LoginView.vue` 换）。
 watch(
   [() => route.path, () => route.query.next],

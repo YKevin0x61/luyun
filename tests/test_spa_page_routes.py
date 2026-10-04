@@ -54,9 +54,12 @@ PAGE_AUDIENCES = {"admin", "staff", "both"}
 
 # 免墙表里**不属于任何页面**的壳层条目，逐条写明理由与归属。表里每一条要么对应清单里
 # 的一页（或它的服务端别名），要么在这里留痕 —— 不许有清单之外的页面悄悄免墙。
+#
+# 票 03 起 `/staff` 那条不在了：员工三页搬进工作台（`/workbench/me/*`），页面壳的放行
+# 根据是「任一会话有效」（`HTML_AUTH_EXACT` 收不了这个），旧的裸条目与 `/staff/` 前缀
+# 一起删掉 —— `tests/test_auth.py` 有反向断言盯着它们不许回来。
 NON_PAGE_AUTH_ENTRIES = {
     "/login.html": "SPA 外壳的静态文件名；同一页面在 vue-router 里叫 '/login'。",
-    "/staff": "员工前缀本身：免墙但没有页面（`/staff` 硬导航 404，tests/test_auth.py 故意这么断言）。",
 }
 
 
@@ -225,7 +228,8 @@ class SpaPageRouteContractTest(unittest.TestCase):
         )
 
     def test_only_the_workbench_prefix_is_registered(self):
-        """票 04（收口）：旧前缀 `/hygiene/*` 与 `/scheduling*` 已删干净，只剩 `/workbench/*`。
+        """票 04 / 03（收口）：旧前缀 `/hygiene/*`、`/scheduling*`、`/staff/*` 已删干净，
+        只剩 `/workbench/*`。
 
         两个方向都查：新前缀一条都不能少（少了 → 手机直连/刷新 404），旧前缀一条都不能
         留（留一半最坏 —— "点得进去、刷新 404"）。前端的字面清单在
@@ -245,6 +249,11 @@ class SpaPageRouteContractTest(unittest.TestCase):
             "/workbench/boards",
             "/workbench/data",
             "/workbench/attire",
+            # 票 03：员工三页搬进「我的」组，越权落点也是工作台里的一页。
+            "/workbench/me/today",
+            "/workbench/me/month",
+            "/workbench/me/clean",
+            "/workbench/forbidden",
         }
         old_paths = {
             "/scheduling",
@@ -258,6 +267,11 @@ class SpaPageRouteContractTest(unittest.TestCase):
             "/hygiene/boards",
             "/hygiene/data",
             "/hygiene/attire",
+            # 票 03：员工三页的旧址（含裸前缀那条「免墙却没页面」的条目，audit 条目 15）。
+            "/staff",
+            "/staff/today",
+            "/staff/month",
+            "/staff/clean",
         }
         router_paths = _router_page_paths()
         self.assertEqual(sorted(new_paths - router_paths), [], "vue-router 少了工作台页面")

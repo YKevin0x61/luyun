@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import asyncio
+import json
 import os
 import re
 import tempfile
@@ -47,10 +48,10 @@ from datetime import datetime, timedelta
 from services import auth_service
 from services.app_runtime import AppRuntime, set_runtime
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 # 员工端路径名单前端那一份（服务端那两张表照它对表，见本文件末尾的契约用例）。
-STAFF_PATHS_JS = (
-    Path(__file__).resolve().parents[1] / "admin-web" / "src" / "utils" / "staffPaths.js"
-)
+STAFF_PATHS_JS = REPO_ROOT / "admin-web" / "src" / "utils" / "staffPaths.js"
 
 
 def _run(coro):
@@ -423,47 +424,72 @@ def test_kds_html_not_redirected_to_login(auth_app_client):
     assert "/login" not in loc
 
 
-def test_staff_phone_pages_accessible_without_admin_session(auth_app_client):
-    # 员工手机上那三页（票 04 起整体住在 `/staff/*`：今天 /staff/today、整月 /staff/month、
-    # 卫生首页 /staff/clean）：没有管理端会话也必须拿到 SPA 外壳 —— 管理端登录表单只认
-    # 管理端账号，服务端把员工拦下来他就永远进不去（员工会话由客户端守卫查那个 cookie）。
-    # 三页都不是精确表里的条目：它们靠 `/staff/` 前缀放行（书签/外链/手输都可能带尾斜杠）。
-    # 员工注册页（票 02）在员工前缀之外，只能逐条精确放行。
-    client, _ = auth_app_client
-    for path in ("/staff/today", "/staff/month", "/staff/clean", "/register"):
-        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
-        assert resp.status_code == 200, (path, resp.headers.get("location"))
-        assert "text/html" in resp.headers["content-type"], path
+def test_staff_pages_are_walled_workbench_pages_now(auth_app_client):
+    """票 03：员工三页搬进工作台（`/workbench/me/*`），**不再靠路径免墙**。
 
-    # `/staff` 与前缀本身没有页面（票面明确 `/staff` 不进 SPA_PAGE_ROUTES）：免墙、
-    # 但确实没有这一页 —— 404，而不是被甩到 /login。
-    for path in ("/staff", "/staff/"):
-        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
-        assert resp.status_code == 404, (path, resp.headers.get("location"))
+    旧口径（票 04）是「手机上没有管理端会话，所以 `/staff/*` 必须免墙，否则员工永远进
+    不去」——页面壳的放行只看管理端 cookie。票 02 把工作台改成「任一会话有效」之后，
+    员工自己的会话就是那把钥匙：路径免墙那条口子不但不必要，而且有害（工作台是「进去
+    要登录」的页面区，留着它未登录访客也能拿到壳）。
 
-
-def test_old_staff_paths_are_gone(auth_app_client):
-    """票 04：员工三页搬进 `/staff/*`，旧的 `/today`、`/today/month`、`/hygiene` 一律删掉。
-
-    这是 ADR 0091 明知代价的取舍：不加 302、不留前端别名。浏览器硬导航到旧地址既不是
-    员工页也不是兼容跳转 —— 用非页面请求（curl / 探针：Accept 不是 text/html）绕开
-    登录墙，直接看路由表：确实是 404。
+    所以这里断的是新的行为：三页未登录硬导航一律 302 到 `/login?next=<原地址>`，
+    带员工会话才 200（后一条在 `test_workbench_page_wall_accepts_a_staff_session`）。
     """
+    from urllib.parse import quote
+
     import main as main_module
 
     client, _ = auth_app_client
-    for stale in ("/today", "/today/month", "/hygiene"):
+    for path in ("/workbench/me/today", "/workbench/me/month", "/workbench/me/clean"):
+        assert path in main_module.SPA_PAGE_ROUTES, path
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 302, (path, resp.status_code)
+        assert resp.headers["location"] == f"/login?next={quote(path, safe='')}", path
+
+    # 员工注册页（票 02）在工作台之外，照旧逐条精确放行：新员工还没有任何会话。
+    resp = client.get("/register", headers=_html_headers(), follow_redirects=False)
+    assert resp.status_code == 200, resp.headers.get("location")
+    assert "text/html" in resp.headers["content-type"]
+
+    # 反向：旧的裸条目 `/staff` 与免墙前缀 `/staff/` 一条都不许回来（audit 条目 15 记的
+    # 正是「`/staff` 免墙却无页面」这个坑；留着前缀等于把 `/staff/*` 整段对未登录访客放行）。
+    assert "/staff" not in main_module.HTML_AUTH_EXACT
+    assert "/staff/" not in main_module.HTML_AUTH_PREFIXES
+
+
+def test_old_staff_paths_are_gone(auth_app_client):
+    """票 03：`/staff/*` 随员工三页搬走而作废 —— 不留别名、不留重定向、不再免墙。
+
+    这是 ADR 0091/0092 明知代价的取舍：不加 302、不留前端别名。浏览器硬导航到旧地址
+    跟任何一个未登录的受保护页一样被登录墙 302（`?next=` 里存着旧地址也不是兼容跳转）；
+    用非页面请求（curl / 探针：Accept 不是 text/html）绕开登录墙直接看路由表：确实是 404。
+    """
+    from urllib.parse import quote
+
+    import main as main_module
+
+    client, _ = auth_app_client
+    for stale in ("/staff", "/staff/", "/staff/today", "/staff/month", "/staff/clean"):
         assert stale not in main_module.SPA_PAGE_ROUTES, stale
         assert stale not in main_module.HTML_AUTH_EXACT, stale
-        # 旧路径不再是一个页面（服务端没有 catch-all，也没给它们留兼容跳转）。
+        # 不再落在任何免墙前缀下（票 03 删掉了 `/staff/`）。
+        assert not any(
+            stale.startswith(prefix) for prefix in main_module.HTML_AUTH_PREFIXES
+        ), stale
+        # 非页面请求：没有页面 → 404；浏览器硬导航：被登录墙 302 到 `/login?next=<旧地址>`。
         assert client.get(stale, follow_redirects=False).status_code == 404, stale
+        nav = client.get(stale, headers=_html_headers(), follow_redirects=False)
+        assert nav.status_code == 302, stale
+        assert nav.headers["location"] == f"/login?next={quote(stale, safe='')}", stale
 
-    # 新落点反过来都在：三页进页面注册清单，`/staff` 本身只进免墙精确名单。
-    for fresh in ("/staff/today", "/staff/month", "/staff/clean"):
+    # 更早那一批旧地址（票 04）同样不再是一个页面。
+    for older in ("/today", "/today/month", "/hygiene"):
+        assert older not in main_module.SPA_PAGE_ROUTES, older
+        assert client.get(older, follow_redirects=False).status_code == 404, older
+
+    # 新落点反过来都在：三页进页面注册清单（工作台里的一页）。
+    for fresh in ("/workbench/me/today", "/workbench/me/month", "/workbench/me/clean"):
         assert fresh in main_module.SPA_PAGE_ROUTES, fresh
-    assert "/staff" in main_module.HTML_AUTH_EXACT
-    assert "/staff" not in main_module.SPA_PAGE_ROUTES
-    assert "/staff/" in main_module.HTML_AUTH_PREFIXES
 
 
 def test_register_page_is_public_and_the_old_hygiene_path_is_gone(auth_app_client):
@@ -555,24 +581,26 @@ def test_hygiene_login_page_is_gone_and_the_hygiene_prefix_no_longer_skips_the_w
         assert client.get(legacy, follow_redirects=False).status_code == 404, legacy
 
 
-def test_staff_path_list_matches_the_frontend_copy():
-    """员工端路径名单前端也有一份：两边必须对得上。
+def test_staff_path_list_matches_the_frontend_copy(auth_app_client):
+    """员工端路径名单前后端对表（票 03 改写）：**服务端不再为它开免墙口子**。
 
-    名单的唯一一份判据在 `admin-web/src/utils/staffPaths.js`（路由守卫、401 白名单、
-    PWA 清单归属都从它出发）。服务端这边少登记一条，员工手机硬导航那一页就被 302 到
-    管理端 `/login`（票 05 的 `/today` 正是这么漏过一次）；前端多一条，管理端页面就被
-    当成员工页。所以这里按 JS 那份逐条对 `main.py` 的两张表，而不是各写一份清单。
+    名单的唯一一份判据仍在 `admin-web/src/utils/staffPaths.js`（路由守卫、401 白名单、
+    PWA 清单归属都从它出发）。票 02/04 那两版断的是「JS 那份逐条等于 `main.py` 两张
+    免墙表里的条目」—— 员工页当时靠路径免墙（手机上没有管理端会话）。
 
-    票 02 起 JS 那份拆成两层，这里也要分别对：
-    - 前缀名单（`STAFF_PHONE_PREFIXES`）＝ 员工侧界面与登录后落点；
-    - 精确名单（`STAFF_PHONE_EXACT`）＝ 只属于员工侧界面、**不是**落点（`/register`）。
-    两层都进 `HTML_AUTH_EXACT`，精确名单里的条目还必须不被前缀覆盖 —— 被覆盖就说明
-    这一层是白写的，两层语义已经塌回一层。
+    票 03 把三页搬进工作台之后，页面壳的放行根据换成会话（`_is_workbench_page` +
+    `_has_staff_session`，票 02），路径免墙那条口子必须消失：留着 `/workbench/me/`
+    前缀，整段员工页就对未登录访客放行了 —— 工作台是「进去要登录」的页面区。
 
-    票 04 起只有 `/staff` 一条前缀（三个员工页都在它下面），前缀的子树也全是员工页，
-    所以「前缀本身」与「前缀 + `/`」两条都在免墙名单里。反向断言（`/hygiene/` 不在
-    免墙前缀里）在 `test_hygiene_login_page_is_gone_and_the_hygiene_prefix_no_longer_skips_the_wall`。
+    所以这里断三件事，判据仍然只有 JS 那一份 + 页面清单那一份：
+
+    - 反向（安全要害）：前缀本身与前缀下的页都不在免墙表里，未登录硬导航一律 302；
+    - 正向：前缀罩住的每一页都在 `SPA_PAGE_ROUTES` 里（少一条 = 手机硬导航 404）。
+      名单从页面清单的 `me` 组取，不在这儿再抄一遍；
+    - 精确名单（`/register`）照旧逐条免墙 —— 它在工作台之外，新员工还没有任何会话。
     """
+    from urllib.parse import quote
+
     import main as main_module
 
     source = STAFF_PATHS_JS.read_text(encoding="utf-8")
@@ -586,10 +614,32 @@ def test_staff_path_list_matches_the_frontend_copy():
     exact_paths = re.findall(r"'([^']+)'", exact_block.group(1))
     assert exact_paths, "精确名单是空的：解析规则或文件结构变了，这条契约要跟着改"
 
+    client, _ = auth_app_client
+
+    # 「我的」那一组就是前端名单罩住的那一段：清单是唯一来源，不在这儿再列一遍路径。
+    inventory = json.loads(
+        (REPO_ROOT / "admin-web" / "src" / "router" / "pageRoutes.json").read_text(
+            encoding="utf-8"
+        )
+    )["pages"]
+    me_pages = [row["path"] for row in inventory if row["group"] == "me"]
+    assert me_pages, "页面清单里「我的」一页都没有：名单或清单结构变了"
+
     for prefix in prefixes:
-        assert prefix in main_module.HTML_AUTH_EXACT, prefix
-        # 尾斜杠变体走前缀表（书签/外链/手输带来的 `/staff/today/`）。
-        assert f"{prefix}/" in main_module.HTML_AUTH_PREFIXES, prefix
+        # 反向：前缀本身不在精确表里（裸条目免墙却无页面正是 audit 条目 15 那个坑）。
+        assert prefix not in main_module.HTML_AUTH_EXACT, prefix
+        # 反向：前缀也不在免墙前缀表里 —— 在的话下面那些页整段对未登录访客放行。
+        assert f"{prefix}/" not in main_module.HTML_AUTH_PREFIXES, prefix
+        assert not any(prefix.startswith(item) for item in main_module.HTML_AUTH_EXACT), prefix
+
+    for path in me_pages:
+        assert any(path.startswith(f"{prefix}/") for prefix in prefixes), (
+            f"{path} 是「我的」组的一页，却不在前端那份员工前缀名单里（{prefixes}）"
+        )
+        assert path in main_module.SPA_PAGE_ROUTES, path
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 302, (path, resp.status_code)
+        assert resp.headers["location"] == f"/login?next={quote(path, safe='')}", path
 
     for exact in exact_paths:
         assert exact in main_module.HTML_AUTH_EXACT, exact
@@ -636,6 +686,12 @@ WORKBENCH_PAGES = (
     "/workbench/boards",
     "/workbench/data",
     "/workbench/attire",
+    # 票 03：员工三页搬进「我的」组，越权落点也是工作台里的一页 —— 服务端对它们一视
+    # 同仁（任一会话有效即可拿到壳，页面级权限在前端守卫与各接口 401）。
+    "/workbench/me/today",
+    "/workbench/me/month",
+    "/workbench/me/clean",
+    "/workbench/forbidden",
 )
 SYSTEM_PAGES = (
     "/",
@@ -685,7 +741,8 @@ def test_workbench_page_wall_accepts_a_staff_session(auth_app_client):
     """员工会话（没有管理端会话）硬导航工作台每一页 → 200 页面壳。
 
     这就是「工作台包含员工端」在服务端成立的那一半：以前页面墙只读管理端 cookie，
-    员工对自己的那半边（票 03 起是 `/workbench/me/*`）也永远进不去。
+    员工对自己的那半边（票 03 起是 `/workbench/me/*`）也永远进不去。票 03 之前员工页
+    是靠路径免墙（`/staff/*`）绕过去的；现在它们跟工作台别的页一个待遇。
     """
     client, _ = auth_app_client
     _staff_only_client(client)

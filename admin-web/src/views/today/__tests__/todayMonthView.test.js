@@ -136,19 +136,19 @@ describe('员工端「整月」页（票 06）', () => {
   })
 
   it('is registered as a staff page on both sides', () => {
-    expect(router).toMatch(/path: '\/staff\/month', name: 'today-month'/)
+    expect(router).toMatch(/workbenchStaffPage\('\/workbench\/me\/month', 'today-month'/)
     expect(router).toMatch(/views\/today\/TodayMonthView\.vue/)
-    // 票 02：员工身份来自页面清单的 audience（`pageMeta('/staff/month')`），不再是
-    // 路由级的 `staffAuth` 布尔。
-    expect(router).toMatch(/path: '\/staff\/month'[\s\S]{0,200}?pageMeta\('\/staff\/month'\)/)
+    // 票 02：员工身份来自页面清单的 audience —— 三页共用的工厂 `workbenchStaffPage`
+    // 里由 `pageMeta(path)` 带进来，不再是路由级的 `staffAuth` 布尔。
+    expect(router).toMatch(/function workbenchStaffPage\(path, name, loader\)[\s\S]{0,300}?pageMeta\(path\)/)
     expect(router).not.toMatch(/staffAuth/)
-    expect(router).toMatch(/path: '\/staff\/month'[\s\S]{0,200}?staffProbe: false/)
+    expect(router).toMatch(/function workbenchStaffPage\(path, name, loader\)[\s\S]{0,300}?staffProbe: false/)
     // 后端那一侧（`SPA_PAGE_ROUTES`、`HTML_AUTH_PREFIXES`、尾斜杠）由行为级契约盯着：
     // `tests/test_spa_page_routes.py` 拿 `main.app.routes` 的真实路径集合对表、
     // `tests/test_auth.py::test_staff_phone_pages_accessible_without_admin_session` 走请求。
     // 这里不再抓 `main.py` 的源码文本（票 02 #18：弱断言重说一遍强断言的事，改个写法就假红）。
     // 入口：「今天」页那张卡上的「整月」不是一句「还没开放」，而是真的走过去。
-    expect(today).toMatch(/\{\s*key: 'month',\s*label: '整月',\s*to: '\/staff\/month'\s*\}/)
+    expect(today).toMatch(/\{\s*key: 'month',\s*label: '整月',\s*to: '\/workbench\/me\/month'\s*\}/)
     expect(today).toMatch(/router\.push\(entry\.to\)/)
   })
 

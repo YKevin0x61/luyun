@@ -11,7 +11,7 @@ import { staffRequest } from '../utils/hygieneStaff'
  * 队列里还有照片时先问一句，别让他白拍一轮。
  *
  * 退出后落 `/login` 的员工栏，并把当前页作为 `next` 带上——重新登录回原处。
- * （面板那侧 `resolveStaffNext` 只认员工端路径，`/staff/*` 在白名单里。）
+ * （面板那侧 `resolveStaffNext` 只认员工端路径，`/workbench/me/*` 在白名单里。）
  */
 export function useStaffLogout() {
   const route = useRoute()

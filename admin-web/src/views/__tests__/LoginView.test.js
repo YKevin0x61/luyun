@@ -30,9 +30,9 @@ const ROUTES = [
   { path: '/', component: { template: '<div />' } },
   { path: '/login', component: { template: '<div />' } },
   { path: '/admin', component: { template: '<div />' } },
-  { path: '/staff/today', component: { template: '<div />' } },
-  { path: '/staff/month', component: { template: '<div />' } },
-  { path: '/staff/clean', component: { template: '<div />' } },
+  { path: '/workbench/me/today', component: { template: '<div />' } },
+  { path: '/workbench/me/month', component: { template: '<div />' } },
+  { path: '/workbench/me/clean', component: { template: '<div />' } },
   { path: '/workbench/roster', component: { template: '<div />' } },
   { path: '/register', component: { template: '<div />' } },
 ]
@@ -149,7 +149,7 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
     rememberTab('admin')
     fetchMock.mockResolvedValueOnce(STAFF_401())
 
-    const { wrapper } = await mountLogin('/login?next=%2Fstaff%2Fmonth')
+    const { wrapper } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fmonth')
 
     expect(activeTab(wrapper)).toBe('员工')
     expect(findCall(fetchMock, '/api/hygiene/staff/me')).toBeTruthy()
@@ -307,7 +307,7 @@ describe('/login 面板：员工栏', () => {
       .mockResolvedValueOnce(STAFF_401())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
 
-    const { wrapper, router } = await mountLogin('/login?next=%2Fstaff%2Fmonth')
+    const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fmonth')
     await submitWith(wrapper, {
       'input[type="tel"]': '13800138000',
       'input[type="password"]': 's3cret',
@@ -321,7 +321,7 @@ describe('/login 面板：员工栏', () => {
       password: 's3cret',
       remember: true,
     })
-    expect(router.currentRoute.value.path).toBe('/staff/month')
+    expect(router.currentRoute.value.path).toBe('/workbench/me/month')
   })
 
   it('没带 ?next 时落到员工默认落点（今天页）', async () => {
@@ -335,15 +335,15 @@ describe('/login 面板：员工栏', () => {
       'input[type="password"]': 's3cret',
     })
 
-    expect(router.currentRoute.value.path).toBe('/staff/today')
+    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
   })
 
   it('员工会话仍有效时自动进入员工落点', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ employee: { name: '张三' } }))
 
-    const { router } = await mountLogin('/login?next=%2Fstaff%2Fclean')
+    const { router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fclean')
 
-    expect(router.currentRoute.value.path).toBe('/staff/clean')
+    expect(router.currentRoute.value.path).toBe('/workbench/me/clean')
   })
 
   it('?switch=1 且员工会话有效时停在确认面板，退出走员工端登出接口', async () => {
@@ -431,7 +431,7 @@ describe('/login 面板：非法 ?next 回落', () => {
       'input[type="tel"]': '13800138000',
       'input[type="password"]': 's3cret',
     })
-    expect(router.currentRoute.value.path).toBe('/staff/today')
+    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
   })
 
   it('员工端路径不把管理员身份送进去：管理栏登录后回落到 /', async () => {
@@ -440,7 +440,7 @@ describe('/login 面板：非法 ?next 回落', () => {
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ ok: true }))
 
-    const { wrapper, router } = await mountLogin('/login?next=%2Fstaff%2Ftoday')
+    const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Ftoday')
     // 带员工端 next 时面板开在员工栏；管理员自己切回管理栏。
     expect(activeTab(wrapper)).toBe('员工')
     await clickTab(wrapper, '管理员')

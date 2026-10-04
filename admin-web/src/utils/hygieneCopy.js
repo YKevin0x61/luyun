@@ -41,7 +41,7 @@ export const HYGIENE_BACK_TO_ADMIN_LABEL = '后台'
  *  `/workbench/shifts` 是排班那两组、`/workbench` 本身是首页），光比前缀会把它们
  *  一起算成卫生页 —— 那会让它们套上"内部自己滚动"的壳（`.page-body-hygiene`），
  *  工作台首页的吸顶窄栏就废了。所以只认**清单里那八条**。
- *  （`/staff/clean`、`/register` 这些员工侧页面本来就不在清单里。）
+ *  （`/workbench/me/clean`、`/register` 这些员工侧页面本来就不在清单里。）
  */
 export function isHygieneAdminPath(pathname) {
   const path = String(pathname || '')

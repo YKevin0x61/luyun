@@ -6,6 +6,7 @@ import { pageMeta, pageTitle } from './pageRoutes.js'
 
 const HygieneAdminLayout = () => import('../views/hygiene/HygieneAdminLayout.vue')
 const HygieneStaffAuthLayout = () => import('../views/hygiene/HygieneStaffAuthLayout.vue')
+const WorkbenchLayout = () => import('../views/workbench/WorkbenchLayout.vue')
 
 // 页面清单（`./pageRoutes.json`）是唯一来源（票 01）：每条路由的「独立外壳 / 免登录」
 // 标记与页面标题都从它派生。加一页先改那张表 —— 后端的页面路由清单与两张页面豁免表
@@ -24,6 +25,22 @@ function hygieneStaffAuthPage(path, name, loader) {
     path,
     component: HygieneStaffAuthLayout,
     meta: { ...pageMeta(path), staffPageTitle: pageTitle(path) },
+    children: [{ path: '', name, component: loader }],
+  }
+}
+
+/** 工作台「我的」那一组（员工端）的页面：套工作台外壳（顶上一条窄栏 + 按身份过滤的
+ *  导航），页面本体还在子记录里。
+ *
+ *  `staffProbe: false` 三页一致：页面自己那一次请求本来就分得清 401 与断网，不必先陪
+ *  守卫白等一次探针超时（弱网下最多 4 秒，而这是员工手机上每次导航都要付的）。票 04 时
+ *  只有两页带它 —— 同前缀两套行为正是 navigation-audit 条目 7 记的问题，这次收齐。
+ *  `realtime: true`：店长改了排班 / 派了活，页面上的格子与待办要跟着变。 */
+function workbenchStaffPage(path, name, loader) {
+  return {
+    path,
+    component: WorkbenchLayout,
+    meta: { ...pageMeta(path), staffProbe: false, realtime: true },
     children: [{ path: '', name, component: loader }],
   }
 }
@@ -75,21 +92,20 @@ const routes = [
       { path: '/workbench/shifts', name: 'workbench-shifts', component: () => import('../views/scheduling/SchedulingShiftsView.vue'), meta: pageMeta('/workbench/shifts') },
     ],
   },
-  // 员工手机端的入口是「今天」页（票 05）：登录后落到这里，第一眼是自己的班。
-  // 票 04 起员工端整体住在 `/staff/*`（今天 /staff/today、整月 /staff/month、
-  // 卫生首页 /staff/clean），旧的 `/today`、`/today/month`、`/hygiene` 已删除且不留别名。
-  // 卫生那张卡（票 10）与这颗实时开关一起到齐：`realtime: true` 是给人的页面显式打开的
-  // （`App.vue` 只对**非 public** 的路由默认开），员工页是 public 的，不写就不连。
-  // `staffProbe: false`：这一页自己那一次请求就分得清 401 与断网（见 TodayView 的
-  // `load()`），不必先陪守卫白等一次探针超时（弱网下最多 4 秒）。
-  { path: '/staff/today', name: 'today', component: () => import('../views/today/TodayView.vue'), meta: { ...pageMeta('/staff/today'), staffProbe: false, realtime: true } },
-  // 整月（票 06）：从「今天」页那张排班卡的「整月」按钮进来，看自己这个月每天上什么班。
-  // 跟 `/staff/today` 同一套 meta —— 同一扇门（员工的 cookie）、同样的 `staffProbe: false`，
-  // 也订同一颗实时开关（店长改了某一天，这一页上的格子要跟着变）。
-  { path: '/staff/month', name: 'today-month', component: () => import('../views/today/TodayMonthView.vue'), meta: { ...pageMeta('/staff/month'), staffProbe: false, realtime: true } },
-  // 卫生首页（员工那半）：票 04 从 `/hygiene` 搬到 `/staff/clean` ——
-  // `/hygiene*` 从此是管理端卫生页的领土（票 05 把八个页面搬进去）。
-  { path: '/staff/clean', name: 'hygiene-home', component: () => import('../views/hygiene/HygieneHomeView.vue'), meta: { ...pageMeta('/staff/clean'), realtime: true } },
+  // ── 工作台 · 我的（员工端，票 03）──────────────────────────────────────────
+  // 三页从 `/staff/*` 搬进 `/workbench/me/*`：**只改前缀与名字**，页内结构与那五个
+  // tab 一个不动。旧前缀连带 `main.py` 里那条裸 `/staff` 免墙条目一起删掉、不留别名
+  // （旧书签自然 404，spec 故事 48）。员工登录后的落点、登录回跳白名单、花名册页那张
+  // 二维码、PWA 归属判据都从 `utils/staffPaths.js` 那一份常量走，不各写一遍。
+  // 三页都套工作台外壳（导航里只有「我的」一格，票 07 / 08 往里加配方与备货计划）。
+  workbenchStaffPage('/workbench/me/today', 'today', () => import('../views/today/TodayView.vue')),
+  // 整月：从「今天」页那张排班卡的「整月」按钮进来，看自己这个月每天上什么班。
+  workbenchStaffPage('/workbench/me/month', 'today-month', () => import('../views/today/TodayMonthView.vue')),
+  // 卫生待办（员工那半）：五个 tab 与页内结构照旧。
+  workbenchStaffPage('/workbench/me/clean', 'hygiene-home', () => import('../views/hygiene/HygieneHomeView.vue')),
+  // 越权落点（票 03）：有会话、但这一页不是这个身份的 —— 一页说明 + 一颗回自己首页的
+  // 按钮，不再静默改道（旧行为把员工换成 `/staff/today`，`?next=` 也丢了）。
+  { path: '/workbench/forbidden', name: 'workbench-forbidden', component: () => import('../views/workbench/ForbiddenView.vue'), meta: pageMeta('/workbench/forbidden') },
   // 员工登录页已并入 `/login` 的员工栏（票 03）：原 `/hygiene/login` 这条路由与
   // `HygieneLoginView.vue` 一起删掉了。
   // 员工自助注册（票 02）：公开页，从员工前缀里挪到顶层 /register，仍走同一套员工鉴权排印
@@ -104,10 +120,17 @@ const router = createRouter({
   routes,
 })
 
-// 未登录 / 会话过期 / 身份不匹配的统一落点：登录页 + 原目标。票 03 会把「有会话但
-// 身份不匹配」那一支换成明确的「无权访问」页，未登录与会话过期的落点仍是这里。
+// 「一个会话都没有」的落点（票 02）：登录页 + 原目标。身份不匹配走下面的
+// `forbiddenRedirect` —— 两者分开正是票 03 的验收之一。
 function loginRedirect(to) {
   return { path: '/login', query: { next: buildLoginNextFromRoute(to) } }
+}
+
+// 有会话但这不是他的页（票 03）：落明确的「无权访问」页，原目标一起带过去（那一页
+// 据此说明这页属于谁）。与 `loginRedirect` 的分界就是「有没有会话」—— 一个会话都没有
+// 时不该说「这不是你的页」，该让他先登录、登录后仍回原目标。
+function forbiddenRedirect(to) {
+  return { path: '/workbench/forbidden', query: { next: buildLoginNextFromRoute(to) } }
 }
 
 // 全站登录守卫（票 02）：判据是页面清单里的「允许的身份」三态（`meta.audience`），
@@ -115,16 +138,15 @@ function loginRedirect(to) {
 //   admin → 只认管理端会话；staff → 只认员工会话；both → 任一会话有效即可
 //   （工作台外壳就是这一档，与服务端页面墙对 `/workbench` 的判定同一口径）。
 // 免登录（`meta.public`）优先于身份判定：public 是「不需要会话就能拿到页面壳」，
-// 三页员工手机端与 `/register` 都在这一档，页面自己那次请求 401 时各自 replace 到
+// `/register` 与配方阅读面在这一档，页面自己那次请求 401 时各自 replace 到
 // `/login?next=<fullPath>`（见 `HygieneHomeView.leaveForStaffLogin`、`TodayView.load`）。
+// 票 03 起工作台里的页一律不是 public（工作台是「进去要登录」的页面区）。
 router.beforeEach(async (to) => {
-  // 免登录页（登录 / 注册 / 配方阅读面 / 员工手机三页）放行 —— 配方阅读面改成
-  // 要登录是票 07 的事。
   if (to.meta.public) return true
 
   const audience = to.meta.audience
 
-  // 员工页（票 03 起是 `/workbench/me/*`）：只认员工会话。
+  // 员工页（`/workbench/me/*`）：只认员工会话。
   if (audience === 'staff') {
     // 页面自己会拉数据的（`staffProbe: false`）跳过探针：那一次请求本来就分得清
     // 401 与断网，探针只是让员工在白屏前多等一次超时。
@@ -132,13 +154,22 @@ router.beforeEach(async (to) => {
     // 网络不明（断网 / 后端刚重启 / 超时）时放行到页面：那里会显示"网络不好，
     // 正在重试"并退避重试。把这种情况也判成未登录，弱网下就会把员工反复甩到登录页。
     if ((await staffSessionState()) !== 'unauthenticated') return true
+    // 有管理端会话但这一页是员工的：说清这页是谁的，不静默改道。
+    if (await isLoggedIn()) return forbiddenRedirect(to)
     return loginRedirect(to)
   }
 
   if (await isLoggedIn()) return true
-  if (audience === 'both' && (await staffSessionState()) !== 'unauthenticated') return true
 
-  // 未登录、会话过期、身份不匹配，以及认不出的 audience（fail-closed：宁可多问一次
+  const staff = await staffSessionState()
+  if (staff !== 'unauthenticated') {
+    // `both`：工作台外壳对两种身份都开。
+    if (audience === 'both') return true
+    // 员工会话进店长专属页（票 03 的核心那一条）：落「无权访问」页。
+    if (audience === 'admin') return forbiddenRedirect(to)
+  }
+
+  // 一个会话都没有、会话过期、以及认不出的 audience（fail-closed：宁可多问一次
   // 登录，也不静默放行一页）都落这里。
   return loginRedirect(to)
 })

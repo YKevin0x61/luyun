@@ -38,7 +38,7 @@ const disableTarget = ref(null)
 // 员工入口：全仓只有导航栏指向 /hygiene/roster，没人知道店员该扫哪个地址。这里把
 // 绝对 URL 和二维码一起摆出来，新店员不用管理员口述。
 // 路径取 `staffPaths.js` 的 `STAFF_ENTRY_PATH`（员工端入口 = 今天页），不在这里写死 ——
-// 票 04 把员工首页搬到 `/staff/*` 时，这里硬编码的 `/hygiene` 漏改，二维码扫出来是死路径。
+// 票 03 把员工首页搬进工作台（`/workbench/me/today`）时，三处硬编码里的 `/hygiene` 就是这么漏的。
 const staffEntryUrl = ref('')
 const entryCopied = ref(false)
 const qrCanvas = ref(null)

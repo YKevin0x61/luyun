@@ -62,6 +62,12 @@ OLD_URLS = (
     "/today",
     "/today/month",
     "/hygiene",
+    # 票 03：员工三页搬进工作台的「我的」组，`/staff/*`（含裸前缀那条「免墙却没页面」的
+    # 条目，audit 条目 15）与更早那批一样作废 —— 不加 302、不留别名、不再免墙。
+    "/staff",
+    "/staff/today",
+    "/staff/month",
+    "/staff/clean",
     "/workbench/login",
     "/workbench/register",
     "/hygiene-roster",
@@ -75,7 +81,7 @@ OLD_URLS = (
     "/setup",
 )
 
-STAFF_PAGES = ("/staff/today", "/staff/month", "/staff/clean")
+STAFF_PAGES = ("/workbench/me/today", "/workbench/me/month", "/workbench/me/clean")
 
 HYGIENE_ADMIN_PAGES = (
     "/workbench/roster",
@@ -155,13 +161,20 @@ def test_hygiene_admin_pages_are_walled_with_next_not_served_as_the_spa_shell(ap
     assert bare.headers["location"] == "/login?next=%2Fhygiene"
 
 
-def test_staff_entry_landing_is_a_served_page_and_exempt_from_the_wall(app_client):
-    """票面第 1 条的服务端半边：员工登录后的落点确实可达、且免登录墙。
+def test_staff_entry_landing_is_a_served_page_behind_the_workbench_wall(app_client):
+    """票面第 1 条的服务端半边：员工登录后的落点确实可达 —— 但它现在是**要登录**的页。
 
     落点值来自前端唯一那份常量（`STAFF_ENTRY_PATH`）：员工栏登录成功、花名册页二维码、
-    员工清单 `start_url` 三处共用它。这里把「前端默认落点」与「服务端真的服务这个地址」
-    接起来 —— 常量漂到一条没注册的路径上，员工登进去就是 404/白屏。
+    员工清单的 `start_url` 三处共用它。这里把「前端默认落点」与「服务端真的服务这个
+    地址」接起来 —— 常量漂到一条没注册的路径上，员工登进去就是 404/白屏。
+
+    票 03 的口径变化：三页搬进工作台之后**不再靠路径免墙**（旧的 `/staff/` 前缀删掉
+    了），未登录硬导航跟工作台别的页一样 302 到 `/login?next=<原地址>`；带员工会话拿到
+    外壳的那半边由 `tests/test_auth.py::test_workbench_page_wall_accepts_a_staff_session`
+    盯着（这里不重复建员工账号）。
     """
+    from urllib.parse import quote
+
     client, main_module = app_client
 
     source = STAFF_PATHS_JS.read_text(encoding="utf-8")
@@ -169,15 +182,15 @@ def test_staff_entry_landing_is_a_served_page_and_exempt_from_the_wall(app_clien
     assert match, f"{STAFF_PATHS_JS} 里找不到 STAFF_ENTRY_PATH"
     entry = match.group(1)
 
-    assert entry == "/staff/today"
+    assert entry == "/workbench/me/today"
     assert entry in main_module.SPA_PAGE_ROUTES, entry
 
-    # 员工三页都可达：未登录（员工手机上没有管理端会话）也要拿到 SPA 外壳 + text/html。
+    # 员工三页都可达（在页面注册清单里），但未登录不再放行 —— 工作台是「进去要登录」的。
     for path in STAFF_PAGES:
         assert path in main_module.SPA_PAGE_ROUTES, path
         resp = client.get(path, headers=HTML, follow_redirects=False)
-        assert resp.status_code == 200, (path, resp.status_code)
-        assert "text/html" in resp.headers["content-type"], path
+        assert resp.status_code == 302, (path, resp.status_code)
+        assert resp.headers["location"] == f"/login?next={quote(path, safe='')}", path
 
 
 def test_two_cookie_browser_keeps_both_sessions_alive(app_client):
@@ -217,7 +230,7 @@ def test_two_cookie_browser_keeps_both_sessions_alive(app_client):
     assert client.cookies.get(settings.SESSION_COOKIE_NAME)
     assert client.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
 
-    # 员工页免墙：手机上没带管理端会话也是 200 外壳（这里两套都带着，同样 200）。
+    # 工作台页面壳对任一会话都放行（票 02）：两套都带着，员工三页同样 200 外壳。
     for path in STAFF_PAGES:
         resp = client.get(path, headers=HTML, follow_redirects=False)
         assert resp.status_code == 200, path
