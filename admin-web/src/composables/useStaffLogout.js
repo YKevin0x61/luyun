@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useImageUploadQueueStore } from '../stores/imageUploadQueue'
+import { useWorkbenchIdentityStore } from '../stores/workbenchIdentity'
 import { staffRequest } from '../utils/hygieneStaff'
 
 /**
@@ -17,6 +18,7 @@ export function useStaffLogout() {
   const route = useRoute()
   const router = useRouter()
   const imageUploads = useImageUploadQueueStore()
+  const identityStore = useWorkbenchIdentityStore()
 
   const loggingOut = ref(false)
   const confirmOpen = ref(false)
@@ -49,6 +51,10 @@ export function useStaffLogout() {
       // 会话可能已经没了；仍然把手机交出去（离开员工端）。
     }
     await router.replace({ path: '/login', query: { next: route.fullPath } })
+    // 工作台身份的结论跟着会话作废（同一个动作的另一档在 `useWorkbenchLogout` 里做）：
+    // 换个人登录是客户端路由、不整页刷新，而身份的探针只在"还没探过"时开场 ——
+    // 不清的话，下一个人进工作台时顶栏还挂着上一个人的档与姓名。
+    identityStore.reset()
   }
 
   return { loggingOut, confirmOpen, queuedCount, ask, cancel, logout }

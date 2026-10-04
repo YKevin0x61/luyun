@@ -1184,9 +1184,12 @@ async def kds_manifest():
 # 对着那张表强校验：清单相等 + 未登录硬导航的真实请求复核。「是否公开」的语义就是
 # 表里的 `public`：未登录也能拿到页面壳。新增 vue-router 页面时先补那张表，再补这里。
 # main.py 没有 catch-all，反代的
-# `try_files … /index.html` 也只写在 admin|sales-report|logs|prep-plan|wecom-push|recipe
-# 六个前缀的白名单块里（deploy/nginx.conf、deploy/Caddyfile），hygiene 页面一律落到
+# `try_files … /index.html` 也只写在 admin|sales-report|logs|wecom-push|workbench
+# 五个前缀的白名单块里（deploy/nginx.conf、deploy/Caddyfile），其余页面路由一律落到
 # 反代兜底转发 —— 漏一条就是直连/反代硬导航 404（DOC-01 的 /hygiene-data 就是这么漏的）。
+# 票 11 起工作台（`/workbench*`）进了那份白名单（不再靠"白名单之外一律兜底"活着），
+# 同时把已搬走的 `/prep-plan`、`/recipe*` 从白名单里清掉：留着它们，旧地址会在反代层
+# 拿到一个 200 的空壳，而不是 ADR 0092 定的"自然 404"。
 # 工作台：票 05 起按组分在 `/workbench/hr/*`（人事：月历 / 待办 / 班次表 / 花名册）、
 # `/workbench/floor/*`（现场：卫生七页）与 `/workbench/kitchen/*`（后勤：票 07 的配方、
 # 票 08 的备货计划）三组；平铺的那批旧地址已删干净、不留别名。

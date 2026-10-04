@@ -131,4 +131,31 @@ describe('工作台外壳上的退出入口', () => {
 
     expect(router.currentRoute.value.path).toBe('/login')
   })
+
+  it('店长退出后清空工作台身份 store：不把旧档留给下一次入场', async () => {
+    const { wrapper, store } = await mountButton({ identity: 'super', path: '/workbench' })
+    store.staffName = '旧员工'
+    expect(store.identity).toBe('super')
+
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+
+    // 会话没了，结论跟着作废：身份、可用档位与探针结果一起回到"还没探"。
+    expect(store.identity).toBeNull()
+    expect(store.available).toEqual([])
+    expect(store.probed).toBe(false)
+    expect(store.staffName).toBe('')
+  })
+
+  it('员工退出后同样清空身份 store（换人用的同一台手机，不能留着上一个人的姓名）', async () => {
+    const { wrapper, store } = await mountButton({ identity: 'staff', path: '/workbench' })
+    store.staffName = '张三'
+
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+
+    expect(store.identity).toBeNull()
+    expect(store.probed).toBe(false)
+    expect(store.staffName).toBe('')
+  })
 })

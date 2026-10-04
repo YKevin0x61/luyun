@@ -12,20 +12,24 @@
   表结构管理（新增/删除列）
 - 销售报表（`/sales-report`）：汇总卡、趋势图、档口占比、菜品明细、半成品换算规则、
   退款、企微推送、文字导出
-- 配方 SOP（`/recipe`、`/recipe/detail`、`/recipe/manage`、`/recipe/print`、`/recipe/qr`）：
+- 配方 SOP（`/workbench/kitchen/recipe`、`/workbench/kitchen/recipe/detail`、
+  `/workbench/kitchen/recipe/manage`、`/workbench/kitchen/recipe/print`、
+  `/workbench/kitchen/recipe/qr`，工作台「后勤」组）：
   岗位列表、配方阅读器（含 TOC/搜索/字号/主题/用量缩放）、配方管理编辑器、打印预览、
-  岗位二维码
+  岗位二维码；阅读面两种身份都进得去（扫码看岗位配方的路子保留），管理页只给超级管理员
 - 企微推送（`/wecom-push`）：Webhook 管理、推送任务管理、消息预览与立即发送、发送记录
 - 备货计划（`/workbench/kitchen/prep-plan`，工作台「后勤」组；员工这一档只读）：
   一键生成执行清单、档口执行板、辅助信息
 - 实时日志（`/logs`）：实时跟踪 / 历史查询、级别与 logger 过滤、统计面板
-- 卫生管理端（`/hygiene/roster`、`/hygiene/zones`、`/hygiene/daily`、
-  `/hygiene/deep-clean`、`/hygiene/fix`、`/hygiene/boards`、`/hygiene/data`、
-  `/hygiene/attire`）：
-  排班、工作区、日常与专项计划、整改单、红黑榜、卫生数据台账（浏览 / 导出 / 清理）、
+- 卫生管理端（`/workbench/floor/zones`、`/workbench/floor/daily`、
+  `/workbench/floor/attire`、`/workbench/floor/deep-clean`、`/workbench/floor/fix`、
+  `/workbench/floor/boards`、`/workbench/floor/data`，工作台「现场」组；花名册在人事组
+  `/workbench/hr/roster`）：
+  工作区、日常与专项计划、整改单、红黑榜、卫生数据台账（浏览 / 导出 / 清理）、
   仪容仪表（按人拍，名单由排班给）
-- 排班（店长端 `/scheduling`、`/scheduling/inbox` 与 `/scheduling/shifts`、员工端 `/staff/today` 与
-  `/staff/month`）：
+- 排班（店长端工作台「人事」组 `/workbench/hr/calendar`、`/workbench/hr/inbox` 与
+  `/workbench/hr/shifts`，员工端「我的」组 `/workbench/me/today` 与
+  `/workbench/me/month`）：
   固定班次、工作区默认、轮转周期，由系统展开成月历；店长能点某天的某人**就地改那一天**
   （票 07：换班次 / 改成休 / 只换区，只动这一天、规则一个字不改，改过的日子带青点、
   撤掉覆盖就回到规则）；员工在「今天」页**提请假**（一天或一段，没批之前能撤回），
@@ -39,11 +43,12 @@
   N 个班次渲染）；
   员工端「今天」页是员工登录后的落点，「整月」页（票 06）
   按日历列出自己这个月的班别，两页都只读自己的班（卫生那块下一张票接到「今天」页上）
-- 员工手机端（票 04 起整体在 `/staff/*`：`/staff/today`、`/staff/month`、`/staff/clean`，
-  另有 `/register`）：登录入口是 `/login`
-  的员工栏（票 03 起一个面板两个 Tab，员工登录页 `/hygiene/login` 已删除）。
-  独立员工会话、实时 nudge 刷新、离线重试；票 05 起登录后落在「今天」页（排班的员工入口），
-  卫生那块也在同一套会话下。旧的 `/today`、`/today/month`、`/hygiene` 一律删除、不留别名
+- 员工手机端（工作台「我的」组：`/workbench/me/today`、`/workbench/me/month`、
+  `/workbench/me/clean`，另有 `/register`）：**员工入口是 `/login`** 的员工栏
+  （一个面板两个 Tab，独立员工登录页早已删除）。旧书签 `/staff/today` 随员工端
+  搬进工作台作废，给员工重发一次 `/login` 即可（登录后落到 `/workbench/me/today`）。
+  独立员工会话、实时 nudge 刷新、离线重试；卫生那块也在同一套会话下。旧的
+  `/staff/*`、`/today`、`/today/month`、`/hygiene/*`、`/scheduling*` 一律删除、不留别名
 - 系统配置页（`/settings`）：POS 凭据、数据库凭据、备份中心、系统更新（版本检测 /
   环境自检 / 应用更新 / 数据库迁移）。数据库只支持 PostgreSQL（ADR 0089），
   数据库凭据面板也按 PostgreSQL 连接展示
@@ -115,9 +120,12 @@ src/
   views/
     DashboardView.vue / AdminView.vue / SalesReportView.vue / LogsView.vue /
     PrepPlanView.vue / WecomPushView.vue / LoginView.vue / SetupView.vue
+    workbench/*.vue         # 工作台外壳 WorkbenchLayout / 首页「今天」WorkbenchHomeView /
+                            # 越权落点 ForbiddenView
     recipe/*.vue            # RecipeStationsView / RecipeDetailView / RecipeManageView /
                             # RecipePrintView / RecipeQrView
-    hygiene/*.vue           # 管理端 7 页 + 员工端 Home/Login/Register + 两个 Layout
+    hygiene/*.vue           # 现场组 8 页 + 员工端卫生待办 HygieneHomeView / 注册页 +
+                            # 三个 Layout（AdminLayout / StaffAuthLayout 等）
     scheduling/*.vue        # 排班日历 + 待办 + 班次表（店长端，独立系统，不 import 卫生）
     today/*.vue             # 员工端「今天」（含请假与换班表单）+「整月」两页（登录后的落点，
                             # 读 /api/scheduling/me、/me/month 与 /me/requests、

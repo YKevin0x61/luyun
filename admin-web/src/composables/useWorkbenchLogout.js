@@ -16,6 +16,12 @@
  *
  *  身份还没探出来（`null`）时**什么也不做**：那会儿还不知道该退哪一套会话，
  *  猜错就是把另一套会话留着、人却以为退了。
+ *
+ *  **退完要把工作台身份的结论作废**（`stores/workbenchIdentity` 的 `reset()`）：探针的
+ *  结论在会话消失的那一刻就不成立了，而切换器只在"还没探过"时开场探针 —— 不清的话，
+ *  同一页应用里换个人登录（客户端路由，不整页刷新）再进工作台，顶栏会一直挂着上一个人
+ *  的档。两档的作废点各在自己那条出口上：店长这一档在这里，员工那一档在
+ *  `useStaffLogout.logout()`（理由见下面 `exit()` 里的注释）。
  */
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -45,11 +51,15 @@ export function useWorkbenchLogout() {
   /** 真退（员工那侧的确认框回调也接这儿）。 */
   async function exit() {
     if (identity.value === 'staff') {
+      // 员工那半的「身份结论作废」落在 `useStaffLogout.logout()` 里：`ask()` 那条
+      // 「队列里没有照片就直接退」的路不经过这里（它直接调 `staff.ask()`），作废只有
+      // 写在那边才两条路都盖得住。
       await staff.logout()
       return
     }
     if (identity.value === 'super') {
       await logoutAdminSession(router, route.fullPath)
+      identityStore.reset()
     }
   }
 

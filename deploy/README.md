@@ -334,21 +334,32 @@ sudo nginx -t && sudo systemctl reload nginx
 - `/api/*`、`/ws/*` → 反代到 `127.0.0.1:8000`（WebSocket 升级：Caddy 自动
   处理；Nginx 需要显式 `proxy_set_header Upgrade/Connection`，配置里已带）。
 - 管理后台各页面分两类落地（完整清单以 `main.py` 的 `SPA_PAGE_ROUTES` 为准，
-  两个方向都不许有差 —— 只差 `tests/test_spa_page_routes.py` 里那两条显式例外：
-  `/index.html` 是外壳文件名、`/admin/` 是 `/admin` 的尾斜杠变体）：
-  - **反代白名单六个前缀**（`admin|sales-report|logs|prep-plan|wecom-push|recipe`）→
+  它是页面清单 `admin-web/src/router/pageRoutes.json` 的镜像，两个方向都不许有差
+  —— 只差 `tests/test_spa_page_routes.py` 里那两条显式例外：`/index.html` 是外壳
+  文件名、`/admin/` 是 `/admin` 的尾斜杠变体）：
+  - **反代白名单前缀**（`admin|sales-report|logs|wecom-push|workbench`）→
     由 `admin-web/dist` 直接提供，history 模式路由用 `try_files` 回退到
-    `index.html`，交给 vue-router 接管。
-  - **其余页面路由**（`/login`、`/register`、`/settings`、`/staff/today`、
-    `/staff/month`、`/staff/clean`、`/hygiene/roster`、`/hygiene/zones`、
-    `/hygiene/daily`、`/hygiene/deep-clean`、`/hygiene/fix`、`/hygiene/boards`、
-    `/hygiene/data`、`/hygiene/attire`、`/scheduling`、`/scheduling/inbox`、
-    `/scheduling/shifts`、`/`）→ 落到兜底 `reverse_proxy 127.0.0.1:8000`，由
-    `main.py` 的同一条 `spa_page` 路由返回 `admin-web/dist/index.html`。
-    `main.py` 没有 catch-all：这里少登记一条，直连 uvicorn 或经反代硬导航就是 404
-    （旧的 `/hygiene-data` 就这么漏过），新增页面必须同时补进 `SPA_PAGE_ROUTES`。
+    `index.html`，交给 vue-router 接管。工作台（`/workbench*`，
+    含 `/workbench/hr/*`、`/workbench/floor/*`、`/workbench/kitchen/*`、
+    `/workbench/me/*` 与 `/workbench/forbidden`）必须在这份名单里：它每一页都是
+    可以硬导航直达的地址，而 `main.py` 没有 catch-all。
+  - **其余页面路由**（`/`、`/login`、`/register`、`/settings`）→ 落到兜底
+    `reverse_proxy 127.0.0.1:8000`，由 `main.py` 的同一条 `spa_page` 路由返回
+    `admin-web/dist/index.html`。`main.py` 没有 catch-all：这里少登记一条，直连
+    uvicorn 或经反代硬导航就是 404（旧的 `/hygiene-data` 就这么漏过），新增页面必须
+    同时补进 `SPA_PAGE_ROUTES`。
+  - **旧地址一律作废**：`/staff/*`、`/recipe*`、`/hygiene/*`、`/hygiene-*`、
+    `/scheduling*`、`/today`、`/setup`、`/prep-plan`，以及工作台早期那批平铺地址
+    （`/workbench/roster`、`/workbench/daily` …）在路由、后端页面清单、两张豁免表、
+    登录回跳白名单与这份反代白名单里都不留 —— 按已定口径**自然 404，不做提示页、
+    不做重定向**（ADR 0092）。反代白名单里留着它们只会让旧地址拿到一个 200 空壳。
 - `/kds/*`、Swagger `/docs`、以及仍由后端 `StaticFiles` / `FileResponse`
   提供的路径 → 按各自配置转发或直出（见 Caddyfile / nginx.conf 注释）。
+
+**员工入口是 `/login`**（登录面板的员工栏；登录后落到 `/workbench/me/today`）。
+旧书签 `/staff/today` 已随这次改造作废 —— 给员工重发一次 `/login` 即可；花名册页上
+那张员工入口码指向的也是工作台里的员工首页，未登录的人会被带到 `/login`、登录后
+自动回到原页。
 
 ---
 

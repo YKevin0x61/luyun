@@ -118,6 +118,23 @@ export const useWorkbenchIdentityStore = defineStore('workbenchIdentity', {
       this.notice = null
     },
 
+    /** 会话没了之后把结论作废（登出时调）。
+     *
+     *  身份是**探针 + 记忆**算出来的结论，探针的结论在会话消失的那一刻就不成立了；
+     *  不清的话，同一页应用里换个人登录再进工作台，顶栏还挂着上一个人的档 ——
+     *  `WorkbenchIdentitySwitcher` 只在 `!probed` 时开场探针，而 `probed` 还是 true，
+     *  于是那次纠正根本不会发生（除非整页刷新）。清成"还没探"是唯一诚实的值。
+     *
+     *  **不动 `remembered`**：那是这台设备记住的选择（spec 故事 4），不是会话结论。
+     *  下一次 `refresh()` 照旧按它判"只降不升"。 */
+    reset() {
+      this.identity = null
+      this.available = []
+      this.sessions = unknownState()
+      this.notice = null
+      this.staffName = ''
+    },
+
     /** 员工姓名（`/api/hygiene/staff/me` 的 `employee.name`）。拿不到就留空，不抛错。 */
     async loadStaffName() {
       try {

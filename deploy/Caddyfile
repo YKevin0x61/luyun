@@ -13,14 +13,18 @@
 #   - /api/*、/ws/* → 反代到本机 127.0.0.1:8000（uvicorn main:app）。
 #     Caddy 的 reverse_proxy 会自动识别并转发 WebSocket 升级请求
 #     （Upgrade/Connection 头），不需要额外配置。
-#   - 管理后台各页面（/、/admin、/sales-report、/logs、/prep-plan、/wecom-push、
-#     /recipe*）已由 admin-web（Vue3 + vue-router，history 模式）接管，见
+#   - SPA 页面壳白名单（/、/admin、/sales-report、/logs、/wecom-push、/workbench*）
+#     已由 admin-web（Vue3 + vue-router，history 模式）接管，见
 #     admin-web/README.md「生产环境路由」一节 —— 生产环境应由反代层把这些路径
 #     指向 admin-web/dist/index.html，而不是打到后端；main.py 里同名的
 #     FileResponse 路由只是本机不经反代直连 :8000 时的访问入口保留，不影响
-#     生产行为。
-#   - 其余路径（/login、/setup、/vendor/*、/common.css、/common.js、/auth.js、
-#     /icons.js、/docs、/openapi.json、/kds/* 等）直接反代给后端，因为它们仍
+#     生产行为。这份白名单只列**今天真有页面的前缀**（来源是页面清单
+#     admin-web/src/router/pageRoutes.json）：旧的 /prep-plan 与 /recipe* 已搬进
+#     /workbench/kitchen/*，留在这里它们会拿到一个 200 的空壳而不是自然 404。
+#     工作台（/workbench*）必须在这里 —— 它今天能直连只是因为"白名单之外一律兜底
+#     转发给 uvicorn"，而 main.py 没有 catch-all，兜底那条路上页面是逐条注册的。
+#   - 其余路径（/login、/register、/settings、/vendor/*、/common.css、/common.js、
+#     /auth.js、/icons.js、/docs、/openapi.json、/kds/* 等）直接反代给后端，因为它们仍
 #     由 main.py 的 FileResponse / StaticFiles 挂载（public/、public/kds/）
 #     直接提供，无需在反代层重复维护。
 
@@ -76,17 +80,18 @@ your-domain.example.com {
 		header Cache-Control "public, max-age=31536000, immutable"
 	}
 
-	# ── 管理后台 SPA 页面壳：history 模式路由，找不到对应静态文件时回退到
-	#    index.html，交给 vue-router 在浏览器端接管路由 ──
+	# ── SPA 页面壳：history 模式路由，找不到对应静态文件时回退到
+	#    index.html，交给 vue-router 在浏览器端接管路由。
+	#    前缀表与 nginx.conf 的 location 正则逐条对齐（改一处就得改另一处）──
 	@spa path / /admin /admin/* /sales-report /sales-report/* /logs /logs/* \
-		/prep-plan /prep-plan/* /wecom-push /wecom-push/* /recipe /recipe/*
+		/wecom-push /wecom-push/* /workbench /workbench/*
 	handle @spa {
 		root * /opt/luyun/admin-web/dist
 		try_files {path} /index.html
 		file_server
 	}
 
-	# ── 其余一切（/login、/setup、/vendor/*、/kds/*、/docs 等）反代给后端 ──
+	# ── 其余一切（/login、/register、/settings、/vendor/*、/kds/*、/docs 等）反代给后端 ──
 	handle {
 		reverse_proxy 127.0.0.1:8000
 	}
