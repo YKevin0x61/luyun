@@ -1,4 +1,10 @@
-"""配方模块 REST 路由。返回 JSON 与 HTML 片段；写操作需 admin 鉴权，读路由保持公开。"""
+"""配方模块 REST 路由。返回 JSON 与 HTML 片段；写操作需 admin 鉴权。
+
+票 07 之前**阅读面是零鉴权的**（`/recipe*` 是扫码即看的免登录页）。现在配方住进了
+工作台的「后勤」组（`/workbench/kitchen/recipe*`），阅读面跟着改成「任一身份」门：
+管理端会话或员工会话，任一有效即可 —— 扫码看岗位配方保留，但扫码的人先登录
+（ADR 0092）。两条 router 的分工因此变成「阅读面：任一身份」与「管理面：管理端凭据」。
+"""
 
 from __future__ import annotations
 
@@ -25,16 +31,17 @@ from services.recipes.store import (
 from services.recipes.sections import RecipeSectionError, require_recipe_section
 from services.recipes.rendering import render_station_to_docx
 from services.recipes.structured_render import render_structured_recipe_body
-from api.security import verify_admin_token
+from api.security import require_any_identity_session, verify_admin_token
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 
-# 扫码即看的公开阅读面（admin-web 的 /recipe、/recipe/detail、/recipe/print、
-# /recipe/qr 都是免登录页面，router/index.js 里标了 RECIPE_READER_META.public）。
-# 这些读接口**不带**管理员凭据：后厨扫码进来是白屏还是配方，全看它们。
+# 扫码即看的阅读面（`/workbench/kitchen/recipe`、`.../detail`、`.../print`、`.../qr`）。
+# 它们**不再是公开面**（票 07）：三道门是「任一身份」——管理端会话（店长在平板上看）
+# 或员工会话（厨师扫码登录后看），两者拿到的是同一份只读内容。门本身在
+# `api/security.py::require_any_identity_session`（形状照卫生那条双身份依赖）。
 # 与阅读面相对的是管理面（岗位增删改、全量行、导出、历史），走 router ——
 # main.py 在注册处给 router 统一挂 verify_admin_token。
-public_router = APIRouter(prefix="/api/recipes", tags=["recipes"])
+reader_router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 
 CSV_IMPORT_MAX_BYTES = 2 * 1024 * 1024
 CSV_IMPORT_MAX_ROWS = 2_000
@@ -52,6 +59,17 @@ def _get_recipe_store() -> RecipeStore:
     if recipe_store is None:
         raise HTTPException(status_code=500, detail="配方库未初始化")
     return recipe_store
+
+
+def _may_include_inactive(identity: dict, requested: bool) -> bool:
+    """「含停用」这个开关只对管理端生效（票 07）。
+
+    停用是**管理动作**（下架一道不做的菜），免登录时代它对谁都生效，等于在公开面上
+    没做。改成「任一身份」门之后仍未收口的话，厨师扫码看到的会是店里已经下架的配方。
+    身份由 `require_any_identity_session` 给出（`kind` 是 `admin` / `staff`），
+    不另造依赖、也不猜 cookie。
+    """
+    return bool(requested) and identity.get("kind") == "admin"
 
 
 # ---- 校验 ----
@@ -227,24 +245,31 @@ async def preview_recipe_body(payload: RecipePreviewBody):
     }
 
 
-@public_router.get("/search")
+@reader_router.get("/search")
 async def search_recipes(q: str = "", include_inactive: bool = False,
+                         identity: dict = Depends(require_any_identity_session),
                          store: RecipeStore = Depends(_get_recipe_store)):
-    return {"groups": await store.search_recipes(q, include_inactive=include_inactive)}
+    return {"groups": await store.search_recipes(
+        q, include_inactive=_may_include_inactive(identity, include_inactive),
+    )}
 
 
-@public_router.get("/stations")
-async def list_stations(store: RecipeStore = Depends(_get_recipe_store)):
+@reader_router.get("/stations")
+async def list_stations(identity: dict = Depends(require_any_identity_session),
+                        store: RecipeStore = Depends(_get_recipe_store)):
     return {"stations": await store.list_stations()}
 
 
-@public_router.get("/stations/{slug}")
+@reader_router.get("/stations/{slug}")
 async def station_detail(slug: str, include_inactive: bool = False,
+                         identity: dict = Depends(require_any_identity_session),
                          store: RecipeStore = Depends(_get_recipe_store)):
     station = await store.get_station(slug)
     if station is None:
         raise HTTPException(status_code=404, detail="岗位不存在")
-    html = await store.station_display_html(slug, include_inactive=include_inactive)
+    html = await store.station_display_html(
+        slug, include_inactive=_may_include_inactive(identity, include_inactive),
+    )
     if html is None:
         raise HTTPException(status_code=404, detail="该岗位暂无可显示配方")
     return {"slug": station["slug"], "title": station["title"],

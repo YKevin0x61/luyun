@@ -120,8 +120,8 @@ class TestRecipesWriteRequiresAuth(unittest.TestCase):
         _run(self.store.connect())
 
         self.app = FastAPI()
-        # 与 main.py 一致：公开阅读面走 public_router，管理面走 router（SEC-02）。
-        self.app.include_router(recipes_module.public_router)
+        # 与 main.py 一致：阅读面走 reader_router（票 07 起是「任一身份」门），管理面走 router。
+        self.app.include_router(recipes_module.reader_router)
         self.app.include_router(recipes_module.router)
         self.app.dependency_overrides[recipes_module._get_recipe_store] = lambda: self.store
 
@@ -158,10 +158,22 @@ class TestRecipesWriteRequiresAuth(unittest.TestCase):
             resp = client.post("/api/recipes/recipes/1/confirm-review")
         self.assertEqual(resp.status_code, 401)
 
-    def test_list_stations_stays_public(self):
+    def test_list_stations_requires_any_identity_session(self):
+        """票 07：配方阅读面从免登录改成「任一身份」门 —— 无凭据 401，带会话 200。
+
+        这条原是 `test_list_stations_stays_public`（免登录也能读岗位列表），本次**反向**
+        改：扫码看配方保留，但扫码的人先登录；停用配方不再对未登录者可见。
+        """
         with TestClient(self.app) as client:
-            resp = client.get("/api/recipes/stations")
-        self.assertEqual(resp.status_code, 200)
+            anonymous = client.get("/api/recipes/stations")
+            self.assertEqual(anonymous.status_code, 401)
+            self.assertEqual(anonymous.json()["detail"], "未授权")
+
+            session_id, _expires_at = _run(auth_service.create_session(remember=False))
+            client.cookies.set(settings.SESSION_COOKIE_NAME, session_id)
+            authorized = client.get("/api/recipes/stations")
+        self.assertEqual(authorized.status_code, 200)
+        self.assertIn("changfen", [s["slug"] for s in authorized.json()["stations"]])
 
     def test_create_recipe_succeeds_with_session_cookie(self):
         session_id, _expires_at = _run(auth_service.create_session(remember=False))

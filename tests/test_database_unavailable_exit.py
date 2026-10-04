@@ -25,6 +25,8 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
+from config import settings
+
 import main as main_module
 from database import DatabaseManager
 from db_core.backend import pg as pg_backend
@@ -34,12 +36,19 @@ from db_core.backend.pg import (
     DatabaseUnavailable,
 )
 
-# 免鉴权的配方阅读面：窗口内它必须 503，而不是 500、也不是白屏（RECIPE_READER_META.public）。
+# 配方阅读面（票 07 起是「任一身份」门，不再是免鉴权的公开面）：窗口内它必须 503，
+# 而不是 500、也不是白屏。所以下面那条用例先真登录一次拿会话 —— 门自己也查会话表
+# （`require_any_identity_session`），窗口内同样该走 503 那条出路。
 BUSINESS_ROUTE = "/api/recipes/stations"
 # 真实存在的写路由（业务面统一挂 verify_admin_token）：窗口内必须在中间件就被拦下。
 WRITE_ROUTE = "/api/dish-stations/"
 # 把 asyncpg.connect 拖慢，好让「重连窗口」稳定地张开足够长的时间给 HTTP 请求撞进去。
 SLOW_CONNECT_SECONDS = 0.6
+ADMIN_INIT = {
+    "username": "admin",
+    "password": "password123",
+    "confirm_password": "password123",
+}
 
 
 class DatabaseUnavailableContractTest(unittest.IsolatedAsyncioTestCase):
@@ -112,12 +121,25 @@ class DatabaseUnavailableHttpTest(unittest.TestCase):
             self.assertIsNotNone(db, "lifespan 应当已经建好 db_manager")
             pg = db._connection._pg
 
+            # 票 07：配方阅读面不再是免鉴权页，先真登录一次拿会话，才走得到那条读路由。
+            init = client.post("/api/auth/init", json=ADMIN_INIT)
+            self.assertEqual(init.status_code, 200, init.text)
+            login = client.post(
+                "/api/auth/login",
+                json={"username": "admin", "password": "password123"},
+            )
+            self.assertEqual(login.status_code, 200, login.text)
+
             # 前置：两条路由平时都是「真的能走」的（写路由至少能走到鉴权）。
             baseline = client.get(BUSINESS_ROUTE)
             self.assertEqual(baseline.status_code, 200, baseline.text)
+            # 写路由那一探要露出「它要鉴权」：先摘掉刚拿到的会话 cookie，问完再放回去。
+            session_id = client.cookies.get(settings.SESSION_COOKIE_NAME)
+            client.cookies.clear()
             unauthenticated = client.post(
                 WRITE_ROUTE, json={"dish_name": "探针", "station": "探针"}
             )
+            client.cookies.set(settings.SESSION_COOKIE_NAME, session_id)
             self.assertIn(
                 unauthenticated.status_code,
                 (401, 403),

@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../../api/client'
+import { useRecipeAdmin } from '../../composables/useRecipeAdmin'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import RecipeNavIcon from './RecipeNavIcon.vue'
 import RecipeFileDropzone from '../../components/recipe/RecipeFileDropzone.vue'
@@ -13,6 +14,7 @@ import {
   deleteStationConfirmCopy,
   restoreHistoryCopy,
 } from '../../utils/recipeConfirmCopy'
+import { RECIPE_DETAIL_PATH, RECIPE_HOME_PATH } from '../../utils/recipePaths'
 import {
   RECIPE_BRAND_MARK,
   RECIPE_BRAND_TAGLINE,
@@ -24,6 +26,9 @@ import {
 } from '../../utils/recipeCopy'
 
 useScopedStylesheet('/recipe.css')
+
+// 顶栏那两颗管理端入口的判据（票 07）：工作台身份，不是「有没有登录」。
+const { isAdmin } = useRecipeAdmin()
 
 const route = useRoute()
 
@@ -329,7 +334,7 @@ applyManageQuery()
   <div>
     <header class="site-header no-print" style="position:static">
       <div class="site-header-inner">
-        <router-link class="site-brand" to="/recipe">
+        <router-link class="site-brand" :to="RECIPE_HOME_PATH">
           <span class="site-brand-mark" aria-hidden="true"><span class="site-brand-mark-inner">{{ RECIPE_BRAND_MARK }}</span></span>
           <span class="site-brand-text">
             <span class="site-brand-title">{{ RECIPE_BRAND_TITLE }}</span>
@@ -337,9 +342,12 @@ applyManageQuery()
           </span>
         </router-link>
         <nav class="site-nav no-print">
-          <router-link class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />{{ RECIPE_NAV_HOME_LABEL }}</router-link>
-          <router-link class="site-nav-link" to="/recipe"><RecipeNavIcon name="layout-grid" :size="14" />{{ RECIPE_NAV_STATIONS_LABEL }}</router-link>
-          <router-link class="site-nav-link" to="/recipe/manage"><RecipeNavIcon name="sparkles" :size="14" />{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
+          <!-- 三颗入口按身份出现（票 07）：`/`（管理后台）与配方管理都是管理端那一档的页，
+               扫码进来的厨师点它们只会被弹去登录页（navigation-audit 条目 4）。判据是
+               工作台身份（`useRecipeAdmin`），不是「有没有登录」。 -->
+          <router-link v-if="isAdmin" class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />{{ RECIPE_NAV_HOME_LABEL }}</router-link>
+          <router-link class="site-nav-link" :to="RECIPE_HOME_PATH"><RecipeNavIcon name="layout-grid" :size="14" />{{ RECIPE_NAV_STATIONS_LABEL }}</router-link>
+          <router-link v-if="isAdmin" class="site-nav-link" :to="RECIPE_MANAGE_PATH"><RecipeNavIcon name="sparkles" :size="14" />{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
         </nav>
       </div>
     </header>
@@ -351,7 +359,7 @@ applyManageQuery()
           <p class="page-lead">新增、改名或删除岗位和配方。阅读和打印从岗位列表进入。</p>
           <div class="manage-actions">
             <button class="btn btn-primary" @click="openAddStation">新增岗位</button>
-            <router-link class="btn btn-ghost" to="/recipe">返回岗位列表</router-link>
+            <router-link class="btn btn-ghost" :to="RECIPE_HOME_PATH">返回岗位列表</router-link>
           </div>
         </header>
         <p v-if="errorMsg" class="flash flash-error" style="margin-bottom:12px">{{ errorMsg }}</p>
@@ -366,7 +374,7 @@ applyManageQuery()
                 <td class="manage-table-actions" data-label="操作">
                   <div class="row-actions">
                     <button class="btn btn-sm btn-ghost" @click="openStation(s.slug)">管理配方</button>
-                    <router-link class="btn btn-sm btn-ghost" :to="`/recipe/detail?slug=${encodeURIComponent(s.slug)}`">查看</router-link>
+                    <router-link class="btn btn-sm btn-ghost" :to="`${RECIPE_DETAIL_PATH}?slug=${encodeURIComponent(s.slug)}`">查看</router-link>
                     <button class="btn btn-sm btn-ghost" @click="openRename(s.slug, s.title)">改名</button>
                     <button class="btn btn-sm btn-danger" @click="deleteStation(s)">删除</button>
                   </div>
@@ -382,7 +390,7 @@ applyManageQuery()
           <h1 class="page-title">{{ currentTitle }}</h1>
           <div class="manage-actions">
             <button class="btn btn-primary" @click="openAddRecipe">新增配方</button>
-            <router-link class="btn btn-ghost" :to="`/recipe/detail?slug=${encodeURIComponent(currentSlug)}`">查看岗位配方</router-link>
+            <router-link class="btn btn-ghost" :to="`${RECIPE_DETAIL_PATH}?slug=${encodeURIComponent(currentSlug)}`">查看岗位配方</router-link>
             <a class="btn btn-ghost" :href="`/api/recipes/stations/${encodeURIComponent(currentSlug)}/export`">导出 CSV</a>
             <button class="btn btn-ghost" @click="openImportCsv">导入 CSV</button>
             <a class="btn btn-ghost" :href="`/api/recipes/stations/${encodeURIComponent(currentSlug)}/docx`">导出 Word</a>

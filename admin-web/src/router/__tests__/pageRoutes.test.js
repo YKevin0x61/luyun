@@ -60,10 +60,14 @@ describe('页面清单（唯一来源）', () => {
       '/workbench/floor/fix',
       '/workbench/floor/boards',
       '/workbench/floor/data',
-      '/recipe',
-      '/recipe/detail',
-      '/recipe/print',
-      '/recipe/qr',
+      // 票 07：后勤组的配方五页 —— 两种外壳（带工作台导航的列表与管理，沉浸的阅读 /
+      // 打印 / 印码）在这张表里都记 `standalone: true`（那条的语义是「不渲染管理后台
+      // 那条导航」，不是「没有外壳」）。
+      '/workbench/kitchen/recipe',
+      '/workbench/kitchen/recipe/detail',
+      '/workbench/kitchen/recipe/print',
+      '/workbench/kitchen/recipe/qr',
+      '/workbench/kitchen/recipe/manage',
       // 员工三页搬进工作台的「我的」组（票 03）：套工作台外壳，后台导航照样不渲染；
       // 越权落点也是独立一页（一页说明 + 一颗按钮，不套导航）。
       '/workbench/me/today',
@@ -73,16 +77,14 @@ describe('页面清单（唯一来源）', () => {
     ])
   })
 
-  it('免登录的页面就是这些（登录页、注册页、配方阅读面）', () => {
+  it('免登录的页面就是这些（只剩登录页与注册页两个入口）', () => {
     // 票 03 起工作台里的页一律不是 public（工作台是「进去要登录」的页面区）：员工三页
     // 从这份名单里退出，页面壳的放行改由「任一会话有效」决定。
+    // 票 07 起配方阅读面也退出（本仓唯一一次推翻既有刻意设计）：扫码看配方保留，
+    // 但扫码的人先登录 —— public 只剩两个入口页。
     expect(PAGE_ROUTES.filter((row) => row.public).map((row) => row.path)).toEqual([
       '/login',
       '/register',
-      '/recipe',
-      '/recipe/detail',
-      '/recipe/print',
-      '/recipe/qr',
     ])
   })
 

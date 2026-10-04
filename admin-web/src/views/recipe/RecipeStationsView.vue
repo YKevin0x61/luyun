@@ -2,8 +2,10 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../../api/client'
+import { useRecipeAdmin } from '../../composables/useRecipeAdmin'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import * as RC from '../../utils/recipeCore'
+import { RECIPE_DETAIL_PATH, RECIPE_HOME_PATH, RECIPE_PRINT_PATH, RECIPE_QR_PATH } from '../../utils/recipePaths'
 import {
   SEARCH_GROUP_ITEM_CAP,
   capGroupedSearchHits,
@@ -24,6 +26,9 @@ import {
 } from '../../utils/recipeCopy'
 
 useScopedStylesheet('/recipe.css')
+
+// 顶栏那两颗管理端入口的判据（票 07）：工作台身份，不是「有没有登录」。
+const { isAdmin } = useRecipeAdmin()
 
 const SEARCH_DEBOUNCE_MS = 120
 
@@ -102,7 +107,7 @@ function printSelected() {
     window.alert('请先勾选岗位')
     return
   }
-  router.push({ path: '/recipe/print', query: { slugs: slugs.join(',') } })
+  router.push({ path: RECIPE_PRINT_PATH, query: { slugs: slugs.join(',') } })
 }
 
 function onSearchInput() {
@@ -182,7 +187,7 @@ function onDocumentPointerDown(evt) {
   <div>
     <header class="site-header no-print" style="position:static">
       <div class="site-header-inner">
-        <router-link class="site-brand" to="/recipe">
+        <router-link class="site-brand" :to="RECIPE_HOME_PATH">
           <span class="site-brand-mark" aria-hidden="true"><span class="site-brand-mark-inner">{{ RECIPE_BRAND_MARK }}</span></span>
           <span class="site-brand-text">
             <span class="site-brand-title">{{ RECIPE_BRAND_TITLE }}</span>
@@ -190,9 +195,12 @@ function onDocumentPointerDown(evt) {
           </span>
         </router-link>
         <nav class="site-nav no-print">
-          <router-link class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />{{ RECIPE_NAV_HOME_LABEL }}</router-link>
-          <router-link class="site-nav-link" to="/recipe"><RecipeNavIcon name="layout-grid" :size="14" />{{ RECIPE_NAV_STATIONS_LABEL }}</router-link>
-          <router-link class="site-nav-link" to="/recipe/manage"><RecipeNavIcon name="sparkles" :size="14" />{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
+          <!-- 三颗入口按身份出现（票 07）：`/`（管理后台）与配方管理都是管理端那一档的页，
+               扫码进来的厨师点它们只会被弹去登录页（navigation-audit 条目 4）。判据是
+               工作台身份（`useRecipeAdmin`），不是「有没有登录」。 -->
+          <router-link v-if="isAdmin" class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />{{ RECIPE_NAV_HOME_LABEL }}</router-link>
+          <router-link class="site-nav-link" :to="RECIPE_HOME_PATH"><RecipeNavIcon name="layout-grid" :size="14" />{{ RECIPE_NAV_STATIONS_LABEL }}</router-link>
+          <router-link v-if="isAdmin" class="site-nav-link" :to="RECIPE_MANAGE_PATH"><RecipeNavIcon name="sparkles" :size="14" />{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
         </nav>
       </div>
     </header>
@@ -262,7 +270,7 @@ function onDocumentPointerDown(evt) {
           <button v-if="batchMode" type="button" class="btn btn-primary btn-sm" @click="printSelected">
             打印所选 ({{ Object.keys(selected).length }})
           </button>
-          <router-link class="btn btn-ghost btn-sm" to="/recipe/qr">岗位二维码</router-link>
+          <router-link class="btn btn-ghost btn-sm" :to="RECIPE_QR_PATH">岗位二维码</router-link>
         </div>
         <div v-if="loading" class="loading-state">加载岗位列表…</div>
         <div v-else-if="errorMsg" class="empty-state">{{ errorMsg }}</div>
@@ -275,7 +283,7 @@ function onDocumentPointerDown(evt) {
             :class="{ 'is-checked': selected[s.slug] }"
           >
             <span class="station-check" aria-hidden="true"></span>
-            <router-link class="station-link" :to="`/recipe/detail?slug=${encodeURIComponent(s.slug)}`" @click="onItemClick(s.slug, $event)">
+            <router-link class="station-link" :to="`${RECIPE_DETAIL_PATH}?slug=${encodeURIComponent(s.slug)}`" @click="onItemClick(s.slug, $event)">
               <span class="station-link-icon" aria-hidden="true">{{ (s.title || '·').slice(0, 1) }}</span>
               <span class="station-link-copy">
                 <span class="station-link-title">

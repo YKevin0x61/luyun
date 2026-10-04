@@ -34,6 +34,9 @@ const ROUTES = [
   { path: '/workbench/me/month', component: { template: '<div />' } },
   { path: '/workbench/me/clean', component: { template: '<div />' } },
   { path: '/workbench/hr/roster', component: { template: '<div />' } },
+  // 票 07：配方阅读面（扫码的目标页）。
+  { path: '/workbench/kitchen/recipe/detail', component: { template: '<div />' } },
+  { path: '/workbench/kitchen/recipe', component: { template: '<div />' } },
   { path: '/register', component: { template: '<div />' } },
 ]
 
@@ -453,5 +456,72 @@ describe('/login 面板：非法 ?next 回落', () => {
 
     expect(findCall(fetchMock, '/api/auth/login')).toBeTruthy()
     expect(router.currentRoute.value.path).toBe('/')
+  })
+})
+
+describe('/login 面板：扫码进来看配方（票 07）', () => {
+  // 本票风险最高的一条链路：扫码 → 未登录 → 登录页默认开员工栏 → 登录后回到那条配方。
+  // 两处最容易漏：面板开错栏（厨师范不着管理栏）、员工栏把配方路径当「不是员工落点」
+  // 静默落到 `/workbench/me/today`。
+  const SCAN = '/login?next=%2Fworkbench%2Fkitchen%2Frecipe%2Fdetail%3Fslug%3Dchangfen'
+
+  it('扫码进来默认开员工栏，优先于记住的管理员栏', async () => {
+    rememberTab('admin')
+    fetchMock.mockResolvedValueOnce(STAFF_401())
+
+    const { wrapper } = await mountLogin(SCAN)
+
+    expect(activeTab(wrapper)).toBe('员工')
+    // 员工栏不该顺手去查管理端状态（扫码的绝大多数是厨师）。
+    expect(findCall(fetchMock, '/api/auth/status')).toBeFalsy()
+  })
+
+  it('厨师在员工栏登录后回到**那条配方**（不是静默落到「今天」）', async () => {
+    fetchMock
+      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
+
+    const { wrapper, router } = await mountLogin(SCAN)
+    await submitWith(wrapper, {
+      'input[type="tel"]': '13800138000',
+      'input[type="password"]': 's3cret',
+    })
+
+    expect(findCall(fetchMock, '/api/hygiene/staff/login')).toBeTruthy()
+    expect(router.currentRoute.value.path).toBe('/workbench/kitchen/recipe/detail')
+    expect(router.currentRoute.value.query.slug).toBe('changfen')
+  })
+
+  it('岗位码若还指着老地址，入口换成新地址后照样回到那条配方', async () => {
+    fetchMock
+      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
+
+    const { wrapper, router } = await mountLogin('/login?next=%2Frecipe%2Fdetail%3Fslug%3Dchangfen')
+    await submitWith(wrapper, {
+      'input[type="tel"]': '13800138000',
+      'input[type="password"]': 's3cret',
+    })
+
+    expect(router.currentRoute.value.path).toBe('/workbench/kitchen/recipe/detail')
+    expect(router.currentRoute.value.query.slug).toBe('changfen')
+  })
+
+  it('店长在管理栏登录后同样回到那条配方（阅读面两档都进得去）', async () => {
+    fetchMock
+      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
+      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+
+    const { wrapper, router } = await mountLogin(SCAN)
+    expect(activeTab(wrapper)).toBe('员工')
+    await clickTab(wrapper, '管理员')
+    await submitWith(wrapper, {
+      'input[type="text"]': 'admin',
+      'input[type="password"]': 's3cret',
+    })
+
+    expect(findCall(fetchMock, '/api/auth/login')).toBeTruthy()
+    expect(router.currentRoute.value.path).toBe('/workbench/kitchen/recipe/detail')
   })
 })

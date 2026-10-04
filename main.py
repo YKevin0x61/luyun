@@ -24,7 +24,7 @@ from db_core.backend.pg import DatabaseUnavailable
 from db_core.business_day import business_day_window
 from api import orders, dishes, dish_stations, semi_rules, report_dishes, prep_plan, wecom_push
 from api.admin import router as admin_router
-from api.recipes import public_router as recipes_public_router
+from api.recipes import reader_router as recipes_reader_router
 from api.recipes import router as recipes_router
 from api.credentials import router as credentials_router
 from api.db_credentials import router as db_credentials_router
@@ -691,17 +691,13 @@ HTML_AUTH_EXACT = {"/login", "/login.html", "/index.html", "/register"}
 # 票 01 起这两张页面豁免表与 `SPA_PAGE_ROUTES` 一起，由 `tests/test_spa_page_routes.py`
 # 对着页面清单的唯一来源 `admin-web/src/router/pageRoutes.json` 强校验（表里每条都要有
 # 出处，`public` 字段再用未登录硬导航的真实请求复核一遍）。
-# Keep in lockstep with admin-web/src/utils/loginNext.js RECIPE_READER_PATHS.
-# Do not use a /recipe prefix — /recipe/manage still requires a session.
-# Staff-phone entry pages live under `/workbench/me/*` (票 03): they are ordinary
-# workbench pages now (no exemption here) and the page wall lets either session
-# through. There is no `/staff/` prefix any more (票 03 删掉了它).
-HTML_AUTH_PUBLIC_PAGES = frozenset({
-    "/recipe",
-    "/recipe/detail",
-    "/recipe/print",
-    "/recipe/qr",
-})
+# **票 07 起这张表是空的**：配方阅读面（`/recipe*` 四页）是最后一批免墙的业务页，随配方
+# 搬进工作台的「后勤」组一齐关掉 —— 扫码看配方保留，但扫码的人先登录（页面墙对
+# `/workbench/*` 认任一会话）。空表不是没人用：`_is_html_auth_exempt` 与契约测试都还
+# 读它，以后真有公开页（比如再有一页 `/register` 那样的入口）仍从这里逐条登记。
+# 与 `admin-web/src/utils/loginNext.js` 的 RECIPE_READER_PATHS 不再需要对齐 ——
+# 那一份现在是「扫码回跳白名单」（阅读面五页里那四条），不是免墙名单。
+HTML_AUTH_PUBLIC_PAGES = frozenset()
 HTML_AUTH_PREFIXES = (
     "/api/auth/",
     "/vendor/",
@@ -1033,12 +1029,10 @@ PUBLIC_API_SURFACE: tuple[tuple[str, str], ...] = (
     # 卫生员工端入口：员工手机没有管理端会话，这里靠按 IP / 手机号的登录限流兜底
     ("POST", "/api/hygiene/staff/login"),
     ("POST", "/api/hygiene/staff/register"),
-    # 配方阅读面：/recipe、/recipe/detail、/recipe/print、/recipe/qr 是扫码即看的
-    # 免登录页面（RECIPE_READER_META.public），这些读接口断了后厨就白屏。
-    # 同模块的管理面（岗位增删改、全量行、导出、历史）不在此列，见 api/recipes.py。
-    ("GET", "/api/recipes/search"),
-    ("GET", "/api/recipes/stations"),
-    ("GET", "/api/recipes/stations/{slug}"),
+    # 配方阅读面**不在这里**（票 07）：/workbench/kitchen/recipe* 的扫码阅读面改成
+    # 「任一身份」门（require_any_identity_session），三条读接口挂的是守卫，不是登记。
+    # 认证例外清单里多一条就等于把「零鉴权、谁都能拉（连停用配方都能拉）」开回来。
+    # 同模块的管理面（岗位增删改、全量行、导出、历史）照旧走 verify_admin_token。
     # API 信息页：只有版本号与 docs 链接
     ("GET", "/api"),
 )
@@ -1047,7 +1041,7 @@ PUBLIC_API_SURFACE: tuple[tuple[str, str], ...] = (
 # —— 公开面（清单见 PUBLIC_API_SURFACE）——
 app.include_router(auth_router)          # 登录 / 初始化
 app.include_router(hygiene_router)       # 员工端走 require_staff_session，管理端走 require_session
-app.include_router(recipes_public_router)  # 扫码即看的配方阅读面
+app.include_router(recipes_reader_router)  # 配方阅读面：任一身份（管理端或员工会话）
 # —— 业务面：统一挂管理员凭据（会话 cookie / X-Admin-Token / Bearer）——
 app.include_router(orders.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(dishes.router, dependencies=[Depends(verify_admin_token)])
@@ -1162,8 +1156,9 @@ async def kds_manifest():
 # `try_files … /index.html` 也只写在 admin|sales-report|logs|prep-plan|wecom-push|recipe
 # 六个前缀的白名单块里（deploy/nginx.conf、deploy/Caddyfile），hygiene 页面一律落到
 # 反代兜底转发 —— 漏一条就是直连/反代硬导航 404（DOC-01 的 /hygiene-data 就是这么漏的）。
-# 工作台：票 05 起按组分在 `/workbench/hr/*`（人事：月历 / 待办 / 班次表 / 花名册）与
-# `/workbench/floor/*`（现场：卫生七页）两组；平铺的那批旧地址已删干净、不留别名。
+# 工作台：票 05 起按组分在 `/workbench/hr/*`（人事：月历 / 待办 / 班次表 / 花名册）、
+# `/workbench/floor/*`（现场：卫生七页）与 `/workbench/kitchen/*`（票 07 的后勤：配方）
+# 三组；平铺的那批旧地址已删干净、不留别名。
 # 票 06 起系统配置页从 `/setup` 改名 `/settings` —— 它一直不是首次初始化页（建管理员账号
 # 在 `/login` 的管理员栏），旧地址不做兼容、不留别名。
 SPA_PAGE_ROUTES = (
@@ -1177,11 +1172,6 @@ SPA_PAGE_ROUTES = (
     "/sales-report",
     "/prep-plan",
     "/wecom-push",
-    "/recipe",
-    "/recipe/detail",
-    "/recipe/print",
-    "/recipe/manage",
-    "/recipe/qr",
     "/logs",
     # 工作台（排班 + 卫生 + 员工端，2026-10-04）：一个子应用、两种身份、四块业务。
     # 票 05 起页面按组落在 URL 上：人事 `/workbench/hr/*`、现场 `/workbench/floor/*`；
@@ -1205,6 +1195,15 @@ SPA_PAGE_ROUTES = (
     "/workbench/floor/boards",
     "/workbench/floor/attire",
     "/workbench/floor/data",
+    # 票 07：后勤组的配方五页 —— 从独立域 `/recipe*` 搬进来（阅读面列表 / 沉浸阅读 /
+    # 打印 / 印码两种身份都能看，管理面只给管理端）。服务端这里只管「注册成页面」，
+    # 页面级权限在前端路由 meta 与各接口自己的 401。旧 `/recipe*` 一律作废：删干净、
+    # 不留别名、不做重定向（`?next=` 里的老地址由前端 `utils/loginNext.js` 换成新地址）。
+    "/workbench/kitchen/recipe",
+    "/workbench/kitchen/recipe/detail",
+    "/workbench/kitchen/recipe/print",
+    "/workbench/kitchen/recipe/qr",
+    "/workbench/kitchen/recipe/manage",
     "/workbench/me/today",
     "/workbench/me/month",
     "/workbench/me/clean",

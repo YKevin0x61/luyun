@@ -1,13 +1,14 @@
 /** Build and resolve /login?next= without double-encoding query values.
- *  RECIPE_READER_PATHS must stay in lockstep with main.py HTML_AUTH_PUBLIC_PAGES.
+ *
+ *  配方阅读面那四条路径不在这里写第二遍：唯一一份在 `utils/recipePaths.js`
+ *  （页面里的 router-link、印码页生成的地址、这里的回跳白名单共用它）。
+ *  免墙名单（`main.py` 的 `HTML_AUTH_PUBLIC_PAGES`）票 07 起已经是空的 ——
+ *  配方阅读面也要登录，这一份不再是「免墙名单」而是「扫码回跳白名单」。
  */
+import { RECIPE_READER_PATHS, isRecipeReaderPath } from './recipePaths.js'
 import { STAFF_ENTRY_PATH, isStaffLandingPath, isStaffPhonePath } from './staffPaths.js'
 
-export const RECIPE_READER_PATHS = ['/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr']
-
-export function isRecipeReaderPath(pathname) {
-  return RECIPE_READER_PATHS.includes(pathname || '')
-}
+export { RECIPE_READER_PATHS, isRecipeReaderPath }
 
 export function shouldSkipLoginRedirect(pathname) {
   if (pathname === '/login' || pathname === '/settings') return true
@@ -80,6 +81,15 @@ function pathnameOf(next) {
  *  地址本身照旧 404，这里换的只是「登录之后回哪儿」。
  */
 const LEGACY_NEXT_PATHS = [
+  // ── 票 07：配方从独立域搬进工作台的「后勤」组 ─────────────────────────────
+  // 岗位码里印的是老地址（`/recipe/detail?slug=…`）时，扫码的人被挡到登录页、`?next=`
+  // 就是这一条 —— 不换的话登录之后回到一个 404。五条逐条换（整段匹配），查询串与 hash
+  // 原样带过去；`/recipe/` 那条兜底挂在最后，接住前缀底下别的写法。
+  ['/recipe/detail', '/workbench/kitchen/recipe/detail'],
+  ['/recipe/print', '/workbench/kitchen/recipe/print'],
+  ['/recipe/manage', '/workbench/kitchen/recipe/manage'],
+  ['/recipe/qr', '/workbench/kitchen/recipe/qr'],
+  ['/recipe', '/workbench/kitchen/recipe'],
   // ── 票 05：工作台分成「人事 / 现场」两组，平铺的地址换成新分组 ──────────────
   ['/workbench/inbox', '/workbench/hr/inbox'],
   ['/workbench/shifts', '/workbench/hr/shifts'],
@@ -109,6 +119,7 @@ const LEGACY_NEXT_PATHS = [
   // ── 兜底：老前缀底下别的地址（今天已经没有对应的页了，换过去也是 404，但至少还在
   //    工作台里，不会把人送进一个连外壳都没有的空路径）────────────────────────
   ['/hygiene/', '/workbench/'],
+  ['/recipe/', '/workbench/kitchen/recipe/'],
 ]
 
 /** 一条老地址规则命中没有：`from` 带尾斜杠 = 前缀规则，否则整段匹配（含尾斜杠写法）。 */
@@ -133,17 +144,26 @@ function migrateLegacyPath(next) {
   return raw
 }
 
-/** `?next=` 指定的员工端落点；不是员工端路径（或本身非法）时返回 null。
+/** `?next=` 指定的员工端落点；不是员工能去的地方（或本身非法）时返回 null。
  *
  *  三个消费者共用这一份判据：员工栏的登录后落点（`resolveStaffNext`）、面板默认
- *  开在哪一栏（`resolveLoginTab`）。判据本身在 `staffPaths.js` 的
- *  `isStaffLandingPath`（只要员工前缀，`/register` 不算 —— 账号还没批准、会话也
- *  不存在，把 `?next=/register` 当落点就是把员工送进死路）。
+ *  开在哪一栏（`resolveLoginTab`）。两份白名单：
+ *  - 员工前缀（`staffPaths.js` 的 `isStaffLandingPath`）：员工自己的页面。`/register`
+ *    不算 —— 账号还没批准、会话也不存在，把 `?next=/register` 当落点就是把员工送进死路；
+ *  - **配方阅读面**（票 07）：扫码看岗位配方的那条链路。厨师在员工栏登录、目标是
+ *    `/workbench/kitchen/recipe/detail?slug=…` 时，若这里不放行就会**静默落到
+ *    `/workbench/me/today`** —— 「登录后回到那条配方」当场失效，而且没有任何报错。
+ *    阅读面在清单里是 `both`，员工进得去，所以它是合法的员工落点。
+ *
+ *  配方**管理**页不在这两份里（那是管理端的一页），别顺手把整个 `/workbench/kitchen/`
+ *  前缀放进来。
  */
 export function staffNextTarget(raw) {
   const next = sanitizeNext(raw)
   if (!next) return null
-  return isStaffLandingPath(pathnameOf(next)) ? next : null
+  const pathname = pathnameOf(next)
+  if (isStaffLandingPath(pathname) || isRecipeReaderPath(pathname)) return next
+  return null
 }
 
 /** 管理员身份的落点：认站内路径，但拒绝员工端前缀（那是员工 cookie 那扇门）与登录页自身。
@@ -160,20 +180,24 @@ export function resolveLoginNext(raw, fallback = '/') {
   return next
 }
 
-/** 员工栏登录后的落点：`?next=` 只认员工端前缀，别的一律回落到员工默认落点。
+/** 员工栏登录后的落点：`?next=` 只认员工端前缀**与配方阅读面**，别的一律回落到默认落点。
  *
  *  `/register` 是「员工侧界面」却不是落点：账号还没被批准、会话也不存在，把
  *  `?next=/register` 当合法落点就是把员工送进死路。
  *
- *  判据写在 `staffPaths.js`、单测在 `__tests__/loginNext.test.js`，页面里不许再手写
- *  一遍正则 —— 手写的那份比这里弱，放松了也没有断言拦得住。
+ *  票 07 起配方阅读面也是合法落点（扫码的厨师登录后回到那条配方）—— 判据与
+ *  「面板开哪一栏」共用 `staffNextTarget`，两处不会一个放行一个拒绝。
+ *
+ *  判据写在 `staffPaths.js` 与 `recipePaths.js`、单测在 `__tests__/loginNext.test.js`，
+ *  页面里不许再手写一遍正则 —— 手写的那份比这里弱，放松了也没有断言拦得住。
  */
 export function resolveStaffNext(raw, fallback = STAFF_ENTRY_PATH) {
   const fallbackPath = fallback || STAFF_ENTRY_PATH
   return staffNextTarget(raw) || fallbackPath
 }
 
-/** 面板默认开在哪一栏：`?next=` 落在员工端前缀内时**强制**员工栏，优先于记住值。
+/** 面板默认开在哪一栏：`?next=` 落在员工端前缀或**配方阅读面**内时**强制**员工栏，
+ *  优先于记住值（扫码的绝大多数是厨师，不该先看到管理栏）。
  *
  *  没有记住值（或记的是脏值）时落在员工栏：员工手机上打开 `/login` 就该直接看到
  *  手机号那一栏，不必先点一下（spec 故事 3 / ADR 0091）。管理端机器靠「上次选的是

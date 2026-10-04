@@ -12,8 +12,24 @@ describe('pwaManifest', () => {
     expect(selectPwaManifest('/').role).toBe('admin')
     expect(selectPwaManifest('/workbench/me/clean').role).toBe('hygiene')
     expect(selectPwaManifest('/workbench/hr/roster').role).toBe('admin')
-    expect(selectPwaManifest('/recipe/manage').role).toBe('recipe')
+    expect(selectPwaManifest('/workbench/kitchen/recipe/manage').role).toBe('recipe')
     expect(selectPwaManifest('/settings').role).toBe('admin')
+  })
+
+  it('票 07：配方页搬进后勤组之后，旧的 /recipe* 不再落在配方那一档', () => {
+    // 归属判据跟着地址走：旧地址自然 404，判据也不该再认它（认了就是给死路径留了一档）。
+    expect(selectPwaManifest('/recipe').role).toBe('admin')
+    expect(selectPwaManifest('/recipe/qr').role).toBe('admin')
+    // 新地址那五页都归配方那一档（阅读面四页 + 管理页）。
+    for (const path of [
+      '/workbench/kitchen/recipe',
+      '/workbench/kitchen/recipe/detail',
+      '/workbench/kitchen/recipe/print',
+      '/workbench/kitchen/recipe/qr',
+      '/workbench/kitchen/recipe/manage',
+    ]) {
+      expect(selectPwaManifest(path).role, path).toBe('recipe')
+    }
   })
 
   it('员工端三页挂员工清单，不是管理端那份', () => {
@@ -70,7 +86,7 @@ describe('pwaManifest', () => {
     expect(selectPwaManifest('/', 'staff').role).toBe('admin')
     expect(selectPwaManifest('/workbench/me/today', 'admin').role).toBe('hygiene')
     expect(selectPwaManifest('/register', 'admin').role).toBe('hygiene')
-    expect(selectPwaManifest('/recipe/qr', 'staff').role).toBe('recipe')
+    expect(selectPwaManifest('/workbench/kitchen/recipe/qr', 'staff').role).toBe('recipe')
   })
 
   it('员工清单的 start_url 与员工入口的关系（票 03 之后是**已知的中间态**）', () => {
@@ -152,8 +168,8 @@ describe('pwaManifest', () => {
   })
 
   it('ignores an invalid document-like argument', () => {
-    expect(applyPwaManifest('/recipe', null, '/previous-route')).toMatchObject({
-      role: 'recipe',
-    })
+    expect(
+      applyPwaManifest('/workbench/kitchen/recipe', null, '/previous-route'),
+    ).toMatchObject({ role: 'recipe' })
   })
 })

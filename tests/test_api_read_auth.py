@@ -12,11 +12,15 @@
 
 1. **业务读面**：无凭据 401（且拒绝必须来自鉴权门，不是业务逻辑碰巧报错），
    带会话 cookie 或 ``X-Admin-Token`` 时 200 并且真的拿到数据；
-2. **公开面不被误伤**：``/api/healthz`` 探针、登录入口、卫生员工端入口、
-   扫码即看的配方阅读面（``/recipe*`` 页面读的接口）无凭据照样可用；
+2. **公开面不被误伤**：``/api/healthz`` 探针、登录入口、卫生员工端入口无凭据照样可用；
 3. **公开面清单与实现一致**：``main.PUBLIC_API_SURFACE`` 是唯一的例外登记处，
    清单之外的 ``/api`` 路由必须带守卫（管理员凭据 / require_session /
-   require_staff_session），防止以后又长出新的裸读接口。
+   require_staff_session / require_any_identity_session），防止以后又长出新的裸读接口。
+
+票 07 起**配方阅读面不再是公开面**：三条读接口（搜索 / 岗位列表 / 岗位阅读）改成
+「任一身份」门（``require_any_identity_session``，ADR 0092）—— 扫码看配方保留，但
+扫码的人先登录。这一条把「零鉴权、谁都能拉（连停用配方都能拉）」那个既有缺陷关掉，
+所以下面第 2 节里不再有配方，第 1 节里多出三条。
 """
 
 from datetime import datetime
@@ -52,6 +56,11 @@ BUSINESS_READ_PATHS = (
     "/api/recipes/stations/changfen/recipes",
     "/api/recipes/stations/changfen/export",
     "/api/recipes/recipes/1/history",
+    # 配方阅读面（票 07）：扫码即看的三条读接口从「零鉴权」改成「任一身份」门 ——
+    # 无凭据必须 401，拒绝同样来自鉴权门（body 是「未授权」）。
+    "/api/recipes/search",
+    "/api/recipes/stations",
+    "/api/recipes/stations/changfen",
 )
 
 # 公开面：无凭据必须「可达」，即拒绝原因绝不能是鉴权门的 401「未授权」。
@@ -60,8 +69,6 @@ PUBLIC_PATHS = (
     "/api/system/health",
     "/api/scraper/status",
     "/api/auth/status",
-    "/api/recipes/stations",
-    "/api/recipes/search",
 )
 
 # 鉴权门的 401 body。用它把「鉴权拒绝」和业务自己的 401（如员工登录密码错误）区分开。
@@ -87,18 +94,28 @@ GUARD_CALLABLES = {
 
 
 class ApiAccess:
-    """真实 ``main.app`` 客户端 + 三种身份：匿名 / 会话 cookie / API Token。"""
+    """真实 ``main.app`` 客户端 + 四种身份：匿名 / 管理端会话 / 员工会话 / API Token。
+
+    员工会话（票 07 起配方阅读面的第二把钥匙）在用到时才建：建它要先走一遍
+    「注册 → 批准 → 登录」，而批准那一步本身要管理端会话。
+    """
 
     def __init__(self, client: TestClient, session_id: str, token: str) -> None:
         self.client = client
         self.session_id = session_id
         self.token = token
+        self.staff_session_id = None
 
-    def _send(self, method: str, path: str, *, cookie=False, token=False, **kwargs):
+    def _send(self, method: str, path: str, *, cookie=False, staff=False, token=False, **kwargs):
         self.client.cookies.clear()
         headers = dict(kwargs.pop("headers", None) or {})
         if cookie:
             self.client.cookies.set(settings.SESSION_COOKIE_NAME, self.session_id)
+        if staff:
+            assert self.staff_session_id, "先调 _staff_reader_session(api) 建员工会话"
+            self.client.cookies.set(
+                settings.STAFF_SESSION_COOKIE_NAME, self.staff_session_id
+            )
         if token:
             headers["X-Admin-Token"] = self.token
         return self.client.request(method, path, headers=headers, **kwargs)
@@ -108,6 +125,9 @@ class ApiAccess:
 
     def as_cookie(self, method: str, path: str, **kwargs):
         return self._send(method, path, cookie=True, **kwargs)
+
+    def as_staff(self, method: str, path: str, **kwargs):
+        return self._send(method, path, staff=True, **kwargs)
 
     def as_token(self, method: str, path: str, **kwargs):
         return self._send(method, path, token=True, **kwargs)
@@ -349,24 +369,110 @@ def _seed_recipe_station(api: ApiAccess) -> str:
     return slug
 
 
-def test_recipe_reader_surface_is_readable_without_credentials(api):
-    """``/recipe*`` 是扫码即看的公开页面，无凭据也要能读到岗位与配方内容。"""
-    slug = _seed_recipe_station(api)
+def _staff_reader_session(api: ApiAccess) -> str:
+    """走完员工链路，返回员工会话 cookie 原文（配方阅读面的第二把钥匙）。
 
-    stations = api.anonymous("GET", "/api/recipes/stations")
+    `_staff_session_cookie` 里那一步「批准注册」要管理端会话，而 `ApiAccess` 每次请求
+    都会先清空 cookie 罐 —— 这里先把管理端会话放回去，再走员工注册 / 登录。
+    """
+    api.client.cookies.set(settings.SESSION_COOKIE_NAME, api.session_id)
+    api.staff_session_id = _staff_session_cookie(api.client)
+    return api.staff_session_id
+
+
+def test_recipe_reader_surface_requires_any_identity_session(api):
+    """票 07：配方阅读面从「零鉴权」改成「任一身份」门（ADR 0092）。
+
+    ``/workbench/kitchen/recipe*`` 是工作台里的页面，三条读接口跟着换成
+    ``require_any_identity_session``：无凭据 401（拒绝来自鉴权门），管理端会话与
+    员工会话都能读到**同样的**内容 —— 扫码的厨师登录之后看的就是这一份。
+    """
+    slug = _seed_recipe_station(api)
+    reader_paths = (
+        "/api/recipes/stations",
+        f"/api/recipes/stations/{slug}",
+        "/api/recipes/search?q=虾",
+    )
+
+    for path in reader_paths:
+        resp = api.anonymous("GET", path)
+        assert resp.status_code == 401, f"{path} 无凭据居然 {resp.status_code}: {resp.text}"
+        assert resp.json() == AUTH_GATE_BODY, resp.text
+
+    _staff_reader_session(api)
+
+    stations = api.as_staff("GET", "/api/recipes/stations")
     assert stations.status_code == 200, stations.text
     assert slug in [s["slug"] for s in stations.json()["stations"]]
 
-    detail = api.anonymous("GET", f"/api/recipes/stations/{slug}")
+    detail = api.as_staff("GET", f"/api/recipes/stations/{slug}")
     assert detail.status_code == 200, detail.text
     body = detail.json()
     assert body["title"] == "肠粉档"
     assert "鲜虾肠粉" in body["content_html"]
-    assert "大火蒸 3 分钟" in body["content_html"]
 
-    search = api.anonymous("GET", "/api/recipes/search", params={"q": "虾"})
+    search = api.as_staff("GET", "/api/recipes/search", params={"q": "虾"})
     assert search.status_code == 200, search.text
     assert "鲜虾肠粉" in search.text
+
+    # 管理端会话走的是同一条门（先管理端、再员工），拿到的内容一样。
+    as_admin = api.as_cookie("GET", f"/api/recipes/stations/{slug}")
+    assert as_admin.status_code == 200, as_admin.text
+    assert "鲜虾肠粉" in as_admin.json()["content_html"]
+
+
+def test_recipe_include_inactive_flag_is_admin_only(api):
+    """票 07：「含停用」只对管理端生效 —— 员工与未登录者都拉不到停用配方。
+
+    这是既有缺陷的正面口径：免登录时代 ``include_inactive=1`` 对谁都生效，
+    于是「停用」这个管理动作在公开面上等于没做。
+    """
+    slug = _seed_recipe_station(api)
+    created = api.as_token(
+        "POST",
+        f"/api/recipes/stations/{slug}/recipes",
+        json={"section": "配方", "recipe_name": "停售品", "body": "下架了", "is_new": False},
+    )
+    assert created.status_code == 200, created.text
+    rid = created.json()["id"]
+    assert api.as_token("POST", f"/api/recipes/recipes/{rid}/toggle-active").status_code == 200
+
+    _staff_reader_session(api)
+
+    # 员工会话：显式要 include_inactive 也不算数。
+    staff_detail = api.as_staff(
+        "GET", f"/api/recipes/stations/{slug}", params={"include_inactive": 1}
+    )
+    assert staff_detail.status_code == 200, staff_detail.text
+    assert "停售品" not in staff_detail.json()["content_html"]
+
+    staff_search = api.as_staff(
+        "GET", "/api/recipes/search", params={"q": "停售品", "include_inactive": 1}
+    )
+    assert staff_search.status_code == 200, staff_search.text
+    assert staff_search.json() == {"groups": []}
+
+    # 管理端会话：这个开关照旧生效（阅读面与打印面都是管理端在用的）。
+    admin_detail = api.as_cookie(
+        "GET", f"/api/recipes/stations/{slug}", params={"include_inactive": 1}
+    )
+    assert admin_detail.status_code == 200, admin_detail.text
+    assert "停售品" in admin_detail.json()["content_html"]
+    assert "recipe-card--inactive" in admin_detail.json()["content_html"]
+
+    admin_search = api.as_cookie(
+        "GET", "/api/recipes/search", params={"q": "停售品", "include_inactive": 1}
+    )
+    assert admin_search.status_code == 200, admin_search.text
+    assert "停售品" in admin_search.text
+
+    # 不带这个开关时两边都看不到（默认就是「只看启用」）。
+    for client_call in (
+        api.as_cookie("GET", f"/api/recipes/stations/{slug}"),
+        api.as_staff("GET", f"/api/recipes/stations/{slug}"),
+    ):
+        assert client_call.status_code == 200, client_call.text
+        assert "停售品" not in client_call.json()["content_html"]
 
 
 def test_recipe_management_reads_require_credentials(api):

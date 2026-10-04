@@ -1,8 +1,8 @@
 /** 工作台外壳的导航（票 03 起）：**一组一格**，按身份过滤。
  *
  *  工作台的路径按组排（`pageRoutes.json` 的 `group`）：人事（`/workbench/hr/*`）、现场
- *  （`/workbench/floor/*`）票 05 落位，「我的」（`/workbench/me/*`）票 03 就在；配方 /
- *  备货计划（票 07 / 08）并入时往 `WORKBENCH_NAV_GROUPS` 里各加一行就行 —— 外壳
+ *  （`/workbench/floor/*`）票 05 落位，「我的」（`/workbench/me/*`）票 03 就在，后勤
+ *  （`/workbench/kitchen/*`：配方，票 07）随后进来 —— 外壳
  *  （`views/workbench/WorkbenchLayout.vue`）只认这张表与身份，不认具体有哪些组，所以加组
  *  不用改结构。两个管理端壳（人事壳 / 现场壳）也引这张表：它们的跨组门（「现场 ›」/
  *  「人事」）的落点与名字就是这里那一行，不各写一遍。
@@ -16,6 +16,7 @@
  *  —— 不叫「管理员」）。两者的映射就在 `workbenchAudienceFor` 这一处，别在别处再写一遍。
  */
 import { PAGE_ROUTES, pageMeta, pageRow } from '../router/pageRoutes.js'
+import { RECIPE_HOME_PATH } from './recipePaths.js'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME } from './workbenchCopy.js'
 import { IDENTITY_ADMIN } from './workbenchIdentity.js'
 
@@ -26,6 +27,9 @@ export const WORKBENCH_NAV_GROUPS = [
   { key: 'hr', label: '人事', to: WORKBENCH_HR_HOME },
   // 现场：卫生七页（落点是日常验收，到了那儿由那一组自己的 rail 接手）。
   { key: 'floor', label: '现场', to: WORKBENCH_FIELD_HOME },
+  // 后勤（票 07）：配方 —— 落点是岗位列表（阅读面，`both`，所以员工这一档也看得见这一格；
+  // 票 08 的备货计划同组）。落点常量在 `utils/recipePaths.js`，与页面里的 router-link 同一份。
+  { key: 'kitchen', label: '后勤', to: RECIPE_HOME_PATH },
   // 员工端三页（今天 / 整月 / 卫生待办）同属「我的」这一组，落点是「今天」。
   { key: 'me', label: '我的', to: '/workbench/me/today' },
 ]

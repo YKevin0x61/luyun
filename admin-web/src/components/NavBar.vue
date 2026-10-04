@@ -3,7 +3,6 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api/client'
 import SvgIcon from './SvgIcon.vue'
-import { RECIPE_BRAND_TITLE } from '../utils/recipeCopy'
 import { WORKBENCH_TITLE } from '../utils/workbenchCopy'
 
 defineProps({
@@ -21,7 +20,6 @@ const PAGE_SUBTITLES = [
   { prefix: '/prep-plan', subtitle: '备货计划' },
   { prefix: '/wecom-push', subtitle: '企微推送' },
   { prefix: '/sales-report', subtitle: '销售报表' },
-  { prefix: '/recipe', subtitle: RECIPE_BRAND_TITLE },
   { prefix: '/admin', subtitle: '数据管理' },
   { prefix: '/', subtitle: '运营仪表盘' },
 ]
@@ -87,7 +85,8 @@ async function handleLogout() {
         :class="{ active: route.path.startsWith('/workbench') }"
       >{{ WORKBENCH_TITLE }}</router-link>
       <router-link to="/sales-report" class="nav-tab" :class="{ active: route.path.startsWith('/sales-report') }">销售报表</router-link>
-      <router-link to="/recipe" class="nav-tab" :class="{ active: route.path.startsWith('/recipe') }">{{ RECIPE_BRAND_TITLE }}</router-link>
+      <!-- 票 07（spec 故事 12）：配方那一格撤掉 —— 它已经在工作台的「后勤」组里，
+           从上面「工作台」那一格进。管理后台的导航为它单列一格只会让人以为有两个配方域。 -->
       <router-link to="/wecom-push" class="nav-tab" :class="{ active: route.path.startsWith('/wecom-push') }">企微推送</router-link>
       <router-link to="/prep-plan" class="nav-tab" :class="{ active: route.path.startsWith('/prep-plan') }">备货计划</router-link>
       <router-link to="/logs" class="nav-tab" :class="{ active: route.path.startsWith('/logs') }">日志</router-link>

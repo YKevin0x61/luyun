@@ -351,19 +351,116 @@ def test_static_asset_accessible_without_session(auth_app_client):
     assert hygiene_css.status_code == 200
 
 
-def test_recipe_reader_pages_accessible_without_session(auth_app_client):
+def test_recipe_reader_pages_require_a_session(auth_app_client):
+    """票 07：配方阅读面从**免登录**改成要登录（本仓唯一一次推翻既有刻意设计）。
+
+    旧口径是「扫码即看」：`/recipe*` 四页在 `HTML_AUTH_PUBLIC_PAGES` 里、未登录也拿到
+    外壳（那也正是「零鉴权、谁都能拉、连停用配方都能拉」那个缺陷的入口）。配方搬进工作台
+    的「后勤」组之后，阅读面与工作台别的页一个待遇：未登录硬导航 302 到
+    `/login?next=<原地址>` —— **原地址要能原样回来（含 query）**，扫码那条链路
+    （扫码 → 未登录 → 登录 → 回到那条配方）就压在这上面。
+    """
+    from urllib.parse import quote
+
+    import main as main_module
+
     client, _ = auth_app_client
-    for path in ("/recipe", "/recipe/detail", "/recipe/print", "/recipe/qr"):
+    for path in (
+        "/workbench/kitchen/recipe",
+        "/workbench/kitchen/recipe/detail",
+        "/workbench/kitchen/recipe/print",
+        "/workbench/kitchen/recipe/qr",
+        "/workbench/kitchen/recipe/manage",
+    ):
+        assert path in main_module.SPA_PAGE_ROUTES, path
+        assert path not in main_module.HTML_AUTH_PUBLIC_PAGES, path
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
-        loc = resp.headers.get("location", "")
-        assert resp.status_code != 302 or "/login" not in loc, path
+        assert resp.status_code == 302, (path, resp.status_code)
+        assert resp.headers["location"] == f"/login?next={quote(path, safe='')}", path
 
-
-def test_recipe_manage_html_requires_session(auth_app_client):
-    client, _ = auth_app_client
-    resp = client.get("/recipe/manage", headers=_html_headers(), follow_redirects=False)
+    # 扫码进来的是带 slug 的那一条：query 必须一起回来，否则登录后回到的是列表页。
+    scanned = "/workbench/kitchen/recipe/detail?slug=changfen"
+    resp = client.get(scanned, headers=_html_headers(), follow_redirects=False)
     assert resp.status_code == 302
-    assert resp.headers["location"].startswith("/login")
+    assert resp.headers["location"] == f"/login?next={quote(scanned, safe='')}"
+
+    # 反向：旧的四条 `/recipe*` 不许留在页面豁免表里（留着它们，改门就只改了一半）。
+    for stale in ("/recipe", "/recipe/detail", "/recipe/print", "/recipe/qr"):
+        assert stale not in main_module.HTML_AUTH_PUBLIC_PAGES, stale
+
+
+def test_recipe_pages_open_for_a_logged_in_admin(auth_app_client):
+    """另一半：有会话就拿到外壳（登录墙放行的根据是会话，不是路径）。
+
+    未登录被拦不等于页面作废 —— 登录之后每一条都得能开，否则「登录后回到那条配方」
+    会落在一个 404 上。
+    """
+    from urllib.parse import quote
+
+    client, _ = auth_app_client
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200, init.text
+    assert client.cookies.get(settings.SESSION_COOKIE_NAME)
+
+    for path in (
+        "/workbench/kitchen/recipe",
+        "/workbench/kitchen/recipe/detail?slug=changfen",
+        "/workbench/kitchen/recipe/print?slug=changfen",
+        "/workbench/kitchen/recipe/qr",
+        "/workbench/kitchen/recipe/manage",
+    ):
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 200, (path, resp.status_code, quote(resp.text, safe=""))
+        assert "text/html" in resp.headers["content-type"], path
+
+
+def test_old_recipe_paths_are_gone(auth_app_client):
+    """票 07：旧 `/recipe*` 随搬家作废 —— 不留别名、不留重定向、不再免墙。
+
+    跟 `/staff/*`、`/hygiene/*`、`/scheduling*` 一个待遇（ADR 0092）：浏览器硬导航到旧
+    地址跟任何一个未登录的受保护页一样被 302；非页面请求直接看路由表，确实是 404。
+    `?next=` 里可能还存着旧地址，那由前端 `loginNext` 在入口换成新地址。
+    """
+    from urllib.parse import quote
+
+    import main as main_module
+
+    client, _ = auth_app_client
+    for stale in ("/recipe", "/recipe/detail", "/recipe/print", "/recipe/qr", "/recipe/manage"):
+        assert stale not in main_module.SPA_PAGE_ROUTES, stale
+        assert stale not in main_module.HTML_AUTH_PUBLIC_PAGES, stale
+        assert stale not in main_module.HTML_AUTH_EXACT, stale
+        assert client.get(stale, follow_redirects=False).status_code == 404, stale
+        nav = client.get(stale, headers=_html_headers(), follow_redirects=False)
+        assert nav.status_code == 302, stale
+        assert nav.headers["location"] == f"/login?next={quote(stale, safe='')}", stale
+
+
+def test_recipe_reader_pages_open_for_a_staff_session(auth_app_client):
+    """扫码的厨师：员工会话（没有管理端会话）硬导航阅读页 → 200 页面壳。
+
+    这是「扫码 → 登录 → 回到那条配方」在服务端的另一半：登录之后落回来的是工作台里的
+    一页，页面墙对 `/workbench/*` 认任一会话（`_has_staff_session`）。
+    """
+    client, _ = auth_app_client
+    _staff_only_client(client)
+
+    for path in (
+        "/workbench/kitchen/recipe",
+        "/workbench/kitchen/recipe/detail?slug=changfen",
+        "/workbench/kitchen/recipe/print",
+        "/workbench/kitchen/recipe/qr",
+    ):
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 200, (path, resp.status_code)
+        assert "text/html" in resp.headers["content-type"], path
+
+    # 配方管理是管理端那一页：员工会话进得去壳（工作台认任一会话），页面级权限由前端
+    # 守卫 `audience: admin` 与接口自己的 401 兜住 —— 这一条与服务端页面墙的分工一致。
+    manage = client.get(
+        "/workbench/kitchen/recipe/manage", headers=_html_headers(), follow_redirects=False
+    )
+    assert manage.status_code == 200, manage.status_code
 
 
 def test_settings_html_requires_session(auth_app_client):
@@ -715,6 +812,12 @@ WORKBENCH_PAGES = (
     "/workbench/me/month",
     "/workbench/me/clean",
     "/workbench/forbidden",
+    # 票 07：配方五页搬进「后勤」组（阅读四页 + 管理页）—— 服务端同样一视同仁。
+    "/workbench/kitchen/recipe",
+    "/workbench/kitchen/recipe/detail",
+    "/workbench/kitchen/recipe/print",
+    "/workbench/kitchen/recipe/qr",
+    "/workbench/kitchen/recipe/manage",
 )
 SYSTEM_PAGES = (
     "/",

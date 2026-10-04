@@ -7,7 +7,7 @@ import { WORKBENCH_FIELD_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenc
 
 // 工作台外壳（票 03 立、票 04 接上身份）：
 // - 导航跟着**此刻的身份**走，不跟着"这一页是谁的"。店长的会话挂在「我的」页上时，
-//   顶栏照样是他的那一档与他的导航面（人事 / 现场那两组在票 05 落位后自动出现）。
+//   顶栏照样是他的那一档与他的导航面（人事 / 现场 / 后勤那几组落位后自动出现）。
 // - 顶栏那颗切换器换一档，导航面跟着换。
 // 断言的都是渲染出来的东西（有几格、点去哪、亮不亮），不是组件的内部结构。
 
@@ -19,6 +19,8 @@ const ROUTES = [
   // 票 05：工作台按组分家，人事 / 现场各有自己的落点。票 06：首页（`/workbench`）是 `both`。
   { path: '/workbench/hr/calendar', component: { template: '<div>排班月历</div>' }, meta: { audience: 'admin', standalone: true } },
   { path: '/workbench/floor/daily', component: { template: '<div>日常验收</div>' }, meta: { audience: 'admin', standalone: true } },
+  // 票 07：后勤那一格的落点（配方列表，`both` —— 员工也看得见）。
+  { path: '/workbench/kitchen/recipe', component: { template: '<div>配方</div>' }, meta: { audience: 'both', standalone: true } },
 ]
 
 function jsonResponse(data, status = 200) {
@@ -82,14 +84,14 @@ afterEach(() => {
 })
 
 describe('工作台外壳的导航', () => {
-  it('员工这一档是「今天 / 我的」两格：首页两组都看得见，店长那几页点不到', async () => {
+  it('员工这一档是「今天 / 后勤 / 我的」三格：首页与配方两组都看得见，店长那几页点不到', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const { wrapper } = await mountShell('/workbench/me/today')
 
     const items = wrapper.findAll('.wb-nav-item')
-    expect(items.map((item) => item.text())).toEqual(['今天', '我的'])
+    expect(items.map((item) => item.text())).toEqual(['今天', '后勤', '我的'])
     expect(items.map((item) => item.attributes('href'))).toEqual([
-      '/workbench', '/workbench/me/today',
+      '/workbench', '/workbench/kitchen/recipe', '/workbench/me/today',
     ])
     // 员工点不到店长那几页（它们在清单里是 admin，导航按身份过滤）。
     expect(wrapper.find('a[href="/workbench/floor/daily"]').exists()).toBe(false)
@@ -110,11 +112,11 @@ describe('工作台外壳的导航', () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const { wrapper, router } = await mountShell('/workbench/me/month')
 
-    // 第二格是「我的」（第一格是首页）。
+    // 票 07 起第二格是「后勤」（配方），第三格才是「我的」。
     await wrapper.findAll('.wb-nav-item')[1].trigger('click')
     await flushPromises()
 
-    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.path).toBe('/workbench/kitchen/recipe')
   })
 
   it('顶栏挂着身份切换器，两档都在（「超级管理员」不写成「管理员」）', async () => {
@@ -137,9 +139,9 @@ describe('工作台外壳的导航', () => {
     // 常量（而不是因为"这一页是员工页"才藏起来）。页面内容按自己的 401 处理 —— 切换器
     // 不改权限、也不改守卫。
     const items = wrapper.findAll('.wb-nav-item')
-    expect(items.map((item) => item.text())).toEqual(['今天', '人事', '现场'])
+    expect(items.map((item) => item.text())).toEqual(['今天', '人事', '现场', '后勤'])
     expect(items.map((item) => item.attributes('href'))).toEqual([
-      '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
+      '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME, '/workbench/kitchen/recipe',
     ])
   })
 
@@ -151,7 +153,7 @@ describe('工作台外壳的导航', () => {
     await flushPromises()
 
     expect(store.identity).toBe('staff')
-    expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual(['今天', '我的'])
+    expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual(['今天', '后勤', '我的'])
   })
 
   it('切成员工后仍站在店长的页上：送回员工那一档的第一格（不是停在别人的页上）', async () => {

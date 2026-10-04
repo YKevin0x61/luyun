@@ -35,6 +35,9 @@ const ROUTES = [
   ...workbenchPagesOf('me').map(pageStub),
   ...workbenchPagesOf('hr').map(pageStub),
   ...workbenchPagesOf('floor').map(pageStub),
+  // 票 07：后勤那一格（配方）—— 导航里画得出来，路由表里就得有它，
+  // 否则点一下只剩一条 "No match found" 告警。
+  ...workbenchPagesOf('kitchen').map(pageStub),
 ]
 
 function jsonResponse(data, status = 200) {

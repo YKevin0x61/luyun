@@ -1,5 +1,7 @@
 /** Type-ahead helpers for cross-station recipe name search on the list page. */
 
+import { RECIPE_DETAIL_PATH, RECIPE_MANAGE_PATH } from './recipePaths.js'
+
 export const SEARCH_GROUP_ITEM_CAP = 8
 
 export function capGroupedSearchHits(groups, cap = SEARCH_GROUP_ITEM_CAP) {
@@ -56,14 +58,14 @@ export function nextTypeaheadKeyboardState(state, key) {
 
 export function recipeFocusLocation(stationSlug, recipeId) {
   return {
-    path: '/recipe/detail',
+    path: RECIPE_DETAIL_PATH,
     query: { slug: stationSlug, focus: String(recipeId) },
   }
 }
 
 export function recipeManageEditLocation(stationSlug, recipeId) {
   return {
-    path: '/recipe/manage',
+    path: RECIPE_MANAGE_PATH,
     query: { slug: stationSlug, edit: String(recipeId) },
   }
 }

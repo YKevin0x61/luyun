@@ -9,16 +9,23 @@ import {
 } from '../loginNext.js'
 
 describe('isRecipeReaderPath', () => {
-  it('岗位列表、详情、打印、二维码是阅读面', () => {
-    expect(isRecipeReaderPath('/recipe')).toBe(true)
-    expect(isRecipeReaderPath('/recipe/detail')).toBe(true)
-    expect(isRecipeReaderPath('/recipe/print')).toBe(true)
-    expect(isRecipeReaderPath('/recipe/qr')).toBe(true)
+  // 票 07：配方阅读面搬进工作台的「后勤」组，四条路径跟着换地址。
+  it('岗位列表、详情、打印、二维码是阅读面（新地址）', () => {
+    expect(isRecipeReaderPath('/workbench/kitchen/recipe')).toBe(true)
+    expect(isRecipeReaderPath('/workbench/kitchen/recipe/detail')).toBe(true)
+    expect(isRecipeReaderPath('/workbench/kitchen/recipe/print')).toBe(true)
+    expect(isRecipeReaderPath('/workbench/kitchen/recipe/qr')).toBe(true)
   })
 
-  it('配方管理不是阅读面', () => {
-    expect(isRecipeReaderPath('/recipe/manage')).toBe(false)
+  it('配方管理不是阅读面（它只给管理端）', () => {
+    expect(isRecipeReaderPath('/workbench/kitchen/recipe/manage')).toBe(false)
     expect(isRecipeReaderPath('/admin')).toBe(false)
+  })
+
+  it('旧的 /recipe* 不是阅读面了：搬走之后一条别名都不留', () => {
+    for (const stale of ['/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr']) {
+      expect(isRecipeReaderPath(stale)).toBe(false)
+    }
   })
 })
 
@@ -26,11 +33,16 @@ describe('shouldSkipLoginRedirect', () => {
   it('登录页、配置页和配方阅读面不因 401 整页跳登录', () => {
     expect(shouldSkipLoginRedirect('/login')).toBe(true)
     expect(shouldSkipLoginRedirect('/settings')).toBe(true)
-    expect(shouldSkipLoginRedirect('/recipe/detail')).toBe(true)
+    expect(shouldSkipLoginRedirect('/workbench/kitchen/recipe/detail')).toBe(true)
   })
 
   it('旧配置页地址 /setup 改名后不再有豁免（不做别名）', () => {
     expect(shouldSkipLoginRedirect('/setup')).toBe(false)
+  })
+
+  it('旧配方地址不再有豁免（搬进工作台之后不留别名）', () => {
+    expect(shouldSkipLoginRedirect('/recipe/detail')).toBe(false)
+    expect(shouldSkipLoginRedirect('/recipe')).toBe(false)
   })
 
   it('员工手机端的页不因 401 跳后台登录（票 03 起在 /workbench/me/*）', () => {
@@ -49,7 +61,7 @@ describe('shouldSkipLoginRedirect', () => {
   })
 
   it('管理面和运营页仍跳登录', () => {
-    expect(shouldSkipLoginRedirect('/recipe/manage')).toBe(false)
+    expect(shouldSkipLoginRedirect('/workbench/kitchen/recipe/manage')).toBe(false)
     expect(shouldSkipLoginRedirect('/admin')).toBe(false)
     expect(shouldSkipLoginRedirect('/workbench/hr/roster')).toBe(false)
     expect(shouldSkipLoginRedirect('/workbench/floor/zones')).toBe(false)
@@ -63,22 +75,23 @@ describe('shouldSkipLoginRedirect', () => {
 describe('buildLoginNextFromRoute', () => {
   it('用已解码的 query 拼 next，slug 只编码一次', () => {
     const next = buildLoginNextFromRoute({
-      path: '/recipe/detail',
+      path: '/workbench/kitchen/recipe/detail',
       query: { slug: '肠粉档' },
     })
-    expect(next).toBe('/recipe/detail?slug=%E8%82%A0%E7%B2%89%E6%A1%A3')
+    expect(next).toBe('/workbench/kitchen/recipe/detail?slug=%E8%82%A0%E7%B2%89%E6%A1%A3')
     expect(next).not.toContain('%25')
   })
 
   it('没有 query 时只返回 path', () => {
-    expect(buildLoginNextFromRoute({ path: '/recipe/manage', query: {} })).toBe('/recipe/manage')
+    expect(buildLoginNextFromRoute({ path: '/workbench/kitchen/recipe/manage', query: {} }))
+      .toBe('/workbench/kitchen/recipe/manage')
   })
 })
 
 describe('resolveLoginNext', () => {
   it('解开误伤的双重编码 slug', () => {
-    const raw = '/recipe/detail?slug=%25E8%2582%25A0%25E7%25B2%2589%25E6%25A1%25A3'
-    expect(resolveLoginNext(raw)).toBe('/recipe/detail?slug=%E8%82%A0%E7%B2%89%E6%A1%A3')
+    const raw = '/workbench/kitchen/recipe/detail?slug=%25E8%2582%25A0%25E7%25B2%2589%25E6%25A1%25A3'
+    expect(resolveLoginNext(raw)).toBe('/workbench/kitchen/recipe/detail?slug=%E8%82%A0%E7%B2%89%E6%A1%A3')
   })
 
   it('拒绝开放重定向', () => {
@@ -88,8 +101,8 @@ describe('resolveLoginNext', () => {
   })
 
   it('空值回退', () => {
-    expect(resolveLoginNext(null, '/recipe')).toBe('/recipe')
-    expect(resolveLoginNext('', '/recipe')).toBe('/recipe')
+    expect(resolveLoginNext(null, '/workbench/kitchen/recipe')).toBe('/workbench/kitchen/recipe')
+    expect(resolveLoginNext('', '/workbench/kitchen/recipe')).toBe('/workbench/kitchen/recipe')
   })
 
   it('管理员身份不认员工端落点（身份互斥）', () => {
@@ -101,10 +114,13 @@ describe('resolveLoginNext', () => {
     expect(resolveLoginNext('/workbench/me/today', '/admin')).toBe('/admin')
   })
 
-  it('管理员身份照旧放行任意站内管理路径（含 query 与菜谱阅读面）', () => {
+  it('管理员身份照旧放行任意站内管理路径（含 query 与配方阅读面）', () => {
     expect(resolveLoginNext('/workbench/hr/roster')).toBe('/workbench/hr/roster')
     expect(resolveLoginNext('/admin?tab=orders')).toBe('/admin?tab=orders')
-    expect(resolveLoginNext('/recipe/detail?slug=congee')).toBe('/recipe/detail?slug=congee')
+    // 票 07：配方阅读面是 `both`，管理端登录后回那条配方也要放行（扫码的人里也有店长）。
+    expect(resolveLoginNext('/workbench/kitchen/recipe/detail?slug=congee'))
+      .toBe('/workbench/kitchen/recipe/detail?slug=congee')
+    expect(resolveLoginNext('/workbench/kitchen/recipe')).toBe('/workbench/kitchen/recipe')
   })
 })
 
@@ -130,6 +146,29 @@ describe('resolveStaffNext', () => {
     expect(resolveStaffNext('/workbench/floor/zones')).toBe('/workbench/me/today')
     expect(resolveStaffNext('/workbench/mex')).toBe('/workbench/me/today')
     expect(resolveStaffNext('/login?next=/admin')).toBe('/workbench/me/today')
+  })
+
+  it('票 07：配方阅读面也是员工落点 —— 扫码的厨师登录后回到那条配方', () => {
+    // 这是本票最容易漏的一处：只认「员工端落点」（`/workbench/me/*`）的话，厨师在员工栏
+    // 登录、`?next=` 是配方阅读路径时会**静默落到 `/workbench/me/today`** ——
+    // 「登录后回到那条配方」当场失效，而且没有任何报错。
+    expect(resolveStaffNext('/workbench/kitchen/recipe'))
+      .toBe('/workbench/kitchen/recipe')
+    expect(resolveStaffNext('/workbench/kitchen/recipe/detail?slug=changfen'))
+      .toBe('/workbench/kitchen/recipe/detail?slug=changfen')
+    expect(resolveStaffNext('/workbench/kitchen/recipe/print?slug=changfen'))
+      .toBe('/workbench/kitchen/recipe/print?slug=changfen')
+    expect(resolveStaffNext('/workbench/kitchen/recipe/qr'))
+      .toBe('/workbench/kitchen/recipe/qr')
+    // 管理页不是员工落点（配方管理只给管理端），照旧回落到员工默认落点。
+    expect(resolveStaffNext('/workbench/kitchen/recipe/manage'))
+      .toBe('/workbench/me/today')
+  })
+
+  it('票 07：老地址 ?next=/recipe* 换成新地址之后才算员工落点', () => {
+    expect(resolveStaffNext('/recipe/detail?slug=changfen'))
+      .toBe('/workbench/kitchen/recipe/detail?slug=changfen')
+    expect(resolveStaffNext('/recipe')).toBe('/workbench/kitchen/recipe')
   })
 
   it('旧员工路径不再是落点：搬走之后没留别名', () => {
@@ -179,6 +218,20 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
     expect(resolveLoginTab('/workbench/me/today?next=%252Fworkbench%252Fme%252Ftoday', 'admin')).toBe('staff')
   })
 
+  it('票 07：?next 是配方阅读路径时也强制员工栏（扫码的绝大多数是厨师）', () => {
+    // 关键交互那条：「扫码 → 未登录 → 登录页**默认开员工栏**」。判据不是「路径前缀像员工端」
+    // 而是「这条目标路径是一页配方阅读面」——前台/后厨共用的扫码入口就这么一个。
+    expect(resolveLoginTab('/workbench/kitchen/recipe/detail?slug=changfen', 'admin')).toBe('staff')
+    expect(resolveLoginTab('/workbench/kitchen/recipe', 'admin')).toBe('staff')
+    expect(resolveLoginTab('/workbench/kitchen/recipe/qr', 'admin')).toBe('staff')
+    // 老地址在入口先换成新地址，换完仍然开员工栏（扫码的人手里是旧二维码）。
+    expect(resolveLoginTab('/recipe/detail?slug=changfen', 'admin')).toBe('staff')
+  })
+
+  it('配方管理不是阅读面：它照旧跟着记住值走', () => {
+    expect(resolveLoginTab('/workbench/kitchen/recipe/manage', 'admin')).toBe('admin')
+  })
+
   it('管理端路径、站外地址、登录页自身都不强制员工栏', () => {
     expect(resolveLoginTab('/admin', 'admin')).toBe('admin')
     expect(resolveLoginTab('/workbench/hr/roster', 'admin')).toBe('admin')
@@ -198,9 +251,29 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
   })
 })
 
-describe('老地址的 ?next= 迁移（票 03/04/05）', () => {
+describe('老地址的 ?next= 迁移（票 03/04/05/07）', () => {
   // 老路由已经删干净了，`?next=` 里可能还存着搬家前的老地址（旧书签、上一次被挡下来
   // 写进 URL 的那条）——在入口处换成新地址，原样放行就是跳进白屏。
+  it('票 07：独立域的 /recipe* 换成工作台「后勤」组的新地址，query 与 hash 原样带过去', () => {
+    // 扫码看岗位配方这条路最值钱：岗位码指向新地址，但**已经贴出去/存下来的**老地址
+    // 还在别人手机里（`?next=` 里也可能是上一次被挡下来时写的那条）。
+    expect(resolveLoginNext('/recipe')).toBe('/workbench/kitchen/recipe')
+    expect(resolveLoginNext('/recipe/detail?slug=changfen'))
+      .toBe('/workbench/kitchen/recipe/detail?slug=changfen')
+    expect(resolveLoginNext('/recipe/print?slug=changfen'))
+      .toBe('/workbench/kitchen/recipe/print?slug=changfen')
+    expect(resolveLoginNext('/recipe/qr')).toBe('/workbench/kitchen/recipe/qr')
+    expect(resolveLoginNext('/recipe/manage')).toBe('/workbench/kitchen/recipe/manage')
+    expect(resolveLoginNext('/recipe/detail#top')).toBe('/workbench/kitchen/recipe/detail#top')
+    expect(resolveLoginNext('/recipe/detail/')).toBe('/workbench/kitchen/recipe/detail/')
+    // 前缀相同不等于老地址：只按整段（含尾斜杠那一种）匹配。
+    expect(resolveLoginNext('/recipex')).toBe('/recipex')
+    expect(resolveLoginNext('/recipe-x')).toBe('/recipe-x')
+    // 员工栏同样认得（扫码的厨师走的就是这一栏）。
+    expect(resolveStaffNext('/recipe/detail?slug=changfen'))
+      .toBe('/workbench/kitchen/recipe/detail?slug=changfen')
+  })
+
   it('票 05：工作台平铺的地址换成「人事 / 现场」两组的新地址', () => {
     // 票 04 那版平铺的 `/workbench/*` 是**正式地址**，这一票刚把它们按组重排 ——
     // 手机里存着的、上一次登录写进 URL 的都可能是这一批。

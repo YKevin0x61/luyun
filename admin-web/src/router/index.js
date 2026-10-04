@@ -60,14 +60,24 @@ function workbenchStaffPage(path, name, loader) {
   }
 }
 
+/** 工作台「后勤」那一组（票 07：配方；票 08 的备货计划同组）里**带工作台导航**的页面：
+ *  套工作台外壳（`WorkbenchLayout`：顶栏一条 + 按身份过滤的导航），页面本体在子记录里。
+ *
+ *  组里的**沉浸页**（阅读 / 打印 / 印码）不走这个工厂 —— 扫码进来的人是来看那一条配方的，
+ *  页面上只有返回 / 打印 / 目录抽屉，不套外壳（与今天配方阅读页的独立外壳行为一致）。
+ *  两种在页面清单里都记 `standalone: true`（那条的语义是「不渲染管理后台那条导航」）。 */
+function workbenchKitchenPage(path, name, loader) {
+  return {
+    path,
+    component: WorkbenchLayout,
+    meta: pageMeta(path),
+    children: [{ path: '', name, component: loader }],
+  }
+}
+
 const routes = [
   { path: '/', name: 'dashboard', component: () => import('../views/DashboardView.vue'), meta: pageMeta('/') },
   { path: '/admin', name: 'admin', component: () => import('../views/AdminView.vue'), meta: pageMeta('/admin') },
-  { path: '/recipe', name: 'recipe-stations', component: () => import('../views/recipe/RecipeStationsView.vue'), meta: pageMeta('/recipe') },
-  { path: '/recipe/detail', name: 'recipe-detail', component: () => import('../views/recipe/RecipeDetailView.vue'), meta: pageMeta('/recipe/detail') },
-  { path: '/recipe/manage', name: 'recipe-manage', component: () => import('../views/recipe/RecipeManageView.vue'), meta: pageMeta('/recipe/manage') },
-  { path: '/recipe/print', name: 'recipe-print', component: () => import('../views/recipe/RecipePrintView.vue'), meta: pageMeta('/recipe/print') },
-  { path: '/recipe/qr', name: 'recipe-qr', component: () => import('../views/recipe/RecipeQrView.vue'), meta: pageMeta('/recipe/qr') },
   { path: '/sales-report', name: 'sales-report', component: () => import('../views/SalesReportView.vue'), meta: pageMeta('/sales-report') },
   { path: '/logs', name: 'logs', component: () => import('../views/LogsView.vue'), meta: pageMeta('/logs') },
   { path: '/prep-plan', name: 'prep-plan', component: () => import('../views/PrepPlanView.vue'), meta: pageMeta('/prep-plan') },
@@ -103,6 +113,20 @@ const routes = [
   hygieneAdminPage('/workbench/floor/fix', 'workbench-floor-fix', () => import('../views/hygiene/HygieneFixView.vue')),
   hygieneAdminPage('/workbench/floor/boards', 'workbench-floor-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
   hygieneAdminPage('/workbench/floor/data', 'workbench-floor-data', () => import('../views/hygiene/HygieneDataView.vue')),
+  // ── 工作台 · 后勤（配方，票 07）─────────────────────────────────────────────
+  // 配方从独立域 `/recipe*` 搬进「后勤」组，同时**阅读面从免登录改成要登录**
+  // （ADR 0092 里那个推翻既有刻意设计的动作）。扫码看岗位配方的路子保留：扫码 →
+  // 未登录 → 登录页默认开员工栏 → 回到那条配方（回跳白名单在 `utils/loginNext.js`）。
+  //
+  // 两种外壳（都不是管理后台那条导航，所以清单里一律 `standalone: true`）：
+  //   带导航 —— 列表页与管理页套 `WorkbenchLayout`（`workbenchKitchenPage`）；
+  //   沉浸页 —— 阅读 / 打印 / 印码不套外壳，页面上只有返回 / 打印 / 目录抽屉。
+  // 旧的 `/recipe*` 一条都不留（自然 404，不给别名、不做重定向）。
+  workbenchKitchenPage('/workbench/kitchen/recipe', 'recipe-stations', () => import('../views/recipe/RecipeStationsView.vue')),
+  workbenchKitchenPage('/workbench/kitchen/recipe/manage', 'recipe-manage', () => import('../views/recipe/RecipeManageView.vue')),
+  { path: '/workbench/kitchen/recipe/detail', name: 'recipe-detail', component: () => import('../views/recipe/RecipeDetailView.vue'), meta: pageMeta('/workbench/kitchen/recipe/detail') },
+  { path: '/workbench/kitchen/recipe/print', name: 'recipe-print', component: () => import('../views/recipe/RecipePrintView.vue'), meta: pageMeta('/workbench/kitchen/recipe/print') },
+  { path: '/workbench/kitchen/recipe/qr', name: 'recipe-qr', component: () => import('../views/recipe/RecipeQrView.vue'), meta: pageMeta('/workbench/kitchen/recipe/qr') },
   // 子应用根（票 06）：就是「今天」首页 —— 按身份用已有接口聚合今日摘要，只做分流与
   // 摘要、不做业务动作。它套**工作台外壳**（`WorkbenchLayout`：顶栏一条 + 按身份过滤的
   // 导航），跟「我的」那三页同一个壳；月历仍自己占一行（人事组的落点），两行不再指

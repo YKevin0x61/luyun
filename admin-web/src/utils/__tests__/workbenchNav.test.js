@@ -29,10 +29,14 @@ describe('工作台身份 → 清单身份', () => {
   })
 })
 
-describe('工作台的组（票 05：人事 / 现场；票 06 加上首页）', () => {
-  it('四组：今天、人事、现场、我的（顺序就是顶栏里的顺序）', () => {
-    expect(WORKBENCH_NAV_GROUPS.map((group) => group.key)).toEqual(['home', 'hr', 'floor', 'me'])
-    expect(WORKBENCH_NAV_GROUPS.map((group) => group.label)).toEqual(['今天', '人事', '现场', '我的'])
+describe('工作台的组（票 05：人事 / 现场；票 06 加上首页；票 07 加上后勤）', () => {
+  it('五组：今天、人事、现场、后勤、我的（顺序就是顶栏里的顺序）', () => {
+    expect(WORKBENCH_NAV_GROUPS.map((group) => group.key)).toEqual([
+      'home', 'hr', 'floor', 'kitchen', 'me',
+    ])
+    expect(WORKBENCH_NAV_GROUPS.map((group) => group.label)).toEqual([
+      '今天', '人事', '现场', '后勤', '我的',
+    ])
     // 第一格是子应用根（首页），不是某一组的专页。
     expect(WORKBENCH_NAV_GROUPS[0].to).toBe('/workbench')
   })
@@ -54,13 +58,15 @@ describe('工作台的组（票 05：人事 / 现场；票 06 加上首页）', 
     expect(workbenchDocumentTitle(null)).toBe('工作台')
   })
 
-  it('人事落点是排班月历、现场落点是日常验收（两个常量只写一次）', () => {
+  it('人事落点是排班月历、现场落点是日常验收、后勤落点是配方列表（常量只写一次）', () => {
     // 两个壳（`SchedulingLayout` / `HygieneAdminLayout`）与页内跳转都引这两个常量，
-    // 谁都不许再写一遍字面量。
+    // 谁都不许再写一遍字面量。后勤那一格的落点是清单里那一条（票 07）。
     expect(WORKBENCH_HR_HOME).toBe('/workbench/hr/calendar')
     expect(WORKBENCH_FIELD_HOME).toBe('/workbench/floor/daily')
     expect(WORKBENCH_NAV_GROUPS.find((group) => group.key === 'hr').to).toBe(WORKBENCH_HR_HOME)
     expect(WORKBENCH_NAV_GROUPS.find((group) => group.key === 'floor').to).toBe(WORKBENCH_FIELD_HOME)
+    expect(WORKBENCH_NAV_GROUPS.find((group) => group.key === 'kitchen').to)
+      .toBe('/workbench/kitchen/recipe')
   })
 
   it('组里的页从清单派生（人事四页、现场七页，顺序照清单）', () => {
@@ -87,7 +93,7 @@ describe('工作台的组（票 05：人事 / 现场；票 06 加上首页）', 
     expect(workbenchPagesOf('nope')).toEqual([])
   })
 
-  it('十一个页面正好落在人事 / 现场两组里，平铺那批地址一条都不在清单里', () => {
+  it('十一页正好落在人事 / 现场两组里，平铺那批地址一条都不在清单里', () => {
     const grouped = PAGE_ROUTES.filter((row) => row.group === 'hr' || row.group === 'floor')
     expect(grouped).toHaveLength(11)
     // 留一半最坏：「点得进去、刷新 404」。
@@ -96,6 +102,23 @@ describe('工作台的组（票 05：人事 / 现场；票 06 加上首页）', 
       '/workbench/daily', '/workbench/deep-clean', '/workbench/fix', '/workbench/boards',
       '/workbench/data', '/workbench/attire',
     ]) {
+      expect(pageRow(old), `${old} 又回到清单里了`).toBe(null)
+    }
+  })
+
+  it('后勤组是配方五页（票 07），旧的 /recipe* 一条都不在清单里', () => {
+    const kitchen = workbenchPagesOf('kitchen').map((page) => page.path)
+    expect(kitchen.slice(0, 5)).toEqual([
+      '/workbench/kitchen/recipe',
+      '/workbench/kitchen/recipe/detail',
+      '/workbench/kitchen/recipe/print',
+      '/workbench/kitchen/recipe/qr',
+      '/workbench/kitchen/recipe/manage',
+    ])
+    // 备货计划在清单里也标着 kitchen，但它今天仍住在 `/prep-plan` —— 那是票 08 的事，
+    // 本票不动它（这里把它写出来，免得下一票以为后勤组里只有配方）。
+    expect(kitchen.slice(5)).toEqual(['/prep-plan'])
+    for (const old of ['/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr', '/recipe/manage']) {
       expect(pageRow(old), `${old} 又回到清单里了`).toBe(null)
     }
   })
@@ -120,13 +143,20 @@ describe('按身份过滤导航', () => {
     }
   })
 
-  it('店长这一档：今天 / 人事 / 现场三格；员工那一档：今天 / 我的（首页两组都看得见）', () => {
-    expect(workbenchNavFor('super').map((item) => item.key)).toEqual(['home', 'hr', 'floor'])
-    expect(workbenchNavFor('staff').map((item) => item.key)).toEqual(['home', 'me'])
+  it('店长这一档：今天 / 人事 / 现场 / 后勤四格；员工那一档：今天 / 后勤 / 我的', () => {
+    // 员工那一档就是 spec 故事 8 那三项（配方只读；备货计划在票 08 进来），
+    // 外加两档都看得见的首页「今天」。
+    expect(workbenchNavFor('super').map((item) => item.key)).toEqual([
+      'home', 'hr', 'floor', 'kitchen',
+    ])
+    expect(workbenchNavFor('staff').map((item) => item.key)).toEqual(['home', 'kitchen', 'me'])
     // 首页那一页是 `both`（票 06）：两档都进得去，过滤天然放行。
     expect(pageMeta('/workbench').audience).toBe('both')
     expect(pageMeta(WORKBENCH_HR_HOME).audience).toBe('admin')
     expect(pageMeta(WORKBENCH_FIELD_HOME).audience).toBe('admin')
+    // 后勤的落点是配方列表：`both` —— 员工也要看得到配方这一项（票面验收）。
+    expect(pageMeta('/workbench/kitchen/recipe').audience).toBe('both')
+    expect(pageMeta('/workbench/kitchen/recipe/manage').audience).toBe('admin')
     expect(pageMeta('/workbench/me/today').audience).toBe('staff')
   })
 })
@@ -139,6 +169,9 @@ describe('高亮跟着新分组走', () => {
     expect(workbenchGroupOf('/workbench/hr/roster')).toBe('hr')
     expect(workbenchGroupOf('/workbench/floor/daily')).toBe('floor')
     expect(workbenchGroupOf('/workbench/floor/data')).toBe('floor')
+    // 票 07：后勤组里的沉浸页（阅读 / 打印 / 印码）也算在「后勤」那一格上。
+    expect(workbenchGroupOf('/workbench/kitchen/recipe/detail')).toBe('kitchen')
+    expect(workbenchGroupOf('/workbench/kitchen/recipe/qr')).toBe('kitchen')
     // 子应用根（票 06 的首页那一组）不属于人事 / 现场任何一格。
     expect(workbenchGroupOf('/workbench')).toBe('home')
     // 不在清单里的路径（单测里的临时路由）没有组，也就没有高亮。

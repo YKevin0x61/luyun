@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import api.recipes as recipes_module
+from config import settings
 from services.recipes.store import RecipeStore
 from database import DatabaseManager
 from services import auth_service
@@ -47,9 +48,10 @@ def client():
     """TestClient + 注入 store 的 PG 连接（连接、种子、store 都建在 client 的循环里）。"""
     db = DatabaseManager()
     app = FastAPI()
-    # 阅读面（公开）与管理面（带凭据）在 main.py 里分开注册：SEC-02 之后
-    # /api/recipes 的读接口分属两个 router，这里按同样的方式拼。
-    app.include_router(recipes_module.public_router)
+    # 阅读面与管理面在 main.py 里分开注册：SEC-02 之后 /api/recipes 的读接口分属
+    # 两个 router，这里按同样的方式拼。票 07 起阅读面是「任一身份」门（不再是公开面），
+    # 所以夹具要连会话一起给 —— 管理端会话与下面那个 X-Admin-Token 是两把不同的钥匙。
+    app.include_router(recipes_module.reader_router)
     app.include_router(recipes_module.router)
     with TestClient(app) as c:
         # DatabaseManager 的连接属性是 _conn（main.py 的装配同样用它），没有公开的 conn。
@@ -62,6 +64,8 @@ def client():
         _run(c, auth_service.init_user("admin", "password123"))
         token, _meta = _run(c, auth_service.issue_api_token(label="test-recipe-api"))
         c.headers.update({"X-Admin-Token": token})
+        session_id, _expires = _run(c, auth_service.create_session(remember=False))
+        c.cookies.set(settings.SESSION_COOKIE_NAME, session_id)
         c.recipe_store = store
         yield c
         set_runtime(None)
@@ -380,6 +384,7 @@ def test_import_csv_does_not_infer_is_new_from_name_or_body(client):
 
 def test_reorder_recipes_requires_auth(client):
     client.headers.pop("X-Admin-Token", None)
+    client.cookies.clear()
     r = client.put("/api/recipes/stations/changfen/recipes/reorder", json={"ids": [1]})
     assert r.status_code == 401
 
@@ -536,8 +541,20 @@ def test_search_treats_like_wildcards_as_literal(client):
     assert underscore == {"groups": []}
 
 
-def test_search_stays_public(client):
+def test_search_requires_any_identity_session(client):
+    """票 07：搜索接口从「零鉴权」改成「任一身份」门（阅读面里的那一半）。
+
+    无凭据 401（本是 `test_search_stays_public`，本次反向改）；把管理端会话放回去，
+    同一个请求照旧拿到内容 —— 门换的是「要不要登录」，不是「谁能看什么」。
+    """
     client.headers.pop("X-Admin-Token", None)
+    client.cookies.clear()
+    anonymous = client.get("/api/recipes/search", params={"q": "肠粉"})
+    assert anonymous.status_code == 401
+    assert anonymous.json() == {"detail": "未授权"}
+
+    session_id, _expires = _run(client, auth_service.create_session(remember=False))
+    client.cookies.set(settings.SESSION_COOKIE_NAME, session_id)
     r = client.get("/api/recipes/search", params={"q": "肠粉"})
     assert r.status_code == 200
     assert r.json()["groups"][0]["items"][0]["recipe_name"] == "肠粉酱油"
@@ -1110,6 +1127,7 @@ def test_confirm_review_missing_returns_404(client):
 
 def test_confirm_review_requires_auth(client):
     client.headers.pop("X-Admin-Token", None)
+    client.cookies.clear()
     r = client.post("/api/recipes/recipes/1/confirm-review")
     assert r.status_code == 401
 
@@ -1143,6 +1161,7 @@ def test_restore_history_applies_previous_version(client):
 
 def test_restore_history_requires_auth(client):
     client.headers.pop("X-Admin-Token", None)
+    client.cookies.clear()
     r = client.post("/api/recipes/recipes/1/history/1/restore")
     assert r.status_code == 401
 
@@ -1188,6 +1207,7 @@ def test_preview_body_matches_structured_render(client):
 
 def test_preview_body_requires_auth(client):
     client.headers.pop("X-Admin-Token", None)
+    client.cookies.clear()
     r = client.post(
         "/api/recipes/preview-body",
         json={"ingredients": [{"name": "面粉", "amount": "200", "unit": "g"}]},

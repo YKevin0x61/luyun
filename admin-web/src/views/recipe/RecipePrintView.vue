@@ -2,6 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../../api/client'
+import { RECIPE_DETAIL_PATH, RECIPE_HOME_PATH } from '../../utils/recipePaths'
+import { useRecipeAdmin } from '../../composables/useRecipeAdmin'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { RECIPE_NAV_HOME_LABEL } from '../../utils/recipeCopy'
 import {
@@ -17,6 +19,9 @@ import {
 } from '../../utils/recipePrintPagination'
 
 useScopedStylesheet('/recipe.css')
+
+// 工具栏那颗「管理后台」的判据（票 07）：工作台身份，不是「有没有登录」。
+const { isAdmin } = useRecipeAdmin()
 
 const route = useRoute()
 const slugs = computed(() =>
@@ -36,7 +41,9 @@ const printTailIndex = computed(() => lastSelectedPageIndex(selectedPages.value)
 const canPrint = computed(() => selectedCount.value > 0)
 const measureRef = ref(null)
 const probeRef = ref(null)
-const backHref = computed(() => (slugs.value.length === 1 ? `/recipe/detail?slug=${encodeURIComponent(slugs.value[0])}` : '/recipe'))
+const backHref = computed(() => (slugs.value.length === 1
+  ? `${RECIPE_DETAIL_PATH}?slug=${encodeURIComponent(slugs.value[0])}`
+  : RECIPE_HOME_PATH))
 
 let resizeObserver = null
 let previousThemeAttr = null
@@ -236,7 +243,9 @@ function doPrint() {
       <button type="button" class="btn btn-primary" :disabled="!canPrint" @click="doPrint">
         {{ pageCount > 1 ? `打印已选页` : '打印' }}
       </button>
-      <router-link class="btn btn-ghost" to="/">{{ RECIPE_NAV_HOME_LABEL }}</router-link>
+      <!-- 票 07：「管理后台」只给管理端那一档 —— 它是 `admin` 的页，员工点它只会落
+           越权页；打印页同样只有返回 / 打印（这一页是沉浸页）。 -->
+      <router-link v-if="isAdmin" class="btn btn-ghost" to="/">{{ RECIPE_NAV_HOME_LABEL }}</router-link>
       <router-link class="btn btn-ghost" :to="backHref">关闭</router-link>
     </header>
     <div class="sop-print-preview-measure-host no-print" aria-hidden="true">

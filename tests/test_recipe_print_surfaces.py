@@ -3,12 +3,17 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# 两份已漂移的配方样式表都照旧在这里断言（票 07 明确不做合并，只记录）：
+# `admin-web/public/recipe.css` 718 行（构建进 dist，是真源）vs 仓库 `public/recipe.css`
+# 684 行（旧副本）—— 服务端优先取 dist（main.py 的 `/recipe.css` 路由）。
 RECIPE_CSS_PATHS = (
     ROOT / "public" / "recipe.css",
     ROOT / "admin-web" / "public" / "recipe.css",
 )
 PRINT_VIEW = ROOT / "admin-web" / "src" / "views" / "recipe" / "RecipePrintView.vue"
 QR_VIEW = ROOT / "admin-web" / "src" / "views" / "recipe" / "RecipeQrView.vue"
+# 五条配方地址的唯一一份常量（票 07 搬进工作台的「后勤」组）。
+RECIPE_PATHS_JS = ROOT / "admin-web" / "src" / "utils" / "recipePaths.js"
 
 
 def test_print_css_packs_unbroken_cards_in_newspaper_columns():
@@ -70,6 +75,20 @@ def test_print_view_embeds_station_content_html():
 
 
 def test_qr_view_lists_stations_and_encodes_detail_slug():
+    """印码页生成的岗位码指向**新**阅读地址（票 07 搬进工作台「后勤」组）。
+
+    岗位码从未张贴过，改地址没有存量风险 —— 但正因如此，地址写错不会有人当场发现，
+    这里就得把「印出去的是哪条路径」钉死：常量来自 `recipePaths.js` 那一份（页面里的
+    router-link 与登录回跳白名单也引它），不是页面里各自抄的字面量。
+    """
     src = QR_VIEW.read_text(encoding="utf-8")
     assert "/api/recipes/stations" in src
-    assert "/recipe/detail?slug=" in src
+    # 拼地址用的是那份常量，而不是再抄一遍 `/recipe/detail`。
+    assert "origin}${RECIPE_DETAIL_PATH}?slug=" in src
+    assert "from '../../utils/recipePaths'" in src
+    # 旧的独立域地址一条都不留（自然 404，不给别名）。
+    assert "/recipe/detail?slug=" not in src
+
+    paths = RECIPE_PATHS_JS.read_text(encoding="utf-8")
+    assert "export const RECIPE_DETAIL_PATH = '/workbench/kitchen/recipe/detail'" in paths
+    assert "export const RECIPE_HOME_PATH = '/workbench/kitchen/recipe'" in paths

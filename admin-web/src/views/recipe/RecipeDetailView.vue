@@ -3,11 +3,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useRoute } from 'vue-router'
 import QRCode from 'qrcode'
 import { api } from '../../api/client'
+import { useRecipeAdmin } from '../../composables/useRecipeAdmin'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import * as RC from '../../utils/recipeCore'
 import { RECIPE_INGREDIENTS_AMOUNT_CLASS } from '../../utils/recipeIngredients'
 import { parseBaseServingsQty, scaleAmount, servingsFactor } from '../../utils/recipeServings'
 import { isRecipeDrawerPanel, nextRecipeDrawerState } from '../../utils/recipeDrawer'
+import { RECIPE_HOME_PATH, RECIPE_MANAGE_PATH, RECIPE_PRINT_PATH } from '../../utils/recipePaths'
 import SvgIcon from '../../components/SvgIcon.vue'
 import RecipeNavIcon from './RecipeNavIcon.vue'
 import RecipeFormModal from '../../components/recipe/RecipeFormModal.vue'
@@ -69,7 +71,10 @@ const servingsUnitLabel = ref('')
 const servingsControlVisible = ref(false)
 const drawerPanel = ref(null)
 const drawerRef = ref(null)
-const canEdit = ref(false)
+// 票 07：能不能编辑由**工作台身份**决定（`useRecipeAdmin`），不再问一次登录状态 ——
+// 「谁能编辑配方」以前只由一个前端登录开关决定，界面上没有任何来源可查（audit 条目 11）。
+// 拖拽排序 / 删除这些入口跟着它一起收；接口自己也有一道 401。
+const { isAdmin: canEdit } = useRecipeAdmin()
 const editRecipeId = ref(null)
 const confirmDialog = reactive({
   open: false,
@@ -753,17 +758,6 @@ function onMoreQr() {
   openQr()
 }
 
-async function loadEditAccess() {
-  try {
-    const resp = await fetch('/api/auth/status', { credentials: 'include' })
-    if (!resp.ok) return
-    const data = await resp.json()
-    canEdit.value = !!data.logged_in
-  } catch {
-    canEdit.value = false
-  }
-}
-
 watch(slug, load)
 watch(targetServingsQty, () => applyAllCardScales())
 watch(drawerPanel, (open) => {
@@ -800,7 +794,6 @@ onMounted(() => {
   dragBlockMq = window.matchMedia(READER_DRAG_BLOCK_MQ)
   dragBlocked.value = dragBlockMq.matches
   dragBlockMq.addEventListener('change', onDragBlockMq)
-  loadEditAccess()
   load()
 })
 onBeforeUnmount(() => {
@@ -823,7 +816,7 @@ onBeforeUnmount(() => {
   <div class="sop-reader">
     <header class="site-header no-print" style="position:static">
       <div class="site-header-inner">
-        <router-link class="site-brand" to="/recipe">
+        <router-link class="site-brand" :to="RECIPE_HOME_PATH">
           <span class="site-brand-mark" aria-hidden="true"><span class="site-brand-mark-inner">{{ RECIPE_BRAND_MARK }}</span></span>
           <span class="site-brand-text">
             <span class="site-brand-title">{{ RECIPE_BRAND_TITLE }}</span>
@@ -831,9 +824,12 @@ onBeforeUnmount(() => {
           </span>
         </router-link>
         <nav class="site-nav no-print">
-          <router-link class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />{{ RECIPE_NAV_HOME_LABEL }}</router-link>
-          <router-link class="site-nav-link" to="/recipe"><RecipeNavIcon name="layout-grid" :size="14" />{{ RECIPE_NAV_STATIONS_LABEL }}</router-link>
-          <router-link class="site-nav-link" to="/recipe/manage"><RecipeNavIcon name="sparkles" :size="14" />{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
+          <!-- 三颗入口按身份出现（票 07）：`/`（管理后台）与配方管理都是管理端那一档的页，
+               扫码进来的厨师点它们只会被弹去登录页（navigation-audit 条目 4）。判据是
+               工作台身份（`useRecipeAdmin`），不是「有没有登录」。 -->
+          <router-link v-if="isAdmin" class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />{{ RECIPE_NAV_HOME_LABEL }}</router-link>
+          <router-link class="site-nav-link" :to="RECIPE_HOME_PATH"><RecipeNavIcon name="layout-grid" :size="14" />{{ RECIPE_NAV_STATIONS_LABEL }}</router-link>
+          <router-link v-if="isAdmin" class="site-nav-link" :to="RECIPE_MANAGE_PATH"><RecipeNavIcon name="sparkles" :size="14" />{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
         </nav>
         <div class="sop-header-actions no-print">
           <button
@@ -867,7 +863,7 @@ onBeforeUnmount(() => {
             <button type="button" class="btn btn-ghost sop-density-toggle" @click="openQr">
               <span aria-hidden="true">▣</span>二维码
             </button>
-            <router-link class="print-button" :to="`/recipe/print?slug=${encodeURIComponent(slug)}`">
+            <router-link class="print-button" :to="`${RECIPE_PRINT_PATH}?slug=${encodeURIComponent(slug)}`">
               <span aria-hidden="true">◱</span>打印预览
             </router-link>
           </span>
@@ -879,7 +875,7 @@ onBeforeUnmount(() => {
         <aside class="sop-toc no-print" id="sopToc" v-show="tocVisible" v-html="tocHtml"></aside>
         <article class="sop-article">
           <div class="sop-toolbar no-print">
-            <router-link class="back-link" to="/recipe"><span class="back-link-icon" aria-hidden="true">←</span>返回列表</router-link>
+            <router-link class="back-link" :to="RECIPE_HOME_PATH"><span class="back-link-icon" aria-hidden="true">←</span>返回列表</router-link>
             <span class="sop-toolbar-chip">{{ title }}</span>
             <div v-if="servingsControlVisible" class="sop-servings sop-servings--toolbar no-print" aria-live="polite">
               <label class="sop-servings-label" for="sop-target-servings">目标份数</label>
@@ -1021,11 +1017,11 @@ onBeforeUnmount(() => {
               <router-link
                 class="print-button"
                 aria-label="打印预览"
-                :to="`/recipe/print?slug=${encodeURIComponent(slug)}`"
+                :to="`${RECIPE_PRINT_PATH}?slug=${encodeURIComponent(slug)}`"
               >
                 <span aria-hidden="true">◱</span>打印预览
               </router-link>
-              <router-link v-if="canEdit" class="btn btn-ghost" to="/recipe/manage">{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
+              <router-link v-if="canEdit" class="btn btn-ghost" :to="RECIPE_MANAGE_PATH">{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
             </div>
           </div>
         </div>

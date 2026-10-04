@@ -1,3 +1,4 @@
+import { RECIPE_HOME_PATH } from './recipePaths.js'
 import { isStaffPhonePath } from './staffPaths.js'
 
 /** 员工手机端的三个页面（`/workbench/me/today`、`/workbench/me/month`、
@@ -25,7 +26,11 @@ const ROLE_MANIFESTS = [
   },
   {
     role: 'recipe',
-    matches: (pathname) => pathname === '/recipe' || pathname.startsWith('/recipe/'),
+    // 票 07：配方五页从 `/recipe*` 搬进工作台的「后勤」组 —— 归属判据跟着地址走，
+    // 旧前缀不再认（认了就是给死路径留一档）。整组共用一份清单（列表 / 沉浸阅读 /
+    // 打印 / 印码 / 管理都在这一档）。
+    matches: (pathname) =>
+      pathname === RECIPE_HOME_PATH || pathname.startsWith(`${RECIPE_HOME_PATH}/`),
     manifest: '/pwa/manifests/recipe.webmanifest',
     appleTouchIcon: '/pwa/icons/recipe-192.png',
     themeColor: '#d97706',

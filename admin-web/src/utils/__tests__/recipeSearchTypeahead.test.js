@@ -110,7 +110,7 @@ describe('nextTypeaheadKeyboardState', () => {
 describe('recipeFocusLocation', () => {
   it('跳转到详情页并带 focus 参数', () => {
     expect(recipeFocusLocation('changfen', 42)).toEqual({
-      path: '/recipe/detail',
+      path: '/workbench/kitchen/recipe/detail',
       query: { slug: 'changfen', focus: '42' },
     })
   })
@@ -119,7 +119,7 @@ describe('recipeFocusLocation', () => {
 describe('recipeManageEditLocation', () => {
   it('打开管理页并带上岗位和配方 id', () => {
     expect(recipeManageEditLocation('肠粉档', 120)).toEqual({
-      path: '/recipe/manage',
+      path: '/workbench/kitchen/recipe/manage',
       query: { slug: '肠粉档', edit: '120' },
     })
   })
