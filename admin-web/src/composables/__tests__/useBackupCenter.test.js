@@ -22,8 +22,14 @@ vi.mock('../../api/client', () => ({
 
 const { useBackupCenter } = await import('../useBackupCenter.js')
 
+// 退出这一页（还原了业务库、会话已失效）走的是 `utils/adminLogout.js` 那一处唯一
+// 实现：它需要页面把自己的 router 交进来（票 10）。内存里给一份最小的替身。
 function makeHarness() {
-  return useBackupCenter({ showAlert: vi.fn(), clearAlert: vi.fn() })
+  const router = {
+    currentRoute: { value: { fullPath: '/settings?section=backup' } },
+    replace: vi.fn(async () => {}),
+  }
+  return { ...useBackupCenter({ showAlert: vi.fn(), clearAlert: vi.fn(), router }), router }
 }
 
 function healthPayload(overrides = {}) {
@@ -653,8 +659,8 @@ describe('useBackupCenter', () => {
       session_invalidated: false,
     })
     apiGet.mockResolvedValue({})
-    const location = { href: '/settings?section=backup' }
-    vi.stubGlobal('window', { location })
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) }))
+    vi.stubGlobal('fetch', fetchMock)
     try {
       const {
         importState,
@@ -664,6 +670,7 @@ describe('useBackupCenter', () => {
         onConfirmClick,
         importSuccessModal,
         confirmImportSuccessRedirect,
+        router,
       } = makeHarness()
 
       onImportFileChange({ name: 'backup.luyunbak' })
@@ -677,17 +684,17 @@ describe('useBackupCenter', () => {
       expect(importSuccessModal.show).toBe(true)
       expect(importSuccessModal.sessionInvalidated).toBe(false)
 
-      apiPost.mockClear()
       await confirmImportSuccessRedirect()
       expect(importSuccessModal.show).toBe(false)
-      expect(apiPost).not.toHaveBeenCalled()
-      expect(location.href).toBe('/settings?section=backup')
+      // 会话还在：不登出、也不离开这一页。
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/api/auth/logout')).toHaveLength(0)
+      expect(router.replace).not.toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()
     }
   })
 
-  it('还原了业务库（会话已失效）时才登出并跳登录页', async () => {
+  it('还原了业务库（会话已失效）时才客户端登出并回登录页（不整页重载）', async () => {
     apiUpload.mockResolvedValueOnce(previewPayload()).mockResolvedValueOnce({
       success: true,
       mode: 'merge',
@@ -697,9 +704,8 @@ describe('useBackupCenter', () => {
       session_invalidated: true,
     })
     apiGet.mockResolvedValue({})
-    apiPost.mockResolvedValue({ success: true })
-    const location = { href: '/settings?section=backup' }
-    vi.stubGlobal('window', { location })
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) }))
+    vi.stubGlobal('fetch', fetchMock)
     try {
       const {
         importState,
@@ -709,6 +715,7 @@ describe('useBackupCenter', () => {
         onConfirmClick,
         importSuccessModal,
         confirmImportSuccessRedirect,
+        router,
       } = makeHarness()
 
       onImportFileChange({ name: 'backup.luyunbak' })
@@ -720,8 +727,12 @@ describe('useBackupCenter', () => {
       expect(importSuccessModal.sessionInvalidated).toBe(true)
       await confirmImportSuccessRedirect()
 
-      expect(apiPost).toHaveBeenCalledWith('/api/auth/logout')
-      expect(location.href).toBe('/login')
+      // 登出请求照发，但落点是**客户端路由** + 带原目标（票 10 消掉的整页重载）。
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/api/auth/logout')).toHaveLength(1)
+      expect(router.replace).toHaveBeenCalledWith({
+        path: '/login',
+        query: { next: '/settings?section=backup' },
+      })
     } finally {
       vi.unstubAllGlobals()
     }

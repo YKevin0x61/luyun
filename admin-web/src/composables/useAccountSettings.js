@@ -1,9 +1,14 @@
 import { computed, reactive, ref } from 'vue'
 import { api } from '../api/client'
+import { logoutAdminSession } from '../utils/adminLogout'
 import { formatTs } from '../utils/backupProgress'
 
-/** Setup page — session / password / API tokens. */
-export function useAccountSettings({ showAlert, clearAlert }) {
+/** Setup page — session / password / API tokens.
+ *
+ *  `router` 由页面传进来（`views/SetupView.vue` 的 `useRouter()`）：退出登录走的是
+ *  `utils/adminLogout.js` 那一处唯一实现（客户端路由 + 带原目标），composable 自己
+ *  不引 router 单例 —— 那样单测就没法换一份内存路由。 */
+export function useAccountSettings({ showAlert, clearAlert, router }) {
   const sessionUserHint = ref('加载中…')
   /** 只放用户名：总览条的事实列需要短值，完整说明走 hint 文案。 */
   const sessionUsername = ref('')
@@ -31,15 +36,11 @@ export function useAccountSettings({ showAlert, clearAlert }) {
     }
   }
 
-  /** 危险动作：确认弹窗由页面层的两步确认负责（不用浏览器原生 confirm）。 */
+  /** 危险动作：确认弹窗由页面层的两步确认负责（不用浏览器原生 confirm）。
+   *  真正的离开交给唯一那处实现（票 10）：客户端路由 + `?next=` 回到本页，
+   *  不再整页重载。请求失败也照样离开 —— 会话可能已经没了。 */
   async function handleLogout() {
-    try {
-      await api.post('/api/auth/logout')
-    } catch (err) {
-      showAlert('error', '退出失败：' + (err.message || '未知错误'))
-      return
-    }
-    window.location.href = '/login'
+    await logoutAdminSession(router)
   }
 
   const changePwdForm = reactive({ oldPassword: '', newPassword: '' })

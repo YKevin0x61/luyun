@@ -40,8 +40,11 @@ const ROUTES = [
   { path: '/register', component: { template: '<div />' } },
 ]
 
-async function mountLogin(path = '/login') {
+async function mountLogin(path = '/login', { from = null } = {}) {
   const router = createRouter({ history: createMemoryHistory(), routes: ROUTES })
+  // `from`：先往历史里压一页「上一页」，才能验证登录落点的 history 语义
+  // （memory history 的第一次导航会占掉初始那一格，只 push 登录页就没得退了）。
+  if (from) await router.push(from)
   await router.push(path)
   await router.isReady()
   const pinia = createPinia()
@@ -300,6 +303,28 @@ describe('/login 面板：管理员栏', () => {
     // `?next=/hygiene/roster` 是搬家前的老地址：入口换成新分组之后的花名册页（票 05）。
     expect(router.currentRoute.value.path).toBe('/workbench/hr/roster')
   })
+
+  it('登录落点用 replace：后退不会退回登录页（管理栏与员工栏同一套 history 语义）', async () => {
+    fetchMock
+      .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
+      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+
+    const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fhr%2Froster', {
+      from: '/',
+    })
+    await submitWith(wrapper, {
+      'input[type="text"]': 'admin',
+      'input[type="password"]': 's3cret',
+    })
+    expect(router.currentRoute.value.path).toBe('/workbench/hr/roster')
+
+    // 登录页（`router.push` 进来的那一格）被落点**替换**掉，不在后退历史里：
+    // 再按一次浏览器后退，回到的是进登录页之前的那一页（这里是初始的 `/`）。
+    router.back()
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
+  })
 })
 
 describe('/login 面板：员工栏', () => {
@@ -323,6 +348,25 @@ describe('/login 面板：员工栏', () => {
       remember: true,
     })
     expect(router.currentRoute.value.path).toBe('/workbench/me/month')
+  })
+
+  it('员工栏落点同样是 replace：后退不退回登录页', async () => {
+    fetchMock
+      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
+
+    const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fmonth', {
+      from: '/',
+    })
+    await submitWith(wrapper, {
+      'input[type="tel"]': '13800138000',
+      'input[type="password"]': 's3cret',
+    })
+
+    router.back()
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
   })
 
   it('没带 ?next 时落到员工默认落点（今天页）', async () => {

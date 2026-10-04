@@ -47,6 +47,8 @@ from datetime import datetime, timedelta
 
 from services import auth_service
 from services.app_runtime import AppRuntime, set_runtime
+# 节流窗口与员工端同一个值（`services/identity/accounts.py`）—— 票 10 的对齐要求之一。
+from services.identity.accounts import LAST_SEEN_REFRESH_SECONDS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,15 +68,30 @@ def _cookie_max_age(resp) -> int:
     return int(match.group(1))
 
 
-async def _session_expires_at(db: DatabaseManager, session_id: str) -> datetime:
+async def _session_row(db: DatabaseManager, session_id: str):
+    """会话行（被删掉时返回 None）。"""
     async with db.table("auth").conn.cursor() as cursor:
         await cursor.execute(
-            "SELECT expires_at FROM sessions WHERE session_id = ?", (session_id,)
+            "SELECT expires_at, last_seen_at FROM sessions WHERE session_id = ?", (session_id,)
         )
-        row = await cursor.fetchone()
+        return await cursor.fetchone()
+
+
+async def _session_expires_at(db: DatabaseManager, session_id: str) -> datetime:
+    row = await _session_row(db, session_id)
     assert row is not None, "session 未落库"
     expires_at = datetime.fromisoformat(row["expires_at"])
     return expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=CHINA_TZ)
+
+
+async def _set_last_seen(db: DatabaseManager, session_id: str, when: datetime) -> None:
+    """把「这个会话最后一次被用到」的时间挪到过去 —— 闲置上限判定的唯一输入。"""
+    async with db.table("auth").conn.cursor() as cursor:
+        await cursor.execute(
+            "UPDATE sessions SET last_seen_at = ? WHERE session_id = ?",
+            (when.isoformat(), session_id),
+        )
+    await db.table("auth").conn.commit()
 
 
 class AuthServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -126,6 +143,94 @@ class AuthServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(password), settings.AUTH_MIN_PASSWORD_LENGTH)
         await auth_service.init_user("admin", password)
         self.assertIsNotNone(await auth_service.authenticate("admin", password))
+
+
+# 票面口径：管理端复用员工端那一个配置项（`SESSION_IDLE_HOURS`），默认 14 天。
+# 下面的边界用例从这条字面量算「超限/未超限」，不拿被测代码读的那个值反推期望值。
+IDLE_DAYS = 14
+
+
+class AdminSessionIdleLimitTest(unittest.IsolatedAsyncioTestCase):
+    """管理端会话的闲置上限（票 10，spec 故事 43 / 44）。
+
+    行为与员工端一致：**先看绝对有效期，再看闲置上限**；在用的会话按
+    `LAST_SEEN_REFRESH_SECONDS` 节流刷新 `last_seen_at`（闲置窗口随活动滑动），
+    但**绝不延长 `expires_at`**（「记住我 30 天 / 否则 8 小时」两档一个字不改）。
+    """
+
+    async def asyncSetUp(self):
+        self._old_database_dir = settings.DATABASE_DIR
+        self._old_idle_hours = settings.SESSION_IDLE_HOURS
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+        self.db = DatabaseManager()
+        await self.db.connect()
+        set_runtime(AppRuntime(db=self.db))
+        await auth_service.init_user("admin", "password123")
+
+    async def asyncTearDown(self):
+        settings.SESSION_IDLE_HOURS = self._old_idle_hours
+        await self.db.close()
+        set_runtime(None)
+        settings.DATABASE_DIR = self._old_database_dir
+        self._tmpdir.cleanup()
+
+    async def test_idle_limit_reuses_the_staff_setting_and_defaults_to_fourteen_days(self):
+        """同一个配置项、同一个默认值：两套会话不该让人猜为什么这次要重登。"""
+        self.assertEqual(settings.SESSION_IDLE_HOURS, IDLE_DAYS * 24)
+
+    async def test_session_within_the_idle_limit_still_passes(self):
+        """未超限放行：勾了「记住我」（绝对有效期 30 天）的会话闲置 13 天仍然有效。"""
+        settings.SESSION_IDLE_HOURS = IDLE_DAYS * 24
+        session_id, _ = await auth_service.create_session(remember=True)
+        await _set_last_seen(
+            self.db, session_id, datetime.now(CHINA_TZ) - timedelta(days=IDLE_DAYS - 1)
+        )
+
+        self.assertTrue(await auth_service.validate_session_id(session_id))
+        self.assertIsNotNone(await _session_row(self.db, session_id), "放行的会话不该被删")
+
+    async def test_session_over_the_idle_limit_is_logged_out(self):
+        """超限登出：闲置 15 天（绝对有效期还没到）→ 拒绝，并把行删掉。"""
+        settings.SESSION_IDLE_HOURS = IDLE_DAYS * 24
+        session_id, _ = await auth_service.create_session(remember=True)
+        await _set_last_seen(
+            self.db, session_id, datetime.now(CHINA_TZ) - timedelta(days=IDLE_DAYS, hours=1)
+        )
+
+        self.assertFalse(await auth_service.validate_session_id(session_id))
+        self.assertIsNone(
+            await _session_row(self.db, session_id), "闲置超时要删行，而不是只拒绝这一次"
+        )
+
+    async def test_last_seen_refreshes_only_after_the_throttle_window(self):
+        """节流刷新与员工端同值：窗口内不写库，过了窗口才把 last_seen_at 推到现在。"""
+        session_id, _ = await auth_service.create_session(remember=True)
+
+        before = (await _session_row(self.db, session_id))["last_seen_at"]
+        self.assertTrue(await auth_service.validate_session_id(session_id))
+        self.assertEqual(
+            (await _session_row(self.db, session_id))["last_seen_at"],
+            before,
+            "节流窗口内的请求不该写库",
+        )
+
+        stale = datetime.now(CHINA_TZ) - timedelta(seconds=LAST_SEEN_REFRESH_SECONDS + 60)
+        await _set_last_seen(self.db, session_id, stale)
+        self.assertTrue(await auth_service.validate_session_id(session_id))
+        refreshed = (await _session_row(self.db, session_id))["last_seen_at"]
+        self.assertNotEqual(refreshed, stale.isoformat())
+        self.assertGreater(datetime.fromisoformat(refreshed), stale)
+
+    async def test_idle_limit_never_extends_the_absolute_expiry(self):
+        """不加滑动续期：怎么用都不改 `expires_at`（那是「记住我 / 不记住」两档说了算的）。"""
+        session_id, expires_at = await auth_service.create_session(remember=False)
+        await _set_last_seen(
+            self.db, session_id, datetime.now(CHINA_TZ) - timedelta(hours=2)
+        )
+
+        self.assertTrue(await auth_service.validate_session_id(session_id))
+        self.assertEqual((await _session_row(self.db, session_id))["expires_at"], expires_at)
 
 
 import pytest
@@ -242,6 +347,32 @@ def test_login_remember_extends_cookie_and_session(auth_client):
     assert session_expires - datetime.now(CHINA_TZ) <= timedelta(
         hours=settings.SESSION_TTL_HOURS
     )
+
+
+def test_idle_admin_session_is_rejected_on_a_protected_endpoint(auth_client):
+    """闲置超限的管理端会话：受保护端点 401，且会话行被删掉（真实请求，不是内部调用）。"""
+    client, db = auth_client
+    client.post("/api/auth/init", json={
+        "username": "admin",
+        "password": "password123",
+        "confirm_password": "password123",
+    })
+    client.cookies.clear()
+    login = client.post("/api/auth/login", json={
+        "username": "admin",
+        "password": "password123",
+        "remember": True,
+    })
+    assert login.status_code == 200
+    session_id = login.cookies.get(settings.SESSION_COOKIE_NAME)
+    _run(_set_last_seen(
+        db, session_id, datetime.now(CHINA_TZ) - timedelta(days=IDLE_DAYS, hours=1)
+    ))
+
+    resp = client.get("/api/auth/tokens")
+
+    assert resp.status_code == 401
+    assert _run(_session_row(db, session_id)) is None
 
 
 def test_verify_admin_token_accepts_session_cookie(auth_client):

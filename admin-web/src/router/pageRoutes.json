@@ -4,6 +4,7 @@
     "前端：admin-web/src/router/index.js 每条路由的 meta（standalone/public）与页面标题从这张表派生，读取口是 admin-web/src/router/pageRoutes.js。",
     "后端：main.py 的 SPA_PAGE_ROUTES 与两张页面豁免表（HTML_AUTH_EXACT / HTML_AUTH_PUBLIC_PAGES）由 tests/test_spa_page_routes.py 强校验与本表一致（清单相等 + 未登录硬导航的真实请求复核）。",
     "字段：path 路径 / title 页面标题 / group 所属组（home|hr|floor|kitchen|me|system|entry，home 是工作台首页那一组）/ audience 允许的身份（admin 管理端 | staff 员工 | both 两者）/ standalone 是否独立外壳（不渲染后台导航）/ public 是否免登录（未登录也能拿到页面壳：服务端不 302、前端守卫放行）/ aliases 服务端额外注册的路径变体（同一页面的别名，不是独立路由，可选）。",
+    "可选字段 authRedirect（默认 true，票 10）：管理端 client 拿到 401 时要不要统一跳 /login。只有 /settings 是 false —— 它自己把 401 渲染成「当前未登录」，跳转会和它自己的状态机打架（同一个接口反复 401 时还会在 /login 与 /settings 之间来回跳）。登录页与注册页是 public，不需要这个标记；员工身份与 both 的页按 audience 判（它们的钥匙可能是员工 cookie，甩去管理端登录页是走错门）。判据在 admin-web/src/router/pageRoutes.js 的 skipsAdminLoginRedirect。",
     "audience 的分组语义按 2026-10-05 定下的工作台信息架构：人事、现场、后勤（配方 + 备货计划）、我的（员工端，票 03 起住在 /workbench/me/*）。",
     "public 的语义是「未登录也能拿到页面壳」（服务端不 302、前端守卫放行）。工作台是「进去要登录」的页面区（票 02 的页面墙对 /workbench 认任一会话），所以工作台里的页一律 public: false —— 员工三页也不例外：员工自己的会话就是那把钥匙，标成 public 只会把壳也对未登录访客敞开。",
     "票 07 起配方阅读面（/workbench/kitchen/recipe 列表 / detail 沉浸阅读 / print 打印 / qr 印码）也从免登录改成要登录 —— 它是最后一批 public: true 的业务页，关掉之后 public 只剩 /login 与 /register 两个入口页。扫码看岗位配方保留：扫码 → 未登录 → 登录（默认开员工栏）→ 回到那条配方，回跳在 admin-web/src/utils/loginNext.js 的 RECIPE_READER_PATHS 里。",
@@ -78,7 +79,8 @@
       "group": "system",
       "audience": "admin",
       "standalone": true,
-      "public": false
+      "public": false,
+      "authRedirect": false
     },
     {
       "path": "/workbench",

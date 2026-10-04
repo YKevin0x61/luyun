@@ -12,6 +12,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
+# 节流窗口与员工端共用同一个值：两套会话的闲置口径必须逐条一致（票 10），
+# 而这个值只该有一份（`services/identity/accounts.py` 是它的定义处）。
+from services.identity.accounts import LAST_SEEN_REFRESH_SECONDS
 from services.password_hash import hash_password_async as _hash_password
 from services.password_hash import needs_rehash as _needs_rehash
 from services.password_hash import validate_password as _validate_password
@@ -35,6 +38,23 @@ def _conn():
 
 def _now_iso() -> str:
     return datetime.now(CHINA_TZ).isoformat()
+
+
+def _parse_stamp(value: Any) -> Optional[datetime]:
+    """ISO 时间戳 → 带时区的 datetime；空值或坏值返回 None（不抛）。
+
+    与员工端 `services/identity/accounts.py` 的 `_parse_stamp` 同一口径：库里存的
+    时刻可能是旧版本写进去的裸时间（没有时区），一律按北京时间解读。
+    """
+    if not value:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=CHINA_TZ)
+    return stamp
 
 
 def _hash_token(plain: str) -> str:
@@ -154,23 +174,54 @@ async def create_session(remember: bool = False) -> Tuple[str, str]:
     return session_id, expires_at
 
 
+async def _touch_session(session_id: str, now_iso: str) -> None:
+    """刷新 `last_seen_at`（只在节流窗口过后调用）。
+
+    必须落在 `DatabaseManager._write_lock` 里：`validate_session_id` 在**每个**管理端
+    请求上都会跑，如果在锁外 `commit()`，就会把并发写者（`serialized_write` 里的显式
+    事务）刚写了一半的事务顺手提交掉 —— 与员工端
+    `EmployeeAccounts._touch_staff_session` 是同一条理由、同一个锁。
+    """
+    async with _db()._write_lock:
+        async with _conn().cursor() as cursor:
+            await cursor.execute(
+                "UPDATE sessions SET last_seen_at = ? WHERE session_id = ?",
+                (now_iso, session_id),
+            )
+        await _conn().commit()
+
+
 async def validate_session_id(session_id: Optional[str]) -> bool:
     if not session_id:
         return False
     async with _conn().cursor() as cursor:
         await cursor.execute(
-            "SELECT expires_at FROM sessions WHERE session_id = ?",
+            "SELECT expires_at, last_seen_at FROM sessions WHERE session_id = ?",
             (session_id,),
         )
         row = await cursor.fetchone()
     if not row:
         return False
-    expires_at = datetime.fromisoformat(row["expires_at"])
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=CHINA_TZ)
-    if datetime.now(CHINA_TZ) >= expires_at:
+    now_dt = datetime.now(CHINA_TZ)
+    # 判定顺序与员工端逐条一致：先绝对有效期，再闲置上限，最后才谈刷新。
+    expires_at = _parse_stamp(row["expires_at"]) or now_dt
+    if now_dt >= expires_at:
         await delete_session(session_id)
         return False
+    # 闲置上限（票 10）：勾了「记住我」的会话有效期 30 天，这条把「机器一直挂着没人用」
+    # 的窗口收窄 —— 与员工端共用 `SESSION_IDLE_HOURS`（默认 336 = 14 天，0 = 关闭）。
+    # 在用的会话按下面的节流刷新 last_seen_at，所以闲置窗口跟着活动滑动；但这条**绝不
+    # 延长 expires_at**：那两档（记住我 30 天 / 否则 8 小时）一个字都不改。
+    idle_hours = int(getattr(settings, "SESSION_IDLE_HOURS", 0) or 0)
+    last_seen = _parse_stamp(row["last_seen_at"]) or now_dt
+    if idle_hours > 0 and now_dt - last_seen >= timedelta(hours=idle_hours):
+        await delete_session(session_id)
+        logger.info("管理端会话闲置超时已登出（阈值 %sh）", idle_hours)
+        return False
+    # 节流刷新：SPA 的状态探测与实时拉取很频繁，每次请求都写库没有意义；5 分钟的粒度
+    # 对「闲置多久算失效」完全够用（员工端同一套写法、同一个值）。
+    if (now_dt - last_seen).total_seconds() >= LAST_SEEN_REFRESH_SECONDS:
+        await _touch_session(session_id, now_dt.isoformat())
     return True
 
 

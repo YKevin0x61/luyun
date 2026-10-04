@@ -2,11 +2,12 @@
 import ConfirmDialog from '../admin/ConfirmDialog.vue'
 import { useWorkbenchLogout } from '../../composables/useWorkbenchLogout'
 
-// 工作台那几个外壳（工作台 / 人事 / 现场）共用的退出入口（票 06）。
+// 工作台那几个外壳（工作台 / 人事 / 现场）共用的退出入口（票 06；票 10 收敛之后
+// 它与配方阅读面那颗 `components/recipe/RecipeExitButton.vue` 走的是同一个动作）。
 //
 // 逻辑全在 `composables/useWorkbenchLogout.js`（身份 → 哪条出口的唯一映射），这里只管
-// 那颗按钮与员工那侧的「还有照片没传完」确认框。**票 10** 会把四处登出收敛成一条路径，
-// 到时候改那个 composable，四个壳上的按钮一个字都不用动。
+// 那颗按钮与员工那侧的「还有照片没传完」确认框。**改退出行为去改那一个文件** ——
+// 三颗按钮（工作台壳 / 员工端三页 / 配方阅读面）都只是皮。
 //
 // 它长得跟员工端那颗 `components/staff/StaffExitButton.vue` 一样是有意的：同一个动作在
 // 工作台里应该长同一个样子。两处的差别只在「谁负责确认框」—— 员工端那三页有自己的顶栏、

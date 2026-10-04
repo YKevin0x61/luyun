@@ -4,19 +4,15 @@
  *  （页面里的 router-link、印码页生成的地址、这里的回跳白名单共用它）。
  *  免墙名单（`main.py` 的 `HTML_AUTH_PUBLIC_PAGES`）票 07 起已经是空的 ——
  *  配方阅读面也要登录，这一份不再是「免墙名单」而是「扫码回跳白名单」。
+ *
+ *  **401 兜底的豁免名单不在这里**（票 10）：它从页面清单派生，判据是
+ *  `router/pageRoutes.js` 的 `skipsAdminLoginRedirect` —— 这里只回答「登录之后回哪儿」，
+ *  不再兼管「哪一页不该被甩去登录」（那份名单以前手写在这里，路径一搬家就漂）。
  */
 import { RECIPE_READER_PATHS, isRecipeReaderPath } from './recipePaths.js'
-import { STAFF_ENTRY_PATH, isStaffLandingPath, isStaffPhonePath } from './staffPaths.js'
+import { STAFF_ENTRY_PATH, isStaffLandingPath } from './staffPaths.js'
 
 export { RECIPE_READER_PATHS, isRecipeReaderPath }
-
-export function shouldSkipLoginRedirect(pathname) {
-  if (pathname === '/login' || pathname === '/settings') return true
-  // 员工手机端那两块（「今天」与卫生）：401 回的是员工登录，不是管理端登录 ——
-  // 名单在 utils/staffPaths.js，跟 PWA 清单归属共用一份。
-  if (isStaffPhonePath(pathname)) return true
-  return isRecipeReaderPath(pathname)
-}
 
 export function buildLoginNextFromRoute(route) {
   const path = (route && route.path) || '/'

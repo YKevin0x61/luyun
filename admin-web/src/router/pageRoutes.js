@@ -41,3 +41,44 @@ export function pageMeta(path) {
   const row = requireRow(path)
   return { standalone: row.standalone, public: row.public, audience: row.audience }
 }
+
+/** 路径 → 清单里那一行；`/workbench/me/today/` 与它底下的子路径都算这一页。
+ *
+ *  `pageRow` 是精确匹配（路由注册用），这里服务的是**运行时地址**：浏览器地址栏里
+ *  可能多一个尾斜杠，401 兜底的判据不该因为一个斜杠换待遇。取最长的按整段命中的
+ *  前缀 —— `/workbench/hr` 不是一页，别把 `/workbench/hr/roster` 认成它。
+ */
+function runtimeRow(pathname) {
+  const raw = String(pathname == null ? '' : pathname)
+  if (!raw) return null
+  const trimmed = raw.endsWith('/') && raw !== '/' ? raw.slice(0, -1) : raw
+  const exact = BY_PATH.get(trimmed)
+  if (exact) return exact
+  let best = null
+  for (const row of PAGE_ROUTES) {
+    if (trimmed.startsWith(`${row.path}/`) && (!best || row.path.length > best.path.length)) {
+      best = row
+    }
+  }
+  return best
+}
+
+/** 管理端 client 拿到 401 时要不要跳登录页（票 10：这份名单从清单派生，不再手写一份）。
+ *
+ *  判据只有一条：**这一页的凭据不是管理端会话**，就不该被管理端那套 401 兜底甩去
+ *  `/login`：
+ *  - `public`（`/login`、`/register`）：本来就不需要会话，登录页自己拿 401 渲染错误；
+ *  - `audience !== 'admin'`（`staff` / `both`：我的三页、配方阅读面、工作台首页、
+ *    备货计划、无权访问页）：钥匙可能是员工 cookie，甩去管理端登录页是走错门；
+ *  - 表里显式标了 `authRedirect: false` 的页（`/settings`）：它自己把 401 渲染成
+ *    「当前未登录」，跳转会和它自己的状态机打架。
+ *
+ *  系统管理面（`/`、`/admin`、销售报表、企微推送、日志）与工作台里店长专属的那些页
+ *  照旧跳登录：它们的会话没了就该去登录。清单里没有的路径（已作废的老地址）也返回
+ *  false —— 没有豁免可言。
+ */
+export function skipsAdminLoginRedirect(pathname) {
+  const row = runtimeRow(pathname)
+  if (!row) return false
+  return row.public === true || row.audience !== 'admin' || row.authRedirect === false
+}

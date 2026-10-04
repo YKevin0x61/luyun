@@ -5,7 +5,6 @@ import {
   resolveLoginNext,
   resolveLoginTab,
   resolveStaffNext,
-  shouldSkipLoginRedirect,
 } from '../loginNext.js'
 
 describe('isRecipeReaderPath', () => {
@@ -26,49 +25,6 @@ describe('isRecipeReaderPath', () => {
     for (const stale of ['/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr']) {
       expect(isRecipeReaderPath(stale)).toBe(false)
     }
-  })
-})
-
-describe('shouldSkipLoginRedirect', () => {
-  it('登录页、配置页和配方阅读面不因 401 整页跳登录', () => {
-    expect(shouldSkipLoginRedirect('/login')).toBe(true)
-    expect(shouldSkipLoginRedirect('/settings')).toBe(true)
-    expect(shouldSkipLoginRedirect('/workbench/kitchen/recipe/detail')).toBe(true)
-  })
-
-  it('旧配置页地址 /setup 改名后不再有豁免（不做别名）', () => {
-    expect(shouldSkipLoginRedirect('/setup')).toBe(false)
-  })
-
-  it('旧配方地址不再有豁免（搬进工作台之后不留别名）', () => {
-    expect(shouldSkipLoginRedirect('/recipe/detail')).toBe(false)
-    expect(shouldSkipLoginRedirect('/recipe')).toBe(false)
-  })
-
-  it('员工手机端的页不因 401 跳后台登录（票 03 起在 /workbench/me/*）', () => {
-    expect(shouldSkipLoginRedirect('/workbench/me/today')).toBe(true)
-    expect(shouldSkipLoginRedirect('/workbench/me/today/')).toBe(true)
-    expect(shouldSkipLoginRedirect('/workbench/me/month')).toBe(true)
-    expect(shouldSkipLoginRedirect('/workbench/me/clean')).toBe(true)
-    // 注册页搬到顶层 /register：它没有管理端会话，401 也不该整页跳 /login。
-    expect(shouldSkipLoginRedirect('/register')).toBe(true)
-  })
-
-  it('旧员工路径已删除：401 不再给它们任何豁免（不做别名）', () => {
-    expect(shouldSkipLoginRedirect('/today')).toBe(false)
-    expect(shouldSkipLoginRedirect('/today/month')).toBe(false)
-    expect(shouldSkipLoginRedirect('/hygiene')).toBe(false)
-  })
-
-  it('管理面和运营页仍跳登录', () => {
-    expect(shouldSkipLoginRedirect('/workbench/kitchen/recipe/manage')).toBe(false)
-    expect(shouldSkipLoginRedirect('/admin')).toBe(false)
-    expect(shouldSkipLoginRedirect('/workbench/hr/roster')).toBe(false)
-    expect(shouldSkipLoginRedirect('/workbench/floor/zones')).toBe(false)
-    expect(shouldSkipLoginRedirect('/workbench/floor/daily')).toBe(false)
-    expect(shouldSkipLoginRedirect('/workbench/floor/deep-clean')).toBe(false)
-    expect(shouldSkipLoginRedirect('/workbench/floor/fix')).toBe(false)
-    expect(shouldSkipLoginRedirect('/workbench/floor/boards')).toBe(false)
   })
 })
 

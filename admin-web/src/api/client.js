@@ -1,17 +1,36 @@
 // 统一 fetch 封装：同源 Cookie 会话鉴权（阶段二后端仍是 Session Cookie），
 // 401 时跳转到 SPA 内的 /login 路由（阶段三登录页已迁移进 admin-web）。
 
-import { shouldSkipLoginRedirect } from '../utils/loginNext'
+import { skipsAdminLoginRedirect } from '../router/pageRoutes.js'
 
-// 登录页 / 配置页自身也会调用写接口鉴权（如 /api/credentials、/api/auth/tokens）。
-// 若它们在未登录/会话过期时也触发跳转，会与页面自身的状态机互相打架，
-// 甚至造成 /login <-> /settings 来回跳转，因此这两个路由自己吞掉 401，交给页面处理。
-// 配方阅读面 API 读公开；401 不应把厨房扫码页整页踢去登录。
+// 401 兜底豁免：判据在**页面清单**（`router/pageRoutes.json`）那一处 ——
+// 「这一页的凭据不是管理端会话」就不该被甩去 /login（票 10 消掉的 audit 条目 10：
+// 这份名单以前手写在 utils/loginNext.js，路径一搬家就漂，`/staff*` 与配方四页都换过地址）。
+//   - `/login`、`/register`：public，登录页自己拿 401 渲染错误；
+//   - `/settings`：清单里 `authRedirect: false`，它自己把 401 讲清楚（登录页自身也会用
+//     写接口鉴权，与它自己的状态机互相打架时会来回跳）；
+//   - 员工页与配方阅读面（`audience` 是 staff / both）：钥匙可能是员工 cookie。
 function isStandaloneAuthRoute() {
-  return shouldSkipLoginRedirect(window.location.pathname)
+  return skipsAdminLoginRedirect(window.location.pathname)
+}
+
+// 401 之后怎么回登录页：**客户端导航**，不再整页重载（票 10）。
+// 整页重载会把 Service Worker、实时连接、滚动位置全丢掉，还要多一次冷启动；
+// 而本模块不是组件、拿不到 `useRouter()` —— 所以由 app 启动时（`main.js`）把
+// 「跳登录页」这个动作注入进来，注入方负责带上原目标（`router.currentRoute`）。
+// 没人注入时（单测、非 SPA 上下文）退回整页跳一次：宁可多一次冷启动，
+// 也不能把人留在一页已经无权的界面上。
+let unauthorizedHandler = null
+
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = handler
 }
 
 function redirectToLogin() {
+  if (typeof unauthorizedHandler === 'function') {
+    unauthorizedHandler()
+    return
+  }
   const next = window.location.pathname + window.location.search
   window.location.href = '/login?next=' + encodeURIComponent(next)
 }

@@ -1,8 +1,8 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
-import { api } from '../api/client'
+import { useRoute, useRouter } from 'vue-router'
 import SvgIcon from './SvgIcon.vue'
+import { logoutAdminSession } from '../utils/adminLogout'
 import { WORKBENCH_TITLE } from '../utils/workbenchCopy'
 
 defineProps({
@@ -11,6 +11,7 @@ defineProps({
 })
 
 const route = useRoute()
+const router = useRouter()
 
 // 简单映射，对齐旧原生页各自的 data-subtitle（如 public/logs.html:130）
 const PAGE_SUBTITLES = [
@@ -61,13 +62,10 @@ async function handleLogout() {
   if (loggingOut.value) return
   if (!window.confirm('确定要退出登录吗？')) return
   loggingOut.value = true
-  try {
-    await api.post('/api/auth/logout')
-    window.location.href = '/login'
-  } catch (e) {
-    window.alert('退出失败：' + (e.message || '未知错误'))
-    loggingOut.value = false
-  }
+  // 客户端登出（票 10）：不再整页重载、不再丢原目标。实现只有一处
+  // （`utils/adminLogout.js`）—— 配置页、备份中心、工作台与配方阅读面的退出按钮
+  // 走的都是它。误点的保护留在这里（浏览器原生 confirm），不是登出实现的事。
+  await logoutAdminSession(router, route.fullPath)
 }
 </script>
 

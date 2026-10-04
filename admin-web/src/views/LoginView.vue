@@ -141,10 +141,14 @@ async function focusField(inputRef) {
 
 // ===== 落点 =====
 
-/** 管理员栏登录后的落点；员工端路径不认（身份互斥，判据在 utils/loginNext.js）。 */
+/** 管理员栏登录后的落点；员工端路径不认（身份互斥，判据在 utils/loginNext.js）。
+ *
+ *  用 `replace`：登录页不该留在后退历史里 —— 否则登录成功后按浏览器后退会退回
+ *  登录页（票 10 消掉的 audit 条目 9）。员工栏本来就是这么做的，两栏的 history
+ *  语义现在只有一种。 */
 function redirectAsAdmin() {
   setAuthLoggedIn(true)
-  router.push(resolveLoginNext(route.query.next, '/'))
+  router.replace(resolveLoginNext(route.query.next, '/'))
 }
 
 /** 员工栏登录后的落点；只认员工端前缀，别的一律回落到员工默认落点。 */

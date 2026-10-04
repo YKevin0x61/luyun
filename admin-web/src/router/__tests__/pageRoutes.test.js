@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { PAGE_ROUTES, pageMeta, pageRow, pageTitle } from '../pageRoutes.js'
+import {
+  PAGE_ROUTES,
+  pageMeta,
+  pageRow,
+  pageTitle,
+  skipsAdminLoginRedirect,
+} from '../pageRoutes.js'
 
 // 票 01：页面清单（`router/pageRoutes.json`）是唯一来源。这里钉两件事：
 // 1. 表本身合法（六个字段齐全、取值在枚举内、路径唯一）；
@@ -128,5 +134,58 @@ describe('vue-router 从清单派生', () => {
 
     expect(pageTitle('/register')).toBe('员工注册')
     expect(router.resolve('/register').meta.staffPageTitle).toBe('员工注册')
+  })
+})
+
+describe('401 兜底豁免也从清单派生（票 10）', () => {
+  // 这份名单以前手写在 `utils/loginNext.js`（形如 `/login`、`/settings`、`/staff*`…），
+  // 路径一搬家就漂。现在判据只有一条：**这一页的凭据不是管理端会话**就不该被管理端
+  // client 甩去 `/login` —— `public` 的页、`audience !== 'admin'` 的页，以及表里显式
+  // 标了 `authRedirect: false` 的页（它自己把 401 渲染成「当前未登录」）。
+  it('免登录的入口页豁免（登录页自己要用 401 渲染错误）', () => {
+    expect(skipsAdminLoginRedirect('/login')).toBe(true)
+    expect(skipsAdminLoginRedirect('/register')).toBe(true)
+  })
+
+  it('配置页自己处理 401（清单里 authRedirect: false）', () => {
+    expect(skipsAdminLoginRedirect('/settings')).toBe(true)
+  })
+
+  it('员工身份与「两者皆可」的页豁免（钥匙可能是员工 cookie）', () => {
+    expect(skipsAdminLoginRedirect('/workbench/me/today')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/me/month')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/me/clean')).toBe(true)
+    // 扫码看配方那条链路：厨师用员工会话读，不该被甩去管理端登录页。
+    expect(skipsAdminLoginRedirect('/workbench/kitchen/recipe/detail')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/kitchen/recipe')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/kitchen/prep-plan')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/forbidden')).toBe(true)
+  })
+
+  it('管理端专属的页照样跳登录（会话没了就该去登录）', () => {
+    for (const path of [
+      '/',
+      '/admin',
+      '/sales-report',
+      '/logs',
+      '/wecom-push',
+      '/workbench/hr/roster',
+      '/workbench/floor/daily',
+      '/workbench/kitchen/recipe/manage',
+    ]) {
+      expect(skipsAdminLoginRedirect(path), path).toBe(false)
+    }
+  })
+
+  it('尾斜杠与子路径按同一页算（浏览器地址栏里多一个斜杠不该换待遇）', () => {
+    expect(skipsAdminLoginRedirect('/workbench/me/today/')).toBe(true)
+    expect(skipsAdminLoginRedirect('/admin/')).toBe(false)
+  })
+
+  it('清单里没有的（已作废的）路径没有豁免', () => {
+    for (const stale of ['/setup', '/staff/today', '/recipe', '/recipe/detail', '/hygiene']) {
+      expect(skipsAdminLoginRedirect(stale), stale).toBe(false)
+    }
   })
 })

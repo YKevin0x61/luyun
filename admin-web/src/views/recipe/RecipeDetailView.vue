@@ -12,6 +12,7 @@ import { isRecipeDrawerPanel, nextRecipeDrawerState } from '../../utils/recipeDr
 import { RECIPE_HOME_PATH, RECIPE_MANAGE_PATH, RECIPE_PRINT_PATH } from '../../utils/recipePaths'
 import SvgIcon from '../../components/SvgIcon.vue'
 import RecipeNavIcon from './RecipeNavIcon.vue'
+import RecipeExitButton from '../../components/recipe/RecipeExitButton.vue'
 import RecipeFormModal from '../../components/recipe/RecipeFormModal.vue'
 import {
   RECIPE_BRAND_MARK,
@@ -830,6 +831,9 @@ onBeforeUnmount(() => {
           <router-link v-if="isAdmin" class="site-nav-link" to="/"><RecipeNavIcon name="home" :size="14" />{{ RECIPE_NAV_HOME_LABEL }}</router-link>
           <router-link class="site-nav-link" :to="RECIPE_HOME_PATH"><RecipeNavIcon name="layout-grid" :size="14" />{{ RECIPE_NAV_STATIONS_LABEL }}</router-link>
           <router-link v-if="isAdmin" class="site-nav-link" :to="RECIPE_MANAGE_PATH"><RecipeNavIcon name="sparkles" :size="14" />{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
+          <!-- 退出入口（票 10，spec 故事 47）：沉浸页没有工作台外壳，退出挂在这里。
+               动作与工作台那颗是同一个（`useWorkbenchLogout` 按身份派发）。 -->
+          <RecipeExitButton />
         </nav>
         <div class="sop-header-actions no-print">
           <button

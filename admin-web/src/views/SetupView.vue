@@ -200,6 +200,9 @@ const {
 } = useBackupCenter({
   showAlert,
   clearAlert,
+  // 退出/离开这一页必须走客户端路由（票 10）：那一处唯一实现在 utils/adminLogout.js，
+  // 两个 composable 都从页面拿 router，不各自引 router 单例（单测才能换内存路由）。
+  router,
   onAfterRollback: async () => {
     await fetchCurrent()
     await loadRuntimeSettings()
@@ -228,7 +231,7 @@ const {
   revokeToken,
   closeTokenModal,
   copyToken,
-} = useAccountSettings({ showAlert, clearAlert })
+} = useAccountSettings({ showAlert, clearAlert, router })
 
 const {
   versionCheck,

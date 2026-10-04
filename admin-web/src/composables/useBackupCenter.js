@@ -1,5 +1,6 @@
 import { computed, reactive, ref } from 'vue'
 import { api } from '../api/client'
+import { logoutAdminSession } from '../utils/adminLogout'
 import {
   createProgressController,
   createProgressState,
@@ -30,9 +31,13 @@ const BACKUP_PASSPHRASE_MIN_LENGTH = 6
  * 先 requestConfirm 展示将要发生什么与风险勾选项，再由页面上的确认按钮调用
  * onConfirmClick；覆盖导入、数据回滚、清理与保存保留配置都复用这一条通道。
  *
- * @param {{ showAlert: Function, clearAlert: Function, onAfterRollback?: () => Promise<void> }} opts
+ * `router` 由页面传进来（`views/SetupView.vue` 的 `useRouter()`）：还原了业务库之后
+ * 会话在服务端就没了，离开这一页要走 `utils/adminLogout.js` 那一处唯一实现
+ * （客户端路由 + 带原目标），composable 自己不引 router 单例。
+ *
+ * @param {{ showAlert: Function, clearAlert: Function, router: object, onAfterRollback?: () => Promise<void> }} opts
  */
-export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
+export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback }) {
   // ==================== 导出备份 ====================
   /** 后端数据库形态（"sqlite" | "postgres"）与「业务数据能否打进导出包」的能力位。 */
   const dbBackend = ref('')
@@ -712,18 +717,15 @@ export function useBackupCenter({ showAlert, clearAlert, onAfterRollback }) {
   }
 
   /**
-   * 只恢复了照片 / 配方这类不碰 app.db 的内容时，会话并没有失效：这时关掉弹窗
-   * 留在本页即可。只有后端明确说会话已失效（还原了 app.db）才登出并跳登录页。
+   * 恢复导入成功后的落点：只有后端明确说会话已失效（还原了业务库）才登出并回登录页；
+   * 只恢复了照片 / 配方这类不碰业务库的内容时会话还在，关掉弹窗留在本页即可。
    */
   async function confirmImportSuccessRedirect() {
     importSuccessModal.show = false
     if (!importSuccessModal.sessionInvalidated) return
-    try {
-      await api.post('/api/auth/logout')
-    } catch (_) {
-      // session may already be invalid after app_db import
-    }
-    window.location.href = '/login'
+    // 走唯一那处客户端登出（票 10）：不再整页重载（SW、实时连接、身份记忆都不丢），
+    // 并带上本页作为原目标 —— 重新登录后回到备份中心。
+    await logoutAdminSession(router)
   }
 
   // ==================== 本机回滚快照 ====================

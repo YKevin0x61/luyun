@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { api } from '../client.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { api, setUnauthorizedHandler } from '../client.js'
 
 // 轻量 FakeXHR：记录回调，由测试同步驱动 upload / onload 等事件，
 // 用来验证 client.js 中 upload() 的 XHR 行为（进度回调、401、错误 detail 等）。
@@ -41,6 +41,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setUnauthorizedHandler(null)
   delete global.XMLHttpRequest
   delete global.window
 })
@@ -86,30 +87,37 @@ describe('api.upload', () => {
     await expect(promise).rejects.toThrow(/文件过大/)
   })
 
-  it('401 且非独立鉴权路由时跳转登录并 reject', async () => {
+  it('401 且非豁免路由时走客户端导航（不再整页重载）并 reject', async () => {
+    const handler = vi.fn()
+    setUnauthorizedHandler(handler)
     const promise = api.upload('/api/backup/import/apply', new FormData())
     const xhr = FakeXHR.instances[0]
     xhr.emitLoad(401, '')
     await expect(promise).rejects.toThrow('未登录，正在跳转登录页')
-    expect(global.window.location.href).toContain('/login?next=')
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(global.window.location.href).toBe('')
   })
 
   it('401 且处于 /settings 独立鉴权路由时不跳转，按错误处理', async () => {
     global.window.location.pathname = '/settings'
+    const handler = vi.fn()
+    setUnauthorizedHandler(handler)
     const promise = api.upload('/api/backup/import/apply', new FormData())
     const xhr = FakeXHR.instances[0]
     xhr.emitLoad(401, JSON.stringify({ detail: '会话已过期' }))
     await expect(promise).rejects.toMatchObject({ message: '会话已过期', status: 401 })
-    expect(global.window.location.href).toBe('')
+    expect(handler).not.toHaveBeenCalled()
   })
 
-  it('401 且处于配方阅读面时不整页跳登录', async () => {
+  it('401 且处于配方阅读面时不跳登录', async () => {
     global.window.location.pathname = '/workbench/kitchen/recipe/detail'
+    const handler = vi.fn()
+    setUnauthorizedHandler(handler)
     const promise = api.upload('/api/recipes/stations/x/import', new FormData())
     const xhr = FakeXHR.instances[0]
     xhr.emitLoad(401, JSON.stringify({ detail: '需要登录' }))
     await expect(promise).rejects.toMatchObject({ message: '需要登录', status: 401 })
-    expect(global.window.location.href).toBe('')
+    expect(handler).not.toHaveBeenCalled()
   })
 
   it('不传 onProgress 时兼容旧行为（不注册 upload 回调）', async () => {

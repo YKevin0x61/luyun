@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { api } from '../../api/client'
 import { RECIPE_DETAIL_PATH, RECIPE_HOME_PATH } from '../../utils/recipePaths'
 import { useRecipeAdmin } from '../../composables/useRecipeAdmin'
+import RecipeExitButton from '../../components/recipe/RecipeExitButton.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { RECIPE_NAV_HOME_LABEL } from '../../utils/recipeCopy'
 import {
@@ -244,8 +245,11 @@ function doPrint() {
         {{ pageCount > 1 ? `打印已选页` : '打印' }}
       </button>
       <!-- 票 07：「管理后台」只给管理端那一档 —— 它是 `admin` 的页，员工点它只会落
-           越权页；打印页同样只有返回 / 打印（这一页是沉浸页）。 -->
+           越权页；打印页也是沉浸页（没有返回 / 打印之外的入口）。
+           票 10：退出入口（spec 故事 47）与工作台 / 阅读面那颗是同一个动作，挂在这条
+           `no-print` 工具栏里，所以它不会被打进 A4。 -->
       <router-link v-if="isAdmin" class="btn btn-ghost" to="/">{{ RECIPE_NAV_HOME_LABEL }}</router-link>
+      <RecipeExitButton />
       <router-link class="btn btn-ghost" :to="backHref">关闭</router-link>
     </header>
     <div class="sop-print-preview-measure-host no-print" aria-hidden="true">
