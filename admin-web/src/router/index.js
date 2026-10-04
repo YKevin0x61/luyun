@@ -103,14 +103,16 @@ const routes = [
   hygieneAdminPage('/workbench/floor/fix', 'workbench-floor-fix', () => import('../views/hygiene/HygieneFixView.vue')),
   hygieneAdminPage('/workbench/floor/boards', 'workbench-floor-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
   hygieneAdminPage('/workbench/floor/data', 'workbench-floor-data', () => import('../views/hygiene/HygieneDataView.vue')),
-  // 子应用根（票 06 会把它换成「今天」首页）。在那之前仍渲染排班月历，且**不许 404**：
-  // 它是页面清单里 group 为 home 的那一行，月历自己另有一行（人事组的落点）。
+  // 子应用根（票 06）：就是「今天」首页 —— 按身份用已有接口聚合今日摘要，只做分流与
+  // 摘要、不做业务动作。它套**工作台外壳**（`WorkbenchLayout`：顶栏一条 + 按身份过滤的
+  // 导航），跟「我的」那三页同一个壳；月历仍自己占一行（人事组的落点），两行不再指
+  // 同一个页面组件。`audience: both` 与页面墙对 `/workbench` 的判定同一口径（任一会话）。
   {
     path: '/workbench',
-    component: SchedulingLayout,
+    component: WorkbenchLayout,
     meta: pageMeta('/workbench'),
     children: [
-      { path: '', name: 'workbench', component: () => import('../views/scheduling/SchedulingCalendarView.vue'), meta: pageMeta('/workbench') },
+      { path: '', name: 'workbench', component: () => import('../views/workbench/WorkbenchHomeView.vue'), meta: pageMeta('/workbench') },
     ],
   },
   // ── 工作台 · 我的（员工端，票 03）──────────────────────────────────────────

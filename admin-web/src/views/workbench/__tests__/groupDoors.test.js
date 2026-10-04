@@ -28,6 +28,11 @@ function pageStub(page) {
 
 const ROUTES = [
   { path: '/', component: { template: '<div />' } },
+  { path: '/login', component: { template: '<div />' } },
+  // 壳自己的落点（首页 `both` + 我的那三页）：`WorkbenchLayout` 的退出入口要落回 `/login`，
+  // 路由表里得有这两条。
+  { path: '/workbench', component: { template: '<div />' } },
+  ...workbenchPagesOf('me').map(pageStub),
   ...workbenchPagesOf('hr').map(pageStub),
   ...workbenchPagesOf('floor').map(pageStub),
 ]
@@ -47,13 +52,26 @@ function anonymousFetch() {
     const path = String(url)
     if (path.includes('/api/auth/status')) return jsonResponse({ logged_in: false, initialized: true })
     if (path.includes('/api/hygiene/staff/me')) return jsonResponse({}, 401)
+    if (path.includes('/api/auth/logout') || path.includes('/api/hygiene/staff/logout')) {
+      return jsonResponse({})
+    }
     return jsonResponse({}, 404)
   })
 }
 
+/** 每个用例用的那份 fetch 替身（退出入口那几条要查它发了什么请求）。 */
+let fetchMock
+
+/** 某个地址上的请求（退出那几条断言用它）。 */
+function callsTo(path) {
+  return fetchMock.mock.calls.filter(([url]) => url === path)
+}
+
 /** 挂一个壳（`hr` / `floor`），落在 `path` 上。每个用例换一份崭新的模块图：
- *  `authStatus` 有 10 秒状态缓存、工作台身份的记忆在 localStorage 里，跨用例会串。 */
-async function mountShell(which, path) {
+ *  `authStatus` 有 10 秒状态缓存、工作台身份的记忆在 localStorage 里，跨用例会串。
+ *
+ *  `identity` 直接放进 store（退出入口按身份分派，而探针本身在别的文件里压过）。 */
+async function mountShell(which, path, { identity = null } = {}) {
   vi.resetModules()
   localStorage.clear()
   const [{ default: Shell }, { useWorkbenchIdentityStore }] = await Promise.all([
@@ -65,17 +83,22 @@ async function mountShell(which, path) {
 
   const pinia = createPinia()
   setActivePinia(pinia)
+  const store = useWorkbenchIdentityStore()
+  store.identity = identity
+  store.sessions = { admin: identity === 'super', staff: identity === 'staff' }
+  store.available = identity ? [identity] : []
   const router = createRouter({ history: createMemoryHistory(), routes: ROUTES })
   await router.push(path)
   await router.isReady()
 
   const wrapper = mount(Shell, { global: { plugins: [router, pinia] }, attachTo: document.body })
   await flushPromises()
-  return { wrapper, router, store: useWorkbenchIdentityStore() }
+  return { wrapper, router, store }
 }
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', anonymousFetch())
+  fetchMock = anonymousFetch()
+  vi.stubGlobal('fetch', fetchMock)
 })
 
 afterEach(() => {
@@ -176,5 +199,62 @@ describe('现场壳（人事 → 现场 的那半扇门）', () => {
     const { wrapper } = await mountShell('floor', '/workbench/floor/daily')
 
     expect(wrapper.find('.hy-header .wb-id').exists()).toBe(true)
+  })
+})
+
+// 票 06：**独立外壳页也有退出登录入口**（今天工作台十一页一个退出按钮都没有，
+// spec 故事 37 / 47）。两个管理壳各挂一颗，行为只有一处（`useWorkbenchLogout`）。
+describe('工作台的外壳都有退出入口', () => {
+  it('人事壳：点一下退管理端会话，落登录页并带上原页', async () => {
+    const { wrapper, router } = await mountShell('hr', '/workbench/hr/calendar', { identity: 'super' })
+
+    const exit = wrapper.get('.wb-exit')
+    expect(exit.text()).toContain('退出')
+    await exit.trigger('click')
+    await flushPromises()
+
+    const logout = callsTo('/api/auth/logout')
+    expect(logout).toHaveLength(1)
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/hr/calendar')
+  })
+
+  it('现场壳：同一颗按钮、同一条行为', async () => {
+    const { wrapper, router } = await mountShell('floor', '/workbench/floor/daily', { identity: 'super' })
+
+    await wrapper.get('.wb-exit').trigger('click')
+    await flushPromises()
+
+    expect(callsTo('/api/auth/logout')).toHaveLength(1)
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/floor/daily')
+  })
+
+  it('工作台外壳（我的那三页）也有，且员工那一档走员工登出', async () => {
+    vi.resetModules()
+    const [{ default: Shell }, { useWorkbenchIdentityStore }] = await Promise.all([
+      import('../WorkbenchLayout.vue'),
+      import('../../../stores/workbenchIdentity'),
+    ])
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useWorkbenchIdentityStore()
+    store.identity = 'staff'
+    store.sessions = { admin: false, staff: true }
+    store.available = ['staff']
+    const router = createRouter({ history: createMemoryHistory(), routes: ROUTES })
+    await router.push('/workbench/me/today')
+    await router.isReady()
+    const wrapper = mount(Shell, { global: { plugins: [router, pinia] }, attachTo: document.body })
+    await flushPromises()
+
+    await wrapper.get('.wb-exit').trigger('click')
+    await flushPromises()
+
+    expect(callsTo('/api/hygiene/staff/logout')).toHaveLength(1)
+    // 员工那一档不走管理端那条门。
+    expect(callsTo('/api/auth/logout')).toHaveLength(0)
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
   })
 })

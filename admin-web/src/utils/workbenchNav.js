@@ -16,10 +16,12 @@
  *  —— 不叫「管理员」）。两者的映射就在 `workbenchAudienceFor` 这一处，别在别处再写一遍。
  */
 import { PAGE_ROUTES, pageMeta, pageRow } from '../router/pageRoutes.js'
-import { WORKBENCH_FIELD_HOME, WORKBENCH_HR_HOME } from './workbenchCopy.js'
+import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME } from './workbenchCopy.js'
 import { IDENTITY_ADMIN } from './workbenchIdentity.js'
 
 export const WORKBENCH_NAV_GROUPS = [
+  // 首页（票 06）：「今天」—— 子应用根，两种身份都看得见（那一页在清单里是 `both`）。
+  { key: 'home', label: '今天', to: WORKBENCH_HOME },
   // 人事：月历 / 待办 / 班次表 / 花名册（落点是月历，组里的页由 `workbenchPagesOf` 给）。
   { key: 'hr', label: '人事', to: WORKBENCH_HR_HOME },
   // 现场：卫生七页（落点是日常验收，到了那儿由那一组自己的 rail 接手）。

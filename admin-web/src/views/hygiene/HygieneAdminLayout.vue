@@ -3,6 +3,7 @@ import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import StandardPhotoCachePanel from '../../components/hygiene/StandardPhotoCachePanel.vue'
 import SvgIcon from '../../components/SvgIcon.vue'
+import WorkbenchExitButton from '../../components/workbench/WorkbenchExitButton.vue'
 import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
@@ -117,6 +118,9 @@ watch(
           </p>
           <!-- 身份切换器（票 04 那颗，自包含）：店长在自己的页面里也看得到那两档。 -->
           <WorkbenchIdentitySwitcher class="hy-id" />
+          <!-- 退出入口（票 06）：现场这七页也是独立外壳，原先一个退出按钮都没有。
+               行为只有一处（`composables/useWorkbenchLogout.js`），票 10 统一四处登出。 -->
+          <WorkbenchExitButton class="hy-exit" />
           <router-link class="hy-back hy-back-top" to="/" :title="HYGIENE_BACK_TO_ADMIN_LABEL">
             {{ HYGIENE_BACK_TO_ADMIN_LABEL }}
           </router-link>
@@ -131,6 +135,8 @@ watch(
 </template>
 
 <style scoped>
+/* 退出入口（票 06）：贴在「后台」那颗旁边，窄屏下跟它一起让位给切换器。 */
+.hy-exit { flex: 0 0 auto; }
 /* 回人事组那扇门：桌面 rail 里跟现场七页之间一条分隔（它不是现场页）；手机上 rail 是
    底部两行网格，那一格跟别的 tab 一样，不加分隔线。 */
 @media (min-width: 900px) {

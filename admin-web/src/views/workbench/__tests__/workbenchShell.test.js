@@ -12,10 +12,11 @@ import { WORKBENCH_FIELD_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenc
 // 断言的都是渲染出来的东西（有几格、点去哪、亮不亮），不是组件的内部结构。
 
 const ROUTES = [
+  { path: '/workbench', component: { template: '<div>今天</div>' }, meta: { audience: 'both', standalone: true } },
   { path: '/workbench/me/today', component: { template: '<div>今天</div>' }, meta: { audience: 'staff', standalone: true } },
   { path: '/workbench/me/month', component: { template: '<div>整月</div>' }, meta: { audience: 'staff', standalone: true } },
   // 店长那几页与清单里一样带 `audience: 'admin'`（这里只压外壳，页面本体给个占位）。
-  // 票 05：工作台按组分家，人事 / 现场各有自己的落点。
+  // 票 05：工作台按组分家，人事 / 现场各有自己的落点。票 06：首页（`/workbench`）是 `both`。
   { path: '/workbench/hr/calendar', component: { template: '<div>排班月历</div>' }, meta: { audience: 'admin', standalone: true } },
   { path: '/workbench/floor/daily', component: { template: '<div>日常验收</div>' }, meta: { audience: 'admin', standalone: true } },
 ]
@@ -81,32 +82,36 @@ afterEach(() => {
 })
 
 describe('工作台外壳的导航', () => {
-  it('员工这一档只有「我的」一格，指到「今天」', async () => {
+  it('员工这一档是「今天 / 我的」两格：首页两组都看得见，店长那几页点不到', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const { wrapper } = await mountShell('/workbench/me/today')
 
     const items = wrapper.findAll('.wb-nav-item')
-    expect(items).toHaveLength(1)
-    expect(items[0].text()).toBe('我的')
-    expect(items[0].attributes('href')).toBe('/workbench/me/today')
+    expect(items.map((item) => item.text())).toEqual(['今天', '我的'])
+    expect(items.map((item) => item.attributes('href'))).toEqual([
+      '/workbench', '/workbench/me/today',
+    ])
     // 员工点不到店长那几页（它们在清单里是 admin，导航按身份过滤）。
     expect(wrapper.find('a[href="/workbench/floor/daily"]').exists()).toBe(false)
   })
 
-  it('整组都亮：站在「整月」上，「我的」那一格仍是当前项', async () => {
+  it('整组都亮：站在「整月」上，「我的」那一格仍是当前项（首页那一格不亮）', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const { wrapper } = await mountShell('/workbench/me/month')
 
-    const item = wrapper.get('.wb-nav-item')
-    expect(item.classes()).toContain('is-on')
-    expect(item.attributes('aria-current')).toBe('page')
+    const items = wrapper.findAll('.wb-nav-item')
+    const on = items.filter((item) => item.classes().includes('is-on'))
+    expect(on).toHaveLength(1)
+    expect(on[0].text()).toBe('我的')
+    expect(on[0].attributes('aria-current')).toBe('page')
   })
 
   it('点一下真的走到那一格（外壳是路由链接，不是摆设）', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const { wrapper, router } = await mountShell('/workbench/me/month')
 
-    await wrapper.get('.wb-nav-item').trigger('click')
+    // 第二格是「我的」（第一格是首页）。
+    await wrapper.findAll('.wb-nav-item')[1].trigger('click')
     await flushPromises()
 
     expect(router.currentRoute.value.path).toBe('/workbench/me/today')
@@ -128,13 +133,13 @@ describe('工作台外壳的导航', () => {
 
     expect(store.identity).toBe('super')
     expect(wrapper.get('.wb-id .is-on').text()).toContain('超级管理员')
-    // 导航面按**他这一档**渲染：票 05 落位之后是人事 / 现场两格，各自的落点是共享常量
-    // （而不是因为"这一页是员工页"才藏起来）。页面内容按自己的 401 处理 —— 切换器
+    // 导航面按**他这一档**渲染：票 06 之后是首页 / 人事 / 现场三格，各自的落点是共享
+    // 常量（而不是因为"这一页是员工页"才藏起来）。页面内容按自己的 401 处理 —— 切换器
     // 不改权限、也不改守卫。
     const items = wrapper.findAll('.wb-nav-item')
-    expect(items.map((item) => item.text())).toEqual(['人事', '现场'])
+    expect(items.map((item) => item.text())).toEqual(['今天', '人事', '现场'])
     expect(items.map((item) => item.attributes('href'))).toEqual([
-      WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
+      '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
     ])
   })
 
@@ -146,11 +151,10 @@ describe('工作台外壳的导航', () => {
     await flushPromises()
 
     expect(store.identity).toBe('staff')
-    expect(wrapper.findAll('.wb-nav-item')).toHaveLength(1)
-    expect(wrapper.get('.wb-nav-item').text()).toBe('我的')
+    expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual(['今天', '我的'])
   })
 
-  it('切成员工后仍站在店长的页上：送回员工那一档的首页（不是停在别人的页上）', async () => {
+  it('切成员工后仍站在店长的页上：送回员工那一档的第一格（不是停在别人的页上）', async () => {
     // 起点是店长的页（现场组的落点）—— 顶栏这一档与导航面按他算。
     const { wrapper, router, store } = await mountShell('/workbench/floor/daily')
     expect(store.identity).toBe('super')
@@ -161,9 +165,8 @@ describe('工作台外壳的导航', () => {
     await flushPromises()
     await flushPromises()
 
-    // 员工这一档的导航落点是「我的」，这一页不是他看的，于是人被送到那儿
+    // 员工这一档的第一格是首页（`/workbench`，`both`），这一页不是他看的，于是人被送到那儿
     // （不是被守卫甩走、也不是停在别人的页上）。
-    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
-    expect(wrapper.get('.wb-nav-item').text()).toBe('我的')
+    expect(router.currentRoute.value.path).toBe('/workbench')
   })
 })

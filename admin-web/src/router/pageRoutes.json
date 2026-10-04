@@ -8,7 +8,7 @@
     "public 的语义是「未登录也能拿到页面壳」（服务端不 302、前端守卫放行）。工作台是「进去要登录」的页面区（票 02 的页面墙对 /workbench 认任一会话），所以工作台里的页一律 public: false —— 员工三页也不例外：员工自己的会话就是那把钥匙，标成 public 只会把壳也对未登录访客敞开。",
     "/workbench/forbidden 是越权落点（票 03）：group 用 entry —— 它不属于任何业务组、不进工作台导航；audience: both 是「两种身份都可能被拦到这里」（谁越权谁看）；standalone: true 是「一页说明 + 一颗回自己首页的按钮」，不套后台导航。",
     "票 05 起工作台的页面按组落在 URL 上：人事 /workbench/hr/*（排班月历 / 排班待办 / 班次表 / 花名册）、现场 /workbench/floor/*（卫生七页）。票 05 之前那批**平铺**地址（/workbench/roster、/workbench/daily、/workbench/inbox …）随这一票作废：不加别名、不做重定向，自然 404（`?next=` 里可能还存着它们，由 admin-web/src/utils/loginNext.js 在入口换成新地址）。",
-    "/workbench 本身是**子应用根**，不许 404：票 06 会把它换成「今天」首页；在那之前它仍渲染排班月历（单独一行、group 标 home、title 仍是「工作台」）—— 月历自己也有一行（/workbench/hr/calendar，人事组），两行指同一个页面组件是过渡期的实情，不是漏删。"
+    "/workbench 本身是**子应用根**，不许 404：票 06 起它就是「今天」首页（group 标 home、标题「今天」、audience 为 both —— 两种身份都能进，各自看到自己那一套），页面组件是 views/workbench/WorkbenchHomeView.vue，套工作台外壳。月历仍自己占一行（/workbench/hr/calendar，人事组）：两行不再指同一个页面组件（票 05 的过渡态到此结束）。"
   ],
   "pages": [
     {
@@ -79,9 +79,9 @@
     },
     {
       "path": "/workbench",
-      "title": "工作台",
+      "title": "今天",
       "group": "home",
-      "audience": "admin",
+      "audience": "both",
       "standalone": true,
       "public": false
     },

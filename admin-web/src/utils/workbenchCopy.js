@@ -19,8 +19,9 @@ export const WORKBENCH_HR_HOME = '/workbench/hr/calendar'
  *  到了那儿由那一组自己的 rail 接手。 */
 export const WORKBENCH_FIELD_HOME = '/workbench/floor/daily'
 
-/** 工作台**首页**（仪表盘上那张卡通往哪儿）：子应用根 `/workbench` —— 票 06 会把它换成
- *  「今天」首页；在那之前它渲染排班月历（页面清单里 group 标 home 的那一行）。 */
+/** 工作台**首页**（仪表盘上那张卡通往哪儿）：子应用根 `/workbench` —— 票 06 起它就是
+ *  「今天」：店长看到今天谁上班与三个数字，员工看到自己的班、工作区与待办条数。
+ *  它与「人事」那一组的落点（月历）是两个地址，不再互相兼职。 */
 export const WORKBENCH_HOME = '/workbench'
 
 /** 仪表盘那张卡的说明：两组一起说，别只列现场那一组。 */
@@ -28,11 +29,12 @@ export const WORKBENCH_DASHBOARD_BLURB = '当班排班 · 现场验收 · 整改
 
 /** 页面标题的统一写法：`<页面名> · 工作台`。
  *
- *  规格只写一次 —— 工作台里三个壳（人事 / 现场 / 我的）与配方的阅读面都给页面挂标题，
- *  各写各的模板迟早漂成两种写法（`hygieneCopy.js` 的 `hygieneDocumentTitle` 转发到这里）。
+ *  规格只写一次 —— 工作台里那几个壳（首页 / 我的共用的工作台壳、人事壳、现场壳）与配方的
+ *  阅读面都给页面挂标题，各写各的模板迟早漂成两种写法（`hygieneCopy.js` 的
+ *  `hygieneDocumentTitle` 转发到这里）。
  *
- *  页面名本身就是「工作台」时（子应用根那一页，票 06 起是首页）只留一个，不写
- *  「工作台 · 工作台」。 */
+ *  页面名本身就是「工作台」时只留一个，不写「工作台 · 工作台」（票 06 起子应用根那页叫
+ *  「今天」，这条只留给调用方传进「工作台」的情形）。 */
 export function workbenchDocumentTitle(pageName) {
   const name = pageName == null ? '' : String(pageName).trim()
   if (!name || name === WORKBENCH_TITLE) return WORKBENCH_TITLE

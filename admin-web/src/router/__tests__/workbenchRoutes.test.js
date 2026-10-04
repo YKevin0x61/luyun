@@ -75,16 +75,17 @@ describe('工作台路由（票 05 按分组落位之后）', () => {
     expect(layout).toMatch(/<router-view \/>/)
   })
 
-  it('子应用根 /workbench 仍是一页（票 06 之前渲染月历），本体挂在空路径子记录上', () => {
+  it('子应用根 /workbench 就是首页（票 06），套工作台外壳、本体挂在空路径子记录上', () => {
     // 票 01：独立外壳标记从页面清单派生（`meta: pageMeta('/workbench')`），不再写死在这里。
     expect(router).toMatch(
-      /path: '\/workbench',\n\s+component: SchedulingLayout,\n\s+meta: pageMeta\('\/workbench'\),/,
+      /path: '\/workbench',\n\s+component: WorkbenchLayout,\n\s+meta: pageMeta\('\/workbench'\),/,
     )
     expect(router).toMatch(
-      /path: '', name: 'workbench', component: \(\) => import\('\.\.\/views\/scheduling\/SchedulingCalendarView\.vue'\)/,
+      /path: '', name: 'workbench', component: \(\) => import\('\.\.\/views\/workbench\/WorkbenchHomeView\.vue'\)/,
     )
-    // 月历自己也有一行（人事组的落点）：两行指同一个页面组件是过渡期的实情。
+    // 月历仍自己占一行（人事组的落点），但**不再兼职当首页**。
     expect(lineFor('/workbench/hr/calendar')).toContain('SchedulingCalendarView.vue')
+    expect(lineFor('/workbench')).not.toContain('SchedulingCalendarView.vue')
   })
 
   it('旧地址一条都不留（不留别名、不留重定向）', () => {

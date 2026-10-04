@@ -29,10 +29,12 @@ describe('工作台身份 → 清单身份', () => {
   })
 })
 
-describe('工作台的组（票 05：人事 / 现场）', () => {
-  it('三组：人事、现场、我的（顺序就是顶栏里的顺序）', () => {
-    expect(WORKBENCH_NAV_GROUPS.map((group) => group.key)).toEqual(['hr', 'floor', 'me'])
-    expect(WORKBENCH_NAV_GROUPS.map((group) => group.label)).toEqual(['人事', '现场', '我的'])
+describe('工作台的组（票 05：人事 / 现场；票 06 加上首页）', () => {
+  it('四组：今天、人事、现场、我的（顺序就是顶栏里的顺序）', () => {
+    expect(WORKBENCH_NAV_GROUPS.map((group) => group.key)).toEqual(['home', 'hr', 'floor', 'me'])
+    expect(WORKBENCH_NAV_GROUPS.map((group) => group.label)).toEqual(['今天', '人事', '现场', '我的'])
+    // 第一格是子应用根（首页），不是某一组的专页。
+    expect(WORKBENCH_NAV_GROUPS[0].to).toBe('/workbench')
   })
 
   it('每组的落点是清单里真实的一页，且那一页就属于这一组', () => {
@@ -118,9 +120,11 @@ describe('按身份过滤导航', () => {
     }
   })
 
-  it('店长这一档：人事与现场两格；员工那一档：只有「我的」', () => {
-    expect(workbenchNavFor('super').map((item) => item.key)).toEqual(['hr', 'floor'])
-    expect(workbenchNavFor('staff').map((item) => item.key)).toEqual(['me'])
+  it('店长这一档：今天 / 人事 / 现场三格；员工那一档：今天 / 我的（首页两组都看得见）', () => {
+    expect(workbenchNavFor('super').map((item) => item.key)).toEqual(['home', 'hr', 'floor'])
+    expect(workbenchNavFor('staff').map((item) => item.key)).toEqual(['home', 'me'])
+    // 首页那一页是 `both`（票 06）：两档都进得去，过滤天然放行。
+    expect(pageMeta('/workbench').audience).toBe('both')
     expect(pageMeta(WORKBENCH_HR_HOME).audience).toBe('admin')
     expect(pageMeta(WORKBENCH_FIELD_HOME).audience).toBe('admin')
     expect(pageMeta('/workbench/me/today').audience).toBe('staff')

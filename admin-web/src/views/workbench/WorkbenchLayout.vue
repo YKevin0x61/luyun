@@ -12,6 +12,7 @@
 // 仍是路由守卫与服务端页面墙的事，这里一个字都不碰。
 import { computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import WorkbenchExitButton from '../../components/workbench/WorkbenchExitButton.vue'
 import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { pageRow } from '../../router/pageRoutes.js'
@@ -76,6 +77,10 @@ watch(identity, keepViewAllowed)
           :to="item.to"
         >{{ item.label }}</router-link>
       </nav>
+      <!-- 退出入口（票 06）：员工那三页原来自带一颗（`StaffExitButton`），首页与切档之后
+           的店长视角原先没有 —— 工作台是子应用，页页都得退得出去。行为只有一处
+           （`composables/useWorkbenchLogout.js`），票 10 会把四处登出收敛成一条。 -->
+      <WorkbenchExitButton class="wb-exit-btn" />
     </header>
 
     <main id="workbench-main" class="wb-main">
@@ -104,6 +109,7 @@ watch(identity, keepViewAllowed)
 /* 切换器与导航之间一条细分隔：两件事（我是谁 / 去哪一页），别挤成一团。 */
 .wb-id-switcher { margin-left: 4px; padding-right: 10px; border-right: 1px solid var(--hy-line); }
 .wb-nav { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.wb-exit-btn { margin-left: 8px; }
 .wb-nav-item {
   font-size: 12px; color: var(--hy-muted); text-decoration: none;
   border: 1px solid var(--hy-line); background: var(--hy-surface-2);

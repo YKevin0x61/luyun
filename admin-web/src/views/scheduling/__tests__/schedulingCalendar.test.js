@@ -137,8 +137,13 @@ describe('店长端排班月历（原型 B）', () => {
     // 自己的头（回后台的入口、页面名、实时状态，原先这三样都挂在后台导航上）。
     // 票 01：这个标记不再写死在 router 里，而是从页面清单派生（`meta: pageMeta('/workbench')`）；
     // 注册出来的路由确实等于清单，由 `router/__tests__/pageRoutes.test.js` 对着真实路由表钉。
+    // 票 06：子应用根改成了「今天」首页（`audience: both`）—— 人事这一组这几页仍各自带
+    // `audience: 'admin'` 的独立外壳标记（由 `workbenchHrPage` 那条工厂从清单派生）。
+    expect(router).toMatch(/meta: pageMeta\(path\)/)
     expect(router).toMatch(/meta: pageMeta\('\/workbench'\)/)
-    expect(pageMeta('/workbench')).toEqual({ standalone: true, public: false, audience: 'admin' })
+    expect(pageMeta('/workbench/hr/calendar')).toEqual({
+      standalone: true, public: false, audience: 'admin',
+    })
     expect(router).toMatch(/views\/scheduling\/SchedulingLayout\.vue/)
     expect(shell).toMatch(/router\.push\('\/'\)/)
     expect(shell).toMatch(/inject\('wsConnected'/)
