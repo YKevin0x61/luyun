@@ -23,7 +23,7 @@ describe('hygiene staff auth gate', () => {
     // 清单（`meta: pageMeta('/login')`）—— 这里断清单里的值，注册出来对不对由
     // `router/__tests__/pageRoutes.test.js` 对着真实路由表钉。
     expect(router).toMatch(/path: '\/login'[\s\S]{0,200}?meta: pageMeta\('\/login'\)/)
-    expect(pageMeta('/login')).toEqual({ standalone: true, public: true })
+    expect(pageMeta('/login')).toEqual({ standalone: true, public: true, audience: 'both' })
   })
 
   it('gate loads the shared hygiene stylesheet and the 卫 lockup', () => {

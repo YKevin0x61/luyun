@@ -1,6 +1,6 @@
 /** 员工手机端的页面归属，一处定义、三处消费：
- *  - `router/index.js` 的 `staffAuth` 守卫（未登录落 `/login?next=<目标>`，面板按
- *    `isStaffLandingPath` 强制开员工栏）；
+ *  - `router/index.js` 的登录守卫（票 02 起按页面清单的 audience 判定，这些页是 `staff`；
+ *    未登录落 `/login?next=<目标>`，面板按 `isStaffLandingPath` 强制开员工栏）；
  *  - `loginNext.shouldSkipLoginRedirect`：管理端 client 拿到 401 时不许把员工甩去 `/login`；
  *  - `pwaManifest`：这些页挂的是员工端那份清单与主题色（青绿），不是管理端（深色）。
  *

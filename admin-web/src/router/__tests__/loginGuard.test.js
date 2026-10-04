@@ -9,8 +9,13 @@ import { createPinia, setActivePinia } from 'pinia'
 // 没有一条真的让守卫跑一遍；这里补上，覆盖票面两条冒烟：
 //
 // - 未登录硬导航受保护页 → 守卫带 `next=<原目标>` 送到 `/login`；
-// - `/staff/today`（`staffProbe: false`）例外：守卫**故意**放行，页面自己那次请求
-//   分得清 401 与断网，401 时由页面把 `fullPath` 带回去（见本文件下半段真实挂载）。
+// - 标了 `public` 的页（员工手机三页、`/register`、配方阅读面）守卫放行，页面自己
+//   那次请求分得清 401 与断网，401 时由页面把 `fullPath` 带回去（见本文件下半段
+//   真实挂载的那条）。
+//
+// 票 02 起判据换成页面清单里的「允许的身份」三态（`meta.audience`），未登录 / 会话
+// 过期 / 身份不匹配都落 `/login?next=`；`/staff/clean` 不再被守卫的会话探针先拦一道
+// —— 它和另外两页一样是 `public`，落点由页面自己那次 401 决定（与表里的 public 一致）。
 
 function jsonResponse(data, status = 200) {
   return {
@@ -50,12 +55,14 @@ afterEach(() => {
 })
 
 describe('vue-router 登录守卫：未登录时带 ?next= 送到 /login', () => {
-  it('员工页 /staff/clean（走会话探针那条）', async () => {
+  it('公开的员工页 /staff/clean 放行：落点由页面自己那次 401 决定', async () => {
+    // 票 02 的收敛：这一页以前在守卫里先陪探针等一次（同前缀三页两套行为），现在和
+    // `/staff/today` 一样走 public；未登录时 `HygieneHomeView.leaveForStaffLogin`
+    // 拿到 401 再把 `fullPath` 带回 `/login`。
     const router = await freshRouter()
     await router.push('/staff/clean')
 
-    expect(router.currentRoute.value.path).toBe('/login')
-    expect(router.currentRoute.value.query.next).toBe('/staff/clean')
+    expect(router.currentRoute.value.path).toBe('/staff/clean')
   })
 
   it('管理端卫生页 /hygiene/daily', async () => {
@@ -98,6 +105,103 @@ describe('vue-router 登录守卫：未登录时带 ?next= 送到 /login', () =>
     // 不是被守卫送到 /login —— meta.staffProbe=false（弱网下别让员工先陪守卫白等一次
     // 探针超时）。页面拿到 401 时自己 replace 到 /login?next=<fullPath>，见下半段。
     expect(router.currentRoute.value.path).toBe('/staff/today')
+  })
+})
+
+// 票 02：守卫的判据从布尔标记（`staffAuth` / `public`）换成清单里的「允许的身份」
+// 三态（管理端 / 员工 / 两者）。这三条断言**行为**：给出会话组合与目标路径，URL 最后
+// 落在哪。今天清单里还没有「两者且要登录」的页（票 03 的工作台首页才是），所以用
+// `addRoute` 临时挂一条 —— 钉的是守卫对三态的反应，不是某一页。
+describe('身份三态（票 02）：守卫按清单里的 audience 判定', () => {
+  /** 手机上那个浏览器：只有员工会话（管理端未登录）。 */
+  function staffOnlyFetch() {
+    return vi.fn(async (url) => {
+      const path = String(url)
+      if (path.includes('/api/hygiene/staff/me')) {
+        return jsonResponse({ employee: { name: '张三' } })
+      }
+      if (path.includes('/api/auth/status')) {
+        return jsonResponse({ logged_in: false, initialized: true })
+      }
+      return jsonResponse({}, 404)
+    })
+  }
+
+  /** 店里那台共用电脑的店长：只有管理端会话。 */
+  function adminOnlyFetch() {
+    return vi.fn(async (url) => {
+      const path = String(url)
+      if (path.includes('/api/hygiene/staff/me')) {
+        return jsonResponse({ detail: '需要员工登录' }, 401)
+      }
+      if (path.includes('/api/auth/status')) {
+        return jsonResponse({ logged_in: true, initialized: true })
+      }
+      return jsonResponse({}, 404)
+    })
+  }
+
+  async function routerWith(path, meta) {
+    const router = await freshRouter()
+    router.addRoute({ path, component: { template: '<div />' }, meta })
+    return router
+  }
+
+  it('「两者」页：只有员工会话也放行（工作台外壳对两种身份都开）', async () => {
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    const router = await routerWith('/tmp/both', { audience: 'both' })
+
+    await router.push('/tmp/both')
+
+    expect(router.currentRoute.value.path).toBe('/tmp/both')
+  })
+
+  it('「两者」页：只有管理端会话也放行', async () => {
+    vi.stubGlobal('fetch', adminOnlyFetch())
+    const router = await routerWith('/tmp/both', { audience: 'both' })
+
+    await router.push('/tmp/both')
+
+    expect(router.currentRoute.value.path).toBe('/tmp/both')
+  })
+
+  it('管理端页：员工会话不算数，落 /login?next=<目标>（票 03 换成「无权访问」页）', async () => {
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    const router = await freshRouter()
+
+    await router.push('/workbench/daily')
+
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/daily')
+  })
+
+  it('员工页：管理端会话不算数（两套会话各认各的门）', async () => {
+    vi.stubGlobal('fetch', adminOnlyFetch())
+    const router = await routerWith('/tmp/staff', { audience: 'staff' })
+
+    await router.push('/tmp/staff')
+
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query.next).toBe('/tmp/staff')
+  })
+
+  it('员工页：只有员工会话放行', async () => {
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    const router = await routerWith('/tmp/staff', { audience: 'staff' })
+
+    await router.push('/tmp/staff')
+
+    expect(router.currentRoute.value.path).toBe('/tmp/staff')
+  })
+
+  it('认不出的 audience（meta 里没有）不静默当成 both：只有员工会话也落登录页', async () => {
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    const router = await routerWith('/tmp/unknown', {})
+
+    await router.push('/tmp/unknown')
+
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query.next).toBe('/tmp/unknown')
   })
 })
 

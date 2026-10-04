@@ -101,7 +101,10 @@ describe('员工端「今天」页（原型 A）', () => {
     // 带尾斜杠那条走 HTML_AUTH_PREFIXES（见 tests/test_auth.py 的员工端用例）。
     expect(router).toMatch(/path: '\/staff\/today', name: 'today'/)
     expect(router).toMatch(/views\/today\/TodayView\.vue/)
-    expect(router).toMatch(/path: '\/staff\/today'[\s\S]{0,200}?staffAuth: true/)
+    // 票 02：「这是员工页」不再由路由级的 `staffAuth` 布尔表达，而是页面清单里的
+    // audience（由 `pageMeta('/staff/today')` 带进来，守卫与 App.vue 都按它判）。
+    expect(router).toMatch(/path: '\/staff\/today'[\s\S]{0,200}?pageMeta\('\/staff\/today'\)/)
+    expect(router).not.toMatch(/staffAuth/)
     expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/staff\/today"/)
     // 免墙的是前缀本身 `/staff`（精确）与 `/staff/`（前缀表）：三页都没进精确名单。
     expect(mainPy).toMatch(/HTML_AUTH_EXACT = \{[^}]*"\/staff"/)

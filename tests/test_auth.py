@@ -598,9 +598,15 @@ def test_staff_path_list_matches_the_frontend_copy():
         ), f"{exact} 已被前缀名单罩住，不该再进精确名单（两层语义塌回一层）"
 
 
-def test_hygiene_roster_html_requires_admin_session(auth_app_client):
+def test_hygiene_roster_html_requires_a_session(auth_app_client):
+    """未登录（两套会话都没有）硬导航工作台页面：302 到 `/login?next=`，不是 200 外壳。
+
+    票 02 之后这一条的含义收窄成「没有**任何**会话」——工作台页面壳对管理端会话与
+    员工会话都放行（下面那三条用例分别盯着放行、系统管理面只认管理端、假 cookie 不放行）。
+    """
     client, _ = auth_app_client
     for path in (
+        "/workbench",
         "/workbench/roster",
         "/workbench/zones",
         "/workbench/daily",
@@ -611,6 +617,127 @@ def test_hygiene_roster_html_requires_admin_session(auth_app_client):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         assert resp.status_code == 302, path
         assert resp.headers["location"].startswith("/login"), path
+
+
+# ── 票 02：「任一身份」门 ─────────────────────────────────────────────────────
+# 工作台（ADR 0092）是第一个两种身份都能进的页面区：页面壳的放行条件是「管理端会话
+# 或员工会话至少有一个有效」，哪一页谁能看交给前端路由 meta 与各接口自己的 401。
+# 系统管理面（仪表盘 / 数据管理 / 销售报表 / 备货计划 / 企微推送 / 日志 / 设置）留在
+# 工作台外面，继续只认管理端会话。
+WORKBENCH_PAGES = (
+    "/workbench",
+    "/workbench/inbox",
+    "/workbench/shifts",
+    "/workbench/roster",
+    "/workbench/zones",
+    "/workbench/daily",
+    "/workbench/deep-clean",
+    "/workbench/fix",
+    "/workbench/boards",
+    "/workbench/data",
+    "/workbench/attire",
+)
+SYSTEM_PAGES = (
+    "/",
+    "/admin",
+    "/sales-report",
+    "/prep-plan",
+    "/wecom-push",
+    "/logs",
+    "/settings",
+)
+STAFF_PHONE = "13800138000"
+STAFF_PASSWORD = "password123"
+ADMIN_INIT = {
+    "username": "admin",
+    "password": "password123",
+    "confirm_password": "password123",
+}
+
+
+def _staff_only_client(client):
+    """把客户端变成「只有员工会话」：走过完整的员工链路，最后清掉管理端 cookie。
+
+    管理端会话只在审批花名册那一步用（`/api/hygiene/admin/roster/{id}/approve`），
+    审批完就删掉 —— 这条用例的前提正是「手机上只有员工 cookie、没有管理端会话」。
+    """
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200, init.text
+    registered = client.post(
+        "/api/hygiene/staff/register",
+        json={"name": "张三", "phone": STAFF_PHONE, "password": STAFF_PASSWORD},
+    )
+    assert registered.status_code == 200, registered.text
+    employee = registered.json()["employee"]
+    approved = client.post(f"/api/hygiene/admin/roster/{employee['id']}/approve")
+    assert approved.status_code == 200, approved.text
+    login = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": STAFF_PHONE, "password": STAFF_PASSWORD},
+    )
+    assert login.status_code == 200, login.text
+    assert client.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    client.cookies.delete(settings.SESSION_COOKIE_NAME)
+    assert client.cookies.get(settings.SESSION_COOKIE_NAME) is None
+
+
+def test_workbench_page_wall_accepts_a_staff_session(auth_app_client):
+    """员工会话（没有管理端会话）硬导航工作台每一页 → 200 页面壳。
+
+    这就是「工作台包含员工端」在服务端成立的那一半：以前页面墙只读管理端 cookie，
+    员工对自己的那半边（票 03 起是 `/workbench/me/*`）也永远进不去。
+    """
+    client, _ = auth_app_client
+    _staff_only_client(client)
+
+    for path in WORKBENCH_PAGES:
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 200, (path, resp.status_code)
+        assert "text/html" in resp.headers["content-type"], path
+
+
+def test_system_management_surface_rejects_a_staff_session(auth_app_client):
+    """系统管理面留在工作台外面：同一个员工会话对它任何一页都无效，仍然 302 登录页。"""
+    from urllib.parse import quote
+
+    client, _ = auth_app_client
+    _staff_only_client(client)
+
+    for path in SYSTEM_PAGES:
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 302, (path, resp.status_code)
+        assert resp.headers["location"] == f"/login?next={quote(path, safe='')}", path
+
+
+def test_workbench_page_wall_fails_closed_before_staff_accounts_are_wired(
+    auth_app_client, monkeypatch
+):
+    """员工账号服务还没装配（服务刚起的那几秒）：不放行，也不炸 500。"""
+    import main as main_module
+
+    client, _ = auth_app_client
+    monkeypatch.setattr(main_module, "employee_accounts", None)
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, "some-staff-session")
+
+    resp = client.get(
+        "/workbench/roster", headers=_html_headers(), follow_redirects=False
+    )
+
+    assert resp.status_code == 302, resp.text
+    assert resp.headers["location"] == "/login?next=%2Fworkbench%2Froster"
+
+
+def test_workbench_page_wall_rejects_a_bogus_staff_cookie(auth_app_client):
+    """有那个 cookie 不等于会话有效：假 / 过期 / 别人的员工 cookie 都不放行。"""
+    client, _ = auth_app_client
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, "bogus-staff-session")
+
+    resp = client.get(
+        "/workbench/roster", headers=_html_headers(), follow_redirects=False
+    )
+
+    assert resp.status_code == 302, resp.text
+    assert resp.headers["location"] == "/login?next=%2Fworkbench%2Froster"
 
 
 def test_logged_in_super_admin_gets_the_spa_shell_on_every_hygiene_page(auth_app_client):

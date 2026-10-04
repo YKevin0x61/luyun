@@ -138,7 +138,10 @@ describe('员工端「整月」页（票 06）', () => {
   it('is registered as a staff page on both sides', () => {
     expect(router).toMatch(/path: '\/staff\/month', name: 'today-month'/)
     expect(router).toMatch(/views\/today\/TodayMonthView\.vue/)
-    expect(router).toMatch(/path: '\/staff\/month'[\s\S]{0,200}?staffAuth: true/)
+    // 票 02：员工身份来自页面清单的 audience（`pageMeta('/staff/month')`），不再是
+    // 路由级的 `staffAuth` 布尔。
+    expect(router).toMatch(/path: '\/staff\/month'[\s\S]{0,200}?pageMeta\('\/staff\/month'\)/)
+    expect(router).not.toMatch(/staffAuth/)
     expect(router).toMatch(/path: '\/staff\/month'[\s\S]{0,200}?staffProbe: false/)
     // 后端那一侧（`SPA_PAGE_ROUTES`、`HTML_AUTH_PREFIXES`、尾斜杠）由行为级契约盯着：
     // `tests/test_spa_page_routes.py` 拿 `main.app.routes` 的真实路径集合对表、

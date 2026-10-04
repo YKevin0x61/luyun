@@ -20,10 +20,10 @@ const isHygieneAdmin = computed(() => isHygieneAdminPath(route.path))
 const realtimeEnabled = computed(() => route.meta.realtime === true || !route.meta.public)
 // 员工端页面的实时连接显式声明自己是员工（票 08）：同一浏览器可能同时持管理端与
 // 员工端两套 cookie，服务端默认「管理端优先」，不声明就会被判成管理端身份——主题
-// 白名单全开、员工之间「只看得到与自己有关的那条」的隔离失效。判据用页面自己那条
-// `meta.staffAuth`（与路由守卫同一个标记），不另写一份路径正则；管理端页面不带声明，
+// 白名单全开、员工之间「只看得到与自己有关的那条」的隔离失效。判据用页面清单里的
+// 「允许的身份」三态（与路由守卫同一个来源），不另写一份路径正则；管理端页面不带声明，
 // 默认优先级本来就对。声明写在连接 URL 上，路由换了身份就换连接（composable 负责重连）。
-const realtimeIdentity = computed(() => (route.meta.staffAuth ? 'staff' : null))
+const realtimeIdentity = computed(() => (route.meta.audience === 'staff' ? 'staff' : null))
 
 // PWA 清单归属跟面板用的是同一个判据（`utils/loginNext.js` 的 `resolveLoginTab`）：
 // `/login` 一条路径装两种身份，装出来是哪份应用看当下停在哪一栏 —— 员工栏是员工应用

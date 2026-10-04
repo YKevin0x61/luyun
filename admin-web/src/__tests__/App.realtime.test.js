@@ -24,15 +24,20 @@ class FakeWebSocket {
   }
 }
 
-// 与真实 router 同一套 meta 口径（`/staff/*` 是 public + staffAuth + realtime）。
+// 与真实 router 同一套 meta 口径（`/staff/*` 是 public + audience 'staff' + realtime；
+// 身份判据是票 02 的 `meta.audience` 三态，不再是 `staffAuth` 布尔）。
 const ROUTES = [
-  { path: '/', component: { template: '<div />' } },
-  { path: '/workbench/roster', component: { template: '<div />' }, meta: { standalone: true } },
-  { path: '/login', component: { template: '<div />' }, meta: { standalone: true, public: true } },
+  { path: '/', component: { template: '<div />' }, meta: { audience: 'admin' } },
+  {
+    path: '/workbench/roster',
+    component: { template: '<div />' },
+    meta: { standalone: true, audience: 'admin' },
+  },
+  { path: '/login', component: { template: '<div />' }, meta: { standalone: true, public: true, audience: 'both' } },
   {
     path: '/staff/today',
     component: { template: '<div />' },
-    meta: { public: true, standalone: true, staffAuth: true, realtime: true },
+    meta: { public: true, standalone: true, audience: 'staff', realtime: true },
   },
 ]
 

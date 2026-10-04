@@ -48,7 +48,7 @@ describe('hygiene admin section shell', () => {
     // （`meta: pageMeta(path)`）。值本身在这里对着清单断一次；「注册出来的路由确实
     // 等于清单」由 `router/__tests__/pageRoutes.test.js` 对着真实路由表钉。
     expect(router).toMatch(/meta: pageMeta\(path\)/)
-    expect(pageMeta('/workbench/roster')).toEqual({ standalone: true, public: false })
+    expect(pageMeta('/workbench/roster')).toEqual({ standalone: true, public: false, audience: 'admin' })
     expect(router).toMatch(/hygieneAdminPage\('\/workbench\/roster'/)
     expect(router).toMatch(/hygieneAdminPage\('\/workbench\/zones'/)
     expect(router).toMatch(/hygieneAdminPage\('\/workbench\/daily'/)

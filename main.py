@@ -729,6 +729,33 @@ HTML_AUTH_SUFFIXES = (
 )
 
 
+# 工作台页面区（ADR 0092）：唯一两种身份都能进的页面区，放行条件是「管理端会话或
+# 员工会话至少一个有效」。前缀写成「等于 + 带斜杠」，不用裸 startswith —— 那样
+# `/workbenchxyz` 这种不存在的路径也会被放宽到两套凭据。
+WORKBENCH_PAGE_PREFIX = "/workbench"
+
+
+def _is_workbench_page(path: str) -> bool:
+    return path == WORKBENCH_PAGE_PREFIX or path.startswith(f"{WORKBENCH_PAGE_PREFIX}/")
+
+
+async def _has_staff_session(request: Request) -> bool:
+    """员工会话是否有效 —— 工作台页面壳的第二把钥匙。
+
+    cookie 里是会话原文、库里存的是 sha256，所以判定只能走公共层的
+    `EmployeeAccounts.get_staff_session`，不能自己查 `hygiene_staff_sessions`
+    （那会多出一份会漂的哈希与有效期判定）。服务刚起的那几秒 `employee_accounts`
+    还没装配：fail-closed，不放行。
+    """
+    session_id = request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    if not session_id:
+        return False
+    accounts = employee_accounts
+    if accounts is None:
+        return False
+    return await accounts.get_staff_session(session_id) is not None
+
+
 def _is_html_auth_exempt(path: str) -> bool:
     if path in HTML_AUTH_EXACT or path in HTML_AUTH_PUBLIC_PAGES:
         return True
@@ -763,6 +790,9 @@ class HtmlAuthMiddleware(BaseHTTPMiddleware):
         if _is_html_auth_exempt(path):
             return await call_next(request)
         accept = request.headers.get("accept", "")
+        # 只拦「看起来像页面」的请求是**有意**的，不是顺手：非页面请求（运维 curl、
+        # 探针、XHR）拿到的是不含任何业务数据的 SPA 外壳，真实数据仍由各接口自己的
+        # 401 兜住；把墙扩到全部请求只会让探针与静态检查跟着一起 302。
         looks_like_page = (
             path.endswith(".html")
             or path in {"/", "/admin", "/admin/"}
@@ -772,6 +802,11 @@ class HtmlAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
         if await auth_service.validate_session_id(session_id):
+            return await call_next(request)
+        # 工作台接受任一会话（ADR 0092）：管理端那一支在上面，这里再给员工会话一次
+        # 机会。系统管理面不走这条路 —— 员工会话对它任何一页都无效。页面级权限交给
+        # 前端路由 meta 与各接口自己的 401，服务端不替它们做页面级授权。
+        if _is_workbench_page(path) and await _has_staff_session(request):
             return await call_next(request)
         return _html_login_redirect(request)
 

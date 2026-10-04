@@ -101,15 +101,15 @@ describe('vue-router 从清单派生', () => {
     expect(missing, `清单里的页面没注册（点进去是白屏）：${missing}`).toEqual([])
   })
 
-  it('每条路由的「独立外壳 / 免登录」标记等于清单里的值', async () => {
+  it('每条路由的「独立外壳 / 免登录 / 允许的身份」等于清单里的值', async () => {
     const router = await freshRouter()
 
     for (const row of PAGE_ROUTES) {
       const meta = router.resolve(row.path).meta
       expect(
-        { standalone: !!meta.standalone, public: !!meta.public },
+        { standalone: !!meta.standalone, public: !!meta.public, audience: meta.audience },
         row.path,
-      ).toEqual({ standalone: row.standalone, public: row.public })
+      ).toEqual({ standalone: row.standalone, public: row.public, audience: row.audience })
     }
   })
 

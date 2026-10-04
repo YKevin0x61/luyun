@@ -6,7 +6,8 @@
  *  `tests/test_spa_page_routes.py` 对着同一张表强校验。两边一起动的时候，
  *  只要表是对的，前端与后端就不会各说各话（这正是票 01 要消掉的那类漂移）。
  *
- *  身份（`audience`）这一票只登记、还没有消费者 —— 路由守卫按它判定是票 02 的事。
+ *  身份（`audience`）由路由守卫消费（票 02 起）：`admin` 只认管理端会话、`staff` 只认
+ *  员工会话、`both` 任一会话有效即可 —— 与 `main.py` 的页面墙对工作台前缀的判定同一口径。
  */
 import table from './pageRoutes.json'
 
@@ -35,8 +36,8 @@ export function pageTitle(path) {
   return requireRow(path).title
 }
 
-/** vue-router 的 meta：独立外壳（不渲染后台导航）与免登录（守卫放行）。 */
+/** vue-router 的 meta：独立外壳、免登录，以及守卫要用的「允许的身份」三态。 */
 export function pageMeta(path) {
   const row = requireRow(path)
-  return { standalone: row.standalone, public: row.public }
+  return { standalone: row.standalone, public: row.public, audience: row.audience }
 }

@@ -233,3 +233,30 @@ async def require_staff_session(request: Request) -> dict:
     if employee is None:
         raise HTTPException(status_code=401, detail="需要员工登录")
     return employee
+
+
+async def require_any_identity_session(request: Request) -> dict:
+    """「任一身份」门：管理端会话或员工会话，任一有效即放行。
+
+    形状照 `api/hygiene.py` 的 `require_standard_cache_session`（先管理端、再员工，
+    返回同一个 `{"kind": ...}` 形状），但账号源走公共层 —— 配方（票 07）与备货计划
+    （票 08）的读接口要用它，不该为了一个依赖 import 卫生的路由模块。判定顺序与
+    CSRF 拦截、WS 身份那几处一致：两套 cookie 都在时**管理端优先**。
+
+    拒绝时是 401「未授权」（与 `verify_admin_token` 同一个 body），不是「需要登录」
+    —— 契约测试用这个 body 把「鉴权门拒绝」与业务自己的 401 分开。没带员工 cookie
+    时不碰员工账号服务，所以服务刚起、`main.employee_accounts` 还没装配的那几秒，
+    未登录访客拿到的是 401 而不是 503。
+    """
+    admin_session = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    if await auth_service.validate_session_id(admin_session):
+        return {"kind": "admin", "session_id": admin_session}
+
+    staff_session = request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    if staff_session:
+        accounts = _staff_accounts()
+        employee = await accounts.get_staff_session(staff_session)
+        if employee is not None:
+            return {"kind": "staff", "employee": employee}
+
+    raise HTTPException(status_code=401, detail="未授权")

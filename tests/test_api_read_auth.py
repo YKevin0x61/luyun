@@ -22,6 +22,7 @@
 from datetime import datetime
 
 import pytest
+from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
@@ -73,12 +74,15 @@ AUTH_GATE_BODY = {"detail": "未授权"}
 # 路由，等于给未来的"裸读接口"留了后门。整份清单删除：现在「清单外 /api 必须带
 # 守卫」对全部 /api 路由生效。
 
-# 认得的守卫：管理员凭据、管理端会话、员工会话、卫生标准图缓存会话。
+# 认得的守卫：管理员凭据、管理端会话、员工会话、卫生标准图缓存会话、任一身份门。
+# 新守卫要加进这里，否则挂上它的路由在下面那条契约里会被当成「裸接口」（票 07/08
+# 把「任一身份」门接到配方 / 备货计划读接口时会撞上）。
 GUARD_CALLABLES = {
     "verify_admin_token",
     "require_session",
     "require_staff_session",
     "require_standard_cache_session",
+    "require_any_identity_session",
 }
 
 
@@ -439,3 +443,144 @@ def test_public_api_surface_registry_matches_real_routes():
     missing = sorted(set(main_module.PUBLIC_API_SURFACE) - real)
 
     assert missing == [], f"PUBLIC_API_SURFACE 里这些条目没有对应路由：{missing}"
+
+
+# ---------------------------------------------------------------------------
+# 5. 「任一身份」门（票 02 建依赖本身；接线到配方 / 备货计划是 07 / 08 的事）
+# ---------------------------------------------------------------------------
+# 工作台是第一个两种身份都能进的地方，配方与备货计划的读接口随后要共用同一条门
+# （ADR 0092）。本票不改任何业务路由，所以这里用一条探针 app 打它 —— 依赖必须真的
+# 可用：真 `main.app` 的 lifespan 建库与员工账号服务，管理端会话走 `/api/auth/login`，
+# 员工会话走 `/api/hygiene/staff/login`，两个都是真 cookie。
+PROBE_PATH = "/probe"
+
+
+def _staff_session_cookie(client) -> str:
+    """在真 app 上走完员工链路，返回员工会话的 cookie 原文（库里存的是它的 sha256）。"""
+    registered = client.post(
+        "/api/hygiene/staff/register",
+        json={"name": "张三", "phone": "13800138000", "password": ADMIN_PASSWORD},
+    )
+    assert registered.status_code == 200, registered.text
+    employee = registered.json()["employee"]
+    approved = client.post(f"/api/hygiene/admin/roster/{employee['id']}/approve")
+    assert approved.status_code == 200, approved.text
+    login = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": "13800138000", "password": ADMIN_PASSWORD},
+    )
+    assert login.status_code == 200, login.text
+    session_id = client.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    assert session_id, "员工登录必须下发员工会话 cookie"
+    return session_id
+
+
+@pytest.fixture
+def any_identity_gate(tmp_path):
+    """一条只挂「任一身份」门的探针 app + 真 app 的装配（runtime / 员工账号服务）。"""
+    old = settings.DATABASE_DIR
+    settings.DATABASE_DIR = str(tmp_path)
+    import main as main_module
+    from api.security import require_any_identity_session
+
+    probe = FastAPI()
+
+    @probe.get(PROBE_PATH)
+    async def _probe(identity=Depends(require_any_identity_session)):
+        return {"kind": identity["kind"]}
+
+    try:
+        with TestClient(main_module.app) as client:
+            yield client, TestClient(probe)
+    finally:
+        settings.DATABASE_DIR = old
+
+
+def test_any_identity_gate_is_registered_as_a_known_guard():
+    """名字必须与契约清单里那一条对得上 —— 重命名要一起改，否则挂上它的接口变「裸接口」。"""
+    from api.security import require_any_identity_session
+
+    assert require_any_identity_session.__name__ in GUARD_CALLABLES
+
+
+def test_any_identity_gate_accepts_either_session(any_identity_gate):
+    client, probe = any_identity_gate
+
+    # 无凭据：401，body 与别的鉴权门一致（契约靠它把「鉴权拒绝」与业务 401 分开）。
+    anonymous = probe.get(PROBE_PATH)
+    assert anonymous.status_code == 401, anonymous.text
+    assert anonymous.json() == AUTH_GATE_BODY
+
+    init = client.post(
+        "/api/auth/init",
+        json={
+            "username": ADMIN_USERNAME,
+            "password": ADMIN_PASSWORD,
+            "confirm_password": ADMIN_PASSWORD,
+        },
+    )
+    assert init.status_code == 200, init.text
+    login = client.post(
+        "/api/auth/login",
+        json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+    )
+    assert login.status_code == 200, login.text
+    admin_session = client.cookies.get(settings.SESSION_COOKIE_NAME)
+    assert admin_session
+
+    staff_session = _staff_session_cookie(client)
+
+    probe.cookies.set(settings.SESSION_COOKIE_NAME, admin_session)
+    as_admin = probe.get(PROBE_PATH)
+    assert as_admin.status_code == 200, as_admin.text
+    assert as_admin.json() == {"kind": "admin"}
+
+    probe.cookies.clear()
+    probe.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    as_staff = probe.get(PROBE_PATH)
+    assert as_staff.status_code == 200, as_staff.text
+    assert as_staff.json() == {"kind": "staff"}
+
+
+def test_any_identity_gate_prefers_the_admin_session(any_identity_gate):
+    """同浏览器两套 cookie：管理端那一支先判（与卫生的标准图门同一顺序）。"""
+    client, probe = any_identity_gate
+
+    init = client.post(
+        "/api/auth/init",
+        json={
+            "username": ADMIN_USERNAME,
+            "password": ADMIN_PASSWORD,
+            "confirm_password": ADMIN_PASSWORD,
+        },
+    )
+    assert init.status_code == 200, init.text
+    login = client.post(
+        "/api/auth/login",
+        json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+    )
+    assert login.status_code == 200, login.text
+    staff_session = _staff_session_cookie(client)
+
+    probe.cookies.set(
+        settings.SESSION_COOKIE_NAME, client.cookies.get(settings.SESSION_COOKIE_NAME)
+    )
+    probe.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+
+    resp = probe.get(PROBE_PATH)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"kind": "admin"}
+
+
+def test_any_identity_gate_rejects_bogus_cookies(any_identity_gate):
+    """有 cookie 不等于有会话：伪造 / 过期的凭据一律 401。"""
+    _client, probe = any_identity_gate
+
+    probe.cookies.set(settings.SESSION_COOKIE_NAME, "bogus-admin-session")
+    probe.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, "bogus-staff-session")
+
+    resp = probe.get(PROBE_PATH)
+
+    assert resp.status_code == 401, resp.text
+    assert resp.json() == AUTH_GATE_BODY

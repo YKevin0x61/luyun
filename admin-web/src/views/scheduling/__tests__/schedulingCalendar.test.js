@@ -138,7 +138,7 @@ describe('店长端排班月历（原型 B）', () => {
     // 票 01：这个标记不再写死在 router 里，而是从页面清单派生（`meta: pageMeta('/workbench')`）；
     // 注册出来的路由确实等于清单，由 `router/__tests__/pageRoutes.test.js` 对着真实路由表钉。
     expect(router).toMatch(/meta: pageMeta\('\/workbench'\)/)
-    expect(pageMeta('/workbench')).toEqual({ standalone: true, public: false })
+    expect(pageMeta('/workbench')).toEqual({ standalone: true, public: false, audience: 'admin' })
     expect(router).toMatch(/views\/scheduling\/SchedulingLayout\.vue/)
     expect(shell).toMatch(/router\.push\('\/'\)/)
     expect(shell).toMatch(/inject\('wsConnected'/)
