@@ -15,6 +15,9 @@
  *    单子）。逾期 = **过了截止时间、还等着回拍**（`待回拍`）—— 那正是店长要盯的那批；
  *    已经回拍上来等验收的（`待验收`）超时与否是验收节奏的事，不算在这格里。
  *
+ *  身份词表只有一处（`utils/workbenchIdentity.js`）：这里不写 'super' / 'staff'
+ *  字面量，免得第 N 个消费方各写一份、改口径时漏掉。
+ *
  *  **员工侧**复用「今天」页那套翻译（`utils/todayShift.js`）与工作流口径
  *  （`utils/hygieneWorkFlow.js`）：同一件事在两个页面上必须说同一句话。
  *
@@ -23,6 +26,7 @@
  */
 import { shiftText, todayHeadline, todaySubline, todayTone } from './todayShift.js'
 import { STATUS_FIX_TODO, STATUS_PENDING, openRows } from './hygieneWorkFlow.js'
+import { IDENTITY_ADMIN, IDENTITY_STAFF } from './workbenchIdentity.js'
 
 /** 首页每个数字点进去的地方 —— 一处定义，模板与测试都引它，不各写一遍字面量。 */
 export const HOME_LINKS = {
@@ -43,11 +47,11 @@ export const HOME_LINKS = {
 /** 工作台身份 → 清单里的身份词。与 `utils/workbenchNav.js` 同一张表的两档词，
  *  这里只做「认不出就不渲染」这一条判据（fail-closed），不参与权限。 */
 function isAdmin(identity) {
-  return identity === 'super'
+  return identity === IDENTITY_ADMIN
 }
 
 function isStaff(identity) {
-  return identity === 'staff'
+  return identity === IDENTITY_STAFF
 }
 
 /** 待批请假条数：申请队列里 `kind === 'leave'` 的那几条。
@@ -188,7 +192,7 @@ export function workbenchHomeSummary({
   if (isAdmin(identity)) {
     const groups = onDutyNames(day)
     return {
-      view: 'super',
+      view: IDENTITY_ADMIN,
       duty: {
         total: (day && typeof day.total === 'number') ? day.total : groups.reduce((sum, group) => sum + group.count, 0),
         groups,
@@ -211,7 +215,7 @@ export function workbenchHomeSummary({
       requests: inbox,
     })
     return {
-      view: 'staff',
+      view: IDENTITY_STAFF,
       duty: null,
       leaves: null,
       reviews: null,

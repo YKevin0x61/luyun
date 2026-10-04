@@ -27,6 +27,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWorkbenchIdentityStore } from '../stores/workbenchIdentity'
 import { logoutAdminSession } from '../utils/adminLogout'
+import { IDENTITY_ADMIN, IDENTITY_STAFF } from '../utils/workbenchIdentity.js'
 import { useStaffLogout } from './useStaffLogout'
 
 export function useWorkbenchLogout() {
@@ -41,7 +42,7 @@ export function useWorkbenchLogout() {
   /** 点了退出：员工那一档且队列里还有照片 → 先弹确认；其余情况直接退。
    *  `ask()` 会把「要不要确认」与「真退」分开，店长那侧没有队列，直接走 exit。 */
   function ask() {
-    if (identity.value === 'staff') {
+    if (identity.value === IDENTITY_STAFF) {
       staff.ask()
       return
     }
@@ -50,14 +51,14 @@ export function useWorkbenchLogout() {
 
   /** 真退（员工那侧的确认框回调也接这儿）。 */
   async function exit() {
-    if (identity.value === 'staff') {
+    if (identity.value === IDENTITY_STAFF) {
       // 员工那半的「身份结论作废」落在 `useStaffLogout.logout()` 里：`ask()` 那条
       // 「队列里没有照片就直接退」的路不经过这里（它直接调 `staff.ask()`），作废只有
       // 写在那边才两条路都盖得住。
       await staff.logout()
       return
     }
-    if (identity.value === 'super') {
+    if (identity.value === IDENTITY_ADMIN) {
       await logoutAdminSession(router, route.fullPath)
       identityStore.reset()
     }
@@ -68,7 +69,7 @@ export function useWorkbenchLogout() {
     ask,
     exit,
     /** 员工那一档的「还有照片没传完」确认框（店长那侧恒为 false）。 */
-    confirmOpen: computed(() => identity.value === 'staff' && staff.confirmOpen.value),
+    confirmOpen: computed(() => identity.value === IDENTITY_STAFF && staff.confirmOpen.value),
     queuedCount: staff.queuedCount,
     cancel: staff.cancel,
     loggingOut: staff.loggingOut,

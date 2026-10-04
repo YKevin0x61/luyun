@@ -76,7 +76,15 @@ PREP_PLAN_READ_PATHS = (
     "/api/prep-plan/forecast",
     "/api/prep-plan/movements",
     "/api/prep-plan/expiring",
+    # `/accuracy` 也是读端点（code-review 指出：票 08 曾把它留在管理端 router，与 ADR 0092
+    # 契约表的「备货计划读端点 → 任一身份」不符；收尾时并到 reader_router）。
+    "/api/prep-plan/accuracy",
 )
+
+# 少数读端点要参数才是 200（缺参数会是 422，那是形态问题、与鉴权门无关）。
+PREP_PLAN_READ_QUERY = {
+    "/api/prep-plan/accuracy": {"start_date": "2026-10-01", "end_date": "2026-10-05"},
+}
 
 # 备货计划的写面（票 08 不动的部分）：**仍只认管理端**。
 PREP_PLAN_WRITE_PATHS = (
@@ -560,16 +568,17 @@ def test_prep_plan_reads_accept_any_identity_session(api):
     管理端会话与员工会话都能读到**同样的**内容。**写端点不在这一档**（下一条钉住）。
     """
     for path in PREP_PLAN_READ_PATHS:
-        anonymous = api.anonymous("GET", path)
+        query = PREP_PLAN_READ_QUERY.get(path)
+        anonymous = api.anonymous("GET", path, params=query)
         assert anonymous.status_code == 401, f"{path} 无凭据居然 {anonymous.status_code}"
         assert anonymous.json() == AUTH_GATE_BODY, anonymous.text
 
-        as_admin = api.as_cookie("GET", path)
+        as_admin = api.as_cookie("GET", path, params=query)
         assert as_admin.status_code == 200, f"{path} 管理端会话 {as_admin.status_code}: {as_admin.text}"
 
     _staff_reader_session(api)
     for path in PREP_PLAN_READ_PATHS:
-        as_staff = api.as_staff("GET", path)
+        as_staff = api.as_staff("GET", path, params=PREP_PLAN_READ_QUERY.get(path))
         assert as_staff.status_code == 200, f"{path} 员工会话 {as_staff.status_code}: {as_staff.text}"
 
     # 两把钥匙拿到的是同一份内容（读面不分身份裁剪）。

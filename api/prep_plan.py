@@ -252,7 +252,7 @@ async def get_expiring_batches(
         raise HTTPException(status_code=500, detail=f"查询临期批次失败: {exc}")
 
 
-@router.get("/accuracy")
+@reader_router.get("/accuracy")
 async def get_accuracy(
     start_date: str = Query(...),
     end_date: str = Query(...),
@@ -262,9 +262,10 @@ async def get_accuracy(
     MVP3 基础版准确率：按计划项聚合统计 abs(预测-实际)/实际。
     实际值暂以 orders + semi_rules 换算（简化版：同周期总量）。
 
-    **这条留在业务 router 上**（票 08）：它是管理端的复盘口径，备货计划页一个字段都不用
-    它 —— 读面开「任一身份」开的是那一页真正要读的四条（forecast / current / movements /
-    expiring），不顺手把没被工作台消费的接口一起放宽。
+    **挂在 reader_router 上**（票 08 的原实现把它留在业务 router，code-review 指出这与
+    spec 的 API 契约表不符 —— 那张表写的是「备货计划读端点：仅管理端 → 任一身份」，没有
+    给「页面没消费的读端点」留例外）。它只读、没有副作用，放宽到任一身份不扩权；写端点
+    仍然只认管理端。
     """
     try:
         return await prep_plan_service.get_accuracy(db, start_date, end_date)

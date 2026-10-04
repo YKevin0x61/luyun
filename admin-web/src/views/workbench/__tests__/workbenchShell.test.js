@@ -206,4 +206,15 @@ describe('工作台外壳的导航', () => {
     // （不是被守卫甩走、也不是停在别人的页上）。
     expect(router.currentRoute.value.path).toBe('/workbench')
   })
+
+  it('顶栏有一扇回管理后台的门（spec 故事 11：两边各留一个入口、双向）', async () => {
+    // 工作台首页 / 后勤 / 「我的」这几页走的都是这个壳；人事与现场那两个壳各自也有
+    // 一颗「‹ 后台」。少了它，店长站在子应用首页回不去后台（code-review 指出的缺口）。
+    const { wrapper } = await mountShell('/workbench')
+
+    const back = wrapper.find('.wb-back')
+    expect(back.exists()).toBe(true)
+    expect(back.text()).toContain('后台')
+    expect(back.attributes('href')).toBe('/')
+  })
 })

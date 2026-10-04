@@ -71,10 +71,16 @@ worker/多进程会导致状态分裂、WebSocket 订阅收不到推送、甚至
 | `scripts/publish_release.sh` | 开发者发布 GitHub Release（产出发行包） |
 
 Admin 与 KDS 构建产物包含各自的 Service Worker 和 Web App Manifest。反代需要
-让 `/sw.js`、`/pwa/*` 与 `/kds/sw.js`、`/kds/manifest.webmanifest` 到达
-FastAPI；FastAPI 会为 Service Worker/manifest/HTML 设置 `no-cache`，并为
+让 `/sw.js`、`/pwa/*`、**`/workbench/sw.js`** 与 `/kds/sw.js`、`/kds/manifest.webmanifest`
+到达 FastAPI；FastAPI 会为 Service Worker/manifest/HTML 设置 `no-cache`，并为
 哈希静态资源设置 immutable 缓存。Service Worker 不会缓存 `/api/*`、`/ws/*`、
 上传下载或卫生图片。
+
+**`/workbench/sw.js` 必须由 FastAPI 发，不能被反代的 SPA 静态块直接吐出去**：它要带
+`Service-Worker-Allowed: /workbench`，少这个头浏览器会以 SecurityError 拒掉
+`scope: '/workbench'` 的注册（`main.py` 的 `/workbench/sw.js` 路由负责发这个头；
+`deploy/nginx.conf` 用 `location = /workbench/sw.js`、`deploy/Caddyfile` 用
+`handle @workbench_sw` 把它单独交给后端，别并进 `/workbench*` 那条静态白名单）。
 
 ---
 

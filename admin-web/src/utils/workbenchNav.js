@@ -29,7 +29,7 @@ import { PAGE_ROUTES, pageMeta, pageRow } from '../router/pageRoutes.js'
 import { PREP_PLAN_PATH } from './prepPlanPaths.js'
 import { RECIPE_HOME_PATH } from './recipePaths.js'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME } from './workbenchCopy.js'
-import { IDENTITY_ADMIN } from './workbenchIdentity.js'
+import { IDENTITY_ADMIN, IDENTITY_STAFF } from './workbenchIdentity.js'
 
 export const WORKBENCH_NAV_GROUPS = [
   // 首页（票 06）：「今天」—— 子应用根，两种身份都看得见（那一页在清单里是 `both`）。
@@ -78,7 +78,7 @@ export function workbenchPagesOf(group) {
  *  认不出的身份给 `null`（不是 `admin`）：调用方据此不渲染任何一格，fail-closed。 */
 export function workbenchAudienceFor(identity) {
   if (identity === IDENTITY_ADMIN) return 'admin'
-  if (identity === 'staff') return 'staff'
+  if (identity === IDENTITY_STAFF) return 'staff'
   return null
 }
 

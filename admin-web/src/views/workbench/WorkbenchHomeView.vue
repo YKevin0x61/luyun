@@ -25,6 +25,7 @@ import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { pageTitle } from '../../router/pageRoutes.js'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
+import { IDENTITY_ADMIN } from '../../utils/workbenchIdentity'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { dayLabel } from '../../utils/todayShift'
 import { WORKBENCH_TITLE, workbenchDocumentTitle } from '../../utils/workbenchCopy'
@@ -112,7 +113,7 @@ async function loadStaff() {
 async function load() {
   if (!identity.value) return
   state.value = 'loading'
-  if (identity.value === 'super') await loadManager()
+  if (identity.value === IDENTITY_ADMIN) await loadManager()
   else await loadStaff()
   state.value = 'ready'
 }
@@ -149,7 +150,7 @@ useNudgePull({
     <p v-if="!summary.view" class="wbh-wait">{{ state === 'loading' ? '正在确认身份…' : '身份还没定，稍后再看' }}</p>
 
     <!-- ── 店长：今天谁上班 + 三个数字 ─────────────────────────────────── -->
-    <template v-else-if="summary.view === 'super'">
+    <template v-else-if="summary.view === IDENTITY_ADMIN">
       <router-link class="wbh-card wbh-duty" :to="HOME_LINKS.duty">
         <div class="wbh-card-hd">
           <span class="wbh-card-title">今天谁上班</span>

@@ -99,6 +99,10 @@ watch(identity, keepViewAllowed)
     <a class="hy-skip" href="#workbench-main">跳到内容</a>
 
     <header class="wb-top">
+      <!-- 回管理后台的门（spec 故事 11：两边各留一个入口、双向）。人事 / 现场两个壳各自
+           也有一个「‹ 后台」，这里补上工作台首页、后勤与「我的」这几个页面的那一扇 ——
+           少了它，店长站在子应用首页回不去后台。 -->
+      <router-link class="wb-back" to="/">‹ 后台</router-link>
       <b class="wb-brand">{{ WORKBENCH_TITLE }}</b>
       <WorkbenchIdentitySwitcher class="wb-id-switcher" />
       <nav class="wb-nav" aria-label="工作台导航">
@@ -151,6 +155,14 @@ watch(identity, keepViewAllowed)
   font-family: var(--font-song); font-size: 14px;
   letter-spacing: .12em; color: var(--hy-ink);
 }
+/* 与人事壳的 `.sched-back` 同一身：一颗描边小胶囊，别抢牌子的视线。 */
+.wb-back {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 12px; color: var(--hy-muted); text-decoration: none;
+  background: var(--hy-surface-2); border: 1px solid var(--hy-line);
+  border-radius: 999px; padding: 4px 11px;
+}
+.wb-back:hover { color: var(--hy-ink); border-color: var(--hy-line-strong); }
 /* 切换器与导航之间一条细分隔：两件事（我是谁 / 去哪一页），别挤成一团。 */
 .wb-id-switcher { margin-left: 4px; padding-right: 10px; border-right: 1px solid var(--hy-line); }
 .wb-nav { display: flex; align-items: center; gap: 6px; margin-left: auto; }

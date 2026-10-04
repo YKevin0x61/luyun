@@ -80,6 +80,16 @@ your-domain.example.com {
 		header Cache-Control "public, max-age=31536000, immutable"
 	}
 
+	# ── 工作台 Service Worker：**必须由后端发**，不能走下面那条静态块 ──
+	# 它要带 `Service-Worker-Allowed: /workbench`（main.py 的 `/workbench/sw.js` 路由发），
+	# 少这个头浏览器会以 SecurityError 拒掉 `scope: '/workbench'` 的注册，而失败会被前端
+	# 静默吞掉（表现为「经反代部署时工作台 SW 从不注册」）。Caddy 的 handle 按书写顺序
+	# 取第一个匹配的，所以这条要排在 @spa 前面。
+	@workbench_sw path /workbench/sw.js
+	handle @workbench_sw {
+		reverse_proxy 127.0.0.1:8000
+	}
+
 	# ── SPA 页面壳：history 模式路由，找不到对应静态文件时回退到
 	#    index.html，交给 vue-router 在浏览器端接管路由。
 	#    前缀表与 nginx.conf 的 location 正则逐条对齐（改一处就得改另一处）──
