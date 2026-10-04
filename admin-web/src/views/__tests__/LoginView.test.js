@@ -172,8 +172,11 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
   })
 })
 
-describe('/login 面板：装出来的应用跟着当前栏走（票 07）', () => {
-  it('切到员工栏时 #app-manifest 换成员工清单、主题色跟着变；切回管理员栏变回管理端', async () => {
+describe('/login 面板：清单归属只看路径（票 09 收敛，不再随栏位变）', () => {
+  it('切到员工栏时清单与主题色都不变：登录页整个归管理端那份', async () => {
+    // 票 07 的做法是「面板身份就是归属」——一条路径两份清单，判据吃不下「当下停在哪一栏」，
+    // 票 09 按票面口径把 `/login` 整个划给管理端。员工要装工作台那份，从 `/register`
+    // 或已经登录后的工作台页面装（工作台前缀归工作台）。
     rememberTab('admin')
     fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT()).mockResolvedValueOnce(STAFF_401())
 
@@ -184,12 +187,6 @@ describe('/login 面板：装出来的应用跟着当前栏走（票 07）', () 
     await clickTab(wrapper, '员工')
 
     expect(activeTab(wrapper)).toBe('员工')
-    expect(manifestHref()).toBe('/pwa/manifests/hygiene.webmanifest')
-    expect(themeColor()).toBe('#16a34a')
-
-    await clickTab(wrapper, '管理员')
-
-    expect(activeTab(wrapper)).toBe('管理员')
     expect(manifestHref()).toBe('/pwa/manifests/admin.webmanifest')
     expect(themeColor()).toBe('#0a0d16')
   })

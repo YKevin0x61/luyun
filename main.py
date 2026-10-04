@@ -10,7 +10,7 @@ import uvicorn
 from contextlib import asynccontextmanager
 from collections import deque
 from datetime import datetime, timezone, timedelta
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -854,7 +854,7 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
             ):
                 response.headers["Cache-Control"] = "public, max-age=86400"
             elif (
-                request.url.path in {"/sw.js", "/kds/sw.js"}
+                request.url.path in {"/sw.js", "/workbench/sw.js", "/kds/sw.js"}
                 or request.url.path.endswith(".webmanifest")
                 or response.headers.get("content-type", "").startswith("text/html")
             ):
@@ -1089,14 +1089,21 @@ def _spa_index():
     return FileResponse(spa_index_path, headers={"Cache-Control": "no-cache"})
 
 
-def _spa_asset(relative_path: str, media_type: str):
+def _spa_asset(
+    relative_path: str,
+    media_type: str,
+    extra_headers: Optional[Dict[str, str]] = None,
+):
     target = os.path.join(spa_dir, relative_path)
     if not os.path.isfile(target):
         raise HTTPException(status_code=404, detail="管理后台 PWA 资源未构建")
+    headers = {"Cache-Control": "no-cache"}
+    if extra_headers:
+        headers.update(extra_headers)
     return FileResponse(
         target,
         media_type=media_type,
-        headers={"Cache-Control": "no-cache"},
+        headers=headers,
     )
 
 
@@ -1116,12 +1123,32 @@ async def admin_service_worker():
     return _spa_asset("sw.js", "application/javascript")
 
 
+@app.get("/workbench/sw.js", include_in_schema=False)
+async def workbench_service_worker():
+    """工作台自己的 Service Worker（票 09）：脚本落在工作台路径下、scope 是 `/workbench`。
+
+    **`Service-Worker-Allowed` 这个头不能省**：脚本在 `/workbench/sw.js` 时，浏览器给的
+    默认最大 scope 是它所在的目录 `/workbench/`，而 `/workbench`（无尾斜杠，正是工作台首页
+    与本清单的 `start_url`）**不在**那条前缀里 —— 不发放宽头，`navigator.serviceWorker.
+    register('/workbench/sw.js', {scope: '/workbench'})` 会以 SecurityError 被拒；退一步用
+    `scope: '/workbench/'` 则首页自己不受 worker 控制（导航回退盖不到它）。两条都是实测
+    结论，见 `.scratch/workbench-subapp/issues/09-workbench-pwa.md` 票尾。
+    """
+    return _spa_asset(
+        "workbench/sw.js",
+        "application/javascript",
+        {"Service-Worker-Allowed": WORKBENCH_PAGE_PREFIX},
+    )
+
+
 @app.get("/pwa/manifests/{manifest_name}", include_in_schema=False)
 async def admin_manifest(manifest_name: str):
+    # 票 09 起只剩两份：工作台（scope `/workbench`）与管理端（scope `/`）。旧的
+    # hygiene / recipe 两份随票 09 删除，这里不再放行 —— 还挂着的旧图标进来是 404，
+    # 别再给死应用发一份清单（它们的 start_url 早已随票 03 / 07 作废）。
     if manifest_name not in {
         "admin.webmanifest",
-        "hygiene.webmanifest",
-        "recipe.webmanifest",
+        "workbench.webmanifest",
     }:
         raise HTTPException(status_code=404, detail="PWA manifest 不存在")
     return _spa_asset(

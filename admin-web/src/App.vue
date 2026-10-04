@@ -8,12 +8,17 @@ import { useRealtime } from './composables/useRealtime'
 import { usePwaUpdate } from './composables/usePwaUpdate'
 import { useStationsStore } from './stores/stations'
 import { isHygieneAdminPath } from './utils/hygieneCopy'
-import { resolveLoginTab } from './utils/loginNext'
-import { loadLoginTab } from './utils/loginPrefs'
-import { applyPwaManifest } from './utils/pwaManifest'
+import { applyPwaManifest, selectPwaManifest } from './utils/pwaManifest'
 
 const route = useRoute()
-const pwaUpdate = usePwaUpdate()
+// 页面属于哪个 App（工作台 / 管理端）：清单、图标、主题色与 Service Worker 四处都从
+// 这一条判据来（`utils/pwaManifest.js` 的 `selectPwaManifest`）。票 09 起只看路径。
+const pwaApp = computed(() => selectPwaManifest(route.path))
+// 注册的是**当前 App** 那份 worker：管理面页面注册全站那份（scope `/`），工作台页面注册
+// `/workbench/sw.js`（scope `/workbench`）。客户端路由跨过界时会补注册新的那份
+// （`usePwaUpdate` 自己盯这条判据）—— 否则从管理面走进工作台会一直挂在根 worker 上，
+// 根 worker 的导航回退就把工作台的导航吃掉了。
+const pwaUpdate = usePwaUpdate(pwaApp)
 // 登录 / 配置页是独立全屏页，不显示主导航壳（见 router meta.standalone）。
 const isStandalone = computed(() => !!route.meta.standalone)
 const isHygieneAdmin = computed(() => isHygieneAdminPath(route.path))
@@ -25,15 +30,9 @@ const realtimeEnabled = computed(() => route.meta.realtime === true || !route.me
 // 默认优先级本来就对。声明写在连接 URL 上，路由换了身份就换连接（composable 负责重连）。
 const realtimeIdentity = computed(() => (route.meta.audience === 'staff' ? 'staff' : null))
 
-// PWA 清单归属跟面板用的是同一个判据（`utils/loginNext.js` 的 `resolveLoginTab`）：
-// `/login` 一条路径装两种身份，装出来是哪份应用看当下停在哪一栏 —— 员工栏是员工应用
-// （打开即 `/workbench/me/today`），管理栏是管理应用。`?next=` 会改这一栏，所以也盯着它；
-// 其余路径由路径本身决定归属，多带一个身份不影响（面板里点 Tab 时由 `LoginView.vue` 换）。
-watch(
-  [() => route.path, () => route.query.next],
-  () => applyPwaManifest(route.path, resolveLoginTab(route.query.next, loadLoginTab())),
-  { immediate: true },
-)
+// 清单归属跟着路由换（工作台前缀 ↔ 管理面）：换 `<link rel=manifest>`、apple-touch-icon
+// 与 theme-color 三处。票 09 起判据只看路径 —— `/login` 不再随面板栏位换清单。
+watch(() => route.path, () => applyPwaManifest(route.path), { immediate: true })
 
 const listeners = new Set()
 function onRealtimeEvent(event) {

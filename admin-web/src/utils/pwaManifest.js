@@ -1,39 +1,41 @@
-import { RECIPE_HOME_PATH } from './recipePaths.js'
-import { isStaffPhonePath } from './staffPaths.js'
+import { STAFF_PHONE_EXACT } from './staffPaths.js'
+import { WORKBENCH_ROOT, isWorkbenchPath } from './workbenchPaths.js'
 
-/** 员工手机端的三个页面（`/workbench/me/today`、`/workbench/me/month`、
- *  `/workbench/me/clean`，票 03 起整体住在工作台的「我的」组里）共用一个清单：
- *  一个入口一套登录。
- *  这里必须认那条前缀 —— 否则员工在那一页装出来的是管理端应用（深色主题 + 厨务管家
- *  管理清单）。清单本身仍分三份是票 09 要收的事（三份 `scope` 都是 `/`）。
- *  哪些路径算员工端只在 `staffPaths.js` 写一次（名单还要给 401 那条用）。
+/** App 归属判据（票 09 收敛）：**两份清单，按路径分家**。
  *
- *  **`/login` 一条路径装两种身份**（票 07）：装出来是哪份清单得看面板当下停在哪一栏，
- *  所以判据是「pathname + 面板身份」两件事。判据只有两处来源，本文件不重算：
- *  - 面板身份（`'staff'` / `'admin'` / 未知）由 `utils/loginNext.js` 的
- *    `resolveLoginTab` 给出，调用方算好传进来（`App.vue` 跟路由、`LoginView.vue` 跟点击）；
- *  - 路径归属仍由 `staffPaths.js` 给出。
- *  身份未知时 `/login` 兜底管理端那份（跟 `index.html` 的默认清单一致）。
- *  清单自己的 `start_url` 是员工入口 `STAFF_ENTRY_PATH`（票 07 从 `/today` 订正过来）。 */
+ *  今天之前是三份清单、且 admin 与 hygiene 两份的 `scope` 都是 `/`、只靠 `id` 区分
+ *  —— 一个 scope 里塞两个 App，装出来哪个全看当下页面挂的是哪份 `<link rel=manifest>`，
+ *  于是真正的工作台（`/workbench/*`）装出来是深色的「厨务管家管理」。实测记录见
+ *  `.scratch/workbench-subapp/issues/09-workbench-pwa.md` 票尾。
+ *
+ *  收敛后的判据只有两档：
+ *  - **工作台**：`/workbench` 与 `/workbench/*`（`workbenchPaths.js`，与服务端页面墙同一个
+ *    口径），外加员工侧界面的精确条目（`/register`，见下）。清单 `start_url` 与 `scope`
+ *    都锁在 `/workbench`，Service Worker 也从 `/workbench/sw.js` 提供（scope `/workbench`）。
+ *  - **管理端**：其余全部 —— `/login` 与 `/`、`/admin`、`/sales-report`、`/wecom-push`、
+ *    `/logs`、`/settings` 这一个系统管理面（`/register` 除外，它归工作台）。清单 `scope`
+ *    仍是 `/`（它要覆盖管理面那些平铺路径），但工作台页面不再挂它。
+ *
+ *  `/register`（员工自助注册）不在工作台前缀里，但它是员工侧界面（`staffPaths.js` 的
+ *  `STAFF_PHONE_EXACT`）：新人在注册页「添加到主屏幕」，装出来必须是员工接下来要用的
+ *  那个应用（打开即 `/workbench`，按身份渲染），挂成深色管理端只会让人找不到自己该去哪。
+ *
+ *  `/login` **不再**随面板栏位换清单（票 07 的行为）：它一条路径装两种身份，判据吃不下
+ *  「当下停在哪一栏」这件事，票 09 按票面口径把它整个划给管理端。
+ */
 const ROLE_MANIFESTS = [
   {
-    role: 'hygiene',
-    matches: (path, panelTab) =>
-      isStaffPhonePath(path) || (path === '/login' && panelTab === 'staff'),
-    manifest: '/pwa/manifests/hygiene.webmanifest',
-    appleTouchIcon: '/pwa/icons/hygiene-192.png',
-    themeColor: '#16a34a',
-  },
-  {
-    role: 'recipe',
-    // 票 07：配方五页从 `/recipe*` 搬进工作台的「后勤」组 —— 归属判据跟着地址走，
-    // 旧前缀不再认（认了就是给死路径留一档）。整组共用一份清单（列表 / 沉浸阅读 /
-    // 打印 / 印码 / 管理都在这一档）。
-    matches: (pathname) =>
-      pathname === RECIPE_HOME_PATH || pathname.startsWith(`${RECIPE_HOME_PATH}/`),
-    manifest: '/pwa/manifests/recipe.webmanifest',
-    appleTouchIcon: '/pwa/icons/recipe-192.png',
-    themeColor: '#d97706',
+    role: 'workbench',
+    matches: (path) => isWorkbenchPath(path) || STAFF_PHONE_EXACT.includes(path),
+    manifest: '/pwa/manifests/workbench.webmanifest',
+    appleTouchIcon: '/pwa/icons/workbench-192.png',
+    themeColor: '#0a1719',
+    // Service Worker 从工作台路径下提供。脚本在 `/workbench/sw.js` → 默认最大 scope 是
+    // `/workbench/`，而 `/workbench`（无尾斜杠，start_url 与首页）**不在它的路径前缀里**
+    // —— 服务端必须发 `Service-Worker-Allowed: /workbench`，注册才不会被 SecurityError 拒掉
+    // （实测：.scratch/workbench-subapp/pwa-lab/exp-b-sw-scope.json）。
+    serviceWorker: '/workbench/sw.js',
+    serviceWorkerScope: WORKBENCH_ROOT,
   },
   {
     role: 'admin',
@@ -41,18 +43,19 @@ const ROLE_MANIFESTS = [
     manifest: '/pwa/manifests/admin.webmanifest',
     appleTouchIcon: '/pwa/icons/admin-192.png',
     themeColor: '#0a0d16',
+    serviceWorker: '/sw.js',
+    serviceWorkerScope: '/',
   },
 ]
 
-/** 按路径（+ `/login` 上的面板身份）选清单。`panelTab` 非法 / 缺失按「身份未知」处理。 */
-export function selectPwaManifest(pathname, panelTab) {
+/** 按路径选 App（票 09 起判据只看路径；多的参数 JS 直接忽略，老调用方不会炸）。 */
+export function selectPwaManifest(pathname) {
   const path = String(pathname || '/')
-  const tab = panelTab === 'staff' || panelTab === 'admin' ? panelTab : null
-  return ROLE_MANIFESTS.find((entry) => entry.matches(path, tab)) || ROLE_MANIFESTS.at(-1)
+  return ROLE_MANIFESTS.find((entry) => entry.matches(path)) || ROLE_MANIFESTS.at(-1)
 }
 
-export function applyPwaManifest(pathname, panelTab, documentRef = globalThis.document) {
-  const selected = selectPwaManifest(pathname, panelTab)
+export function applyPwaManifest(pathname, documentRef = globalThis.document) {
+  const selected = selectPwaManifest(pathname)
   if (!documentRef || typeof documentRef.getElementById !== 'function') return selected
 
   const manifestLink = documentRef.getElementById('app-manifest')
@@ -67,4 +70,4 @@ export function applyPwaManifest(pathname, panelTab, documentRef = globalThis.do
   return selected
 }
 
-export { ROLE_MANIFESTS }
+export { ROLE_MANIFESTS, WORKBENCH_ROOT }

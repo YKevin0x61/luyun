@@ -1,28 +1,28 @@
 {
-  "id": "/pwa/manifests/hygiene.webmanifest",
+  "id": "/workbench/",
   "name": "厨务管家工作台",
   "short_name": "厨务管家工作台",
-  "description": "门店当班：我的班 · 现场执行与整改",
-  "start_url": "/staff/today",
-  "scope": "/",
+  "description": "门店当班：今天 · 人事 · 现场 · 后勤 · 我的",
+  "start_url": "/workbench",
+  "scope": "/workbench",
   "display": "standalone",
-  "background_color": "#f8fafc",
-  "theme_color": "#16a34a",
+  "background_color": "#0a1719",
+  "theme_color": "#0a1719",
   "icons": [
     {
-      "src": "/pwa/icons/hygiene-192.png",
+      "src": "/pwa/icons/workbench-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/pwa/icons/hygiene-512.png",
+      "src": "/pwa/icons/workbench-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/pwa/icons/hygiene-maskable-512.png",
+      "src": "/pwa/icons/workbench-maskable-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"

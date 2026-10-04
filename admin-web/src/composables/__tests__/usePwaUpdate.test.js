@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createPwaUpdateController, isSecurePwaContext } from '../usePwaUpdate'
+import { nextTick, ref } from 'vue'
+import { createPwaUpdateController, isSecurePwaContext, usePwaUpdate } from '../usePwaUpdate'
 
 class FakeEventTarget {
   constructor() {
@@ -117,5 +118,104 @@ describe('usePwaUpdate', () => {
     })
     expect(await controller.initialize()).toBe(false)
     expect(serviceWorker.register).not.toHaveBeenCalled()
+  })
+
+  it('票 09：按 App 注册 —— 工作台那份是 /workbench/sw.js + scope /workbench', async () => {
+    const serviceWorker = new FakeServiceWorkerContainer()
+    serviceWorker.controller = {}
+    serviceWorker.register.mockResolvedValue(new FakeRegistration())
+    const controller = createPwaUpdateController({
+      serviceWorker,
+      locationRef: { protocol: 'https:', hostname: 'shop.example' },
+    })
+
+    await controller.initialize({
+      serviceWorker: '/workbench/sw.js',
+      serviceWorkerScope: '/workbench',
+    })
+
+    expect(serviceWorker.register).toHaveBeenCalledWith('/workbench/sw.js', {
+      scope: '/workbench',
+      updateViaCache: 'none',
+    })
+  })
+
+  it('同一个 App 重复初始化只注册一次，换 App 才补注册并改盯新的那份', async () => {
+    const serviceWorker = new FakeServiceWorkerContainer()
+    serviceWorker.controller = {}
+    const rootRegistration = new FakeRegistration()
+    rootRegistration.waiting = { postMessage: vi.fn() }
+    const workbenchWaiting = { postMessage: vi.fn(() => serviceWorker.emit('controllerchange')) }
+    const workbenchRegistration = new FakeRegistration({ waiting: workbenchWaiting })
+    serviceWorker.register.mockImplementation(async (url) =>
+      url === '/workbench/sw.js' ? workbenchRegistration : rootRegistration,
+    )
+    const controller = createPwaUpdateController({
+      serviceWorker,
+      locationRef: { protocol: 'https:', hostname: 'shop.example' },
+    })
+
+    // 管理面：根那份已经在等更新 → 提示条亮
+    await controller.initialize()
+    expect(controller.visible.value).toBe(true)
+
+    // 走进工作台（客户端路由，不刷新）：补注册工作台那份，提示条改盯它
+    await controller.initialize({
+      serviceWorker: '/workbench/sw.js',
+      serviceWorkerScope: '/workbench',
+    })
+    expect(serviceWorker.register).toHaveBeenCalledTimes(2)
+    expect(serviceWorker.register).toHaveBeenLastCalledWith('/workbench/sw.js', {
+      scope: '/workbench',
+      updateViaCache: 'none',
+    })
+    // 换 App 时旧的等待状态不跟着走，再按新的那份重算
+    expect(controller.visible.value).toBe(true)
+    expect(await controller.apply()).toBe(true)
+    expect(workbenchWaiting.postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' })
+
+    // 同一个 App 再来一次不发请求
+    await controller.initialize({
+      serviceWorker: '/workbench/sw.js',
+      serviceWorkerScope: '/workbench',
+    })
+    expect(serviceWorker.register).toHaveBeenCalledTimes(2)
+    // 切回管理面：注册根那份、重新盯它
+    await controller.initialize()
+    expect(serviceWorker.register).toHaveBeenCalledTimes(3)
+    expect(serviceWorker.register).toHaveBeenLastCalledWith('/sw.js', {
+      scope: '/',
+      updateViaCache: 'none',
+    })
+  })
+
+  it('usePwaUpdate：归属判据换了档就补注册那一档的 worker', async () => {
+    const serviceWorker = new FakeServiceWorkerContainer()
+    serviceWorker.controller = {}
+    serviceWorker.register.mockResolvedValue(new FakeRegistration())
+    const selection = ref({ serviceWorker: '/sw.js', serviceWorkerScope: '/' })
+
+    usePwaUpdate(selection, {
+      serviceWorker,
+      locationRef: { protocol: 'https:', hostname: 'shop.example' },
+    })
+    await nextTick()
+    await Promise.resolve()
+    expect(serviceWorker.register).toHaveBeenCalledTimes(1)
+
+    selection.value = { serviceWorker: '/workbench/sw.js', serviceWorkerScope: '/workbench' }
+    await nextTick()
+    await Promise.resolve()
+    expect(serviceWorker.register).toHaveBeenCalledTimes(2)
+    expect(serviceWorker.register).toHaveBeenLastCalledWith('/workbench/sw.js', {
+      scope: '/workbench',
+      updateViaCache: 'none',
+    })
+
+    // 同一档里换路由（判据返回同一个对象）不再注册
+    selection.value = selection.value
+    await nextTick()
+    await Promise.resolve()
+    expect(serviceWorker.register).toHaveBeenCalledTimes(2)
   })
 })

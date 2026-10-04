@@ -73,15 +73,19 @@ npm run dev          # http://localhost:5173，自动代理 /api /ws 到 http://
 npm run build        # 产出 dist/（含 sw.js、多角色 manifest 与 PWA 图标）
 ```
 
-生产由 FastAPI 或 `deploy/` 反向代理托管。Service Worker 仅缓存前端程序资源；
+生产由 FastAPI 或 `deploy/` 反向代理托管。两份 Service Worker 都只缓存前端程序资源；
 `/api/*`、`/ws/*` 和上传下载始终直连后端。页面在每次启动时检查一次新版本，
 发现等待中的新 Worker 后显示全局更新提示，用户确认后才切换并刷新。
 
-管理端、卫生员工端与配方阅读端分别使用：
+两个 App 各有一份清单与一个作用域内的 Worker：
 
-- `/pwa/manifests/admin.webmanifest`
-- `/pwa/manifests/hygiene.webmanifest`
-- `/pwa/manifests/recipe.webmanifest`
+- 管理端：`/pwa/manifests/admin.webmanifest`（`scope: /`）+ `/sw.js`
+- 工作台：`/pwa/manifests/workbench.webmanifest`（`scope: /workbench`）+ `/workbench/sw.js`
+  （该脚本由 FastAPI 带 `Service-Worker-Allowed: /workbench` 发出 —— 少了它浏览器不许
+  脚本用它所在目录之上的 scope，而 `/workbench` 正是首页与 `start_url`）
+
+页面属于哪个 App 由 `src/utils/pwaManifest.js` 按路径判定（工作台前缀归工作台、
+其余归管理端），清单、图标、主题色与注册哪个 Worker 都从这一条判据来。
 
 ## 目录结构
 

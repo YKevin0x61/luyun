@@ -79,9 +79,10 @@ jobs:
         working-directory: .
         run: |
           test -f admin-web/dist/sw.js
+          test -f admin-web/dist/workbench/sw.js
           test -f admin-web/dist/pwa/manifests/admin.webmanifest
-          test -f admin-web/dist/pwa/manifests/hygiene.webmanifest
-          test -f admin-web/dist/pwa/manifests/recipe.webmanifest
+          test -f admin-web/dist/pwa/manifests/workbench.webmanifest
+          test -f admin-web/dist/pwa/icons/workbench-192.png
       - name: Run tests
         run: npm run test
 

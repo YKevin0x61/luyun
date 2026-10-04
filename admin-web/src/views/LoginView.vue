@@ -16,7 +16,6 @@ import {
   saveLoginTab,
 } from '../utils/loginPrefs'
 import { resolveLoginNext, resolveLoginTab, resolveStaffNext } from '../utils/loginNext'
-import { applyPwaManifest } from '../utils/pwaManifest'
 
 // 迁移自 public/login.html：登录 / 首次初始化管理员 / 已登录三态页面。
 // 票 03 起同一个面板装两种身份（管理员 / 员工）：两个显式 Tab 各打自己原来那套登录接口、
@@ -160,9 +159,8 @@ function selectTab(tab) {
   activeTab.value = tab
   // 「记住上次选的」：只有用户自己点的才算选择；`?next=` 强制开的那次不写盘。
   saveLoginTab(tab)
-  // 面板身份就是 PWA 清单归属（票 07）：用户点的这一栏决定此刻「添加到主屏幕」装出来
-  // 是哪个应用。路由没变，`App.vue` 那条 watcher 不会响，所以在这里自己换一次。
-  applyPwaManifest(route.path, tab)
+  // 票 09 起清单归属只看路径（`/login` 归管理端那份），换栏不再换清单 ——
+  // 一条路径两份清单的判据吃不下「当下停在哪一栏」，这正是本票要收敛掉的漂移。
   // 一栏的错误不跟着串到另一栏。
   hideAlert()
   if (!loadedTabs[tab]) {

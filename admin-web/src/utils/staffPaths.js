@@ -2,7 +2,9 @@
  *  - `router/index.js` 的登录守卫（票 02 起按页面清单的 audience 判定，这些页是 `staff`；
  *    未登录落 `/login?next=<目标>`，面板按 `isStaffLandingPath` 强制开员工栏）；
  *  - `loginNext.shouldSkipLoginRedirect`：管理端 client 拿到 401 时不许把员工甩去 `/login`；
- *  - `pwaManifest`：这些页挂的是员工端那份清单与主题色（青绿），不是管理端（深色）。
+ *  - `pwaManifest`：这些页挂的是**工作台**那份清单与主题色（深青墨 `#0a1719`）—— 票 09 起
+ *    员工侧界面（前缀 ∪ `STAFF_PHONE_EXACT`）与工作台前缀共用一个 App，不再有单独的
+ *    「青绿员工清单」。
  *
  *  **票 03 起员工三页住在工作台的「我的」组里**（今天 `/workbench/me/today`、整月
  *  `/workbench/me/month`、卫生待办 `/workbench/me/clean`）：前缀就是 `/workbench/me`。

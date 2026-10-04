@@ -9,6 +9,8 @@
  *  （`views/scheduling/SchedulingLayout.vue` 与 `views/hygiene/HygieneAdminLayout.vue`）
  *  互相开门，门牌就是这里两个**落点**常量 —— 一处定义，两个壳与页内跳转都引它。
  */
+import { WORKBENCH_ROOT } from './workbenchPaths.js'
+
 export const WORKBENCH_TITLE = '工作台'
 export const WORKBENCH_TAGLINE = '人事 · 现场 · 后勤'
 
@@ -21,8 +23,11 @@ export const WORKBENCH_FIELD_HOME = '/workbench/floor/daily'
 
 /** 工作台**首页**（仪表盘上那张卡通往哪儿）：子应用根 `/workbench` —— 票 06 起它就是
  *  「今天」：店长看到今天谁上班与三个数字，员工看到自己的班、工作区与待办条数。
- *  它与「人事」那一组的落点（月历）是两个地址，不再互相兼职。 */
-export const WORKBENCH_HOME = '/workbench'
+ *  它与「人事」那一组的落点（月历）是两个地址，不再互相兼职。
+ *
+ *  路径本身只在 `utils/workbenchPaths.js` 写一次（票 09：PWA 归属判据与服务端页面墙
+ *  也读同一份口径）。 */
+export const WORKBENCH_HOME = WORKBENCH_ROOT
 
 /** 仪表盘那张卡的说明：两组一起说，别只列现场那一组。 */
 export const WORKBENCH_DASHBOARD_BLURB = '当班排班 · 现场验收 · 整改 · 仪容仪表 · 红黑榜'

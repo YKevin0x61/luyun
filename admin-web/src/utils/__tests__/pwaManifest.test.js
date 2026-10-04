@@ -1,175 +1,195 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { applyPwaManifest, selectPwaManifest } from '../pwaManifest'
-import { STAFF_ENTRY_PATH, isStaffLandingPath } from '../staffPaths.js'
+import { WORKBENCH_ROOT } from '../workbenchPaths.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
+const manifestDir = join(here, '../../../public/pwa/manifests')
+const iconDir = join(here, '../../../public/pwa/icons')
 
-describe('pwaManifest', () => {
-  it('selects role manifests by route', () => {
-    expect(selectPwaManifest('/').role).toBe('admin')
-    expect(selectPwaManifest('/workbench/me/clean').role).toBe('hygiene')
-    expect(selectPwaManifest('/workbench/hr/roster').role).toBe('admin')
-    expect(selectPwaManifest('/workbench/kitchen/recipe/manage').role).toBe('recipe')
-    expect(selectPwaManifest('/settings').role).toBe('admin')
-  })
-
-  it('票 07：配方页搬进后勤组之后，旧的 /recipe* 不再落在配方那一档', () => {
-    // 归属判据跟着地址走：旧地址自然 404，判据也不该再认它（认了就是给死路径留了一档）。
-    expect(selectPwaManifest('/recipe').role).toBe('admin')
-    expect(selectPwaManifest('/recipe/qr').role).toBe('admin')
-    // 新地址那五页都归配方那一档（阅读面四页 + 管理页）。
+/** 票 09 收口后的归属表：只有两份清单，工作台前缀归工作台、其余归管理端。 */
+describe('pwaManifest：App 归属判据（票 09 收敛）', () => {
+  it('工作台前缀（含子路径）归工作台清单', () => {
     for (const path of [
+      '/workbench',
+      '/workbench/',
+      WORKBENCH_ROOT,
+      '/workbench/hr/calendar',
+      '/workbench/hr/roster',
+      '/workbench/floor/daily',
+      '/workbench/me/today',
+      '/workbench/me/clean',
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/recipe/detail',
-      '/workbench/kitchen/recipe/print',
-      '/workbench/kitchen/recipe/qr',
       '/workbench/kitchen/recipe/manage',
+      '/workbench/kitchen/prep-plan',
+      '/workbench/forbidden',
     ]) {
-      expect(selectPwaManifest(path).role, path).toBe('recipe')
+      expect(selectPwaManifest(path).role, path).toBe('workbench')
     }
   })
 
-  it('员工端三页挂员工清单，不是管理端那份', () => {
-    // 票 03 起员工端在 `/workbench/me/*`：挂错清单的话手机上装出来的是「厨务管家管理」。
+  it('登录页与系统管理面归管理端清单', () => {
     for (const path of [
-      '/workbench/me/today',
-      '/workbench/me/today/',
-      '/workbench/me/month',
-      '/workbench/me/clean',
+      '/login',
+      '/',
+      '/index.html',
+      '/admin',
+      '/admin/',
+      '/sales-report',
+      '/wecom-push',
+      '/logs',
+      '/settings',
+      '/prep-plan',
     ]) {
-      expect(selectPwaManifest(path).role, path).toBe('hygiene')
-    }
-    expect(selectPwaManifest('/workbench/me/today').themeColor).toBe('#16a34a')
-    expect(selectPwaManifest('/workbench/me/today').manifest).toBe(
-      '/pwa/manifests/hygiene.webmanifest',
-    )
-  })
-
-  it('旧员工路径已删除：装出来不再是员工清单（旧图标点进去是空壳）', () => {
-    // ADR 0091 的取舍：不给旧地址留别名，所以这里也不该再认它们。票 03 把三页搬进
-    // 工作台之后，`/staff/*` 也进了这份名单。
-    for (const stale of ['/today', '/today/month', '/hygiene', '/staff/today', '/staff/clean']) {
-      expect(selectPwaManifest(stale).role, stale).toBe('admin')
+      expect(selectPwaManifest(path).role, path).toBe('admin')
     }
   })
 
-  it('自助注册页（票 02 起是顶层 /register）也挂员工清单', () => {
-    // 新人在注册页「添加到主屏幕」，装出来还得是青绿的员工应用 —— 这里挂成管理端，
-    // 他装完打开是深色的管理后台，反而找不到自己该去哪。
-    expect(selectPwaManifest('/register').role).toBe('hygiene')
-    expect(selectPwaManifest('/register').themeColor).toBe('#16a34a')
-  })
-
-  it('/login 上挂哪份清单看面板身份（票 07）', () => {
-    // `/login` 一条路径装两种身份：归属只能由面板当下那一栏决定 —— 员工在员工栏上
-    // 「添加到主屏幕」，装出来必须是青绿的员工应用（打开即 /workbench/me/today）。
-    expect(selectPwaManifest('/login', 'staff').role).toBe('hygiene')
-    expect(selectPwaManifest('/login', 'staff').themeColor).toBe('#16a34a')
-    expect(selectPwaManifest('/login', 'staff').manifest).toBe(
-      '/pwa/manifests/hygiene.webmanifest',
-    )
-  })
-
-  it('/login 的管理员栏与「身份未知」都兜底管理端清单', () => {
-    // 身份未知 = 调用方没给（首帧还没算出栏位）：保持 index.html 里那份默认清单。
-    for (const tab of ['admin', undefined, null, '', 'weird']) {
+  it('/login 不再随面板栏位变清单：装出来的就是管理端那一份', () => {
+    // 票 07 起 `/login` 一条路径挂两份清单（看当下停在哪一栏）。票 09 收敛成
+    // 「登录页归管理端」—— 判据只看路径，不再吃「面板身份」这个参数。
+    for (const tab of ['staff', 'admin', undefined, null, '', 'weird']) {
       expect(selectPwaManifest('/login', tab).role, String(tab)).toBe('admin')
     }
   })
 
-  it('面板身份只对 /login 生效，别的路径照旧按路径选', () => {
-    expect(selectPwaManifest('/workbench/hr/roster', 'staff').role).toBe('admin')
-    expect(selectPwaManifest('/settings', 'staff').role).toBe('admin')
-    expect(selectPwaManifest('/', 'staff').role).toBe('admin')
-    expect(selectPwaManifest('/workbench/me/today', 'admin').role).toBe('hygiene')
-    expect(selectPwaManifest('/register', 'admin').role).toBe('hygiene')
-    expect(selectPwaManifest('/workbench/kitchen/recipe/qr', 'staff').role).toBe('recipe')
+  it('员工自助注册页仍归工作台清单（新人装出来要是员工要用的那个应用）', () => {
+    // `/register` 不在工作台前缀里，但它是员工侧界面（`staffPaths.js` 的
+    // STAFF_PHONE_EXACT），装成深色管理端只会让人找不到自己该去哪。
+    expect(selectPwaManifest('/register').role).toBe('workbench')
+    expect(selectPwaManifest('/register').manifest).toBe(
+      '/pwa/manifests/workbench.webmanifest',
+    )
   })
 
-  it('员工清单的 start_url 与员工入口的关系（票 03 之后是**已知的中间态**）', () => {
-    // 票 07 收口时这里断的是「清单的 start_url 等于 staffPaths.js 里那个员工入口常量」。
-    // 票 03 把员工入口搬到了 `/workbench/me/today`，而**清单文件本身归票 09**（三份清单
-    // 收成一份工作台清单）—— 于是现在这两者**不相等**，而且旧地址已经不是员工落点了：
-    // 员工从新地址打开、可装出来的图标仍指着 404 的旧地址。这不是本票要修的，但必须
-    // 显式记着：票 09 收口时把这几行反过来断相等（改清单文件 + 改这里）。
+  it('旧地址（/staff/*、/recipe*、/hygiene/*）不再有自己的清单，一律落管理端', () => {
+    for (const stale of [
+      '/staff/today',
+      '/staff/clean',
+      '/recipe',
+      '/recipe/qr',
+      '/hygiene',
+      '/scheduling',
+    ]) {
+      expect(selectPwaManifest(stale).role, stale).toBe('admin')
+    }
+  })
+})
+
+describe('pwaManifest：两份清单的内容', () => {
+  it('工作台清单把 start_url 与 scope 都锁在工作台根', () => {
     const manifest = JSON.parse(
-      readFileSync(join(here, '../../../public/pwa/manifests/hygiene.webmanifest'), 'utf8'),
+      readFileSync(join(manifestDir, 'workbench.webmanifest'), 'utf8'),
     )
-    expect(manifest.start_url).toBe('/staff/today')
-    expect(manifest.start_url).not.toBe(STAFF_ENTRY_PATH)
-    expect(isStaffLandingPath(manifest.start_url)).toBe(false)
-    // 身份靠 id 区分，两份 scope 都是 `/`（三页同在工作台里：只管一页的话页间跳转会跳出应用）。
-    expect(manifest.id).toBe('/pwa/manifests/hygiene.webmanifest')
-    expect(manifest.scope).toBe('/')
-
-    const admin = JSON.parse(
-      readFileSync(join(here, '../../../public/pwa/manifests/admin.webmanifest'), 'utf8'),
-    )
-    expect(admin.id).toBe('/pwa/manifests/admin.webmanifest')
-    expect(admin.scope).toBe('/')
-    expect(admin.start_url).toBe('/')
+    expect(manifest.name).toBe('厨务管家工作台')
+    expect(manifest.short_name).toBe('厨务管家工作台')
+    expect(manifest.start_url).toBe(WORKBENCH_ROOT)
+    // scope 不带尾斜杠：`/workbench/` 不覆盖 `/workbench`（本仓 start_url 就是它），
+    // 实测见 .scratch/workbench-subapp/issues/09-workbench-pwa.md 票尾。
+    expect(manifest.scope).toBe(WORKBENCH_ROOT)
+    expect(manifest.display).toBe('standalone')
+    expect(manifest.id).toBe('/workbench/')
+    // 深青墨外壳（--hy-bg）与薄荷信号色（--hy-mint）：与页面里真正渲染的一致。
+    expect(manifest.background_color).toBe('#0a1719')
+    expect(manifest.theme_color).toBe('#0a1719')
+    for (const icon of manifest.icons) {
+      expect(icon.src.startsWith('/pwa/icons/workbench-'), icon.src).toBe(true)
+      expect(existsSync(join(iconDir, icon.src.split('/').pop())), icon.src).toBe(true)
+    }
+    expect(manifest.icons.map((icon) => icon.sizes)).toEqual(['192x192', '512x512', '512x512'])
+    expect(manifest.icons.some((icon) => icon.purpose === 'maskable')).toBe(true)
   })
 
-  it('updates manifest, apple icon and theme color', () => {
+  it('管理端清单还在，且不再抢工作台前缀', () => {
+    const manifest = JSON.parse(
+      readFileSync(join(manifestDir, 'admin.webmanifest'), 'utf8'),
+    )
+    expect(manifest.start_url).toBe('/')
+    expect(manifest.scope).toBe('/')
+  })
+
+  it('三份旧清单只剩管理端那一份：hygiene / recipe 已删', () => {
+    expect(existsSync(join(manifestDir, 'hygiene.webmanifest'))).toBe(false)
+    expect(existsSync(join(manifestDir, 'recipe.webmanifest'))).toBe(false)
+    expect(existsSync(join(manifestDir, 'workbench.webmanifest'))).toBe(true)
+    expect(existsSync(join(manifestDir, 'admin.webmanifest'))).toBe(true)
+  })
+
+  it('判据给的两份清单确实存在，且各自的 worker 从自己的路径下提供', () => {
+    for (const path of ['/workbench/hr/calendar', '/settings']) {
+      const selected = selectPwaManifest(path)
+      expect(existsSync(join(manifestDir, selected.manifest.split('/').pop())), path).toBe(
+        true,
+      )
+      expect(selected.serviceWorker.startsWith('/'), selected.serviceWorker).toBe(true)
+    }
+    expect(selectPwaManifest('/workbench').serviceWorker).toBe('/workbench/sw.js')
+    expect(selectPwaManifest('/workbench').serviceWorkerScope).toBe(WORKBENCH_ROOT)
+    expect(selectPwaManifest('/settings').serviceWorker).toBe('/sw.js')
+    expect(selectPwaManifest('/settings').serviceWorkerScope).toBe('/')
+  })
+})
+
+describe('pwaManifest：DOM 落点', () => {
+  function fakeDocument() {
     const elements = {
       manifest: { setAttribute: vi.fn() },
       appleIcon: { setAttribute: vi.fn() },
       theme: { setAttribute: vi.fn() },
     }
-    const documentRef = {
-      getElementById: (id) => {
-        if (id === 'app-manifest') return elements.manifest
-        if (id === 'app-apple-touch-icon') return elements.appleIcon
-        return null
+    return {
+      elements,
+      documentRef: {
+        getElementById: (id) => {
+          if (id === 'app-manifest') return elements.manifest
+          if (id === 'app-apple-touch-icon') return elements.appleIcon
+          return null
+        },
+        querySelector: () => elements.theme,
       },
-      querySelector: () => elements.theme,
     }
+  }
 
-    const selected = applyPwaManifest('/workbench/me/clean', null, documentRef)
+  it('工作台路径换工作台清单、图标与主题色', () => {
+    const { elements, documentRef } = fakeDocument()
 
-    expect(selected.role).toBe('hygiene')
+    const selected = applyPwaManifest('/workbench/hr/roster', documentRef)
+
+    expect(selected.role).toBe('workbench')
     expect(elements.manifest.setAttribute).toHaveBeenCalledWith(
       'href',
-      '/pwa/manifests/hygiene.webmanifest',
+      '/pwa/manifests/workbench.webmanifest',
     )
     expect(elements.appleIcon.setAttribute).toHaveBeenCalledWith(
       'href',
-      '/pwa/icons/hygiene-192.png',
+      '/pwa/icons/workbench-192.png',
     )
-    expect(elements.theme.setAttribute).toHaveBeenCalledWith('content', '#16a34a')
+    expect(elements.theme.setAttribute).toHaveBeenCalledWith('content', '#0a1719')
   })
 
-  it('applyPwaManifest 也认 /login 上的面板身份（DOM 上那个 link 跟着换）', () => {
-    const elements = {
-      manifest: { setAttribute: vi.fn() },
-      appleIcon: { setAttribute: vi.fn() },
-      theme: { setAttribute: vi.fn() },
-    }
-    const documentRef = {
-      getElementById: (id) => {
-        if (id === 'app-manifest') return elements.manifest
-        if (id === 'app-apple-touch-icon') return elements.appleIcon
-        return null
-      },
-      querySelector: () => elements.theme,
-    }
+  it('管理端页面换回深色管理端清单', () => {
+    const { elements, documentRef } = fakeDocument()
 
-    const selected = applyPwaManifest('/login', 'staff', documentRef)
+    const selected = applyPwaManifest('/settings', documentRef)
 
-    expect(selected.role).toBe('hygiene')
+    expect(selected.role).toBe('admin')
     expect(elements.manifest.setAttribute).toHaveBeenCalledWith(
       'href',
-      '/pwa/manifests/hygiene.webmanifest',
+      '/pwa/manifests/admin.webmanifest',
     )
-    expect(elements.theme.setAttribute).toHaveBeenCalledWith('content', '#16a34a')
+    expect(elements.appleIcon.setAttribute).toHaveBeenCalledWith(
+      'href',
+      '/pwa/icons/admin-192.png',
+    )
+    expect(elements.theme.setAttribute).toHaveBeenCalledWith('content', '#0a0d16')
   })
 
   it('ignores an invalid document-like argument', () => {
-    expect(
-      applyPwaManifest('/workbench/kitchen/recipe', null, '/previous-route'),
-    ).toMatchObject({ role: 'recipe' })
+    expect(applyPwaManifest('/workbench/hr/roster', '/previous-route')).toMatchObject({
+      role: 'workbench',
+    })
   })
 })
