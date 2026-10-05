@@ -424,11 +424,15 @@ describe('账号设置（2026-10-05 从卫生页的「我」整格搬来）', ()
     }
     // 资料那一段（原来「我」面板里的那张表）也一起搬来了。
     expect(view).toMatch(/class="me-meta"/)
-    expect(view).toMatch(/hygienePermissionLabel\(/)
-    // 卫生权限那一行不是只念标签：`permissionLine` 把 `admin_caps` 里**真正能做的项数**
-    // 一起报出来（真机走查 S10：标签写着「管理员」而一项开关都没给时，原来只显示
+    // 票 01 起档位标签**不在这里**了：`permissionLine` 那一行撤掉，能力（开了哪几项、
+    // 每项干什么、**还缺哪一项**）由页首那张「你能做的事」卡承载 —— 同一件事不说两遍
+    // （真机走查 S10 的病根：标签写着「管理员」而一项开关都没给时，这里原来只显示
     // 「管理员」，人会以为自己有权限却什么都做不了）。
-    expect(view).toMatch(/\{\{ permissionLine \}\}/)
+    // 卡自己的行为（逐条渲染 / 没开的写「店长还没开给你」/ 没权限整块不渲染）在
+    // `staffCapabilityCard.test.js` 里**真挂一遍页**压，这里只钉"它搬走了"。
+    expect(view).not.toMatch(/<dt>卫生权限<\/dt>/)
+    expect(view).not.toMatch(/\{\{ permissionLine \}\}/)
+    expect(view).toMatch(/class="tA-card caps"/)
   })
 
   it('两条写请求走员工自己的门，读的还是 /staff/me 那一份（不额外发请求）', () => {

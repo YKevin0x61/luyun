@@ -25,7 +25,7 @@ import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { ADMIN_CAP_STAFF_DEFS, hasCap } from '../../utils/adminCaps'
-import { hygienePermissionLabel, hygieneShiftLabel } from '../../utils/hygieneCopy'
+import { hygieneShiftLabel } from '../../utils/hygieneCopy'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { buildWorkQueue, dailyProgress, shiftClock } from '../../utils/hygieneWorkFlow'
 import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
@@ -98,24 +98,23 @@ const hygiene = ref({
 
 // 「我的」那一块（从卫生页的「我」搬来，界面与逻辑在文件后半段）的**数据**：都跟着
 // `loadHygiene` 那条 `/api/hygiene/staff/me` 一起下来 —— `staffMe` 就是那份 employee
-// （姓名 / 手机号 / 职位 / 卫生权限），`deepClock` 是专项的钟点。两条都是**同一个响应**，
+// （姓名 / 手机号 / 职位 / 当天的区与班次，外加「你能做的事」那张卡要的 `admin_caps`），
+// `deepClock` 是专项的钟点。两条都是**同一个响应**，
 // 不再为「我的」多发一条请求。声明摆在这里，是因为给它们赋值的那一步在下面。
 const staffMe = ref(null)
 const deepClock = ref(null)
 
-// 「卫生权限」那一行的人话（真机走查 S10）：`permission` 只是**显示用的标签**，能不能做事
-// 一律看 `admin_caps`（花名册上可勾的那三项）。两者不一致是合法状态 —— 标签是「管理员」、
-// 一项开关都没给 —— 那时界面上原来只显示「管理员」，人会以为自己有权限却什么都做不了。
-// 所以这里如实把实际能力报出来。
-const staffCapCount = computed(
-  () => ADMIN_CAP_STAFF_DEFS.filter((item) => hasCap(staffMe.value && staffMe.value.admin_caps, item.key)).length,
-)
-const permissionLine = computed(() => {
-  const label = hygienePermissionLabel(staffMe.value && staffMe.value.permission)
-  if (staffCapCount.value) return `${label}（可判 ${staffCapCount.value} 项）`
-  if (label === '管理员') return `${label}（暂未开放权限，找店长开）`
-  return label
-})
+// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十项开关里**员工端真有执行点**的那三项
+// （`ADMIN_CAP_STAFF_DEFS` 与后端 `STAFF_SIDE_CAPABILITIES` 同义），逐项标出开了没有。
+// 判据一律看 `admin_caps` —— `permission` 只是显示用的标签（真机走查 S10：标签写着
+// 「管理员」而一项开关都没给是合法状态），拿标签判会放行没给的那件事。
+// 未接线的那七项**不进这张卡**：它们对应的是超级管理员在电脑端的活，员工端没有入口，
+// 画出来就是"勾了不生效"那类缺陷的另一面。
+const staffCaps = computed(() => ADMIN_CAP_STAFF_DEFS.map((item) => ({
+  ...item,
+  granted: hasCap(staffMe.value && staffMe.value.admin_caps, item.key),
+})))
+const staffCapCount = computed(() => staffCaps.value.filter((item) => item.granted).length)
 
 // 「我的成绩」（2026-10-05 用户裁定）：近 7 天的一次通过率 + 被驳回的原因分布。
 //
@@ -488,8 +487,9 @@ async function loadHygiene(quiet = false) {
     ])
     const employee = me.employee || {}
     const shot = attireShot.attire || {}
-    // 同一份响应里那个 employee 也喂「我的」那一块（姓名 / 手机号 / 职位 / 卫生权限，
-    // 见下面 `staffMe`）：它是**同一个** `/api/hygiene/staff/me`，不额外再发一条请求。
+    // 同一份响应里那个 employee 也喂「我的」那一块与「你能做的事」那张卡（姓名 / 手机号 /
+    // 职位 / 班次 / `admin_caps`，见下面 `staffMe`）：它是**同一个** `/api/hygiene/staff/me`，
+    // 不额外再发一条请求。
     staffMe.value = employee
     deepClock.value = me.deep_clock || null
     attire.value = {
@@ -771,6 +771,45 @@ useNudgePull({
       </template>
 
       <template v-else>
+        <!-- 「你能做的事」（票 01 / ADR 0093）：被放权的员工在这一页看清自己能做哪几件事。
+             为什么要占页面最上面：这一页是他登录后的落点，而"我能做什么"是读这一页之前
+             就得知道的事 —— 原来这信息藏在页尾账号信息那一行里，等于没写。
+             完全没有权限的员工看不到这一块：判据是 `staffCapCount`（那三项里一项都没开），
+             界面就不给他一个空洞的头衔 —— 挂在 `permission` 标签上就会给（标签写着
+             「管理员」而一项开关都没给是合法状态，见 ADR 0093）。 -->
+        <section v-if="staffCapCount" class="tA-card caps">
+          <div class="tA-hd">
+            <span class="tag caps">你能做的事</span>
+            <!-- 档位那颗胶囊（`现场复核 · n 项`，与卫生页页头那颗同一个措辞）：原来在账号
+                 信息里的「卫生权限」那一行，票 01 起搬到这里 —— 同一件事只说一遍。 -->
+            <em>现场复核 · {{ staffCapCount }} 项</em>
+          </div>
+          <ul class="cap-list">
+            <!-- 三项**都列**：没开的那一项写「店长还没开给你」，员工才知道该找店长开什么，
+                 而不是以为系统就是不给（只列开了的那几项，缺的那一项就永远看不见）。 -->
+            <li
+              v-for="item in staffCaps"
+              :key="item.key"
+              class="cap-row"
+              :class="{ off: !item.granted }"
+            >
+              <span class="cap-mark" aria-hidden="true">{{ item.granted ? '✓' : '—' }}</span>
+              <span class="cap-name">{{ item.label }}</span>
+              <span class="cap-note">{{ item.granted ? item.note : '店长还没开给你' }}</span>
+            </li>
+          </ul>
+          <!-- 脚注 + 入口：这三项的执行点全在手机端「卫生」页（`/workbench/me/clean`），
+               员工在电脑上找是找不到的 —— 所以这里直接给路，不让他自己猜。
+               「卫生」那一页自己也有一条从「今天」页过去的路（那张卫生卡上），两处不冲突：
+               这一条属于"知道了能做什么，接着去做"。 -->
+          <p class="tA-sub">这三项都在手机端「卫生」页里做。</p>
+          <div class="acts">
+            <button class="btn" type="button" @click="router.push('/workbench/me/clean')">
+              去「卫生」页 ›
+            </button>
+          </div>
+        </section>
+
         <section ref="schedCard" class="tA-card sched">
           <div class="tA-hd">
             <span class="tag sched">排班</span>
@@ -1043,10 +1082,6 @@ useNudgePull({
             <div>
               <dt>职位</dt>
               <dd>{{ staffMe.job_title || '未设置' }}</dd>
-            </div>
-            <div>
-              <dt>卫生权限</dt>
-              <dd>{{ permissionLine }}</dd>
             </div>
           </dl>
           <ul class="tL-list">
@@ -1460,6 +1495,69 @@ useNudgePull({
 .tA-card.me {
   border-color: var(--hy-line-strong);
   background: var(--hy-surface-2);
+}
+
+/* 「你能做的事」（票 01）：这一页上唯一一块讲**权限**的卡，位置最靠上，色取玉色那一档
+   （跟"已通过"同一个色系）—— 它说的是"你能做什么"，不是"你还欠什么"。 */
+.tA-card.caps {
+  border-color: var(--hy-mint-line);
+  background: linear-gradient(168deg, rgba(63, 224, 176, .08), transparent 62%),
+    var(--hy-surface-2);
+}
+
+.tag.caps {
+  color: var(--hy-jade);
+  background: var(--hy-mint-soft);
+  border-color: var(--hy-mint-line);
+}
+
+/* 一行一项：勾/破折号 + 名字 + 一句说明。名字那一列定宽，三行说明才对得齐。 */
+.cap-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.cap-row {
+  display: grid;
+  grid-template-columns: 18px 62px 1fr;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.cap-mark {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--hy-jade);
+}
+
+.cap-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--hy-ink);
+}
+
+.cap-note {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--hy-muted);
+}
+
+/* 没开的那一项：整行退到背景里（破折号 + 灰字），与开了的那几行一眼分得开 ——
+   「还没开给你」是**说明**，不是可用的能力。 */
+.cap-row.off .cap-mark {
+  color: var(--hy-faint);
+}
+
+.cap-row.off .cap-name {
+  font-weight: 500;
+  color: var(--hy-muted);
+}
+
+.cap-row.off .cap-note {
+  color: var(--hy-faint);
 }
 
 /* 「我的成绩」：玉色那一档（跟"已通过"同一个色系）—— 这一页上其它几张卡都在说
