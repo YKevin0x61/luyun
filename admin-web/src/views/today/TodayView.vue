@@ -1511,7 +1511,10 @@ useNudgePull({
   border-color: var(--hy-mint-line);
 }
 
-/* 一行一项：勾/破折号 + 名字 + 一句说明。名字那一列定宽，三行说明才对得齐。 */
+/* 一行一项：勾/破折号 + 名字 + 一句说明。名字那一列定宽（三个名字最长 4 字），三行
+   说明才对得齐；列宽按 390 逻辑宽（原型与真机那一档）算过：卡内容 328px，最长的那句
+   说明 19 字 × 12px = 228px，落在 240px 的说明列里正好一行 —— 差一点点就会甩一个字
+   到第二行，很难看。 */
 .cap-list {
   list-style: none;
   margin: 4px 0 0;
@@ -1522,9 +1525,9 @@ useNudgePull({
 
 .cap-row {
   display: grid;
-  grid-template-columns: 18px 62px 1fr;
+  grid-template-columns: 16px 58px 1fr;
   align-items: baseline;
-  gap: 8px;
+  gap: 7px;
 }
 
 .cap-mark {
@@ -1540,9 +1543,14 @@ useNudgePull({
 }
 
 .cap-note {
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--hy-muted);
+}
+
+/* 脚注紧贴上一行会被读成"第四项"，跟上面那三行拉开一点（`.tA-sub` 本身 margin 是 0）。 */
+.tA-card.caps .tA-sub {
+  margin-top: 10px;
 }
 
 /* 没开的那一项：整行退到背景里（破折号 + 灰字），与开了的那几行一眼分得开 ——
