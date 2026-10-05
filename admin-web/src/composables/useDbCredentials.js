@@ -8,7 +8,7 @@ export const MIN_RECOMMENDED_PASSWORD_LENGTH = 16
  * Setup page —「数据库凭据」面板：查看 PostgreSQL 连接信息、重置业务角色密码。
  *
  * 安全约定（与后端一致）：响应永不含密码明文，页面也不提供显示 / 索取新密码的入口；
- * 重置必须二次确认当前后台管理员密码，新密码只写入后端的 env 文件。
+ * 重置必须二次确认当前后台超级管理员密码，新密码只写入后端的 env 文件。
  */
 export function useDbCredentials({ showAlert, clearAlert } = {}) {
   const dbCred = ref(null)
@@ -71,7 +71,7 @@ export function useDbCredentials({ showAlert, clearAlert } = {}) {
     }
   }
 
-  // ==================== 二次确认 + 管理员密码 ====================
+  // ==================== 二次确认 + 超级管理员密码 ====================
   const dbResetConfirm = reactive({ open: false, password: '', error: '' })
   const dbResetShowPassword = ref(false)
   const dbResetting = ref(false)
@@ -104,7 +104,7 @@ export function useDbCredentials({ showAlert, clearAlert } = {}) {
   async function dbResetSubmit() {
     if (dbResetting.value) return
     if (!dbResetConfirm.password) {
-      dbResetConfirm.error = '请输入当前后台管理员密码'
+      dbResetConfirm.error = '请输入当前后台超级管理员密码'
       return
     }
     clearAlert?.()

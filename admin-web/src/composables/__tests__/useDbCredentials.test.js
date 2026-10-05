@@ -117,7 +117,7 @@ describe('useDbCredentials 密码强度与禁用条件', () => {
 })
 
 describe('useDbCredentials 重置流程', () => {
-  it('确认后提交管理员密码，成功时记录结果并更新密码长度', async () => {
+  it('确认后提交超级管理员密码，成功时记录结果并更新密码长度', async () => {
     apiGet.mockResolvedValue(statusPayload({ password_length: 3 }))
     apiPost.mockResolvedValue({
       ok: true,
@@ -151,7 +151,7 @@ describe('useDbCredentials 重置流程', () => {
     expect(apiGet).toHaveBeenCalledTimes(1)
   })
 
-  it('未输入管理员密码时不发请求', async () => {
+  it('未输入超级管理员密码时不发请求', async () => {
     apiGet.mockResolvedValue(statusPayload())
     const h = makeHarness()
     await h.loadDbCred()
@@ -160,7 +160,7 @@ describe('useDbCredentials 重置流程', () => {
     await h.dbResetSubmit()
 
     expect(apiPost).not.toHaveBeenCalled()
-    expect(h.dbResetConfirm.error).toBe('请输入当前后台管理员密码')
+    expect(h.dbResetConfirm.error).toBe('请输入当前后台超级管理员密码')
     expect(h.dbResetConfirm.open).toBe(true)
   })
 

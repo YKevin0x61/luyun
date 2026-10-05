@@ -455,7 +455,7 @@ function onLogoutConfirm() {
   requestConfirm(
     {
       title: '确认退出登录',
-      message: '退出后需要重新输入管理员密码才能回到管理页面。',
+      message: '退出后需要重新输入超级管理员密码才能回到管理页面。',
       danger: true,
       confirmLabel: '退出登录',
     },
@@ -1621,7 +1621,7 @@ onMounted(() => {
             <fieldset v-if="dbCred">
               <legend>重置数据库密码</legend>
               <p class="hint section-lead">
-                重置会生成 32 位随机密码并写入 env 文件，需要二次确认当前后台管理员密码；页面不会显示新密码明文。
+                重置会生成 32 位随机密码并写入 env 文件，需要二次确认当前后台超级管理员密码；页面不会显示新密码明文。
               </p>
 
               <div
@@ -1801,18 +1801,18 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 重置数据库密码：二次确认必须输入当前后台管理员密码，不使用浏览器原生 prompt -->
+    <!-- 重置数据库密码：二次确认必须输入当前后台超级管理员密码，不使用浏览器原生 prompt -->
     <div v-if="dbResetConfirm.open" class="modal-overlay show" role="dialog" aria-modal="true">
       <div class="modal-box">
         <h3>重置数据库密码</h3>
         <p>
           将为 <code>{{ dbCred?.user || '当前数据库角色' }}</code> 生成 32 位随机密码并写入
           <code>{{ dbCred?.env_file || 'env 文件' }}</code>。页面不会显示新密码明文，写入成功后会自动重启应用使其生效。
-          请输入当前后台管理员密码以确认本次重置。
+          请输入当前后台超级管理员密码以确认本次重置。
         </p>
         <div class="grid">
           <div class="full">
-            <label for="dbResetPassword">当前后台管理员密码</label>
+            <label for="dbResetPassword">当前后台超级管理员密码</label>
             <div class="password-row">
               <input
                 class="input"
