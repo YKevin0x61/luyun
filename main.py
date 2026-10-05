@@ -696,7 +696,9 @@ HTML_AUTH_EXACT = {"/login", "/login.html", "/index.html", "/register"}
 # `/workbench/*` 认任一会话）。空表不是没人用：`_is_html_auth_exempt` 与契约测试都还
 # 读它，以后真有公开页（比如再有一页 `/register` 那样的入口）仍从这里逐条登记。
 # 与 `admin-web/src/utils/loginNext.js` 的 RECIPE_READER_PATHS 不再需要对齐 ——
-# 那一份现在是「扫码回跳白名单」（阅读面五页里那四条），不是免墙名单。
+# 那一份现在是「扫码回跳白名单」（扫码即看的那三条：列表 / 详情 / 打印），不是免墙名单。
+# 票 04 起印码页（`/workbench/kitchen/recipe/qr`）从那一份里摘出去了（它是店长布置岗位码
+# 的动作）—— 只影响**前端**的登录回跳与面板默认栏位，服务端页面墙与接口门一个字没动。
 HTML_AUTH_PUBLIC_PAGES = frozenset()
 HTML_AUTH_PREFIXES = (
     "/api/auth/",
@@ -1232,7 +1234,8 @@ SPA_PAGE_ROUTES = (
     # 台账，这一页回答「这周比上周好还是差」。同一批：漏一条就是直连 uvicorn 硬导航 404。
     "/workbench/floor/trend",
     # 票 07：后勤组的配方五页 —— 从独立域 `/recipe*` 搬进来（阅读面列表 / 沉浸阅读 /
-    # 打印 / 印码两种身份都能看，管理面只给管理端）。服务端这里只管「注册成页面」，
+    # 打印两种身份都能看；印码与管理面只给管理端，印码票 04 起收归管理端 —— 它是店长布置
+    # 岗位码的动作，员工是扫码的那一方）。服务端这里只管「注册成页面」，
     # 页面级权限在前端路由 meta 与各接口自己的 401。旧 `/recipe*` 一律作废：删干净、
     # 不留别名、不做重定向（`?next=` 里的老地址由前端 `utils/loginNext.js` 换成新地址）。
     "/workbench/kitchen/recipe",

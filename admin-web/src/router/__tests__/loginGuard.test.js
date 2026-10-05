@@ -177,6 +177,28 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
     expect(router.currentRoute.value.query.next).toBe('/workbench/floor/daily')
   })
 
+  it('票 04：员工会话访问印码页同样落「无权访问」（它是店长那一档的页）', async () => {
+    // 印码是店长布置岗位码的动作；员工是**扫码**的那一方，扫到的是配方详情页。
+    // 员工手输 URL 不静默改道，带着原目标去看那一页的说明与回自己首页的按钮。
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    const router = await freshRouter()
+
+    await router.push('/workbench/kitchen/recipe/qr')
+
+    expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/kitchen/recipe/qr')
+  })
+
+  it('票 04：扫码那条链路的配方详情页照旧对员工会话开着', async () => {
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    const router = await freshRouter()
+
+    await router.push('/workbench/kitchen/recipe/detail?slug=changfen')
+
+    expect(router.currentRoute.value.path).toBe('/workbench/kitchen/recipe/detail')
+    expect(router.currentRoute.value.query.slug).toBe('changfen')
+  })
+
   it('员工页：管理端会话不算数，同样落「无权访问」页（这类页没带 staffProbe 标记）', async () => {
     vi.stubGlobal('fetch', adminOnlyFetch())
     const router = await routerWith('/tmp/staff', { audience: 'staff' })

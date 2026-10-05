@@ -1,6 +1,6 @@
 /** Build and resolve /login?next= without double-encoding query values.
  *
- *  配方阅读面那四条路径不在这里写第二遍：唯一一份在 `utils/recipePaths.js`
+ *  配方阅读面那三条路径不在这里写第二遍：唯一一份在 `utils/recipePaths.js`
  *  （页面里的 router-link、印码页生成的地址、这里的回跳白名单共用它）。
  *  免墙名单（`main.py` 的 `HTML_AUTH_PUBLIC_PAGES`）票 07 起已经是空的 ——
  *  配方阅读面也要登录，这一份不再是「免墙名单」而是「扫码回跳白名单」。
@@ -180,8 +180,9 @@ function migrateLegacyPath(next) {
  *    `/workbench/me/today`** —— 「登录后回到那条配方」当场失效，而且没有任何报错。
  *    阅读面在清单里是 `both`，员工进得去，所以它是合法的员工落点。
  *
- *  配方**管理**页不在这两份里（那是管理端的一页），别顺手把整个 `/workbench/kitchen/`
- *  前缀放进来。
+ *  配方**管理**页与**印码**页不在这两份里（两页都是管理端那一档），别顺手把整个
+ *  `/workbench/kitchen/` 前缀放进来。印码页票 04 起从阅读面里摘出去了：印码是店长布置
+ *  岗位码的动作，员工是扫码的那一方（扫到的是上面那条 detail）。
  */
 export function staffNextTarget(raw) {
   const next = sanitizeNext(raw)

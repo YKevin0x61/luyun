@@ -38,11 +38,18 @@ describe('配方五条地址的唯一一份常量', () => {
     expect(RECIPE_MANAGE_PATH).toBe('/workbench/kitchen/recipe/manage')
   })
 
-  it('阅读面四条、管理页不在其中', () => {
+  it('阅读面三条、印码与管理页不在其中', () => {
+    // 印码页是**店长的活**（生成岗位码、印出来贴到岗位上），员工是扫码的那一方 ——
+    // 扫码扫到的是 detail 页。它原来被并称「阅读面」，于是未登录访问它会默认开员工栏。
     expect(RECIPE_READER_PATHS).toEqual([
-      RECIPE_HOME_PATH, RECIPE_DETAIL_PATH, RECIPE_PRINT_PATH, RECIPE_QR_PATH,
+      RECIPE_HOME_PATH, RECIPE_DETAIL_PATH, RECIPE_PRINT_PATH,
     ])
+    expect(isRecipeReaderPath(RECIPE_QR_PATH)).toBe(false)
     expect(isRecipeReaderPath(RECIPE_MANAGE_PATH)).toBe(false)
+  })
+
+  it('印码页的路径常量照旧在（页内那颗「岗位二维码」入口靠它）', () => {
+    expect(RECIPE_QR_PATH).toBe('/workbench/kitchen/recipe/qr')
   })
 
   it('旧的 /recipe* 一条都不是阅读面（搬走之后不留别名）', () => {

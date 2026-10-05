@@ -580,18 +580,20 @@ def test_recipe_reader_pages_open_for_a_staff_session(auth_app_client):
         "/workbench/kitchen/recipe",
         "/workbench/kitchen/recipe/detail?slug=changfen",
         "/workbench/kitchen/recipe/print",
-        "/workbench/kitchen/recipe/qr",
     ):
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         assert resp.status_code == 200, (path, resp.status_code)
         assert "text/html" in resp.headers["content-type"], path
 
-    # 配方管理是管理端那一页：员工会话进得去壳（工作台认任一会话），页面级权限由前端
-    # 守卫 `audience: admin` 与接口自己的 401 兜住 —— 这一条与服务端页面墙的分工一致。
-    manage = client.get(
-        "/workbench/kitchen/recipe/manage", headers=_html_headers(), follow_redirects=False
-    )
-    assert manage.status_code == 200, manage.status_code
+    # 管理端那两页（配方管理、印码）：员工会话进得去壳（工作台认任一会话），页面级权限由
+    # 前端守卫 `audience: admin` 与接口自己的 401 兜住 —— 这一条与服务端页面墙的分工一致。
+    # 票 04 起印码页（`/workbench/kitchen/recipe/qr`）也归这一档：前端守卫会把员工送到
+    # `/workbench/forbidden`（admin-web 的 `loginGuard.test.js` 压着那一条），服务端页面墙
+    # 一个字没动 —— 页面能不能打开与接口能不能读是两件事。
+    for path in ("/workbench/kitchen/recipe/manage", "/workbench/kitchen/recipe/qr"):
+        resp = client.get(path, headers=_html_headers(), follow_redirects=False)
+        assert resp.status_code == 200, (path, resp.status_code)
+        assert "text/html" in resp.headers["content-type"], path
 
 
 def test_settings_html_requires_session(auth_app_client):

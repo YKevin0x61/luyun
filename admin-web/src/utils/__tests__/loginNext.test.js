@@ -10,12 +10,17 @@ import {
 } from '../loginNext.js'
 
 describe('isRecipeReaderPath', () => {
-  // 票 07：配方阅读面搬进工作台的「后勤」组，四条路径跟着换地址。
-  it('岗位列表、详情、打印、二维码是阅读面（新地址）', () => {
+  // 票 07：配方阅读面搬进工作台的「后勤」组，三条路径跟着换地址。
+  it('岗位列表、详情、打印是阅读面（新地址）', () => {
     expect(isRecipeReaderPath('/workbench/kitchen/recipe')).toBe(true)
     expect(isRecipeReaderPath('/workbench/kitchen/recipe/detail')).toBe(true)
     expect(isRecipeReaderPath('/workbench/kitchen/recipe/print')).toBe(true)
-    expect(isRecipeReaderPath('/workbench/kitchen/recipe/qr')).toBe(true)
+  })
+
+  it('印码不是阅读面（那是店长的活，扫码扫到的是详情页）', () => {
+    // 票 04：印码页从「扫码即看的阅读面」里摘出来 —— 员工是扫码的那一方，
+    // 扫到的是 detail 页；生成岗位码、印出来贴到岗位上是店长布置岗位码的动作。
+    expect(isRecipeReaderPath('/workbench/kitchen/recipe/qr')).toBe(false)
   })
 
   it('配方管理不是阅读面（它只给管理端）', () => {
@@ -180,6 +185,8 @@ describe('resolveStaffNext', () => {
     expect(resolveStaffNext('/workbench/floor/zones')).toBe('/workbench/me/today')
     expect(resolveStaffNext('/workbench/mex')).toBe('/workbench/me/today')
     expect(resolveStaffNext('/login?next=/admin')).toBe('/workbench/me/today')
+    // 票 04：印码页是 `admin` 那一档，也不再是员工落点（跟配方管理一个待遇）。
+    expect(resolveStaffNext('/workbench/kitchen/recipe/qr')).toBe('/workbench/me/today')
   })
 
   it('票 07：配方阅读面也是员工落点 —— 扫码的厨师登录后回到那条配方', () => {
@@ -192,9 +199,7 @@ describe('resolveStaffNext', () => {
       .toBe('/workbench/kitchen/recipe/detail?slug=changfen')
     expect(resolveStaffNext('/workbench/kitchen/recipe/print?slug=changfen'))
       .toBe('/workbench/kitchen/recipe/print?slug=changfen')
-    expect(resolveStaffNext('/workbench/kitchen/recipe/qr'))
-      .toBe('/workbench/kitchen/recipe/qr')
-    // 管理页不是员工落点（配方管理只给管理端），照旧回落到员工默认落点。
+    // 管理页与印码页都不是员工落点（两页都只给管理端），照旧回落到员工默认落点。
     expect(resolveStaffNext('/workbench/kitchen/recipe/manage'))
       .toBe('/workbench/me/today')
   })
@@ -257,9 +262,16 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
     // 而是「这条目标路径是一页配方阅读面」——前台/后厨共用的扫码入口就这么一个。
     expect(resolveLoginTab('/workbench/kitchen/recipe/detail?slug=changfen', 'admin')).toBe('staff')
     expect(resolveLoginTab('/workbench/kitchen/recipe', 'admin')).toBe('staff')
-    expect(resolveLoginTab('/workbench/kitchen/recipe/qr', 'admin')).toBe('staff')
     // 老地址在入口先换成新地址，换完仍然开员工栏（扫码的人手里是旧二维码）。
     expect(resolveLoginTab('/recipe/detail?slug=changfen', 'admin')).toBe('staff')
+  })
+
+  it('票 04：印码页不是阅读面，跟配方管理一样开管理栏', () => {
+    // 印码是店长布置岗位码的动作：未登录访问它默认开管理栏，不必先切一次身份。
+    // 老地址 /recipe/qr 在入口换成新地址之后同样开管理栏。
+    expect(resolveLoginTab('/workbench/kitchen/recipe/qr', 'staff')).toBe('admin')
+    expect(resolveLoginTab('/workbench/kitchen/recipe/qr', null)).toBe('admin')
+    expect(resolveLoginTab('/recipe/qr', 'staff')).toBe('admin')
   })
 
   it('配方管理不是阅读面：它照旧跟着记住值走', () => {

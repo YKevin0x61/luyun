@@ -175,6 +175,9 @@ describe('401 兜底豁免也从清单派生（票 10）', () => {
       '/workbench/hr/roster',
       '/workbench/floor/daily',
       '/workbench/kitchen/recipe/manage',
+      // 票 04：印码页也是管理端那一档（印码是店长布置岗位码的动作）—— 会话没了就该去登录，
+      // 不再像「扫码即看的阅读面」那样被豁免。
+      '/workbench/kitchen/recipe/qr',
     ]) {
       expect(skipsAdminLoginRedirect(path), path).toBe(false)
     }

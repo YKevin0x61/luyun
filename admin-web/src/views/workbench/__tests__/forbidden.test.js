@@ -101,6 +101,23 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
     expect(router.currentRoute.value.path).toBe('/workbench/me/today')
   })
 
+  it('票 04：员工进印码页同理 —— 说清那是店长的页，仍留一条回自己首页的路', async () => {
+    // 印码页（生成岗位二维码、印出来贴到岗位上）票 04 起是 `admin` 那一档：员工手输 URL
+    // 被守卫拦到这里，看到的是**解释**（不是静默改道），按钮回自己的首页。
+    const { wrapper, router } = await mountForbidden('/workbench/kitchen/recipe/qr')
+
+    expect(wrapper.text()).toContain('无权访问')
+    expect(wrapper.text()).toContain('店长')
+    expect(wrapper.text()).toContain('岗位二维码')
+
+    const button = wrapper.get('button')
+    expect(button.text()).toBe('回我的首页')
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
+  })
+
   it('超级管理员进员工页：说明这是员工手机端的页，按钮回工作台首页', async () => {
     vi.stubGlobal('fetch', adminOnlyFetch())
     const { wrapper, router } = await mountForbidden('/workbench/me/today')

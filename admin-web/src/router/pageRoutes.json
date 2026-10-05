@@ -7,7 +7,8 @@
     "可选字段 authRedirect（默认 true，票 10）：管理端 client 拿到 401 时要不要统一跳 /login。只有 /settings 是 false —— 它自己把 401 渲染成「当前未登录」，跳转会和它自己的状态机打架（同一个接口反复 401 时还会在 /login 与 /settings 之间来回跳）。登录页与注册页是 public，不需要这个标记；员工身份与 both 的页按 audience 判（它们的钥匙可能是员工 cookie，甩去管理端登录页是走错门）。判据在 admin-web/src/router/pageRoutes.js 的 skipsAdminLoginRedirect。",
     "audience 的分组语义按 2026-10-05 定下的工作台信息架构：人事、现场、后勤（配方 + 备货计划）、我的（员工端，票 03 起住在 /workbench/me/*）。",
     "public 的语义是「未登录也能拿到页面壳」（服务端不 302、前端守卫放行）。工作台是「进去要登录」的页面区（票 02 的页面墙对 /workbench 认任一会话），所以工作台里的页一律 public: false —— 员工三页也不例外：员工自己的会话就是那把钥匙，标成 public 只会把壳也对未登录访客敞开。",
-    "票 07 起配方阅读面（/workbench/kitchen/recipe 列表 / detail 沉浸阅读 / print 打印 / qr 印码）也从免登录改成要登录 —— 它是最后一批 public: true 的业务页，关掉之后 public 只剩 /login 与 /register 两个入口页。扫码看岗位配方保留：扫码 → 未登录 → 登录（默认开员工栏）→ 回到那条配方，回跳在 admin-web/src/utils/loginNext.js 的 RECIPE_READER_PATHS 里。",
+    "票 07 起配方阅读面（/workbench/kitchen/recipe 列表 / detail 沉浸阅读 / print 打印）也从免登录改成要登录 —— 它是最后一批 public: true 的业务页，关掉之后 public 只剩 /login 与 /register 两个入口页。扫码看岗位配方保留：扫码 → 未登录 → 登录（默认开员工栏）→ 回到那条配方，回跳在 admin-web/src/utils/loginNext.js 的 RECIPE_READER_PATHS 里。",
+    "票 04 把 /workbench/kitchen/recipe/qr 的 audience 从 both 收成 admin：它是**印码页**（生成岗位二维码、印出来贴到岗位上），印码是店长布置岗位码的动作，员工是**扫码**的那一方（扫到的是 detail 页）。它原来被并称「配方阅读面」，于是未登录访问它会默认开员工栏、员工导航与 URL 直达都进得去。现在员工手输 URL 落 /workbench/forbidden（不静默改道），未登录访问它默认开管理栏；接口那一侧一个字都没动 —— 页面能不能打开与接口能不能读是两件事。",
     "standalone 的语义是「不渲染管理后台那条导航」（App.vue 按它决定渲不渲 NavBar），不是「没有外壳」：后勤组里的列表页与配方管理页各自套工作台外壳（WorkbenchLayout，顶栏那条窄栏 + 按身份过滤的导航），阅读 / 打印 / 印码三页是**沉浸页** —— 不套外壳，页面上只有返回 / 打印 / 目录抽屉。两种在这张表里都记 standalone: true。",
     "/workbench/forbidden 是越权落点（票 03）：group 用 entry —— 它不属于任何业务组、不进工作台导航；audience: both 是「两种身份都可能被拦到这里」（谁越权谁看）；standalone: true 是「一页说明 + 一颗回自己首页的按钮」，不套后台导航。",
     "票 05 起工作台的页面按组落在 URL 上：人事 /workbench/hr/*（排班月历 / 排班待办 / 班次表 / 花名册）、现场 /workbench/floor/*（卫生七页）。票 05 之前那批**平铺**地址（/workbench/roster、/workbench/daily、/workbench/inbox …）随这一票作废：不加别名、不做重定向，自然 404（`?next=` 里可能还存着它们，由 admin-web/src/utils/loginNext.js 在入口换成新地址）。",
@@ -214,7 +215,7 @@
       "path": "/workbench/kitchen/recipe/qr",
       "title": "岗位二维码",
       "group": "kitchen",
-      "audience": "both",
+      "audience": "admin",
       "standalone": true,
       "public": false
     },
