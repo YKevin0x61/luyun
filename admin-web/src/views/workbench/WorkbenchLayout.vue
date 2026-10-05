@@ -144,16 +144,20 @@ watch(identity, keepViewAllowed)
 .wb-top {
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; gap: 10px;
-  height: 40px; padding: 0 12px;
+  /* 高度是**下限**不是定值（票 12 收的 O3）：原来是 `height: 40px` 的单行 flex，
+     390px 手机上胶囊被压到内容宽度以下、汉字逐字换行，整条栏溢出后被裁掉 ——
+     退出按钮当场看不见（实测 clientWidth 390 / scrollWidth 442、高度 39/62）。 */
+  min-height: 40px; padding: 4px 12px;
   background: var(--hy-bg);
   border-bottom: 1px solid var(--hy-line);
 }
 .wb-brand {
   /* 牌子占掉剩下的宽度：切换器与导航一起贴在右端（原来靠 `.wb-nav` 的 auto margin，
-     中间插了切换器之后那点间距就不够看了）。 */
-  flex: 1; min-width: 0;
+     中间插了切换器之后那点间距就不够看了）。窄屏放不下时它先让位（见下面的媒体查询）。 */
+  flex: 1 1 auto; min-width: 0;
   font-family: var(--font-song); font-size: 14px;
   letter-spacing: .12em; color: var(--hy-ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* 与人事壳的 `.sched-back` 同一身：一颗描边小胶囊，别抢牌子的视线。 */
 .wb-back {
@@ -161,16 +165,17 @@ watch(identity, keepViewAllowed)
   font-size: 12px; color: var(--hy-muted); text-decoration: none;
   background: var(--hy-surface-2); border: 1px solid var(--hy-line);
   border-radius: 999px; padding: 4px 11px;
+  white-space: nowrap;
 }
 .wb-back:hover { color: var(--hy-ink); border-color: var(--hy-line-strong); }
 /* 切换器与导航之间一条细分隔：两件事（我是谁 / 去哪一页），别挤成一团。 */
 .wb-id-switcher { margin-left: 4px; padding-right: 10px; border-right: 1px solid var(--hy-line); }
-.wb-nav { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.wb-nav { display: flex; align-items: center; gap: 6px; margin-left: auto; min-width: 0; }
 .wb-exit-btn { margin-left: 8px; }
 .wb-nav-item {
   font-size: 12px; color: var(--hy-muted); text-decoration: none;
   border: 1px solid var(--hy-line); background: var(--hy-surface-2);
-  border-radius: 999px; padding: 4px 12px;
+  border-radius: 999px; padding: 4px 12px; white-space: nowrap;
 }
 .wb-nav-item:hover { color: var(--hy-ink); border-color: var(--hy-line-strong); }
 /* 高亮按「格」算，不按链接自己的路径（见 `workbenchGroupOf`）。
@@ -191,4 +196,17 @@ watch(identity, keepViewAllowed)
 .wb-nav-item.is-current { color: var(--hy-ink); font-weight: 600; }
 .wb-nav-item.is-current.is-on { color: var(--hy-mint); }
 .wb-main { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+/* 窄屏（票 12 收的 O3）：顶栏换行 —— 身份切换器与退出是这一条里最不该被挤出屏幕的两件
+   （切换器自己 `flex: 0 0 auto`，见 `WorkbenchIdentitySwitcher.vue`），所以本组导航整条
+   另起一行、自己横向滑。与人事壳 `.sched-top` 同一套路。 */
+@media (max-width: 720px) {
+  .wb-top { flex-wrap: wrap; row-gap: 6px; }
+  .wb-nav { order: 1; flex-basis: 100%; margin-left: 0; overflow-x: auto; }
+}
+@media (max-width: 560px) {
+  /* 牌子让位给切换器与两扇门（人事壳同一条：`.sched-name` 在 560px 收起）：
+     子系统名字在页面标题与工作台导航里都还在。 */
+  .wb-brand { display: none; }
+}
 </style>

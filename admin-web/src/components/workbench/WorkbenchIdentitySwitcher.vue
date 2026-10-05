@@ -73,13 +73,16 @@ function pick(option) {
 </template>
 
 <style scoped>
-.wb-id { display: flex; align-items: center; gap: 6px; position: relative; }
+.wb-id { display: flex; align-items: center; gap: 6px; position: relative; flex: 0 0 auto; }
 .wb-id-opt {
   display: inline-flex; align-items: baseline; gap: 2px;
   font: inherit; font-size: 12px; line-height: 1.2; cursor: pointer;
   color: var(--hy-muted); background: var(--hy-surface-2);
   border: 1px solid var(--hy-line); border-radius: 999px;
   padding: 4px 12px;
+  /* 两档的名字不逐字换行（票 12 收的 O3）：顶栏变窄时它是**最后一个**该被压缩的东西
+     —— 原来是胶囊被挤到 132px、汉字竖着排（390px 实测）。顶栏自己换行来容它。 */
+  white-space: nowrap;
 }
 .wb-id-opt:hover:not(:disabled) { color: var(--hy-ink); border-color: var(--hy-line-strong); }
 /* 当前这一档：实心薄荷，与导航里「当前组」同一套令牌。 */

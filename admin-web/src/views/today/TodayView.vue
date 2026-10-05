@@ -25,6 +25,7 @@ import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { buildWorkQueue, dailyProgress, shiftClock } from '../../utils/hygieneWorkFlow'
 import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
+import { loginRedirectTarget } from '../../utils/loginNext'
 import {
   dayLabel,
   nextTwoLine,
@@ -191,11 +192,12 @@ const ENTRIES = [
 // 会话没了（换了手机、店里停了账号、cookie 过期）：回员工登录，回来还是这一页。
 // 票 03 起员工登录页就是 `/login` 的员工栏（`?next=` 落在员工端前缀内时面板会强制
 // 开员工栏）；跟卫生首页同一个走法（`leaveForStaffLogin`）：把当前地址整个带过去。
+// 落点算在 `loginRedirectTarget` 一处（票 12 收的 O2）：页面上并发的几个请求会各拿一个
+// 401 各自调到这里，**已经在登录页上时它返回 null** —— 不返回的话第二个 401 会把
+// 「已经是登录页的当前地址」再包一层，`?next=` 里的目标当场作废。
 function leaveForStaffLogin() {
-  router.replace({
-    path: '/login',
-    query: { next: router.currentRoute.value.fullPath },
-  })
+  const target = loginRedirectTarget(router.currentRoute.value)
+  if (target) router.replace(target)
 }
 
 function open(entry) {

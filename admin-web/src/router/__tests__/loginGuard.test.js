@@ -259,4 +259,71 @@ describe('/workbench/me/today 真实挂载：未登录时页面自己把 fullPat
     expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
     wrapper.unmount()
   })
+
+  // 票 12 收的 O2：这条链上**并发的 401** 才是真机上的形态 —— 页面一挂载就并行发几条
+  // 请求（排班 / 申请 / 卫生），各自 catch 里都会调 `leaveForStaffLogin`。第一个把人送到
+  // `/login?next=X`，第二个若再跳一次，就会把「已经是登录页的当前地址」当成目标包进去：
+  // 真机实测的最终 URL 就是 `/login?next=/login?next=/workbench/me/today`。
+  it('第二个 401 晚到（此刻已站在 /login 上）：URL 不套娃', async () => {
+    vi.resetModules()
+    const TodayView = (await import('../../views/today/TodayView.vue')).default
+
+    // `/api/scheduling/me` 这条**挂住**，等第一条跳转落定之后再回 401 —— 复刻真机上
+    // 「第二个 401 在导航之后才到」的时序；其余请求照 beforeEach 那份桩（卫生那条立刻 401）。
+    let releaseSlowRequest
+    const slowResponse = new Promise((resolve) => {
+      releaseSlowRequest = () => resolve(jsonResponse({ detail: '需要员工登录' }, 401))
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url) => {
+        const path = String(url)
+        if (path.includes('/api/scheduling/me') && !path.includes('/me/')) return slowResponse
+        if (path.includes('/api/hygiene/staff/me')) {
+          return jsonResponse({ detail: '需要员工登录' }, 401)
+        }
+        if (path.includes('/api/auth/status')) {
+          return jsonResponse({ logged_in: false, initialized: true })
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/workbench/me/today', component: TodayView },
+        { path: '/login', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/workbench/me/today')
+    await router.isReady()
+
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const wrapper = mount(TodayView, {
+      global: {
+        plugins: [router, pinia],
+        stubs: {
+          ConfirmDialog: true,
+          HygieneLiveCamera: true,
+          HygieneStandardOverlay: true,
+        },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
+
+    // 迟到的那个 401 到达：这一跳**不该**发生。
+    releaseSlowRequest()
+    await flushPromises()
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.fullPath.match(/next=/g)).toHaveLength(1)
+    wrapper.unmount()
+  })
 })

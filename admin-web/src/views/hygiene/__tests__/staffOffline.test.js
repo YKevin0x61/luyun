@@ -42,7 +42,10 @@ describe('员工端弱网与未登录的分流', () => {
   })
 
   it('carries the current page into re-login', () => {
-    expect(home).toMatch(/query: \{ next: router\.currentRoute\.value\.fullPath \}/)
+    // 票 12 起由 `utils/loginNext.js` 的 `loginRedirectTarget` 算落点（不套娃、query 统一
+    // 编码），页面里不再手拼 `?next=`。
+    expect(home).toMatch(/loginRedirectTarget\(router\.currentRoute\.value\)/)
+    expect(home).not.toMatch(/query: \{ next: router\.currentRoute\.value\.fullPath \}/)
   })
 
   it('uses that return path on the login panel, but only inside the staff pages', () => {

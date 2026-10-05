@@ -111,4 +111,24 @@ describe('api.request 的 401 兜底', () => {
     expect(handler).not.toHaveBeenCalled()
     expect(err.status).toBe(401)
   })
+
+  // 票 12 收的 O2 复盘：站在 `/login` 上时这一路兜底**本来就**不会再跳 —— 登录页在页面
+  // 清单里是 `public`，`skipsAdminLoginRedirect` 先拦下来了（所以真机上那次套娃不是从这里
+  // 出来的，是员工页自己那次 `leaveForStaffLogin`；落点的「不套娃」判据在
+  // `utils/loginNext.js` 的 `loginRedirectTarget`，两条链共用它）。这条测试把这件事钉住：
+  // 谁哪天把登录页移出豁免名单，这里会先红。
+  it('站在 /login 上：豁免名单先拦下，兜底一动不动（`?next=` 不会叠第二层）', async () => {
+    const location = stubLocation('/login')
+    const handler = vi.fn()
+    setUnauthorizedHandler(handler)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      jsonResponse(401, { detail: '需要登录' }),
+    ))
+
+    const err = await api.get('/api/scheduling/me').catch((e) => e)
+
+    expect(handler).not.toHaveBeenCalled()
+    expect(location.href).toBe('')
+    expect(err.status).toBe(401)
+  })
 })

@@ -25,9 +25,11 @@ describe('员工端「整月」页（票 06）', () => {
     expect(view).not.toMatch(/\/api\/hygiene/)
     expect(view).not.toMatch(/\/api\/scheduling\/(roster|calendar|day|rules)/)
     // 401 回员工登录（票 03 起是 /login 的员工栏），把当前地址整个带过去。
-    expect(view).toMatch(/path: '\/login'/)
+    // 票 12 起落点算在 `utils/loginNext.js` 的 `loginRedirectTarget` 一处（它拒绝在
+    // 登录页上再跳一次，O2 的 `?next=` 套娃就是这么来的）。
     expect(view).not.toMatch(/path: '\/workbench\/login'/)
-    expect(view).toMatch(/next: router\.currentRoute\.value\.fullPath/)
+    expect(view).toMatch(/import \{ loginRedirectTarget \} from '\.\.\/\.\.\/utils\/loginNext'/)
+    expect(view).toMatch(/loginRedirectTarget\(router\.currentRoute\.value\)/)
   })
 
   it('lays out a real month grid without horizontal scrolling', () => {

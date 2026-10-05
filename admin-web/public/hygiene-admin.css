@@ -2283,6 +2283,14 @@
    响应式
    ========================================================================== */
 @media (max-width: 720px) {
+  /* 窄屏顶栏换行（票 12 收的 O3）：390px 下品牌与身份切换器会被挤成竖排（实测切换器掉到
+     132px 宽、「超级管理员」四个字竖着排）。切换器自己 `flex: 0 0 auto`（见
+     WorkbenchIdentitySwitcher.vue），所以这里让容器换行来容它们 —— 与人事壳
+     `.sched-top` 的窄屏换行同一套路。 */
+  .hygiene-admin .hy-header-inner {
+    flex-wrap: wrap;
+    row-gap: .45rem;
+  }
   .hygiene-admin .roster-head.card {
     flex-direction: column;
     align-items: stretch;

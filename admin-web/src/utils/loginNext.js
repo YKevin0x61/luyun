@@ -30,6 +30,30 @@ export function buildLoginNextFromRoute(route) {
   return qs ? `${path}?${qs}` : path
 }
 
+/** 登录页的路径（票 12：落点与判据都从这一份取，别在两处判据里各写一遍字符串）。 */
+export const LOGIN_PATH = '/login'
+
+/** 当前是不是已经站在登录页上（带不带 `?next=` 都算）。 */
+export function isOnLoginPage(path) {
+  return String(path == null ? '' : path) === LOGIN_PATH
+}
+
+/** 「会话没了，回登录页」这个动作的落点：`/login` + 原目标（`?next=`）。
+ *
+ *  **已经在登录页上时返回 `null`**（不跳）。这不是优化，是止损：一页上并发的几个请求会
+ *  各拿一个 401，第一个把人送到 `/login?next=X`，后面几个若再跳一次，就会把「已经是登录
+ *  页的当前地址」当成原目标包进去 —— `/login?next=/login?next=X` 那种套娃，`?next=` 里
+ *  真正要回去的目标当场作废（票 12 收的 O2，真机实测过）。
+ *
+ *  组件侧（员工三页）与 `main.js` 注入给 `api/client.js` 的 401 兜底共用这一份判据，
+ *  不各写一遍 —— 写两遍就会一处修、一处漏。
+ */
+export function loginRedirectTarget(route) {
+  const current = route || {}
+  if (isOnLoginPage(current.path)) return null
+  return { path: LOGIN_PATH, query: { next: buildLoginNextFromRoute(current) } }
+}
+
 /** 站内相对路径的公共判据：站外、协议相对、反斜杠变体、登录页自身一律不算。
  *
  *  按身份互斥的两份白名单（管理员 / 员工）都从这里出发 —— 不各写一遍正则，否则

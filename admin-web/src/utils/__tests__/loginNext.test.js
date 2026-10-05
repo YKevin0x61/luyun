@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildLoginNextFromRoute,
+  isOnLoginPage,
   isRecipeReaderPath,
+  loginRedirectTarget,
   resolveLoginNext,
   resolveLoginTab,
   resolveStaffNext,
@@ -41,6 +43,45 @@ describe('buildLoginNextFromRoute', () => {
   it('没有 query 时只返回 path', () => {
     expect(buildLoginNextFromRoute({ path: '/workbench/kitchen/recipe/manage', query: {} }))
       .toBe('/workbench/kitchen/recipe/manage')
+  })
+})
+
+// 票 12 收的 O2：一页上并发的几个请求会各拿一个 401，各自调一次「回登录页」。第一个把人
+// 送到 `/login?next=X`，后面几个若照跳不误，就会把**已经是登录页的当前地址**当成原目标
+// 再包一层 —— `/login?next=/login?next=X`，`?next=` 里真正要回去的目标当场作废（真机实测
+// 过：管理端身份打开员工页，最终 URL 就是这个套娃）。
+describe('loginRedirectTarget：已经在登录页上就不再跳', () => {
+  it('第一次：原目标整个带过去（path + query）', () => {
+    expect(loginRedirectTarget({
+      path: '/workbench/kitchen/recipe/detail',
+      query: { slug: '肠粉档' },
+    })).toEqual({
+      path: '/login',
+      query: { next: '/workbench/kitchen/recipe/detail?slug=%E8%82%A0%E7%B2%89%E6%A1%A3' },
+    })
+  })
+
+  it('第二次（此刻已经在 /login?next=X 上）：返回 null，不套娃', () => {
+    expect(loginRedirectTarget({ path: '/login', query: { next: '/workbench/me/today' } })).toBeNull()
+    expect(loginRedirectTarget({ path: '/login' })).toBeNull()
+  })
+
+  it('连跳两次之后 URL 里只有一个 next=', () => {
+    const start = { path: '/workbench/me/today', query: {} }
+    const first = loginRedirectTarget(start)
+    expect(first.query.next).toBe('/workbench/me/today')
+
+    // 第二个 401 到达时，当前地址已经是第一条跳转的落点。
+    const second = loginRedirectTarget({ path: '/login', query: first.query })
+    expect(second).toBeNull()
+    expect(`/login?next=${first.query.next}`.match(/next=/g)).toHaveLength(1)
+  })
+
+  it('isOnLoginPage 只认登录页本身', () => {
+    expect(isOnLoginPage('/login')).toBe(true)
+    expect(isOnLoginPage('/login/')).toBe(false)
+    expect(isOnLoginPage('/workbench/me/today')).toBe(false)
+    expect(isOnLoginPage(undefined)).toBe(false)
   })
 })
 

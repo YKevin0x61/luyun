@@ -14,7 +14,7 @@ import {
   deleteStationConfirmCopy,
   restoreHistoryCopy,
 } from '../../utils/recipeConfirmCopy'
-import { RECIPE_DETAIL_PATH, RECIPE_HOME_PATH } from '../../utils/recipePaths'
+import { RECIPE_DETAIL_PATH, RECIPE_HOME_PATH, RECIPE_MANAGE_PATH } from '../../utils/recipePaths'
 import {
   RECIPE_BRAND_MARK,
   RECIPE_BRAND_TAGLINE,

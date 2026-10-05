@@ -5,7 +5,13 @@ import { api } from '../../api/client'
 import { useRecipeAdmin } from '../../composables/useRecipeAdmin'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import * as RC from '../../utils/recipeCore'
-import { RECIPE_DETAIL_PATH, RECIPE_HOME_PATH, RECIPE_PRINT_PATH, RECIPE_QR_PATH } from '../../utils/recipePaths'
+import {
+  RECIPE_DETAIL_PATH,
+  RECIPE_HOME_PATH,
+  RECIPE_MANAGE_PATH,
+  RECIPE_PRINT_PATH,
+  RECIPE_QR_PATH,
+} from '../../utils/recipePaths'
 import {
   SEARCH_GROUP_ITEM_CAP,
   capGroupedSearchHits,
@@ -309,6 +315,15 @@ function onDocumentPointerDown(evt) {
 </template>
 
 <style scoped>
+/* 大标题用**配方自己的**字色（票 12 收的 O5）：这一页自从搬进 `/workbench/kitchen/recipe`
+   （票 07）就套在工作台外壳里，而外壳那条 `.hygiene-admin h1/h2 { color: var(--hy-ink) }`
+   （特异度 0,1,1）压过 `recipe.css` 的 `.page-title`（0,1,0）—— 深色工作台的字色漏到这张
+   白底 hero 上就是白底白字，真机实测 computed color `rgb(228,240,238)`、卡片底 `#fff`。
+   这里按配方自己的令牌盖回来；只作用于这一页（scoped 的 `[data-v-…]` 提到 0,2,0），
+   不动全局主题，也不动外壳那条规则（配方管理页的标题坐在深色底上，是对的）。 */
+.page-title {
+  color: var(--ink);
+}
 .site-nav-link {
   display: inline-flex;
   align-items: center;

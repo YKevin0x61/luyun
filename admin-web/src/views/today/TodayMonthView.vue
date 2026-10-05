@@ -25,6 +25,7 @@ import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { eachDayInRange } from '../../utils/dateRange'
+import { loginRedirectTarget } from '../../utils/loginNext'
 import {
   MONTH_HEADS,
   dayBeyondWindow,
@@ -71,10 +72,9 @@ async function load(target, quiet = false) {
   } catch (err) {
     if (err.status === 401) {
       // 会话没了：回员工登录（`/login` 的员工栏），回来还是这一页（跟「今天」页同一个走法）。
-      router.replace({
-        path: '/login',
-        query: { next: router.currentRoute.value.fullPath },
-      })
+      // 落点与「已经在登录页上就不再跳」都算在 `loginRedirectTarget` 一处（票 12 收的 O2）。
+      const target = loginRedirectTarget(router.currentRoute.value)
+      if (target) router.replace(target)
       return
     }
     errorText.value = err.message || '读不到你的班'

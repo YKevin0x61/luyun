@@ -59,6 +59,7 @@ import {
   statusTone,
   tabWorkCount,
 } from '../../utils/hygieneWorkFlow'
+import { loginRedirectTarget } from '../../utils/loginNext'
 
 useScopedStylesheet('/hygiene-admin.css')
 
@@ -444,11 +445,11 @@ function isAuthError(err) {
 function leaveForStaffLogin() {
   imageUploads.clearTasksByTransport('staff')
   // 票 03 起员工登录页就是 `/login` 的员工栏：`?next=` 落在员工端前缀内时面板会强制
-  // 开员工栏，登回来还是这一页。
-  router.replace({
-    path: '/login',
-    query: { next: router.currentRoute.value.fullPath },
-  })
+  // 开员工栏，登回来还是这一页。落点算在 `loginRedirectTarget` 一处（票 12 收的 O2）：
+  // 页面上并发的几个请求各拿一个 401 各自调到这里，**已经在登录页上时它返回 null** ——
+  // 不返回的话第二个 401 会把「已经是登录页的当前地址」再包一层，`?next=` 里的目标作废。
+  const target = loginRedirectTarget(router.currentRoute.value)
+  if (target) router.replace(target)
 }
 
 function scheduleMeRetry() {
