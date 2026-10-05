@@ -6,11 +6,12 @@ import { createPinia, setActivePinia } from 'pinia'
 import LoginView from '../LoginView.vue'
 
 // /login 面板的组件级测试：真实挂载页面，只断言「渲染出什么」与「它实际发出什么请求」。
-// 票 03 起一个面板两个 Tab（管理员 / 员工）：
-//  - 状态接口的返回决定当前栏落在哪一态（未初始化 → init 只属于管理员栏，已初始化未登录
+// 票 03 起一个面板两个 Tab（超级管理员 / 员工）—— 共享账号那一档界面上一律写
+// 「超级管理员」，「管理员」只留给花名册上那个真人的派生标签（ADR 0093）：
+//  - 状态接口的返回决定当前栏落在哪一态（未初始化 → init 只属于超级管理员栏，已初始化未登录
 //    → login，已登录 + ?switch=1 → loggedIn 确认面板）；
 //  - 默认栏 = 记住值（`luyun.login.panel.tab`），`?next=` 落在员工端前缀内时强制员工栏；
-//  - 管理员栏打 `/api/auth/*`（原生 fetch），员工栏打 `/api/hygiene/staff/*`（staffRequest）。
+//  - 超级管理员栏打 `/api/auth/*`（原生 fetch），员工栏打 `/api/hygiene/staff/*`（staffRequest）。
 // 不看组件内部状态与私有函数名。
 
 function jsonResponse(data, { ok = true, status = 200 } = {}) {
@@ -34,7 +35,7 @@ const ROUTES = [
   { path: '/workbench/me/month', component: { template: '<div />' } },
   { path: '/workbench/me/clean', component: { template: '<div />' } },
   { path: '/workbench/hr/roster', component: { template: '<div />' } },
-  // 越权落点（D4：管理栏拿到进不去的 `?next=` 时落这里，原目标一起带过去）。
+  // 越权落点（D4：超级管理员栏拿到进不去的 `?next=` 时落这里，原目标一起带过去）。
   { path: '/workbench/forbidden', component: { template: '<div />' } },
   // 票 07：配方阅读面（扫码的目标页）。
   { path: '/workbench/kitchen/recipe/detail', component: { template: '<div />' } },
@@ -75,6 +76,9 @@ function rememberTab(tab) {
 
 async function clickTab(wrapper, label) {
   const tab = wrapper.findAll('[role="tab"]').find((item) => item.text() === label)
+  // 找不到就**当场**红：`.find` 落空时 `trigger` 会抛一句"读不到 undefined 的 trigger"，
+  // 那种红看不出是哪一档的名字变了（票 03 改名字时踩过一次）。
+  if (!tab) throw new Error(`面板上没有「${label}」这一栏，现有：${tabTexts(wrapper).join(' / ')}`)
   await tab.trigger('click')
   await flushPromises()
 }
@@ -126,12 +130,27 @@ function themeColor() {
 }
 
 describe('/login 面板：两个 Tab 与默认栏', () => {
+  // 票 03 的回归护栏：共享账号那一档**不许**只写「管理员」。「超级管理员」是完整的一个词，
+  // 写作 `not.toContain('管理员')` 会把正确的名字一起判红，所以剥掉那个完整的词再判。
+  it('共享账号那一档写「超级管理员」，不写「管理员」；员工那一档不受影响', async () => {
+    rememberTab('admin')
+    fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT())
+
+    const { wrapper } = await mountLogin('/login')
+
+    expect(activeTab(wrapper)).toBe('超级管理员')
+    // 一条断言同时管住两件事：出现的是「超级管理员」这个完整词，且没有光秃秃的「管理员」
+    // 残留 —— 渲染成「超级管理员管理员」这种半截替换也在这里变红。
+    expect(activeTab(wrapper).replace('超级管理员', '')).not.toContain('管理员')
+    expect(tabTexts(wrapper).filter((text) => text.includes('员工'))).toHaveLength(1)
+  })
+
   it('两个显式 Tab 都在；没记住过时默认员工栏（员工手机一打开就是员工栏）', async () => {
     fetchMock.mockResolvedValueOnce(STAFF_401())
 
     const { wrapper } = await mountLogin('/login')
 
-    expect(tabTexts(wrapper)).toEqual(['管理员', '员工'])
+    expect(tabTexts(wrapper)).toEqual(['超级管理员', '员工'])
     expect(activeTab(wrapper)).toBe('员工')
     const form = wrapper.get('form')
     expect(form.get('input[type="tel"]').exists()).toBe(true)
@@ -140,13 +159,13 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
     expect(findCall(fetchMock, '/api/auth/status')).toBeFalsy()
   })
 
-  it('记住上次选的栏：记住管理员栏时打开就是管理员栏', async () => {
+  it('记住上次选的栏：记住超级管理员栏时打开就是超级管理员栏', async () => {
     rememberTab('admin')
     fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login')
 
-    expect(activeTab(wrapper)).toBe('管理员')
+    expect(activeTab(wrapper)).toBe('超级管理员')
     const statusCall = findCall(fetchMock, '/api/auth/status')
     expect(statusCall).toBeTruthy()
     expect(statusCall[1].credentials).toBe('include')
@@ -170,22 +189,22 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login')
-    await clickTab(wrapper, '管理员')
+    await clickTab(wrapper, '超级管理员')
 
-    expect(activeTab(wrapper)).toBe('管理员')
+    expect(activeTab(wrapper)).toBe('超级管理员')
     expect(window.localStorage.getItem('luyun.login.panel.tab')).toBe('admin')
   })
 
-  // D13：`?next=` 指向管理端专属页时开管理员栏。这类目标只认管理端 cookie，开员工栏
+  // D13：`?next=` 指向管理端专属页时开超级管理员栏。这类目标只认管理端 cookie，开员工栏
   // 等于让人在手机号表单上白填一次（审查实测：`/login?next=/workbench/hr/roster` 开的是
   // 员工栏）。没记住过偏好也一样 —— 那正是审查里撞到的那一档。
-  it('D13：?next 是管理端专属页时开管理员栏（没记住偏好也一样）', async () => {
+  it('D13：?next 是管理端专属页时开超级管理员栏（没记住偏好也一样）', async () => {
     fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login?next=%2Fworkbench%2Fhr%2Froster')
 
-    expect(activeTab(wrapper)).toBe('管理员')
-    // 开管理员栏就该查管理端状态，别去敲员工探针。
+    expect(activeTab(wrapper)).toBe('超级管理员')
+    // 开超级管理员栏就该查管理端状态，别去敲员工探针。
     expect(findCall(fetchMock, '/api/auth/status')).toBeTruthy()
     expect(findCall(fetchMock, '/api/hygiene/staff/me')).toBeFalsy()
   })
@@ -196,7 +215,7 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
 
     const { wrapper } = await mountLogin('/login?next=%2Fsales-report')
 
-    expect(activeTab(wrapper)).toBe('管理员')
+    expect(activeTab(wrapper)).toBe('超级管理员')
   })
 })
 
@@ -209,7 +228,7 @@ describe('/login 面板：清单归属只看路径（票 09 收敛，不再随�
     fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT()).mockResolvedValueOnce(STAFF_401())
 
     const { wrapper } = await mountLogin('/login')
-    expect(activeTab(wrapper)).toBe('管理员')
+    expect(activeTab(wrapper)).toBe('超级管理员')
     expect(manifestHref()).toBe('/pwa/manifests/admin.webmanifest')
 
     await clickTab(wrapper, '员工')
@@ -220,10 +239,10 @@ describe('/login 面板：清单归属只看路径（票 09 收敛，不再随�
   })
 })
 
-describe('/login 面板：管理员栏', () => {
+describe('/login 面板：超级管理员栏', () => {
   beforeEach(() => rememberTab('admin'))
 
-  it('状态接口报「已初始化且未登录」时渲染管理员登录表单', async () => {
+  it('状态接口报「已初始化且未登录」时渲染超级管理员登录表单', async () => {
     fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login')
@@ -273,8 +292,8 @@ describe('/login 面板：管理员栏', () => {
     expect(initCall[1].method).toBe('POST')
   })
 
-  it('首次初始化只属于管理员栏：员工栏没有这一态', async () => {
-    // 这一条要从默认的员工栏进，覆盖掉本 describe 的「记住管理员栏」前置。
+  it('首次初始化只属于超级管理员栏：员工栏没有这一态', async () => {
+    // 这一条要从默认的员工栏进，覆盖掉本 describe 的「记住超级管理员栏」前置。
     window.localStorage.clear()
     fetchMock
       .mockResolvedValueOnce(STAFF_401())
@@ -286,8 +305,8 @@ describe('/login 面板：管理员栏', () => {
     expect(wrapper.get('form').get('button[type="submit"]').text()).toContain('登录')
     expect(wrapper.text()).not.toContain('创建账号并登录')
 
-    // 同一份未初始化状态在管理员栏才变成首次初始化表单。
-    await clickTab(wrapper, '管理员')
+    // 同一份未初始化状态在超级管理员栏才变成首次初始化表单。
+    await clickTab(wrapper, '超级管理员')
     expect(wrapper.get('form').get('button[type="submit"]').text()).toContain('创建账号')
   })
 
@@ -329,7 +348,7 @@ describe('/login 面板：管理员栏', () => {
     expect(router.currentRoute.value.path).toBe('/workbench/hr/roster')
   })
 
-  it('登录落点用 replace：后退不会退回登录页（管理栏与员工栏同一套 history 语义）', async () => {
+  it('登录落点用 replace：后退不会退回登录页（超级管理员栏与员工栏同一套 history 语义）', async () => {
     fetchMock
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ ok: true }))
@@ -465,7 +484,7 @@ describe('/login 面板：员工栏', () => {
 
     expect(wrapper.get('[role="alert"]').text()).toContain('手机号或密码错误')
 
-    await clickTab(wrapper, '管理员')
+    await clickTab(wrapper, '超级管理员')
 
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     expect(wrapper.get('form').get('input[type="text"]').exists()).toBe(true)
@@ -473,7 +492,7 @@ describe('/login 面板：员工栏', () => {
 })
 
 describe('/login 面板：非法 ?next 回落', () => {
-  it('协议相对地址不强制员工栏，且管理员登录后落到「无权访问」页（不静默改道）', async () => {
+  it('协议相对地址不强制员工栏，且超级管理员登录后落到「无权访问」页（不静默改道）', async () => {
     rememberTab('admin')
     fetchMock
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
@@ -481,7 +500,7 @@ describe('/login 面板：非法 ?next 回落', () => {
 
     const { wrapper, router } = await mountLogin('/login?next=%2F%2Fevil.example')
 
-    expect(activeTab(wrapper)).toBe('管理员')
+    expect(activeTab(wrapper)).toBe('超级管理员')
     await submitWith(wrapper, {
       'input[type="text"]': 'admin',
       'input[type="password"]': 's3cret',
@@ -506,16 +525,16 @@ describe('/login 面板：非法 ?next 回落', () => {
     expect(router.currentRoute.value.path).toBe('/workbench/me/today')
   })
 
-  it('员工端路径不把管理员身份送进去：管理栏登录后落「无权访问」并把原目标带上', async () => {
+  it('员工端路径不把超级管理员身份送进去：超级管理员栏登录后落「无权访问」并把原目标带上', async () => {
     fetchMock
       .mockResolvedValueOnce(STAFF_401())
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ ok: true }))
 
     const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Ftoday')
-    // 带员工端 next 时面板开在员工栏；管理员自己切回管理栏。
+    // 带员工端 next 时面板开在员工栏；超级管理员自己切回超级管理员栏。
     expect(activeTab(wrapper)).toBe('员工')
-    await clickTab(wrapper, '管理员')
+    await clickTab(wrapper, '超级管理员')
 
     await submitWith(wrapper, {
       'input[type="text"]': 'admin',
@@ -532,11 +551,11 @@ describe('/login 面板：非法 ?next 回落', () => {
 
 describe('/login 面板：扫码进来看配方（票 07）', () => {
   // 本票风险最高的一条链路：扫码 → 未登录 → 登录页默认开员工栏 → 登录后回到那条配方。
-  // 两处最容易漏：面板开错栏（厨师范不着管理栏）、员工栏把配方路径当「不是员工落点」
+  // 两处最容易漏：面板开错栏（厨师范不着超级管理员栏）、员工栏把配方路径当「不是员工落点」
   // 静默落到 `/workbench/me/today`。
   const SCAN = '/login?next=%2Fworkbench%2Fkitchen%2Frecipe%2Fdetail%3Fslug%3Dchangfen'
 
-  it('扫码进来默认开员工栏，优先于记住的管理员栏', async () => {
+  it('扫码进来默认开员工栏，优先于记住的超级管理员栏', async () => {
     rememberTab('admin')
     fetchMock.mockResolvedValueOnce(STAFF_401())
 
@@ -578,7 +597,7 @@ describe('/login 面板：扫码进来看配方（票 07）', () => {
     expect(router.currentRoute.value.query.slug).toBe('changfen')
   })
 
-  it('店长在管理栏登录后同样回到那条配方（阅读面两档都进得去）', async () => {
+  it('店长在超级管理员栏登录后同样回到那条配方（阅读面两档都进得去）', async () => {
     fetchMock
       .mockResolvedValueOnce(STAFF_401())
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
@@ -586,7 +605,7 @@ describe('/login 面板：扫码进来看配方（票 07）', () => {
 
     const { wrapper, router } = await mountLogin(SCAN)
     expect(activeTab(wrapper)).toBe('员工')
-    await clickTab(wrapper, '管理员')
+    await clickTab(wrapper, '超级管理员')
     await submitWith(wrapper, {
       'input[type="text"]': 'admin',
       'input[type="password"]': 's3cret',

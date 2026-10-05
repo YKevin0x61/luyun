@@ -22,13 +22,13 @@ import { resolveLoginNext, resolveLoginTab, resolveStaffNext } from '../utils/lo
  *  `?next=` 悄悄丢掉换成 `/`（D4：`/login?next=/workbench/me/month` 原来落到 `/workbench`）。 */
 const FORBIDDEN_PATH = '/workbench/forbidden'
 
-// 迁移自 public/login.html：登录 / 首次初始化管理员 / 已登录三态页面。
-// 票 03 起同一个面板装两种身份（管理员 / 员工）：两个显式 Tab 各打自己原来那套登录接口、
+// 迁移自 public/login.html：登录 / 首次初始化超级管理员 / 已登录三态页面。
+// 票 03 起同一个面板装两种身份（超级管理员 / 员工）：两个显式 Tab 各打自己原来那套登录接口、
 // 各发自己原来的 cookie —— 后端 `sessions` 与 `hygiene_staff_sessions` 两张表、两个
 // cookie、两条守卫链一个字不改，也没有统一登录接口或账号形态自动判别。
 //
 // 该页不经过 api/client.js（避免其 401 重定向逻辑与本页自身状态机冲突）：
-// 管理员栏用原生 fetch（与旧页逐字一致），员工栏用 `staffRequest`（同样是直连，
+// 超级管理员栏用原生 fetch（与旧页逐字一致），员工栏用 `staffRequest`（同样是直连，
 // 但带员工端超时与中文网络文案）。
 //
 // 视觉：两栏共用一套骨架（品牌 + Tab + 副标题 + 提示区 + 表单区），主题按身份切；
@@ -38,9 +38,13 @@ const route = useRoute()
 const router = useRouter()
 const imageUploads = useImageUploadQueueStore()
 
-/** 两个显式 Tab。`scope` 是品牌副题，跟着身份走。 */
+/** 两个显式 Tab。`scope` 是品牌副题，跟着身份走。
+ *
+ *  共享账号那一档的名字跟领域词表（CONTEXT「超级管理员」）与工作台顶栏逐字一致：
+ *  「管理员」在词表里另有所指 —— 花名册上某个真人的卫生权限派生标签（ADR 0093），
+ *  同一个账号在系统里只许有一个名字。 */
 const PANEL_TABS = [
-  { key: 'admin', label: '管理员', scope: '数据中心' },
+  { key: 'admin', label: '超级管理员', scope: '数据中心' },
   { key: 'staff', label: '员工', scope: '员工端' },
 ]
 
@@ -51,7 +55,7 @@ const PANEL_TABS = [
 const activeTab = ref(resolveLoginTab(route.query.next, loadLoginTab()))
 
 // phase: 'loading' | 'error' | 'loggedIn' | 'login' | 'init'
-// 'init'（首次创建管理员账号）只属于管理员栏，员工栏没有这一态。
+// 'init'（首次创建超级管理员账号）只属于超级管理员栏，员工栏没有这一态。
 // 两栏各自一份状态：一栏的错误、表单与确认面板不会串到另一栏。
 const adminPhase = ref('loading')
 const staffPhase = ref('loading')
@@ -61,7 +65,7 @@ const loadedTabs = { admin: false, staff: false }
 const phase = computed(() => phaseByTab[activeTab.value].value)
 
 const alert = ref({ show: false, type: 'error', message: '' })
-/** 当前栏的已登录身份：管理员是用户名，员工是姓名（回落到手机号）。 */
+/** 当前栏的已登录身份：超级管理员是用户名，员工是姓名（回落到手机号）。 */
 const loggedInName = ref('')
 
 const initForm = ref({ username: '', password: '', confirmPassword: '' })
@@ -100,7 +104,7 @@ const subtitle = computed(() => {
   if (phase.value === 'error') return '无法连接服务器，请稍后重试。'
   if (phase.value === 'loggedIn') return '您已登录，可直接进入系统或退出后换账号。'
   if (activeTab.value === 'admin') {
-    return phase.value === 'init' ? '首次使用，请创建管理员账号。' : '请登录以访问数据中心。'
+    return phase.value === 'init' ? '首次使用，请创建超级管理员账号。' : '请登录以访问数据中心。'
   }
   return '用手机号和密码进入员工端。未批准或已停用的账号无法登录。'
 })
@@ -146,7 +150,7 @@ async function focusField(inputRef) {
 
 // ===== 落点 =====
 
-/** 管理员栏登录后的落点；员工端路径不认（身份互斥，判据在 utils/loginNext.js）。
+/** 超级管理员栏登录后的落点；员工端路径不认（身份互斥，判据在 utils/loginNext.js）。
  *
  *  `?next=` 指向员工专属页时落 `/workbench/forbidden?next=<原目标>`（`FORBIDDEN_PATH`
  *  那一条），不是悄没声地换成 `/`。带 `?next=` 的去向**始终是这个目标本身**：能进的
@@ -243,7 +247,7 @@ async function loadStaffStatus() {
   }
 }
 
-// ===== 管理员栏 =====
+// ===== 超级管理员栏 =====
 
 async function submitInit() {
   hideAlert()
@@ -412,10 +416,10 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- 首次初始化只属于管理员栏；员工栏没有这一态。 -->
+      <!-- 首次初始化只属于超级管理员栏；员工栏没有这一态。 -->
       <form v-else-if="phase === 'init'" autocomplete="off" @submit.prevent="submitInit">
         <div class="form-row">
-          <label for="initUsername">管理员用户名</label>
+          <label for="initUsername">超级管理员用户名</label>
           <input
             id="initUsername"
             ref="initUsernameInput"
@@ -438,7 +442,7 @@ onMounted(() => {
             autocomplete="new-password"
             placeholder="至少 8 位"
           >
-          <p class="hint">首次使用需创建共享管理员账号，密码至少 8 位。</p>
+          <p class="hint">首次使用需创建共享超级管理员账号，密码至少 8 位。</p>
         </div>
         <div class="form-row">
           <label for="initConfirm">确认密码</label>
@@ -467,7 +471,7 @@ onMounted(() => {
             type="text"
             required
             autocomplete="username"
-            placeholder="管理员用户名"
+            placeholder="超级管理员用户名"
           >
         </div>
         <div class="form-row">
@@ -536,7 +540,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* 共用骨架 + 按身份切主题：管理员栏是现有的深色卡片（数据中心），员工栏是原来员工
+/* 共用骨架 + 按身份切主题：超级管理员栏是现有的深色卡片（数据中心），员工栏是原来员工
    登录页那套青绿（浅色卡片、薄荷信号色）。两套都只在 `.login-page.is-*` 下生效。 */
 .login-page {
   --login-bg:
@@ -724,7 +728,7 @@ onMounted(() => {
   padding: 24px 0;
 }
 
-/* 员工栏的输入与按钮：主题色跟着身份走（管理员栏沿用全局深色样式，一个字不动）。 */
+/* 员工栏的输入与按钮：主题色跟着身份走（超级管理员栏沿用全局深色样式，一个字不动）。 */
 .login-page.is-staff :deep(.input),
 .login-page.is-staff .input {
   background: var(--login-input-bg);
