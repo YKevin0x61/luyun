@@ -4,7 +4,12 @@ import QRCode from 'qrcode'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
-import { ADMIN_CAP_DEFS, normalizeCaps } from '../../utils/adminCaps'
+import {
+  ADMIN_CAP_STAFF_DEFS,
+  ADMIN_CAP_SUPERVISOR_ONLY_DEFS,
+  keepSupervisorOnlyCaps,
+  normalizeCaps,
+} from '../../utils/adminCaps'
 import {
   HYGIENE_PERMISSIONS,
   HYGIENE_SHIFTS,
@@ -34,6 +39,10 @@ const loading = ref(true)
 const errorText = ref('')
 const drafts = ref({})
 const busyId = ref(null)
+// 保存成功的反馈（`role="status"`）：原来保存只清 errorText，页面上没有任何变化，超管不
+// 确定放没放上去，于是反复点、或手动刷新再看一眼。2026-10-06 真机实测确认了这一点。
+const savedHint = ref('')
+let savedHintTimer = null
 const disableTarget = ref(null)
 
 // 员工入口：全仓只有导航栏指向 /hygiene/roster，没人知道店员该扫哪个地址。这里把
@@ -259,18 +268,28 @@ async function saveRow(row) {
   const draft = draftFor(row)
   busyId.value = row.id
   errorText.value = ''
+  savedHint.value = ''
   try {
     await api.patch(`/api/hygiene/admin/roster/${row.id}`, {
       name: draft.name,
       job_title: draft.job_title,
-      // 人话标签照旧一起发（它还在、还要显示），真正决定能做什么的是下面这一组开关。
+      // 人话标签照旧一起发（它还在、还要显示），真正决定能做什么的是下面那一组开关。
       permission: draft.permission,
-      // 整组替换：这一行当前勾上的十项一次发完，服务端只认这一个数组。
-      admin_caps: normalizeCaps(draft.admin_caps),
+      // 整组替换：这一行当前勾上的那几项一次发完，服务端只认这一个数组。
+      //
+      // **只读那七项要原样带回**：花名册不再提供它们的勾（员工端没有执行点），但库里若已经
+      // 存着值，整组替换会把它们抹掉 —— 那是静默删权限，比"勾了不生效"更坏。所以把原来那
+      // 一组里属于只读七项的键挑出来一起发。
+      admin_caps: normalizeCaps([...draft.admin_caps, ...keepSupervisorOnlyCaps(row.admin_caps)]),
     })
     // 重读一遍：草稿换成服务端返回值（归一化与截断以那边为准），页面上两个「现在…」
     // 也才跟着更新。
     await loadRoster()
+    savedHint.value = `已保存${row.name ? ` ${row.name} ` : ''}的资料与管理权限`
+    if (savedHintTimer) clearTimeout(savedHintTimer)
+    savedHintTimer = setTimeout(() => {
+      savedHint.value = ''
+    }, 4000)
   } catch (err) {
     errorText.value = err.message || '保存失败'
   } finally {
@@ -341,6 +360,7 @@ async function undoAssignment(row) {
     </div>
 
     <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>
+    <p v-if="savedHint" class="roster-saved" role="status">{{ savedHint }}</p>
 
     <div class="table-card">
       <div class="table-card-header">
@@ -419,13 +439,13 @@ async function undoAssignment(row) {
             <fieldset class="roster-caps">
               <legend class="roster-caps-title">管理权限</legend>
               <p class="roster-caps-hint">
-                这些开关只在员工手机端的「卫生」页生效；现场七页（工作区 / 日常 / 仪容 / 专项 /
-                整改 / 榜 / 数据）仍归超级管理员。上面的「卫生权限」只是显示用的人话标签，
-                能不能做某件事一律看这里的勾。勾完点最下面的「保存」，一次改完一起提交。
+                只有下面这三项在员工手机端的「卫生」页里生效，<strong>勾了就能用</strong>。上面的「卫生权限」
+                只是显示用的人话标签，能不能做某件事一律看这里的勾。勾完点最下面的「保存」，
+                一次改完一起提交。
               </p>
               <div class="roster-caps-grid">
                 <label
-                  v-for="cap in ADMIN_CAP_DEFS"
+                  v-for="cap in ADMIN_CAP_STAFF_DEFS"
                   :key="cap.key"
                   class="roster-cap"
                   :title="cap.note"
@@ -439,10 +459,22 @@ async function undoAssignment(row) {
                   <span>{{ cap.label }}</span>
                 </label>
               </div>
+              <!-- 只读那七项：**键与数据面都保留**（将来真给员工端开出入口时改一个字段即可，
+                   契约不用动），但不给勾 —— 它们对应的全是超级管理员在电脑端的活，员工端没有
+                   入口，勾了不会有任何变化（2026-10-06 真机实测：勾「数据与归档」→ 保存成功 →
+                   员工端零变化）。摆成只读说明，超管就不会以为自己放权了。 -->
+              <p class="roster-caps-readonly-title">
+                以下七项只在电脑端由超级管理员操作，员工端暂无入口，<strong>不必勾选</strong>
+              </p>
+              <ul class="roster-caps-readonly">
+                <li v-for="cap in ADMIN_CAP_SUPERVISOR_ONLY_DEFS" :key="cap.key">
+                  <strong>{{ cap.label }}</strong>：{{ cap.note }}
+                </li>
+              </ul>
               <details class="rule-help roster-caps-help">
-                <summary>每项开关管什么</summary>
+                <summary>可勾的这三项分别管什么</summary>
                 <ul>
-                  <li v-for="cap in ADMIN_CAP_DEFS" :key="cap.key">
+                  <li v-for="cap in ADMIN_CAP_STAFF_DEFS" :key="cap.key">
                     <strong>{{ cap.label }}</strong>：{{ cap.note }}
                   </li>
                 </ul>
@@ -602,6 +634,30 @@ async function undoAssignment(row) {
   grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
   gap: .15rem .7rem;
   max-width: 44rem;
+}
+/* 只读那七项：摆成说明而不是勾 —— 它们对应的活全在电脑端，员工端没有入口。字号与颜色都
+   刻意弱于上面的勾，避免被看成"另一种开关"（真机实测的教训：并排摆着就会有人去勾）。 */
+.roster-caps-readonly-title {
+  margin: .55rem 0 .2rem;
+  font-size: .72rem;
+  line-height: 1.6;
+  color: var(--hy-faint);
+}
+.roster-caps-readonly {
+  margin: 0;
+  padding-left: 1.1rem;
+  max-width: 44rem;
+  font-size: .72rem;
+  line-height: 1.7;
+  color: var(--hy-faint);
+}
+.roster-caps-readonly strong { font-weight: 600; }
+/* 保存成功的一次性反馈（`role="status"`）：与 `roster-error` 同一个位置、同一个尺寸，
+   只是颜色相反 —— 原来保存完页面上什么都不变，超管不知道放没放上去。 */
+.roster-saved {
+  margin: 0 0 .6rem;
+  font-size: .8rem;
+  color: var(--hy-jade);
 }
 /* 共享表里的 `.hy-person-fields label` 是竖排字段（标签在上、控件在下）——这里每一项是
    横排的勾，得盖回来。整个 label 都是点击目标，所以手机上这个格子本身就是触控区。 */

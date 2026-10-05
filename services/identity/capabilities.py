@@ -81,6 +81,35 @@ CAPABILITY_NOTES: dict[str, str] = {
 #: 升级前那个「管理员」档位等于这三项 —— 迁移 `0015` 的回填值就是它，改这里要同步改迁移。
 LEGACY_ADMIN_CAPABILITIES: tuple[str, ...] = (CAP_DAILY_REVIEW, CAP_DEEP_REVIEW, CAP_FIX)
 
+#: **员工端有执行点的**能力：只有这三项在员工手机端「卫生」页真正生效
+#: （服务层的判据见 `services/hygiene/work.py` 的 `_require_reviewer` / `_require_fix_*`）。
+#: 花名册里**可勾**的就是这一组 —— 勾了就能用，不存在"勾了不生效"。
+STAFF_SIDE_CAPABILITIES: tuple[str, ...] = (CAP_DAILY_REVIEW, CAP_DEEP_REVIEW, CAP_FIX)
+
+#: 其余七项：**键保留、判据暂时没有**。
+#:
+#: 2026-10-06 实测裁定（工作台三视角真机走查）：这七项对应的功能全部是超级管理员在电脑端
+#: 的活（现场八页 + 排班），员工端没有任何入口，勾了也不会有任何变化 —— 而花名册却把它们
+#: 和前三项画在一起，超管勾完以为放权了，被放权的人那边什么都不会发生（静默无效，实测
+#: 复现：勾「数据与归档」→ 保存成功 → 员工端零变化）。
+#:
+#: 处理方式：**不删键**（删了 `parse_caps` 会静默丢弃库里已有的值，不可逆），改为把这一组
+#: 从"可勾"降级成花名册上的**只读说明**：界面不再提供会骗人的勾，而契约与数据面保持向后
+#: 兼容 —— 将来若真给员工端开出这些入口，把键从本组挪进 `STAFF_SIDE_CAPABILITIES` 即可。
+SUPERVISOR_ONLY_CAPABILITIES: tuple[str, ...] = (
+    CAP_ATTIRE,
+    CAP_STANDARD,
+    CAP_ZONE,
+    CAP_ROSTER,
+    CAP_BOARDS,
+    CAP_CLOCK,
+    CAP_DATA,
+)
+
+#: 两组必须刚好把十项分完，且顺序与 `CAPABILITIES` 一致 —— 由 `tests/test_hygiene_admin_caps.py` 钉住。
+assert set(STAFF_SIDE_CAPABILITIES) | set(SUPERVISOR_ONLY_CAPABILITIES) == set(CAPABILITIES)
+assert tuple(k for k in CAPABILITIES if k in set(STAFF_SIDE_CAPABILITIES)) == STAFF_SIDE_CAPABILITIES
+
 _CAP_SET = frozenset(CAPABILITIES)
 
 

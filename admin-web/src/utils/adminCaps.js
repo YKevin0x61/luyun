@@ -21,22 +21,50 @@
  * 决定能不能做那件事，不再有"标签给了、开关没给"的中间态。
  */
 
-/** 十项能力：`key` 是契约键名，`label` / `note` 只用于界面显示，顺序 = 花名册里的显示顺序。 */
+/** 十项能力：`key` 是契约键名，`label` / `note` 只用于界面显示，顺序 = 花名册里的显示顺序。
+ *
+ *  `staffSide` 标的是**员工端有没有执行点**（后端 `STAFF_SIDE_CAPABILITIES` 的同义字段）：
+ *  只有前三项在员工手机端「卫生」页真正生效，花名册里**可勾**的也只有它们。
+ *
+ *  ## 为什么后七项还在表里，却不可勾
+ *
+ *  2026-10-06 的真机实测：十项并排画在一次，超管勾「数据与归档」→ 保存成功 → 员工端**零变化**
+ *  （那七项对应的是现场八页与排班，全是超级管理员在电脑端的活，员工端根本没有入口）。勾了
+ *  不生效、界面也不说，是最坏的一类缺陷。所以把这一组降级成**只读说明**。
+ *
+ *  **键不删**：删了 `normalizeCaps` / 后端 `parse_caps` 会静默丢掉库里已有的值，不可逆。
+ *  将来真给员工端开出这些入口，把 `staffSide` 改回 `true` 即可，契约与数据面都不用动。
+ */
 export const ADMIN_CAP_DEFS = [
-  { key: 'daily_review', label: '日常验收', note: '判别人交的日常检查，看原图与标准图对照' },
-  { key: 'deep_review', label: '专项验收', note: '判专项卫生的前后对照' },
-  { key: 'fix', label: '整改单', note: '开整改单、验收或驳回整改单' },
-  { key: 'attire', label: '仪容仪表', note: '看与判仪容打卡，维护仪容标准' },
-  { key: 'standard', label: '标准图管理', note: '换标准图、改标注、导出整套标准' },
-  { key: 'zone', label: '工作区与检查项', note: '加/改/删工作区与检查项' },
-  { key: 'roster', label: '花名册与排班', note: '审批入职、停用、改权限与班次' },
-  { key: 'boards', label: '红黑榜与教材', note: '标记合格对照、发红黑榜、编教材' },
-  { key: 'clock', label: '时限设置', note: '设日常与专项的时限' },
-  { key: 'data', label: '数据与归档', note: '看历史记录、导出归档、清理数据' },
+  { key: 'daily_review', label: '日常验收', note: '判别人交的日常检查，看原图与标准图对照', staffSide: true },
+  { key: 'deep_review', label: '专项验收', note: '判专项卫生的前后对照', staffSide: true },
+  { key: 'fix', label: '整改单', note: '开整改单、验收或驳回整改单', staffSide: true },
+  { key: 'attire', label: '仪容仪表', note: '看与判仪容打卡，维护仪容标准', staffSide: false },
+  { key: 'standard', label: '标准图管理', note: '换标准图、改标注、导出整套标准', staffSide: false },
+  { key: 'zone', label: '工作区与检查项', note: '加/改/删工作区与检查项', staffSide: false },
+  { key: 'roster', label: '花名册与排班', note: '审批入职、停用、改权限与班次', staffSide: false },
+  { key: 'boards', label: '红黑榜与教材', note: '标记合格对照、发红黑榜、编教材', staffSide: false },
+  { key: 'clock', label: '时限设置', note: '设日常与专项的时限', staffSide: false },
+  { key: 'data', label: '数据与归档', note: '看历史记录、导出归档、清理数据', staffSide: false },
 ]
 
 /** 键名清单（顺序 = 契约）：`normalizeCaps` 的排序与后端 `dump_caps` 的写法都以它为准。 */
 export const ADMIN_CAPABILITIES = ADMIN_CAP_DEFS.map((item) => item.key)
+
+/** 花名册上**可勾**的三项（员工端有执行点）。 */
+export const ADMIN_CAP_STAFF_DEFS = ADMIN_CAP_DEFS.filter((item) => item.staffSide)
+
+/** 花名册上**只读展示**的七项：键保留、员工端暂无入口。 */
+export const ADMIN_CAP_SUPERVISOR_ONLY_DEFS = ADMIN_CAP_DEFS.filter((item) => !item.staffSide)
+
+/** 只读那七项的键 —— 保存一行时要**原样保留**库里已有的值，不能因为界面不显示就抹掉。 */
+export const ADMIN_CAP_SUPERVISOR_ONLY_KEYS = ADMIN_CAP_SUPERVISOR_ONLY_DEFS.map((item) => item.key)
+
+/** 从一组能力里挑出「只读那七项」已有的值（保存时原样带回，避免静默清除）。 */
+export function keepSupervisorOnlyCaps(raw) {
+  const kept = new Set(normalizeCaps(raw).filter((key) => ADMIN_CAP_SUPERVISOR_ONLY_KEYS.includes(key)))
+  return ADMIN_CAP_SUPERVISOR_ONLY_KEYS.filter((key) => kept.has(key))
+}
 
 /** 键 → 中文标签。 */
 export const ADMIN_CAP_LABELS = Object.fromEntries(

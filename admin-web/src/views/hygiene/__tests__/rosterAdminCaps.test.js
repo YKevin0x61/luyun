@@ -2,16 +2,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import HygieneRosterView from '../HygieneRosterView.vue'
-import { ADMIN_CAP_DEFS } from '../../../utils/adminCaps'
+import {
+  ADMIN_CAP_STAFF_DEFS,
+  ADMIN_CAP_SUPERVISOR_ONLY_DEFS,
+} from '../../../utils/adminCaps'
 
 /**
- * 花名册的「管理权限」十项开关（2026-10-05 用户裁定：由超级管理员逐项放权）。
+ * 花名册的「管理权限」（2026-10-05 逐项放权；2026-10-06 真机实测后收敛可勾面）。
  *
- * 真挂一遍页面，压三件读源码看不准的事：
- * 1. 十个开关按**契约顺序**渲染，那个「卫生权限」下拉还在（它还是人话标签）；
- * 2. **勾选不发请求**：十个勾改完只在本地，点「保存」才发**一次** PATCH，
- *    body 里 `admin_caps` 是整组（且归一化成契约顺序）；
- * 3. 保存中开关禁用，成功后草稿跟着**服务端返回值**走（不是"我勾了什么就一直是什么"）。
+ * 真机实测的教训：十项并排画着的时候，那七项**勾了不生效也不说**——勾「数据与归档」→ 保存
+ * 成功 → 员工端零变化（它们对应的活全在电脑端，员工端没有入口）。所以现在只有员工端真有
+ * 执行点的三项可勾，其余七项降级成只读说明。
+ *
+ * 真挂一遍页面，压五件读源码看不准的事：
+ * 1. **可勾的只有三项**，七项只读，且只读区里没有任何可勾控件；
+ * 2. 文案说清作用范围（不再说"现场七页"——现场是八页）；
+ * 3. **勾选不发请求**：改完只在本地，点「保存」才发**一次** PATCH，body 里 `admin_caps`
+ *    是整组（且归一化成契约顺序）；
+ * 4. **只读那七项若库里已有值，保存时原样带回** —— 整组替换不能变成静默删权限；
+ * 5. 保存给一次 `role="status"` 的反馈（原来保存完页面上什么都不变）。
  */
 
 const ROW = {
@@ -88,13 +97,13 @@ function saveButton(wrapper) {
   return wrapper.findAll('button').find((node) => node.text() === '保存')
 }
 
-describe('花名册 · 管理权限十项开关', () => {
-  it('十个开关按契约顺序渲染，且「卫生权限」下拉还在', async () => {
+describe('花名册 · 管理权限', () => {
+  it('可勾的只有员工端真正生效的三项，「卫生权限」下拉还在', async () => {
     const wrapper = await mountRoster()
 
     expect(wrapper.findAll('.roster-cap').map((node) => node.text()))
-      .toEqual(ADMIN_CAP_DEFS.map((item) => item.label))
-    expect(capBoxes(wrapper)).toHaveLength(10)
+      .toEqual(ADMIN_CAP_STAFF_DEFS.map((item) => item.label))
+    expect(capBoxes(wrapper)).toHaveLength(3)
 
     // 人话标签那一列没被开关顶掉（它决定的是员工 vs 管理员这个显示用标签）。
     const selects = wrapper.findAll('select')
@@ -105,18 +114,34 @@ describe('花名册 · 管理权限十项开关', () => {
     wrapper.unmount()
   })
 
-  it('说清作用范围：只在员工手机端的「卫生」页生效，现场七页仍归超级管理员', async () => {
+  it('其余七项是只读说明：列出来了，但里面一个可勾控件都没有', async () => {
     const wrapper = await mountRoster()
-    const hint = wrapper.get('.roster-caps-hint').text()
-    expect(hint).toContain('只在员工手机端的「卫生」页生效')
-    expect(hint).toContain('现场七页')
-    expect(hint).toContain('超级管理员')
-    // 也说明了「保存」才生效（勾选不即时提交）。
-    expect(hint).toContain('保存')
+
+    expect(wrapper.findAll('.roster-caps-readonly li').map((node) => node.text()))
+      .toEqual(ADMIN_CAP_SUPERVISOR_ONLY_DEFS.map((item) => `${item.label}：${item.note}`))
+    // 关键：只读区不能藏着勾 —— 藏一个就等于"勾了不生效"又回来了。
+    expect(wrapper.findAll('.roster-caps-readonly input')).toHaveLength(0)
+
     wrapper.unmount()
   })
 
-  it('十个勾一次改完只在本地，点「保存」才发一次 PATCH（整组、按契约顺序）', async () => {
+  it('说清作用范围：只有这三项在员工手机端的「卫生」页生效', async () => {
+    const wrapper = await mountRoster()
+    const hint = wrapper.get('.roster-caps-hint').text()
+
+    expect(hint).toContain('员工手机端')
+    expect(hint).toContain('卫生')
+    expect(hint).toContain('勾了就能用')
+    // 也说明了「保存」才生效（勾选不即时提交）。
+    expect(hint).toContain('保存')
+    // 「现场七页」是旧口径：现场是八页（含卫生趋势），而且这句话已经挪进只读区说明。
+    expect(hint).not.toContain('七页')
+    expect(wrapper.text()).toContain('员工端暂无入口')
+
+    wrapper.unmount()
+  })
+
+  it('三个勾一次改完只在本地，点「保存」才发一次 PATCH（整组、按契约顺序）', async () => {
     const wrapper = await mountRoster()
     const boxes = capBoxes(wrapper)
 
@@ -144,7 +169,29 @@ describe('花名册 · 管理权限十项开关', () => {
     wrapper.unmount()
   })
 
-  it('保存中开关禁用，成功后草稿同步成服务端返回值', async () => {
+  it('库里若已存着只读七项的值，保存时原样带回，不静默抹掉', async () => {
+    // 历史数据（这七项从来没有可勾的界面，但键保留着，库里可能有值）。
+    serverCaps = ['daily_review', 'data', 'boards']
+    const wrapper = await mountRoster()
+
+    // 界面上看不见 data / boards 的勾。
+    expect(capBoxes(wrapper)).toHaveLength(3)
+
+    // 再加一项「专项验收」，然后保存。
+    await capBoxes(wrapper)[1].setValue(true)
+    await flushPromises()
+    await saveButton(wrapper).trigger('click')
+    await flushPromises()
+
+    // 整组替换里必须仍带着 data / boards：少一个就是静默删权限。
+    expect(patchCalls).toHaveLength(1)
+    expect(patchCalls[0].body.admin_caps)
+      .toEqual(['daily_review', 'deep_review', 'boards', 'data'])
+
+    wrapper.unmount()
+  })
+
+  it('保存中开关禁用，成功后草稿同步成服务端返回值，并给一次 role="status" 的反馈', async () => {
     const wrapper = await mountRoster()
     await capBoxes(wrapper)[2].setValue(true)
     await flushPromises()
@@ -164,6 +211,11 @@ describe('花名册 · 管理权限十项开关', () => {
     expect(boxes[0].element.checked).toBe(true)
     expect(boxes[2].element.checked).toBe(false)
     expect(boxes[0].element.disabled).toBe(false)
+
+    // 保存成功要有一次可见反馈（真机实测：原来页面上什么都不变）。
+    const hint = wrapper.get('.roster-saved')
+    expect(hint.attributes('role')).toBe('status')
+    expect(hint.text()).toContain('已保存')
 
     wrapper.unmount()
   })

@@ -7,7 +7,10 @@ import {
   ADMIN_CAP_DEFS,
   ADMIN_CAP_LABELS,
   ADMIN_CAP_NOTES,
+  ADMIN_CAP_STAFF_DEFS,
+  ADMIN_CAP_SUPERVISOR_ONLY_KEYS,
   hasCap,
+  keepSupervisorOnlyCaps,
   normalizeCaps,
 } from '../adminCaps.js'
 
@@ -37,6 +40,25 @@ describe('adminCaps · 前后端契约', () => {
   it('十项键名与顺序逐字等于后端 CAPABILITIES', () => {
     expect(ADMIN_CAPABILITIES).toEqual(CONTRACT_KEYS)
     expect(ADMIN_CAP_DEFS.map((item) => item.key)).toEqual(CONTRACT_KEYS)
+  })
+
+  it('可勾的三项 = 员工端有执行点的那三项，其余七项只读（两组不重不漏）', () => {
+    // 这三项与后端 `STAFF_SIDE_CAPABILITIES` 同义：只有它们在员工手机端「卫生」页生效。
+    expect(ADMIN_CAP_STAFF_DEFS.map((item) => item.key))
+      .toEqual(['daily_review', 'deep_review', 'fix'])
+    expect(ADMIN_CAP_SUPERVISOR_ONLY_KEYS)
+      .toEqual(['attire', 'standard', 'zone', 'roster', 'boards', 'clock', 'data'])
+    // 两组刚好分完十项：多一个少一个都会让"可勾面 == 生效面"这个前提失效。
+    expect([...ADMIN_CAP_STAFF_DEFS.map((item) => item.key), ...ADMIN_CAP_SUPERVISOR_ONLY_KEYS])
+      .toEqual(CONTRACT_KEYS)
+  })
+
+  it('keepSupervisorOnlyCaps 只挑只读那七项、按契约顺序、坏数据当空', () => {
+    // 保存时要原样带回的正是这一组（少一个就是静默删权限）。
+    expect(keepSupervisorOnlyCaps(['data', 'fix', 'boards'])).toEqual(['boards', 'data'])
+    expect(keepSupervisorOnlyCaps(['daily_review', 'deep_review'])).toEqual([])
+    expect(keepSupervisorOnlyCaps('not json')).toEqual([])
+    expect(keepSupervisorOnlyCaps(null)).toEqual([])
   })
 
   it('每一项都有中文标签与一句说明（界面要用）', () => {
@@ -115,9 +137,12 @@ describe('判据收敛：两个页面只按开关判，不按 permission 档位'
     expect(src).toMatch(/v-model="drafts\[row\.id\]\.permission"/)
     expect(src).toMatch(/permission: draft\.permission/)
     expect(src).not.toMatch(/permission\s*===/)
-    // 十项开关按契约顺序渲染，草稿与 PATCH 都过归一化。
-    expect(src).toMatch(/v-for="cap in ADMIN_CAP_DEFS"/)
-    expect(src).toMatch(/admin_caps: normalizeCaps\(draft\.admin_caps\)/)
+    // 可勾的那三项按契约顺序渲染；草稿进页归一化，PATCH 时把**只读七项已有的值原样带回**
+    // （它们没有可勾的界面，整组替换若漏掉就是静默删权限）。
+    expect(src).toMatch(/v-for="cap in ADMIN_CAP_STAFF_DEFS"/)
+    expect(src).toMatch(
+      /admin_caps: normalizeCaps\(\[\.\.\.draft\.admin_caps, \.\.\.keepSupervisorOnlyCaps\(row\.admin_caps\)\]\)/,
+    )
     expect(src).toMatch(/admin_caps: normalizeCaps\(row\.admin_caps\)/)
   })
 })

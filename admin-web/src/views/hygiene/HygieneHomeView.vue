@@ -370,12 +370,22 @@ useHygieneRealtime({
     'teaching',
     'zones',
     'settings',
+    // 花名册：**超管改这个人的管理权限**（`admin_caps`）时会广播 `roster`（scope 带本人
+    // employee_id，服务端只推给他）。2026-10-06 真机实测：不订它的话，超管取消「整改单」
+    // 后员工这一页 30 秒零变化，必须手动刷新才生效 —— 放权的最后一公里就断在这里。
+    'roster',
   ],
   pull: async (event) => {
     if (!employee.value) return
     try {
       const resource = event && event.scope && event.scope.resource
       if (resource === 'assignment' || resource === 'settings') {
+        await loadMe()
+        return
+      }
+      // 权限变了就是 `me` 变了：重拉一次，`canDailyReview` / `canDeepReview` / `canFix`
+      // 这些判据全部由 `employee.admin_caps` 派生，拉完按钮与分组自己就跟着变。
+      if (resource === 'roster') {
         await loadMe()
         return
       }
