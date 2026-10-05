@@ -441,16 +441,24 @@ const wsConnected = inject('wsConnected', null)
 const connectionLost = ref(false)
 let connectionTimer = null
 
-/** 手动刷新：不挑 resource，全部重拉——断线期间任何变更都可能漏掉。 */
+/** 手动刷新：不挑 resource，全部重拉——断线期间任何变更都可能漏掉。名单逐条列全
+ *  （`loadMe` 里也会拉的那几条照样列）：断连时 `/me` 自己会失败并进退避重试，别的几段
+ *  不该跟着它一起哑掉。
+ *  「待我验收」也在内（票 06）：它原来只挂在 `/me` 那条链路上，于是 `/me` 一失败，日常 /
+ *  专项 / 整改 / 工作区都换了新数据，那一段还停在上一次的样子，而界面上没有任何地方提示他
+ *  "这段没刷"。判据与 `loadMe` 里那一处相同（「日常验收」那一项开关）：没这一项的人不发
+ *  这条请求——服务端对普通员工是 403。 */
 async function refreshAll() {
   errorText.value = ''
-  await Promise.allSettled([
+  const jobs = [
     loadMe(),
     loadInbox(),
     loadDeepClean(),
     loadFixTickets(),
     loadZones({ force: true }),
-  ])
+  ]
+  if (canDailyReview.value) jobs.push(loadPendingReviews())
+  await Promise.allSettled(jobs)
 }
 
 function handleConnectionChange(connected) {
@@ -594,8 +602,8 @@ async function loadInbox() {
 
 /** 待我验收那一档，只有开了**「日常验收」**那一项的人才会去拉：范围与过滤都在服务层
  *  （`list_daily_work(pending_review_only=True)`）：两个班次、全部区、只要「待验收」、
- *  且不是他自己交的 —— 与验收接口的判据逐字对齐。调用点在 `loadMe`（那里同样按这一项判），
- *  没有这一项的人一次请求都不会发。 */
+ *  且不是他自己交的 —— 与验收接口的判据逐字对齐。调用点在 `loadMe` 与 `refreshAll`
+ *  （两处都按这一项判），没有这一项的人一次请求都不会发。 */
 async function loadPendingReviews() {
   const data = await staffRequest('/api/hygiene/staff/daily-work?review=1')
   reviewInbox.value = data.items || []
