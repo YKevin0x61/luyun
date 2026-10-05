@@ -19,23 +19,22 @@
 直连后端那条路仍然逐条注册，本文件按这个前提断言。
 
 **票 01 起页面清单只有一份来源**：`admin-web/src/router/pageRoutes.json`
-（Vite 直接 `import`，本文件 `json.load`）。本文件因此同时钉三件事：
+（Vite 直接 `import`，本文件 `json.load`）。本文件因此同时钉四件事：
 
 1. 表本身合法 —— 六个字段（路径 / 页面标题 / 所属组 / 允许的身份 / 是否独立外壳 /
    是否公开）齐全、取值在枚举内、路径唯一且为绝对路径；
 2. vue-router 注册的路径集合与表**逐条相等**（双向；服务端别名不是页面，不参与）；
 3. 后端 `main.SPA_PAGE_ROUTES` 与两张页面豁免表（`HTML_AUTH_EXACT` /
    `HTML_AUTH_PUBLIC_PAGES`）由表派生 —— 清单相等，「是否公开」再拿**真实请求**
-   复核一遍（未登录硬导航 200 / 302 到 `/login`），而不是把名单在测试里再抄一遍。
+   复核一遍（未登录硬导航 200 / 302 到 `/login`），而不是把名单在测试里再抄一遍；
+4. 票 05 起还钉**「允许的身份」那一列的服务端那一半**：清单说员工进得去的页，员工会话
+   必须真的拿得到壳；说管理端专属、又在工作台前缀之外的页，员工会话必须被挡回登录页
+   （见文件末尾 `test_staff_session_matches_the_audience_column`）。另一半（管理端专属页
+   不出现在员工导航与员工可达的入口里）要真的渲染 Vue 组件，住在
+   `admin-web/src/router/__tests__/pageAudienceGate.test.js`；两半合起来才是那道门。
 
 方向：**前端有的，后端必须有**（本票的缺陷方向）。反向（后端有、前端无）只剩表里的
 服务端别名（`aliases`：`/index.html`、`/admin/`）—— 不再有第二份例外清单。
-
-4. 票 05 起还钉**这一列的服务端那一半**：清单说员工进得去的页，员工会话必须真的拿得到
-   壳；说管理端专属、又在工作台前缀之外的页，员工会话必须被挡回登录页（见文件末尾
-   `test_staff_session_matches_the_audience_column`）。前半（管理端专属页不出现在员工
-   导航与员工可达的入口里）要真的渲染 Vue 组件，住在
-   `admin-web/src/router/__tests__/pageAudienceGate.test.js`；两半合起来才是那道门。
 """
 
 from __future__ import annotations
