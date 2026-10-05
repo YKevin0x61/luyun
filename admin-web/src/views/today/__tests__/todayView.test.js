@@ -430,9 +430,10 @@ describe('账号设置（2026-10-05 从卫生页的「我」整格搬来）', ()
     // 「管理员」，人会以为自己有权限却什么都做不了）。
     // 卡自己的行为（逐条渲染 / 没开的写「店长还没开给你」/ 没权限整块不渲染）在
     // `staffCapabilityCard.test.js` 里**真挂一遍页**压，这里只钉"它搬走了"。
+    // 这一条不读模板串断那张卡的 CSS 类名：spec 的 Testing Decisions 明写只断言外部行为，
+    // 卡的形态归它自己那两处真挂载的用例管。
     expect(view).not.toMatch(/<dt>卫生权限<\/dt>/)
     expect(view).not.toMatch(/\{\{ permissionLine \}\}/)
-    expect(view).toMatch(/class="tA-card caps"/)
   })
 
   it('两条写请求走员工自己的门，读的还是 /staff/me 那一份（不额外发请求）', () => {

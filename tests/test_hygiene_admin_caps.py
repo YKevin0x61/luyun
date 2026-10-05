@@ -63,15 +63,41 @@ UNWIRED_CAPABILITIES: tuple[str, ...] = (
 CONSUMER_DIRS = ("services", "api")
 _CAPABILITIES_MODULE = REPO_ROOT / "services" / "identity" / "capabilities.py"
 
+#: **import 语句**（`import x` / `from x import (...)`；括号续行与反斜杠续行都算，缩进的
+#: 局部 import 也算）。扫描前先剔掉它，见 `_without_imports` 的说明。
+_IMPORT_STATEMENT = re.compile(
+    r"""
+    ^[ \t]*
+    (?:
+        from[ \t]+\S+[ \t]+import[ \t]*\([^)]*\)
+      | from[ \t]+\S+[ \t]+import[^\n]*(?:\\\n[^\n]*)*
+      | import[^\n]*(?:\\\n[^\n]*)*
+    )
+    """,
+    re.MULTILINE | re.VERBOSE,
+)
+
+
+def _without_imports(text: str) -> str:
+    """把 import 语句从源码文本里剔掉，只看 import 之外的引用。
+
+    **不剔掉就会漏判**：`services/hygiene/work.py` 顶部 `from services.identity.capabilities
+    import (CAP_DAILY_REVIEW, CAP_DEEP_REVIEW, CAP_FIX, has_cap)`，于是某个键的判据被整段删掉、
+    只留 import 时，旧写法照样能扫到这个常量、这道门照样绿 —— 而它自己说的是"看这个键有没有被
+    判据层用到"。**接线处 = import 之外的引用**：判据是 `has_cap(actor.get("caps"), CAP_XXX)`
+    那一类调用，把常量名字带进模块命名空间本身不算接线（2026-10-06 评审 B-01）。
+    """
+    return _IMPORT_STATEMENT.sub("", text)
+
 
 def _capability_reference_sites() -> dict[str, list[str]]:
-    """每个能力键的常量（`CAP_XXX`）在判据消费点出现的文件清单。"""
+    """每个能力键的常量（`CAP_XXX`）在**判据消费点**出现的文件清单（import 语句不算）。"""
     sites: dict[str, list[str]] = {key: [] for key in CAPABILITIES}
     for folder in CONSUMER_DIRS:
         for path in sorted((REPO_ROOT / folder).rglob("*.py")):
             if path == _CAPABILITIES_MODULE:
                 continue
-            text = path.read_text(encoding="utf-8")
+            text = _without_imports(path.read_text(encoding="utf-8"))
             for key in CAPABILITIES:
                 if re.search(rf"\bCAP_{key.upper()}\b", text):
                     sites[key].append(str(path.relative_to(REPO_ROOT)))
@@ -87,6 +113,9 @@ def test_every_wired_capability_is_referenced_by_a_judgment():
 
     只断言**契约是否成立**，不断言判据怎么写：看的是"这个键有没有被判据层用到"，不是
     "它在哪一行、怎么判"。引用处判得对不对（有没有真拦住）由服务层自己的用例管。
+
+    「用到」的判据是**import 之外的引用**：`from ... import CAP_XXX` 只把常量名字带进那个
+    模块的命名空间，本身不是一处判据 —— 扫源码前会把这些 import 语句剔掉（`_without_imports`）。
     """
     from services.identity.capabilities import (
         STAFF_SIDE_CAPABILITIES,

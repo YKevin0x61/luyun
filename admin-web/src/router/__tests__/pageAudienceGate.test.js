@@ -47,12 +47,7 @@ import NavBar from '../../components/NavBar.vue'
 import { clearAuthStatusCache } from '../../utils/authStatus.js'
 import { RECIPE_QR_PATH } from '../../utils/recipePaths.js'
 import { IDENTITY_ADMIN, IDENTITY_STAFF } from '../../utils/workbenchIdentity.js'
-
-/** 身份两档：工作台那一档的词（`super` / `staff`）与清单里的词（`admin` / `staff`）。 */
-const INVENTORY_AUDIENCE = {
-  [IDENTITY_ADMIN]: 'admin',
-  [IDENTITY_STAFF]: 'staff',
-}
+import { workbenchAudienceFor } from '../../utils/workbenchNav.js'
 
 /** jsdom 缺的那几样浏览器 API：这道门要真的挂载页面，缺一个就在 `onMounted` 里炸。
  *
@@ -193,12 +188,16 @@ function linkedPaths(wrapper) {
  *
  *  - 清单里没有的路径：不是页面（`/api/...`、静态资源），不归这道门管；
  *  - 公开页（`public: true`）：谁都能开 —— `/login` 上的「自助注册」就是一例；
- *  - 其余按 `audience`：`both` 两档都开，`admin` / `staff` 各一边。 */
+ *  - 其余按 `audience`：`both` 两档都开，`admin` / `staff` 各一边。
+ *
+ *  身份词（`super` / `staff`）翻成清单里的词（`admin` / `staff`）走
+ *  `workbenchAudienceFor` —— 这个映射全仓只有那一处，这里不再抄一份副本（抄的那份一旦
+ *  漏改，这道门会拿错的身份词去比对，症状是它静默放行）。 */
 function openableBy(path, identity) {
   const row = pageRow(path)
   if (!row) return { judged: false }
   if (row.public) return { judged: true, ok: true, row }
-  const ok = row.audience === 'both' || row.audience === INVENTORY_AUDIENCE[identity]
+  const ok = row.audience === 'both' || row.audience === workbenchAudienceFor(identity)
   return { judged: true, ok, row }
 }
 
@@ -215,8 +214,9 @@ function unreachableEntries(wrapper, identity) {
 
 /** 清单里所有「这个身份进得去」的页（公开页也算：谁都能开）。 */
 function pagesReachableBy(identity) {
+  const audience = workbenchAudienceFor(identity)
   return PAGE_ROUTES.filter(
-    (row) => row.public || row.audience === 'both' || row.audience === INVENTORY_AUDIENCE[identity],
+    (row) => row.public || row.audience === 'both' || row.audience === audience,
   ).map((row) => row.path)
 }
 
