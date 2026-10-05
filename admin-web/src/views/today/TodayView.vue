@@ -18,11 +18,13 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
+import { ADMIN_CAP_STAFF_DEFS, hasCap } from '../../utils/adminCaps'
 import { hygienePermissionLabel, hygieneShiftLabel } from '../../utils/hygieneCopy'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { buildWorkQueue, dailyProgress, shiftClock } from '../../utils/hygieneWorkFlow'
@@ -100,6 +102,20 @@ const hygiene = ref({
 // 不再为「我的」多发一条请求。声明摆在这里，是因为给它们赋值的那一步在下面。
 const staffMe = ref(null)
 const deepClock = ref(null)
+
+// 「卫生权限」那一行的人话（真机走查 S10）：`permission` 只是**显示用的标签**，能不能做事
+// 一律看 `admin_caps`（花名册上可勾的那三项）。两者不一致是合法状态 —— 标签是「管理员」、
+// 一项开关都没给 —— 那时界面上原来只显示「管理员」，人会以为自己有权限却什么都做不了。
+// 所以这里如实把实际能力报出来。
+const staffCapCount = computed(
+  () => ADMIN_CAP_STAFF_DEFS.filter((item) => hasCap(staffMe.value && staffMe.value.admin_caps, item.key)).length,
+)
+const permissionLine = computed(() => {
+  const label = hygienePermissionLabel(staffMe.value && staffMe.value.permission)
+  if (staffCapCount.value) return `${label}（可判 ${staffCapCount.value} 项）`
+  if (label === '管理员') return `${label}（暂未开放权限，找店长开）`
+  return label
+})
 
 // 「我的成绩」（2026-10-05 用户裁定）：近 7 天的一次通过率 + 被驳回的原因分布。
 //
@@ -704,7 +720,10 @@ function openShiftNotice() {
 }
 
 onMounted(() => {
-  document.title = '今天'
+  // 名字与页面清单（`router/pageRoutes.json` 里 `/workbench/me/today` 那一行）同一个：
+  // 它原来是「今天」，与工作台首页（`/workbench`，也报「今天」）**撞名** —— 真机走查里
+  // 员工登录落到这一页、底栏第一格「今天」却指向另一页，两页浏览器标签一模一样。
+  document.title = workbenchDocumentTitle('我的今天')
   load()
   // 顺手读一次自己的申请：有等着批的、或别人问我换班的，首页就能看见（读不出来不吭声）。
   loadRequests(true)
@@ -1027,7 +1046,7 @@ useNudgePull({
             </div>
             <div>
               <dt>卫生权限</dt>
-              <dd>{{ hygienePermissionLabel(staffMe.permission) }}</dd>
+              <dd>{{ permissionLine }}</dd>
             </div>
           </dl>
           <ul class="tL-list">

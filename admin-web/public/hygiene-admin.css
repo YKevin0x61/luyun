@@ -1475,6 +1475,23 @@
   box-shadow: 0 0 8px var(--hy-mint);
   flex: 0 0 auto;
 }
+/* 被放权的那一档（真机走查 O-id）：页首报「现场复核 · N 项」。
+   用琥珀色而不是薄荷色 —— 薄荷那一颗回答"我现在在哪"（只读事实），这一颗回答"我能判什么"
+   （身份），两句话语义不同，并排摆着要能一眼分开。只在真有能力时渲染，普通员工看不到。 */
+.hygiene-work .hy-work-role {
+  flex: 0 0 auto;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 .7rem;
+  border-radius: 999px;
+  background: var(--hy-amber-soft);
+  border: 1px solid var(--hy-amber-line);
+  color: var(--hy-amber-bright);
+  font-size: .78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
 /* 回「今天」页那条（员工的班在 /staff/today）：形态跟旁边的「区域 · 班次」一致，但它是
    **去别处**的入口，所以用中性描边 —— 不抢那个薄荷色的「我现在在哪」。 */
 .hygiene-work .hy-work-today {

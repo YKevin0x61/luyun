@@ -125,7 +125,7 @@ describe('判据收敛：两个页面只按开关判，不按 permission 档位'
     // 只查**模板段**：脚本里的注释会引用旧写法（`permission === '管理员'`），那是留给人看的说明。
     const template = src.slice(src.indexOf('<template>'))
     expect(template).not.toMatch(/permission/)
-    expect(src).toMatch(/import \{ hasCap, normalizeCaps \} from '\.\.\/\.\.\/utils\/adminCaps'/)
+    expect(src).toMatch(/import \{ ADMIN_CAP_STAFF_DEFS, hasCap, normalizeCaps \} from '\.\.\/\.\.\/utils\/adminCaps'/)
     // 三件事各用自己那一项开关。
     expect(src).toMatch(/hasCap\(caps\.value, 'daily_review'\)/)
     expect(src).toMatch(/hasCap\(caps\.value, 'deep_review'\)/)

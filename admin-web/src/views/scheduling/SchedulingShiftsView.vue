@@ -20,7 +20,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
-import { WORKBENCH_HR_HOME } from '../../utils/workbenchCopy'
+import { WORKBENCH_HR_HOME, workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import { api } from '../../api/client'
 // 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
 // <link>，壳一层管住就跟卫生管理端一个做法。
@@ -229,7 +229,9 @@ async function confirmDelete() {
 }
 
 onMounted(() => {
-  document.title = '班次表'
+  // 名字与清单里 `/workbench/hr/shifts` 那一行同步。原来这里是裸的 `'班次表'`，于是
+  // 同一组的「排班月历」有「· 工作台」后缀、这一页没有（真机走查 N4）。
+  document.title = workbenchDocumentTitle('班次表')
   load()
 })
 </script>

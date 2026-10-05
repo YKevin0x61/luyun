@@ -14,7 +14,7 @@ import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import { FALLBACK_GRACE_MS } from '../../composables/useConnectionFallback'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
-import { hasCap, normalizeCaps } from '../../utils/adminCaps'
+import { ADMIN_CAP_STAFF_DEFS, hasCap, normalizeCaps } from '../../utils/adminCaps'
 import {
   HYGIENE_FIX_TYPES,
   canAcceptFixTicket,
@@ -175,6 +175,12 @@ const isManager = computed(() => caps.value.length > 0)
 const canDailyReview = computed(() => hasCap(caps.value, 'daily_review'))
 const canDeepReview = computed(() => hasCap(caps.value, 'deep_review'))
 const canFix = computed(() => hasCap(caps.value, 'fix'))
+/** 他手里**真正能用**的管理能力有几项（就是花名册上可勾的那三项）。
+ *  页首那颗身份胶囊用它 —— 顶栏只写「员工（张三）」，被放权的这一档在界面上一直看不出来
+ *  （真机走查 O-id：他自己不知道有验收权，也看不到"我在店里能做哪三件事"）。 */
+const staffCapCount = computed(
+  () => ADMIN_CAP_STAFF_DEFS.filter((item) => hasCap(caps.value, item.key)).length,
+)
 const liveOk = computed(() => hasLiveCamera())
 // 已入队、还没确认上传成功的任务（键与 buildWorkQueue 的 task.key 一致）：让待办
 // 立刻把这一项当"交过了"，避免员工在慢网下重拍。
@@ -1323,6 +1329,12 @@ async function decide(action, reason = '') {
         <span v-if="employee" class="hy-work-shift">
           {{ employee.name || employee.phone }} · {{ employee.zone_name || (employee.shift ? '还没定区' : '今天没排班') }} · {{ hygieneShiftLabel(employee.shift) }}
         </span>
+        <!-- 被放权的那一档在界面上如实标出来：顶栏只有「员工（姓名）」两档可选，而这一页上
+             他干的是判别人活的活（真机走查 O-id：角色审查 F-01 记的就是"界面层看不见它"）。
+             只在真有可用的那三项时出现，普通员工看不到这一颗。 -->
+        <span v-if="employee && staffCapCount" class="hy-work-role" :title="`可判 ${staffCapCount} 项：${ADMIN_CAP_STAFF_DEFS.filter((item) => hasCap(caps, item.key)).map((item) => item.label).join('、')}`">
+          现场复核 · {{ staffCapCount }} 项
+        </span>
       </div>
     </header>
 
@@ -1344,7 +1356,13 @@ async function decide(action, reason = '') {
            「今天的总数」、哪排是「日常这一项的进度」。 -->
       <p v-if="employee" class="hy-progress">
         今天要做 {{ todoTotal }} 项
-        <span>· 日常 {{ dailyCount }} · 专项 {{ deepCount }} · 整改 {{ fixCount }}</span>
+        <!-- 「待我验收」也进这一行（真机走查 O4）：原来这一行只算自己那三组，于是有验收权、
+             今天没人交的人读到「今天要做 0 项」；今天真有人交时下面又列着活 —— 上下自相矛盾。
+             它按「日常验收」那一项开关判（不是"是不是管理员"），0 也照报，等于给这一档补上
+             一直缺的空状态：有这权力但没人交，和根本没这权力，从此看得出区别。
+             **写在同一颗 span 里**：两颗相邻标签之间的空白会被模板编译器消掉，实测渲染成
+             「整改 0· 待我验收 0」（分隔号贴在前一个数字上）。 -->
+        <span>· 日常 {{ dailyCount }} · 专项 {{ deepCount }} · 整改 {{ fixCount }}<template v-if="canDailyReview"> · 待我验收 {{ reviewInbox.length }}</template></span>
       </p>
 
       <!-- 「待我验收」：只有开了**「日常验收」**那一项的人有，且**今天真有人交了**才出现

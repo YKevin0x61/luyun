@@ -16,7 +16,7 @@ import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import { useNudgePull } from '../../composables/useNudgePull'
-import { WORKBENCH_HR_HOME } from '../../utils/workbenchCopy'
+import { WORKBENCH_HR_HOME, workbenchDocumentTitle } from '../../utils/workbenchCopy'
 // 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
 // <link>，壳一层管住就跟卫生管理端一个做法。
 import {
@@ -108,7 +108,8 @@ async function confirmReject() {
 }
 
 onMounted(() => {
-  document.title = '排班待办'
+  // 名字与清单里 `/workbench/hr/inbox` 那一行同步，后缀走 `workbenchDocumentTitle`（同上）。
+  document.title = workbenchDocumentTitle('排班待办')
   load()
 })
 

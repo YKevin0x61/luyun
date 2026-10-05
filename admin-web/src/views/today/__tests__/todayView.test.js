@@ -424,7 +424,11 @@ describe('账号设置（2026-10-05 从卫生页的「我」整格搬来）', ()
     }
     // 资料那一段（原来「我」面板里的那张表）也一起搬来了。
     expect(view).toMatch(/class="me-meta"/)
-    expect(view).toMatch(/hygienePermissionLabel\(staffMe\.permission\)/)
+    expect(view).toMatch(/hygienePermissionLabel\(/)
+    // 卫生权限那一行不是只念标签：`permissionLine` 把 `admin_caps` 里**真正能做的项数**
+    // 一起报出来（真机走查 S10：标签写着「管理员」而一项开关都没给时，原来只显示
+    // 「管理员」，人会以为自己有权限却什么都做不了）。
+    expect(view).toMatch(/\{\{ permissionLine \}\}/)
   })
 
   it('两条写请求走员工自己的门，读的还是 /staff/me 那一份（不额外发请求）', () => {

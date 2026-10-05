@@ -6,7 +6,7 @@ import { RECIPE_DETAIL_PATH, RECIPE_HOME_PATH } from '../../utils/recipePaths'
 import { useRecipeAdmin } from '../../composables/useRecipeAdmin'
 import RecipeExitButton from '../../components/recipe/RecipeExitButton.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
-import { RECIPE_NAV_HOME_LABEL } from '../../utils/recipeCopy'
+import { RECIPE_NAV_HOME_LABEL, recipeDocumentTitle } from '../../utils/recipeCopy'
 import {
   A4_CONTENT_HEIGHT_MM,
   PRINT_CARD_GAP_MM,
@@ -136,6 +136,10 @@ async function layoutPages() {
 }
 
 onMounted(async () => {
+  // 标题要在**任何分支之前**设：下面「没给 slug」「加载失败」都会早早走掉，而原来那行
+  // `document.title = pageTitle.value` 在成功分支里 —— 于是失败时浏览器标签停在 index.html
+  // 的默认值「厨务管家 · 管理后台」（真机走查 N1）。加载成功后再换成更具体的标题。
+  document.title = recipeDocumentTitle('配方打印')
   previousThemeAttr = document.documentElement.getAttribute('data-theme')
   document.documentElement.setAttribute('data-theme', 'light')
   document.body.classList.add('sop-print-preview-page')
@@ -157,7 +161,7 @@ onMounted(async () => {
     } else {
       bodyHtml.value = parts.join('<div class="sop-print-page-break"></div>')
       pageTitle.value = slugs.value.length === 1 ? '打印预览' : `批量打印 · ${slugs.value.length} 个岗位`
-      document.title = pageTitle.value
+      document.title = recipeDocumentTitle(pageTitle.value)
     }
   } catch (e) {
     bodyHtml.value = '加载失败'

@@ -4,6 +4,7 @@ import ConfirmDialog from '../components/admin/ConfirmDialog.vue'
 import TextExportModal from '../components/salesreport/TextExportModal.vue'
 import LuyunNumberInput from '../components/ui/LuyunNumberInput.vue'
 import { usePrepPlan } from '../composables/usePrepPlan'
+import { workbenchDocumentTitle } from '../utils/workbenchCopy'
 import { usePrepPlanAdmin } from '../composables/usePrepPlanAdmin'
 import { useStationsStore } from '../stores/stations'
 import {
@@ -114,7 +115,12 @@ function stationIdOf(row) {
 }
 
 const stationsStore = useStationsStore()
-onMounted(() => stationsStore.load())
+onMounted(() => {
+  // 这一页原来**一个 document.title 都没设**：真机走查里它的浏览器标签是 index.html 的
+  // 默认值「厨务管家 · 管理后台」，跟管理后台任意一页分不开（手机上多标签时尤其明显）。
+  document.title = workbenchDocumentTitle('备货计划')
+  stationsStore.load()
+})
 
 const stationChips = computed(() => [
   { id: '', label: ALL_STATIONS_LABEL },

@@ -21,6 +21,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useNudgePull } from '../../composables/useNudgePull'
+import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { eachDayInRange } from '../../utils/dateRange'
@@ -116,7 +117,9 @@ function backToThisMonth() {
 }
 
 onMounted(() => {
-  document.title = '整月'
+  // 名字与清单里 `/workbench/me/month` 那一行同步。走 `workbenchDocumentTitle` 是为了
+  // 那条「· 工作台」后缀：只写裸标题会让它在浏览器标签里跟管理后台的页面分不开。
+  document.title = workbenchDocumentTitle('整月')
   load()
   // 申请那份自己拉（票 06 的角标）：跟月历并行，读不出来只是不标角标。
   loadPendingMarks()

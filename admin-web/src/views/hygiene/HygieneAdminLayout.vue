@@ -26,7 +26,6 @@
 // 工作台导航表与同一颗组件，差异只剩"每条栏怎么摆"。
 import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import StandardPhotoCachePanel from '../../components/hygiene/StandardPhotoCachePanel.vue'
 import SvgIcon from '../../components/SvgIcon.vue'
 import WorkbenchExitButton from '../../components/workbench/WorkbenchExitButton.vue'
 import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
@@ -163,7 +162,11 @@ watch(
     <!-- 工作台级导航在手机档的落点（C 方向）：底栏一格一组、拇指区可达；桌面档它自己
          不渲染（`display: none`），那里 rail 里的七页与横条上的那排 tab 在干活。 -->
     <WorkbenchTabBar class="hy-wb-tabbar" />
-    <StandardPhotoCachePanel />
+    <!-- 这里**不放** `StandardPhotoCachePanel`（原来放在这儿）：那个面板是给**要拍照的人**
+         离线缓存标准图用的，而现场这八页是店长的复核面 —— 他没有拍摄动作，进页面却被一个
+         「36 张标准图 · 约 8.2 MB，先下载标准图」的模态挡住首屏（真机走查 N2，手机档尤其
+         明显：点进来想判一单，先得处理一个下载框）。员工端那一页（`HygieneHomeView`）是
+         真拍摄面，保留它。 -->
   </div>
 </template>
 
