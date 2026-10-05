@@ -97,11 +97,17 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(login["employee"]["permission"], "普通员工")
         self.assertEqual(login["employee"]["job_title"], "领班")
         admined = await self.accounts.set_permission(employee["id"], "管理员")
-        self.assertEqual(admined["permission"], "管理员")
+        # 2026-10-06 起那一个标签**由开关派生**（票 02，ADR 0093）：`set_permission` 只写库列，
+        # 一项开关都没给的人读出来仍是「普通员工」—— 两者不一致时一律以开关为准。
+        self.assertEqual(admined["permission"], "普通员工")
+        self.assertEqual(admined["admin_caps"], [])
         self.assertEqual(admined["job_title"], "领班")
         with self.assertRaises(EmployeeAccountsError) as raised:
             await self.accounts.set_permission(employee["id"], "店长")
         self.assertEqual(raised.exception.code, "invalid_permission")
+        # 给出任一项管理能力，派生出来的标签才是「管理员」。
+        granted = await self.accounts.set_admin_caps(employee["id"], ["daily_review"])
+        self.assertEqual(granted["permission"], "管理员")
         still = await self.accounts.list_roster()
         self.assertEqual(still[0]["permission"], "管理员")
 
@@ -280,7 +286,11 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         """
         staff = await self._approved_employee()
         manager = await self._approved_employee(PHONE_ADMIN)
-        await self.accounts.set_permission(manager["id"], "管理员")
+        # 2026-10-06 起「管理员」这个标签由开关派生（票 02，ADR 0093）：要让他真是管理员，
+        # 得给管理能力开关；只写 `permission` 那一列已经不影响读出来的档位。
+        await self.accounts.set_admin_caps(
+            manager["id"], ["daily_review", "deep_review", "fix"]
+        )
         roster = await self.accounts.list_roster()
         self.assertEqual(
             next(row for row in roster if row["id"] == manager["id"])["permission"],

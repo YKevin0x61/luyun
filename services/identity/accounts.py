@@ -186,15 +186,20 @@ class EmployeeAccounts:
 
     def _employee_from_row(self, row) -> dict:
         mapping = dict(row)
+        # 管理权限开关（2026-10-05）：判据一律看这一组，`permission` 只当人话标签用。
+        # 认不出的键会被 `parse_caps` 丢掉（fail-closed）—— 权限宁可少给一项。
+        caps = parse_caps(mapping.get("admin_caps"))
         return {
             "id": int(mapping["id"]),
             "phone": mapping["phone"],
             "name": mapping.get("name") or "",
             "job_title": mapping.get("job_title") or "",
-            "permission": mapping["permission"],
-            # 管理权限开关（2026-10-05）：判据一律看这一组，`permission` 只当人话标签用。
-            # 认不出的键会被 `parse_caps` 丢掉（fail-closed）—— 权限宁可少给一项。
-            "admin_caps": list(parse_caps(mapping.get("admin_caps"))),
+            # 档位标签**由开关派生**（2026-10-06 起，见 `docs/adr/0093`）：有任一项管理能力就是
+            # 「管理员」，一项都没有就是「普通员工」。库里那一列保留（花名册的下拉照旧写它），
+            # 但不再是真相来源 —— 两者不一致时一律以开关为准，界面上因此不可能出现
+            # "标签说管理员、一项开关都没给"这种自相矛盾的行。
+            "permission": PERMISSION_ADMIN if caps else PERMISSION_STAFF,
+            "admin_caps": list(caps),
             "approved": _as_bool(mapping["approved"]),
             "disabled": _as_bool(mapping["disabled"]),
         }

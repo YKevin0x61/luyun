@@ -9,6 +9,15 @@
 
 另外两条钉的是**迁移口径**：`0015` 的回填值与 `LEGACY_ADMIN_CAPABILITIES` 必须是同一件事
 （升级当场行为不变就靠它），以及解析/序列化的稳定性（去重、按声明顺序，便于比对与显示）。
+
+2026-10-06（票 02）又加了两条门，钉的是**「档位」不再是第二个真相来源**：
+
+* `test_permission_label_is_derived_from_the_caps`：库列与开关不一致时，读出来的标签跟
+  开关走（有任一项即「管理员」，一项都没有即「普通员工」）—— 界面上不可能再出现
+  "标签说管理员、一项开关都没给"这种自相矛盾的行。
+* `test_every_wired_capability_is_referenced_by_a_judgment`：每个能力键至少被一处判据引用，
+  未接线的必须落在显式白名单里 —— 新增一个键却不接线时，这条会红（把"勾了不生效"从人工
+  走查变成自动门）。
 """
 
 import json
@@ -27,6 +36,81 @@ from services.identity.capabilities import (
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 FRONTEND = REPO_ROOT / "admin-web" / "src" / "utils" / "adminCaps.js"
 MIGRATION = REPO_ROOT / "migrations" / "pg" / "0015_hygiene_employee_admin_caps.sql"
+
+#: 员工账号读取点那条用例用的账号（跑在 conftest 钉死的测试库上，不碰真库）。
+STAFF_PHONE = "13800138007"
+STAFF_PASSWORD = "password123"
+
+#: **未接线**的能力键：键与数据面都保留，但服务层没有任何判据引用它们。
+#:
+#: 逐字写死在这里（**不**从 `capabilities.py` 的分组读）是有意的：新增一个键、忘了接线时，
+#: 这份名单会与代码里的分组对不上，测试当场变红，逼出一次显式决定 —— 要么接线（在服务层用
+#: `has_cap(actor.get("caps"), CAP_XXX)` 判定），要么把它写进这张白名单，并在票 / ADR 里说明
+#: 它为什么现在不生效。来源：`docs/adr/0093` 的十项分组（那七项对应的全是超级管理员在电脑端
+#: 的活，员工端没有入口）。
+UNWIRED_CAPABILITIES: tuple[str, ...] = (
+    "attire",
+    "standard",
+    "zone",
+    "roster",
+    "boards",
+    "clock",
+    "data",
+)
+
+#: 判据消费点：卫生的业务层（`_require_reviewer` / `_require_fix_*`）。扫服务层与接口层；
+#: `services/identity/capabilities.py` 是键的定义处，不算消费。
+CONSUMER_DIRS = ("services", "api")
+_CAPABILITIES_MODULE = REPO_ROOT / "services" / "identity" / "capabilities.py"
+
+
+def _capability_reference_sites() -> dict[str, list[str]]:
+    """每个能力键的常量（`CAP_XXX`）在判据消费点出现的文件清单。"""
+    sites: dict[str, list[str]] = {key: [] for key in CAPABILITIES}
+    for folder in CONSUMER_DIRS:
+        for path in sorted((REPO_ROOT / folder).rglob("*.py")):
+            if path == _CAPABILITIES_MODULE:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for key in CAPABILITIES:
+                if re.search(rf"\bCAP_{key.upper()}\b", text):
+                    sites[key].append(str(path.relative_to(REPO_ROOT)))
+    return sites
+
+
+def test_every_wired_capability_is_referenced_by_a_judgment():
+    """每个能力键至少被一处判据引用；未接线的必须落在**显式白名单**里。
+
+    「勾了不生效」是最坏的一类缺陷：花名册上多一个勾、服务层一处判据都没有，勾完保存成功、
+    员工端零变化，界面也不给提示（2026-10-06 真机实测复现：勾「数据与归档」→ 保存成功 →
+    员工端零变化）。这条门把它从人工走查变成自动断言：新增一个能力键却不接线，这里就红。
+
+    只断言**契约是否成立**，不断言判据怎么写：看的是"这个键有没有被判据层用到"，不是
+    "它在哪一行、怎么判"。引用处判得对不对（有没有真拦住）由服务层自己的用例管。
+    """
+    from services.identity.capabilities import (
+        STAFF_SIDE_CAPABILITIES,
+        SUPERVISOR_ONLY_CAPABILITIES,
+    )
+
+    # 白名单与领域分组必须是同一件事：把某项挪出只读组（= 声明它接线了）就得先改这份名单，
+    # 而下面的断言又会要求它真的被判据引用。
+    assert UNWIRED_CAPABILITIES == SUPERVISOR_ONLY_CAPABILITIES, (
+        "显式白名单与 SUPERVISOR_ONLY_CAPABILITIES 不一致："
+        f"{UNWIRED_CAPABILITIES} vs {SUPERVISOR_ONLY_CAPABILITIES}"
+    )
+    wired = tuple(key for key in CAPABILITIES if key not in UNWIRED_CAPABILITIES)
+    assert wired == STAFF_SIDE_CAPABILITIES, (
+        f"要判据的应当是员工端有执行点的那三项，实际 {wired} vs {STAFF_SIDE_CAPABILITIES}"
+    )
+    sites = _capability_reference_sites()
+    missing = [key for key in wired if not sites[key]]
+    assert not missing, (
+        "这些能力键没有任何判据引用它们（勾了也不会生效）："
+        + "、".join(missing)
+        + "。要么在服务层接线（`has_cap(actor.get(\"caps\"), CAP_XXX)`），"
+        "要么把它写进本文件顶部的 UNWIRED_CAPABILITIES（显式白名单）。"
+    )
 
 
 def test_frontend_keys_match_backend_exactly():
@@ -86,6 +170,64 @@ def test_migration_backfill_matches_the_legacy_tier():
     assert tuple(backfilled) == LEGACY_ADMIN_CAPABILITIES
     # 回填只该给「管理员」那一档，普通员工必须留空（否则等于给所有人放权）。
     assert "permission = '管理员'" in sql
+
+
+def test_permission_label_is_derived_from_the_caps():
+    """档位标签由开关派生：有任一管理能力即「管理员」，一项都没有即「普通员工」。
+
+    `hygiene_employees.permission` 那一列还在（花名册的下拉照旧写它），但**读出来的标签
+    一律跟开关走** —— 库里写着「管理员」、一项开关都没给时，返回的是「普通员工」。两者
+    不一致是合法状态，一律以开关为准；界面上因此不会再出现"标签说管理员、一项开关都没给"
+    这种自相矛盾的行（2026-10-06 评审 S12）。
+
+    只在**读取点**上断言（花名册与登录返回的 employee），不看派生写在哪一行。
+    """
+    import asyncio
+
+    from database import DatabaseManager
+    from services.identity.accounts import EmployeeAccounts
+
+    async def scenario() -> dict:
+        db = DatabaseManager()
+        await db.connect()
+        try:
+            accounts = EmployeeAccounts(db)
+            employee = await accounts.register(STAFF_PHONE, STAFF_PASSWORD, "张三")
+            await accounts.approve(employee["id"])
+            employee_id = employee["id"]
+            seen = {}
+
+            async def roster_label() -> str:
+                roster = await accounts.list_roster()
+                return next(row["permission"] for row in roster if row["id"] == employee_id)
+
+            async def login_label() -> str:
+                logged_in = await accounts.login(STAFF_PHONE, STAFF_PASSWORD)
+                return logged_in["employee"]["permission"]
+
+            seen["一项都没有"] = await roster_label()
+            # 「有任一项」只看有没有，不看那一项能不能用：未接线的那七项也算有管理能力。
+            await accounts.set_admin_caps(employee_id, ["data"])
+            seen["给了未接线的一项"] = await roster_label()
+            await accounts.set_admin_caps(employee_id, ["daily_review"])
+            seen["给了员工端真生效的一项"] = await roster_label()
+            seen["登录返回的 employee"] = await login_label()
+            # 库列与开关不一致（标签「管理员」、开关为空）—— 读出来跟开关走。
+            await accounts.set_admin_caps(employee_id, [])
+            await accounts.set_permission(employee_id, "管理员")
+            seen["库列写管理员、开关为空（花名册）"] = await roster_label()
+            seen["库列写管理员、开关为空（登录）"] = await login_label()
+            return seen
+        finally:
+            await db.close()
+
+    seen = asyncio.run(scenario())
+    assert seen["一项都没有"] == "普通员工"
+    assert seen["给了未接线的一项"] == "管理员"
+    assert seen["给了员工端真生效的一项"] == "管理员"
+    assert seen["登录返回的 employee"] == "管理员"
+    assert seen["库列写管理员、开关为空（花名册）"] == "普通员工"
+    assert seen["库列写管理员、开关为空（登录）"] == "普通员工"
 
 
 def test_frontend_checkbox_group_is_exactly_the_staff_side_caps():

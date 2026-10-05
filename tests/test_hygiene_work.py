@@ -415,7 +415,7 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
         """「待我验收」那一档：管理员的验收权是全店的，但默认队列锁在他自己的区里。
 
         2026-10-05 用户确认「员工账号的管理员也同样有权限验收」。后端判据一直是全店的
-        （`_require_reviewer` 只看 permission、不看区），缺的是**入口**：默认队列按
+        （`_require_reviewer` 只看 `daily_review` 那一项能力开关、不看区），缺的是**入口**：默认队列按
         「本区 + 本班次」过滤（`_inbox_filter`），今天别的区有人交了，他一条也看不到。
         `pending_review_only=True` 就是那条入口 —— 两个班次、全部区、只要待验收、
         且不含他自己交的那条（`cannot_self_accept`）。普通员工拿不到（forbidden）。
