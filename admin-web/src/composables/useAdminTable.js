@@ -75,13 +75,31 @@ export function useAdminTable() {
     }
   }
 
+  /**
+   * 表的默认排序：**最新在前**，否则一进来是物理顺序（`orders` 实测是
+   * 7,8,9,10,13,15,…,2,25,27,11,4）——既不是插入序也不是时间序，20 万行的表里
+   * 用户根本看不出自己在看什么，想找刚发生的事得翻 4189 页。
+   *
+   * 优先用业务时间列，其次 created_at；两者都没有就不排（小字典表按主键来更自然）。
+   * 只在切换表时套用，用户点过表头之后就以他选的为准。
+   */
+  const DEFAULT_SORT_COLUMNS = ['order_time', 'created_at']
+
+  function defaultSortFor(columnNames) {
+    const lower = columnNames.map((name) => String(name).toLowerCase())
+    const field = DEFAULT_SORT_COLUMNS.find((name) => lower.includes(name))
+    return field ? columnNames[lower.indexOf(field)] : ''
+  }
+
   async function switchTable(table) {
     currentTable.value = table
     page.value = 1
     searchField.value = ''
     searchValue.value = ''
-    sortField.value = ''
     await loadSchema()
+    // schema 到手才知道有没有时间列，所以默认排序在 loadSchema 之后定。
+    sortField.value = defaultSortFor(columns.value)
+    sortDir.value = 'desc'
     await loadRows()
   }
 

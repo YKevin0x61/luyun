@@ -17,6 +17,11 @@ import {
 } from '../utils/loginPrefs'
 import { resolveLoginNext, resolveLoginTab, resolveStaffNext } from '../utils/loginNext'
 
+/** 「无权访问」页（守卫的落点之一）。管理栏登录时 `?next=` 指向员工专属页的话，
+ *  落点由 `resolveLoginNext` 返回这里 —— 让守卫去说明「这页是谁的」，而不是把
+ *  `?next=` 悄悄丢掉换成 `/`（D4：`/login?next=/workbench/me/month` 原来落到 `/workbench`）。 */
+const FORBIDDEN_PATH = '/workbench/forbidden'
+
 // 迁移自 public/login.html：登录 / 首次初始化管理员 / 已登录三态页面。
 // 票 03 起同一个面板装两种身份（管理员 / 员工）：两个显式 Tab 各打自己原来那套登录接口、
 // 各发自己原来的 cookie —— 后端 `sessions` 与 `hygiene_staff_sessions` 两张表、两个
@@ -143,12 +148,22 @@ async function focusField(inputRef) {
 
 /** 管理员栏登录后的落点；员工端路径不认（身份互斥，判据在 utils/loginNext.js）。
  *
+ *  `?next=` 指向员工专属页时落 `/workbench/forbidden?next=<原目标>`（`FORBIDDEN_PATH`
+ *  那一条），不是悄没声地换成 `/`。带 `?next=` 的去向**始终是这个目标本身**：能进的
+ *  直接进，进不去的由守卫说清为什么 —— 这正是 ADR 0092「不静默改道」。
+ *
+ *  **兜底只在真有 `?next=` 时生效**：没有 `?next=` 的登录（`/login`、`?switch=1` 的
+ *  确认面板）照旧回 `/`，那条链一个字没动（`resolveLoginNext` 的空兜底 = `/`）。
+ *  这两个分支的取值在这里算清楚，别让「登录页自己的 401 兜底不跳」那条判据被顺手改掉。
+ *
  *  用 `replace`：登录页不该留在后退历史里 —— 否则登录成功后按浏览器后退会退回
  *  登录页（票 10 消掉的 audit 条目 9）。员工栏本来就是这么做的，两栏的 history
  *  语义现在只有一种。 */
 function redirectAsAdmin() {
   setAuthLoggedIn(true)
-  router.replace(resolveLoginNext(route.query.next, '/'))
+  const next = route.query.next
+  const fallback = next ? FORBIDDEN_PATH : '/'
+  router.replace(resolveLoginNext(next, fallback))
 }
 
 /** 员工栏登录后的落点；只认员工端前缀，别的一律回落到员工默认落点。 */

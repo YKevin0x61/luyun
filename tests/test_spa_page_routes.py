@@ -51,8 +51,10 @@ ROUTER_JS = REPO_ROOT / "admin-web" / "src" / "router" / "index.js"
 PAGE_ROUTES_JSON = REPO_ROOT / "admin-web" / "src" / "router" / "pageRoutes.json"
 
 # 表里的取值域。`home` 是工作台首页那一组（票 06 才有行），先在这里登记，免得以后
-# 加一页时两边枚举对不上。
-PAGE_GROUPS = {"home", "hr", "floor", "kitchen", "me", "system", "entry"}
+# 加一页时两边枚举对不上。`hygiene` 是**员工**那一档的卫生组（2026-10-05 起
+# `/workbench/me/clean` 从 `me` 挪进它自己的组，因为员工底栏给了它一个一级入口；
+# 店长那一档走的是 `floor` 那七页，两组人做同一批活、看到的是各自的面）。
+PAGE_GROUPS = {"home", "hr", "floor", "hygiene", "kitchen", "me", "system", "entry"}
 PAGE_AUDIENCES = {"admin", "staff", "both"}
 
 # 免墙表里**不属于任何页面**的壳层条目，逐条写明理由与归属。表里每一条要么对应清单里
@@ -272,6 +274,9 @@ class SpaPageRouteContractTest(unittest.TestCase):
             "/workbench/floor/boards",
             "/workbench/floor/attire",
             "/workbench/floor/data",
+            # 卫生趋势（2026-10-05 用户裁定）：现场组的第八页 —— 同批登记，漏一条就是
+            # 「点得进去、刷新 404」。
+            "/workbench/floor/trend",
             # 票 03：员工三页搬进「我的」组，越权落点也是工作台里的一页。
             "/workbench/me/today",
             "/workbench/me/month",

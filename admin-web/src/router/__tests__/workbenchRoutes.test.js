@@ -29,6 +29,8 @@ const FLOOR_PAGES = [
   ['/workbench/floor/fix', 'HygieneFixView.vue'],
   ['/workbench/floor/boards', 'HygieneBoardsView.vue'],
   ['/workbench/floor/data', 'HygieneDataView.vue'],
+  // 卫生趋势（2026-10-05 用户裁定）：现场组的第八页，同壳（hygieneAdminPage）。
+  ['/workbench/floor/trend', 'HygieneTrendView.vue'],
 ]
 
 // 工作台「后勤」那一组里**带工作台导航**的页面（票 07 的配方列表 / 管理，票 08 的备货
@@ -71,7 +73,7 @@ describe('工作台路由（票 05 按分组落位之后）', () => {
     }
   })
 
-  it('人事四页走人事壳、现场七页走现场壳、后勤的列表 / 管理 / 备货计划走工作台外壳', () => {
+  it('人事四页走人事壳、现场八页走现场壳、后勤的列表 / 管理 / 备货计划走工作台外壳', () => {
     for (const [path] of HR_PAGES) {
       expect(lineFor(path), `${path} 该走人事壳`).toContain('workbenchHrPage')
     }

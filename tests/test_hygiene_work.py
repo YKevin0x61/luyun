@@ -10,7 +10,18 @@ from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.notifier import FakeNotifier
-from services.hygiene.work import HygieneWork, HygieneWorkError, hygiene_week_start
+from services.hygiene.work import (
+    BOARD_PERSON,
+    BOARD_ZONE,
+    EVENT_FIRST_PASS,
+    EVENT_MISSED_DAILY,
+    EVENT_REJECT,
+    OPENER_STAFF,
+    HygieneWork,
+    HygieneWorkError,
+    hygiene_business_date,
+    hygiene_week_start,
+)
 from tests.hygiene_duty import assign_duty
 
 SEED_ZONE_NAMES = ["案板", "馅档", "熟笼", "肠粉", "西饼", "明档1", "明档2", "煎炸"]
@@ -311,11 +322,22 @@ ADMIN_PHONE = "13800138013"
 OTHER_ADMIN_PHONE = "13800138014"
 
 
-def _staff(employee_id, phone, shift, permission="普通员工", name=""):
+def _staff(employee_id, phone, shift, permission="普通员工", name="", caps=None):
+    """造一个员工 actor。
+
+    `caps` 是**管理权限开关**（2026-10-05 起判据看它，不看 `permission`）。不给就按迁移
+    `0015` 的回填规则推：升级前那个「管理员」档位等于 `daily_review + deep_review + fix`
+    三项 —— 于是升级前写的用例一字不改仍然表达同一个意思。
+    """
+    if caps is None:
+        caps = (
+            ("daily_review", "deep_review", "fix") if permission == "管理员" else ()
+        )
     return {
         "kind": "staff",
         "id": employee_id,
         "permission": permission,
+        "caps": list(caps),
         "name": name,
         "phone": phone,
         "shift": shift,
@@ -388,6 +410,212 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "待验收")
         self.assertEqual(row["zone_name"], "馅档")
         self.assertEqual(self.captures.get(row["capture_id"]), SHOT_A)
+
+    async def test_pending_review_queue_is_shop_wide_for_admins(self):
+        """「待我验收」那一档：管理员的验收权是全店的，但默认队列锁在他自己的区里。
+
+        2026-10-05 用户确认「员工账号的管理员也同样有权限验收」。后端判据一直是全店的
+        （`_require_reviewer` 只看 permission、不看区），缺的是**入口**：默认队列按
+        「本区 + 本班次」过滤（`_inbox_filter`），今天别的区有人交了，他一条也看不到。
+        `pending_review_only=True` 就是那条入口 —— 两个班次、全部区、只要待验收、
+        且不含他自己交的那条（`cannot_self_accept`）。普通员工拿不到（forbidden）。
+        """
+        anban, xian = await self._two_items()
+        zones = await self.work.list_zones()
+        anban_zone = self._zone(zones, "案板")["id"]
+        xian_zone = self._zone(zones, "馅档")["id"]
+
+        # 同事在**馅档**交了活，等的就是管理员那一眼。
+        mate = dict(_staff(12, ADMIN_PHONE, "白班", name="同事"), zone_id=xian_zone)
+        await self.work.submit_daily(mate, xian["id"], self._live(SHOT_A))
+
+        # 管理员今天排的是**案板**。
+        manager = dict(
+            _staff(13, OTHER_ADMIN_PHONE, "白班", permission="管理员", name="复核"),
+            zone_id=anban_zone,
+        )
+
+        # 默认队列锁在本区：馅档那条看不见 —— 这正是"有权限、没入口"的现场。
+        mine = await self.work.list_daily_work(manager)
+        self.assertNotIn(xian["id"], [row["item_id"] for row in mine])
+
+        # 「待我验收」跨区看得见（权限本来就是全店的）。
+        review = await self.work.list_daily_work(manager, pending_review_only=True)
+        rows = [row for row in review if row["item_id"] == xian["id"]]
+        self.assertEqual(len(rows), 1, "馅档那条待验收应当出现在「待我验收」里")
+        self.assertEqual(rows[0]["status"], "待验收")
+        self.assertEqual(rows[0]["zone_name"], "馅档")
+
+        # 自己交的不能自己验收：管理员在案板也交一条，它**不**出现在待验收那一档。
+        await self.work.submit_daily(manager, anban["id"], self._live(SHOT_A))
+        again = await self.work.list_daily_work(manager, pending_review_only=True)
+        self.assertNotIn(anban["id"], [row["item_id"] for row in again])
+
+        # 普通员工拿不到这一档（前端也不会问他）。
+        plain = dict(_staff(14, DAY_PHONE, "白班"), zone_id=anban_zone)
+        with self.assertRaises(HygieneWorkError) as raised:
+            await self.work.list_daily_work(plain, pending_review_only=True)
+        self.assertEqual(raised.exception.code, "forbidden")
+
+    async def test_admin_caps_are_per_item_not_all_or_nothing(self):
+        """管理权限是**逐项开关**（2026-10-05 用户裁定）：只勾了「日常验收」的人判不了专项。
+
+        升级前只有一个「管理员」档位 —— 勾上就是三项全给，表达不出"他该判日常、不该判专项"。
+        现在判据是 `_require_reviewer(actor, submitter_id, cap)`，这里直接压它：
+        有那一项就放行、没有就 forbidden；自己交的仍然不能自己判（那条老规矩没动）。
+        """
+        mate_id = 12
+        only_daily = _staff(
+            13, OTHER_ADMIN_PHONE, "白班", permission="管理员", caps=("daily_review",)
+        )
+        # 有这一项：放行（不抛就是过）。
+        self.work._require_reviewer(only_daily, mate_id, "daily_review")
+        # 没有那一项：拒。
+        with self.assertRaises(HygieneWorkError) as raised:
+            self.work._require_reviewer(only_daily, mate_id, "deep_review")
+        self.assertEqual(raised.exception.code, "forbidden")
+        # 自己交的不能自己判 —— 哪怕他有那一项。
+        with self.assertRaises(HygieneWorkError) as raised_self:
+            self.work._require_reviewer(only_daily, 13, "daily_review")
+        self.assertEqual(raised_self.exception.code, "cannot_self_accept")
+        # 一个开关都没有 = 什么都判不了（普通员工那一档）。
+        plain = _staff(14, DAY_PHONE, "白班")
+        with self.assertRaises(HygieneWorkError) as raised_plain:
+            self.work._require_reviewer(plain, mate_id, "daily_review")
+        self.assertEqual(raised_plain.exception.code, "forbidden")
+        # 超级管理员不受开关限制（他没走员工会话这条路）。
+        self.work._require_reviewer({"kind": "super"}, mate_id, "deep_review")
+
+    async def test_my_score_reads_the_same_events_as_the_board(self):
+        """「我的成绩」与红黑榜是**同一份记录**，不另起计数。
+
+        2026-10-05 用户裁定做这一项：员工端原来只有"今天要做什么"，看不到自己干得怎么样。
+        口径是 `一次通过 /（一次通过 + 驳回）`，数据源就是"人的榜"那张事件表 ——
+        如果哪天有人另起一套计数，员工看到的数字就会和店长看到的榜对不上，那种账最难查。
+        """
+        today = hygiene_business_date(self.work._now_dt())
+        me = 7
+        other = 8
+        # 三条一次通过、一条驳回（带原因）、一条同事的（不该算进我的）
+        for _ in range(3):
+            await self.work._insert_board_event(
+                BOARD_PERSON, EVENT_FIRST_PASS, employee_id=me, business_date=today
+            )
+        await self.work._insert_board_event(
+            BOARD_PERSON,
+            EVENT_REJECT,
+            employee_id=me,
+            business_date=today,
+            reason="有水渍",
+        )
+        await self.work._insert_board_event(
+            BOARD_PERSON, EVENT_FIRST_PASS, employee_id=other, business_date=today
+        )
+
+        score = await self.work.staff_score(me, days=7)
+        self.assertEqual(score["first_pass"], 3)
+        self.assertEqual(score["rejected"], 1)
+        # 3/4 —— 同事那一条不能算进来。
+        self.assertAlmostEqual(score["pass_rate"], 0.75)
+        self.assertEqual(score["reasons"], [{"reason": "有水渍", "count": 1}])
+
+        # 一次都没交过的人：pass_rate 是 None（不是 0）—— 前端据此显示"还没开始"，
+        # 显示 0% 会让新人看着像已经被扣分了。
+        empty = await self.work.staff_score(999, days=7)
+        self.assertEqual(empty["first_pass"], 0)
+        self.assertIsNone(empty["pass_rate"])
+        self.assertEqual(empty["reasons"], [])
+
+        # 窗口之外的事件不算（把那条驳回挪到 30 天前）。
+        old_date = (datetime.fromisoformat(today) - timedelta(days=30)).date().isoformat()
+        await self.work._conn.execute(
+            "UPDATE hygiene_board_events SET business_date = ? WHERE employee_id = ? AND event_type = ?",
+            (old_date, me, EVENT_REJECT),
+        )
+        await self.work._conn.commit()
+        week = await self.work.staff_score(me, days=7)
+        self.assertEqual(week["rejected"], 0)
+        self.assertEqual(week["pass_rate"], 1.0)
+
+    async def test_reject_requires_a_reason(self):
+        """驳回**必须**写原因（2026-10-05 用户裁定）—— 这条在 API 层拦，服务层不动。
+
+        服务层的 `reason` 仍然是可选的（管理端回看、脚本、历史数据都可能没有原因），
+        把关放在七个 HTTP 驳回入口上（`_require_reject_reason`），那里才是人点出来的。
+        """
+        from api.hygiene import _require_reject_reason
+        from fastapi import HTTPException
+
+        self.assertEqual(_require_reject_reason("  有水渍  "), "有水渍")
+        self.assertEqual(len(_require_reject_reason("x" * 500)), 200)
+        for blank in (None, "", "   "):
+            with self.assertRaises(HTTPException) as raised:
+                _require_reject_reason(blank)
+            self.assertEqual(raised.exception.status_code, 400)
+            # 与仪容那条既有文案一字不差（七个入口一句话）—— 改文案要一起改测试。
+            self.assertIn("写明", raised.exception.detail)
+
+    async def test_trend_aggregates_days_zones_and_reasons(self):
+        """趋势三个切面：按天 / 按区 / 按驳回原因（2026-10-05 用户裁定）。
+
+        店长要能回答"这周比上周好还是差" —— 现场七页只有"当下"，没有一处能给这个答案。
+        口径必须与榜、与员工端那张成绩卡**一致**（都从同一张事件表来），
+        所以这里连"按区那次也按同一口径"一起钉住：逾期是另一条轴，不塞进分母。
+        """
+        today = hygiene_business_date(self.work._now_dt())
+        zones = await self.work.list_zones()
+        anban = self._zone(zones, "案板")["id"]
+        xian = self._zone(zones, "馅档")["id"]
+
+        # 今天：案板 2 次一次通过 + 1 次驳回（带原因）；馅档 1 次一次通过。
+        for _ in range(2):
+            await self.work._insert_board_event(
+                BOARD_PERSON, EVENT_FIRST_PASS, zone_id=anban, employee_id=11, business_date=today
+            )
+        await self.work._insert_board_event(
+            BOARD_PERSON, EVENT_REJECT, zone_id=anban, employee_id=11,
+            business_date=today, reason="有水渍",
+        )
+        await self.work._insert_board_event(
+            BOARD_PERSON, EVENT_FIRST_PASS, zone_id=xian, employee_id=12, business_date=today
+        )
+        # 区的榜：案板逾期 3 次（另一条轴）。
+        for _ in range(3):
+            await self.work._insert_board_event(
+                BOARD_ZONE, EVENT_MISSED_DAILY, zone_id=anban, business_date=today
+            )
+        # 30 天前的一条：不该进 7 天窗口。
+        old = (datetime.fromisoformat(today) - timedelta(days=30)).date().isoformat()
+        await self.work._insert_board_event(
+            BOARD_PERSON, EVENT_REJECT, zone_id=xian, employee_id=12,
+            business_date=old, reason="旧账",
+        )
+        await self.work._conn.commit()
+
+        trend = await self.work.hygiene_trend(days=7)
+        day = next(row for row in trend["daily"] if row["business_date"] == today)
+        self.assertEqual(day["first_pass"], 3)
+        self.assertEqual(day["rejected"], 1)
+        self.assertEqual(day["missed"], 3)
+        self.assertAlmostEqual(day["pass_rate"], 0.75)
+        # 旧账不在窗口里。
+        self.assertNotIn("旧账", [row["reason"] for row in trend["reasons"]])
+        self.assertEqual(trend["totals"]["first_pass"], 3)
+        self.assertEqual(trend["totals"]["rejected"], 1)
+
+        # 按区：与按天**同一口径**（一次通过 /（一次通过 + 驳回）），逾期单独一列。
+        by_zone = {row["zone_id"]: row for row in trend["zones"]}
+        self.assertEqual(by_zone[anban]["first_pass"], 2)
+        self.assertEqual(by_zone[anban]["rejected"], 1)
+        self.assertEqual(by_zone[anban]["missed"], 3)
+        self.assertAlmostEqual(by_zone[anban]["pass_rate"], 2 / 3)
+        self.assertEqual(by_zone[xian]["pass_rate"], 1.0)
+        # 驳回多的区排前面（店长先看问题区）。
+        self.assertEqual(trend["zones"][0]["zone_id"], anban)
+
+        # 一条事件都没有的窗口：不编数字（pass_rate 是 None，不是 0）。
+        empty = await self.work.hygiene_trend(days=1)
+        self.assertIsInstance(empty["daily"], list)
 
     async def test_later_submit_replaces_pending_capture(self):
         _anban, xian = await self._two_items()
@@ -778,6 +1006,31 @@ class HygieneDeepCleanTest(unittest.IsolatedAsyncioTestCase):
     def _pair_row(self, listed, item_id):
         return next(row for row in listed["items"] if row["item_id"] == item_id)
 
+    async def test_deep_clean_list_is_shop_wide_on_purpose(self):
+        """专项清单对**所有**员工会话一视同仁（全店一起干，见 ADR 0054 / 0059 / 0075）。
+
+        2026-10-05 审查 F-07 把"专项不按提交人过滤、同事能看到别人待验收的照片与姓名"
+        标成「存疑，需产品确认」。核到的结论是**设计如此**：专项清单只有 `(weekday, name)`，
+        没有区/组/人可判 —— 与日常那侧（按本区 + 本班次过滤）不对称是口径不同，不是漏判。
+
+        这条用例是**特征测试**：将来有人要给专项补 `WHERE submitter_id = ?`，它会红 ——
+        那时请先改产品口径（ADR）与页面文案，别在服务层悄悄加一片横向隔离。
+        """
+        first, _second = await self._two_sunday_items()
+        submitter = _staff(10, DAY_PHONE, "白班")
+        colleague = _staff(11, NIGHT_PHONE, "夜班")
+        await self.work.submit_deep_clean_pair(
+            submitter, first["id"], self._live(BEFORE_A), self._live(AFTER_A)
+        )
+        for actor in (submitter, colleague, _staff(12, ADMIN_PHONE, "白班", "管理员")):
+            row = self._pair_row(await self.work.list_deep_clean_work(actor), first["id"])
+            self.assertEqual(row["status"], "待验收")
+            # 提交人姓名 + 照片 id 一起下发：这是"全店可见"的具体含义（字段名叫
+            # submitter_phone，实际存的是姓名 —— 水印取的是同一个值）。
+            self.assertEqual(row["submitter_id"], 10)
+            self.assertIsNotNone(row["before_capture_id"])
+            self.assertIsNotNone(row["after_capture_id"])
+
     async def test_one_pair_does_not_complete_until_every_pair_accepted(self):
         first, second = await self._two_sunday_items()
         day = _staff(10, DAY_PHONE, "白班")
@@ -1080,6 +1333,68 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.notifier.texts), 2)
         self.assertNotIn("FIX-OPEN-JPEG", self.notifier.texts[1])
         self.assertNotIn("image", self.notifier.texts[1].lower())
+
+    async def test_fix_opener_needs_permission_and_a_zone_not_a_shift(self):
+        """开整改单要的是**档位 + 工作区**，不是"今天排到班"（2026-10-05 审查 F-05）。
+
+        actor 按 `api/hygiene.py` 的 `_staff_actor` 那个形状造：**`zone_id` 键始终在**
+        （今天没排到区时值是 None）。本文件其它用例用的 `_staff()` helper 不带这个键，
+        而 `_actor_zone_id` 对"键都没有"和"键在但是空"是两种处理 —— 拿它测这一条会漏掉
+        真实的 400。
+        """
+        anban = await self._zone_id("案板")
+        xian = await self._zone_id("馅档")
+        live = self._live(OPEN_BYTES)
+
+        def actor(employee_id, permission, zone_id):
+            # 2026-10-05 起判据看 `caps`（管理权限开关），`permission` 只是人话标签 ——
+            # 这里按迁移 `0015` 的回填规则推：老「管理员」= daily_review + deep_review + fix。
+            caps = (
+                ["daily_review", "deep_review", "fix"] if permission == "管理员" else []
+            )
+            return {
+                "kind": "staff",
+                "id": employee_id,
+                "permission": permission,
+                "caps": caps,
+                "name": "",
+                "phone": ADMIN_PHONE,
+                "shift": "白班" if zone_id else None,
+                "zone_id": zone_id,
+            }
+
+        admin_with_zone = actor(20, "管理员", anban)
+        admin_no_zone = actor(21, "管理员", None)
+        body = "案板有油，用热水擦干净"
+
+        # 普通员工：403 不变，而且在工作区判断**之前**就被挡下（两种形状都一样）。
+        for worker in (actor(30, "普通员工", anban), actor(31, "普通员工", None)):
+            with self.assertRaises(HygieneWorkError) as forbidden:
+                await self.work.open_fix(worker, anban, "卫生", body, TWO_HOURS, live)
+            self.assertEqual(forbidden.exception.code, "forbidden")
+        self.assertEqual(self.notifier.texts, [])
+
+        # 管理员 + 今天排到了区：能开，但只能开在自己那个区上。
+        opened = await self.work.open_fix(
+            admin_with_zone, anban, "卫生", body, TWO_HOURS, live
+        )
+        self.assertEqual(opened["status"], "待回拍")
+        self.assertEqual(opened["opener_kind"], OPENER_STAFF)
+        with self.assertRaises(HygieneWorkError) as mismatch:
+            await self.work.open_fix(admin_with_zone, xian, "卫生", body, TWO_HOURS, live)
+        self.assertEqual(mismatch.exception.code, "zone_mismatch")
+
+        # 管理员 + 今天没排到区：拒的是"没有可开的区"（zone_required），不是"没有班"。
+        with self.assertRaises(HygieneWorkError) as no_zone:
+            await self.work.open_fix(admin_no_zone, anban, "卫生", body, TWO_HOURS, live)
+        self.assertEqual(no_zone.exception.code, "zone_required")
+
+        # 三次被拒都没建单：只有成功那一次落了库。
+        tickets = await self.work.list_fix_tickets(admin_with_zone)
+        self.assertEqual([ticket["id"] for ticket in tickets], [opened["id"]])
+        # 也只有那一次发了群文字。
+        self.assertEqual(len(self.notifier.texts), 1)
+        self.assertIn("案板", self.notifier.texts[0])
 
     async def test_night_staff_can_reshoot_day_opened_ticket(self):
         opener = _staff(20, ADMIN_PHONE, "白班", "管理员")

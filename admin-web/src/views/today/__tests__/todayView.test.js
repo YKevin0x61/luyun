@@ -140,6 +140,59 @@ describe('员工端「今天」页（原型 A）', () => {
   })
 })
 
+describe('「我的成绩」卡（2026-10-05 用户裁定）', () => {
+  it('读员工自己的成绩门，路径上没有 employee_id', () => {
+    expect(view).toMatch(/staffRequest\(`\/api\/hygiene\/staff\/me\/stats\?days=\$\{SCORE_DAYS\}`\)/)
+    expect(view).toMatch(/const SCORE_DAYS = 7/)
+    expect(view).not.toMatch(/\/api\/hygiene\/admin/)
+  })
+
+  it('放在卫生卡与「我的」之间：员工每天登录就落在这页，卫生页只有有活时才打开', () => {
+    // 位置是这一票的实质决定（用户让我自己判）：`/workbench/me/today` 是员工登录后的
+    // 落点、休假也打得开；`/workbench/me/clean` 只有"今天有活"时才被点开 —— 最该看到
+    // 成绩的人恰恰可能那天没活。判据压在**顺序**上：卫生卡 → 成绩卡 → 我的。
+    const hyg = view.indexOf('class="tA-card hyg"')
+    const score = view.indexOf('class="tA-card score"')
+    const me = view.indexOf('class="tA-card me"')
+    expect(hyg).toBeGreaterThan(-1)
+    expect(score).toBeGreaterThan(hyg)
+    expect(me).toBeGreaterThan(score)
+  })
+
+  it('空态不给数字，更没有 0%（`pass_rate === null` 是"还没开始"，不是"被扣分"）', () => {
+    // 服务端用 null 表示"没有分母"。这里钉住那个分支：空态渲染的是 `.score-empty`
+    // 那一句话，数字那一段（`.score-rate`）整个不在。
+    expect(view).toMatch(/v-else-if="scorePercent === null"/)
+    expect(view).toMatch(/class="score-empty"/)
+    expect(view).toContain('还没交过活，交一项就有记录')
+    expect(view).toMatch(/if \(score\.value\.passRate === null\) return null/)
+  })
+
+  it('主数字旁边是两个小数字，驳回原因一行一条带次数', () => {
+    expect(view).toMatch(/class="score-rate"/)
+    expect(view).toMatch(/class="score-split"/)
+    expect(view).toContain('一次通过')
+    expect(view).toContain('被驳回')
+    expect(view).toMatch(/v-for="item in score\.reasons"/)
+    expect(view).toMatch(/\{\{ item\.count \}\} 次/)
+  })
+
+  it('跟卫生那几块一样自己一个 try：读不出来只影响这张卡，并且能重试', () => {
+    expect(view).toMatch(/async function loadScore\(quiet = false\)/)
+    expect(view).toMatch(/loadScore\(\)/)
+    expect(view).toMatch(/loadScore\(true\)/)
+    // 窗口与口径写清是"近 N 天"、跟红黑榜同一份记录。
+    expect(view).toContain('近 {{ score.days }} 天')
+    expect(view).toContain('红黑榜是同一份记录')
+  })
+
+  it('验收发生在店长那一侧：跟着卫生 nudge 重读一次', () => {
+    expect(view).toMatch(/topics: \['scheduling', 'hygiene'\]/)
+    const pull = view.slice(view.indexOf('useNudgePull({'), view.indexOf('</script>'))
+    expect(pull).toContain('loadScore(true)')
+  })
+})
+
 describe('员工端请假（票 08）', () => {
   it('三条请求都走员工门，路径上只有自己的申请号', () => {
     // 提/看/撤：`GET|POST /api/scheduling/me/requests`、`DELETE .../<申请号>`。
@@ -359,5 +412,46 @@ describe('仪容仪表（票 12）：按人拍、两步、只在排到班次时�
     expect(view).toMatch(/\.attire-line \{/)
     expect(view).toMatch(/\.attire-line\.rejected \{/)
     expect(view).toMatch(/\.attire-line\.nostandard \{/)
+  })
+})
+
+describe('账号设置（2026-10-05 从卫生页的「我」整格搬来）', () => {
+  it('三行入口都在这一页尾部，卫生页里一个都不留', () => {
+    const home = readFileSync(join(here, '../../hygiene/HygieneHomeView.vue'), 'utf8')
+    for (const label of ['修改个人信息', '修改密码', '重新选择区域和班次']) {
+      expect(view).toContain(label)
+      expect(home).not.toContain(`>${label}<`)
+    }
+    // 资料那一段（原来「我」面板里的那张表）也一起搬来了。
+    expect(view).toMatch(/class="me-meta"/)
+    expect(view).toMatch(/hygienePermissionLabel\(staffMe\.permission\)/)
+  })
+
+  it('两条写请求走员工自己的门，读的还是 /staff/me 那一份（不额外发请求）', () => {
+    // 改资料 / 改密码：`PATCH /api/hygiene/staff/me`、`PATCH /api/hygiene/staff/password`。
+    expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/me', \{[\s\S]{0,80}?method: 'PATCH'/)
+    expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/password'/)
+    // 资料那份 employee 与卫生进度同一个响应（`loadHygiene` 里顺手存下），路径上没有 id。
+    expect(view).toMatch(/staffMe\.value = employee/)
+    expect(view).not.toMatch(/\/api\/hygiene\/admin/)
+  })
+
+  it('改手机号要先确认：它是登录账号，打错一位下次就登不进来', () => {
+    // 校验与确认框都是从卫生页照搬的：正则、`phoneChanged`、`confirm-label="确认改号"`。
+    expect(view).toMatch(/const PHONE_PATTERN = \/\^1\[3-9\]\\d\{9\}\$\//)
+    expect(view).toMatch(/function phoneChanged\(\)/)
+    expect(view).toMatch(/if \(phoneChanged\(\) && !profilePhoneConfirmOpen\.value\)/)
+    expect(view).toMatch(/title="确认改手机号"/)
+    expect(view).toMatch(/confirm-label="确认改号"/)
+    // 两次新密码不一致就地拦住，不发请求。
+    expect(view).toMatch(/if \(newPassword\.value !== confirmPassword\.value\)/)
+  })
+
+  it('「重新选择区域和班次」不自选：说清由排班决定，并把人送回顶上那张排班卡', () => {
+    // 票 10 撤掉了员工自选班次/工作区那条路，搬过来也不许偷偷装回来。
+    expect(view).toMatch(/function openShiftNotice\(\)/)
+    expect(view).toMatch(/由排班决定；要改哪一天，找店长在排班页改/)
+    expect(view).not.toMatch(/api\/hygiene\/staff\/assignment/)
+    expect(view).not.toMatch(/HYGIENE_SHIFTS/)
   })
 })

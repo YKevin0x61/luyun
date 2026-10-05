@@ -135,10 +135,13 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 /* ===== 7. 列表页 ===== */
 .index-section{animation:sop-fade .4s var(--ease) both}
 @keyframes sop-fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+/* 这里**不能**用 `overflow:hidden` 裁顶部那条渐变：`.station-search-dropdown` 是
+   `.index-hero` 的后代，一旦裁剪，下拉只剩 hero 底边往上露出的十几像素（实测桌面
+   露 ~20px、手机 16px），搜索等于不可用。改由 `::before` 自己收圆角。 */
 .index-hero{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:clamp(1rem,4vw,2.5rem);
   margin-bottom:clamp(1.1rem,3vw,1.7rem);padding:clamp(1.3rem,4vw,2.6rem);
-  border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--shadow-md);overflow:hidden}
-.index-hero::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:linear-gradient(90deg,var(--jade),var(--gold),transparent 60%)}
+  border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--shadow-md)}
+.index-hero::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;border-radius:calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0;background:linear-gradient(90deg,var(--jade),var(--gold),transparent 60%)}
 .hero-copy{min-width:0}
 .hero-eyebrow,.section-caption span{display:inline-flex;width:fit-content;margin:0 0 .6rem;padding:.24rem .6rem;border-radius:999px;color:var(--jade-ink);background:var(--jade-soft);border:1px solid var(--line);font-size:.72rem;font-weight:900;letter-spacing:.1em;text-transform:uppercase}
 .page-title{margin:0 0 .5rem;font-size:clamp(1.6rem,4.5vw,2.6rem);font-weight:900;letter-spacing:-.03em;color:var(--ink);line-height:1.05}
@@ -283,7 +286,11 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .manage-page-head{margin-bottom:clamp(1.1rem,3vw,1.6rem)}
 .manage-actions{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1rem}
 .manage-table-wrap{border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--shadow-md);overflow:auto}
-.manage-table{width:100%;min-width:34rem;border-collapse:separate;border-spacing:0;font-size:.92rem}
+/* 表格正文必须显式声明配方自己的墨色：这一页套在工作台外壳里，而外壳容器带着
+   `color: var(--hy-ink)`（深青主题的浅字色 #e4f0ee）。`td` 原本没有 color，就把它
+   继承下来，压在 `--surface` 的白纸底上 —— 真机实测对比度 1.17:1，配方名与操作列
+   几乎看不见（截图里 4800 像素暗像素 0 个）。`th` 早就写了自己的颜色，漏的是 `td`。 */
+.manage-table{width:100%;min-width:34rem;border-collapse:separate;border-spacing:0;font-size:.92rem;color:var(--ink)}
 .manage-table th,.manage-table td{padding:.6rem .85rem;text-align:left;border-bottom:1px solid var(--line);vertical-align:middle}
 .manage-table th{position:sticky;top:0;z-index:2;background:var(--jade-soft);color:var(--jade-ink);font-weight:800;font-size:.78rem;letter-spacing:.04em;text-transform:uppercase}
 .manage-table tr:last-child td{border-bottom:0}

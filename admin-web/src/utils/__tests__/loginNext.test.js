@@ -121,6 +121,43 @@ describe('resolveLoginNext', () => {
   })
 })
 
+// D4：`?next=` 不能「消费掉却什么也不说」。
+// 管理栏拿到的目标若是员工专属页，落点交回调用方给的兜底 —— `LoginView` 传的是
+// `/workbench/forbidden`，于是原目标跟着人去「无权访问」页（ADR 0092「不静默改道」）。
+// 这里压的是**判据**：换成别的目标时仍然原样放行，别把这条兜底做成"什么都拦"。
+describe('resolveLoginNext（D4）：员工专属目标交给调用方的兜底，不自己吞掉', () => {
+  it('员工端前缀的目标回落到调用方给的 forbidden 落点（而不是 /）', () => {
+    expect(resolveLoginNext('/workbench/me/today', '/workbench/forbidden')).toBe('/workbench/forbidden')
+    expect(resolveLoginNext('/workbench/me/month', '/workbench/forbidden')).toBe('/workbench/forbidden')
+    expect(resolveLoginNext('/workbench/me/clean', '/workbench/forbidden')).toBe('/workbench/forbidden')
+    // 老员工地址先迁移，迁移后仍是员工端 → 同样回落到 forbidden。
+    expect(resolveLoginNext('/staff/today', '/workbench/forbidden')).toBe('/workbench/forbidden')
+  })
+
+  it('进得去的目标一个都不受影响（兜底只在身份不匹配时生效）', () => {
+    const forbidden = '/workbench/forbidden'
+    expect(resolveLoginNext('/workbench/hr/roster', forbidden)).toBe('/workbench/hr/roster')
+    expect(resolveLoginNext('/workbench', forbidden)).toBe('/workbench')
+    expect(resolveLoginNext('/workbench/kitchen/recipe/detail?slug=x', forbidden))
+      .toBe('/workbench/kitchen/recipe/detail?slug=x')
+    expect(resolveLoginNext('/sales-report', forbidden)).toBe('/sales-report')
+  })
+
+  it('站外 / 非法 / 登录页自身一律回落到兜底（开放重定向仍然挡着）', () => {
+    const forbidden = '/workbench/forbidden'
+    expect(resolveLoginNext('https://evil.example/phish', forbidden)).toBe(forbidden)
+    expect(resolveLoginNext('//evil.example', forbidden)).toBe(forbidden)
+    expect(resolveLoginNext('/login?next=/admin', forbidden)).toBe(forbidden)
+    expect(resolveLoginNext(null, forbidden)).toBe(forbidden)
+    expect(resolveLoginNext('', forbidden)).toBe(forbidden)
+  })
+
+  it('空兜底仍回落到 /（默认值没变，别的调用方不受影响）', () => {
+    expect(resolveLoginNext('/workbench/me/today', '')).toBe('/')
+    expect(resolveLoginNext(null, undefined)).toBe('/')
+  })
+})
+
 describe('resolveStaffNext', () => {
   it('员工那三页原样放行（含子页面与 query）', () => {
     expect(resolveStaffNext('/workbench/me/today')).toBe('/workbench/me/today')
@@ -243,8 +280,53 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
   })
 
   it('数组取第一个', () => {
-    expect(resolveLoginTab(['/admin', '/workbench/me/today'], 'staff')).toBe('staff')
+    // 第一个元素才参与判定：`?next=/admin` 是管理端专属页，所以强制管理员栏（D13 那条）。
+    expect(resolveLoginTab(['/admin', '/workbench/me/today'], 'staff')).toBe('admin')
     expect(resolveLoginTab(['/workbench/me/today', '/admin'], 'admin')).toBe('staff')
+  })
+})
+
+// D13：`?next=` 指向**管理端专属页**时开管理员栏。
+// 原来只按「是不是员工落点 / 配方阅读面」判，其余一律跟记住值走、没记住值就落员工栏 ——
+// 于是 `/login?next=/workbench/hr/roster` 这种只认管理端 cookie 的目标，开出来是手机号
+// 表单：员工会误填一次，管理端还得自己找 tab。身份只从页面清单那一行读，不另写前缀表。
+describe('resolveLoginTab（D13）：?next 是管理端专属页时强制管理员栏', () => {
+  it('没有记住值时也开管理员栏（这正是原来会开错的那一档）', () => {
+    expect(resolveLoginTab('/workbench/hr/roster', null)).toBe('admin')
+    expect(resolveLoginTab('/sales-report', null)).toBe('admin')
+    expect(resolveLoginTab('/workbench/floor/daily', null)).toBe('admin')
+    expect(resolveLoginTab('/workbench/kitchen/recipe/manage', null)).toBe('admin')
+    expect(resolveLoginTab('/', null)).toBe('admin')
+  })
+
+  it('优先于「记住的是员工栏」：目标进不去就不该开员工栏让人白填', () => {
+    expect(resolveLoginTab('/workbench/hr/calendar', 'staff')).toBe('admin')
+    expect(resolveLoginTab('/admin?tab=orders', 'staff')).toBe('admin')
+  })
+
+  it('带 query 与老地址（先迁移再判身份）都认', () => {
+    expect(resolveLoginTab('/workbench/hr/shifts?tab=add', null)).toBe('admin')
+    expect(resolveLoginTab('/hygiene/daily', null)).toBe('admin')
+    expect(resolveLoginTab('/scheduling/inbox', null)).toBe('admin')
+  })
+
+  it('员工栏那两档不被抢走：员工页与配方阅读面照旧强制员工栏', () => {
+    expect(resolveLoginTab('/workbench/me/month', null)).toBe('staff')
+    expect(resolveLoginTab('/workbench/kitchen/recipe/detail?slug=x', null)).toBe('staff')
+  })
+
+  it('`both` 页不算管理端专属：工作台首页与备货计划跟记住值走', () => {
+    expect(resolveLoginTab('/workbench', null)).toBe('staff')
+    expect(resolveLoginTab('/workbench', 'admin')).toBe('admin')
+    expect(resolveLoginTab('/workbench/kitchen/prep-plan', null)).toBe('staff')
+    expect(resolveLoginTab('/workbench/forbidden', null)).toBe('staff')
+  })
+
+  it('清单里没有的路径（老地址、手改的、站外）不强制，交回记住值', () => {
+    expect(resolveLoginTab('/nowhere', 'admin')).toBe('admin')
+    expect(resolveLoginTab('/nowhere', null)).toBe('staff')
+    expect(resolveLoginTab('/prep-plan-x', 'admin')).toBe('admin')
+    expect(resolveLoginTab('https://evil.example/admin', 'admin')).toBe('admin')
   })
 })
 

@@ -158,8 +158,10 @@ def test_fix_reject_is_visible_to_staff(env):
     """整改单被驳回同样要能认出来（事件按 ticket_id 关联）。"""
     _db, work, actor, _rejected_item, _clean_item, _deep = env
 
-    # 开整改单要求卫生管理员权限（普通员工只能回拍）
-    opener = {**actor, "permission": "管理员"}
+    # 开整改单要求「整改单」这一项管理权限（普通员工只能回拍）。
+    # 2026-10-05 起判据看的是**开关**（`caps`），`permission` 只是人话标签 ——
+    # 这里按迁移 `0015` 的回填规则给他这一项。
+    opener = {**actor, "permission": "管理员", "caps": ["fix"]}
     ticket = _run(
         work.open_fix(opener, actor["zone_id"], "卫生", "台面有油", timedelta(hours=2), _capture())
     )
@@ -176,7 +178,7 @@ def test_fix_reject_is_visible_to_staff(env):
 
 def test_a_ticket_that_was_never_rejected_is_not_flagged(env):
     _db, work, actor, _rejected_item, _clean_item, _deep = env
-    opener = {**actor, "permission": "管理员"}
+    opener = {**actor, "permission": "管理员", "caps": ["fix"]}
     ticket = _run(
         work.open_fix(opener, actor["zone_id"], "卫生", "台面有油", timedelta(hours=2), _capture())
     )

@@ -25,6 +25,32 @@ import {
 const BACKUP_PASSPHRASE_MIN_LENGTH = 6
 
 /**
+ * 从备份点里取回滚要用的快照时间戳。
+ *
+ * 后端 `list_snapshots()` 给的是 `detail.ts`（就是快照目录名，回滚接口的路径参数），
+ * 备份点 id 则是 `snapshot:<ts>`。两个都要认：调用方可能传整个备份点（有 detail），
+ * 也可能只传一个时间戳字符串。**取不到时返回空串而不是 undefined** —— 调用方据此
+ * 拒绝继续，而不是把 undefined 拼进确认文案里当成一份真实的快照名。
+ *
+ * 校验形状（`YYYYMMDD_HHMMSS`，与后端 `_SNAPSHOT_TS_RE` 同一口径）：拼进 URL 前先挡住
+ * 明显不是时间戳的值比事后吃 404 强，也让"取到了个东西"和"取到了正确的快照"区分开。
+ */
+const SNAPSHOT_TS_RE = /^\d{8}_\d{6}$/
+
+export function resolveSnapshotTs(point) {
+  const candidates = [
+    point?.detail?.ts,
+    point?.ts,
+    String(point?.id || '').replace(/^snapshot:/, ''),
+  ]
+  for (const candidate of candidates) {
+    const ts = String(candidate ?? '').trim()
+    if (SNAPSHOT_TS_RE.test(ts)) return ts
+  }
+  return ''
+}
+
+/**
  * Setup page — 备份中心：备份健康 / 备份点列表 / 导出备份 / 恢复 / 保留与清理。
  *
  * 恢复动作一律走本 composable 内的两步确认（不使用浏览器原生 confirm）：
@@ -794,7 +820,17 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     const point = typeof tsOrPoint === 'string'
       ? snapshots.value.find((s) => s.ts === tsOrPoint) || { ts: tsOrPoint }
       : (tsOrPoint || {})
-    const ts = point.ts
+    // 快照标识有两个来源：`detail.ts`（后端 list_snapshots 给的时间戳，也是回滚接口的
+    // 路径参数）与 `id`（`snapshot:<ts>`）。**必须在这里取，不能在调用方取**：调用方
+    // 传字符串时上面那条分支会现造一个只有 ts 的对象，而列表给的对象里 ts 的真身在
+    // detail 里。以前直接读 `point.ts`，两者对不上时就变成 `undefined`，确认框于是
+    // 渲染成「替换为本机回滚快照 undefined 的内容」——最危险的一个操作，用户看不到
+    // 自己要覆盖成哪一份快照。取不到就根本不该让这次回滚继续（见下）。
+    const ts = resolveSnapshotTs(point)
+    if (!ts) {
+      showAlert('error', '无法确定这份快照的标识，已阻止回滚。请刷新备份点列表后重试。')
+      return
+    }
     const contents = Array.isArray(point.contents_labels) ? point.contents_labels : []
     const contentCodes = Array.isArray(point.contents) ? point.contents : []
     const hasStandard = contentCodes.includes(CONTENT_STANDARD_PHOTOS)

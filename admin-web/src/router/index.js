@@ -48,8 +48,11 @@ function workbenchHrPage(path, name, loader) {
  *  导航），页面本体还在子记录里。
  *
  *  `staffProbe: false` 三页一致：页面自己那一次请求本来就分得清 401 与断网，不必先陪
- *  守卫白等一次探针超时（弱网下最多 4 秒，而这是员工手机上每次导航都要付的）。票 04 时
- *  只有两页带它 —— 同前缀两套行为正是 navigation-audit 条目 7 记的问题，这次收齐。
+ *  守卫白等一次员工会话探针超时（弱网下最多 4 秒，而这是员工手机上每次导航都要付的）。
+ *  **它只免掉员工会话那一次探针**：守卫仍会用管理端会话判一次身份 —— 管理端 cookie
+ *  在这类页上只会被员工接口 401，不先拦下来就会落成员工登录页（见守卫里那段注释）。
+ *  票 04 时只有两页带它 —— 同前缀两套行为正是 navigation-audit 条目 7 记的问题，
+ *  这次收齐。
  *  `realtime: true`：店长改了排班 / 派了活，页面上的格子与待办要跟着变。 */
 function workbenchStaffPage(path, name, loader) {
   return {
@@ -112,6 +115,9 @@ const routes = [
   hygieneAdminPage('/workbench/floor/fix', 'workbench-floor-fix', () => import('../views/hygiene/HygieneFixView.vue')),
   hygieneAdminPage('/workbench/floor/boards', 'workbench-floor-boards', () => import('../views/hygiene/HygieneBoardsView.vue')),
   hygieneAdminPage('/workbench/floor/data', 'workbench-floor-data', () => import('../views/hygiene/HygieneDataView.vue')),
+  // 卫生趋势（2026-10-05 用户裁定）：现场组的第八页。前面七页全是「当下」，数据页是
+  // 台账与导出 —— 这一页回答「这周比上周好还是差」。
+  hygieneAdminPage('/workbench/floor/trend', 'workbench-floor-trend', () => import('../views/hygiene/HygieneTrendView.vue')),
   // ── 工作台 · 后勤（配方票 07；备货计划票 08）────────────────────────────────
   // 配方从独立域 `/recipe*` 搬进「后勤」组，同时**阅读面从免登录改成要登录**
   // （ADR 0092 里那个推翻既有刻意设计的动作）。扫码看岗位配方的路子保留：扫码 →
@@ -201,14 +207,25 @@ router.beforeEach(async (to) => {
 
   // 员工页（`/workbench/me/*`）：只认员工会话。
   if (audience === 'staff') {
-    // 页面自己会拉数据的（`staffProbe: false`）跳过探针：那一次请求本来就分得清
+    // **管理端会话先判**，而且要判在 `staffProbe` 短路之前：这类页拿管理端 cookie 去
+    // 请求员工接口必然 401，页面自己那条 401 兜底会把人送去 `/login?next=<员工页>`
+    // —— 落成**员工登录页**，与 `forbiddenRedirect` 的口径打架（D3：管理端打开
+    // `/workbench/me/today` 看到的是手机号表单，页面上还一个出口都没有）。
+    // 有会话但身份不匹配是 forbidden 那一档，不是 login 那一档，所以这一条不能参与
+    // 「跳过探针」——跳过的只是**员工会话**探针（让员工在弱网下少等一次超时），
+    // 不是「这页该不该给这个身份看」的判定。
+    if (await isLoggedIn()) {
+      // 两套 cookie 都在时仍按员工身份放行：同浏览器双会话是店里那台共用电脑的常态，
+      // 员工会话本人就是这把钥匙（票 04 的「只降不升」把显示交给切换器，不管授权）。
+      if ((await staffSessionState()) !== 'unauthenticated') return true
+      return forbiddenRedirect(to)
+    }
+    // 页面自己会拉数据的（`staffProbe: false`）跳过员工会话探针：那一次请求本来就分得清
     // 401 与断网，探针只是让员工在白屏前多等一次超时。
     if (to.meta.staffProbe === false) return true
     // 网络不明（断网 / 后端刚重启 / 超时）时放行到页面：那里会显示"网络不好，
     // 正在重试"并退避重试。把这种情况也判成未登录，弱网下就会把员工反复甩到登录页。
     if ((await staffSessionState()) !== 'unauthenticated') return true
-    // 有管理端会话但这一页是员工的：说清这页是谁的，不静默改道。
-    if (await isLoggedIn()) return forbiddenRedirect(to)
     return loginRedirect(to)
   }
 

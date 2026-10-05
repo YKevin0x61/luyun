@@ -5,6 +5,7 @@ import { resolveTablePlugin } from '../../admin/tablePlugins'
 import { useAdminTable } from '../../composables/useAdminTable'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { getCellLabel, getColumnLabel, getTableIcon, getTableLabel } from '../../utils/adminLabels'
+import { describeRow } from '../../utils/adminRowSummary'
 import SvgIcon from '../SvgIcon.vue'
 import RowEditModal from './RowEditModal.vue'
 import ColumnManageModal from './ColumnManageModal.vue'
@@ -56,6 +57,25 @@ const confirmDeleteRow = ref(null)
 const showBatchDeleteConfirm = ref(false)
 const showBatchEditModal = ref(false)
 const selectedRowIds = ref(new Set())
+
+// 删除确认必须能核对"删的是哪一条"：以前只写 rowid（数据库主键），既不是人认得出的
+// 标识，又完全没说不可撤销。（见 utils/adminRowSummary.js 里为什么按列挑要点。）
+const deleteRowMessage = computed(() => {
+  const row = confirmDeleteRow.value
+  if (!row) return ''
+  const summary = describeRow(row)
+  const target = summary ? `这条记录（${summary}）` : '这条记录'
+  return `确认删除${target}？删除后无法撤销，也无法恢复。`
+})
+
+// 当前排序列的说明。两种情况下表头上看不到排序状态：默认排序用的是业务时间列
+// （`order_time` 等内部列不进表头），或者表宽到表头被滚出视野——那时"这张表是按什么
+// 排的"就完全不可见了。这条常驻说明补上那个缺口。
+const sortLabel = computed(() => {
+  if (!sortField.value) return ''
+  return getColumnLabel(currentTable.value, sortField.value)
+})
+const sortDirectionLabel = computed(() => (sortDir.value === 'asc' ? '升序' : '降序'))
 
 const selectedCount = computed(() => selectedRowIds.value.size)
 const allPageSelected = computed(() =>
@@ -246,6 +266,13 @@ function jumpToPage() {
   pageJumpInput.value = ''
 }
 
+// 窄屏下表格变成卡片（列名从 CSS 的 ::before 出来），行与行的分界也随之消失，
+// 读屏只念一串没有归属的值。给每一行一句可读的名字，让卡片和读屏都知道"这是哪一条"。
+function rowLabel(row) {
+  const summary = describeRow(row, { max: 2 })
+  return summary ? `第 ${rowKey(row)} 行：${summary}` : `第 ${rowKey(row)} 行`
+}
+
 function formatCellText(col, val) {
   if (val === null || val === undefined || val === '') return ''
   if (typeof val === 'object') return JSON.stringify(val)
@@ -299,6 +326,13 @@ function formatCellText(col, val) {
         <button class="btn" @click="doSearch"><SvgIcon name="search" :size="13" /> 搜索</button>
         <button class="btn btn-sm" @click="clearSearch" :disabled="!searchField && !searchValue">清除</button>
         <button
+          v-if="sortLabel"
+          type="button"
+          class="dt-sort-state"
+          :title="`当前排序：${sortLabel} ${sortDirectionLabel}（原字段 ${sortField}）。点一下切换升降序。`"
+          @click="sortBy(sortField)"
+        >排序：{{ sortLabel }} {{ sortDir === 'asc' ? '▲' : '▼' }}</button>
+        <button
           v-if="rows.length && !loading && !tableReadOnly"
           class="btn btn-sm"
           @click="toggleSelectAllPage"
@@ -336,18 +370,27 @@ function formatCellText(col, val) {
         <table class="data-table">
           <thead>
             <tr>
-              <th style="width:60px">序号</th>
+              <th class="dt-col-key">序号</th>
               <th
                 v-for="col in columns"
                 :key="col"
-                :title="col"
+                class="dt-col-sortable"
+                :class="{ 'is-sorted': sortField === col }"
+                :title="`按「${getColumnLabel(currentTable, col)}」排序（原字段 ${col}）`"
                 :aria-sort="sortField !== col ? 'none' : (sortDir === 'asc' ? 'ascending' : 'descending')"
                 @click="sortBy(col)"
               >
                 {{ getColumnLabel(currentTable, col) }}
-                <span v-if="sortField === col">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+                <!-- 常显的排序箭头：只在当前排序列上画 ▲▼ 时，另外 26 个头看起来
+                     和纯文本表头一模一样——这一页此前就被判定为"没有任何排序入口"。
+                     未排序列给一个低对比度的双箭头，鼠标悬停时才提亮。 -->
+                <span
+                  class="dt-sort-mark"
+                  :class="{ 'is-active': sortField === col }"
+                  aria-hidden="true"
+                >{{ sortField === col ? (sortDir === 'asc' ? '▲' : '▼') : '⇅' }}</span>
               </th>
-              <th v-if="!tableReadOnly">操作</th>
+              <th v-if="!tableReadOnly" class="dt-col-actions">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -358,15 +401,22 @@ function formatCellText(col, val) {
                 'dt-row-clickable': !tableReadOnly,
                 'dt-row-selected': selectedRowIds.has(rowKey(row)),
               }"
+              :aria-label="rowLabel(row)"
               @click="tableReadOnly ? undefined : toggleRowSelection(rowKey(row))"
             >
-              <td style="color:var(--text-dim)">{{ rowKey(row) }}</td>
-              <td v-for="col in columns" :key="col" :title="formatCellText(col, row[col])">
+              <td class="dt-col-key" style="color:var(--text-dim)">{{ rowKey(row) }}</td>
+              <!-- data-col 是窄屏卡片布局的字段名来源（见样式里的 ::before）。 -->
+              <td
+                v-for="col in columns"
+                :key="col"
+                :data-col="getColumnLabel(currentTable, col)"
+                :title="formatCellText(col, row[col])"
+              >
                 <span v-if="row[col] === null || row[col] === undefined" style="color:var(--text-dim)">NULL</span>
                 <span v-else-if="row[col] === ''" style="color:var(--text-dim)">—</span>
                 <template v-else>{{ formatCellText(col, row[col]) }}</template>
               </td>
-              <td v-if="!tableReadOnly" class="actions" @click.stop>
+              <td v-if="!tableReadOnly" class="actions dt-col-actions" @click.stop>
                 <button class="btn btn-sm" @click="openEdit(row)"><SvgIcon name="pencil" :size="12" /> 编辑</button>
                 <button class="btn btn-sm btn-danger" @click="handleDelete(row)"><SvgIcon name="trash-2" :size="12" /> 删除</button>
               </td>
@@ -430,8 +480,8 @@ function formatCellText(col, val) {
     <ConfirmDialog
       v-if="showBatchDeleteConfirm"
       title="批量删除确认"
-      :message="`确认删除已选的 ${selectedCount} 条记录？此操作不可撤销。`"
-      confirm-label="批量删除"
+      :message="`确认删除已选的 ${selectedCount} 条记录？删除后无法撤销，也无法恢复。`"
+      confirm-label="确认批量删除"
       danger
       @confirm="confirmBatchDelete"
       @cancel="showBatchDeleteConfirm = false"
@@ -440,8 +490,8 @@ function formatCellText(col, val) {
     <ConfirmDialog
       v-if="confirmDeleteRow"
       title="删除确认"
-      :message="`确认删除该行（rowid=${rowKey(confirmDeleteRow)}）？`"
-      confirm-label="删除"
+      :message="deleteRowMessage"
+      confirm-label="确认删除"
       danger
       @confirm="confirmDelete"
       @cancel="confirmDeleteRow = null"
@@ -580,5 +630,125 @@ function formatCellText(col, val) {
     opacity: 1;
     pointer-events: auto;
   }
+}
+
+/* ===== A3：27 列的表在 1440 下也要横滚才能碰到「操作」列（容器 1206px / 内容 2595px），
+   390 下更要滚 2227px，滚过去以后行标识（流水号 / 菜品名）又全在屏幕外 —— 想删一行
+   得先记住序号、滚到底、按序号猜是哪一行。两处一起收：
+   - 桌面 / 平板：序号列钉在左边、操作列钉在右边，中间那些列怎么滚，行标识与操作
+     始终在视野里；
+   - 窄屏（≤700px）：连"横向滚动"这个交互本身都不成立（一屏只够看一两列），改成
+     一行一张卡片、字段名在值前面，编辑 / 删除落在每张卡底部。 */
+@media (min-width: 701px) {
+  /* sticky 的 th/td 需要不透明底色，否则横向滚动时下面的列会从它底下透出来。
+     th 的底色跟 theme.css 的 var(--card2) 对齐，td 用卡片底色。 */
+  :deep(table.data-table) .dt-col-key,
+  :deep(table.data-table) .dt-col-actions {
+    position: sticky;
+    background: var(--card);
+    z-index: 2;
+  }
+  :deep(table.data-table) thead .dt-col-key,
+  :deep(table.data-table) thead .dt-col-actions {
+    background: var(--card2);
+    /* 表头本身也是 sticky 的（theme.css），钉住的列要在它之上才能盖住滚过来的列 */
+    z-index: 3;
+  }
+  /* 宽度原来写在模板的 inline style 上，挪到这里是因为钉住的列必须能算准偏移 */
+  :deep(table.data-table) .dt-col-key { left: 0; width: 60px; }
+  :deep(table.data-table) .dt-col-actions {
+    right: 0;
+    /* 操作列本身是 flex（theme.css 的 td.actions），sticky 后仍要排一行 */
+    display: flex;
+    gap: 6px;
+  }
+  /* 钉住的列不许折行：折行会让行高在滚动时跳动 */
+  :deep(table.data-table) .dt-col-key,
+  :deep(table.data-table) .dt-col-actions { white-space: nowrap; }
+  /* 钉住的一侧加一道阴影，表达"这一列浮在内容之上"，而不是内容到此为止 */
+  :deep(table.data-table) .dt-col-key { box-shadow: 6px 0 8px -6px rgba(0, 0, 0, 0.55); }
+  :deep(table.data-table) .dt-col-actions { box-shadow: -6px 0 8px -6px rgba(0, 0, 0, 0.55); }
+}
+
+/* 工具栏里的排序状态：表头滚出视野、或默认排序用的列不在表头里时，
+   "这张表按什么排的"必须还有地方说。 */
+.dt-sort-state {
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card2);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: inherit;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.dt-sort-state:hover { color: var(--text); border-color: var(--accent); }
+
+/* 排序箭头：未排序列也给一个低对比度的 ⇅，让"这个表头可以点"这件事看得出来。
+   此前只有当前排序列画 ▲▼，其余 26 个头与纯文本表头毫无区别。 */
+:deep(table.data-table) th.dt-col-sortable .dt-sort-mark {
+  margin-left: 4px;
+  font-size: 9px;
+  opacity: 0.45;
+}
+:deep(table.data-table) th.dt-col-sortable:hover .dt-sort-mark { opacity: 0.85; }
+:deep(table.data-table) th.dt-col-sortable.is-sorted .dt-sort-mark {
+  opacity: 1;
+  color: var(--accent);
+}
+
+/* 窄屏卡片：一行一张卡 —— 列名走 data-col，值排在后面。
+   这里一律用 `:deep(table.data-table ...)` 写法，是为了让每条规则的优先级都是
+   (0, 4, 1) 同级、靠源码顺序生效：theme.css 里 `table.data-table td.actions { display:flex }`
+   这类规则若是同级就会跟下来打架，而 `td.dt-col-actions` 单独写又只有 (0,3,1)、
+   压不住桌面那段 `display: flex`。 */
+@media (max-width: 700px) {
+  :deep(table.data-table) { display: block; }
+  :deep(table.data-table thead) { display: none; }
+  :deep(table.data-table tbody) { display: block; }
+  :deep(table.data-table tr) {
+    display: block;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  :deep(table.data-table tr:last-child) { border-bottom: none; }
+  /* 序号做卡片标题：它是核对时唯一能对上表格的值，也是行标识。 */
+  :deep(table.data-table td.dt-col-key) {
+    display: block;
+    padding: 0 0 6px;
+    border-bottom: 1px dashed var(--border);
+    margin-bottom: 6px;
+    font-weight: 700;
+  }
+  :deep(table.data-table td.dt-col-key)::before {
+    content: '序号 ';
+    font-weight: 400;
+  }
+  :deep(table.data-table td) {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 2px 0;
+    border-bottom: none;
+    /* 桌面档用 nowrap 让长值撑开横向滚动；卡片里必须允许折行 */
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  :deep(table.data-table td[data-col])::before {
+    content: attr(data-col);
+    flex: 0 0 74px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  /* 操作列单独一行放底部，宽度占满，符合手指点击的落点习惯。 */
+  :deep(table.data-table td.dt-col-actions) {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
+  }
+  :deep(table.data-table td.dt-col-actions .btn) { flex: 1 1 0; justify-content: center; }
 }
 </style>

@@ -30,13 +30,13 @@ describe('工作台身份 → 清单身份', () => {
   })
 })
 
-describe('工作台的组（票 05：人事 / 现场；票 06 加上首页；票 07 加上后勤）', () => {
-  it('五组：今天、人事、现场、后勤、我的（顺序就是顶栏里的顺序）', () => {
+describe('工作台的组（票 05：人事 / 现场；票 06 加上首页；票 07 加上后勤；2026-10-05 加上员工卫生）', () => {
+  it('六组：今天、人事、现场、卫生、后勤、我的（顺序就是顶栏里的顺序）', () => {
     expect(WORKBENCH_NAV_GROUPS.map((group) => group.key)).toEqual([
-      'home', 'hr', 'floor', 'kitchen', 'me',
+      'home', 'hr', 'floor', 'hygiene', 'kitchen', 'me',
     ])
     expect(WORKBENCH_NAV_GROUPS.map((group) => group.label)).toEqual([
-      '今天', '人事', '现场', '后勤', '我的',
+      '今天', '人事', '现场', '卫生', '后勤', '我的',
     ])
     // 第一格是子应用根（首页），不是某一组的专页。
     expect(WORKBENCH_NAV_GROUPS[0].to).toBe('/workbench')
@@ -70,7 +70,7 @@ describe('工作台的组（票 05：人事 / 现场；票 06 加上首页；票
       .toBe('/workbench/kitchen/recipe')
   })
 
-  it('组里的页从清单派生（人事四页、现场七页，顺序照清单）', () => {
+  it('组里的页从清单派生（人事四页、现场八页，顺序照清单）', () => {
     expect(workbenchPagesOf('hr').map((page) => page.path)).toEqual([
       '/workbench/hr/calendar',
       '/workbench/hr/inbox',
@@ -85,6 +85,8 @@ describe('工作台的组（票 05：人事 / 现场；票 06 加上首页；票
       '/workbench/floor/fix',
       '/workbench/floor/boards',
       '/workbench/floor/data',
+      // 卫生趋势（2026-10-05 用户裁定）：现场组的第八页，排在同组最后。
+      '/workbench/floor/trend',
     ])
     // 标题也从清单来：外壳的导航与页签不另抄一份名字。
     expect(workbenchPagesOf('hr').map((page) => page.title)).toEqual([
@@ -94,9 +96,9 @@ describe('工作台的组（票 05：人事 / 现场；票 06 加上首页；票
     expect(workbenchPagesOf('nope')).toEqual([])
   })
 
-  it('十一页正好落在人事 / 现场两组里，平铺那批地址一条都不在清单里', () => {
+  it('十二页正好落在人事 / 现场两组里，平铺那批地址一条都不在清单里', () => {
     const grouped = PAGE_ROUTES.filter((row) => row.group === 'hr' || row.group === 'floor')
-    expect(grouped).toHaveLength(11)
+    expect(grouped).toHaveLength(12)
     // 留一半最坏：「点得进去、刷新 404」。
     for (const old of [
       '/workbench/inbox', '/workbench/shifts', '/workbench/roster', '/workbench/zones',
@@ -178,7 +180,9 @@ describe('按身份过滤导航', () => {
       ...new Set(workbenchNavFor(identity).map((item) => item.key)),
     ]
     expect(keysOf('super')).toEqual(['home', 'hr', 'floor', 'kitchen'])
-    expect(keysOf('staff')).toEqual(['home', 'kitchen', 'me'])
+    // 员工那一档多了「卫生」（2026-10-05 裁定的重构：他们每天要做的活给一个一级入口），
+    // 而店长的「人事 / 现场」两格对他不可见 —— 卫生那一格反过来只对员工可见。
+    expect(keysOf('staff')).toEqual(['home', 'hygiene', 'kitchen', 'me'])
     // 首页那一页是 `both`（票 06）：两档都进得去，过滤天然放行。
     expect(pageMeta('/workbench').audience).toBe('both')
     expect(pageMeta(WORKBENCH_HR_HOME).audience).toBe('admin')
@@ -193,7 +197,9 @@ describe('按身份过滤导航', () => {
 describe('高亮跟着新分组走', () => {
   it('整组下的任意一页都算在那一格上', () => {
     expect(workbenchGroupOf('/workbench/me/month')).toBe('me')
-    expect(workbenchGroupOf('/workbench/me/clean')).toBe('me')
+    // 卫生那一页 2026-10-05 从「我的」组挪进了自己的「卫生」组（它有了一级入口，
+    // 再挂在「我的」组上会让两格同时亮）。
+    expect(workbenchGroupOf('/workbench/me/clean')).toBe('hygiene')
     expect(workbenchGroupOf('/workbench/hr/calendar')).toBe('hr')
     expect(workbenchGroupOf('/workbench/hr/roster')).toBe('hr')
     expect(workbenchGroupOf('/workbench/floor/daily')).toBe('floor')

@@ -8,7 +8,9 @@ const props = defineProps({
 const stationsStore = useStationsStore()
 
 // 前三名金/银/铜牌配色，对齐老页 public/index.html 的 rankCls（.hot-rank.gold/.silver/.bronze），第4名起保持普通序号色。
-const RANK_COLORS = ['#fbbf24', '#9ca3af', '#b45309']
+// 铜牌走 `--rank-bronze`（theme.css）而不是字面量：旧的 #b45309 压在卡片底 #1a2035 上
+// 只有 3.21:1，低于 AA —— 换成同色系的 #d97706（5.06:1）后仍是铜色、与金银同一档亮度。
+const RANK_COLORS = ['#fbbf24', '#9ca3af', 'var(--rank-bronze)']
 function rankColor(idx) {
   return RANK_COLORS[idx] || 'var(--text-dim)'
 }

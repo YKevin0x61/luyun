@@ -2,7 +2,6 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
-import StaffExitButton from '../../components/staff/StaffExitButton.vue'
 import SvgIcon from '../../components/SvgIcon.vue'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneImageLightbox from '../../components/hygiene/HygieneImageLightbox.vue'
@@ -15,16 +14,12 @@ import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import { FALLBACK_GRACE_MS } from '../../composables/useConnectionFallback'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
+import { hasCap, normalizeCaps } from '../../utils/adminCaps'
 import {
-  HYGIENE_BRAND_MARK,
-  HYGIENE_BRAND_TAGLINE,
-  HYGIENE_BRAND_TITLE,
   HYGIENE_FIX_TYPES,
-  HYGIENE_STAFF_TABS,
   canAcceptFixTicket,
   hasLiveCamera,
   hygieneDocumentTitle,
-  hygienePermissionLabel,
   hygieneShiftLabel,
 } from '../../utils/hygieneCopy'
 import {
@@ -49,11 +44,13 @@ import {
   fixPrimaryAction,
   formatStamp,
   groupByZone,
+  isPendingReview,
   nextDeepShootRow,
   nextFixWorkRow,
   nextShootRow,
   openRows,
   passedRows,
+  queueActionLabel,
   queueGroups,
   shiftClock,
   statusTone,
@@ -66,29 +63,32 @@ useScopedStylesheet('/hygiene-admin.css')
 const router = useRouter()
 const imageUploads = useImageUploadQueueStore()
 const standardPhotoCache = useStandardPhotoCacheStore()
-const tab = ref('inbox')
+// **没有页内 tab 了**（2026-10-05 用户裁定）：原来待办 / 专项 / 整改 / 榜 / 我 五格平级，
+// 把"任务""信息""设置"三种性质混在一条 tab 条上，员工看不出哪一格才是今天要干的活。
+// 现在这一页**依次渲染**：日常 → 专项 → 整改（三组都是任务，组标题各自带条数），
+// 「榜」降级成页尾一行信息入口（`boardsOpen`），「我」整块搬到「今天」页（账号设置不属于
+// 干活的那一屏）。下面的分节名与那道入口都跟着这套结构走。
 const employee = ref(null)
 const errorText = ref('')
 // 票 10：员工不再自己选班次和区（`selectedShift` / `selectedZoneId` / `assignableZones`
 // 那一套状态跟着选择器一起撤了）。今天在哪由排班决定，`employee.shift` / `employee.zone_id`
 // 就是从排班结果读来的那两个值。
-const profileEditing = ref(false)
-const profileName = ref('')
-const profilePhone = ref('')
-const profileSaving = ref(false)
-const profileError = ref('')
-const profileFlash = ref('')
-const profilePhoneConfirmOpen = ref(false)
-const passwordEditing = ref(false)
-const currentPassword = ref('')
-const newPassword = ref('')
-const confirmPassword = ref('')
-const passwordSaving = ref(false)
-const passwordError = ref('')
-const passwordFlash = ref('')
+/** 「榜」那一屏：从平级 tab 降级成页尾一行"信息入口"，点开**在本页展开**（不是跳去另一个
+ *  面板）。选它是因为改动最小、也最不容易出错 —— 红黑榜与卫生教材本来就渲染在这一页里，
+ *  展开只是把 `v-if` 换成这一位；跳转则要新开一条路由 / 一个页面，还得再搬一次登录与
+ *  实时那套（这一屏的数据是员工 cookie 读的，落到店长那侧的 `/workbench/floor/boards`
+ *  只会吃 403）。默认收起：它是"信息"，不是今天要干的活。 */
+const boardsOpen = ref(false)
 const lightboxOpen = ref(false)
 const lightbox = ref({ src: '', alt: '', markup: [], watermark: null })
 const inbox = ref([])
+/** 「待我验收」（只有开了「日常验收」这一项的人会填）：全店今天的待验收、不含自己交的。
+ *  它的验收权本来就是全店的，但这条入口以前**不存在** —— 默认队列（`inbox`）被锁在
+ *  「本区 + 本班次」，今天别的区有人交了，他一条也看不到，权力等于没有入口
+ *  （2026-10-05 用户确认：员工账号的管理员同样有验收权）。
+ *  2026-10-05 同日改判据：这一档问的是**「日常验收」那一项开关**，不是「是不是管理员」
+ *  —— 只开了整改单的人不该在这里看到日常的待验收活。 */
+const reviewInbox = ref([])
 const deepInbox = ref([])
 const deepStatus = ref('')
 const fixInbox = ref([])
@@ -159,7 +159,22 @@ const shiftDue = computed(() => shiftClock(
 ))
 const deepDue = computed(() => (deepClock.value && deepClock.value.hhmm) || '')
 
-const isManager = computed(() => employee.value && employee.value.permission === '管理员')
+// ── 管理权限的判据（2026-10-05 用户裁定：由档位换成逐项开关）──────────────────────────
+//
+// 以前是 `employee.permission === '管理员'` 一个字符串判到底：勾上「管理员」就同时拿到
+// 验收、开单、待我验收三件事，表达不出"只该判日常、不该开整改单"。现在服务端发下来的是
+// `employee.admin_caps`（十项开关的数组），**每一件事按自己那一项判**：
+// 日常验收 → daily_review，专项验收 → deep_review，整改单 → fix，待我验收 → daily_review。
+//
+// 判据只在这一处算成 computed，页面里不再散落任何 `permission === '管理员'` 的比较
+// （`normalizeCaps` / `hasCap` 都在 `utils/adminCaps.js`，那里也写着为什么标签列还留着）。
+const caps = computed(() => normalizeCaps(employee.value && employee.value.admin_caps))
+/** 有没有**任意一项**管理权限。它不再是"是不是管理员"那个档位，只用来回答"这个人跟普通
+ *  员工有没有区别"这类粗细问题；具体一件事能不能做，一律看下面那几个开关。 */
+const isManager = computed(() => caps.value.length > 0)
+const canDailyReview = computed(() => hasCap(caps.value, 'daily_review'))
+const canDeepReview = computed(() => hasCap(caps.value, 'deep_review'))
+const canFix = computed(() => hasCap(caps.value, 'fix'))
 const liveOk = computed(() => hasLiveCamera())
 // 已入队、还没确认上传成功的任务（键与 buildWorkQueue 的 task.key 一致）：让待办
 // 立刻把这一项当"交过了"，避免员工在慢网下重拍。
@@ -178,15 +193,21 @@ function notifySubmitFailed(label) {
   errorText.value = `「${label}」上传失败，可在上传列表里重试`
 }
 
-// 待办页就是「日常」页：专项、整改各自有 tab 与角标，不再混进这一屏的队列。
-// 它们仍照常加载（loadDeepClean / loadFixTickets 喂各自的 tab），只是不参与这条队列。
+// 日常队列就是这一组：专项、整改各自成组，不再混进这条队列。
+// 它们仍照常加载（loadDeepClean / loadFixTickets 喂下面那两组），只是不参与这条队列。
+//
+// 文案要按**这一项自己的开关**重算一遍：`buildWorkQueue` 是按"一个档位"写的（只收一个
+// `isManager`），拿"有没有任意管理权限"去填，只开了整改单的人就会在日常那一行读到
+// 「验收」、点开却是个没有决定按钮的面板 —— 正是 2026-10-05 审查 F-04 那个分叉。
+// 判据仍是 `dailyAction` / `deepAction` / `fixAction`（与任务卡上的按钮同源），文案仍走
+// 队列自己的 `queueActionLabel` 查表，这里只是把"档位"换成"这一项"。
 const workQueue = computed(() => buildWorkQueue({
   inbox: inbox.value,
   shiftDue: shiftDue.value,
   now: nowTick.value,
   isManager: isManager.value,
   pendingKeys: pendingKeys.value,
-}))
+}).map((task) => ({ ...task, primaryLabel: queueLabelFor(task) })))
 const nextWork = computed(() => workQueue.value[0] || null)
 const restWorkGroups = computed(() => {
   const nextKey = nextWork.value && nextWork.value.key
@@ -197,13 +218,9 @@ const queueSummary = computed(() => ({
   soon: workQueue.value.filter((task) => task.bucket === 'soon').length,
   waiting: workQueue.value.filter((task) => task.bucket === 'waiting').length,
 }))
-const currentStaffTab = computed(() => (
-  HYGIENE_STAFF_TABS.find((item) => item.id === tab.value) || HYGIENE_STAFF_TABS[0]
-))
-
-watch(currentStaffTab, (item) => {
-  document.title = hygieneDocumentTitle(item.title)
-}, { immediate: true })
+// 那条五格 tab 条撤掉之后，文档标题不再跟着"当前是哪一格"走：这一页整体就叫「卫生」
+// （页面清单里 `/workbench/me/clean` 的 title 也是它），与外壳顶栏 / 底栏那一格同名。
+document.title = hygieneDocumentTitle('卫生')
 
 watch(sheet, async (value, previous) => {
   standardPhotoCache.setTaskSheetOpen(Boolean(value))
@@ -233,26 +250,34 @@ async function loadBoardsAndTeaching({ force = false } = {}) {
   }
 }
 
-watch(tab, async (id) => {
-  if (id === 'boards') {
-    errorText.value = ''
-    await loadBoardsAndTeaching({ force: true })
-  } else if (id === 'fix') {
-    await loadZones()
-  }
+// 「榜」从平级 tab 降成页尾那一行入口之后，"什么时候去拉榜和教材"也跟着换判据：
+// 原来是切到那一格（`watch(tab)`），现在是这一行被展开。收起时不拉 —— 服务端每次提交
+// 都会广播 boards，不在看就没必要跟着刷（实时那一支里的判据同步改成 `boardsOpen`）。
+watch(boardsOpen, async (open) => {
+  if (!open) return
+  errorText.value = ''
+  await loadBoardsAndTeaching({ force: true })
 })
 
 watch(needsAssignment, (needed) => {
   if (needed && !zonesLoaded.value) loadZones()
 }, { immediate: true })
 
-function tabCount(id) {
+/** 一组还有多少件没交。口径仍是 `tabWorkCount`（待办 = 未通过的日常、专项 = 未通过的专项、
+ *  整改 = 全部未闭环的整改单），页内三个组标题与顶部汇总那一行都用它 —— 三处各算一遍的话
+ *  迟早会和列表对不上。 */
+function groupCount(id) {
   return tabWorkCount(id, {
     inbox: inbox.value,
     deepInbox: deepInbox.value,
     fixInbox: fixInbox.value,
   })
 }
+const dailyCount = computed(() => groupCount('inbox'))
+const deepCount = computed(() => groupCount('deep'))
+const fixCount = computed(() => groupCount('fix'))
+// 顶部那一行汇总：今天要做几项 = 三组待办之和（日常 + 专项 + 整改）。
+const todoTotal = computed(() => dailyCount.value + deepCount.value + fixCount.value)
 const sheetTitle = computed(() => {
   if (!sheet.value) return ''
   if (sheet.value.kind === 'fix' && sheet.value.mode === 'form') return '开整改单'
@@ -357,12 +382,12 @@ useHygieneRealtime({
       if (resource === 'daily') await loadInbox()
       if (resource === 'deep') await loadDeepClean()
       if (resource === 'fix') await loadFixTickets()
-      // 别人的拍照/开单会广播 boards：只有正开着「榜」那一屏时才需要跟着拉。
-      // 切到该 tab 时本来就会强制拉一次（见 watch(tab)），所以这里不拉不会漏。
-      if (resource === 'boards' && tab.value === 'boards') {
+      // 别人的拍照/开单会广播 boards：只有页尾那一行入口**展开着**时才需要跟着拉。
+      // 展开那一刻本来就会强制拉一次（见 `watch(boardsOpen)`），所以这里不拉不会漏。
+      if (resource === 'boards' && boardsOpen.value) {
         await loadBoards({ force: true })
       }
-      if (resource === 'teaching' && tab.value === 'boards') {
+      if (resource === 'teaching' && boardsOpen.value) {
         await loadTeaching({ force: true })
       }
       // `zones` 这个 resource 承载两件事：工作区列表变更，以及**标准图换版 / 改标注**
@@ -520,8 +545,17 @@ async function loadMe() {
     return
   }
   const jobs = [loadDeepClean]
+  if (canDailyReview.value) {
+    // 复核是他的**职责**，不是"有班才顺手做的事"：不管今天有没有排他班、排没排区，
+    // 都要把待验收拉回来 —— 别人交了活，等的就是他这一眼。
+    // 判据是「日常验收」那一项开关（不是"是不是管理员"）：只开了整改单的人不拉这一档。
+    jobs.push(loadPendingReviews)
+  }
   if (employee.value && employee.value.shift && employee.value.zone_id) {
-    jobs.push(loadInbox, loadFixTickets)
+    // 三个组现在同屏依次渲染（不再是切到哪一格才拉哪一格的数据），所以进页面就得把
+    // 整改那一组要用的工作区名单一起拉上 —— 原来它是 `watch(tab)` 在切到「整改」时拉的，
+    // 那一步没有了；少了它，「开整改单」那张表单里的工作区下拉是空的。
+    jobs.push(loadInbox, loadFixTickets, loadZones)
   } else {
     inbox.value = []
     fixInbox.value = []
@@ -540,6 +574,15 @@ async function loadMe() {
 async function loadInbox() {
   const data = await staffRequest('/api/hygiene/staff/daily-work')
   inbox.value = data.items || []
+}
+
+/** 待我验收那一档，只有开了**「日常验收」**那一项的人才会去拉：范围与过滤都在服务层
+ *  （`list_daily_work(pending_review_only=True)`）：两个班次、全部区、只要「待验收」、
+ *  且不是他自己交的 —— 与验收接口的判据逐字对齐。调用点在 `loadMe`（那里同样按这一项判），
+ *  没有这一项的人一次请求都不会发。 */
+async function loadPendingReviews() {
+  const data = await staffRequest('/api/hygiene/staff/daily-work?review=1')
+  reviewInbox.value = data.items || []
 }
 
 async function loadDeepClean() {
@@ -587,126 +630,58 @@ function openTeaching(row) {
   sheet.value = { kind: 'teaching', mode: 'review', row }
 }
 
-/** 切到「待办」那一屏并滚到顶，让员工看清今天为什么没有日常可交。
+/** 滚到这一页顶上，让员工看清今天为什么没有日常可交。
  *
  *  票 10 之前它叫 `openAssignmentPicker`（打开「重选区域和班次」的选择器）。自选撤了之后
  *  同样的入口变成「去看那一屏的说明」，所以不再需要拉工作区名单那一步 —— 说明里的话
  *  只跟排班给的值有关。
+ *  五格合并之后没有"那一屏"可切了：日常就是第一组，`tab.value = 'inbox'` 那一步跟着
+ *  页内 tab 一起撤掉，剩下的只是滚到顶。
  */
 async function openDutyNotice() {
   if (!employee.value) return
-  tab.value = 'inbox'
   await nextTick()
   const main = document.getElementById('hygiene-work-main')
   if (main) main.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-function startProfileEdit() {
-  passwordEditing.value = false
-  profileEditing.value = true
-  profileError.value = ''
-  profileFlash.value = ''
-  profileName.value = (employee.value && employee.value.name) || ''
-  profilePhone.value = (employee.value && employee.value.phone) || ''
-}
-
-function cancelProfileEdit() {
-  profileEditing.value = false
-  profileError.value = ''
-}
-
-const PHONE_PATTERN = /^1[3-9]\d{9}$/
-
-/** 手机号是登录账号，改错一位 = 下次登不进来。改号必须先确认。 */
-function phoneChanged() {
-  const current = String((employee.value && employee.value.phone) || '')
-  return profilePhone.value.trim() !== current
-}
-
-async function saveProfile() {
-  if (profileSaving.value || !employee.value) return
-  const nextPhone = profilePhone.value.trim()
-  if (!PHONE_PATTERN.test(nextPhone)) {
-    profileError.value = '手机号格式不对，应该是 11 位、以 1 开头的号码。'
-    return
-  }
-  // 姓名随便改，手机号不行：它是登录账号，且 30 天内只能靠管理员救回来。
-  if (phoneChanged() && !profilePhoneConfirmOpen.value) {
-    profilePhoneConfirmOpen.value = true
-    return
-  }
-  profilePhoneConfirmOpen.value = false
-  profileSaving.value = true
-  profileError.value = ''
-  profileFlash.value = ''
-  try {
-    const data = await staffRequest('/api/hygiene/staff/me', {
-      method: 'PATCH',
-      body: {
-        name: profileName.value.trim(),
-        phone: nextPhone,
-      },
-    })
-    employee.value = { ...employee.value, ...(data.employee || {}) }
-    profileEditing.value = false
-    profileFlash.value = '个人信息已保存，手机号下次登录生效。'
-  } catch (err) {
-    profileError.value = err.message || '保存个人信息失败'
-  } finally {
-    profileSaving.value = false
-  }
-}
-
-function startPasswordEdit() {
-  profileEditing.value = false
-  passwordEditing.value = true
-  passwordError.value = ''
-  passwordFlash.value = ''
-  currentPassword.value = ''
-  newPassword.value = ''
-  confirmPassword.value = ''
-}
-
-function cancelPasswordEdit() {
-  passwordEditing.value = false
-  passwordError.value = ''
-  currentPassword.value = ''
-  newPassword.value = ''
-  confirmPassword.value = ''
-}
-
-async function savePassword() {
-  if (passwordSaving.value) return
-  passwordError.value = ''
-  passwordFlash.value = ''
-  if (newPassword.value !== confirmPassword.value) {
-    passwordError.value = '两次输入的新密码不一致'
-    return
-  }
-  passwordSaving.value = true
-  try {
-    await staffRequest('/api/hygiene/staff/password', {
-      method: 'PATCH',
-      body: {
-        current_password: currentPassword.value,
-        new_password: newPassword.value,
-        confirm_password: confirmPassword.value,
-      },
-    })
-    passwordEditing.value = false
-    currentPassword.value = ''
-    newPassword.value = ''
-    confirmPassword.value = ''
-    passwordFlash.value = '密码已修改，其他设备上的登录已失效。'
-  } catch (err) {
-    passwordError.value = err.message || '修改密码失败'
-  } finally {
-    passwordSaving.value = false
-  }
-}
+// 「我」那一格（修改个人信息 / 修改密码 / 重新选择区域和班次，连同各自的弹窗与表单状态）
+// 整块搬到了「今天」页（`views/today/TodayView.vue` 尾部那三行入口）：
+// 账号设置不是"今天要干的卫生活"，混在干活的那一屏里只会把待办推到下面。这一页现在
+// 只剩卫生本身 —— 它读的还是同一个员工会话（`/api/hygiene/staff/me`），搬的只是界面。
 
 // 退出登录（含「队列里还有照片」那次确认）已抽到 `composables/useStaffLogout.js`，
-// 由顶栏那颗共用的 `StaffExitButton` 承载 —— 三张员工页一处实现（票 10）。
+// 由工作台外壳顶栏那颗 `WorkbenchExitButton` 承载 —— 员工三页一处实现、一颗按钮（D5：
+// 这一页原先页内又挂了一颗 `StaffExitButton`，与外壳那颗同名同功能）。
+
+/** 行点击 / 行内按钮 / 队列文案共用**同一个**判据（`hygieneWorkFlow` 那三个 `*PrimaryAction`）。
+ *  判据在页面这一侧只经手这里，模板里不再各写一遍 —— 之前正是两处各判一次，普通员工才会
+ *  点到一个没有决定按钮的空壳验收面板（2026-10-05 审查 F-04）。
+ *
+ *  2026-10-05 起每一项喂的是**它自己那一项开关**：日常验收 → `daily_review`、专项验收 →
+ *  `deep_review`、整改单 → `fix`。`hygieneWorkFlow` 那个参数名还叫 `isManager`（那份文件
+ *  没动）：它问的其实是"这一项这个人能不能判"，现在由各个开关回答。
+ *  日常与专项分开判是必须的 —— 只开了 `deep_review` 的人，日常那一行就该是「查看」。 */
+function dailyAction(row) {
+  return dailyPrimaryAction(row, { isManager: canDailyReview.value })
+}
+
+function deepAction(row) {
+  return deepPrimaryAction(row, { isManager: canDeepReview.value })
+}
+
+function fixAction(row) {
+  return fixPrimaryAction(row, { isManager: canFix.value })
+}
+
+/** 队列里那条任务的按钮文案：按 kind 分派到上面同一个判据，再查队列那份文案表。
+ *  （`buildWorkQueue` 只收一个布尔，算不出三种人各不相同的文案，见 `workQueue` 的注释。） */
+function queueLabelFor(task) {
+  if (!task) return ''
+  if (task.kind === 'daily') return queueActionLabel('daily', dailyAction(task.row))
+  if (task.kind === 'deep') return queueActionLabel('deep', deepAction(task.row))
+  return queueActionLabel('fix', fixAction(task.row))
+}
 
 function canShootDeep(row) {
   return Boolean(employee.value && row.status !== '已通过')
@@ -716,11 +691,16 @@ function isDeepSheet() {
   return Boolean(sheet.value && sheet.value.kind === 'deep')
 }
 
-function canDecide(review) {
-  if (!isManager.value || !review || !employee.value) return false
+/** 对照面板能不能出现「通过 / 驳回」。`cap` 是**这一项**的开关键：日常那一屏传
+ *  `daily_review`、专项传 `deep_review` —— 同一个面板，两件事各判各的。
+ *  另外自己交的那份不能自己验（与服务端 `_require_reviewer` 同口径）。 */
+function canDecide(review, cap) {
+  if (!hasCap(caps.value, cap) || !review || !employee.value) return false
   return employee.value.id !== review.submitter_id
 }
 
+/** 整改单能不能判：判据在 `canAcceptFixTicket` 里，它收的同样是「整改单」那一项开关
+ *  （外加两条例外：自己开的单子自己收、超级管理员开的单子他向来自收）。 */
 function canDecideFix(ticket) {
   if (!ticket || !employee.value) return false
   return canAcceptFixTicket(employee.value, ticket)
@@ -741,21 +721,23 @@ function fixDueLabel(row) {
 }
 
 function runDailyPrimary(row) {
-  const action = dailyPrimaryAction(row)
-  if (action === 'review') return openReview(row)
+  const action = dailyAction(row)
+  // 'view'（没有「日常验收」那一项的人看自己那份待验收的）与 'review'（有那一项的验收）
+  // 开的是同一个面板：面板里能不能决定由 `canDecide` 说了算，不是两个面板。
+  if (action === 'review' || action === 'view') return openReview(row)
   if (action === 'shoot') return openStandard(row)
   return undefined
 }
 
 function runDeepPrimary(row) {
-  const action = deepPrimaryAction(row)
-  if (action === 'review') return openDeepReview(row)
+  const action = deepAction(row)
+  if (action === 'review' || action === 'view') return openDeepReview(row)
   if (action === 'shoot') return openDeepCapture(row)
   return undefined
 }
 
 function runFixPrimary(row) {
-  const action = fixPrimaryAction(row, { isManager: isManager.value })
+  const action = fixAction(row)
   if (action === 'review') return openFixReview(row)
   return openFixOriginal(row)
 }
@@ -767,13 +749,45 @@ function runQueueTask(task) {
   return runFixPrimary(task.row)
 }
 
+/** 开整改单能选的工作区：**只有他自己今天那个区**。
+ *
+ *  服务端 `open_fix` 的 `_require_zone_access` 认的就是"今天排给他的那个区"（今天没区
+ *  直接拒），而 `/api/hygiene/staff/daily-catalog` 回来的 `zones` 是**全店名单** ——
+ *  服务端只把每个区底下的检查项按他的区切了片，名单本身没切。直接拿它当选项，默认
+ *  选中的是名单里第一个区，那不是他的区，提交必然吃 `zone_mismatch` 403。所以这里按
+ *  `employee.zone_id` 收成一个选项：名字优先取名单里的（跟页头那颗只读胶囊同一个来源），
+ *  名单还没回来 / 区刚被删时退到 `zone_name`。 */
+const fixZoneOptions = computed(() => {
+  const current = employee.value
+  if (!current || !current.zone_id) return []
+  const listed = zones.value.find((zone) => String(zone.id) === String(current.zone_id))
+  return [{
+    id: current.zone_id,
+    name: (listed && listed.name) || current.zone_name || '今天的卫生工作区',
+  }]
+})
+
+/** 开整改单：**只认"今天有没有工作区"，不认"今天有没有班"**。
+ *
+ *  这里原来拦的是 `needsAssignment`（没班次 / 没区 / 排的班次跟这个区对不上）—— 那是
+ *  **日常拍摄**的前置条件：班次决定交哪一档日常，所以没班就没日常可交。开整改单是复核
+ *  动作，不落在班次上：服务端 `_require_fix_opener` 只看**「整改单」那一项开关**（没有它
+ *  → forbidden），能开在哪个区由 `open_fix` 里的 `_require_zone_access` 判 —— 只认
+ *  今天排给他的那个区；今天一个区都没排到就没有可开的区。所以前端这一档跟着**工作区**
+ *  判：有区就能开，没区才拦。
+ *
+ *  原本文案让他"先找店长确认今天的排班"，可他自己就是管理员（2026-10-05 审查 F-05）：
+ *  现在直接说清缺的是什么、去哪儿补。班次与区都由排班的单日覆盖说了算（票 10），
+ *  员工端没有自选入口，所以"找店长在排班页排一个区"是唯一可执行的下一步。 */
 function openFixForm() {
   errorText.value = ''
   formError.value = ''
   flashText.value = ''
-  if (!isManager.value) return
-  if (needsAssignment.value) {
-    errorText.value = '今天没有排到你的班（或者工作区对不上），先找店长确认今天的排班。'
+  // 走 `canFix` 而不是 `isManager`：按钮本来就只给开了这一项的人渲染，这里再判一道是
+  // 防手滑（键盘/程序化调用）——判据两处同一个开关，不会出现"按钮在、点了没反应"。
+  if (!canFix.value) return
+  if (!employee.value || !employee.value.zone_id) {
+    errorText.value = '今天没有排到你的工作区，开不了整改单：开单要在自己的区里开。找店长在排班页给你排一个区。'
     return
   }
   if (!liveOk.value) {
@@ -781,7 +795,7 @@ function openFixForm() {
     return
   }
   clearPreview()
-  const firstZone = zones.value[0]
+  const firstZone = fixZoneOptions.value[0]
   sheet.value = {
     kind: 'fix',
     mode: 'form',
@@ -1055,12 +1069,14 @@ function continueDeep(current) {
 }
 
 function continueFix(current) {
-  const next = nextFixWorkRow(fixInbox.value, current, { isManager: isManager.value })
+  // 下一张挑哪张、挑到待验收的要不要直接开对照，两处都按「整改单」那一项开关判
+  // （`hygieneWorkFlow` 的 `nextFixWorkRow` 收的仍叫 `isManager`，问的是同一个问题）。
+  const next = nextFixWorkRow(fixInbox.value, current, { isManager: canFix.value })
   if (!next) {
     closeSheet(true)
     return
   }
-  if (next.status === '待验收' && isManager.value) {
+  if (next.status === '待验收' && canFix.value) {
     openFixReview(next)
   } else {
     openFixOriginal(next)
@@ -1196,7 +1212,8 @@ function submitDeepPair() {
 }
 
 // 管理员在手机上验收时的驳回：与管理后台的三个视图保持一致——不可撤销的操作要确认，
-// 并且可以写一句原因（员工端会显示在待办行上）。这屏的"驳回"紧挨着"通过"，误触代价一样。
+// 并且**必须**写一句原因（2026-10-05 用户裁定；员工端会把它显示在待办行上，他照着改）。
+// 这屏的"驳回"紧挨着"通过"，误触代价一样。
 const rejectConfirmOpen = ref(false)
 
 function askReject() {
@@ -1216,8 +1233,8 @@ async function decide(action, reason = '') {
   const deep = isDeepSheet()
   busy.value = true
   errorText.value = ''
-  // 驳回可以带一句原因，员工端会显示出来。管理员在手机上（走这条路径）与在管理后台
-  // 走的是同一套后端接口，行为要一致。
+  // 驳回必须带一句原因（弹窗里必填，服务端也拦）：员工端会显示出来。管理员在手机上
+  // （走这条路径）与在管理后台走的是同一套后端接口，行为要一致。
   const rejectBody = action === 'reject' && reason ? { reason } : undefined
   try {
     if (deep) {
@@ -1228,7 +1245,8 @@ async function decide(action, reason = '') {
       closeSheet(true)
       await loadDeepClean()
       const next = openDeep.value.find((item) => item.status === '待验收' && item.item_id !== row.item_id)
-      if (next && isManager.value) await openDeepReview(next)
+      // 连着判下一项：只有还留着「专项验收」那一项的人才会被带进下一个对照面板。
+      if (next && canDeepReview.value) await openDeepReview(next)
     } else if (sheet.value.kind === 'fix') {
       await staffRequest(`/api/hygiene/staff/fix/${row.id}/${action}`, {
         method: 'POST',
@@ -1236,9 +1254,9 @@ async function decide(action, reason = '') {
       })
       closeSheet(true)
       await loadFixTickets()
-      const next = nextFixWorkRow(fixInbox.value, row, { isManager: isManager.value })
+      const next = nextFixWorkRow(fixInbox.value, row, { isManager: canFix.value })
       if (next) {
-        if (next.status === '待验收' && isManager.value) await openFixReview(next)
+        if (next.status === '待验收' && canFix.value) await openFixReview(next)
         else openFixOriginal(next)
         flashText.value = next.status === '待验收'
           ? `下一张对照：${next.zone_name}`
@@ -1254,7 +1272,7 @@ async function decide(action, reason = '') {
       const next = inbox.value.find((item) => (
         item.status === '待验收' && !(item.item_id === row.item_id && item.shift === row.shift)
       ))
-      if (next && isManager.value) await openReview(next)
+      if (next && canDailyReview.value) await openReview(next)
     }
   } catch (err) {
     errorText.value = err.message || (action === 'accept' ? '验收失败' : '驳回失败')
@@ -1276,20 +1294,18 @@ async function decide(action, reason = '') {
       @close="lightboxOpen = false"
     />
     <a class="hy-skip" href="#hygiene-work-main">跳到内容</a>
+    <!-- 页头收成一行（2026-10-05 用户裁定）：页名 +「我今天在哪」那颗只读胶囊。
+         原来这里还有一条 `‹ 今天`（D9 给页内条留的唯一一条回程），现在去掉 —— 工作台
+         底栏那一格「我的」指向的正是 `/workbench/me/today`（`utils/workbenchNav.js` 的
+         `me` 那一格，`WorkbenchTabBar` 按身份渲染出来），页内再摆一条就是**同一个目的地
+         两个入口**；「今天」页自己也有一条来卫生的路（那张卫生卡上的按钮），两边都不缺路。
+         （更早以前这一条还兼职"给没有返回键的 iOS PWA 留一条回程"，那件事现在由底栏接手。）
+         品牌仍归外壳顶栏、退出仍归外壳那一颗（D5）——这里只报「这一页叫什么」和「我在哪」。
+         页名的样式沿用 `.hy-brand-title`：它就是这条窄栏里那个标题槽（字号由
+         `.hygiene-work .hy-work-header .hy-brand-title` 收到 1.02rem）。 -->
     <header class="hy-work-header" :inert="Boolean(sheet)">
       <div class="hy-work-header-inner">
-        <div class="hy-brand">
-          <span class="hy-brand-mark" aria-hidden="true">{{ HYGIENE_BRAND_MARK }}</span>
-          <span class="hy-brand-text">
-            <span class="hy-brand-title">{{ HYGIENE_BRAND_TITLE }}</span>
-            <span class="hy-brand-tagline">{{ HYGIENE_BRAND_TAGLINE }}</span>
-          </span>
-        </div>
-        <!-- 回「今天」页（票 05 的排班卡）：员工登录后落在 /workbench/me/today，卫生是它的下半张卡。
-             少这条回程就是单行道 —— iOS 的 PWA 独立窗口没有返回键，点进来就出不去了。 -->
-        <router-link class="hy-work-today" to="/workbench/me/today" aria-label="回到「今天」页看我的班">
-          ‹ 今天
-        </router-link>
+        <h1 class="hy-brand-title">卫生</h1>
         <!-- 今天在哪：**只读**（票 10）。以前点它还能重选，现在班次和工作区由排班决定，
              要改得去排班页改那一天 —— 所以这里只报「排班说你今天在哪」，点不动。
              「还没定区」与「今天没排班」是两件事：前者有班次但店长没给他配这个班的固定区
@@ -1297,8 +1313,6 @@ async function decide(action, reason = '') {
         <span v-if="employee" class="hy-work-shift">
           {{ employee.name || employee.phone }} · {{ employee.zone_name || (employee.shift ? '还没定区' : '今天没排班') }} · {{ hygieneShiftLabel(employee.shift) }}
         </span>
-        <!-- 三张员工页共用的退出（票 10）：原来只在下面「我」栏里那颗，顶上这颗跟今天/整月页同一套。 -->
-        <StaffExitButton />
       </div>
     </header>
 
@@ -1308,16 +1322,52 @@ async function decide(action, reason = '') {
         <button type="button" class="btn" @click="refreshAll">刷新</button>
       </p>
       <p v-if="errorText && !sheet" class="hy-staff-alert" role="alert">{{ errorText }}</p>
-      <p
-        v-if="needsAssignment && tab !== 'inbox'"
-        class="hy-staff-alert"
-        role="status"
-      >
-        今天没有排到你的班（或者工作区对不上），日常检查交不了。
-        <button type="button" class="btn" @click="router.push('/workbench/me/today')">去看我的班</button>
+
+      <!-- 顶部一行汇总（2026-10-05 用户裁定）：今天要做几项 = 三组待办之和，后面跟一句
+           明细（日常 / 专项 / 整改各几件）。五格合并之后这一行就是这一页的门面 ——
+           员工进来看一个数就知道今天还剩多少活，不必先在两格之间挑。
+           它原来那条「今天没有排到你的班…」的警示条撤了：那时候它只在**不在待办那一格**
+           时才显示（日常那一格自己会说清），现在三组同屏、日常就在最上面，同一句话不必
+           再说第二遍 —— 它自带的那条「去看我的班」也还在。
+           样式用 `.hy-progress`（单行、mono、tabular-nums）：与专项组那条进度线同一个语义。
+           刻意不摆成一排事实胶囊 —— 下面日常组第一行就是那排胶囊，两排一样的看不出哪排是
+           「今天的总数」、哪排是「日常这一项的进度」。 -->
+      <p v-if="employee" class="hy-progress">
+        今天要做 {{ todoTotal }} 项
+        <span>· 日常 {{ dailyCount }} · 专项 {{ deepCount }} · 整改 {{ fixCount }}</span>
       </p>
 
-      <section v-if="tab === 'inbox'">
+      <!-- 「待我验收」：只有开了**「日常验收」**那一项的人有，且**今天真有人交了**才出现
+           （拉不拉是这一档的另一半，在 `loadMe` 里、同一个开关）。
+           他的验收权是全店的（服务层那一档同样按开关判、不看区），但默认队列锁在他自己的
+           区与班次里 —— 今天别的区有人交了，他一条也看不到，权力等于没有入口
+           （2026-10-05 用户确认：员工账号的管理员同样有验收权）。
+           所以这一组不看他自己的班，只看"有没有别人交的活等着判"；放在最前，因为别人交完
+           活等的就是他这一眼，有时效。 -->
+      <section v-if="canDailyReview && reviewInbox.length" class="hy-queue-group">
+        <h2>待我验收 <span>{{ reviewInbox.length }}</span></h2>
+        <p class="hy-staff-lead">同事交上来的，先看原图再判。你自己交的那份不能自己验收。</p>
+        <button
+          v-for="row in reviewInbox"
+          :key="`review-${row.item_id}-${row.shift}`"
+          type="button"
+          class="hy-work-row"
+          @click="openReview(row)"
+        >
+          <span class="hy-task-kind">{{ row.shift }}</span>
+          <span class="hy-work-copy">
+            <strong>{{ row.name }}</strong>
+            <span>{{ row.zone_name }} · 同事交的</span>
+          </span>
+          <span class="hy-work-due">待验收</span>
+          <SvgIcon name="chevron-right" :size="18" />
+        </button>
+      </section>
+
+      <!-- 第 1 组 · 日常（原来的「待办」那一格）。三个组依次排下去，每组一个小标题带条数，
+           条数与上面那行明细同一口径（都是 `tabWorkCount`）。 -->
+      <section class="hy-queue-group">
+        <h2>日常 <span>{{ dailyCount }}</span></h2>
         <!-- 票 10：班次和工作区不再由员工当天自己选 —— 排班说今天在哪个班、哪个区，
              卫生就认哪个。这一屏以前是个选择器，现在换成一句实话 + 一条去「今天」页的路：
              没有班次（新人没配规则 / 今天休 / 那条班次还没标卫生档位）就没有日常可交，
@@ -1343,7 +1393,6 @@ async function decide(action, reason = '') {
           >去看我的班 ›</button>
         </template>
         <template v-else-if="employee">
-          <h1>今天还差什么</h1>
           <div class="hy-work-facts">
             <span>日常 {{ dailyStats.passed }}/{{ dailyStats.total }}</span>
             <span v-if="queueSummary.overdue" class="is-overdue">超时 {{ queueSummary.overdue }}</span>
@@ -1351,7 +1400,7 @@ async function decide(action, reason = '') {
             <span v-if="queueSummary.waiting">等验收 {{ queueSummary.waiting }}</span>
           </div>
           <p class="hy-staff-lead">
-            <template v-if="shiftDue">本班 {{ shiftDue }} 前交。专项和整改在各自那一屏。</template>
+            <template v-if="shiftDue">本班 {{ shiftDue }} 前交。专项和整改在下面两组。</template>
             <template v-else>按超时、快到截止、待拍的顺序排好，照下一个做就行。</template>
           </p>
 
@@ -1428,8 +1477,11 @@ async function decide(action, reason = '') {
         <p v-else class="hy-staff-lead">正在确认登录…</p>
       </section>
 
-      <section v-if="tab === 'deep'" class="hy-section">
-        <h1>专项卫生{{ deepStatus ? ` · ${deepStatus}` : '' }}</h1>
+      <!-- 第 2 组 · 专项。原来的那一格自带一句大标题「专项卫生 · 待办 / 已完成 / 无专项」：
+           五格合并之后组标题已经写着「专项 N」，大标题里那两个字就成了重复，所以只把
+           **状态**接在组标题后面（它是服务端给的这一轮结论，不能丢）。 -->
+      <section class="hy-queue-group">
+        <h2>专项 <span>{{ deepCount }}</span><span v-if="deepStatus">{{ deepStatus }}</span></h2>
         <p v-if="deepStats.total" class="hy-progress">
           {{ deepStats.passed }}/{{ deepStats.total }}
           <span v-if="deepDue"> · {{ deepDue }} 前做完</span>
@@ -1447,13 +1499,27 @@ async function decide(action, reason = '') {
             <p><span class="hy-status" :class="`is-${statusTone(row.status)}`">{{ row.status }}</span></p>
           </button>
           <div class="hy-task-actions">
+            <!-- 三颗按钮的判据都是同一个 `deepAction`（= `deepPrimaryAction(row, { isManager })`，
+                 那里喂的是**「专项验收」那一项开关**）：开了那一项的人在待验收那一档拿到
+                 'review'（对照 + 能通过 / 驳回），没开的拿到 'view'（查看：面板里没有决定
+                 按钮，也明说了等管理员验收）。「重拍」问的是另一件事
+                 —— 这一项是不是已经交了、还在等验收（ADR 0071 允许再交一张替换）—— 它跟谁
+                 能验收无关，所以用 `isPendingReview` 判，别挂在 'review' 上（那样没开验收
+                 的人的入口会跟着一起消失）。 -->
             <button
-              v-if="deepPrimaryAction(row) === 'review'"
+              v-if="deepAction(row) === 'review'"
               type="button"
               class="btn btn-primary"
               :disabled="busy"
               @click="openDeepReview(row)"
             >对照</button>
+            <button
+              v-else-if="deepAction(row) === 'view'"
+              type="button"
+              class="btn btn-primary"
+              :disabled="busy"
+              @click="openDeepReview(row)"
+            >查看</button>
             <button
               v-else-if="canShootDeep(row)"
               type="button"
@@ -1462,7 +1528,7 @@ async function decide(action, reason = '') {
               @click="openDeepCapture(row)"
             >拍前后</button>
             <button
-              v-if="canShootDeep(row) && deepPrimaryAction(row) === 'review'"
+              v-if="canShootDeep(row) && isPendingReview(row)"
               type="button"
               class="btn"
               :disabled="busy"
@@ -1482,11 +1548,13 @@ async function decide(action, reason = '') {
         </details>
       </section>
 
-      <section v-if="tab === 'fix'" class="hy-section">
-        <h1>整改单</h1>
+      <!-- 第 3 组 · 整改（原来的「整改」那一格）。同样只留组标题 + 条数：大标题里的
+           「整改单」与组标题重复。 -->
+      <section class="hy-queue-group">
+        <h2>整改 <span>{{ fixCount }}</span></h2>
         <p class="hy-staff-lead">按所选区域显示和提交。先看开单原图再拍，镜头不叠图。</p>
         <button
-          v-if="isManager"
+          v-if="canFix"
           type="button"
           class="btn btn-primary hy-staff-submit"
           :disabled="busy"
@@ -1509,7 +1577,7 @@ async function decide(action, reason = '') {
           </button>
           <div class="hy-task-actions">
             <button
-              v-if="fixPrimaryAction(row, { isManager }) === 'review'"
+              v-if="fixAction(row) === 'review'"
               type="button"
               class="btn btn-primary"
               :disabled="busy"
@@ -1523,7 +1591,7 @@ async function decide(action, reason = '') {
               @click="openFixOriginal(row)"
             >回拍</button>
             <button
-              v-if="fixPrimaryAction(row, { isManager }) === 'review'"
+              v-if="fixAction(row) === 'review'"
               type="button"
               class="btn"
               :disabled="busy"
@@ -1533,192 +1601,69 @@ async function decide(action, reason = '') {
         </article>
       </section>
 
-      <section v-if="tab === 'boards'">
-        <h1>红黑榜</h1>
-        <p class="hy-staff-lead">本周 {{ weekLabel(boards.week_start) }} 起。只记次数。</p>
-        <section class="hy-section">
-          <h2>人的红黑榜</h2>
-          <p v-if="!(boards.people || []).length" class="hy-staff-lead">这一周还没有人的次数。</p>
-          <article v-for="row in boards.people" :key="`person-${row.employee_id}`" class="hy-task">
-            <div>
-              <strong>{{ personLabel(row) }}</strong>
-              <p>实拍 {{ row['实拍'] }} · 驳回 {{ row['驳回'] }} · 一次通过 {{ row['一次通过'] }} · 逾期 {{ row['逾期'] }}</p>
-            </div>
-          </article>
-        </section>
-        <section class="hy-section">
-          <h2>卫生工作区红黑榜</h2>
-          <p v-if="!(boards.zones || []).length" class="hy-staff-lead">这一周还没有卫生工作区的次数。</p>
-          <article v-for="row in boards.zones" :key="`zone-${row.zone_id}`" class="hy-task">
-            <div>
-              <strong>{{ row.zone_name }}</strong>
-              <p>逾期 {{ row['逾期'] }}</p>
-            </div>
-          </article>
-        </section>
-        <section class="hy-section">
-          <h2>卫生教材</h2>
-          <p class="hy-staff-lead">只展示超级管理员手动标记的合格对照。</p>
-          <p v-if="!teaching.length" class="hy-staff-lead">还没有卫生教材。</p>
-          <article v-for="row in teaching" :key="`teach-${row.id}`" class="hy-task">
-            <div>
-              <strong>{{ row.title }}</strong>
-              <p>{{ row.left_label }} / {{ row.right_label }}</p>
-            </div>
-            <button type="button" class="btn" @click="openTeaching(row)">打开</button>
-          </article>
-        </section>
-      </section>
+      <!-- 信息入口（页尾一行）：红黑榜 + 卫生教材。它原来是与三组任务平级的第五格 tab
+           ——「榜」是**信息**（谁被驳回过、哪个区逾期、哪些是合格对照），跟"今天要干的活"
+           不是一回事，平级摆着只会让人以为它也要今天做完。降成一行入口、点开在本页展开：
+           这一屏的数据本来就是员工 cookie 读的（`/api/hygiene/staff/boards` 等），展开
+           只是换一位 `v-if`；跳去店长那侧的 `/workbench/floor/boards` 只会吃 403，
+           为它另开一条员工路由又要再搬一遍登录与实时那一套，得不偿失。
+           行上那个「展开 / 收起」是**文字**不是箭头：箭头得配一个旋转动画才说得清开没开，
+           而这一页没有自己的 scoped 样式块（样式全在共享的 hygiene-admin.css 里，
+           本次改动只动页面结构，不动那张表）。 -->
+      <section class="hy-queue-group">
+        <h2>信息</h2>
+        <button
+          type="button"
+          class="hy-work-row"
+          :aria-expanded="boardsOpen"
+          aria-controls="hygiene-boards-panel"
+          @click="boardsOpen = !boardsOpen"
+        >
+          <span class="hy-task-kind">榜</span>
+          <span class="hy-work-copy">
+            <strong>红黑榜 · 卫生教材</strong>
+            <span>本周谁被驳回过、哪个工作区逾期、超级管理员标记的合格对照</span>
+          </span>
+          <span class="hy-work-due">{{ boardsOpen ? '收起' : '展开' }}</span>
+        </button>
 
-      <section v-if="tab === 'me'">
-        <h1>我</h1>
-        <template v-if="employee">
-          <p v-if="profileFlash" class="staff-flash" role="status">{{ profileFlash }}</p>
-          <p v-if="passwordFlash" class="staff-flash" role="status">{{ passwordFlash }}</p>
-          <p v-if="profileError" class="hy-staff-alert" role="alert">{{ profileError }}</p>
-          <p v-if="passwordError" class="hy-staff-alert" role="alert">{{ passwordError }}</p>
-          <div v-if="profileEditing" class="staff-profile-edit">
-            <label class="staff-field">
-              姓名
-              <input
-                v-model="profileName"
-                class="staff-input"
-                type="text"
-                maxlength="40"
-                autocomplete="name"
-              >
-            </label>
-            <label class="staff-field">
-              手机号
-              <input
-                v-model="profilePhone"
-                class="staff-input"
-                type="tel"
-                inputmode="numeric"
-                maxlength="11"
-                pattern="1[3-9]\d{9}"
-                autocomplete="username"
-              >
-            </label>
-            <p class="hy-staff-lead">手机号也是登录账号；保存后请用新手机号登录。改号前会再确认一次。</p>
-            <div class="staff-decide">
-              <button type="button" class="btn btn-primary" :disabled="profileSaving" @click="saveProfile">
-                {{ profileSaving ? '正在保存…' : '保存' }}
-              </button>
-              <button type="button" class="btn" :disabled="profileSaving" @click="cancelProfileEdit">取消</button>
-            </div>
-          </div>
-          <div v-else-if="passwordEditing" class="staff-profile-edit">
-            <label class="staff-field">
-              当前密码
-              <input
-                v-model="currentPassword"
-                class="staff-input"
-                type="password"
-                autocomplete="current-password"
-              >
-            </label>
-            <label class="staff-field">
-              新密码
-              <input
-                v-model="newPassword"
-                class="staff-input"
-                type="password"
-                minlength="8"
-                autocomplete="new-password"
-              >
-            </label>
-            <label class="staff-field">
-              确认新密码
-              <input
-                v-model="confirmPassword"
-                class="staff-input"
-                type="password"
-                minlength="8"
-                autocomplete="new-password"
-              >
-            </label>
-            <p class="hy-staff-lead">修改后保留当前设备登录，其他设备上的登录会失效。</p>
-            <div class="staff-decide">
-              <button type="button" class="btn btn-primary" :disabled="passwordSaving" @click="savePassword">
-                {{ passwordSaving ? '正在保存…' : '修改密码' }}
-              </button>
-              <button type="button" class="btn" :disabled="passwordSaving" @click="cancelPasswordEdit">取消</button>
-            </div>
-          </div>
-          <dl v-else class="hy-meta">
-            <div>
-              <dt>姓名</dt>
-              <dd>{{ employee.name || '未设置' }}</dd>
-            </div>
-            <div>
-              <dt>手机号</dt>
-              <dd>{{ employee.phone }}</dd>
-            </div>
-            <div>
-              <dt>当天区域</dt>
-              <dd>{{ employee.zone_name || '未选' }}</dd>
-            </div>
-            <div>
-              <dt>当天班次</dt>
-              <dd>{{ hygieneShiftLabel(employee.shift) }}</dd>
-            </div>
-            <div v-if="shiftDue">
-              <dt>本班日常截止</dt>
-              <dd>{{ shiftDue }} 前交</dd>
-            </div>
-            <div v-if="deepDue">
-              <dt>专项截止</dt>
-              <dd>{{ deepDue }} 前做完</dd>
-            </div>
-            <div>
-              <dt>职位</dt>
-              <dd>{{ employee.job_title || '未设置' }}</dd>
-            </div>
-            <div>
-              <dt>卫生权限</dt>
-              <dd>{{ hygienePermissionLabel(employee.permission) }}</dd>
-            </div>
-          </dl>
-          <p v-if="!profileEditing && !passwordEditing" class="hy-staff-lead">专项全店可用；整改按所选工作区显示。所有现场照片都需实拍。</p>
-          <button
-            v-if="!profileEditing && !passwordEditing"
-            type="button"
-            class="btn btn-block hy-staff-submit"
-            @click="startProfileEdit"
-          >修改个人信息</button>
-          <button
-            v-if="!profileEditing && !passwordEditing"
-            type="button"
-            class="btn btn-block hy-staff-submit"
-            @click="startPasswordEdit"
-          >修改密码</button>
-          <button
-            v-if="!profileEditing && !passwordEditing"
-            type="button"
-            class="btn btn-block hy-staff-submit"
-            @click="openDutyNotice"
-          >重新选择区域和班次</button>
-        </template>
-        <p v-else class="hy-staff-lead">正在确认登录…</p>
+        <div v-if="boardsOpen" id="hygiene-boards-panel">
+          <p class="hy-staff-lead">本周 {{ weekLabel(boards.week_start) }} 起。只记次数。</p>
+          <section class="hy-section">
+            <h2>人的红黑榜</h2>
+            <p v-if="!(boards.people || []).length" class="hy-staff-lead">这一周还没有人的次数。</p>
+            <article v-for="row in boards.people" :key="`person-${row.employee_id}`" class="hy-task">
+              <div>
+                <strong>{{ personLabel(row) }}</strong>
+                <p>实拍 {{ row['实拍'] }} · 驳回 {{ row['驳回'] }} · 一次通过 {{ row['一次通过'] }} · 逾期 {{ row['逾期'] }}</p>
+              </div>
+            </article>
+          </section>
+          <section class="hy-section">
+            <h2>卫生工作区红黑榜</h2>
+            <p v-if="!(boards.zones || []).length" class="hy-staff-lead">这一周还没有卫生工作区的次数。</p>
+            <article v-for="row in boards.zones" :key="`zone-${row.zone_id}`" class="hy-task">
+              <div>
+                <strong>{{ row.zone_name }}</strong>
+                <p>逾期 {{ row['逾期'] }}</p>
+              </div>
+            </article>
+          </section>
+          <section class="hy-section">
+            <h2>卫生教材</h2>
+            <p class="hy-staff-lead">只展示超级管理员手动标记的合格对照。</p>
+            <p v-if="!teaching.length" class="hy-staff-lead">还没有卫生教材。</p>
+            <article v-for="row in teaching" :key="`teach-${row.id}`" class="hy-task">
+              <div>
+                <strong>{{ row.title }}</strong>
+                <p>{{ row.left_label }} / {{ row.right_label }}</p>
+              </div>
+              <button type="button" class="btn" @click="openTeaching(row)">打开</button>
+            </article>
+          </section>
+        </div>
       </section>
     </main>
-
-    <nav v-if="employee" class="hy-tabbar" aria-label="卫生入口" :inert="Boolean(sheet)">
-      <button
-        v-for="item in HYGIENE_STAFF_TABS"
-        :key="item.id"
-        type="button"
-        class="hy-tab"
-        :class="{ 'is-active': tab === item.id }"
-        :aria-current="tab === item.id ? 'page' : undefined"
-        @click="tab = item.id"
-      >
-        <SvgIcon :name="item.icon" :size="20" />
-        <span>{{ item.title }}</span>
-        <span v-if="tabCount(item.id)" class="hy-tab-badge">{{ tabCount(item.id) }}</span>
-      </button>
-    </nav>
 
     <div
       v-if="sheet"
@@ -1753,7 +1698,9 @@ async function decide(action, reason = '') {
               :aria-invalid="formErrorField === 'fix-zone'"
               @change="formError = ''; formErrorField = ''"
             >
-              <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
+              <!-- 只有他自己今天那个区：开单只能开在自己的区上（见 `fixZoneOptions`）。
+                   这里曾经列全店名单、默认选中第一个区 —— 那个区不是他的，提交必吃 403。 -->
+              <option v-for="zone in fixZoneOptions" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
             </select>
           </label>
           <label class="staff-field">
@@ -1952,7 +1899,7 @@ async function decide(action, reason = '') {
             :left-watermark="sheet.review.open_watermark"
             :watermark="sheet.review.watermark"
           />
-          <p v-if="isManager && !canDecideFix(sheet.row)" class="staff-lead">时限还没到，只有开单人能验。</p>
+          <p v-if="canFix && !canDecideFix(sheet.row)" class="staff-lead">时限还没到，只有开单人能验。</p>
           <div v-if="canDecideFix(sheet.row)" class="staff-decide">
             <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="decide('accept')">通过</button>
             <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="askReject">驳回</button>
@@ -1972,8 +1919,11 @@ async function decide(action, reason = '') {
             :capture-alt="'清理后'"
             :watermark="sheet.review.after_watermark || sheet.review.watermark"
           />
-          <p v-if="isManager && !canDecide(sheet.review)" class="staff-lead">交这一组的人不能自己验收。</p>
-          <div v-if="canDecide(sheet.review)" class="staff-decide">
+          <p v-if="canDeepReview && !canDecide(sheet.review, 'deep_review')" class="staff-lead">交这一组的人不能自己验收。</p>
+          <!-- 没有「专项验收」那一项的人打开的是同一个对照面板，只是没有决定区：不说这一句，
+               面板看上去就是"空的"（2026-10-05 审查 F-04 的两张并排截图）。 -->
+          <p v-else-if="!canDeepReview" class="staff-lead">等管理员验收：你没有这一项的验收权，这里只能看。</p>
+          <div v-if="canDecide(sheet.review, 'deep_review')" class="staff-decide">
             <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="decide('accept')">通过</button>
             <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="askReject">驳回</button>
           </div>
@@ -1990,8 +1940,10 @@ async function decide(action, reason = '') {
             :capture-alt="'实拍'"
             :watermark="sheet.review.watermark"
           />
-          <p v-if="isManager && !canDecide(sheet.review)" class="staff-lead">交这张的人不能自己验收。</p>
-          <div v-if="canDecide(sheet.review)" class="staff-decide">
+          <p v-if="canDailyReview && !canDecide(sheet.review, 'daily_review')" class="staff-lead">交这张的人不能自己验收。</p>
+          <!-- 同上：没有「日常验收」那一项的人从队列里点进来的就是这一屏。 -->
+          <p v-else-if="!canDailyReview" class="staff-lead">等管理员验收：你没有这一项的验收权，这里只能看。</p>
+          <div v-if="canDecide(sheet.review, 'daily_review')" class="staff-decide">
             <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="decide('accept')">通过</button>
             <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="askReject">驳回</button>
           </div>
@@ -2014,19 +1966,11 @@ async function decide(action, reason = '') {
       :message="`驳回「${sheet ? (sheet.row.item_name || sheet.row.zone_name || '这一项') : '这一项'}」后要重新拍；本周红黑榜会记一次驳回。`"
       confirm-label="驳回"
       danger
-      :prompt="{ label: '哪里不合格（可选，员工能看到）', placeholder: '例如：台面还有油渍', maxlength: 120 }"
+      :prompt="{ label: '哪里不合格（必填，员工能看到）', placeholder: '写一句让他知道改什么，例如：台面还有油渍、角落没擦到', hint: '必填 · 员工照这句重拍', required: true, maxlength: 120 }"
       @confirm="confirmReject"
       @cancel="rejectConfirmOpen = false"
     />
 
-    <ConfirmDialog
-      v-if="profilePhoneConfirmOpen"
-      title="确认改手机号"
-      :message="`手机号是登录账号。改成 ${profilePhone.trim()} 之后，下次登录要用新号；打错一位就得找管理员改回来。`"
-      confirm-label="确认改号"
-      danger
-      @confirm="saveProfile"
-      @cancel="profilePhoneConfirmOpen = false"
-    />
+    <!-- 「确认改手机号」那个框跟着「我」那一格搬去 `views/today/TodayView.vue` 了。 -->
   </div>
 </template>

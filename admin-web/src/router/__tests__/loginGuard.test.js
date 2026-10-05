@@ -15,8 +15,10 @@ import { createPinia, setActivePinia } from 'pinia'
 // 票 02 起判据换成页面清单里的「允许的身份」三态（`meta.audience`）。
 // **票 03 起「有会话但身份不匹配」不再落登录页**：员工进店长专属页落
 // `/workbench/forbidden?next=<原目标>`（说清这页是谁的 + 一颗回自己首页的按钮），
-// 只有「一个会话都没有」才去 `/login`。员工三页则是 `staffProbe: false`：守卫放行、
-// 落点由页面自己那一次 401 决定（三页一致，见 router 的 `workbenchStaffPage`）。
+// 只有「一个会话都没有」才去 `/login`。员工三页则是 `staffProbe: false`：守卫不替员工
+// 等那次会话探针，落点由页面自己那一次 401 决定 —— 但**管理端会话仍先判**（D3）：
+// 那条短路只免员工会话探针，不免身份判定，否则管理端会被页面自己的 401 兜底送去员工
+// 登录页。三页一致，见 router 的 `workbenchStaffPage` 与守卫里那段注释。
 
 function jsonResponse(data, status = 200) {
   return {
@@ -183,6 +185,61 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
 
     expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
     expect(router.currentRoute.value.query.next).toBe('/tmp/staff')
+  })
+
+  // D3：**真实**的员工三页带 `staffProbe: false`（守卫不替员工等那次探针），原来这条短路
+  // 写在「有管理端会话 → forbidden」之前，于是管理端打开 `/workbench/me/today` 被放行到
+  // 页面，页面自己那次员工接口 401 又把人送去 `/login?next=<员工页>` —— 落成**员工登录页**，
+  // 页面上连一个出口都没有。跳过的只是员工会话探针，不是身份判定。
+  it('D3：员工三页（staffProbe:false）遇管理端会话也落「无权访问」，不被 401 兜底带去员工登录页', async () => {
+    vi.stubGlobal('fetch', adminOnlyFetch())
+    const router = await freshRouter()
+
+    await router.push('/workbench/me/today')
+
+    expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
+  })
+
+  it('D3：`/workbench/me/clean` 同样落 forbidden；员工页自己那三页行为一致', async () => {
+    vi.stubGlobal('fetch', adminOnlyFetch())
+    const router = await freshRouter()
+
+    await router.push('/workbench/me/clean')
+
+    expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/me/clean')
+  })
+
+  it('D3 不误伤双会话：管理端 cookie 也在、但员工会话有效时员工页照开', async () => {
+    // 店里那台共用电脑就是双会话：员工会话本人就是这把钥匙，守卫不能被管理端 cookie
+    // 抢先把人送去 forbidden（那会让员工在自己的手机上打不开自己的页）。
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url) => {
+        const path = String(url)
+        if (path.includes('/api/hygiene/staff/me')) {
+          return jsonResponse({ employee: { name: '张三' } })
+        }
+        if (path.includes('/api/auth/status')) {
+          return jsonResponse({ logged_in: true, initialized: true })
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    const router = await freshRouter()
+
+    await router.push('/workbench/me/today')
+
+    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
+  })
+
+  it('D3 不误伤未登录：一个会话都没有的员工页仍然放行（落点由页面那次 401 决定）', async () => {
+    const router = await freshRouter()
+
+    await router.push('/workbench/me/month')
+
+    expect(router.currentRoute.value.path).toBe('/workbench/me/month')
   })
 
   it('「无权访问」页本身对两种身份都开：员工会话不被再拦一道（守卫不能自己绕圈）', async () => {

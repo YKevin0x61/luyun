@@ -10,6 +10,7 @@
  *  不再兼管「哪一页不该被甩去登录」（那份名单以前手写在这里，路径一搬家就漂）。
  */
 import { RECIPE_READER_PATHS, isRecipeReaderPath } from './recipePaths.js'
+import { pageRow } from '../router/pageRoutes.js'
 import { STAFF_ENTRY_PATH, isStaffLandingPath } from './staffPaths.js'
 
 export { RECIPE_READER_PATHS, isRecipeReaderPath }
@@ -193,8 +194,14 @@ export function staffNextTarget(raw) {
 /** 管理员身份的落点：认站内路径，但拒绝员工端前缀（那是员工 cookie 那扇门）与登录页自身。
  *
  *  两个方向都用同一份判据：员工栏只认员工端路径（`resolveStaffNext`），管理栏不认员工端
- *  路径。不这么收，管理端身份会被 `?next=/workbench/me/today` 送进员工页，再被客户端守卫
- *  弹回登录页。
+ *  路径。
+ *
+ *  **落点不是管理端能进的页时返回 `fallback`，而调用方给的是「无权访问」页** ——
+ *  这里以前硬回落到 `/`：管理端会话打开 `/login?next=/workbench/me/month` 时，`?next=`
+ *  被**消费掉却什么也没说**（D4 实测最终落在 `/workbench`，目标消失）。按 ADR 0092
+ *  「不静默改道」，这种情况下要带人去 forbidden 并把原目标一起带上 —— 那一页会说明
+ *  「这是员工手机端的页面」，还留一条回自己首页的路。默认值仍是 `/`，给那些不想要
+ *  这一跳的调用方（以及测试）用。
  */
 export function resolveLoginNext(raw, fallback = '/') {
   const fallbackPath = fallback || '/'
@@ -220,14 +227,34 @@ export function resolveStaffNext(raw, fallback = STAFF_ENTRY_PATH) {
   return staffNextTarget(raw) || fallbackPath
 }
 
-/** 面板默认开在哪一栏：`?next=` 落在员工端前缀或**配方阅读面**内时**强制**员工栏，
- *  优先于记住值（扫码的绝大多数是厨师，不该先看到管理栏）。
+/** 面板默认开在哪一栏。判据按优先级从上到下，第一条命中即用：
  *
- *  没有记住值（或记的是脏值）时落在员工栏：员工手机上打开 `/login` 就该直接看到
- *  手机号那一栏，不必先点一下（spec 故事 3 / ADR 0091）。管理端机器靠「上次选的是
- *  管理员栏」记住 —— 见 `loginPrefs.js` 的 `loadLoginTab`。
+ *  1. `?next=` 是**管理端专属页**（页面清单里 `audience === 'admin'`）→ 强制管理员栏。
+ *     这类目标只认管理端 cookie，开员工栏等于让人在手机号表单上白填一次（D13 实测：
+ *     `/login?next=/workbench/hr/roster` 开的是员工栏，管理端还得自己找 tab）。
+ *  2. `?next=` 落在员工端前缀或**配方阅读面**内 → 强制员工栏，优先于记住值
+ *     （扫码的绝大多数是厨师，不该先看到管理栏）。
+ *  3. 其余（含没有记住值、记住值脏了、站外地址、清单里没有的路径）按记住值走，
+ *     没记住过就落员工栏：员工手机上打开 `/login` 就该直接看到手机号那一栏，
+ *     不必先点一下（spec 故事 3 / ADR 0091）。管理端机器靠「上次选的是管理员栏」记住
+ *     —— 见 `loginPrefs.js` 的 `loadLoginTab`。
+ *
+ *  身份**只看页面清单那一行**（`router/pageRoutes.js` 的 `pageRow`，唯一来源），不在
+ *  这里再写一份前缀正则；清单里没有的路径（老地址、手改的）一律不强制，交回记住值。
  */
 export function resolveLoginTab(raw, remembered) {
   if (staffNextTarget(raw)) return 'staff'
+  if (adminTarget(raw)) return 'admin'
   return remembered === 'admin' ? 'admin' : 'staff'
+}
+
+/** 这条 `?next=` 指向的是不是管理端专属页（`audience === 'admin'`）。
+ *
+ *  判据取自页面清单：`/workbench/hr/roster`、`/sales-report` 这类页只认管理端 cookie。
+ *  `both` 与 `staff` 都不是（配方阅读面对两种身份都开，员工栏就是它的默认栏）。 */
+function adminTarget(raw) {
+  const next = sanitizeNext(raw)
+  if (!next) return false
+  const row = pageRow(pathnameOf(next))
+  return row?.audience === 'admin'
 }

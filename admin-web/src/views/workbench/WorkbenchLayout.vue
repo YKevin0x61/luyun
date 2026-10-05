@@ -14,11 +14,14 @@ import { computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import WorkbenchExitButton from '../../components/workbench/WorkbenchExitButton.vue'
 import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
+import WorkbenchNav from '../../components/workbench/WorkbenchNav.vue'
+import WorkbenchTabBar from '../../components/workbench/WorkbenchTabBar.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
-import { pageRow, pageTitle } from '../../router/pageRoutes.js'
+import { pageRow } from '../../router/pageRoutes.js'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
 import { WORKBENCH_TITLE } from '../../utils/workbenchCopy'
-import { workbenchAudienceFor, workbenchGroupOf, workbenchNavFor } from '../../utils/workbenchNav'
+import { workbenchAudienceFor, workbenchNavFor } from '../../utils/workbenchNav'
+import { IDENTITY_STAFF } from '../../utils/workbenchIdentity'
 
 // 深青墨令牌跟工作台其他两组同一张表（`/hygiene-admin.css`）。
 useScopedStylesheet('/hygiene-admin.css')
@@ -30,42 +33,14 @@ const identityStore = useWorkbenchIdentityStore()
 // 探针由切换器自己开场（`onMounted`）。这里只在**已经探出结论**时消费它：没探完时
 // `identity` 是 null，导航不渲染 —— 不给一个可能点不通的入口。
 const identity = computed(() => identityStore.identity)
+// 导航面（今天 / 人事 / 现场 / 后勤 / 我的）由 `WorkbenchNav` 渲染，这里留一份同样的
+// 条目只为了「切档之后把人送回他这一档的第一格」（见 `keepViewAllowed`）。
 const navItems = computed(() => workbenchNavFor(identity.value))
-const currentGroup = computed(() => workbenchGroupOf(route.path))
 
-/** 按**格**把条目分好组（一处渲染）：一格里的条目共享一个 key，键序仍是组表里的顺序。
- *
- *  标题的取法跟着"这一格有几扇门"走：
- *  - **一格一门**（今天 / 人事 / 现场 / 我的）—— 用组表里的 `label`，与票 07 之前一字不差；
- *  - **一格多门**（票 08 的后勤：配方 + 备货计划）—— 每一半用它**自己那一页在清单里的名字**
- *    （同一颗胶囊里写两遍「后勤」看不出哪一半是哪一页）。名字从页面清单取（`pageTitle`），
- *    不在这里另写一份词表。 */
-const navCells = computed(() => {
-  const cells = []
-  for (const item of navItems.value) {
-    let cell = cells.find((row) => row.key === item.key)
-    if (!cell) {
-      cell = { key: item.key, links: [] }
-      cells.push(cell)
-    }
-    cell.links.push(item)
-  }
-  for (const cell of cells) {
-    const titled = cell.links.length > 1
-    cell.links = cell.links.map((item) => ({
-      ...item,
-      label: titled ? pageTitle(item.to) : item.label,
-    }))
-  }
-  return cells
-})
-
-/** 这一扇门算不算"当前"：得同时是**这一格**（`workbenchGroupOf`，判据是页面的 `group`）
- *  与这一条链接自己指着的路径。同一格里因此只有一扇门亮 —— 后勤那一格两扇门指着两页，
- *  站在备货计划上时亮的是备货计划那一半，「后勤」整格仍然算当前（`is-on`）。 */
-function isCurrentLink(cell, item) {
-  return cell.key === currentGroup.value && item.to === route.path
-}
+/** 员工这一档不渲染「‹ 后台」（D7）：那一扇门通向 `/`（运营仪表盘）—— 店长专属页，
+ *  员工点下去只会吃一张「无权访问」。挂着一扇**必然被拒**的门比没有门更糟：
+ *  它天天在那里，点一次损失一次。店长那一档照旧（spec 故事 11 的双向入口）。 */
+const showBackToAdmin = computed(() => identity.value !== IDENTITY_STAFF)
 
 /** 此刻这一页还属于当前身份吗（判据是页面清单里那一行的 `audience`，不猜路径前缀）。
  *
@@ -101,40 +76,27 @@ watch(identity, keepViewAllowed)
     <header class="wb-top">
       <!-- 回管理后台的门（spec 故事 11：两边各留一个入口、双向）。人事 / 现场两个壳各自
            也有一个「‹ 后台」，这里补上工作台首页、后勤与「我的」这几个页面的那一扇 ——
-           少了它，店长站在子应用首页回不去后台。 -->
-      <router-link class="wb-back" to="/">‹ 后台</router-link>
+           少了它，店长站在子应用首页回不去后台。**员工那一档不渲染**（见 `showBackToAdmin`）。 -->
+      <router-link v-if="showBackToAdmin" class="wb-back" to="/">‹ 后台</router-link>
       <b class="wb-brand">{{ WORKBENCH_TITLE }}</b>
       <WorkbenchIdentitySwitcher class="wb-id-switcher" />
-      <nav class="wb-nav" aria-label="工作台导航">
-        <!-- 一格一颗胶囊（票 03 的规矩）：单条目那一格就是一个链接；多条目那一格
-             （票 08 的后勤）是同一颗里的两条链接，`is-multi` 只收窄内边距。整格是否
-             当前由 `is-on` 判（按页面清单的 group），哪一半贴着"当前"由 `is-current`
-             判（这一格 + 这条链接自己的路径）—— 两个类都挂在链接上，样式里按类取值。 -->
-        <span
-          v-for="cell in navCells"
-          :key="cell.key"
-          class="wb-nav-cell"
-          :class="{ 'is-on': cell.key === currentGroup, 'is-multi': cell.links.length > 1 }"
-        >
-          <router-link
-            v-for="item in cell.links"
-            :key="item.to"
-            class="wb-nav-item"
-            :class="{ 'is-on': cell.key === currentGroup, 'is-current': isCurrentLink(cell, item) }"
-            :aria-current="cell.key === currentGroup ? 'page' : undefined"
-            :to="item.to"
-          >{{ item.label }}</router-link>
-        </span>
-      </nav>
+      <!-- 工作台级导航（今天 / 人事 / 现场 / 后勤 / 我的）：表与高亮都在
+           `components/workbench/WorkbenchNav.vue` 里，人事 / 现场两个壳渲染的是同一颗
+           （B1 的小步：三套壳共用同一排工作台导航，「今天」因此在每一页都点得到）。 -->
+      <WorkbenchNav class="wb-nav" />
       <!-- 退出入口（票 06）：员工那三页原来自带一颗（`StaffExitButton`），首页与切档之后
            的店长视角原先没有 —— 工作台是子应用，页页都得退得出去。行为只有一处
-           （`composables/useWorkbenchLogout.js`），票 10 会把四处登出收敛成一条。 -->
+           （`composables/useWorkbenchLogout.js`）。**员工那三页页内那颗已去掉**（D5）：
+           同一个动作在同一屏里不该有两颗按钮，外壳这一颗覆盖全部工作台页面。 -->
       <WorkbenchExitButton class="wb-exit-btn" />
     </header>
 
     <main id="workbench-main" class="wb-main">
       <router-view />
     </main>
+    <!-- 工作台级导航在手机档的落点（C 方向）：底栏一格一组、拇指区可达；桌面档它自己
+         不渲染（`display: none`），那里用顶栏那条 tab。同一排入口不在两处同时出现。 -->
+    <WorkbenchTabBar />
   </div>
 </template>
 
@@ -146,17 +108,29 @@ watch(identity, keepViewAllowed)
   display: flex; align-items: center; gap: 10px;
   /* 高度是**下限**不是定值（票 12 收的 O3）：原来是 `height: 40px` 的单行 flex，
      390px 手机上胶囊被压到内容宽度以下、汉字逐字换行，整条栏溢出后被裁掉 ——
-     退出按钮当场看不见（实测 clientWidth 390 / scrollWidth 442、高度 39/62）。 */
-  min-height: 40px; padding: 4px 12px;
+     退出按钮当场看不见（实测 clientWidth 390 / scrollWidth 442、高度 39/62）。
+     **底部不留内边距**：导航是下划线 tab，那条指示线要落在这一栏的分隔线上。
+     不占满整行高的那几件各自补下边距（见下一条），不会被拉到底。 */
+  min-height: 40px; padding: 4px 12px 0;
   background: var(--hy-bg);
   border-bottom: 1px solid var(--hy-line);
 }
+/* 不占满整行的那几件：补 4px 下边距，与导航 tab 的文字基线对齐后仍居中；
+   导航（下划线 tab）不在此列 —— 它要贴到底边。 */
+.wb-back, .wb-brand, .wb-id-switcher { margin-bottom: 4px; }
+/* 退出按钮要**:deep() 才选得中**：`WorkbenchExitButton` 的模板是多根
+   （`<button>` + 那个「还有照片没传完」的 `<ConfirmDialog>`），多根组件不透传父级
+   传下来的 class —— 挂在外面的 `.wb-exit-btn` 从来就没命中过元素，
+   `margin-left: auto`（让它贴右端）因此一直是死规则，手机上它只是跟在切换器后面。 */
+.wb-top :deep(.wb-exit) { margin-left: auto; margin-bottom: 4px; }
 .wb-brand {
   /* 牌子占掉剩下的宽度：切换器与导航一起贴在右端（原来靠 `.wb-nav` 的 auto margin，
-     中间插了切换器之后那点间距就不够看了）。窄屏放不下时它先让位（见下面的媒体查询）。 */
+     中间插了切换器之后那点间距就不够看了）。窄屏放不下时它先让位（见下面的媒体查询）。
+     B 方向：这是**同一块屏上的第三个身份标注**（导航的当前格、切档器、还有它），
+     所以字号与字距都收一档 —— 留着它当栏首的锚点，但不与页面标题争。 */
   flex: 1 1 auto; min-width: 0;
-  font-family: var(--font-song); font-size: 14px;
-  letter-spacing: .12em; color: var(--hy-ink);
+  font-family: var(--font-song); font-size: 13.5px;
+  letter-spacing: .06em; color: var(--hy-ink);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* 与人事壳的 `.sched-back` 同一身：一颗描边小胶囊，别抢牌子的视线。 */
@@ -170,39 +144,36 @@ watch(identity, keepViewAllowed)
 .wb-back:hover { color: var(--hy-ink); border-color: var(--hy-line-strong); }
 /* 切换器与导航之间一条细分隔：两件事（我是谁 / 去哪一页），别挤成一团。 */
 .wb-id-switcher { margin-left: 4px; padding-right: 10px; border-right: 1px solid var(--hy-line); }
-.wb-nav { display: flex; align-items: center; gap: 6px; margin-left: auto; min-width: 0; }
-.wb-exit-btn { margin-left: 8px; }
-.wb-nav-item {
-  font-size: 12px; color: var(--hy-muted); text-decoration: none;
-  border: 1px solid var(--hy-line); background: var(--hy-surface-2);
-  border-radius: 999px; padding: 4px 12px; white-space: nowrap;
-}
-.wb-nav-item:hover { color: var(--hy-ink); border-color: var(--hy-line-strong); }
-/* 高亮按「格」算，不按链接自己的路径（见 `workbenchGroupOf`）。
-   一格里有多扇门时（票 08 的后勤：配方 + 备货计划）两颗链接合成**一颗胶囊**：
-   边框与底色挂在外层，里面那两条只留文字（否则两颗胶囊并排，看着像两个分组）。
-   **整格是否当前**由 `is-on` 判（哪一格亮），**哪一半贴着"当前"**由 `is-current` 判
-   —— 一格两门时两半都算"这一格"（`.wb-nav-cell.is-on` 一起点着），只有指到这一页的
-   那半加粗着色。 */
-.wb-nav-cell {
-  display: inline-flex; align-items: stretch;
-  border: 1px solid var(--hy-line); background: var(--hy-surface-2); border-radius: 999px;
-}
-.wb-nav-cell > .wb-nav-item { border: none; background: none; padding: 4px 12px; }
-.wb-nav-cell.is-multi > .wb-nav-item + .wb-nav-item { border-left: 1px solid var(--hy-line); }
-.wb-nav-cell.is-multi > .wb-nav-item { padding: 4px 10px; }
-.wb-nav-item.is-on { color: var(--hy-mint); }
-.wb-nav-cell.is-on { border-color: var(--hy-mint-line); background: var(--hy-mint-soft); }
-.wb-nav-item.is-current { color: var(--hy-ink); font-weight: 600; }
-.wb-nav-item.is-current.is-on { color: var(--hy-mint); }
+/* 工作台级导航（`WorkbenchNav.vue`）：它自己只出胶囊，**贴右端**是这一条栏的事 ——
+   `margin-left: auto` 因此挂在这里，不挂在组件里（人事 / 现场两个壳要把它并进自己的
+   导航条，那里不兴贴右端）。 */
+.wb-nav { margin-left: auto; }
 .wb-main { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 
 /* 窄屏（票 12 收的 O3）：顶栏换行 —— 身份切换器与退出是这一条里最不该被挤出屏幕的两件
    （切换器自己 `flex: 0 0 auto`，见 `WorkbenchIdentitySwitcher.vue`），所以本组导航整条
    另起一行、自己横向滑。与人事壳 `.sched-top` 同一套路。 */
 @media (max-width: 720px) {
-  .wb-top { flex-wrap: wrap; row-gap: 6px; }
-  .wb-nav { order: 1; flex-basis: 100%; margin-left: 0; overflow-x: auto; }
+  /* 行数钉死两行（D8）：第一行放「‹后台 + 切换器 + 退出」，第二行整条导航。
+     390px 上实测原来会掉成三层（‹后台+切换器 / 退出 / 导航，104px，视口的 12%）——
+     原因是第一行差十几个像素放不下：切换器那条右边框与内边距（15px）、顶栏的内边距与
+     间隙（10px）加起来正好把「退出」挤到下一行。这里把这三处让出来，退出用 `auto`
+     贴住右端，于是它留在第一行。 */
+  .wb-top { flex-wrap: wrap; row-gap: 6px; gap: 8px; padding: 2px 10px; }
+  /* 这一行不再为下划线 tab 留底边（那条到底栏去了），几件元素回到上下等距。 */
+  .wb-back, .wb-brand, .wb-id-switcher { margin-bottom: 0; }
+  .wb-top :deep(.wb-exit) { margin-bottom: 0; }
+  .wb-id-switcher { margin-left: 0; padding-right: 0; border-right: 0; }
+  /* C 方向：工作台级导航在手机档下到底栏（`components/workbench/WorkbenchTabBar.vue`），
+     顶栏这一条收起来 —— 同一排入口不同时出现在两处。顶栏因此只剩一行：
+     返回 + 切档 + 退出，内容区把这一行省下来的高度拿走。 */
+  .wb-nav { display: none; }
+  /* 底栏是 `fixed`（脱离文档流），内容区得自己让出这一条的高度，否则滚到底时
+     最后一块内容压在它下面够不着。57px = 底栏自身高，再加 iPhone 的安全区。 */
+  .wb-main { padding-bottom: calc(57px + env(safe-area-inset-bottom, 0px)); }
+  /* 触控下限（B6）：手机上这一条栏里的三件（‹后台 / 导航胶囊 / 退出）原来高 24–29px，
+     一排互相挨着，误触率高。这里抬到 44px；退出那颗在它自己的组件里同一条。 */
+  .wb-back { min-height: 44px; padding: 4px 14px; }
 }
 @media (max-width: 560px) {
   /* 牌子让位给切换器与两扇门（人事壳同一条：`.sched-name` 在 560px 收起）：

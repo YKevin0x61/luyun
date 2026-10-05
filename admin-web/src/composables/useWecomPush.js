@@ -27,6 +27,50 @@ export function hygieneFeedWarning(webhooks) {
   return '还没有指定卫生群：卫生提醒与验收照片当前不会发出。请在下面的地址上勾选「这是卫生群」。'
 }
 
+/** 发送类型的短名：确认框里"销售报表 / 数据质量摘要"比内部标识好读。 */
+export function pushTypeLabel(pushType) {
+  if (pushType === 'data_quality_alert') return '数据质量摘要'
+  return '销售报表'
+}
+
+/**
+ * 「立即发送」的确认文案。
+ *
+ * 原来的文案是「确定立即发送当前预览对应的销售报表？」——**预览区空着的时候也这么说**：
+ * 页面显示「0 / 2048 字节」「选择任务后点击刷新预览」，确认框却在描述一份"当前预览"，
+ * 用户既不知道会发出什么，也不知道发给哪个群。外发消息撤不回来，确认框是最后一道闸门，
+ * 它必须说清"发给谁、多少字节、开头长什么样"。
+ *
+ * @param {{ job?: object|null, bytes?: number, content?: string }} args
+ *   `job` 是当前选中的推送任务（带 name / webhook_name），`bytes`/`content` 来自预览。
+ * @returns {string}
+ */
+export function sendNowConfirmText({ job = null, bytes = 0, content = '' } = {}) {
+  const typeLabel = pushTypeLabel(job?.push_type)
+  const target = job?.webhook_name ? `「${job.webhook_name}」` : '（任务未配置目标群）'
+  const lines = [`确定立即发送${typeLabel}到 ${target} 吗？`]
+
+  const size = Number(bytes) || 0
+  // 预览为空时说清这一点：后端会自己现算一份内容发出去（send-now 不读预览），
+  // 所以"空预览"不等于"发空消息"，但用户必须知道自己没核对过内容。
+  if (!content) {
+    lines.push('注意：当前没有预览内容，将按任务配置现算后发送，你没有核对过正文。')
+  }
+  lines.push(`消息大小 ${size} / 2048 字节。`)
+
+  const head = String(content || '').split('\n').map((line) => line.trim()).find(Boolean)
+  if (head) {
+    lines.push(`正文首行：${head.length > 40 ? `${head.slice(0, 40)}…` : head}`)
+  }
+  lines.push('消息发出后无法撤回。')
+  return lines.join('\n')
+}
+
+/** 预览为空时不允许「立即发送」：没有可核对的内容就外发，是这一页最容易误触的一条。 */
+export function canSendNow({ job = null, content = '' } = {}) {
+  return Boolean(job) && String(content || '').trim().length > 0
+}
+
 /** 阶段三：企微推送管理页面状态管理，1:1 迁移自原 public/wecom-push.html。 */
 export function useWecomPush() {
   const webhooks = ref([])

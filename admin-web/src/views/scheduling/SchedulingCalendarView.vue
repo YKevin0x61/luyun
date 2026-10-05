@@ -122,7 +122,10 @@ function toneClass(shiftId) {
 function formatDayLabel(businessDate) {
   if (!businessDate) return ''
   const [year, month, day] = businessDate.split('-').map(Number)
-  const weekday = WEEKDAYS[new Date(year, month - 1, day).getDay()]
+  // `WEEKDAYS` 是**周一开头**（索引 0 = 周一），而 `getDay()` 是周日=0 —— 直接拿它索引
+  // 会整体错一天（10/5 周一显示成「周二」）。跟 `weekStart()`、服务端 `date.weekday()`
+  // 一样先换算成周一=0。
+  const weekday = WEEKDAYS[(new Date(year, month - 1, day).getDay() + 6) % 7]
   return `${month}/${day} 周${weekday}`
 }
 

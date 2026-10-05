@@ -1228,6 +1228,9 @@ SPA_PAGE_ROUTES = (
     "/workbench/floor/boards",
     "/workbench/floor/attire",
     "/workbench/floor/data",
+    # 卫生趋势（2026-10-05 用户裁定）：现场组的第八页 —— 前面七页都是「当下」、数据页是
+    # 台账，这一页回答「这周比上周好还是差」。同一批：漏一条就是直连 uvicorn 硬导航 404。
+    "/workbench/floor/trend",
     # 票 07：后勤组的配方五页 —— 从独立域 `/recipe*` 搬进来（阅读面列表 / 沉浸阅读 /
     # 打印 / 印码两种身份都能看，管理面只给管理端）。服务端这里只管「注册成页面」，
     # 页面级权限在前端路由 meta 与各接口自己的 401。旧 `/recipe*` 一律作废：删干净、

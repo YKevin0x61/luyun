@@ -1,11 +1,16 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../../api/client'
+import { useEscapeClose } from '../../composables/useEscapeClose'
 import { useNudgePull } from '../../composables/useNudgePull'
 import SvgIcon from '../SvgIcon.vue'
 import LuyunDatePicker from '../ui/LuyunDatePicker.vue'
 
 const emit = defineEmits(['close'])
+
+// 组件由 `v-if` 控制，挂载即打开：Esc 关闭走和 ✕ / 点遮罩同一条 emit。
+// 这个面板是整屏 modal，键盘关不掉时用户只能去够右上角的 ✕。
+useEscapeClose(() => true, () => emit('close'))
 
 const loading = ref(true)
 const error = ref('')

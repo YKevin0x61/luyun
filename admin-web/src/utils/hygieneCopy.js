@@ -1,8 +1,13 @@
 /** Hygiene roster copy and permission helpers. Rules stay on the server. */
 
+import { hasCap } from './adminCaps'
 import { supportsNativeCameraCapture } from './cameraCapabilities'
 import { WORKBENCH_TITLE, workbenchDocumentTitle } from './workbenchCopy'
 
+// 「卫生权限」这一档（普通员工 / 管理员）**还留着**，但它现在只是显示用的人话标签：
+// 花名册拿它当下拉的选项，员工端「我的」拿它显示一行字。**判据一律看 `admin_caps`**
+// （`adminCaps.js` 那十项开关）—— 同档的两个人可以开完全不同的开关，拿这个字符串判
+// 就会把没放权的人一起放进来。2026-10-05 用户裁定，见 `utils/adminCaps.js` 的说明。
 export const HYGIENE_PERMISSIONS = ['普通员工', '管理员']
 export const HYGIENE_SHIFTS = ['白班', '夜班']
 export const HYGIENE_WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
@@ -24,6 +29,12 @@ export const HYGIENE_ADMIN_NAV = [
   { path: '/workbench/floor/fix', title: '整改单', shortTitle: '整改', icon: 'siren', code: 'FIX' },
   { path: '/workbench/floor/boards', title: '红黑榜', shortTitle: '榜', icon: 'star', code: 'BOARDS' },
   { path: '/workbench/floor/data', title: '数据与照片', shortTitle: '数据', icon: 'folder', code: 'ARCHIVE' },
+  // 卫生趋势（2026-10-05 用户裁定）：现场那七页都是"当下"，数据页是台账 —— 没有一处回答
+  // "这周比上周好还是差"，这一页就是那个回答。
+  // **往现场组加页要动两处**：`router/pageRoutes.json`（清单）与**这里**（rail）。这份名单是
+  // **手写**的，不像人事壳那样从清单派生（`workbenchPagesOf`）—— 只登记清单的话，页面敲 URL
+  // 进得去、rail 里却没有入口，`groupDoors.test.js` 有断言盯着这个缺口。
+  { path: '/workbench/floor/trend', title: '卫生趋势', shortTitle: '趋势', icon: 'trending-up', code: 'TREND' },
 ]
 
 export const HYGIENE_STAFF_TABS = [
@@ -97,8 +108,11 @@ export function canAcceptFixTicket(actor, ticket, now = Date.now()) {
   if (actor && actor.kind === 'super' && ticket.opener_kind === 'super') return true
   if (actor && actor.id != null && Number(actor.id) === Number(ticket.opener_id)) return true
   if (!actor) return false
-  const isAdmin = actor.kind === 'super' || actor.permission === '管理员'
-  if (!isAdmin) return false
+  // 验别人的整改单看的是「整改单」这一项开关，不是 `permission` 那个档位（2026-10-05）：
+  // 同一档的两个人可以一个开了整改单、一个没开，拿标签判就会把没开的那个人也放进来。
+  // 上面两条是例外、不看开关：自己开的单子自己收（时限到了），超级管理员开的单子他向来自收。
+  const canReviewFix = actor.kind === 'super' || hasCap(actor.admin_caps, 'fix')
+  if (!canReviewFix) return false
   const deadline = Date.parse(ticket.deadline)
   return Number.isFinite(deadline) && now >= deadline
 }

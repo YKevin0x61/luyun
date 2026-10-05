@@ -10,11 +10,13 @@ import {
   fixPrimaryAction,
   formatStamp,
   groupByZone,
+  isPendingReview,
   nextAfterRemove,
   nextDeepShootRow,
   nextFixWorkRow,
   nextShootRow,
   openRows,
+  queueActionLabel,
   queueGroups,
   shiftClock,
   statusTone,
@@ -73,13 +75,59 @@ describe('hygieneWorkFlow', () => {
   })
 
   it('primary actions: pending review first, passed has none', () => {
-    expect(dailyPrimaryAction(anbanTodo)).toBe('shoot')
-    expect(dailyPrimaryAction(anbanPending)).toBe('review')
-    expect(dailyPrimaryAction(xianPassed)).toBe('none')
-    expect(deepPrimaryAction({ status: '待拍' })).toBe('shoot')
+    expect(dailyPrimaryAction(anbanTodo, { isManager: true })).toBe('shoot')
+    expect(dailyPrimaryAction(anbanPending, { isManager: true })).toBe('review')
+    expect(dailyPrimaryAction(xianPassed, { isManager: true })).toBe('none')
+    expect(deepPrimaryAction({ status: '待拍' }, { isManager: true })).toBe('shoot')
     expect(fixPrimaryAction({ status: '待回拍' }, { isManager: true })).toBe('reshoot')
     expect(fixPrimaryAction({ status: '待验收' }, { isManager: true })).toBe('review')
     expect(fixPrimaryAction({ status: '待验收' }, { isManager: false })).toBe('reshoot')
+    // 漏传档位按"不是管理员"算（落在只读那一档）：漏传只会少一颗决定按钮，不会多给权限。
+    expect(dailyPrimaryAction(anbanPending)).toBe('view')
+  })
+
+  it('待验收那一档分两种人：管理员 review、普通员工 view（判据只有这一处）', () => {
+    // 2026-10-05 审查 F-04：`*PrimaryAction` 原来不看 isManager，队列文案（primaryLabel）
+    // 自己又写了一遍 isManager —— 两处一分叉，普通员工就看到一个既没有决定按钮、也没有
+    // 说明的空壳验收面板。这条守着"档位判据只有一处"：判据给什么，队列文案就得是什么。
+    expect(dailyPrimaryAction(anbanPending, { isManager: true })).toBe('review')
+    expect(dailyPrimaryAction(anbanPending, { isManager: false })).toBe('view')
+    expect(deepPrimaryAction({ status: '待验收' }, { isManager: true })).toBe('review')
+    expect(deepPrimaryAction({ status: '待验收' }, { isManager: false })).toBe('view')
+    // 待拍 / 已通过那一档不随档位变：谁都要拍，通过了就是没有动作。
+    expect(dailyPrimaryAction(anbanTodo, { isManager: false })).toBe('shoot')
+    expect(deepPrimaryAction({ status: '待拍' }, { isManager: false })).toBe('shoot')
+    expect(dailyPrimaryAction(xianPassed, { isManager: false })).toBe('none')
+  })
+
+  it('「重拍」问的是另一件事：交了没有，跟谁能验收无关', () => {
+    // ADR 0071：待验收期间再交一张会替换上一张，交这张的人（普通员工也算）永远能重拍。
+    // 所以它不能被挂在 `*PrimaryAction === 'review'` 上，否则普通员工的重拍入口会消失。
+    expect(isPendingReview({ status: '待验收' })).toBe(true)
+    expect(isPendingReview({ status: '待拍' })).toBe(false)
+    expect(isPendingReview({ status: '已通过' })).toBe(false)
+    expect(isPendingReview(null)).toBe(false)
+  })
+
+  it('buildWorkQueue 的动作文案跟着同一个判据走（普通员工待验收是「查看」，不是「验收」）', () => {
+    const rows = {
+      inbox: [{ ...anbanPending, business_date: '2026-09-13' }],
+      deepInbox: [{ item_id: 30, item_name: '冰箱除霜', business_date: '2026-09-13', status: '待验收' }],
+      shiftDue: '15:00',
+      deepDue: '21:30',
+    }
+    const staffQueue = buildWorkQueue({ ...rows, isManager: false })
+    expect(staffQueue.map((task) => task.primaryLabel).sort()).toEqual(['查看', '查看'])
+    const managerQueue = buildWorkQueue({ ...rows, isManager: true })
+    expect(managerQueue.map((task) => task.primaryLabel).sort()).toEqual(['验收', '验收'])
+    // 文案表与判据对得上：`queueActionLabel` 是唯一的查表口。
+    expect(queueActionLabel('daily', 'shoot')).toBe('拍摄')
+    expect(queueActionLabel('deep', 'shoot')).toBe('拍前后')
+    expect(queueActionLabel('fix', 'reshoot')).toBe('回拍')
+    expect(queueActionLabel('fix', 'review')).toBe('验收')
+    expect(queueActionLabel('deep', 'view')).toBe('查看')
+    expect(queueActionLabel('daily', 'none')).toBe('')
+    expect(queueActionLabel('nope', 'review')).toBe('')
   })
 
   it('deadline urgency and shift clocks stay local to the picked 班次', () => {

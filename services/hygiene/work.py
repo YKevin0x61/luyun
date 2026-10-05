@@ -26,6 +26,14 @@ from services.hygiene.accounts import (
     SHIFT_NIGHT,
     hygiene_business_date,
 )
+# 管理权限开关（2026-10-05）：判据从"是不是管理员这个档位"改成"有没有这一项开关"。
+# `PERMISSION_ADMIN` 还留着，但只在**显示与兼容**处用（见 `capabilities.py` 的说明）。
+from services.identity.capabilities import (
+    CAP_DAILY_REVIEW,
+    CAP_DEEP_REVIEW,
+    CAP_FIX,
+    has_cap,
+)
 from services.hygiene.images import GeneratedVariant, InvalidImageError
 from services.hygiene.archive import (
     ARCHIVE_DELETE_KINDS,
@@ -1829,15 +1837,32 @@ class HygieneWork:
         return DAILY_SHIFTS, None
 
     async def list_daily_work(
-        self, actor: dict, business_date: Optional[str] = None
+        self,
+        actor: dict,
+        business_date: Optional[str] = None,
+        *,
+        pending_review_only: bool = False,
     ) -> list[dict]:
         """列出一个营业日的日常检查。
 
         不给日期就是当天。带历史日期是管理端回看（ADR-0088）：实例与提交照旧，
         只是不再限定「待验收」——回看要能看见那天交没交、漏了哪些。
+
+        ``pending_review_only``：**待我验收**这一档（2026-10-05 加）—— 给员工账号上的
+        「管理员」用。他的验收权是**全店**的（``_require_reviewer`` 只看 permission，不看区），
+        但他的待办队列被 ``_inbox_filter`` 锁在「本区 + 本班次」，于是今天**别的区**有人交了
+        他一条也看不到，验收权等于没有入口。这一档把范围放开到两个班次、全部区，只要
+        「待验收」且不是他自己交的那条 —— 与 ``_require_reviewer`` 的两条判据逐字对齐。
         """
+        if pending_review_only:
+            # 只有能验收的人才拿得到这一档；普通员工拿到的是 forbidden（前端也不会问他）。
+            self._require_reviewer(actor, 0, CAP_DAILY_REVIEW)
         target = business_date or hygiene_business_date(self._now_dt())
-        shifts, zone_id = self._inbox_filter(actor)
+        if pending_review_only:
+            shifts: tuple[str, ...] = DAILY_SHIFTS
+            zone_id: Optional[int] = None
+        else:
+            shifts, zone_id = self._inbox_filter(actor)
         if not shifts:
             return []
         shift_sql = " UNION ALL ".join("SELECT ? AS shift" for _ in shifts)
@@ -1877,6 +1902,13 @@ class HygieneWork:
             mapping = dict(row)
             if not self._zone_shift_enabled(mapping, mapping["shift"]):
                 continue
+            if pending_review_only:
+                # 只要今天真有人交了、还没被判的；自己交的自己不能判
+                # （`_require_reviewer` 的 `cannot_self_accept`，在这里体现为直接不放进来）。
+                if mapping.get("instance_status") != STATUS_PENDING:
+                    continue
+                if int(mapping.get("submitter_id") or 0) == int((actor or {}).get("id") or 0):
+                    continue
             item = {
                 "id": mapping["item_id"],
                 "name": mapping["item_name"],
@@ -1979,12 +2011,18 @@ class HygieneWork:
             ),
         }
 
-    def _require_reviewer(self, actor: dict, submitter_id: int) -> None:
+    def _require_reviewer(self, actor: dict, submitter_id: int, cap: str) -> None:
+        """能不能判别人交的这一份。``cap`` 是要的那一项开关（日常 / 专项）。
+
+        2026-10-05 起由超级管理员逐项放权：以前是"是不是「管理员」这个档位"，
+        现在是"有没有这一项" —— 有的人只该判日常、不该判专项，档位表达不出来。
+        两条老规矩不变：本人不能判自己交的；超级管理员不受开关限制。
+        """
         if not actor:
             raise HygieneWorkError("forbidden", "forbidden")
         if actor.get("kind") == "super":
             return
-        if actor.get("kind") != "staff" or actor.get("permission") != PERMISSION_ADMIN:
+        if actor.get("kind") != "staff" or not has_cap(actor.get("caps"), cap):
             raise HygieneWorkError("forbidden", "forbidden")
         if int(actor.get("id") or 0) == int(submitter_id):
             raise HygieneWorkError("cannot_self_accept", "cannot_self_accept")
@@ -2098,7 +2136,7 @@ class HygieneWork:
         item_row = await self._fetch_item_with_zone(item_id)
         if item_row is not None:
             self._require_zone_access(actor, item_row["zone_id"])
-        self._require_reviewer(actor, submission["submitter_id"])
+        self._require_reviewer(actor, submission["submitter_id"], CAP_DAILY_REVIEW)
         # 发到群里的那一行说明：哪个区、哪个检查项、什么时候验的（**不带员工姓名**）。
         # 先算好 —— 下面那个分支会把 item_row 换成只带 zone_id 的那一行。
         reviewed_item = {} if item_row is None else dict(item_row)
@@ -2170,7 +2208,7 @@ class HygieneWork:
         item_row = await self._fetch_item_with_zone(item_id)
         if item_row is not None:
             self._require_zone_access(actor, item_row["zone_id"])
-        self._require_reviewer(actor, submission["submitter_id"])
+        self._require_reviewer(actor, submission["submitter_id"], CAP_DAILY_REVIEW)
         now = self._now_iso()
         cur = await self._conn.execute(
             """UPDATE hygiene_daily_instances
@@ -2583,6 +2621,171 @@ class HygieneWork:
             params.append(max(1, int(limit)))
         cur = await self._conn.execute(sql, params)
         return [self._event_from_row(row) for row in await cur.fetchall()]
+
+    async def staff_score(self, employee_id: int, *, days: int = 7) -> dict:
+        """**我的成绩**（2026-10-05 用户裁定）：一次通过 / 被驳回 / 驳回原因分布。
+
+        数据源就是"人的榜"那张事件表（`list_person_board_events`）—— 它本来就按人记下了
+        每一次**一次通过**与**驳回**，所以这里**不另起一套计数**：另起就会跟榜对不上，
+        而"员工的成绩和榜上显示的不一样"是那种事后极难查的账。
+
+        口径：**一次通过率 = 一次通过 /（一次通过 + 驳回）**。两者都是 0 时给 `None`
+        （新人还没交过活，不该显示 0% —— 那看着像被扣分）。
+
+        范围按**营业日**往前推 `days` 天（与逾期、榜同一把尺子，不按自然日）。
+        事件有 84 天保留期（`BOARD_EVENT_RETENTION_DAYS`），所以这个窗口最大也只能到那儿。
+        """
+        from datetime import date as _date  # 局部导入：本模块只在方法里用日期算术
+
+        span = max(1, min(int(days or 7), BOARD_EVENT_RETENTION_DAYS))
+        today = hygiene_business_date(self._now_dt())
+        start = (_date.fromisoformat(today) - timedelta(days=span - 1)).isoformat()
+
+        events = await self.list_person_board_events(employee_id=employee_id, limit=None)
+        window = [e for e in events if str(e.get("business_date") or "") >= start]
+
+        tally: dict[str, int] = {}
+        reasons: dict[str, int] = {}
+        for event in window:
+            kind = event.get("event_type") or ""
+            tally[kind] = tally.get(kind, 0) + 1
+            if kind == EVENT_REJECT:
+                text = (event.get("reason") or "").strip() or "没写原因"
+                reasons[text] = reasons.get(text, 0) + 1
+
+        first_pass = tally.get(EVENT_FIRST_PASS, 0)
+        rejected = tally.get(EVENT_REJECT, 0)
+        judged = first_pass + rejected
+        return {
+            "days": span,
+            "since": start,
+            "business_date": today,
+            "first_pass": first_pass,
+            "rejected": rejected,
+            "captured": tally.get(EVENT_CAPTURE, 0),
+            "missed": tally.get(EVENT_MISSED_DAILY, 0),
+            # 没交过活时是 None（不是 0）—— 前端据此显示"还没开始"而不是"0%"。
+            "pass_rate": (first_pass / judged) if judged else None,
+            "reasons": [
+                {"reason": text, "count": count}
+                for text, count in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+            ],
+        }
+
+    async def hygiene_trend(self, *, days: int = 30) -> dict:
+        """卫生趋势（2026-10-05 用户裁定：超级管理员要能看到趋势）。
+
+        现场那七页全是**当下**（今天的队列、当前的待办），数据页是**台账与导出** ——
+        没有一处回答"这周比上周好还是差"。这一份就是那个回答，三个切面：
+
+        * `daily` —— 按营业日：一次通过 / 驳回 / 实拍 / 逾期（前端画趋势线）
+        * `zones` —— 按工作区：谁老出问题、谁的逾期最多
+        * `reasons` —— 全店驳回原因 TOP（尺度问题出在哪）
+
+        数据源还是那张事件表（人的榜 + 区的榜），与红黑榜**同一份记录** —— 不另起计数，
+        否则趋势与榜对不上，而"两个页面两个数"是最难查的一类账。事件有 84 天保留期，
+        所以窗口最大只能到那儿。
+        """
+        from datetime import date as _date  # 局部导入：本模块只在方法里用日期算术
+
+        span = max(1, min(int(days or 30), BOARD_EVENT_RETENTION_DAYS))
+        today = hygiene_business_date(self._now_dt())
+        start = (_date.fromisoformat(today) - timedelta(days=span - 1)).isoformat()
+
+        person = [
+            event
+            for event in await self.list_person_board_events(limit=None)
+            if str(event.get("business_date") or "") >= start
+        ]
+        zone_events = [
+            event
+            for event in await self.list_zone_board_events(limit=None)
+            if str(event.get("business_date") or "") >= start
+        ]
+
+        def bucket(day: str) -> dict:
+            return daily.setdefault(
+                day,
+                {"business_date": day, "first_pass": 0, "rejected": 0, "captured": 0, "missed": 0},
+            )
+
+        daily: dict[str, dict] = {}
+        reasons: dict[str, int] = {}
+        zone_tally: dict[int, dict] = {}
+
+        def zone_bucket(zone_id) -> dict:
+            return zone_tally.setdefault(
+                int(zone_id),
+                {"zone_id": int(zone_id), "first_pass": 0, "rejected": 0, "missed": 0},
+            )
+
+        for event in person:
+            day = str(event.get("business_date") or "")
+            kind = event.get("event_type") or ""
+            row = bucket(day)
+            if kind == EVENT_FIRST_PASS:
+                row["first_pass"] += 1
+                if event.get("zone_id"):
+                    zone_bucket(event["zone_id"])["first_pass"] += 1
+            elif kind == EVENT_REJECT:
+                row["rejected"] += 1
+                text = (event.get("reason") or "").strip() or "没写原因"
+                reasons[text] = reasons.get(text, 0) + 1
+                if event.get("zone_id"):
+                    zone_bucket(event["zone_id"])["rejected"] += 1
+            elif kind == EVENT_CAPTURE:
+                row["captured"] += 1
+
+        for event in zone_events:
+            if (event.get("event_type") or "") != EVENT_MISSED_DAILY:
+                continue
+            day = str(event.get("business_date") or "")
+            bucket(day)["missed"] += 1
+            if event.get("zone_id"):
+                zone_bucket(event["zone_id"])["missed"] += 1
+
+        # 区名从工作区名单取（事件里只有 id）；名单是唯一来源，不在这里拼名字。
+        # `pass_rate` 与按天那一栏**同一个口径**（一次通过 /（一次通过 + 驳回））——
+        # 逾期是另一条轴（`missed` 单独一列），不塞进分母，否则两个数放一起没法比。
+        names = {int(zone["id"]): zone["name"] for zone in await self.list_zones()}
+        zones = []
+        for row in zone_tally.values():
+            judged = row["first_pass"] + row["rejected"]
+            zones.append(
+                {
+                    **row,
+                    "zone_name": names.get(row["zone_id"], f"工作区 {row['zone_id']}"),
+                    "pass_rate": (row["first_pass"] / judged) if judged else None,
+                }
+            )
+        zones.sort(key=lambda row: (-row["rejected"], -row["missed"], row["zone_id"]))
+
+        ordered = [daily[day] for day in sorted(daily)]
+        for row in ordered:
+            judged = row["first_pass"] + row["rejected"]
+            row["pass_rate"] = (row["first_pass"] / judged) if judged else None
+
+        total_first = sum(row["first_pass"] for row in ordered)
+        total_rejected = sum(row["rejected"] for row in ordered)
+        judged = total_first + total_rejected
+        return {
+            "days": span,
+            "since": start,
+            "business_date": today,
+            "daily": ordered,
+            "zones": zones[:12],
+            "reasons": [
+                {"reason": text, "count": count}
+                for text, count in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+            ],
+            "totals": {
+                "first_pass": total_first,
+                "rejected": total_rejected,
+                "captured": sum(row["captured"] for row in ordered),
+                "missed": sum(row["missed"] for row in ordered),
+                "pass_rate": (total_first / judged) if judged else None,
+            },
+        }
 
     @serialized_write
     async def purge_old_board_events(self, now: Optional[datetime] = None) -> int:
@@ -3138,6 +3341,25 @@ class HygieneWork:
         }
 
     async def list_deep_clean_work(self, actor: dict) -> dict:
+        """列出今天这一天的专项卫生清单。
+
+        **不带 actor 过滤是有意的，不是漏了横向隔离**（2026-10-05 审查 F-07 把它标成
+        「存疑、需产品确认」，这里记一下结论）：专项是「全店一条、全店一起干」，不分
+        卫生工作区、也不分班次 —— `hygiene_deep_clean_items` 只有 ``(weekday, name)``
+        两列，压根没有"这一项归哪个区 / 哪个人"可判。日常那侧之所以按「本区 + 本班次」
+        过滤，是因为日常检查项挂在区下、班次决定交哪一档；专项没有这两层。
+
+        出处是产品决策，写在 ADR 里（0040 / 0041 / 0064 被后续 ADR 取代时，每一条都
+        单独保留了"专项卫生 remains shop-wide"这句）：ADR 0054「专项卫生 is one
+        shop-wide item」、0059「One shop-wide 专项卫生 contains many before/after
+        pairs」、0075「专项卫生 does not belong to a 卫生工作区 and remains shop-wide」。
+        页面文案照同一口径写（`HygieneHomeView` 的「全店专项，不按工作区或班次」）。
+
+        代价是明确的、且被接受：这个接口把今天每一项的 `submitter_phone`（**实际存的是
+        姓名**，见 `submit_deep_clean_pair` 里 `photographer` 那一列）连同照片一起发给
+        任何员工会话。要收紧就得先改产品口径、再给专项清单加"归谁 / 归哪个区"的列 ——
+        在这里补一句 ``WHERE submitter_id = ?`` 只会让"全店一起干"的活变成谁都看不见。
+        """
         del actor  # shop-wide; 班次 does not gate 专项卫生
         business_date = hygiene_business_date(self._now_dt())
         weekday = self._weekday_of(business_date)
@@ -3363,7 +3585,7 @@ class HygieneWork:
     @serialized_write
     async def accept_deep_clean_pair(self, actor: dict, item_id: int) -> dict:
         instance, submission = await self._pending_deep_clean(item_id)
-        self._require_reviewer(actor, submission["submitter_id"])
+        self._require_reviewer(actor, submission["submitter_id"], CAP_DEEP_REVIEW)
         # 专项一次提交两张图：capture_id 存「后」，extra 存「前」，发出去的是拼好的
         # 一张对照图（左前右后）—— 所以说明里要写清左右，图上也有标签。
         deep_clean_name = str(submission.get("item_name") or "").strip() or "专项卫生"
@@ -3410,7 +3632,7 @@ class HygieneWork:
         reason: Optional[str] = None,
     ) -> dict:
         instance, submission = await self._pending_deep_clean(item_id)
-        self._require_reviewer(actor, submission["submitter_id"])
+        self._require_reviewer(actor, submission["submitter_id"], CAP_DEEP_REVIEW)
         now = self._now_iso()
         cur = await self._conn.execute(
             """UPDATE hygiene_deep_clean_instances
@@ -3463,12 +3685,26 @@ class HygieneWork:
         return f"{hours:g} 小时"
 
     def _require_fix_opener(self, actor: dict) -> None:
+        """开整改单的**权限**判据：只看档位，不看今天排没排到班。
+
+        「管理员」这个档位在后端只有三处能力，这是其中一处（另两处是
+        `_require_reviewer` 验收日常/专项、`_require_fix_reviewer` 验收整改单）。
+        管理员是"现场复核档"：他把活交出去、也能自己开单。开单跟日常拍摄不是一回事 ——
+        班次只决定交哪一档日常，所以**"今天有没有班"不是这一档的前置条件**（2026-10-05
+        审查 F-05：前端曾经复用日常那条 `needsAssignment` 拦开单，管理员被告知"去找店长
+        确认排班"，而他自己就是管理员）。
+
+        真正限制他开在哪里的，是 `open_fix` 里的 `_require_zone_access`：只认今天排给他的
+        那个卫生工作区（`_actor_zone_id`；今天一个区都没排到的员工 actor 带的是
+        ``zone_id=None``，那里会抛 `zone_required` → 前端说人话拒绝）。普通员工在这一步
+        就被 `forbidden` 挡下，**不会**走到工作区判断 —— 403 不能变成 200。
+        """
         if actor and actor.get("kind") == "super":
             return
         if (
             actor
             and actor.get("kind") == "staff"
-            and actor.get("permission") == PERMISSION_ADMIN
+            and has_cap(actor.get("caps"), CAP_FIX)
         ):
             return
         raise HygieneWorkError("forbidden", "forbidden")
@@ -3493,7 +3729,7 @@ class HygieneWork:
         if (
             actor
             and actor.get("kind") == "staff"
-            and actor.get("permission") == PERMISSION_ADMIN
+            and has_cap(actor.get("caps"), CAP_FIX)
         ):
             return
         raise HygieneWorkError("forbidden", "forbidden")
@@ -3616,6 +3852,9 @@ class HygieneWork:
         zone = await self._fetch_zone(zone_id)
         if zone is None:
             raise HygieneWorkError("zone_not_found", "zone_not_found")
+        # 权限另判（`_require_fix_opener`），这里判的是**开在哪个区**：今天排了区就只能开
+        # 在自己那个区上；今天一个区都没排到（actor 的 zone_id 是 None）会被判
+        # `zone_required` 拒掉。班次不参与 —— 开整改单是复核动作，不落在班次上。
         self._require_zone_access(actor, zone_id)
         zone_name = dict(zone)["name"]
         if actor.get("kind") == "super":

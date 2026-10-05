@@ -16,7 +16,7 @@ import {
 // 断言的是行为（注册出来的路由表长什么样），不是源码写法：router 怎么改结构都行，
 // 只要还是从这一张表派生。
 
-const GROUPS = ['home', 'hr', 'floor', 'kitchen', 'me', 'system', 'entry']
+const GROUPS = ['home', 'hr', 'floor', 'hygiene', 'kitchen', 'me', 'system', 'entry']
 const AUDIENCES = ['admin', 'staff', 'both']
 
 /** 每个用例都换一份崭新的 router 模块（它是单例，`createWebHistory` 也只该建一次）。 */
@@ -66,6 +66,8 @@ describe('页面清单（唯一来源）', () => {
       '/workbench/floor/fix',
       '/workbench/floor/boards',
       '/workbench/floor/data',
+      // 卫生趋势（2026-10-05 用户裁定）：现场组的第八页，与同组那七页同壳（standalone）。
+      '/workbench/floor/trend',
       // 票 07：后勤组的配方五页 —— 两种外壳（带工作台导航的列表与管理，沉浸的阅读 /
       // 打印 / 印码）在这张表里都记 `standalone: true`（那条的语义是「不渲染管理后台
       // 那条导航」，不是「没有外壳」）。

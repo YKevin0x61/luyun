@@ -173,7 +173,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="insight-card-body"><TrendChart :series="trendSeries" :error="trendError" /></div>
         </div>
-        <div class="insight-card">
+        <div class="insight-card insight-card--share">
           <div class="insight-card-header">
             <h3>档口收入占比</h3>
             <span class="badge">{{ stationShareTotal }}</span>
@@ -213,3 +213,15 @@ onBeforeUnmount(() => {
     <ReportDishSettingsModal v-if="modal === 'report-dish-settings'" @close="modal = null" />
   </div>
 </template>
+
+<style scoped>
+/* 「档口收入占比」允许随内容长高。`theme.css` 给 `.insight-card-body` 定的是固定
+   `height: 110px`，那是为走势图/时段卡这类"一张图占满"的内容定的；档口数多于 4 个时
+   这张列表就会在第 5 行被从字形中间切断、第 6–7 项完全看不到（真机实测 7 个档口只排到
+   第 5 行，卡片总高 151px，也没有任何展开或滚动提示）。这里只放开这一张卡，其余卡片
+   维持 110px。 */
+.insight-card--share .insight-card-body {
+  height: auto;
+  max-height: 240px;
+}
+</style>

@@ -12,16 +12,18 @@
  * `GET|POST|DELETE /api/scheduling/me/requests`（自己提的请假）与票 09 加的
  * `GET /api/scheduling/me/colleagues` + `POST /api/scheduling/me/swaps*`（换班：
  * 提一条、替对方点头或摇头）。整屏没有钟点 —— 班次没有起止时刻，钟点只在卫生那边。
+ * 「我的成绩」那张卡（2026-10-05 用户裁定）另读一条 `GET /api/hygiene/staff/me/stats`，
+ * 同样只认员工自己的 cookie（路径上没有 `employee_id`，读谁由服务端按会话定）。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import StaffExitButton from '../../components/staff/StaffExitButton.vue'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
+import { hygienePermissionLabel, hygieneShiftLabel } from '../../utils/hygieneCopy'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { buildWorkQueue, dailyProgress, shiftClock } from '../../utils/hygieneWorkFlow'
 import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
@@ -91,6 +93,40 @@ const hygiene = ref({
   zoneName: '',
   now: 0,
 })
+
+// 「我的」那一块（从卫生页的「我」搬来，界面与逻辑在文件后半段）的**数据**：都跟着
+// `loadHygiene` 那条 `/api/hygiene/staff/me` 一起下来 —— `staffMe` 就是那份 employee
+// （姓名 / 手机号 / 职位 / 卫生权限），`deepClock` 是专项的钟点。两条都是**同一个响应**，
+// 不再为「我的」多发一条请求。声明摆在这里，是因为给它们赋值的那一步在下面。
+const staffMe = ref(null)
+const deepClock = ref(null)
+
+// 「我的成绩」（2026-10-05 用户裁定）：近 7 天的一次通过率 + 被驳回的原因分布。
+//
+// **为什么放这一页**：员工端原来只有「今天要做什么」——惩罚（驳回、红黑榜）看得见，
+// 正反馈一点没有，人会躲着这个系统用。这一页是员工**登录后的落点**（`/login` 的员工栏
+// 就落在这儿，见 `utils/loginNext.js`），休假的、当天没排到班的日子照样打得开；卫生页
+// `/workbench/me/clean` 只有"今天有活"的时候才会被点开 —— 恰恰是那些被驳回过、最该看
+// 一眼自己成绩的人，那天可能压根没有活干，也就永远看不到这张卡。成绩记的是**验收之后**
+// 的结果，不是交照片那一刻，也不需要贴着取景框才有意义。
+// 卡的位置在卫生卡与「我的」之间：这一页的读序是"今天上不上班 → 今天的活 → 我干得
+// 怎么样 → 账号设置"，成绩属于第三段，而「我的」那张是设置（不是活）。
+const SCORE_DAYS = 7
+const score = ref({
+  state: 'loading', // loading | ready | error
+  error: '',
+  // `passRate === null` = 这段时间**一次都没交过活**（服务端就用 null 表示"没有分母"）。
+  // 它与 `0` 是两件事：0% 是"交了全被驳"，null 是"还没开始"。界面上必须分开（见模板里
+  // 那个分支）—— 给新人看 0%，他只会以为自己已经被扣分了，那正是这张卡要治的毛病。
+  passRate: null,
+  firstPass: 0,
+  rejected: 0,
+  reasons: [],
+  days: SCORE_DAYS,
+})
+
+// 顶上那张排班卡（「重新选择区域和班次」那一行要把人送回它）：
+const schedCard = ref(null)
 
 const hygieneStats = computed(() => dailyProgress(hygiene.value.items))
 const hygieneDue = computed(() => shiftClock(hygiene.value.shift, hygiene.value.clocks))
@@ -436,6 +472,10 @@ async function loadHygiene(quiet = false) {
     ])
     const employee = me.employee || {}
     const shot = attireShot.attire || {}
+    // 同一份响应里那个 employee 也喂「我的」那一块（姓名 / 手机号 / 职位 / 卫生权限，
+    // 见下面 `staffMe`）：它是**同一个** `/api/hygiene/staff/me`，不额外再发一条请求。
+    staffMe.value = employee
+    deepClock.value = me.deep_clock || null
     attire.value = {
       state: 'ready',
       error: '',
@@ -466,6 +506,203 @@ async function loadHygiene(quiet = false) {
   }
 }
 
+/** 大数字那位：服务端给的是 0–1 的小数。 */
+const scorePercent = computed(() => {
+  if (score.value.passRate === null) return null
+  const percent = Math.round(score.value.passRate * 100)
+  // 0.996 这种不能显示成 100%：这张卡上就写着「被驳回 N 次」，两个数并排自相矛盾 ——
+  // 少一个百分点的精度，比让员工发现页面在骗他要轻得多。
+  return percent === 100 && score.value.passRate < 1 ? 99 : percent
+})
+
+/** 读自己的成绩（近 7 天）。跟卫生那块一样**自己一个 try**：读不出来只把这卡变成一句
+ *  「读不出来 + 重试」，上面那几张卡照常显示。 */
+async function loadScore(quiet = false) {
+  if (!quiet) score.value = { ...score.value, state: 'loading', error: '' }
+  try {
+    const data = await staffRequest(`/api/hygiene/staff/me/stats?days=${SCORE_DAYS}`)
+    score.value = {
+      state: 'ready',
+      error: '',
+      passRate: data.pass_rate === null || data.pass_rate === undefined
+        ? null
+        : Number(data.pass_rate),
+      firstPass: Number(data.first_pass) || 0,
+      rejected: Number(data.rejected) || 0,
+      reasons: Array.isArray(data.reasons) ? data.reasons : [],
+      // 窗口用响应里那个 `days`：服务端有 84 天保留期这一道夹子，拿它的数显示才不会跟
+      // 真实窗口对不上（文案里写死「7 天」，服务端一改口径这张卡就开始撒谎）。
+      days: Number(data.days) || SCORE_DAYS,
+    }
+  } catch (err) {
+    if (err.status === 401) {
+      leaveForStaffLogin()
+      return
+    }
+    score.value = { ...score.value, state: 'error', error: err.message || '成绩读不出来' }
+  }
+}
+
+// 「我的」那一块（2026-10-05 用户裁定）——**从卫生页整块搬来**。
+//
+// 原来它在 `/workbench/me/clean` 是第五格 tab「我」，与待办 / 专项 / 整改 / 榜四条平级：
+// 一条 tab 条上混了三种性质（任务 / 信息 / 设置）。账号设置属于「我的」这一页
+// （底栏那一格指的就是 `/workbench/me/today`），所以连人带逻辑搬到这一页尾部：
+// 三行入口（修改个人信息 / 修改密码 / 重新选择区域和班次）+ 一条自己的资料。
+// 逻辑是照搬的（手机号正则、改号前那次确认、两条 PATCH、成功与失败的提示语），
+// 只换了容器写法：这一页的表单走 `.form-row` / `.input` / `.modal-*`（与请假、换班
+// 同一个底子），不再借用卫生页那套 `.staff-field` / `.staff-input`（那套样式的作用域
+// 是 `.hygiene-work`，在「今天」页上落不下来）。
+const profileOpen = ref(false)
+const profileName = ref('')
+const profilePhone = ref('')
+const profileSaving = ref(false)
+const profileError = ref('')
+const profileFlash = ref('')
+const profilePhoneConfirmOpen = ref(false)
+const passwordOpen = ref(false)
+const currentPassword = ref('')
+const newPassword = ref('')
+const confirmPassword = ref('')
+const passwordSaving = ref(false)
+const passwordError = ref('')
+const passwordFlash = ref('')
+
+// 专项截止（原来也在「我」那张资料里）：钟点随 `/api/hygiene/staff/me` 下来，跟日常那个
+// `hygieneDue` 一个来源，所以这一页不再另发请求。
+const deepDue = computed(() => (deepClock.value && deepClock.value.hhmm) || '')
+
+function openProfile() {
+  passwordOpen.value = false
+  profileError.value = ''
+  profileFlash.value = ''
+  profileName.value = (staffMe.value && staffMe.value.name) || ''
+  profilePhone.value = (staffMe.value && staffMe.value.phone) || ''
+  profileOpen.value = true
+}
+
+function closeProfile() {
+  profileOpen.value = false
+  profileError.value = ''
+}
+
+const PHONE_PATTERN = /^1[3-9]\d{9}$/
+
+/** 手机号是登录账号，改错一位 = 下次登不进来。改号必须先确认。 */
+function phoneChanged() {
+  const current = String((staffMe.value && staffMe.value.phone) || '')
+  return profilePhone.value.trim() !== current
+}
+
+async function saveProfile() {
+  if (profileSaving.value || !staffMe.value) return
+  const nextPhone = profilePhone.value.trim()
+  if (!PHONE_PATTERN.test(nextPhone)) {
+    profileError.value = '手机号格式不对，应该是 11 位、以 1 开头的号码。'
+    return
+  }
+  // 姓名随便改，手机号不行：它是登录账号，且 30 天内只能靠管理员救回来。
+  if (phoneChanged() && !profilePhoneConfirmOpen.value) {
+    profilePhoneConfirmOpen.value = true
+    return
+  }
+  profilePhoneConfirmOpen.value = false
+  profileSaving.value = true
+  profileError.value = ''
+  profileFlash.value = ''
+  try {
+    const data = await staffRequest('/api/hygiene/staff/me', {
+      method: 'PATCH',
+      body: {
+        name: profileName.value.trim(),
+        phone: nextPhone,
+      },
+    })
+    staffMe.value = { ...staffMe.value, ...(data.employee || {}) }
+    // 顶栏那颗名字来自排班那份 employee（`/api/scheduling/me`）：改完顺手抹平，
+    // 不然这一页顶上还挂着旧名字，得刷新才变。
+    if (employee.value && data.employee && data.employee.name) {
+      employee.value = { ...employee.value, name: data.employee.name }
+    }
+    profileOpen.value = false
+    profileFlash.value = '个人信息已保存，手机号下次登录生效。'
+  } catch (err) {
+    // 401 回员工登录：与这一页其它几条请求同一个走法（原卫生页那两处没写这一段，
+    // 搬过来时补齐 —— 会话过期时不该只把话咽成一句「保存失败」）。
+    if (err.status === 401) {
+      leaveForStaffLogin()
+      return
+    }
+    profileError.value = err.message || '保存个人信息失败'
+  } finally {
+    profileSaving.value = false
+  }
+}
+
+function openPassword() {
+  profileOpen.value = false
+  passwordError.value = ''
+  passwordFlash.value = ''
+  currentPassword.value = ''
+  newPassword.value = ''
+  confirmPassword.value = ''
+  passwordOpen.value = true
+}
+
+function closePassword() {
+  passwordOpen.value = false
+  passwordError.value = ''
+  currentPassword.value = ''
+  newPassword.value = ''
+  confirmPassword.value = ''
+}
+
+async function savePassword() {
+  if (passwordSaving.value) return
+  passwordError.value = ''
+  passwordFlash.value = ''
+  if (newPassword.value !== confirmPassword.value) {
+    passwordError.value = '两次输入的新密码不一致'
+    return
+  }
+  passwordSaving.value = true
+  try {
+    await staffRequest('/api/hygiene/staff/password', {
+      method: 'PATCH',
+      body: {
+        current_password: currentPassword.value,
+        new_password: newPassword.value,
+        confirm_password: confirmPassword.value,
+      },
+    })
+    passwordOpen.value = false
+    currentPassword.value = ''
+    newPassword.value = ''
+    confirmPassword.value = ''
+    passwordFlash.value = '密码已修改，其他设备上的登录已失效。'
+  } catch (err) {
+    if (err.status === 401) {
+      leaveForStaffLogin()
+      return
+    }
+    passwordError.value = err.message || '修改密码失败'
+  } finally {
+    passwordSaving.value = false
+  }
+}
+
+/** 第三行「重新选择区域和班次」：票 10 起员工**不能**自选班次和工作区 —— 今天在哪由
+ *  排班决定。卫生页那一版点了是滚回待办那一屏看说明；在这一页，说明和班就在顶上那张
+ *  排班卡里，所以这里把话写进它的提示位，再把页面送回顶部（那就是「去看我的班」）。
+ *  不摆一个改不动的选择器：那正是票 10 撤掉的东西。
+ *  用模板 ref 而不是 `document.querySelector`：那张卡只在读到了班的时候才在（loading /
+ *  出错时不渲染），拿 ref 少一次"查不到就当没点"的静默分支。 */
+function openShiftNotice() {
+  note.value = '今天上哪个班、在哪个区由排班决定；要改哪一天，找店长在排班页改。'
+  const card = schedCard.value
+  if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 onMounted(() => {
   document.title = '今天'
   load()
@@ -473,11 +710,16 @@ onMounted(() => {
   loadRequests(true)
   // 卫生那一块自己拉（票 10），跟排班卡并行、失败互不影响。
   loadHygiene()
+  // 「我的成绩」也自己拉：它读的是另一条接口（`/staff/me/stats`），弱网下不用排在
+  // 卫生那三跳后面。
+  loadScore()
 })
 
 // 实时（票 10 收尾）：店长改了我的班、批了我的假、有人找我换班、或者我这区的卫生
 // 待办变了 —— 三块各拉各的（都是轻量 GET，nudge 本身不带数据），一次全刷到。
 // 换班那条尤其要紧：对方不开页面就永远不知道有人找他换。
+// 成绩那一块也在这儿重读：验收（通过 / 驳回）是店长在别处做的动作，nudge 是这张卡
+// 唯一能自己变新的机会 —— 不挂在这条上，员工得等下次开页面才看得到新数字。
 useNudgePull({
   id: 'today-page',
   topics: ['scheduling', 'hygiene'],
@@ -485,6 +727,7 @@ useNudgePull({
     load(true)
     loadRequests(true)
     loadHygiene(true)
+    loadScore(true)
   },
 })
 </script>
@@ -495,8 +738,9 @@ useNudgePull({
       <span class="tDay">今天</span>
       <span class="tDate">{{ today ? dayLabel(today.business_date) : '' }}</span>
       <span v-if="employee" class="tMe">{{ employee.name }}</span>
-      <!-- 三张员工页共用的退出（票 10）：顶栏右上角同一颗按钮、同一套逻辑。 -->
-      <StaffExitButton />
+      <!-- 退出**不在这里**（D5）：工作台外壳顶栏已经有一颗（`WorkbenchLayout` 的
+           `WorkbenchExitButton`，员工那一档走同一条 `useStaffLogout`），这一页原来又挂了
+           一颗同名的 `.staff-exit` —— 手机上两者相距约 300px、功能完全重复。 -->
     </header>
 
     <div class="tA-body">
@@ -508,7 +752,7 @@ useNudgePull({
       </template>
 
       <template v-else>
-        <section class="tA-card sched">
+        <section ref="schedCard" class="tA-card sched">
           <div class="tA-hd">
             <span class="tag sched">排班</span>
             <em>{{ nextLine }}</em>
@@ -681,6 +925,132 @@ useNudgePull({
           </template>
         </section>
 
+        <!-- 「我的成绩」（2026-10-05 用户裁定）：近 7 天的一次通过率 + 被驳回的原因。
+             为什么放在这一页、为什么 `null` 不能显示成 0%，见脚本里 `score` 与
+             `scorePercent` 那两段。 -->
+        <section class="tA-card score">
+          <div class="tA-hd">
+            <span class="tag score">成绩</span>
+            <em>近 {{ score.days }} 天</em>
+          </div>
+
+          <p v-if="score.state === 'loading'" class="tA-sub">正在读你的成绩…</p>
+
+          <template v-else-if="score.state === 'error'">
+            <p class="tA-sub">{{ score.error }}</p>
+            <div class="acts">
+              <button class="btn" type="button" @click="loadScore()">重试</button>
+            </div>
+          </template>
+
+          <!-- 还没开始（`pass_rate === null`）：这一格**不给任何数字**，包括 0%。
+               0% 是"交了但都被驳"，"还没交过"是另一件事 —— 给新人看 0%，他会当成
+               已经被扣了一分，而这张卡存在的理由正好相反：让他愿意交第一项。 -->
+          <template v-else-if="scorePercent === null">
+            <p class="score-empty">近 {{ score.days }} 天还没交过活，交一项就有记录。</p>
+            <p class="tA-sub">一次通过率要交了第一项才算得出来，现在不算你落后。</p>
+          </template>
+
+          <template v-else>
+            <div class="score-body">
+              <p class="score-rate">{{ scorePercent }}<span>%</span></p>
+              <dl class="score-split">
+                <div>
+                  <dt>一次通过</dt>
+                  <dd>{{ score.firstPass }} 项</dd>
+                </div>
+                <div>
+                  <dt>被驳回</dt>
+                  <dd>{{ score.rejected }} 次</dd>
+                </div>
+              </dl>
+            </div>
+            <p class="tA-sub">
+              一次通过率 = 一次通过 ÷（一次通过 + 被驳回）；跟店长看的红黑榜是同一份记录。
+            </p>
+          </template>
+
+          <!-- 驳回原因比数字更有用：员工要知道的是"我老在哪件事上栽"。一行一条、带次数
+               （服务端已按次数排好、最多 5 条）。一条原因都没有时整块不出现。 -->
+          <div v-if="score.reasons.length" class="score-reasons">
+            <p class="score-reasons-hd">被驳回的地方</p>
+            <ul>
+              <li v-for="item in score.reasons" :key="item.reason">
+                <span>{{ item.reason }}</span>
+                <em>{{ item.count }} 次</em>
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- 「我的」那一块（2026-10-05 用户裁定，**从卫生页的「我」整格搬来**）：
+             三行入口 + 一张自己的资料。放在页面尾部 —— 这一页开头是「今天上不上班」、
+             中间是今天的活，账号设置是收尾的事。
+             三行入口各自开一张弹层（与上面请假 / 换班同一个底子），不在这里再长出一套
+             卫生页的页内表单；「重新选择区域和班次」第三行不弹表单（票 10 起员工不能自选），
+             它把说明写进顶部那张排班卡并把人送回去 —— 见 `openShiftNotice`。 -->
+        <section class="tA-card me">
+          <div class="tA-hd">
+            <span class="tag me">我的</span>
+            <em v-if="staffMe">{{ staffMe.name || staffMe.phone }}</em>
+          </div>
+          <p v-if="profileFlash" class="me-flash" role="status">{{ profileFlash }}</p>
+          <p v-if="passwordFlash" class="me-flash" role="status">{{ passwordFlash }}</p>
+          <dl v-if="staffMe" class="me-meta">
+            <div>
+              <dt>姓名</dt>
+              <dd>{{ staffMe.name || '未设置' }}</dd>
+            </div>
+            <div>
+              <dt>手机号</dt>
+              <dd>{{ staffMe.phone }}</dd>
+            </div>
+            <div>
+              <dt>当天区域</dt>
+              <dd>{{ staffMe.zone_name || '未选' }}</dd>
+            </div>
+            <div>
+              <dt>当天班次</dt>
+              <dd>{{ hygieneShiftLabel(staffMe.shift) }}</dd>
+            </div>
+            <div v-if="hygieneDue">
+              <dt>本班日常截止</dt>
+              <dd>{{ hygieneDue }} 前交</dd>
+            </div>
+            <div v-if="deepDue">
+              <dt>专项截止</dt>
+              <dd>{{ deepDue }} 前做完</dd>
+            </div>
+            <div>
+              <dt>职位</dt>
+              <dd>{{ staffMe.job_title || '未设置' }}</dd>
+            </div>
+            <div>
+              <dt>卫生权限</dt>
+              <dd>{{ hygienePermissionLabel(staffMe.permission) }}</dd>
+            </div>
+          </dl>
+          <ul class="tL-list">
+            <li>
+              <span class="tL-line">修改个人信息</span>
+              <!-- 资料（`staffMe`）没读出来时这两行点不动：表单要拿姓名与手机号做初值，
+                   点开了也只会是空的（原来「我」那一格整块挂在 `v-if="employee"` 上，
+                   同一个保证）。第三行不依赖它 —— 它只是把人送回顶上那张排班卡。 -->
+              <button class="btn tL-cancel" type="button" :disabled="!staffMe" @click="openProfile">修改</button>
+            </li>
+            <li>
+              <span class="tL-line">修改密码</span>
+              <button class="btn tL-cancel" type="button" :disabled="!staffMe" @click="openPassword">修改</button>
+            </li>
+            <li>
+              <span class="tL-line">重新选择区域和班次</span>
+              <!-- 按钮上不写「修改」：票 10 起员工改不了它，点一下是去看为什么 + 该找谁。 -->
+              <button class="btn tL-cancel" type="button" @click="openShiftNotice">怎么改</button>
+            </li>
+          </ul>
+          <p class="tA-sub">专项全店可用；整改按你的工作区显示。所有现场照片都需实拍。</p>
+        </section>
+
         <p class="tA-foot">
           排班只说班次，不说几点上班 —— 钟点只有卫生那边才有（逾期点）。
         </p>
@@ -842,6 +1212,120 @@ useNudgePull({
       </div>
     </div>
 
+    <!-- 修改个人信息（从卫生页的「我」搬来）：姓名随便改，手机号是登录账号 ——
+         改号那一次要先过确认框（这一块最下面那个）。 -->
+    <div
+      v-if="profileOpen"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="profile-sheet-title"
+      @click.self="closeProfile"
+    >
+      <div class="modal-box">
+        <div class="modal-header">
+          <h3 id="profile-sheet-title">修改个人信息</h3>
+          <button class="btn" type="button" @click="closeProfile">关闭</button>
+        </div>
+        <div class="form-row">
+          <label for="profile-name">姓名</label>
+          <input
+            id="profile-name"
+            v-model="profileName"
+            class="input"
+            type="text"
+            maxlength="40"
+            autocomplete="name"
+          >
+        </div>
+        <div class="form-row">
+          <label for="profile-phone">手机号</label>
+          <input
+            id="profile-phone"
+            v-model="profilePhone"
+            class="input"
+            type="tel"
+            inputmode="numeric"
+            maxlength="11"
+            pattern="1[3-9]\d{9}"
+            autocomplete="username"
+          >
+        </div>
+        <p class="tA-sub">手机号也是登录账号；保存后请用新手机号登录。改号前会再确认一次。</p>
+        <p v-if="profileError" class="tL-err" role="alert">{{ profileError }}</p>
+        <div class="modal-footer">
+          <button class="btn" type="button" :disabled="profileSaving" @click="closeProfile">取消</button>
+          <button
+            class="btn btn-primary"
+            type="button"
+            :disabled="profileSaving"
+            @click="saveProfile"
+          >{{ profileSaving ? '正在保存…' : '保存' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 修改密码（同上，从卫生页的「我」搬来）：校验在客户端先做一遍（两次输入一致），
+         真正的规则仍在服务端。 -->
+    <div
+      v-if="passwordOpen"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="password-sheet-title"
+      @click.self="closePassword"
+    >
+      <div class="modal-box">
+        <div class="modal-header">
+          <h3 id="password-sheet-title">修改密码</h3>
+          <button class="btn" type="button" @click="closePassword">关闭</button>
+        </div>
+        <div class="form-row">
+          <label for="password-current">当前密码</label>
+          <input
+            id="password-current"
+            v-model="currentPassword"
+            class="input"
+            type="password"
+            autocomplete="current-password"
+          >
+        </div>
+        <div class="form-row">
+          <label for="password-new">新密码</label>
+          <input
+            id="password-new"
+            v-model="newPassword"
+            class="input"
+            type="password"
+            minlength="8"
+            autocomplete="new-password"
+          >
+        </div>
+        <div class="form-row">
+          <label for="password-confirm">确认新密码</label>
+          <input
+            id="password-confirm"
+            v-model="confirmPassword"
+            class="input"
+            type="password"
+            minlength="8"
+            autocomplete="new-password"
+          >
+        </div>
+        <p class="tA-sub">修改后保留当前设备登录，其他设备上的登录会失效。</p>
+        <p v-if="passwordError" class="tL-err" role="alert">{{ passwordError }}</p>
+        <div class="modal-footer">
+          <button class="btn" type="button" :disabled="passwordSaving" @click="closePassword">取消</button>
+          <button
+            class="btn btn-primary"
+            type="button"
+            :disabled="passwordSaving"
+            @click="savePassword"
+          >{{ passwordSaving ? '正在保存…' : '修改密码' }}</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 撤回 / 拒绝先过确认框（不可逆，手机上一误触没有回头路）。同意不弹：
          后面还有店长那道闸，跟店长端「批准不弹、驳回弹」同一个口径。 -->
     <ConfirmDialog
@@ -861,6 +1345,18 @@ useNudgePull({
       danger
       @confirm="confirmAnswer"
       @cancel="answerTarget = null"
+    />
+
+    <!-- 改手机号要先确认（跟卫生页那颗一样）：手机号是登录账号，打错一位下次就登不进来。
+         文案里的号码取的是输入框里那个待保存的值。 -->
+    <ConfirmDialog
+      v-if="profilePhoneConfirmOpen"
+      title="确认改手机号"
+      :message="`手机号是登录账号。改成 ${profilePhone.trim()} 之后，下次登录要用新号；打错一位就得找管理员改回来。`"
+      confirm-label="确认改号"
+      danger
+      @confirm="saveProfile"
+      @cancel="profilePhoneConfirmOpen = false"
     />
   </div>
 </template>
@@ -937,6 +1433,179 @@ useNudgePull({
   border-color: var(--hy-aqua);
   background: linear-gradient(168deg, rgba(94, 234, 212, .07), transparent 58%),
     var(--hy-surface-2);
+}
+
+/* 「我的」那一块（从卫生页的「我」搬来）：中性色 —— 设置不是活，不抢上面两张卡的色。
+   资料那一段是表格式的一行一条（原来在卫生页叫 `.hy-meta`，那份样式挂在
+   `.hygiene-work` 作用域下，搬到这一页落不下来，按同一套写法在这里写一份）。 */
+.tA-card.me {
+  border-color: var(--hy-line-strong);
+  background: var(--hy-surface-2);
+}
+
+/* 「我的成绩」：玉色那一档（跟"已通过"同一个色系）—— 这一页上其它几张卡都在说
+   "还有活没干"，只有它只讲"你干得怎么样"，所以用这套里的"好"色，不摆红字。 */
+.tA-card.score {
+  border-color: var(--hy-mint-line);
+  background: linear-gradient(168deg, rgba(63, 224, 176, .06), transparent 62%),
+    var(--hy-surface-2);
+}
+
+.tag.score {
+  color: var(--hy-jade);
+  background: var(--hy-mint-soft);
+  border-color: var(--hy-mint-line);
+}
+
+.score-body {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  padding: 4px 0 2px;
+}
+
+/* 主数字用「英雄数字」那一档字号（`.shift` 是 52px）：这张卡的主角就是它。
+   比排班卡那个班次小一档，不抢"今天上不上班"的第一眼。 */
+.score-rate {
+  margin: 0;
+  font-family: var(--font-song);
+  font-size: 44px;
+  line-height: 1;
+  letter-spacing: .02em;
+  color: var(--hy-jade);
+}
+
+.score-rate span {
+  margin-left: 2px;
+  font-size: 18px;
+  color: var(--hy-muted);
+}
+
+.score-split {
+  display: grid;
+  gap: 3px;
+  margin: 0 0 5px;
+}
+
+.score-split > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.score-split dt {
+  font-size: 11px;
+  color: var(--hy-muted);
+}
+
+.score-split dd {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--hy-ink);
+}
+
+/* 空态那一句按正文字号排，不套上面那个 44px 的数字位（那一格本来就没有数字）。 */
+.score-empty {
+  margin: 10px 0 5px;
+  font-family: var(--font-song);
+  font-size: 19px;
+  line-height: 1.5;
+  color: var(--hy-jade);
+}
+
+.score-reasons {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hy-line);
+}
+
+.score-reasons-hd {
+  margin: 0 0 7px;
+  font-size: 11px;
+  letter-spacing: .1em;
+  color: var(--hy-muted);
+}
+
+.score-reasons ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.score-reasons li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--hy-ink);
+}
+
+/* 原因那句话可能很长（服务端最多 200 字）：让它自己换行，别把右边那次数挤出屏幕。 */
+.score-reasons li span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 次数用琥珀色：是"注意这里"，不是"你被罚了"——红字留给真正要动手的报错。 */
+.score-reasons li em {
+  flex: none;
+  font-style: normal;
+  color: var(--hy-amber);
+}
+
+.tag.me {
+  color: var(--hy-muted);
+  background: rgba(133, 205, 198, .1);
+  border-color: var(--hy-line-strong);
+}
+
+/* 保存成功那句：跟表单里的报错（`.tL-err`）分开，一眼看得出这次是成了。 */
+.me-flash {
+  margin: 9px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--hy-radius-sm);
+  background: var(--hy-mint-soft);
+  border: 1px solid var(--hy-mint-line);
+  color: var(--hy-jade);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.me-meta {
+  display: grid;
+  gap: 0;
+  margin: 10px 0 4px;
+  border: 1px solid var(--hy-line);
+  border-radius: var(--hy-radius-md);
+  background: rgba(17, 37, 41, .66);
+  overflow: hidden;
+}
+
+.me-meta > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--hy-line);
+}
+
+.me-meta > div:last-child {
+  border-bottom: 0;
+}
+
+.me-meta dt {
+  color: var(--hy-muted);
+  font-size: 11.5px;
+}
+
+.me-meta dd {
+  margin: 0;
+  font-weight: 600;
+  font-size: 12.5px;
+  text-align: right;
 }
 
 /* 别人问我换班（票 09）：暖色 —— 跟「我自己提的」那张冷色的分开，

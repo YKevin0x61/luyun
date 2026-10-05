@@ -81,16 +81,30 @@ describe('员工端共用的退出按钮', () => {
     expect(router.currentRoute.value.path).toBe('/login')
   })
 
-  it('三张员工页都挂同一颗共用按钮，卫生首页不再自己实现退出', () => {
+  it('员工三页**不再**各挂一颗：外壳顶栏那一颗是唯一的一颗（D5）', () => {
+    // 原来三页页内各挂一颗 `<StaffExitButton />`，而这三页从票 03 起就套在
+    // `WorkbenchLayout` 里 —— 那一条顶栏自己也有一颗（`.wb-exit`，员工那一档同样走
+    // `useStaffLogout`）。390 上两颗相距约 300px、都叫「退出」、功能完全重复。
+    // 现在页内那三颗撤掉，外壳那一颗覆盖全部工作台页面（含员工首页那种页内没有顶栏的）。
     const pages = [
       '../../../views/today/TodayView.vue',
       '../../../views/today/TodayMonthView.vue',
       '../../../views/hygiene/HygieneHomeView.vue',
     ]
     for (const rel of pages) {
-      expect(readFileSync(join(here, rel), 'utf8'), rel).toMatch(/<StaffExitButton \/>/)
+      const source = readFileSync(join(here, rel), 'utf8')
+      expect(source, rel).not.toMatch(/<StaffExitButton/)
+      expect(source, rel).not.toMatch(/components\/staff\/StaffExitButton/)
     }
+
+    // 那一颗在外壳里，三页共用（`workbenchShell.test.js` 另有一条按员工身份点它的）。
+    const shell = readFileSync(join(here, '../../../views/workbench/WorkbenchLayout.vue'), 'utf8')
+    expect(shell).toMatch(/<WorkbenchExitButton/)
+
+    // 员工端卫生首页自己的顶栏也退化成页内标题条了：品牌（红色「台」+「工作台」）搬走
+    // （D9 —— 原来 390 下被压到 scrollWidth 62 / clientWidth 57，三个字逐字竖排）。
     const home = readFileSync(join(here, '../../../views/hygiene/HygieneHomeView.vue'), 'utf8')
+    expect(home).not.toMatch(/class="hy-brand"/)
     expect(home).not.toMatch(/askLogout/)
     expect(home).not.toMatch(/staff\/logout/)
   })

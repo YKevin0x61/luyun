@@ -34,6 +34,8 @@ const ROUTES = [
   { path: '/workbench/me/month', component: { template: '<div />' } },
   { path: '/workbench/me/clean', component: { template: '<div />' } },
   { path: '/workbench/hr/roster', component: { template: '<div />' } },
+  // 越权落点（D4：管理栏拿到进不去的 `?next=` 时落这里，原目标一起带过去）。
+  { path: '/workbench/forbidden', component: { template: '<div />' } },
   // 票 07：配方阅读面（扫码的目标页）。
   { path: '/workbench/kitchen/recipe/detail', component: { template: '<div />' } },
   { path: '/workbench/kitchen/recipe', component: { template: '<div />' } },
@@ -172,6 +174,29 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
 
     expect(activeTab(wrapper)).toBe('管理员')
     expect(window.localStorage.getItem('luyun.login.panel.tab')).toBe('admin')
+  })
+
+  // D13：`?next=` 指向管理端专属页时开管理员栏。这类目标只认管理端 cookie，开员工栏
+  // 等于让人在手机号表单上白填一次（审查实测：`/login?next=/workbench/hr/roster` 开的是
+  // 员工栏）。没记住过偏好也一样 —— 那正是审查里撞到的那一档。
+  it('D13：?next 是管理端专属页时开管理员栏（没记住偏好也一样）', async () => {
+    fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT())
+
+    const { wrapper } = await mountLogin('/login?next=%2Fworkbench%2Fhr%2Froster')
+
+    expect(activeTab(wrapper)).toBe('管理员')
+    // 开管理员栏就该查管理端状态，别去敲员工探针。
+    expect(findCall(fetchMock, '/api/auth/status')).toBeTruthy()
+    expect(findCall(fetchMock, '/api/hygiene/staff/me')).toBeFalsy()
+  })
+
+  it('D13：优先于「记住的是员工栏」', async () => {
+    rememberTab('staff')
+    fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT())
+
+    const { wrapper } = await mountLogin('/login?next=%2Fsales-report')
+
+    expect(activeTab(wrapper)).toBe('管理员')
   })
 })
 
@@ -448,7 +473,7 @@ describe('/login 面板：员工栏', () => {
 })
 
 describe('/login 面板：非法 ?next 回落', () => {
-  it('协议相对地址不强制员工栏，且管理员登录后回落到 /', async () => {
+  it('协议相对地址不强制员工栏，且管理员登录后落到「无权访问」页（不静默改道）', async () => {
     rememberTab('admin')
     fetchMock
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
@@ -461,7 +486,9 @@ describe('/login 面板：非法 ?next 回落', () => {
       'input[type="text"]': 'admin',
       'input[type="password"]': 's3cret',
     })
-    expect(router.currentRoute.value.path).toBe('/')
+    // D4：站外目标不再被悄悄换成 `/`（那样用户看不出自己为什么没到想去的地方）——
+    // 落「无权访问」页，原目标由那一页说明「不是工作台里的页面」。
+    expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
   })
 
   it('站外地址不强制员工栏，员工登录后回落到今天页', async () => {
@@ -479,7 +506,7 @@ describe('/login 面板：非法 ?next 回落', () => {
     expect(router.currentRoute.value.path).toBe('/workbench/me/today')
   })
 
-  it('员工端路径不把管理员身份送进去：管理栏登录后回落到 /', async () => {
+  it('员工端路径不把管理员身份送进去：管理栏登录后落「无权访问」并把原目标带上', async () => {
     fetchMock
       .mockResolvedValueOnce(STAFF_401())
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
@@ -496,7 +523,10 @@ describe('/login 面板：非法 ?next 回落', () => {
     })
 
     expect(findCall(fetchMock, '/api/auth/login')).toBeTruthy()
-    expect(router.currentRoute.value.path).toBe('/')
+    // D4：管理端身份**不被送进**员工页（这条一直在），目标也不再被悄悄换成 `/` 让人
+    // 莫名其妙 —— 落「无权访问」页（真机上那一页的 `?next=` 由守卫补上；这里只挂了一条
+    // 裸路由，所以断言落在"人到哪儿"这一层）。
+    expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
   })
 })
 

@@ -1078,4 +1078,82 @@ describe('useBackupCenter', () => {
     expect(source).not.toMatch(/window\.confirm/)
     expect(source).toMatch(/function requestConfirm/)
   })
+
+  // 「恢复整库数据」是全站最危险的一个动作：确认框里必须能读到**具体哪一份快照**。
+  // 快照标识在备份点里有两个来源（detail.ts / id 的 snapshot: 前缀），只认顶层 ts 时，
+  // 从列表点进来的那份会渲染成「替换为本机回滚快照 undefined 的内容」——用户看不到
+  // 自己要覆盖成什么，却已经勾了「我确认」。
+  it('确认框里的快照标识来自 detail.ts，不会渲染成 undefined', async () => {
+    const pgPoint = {
+      id: 'snapshot:20260919_051032',
+      medium: 'local_snapshot',
+      medium_label: '本机回滚快照',
+      provenance_label: '更新作业前',
+      contents: ['app_pg', 'runtime'],
+      contents_labels: ['业务数据 (PostgreSQL)', '运行配置'],
+      // 注意：**没有**顶层 ts —— 后端 list_snapshots 只给 detail.ts。
+      detail: { ts: '20260919_051032', files: ['app.pgdump'] },
+      created_at: '2026-09-19T05:10:34+08:00',
+      recoverable: true,
+      basic_check: { ok: true, messages: [] },
+      photos: {},
+      missing: [],
+    }
+    apiGet.mockResolvedValue(pointsPayload({ points: [pgPoint] }))
+    const { loadPoints, onRollbackSnapshot, confirmState } = makeHarness()
+
+    await loadPoints()
+    onRollbackSnapshot(pgPoint)
+
+    expect(confirmState.message).toContain('20260919_051032')
+    expect(confirmState.message).not.toContain('undefined')
+    expect(confirmState.details.join('；')).toContain('目标本机回滚快照：20260919_051032')
+    expect(confirmState.details.join('；')).not.toContain('undefined')
+  })
+
+  it('只给 id（snapshot:<ts>）的快照也认得出标识', async () => {
+    const bare = {
+      id: 'snapshot:20260919_051032',
+      medium: 'local_snapshot',
+      contents: ['app_pg'],
+      contents_labels: ['业务数据 (PostgreSQL)'],
+      recoverable: true,
+    }
+    apiGet.mockResolvedValue(pointsPayload({ points: [bare] }))
+    const { loadPoints, onRollbackSnapshot, confirmState } = makeHarness()
+
+    await loadPoints()
+    onRollbackSnapshot(bare)
+
+    expect(confirmState.message).toContain('20260919_051032')
+    expect(confirmState.message).not.toContain('undefined')
+  })
+
+  // 取不到标识时不能"照常弹框、把 undefined 拼进 URL"：后端 404，而用户已经勾了
+  // 那个不可撤销的确认项。宁可什么都不做，并说清为什么。
+  it('标识无法确定时拒绝开始回滚，并给出原因', () => {
+    const showAlert = vi.fn()
+    const { onRollbackSnapshot, confirmState } = useBackupCenter({
+      showAlert,
+      clearAlert: vi.fn(),
+    })
+
+    onRollbackSnapshot({ medium: 'local_snapshot', contents: ['app_pg'] })
+    expect(confirmState.open).toBe(false)
+    expect(showAlert).toHaveBeenCalledWith('error', expect.stringContaining('无法确定'))
+
+    onRollbackSnapshot(undefined)
+    expect(confirmState.open).toBe(false)
+  })
+
+  it('resolveSnapshotTs 认 detail.ts / ts / id 三种来源，形状不对一律返回空串', async () => {
+    const { resolveSnapshotTs } = await import('../useBackupCenter.js')
+    expect(resolveSnapshotTs({ detail: { ts: '20260919_051032' } })).toBe('20260919_051032')
+    expect(resolveSnapshotTs({ ts: '20260919_051032' })).toBe('20260919_051032')
+    expect(resolveSnapshotTs({ id: 'snapshot:20260919_051032' })).toBe('20260919_051032')
+    // 旧快照目录名不是 YYYYMMDD_HHMMSS 时不能拿来拼 URL
+    expect(resolveSnapshotTs({ id: 'snapshot:snap-2026-09-19' })).toBe('')
+    expect(resolveSnapshotTs({})).toBe('')
+    expect(resolveSnapshotTs(null)).toBe('')
+  })
 })

@@ -45,6 +45,21 @@ export function clampFontPx(v) {
   return Math.max(12, Math.min(20, n))
 }
 
+/** 阅读页正文的**默认**字号（用户没手动调过时用的那个）。
+ *
+ * 窄屏给 14px：厨师把手机/平板架在灶台边、离手一臂看，12px 在蒸汽和弱光下认不动；
+ * 桌面维持 12px（近距阅读，且正文区本来就宽）。
+ *
+ * 放在这里而不是 CSS 的 `@media` 里，是因为详情页的字号是 JS 用
+ * `documentElement.style.setProperty('--reader-fs', …)` 写的**内联样式**（见
+ * `RecipeDetailView.applyFont`），内联一开始就压过任何选择器 —— 只写 CSS 媒体查询
+ * 等于没改（实测三档仍都是 12px）。断点与 `recipe.css` 的 `max-width:40rem` 对齐。
+ */
+export function defaultFontPx() {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 12
+  return window.matchMedia('(max-width: 40rem)').matches ? 14 : 12
+}
+
 export function clampFactor(v) {
   const n = parseFloat(v)
   if (Number.isNaN(n)) return 1

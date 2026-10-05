@@ -286,6 +286,18 @@ async def _load_table_columns(conn, table_name: str) -> List[Dict[str, Any]]:
     return [_column_entry(row) for row in await cursor.fetchall()]
 
 
+# PostgreSQL 的数值列类型。这些列**不能**用 LIKE 搜：`bigint LIKE '%1%'` 会被 PG 直接
+# 拒绝（`operator does not exist: bigint ~~ unknown`），而那条英文原文会被渲染到
+# 表格区给店长看（数据管理页 26 个可选搜索字段里有 9 个是数值列）。
+_NUMERIC_COLUMN_TYPES = frozenset(
+    {"smallint", "integer", "bigint", "numeric", "decimal", "real", "double precision"}
+)
+
+
+def _is_numeric_column_type(data_type: Any) -> bool:
+    return str(data_type or "").strip().lower() in _NUMERIC_COLUMN_TYPES
+
+
 def _validate_batch_update_column(column: str, table_columns: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', column):
         raise HTTPException(status_code=400, detail="无效的字段名")
@@ -380,8 +392,26 @@ async def get_table_rows(
                 if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', search_field):
                     raise HTTPException(status_code=400, detail="无效的搜索字段")
                 _ensure_not_redacted(table_name, search_field)
-                conditions.append(f"{search_field} LIKE ?")
-                params.append(f"%{search_value}%")
+                # 按列类型选操作符：数值列走等值、文本列走 LIKE。全都 LIKE 的话，
+                # 数值列必然抛 PG 原文错误（见 _NUMERIC_COLUMN_TYPES 的注释）。
+                columns = await _load_table_columns(conn, table_name)
+                column = next(
+                    (c for c in columns if c["name"].lower() == search_field.lower()), None
+                )
+                if column is None:
+                    raise HTTPException(status_code=400, detail=f"字段 {search_field} 不存在")
+                if _is_numeric_column_type(column["type"]):
+                    raw = search_value.strip()
+                    if not re.fullmatch(r'-?\d+(?:\.\d+)?', raw):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"「{search_field}」是数值列，只能填数字",
+                        )
+                    conditions.append(f"{search_field} = ?")
+                    params.append(float(raw) if "." in raw else int(raw))
+                else:
+                    conditions.append(f"{search_field} LIKE ?")
+                    params.append(f"%{search_value}%")
 
             where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
             order = ""

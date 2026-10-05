@@ -23,7 +23,11 @@ PHONE = "13800138000"
 PASSWORD = "password123"
 
 
-def staff(employee_id=1, phone=PHONE, shift="白班", permission="管理员"):
+def staff(employee_id=1, phone=PHONE, shift="白班", permission="管理员", caps=None):
+    """员工 actor。`caps` 是**管理权限开关**（2026-10-05 起判据看它，不看 `permission`）；
+    不给就按迁移 `0015` 的回填规则推 —— 老「管理员」= 日常验收 + 专项验收 + 整改单。"""
+    if caps is None:
+        caps = ("daily_review", "deep_review", "fix") if permission == "管理员" else ()
     return {
         "kind": "staff",
         "id": employee_id,
@@ -31,6 +35,7 @@ def staff(employee_id=1, phone=PHONE, shift="白班", permission="管理员"):
         "name": "张三",
         "shift": shift,
         "permission": permission,
+        "caps": list(caps),
         "zone_id": 1,
     }
 

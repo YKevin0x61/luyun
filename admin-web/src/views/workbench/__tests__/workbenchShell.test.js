@@ -95,9 +95,11 @@ describe('工作台外壳的导航', () => {
     // 票 08：后勤那一格是**一格两门** —— 配方与备货计划各占一半，都在同一格（同一颗
     // 胶囊）里，员工两项都看得见（spec 故事 8）。一格两门时标题取各自那一页在清单里的
     // 名字（「选择岗位」/「备货计划」）：同一颗胶囊里写两遍「后勤」看不出哪一半是哪一页。
-    expect(items.map((item) => item.text())).toEqual(['今天', '选择岗位', '备货计划', '我的'])
+    // 2026-10-05 起员工这一档还多一格「卫生」（他们每天要做的活，一级入口）。
+    expect(items.map((item) => item.text())).toEqual(['今天', '卫生', '选择岗位', '备货计划', '我的'])
     expect(items.map((item) => item.attributes('href'))).toEqual([
-      '/workbench', '/workbench/kitchen/recipe', PREP_PLAN_PATH, '/workbench/me/today',
+      '/workbench', '/workbench/me/clean', '/workbench/kitchen/recipe', PREP_PLAN_PATH,
+      '/workbench/me/today',
     ])
     expect(wrapper.findAll('.wb-nav-cell.is-multi')).toHaveLength(1)
     // 员工点不到店长那几页（它们在清单里是 admin，导航按身份过滤）。
@@ -142,20 +144,24 @@ describe('工作台外壳的导航', () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const { wrapper, router } = await mountShell('/workbench/me/month')
 
-    // 票 07 起第二格是「后勤」（配方），第三格才是「我的」。
-    await wrapper.findAll('.wb-nav-item')[1].trigger('click')
+    // 2026-10-05 起员工那一档的顺序是：今天 / 卫生 / 后勤（两门）/ 我的 ——
+    // 第二格是「卫生」，后勤从第二格挪到了第三、四格。
+    await wrapper.findAll('.wb-nav-item')[2].trigger('click')
     await flushPromises()
 
     expect(router.currentRoute.value.path).toBe('/workbench/kitchen/recipe')
   })
 
-  it('顶栏挂着身份切换器，两档都在（「超级管理员」不写成「管理员」）', async () => {
+  it('顶栏挂着身份切换器，显示的是**当前**那一档（「超级管理员」不写成「管理员」）', async () => {
     const { wrapper } = await mountShell('/workbench/me/today')
 
     const switcher = wrapper.get('.wb-id')
     expect(switcher.text()).toContain('超级管理员')
     expect(switcher.text()).toContain('共享账号')
-    expect(switcher.text()).toContain('员工')
+    // 2026-10-05 裁定：一行只显示当前身份 —— 这一台是双会话，另一档（员工）收进点开的
+    // 菜单里，所以这里**不该**出现「员工」；菜单要到点开之后才有。
+    expect(switcher.text()).not.toContain('员工')
+    expect(wrapper.find('.wb-id-menu').exists()).toBe(false)
     // 词表打架的那一个词不出现在顶栏上。
     expect(switcher.text()).not.toMatch(/管理员（共享账号）/)
   })
@@ -164,7 +170,7 @@ describe('工作台外壳的导航', () => {
     const { wrapper, store } = await mountShell('/workbench/me/today')
 
     expect(store.identity).toBe('super')
-    expect(wrapper.get('.wb-id .is-on').text()).toContain('超级管理员')
+    expect(wrapper.get('.wb-id-current').text()).toContain('超级管理员')
     // 导航面按**他这一档**渲染：票 06 之后是首页 / 人事 / 现场三格，各自的落点是共享
     // 常量（而不是因为"这一页是员工页"才藏起来）。页面内容按自己的 401 处理 —— 切换器
     // 不改权限、也不改守卫。票 08 起后勤那一格是两扇门（配方 + 备货计划）。
@@ -181,13 +187,16 @@ describe('工作台外壳的导航', () => {
   it('在顶栏切成员工：导航面当场跟着换', async () => {
     const { wrapper, store } = await mountShell('/workbench/me/today')
 
-    const staffOption = wrapper.findAll('.wb-id-opt').find((n) => n.text().includes('员工'))
-    await staffOption.trigger('click')
+    // 切换器现在**只显示当前身份**（2026-10-05 裁定），另一档收在点开的菜单里：
+    // 先点当前这一档，再选菜单里那一项。
+    await wrapper.get('.wb-id-current').trigger('click')
+    await flushPromises()
+    await wrapper.get('.wb-id-menu-item').trigger('click')
     await flushPromises()
 
     expect(store.identity).toBe('staff')
     expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
-      '今天', '选择岗位', '备货计划', '我的',
+      '今天', '卫生', '选择岗位', '备货计划', '我的',
     ])
   })
 
@@ -197,8 +206,11 @@ describe('工作台外壳的导航', () => {
     expect(store.identity).toBe('super')
     expect(wrapper.find('a[href="/workbench/floor/daily"]').exists()).toBe(true)
 
-    const staffOption = wrapper.findAll('.wb-id-opt').find((n) => n.text().includes('员工'))
-    await staffOption.trigger('click')
+    // 切换器现在**只显示当前身份**（2026-10-05 裁定），另一档收在点开的菜单里：
+    // 先点当前这一档，再选菜单里那一项。
+    await wrapper.get('.wb-id-current').trigger('click')
+    await flushPromises()
+    await wrapper.get('.wb-id-menu-item').trigger('click')
     await flushPromises()
     await flushPromises()
 

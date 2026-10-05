@@ -12,11 +12,13 @@ function read(rel) {
 const home = read('../HygieneHomeView.vue')
 
 describe('nudge 只拉起当前真正要用的数据', () => {
-  it('only follows boards/teaching while the boards tab is on screen', () => {
-    // 服务端一次提交会广播 daily + boards 两条；不在「榜」那一屏就没必要跟着拉，
-    // 切到该 tab 时 watch(tab) 本来就会强制拉一次。
-    expect(home).toMatch(/resource === 'boards' && tab\.value === 'boards'/)
-    expect(home).toMatch(/resource === 'teaching' && tab\.value === 'boards'/)
+  it('only follows boards/teaching while the boards entry is expanded', () => {
+    // 服务端一次提交会广播 daily + boards 两条；「榜」不在看就没必要跟着拉。
+    // 五格合并之后「榜」不再是平级的一格 tab（页内那条 tab 条整个撤了）：它是页尾那一行
+    // 信息入口，点开才在本页展开 —— 判据跟着从「当前 tab 是不是 boards」换成
+    // 「`boardsOpen` 展开没有」；展开那一刻本来就会强制拉一次（`watch(boardsOpen)`）。
+    expect(home).toMatch(/resource === 'boards' && boardsOpen\.value/)
+    expect(home).toMatch(/resource === 'teaching' && boardsOpen\.value/)
     expect(home).not.toMatch(/if \(resource === 'boards'\) await loadBoards/)
   })
 
@@ -30,7 +32,8 @@ describe('nudge 只拉起当前真正要用的数据', () => {
     expect(home).not.toMatch(/if \(resource === 'zones'\) await refreshPage/)
   })
 
-  it('still refreshes the daily inbox, which feeds the tab badge', () => {
+  it('still refreshes the daily inbox, which feeds the daily group count', () => {
+    // 角标变成了组标题后面那个条数与顶部那行汇总，但喂它的还是这两条重拉。
     expect(home).toMatch(/if \(resource === 'daily'\) await loadInbox\(\)/)
     expect(home).toMatch(/if \(resource === 'fix'\) await loadFixTickets\(\)/)
   })

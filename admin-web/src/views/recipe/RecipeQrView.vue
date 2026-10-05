@@ -30,25 +30,33 @@ const stations = ref([])
 const loading = ref(true)
 const errorMsg = ref('')
 
+/** 把每个岗位的码画进对应画布。**必须等 `.qr-grid` 渲染出来之后**才能调。 */
+async function renderCodes() {
+  for (const s of stations.value) {
+    const canvas = document.getElementById(`qr-${s.slug}`)
+    if (!canvas) continue
+    // 票 07：岗位码指向工作台「后勤」组里的阅读页。岗位码从未张贴过，改地址
+    // 没有存量风险；但**必须真的改** —— 老地址已经不作路由了（自然 404）。
+    const url = `${window.location.origin}${RECIPE_DETAIL_PATH}?slug=${encodeURIComponent(s.slug)}`
+    await QRCode.toCanvas(canvas, url, { width: 150, margin: 1 })
+  }
+}
+
 onMounted(async () => {
   document.title = recipeDocumentTitle('岗位二维码')
   try {
     const data = await api.get('/api/recipes/stations')
     stations.value = data.stations || []
-    await nextTick()
-    for (const s of stations.value) {
-      const canvas = document.getElementById(`qr-${s.slug}`)
-      if (!canvas) continue
-      // 票 07：岗位码指向工作台「后勤」组里的阅读页。岗位码从未张贴过，改地址
-      // 没有存量风险；但**必须真的改** —— 老地址已经不作路由了（自然 404）。
-      const url = `${window.location.origin}${RECIPE_DETAIL_PATH}?slug=${encodeURIComponent(s.slug)}`
-      QRCode.toCanvas(canvas, url, { width: 150, margin: 1 })
-    }
   } catch (e) {
     errorMsg.value = '无法加载岗位列表，请稍后重试'
   } finally {
     loading.value = false
   }
+  // 画码要等模板真的渲染出 `.qr-grid`：`loading` 还是 true 时页面走的是
+  // 「加载岗位列表…」那一支，`<canvas>` 根本不在 DOM 里，`getElementById` 全返回
+  // null、`continue` 掉 —— 7 张码全是空白画布就是这么来的。
+  await nextTick()
+  if (!errorMsg.value && stations.value.length) await renderCodes()
 })
 
 function doPrint() {

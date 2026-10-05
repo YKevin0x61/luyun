@@ -162,9 +162,15 @@ describe('店长端排班月历（原型 B）', () => {
     // 原来是并排两格（「排班」+「卫生」）。合并成一个子系统之后只留一格，高亮覆盖两组。
     expect(navBar).toMatch(/WORKBENCH_TITLE/)
         expect(navBar).toMatch(/route\.path\.startsWith\('\/workbench'\)/)
-    // 人事壳的窄栏里有进「现场」那一组的门（两组双向可达的这一半；落点是共享常量）。
-    expect(shell).toMatch(/WORKBENCH_FIELD_HOME|workbenchGroup\('floor'\)/)
-    expect(shell).toMatch(/class="sched-field"/)
+    // B1 的小步：进「现场」那一组不再靠壳里那扇单门（它是工作台导航的真子集，
+    // 一次只到得了一页，还带着一个看着像下拉的 `›`），由壳渲染的**整排工作台级导航**
+    // 接手 —— 同一颗组件（`components/workbench/WorkbenchNav.vue`）三个壳共用，
+    // 表在 `utils/workbenchNav.js`，落点常量在 `utils/workbenchCopy.js`。
+    expect(shell).toMatch(/components\/workbench\/WorkbenchNav\.vue/)
+    expect(shell).toMatch(/class="sched-navbar"/)
+    expect(shell).toMatch(/workbenchGroup\('hr'\)/)
+    // 牌子写「工作台」就指工作台首页（B2：原来指本组首页，于是这条栏上没有回首页的路）。
+    expect(shell).toMatch(/WORKBENCH_HOME/)
     // 子系统名字只写一次。
     expect(shell).toMatch(/WORKBENCH_TITLE/)
   })
@@ -285,5 +291,61 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/id: 'scheduling-calendar'/)
     expect(view).toMatch(/topics: \['scheduling'\]/)
     expect(view).toMatch(/loadCalendar\(monthValue\.value, true\)/)
+  })
+})
+
+// C 方向（2026-10-05 用户裁定）：工作台级导航（今天 / 人事 / 现场 / 后勤 / 我的）在手机档
+// 从顶栏下到底部的拇指区，顶栏因此只剩「‹后台 + 本组四页 + 身份 + 退出」。
+// 手机档的排布是**布局**：jsdom 不做布局、也不解析媒体查询，所以这一组按源码断 ——
+// 同一手法见 `views/workbench/__tests__/shellMobileChrome.test.js` 的 `mobileBlocks`
+// （那边断的是工作台外壳自己的那份，这里断人事壳的）。
+describe('C 方向：人事壳把工作台级导航让到底栏', () => {
+  /** 把文件里 `@media (max-width: 720px)` 那几段规则拼起来。按大括号配对取块，
+   *  不靠正则猜边界（文件末尾还有 ≤560px 与桌面档的规则，滑过去就会断错对象）。 */
+  function mobileRules(source) {
+    const marker = '@media (max-width: 720px)'
+    const blocks = []
+    let from = 0
+    for (;;) {
+      const start = source.indexOf(marker, from)
+      if (start === -1) break
+      const open = source.indexOf('{', start)
+      let depth = 0
+      let end = -1
+      for (let i = open; i < source.length; i += 1) {
+        if (source[i] === '{') depth += 1
+        else if (source[i] === '}') {
+          depth -= 1
+          if (depth === 0) { end = i; break }
+        }
+      }
+      if (end === -1) throw new Error('大括号不配对')
+      blocks.push(source.slice(open, end + 1))
+      from = end + 1
+    }
+    expect(blocks.length, `${marker} 一段都没有`).toBeGreaterThan(0)
+    return blocks.join('\n')
+  }
+
+  it('底栏挂上了，而顶栏那排只是收起来（桌面档还要它）', () => {
+    expect(shell).toMatch(/components\/workbench\/WorkbenchTabBar\.vue/)
+    expect(shell).toMatch(/<WorkbenchTabBar class="sched-tabbar" \/>/)
+    // 组件与它所在的带子都还在：桌面档（>720px）那条带子里仍是工作台级导航 + 本组四页。
+    expect(shell).toMatch(/components\/workbench\/WorkbenchNav\.vue/)
+    expect(shell).toMatch(/class="sched-navbar"/)
+    // 手机档只是把它收起来。删组件（而不是 display:none）会把桌面档那一排一起删掉。
+    expect(mobileRules(shell)).toMatch(/\.sched-shell \.sched-wb-nav\s*\{\s*display:\s*none/)
+  })
+
+  it('底栏钉在视口底、内容给它让出高度（两条都是壳自己的账）', () => {
+    // 组件里那条 `position: fixed` 会被共享样式表的
+    // `.hygiene-admin > *:not(.modal-overlay) { position: relative }` 打回 `relative`
+    // （同特异度，而那张表更晚进 head —— 平局按文档顺序判）：底栏脱不出文档流，内容一长
+    // 就跟着排到页面末尾，手机上等于没有。`.sched-shell` 这个父级是这条规则赢的条件，
+    // 别当成冗余删掉。
+    const rules = mobileRules(shell)
+    expect(rules).toMatch(/\.sched-shell \.sched-tabbar\s*\{[^}]*position:\s*fixed/)
+    // 它是 fixed（不占流），内容末尾要让出那条栏的高度，否则最后一屏压在栏下滚不到底。
+    expect(rules).toMatch(/\.sched-shell\s*\{[^}]*padding-bottom:\s*calc\(57px \+ env\(safe-area-inset-bottom/)
   })
 })

@@ -48,4 +48,10 @@ const { ask, exit, confirmOpen, queuedCount, cancel, loggingOut } = useWorkbench
 
 .wb-exit:hover { color: var(--hy-seal-bright); border-color: var(--hy-seal-line); }
 .wb-exit:disabled { opacity: .6; cursor: default; }
+
+/* 触控下限（B6）：手机上原来 45×26 —— 顶栏里最小的目标之一，还紧挨着导航胶囊。
+   抬到 44px（宽也补到 44，字少也不会变成一个细条）；桌面档保持那颗小胶囊。 */
+@media (max-width: 720px) {
+  .wb-exit { min-height: 44px; min-width: 44px; padding: 4px 12px; }
+}
 </style>

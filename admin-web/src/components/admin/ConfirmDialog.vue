@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import SvgIcon from '../SvgIcon.vue'
 
 // 轻量通用确认弹窗，复用项目既有 .modal-overlay/.modal-box 弹窗风格（admin-web/src/styles/theme.css），
@@ -7,7 +7,13 @@ import SvgIcon from '../SvgIcon.vue'
 //
 // prompt 为可选：传了才渲染输入框，confirm 事件会带上用户填的文本（不传时是空串）。
 // 驳回这类"要说清哪里不行"的场景靠它，避免再做一个专用组件。
-defineProps({
+//
+// `prompt.required`：驳回**必须**写一句原因（2026-10-05 用户裁定）。空原因驳回去，员工
+// 看到的只是"已驳回，请重拍" —— 他不知道改什么，只能原样重拍，然后又被驳。所以这一道
+// 拦在前端：填之前确认按钮是禁用的，旁边那句 `prompt.hint` 就是为什么点不动。
+// （服务端同样会拦，返回 400 —— 两边都拦是有意的：这一道省掉一次网络往返，也省掉
+// "点了一下没反应"那种体验。）
+const props = defineProps({
   title: { type: String, default: '请确认' },
   message: { type: String, required: true },
   confirmLabel: { type: String, default: '确认' },
@@ -22,6 +28,12 @@ const promptEl = ref(null)
 const confirmEl = ref(null)
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+/** 这个框的输入是不是必填。只有驳回那几处传 `required: true`；其余（删除 / 排除 /
+ *  改号确认）都不传，行为与以前完全一样 —— 它们没有输入框，或者输入本来就可有可无。 */
+const promptRequired = computed(() => Boolean(props.prompt && props.prompt.required))
+/** 必填时，一个字都没写（或只有空格）就不让提交。 */
+const canConfirm = computed(() => !promptRequired.value || value.value.trim().length > 0)
 
 function focusables() {
   if (!boxEl.value) return []
@@ -76,18 +88,29 @@ onBeforeUnmount(() => {
       </div>
       <p style="font-size:13px;line-height:1.6;margin:0 0 4px">{{ message }}</p>
       <label v-if="prompt" class="modal-prompt">
-        <span>{{ prompt.label || '说明（可选）' }}</span>
+        <span class="modal-prompt-head">
+          <span>{{ prompt.label || '说明（可选）' }}</span>
+          <!-- 必填时那一句"为什么点不动"挨着输入框写（驳回：员工端会原样看到这句话）。 -->
+          <em v-if="prompt.hint">{{ prompt.hint }}</em>
+        </span>
         <textarea
           ref="promptEl"
           v-model="value"
           rows="2"
           :maxlength="prompt.maxlength || 120"
           :placeholder="prompt.placeholder || ''"
+          :aria-required="promptRequired ? 'true' : undefined"
         ></textarea>
       </label>
       <div class="modal-footer">
         <button class="btn" @click="emit('cancel')">{{ cancelLabel }}</button>
-        <button ref="confirmEl" class="btn" :class="danger ? 'btn-danger' : 'btn-primary'" @click="emit('confirm', value.trim())">{{ confirmLabel }}</button>
+        <button
+          ref="confirmEl"
+          class="btn"
+          :class="danger ? 'btn-danger' : 'btn-primary'"
+          :disabled="!canConfirm"
+          @click="emit('confirm', value.trim())"
+        >{{ confirmLabel }}</button>
       </div>
     </div>
   </div>
@@ -99,6 +122,26 @@ onBeforeUnmount(() => {
   margin: 10px 0 4px;
   font-size: 12px;
   color: var(--text-muted, #6b7280);
+}
+/* 必填那句提示与标签同一行、贴着右端：读标签的时候顺手就看到了，不用再看别处。
+   允许换行：标签长的（驳回那处的「哪里不合格（必填，员工能看到）」）在窄屏上挤不下时，
+   提示整句掉到第二行，不会顶出弹窗。 */
+.modal-prompt-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+.modal-prompt-head > span:first-child {
+  min-width: 0;
+}
+.modal-prompt-hint {
+  margin-left: auto;
+  flex: none;
+  font-style: normal;
+  font-size: 11px;
+  text-align: right;
+  color: var(--red, #ef4444);
 }
 .modal-prompt textarea {
   display: block;

@@ -70,18 +70,31 @@ describe('hygieneCopy', () => {
     }
     const before = Date.parse('2026-09-13T11:59:00+08:00')
     const after = Date.parse('2026-09-13T12:00:00+08:00')
-    expect(canAcceptFixTicket({ id: 20, permission: '管理员' }, ticket, before)).toBe(true)
-    expect(canAcceptFixTicket({ id: 21, permission: '管理员' }, ticket, before)).toBe(false)
+    // 2026-10-05 改判据：验别人的整改单看的是**「整改单」那一项开关**（`admin_caps`），
+    // 不再是 `permission === '管理员'` 那个档位 —— 同一个标签下的两个人可以一个开了
+    // 这一项、一个没开，拿标签判会把没开的那个人也放进来。所以下面这几条从
+    // `permission: '管理员'` 改成了 `admin_caps: ['fix']`，并补一条"只有标签、没有开关
+    // 就不放行"的反例。
+    const fixer = { id: 21, permission: '管理员', admin_caps: ['fix'] }
+    const labelOnly = { id: 21, permission: '管理员', admin_caps: [] }
+    // 开单人自己收：不看他有没有那一项（服务端同口径）。
+    expect(canAcceptFixTicket({ id: 20, permission: '普通员工', admin_caps: [] }, ticket, before)).toBe(true)
+    expect(canAcceptFixTicket(fixer, ticket, before)).toBe(false)
     expect(canAcceptFixTicket({ kind: 'super' }, ticket, before)).toBe(false)
-    expect(canAcceptFixTicket({ id: 21, permission: '管理员' }, ticket, after)).toBe(true)
+    expect(canAcceptFixTicket(fixer, ticket, after)).toBe(true)
     expect(canAcceptFixTicket({ kind: 'super' }, ticket, after)).toBe(true)
-    expect(canAcceptFixTicket({ id: 10, permission: '普通员工' }, ticket, after)).toBe(false)
+    // 只有「管理员」这个标签、没开那一项 → 不放行（旧行为会放行，这正是要改掉的那条）。
+    expect(canAcceptFixTicket(labelOnly, ticket, after)).toBe(false)
+    // 开了别的项也不顶替：这一件事只认 `fix`。
+    expect(canAcceptFixTicket({ id: 10, admin_caps: ['daily_review'] }, ticket, after)).toBe(false)
   })
 
-  it('现场七页合成一个卫生板块，不把员工手机入口与人事页算进去', () => {
+  it('现场八页合成一个卫生板块，不把员工手机入口与人事页算进去', () => {
     // 2026-10-04：排班与卫生合并成子系统「工作台」，这一组是它的「现场」那一组，
     // 品牌三件套跟着子系统走（名字只在 workbenchCopy.js 写一次）。
     // 票 05：这一组按分组落在 `/workbench/floor/*`；花名册是**人事**页，从这条 rail 搬走。
+    // 2026-10-05：加上「卫生趋势」（八页）—— 前七页都是"当下"、数据页是台账，
+    // 没有一处回答"这周比上周好还是差"，那一页就是这个回答。
     expect(HYGIENE_BRAND_TITLE).toBe('工作台')
     expect(hygieneDocumentTitle('花名册')).toBe('花名册 · 工作台')
     expect(HYGIENE_BRAND_MARK).toBe('台')
@@ -94,6 +107,7 @@ describe('hygieneCopy', () => {
       '/workbench/floor/fix',
       '/workbench/floor/boards',
       '/workbench/floor/data',
+      '/workbench/floor/trend',
     ])
     expect(isHygieneAdminPath('/workbench/floor/zones')).toBe(true)
     expect(isHygieneAdminPath('/workbench/floor/boards')).toBe(true)
@@ -118,7 +132,7 @@ describe('hygieneCopy', () => {
     // 员工端的卫生待办也不是（票 03 起在 `/workbench/me/clean`）。
     expect(isHygieneAdminPath('/workbench/me/clean')).toBe(false)
     expect(HYGIENE_ADMIN_NAV.map((item) => item.shortTitle)).toEqual([
-      '工作区', '日常', '仪容', '专项', '整改', '榜', '数据',
+      '工作区', '日常', '仪容', '专项', '整改', '榜', '数据', '趋势',
     ])
     expect(HYGIENE_STAFF_TABS.map((item) => item.id)).toEqual([
       'inbox', 'deep', 'fix', 'boards', 'me',

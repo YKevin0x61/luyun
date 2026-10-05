@@ -4,6 +4,35 @@ import { createBrowserStandardPhotoCache } from '../utils/standardPhotoCache'
 let browserCache = null
 let firstDownloadController = null
 
+/** 「稍后下载」的记忆键（B4）。
+ *
+ *  为什么要有它：首次下载那张**阻塞式**弹窗原来是"每次进页都弹"—— 绕开的方式只有
+ *  「开始下载」，点「稍后下载」只是把 `firstPromptOpen` 在内存里按下去，而现场七页
+ *  各自挂一份面板、每次进页都 `initialize()` 一次，`stats.baselineReady` 仍是 false，
+ *  于是又弹。实测同一会话里 zones → daily → data 连进三页弹三次，刚点过「稍后下载」照弹。
+ *  记在 localStorage 里（不是内存里）才算"记住"：员工关掉页面、换一页再进来也不该再被
+ *  拦一次。缺图的提醒还在 —— 外壳上那颗浮标「标准图缓存 N」与缓存管理面板都照旧。 */
+export const PROMPT_DEFERRED_KEY = 'luyun.hygiene.standardPhotoCache.promptDeferred'
+
+/** 读 / 写那一个标记。存储被禁（隐私模式、配额满）时**一律当作没记住**：
+ *  读不出来就是"还没选过"，写不进去最多退回原来的行为，不该连带把面板弄崩。 */
+function readPromptDeferred() {
+  try {
+    return globalThis.localStorage?.getItem(PROMPT_DEFERRED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writePromptDeferred(deferred) {
+  try {
+    if (deferred) globalThis.localStorage?.setItem(PROMPT_DEFERRED_KEY, '1')
+    else globalThis.localStorage?.removeItem(PROMPT_DEFERRED_KEY)
+  } catch {
+    // 记不住就算了：这一次仍然按调用方的意思收起弹窗（见 `skipFirstRun`）。
+  }
+}
+
 function getBrowserCache() {
   if (!browserCache) browserCache = createBrowserStandardPhotoCache()
   return browserCache
@@ -25,6 +54,9 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
       lastSyncAt: '',
     },
     firstPromptOpen: false,
+    // 「稍后下载」选过没有（B4）：`initialize()` 里先从 localStorage 读回来，
+    // 选过之后**不再自动弹**那张阻塞遮罩。
+    promptDeferred: false,
     progress: null,
     deferred: null,
     notice: null,
@@ -95,8 +127,11 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
         } else if (this.stats.baselineReady) {
           await this.checkForUpdates({ manifest: this.manifest })
         } else {
+          // 还没下过基线：只在**没记过「稍后下载」**时弹那张阻塞遮罩（B4）。
+          this.promptDeferred = readPromptDeferred()
           this.firstPromptOpen = Boolean(
             prompt
+            && !this.promptDeferred
             && this.stats.totalCount > 0
             && state.missing.length > 0,
           )
@@ -107,14 +142,27 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
         this.initializing = false
       }
     },
+    /** 「稍后下载」：收起弹窗，并且**记住**这个选择（B4）。
+     *
+     *  记的是"这台设备上这个人不想现在下"：换页、刷新、明天再进来都不再拦他一次。
+     *  真要下的时候入口还在两处 —— 浮标「标准图缓存 N」与缓存管理面板里的「下载 N 张」。 */
     skipFirstRun() {
       this.firstPromptOpen = false
+      this.promptDeferred = true
+      writePromptDeferred(true)
+    },
+    /** 那个"稍后"的选择在真正动手之后就算花掉了：他开始下载、或者清了缓存从头来过，
+     *  下一次缺图时该重新问一遍（否则清完缓存就再也看不到那张提示了）。 */
+    _forgetPromptDeferred() {
+      this.promptDeferred = false
+      writePromptDeferred(false)
     },
     async startFirstDownload() {
       if (this.busy || !this.manifest) return null
       this.busy = true
       this.firstPromptOpen = false
       this.errorText = ''
+      this._forgetPromptDeferred()
       try {
         const state = this._applySnapshot(
           await getBrowserCache().snapshot(this.manifest),
@@ -248,6 +296,8 @@ export const useStandardPhotoCacheStore = defineStore('standardPhotoCache', {
         this.notice = null
         this.queuedNotice = null
         this.firstPromptOpen = false
+        // 清掉缓存 = 回到"这台设备没有基线"，那张一次性提示也该重新有机会出现（B4）。
+        this._forgetPromptDeferred()
       } catch (error) {
         this.errorText = error && error.message ? error.message : '清理缓存失败'
       } finally {

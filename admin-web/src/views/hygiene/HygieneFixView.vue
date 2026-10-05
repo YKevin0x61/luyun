@@ -414,7 +414,7 @@ async function confirmDelete() {
       :message="`驳回「${selected ? selected.zone_name : ''} · ${selected ? selected.ticket_type : ''}」后要重新回拍；本周红黑榜会记一次驳回。`"
       confirm-label="驳回"
       danger
-      :prompt="{ label: '哪里不合格（可选，员工能看到）', placeholder: '例如：回拍角度不对，看不出整改结果', maxlength: 120 }"
+      :prompt="{ label: '哪里不合格（必填，员工能看到）', placeholder: '写一句让他知道改什么，例如：回拍角度不对，看不出整改结果', hint: '必填 · 员工照这句重拍', required: true, maxlength: 120 }"
       @confirm="confirmReject"
       @cancel="rejectOpen = false"
     />

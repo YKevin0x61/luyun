@@ -92,7 +92,39 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .form-textarea{font-family:var(--font-mono);font-size:.85rem;line-height:1.5;resize:vertical;min-height:12rem}
 .form-input:focus-visible,.form-textarea:focus-visible{outline:none;border-color:var(--jade);box-shadow:0 0 0 3px var(--jade-soft)}
 .form-check{display:flex;align-items:flex-start;gap:.5rem;font-size:.9rem;line-height:1.5;color:var(--ink);cursor:pointer;margin:.5rem 0}
-.form-check input[type="checkbox"]{margin-top:.18rem;width:1.05rem;height:1.05rem;accent-color:var(--jade)}
+.form-check .recipe-checkbox{flex:0 0 auto;margin-top:.12rem}
+
+.recipe-checkbox{
+  all:unset;box-sizing:border-box;width:1.05rem;height:1.05rem;flex-shrink:0;
+  display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid var(--line-strong);border-radius:4px;background:var(--surface);
+  cursor:pointer;transition:border-color .15s,background .15s,box-shadow .15s;
+}
+.recipe-checkbox:hover:not([data-disabled]){border-color:var(--jade)}
+.recipe-checkbox:focus-visible{outline:none;box-shadow:0 0 0 3px var(--jade-soft)}
+.recipe-checkbox[data-state='checked'],.recipe-checkbox[data-state='indeterminate']{
+  background:var(--jade);border-color:var(--jade);color:#fff;
+}
+.recipe-checkbox[data-disabled]{opacity:.55;cursor:not-allowed}
+.recipe-checkbox__indicator{display:flex;align-items:center;justify-content:center;color:inherit}
+.recipe-checkbox__indicator svg{opacity:0;transform:scale(.85);transition:opacity .12s,transform .12s}
+.recipe-checkbox[data-state='checked'] .recipe-checkbox__indicator svg,
+.recipe-checkbox[data-state='indeterminate'] .recipe-checkbox__indicator svg{opacity:1;transform:scale(1)}
+
+.recipe-dropzone{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.45rem;
+  min-height:6.5rem;padding:1rem .85rem;border:1px dashed var(--line-strong);border-radius:var(--radius-md);
+  background:var(--surface-2);color:var(--muted);text-align:center;cursor:pointer;
+  transition:border-color .15s,background .15s,color .15s,box-shadow .15s;
+}
+.recipe-dropzone:hover:not(.is-disabled),.recipe-dropzone.is-dragging{
+  border-color:var(--jade);background:var(--jade-soft);color:var(--jade-ink);box-shadow:var(--shadow-sm);
+}
+.recipe-dropzone.has-file{border-style:solid;color:var(--ink)}
+.recipe-dropzone.is-disabled{opacity:.55;cursor:not-allowed}
+.recipe-dropzone__input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.recipe-dropzone__label{font-size:.88rem;line-height:1.45;font-weight:700;word-break:break-all}
+.recipe-dropzone__hint{font-size:.78rem;color:var(--muted)}
 
 /* ===== 6. Flash ===== */
 .flash{padding:.6rem 1rem;border-radius:var(--radius-sm);font-size:.92rem;font-weight:700;border:1px solid transparent}
@@ -103,10 +135,13 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 /* ===== 7. 列表页 ===== */
 .index-section{animation:sop-fade .4s var(--ease) both}
 @keyframes sop-fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+/* 这里**不能**用 `overflow:hidden` 裁顶部那条渐变：`.station-search-dropdown` 是
+   `.index-hero` 的后代，一旦裁剪，下拉只剩 hero 底边往上露出的十几像素（实测桌面
+   露 ~20px、手机 16px），搜索等于不可用。改由 `::before` 自己收圆角。 */
 .index-hero{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:clamp(1rem,4vw,2.5rem);
   margin-bottom:clamp(1.1rem,3vw,1.7rem);padding:clamp(1.3rem,4vw,2.6rem);
-  border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--shadow-md);overflow:hidden}
-.index-hero::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:linear-gradient(90deg,var(--jade),var(--gold),transparent 60%)}
+  border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--shadow-md)}
+.index-hero::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;border-radius:calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0;background:linear-gradient(90deg,var(--jade),var(--gold),transparent 60%)}
 .hero-copy{min-width:0}
 .hero-eyebrow,.section-caption span{display:inline-flex;width:fit-content;margin:0 0 .6rem;padding:.24rem .6rem;border-radius:999px;color:var(--jade-ink);background:var(--jade-soft);border:1px solid var(--line);font-size:.72rem;font-weight:900;letter-spacing:.1em;text-transform:uppercase}
 .page-title{margin:0 0 .5rem;font-size:clamp(1.6rem,4.5vw,2.6rem);font-weight:900;letter-spacing:-.03em;color:var(--ink);line-height:1.05}
@@ -251,7 +286,11 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .manage-page-head{margin-bottom:clamp(1.1rem,3vw,1.6rem)}
 .manage-actions{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1rem}
 .manage-table-wrap{border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--shadow-md);overflow:auto}
-.manage-table{width:100%;min-width:34rem;border-collapse:separate;border-spacing:0;font-size:.92rem}
+/* 表格正文必须显式声明配方自己的墨色：这一页套在工作台外壳里，而外壳容器带着
+   `color: var(--hy-ink)`（深青主题的浅字色 #e4f0ee）。`td` 原本没有 color，就把它
+   继承下来，压在 `--surface` 的白纸底上 —— 真机实测对比度 1.17:1，配方名与操作列
+   几乎看不见（截图里 4800 像素暗像素 0 个）。`th` 早就写了自己的颜色，漏的是 `td`。 */
+.manage-table{width:100%;min-width:34rem;border-collapse:separate;border-spacing:0;font-size:.92rem;color:var(--ink)}
 .manage-table th,.manage-table td{padding:.6rem .85rem;text-align:left;border-bottom:1px solid var(--line);vertical-align:middle}
 .manage-table th{position:sticky;top:0;z-index:2;background:var(--jade-soft);color:var(--jade-ink);font-weight:800;font-size:.78rem;letter-spacing:.04em;text-transform:uppercase}
 .manage-table tr:last-child td{border-bottom:0}
@@ -524,7 +563,9 @@ body.batch-mode .station-item.is-checked .station-link{border-color:var(--jade);
 .sop-scale-wrap.is-open .sop-scale--popover{display:inline-flex;transform:scale(1);opacity:1}
 .sop-scale-btn{min-width:1.7rem;height:1.6rem;padding:0 .3rem;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--muted);font:inherit;font-size:.72rem;font-weight:800;cursor:pointer}
 .sop-scale-btn.on{background:var(--jade);border-color:var(--jade);color:#fff}
-.sop-scale-input{width:2.6rem;height:1.6rem;padding:0 .3rem;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit;font-size:.72rem}
+.sop-scale-input{width:2.6rem;height:1.6rem;padding:0 .3rem;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit;font-size:.72rem;text-align:center;-moz-appearance:textfield;appearance:textfield}
+.sop-scale-input:focus-visible{outline:none;border-color:var(--jade);box-shadow:0 0 0 2px var(--jade-soft)}
+.sop-scale-input::-webkit-outer-spin-button,.sop-scale-input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 @media (pointer:coarse){.sop-scale-btn,.sop-scale-input,.sop-scale-toggle{height:2rem}.sop-scale-toggle{width:2rem}}
 
 /* ===== 12e. 窄屏阅读底栏 / 抽屉 ===== */

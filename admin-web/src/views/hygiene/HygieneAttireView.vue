@@ -232,19 +232,24 @@ function pickStandard(event) {
             </div>
 
             <div v-if="rejectFor === row.employee_id" class="reject-box">
-              <label :for="`reject-note-${row.employee_id}`">哪里不合格（员工照着这句重拍）</label>
+              <label :for="`reject-note-${row.employee_id}`">哪里不合格（必填，员工照着这句重拍）</label>
+              <!-- 2026-10-05 用户裁定：驳回原因必填。这句提示就摆在输入框旁，
+                   确认按钮在填之前是禁用的 —— 以前只有页面顶上那一行报错，
+                   人在这一格上根本看不到为什么点不动。 -->
+              <p class="reject-hint">必填 · 员工端原样显示这句话，他照着改</p>
               <textarea
                 :id="`reject-note-${row.employee_id}`"
                 v-model="rejectNote"
                 class="staff-input"
                 rows="2"
                 maxlength="200"
+                placeholder="写一句让他知道改什么，例如：帽子没戴正、围裙有污渍"
               ></textarea>
               <div class="row-acts">
                 <button
                   type="button"
                   class="btn btn-primary"
-                  :disabled="busyId === row.employee_id"
+                  :disabled="busyId === row.employee_id || !rejectNote.trim()"
                   @click="submitReject"
                 >确认驳回</button>
                 <button type="button" class="btn" @click="rejectFor = null">取消</button>
@@ -344,6 +349,12 @@ function pickStandard(event) {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+/* 必填那句提示：贴着输入框、小一号（用的是这一页既有的报错色，不引新颜色）。 */
+.reject-hint {
+  margin: 0;
+  font-size: .8rem;
+  color: var(--hy-danger, #c0392b);
 }
 .upload-btn {
   position: relative;

@@ -15,7 +15,7 @@ import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { pageRow, pageTitle } from '../../router/pageRoutes.js'
 import { isLoggedIn } from '../../utils/authStatus'
 import { hygieneDocumentTitle } from '../../utils/hygieneCopy'
-import { staffSessionState } from '../../utils/hygieneStaff'
+import { staffRequest, staffSessionState } from '../../utils/hygieneStaff'
 import { STAFF_ENTRY_PATH } from '../../utils/staffPaths'
 import { WORKBENCH_TITLE } from '../../utils/workbenchCopy'
 
@@ -38,25 +38,51 @@ const target = computed(() => {
 const owner = computed(() => {
   const row = pageRow(target.value)
   if (!row) return '这个地址不是工作台里的页面。'
-  if (row.audience === 'admin') return `「${row.title}」是店长（超级管理员）用的页面。`
+  if (row.audience === 'admin') {
+    // 店里那个「管理员」（员工账号 + 卫生权限=管理员）能调验收与整改单的接口，但这一页
+    // 是店长在电脑端的全店面板 —— 两边都对，所以别对他说"你是员工、没你的事"
+    // （角色审查 F-03：旧文案正是这么说的）。把他该去哪儿说清楚。
+    if (identity.value === 'staff-admin') {
+      return `「${row.title}」是店长在电脑端用的页面。你的复核工作在手机端「卫生」页里做。`
+    }
+    return `「${row.title}」是店长（超级管理员）用的页面。`
+  }
   if (row.audience === 'staff') return `「${row.title}」是员工手机端的页面，只在员工身份下打开。`
   // 目标页两种身份都能看（`both`）：走到这里说明拦它的不是身份这一条，别乱认领。
   return `「${row.title}」这一页需要的身份和当前会话对不上。`
 })
 
-/** 我此刻是什么身份 —— 与守卫同一套口径（管理端会话优先，再看员工会话）。 */
-const identity = ref(null) // null | 'admin' | 'staff'
+/** 我此刻是什么身份 —— 与守卫同一套口径（管理端会话优先，再看员工会话）。
+ *  `staff-admin` 不是第四种会话，是**员工会话里的卫生权限档**（现场复核档）：界面层一直
+ *  看不见它（角色审查 F-01），而这个页面恰好是"必须解释身份"的地方，所以在这里问一次。 */
+const identity = ref(null) // null | 'admin' | 'staff' | 'staff-admin'
 
 onMounted(async () => {
   if (await isLoggedIn()) {
     identity.value = 'admin'
     return
   }
-  identity.value = (await staffSessionState()) === 'unauthenticated' ? null : 'staff'
+  if ((await staffSessionState()) === 'unauthenticated') {
+    identity.value = null
+    return
+  }
+  identity.value = 'staff'
+  // 拿不到就问不出来 —— 这里**不做授权判断**（拦截在守卫与接口），只影响措辞，
+  // 所以失败就当他普通员工，不弹错、不拦人。
+  // 判据是**管理权限开关**（2026-10-05 起）：`permission` 那个标签不再代表能力，
+  // 只看它会把"标签是管理员、一个勾都没给"的人说成有复核工作（正好说反）。
+  try {
+    const me = await staffRequest('/api/hygiene/staff/me', { timeoutMs: 4000 })
+    const caps = (me && me.employee && me.employee.admin_caps) || []
+    if (Array.isArray(caps) && caps.length > 0) identity.value = 'staff-admin'
+  } catch (err) {
+    /* 断网或超时：保持 'staff' */
+  }
 })
 
 const identityLabel = computed(() => {
   if (identity.value === 'admin') return '超级管理员'
+  if (identity.value === 'staff-admin') return '管理员（员工账号 · 现场复核）'
   if (identity.value === 'staff') return '员工'
   return '未登录'
 })
@@ -65,13 +91,13 @@ const identityLabel = computed(() => {
  *  身份各自的首页）。会话已经没了就回登录页 —— 落点由那份判据说了算，不在这里写死。 */
 const homeTo = computed(() => {
   if (identity.value === 'admin') return '/workbench'
-  if (identity.value === 'staff') return STAFF_ENTRY_PATH
+  if (identity.value) return STAFF_ENTRY_PATH
   return '/login'
 })
 
 const homeLabel = computed(() => {
   if (identity.value === 'admin') return '回工作台首页'
-  if (identity.value === 'staff') return '回我的首页'
+  if (identity.value) return '回我的首页'
   return '去登录'
 })
 

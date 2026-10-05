@@ -34,11 +34,16 @@ FIRST_COLOR = (120, 60, 30)
 SECOND_COLOR = (200, 40, 40)
 
 
-def _staff(employee_id, phone, shift, permission="普通员工", name="") -> dict:
+def _staff(employee_id, phone, shift, permission="普通员工", name="", caps=None) -> dict:
+    """员工 actor。`caps` 是**管理权限开关**（2026-10-05 起判据看它，不看 `permission`）；
+    不给就按迁移 `0015` 的回填规则推 —— 老「管理员」= 日常验收 + 专项验收 + 整改单。"""
+    if caps is None:
+        caps = ("daily_review", "deep_review", "fix") if permission == "管理员" else ()
     return {
         "kind": "staff",
         "id": employee_id,
         "permission": permission,
+        "caps": list(caps),
         "name": name,
         "phone": phone,
         "shift": shift,

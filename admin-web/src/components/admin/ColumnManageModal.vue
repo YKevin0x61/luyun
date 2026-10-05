@@ -1,6 +1,7 @@
 <script setup>
 import { reactive, ref } from 'vue'
 import { getColumnLabel, isAutoColumn } from '../../utils/adminLabels'
+import { useEscapeClose } from '../../composables/useEscapeClose'
 import SvgIcon from '../SvgIcon.vue'
 import LuyunCheckbox from '../ui/LuyunCheckbox.vue'
 
@@ -9,6 +10,10 @@ const props = defineProps({
   table: { type: String, default: '' },
 })
 const emit = defineEmits(['close', 'add', 'drop'])
+
+// 组件由 `v-if` 控制，挂载即打开：Esc 关闭走和 ✕ / 点遮罩同一条 emit。
+// 少了它，这个框是页面上唯一一个键盘关不掉的弹窗（同类弹窗都接得上）。
+useEscapeClose(() => true, () => emit('close'))
 
 const form = reactive({
   column_name: '',

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote
@@ -145,8 +145,11 @@ _ERROR_DETAILS = {
     "duplicate_item": "该卫生工作区已有同名检查项",
     "shift_required": "请先选择当天班次",
     "shift_mismatch": "只能交自己班次的日常检查",
-    "zone_required": "请先选择今天的卫生工作区",
-    "zone_mismatch": "只能查看和提交所选卫生工作区的任务",
+    # 票 10 起员工**不能自选**工作区（区域与班次由店长在排班页配），所以这两句不能再
+    # 说"请先选择 / 所选"——那是旧口径，会把人指去一个已经不存在的操作。现在的真话是：
+    # 他没被排到区，得找店长配。前端的门槛已经先拦一道，这里是绕过前端直接打接口时的那句。
+    "zone_required": "今天排班没给你排到工作区：找店长在排班页配一个",
+    "zone_mismatch": "只能在自己今天那个区里操作",
     "live_required": "必须现场拍摄，不能从相册选图",
     "capture_required": "请拍摄日常检查照片",
     "cannot_self_accept": "交这张的人不能自己验收",
@@ -350,6 +353,10 @@ class RosterPatchIn(BaseModel):
     name: Optional[str] = None
     job_title: Optional[str] = None
     permission: Optional[str] = None
+    # 管理权限开关（2026-10-05）：整组替换那十个勾；不传就是不动它。
+    # `permission` 那个下拉现在只是人话标签（花名册里显示"管理员 / 普通员工"），
+    # **判据一律以这里为准** —— 见 `services/identity/capabilities.py`。
+    admin_caps: Optional[List[str]] = None
 
 
 class ShiftIn(BaseModel):
@@ -442,6 +449,9 @@ def _staff_actor(employee: Dict[str, Any]) -> Dict[str, Any]:
         "kind": "staff",
         "id": employee["id"],
         "permission": employee["permission"],
+        # 管理权限开关（2026-10-05）：**判据看这一组**，`permission` 只当人话标签
+        # （服务层的 `_require_reviewer` / `_require_fix_*` 都是 `has_cap(actor["caps"], …)`）。
+        "caps": list(employee.get("admin_caps") or []),
         "name": employee.get("name") or "",
         "phone": employee["phone"],
         "shift": employee.get("shift"),
@@ -452,6 +462,27 @@ def _staff_actor(employee: Dict[str, Any]) -> Dict[str, Any]:
 
 def _live_flag(raw: Optional[str]) -> bool:
     return (raw or "").strip().lower() in {"true", "1", "yes"}
+
+
+MAX_REJECT_REASON = 200
+
+
+def _require_reject_reason(raw: Optional[str]) -> str:
+    """驳回**必须**写一句原因（2026-10-05 用户裁定：不能选填）。
+
+    以前 `reason` 是可选的，不写也能驳 —— 员工交完看到的就是一句"已驳回，请重拍"，
+    他不知道自己错在哪，只能原样重拍，然后又被驳。判的尺度本来就在管理员脑子里
+    （标准图只说明"该拍成什么样"，不说明"什么算不合格"），再不写一句，两边就对立了。
+
+    七个驳回入口（员工端日常/专项/整改 + 管理端仪容/日常/专项/整改）**都过这里** ——
+    判据只有一处，将来再加驳回入口也逃不掉。
+    """
+    text = (raw or "").strip()
+    if not text:
+        # 与仪容那条既有的必填文案（`attire_note_required`）**一字不差** —— 七个入口
+        # 一句话，员工看到的提示与管理员看到的提示是同一句。
+        raise HTTPException(status_code=400, detail="请写明哪里不合格：员工要照着这句重拍")
+    return text[:MAX_REJECT_REASON]
 
 
 async def _live_capture_from_upload(file: UploadFile, live_raw: Optional[str]) -> dict:
@@ -779,6 +810,24 @@ async def staff_me(
     }
 
 
+@router.get("/staff/me/stats")
+async def staff_my_stats(
+    days: Optional[int] = None,
+    staff=Depends(require_staff_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    """我的成绩：一段时间内的一次通过、被驳回与原因分布。
+
+    给员工端那张"我干得怎么样"的卡片用（2026-10-05 用户裁定）。数据源是"人的榜"那张
+    事件表，与管理员看到的榜**同一份记录** —— 员工看到的数字和店长看到的对得上。
+    """
+    employee = staff["employee"]
+    try:
+        return await work.staff_score(int(employee["id"]), days=days or 7)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
 @router.patch("/staff/me")
 async def staff_update_me(
     body: StaffProfileIn,
@@ -946,14 +995,20 @@ async def admin_patch_roster(
     _session_id: str = Depends(require_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
-    if body.name is None and body.job_title is None and body.permission is None:
-        raise HTTPException(status_code=400, detail="请提供姓名、职位或卫生权限")
+    if (
+        body.name is None
+        and body.job_title is None
+        and body.permission is None
+        and body.admin_caps is None
+    ):
+        raise HTTPException(status_code=400, detail="请提供姓名、职位、卫生权限或管理权限开关")
     try:
         employee = await accounts.update_fields(
             employee_id,
             name=body.name,
             job_title=body.job_title,
             permission=body.permission,
+            admin_caps=body.admin_caps,
         )
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
@@ -1283,6 +1338,23 @@ async def admin_boards(
     return await work.list_boards()
 
 
+@router.get("/admin/trend")
+async def admin_trend(
+    days: Optional[int] = None,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    """卫生趋势：按天、按工作区、按驳回原因三个切面（2026-10-05 用户裁定）。
+
+    现场那七页都是"当下"，数据页是台账 —— 这一条回答"这周比上周好还是差"。
+    数据源与红黑榜同一份事件记录，所以店长在两个页面上看到的数不会打架。
+    """
+    try:
+        return await work.hygiene_trend(days=days or 30)
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+
+
 @router.get("/staff/boards")
 async def staff_boards(
     _staff=Depends(require_staff_session),
@@ -1494,7 +1566,7 @@ async def admin_attire_reject(
 ) -> Dict[str, Any]:
     """驳回：原因必填 —— 员工照着这句重拍（跟日常驳回同一条口径）。"""
     try:
-        result = await attire.reject(employee_id, payload.note, date)
+        result = await attire.reject(employee_id, _require_reject_reason(payload.note), date)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     await _hygiene_nudge("attire", "rejected", employee_id=employee_id)
@@ -1543,10 +1615,27 @@ async def staff_current_standard_image(
 
 @router.get("/staff/daily-work")
 async def staff_daily_work(
+    review: Optional[str] = Query(None),
     staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    return {"items": await work.list_daily_work(_staff_actor(staff["employee"]))}
+    """员工端的日常检查。``?review=1`` 是**待我验收**那一档（员工账号上的「管理员」用）。
+
+    他的验收权是全店的，但默认队列锁在他自己的区与班次里 —— 今天别的区有人交了他也
+    看不到。这一档不另开端点：同一张表的形状、同一套渲染，只是范围与过滤不同，
+    两条判据（有权限 / 不能是自己交的）都在服务层的 `list_daily_work` 里。
+    """
+    pending_review_only = str(review or "").lower() in ("1", "true", "yes")
+    # 和 `staff_list_fix` 同一个坑：`list_daily_work` 会抛 `HygieneWorkError`（`?review=1`
+    # 时普通员工撞的就是 `forbidden`），不过一遍 `_work_http_error` 就是 500 而不是 403。
+    try:
+        return {
+            "items": await work.list_daily_work(
+                _staff_actor(staff["employee"]), pending_review_only=pending_review_only
+            )
+        }
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
 
 
 @router.post("/staff/daily/{item_id}/submit")
@@ -1600,7 +1689,7 @@ async def staff_reject_daily(
 ) -> Dict[str, Any]:
     try:
         rejected = await work.reject_daily(
-            _staff_actor(staff["employee"]), item_id, body.shift, reason=body.reason
+            _staff_actor(staff["employee"]), item_id, body.shift, reason=_require_reject_reason(body.reason)
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
@@ -1717,7 +1806,7 @@ async def admin_reject_daily(
 ) -> Dict[str, Any]:
     try:
         rejected = await work.reject_daily(
-            SUPER_ACTOR, item_id, body.shift, reason=body.reason
+            SUPER_ACTOR, item_id, body.shift, reason=_require_reject_reason(body.reason)
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
@@ -1866,7 +1955,7 @@ async def staff_reject_deep_clean(
         rejected = await work.reject_deep_clean_pair(
             _staff_actor(staff["employee"]),
             item_id,
-            reason=(body.reason if body else None),
+            reason=_require_reject_reason(body.reason if body else None),
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
@@ -2009,7 +2098,7 @@ async def admin_reject_deep_clean(
 ) -> Dict[str, Any]:
     try:
         rejected = await work.reject_deep_clean_pair(
-            SUPER_ACTOR, item_id, reason=(body.reason if body else None)
+            SUPER_ACTOR, item_id, reason=_require_reject_reason(body.reason if body else None)
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
@@ -2125,7 +2214,15 @@ async def staff_list_fix(
     staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
-    return {"items": await work.list_fix_tickets(_staff_actor(staff["employee"]))}
+    # 这一条曾经是全组**唯一**把业务异常漏成 500 的接口：`list_fix_tickets` 在没有工作区时
+    # 抛 `zone_required`（今天没排班、或还没选工作区的员工必中，新入职的最容易撞），而这里
+    # 直接返回、没过 `_work_http_error` —— 前端拿到「服务器内部错误」，整改单列表整块加载
+    # 不出来，还把失败笼统报成"无法加载卫生待办"。文案早就备在 `_ERROR_DETAILS` 里
+    # （`zone_required` → 「请先选择今天的卫生工作区」），翻一下就是 400 + 那句话。
+    try:
+        return {"items": await work.list_fix_tickets(_staff_actor(staff["employee"]))}
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
 
 
 @router.post("/staff/fix")
@@ -2210,7 +2307,7 @@ async def staff_reject_fix(
 ) -> Dict[str, Any]:
     try:
         rejected = await work.reject_fix(
-            _staff_actor(staff["employee"]), ticket_id, reason=(body.reason if body else None)
+            _staff_actor(staff["employee"]), ticket_id, reason=_require_reject_reason(body.reason if body else None)
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
@@ -2322,7 +2419,7 @@ async def admin_reject_fix(
 ) -> Dict[str, Any]:
     try:
         rejected = await work.reject_fix(
-            SUPER_ACTOR, ticket_id, reason=(body.reason if body else None)
+            SUPER_ACTOR, ticket_id, reason=_require_reject_reason(body.reason if body else None)
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc

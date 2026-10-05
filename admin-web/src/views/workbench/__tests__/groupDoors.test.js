@@ -6,17 +6,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
-import { WORKBENCH_FIELD_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenchCopy.js'
+import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenchCopy.js'
+import { HYGIENE_ADMIN_NAV } from '../../../utils/hygieneCopy.js'
+import { PREP_PLAN_PATH } from '../../../utils/prepPlanPaths.js'
+import { RECIPE_HOME_PATH } from '../../../utils/recipePaths.js'
 import { workbenchPagesOf } from '../../../utils/workbenchNav.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const HR_SHELL_SOURCE = readFileSync(join(here, '../../scheduling/SchedulingLayout.vue'), 'utf8')
 
-// 票 05 的验收之一：**两组之间双向可达**（navigation-audit 条目 1 那个单向门）。
-// 两个壳各自留一扇门，落点都是 `workbenchCopy.js` 里那份常量：
-//   - 人事壳（`SchedulingLayout`）：本组四页的导航 + 「现场 ›」→ 现场落点；
-//   - 现场壳（`HygieneAdminLayout`）：本组七页的 rail（**不再把花名册当现场页**）+
-//     「人事」→ 人事落点。
+// 工作台三个壳的关系（B1 的小步之后）：
+//   - `WorkbenchLayout`（首页 / 后勤 / 我的）：一条顶栏，工作台级导航；
+//   - 人事壳（`SchedulingLayout`）与现场壳（`HygieneAdminLayout`）：各自的外壳还在，
+//     但**都渲染同一颗工作台级导航**（`components/workbench/WorkbenchNav.vue`，
+//     表来自 `utils/workbenchNav.js`）—— 于是「今天」在 11 个页面上都点得到（B2），
+//     两组原先互相开的那两扇单门（「现场 ›」/ rail 里的「人事」）随之撤掉：它们是
+//     这一排导航的真子集，留着就是同一件事写两遍。
 // 断的是渲染出来的东西：有几条链接、href 是哪、当前项亮不亮。
 
 /** 页面壳的替身：花名册那一页的根节点跟真页面一样叫 `.roster-page`（下面有一条断言
@@ -110,7 +115,7 @@ afterEach(() => {
   vi.resetModules()
 })
 
-describe('人事壳（现场 → 人事 的那半扇门）', () => {
+describe('人事壳（工作台级导航 + 本组四页）', () => {
   it('本组四页都在顶栏导航里，链接指向新地址（不是平铺的旧地址）', async () => {
     const { wrapper } = await mountShell('hr', '/workbench/hr/calendar')
 
@@ -121,16 +126,42 @@ describe('人事壳（现场 → 人事 的那半扇门）', () => {
     }
   })
 
-  it('「现场 ›」指到现场落点（两组互通，不再只能回后台）', async () => {
-    const { wrapper } = await mountShell('hr', '/workbench/hr/calendar')
+  it('顶栏带上整排工作台级导航：今天 / 人事 / 现场 / 后勤 / 我的都在，落点正确（B1/B2）', async () => {
+    // 这一组原来只有本组四页的导航与一扇「现场 ›」，**没有任何一条回工作台首页的链接**
+    // （href 全集里不含 `/workbench`）。现在顶栏并进整排工作台级导航（与
+    // `WorkbenchLayout` 同一颗组件、同一张表），「今天」在人事四页上都点得到。
+    const { wrapper } = await mountShell('hr', '/workbench/hr/calendar', { identity: 'super' })
 
-    const door = wrapper.get('.sched-field')
-    expect(door.attributes('href')).toBe(WORKBENCH_FIELD_HOME)
-    expect(door.text()).toContain('现场')
+    const hrefs = wrapper.findAll('.wb-nav-item').map((item) => item.attributes('href'))
+    // 身份过滤照旧按**落点那一页**的 `audience` 走：店长这一档没有「我的」那一格
+    // （员工三页是 `staff`），与 `WorkbenchLayout` 里的判定同一份代码。
+    expect(hrefs).toEqual([
+      WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
+      RECIPE_HOME_PATH, PREP_PLAN_PATH,
+    ])
+    expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
+    // 工作台级那排与本组四页在**同一条**横滑带子里（顶栏行数没有因此变多）。
+    expect(wrapper.get('.sched-navbar').findAll('.sched-nav').length).toBe(1)
   })
 
-  it('顶栏挂着身份切换器（票 04 交接：店长在自己的页面里也要看得到那两档）', async () => {
+  it('牌子写「工作台」就指工作台首页（不再指本组首页）', async () => {
     const { wrapper } = await mountShell('hr', '/workbench/hr/calendar')
+
+    const brand = wrapper.get('.sched-name')
+    expect(brand.text()).toBe('工作台')
+    expect(brand.attributes('href')).toBe(WORKBENCH_HOME)
+  })
+
+  it('旧的「现场 ›」那扇门没了：跨组由工作台级导航接手（同一件事不写两遍）', async () => {
+    const { wrapper } = await mountShell('hr', '/workbench/hr/calendar')
+
+    expect(wrapper.find('.sched-field').exists()).toBe(false)
+  })
+
+  it('顶栏挂着身份切换器（票 04 交接：店长在自己的页面里也要看得到自己在哪一档）', async () => {
+    // 切换器现在**只显示当前身份**（2026-10-05 裁定），所以这个用例要给一个真的会话来定档；
+    // 探针没回来、一个档位都不可用时它不渲染 —— 那是有意的（宁可空着，也不闪一个假身份）。
+    const { wrapper } = await mountShell('hr', '/workbench/hr/calendar', { identity: 'super' })
 
     expect(wrapper.find('.wb-id').exists()).toBe(true)
     expect(wrapper.get('.wb-id').text()).toContain('超级管理员')
@@ -169,37 +200,59 @@ describe('人事壳（现场 → 人事 的那半扇门）', () => {
   })
 })
 
-describe('现场壳（人事 → 现场 的那半扇门）', () => {
-  it('rail 只有现场七页：花名册不在其中（它现在是人事页）', async () => {
+describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', () => {
+  it('rail 渲染的是现场壳自己那份名单，花名册不在其中（它现在是人事页）', async () => {
     const { wrapper } = await mountShell('floor', '/workbench/floor/daily')
 
-    const hrefs = wrapper.findAll('.hy-tab:not(.hy-tab-cross)').map((item) => item.attributes('href'))
-    expect(hrefs).toEqual(workbenchPagesOf('floor').map((page) => page.path))
+    const hrefs = wrapper.findAll('.hy-tab').map((item) => item.attributes('href'))
+    // **现场壳的 rail 不是从页面清单派生的**：人事壳那一侧才是 `workbenchPagesOf('hr')`，
+    // 现场壳读的是 `utils/hygieneCopy.js` 里手写的 `HYGIENE_ADMIN_NAV`。所以往现场组加页要
+    // **同时**动清单与那份手写名单 —— 只动一边，下面第二条断言就红。
+    expect(hrefs).toEqual(HYGIENE_ADMIN_NAV.map((item) => item.path))
     expect(hrefs).not.toContain('/workbench/hr/roster')
+    // 两份名单**此刻是一致的**（2026-10-05 补上「卫生趋势」那一行之后）：这条把关系钉住，
+    // 将来谁只往清单里加页、忘了 rail（页面敲 URL 进得去、导航里没入口），这里立刻红。
+    expect([...HYGIENE_ADMIN_NAV].map((item) => item.path).sort()).toEqual(
+      workbenchPagesOf('floor').map((page) => page.path).sort(),
+    )
   })
 
-  it('「人事」那扇门指到人事落点（现场也能一步回人事）', async () => {
-    const { wrapper } = await mountShell('floor', '/workbench/floor/daily')
+  it('内容区顶上是整排工作台级导航：今天 / 人事 / 现场 / 后勤 / 我的（B1/B2）', async () => {
+    // 这一组原来右边那扇「人事」门是**唯一**的跨组出口，回工作台的链接一条都没有。
+    // 现在整排工作台导航在内容区顶上那条横条里（那一条右侧原先大片空着）。
+    const { wrapper } = await mountShell('floor', '/workbench/floor/daily', { identity: 'super' })
 
-    const door = wrapper.get('.hy-tab-cross')
-    expect(door.attributes('href')).toBe(WORKBENCH_HR_HOME)
-    expect(door.text()).toContain('人事')
-    // rail 自己的名字：工作台 · 现场（它不是「卫生管理」那套旧牌子了）。
+    expect(wrapper.get('.hy-header').find('.wb-nav').exists()).toBe(true)
+    const hrefs = wrapper.findAll('.wb-nav-item').map((item) => item.attributes('href'))
+    // 身份过滤照旧按**落点那一页**的 `audience` 走：店长这一档没有「我的」那一格
+    // （员工三页是 `staff`），与 `WorkbenchLayout` 里的判定同一份代码。
+    expect(hrefs).toEqual([
+      WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
+      RECIPE_HOME_PATH, PREP_PLAN_PATH,
+    ])
+    expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
+    // rail 自己的名字没变：工作台 · 现场。
     expect(wrapper.get('.hy-tabbar').attributes('aria-label')).toBe('工作台 · 现场')
   })
 
-  it('品牌链接指现场落点（不再是人事组的花名册）', async () => {
+  it('rail 里那扇单门「人事」没了：跨组由工作台级导航接手', async () => {
+    const { wrapper } = await mountShell('floor', '/workbench/floor/daily')
+
+    expect(wrapper.find('.hy-tab-cross').exists()).toBe(false)
+  })
+
+  it('品牌链接指工作台首页（牌子写的是「工作台」，不是现场组那一页）', async () => {
     const { wrapper } = await mountShell('floor', '/workbench/floor/boards')
 
     const brands = wrapper.findAll('.hy-brand')
     expect(brands.length).toBeGreaterThan(0)
     for (const brand of brands) {
-      expect(brand.attributes('href')).toBe(WORKBENCH_FIELD_HOME)
+      expect(brand.attributes('href')).toBe(WORKBENCH_HOME)
     }
   })
 
   it('顶栏挂着身份切换器（同一颗，不改它的判定）', async () => {
-    const { wrapper } = await mountShell('floor', '/workbench/floor/daily')
+    const { wrapper } = await mountShell('floor', '/workbench/floor/daily', { identity: 'super' })
 
     expect(wrapper.find('.hy-header .wb-id').exists()).toBe(true)
   })

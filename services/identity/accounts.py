@@ -26,6 +26,7 @@ from typing import Any, Callable, Optional
 from config import settings
 from database import CHINA_TZ
 from db_core.errors import is_integrity_violation
+from services.identity.capabilities import dump_caps, parse_caps
 from services import password_hash
 
 logger = logging.getLogger(__name__)
@@ -191,13 +192,16 @@ class EmployeeAccounts:
             "name": mapping.get("name") or "",
             "job_title": mapping.get("job_title") or "",
             "permission": mapping["permission"],
+            # 管理权限开关（2026-10-05）：判据一律看这一组，`permission` 只当人话标签用。
+            # 认不出的键会被 `parse_caps` 丢掉（fail-closed）—— 权限宁可少给一项。
+            "admin_caps": list(parse_caps(mapping.get("admin_caps"))),
             "approved": _as_bool(mapping["approved"]),
             "disabled": _as_bool(mapping["disabled"]),
         }
 
     async def _fetch_employee(self, employee_id: int):
         cur = await self._conn.execute(
-            """SELECT id, phone, name, job_title, permission, approved, disabled
+            """SELECT id, phone, name, job_title, permission, admin_caps, approved, disabled
                FROM hygiene_employees WHERE id = ?""",
             (employee_id,),
         )
@@ -205,7 +209,8 @@ class EmployeeAccounts:
 
     async def _fetch_employee_by_phone(self, phone: str):
         cur = await self._conn.execute(
-            """SELECT id, phone, name, password_hash, job_title, permission, approved, disabled
+            """SELECT id, phone, name, password_hash, job_title, permission, admin_caps,
+                      approved, disabled
                FROM hygiene_employees WHERE phone = ?""",
             (phone,),
         )
@@ -345,7 +350,7 @@ class EmployeeAccounts:
 
     async def list_roster(self) -> list[dict]:
         cur = await self._conn.execute(
-            """SELECT e.id, e.phone, e.name, e.job_title, e.permission,
+            """SELECT e.id, e.phone, e.name, e.job_title, e.permission, e.admin_caps,
                       e.approved, e.disabled
                FROM hygiene_employees e
                ORDER BY e.disabled ASC, e.approved ASC, e.id ASC""",
@@ -486,6 +491,27 @@ class EmployeeAccounts:
         return self._employee_from_row(row)
 
     @serialized_write
+    async def set_admin_caps(self, employee_id: int, caps) -> dict:
+        """整组替换这个人的管理权限开关（花名册里那十个勾，2026-10-05 用户裁定）。
+
+        与 `set_permission` **分开**：那个改的是「普通员工 / 管理员」这一个人话标签
+        （显示用），这个改的是他真能做什么。**判据只看这里** —— 见
+        `services/identity/capabilities.py` 的说明，别再把两者绑在一起。
+        `dump_caps` 会丢掉认不出的键、去重、按声明顺序排，所以库里那一列永远规整。
+        """
+        row = await self._fetch_employee(employee_id)
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        now = self._now_iso()
+        await self._conn.execute(
+            "UPDATE hygiene_employees SET admin_caps = ?, updated_at = ? WHERE id = ?",
+            (dump_caps(caps), now, employee_id),
+        )
+        await self._conn.commit()
+        row = await self._fetch_employee(employee_id)
+        return self._employee_from_row(row)
+
+    @serialized_write
     async def update_fields(
         self,
         employee_id: int,
@@ -493,6 +519,7 @@ class EmployeeAccounts:
         name: Optional[str] = None,
         job_title: Optional[str] = None,
         permission: Optional[str] = None,
+        admin_caps: Optional[list] = None,
     ) -> dict:
         row = await self._fetch_employee(employee_id)
         if row is None:
@@ -514,6 +541,10 @@ class EmployeeAccounts:
                 raise EmployeeAccountsError("invalid_permission", "invalid_permission")
             fields.append("permission = ?")
             params.append(value)
+        if admin_caps is not None:
+            # 整组替换（前端一次提交十个勾的现状）——`dump_caps` 负责去重与排序。
+            fields.append("admin_caps = ?")
+            params.append(dump_caps(admin_caps))
         if not fields:
             return self._employee_from_row(row)
         fields.append("updated_at = ?")
@@ -545,9 +576,11 @@ class EmployeeAccounts:
         if not session_id:
             return None
         # 库里存的是 sha256，cookie 是原文：哈希后再查。
+        # `e.admin_caps` 必须带出来 —— 它是**判据的来源**（`_staff_actor` 把这一组交给
+        # 服务层的 `has_cap(...)`），漏掉这一列会让所有管理动作静默变成 403。
         cur = await self._conn.execute(
             """SELECT s.session_id, s.expires_at, s.last_seen_at,
-                      e.id, e.phone, e.name, e.job_title, e.permission,
+                      e.id, e.phone, e.name, e.job_title, e.permission, e.admin_caps,
                       e.approved, e.disabled
                FROM hygiene_staff_sessions s
                JOIN hygiene_employees e ON e.id = s.employee_id

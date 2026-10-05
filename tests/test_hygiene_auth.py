@@ -536,9 +536,11 @@ def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
     listed = next(zone for zone in catalog.json()["zones"] if zone["name"] == "案板")
     assert [row["name"] for row in listed["items"]] == ["案板表面"]
     # 没排班 = 今天没有班次，也就没有「我的区」：目录看得见全店，但这一项的标准图不给。
+    # 文案 2026-10-05 改过一次：票 10 之后员工**不能自选**工作区，旧那句"请先选择今天的
+    # 卫生工作区"把他指去一个不存在的操作，现在是"找店长在排班页配一个"。
     no_duty = client.get(f"/api/hygiene/staff/items/{item['id']}/standard")
     assert no_duty.status_code == 400
-    assert no_duty.json()["detail"] == "请先选择今天的卫生工作区"
+    assert no_duty.json()["detail"] == "今天排班没给你排到工作区：找店长在排班页配一个"
 
     # 排班说「白班 · 案板」之后，同一张标准图才拿得到（票 10：分工读排班，不自选）。
     _assign_duty(_db, employee["id"], "白班", zone_id=anban["id"])
@@ -576,7 +578,8 @@ def test_staff_assignment_hides_and_rejects_other_zones(hygiene_http):
     assert client.get(f"/api/hygiene/staff/items/{xian_item['id']}/standard").status_code == 403
     denied = _submit_daily(client, xian_item["id"], SHOT_A)
     assert denied.status_code == 403
-    assert denied.json()["detail"] == "只能查看和提交所选卫生工作区的任务"
+    # 同上：票 10 之后「所选工作区」这个说法没了（不能自选），改成说他只能在自己那个区里动。
+    assert denied.json()["detail"] == "只能在自己今天那个区里操作"
 
 
 def test_standard_manifest_and_immutable_image_contract(hygiene_http):
@@ -643,11 +646,20 @@ def _assign_duty(db, employee_id, shift, zone_id=1):
     )
 
 
-def _approve_staff(db, accounts, phone, shift, permission="普通员工"):
+def _approve_staff(db, accounts, phone, shift, permission="普通员工", caps=None):
     employee = _run(accounts.register(phone, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
     if permission != "普通员工":
         _run(accounts.set_permission(employee["id"], permission))
+        # 2026-10-05 起**判据看管理权限开关**，`permission` 只是人话标签：只设标签不设开关，
+        # 这个人就真的什么都做不了（那正是新模型的语义）。`caps` 不给就按迁移 `0015` 的
+        # 回填规则推 —— 老「管理员」等于这三项，于是升级前写的用例表达的意思不变。
+        _run(
+            accounts.set_admin_caps(
+                employee["id"],
+                caps if caps is not None else ["daily_review", "deep_review", "fix"],
+            )
+        )
     _assign_duty(db, employee["id"], shift)
     return employee
 
@@ -762,7 +774,10 @@ def test_night_staff_http_cannot_submit_day_instance(hygiene_http):
     _approve_staff(_db, accounts, PHONE_OTHER_ADMIN, "夜班", "管理员")
     _staff_login(client, PHONE_OTHER_ADMIN)
     rejected = client.post(
-        f"/api/hygiene/staff/daily/{item['id']}/reject", json={"shift": "夜班"}
+        f"/api/hygiene/staff/daily/{item['id']}/reject",
+        # 2026-10-05 起驳回**必须**写原因（用户裁定）—— 这条测的是"同一张实拍重传"，
+        # 原因给一句就好，别让它卡在必填上。
+        json={"shift": "夜班", "reason": "有水渍"},
     )
     assert rejected.status_code == 200
     assert rejected.json()["status"] == "待拍"

@@ -4,6 +4,7 @@ import QRCode from 'qrcode'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
+import { ADMIN_CAP_DEFS, normalizeCaps } from '../../utils/adminCaps'
 import {
   HYGIENE_PERMISSIONS,
   HYGIENE_SHIFTS,
@@ -83,6 +84,10 @@ async function loadRoster() {
         name: row.name || '',
         job_title: row.job_title || '',
         permission: row.permission,
+        // 十项管理权限的草稿。**勾选只在本地改**，点「保存」才整组 PATCH（`admin_caps` 是
+        // 整组替换，不是增量）：勾十个发十次请求，中间任何一次失败都会留下半套权限。
+        // 进来先归一化一道（只留认识的键、去重、按契约顺序），与服务端返回值同形。
+        admin_caps: normalizeCaps(row.admin_caps),
         // 「改今天」写的是排班的**单日覆盖**，草稿里放的是排班班次 id（或 'rest' = 那天休），
         // 不是写死的「白班/夜班」。
         shift: defaultShiftIdFor(row),
@@ -258,8 +263,13 @@ async function saveRow(row) {
     await api.patch(`/api/hygiene/admin/roster/${row.id}`, {
       name: draft.name,
       job_title: draft.job_title,
+      // 人话标签照旧一起发（它还在、还要显示），真正决定能做什么的是下面这一组开关。
       permission: draft.permission,
+      // 整组替换：这一行当前勾上的十项一次发完，服务端只认这一个数组。
+      admin_caps: normalizeCaps(draft.admin_caps),
     })
+    // 重读一遍：草稿换成服务端返回值（归一化与截断以那边为准），页面上两个「现在…」
+    // 也才跟着更新。
     await loadRoster()
   } catch (err) {
     errorText.value = err.message || '保存失败'
@@ -321,7 +331,7 @@ async function undoAssignment(row) {
       <div>
         <p class="hy-eyebrow">Roster · 人员名册</p>
         <h1>卫生花名册</h1>
-        <p>批准注册、维护姓名职位，并设置卫生权限。</p>
+        <p>批准注册、维护姓名职位，并逐项设置管理权限。</p>
         <details class="rule-help">
           <summary>规则说明</summary>
           <p>今天上哪个班、在哪个区由排班决定。这里的「改今天」写的是排班的单日覆盖：只改今天这一天，不动排班规则（以后怎么排去「排班」页改规则）。停用后不能登录，但花名册记录保留，可重新启用。超级管理员是后台共享账号，不能从花名册提升。</p>
@@ -389,6 +399,9 @@ async function undoAssignment(row) {
                 placeholder="头衔，比如领班"
               >
             </label>
+            <!-- 「卫生权限」这一档**保留**：它现在只是显示用的人话标签（普通员工 / 管理员），
+                 花名册与员工端「我的」都在显示它。判据一律看下面那十项开关 —— 同一个标签下
+                 的两个人可以开完全不同的开关，所以两个控件谁也代替不了谁。 -->
             <label>
               卫生权限
               <select
@@ -401,6 +414,40 @@ async function undoAssignment(row) {
                 </option>
               </select>
             </label>
+            <!-- 管理权限：十项独立开关，逐项放权。勾选只改草稿，点这一行的「保存」才发一次
+                 PATCH（整组替换）—— 十个勾一次改完一起交，不用等十次请求。 -->
+            <fieldset class="roster-caps">
+              <legend class="roster-caps-title">管理权限</legend>
+              <p class="roster-caps-hint">
+                这些开关只在员工手机端的「卫生」页生效；现场七页（工作区 / 日常 / 仪容 / 专项 /
+                整改 / 榜 / 数据）仍归超级管理员。上面的「卫生权限」只是显示用的人话标签，
+                能不能做某件事一律看这里的勾。勾完点最下面的「保存」，一次改完一起提交。
+              </p>
+              <div class="roster-caps-grid">
+                <label
+                  v-for="cap in ADMIN_CAP_DEFS"
+                  :key="cap.key"
+                  class="roster-cap"
+                  :title="cap.note"
+                >
+                  <input
+                    v-model="drafts[row.id].admin_caps"
+                    type="checkbox"
+                    :value="cap.key"
+                    :disabled="busyId === row.id"
+                  >
+                  <span>{{ cap.label }}</span>
+                </label>
+              </div>
+              <details class="rule-help roster-caps-help">
+                <summary>每项开关管什么</summary>
+                <ul>
+                  <li v-for="cap in ADMIN_CAP_DEFS" :key="cap.key">
+                    <strong>{{ cap.label }}</strong>：{{ cap.note }}
+                  </li>
+                </ul>
+              </details>
+            </fieldset>
             <label>
               当天班次 · 现在 {{ hygieneShiftLabel(row.shift) }}
               <select
@@ -519,4 +566,78 @@ async function undoAssignment(row) {
   color: var(--hy-faint);
 }
 .roster-assign-error { color: var(--hy-seal-bright); }
+
+/* ==========================================================================
+   管理权限：十项独立开关
+   ==========================================================================
+   这是 `.hy-person-fields` 里的一个 fieldset（浏览器默认带边框与 padding，这里清掉；
+   `min-width: 0` 是必须的 —— fieldset 默认 `min-inline-size: min-content`，在 flex 列里
+   会把卡片撑破）。 */
+.roster-caps {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+}
+.roster-caps-title {
+  padding: 0;
+  font-size: .76rem;
+  font-weight: 600;
+  color: var(--hy-muted);
+}
+/* 作用范围那句实话：跟其它字段的说明同一个字号，别抢字段本身的注意力。 */
+.roster-caps-hint {
+  margin: 0;
+  font-size: .72rem;
+  line-height: 1.6;
+  color: var(--hy-faint);
+}
+/* 十个勾的排布：**390 宽的手机上两列**（花名册在手机上也要能改权限），桌面折到五列
+   就停（`max-width` 封顶，不然宽屏会拉成一条十列的长带）。 */
+.roster-caps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
+  gap: .15rem .7rem;
+  max-width: 44rem;
+}
+/* 共享表里的 `.hy-person-fields label` 是竖排字段（标签在上、控件在下）——这里每一项是
+   横排的勾，得盖回来。整个 label 都是点击目标，所以手机上这个格子本身就是触控区。 */
+.hy-person-fields .roster-cap {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: .4rem;
+  min-height: 34px;
+  font-weight: 500;
+  color: var(--hy-ink);
+  cursor: pointer;
+}
+/* 原生勾在 iOS/安卓上默认只有十几像素且样式各异：给个统一尺寸，颜色跟着主题走。 */
+.roster-cap input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--hy-mint);
+}
+.roster-cap span { min-width: 0; }
+.roster-cap input:disabled { cursor: not-allowed; }
+.roster-cap:has(input:disabled) { cursor: not-allowed; color: var(--hy-faint); }
+/* 每项的一句话说明（`ADMIN_CAP_DEFS` 的 note）默认收起：十句话摊开会把一个人的卡片拉长
+   一倍，而它是"看一下就懂"的内容，不是每次都要读的字段。手机上没有 hover，所以不能
+   只挂在 title 上。 */
+.roster-caps-help { margin-top: 0; }
+.roster-caps-help ul {
+  margin: .35rem 0 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: .15rem;
+}
+@media (max-width: 720px) {
+  /* 窄屏触控下限（共享表那条 B6 规矩）：勾和字一起撑到 44 高。 */
+  .hy-person-fields .roster-cap { min-height: 44px; }
+}
 </style>

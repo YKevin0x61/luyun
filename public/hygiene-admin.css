@@ -77,7 +77,10 @@
   --pink: var(--hy-seal-bright);
 
   position: relative;
-  z-index: 0;
+  /* 这里**不能**给 z-index：一旦给了就会形成层叠上下文，把容器内 `position: fixed`
+     的弹层锁在这一层（z-index 0），于是工作台外壳顶栏（`.wb-top`，z-index 20）会压住
+     弹窗、还能点穿（实测：标准图弹窗开着时点顶栏「今天」真的跳页）。纸面颗粒靠
+     `::before` 的 `z-index: -1` 待在内容之下，不需要容器自己建层叠上下文。 */
   min-height: 100%;
   display: flex;
   flex-direction: column;
@@ -95,24 +98,30 @@
   color-scheme: dark;
 }
 
-/* 纸面颗粒 */
+/* 纸面颗粒。**必须留在内容之下（-1）**：容器不再建层叠上下文（见上面的注释），
+   用 0 会跟内容抢同一层，颗粒会盖到文字上。 */
 .hygiene-admin::before,
 .hygiene-staff::before {
   content: "";
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: -1;
   pointer-events: none;
   opacity: .05;
   mix-blend-mode: overlay;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-.hygiene-admin > *,
-.hygiene-staff > * {
-  position: relative;
-  z-index: 1;
-}
+/* 这里原来有一条 `.hygiene-admin > *:not(.modal-overlay) { position: relative; z-index: 1 }`
+   —— 它当初的作用是把面板内容抬到"纸面颗粒"（`::before`）之上。颗粒层后来改成
+   `z-index: -1` 待在内容下面，这条通配规则就**只剩副作用**了：它把所有直接子元素
+   一律打回 `position: relative` 并压到 `z-index: 1`，于是——
+     * `.modal-overlay`（请假 / 换班弹层）掉进文档流、渲染到视口外（y=965，视口 844）；
+     * `.wb-tabbar`（工作台底栏）的 `fixed` 失效、被推到内容末尾（y=1047）；
+     * `.std-cache-ui`（标准图缓存弹窗）的 `z-index: 40/41` 被压成 1，和页面内容叠着画；
+     * `.wb-top` / `.sched-top` 的 `sticky` 失效（顶栏会随内容滚走）。
+   前两条上个版本靠 `:not()` 逐个排除，第三次踩到就说明手法不对 —— 整条删掉，
+   让每个组件用它自己写在 scoped 样式里的定位。颗粒层是 `-1`，不需要谁来压。 */
 
 .hygiene-admin ::selection,
 .hygiene-staff ::selection {
@@ -1434,9 +1443,10 @@
 .hygiene-work .hy-work-header .hy-brand-tagline { display: none; }
 .hygiene-work .hy-work-shift {
   flex: 0 0 auto;
-  /* 头部现在有三个元素（品牌 / 回「今天」 / 区域·班次）：把这一条的宽度让出一点。
-     窄屏上超出部分自己走省略号（下面有 text-overflow）。 */
-  max-width: 50%;
+  /* 这条页内条现在只有两件（回「今天」 + 区域·班次）：品牌搬走了（D9，交给外壳顶栏）。
+     原来那条 `max-width: 50%` 是为了给品牌让位，留着只会把「余威威 · 案板 · 白班」
+     压到比内容窄（实测 scrollWidth 187 / clientWidth 177，字被切在半路）。 */
+  max-width: 100%;
   min-height: 34px;
   display: inline-flex;
   align-items: center;
@@ -2307,6 +2317,31 @@
   }
 }
 
+@media (max-width: 720px) {
+  /* 员工工作台里那条 `.hy-tabbar` 在手机档的归属（C 方向）：
+     它是**页内 tab**（今天 / 待办 / 红黑榜…，切的是页面内的面板），不是导航。
+     底部那一格现在归工作台级底栏（`WorkbenchTabBar`，`fixed` 钉在视口底）——
+     两条底栏同屏会叠在一起，而且页内这条的 `z-index: 30` 会盖在底栏（15）上面，
+     底栏整个点不到。容器是 flex 列（`.hygiene-staff`），所以用 order 把它挪到
+     **页头之下、内容之上**，做成一条横滑带。桌面档不动：那里它仍在底部。 */
+  .hygiene-work .hy-work-header { order: 0; }
+  .hygiene-work .hy-tabbar {
+    order: 1;
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    border-top: 0;
+    border-bottom: 1px solid var(--hy-line);
+    padding: .28rem .15rem;
+  }
+  .hygiene-work .hy-tab { flex: 0 0 auto; min-width: 62px; }
+  .hygiene-work .hy-work-main {
+    order: 2;
+    /* 底栏是 `fixed`（脱离文档流），内容得自己让出这一条的高度。 */
+    padding-bottom: calc(57px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
 @media (min-width: 720px) {
   .hygiene-work .hy-work-main {
     width: min(100%, 46rem);
@@ -2342,5 +2377,41 @@
     animation-duration: .01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;
+  }
+}
+
+/* ==========================================================================
+   窄屏触控下限（B6）
+   ==========================================================================
+   390 档实测：外壳里「‹后台」57×29、导航胶囊高 29、身份切换器 132×24、退出 45×26；
+   表单里的按钮普遍 40–42 高，花名册那种一人一张表单的页面（211 个控件）更是全数低于
+   44×44 —— 一排 24–29px 的目标紧挨着，误触率高。
+   规则只加在**手机档**（≤720）：桌面是鼠标，没有理由把界面撑胖。
+   外壳自己那几颗（工作台 / 人事 / 现场的顶栏胶囊、切换器、退出）在各自组件的 scoped
+   样式里，这里管的是**共享件**与现场壳的横条。 */
+@media (max-width: 720px) {
+  .hygiene-admin .hy-back,
+  .hygiene-admin .hy-back-top {
+    min-height: 44px;
+  }
+  /* 表单按钮与输入框：`.btn` 40、`.btn-sm` 34、花名册行内的 input/select 38。 */
+  .hygiene-admin .btn,
+  .hygiene-admin .btn-sm,
+  .hygiene-admin .input,
+  .hygiene-admin .select,
+  .hygiene-admin .hy-person-fields .input,
+  .hygiene-admin .hy-person-fields .select {
+    min-height: 44px;
+  }
+  /* 员工卫生页页内条上那颗「‹ 今天」（原来 34 高）。 */
+  .hygiene-work .hy-work-today {
+    min-height: 44px;
+    padding: 0 .9rem;
+  }
+  /* 现场壳的横条在手机上放不下三件（牌子 / 工作台级导航 / 切换器 + 退出 + 后台）：
+     让**装饰性**的品牌先让位 —— 页内每一页都有自己的 h1，牌子在这一档只是重复；
+     工作台级导航（含「今天」）因此进得来，横条行数不变。 */
+  .hygiene-admin .hy-brand-top {
+    display: none;
   }
 }

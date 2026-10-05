@@ -1,6 +1,9 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { useWecomPush, PUSH_TYPE_NAMES, webhookDeleteConfirmText, hygieneFeedWarning } from '../composables/useWecomPush'
+import {
+  useWecomPush, PUSH_TYPE_NAMES, webhookDeleteConfirmText, hygieneFeedWarning,
+  canSendNow, sendNowConfirmText,
+} from '../composables/useWecomPush'
 import { useStationsStore } from '../stores/stations'
 import SvgIcon from '../components/SvgIcon.vue'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
@@ -28,6 +31,12 @@ const isEditingWebhook = computed(() => !!webhookForm.id)
 const hygieneWarning = computed(() => hygieneFeedWarning(webhooks.value))
 const selectedJob = computed(() => jobs.value.find((j) => j.id === selectedJobId.value))
 const jobStations = computed(() => stationsStore.list.filter((s) => s.id && s.id !== 'loumian'))
+// 预览为空时「立即发送」不可点：这时页面没有任何可核对的内容，一点却会真的外发
+// （后端 send-now 自己现算正文），是全页最容易误触的一条。
+const sendReady = computed(() => canSendNow({
+  job: selectedJob.value,
+  content: previewContent.value,
+}))
 
 async function handleSaveWebhook() {
   try {
@@ -74,9 +83,14 @@ async function handlePreview() {
   } catch (e) { flash(e.message, 'error') }
 }
 async function handleSend() {
-  const pushType = selectedJob.value?.push_type || 'sales_report_text'
-  const label = pushType === 'data_quality_alert' ? '数据质量摘要' : '销售报表'
-  if (!window.confirm(`确定立即发送当前预览对应的${label}？`)) return
+  // 确认框的文案必须跟着页面状态走：预览空着的时候原来的文案照样说"当前预览对应的
+  // 销售报表"，用户既不知道发给谁也不知道多少字节（见 sendNowConfirmText 的注释）。
+  const text = sendNowConfirmText({
+    job: selectedJob.value,
+    bytes: previewMeta.value.bytes,
+    content: previewContent.value,
+  })
+  if (!window.confirm(text)) return
   try {
     const result = await sendSelectedJob()
     flash(result.success ? '消息已发送' : `发送失败：${result.error || result.response_text}`, result.success ? 'success' : 'error')
@@ -162,10 +176,10 @@ onMounted(async () => {
 
           <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
             <div v-if="!webhooks.length" class="empty-state">暂无 webhook</div>
-            <div v-for="item in webhooks" :key="item.id" class="card" style="padding:10px">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-                <strong style="font-size:13px">{{ item.name }}</strong>
-                <span style="display:flex;gap:6px;align-items:center">
+            <div v-for="item in webhooks" :key="item.id" class="card wp-hook-card" style="padding:10px">
+              <div class="wp-hook-head">
+                <strong class="wp-hook-name">{{ item.name }}</strong>
+                <span class="wp-hook-badges">
                   <span v-if="item.hygiene_feed" class="badge" style="color:var(--cyan);border-color:var(--cyan)">卫生群</span>
                   <span class="badge" :style="item.enabled ? 'color:var(--green);border-color:var(--green)' : ''">{{ item.enabled ? '启用' : '停用' }}</span>
                 </span>
@@ -280,7 +294,13 @@ onMounted(async () => {
             <span>消息预览</span>
             <div style="display:flex;gap:6px">
               <button class="btn btn-sm" @click="handlePreview">刷新预览</button>
-              <button class="btn btn-sm" style="background:var(--green);border-color:var(--green);color:#fff" @click="handleSend">立即发送</button>
+              <button
+                class="btn btn-sm"
+                style="background:var(--green);border-color:var(--green);color:#fff"
+                :disabled="!sendReady"
+                :title="sendReady ? '发送前会再确认一次' : '先选择任务并刷新预览'"
+                @click="handleSend"
+              >立即发送</button>
               <button class="btn btn-sm" @click="copyPreview">复制</button>
             </div>
           </div>
@@ -336,6 +356,35 @@ onMounted(async () => {
 
 <style scoped>
 @media (max-width: 980px) {
-  .grid { grid-template-columns: 1fr !important; }
+  /* 窄屏单列。**必须是 `minmax(0, 1fr)` 而不是 `1fr`**：轨道里的卡片带
+     `display:flex` 的标题行与 form，`1fr` 的自动最小尺寸会被内容的固有宽度顶起来
+     ——390 下实测轨道被撑到 493px（页面体 scrollWidth 503 > 390，需横向拖动），
+     换成 `minmax(0, 1fr)` 才会真正收缩到 370px。这一层是 A11 里「卫生群 / 启用徽章
+     被挤出屏幕」的根因，徽章换行只是让内容更窄，挡不住轨道自己被撑宽。 */
+  .grid { grid-template-columns: minmax(0, 1fr) !important; }
+  /* 卡片本身也要能收缩：块级子元素的 min-width 默认是 auto。 */
+  .grid > div > * { min-width: 0; }
+}
+
+/* Webhook 卡片的标题行（名称 + 卫生群/启用徽章）：桌面档是左右各一边，窄屏
+   （390 下卡片内容区只有 ~300px）必须允许换行 —— 原来是 `justify-content: space-between`
+   且名称不收缩，徽章被顶到 380–431px，视口 390px 直接看不见「卫生群」。
+   而"这个群是不是卫生群"正是这一页最关键的信息（卫生提醒只发勾选的群）。 */
+.wp-hook-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.wp-hook-name { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.wp-hook-badges { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+/* 窄屏直接把徽章换到名称下一行，不再和名称抢同一行的宽度。 */
+@media (max-width: 560px) {
+  .wp-hook-head { justify-content: flex-start; }
+  .wp-hook-name { flex: 1 1 100%; }
+  .wp-hook-badges { flex: 1 1 100%; }
 }
 </style>

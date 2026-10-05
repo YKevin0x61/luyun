@@ -3,6 +3,8 @@
  * 用于保存和获取应用配置
  */
 
+import { resolveFallbackApiBaseUrl } from './constants.js'
+
 const STORAGE_KEYS = {
   API_SETTINGS: 'kds_api_settings',
   API_AUTH: 'kds_api_auth',
@@ -179,11 +181,25 @@ export class ApiSettingsManager {
     if (settings && settings.baseUrl) {
       return normalizeBaseUrl(settings.baseUrl)
     }
-    
-    // 返回默认配置
-    return process.env.NODE_ENV === 'development'
-      ? 'http://localhost:8000'
-      : 'https://luyun.ykevin0x61.com'
+
+    // 没配过：按可用性兜底（C-A5，判据与注释在 `constants.js` 的
+    // `resolveFallbackApiBaseUrl`）—— 原来是硬编码生产域名，本机/内网部署的屏会打着
+    // 生产域名显示**生产数据**，运维还以为是自己的库。
+    const fallback = resolveFallbackApiBaseUrl({
+      isDev: process.env.NODE_ENV === 'development',
+      origin: typeof location !== 'undefined' ? location.origin : '',
+    })
+    if (!fallback) {
+      // 兜底也拿不到（非 H5 且没配过）：说清楚是"地址没配"，别让人对着一个沉默的屏猜。
+      console.warn(
+        '[API] 这台设备既没有保存 API 地址，也没有可用的页面来源地址。'
+        + '请到「设置」页填写服务器地址后再使用。',
+      )
+    } else if (!settings || !settings.baseUrl) {
+      // 自动判定出来的地址要在控制台留一句：运维就是靠它分清"屏坏了"与"指错服务器"。
+      console.warn(`[API] 未配置服务器地址，已按当前页面来源使用 ${fallback}（可在「设置」页改）`)
+    }
+    return fallback
   }
 
   /**

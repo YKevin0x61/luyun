@@ -4,12 +4,18 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
 
-// 票 04：顶栏身份切换器 —— 票面那组用例就是这张表。
-// 四类会话组合（两套都在 / 只有管理端 / 只有员工 / 都没有）× 记忆值，只断言**渲染与
-// 切换结果**：哪一档亮着、哪一档点得动、点下去变成谁、有没有那句降级提示。
-// 会话靠真实的两个探针（`/api/auth/status`、`/api/hygiene/staff/me`）读出来，与守卫
-// 同一套口径；身份判定本身在 `utils/__tests__/workbenchIdentity.test.js` 里逐行压过，
-// 这里压的是它**渲染出来**的样子。
+// 票 04：顶栏身份切换器。**2026-10-05 起它只显示当前身份**（用户裁定）：
+// 原来两档恒显，而"一人一设备"的现实下总有一档是死的 —— 员工手机上「超级管理员 共享账号」
+// 恒为禁用态却占 132px（390 宽屏的 34%，比当前身份那 107px 还宽），点它只换来一句解释。
+// 现在只有**这台设备真有两个会话**时才多出一个可点开的菜单；一个会话时它就是一行纯显示。
+//
+// 四类会话组合（两套都在 / 只有管理端 / 只有员工 / 都没有）× 记忆值，断言**渲染与切换
+// 结果**：显示的是哪一档、点不点得开菜单、点下去变成谁、有没有那句降级提示。会话靠真实的
+// 两个探针（`/api/auth/status`、`/api/hygiene/staff/me`）读出来，与守卫同一套口径；
+// 身份判定本身在 `utils/__tests__/workbenchIdentity.test.js` 里逐行压过。
+//
+// 旧用例里"点禁用那一档 → 说清缺哪种会话"三条已随结构一起消失：那一档现在根本不渲染，
+// 也就没有"点了没反应"这回事（D11 当初要解决的就是那个）。
 
 const IDENTITY_KEY = 'luyun.login.workbench.identity'
 
@@ -37,7 +43,7 @@ function jsonResponse(data, status = 200) {
 }
 
 const SESSIONS = {
-  /** 店里那台共用电脑：两套会话都在。 */
+  /** 店里那台共用电脑：两套会话都在 —— 只有这一种组合下菜单才会出现。 */
   both: { admin: true, staff: true },
   /** 只有管理端会话。 */
   admin: { admin: true, staff: false },
@@ -105,16 +111,25 @@ async function mountSwitcher({ session, saved = null, staffName = '张三' } = {
   return { wrapper, store, router }
 }
 
-function option(wrapper, text) {
-  const found = wrapper.findAll('.wb-id-opt').find((node) => node.text().includes(text))
-  if (!found) throw new Error(`切换器上没有「${text}」这一档`)
-  return found
+/** 那一颗「我是谁」。它现在只有一颗 —— 两个档位并排的结构已经取消。 */
+function currentEl(wrapper) {
+  const node = wrapper.find('.wb-id-current')
+  if (!node.exists()) throw new Error('切换器没有渲染当前身份')
+  return node
 }
 
-function litOption(wrapper) {
-  const lit = wrapper.findAll('.wb-id-opt').filter((node) => node.classes().includes('is-on'))
-  expect(lit).toHaveLength(1)
-  return lit[0]
+/** 这份会话下它该不该给菜单（判据在组件里：可用档位 ≥ 2）。 */
+function canSwitch(wrapper) {
+  return currentEl(wrapper).classes().includes('is-switchable')
+}
+
+/** 点开菜单并返回里面那一项。 */
+async function openMenu(wrapper) {
+  await currentEl(wrapper).trigger('click')
+  await flushPromises()
+  const item = wrapper.find('.wb-id-menu-item')
+  if (!item.exists()) throw new Error('这台设备只有一个会话，不该有菜单')
+  return item
 }
 
 beforeEach(() => {
@@ -127,104 +142,115 @@ afterEach(() => {
 })
 
 describe('工作台身份切换器', () => {
-  it('两套会话都在 + 没选过：自动定超级管理员，两档都点得动', async () => {
+  it('两套会话都在 + 没选过：自动定超级管理员，且给得出切档菜单', async () => {
     const { wrapper } = await mountSwitcher({ session: SESSIONS.both })
 
-    expect(litOption(wrapper).text()).toContain('超级管理员')
-    expect(option(wrapper, '超级管理员').attributes('disabled')).toBeUndefined()
-    expect(option(wrapper, '员工').attributes('disabled')).toBeUndefined()
-    // 两档各一个 aria-pressed：亮着的那个是 true，另一个 false。
-    expect(option(wrapper, '超级管理员').attributes('aria-pressed')).toBe('true')
-    expect(option(wrapper, '员工').attributes('aria-pressed')).toBe('false')
+    expect(currentEl(wrapper).text()).toContain('超级管理员')
+    expect(currentEl(wrapper).text()).toContain('共享账号')
+    // 两个可用档位 —— 这一档点得开（而且是**只有这一种组合**点得开）。
+    expect(canSwitch(wrapper)).toBe(true)
+    expect(wrapper.find('.wb-id-menu').exists()).toBe(false)
   })
 
-  it('只有管理端会话：员工那一档点不动（哪怕记着员工）', async () => {
-    const { wrapper } = await mountSwitcher({ session: SESSIONS.admin, saved: 'super' })
+  it('两套会话都在：菜单里那一项能切到员工', async () => {
+    const { wrapper, store } = await mountSwitcher({ session: SESSIONS.both })
+    expect(store.identity).toBe('super')
 
-    expect(litOption(wrapper).text()).toContain('超级管理员')
-    expect(option(wrapper, '员工').attributes('disabled')).toBeDefined()
+    const item = await openMenu(wrapper)
+    expect(item.text()).toContain('员工')
+    await item.trigger('click')
+    await flushPromises()
+
+    expect(store.identity).toBe('staff')
+    expect(currentEl(wrapper).text()).toContain('员工')
+    // 切完菜单收起。
+    expect(wrapper.find('.wb-id-menu').exists()).toBe(false)
   })
 
-  it('只有员工会话：显示「员工（我的姓名）」，超级管理员那一档点不动', async () => {
-    const { wrapper } = await mountSwitcher({ session: SESSIONS.staff, staffName: '李四' })
+  it('只有管理端会话：只显示超级管理员，且**点不开**（没有菜单也没有箭头）', async () => {
+    const { wrapper } = await mountSwitcher({ session: SESSIONS.admin, saved: 'staff' })
 
-    expect(litOption(wrapper).text()).toContain('员工（李四）')
-    expect(option(wrapper, '超级管理员').attributes('disabled')).toBeDefined()
+    expect(currentEl(wrapper).text()).toContain('超级管理员')
+    expect(canSwitch(wrapper)).toBe(false)
+    expect(wrapper.find('.wb-id-caret').exists()).toBe(false)
+    // 另一档根本不渲染 —— 于是也就没有"点了没反应"这回事。
+    expect(wrapper.text()).not.toContain('员工')
   })
 
-  it('两套都没有：不冒充身份，两档都灰着、也没有「当前档」', async () => {
-    const { wrapper } = await mountSwitcher({ session: SESSIONS.none, saved: 'super' })
+  it('只有员工会话：显示「员工（张三）」，点不开', async () => {
+    const { wrapper } = await mountSwitcher({ session: SESSIONS.staff })
 
-    expect(wrapper.findAll('.wb-id-opt').filter((n) => n.classes().includes('is-on'))).toHaveLength(0)
-    expect(option(wrapper, '超级管理员').attributes('disabled')).toBeDefined()
-    expect(option(wrapper, '员工').attributes('disabled')).toBeDefined()
+    expect(currentEl(wrapper).text()).toContain('员工')
+    expect(currentEl(wrapper).text()).toContain('张三')
+    expect(canSwitch(wrapper)).toBe(false)
+    expect(wrapper.text()).not.toContain('超级管理员')
+  })
+
+  it('两套都没有：什么都不渲染（不冒充身份）', async () => {
+    const { wrapper, store } = await mountSwitcher({ session: SESSIONS.none, saved: 'staff' })
+
+    expect(store.identity).toBe(null)
+    expect(wrapper.find('.wb-id').exists()).toBe(false)
   })
 
   it('只降不升：记着超级管理员而它失效、员工会话还在 → 降为员工并提示一次', async () => {
-    const { wrapper } = await mountSwitcher({ session: SESSIONS.staff, saved: 'super', staffName: '李四' })
+    const { wrapper, store } = await mountSwitcher({ session: SESSIONS.staff, saved: 'super' })
 
-    expect(litOption(wrapper).text()).toContain('员工（李四）')
-    // 看得见、一句话、不阻塞（role=status，不是 modal / alert 拦截）。
-    const notice = wrapper.get('[role="status"]')
-    expect(notice.text()).toContain('管理端的登录已过期')
-    expect(notice.text()).toContain('员工')
-    // 降级落到本机记忆里：店长会话哪天自己回来也不会把这一档顶回去。
-    expect(localStorage.getItem(IDENTITY_KEY)).toBe('staff')
+    expect(store.identity).toBe('staff')
+    expect(currentEl(wrapper).text()).toContain('员工')
+    const notice = wrapper.find('.wb-id-notice')
+    expect(notice.exists()).toBe(true)
+    expect(notice.text()).toMatch(/管理端|店长|共享账号/)
   })
 
   it('降级提示不常驻：关掉就没了，重新打开也不再提', async () => {
-    const { wrapper } = await mountSwitcher({ session: SESSIONS.staff, saved: 'super', staffName: '李四' })
+    const { wrapper } = await mountSwitcher({ session: SESSIONS.staff, saved: 'super' })
 
     await wrapper.get('.wb-id-dismiss').trigger('click')
     await flushPromises()
-    expect(wrapper.find('[role="status"]').exists()).toBe(false)
-
-    // 本机记忆已经变成员工，所以再打开一次（新的模块图、同一个 localStorage）时
-    // 不构成第二次降级 —— 提示不会再冒出来。
-    const reopened = await mountSwitcher({ session: SESSIONS.staff, staffName: '李四' })
-    expect(litOption(reopened.wrapper).text()).toContain('员工（李四）')
-    expect(reopened.wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper.find('.wb-id-notice').exists()).toBe(false)
   })
 
-  it('只降不升：记着员工而店长会话也在 → 仍显示员工，绝不自动升（且两档都还点得动）', async () => {
-    const { wrapper, store } = await mountSwitcher({ session: SESSIONS.both, saved: 'staff', staffName: '李四' })
+  it('只降不升：记着员工而店长会话也在 → 仍显示员工，绝不自动升', async () => {
+    const { wrapper, store } = await mountSwitcher({ session: SESSIONS.both, saved: 'staff' })
 
-    expect(litOption(wrapper).text()).toContain('员工（李四）')
     expect(store.identity).toBe('staff')
-    // 员工可以自己点回超级管理员（手动不算自动升）；记忆值也没被系统改写。
-    expect(option(wrapper, '超级管理员').attributes('disabled')).toBeUndefined()
-    expect(localStorage.getItem(IDENTITY_KEY)).toBe('staff')
+    expect(currentEl(wrapper).text()).toContain('员工')
+    // 两档都可用 → 店长想切回去，菜单在。
+    expect(canSwitch(wrapper)).toBe(true)
+    expect((await openMenu(wrapper)).text()).toContain('超级管理员')
   })
 
-  it('点另一档：当场换过去、记在本机；反向也点得动', async () => {
-    const { wrapper, store } = await mountSwitcher({ session: SESSIONS.both })
+  it('点菜单里那一项：当场换过去、记在本机', async () => {
+    const { wrapper, store } = await mountSwitcher({ session: SESSIONS.both, saved: 'staff' })
 
-    await option(wrapper, '员工').trigger('click')
+    const item = await openMenu(wrapper)
+    await item.trigger('click')
     await flushPromises()
-    expect(store.identity).toBe('staff')
-    expect(localStorage.getItem(IDENTITY_KEY)).toBe('staff')
 
-    await option(wrapper, '超级管理员').trigger('click')
-    await flushPromises()
     expect(store.identity).toBe('super')
     expect(localStorage.getItem(IDENTITY_KEY)).toBe('super')
   })
 
   it('记在本机：换一次之后重新打开（同一台设备、同一个 localStorage）还是那一档', async () => {
     const first = await mountSwitcher({ session: SESSIONS.both })
-    await option(first.wrapper, '员工').trigger('click')
+    const item = await openMenu(first.wrapper)
+    await item.trigger('click')
     await flushPromises()
+    expect(first.store.identity).toBe('staff')
 
-    // 「重新打开」：换一份崭新的模块图，但本机记忆还在（localStorage 没换）。
-    const second = await mountSwitcher({ session: SESSIONS.both })
-    expect(litOption(second.wrapper).text()).toContain('员工')
+    // 同一份 storage、重新挂一次（等价于关掉再打开这台设备上的工作台）。
+    const again = await mountSwitcher({ session: SESSIONS.both })
+    expect(again.store.identity).toBe('staff')
+    expect(currentEl(again.wrapper).text()).toContain('员工')
   })
 
   it('拿不到姓名时不显示空括号，只写「员工」', async () => {
     const { wrapper } = await mountSwitcher({ session: SESSIONS.staff, staffName: '' })
 
-    const staffOption = option(wrapper, '员工')
-    expect(staffOption.text()).toBe('员工')
-    expect(staffOption.text()).not.toContain('（')
+    const text = currentEl(wrapper).text()
+    expect(text).toContain('员工')
+    expect(text).not.toContain('（）')
+    expect(text).not.toContain('()')
   })
 })

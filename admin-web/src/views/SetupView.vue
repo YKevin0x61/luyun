@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, reactive, ref, computed } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
 import LuyunRadioGroup from '../components/ui/LuyunRadioGroup.vue'
@@ -13,6 +13,8 @@ import { useAccountSettings } from '../composables/useAccountSettings'
 import { useSystemUpdate } from '../composables/useSystemUpdate'
 import { useDbCredentials } from '../composables/useDbCredentials'
 import { useSystemHealth } from '../composables/useSystemHealth'
+import { useEscapeClose } from '../composables/useEscapeClose'
+import { createScrollHints } from '../utils/scrollHints'
 import { formatCount, formatMb } from '../utils/systemHealthFormat'
 import SvgIcon from '../components/SvgIcon.vue'
 import HealthSummary from '../components/system/HealthSummary.vue'
@@ -42,6 +44,14 @@ function goBack() {
 // 写接口一律走 api/client.js（自带 credentials:'include' 与 401 处理），
 // client.js 已针对 /login、/settings 关闭 401 自动跳转，避免在本页造成重定向死循环。
 
+// 分节导航在窄屏（≤720px）变成一条横向滚动条：内容 848px、可视 352px，第 4–7 项
+// （备份中心 / 系统更新 / 数据库凭据 / 账号与 API Token）整个在屏幕外，第 3 项刚好
+// 卡在边界上——看起来像"只有 3 个分节"，而备份与更新正是用户最常来找的两块。
+// 滚动本身早就有了，缺的是"看得出还能滚"和"当前分节自己滚进来"这两件事
+// （createScrollHints 的注释里讲了这两条的由来）。
+const setupNav = createScrollHints()
+const setupNavEl = setupNav.scrollerRef
+
 const SECTIONS = [
   { id: 'pos', label: 'POS 凭据', icon: 'store' },
   { id: 'runtime', label: '运行配置', icon: 'timer' },
@@ -52,6 +62,28 @@ const SECTIONS = [
   { id: 'account', label: '账号与 API Token', icon: 'key' },
 ]
 const activeSection = ref('pos')
+
+function switchSection(id) {
+  activeSection.value = id
+  // `flush: 'post'` 式的时机问题在这里用 nextTick 处理：`:class` 的 active 要等这次
+  // 渲染落地才换格，滚早了滚的是上一个分节。
+  nextTick(() => setupNav.scrollActiveIntoView())
+  if (id === 'account') loadTokenList()
+  if (id === 'runtime') loadRuntimeSettings()
+  if (id === 'health') loadSysHealth()
+  if (id === 'database') loadDbCred()
+  if (id === 'backup') {
+    loadPoints()
+    loadHealth()
+    loadRetention()
+  }
+  if (id === 'update') {
+    loadGithubConfig()
+    loadVersionCheck()
+    loadJobStatus()
+    loadHistory()
+  }
+}
 
 const alert = reactive({ show: false, type: 'info', message: '' })
 let alertTimer = null
@@ -444,24 +476,15 @@ function onRevokeTokenConfirm(prefix) {
   )
 }
 
-function switchSection(id) {
-  activeSection.value = id
-  if (id === 'account') loadTokenList()
-  if (id === 'runtime') loadRuntimeSettings()
-  if (id === 'health') loadSysHealth()
-  if (id === 'database') loadDbCred()
-  if (id === 'backup') {
-    loadPoints()
-    loadHealth()
-    loadRetention()
-  }
-  if (id === 'update') {
-    loadGithubConfig()
-    loadVersionCheck()
-    loadJobStatus()
-    loadHistory()
-  }
-}
+// 本页四个手写 modal 都要能按 Esc 关掉。这些 `.modal-overlay` 是直接写在模板里的
+// （不像 components/admin/ConfirmDialog.vue 那样自带键盘处理），谁都没接键盘，
+// 于是同一站里「删除行」能按 Esc 关、「恢复整库数据」按了没反应，框还挡着后面的
+// 内容——看着像页面死了。Esc 一律走各弹窗自己的关闭路径（取消 = 什么都没发生），
+// 唯一例外是「恢复完成」：它没有"取消"语义，Esc 等同于点主按钮（会话已失效时登出）。
+useEscapeClose(() => confirmState.open, closeConfirm)
+useEscapeClose(() => importSuccessModal.show, confirmImportSuccessRedirect)
+useEscapeClose(() => dbResetConfirm.open, closeDbReset)
+useEscapeClose(() => tokenModal.show, closeTokenModal)
 
 onMounted(() => {
   const section = route.query.section
@@ -483,7 +506,11 @@ onMounted(() => {
       </p>
 
       <div class="setup-body">
-        <nav class="setup-nav">
+        <nav
+          ref="setupNavEl"
+          class="setup-nav"
+          :class="{ 'is-scroll-start': setupNav.atStart.value, 'is-scroll-end': setupNav.atEnd.value }"
+        >
           <button
             v-for="s in SECTIONS"
             :key="s.id"
@@ -2146,9 +2173,42 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
   .setup-body { flex-direction: column; gap: 12px; }
   .setup-nav {
     flex: none; width: 100%; flex-direction: row; overflow-x: auto;
-    position: static; border-bottom: 1px solid var(--border); padding-bottom: 8px;
+    /* `relative` 是给两端渐隐的定位基准：桌面档这里是 sticky（本身就定位），
+       窄屏改成 static 后伪元素会跑到页面角落去。 */
+    position: relative;
+    border-bottom: 1px solid var(--border); padding-bottom: 8px;
+    /* 分节有 7 项（内容 848px、可视 352px），滚动条要么很粗要么被系统藏掉，
+       两种都难看，索性统一隐藏 —— 溢出交给两端的渐隐提示来表达（见下面 ::before/::after）。
+       `scroll-padding-inline` 让 scrollActiveIntoView 居中后的当前项不会被渐隐盖住。 */
+    scrollbar-width: none;
+    scroll-padding-inline: 24px;
   }
+  .setup-nav::-webkit-scrollbar { display: none; }
   .setup-nav .nav-item { white-space: nowrap; }
+
+  /* 溢出提示：只在真的还有内容的那一侧出现。没有它，用户会以为"只有 3 个分节"
+     —— 第 4–7 项（备份中心 / 系统更新 / 数据库凭据 / 账号与 API Token）全在屏外。 */
+  .setup-nav::before,
+  .setup-nav::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 8px;
+    width: 22px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .setup-nav::before {
+    left: 0;
+    background: linear-gradient(to right, rgba(17, 24, 39, 0.95), transparent);
+  }
+  .setup-nav::after {
+    right: 0;
+    background: linear-gradient(to left, rgba(17, 24, 39, 0.95), transparent);
+  }
+  .setup-nav:not(.is-scroll-end)::after { opacity: 1; }
+  .setup-nav:not(.is-scroll-start)::before { opacity: 1; }
   .health-cards { grid-template-columns: minmax(0, 1fr); }
   /* 窄屏只保留版本对照的关键列：名称 / 更新前版本 / 耗时 先让位，避免横向滚动。 */
   .release-list th:nth-child(2), .release-list td:nth-child(2),

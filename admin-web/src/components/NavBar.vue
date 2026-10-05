@@ -1,8 +1,9 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import SvgIcon from './SvgIcon.vue'
 import { logoutAdminSession } from '../utils/adminLogout'
+import { createScrollHints } from '../utils/scrollHints'
 import { WORKBENCH_TITLE } from '../utils/workbenchCopy'
 
 defineProps({
@@ -67,27 +68,55 @@ async function handleLogout() {
   // 走的都是它。误点的保护留在这里（浏览器原生 confirm），不是登出实现的事。
   await logoutAdminSession(router, route.fullPath)
 }
+
+// tab 条在 390 下只有 374px 可用，「日志」那一格（382–432px）整个在视口外。
+// 光加滚动还不够：容器藏了滚动条，用户看不出右边还有内容；而且切到 `/logs` 时
+// 容器 `scrollLeft` 仍是 0——**在日志页自己也看不出自己在哪**。所以两件事都做：
+// 把 active 项滚进视野 + 两端溢出渐隐（见 utils/scrollHints.js）。
+const tabs = createScrollHints()
+// 模板里 `ref="tabsScroller"` 是字符串 ref，靠 setup 作用域里的同名变量绑定；
+// `createScrollHints` 返回的是 `scrollerRef`，这里换名接上。
+const tabsScroller = tabs.scrollerRef
+
+// 路由换了才滚：同一页内的实时状态更新不该让 tab 条自己动。
+// `flush: 'post'` 不能省：默认的 flush 跑在 DOM 更新**之前**，那一刻 `.active` 还挂在
+// 上一页那一格上，滚过去的会是上一页（实测：从 `/admin` 进 `/logs`，滚的是「数据管理」）。
+watch(
+  () => route.path,
+  () => tabs.scrollActiveIntoView(),
+  { flush: 'post' },
+)
+
+onMounted(() => {
+  // 首屏（可能直接落在 `/logs`）用 auto：进场动画期间做平滑滚动只会看到条在抖。
+  tabs.scrollActiveIntoView('auto')
+})
 </script>
 
 <template>
   <div class="global-nav">
     <div class="global-nav-brand">厨务管家<span v-if="pageSubtitle" class="global-nav-subtitle"> · {{ pageSubtitle }}</span></div>
-    <div class="global-nav-tabs">
-      <router-link to="/" class="nav-tab" :class="{ active: route.path === '/' }">仪表盘</router-link>
-      <router-link to="/admin" class="nav-tab" :class="{ active: route.path.startsWith('/admin') }">数据管理</router-link>
-      <!-- 排班与卫生合成一个子系统「工作台」（2026-10-04）：一格进排班月历，卫生那一组
-           从工作台窄栏里的「现场」进 —— 这里不再并排两格。高亮覆盖两组。 -->
-      <router-link
-        to="/workbench"
-        class="nav-tab"
-        :class="{ active: route.path.startsWith('/workbench') }"
-      >{{ WORKBENCH_TITLE }}</router-link>
-      <router-link to="/sales-report" class="nav-tab" :class="{ active: route.path.startsWith('/sales-report') }">销售报表</router-link>
-      <!-- 票 07（spec 故事 12）：配方那一格撤掉 —— 它已经在工作台的「后勤」组里，
-           从上面「工作台」那一格进。管理后台的导航为它单列一格只会让人以为有两个配方域。
-           票 08 同理：备货计划那一格也撤掉（后勤组里，与配方同住一格）。 -->
-      <router-link to="/wecom-push" class="nav-tab" :class="{ active: route.path.startsWith('/wecom-push') }">企微推送</router-link>
-      <router-link to="/logs" class="nav-tab" :class="{ active: route.path.startsWith('/logs') }">日志</router-link>
+    <div
+      class="global-nav-tabs-wrap"
+      :class="{ 'is-scroll-start': tabs.atStart.value, 'is-scroll-end': tabs.atEnd.value }"
+    >
+      <div ref="tabsScroller" class="global-nav-tabs">
+        <router-link to="/" class="nav-tab" :class="{ active: route.path === '/' }">仪表盘</router-link>
+        <router-link to="/admin" class="nav-tab" :class="{ active: route.path.startsWith('/admin') }">数据管理</router-link>
+        <!-- 排班与卫生合成一个子系统「工作台」（2026-10-04）：一格进排班月历，卫生那一组
+             从工作台窄栏里的「现场」进 —— 这里不再并排两格。高亮覆盖两组。 -->
+        <router-link
+          to="/workbench"
+          class="nav-tab"
+          :class="{ active: route.path.startsWith('/workbench') }"
+        >{{ WORKBENCH_TITLE }}</router-link>
+        <router-link to="/sales-report" class="nav-tab" :class="{ active: route.path.startsWith('/sales-report') }">销售报表</router-link>
+        <!-- 票 07（spec 故事 12）：配方那一格撤掉 —— 它已经在工作台的「后勤」组里，
+             从上面「工作台」那一格进。管理后台的导航为它单列一格只会让人以为有两个配方域。
+             票 08 同理：备货计划那一格也撤掉（后勤组里，与配方同住一格）。 -->
+        <router-link to="/wecom-push" class="nav-tab" :class="{ active: route.path.startsWith('/wecom-push') }">企微推送</router-link>
+        <router-link to="/logs" class="nav-tab" :class="{ active: route.path.startsWith('/logs') }">日志</router-link>
+      </div>
     </div>
     <div class="nav-right">
       <span class="nav-status-dot" :class="connected ? 'online' : 'offline'" :title="connected ? '实时已连接' : '实时已断开'"></span>
@@ -110,3 +139,50 @@ async function handleLogout() {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 溢出提示（A5）：tab 条本身是 theme.css 里的 `.global-nav-tabs`（滚动条被显式藏掉），
+   这里只加一层定位用的壳，用 :deep 去够里面那条，不改它的既有布局。遮罩只在真的还
+   有内容时出现（is-scroll-start / is-scroll-end 由 utils/scrollHints.js 算），
+   否则文字会被无谓地淡掉一截。 */
+.global-nav-tabs-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.global-nav-tabs-wrap :deep(.global-nav-tabs) {
+  /* 让 scrollActiveIntoView 居中后不会把当前项顶到遮罩底下 */
+  scroll-padding-inline: 24px;
+}
+
+.global-nav-tabs-wrap::before,
+.global-nav-tabs-wrap::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 22px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.global-nav-tabs-wrap::before {
+  left: 0;
+  background: linear-gradient(to right, var(--sidebar-bg), transparent);
+}
+
+.global-nav-tabs-wrap::after {
+  right: 0;
+  background: linear-gradient(to left, var(--sidebar-bg), transparent);
+}
+
+/* 右边还有内容 → 右端渐隐；已经滚过去了 → 左端也渐隐。 */
+.global-nav-tabs-wrap:not(.is-scroll-end)::after { opacity: 1; }
+.global-nav-tabs-wrap:not(.is-scroll-start)::before { opacity: 1; }
+
+/* 不随系统动效偏好做平滑滚动：滚动是位移，不是动画。 */
+@media (prefers-reduced-motion: reduce) {
+  .global-nav-tabs-wrap :deep(.global-nav-tabs) { scroll-behavior: auto; }
+}
+</style>

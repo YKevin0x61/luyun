@@ -20,7 +20,6 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import StaffExitButton from '../../components/staff/StaffExitButton.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { staffRequest } from '../../utils/hygieneStaff'
@@ -141,8 +140,8 @@ useNudgePull({
       <span class="tDay">整月</span>
       <span class="tDate">{{ employee ? employee.name : '' }}</span>
       <button class="tBack" type="button" @click="router.push('/workbench/me/today')">‹ 今天</button>
-      <!-- 三张员工页共用的退出（票 10）。 -->
-      <StaffExitButton />
+      <!-- 退出**不在这里**（D5）：工作台外壳顶栏那一颗是员工三页共用的唯一一颗
+           （`WorkbenchLayout` 的 `WorkbenchExitButton`，员工那一档走 `useStaffLogout`）。 -->
     </header>
 
     <div class="mBody">

@@ -417,7 +417,7 @@ async function markTeaching() {
       :message="`驳回「${selected ? selected.item_name : ''}」后要重新拍清理前后；本周红黑榜会记一次驳回。`"
       confirm-label="驳回"
       danger
-      :prompt="{ label: '哪里不合格（可选，员工能看到）', placeholder: '例如：滤网没拆下来洗', maxlength: 120 }"
+      :prompt="{ label: '哪里不合格（必填，员工能看到）', placeholder: '写一句让他知道改什么，例如：滤网没拆下来洗', hint: '必填 · 员工照这句重做', required: true, maxlength: 120 }"
       @confirm="confirmReject"
       @cancel="rejectOpen = false"
     />

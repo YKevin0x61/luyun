@@ -60,7 +60,7 @@ const tocVisible = ref(false)
 
 const theme = ref(RC.readPref(window.localStorage, 'sop.theme', 'auto'))
 const density = ref(RC.readPref(window.localStorage, 'sop.density', 'compact') !== 'grid')
-const fontPx = ref(RC.clampFontPx(RC.readPref(window.localStorage, 'sop.fontScale', '12')))
+const fontPx = ref(RC.clampFontPx(RC.readPref(window.localStorage, 'sop.fontScale', String(RC.defaultFontPx()))))
 const searchTerm = ref('')
 const searchCount = ref('')
 const onlyNew = ref(false)
