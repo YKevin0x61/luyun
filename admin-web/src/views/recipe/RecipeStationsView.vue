@@ -280,7 +280,11 @@ function onDocumentPointerDown(evt) {
           <button v-if="batchMode" type="button" class="btn btn-primary btn-sm" @click="printSelected">
             打印所选 ({{ Object.keys(selected).length }})
           </button>
-          <router-link class="btn btn-ghost btn-sm" :to="RECIPE_QR_PATH">岗位二维码</router-link>
+          <!-- 印码入口按身份出现（票 04 起印码页是 `admin` 专属）：员工是**扫码**的那一方，
+               扫到的是配方详情页；这一页在清单里是 `both`（员工也看得配方列表），但这颗按钮
+               落到的是店长才能打开的印码页 —— 无条件渲染的话员工点下去只吃一张「无权访问」。
+               判据与同页顶栏那两颗入口一样（`useRecipeAdmin` 的工作台身份）。 -->
+          <router-link v-if="isAdmin" class="btn btn-ghost btn-sm" :to="RECIPE_QR_PATH">岗位二维码</router-link>
         </div>
         <div v-if="loading" class="loading-state">加载岗位列表…</div>
         <div v-else-if="errorMsg" class="empty-state">{{ errorMsg }}</div>

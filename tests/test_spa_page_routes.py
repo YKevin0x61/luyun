@@ -30,6 +30,12 @@
 
 方向：**前端有的，后端必须有**（本票的缺陷方向）。反向（后端有、前端无）只剩表里的
 服务端别名（`aliases`：`/index.html`、`/admin/`）—— 不再有第二份例外清单。
+
+4. 票 05 起还钉**这一列的服务端那一半**：清单说员工进得去的页，员工会话必须真的拿得到
+   壳；说管理端专属、又在工作台前缀之外的页，员工会话必须被挡回登录页（见文件末尾
+   `test_staff_session_matches_the_audience_column`）。前半（管理端专属页不出现在员工
+   导航与员工可达的入口里）要真的渲染 Vue 组件，住在
+   `admin-web/src/router/__tests__/pageAudienceGate.test.js`；两半合起来才是那道门。
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
@@ -535,6 +542,102 @@ class PageInventorySingleSourceTest(unittest.TestCase):
                             response.headers["location"].startswith("/login"),
                             response.headers["location"],
                         )
+
+
+# ── 清单的 `audience` 列与服务端页面墙对表（票 05）──────────────────────────
+# 前端那半（管理端专属页不出现在员工导航与员工可达的入口里）在
+# `admin-web/src/router/__tests__/pageAudienceGate.test.js` —— 那要真的渲染 Vue 组件，
+# Python 这边做不到。这里压**服务端判得住的那一半**，面的定义仍是清单里那一列
+# （不在这里另抄一份路径名单）：
+#
+#   1. 清单说员工进得去的页（`public` / `both` / `staff`）—— 员工会话必须真的拿到壳；
+#   2. 清单说是管理端专属、且**在工作台前缀之外**的页 —— 员工会话必须被挡回登录页。
+#
+# `/workbench/*` 里的管理端页**服务端本就不按 audience 拦**（ADR 0092：工作台页面区对
+# 任一会话放行，页面级权限交给前端路由 meta 与各接口的 401）—— 它们只出现在第 1 条里，
+# 拦人的那一半只有前端那道门守着。这条边界写清楚而不是含糊过去：两半合起来才是那道门。
+#
+# 员工会话走真实链路建（与 `tests/test_auth.py` 的 `_staff_only_client` 同一套口径）：
+# 建管理员 → 员工注册 → 花名册批准 → 员工登录 → 清掉管理端 cookie。
+ADMIN_INIT = {"username": "admin", "password": "password123", "confirm_password": "password123"}
+STAFF_PHONE = "13800138000"
+STAFF_PASSWORD = "password123"
+
+
+@pytest.fixture
+def audience_client(tmp_path, monkeypatch):
+    """整应用客户端（带 lifespan：员工会话的判定要用装配好的 `employee_accounts`）。"""
+    import main as main_module
+
+    stub = tmp_path / "spa-index.html"
+    stub.write_text("<!doctype html><title>spa stub</title>", encoding="utf-8")
+    monkeypatch.setattr(main_module, "spa_index_path", str(stub))
+    with TestClient(main_module.app) as client:
+        yield client
+
+
+def _staff_only_session(client) -> None:
+    """把客户端变成「只有员工会话」，管理端 cookie 用完就删（同 `tests/test_auth.py`）。"""
+    from config import settings
+
+    init = client.post("/api/auth/init", json=ADMIN_INIT)
+    assert init.status_code == 200, init.text
+    registered = client.post(
+        "/api/hygiene/staff/register",
+        json={"name": "张三", "phone": STAFF_PHONE, "password": STAFF_PASSWORD},
+    )
+    assert registered.status_code == 200, registered.text
+    employee = registered.json()["employee"]
+    approved = client.post(f"/api/hygiene/admin/roster/{employee['id']}/approve")
+    assert approved.status_code == 200, approved.text
+    login = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": STAFF_PHONE, "password": STAFF_PASSWORD},
+    )
+    assert login.status_code == 200, login.text
+    assert client.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    client.cookies.delete(settings.SESSION_COOKIE_NAME)
+    assert client.cookies.get(settings.SESSION_COOKIE_NAME) is None
+
+
+def test_staff_session_matches_the_audience_column(audience_client):
+    """遍历清单：员工会话拿得到员工该进的页，进不去工作台外面的管理端页。
+
+    名单不在这里手抄（`tests/test_auth.py` 那两条用的是手写常量）：面的定义就是清单里
+    那一列，所以清单改一页、这条断言跟着改。
+    """
+    client = audience_client
+    _staff_only_session(client)
+
+    staff_pages: list[str] = []
+    admin_pages: list[str] = []
+    for row in _page_rows():
+        path = row["path"]
+        response = client.get(path, headers={"accept": "text/html"}, follow_redirects=False)
+        if row["public"] or row["audience"] in {"both", "staff"}:
+            staff_pages.append(path)
+            assert response.status_code == 200, (
+                f"{path} 在清单里是给员工的（audience={row['audience']}），员工会话硬导航"
+                f"却拿到 {response.status_code}（{response.headers.get('location')}）"
+                "—— 员工点进去是被挡在门外的。"
+            )
+        elif path.startswith("/workbench"):
+            # 工作台里的管理端页：服务端对任一会话放行（ADR 0092），拦人的是前端那道门。
+            continue
+        else:
+            admin_pages.append(path)
+            assert response.status_code == 302, (
+                f"{path} 在清单里是管理端专属，员工会话硬导航却拿到了页面壳"
+                f"（{response.status_code}）—— 员工可达的入口多了一个。"
+            )
+            assert response.headers["location"].startswith("/login"), (
+                path,
+                response.headers.get("location"),
+            )
+
+    # 两边都得有东西：清单被抽空、或某一类一页都不剩时，上面的循环会静默空过。
+    assert staff_pages, "清单里没有一页是员工进得去的？"
+    assert admin_pages, "工作台外面没有管理端专属页？"
 
 
 if __name__ == "__main__":
