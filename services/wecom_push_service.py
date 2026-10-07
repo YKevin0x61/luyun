@@ -574,14 +574,19 @@ class WeComPushService:
         return dispatched_count
 
     async def scheduler_loop(self, db: DatabaseManager) -> None:
-        """30 秒一轮：定时任务到点就推 + 统一出站的兜底、派发与保留清理。
+        """30 秒一轮：定时任务到点就推 + 运维事件 + 统一出站的兜底、派发与保留清理。
 
         统一出站（`services/wecom_outbox.py`）的兜底（卡在发送中的行）、重试、补发、
         节流都挂在这条既有循环上，**不新增常驻 task**（单 worker 约束，常驻 task 清单
         有测试钉着）。兜底放在派发前：捞回来的行在同一轮就能重新排队发出。
+
+        运维事件（`services/wecom_ops_events.py`：磁盘 / 内存水位、更新与冷备结果）同样
+        挂在这里，且排在派发之前 —— 本轮入队的行当轮就能发出去。水位是状态、结果是
+        状态文件，都不需要自己的循环。
         """
         # 延迟导入：出站服务要用本模块的发送器与拆分函数，模块级互相 import 会成环。
         from services.wecom_outbox import wecom_outbox
+        from services.wecom_ops_events import ops_event_watcher
 
         logger.info("企业微信推送调度器已启动")
         while True:
@@ -591,6 +596,12 @@ class WeComPushService:
                 raise
             except Exception as exc:
                 logger.error("企业微信推送调度器异常: %s", exc)
+            try:
+                await ops_event_watcher.poll_once(db)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("企微运维事件轮询异常: %s", exc)
             try:
                 await wecom_outbox.requeue_stale_sending(db)
             except asyncio.CancelledError:
