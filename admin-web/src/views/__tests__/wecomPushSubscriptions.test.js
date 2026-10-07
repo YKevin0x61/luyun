@@ -187,6 +187,53 @@ describe('渠道 tab 的卡片', () => {
     // 用户点了「取消」：一条写请求都不该发出去
     expect(fetchMock.calls.filter((call) => call.method !== 'GET')).toEqual([])
   })
+
+  // U6（旧清单 A29）：「测试」按钮一点即外发，走查时真的把消息发进了门店群。
+  it('「测试」先确认：文案点名目标群并说清撤不回来', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    const test = wrapper.findAll('button').find((node) => node.text() === '测试')
+    expect(test, '找不到「测试」按钮').toBeTruthy()
+    await test.trigger('click')
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    const text = String(confirmSpy.mock.calls[0][0])
+    expect(text).toContain('门店群')
+    expect(text).toContain('无法撤回')
+  })
+
+  it('确认框点「取消」：一条外发请求都不发', async () => {
+    const { wrapper, fetchMock } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    await wrapper.findAll('button').find((node) => node.text() === '测试').trigger('click')
+    await flushPromises()
+
+    expect(fetchMock.calls.filter((call) => call.path.includes('/test'))).toEqual([])
+  })
+
+  it('确认后才真的发测试请求（点「确定」这一路没被挡掉）', async () => {
+    const { wrapper, fetchMock } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    await wrapper.findAll('button').find((node) => node.text() === '测试').trigger('click')
+    await flushPromises()
+
+    const tests = fetchMock.calls.filter((call) => call.path.includes('/api/wecom-push/webhooks/1/test'))
+    expect(tests).toHaveLength(1)
+    expect(tests[0].method).toBe('POST')
+  })
 })
 
 describe('订阅矩阵', () => {
@@ -226,6 +273,55 @@ describe('订阅矩阵', () => {
       target_channel_id: 2,
       enabled: true,
     })
+  })
+
+  // U3：每格只有一个 16×16 的勾选框、`<td>` 自己不可点 —— 64 格 × 3 档实测 192 次点空。
+  it('点格子空白处就算勾选（整格是热区），且只切一下', async () => {
+    const { wrapper, fetchMock } = await mountView({ channels: CHANNELS, topics: TOPICS })
+    await openTab(wrapper, '订阅')
+
+    const cell = wrapper.find('table.wp-matrix').findAll('tbody tr')[0].findAll('td')[2]
+    // 直接点 `<td>`（真实鼠标点在勾选框旁边的空白处就是这一路）
+    await cell.trigger('click')
+    await flushPromises()
+
+    const posts = fetchMock.calls.filter((call) => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0].body)).toMatchObject({
+      topic_id: 'sales_report', target_channel_id: 2, enabled: true,
+    })
+    // 再点一次：**一次点击只切一下**（td 接管 + 勾选框自己那一路会双触发的话，
+    // 这里一次点击就会发出两条相反的请求）
+    await cell.trigger('click')
+    await flushPromises()
+    expect(fetchMock.calls.filter((call) => call.method === 'POST')).toHaveLength(2)
+  })
+
+  it('点在勾选框本身也只切一下（不会 td + 勾选框各切一次）', async () => {
+    const { wrapper, fetchMock } = await mountView({ channels: CHANNELS, topics: TOPICS })
+    await openTab(wrapper, '订阅')
+
+    const box = wrapper.find('table.wp-matrix').findAll('tbody tr')[0].findAll('td')[2]
+      .find('button[role=checkbox]')
+    await box.trigger('click')
+    await flushPromises()
+
+    expect(fetchMock.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+  })
+
+  it('勾选框是键盘可达的原生按钮，并带程序化名称（U3 / U10）', async () => {
+    const { wrapper } = await mountView({ channels: CHANNELS, topics: TOPICS })
+    await openTab(wrapper, '订阅')
+
+    const box = wrapper.find('table.wp-matrix').findAll('tbody tr')[0].findAll('td')[2]
+      .find('button[role=checkbox]')
+    expect(box.element.tagName).toBe('BUTTON')
+    expect(box.attributes('tabindex')).not.toBe('-1')
+    // 读屏读得出"哪一类内容发给哪个群"，而不是光一句「复选框」
+    expect(box.attributes('aria-label')).toBe('销售报表 发给 日报群')
+    // 命中区 ≥44×44（真正接点击的是这一层）
+    const cell = wrapper.find('table.wp-matrix').findAll('tbody tr')[0].findAll('td')[2]
+    expect(cell.find('.wp-matrix-hit').exists()).toBe(true)
   })
 
   it('零订阅的内容类型：行高亮 + 页顶提示条', async () => {

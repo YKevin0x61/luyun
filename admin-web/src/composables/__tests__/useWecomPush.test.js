@@ -16,6 +16,8 @@ vi.mock('../../api/client', () => ({
 
 const {
   useWecomPush, sendNowConfirmText, canSendNow,
+  loadErrorMessage, loadErrorDetail, testChannelConfirmText,
+  deliveryErrorSummary, wecomErrcode,
 } = await import('../useWecomPush.js')
 
 const CHANNEL = {
@@ -177,5 +179,78 @@ describe('立即发送的确认文案与可点条件', () => {
     // 只有空白字符同样不算"核对过内容"
     expect(canSendNow({ job: JOB, content: '   \n  ' })).toBe(false)
     expect(canSendNow({ job: null, content: '有内容' })).toBe(false)
+  })
+})
+
+// U5（UI 走查 medium）：后端 5xx 时页面把 `Internal Server Error` 原样端给店长。
+describe('加载失败的两套文案（U5）', () => {
+  it('5xx 翻成「服务暂时不可用」，英文原文只进"详情"', () => {
+    const error = Object.assign(new Error('Internal Server Error'), {
+      status: 500, detail: 'Internal Server Error',
+    })
+
+    expect(loadErrorMessage(error)).toBe('服务暂时不可用，请稍后重试')
+    expect(loadErrorMessage(error)).not.toContain('Internal Server Error')
+    expect(loadErrorDetail(error)).toBe('HTTP 500 · Internal Server Error')
+  })
+
+  it('4xx 用后端写好的中文 detail（那是给人看的），网络层用客户端已经翻过的那句', () => {
+    const stale = Object.assign(new Error('页面已更新，请刷新后重试'), { status: 409 })
+    expect(loadErrorMessage(stale)).toBe('页面已更新，请刷新后重试')
+
+    const offline = new Error('网络连不上，请检查网络后重试')
+    expect(loadErrorMessage(offline)).toBe('网络连不上，请检查网络后重试')
+    // 断网时没有状态码：详情与技术原文是同一句，页面据此不重复渲染「详情」
+    expect(loadErrorDetail(offline)).toBe('网络连不上，请检查网络后重试')
+  })
+
+  it('兜底：认不出的失败也给一句中文，不把空字符串糊到页面上', () => {
+    expect(loadErrorMessage(null)).toBe('加载失败，请重试')
+    expect(loadErrorDetail(null)).toBe('')
+  })
+})
+
+// U6（旧清单 A29）：「测试」一点就真外发，走查时真的发进了门店群。
+describe('「测试」按钮的确认文案（U6）', () => {
+  it('点名目标群，并说清撤不回来', () => {
+    const text = testChannelConfirmText({ id: 3, name: '门店群' })
+
+    expect(text).toContain('门店群')
+    expect(text).toContain('无法撤回')
+    // 括号里那句话是给读屏与确认框一起读的：写的是"真的发到这个群"
+    expect(text).toContain('真的发到')
+  })
+
+  it('没有名字时退回 id / 兜底文案，不生成一句没有主语的提示', () => {
+    expect(testChannelConfirmText({ id: 9 })).toContain('9')
+    expect(testChannelConfirmText(null)).toContain('该渠道')
+  })
+})
+
+// U16（UI 走查 medium）：第 7 列显示的是英文原文或 Python 异常栈的一行。
+describe('发送记录错误的中文化（U16）', () => {
+  it('errcode 映射成人话（企微限流这类最常见的失败）', () => {
+    expect(deliveryErrorSummary('企业微信接口返回 errcode=45009：api freq out of limit'))
+      .toContain('调用频率上限')
+    expect(deliveryErrorSummary('上传图片素材失败：errcode=40001 invalid credential'))
+      .toContain('key 无效')
+    expect(deliveryErrorSummary('errcode=93000 invalid webhook url'))
+      .toContain('已被移出这个群')
+  })
+
+  it('网络层的几种失败也认得出', () => {
+    expect(deliveryErrorSummary(
+      "HTTPSConnectionPool(host='qyapi.weixin.qq.com', port=443): Read timed out. (read timeout=10)",
+    )).toContain('超时')
+    expect(deliveryErrorSummary('第 1/1 条发送失败：invalid webhook url'))
+      .toContain('webhook 地址无效')
+  })
+
+  it('errcode 认不出来就原样显示，不吞掉失败原因', () => {
+    const raw = '第 1/1 条发送失败：某种没见过的错'
+    expect(deliveryErrorSummary(raw)).toBe(raw)
+    expect(deliveryErrorSummary('')).toBe('')
+    expect(wecomErrcode('errcode=40001')).toBe(40001)
+    expect(wecomErrcode('没有码')).toBe(0)
   })
 })

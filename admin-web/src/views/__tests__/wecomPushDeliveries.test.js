@@ -176,7 +176,9 @@ describe('发送记录 tab 的列表', () => {
     expect(cells[3]).toContain('失败')
     expect(cells[4]).toBe('118')
     expect(cells[5]).toBe('4')
-    expect(cells[6]).toContain('invalid webhook url')
+    // 第 7 列是**人话版**摘要（U16）：`invalid webhook url` 这种企微原文翻成中文，
+    // 原文一个字不丢、进「详情」（见下面「最后一次错误」那一组用例）。
+    expect(cells[6]).toContain('webhook 地址无效')
   })
 
   it('还没完成的行显示入队时间并标注「未完成」，不会被读成已发送', async () => {
@@ -377,5 +379,117 @@ describe('发送记录 tab 的整行布局（D2）', () => {
     const preview = wrapper.findAll('.card').find((node) => node.text().includes('消息预览'))
     expect(preview).toBeTruthy()
     expect(preview.element.closest('.grid')).toBe(form.element.closest('.grid'))
+  })
+})
+
+// U16：第 7 列「最后一次错误」被 `overflow:hidden` 硬裁、没有展开入口，内容还是英文原文。
+// 现在：行内显示人话摘要，点「详情」展开完整原文（触屏没有 hover，`title` 等于没有）。
+describe('发送记录第 7 列的错误详情（U16）', () => {
+  const RAW = "HTTPSConnectionPool(host='qyapi.weixin.qq.com', port=443): Read timed out. (read timeout=10)"
+
+  async function mountWithError(raw, extra = {}) {
+    return mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+      deliveriesFor: () => ({
+        success: true,
+        rows: [delivery({ status: 'failed', attempts: 3, last_error: raw, ...extra })],
+        total: 1, page: 1, page_size: 50, pages: 1,
+      }),
+    })
+  }
+
+  it('常见错误翻成人话，完整原文默认不显示', async () => {
+    const { wrapper } = await mountWithError(RAW)
+    await openTab(wrapper, '发送记录')
+
+    const table = deliveryTable(wrapper)
+    expect(table.text()).toContain('连接企业微信超时')
+    // 原文只在展开后才出现：默认一行摘要，不是把整段异常栈塞进格子
+    expect(table.text()).not.toContain('HTTPSConnectionPool')
+    const toggle = table.findAll('button').find((node) => node.text() === '详情')
+    expect(toggle, '第 7 列没有展开入口').toBeTruthy()
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+  })
+
+  it('点「详情」行内展开完整错误原文 + 内容摘要，再点收起', async () => {
+    const { wrapper } = await mountWithError(RAW, { content_summary: '【销售报表】2026-10-05' })
+    await openTab(wrapper, '发送记录')
+
+    const table = deliveryTable(wrapper)
+    const toggle = table.findAll('button').find((node) => node.text() === '详情')
+    await toggle.trigger('click')
+
+    const detail = wrapper.find('tr.wp-delivery-detail')
+    expect(detail.exists(), '展开后没有详情行').toBeTruthy()
+    expect(detail.text()).toContain('HTTPSConnectionPool')
+    expect(detail.text()).toContain('Read timed out')
+    expect(detail.text()).toContain('【销售报表】2026-10-05')
+
+    // 「收起」把它收回去（一次只展开一行）
+    const collapse = wrapper.findAll('button').find((node) => node.text() === '收起')
+    expect(collapse).toBeTruthy()
+    await collapse.trigger('click')
+    expect(wrapper.find('tr.wp-delivery-detail').exists()).toBe(false)
+  })
+
+  it('errcode 也翻成人话（企微限流这类最常见的失败）', async () => {
+    const { wrapper } = await mountWithError(
+      '企业微信接口返回 errcode=45009：api freq out of limit，当日调用次数已达上限',
+    )
+    await openTab(wrapper, '发送记录')
+
+    const cell = deliveryTable(wrapper).findAll('tbody tr')[0].findAll('td')[6]
+    expect(cell.text()).toContain('触发企业微信调用频率上限')
+    expect(cell.text()).not.toContain('freq out of limit')
+  })
+
+  it('认不出的错误原样显示 —— 宁可露出英文，也不能把失败原因吞掉', async () => {
+    const { wrapper } = await mountWithError('某种从没见过的新失败')
+    await openTab(wrapper, '发送记录')
+
+    expect(deliveryTable(wrapper).findAll('tbody tr')[0].findAll('td')[6].text())
+      .toContain('某种从没见过的新失败')
+  })
+
+  it('没有错误的行不出现「详情」按钮', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+      deliveriesFor: () => ({
+        success: true,
+        rows: [delivery({ status: 'sent' })],
+        total: 1, page: 1, page_size: 50, pages: 1,
+      }),
+    })
+    await openTab(wrapper, '发送记录')
+
+    expect(deliveryTable(wrapper).findAll('button').map((node) => node.text()))
+      .not.toContain('详情')
+  })
+})
+
+// U2：390 下这张七列表格只能横向拖、关键列被卡片边缘硬切，也没有任何滚动提示。
+// 改法是 ≤700px 时把它切成一行一卡 —— 卡片里的字段名就来自 `data-label`。
+describe('发送记录的卡片式标记（U2）', () => {
+  it('每个值格子都带 data-label，且表格挂上了卡片式类名', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+      deliveriesFor: () => ({
+        success: true,
+        rows: [delivery({ status: 'failed', last_error: 'boom' })],
+        total: 1, page: 1, page_size: 50, pages: 1,
+      }),
+    })
+    await openTab(wrapper, '发送记录')
+
+    const table = deliveryTable(wrapper)
+    expect(table.classes()).toContain('wp-card-table')
+    const labels = table.findAll('tbody tr')[0].findAll('td').map((cell) => cell.attributes('data-label'))
+    expect(labels).toEqual([
+      '时间', '目标渠道', '内容类型', '状态', '字节数', '尝试次数', '最后一次错误',
+    ])
+    expect(table.element.closest('.wp-card-table-wrap'), '滚动容器没挂卡片式的类').toBeTruthy()
   })
 })

@@ -62,6 +62,60 @@ export function deliveryStatusLabel(status) {
   return matched ? matched.name : String(status || '')
 }
 
+/**
+ * 企微群机器人常见 errcode 的人话（UI 走查 U16）。
+ *
+ * 发送记录的「最后一次错误」原来显示的是企微返回的英文原文（`api freq out of limit`）或
+ * Python 异常栈里的一行（`HTTPSConnectionPool(...): Read timed out.`）——那是给排查的人看
+ * 的，不是给店长看的：他要知道的是「要不要做点什么」。原文一个字都不丢，进「详情」。
+ *
+ * 只列**能给出下一步**的那几个码；注册表里没有的码原样显示，不猜。
+ */
+export const WECOM_ERRCODE_HINTS = {
+  40001: 'webhook 地址里的 key 无效或已失效，请重新生成后更新渠道',
+  40003: '企业微信应用 ID 不合法，请联系企业微信管理员',
+  40008: '企业微信不接受这条消息的内容格式',
+  40013: '企业微信应用 ID 不合法，请联系企业微信管理员',
+  40014: '访问凭证已过期，请重新生成',
+  41001: '缺少访问凭证，请重新生成 webhook 地址',
+  45009: '触发企业微信调用频率上限（当天额度用尽），次日或稍后会自动重试',
+  45033: '企业微信并发超限，稍后会自动重试',
+  45047: '企业微信下行消息条数超过上限，稍后会自动重试',
+  93000: '机器人已被移出这个群，或 webhook 已停用，请检查群里还有没有这个机器人',
+}
+
+/**
+ * 认得出但不是 errcode 的那几种失败（网络层最常见）。
+ *
+ * 顺序有意义：先匹配到的先用。
+ */
+export const WECOM_ERROR_PATTERNS = [
+  [/invalid webhook url/i, 'webhook 地址无效，请到「渠道」里重新填写'],
+  [/Read timed out|read timeout|ConnectTimeout|timed out/i, '连接企业微信超时（网络不通或对方响应慢），稍后会自动重试'],
+  [/HTTPSConnectionPool|Connection refused|Max retries exceeded|NewConnectionError|Name or service not known|Temporary failure in name resolution/i, '连不上企业微信服务器（网络或 DNS 问题），稍后会自动重试'],
+]
+
+/** 从错误原文里取 errcode；认不出返回 0。 */
+export function wecomErrcode(text) {
+  const matched = /errcode["'\s]*[=:：]\s*(-?\d+)/i.exec(String(text || ''))
+  return matched ? Number(matched[1]) : 0
+}
+
+/**
+ * 「最后一次错误」在表格里显示的那一句话（UI 走查 U16）。
+ *
+ * 认得出就把原文翻成人话；认不出**原样返回**——宁可让店长看见一行英文，也不能把失败
+ * 原因吞掉（这时行内的「详情」按钮仍然能展开完整原文）。
+ */
+export function deliveryErrorSummary(text) {
+  const raw = String(text || '').trim()
+  if (!raw) return ''
+  const hint = WECOM_ERRCODE_HINTS[wecomErrcode(raw)]
+  if (hint) return hint
+  const matched = WECOM_ERROR_PATTERNS.find(([pattern]) => pattern.test(raw))
+  return matched ? matched[1] : raw
+}
+
 /** 记录里的时间戳按秒显示；没有值就给占位符（空字符串直接渲染会是一片空白）。 */
 export function formatDeliveryTime(value) {
   const raw = String(value || '')
@@ -306,6 +360,51 @@ export function channelTopicNames(channel) {
   return ((channel && channel.topics) || []).map((topic) => topic.name || topic.id).join('、')
 }
 
+/**
+ * 加载失败时给店长看的那一句话（UI 走查 U5）。
+ *
+ * 后端 5xx 的 `detail` 是 FastAPI 的英文原文（`Internal Server Error`），原来被整句透传到
+ * 页顶：「企微推送数据加载失败：Internal Server Error」。这不是店长能读懂、也不是他能处理的
+ * 东西 —— 5xx 一律翻成「服务暂时不可用」+ 重试按钮；4xx 的 `detail` 是后端写好的中文
+ * （「页面已更新，请刷新后重试」这类），照用；网络层在 `api/client.js` 已经翻过中文了。
+ *
+ * 技术原文不丢：进 `loadErrorDetail()`，页面折叠在「详情」里。
+ */
+export function loadErrorMessage(error) {
+  const status = Number((error && error.status) || 0)
+  if (status >= 500) return '服务暂时不可用，请稍后重试'
+  const message = String((error && error.message) || '').trim()
+  return message || '加载失败，请重试'
+}
+
+/**
+ * 加载失败的**技术原文**（页面「详情」里显示）。
+ *
+ * 与 `loadErrorMessage()` 同一个来源、两种用途：一个给人读，一个给排查读。
+ */
+export function loadErrorDetail(error) {
+  if (!error) return ''
+  const status = Number(error.status) || 0
+  const raw = String(error.detail || error.message || '').trim()
+  const parts = []
+  if (status) parts.push(`HTTP ${status}`)
+  if (raw) parts.push(raw)
+  return parts.join(' · ')
+}
+
+/**
+ * 「测试」按钮的确认文案（UI 走查 U6，旧清单 A29 遗留）。
+ *
+ * 这个按钮**一点就真的往门店群里发一条消息**（10-05 的走查真的发进过门店群），而它跟
+ * 「删除」并排、同为 42×24 的小按钮，误点一下的代价是一条撤不回来的群消息。所以确认框
+ * 必须点名目标群、并说清撤不回来 —— 这是点击与外发之间唯一的一道闸门。
+ */
+export function testChannelConfirmText(channel) {
+  const name = String((channel && (channel.name || channel.id)) || '该渠道')
+  return `确定向「${name}」发送一条测试消息吗？\n`
+    + `测试消息会真的发到「${name}」这个群，任何人都无法撤回。`
+}
+
 /** 「最近一次发送成功」的展示串；从未发过就说清这一点（那是渠道失效的第一信号）。 */
 export function formatSentAt(channel) {
   const raw = String((channel && channel.last_sent_at) || '')
@@ -466,6 +565,9 @@ export function useWecomPush() {
   const previewMeta = ref({ bytes: 0, chunkCount: 1 })
   const loading = ref(false)
   const error = ref('')
+  // 加载失败的技术原文（英文 detail / HTTP 状态）：页面上折叠在「详情」里，不进主提示
+  // —— 店长读的是 `error`，排查的人展开看它（UI 走查 U5）。
+  const errorDetail = ref('')
 
   const activeTab = ref('channels')
   const channelForm = reactive(emptyChannelForm())
@@ -596,14 +698,36 @@ export function useWecomPush() {
   async function loadAll() {
     loading.value = true
     error.value = ''
+    errorDetail.value = ''
     try {
       await loadMeta()
       await loadChannels()
       await loadJobs()
     } catch (e) {
-      error.value = e.message || '加载失败'
+      setLoadError(e)
     } finally {
       loading.value = false
+    }
+  }
+
+  /** 记一次加载失败：人话进 `error`，原文进 `errorDetail`（两处都由上面两个函数定口径）。 */
+  function setLoadError(e) {
+    error.value = loadErrorMessage(e)
+    errorDetail.value = loadErrorDetail(e)
+  }
+
+  /**
+   * 页顶错误条上的「重试」：三份首屏数据与发送记录一起重拉。
+   *
+   * 发送记录是另一条请求（另一套分页），它失败时**不覆盖** `loadAll` 已经给出的那条 ——
+   * 两条都挂的时候，先说出口的那条更贴首屏（也是店长正在看的那一块）。
+   */
+  async function reloadAll() {
+    await loadAll()
+    try {
+      await loadDeliveries()
+    } catch (e) {
+      if (!error.value) setLoadError(e)
     }
   }
 
@@ -881,11 +1005,11 @@ export function useWecomPush() {
 
   return {
     meta, channels, topics, groups, jobs, matrix, deliveries, audit,
-    selectedJobId, previewContent, previewMeta, loading, error,
+    selectedJobId, previewContent, previewMeta, loading, error, errorDetail,
     activeTab, channelForm, channelGroupForm, multiSelect,
     contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
     resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
-    loadAll, loadMeta, loadChannels, loadSubscriptions, loadChannelGroups, loadJobs,
+    loadAll, reloadAll, loadMeta, loadChannels, loadSubscriptions, loadChannelGroups, loadJobs,
     loadDeliveries, applyDeliveryFilters,
     loadAuditLog, applyAuditFilters,
     editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,

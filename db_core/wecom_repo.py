@@ -146,6 +146,11 @@ class _WecomRepoMixin:
         任务只描述「内容类型 + 参数 + 时间」（票 08）：收件人由推送订阅决定，所以
         `webhook_id` / `push_type` / `date_range_mode` / `station` 这几列**不再被读**——
         它们连同旧值一起留在表里只读（回滚与排查的依据，见迁移 0018）。
+
+        **排序按 `id`，不按 `schedule_time`**（UI 走查 U1）：按时间排的话，改完某条任务的
+        推送时间并保存，这张卡会当场跳到列表别的位置 —— 店长会以为刚编辑的任务没了，按位置
+        再点一次「编辑」就改到了另一条任务上（走查脚本真的这么把 21:30 写进了另一条任务）。
+        推送时间照旧显示在卡片上，列表顺序只跟创建顺序走，保存前后不会动。
         """
         try:
             tdb = self._connection.table("wecom_push_jobs")
@@ -156,7 +161,7 @@ class _WecomRepoMixin:
             if not include_disabled:
                 sql += " WHERE enabled = ?"
                 params.append(1)
-            sql += " ORDER BY schedule_time ASC, id ASC"
+            sql += " ORDER BY id ASC"
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(sql, params)
                 rows = await cursor.fetchall()

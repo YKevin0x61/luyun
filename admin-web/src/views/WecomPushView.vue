@@ -1,11 +1,11 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, scheduledTopics,
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
-  canSendNow, sendNowConfirmText, DELIVERY_STATUS_OPTIONS, deliveryStatusLabel,
-  formatDeliveryTime, auditActionLabel, auditObjectLabel, auditVisibleFields,
-  auditChangeText,
+  canSendNow, sendNowConfirmText, testChannelConfirmText, DELIVERY_STATUS_OPTIONS,
+  deliveryStatusLabel, deliveryErrorSummary, formatDeliveryTime, auditActionLabel,
+  auditObjectLabel, auditVisibleFields, auditChangeText,
 } from '../composables/useWecomPush'
 import SvgIcon from '../components/SvgIcon.vue'
 import PushParamsForm from '../components/wecom/PushParamsForm.vue'
@@ -22,11 +22,13 @@ const TABS = [
 
 const {
   meta, channels, topics, groups, jobs, matrix, deliveries, audit, selectedJobId,
-  previewContent, previewMeta, error, activeTab, channelForm, channelGroupForm,
-  multiSelect, contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
+  previewContent, previewMeta, loading, error, errorDetail, activeTab, channelForm,
+  channelGroupForm, multiSelect, contractWarning, zeroSubscriptionTip, viewMode,
+  zeroTopicIds,
   resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
-  loadAll, loadSubscriptions, loadJobs, loadDeliveries, applyDeliveryFilters,
-  loadChannels, loadAuditLog, applyAuditFilters,
+  // `loadAll` 不再直接调：首屏与「重试」都走 `reloadAll`（它还负责把发送记录一页带上）。
+  reloadAll, loadSubscriptions, loadJobs, loadDeliveries,
+  applyDeliveryFilters, loadChannels, loadAuditLog, applyAuditFilters,
   editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,
   editChannelGroup, saveChannelGroup, deleteChannelGroup,
   addGroupMember, removeGroupMember,
@@ -42,6 +44,21 @@ function flash(msg, type = 'info') {
   toastMsg.value = msg
   toastType.value = type
   setTimeout(() => { if (toastMsg.value === msg) toastMsg.value = '' }, 3000)
+}
+
+/**
+ * 渠道 / 群组两块数据的加载态（UI 走查 U4）。
+ *
+ * `loading` 一为真就说明首屏数据还没回来：这时**不能**渲染「0 个 / 暂无渠道」那种空态文案
+ * —— 那是"确实没有"，与"还没拿到"是两件事，店长按前者就会去新建一个已经存在的渠道。
+ * 判据带上 `!length`：重试时已经有旧数据在屏幕上，这时再闪骨架反而更乱。
+ */
+const channelsLoading = computed(() => loading.value && !channels.value.length)
+const groupsLoading = computed(() => loading.value && !groups.value.length)
+
+/** 页顶错误条上的「重试」：三份首屏数据 + 发送记录一起重拉（口径在 composable 里）。 */
+async function handleRetryLoad() {
+  await reloadAll()
 }
 
 // 发送记录（票 07）：筛选控件是**本地草稿**，点「筛选」才写回 composable 并回第一页。
@@ -155,6 +172,33 @@ function topicHasPhotos(row) {
   return !!row.contains_employee_photos
 }
 
+// 矩阵加载态（U4）：与渠道 / 群组同一套判据，理由见上面 channelsLoading 的注释。
+const subscriptionsLoading = computed(() => loading.value && !matrixRows.value.length)
+
+/**
+ * 矩阵格子的可访问名（U3）。
+ *
+ * 每一格原来只有一个 16×16 的勾选框、`<td>` 自己不可点，读屏读到的也只是「复选框」——
+ * 既不知道是哪一类内容、也不知道发给哪个群。名字就说这两件事，勾选态由 `aria-checked` 给。
+ */
+function matrixCellLabel(row, channel) {
+  return `${row.name} 发给 ${channel.name}`
+}
+function matrixCellId(row, channel) {
+  return `wp-matrix-${row.id}-${channel.id}`
+}
+/**
+ * 点矩阵格子（U3）：整格都是热区。
+ *
+ * 勾选框自己那一路（指针点在框上、或键盘 Space/Enter 触发原生 click）会由 CheckboxRoot
+ * 处理并抛出 `update:model-value`，事件再冒泡到这里 —— 不按 target 挡掉的话一次点击会切
+ * 两下（勾上又取消），所以这里只接管"点在格子空白处"的那些点击。
+ */
+function handleMatrixCellClick(row, channel, event) {
+  if (event.target && event.target.closest && event.target.closest('.luyun-checkbox')) return
+  handleToggleSubscription(row, channel)
+}
+
 async function handleSaveChannel() {
   try {
     await saveChannel()
@@ -174,9 +218,11 @@ async function handleToggleChannel(item) {
     flash(item.enabled ? `已停用「${item.name}」` : `已启用「${item.name}」`, 'success')
   } catch (e) { flash(e.message, 'error') }
 }
-async function handleTestChannel(id) {
+async function handleTestChannel(item) {
+  // 一点就真外发（旧清单 A29 真发进过门店群）：确认框是唯一一道闸门，文案点名目标群。
+  if (!window.confirm(testChannelConfirmText(item))) return
   try {
-    const result = await testChannel(id)
+    const result = await testChannel(item.id)
     flash(result.success ? '测试消息已发送' : `测试失败：${result.error || result.response_text}`, result.success ? 'success' : 'error')
   } catch (e) { flash(e.message, 'error') }
 }
@@ -227,6 +273,54 @@ async function handleSaveMultiSelect() {
     flash(`订阅已保存（${parts.join('、')}），下一次触发即按新订阅投递`, 'success')
   } catch (e) { flash(e.message, 'error') }
 }
+/**
+ * 保存任务后把这张卡"点"一下（UI 走查 U1）。
+ *
+ * 列表按 id 稳定排序（后端 `wecom_jobs_all`），所以保存不会换位；但这条 tab 上还有别的
+ * 卡片与滚动，店长刚点完「保存任务」得能一眼确认**哪张卡被改了**、改成了什么。短时高亮
+ * 把它标出来，`scrollIntoView` 保证它在视口里（长列表里保存的那张可能正在屏幕外）。
+ *
+ * 高亮是"刚发生的事"，2.4 秒后自己退掉 —— 常驻的话就变成了另一种选中态，与卡片本来
+ * 就有的选中边框分不开。
+ */
+const flashJobId = ref(null)
+/**
+ * 任务卡的 DOM 引用（按 id）。用普通 Map 而不是响应式对象：函数式 ref 每次重渲染都会
+ * 被调一次，写进响应式状态会自己触发下一轮渲染。
+ */
+const jobCards = new Map()
+function setJobCardRef(id) {
+  return (el) => {
+    if (el) jobCards.set(id, el)
+    else jobCards.delete(id)
+  }
+}
+let flashTimer = null
+function flashSavedJob(id) {
+  if (!id) return
+  flashJobId.value = id
+  clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => { flashJobId.value = null }, 2400)
+  nextTick(() => {
+    const card = jobCards.get(id)
+    // jsdom 没有 scrollIntoView；真机上滚动失败也不该影响保存这条路。
+    if (card && typeof card.scrollIntoView === 'function') {
+      card.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  })
+}
+onBeforeUnmount(() => {
+  clearTimeout(flashTimer)
+  jobCards.clear()
+})
+
+// 发送记录的「最后一次错误」：展开看完整原文（U16）。一次只展开一行 —— 一屏几十行里
+// 同时摊开多条错误，反而看不出哪一行是哪一条。
+const expandedDeliveryId = ref(null)
+function toggleDeliveryDetail(id) {
+  expandedDeliveryId.value = expandedDeliveryId.value === id ? null : id
+}
+
 async function handleSaveJob() {
   // 名称必填：点击保存这条路不经过原生表单校验（见按钮上的 `.prevent`），这里补上 ——
   // 否则能存出一条没有名字的任务。
@@ -236,6 +330,7 @@ async function handleSaveJob() {
   }
   try {
     await saveJob()
+    flashSavedJob(selectedJobId.value)
     flash('推送任务已保存', 'success')
   } catch (e) { flash(e.message, 'error') }
 }
@@ -287,19 +382,25 @@ function handleApplyPreset(topicId) {
 }
 
 onMounted(async () => {
-  await loadAll()
-  // 发送记录另拉一页（带分页与总数，和 loadAll 里的「最近 N 条」不是一回事）。
-  try {
-    await loadDeliveries()
-  } catch (e) {
-    if (!error.value) error.value = e.message || '发送记录加载失败'
-  }
+  // 首屏三份数据（meta / 渠道 / 任务）+ 发送记录一页一起拉；失败的落点与「重试」按钮
+  // 走同一条路（composable 的 reloadAll），页面只管展示 `error` / `errorDetail`。
+  await reloadAll()
 })
 </script>
 
 <template>
   <div style="display:flex;flex-direction:column;gap:12px">
-    <div v-if="error" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> 企微推送数据加载失败：{{ error }}</div>
+    <!-- 加载失败：只给人话 + 重试，技术原文折叠进「详情」（U5）。后端 5xx 的 detail 是
+         英文的 `Internal Server Error`，直接透传给店长等于没说。 -->
+    <div v-if="error" class="dash-error-banner wp-load-error">
+      <SvgIcon name="alert-triangle" :size="14" />
+      <span class="wp-load-error__text">企微推送数据加载失败：{{ error }}</span>
+      <button class="btn btn-sm" type="button" @click="handleRetryLoad">重试</button>
+      <details v-if="errorDetail && errorDetail !== error" class="wp-load-error__detail">
+        <summary>详情</summary>
+        <pre>{{ errorDetail }}</pre>
+      </details>
+    </div>
     <!-- 接口版本不匹配：只提示，不阻断操作（旧页面照样能读，写接口由后端把关） -->
     <div v-if="contractWarning" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ contractWarning }}</div>
     <!-- 零订阅：这类内容当前一条都不发，页面上不写出来店长只会以为"今天没有" -->
@@ -332,7 +433,10 @@ onMounted(async () => {
         <div class="card">
           <div class="panel-title" style="display:flex;justify-content:space-between">
             <span>渠道</span>
-            <span style="color:var(--text-dim);font-size:12px">{{ channels.length }} 个</span>
+            <!-- 数据没回来时说「加载中…」，不说「0 个」——后者是"确实一个都没有"（U4）。 -->
+            <span style="color:var(--text-dim);font-size:12px">
+              {{ channelsLoading ? '加载中…' : `${channels.length} 个` }}
+            </span>
           </div>
           <form @submit.prevent="handleSaveChannel" style="display:flex;flex-direction:column;gap:10px">
             <div class="badge" :style="isEditingChannel ? 'color:var(--yellow);border-color:var(--yellow)' : ''">
@@ -340,16 +444,16 @@ onMounted(async () => {
               <button v-if="isEditingChannel" type="button" class="btn btn-sm" style="margin-left:8px" @click="resetChannelForm">取消编辑</button>
             </div>
             <div class="form-row">
-              <label>名称</label>
-              <input class="input" v-model="channelForm.name" placeholder="例如：管理群日报" maxlength="60" required />
+              <label for="wp-channel-name">名称</label>
+              <input id="wp-channel-name" class="input" v-model="channelForm.name" placeholder="例如：管理群日报" maxlength="60" required />
             </div>
             <div class="form-row">
-              <label>Webhook 地址</label>
-              <input class="input" v-model="channelForm.webhook_url" :placeholder="isEditingChannel ? '留空表示不更换地址' : 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...'" maxlength="500" />
+              <label for="wp-channel-url">Webhook 地址</label>
+              <input id="wp-channel-url" class="input" v-model="channelForm.webhook_url" :placeholder="isEditingChannel ? '留空表示不更换地址' : 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...'" maxlength="500" />
             </div>
             <div class="form-row">
-              <label>备注</label>
-              <textarea class="input" v-model="channelForm.notes" maxlength="200" placeholder="可选" style="min-height:74px;resize:vertical"></textarea>
+              <label for="wp-channel-notes">备注</label>
+              <textarea id="wp-channel-notes" class="input" v-model="channelForm.notes" maxlength="200" placeholder="可选" style="min-height:74px;resize:vertical"></textarea>
             </div>
             <div class="form-row">
               <label>所属群组（可多选）</label>
@@ -376,7 +480,12 @@ onMounted(async () => {
           </form>
 
           <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
-            <div v-if="!channels.length" class="empty-state">暂无渠道</div>
+            <div v-if="channelsLoading" class="wp-skeleton" role="status" aria-live="polite" aria-label="正在加载渠道">
+              <span class="wp-skeleton__line"></span>
+              <span class="wp-skeleton__line"></span>
+              <span class="wp-skeleton__line wp-skeleton__line--short"></span>
+            </div>
+            <div v-else-if="!channels.length" class="empty-state">暂无渠道</div>
             <div v-for="item in channels" :key="item.id" class="card wp-hook-card" style="padding:10px">
               <div class="wp-hook-head">
                 <strong class="wp-hook-name">{{ item.name }}</strong>
@@ -399,7 +508,7 @@ onMounted(async () => {
               <div style="display:flex;gap:6px;margin-top:8px">
                 <button class="btn btn-sm" @click="editChannel(item)">编辑</button>
                 <button class="btn btn-sm" @click="handleToggleChannel(item)">{{ item.enabled ? '停用' : '启用' }}</button>
-                <button class="btn btn-sm" @click="handleTestChannel(item.id)">测试</button>
+                <button class="btn btn-sm" @click="handleTestChannel(item)">测试</button>
                 <button class="btn btn-sm btn-danger" @click="handleDeleteChannel(item)">删除</button>
               </div>
             </div>
@@ -412,7 +521,9 @@ onMounted(async () => {
         <div class="card">
           <div class="panel-title" style="display:flex;justify-content:space-between">
             <span>渠道群组</span>
-            <span style="color:var(--text-dim);font-size:12px">{{ groups.length }} 个</span>
+            <span style="color:var(--text-dim);font-size:12px">
+              {{ groupsLoading ? '加载中…' : `${groups.length} 个` }}
+            </span>
           </div>
           <p style="color:var(--text-dim);font-size:12px;margin:0 0 8px">
             群组是可以整体订阅的一组渠道；一个渠道可以同时属于多个群组。停用群组只暂停这一组的订阅，
@@ -424,12 +535,12 @@ onMounted(async () => {
               <button v-if="isEditingGroup" type="button" class="btn btn-sm" style="margin-left:8px" @click="resetChannelGroupForm">取消编辑</button>
             </div>
             <div class="form-row">
-              <label>群组名称</label>
-              <input class="input" v-model="channelGroupForm.name" maxlength="60" placeholder="例如：日报群组" required />
+              <label for="wp-group-name">群组名称</label>
+              <input id="wp-group-name" class="input" v-model="channelGroupForm.name" maxlength="60" placeholder="例如：日报群组" required />
             </div>
             <div class="form-row">
-              <label>备注</label>
-              <input class="input" v-model="channelGroupForm.notes" maxlength="200" placeholder="可选" />
+              <label for="wp-group-notes">备注</label>
+              <input id="wp-group-notes" class="input" v-model="channelGroupForm.notes" maxlength="200" placeholder="可选" />
             </div>
             <label class="luyun-check-row">
               <LuyunCheckbox v-model="channelGroupForm.enabled" /> 启用
@@ -441,7 +552,11 @@ onMounted(async () => {
           </form>
 
           <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
-            <div v-if="!groups.length" class="empty-state">暂无群组</div>
+            <div v-if="groupsLoading" class="wp-skeleton" role="status" aria-live="polite" aria-label="正在加载群组">
+              <span class="wp-skeleton__line"></span>
+              <span class="wp-skeleton__line wp-skeleton__line--short"></span>
+            </div>
+            <div v-else-if="!groups.length" class="empty-state">暂无群组</div>
             <div v-for="item in groups" :key="item.id" class="card" style="padding:10px">
               <div class="wp-hook-head">
                 <strong class="wp-hook-name">{{ item.name }}</strong>
@@ -477,40 +592,62 @@ onMounted(async () => {
         <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>订阅：哪类内容发给哪些渠道</span>
           <span style="color:var(--text-dim);font-size:12px">
-            {{ matrixColumns.length }} 个渠道 · {{ matrixRows.length }} 类内容
+            {{ subscriptionsLoading ? '加载中…' : `${matrixColumns.length} 个渠道 · ${matrixRows.length} 类内容` }}
           </span>
         </div>
 
         <!-- 渠道不超过阈值：内容 × 渠道的勾选矩阵 -->
         <template v-if="!isMultiSelectView">
-          <p v-if="!matrixColumns.length" class="empty-state">还没有渠道。先到「渠道」tab 新增一个。</p>
-          <div v-else class="data-table-wrap luyun-scrollbar" style="max-height:520px">
-            <table class="data-table wp-matrix">
-              <thead>
-                <tr>
-                  <th style="cursor:default">内容类型</th>
-                  <th v-for="channel in matrixColumns" :key="channel.id" style="cursor:default">
-                    {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用）</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in matrixRows" :key="row.id" :class="{ 'wp-matrix-zero': zeroTopicIds.includes(row.id) }">
-                  <td>
-                    <strong>{{ row.name }}</strong>
-                    <span v-if="topicHasPhotos(row)" class="badge" style="margin-left:6px;color:var(--cyan);border-color:var(--cyan)">含员工实拍照片</span>
-                    <div v-if="zeroTopicIds.includes(row.id)" style="color:var(--yellow);font-size:11px">零订阅：当前不会发出</div>
-                  </td>
-                  <td v-for="channel in matrixColumns" :key="channel.id" style="text-align:center">
-                    <LuyunCheckbox
-                      :model-value="topicSubscribed(row.id, channel.id)"
-                      @update:model-value="() => handleToggleSubscription(row, channel)"
-                    />
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div v-if="subscriptionsLoading" class="wp-skeleton" role="status" aria-live="polite" aria-label="正在加载订阅">
+            <span class="wp-skeleton__line"></span>
+            <span class="wp-skeleton__line"></span>
+            <span class="wp-skeleton__line wp-skeleton__line--short"></span>
           </div>
+          <p v-else-if="!matrixColumns.length" class="empty-state">还没有渠道。先到「渠道」tab 新增一个。</p>
+          <template v-else>
+            <!-- 窄屏只有这条横向滚动的表格（发送记录 / 变更历史都改成了卡片）：没有提示
+                 的话「右边还有渠道」是看不出来的（U2）。桌面档整张表摆得下，不显示。 -->
+            <p class="wp-scroll-hint">表格可左右滑动，查看其余渠道 →</p>
+            <div class="data-table-wrap wp-matrix-wrap luyun-scrollbar" style="max-height:520px">
+              <table class="data-table wp-matrix">
+                <thead>
+                  <tr>
+                    <th style="cursor:default">内容类型</th>
+                    <th v-for="channel in matrixColumns" :key="channel.id" style="cursor:default">
+                      {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用）</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in matrixRows" :key="row.id" :class="{ 'wp-matrix-zero': zeroTopicIds.includes(row.id) }">
+                    <td>
+                      <strong>{{ row.name }}</strong>
+                      <span v-if="topicHasPhotos(row)" class="badge" style="margin-left:6px;color:var(--cyan);border-color:var(--cyan)">含员工实拍照片</span>
+                      <div v-if="zeroTopicIds.includes(row.id)" style="color:var(--yellow);font-size:11px">零订阅：当前不会发出</div>
+                    </td>
+                    <!-- 整格都是热区（U3）：原来只有 16×16 的勾选框可点，矩阵 64 格实测 192 次
+                         点空。格子里留一个 ≥44×44 的命中区，点击由整格接管；勾选框自己是
+                         可聚焦的按钮，键盘 Space/Enter 照旧可切（见 handleMatrixCellClick）。 -->
+                    <td
+                      v-for="channel in matrixColumns"
+                      :key="channel.id"
+                      class="wp-matrix-cell"
+                      @click="handleMatrixCellClick(row, channel, $event)"
+                    >
+                      <span class="wp-matrix-hit">
+                        <LuyunCheckbox
+                          :id="matrixCellId(row, channel)"
+                          :model-value="topicSubscribed(row.id, channel.id)"
+                          :aria-label="matrixCellLabel(row, channel)"
+                          @update:model-value="() => handleToggleSubscription(row, channel)"
+                        />
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
         </template>
 
         <!-- 渠道超过阈值：先选内容、再勾群（手机上可点） -->
@@ -579,15 +716,16 @@ onMounted(async () => {
           </div>
           <form @submit.prevent="handleSaveJob" style="display:flex;flex-direction:column;gap:10px">
             <div class="form-row">
-              <label>任务名称</label>
-              <input class="input" v-model="jobForm.name" maxlength="60" required />
+              <label for="wp-job-name">任务名称</label>
+              <input id="wp-job-name" class="input" v-model="jobForm.name" maxlength="60" required />
             </div>
             <!-- 内容类型下拉来自 `/meta` 的注册表，只列**支持定时触发**的（票 08）：事件类
                  内容没有定时侧、也就没有表单参数，不能建成任务。收件人不再由任务指定 ——
                  它由该内容类型的订阅决定。 -->
             <div class="form-row">
-              <label>内容类型</label>
+              <label for="wp-job-topic">内容类型</label>
               <select
+                id="wp-job-topic"
                 class="select"
                 :value="jobForm.topic_id"
                 @change="handlePickJobTopic($event.target.value)"
@@ -612,8 +750,8 @@ onMounted(async () => {
               {{ jobTopics.length ? '选择内容类型后，这里出现它的参数。' : '注册表里还没有支持定时触发的内容类型。' }}
             </div>
             <div class="form-row">
-              <label>备注</label>
-              <textarea class="input" v-model="jobForm.notes" maxlength="200" placeholder="可选" style="min-height:74px;resize:vertical"></textarea>
+              <label for="wp-job-notes">备注</label>
+              <textarea id="wp-job-notes" class="input" v-model="jobForm.notes" maxlength="200" placeholder="可选" style="min-height:74px;resize:vertical"></textarea>
             </div>
             <label class="luyun-check-row">
               <LuyunCheckbox v-model="jobForm.enabled" /> 启用定时推送
@@ -637,10 +775,16 @@ onMounted(async () => {
 
           <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
             <div v-if="!jobs.length" class="empty-state">暂无推送任务</div>
+            <!-- 卡片顺序 = 后端给的顺序，**按 id 稳定排**（`wecom_jobs_all` 的 ORDER BY id）：
+                 推送时间只显示在卡上，不参与排序 —— 改完时间保存后这张卡不会跳到别处（U1），
+                 按位置连点「编辑」也就不会改到另一条任务上。 -->
             <div
               v-for="item in jobs"
               :key="item.id"
-              class="card"
+              :ref="setJobCardRef(item.id)"
+              class="card wp-job-card"
+              :class="{ 'is-saved': flashJobId === item.id }"
+              :data-job-id="item.id"
               style="padding:10px;cursor:pointer"
               :style="selectedJobId === item.id ? 'border-color:var(--accent)' : ''"
               @click="selectedJobId = item.id"
@@ -672,11 +816,14 @@ onMounted(async () => {
             <span>消息预览</span>
             <div style="display:flex;gap:6px">
               <button class="btn btn-sm" @click="handlePreview">刷新预览</button>
+              <!-- 禁用态（U8）：原来是绿底 + `opacity:.5`，看着仍是最显眼的主按钮，而预览
+                   空着时点它没有任何可核对的内容。现在禁用就是灰底（.wp-send-now:disabled），
+                   `title` 也说清"差哪一步"—— 进 tab 时任务已经默认选中，再写"先选择任务"
+                   与卡片右上角的「当前任务：…」自相矛盾。 -->
               <button
-                class="btn btn-sm"
-                style="background:var(--green);border-color:var(--green);color:#fff"
+                class="btn btn-sm wp-send-now"
                 :disabled="!sendReady"
-                :title="sendReady ? '发送前会再确认一次' : '先选择任务并刷新预览'"
+                :title="sendReady ? '发送前会再确认一次' : '点「刷新预览」后可发送'"
                 @click="handleSend"
               >立即发送</button>
               <button class="btn btn-sm" @click="copyPreview">复制</button>
@@ -689,8 +836,10 @@ onMounted(async () => {
             </span>
           </div>
           <textarea
+            id="wp-job-preview"
             class="input"
             readonly
+            aria-label="消息预览内容"
             :value="previewContent"
             placeholder="选择任务后点击刷新预览"
             style="min-height:280px;width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap"
@@ -712,11 +861,12 @@ onMounted(async () => {
         </span>
       </div>
 
-      <!-- 筛选：内容类型（来自 /meta 注册表）/ 渠道 / 状态 + 分页 -->
+      <!-- 筛选：内容类型（来自 /meta 注册表）/ 渠道 / 状态 + 分页。三个下拉是同一排的
+           筛选控件、没有各自的可见标签，用 aria-label 给程序化名称（U10）。 -->
       <div class="wp-delivery-filters">
         <div class="form-row">
           <label>内容类型</label>
-          <select class="select" v-model="deliveryFilterForm.topicId">
+          <select class="select" aria-label="按内容类型筛选" v-model="deliveryFilterForm.topicId">
             <option value="">全部内容类型</option>
             <option v-for="item in deliveryTopicOptions" :key="item.id" :value="item.id">
               {{ item.name }}
@@ -725,7 +875,7 @@ onMounted(async () => {
         </div>
         <div class="form-row">
           <label>目标渠道</label>
-          <select class="select" v-model="deliveryFilterForm.channelId">
+          <select class="select" aria-label="按目标渠道筛选" v-model="deliveryFilterForm.channelId">
             <option value="">全部渠道</option>
             <option v-for="item in channels" :key="item.id" :value="item.id">
               {{ item.name }}{{ item.enabled ? '' : '（停用）' }}
@@ -734,7 +884,7 @@ onMounted(async () => {
         </div>
         <div class="form-row">
           <label>状态</label>
-          <select class="select" v-model="deliveryFilterForm.status">
+          <select class="select" aria-label="按状态筛选" v-model="deliveryFilterForm.status">
             <option value="">全部状态</option>
             <option v-for="item in deliveryStatusOptions" :key="item.id" :value="item.id">
               {{ item.name }}
@@ -752,8 +902,9 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div class="data-table-wrap luyun-scrollbar" style="max-height:420px">
-        <table class="data-table wp-delivery-table">
+      <!-- ≤700px 这张七列表格会切成一行一卡（U2）：`data-label` 就是卡片里的字段名。 -->
+      <div class="data-table-wrap wp-card-table-wrap luyun-scrollbar" style="max-height:420px">
+        <table class="data-table wp-card-table wp-delivery-table">
           <thead>
             <tr>
               <th style="cursor:default">时间</th>
@@ -771,32 +922,54 @@ onMounted(async () => {
                 {{ deliveryFiltered ? '没有符合条件的记录，可换个筛选条件或清空筛选' : '暂无发送记录' }}
               </td>
             </tr>
-            <tr
-              v-for="item in deliveries.rows"
-              :key="item.id"
-              :class="{ 'wp-delivery-failed': item.status === 'failed' }"
-            >
-              <td style="white-space:nowrap">
-                {{ formatDeliveryTime(item.finished_at || item.created_at) }}
-                <span v-if="!item.finished_at" style="color:var(--text-dim);font-size:11px">（未完成，这是入队时间）</span>
-              </td>
-              <td>{{ item.channel_name || (item.channel_id ? `#${item.channel_id}` : '渠道已删除') }}</td>
-              <td>{{ item.topic_name }}</td>
-              <td>
-                <span
-                  class="badge"
-                  :style="item.status === 'sent'
-                    ? 'color:var(--green);border-color:var(--green)'
-                    : (item.status === 'failed' ? 'color:var(--red);border-color:var(--red)' : '')"
-                >{{ deliveryStatusLabel(item.status) }}</span>
-              </td>
-              <td>{{ item.message_bytes }}</td>
-              <td>{{ item.attempts }}</td>
-              <td
-                style="color:var(--text-dim);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-                :title="item.last_error || item.content_summary"
-              >{{ item.last_error }}</td>
-            </tr>
+            <template v-for="item in deliveries.rows" :key="item.id">
+              <tr :class="{ 'wp-delivery-failed': item.status === 'failed' }">
+                <!-- 时间不换行是全局 `table.data-table td` 就有的（桌面档），这里不再写内联：
+                     内联的 nowrap 在 ≤700px 的卡片式里会把这一格顶出横向滚动。 -->
+                <td data-label="时间">
+                  {{ formatDeliveryTime(item.finished_at || item.created_at) }}
+                  <span v-if="!item.finished_at" style="color:var(--text-dim);font-size:11px">（未完成，这是入队时间）</span>
+                </td>
+                <td data-label="目标渠道">{{ item.channel_name || (item.channel_id ? `#${item.channel_id}` : '渠道已删除') }}</td>
+                <td data-label="内容类型">{{ item.topic_name }}</td>
+                <td data-label="状态">
+                  <span
+                    class="badge"
+                    :style="item.status === 'sent'
+                      ? 'color:var(--green);border-color:var(--green)'
+                      : (item.status === 'failed' ? 'color:var(--red);border-color:var(--red)' : '')"
+                  >{{ deliveryStatusLabel(item.status) }}</span>
+                </td>
+                <td data-label="字节数">{{ item.message_bytes }}</td>
+                <td data-label="尝试次数">{{ item.attempts }}</td>
+                <!-- 第 7 列（U16）：这里原来 `overflow:hidden` 硬裁、没有展开入口，而失败原因
+                     正是这一页最需要读的东西。现在显示人话版摘要，「详情」展开完整原文，
+                     触屏（没有 hover）也读得到。 -->
+                <td data-label="最后一次错误" class="wp-delivery-error">
+                  <template v-if="item.last_error">
+                    <span class="wp-delivery-error__text">{{ deliveryErrorSummary(item.last_error) }}</span>
+                    <button
+                      class="btn btn-sm wp-delivery-error__toggle"
+                      type="button"
+                      :aria-expanded="expandedDeliveryId === item.id"
+                      @click.stop="toggleDeliveryDetail(item.id)"
+                    >{{ expandedDeliveryId === item.id ? '收起' : '详情' }}</button>
+                  </template>
+                  <span v-else style="color:var(--text-dim)">—</span>
+                </td>
+              </tr>
+              <tr v-if="expandedDeliveryId === item.id" class="wp-delivery-detail">
+                <td colspan="7">
+                  <div class="wp-error-full">
+                    <div class="wp-error-full__title">最后一次错误（原文）</div>
+                    <pre class="wp-error-full__raw">{{ item.last_error }}</pre>
+                    <div v-if="item.content_summary" class="wp-error-full__meta">
+                      内容摘要：{{ item.content_summary }}
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
@@ -840,7 +1013,7 @@ onMounted(async () => {
       <div class="wp-audit-filters">
         <div class="form-row">
           <label>对象类型</label>
-          <select class="select" v-model="auditFilterForm.objectType">
+          <select class="select" aria-label="按对象类型筛选" v-model="auditFilterForm.objectType">
             <option value="">全部对象类型</option>
             <option v-for="item in audit.objectTypes" :key="item.id" :value="item.id">
               {{ item.name }}
@@ -858,8 +1031,8 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div class="data-table-wrap luyun-scrollbar" style="max-height:520px">
-        <table class="data-table wp-audit-table">
+      <div class="data-table-wrap wp-card-table-wrap luyun-scrollbar" style="max-height:520px">
+        <table class="data-table wp-card-table wp-audit-table">
           <thead>
             <tr>
               <th style="cursor:default">时间</th>
@@ -876,9 +1049,9 @@ onMounted(async () => {
               </td>
             </tr>
             <tr v-for="item in audit.rows" :key="item.id">
-              <td style="white-space:nowrap">{{ formatDeliveryTime(item.created_at) }}</td>
-              <td>{{ item.actor || '（未知）' }}</td>
-              <td>
+              <td data-label="时间">{{ formatDeliveryTime(item.created_at) }}</td>
+              <td data-label="操作人">{{ item.actor || '（未知）' }}</td>
+              <td data-label="操作">
                 <!-- 动作的颜色是给人扫的：停用 / 删除是"少了一个收件人"的两种，红色。 -->
                 <span
                   class="badge"
@@ -887,11 +1060,11 @@ onMounted(async () => {
                     : (item.action === 'disable' ? 'color:var(--yellow);border-color:var(--yellow)' : '')"
                 >{{ auditActionLabel(item.action) }}</span>
               </td>
-              <td>
+              <td data-label="对象">
                 <div>{{ auditObjectLabel(item.object_type) }}</div>
                 <div style="color:var(--text-dim);font-size:12px">{{ item.object_name }}</div>
               </td>
-              <td>
+              <td data-label="变更内容">
                 <div
                   v-for="(line, index) in auditChanges(item)"
                   :key="index"
@@ -1060,4 +1233,188 @@ onMounted(async () => {
 /* 变更内容那一列是「改前 → 改后」的逐行文本：允许换行，别把表格撑出横向滚动。 */
 :deep(.data-table.wp-audit-table td) { vertical-align: top; }
 :deep(.data-table.wp-audit-table td:nth-child(5)) { white-space: normal; min-width: 200px; }
+
+/* ══ U4 · 加载态 ═══════════════════════════════════════════════════════════
+   数据没回来时显示骨架，不显示「0 个 / 暂无渠道」那种空态文案 —— 后者是"确实没有"。
+   类名里带 skeleton：真机走查按 `loading|skeleton|spinner|加载中` 统计加载中的可见节点。 */
+.wp-skeleton { display: flex; flex-direction: column; gap: 8px; padding: 10px 0; }
+.wp-skeleton__line {
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--card2), var(--border), var(--card2));
+  background-size: 200% 100%;
+  animation: wp-skeleton-shine 1.4s ease-in-out infinite;
+}
+.wp-skeleton__line--short { width: 45%; }
+@keyframes wp-skeleton-shine {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wp-skeleton__line { animation: none; }
+}
+
+/* ══ U5 · 加载失败提示条 ═══════════════════════════════════════════════════
+   人话（`error`）在明面上、技术原文折叠在「详情」里，旁边一个「重试」。 */
+.wp-load-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.wp-load-error__text { flex: 1 1 220px; }
+.wp-load-error__detail { flex: 1 1 100%; font-size: 11px; }
+.wp-load-error__detail summary { cursor: pointer; color: var(--text-dim); }
+.wp-load-error__detail pre {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--card2);
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ══ U8 · 「立即发送」的禁用态 ═════════════════════════════════════════════
+   原来禁用只靠全局 `.btn:disabled{opacity:.5}`：绿底透出来仍是最显眼的主按钮。禁用
+   就该是灰的，可点才上绿。 */
+.wp-send-now { background: var(--green); border-color: var(--green); color: #fff; }
+.wp-send-now:hover:not(:disabled) { border-color: var(--green); }
+.wp-send-now:disabled {
+  background: var(--card2);
+  border-color: var(--border);
+  color: var(--text-dim);
+  opacity: 1;
+}
+
+/* ══ U1 · 保存后把改过的那张任务卡标出来 ═══════════════════════════════════
+   列表按 id 稳定排（后端 ORDER BY id），保存后不会换位；高亮 + scrollIntoView 让店长
+   确认"改的是这一张"。2.4 秒后自己退掉，不跟卡片本身的选中边框混成一种状态。 */
+.wp-job-card.is-saved { animation: wp-job-flash 2.4s ease-out; }
+@keyframes wp-job-flash {
+  from { box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.6); }
+  to { box-shadow: 0 0 0 3px rgba(99, 102, 241, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wp-job-card.is-saved { animation: none; border-color: var(--accent); }
+}
+
+/* ══ U3 · 订阅矩阵的整格热区 ═══════════════════════════════════════════════
+   每一格原来只有一个 16×16 的勾选框可点（64 格 × 3 档实测 192 次点空）。命中的是整格：
+   `<td>` 接管点击（见 handleMatrixCellClick），里面这层命中区把热区撑到 ≥44×44。 */
+:deep(.data-table.wp-matrix td.wp-matrix-cell) { cursor: pointer; padding: 4px 8px; }
+.wp-matrix-hit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+}
+:deep(.data-table.wp-matrix td.wp-matrix-cell:hover) { background: rgba(99, 102, 241, 0.1); }
+
+/* ══ U2 · 窄屏的宽表与矩阵 ═════════════════════════════════════════════════
+   两个方向：
+   - 发送记录 / 变更历史在 ≤700px 改**卡片式**（一行一卡、字段名 + 值），不再靠横向拖；
+   - 订阅矩阵 ≤8 渠道时仍是表格，至少冻结「内容类型」列，右侧加渐隐，提示右边还有渠道。 */
+.wp-scroll-hint { display: none; }
+.wp-matrix-wrap {
+  /* 滚动阴影（纯 CSS）：内容没滚到头时左右边缘各有渐隐，滚到底自己消失，
+     不需要 JS 判断能不能滚。四层顺序 = 两个"遮罩" + 两个"阴影"，
+     配套的 local / local / scroll / scroll 由简写里的顺序给出。 */
+  background:
+    linear-gradient(to right, var(--card) 40%, rgba(17, 24, 39, 0)) left center / 28px 100% no-repeat local,
+    linear-gradient(to left, var(--card) 40%, rgba(17, 24, 39, 0)) right center / 28px 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0)) left center / 12px 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0)) right center / 12px 100% no-repeat scroll;
+}
+/* 冻结「内容类型」列：横向滚动时它留在原地，否则滑到右边就不知道这一行是哪类内容。
+   表头那格还要保住全局的 `position: sticky; top: 0`，两层一起生效。 */
+:deep(.data-table.wp-matrix th:first-child),
+:deep(.data-table.wp-matrix td:first-child) {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--card);
+}
+:deep(.data-table.wp-matrix th:first-child) { background: var(--card2); z-index: 2; }
+
+/* ══ U16 · 发送记录里的「最后一次错误」 ════════════════════════════════════
+   原来是 `overflow:hidden` 硬裁 + 只有桌面 hover 才看得到的 `title`。现在：行内最多两行
+   摘要（人话），「详情」展开完整原文 —— 触屏也读得到。 */
+:deep(.data-table.wp-delivery-table td.wp-delivery-error) {
+  white-space: normal;
+  color: var(--text-dim);
+}
+@media (min-width: 701px) {
+  /* 只在桌面档限宽：7 列同排时第 7 列不设上限会把「尝试次数」挤没。
+     ≤700px 是卡片式（每格整行宽），限宽只会把内容顶出横向滚动。 */
+  :deep(.data-table.wp-delivery-table td.wp-delivery-error) { max-width: 320px; }
+}
+.wp-delivery-error__text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  /* `min-width:0` + `anywhere` 是必需的：flex 子项默认不肯缩到 min-content 以下，
+     而企微的错误原文里常有 `HTTPSConnectionPool(host='qyapi.weixin.qq.com',` 这种
+     40+ 字符的不可断词 —— 不压住它，摘要自己就把卡片顶出横向滚动（390 实测 26px）。 */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.wp-delivery-error__toggle { margin-top: 4px; }
+.wp-error-full__title { color: var(--text-dim); font-size: 11px; margin-bottom: 4px; }
+.wp-error-full__raw {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--card2);
+  color: var(--text);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.wp-error-full__meta { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
+:deep(.data-table tr.wp-delivery-detail td) { background: rgba(17, 24, 39, 0.6); }
+
+/* ══ U11 · 触屏档（≤700px）把控件放大到能点 ═══════════════════════════════
+   三档实测控件尺寸完全相同：`.btn-sm` 42×24、页内 tab 52×31、输入框高 34 —— 手机档
+   仍是桌面尺寸。桌面档维持现状，只在窄屏这一档放大。 */
+@media (max-width: 700px) {
+  :deep(.btn) { min-height: 40px; }
+  :deep(.btn-sm) { min-height: 40px; padding: 8px 12px; font-size: 12px; }
+  .wp-tabbar .view-tab { min-height: 44px; padding: 10px 14px; }
+  :deep(.input), :deep(.select) { min-height: 44px; }
+  .wp-matrix-hit { min-width: 44px; min-height: 44px; }
+
+  /* 宽表 → 卡片式：一行一卡，`data-label` 当字段名。表头不再需要（每个值自己带名字）。 */
+  .wp-card-table-wrap { max-height: none !important; overflow-x: visible; }
+  .wp-card-table,
+  .wp-card-table tbody,
+  .wp-card-table tr,
+  .wp-card-table td { display: block; width: 100%; }
+  .wp-card-table thead { display: none; }
+  .wp-card-table tbody tr {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 0 0 8px;
+    padding: 6px 8px;
+    background: var(--card2);
+  }
+  .wp-card-table tbody tr:hover { background: var(--card2); }
+  .wp-card-table td {
+    display: flex;
+    gap: 8px;
+    padding: 3px 0;
+    border-bottom: none;
+    white-space: normal;
+    text-align: left;
+    min-width: 0;
+  }
+  .wp-card-table td::before {
+    content: attr(data-label);
+    flex: 0 0 76px;
+    color: var(--text-dim);
+  }
+  /* 没有 data-label 的格子（空态行 / 展开的详情行）不占那 76px 的字段名列。 */
+  .wp-card-table td:not([data-label])::before { display: none; }
+  .wp-card-table tr td.empty-state { display: block; }
+  .wp-card-table tr.wp-delivery-detail { padding: 0 8px 6px; }
+  .wp-scroll-hint { display: block; color: var(--text-dim); font-size: 11px; margin: 0 0 6px; }
+}
 </style>

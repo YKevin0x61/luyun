@@ -93,20 +93,24 @@ const FAKE_TOPIC = {
   },
 }
 
-const JOBS = [
-  {
-    id: 3,
-    name: '每日销售报表',
+/** 一条推送任务的完整形状（读接口给的就是这个）。 */
+function job(id, name, scheduleTime, overrides = {}) {
+  return {
+    id,
+    name,
     topic_id: 'sales_report',
     topic_name: '销售报表',
-    params: { schedule_time: '21:30', date_range_mode: 'today', station: '' },
-    schedule_time: '21:30',
+    params: { schedule_time: scheduleTime, date_range_mode: 'today', station: '' },
+    schedule_time: scheduleTime,
     enabled: true,
     last_sent_date: '2026-10-06',
     notes: '',
     target_count: 2,
-  },
-]
+    ...overrides,
+  }
+}
+
+const JOBS = [job(3, '每日销售报表', '21:30')]
 
 function jsonResponse(data, status = 200) {
   return {
@@ -117,7 +121,7 @@ function jsonResponse(data, status = 200) {
   }
 }
 
-function probeFetch({ topics = [] } = {}) {
+function probeFetch({ topics = [], jobs = JOBS } = {}) {
   const calls = []
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url)
@@ -134,7 +138,13 @@ function probeFetch({ topics = [] } = {}) {
     if (path.includes('/api/wecom-push/channel-groups')) {
       return jsonResponse({ success: true, groups: [] })
     }
-    if (path.includes('/api/wecom-push/jobs')) return jsonResponse({ success: true, jobs: JOBS })
+    if (path.includes('/api/wecom-push/jobs')) {
+      if ((options.method || 'GET') === 'POST') {
+        // 保存成功：后端回一条带 id 的任务（页面据此高亮"刚改的这一张"）
+        return jsonResponse({ success: true, job: { ...jobs[0], id: 3 } })
+      }
+      return jsonResponse({ success: true, jobs })
+    }
     if (path.includes('/api/wecom-push/logs')) {
       return jsonResponse({
         success: true, rows: [], total: 0, page: 1, page_size: 50, pages: 0, logs: [],
@@ -269,6 +279,80 @@ describe('任务卡片', () => {
     expect(text).toContain('订阅目标')
     expect(text).toContain('2 个群')
     expect(text).toContain('2026-10-06')
+  })
+})
+
+/**
+ * U1（UI 走查 high）：任务卡原来按 `schedule_time` 升序排，改完时间一保存这张卡就换位；
+ * 按位置连点「编辑」会把时间写进另一条任务（走查里真的发生过）。现在后端按 id 稳定排、
+ * 页面按接口给的顺序渲染，保存后把刚改的那张卡短时高亮并滚进视野。
+ */
+describe('任务卡的排序与保存反馈（U1）', () => {
+  /** 页面上任务卡的名字，按渲染顺序。 */
+  function cardNames(wrapper) {
+    return wrapper.findAll('.wp-job-card strong').map((node) => node.text())
+  }
+
+  it('卡片顺序 = 接口给的顺序：时间只显示，不参与排序', async () => {
+    // 接口给的是 id 序（22:10 排在 21:30 前面）。页面若自己按时间重排，这里就会翻过来 ——
+    // 那正是"改完时间卡片跳位"的来源。
+    const { wrapper } = await mountView({
+      topics: [SALES_TOPIC],
+      jobs: [job(5, '日终对账差异', '22:10'), job(3, '每日销售报表', '21:30')],
+    })
+    await openTab(wrapper, '定时任务')
+
+    expect(cardNames(wrapper)).toEqual(['日终对账差异', '每日销售报表'])
+    // 时间照旧显示在卡上
+    expect(wrapper.text()).toContain('22:10')
+    expect(wrapper.text()).toContain('21:30')
+  })
+
+  it('保存成功后把那张卡标成 is-saved 并滚进视野', async () => {
+    const scrollSpy = vi.fn()
+    // jsdom 没有 scrollIntoView；存根一个，用来确认真的调了
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = scrollSpy
+    try {
+      const { wrapper } = await mountView({
+        topics: [SALES_TOPIC],
+        jobs: [job(5, '日终对账差异', '22:10'), job(3, '每日销售报表', '21:30')],
+      })
+      await openTab(wrapper, '定时任务')
+
+      // 编辑第二条（按位置点，正是走查里踩雷的那一步）
+      const cards = wrapper.findAll('.wp-job-card')
+      await cards[1].findAll('button').find((node) => node.text() === '编辑').trigger('click')
+      await flushPromises()
+
+      await wrapper.findAll('button').find((node) => node.text() === '保存任务').trigger('click')
+      await flushPromises()
+
+      const saved = wrapper.findAll('.wp-job-card').find(
+        (node) => node.attributes('data-job-id') === '3',
+      )
+      expect(saved, '找不到被保存的那张卡').toBeTruthy()
+      expect(saved.classes()).toContain('is-saved')
+      expect(scrollSpy).toHaveBeenCalled()
+      // 顺序没变：卡片没有因为时间被改而换位
+      expect(cardNames(wrapper)).toEqual(['日终对账差异', '每日销售报表'])
+    } finally {
+      Element.prototype.scrollIntoView = original
+    }
+  })
+})
+
+describe('「立即发送」的禁用态（U8）', () => {
+  it('预览为空时禁用，title 说的是"点刷新预览"，与卡片右上角的当前任务一致', async () => {
+    const { wrapper } = await mountView({ topics: [SALES_TOPIC] })
+    await openTab(wrapper, '定时任务')
+
+    const send = wrapper.findAll('button').find((node) => node.text() === '立即发送')
+    expect(send.attributes('disabled')).toBeDefined()
+    expect(send.attributes('title')).toBe('点「刷新预览」后可发送')
+    expect(send.classes()).toContain('wp-send-now')
+    // 页面已经显示"当前任务：…"，禁用理由不能再让人去"先选择任务"
+    expect(wrapper.text()).toContain('当前任务：每日销售报表')
   })
 })
 

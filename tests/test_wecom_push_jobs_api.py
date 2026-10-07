@@ -218,6 +218,40 @@ def test_the_same_topic_can_have_several_jobs(api):
     assert listed[second["id"]]["schedule_time"] == "21:30"
 
 
+def test_the_job_list_keeps_a_stable_id_order_when_a_time_changes(api):
+    """列表按 id 稳定排（UI 走查 U1）：改推送时间**不会**让这张卡换位置。
+
+    原来 `ORDER BY schedule_time ASC, id ASC` —— 把 21:30 改成 23:55 保存后，这张卡当场
+    跳到列表末尾，店长会以为刚编辑的任务没了；走查脚本按位置再点一次「编辑」就改到了
+    另一条任务上（真的把 21:30 写进了 id=2 的任务）。顺序只跟创建顺序走，时间只在卡上显示。
+    """
+    first = _create_job(api, name="每日销售报表", schedule_time="21:30",
+                        params={"schedule_time": "21:30", "date_range_mode": "today", "station": ""})
+    second = _create_job(api, name="日终对账差异", schedule_time="22:10",
+                         topic_id="reconcile_diff",
+                         params={"schedule_time": "22:10", "date_range_mode": "today"})
+
+    before = [job["id"] for job in _jobs(api)]
+    assert before == [first["id"], second["id"]]
+
+    # 把第一条的时间改到晚于第二条：按时间排的话它应该挪到后面去
+    resp = api.as_session(
+        "PUT",
+        f"{API_PREFIX}/jobs/{first['id']}",
+        json=_job_payload(
+            name="每日销售报表",
+            schedule_time="23:55",
+            params={"schedule_time": "23:55", "date_range_mode": "today", "station": ""},
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+
+    listed = _jobs(api)
+    assert [job["id"] for job in listed] == before, "改完时间任务卡不该换位置"
+    assert listed[0]["schedule_time"] == "23:55"
+    assert [job["id"] for job in listed] == sorted(job["id"] for job in listed)
+
+
 def test_a_job_card_counts_the_subscribed_targets(api):
     """任务卡片显示「订阅目标数」，不是单个群名（票面验收项）。"""
     first = _create_channel(api, "门店群")
