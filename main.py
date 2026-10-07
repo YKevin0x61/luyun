@@ -1603,21 +1603,30 @@ async def get_scraper_status():
 # （路径唯一 + 依赖树含 verify_admin_token）。
 
 async def _send_scraper_health_alert(message: str) -> None:
-    """经既有企微告警通道推送爬虫健康告警。
+    """爬虫健康告警按「采集失败」的订阅入队（统一出站）。
 
     在调用时（而非任务启动时）解析全局 `db_manager`，以兼容 uvicorn --reload
     重置全局变量的情况，与本文件其它路由/任务保持一致的解析时机模式。
+
+    业务引用取本次告警的时点：Tracker 已经按「次数门槛 + 最小间隔」去抖，同类故障再次
+    告警就是一封新消息，不该因为文案与上次逐字相同被幂等键吃掉。
     """
     if db_manager is None:
-        logger.warning("db_manager 未初始化，跳过爬虫健康告警推送")
+        logger.warning("db_manager 未初始化，跳过爬虫健康告警入队")
         return
-    from services.data_quality_alerts import send_to_enabled_webhooks
+    from services.data_quality_alerts import enqueue_alert
+    from services.wecom_push_topics import TOPIC_SCRAPER_FAILURE
 
-    result = await send_to_enabled_webhooks(db_manager, message)
+    result = await enqueue_alert(
+        db_manager,
+        TOPIC_SCRAPER_FAILURE,
+        message,
+        scope=datetime.now(CHINA_TZ).isoformat(),
+    )
     if result.get("sent", 0) == 0:
-        logger.warning(f"⚠️ 爬虫健康告警未发送成功: {result}")
+        logger.warning(f"⚠️ 爬虫健康告警未入队: {result}")
     else:
-        logger.warning(f"⚠️ 爬虫健康告警已发送: {message}")
+        logger.warning(f"⚠️ 爬虫健康告警已入队: {message}")
 
 
 # 餐厅数据爬取任务
