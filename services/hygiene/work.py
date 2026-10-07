@@ -2178,7 +2178,8 @@ class HygieneWork:
                 business_date=instance["business_date"],
             )
         if self._sharer is not None:
-            # 与验收在同一个事务里登记：不存在"验收成功了却没登记"。
+            # 与验收在同一个事务里登记：不存在"验收成功了却没登记"。登记不发送，
+            # 也不用在这里触发 —— 读图与网络发送由企微调度循环在卫生写锁外做。
             await self._sharer.enqueue(
                 kind="daily",
                 ref_key=f"{int(item_id)}:{shift}:{instance['business_date']}",
@@ -2186,9 +2187,6 @@ class HygieneWork:
                 caption=share_caption,
             )
         await self._conn.commit()
-        if self._sharer is not None:
-            # 只触发，不等它跑完：发送是秒级的网络 IO，此刻我们还握着写锁。
-            self._sharer.kick()
         logger.info("hygiene daily accepted item=%s shift=%s", item_id, shift)
         return {
             "item_id": int(item_id),
@@ -3614,8 +3612,6 @@ class HygieneWork:
                 caption=share_caption,
             )
         await self._conn.commit()
-        if self._sharer is not None:
-            self._sharer.kick()
         logger.info("hygiene deep-clean accepted item=%s", item_id)
         work = await self.list_deep_clean_work(actor)
         return {
@@ -4187,8 +4183,6 @@ class HygieneWork:
                 caption=share_caption,
             )
         await self._conn.commit()
-        if self._sharer is not None:
-            self._sharer.kick()
         logger.info("hygiene fix accepted ticket=%s", ticket_id)
         return {
             "id": int(ticket_id),
@@ -4222,8 +4216,6 @@ class HygieneWork:
                 extra_capture_id=extra_capture_id,
             )
             await self._conn.commit()
-        if created:
-            self._sharer.kick()
         return created
 
     @serialized_write
@@ -4434,10 +4426,9 @@ class HygieneWork:
         logger.info("卫生逾期调度器已启动")
         while True:
             try:
-                # 兜底：验收提交时打的那一枪可能没打中（进程刚重启、上次发送失败要重试），
-                # 积压的分享在这里被捡起来。发送本身在写锁外。
-                if self._sharer is not None:
-                    await self._sharer.flush_pending()
+                # 验收照片的兜底（进程重启后积压的待发行、上次失败要重试的）**不在这里**：
+                # 出站表本身就是队列，重试与补发由既有 30 秒企微调度循环驱动
+                # （services/wecom_outbox.py），这条循环只管逾期的业务扫描。
                 await self.sweep_overdue()
                 await self._maybe_purge_board_events()
             except asyncio.CancelledError:

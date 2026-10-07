@@ -333,6 +333,8 @@ async def lifespan(app: FastAPI):
         from services.hygiene.attire import HygieneAttire
         from services.hygiene.wecom_share import HygieneCaptureSharer
         from services.hygiene.work import HygieneWork
+        from services.wecom_outbox import wecom_outbox
+        from services.wecom_push_topics import TOPIC_HYGIENE_PHOTO
         from pathlib import Path
         if db_manager and db_manager.is_connected():
             employee_accounts = EmployeeAccounts(db_manager)
@@ -340,12 +342,16 @@ async def lifespan(app: FastAPI):
             startup_results.append("员工账号")
             capture_root = Path(settings.DATABASE_DIR) / "hygiene-captures"
             hygiene_captures = FileCaptureStore(capture_root)
+            # 验收通过的实拍 → 订阅了「验收照片」的渠道：登记在验收事务里（不提交，
+            # 与验收同生共死），读图与发送由企微调度循环在卫生写锁外做。照片在**发送时**
+            # 才渲染（出站行里只有采集图引用），所以这条渲染器要挂在统一出站上。
+            capture_sharer = HygieneCaptureSharer(db_manager, hygiene_captures)
+            wecom_outbox.register_renderer(TOPIC_HYGIENE_PHOTO, capture_sharer.render)
             hygiene_work = HygieneWork(
                 db_manager,
                 captures=hygiene_captures,
                 notifier=WeComGroupTextNotifier(db_manager),
-                # 验收通过的实拍 → 卫生群（登记在验收事务里，发送由它自己在写锁外做）
-                capture_sharer=HygieneCaptureSharer(db_manager, hygiene_captures),
+                capture_sharer=capture_sharer,
                 image_variants=ImageVariantGenerator(),
                 on_change=broadcast_hygiene_change,
             )

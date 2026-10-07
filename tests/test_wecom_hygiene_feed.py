@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""「卫生群」标记（票 01）：HTTP 契约 + 收件人过滤。
+"""「卫生群」标记（票 01）：写入契约。
 
 这一票的关键契约是**三态**：只有明确传 true / false 才写 `hygiene_feed` 这一列。
 列表上的「停用 / 启用」快捷开关、以及还缓存着旧 bundle 的浏览器，提交的载荷里都没有
 这个字段 —— 一旦把它当普通布尔（默认 False）处理，点一下「停用」就会把标记清掉，
 而界面上完全看不出来。
+
+票 04 起这一列**不再被读取**：`wecom_webhooks_all(hygiene_only=…)` 的收件人过滤随票删除，
+「谁收到卫生内容」只由推送订阅决定（回填见迁移 0016，口径见
+`tests/test_wecom_subscription_resolution.py`）。这里只剩这一列自身的读写契约 ——
+页面还在显示与编辑它，删列得连页面一起改。
 """
 
 import asyncio
@@ -106,24 +111,11 @@ def test_explicit_false_clears_the_mark(wecom_client):
     assert response.json()["webhook"]["hygiene_feed"] is False
 
 
-# ── 收件人过滤（后续票据复用这条查询） ──────────────────────────────────────
-
-
-def test_hygiene_only_filter_returns_marked_and_enabled_groups(wecom_client):
-    client, db = wecom_client
-    marked = _create(client, name="卫生群", hygiene_feed=True)
-    daily = _create(client, name="日报群")
-    marked_disabled = _create(client, name="停用的卫生群", hygiene_feed=True, enabled=False)
-
-    hygiene_groups = _run(db.wecom_webhooks_all(include_disabled=False, hygiene_only=True))
-    assert {row["id"] for row in hygiene_groups} == {marked["id"]}
-
-    with_disabled = _run(db.wecom_webhooks_all(include_disabled=True, hygiene_only=True))
-    assert {row["id"] for row in with_disabled} == {marked["id"], marked_disabled["id"]}
+# ── 渠道列表（不带标记过滤：收件人由订阅决定） ──────────────────────────────
 
 
 def test_default_listing_is_unchanged(wecom_client):
-    """不传 hygiene_only 时行为与从前一致：所有启用中的都回。"""
+    """不带任何过滤时：所有启用中的渠道都回（标记不参与筛选）。"""
     client, db = wecom_client
     marked = _create(client, name="卫生群", hygiene_feed=True)
     daily = _create(client, name="日报群")

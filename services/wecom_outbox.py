@@ -12,6 +12,10 @@
 
 正文在**发送时**渲染：行里存的是内容类型 + 参数，参数里的「今天 / 昨天」在入队时
 就解析成具体营业日并冻结，补发跨过 06:00 也不会跑到另一天（ADR 0095）。
+
+渲染器按内容类型注册（``register_renderer``）：文字类的正文由触发点算好放进参数，
+图片类（验收照片）在发送时才去读采集图、专项还要拼一张前后对照图 —— 这两件事一个是
+纯文本、一个要碰磁盘与图片处理，所以默认渲染器只认文本，图片那条由卫生侧注册。
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set
 
 from config import settings
 from db_core.utils import CHINA_TZ
@@ -86,6 +90,33 @@ class ResolvedTarget:
     channel_name: str
     enabled: bool = True
     skipped_reason: str = ""
+
+
+@dataclass(frozen=True)
+class RenderedDelivery:
+    """一次投递实际要发出去的东西：一段文字**或**一张图（二选一）。
+
+    图片存的是采集图引用，发送时才读成字节穿到这里（ADR 0095）；一条图片投递就是
+    一条消息，不像文字那样按字节分块。
+    """
+
+    text: str = ""
+    image_bytes: Optional[bytes] = None
+
+    @property
+    def is_image(self) -> bool:
+        return self.image_bytes is not None
+
+    @property
+    def byte_length(self) -> int:
+        if self.image_bytes is not None:
+            return len(self.image_bytes)
+        return len(self.text.encode("utf-8"))
+
+
+# 渲染器：(出站行, 已解析的参数) → 这次要发的东西。事件类内容的正文由触发点算好放进
+# 参数，所以默认渲染器不需要额外知识；图片类要读采集图 / 拼图，由卫生侧注册自己那条。
+Renderer = Callable[[Mapping[str, Any], Mapping[str, Any]], Awaitable[RenderedDelivery]]
 
 
 def _now() -> datetime:
@@ -177,18 +208,32 @@ def default_summary(params: Mapping[str, Any]) -> str:
     return text.splitlines()[0][:200] if text else ""
 
 
-def render_content(row: Mapping[str, Any]) -> str:
-    """按出站行渲染这一次投递的正文。
+def parse_params(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """出站行的参数（JSON 文本 → dict）。
 
-    正文在发送时渲染（ADR 0095），行里只有内容类型 + 参数。事件类内容的正文由触发点
-    算好放进参数（`text`）——卫生的四类文字提醒就是这么进来的：谁在什么业务时点算出了
-    什么文案，出站只负责发给订阅了这类内容的渠道。
+    参数是一行投递的**全部内容**（正文与图片引用都在里面），所以解析不了就是这条永远
+    发不出去：当场报错，由派发路径落终态并留下原因。
     """
     try:
         params = json.loads(str(row.get("params_json") or "{}"))
     except ValueError as exc:
         raise ValueError(f"参数不是合法 JSON：{exc}") from exc
-    text = str((params or {}).get("text") or "").strip()
+    if not isinstance(params, dict):
+        raise ValueError("参数必须是 JSON 对象")
+    return params
+
+
+def render_content(
+    row: Mapping[str, Any], params: Optional[Mapping[str, Any]] = None
+) -> str:
+    """按出站行渲染这一次投递的正文（文本类内容的渲染口径）。
+
+    正文在发送时渲染（ADR 0095），行里只有内容类型 + 参数。事件类内容的正文由触发点
+    算好放进参数（`text`）——卫生的四类文字提醒就是这么进来的：谁在什么业务时点算出了
+    什么文案，出站只负责发给订阅了这类内容的渠道。
+    """
+    resolved = parse_params(row) if params is None else params
+    text = str(resolved.get("text") or "").strip()
     if not text:
         raise ValueError("参数里没有正文（text）")
     return text
@@ -198,7 +243,8 @@ class WeComOutbox:
     """统一出站：入队、派发、节流、重试、补发、保留清理。
 
     ``sender`` / ``now`` / ``gap_seconds`` 都可注入：测试用假发送器 + 假时钟驱动整套
-    状态机，生产用企微发送器与墙上时钟（默认值）。
+    状态机，生产用企微发送器与墙上时钟（默认值）；图片类内容的渲染器用
+    ``register_renderer`` 登记。
     """
 
     def __init__(
@@ -211,9 +257,18 @@ class WeComOutbox:
         self._sender = wecom_push_service if sender is None else sender
         self._now = now or _now
         self._gap_seconds = MESSAGE_GAP_SECONDS if gap_seconds is None else gap_seconds
+        self._renderers: Dict[str, Renderer] = {}
         # 每渠道的滚动窗口（内存里）：重启丢掉窗口只会让节流更宽松一点，不会丢消息。
         self._recent_sends: Dict[int, List[datetime]] = {}
         self._next_purge_at: Optional[datetime] = None
+
+    def register_renderer(self, topic_id: str, renderer: Renderer) -> None:
+        """给一类内容登记渲染器（同一个 id 覆盖）。
+
+        没登记的内容类型走默认的文本渲染（参数里的 `text`）。图片类内容必须登记：
+        它的参数里只有采集图引用，没有正文。
+        """
+        self._renderers[str(topic_id)] = renderer
 
     # ── 入队 ──────────────────────────────────────────────────────────────
 
@@ -228,6 +283,7 @@ class WeComOutbox:
         targets: Optional[Sequence[ResolvedTarget]] = None,
         schedule_id: Optional[int] = None,
         summary: str = "",
+        commit: bool = True,
     ) -> List[int]:
         """一类内容 → 每个目标渠道一行出站记录，返回这些行的 id。
 
@@ -235,6 +291,11 @@ class WeComOutbox:
         - 幂等键 = 内容类型 + 业务引用 + 目标：重复触发只落一行；
         - 停用的渠道也落一行，就地标成 skipped 并写明原因（订阅保留，投递跳过）；
         - 零订阅 → 一条不发，只记日志。
+
+        ``commit=False`` 给「登记必须与业务事务同生共死」的调用方（验收照片）：这些行
+        落进调用方的事务，由调用方决定提交还是回滚。代价之一是**不做**就地跳过标记
+        （那要单独提交，会把调用方的事务切开）——停用的渠道由下一轮派发标成 skipped，
+        终态与原因一样，只是晚 30 秒。
         """
         validated = validate_params(topic_id, params, trigger=trigger)
         frozen = freeze_business_date(validated, self._now())
@@ -261,14 +322,14 @@ class WeComOutbox:
                 "idempotency_key": build_idempotency_key(
                     topic_id, business_reference, target.channel_id
                 ),
-            })
+            }, commit=commit)
             if not outbox_id:
                 logger.error(
                     "出站入队失败 topic=%s channel=%s", topic_id, target.channel_id
                 )
                 continue
             outbox_ids.append(int(outbox_id))
-            if target.skipped_reason:
+            if target.skipped_reason and commit:
                 await self._skip_if_untouched(db, int(outbox_id), target.skipped_reason)
                 logger.info(
                     "出站跳过（渠道停用）topic=%s channel=%s(%s)",
@@ -325,19 +386,25 @@ class WeComOutbox:
             return False
 
         try:
-            content = render_content(row)
+            delivery = await self._render(row)
         except Exception as exc:
-            # 参数坏的：重试多少次都是同一个错，直接落终态并留下原因。
+            # 渲染不出来的内容重试多少次都是同一个结果（参数坏的 / 图被清理了 / 装不下）：
+            # 直接落终态并留下原因，不无限重试，也不静默。
             await db.wecom_outbox_mark_failed(
                 row_id, f"正文渲染失败：{exc}", attempts=self._attempts(row) + 1
             )
             return False
 
-        outgoing = expand_messages([content])
+        if delivery.is_image:
+            outgoing: List[str] = []
+            message_count = 1  # 一张图 = 一条消息，不按字节分块
+        else:
+            outgoing = expand_messages([delivery.text])
+            message_count = len(outgoing)
         now = self._now()
-        if not self._throttle_allow(int(channel_id), len(outgoing), now):
+        if not self._throttle_allow(int(channel_id), message_count, now):
             return False  # 超出本渠道这一分钟的额度：留在待发，下一轮再来
-        self._throttle_consume(int(channel_id), len(outgoing), now)
+        self._throttle_consume(int(channel_id), message_count, now)
 
         try:
             webhook_url = decrypt_webhook_url(channel["webhook_url_encrypted"])
@@ -346,16 +413,34 @@ class WeComOutbox:
             return False
 
         await db.wecom_outbox_mark_sending(row_id, sending_at=now.isoformat())
-        ok, error = await self._send_all(webhook_url, outgoing)
+        if delivery.is_image:
+            ok, error = await self._send_image(webhook_url, delivery.image_bytes or b"")
+        else:
+            ok, error = await self._send_all(webhook_url, outgoing)
         if ok:
             await db.wecom_outbox_mark_sent(
                 row_id,
-                len(content.encode("utf-8")),
+                delivery.byte_length,
                 attempts=self._attempts(row) + 1,
             )
             return True
         await self._settle_failure(db, row, error)
         return False
+
+    async def _render(self, row: Mapping[str, Any]) -> RenderedDelivery:
+        """这次投递要发的东西：按内容类型找渲染器，没登记的走默认文本渲染。"""
+        params = parse_params(row)
+        renderer = self._renderers.get(str(row.get("topic_id") or ""))
+        if renderer is None:
+            return RenderedDelivery(text=render_content(row, params))
+        return await renderer(row, params)
+
+    async def _send_image(self, webhook_url: str, image_bytes: bytes) -> tuple[bool, str]:
+        """发一张图。图片是**一条**消息（超限的图在渲染那一步就已经被降档或记失败了）。"""
+        try:
+            return await self._sender.send_image(webhook_url, image_bytes)
+        except Exception as exc:
+            return False, f"图片发送异常：{exc}"
 
     async def _send_all(self, webhook_url: str, outgoing: Sequence[str]) -> tuple[bool, str]:
         """同一投递的拆分段**按顺序**发送；任何一段失败就整条算失败。"""

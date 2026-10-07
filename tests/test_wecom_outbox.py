@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services import wecom_push_service as wecom_push_service_module
-from services.wecom_outbox import WeComOutbox
+from services.wecom_outbox import RenderedDelivery, WeComOutbox
 from services.wecom_push_service import (
     WECOM_TEXT_BYTE_LIMIT,
     encrypt_webhook_url,
@@ -28,6 +28,7 @@ from services.wecom_push_service import (
     wecom_push_service,
 )
 from services.wecom_push_topics import (
+    TOPIC_HYGIENE_PHOTO,
     PushTopic,
     PushTrigger,
     register_topic,
@@ -45,12 +46,19 @@ class FakeSender:
 
     def __init__(self):
         self.sent = []
+        self.images = []
         self.failures = []
 
     async def send_text(self, webhook_url, content):
         if self.failures:
             return False, self.failures.pop(0)
         self.sent.append((webhook_url, content))
+        return True, "ok"
+
+    async def send_image(self, webhook_url, image_bytes):
+        if self.failures:
+            return False, self.failures.pop(0)
+        self.images.append((webhook_url, image_bytes))
         return True, "ok"
 
 
@@ -191,6 +199,115 @@ class OutboxSkippedChannelTest(OutboxTestCase):
         self.assertEqual(rows[0]["status"], "skipped")
         self.assertIn("停用", rows[0]["last_error"])
         self.assertEqual(self.sender.sent, [])
+
+
+IMAGE_BYTES = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+
+
+class OutboxImageDeliveryTest(OutboxTestCase):
+    """图片类投递（票 04）：正文在**发送时**才渲染成一张图，一行 = 一条图片消息。
+
+    照片存的是采集图引用而不是 base64（ADR 0095），所以这一步要读盘、专项还要拼图。
+    渲染不出来的内容重试多少次都是同一个结果（图被清理了 / 装不下），直接落终态并写明
+    原因 —— 不无限重试，也不静默。
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.channel = await self._channel("卫生群", URL_A)
+        await self._subscribe([self.channel], topic=TOPIC_HYGIENE_PHOTO)
+        self.outbox.register_renderer(TOPIC_HYGIENE_PHOTO, self._render_image)
+
+    @staticmethod
+    async def _render_image(_row, _params):
+        return RenderedDelivery(image_bytes=IMAGE_BYTES)
+
+    async def _enqueue_photo(self, reference="daily:1:白班:2026-05-02:cap-1"):
+        return await self.outbox.enqueue_topic(
+            self.db,
+            TOPIC_HYGIENE_PHOTO,
+            params={
+                "ref_key": "1:白班:2026-05-02",
+                "capture_id": "cap-1",
+                "extra_capture_id": "",
+            },
+            trigger=PushTrigger.EVENT,
+            business_reference=reference,
+            summary="【卫生验收】案板 · 案板表面",
+        )
+
+    async def test_an_image_delivery_sends_exactly_one_image_message(self):
+        await self._enqueue_photo()
+
+        sent = await self.outbox.dispatch_pending(self.db)
+
+        self.assertEqual(sent, 1)
+        self.assertEqual(self.sender.images, [(URL_A, IMAGE_BYTES)])
+        self.assertEqual(self.sender.sent, [], "图片类内容不该再发一条文字")
+        row = (await self._rows())[0]
+        self.assertEqual(row["status"], "sent")
+        self.assertEqual(int(row["message_bytes"]), len(IMAGE_BYTES))
+        self.assertEqual(row["content_summary"], "【卫生验收】案板 · 案板表面")
+
+    async def test_a_render_failure_fails_the_row_and_is_never_retried(self):
+        """图被清理 / 装不下不会因为重试而变好：记失败、写明原因、不再重试。"""
+
+        async def broken(_row, _params):
+            raise ValueError("图片已被清理（采集图 cap-1 不存在，可能已过保留期）")
+
+        self.outbox.register_renderer(TOPIC_HYGIENE_PHOTO, broken)
+        await self._enqueue_photo()
+
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 0)
+        self.clock += timedelta(hours=1)
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 0)
+
+        self.assertEqual(self.sender.images, [])
+        row = (await self._rows())[0]
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(int(row["attempts"]), 1)
+        self.assertIn("图片已被清理", row["last_error"])
+        self.assertIsNotNone(row["finished_at"])
+
+
+class OutboxTransactionTest(OutboxTestCase):
+    """登记与业务事务同生共死（票 04）：验收路径要的是「验收成功 = 这一行在」。
+
+    出站默认自己提交（一条投递一个写单元）；``commit=False`` 让出站行落进**调用方的
+    事务**里 —— 调用方回滚，这一行跟着消失；调用方提交，它才真的在。
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.channel = await self._channel("卫生群", URL_A)
+        await self._subscribe([self.channel])
+
+    async def _enqueue_in_transaction(self, reference="ref-1"):
+        return await self.outbox.enqueue_topic(
+            self.db,
+            TOPIC,
+            params={"text": "验收通过，照片待发"},
+            trigger=PushTrigger.EVENT,
+            business_reference=reference,
+            commit=False,
+        )
+
+    async def test_the_callers_rollback_discards_the_outbox_row(self):
+        ids = await self._enqueue_in_transaction()
+
+        await self.db._conn.rollback()
+
+        self.assertEqual(len(ids), 1, "登记要拿到这一行的 id，才好回给调用方")
+        self.assertEqual(await self._rows(), [])
+
+    async def test_the_callers_commit_keeps_the_outbox_row(self):
+        await self._enqueue_in_transaction()
+
+        await self.db._conn.commit()
+
+        rows = await self._rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "pending")
 
 
 class DigestParams(BaseModel):

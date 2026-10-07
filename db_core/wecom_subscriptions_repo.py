@@ -328,13 +328,18 @@ class _WecomSubscriptionsRepoMixin:
 
     # ── 出站记录（队列表 = 发送记录） ──────────────────────────────────────
 
-    async def wecom_outbox_enqueue(self, item: Dict[str, Any]) -> int:
+    async def wecom_outbox_enqueue(self, item: Dict[str, Any], *, commit: bool = True) -> int:
         """登记一次投递并返回它的 id；同一幂等键已存在时返回**那一行**的 id。
 
         返回既有行的 id 而不是 0：调用方（验收登记、调度循环）据此判断「这封已经
         在队列里了」，而不是把它当成失败再试一遍。
 
         ``created_at`` 可以显式给（迁移搬历史行时要保住原来的时间），不给就取现在。
+
+        ``commit=False`` 给「登记必须与业务事务同生共死」的调用方（验收照片就是这样）：
+        这一行落进调用方的事务里，由调用方的 commit / rollback 决定它到底在不在——
+        这里一句都不提交。调用方要保证自己没有把事务搞脏（缺表这类可预期的失败先探一下，
+        别让一条失败语句把整个业务事务变成 aborted）。
         """
         topic_id = str(item.get("topic_id") or "").strip()
         if not topic_id:
@@ -379,7 +384,8 @@ class _WecomSubscriptionsRepoMixin:
                         (idempotency_key,),
                     )
                     row = await cursor.fetchone()
-            await tdb.commit()
+            if commit:
+                await tdb.commit()
             return int(dict(row)["id"]) if row else 0
         except ValueError:
             raise

@@ -16,13 +16,12 @@ logger = logging.getLogger(__name__)
 class _WecomRepoMixin:
     """企业微信 webhook、推送任务与推送日志的增删改查。"""
 
-    async def wecom_webhooks_all(
-        self, include_disabled: bool = True, hygiene_only: bool = False
-    ) -> List[Dict]:
+    async def wecom_webhooks_all(self, include_disabled: bool = True) -> List[Dict]:
         """列出 webhook。
 
-        ``hygiene_only`` 只回「卫生群」—— 卫生提醒与验收照片的收件人。卫生侧一律带这个
-        过滤，不再「发给所有启用的群」：测试群、销售日报群不该收到员工的实拍照片。
+        没有「卫生群」过滤：收件人只由推送订阅决定（``wecom_push_subscriptions``），
+        渠道上的 `hygiene_feed` 列不再被读取（票 04 删掉了 ``hygiene_only`` 这条读取
+        路径，回填见迁移 0016）。列本身还在，页面仍旧显示与编辑它。
         """
         try:
             tdb = self._connection.table("wecom_push_webhooks")
@@ -33,9 +32,6 @@ class _WecomRepoMixin:
             conditions: List[str] = []
             if not include_disabled:
                 conditions.append("enabled = ?")
-                params.append(1)
-            if hygiene_only:
-                conditions.append("hygiene_feed = ?")
                 params.append(1)
             if conditions:
                 sql += " WHERE " + " AND ".join(conditions)
