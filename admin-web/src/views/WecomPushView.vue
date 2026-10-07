@@ -3,7 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 import {
   useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, pushTypeLabel,
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
-  canSendNow, sendNowConfirmText,
+  canSendNow, sendNowConfirmText, DELIVERY_STATUS_OPTIONS, deliveryStatusLabel,
+  formatDeliveryTime,
 } from '../composables/useWecomPush'
 import { useStationsStore } from '../stores/stations'
 import SvgIcon from '../components/SvgIcon.vue'
@@ -20,11 +21,12 @@ const TABS = [
 ]
 
 const {
-  meta, channels, topics, groups, jobs, logs, matrix, selectedJobId, previewContent,
-  previewMeta, error, activeTab, channelForm, channelGroupForm, multiSelect,
-  contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
+  meta, channels, topics, groups, jobs, matrix, deliveries, selectedJobId,
+  previewContent, previewMeta, error, activeTab, channelForm, channelGroupForm,
+  multiSelect, contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
   resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
-  loadAll, loadSubscriptions, loadJobs, loadLogs, loadChannels,
+  loadAll, loadSubscriptions, loadJobs, loadDeliveries, applyDeliveryFilters,
+  loadChannels,
   editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,
   editChannelGroup, saveChannelGroup, deleteChannelGroup,
   addGroupMember, removeGroupMember,
@@ -40,6 +42,39 @@ function flash(msg, type = 'info') {
   toastMsg.value = msg
   toastType.value = type
   setTimeout(() => { if (toastMsg.value === msg) toastMsg.value = '' }, 3000)
+}
+
+// 发送记录（票 07）：筛选控件是**本地草稿**，点「筛选」才写回 composable 并回第一页。
+// 每次选择都立刻请求的话，店长调三个下拉就要看三次中途结果。
+const deliveryFilterForm = ref({
+  topicId: deliveries.filters.topicId,
+  channelId: deliveries.filters.channelId,
+  status: deliveries.filters.status,
+})
+// 内容类型下拉来自 `/meta` 的注册表（ADR 0097）：加一类内容只改后端，页面不写死。
+// 用注册表而不是「记录里出现过的类型」：某一类还没发过也要能选中它（那正是要查的场景）。
+const deliveryTopicOptions = computed(() => meta.value.topics || [])
+// 一次筛选都没设：空表时说「暂无发送记录」，否则说「没有符合条件的记录」。
+const deliveryFiltered = computed(() => Boolean(
+  deliveries.filters.topicId || deliveries.filters.channelId || deliveries.filters.status,
+))
+const deliveryStatusOptions = DELIVERY_STATUS_OPTIONS
+
+async function handleApplyDeliveryFilters() {
+  try {
+    await applyDeliveryFilters(deliveryFilterForm.value)
+  } catch (e) { flash(e.message, 'error') }
+}
+async function handleDeliveryPage(page) {
+  try {
+    await loadDeliveries({ page })
+  } catch (e) { flash(e.message, 'error') }
+}
+function handleRefreshDeliveries() {
+  loadDeliveries().catch((e) => flash(e.message, 'error'))
+  // 渠道名是服务端配在记录里的：新建渠道后刷新记录顺带把渠道列表拉一遍，
+  // 下拉里立刻能按新渠道筛（不然要整页刷新才看得到）。
+  loadChannels().catch(() => {})
 }
 
 const isEditingChannel = computed(() => !!channelForm.id)
@@ -180,10 +215,6 @@ function handleApplyTemplate(id) {
   } catch (e) { flash(e.message, 'error') }
 }
 
-function fmtSentAt(s) {
-  return (s || '').replace('T', ' ').slice(0, 19)
-}
-
 onMounted(async () => {
   let stationError = ''
   try {
@@ -193,6 +224,12 @@ onMounted(async () => {
     flash(stationError, 'error')
   }
   await loadAll()
+  // 发送记录另拉一页（带分页与总数，和 loadAll 里的「最近 N 条」不是一回事）。
+  try {
+    await loadDeliveries()
+  } catch (e) {
+    if (!error.value) error.value = e.message || '发送记录加载失败'
+  }
   // loadAll() 成功时会把 error 清空，这里补上档口加载失败的持久提示，避免被吞掉
   if (stationError && !error.value) error.value = stationError
 })
@@ -591,31 +628,120 @@ onMounted(async () => {
         <div v-if="activeTab === 'logs'" class="card">
           <div class="panel-title" style="display:flex;justify-content:space-between">
             <span>发送记录</span>
-            <button class="btn btn-sm" @click="loadLogs">刷新</button>
+            <span style="display:flex;gap:8px;align-items:center">
+              <span style="color:var(--text-dim);font-size:12px">共 {{ deliveries.total }} 条</span>
+              <button class="btn btn-sm" @click="handleRefreshDeliveries">刷新</button>
+            </span>
           </div>
-          <div class="data-table-wrap luyun-scrollbar" style="max-height:340px">
-            <table class="data-table">
+
+          <!-- 筛选：内容类型（来自 /meta 注册表）/ 渠道 / 状态 + 分页 -->
+          <div class="wp-delivery-filters">
+            <div class="form-row">
+              <label>内容类型</label>
+              <select class="select" v-model="deliveryFilterForm.topicId">
+                <option value="">全部内容类型</option>
+                <option v-for="item in deliveryTopicOptions" :key="item.id" :value="item.id">
+                  {{ item.name }}
+                </option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label>目标渠道</label>
+              <select class="select" v-model="deliveryFilterForm.channelId">
+                <option value="">全部渠道</option>
+                <option v-for="item in channels" :key="item.id" :value="item.id">
+                  {{ item.name }}{{ item.enabled ? '' : '（停用）' }}
+                </option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label>状态</label>
+              <select class="select" v-model="deliveryFilterForm.status">
+                <option value="">全部状态</option>
+                <option v-for="item in deliveryStatusOptions" :key="item.id" :value="item.id">
+                  {{ item.name }}
+                </option>
+              </select>
+            </div>
+            <div style="display:flex;gap:8px;align-items:flex-end">
+              <button class="btn btn-primary btn-sm" type="button" @click="handleApplyDeliveryFilters">筛选</button>
+              <button
+                class="btn btn-sm"
+                type="button"
+                :disabled="!deliveryFiltered"
+                @click="deliveryFilterForm = { topicId: '', channelId: '', status: '' }; handleApplyDeliveryFilters()"
+              >清空筛选</button>
+            </div>
+          </div>
+
+          <div class="data-table-wrap luyun-scrollbar" style="max-height:420px">
+            <table class="data-table wp-delivery-table">
               <thead>
-                <tr><th>时间</th><th>目标</th><th>类型</th><th>状态</th><th>字节</th><th>结果</th></tr>
+                <tr>
+                  <th style="cursor:default">时间</th>
+                  <th style="cursor:default">目标渠道</th>
+                  <th style="cursor:default">内容类型</th>
+                  <th style="cursor:default">状态</th>
+                  <th style="cursor:default">字节数</th>
+                  <th style="cursor:default">尝试次数</th>
+                  <th style="cursor:default">最后一次错误</th>
+                </tr>
               </thead>
               <tbody>
-                <tr v-if="!logs.length"><td colspan="6" class="empty-state">暂无发送记录</td></tr>
-                <tr v-for="item in logs" :key="item.id">
-                  <td>{{ fmtSentAt(item.sent_at) }}</td>
-                  <td>{{ item.webhook_name }}</td>
-                  <td>{{ pushTypeLabel(item.push_type) }}</td>
+                <tr v-if="!deliveries.rows.length">
+                  <td colspan="7" class="empty-state">
+                    {{ deliveryFiltered ? '没有符合条件的记录，可换个筛选条件或清空筛选' : '暂无发送记录' }}
+                  </td>
+                </tr>
+                <tr
+                  v-for="item in deliveries.rows"
+                  :key="item.id"
+                  :class="{ 'wp-delivery-failed': item.status === 'failed' }"
+                >
+                  <td style="white-space:nowrap">
+                    {{ formatDeliveryTime(item.finished_at || item.created_at) }}
+                    <span v-if="!item.finished_at" style="color:var(--text-dim);font-size:11px">（未完成，这是入队时间）</span>
+                  </td>
+                  <td>{{ item.channel_name || (item.channel_id ? `#${item.channel_id}` : '渠道已删除') }}</td>
+                  <td>{{ item.topic_name }}</td>
                   <td>
-                    <span class="badge" :style="item.status === 'success' ? 'color:var(--green);border-color:var(--green)' : 'color:var(--red);border-color:var(--red)'">
-                      {{ item.status === 'success' ? '成功' : '失败' }}
-                    </span>
+                    <span
+                      class="badge"
+                      :style="item.status === 'sent'
+                        ? 'color:var(--green);border-color:var(--green)'
+                        : (item.status === 'failed' ? 'color:var(--red);border-color:var(--red)' : '')"
+                    >{{ deliveryStatusLabel(item.status) }}</span>
                   </td>
-                  <td>{{ item.message_bytes || 0 }}</td>
-                  <td style="color:var(--text-dim);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="item.error || item.response_text">
-                    {{ item.error || item.response_text || '' }}
-                  </td>
+                  <td>{{ item.message_bytes }}</td>
+                  <td>{{ item.attempts }}</td>
+                  <td
+                    style="color:var(--text-dim);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                    :title="item.last_error || item.content_summary"
+                  >{{ item.last_error }}</td>
                 </tr>
               </tbody>
             </table>
+          </div>
+
+          <div class="wp-delivery-pager">
+            <button
+              class="btn btn-sm"
+              type="button"
+              :disabled="deliveries.page <= 1"
+              @click="handleDeliveryPage(deliveries.page - 1)"
+            >上一页</button>
+            <span style="color:var(--text-dim);font-size:12px">
+              第 {{ deliveries.page }} / {{ Math.max(deliveries.pages, 1) }} 页
+            </span>
+            <button
+              class="btn btn-sm"
+              type="button"
+              :disabled="deliveries.page >= deliveries.pages"
+              @click="handleDeliveryPage(deliveries.page + 1)"
+            >下一页</button>
+            <span style="color:var(--text-dim);font-size:11px">
+              超过保留天数的记录会被自动清理；待发与发送中的行不会被清理。
+            </span>
           </div>
         </div>
       </div>
@@ -673,4 +799,29 @@ onMounted(async () => {
 .wp-pick-row.active { border-color: var(--accent); color: var(--accent); }
 .wp-pick-row.wp-matrix-zero { color: var(--yellow); }
 .wp-pick-row.wp-matrix-zero.active { border-color: var(--yellow); }
+
+/* 发送记录（票 07）：筛选行在窄屏要能换行（三个下拉 + 两个按钮在一行里挤不下）。 */
+.wp-delivery-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  margin-bottom: 10px;
+}
+.wp-delivery-filters .form-row { min-width: 150px; flex: 1 1 150px; }
+
+/* 失败行整行标出来：一屏几十行里，失败的那几条要第一眼看得见。 */
+:deep(.data-table tr.wp-delivery-failed) td {
+  background: rgba(239, 68, 68, 0.08);
+  border-left-color: var(--red);
+}
+:deep(.data-table tr.wp-delivery-failed) td:first-child { border-left: 2px solid var(--red); }
+
+.wp-delivery-pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
 </style>

@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services import wecom_push_service as wecom_push_service_module
-from services.wecom_outbox import RenderedDelivery, WeComOutbox
+from services.wecom_outbox import RenderedDelivery, WeComOutbox, wecom_outbox
 from services.wecom_push_service import (
     WECOM_TEXT_BYTE_LIMIT,
     encrypt_webhook_url,
@@ -548,6 +548,214 @@ class OutboxRetentionTest(OutboxTestCase):
 
         self.assertEqual(await self.outbox.purge_expired(self.db), 0)
         self.assertEqual(await self._ids(), {old})
+
+    async def test_unfinished_rows_are_never_purged(self):
+        """待发 / 发送中的行不管多老都不删：那是还没发出去的消息，删掉就是静默丢失。"""
+        expired = await self._row(status="sent", days_ago=91, key="old-sent")
+        pending = await self._row(status="pending", days_ago=91, key="old-pending")
+        sending = await self._row(status="sending", days_ago=91, key="old-sending")
+
+        self.assertEqual(await self.outbox.purge_expired(self.db), 1)
+        self.assertEqual(await self._ids(), {pending, sending})
+        self.assertNotIn(expired, await self._ids())
+
+
+class OutboxRetentionScheduleTest(OutboxTestCase):
+    """清理挂在既有 30 秒企微循环上（票 07 验收：确认清理确实在跑）。
+
+    `purge_expired` 单独测过（上面那一类）；这一条测的是**循环真的会调它**——一个写好
+    了但没人调用的清理等于没做，而发送记录表会一直长下去。
+
+    派发与发送中兜底在这一条里桩掉：本用例要的是「清理跑起来了、且只碰终态行」，让
+    派发把待发的行发出去（或标成跳过）反而把夹具本身变成了非终态 → 终态的过程，断言
+    就没法钉在「老不老的待发行都不许删」上。两者本就是同一个循环里顺序执行的三件事，
+    各自另有覆盖（`OutboxSchedulerLoopTest` / `OutboxStaleSendingTest`）。
+    """
+
+    ANCIENT_DAYS = 900
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # 清理有一小时一次的节流：不重置的话这一轮未必会跑（单例的窗口可能刚被用过）。
+        wecom_outbox._next_purge_at = None
+        self.channel_id = await self._channel("卫生群", URL_A)
+        self.old_failed = await self._aged_row("loop-old-failed", "failed")
+        self.old_pending = await self._aged_row("loop-old-pending", "pending")
+        self.old_sending = await self._aged_row("loop-old-sending", "sending")
+
+    async def _aged_row(self, key, status):
+        return await self.db.wecom_outbox_enqueue({
+            "topic_id": TOPIC,
+            "target_channel_id": self.channel_id,
+            "idempotency_key": key,
+            "status": status,
+            "created_at": (
+                datetime.now(CHINA_TZ) - timedelta(days=self.ANCIENT_DAYS)
+            ).isoformat(),
+        })
+
+    async def _ids(self):
+        return {int(row["id"]) for row in await self.db.wecom_outbox_recent(limit=200)}
+
+    async def test_the_resident_loop_purges_expired_rows_and_keeps_the_rest(self):
+        with patch.object(wecom_outbox, "dispatch_pending", new=AsyncMock(return_value=0)), \
+             patch.object(wecom_outbox, "requeue_stale_sending", new=AsyncMock(return_value=0)), \
+             patch.object(wecom_push_service_module, "SCHEDULER_INTERVAL_SECONDS", 0.01):
+            task = asyncio.create_task(wecom_push_service.scheduler_loop(self.db))
+            try:
+                await self._wait_for_purge()
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        remaining = await self._ids()
+        self.assertNotIn(self.old_failed, remaining, "过期的终态行该被清理掉")
+        self.assertIn(self.old_pending, remaining, "待发的行不许被清理（哪怕很老）")
+        self.assertIn(self.old_sending, remaining, "发送中的行不许被清理（哪怕很老）")
+
+    async def _wait_for_purge(self, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.old_failed not in await self._ids():
+                return
+            await asyncio.sleep(0.02)
+        self.fail(f"清理没有在 {timeout}s 内跑起来")
+
+
+class OutboxRecordQueryTest(OutboxTestCase):
+    """发送记录页要的那条查询（票 07）：筛选组合 + 分页 + 总数。
+
+    缝隙沿用出站这条（spec「Testing Decisions」第 2 条）：断言的是**页面读到的行**——
+    按时间倒序、筛选生效、每一页的行数与总数，不测 SQL 形状。
+    """
+
+    SECONDS_AGO = (0, 60, 120, 180, 240)
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.channel_a = await self._channel("卫生群", URL_A)
+        self.channel_b = await self._channel("日报群", URL_B)
+        self.ids = []
+        for index, topic_id in enumerate(
+            ("hygiene_reminder", "sales_report", "hygiene_reminder", "sales_report", "hygiene_reminder")
+        ):
+            status = "failed" if index in (1, 3) else "sent"
+            self.ids.append(await self._row(
+                key=f"record-{index}",
+                topic_id=topic_id,
+                status=status,
+                seconds_ago=self.SECONDS_AGO[index],
+                channel_id=self.channel_a if index % 2 == 0 else self.channel_b,
+            ))
+        self.newest, self.oldest = self.ids[0], self.ids[-1]
+
+    async def _row(self, *, key, topic_id, status, seconds_ago, channel_id):
+        return await self.db.wecom_outbox_enqueue({
+            "topic_id": topic_id,
+            "params_json": json.dumps({"text": key}),
+            "target_channel_id": channel_id,
+            "idempotency_key": key,
+            "status": status,
+            "created_at": (self.clock - timedelta(seconds=seconds_ago)).isoformat(),
+        })
+
+    async def test_records_come_newest_first_and_are_paginated(self):
+        page = await self.db.wecom_outbox_page(page=1, page_size=2)
+
+        self.assertEqual([row["id"] for row in page["rows"]],
+                         [self.newest, self.ids[1]])
+        self.assertEqual(page["total"], 5)
+        self.assertEqual(page["page"], 1)
+        self.assertEqual(page["page_size"], 2)
+        self.assertEqual(page["pages"], 3)
+
+        last = await self.db.wecom_outbox_page(page=3, page_size=2)
+        self.assertEqual([row["id"] for row in last["rows"]], [self.oldest])
+
+        empty = await self.db.wecom_outbox_page(page=4, page_size=2)
+        self.assertEqual(empty["rows"], [])
+        self.assertEqual(empty["total"], 5)
+
+    async def test_filters_by_content_type_and_status_together(self):
+        page = await self.db.wecom_outbox_page(
+            topic_id="sales_report", status="failed", page_size=50
+        )
+
+        self.assertEqual(page["total"], 2)
+        self.assertEqual([row["id"] for row in page["rows"]], [self.ids[1], self.ids[3]])
+        self.assertEqual({row["topic_id"] for row in page["rows"]}, {"sales_report"})
+        self.assertEqual({row["status"] for row in page["rows"]}, {"failed"})
+
+    async def test_filters_by_channel(self):
+        page = await self.db.wecom_outbox_page(channel_id=self.channel_b, page_size=50)
+
+        self.assertEqual([row["id"] for row in page["rows"]], [self.ids[1], self.ids[3]])
+
+    async def test_page_size_and_page_number_are_clamped(self):
+        """页大小与页码都不信外部输入：0 / 负数 / 超上限一律收进安全区间。"""
+        oversized = await self.db.wecom_outbox_page(page=0, page_size=9999)
+
+        self.assertEqual(oversized["page_size"], 200, "页大小要有上限（一次最多 200 行）")
+        self.assertEqual(oversized["page"], 1)
+
+
+class OutboxChannelLastSentTest(OutboxTestCase):
+    """渠道卡片上「最近一次发送成功时间」要按渠道聚合（票 07 顺手修的票 06 遗留）。
+
+    旧写法是「取最近 200 条成功记录、按渠道取首条」：某个群长期没发过，它那条成功
+    记录早就被挤出 200 条之外，卡片上就显示成「从未发送」—— 恰恰是「这个地址是不是
+    失效了」最需要看的那一眼（用户故事 26）给出的却是错的。
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.channel_quiet = await self._channel("长期未发的群", URL_A)
+        self.channel_busy = await self._channel("每天在发的群", URL_B)
+
+    async def _finished(self, channel_id, *, seconds_ago, key, status="sent"):
+        """造一行**终态**记录，完成时间由夹具给（成功时间就是 `finished_at`）。"""
+        stamp = (self.clock - timedelta(seconds=seconds_ago)).isoformat()
+        tdb = self.db._connection.table("wecom_push_outbox")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """INSERT INTO wecom_push_outbox
+                   (topic_id, params_json, target_channel_id, status, attempts,
+                    last_error, idempotency_key, created_at, finished_at)
+                   VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+                ("sales_report", "{}", int(channel_id), status, "boom", key, stamp, stamp),
+            )
+        await tdb.commit()
+
+    async def test_the_quiet_channel_keeps_its_own_last_success(self):
+        """安静渠道的那一条成功记录不被别人的成功记录挤掉。"""
+        await self._finished(self.channel_quiet, seconds_ago=86400, key="quiet-1")
+        newest_quiet = (self.clock - timedelta(seconds=30)).isoformat()
+        await self._finished(self.channel_quiet, seconds_ago=30, key="quiet-2")
+        for index in range(250):
+            await self._finished(self.channel_busy, seconds_ago=index, key=f"busy-{index}")
+
+        last_sent = await self.db.wecom_channel_last_sent()
+
+        self.assertEqual(last_sent.get(self.channel_quiet), newest_quiet,
+                         "安静渠道的时间不该被 250 条新记录挤出结果")
+        self.assertEqual(
+            last_sent.get(self.channel_busy), (self.clock).isoformat(),
+            "在发的渠道取它自己最近的那一条",
+        )
+
+    async def test_only_successful_deliveries_count(self):
+        """失败 / 跳过 / 待发的行都不是「发送成功」：从没成功过的渠道不在结果里。"""
+        await self._finished(self.channel_quiet, seconds_ago=10, key="quiet-failed",
+                             status="failed")
+        await self._finished(self.channel_quiet, seconds_ago=20, key="quiet-skipped",
+                             status="skipped")
+
+        last_sent = await self.db.wecom_channel_last_sent()
+
+        self.assertNotIn(self.channel_quiet, last_sent)
+        await self._finished(self.channel_quiet, seconds_ago=5, key="quiet-sent")
+
+        self.assertIn(self.channel_quiet, await self.db.wecom_channel_last_sent())
 
 
 class DyingSender(FakeSender):

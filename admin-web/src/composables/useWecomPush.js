@@ -33,6 +33,59 @@ export function matrixViewMode(channels) {
     : 'matrix'
 }
 
+/**
+ * 发送记录一页多少条（票 07）。
+ *
+ * 与后端 `/logs` 的 `page_size` 对齐：不给 `page_size` 时后端退回旧的 `limit`（默认
+ * 50），两边默认值必须一样，否则「翻到底了没有」会在页面与后端之间对不上。
+ */
+export const DELIVERY_PAGE_SIZE = 50
+
+/**
+ * 出站状态在页面上的名字（值域与 `db_core/wecom_subscriptions_repo.py` 的
+ * `SUB_OUTBOX_STATUS_*` 一致）。
+ *
+ * 「已经发出去了」（已发）与「还没轮到 / 正在发」（待发 / 发送中）必须分开显示：
+ * 店长查「这封到底发了没有」时看到「待发」却以为已经发了，是最要命的一种误读。
+ */
+export const DELIVERY_STATUS_OPTIONS = [
+  { id: 'pending', name: '待发' },
+  { id: 'sending', name: '发送中' },
+  { id: 'sent', name: '已发' },
+  { id: 'failed', name: '失败' },
+  { id: 'skipped', name: '已跳过' },
+]
+
+/** 出站状态的显示名；注册表里没有这个值就退回原值（不吞掉这一行）。 */
+export function deliveryStatusLabel(status) {
+  const matched = DELIVERY_STATUS_OPTIONS.find((item) => item.id === status)
+  return matched ? matched.name : String(status || '')
+}
+
+/** 记录里的时间戳按秒显示；没有值就给占位符（空字符串直接渲染会是一片空白）。 */
+export function formatDeliveryTime(value) {
+  const raw = String(value || '')
+  if (!raw) return '—'
+  return raw.replace('T', ' ').slice(0, 19)
+}
+
+/**
+ * 发送记录一页的查询参数。
+ *
+ * 空筛选**不发这个键**：`api.get` 会把空串整个丢掉，后端也就分得清「没筛这一项」与
+ * 「按空值筛」（后者在 `topic_id=` 上一行都筛不出来）。带哪些键只在这里决定。
+ */
+export function deliveryQuery({ topicId = '', channelId = '', status = '', page = 1 } = {}) {
+  const params = { page: Number(page) || 1, page_size: DELIVERY_PAGE_SIZE }
+  const topic = String(topicId || '').trim()
+  const channel = channelId === 0 || channelId ? Number(channelId) : 0
+  const state = String(status || '').trim()
+  if (topic) params.topic_id = topic
+  if (channel) params.channel_id = channel
+  if (state) params.status = state
+  return params
+}
+
 /** 矩阵里有几行订阅（行 = 内容类型）。 */
 export function matrixTopics(matrix) {
   return (matrix && matrix.topics) || []
@@ -189,7 +242,14 @@ export function useWecomPush() {
   const topics = ref([])
   const groups = ref([])
   const jobs = ref([])
-  const logs = ref([])
+  // 发送记录（票 07）：一页记录 + 筛选 + 总数，页面上的表格与分页条都读它。
+  const deliveries = reactive({
+    rows: [],
+    total: 0,
+    page: 1,
+    pages: 0,
+    filters: { topicId: '', channelId: '', status: '' },
+  })
   const matrix = ref({ topics: [], channels: [] })
   const selectedJobId = ref(null)
   const previewContent = ref('')
@@ -266,9 +326,35 @@ export function useWecomPush() {
     if (!selectedJobId.value && jobs.value.length) selectedJobId.value = jobs.value[0].id
   }
 
-  async function loadLogs() {
-    const data = await api.get('/api/wecom-push/logs', { limit: 80 })
-    logs.value = data.logs || []
+  /**
+   * 发送记录：页面上要的是一页（后端算好总数），不是「最近 N 条」。
+   *
+   * 切到统一出站表之后（ADR 0095），**这一条就是这一页唯一的记录来源**：旧表那一份
+   * （`/logs` 的 `logs` 键）只为缓存着旧 bundle 的浏览器留着，页面不读它。所以这里
+   * 连 `limit` 都不发 —— 一页多少条由页码与 `page_size` 决定。
+   */
+  async function loadDeliveries({ page = null } = {}) {
+    if (page !== null) deliveries.page = Math.max(1, Number(page) || 1)
+    const data = await api.get('/api/wecom-push/logs', deliveryQuery({
+      topicId: deliveries.filters.topicId,
+      channelId: deliveries.filters.channelId,
+      status: deliveries.filters.status,
+      page: deliveries.page,
+    }))
+    deliveries.rows = data.rows || []
+    deliveries.total = Number(data.total) || 0
+    deliveries.pages = Number(data.pages) || 0
+    deliveries.page = Number(data.page) || deliveries.page
+    return deliveries
+  }
+
+  /** 改筛选：**回到第一页**（停在第 4 页时换了筛选条件，那一页往往已经不存在）。 */
+  async function applyDeliveryFilters({ topicId = '', channelId = '', status = '' } = {}) {
+    deliveries.filters.topicId = topicId
+    deliveries.filters.channelId = channelId
+    deliveries.filters.status = status
+    deliveries.page = 1
+    return loadDeliveries()
   }
 
   async function loadAll() {
@@ -278,7 +364,6 @@ export function useWecomPush() {
       await loadMeta()
       await loadChannels()
       await loadJobs()
-      await loadLogs()
     } catch (e) {
       error.value = e.message || '加载失败'
     } finally {
@@ -363,7 +448,7 @@ export function useWecomPush() {
 
   async function testChannel(id) {
     const result = await api.post(`/api/wecom-push/webhooks/${id}/test`, {})
-    await loadLogs()
+    await loadChannels()
     return result
   }
 
@@ -515,17 +600,20 @@ export function useWecomPush() {
   async function sendSelectedJob() {
     if (!selectedJobId.value) throw new Error('请先选择任务')
     const result = await api.post(`/api/wecom-push/jobs/${selectedJobId.value}/send-now`, {})
-    await loadLogs()
+    // 这条旧入口不走统一出站、也不落发送记录（票 08 把定时任务切过去），所以这里只把
+    // 记录页重新拉一遍：本轮新入队的投递（如果有）立刻可见。
+    await loadDeliveries()
     return result
   }
 
   return {
-    meta, channels, topics, groups, jobs, logs, matrix,
+    meta, channels, topics, groups, jobs, matrix, deliveries,
     selectedJobId, previewContent, previewMeta, loading, error,
     activeTab, channelForm, channelGroupForm, multiSelect,
     contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
     resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
-    loadAll, loadMeta, loadChannels, loadSubscriptions, loadChannelGroups, loadJobs, loadLogs,
+    loadAll, loadMeta, loadChannels, loadSubscriptions, loadChannelGroups, loadJobs,
+    loadDeliveries, applyDeliveryFilters,
     editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,
     editChannelGroup, saveChannelGroup, deleteChannelGroup,
     addGroupMember, removeGroupMember, syncChannelGroups,

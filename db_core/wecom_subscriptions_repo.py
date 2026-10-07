@@ -30,6 +30,11 @@ _OUTBOX_FINISHED_STATUSES = (
     SUB_OUTBOX_STATUS_SKIPPED,
 )
 
+# 发送记录页的页码与页大小（票 07）。页大小有上限：一页 200 行已经够在窄屏上翻，
+# 再大就变成「一次请求把整张表的正文摘要都拉下来」。
+OUTBOX_PAGE_SIZE_DEFAULT = 50
+OUTBOX_PAGE_SIZE_MAX = 200
+
 
 def _now() -> str:
     return datetime.now(CHINA_TZ).isoformat()
@@ -561,6 +566,106 @@ class _WecomSubscriptionsRepoMixin:
         except Exception as e:
             logger.error(f"❌ 获取发送记录失败: {e}")
             return []
+
+    async def wecom_outbox_page(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = OUTBOX_PAGE_SIZE_DEFAULT,
+        topic_id: Optional[str] = None,
+        channel_id: Optional[int] = None,
+        status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """发送记录的一页（票 07）：按时间倒序 + 内容类型 / 渠道 / 状态筛选 + 总数。
+
+        与 ``wecom_outbox_recent`` 分开而不是改它：那条是「最近 N 条」的口径，被页面
+        首屏与调度侧读着，加了 offset / 总数就换了语义。这一条专门服务于带筛选的
+        记录页 —— 返回 ``{rows, total, page, page_size, pages}``。
+
+        页大小与页码一律收进安全区间（外部输入不进 SQL 的 ``LIMIT`` / ``OFFSET``）：
+        ``page_size`` 收进 1..200，``page`` 不小于 1。``total`` 是**筛选之后**的总数，
+        页面据此算得出还有没有下一页。
+        """
+        try:
+            safe_size = max(1, min(int(page_size), OUTBOX_PAGE_SIZE_MAX))
+            safe_page = max(1, int(page))
+            conditions: List[str] = []
+            params: List[Any] = []
+            if topic_id:
+                conditions.append("topic_id = ?")
+                params.append(str(topic_id))
+            if channel_id is not None:
+                conditions.append("target_channel_id = ?")
+                params.append(int(channel_id))
+            if status:
+                conditions.append("status = ?")
+                params.append(str(status))
+            where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+
+            tdb = self._connection.table("wecom_push_outbox")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    f"SELECT COUNT(*) AS total FROM wecom_push_outbox{where}", params
+                )
+                counted = await cursor.fetchone()
+                total = int(dict(counted)["total"]) if counted else 0
+                await cursor.execute(
+                    f"""SELECT id, topic_id, params_json, schedule_id, target_channel_id,
+                               content_summary, message_bytes, status, attempts, last_error,
+                               idempotency_key, scheduled_at, created_at, sending_at,
+                               finished_at
+                        FROM wecom_push_outbox{where}
+                        ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?""",
+                    [*params, safe_size, (safe_page - 1) * safe_size],
+                )
+                rows = await cursor.fetchall()
+            return {
+                "rows": [dict(row) for row in rows],
+                "total": total,
+                "page": safe_page,
+                "page_size": safe_size,
+                "pages": (total + safe_size - 1) // safe_size if total else 0,
+            }
+        except Exception as e:
+            logger.error(f"❌ 获取发送记录失败: {e}")
+            return {
+                "rows": [],
+                "total": 0,
+                "page": max(1, int(page)),
+                "page_size": max(1, min(int(page_size), OUTBOX_PAGE_SIZE_MAX)),
+                "pages": 0,
+            }
+
+    async def wecom_channel_last_sent(self) -> Dict[int, str]:
+        """每个渠道最近一次**成功**投递的时间，``{channel_id: 时间戳}``。
+
+        按渠道聚合（``MAX(finished_at)``）而不是「取最近 N 条成功记录再挑首条」：采样
+        版本里，一个长期没发过的群，它那条成功记录早被挤出窗口，渠道卡片就把它显示成
+        「从未发送」—— 而「这个地址是不是失效了」正是卡片上这一眼要回答的问题。
+
+        没成功过的渠道**不出现在结果里**（页面据此显示「从未发送」）。历史搬入的行没
+        有 ``finished_at``，退回 ``created_at``：入队时刻就是当时那次投递的时刻。
+        """
+        try:
+            tdb = self._connection.table("wecom_push_outbox")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT target_channel_id AS channel_id,
+                              MAX(COALESCE(finished_at, created_at)) AS last_sent_at
+                       FROM wecom_push_outbox
+                       WHERE status = ? AND target_channel_id IS NOT NULL
+                       GROUP BY target_channel_id""",
+                    (SUB_OUTBOX_STATUS_SENT,),
+                )
+                rows = await cursor.fetchall()
+            return {
+                int(dict(row)["channel_id"]): str(dict(row)["last_sent_at"])
+                for row in rows
+                if dict(row).get("last_sent_at")
+            }
+        except Exception as e:
+            logger.error(f"❌ 聚合渠道最近发送时间失败: {e}")
+            return {}
 
     async def wecom_outbox_mark_sending(
         self, outbox_id: int, *, sending_at: Optional[str] = None

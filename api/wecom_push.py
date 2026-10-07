@@ -232,27 +232,45 @@ def _safe_webhook(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _delivery_row(row: Dict[str, Any], channels: Dict[int, Dict[str, Any]]) -> Dict[str, Any]:
+    """一条发送记录回给页面的形状（票 07）。
+
+    字段就是页面表格的那七列（时间 / 目标渠道 / 内容类型 / 状态 / 字节数 / 尝试次数 /
+    最后一次错误）加上 `content_summary`（鼠标悬停能认出这是哪一封）与
+    `finished_at`（终态时间；没完成的行没有）。
+    """
+    channel_id = row.get("target_channel_id")
+    channel = channels.get(int(channel_id)) if channel_id is not None else None
+    topic_id = str(row.get("topic_id") or "")
+    return {
+        "id": int(row["id"]),
+        "created_at": row.get("created_at") or "",
+        "finished_at": row.get("finished_at") or "",
+        "channel_id": int(channel_id) if channel_id is not None else None,
+        # 渠道删掉之后名字取不到：回空串而不是让整行读不出来（历史不该跟着渠道消失）。
+        "channel_name": channel.get("name", "") if channel else "",
+        "topic_id": topic_id,
+        # 注册表里没有这个 id（内容类型下过线）就退回 id：页面要看得见这一行。
+        "topic_name": _topic_name(topic_id),
+        "status": str(row.get("status") or ""),
+        "message_bytes": int(row.get("message_bytes") or 0),
+        "attempts": int(row.get("attempts") or 0),
+        "last_error": str(row.get("last_error") or ""),
+        "content_summary": str(row.get("content_summary") or ""),
+    }
+
+
 async def _channel_last_sent(db: DatabaseManager) -> Dict[int, str]:
     """每个渠道最近一次**成功**投递的完成时间（`{channel_id: ISO}`）。
 
-    成功一次 = 出站表里 status = sent 的那一行。取不到（从未发过）就不在字典里，
-    页面上显示「从未发送」。
+    成功一次 = 出站表里 status = sent 的那一行，按渠道取 `MAX(finished_at)`：**聚合，
+    不是采样**。以前是「取最近 200 条成功记录、按渠道挑首条」，一个长期没发过的群，
+    它那条成功记录早被挤出窗口，卡片就显示成「从未发送」—— 恰恰是「这个地址是不是
+    失效了」最需要的那一眼给出的却是错的（用户故事 26）。
+
+    取不到（从未成功过）就不在字典里，页面上显示「从未发送」。
     """
-    rows = await db.wecom_outbox_recent(limit=200, status="sent")
-    latest: Dict[int, str] = {}
-    for row in rows:
-        channel_id = row.get("target_channel_id")
-        if channel_id is None:
-            continue
-        key = int(channel_id)
-        if key in latest:
-            continue
-        # repo 按 created_at 倒序取，第一眼看到的就是最近那条；终态行的 finished_at
-        # 才是「发送成功」的时刻，缺了（历史搬入行没有这一列的值）就退回 created_at。
-        stamp = str(row.get("finished_at") or row.get("created_at") or "")
-        if stamp:
-            latest[key] = stamp
-    return latest
+    return await db.wecom_channel_last_sent()
 
 
 async def _subscription_targets(db: DatabaseManager) -> Dict[str, Any]:
@@ -843,9 +861,47 @@ async def send_job_now(job_id: int, db: DatabaseManager = Depends(get_db)):
 @router.get("/logs")
 async def list_logs(
     limit: int = Query(50, ge=1, le=200),
+    page: int = Query(1, ge=1),
+    page_size: Optional[int] = Query(None, ge=1),
+    topic_id: Optional[str] = Query(None, max_length=60),
+    channel_id: Optional[int] = Query(None, gt=0),
+    status: Optional[str] = Query(None, max_length=20),
     db: DatabaseManager = Depends(get_db),
 ):
-    return {"success": True, "logs": await db.wecom_logs_recent(limit)}
+    """发送记录（票 07）：读的是**统一出站表**（ADR 0095：队列表与发送记录是同一张表）。
+
+    每行带上页面要显示的七样：时间、目标渠道、内容类型、状态、字节数、尝试次数、
+    最后一次错误。渠道名与内容类型名在服务端配好（`channel_name` / `topic_name`），
+    页面不必拿 id 去两张表里对照；渠道被删之后那一行的 `channel_id` 是 null、名字退回
+    空串，行本身仍然读得出来（外键 ON DELETE SET NULL，历史不该跟着渠道消失）。
+
+    ``logs`` 那一份是**旧表**的镜像，只为缓存着旧 bundle 的浏览器留着（新页面读
+    `rows`）：它不是数据源，也不会再有这一页产生的新行。
+
+    ``page_size`` 不给时退回 ``limit``：页面重构前的调用是 ``?limit=80``（没有分页与
+    筛选），那一次它要的就是「最近 80 条」—— 切表之后这个口径逐字保住。页大小上限
+    200，一次请求拉不走整张表。
+    """
+    size = min(page_size or limit, 200)
+    result = await db.wecom_outbox_page(
+        page=page,
+        page_size=size,
+        topic_id=topic_id,
+        channel_id=channel_id,
+        status=status,
+    )
+    channels = {int(row["id"]): row for row in await db.wecom_webhooks_all()}
+    return {
+        "success": True,
+        "api_version": WECOM_PUSH_API_VERSION,
+        "rows": [_delivery_row(row, channels) for row in result["rows"]],
+        "total": result["total"],
+        "page": result["page"],
+        "page_size": result["page_size"],
+        "pages": result["pages"],
+        # 旧形状：只读镜像，见 docstring。
+        "logs": await db.wecom_logs_recent(limit),
+    }
 
 
 @router.get("/meta")
