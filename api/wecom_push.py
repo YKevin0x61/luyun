@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from api.security import verify_admin_token
 from database import get_db, CHINA_TZ, DatabaseManager
+from services.wecom_push_topics import PushTrigger, all_topics
 from services.wecom_push_service import (
     RenderedMessage,
     ALLOWED_PUSH_TYPES,
@@ -344,8 +345,14 @@ async def list_logs(
 
 @router.get("/meta")
 async def get_meta():
+    """页面元数据：旧的字段**原样保留**（缓存着旧 bundle 的浏览器还在读它们）。
+
+    新增的是推送内容类型注册表（票 02 / ADR 0097）：前端据此渲染内容类型下拉、
+    参数表单（schema + uischema）与下拉选项，加一类内容类型只改后端注册表。
+    """
     return {
         "success": True,
+        # ── 旧形状：`/jobs` 的 push_type 与任务模板仍按它工作，不要动 ──────────
         "push_types": [
             {"id": SALES_REPORT_PUSH_TYPE, "name": "销售报表文字版"},
             {"id": DATA_QUALITY_PUSH_TYPE, "name": "数据质量告警"},
@@ -371,5 +378,10 @@ async def get_meta():
                 "date_range_mode": "today",
                 "notes": "建议在日终对账（22:05）之后推送",
             },
+        ],
+        # ── 推送内容类型注册表 ────────────────────────────────────────────────
+        "topics": [topic.payload() for topic in all_topics()],
+        "triggers": [
+            {"id": trigger.value, "name": trigger.label} for trigger in PushTrigger
         ],
     }
