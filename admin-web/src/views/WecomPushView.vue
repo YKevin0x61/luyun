@@ -4,28 +4,29 @@ import {
   useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, scheduledTopics,
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
   canSendNow, sendNowConfirmText, DELIVERY_STATUS_OPTIONS, deliveryStatusLabel,
-  formatDeliveryTime,
+  formatDeliveryTime, auditActionLabel, auditObjectLabel, auditVisibleFields,
+  auditChangeText,
 } from '../composables/useWecomPush'
 import SvgIcon from '../components/SvgIcon.vue'
 import PushParamsForm from '../components/wecom/PushParamsForm.vue'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
 
-// 页内 tab：不改路由（页面清单契约保持绿）。五个 tab 里的「变更历史」是第二批，
-// 本票先摆四个；定时任务与发送记录两个 tab 的内容本票**原样搬入**，票 07/08 各自重做。
+// 页内 tab：不改路由（页面清单契约保持绿）。「变更历史」是票 11 的第五个 tab。
 const TABS = [
   { id: 'channels', name: '渠道' },
   { id: 'subscriptions', name: '订阅' },
   { id: 'jobs', name: '定时任务' },
   { id: 'logs', name: '发送记录' },
+  { id: 'audit', name: '变更历史' },
 ]
 
 const {
-  meta, channels, topics, groups, jobs, matrix, deliveries, selectedJobId,
+  meta, channels, topics, groups, jobs, matrix, deliveries, audit, selectedJobId,
   previewContent, previewMeta, error, activeTab, channelForm, channelGroupForm,
   multiSelect, contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
   resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
   loadAll, loadSubscriptions, loadJobs, loadDeliveries, applyDeliveryFilters,
-  loadChannels,
+  loadChannels, loadAuditLog, applyAuditFilters,
   editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,
   editChannelGroup, saveChannelGroup, deleteChannelGroup,
   addGroupMember, removeGroupMember,
@@ -58,6 +59,48 @@ const deliveryFiltered = computed(() => Boolean(
   deliveries.filters.topicId || deliveries.filters.channelId || deliveries.filters.status,
 ))
 const deliveryStatusOptions = DELIVERY_STATUS_OPTIONS
+
+// 变更历史（票 11）：筛选控件同样是**本地草稿**，点「筛选」才写回 composable 并回第一页。
+const auditFilterForm = ref({ objectType: audit.filters.objectType })
+// 一次筛选都没设：空表时说「暂无变更记录」，否则说「没有符合条件的记录」。
+const auditFiltered = computed(() => Boolean(audit.filters.objectType))
+
+async function handleApplyAuditFilters() {
+  try {
+    await applyAuditFilters(auditFilterForm.value)
+  } catch (e) { flash(e.message, 'error') }
+}
+async function handleAuditPage(page) {
+  try {
+    await loadAuditLog({ page })
+  } catch (e) { flash(e.message, 'error') }
+}
+function handleRefreshAudit() {
+  loadAuditLog().catch((e) => flash(e.message, 'error'))
+}
+
+/**
+ * 切页内 tab。
+ *
+ * 「变更历史」**按需加载**（与发送记录在挂载时另拉一页同一个道理，只是更懒）：它长期
+ * 保留、条数只会涨，而大多数时候店长是来看渠道 / 订阅的 —— 每次打开这一页都顺手拉一页
+ * 历史没有意义。切过去的那一刻拉一次，之后靠「刷新」与翻页。
+ */
+function handleSwitchTab(tabId) {
+  activeTab.value = tabId
+  if (tabId === 'audit') handleRefreshAudit()
+}
+
+/**
+ * 一行记录里「变更内容」那几行的文本。
+ *
+ * 逐字段算差异，页面只负责渲染「改前 → 改后」（口径在 composable 的 `auditFieldChanges`
+ * 里，与后端 `changed_fields` 同一份）：一次保存动了名字又动了启停时，两行都要看得见。
+ * 行内 id 与已用名字表达过的外键由 `auditVisibleFields` 挡掉（记录里还在，只是不显示）。
+ */
+function auditChanges(row) {
+  return auditVisibleFields(row).map(([field, change]) => auditChangeText(field, change))
+}
 
 async function handleApplyDeliveryFilters() {
   try {
@@ -263,7 +306,7 @@ onMounted(async () => {
         class="view-tab"
         :class="{ active: activeTab === tab.id }"
         type="button"
-        @click="activeTab = tab.id"
+        @click="handleSwitchTab(tab.id)"
       >{{ tab.name }}</button>
       <span style="margin-left:auto;color:var(--text-dim);font-size:11px;align-self:center">
         接口版本 {{ WECOM_PUSH_API_VERSION }}
@@ -759,6 +802,111 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+    <!-- ═══ 变更历史（票 11）══════════════════════════════════════════════ -->
+    <div v-if="activeTab === 'audit'" class="card">
+      <div class="panel-title" style="display:flex;justify-content:space-between">
+        <span>变更历史</span>
+        <span style="display:flex;gap:8px;align-items:center">
+          <span style="color:var(--text-dim);font-size:12px">共 {{ audit.total }} 条</span>
+          <button class="btn btn-sm" @click="handleRefreshAudit">刷新</button>
+        </span>
+      </div>
+      <p style="color:var(--text-dim);font-size:12px;margin:0 0 8px">
+        渠道、群组与成员、订阅、任务的每一次变更都留一条记录：谁、什么时候、改了什么。
+        与「发送记录」不同，变更历史**长期保留**，不会被自动清理。
+      </p>
+
+      <!-- 筛选：对象类型（选项来自读接口，加一种对象类型只改后端）+ 分页 -->
+      <div class="wp-audit-filters">
+        <div class="form-row">
+          <label>对象类型</label>
+          <select class="select" v-model="auditFilterForm.objectType">
+            <option value="">全部对象类型</option>
+            <option v-for="item in audit.objectTypes" :key="item.id" :value="item.id">
+              {{ item.name }}
+            </option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;align-items:flex-end">
+          <button class="btn btn-primary btn-sm" type="button" @click="handleApplyAuditFilters">筛选</button>
+          <button
+            class="btn btn-sm"
+            type="button"
+            :disabled="!auditFiltered"
+            @click="auditFilterForm = { objectType: '' }; handleApplyAuditFilters()"
+          >清空筛选</button>
+        </div>
+      </div>
+
+      <div class="data-table-wrap luyun-scrollbar" style="max-height:520px">
+        <table class="data-table wp-audit-table">
+          <thead>
+            <tr>
+              <th style="cursor:default">时间</th>
+              <th style="cursor:default">操作人</th>
+              <th style="cursor:default">操作</th>
+              <th style="cursor:default">对象</th>
+              <th style="cursor:default">变更内容</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!audit.rows.length">
+              <td colspan="5" class="empty-state">
+                {{ auditFiltered ? '没有符合条件的记录，可换个对象类型或清空筛选' : '暂无变更记录' }}
+              </td>
+            </tr>
+            <tr v-for="item in audit.rows" :key="item.id">
+              <td style="white-space:nowrap">{{ formatDeliveryTime(item.created_at) }}</td>
+              <td>{{ item.actor || '（未知）' }}</td>
+              <td>
+                <!-- 动作的颜色是给人扫的：停用 / 删除是"少了一个收件人"的两种，红色。 -->
+                <span
+                  class="badge"
+                  :style="item.action === 'delete'
+                    ? 'color:var(--red);border-color:var(--red)'
+                    : (item.action === 'disable' ? 'color:var(--yellow);border-color:var(--yellow)' : '')"
+                >{{ auditActionLabel(item.action) }}</span>
+              </td>
+              <td>
+                <div>{{ auditObjectLabel(item.object_type) }}</div>
+                <div style="color:var(--text-dim);font-size:12px">{{ item.object_name }}</div>
+              </td>
+              <td>
+                <div
+                  v-for="(line, index) in auditChanges(item)"
+                  :key="index"
+                  style="font-size:12px"
+                >{{ line }}</div>
+                <span v-if="!auditChanges(item).length" style="color:var(--text-dim);font-size:12px">
+                  未改动任何字段
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="wp-audit-pager">
+        <button
+          class="btn btn-sm"
+          type="button"
+          :disabled="audit.page <= 1"
+          @click="handleAuditPage(audit.page - 1)"
+        >上一页</button>
+        <span style="color:var(--text-dim);font-size:12px">
+          第 {{ audit.page }} / {{ Math.max(audit.pages, 1) }} 页
+        </span>
+        <button
+          class="btn btn-sm"
+          type="button"
+          :disabled="audit.page >= audit.pages"
+          @click="handleAuditPage(audit.page + 1)"
+        >下一页</button>
+        <span style="color:var(--text-dim);font-size:11px">
+          变更历史长期保留，不随发送记录的保留天数清理。
+        </span>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -844,4 +992,26 @@ onMounted(async () => {
   flex-wrap: wrap;
   margin-top: 10px;
 }
+
+/* 变更历史（票 11）：筛选行与分页条与发送记录同一套写法，窄屏要能换行。 */
+.wp-audit-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  margin-bottom: 10px;
+}
+.wp-audit-filters .form-row { min-width: 150px; flex: 1 1 150px; }
+
+.wp-audit-pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+/* 变更内容那一列是「改前 → 改后」的逐行文本：允许换行，别把表格撑出横向滚动。 */
+:deep(.data-table.wp-audit-table td) { vertical-align: top; }
+:deep(.data-table.wp-audit-table td:nth-child(5)) { white-space: normal; min-width: 200px; }
 </style>

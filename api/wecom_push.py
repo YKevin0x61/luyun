@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from api.security import require_session, verify_admin_token
 from database import get_db, DatabaseManager
+from services import auth_service, wecom_audit
 from services.wecom_outbox import ResolvedTarget, resolve_targets, wecom_outbox
 from services.wecom_push_topics import (
     TOPIC_MANUAL_SEND,
@@ -76,6 +77,158 @@ def _topic_name(topic_id: str) -> str:
     """
     return topic_display_name(topic_id)
 
+
+
+def _channel_snapshot(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """渠道变更记录里的快照（没这一行说明这次是新建）。
+
+    **只放名称、启停与掩码地址**：地址的明文与密文都不进审计表 —— 变更历史要能读出
+    「改了什么」，但不该变成第二份凭据存储（页面上的渠道卡片显示的也正是掩码）。
+    """
+    if not row:
+        return None
+    return {
+        "name": row.get("name", ""),
+        "enabled": bool(row.get("enabled")),
+        "url": row.get("webhook_url_masked", ""),
+    }
+
+
+async def _group_snapshot(
+    db: DatabaseManager, group_id: int
+) -> Optional[Dict[str, Any]]:
+    """群组变更记录里的快照：名称 / 启停 / **成员名单**（成员是群组自身的配置）。
+
+    成员用渠道名（不是 id）：记录要能直接读，页面上那几列不该再让人拿 id 去别处对照。
+    渠道已经被删掉时退回 ``#id``，不丢这一项。
+    """
+    group = await db.wecom_channel_group_get(group_id)
+    if group is None:
+        return None
+    members = await db.wecom_channel_group_members(group_id)
+    names = {
+        int(row["id"]): str(row.get("name") or "")
+        for row in await db.wecom_webhooks_all()
+    }
+    # 按渠道 id 排（渠道的登记顺序），不是按名字排：名字是中文，字典序在这种地方
+    # 只会让「谁先进来的」看不出来。
+    return {
+        "name": group.get("name", ""),
+        "enabled": bool(group.get("enabled")),
+        "members": [
+            names.get(int(member["channel_id"])) or f"#{int(member['channel_id'])}"
+            for member in sorted(members, key=lambda row: int(row["channel_id"]))
+        ],
+    }
+
+
+def _subscription_snapshot(
+    row: Optional[Dict[str, Any]], target_name: str
+) -> Optional[Dict[str, Any]]:
+    """订阅变更记录里的快照：内容类型 + 目标（渠道名或群组名）+ 启停。
+
+    「订阅了什么」在接口上只有 id，记录里必须是名字 —— 半年后那个渠道可能已经删了，
+    而这一列正是要回答「当时是谁把日报群取消的」。
+    """
+    if not row:
+        return None
+    return {
+        # 订阅自己的 id（记录里那一行的标识；删除时快照取自删除前的同一行）。
+        "id": row.get("id"),
+        "topic_id": str(row.get("topic_id") or ""),
+        "target_channel_id": row.get("target_channel_id"),
+        "target_group_id": row.get("target_group_id"),
+        "target_name": target_name,
+        "enabled": bool(row.get("enabled")),
+    }
+
+
+def _subscription_name(topic_id: str, target_name: str) -> str:
+    """订阅记录的对象名：「内容类型 → 目标」——历史里一眼看得出这是哪一条订阅。"""
+    return f"{_topic_name(topic_id)} → {target_name or '（未知目标）'}"
+
+
+async def _job_snapshot(db: DatabaseManager, job_id: int) -> Optional[Dict[str, Any]]:
+    """任务变更记录里的快照：名称 / 内容类型 / 时间 / 启停（参数不逐字段铺开）。"""
+    job = await db.wecom_job_get(job_id)
+    if job is None:
+        return None
+    return {
+        "name": job.get("name", ""),
+        "topic_id": str(job.get("topic_id") or ""),
+        "schedule_time": job.get("schedule_time", ""),
+        "enabled": bool(job.get("enabled")),
+    }
+
+
+async def _record_audit(
+    db: DatabaseManager, audit: Dict[str, Any], item: Dict[str, Any]
+) -> None:
+    """落一条变更记录：**这里吞掉一切异常，只记日志**。
+
+    这是票面的硬要求 —— 审计写失败不能让原本成功的配置变更报错。业务事务在这一行之前
+    就已经提交了，所以这里再抛出去只会把一个已经生效的变更在页面上显示成失败（店长会
+    重做一次，于是变更被执行两遍）。
+
+    ``db.wecom_audit_add`` 自己也会吞异常（与 ``wecom_repo.py`` 的既有方法一致），
+    但这一层不依赖被调方守约：换成任何实现（真探到了爆炸路径）都不会穿到路由。
+    用例见 ``tests/test_wecom_push_audit_api.py`` 的
+    ``test_a_channel_change_still_succeeds_when_the_audit_write_fails``。
+    """
+    try:
+        await db.wecom_audit_add({**item, "actor": (audit or {}).get("actor", "")})
+    except Exception as exc:  # noqa: BLE001 - 审计绝不阻断业务
+        logger.error("写入推送配置变更记录失败（这次变更仍然生效）: %s", exc)
+
+
+# ── 配置变更历史（票 11）────────────────────────────────────────────────────
+#
+# 埋点落点：**挂在写路由的依赖上**（`audit_context`），业务函数一个字不用改 —— 处理函数
+# 只在自己的身份参数里多一句 ``_audit=Depends(audit_context)``。好处有两条：
+#
+#   1. 门禁与身份只解析一次。这一页的写操作已经收紧成只接受浏览器会话
+#      （票 06 的 `require_session`），操作人就是那个会话对应的管理员账号；
+#   2. 新增写路由时忘不了它 —— 与既有的 `require_session` 契约测试同一处口径
+#      （`test_wecom_push_channels_api.py` 里那条路由表断言）。
+#
+# `require_session` 本身**不动**：它返回的是 session id，而审计要的是账号名，并且
+# 另外几处（卫生、备份、更新）也在用它，改返回值会波及那些调用方。
+async def audit_context(_session: str = Depends(require_session)) -> Dict[str, Any]:
+    """这一次写操作的审计上下文：操作人（登录账号名）。
+
+    取名字失败（库还没初始化 / 连接抖动）**不抛**：审计缺一个人名，不该让一个本来能
+    成功的配置变更报 500 —— 与「审计写失败只记日志」是同一条口径。名字取不到时留空串，
+    记录照写（时间、动作、对象、前后值都还在）。
+    """
+    try:
+        return {"actor": await auth_service.get_admin_username() or ""}
+    except Exception as exc:  # noqa: BLE001 - 审计上下文绝不阻断业务
+        logger.warning("读取审计操作人失败（记录仍会写入，操作人留空）: %s", exc)
+        return {"actor": ""}
+
+
+def _audit(row: Dict[str, Any]) -> Dict[str, Any]:
+    """一条审计记录回给页面的形状（与 ``auditQuery`` 的筛选参数同名）。"""
+    return {
+        "id": int(row["id"]),
+        "created_at": row.get("created_at") or "",
+        "actor": row.get("actor") or "",
+        "action": row.get("action") or "",
+        "object_type": row.get("object_type") or "",
+        "object_id": row.get("object_id"),
+        "object_name": row.get("object_name") or "",
+        "before": _audit_json(row.get("before_json")),
+        "after": _audit_json(row.get("after_json")),
+    }
+
+
+def _audit_json(value: Any) -> Dict[str, Any]:
+    """快照那一列是 JSON 文本；坏了就回空对象（这一行仍要读得出来）。"""
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class WebhookIn(BaseModel):
@@ -545,6 +698,7 @@ async def create_webhook(
     payload: WebhookIn,
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     if not payload.webhook_url:
         raise HTTPException(status_code=400, detail="webhook 地址不能为空")
@@ -559,6 +713,13 @@ async def create_webhook(
     if not new_id:
         raise HTTPException(status_code=500, detail="创建 webhook 失败")
     row = await db.wecom_webhook_get(new_id)
+    await _record_audit(db, audit, wecom_audit.record(
+        action=wecom_audit.AUDIT_ACTION_CREATE,
+        object_type=wecom_audit.AUDIT_OBJECT_CHANNEL,
+        object_id=new_id,
+        object_name=str((row or {}).get("name") or payload.name),
+        after=_channel_snapshot(row),
+    ))
     # 旧 bundle 读 `webhook`，新页面读 `channel`（多带最近发送时间等）：两个都给，
     # 形状不变的那一支保持原样。
     return {"success": True, "webhook": _safe_webhook(row), "channel": await _channel_card(db, new_id)}
@@ -570,6 +731,7 @@ async def update_webhook(
     payload: WebhookIn,
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     existing = await db.wecom_webhook_get(webhook_id)
     if not existing:
@@ -589,6 +751,17 @@ async def update_webhook(
     if not ok:
         raise HTTPException(status_code=500, detail="更新 webhook 失败")
     row = await db.wecom_webhook_get(webhook_id)
+    await _record_audit(db, audit, wecom_audit.record(
+        # 启停单列成 enable / disable（列表上的快捷开关正是这一种），其余是 update。
+        action=wecom_audit.action_for_change(
+            _channel_snapshot(existing), _channel_snapshot(row)
+        ),
+        object_type=wecom_audit.AUDIT_OBJECT_CHANNEL,
+        object_id=webhook_id,
+        object_name=str((row or {}).get("name") or payload.name),
+        before=_channel_snapshot(existing),
+        after=_channel_snapshot(row),
+    ))
     return {
         "success": True,
         "webhook": _safe_webhook(row),
@@ -601,6 +774,7 @@ async def delete_webhook(
     webhook_id: int,
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     """删除渠道。
 
@@ -608,6 +782,7 @@ async def delete_webhook(
     由订阅决定。被订阅引用时不拒绝 —— 订阅与群组成员是跟着渠道走的附属关系（外键级联），
     删除渠道就是取消它全部的订阅，提示里把这层说清楚。
     """
+    existing = await db.wecom_webhook_get(webhook_id)
     subscriptions = await db.wecom_subscriptions_all()
     drops_subscription = any(
         int(item.get("target_channel_id") or 0) == webhook_id for item in subscriptions
@@ -622,6 +797,14 @@ async def delete_webhook(
     ok = await db.wecom_webhook_delete(webhook_id)
     if not ok:
         raise HTTPException(status_code=500, detail="删除 webhook 失败")
+    # 快照在删除**之前**取（上面那一行），删完就查不到名字了。
+    await _record_audit(db, audit, wecom_audit.record(
+        action=wecom_audit.AUDIT_ACTION_DELETE,
+        object_type=wecom_audit.AUDIT_OBJECT_CHANNEL,
+        object_id=webhook_id,
+        object_name=str((existing or {}).get("name") or f"#{webhook_id}"),
+        before=_channel_snapshot(existing),
+    ))
     return {"success": True, "message": f"渠道已删除{group_note}"}
 
 
@@ -651,6 +834,7 @@ async def create_channel_group(
     payload: ChannelGroupIn,
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     group_id = await db.wecom_channel_group_create({
         "name": payload.name,
@@ -659,7 +843,15 @@ async def create_channel_group(
     })
     if not group_id:
         raise HTTPException(status_code=400, detail=_DUPLICATE_GROUP_NAME)
-    return {"success": True, "group": await _group_detail(db, group_id)}
+    detail = await _group_detail(db, group_id)
+    await _record_audit(db, audit, wecom_audit.record(
+        action=wecom_audit.AUDIT_ACTION_CREATE,
+        object_type=wecom_audit.AUDIT_OBJECT_GROUP,
+        object_id=group_id,
+        object_name=payload.name,
+        after=await _group_snapshot(db, group_id),
+    ))
+    return {"success": True, "group": detail}
 
 
 @router.put("/channel-groups/{group_id}")
@@ -668,9 +860,11 @@ async def update_channel_group(
     payload: ChannelGroupIn,
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     if await db.wecom_channel_group_get(group_id) is None:
         raise HTTPException(status_code=404, detail="渠道群组不存在")
+    before = await _group_snapshot(db, group_id)
     ok = await db.wecom_channel_group_update(group_id, {
         "name": payload.name,
         "enabled": payload.enabled,
@@ -678,6 +872,15 @@ async def update_channel_group(
     })
     if not ok:
         raise HTTPException(status_code=500, detail="更新渠道群组失败")
+    after = await _group_snapshot(db, group_id)
+    await _record_audit(db, audit, wecom_audit.record(
+        action=wecom_audit.action_for_change(before, after),
+        object_type=wecom_audit.AUDIT_OBJECT_GROUP,
+        object_id=group_id,
+        object_name=payload.name,
+        before=before,
+        after=after,
+    ))
     return {"success": True, "group": await _group_detail(db, group_id)}
 
 
@@ -686,14 +889,24 @@ async def delete_channel_group(
     group_id: int,
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     """删除群组：成员与指向它的订阅一起走（spec 用户故事 8 的另一面 —— 保留组就是
     「停用」，那一条用 PUT 改 enabled）。"""
-    if await db.wecom_channel_group_get(group_id) is None:
+    existing = await db.wecom_channel_group_get(group_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="渠道群组不存在")
+    before = await _group_snapshot(db, group_id)
     ok = await db.wecom_channel_group_delete(group_id)
     if not ok:
         raise HTTPException(status_code=500, detail="删除渠道群组失败")
+    await _record_audit(db, audit, wecom_audit.record(
+        action=wecom_audit.AUDIT_ACTION_DELETE,
+        object_type=wecom_audit.AUDIT_OBJECT_GROUP,
+        object_id=group_id,
+        object_name=str(existing.get("name") or f"#{group_id}"),
+        before=before,
+    ))
     return {"success": True}
 
 
@@ -703,14 +916,28 @@ async def add_channel_group_member(
     payload: GroupMemberIn,
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     if await db.wecom_channel_group_get(group_id) is None:
         raise HTTPException(status_code=404, detail="渠道群组不存在")
-    if await db.wecom_webhook_get(payload.channel_id) is None:
+    channel = await db.wecom_webhook_get(payload.channel_id)
+    if channel is None:
         raise HTTPException(status_code=404, detail="渠道不存在")
+    before = await _group_snapshot(db, group_id)
     ok = await db.wecom_channel_group_add_member(group_id, payload.channel_id)
     if not ok:
         raise HTTPException(status_code=500, detail="添加群组成员失败")
+    after = await _group_snapshot(db, group_id)
+    # 成员变更记在**群组**这一行上（成员是群组自身的配置），动作仍是 update：
+    # 「渠道 X 什么时候进的这个组」在历史的变更内容里看得见。
+    await _record_audit(db, audit, wecom_audit.record(
+        action=wecom_audit.AUDIT_ACTION_UPDATE,
+        object_type=wecom_audit.AUDIT_OBJECT_GROUP,
+        object_id=group_id,
+        object_name=str(channel.get("name") or f"#{payload.channel_id}"),
+        before=before,
+        after=after,
+    ))
     return {"success": True, "group": await _group_detail(db, group_id)}
 
 
@@ -720,12 +947,24 @@ async def remove_channel_group_member(
     channel_id: int,
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     if await db.wecom_channel_group_get(group_id) is None:
         raise HTTPException(status_code=404, detail="渠道群组不存在")
     # 渠道已经被删掉时也要能清掉这条成员关系：先删成员再删群组是页面上的正常顺序，
     # 不应该因为外键把行带走了就报 404。
+    before = await _group_snapshot(db, group_id)
+    channel = await db.wecom_webhook_get(channel_id)
     await db.wecom_channel_group_remove_member(group_id, channel_id)
+    after = await _group_snapshot(db, group_id)
+    await _record_audit(db, audit, wecom_audit.record(
+        action=wecom_audit.AUDIT_ACTION_UPDATE,
+        object_type=wecom_audit.AUDIT_OBJECT_GROUP,
+        object_id=group_id,
+        object_name=str((channel or {}).get("name") or f"#{channel_id}"),
+        before=before,
+        after=after,
+    ))
     return {"success": True, "group": await _group_detail(db, group_id)}
 
 
@@ -759,18 +998,35 @@ async def upsert_subscription(
     payload: SubscriptionIn,
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     """勾选 / 取消勾选一条订阅。
 
     ``enabled=False`` 是**停用**（保留那一行，重新勾上不用重配）；彻底取消走
     DELETE。同一个「内容类型 × 目标」重复勾选不会多出一行（唯一索引 + upsert）。
     """
+    target_name = ""
     if payload.target_channel_id is not None:
-        if await db.wecom_webhook_get(payload.target_channel_id) is None:
+        channel = await db.wecom_webhook_get(payload.target_channel_id)
+        if channel is None:
             raise HTTPException(status_code=404, detail="渠道不存在")
-    elif await db.wecom_channel_group_get(payload.target_group_id) is None:
-        raise HTTPException(status_code=404, detail="渠道群组不存在")
+        target_name = str(channel.get("name") or "")
+    else:
+        group = await db.wecom_channel_group_get(payload.target_group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail="渠道群组不存在")
+        target_name = str(group.get("name") or "")
 
+    # 变更前的样子：同一「内容类型 × 目标」可能已经有一行（勾选 → 取消 → 再勾选），
+    # 那时改的是 enabled 而不是新建 —— 前后值必须是**这一行**的真实差异。
+    before = _subscription_snapshot(
+        await db.wecom_subscription_for(
+            payload.topic_id,
+            target_channel_id=payload.target_channel_id,
+            target_group_id=payload.target_group_id,
+        ),
+        target_name,
+    )
     try:
         subscription_id = await db.wecom_subscription_upsert({
             "topic_id": payload.topic_id,
@@ -782,6 +1038,27 @@ async def upsert_subscription(
         raise HTTPException(status_code=400, detail=str(exc))
     if not subscription_id:
         raise HTTPException(status_code=500, detail="保存推送订阅失败")
+    after = _subscription_snapshot(
+        {
+            # 这一行的 id 用 upsert 的返回值：不填的话，勾选 → 取消再勾选那一次会算出
+            # 一个假的「id: 1 → （空）」变更（同一行，id 根本没动）。
+            "id": subscription_id,
+            "topic_id": payload.topic_id,
+            "target_channel_id": payload.target_channel_id,
+            "target_group_id": payload.target_group_id,
+            "enabled": payload.enabled,
+        },
+        target_name,
+    )
+    await _record_audit(db, audit, wecom_audit.record(
+        # 勾选与取消都是 update（这一行的启停变了）；新建那一行没有改前，判成 create。
+        action=wecom_audit.action_for_change(before, after),
+        object_type=wecom_audit.AUDIT_OBJECT_SUBSCRIPTION,
+        object_id=subscription_id,
+        object_name=_subscription_name(payload.topic_id, target_name),
+        before=before,
+        after=after,
+    ))
     return {"success": True, "subscription_id": subscription_id}
 
 
@@ -792,11 +1069,27 @@ async def delete_subscription(
     target_group_id: Optional[int] = Query(None, gt=0),
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     if get_topic(topic_id) is None:
         raise HTTPException(status_code=400, detail=f"未知的推送内容类型: {topic_id}")
     if (target_channel_id is None) == (target_group_id is None):
         raise HTTPException(status_code=400, detail="订阅必须且只能指定一个目标（渠道或群组）")
+    # 目标名在删除**之前**取：这一行马上要没了，而记录里要写得出来是谁。
+    if target_channel_id is not None:
+        target = await db.wecom_webhook_get(target_channel_id)
+        target_name = str((target or {}).get("name") or f"#{target_channel_id}")
+    else:
+        target = await db.wecom_channel_group_get(target_group_id)
+        target_name = str((target or {}).get("name") or f"#{target_group_id}")
+    before = _subscription_snapshot(
+        await db.wecom_subscription_for(
+            topic_id,
+            target_channel_id=target_channel_id,
+            target_group_id=target_group_id,
+        ),
+        target_name,
+    )
     removed = await db.wecom_subscription_delete_for(
         topic_id,
         target_channel_id=target_channel_id,
@@ -804,6 +1097,13 @@ async def delete_subscription(
     )
     if not removed:
         raise HTTPException(status_code=404, detail="这条订阅不存在")
+    await _record_audit(db, audit, wecom_audit.record(
+        action=wecom_audit.AUDIT_ACTION_DELETE,
+        object_type=wecom_audit.AUDIT_OBJECT_SUBSCRIPTION,
+        object_id=(before or {}).get("id"),
+        object_name=_subscription_name(topic_id, target_name),
+        before=before,
+    ))
     return {"success": True, "removed": removed}
 
 
@@ -867,6 +1167,7 @@ async def create_job(
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
     _legacy: None = Depends(reject_legacy_job_payload),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     """新建推送任务：内容类型 + 参数 + 时间。收件人由订阅决定。"""
     topic = _job_topic(payload)
@@ -882,6 +1183,13 @@ async def create_job(
     if not new_id:
         raise HTTPException(status_code=500, detail="创建推送任务失败")
     job = await db.wecom_job_get(new_id)
+    await _record_audit(db, audit, wecom_audit.record(
+        action=wecom_audit.AUDIT_ACTION_CREATE,
+        object_type=wecom_audit.AUDIT_OBJECT_JOB,
+        object_id=new_id,
+        object_name=payload.name,
+        after=await _job_snapshot(db, new_id),
+    ))
     return {"success": True, "job": (await _jobs_payload(db, [job]))[0]}
 
 
@@ -892,12 +1200,14 @@ async def update_job(
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
     _legacy: None = Depends(reject_legacy_job_payload),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
     existing = await db.wecom_job_get(job_id)
     if not existing:
         raise HTTPException(status_code=404, detail="推送任务不存在")
     topic = _job_topic(payload)
     params = _job_params(topic, payload)
+    before = await _job_snapshot(db, job_id)
     ok = await db.wecom_job_update(job_id, {
         "name": payload.name,
         "topic_id": payload.topic_id,
@@ -911,6 +1221,16 @@ async def update_job(
     if not ok:
         raise HTTPException(status_code=500, detail="更新推送任务失败")
     job = await db.wecom_job_get(job_id)
+    after = await _job_snapshot(db, job_id)
+    await _record_audit(db, audit, wecom_audit.record(
+        # 任务的启停（表单里的「启用定时推送」）同样单列成 enable / disable。
+        action=wecom_audit.action_for_change(before, after),
+        object_type=wecom_audit.AUDIT_OBJECT_JOB,
+        object_id=job_id,
+        object_name=payload.name,
+        before=before,
+        after=after,
+    ))
     return {"success": True, "job": (await _jobs_payload(db, [job]))[0]}
 
 
@@ -919,10 +1239,20 @@ async def delete_job(
     job_id: int,
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
+    audit: Dict[str, Any] = Depends(audit_context),
 ):
+    existing = await db.wecom_job_get(job_id)
+    before = await _job_snapshot(db, job_id)
     ok = await db.wecom_job_delete(job_id)
     if not ok:
         raise HTTPException(status_code=500, detail="删除推送任务失败")
+    await _record_audit(db, audit, wecom_audit.record(
+        action=wecom_audit.AUDIT_ACTION_DELETE,
+        object_type=wecom_audit.AUDIT_OBJECT_JOB,
+        object_id=job_id,
+        object_name=str((existing or {}).get("name") or f"#{job_id}"),
+        before=before,
+    ))
     return {"success": True}
 
 
@@ -1014,6 +1344,42 @@ async def list_logs(
         "pages": result["pages"],
         # 旧形状：只读镜像，见 docstring。
         "logs": await db.wecom_logs_recent(limit),
+    }
+
+
+@router.get("/audit-log")
+async def list_audit_log(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    object_type: Optional[str] = Query(None, max_length=60),
+    db: DatabaseManager = Depends(get_db),
+):
+    """配置变更历史（票 11）：按时间倒序，可按对象类型筛。
+
+    每行带上页面上要显示的五样：时间、操作人、操作、对象、变更内容
+    （``before`` / ``after`` 两份快照，页面算出差异那一列）。
+
+    ``object_types`` / ``actions`` 是**筛选项本身**（值 + 中文名）：页面的下拉读它，
+    加一种对象类型只改后端 ``services/wecom_audit.py``。传一个认不出的对象类型不是错误
+    —— 筛出来是空表（页面据此说「没有符合条件的记录」），而不是让整页报错。
+    """
+    result = await db.wecom_audit_page(
+        page=page, page_size=page_size, object_type=object_type
+    )
+    return {
+        "success": True,
+        "api_version": WECOM_PUSH_API_VERSION,
+        "rows": [_audit(row) for row in result["rows"]],
+        "total": result["total"],
+        "page": result["page"],
+        "page_size": result["page_size"],
+        "pages": result["pages"],
+        "object_types": [
+            {"id": value, "name": label} for value, label in wecom_audit.AUDIT_OBJECT_TYPES
+        ],
+        "actions": [
+            {"id": value, "name": label} for value, label in wecom_audit.AUDIT_ACTIONS
+        ],
     }
 
 

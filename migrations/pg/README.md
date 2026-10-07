@@ -58,6 +58,7 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0016_wecom_push_subscriptions.sql` | 推送订阅的新模型：`wecom_push_subscriptions`（内容类型 × 渠道/群组）、`wecom_channel_groups`、`wecom_channel_group_members`、`wecom_push_outbox`（队列表兼发送记录），按**三条规则**回填现有收件人，并把 `wecom_push_logs` / `hygiene_wecom_shares` 的历史行搬进 `wecom_push_outbox` | 新代码读不到任何订阅 → **一条推送都发不出去**（卫生提醒、验收照片、采集告警、日报全停）；发送记录页空 |
 | `0017_wecom_outbox_sending_at.sql` | `wecom_push_outbox."sending_at"` 列：这一行**进入发送的时刻**，也是「卡在 sending」的兜底判据（进程在 `mark_sending` 之后退出时，留给下一次派发把行捞回来） | 兜底查询捕到缺列 → 卡在 `sending` 的行**永远捞不回来**（就是票 03 返工修的那个缺口）；`mark_sending` 那条 UPDATE 也会整条落空（行留在 `pending`，投递照常，只是状态机少跳一步） |
 | `0018_wecom_push_jobs_topic.sql` | 推送任务不再持有收件人：`wecom_push_jobs."topic_id"`（内容类型，按旧 `push_type` 回填）与 `"params_json"`（参数，从旧 `date_range_mode` / `station` / `schedule_time` 搬进来）两列，并给旧列 `webhook_id` 补默认值 | 任务列表与详情查询整条落空（缺列 → 页面「定时任务」空、`dispatch_due_jobs` 一条都不入队，**定时推送全停**）；新建任务也会失败（`webhook_id` 是 NOT NULL 而新代码不再写它）。收件人本身不受影响（那由 0016 的订阅决定） |
+| `0019_wecom_push_audit.sql` | 配置变更历史 `wecom_push_audit`（只追加：时间 / 操作人 / 动作 / 对象 / 前后值快照）+ 两条按时间倒序的索引 | **配置变更不报错、只是不留痕**：审计写失败被吞成一行日志（`db_core/wecom_audit_repo.py`），所以页面「变更历史」tab 一直空、「谁在什么时候把这个群停用了」查不出来。渠道 / 订阅 / 任务本身照常工作 |
 
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，

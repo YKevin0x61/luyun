@@ -110,11 +110,12 @@ afterEach(() => {
 })
 
 describe('企微推送页的 tab 骨架（不改路由）', () => {
-  it('四个页内 tab 都在，默认停在「渠道」', async () => {
+  it('五个页内 tab 都在，默认停在「渠道」', async () => {
     const { wrapper } = await mountView({ channels: [channel(1, '门店群')], topics: [topic('sales_report', '销售报表')] })
 
+    // 「变更历史」是票 11 补上的第五个（配置变更留痕，只读）。
     expect(wrapper.findAll('.view-tab').map((node) => node.text())).toEqual([
-      '渠道', '订阅', '定时任务', '发送记录',
+      '渠道', '订阅', '定时任务', '发送记录', '变更历史',
     ])
     expect(wrapper.find('.view-tab.active').text()).toBe('渠道')
     expect(wrapper.text()).toContain('渠道群组')

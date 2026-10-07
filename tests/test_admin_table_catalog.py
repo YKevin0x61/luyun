@@ -90,7 +90,11 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
 
 
 def test_push_subscription_tables_are_browsable_but_read_only(admin_client):
-    """迁移 0016 的四张表只读展示：写入一律走企微推送的 repo 方法。"""
+    """企微推送那几张新表只读展示：写入一律走企微推送的 repo 方法。
+
+    迁移 0016 的四张 + 迁移 0019 的配置变更历史（票 11）。审计表进这个名单还多一层
+    意思：它是**只追加**的（只写不改、没有保留期），数据管理页更不能给它开通用写入口。
+    """
     client, _ = admin_client
     body = client.get("/api/admin/tables").json()
     meta = body["table_meta"]
@@ -105,6 +109,7 @@ def test_push_subscription_tables_are_browsable_but_read_only(admin_client):
         "wecom_channel_groups",
         "wecom_channel_group_members",
         "wecom_push_outbox",
+        "wecom_push_audit",
     )
 
     rejected = client.post(
@@ -112,6 +117,13 @@ def test_push_subscription_tables_are_browsable_but_read_only(admin_client):
         json={"values": {"topic_id": "sales_report", "target_channel_id": 1}},
     )
     assert rejected.status_code == 403
+
+    # 变更历史同样只能由这一页的写操作追加，不能从数据管理页手改一行。
+    rejected_audit = client.post(
+        "/api/admin/tables/wecom_push_audit/rows",
+        json={"values": {"action": "update", "object_type": "wecom_push_webhooks"}},
+    )
+    assert rejected_audit.status_code == 403
 
 
 def test_read_only_physical_tables_can_be_browsed(tmp_path):

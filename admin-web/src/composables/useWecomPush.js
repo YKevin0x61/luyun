@@ -86,8 +86,152 @@ export function deliveryQuery({ topicId = '', channelId = '', status = '', page 
   return params
 }
 
-/** 矩阵里有几行订阅（行 = 内容类型）。 */
-export function matrixTopics(matrix) {
+/**
+ * 「变更历史」一页多少条（票 11）。
+ *
+ * 与后端 `/audit-log` 的 `page_size` 默认值对齐（同一套翻页手感，也和发送记录一致）：
+ * 两边默认值不一样的话，「翻到底了没有」会在页面与后端之间对不上。
+ */
+export const AUDIT_PAGE_SIZE = 50
+
+/**
+ * 对象类型的中文名（值就是后端的表名）。
+ *
+ * 这份表只是**兜底**：读接口会在 `object_types` 里给出它自己的名单与名字，页面下拉读那
+ * 一份（加一种对象类型只改后端）。这里留着是为了「记录里的对象类型在后端名单里已经不在」
+ * 时仍显示得出中文（旧记录不该变成一串表名）。
+ */
+export const AUDIT_OBJECT_LABELS = {
+  wecom_push_webhooks: '推送渠道',
+  wecom_channel_groups: '渠道群组',
+  wecom_push_subscriptions: '推送订阅',
+  wecom_push_jobs: '推送任务',
+}
+
+/** 动作的中文名（后端 `actions` 的同一份口径，见上一条的理由）。 */
+export const AUDIT_ACTION_LABELS = {
+  create: '新增',
+  update: '修改',
+  enable: '启用',
+  disable: '停用',
+  delete: '删除',
+}
+
+/**
+ * 快照里那些字段的中文名（页面上「变更内容」一列逐项显示）。
+ *
+ * 字段名是领域词（`enabled` / `target_name` / `members`……），翻不出来就原样显示 ——
+ * 哪天后端加了一个字段，页面上多出一个英文名，总好过整条记录看不见。
+ */
+export const AUDIT_FIELD_LABELS = {
+  name: '名称',
+  enabled: '启用',
+  url: 'Webhook 地址',
+  members: '成员',
+  topic_id: '内容类型',
+  target_name: '目标',
+  target_channel_id: '目标渠道',
+  target_group_id: '目标群组',
+  schedule_time: '推送时间',
+}
+
+/** 动作的中文名；认不出的动作退回原值（不吞掉这一行）。 */
+export function auditActionLabel(action) {
+  return AUDIT_ACTION_LABELS[action] || String(action || '')
+}
+
+/** 对象类型的中文名；认不出的退回原值。 */
+export function auditObjectLabel(objectType) {
+  return AUDIT_OBJECT_LABELS[objectType] || String(objectType || '')
+}
+
+/** 快照字段的中文名；认不出的原样显示。 */
+export function auditFieldLabel(field) {
+  return AUDIT_FIELD_LABELS[field] || String(field || '')
+}
+
+/**
+ * 变更内容里**不显示**的字段：行内 id 与已经用名字表达过的外键。
+ *
+ * 它们照旧存在审计记录里（排查要靠它们），只是不该出现在页面上：目标已经写成「目标：
+ * 门店群」，再列一行「目标渠道：2」只是噪音，而 `topic_id` 早就进了对象名
+ * （「销售报表 → 门店群」）。`id` 同理 —— 那是页面的 key，不是人读的变更。
+ */
+const AUDIT_HIDDEN_FIELDS = new Set([
+  'id', 'topic_id', 'target_channel_id', 'target_group_id',
+])
+
+/** 「变更内容」一列要渲染的字段（顺序 = 快照里的键序）。 */
+export function auditVisibleFields(row) {
+  return Object.entries(auditFieldChanges(row))
+    .filter(([field]) => !AUDIT_HIDDEN_FIELDS.has(field))
+}
+
+/** 一个快照值的显示文本。
+ *
+ * 布尔按「启用 / 停用」渲染（快照里最常见的就是那一列），空值给占位符 ——
+ * 直接渲染成空白会让人分不清「没这一项」与「被清空了」。
+ */
+export function formatAuditValue(value) {
+  if (value === true) return '启用'
+  if (value === false) return '停用'
+  if (value === null || value === undefined || value === '') return '（空）'
+  if (Array.isArray(value)) {
+    return value.length ? value.map((item) => formatAuditValue(item)).join('、') : '（空）'
+  }
+  return String(value)
+}
+
+/**
+ * 变更内容：``{字段: {before, after}}``，只留**真的变了**的字段。
+ *
+ * 新建（没有改前）与删除（没有改后）整份快照都算变更 —— 页面上那两条也要看得见写了
+ * 什么、删了什么。与后端 `services/wecom_audit.py` 的 `changed_fields` 同一口径：
+ * 页面不自己另算一份「什么算变了」。
+ */
+export function auditFieldChanges(row) {
+  const before = (row && row.before) || {}
+  const after = (row && row.after) || {}
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+  const changes = {}
+  for (const key of keys) {
+    if (before[key] !== after[key]) {
+      changes[key] = {
+        before: Object.prototype.hasOwnProperty.call(before, key) ? before[key] : null,
+        after: Object.prototype.hasOwnProperty.call(after, key) ? after[key] : null,
+      }
+    }
+  }
+  return changes
+}
+
+/** 「变更内容」一列的一行文本：``名称：门店群 → 门店群（改名）``。 */
+export function auditChangeText(field, change) {
+  const label = auditFieldLabel(field)
+  /** 删除（没有改后）与新建（没有改前）只说一头，别写成「X → （空）」。 */
+  if (!change || change.before === null || change.before === undefined) {
+    return `${label}：${formatAuditValue(change && change.after)}`
+  }
+  if (change.after === null || change.after === undefined) {
+    return `${label}：${formatAuditValue(change.before)}（已删除）`
+  }
+  return `${label}：${formatAuditValue(change.before)} → ${formatAuditValue(change.after)}`
+}
+
+/**
+ * 变更历史一页的查询参数。
+ *
+ * 空筛选**不发这个键**（与发送记录同一条规矩）：`api.get` 会把空串丢掉，后端也就分得清
+ * 「没筛这一项」与「按空值筛」。
+ */
+export function auditQuery({ objectType = '', page = 1 } = {}) {
+  const params = { page: Number(page) || 1, page_size: AUDIT_PAGE_SIZE }
+  const type = String(objectType || '').trim()
+  if (type) params.object_type = type
+  return params
+}
+
+/** 矩阵里有几行订阅（行 = 内容类型）。 */export function matrixTopics(matrix) {
   return (matrix && matrix.topics) || []
 }
 
@@ -297,6 +441,17 @@ export function useWecomPush() {
     filters: { topicId: '', channelId: '', status: '' },
   })
   const matrix = ref({ topics: [], channels: [] })
+  // 变更历史（票 11）：一页记录 + 对象类型筛选 + 总数，页面第五个 tab 读它。
+  // `objectTypes` / `actions` 由读接口给出（筛选下拉的选项与中文名）。
+  const audit = reactive({
+    rows: [],
+    total: 0,
+    page: 1,
+    pages: 0,
+    filters: { objectType: '' },
+    objectTypes: [],
+    actions: [],
+  })
   const selectedJobId = ref(null)
   const previewContent = ref('')
   const previewMeta = ref({ bytes: 0, chunkCount: 1 })
@@ -398,6 +553,35 @@ export function useWecomPush() {
     deliveries.filters.status = status
     deliveries.page = 1
     return loadDeliveries()
+  }
+
+  /**
+   * 变更历史：一页记录（后端算好总数），按时间倒序。
+   *
+   * 筛选只有对象类型一项（票面要求），与发送记录同样先取一页、不取「最近 N 条」：
+   * 记录长期保留，半年后回看时"最近 N 条"根本没有用。
+   */
+  async function loadAuditLog({ page = null } = {}) {
+    if (page !== null) audit.page = Math.max(1, Number(page) || 1)
+    const data = await api.get('/api/wecom-push/audit-log', auditQuery({
+      objectType: audit.filters.objectType,
+      page: audit.page,
+    }))
+    audit.rows = data.rows || []
+    audit.total = Number(data.total) || 0
+    audit.pages = Number(data.pages) || 0
+    audit.page = Number(data.page) || audit.page
+    // 筛选项读接口给：加一种对象类型只改后端，页面不维护第二份名单。
+    if (Array.isArray(data.object_types)) audit.objectTypes = data.object_types
+    if (Array.isArray(data.actions)) audit.actions = data.actions
+    return audit
+  }
+
+  /** 改对象类型筛选：回到第一页（与发送记录同一条规矩）。 */
+  async function applyAuditFilters({ objectType = '' } = {}) {
+    audit.filters.objectType = objectType
+    audit.page = 1
+    return loadAuditLog()
   }
 
   async function loadAll() {
@@ -663,13 +847,14 @@ export function useWecomPush() {
   }
 
   return {
-    meta, channels, topics, groups, jobs, matrix, deliveries,
+    meta, channels, topics, groups, jobs, matrix, deliveries, audit,
     selectedJobId, previewContent, previewMeta, loading, error,
     activeTab, channelForm, channelGroupForm, multiSelect,
     contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
     resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
     loadAll, loadMeta, loadChannels, loadSubscriptions, loadChannelGroups, loadJobs,
     loadDeliveries, applyDeliveryFilters,
+    loadAuditLog, applyAuditFilters,
     editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,
     editChannelGroup, saveChannelGroup, deleteChannelGroup,
     addGroupMember, removeGroupMember, syncChannelGroups,

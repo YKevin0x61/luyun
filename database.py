@@ -27,6 +27,7 @@ from db_core.report_dishes_repo import _ReportDishesRepoMixin
 from db_core.settings_repo import _SettingsRepoMixin
 from db_core.wecom_repo import _WecomRepoMixin
 from db_core.wecom_subscriptions_repo import _WecomSubscriptionsRepoMixin
+from db_core.wecom_audit_repo import _WecomAuditRepoMixin
 from db_core.aggregation import _AggregationMixin
 from db_core.reports import _ReportsMixin
 from db_core.stats import _StatsMixin
@@ -67,6 +68,7 @@ class DatabaseManager(
     _SettingsRepoMixin,
     _WecomRepoMixin,
     _WecomSubscriptionsRepoMixin,
+    _WecomAuditRepoMixin,
     _AggregationMixin,
     _ReportsMixin,
     _StatsMixin,

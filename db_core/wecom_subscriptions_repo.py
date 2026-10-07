@@ -134,6 +134,43 @@ class _WecomSubscriptionsRepoMixin:
             logger.error(f"❌ 删除推送订阅失败: {e}")
             return False
 
+    async def wecom_subscription_for(
+        self,
+        topic_id: str,
+        *,
+        target_channel_id: Optional[int] = None,
+        target_group_id: Optional[int] = None,
+    ) -> Optional[Dict]:
+        """按「内容类型 × 目标」取那一行订阅（没有就返回 ``None``）。
+
+        审计用（票 11）：勾选 / 取消都要先把**改前的样子**取出来，否则「取消勾选」那条
+        记录的变更前后值只能是空的。只是读一行的投影，目标列约定与
+        ``wecom_subscriptions_all`` 一致。
+        """
+        if (target_channel_id is None) == (target_group_id is None):
+            raise ValueError("取订阅必须且只能指定一个目标（渠道或群组）")
+        try:
+            tdb = self._connection.table("wecom_push_subscriptions")
+            if target_channel_id is not None:
+                sql = """SELECT id, topic_id, target_channel_id, target_group_id, enabled
+                          FROM wecom_push_subscriptions
+                          WHERE topic_id = ? AND target_channel_id = ?"""
+                params: tuple = (str(topic_id), int(target_channel_id))
+            else:
+                sql = """SELECT id, topic_id, target_channel_id, target_group_id, enabled
+                          FROM wecom_push_subscriptions
+                          WHERE topic_id = ? AND target_group_id = ?"""
+                params = (str(topic_id), int(target_group_id))
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(sql, params)
+                row = await cursor.fetchone()
+            return self._subscription_row(dict(row)) if row else None
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ 获取推送订阅详情失败: {e}")
+            return None
+
     async def wecom_subscription_delete_for(
         self,
         topic_id: str,

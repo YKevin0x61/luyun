@@ -86,9 +86,11 @@ SCHEDULING_TABLES = (
 
 AUTH_PHYSICAL_TABLES = ("admin_user", "sessions", "api_tokens")
 
-# 企微推送的新模型表（迁移 0016）：订阅 / 渠道群组 / 群组成员 / 出站记录。
-# 与 SCHEDULING_TABLES 同一个理由不进 ALL_TABLES —— 它们由订阅与出站的 repo 方法
-# （db_core/wecom_subscriptions_repo.py）写入，不该出现在 Admin 的通用业务表写入口。
+# 企微推送的新模型表（迁移 0016）：订阅 / 渠道群组 / 群组成员 / 出站记录；
+# 外加迁移 0019 的配置变更历史 `wecom_push_audit`（只追加、无通用写入口）。
+# 与 SCHEDULING_TABLES 同一个理由不进 ALL_TABLES —— 它们由订阅 / 出站 / 审计的 repo
+# 方法（db_core/wecom_subscriptions_repo.py、db_core/wecom_audit_repo.py）写入，
+# 不该出现在 Admin 的通用业务表写入口。
 # 但连接建立时**必须**给它们绑 TableView：``db.table(name)`` 只认已绑定的表，漏了
 # 就是运行期「未知表」。
 WECOM_SUBSCRIPTION_TABLES = (
@@ -96,6 +98,7 @@ WECOM_SUBSCRIPTION_TABLES = (
     "wecom_channel_groups",
     "wecom_channel_group_members",
     "wecom_push_outbox",
+    "wecom_push_audit",
 )
 
 # Admin DataTable exposes these tables read-only; their owning feature pages
