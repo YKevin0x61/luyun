@@ -4,8 +4,8 @@
 
 Invoked by deploy/luyun-update.service (Type=oneshot) or Docker detached starter.
 Reads queued intent from data/update_job.json, runs backup → fetch bundle →
-install (atomic switch) → conditional deps → restart, and writes progress back
-for Admin polling.
+install (atomic switch) → conditional deps → apply pending migrations → restart,
+and writes progress back for Admin polling.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ if str(_ROOT) not in sys.path:
 from services.github_release_config import get_effective_config  # noqa: E402
 from services.release_update.factory import default_deploy_dir  # noqa: E402
 from services.release_update.job_adapters import (  # noqa: E402
+    DeployTreeMigrationsAdapter,
     PipDepsSyncAdapter,
     PlaywrightBrowserSyncAdapter,
     ReleaseBundleInstallAdapter,
@@ -72,6 +73,8 @@ def build_runner(deploy_dir: Path) -> UpdateJobRunner:
             log_path=job_log_path(),
         ),
         browser=PlaywrightBrowserSyncAdapter(deploy_dir),
+        # 待执行迁移用**新树**里的入口跑（作业进程是旧树的代码），见 ADR 0096。
+        migrations=DeployTreeMigrationsAdapter(deploy_dir, log_path=job_log_path()),
         service=build_main_service_adapter(),
         is_cancelled=is_cancel_requested,
     )
@@ -97,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             "fetching_bundle",
             "installing",
             "syncing_deps",
+            "applying_migrations",
             "restarting",
             "succeeded|failed",
         ]

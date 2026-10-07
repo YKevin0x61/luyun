@@ -15,6 +15,7 @@ Day-to-day entry scripts live here. One-off migration, debug, and smoke utilitie
 | `curl_install.sh` | Curl\|bash install entry used with Releases |
 | `docker_up.sh` | Docker / Compose process-shell bring-up |
 | `run_update_job.py` | Out-of-process Update Job runner |
+| `apply_db_migrations.py` | 应用待执行迁移：Update Job 的 `applying_migrations` 阶段用**新树**的这份入口执行（ADR 0096）；也可手工排障 |
 | `cold_backup.py` | 冷备归档入口（库快照 + 凭据 + 密钥 + 卫生照片 + 清单 + 校验和 + 状态文件）；由 `deploy/backup.sh` 调度 |
 | `reconcile_settled_bills.py` | Settled-bill reconciliation utility |
 | `prototype_kds_hub_settings.sh` / `prototype_prep_revenue_nowcast/` | One-off prototypes (KDS hub settings UI; prep revenue nowcast). Artifacts live in each `out/` and never enter the Release Bundle |

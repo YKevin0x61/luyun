@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Real adapters used by the Update Job oneshot (bundle / backup / deps / restart)."""
+"""Real adapters used by the Update Job oneshot (bundle / backup / deps / migrations / restart)."""
 
 from __future__ import annotations
 
@@ -31,12 +31,17 @@ from services.playwright_env import (
     repair_hint,
     strict_mode_enabled,
 )
-from services.release_update.job_runner import BundleInstallResult
+from services.release_update.job_runner import BundleInstallResult, MigrationApplyOutcome
 from services.release_update.job_state import is_cancel_requested, job_log_path
 from services.release_update.manifest_identity import MANIFEST_NAME
 
 PIP_SYNC_TIMEOUT_SECONDS = 1800
 PIP_POLL_SECONDS = 0.5
+
+# 应用待执行迁移：入口、结果标记与超时（建索引这类 DDL 可能不快，给足 30 分钟）。
+MIGRATIONS_ENTRY_RELATIVE = Path("scripts") / "apply_db_migrations.py"
+MIGRATION_RESULT_PREFIX = "LUYUN_DB_MIGRATION_RESULT "
+MIGRATION_APPLY_TIMEOUT_SECONDS = 1800
 
 logger = logging.getLogger(__name__)
 
@@ -597,6 +602,144 @@ class PlaywrightBrowserSyncAdapter:
                 log_fh.flush()
         except OSError as exc:
             logger.error("写更新作业日志失败（告警只在进程日志里）: %s", exc)
+
+
+def parse_migration_result(stdout: str) -> Optional[dict]:
+    """从入口的 stdout 里取结果标记（最后一行）；缺失或不是合法 JSON 时返回 None。"""
+    for line in reversed((stdout or "").splitlines()):
+        if not line.startswith(MIGRATION_RESULT_PREFIX):
+            continue
+        try:
+            payload = json.loads(line[len(MIGRATION_RESULT_PREFIX):])
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+class DeployTreeMigrationsAdapter:
+    """用**新树自己的代码与解释器**应用待执行迁移（ADR 0096）。
+
+    为什么不在作业进程里 import 自己那份 ``services.db_migrations``：作业进程在原子
+    切换之前就启动了，跑的是**旧树**的代码，而 ``migrations/pg/`` 是按
+    ``db_migrations.py`` 自己的模块文件定位的——旧树那份读不到随发行包刚下来的新迁移
+    文件。所以这里把新树里的 ``scripts/apply_db_migrations.py`` 当执行体：用部署 venv
+    的解释器，以新树为工作目录（``.env`` 相对路径也才落在新树）与包搜索路径首位跑一遍。
+
+    三条路径（都有用例）：
+    * 有待应用：入口应用并报告版本列表；
+    * 无待应用：入口报告空列表，阶段跳过——作业照常重启，不是失败；
+    * 失败（SQL 报错 / 连不上库 / 超时）：抛 :class:`RuntimeError`，作业走既有的
+      失败 + ``restore_previous_tree`` 回滚路径，原因同时写进作业日志。
+
+    入口不存在（回退到本阶段出现之前的发行包）：不改库，返回带说明的跳过——「回到上
+    一版本」这条合法退路不该被一个当时还不存在的脚本挡住，手工「数据库迁移」入口仍是
+    兜底。
+
+    这里**不**在子进程运行期间轮询取消标志：一个迁移文件整体在 PG 的隐式事务里，中途
+    掐连接只会白跑一趟；让当前文件跑完更可控，阶段结束后 ``job_runner`` 那句取消检查
+    照旧生效（已切树，会走回滚）。
+
+    入口的输出在它退出后一次性写进作业日志：迁移脚本本身不打进度，真正需要看实时流的
+    是 pip 那条（见 :class:`PipDepsSyncAdapter`）；进度层面门店看到的是作业状态里的
+    ``applying_migrations`` 阶段。
+    """
+
+    def __init__(
+        self,
+        deploy_dir: Path,
+        *,
+        python_bin: Optional[str] = None,
+        log_path: Optional[Path] = None,
+        timeout_seconds: int = MIGRATION_APPLY_TIMEOUT_SECONDS,
+    ) -> None:
+        self._deploy = Path(deploy_dir)
+        self._python = resolve_deploy_python(self._deploy, python_bin)
+        self._log_path = Path(log_path) if log_path is not None else job_log_path()
+        self._timeout_seconds = timeout_seconds
+
+    def apply_pending(self) -> MigrationApplyOutcome:
+        entry = self._deploy / MIGRATIONS_ENTRY_RELATIVE
+        if not entry.is_file():
+            note = (
+                f"发行包内没有迁移入口（{MIGRATIONS_ENTRY_RELATIVE.as_posix()}），"
+                "本阶段跳过；如需应用请用「系统更新 → 数据库迁移」入口"
+            )
+            self._append_job_log(f"--- apply db migrations ---\n{note}")
+            logger.info("%s", note)
+            return MigrationApplyOutcome(note=note)
+
+        env = dict(os.environ)
+        inherited = (env.get("PYTHONPATH") or "").strip()
+        env["PYTHONPATH"] = (
+            os.pathsep.join([str(self._deploy), inherited]) if inherited else str(self._deploy)
+        )
+        cmd = [self._python, str(entry)]
+        logger.info("Applying pending migrations from %s", self._deploy)
+        try:
+            completed = subprocess.run(
+                cmd,
+                cwd=str(self._deploy),
+                env=env,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                check=False,
+                timeout=self._timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            self._append_job_log(
+                f"--- apply db migrations ---\n$ {' '.join(cmd)}\n"
+                f"[update] timed out after {self._timeout_seconds}s\n"
+            )
+            raise RuntimeError(
+                f"applying pending migrations timed out after {self._timeout_seconds}s"
+            ) from None
+        except OSError as exc:
+            raise RuntimeError(f"failed to run pending migrations: {exc}") from exc
+
+        self._append_job_log(
+            f"--- apply db migrations ---\n$ {' '.join(cmd)}\n"
+            f"{completed.stdout or ''}{completed.stderr or ''}"
+        )
+        payload = parse_migration_result(completed.stdout)
+        if completed.returncode != 0 or payload is None or not payload.get("ok"):
+            raise RuntimeError(self._failure_message(completed, payload))
+        applied = tuple(str(version) for version in (payload.get("applied") or []))
+        logger.info("已应用待执行迁移：%s", list(applied))
+        return MigrationApplyOutcome(applied=applied)
+
+    @staticmethod
+    def _failure_message(
+        completed: subprocess.CompletedProcess,
+        payload: Optional[dict],
+    ) -> str:
+        prefix = "applying pending migrations failed"
+        failed = (payload or {}).get("failed") or []
+        if failed:
+            first = failed[0] or {}
+            name = first.get("filename") or first.get("version") or "迁移"
+            return f"{prefix}: {name}: {first.get('error')}"
+        if payload and payload.get("error"):
+            return f"{prefix}: {payload['error']}"
+        # 没有结果标记（入口半路崩掉/被顶掉）：至少留下退出码与最后一行输出。
+        lines = [
+            line.strip()
+            for line in f"{completed.stderr or ''}\n{completed.stdout or ''}".splitlines()
+            if line.strip()
+        ]
+        detail = lines[-1] if lines else "no output"
+        return f"{prefix}: exit {completed.returncode}: {detail}"
+
+    def _append_job_log(self, text: str) -> None:
+        """把入口的输出写进更新作业日志；日志写不进去也不能让更新崩掉。"""
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._log_path, "a", encoding="utf-8") as log_fh:
+                log_fh.write("\n" + text.rstrip("\n") + "\n")
+                log_fh.flush()
+        except OSError as exc:
+            logger.error("写更新作业日志失败（迁移原因只在进程日志里）: %s", exc)
 
 
 class SystemdMainServiceAdapter:

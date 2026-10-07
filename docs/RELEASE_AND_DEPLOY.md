@@ -268,14 +268,14 @@ luyun-install() {
         ↓
 Apply Update（Web 只写意图；systemd：`systemctl start --no-block luyun-update`；Docker：后台跑 `scripts/run_update_job.py`）
         ↓
-Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 → 旁路解压并原子切换 → 条件 pip → 重启（systemd：`luyun`；Docker：`docker.sock` 重启容器）
+Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 → 旁路解压并原子切换 → 条件 pip → 应用待执行迁移（ADR 0096）→ 重启（systemd：`luyun`；Docker：`docker.sock` 重启容器）
         ↓
 作业进入「已切换、重启中」（`restarting`），**不直接落成功**
         ↓
 页面轮询 data/update_job.json；管理后台按就绪口径完成**健康确认**（`succeeded` / `succeeded_but_unhealthy`）
         ↓
-「系统更新」→「数据库迁移」→「应用待执行迁移」
-（没有例外：schema 只在 `migrations/pg/000N` 里改，启动期不改结构）
+（例外才需要）「系统更新」→「数据库迁移」→「应用待执行迁移」
+（schema 只在 `migrations/pg/000N` 里改，启动期不改结构）
 ```
 
 主服务会短暂中断；WebSocket / 采集会随进程重启恢复。宜避开极端高峰；急事可覆盖警告。
@@ -287,14 +287,29 @@ Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 �
 保留回退点与日志，提供查看日志 / 重新检测 / 回到上一版本三条出路）。健康确认
 失败不会自动重试，也不会自动回滚。
 
-**数据库 schema 变更（升级里固定的一步）**：应用按设计**不在启动期改结构**
+**数据库 schema 变更（升级里自动的一步，ADR 0096）**：应用按设计**不在启动期改结构**
 （结构变更要可追溯，见 `db_core/connection.py::_connect_postgres` 的说明），DDL 只在
-`migrations/pg/000N_*.sql` 里，所以健康确认之后还要应用一次迁移：「系统更新」→
-「数据库迁移」→「应用待执行迁移」。
+`migrations/pg/000N_*.sql` 里，所以更新作业在 `installing`（已切到新树）之后、
+`restarting` 之前有一个 `applying_migrations` 阶段：迁移 SQL 随发行包下发，
+「先迁移再更新」在物理上不成立，而迁移在重启前做完就不存在「新代码跑旧结构」的窗口。
 
-版本检测会把待应用条数直接显示在版本状态卡上（状态灯转黄），不必靠记性；应用记录写在库里的
-`schema_migrations`，随时能看出当前到哪一版。漏应用的后果通常不是报错，而是变慢或某个功能
-悄悄降级——这正是把它显式写进流程的原因。细节见 `migrations/pg/README.md`。
+- 有等待应用的脚本：一次更新即完成，重启后的健康确认直接通过（就绪口径里的
+  「迁移已完成」= 待应用条数为 0）。
+- 没有待应用的脚本：该阶段跳过，作业照常重启。
+- 迁移失败：作业失败并按既有机制回滚代码树（`restore_previous_tree`），原因写在
+  `data/update_job.log` 与作业 `error` 里。加成性迁移（加列 / 加索引 / 建表）允许
+  部分应用，重跑幂等——代码回滚不带回滚已应用的 DDL。
+
+手工「数据库迁移」入口保留作**兜底**（`/api/db-migrations`）。有一处需要它：作业进程跑的
+是**当前已装版本**的代码，所以「升级到第一个带 `applying_migrations` 的发行包」那一次仍由
+旧作业执行（它还不知道这个阶段），待应用迁移要手工点一下——趁页面还在 `restarting` 的健康
+确认宽限期（180 秒）内点完，仍会落 `succeeded`；错过宽限期会落 `succeeded_but_unhealthy`
+（页面保留日志与回退点，补应用迁移即可用）。此后每次升级都由作业在重启前自动应用。
+回退到不含迁移入口的旧发行包时，该阶段跳过并把这件事写进作业日志。
+
+版本检测会把待应用条数直接显示在版本状态卡上（状态灯转黄），应用记录写在库里的
+`schema_migrations`，随时能看出当前到哪一版。该阶段用**新树自己的**解释器与代码执行
+（作业进程跑的是旧树代码），细节见 `migrations/pg/README.md`。
 
 **Docker / 1Panel（进程外壳）：** 用 `deploy/docker-compose.yml` / `./scripts/docker_up.sh`。  
 必须绑定挂载**直播应用目录的父目录**（默认 `deploy/runtime` → `/srv/luyun`，直播树 `/srv/luyun/app`），并挂载 `/var/run/docker.sock`；设置 `LUYUN_DEPLOY_MODE=docker`、`LUYUN_DOCKER_CONTAINER=<容器名>`（与 `container_name` 一致）。详见 `deploy/README.md` §1.1。**不要求**挂载 `.git`；交付仍是发行包，不是 `docker pull` 镜像。
@@ -324,6 +339,7 @@ Update Job：备份（来由「更新作业前」）→ 下载/校验发行包 �
 | `fetching_bundle` | 下载 `luyun-release-bundle.tar.gz` + `SHA256SUMS` 并硬校验 |
 | `installing` | 旁路解压、保留上一版目录后原子切换；不覆盖店内 `data/` / 凭据 |
 | `syncing_deps` | 仅当版本清单 `requirements_fingerprint` 变化时 pip；否则跳过 |
+| `applying_migrations` | 用**新树自己的**入口应用待执行迁移（`scripts/apply_db_migrations.py`，ADR 0096）；没有待应用项时跳过，失败则作业失败并回滚代码树 |
 | `restarting` | systemd：`systemctl restart luyun`；Docker：Engine API restart 容器。语义是「已切换发行包、正在重启，等待健康确认」 |
 | `succeeded` / `succeeded_but_unhealthy` / `failed` | 终态。`succeeded` = 切换 + 重启后健康确认通过；`succeeded_but_unhealthy` = 已切换但服务未恢复健康（保留回退点与日志）；失败且已离开旧树时切回上一版目录并尽量拉起主服务，`error` 含日志指针 |
 

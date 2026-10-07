@@ -457,8 +457,8 @@ _Avoid_: 引导安装以私有仓 clone 或强制 PAT 为必经步骤；把 Dock
 _Avoid_: 以为还能把 `DATABASE_BACKEND` 改回 `sqlite`（那是启动失败，不是回滚路径）；把 SQLite 的「临时目录里的一个库文件」当成测试隔离；以为 Redis 是可选项（**部署必需**：没配 `REDIS_URL` 应用启动即失败，见 ADR 0090；但它只让 nudge 跨进程广播，单 worker 约束不受影响）。
 
 ### 数据库迁移 (Database Migration)
-对库结构的**可追溯**变更：新增或修改表/索引时提交一份 `migrations/pg/000N_*.sql`（只做加成性变更），由管理员在后台「系统更新 → 数据库迁移」应用，记录落在 `schema_migrations` 表。应用**不在启动期改结构**——`db_core/schema.py` 只剩表名清单，DDL 只在 `migrations/pg` 里。
-_Avoid_: 期待重启或更新作业自动改结构；只升代码不出 `000N` 脚本；把 `0001`（`luyun:bootstrap-only`）当成可重复应用的迁移。
+对库结构的**可追溯**变更：新增或修改表/索引时提交一份 `migrations/pg/000N_*.sql`（只做加成性变更），记录落在 `schema_migrations` 表。升级时由**更新作业**在 `applying_migrations` 阶段（原子切换之后、重启主服务之前）用新树自己的入口应用（ADR 0096）；后台「系统更新 → 数据库迁移」是兜底入口（旧作业还没有该阶段、或需要单独补应用时）。应用**不在启动期改结构**——`db_core/schema.py` 只剩表名清单，DDL 只在 `migrations/pg` 里。
+_Avoid_: 期待重启自动改结构（启动期补 schema 这条捷径是刻意没有的）；只升代码不出 `000N` 脚本；把 `0001`（`luyun:bootstrap-only`）当成可重复应用的迁移。
 
 ## 备份与恢复
 

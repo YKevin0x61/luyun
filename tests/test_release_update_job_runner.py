@@ -9,7 +9,11 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from services.release_update import UpdateJobState
-from services.release_update.job_runner import BundleInstallResult, UpdateJobRunner
+from services.release_update.job_runner import (
+    BundleInstallResult,
+    MigrationApplyOutcome,
+    UpdateJobRunner,
+)
 
 
 @dataclass
@@ -100,6 +104,24 @@ class FakeBrowser:
         self.synced = True
 
 
+@dataclass
+class FakeMigrations:
+    """DatabaseMigrationsPort fake：待应用版本 / 无待应用 / 应用失败三条路径。"""
+
+    applied: tuple = ()
+    note: str = ""
+    fail: bool = False
+    calls: int = 0
+
+    def apply_pending(self) -> MigrationApplyOutcome:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError(
+                '0005_scheduling.sql: relation "staff_shifts" already exists'
+            )
+        return MigrationApplyOutcome(applied=self.applied, note=self.note)
+
+
 def _queued(target: str = "v0.2.0", previous: str = "v0.1.0") -> UpdateJobState:
     return UpdateJobState(
         stage="queued",
@@ -118,12 +140,14 @@ def _runner(
     deps: Optional[FakeDeps] = None,
     service: Optional[FakeService] = None,
     browser: Optional[FakeBrowser] = None,
+    migrations: Optional[FakeMigrations] = None,
     is_cancelled=None,
 ) -> tuple[UpdateJobRunner, FakeBackup, FakeBundle, FakeDeps, FakeService]:
     b = backup or FakeBackup()
     bund = bundle or FakeBundle()
     d = deps or FakeDeps()
     s = service or FakeService()
+    m = migrations or FakeMigrations()
     runner = UpdateJobRunner(
         job_store=store,
         backup=b,
@@ -131,6 +155,7 @@ def _runner(
         deps=d,
         service=s,
         browser=browser,
+        migrations=m,
         is_cancelled=is_cancelled,
     )
     return runner, b, bund, d, s
@@ -204,6 +229,9 @@ class UpdateJobRunnerTest(unittest.TestCase):
                 "fetching_bundle",
                 "installing",
                 "syncing_deps",
+                # 迁移阶段写两次：进入阶段 + 结果（有迁移 / 无迁移都在这里落定）
+                "applying_migrations",
+                "applying_migrations",
                 "restarting",
             ],
         )
@@ -261,6 +289,9 @@ class UpdateJobRunnerTest(unittest.TestCase):
                 "fetching_bundle",
                 "installing",
                 "syncing_deps",
+                # 迁移阶段写两次：进入阶段 + 结果（有迁移 / 无迁移都在这里落定）
+                "applying_migrations",
+                "applying_migrations",
                 "restarting",
             ],
         )
@@ -372,3 +403,78 @@ class UpdateJobRunnerTest(unittest.TestCase):
         self.assertEqual(final.stage, "failed")
         self.assertFalse(final.rollback_attempted)
         self.assertIn("cancelled by operator", final.error or "")
+
+    # ── 应用待执行迁移：有迁移 / 无迁移 / 迁移失败（票 09） ──
+
+    def test_applies_pending_migrations_after_install_and_before_restart(self):
+        """阶段位置：installing（已切到新树）之后、restarting 之前。
+
+        迁移文件随新发行包下发，所以这一阶段必须在 ``activate_bundle`` 之后跑——
+        用例用探针钉住「切换已经发生」，而不只是看阶段名的先后。
+        """
+        store = FakeJobStore(_queued())
+        bundle = FakeBundle()
+        seen: dict = {}
+
+        class ProbeMigrations(FakeMigrations):
+            def apply_pending(self) -> MigrationApplyOutcome:
+                seen["left_previous"] = bundle.left_previous
+                return super().apply_pending()
+
+        migrations = ProbeMigrations(applied=("0005", "0006"))
+        runner, _, _, _, service = _runner(store, bundle=bundle, migrations=migrations)
+
+        final = runner.run()
+
+        self.assertTrue(seen["left_previous"], "迁移必须跑在原子切换之后（读的是新树的迁移文件）")
+        self.assertEqual(
+            [w.stage for w in store.writes],
+            [
+                "backing_up",
+                "fetching_bundle",
+                "installing",
+                "syncing_deps",
+                "applying_migrations",
+                "applying_migrations",
+                "restarting",
+            ],
+        )
+        messages = [w.message for w in store.writes if w.stage == "applying_migrations"]
+        self.assertTrue(any("0005" in m and "0006" in m for m in messages), messages)
+        self.assertEqual(final.stage, "restarting")
+        self.assertIsNone(final.error)
+        self.assertEqual(service.restarts, 1)
+
+    def test_no_pending_migrations_skips_stage_without_failing_the_job(self):
+        store = FakeJobStore(_queued())
+        migrations = FakeMigrations(applied=())
+        runner, _, bundle, deps, service = _runner(store, migrations=migrations)
+
+        final = runner.run()
+
+        self.assertEqual(migrations.calls, 1)
+        self.assertTrue(deps.synced)
+        self.assertFalse(bundle.restored)
+        self.assertFalse(final.rollback_attempted)
+        self.assertIsNone(final.error)
+        self.assertEqual(final.stage, "restarting")
+        self.assertEqual(service.restarts, 1)
+        messages = [w.message for w in store.writes if w.stage == "applying_migrations"]
+        self.assertTrue(any("跳过" in m for m in messages), messages)
+
+    def test_migration_failure_fails_job_and_rolls_back_previous_tree(self):
+        store = FakeJobStore(_queued())
+        migrations = FakeMigrations(fail=True)
+        runner, _, bundle, _, service = _runner(store, migrations=migrations)
+
+        final = runner.run()
+
+        self.assertEqual(migrations.calls, 1)
+        self.assertTrue(bundle.restored, "迁移失败要按现有机制回滚代码树")
+        self.assertEqual(final.stage, "failed")
+        self.assertTrue(final.rollback_attempted)
+        self.assertTrue(final.rollback_ok)
+        self.assertIn("0005_scheduling.sql", final.error or "")
+        self.assertIn("log=", final.error or "")
+        self.assertGreaterEqual(service.restarts, 1)
+        self.assertIn("applying_migrations", [w.stage for w in store.writes])

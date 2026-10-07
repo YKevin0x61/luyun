@@ -16,13 +16,17 @@ logger = logging.getLogger(__name__)
 
 # Stages written by Apply Update / Update Job (stable for Admin UI polling).
 # Bundle path (ADR 0011): queued → backing_up → fetching_bundle → installing
-# → syncing_deps → restarting → succeeded|failed
+# → syncing_deps → applying_migrations → restarting → succeeded|failed
 STAGE_IDLE = "idle"
 STAGE_QUEUED = "queued"
 STAGE_BACKING_UP = "backing_up"
 STAGE_FETCHING_BUNDLE = "fetching_bundle"
 STAGE_INSTALLING = "installing"
 STAGE_SYNCING_DEPS = "syncing_deps"
+# 待执行迁移在 installing 之后、restarting 之前应用（ADR 0096）：迁移 SQL 随发行包
+# 下发，所以只有切到新树之后才读得到它们；反过来，「新代码先跑、结构还没改」的窗口
+# 因此不存在。
+STAGE_APPLYING_MIGRATIONS = "applying_migrations"
 STAGE_RESTARTING = "restarting"
 STAGE_SUCCEEDED = "succeeded"
 STAGE_SUCCEEDED_BUT_UNHEALTHY = "succeeded_but_unhealthy"
@@ -41,6 +45,7 @@ IN_PROGRESS_STAGES = frozenset(
         STAGE_FETCHING_BUNDLE,
         STAGE_INSTALLING,
         STAGE_SYNCING_DEPS,
+        STAGE_APPLYING_MIGRATIONS,
         STAGE_RESTARTING,
         STAGE_FETCHING,
         STAGE_INSTALLING_ASSETS,

@@ -21,11 +21,18 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0001_initial_schema.sql
 `0001` 之后新增的索引/列放在带序号的小脚本里，全部写成幂等 DDL（`IF NOT EXISTS`），
 可重复执行。
 
-**推荐做法：用 Admin 界面应用**——「系统更新」区块里有一块「数据库迁移」，会列出
-待应用的脚本并支持一键应用，应用记录写进库里的 `schema_migrations` 表，随时能看出
-当前到哪一版（`GET /api/db-migrations` 列出待应用脚本，`POST /api/db-migrations/apply`
-应用）。这样发版时不必记得敲 psql，也不会
-出现「代码升了、schema 没升」这种只在运行期才暴露的错位。
+**推荐做法：更新作业自动应用**——「系统更新」的 Update Job 在 `installing`（已切到新树）
+之后、`restarting` 之前有一个 `applying_migrations` 阶段，用**新树自己的**
+`scripts/apply_db_migrations.py` 把待应用脚本跑完（迁移 SQL 随发行包下发，所以只有新树里
+的这份代码读得到它们——作业进程本身跑的是旧树代码，见 ADR 0096）。没有待应用项时该阶段跳过，
+失败则更新作业失败并回滚代码树。
+
+**兜底：Admin 界面手工应用**——「系统更新」区块里有一块「数据库迁移」，会列出待应用的脚本
+并支持一键应用（`GET /api/db-migrations` 列出待应用脚本，`POST /api/db-migrations/apply`
+应用）。升级到第一个带 `applying_migrations` 的发行包时作业还是旧代码，那一次走这里；需要单独
+补应用时同样走这里。两条路用的是同一套 `services/db_migrations` 逻辑与同一张
+`schema_migrations` 记录表，所以发版时不必记得敲 psql，也不会出现「代码升了、schema 没升」
+这种只在运行期才暴露的错位。
 
 想手工应用也可以：
 

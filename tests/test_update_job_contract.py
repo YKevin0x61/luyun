@@ -34,6 +34,7 @@ class UpdateJobContractTest(unittest.TestCase):
         self.assertIn("fetching_bundle", out)
         self.assertIn("installing", out)
         self.assertIn("syncing_deps", out)
+        self.assertIn("applying_migrations", out)
         self.assertIn("restarting", out)
         self.assertIn("luyun-release-bundle.tar.gz", out)
         self.assertIn("SHA256SUMS", out)

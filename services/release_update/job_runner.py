@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Update Job runner: backup → fetch bundle → install → conditional deps → restart."""
+"""Update Job runner: backup → fetch bundle → install → conditional deps → migrations → restart."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Callable, Optional, Protocol
+from typing import Callable, Optional, Protocol, Tuple
 
 from database import CHINA_TZ
 from services.release_update import (
+    STAGE_APPLYING_MIGRATIONS,
     STAGE_BACKING_UP,
     STAGE_FAILED,
     STAGE_FETCHING_BUNDLE,
@@ -34,6 +35,19 @@ class BundleInstallResult:
     previous_requirements_fingerprint: Optional[str]
 
 
+@dataclass(frozen=True)
+class MigrationApplyOutcome:
+    """待执行迁移阶段的结果。
+
+    ``applied`` 为空表示「本次没有待应用的东西」——那是正常的跳过，不是失败；作业
+    继续走到重启。失败不在这里表达：适配器直接抛异常，走 ``job_runner`` 已有的失败
+    + 回滚路径。
+    """
+
+    applied: Tuple[str, ...] = ()
+    note: str = ""
+
+
 class MandatoryBackupPort(Protocol):
     def run_backup(self) -> str: ...
 
@@ -51,6 +65,11 @@ class BundleInstallPort(Protocol):
 
 class DepsSyncPort(Protocol):
     def sync(self) -> None: ...
+
+
+class DatabaseMigrationsPort(Protocol):
+    def apply_pending(self) -> MigrationApplyOutcome:
+        """应用**新树**里的待执行迁移；没有待应用项时返回空的 outcome。"""
 
 
 class BrowserSyncPort(Protocol):
@@ -86,6 +105,7 @@ class UpdateJobRunner:
         bundle: BundleInstallPort,
         deps: DepsSyncPort,
         service: MainServicePort,
+        migrations: DatabaseMigrationsPort,
         browser: Optional[BrowserSyncPort] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
     ) -> None:
@@ -94,6 +114,7 @@ class UpdateJobRunner:
         self._bundle = bundle
         self._deps = deps
         self._service = service
+        self._migrations = migrations
         self._browser = browser
         self._is_cancelled = is_cancelled or (lambda: False)
 
@@ -169,6 +190,24 @@ class UpdateJobRunner:
             # requirements 指纹是否变化都要跑：手动删过浏览器/换过镜像同样要修。
             if self._browser is not None:
                 self._browser.sync()
+
+            self._raise_if_cancelled()
+            # 待执行迁移必须在原子切换之后应用（ADR 0096）：迁移 SQL 随发行包下发，
+            # 只有新树里才有这次要应用的文件。适配器用**新树自己的代码与解释器**跑，
+            # 不在这里 import 作业进程那份 db_migrations（那是旧树）。
+            base = self._store.read()
+            self._set(base, STAGE_APPLYING_MIGRATIONS, "Applying pending database migrations")
+            base = self._store.read()
+            outcome = self._migrations.apply_pending()
+            # 迁移可能跑几分钟：写下结果前重新读一次，别把期间写进状态文件的东西
+            # （操作者请求取消）覆盖掉。
+            base = self._store.read()
+            if outcome.applied:
+                message = "已应用数据库迁移：" + "、".join(outcome.applied)
+            else:
+                message = outcome.note or "无待应用数据库迁移，跳过"
+            self._set(base, STAGE_APPLYING_MIGRATIONS, message)
+            base = self._store.read()
 
             self._raise_if_cancelled()
             # The job only switches the Release Bundle and asks for a restart.

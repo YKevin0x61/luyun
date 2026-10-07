@@ -160,7 +160,7 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 
 ---
 
-## 2. 升级：Version Check → Update Preflight → Apply Update → Update Job →（PG）应用数据库迁移
+## 2. 升级：Version Check → Update Preflight → Apply Update → Update Job（含应用数据库迁移）
 
 店内日常升级**不要** SSH 上去 `git checkout` 再 `npm run build`。正确路径：
 
@@ -183,6 +183,7 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 | `fetching_bundle` | 下载发行包 + `SHA256SUMS` 并硬校验 |
 | `installing` | 旁路解压后原子切换（保留上一版目录；不覆盖 `data/` / 凭据） |
 | `syncing_deps` | 仅当 `requirements_fingerprint` 变化时 pip；随后幂等同步 Playwright 浏览器（失败只告警，不阻断更新） |
+| `applying_migrations` | 用**新树自己的**入口（`scripts/apply_db_migrations.py`）应用待执行迁移（ADR 0096）；没有待应用项时跳过，失败则作业失败并回滚代码树 |
 | `restarting` | 重启主服务（systemd 或 Docker socket）；重启后由管理后台轮询完成**健康确认**，不直接算成功 |
 | `succeeded` | 终态之一：已切换 + 重启后健康确认通过 |
 | `succeeded_but_unhealthy` | 终态之一：已切换但服务未恢复健康（保留回退点与日志；**不自动重试、不自动回滚**，处置见下方「更新后起不来」） |
@@ -191,12 +192,14 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 并发：已有进行中的 Update Job 时，新的 Apply Update 会被拒绝。
 `data/` 业务库与凭据在代码更新过程中保留；备份另见第 4 节。
 
-5. **应用数据库迁移**：健康确认之后进「系统更新」→「数据库迁移」→「应用待执行迁移」。
+5. **数据库迁移**：更新作业已在 `restarting` 之前自动应用（`applying_migrations` 阶段）。
+   「系统更新」→「数据库迁移」→「应用待执行迁移」保留作兜底——作业进程跑的是当前已装版本的
+   代码，升级到第一个带该阶段的发行包时那一次仍要手工应用。
 
-   更新作业按设计**不碰数据库结构**（`_connect_postgres` 明确不在启动期改结构，结构变更
-   要可追溯），所以 schema 变更得单独应用一次。版本检测已把待应用条数显示在版本状态卡上，
-   不用靠记性；应用记录写在 `schema_migrations` 表，能看出当前到哪一版。详见
-   `migrations/pg/README.md`。
+   应用按设计**不在启动期改结构**（`_connect_postgres` 明确不这么做，结构变更要可追溯），
+   DDL 只在 `migrations/pg/000N_*.sql` 里、随发行包下发，所以只能切到新树之后应用。
+   版本检测已把待应用条数显示在版本状态卡上，不用靠记性；应用记录写在 `schema_migrations`
+   表，能看出当前到哪一版。详见 `migrations/pg/README.md`。
 
 > **数据库是 PostgreSQL**：上面 `backing_up` 阶段的强制备份走 `pg_dump` 产出
 > `app.pgdump`（不再有 `app.db`）。首次部署、从遗留 SQLite 迁移、恢复与回滚见
