@@ -134,6 +134,13 @@ class Settings(BaseSettings):
     # 的实例必须靠这个循环把保留天数落到实处（空间回收交给 PG 的 autovacuum）。
     LOG_MAINTENANCE_INTERVAL_SECONDS: int = 6 * 3600
 
+    # 统一出站（ADR 0095）：**每渠道**独立的发信节流与发送记录保留天数。
+    # 阈值刻意做成配置项、不硬编官方数字——企微群机器人的每分钟上限没有从官方文档
+    # 正文确认过（文档页是脚本渲染的，抓不到正文），社区与云厂商接入文档普遍转述为
+    # 每分钟 20 条。0 = 关掉节流（阈值）/ 永久保留（保留天数）。
+    WECOM_OUTBOX_RATE_LIMIT_PER_MINUTE: int = 20
+    WECOM_OUTBOX_RETENTION_DAYS: int = 90
+
     # 磁盘守护（进程内）：阈值告警 + 健康端点暴露
     DISK_GUARD_ENABLED: bool = True
     DISK_GUARD_INTERVAL_SECONDS: int = 300

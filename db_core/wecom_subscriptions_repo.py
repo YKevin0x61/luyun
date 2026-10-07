@@ -470,31 +470,31 @@ class _WecomSubscriptionsRepoMixin:
         )
 
     async def wecom_outbox_mark_sent(
-        self, outbox_id: int, message_bytes: Optional[int] = None
+        self,
+        outbox_id: int,
+        message_bytes: Optional[int] = None,
+        *,
+        attempts: Optional[int] = None,
     ) -> bool:
+        """标记已发（终态）。``attempts`` 是含这次成功在内的尝试次数。"""
         try:
+            sets = ["status = ?", "last_error = ''"]
+            params: List[Any] = [SUB_OUTBOX_STATUS_SENT]
+            if message_bytes is not None:
+                sets.append("message_bytes = ?")
+                params.append(int(message_bytes))
+            sets.append("finished_at = ?")
+            params.append(_now())
+            if attempts is not None:
+                sets.append("attempts = ?")
+                params.append(int(attempts))
+            params.append(int(outbox_id))
             tdb = self._connection.table("wecom_push_outbox")
             async with tdb.conn.cursor() as cursor:
-                if message_bytes is None:
-                    await cursor.execute(
-                        """UPDATE wecom_push_outbox
-                              SET status = ?, last_error = '', finished_at = ?
-                            WHERE id = ?""",
-                        (SUB_OUTBOX_STATUS_SENT, _now(), int(outbox_id)),
-                    )
-                else:
-                    await cursor.execute(
-                        """UPDATE wecom_push_outbox
-                              SET status = ?, last_error = '', message_bytes = ?,
-                                  finished_at = ?
-                            WHERE id = ?""",
-                        (
-                            SUB_OUTBOX_STATUS_SENT,
-                            int(message_bytes),
-                            _now(),
-                            int(outbox_id),
-                        ),
-                    )
+                await cursor.execute(
+                    f"UPDATE wecom_push_outbox SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
             await tdb.commit()
             return True
         except Exception as e:
@@ -502,11 +502,26 @@ class _WecomSubscriptionsRepoMixin:
             return False
 
     async def wecom_outbox_mark_retry(
-        self, outbox_id: int, error: str, status: str, attempts: int
+        self,
+        outbox_id: int,
+        error: str,
+        status: str,
+        attempts: int,
+        *,
+        scheduled_at: Optional[str] = None,
     ) -> bool:
-        """失败后放回待发（或按状态机落到别的非终态），并留下错误与尝试次数。"""
+        """失败后放回待发（或按状态机落到别的非终态），并留下错误与尝试次数。
+
+        ``scheduled_at`` 是**下一次尝试的时间**：事件类按退避（1 / 5 / 15 分钟），
+        定时类按当天补发（约 10 分钟）。写进库里而不是只放内存里，重启后仍然看得见
+        「这条什么时候再试」。
+        """
         return await self._outbox_set_status(
-            outbox_id, status, last_error=error, attempts=attempts
+            outbox_id,
+            status,
+            last_error=error,
+            attempts=attempts,
+            scheduled_at=scheduled_at,
         )
 
     async def wecom_outbox_mark_failed(
@@ -530,6 +545,7 @@ class _WecomSubscriptionsRepoMixin:
         *,
         last_error: Optional[str] = None,
         attempts: Optional[int] = None,
+        scheduled_at: Optional[str] = None,
         finished: bool = False,
     ) -> bool:
         try:
@@ -541,6 +557,9 @@ class _WecomSubscriptionsRepoMixin:
             if attempts is not None:
                 sets.append("attempts = ?")
                 params.append(int(attempts))
+            if scheduled_at is not None:
+                sets.append("scheduled_at = ?")
+                params.append(str(scheduled_at))
             if finished:
                 sets.append("finished_at = ?")
                 params.append(_now())
