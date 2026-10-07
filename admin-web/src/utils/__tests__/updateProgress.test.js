@@ -20,12 +20,36 @@ describe('updateStageSteps', () => {
     const view = updateStageSteps({ stage: 'installing', snapshot_ts: '20260919-0359' })
     expect(view.outcome).toBe('running')
     expect(states({ stage: 'installing', snapshot_ts: '20260919-0359' })).toEqual([
-      'done', 'done', 'active', 'pending', 'pending', 'pending',
+      'done', 'done', 'active', 'pending', 'pending', 'pending', 'pending',
     ])
     expect(view.summary).toContain('安装发行包')
-    expect(view.summary).toContain('3/6')
+    expect(view.summary).toContain('3/7')
     // 备份步骤真的完成了才标时间戳
     expect(view.items[0].at).toBe('20260919-0359')
+  })
+
+  it('步骤顺序与后端阶段序列一致：应用数据库迁移在同步依赖之后、切换并重启之前', () => {
+    expect(KEYS).toEqual([
+      'backing_up',
+      'fetching_bundle',
+      'installing',
+      'syncing_deps',
+      'applying_migrations',
+      'restarting',
+      'health',
+    ])
+  })
+
+  it('应用数据库迁移：进度条停在「应用数据库迁移」，不回落成「暂无进行中的更新作业」', () => {
+    const view = updateStageSteps({ stage: 'applying_migrations' })
+    expect(view.outcome).toBe('running')
+    expect(view.currentLabel).toBe('应用数据库迁移')
+    expect(view.summary).toContain('第 5/7 步')
+    expect(states({ stage: 'applying_migrations' })).toEqual([
+      'done', 'done', 'done', 'done', 'active', 'pending', 'pending',
+    ])
+    // 未知阶段会回落成 idle —— 这条断言钉住「阶段表漏了 applying_migrations」的缺陷。
+    expect(view.summary).not.toContain('暂无进行中的更新作业')
   })
 
   it('刚排队时第一步还是进行中，不预先标成完成', () => {
@@ -37,14 +61,14 @@ describe('updateStageSteps', () => {
 
   it('兼容 ADR 0010 的 legacy 阶段名（fetching / installing_assets）', () => {
     expect(states({ stage: 'fetching' })).toEqual([
-      'done', 'active', 'pending', 'pending', 'pending', 'pending',
+      'done', 'active', 'pending', 'pending', 'pending', 'pending', 'pending',
     ])
     expect(states({ stage: 'installing_assets' })).toEqual([
-      'done', 'done', 'active', 'pending', 'pending', 'pending',
+      'done', 'done', 'active', 'pending', 'pending', 'pending', 'pending',
     ])
   })
 
-  it('成功 = 六个步骤全部完成，并带出快照 / 重启 / 健康确认时间', () => {
+  it('成功 = 七个步骤全部完成，并带出快照 / 重启 / 健康确认时间', () => {
     const view = updateStageSteps({
       stage: 'succeeded',
       snapshot_ts: '20260919-0359',
@@ -53,8 +77,8 @@ describe('updateStageSteps', () => {
     })
     expect(view.outcome).toBe('succeeded')
     expect(states({ stage: 'succeeded' })).toEqual(KEYS.map(() => 'done'))
-    expect(view.items[4].at).toBe('2026-09-19T03:59:50+08:00')
-    expect(view.items[5].at).toBe('2026-09-19T04:00:20+08:00')
+    expect(view.items[5].at).toBe('2026-09-19T03:59:50+08:00')
+    expect(view.items[6].at).toBe('2026-09-19T04:00:20+08:00')
   })
 
   it('已切换但未健康：只有健康确认这一步是失败态', () => {
@@ -65,7 +89,7 @@ describe('updateStageSteps', () => {
     })
     expect(view.outcome).toBe('unhealthy')
     expect(states({ stage: 'succeeded_but_unhealthy' })).toEqual([
-      'done', 'done', 'done', 'done', 'done', 'failed',
+      'done', 'done', 'done', 'done', 'done', 'done', 'failed',
     ])
     expect(view.summary).toContain('健康确认未通过')
   })
@@ -73,15 +97,17 @@ describe('updateStageSteps', () => {
   it('失败：只用真正落下的时间戳判断完成过哪些步骤', () => {
     // 只有快照时间戳 → 只知道备份完成，其余不猜
     expect(states({ stage: 'failed', snapshot_ts: '20260919-0359' })).toEqual([
-      'done', 'pending', 'pending', 'pending', 'pending', 'pending',
+      'done', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending',
     ])
-    // 已经请求重启 → 之前的下载/安装/依赖都完成过
+    // 已经请求重启 → 之前的下载/安装/依赖/迁移都完成过
     const restarted = states({
       stage: 'failed',
       snapshot_ts: '20260919-0359',
       restart_requested_at: '2026-09-19T03:59:50+08:00',
     })
-    expect(restarted).toEqual(['done', 'done', 'done', 'done', 'done', 'pending'])
+    expect(restarted).toEqual([
+      'done', 'done', 'done', 'done', 'done', 'done', 'pending',
+    ])
     const view = updateStageSteps({ stage: 'failed' })
     expect(view.summary).toContain('失败')
     expect(states({ stage: 'failed' })).toEqual(KEYS.map(() => 'pending'))

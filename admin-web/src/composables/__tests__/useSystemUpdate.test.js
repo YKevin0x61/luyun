@@ -419,6 +419,8 @@ describe('useSystemUpdate', () => {
     expect(STAGE_LABELS.fetching_bundle).toBe('正在下载发行包')
     expect(STAGE_LABELS.installing).toBe('正在安装发行包')
     expect(STAGE_LABELS.syncing_deps).toBe('正在同步依赖')
+    // applying_migrations 在 syncing_deps 之后、restarting 之前（ADR 0096）。
+    expect(STAGE_LABELS.applying_migrations).toBe('正在应用数据库迁移')
     // restarting 不是成功：主服务已切换、正在重启，仍需健康确认。
     expect(STAGE_LABELS.restarting).toBe('已切换、重启中')
     expect(STAGE_LABELS.succeeded_but_unhealthy).toBe('已切换但未健康')
@@ -823,6 +825,40 @@ describe('useSystemUpdate', () => {
 
     expect(job.value.stage).toBe('installing')
     expect(jobStageLabel.value).toBe('正在安装发行包')
+    expect(jobPolling.value).toBe(true)
+  })
+
+  it('treats applying_migrations as in progress: polling resumes, Chinese label, cancellable', async () => {
+    apiGet.mockResolvedValue({
+      success: true,
+      job: {
+        stage: 'applying_migrations',
+        target_tag: 'v0.2.0',
+        message: 'Applying pending database migrations',
+        log_path: 'data/update_job.log',
+      },
+    })
+
+    const {
+      loadJobStatus,
+      jobPolling,
+      jobInProgress,
+      canCancelJob,
+      job,
+      jobStageLabel,
+    } = useSystemUpdate({
+      showAlert: vi.fn(),
+      clearAlert: vi.fn(),
+      pollIntervalMs: 60_000,
+    })
+
+    await loadJobStatus()
+
+    expect(job.value.stage).toBe('applying_migrations')
+    expect(jobInProgress.value).toBe(true)
+    expect(jobStageLabel.value).toBe('正在应用数据库迁移')
+    // 进度页在这一阶段仍要给出取消入口。
+    expect(canCancelJob.value).toBe(true)
     expect(jobPolling.value).toBe(true)
   })
 

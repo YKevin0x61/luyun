@@ -3,7 +3,7 @@
  *
  * 后端的 stage 是「某一时刻的状态」，不是一个进度百分比；这里把它还原成
  * 一条固定顺序的步骤链：备份 → 下载发行包 → 安装发行包 → 同步依赖 →
- * 切换并重启 → 健康确认。
+ * 应用数据库迁移 → 切换并重启 → 健康确认。
  *
  * 失败是终态（stage 直接变 failed，不带失败发生在哪一步），因此失败时只用
  * 作业里确实落下的时间戳（snapshot_ts / restart_requested_at）判断哪些步骤
@@ -15,6 +15,7 @@ export const UPDATE_STEPS = [
   { key: 'fetching_bundle', label: '下载发行包', stages: ['fetching_bundle', 'fetching'] },
   { key: 'installing', label: '安装发行包', stages: ['installing', 'installing_assets'] },
   { key: 'syncing_deps', label: '同步依赖', stages: ['syncing_deps'] },
+  { key: 'applying_migrations', label: '应用数据库迁移', stages: ['applying_migrations'] },
   { key: 'restarting', label: '切换并重启', stages: ['restarting'] },
   { key: 'health', label: '健康确认', stages: [] },
 ]
