@@ -27,6 +27,7 @@ from db_core.schema import (
     HYGIENE_TABLES,
     RECIPE_TABLES,
     SCHEDULING_TABLES,
+    WECOM_SUBSCRIPTION_TABLES,
 )
 from api.security import verify_admin_token
 from services.dish_catalog import get_dish_catalog
@@ -42,6 +43,7 @@ _ADMIN_READ_ONLY_TABLES = frozenset({
     *RECIPE_TABLES,
     *HYGIENE_TABLES,
     *SCHEDULING_TABLES,
+    *WECOM_SUBSCRIPTION_TABLES,
 })
 _ADMIN_WRITABLE_TABLES = frozenset(
     table for table in ALL_TABLES
@@ -52,6 +54,7 @@ _ADMIN_TABLE_GROUPS = (
     ("recipe", "配方库", RECIPE_TABLES),
     ("hygiene", "卫生管理", HYGIENE_TABLES),
     ("scheduling", "排班", SCHEDULING_TABLES),
+    ("wecom", "企微推送", WECOM_SUBSCRIPTION_TABLES),
     ("auth", "登录认证", AUTH_PHYSICAL_TABLES),
     ("external", "其他数据源", ("logs",)),
 )
@@ -88,6 +91,10 @@ def _reject_read_only_table_write(table_name: str) -> None:
         raise HTTPException(status_code=403, detail="卫生表为只读表，请通过卫生管理页面维护")
     if table_name in SCHEDULING_TABLES:
         raise HTTPException(status_code=403, detail="排班表为只读表，请通过排班页面维护")
+    if table_name in WECOM_SUBSCRIPTION_TABLES:
+        raise HTTPException(
+            status_code=403, detail="订阅与出站表为只读表，请通过企微推送页面维护"
+        )
     if table_name not in _ADMIN_WRITABLE_TABLES:
         raise HTTPException(status_code=403, detail="系统表禁止修改")
 
@@ -121,6 +128,8 @@ def _admin_catalog() -> Dict[str, Any]:
                 meta["read_only_reason"] = "请通过卫生管理页面维护"
             elif table in SCHEDULING_TABLES:
                 meta["read_only_reason"] = "请通过排班页面维护"
+            elif table in WECOM_SUBSCRIPTION_TABLES:
+                meta["read_only_reason"] = "请通过企微推送页面维护"
             redacted = sorted(_ADMIN_REDACTED_COLUMNS.get(table, ()))
             if redacted:
                 meta["redacted_columns"] = redacted

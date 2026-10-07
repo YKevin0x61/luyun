@@ -21,7 +21,13 @@ from typing import Any, Dict, Optional
 
 from config import settings
 
-from db_core.schema import ALL_TABLES, HYGIENE_TABLES, RECIPE_TABLES, SCHEDULING_TABLES
+from db_core.schema import (
+    ALL_TABLES,
+    HYGIENE_TABLES,
+    RECIPE_TABLES,
+    SCHEDULING_TABLES,
+    WECOM_SUBSCRIPTION_TABLES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +67,13 @@ class DatabaseConnection:
             else:
                 await self._pg.rebind(dsn)
 
-            tables = list(ALL_TABLES) + list(RECIPE_TABLES) + list(HYGIENE_TABLES) + list(SCHEDULING_TABLES)
+            tables = (
+                list(ALL_TABLES)
+                + list(RECIPE_TABLES)
+                + list(HYGIENE_TABLES)
+                + list(SCHEDULING_TABLES)
+                + list(WECOM_SUBSCRIPTION_TABLES)
+            )
             for table in tables:
                 self._table_views[table] = TableView(table, self)
 

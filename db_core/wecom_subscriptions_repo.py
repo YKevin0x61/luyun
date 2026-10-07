@@ -1,0 +1,586 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""DatabaseManager 的推送订阅职责：订阅 / 渠道群组 / 群组成员 / 出站记录。
+
+「谁收到什么」只有一条真相来源——``wecom_push_subscriptions``（内容类型 × 目标，
+目标是推送渠道或渠道群组，见 ADR 0094）；出站记录 ``wecom_push_outbox`` 是
+**一次投递一行**的队列表兼发送记录（ADR 0095）。
+
+表由迁移 ``0016_wecom_push_subscriptions.sql`` 建立。异常一律记日志后返回空值 /
+``False``，与 ``wecom_repo.py`` 的既有方法一致：调用方（页面与调度循环）拿到的是
+「这次没读到 / 没写成」，而不是一个把整条请求打成 500 的异常。
+"""
+
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from db_core.utils import CHINA_TZ
+
+logger = logging.getLogger(__name__)
+
+SUB_OUTBOX_STATUS_PENDING = "pending"
+SUB_OUTBOX_STATUS_SENDING = "sending"
+SUB_OUTBOX_STATUS_SENT = "sent"
+SUB_OUTBOX_STATUS_FAILED = "failed"
+SUB_OUTBOX_STATUS_SKIPPED = "skipped"
+_OUTBOX_FINISHED_STATUSES = (
+    SUB_OUTBOX_STATUS_SENT,
+    SUB_OUTBOX_STATUS_FAILED,
+    SUB_OUTBOX_STATUS_SKIPPED,
+)
+
+
+def _now() -> str:
+    return datetime.now(CHINA_TZ).isoformat()
+
+
+class _WecomSubscriptionsRepoMixin:
+    """推送订阅、渠道群组与出站记录的增删改查。"""
+
+    # ── 推送订阅 ──────────────────────────────────────────────────────────
+
+    async def wecom_subscriptions_all(
+        self, topic_id: Optional[str] = None, include_disabled: bool = True
+    ) -> List[Dict]:
+        """列出订阅；可按内容类型过滤。目标两列恰好有一个非空。"""
+        try:
+            tdb = self._connection.table("wecom_push_subscriptions")
+            sql = """SELECT id, topic_id, target_channel_id, target_group_id,
+                            enabled, created_at, updated_at
+                     FROM wecom_push_subscriptions"""
+            params: List[Any] = []
+            conditions: List[str] = []
+            if topic_id:
+                conditions.append("topic_id = ?")
+                params.append(str(topic_id))
+            if not include_disabled:
+                conditions.append("enabled = ?")
+                params.append(1)
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+            sql += " ORDER BY topic_id ASC, id ASC"
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(sql, params)
+                rows = await cursor.fetchall()
+            return [self._subscription_row(dict(row)) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ 获取推送订阅失败: {e}")
+            return []
+
+    async def wecom_subscription_upsert(self, item: Dict[str, Any]) -> int:
+        """登记一条订阅并返回它的 id；同一「内容类型 × 目标」已存在时复用那一行。
+
+        唯一索引落在 (tenant_id, topic_id, 目标列) 上，所以这里的 ``ON CONFLICT``
+        与页面上的「勾选 / 取消勾选」共用同一条约束：不会因为重复勾选多出一行。
+        """
+        topic_id = str(item.get("topic_id") or "").strip()
+        channel_id = item.get("target_channel_id")
+        group_id = item.get("target_group_id")
+        if not topic_id or (channel_id is None) == (group_id is None):
+            raise ValueError("订阅必须且只能指定一个目标（渠道或群组）")
+
+        try:
+            now = _now()
+            enabled = 1 if item.get("enabled", True) else 0
+            tdb = self._connection.table("wecom_push_subscriptions")
+            if channel_id is not None:
+                sql = """INSERT INTO wecom_push_subscriptions
+                           (topic_id, target_channel_id, enabled, created_at, updated_at)
+                         VALUES (?, ?, ?, ?, ?)
+                         ON CONFLICT (tenant_id, topic_id, target_channel_id)
+                             WHERE target_channel_id IS NOT NULL
+                         DO UPDATE SET enabled = excluded.enabled,
+                                       updated_at = excluded.updated_at
+                         RETURNING id"""
+                params = (topic_id, int(channel_id), enabled, now, now)
+            else:
+                sql = """INSERT INTO wecom_push_subscriptions
+                           (topic_id, target_group_id, enabled, created_at, updated_at)
+                         VALUES (?, ?, ?, ?, ?)
+                         ON CONFLICT (tenant_id, topic_id, target_group_id)
+                             WHERE target_group_id IS NOT NULL
+                         DO UPDATE SET enabled = excluded.enabled,
+                                       updated_at = excluded.updated_at
+                         RETURNING id"""
+                params = (topic_id, int(group_id), enabled, now, now)
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(sql, params)
+                row = await cursor.fetchone()
+            await tdb.commit()
+            return int(dict(row)["id"]) if row else 0
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ 保存推送订阅失败: {e}")
+            return 0
+
+    async def wecom_subscription_delete(self, subscription_id: int) -> bool:
+        try:
+            tdb = self._connection.table("wecom_push_subscriptions")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    "DELETE FROM wecom_push_subscriptions WHERE id = ?",
+                    (int(subscription_id),),
+                )
+            await tdb.commit()
+            return True
+        except Exception as e:
+            logger.error(f"❌ 删除推送订阅失败: {e}")
+            return False
+
+    # ── 渠道群组与成员 ────────────────────────────────────────────────────
+
+    async def wecom_channel_groups_all(self, include_disabled: bool = True) -> List[Dict]:
+        try:
+            tdb = self._connection.table("wecom_channel_groups")
+            sql = """SELECT id, name, enabled, notes, created_at, updated_at
+                     FROM wecom_channel_groups"""
+            params: List[Any] = []
+            if not include_disabled:
+                sql += " WHERE enabled = ?"
+                params.append(1)
+            sql += " ORDER BY name ASC, id ASC"
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(sql, params)
+                rows = await cursor.fetchall()
+            return [
+                {**dict(row), "enabled": bool(dict(row).get("enabled"))} for row in rows
+            ]
+        except Exception as e:
+            logger.error(f"❌ 获取渠道群组失败: {e}")
+            return []
+
+    async def wecom_channel_group_get(self, group_id: int) -> Optional[Dict]:
+        try:
+            tdb = self._connection.table("wecom_channel_groups")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT id, name, enabled, notes, created_at, updated_at
+                       FROM wecom_channel_groups WHERE id = ?""",
+                    (int(group_id),),
+                )
+                row = await cursor.fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            return {**item, "enabled": bool(item.get("enabled"))}
+        except Exception as e:
+            logger.error(f"❌ 获取渠道群组详情失败: {e}")
+            return None
+
+    async def wecom_channel_group_create(self, item: Dict[str, Any]) -> int:
+        """建群组；同名已存在时返回 0（不静默复用那一行）。
+
+        复用同名群组是**危险**的：调用方以为新建了一个空群组，实际拿到的是另一个
+        群组，往里加成员、挂订阅就动到了别人的收件人。宁可返回 0 让页面提示重名。
+        """
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise ValueError("群组名称不能为空")
+        try:
+            tdb = self._connection.table("wecom_channel_groups")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT id FROM wecom_channel_groups WHERE name = ?", (name,)
+                )
+                if await cursor.fetchone() is not None:
+                    logger.error(f"❌ 创建渠道群组失败：同名群组已存在 {name}")
+                    return 0
+                now = _now()
+                await cursor.execute(
+                    """INSERT INTO wecom_channel_groups
+                       (name, enabled, notes, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        name,
+                        1 if item.get("enabled", True) else 0,
+                        str(item.get("notes", "")),
+                        now,
+                        now,
+                    ),
+                )
+                row_id = cursor.lastrowid
+            await tdb.commit()
+            return int(row_id or 0)
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ 创建渠道群组失败: {e}")
+            return 0
+
+    async def wecom_channel_group_update(self, group_id: int, item: Dict[str, Any]) -> bool:
+        try:
+            existing = await self.wecom_channel_group_get(group_id)
+            if not existing:
+                return False
+            name = str(item.get("name", existing["name"])).strip()
+            if not name:
+                raise ValueError("群组名称不能为空")
+            tdb = self._connection.table("wecom_channel_groups")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """UPDATE wecom_channel_groups
+                       SET name = ?, enabled = ?, notes = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        name,
+                        1 if item.get("enabled", bool(existing["enabled"])) else 0,
+                        str(item.get("notes", existing.get("notes", ""))),
+                        _now(),
+                        int(group_id),
+                    ),
+                )
+            await tdb.commit()
+            return True
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ 更新渠道群组失败: {e}")
+            return False
+
+    async def wecom_channel_group_delete(self, group_id: int) -> bool:
+        """删除群组：成员与指向它的订阅一起走（外键 ON DELETE CASCADE）。"""
+        try:
+            tdb = self._connection.table("wecom_channel_groups")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    "DELETE FROM wecom_channel_groups WHERE id = ?", (int(group_id),)
+                )
+            await tdb.commit()
+            return True
+        except Exception as e:
+            logger.error(f"❌ 删除渠道群组失败: {e}")
+            return False
+
+    async def wecom_channel_group_members(self, group_id: int) -> List[Dict]:
+        try:
+            tdb = self._connection.table("wecom_channel_group_members")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT id, group_id, channel_id, created_at
+                       FROM wecom_channel_group_members
+                       WHERE group_id = ? ORDER BY id ASC""",
+                    (int(group_id),),
+                )
+                rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ 获取群组成员失败: {e}")
+            return []
+
+    async def wecom_channel_groups_of_channel(self, channel_id: int) -> List[Dict]:
+        """这个渠道属于哪些群组（渠道卡片与删除提示都要用）。"""
+        try:
+            tdb = self._connection.table("wecom_channel_group_members")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT g.id, g.name, g.enabled, g.notes, g.created_at, g.updated_at
+                       FROM wecom_channel_group_members m
+                       JOIN wecom_channel_groups g ON g.id = m.group_id
+                       WHERE m.channel_id = ?
+                       ORDER BY g.name ASC, g.id ASC""",
+                    (int(channel_id),),
+                )
+                rows = await cursor.fetchall()
+            return [
+                {**dict(row), "enabled": bool(dict(row).get("enabled"))} for row in rows
+            ]
+        except Exception as e:
+            logger.error(f"❌ 获取渠道所属群组失败: {e}")
+            return []
+
+    async def wecom_channel_group_add_member(self, group_id: int, channel_id: int) -> bool:
+        """把渠道加进群组；重复加入是幂等的（唯一索引 + ON CONFLICT DO NOTHING）。"""
+        try:
+            if await self.wecom_channel_group_get(group_id) is None:
+                logger.error(f"❌ 渠道群组不存在: {group_id}")
+                return False
+            tdb = self._connection.table("wecom_channel_group_members")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """INSERT INTO wecom_channel_group_members
+                       (group_id, channel_id, created_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT (tenant_id, group_id, channel_id) DO NOTHING""",
+                    (int(group_id), int(channel_id), _now()),
+                )
+            await tdb.commit()
+            return True
+        except Exception as e:
+            logger.error(f"❌ 添加群组成员失败: {e}")
+            return False
+
+    async def wecom_channel_group_remove_member(self, group_id: int, channel_id: int) -> bool:
+        try:
+            tdb = self._connection.table("wecom_channel_group_members")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """DELETE FROM wecom_channel_group_members
+                       WHERE group_id = ? AND channel_id = ?""",
+                    (int(group_id), int(channel_id)),
+                )
+            await tdb.commit()
+            return True
+        except Exception as e:
+            logger.error(f"❌ 移除群组成员失败: {e}")
+            return False
+
+    # ── 出站记录（队列表 = 发送记录） ──────────────────────────────────────
+
+    async def wecom_outbox_enqueue(self, item: Dict[str, Any]) -> int:
+        """登记一次投递并返回它的 id；同一幂等键已存在时返回**那一行**的 id。
+
+        返回既有行的 id 而不是 0：调用方（验收登记、调度循环）据此判断「这封已经
+        在队列里了」，而不是把它当成失败再试一遍。
+
+        ``created_at`` 可以显式给（迁移搬历史行时要保住原来的时间），不给就取现在。
+        """
+        topic_id = str(item.get("topic_id") or "").strip()
+        if not topic_id:
+            raise ValueError("出站记录必须带内容类型")
+        target_channel_id = item.get("target_channel_id")
+        if target_channel_id is None:
+            raise ValueError("出站记录必须带目标渠道")
+        idempotency_key = str(item.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise ValueError("出站记录必须带幂等键")
+
+        try:
+            now = _now()
+            tdb = self._connection.table("wecom_push_outbox")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """INSERT INTO wecom_push_outbox
+                       (topic_id, params_json, schedule_id, target_channel_id,
+                        content_summary, message_bytes, status, attempts, last_error,
+                        idempotency_key, scheduled_at, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)
+                       ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+                       RETURNING id""",
+                    (
+                        topic_id,
+                        str(item.get("params_json") or "{}"),
+                        item.get("schedule_id"),
+                        int(target_channel_id),
+                        str(item.get("content_summary", "")),
+                        int(item.get("message_bytes", 0) or 0),
+                        str(item.get("status", SUB_OUTBOX_STATUS_PENDING)),
+                        idempotency_key,
+                        item.get("scheduled_at"),
+                        str(item.get("created_at") or now),
+                    ),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    await cursor.execute(
+                        """SELECT id FROM wecom_push_outbox
+                            WHERE tenant_id = 1 AND idempotency_key = ?""",
+                        (idempotency_key,),
+                    )
+                    row = await cursor.fetchone()
+            await tdb.commit()
+            return int(dict(row)["id"]) if row else 0
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ 登记出站记录失败: {e}")
+            return 0
+
+    async def wecom_outbox_get(self, outbox_id: int) -> Optional[Dict]:
+        try:
+            tdb = self._connection.table("wecom_push_outbox")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT id, topic_id, params_json, schedule_id, target_channel_id,
+                              content_summary, message_bytes, status, attempts, last_error,
+                              idempotency_key, scheduled_at, created_at, finished_at
+                       FROM wecom_push_outbox WHERE id = ?""",
+                    (int(outbox_id),),
+                )
+                row = await cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"❌ 获取出站记录失败: {e}")
+            return None
+
+    async def wecom_outbox_pending(self, limit: int = 20) -> List[Dict]:
+        """按先进先出取待发（调度循环每轮捞一批）。"""
+        try:
+            safe_limit = max(1, min(int(limit), 200))
+            tdb = self._connection.table("wecom_push_outbox")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT id, topic_id, params_json, schedule_id, target_channel_id,
+                              content_summary, message_bytes, status, attempts, last_error,
+                              idempotency_key, scheduled_at, created_at, finished_at
+                       FROM wecom_push_outbox
+                       WHERE status = ?
+                       ORDER BY id ASC LIMIT ?""",
+                    (SUB_OUTBOX_STATUS_PENDING, safe_limit),
+                )
+                rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ 获取待发出站记录失败: {e}")
+            return []
+
+    async def wecom_outbox_recent(
+        self,
+        limit: int = 50,
+        status: Optional[str] = None,
+        topic_id: Optional[str] = None,
+        channel_id: Optional[int] = None,
+    ) -> List[Dict]:
+        """发送记录：按时间倒序，可按状态 / 内容类型 / 渠道筛选。"""
+        try:
+            safe_limit = max(1, min(int(limit), 200))
+            tdb = self._connection.table("wecom_push_outbox")
+            sql = """SELECT id, topic_id, params_json, schedule_id, target_channel_id,
+                            content_summary, message_bytes, status, attempts, last_error,
+                            idempotency_key, scheduled_at, created_at, finished_at
+                     FROM wecom_push_outbox"""
+            params: List[Any] = []
+            conditions: List[str] = []
+            if status:
+                conditions.append("status = ?")
+                params.append(str(status))
+            if topic_id:
+                conditions.append("topic_id = ?")
+                params.append(str(topic_id))
+            if channel_id is not None:
+                conditions.append("target_channel_id = ?")
+                params.append(int(channel_id))
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+            sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+            params.append(safe_limit)
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(sql, params)
+                rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ 获取发送记录失败: {e}")
+            return []
+
+    async def wecom_outbox_mark_sending(self, outbox_id: int) -> bool:
+        """标记「发送中」。重试路径由调用方先经 ``wecom_outbox_mark_retry`` 放回待发。"""
+        return await self._outbox_set_status(
+            outbox_id, SUB_OUTBOX_STATUS_SENDING, last_error=""
+        )
+
+    async def wecom_outbox_mark_sent(
+        self, outbox_id: int, message_bytes: Optional[int] = None
+    ) -> bool:
+        try:
+            tdb = self._connection.table("wecom_push_outbox")
+            async with tdb.conn.cursor() as cursor:
+                if message_bytes is None:
+                    await cursor.execute(
+                        """UPDATE wecom_push_outbox
+                              SET status = ?, last_error = '', finished_at = ?
+                            WHERE id = ?""",
+                        (SUB_OUTBOX_STATUS_SENT, _now(), int(outbox_id)),
+                    )
+                else:
+                    await cursor.execute(
+                        """UPDATE wecom_push_outbox
+                              SET status = ?, last_error = '', message_bytes = ?,
+                                  finished_at = ?
+                            WHERE id = ?""",
+                        (
+                            SUB_OUTBOX_STATUS_SENT,
+                            int(message_bytes),
+                            _now(),
+                            int(outbox_id),
+                        ),
+                    )
+            await tdb.commit()
+            return True
+        except Exception as e:
+            logger.error(f"❌ 标记出站记录已发失败: {e}")
+            return False
+
+    async def wecom_outbox_mark_retry(
+        self, outbox_id: int, error: str, status: str, attempts: int
+    ) -> bool:
+        """失败后放回待发（或按状态机落到别的非终态），并留下错误与尝试次数。"""
+        return await self._outbox_set_status(
+            outbox_id, status, last_error=error, attempts=attempts
+        )
+
+    async def wecom_outbox_mark_failed(
+        self, outbox_id: int, error: str, attempts: Optional[int] = None
+    ) -> bool:
+        return await self._outbox_set_status(
+            outbox_id, SUB_OUTBOX_STATUS_FAILED, last_error=error, attempts=attempts,
+            finished=True,
+        )
+
+    async def wecom_outbox_mark_skipped(self, outbox_id: int, reason: str) -> bool:
+        """没有收件人（渠道停用 / 零订阅）：跳过并写明原因，不重试。"""
+        return await self._outbox_set_status(
+            outbox_id, SUB_OUTBOX_STATUS_SKIPPED, last_error=reason, finished=True
+        )
+
+    async def _outbox_set_status(
+        self,
+        outbox_id: int,
+        status: str,
+        *,
+        last_error: Optional[str] = None,
+        attempts: Optional[int] = None,
+        finished: bool = False,
+    ) -> bool:
+        try:
+            sets = ["status = ?"]
+            params: List[Any] = [str(status)]
+            if last_error is not None:
+                sets.append("last_error = ?")
+                params.append(str(last_error)[:500])
+            if attempts is not None:
+                sets.append("attempts = ?")
+                params.append(int(attempts))
+            if finished:
+                sets.append("finished_at = ?")
+                params.append(_now())
+            params.append(int(outbox_id))
+            tdb = self._connection.table("wecom_push_outbox")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    f"UPDATE wecom_push_outbox SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
+            await tdb.commit()
+            return True
+        except Exception as e:
+            logger.error(f"❌ 更新出站记录状态失败: {e}")
+            return False
+
+    async def wecom_outbox_purge_finished_before(self, cutoff_iso: str) -> int:
+        """清理过期的**终态**行，返回删除条数。
+
+        只碰 sent / failed / skipped：待发与发送中的行不管多老都不能删——那是还没
+        发出去的消息，删掉就是静默丢失。
+        """
+        try:
+            tdb = self._connection.table("wecom_push_outbox")
+            placeholders = ", ".join("?" for _ in _OUTBOX_FINISHED_STATUSES)
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    f"""DELETE FROM wecom_push_outbox
+                         WHERE status IN ({placeholders}) AND created_at < ?""",
+                    (*_OUTBOX_FINISHED_STATUSES, str(cutoff_iso)),
+                )
+                removed = cursor.rowcount or 0
+            await tdb.commit()
+            return int(removed)
+        except Exception as e:
+            logger.error(f"❌ 清理出站记录失败: {e}")
+            return 0
+
+    # ── 行整形 ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _subscription_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        return {**row, "enabled": bool(row.get("enabled"))}

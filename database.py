@@ -26,6 +26,7 @@ from db_core.semi_rules_repo import _SemiRulesRepoMixin
 from db_core.report_dishes_repo import _ReportDishesRepoMixin
 from db_core.settings_repo import _SettingsRepoMixin
 from db_core.wecom_repo import _WecomRepoMixin
+from db_core.wecom_subscriptions_repo import _WecomSubscriptionsRepoMixin
 from db_core.aggregation import _AggregationMixin
 from db_core.reports import _ReportsMixin
 from db_core.stats import _StatsMixin
@@ -65,6 +66,7 @@ class DatabaseManager(
     _ReportDishesRepoMixin,
     _SettingsRepoMixin,
     _WecomRepoMixin,
+    _WecomSubscriptionsRepoMixin,
     _AggregationMixin,
     _ReportsMixin,
     _StatsMixin,
@@ -84,6 +86,7 @@ class DatabaseManager(
     - _ReportDishesRepoMixin: 固定报表菜品
     - _SettingsRepoMixin: 应用运行配置（app_settings 键值表）
     - _WecomRepoMixin: 企业微信推送 webhook/任务/日志
+    - _WecomSubscriptionsRepoMixin: 推送订阅 / 渠道群组与成员 / 出站记录（迁移 0016）
     - _AggregationMixin: 档口统计与订单维度聚合查询
     - _ReportsMixin: 跨表销售报表与经营分析
     - _StatsMixin: 性能统计与健康检查

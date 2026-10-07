@@ -12,6 +12,7 @@ from api.admin import router as admin_router
 from api.security import verify_admin_token
 from config import settings
 from database import DatabaseManager, get_db
+from db_core.schema import WECOM_SUBSCRIPTION_TABLES
 
 
 def _make_app(seed=None) -> FastAPI:
@@ -83,7 +84,34 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
     assert meta["admin_user"]["redacted_columns"] == ["password_hash"]
 
     group_keys = [group["key"] for group in body["groups"]]
-    assert group_keys == ["business", "recipe", "hygiene", "scheduling", "auth", "external"]
+    assert group_keys == [
+        "business", "recipe", "hygiene", "scheduling", "wecom", "auth", "external"
+    ]
+
+
+def test_push_subscription_tables_are_browsable_but_read_only(admin_client):
+    """迁移 0016 的四张表只读展示：写入一律走企微推送的 repo 方法。"""
+    client, _ = admin_client
+    body = client.get("/api/admin/tables").json()
+    meta = body["table_meta"]
+
+    for table in WECOM_SUBSCRIPTION_TABLES:
+        assert table in body["tables"]
+        assert meta[table]["group"] == "wecom"
+        assert meta[table]["read_only"] is True
+
+    assert WECOM_SUBSCRIPTION_TABLES == (
+        "wecom_push_subscriptions",
+        "wecom_channel_groups",
+        "wecom_channel_group_members",
+        "wecom_push_outbox",
+    )
+
+    rejected = client.post(
+        "/api/admin/tables/wecom_push_subscriptions/rows",
+        json={"values": {"topic_id": "sales_report", "target_channel_id": 1}},
+    )
+    assert rejected.status_code == 403
 
 
 def test_read_only_physical_tables_can_be_browsed(tmp_path):
