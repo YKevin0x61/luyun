@@ -148,3 +148,103 @@ describe('参数变化回给调用方', () => {
     expect(wrapper.find('select').element.value).toBe('recover')
   })
 })
+
+// D3：「档口」下拉默认显示空白。vanilla 渲染器给每个 select 前面硬编码了一个没有文案的
+// `<option value="">`，而「全部（排除楼面）」的 const 恰好也是空串 —— 浏览器按 value
+// 选中前面那个 ⇒ 一行空白；从下拉里挑「全部（排除楼面）」也还是空白。
+// 这里用**注册表真实的形状**（oneOf 里带一个 const 空串的选项）钉住三件事：
+// 空值选项有文案、默认值空串时显示的就是它、选中它回传的仍是空串。
+describe('下拉的空值选项（D3：档口不能显示成空白）', () => {
+  const STATION_SCHEMA = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      station: {
+        type: 'string',
+        default: '',
+        title: '档口',
+        description: '只推某个档口；空 = 全部（排除楼面）。',
+        oneOf: [
+          { const: '', title: '全部（排除楼面）' },
+          { const: 'chuanqi', title: '传菜' },
+          { const: 'paicai', title: '派菜' },
+        ],
+      },
+    },
+  }
+  const STATION_UISCHEMA = {
+    type: 'VerticalLayout',
+    elements: [
+      {
+        type: 'Control',
+        scope: '#/properties/station',
+        label: '档口',
+        options: { control: 'select' },
+      },
+    ],
+  }
+
+  /** 选项在浏览器里真正显示的文字：`label` 属性优先，其次才是文本节点。 */
+  function visibleOptionTexts(wrapper) {
+    return wrapper.findAll('option').map((option) => option.element.label)
+  }
+
+  function mountStation(station = '') {
+    return mount(PushParamsForm, {
+      props: {
+        schema: STATION_SCHEMA, uischema: STATION_UISCHEMA, data: { station },
+      },
+    })
+  }
+
+  it('空值选项带可读文案，且下拉里只剩一个 value="" 的选项', () => {
+    const options = mountStation().findAll('option')
+
+    expect(options.map((option) => option.attributes('value'))).toEqual(['', 'chuanqi', 'paicai'])
+    // 两个 value="" 的选项正是 D3 的根因：浏览器会选中前面那个空文案的
+    expect(options.filter((option) => option.attributes('value') === '')).toHaveLength(1)
+    // 没有任何一个选项是「看得见的空白」
+    expect(visibleOptionTexts(mountStation()).filter((text) => text.trim() === '')).toEqual([])
+    expect(visibleOptionTexts(mountStation())).toEqual(['全部（排除楼面）', '传菜', '派菜'])
+  })
+
+  it('默认值空串时显示「全部（排除楼面）」，不是空白', () => {
+    const select = mountStation().find('select')
+
+    expect(select.element.value).toBe('')
+    expect(select.element.selectedOptions[0].text).toBe('全部（排除楼面）')
+  })
+
+  it('选中「全部（排除楼面）」回传空串（写回后仍显示文案）', async () => {
+    const wrapper = mountStation('chuanqi')
+    expect(wrapper.find('select').element.selectedOptions[0].label).toBe('传菜')
+
+    await wrapper.find('select').setValue('')
+
+    const data = wrapper.emitted('update:data').at(-1)[0]
+    expect(data.station).toBe('')
+    // 父组件把这份参数写回来：不能又变回一行空白
+    await wrapper.setProps({ data })
+    expect(wrapper.find('select').element.selectedOptions[0].label).toBe('全部（排除楼面）')
+  })
+
+  it('选档口回传的是档口 id（空值那条路没有把别的选项带坏）', async () => {
+    const wrapper = mountStation()
+
+    await wrapper.find('select').setValue('paicai')
+
+    expect(wrapper.emitted('update:data').at(-1)[0]).toMatchObject({ station: 'paicai' })
+  })
+
+  it('没有空值选项的字段保持原样：前面仍是 vanilla 那个空选项（选中=清空）', async () => {
+    const wrapper = mountForm()
+    const options = wrapper.findAll('select')[0].findAll('option')
+
+    expect(visibleOptionTexts(wrapper.findAll('select')[0])).toEqual(['', '告警', '恢复'])
+
+    await wrapper.find('select').setValue('')
+    const data = wrapper.emitted('update:data').at(-1)[0]
+    // 「清空」＝把值去掉（后端按默认值处理），不是写一个空串进去
+    expect(data.level).toBeUndefined()
+  })
+})

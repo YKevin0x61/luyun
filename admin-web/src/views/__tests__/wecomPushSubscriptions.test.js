@@ -52,12 +52,18 @@ function jsonResponse(data, status = 200) {
   }
 }
 
-/** 记录每一次请求；`channels` 用闭包给，方便多选列表那一档造 9 个渠道。 */
-function probeFetch({ channels = [], topics = [], groups = [] }) {
+/** 记录每一次请求；`channels` 用闭包给，方便多选列表那一档造 9 个渠道。
+ *
+ * `writeStatus` 非 200 时**写请求**一律按该状态失败（读请求照常），用来演「保存失败」。 */
+function probeFetch({ channels = [], topics = [], groups = [], writeStatus = 200 }) {
   const calls = []
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url)
-    calls.push({ path, method: options.method || 'GET', body: options.body })
+    const method = options.method || 'GET'
+    calls.push({ path, method, body: options.body })
+    if (method !== 'GET' && writeStatus !== 200) {
+      return jsonResponse({ detail: '数据验证失败' }, writeStatus)
+    }
     if (path.includes('/api/wecom-push/meta')) {
       return jsonResponse({ success: true, api_version: API_VERSION, job_templates: [] })
     }
@@ -262,7 +268,7 @@ describe('订阅矩阵', () => {
     await flushPromises()
     const rows = wrapper.findAll('.luyun-check-row')
     expect(rows.length).toBe(9)
-    await rows[1].find('button').trigger('click')
+    await rows[1].find('button[role=checkbox]').trigger('click')
     await flushPromises()
 
     const save = wrapper.findAll('button').find((node) => node.text() === '保存订阅')
@@ -274,6 +280,109 @@ describe('订阅矩阵', () => {
     expect(JSON.parse(posts[0].body)).toMatchObject({
       topic_id: 'sales_report', target_channel_id: 2, enabled: true,
     })
+  })
+})
+
+// D1 的现场：渠道 10 个（> 8）时列表形态，读接口的行是 `channels: [{id, enabled}]`，
+// 页面却对它做了 `Number(对象)` ⇒ NaN ⇒ 10 个渠道全未勾（同一行徽章却写「1 个渠道」），
+// 取消勾选发出去的是 `target_channel_id: null` ⇒ 422，而复选框已经弹回未勾。
+// 这一组用例钉的是**渲染出来的勾选态**与**页面发出去的请求体**。
+describe('多选列表（渠道 > 8）的勾选与保存反馈', () => {
+  const MANY = Array.from({ length: 9 }, (_, index) => channel(index + 1, `群 ${index + 1}`))
+  // 「卫生提醒」订了「群 3」（读接口给的是 `[{id: 3, enabled: true}]`）
+  const TOPICS = [topic('hygiene_reminder', '卫生提醒', [3])]
+
+  async function openPicker(wrapper) {
+    await openTab(wrapper, '订阅')
+    await wrapper.findAll('.wp-pick-row')[0].trigger('click')
+    await flushPromises()
+  }
+
+  function checkboxes(wrapper) {
+    return wrapper.findAll('.luyun-check-row').map(
+      (row) => row.find('button[role=checkbox]').attributes('aria-checked'),
+    )
+  }
+
+  async function save(wrapper) {
+    const button = wrapper.findAll('button').find((node) => node.text() === '保存订阅')
+    expect(button, '找不到「保存订阅」').toBeTruthy()
+    await button.trigger('click')
+    await flushPromises()
+  }
+
+  it('已有订阅显示为已勾（与同一行的「N 个渠道」徽章说的是同一件事）', async () => {
+    const { wrapper } = await mountView({ channels: MANY, topics: TOPICS })
+    await openPicker(wrapper)
+
+    expect(wrapper.findAll('.wp-pick-row')[0].text()).toContain('1 个渠道')
+    const checked = checkboxes(wrapper)
+    expect(checked).toHaveLength(9)
+    expect(checked[2]).toBe('true')
+    expect(checked.filter((value) => value === 'true')).toHaveLength(1)
+  })
+
+  it('「订了但渠道停着」不算已勾：徽章与勾选数用同一份判据', async () => {
+    const many = MANY.map((item, index) => (index === 1 ? { ...item, enabled: false } : item))
+    const { wrapper } = await mountView({
+      channels: many,
+      topics: [topic('hygiene_reminder', '卫生提醒', [], {
+        // 群 2 停着（订阅保留、投递跳过），群 3 正常
+        channels: [{ id: 2, enabled: false }, { id: 3, enabled: true }],
+      })],
+    })
+    await openPicker(wrapper)
+
+    expect(wrapper.findAll('.wp-pick-row')[0].text()).toContain('1 个渠道')
+    expect(checkboxes(wrapper).filter((value) => value === 'true')).toHaveLength(1)
+    expect(checkboxes(wrapper)[2]).toBe('true')
+    expect(checkboxes(wrapper)[1]).toBe('false')
+  })
+
+  it('取消勾选发出的是带真实渠道 id 的停用请求', async () => {
+    const { wrapper, fetchMock } = await mountView({ channels: MANY, topics: TOPICS })
+    await openPicker(wrapper)
+
+    // 取消「群 3」这一勾 → 保存：请求体必须是停用**渠道 3**，不是 target_channel_id: null
+    await wrapper.findAll('.luyun-check-row')[2].find('button[role=checkbox]').trigger('click')
+    await flushPromises()
+    await save(wrapper)
+
+    const posts = fetchMock.calls.filter((call) => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0].body)).toEqual({
+      topic_id: 'hygiene_reminder', enabled: false, target_channel_id: 3,
+    })
+    expect(wrapper.text()).toContain('停用 1 个渠道')
+  })
+
+  it('没有差异时不发请求，也不假报「已保存」', async () => {
+    const { wrapper, fetchMock } = await mountView({ channels: MANY, topics: TOPICS })
+    await openPicker(wrapper)
+
+    await save(wrapper)
+
+    expect(fetchMock.calls.filter((call) => call.method === 'POST')).toEqual([])
+    expect(wrapper.text()).toContain('没有改动，无需保存')
+    expect(wrapper.text()).not.toContain('订阅已保存')
+  })
+
+  it('保存失败：红条说明失败、不假报成功，勾选态也不弹回', async () => {
+    const { wrapper, fetchMock } = await mountView({
+      channels: MANY, topics: TOPICS, writeStatus: 422,
+    })
+    await openPicker(wrapper)
+
+    // 勾一个原本没订的渠道（群 1）→ 保存被后端拒绝
+    await wrapper.findAll('.luyun-check-row')[0].find('button[role=checkbox]').trigger('click')
+    await flushPromises()
+    await save(wrapper)
+
+    expect(fetchMock.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(wrapper.text()).toContain('数据验证失败')
+    expect(wrapper.text()).not.toContain('订阅已保存')
+    // 店长刚点的勾还在（悄悄弹回去 = 让人以为改好了）
+    expect(checkboxes(wrapper)[0]).toBe('true')
   })
 })
 

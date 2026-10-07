@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { normalizeControlValues, toJsonFormsUiSchema } from '../jsonFormsControls.js'
+import {
+  normalizeControlValues, splitEmptySelectOption, toJsonFormsUiSchema,
+} from '../jsonFormsControls.js'
 
 // 后端给的 uischema 用 `options.control` 声明控件类型（ADR 0097：「时间用 time 控件、
 // 档口用下拉」属于后端知识）。vanilla 渲染器不认这个名字，这里翻成它认的形状
@@ -107,5 +109,50 @@ describe('参数修剪与对象引用', () => {
   it('空参数不炸', () => {
     expect(normalizeControlValues(null, TIME_ONLY)).toEqual({})
     expect(normalizeControlValues(undefined, null)).toEqual({})
+  })
+})
+
+// D3：vanilla 渲染器给每个 select 前面硬编码了一个没有文案的 `<option value="">`，
+// 而档口的「全部（排除楼面）」const 就是空串 —— 同一个下拉里两个 `value=""`，浏览器
+// 选中的是前面那个空文案的，于是默认显示空白、挑「全部（排除楼面）」也还是空白。
+// 这里把 schema 里那个空值选项拎出来交给渲染器（用它的 title 渲染第一个选项），
+// 空串仍然表示「全部」—— 只是看得见了。
+describe('下拉的空值选项', () => {
+  it('schema 里空值选项被单独拎出来，带上它的 title', () => {
+    const result = splitEmptySelectOption([
+      { label: '全部（排除楼面）', value: '' },
+      { label: '传菜', value: 'chuanqi' },
+    ])
+
+    expect(result).toEqual({
+      hasEmptyOption: true,
+      emptyLabel: '全部（排除楼面）',
+      options: [{ label: '传菜', value: 'chuanqi' }],
+    })
+  })
+
+  it('没有空值选项时原样返回（「清空」语义留给渲染器）', () => {
+    const list = [{ label: '当天', value: 'today' }, { label: '昨天', value: 'yesterday' }]
+
+    expect(splitEmptySelectOption(list)).toEqual({
+      hasEmptyOption: false, emptyLabel: '', options: list,
+    })
+  })
+
+  it('空数组 / 拿不到选项都不炸', () => {
+    for (const input of [[], undefined, null, {}]) {
+      expect(splitEmptySelectOption(input)).toEqual({
+        hasEmptyOption: false, emptyLabel: '', options: [],
+      })
+    }
+  })
+
+  it('值是 0 / false 的选项不算空值（只认空串）', () => {
+    const result = splitEmptySelectOption([
+      { label: '关', value: 0 }, { label: '开', value: 1 },
+    ])
+
+    expect(result.hasEmptyOption).toBe(false)
+    expect(result.options).toHaveLength(2)
   })
 })

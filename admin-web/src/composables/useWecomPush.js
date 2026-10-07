@@ -235,20 +235,29 @@ export function auditQuery({ objectType = '', page = 1 } = {}) {
   return (matrix && matrix.topics) || []
 }
 
-/** 某一行的零订阅判定：一个**启用中**的渠道都没有，就是这类内容当前一条都不发。
+/** 某一行里**现在真的会收到**这类内容的渠道 id：订阅在启用中，且渠道自己也启用着。
  *
- * 「订阅了但渠道停着」也算零订阅 —— 投递会跳过停用渠道（出站记 skipped），页面上不
- * 亮出来，店长会以为还在发（用户故事 9 要的正是这个可见性）。所以行里带的是
- * `{id, enabled}` 而不是光秃秃的 id 数组：停用状态只有后端知道。
- */
-export function topicIsUnsubscribed(row) {
-  const subscribed = (row && row.channels) || []
-  return !subscribed.some((channel) => channel && channel.enabled)
+ * 读接口给的行是 `channels: [{id, enabled}]`，其中 `enabled` 是**渠道**的启停（不是这条
+ * 订阅的）：停用的渠道仍留在这份名单里（订阅保留、投递跳过）。所以取 id 必须走
+ * `channel.id` —— 直接 `Number(对象)` 得到的是 NaN，页面表现是多选列表全未勾、取消勾选
+ * 发出 `target_channel_id: null` 的 422 请求（D1）。
+ *
+ * 「勾了」＝现在真的会发到那里，所以矩阵的勾选态（`topicSubscribed`）、多选列表的勾选态、
+ * 「N 个渠道」徽章与零订阅判定**共用这一份判据** —— 徽章写「1 个渠道」时，两个形态的勾
+ * 都该正好是 1 个。 */
+export function topicActiveChannelIds(row) {
+  return ((row && row.channels) || [])
+    .filter((channel) => channel && channel.enabled)
+    .map((channel) => Number(channel.id))
 }
 
-/** 某一行订阅到的渠道 id（矩阵打勾、多选列表做差集都用它）。 */
-export function topicChannelIds(row) {
-  return ((row && row.channels) || []).map((channel) => Number(channel.id))
+/** 某一行的零订阅判定：一个**可投递**的渠道都没有，就是这类内容当前一条都不发。
+ *
+ * 「订阅了但渠道停着」也算零订阅 —— 投递会跳过停用渠道（出站记 skipped），页面上不
+ * 亮出来，店长会以为还在发（用户故事 9 要的正是这个可见性）。
+ */
+export function topicIsUnsubscribed(row) {
+  return topicActiveChannelIds(row).length === 0
 }
 
 /** 零订阅的内容类型显示名（页面上要高亮这些行）。 */
@@ -732,10 +741,14 @@ export function useWecomPush() {
     return data
   }
 
-  /** 矩阵里某一行当前勾了哪些渠道（多选列表用它做差集）。 */
+  /** 矩阵里某一行当前勾了哪些渠道（多选列表用它做勾选态与差集）。
+   *
+   * 判据与矩阵、徽章、零订阅判定同一份（`topicActiveChannelIds`）：**不能**在这里对
+   * `{id, enabled}` 做 `Number(对象)` —— 那是 D1，勾选列表会全空、取消勾选还会发出
+   * `target_channel_id: null` 的 422 请求。
+   */
   function subscribedChannelIds(topicId) {
-    const row = matrixTopics(matrix.value).find((item) => item.id === topicId)
-    return ((row && row.channels) || []).map(Number)
+    return topicActiveChannelIds(matrixTopics(matrix.value).find((item) => item.id === topicId))
   }
 
   function pickMultiSelectTopic(topicId) {
@@ -748,25 +761,45 @@ export function useWecomPush() {
    *
    * 全量重发会把没动过的渠道也写一遍（更新时间被刷、页面上的「最近变更」也会漂），
    * 而且渠道多起来之后就是几十次没必要的写。
+   *
+   * 返回 `{changed, added, removed}`：**没有差异时 changed 是 0**，调用方据此说
+   * 「没有改动」而不是假报「订阅已保存」（D1）—— 一次请求都没发却提示保存成功，
+   * 店长会以为改好了。
+   *
+   * 中途失败时把服务端状态重拉一遍（页面上的「N 个渠道」徽章要是真的），但**不动**
+   * `multiSelect.channelIds`：勾选态是店长刚点的意图，失败时悄悄弹回去是最坏的一种
+   * 反馈。抛出的错误里带上已经落库的条数，重试时差集按新拉到的状态重算，已成功的那
+   * 几条不会重复写坏（同一条订阅写两次 enabled 是幂等的）。
    */
   async function saveMultiSelectTopic() {
     const topicId = multiSelect.topicId
     if (!topicId) throw new Error('请先选择内容类型')
     const before = new Set(subscribedChannelIds(topicId))
-    const after = new Set((multiSelect.channelIds || []).map(Number))
-    for (const channelId of after) {
-      if (!before.has(channelId)) {
+    const after = new Set((multiSelect.channelIds || []).map(Number).filter(Number.isFinite))
+    const added = [...after].filter((channelId) => !before.has(channelId))
+    const removed = [...before].filter((channelId) => !after.has(channelId))
+    if (!added.length && !removed.length) {
+      return { changed: 0, added: 0, removed: 0 }
+    }
+    let changed = 0
+    try {
+      for (const channelId of added) {
         await api.post('/api/wecom-push/subscriptions',
           subscriptionPayload({ topicId, channelId, enabled: true }))
+        changed += 1
       }
-    }
-    for (const channelId of before) {
-      if (!after.has(channelId)) {
+      for (const channelId of removed) {
         await api.post('/api/wecom-push/subscriptions',
           subscriptionPayload({ topicId, channelId, enabled: false }))
+        changed += 1
       }
+    } catch (e) {
+      await loadSubscriptions().catch(() => {})
+      const message = (e && e.message) || '保存失败'
+      throw new Error(changed ? `已保存 ${changed} 条，之后：${message}` : message)
     }
     await loadSubscriptions()
+    return { changed, added: added.length, removed: removed.length }
   }
 
   // ── 定时任务与发送记录（票 08 重做定时任务那一半）──────────────────────────

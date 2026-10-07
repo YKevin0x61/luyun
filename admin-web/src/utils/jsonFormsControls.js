@@ -46,6 +46,32 @@ function toJsonFormsElement(element) {
   return { ...element, options }
 }
 
+/**
+ * 把下拉的选项拆成「空值那一个」与「其余」。
+ *
+ * vanilla 渲染器给每个 select 前面都硬编码了一个 `<option value="">`（没有文案，语义是
+ * 「清空」）。可档口的「全部（排除楼面）」const 恰好就是空串：于是同一个下拉里出现两个
+ * `value=""` 的选项，浏览器选中第一个（空文案）⇒ **默认显示空白**，从下拉里挑「全部
+ * （排除楼面）」也还是空白（D3）。
+ *
+ * 所以这里把 schema 里那个空值选项拎出来：渲染器用它自己的 title 去渲染第一个选项，
+ * 循环里不再重复渲染一份。空串仍然表示「全部」（后端语义一个字没动），只是**看得见**了。
+ *
+ * `hasEmptyOption` 也给渲染器用：schema 里本来就有空值选项时，选中它要按选项的真实值
+ * （空串）回传，而不是 vanilla 那条「selectedIndex === 0 就当清空」的老规矩。
+ */
+export function splitEmptySelectOption(options) {
+  const list = Array.isArray(options) ? options : []
+  const emptyIndex = list.findIndex((option) => String((option && option.value) ?? '') === '')
+  if (emptyIndex < 0) return { hasEmptyOption: false, emptyLabel: '', options: list }
+  const empty = list[emptyIndex] || {}
+  return {
+    hasEmptyOption: true,
+    emptyLabel: String(empty.label ?? ''),
+    options: list.filter((_, index) => index !== emptyIndex),
+  }
+}
+
 /** `HH:MM:SS` → `HH:MM`（原生 time 控件在有的环境里会带上秒）。 */
 const TIME_WITH_SECONDS = /^(\d{2}:\d{2}):\d{2}$/
 

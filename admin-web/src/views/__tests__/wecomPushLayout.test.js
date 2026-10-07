@@ -65,3 +65,52 @@ describe('企微推送页的立即发送', () => {
     expect(src).not.toContain('确定立即发送当前预览对应的')
   })
 })
+
+// D2：这张卡以前和「定时任务」共用 `v-if="activeTab === 'jobs' || activeTab === 'logs'"`
+// 的两列 grid，而左列自己带 `v-if="activeTab === 'jobs'"` —— 切到发送记录时左列不渲染，
+// 卡片被 grid 自动放进第一列 `minmax(280px, 420px)`：1440 下 7 列表格只有 388px 可视宽
+// （字节数 / 尝试次数 / 最后一次错误要横向滚动），右边 1000px 空白。
+// 结构上钉死两件事：发送记录是**根容器的直接子节点**（class 只有 card），而两列 grid
+// 只属于定时任务那一个 tab。
+describe('发送记录不再被塞进两列 grid 的左列（D2）', () => {
+  it('两列 grid 只挂在「定时任务」上，发送记录不共用它', () => {
+    const src = compact(view)
+    expect(src).toContain('v-if="activeTab===\'jobs\'"class="grid"')
+    expect(src).not.toContain("activeTab==='jobs'||activeTab==='logs'")
+    expect(src).not.toContain('v-if="activeTab===\'logs\'"class="grid"')
+  })
+
+  it('发送记录卡不套 grid（class 里没有 grid）', () => {
+    const src = compact(view)
+    expect(src).toContain('<divv-if="activeTab===\'logs\'"class="card">')
+  })
+
+  it('窄屏单列那条 !important 还在（它管的是渠道 / 定时任务那两个 grid 的收缩）', () => {
+    expect(compact(view)).toContain('grid-template-columns:minmax(0,1fr)!important')
+  })
+})
+
+// D4：390 下 5 个页内标签与「接口版本 v2」抢同一行，flex 把按钮压得比文字还窄，中文
+// 逐字换行成「渠 道」「定时任 务」「发送记 录」「变更历 史」。两条一起上：标签行自己
+// 横向滚动（按钮不收缩、不换行），版本徽章窄屏让位。
+describe('页内 tab 条在窄屏不竖排（D4）', () => {
+  it('标签进横向滚动行：按钮 flex:0 0 auto + nowrap', () => {
+    const src = compact(view)
+    expect(src).toContain('.wp-tabbar{')
+    expect(src).toContain('overflow-x:auto')
+    expect(src).toContain('.wp-tabbar.view-tab{flex:00auto;white-space:nowrap;}')
+  })
+
+  it('版本徽章在窄屏让位（真不匹配时页顶有专门的提示条）', () => {
+    const src = compact(view)
+    expect(src).toContain('@media(max-width:700px)')
+    expect(src).toContain('.wp-api-version{display:none;}')
+  })
+
+  it('模板把 5 个 tab 放进 .wp-tabbar（样式挂在真的元素上）', () => {
+    const src = compact(view)
+    expect(src).toContain('class="wp-tabbarluyun-scrollbar"')
+    expect(src).toContain('class="wp-api-version"')
+    expect(src).toContain('接口版本{{WECOM_PUSH_API_VERSION}}')
+  })
+})

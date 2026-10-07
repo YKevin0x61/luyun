@@ -13,8 +13,10 @@
 import { computed, markRaw } from 'vue'
 import { JsonForms } from '@jsonforms/vue'
 import { vanillaRenderers } from '@jsonforms/vue-vanilla'
+import { isEnumControl, isOneOfEnumControl, rankWith } from '@jsonforms/core'
 
 import { normalizeControlValues, toJsonFormsUiSchema } from '../../utils/jsonFormsControls'
+import PushSelectControl from './PushSelectControl.vue'
 
 const props = defineProps({
   schema: { type: Object, default: () => ({ type: 'object', properties: {} }) },
@@ -26,7 +28,16 @@ const emit = defineEmits(['update:data'])
 
 // markRaw：渲染器是静态的组件表，别让 JSON Forms 把它塞进响应式状态里（Vue 会就此
 // 打印一条「component was made a reactive object」的性能告警）。
-const renderers = markRaw(vanillaRenderers)
+//
+// 下拉用我们自己的渲染器，rank 要**盖过** vanilla 那两个（普通枚举 2 / oneOf 枚举 5）：
+// vanilla 给每个 select 硬编码了一个没有文案的空选项，而档口的「全部（排除楼面）」const
+// 正是空串 —— 浏览器按 value 选中前面那个空文案的选项，下拉就显示空白（D3）。
+// 其余控件照旧走 vanilla 的渲染器：字段名与控件类型一个都没写死。
+const renderers = markRaw([
+  { renderer: PushSelectControl, tester: rankWith(6, isOneOfEnumControl) },
+  { renderer: PushSelectControl, tester: rankWith(3, isEnumControl) },
+  ...vanillaRenderers,
+])
 const formSchema = computed(() => props.schema || { type: 'object', properties: {} })
 // 参数说明（schema 的 description）一直显示：门店页面上这些说明就是「这个参数是什么」
 // 的唯一解释，藏到聚焦之后等于没有。

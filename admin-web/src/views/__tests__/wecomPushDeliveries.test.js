@@ -343,3 +343,39 @@ describe('发送记录 tab 的分页', () => {
     expect(wrapper.text()).toContain('第 2 / 3 页')
   })
 })
+
+// D2：这张卡以前和「定时任务」共用一个两列 grid，而左列自己带
+// `v-if="activeTab === 'jobs'"` —— 切到发送记录时左列不渲染，卡片被 grid 自动放进
+// 第一列 `minmax(280px, 420px)`，1440 下 7 列表格只有 388px 可视宽（要横向滚动），
+// 右边 1000px 空白。结构上钉死：发送记录卡不在任何两列 grid 里。
+describe('发送记录 tab 的整行布局（D2）', () => {
+  it('发送记录卡不嵌在两列 grid 里（1440 下左列 420px 会把 7 列表格裁掉）', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+    })
+    await openTab(wrapper, '发送记录')
+
+    const table = deliveryTable(wrapper)
+    expect(table, '找不到发送记录表').toBeTruthy()
+    const card = table.element.closest('.card')
+    expect(card, '发送记录表不在卡片里').toBeTruthy()
+    expect(card.closest('.grid')).toBeNull()
+  })
+
+  it('定时任务 tab 仍然是两列（左表单 / 右预览），没被顺手改成单列', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+    })
+    await openTab(wrapper, '定时任务')
+
+    const form = wrapper.find('form')
+    expect(form.exists()).toBe(true)
+    expect(form.element.closest('.grid')).toBeTruthy()
+    // 预览卡也在同一个 grid 里（它以前带 `v-if="activeTab === 'jobs'"`，现在整块只属于这个 tab）
+    const preview = wrapper.findAll('.card').find((node) => node.text().includes('消息预览'))
+    expect(preview).toBeTruthy()
+    expect(preview.element.closest('.grid')).toBe(form.element.closest('.grid'))
+  })
+})

@@ -30,7 +30,7 @@ const {
   editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,
   editChannelGroup, saveChannelGroup, deleteChannelGroup,
   addGroupMember, removeGroupMember,
-  toggleSubscription, pickMultiSelectTopic, saveMultiSelectTopic,
+  toggleSubscription, pickMultiSelectTopic, saveMultiSelectTopic, subscribedChannelIds,
   editJob, pickJobTopic, applyJobPreset, saveJob, deleteJob, previewSelectedJob,
   sendSelectedJob,
 } = useWecomPush()
@@ -138,11 +138,12 @@ const sendReady = computed(() => canSendNow({
 const isMultiSelectView = computed(() => viewMode.value === 'multi-select')
 const matrixRows = computed(() => matrix.value.topics || [])
 const matrixColumns = computed(() => matrix.value.channels || [])
-// 某个内容类型当前勾了哪些渠道（矩阵与多选列表共用同一份判据）
+// 某个内容类型当前勾了哪些渠道：判据在 composable 里（`subscribedChannelIds` →
+// `topicActiveChannelIds`），矩阵与多选列表共用同一份 —— 徽章「N 个渠道」数的就是它。
 const subscriptionIds = computed(() => {
   const map = {}
   for (const row of matrixRows.value) {
-    map[row.id] = (row.channels || []).filter((item) => item.enabled).map((item) => Number(item.id))
+    map[row.id] = subscribedChannelIds(row.id)
   }
   return map
 })
@@ -214,8 +215,16 @@ function handlePickTopic(topicId) {
 }
 async function handleSaveMultiSelect() {
   try {
-    await saveMultiSelectTopic()
-    flash('订阅已保存，下一次触发即按新订阅投递', 'success')
+    const result = await saveMultiSelectTopic()
+    // 没有差异时**不能**报「已保存」：一个请求都没发，那句提示是假的（D1）。
+    if (!result || !result.changed) {
+      flash('没有改动，无需保存 —— 勾选与已保存的订阅一致', 'info')
+      return
+    }
+    const parts = []
+    if (result.added) parts.push(`新增 ${result.added} 个渠道`)
+    if (result.removed) parts.push(`停用 ${result.removed} 个渠道`)
+    flash(`订阅已保存（${parts.join('、')}），下一次触发即按新订阅投递`, 'success')
   } catch (e) { flash(e.message, 'error') }
 }
 async function handleSaveJob() {
@@ -299,18 +308,21 @@ onMounted(async () => {
       {{ toastMsg }}
     </div>
 
+    <!-- 页内 tab 条：390 下 5 个标签 + 版本徽章抢同一行，标签会被压成「渠 道」这种
+         竖排（D4）。所以标签进一个可横向滚动的行、版本徽章窄屏让位（不匹配时页顶
+         有专门的提示条），见 <style scoped> 里的 .wp-tabbar / .wp-api-version。 -->
     <div class="view-tabs">
-      <button
-        v-for="tab in TABS"
-        :key="tab.id"
-        class="view-tab"
-        :class="{ active: activeTab === tab.id }"
-        type="button"
-        @click="handleSwitchTab(tab.id)"
-      >{{ tab.name }}</button>
-      <span style="margin-left:auto;color:var(--text-dim);font-size:11px;align-self:center">
-        接口版本 {{ WECOM_PUSH_API_VERSION }}
-      </span>
+      <div class="wp-tabbar luyun-scrollbar">
+        <button
+          v-for="tab in TABS"
+          :key="tab.id"
+          class="view-tab"
+          :class="{ active: activeTab === tab.id }"
+          type="button"
+          @click="handleSwitchTab(tab.id)"
+        >{{ tab.name }}</button>
+      </div>
+      <span class="wp-api-version">接口版本 {{ WECOM_PUSH_API_VERSION }}</span>
     </div>
 
     <!-- ═══ 渠道 ══════════════════════════════════════════════════════════ -->
@@ -552,9 +564,13 @@ onMounted(async () => {
       </div>
     </div>
 
-    <!-- ═══ 定时任务 / 发送记录（票 07/08 各自重做，本票原样保留）══════════ -->
-    <div v-if="activeTab === 'jobs' || activeTab === 'logs'" class="grid" style="grid-template-columns: minmax(280px, 420px) minmax(0, 1fr)">
-      <div v-if="activeTab === 'jobs'" style="display:flex;flex-direction:column;gap:12px">
+    <!-- ═══ 定时任务（左：任务表单 + 任务卡；右：消息预览）══════════════════
+         两列 grid 只属于「定时任务」这一个 tab：它左列窄、右列是预览，摆得下。
+         「发送记录」以前被并进这个 `v-if`，而左列自己带 `v-if="activeTab === 'jobs'"` ——
+         切过去时左列不渲染，剩下的卡片被 grid 自动放进第一列 `minmax(280px,420px)`，
+         1440 下 7 列表格只有 388px 可视宽（要横向滚动），右边 1000px 空白（D2）。 -->
+    <div v-if="activeTab === 'jobs'" class="grid" style="grid-template-columns: minmax(280px, 420px) minmax(0, 1fr)">
+      <div style="display:flex;flex-direction:column;gap:12px">
         <!-- 推送任务 -->
         <div class="card">
           <div class="panel-title" style="display:flex;justify-content:space-between">
@@ -680,126 +696,130 @@ onMounted(async () => {
             style="min-height:280px;width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap"
           ></textarea>
         </div>
+      </div>
+    </div>
 
-        <div v-if="activeTab === 'logs'" class="card">
-          <div class="panel-title" style="display:flex;justify-content:space-between">
-            <span>发送记录</span>
-            <span style="display:flex;gap:8px;align-items:center">
-              <span style="color:var(--text-dim);font-size:12px">共 {{ deliveries.total }} 条</span>
-              <button class="btn btn-sm" @click="handleRefreshDeliveries">刷新</button>
-            </span>
-          </div>
+    <!-- ═══ 发送记录（票 07）══════════════════════════════════════════════
+         整行铺开：7 列表格塞进两列 grid 的左列（minmax(280px, 420px)）时 1440 下只有
+         388px 可视宽、右边 1000px 空白，字节数 / 尝试次数 / 最后一次错误全要横向滚动
+         （D2）。它不跟「定时任务」共用那个 grid，直接占满整行。 -->
+    <div v-if="activeTab === 'logs'" class="card">
+      <div class="panel-title" style="display:flex;justify-content:space-between">
+        <span>发送记录</span>
+        <span style="display:flex;gap:8px;align-items:center">
+          <span style="color:var(--text-dim);font-size:12px">共 {{ deliveries.total }} 条</span>
+          <button class="btn btn-sm" @click="handleRefreshDeliveries">刷新</button>
+        </span>
+      </div>
 
-          <!-- 筛选：内容类型（来自 /meta 注册表）/ 渠道 / 状态 + 分页 -->
-          <div class="wp-delivery-filters">
-            <div class="form-row">
-              <label>内容类型</label>
-              <select class="select" v-model="deliveryFilterForm.topicId">
-                <option value="">全部内容类型</option>
-                <option v-for="item in deliveryTopicOptions" :key="item.id" :value="item.id">
-                  {{ item.name }}
-                </option>
-              </select>
-            </div>
-            <div class="form-row">
-              <label>目标渠道</label>
-              <select class="select" v-model="deliveryFilterForm.channelId">
-                <option value="">全部渠道</option>
-                <option v-for="item in channels" :key="item.id" :value="item.id">
-                  {{ item.name }}{{ item.enabled ? '' : '（停用）' }}
-                </option>
-              </select>
-            </div>
-            <div class="form-row">
-              <label>状态</label>
-              <select class="select" v-model="deliveryFilterForm.status">
-                <option value="">全部状态</option>
-                <option v-for="item in deliveryStatusOptions" :key="item.id" :value="item.id">
-                  {{ item.name }}
-                </option>
-              </select>
-            </div>
-            <div style="display:flex;gap:8px;align-items:flex-end">
-              <button class="btn btn-primary btn-sm" type="button" @click="handleApplyDeliveryFilters">筛选</button>
-              <button
-                class="btn btn-sm"
-                type="button"
-                :disabled="!deliveryFiltered"
-                @click="deliveryFilterForm = { topicId: '', channelId: '', status: '' }; handleApplyDeliveryFilters()"
-              >清空筛选</button>
-            </div>
-          </div>
-
-          <div class="data-table-wrap luyun-scrollbar" style="max-height:420px">
-            <table class="data-table wp-delivery-table">
-              <thead>
-                <tr>
-                  <th style="cursor:default">时间</th>
-                  <th style="cursor:default">目标渠道</th>
-                  <th style="cursor:default">内容类型</th>
-                  <th style="cursor:default">状态</th>
-                  <th style="cursor:default">字节数</th>
-                  <th style="cursor:default">尝试次数</th>
-                  <th style="cursor:default">最后一次错误</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-if="!deliveries.rows.length">
-                  <td colspan="7" class="empty-state">
-                    {{ deliveryFiltered ? '没有符合条件的记录，可换个筛选条件或清空筛选' : '暂无发送记录' }}
-                  </td>
-                </tr>
-                <tr
-                  v-for="item in deliveries.rows"
-                  :key="item.id"
-                  :class="{ 'wp-delivery-failed': item.status === 'failed' }"
-                >
-                  <td style="white-space:nowrap">
-                    {{ formatDeliveryTime(item.finished_at || item.created_at) }}
-                    <span v-if="!item.finished_at" style="color:var(--text-dim);font-size:11px">（未完成，这是入队时间）</span>
-                  </td>
-                  <td>{{ item.channel_name || (item.channel_id ? `#${item.channel_id}` : '渠道已删除') }}</td>
-                  <td>{{ item.topic_name }}</td>
-                  <td>
-                    <span
-                      class="badge"
-                      :style="item.status === 'sent'
-                        ? 'color:var(--green);border-color:var(--green)'
-                        : (item.status === 'failed' ? 'color:var(--red);border-color:var(--red)' : '')"
-                    >{{ deliveryStatusLabel(item.status) }}</span>
-                  </td>
-                  <td>{{ item.message_bytes }}</td>
-                  <td>{{ item.attempts }}</td>
-                  <td
-                    style="color:var(--text-dim);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-                    :title="item.last_error || item.content_summary"
-                  >{{ item.last_error }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="wp-delivery-pager">
-            <button
-              class="btn btn-sm"
-              type="button"
-              :disabled="deliveries.page <= 1"
-              @click="handleDeliveryPage(deliveries.page - 1)"
-            >上一页</button>
-            <span style="color:var(--text-dim);font-size:12px">
-              第 {{ deliveries.page }} / {{ Math.max(deliveries.pages, 1) }} 页
-            </span>
-            <button
-              class="btn btn-sm"
-              type="button"
-              :disabled="deliveries.page >= deliveries.pages"
-              @click="handleDeliveryPage(deliveries.page + 1)"
-            >下一页</button>
-            <span style="color:var(--text-dim);font-size:11px">
-              超过保留天数的记录会被自动清理；待发与发送中的行不会被清理。
-            </span>
-          </div>
+      <!-- 筛选：内容类型（来自 /meta 注册表）/ 渠道 / 状态 + 分页 -->
+      <div class="wp-delivery-filters">
+        <div class="form-row">
+          <label>内容类型</label>
+          <select class="select" v-model="deliveryFilterForm.topicId">
+            <option value="">全部内容类型</option>
+            <option v-for="item in deliveryTopicOptions" :key="item.id" :value="item.id">
+              {{ item.name }}
+            </option>
+          </select>
         </div>
+        <div class="form-row">
+          <label>目标渠道</label>
+          <select class="select" v-model="deliveryFilterForm.channelId">
+            <option value="">全部渠道</option>
+            <option v-for="item in channels" :key="item.id" :value="item.id">
+              {{ item.name }}{{ item.enabled ? '' : '（停用）' }}
+            </option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>状态</label>
+          <select class="select" v-model="deliveryFilterForm.status">
+            <option value="">全部状态</option>
+            <option v-for="item in deliveryStatusOptions" :key="item.id" :value="item.id">
+              {{ item.name }}
+            </option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;align-items:flex-end">
+          <button class="btn btn-primary btn-sm" type="button" @click="handleApplyDeliveryFilters">筛选</button>
+          <button
+            class="btn btn-sm"
+            type="button"
+            :disabled="!deliveryFiltered"
+            @click="deliveryFilterForm = { topicId: '', channelId: '', status: '' }; handleApplyDeliveryFilters()"
+          >清空筛选</button>
+        </div>
+      </div>
+
+      <div class="data-table-wrap luyun-scrollbar" style="max-height:420px">
+        <table class="data-table wp-delivery-table">
+          <thead>
+            <tr>
+              <th style="cursor:default">时间</th>
+              <th style="cursor:default">目标渠道</th>
+              <th style="cursor:default">内容类型</th>
+              <th style="cursor:default">状态</th>
+              <th style="cursor:default">字节数</th>
+              <th style="cursor:default">尝试次数</th>
+              <th style="cursor:default">最后一次错误</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!deliveries.rows.length">
+              <td colspan="7" class="empty-state">
+                {{ deliveryFiltered ? '没有符合条件的记录，可换个筛选条件或清空筛选' : '暂无发送记录' }}
+              </td>
+            </tr>
+            <tr
+              v-for="item in deliveries.rows"
+              :key="item.id"
+              :class="{ 'wp-delivery-failed': item.status === 'failed' }"
+            >
+              <td style="white-space:nowrap">
+                {{ formatDeliveryTime(item.finished_at || item.created_at) }}
+                <span v-if="!item.finished_at" style="color:var(--text-dim);font-size:11px">（未完成，这是入队时间）</span>
+              </td>
+              <td>{{ item.channel_name || (item.channel_id ? `#${item.channel_id}` : '渠道已删除') }}</td>
+              <td>{{ item.topic_name }}</td>
+              <td>
+                <span
+                  class="badge"
+                  :style="item.status === 'sent'
+                    ? 'color:var(--green);border-color:var(--green)'
+                    : (item.status === 'failed' ? 'color:var(--red);border-color:var(--red)' : '')"
+                >{{ deliveryStatusLabel(item.status) }}</span>
+              </td>
+              <td>{{ item.message_bytes }}</td>
+              <td>{{ item.attempts }}</td>
+              <td
+                style="color:var(--text-dim);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                :title="item.last_error || item.content_summary"
+              >{{ item.last_error }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="wp-delivery-pager">
+        <button
+          class="btn btn-sm"
+          type="button"
+          :disabled="deliveries.page <= 1"
+          @click="handleDeliveryPage(deliveries.page - 1)"
+        >上一页</button>
+        <span style="color:var(--text-dim);font-size:12px">
+          第 {{ deliveries.page }} / {{ Math.max(deliveries.pages, 1) }} 页
+        </span>
+        <button
+          class="btn btn-sm"
+          type="button"
+          :disabled="deliveries.page >= deliveries.pages"
+          @click="handleDeliveryPage(deliveries.page + 1)"
+        >下一页</button>
+        <span style="color:var(--text-dim);font-size:11px">
+          超过保留天数的记录会被自动清理；待发与发送中的行不会被清理。
+        </span>
       </div>
     </div>
     <!-- ═══ 变更历史（票 11）══════════════════════════════════════════════ -->
@@ -911,6 +931,32 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+/* 页内 tab 条（D4）：390 下 5 个标签与「接口版本 v2」抢同一行，flex 会把每个按钮压到
+   比文字还窄，中文就逐字换行成「渠 道」「定时任 务」那一列。两条一起上：
+   - 标签行自己横向滚动，按钮不收缩、不换行（`flex: 0 0 auto` + `white-space: nowrap`）；
+   - 版本徽章窄屏让位 —— 它只是"这份 bundle 是哪一版"，真不匹配时页顶有专门的提示条。 */
+.view-tabs { flex-wrap: nowrap; }
+.wp-tabbar {
+  display: flex;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.wp-tabbar .view-tab { flex: 0 0 auto; white-space: nowrap; }
+.wp-api-version {
+  margin-left: auto;
+  align-self: center;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+@media (max-width: 700px) {
+  .wp-api-version { display: none; }
+}
+
 @media (max-width: 980px) {
   /* 窄屏单列。**必须是 `minmax(0, 1fr)` 而不是 `1fr`**：轨道里的卡片带
      `display:flex` 的标题行与 form，`1fr` 的自动最小尺寸会被内容的固有宽度顶起来
