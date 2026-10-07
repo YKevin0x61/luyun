@@ -18,6 +18,13 @@ export function createPwaUpdateController({
   controllerChangeTimeoutMs = 3000,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
+  // 开发环境（Vite dev server，:5173）不注册：那份 worker 只在构建时生成
+  // （`vite.config.js` 两份都 `devOptions.enabled: false`），dev 下 `/sw.js` 与
+  // `/workbench/sw.js` 都落到 SPA history fallback，回一份 index.html
+  // （实测 200 + `Content-Type: text/html`）—— 浏览器按 MIME 直接拒注册，
+  // 控制台每次启动刷一条 `SecurityError: unsupported MIME type ('text/html')`，
+  // 而注册本来就不可能成功。要验 PWA 行为请用构建产物走后端 :8000。
+  enabled = import.meta.env?.DEV !== true,
 } = {}) {
   const needRefresh = ref(false)
   const applying = ref(false)
@@ -66,7 +73,7 @@ export function createPwaUpdateController({
    *  否则「应用更新」会把 SKIP_WAITING 发到另一个 App 的 worker 上。
    */
   async function initialize(app = {}) {
-    if (!supported) return false
+    if (!supported || !enabled) return false
     const nextUrl = app.serviceWorker || swUrl
     const nextScope = app.serviceWorkerScope || scope
     if (registeredUrl === nextUrl) return true

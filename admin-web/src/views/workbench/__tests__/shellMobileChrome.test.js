@@ -22,6 +22,7 @@ const TABBAR = read('../../../components/workbench/WorkbenchTabBar.vue')
 const EXIT_BUTTON = read('../../../components/workbench/WorkbenchExitButton.vue')
 const SWITCHER = read('../../../components/workbench/WorkbenchIdentitySwitcher.vue')
 const HR_SHELL = read('../../scheduling/SchedulingLayout.vue')
+const HY_SHELL = read('../../hygiene/HygieneAdminLayout.vue')
 const STAFF_HOME = read('../../hygiene/HygieneHomeView.vue')
 // 现场壳的共享样式：两份逐字节一致的副本（`utils/__tests__/hygieneAdminCss.test.js` 钉着），
 // 这里读正本。
@@ -183,6 +184,28 @@ describe('D8 / B6：手机档顶栏是两行、目标 ≥44px', () => {
     const shellIds = scopeIds('.wb-top')
     expect(shellIds.length).toBeGreaterThan(0)
     expect(scopeIds('.wb-nav').some((id) => shellIds.includes(id))).toBe(true)
+  })
+})
+
+describe('多根组件不透传 class：三个外壳都不给退出按钮挂 class', () => {
+  it('直接挂 <WorkbenchExitButton />，靠 :deep(.wb-exit) 够那颗按钮', () => {
+    // `WorkbenchExitButton` 的模板是多根（`<button>` + 那个「还有照片没传完」的
+    // `<ConfirmDialog>`）：外面挂的 class 传不进按钮，Vue 还会报
+    // `Extraneous non-props attributes`。原来三个壳各自挂了一颗
+    // （`.wb-exit-btn` / `.sched-exit` / `.hy-exit`），规则全是死的。
+    for (const [name, source] of [['工作台壳', SHELL], ['人事壳', HR_SHELL], ['现场壳', HY_SHELL]]) {
+      expect(source, name).toMatch(/<WorkbenchExitButton\s*\/>/)
+      expect(source, name).not.toMatch(/<WorkbenchExitButton[^>]*class=/)
+    }
+  })
+
+  it('挂载外壳不再出那条 attrs 继承警告（原来那颗 class 就是警告的来源）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await mountShell('/workbench', 'super')
+
+    const hits = warn.mock.calls.filter(([first]) =>
+      String(first).includes('Extraneous non-props attributes'))
+    expect(hits).toEqual([])
   })
 })
 

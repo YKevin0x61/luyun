@@ -53,6 +53,7 @@ describe('usePwaUpdate', () => {
     const controller = createPwaUpdateController({
       serviceWorker,
       locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
     })
 
     expect(controller.visible.value).toBe(false)
@@ -77,6 +78,7 @@ describe('usePwaUpdate', () => {
     const controller = createPwaUpdateController({
       serviceWorker,
       locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
       reload,
     })
 
@@ -100,6 +102,7 @@ describe('usePwaUpdate', () => {
     const controller = createPwaUpdateController({
       serviceWorker,
       locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
       reload: vi.fn(),
     })
 
@@ -115,9 +118,23 @@ describe('usePwaUpdate', () => {
     const controller = createPwaUpdateController({
       serviceWorker,
       locationRef: { protocol: 'http:', hostname: '192.168.1.20' },
+      enabled: true,
     })
     expect(await controller.initialize()).toBe(false)
     expect(serviceWorker.register).not.toHaveBeenCalled()
+  })
+
+  it('开发环境默认不注册（dev server 根本没有那份 worker，注册必被 MIME 拒掉）', async () => {
+    const serviceWorker = new FakeServiceWorkerContainer()
+    // 不传 enabled：走默认值，而 vitest 下 import.meta.env.DEV 恒为 true，等同 Vite dev server。
+    const controller = createPwaUpdateController({
+      serviceWorker,
+      locationRef: { protocol: 'http:', hostname: 'localhost' },
+    })
+
+    expect(await controller.initialize()).toBe(false)
+    expect(serviceWorker.register).not.toHaveBeenCalled()
+    expect(controller.visible.value).toBe(false)
   })
 
   it('票 09：按 App 注册 —— 工作台那份是 /workbench/sw.js + scope /workbench', async () => {
@@ -127,6 +144,7 @@ describe('usePwaUpdate', () => {
     const controller = createPwaUpdateController({
       serviceWorker,
       locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
     })
 
     await controller.initialize({
@@ -153,6 +171,7 @@ describe('usePwaUpdate', () => {
     const controller = createPwaUpdateController({
       serviceWorker,
       locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
     })
 
     // 管理面：根那份已经在等更新 → 提示条亮
@@ -198,6 +217,7 @@ describe('usePwaUpdate', () => {
     usePwaUpdate(selection, {
       serviceWorker,
       locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
     })
     await nextTick()
     await Promise.resolve()

@@ -149,7 +149,7 @@ watch(
           <WorkbenchIdentitySwitcher class="hy-id" />
           <!-- 退出入口（票 06）：现场这七页也是独立外壳，原先一个退出按钮都没有。
                行为只有一处（`composables/useWorkbenchLogout.js`）。 -->
-          <WorkbenchExitButton class="hy-exit" />
+          <WorkbenchExitButton />
           <router-link class="hy-back hy-back-top" to="/" :title="HYGIENE_BACK_TO_ADMIN_LABEL">
             {{ HYGIENE_BACK_TO_ADMIN_LABEL }}
           </router-link>
@@ -171,8 +171,6 @@ watch(
 </template>
 
 <style scoped>
-/* 退出入口（票 06）：贴在「后台」那颗旁边，窄屏下跟它一起让位给切换器。 */
-.hy-exit { flex: 0 0 auto; }
 /* 工作台级导航：吃掉横条里剩下的宽度（原来那一块右侧是空的），放不下就**自己**横滑，
    别把切换器 / 退出挤到下一行。 */
 .hy-wb-nav { flex: 1 1 auto; overflow-x: auto; }

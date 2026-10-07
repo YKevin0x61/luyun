@@ -69,6 +69,10 @@ npm run dev          # http://localhost:5173，自动代理 /api /ws 到 http://
 
 如后端不在默认地址，设置 `LUYUN_API_PROXY` 环境变量后再跑 `npm run dev`。
 
+dev server 下**不注册** Service Worker：两份 worker 都是 `npm run build` 时生成的，dev 下
+`/sw.js` 与 `/workbench/sw.js` 会落到 SPA history fallback 回一份 `index.html`（`text/html`），
+浏览器按 MIME 直接拒注册。要验 PWA 行为（安装、更新提示）请用构建产物走后端 `:8000`。
+
 鉴权沿用 Cookie Session：先在 `/login` 登录一次，浏览器 Cookie 对 `localhost`
 同源共享，`fetch` 带 `credentials: 'include'`。
 

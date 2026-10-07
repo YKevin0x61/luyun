@@ -88,7 +88,7 @@ watch(identity, keepViewAllowed)
            的店长视角原先没有 —— 工作台是子应用，页页都得退得出去。行为只有一处
            （`composables/useWorkbenchLogout.js`）。**员工那三页页内那颗已去掉**（D5）：
            同一个动作在同一屏里不该有两颗按钮，外壳这一颗覆盖全部工作台页面。 -->
-      <WorkbenchExitButton class="wb-exit-btn" />
+      <WorkbenchExitButton />
     </header>
 
     <main id="workbench-main" class="wb-main">
@@ -118,10 +118,10 @@ watch(identity, keepViewAllowed)
 /* 不占满整行的那几件：补 4px 下边距，与导航 tab 的文字基线对齐后仍居中；
    导航（下划线 tab）不在此列 —— 它要贴到底边。 */
 .wb-back, .wb-brand, .wb-id-switcher { margin-bottom: 4px; }
-/* 退出按钮要**:deep() 才选得中**：`WorkbenchExitButton` 的模板是多根
-   （`<button>` + 那个「还有照片没传完」的 `<ConfirmDialog>`），多根组件不透传父级
-   传下来的 class —— 挂在外面的 `.wb-exit-btn` 从来就没命中过元素，
-   `margin-left: auto`（让它贴右端）因此一直是死规则，手机上它只是跟在切换器后面。 */
+/* 退出按钮要**:deep() 才选得中** —— 也别在挂它的地方传 class：`WorkbenchExitButton`
+   的模板是多根（`<button>` + 那个「还有照片没传完」的 `<ConfirmDialog>`），父级传下去
+   的 class 不透传，Vue 还会当场报 `Extraneous non-props attributes`；挂在外面的
+   `.wb-exit-btn` 从来没命中过元素，`margin-left: auto`（让它贴右端）一直是死规则。 */
 .wb-top :deep(.wb-exit) { margin-left: auto; margin-bottom: 4px; }
 .wb-brand {
   /* 牌子占掉剩下的宽度：切换器与导航一起贴在右端（原来靠 `.wb-nav` 的 auto margin，

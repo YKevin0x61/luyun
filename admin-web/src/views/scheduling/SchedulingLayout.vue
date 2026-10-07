@@ -108,7 +108,7 @@ watch(
       <WorkbenchIdentitySwitcher class="sched-id" />
       <!-- 退出入口（票 06）：这一页是独立外壳（`standalone`，后台那条导航不渲染），
            原先没有退出的地方。行为只有一处（`composables/useWorkbenchLogout.js`）。 -->
-      <WorkbenchExitButton class="sched-exit" />
+      <WorkbenchExitButton />
       <span
         class="sched-conn"
         :class="{ off: offline }"
@@ -167,7 +167,6 @@ watch(
 /* 身份切换器（票 04 那颗）与实时点贴右端。窄屏下它跟「本组导航」换行：切换器是顶栏里
    最不该被挤出屏幕的一件，所以导航整条另起一行、自己横向滑。 */
 .sched-id { flex: 0 0 auto; margin-left: auto; }
-.sched-exit { flex: 0 0 auto; }
 .sched-conn { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--hy-faint); }
 .sched-conn i { width: 7px; height: 7px; border-radius: 50%; background: var(--hy-mint); }
 .sched-conn.off { color: var(--hy-seal-bright); }
