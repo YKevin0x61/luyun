@@ -519,10 +519,22 @@ class _WecomSubscriptionsRepoMixin:
             logger.error(f"❌ 获取出站记录失败: {e}")
             return None
 
-    async def wecom_outbox_pending(self, limit: int = 20) -> List[Dict]:
-        """按先进先出取待发（调度循环每轮捞一批）。"""
+    async def wecom_outbox_pending(self, limit: int = 20, now: Optional[str] = None) -> List[Dict]:
+        """按先进先出取**已到点**的待发（调度循环每轮捞一批）。
+
+        只捞 ``scheduled_at`` 为空或已到点的行：退避 / 补发等待中的行这一轮本来就不会发
+        （派发对未到点的行是「留待下轮」），但它们**不能占住这一批的名额** —— 只按 id 取
+        最旧 20 行的话，一批正在等 1/5/15 分钟退避的行会把新入队的行挡在批次之外，直到
+        它们到点为止（不丢，但违背「超出的行排队、由调度循环继续发」的口径）。
+
+        时间字段是同一格式的 ISO 文本（写入方都用 CHINA_TZ 的 ``isoformat``），可以直接
+        比较，与 ``wecom_outbox_stale_sending`` 的 ``COALESCE(...) < ?`` 同一个先例。
+        ``now`` 是调用方的时钟，缺省取当前时间：调度循环与测试的假时钟都应当传进来，
+        不传就按墙上时钟判定。
+        """
         try:
             safe_limit = max(1, min(int(limit), 200))
+            cutoff = str(now or _now())
             tdb = self._connection.table("wecom_push_outbox")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
@@ -531,9 +543,9 @@ class _WecomSubscriptionsRepoMixin:
                               idempotency_key, scheduled_at, created_at, sending_at,
                               finished_at
                        FROM wecom_push_outbox
-                       WHERE status = ?
+                       WHERE status = ? AND COALESCE(scheduled_at, '') <= ?
                        ORDER BY id ASC LIMIT ?""",
-                    (SUB_OUTBOX_STATUS_PENDING, safe_limit),
+                    (SUB_OUTBOX_STATUS_PENDING, cutoff, safe_limit),
                 )
                 rows = await cursor.fetchall()
             return [dict(row) for row in rows]

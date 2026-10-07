@@ -396,9 +396,12 @@ class WeComOutbox:
         """捞一批待发，按节流发送；返回真正发成功的条数。
 
         没轮到的行留在待发，由 30 秒一轮的调度循环接着发——超出节流是**排队**，
-        不是丢弃。
+        不是丢弃。捞的是「已到点」的那一批（未到点的退避 / 补发行不占名额，见
+        ``wecom_outbox_pending``）：它们本来就只能留待下轮，占着名额只会把新入队的
+        行一起挡在批次外面。
         """
-        rows = await db.wecom_outbox_pending(limit)
+        now = self._now()
+        rows = await db.wecom_outbox_pending(limit, now.isoformat())
         sent = 0
         for row in rows:
             try:
@@ -609,7 +612,9 @@ class WeComOutbox:
 
     @staticmethod
     def _sending_timeout_seconds() -> int:
-        return int(getattr(settings, "WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS", 300) or 0)
+        # 默认值只住在 `config.py` 的声明里（同一处读法见 `services/data_quality_scheduler.py`）：
+        # 在这里再抄一份字面量，config 一改就是错的兜底。
+        return int(settings.WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS or 0)
 
     # ── 时间与尝试次数 ────────────────────────────────────────────────────
 
@@ -656,7 +661,7 @@ class WeComOutbox:
         待发与发送中的行不管多老都不删：那是还没发出去的消息，删掉就是静默丢失。
         保留天数 0 = 永久保留（与日志保留同一个口径）。
         """
-        days = int(getattr(settings, "WECOM_OUTBOX_RETENTION_DAYS", 90) or 0)
+        days = int(settings.WECOM_OUTBOX_RETENTION_DAYS or 0)
         if days <= 0:
             return 0
         cutoff = ((now or self._now()) - timedelta(days=days)).isoformat()
@@ -703,7 +708,7 @@ class WeComOutbox:
 
     @staticmethod
     def _rate_limit_per_minute() -> int:
-        return int(getattr(settings, "WECOM_OUTBOX_RATE_LIMIT_PER_MINUTE", 20) or 0)
+        return int(settings.WECOM_OUTBOX_RATE_LIMIT_PER_MINUTE or 0)
 
 
 wecom_outbox = WeComOutbox()

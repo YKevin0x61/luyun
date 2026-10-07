@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from config import settings
+from services.wecom_push_service import wecom_push_service
 
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "password123"
@@ -643,6 +645,11 @@ def test_writes_reject_api_tokens(api):
          {"topic_id": "sales_report", "target_channel_id": channel["id"]}),
         ("DELETE", f"{API_PREFIX}/subscriptions?topic_id=sales_report"
                    f"&target_channel_id={channel['id']}", None),
+        # 手工外发（销售报表页的「推送」弹窗）也是这一页的写接口：它真的往群里发消息，
+        # 不该被一个长寿命令牌驱动。
+        ("POST", f"{API_PREFIX}/send-text",
+         {"webhook_id": channel["id"], "content": "偷发的一段",
+          "push_type": "sales_report_text"}),
     )
     for method, path, payload in writes:
         resp = api.as_token(method, path, json=payload) if payload is not None else api.as_token(
@@ -660,6 +667,27 @@ def test_writes_reject_api_tokens(api):
                api.as_session("GET", f"{API_PREFIX}/subscriptions").json()["topics"])
 
 
+def test_send_text_accepts_the_browser_session(api):
+    """同一个入口带会话 cookie 就通：销售报表页的「推送」弹窗正是这么调的。"""
+    channel = _create_channel(api, name="门店群")
+
+    with patch.object(
+        wecom_push_service, "send_text", new=AsyncMock(return_value=(True, "ok"))
+    ):
+        resp = api.as_session(
+            "POST",
+            f"{API_PREFIX}/send-text",
+            json={
+                "webhook_id": channel["id"],
+                "content": "【销售报表】2026-05-02\n订单数：3",
+                "push_type": "sales_report_text",
+            },
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True
+
+
 def test_reads_still_accept_api_tokens(api):
     """读面沿用旧凭据（会话 / API token）：这一票只收紧写操作。"""
     _create_channel(api, name="门店群")
@@ -675,7 +703,11 @@ def test_reads_still_accept_api_tokens(api):
 
 
 def test_every_write_route_on_this_page_declares_the_session_gate():
-    """路由表层面的契约：这一页今后**新增**的写接口也自动受这条门约束。"""
+    """路由表层面的契约：这一页今后**新增**的写接口也自动受这条门约束。
+
+    这一页**没有豁免**：`/send-text`（销售报表页的「推送」弹窗）的调用方带的就是会话
+    cookie，所以它和其它写接口同一个口径 —— 契约测试对它是全覆盖的，不再有白名单。
+    """
     import main as main_module
     from api.security import require_session
 
@@ -695,8 +727,6 @@ def test_every_write_route_on_this_page_declares_the_session_gate():
     for route in main_module.app.routes:
         if not isinstance(route, APIRoute) or not route.path.startswith(API_PREFIX):
             continue
-        if route.path in _ROUTES_OWNED_BY_LATER_TICKETS:
-            continue
         for method in sorted(route.methods):
             if method in ("GET", "HEAD", "OPTIONS"):
                 continue
@@ -708,11 +738,3 @@ def test_every_write_route_on_this_page_declares_the_session_gate():
         "以下写接口没有 require_session（这一页的写操作只接受浏览器会话）：\n"
         + "\n".join(ungated)
     )
-
-
-# `send-text` 是唯一还留旧口径的写路由：它的调用方不止这一页（销售报表页的「推送」
-# 弹窗也走它），本票只收口它的落库，不动它的鉴权。定时任务那几条写路由已在票 08 里
-# 收紧成会话专用（`/jobs` 的形状也换成了「内容类型 + 参数 + 时间」）。
-_ROUTES_OWNED_BY_LATER_TICKETS = (
-    f"{API_PREFIX}/send-text",
-)

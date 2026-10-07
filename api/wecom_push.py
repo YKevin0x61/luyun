@@ -1108,12 +1108,19 @@ async def delete_subscription(
 
 
 @router.post("/send-text")
-async def send_text(payload: SendTextIn, db: DatabaseManager = Depends(get_db)):
+async def send_text(
+    payload: SendTextIn,
+    db: DatabaseManager = Depends(get_db),
+    _session: str = Depends(require_session),
+):
     """手工把一段正文发给某个渠道（销售报表页的「推送」弹窗）。
 
     发出去的结果写进**统一出站**（票 07 的遗留）：它不再往旧的推送日志表里写，所以
     「手工发送」在页面的发送记录里看得见。同步发送保持不变 —— 这个入口要当场把成败
     回给用户，不排队等调度循环。
+
+    它是**外发**入口（真往群里发消息），所以和这一页其它写接口同一个凭据口径：只认
+    浏览器登录会话。调用方是管理端销售报表页的弹窗，带的正是会话 cookie。
     """
     webhook = await db.wecom_webhook_get(payload.webhook_id)
     if not webhook:

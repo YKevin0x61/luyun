@@ -911,6 +911,109 @@ class OutboxStaleSendingTest(OutboxTestCase):
         self.assertEqual(int(outbox_id), int(row["id"]))
 
 
+class OutboxBackingOffBatchTest(OutboxTestCase):
+    """一批在退避等待中的行不许占满派发批次（票 11 审查的收尾）。
+
+    修复前 ``wecom_outbox_pending`` 只按 id 取最旧 20 行、不看 ``scheduled_at``：最旧的
+    20 行都在等退避时，新入队的行这一轮连看都看不到，要等它们到点才轮到 —— 不丢，但
+    「超出的行排队、由调度循环继续发」在这段时间里是不成立的。
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self._old_limit = settings.WECOM_OUTBOX_RATE_LIMIT_PER_MINUTE
+        settings.WECOM_OUTBOX_RATE_LIMIT_PER_MINUTE = 100  # 让那 20 行先各发一次（都失败）
+        self.channel = await self._channel("卫生群", URL_A)
+        await self._subscribe([self.channel])
+
+    async def asyncTearDown(self):
+        settings.WECOM_OUTBOX_RATE_LIMIT_PER_MINUTE = self._old_limit
+        await super().asyncTearDown()
+
+    async def test_a_new_delivery_goes_out_while_the_oldest_batch_is_backing_off(self):
+        for index in range(20):
+            await self._enqueue(f"第 {index} 封", reference=f"backoff-{index}")
+        self.sender.failures = ["boom"] * 20
+
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 0, "首批 20 行全部失败")
+        rows = await self._rows()
+        self.assertEqual(len(rows), 20)
+        self.assertTrue(all(row["status"] == "pending" for row in rows))
+        self.assertTrue(all(row["scheduled_at"] for row in rows), "20 行都排了退避")
+
+        await self._enqueue("晚到的一封", reference="late")
+
+        self.assertEqual(
+            await self.outbox.dispatch_pending(self.db), 1, "新行这一轮就该发出去"
+        )
+        self.assertEqual([content for _, content in self.sender.sent], ["晚到的一封"])
+
+        # 未到点的行不是被跳过：到点之后照旧会被发出去。
+        self.clock += timedelta(minutes=2)
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 20)
+        self.assertEqual({row["status"] for row in await self._rows()}, {"sent"})
+
+
+class OutboxConfigTest(OutboxTestCase):
+    """三项出站配置直接读 ``settings``（票 11 审查）：改了值就生效，模块里不留副本。
+
+    以前这里写的是 ``getattr(settings, "WECOM_OUTBOX_...", <字面量>)``：字面量与
+    ``config.py`` 的声明重复，config 一改默认值，这个兜底就是错的。所以断言的是
+    「配置值说话」，而不是某个具体数字。
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self._old = (
+            settings.WECOM_OUTBOX_RATE_LIMIT_PER_MINUTE,
+            settings.WECOM_OUTBOX_RETENTION_DAYS,
+            settings.WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS,
+        )
+        self.channel = await self._channel("卫生群", URL_A)
+        await self._subscribe([self.channel])
+
+    async def asyncTearDown(self):
+        (
+            settings.WECOM_OUTBOX_RATE_LIMIT_PER_MINUTE,
+            settings.WECOM_OUTBOX_RETENTION_DAYS,
+            settings.WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS,
+        ) = self._old
+        await super().asyncTearDown()
+
+    async def test_the_rate_limit_is_read_from_settings(self):
+        settings.WECOM_OUTBOX_RATE_LIMIT_PER_MINUTE = 1
+        for index in range(3):
+            await self._enqueue(f"第 {index} 封", reference=f"cfg-{index}")
+
+        self.assertEqual(
+            await self.outbox.dispatch_pending(self.db), 1, "限流设 1 就只发 1 条"
+        )
+
+    async def test_the_retention_days_is_read_from_settings(self):
+        settings.WECOM_OUTBOX_RETENTION_DAYS = 7
+        expired = await self.db.wecom_outbox_enqueue({
+            "topic_id": TOPIC,
+            "target_channel_id": self.channel,
+            "idempotency_key": "cfg-old-sent",
+            "status": "sent",
+            "created_at": (self.clock - timedelta(days=8)).isoformat(),
+        })
+
+        self.assertEqual(await self.outbox.purge_expired(self.db), 1, "保留 7 天就清 8 天前")
+        self.assertNotIn(expired, [int(row["id"]) for row in await self._rows()])
+
+    async def test_the_sending_timeout_is_read_from_settings(self):
+        settings.WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS = 42
+        row_id = (await self._enqueue("正在发的一封"))[0]
+        await self.db.wecom_outbox_mark_sending(
+            row_id, sending_at=(self.clock - timedelta(seconds=100)).isoformat()
+        )
+
+        self.assertEqual(
+            await self.outbox.requeue_stale_sending(self.db), 1, "阈值 42 秒就捞 100 秒前的"
+        )
+
+
 class OutboxZeroSubscriptionTest(OutboxTestCase):
     async def test_no_subscription_enqueues_nothing_and_logs(self):
         await self._channel("没人订阅的群", URL_A)

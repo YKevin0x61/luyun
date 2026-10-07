@@ -9,7 +9,7 @@ Repo 层是后续票据（订阅矩阵、统一出站、发送记录页）共用
 
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
@@ -274,6 +274,49 @@ class WeComOutboxRepoTests(unittest.IsolatedAsyncioTestCase):
         await self._enqueue(idempotency_key="hygiene:r1:other")
 
         self.assertEqual(len(await self.db.wecom_outbox_pending()), 2)
+
+    async def test_pending_skips_rows_that_are_not_due_yet(self):
+        """退避 / 补发等待中的行不占批次名额：它们这一轮本来就不会发。
+
+        只按 id 取最旧一批的话，一批在等退避的行会把新入队的行挡在批次外面，直到它们
+        到点为止 —— 不丢，但「超出的行排队、由调度循环继续发」就名不副实了。
+        """
+        now = datetime.now(CHINA_TZ)
+        waiting = [
+            await self._enqueue(
+                idempotency_key=f"hygiene:backoff-{index}",
+                scheduled_at=(now + timedelta(minutes=5)).isoformat(),
+            )
+            for index in range(3)
+        ]
+        fresh = await self._enqueue(
+            idempotency_key="hygiene:fresh", scheduled_at=None
+        )
+
+        due = [int(row["id"]) for row in await self.db.wecom_outbox_pending()]
+        self.assertEqual(due, [fresh], "只有到点的那一行轮得到这一批")
+
+        # 到点之后它们照旧会被捞出来：不是被跳过，只是这一轮不占名额。
+        later = (now + timedelta(minutes=6)).isoformat()
+        self.assertEqual(
+            [int(row["id"]) for row in await self.db.wecom_outbox_pending(now=later)],
+            waiting + [fresh],
+        )
+
+    async def test_pending_honours_the_callers_clock(self):
+        """``now`` 是调用方的时钟：同一批行，时钟不同，捞出来的也不同。"""
+        now = datetime.now(CHINA_TZ)
+        outbox_id = await self._enqueue(
+            idempotency_key="hygiene:future",
+            scheduled_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+
+        self.assertEqual(await self.db.wecom_outbox_pending(now=now.isoformat()), [])
+        self.assertEqual(
+            [int(row["id"]) for row in await self.db.wecom_outbox_pending(
+                now=(now + timedelta(minutes=6)).isoformat())],
+            [outbox_id],
+        )
 
     async def test_mark_sent_removes_it_from_pending_and_records_the_finish(self):
         outbox_id = await self._enqueue()
