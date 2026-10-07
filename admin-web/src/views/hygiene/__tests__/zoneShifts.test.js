@@ -33,14 +33,11 @@ describe('hygiene zone shifts', () => {
     expect(home).toMatch(/router\.push\('\/workbench\/me\/today'\)/)
   })
 
-  it('filters the admin roster assignment zones by the chosen shift', () => {
-    // 候选区还是那份按工作区开关筛出来的名单（`zonesForShift`），但台账上选中的「班次」
-    // 现在是**排班的班次 id**（票 10：改派写的是排班的单日覆盖）。排班那条班次只标了
-    // `duty_slot`（day/night），先翻成卫生认的「白班/夜班」再喂给它；没标档位的班次不筛
-    // （筛只会把区滤空），所以那一步落在 `zoneChoicesForShift` 里。
-    expect(roster).toMatch(/function zonesForShift/)
-    expect(roster).toMatch(/const DUTY_SLOT_SHIFTS = \{ day: '白班', night: '夜班' \}/)
-    expect(roster).toMatch(/return slot \? zonesForShift\(slot\) : zones\.value/)
-    expect(roster).toMatch(/zoneChoicesForShift\(drafts\[row\.id\]\.shift\)/)
+  it('花名册不再按班次筛工作区（2026-10 改版：改派整段退出这一页）', () => {
+    // 原来台账上选中的「班次」是排班的班次 id，候选区按工作区开关筛出来（`zonesForShift`）。
+    // 改版后花名册只管档案与批准，这一套派生整组下线 —— 这条守着"它没有偷偷回来"。
+    expect(roster).not.toMatch(/zonesForShift|zoneChoicesForShift|DUTY_SLOT_SHIFTS/)
+    expect(roster).not.toMatch(/\/api\/scheduling\//)
+    expect(roster).not.toMatch(/zone_id/)
   })
 })

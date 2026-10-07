@@ -239,6 +239,7 @@ from fastapi.testclient import TestClient
 
 import api.auth as auth_module
 from services import auth_service
+from tests.hygiene_profile import approve_body, register_body
 
 
 @pytest.fixture
@@ -982,10 +983,15 @@ def _staff_only_client(client):
     assert init.status_code == 200, init.text
     registered = client.post(
         "/api/hygiene/staff/register",
-        json={"name": "张三", "phone": STAFF_PHONE, "password": STAFF_PASSWORD},
+        json=register_body(name="张三", phone=STAFF_PHONE, password=STAFF_PASSWORD),
     )
     assert registered.status_code == 200, registered.text
     employee = registered.json()["employee"]
+    # 批准门槛（2026-10-07）：先补底薪与入职日期，才批得下来。
+    seeded = client.patch(
+        f"/api/hygiene/admin/roster/{employee['id']}", json=approve_body()
+    )
+    assert seeded.status_code == 200, seeded.text
     approved = client.post(f"/api/hygiene/admin/roster/{employee['id']}/approve")
     assert approved.status_code == 200, approved.text
     login = client.post(

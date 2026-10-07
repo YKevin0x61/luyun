@@ -20,13 +20,22 @@ import functools
 import hashlib
 import re
 import secrets
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional
 
 from config import settings
 from database import CHINA_TZ
 from db_core.errors import is_integrity_violation
 from services.identity.capabilities import dump_caps, parse_caps
+from services.identity.profile import (
+    ProfileError,
+    health_cert_status,
+    normalize_base_salary,
+    normalize_date,
+    normalize_health_cert_date,
+    normalize_id_card,
+    profile_incomplete,
+)
 from services import password_hash
 
 logger = logging.getLogger(__name__)
@@ -139,6 +148,18 @@ class EmployeeAccounts:
             return value.replace(tzinfo=CHINA_TZ)
         return value
 
+    def _today(self) -> date:
+        """**北京时自然日** —— 健康证有效期与「不得晚于今天」都按它算。
+
+        刻意不用营业日（`business_date_of`，06:00 切）：证件上的有效期是日历日，
+        员工凌晨看的也是同一个日期。
+        """
+        return self._now_dt().date()
+
+    def today(self) -> str:
+        """同一个日期的 `YYYY-MM-DD` 形式（导出的文件名也用它，好与注入的时钟一致）。"""
+        return self._today().isoformat()
+
     def _now_iso(self) -> str:
         return self._now_dt().isoformat()
 
@@ -184,11 +205,39 @@ class EmployeeAccounts:
             raise EmployeeAccountsError("invalid_name", "invalid_name")
         return cleaned
 
+    @staticmethod
+    def _checked(fn, *args):
+        """档案字段校验（`services/identity/profile.py`）→ 本层异常族。
+
+        校验实现只此一处；这里只把 `ProfileError` 换成 `EmployeeAccountsError`，
+        让接口层每个入口照旧一句 `except EmployeeAccountsError` 就够（与手机号/姓名
+        校验同一套），code 逐字保留。
+        """
+        try:
+            return fn(*args)
+        except ProfileError as exc:
+            raise EmployeeAccountsError(exc.code, exc.code) from exc
+
     def _employee_from_row(self, row) -> dict:
-        mapping = dict(row)
+        return self._project_employee(dict(row))
+
+    def _project_employee(self, mapping: dict, health: Optional[dict] = None) -> dict:
+        """身份投影：管理端与员工端**共用**。
+
+        ⚠️ 这里只放"这个人是谁"以及**员工本人也能看到**的档案项（`hire_date` /
+        `health_cert_expires_on` / `health_cert_state`）。**敏感项绝不能加进来**：
+        `id_card_no` / `base_salary` / `health_cert_date` 只在 :meth:`_roster_row`
+        那份管理端投影里下发 —— 本函数同时喂着 `login()` 与 `get_staff_session()`，
+        往里加一行就等于把它们发到员工手机上（design §0.3 的红线）。
+        """
         # 管理权限开关（2026-10-05）：判据一律看这一组，`permission` 只当人话标签用。
         # 认不出的键会被 `parse_caps` 丢掉（fail-closed）—— 权限宁可少给一项。
         caps = parse_caps(mapping.get("admin_caps"))
+        # 健康证：办理日期 + 12 个月，唯一实现在 `services/identity/profile.py`。
+        # 这一行的 SELECT 没带 `health_cert_date` 时（老查询）按"没填"渲染。
+        status = health or health_cert_status(
+            mapping.get("health_cert_date"), self._today()
+        )
         return {
             "id": int(mapping["id"]),
             "phone": mapping["phone"],
@@ -202,11 +251,42 @@ class EmployeeAccounts:
             "admin_caps": list(caps),
             "approved": _as_bool(mapping["approved"]),
             "disabled": _as_bool(mapping["disabled"]),
+            # 员工端「我的」也显示的档案项（非敏感）。空值一律 `None`：
+            # 前端那些 `!= null` 的判据（批准门槛、有效期至）靠它。
+            "hire_date": mapping.get("hire_date") or None,
+            "health_cert_expires_on": status["expires_on"],
+            "health_cert_state": status["state"],
         }
+
+    def _roster_row(self, row) -> dict:
+        """花名册行 = 身份投影 + **只在管理端下发**的档案字段。
+
+        花名册是管理端专属响应（`require_session`），所以这里可以带身份证号与底薪；
+        员工端那份走 `_project_employee`，两条路不会串。
+        """
+        mapping = dict(row)
+        health = health_cert_status(mapping.get("health_cert_date"), self._today())
+        employee = self._project_employee(mapping, health)
+        employee.update(
+            {
+                "created_at": mapping.get("created_at") or "",
+                "id_card_no": mapping.get("id_card_no") or None,
+                "health_cert_date": mapping.get("health_cert_date") or None,
+                "base_salary": (
+                    None
+                    if mapping.get("base_salary") is None
+                    else int(mapping["base_salary"])
+                ),
+                "health_cert_days_left": health["days_left"],
+                "profile_incomplete": profile_incomplete(mapping),
+            }
+        )
+        return employee
 
     async def _fetch_employee(self, employee_id: int):
         cur = await self._conn.execute(
-            """SELECT id, phone, name, job_title, permission, admin_caps, approved, disabled
+            """SELECT id, phone, name, job_title, permission, admin_caps, approved, disabled,
+                      created_at, id_card_no, base_salary, hire_date, health_cert_date
                FROM hygiene_employees WHERE id = ?""",
             (employee_id,),
         )
@@ -215,36 +295,82 @@ class EmployeeAccounts:
     async def _fetch_employee_by_phone(self, phone: str):
         cur = await self._conn.execute(
             """SELECT id, phone, name, password_hash, job_title, permission, admin_caps,
-                      approved, disabled
+                      approved, disabled, created_at, id_card_no, base_salary, hire_date,
+                      health_cert_date
                FROM hygiene_employees WHERE phone = ?""",
             (phone,),
         )
         return await cur.fetchone()
 
+    async def _fetch_employee_by_id_card(self, id_card_no: str):
+        cur = await self._conn.execute(
+            """SELECT id, phone, name FROM hygiene_employees WHERE id_card_no = ?""",
+            (id_card_no,),
+        )
+        return await cur.fetchone()
+
     @serialized_write
-    async def register(self, phone: str, password: str, name: str) -> dict:
+    async def register(
+        self,
+        phone: str,
+        password: str,
+        name: str,
+        *,
+        id_card_no: Optional[str] = None,
+        health_cert_date: Optional[str] = None,
+    ) -> dict:
+        """员工自助注册。
+
+        两个档案项（身份证号、健康证办理日期）是**注册页的必填项**，但"必填"这一层
+        由接口层把住（`StaffRegisterIn` + `_ERROR_DETAILS` 的逐字文案）；这里为空时
+        照旧落库成 NULL —— 存量行与测试夹具都走这条路，档案缺项是合法状态（显示
+        「待补」、挡在批准门槛前），不是错误。**给了值就必须合法**：形状/校验位
+        （`services/identity/profile.py`）与同号唯一都在这里判，注册与 PATCH 共用。
+        """
         normalized = self._normalize_phone(phone)
         employee_name = self._normalize_name(name)
         password_hash.validate_password(password)
+        id_card = self._checked(normalize_id_card, id_card_no)
+        cert_date = self._checked(
+            normalize_health_cert_date, health_cert_date, self._today()
+        )
         existing = await self._fetch_employee_by_phone(normalized)
         if existing is not None:
             raise EmployeeAccountsError("duplicate_phone", "duplicate_phone")
+        if id_card is not None and await self._fetch_employee_by_id_card(id_card) is not None:
+            raise EmployeeAccountsError("duplicate_id_card", "duplicate_id_card")
         now = self._now_iso()
         hashed = await password_hash.hash_password_async(password)
         try:
             cur = await self._conn.execute(
                 """INSERT INTO hygiene_employees
                    (phone, name, password_hash, job_title, permission, approved, disabled,
-                    created_at, updated_at)
-                   VALUES (?, ?, ?, '', ?, 0, 0, ?, ?)""",
-                (normalized, employee_name, hashed, PERMISSION_STAFF, now, now),
+                    id_card_no, health_cert_date, created_at, updated_at)
+                   VALUES (?, ?, ?, '', ?, 0, 0, ?, ?, ?, ?)""",
+                (
+                    normalized,
+                    employee_name,
+                    hashed,
+                    PERMISSION_STAFF,
+                    id_card,
+                    cert_date,
+                    now,
+                    now,
+                ),
             )
             await self._conn.commit()
         except Exception as exc:
             if not is_integrity_violation(exc):
                 raise
             await self._conn.rollback()
-            raise EmployeeAccountsError("duplicate_phone", "duplicate_phone") from exc
+            # 预检查在写锁外跑过，两个并发注册还是可能同时挤进来：撞上哪条唯一索引
+            # 就报哪件事。按**查库结果**判定而不是按异常类名（`is_integrity_violation`
+            # 已经把 SQLite 与 asyncpg 两族都算进来了）。
+            if await self._fetch_employee_by_phone(normalized) is not None:
+                raise EmployeeAccountsError("duplicate_phone", "duplicate_phone") from exc
+            if id_card is not None and await self._fetch_employee_by_id_card(id_card) is not None:
+                raise EmployeeAccountsError("duplicate_id_card", "duplicate_id_card") from exc
+            raise
         logger.info("hygiene employee registered id=%s", cur.lastrowid)
         row = await self._fetch_employee(cur.lastrowid)
         return self._employee_from_row(row)
@@ -354,16 +480,68 @@ class EmployeeAccounts:
         return {}
 
     async def list_roster(self) -> list[dict]:
+        """花名册：每行 = `_roster_row`（含只在管理端下发的档案字段）。
+
+        排序仍是「未停用在前、待批准在前、按 id 升序」；页面自己按分段与姓名重排
+        （票面 §2.2 的排序在前端），这里只保证集合与口径。
+        """
         cur = await self._conn.execute(
             """SELECT e.id, e.phone, e.name, e.job_title, e.permission, e.admin_caps,
-                      e.approved, e.disabled
+                      e.approved, e.disabled, e.created_at, e.id_card_no, e.base_salary,
+                      e.hire_date, e.health_cert_date
                FROM hygiene_employees e
                ORDER BY e.disabled ASC, e.approved ASC, e.id ASC""",
         )
         rows = await cur.fetchall()
-        employees = [self._employee_from_row(row) for row in rows]
+        employees = [self._roster_row(row) for row in rows]
         await self._roster_extras(employees)
         return employees
+
+    async def get_profile_row(self, employee_id: int) -> dict:
+        """一个员工的管理端投影（批准门槛这类判据要用 `base_salary` / `hire_date`）。
+
+        跟花名册同一条投影，所以"缺什么算缺"只有一处口径（`profile.py` 的
+        `approve_gate` / `profile_incomplete`）。找不到人 → `employee_not_found`（404）。
+        """
+        row = await self._fetch_employee(int(employee_id))
+        if row is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        return self._roster_row(row)
+
+    async def list_health_cert_due(self) -> list[dict]:
+        """健康证**临期或已过期**的员工（超管首页那块待办）。
+
+        只捞未停用的人（停用的人不用催办），阈值与花名册行标签同源 —— 都走
+        `health_cert_status`，所以首页的数字与花名册里能数出来的标签数永远一致。
+        每人一行：`{id, name, phone, expires_on, state, days_left}`，按到期日升序
+        （最急的在最上面）。
+        """
+        cur = await self._conn.execute(
+            """SELECT id, name, phone, health_cert_date
+               FROM hygiene_employees
+               WHERE disabled = 0
+               ORDER BY id ASC""",
+        )
+        rows = await cur.fetchall()
+        today = self._today()
+        due = []
+        for row in rows:
+            mapping = dict(row)
+            status = health_cert_status(mapping.get("health_cert_date"), today)
+            if status["state"] not in ("soon", "expired"):
+                continue
+            due.append(
+                {
+                    "id": int(mapping["id"]),
+                    "name": mapping.get("name") or "",
+                    "phone": mapping.get("phone") or "",
+                    "expires_on": status["expires_on"],
+                    "state": status["state"],
+                    "days_left": status["days_left"],
+                }
+            )
+        due.sort(key=lambda item: item["expires_on"])
+        return due
 
     async def set_job_title(self, employee_id: int, title: str) -> dict:
         row = await self._fetch_employee(employee_id)
@@ -525,7 +703,21 @@ class EmployeeAccounts:
         job_title: Optional[str] = None,
         permission: Optional[str] = None,
         admin_caps: Optional[list] = None,
+        id_card_no: Optional[str] = None,
+        health_cert_date: Optional[str] = None,
+        base_salary: Optional[Any] = None,
+        hire_date: Optional[str] = None,
     ) -> dict:
+        """花名册抽屉保存：只 SET **传进来的**列（`None` = 不动这一列）。
+
+        `''`（空串）**是"清空"**：四个档案字段的空值在库里一律是 NULL，接口层把
+        JSON 的 `null` 与空串都归一成 `''` 再传进来（见 `api/hygiene.py` 的
+        `_profile_updates`）。底薪 `0` 与"没填"是两回事（0 会落成 0）。
+
+        `permission` 仍是独立的一列、`admin_caps` 仍是**整组替换**：这里不做
+        permission ↔ caps 的一致性校验或派生写回（那是 ADR 0093 明确留下的现状，
+        两者不一致是合法状态）。
+        """
         row = await self._fetch_employee(employee_id)
         if row is None:
             raise EmployeeAccountsError("employee_not_found", "employee_not_found")
@@ -550,16 +742,51 @@ class EmployeeAccounts:
             # 整组替换（前端一次提交十个勾的现状）——`dump_caps` 负责去重与排序。
             fields.append("admin_caps = ?")
             params.append(dump_caps(admin_caps))
+        if id_card_no is not None:
+            value = self._checked(normalize_id_card, id_card_no)
+            existing = await self._fetch_employee_by_id_card(value) if value else None
+            if existing is not None and int(dict(existing)["id"]) != int(employee_id):
+                raise EmployeeAccountsError("duplicate_id_card", "duplicate_id_card")
+            fields.append("id_card_no = ?")
+            params.append(value)
+        if health_cert_date is not None:
+            fields.append("health_cert_date = ?")
+            params.append(
+                self._checked(
+                    normalize_health_cert_date, health_cert_date, self._today()
+                )
+            )
+        if base_salary is not None:
+            fields.append("base_salary = ?")
+            params.append(self._checked(normalize_base_salary, base_salary))
+        if hire_date is not None:
+            # 入职日期**允许将来**（提前建档），所以只校验日期形状。
+            fields.append("hire_date = ?")
+            params.append(self._checked(normalize_date, hire_date))
         if not fields:
             return self._employee_from_row(row)
         fields.append("updated_at = ?")
         params.append(self._now_iso())
         params.append(employee_id)
-        await self._conn.execute(
-            f"UPDATE hygiene_employees SET {', '.join(fields)} WHERE id = ?",
-            params,
-        )
-        await self._conn.commit()
+        try:
+            await self._conn.execute(
+                f"UPDATE hygiene_employees SET {', '.join(fields)} WHERE id = ?",
+                params,
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            if not is_integrity_violation(exc):
+                raise
+            await self._conn.rollback()
+            # 同号身份证在并发下由局部唯一索引兜底（预检查在写锁外）。
+            if id_card_no:
+                value = normalize_id_card(id_card_no)
+                existing = await self._fetch_employee_by_id_card(value) if value else None
+                if existing is not None and int(dict(existing)["id"]) != int(employee_id):
+                    raise EmployeeAccountsError(
+                        "duplicate_id_card", "duplicate_id_card"
+                    ) from exc
+            raise
         refreshed = await self._fetch_employee(employee_id)
         return self._employee_from_row(refreshed)
 
@@ -586,7 +813,7 @@ class EmployeeAccounts:
         cur = await self._conn.execute(
             """SELECT s.session_id, s.expires_at, s.last_seen_at,
                       e.id, e.phone, e.name, e.job_title, e.permission, e.admin_caps,
-                      e.approved, e.disabled
+                      e.approved, e.disabled, e.hire_date, e.health_cert_date
                FROM hygiene_staff_sessions s
                JOIN hygiene_employees e ON e.id = s.employee_id
                WHERE s.session_id = ?""",

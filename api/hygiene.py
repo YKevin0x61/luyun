@@ -10,6 +10,8 @@ from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote
 import asyncio
+import csv
+import io
 import json
 import logging
 import tempfile
@@ -17,7 +19,7 @@ import time
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.security import require_session
@@ -31,6 +33,8 @@ from services.hygiene.accounts import (
     EmployeeAccountsError,
     normalize_phone,
 )
+from services.identity.capabilities import CAPABILITY_LABELS, STAFF_SIDE_CAPABILITIES
+from services.identity.profile import approve_gate
 from services.hygiene.archive import (
     KIND_DAILY,
     KIND_DEEP,
@@ -115,6 +119,22 @@ _ERROR_DETAILS = {
     "duplicate_phone": "该手机号已注册",
     "invalid_name": "请填写员工姓名",
     "invalid_profile": "没有需要修改的资料",
+    "no_changes": "没有要保存的改动",
+    # ── 员工档案（2026-10-07）：注册与花名册抽屉共用的逐字文案，前端用同一批常量 ──
+    # 身份证号是敏感字段：这几句只描述"哪里不对"，**任何一句都不回显号码本身**。
+    "id_card_required": "请填写身份证号",
+    "id_card_length": "身份证号应为 18 位",
+    "id_card_checksum": "身份证号校验位不对",
+    "duplicate_id_card": "该身份证号已建档",
+    "health_cert_required": "请选择健康证办理日期",
+    "health_cert_future": "健康证办理日期不能是将来",
+    "base_salary_not_integer": "底薪只能是整数元",
+    "base_salary_negative": "底薪不能是负数",
+    "base_salary_too_large": "底薪最多 999999 元",
+    # 批准门槛（三个变体都逐字取自 design §7.2/§7.4）：说清缺哪几项。
+    "approve_missing_both": "底薪与入职日期补齐后才能批准",
+    "approve_missing_base_salary": "还缺底薪",
+    "approve_missing_hire_date": "还缺入职日期",
     "invalid_permission": "卫生权限只能是普通员工或管理员",
     "invalid_job_title": "职位过长",
     "employee_not_found": "员工不存在",
@@ -330,6 +350,11 @@ class StaffRegisterIn(BaseModel):
     name: str
     phone: str
     password: str
+    # 两项必填的档案（2026-10-07）：注册页 `HygieneRegisterView.vue` 也校验同样两条。
+    # 这里刻意声明成可选（而不是 `str` 必填）：pydantic 缺字段回的是 422 的英文结构，
+    # 而票面要求「缺项 → 400 + 逐字中文原因」——必填在 `staff_register` 里判。
+    id_card_no: Optional[str] = None
+    health_cert_date: Optional[str] = None
 
 
 class StaffLoginIn(BaseModel):
@@ -357,6 +382,14 @@ class RosterPatchIn(BaseModel):
     # `permission` 那个下拉现在只是人话标签（花名册里显示"管理员 / 普通员工"），
     # **判据一律以这里为准** —— 见 `services/identity/capabilities.py`。
     admin_caps: Optional[List[str]] = None
+    # 员工档案四项（2026-10-07，花名册抽屉）：**各自可选**，不传 = 不动这一列；
+    # `null` / 空串 = 清空（库里一律是 NULL）。校验在服务层一处
+    # （`services/identity/profile.py`），这里只做类型声明 —— 日期与底薪用宽松类型
+    # 收下，好把「形状不对」也答成 400 中文，而不是 pydantic 的 422。
+    id_card_no: Optional[str] = None
+    health_cert_date: Optional[str] = None
+    base_salary: Optional[Any] = None
+    hire_date: Optional[str] = None
 
 
 class ShiftIn(BaseModel):
@@ -679,8 +712,26 @@ async def staff_register(
     body: StaffRegisterIn,
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
+    """员工自助注册。
+
+    姓名、手机号、密码之外，2026-10-07 起**必填**身份证号与健康证办理日期（注册页
+    同步校验，这里才是判据）：缺项、形状不对、同号重复都答 400 + 逐字中文
+    （`_ERROR_DETAILS`），页面原话显示。健康证办理日期不得晚于今天。
+    """
+    if not (body.id_card_no or "").strip():
+        raise HTTPException(status_code=400, detail=_ERROR_DETAILS["id_card_required"])
+    if not (body.health_cert_date or "").strip():
+        raise HTTPException(
+            status_code=400, detail=_ERROR_DETAILS["health_cert_required"]
+        )
     try:
-        employee = await accounts.register(body.phone, body.password, body.name)
+        employee = await accounts.register(
+            body.phone,
+            body.password,
+            body.name,
+            id_card_no=body.id_card_no,
+            health_cert_date=body.health_cert_date,
+        )
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
     except ValueError as exc:
@@ -940,10 +991,183 @@ async def admin_list_roster(
     accounts: EmployeeAccounts = Depends(_get_accounts),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
+    """花名册（管理端）：每行含四个档案字段 + 健康证派生值 + `profile_incomplete`。
+
+    身份证号与底薪只在这条路上下发（`_roster_row` 的管理端投影）；员工端那份
+    （`/staff/me`）走 `_project_employee`，两边不可能串。`zones` 留给排班相关的旧
+    调用方，花名册页面自己不再消费它。
+    """
     return {
         "employees": await accounts.list_roster(),
         "zones": await work.list_zones(),
     }
+
+
+# ── 花名册导出（CSV，2026-10-07）──────────────────────────────────────────────
+# 路径是**单段**的 `/admin/roster-export.csv`：写成 `/admin/roster/export.csv` 会正好
+# 落进 `/admin/roster/{employee_id}` 的形状里（本仓 AGENTS.md 点过名的 FastAPI 顺序坑）。
+#
+# 行集合跟页面走：`filter` = 当前分段（all | missing | disabled，与页面分段同一口径），
+# `q` = 搜索框里的关键字（姓名或手机号，空 = 不筛）—— 所见即所得。
+ROSTER_EXPORT_COLUMNS = [
+    "姓名",
+    "手机号",
+    "职位",
+    "状态",
+    "卫生权限",
+    "管理权限",
+    "身份证号",
+    "健康证办理日期",
+    "健康证到期日",
+    "底薪(元/月)",
+    "入职日期",
+    "注册时间",
+]
+
+# 分段取值：页面用英文 id，票面用中文名描述同一段，两个都收。
+_ROSTER_SEGMENTS = {
+    "all": "all",
+    "全部": "all",
+    "missing": "missing",
+    "待补": "missing",
+    "disabled": "disabled",
+    "已停用": "disabled",
+}
+
+
+def _roster_segment(raw: Optional[str]) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return "all"
+    segment = _ROSTER_SEGMENTS.get(value.lower()) or _ROSTER_SEGMENTS.get(value)
+    if segment is None:
+        raise HTTPException(
+            status_code=400,
+            detail="分组只能是 all、missing 或 disabled",
+        )
+    return segment
+
+
+def _roster_export_rows(employees: list, segment: str, keyword: Optional[str]) -> list:
+    """分段 + 关键字 → 要导出的行（与页面两个筛选器同一口径）。
+
+    * `all`      = 待批准 + 在职（**不含已停用**，页面上已停用默认隐藏）；
+    * `missing`  = 未停用且 `profile_incomplete`；
+    * `disabled` = `disabled`。
+    """
+    if segment == "disabled":
+        rows = [row for row in employees if row.get("disabled")]
+    elif segment == "missing":
+        rows = [
+            row
+            for row in employees
+            if not row.get("disabled") and row.get("profile_incomplete")
+        ]
+    else:
+        rows = [row for row in employees if not row.get("disabled")]
+    needle = (keyword or "").strip().lower()
+    if needle:
+        rows = [
+            row
+            for row in rows
+            if needle in str(row.get("name") or "").lower()
+            or needle in str(row.get("phone") or "").lower()
+        ]
+    return rows
+
+
+def _roster_export_status(row: dict) -> str:
+    if row.get("disabled"):
+        return "已停用"
+    return "已批准" if row.get("approved") else "待批准"
+
+
+def _roster_export_caps(row: dict) -> str:
+    """已勾**员工端真生效**的那三项（`、` 连接）；超管专属七项不进导出。"""
+    granted = set(row.get("admin_caps") or [])
+    return "、".join(
+        CAPABILITY_LABELS[key] for key in STAFF_SIDE_CAPABILITIES if key in granted
+    )
+
+
+def _roster_export_stamp(value: Any) -> str:
+    """`created_at`（ISO）→ `YYYY-MM-DD HH:mm`（北京时）。
+
+    与抽屉里「注册时间」同一格式：裸时间戳按北京时解释（服务端一直写带偏移的值，
+    这里只是对历史数据兜底）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=CHINA_TZ)
+    return stamp.astimezone(CHINA_TZ).strftime("%Y-%m-%d %H:%M")
+
+
+@router.get("/admin/roster-export.csv")
+async def admin_roster_export_csv(
+    segment: Optional[str] = Query(None, alias="filter"),
+    status: Optional[str] = Query(None),
+    q: Optional[str] = Query(None, max_length=64),
+    _session_id: str = Depends(require_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Response:
+    """花名册 CSV（管理端）。
+
+    参数：`filter`（`all` / `missing` / `disabled`，与页面分段同一个 id；票面用
+    `status` 写同一件事，两个名字都收）+ `q`（姓名或手机号关键字，空 = 不筛）。
+    UTF-8 **带 BOM** + CRLF + RFC4180 引号转义（Excel 双击直接看，中文不乱码），
+    文件名 `roster-YYYY-MM-DD.csv`（北京时）。
+
+    **导出会带身份证号与底薪**（台账用途，用户明确要的）。所以这条路的日志只有
+    「谁、哪个分组、几行」三件事：不记内容、不记身份证号、异常消息也不回显字段值。
+    """
+    target = _roster_segment(segment if segment is not None else status)
+    rows = _roster_export_rows(await accounts.list_roster(), target, q)
+    if not rows:
+        raise HTTPException(status_code=400, detail=_ERROR_DETAILS["export_empty"])
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    writer.writerow(ROSTER_EXPORT_COLUMNS)
+    for row in rows:
+        writer.writerow(
+            [
+                row.get("name") or "",
+                row.get("phone") or "",
+                row.get("job_title") or "",
+                _roster_export_status(row),
+                row.get("permission") or "",
+                _roster_export_caps(row),
+                row.get("id_card_no") or "",
+                row.get("health_cert_date") or "",
+                row.get("health_cert_expires_on") or "",
+                "" if row.get("base_salary") is None else row["base_salary"],
+                row.get("hire_date") or "",
+                _roster_export_stamp(row.get("created_at")),
+            ]
+        )
+    operator = await auth_service.get_admin_username() or "超级管理员"
+    # 「谁在何时导出了 N 行」——何时由日志自身的时间戳给，这里给人与行数。
+    logger.info(
+        "花名册导出 operator=%s filter=%s rows=%s",
+        operator,
+        target,
+        len(rows),
+    )
+    filename = f"roster-{accounts.today()}.csv"
+    payload = "\ufeff" + buffer.getvalue()
+    return StreamingResponse(
+        iter([payload.encode("utf-8")]),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            # 文件名是纯 ASCII，`quote` 只是沿用本仓导出的一贯写法（RFC 3986 转义一次）。
+            "Content-Disposition": f'attachment; filename="{quote(filename)}"'
+        },
+    )
 
 
 @router.post("/admin/roster/{employee_id}/approve")
@@ -952,6 +1176,20 @@ async def admin_approve(
     _session_id: str = Depends(require_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
+    """批准入职。
+
+    **门槛**（2026-10-07）：底薪与入职日期**齐了**才能批准 —— 档案没补全的人正是
+    待批准那一批的主要来源，先批准再补档会让「待补」与「在职」两个状态互相矛盾。
+    前端会同步把按钮置灰，但判据在这里。`/enable`（重新启用已停用的人）**不走这个
+    门槛**：那是恢复，不是新入职。
+    """
+    try:
+        profile = await accounts.get_profile_row(employee_id)
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
+    blocker = approve_gate(profile)
+    if blocker is not None:
+        raise HTTPException(status_code=400, detail=_error_detail(blocker))
     try:
         employee = await accounts.approve(employee_id)
     except EmployeeAccountsError as exc:
@@ -988,6 +1226,30 @@ async def admin_enable(
     return {"employee": employee}
 
 
+# 花名册抽屉能改的四项档案：**只在请求里出现过**才写（`None` 与空串都算"清空"）。
+_ROSTER_PROFILE_FIELDS = ("id_card_no", "health_cert_date", "base_salary", "hire_date")
+
+
+def _profile_updates(body: RosterPatchIn) -> Dict[str, Any]:
+    """请求体 → `update_fields` 的关键字参数。
+
+    判据是 pydantic 的 `model_fields_set`（**显式传过**的字段），不是值是否为 None：
+    抽屉保存时 `{}`（这一格没动）与 `{"hire_date": null}`（清空入职日期）必须能分开 ——
+    后者在库里要落成 NULL。清空统一归一成空串，服务层再把空串落成 NULL
+    （design §0.3「空串按未填处理」）。
+    """
+    provided = body.model_fields_set
+    updates: Dict[str, Any] = {}
+    for field in ("name", "job_title", "permission", "admin_caps"):
+        if field in provided:
+            updates[field] = getattr(body, field)
+    for field in _ROSTER_PROFILE_FIELDS:
+        if field in provided:
+            value = getattr(body, field)
+            updates[field] = "" if value is None else value
+    return updates
+
+
 @router.patch("/admin/roster/{employee_id}")
 async def admin_patch_roster(
     employee_id: int,
@@ -995,23 +1257,25 @@ async def admin_patch_roster(
     _session_id: str = Depends(require_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
-    if (
-        body.name is None
-        and body.job_title is None
-        and body.permission is None
-        and body.admin_caps is None
-    ):
-        raise HTTPException(status_code=400, detail="请提供姓名、职位、卫生权限或管理权限开关")
+    """花名册抽屉保存：姓名、职位、四项档案、管理权限开关各**可选**。
+
+    * 四项档案的校验（身份证形状/校验位/同号唯一、健康证不得晚于今天、底薪整数与
+      0–999999、日期形状）都在服务层一处实现，注册与这里共用；
+    * `admin_caps` 仍是**整组替换**，不做 permission ↔ caps 的一致性校验或派生写回
+      （ADR 0093 的现状：两者不一致是合法状态，判据只看开关）。页面不再发 `permission`。
+    """
+    updates = _profile_updates(body)
+    if not updates:
+        raise HTTPException(status_code=400, detail=_ERROR_DETAILS["no_changes"])
     try:
-        employee = await accounts.update_fields(
-            employee_id,
-            name=body.name,
-            job_title=body.job_title,
-            permission=body.permission,
-            admin_caps=body.admin_caps,
-        )
+        employee = await accounts.update_fields(employee_id, **updates)
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=_error_detail(str(exc)),
+        ) from exc
     await _hygiene_nudge("roster", "updated", employee_id=employee_id)
     return {"employee": employee}
 
@@ -1758,19 +2022,27 @@ async def admin_daily_queue(
     date: Optional[str] = None,
     _session_id: str = Depends(require_session),
     work: HygieneWork = Depends(_get_work),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
-    """某个营业日的日常检查。
+    """某个营业日的日常检查（超管首页也读这一条）。
 
     不带日期时与验收动线一致：只回「待验收」。带日期是历史回看（ADR-0088）：
     回当天全部检查项与状态，让管理员看见漏拍与已通过的，但那边不能验收。
+
+    另带一块 `health_cert_due`（2026-10-07，首页第四格「健康证到期」用）：未停用、
+    健康证**临期或已过期**的人。它是「现在」的事，与查的是哪一天无关，所以两个分支
+    都按同一个口径算 —— 判据来自公共层 `health_cert_status`，与花名册行上的标签同源。
     """
     today = work.business_date()
+    due = await accounts.list_health_cert_due()
+    health_cert_due = {"count": len(due), "items": due}
     if date is None or not str(date).strip():
         items = await work.list_daily_work(SUPER_ACTOR)
         return {
             "date": today,
             "is_today": True,
             "items": [row for row in items if row.get("status") == "待验收"],
+            "health_cert_due": health_cert_due,
         }
     target = _clean_business_date(date)
     items = await work.list_daily_work(SUPER_ACTOR, target)
@@ -1778,6 +2050,7 @@ async def admin_daily_queue(
         "date": target,
         "is_today": target == today,
         "items": items,
+        "health_cert_due": health_cert_due,
     }
 
 

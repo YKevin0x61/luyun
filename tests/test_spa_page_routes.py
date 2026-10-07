@@ -51,6 +51,8 @@ import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from tests.hygiene_profile import approve_body, register_body
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ROUTER_JS = REPO_ROOT / "admin-web" / "src" / "router" / "index.js"
 # 页面清单的唯一来源。加一页、改标题、改分组、改身份都只改这里（见文件头注释）。
@@ -583,10 +585,15 @@ def _staff_only_session(client) -> None:
     assert init.status_code == 200, init.text
     registered = client.post(
         "/api/hygiene/staff/register",
-        json={"name": "张三", "phone": STAFF_PHONE, "password": STAFF_PASSWORD},
+        json=register_body(name="张三", phone=STAFF_PHONE, password=STAFF_PASSWORD),
     )
     assert registered.status_code == 200, registered.text
     employee = registered.json()["employee"]
+    # 批准门槛（2026-10-07）：先补底薪与入职日期，才批得下来。
+    seeded = client.patch(
+        f"/api/hygiene/admin/roster/{employee['id']}", json=approve_body()
+    )
+    assert seeded.status_code == 200, seeded.text
     approved = client.post(f"/api/hygiene/admin/roster/{employee['id']}/approve")
     assert approved.status_code == 200, approved.text
     login = client.post(

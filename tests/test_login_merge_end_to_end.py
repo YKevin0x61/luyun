@@ -41,6 +41,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from config import settings
+from tests.hygiene_profile import approve_body, register_body
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STAFF_PATHS_JS = REPO_ROOT / "admin-web" / "src" / "utils" / "staffPaths.js"
@@ -232,11 +233,16 @@ def test_two_cookie_browser_keeps_both_sessions_alive(app_client):
 
     registered = client.post(
         "/api/hygiene/staff/register",
-        json={"name": NAME, "phone": PHONE, "password": PASSWORD},
+        json=register_body(name=NAME, phone=PHONE, password=PASSWORD),
     )
     assert registered.status_code == 200, registered.text
     employee = registered.json()["employee"]
 
+    # 批准门槛（2026-10-07）：先补底薪与入职日期，才批得下来。
+    seeded = client.patch(
+        f"/api/hygiene/admin/roster/{employee['id']}", json=approve_body()
+    )
+    assert seeded.status_code == 200, seeded.text
     approved = client.post(f"/api/hygiene/admin/roster/{employee['id']}/approve")
     assert approved.status_code == 200, approved.text
 
@@ -279,10 +285,13 @@ def test_realtime_endpoint_over_the_real_app_keeps_staff_identity_with_two_cooki
     assert init.status_code == 200, init.text
     registered = client.post(
         "/api/hygiene/staff/register",
-        json={"name": NAME, "phone": PHONE, "password": PASSWORD},
+        json=register_body(name=NAME, phone=PHONE, password=PASSWORD),
     )
     assert registered.status_code == 200, registered.text
     employee = registered.json()["employee"]
+    assert client.patch(
+        f"/api/hygiene/admin/roster/{employee['id']}", json=approve_body()
+    ).status_code == 200
     assert client.post(
         f"/api/hygiene/admin/roster/{employee['id']}/approve"
     ).status_code == 200

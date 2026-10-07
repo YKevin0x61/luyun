@@ -116,6 +116,19 @@ const staffCaps = computed(() => ADMIN_CAP_STAFF_DEFS.map((item) => ({
 })))
 const staffCapCount = computed(() => staffCaps.value.filter((item) => item.granted).length)
 
+// 健康证到期（一行提示，只在临期 / 过期时渲染）：文案里**不带日期** —— 日期在下面
+// 「我的」那两行里，同一件事不说两遍。数据来自 `/api/hygiene/staff/me` 的
+// `health_cert_state`（服务端按北京时自然日算，前端不做日期算术）。
+const healthCertAlert = computed(() => {
+  const state = staffMe.value && staffMe.value.health_cert_state
+  if (state === 'soon') return '健康证快到期，请尽快办理'
+  if (state === 'expired') return '健康证已过期，请尽快办理'
+  return ''
+})
+const healthCertTone = computed(() => (
+  (staffMe.value && staffMe.value.health_cert_state) === 'soon' ? 'is-soon' : ''
+))
+
 // 「我的成绩」（2026-10-05 用户裁定）：近 7 天的一次通过率 + 被驳回的原因分布。
 //
 // **为什么放这一页**：员工端原来只有「今天要做什么」——惩罚（驳回、红黑榜）看得见，
@@ -763,6 +776,15 @@ useNudgePull({
     </header>
 
     <div class="tA-body">
+      <!-- 健康证提示（一条一行，不可关闭）：整页最上面 —— 它是"你得去办证了"，
+           比排班与今天的活都更早要处理。日期不写在这句里（下面「我的」那两行有）。 -->
+      <p
+        v-if="healthCertAlert"
+        class="hy-staff-alert health-cert-alert"
+        :class="healthCertTone"
+        role="status"
+      >{{ healthCertAlert }}</p>
+
       <p v-if="state === 'loading'" class="tA-sub">正在读你的班…</p>
 
       <template v-else-if="state === 'error'">
@@ -1082,6 +1104,16 @@ useNudgePull({
             <div>
               <dt>职位</dt>
               <dd>{{ staffMe.job_title || '未设置' }}</dd>
+            </div>
+            <!-- 档案两行（2026-10 花名册改版）：入职日期与健康证到期日由超管在花名册里补录，
+                 员工自己只读。底薪与身份证号**不下发也不显示**（敏感字段边界）。 -->
+            <div>
+              <dt>入职日期</dt>
+              <dd>{{ staffMe.hire_date || '未设置' }}</dd>
+            </div>
+            <div>
+              <dt>健康证到期日</dt>
+              <dd>{{ staffMe.health_cert_expires_on || '未设置' }}</dd>
             </div>
           </dl>
           <ul class="tL-list">
@@ -1995,5 +2027,16 @@ useNudgePull({
   font-size: 10.5px;
   color: var(--hy-faint);
   line-height: 1.75;
+}
+
+/* 健康证提示：共享表里的 `.hygiene-staff .hy-staff-alert` 是朱砂（过期那一档），
+   临期这一档改琥珀 —— 父级选择器抬特异度，稳过共享表那条。 */
+.health-cert-alert {
+  margin: 0;
+}
+.health-cert-alert.is-soon {
+  background: var(--hy-amber-soft);
+  border-color: var(--hy-amber-line);
+  color: var(--hy-amber);
 }
 </style>

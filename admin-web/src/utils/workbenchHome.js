@@ -38,6 +38,8 @@ export const HOME_LINKS = {
   reviews: '/workbench/floor/daily',
   /** 逾期整改 → 整改单。 */
   fixes: '/workbench/floor/fix',
+  /** 健康证到期 → 花名册（补档案、看谁到期的地方）。 */
+  certs: '/workbench/hr/roster',
   /** 我的待办条数 → 卫生待办（日常 / 专项 / 整改三个 tab 都在这儿）。 */
   myItems: '/workbench/me/clean',
   /** 我的申请待回应 → 「今天」页那张卡。 */
@@ -90,6 +92,20 @@ export function countOverdueFixes(fix, now = Date.now()) {
     const stamp = Date.parse(row.deadline)
     return Number.isFinite(stamp) && stamp <= now
   }).length
+}
+
+/** 健康证到期条数：`daily-queue` 里的 `health_cert_due.count`（**未停用**且临期 / 过期的人数，
+ *  服务端按同一套阈值算 —— 与花名册行标签同源，30 天）。
+ *
+ *  读不出来（整块没到、键没下发）给 `null`，页面画「—」：`0` 是真的没有，`—` 是没读到，
+ *  店长对这两件事的动作不一样（另一格「待验收」也是这么分的）。
+ */
+export function countHealthCertDue(queue) {
+  if (!queue) return null
+  const block = queue.health_cert_due
+  if (!block || block.count === undefined || block.count === null) return null
+  const count = Number(block.count)
+  return Number.isFinite(count) ? count : null
 }
 
 /** 今天谁上班：按班次分组，带人数与名字（休的人不在这份里 —— 服务端给了 `off_people`）。
@@ -170,7 +186,7 @@ export function staffWorkCounts({ daily, deep, fix, requests: inbox } = {}) {
  * @returns {{
  *   view: 'super'|'staff'|null,
  *   duty: {total: number, groups: Array<{shift: string, count: number, names: string[]}>}|null,
- *   leaves: number|null, reviews: number|null, fixes: number|null,
+ *   leaves: number|null, reviews: number|null, fixes: number|null, certs: number|null,
  *   me: {shift: {headline: string, subline: string, tone: string}, next: Array<object>}|null,
  *   work: {daily: number, deep: number, fix: number, pending: number, incoming: number}|null,
  *   incoming: number|null,
@@ -200,6 +216,7 @@ export function workbenchHomeSummary({
       leaves: countPendingLeaves(inbox),
       reviews: countPendingItems(queue),
       fixes: countOverdueFixes(fix, now),
+      certs: countHealthCertDue(queue),
       me: null,
       work: null,
       incoming: null,
@@ -220,6 +237,7 @@ export function workbenchHomeSummary({
       leaves: null,
       reviews: null,
       fixes: null,
+      certs: null,
       me: { shift: staffShiftCell(today), next: staffNextDays(me) },
       work,
       incoming: work.incoming,
@@ -232,6 +250,7 @@ export function workbenchHomeSummary({
     leaves: null,
     reviews: null,
     fixes: null,
+    certs: null,
     me: null,
     work: null,
     incoming: null,

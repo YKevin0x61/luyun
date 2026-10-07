@@ -188,6 +188,13 @@ useNudgePull({
           <span class="wbh-label">逾期整改</span>
           <span class="wbh-go">整改单 ›</span>
         </router-link>
+        <!-- 健康证到期（2026-10 花名册改版）：数字与花名册行标签**同源**（服务端那份
+             `daily-queue` 的 `health_cert_due`），点进去是花名册（补档案、看谁到期）。 -->
+        <router-link class="wbh-cell certs" :to="HOME_LINKS.certs" title="临期或已过期的人数">
+          <span class="wbh-num">{{ numberText(summary.certs) }}</span>
+          <span class="wbh-label">健康证到期</span>
+          <span class="wbh-go">花名册 ›</span>
+        </router-link>
       </div>
     </template>
 

@@ -44,8 +44,8 @@ async function mountRegister() {
   return { wrapper, router }
 }
 
-/** 依次填四格并提交。传 `null` 的格子不动（留空）。 */
-async function submitWith(wrapper, { name, phone, password, confirm }) {
+/** 依次填六格并提交。传 `null` 的格子不动（留空）。 */
+async function submitWith(wrapper, { name, phone, idCard, healthCert, password, confirm }) {
   const fill = async (selector, value) => {
     if (value === null) return
     const input = wrapper.get(selector)
@@ -53,6 +53,8 @@ async function submitWith(wrapper, { name, phone, password, confirm }) {
   }
   await fill('#regName', name)
   await fill('#regPhone', phone)
+  await fill('#regIdCard', idCard)
+  await fill('#regHealthCert', healthCert)
   await fill('#regPassword', password)
   await fill('#regConfirm', confirm)
   await wrapper.get('form').trigger('submit')
@@ -64,7 +66,19 @@ function alertText(wrapper) {
   return alert.exists() ? alert.text() : ''
 }
 
-const VALID = { name: '张三', phone: '13800138000', password: 'abcd1234', confirm: 'abcd1234' }
+// 身份证与手机号一样是**必填**（2026-10 花名册改版）：样本是校验位算得过的号，
+// 校验位错的用同一个前 17 位、换掉末位（`ID_CARD_BAD`）。
+const ID_CARD = '110101199003077213'
+const ID_CARD_X = '11010119900307723X'
+const ID_CARD_BAD = '110101199003077211'
+const VALID = {
+  name: '张三',
+  phone: '13800138000',
+  idCard: ID_CARD,
+  healthCert: '2020-01-01',
+  password: 'abcd1234',
+  confirm: 'abcd1234',
+}
 
 let fetchMock
 
@@ -121,6 +135,79 @@ describe('/register 校验（D12）：中文提示，且不发请求', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('身份证空 → 中文「请填写身份证号」，且一个请求都不发', async () => {
+    const { wrapper } = await mountRegister()
+
+    await submitWith(wrapper, { ...VALID, idCard: '   ' })
+
+    expect(alertText(wrapper)).toBe('请填写身份证号')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('身份证位数不够 → 「身份证号应为 18 位」', async () => {
+    const { wrapper } = await mountRegister()
+
+    await submitWith(wrapper, { ...VALID, idCard: '11010119900307721' })
+
+    expect(alertText(wrapper)).toBe('身份证号应为 18 位')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('身份证校验位不对 → 「身份证号校验位不对」', async () => {
+    const { wrapper } = await mountRegister()
+
+    await submitWith(wrapper, { ...VALID, idCard: ID_CARD_BAD })
+
+    expect(alertText(wrapper)).toBe('身份证号校验位不对')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('末位小写 x 归一成大写再提交（服务端同一口径）', async () => {
+    const { wrapper } = await mountRegister()
+
+    await submitWith(wrapper, { ...VALID, idCard: '11010119900307723x' })
+
+    const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/api/hygiene/staff/register'))
+    expect(call).toBeTruthy()
+    expect(JSON.parse(call[1].body).id_card_no).toBe(ID_CARD_X)
+  })
+
+  it('健康证办理日期空 → 「请选择健康证办理日期」', async () => {
+    const { wrapper } = await mountRegister()
+
+    await submitWith(wrapper, { ...VALID, healthCert: '' })
+
+    expect(alertText(wrapper)).toBe('请选择健康证办理日期')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('健康证办理日期晚于今天 → 「健康证办理日期不能是将来」', async () => {
+    const { wrapper } = await mountRegister()
+
+    await submitWith(wrapper, { ...VALID, healthCert: '2999-01-01' })
+
+    expect(alertText(wrapper)).toBe('健康证办理日期不能是将来')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('校验顺序与服务端一致：姓名 → 手机号 → 身份证 → 健康证 → 密码长度 → 两次一致', async () => {
+    const { wrapper } = await mountRegister()
+
+    // 手机号坏 + 身份证空：先报手机号。
+    await submitWith(wrapper, { ...VALID, phone: '138', idCard: '' })
+    expect(alertText(wrapper)).toBe('请输入有效的中国大陆手机号')
+
+    // 身份证坏 + 健康证空：先报身份证。
+    await submitWith(wrapper, { ...VALID, idCard: ID_CARD_BAD, healthCert: '' })
+    expect(alertText(wrapper)).toBe('身份证号校验位不对')
+
+    // 健康证空 + 密码太短：先报健康证（实名两项排在密码之前）。
+    await submitWith(wrapper, { ...VALID, healthCert: '', password: 'abc', confirm: 'abc' })
+    expect(alertText(wrapper)).toBe('请选择健康证办理日期')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('密码 7 位 → 中文「密码至少 8 位」（不是英文 lengthen 提示）', async () => {
     const { wrapper } = await mountRegister()
 
@@ -144,16 +231,19 @@ describe('/register 校验（D12）：中文提示，且不发请求', () => {
     expect(alertText(wrapper)).toBe('密码至少 8 位')
   })
 
-  it('校验通过：发请求、成功态换成「等超级管理员批准」', async () => {
+  it('校验通过：发请求、成功态换成「等管理员批准」', async () => {
     const { wrapper } = await mountRegister()
 
     await submitWith(wrapper, VALID)
 
     const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/api/hygiene/staff/register'))
     expect(call).toBeTruthy()
+    // 六项一起发：身份证与健康证办理日期是 2026-10 花名册改版新加的**必填**两项。
     expect(JSON.parse(call[1].body)).toEqual({
       name: '张三',
       phone: '13800138000',
+      id_card_no: ID_CARD,
+      health_cert_date: '2020-01-01',
       password: 'abcd1234',
     })
     expect(wrapper.text()).toContain('已提交')

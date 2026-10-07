@@ -37,6 +37,7 @@ from fastapi.testclient import TestClient
 
 from config import settings
 from database import CHINA_TZ
+from tests.hygiene_profile import approve_body, register_body
 
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "password123"
@@ -680,10 +681,15 @@ def _staff_session_cookie(client) -> str:
     """在真 app 上走完员工链路，返回员工会话的 cookie 原文（库里存的是它的 sha256）。"""
     registered = client.post(
         "/api/hygiene/staff/register",
-        json={"name": "张三", "phone": "13800138000", "password": ADMIN_PASSWORD},
+        json=register_body(name="张三", phone="13800138000", password=ADMIN_PASSWORD),
     )
     assert registered.status_code == 200, registered.text
     employee = registered.json()["employee"]
+    # 批准门槛（2026-10-07）：先补底薪与入职日期，才批得下来。
+    seeded = client.patch(
+        f"/api/hygiene/admin/roster/{employee['id']}", json=approve_body()
+    )
+    assert seeded.status_code == 200, seeded.text
     approved = client.post(f"/api/hygiene/admin/roster/{employee['id']}/approve")
     assert approved.status_code == 200, approved.text
     login = client.post(

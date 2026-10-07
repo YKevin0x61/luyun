@@ -132,17 +132,32 @@ describe('判据收敛：两个页面只按开关判，不按 permission 档位'
     expect(src).toMatch(/hasCap\(caps\.value, 'fix'\)/)
   })
 
-  it('花名册只把 permission 当人话标签读写（下拉的 v-model 与 PATCH 的字段），不作判据', () => {
+  it('花名册只把 permission 当**只读**人话标签显示（2026-10 改版：下拉与 PATCH 都撤了）', () => {
     const src = readView('HygieneRosterView')
-    expect(src).toMatch(/v-model="drafts\[row\.id\]\.permission"/)
-    expect(src).toMatch(/permission: draft\.permission/)
+    // 标签值仍来自服务端派生，页面只显示、不编辑。
+    expect(src).toMatch(/hygienePermissionLabel\(drawerRow\.permission\)/)
+    expect(src).not.toMatch(/v-model="drafts\[row\.id\]\.permission"/)
+    expect(src).not.toMatch(/permission: draft\.permission/)
+    // 抽屉里没有任何下拉（「卫生权限」原来是唯一一个 `<select>`）。
+    expect(src).not.toMatch(/<select/)
     expect(src).not.toMatch(/permission\s*===/)
     // 可勾的那三项按契约顺序渲染；草稿进页归一化，PATCH 时把**只读七项已有的值原样带回**
     // （它们没有可勾的界面，整组替换若漏掉就是静默删权限）。
     expect(src).toMatch(/v-for="cap in ADMIN_CAP_STAFF_DEFS"/)
     expect(src).toMatch(
-      /admin_caps: normalizeCaps\(\[\.\.\.draft\.admin_caps, \.\.\.keepSupervisorOnlyCaps\(row\.admin_caps\)\]\)/,
+      /admin_caps: normalizeCaps\(\[\.\.\.source\.admin_caps, \.\.\.keepSupervisorOnlyCaps\(row\.admin_caps\)\]\)/,
     )
     expect(src).toMatch(/admin_caps: normalizeCaps\(row\.admin_caps\)/)
+    // 只读那七项**整块不渲染**：连它们的定义都不引进来，名字与说明就没有出场的机会。
+    expect(src).not.toMatch(/ADMIN_CAP_SUPERVISOR_ONLY/)
+  })
+
+  it('花名册行内项数只数员工端真正生效的三项（不按 admin_caps 全长度报）', () => {
+    const src = readView('HygieneRosterView')
+    expect(src).toMatch(
+      /ADMIN_CAP_STAFF_DEFS\.filter\(\(item\) => caps\.includes\(item\.key\)\)\.length/,
+    )
+    expect(src).toMatch(/普通员工 · 无/)
+    expect(src).toMatch(/管理员 · \$\{usable\} 项/)
   })
 })

@@ -14,6 +14,7 @@ const ROUTES = [
   { path: '/workbench', component: { template: '<div />' } },
   { path: '/workbench/hr/calendar', component: { template: '<div />' } },
   { path: '/workbench/hr/inbox', component: { template: '<div />' } },
+  { path: '/workbench/hr/roster', component: { template: '<div />' } },
   { path: '/workbench/floor/daily', component: { template: '<div />' } },
   { path: '/workbench/floor/fix', component: { template: '<div />' } },
   { path: '/workbench/me/today', component: { template: '<div />' } },
@@ -53,7 +54,13 @@ function managerData(overrides = {}) {
   return {
     '/api/scheduling/day': { business_date: '2026-10-05', total: 0, groups: [] },
     '/api/scheduling/inbox': { today: '2026-10-05', requests: [], without_rule: [] },
-    '/api/hygiene/admin/daily-queue': { date: '2026-10-05', is_today: true, items: [] },
+    '/api/hygiene/admin/daily-queue': {
+      date: '2026-10-05',
+      is_today: true,
+      items: [],
+      // 健康证到期（2026-10 花名册改版）：第四格的数字来自这里，与花名册行标签同源。
+      health_cert_due: { count: 0, items: [] },
+    },
     '/api/hygiene/admin/fix': { items: [] },
     ...overrides,
   }
@@ -167,14 +174,17 @@ describe('工作台首页 · 店长视角', () => {
     expect(wrapper.find('.wbh-me').exists()).toBe(false)
   })
 
-  it('三个数字各自渲染，各点进对应专页', async () => {
+  it('四个数字各自渲染，各点进对应专页', async () => {
     const { wrapper } = await mountHome({
       identity: 'super',
       table: managerData({
         '/api/scheduling/inbox': {
           requests: [{ id: 1, kind: 'leave' }, { id: 2, kind: 'swap' }],
         },
-        '/api/hygiene/admin/daily-queue': { items: [{ status: '待验收' }, { status: '待验收' }] },
+        '/api/hygiene/admin/daily-queue': {
+          items: [{ status: '待验收' }, { status: '待验收' }],
+          health_cert_due: { count: 3, items: [] },
+        },
         '/api/hygiene/admin/fix': {
           items: [
             { id: 1, status: '待回拍', deadline: '2020-01-01T00:00:00+08:00' },
@@ -185,9 +195,10 @@ describe('工作台首页 · 店长视角', () => {
     })
 
     const cells = wrapper.findAll('.wbh-cell')
-    expect(cells).toHaveLength(3)
+    expect(cells).toHaveLength(4)
     expect(cells.map((cell) => cell.attributes('href'))).toEqual([
       '/workbench/hr/inbox', '/workbench/floor/daily', '/workbench/floor/fix',
+      '/workbench/hr/roster',
     ])
     // 待批请假只数请假（换班那条还在等对方点头，店长这儿看不到）。
     expect(wrapper.get('.wbh-cell.leaves .wbh-num').text()).toBe('1')
@@ -196,10 +207,45 @@ describe('工作台首页 · 店长视角', () => {
     expect(wrapper.get('.wbh-cell.fixes .wbh-num').text()).toBe('1')
   })
 
+  it('健康证到期那一格：数字与落点都来自 daily-queue 的 health_cert_due', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({
+        '/api/hygiene/admin/daily-queue': {
+          date: '2026-10-05',
+          is_today: true,
+          items: [],
+          health_cert_due: { count: 2, items: [{ id: 5, name: '孙平', expires_on: '2026-09-01', state: 'expired' }] },
+        },
+      }),
+    })
+
+    const cell = wrapper.get('.wbh-cell.certs')
+    expect(cell.get('.wbh-num').text()).toBe('2')
+    expect(cell.text()).toContain('健康证到期')
+    expect(cell.text()).toContain('花名册')
+    expect(cell.attributes('href')).toBe('/workbench/hr/roster')
+    expect(cell.attributes('title')).toBe('临期或已过期的人数')
+    // 首页只摊数字：敏感字段（底薪 / 身份证号）哪里都不出现。
+    expect(wrapper.text()).not.toContain('底薪')
+    expect(wrapper.text()).not.toContain('身份证号')
+  })
+
+  it('health_cert_due 没下发时那一格给「—」，不是 0（没读到 ≠ 没有）', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({
+        '/api/hygiene/admin/daily-queue': { date: '2026-10-05', is_today: true, items: [] },
+      }),
+    })
+
+    expect(wrapper.get('.wbh-cell.certs .wbh-num').text()).toBe('—')
+  })
+
   it('数字为 0 时是稳稳的 0（不是空白、也不是整块消失）', async () => {
     const { wrapper } = await mountHome({ identity: 'super', table: managerData() })
 
-    for (const key of ['leaves', 'reviews', 'fixes']) {
+    for (const key of ['leaves', 'reviews', 'fixes', 'certs']) {
       const num = wrapper.get(`.wbh-cell.${key} .wbh-num`)
       expect(num.text()).toBe('0')
     }

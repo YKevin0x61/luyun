@@ -55,9 +55,11 @@ describe('hygiene staff auth gate', () => {
     expect(login).toMatch(/to="\/register"/)
   })
 
-  it('register 成功后仍说明要等超级管理员批准，并给回登录页的入口', () => {
+  it('register 成功后仍说明要等管理员批准，并给回登录页的入口', () => {
     const register = read('../HygieneRegisterView.vue')
     expect(register).toMatch(/v-if="submitted"/)
-    expect(register).toMatch(/等超级管理员在花名册里批准后再登录/)
+    // 2026-10 花名册改版：这句从 25 字收成 15 字（design §7.5 逐字终稿）。
+    expect(register).toMatch(/已提交。等管理员批准后再登录。/)
+    expect(register).toMatch(/to="\/login"/)
   })
 })

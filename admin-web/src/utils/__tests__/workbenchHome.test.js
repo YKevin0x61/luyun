@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   HOME_LINKS,
+  countHealthCertDue,
   countOverdueFixes,
   countPendingItems,
   countPendingLeaves,
@@ -43,7 +44,13 @@ const INBOX = {
   without_rule: [],
 }
 
-const QUEUE = { date: '2026-10-05', is_today: true, items: [{ item_id: 1, status: '待验收' }] }
+const QUEUE = {
+  date: '2026-10-05',
+  is_today: true,
+  items: [{ item_id: 1, status: '待验收' }],
+  // 2026-10 花名册改版：健康证到期那一格的数字（未停用且临期 / 过期的人数）。
+  health_cert_due: { count: 2, items: [{ id: 5, name: '孙平', expires_on: '2026-09-01', state: 'expired' }] },
+}
 
 const FIX = {
   items: [
@@ -167,7 +174,7 @@ describe('员工那一档', () => {
 })
 
 describe('按身份给两个视角', () => {
-  it('店长：今天谁上班 + 三个数字（各自带跳转目标）', () => {
+  it('店长：今天谁上班 + 四个数字（各自带跳转目标）', () => {
     const summary = workbenchHomeSummary({
       identity: 'super',
       day: DAY,
@@ -182,6 +189,18 @@ describe('按身份给两个视角', () => {
     expect(summary.leaves).toBe(2)
     expect(summary.reviews).toBe(1)
     expect(summary.fixes).toBe(1)
+    expect(summary.certs).toBe(2)
+  })
+
+  it('健康证到期：数字只认 daily-queue 的 health_cert_due.count，读不到给 null（不是 0）', () => {
+    expect(countHealthCertDue(QUEUE)).toBe(2)
+    expect(countHealthCertDue({ ...QUEUE, health_cert_due: { count: 0, items: [] } })).toBe(0)
+    // 键没下发 / 整个队列读不出来 → 「没读到」，页面画「—」。
+    expect(countHealthCertDue({ ...QUEUE, health_cert_due: undefined })).toBeNull()
+    expect(countHealthCertDue(null)).toBeNull()
+
+    const summary = workbenchHomeSummary({ identity: 'super', queue: { items: [] } })
+    expect(summary.certs).toBeNull()
   })
 
   it('员工：不摊店长那几个数字（两种视角互斥，不各显一半）', () => {
@@ -210,10 +229,11 @@ describe('按身份给两个视角', () => {
 })
 
 describe('数字点进去的地方', () => {
-  it('三个数字各指一页专页，员工那两个指员工页', () => {
+  it('四个数字各指一页专页，员工那两个指员工页', () => {
     expect(HOME_LINKS.leaves).toBe('/workbench/hr/inbox')
     expect(HOME_LINKS.reviews).toBe('/workbench/floor/daily')
     expect(HOME_LINKS.fixes).toBe('/workbench/floor/fix')
+    expect(HOME_LINKS.certs).toBe('/workbench/hr/roster')
     expect(HOME_LINKS.duty).toBe('/workbench/hr/calendar')
     expect(HOME_LINKS.myItems).toBe('/workbench/me/clean')
     expect(HOME_LINKS.myRequests).toBe('/workbench/me/today')

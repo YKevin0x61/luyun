@@ -1,345 +1,486 @@
 <script setup>
-import { nextTick, onMounted, ref } from 'vue'
+/**
+ * 花名册（工作台 · 人事组的第四页）。
+ *
+ * 改版口径见 `.scratch/roster-redesign/design.md`：这一页只做三件事 —— 名单（待批准置顶 +
+ * 在职 / 已停用两档）、编辑抽屉（11 项字段 + 底部四个动作）、邀请店员弹层。原来那些
+ * 当天排班/工作区控件、只读七项、规则折叠块全部退出本页（排班那件事的唯一真相源是排班页）。
+ *
+ * 三条不能动的约束：
+ *   1. **抽屉与弹层不 Teleport**：`--hy-*` 全部定义在 `.hygiene-admin` 上，Teleport 到 body
+ *      等于丢光样式。它们写成 `.roster-page` 的直接子元素。
+ *   2. **它们都要 `animation: none`**：共享表给 `.roster-page > *` 挂了 `hy-rise`，那个
+ *      `transform`（`both` 保留到最终帧）会让内部 `position: fixed` 相对卡片而不是视口定位。
+ *   3. **`admin_caps` 是整组替换**：保存时必须用 `keepSupervisorOnlyCaps` 把只读七项在库里
+ *      已有的值原样带回 —— 页面不显示 ≠ 可以抹掉（少带一个就是静默删权限）。
+ *
+ * 敏感字段口径（design §12.1）：身份证号与底薪只在这里的管理端出现（抽屉 / 导出），
+ * 员工端两条接口都不下发它们。
+ */
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import QRCode from 'qrcode'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import {
   ADMIN_CAP_STAFF_DEFS,
-  ADMIN_CAP_SUPERVISOR_ONLY_DEFS,
   keepSupervisorOnlyCaps,
   normalizeCaps,
 } from '../../utils/adminCaps'
-import {
-  HYGIENE_PERMISSIONS,
-  HYGIENE_SHIFTS,
-  hygienePermissionLabel,
-  hygieneShiftLabel,
-  rosterStatusLabel,
-} from '../../utils/hygieneCopy'
+import { hygienePermissionLabel, rosterStatusLabel } from '../../utils/hygieneCopy'
+import { chinaTodayDate, formatHygieneStamp } from '../../utils/hygieneTime'
 import { STAFF_ENTRY_PATH } from '../../utils/staffPaths'
 
-// 排班那条班次挂在卫生的哪一档日常检查（`staff_shifts.duty_slot`）→ 卫生认的班次名。
-// 只认这一列、不认名字：排班的班次是**数据**（店长能改名、能加第三个），把「夜班」改成
-// 「晚班」，这一档仍然是夜班档；工作区正是按这两个开关建的（`hygiene_zones.day_shift` /
-// `night_shift`），所以工作区候选要按它筛。
-const DUTY_SLOT_SHIFTS = { day: '白班', night: '夜班' }
-
 const employees = ref([])
-const zones = ref([])
-// 排班的班次表：只出还在用的（停用的班次服务端会拒，不摆一个点了必然报错的选项）。
-const scheduleShifts = ref([])
-// 今天的**营业日**（06:00 切，北京时）。取服务端算好的那一份，页面不自己 `new Date()` 拼 ——
-// 管理机的时区可能不在东八区，而「过去的日子改不了」是服务端按营业日判的。
-const today = ref('')
-// 排班那份读不出来时的一句话，跟 `errorText` 分开：花名册读得好好的，不该因为排班读挂了
-// 就把整张员工表换成「加载失败」。
-const scheduleError = ref('')
 const loading = ref(true)
+const loadedOnce = ref(false)
+const loadError = ref('')
 const errorText = ref('')
-const drafts = ref({})
-const busyId = ref(null)
-// 保存成功的反馈（`role="status"`）：原来保存只清 errorText，页面上没有任何变化，超管不
-// 确定放没放上去，于是反复点、或手动刷新再看一眼。2026-10-06 真机实测确认了这一点。
 const savedHint = ref('')
 let savedHintTimer = null
+
+// 工具栏两个筛选位：搜索是**本地**过滤（不请求），分段筛选是这一页唯一的一组开关。
+const keyword = ref('')
+const segment = ref('all')
+const SEGMENTS = [
+  { id: 'all', label: '全部', title: '待批准和在职的人' },
+  { id: 'missing', label: '待补', title: '档案没补全的员工' },
+  { id: 'disabled', label: '已停用', title: '停用后不能登录的员工' },
+]
+
+// 抽屉：`drawerRow` 是打开那一刻的那一行，`draft` 是它的草稿。实时到只更新列表，
+// **不覆盖正在编辑的草稿**（design §3.8）——否则管理员刚输入的值会被冲掉。
+const drawerRow = ref(null)
+const draft = ref(null)
+const drawerError = ref('')
+const busy = ref(false)
+const discardOpen = ref(false)
 const disableTarget = ref(null)
 
-// 员工入口：全仓只有导航栏指向 /hygiene/roster，没人知道店员该扫哪个地址。这里把
-// 绝对 URL 和二维码一起摆出来，新店员不用管理员口述。
-// 路径取 `staffPaths.js` 的 `STAFF_ENTRY_PATH`（员工端入口 = 今天页），不在这里写死 ——
-// 票 03 把员工首页搬进工作台（`/workbench/me/today`）时，三处硬编码里的 `/hygiene` 就是这么漏的。
-const staffEntryUrl = ref('')
-const entryCopied = ref(false)
+const exporting = ref(false)
+
+// 邀请店员弹层（二维码 + 链接 + 复制）。
+const inviteOpen = ref(false)
+const inviteUrl = ref('')
+const inviteCopied = ref(false)
+const inviteCopyTitle = ref('')
 const qrCanvas = ref(null)
 
-async function renderStaffEntry() {
-  // 用当前 origin：门店可能是内网 IP、也可能是域名，写死哪个都会有一半人打不开。
-  staffEntryUrl.value = `${window.location.origin}${STAFF_ENTRY_PATH}`
-  entryCopied.value = false
-  await nextTick()
-  if (!qrCanvas.value) return
-  try {
-    await QRCode.toCanvas(qrCanvas.value, staffEntryUrl.value, { width: 148, margin: 1 })
-  } catch {
-    // 画不出二维码不影响复制链接，静默降级（下面那行 URL 仍然可读）。
+const todayDate = chinaTodayDate()
+
+function flash(text) {
+  savedHint.value = text
+  if (savedHintTimer) clearTimeout(savedHintTimer)
+  savedHintTimer = setTimeout(() => { savedHint.value = '' }, 4000)
+}
+
+// ── 分组与排序 ────────────────────────────────────────────────────────────
+// 全部 = 待批准 + 在职（**不含已停用**，已停用默认隐藏）；待补 = 未停用且档案缺项；
+// 已停用 = disabled。计数看**整份名单**，不受搜索影响（搜索是"找人"的临时动作）。
+function employeeCount(id) {
+  if (id === 'missing') {
+    return employees.value.filter((row) => !row.disabled && row.profile_incomplete === true).length
   }
-}
-
-async function copyStaffEntry() {
-  try {
-    await navigator.clipboard.writeText(staffEntryUrl.value)
-    entryCopied.value = true
-  } catch {
-    // 内网明文 http 不是安全上下文，没有 clipboard API：URL 就在旁边，手动抄。
-    entryCopied.value = false
+  if (id === 'disabled') {
+    return employees.value.filter((row) => row.disabled === true).length
   }
+  return 0
 }
 
-function draftFor(row) {
-  return drafts.value[row.id]
+const searched = computed(() => {
+  const needle = keyword.value.trim().toLowerCase()
+  if (!needle) return employees.value
+  return employees.value.filter((row) => (
+    String(row.name || '').toLowerCase().includes(needle)
+    || String(row.phone || '').toLowerCase().includes(needle)
+  ))
+})
+
+const segmentRows = computed(() => {
+  if (segment.value === 'missing') {
+    return searched.value.filter((row) => !row.disabled && row.profile_incomplete === true)
+  }
+  if (segment.value === 'disabled') {
+    return searched.value.filter((row) => row.disabled === true)
+  }
+  return searched.value.filter((row) => !row.disabled)
+})
+
+function phoneOrder(a, b) {
+  return String(a.phone || '').localeCompare(String(b.phone || ''))
 }
 
-async function loadRoster() {
-  loading.value = true
-  errorText.value = ''
+/** 在职 / 已停用：姓名中文升序，同名按手机号；没有姓名的一律排最后。 */
+function byName(a, b) {
+  const nameA = String(a.name || '').trim()
+  const nameB = String(b.name || '').trim()
+  if (!nameA && !nameB) return phoneOrder(a, b)
+  if (!nameA) return 1
+  if (!nameB) return -1
+  const compared = nameA.localeCompare(nameB, 'zh-Hans-CN')
+  return compared === 0 ? phoneOrder(a, b) : compared
+}
+
+/** 待批准：注册时间升序（等得最久的在最上面）；没有注册时间的按 id 升序。 */
+function byCreatedAt(a, b) {
+  const stampA = Date.parse(a.created_at || '')
+  const stampB = Date.parse(b.created_at || '')
+  if (Number.isFinite(stampA) && Number.isFinite(stampB) && stampA !== stampB) return stampA - stampB
+  if (Number.isFinite(stampA) !== Number.isFinite(stampB)) return Number.isFinite(stampA) ? -1 : 1
+  return Number(a.id) - Number(b.id)
+}
+
+const pendingRows = computed(() => (
+  segment.value === 'disabled'
+    ? []
+    : segmentRows.value.filter((row) => !row.approved && !row.disabled).sort(byCreatedAt)
+))
+const activeRows = computed(() => (
+  segment.value === 'disabled'
+    ? []
+    : segmentRows.value.filter((row) => row.approved && !row.disabled).sort(byName)
+))
+const disabledRows = computed(() => (
+  segment.value === 'disabled'
+    ? segmentRows.value.filter((row) => row.disabled).sort(byName)
+    : []
+))
+
+/** 页面上实际渲染的分区（顺序固定：待批准最上面）。空分区整块不渲染。 */
+const rosterGroups = computed(() => {
+  const groups = []
+  if (pendingRows.value.length) groups.push({ key: 'pending', title: '待批准', rows: pendingRows.value })
+  if (activeRows.value.length) groups.push({ key: 'active', title: '在职', rows: activeRows.value })
+  if (disabledRows.value.length) groups.push({ key: 'disabled', title: '已停用', rows: disabledRows.value })
+  return groups
+})
+
+const searchMissed = computed(() => Boolean(keyword.value.trim()) && searched.value.length === 0)
+// 「还没有人注册」只在真的一个人都没有时出现（搜索命不中走另一句）。
+const nobodyYet = computed(() => !employees.value.length && segment.value !== 'disabled')
+
+/** 分段格上的文字：`全部` 不带数字，`待补 3` / `已停用 1` 带（数字是**整份名单**里的计数）。 */
+function segmentText(item) {
+  return item.id === 'all' ? item.label : `${item.label} ${employeeCount(item.id)}`
+}
+
+/** 「管理员 · N 项 / 普通员工 · 无」：标签用服务端派生的值，**项数只数员工端真正生效的
+ *  三项**（`admin_caps` 里可能存着超管专属七项，按全长度报会写成「管理员 · 8 项」而实际
+ *  能用 0 项）。边缘情况照实显示「管理员 · 0 项」。 */
+function capChip(row) {
+  const caps = normalizeCaps(row.admin_caps)
+  const usable = ADMIN_CAP_STAFF_DEFS.filter((item) => caps.includes(item.key)).length
+  return hygienePermissionLabel(row.permission) === '管理员' ? `管理员 · ${usable} 项` : '普通员工 · 无'
+}
+
+function healthChip(row) {
+  if (row.health_cert_state === 'soon') {
+    return { text: `健康证 ${row.health_cert_expires_on} 到期`, title: '30 天内到期', kind: 'is-warn' }
+  }
+  if (row.health_cert_state === 'expired') {
+    return { text: `健康证 ${row.health_cert_expires_on} 已过期`, title: '已过期', kind: 'is-danger' }
+  }
+  return null
+}
+
+// ── 读取 ──────────────────────────────────────────────────────────────────
+async function loadRoster(options = {}) {
+  const quiet = options.quiet === true
+  if (!quiet) loading.value = true
+  loadError.value = ''
   try {
     const data = await api.get('/api/hygiene/admin/roster')
     employees.value = data.employees || []
-    zones.value = data.zones || []
-    const next = {}
-    for (const row of employees.value) {
-      next[row.id] = {
-        name: row.name || '',
-        job_title: row.job_title || '',
-        permission: row.permission,
-        // 十项管理权限的草稿。**勾选只在本地改**，点「保存」才整组 PATCH（`admin_caps` 是
-        // 整组替换，不是增量）：勾十个发十次请求，中间任何一次失败都会留下半套权限。
-        // 进来先归一化一道（只留认识的键、去重、按契约顺序），与服务端返回值同形。
-        admin_caps: normalizeCaps(row.admin_caps),
-        // 「改今天」写的是排班的**单日覆盖**，草稿里放的是排班班次 id（或 'rest' = 那天休），
-        // 不是写死的「白班/夜班」。
-        shift: defaultShiftIdFor(row),
-        // 工作区：'' = 「跟这个班次的固定区」（提交时发 `zone_id: null`）—— 不再替管理员
-        // 挑第一个区，那种默认会把「他今天本来在哪个区」悄悄改掉。
-        zone_id: row.zone_id === null || row.zone_id === undefined ? '' : row.zone_id,
-      }
-    }
-    drafts.value = next
+    loadedOnce.value = true
   } catch (err) {
-    errorText.value = err.message || '无法加载花名册'
+    const message = err.message || '无法加载花名册'
+    // 名单已经读到过一次：这次读挂了只报一行（列表留在原地），不把整张表换成错误态。
+    if (loadedOnce.value) errorText.value = message
+    else loadError.value = message
   } finally {
-    loading.value = false
+    if (!quiet) loading.value = false
   }
 }
 
-// `/calendar` 的 `today` 就是营业日（`SchedulingCalendarView` 同一口径）。这里只看它那一个
-// 字段：月份是这条接口的必填参数，`today` 跟要哪个月无关，所以月按本机时间取就够了
-// （**日期**不这么取，那个必须用服务端的 `today`）。
-function currentMonthValue() {
-  const now = new Date()
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+function onKeydown(event) {
+  // 确认框自己处理 Esc（捕获阶段就吞掉了事件）；这里再兜一道：聚焦在确认框上时
+  // 抽屉不该被同一次 Esc 关掉（那两个动作是两回事）。
+  if (discardOpen.value || disableTarget.value) return
+  if (event.key !== 'Escape' || !drawerRow.value) return
+  requestClose()
 }
 
-// 今天每个人排到哪个班（`{employee_id: 班次 id 字符串 | 'rest'}`）。
-//
-// 花名册那一行只给**卫生的档位**（白班/夜班），而排班同一档可能有好几条班次
-//（白班档既有「早班」也有「白班」）—— 按档位配对会配错人。当天名单是权威，照它预填。
-const dutyToday = ref({})
-
-function dutyMapFromDay(day) {
-  const map = {}
-  for (const group of (day && day.groups) || []) {
-    for (const person of group.people || []) map[person.id] = String(group.shift.id)
-  }
-  for (const person of (day && day.off_people) || []) map[person.id] = 'rest'
-  return map
-}
-
-// 排班那份：今天的营业日 + 还在用的班次表 + 今天的当天名单。跟花名册各读各的 —— 它读挂了
-// 只收掉「改今天」这条路（预填退回按档位配对），批准/停用/改名这些活照旧。
-async function loadSchedule() {
-  try {
-    const [calendar, shiftData] = await Promise.all([
-      api.get('/api/scheduling/calendar', { month: currentMonthValue() }),
-      api.get('/api/scheduling/shifts'),
-    ])
-    today.value = (calendar && calendar.today) || ''
-    scheduleShifts.value = (shiftData && shiftData.shifts) || []
-    scheduleError.value = ''
-    // 当天名单要拿 `today` 当参数，所以只能等上面那一步回来（换一个 RTT 换一次准确预填）。
-    dutyToday.value = today.value
-      ? dutyMapFromDay(await api.get('/api/scheduling/day', { date: today.value }))
-      : {}
-  } catch (err) {
-    today.value = ''
-    scheduleShifts.value = []
-    dutyToday.value = {}
-    scheduleError.value = err.message || '排班读不出来，今天暂时改不了'
-  }
-}
-
-// 「先拿排班那份，再读花名册」：预填要用班次表，反过来的话第一次渲染的预填必然是空的。
-async function loadAll() {
-  await loadSchedule()
-  await loadRoster()
-}
-
-function zonesForShift(shift) {
-  return zones.value.filter((zone) =>
-    (zone.shifts || HYGIENE_SHIFTS).includes(shift),
-  )
-}
-
-// 这条班次算卫生的哪一档；'' = 没标档位（或选了「休」）：跟卫生的日常检查没有对应关系。
-function dutyShiftOf(shiftId) {
-  const shift = scheduleShifts.value.find((item) => String(item.id) === String(shiftId))
-  return (shift && DUTY_SLOT_SHIFTS[shift.duty_slot]) || ''
-}
-
-// 选中的班次能去哪些区：标了档位就把它翻成「白班/夜班」再喂给 `zonesForShift`（那套
-// `day_shift` / `night_shift` 开关）。没标档位的班次不筛 —— 筛只会把区全滤掉，而那种
-// 班次本来就「跟卫生日常无关」，全列出来让管理员自己定。
-function zoneChoicesForShift(shiftId) {
-  const slot = dutyShiftOf(shiftId)
-  return slot ? zonesForShift(slot) : zones.value
-}
-
-// 预填：**先问今天那份当天名单**（`dutyToday`），他今天在哪个班就填哪个班 ——
-// 花名册那一行只给卫生的档位，同一档有多条班次时按档位配对会配错人。
-//
-// 名单里没有他（今天还没铺到、或者名单读挂了）才退回按档位配对：同类班次里挑第一条。
-// 那样挑不到就留空，逼管理员自己选一条 —— 免得「什么都没动就点了提交」把班次悄悄换掉。
-function defaultShiftIdFor(row) {
-  const exact = dutyToday.value[row.id]
-  if (exact) return exact
-  const slot = Object.keys(DUTY_SLOT_SHIFTS).find((key) => DUTY_SLOT_SHIFTS[key] === row.shift)
-  const match = slot && scheduleShifts.value.find((item) => item.duty_slot === slot)
-  return match ? String(match.id) : ''
-}
-
-// 换班次 → 能去的区跟着换：原来那个区不在新班次的名单里就落回「跟固定区」，由排班那边
-// 按「这个人 × 这个班次」的固定区填。
-function onShiftChange(row) {
-  const draft = drafts.value[row.id]
-  if (!draft) return
-  const allowed = zoneChoicesForShift(draft.shift)
-  if (!allowed.some((zone) => String(zone.id) === String(draft.zone_id))) {
-    draft.zone_id = ''
-  }
-}
-
-onMounted(loadAll)
-onMounted(renderStaffEntry)
-
-useHygieneRealtime({
-  id: 'hygiene-admin-roster',
-  resources: ['roster', 'assignment'],
-  pull: loadRoster,
+onMounted(() => {
+  loadRoster()
+  document.addEventListener('keydown', onKeydown)
 })
 
-async function approve(row) {
-  busyId.value = row.id
-  errorText.value = ''
-  try {
-    await api.post(`/api/hygiene/admin/roster/${row.id}/approve`)
-    await loadRoster()
-  } catch (err) {
-    errorText.value = err.message || '批准失败'
-  } finally {
-    busyId.value = null
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown)
+  if (savedHintTimer) clearTimeout(savedHintTimer)
+})
+
+// 实时只订 roster：这一页不再有当天的编辑动作，收 assignment 只换来无意义的重取。
+useHygieneRealtime({
+  id: 'hygiene-admin-roster',
+  resources: ['roster'],
+  pull: () => loadRoster({ quiet: true }),
+})
+
+// ── 抽屉 ──────────────────────────────────────────────────────────────────
+function draftFrom(row) {
+  return {
+    name: row.name || '',
+    job_title: row.job_title || '',
+    id_card_no: row.id_card_no || '',
+    health_cert_date: row.health_cert_date || '',
+    base_salary: row.base_salary === null || row.base_salary === undefined ? '' : String(row.base_salary),
+    hire_date: row.hire_date || '',
+    admin_caps: normalizeCaps(row.admin_caps),
   }
 }
 
-function askDisable(row) {
-  disableTarget.value = row
+function salaryValue(raw) {
+  const text = String(raw ?? '').trim()
+  if (!text) return null
+  const num = Number(text)
+  return Number.isFinite(num) ? num : null
+}
+
+/** PATCH 的 body：**只有这 7 个键**（不再发 `permission`，服务端按开关派生）。 */
+function patchBody(source, row) {
+  return {
+    name: String(source.name || '').trim(),
+    job_title: String(source.job_title || '').trim(),
+    id_card_no: String(source.id_card_no || '').trim().toUpperCase(),
+    health_cert_date: source.health_cert_date || null,
+    base_salary: salaryValue(source.base_salary),
+    hire_date: source.hire_date || null,
+    admin_caps: normalizeCaps([...source.admin_caps, ...keepSupervisorOnlyCaps(row.admin_caps)]),
+  }
+}
+
+const dirty = computed(() => {
+  if (!drawerRow.value || !draft.value) return false
+  return JSON.stringify(patchBody(draft.value, drawerRow.value))
+    !== JSON.stringify(patchBody(draftFrom(drawerRow.value), drawerRow.value))
+})
+
+const missingSalary = computed(() => Boolean(draft.value) && salaryValue(draft.value.base_salary) === null)
+const missingHireDate = computed(() => Boolean(draft.value) && !String(draft.value.hire_date || '').trim())
+const canApprove = computed(() => !missingSalary.value && !missingHireDate.value)
+/** 批准门槛那一行（常显，不藏在悬浮里 —— 手机没有 hover）。只有「待批准」的人才有这一行：
+ *  已批准 / 已停用的人下面根本没有「批准」按钮，摆一句"还缺…"是在说一件不存在的事。 */
+const gateNote = computed(() => {
+  if (!drawerRow.value || drawerRow.value.approved || drawerRow.value.disabled) return ''
+  if (missingSalary.value && missingHireDate.value) return '还缺底薪和入职日期'
+  if (missingSalary.value) return '还缺底薪'
+  if (missingHireDate.value) return '还缺入职日期'
+  return ''
+})
+
+const primaryAction = computed(() => {
+  if (!drawerRow.value) return 'save'
+  if (drawerRow.value.disabled) return 'enable'
+  if (!drawerRow.value.approved) return 'approve'
+  return 'save'
+})
+
+const createdText = computed(() => {
+  const stamp = drawerRow.value && drawerRow.value.created_at
+  return stamp ? (formatHygieneStamp(stamp) || '—') : '—'
+})
+
+const expiresText = computed(() => (drawerRow.value && drawerRow.value.health_cert_expires_on) || '未设置')
+
+function openDrawer(row) {
+  drawerRow.value = row
+  draft.value = draftFrom(row)
+  drawerError.value = ''
+  savedHint.value = ''
+}
+
+function closeDrawer() {
+  drawerRow.value = null
+  draft.value = null
+  drawerError.value = ''
+  discardOpen.value = false
+}
+
+function requestClose() {
+  if (busy.value) return
+  if (dirty.value) {
+    discardOpen.value = true
+    return
+  }
+  closeDrawer()
+}
+
+function confirmDiscard() {
+  discardOpen.value = false
+  closeDrawer()
+}
+
+/** 保存成功后抽屉留在原地、草稿换成服务端返回值（方便接着改）。 */
+async function reloadDrawer(id) {
+  await loadRoster({ quiet: true })
+  const fresh = employees.value.find((row) => row.id === id)
+  if (!fresh) {
+    closeDrawer()
+    return
+  }
+  drawerRow.value = fresh
+  draft.value = draftFrom(fresh)
+}
+
+async function saveDraft() {
+  const row = drawerRow.value
+  if (!row || busy.value || !dirty.value) return
+  const body = patchBody(draft.value, row)
+  if (!body.name) {
+    drawerError.value = '请填写员工姓名'
+    return
+  }
+  busy.value = true
+  drawerError.value = ''
+  savedHint.value = ''
+  try {
+    await api.patch(`/api/hygiene/admin/roster/${row.id}`, body)
+    await reloadDrawer(row.id)
+    flash('已保存')
+  } catch (err) {
+    // 服务端的中文原话直接摆出来（空 PATCH / 底薪格式 / 身份证重复…），别吞。
+    drawerError.value = err.message || '保存失败'
+  } finally {
+    busy.value = false
+  }
+}
+
+async function approveRow() {
+  const row = drawerRow.value
+  if (!row || busy.value || !canApprove.value) return
+  const label = row.name || row.phone
+  busy.value = true
+  drawerError.value = ''
+  savedHint.value = ''
+  try {
+    // 门槛按**库里的值**判（服务端同一口径）：草稿里刚补上的两项先落地，再批准。
+    if (dirty.value) {
+      const body = patchBody(draft.value, row)
+      if (!body.name) {
+        drawerError.value = '请填写员工姓名'
+        return
+      }
+      await api.patch(`/api/hygiene/admin/roster/${row.id}`, body)
+    }
+    await api.post(`/api/hygiene/admin/roster/${row.id}/approve`)
+    closeDrawer()
+    await loadRoster({ quiet: true })
+    flash(`已批准 ${label}`)
+  } catch (err) {
+    drawerError.value = err.message || '批准失败'
+  } finally {
+    busy.value = false
+  }
+}
+
+function askDisable() {
+  if (busy.value || !drawerRow.value) return
+  disableTarget.value = drawerRow.value
 }
 
 async function confirmDisable() {
   const row = disableTarget.value
   disableTarget.value = null
   if (!row) return
-  busyId.value = row.id
-  errorText.value = ''
-  try {
-    await api.post(`/api/hygiene/admin/roster/${row.id}/disable`)
-    await loadRoster()
-  } catch (err) {
-    errorText.value = err.message || '停用失败'
-  } finally {
-    busyId.value = null
-  }
-}
-
-async function enable(row) {
-  busyId.value = row.id
-  errorText.value = ''
-  try {
-    await api.post(`/api/hygiene/admin/roster/${row.id}/enable`)
-    await loadRoster()
-  } catch (err) {
-    errorText.value = err.message || '启用失败'
-  } finally {
-    busyId.value = null
-  }
-}
-
-async function saveRow(row) {
-  const draft = draftFor(row)
-  busyId.value = row.id
-  errorText.value = ''
+  const label = row.name || row.phone
+  busy.value = true
+  drawerError.value = ''
   savedHint.value = ''
   try {
-    await api.patch(`/api/hygiene/admin/roster/${row.id}`, {
-      name: draft.name,
-      job_title: draft.job_title,
-      // 人话标签照旧一起发（它还在、还要显示），真正决定能做什么的是下面那一组开关。
-      permission: draft.permission,
-      // 整组替换：这一行当前勾上的那几项一次发完，服务端只认这一个数组。
-      //
-      // **只读那七项要原样带回**：花名册不再提供它们的勾（员工端没有执行点），但库里若已经
-      // 存着值，整组替换会把它们抹掉 —— 那是静默删权限，比"勾了不生效"更坏。所以把原来那
-      // 一组里属于只读七项的键挑出来一起发。
-      admin_caps: normalizeCaps([...draft.admin_caps, ...keepSupervisorOnlyCaps(row.admin_caps)]),
-    })
-    // 重读一遍：草稿换成服务端返回值（归一化与截断以那边为准），页面上两个「现在…」
-    // 也才跟着更新。
-    await loadRoster()
-    savedHint.value = `已保存${row.name ? ` ${row.name} ` : ''}的资料与管理权限`
-    if (savedHintTimer) clearTimeout(savedHintTimer)
-    savedHintTimer = setTimeout(() => {
-      savedHint.value = ''
-    }, 4000)
+    await api.post(`/api/hygiene/admin/roster/${row.id}/disable`)
+    closeDrawer()
+    await loadRoster({ quiet: true })
+    flash(`已停用 ${label}`)
   } catch (err) {
-    errorText.value = err.message || '保存失败'
+    drawerError.value = err.message || '停用失败'
   } finally {
-    busyId.value = null
+    busy.value = false
   }
 }
 
-// 「改今天」：写一条排班的**单日覆盖**。卫生原来那条改派接口（
-// `POST /api/hygiene/admin/roster/{id}/assignment`）票 10 起固定 403 ——
-// 今天上哪个班、在哪个区由排班决定，而卫生不 import 排班，所以改派直接写排班那边。
-// 覆盖是**整天的快照**：班次和工作区一起定下来，`zone_id: null` = 跟这个班次的固定区。
-async function changeAssignment(row) {
-  const draft = draftFor(row)
-  if (!draft || !draft.shift || !today.value) return
-  busyId.value = row.id
-  errorText.value = ''
+async function enableRow() {
+  const row = drawerRow.value
+  if (!row || busy.value) return
+  const label = row.name || row.phone
+  busy.value = true
+  drawerError.value = ''
+  savedHint.value = ''
   try {
-    const payload = draft.shift === 'rest'
-      // 「那天休」：班次与工作区都得留空（带细节的休会被服务端拦下来）。
-      ? { is_rest: true, shift_id: null, zone_id: null }
-      : {
-          is_rest: false,
-          shift_id: Number(draft.shift),
-          zone_id: draft.zone_id === '' ? null : Number(draft.zone_id),
-        }
-    await api.put(`/api/scheduling/overrides/${row.id}/${today.value}`, payload)
-    await loadRoster()
+    // 启用**不走**批准门槛（恢复不是新入职）。
+    await api.post(`/api/hygiene/admin/roster/${row.id}/enable`)
+    closeDrawer()
+    await loadRoster({ quiet: true })
+    flash(`已启用 ${label}`)
   } catch (err) {
-    // 服务端把「为什么改不了」说全了（已经过去的日子、这天还没排到、班次停用…），原话转给
-    // 管理员，别拿一句「改派失败」盖掉。
-    errorText.value = err.message || '改今天失败'
+    drawerError.value = err.message || '启用失败'
   } finally {
-    busyId.value = null
+    busy.value = false
   }
 }
 
-// 「撤销回规则」：撤掉今天的覆盖，今天就回到排班规则铺出来的样子（服务端按**现在的规则**
-// 重算）。今天没有覆盖时它是个空操作（服务端只删记录再重算），所以不必先判断有没有 ——
-// 花名册这一份看不到「今天是不是覆盖写的」（只有排班当天卡里的 `overridden` 分得开）。
-async function undoAssignment(row) {
-  if (!today.value) return
-  busyId.value = row.id
+// ── 导出 ──────────────────────────────────────────────────────────────────
+// 行集合与当前分段 + 搜索框**完全一致**（所见即所得）：分段给 `filter`、搜索词给 `q`。
+const exportable = computed(() => (
+  !loading.value && !loadError.value && !exporting.value && segmentRows.value.length > 0
+))
+
+async function exportRoster() {
+  if (!exportable.value) return
+  exporting.value = true
   errorText.value = ''
   try {
-    await api.delete(`/api/scheduling/overrides/${row.id}/${today.value}`)
-    await loadRoster()
+    const params = new URLSearchParams({ filter: segment.value })
+    const needle = keyword.value.trim()
+    if (needle) params.set('q', needle)
+    await api.download(`/api/hygiene/admin/roster-export.csv?${params.toString()}`, 'roster.csv')
   } catch (err) {
-    errorText.value = err.message || '撤销失败'
+    errorText.value = err.message || '导出失败'
   } finally {
-    busyId.value = null
+    exporting.value = false
+  }
+}
+
+// ── 邀请店员 ──────────────────────────────────────────────────────────────
+async function openInvite() {
+  inviteOpen.value = true
+  inviteCopied.value = false
+  inviteCopyTitle.value = ''
+  // 用当前 origin：门店可能是内网 IP、也可能是域名，写死哪个都会有一半人打不开。
+  // 路径取 `STAFF_ENTRY_PATH`（员工端入口 = 今天页），页面里不出现字面量路径。
+  inviteUrl.value = `${window.location.origin}${STAFF_ENTRY_PATH}`
+  await nextTick()
+  if (!qrCanvas.value) return
+  try {
+    await QRCode.toCanvas(qrCanvas.value, inviteUrl.value, { width: 148, margin: 1 })
+  } catch {
+    // 画不出二维码不影响复制链接，静默降级（链接就在旁边）。
+  }
+}
+
+function closeInvite() {
+  inviteOpen.value = false
+}
+
+async function copyInvite() {
+  try {
+    await navigator.clipboard.writeText(inviteUrl.value)
+    inviteCopied.value = true
+    setTimeout(() => { inviteCopied.value = false }, 2000)
+  } catch {
+    // 内网明文 http 不是安全上下文，没有 clipboard API：链接在旁边，手动抄。
+    inviteCopied.value = false
+    inviteCopyTitle.value = '手动复制上面的链接'
   }
 }
 </script>
@@ -347,102 +488,243 @@ async function undoAssignment(row) {
 <template>
   <div class="roster-page">
     <div class="card roster-head">
-      <div>
-        <p class="hy-eyebrow">Roster · 人员名册</p>
-        <h1>卫生花名册</h1>
-        <p>批准注册、维护姓名职位，并逐项设置管理权限。</p>
-        <details class="rule-help">
-          <summary>规则说明</summary>
-          <p>今天上哪个班、在哪个区由排班决定。这里的「改今天」写的是排班的单日覆盖：只改今天这一天，不动排班规则（以后怎么排去「排班」页改规则）。停用后不能登录，但花名册记录保留，可重新启用。超级管理员是后台共享账号，不能从花名册提升。</p>
-        </details>
+      <h1>花名册</h1>
+      <div class="roster-tools">
+        <div class="roster-search">
+          <input
+            v-model="keyword"
+            class="input"
+            type="text"
+            autocomplete="off"
+            enterkeyhint="search"
+            aria-label="按姓名或手机号搜索"
+            placeholder="搜索姓名或手机号"
+          >
+          <button
+            v-if="keyword"
+            type="button"
+            class="roster-search-clear"
+            aria-label="清空搜索"
+            @click="keyword = ''"
+          >✕</button>
+        </div>
+        <div class="roster-seg" role="group" aria-label="花名册筛选">
+          <button
+            v-for="item in SEGMENTS"
+            :key="item.id"
+            type="button"
+            class="roster-seg-item"
+            :class="{ 'is-on': segment === item.id }"
+            :title="item.title"
+            :aria-pressed="segment === item.id ? 'true' : 'false'"
+            @click="segment = item.id"
+          >
+            <span>{{ segmentText(item) }}</span>
+          </button>
+        </div>
+        <div class="roster-tools-actions">
+          <button type="button" class="btn" @click="openInvite">邀请店员</button>
+          <button
+            type="button"
+            class="btn"
+            :disabled="!exportable"
+            :title="exportable ? '导出当前分组' : '这个分组没有可导出的人'"
+            @click="exportRoster"
+          >导出</button>
+        </div>
       </div>
-      <button type="button" class="btn" :disabled="loading" @click="loadAll">刷新</button>
     </div>
 
     <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>
     <p v-if="savedHint" class="roster-saved" role="status">{{ savedHint }}</p>
 
-    <div class="table-card">
-      <div class="table-card-header">
-        <h3>员工入口</h3>
-      </div>
-      <p class="editor-lead">店员用手机扫这个码进卫生系统，登录用手机号 + 密码。链接也可以直接在手机浏览器里打开。</p>
-      <div class="staff-entry">
-        <canvas ref="qrCanvas" class="staff-entry-qr" role="img" aria-label="员工入口二维码"></canvas>
-        <div class="staff-entry-copy">
-          <code>{{ staffEntryUrl }}</code>
-          <button type="button" class="btn" @click="copyStaffEntry">
-            {{ entryCopied ? '已复制' : '复制链接' }}
-          </button>
-        </div>
+    <div v-if="loading" class="table-card">
+      <div class="roster-empty">正在加载花名册…</div>
+    </div>
+
+    <div v-else-if="loadError" class="table-card">
+      <div class="roster-empty">
+        <span>花名册没读出来</span>
+        <button type="button" class="btn btn-sm" @click="loadRoster">重试</button>
       </div>
     </div>
 
-    <div class="table-card">
-      <div class="table-card-header">
-        <h3>员工 <span>{{ employees.length }}</span></h3>
-      </div>
-      <div v-if="loading" class="roster-empty">正在加载…</div>
-      <div v-else-if="errorText" class="roster-empty">加载失败，点上方「刷新」重试。</div>
-      <div v-else-if="!employees.length" class="roster-empty">还没有人注册。</div>
-      <div v-else class="hy-person-list">
-        <article v-for="row in employees" :key="row.id" class="hy-person">
-          <div class="hy-person-top">
-            <div class="roster-person-copy">
+    <div v-else-if="nobodyYet" class="table-card">
+      <div class="roster-empty">还没有人注册，点「邀请店员」</div>
+    </div>
+
+    <div v-else-if="searchMissed" class="table-card">
+      <div class="roster-empty">没有找到匹配的人</div>
+    </div>
+
+    <div v-else-if="!segmentRows.length" class="table-card">
+      <div class="roster-empty">这个分组现在没有人</div>
+    </div>
+
+    <template v-else>
+      <!-- 三个分区，各自一张卡：待批准**永远在最上面**，其下才是在职；已停用只在
+           「已停用」分段里出现（默认隐藏）。分区的行集合与标题在 `rosterGroups` 里算。 -->
+      <section v-for="group in rosterGroups" :key="group.key" class="table-card">
+        <div class="table-card-header">
+          <h3>{{ group.title }} <span>{{ group.rows.length }}</span></h3>
+        </div>
+        <div class="hy-person-list">
+          <button
+            v-for="row in group.rows"
+            :key="row.id"
+            type="button"
+            class="hy-person roster-row"
+            :aria-label="`编辑 ${row.name || row.phone} 的资料`"
+            @click="openDrawer(row)"
+          >
+            <span class="roster-person-copy">
               <strong>{{ row.name || '未设置姓名' }}</strong>
               <span>{{ row.phone }}</span>
-            </div>
-            <span class="roster-status" :data-status="rosterStatusLabel(row)">
-              {{ rosterStatusLabel(row) }}
             </span>
-          </div>
-          <div v-if="drafts[row.id]" class="hy-person-fields">
+            <span class="roster-row-meta">
+              <span class="roster-chip" title="管理权限的实际项数">{{ capChip(row) }}</span>
+              <span v-if="row.profile_incomplete" class="roster-chip is-warn" title="四项档案有一项为空">待补</span>
+              <span
+                v-if="healthChip(row)"
+                class="roster-chip"
+                :class="healthChip(row).kind"
+                :title="healthChip(row).title"
+              >{{ healthChip(row).text }}</span>
+            </span>
+            <span class="roster-row-tail">
+              <span class="roster-status" :data-status="rosterStatusLabel(row)">{{ rosterStatusLabel(row) }}</span>
+              <span class="roster-row-go" aria-hidden="true">›</span>
+            </span>
+          </button>
+        </div>
+      </section>
+    </template>
+
+    <!-- 抽屉（桌面右侧滑出 / 手机全屏）。**不 Teleport**、**animation: none**：
+         两条都是样式上的硬约束，见文件头。 -->
+    <div
+      v-if="drawerRow"
+      class="modal-overlay roster-drawer-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="roster-drawer-title"
+      @click.self="requestClose"
+    >
+      <div class="roster-drawer">
+        <div class="roster-drawer-head">
+          <h3 id="roster-drawer-title" class="roster-drawer-title">{{ drawerRow.name || drawerRow.phone }}</h3>
+          <button type="button" class="btn btn-sm" aria-label="关闭" @click="requestClose">关闭</button>
+        </div>
+
+        <div class="roster-drawer-body">
+          <p v-if="drawerError" class="roster-error" role="alert">{{ drawerError }}</p>
+
+          <div v-if="draft" class="hy-person-fields">
             <label>
-              姓名
+              <span class="roster-field-head"><span>姓名</span></span>
               <input
-                v-model="drafts[row.id].name"
+                v-model="draft.name"
                 class="input"
                 type="text"
                 maxlength="40"
-                :disabled="busyId === row.id"
                 placeholder="请输入真实姓名"
+                :disabled="busy"
               >
             </label>
+
             <label>
-              职位
+              <span class="roster-field-head"><span>职位</span></span>
               <input
-                v-model="drafts[row.id].job_title"
+                v-model="draft.job_title"
                 class="input"
                 type="text"
                 maxlength="40"
-                :disabled="busyId === row.id"
                 placeholder="头衔，比如领班"
+                :disabled="busy"
               >
             </label>
-            <!-- 「卫生权限」这一档**保留**：它现在只是显示用的人话标签（普通员工 / 管理员），
-                 花名册与员工端「我的」都在显示它。判据一律看下面那十项开关 —— 同一个标签下
-                 的两个人可以开完全不同的开关，所以两个控件谁也代替不了谁。 -->
-            <label>
-              卫生权限
-              <select
-                v-model="drafts[row.id].permission"
-                class="select"
-                :disabled="busyId === row.id"
-              >
-                <option v-for="perm in HYGIENE_PERMISSIONS" :key="perm" :value="perm">
-                  {{ hygienePermissionLabel(perm) }}
-                </option>
-              </select>
+
+            <label title="登录账号，员工本人能在「我的」里改">
+              <span class="roster-field-head"><span>手机号</span></span>
+              <span class="roster-readonly is-mono">{{ drawerRow.phone }}</span>
             </label>
-            <!-- 管理权限：十项独立开关，逐项放权。勾选只改草稿，点这一行的「保存」才发一次
-                 PATCH（整组替换）—— 十个勾一次改完一起交，不用等十次请求。 -->
+
+            <label title="员工自己注册的时间">
+              <span class="roster-field-head"><span>注册时间</span></span>
+              <span class="roster-readonly">{{ createdText }}</span>
+            </label>
+
+            <label title="明文保存，用于核对证件">
+              <span class="roster-field-head">
+                <span>身份证号</span>
+                <span v-if="!String(draft.id_card_no || '').trim()" class="roster-field-note">待补</span>
+              </span>
+              <input
+                v-model="draft.id_card_no"
+                class="input"
+                type="text"
+                maxlength="18"
+                autocomplete="off"
+                placeholder="18 位身份证号"
+                :disabled="busy"
+              >
+            </label>
+
+            <label title="按证件上的日期填，有效期一年">
+              <span class="roster-field-head">
+                <span>健康证办理日期</span>
+                <span v-if="!draft.health_cert_date" class="roster-field-note">待补</span>
+              </span>
+              <input
+                v-model="draft.health_cert_date"
+                class="input"
+                type="date"
+                :max="todayDate"
+                :disabled="busy"
+              >
+              <span class="roster-expiry">有效期至 {{ expiresText }}</span>
+            </label>
+
+            <label title="不发给员工端，只在管理端显示">
+              <span class="roster-field-head">
+                <span>底薪</span>
+                <span v-if="missingSalary" class="roster-field-note">待补</span>
+              </span>
+              <span class="roster-input-suffix">
+                <input
+                  v-model="draft.base_salary"
+                  class="input"
+                  type="number"
+                  inputmode="numeric"
+                  min="0"
+                  max="999999"
+                  step="1"
+                  :disabled="busy"
+                >
+                <span class="roster-suffix">元/月</span>
+              </span>
+            </label>
+
+            <label title="由超级管理员补录">
+              <span class="roster-field-head">
+                <span>入职日期</span>
+                <span v-if="missingHireDate" class="roster-field-note">待补</span>
+              </span>
+              <input
+                v-model="draft.hire_date"
+                class="input"
+                type="date"
+                :disabled="busy"
+              >
+            </label>
+
+            <label title="由管理权限派生，不能直接改">
+              <span class="roster-field-head"><span>卫生权限</span></span>
+              <span class="roster-readonly">{{ hygienePermissionLabel(drawerRow.permission) }}</span>
+            </label>
+
             <fieldset class="roster-caps">
               <legend class="roster-caps-title">管理权限</legend>
-              <p class="roster-caps-hint">
-                只有下面这三项在员工手机端的「卫生」页里生效，<strong>勾了就能用</strong>。上面的「卫生权限」
-                只是显示用的人话标签，能不能做某件事一律看这里的勾。勾完点最下面的「保存」，
-                一次改完一起提交。
-              </p>
               <div class="roster-caps-grid">
                 <label
                   v-for="cap in ADMIN_CAP_STAFF_DEFS"
@@ -451,161 +733,373 @@ async function undoAssignment(row) {
                   :title="cap.note"
                 >
                   <input
-                    v-model="drafts[row.id].admin_caps"
+                    v-model="draft.admin_caps"
                     type="checkbox"
                     :value="cap.key"
-                    :disabled="busyId === row.id"
+                    :disabled="busy"
                   >
                   <span>{{ cap.label }}</span>
                 </label>
               </div>
-              <!-- 只读那七项：**键与数据面都保留**（将来真给员工端开出入口时改一个字段即可，
-                   契约不用动），但不给勾 —— 它们对应的全是超级管理员在电脑端的活，员工端没有
-                   入口，勾了不会有任何变化（2026-10-06 真机实测：勾「数据与归档」→ 保存成功 →
-                   员工端零变化）。摆成只读说明，超管就不会以为自己放权了。 -->
-              <p class="roster-caps-readonly-title">
-                以下七项只在电脑端由超级管理员操作，员工端暂无入口，<strong>不必勾选</strong>
-              </p>
-              <ul class="roster-caps-readonly">
-                <li v-for="cap in ADMIN_CAP_SUPERVISOR_ONLY_DEFS" :key="cap.key">
-                  <strong>{{ cap.label }}</strong>：{{ cap.note }}
-                </li>
-              </ul>
-              <details class="rule-help roster-caps-help">
-                <summary>可勾的这三项分别管什么</summary>
-                <ul>
-                  <li v-for="cap in ADMIN_CAP_STAFF_DEFS" :key="cap.key">
-                    <strong>{{ cap.label }}</strong>：{{ cap.note }}
-                  </li>
-                </ul>
-              </details>
             </fieldset>
-            <label>
-              当天班次 · 现在 {{ hygieneShiftLabel(row.shift) }}
-              <select
-                v-model="drafts[row.id].shift"
-                class="select"
-                :disabled="busyId === row.id || !today"
-                @change="onShiftChange(row)"
-              >
-                <option value="" disabled>选排班的班次</option>
-                <option value="rest">休（这天不上班）</option>
-                <option v-for="shift in scheduleShifts" :key="shift.id" :value="String(shift.id)">
-                  {{ shift.name }}
-                </option>
-              </select>
-            </label>
-            <label>
-              当天区域 · 现在 {{ row.zone_name || '未选' }}
-              <select
-                v-model="drafts[row.id].zone_id"
-                class="select"
-                :disabled="busyId === row.id || drafts[row.id].shift === 'rest'"
-              >
-                <option value="">跟这个班的固定区</option>
-                <option v-for="zone in zoneChoicesForShift(drafts[row.id].shift)" :key="zone.id" :value="zone.id">
-                  {{ zone.name }}
-                </option>
-              </select>
-            </label>
-            <div class="roster-assign-actions">
-              <button
-                type="button"
-                class="btn"
-                :disabled="busyId === row.id || !today || !drafts[row.id].shift"
-                @click="changeAssignment(row)"
-              >改今天</button>
-              <button
-                type="button"
-                class="btn"
-                :disabled="busyId === row.id || !today"
-                @click="undoAssignment(row)"
-              >撤销回规则</button>
-            </div>
-            <p v-if="scheduleError" class="roster-assign-hint roster-assign-error">{{ scheduleError }}</p>
-            <p v-else class="roster-assign-hint">
-              「改今天」写的是排班今天的单日覆盖：只改这一天，以后改排班规则也不动它。这天没有覆盖时，「撤销回规则」什么都不改。
-            </p>
           </div>
-          <div class="hy-person-actions">
+        </div>
+
+        <div class="roster-drawer-foot">
+          <p v-if="gateNote" class="roster-field-note">{{ gateNote }}</p>
+          <div class="roster-foot-actions">
             <button
-              v-if="!row.approved && !row.disabled"
+              v-if="!drawerRow.disabled"
               type="button"
-              class="btn btn-primary"
-              :disabled="busyId === row.id"
-              @click="approve(row)"
+              class="btn btn-danger roster-danger"
+              :disabled="busy"
+              @click="askDisable"
+            >停用</button>
+            <button
+              type="button"
+              class="btn roster-save"
+              :class="{ 'btn-primary': primaryAction === 'save' }"
+              :disabled="busy || !dirty"
+              :title="dirty ? undefined : '没有改动'"
+              @click="saveDraft"
+            >{{ busy ? '保存中…' : '保存' }}</button>
+            <button
+              v-if="!drawerRow.approved && !drawerRow.disabled"
+              type="button"
+              class="btn roster-primary"
+              :class="{ 'btn-primary': primaryAction === 'approve' }"
+              :disabled="busy || !canApprove"
+              :title="canApprove ? undefined : gateNote"
+              @click="approveRow"
             >批准</button>
             <button
-              v-if="row.disabled"
+              v-if="drawerRow.disabled"
               type="button"
-              class="btn btn-primary"
-              :disabled="busyId === row.id"
-              @click="enable(row)"
+              class="btn roster-primary"
+              :class="{ 'btn-primary': primaryAction === 'enable' }"
+              :disabled="busy"
+              @click="enableRow"
             >启用</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 邀请店员弹层：二维码搬进这里（页面上不再有独立的入口卡片）。 -->
+    <div v-if="inviteOpen" class="modal-overlay roster-invite-overlay" @click.self="closeInvite">
+      <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="roster-invite-title">
+        <div class="modal-header">
+          <h3 id="roster-invite-title">邀请店员</h3>
+          <button type="button" class="btn btn-sm" aria-label="关闭" @click="closeInvite">关闭</button>
+        </div>
+        <div class="staff-entry">
+          <canvas ref="qrCanvas" class="staff-entry-qr" role="img" aria-label="员工入口二维码"></canvas>
+          <div class="staff-entry-copy">
+            <code>{{ inviteUrl }}</code>
             <button
               type="button"
               class="btn"
-              :disabled="busyId === row.id"
-              @click="saveRow(row)"
-            >保存</button>
-            <button
-              v-if="!row.disabled"
-              type="button"
-              class="btn btn-danger"
-              :disabled="busyId === row.id"
-              @click="askDisable(row)"
-            >停用</button>
+              :title="inviteCopyTitle || undefined"
+              @click="copyInvite"
+            >{{ inviteCopied ? '已复制' : '复制链接' }}</button>
           </div>
-        </article>
+        </div>
+        <p class="editor-lead">扫这个码自助注册，批准后登录</p>
       </div>
     </div>
 
     <ConfirmDialog
       v-if="disableTarget"
+      class="roster-dialog"
       title="停用员工"
-      :message="`停用 ${disableTarget.name || disableTarget.phone} 后不能登录，花名册里仍能看到这个人。`"
+      :message="`停用 ${disableTarget.name || disableTarget.phone} 后不能登录，记录还在。`"
       confirm-label="停用"
       danger
       @confirm="confirmDisable"
       @cancel="disableTarget = null"
     />
+
+    <ConfirmDialog
+      v-if="discardOpen"
+      class="roster-dialog"
+      title="放弃改动"
+      message="这次没保存的改动会丢掉。"
+      confirm-label="放弃"
+      @cancel="discardOpen = false"
+      @confirm="confirmDiscard"
+    />
   </div>
 </template>
 
 <style scoped>
-.roster-person-copy {
+/* 三个浮层都是 `.roster-page` 的直接子元素，共享表给直接子元素挂了 `hy-rise`：
+   那个动画的 `transform`（`both` 保留到最终帧）会让内部 `position: fixed` 相对卡片
+   定位而不是视口 —— 抽屉会滑进内容流里、确认框会掉到视口外。这里统一摘掉。 */
+.roster-page > .modal-overlay {
+  animation: none;
+}
+/* 确认框（停用 / 放弃改动）是**叠在抽屉之上**的一层：抽屉自己的遮罩 `z-index: 120`，
+   确认框必须更高 —— 手机上抽屉是全屏的，低一层就等于整个被盖住、点不到。 */
+.roster-page > .roster-dialog {
+  z-index: 130;
+}
+
+/* ── 页头工具组 ─────────────────────────────────────────────────────── */
+.roster-page .roster-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem;
+}
+.roster-page .roster-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.roster-page .roster-search .input {
+  width: 100%;
+  padding-right: 2.4rem;
+}
+.roster-page .roster-search-clear {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  display: grid;
+  place-items: center;
+  width: 2.4rem;
+  min-height: 40px;
+  border: 0;
+  background: transparent;
+  color: var(--hy-muted);
+  font: inherit;
+  font-size: .9rem;
+  cursor: pointer;
+}
+.roster-page .roster-search-clear:hover { color: var(--hy-ink); }
+
+.roster-page .roster-seg {
+  display: flex;
+  align-items: center;
+  gap: .2rem;
+  padding: .18rem;
+  border: 1px solid var(--hy-line);
+  border-radius: var(--hy-radius-sm);
+  background: var(--hy-surface-2);
+}
+.roster-page .roster-seg-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .3rem;
+  min-height: 40px;
+  padding: 0 .7rem;
+  border: 1px solid transparent;
+  border-radius: var(--hy-radius-sm);
+  background: transparent;
+  color: var(--hy-muted);
+  font: inherit;
+  font-size: .8rem;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color .18s var(--hy-ease), background .18s var(--hy-ease), border-color .18s var(--hy-ease);
+}
+.roster-page .roster-seg-item:hover { color: var(--hy-ink); }
+.roster-page .roster-seg-item.is-on {
+  background: var(--hy-mint-soft);
+  border-color: var(--hy-mint-line);
+  color: var(--hy-mint);
+}
+
+.roster-page .roster-tools-actions {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+.roster-page .roster-tools-actions .btn { min-height: 40px; }
+
+/* ── 列表行 ─────────────────────────────────────────────────────────── */
+/* 姓名 + 手机号那一格：竖排两行（共享表里那两套样式挂在 `.hy-person-top` 下，
+   改版后行是 grid、不再是 `.hy-person-top` 的两段结构，所以在这里补一份）。 */
+.roster-page .roster-person-copy {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
 }
+.roster-page .roster-person-copy strong {
+  font-family: var(--font-song);
+  font-size: 1.02rem;
+  font-weight: 700;
+}
+.roster-page .roster-person-copy span { font-family: var(--font-mono); }
 
-/* 「改今天 / 撤销回规则」是同一件事的两面：并排等宽，跟上面那些字段一个节奏。 */
-.roster-assign-actions {
+.roster-page .roster-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: .8rem;
+  width: 100%;
+  min-height: 56px;
+  font: inherit;
+  color: var(--hy-ink);
+  text-align: left;
+  cursor: pointer;
+}
+.roster-page .roster-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: .3rem;
+  min-width: 0;
+}
+.roster-page .roster-row-tail {
+  display: inline-flex;
+  align-items: center;
   gap: .5rem;
 }
-.roster-assign-actions .btn {
-  width: 100%;
-  min-height: 38px;
+.roster-page .roster-row-go {
+  color: var(--hy-faint);
+  font-size: 1.05rem;
+  line-height: 1;
 }
-/* 这一行是「改的是哪一天」和读不出排班时的实话，跟着字段的说明字号走。 */
-.roster-assign-hint {
+.roster-page .roster-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: .15rem .5rem;
+  border: 1px solid var(--hy-line);
+  border-radius: 999px;
+  background: var(--hy-surface-3);
+  color: var(--hy-muted);
+  font-size: .7rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.roster-page .roster-chip.is-warn {
+  background: var(--hy-amber-soft);
+  border-color: var(--hy-amber-line);
+  color: var(--hy-amber);
+}
+.roster-page .roster-chip.is-danger {
+  background: var(--hy-seal-soft);
+  border-color: var(--hy-seal-line);
+  color: var(--hy-seal-bright);
+}
+
+/* ── 抽屉 ───────────────────────────────────────────────────────────── */
+/* 遮罩要盖掉 theme.css 的居中：拉伸 + 靠右。父级限定抬特异度，不用 `!important`。 */
+.roster-page .roster-drawer-overlay {
+  align-items: stretch;
+  justify-content: flex-end;
+  padding: 0;
+  z-index: 120;
+  touch-action: none;
+}
+.roster-page .roster-drawer {
+  display: flex;
+  flex-direction: column;
+  width: min(480px, 100vw);
+  height: 100dvh;
+  max-height: 100dvh;
+  background: var(--hy-surface);
+  border-left: 1px solid var(--hy-line-strong);
+  border-radius: var(--hy-radius-lg) 0 0 var(--hy-radius-lg);
+  box-shadow: var(--hy-shadow-md);
+  touch-action: auto;
+  overscroll-behavior: contain;
+  animation: roster-slide .22s var(--hy-ease) both;
+}
+.roster-page .roster-drawer-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .6rem;
+  padding: .85rem 1rem;
+  border-bottom: 1px solid var(--hy-line);
+  background: var(--hy-surface);
+}
+.roster-page .roster-drawer-title {
   margin: 0;
-  font-size: .74rem;
-  line-height: 1.6;
+  min-width: 0;
+  font-family: var(--font-song);
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--hy-ink);
+  overflow-wrap: anywhere;
+}
+.roster-page .roster-drawer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 1rem;
+}
+.roster-page .roster-drawer-foot {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: .5rem;
+  padding: .7rem 1rem calc(.7rem + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--hy-line);
+  background: var(--hy-surface);
+}
+.roster-page .roster-drawer-foot .roster-field-note { margin-right: auto; }
+.roster-page .roster-foot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+.roster-page .roster-readonly {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 .7rem;
+  border: 1px dashed var(--hy-line);
+  border-radius: var(--hy-radius-sm);
+  background: var(--hy-surface-2);
+  color: var(--hy-ink);
+  font-weight: 400;
+}
+.roster-page .roster-readonly.is-mono { font-family: var(--font-mono); }
+.roster-page .roster-field-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .35rem;
+}
+.roster-page .roster-field-note {
+  color: var(--hy-amber);
+  font-size: .72rem;
+  font-weight: 600;
+}
+.roster-page .roster-expiry {
+  font-size: .72rem;
+  font-weight: 400;
   color: var(--hy-faint);
 }
-.roster-assign-error { color: var(--hy-seal-bright); }
+.roster-page .roster-input-suffix {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+}
+.roster-page .roster-input-suffix .input { flex: 1 1 auto; min-width: 0; }
+.roster-page .roster-suffix {
+  flex: 0 0 auto;
+  font-size: .76rem;
+  font-weight: 400;
+  color: var(--hy-muted);
+}
 
-/* ==========================================================================
-   管理权限：十项独立开关
-   ==========================================================================
-   这是 `.hy-person-fields` 里的一个 fieldset（浏览器默认带边框与 padding，这里清掉；
-   `min-width: 0` 是必须的 —— fieldset 默认 `min-inline-size: min-content`，在 flex 列里
-   会把卡片撑破）。 */
-.roster-caps {
+/* 管理权限：三项可勾（员工端真有执行点的那些）。 */
+.roster-page .roster-caps {
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -614,54 +1108,19 @@ async function undoAssignment(row) {
   flex-direction: column;
   gap: .35rem;
 }
-.roster-caps-title {
+.roster-page .roster-caps-title {
   padding: 0;
   font-size: .76rem;
   font-weight: 600;
   color: var(--hy-muted);
 }
-/* 作用范围那句实话：跟其它字段的说明同一个字号，别抢字段本身的注意力。 */
-.roster-caps-hint {
-  margin: 0;
-  font-size: .72rem;
-  line-height: 1.6;
-  color: var(--hy-faint);
-}
-/* 十个勾的排布：**390 宽的手机上两列**（花名册在手机上也要能改权限），桌面折到五列
-   就停（`max-width` 封顶，不然宽屏会拉成一条十列的长带）。 */
-.roster-caps-grid {
+.roster-page .roster-caps-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
   gap: .15rem .7rem;
   max-width: 44rem;
 }
-/* 只读那七项：摆成说明而不是勾 —— 它们对应的活全在电脑端，员工端没有入口。字号与颜色都
-   刻意弱于上面的勾，避免被看成"另一种开关"（真机实测的教训：并排摆着就会有人去勾）。 */
-.roster-caps-readonly-title {
-  margin: .55rem 0 .2rem;
-  font-size: .72rem;
-  line-height: 1.6;
-  color: var(--hy-faint);
-}
-.roster-caps-readonly {
-  margin: 0;
-  padding-left: 1.1rem;
-  max-width: 44rem;
-  font-size: .72rem;
-  line-height: 1.7;
-  color: var(--hy-faint);
-}
-.roster-caps-readonly strong { font-weight: 600; }
-/* 保存成功的一次性反馈（`role="status"`）：与 `roster-error` 同一个位置、同一个尺寸，
-   只是颜色相反 —— 原来保存完页面上什么都不变，超管不知道放没放上去。 */
-.roster-saved {
-  margin: 0 0 .6rem;
-  font-size: .8rem;
-  color: var(--hy-jade);
-}
-/* 共享表里的 `.hy-person-fields label` 是竖排字段（标签在上、控件在下）——这里每一项是
-   横排的勾，得盖回来。整个 label 都是点击目标，所以手机上这个格子本身就是触控区。 */
-.hy-person-fields .roster-cap {
+.roster-page .hy-person-fields .roster-cap {
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -671,29 +1130,96 @@ async function undoAssignment(row) {
   color: var(--hy-ink);
   cursor: pointer;
 }
-/* 原生勾在 iOS/安卓上默认只有十几像素且样式各异：给个统一尺寸，颜色跟着主题走。 */
-.roster-cap input {
+.roster-page .roster-cap input {
   flex: 0 0 auto;
   width: 16px;
   height: 16px;
   margin: 0;
   accent-color: var(--hy-mint);
 }
-.roster-cap span { min-width: 0; }
-.roster-cap input:disabled { cursor: not-allowed; }
-.roster-cap:has(input:disabled) { cursor: not-allowed; color: var(--hy-faint); }
-/* 每项的一句话说明（`ADMIN_CAP_DEFS` 的 note）默认收起：十句话摊开会把一个人的卡片拉长
-   一倍，而它是"看一下就懂"的内容，不是每次都要读的字段。手机上没有 hover，所以不能
-   只挂在 title 上。 */
-.roster-caps-help { margin-top: 0; }
-.roster-caps-help ul {
-  margin: .35rem 0 0;
-  padding-left: 1.1rem;
-  display: grid;
-  gap: .15rem;
+.roster-page .roster-cap span { min-width: 0; }
+.roster-page .roster-cap input:disabled { cursor: not-allowed; }
+.roster-page .roster-cap:has(input:disabled) { cursor: not-allowed; color: var(--hy-faint); }
+
+/* 保存成功的一次性反馈（`role="status"`）：与 `roster-error` 同一个位置与尺寸，颜色相反。 */
+.roster-page .roster-saved {
+  margin: 0 0 .6rem;
+  font-size: .8rem;
+  color: var(--hy-jade);
 }
+.roster-page .roster-empty .btn { margin-left: .6rem; }
+
+@keyframes roster-slide {
+  from { transform: translateX(16px); opacity: .6; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* ── 桌面（>720px） ─────────────────────────────────────────────────── */
+@media (min-width: 721px) {
+  .roster-page .roster-search { width: 15rem; }
+}
+
+/* ── 手机（≤720px）：工具栏竖排、行两行、抽屉全屏、触控 ≥44 ─────────── */
 @media (max-width: 720px) {
-  /* 窄屏触控下限（共享表那条 B6 规矩）：勾和字一起撑到 44 高。 */
-  .hy-person-fields .roster-cap { min-height: 44px; }
+  .roster-page .roster-tools {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+  .roster-page .roster-search { width: 100%; }
+  .roster-page .roster-search-clear { width: 44px; min-height: 44px; }
+  .roster-page .roster-seg {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    padding: .2rem;
+  }
+  .roster-page .roster-seg-item { min-height: 44px; padding: 0 .4rem; }
+  .roster-page .roster-tools-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .roster-page .roster-tools-actions .btn { min-height: 44px; }
+
+  .roster-page .roster-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: .45rem .6rem;
+    min-height: 64px;
+    padding: .85rem .9rem;
+  }
+  .roster-page .roster-row .roster-person-copy { grid-column: 1; }
+  .roster-page .roster-row .roster-row-meta {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+  .roster-page .roster-row .roster-row-tail { grid-column: 2; grid-row: 1; }
+
+  /* 抽屉全屏：头部吸顶、动作条吸底。 */
+  .roster-page .roster-drawer {
+    width: 100vw;
+    border-left: 0;
+    border-radius: 0;
+  }
+  .roster-page .roster-drawer-body,
+  .roster-page .roster-drawer-foot {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+  .roster-page .roster-readonly { min-height: 44px; }
+  .roster-page .hy-person-fields .roster-cap { min-height: 44px; }
+  /* 危险动作单独一行、跨两列：手机上最不容易误触的排法。 */
+  .roster-page .roster-foot-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: .5rem;
+    width: 100%;
+  }
+  .roster-page .roster-foot-actions .btn { width: 100%; min-height: 44px; }
+  .roster-page .roster-foot-actions .roster-danger {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .roster-page .roster-foot-actions .roster-save { grid-column: 1; grid-row: 1; }
+  .roster-page .roster-foot-actions .roster-primary { grid-column: 2; grid-row: 1; }
 }
 </style>

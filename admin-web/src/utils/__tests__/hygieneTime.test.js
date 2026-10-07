@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatHygieneShortStamp, formatHygieneStamp } from '../hygieneTime.js'
+import { chinaTodayDate, formatHygieneShortStamp, formatHygieneStamp } from '../hygieneTime.js'
 
 describe('formatHygieneStamp', () => {
   it('renders ISO with a T separator', () => {
@@ -41,5 +41,19 @@ describe('formatHygieneShortStamp', () => {
   it('returns an empty string when it cannot parse', () => {
     expect(formatHygieneShortStamp('')).toBe('')
     expect(formatHygieneShortStamp('nonsense')).toBe('')
+  })
+})
+
+describe('chinaTodayDate', () => {
+  it('按东八区算「今天」：UTC 的那一天差 8 小时时必须是北京时那一天', () => {
+    // 2026-10-07T17:30:00Z = 北京时间 2026-10-08 01:30 —— 管理机若按本机日期取，
+    // 会得到 10-07（注册页那条「不得晚于今天」就会把合法日期当成将来）。
+    expect(chinaTodayDate(new Date('2026-10-07T17:30:00Z'))).toBe('2026-10-08')
+    // 反过来：UTC 还是 10-08 的后半天，北京时间已经是 10-09 之前的 10-08。
+    expect(chinaTodayDate(new Date('2026-10-08T15:00:00Z'))).toBe('2026-10-08')
+  })
+
+  it('格式是 YYYY-MM-DD（可以直接与日期框的值比大小）', () => {
+    expect(chinaTodayDate(new Date('2026-01-05T02:00:00+08:00'))).toBe('2026-01-05')
   })
 })

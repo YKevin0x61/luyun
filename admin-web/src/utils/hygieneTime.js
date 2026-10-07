@@ -36,3 +36,24 @@ export function formatHygieneShortStamp(value) {
   if (!matched) return ''
   return `${matched[2]}-${matched[3]} ${matched[4]}:${matched[5]}`
 }
+
+/**
+ * 东八区的今天（`YYYY-MM-DD`）——**不能用本机时间**：管理机与员工手机的时区都可能不在
+ * 东八区，而「不得晚于今天」「有效期至哪天」这类判据在服务端是按北京时算的。
+ *
+ * 给注册页的健康证办理日期与花名册抽屉的 `max` 用：只做一次格式化，不做日期算术
+ * （有效期是服务端派生的，前端不重算）。
+ *
+ * @param {Date} [now]
+ * @returns {string} `YYYY-MM-DD`
+ */
+export function chinaTodayDate(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now)
+  const pick = (type) => (parts.find((item) => item.type === type) || {}).value || ''
+  return `${pick('year')}-${pick('month')}-${pick('day')}`
+}

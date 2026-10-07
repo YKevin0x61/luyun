@@ -21,6 +21,7 @@ from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.work import HygieneWork, SEED_ZONE_NAMES
 from tests.hygiene_duty import assign_duty
+from tests.hygiene_profile import approve_body, register_body
 
 SUPER = {"kind": "super"}
 
@@ -95,7 +96,7 @@ def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http)
     client, _db, _accounts, _work = hygiene_http
     resp = client.post(
         "/api/hygiene/staff/register",
-        json={"name": NAME, "phone": PHONE, "password": PASSWORD},
+        json=register_body(name=NAME, phone=PHONE, password=PASSWORD),
     )
     assert resp.status_code == 200
     login = client.post(
@@ -255,6 +256,11 @@ def test_admin_cookie_can_roster_but_is_not_staff_phone_identity(hygiene_http):
     assert roster.status_code == 200
     assert roster.json()["employees"][0]["phone"] == PHONE
     assert roster.json()["employees"][0]["name"] == NAME
+    # 批准门槛（2026-10-07）：底薪与入职日期齐了才批得下来。
+    seeded = client.patch(
+        f"/api/hygiene/admin/roster/{employee['id']}", json=approve_body()
+    )
+    assert seeded.status_code == 200
     approve = client.post(f"/api/hygiene/admin/roster/{employee['id']}/approve")
     assert approve.status_code == 200
     title = client.patch(
