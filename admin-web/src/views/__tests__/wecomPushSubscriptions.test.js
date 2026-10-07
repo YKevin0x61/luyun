@@ -509,3 +509,114 @@ describe('接口版本提示条', () => {
     expect(second.find('button[type="submit"]').exists()).toBe(true)
   })
 })
+
+// U13：渠道 > 8 走「先选内容、再勾渠道」的多选列表；内容类型为 0 时页面写着
+// 「10 个渠道 · 0 类内容」+「先选一类内容，再勾渠道。」—— 让店长去选一个不存在的东西。
+// 矩阵分支有对应空态（「还没有渠道。先到『渠道』tab 新增一个。」），多选分支漏了。
+describe('订阅多选列表在 0 类内容时的空态（U13）', () => {
+  const TEN = Array.from({ length: 10 }, (_, index) => channel(index + 1, `群 ${index + 1}`))
+
+  it('没有内容类型时给空态，不再让人"先选一类内容"', async () => {
+    const { wrapper } = await mountView({ channels: TEN, topics: [] })
+    await openTab(wrapper, '订阅')
+
+    expect(wrapper.text()).toContain('注册表里还没有内容类型')
+    expect(wrapper.text()).not.toContain('先选一类内容，再勾渠道。')
+    // 一个可点的内容类型都没有，就不该渲染那一列按钮
+    expect(wrapper.findAll('button.wp-pick-row')).toHaveLength(0)
+  })
+
+  it('有内容类型时多选列表照旧（空态不能把正常形态顶掉）', async () => {
+    const { wrapper } = await mountView({
+      channels: TEN, topics: [topic('sales_report', '销售报表', [1])],
+    })
+    await openTab(wrapper, '订阅')
+
+    expect(wrapper.findAll('button.wp-pick-row')).toHaveLength(1)
+    expect(wrapper.text()).toContain('先选一类内容，再勾渠道。')
+    expect(wrapper.text()).not.toContain('注册表里还没有内容类型')
+  })
+})
+
+// U15：群组卡把**全部渠道**平铺成勾选行（3 群组 × 10 渠道 = 30 行，1440 下整页 2588px），
+// 而"这个群有哪些渠道"正是这一页要看的东西。默认只列已勾选的，其余折进「展开全部 N 个渠道」。
+describe('渠道群组卡的成员折叠（U15）', () => {
+  const THREE = [channel(1, '一楼前厅群'), channel(2, '店长日报群'), channel(3, '卫生群')]
+  const GROUPS = [
+    { id: 1, name: '日报群组', enabled: true, notes: '', member_channel_ids: [1] },
+    { id: 2, name: '空群组', enabled: true, notes: '', member_channel_ids: [] },
+  ]
+
+  /** 群组卡：卡内**直接子元素**里的标题（`strong.wp-hook-name`）正好等于群组名。
+   *
+   * 两个坑都在定位上：①按"卡里出现过这个名字"找会先命中渠道表单那张卡（它的
+   * 「所属群组（可多选）」列着全部群组名）；②`find('.wp-hook-head')` 是后代查询，
+   * 外层「渠道群组」大卡也会命中（它包着所有群组卡 + 新增表单），于是成员行里混进
+   * 表单那一行「启用」。`:scope >` 只认自己的标题。 */
+  function groupCard(wrapper, name) {
+    const card = wrapper.findAll('.card').find((node) => {
+      const head = node.element.querySelector(':scope > .wp-hook-head')
+      const title = head && head.querySelector('strong.wp-hook-name')
+      return !!title && title.textContent.trim() === name
+    })
+    expect(card, `找不到群组卡「${name}」`).toBeTruthy()
+    return card
+  }
+
+  function expandButton(card) {
+    return card.findAll('button').find((node) => node.text().startsWith('展开全部'))
+  }
+
+  it('默认只列已勾选的成员，其余折进「展开全部 N 个渠道」', async () => {
+    const { wrapper } = await mountView({ channels: THREE, topics: [], groups: GROUPS })
+    const card = groupCard(wrapper, '日报群组')
+
+    const rows = card.findAll('label.luyun-check-row')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].text()).toContain('一楼前厅群')
+    expect(expandButton(card).text()).toBe('展开全部 3 个渠道')
+  })
+
+  it('展开后列出全部渠道，还能收回去', async () => {
+    const { wrapper } = await mountView({ channels: THREE, topics: [], groups: GROUPS })
+
+    await expandButton(groupCard(wrapper, '日报群组')).trigger('click')
+    await flushPromises()
+    expect(groupCard(wrapper, '日报群组').findAll('label.luyun-check-row')).toHaveLength(3)
+    // 展开按钮自己变成「收起」，否则展开了就收不回去
+    const collapse = groupCard(wrapper, '日报群组').findAll('button')
+      .find((node) => node.text() === '收起')
+    expect(collapse).toBeTruthy()
+
+    await collapse.trigger('click')
+    await flushPromises()
+    expect(groupCard(wrapper, '日报群组').findAll('label.luyun-check-row')).toHaveLength(1)
+  })
+
+  it('一个成员都没有的群组不留一排空行，只写一句并给展开入口', async () => {
+    const { wrapper } = await mountView({ channels: THREE, topics: [], groups: GROUPS })
+    const card = groupCard(wrapper, '空群组')
+
+    expect(card.findAll('label.luyun-check-row')).toHaveLength(0)
+    expect(card.text()).toContain('未勾选任何渠道')
+    expect(expandButton(card)).toBeTruthy()
+  })
+
+  it('折叠只是显示：勾一个没列出来的渠道照样发请求（成员关系没被折叠影响）', async () => {
+    const { wrapper, fetchMock } = await mountView({
+      channels: THREE, topics: [], groups: GROUPS,
+    })
+
+    await expandButton(groupCard(wrapper, '日报群组')).trigger('click')
+    await flushPromises()
+    // 展开后第 2 行是「店长日报群」（不属于这个群组）
+    const row = groupCard(wrapper, '日报群组').findAll('label.luyun-check-row')[1]
+    expect(row.text()).toContain('店长日报群')
+    await row.find('button[role=checkbox]').trigger('click')
+    await flushPromises()
+
+    const writes = fetchMock.calls.filter((call) => call.method !== 'GET')
+    expect(writes).toHaveLength(1)
+    expect(writes[0].path).toContain('/channel-groups/1/members')
+  })
+})

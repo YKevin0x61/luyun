@@ -18,6 +18,26 @@ function compact(source) {
   return source.replace(/\s+/g, '')
 }
 
+/**
+ * WCAG 相对亮度（计算色口径，与走查脚本 `audit.py` 的 `MEASURE_JS` 同一公式）。
+ *
+ * U9 是**数值**问题（2.28:1 → 要 4.5:1），只断言"颜色写进去了"没有意义：换成另一个
+ * 看着更深但只有 4.2 的颜色照样能过。所以这里自己算一遍。
+ */
+function luminance(hex) {
+  const value = hex.replace('#', '')
+  const linear = [0, 2, 4].map((at) => {
+    const channel = parseInt(value.slice(at, at + 2), 16) / 255
+    return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+  })
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+}
+
+function contrastRatio(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
 describe('企微推送页的窄屏布局', () => {
   it('窄屏单列用 minmax(0, 1fr)，否则轨道被内容顶宽、徽章被挤出视口', () => {
     const src = compact(view)
@@ -64,17 +84,49 @@ describe('企微推送页的立即发送', () => {
   it('禁用态是灰底而不是半透明绿底，可点时才是绿色主按钮（U8）', () => {
     const src = compact(view)
     // 绿底挂在 .wp-send-now 上（不再是内联样式），禁用时被 :disabled 规则覆盖成灰
-    expect(src).toContain('.wp-send-now{background:var(--green);')
+    expect(src).toContain('.wp-send-now{background:#15803d;')
     expect(src).toContain('.wp-send-now:disabled{background:var(--card2);')
     expect(src).toContain('opacity:1;')
     // 内联绿底那一条必须消失，否则它会把 :disabled 的灰底压回去
     expect(src).not.toContain('style="background:var(--green);border-color:var(--green);color:#fff"')
   })
 
+  // U9：`--green`（#22c55e）+ 白字按 WCAG 只有 2.28:1，而这是全页唯一会真外发的按钮。
+  // 断言用**计算色**自己验算，不认"看着更深"。
+  it('可点态是深绿底白字，对比度过 AA 的 4.5:1（U9）', () => {
+    const src = compact(view)
+    const rule = /\.wp-send-now\{background:(#[0-9a-f]{6});border-color:(#[0-9a-f]{6});color:#fff;\}/
+      .exec(src)
+    expect(rule, '找不到 .wp-send-now 的底 / 边 / 字色规则').toBeTruthy()
+    // 边框与底色同色：否则 hover 时边框会露回全局 `.btn:hover` 的 --accent
+    expect(rule[2]).toBe(rule[1])
+    // 全局 --green 一个字没动（动它会让本页与其它页的同一控件颜色不一致）
+    expect(src).not.toContain('.wp-send-now{background:var(--green)')
+    expect(contrastRatio(rule[1], '#ffffff')).toBeGreaterThanOrEqual(4.5)
+  })
+
   it('确认文案由 sendNowConfirmText 生成，不再写死一句"当前预览对应的"', () => {
     const src = compact(view)
     expect(src).toContain('sendNowConfirmText({')
     expect(src).not.toContain('确定立即发送当前预览对应的')
+  })
+
+  // U7：确认框原来只说「将发给 3 个群」，店长看不出里面有没有那个不该收的群。
+  it('把收件群名单交给确认文案（名单从订阅矩阵里取）', () => {
+    const src = compact(view)
+    expect(src).toContain('constsendTargetNames=computed(()=>sendNowTargetNames({')
+    expect(src).toContain('targetNames:sendTargetNames.value,')
+  })
+
+  // U12：预览已经选中任务（右上写着「当前任务：每日销售报表」），空 textarea 里却写
+  // 「选择任务后点击刷新预览」—— 让店长去做一件已经做完的事。按钮的 title 在 U8 里已经
+  // 改成同一口径，两处不能各说各话。
+  it('空预览的文案与页面状态一致，不说"先选择任务"（U12）', () => {
+    const src = compact(view)
+    expect(src).toContain('placeholder="点「刷新预览」生成内容"')
+    expect(src).not.toContain('选择任务后点击刷新预览')
+    expect(src).toContain("'点「刷新预览」后可发送'")
+    expect(src).not.toContain('先选择任务并刷新预览')
   })
 })
 

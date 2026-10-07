@@ -131,6 +131,49 @@ describe('发送记录的加载', () => {
   })
 })
 
+// U18：后端对 `page` 只做下界（≥1），不夹上界。超过保留期的记录被清理后 `pages` 会变小，
+// 而页面停在原来的页码上，于是收到一页空表 + 自相矛盾的「第 2 / 1 页」（「上一页」还可点）。
+describe('发送记录的分页夹取（U18）', () => {
+  it('收到 page > pages 时回落到最后一页并重拉一次', async () => {
+    apiGet
+      .mockResolvedValueOnce(deliveriesPayload({ page: 3, pages: 1, rows: [], total: 3 }))
+      .mockResolvedValueOnce(deliveriesPayload({ page: 1, pages: 1, total: 3 }))
+    const { deliveries, loadDeliveries } = useWecomPush()
+
+    await loadDeliveries({ page: 3 })
+
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    expect(apiGet).toHaveBeenLastCalledWith(
+      '/api/wecom-push/logs',
+      expect.objectContaining({ page: 1 }),
+    )
+    expect(deliveries.page).toBe(1)
+    expect(deliveries.rows.map((row) => row.id)).toEqual([11])
+  })
+
+  it('一条记录都没有时也回落（pages = 0 ⇒ 回第 1 页）', async () => {
+    apiGet
+      .mockResolvedValueOnce(deliveriesPayload({ page: 2, pages: 0, rows: [], total: 0 }))
+      .mockResolvedValueOnce(deliveriesPayload({ page: 1, pages: 0, rows: [], total: 0 }))
+    const { deliveries, loadDeliveries } = useWecomPush()
+
+    await loadDeliveries({ page: 2 })
+
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    expect(deliveries.page).toBe(1)
+  })
+
+  it('后端给出不可能的组合时只重拉一次，不会无限递归', async () => {
+    // 每次都回 page 5 / pages 1：夹取只允许发生一次
+    apiGet.mockResolvedValue(deliveriesPayload({ page: 5, pages: 1, rows: [], total: 0 }))
+    const { loadDeliveries } = useWecomPush()
+
+    await loadDeliveries({ page: 5 })
+
+    expect(apiGet).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('发送记录的展示口径', () => {
   it('五种状态各有中文名，未知状态原样显示（不吞掉这一行）', () => {
     expect(DELIVERY_STATUS_OPTIONS.map((item) => item.id)).toEqual([

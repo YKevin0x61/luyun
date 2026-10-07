@@ -3,7 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, scheduledTopics,
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
-  canSendNow, sendNowConfirmText, testChannelConfirmText, DELIVERY_STATUS_OPTIONS,
+  canSendNow, sendNowConfirmText, sendNowTargetNames, testChannelConfirmText,
+  DELIVERY_STATUS_OPTIONS,
   deliveryStatusLabel, deliveryErrorSummary, formatDeliveryTime, auditActionLabel,
   auditObjectLabel, auditVisibleFields, auditChangeText,
 } from '../composables/useWecomPush'
@@ -151,6 +152,12 @@ const sendReady = computed(() => canSendNow({
   job: selectedJob.value,
   content: previewContent.value,
 }))
+// 这次会发给哪些群（U7）：名字从订阅矩阵里取，判据在 composable（名字数与
+// `target_count` 对不上时给空数组，确认框退回只说数量）。
+const sendTargetNames = computed(() => sendNowTargetNames({
+  job: selectedJob.value,
+  matrix: matrix.value,
+}))
 // 订阅视图：渠道超过阈值就切「先选内容、再勾群」的多选列表（窄屏可点）
 const isMultiSelectView = computed(() => viewMode.value === 'multi-select')
 const matrixRows = computed(() => matrix.value.topics || [])
@@ -246,6 +253,30 @@ async function handleToggleMember(group, channelId) {
     else await addGroupMember({ groupId: group.id, channelId })
     await loadChannels()
   } catch (e) { flash(e.message, 'error') }
+}
+
+/**
+ * 群组卡的成员列表（UI 走查 U15）。
+ *
+ * 原来把**全部渠道**平铺成勾选行：3 个群组 × 10 个渠道 = 30 行，1440 下整页 2588px
+ * ——"这个群有哪些渠道"要一行行读，而它正是这一页要看的东西。现在默认只列**已勾选的**，
+ * 其余折进「展开全部 N 个渠道」：成员一眼可见，要加人时再展开。
+ *
+ * 展开状态只存在页面上（不发给后端）：它描述的是"我正在改哪个群组"，与订阅本身无关。
+ */
+const expandedGroupIds = ref([])
+function isGroupExpanded(groupId) {
+  return expandedGroupIds.value.includes(groupId)
+}
+function toggleGroupExpand(groupId) {
+  expandedGroupIds.value = isGroupExpanded(groupId)
+    ? expandedGroupIds.value.filter((id) => id !== groupId)
+    : [...expandedGroupIds.value, groupId]
+}
+function groupMemberChannels(group) {
+  if (isGroupExpanded(group.id)) return channels.value
+  const memberIds = (group.member_channel_ids || []).map(Number)
+  return channels.value.filter((channel) => memberIds.includes(Number(channel.id)))
 }
 async function handleToggleSubscription(row, channel) {
   try {
@@ -349,10 +380,13 @@ async function handlePreview() {
 async function handleSend() {
   // 确认框的文案必须跟着页面状态走：预览空着的时候原来的文案照样说"当前预览对应的
   // 销售报表"，用户既不知道发给谁也不知道多少字节（见 sendNowConfirmText 的注释）。
+  // 收件群名（U7）从已经加载的订阅矩阵里取：确认框只说"3 个群"时，店长看不出里面
+  // 有没有那个不该收的群，而这条消息发出去撤不回来。
   const text = sendNowConfirmText({
     job: selectedJob.value,
     bytes: previewMeta.value.bytes,
     content: previewContent.value,
+    targetNames: sendTargetNames.value,
   })
   if (!window.confirm(text)) return
   try {
@@ -566,15 +600,29 @@ onMounted(async () => {
                 </span>
               </div>
               <div v-if="item.notes" style="color:var(--text-dim);font-size:12px">{{ item.notes }}</div>
+              <!-- 成员列表只列已勾选的渠道（U15），其余折进下面那个「展开全部 N 个渠道」。
+                   3 群组 × 10 渠道全平铺时整页 2588px，「这个群有哪些渠道」要一行行读。 -->
               <div style="display:flex;flex-direction:column;gap:4px;margin-top:6px">
-                <label v-for="channel in channels" :key="channel.id" class="luyun-check-row">
+                <label v-for="channel in groupMemberChannels(item)" :key="channel.id" class="luyun-check-row">
                   <LuyunCheckbox
                     :model-value="(item.member_channel_ids || []).includes(channel.id)"
                     @update:model-value="() => handleToggleMember(item, channel.id)"
                   />
                   {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用）</span>
                 </label>
+                <div
+                  v-if="channels.length && !groupMemberChannels(item).length"
+                  style="color:var(--text-dim);font-size:12px"
+                >未勾选任何渠道</div>
               </div>
+              <button
+                v-if="isGroupExpanded(item.id) || groupMemberChannels(item).length < channels.length"
+                class="btn btn-sm"
+                type="button"
+                style="margin-top:6px"
+                :aria-expanded="isGroupExpanded(item.id)"
+                @click="toggleGroupExpand(item.id)"
+              >{{ isGroupExpanded(item.id) ? '收起' : `展开全部 ${channels.length} 个渠道` }}</button>
               <div v-if="!channels.length" style="color:var(--text-dim);font-size:12px;margin-top:6px">还没有渠道可加入</div>
               <div style="display:flex;gap:6px;margin-top:8px">
                 <button class="btn btn-sm" @click="editChannelGroup(item)">编辑</button>
@@ -652,46 +700,54 @@ onMounted(async () => {
 
         <!-- 渠道超过阈值：先选内容、再勾群（手机上可点） -->
         <template v-else>
-          <p style="color:var(--text-dim);font-size:12px;margin:0 0 8px">
-            渠道已有 {{ matrixColumns.length }} 个（超过 {{ MATRIX_CHANNEL_LIMIT }} 个），
-            改为「先选内容类型、再勾渠道」—— 手机上更好点。
+          <!-- 0 类内容（U13）：注册表里一个内容类型都没有时给空态。少了这一支，页面写的是
+               「10 个渠道 · 0 类内容」+「先选一类内容，再勾渠道。」—— 让店长去选一个不存在
+               的东西（矩阵分支有对应空态，见上面那一支）。加载中不算空态，理由同 U4。 -->
+          <p v-if="!subscriptionsLoading && !matrixRows.length" class="empty-state">
+            注册表里还没有内容类型，暂无可订阅的内容。
           </p>
-          <div style="display:flex;flex-direction:column;gap:8px">
-            <button
-              v-for="row in matrixRows"
-              :key="row.id"
-              class="btn wp-pick-row"
-              :class="{ active: multiSelect.topicId === row.id, 'wp-matrix-zero': zeroTopicIds.includes(row.id) }"
-              type="button"
-              @click="handlePickTopic(row.id)"
-            >
-              <span>{{ row.name }}</span>
-              <span v-if="topicHasPhotos(row)" class="badge" style="color:var(--cyan);border-color:var(--cyan)">含员工实拍照片</span>
-              <span class="badge">{{ (subscriptionIds[row.id] || []).length }} 个渠道</span>
-              <span v-if="zeroTopicIds.includes(row.id)" class="badge" style="color:var(--yellow);border-color:var(--yellow)">零订阅</span>
-            </button>
-          </div>
-          <div v-if="multiSelect.topicId" style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
-            <div style="font-size:13px">
-              勾选要接收「{{ (matrixRows.find((r) => r.id === multiSelect.topicId) || {}).name }}」的渠道：
+          <template v-else>
+            <p style="color:var(--text-dim);font-size:12px;margin:0 0 8px">
+              渠道已有 {{ matrixColumns.length }} 个（超过 {{ MATRIX_CHANNEL_LIMIT }} 个），
+              改为「先选内容类型、再勾渠道」—— 手机上更好点。
+            </p>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <button
+                v-for="row in matrixRows"
+                :key="row.id"
+                class="btn wp-pick-row"
+                :class="{ active: multiSelect.topicId === row.id, 'wp-matrix-zero': zeroTopicIds.includes(row.id) }"
+                type="button"
+                @click="handlePickTopic(row.id)"
+              >
+                <span>{{ row.name }}</span>
+                <span v-if="topicHasPhotos(row)" class="badge" style="color:var(--cyan);border-color:var(--cyan)">含员工实拍照片</span>
+                <span class="badge">{{ (subscriptionIds[row.id] || []).length }} 个渠道</span>
+                <span v-if="zeroTopicIds.includes(row.id)" class="badge" style="color:var(--yellow);border-color:var(--yellow)">零订阅</span>
+              </button>
             </div>
-            <label v-for="channel in matrixColumns" :key="channel.id" class="luyun-check-row">
-              <LuyunCheckbox
-                :model-value="(multiSelect.channelIds || []).includes(channel.id)"
-                @update:model-value="(checked) => {
-                  multiSelect.channelIds = checked
-                    ? [...multiSelect.channelIds, channel.id]
-                    : multiSelect.channelIds.filter((id) => id !== channel.id)
-                }"
-              />
-              {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用，投递会跳过）</span>
-            </label>
-            <div style="display:flex;gap:8px;margin-top:6px">
-              <button class="btn btn-primary" type="button" @click="handleSaveMultiSelect">保存订阅</button>
-              <button class="btn" type="button" @click="multiSelect.channelIds = []">全不选</button>
+            <div v-if="multiSelect.topicId" style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
+              <div style="font-size:13px">
+                勾选要接收「{{ (matrixRows.find((r) => r.id === multiSelect.topicId) || {}).name }}」的渠道：
+              </div>
+              <label v-for="channel in matrixColumns" :key="channel.id" class="luyun-check-row">
+                <LuyunCheckbox
+                  :model-value="(multiSelect.channelIds || []).includes(channel.id)"
+                  @update:model-value="(checked) => {
+                    multiSelect.channelIds = checked
+                      ? [...multiSelect.channelIds, channel.id]
+                      : multiSelect.channelIds.filter((id) => id !== channel.id)
+                  }"
+                />
+                {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用，投递会跳过）</span>
+              </label>
+              <div style="display:flex;gap:8px;margin-top:6px">
+                <button class="btn btn-primary" type="button" @click="handleSaveMultiSelect">保存订阅</button>
+                <button class="btn" type="button" @click="multiSelect.channelIds = []">全不选</button>
+              </div>
             </div>
-          </div>
-          <p v-else style="color:var(--text-dim);font-size:12px;margin-top:12px">先选一类内容，再勾渠道。</p>
+            <p v-else style="color:var(--text-dim);font-size:12px;margin-top:12px">先选一类内容，再勾渠道。</p>
+          </template>
         </template>
 
         <p style="color:var(--text-dim);font-size:12px;margin:10px 0 0">
@@ -841,7 +897,7 @@ onMounted(async () => {
             readonly
             aria-label="消息预览内容"
             :value="previewContent"
-            placeholder="选择任务后点击刷新预览"
+            placeholder="点「刷新预览」生成内容"
             style="min-height:280px;width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap"
           ></textarea>
         </div>
@@ -974,7 +1030,9 @@ onMounted(async () => {
         </table>
       </div>
 
-      <div class="wp-delivery-pager">
+      <!-- 空表时不给分页条（U14）：一条记录都没有时它恒为「第 1 / 1 页」+ 两个禁用按钮，
+           占满一行却什么都做不了。有记录才出现。 -->
+      <div v-if="deliveries.total > 0" class="wp-delivery-pager">
         <button
           class="btn btn-sm"
           type="button"
@@ -1079,7 +1137,8 @@ onMounted(async () => {
         </table>
       </div>
 
-      <div class="wp-audit-pager">
+      <!-- 空表时不给分页条（U14），理由同发送记录。 -->
+      <div v-if="audit.total > 0" class="wp-audit-pager">
         <button
           class="btn btn-sm"
           type="button"
@@ -1271,11 +1330,16 @@ onMounted(async () => {
   word-break: break-all;
 }
 
-/* ══ U8 · 「立即发送」的禁用态 ═════════════════════════════════════════════
-   原来禁用只靠全局 `.btn:disabled{opacity:.5}`：绿底透出来仍是最显眼的主按钮。禁用
-   就该是灰的，可点才上绿。 */
-.wp-send-now { background: var(--green); border-color: var(--green); color: #fff; }
-.wp-send-now:hover:not(:disabled) { border-color: var(--green); }
+/* ══ U8 · 「立即发送」的禁用态 · U9 · 它可点时的对比度 ═════════════════════
+   禁用（U8）：原来只靠全局 `.btn:disabled{opacity:.5}`：绿底透出来仍是最显眼的主按钮。
+   禁用就该是灰的，可点才上绿。
+   可点（U9）：底色原来是内联的 `var(--green)`（#22c55e）+ 白字 —— 按 WCAG 只有 **2.28:1**
+   （正文要 4.5:1），而这是全页唯一会真外发的按钮。改深绿 #15803d：白字 **5.02:1**（两处
+   独立验算：组件测试里的 `contrastRatio`、真机复验的 `verify_after_b.py`）。
+   **只改本页这一处**：`--green` 还被渠道 / 群组 / 状态的徽章共用，动它会让本页与其它页
+   的同一控件颜色不一致（全局配色是另一个议题）。 */
+.wp-send-now { background: #15803d; border-color: #15803d; color: #fff; }
+.wp-send-now:hover:not(:disabled) { border-color: #15803d; }
 .wp-send-now:disabled {
   background: var(--card2);
   border-color: var(--border);

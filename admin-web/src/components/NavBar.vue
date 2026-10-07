@@ -87,9 +87,42 @@ watch(
   { flush: 'post' },
 )
 
+/** 首屏补滚的最后一拍：连接状态 / 延迟文本等异步内容落进 `.nav-right` 之后。 */
+const FIRST_PAINT_RESCROLL_MS = 600
+
+/**
+ * 首屏补滚当前项（UI 走查 U17：834 下「企微推送」被导航条右边缘裁掉，用户看不出自己
+ * 在哪一页，390 与 1440 都正常）。
+ *
+ * 根因是**列宽在 onMounted 那一刻还没定**：`.nav-right` 里的实时时钟刚被 `tickClock()`
+ * 填上（DOM 要等下一个微任务）、「实时已连接 / 延迟 30ms」还要等 WS 回来，中间那列因此
+ * 比最终宽 —— 834 实测「内容 392 / 可视 ~401」，并不溢出，`scrollIntoView` 于是**什么都
+ * 不做**；等这些文字落进 DOM，列被压到 301，导航条才真的溢出，而这一刻已经没有人再去滚
+ * 它。390 那一档不受影响（标签行独占一整行，从第一帧起就溢出），所以只有 834 看得见。
+ *
+ * 补滚的每一拍都是**幂等**的：不溢出时 `scrollIntoView` 自己不做任何事。只在首屏这一段
+ * 短窗口里跑，用户手动滚到别的格子之后不会再被拉回来。
+ */
+function scrollActiveIntoViewOnFirstPaint() {
+  const run = () => tabs.scrollActiveIntoView('auto')
+  const raf = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame
+    : (callback) => setTimeout(callback, 16)
+  // 双 rAF：等这一帧的布局落地（Vue 的 DOM 更新在微任务里，早于下一帧）。
+  raf(() => raf(run))
+  // 连接状态与延迟文本要等 WS 回来才出现，它们同样会改列宽。
+  setTimeout(run, FIRST_PAINT_RESCROLL_MS)
+  // 字体换掉会改每一格的宽度（系统字体同步，WebView 里的字体可能异步就绪）。
+  if (document.fonts && typeof document.fonts.ready?.then === 'function') {
+    document.fonts.ready.then(run).catch(() => {})
+  }
+}
+
 onMounted(() => {
   // 首屏（可能直接落在 `/logs`）用 auto：进场动画期间做平滑滚动只会看到条在抖。
   tabs.scrollActiveIntoView('auto')
+  // 首屏这一次很可能**什么都没做**（那时列宽还没定），见上面这个函数的注释。
+  scrollActiveIntoViewOnFirstPaint()
 })
 </script>
 

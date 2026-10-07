@@ -484,24 +484,62 @@ export function jobPayload({ name = '', topicId = '', params = {}, notes = '', e
 }
 
 /**
+ * 「立即发送」这次会发给哪些群（UI 走查 U7）。
+ *
+ * 确认框原来只说「将发给 3 个群」：店长没法从这句话判断"里面有没有那个不该收的群"，
+ * 而消息发出去撤不回来。名字从页面**已经加载的订阅矩阵**里取 —— `matrix.topics[].channels`
+ * 正是订阅到这一类内容的渠道（与后端 `resolve_targets` 同一口径：停用的渠道也算，
+ * 投递时记 skipped，不是静默消失）。
+ *
+ * 名字数与该任务的 `target_count` 对不上时返回**空数组**（矩阵还没加载、或页面开着
+ * 这段时间里订阅在别处改过）：这时确认框退回只说数量，不会列一份可能错的名单 ——
+ * 一份"看着对"的错名单比没有名单更危险。
+ *
+ * @param {{ job?: object|null, matrix?: object|null }} args
+ * @returns {string[]}
+ */
+export function sendNowTargetNames({ job = null, matrix = null } = {}) {
+  const topicId = String(job?.topic_id || '')
+  const count = Number(job?.target_count) || 0
+  if (!topicId || count <= 0) return []
+  const row = (matrix?.topics || []).find((item) => String(item?.id) === topicId)
+  const nameById = new Map(
+    (matrix?.channels || []).map((item) => [Number(item?.id), String(item?.name || '')]),
+  )
+  const listed = (row?.channels || [])
+    .map((entry) => nameById.get(Number(entry?.id)))
+    .filter(Boolean)
+  return listed.length === count ? listed : []
+}
+
+/** 收件人那一句（U7）：有名单就报名字，多于 3 个只报前三个 + 总数。 */
+function targetSummary(targets, targetNames) {
+  const listed = (targetNames || []).map((name) => String(name || '').trim()).filter(Boolean)
+  if (listed.length > 3) return `将发给 ${listed.slice(0, 3).join('、')} 等 ${targets} 个群。`
+  if (listed.length) return `将发给 ${targets} 个群：${listed.join('、')}。`
+  return `将发给 ${targets} 个群。`
+}
+
+/**
  * 「立即发送」的确认文案。
  *
  * 原来的文案是「确定立即发送当前预览对应的销售报表？」——**预览区空着的时候也这么说**：
- * 页面显示「0 / 2048 字节」「选择任务后点击刷新预览」，确认框却在描述一份"当前预览"，
+ * 页面显示「0 / 2048 字节」「点『刷新预览』生成内容」，确认框却在描述一份"当前预览"，
  * 用户既不知道会发出什么，也不知道发给哪个群。外发消息撤不回来，确认框是最后一道闸门，
- * 它必须说清"发给谁、多少字节、开头长什么样"。
+ * 它必须说清"发给谁（U7 起点名到群）、多少字节、开头长什么样"。
  *
- * @param {{ job?: object|null, bytes?: number, content?: string }} args
- *   `job` 是当前选中的推送任务（带 name / webhook_name），`bytes`/`content` 来自预览。
+ * @param {{ job?: object|null, bytes?: number, content?: string, targetNames?: string[] }} args
+ *   `job` 是当前选中的推送任务（带 name / topic_name / target_count），`bytes`/`content`
+ *   来自预览；`targetNames` 是这一类的收件群名（来自 `sendNowTargetNames`，可为空）。
  * @returns {string}
  */
-export function sendNowConfirmText({ job = null, bytes = 0, content = '' } = {}) {
+export function sendNowConfirmText({ job = null, bytes = 0, content = '', targetNames = [] } = {}) {
   const typeLabel = job?.topic_name || '推送内容'
   const targets = Number(job?.target_count) || 0
-  // 收件人来自订阅（票 08）：确认框要说清"发给几个群"。一个都没有时直接说清这次会被
-  // 拒绝，而不是让人以为点下去就发出去了。
+  // 收件人来自订阅（票 08）：确认框要说清"发给几个群"，能给出名单时（U7）还要说清发给谁。
+  // 一个都没有时直接说清这次会被拒绝，而不是让人以为点下去就发出去了。
   const lines = targets > 0
-    ? [`确定立即发送${typeLabel}吗？将发给 ${targets} 个群。`]
+    ? [`确定立即发送${typeLabel}吗？${targetSummary(targets, targetNames)}`]
     : [`确定立即发送${typeLabel}吗？当前没有任何群订阅这类内容，发送会被拒绝，请先在「订阅」里勾选收件群。`]
 
   const size = Number(bytes) || 0
@@ -641,8 +679,13 @@ export function useWecomPush() {
    * 切到统一出站表之后（ADR 0095），**这一条就是这一页唯一的记录来源**：旧表那一份
    * （`/logs` 的 `logs` 键）只为缓存着旧 bundle 的浏览器留着，页面不读它。所以这里
    * 连 `limit` 都不发 —— 一页多少条由页码与 `page_size` 决定。
+   *
+   * **页码夹取**（UI 走查 U18）：后端对 `page` 只做下界（≥1），不夹上界。超过保留期的
+   * 记录被清理后 `pages` 会变小，而页面停在原来的页码上，于是收到一页空表 + 自相矛盾的
+   * 「第 2 / 1 页」（「上一页」还可点）。收到 `page > pages` 就回落到最后一页重拉**一次**：
+   * `allowClamp` 保证只重拉一次，后端真给出一个不可能的组合时不会无限递归。
    */
-  async function loadDeliveries({ page = null } = {}) {
+  async function loadDeliveries({ page = null, allowClamp = true } = {}) {
     if (page !== null) deliveries.page = Math.max(1, Number(page) || 1)
     const data = await api.get('/api/wecom-push/logs', deliveryQuery({
       topicId: deliveries.filters.topicId,
@@ -654,6 +697,10 @@ export function useWecomPush() {
     deliveries.total = Number(data.total) || 0
     deliveries.pages = Number(data.pages) || 0
     deliveries.page = Number(data.page) || deliveries.page
+    const lastPage = deliveries.pages > 0 ? deliveries.pages : 1
+    if (allowClamp && deliveries.page > lastPage) {
+      return loadDeliveries({ page: lastPage, allowClamp: false })
+    }
     return deliveries
   }
 

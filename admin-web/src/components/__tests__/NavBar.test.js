@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import NavBar from '../NavBar.vue'
+
+// 每个用例结束后自动卸载：导航条的首屏补滚带 rAF / 定时器，上一个用例的组件留在树里
+// 会让那些回调跑到下一个用例的断言里（实测把「数据管理」那次滚动记进了 U17 的记录）。
+enableAutoUnmount(afterEach)
 
 // 后台导航条上的「退出登录」（票 10）：以前是 `window.location.href = '/login'` ——
 // 整页重载、丢掉原目标（navigation-audit 条目 8）。现在走与其余四处同一个实现：
@@ -112,5 +116,28 @@ describe('全局导航的溢出与当前项', () => {
     await router.push('/sales-report')
     await flushPromises()
     expect(scrolled[scrolled.length - 1]).toContain('销售报表')
+  })
+
+  // U17：834 下「企微推送」被导航条右边缘裁掉。根因不是"没调 scrollIntoView"——首屏那次
+  // 确实调了，但那一刻 `.nav-right` 里的时钟还是空的、连接状态也没到，中间那列比最终宽，
+  // 导航条**还没溢出**，于是它什么都不做；等这些文字落进 DOM，列被压窄、导航条才真的溢出，
+  // 而这时已经没人再滚它。修法是首屏跟在布局后面补滚（幂等）。
+  it('首屏补滚：挂载后还会再滚一次，参数带 inline:center（U17）', async () => {
+    const calls = []
+    Element.prototype.scrollIntoView = function (options) {
+      calls.push({ text: String(this.textContent || ''), options })
+    }
+    await mountNavBar('/wecom-push')
+    // 只看这一格：文件里别的用例也会滚自己的那一格
+    const mine = () => calls.filter((call) => call.text.includes('企微推送'))
+    expect(mine().length, '挂载那一刻就该先滚一次').toBeGreaterThanOrEqual(1)
+
+    // 补滚排在双 rAF 之后（jsdom 的 rAF ≈ 16ms 一帧）。
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(mine().length, '首屏没有补滚，列宽变化后当前项仍会被裁').toBeGreaterThanOrEqual(2)
+    for (const call of mine()) {
+      expect(call.options).toMatchObject({ inline: 'center' })
+    }
   })
 })

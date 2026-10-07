@@ -264,6 +264,16 @@ describe('变更历史 tab', () => {
     expect(wrapper.find('.wp-audit-pager').text()).toContain('第 2 / 3 页')
   })
 
+  // U14：一条记录都没有时，完整的分页条（两个按钮都禁用、恒为「第 1 / 1 页」）纯噪音。
+  it('一条记录都没有时不渲染分页条（U14）', async () => {
+    const { wrapper } = await mountView({ rows: [], total: 0, pages: 0 })
+
+    await openTab(wrapper, '变更历史')
+
+    expect(wrapper.find('.wp-audit-table').text()).toContain('暂无变更记录')
+    expect(wrapper.find('.wp-audit-pager').exists()).toBe(false)
+  })
+
   it('说明保留口径：配置变更长期保留，不随发送记录的清理走', async () => {
     const { wrapper } = await mountView()
 

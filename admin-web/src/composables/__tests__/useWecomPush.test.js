@@ -15,7 +15,7 @@ vi.mock('../../api/client', () => ({
 }))
 
 const {
-  useWecomPush, sendNowConfirmText, canSendNow,
+  useWecomPush, sendNowConfirmText, sendNowTargetNames, canSendNow,
   loadErrorMessage, loadErrorDetail, testChannelConfirmText,
   deliveryErrorSummary, wecomErrcode,
 } = await import('../useWecomPush.js')
@@ -121,7 +121,7 @@ describe('渠道表单的群组成员关系', () => {
 
 // 「立即发送」会把消息真的发到门店群、撤不回来。原来的确认文案写死了
 // 「确定立即发送当前预览对应的销售报表？」——预览区空着（0 / 2048 字节、
-// 「选择任务后点击刷新预览」）时也这么说，用户既不知道发给谁也不知道多少字节。
+// 「点『刷新预览』生成内容」）时也这么说，用户既不知道发给谁也不知道多少字节。
 // 票 08 之后收件人来自**订阅**：文案要说清"将发给几个群"，零订阅时说清会被拒绝。
 describe('立即发送的确认文案与可点条件', () => {
   const JOB = { name: '每日销售报表', topic_name: '销售报表', target_count: 2 }
@@ -179,6 +179,54 @@ describe('立即发送的确认文案与可点条件', () => {
     // 只有空白字符同样不算"核对过内容"
     expect(canSendNow({ job: JOB, content: '   \n  ' })).toBe(false)
     expect(canSendNow({ job: null, content: '有内容' })).toBe(false)
+  })
+})
+
+// U7：确认框原来只说「将发给 3 个群」——店长看不出里面有没有那个不该收的群，而消息发出
+// 去撤不回来。群名从页面已经加载的订阅矩阵里取（与后端 resolve_targets 同一口径）。
+describe('立即发送的收件群名单（U7）', () => {
+  const JOB = {
+    id: 1, name: '每日销售报表', topic_id: 'sales_report', topic_name: '销售报表', target_count: 2,
+  }
+  const MATRIX = {
+    topics: [
+      { id: 'sales_report', name: '销售报表', channels: [{ id: 1, enabled: true }, { id: 2, enabled: true }] },
+      { id: 'hygiene_reminder', name: '卫生提醒', channels: [{ id: 1, enabled: true }] },
+    ],
+    channels: [{ id: 1, name: '一楼前厅群' }, { id: 2, name: '店长日报群' }, { id: 3, name: '卫生群' }],
+  }
+
+  it('从订阅矩阵里取出这一类内容的收件群名（顺序跟矩阵的列序）', () => {
+    expect(sendNowTargetNames({ job: JOB, matrix: MATRIX })).toEqual(['一楼前厅群', '店长日报群'])
+  })
+
+  it('名字数与 target_count 对不上（矩阵没加载 / 已在别处改过）时给空数组，不列一份可能错的名单', () => {
+    expect(sendNowTargetNames({ job: { ...JOB, target_count: 3 }, matrix: MATRIX })).toEqual([])
+    expect(sendNowTargetNames({ job: JOB, matrix: null })).toEqual([])
+    expect(sendNowTargetNames({ job: { ...JOB, target_count: 0 }, matrix: MATRIX })).toEqual([])
+    expect(sendNowTargetNames({ job: { ...JOB, topic_id: '' }, matrix: MATRIX })).toEqual([])
+  })
+
+  it('≤3 个群时逐个点名', () => {
+    const text = sendNowConfirmText({
+      job: JOB, bytes: 10, content: 'x', targetNames: ['一楼前厅群', '店长日报群'],
+    })
+    expect(text).toContain('将发给 2 个群：一楼前厅群、店长日报群。')
+  })
+
+  it('多于 3 个群时只列前三个 + 总数，不把一整页群名塞进确认框', () => {
+    const text = sendNowConfirmText({
+      job: { ...JOB, target_count: 5 },
+      bytes: 10,
+      content: 'x',
+      targetNames: ['A群', 'B群', 'C群', 'D群', 'E群'],
+    })
+    expect(text).toContain('将发给 A群、B群、C群 等 5 个群。')
+    expect(text).not.toContain('D群')
+  })
+
+  it('没有名单时退回只说数量（矩阵还没回来也不会说不出话）', () => {
+    expect(sendNowConfirmText({ job: JOB, bytes: 10, content: 'x' })).toContain('将发给 2 个群。')
   })
 })
 

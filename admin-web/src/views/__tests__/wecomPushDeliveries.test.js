@@ -344,6 +344,58 @@ describe('发送记录 tab 的分页', () => {
     expect(new URL(lastLogsCall(fetchMock).path, 'http://x').searchParams.get('page')).toBe('2')
     expect(wrapper.text()).toContain('第 2 / 3 页')
   })
+
+  // U14：空表时完整的分页条（两个按钮都禁用、恒为「第 1 / 1 页」+ 保留期说明）纯噪音。
+  it('一条记录都没有时不渲染分页条', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [],
+      deliveriesFor: () => ({
+        success: true, rows: [], total: 0, page: 1, page_size: 50, pages: 0, logs: [],
+      }),
+    })
+    await openTab(wrapper, '发送记录')
+
+    expect(wrapper.text()).toContain('暂无发送记录')
+    expect(wrapper.find('.wp-delivery-pager').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('第 1 / 1 页')
+  })
+
+  // U18：真实场景是超过保留期的记录被清理 ⇒ `pages` 变小，而页面停在原来的页码上。
+  it('翻到已经不存在的那一页时夹回第 1 页，不显示「第 2 / 1 页」+ 空表', async () => {
+    let logsCalls = 0
+    const { wrapper, fetchMock } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [],
+      deliveriesFor: () => {
+        logsCalls += 1
+        // ① 首屏：还有 2 页，「下一页」可点
+        if (logsCalls === 1) {
+          return { success: true, rows: [delivery()], total: 50, page: 1, page_size: 50, pages: 2 }
+        }
+        // ② 翻过去时后端已经清理到只剩 1 页：如实回 page 2 / pages 1
+        if (logsCalls === 2) {
+          return { success: true, rows: [], total: 50, page: 2, page_size: 50, pages: 1 }
+        }
+        // ③ 夹取后的那一页
+        return { success: true, rows: [delivery()], total: 50, page: 1, page_size: 50, pages: 1 }
+      },
+    })
+    await openTab(wrapper, '发送记录')
+    expect(wrapper.text()).toContain('第 1 / 2 页')
+
+    const next = wrapper.findAll('button').find((node) => node.text() === '下一页')
+    await next.trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(logsCalls).toBe(3)
+    expect(new URL(lastLogsCall(fetchMock).path, 'http://x').searchParams.get('page')).toBe('1')
+    expect(wrapper.text()).toContain('第 1 / 1 页')
+    expect(wrapper.text()).not.toContain('第 2 / 1 页')
+    // 夹回来那一页是有数据的，不是一张空表
+    expect(deliveryTable(wrapper).findAll('tbody tr')).toHaveLength(1)
+  })
 })
 
 // D2：这张卡以前和「定时任务」共用一个两列 grid，而左列自己带
