@@ -433,6 +433,158 @@ class OutboxRetentionTest(OutboxTestCase):
         self.assertEqual(await self._ids(), {old})
 
 
+class DyingSender(FakeSender):
+    """模拟「进程在发送途中退出」：取消异常从发送器里穿出去。
+
+    真实现场是崩溃 / systemd 重启 / **更新作业重启应用**：``mark_sending`` 已经落库，
+    写终态的代码没跑到，这一行就停在 ``sending``。派发路径对 ``CancelledError`` 是
+    往上抛（让关闭流程走完），所以它正好留下那一行，不用手工改库造夹具。
+    """
+
+    async def send_text(self, webhook_url, content):
+        raise asyncio.CancelledError()
+
+
+class OutboxStaleSendingTest(OutboxTestCase):
+    """卡在「发送中」的行要有兜底（票 03 返工）：超阈值回待发，用尽记失败。"""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self._old_timeout = settings.WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS
+        self.channel = await self._channel("卫生群", URL_A)
+        await self._subscribe([self.channel])
+
+    async def asyncTearDown(self):
+        settings.WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS = self._old_timeout
+        await super().asyncTearDown()
+
+    async def _die_mid_send(self):
+        """派发一轮，停在 mark_sending 与写终态之间；返回那一行（status=sending）。"""
+        dying = WeComOutbox(sender=DyingSender(), now=lambda: self.clock, gap_seconds=0)
+        with self.assertRaises(asyncio.CancelledError):
+            await dying.dispatch_pending(self.db)
+        row = (await self._rows())[0]
+        self.assertEqual(row["status"], "sending", "夹具没把这一行留在发送中")
+        return row
+
+    async def test_sending_row_within_the_threshold_is_untouched(self):
+        """正常在发（还没超阈值）的行不许被动：改了它就是制造重复投递。"""
+        await self._enqueue("正在发的一封")
+        row = await self._die_mid_send()
+        sending_at = row["sending_at"]
+        self.assertIsNotNone(sending_at, "进入发送的时刻要落库，否则兜底没有判据")
+
+        self.clock += timedelta(seconds=100)  # < 默认 300
+
+        self.assertEqual(await self.outbox.requeue_stale_sending(self.db), 0)
+        after = (await self._rows())[0]
+        self.assertEqual(after["status"], "sending")
+        self.assertEqual(int(after["attempts"]), 0)
+        self.assertEqual(after["sending_at"], sending_at)
+        self.assertEqual(self.sender.sent, [], "没超阈值的行不该被重发")
+
+    async def test_stale_sending_row_goes_back_to_the_queue_then_sent(self):
+        """超阈值的行回到待发（attempts +1、保留原有错误），下一轮正常发出。"""
+        await self._enqueue("卡住的一封")
+        self.sender.failures = ["boom1"]
+
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 0)
+        self.assertEqual(int((await self._rows())[0]["attempts"]), 1)
+
+        self.clock += timedelta(minutes=1)  # 退避到点
+        row = await self._die_mid_send()
+        self.assertEqual(int(row["attempts"]), 1, "崩掉的那次还没记进 attempts")
+        self.assertIn("boom1", row["last_error"], "上一条错误不该被 mark_sending 抹掉")
+
+        self.clock += timedelta(seconds=301)  # > 默认 300
+        self.assertEqual(await self.outbox.requeue_stale_sending(self.db), 1)
+
+        row = (await self._rows())[0]
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(int(row["attempts"]), 2, "这次尝试确实消耗了一次")
+        self.assertIn("发送中进程退出", row["last_error"])
+        self.assertIn("boom1", row["last_error"], "原有错误信息要保留")
+
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 1)
+        row = (await self._rows())[0]
+        self.assertEqual(row["status"], "sent")
+        self.assertEqual(int(row["attempts"]), 3)
+        self.assertEqual([content for _, content in self.sender.sent], ["卡住的一封"])
+
+    async def test_stale_sending_row_with_attempts_used_up_is_failed(self):
+        """重试次数已用尽的行不许无限重发：直接记失败，原因可读。"""
+        await self._enqueue("发不出去的一封")
+        self.sender.failures = ["boom1", "boom2", "boom3"]
+        for _ in range(3):  # 事件类上限 4：首发 + 两次退避重试之后只剩最后一次
+            await self.outbox.dispatch_pending(self.db)
+            self.clock += timedelta(minutes=16)
+
+        row = (await self._rows())[0]
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(int(row["attempts"]), 3)
+
+        await self._die_mid_send()  # 最后一次尝试中途进程退出
+
+        self.clock += timedelta(seconds=301)
+        self.assertEqual(await self.outbox.requeue_stale_sending(self.db), 1)
+
+        row = (await self._rows())[0]
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(int(row["attempts"]), 4, "崩掉的那次也算一次尝试")
+        self.assertIn("发送中进程退出", row["last_error"])
+        self.assertIn("重试次数已用尽", row["last_error"])
+        self.assertIsNotNone(row["finished_at"])
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 0, "失败的行不该再发")
+        self.assertEqual(self.sender.sent, [])
+
+    async def test_zero_threshold_turns_the_safety_net_off(self):
+        """0 = 不兜底：发送中的行永远不动（与节流 / 保留天数同一个口径）。"""
+        settings.WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS = 0
+        await self._enqueue("卡住的一封")
+        await self._die_mid_send()
+
+        self.clock += timedelta(days=2)
+
+        self.assertEqual(await self.outbox.requeue_stale_sending(self.db), 0)
+        self.assertEqual((await self._rows())[0]["status"], "sending")
+
+    async def test_the_pending_query_still_returns_pending_rows_only(self):
+        """兜底另起一条查询：``wecom_outbox_pending`` 对其它调用方的语义不变。"""
+        await self._enqueue("卡住的一封")
+        row = await self._die_mid_send()
+
+        self.assertEqual(await self.db.wecom_outbox_pending(), [])
+
+        self.clock += timedelta(seconds=301)
+        stale = await self.db.wecom_outbox_stale_sending(
+            (self.clock - timedelta(seconds=300)).isoformat()
+        )
+        self.assertEqual([int(item["id"]) for item in stale], [int(row["id"])])
+
+    async def test_a_row_stuck_before_the_migration_is_recovered_too(self):
+        """迁移前就卡住的行没有 sending_at：按 created_at 兜底，不能永远捞不回来。"""
+        outbox_id = await self.db.wecom_outbox_enqueue({
+            "topic_id": TOPIC,
+            "params_json": json.dumps({"text": "迁移前卡住的一封"}),
+            "target_channel_id": self.channel,
+            "idempotency_key": "legacy-stuck",
+            "status": "sending",
+            "created_at": (self.clock - timedelta(hours=2)).isoformat(),
+        })
+        self.assertIsNone((await self._rows())[0]["sending_at"], "旧行没有这一列的值")
+
+        self.assertEqual(await self.outbox.requeue_stale_sending(self.db), 1)
+
+        row = (await self._rows())[0]
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(int(row["attempts"]), 1)
+
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 1)
+        self.assertEqual((await self._rows())[0]["status"], "sent")
+        self.assertEqual([content for _, content in self.sender.sent], ["迁移前卡住的一封"])
+        self.assertEqual(int(outbox_id), int(row["id"]))
+
+
 class OutboxZeroSubscriptionTest(OutboxTestCase):
     async def test_no_subscription_enqueues_nothing_and_logs(self):
         await self._channel("没人订阅的群", URL_A)
@@ -466,6 +618,32 @@ class OutboxSchedulerLoopTest(OutboxTestCase):
                 await asyncio.gather(task, return_exceptions=True)
 
         self.assertEqual(row["status"], "sent")
+        sender.assert_awaited()
+
+    async def test_the_existing_wecom_loop_recovers_stuck_sending_rows(self):
+        """兜底也挂在这条既有循环上（不新增常驻 task）：卡住的行会被捞回来重发。"""
+        channel = await self._channel("卫生群", URL_A)
+        await self._subscribe([channel])
+        row_id = (await self._enqueue("卡住的一封"))[0]
+        # 上一轮进程在发送途中退出留下的行：停在 sending，进入时刻是墙上时钟的一小时前
+        await self.db.wecom_outbox_mark_sending(
+            row_id,
+            sending_at=(datetime.now(CHINA_TZ) - timedelta(hours=1)).isoformat(),
+        )
+        sender = AsyncMock(return_value=(True, "ok"))
+
+        with patch.object(wecom_push_service, "send_text", new=sender), patch.object(
+            wecom_push_service_module, "SCHEDULER_INTERVAL_SECONDS", 0.01
+        ):
+            task = asyncio.create_task(wecom_push_service.scheduler_loop(self.db))
+            try:
+                row = await self._wait_for_status("sent")
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        self.assertEqual(row["status"], "sent")
+        self.assertEqual(int(row["attempts"]), 2, "崩掉的那次 + 这次成功")
         sender.assert_awaited()
 
     async def _wait_for_status(self, status, timeout=5.0):

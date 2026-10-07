@@ -394,7 +394,8 @@ class _WecomSubscriptionsRepoMixin:
                 await cursor.execute(
                     """SELECT id, topic_id, params_json, schedule_id, target_channel_id,
                               content_summary, message_bytes, status, attempts, last_error,
-                              idempotency_key, scheduled_at, created_at, finished_at
+                              idempotency_key, scheduled_at, created_at, sending_at,
+                              finished_at
                        FROM wecom_push_outbox WHERE id = ?""",
                     (int(outbox_id),),
                 )
@@ -413,7 +414,8 @@ class _WecomSubscriptionsRepoMixin:
                 await cursor.execute(
                     """SELECT id, topic_id, params_json, schedule_id, target_channel_id,
                               content_summary, message_bytes, status, attempts, last_error,
-                              idempotency_key, scheduled_at, created_at, finished_at
+                              idempotency_key, scheduled_at, created_at, sending_at,
+                              finished_at
                        FROM wecom_push_outbox
                        WHERE status = ?
                        ORDER BY id ASC LIMIT ?""",
@@ -423,6 +425,37 @@ class _WecomSubscriptionsRepoMixin:
             return [dict(row) for row in rows]
         except Exception as e:
             logger.error(f"❌ 获取待发出站记录失败: {e}")
+            return []
+
+    async def wecom_outbox_stale_sending(self, cutoff_iso: str, limit: int = 20) -> List[Dict]:
+        """捞「发送中卡住」的行：进入 sending 的时刻早于 ``cutoff_iso``（兜底入口）。
+
+        单独一条查询，**不动** ``wecom_outbox_pending`` 的语义：那条是正常派发的入口，
+        只捞 pending、先进先出；把发送中的行放宽进去，既让「待发」这个名字名不副实，
+        也会把没确认投递结果的行混进正常队列。
+
+        判据是 ``sending_at``（``mark_sending`` 时写入）。迁移前就已经卡住的行没有这一
+        列的值，退回 ``created_at``：入队时刻必然不晚于进入 sending 的时刻，宁可早捞
+        一会儿，也好过永远停在发送中。
+        """
+        try:
+            safe_limit = max(1, min(int(limit), 200))
+            tdb = self._connection.table("wecom_push_outbox")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT id, topic_id, params_json, schedule_id, target_channel_id,
+                              content_summary, message_bytes, status, attempts, last_error,
+                              idempotency_key, scheduled_at, created_at, sending_at,
+                              finished_at
+                       FROM wecom_push_outbox
+                       WHERE status = ? AND COALESCE(sending_at, created_at) < ?
+                       ORDER BY id ASC LIMIT ?""",
+                    (SUB_OUTBOX_STATUS_SENDING, str(cutoff_iso), safe_limit),
+                )
+                rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ 获取卡住的出站记录失败: {e}")
             return []
 
     async def wecom_outbox_recent(
@@ -438,7 +471,8 @@ class _WecomSubscriptionsRepoMixin:
             tdb = self._connection.table("wecom_push_outbox")
             sql = """SELECT id, topic_id, params_json, schedule_id, target_channel_id,
                             content_summary, message_bytes, status, attempts, last_error,
-                            idempotency_key, scheduled_at, created_at, finished_at
+                            idempotency_key, scheduled_at, created_at, sending_at,
+                            finished_at
                      FROM wecom_push_outbox"""
             params: List[Any] = []
             conditions: List[str] = []
@@ -463,10 +497,23 @@ class _WecomSubscriptionsRepoMixin:
             logger.error(f"❌ 获取发送记录失败: {e}")
             return []
 
-    async def wecom_outbox_mark_sending(self, outbox_id: int) -> bool:
-        """标记「发送中」。重试路径由调用方先经 ``wecom_outbox_mark_retry`` 放回待发。"""
+    async def wecom_outbox_mark_sending(
+        self, outbox_id: int, *, sending_at: Optional[str] = None
+    ) -> bool:
+        """标记「发送中」，并记下进入发送的时刻。重试路径由调用方先经
+        ``wecom_outbox_mark_retry`` 放回待发。
+
+        ``sending_at`` 是兜底判据（超过阈值还没写终态就要被捞回来），由调用方给：派发
+        路径传自己的时钟，测试用假时钟驱动；不给就取现在。
+
+        **不清 ``last_error``**：这一行正在发，上一条失败的原因对排查还有价值；进程要
+        是在这中间退出，兜底把行捞回来时那句错误还在（另见
+        ``services/wecom_outbox.py::requeue_stale_sending``）。
+        """
         return await self._outbox_set_status(
-            outbox_id, SUB_OUTBOX_STATUS_SENDING, last_error=""
+            outbox_id,
+            SUB_OUTBOX_STATUS_SENDING,
+            sending_at=str(sending_at or _now()),
         )
 
     async def wecom_outbox_mark_sent(
@@ -546,6 +593,7 @@ class _WecomSubscriptionsRepoMixin:
         last_error: Optional[str] = None,
         attempts: Optional[int] = None,
         scheduled_at: Optional[str] = None,
+        sending_at: Optional[str] = None,
         finished: bool = False,
     ) -> bool:
         try:
@@ -560,6 +608,9 @@ class _WecomSubscriptionsRepoMixin:
             if scheduled_at is not None:
                 sets.append("scheduled_at = ?")
                 params.append(str(scheduled_at))
+            if sending_at is not None:
+                sets.append("sending_at = ?")
+                params.append(str(sending_at))
             if finished:
                 sets.append("finished_at = ?")
                 params.append(_now())

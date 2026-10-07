@@ -44,6 +44,13 @@ STATUS_PENDING = SUB_OUTBOX_STATUS_PENDING
 # 渠道停用时跳过投递的原因：订阅保留、投递跳过，记录里要写清为什么。
 REASON_CHANNEL_DISABLED = "渠道已停用，本次投递跳过"
 
+# 发送中兜底的原因（写进 last_error）：`mark_sending` 之后、写终态之前进程退出
+# （崩溃 / systemd 重启 / 更新作业重启应用），这一行会永远停在 sending —— 派发只捞
+# pending，于是它既不会被重发、也不会被标失败。超过阈值就按「这一次发送确实消耗了
+# 一次尝试」结算，并把这句原因留给排查的人看。
+REASON_SENDING_LOST = "发送中进程退出（发送结果未确认），已回到待发"
+REASON_SENDING_LOST_EXHAUSTED = "发送中进程退出，重试次数已用尽"
+
 # 一轮派发最多捞多少行：与卫生照片队列同量级，够把一轮的突发排空，又不至于让
 # 一次循环长时间占着调度器。
 OUTBOX_BATCH_SIZE = 20
@@ -83,6 +90,11 @@ class ResolvedTarget:
 
 def _now() -> datetime:
     return datetime.now(CHINA_TZ)
+
+
+def _with_previous_error(reason: str, previous: str) -> str:
+    """兜底原因在前、上一条错误附在后：**保留原有错误信息**，不覆盖排查线索。"""
+    return f"{reason}；上次错误：{previous}" if previous else reason
 
 
 def build_idempotency_key(topic_id: str, business_reference: str, channel_id: int) -> str:
@@ -333,7 +345,7 @@ class WeComOutbox:
             await self._settle_failure(db, row, f"webhook 解密失败：{exc}")
             return False
 
-        await db.wecom_outbox_mark_sending(row_id)
+        await db.wecom_outbox_mark_sending(row_id, sending_at=now.isoformat())
         ok, error = await self._send_all(webhook_url, outgoing)
         if ok:
             await db.wecom_outbox_mark_sent(
@@ -368,11 +380,10 @@ class WeComOutbox:
         """
         row_id = int(row["id"])
         attempts = self._attempts(row) + 1
+        max_attempts = self._max_attempts(row)
         if row.get("schedule_id") is not None:
-            max_attempts = SCHEDULED_MAX_ATTEMPTS
             delay: float = SCHEDULED_RETRY_DELAY_SECONDS
         else:
-            max_attempts = EVENT_MAX_ATTEMPTS
             backoff = EVENT_RETRY_BACKOFF_SECONDS
             delay = backoff[min(attempts - 1, len(backoff) - 1)]
 
@@ -395,11 +406,91 @@ class WeComOutbox:
             error,
         )
 
+    # ── 发送中兜底 ────────────────────────────────────────────────────────
+
+    async def requeue_stale_sending(self, db, *, now: Optional[datetime] = None) -> int:
+        """把卡在「发送中」的行捞回来，返回被结算的行数。
+
+        ``mark_sending`` 之后、写终态之前进程退出（崩溃 / systemd 重启 / **更新作业重启
+        应用**），这一行会永远停在 sending：派发只捞 pending，于是它既不会被重发、也不会
+        被标失败，管理页面上只剩一条卡住的行。超过
+        ``WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS`` 还没写终态的行，就当作发送它的进程已经
+        退出，按「这一次发送确实消耗了一次尝试」结算：
+
+        - 已达上限 → 记失败，原因写明「发送中进程退出，重试次数已用尽」；
+        - 未达上限 → 回到待发，attempts + 1，原有错误信息一并保留。
+
+        阈值 0 = 关掉兜底（发送中的行永远不动）。正常在发的行不会被碰：派发与兜底由同
+        一条 30 秒循环**顺序**驱动（单 worker，没有并发调用方），而在发的行从
+        ``mark_sending`` 到写终态最多是「分段数 × 单条发送超时（10 秒）」，够不着默认
+        的 300 秒。
+        """
+        timeout = self._sending_timeout_seconds()
+        if timeout <= 0:
+            return 0
+        moment = now or self._now()
+        cutoff = (moment - timedelta(seconds=timeout)).isoformat()
+        rows = await db.wecom_outbox_stale_sending(cutoff, OUTBOX_BATCH_SIZE)
+        reclaimed = 0
+        for row in rows:
+            try:
+                await self._reclaim_row(db, row, moment)
+                reclaimed += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # 单行异常不该带走整批（其余行还卡着）
+                logger.error("出站兜底异常 outbox=%s: %s", row.get("id"), exc)
+        return reclaimed
+
+    async def _reclaim_row(self, db, row: Mapping[str, Any], moment: datetime) -> None:
+        """结算一行卡住的 sending：用尽的记失败，否则放回待发（并消耗一次尝试）。"""
+        row_id = int(row["id"])
+        attempts = self._attempts(row) + 1
+        previous = str(row.get("last_error") or "").strip()
+        if attempts >= self._max_attempts(row):
+            reason = _with_previous_error(
+                f"{REASON_SENDING_LOST_EXHAUSTED}（已尝试 {attempts} 次）", previous
+            )
+            await db.wecom_outbox_mark_failed(row_id, reason, attempts=attempts)
+            logger.warning(
+                "出站兜底：发送中进程退出且重试次数已用尽 outbox=%s attempts=%s",
+                row_id,
+                attempts,
+            )
+            return
+        await db.wecom_outbox_mark_retry(
+            row_id,
+            _with_previous_error(REASON_SENDING_LOST, previous),
+            STATUS_PENDING,
+            attempts,
+            scheduled_at=moment.isoformat(),
+        )
+        logger.warning(
+            "出站兜底：发送中进程退出，已回到待发 outbox=%s attempts=%s",
+            row_id,
+            attempts,
+        )
+
+    @staticmethod
+    def _sending_timeout_seconds() -> int:
+        return int(getattr(settings, "WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS", 300) or 0)
+
     # ── 时间与尝试次数 ────────────────────────────────────────────────────
 
     @staticmethod
     def _attempts(row: Mapping[str, Any]) -> int:
         return int(row.get("attempts") or 0)
+
+    @staticmethod
+    def _max_attempts(row: Mapping[str, Any]) -> int:
+        """这一行的尝试上限：定时类首发 + 当天补发一次，事件类首发 + 退避重试 3 次。
+
+        靠 ``schedule_id`` 认定时投递（它来自一条推送任务，事件投递没有任务），
+        与 ``_settle_failure`` 同一把尺子 —— 两处各写一套迟早会漂。
+        """
+        if row.get("schedule_id") is not None:
+            return SCHEDULED_MAX_ATTEMPTS
+        return EVENT_MAX_ATTEMPTS
 
     @staticmethod
     def _is_due(row: Mapping[str, Any], now: datetime) -> bool:

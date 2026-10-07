@@ -140,6 +140,11 @@ class Settings(BaseSettings):
     # 每分钟 20 条。0 = 关掉节流（阈值）/ 永久保留（保留天数）。
     WECOM_OUTBOX_RATE_LIMIT_PER_MINUTE: int = 20
     WECOM_OUTBOX_RETENTION_DAYS: int = 90
+    # 「发送中」兜底：一行进入 sending 后超过这个秒数还没写终态，就当作发送它的进程
+    # 已经退出（崩溃 / systemd 重启 / 更新作业重启应用），由调度循环捞回来——未达上限
+    # 的回到待发，用尽的记失败。默认 300 秒，明显大于单次发送超时（10 秒）与节流窗口
+    # （60 秒）：正常在发的行永远够不着这个阈值。0 = 关掉兜底（发送中的行永远不动）。
+    WECOM_OUTBOX_SENDING_TIMEOUT_SECONDS: int = 300
 
     # 磁盘守护（进程内）：阈值告警 + 健康端点暴露
     DISK_GUARD_ENABLED: bool = True

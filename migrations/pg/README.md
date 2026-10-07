@@ -49,6 +49,7 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0014_hygiene_share_pair_image.sql` | `hygiene_wecom_shares."extra_capture_id"` 列：专项前后对照的「前」那张图（主列存「后」），发送时现拼成一张左前右后的对照图 | flush 的查询要读这一列 —— 缺列时**所有**验收照片都发不出去（每轮 flush 报一次错，日志可见）；验收本身照常成功 |
 | `0015_hygiene_employee_admin_caps.sql` | `hygiene_employees."admin_caps"` 列：员工的管理能力逐项开关（JSON 数组文本），并按升级前行为回填 `permission = '管理员'` 那三项目 | 花名册里所有员工都变成「没有任何管理能力」（判定以 `admin_caps` 为准，`permission` 那一列不再作数） |
 | `0016_wecom_push_subscriptions.sql` | 推送订阅的新模型：`wecom_push_subscriptions`（内容类型 × 渠道/群组）、`wecom_channel_groups`、`wecom_channel_group_members`、`wecom_push_outbox`（队列表兼发送记录），按**三条规则**回填现有收件人，并把 `wecom_push_logs` / `hygiene_wecom_shares` 的历史行搬进 `wecom_push_outbox` | 新代码读不到任何订阅 → **一条推送都发不出去**（卫生提醒、验收照片、采集告警、日报全停）；发送记录页空 |
+| `0017_wecom_outbox_sending_at.sql` | `wecom_push_outbox."sending_at"` 列：这一行**进入发送的时刻**，也是「卡在 sending」的兜底判据（进程在 `mark_sending` 之后退出时，留给下一次派发把行捞回来） | 兜底查询捕到缺列 → 卡在 `sending` 的行**永远捞不回来**（就是票 03 返工修的那个缺口）；`mark_sending` 那条 UPDATE 也会整条落空（行留在 `pending`，投递照常，只是状态机少跳一步） |
 
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，
