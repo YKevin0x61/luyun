@@ -7,11 +7,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -21,6 +22,14 @@ from database import CHINA_TZ, DatabaseManager
 from services.business_day import business_date_of, previous_business_date
 from services.credentials_store import _fernet
 from services.dish_normalize import normalize_dish_name
+from services.wecom_push_topics import (
+    TOPIC_RECONCILE_DIFF,
+    TOPIC_SALES_REPORT,
+    TOPIC_TEST_MESSAGE,
+    PushTrigger,
+    get_topic,
+    topic_display_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +96,19 @@ def validate_schedule_time(schedule_time: str) -> str:
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", normalized_time):
         raise ValueError("推送时间格式必须是 HH:MM")
     return normalized_time
+
+
+def job_params(job: Mapping[str, Any]) -> Dict[str, Any]:
+    """推送任务的参数（`params_json` → dict）。
+
+    解析不了就当空参数：页面与预览不该因为库里一行坏数据整页打不开（入队时注册表会
+    按 schema 报出缺哪个字段，那才是该看见的错误）。
+    """
+    try:
+        params = json.loads(str(job.get("params_json") or "{}"))
+    except ValueError:
+        return {}
+    return dict(params) if isinstance(params, dict) else {}
 
 
 def resolve_report_dates(date_range_mode: str, now: Optional[datetime] = None) -> tuple[str, str]:
@@ -347,72 +369,132 @@ class WeComPushService:
         content = await build_data_quality_job_message(db, date_range_mode=date_range_mode)
         return RenderedMessage(content=content, byte_length=len(content.encode("utf-8")))
 
+    async def render_job_message(self, db: DatabaseManager, job: Mapping[str, Any]) -> RenderedMessage:
+        """按任务的**内容类型**渲染正文（定时侧）。
+
+        报表类照旧现算（数据要去库里取）；其余内容类型的正文由触发点放进参数的 `text`
+        里（参数即正文）。所以注册表**新加一类内容类型时这里不用改** —— 只有当它的正文
+        需要现算数据时，才在这里多一条分支。
+        """
+        topic_id = str(job.get("topic_id") or "")
+        params = job_params(job)
+        if topic_id == TOPIC_SALES_REPORT:
+            return await self.build_sales_report_message(
+                db,
+                date_range_mode=str(params.get("date_range_mode") or "today"),
+                station=str(params.get("station") or ""),
+            )
+        if topic_id == TOPIC_RECONCILE_DIFF:
+            return await self.build_data_quality_message(
+                db,
+                date_range_mode=str(params.get("date_range_mode") or "today"),
+            )
+        text = str(params.get("text") or "").strip()
+        if text:
+            return RenderedMessage(content=text, byte_length=len(text.encode("utf-8")))
+        raise ValueError(
+            f"「{topic_display_name(topic_id)}」的正文由触发点产出，这里没有可预览的内容"
+        )
+
     async def preview_job(self, db: DatabaseManager, job_id: int) -> RenderedMessage:
         job = await db.wecom_job_get(job_id)
         if not job:
             raise ValueError("推送任务不存在")
-        push_type = job.get("push_type") or SALES_REPORT_PUSH_TYPE
-        if push_type == SALES_REPORT_PUSH_TYPE:
-            return await self.build_sales_report_message(
-                db,
-                date_range_mode=job.get("date_range_mode", "today"),
-                station=job.get("station", ""),
-            )
-        if push_type == DATA_QUALITY_PUSH_TYPE:
-            return await self.build_data_quality_message(
-                db,
-                date_range_mode=job.get("date_range_mode", "today"),
-            )
-        raise ValueError("暂不支持该推送类型")
+        return await self.render_job_message(db, job)
 
-    async def send_job(self, db: DatabaseManager, job_id: int, mark_sent: bool = False) -> Dict[str, Any]:
+    async def enqueue_job(
+        self,
+        db: DatabaseManager,
+        job: Mapping[str, Any],
+        *,
+        business_reference: str,
+        targets: Optional[List[Any]] = None,
+        now: Optional[datetime] = None,
+    ) -> List[int]:
+        """把一条推送任务按它的内容类型入队，收件人来自订阅（票 08）。
+
+        入队而不是直接发送：节流、重试、发送记录都由统一出站管（ADR 0095）。出站行带
+        `schedule_id` = 任务 id，定时类「失败当天补发一次」的状态机就挂在这上面。
+
+        ``now`` 传给入队那一步去冻结营业日：调度循环算 `last_sent_date` 与冻结参数用的
+        必须是同一个时刻（假时钟才穿得过去）。
+        """
+        # 延迟导入：出站服务要用本模块的发送器与拆分函数，模块级互相 import 会成环。
+        from services.wecom_outbox import wecom_outbox
+
+        topic_id = str(job.get("topic_id") or "")
+        topic = get_topic(topic_id)
+        if topic is None:
+            raise ValueError(f"未知的推送内容类型: {topic_id}")
+        return await wecom_outbox.enqueue_topic(
+            db,
+            topic_id,
+            params=job_params(job),
+            trigger=PushTrigger.SCHEDULED,
+            business_reference=business_reference,
+            targets=targets,
+            schedule_id=int(job["id"]),
+            # 发送记录页悬停能认出这是哪一封：报表类的正文在发送时才渲染，入队时拿不到
+            # 首行，用任务名做摘要。
+            summary=str(job.get("name") or ""),
+            now=now,
+        )
+
+    async def send_job_now(
+        self, db: DatabaseManager, job_id: int, now: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """立即发送：按这个内容类型的**全部订阅目标**投递（票 08）。
+
+        正文先渲染一次 —— 页面拿到的字节数与拆条数就是这次要发出去的东西；真正的发送
+        交给统一出站（每渠道节流、失败退避重试、结果落发送记录）。
+        """
+        from services.wecom_outbox import resolve_targets
+
         job = await db.wecom_job_get(job_id)
         if not job:
             raise ValueError("推送任务不存在")
-        webhook = await db.wecom_webhook_get(int(job["webhook_id"]))
-        if not webhook:
-            raise ValueError("webhook 不存在")
-        if not webhook.get("enabled"):
-            raise ValueError("webhook 已停用")
+        topic_id = str(job.get("topic_id") or "")
+        topic = get_topic(topic_id)
+        if topic is None:
+            raise ValueError(f"未知的推送内容类型: {topic_id}")
 
-        rendered_message = await self.preview_job(db, job_id)
-        webhook_url = decrypt_webhook_url(webhook["webhook_url_encrypted"])
-        sent_at = datetime.now(CHINA_TZ).isoformat()
-        status = "success"
-        response_text = ""
-        error = ""
-        message_parts = list(rendered_message.parts) or [rendered_message.content]
-        try:
-            ok, response_text = await self.send_messages(webhook_url, message_parts)
-            if not ok:
-                status = "failed"
-                error = response_text or "企业微信返回失败"
-        except Exception as exc:
-            status = "failed"
-            error = str(exc)
+        rendered_message = await self.render_job_message(db, job)
+        targets = await resolve_targets(db, topic_id)
+        if not targets:
+            # 静默成功会让店长以为发出去了：零订阅必须当场说清（用户故事 9）。
+            raise ValueError(
+                f"「{topic.name}」还没有订阅任何渠道，一条都发不出去："
+                "请先在「订阅」里勾选收件群"
+            )
 
-        await db.wecom_log_add({
-            "job_id": job_id,
-            "webhook_id": webhook["id"],
-            "webhook_name": webhook.get("name", ""),
-            "push_type": job.get("push_type", ""),
-            "status": status,
-            "message_bytes": rendered_message.byte_length,
-            "error": error,
-            "response_text": response_text,
-            "sent_at": sent_at,
-        })
-        if status == "success" and mark_sent:
-            await db.wecom_job_mark_sent(job_id, datetime.now(CHINA_TZ).date().isoformat())
+        moment = now or datetime.now(CHINA_TZ)
+        # 手工发送每次都是新的一次外发（连点两次就是两封），所以引用里带时刻；定时投递
+        # 用的是营业日，两者不会撞在同一个幂等键上。
+        outbox_ids = await self.enqueue_job(
+            db,
+            job,
+            business_reference=f"{business_date_of(moment)}#manual#{moment.isoformat()}",
+            targets=targets,
+            now=moment,
+        )
+        parts = list(rendered_message.parts) or [rendered_message.content]
         return {
-            "success": status == "success",
-            "status": status,
+            "success": True,
+            "status": "queued",
+            "queued": len(outbox_ids),
+            "target_count": len(targets),
             "message_bytes": rendered_message.byte_length,
-            "error": error,
-            "response_text": response_text,
+            "chunk_count": len(expand_messages(parts)),
         }
 
     async def send_test_message(self, db: DatabaseManager, webhook_id: int) -> Dict[str, Any]:
+        """给某个渠道发一条测试消息，并把结果登记进发送记录。
+
+        测试发送**同步**发（点一下就要看到成败），所以不排队等调度循环；结果作为一条
+        终态的出站行落库 —— 否则「测试发送」的效果在发送记录里看不到（票 07 的遗留）。
+        """
+        from services.wecom_outbox import wecom_outbox
+
         webhook = await db.wecom_webhook_get(webhook_id)
         if not webhook:
             raise ValueError("webhook 不存在")
@@ -433,17 +515,15 @@ class WeComPushService:
         except Exception as exc:
             status = "failed"
             error = str(exc)
-        await db.wecom_log_add({
-            "job_id": None,
-            "webhook_id": webhook["id"],
-            "webhook_name": webhook.get("name", ""),
-            "push_type": "test",
-            "status": status,
-            "message_bytes": rendered_message.byte_length,
-            "error": error,
-            "response_text": response_text,
-            "sent_at": datetime.now(CHINA_TZ).isoformat(),
-        })
+        await wecom_outbox.record_direct_delivery(
+            db,
+            TOPIC_TEST_MESSAGE,
+            params={"text": content},
+            channel_id=int(webhook["id"]),
+            status="sent" if status == "success" else "failed",
+            message_bytes=rendered_message.byte_length,
+            error=error,
+        )
         return {
             "success": status == "success",
             "status": status,
@@ -453,12 +533,18 @@ class WeComPushService:
         }
 
     async def dispatch_due_jobs(self, db: DatabaseManager, now: Optional[datetime] = None) -> int:
-        """到点就推，但**每个营业日只推一次**。
+        """到点就把这条任务**按订阅入队**，但每个营业日只入队一次。
+
+        收件人来自订阅（票 08）：任务只描述「内容类型 + 参数 + 时间」，一次投递一个目标
+        一行出站记录，真正发出去由统一出站的状态机负责（节流、失败当天补发都在那儿）。
 
         `last_sent_date` 存的是**营业日**（06:00 切），不是日历日（CORR-05）：定时任务
         的 `schedule_time` 可以落在 06:00 之后（正常营业时段），也可以落在 00:00–06:00
         ——后者按日历日排重会在同一场营业里推两次（跨零点前后各一次）。与
         `resolve_report_dates` 用同一把尺子，报表内容与排重键才不会错位。
+
+        「入队成功」才算今天发过（零订阅不写 `last_sent_date`）：一条都没入队时店长补上
+        订阅，当天到点还能补发一次。
         """
         current_time = now or datetime.now(CHINA_TZ)
         current_date = business_date_of(current_time)
@@ -471,9 +557,18 @@ class WeComPushService:
             if job.get("last_sent_date") == current_date:
                 continue
             try:
-                result = await self.send_job(db, int(job["id"]), mark_sent=True)
-                if result.get("success"):
-                    dispatched_count += 1
+                outbox_ids = await self.enqueue_job(
+                    db, job, business_reference=current_date, now=current_time
+                )
+                if not outbox_ids:
+                    logger.warning(
+                        "定时推送零订阅：任务 %s（内容类型 %s）没有任何目标渠道，本次一条不发",
+                        job.get("id"),
+                        job.get("topic_id"),
+                    )
+                    continue
+                await db.wecom_job_mark_sent(int(job["id"]), current_date)
+                dispatched_count += 1
             except Exception as exc:
                 logger.error("企微定时推送任务失败 job_id=%s: %s", job.get("id"), exc)
         return dispatched_count

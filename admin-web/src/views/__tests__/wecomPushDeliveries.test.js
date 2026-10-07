@@ -13,7 +13,7 @@ import WecomPushView from '../WecomPushView.vue'
 // 这条约束在页面上就落成「选项不写死」。所以夹具里的 `/meta` 故意给出比渠道/订阅
 // 数据里更多的一类内容：写死的实现会漏掉它。
 
-const API_VERSION = 'v1'
+const API_VERSION = 'v2'
 
 /** 注册表（`/meta` 的 topics）：页面只认这一份，不自己维护名字表。 */
 const REGISTRY_TOPICS = [

@@ -120,13 +120,14 @@ describe('渠道表单的群组成员关系', () => {
 // 「立即发送」会把消息真的发到门店群、撤不回来。原来的确认文案写死了
 // 「确定立即发送当前预览对应的销售报表？」——预览区空着（0 / 2048 字节、
 // 「选择任务后点击刷新预览」）时也这么说，用户既不知道发给谁也不知道多少字节。
+// 票 08 之后收件人来自**订阅**：文案要说清"将发给几个群"，零订阅时说清会被拒绝。
 describe('立即发送的确认文案与可点条件', () => {
-  const JOB = { name: '每日销售报表', push_type: 'sales_report_text', webhook_name: '核心群' }
+  const JOB = { name: '每日销售报表', topic_name: '销售报表', target_count: 2 }
 
-  it('点名目标群与消息大小，而不是只说"当前预览对应的销售报表"', () => {
+  it('点名内容类型与将发给几个群，而不是只说"当前预览对应的销售报表"', () => {
     const text = sendNowConfirmText({ job: JOB, bytes: 812, content: '今日营业额 ¥14525\n明细…' })
 
-    expect(text).toContain('「核心群」')
+    expect(text).toContain('2 个群')
     expect(text).toContain('销售报表')
     expect(text).toContain('812 / 2048 字节')
     // 外发撤不回来这件事必须写出来
@@ -143,19 +144,21 @@ describe('立即发送的确认文案与可点条件', () => {
     expect(text).not.toContain('当前预览对应的')
   })
 
-  it('数据质量任务用「数据质量摘要」而不是「销售报表」', () => {
+  it('别的内容类型用自己的显示名（名字来自注册表，不是页面写死的表）', () => {
     const text = sendNowConfirmText({
-      job: { ...JOB, push_type: 'data_quality_alert' },
+      job: { ...JOB, topic_name: '对账差异告警' },
       bytes: 300,
       content: '数据质量摘要',
     })
-    expect(text).toContain('数据质量摘要')
+    expect(text).toContain('对账差异告警')
     expect(text).not.toContain('销售报表')
   })
 
-  it('任务没配目标群时说清这一点，而不是留空', () => {
-    const text = sendNowConfirmText({ job: { push_type: 'sales_report_text' }, bytes: 10, content: 'x' })
-    expect(text).toContain('未配置目标群')
+  it('零订阅时说清这次发送会被拒绝', () => {
+    const text = sendNowConfirmText({
+      job: { ...JOB, target_count: 0 }, bytes: 10, content: 'x',
+    })
+    expect(text).toContain('没有任何群订阅')
   })
 
   it('正文首行过长时截断，不让确认框被一整段顶开', () => {

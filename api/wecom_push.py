@@ -8,21 +8,25 @@
 所以没有脚本会因此断掉（spec「鉴权与审计」）。
 """
 
+import json
 import logging
 import re
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from api.security import require_session, verify_admin_token
-from database import get_db, CHINA_TZ, DatabaseManager
+from database import get_db, DatabaseManager
+from services.wecom_outbox import ResolvedTarget, resolve_targets, wecom_outbox
 from services.wecom_push_topics import (
+    TOPIC_MANUAL_SEND,
     WECOM_PUSH_API_VERSION,
+    PushTopic,
     PushTrigger,
     all_topics,
     get_topic,
+    topic_display_name,
 )
 from services.wecom_push_service import (
     RenderedMessage,
@@ -65,13 +69,12 @@ def _sent_at_display(value: Any) -> str:
 
 
 def _topic_name(topic_id: str) -> str:
-    """内容类型的显示名；注册表里没有这个 id 就退回 id 本身。
+    """内容类型的显示名（注册表 → 内部类型 → 退回 id 本身）。
 
-    退回 id 而不是丢掉这一行：库里可能留着某个已下线内容类型的订阅（注册表删了一类
-    内容，历史订阅还在），页面要看得见这一行才谈得上清理。
+    退回 id 而不是丢掉这一行：库里可能留着某个已下线内容类型的订阅或出站行（注册表删了
+    一类内容，历史还在），页面要看得见这一行才谈得上清理与排查。
     """
-    topic = get_topic(topic_id)
-    return topic.name if topic else str(topic_id)
+    return topic_display_name(topic_id)
 
 
 
@@ -102,12 +105,19 @@ class WebhookIn(BaseModel):
 
 
 class JobIn(BaseModel):
+    """推送任务的新形状（票 08）：内容类型 + 参数 + 时间。
+
+    任务**不再持有收件人** —— 收件人由这个内容类型的推送订阅决定（`webhook_id` 那
+    一列已经不再被读，迁移 0018 只给它补了默认值）。旧形状的请求体（带 `webhook_id`）
+    由 `reject_legacy_job_payload` 明确拒绝，见那里的注释。
+    """
+
     name: str = Field(..., min_length=1, max_length=60)
-    webhook_id: int = Field(..., gt=0)
-    push_type: str = SALES_REPORT_PUSH_TYPE
+    topic_id: str = Field(..., min_length=1, max_length=60)
+    # 参数形状由内容类型的 schema 决定（注册表是唯一入口）：这里原样收下对象，校验交给
+    # `topic.validate_params` —— 那边的错误文案才带得上字段名（"station: 档口不存在"）。
+    params: Dict[str, Any] = Field(default_factory=dict)
     schedule_time: str
-    date_range_mode: str = "today"
-    station: str = ""
     enabled: bool = True
     notes: str = Field("", max_length=200)
 
@@ -119,31 +129,34 @@ class JobIn(BaseModel):
             raise ValueError("名称不能为空")
         return normalized_name
 
-    @field_validator("push_type")
-    @classmethod
-    def validate_push_type(cls, value: str) -> str:
-        normalized = (value or SALES_REPORT_PUSH_TYPE).strip()
-        if normalized not in ALLOWED_PUSH_TYPES:
-            raise ValueError("推送类型不支持")
-        return normalized
-
     @field_validator("schedule_time")
     @classmethod
     def normalize_schedule_time(cls, value: str) -> str:
         return validate_schedule_time(value)
 
-    @field_validator("date_range_mode")
-    @classmethod
-    def validate_date_range_mode(cls, value: str) -> str:
-        normalized_mode = (value or "today").strip()
-        if normalized_mode not in {"today", "yesterday"}:
-            raise ValueError("报表日期范围只支持 today 或 yesterday")
-        return normalized_mode
 
-    @field_validator("station")
-    @classmethod
-    def normalize_station(cls, value: str) -> str:
-        return (value or "").strip()
+# 旧形状（页面已更新，浏览器里还缓存着旧 bundle）的字段：请求体里出现任一个，就认定
+# 这是旧页面发来的。`webhook_id` 是**收件人**字段，必须明确拒绝 —— 静默忽略会让店长
+# 以为改了收件人其实没改（spec「页面」一节）。
+_LEGACY_JOB_FIELDS = ("webhook_id", "push_type", "date_range_mode", "station")
+STALE_JOB_PAYLOAD = "页面已更新，请刷新后重试"
+
+
+async def reject_legacy_job_payload(request: Request) -> None:
+    """旧形状的任务写请求：400 + 明确文案，且**不产生任何写入**。
+
+    作为依赖挂在路由上（FastAPI 先解析依赖、再校验 body 参数），所以它在 pydantic
+    报「缺 topic_id」之前就拦下来 —— 店长看到的是「页面已更新，请刷新后重试」，
+    而不是一串字段校验错误。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return  # 不是 JSON：交给 pydantic 去报那一条错
+    if not isinstance(body, dict):
+        return
+    if any(field in body for field in _LEGACY_JOB_FIELDS):
+        raise HTTPException(status_code=400, detail=STALE_JOB_PAYLOAD)
 
 
 class SendTextIn(BaseModel):
@@ -225,9 +238,9 @@ def _safe_webhook(row: Dict[str, Any]) -> Dict[str, Any]:
         "notes": row.get("notes", ""),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
-        # 页面上渠道卡片要显示的三样（票 06）：被几条任务引用（删除提示也要）、
-        # 最近一次发送成功的时间。群组与订阅内容在 /subscriptions 那一侧。
-        "job_count": int(row.get("job_count") or 0),
+        # 渠道卡片要显示的最近一次发送成功时间（票 06/07）。群组与订阅内容在
+        # /subscriptions 那一侧；「被几条任务引用」随票 08 一起下掉了 —— 任务不再绑定
+        # 渠道，那个数在新模型里恒为 0。
         "last_sent_at": row.get("last_sent_at") or "",
     }
 
@@ -338,7 +351,6 @@ async def _subscription_targets(db: DatabaseManager) -> Dict[str, Any]:
             "enabled": bool(channel.get("enabled")),
             "notes": channel.get("notes", ""),
             "webhook_url_masked": channel.get("webhook_url_masked", ""),
-            "job_count": int(channel.get("job_count") or 0),
             "last_sent_at": last_sent.get(channel_id, ""),
             # 渠道卡片显示的两样：所属群组与订阅了哪些内容（含「经群组来的」这一层）。
             # 名字在这里就取好，页面不必再拿 id 去两张表里对照。
@@ -430,20 +442,79 @@ async def _groups_with_members(db: DatabaseManager) -> List[Dict[str, Any]]:
     ]
 
 
-async def _jobs_with_webhooks(db: DatabaseManager) -> list[Dict[str, Any]]:
-    jobs = await db.wecom_jobs_all()
-    webhooks = {item["id"]: item for item in await db.wecom_webhooks_all()}
-    result = []
+async def _jobs_payload(
+    db: DatabaseManager, rows: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """推送任务回给页面的形状（票 08）。
+
+    任务只描述「内容类型 + 参数 + 时间」；卡片要显示的**订阅目标数**由服务端按订阅
+    求解后给出（页面不自己推）。同一个内容类型只求解一次 —— 多条任务共用一份结果。
+    """
+    jobs = await db.wecom_jobs_all() if rows is None else rows
+    targets_by_topic: Dict[str, List[ResolvedTarget]] = {}
     for job in jobs:
-        webhook = webhooks.get(job.get("webhook_id"))
-        result.append({
-            **job,
-            "enabled": bool(job.get("enabled")),
-            "webhook_name": webhook.get("name", "") if webhook else "",
-            "webhook_url_masked": webhook.get("webhook_url_masked", "") if webhook else "",
-            "webhook_enabled": bool(webhook.get("enabled")) if webhook else False,
-        })
-    return result
+        topic_id = str(job.get("topic_id") or "")
+        if topic_id and topic_id not in targets_by_topic:
+            targets_by_topic[topic_id] = await resolve_targets(db, topic_id)
+    return [
+        _job_payload(job, targets_by_topic.get(str(job.get("topic_id") or ""), []))
+        for job in jobs
+    ]
+
+
+def _job_payload(row: Dict[str, Any], targets: List[ResolvedTarget]) -> Dict[str, Any]:
+    topic_id = str(row.get("topic_id") or "")
+    try:
+        params = json.loads(str(row.get("params_json") or "{}"))
+    except ValueError:
+        params = {}
+    return {
+        "id": int(row["id"]),
+        "name": row.get("name", ""),
+        "topic_id": topic_id,
+        # 注册表里没有这个 id（内容类型下过线）就退回 id：页面要看得见这一行。
+        "topic_name": _topic_name(topic_id),
+        "params": params if isinstance(params, dict) else {},
+        "schedule_time": row.get("schedule_time", ""),
+        "enabled": bool(row.get("enabled")),
+        "last_sent_date": row.get("last_sent_date", ""),
+        "notes": row.get("notes", ""),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        # 订阅目标数：停用的渠道**也算**（订阅保留、投递跳过并在记录里写明原因）。
+        "target_count": len(targets),
+    }
+
+
+def _job_topic(payload: JobIn) -> PushTopic:
+    """任务的内容类型：必须存在，而且必须支持定时触发。"""
+    topic = get_topic(payload.topic_id)
+    if topic is None:
+        raise HTTPException(
+            status_code=400, detail=f"未知的推送内容类型: {payload.topic_id}"
+        )
+    if PushTrigger.SCHEDULED not in topic.triggers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"「{topic.name}」不支持定时触发，不能建成推送任务",
+        )
+    return topic
+
+
+def _job_params(topic: PushTopic, payload: JobIn) -> Dict[str, Any]:
+    """参数按注册表校验（内容类型的 schema 是唯一入口），并把顶层时间对齐进去。
+
+    页面上只有一个时间控件（参数区里那个 time 控件，由 uischema 驱动），顶层
+    `schedule_time` 是它的投影、也是调度列的值：两处必须一样，所以这里以顶层为准写回
+    参数，避免「列里 21:30、参数里 09:00」这种各说各话的存档。
+    """
+    try:
+        params = topic.validate_params(payload.params, trigger=PushTrigger.SCHEDULED)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if "schedule_time" in params:
+        params["schedule_time"] = payload.schedule_time
+    return params
 
 
 @router.get("/webhooks")
@@ -533,21 +604,10 @@ async def delete_webhook(
 ):
     """删除渠道。
 
-    被推送任务引用时**拒绝**并说清是哪几条任务引用它（删掉之后那些任务就再也发不出去
-    了）；被订阅引用时不拒绝 —— 订阅与群组成员是跟着渠道走的附属关系（外键级联），
+    删除不拒绝：任务**不再绑定渠道**（票 08），删一个渠道不会让任何任务失效 —— 收件人
+    由订阅决定。被订阅引用时不拒绝 —— 订阅与群组成员是跟着渠道走的附属关系（外键级联），
     删除渠道就是取消它全部的订阅，提示里把这层说清楚。
     """
-    jobs = [
-        job for job in await db.wecom_jobs_all()
-        if int(job.get("webhook_id") or 0) == webhook_id
-    ]
-    if jobs:
-        names = "、".join(f"「{job.get('name') or job.get('id')}」" for job in jobs[:3])
-        more = "等" if len(jobs) > 3 else ""
-        raise HTTPException(
-            status_code=400,
-            detail=f"该渠道被推送任务 {names}{more} 引用，请先删除或改绑这些任务",
-        )
     subscriptions = await db.wecom_subscriptions_all()
     drops_subscription = any(
         int(item.get("target_channel_id") or 0) == webhook_id for item in subscriptions
@@ -749,6 +809,12 @@ async def delete_subscription(
 
 @router.post("/send-text")
 async def send_text(payload: SendTextIn, db: DatabaseManager = Depends(get_db)):
+    """手工把一段正文发给某个渠道（销售报表页的「推送」弹窗）。
+
+    发出去的结果写进**统一出站**（票 07 的遗留）：它不再往旧的推送日志表里写，所以
+    「手工发送」在页面的发送记录里看得见。同步发送保持不变 —— 这个入口要当场把成败
+    回给用户，不排队等调度循环。
+    """
     webhook = await db.wecom_webhook_get(payload.webhook_id)
     if not webhook:
         raise HTTPException(status_code=404, detail="webhook 不存在")
@@ -772,17 +838,15 @@ async def send_text(payload: SendTextIn, db: DatabaseManager = Depends(get_db)):
         status = "failed"
         error = str(exc)
 
-    await db.wecom_log_add({
-        "job_id": None,
-        "webhook_id": webhook["id"],
-        "webhook_name": webhook.get("name", ""),
-        "push_type": payload.push_type,
-        "status": status,
-        "message_bytes": rendered_message.byte_length,
-        "error": error,
-        "response_text": response_text,
-        "sent_at": datetime.now(CHINA_TZ).isoformat(),
-    })
+    await wecom_outbox.record_direct_delivery(
+        db,
+        TOPIC_MANUAL_SEND,
+        params={"text": payload.content},
+        channel_id=int(webhook["id"]),
+        status="sent" if status == "success" else "failed",
+        message_bytes=rendered_message.byte_length,
+        error=error,
+    )
     return {
         "success": status == "success",
         "status": status,
@@ -794,37 +858,68 @@ async def send_text(payload: SendTextIn, db: DatabaseManager = Depends(get_db)):
 
 @router.get("/jobs")
 async def list_jobs(db: DatabaseManager = Depends(get_db)):
-    return {"success": True, "jobs": await _jobs_with_webhooks(db)}
+    return {"success": True, "jobs": await _jobs_payload(db)}
 
 
 @router.post("/jobs")
-async def create_job(payload: JobIn, db: DatabaseManager = Depends(get_db)):
-    webhook = await db.wecom_webhook_get(payload.webhook_id)
-    if not webhook:
-        raise HTTPException(status_code=400, detail="webhook 不存在")
-    new_id = await db.wecom_job_create(payload.model_dump())
+async def create_job(
+    payload: JobIn,
+    db: DatabaseManager = Depends(get_db),
+    _session: str = Depends(require_session),
+    _legacy: None = Depends(reject_legacy_job_payload),
+):
+    """新建推送任务：内容类型 + 参数 + 时间。收件人由订阅决定。"""
+    topic = _job_topic(payload)
+    params = _job_params(topic, payload)
+    new_id = await db.wecom_job_create({
+        "name": payload.name,
+        "topic_id": payload.topic_id,
+        "params_json": json.dumps(params, ensure_ascii=False),
+        "schedule_time": payload.schedule_time,
+        "enabled": payload.enabled,
+        "notes": payload.notes,
+    })
     if not new_id:
         raise HTTPException(status_code=500, detail="创建推送任务失败")
     job = await db.wecom_job_get(new_id)
-    return {"success": True, "job": job}
+    return {"success": True, "job": (await _jobs_payload(db, [job]))[0]}
 
 
 @router.put("/jobs/{job_id}")
-async def update_job(job_id: int, payload: JobIn, db: DatabaseManager = Depends(get_db)):
+async def update_job(
+    job_id: int,
+    payload: JobIn,
+    db: DatabaseManager = Depends(get_db),
+    _session: str = Depends(require_session),
+    _legacy: None = Depends(reject_legacy_job_payload),
+):
     existing = await db.wecom_job_get(job_id)
     if not existing:
         raise HTTPException(status_code=404, detail="推送任务不存在")
-    webhook = await db.wecom_webhook_get(payload.webhook_id)
-    if not webhook:
-        raise HTTPException(status_code=400, detail="webhook 不存在")
-    ok = await db.wecom_job_update(job_id, payload.model_dump())
+    topic = _job_topic(payload)
+    params = _job_params(topic, payload)
+    ok = await db.wecom_job_update(job_id, {
+        "name": payload.name,
+        "topic_id": payload.topic_id,
+        "params_json": json.dumps(params, ensure_ascii=False),
+        "schedule_time": payload.schedule_time,
+        "enabled": payload.enabled,
+        "notes": payload.notes,
+        # `last_sent_date` 不在写请求里：改任务不该让今天已经推过的那一次「重新可推」。
+        "last_sent_date": existing.get("last_sent_date", ""),
+    })
     if not ok:
         raise HTTPException(status_code=500, detail="更新推送任务失败")
-    return {"success": True, "job": await db.wecom_job_get(job_id)}
+    job = await db.wecom_job_get(job_id)
+    return {"success": True, "job": (await _jobs_payload(db, [job]))[0]}
 
 
 @router.delete("/jobs/{job_id}")
-async def delete_job(job_id: int, db: DatabaseManager = Depends(get_db)):
+async def delete_job(
+    job_id: int,
+    db: DatabaseManager = Depends(get_db),
+    _session: str = Depends(require_session),
+):
     ok = await db.wecom_job_delete(job_id)
     if not ok:
         raise HTTPException(status_code=500, detail="删除推送任务失败")
@@ -832,7 +927,16 @@ async def delete_job(job_id: int, db: DatabaseManager = Depends(get_db)):
 
 
 @router.post("/jobs/{job_id}/preview")
-async def preview_job(job_id: int, db: DatabaseManager = Depends(get_db)):
+async def preview_job(
+    job_id: int,
+    db: DatabaseManager = Depends(get_db),
+    _session: str = Depends(require_session),
+):
+    """预览这条任务这一刻会发出去的正文。
+
+    它是 POST（要带任务 id 与参数，且报表类会现算数据）但**不写任何东西**；会话门禁
+    与其它写路由同一口径 —— 这一页的调用方只有管理端 SPA。
+    """
     try:
         rendered_message = await wecom_push_service.preview_job(db, job_id)
     except ValueError as exc:
@@ -851,9 +955,18 @@ async def preview_job(job_id: int, db: DatabaseManager = Depends(get_db)):
 
 
 @router.post("/jobs/{job_id}/send-now")
-async def send_job_now(job_id: int, db: DatabaseManager = Depends(get_db)):
+async def send_job_now(
+    job_id: int,
+    db: DatabaseManager = Depends(get_db),
+    _session: str = Depends(require_session),
+):
+    """立即发送：按这个内容类型的**全部订阅目标**入队（票 08）。
+
+    结果不再当场返回「已发送」：真正发出去由统一出站做（每渠道节流、失败退避重试），
+    成败在「发送记录」里看。这里返回这次入队了几个目标与正文大小。
+    """
     try:
-        return await wecom_push_service.send_job(db, job_id, mark_sent=False)
+        return await wecom_push_service.send_job_now(db, job_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

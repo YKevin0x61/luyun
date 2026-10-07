@@ -52,9 +52,11 @@ DATE_RANGE_LABELS = {"today": "当天", "yesterday": "昨天"}
 # `/subscriptions` 等接口形状的改动都要把它 +1** —— 提示条的意义只在于「页面
 # 与服务端说的不是同一套话」，值不跟着改，提示条就永远不会亮。
 #
+# v2（票 08）：推送任务的写请求换成「内容类型 + 参数 + 时间」，`/jobs` 的返回里没有
+# 收件人字段了（改成了 `topic_id` / `params` / `target_count`），旧的写请求会被拒。
 # 前端那一半在 `admin-web/src/composables/useWecomPush.js`（`WECOM_PUSH_API_VERSION`），
 # 两处由 `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js` 钉住。
-WECOM_PUSH_API_VERSION = "v1"
+WECOM_PUSH_API_VERSION = "v2"
 
 
 
@@ -412,6 +414,37 @@ def all_topics() -> "tuple[PushTopic, ...]":
 
 def get_topic(topic_id: str) -> Optional[PushTopic]:
     return _TOPICS.get(str(topic_id or ""))
+
+
+# ── 内部（不可订阅）内容类型 ────────────────────────────────────────────────
+#
+# 「测试发送」与「手工发送」也走统一出站（ADR 0095：发送记录就是出站表），否则这两
+# 个入口的结果在页面上看不到。但它们**不是**可订阅的内容类型：收件人由点击的那一次
+# 调用直接给出（选了哪个群就发哪个群），与订阅无关，给它们一行订阅矩阵只会误导店长
+# ——所以不进注册表（不进 `/meta` 的 topics、不进订阅矩阵、没有参数 schema）。
+#
+# 这里只声明 id 与显示名：发送记录页那一行要写得看得懂（不然显示 `test_message`）。
+# 发送的内容由调用方直接放进参数的 `text` 里，走默认的文本渲染器。
+TOPIC_TEST_MESSAGE = "test_message"
+TOPIC_MANUAL_SEND = "manual_send"
+
+_INTERNAL_TOPIC_NAMES: Dict[str, str] = {
+    TOPIC_TEST_MESSAGE: "测试消息",
+    TOPIC_MANUAL_SEND: "手工发送",
+}
+
+
+def topic_display_name(topic_id: str) -> str:
+    """内容类型的显示名：注册表 → 内部类型 → 退回 id 本身。
+
+    退回 id 而不是丢掉这一行：库里可能留着某个已下线内容类型的出站行（注册表删了一类
+    内容，历史行还在），页面要看得见这一行才谈得上排查。
+    """
+    normalized = str(topic_id or "")
+    topic = get_topic(normalized)
+    if topic is not None:
+        return topic.name
+    return _INTERNAL_TOPIC_NAMES.get(normalized, normalized)
 
 
 def validate_params(

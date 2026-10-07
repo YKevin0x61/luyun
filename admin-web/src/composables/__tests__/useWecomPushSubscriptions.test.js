@@ -139,8 +139,9 @@ describe('渠道卡片的展示字段', () => {
 })
 
 describe('删除渠道的确认文案', () => {
-  it('被任务引用时说清会被拒绝，被订阅时说清订阅会跟着取消', () => {
-    expect(channelDeleteConfirmText({ name: '门店群', job_count: 1 })).toContain('推送任务')
+  it('被订阅时说清订阅会跟着取消，没有被订阅就只说后果', () => {
+    // 任务不再绑定渠道（票 08）：删渠道不会让任何任务失效，所以文案里不再有「被任务引用」。
+    expect(channelDeleteConfirmText({ name: '门店群', job_count: 1 })).not.toContain('推送任务')
     expect(
       channelDeleteConfirmText({ name: '门店群', topics: [{ id: 'sales_report' }] }),
     ).toContain('订阅')

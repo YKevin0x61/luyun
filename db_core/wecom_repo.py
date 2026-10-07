@@ -23,16 +23,14 @@ class _WecomRepoMixin:
         渠道上的 `hygiene_feed` 列不再被读取（票 04 删掉了 ``hygiene_only`` 这条读取
         路径，回填见迁移 0016）。列本身还在，页面仍旧显示与编辑它。
 
-        多一列 ``job_count``：页面要能说清「这个渠道被几条推送任务引用」（删除前的
-        引用提示、渠道卡片上的引用数），按渠道逐条去数就是 N 次往返。
+        也没有「被几条推送任务引用」这一项了：任务不再绑定渠道（票 08），那个数在
+        新模型里恒为 0，留着只会让人以为还有一层引用关系。
         """
         try:
             tdb = self._connection.table("wecom_push_webhooks")
             sql = """SELECT id, name, webhook_url_encrypted, webhook_url_masked,
-                            enabled, hygiene_feed, notes, created_at, updated_at,
-                            (SELECT COUNT(*) FROM wecom_push_jobs j
-                              WHERE j.webhook_id = w.id) AS job_count
-                     FROM wecom_push_webhooks w"""
+                            enabled, hygiene_feed, notes, created_at, updated_at
+                     FROM wecom_push_webhooks"""
             params: List[Any] = []
             conditions: List[str] = []
             if not include_disabled:
@@ -55,10 +53,8 @@ class _WecomRepoMixin:
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT id, name, webhook_url_encrypted, webhook_url_masked,
-                              enabled, hygiene_feed, notes, created_at, updated_at,
-                              (SELECT COUNT(*) FROM wecom_push_jobs j
-                                WHERE j.webhook_id = w.id) AS job_count
-                       FROM wecom_push_webhooks w WHERE id = ?""",
+                              enabled, hygiene_feed, notes, created_at, updated_at
+                       FROM wecom_push_webhooks WHERE id = ?""",
                     (webhook_id,),
                 )
                 row = await cursor.fetchone()
@@ -145,11 +141,16 @@ class _WecomRepoMixin:
             return False
 
     async def wecom_jobs_all(self, include_disabled: bool = True) -> List[Dict]:
+        """列出推送任务。
+
+        任务只描述「内容类型 + 参数 + 时间」（票 08）：收件人由推送订阅决定，所以
+        `webhook_id` / `push_type` / `date_range_mode` / `station` 这几列**不再被读**——
+        它们连同旧值一起留在表里只读（回滚与排查的依据，见迁移 0018）。
+        """
         try:
             tdb = self._connection.table("wecom_push_jobs")
-            sql = """SELECT id, name, webhook_id, push_type, schedule_time,
-                            date_range_mode, station, enabled, last_sent_date,
-                            notes, created_at, updated_at
+            sql = """SELECT id, name, topic_id, params_json, schedule_time,
+                            enabled, last_sent_date, notes, created_at, updated_at
                      FROM wecom_push_jobs"""
             params: List[Any] = []
             if not include_disabled:
@@ -169,9 +170,8 @@ class _WecomRepoMixin:
             tdb = self._connection.table("wecom_push_jobs")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
-                    """SELECT id, name, webhook_id, push_type, schedule_time,
-                              date_range_mode, station, enabled, last_sent_date,
-                              notes, created_at, updated_at
+                    """SELECT id, name, topic_id, params_json, schedule_time,
+                              enabled, last_sent_date, notes, created_at, updated_at
                        FROM wecom_push_jobs WHERE id = ?""",
                     (job_id,),
                 )
@@ -182,22 +182,21 @@ class _WecomRepoMixin:
             return None
 
     async def wecom_job_create(self, item: Dict[str, Any]) -> int:
+        """建一条推送任务。``params_json`` 是参数对象的 JSON 文本（由路由层序列化）。"""
         try:
             now = datetime.now(CHINA_TZ).isoformat()
             tdb = self._connection.table("wecom_push_jobs")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """INSERT INTO wecom_push_jobs
-                       (name, webhook_id, push_type, schedule_time, date_range_mode,
-                        station, enabled, last_sent_date, notes, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (name, topic_id, params_json, schedule_time, enabled,
+                        last_sent_date, notes, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         item["name"],
-                        int(item["webhook_id"]),
-                        item.get("push_type", "sales_report_text"),
+                        str(item["topic_id"]),
+                        str(item.get("params_json") or "{}"),
                         item["schedule_time"],
-                        item.get("date_range_mode", "today"),
-                        item.get("station", ""),
                         1 if item.get("enabled", True) else 0,
                         item.get("last_sent_date", ""),
                         item.get("notes", ""),
@@ -222,17 +221,14 @@ class _WecomRepoMixin:
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """UPDATE wecom_push_jobs
-                       SET name = ?, webhook_id = ?, push_type = ?, schedule_time = ?,
-                           date_range_mode = ?, station = ?, enabled = ?,
-                           last_sent_date = ?, notes = ?, updated_at = ?
+                       SET name = ?, topic_id = ?, params_json = ?, schedule_time = ?,
+                           enabled = ?, last_sent_date = ?, notes = ?, updated_at = ?
                        WHERE id = ?""",
                     (
                         item.get("name", existing["name"]),
-                        int(item.get("webhook_id", existing["webhook_id"])),
-                        item.get("push_type", existing["push_type"]),
+                        str(item.get("topic_id", existing["topic_id"])),
+                        str(item.get("params_json", existing.get("params_json") or "{}")),
                         item.get("schedule_time", existing["schedule_time"]),
-                        item.get("date_range_mode", existing["date_range_mode"]),
-                        item.get("station", existing.get("station", "")),
                         1 if item.get("enabled", bool(existing["enabled"])) else 0,
                         item.get("last_sent_date", existing.get("last_sent_date", "")),
                         item.get("notes", existing.get("notes", "")),

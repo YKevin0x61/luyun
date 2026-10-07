@@ -29,6 +29,7 @@ from services.wecom_push_service import (
 )
 from services.wecom_push_topics import (
     TOPIC_HYGIENE_PHOTO,
+    TOPIC_TEST_MESSAGE,
     PushTopic,
     PushTrigger,
     register_topic,
@@ -979,6 +980,81 @@ class OutboxSchedulerLoopTest(OutboxTestCase):
                 return rows[0]
             await asyncio.sleep(0.02)
         self.fail(f"出站行没有在 {timeout}s 内变成 {status}")
+
+
+class OutboxManualDeliveryTest(OutboxTestCase):
+    """手工发送（测试发送 / 销售报表页的「推送」）也要落进发送记录（票 07 的遗留）。
+
+    这两条链路**同步**发送并把结果当场给页面（点「测试」要立刻看到成败），所以它们
+    不排队等调度循环：登记的是**已经发生**的一次投递，直接写终态行。
+    """
+
+    async def _record(self, channel_id, *, status="sent", error="", text="厨务管家 推送测试"):
+        return await self.outbox.record_direct_delivery(
+            self.db,
+            TOPIC_TEST_MESSAGE,
+            params={"text": text},
+            channel_id=channel_id,
+            status=status,
+            message_bytes=len(text.encode("utf-8")),
+            error=error,
+        )
+
+    async def test_a_manual_delivery_lands_as_a_finished_row(self):
+        channel = await self._channel("门店群", URL_A)
+
+        outbox_id = await self._record(channel)
+
+        row = await self.db.wecom_outbox_get(outbox_id)
+        self.assertEqual(row["status"], "sent")
+        self.assertEqual(row["topic_id"], TOPIC_TEST_MESSAGE)
+        self.assertEqual(int(row["target_channel_id"]), channel)
+        self.assertEqual(int(row["attempts"]), 1, "手工发送只有这一次尝试")
+        self.assertTrue(row["finished_at"])
+        self.assertEqual(json.loads(row["params_json"])["text"], "厨务管家 推送测试")
+        self.assertEqual(row["content_summary"], "厨务管家 推送测试")
+
+    async def test_a_manual_delivery_is_not_sent_again_by_the_dispatcher(self):
+        """终态行不是待发：调度循环不会把「测试消息」再发一遍。"""
+        channel = await self._channel("门店群", URL_A)
+        await self._record(channel)
+
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 0)
+        self.assertEqual(self.sender.sent, [])
+
+    async def test_a_failed_manual_delivery_keeps_the_error(self):
+        channel = await self._channel("门店群", URL_A)
+
+        outbox_id = await self._record(channel, status="failed", error="机器人不存在")
+
+        row = await self.db.wecom_outbox_get(outbox_id)
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["last_error"], "机器人不存在")
+        self.assertTrue(row["finished_at"], "失败也是终态：发送记录里要能按时间查到")
+
+    async def test_each_manual_delivery_is_its_own_row(self):
+        """同一渠道连点两次「测试发送」是两行：这是两次真实外发，不能被幂等键吃掉。"""
+        channel = await self._channel("门店群", URL_A)
+
+        first = await self._record(channel)
+        second = await self._record(channel)
+
+        self.assertNotEqual(first, second)
+        rows = await self.db.wecom_outbox_recent()
+        self.assertEqual([row["status"] for row in rows], ["sent", "sent"])
+
+    async def test_the_send_log_names_an_internal_topic(self):
+        """发送记录页那一行要有看得懂的内容类型名（内部类型也有中文名）。"""
+        from api.wecom_push import _delivery_row
+
+        channel = await self._channel("门店群", URL_A)
+        outbox_id = await self._record(channel)
+        row = await self.db.wecom_outbox_get(outbox_id)
+
+        payload = _delivery_row(row, {channel: {"name": "门店群"}})
+
+        self.assertEqual(payload["topic_name"], "测试消息")
+        self.assertEqual(payload["channel_name"], "门店群")
 
 
 if __name__ == "__main__":

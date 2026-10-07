@@ -12,7 +12,7 @@ import { api } from '../api/client'
  * `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js`
  * 与 `tests/test_wecom_push_channels_api.py`。
  */
-export const WECOM_PUSH_API_VERSION = 'v1'
+export const WECOM_PUSH_API_VERSION = 'v2'
 
 /**
  * 订阅视图切「多选列表」的渠道数阈值。
@@ -170,10 +170,7 @@ export function formatSentAt(channel) {
 export function channelDeleteConfirmText(channel) {
   if (!channel) return '确定删除该渠道？'
   const name = channel.name || channel.id
-  const jobs = Number(channel.job_count) || 0
-  if (jobs > 0) {
-    return `「${name}」被 ${jobs} 条推送任务引用，删除会被拒绝；请先改绑或删除那些任务。`
-  }
+  // 任务不再绑定渠道（票 08）：删渠道只会取消它的订阅，不会让任何任务失效。
   const topics = (channel.topics || []).length
   const groups = (channel.groups || []).length
   const extras = []
@@ -183,10 +180,55 @@ export function channelDeleteConfirmText(channel) {
   return `确定删除渠道「${name}」？${tail}删除后要重新配置才能恢复。`
 }
 
-/** 发送类型的短名：确认框里「销售报表 / 数据质量摘要」比内部标识好读。 */
-export function pushTypeLabel(pushType) {
-  if (pushType === 'data_quality_alert') return '数据质量摘要'
-  return '销售报表'
+/**
+ * 推送任务的内容类型下拉：只列**支持定时触发**的（票 08）。
+ *
+ * 事件类内容（验收照片、采集告警……）没有定时侧，也就没有表单参数，不能建成任务。
+ * 「哪些能定时」是后端注册表说的事（`triggers`），页面不维护第二份名单 —— 加一类
+ * 内容类型、或给某类加上定时触发，前端都不用改。
+ */
+export function scheduledTopics(meta) {
+  return ((meta && meta.topics) || []).filter(
+    (topic) => (topic.triggers || []).includes('scheduled'),
+  )
+}
+
+/**
+ * 某类内容类型的参数默认值：直接取它的 JSON Schema 里每个字段的 `default`。
+ *
+ * 切换内容类型时用它把参数区铺满（下拉要有选中项），所以**字段名一个都不写死** ——
+ * 参数形状是后端给的，页面只照着渲染。
+ */
+export function defaultJobParams(topic) {
+  const properties = (topic && topic.params_schema && topic.params_schema.properties) || {}
+  const params = {}
+  for (const [field, schema] of Object.entries(properties)) {
+    if (schema && Object.prototype.hasOwnProperty.call(schema, 'default')) {
+      params[field] = schema.default
+    }
+  }
+  return params
+}
+
+/**
+ * 任务的请求体（票 08 的形状）：内容类型 + 参数 + 时间。
+ *
+ * 顶层 `schedule_time` 是**调度列**的值，取自参数区那个时间控件（页面上只有这一个
+ * 时间入口）；参数里没有它时退回注册表声明的默认时间。收件人不在请求体里 —— 它由
+ * 该内容类型的订阅决定，带上旧的 `webhook_id` 会被后端明确拒绝。
+ */
+export function jobPayload({ name = '', topicId = '', params = {}, notes = '', enabled = true } = {}, topics = []) {
+  const topic = (topics || []).find((item) => item.id === topicId)
+  const timeFromParams = String((params || {}).schedule_time || '')
+  const scheduleTime = timeFromParams || String((topic && topic.default_schedule_time) || '')
+  return {
+    name: String(name || '').trim(),
+    topic_id: topicId,
+    params: { ...params },
+    schedule_time: scheduleTime,
+    enabled: !!enabled,
+    notes: String(notes || '').trim(),
+  }
 }
 
 /**
@@ -202,9 +244,13 @@ export function pushTypeLabel(pushType) {
  * @returns {string}
  */
 export function sendNowConfirmText({ job = null, bytes = 0, content = '' } = {}) {
-  const typeLabel = pushTypeLabel(job?.push_type)
-  const target = job?.webhook_name ? `「${job.webhook_name}」` : '（任务未配置目标群）'
-  const lines = [`确定立即发送${typeLabel}到 ${target} 吗？`]
+  const typeLabel = job?.topic_name || '推送内容'
+  const targets = Number(job?.target_count) || 0
+  // 收件人来自订阅（票 08）：确认框要说清"发给几个群"。一个都没有时直接说清这次会被
+  // 拒绝，而不是让人以为点下去就发出去了。
+  const lines = targets > 0
+    ? [`确定立即发送${typeLabel}吗？将发给 ${targets} 个群。`]
+    : [`确定立即发送${typeLabel}吗？当前没有任何群订阅这类内容，发送会被拒绝，请先在「订阅」里勾选收件群。`]
 
   const size = Number(bytes) || 0
   // 预览为空时说清这一点：后端会自己现算一份内容发出去（send-now 不读预览），
@@ -269,10 +315,7 @@ export function useWecomPush() {
     return { id: '', name: '', notes: '', enabled: true }
   }
   function emptyJobForm() {
-    return {
-      id: '', name: '每日销售报表', push_type: 'sales_report_text', webhook_id: '',
-      schedule_time: '21:30', date_range_mode: 'today', station: '', notes: '', enabled: true,
-    }
+    return { id: '', name: '', topic_id: '', params: {}, notes: '', enabled: true }
   }
 
   function resetChannelForm() { Object.assign(channelForm, emptyChannelForm()) }
@@ -542,41 +585,54 @@ export function useWecomPush() {
     await loadSubscriptions()
   }
 
-  // ── 定时任务与发送记录（票 07/08 重做，本票原样保留）────────────────────────
+  // ── 定时任务与发送记录（票 08 重做定时任务那一半）──────────────────────────
   function editJob(item) {
     selectedJobId.value = item.id
     Object.assign(jobForm, {
-      id: item.id, name: item.name, webhook_id: item.webhook_id,
-      push_type: item.push_type || 'sales_report_text',
-      schedule_time: item.schedule_time, date_range_mode: item.date_range_mode,
-      station: item.station || '', notes: item.notes || '', enabled: item.enabled,
+      id: item.id,
+      name: item.name,
+      topic_id: item.topic_id || '',
+      // 参数按注册表的默认值铺底，再用任务自己的参数覆盖：这样即便某类内容新加了字段，
+      // 老任务也能在表单里看到它（而不是缺一块控件）。
+      params: {
+        ...defaultJobParams((meta.value.topics || []).find((t) => t.id === item.topic_id)),
+        ...(item.params || {}),
+      },
+      notes: item.notes || '',
+      enabled: !!item.enabled,
     })
+    if (!jobForm.params.schedule_time && item.schedule_time) {
+      jobForm.params.schedule_time = item.schedule_time
+    }
   }
 
-  function applyJobTemplate(templateId) {
-    const tpl = (meta.value.job_templates || []).find((t) => t.id === templateId)
-    if (!tpl) throw new Error('模板不可用')
-    Object.assign(jobForm, {
-      id: '', name: tpl.name || '数据质量日报', push_type: tpl.push_type || 'data_quality_alert',
-      schedule_time: tpl.schedule_time || '22:10', date_range_mode: tpl.date_range_mode || 'today',
-      station: '', notes: tpl.notes || '', enabled: true,
-    })
+  /** 选一类内容类型：参数区立刻按它的 schema 铺满默认值。 */
+  function pickJobTopic(topicId) {
+    const topic = (meta.value.topics || []).find((item) => item.id === topicId)
+    jobForm.topic_id = topicId
+    jobForm.params = defaultJobParams(topic)
+  }
+
+  /** 一键填入某类内容的默认参数（原来是写死的「模板」，现在模板就是注册表的默认值）。 */
+  function applyJobPreset(topicId) {
+    const topic = (meta.value.topics || []).find((item) => item.id === topicId)
+    if (!topic) throw new Error('内容类型不可用')
+    jobForm.id = ''
+    if (!jobForm.name || jobForm.name === '') jobForm.name = topic.name
+    pickJobTopic(topicId)
   }
 
   async function saveJob() {
     const id = jobForm.id
-    const webhookId = Number(jobForm.webhook_id)
-    if (!webhookId) throw new Error('请先选择渠道')
-    const payload = {
-      name: jobForm.name.trim(),
-      webhook_id: webhookId,
-      push_type: jobForm.push_type,
-      schedule_time: jobForm.schedule_time,
-      date_range_mode: jobForm.date_range_mode,
-      station: jobForm.push_type === 'data_quality_alert' ? '' : jobForm.station,
+    if (!jobForm.topic_id) throw new Error('请选择推送内容类型')
+    const payload = jobPayload({
+      name: jobForm.name,
+      topicId: jobForm.topic_id,
+      params: jobForm.params,
+      notes: jobForm.notes,
       enabled: jobForm.enabled,
-      notes: jobForm.notes.trim(),
-    }
+    }, meta.value.topics)
+    if (!payload.schedule_time) throw new Error('请填写推送时间')
     const data = await api[id ? 'put' : 'post'](
       id ? `/api/wecom-push/jobs/${id}` : '/api/wecom-push/jobs', payload)
     selectedJobId.value = (data.job && data.job.id) || Number(id) || selectedJobId.value
@@ -600,8 +656,8 @@ export function useWecomPush() {
   async function sendSelectedJob() {
     if (!selectedJobId.value) throw new Error('请先选择任务')
     const result = await api.post(`/api/wecom-push/jobs/${selectedJobId.value}/send-now`, {})
-    // 这条旧入口不走统一出站、也不落发送记录（票 08 把定时任务切过去），所以这里只把
-    // 记录页重新拉一遍：本轮新入队的投递（如果有）立刻可见。
+    // 「立即发送」现在是**入队**（票 08）：真正发出去由统一出站做，所以这里把发送记录
+    // 重新拉一遍 —— 本轮新入队的投递（待发）立刻可见。
     await loadDeliveries()
     return result
   }
@@ -618,6 +674,6 @@ export function useWecomPush() {
     editChannelGroup, saveChannelGroup, deleteChannelGroup,
     addGroupMember, removeGroupMember, syncChannelGroups,
     toggleSubscription, subscribedChannelIds, pickMultiSelectTopic, saveMultiSelectTopic,
-    editJob, applyJobTemplate, saveJob, deleteJob, previewSelectedJob, sendSelectedJob,
+    editJob, pickJobTopic, applyJobPreset, saveJob, deleteJob, previewSelectedJob, sendSelectedJob,
   }
 }

@@ -1,0 +1,64 @@
+/* JSON Forms（vanilla 渲染器）的样式映射。
+ *
+ * ADR 0097：参数表单由后端 schema 驱动、前端用 JSON Forms 渲染，但 vanilla 渲染器
+ * **不带样式** —— 它输出的结构要映射到页面既有的输入控件样式上，否则参数区看着像
+ * 另一个系统的东西。
+ *
+ * 渲染器输出的结构（@jsonforms/vue-vanilla 3.8 实测）：
+ *   .wp-params-form
+ *     └─ .vertical-layout
+ *          └─ .vertical-layout-item
+ *               └─ .control
+ *                    ├─ label.label
+ *                    ├─ .wrapper > input.input | select.select | textarea.text-area
+ *                    └─ .description
+ * 其中 input / select / text-area 的类名与 `styles/theme.css` 里的全局控件类同名
+ * （`.input` / `.select`），所以底色、边框、聚焦态直接复用；这里补的是**布局与
+ * 次要文字**，让 .control 与页面上的 .form-row 长得一样。
+ */
+
+.wp-params-form .vertical-layout {
+  display: flex;
+  flex-direction: column;
+}
+
+.wp-params-form .control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.wp-params-form .control > .label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.wp-params-form .control > .wrapper {
+  display: flex;
+}
+
+.wp-params-form .control > .wrapper > .input,
+.wp-params-form .control > .wrapper > .select,
+.wp-params-form .control > .wrapper > .text-area {
+  width: 100%;
+}
+
+/* 参数说明一直显示（组件里开了 showUnfocusedDescription）：门店页面上它是「这个参数
+   是什么」的唯一解释。 */
+.wp-params-form .control > .description {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.wp-params-form .control > .error,
+.wp-params-form .control > .validation_error {
+  font-size: 11px;
+  color: var(--red);
+}
+
+.wp-params-form .control .asterisk,
+.wp-params-form .control .required {
+  color: var(--red);
+}

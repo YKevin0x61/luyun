@@ -400,6 +400,10 @@ class _WecomSubscriptionsRepoMixin:
 
         ``created_at`` 可以显式给（迁移搬历史行时要保住原来的时间），不给就取现在。
 
+        ``attempts`` / ``last_error`` / ``finished_at`` 默认是「刚入队、还没发」的样子
+        （0 / 空 / 无）。手工发送的登记（测试发送、销售报表页的「推送」）直接写终态：
+        它在调用这里之前就已经发出去了，落进来的是一条**已经发生**的投递记录。
+
         ``commit=False`` 给「登记必须与业务事务同生共死」的调用方（验收照片就是这样）：
         这一行落进调用方的事务里，由调用方的 commit / rollback 决定它到底在不在——
         这里一句都不提交。调用方要保证自己没有把事务搞脏（缺表这类可预期的失败先探一下，
@@ -423,8 +427,8 @@ class _WecomSubscriptionsRepoMixin:
                     """INSERT INTO wecom_push_outbox
                        (topic_id, params_json, schedule_id, target_channel_id,
                         content_summary, message_bytes, status, attempts, last_error,
-                        idempotency_key, scheduled_at, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)
+                        idempotency_key, scheduled_at, created_at, finished_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
                        RETURNING id""",
                     (
@@ -435,9 +439,12 @@ class _WecomSubscriptionsRepoMixin:
                         str(item.get("content_summary", "")),
                         int(item.get("message_bytes", 0) or 0),
                         str(item.get("status", SUB_OUTBOX_STATUS_PENDING)),
+                        int(item.get("attempts", 0) or 0),
+                        str(item.get("last_error", "")),
                         idempotency_key,
                         item.get("scheduled_at"),
                         str(item.get("created_at") or now),
+                        item.get("finished_at"),
                     ),
                 )
                 row = await cursor.fetchone()

@@ -1,15 +1,14 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import {
-  useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, pushTypeLabel,
+  useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, scheduledTopics,
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
   canSendNow, sendNowConfirmText, DELIVERY_STATUS_OPTIONS, deliveryStatusLabel,
   formatDeliveryTime,
 } from '../composables/useWecomPush'
-import { useStationsStore } from '../stores/stations'
 import SvgIcon from '../components/SvgIcon.vue'
+import PushParamsForm from '../components/wecom/PushParamsForm.vue'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
-import LuyunTimePicker from '../components/ui/LuyunTimePicker.vue'
 
 // 页内 tab：不改路由（页面清单契约保持绿）。五个 tab 里的「变更历史」是第二批，
 // 本票先摆四个；定时任务与发送记录两个 tab 的内容本票**原样搬入**，票 07/08 各自重做。
@@ -31,10 +30,10 @@ const {
   editChannelGroup, saveChannelGroup, deleteChannelGroup,
   addGroupMember, removeGroupMember,
   toggleSubscription, pickMultiSelectTopic, saveMultiSelectTopic,
-  editJob, applyJobTemplate, saveJob, deleteJob, previewSelectedJob, sendSelectedJob,
+  editJob, pickJobTopic, applyJobPreset, saveJob, deleteJob, previewSelectedJob,
+  sendSelectedJob,
 } = useWecomPush()
 
-const stationsStore = useStationsStore()
 const toastMsg = ref('')
 const toastType = ref('info')
 
@@ -80,7 +79,12 @@ function handleRefreshDeliveries() {
 const isEditingChannel = computed(() => !!channelForm.id)
 const isEditingGroup = computed(() => !!channelGroupForm.id)
 const selectedJob = computed(() => jobs.value.find((j) => j.id === selectedJobId.value))
-const jobStations = computed(() => stationsStore.list.filter((s) => s.id && s.id !== 'loumian'))
+// 定时任务的内容类型下拉：只列**支持定时触发**的（来自 /meta 的注册表，票 08）。
+// 参数区跟着选中的这一类走 —— 字段名、标签、下拉选项全部由它的 schema + uischema 给。
+const jobTopics = computed(() => scheduledTopics(meta.value))
+const selectedJobTopic = computed(
+  () => jobTopics.value.find((topic) => topic.id === jobForm.topic_id) || null,
+)
 // 预览为空时「立即发送」不可点：这时页面没有任何可核对的内容，一点却会真的外发
 // （后端 send-now 自己现算正文），是全页最容易误触的一条。
 const sendReady = computed(() => canSendNow({
@@ -172,6 +176,12 @@ async function handleSaveMultiSelect() {
   } catch (e) { flash(e.message, 'error') }
 }
 async function handleSaveJob() {
+  // 名称必填：点击保存这条路不经过原生表单校验（见按钮上的 `.prevent`），这里补上 ——
+  // 否则能存出一条没有名字的任务。
+  if (!String(jobForm.name || '').trim()) {
+    flash('请填写任务名称', 'error')
+    return
+  }
   try {
     await saveJob()
     flash('推送任务已保存', 'success')
@@ -200,7 +210,12 @@ async function handleSend() {
   if (!window.confirm(text)) return
   try {
     const result = await sendSelectedJob()
-    flash(result.success ? '消息已发送' : `发送失败：${result.error || result.response_text}`, result.success ? 'success' : 'error')
+    flash(
+      result.success
+        ? `已加入发送队列：将发给 ${result.target_count} 个群，结果见「发送记录」`
+        : `发送失败：${result.error || result.response_text}`,
+      result.success ? 'success' : 'error',
+    )
   } catch (e) { flash(e.message, 'error') }
 }
 async function copyPreview() {
@@ -208,21 +223,18 @@ async function copyPreview() {
   await navigator.clipboard.writeText(previewContent.value)
   flash('预览内容已复制', 'success')
 }
-function handleApplyTemplate(id) {
+function handlePickJobTopic(topicId) {
+  // 换内容类型就是换一整套参数：直接按新类型的 schema 默认值铺满参数区。
+  pickJobTopic(topicId)
+}
+function handleApplyPreset(topicId) {
   try {
-    applyJobTemplate(id)
-    flash('已填入模板，请选择渠道后保存', 'success')
+    applyJobPreset(topicId)
+    flash('已新建一条草稿：这一类的默认参数已填好，改完名称与时间后保存', 'success')
   } catch (e) { flash(e.message, 'error') }
 }
 
 onMounted(async () => {
-  let stationError = ''
-  try {
-    await stationsStore.load()
-  } catch (e) {
-    stationError = '档口数据加载失败：' + (e.message || '未知错误')
-    flash(stationError, 'error')
-  }
   await loadAll()
   // 发送记录另拉一页（带分页与总数，和 loadAll 里的「最近 N 条」不是一回事）。
   try {
@@ -230,8 +242,6 @@ onMounted(async () => {
   } catch (e) {
     if (!error.value) error.value = e.message || '发送记录加载失败'
   }
-  // loadAll() 成功时会把 error 清空，这里补上档口加载失败的持久提示，避免被吞掉
-  if (stationError && !error.value) error.value = stationError
 })
 </script>
 
@@ -513,43 +523,34 @@ onMounted(async () => {
               <label>任务名称</label>
               <input class="input" v-model="jobForm.name" maxlength="60" required />
             </div>
+            <!-- 内容类型下拉来自 `/meta` 的注册表，只列**支持定时触发**的（票 08）：事件类
+                 内容没有定时侧、也就没有表单参数，不能建成任务。收件人不再由任务指定 ——
+                 它由该内容类型的订阅决定。 -->
             <div class="form-row">
-              <label>推送类型</label>
-              <select class="select" v-model="jobForm.push_type">
-                <option value="sales_report_text">销售报表文字版</option>
-                <option value="data_quality_alert">数据质量告警</option>
+              <label>内容类型</label>
+              <select
+                class="select"
+                :value="jobForm.topic_id"
+                @change="handlePickJobTopic($event.target.value)"
+              >
+                <option value="">请选择内容类型</option>
+                <option v-for="topic in jobTopics" :key="topic.id" :value="topic.id">
+                  {{ topic.name }}
+                </option>
               </select>
             </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-              <div class="form-row">
-                <label>目标渠道</label>
-                <select class="select" v-model="jobForm.webhook_id" required>
-                  <option v-for="w in channels" :key="w.id" :value="w.id">{{ w.name }}{{ w.enabled ? '' : '（停用）' }}</option>
-                </select>
-              </div>
-              <div class="form-row">
-                <label>每天推送时间</label>
-                <LuyunTimePicker v-model="jobForm.schedule_time" />
-              </div>
-            </div>
-            <div v-if="jobForm.push_type !== 'data_quality_alert'" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-              <div class="form-row">
-                <label>报表日期</label>
-                <select class="select" v-model="jobForm.date_range_mode">
-                  <option value="today">当天</option>
-                  <option value="yesterday">昨天</option>
-                </select>
-              </div>
-              <div class="form-row">
-                <label>档口筛选</label>
-                <select class="select" v-model="jobForm.station">
-                  <option value="">全部（排除楼面）</option>
-                  <option v-for="s in jobStations" :key="s.id" :value="s.id">{{ s.name }}</option>
-                </select>
-              </div>
-            </div>
-            <div v-else style="font-size:11px;line-height:1.5;color:var(--text-dim)">
-              数据质量任务会读取采集健康状态与日终对账报告，并统计未映射菜品。建议推送时间设在日终对账（默认 22:05）之后。
+            <!-- 参数区：字段名、标签、下拉选项、默认值全部来自这一类内容的 `params_schema` +
+                 `uischema`（ADR 0097）。页面不认识任何一类内容 —— 注册表加一类就是加一个
+                 下拉项和一套它的字段，前端零改动。 -->
+            <PushParamsForm
+              v-if="selectedJobTopic"
+              :schema="selectedJobTopic.params_schema"
+              :uischema="selectedJobTopic.uischema"
+              :data="jobForm.params"
+              @update:data="jobForm.params = $event"
+            />
+            <div v-else class="wp-job-hint">
+              {{ jobTopics.length ? '选择内容类型后，这里出现它的参数。' : '注册表里还没有支持定时触发的内容类型。' }}
             </div>
             <div class="form-row">
               <label>备注</label>
@@ -559,9 +560,19 @@ onMounted(async () => {
               <LuyunCheckbox v-model="jobForm.enabled" /> 启用定时推送
             </label>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="btn btn-primary" type="submit">保存任务</button>
+              <!-- 点击自己走保存（`.prevent` 挡掉随之而来的表单提交，否则一次点击会存两遍）；
+                   在输入框里回车仍走 `<form>` 的 submit。两条路径都指向 handleSaveJob。 -->
+              <button class="btn btn-primary" type="submit" @click.prevent="handleSaveJob">保存任务</button>
               <button class="btn" type="button" @click="resetJobForm">清空</button>
-              <button class="btn" type="button" @click="handleApplyTemplate('data_quality_daily')">+ 数据质量模板</button>
+              <!-- 同一内容类型可以有多条任务（不同时间 / 参数），这是新建第二条的入口：
+                   按这一类内容的默认值铺一份草稿，改完名称与时间再保存。 -->
+              <button
+                v-if="selectedJobTopic"
+                class="btn"
+                type="button"
+                :title="`按「${selectedJobTopic.name}」的默认参数新建一条任务`"
+                @click="handleApplyPreset(selectedJobTopic.id)"
+              >+ 新建此类任务</button>
             </div>
           </form>
 
@@ -579,9 +590,11 @@ onMounted(async () => {
                 <strong style="font-size:13px">{{ item.name }}</strong>
                 <span class="badge" :style="item.enabled ? 'color:var(--green);border-color:var(--green)' : ''">{{ item.enabled ? item.schedule_time : '停用' }}</span>
               </div>
-              <div style="color:var(--text-dim);font-size:12px">目标：{{ item.webhook_name || '未配置' }}</div>
+              <div style="color:var(--text-dim);font-size:12px">内容类型：{{ item.topic_name || item.topic_id }}</div>
+              <!-- 收件人来自订阅（票 08）：卡片说清这类内容当前有几个群会收到，而不是某个群名。
+                   一个都没有时直接写出来 —— 否则店长会以为任务照发。 -->
               <div style="color:var(--text-dim);font-size:12px">
-                类型：{{ pushTypeLabel(item.push_type) }} · 日期：{{ item.date_range_mode === 'yesterday' ? '昨天' : '当天' }}
+                订阅目标：{{ item.target_count ? `${item.target_count} 个群` : '暂无群订阅，不会投递' }}
               </div>
               <div style="color:var(--text-dim);font-size:12px">上次定时发送日期：{{ item.last_sent_date || '未发送' }}</div>
               <div style="display:flex;gap:6px;margin-top:8px" @click.stop>
@@ -799,6 +812,13 @@ onMounted(async () => {
 .wp-pick-row.active { border-color: var(--accent); color: var(--accent); }
 .wp-pick-row.wp-matrix-zero { color: var(--yellow); }
 .wp-pick-row.wp-matrix-zero.active { border-color: var(--yellow); }
+
+/* 未选内容类型时参数区的占位：它说明"这块地方是什么"，不是错误提示。 */
+.wp-job-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
 
 /* 发送记录（票 07）：筛选行在窄屏要能换行（三个下拉 + 两个按钮在一行里挤不下）。 */
 .wp-delivery-filters {

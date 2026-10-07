@@ -13,7 +13,7 @@ import WecomPushView from '../WecomPushView.vue'
 // 与 `wecomPushLayout.test.js`（读源码钉窄屏那几条 CSS）分工：那一份挡的是"样式被
 // 顺手简化掉"，这一份挡的是"功能没接上"。
 
-const API_VERSION = 'v1'
+const API_VERSION = 'v2'
 
 /** 一条渠道的完整卡片形状（读接口给的就是这个）。 */
 function channel(id, name, overrides = {}) {
@@ -159,12 +159,13 @@ describe('渠道 tab 的卡片', () => {
     expect(text).toContain('销售报表')
     expect(text).toContain('2026-10-05 21:30:12')
     expect(text).toContain('含群组订阅')
-    expect(text).toContain('被 2 条推送任务引用')
   })
 
-  it('删除被任务引用的渠道时先给出会被拒绝的提示，取消后不发请求', async () => {
+  it('删除渠道前先给出后果提示，取消后不发请求', async () => {
+    // 任务不再绑定渠道（票 08）：删除不再会被「被任务引用」拦下来，确认框只说清
+    // 订阅与群组成员会跟着走。
     const { wrapper, fetchMock } = await mountView({
-      channels: [channel(1, '门店群', { job_count: 1 })],
+      channels: [channel(1, '门店群', { job_count: 1, topics: [{ id: 'sales_report', name: '销售报表' }] })],
       topics: [topic('sales_report', '销售报表')],
     })
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
@@ -174,7 +175,8 @@ describe('渠道 tab 的卡片', () => {
     await flushPromises()
 
     expect(confirmSpy).toHaveBeenCalled()
-    expect(String(confirmSpy.mock.calls[0][0])).toContain('推送任务')
+    expect(String(confirmSpy.mock.calls[0][0])).toContain('订阅')
+    expect(String(confirmSpy.mock.calls[0][0])).not.toContain('推送任务')
     // 用户点了「取消」：一条写请求都不该发出去
     expect(fetchMock.calls.filter((call) => call.method !== 'GET')).toEqual([])
   })

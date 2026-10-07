@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set
@@ -284,6 +285,7 @@ class WeComOutbox:
         schedule_id: Optional[int] = None,
         summary: str = "",
         commit: bool = True,
+        now: Optional[datetime] = None,
     ) -> List[int]:
         """一类内容 → 每个目标渠道一行出站记录，返回这些行的 id。
 
@@ -292,13 +294,17 @@ class WeComOutbox:
         - 停用的渠道也落一行，就地标成 skipped 并写明原因（订阅保留，投递跳过）；
         - 零订阅 → 一条不发，只记日志。
 
+        ``now`` 是「这一次入队发生在什么时候」，只用于冻结营业日：调度循环把自己的
+        假时钟（测试）或墙上时钟（生产）传进来，与它算 `last_sent_date` 用的是同一个
+        时刻。不传就取服务自己的时钟。
+
         ``commit=False`` 给「登记必须与业务事务同生共死」的调用方（验收照片）：这些行
         落进调用方的事务，由调用方决定提交还是回滚。代价之一是**不做**就地跳过标记
         （那要单独提交，会把调用方的事务切开）——停用的渠道由下一轮派发标成 skipped，
         终态与原因一样，只是晚 30 秒。
         """
         validated = validate_params(topic_id, params, trigger=trigger)
-        frozen = freeze_business_date(validated, self._now())
+        frozen = freeze_business_date(validated, now or self._now())
         if not business_reference:
             raise ValueError("出站记录必须带业务引用（幂等键的一半）")
 
@@ -339,8 +345,53 @@ class WeComOutbox:
                 )
         return outbox_ids
 
-    # ── 派发 ──────────────────────────────────────────────────────────────
+    async def record_direct_delivery(
+        self,
+        db,
+        topic_id: str,
+        *,
+        params: Mapping[str, Any],
+        channel_id: int,
+        status: str,
+        message_bytes: int = 0,
+        error: str = "",
+        summary: str = "",
+    ) -> int:
+        """把一次**已经发出去**的手工投递登记进发送记录（票 07 的遗留）。
 
+        「测试发送」与销售报表页的「推送」是同步发送的：页面点一下就要看到成败，所以
+        它们不排队等调度循环（那要 30 秒，还拿不到即时结果）。登记的是已经发生的这一次
+        投递，直接写终态行（``sent`` / ``failed``），尝试次数按 1 记 —— 与迁移 0016 搬
+        旧日志时的口径一致：旧链路没有重试，每行就是一次尝试。
+
+        ``topic_id`` 用内部内容类型（`services/wecom_push_topics.py` 的
+        ``TOPIC_TEST_MESSAGE`` / ``TOPIC_MANUAL_SEND``）：它们不进订阅矩阵，只为了这一行
+        在页面上有看得懂的名字。
+
+        每次调用都是**新的一行**：同一个渠道连点两次「测试发送」是两次真实外发，不能被
+        幂等键吃掉（每次用一个新的引用）。
+        """
+        outbox_id = await db.wecom_outbox_enqueue({
+            "topic_id": topic_id,
+            "params_json": json.dumps(dict(params), ensure_ascii=False),
+            "target_channel_id": int(channel_id),
+            "content_summary": summary or default_summary(params),
+            "message_bytes": int(message_bytes or 0),
+            "status": status,
+            "attempts": 1,
+            "last_error": error,
+            "finished_at": self._now().isoformat(),
+            "idempotency_key": build_idempotency_key(
+                topic_id, f"manual:{uuid.uuid4().hex}", int(channel_id)
+            ),
+        })
+        if not outbox_id:
+            logger.error(
+                "手工投递登记失败 topic=%s channel=%s", topic_id, channel_id
+            )
+        return int(outbox_id or 0)
+
+    # ── 派发 ──────────────────────────────────────────────────────────────
     async def dispatch_pending(self, db, *, limit: int = OUTBOX_BATCH_SIZE) -> int:
         """捞一批待发，按节流发送；返回真正发成功的条数。
 

@@ -6,6 +6,9 @@ import { setUnauthorizedHandler } from './api/client'
 import { applyPwaManifest } from './utils/pwaManifest'
 import { loginRedirectTarget } from './utils/loginNext'
 import './styles/theme.css'
+// JSON Forms 的参数表单（企微推送的推送任务）用 vanilla 渲染器：它不带样式，这里把
+// 它的结构与控件类映射到 theme.css 的既有样式上（ADR 0097）。
+import './styles/jsonforms.css'
 import '@vuepic/vue-datepicker/dist/main.css'
 
 applyPwaManifest(window.location.pathname)

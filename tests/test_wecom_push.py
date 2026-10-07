@@ -4,6 +4,7 @@
 
 import base64
 import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -289,88 +290,165 @@ class WeComStorageAndSchedulerTest(unittest.IsolatedAsyncioTestCase):
 
         job_id = await self.db.wecom_job_create({
             "name": "每日报表",
-            "webhook_id": webhook_id,
+            "topic_id": "sales_report",
+            "params_json": json.dumps({
+                "schedule_time": "21:30", "date_range_mode": "today", "station": "",
+            }),
             "schedule_time": "21:30",
         })
         self.assertGreater(job_id, 0)
         job = await self.db.wecom_job_get(job_id)
         self.assertEqual(job["schedule_time"], "21:30")
         self.assertEqual(job["last_sent_date"], "")
+        self.assertEqual(job["topic_id"], "sales_report")
+        self.assertEqual(json.loads(job["params_json"])["date_range_mode"], "today")
+        # 收件人不再是任务的一列：旧的 webhook_id 读都不读了（列还在，只读留档）。
+        self.assertNotIn("webhook_id", job)
 
-    async def test_dispatch_skips_when_already_sent_today(self):
-        webhook_id = await self.db.wecom_webhook_create({
-            "name": "测试群",
+    async def test_job_update_moves_the_topic_and_the_params(self):
+        job_id = await self.db.wecom_job_create({
+            "name": "每日报表",
+            "topic_id": "sales_report",
+            "params_json": json.dumps({"schedule_time": "21:30", "date_range_mode": "today"}),
+            "schedule_time": "21:30",
+        })
+
+        ok = await self.db.wecom_job_update(job_id, {
+            "name": "对账差异日报",
+            "topic_id": "reconcile_diff",
+            "params_json": json.dumps({"schedule_time": "22:10", "date_range_mode": "today"}),
+            "schedule_time": "22:10",
+        })
+
+        self.assertTrue(ok)
+        job = await self.db.wecom_job_get(job_id)
+        self.assertEqual(job["topic_id"], "reconcile_diff")
+        self.assertEqual(json.loads(job["params_json"])["schedule_time"], "22:10")
+
+    async def test_mark_sent_only_touches_the_business_date(self):
+        job_id = await self.db.wecom_job_create({
+            "name": "每日报表",
+            "topic_id": "sales_report",
+            "params_json": json.dumps({"schedule_time": "21:30", "date_range_mode": "today"}),
+            "schedule_time": "21:30",
+        })
+
+        self.assertTrue(await self.db.wecom_job_mark_sent(job_id, "2026-05-02"))
+
+        job = await self.db.wecom_job_get(job_id)
+        self.assertEqual(job["last_sent_date"], "2026-05-02")
+        self.assertEqual(job["topic_id"], "sales_report")
+        self.assertEqual(json.loads(job["params_json"])["schedule_time"], "21:30")
+
+    async def _channel(self, name):
+        return await self.db.wecom_webhook_create({
+            "name": name,
             "webhook_url_encrypted": encrypt_webhook_url(VALID_WEBHOOK),
             "webhook_url_masked": mask_webhook_url(VALID_WEBHOOK),
             "enabled": True,
             "notes": "",
         })
-        now = datetime(2026, 5, 2, 21, 30, tzinfo=CHINA_TZ)
-        await self.db.wecom_job_create({
+
+    async def _job(self, topic_id, schedule_time, *, params=None, last_sent_date=""):
+        return await self.db.wecom_job_create({
             "name": "每日报表",
-            "webhook_id": webhook_id,
-            "schedule_time": "21:30",
-            "last_sent_date": now.date().isoformat(),
+            "topic_id": topic_id,
+            "params_json": json.dumps(params or {
+                "schedule_time": schedule_time, "date_range_mode": "today", "station": "",
+            }),
+            "schedule_time": schedule_time,
+            "last_sent_date": last_sent_date,
         })
 
-        with patch.object(wecom_push_service, "send_job", new=AsyncMock()) as mocked_send:
-            dispatched = await wecom_push_service.dispatch_due_jobs(self.db, now=now)
+    async def _subscribe(self, topic_id, channel_id):
+        await self.db.wecom_subscription_upsert({
+            "topic_id": topic_id,
+            "target_channel_id": channel_id,
+        })
+
+    async def test_dispatch_enqueues_one_delivery_per_subscribed_channel(self):
+        """到点不是「直接发」而是「按订阅入队」：收件人来自订阅，一行一个目标。"""
+        first = await self._channel("门店群")
+        second = await self._channel("日报群")
+        await self._subscribe("sales_report", first)
+        await self._subscribe("sales_report", second)
+        job_id = await self._job("sales_report", "21:30")
+        now = datetime(2026, 5, 2, 21, 30, tzinfo=CHINA_TZ)
+
+        dispatched = await wecom_push_service.dispatch_due_jobs(self.db, now=now)
+
+        self.assertEqual(dispatched, 1)
+        rows = await self.db.wecom_outbox_recent()
+        self.assertEqual({int(row["target_channel_id"]) for row in rows}, {first, second})
+        self.assertEqual({row["status"] for row in rows}, {"pending"}, "入队不等于已发")
+        self.assertEqual({row["topic_id"] for row in rows}, {"sales_report"})
+        self.assertEqual(
+            {int(row["schedule_id"]) for row in rows}, {job_id},
+            "定时投递带着任务 id：失败当天补发靠它认出来（出站状态机）",
+        )
+        params = json.loads(rows[0]["params_json"])
+        self.assertEqual(params["business_date"], "2026-05-02", "营业日在入队时冻结")
+        self.assertNotIn("date_range_mode", params, "冻结之后不再留「以后再解析一次」的口子")
+        job = await self.db.wecom_job_get(job_id)
+        self.assertEqual(job["last_sent_date"], "2026-05-02")
+
+    async def test_dispatch_skips_when_already_sent_today(self):
+        channel_id = await self._channel("测试群")
+        await self._subscribe("sales_report", channel_id)
+        now = datetime(2026, 5, 2, 21, 30, tzinfo=CHINA_TZ)
+        job_id = await self._job("sales_report", "21:30", last_sent_date="2026-05-02")
+
+        dispatched = await wecom_push_service.dispatch_due_jobs(self.db, now=now)
 
         self.assertEqual(dispatched, 0)
-        mocked_send.assert_not_called()
+        self.assertEqual(await self.db.wecom_outbox_recent(), [])
+        self.assertEqual((await self.db.wecom_job_get(job_id))["last_sent_date"], "2026-05-02")
 
     async def test_dispatch_skips_by_business_day_not_calendar_day(self):
-        """`last_sent_date` 是营业日：01:00 那次推送挡住了 05:00 的同一场营业（CORR-05）。
+        """`last_sent_date` 是营业日：22:00 推过之后，次日 01:00 仍是同一场营业（CORR-05）。
 
         日历日排重下这两个时刻同属前一天，恰好也挡得住；真正的差别在跨零点：22:00 推过
         之后，次日 01:00 按日历日是新的一天、按营业日还是同一场营业。
         """
-        webhook_id = await self.db.wecom_webhook_create({
-            "name": "测试群",
-            "webhook_url_encrypted": encrypt_webhook_url(VALID_WEBHOOK),
-            "webhook_url_masked": mask_webhook_url(VALID_WEBHOOK),
-            "enabled": True,
-            "notes": "",
-        })
+        channel_id = await self._channel("测试群")
+        await self._subscribe("sales_report", channel_id)
         # 5/2 22:00 推过 → 营业日 2026-05-02；5/3 01:00 仍属该营业日。
-        await self.db.wecom_job_create({
-            "name": "每日报表",
-            "webhook_id": webhook_id,
-            "schedule_time": "01:00",
-            "last_sent_date": "2026-05-02",
-        })
+        await self._job("sales_report", "01:00", last_sent_date="2026-05-02")
 
         now = datetime(2026, 5, 3, 1, 0, tzinfo=CHINA_TZ)
-        with patch.object(wecom_push_service, "send_job", new=AsyncMock()) as mocked_send:
-            dispatched = await wecom_push_service.dispatch_due_jobs(self.db, now=now)
+        dispatched = await wecom_push_service.dispatch_due_jobs(self.db, now=now)
 
         self.assertEqual(dispatched, 0, "同一营业日不该再推一次")
-        mocked_send.assert_not_called()
+        self.assertEqual(await self.db.wecom_outbox_recent(), [])
 
-    async def test_dispatch_sends_due_job_once(self):
-        webhook_id = await self.db.wecom_webhook_create({
-            "name": "测试群",
-            "webhook_url_encrypted": encrypt_webhook_url(VALID_WEBHOOK),
-            "webhook_url_masked": mask_webhook_url(VALID_WEBHOOK),
-            "enabled": True,
-            "notes": "",
-        })
+    async def test_dispatch_enqueues_nothing_when_nobody_subscribes(self):
+        """零订阅 = 一条都不发，而且不算「今天发过了」：店长补上订阅后当天还能发。"""
+        await self._channel("没人订阅的群")
+        job_id = await self._job("sales_report", "21:30")
         now = datetime(2026, 5, 2, 21, 30, tzinfo=CHINA_TZ)
-        await self.db.wecom_job_create({
-            "name": "每日报表",
-            "webhook_id": webhook_id,
-            "schedule_time": "21:30",
-        })
 
-        with patch.object(
-            wecom_push_service,
-            "send_job",
-            new=AsyncMock(return_value={"success": True}),
-        ) as mocked_send:
-            dispatched = await wecom_push_service.dispatch_due_jobs(self.db, now=now)
+        dispatched = await wecom_push_service.dispatch_due_jobs(self.db, now=now)
 
-        self.assertEqual(dispatched, 1)
-        mocked_send.assert_awaited_once()
+        self.assertEqual(dispatched, 0)
+        self.assertEqual(await self.db.wecom_outbox_recent(), [])
+        self.assertEqual((await self.db.wecom_job_get(job_id))["last_sent_date"], "")
+
+    async def test_dispatch_keeps_the_scheduled_semantics_for_a_reconcile_diff_job(self):
+        """对账差异告警的定时侧（原「数据质量日报」）同样按订阅投递、同样按营业日排重。"""
+        channel_id = await self._channel("告警群")
+        await self._subscribe("reconcile_diff", channel_id)
+        job_id = await self._job(
+            "reconcile_diff", "22:10",
+            params={"schedule_time": "22:10", "date_range_mode": "today"},
+        )
+        now = datetime(2026, 5, 2, 22, 10, tzinfo=CHINA_TZ)
+
+        self.assertEqual(await wecom_push_service.dispatch_due_jobs(self.db, now=now), 1)
+
+        rows = await self.db.wecom_outbox_recent()
+        self.assertEqual({row["topic_id"] for row in rows}, {"reconcile_diff"})
+        self.assertEqual(json.loads(rows[0]["params_json"])["business_date"], "2026-05-02")
+        self.assertEqual((await self.db.wecom_job_get(job_id))["last_sent_date"], "2026-05-02")
 
 
 if __name__ == "__main__":

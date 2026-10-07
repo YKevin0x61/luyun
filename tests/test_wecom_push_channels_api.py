@@ -110,16 +110,16 @@ def _create_channel(api: WecomAdmin, name="门店群", url=WEBHOOK_URL, enabled=
     return resp.json()["channel"]
 
 
-def _create_topic_job(api: WecomAdmin, channel_id: int, name="每日报表"):
+def _create_topic_job(api: WecomAdmin, name="每日报表"):
+    """建一条推送任务（票 08 的形状：内容类型 + 参数 + 时间，没有收件人）。"""
     resp = api.as_session(
         "POST",
         f"{API_PREFIX}/jobs",
         json={
             "name": name,
-            "webhook_id": channel_id,
-            "push_type": "sales_report_text",
+            "topic_id": "sales_report",
+            "params": {"schedule_time": "21:30", "date_range_mode": "today", "station": ""},
             "schedule_time": "21:30",
-            "date_range_mode": "today",
             "enabled": True,
             "notes": "",
         },
@@ -211,7 +211,6 @@ def test_channel_list_carries_the_fields_the_card_shows(api):
     assert set(listed) == {channel["id"], channel_b["id"]}
     assert listed[channel["id"]]["notes"] == ""
     assert listed[channel["id"]]["enabled"] is True
-    assert listed[channel["id"]]["job_count"] == 0
     assert listed[channel["id"]]["last_sent_at"] == ""
 
     # 矩阵那一份带着所属群组与订阅内容（渠道卡片直接读它，不在前端重新推导）。
@@ -265,17 +264,23 @@ def test_channel_create_edit_toggle_delete_round_trip(api):
     assert api.as_session("GET", f"{API_PREFIX}/webhooks").json()["webhooks"] == []
 
 
-def test_deleting_a_channel_referenced_by_a_job_is_refused_with_a_reason(api):
-    """被任务引用时不能删：删了那条任务就再也发不出去 —— 提示要点名是哪条任务。"""
+def test_deleting_a_channel_leaves_the_jobs_alone(api):
+    """任务不再绑定渠道（票 08）：删渠道取消它的订阅，但没有任何任务因此失效。
+
+    旧模型里任务自己持有收件人，删渠道必须先拦住（否则那条任务永远发不出去）。现在
+    收件人来自订阅：渠道走了，任务照旧，缺的只是一个收件人（卡片上的目标数变 0）。
+    """
     channel = _create_channel(api, name="门店群")
-    _create_topic_job(api, channel["id"], name="每日报表")
+    _subscribe(api, "sales_report", channel["id"])
+    job = _create_topic_job(api, name="每日报表")
 
-    refused = api.as_session("DELETE", f"{API_PREFIX}/webhooks/{channel['id']}")
+    resp = api.as_session("DELETE", f"{API_PREFIX}/webhooks/{channel['id']}")
 
-    assert refused.status_code == 400, refused.text
-    assert "每日报表" in refused.json()["detail"]
-    # 渠道还在，任务也还在
-    assert len(api.as_session("GET", f"{API_PREFIX}/webhooks").json()["webhooks"]) == 1
+    assert resp.status_code == 200, resp.text
+    assert "订阅" in resp.json()["message"]
+    jobs = api.as_session("GET", f"{API_PREFIX}/jobs").json()["jobs"]
+    assert [item["id"] for item in jobs] == [job["id"]], "任务不该跟着渠道消失"
+    assert jobs[0]["target_count"] == 0
 
 
 def test_deleting_a_subscribed_channel_drops_its_subscriptions(api):
@@ -705,13 +710,9 @@ def test_every_write_route_on_this_page_declares_the_session_gate():
     )
 
 
-# 本票**不动**的那些写路由（定时任务表单与手工发送是票 07/08 的题，`send-text` 还有
-# 一个非本页的调用方：销售报表页的「推送」弹窗）。它们留旧口径 —— 这一页新做的
-# 渠道 / 群组 / 订阅三组接口才是票面「写操作只接受浏览器登录会话」的落点。
+# `send-text` 是唯一还留旧口径的写路由：它的调用方不止这一页（销售报表页的「推送」
+# 弹窗也走它），本票只收口它的落库，不动它的鉴权。定时任务那几条写路由已在票 08 里
+# 收紧成会话专用（`/jobs` 的形状也换成了「内容类型 + 参数 + 时间」）。
 _ROUTES_OWNED_BY_LATER_TICKETS = (
     f"{API_PREFIX}/send-text",
-    f"{API_PREFIX}/jobs",
-    f"{API_PREFIX}/jobs/{{job_id}}",
-    f"{API_PREFIX}/jobs/{{job_id}}/preview",
-    f"{API_PREFIX}/jobs/{{job_id}}/send-now",
 )

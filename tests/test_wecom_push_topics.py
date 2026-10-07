@@ -29,11 +29,14 @@ from api.wecom_push import router as wecom_push_router
 from config import KITCHEN_STATIONS
 from services.wecom_push_service import WECOM_TEXT_BYTE_LIMIT, validate_schedule_time
 from services.wecom_push_topics import (
+    TOPIC_MANUAL_SEND,
+    TOPIC_TEST_MESSAGE,
     PushTopic,
     PushTrigger,
     all_topics,
     get_topic,
     register_topic,
+    topic_display_name,
     unregister_topic,
     validate_params,
 )
@@ -518,6 +521,26 @@ def test_a_new_topic_reaches_the_page_without_any_frontend_change(meta_client):
     assert "fake_ops_event" not in [
         topic["id"] for topic in meta_client.get("/api/wecom-push/meta").json()["topics"]
     ]
+
+
+def test_internal_topics_are_named_but_not_subscribable(meta_client):
+    """测试发送 / 手工发送也要在发送记录里看得懂，但它们**不是**可订阅的内容类型。
+
+    收件人由点击的那一次调用直接给出（选哪个群就发哪个群），与订阅无关 —— 所以它们
+    不进注册表：不出现在 `/meta` 的 topics 里，也没有订阅行。只留一个显示名，让发送
+    记录里那一行写「测试消息」而不是 `test_message`。
+    """
+    assert TOPIC_TEST_MESSAGE not in [topic.id for topic in all_topics()]
+    assert get_topic(TOPIC_TEST_MESSAGE) is None
+    assert topic_display_name(TOPIC_TEST_MESSAGE) == "测试消息"
+    assert topic_display_name(TOPIC_MANUAL_SEND) == "手工发送"
+    # 注册表里的内容类型仍然按注册表的显示名走；没见过的 id 退回 id 本身（历史行）。
+    assert topic_display_name("sales_report") == "销售报表"
+    assert topic_display_name("gone_topic") == "gone_topic"
+
+    ids = [topic["id"] for topic in meta_client.get("/api/wecom-push/meta").json()["topics"]]
+    assert TOPIC_TEST_MESSAGE not in ids
+    assert TOPIC_MANUAL_SEND not in ids
 
 
 # ── 与迁移的字面量对齐（防漂移）──────────────────────────────────────────────
