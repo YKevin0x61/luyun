@@ -10,7 +10,12 @@
 票 04 起这一列**不再被读取**：`wecom_webhooks_all(hygiene_only=…)` 的收件人过滤随票删除，
 「谁收到卫生内容」只由推送订阅决定（回填见迁移 0016，口径见
 `tests/test_wecom_subscription_resolution.py`）。这里只剩这一列自身的读写契约 ——
-页面还在显示与编辑它，删列得连页面一起改。
+票 06 起新页面不再显示也不再编辑它，但**旧 bundle 还在写**（PWA 缓存），所以三态口径
+必须原样留着，直到确认没有旧页面在用。
+
+票 06 的鉴权收紧落在这一支上：写接口只接受浏览器登录会话。这里把 `require_session`
+覆写成放行（与 `tests/test_backup_api.py` 同一姿势）—— 凭据口径本身由
+`tests/test_wecom_push_channels_api.py` 用真 app 断言；本文件测的是**列的三态**。
 """
 
 import asyncio
@@ -19,7 +24,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from api.security import verify_admin_token
+from api.security import require_session, verify_admin_token
 from api.wecom_push import router as wecom_push_router
 from config import settings
 from database import DatabaseManager, get_db
@@ -44,6 +49,7 @@ def wecom_client(tmp_path):
     app.include_router(wecom_push_router)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[verify_admin_token] = lambda: True
+    app.dependency_overrides[require_session] = lambda: "test-admin-session"
     with TestClient(app) as client:
         yield client, db
     _run(db.close())

@@ -1,33 +1,136 @@
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { api } from '../api/client'
 
-export const PUSH_TYPE_NAMES = {
-  sales_report_text: '销售报表文字版',
-  data_quality_alert: '数据质量告警',
-  test: '测试消息',
+/**
+ * 本页的接口版本。**必须与后端 `services/wecom_push_topics.py` 的
+ * `WECOM_PUSH_API_VERSION` 逐字一致** —— 页面加载时拿 `/meta` 返回的那个值比对，
+ * 对不上就在顶部显示提示条（不阻断操作）。
+ *
+ * 「本地构建版本」就是这一份常量：页面 bundle 与它一起打包，改了后端接口形状又忘了
+ * 改前端时，旧 bundle 里的值会与 `/meta` 对不上，店长立刻看得见（而不是以为改了、
+ * 其实没生效）。漂移由两边的测试钉住：
+ * `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js`
+ * 与 `tests/test_wecom_push_channels_api.py`。
+ */
+export const WECOM_PUSH_API_VERSION = 'v1'
+
+/**
+ * 订阅视图切「多选列表」的渠道数阈值。
+ *
+ * 渠道不超过这个数时用「内容类型 × 渠道」的勾选矩阵；超过就把列收起来，改成
+ * 「先选内容类型、再勾渠道」的多选列表 —— 手机上一行塞十个勾选框点不准。
+ * （spec 的默认值 8，可在实施时调整；两处引用这一个常量。）
+ */
+export const MATRIX_CHANNEL_LIMIT = 8
+
+/** 多选列表模式的标识（`matrixViewMode` 的返回值）。 */
+export const MATRIX_VIEW_MULTI_SELECT = 'multi-select'
+
+/** 某种视图模式下怎么显示（矩阵 / 多选列表）。 */
+export function matrixViewMode(channels) {
+  return (channels || []).length > MATRIX_CHANNEL_LIMIT
+    ? MATRIX_VIEW_MULTI_SELECT
+    : 'matrix'
 }
 
-/** 删除确认文案：标了卫生群的地址要额外点名 —— 误删之后卫生消息就无处可发了。 */
-export function webhookDeleteConfirmText(item) {
-  if (item && item.hygiene_feed) {
-    return `「${item.name}」是卫生群，删除后卫生提醒与验收照片不会再发到它。确定删除？`
-  }
-  return '确定删除该 webhook？'
+/** 矩阵里有几行订阅（行 = 内容类型）。 */
+export function matrixTopics(matrix) {
+  return (matrix && matrix.topics) || []
+}
+
+/** 某一行的零订阅判定：一个**启用中**的渠道都没有，就是这类内容当前一条都不发。
+ *
+ * 「订阅了但渠道停着」也算零订阅 —— 投递会跳过停用渠道（出站记 skipped），页面上不
+ * 亮出来，店长会以为还在发（用户故事 9 要的正是这个可见性）。所以行里带的是
+ * `{id, enabled}` 而不是光秃秃的 id 数组：停用状态只有后端知道。
+ */
+export function topicIsUnsubscribed(row) {
+  const subscribed = (row && row.channels) || []
+  return !subscribed.some((channel) => channel && channel.enabled)
+}
+
+/** 某一行订阅到的渠道 id（矩阵打勾、多选列表做差集都用它）。 */
+export function topicChannelIds(row) {
+  return ((row && row.channels) || []).map((channel) => Number(channel.id))
+}
+
+/** 零订阅的内容类型显示名（页面上要高亮这些行）。 */
+export function matrixZeroTopicNames(matrix) {
+  return matrixTopics(matrix)
+    .filter(topicIsUnsubscribed)
+    .map((row) => row.name || row.id)
 }
 
 /**
- * 没有「启用中的卫生群」时的顶部提示；有可用的群就返回空串。
+ * 零订阅的顶部提示；一处都没有就返回空串。
  *
- * 这条提示是那个空态的可见性兜底：卫生消息这时**一条都不发**，页面上不写出来，
- * 店长只会以为"今天没有漏拍"。
+ * 这条提示是「以为还在发、其实停了」的可见性兜底（用户故事 9）：卫生提醒这类内容
+ * 一个收件人都没有时，页面上不写出来，店长只会以为今天没有漏拍。
  */
-export function hygieneFeedWarning(webhooks) {
-  const usable = (webhooks || []).filter((item) => item.hygiene_feed && item.enabled)
-  if (usable.length) return ''
-  return '还没有指定卫生群：卫生提醒与验收照片当前不会发出。请在下面的地址上勾选「这是卫生群」。'
+export function zeroSubscriptionWarning(matrix) {
+  const names = matrixZeroTopicNames(matrix)
+  if (!names.length) return ''
+  return `以下内容当前没有任何渠道订阅，不会发出：${names.join('、')}。请在「订阅」里勾选收件渠道。`
 }
 
-/** 发送类型的短名：确认框里"销售报表 / 数据质量摘要"比内部标识好读。 */
+/**
+ * 页面与服务端接口版本不一致时的顶部提示；对得上（或拿不到版本）返回空串。
+ *
+ * 拿不到版本（旧后端、请求失败）**不提示**：这时页面还没有资格判断谁旧谁新，
+ * 提示条会变成噪音。
+ */
+export function contractMismatchWarning(meta) {
+  const remote = (meta && meta.api_version) || ''
+  if (!remote || remote === WECOM_PUSH_API_VERSION) return ''
+  return `页面与服务端接口版本不一致（页面 ${WECOM_PUSH_API_VERSION} / 服务端 ${remote}），`
+    + '请刷新页面（Ctrl/Cmd+Shift+R）后再操作；当前显示的字段可能已过期。'
+}
+
+/** 渠道卡片上「所属群组」那一行的文本。 */
+export function channelGroupNames(channel) {
+  return ((channel && channel.groups) || []).map((g) => g.name || g.id).join('、')
+}
+
+/** 渠道卡片上「订阅了哪些内容」那一行的文本。
+ *
+ * 名字是纯名字：订阅「经群组来的」还是「直接订的」，页面上用单独一枚徽章标
+ * （`channel.topics[].via_group`）—— 混进这一行会让店长在核对时多读几个字。
+ */
+export function channelTopicNames(channel) {
+  return ((channel && channel.topics) || []).map((topic) => topic.name || topic.id).join('、')
+}
+
+/** 「最近一次发送成功」的展示串；从未发过就说清这一点（那是渠道失效的第一信号）。 */
+export function formatSentAt(channel) {
+  const raw = String((channel && channel.last_sent_at) || '')
+  if (!raw) return '从未发送'
+  return raw.replace('T', ' ').slice(0, 19)
+}
+
+/**
+ * 删除渠道的确认文案。
+ *
+ * 后端对「被推送任务引用」的删除是**拒绝**的（消息里点名任务）；这里先在前端说清
+ * 后果：订阅与群组成员会跟着走，而被任务引用时会被拦下来。外发配置删错了要重配一遍，
+ * 确认框是最后一道闸门。
+ */
+export function channelDeleteConfirmText(channel) {
+  if (!channel) return '确定删除该渠道？'
+  const name = channel.name || channel.id
+  const jobs = Number(channel.job_count) || 0
+  if (jobs > 0) {
+    return `「${name}」被 ${jobs} 条推送任务引用，删除会被拒绝；请先改绑或删除那些任务。`
+  }
+  const topics = (channel.topics || []).length
+  const groups = (channel.groups || []).length
+  const extras = []
+  if (topics) extras.push(`它的 ${topics} 条订阅会一并取消`)
+  if (groups) extras.push(`它会从 ${groups} 个群组里移除`)
+  const tail = extras.length ? `${extras.join('，')}。` : ''
+  return `确定删除渠道「${name}」？${tail}删除后要重新配置才能恢复。`
+}
+
+/** 发送类型的短名：确认框里「销售报表 / 数据质量摘要」比内部标识好读。 */
 export function pushTypeLabel(pushType) {
   if (pushType === 'data_quality_alert') return '数据质量摘要'
   return '销售报表'
@@ -71,23 +174,39 @@ export function canSendNow({ job = null, content = '' } = {}) {
   return Boolean(job) && String(content || '').trim().length > 0
 }
 
-/** 阶段三：企微推送管理页面状态管理，1:1 迁移自原 public/wecom-push.html。 */
+/** 订阅的「保存后下一次触发即按新订阅投递」：勾选写哪一行由这里定死。 */
+function subscriptionPayload({ topicId, channelId, groupId, enabled }) {
+  const payload = { topic_id: topicId, enabled: !!enabled }
+  if (groupId) payload.target_group_id = Number(groupId)
+  else payload.target_channel_id = Number(channelId)
+  return payload
+}
+
+/** 企微推送管理页面状态：渠道 / 订阅两个 tab（票 06）+ 定时任务 / 发送记录（原样）。 */
 export function useWecomPush() {
-  const webhooks = ref([])
+  const meta = ref({ topics: [], job_templates: [] })
+  const channels = ref([])
+  const topics = ref([])
+  const groups = ref([])
   const jobs = ref([])
   const logs = ref([])
-  const meta = ref({ push_types: [], job_templates: [] })
+  const matrix = ref({ topics: [], channels: [] })
   const selectedJobId = ref(null)
   const previewContent = ref('')
   const previewMeta = ref({ bytes: 0, chunkCount: 1 })
   const loading = ref(false)
   const error = ref('')
 
-  const webhookForm = reactive(emptyWebhookForm())
-  const jobForm = reactive(emptyJobForm())
+  const activeTab = ref('channels')
+  const channelForm = reactive(emptyChannelForm())
+  const channelGroupForm = reactive(emptyChannelGroupForm())
+  const multiSelect = reactive({ topicId: '', channelIds: [] })
 
-  function emptyWebhookForm() {
-    return { id: '', name: '', webhook_url: '', notes: '', enabled: true, hygiene_feed: false }
+  function emptyChannelForm() {
+    return { id: '', name: '', webhook_url: '', notes: '', enabled: true, group_ids: [] }
+  }
+  function emptyChannelGroupForm() {
+    return { id: '', name: '', notes: '', enabled: true }
   }
   function emptyJobForm() {
     return {
@@ -96,16 +215,49 @@ export function useWecomPush() {
     }
   }
 
-  function resetWebhookForm() { Object.assign(webhookForm, emptyWebhookForm()) }
+  function resetChannelForm() { Object.assign(channelForm, emptyChannelForm()) }
+  function resetChannelGroupForm() { Object.assign(channelGroupForm, emptyChannelGroupForm()) }
   function resetJobForm() { Object.assign(jobForm, emptyJobForm()) }
 
+  const jobForm = reactive(emptyJobForm())
+
+  // ── 顶部提示：接口版本与零订阅 ────────────────────────────────────────────
+  const contractWarning = computed(() => contractMismatchWarning(meta.value))
+  const zeroSubscriptionTip = computed(() => zeroSubscriptionWarning(matrix.value))
+  const viewMode = computed(() => matrixViewMode(matrix.value.channels || channels.value))
+  const zeroTopicIds = computed(() => matrixTopics(matrix.value)
+    .filter(topicIsUnsubscribed)
+    .map((row) => row.id))
+
+  // ── 读 ────────────────────────────────────────────────────────────────────
   async function loadMeta() {
     meta.value = await api.get('/api/wecom-push/meta')
   }
 
-  async function loadWebhooks() {
+  /** 一次把渠道 / 群组 / 矩阵拉齐：三份数据同源，页面不必自己拼。 */
+  async function loadChannels() {
     const data = await api.get('/api/wecom-push/webhooks')
-    webhooks.value = data.webhooks || []
+    channels.value = data.channels || []
+    groups.value = data.groups || []
+    topics.value = data.topics || []
+    matrix.value = { topics: data.topics || [], channels: data.channels || [] }
+  }
+
+  async function loadSubscriptions() {
+    const data = await api.get('/api/wecom-push/subscriptions')
+    // 每条读接口都带着自己的接口版本：整页只在启动时拉一次 /meta，页面开着不动的
+    // 那段时间里后端换了版本的话，只有这里能看出来（提示条是同一份文案，不阻断）。
+    if (data.api_version) meta.value = { ...meta.value, api_version: data.api_version }
+    matrix.value = { topics: data.topics || [], channels: data.channels || [] }
+    if (!topics.value.length) topics.value = data.topics || []
+    if (!channels.value.length) channels.value = data.channels || []
+    return matrix.value
+  }
+
+  async function loadChannelGroups() {
+    const data = await api.get('/api/wecom-push/channel-groups')
+    groups.value = data.groups || []
+    return groups.value
   }
 
   async function loadJobs() {
@@ -124,7 +276,7 @@ export function useWecomPush() {
     error.value = ''
     try {
       await loadMeta()
-      await loadWebhooks()
+      await loadChannels()
       await loadJobs()
       await loadLogs()
     } catch (e) {
@@ -134,59 +286,185 @@ export function useWecomPush() {
     }
   }
 
-  function editWebhook(item) {
-    Object.assign(webhookForm, {
-      id: item.id, name: item.name, webhook_url: '', notes: item.notes || '',
-      enabled: item.enabled, hygiene_feed: !!item.hygiene_feed,
+  // ── 渠道 ──────────────────────────────────────────────────────────────────
+  function editChannel(item) {
+    Object.assign(channelForm, {
+      id: item.id,
+      name: item.name,
+      webhook_url: '',
+      notes: item.notes || '',
+      enabled: !!item.enabled,
+      group_ids: (item.groups || []).map((group) => group.id),
     })
   }
 
-  async function saveWebhook() {
-    const id = webhookForm.id
+  async function saveChannel() {
+    const id = channelForm.id
     const payload = {
-      name: webhookForm.name.trim(),
-      webhook_url: webhookForm.webhook_url.trim() || null,
-      enabled: webhookForm.enabled,
-      hygiene_feed: !!webhookForm.hygiene_feed,
-      notes: webhookForm.notes.trim(),
+      name: channelForm.name.trim(),
+      webhook_url: channelForm.webhook_url.trim() || null,
+      enabled: !!channelForm.enabled,
+      notes: channelForm.notes.trim(),
     }
-    if (!id && !payload.webhook_url) throw new Error('新建 webhook 必须填写地址')
-    await api[id ? 'put' : 'post'](id ? `/api/wecom-push/webhooks/${id}` : '/api/wecom-push/webhooks', payload)
-    resetWebhookForm()
-    await loadWebhooks()
+    if (!id && !payload.webhook_url) throw new Error('新建渠道必须填写 webhook 地址')
+    // 先记下**保存前**的成员关系：保存成功那一刻页面上的 groups 还是旧的，拿保存后
+    // 再拉的列表算差集会把「这次加进去的」也算成「已经在了」。
+    const before = groups.value
+    const data = await api[id ? 'put' : 'post'](
+      id ? `/api/wecom-push/webhooks/${id}` : '/api/wecom-push/webhooks',
+      payload,
+    )
+    const channelId = (data.channel && data.channel.id) || Number(id) || 0
+    if (channelId) await syncChannelGroups(channelId, channelForm.group_ids, before)
+    resetChannelForm()
+    await loadChannels()
+    return channelId
   }
 
-  async function deleteWebhook(id) {
-    await api.delete(`/api/wecom-push/webhooks/${id}`)
+  /**
+   * 把渠道的群组成员关系对齐到勾选结果。
+   *
+   * 成员关系是独立的接口（一个渠道可以属于多个群组），所以这里算出差集：新增的加、
+   * 取消的删，已经对上的不动 —— 每次保存都全删全加会把别的页面正在看的关系也抖一遍。
+   * `knownGroups` 是「这次勾选之前的成员关系」（调用方在写渠道**之前**取的那一份）。
+   */
+  async function syncChannelGroups(channelId, wantedIds, knownGroups = null) {
+    const wanted = new Set((wantedIds || []).map(Number))
+    const current = new Set(
+      (knownGroups || groups.value)
+        .filter((group) => (group.member_channel_ids || []).map(Number).includes(Number(channelId)))
+        .map((group) => Number(group.id)),
+    )
+    for (const groupId of wanted) {
+      if (!current.has(groupId)) await addGroupMember({ groupId, channelId })
+    }
+    for (const groupId of current) {
+      if (!wanted.has(groupId)) await removeGroupMember({ groupId, channelId })
+    }
+  }
+
+  async function deleteChannel(id) {
+    const data = await api.delete(`/api/wecom-push/webhooks/${id}`)
     await loadAll()
+    return data
   }
 
-  async function toggleWebhookEnabled(item) {
-    // 列表上的快捷开关：只切 enabled，webhook_url 传 null 表示不动原地址
-    // （后端 `if payload.webhook_url:` 才覆盖，见 api/wecom_push.py）。
-    // hygiene_feed 原样回传是双保险：后端只在明确给值时才写这一列，不发也不会被清掉。
+  async function toggleChannelEnabled(item) {
+    // 快捷开关只切 enabled，webhook_url 传 null 表示不动原地址（后端 `if payload.webhook_url:`
+    // 才覆盖）。不碰 hygiene_feed：那一列已退役，新页面不再显示也不再写它。
     await api.put(`/api/wecom-push/webhooks/${item.id}`, {
       name: item.name,
       webhook_url: null,
       enabled: !item.enabled,
-      hygiene_feed: !!item.hygiene_feed,
       notes: item.notes || '',
     })
-    await loadWebhooks()
+    await loadChannels()
   }
 
-  async function testWebhook(id) {
+  async function testChannel(id) {
     const result = await api.post(`/api/wecom-push/webhooks/${id}/test`, {})
     await loadLogs()
     return result
   }
 
+  // ── 群组与成员 ────────────────────────────────────────────────────────────
+  function editChannelGroup(item) {
+    Object.assign(channelGroupForm, {
+      id: item.id, name: item.name, notes: item.notes || '', enabled: !!item.enabled,
+    })
+  }
+
+  async function saveChannelGroup() {
+    const id = channelGroupForm.id
+    const payload = {
+      name: channelGroupForm.name.trim(),
+      enabled: !!channelGroupForm.enabled,
+      notes: channelGroupForm.notes.trim(),
+    }
+    if (!payload.name) throw new Error('群组名称不能为空')
+    const data = await api[id ? 'put' : 'post'](
+      id ? `/api/wecom-push/channel-groups/${id}` : '/api/wecom-push/channel-groups',
+      payload,
+    )
+    resetChannelGroupForm()
+    await loadChannels()
+    return data.group
+  }
+
+  async function deleteChannelGroup(id) {
+    await api.delete(`/api/wecom-push/channel-groups/${id}`)
+    await loadChannels()
+  }
+
+  async function addGroupMember({ groupId, channelId }) {
+    const data = await api.post(`/api/wecom-push/channel-groups/${groupId}/members`, {
+      channel_id: Number(channelId),
+    })
+    return data.group
+  }
+
+  async function removeGroupMember({ groupId, channelId }) {
+    const data = await api.delete(
+      `/api/wecom-push/channel-groups/${groupId}/members/${channelId}`,
+    )
+    return data.group
+  }
+
+  // ── 订阅 ──────────────────────────────────────────────────────────────────
+  async function toggleSubscription({ topicId, channelId, groupId = null, enabled }) {
+    const data = await api.post(
+      '/api/wecom-push/subscriptions',
+      subscriptionPayload({ topicId, channelId, groupId, enabled }),
+    )
+    await loadSubscriptions()
+    return data
+  }
+
+  /** 矩阵里某一行当前勾了哪些渠道（多选列表用它做差集）。 */
+  function subscribedChannelIds(topicId) {
+    const row = matrixTopics(matrix.value).find((item) => item.id === topicId)
+    return ((row && row.channels) || []).map(Number)
+  }
+
+  function pickMultiSelectTopic(topicId) {
+    multiSelect.topicId = topicId
+    multiSelect.channelIds = subscribedChannelIds(topicId)
+  }
+
+  /**
+   * 多选列表的保存：把「这次勾的」与「原来勾的」做差集，只发变化的那几条。
+   *
+   * 全量重发会把没动过的渠道也写一遍（更新时间被刷、页面上的「最近变更」也会漂），
+   * 而且渠道多起来之后就是几十次没必要的写。
+   */
+  async function saveMultiSelectTopic() {
+    const topicId = multiSelect.topicId
+    if (!topicId) throw new Error('请先选择内容类型')
+    const before = new Set(subscribedChannelIds(topicId))
+    const after = new Set((multiSelect.channelIds || []).map(Number))
+    for (const channelId of after) {
+      if (!before.has(channelId)) {
+        await api.post('/api/wecom-push/subscriptions',
+          subscriptionPayload({ topicId, channelId, enabled: true }))
+      }
+    }
+    for (const channelId of before) {
+      if (!after.has(channelId)) {
+        await api.post('/api/wecom-push/subscriptions',
+          subscriptionPayload({ topicId, channelId, enabled: false }))
+      }
+    }
+    await loadSubscriptions()
+  }
+
+  // ── 定时任务与发送记录（票 07/08 重做，本票原样保留）────────────────────────
   function editJob(item) {
     selectedJobId.value = item.id
     Object.assign(jobForm, {
-      id: item.id, name: item.name, webhook_id: item.webhook_id, push_type: item.push_type || 'sales_report_text',
-      schedule_time: item.schedule_time, date_range_mode: item.date_range_mode, station: item.station || '',
-      notes: item.notes || '', enabled: item.enabled,
+      id: item.id, name: item.name, webhook_id: item.webhook_id,
+      push_type: item.push_type || 'sales_report_text',
+      schedule_time: item.schedule_time, date_range_mode: item.date_range_mode,
+      station: item.station || '', notes: item.notes || '', enabled: item.enabled,
     })
   }
 
@@ -203,7 +481,7 @@ export function useWecomPush() {
   async function saveJob() {
     const id = jobForm.id
     const webhookId = Number(jobForm.webhook_id)
-    if (!webhookId) throw new Error('请先选择 webhook')
+    if (!webhookId) throw new Error('请先选择渠道')
     const payload = {
       name: jobForm.name.trim(),
       webhook_id: webhookId,
@@ -214,7 +492,8 @@ export function useWecomPush() {
       enabled: jobForm.enabled,
       notes: jobForm.notes.trim(),
     }
-    const data = await api[id ? 'put' : 'post'](id ? `/api/wecom-push/jobs/${id}` : '/api/wecom-push/jobs', payload)
+    const data = await api[id ? 'put' : 'post'](
+      id ? `/api/wecom-push/jobs/${id}` : '/api/wecom-push/jobs', payload)
     selectedJobId.value = (data.job && data.job.id) || Number(id) || selectedJobId.value
     resetJobForm()
     await loadJobs()
@@ -241,11 +520,16 @@ export function useWecomPush() {
   }
 
   return {
-    webhooks, jobs, logs, meta, selectedJobId, previewContent, previewMeta, loading, error,
-    webhookForm, jobForm, resetWebhookForm, resetJobForm,
-    loadAll, loadWebhooks, loadJobs, loadLogs,
-    editWebhook, saveWebhook, deleteWebhook, toggleWebhookEnabled, testWebhook,
-    editJob, applyJobTemplate, saveJob, deleteJob,
-    previewSelectedJob, sendSelectedJob,
+    meta, channels, topics, groups, jobs, logs, matrix,
+    selectedJobId, previewContent, previewMeta, loading, error,
+    activeTab, channelForm, channelGroupForm, multiSelect,
+    contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
+    resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
+    loadAll, loadMeta, loadChannels, loadSubscriptions, loadChannelGroups, loadJobs, loadLogs,
+    editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,
+    editChannelGroup, saveChannelGroup, deleteChannelGroup,
+    addGroupMember, removeGroupMember, syncChannelGroups,
+    toggleSubscription, subscribedChannelIds, pickMultiSelectTopic, saveMultiSelectTopic,
+    editJob, applyJobTemplate, saveJob, deleteJob, previewSelectedJob, sendSelectedJob,
   }
 }

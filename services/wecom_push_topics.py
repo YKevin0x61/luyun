@@ -47,6 +47,16 @@ _SCHEDULE_TIME_PATTERN = r"^([01]\d|2[0-3]):[0-5]\d$"
 
 DATE_RANGE_LABELS = {"today": "当天", "yesterday": "昨天"}
 
+# 接口版本：页面加载时拿它和本地构建里的版本比对，对不上就显示顶部提示条
+# （不阻断操作，spec「页面」一节）。**任何改变 `/meta`、`/webhooks`、
+# `/subscriptions` 等接口形状的改动都要把它 +1** —— 提示条的意义只在于「页面
+# 与服务端说的不是同一套话」，值不跟着改，提示条就永远不会亮。
+#
+# 前端那一半在 `admin-web/src/composables/useWecomPush.js`（`WECOM_PUSH_API_VERSION`），
+# 两处由 `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js` 钉住。
+WECOM_PUSH_API_VERSION = "v1"
+
+
 
 def _select_extras(choices: Mapping[str, str]) -> Dict[str, Any]:
     """下拉控件的选项：JSON Forms 的枚举控件认 ``oneOf`` 里的 const / title。"""
@@ -247,6 +257,9 @@ class PushTopic:
     triggers: FrozenSet[PushTrigger]
     schedule_params_model: Optional[Type[BaseModel]] = None
     event_params_model: Optional[Type[BaseModel]] = None
+    # 含员工实拍照片：订阅视图上要标注「含员工实拍照片」（用户故事 11）。
+    # 判断依据是**这一类内容的性质**，不是渲染器怎么实现 —— 放在注册表里，页面零硬编码。
+    contains_employee_photos: bool = False
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -323,6 +336,7 @@ class PushTopic:
             "params_schema": self.params_schema,
             "uischema": self.uischema,
             "default_schedule_time": self.default_schedule_time,
+            "contains_employee_photos": self.contains_employee_photos,
         }
 
     def _resolve_trigger(self, trigger: Optional[PushTrigger]) -> PushTrigger:
@@ -455,6 +469,7 @@ register_topic(PushTopic(
     name="验收照片",
     triggers=frozenset({PushTrigger.EVENT}),
     event_params_model=HygienePhotoParams,
+    contains_employee_photos=True,
 ))
 register_topic(PushTopic(
     id=TOPIC_UPDATE_BACKUP,

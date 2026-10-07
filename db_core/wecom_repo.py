@@ -22,12 +22,17 @@ class _WecomRepoMixin:
         没有「卫生群」过滤：收件人只由推送订阅决定（``wecom_push_subscriptions``），
         渠道上的 `hygiene_feed` 列不再被读取（票 04 删掉了 ``hygiene_only`` 这条读取
         路径，回填见迁移 0016）。列本身还在，页面仍旧显示与编辑它。
+
+        多一列 ``job_count``：页面要能说清「这个渠道被几条推送任务引用」（删除前的
+        引用提示、渠道卡片上的引用数），按渠道逐条去数就是 N 次往返。
         """
         try:
             tdb = self._connection.table("wecom_push_webhooks")
             sql = """SELECT id, name, webhook_url_encrypted, webhook_url_masked,
-                            enabled, hygiene_feed, notes, created_at, updated_at
-                     FROM wecom_push_webhooks"""
+                            enabled, hygiene_feed, notes, created_at, updated_at,
+                            (SELECT COUNT(*) FROM wecom_push_jobs j
+                              WHERE j.webhook_id = w.id) AS job_count
+                     FROM wecom_push_webhooks w"""
             params: List[Any] = []
             conditions: List[str] = []
             if not include_disabled:
@@ -50,8 +55,10 @@ class _WecomRepoMixin:
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT id, name, webhook_url_encrypted, webhook_url_masked,
-                              enabled, hygiene_feed, notes, created_at, updated_at
-                       FROM wecom_push_webhooks WHERE id = ?""",
+                              enabled, hygiene_feed, notes, created_at, updated_at,
+                              (SELECT COUNT(*) FROM wecom_push_jobs j
+                                WHERE j.webhook_id = w.id) AS job_count
+                       FROM wecom_push_webhooks w WHERE id = ?""",
                     (webhook_id,),
                 )
                 row = await cursor.fetchone()

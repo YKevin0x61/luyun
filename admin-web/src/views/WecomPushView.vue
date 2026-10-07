@@ -1,7 +1,8 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import {
-  useWecomPush, PUSH_TYPE_NAMES, webhookDeleteConfirmText, hygieneFeedWarning,
+  useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, pushTypeLabel,
+  channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
   canSendNow, sendNowConfirmText,
 } from '../composables/useWecomPush'
 import { useStationsStore } from '../stores/stations'
@@ -9,10 +10,25 @@ import SvgIcon from '../components/SvgIcon.vue'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
 import LuyunTimePicker from '../components/ui/LuyunTimePicker.vue'
 
+// 页内 tab：不改路由（页面清单契约保持绿）。五个 tab 里的「变更历史」是第二批，
+// 本票先摆四个；定时任务与发送记录两个 tab 的内容本票**原样搬入**，票 07/08 各自重做。
+const TABS = [
+  { id: 'channels', name: '渠道' },
+  { id: 'subscriptions', name: '订阅' },
+  { id: 'jobs', name: '定时任务' },
+  { id: 'logs', name: '发送记录' },
+]
+
 const {
-  webhooks, jobs, logs, meta, selectedJobId, previewContent, previewMeta, loading, error,
-  webhookForm, jobForm, resetWebhookForm, resetJobForm,
-  loadAll, loadJobs, loadLogs, editWebhook, saveWebhook, deleteWebhook, toggleWebhookEnabled, testWebhook,
+  meta, channels, topics, groups, jobs, logs, matrix, selectedJobId, previewContent,
+  previewMeta, error, activeTab, channelForm, channelGroupForm, multiSelect,
+  contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
+  resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
+  loadAll, loadSubscriptions, loadJobs, loadLogs, loadChannels,
+  editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,
+  editChannelGroup, saveChannelGroup, deleteChannelGroup,
+  addGroupMember, removeGroupMember,
+  toggleSubscription, pickMultiSelectTopic, saveMultiSelectTopic,
   editJob, applyJobTemplate, saveJob, deleteJob, previewSelectedJob, sendSelectedJob,
 } = useWecomPush()
 
@@ -26,9 +42,8 @@ function flash(msg, type = 'info') {
   setTimeout(() => { if (toastMsg.value === msg) toastMsg.value = '' }, 3000)
 }
 
-const isEditingWebhook = computed(() => !!webhookForm.id)
-// 没有可用的卫生群时，卫生消息一条都不发 —— 这件事必须在页面上看得见
-const hygieneWarning = computed(() => hygieneFeedWarning(webhooks.value))
+const isEditingChannel = computed(() => !!channelForm.id)
+const isEditingGroup = computed(() => !!channelGroupForm.id)
 const selectedJob = computed(() => jobs.value.find((j) => j.id === selectedJobId.value))
 const jobStations = computed(() => stationsStore.list.filter((s) => s.id && s.id !== 'loumian'))
 // 预览为空时「立即发送」不可点：这时页面没有任何可核对的内容，一点却会真的外发
@@ -37,31 +52,88 @@ const sendReady = computed(() => canSendNow({
   job: selectedJob.value,
   content: previewContent.value,
 }))
+// 订阅视图：渠道超过阈值就切「先选内容、再勾群」的多选列表（窄屏可点）
+const isMultiSelectView = computed(() => viewMode.value === 'multi-select')
+const matrixRows = computed(() => matrix.value.topics || [])
+const matrixColumns = computed(() => matrix.value.channels || [])
+// 某个内容类型当前勾了哪些渠道（矩阵与多选列表共用同一份判据）
+const subscriptionIds = computed(() => {
+  const map = {}
+  for (const row of matrixRows.value) {
+    map[row.id] = (row.channels || []).filter((item) => item.enabled).map((item) => Number(item.id))
+  }
+  return map
+})
 
-async function handleSaveWebhook() {
+function topicSubscribed(topicId, channelId) {
+  return (subscriptionIds.value[topicId] || []).includes(Number(channelId))
+}
+function topicHasPhotos(row) {
+  return !!row.contains_employee_photos
+}
+
+async function handleSaveChannel() {
   try {
-    await saveWebhook()
-    flash('Webhook 已保存', 'success')
+    await saveChannel()
+    flash('渠道已保存', 'success')
   } catch (e) { flash(e.message, 'error') }
 }
-async function handleDeleteWebhook(id) {
-  const target = webhooks.value.find((w) => w.id === id)
-  if (!window.confirm(webhookDeleteConfirmText(target))) return
+async function handleDeleteChannel(item) {
+  if (!window.confirm(channelDeleteConfirmText(item))) return
   try {
-    await deleteWebhook(id)
-    flash('Webhook 已删除', 'success')
+    const data = await deleteChannel(item.id)
+    flash(data.message || '渠道已删除', 'success')
   } catch (e) { flash(e.message, 'error') }
 }
-async function handleToggleWebhook(item) {
+async function handleToggleChannel(item) {
   try {
-    await toggleWebhookEnabled(item)
+    await toggleChannelEnabled(item)
     flash(item.enabled ? `已停用「${item.name}」` : `已启用「${item.name}」`, 'success')
   } catch (e) { flash(e.message, 'error') }
 }
-async function handleTestWebhook(id) {
+async function handleTestChannel(id) {
   try {
-    const result = await testWebhook(id)
+    const result = await testChannel(id)
     flash(result.success ? '测试消息已发送' : `测试失败：${result.error || result.response_text}`, result.success ? 'success' : 'error')
+  } catch (e) { flash(e.message, 'error') }
+}
+async function handleSaveChannelGroup() {
+  try {
+    await saveChannelGroup()
+    flash('群组已保存', 'success')
+  } catch (e) { flash(e.message, 'error') }
+}
+async function handleDeleteChannelGroup(item) {
+  if (!window.confirm(`确定删除群组「${item.name}」？成员与指向它的订阅会一起取消。`)) return
+  try {
+    await deleteChannelGroup(item.id)
+    flash('群组已删除', 'success')
+  } catch (e) { flash(e.message, 'error') }
+}
+async function handleToggleMember(group, channelId) {
+  const isMember = (group.member_channel_ids || []).map(Number).includes(Number(channelId))
+  try {
+    if (isMember) await removeGroupMember({ groupId: group.id, channelId })
+    else await addGroupMember({ groupId: group.id, channelId })
+    await loadChannels()
+  } catch (e) { flash(e.message, 'error') }
+}
+async function handleToggleSubscription(row, channel) {
+  try {
+    await toggleSubscription({
+      topicId: row.id,
+      channelId: channel.id,
+      enabled: !topicSubscribed(row.id, channel.id),
+    })
+  } catch (e) { flash(e.message, 'error') }
+}
+function handlePickTopic(topicId) {
+  pickMultiSelectTopic(topicId)
+}
+async function handleSaveMultiSelect() {
+  try {
+    await saveMultiSelectTopic()
+    flash('订阅已保存，下一次触发即按新订阅投递', 'success')
   } catch (e) { flash(e.message, 'error') }
 }
 async function handleSaveJob() {
@@ -104,7 +176,7 @@ async function copyPreview() {
 function handleApplyTemplate(id) {
   try {
     applyJobTemplate(id)
-    flash('已填入模板，请选择 Webhook 后保存', 'success')
+    flash('已填入模板，请选择渠道后保存', 'success')
   } catch (e) { flash(e.message, 'error') }
 }
 
@@ -129,73 +201,270 @@ onMounted(async () => {
 <template>
   <div style="display:flex;flex-direction:column;gap:12px">
     <div v-if="error" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> 企微推送数据加载失败：{{ error }}</div>
-    <div v-if="hygieneWarning" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ hygieneWarning }}</div>
+    <!-- 接口版本不匹配：只提示，不阻断操作（旧页面照样能读，写接口由后端把关） -->
+    <div v-if="contractWarning" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ contractWarning }}</div>
+    <!-- 零订阅：这类内容当前一条都不发，页面上不写出来店长只会以为"今天没有" -->
+    <div v-if="zeroSubscriptionTip" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ zeroSubscriptionTip }}</div>
     <div v-if="toastMsg" class="badge" :style="toastType === 'error' ? 'color:var(--red);border-color:var(--red)' : 'color:var(--green);border-color:var(--green)'">
       {{ toastMsg }}
     </div>
 
-    <div class="grid" style="grid-template-columns: minmax(280px, 420px) minmax(0, 1fr)">
+    <div class="view-tabs">
+      <button
+        v-for="tab in TABS"
+        :key="tab.id"
+        class="view-tab"
+        :class="{ active: activeTab === tab.id }"
+        type="button"
+        @click="activeTab = tab.id"
+      >{{ tab.name }}</button>
+      <span style="margin-left:auto;color:var(--text-dim);font-size:11px;align-self:center">
+        接口版本 {{ WECOM_PUSH_API_VERSION }}
+      </span>
+    </div>
+
+    <!-- ═══ 渠道 ══════════════════════════════════════════════════════════ -->
+    <div v-if="activeTab === 'channels'" class="grid" style="grid-template-columns: minmax(280px, 420px) minmax(0, 1fr)">
       <div style="display:flex;flex-direction:column;gap:12px">
-        <!-- Webhook 管理 -->
+        <!-- 渠道地址 -->
         <div class="card">
           <div class="panel-title" style="display:flex;justify-content:space-between">
-            <span>Webhook 管理</span>
-            <span style="color:var(--text-dim);font-size:12px">{{ webhooks.length }} 个</span>
+            <span>渠道</span>
+            <span style="color:var(--text-dim);font-size:12px">{{ channels.length }} 个</span>
           </div>
-          <form @submit.prevent="handleSaveWebhook" style="display:flex;flex-direction:column;gap:10px">
-            <div class="badge" :style="isEditingWebhook ? 'color:var(--yellow);border-color:var(--yellow)' : ''">
-              {{ isEditingWebhook ? `正在编辑：${webhookForm.name}` : '新增地址' }}
-              <button v-if="isEditingWebhook" type="button" class="btn btn-sm" style="margin-left:8px" @click="resetWebhookForm">取消编辑</button>
+          <form @submit.prevent="handleSaveChannel" style="display:flex;flex-direction:column;gap:10px">
+            <div class="badge" :style="isEditingChannel ? 'color:var(--yellow);border-color:var(--yellow)' : ''">
+              {{ isEditingChannel ? `正在编辑：${channelForm.name}` : '新增渠道' }}
+              <button v-if="isEditingChannel" type="button" class="btn btn-sm" style="margin-left:8px" @click="resetChannelForm">取消编辑</button>
             </div>
             <div class="form-row">
               <label>名称</label>
-              <input class="input" v-model="webhookForm.name" placeholder="例如：管理群日报" maxlength="60" required />
+              <input class="input" v-model="channelForm.name" placeholder="例如：管理群日报" maxlength="60" required />
             </div>
             <div class="form-row">
               <label>Webhook 地址</label>
-              <input class="input" v-model="webhookForm.webhook_url" :placeholder="isEditingWebhook ? '留空表示不更换地址' : 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...'" maxlength="500" />
+              <input class="input" v-model="channelForm.webhook_url" :placeholder="isEditingChannel ? '留空表示不更换地址' : 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...'" maxlength="500" />
             </div>
             <div class="form-row">
               <label>备注</label>
-              <textarea class="input" v-model="webhookForm.notes" maxlength="200" placeholder="可选" style="min-height:74px;resize:vertical"></textarea>
+              <textarea class="input" v-model="channelForm.notes" maxlength="200" placeholder="可选" style="min-height:74px;resize:vertical"></textarea>
+            </div>
+            <div class="form-row">
+              <label>所属群组（可多选）</label>
+              <div v-if="!groups.length" style="color:var(--text-dim);font-size:12px">还没有群组，可在「渠道群组」卡片里新建</div>
+              <label v-for="g in groups" :key="g.id" class="luyun-check-row">
+                <LuyunCheckbox
+                  :model-value="channelForm.group_ids.includes(g.id)"
+                  @update:model-value="(checked) => {
+                    channelForm.group_ids = checked
+                      ? [...channelForm.group_ids, g.id]
+                      : channelForm.group_ids.filter((id) => id !== g.id)
+                  }"
+                />
+                {{ g.name }}<span v-if="!g.enabled" style="color:var(--text-dim)">（停用）</span>
+              </label>
             </div>
             <label class="luyun-check-row">
-              <LuyunCheckbox v-model="webhookForm.enabled" /> 启用
+              <LuyunCheckbox v-model="channelForm.enabled" /> 启用
             </label>
-            <label class="luyun-check-row">
-              <LuyunCheckbox v-model="webhookForm.hygiene_feed" /> 这是卫生群
-            </label>
-            <p style="color:var(--text-dim);font-size:12px;margin:0">
-              卫生提醒与验收照片只发勾选的群；一个都不勾就一条都不发。
-            </p>
             <div style="display:flex;gap:8px">
-              <button class="btn btn-primary" type="submit">{{ isEditingWebhook ? '保存修改' : '新增地址' }}</button>
-              <button class="btn" type="button" @click="resetWebhookForm">清空 / 新增</button>
+              <button class="btn btn-primary" type="submit">{{ isEditingChannel ? '保存修改' : '新增渠道' }}</button>
+              <button class="btn" type="button" @click="resetChannelForm">清空 / 新增</button>
             </div>
           </form>
 
           <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
-            <div v-if="!webhooks.length" class="empty-state">暂无 webhook</div>
-            <div v-for="item in webhooks" :key="item.id" class="card wp-hook-card" style="padding:10px">
+            <div v-if="!channels.length" class="empty-state">暂无渠道</div>
+            <div v-for="item in channels" :key="item.id" class="card wp-hook-card" style="padding:10px">
               <div class="wp-hook-head">
                 <strong class="wp-hook-name">{{ item.name }}</strong>
                 <span class="wp-hook-badges">
-                  <span v-if="item.hygiene_feed" class="badge" style="color:var(--cyan);border-color:var(--cyan)">卫生群</span>
                   <span class="badge" :style="item.enabled ? 'color:var(--green);border-color:var(--green)' : ''">{{ item.enabled ? '启用' : '停用' }}</span>
+                  <span v-if="(item.topics || []).length === 0" class="badge" style="color:var(--yellow);border-color:var(--yellow)">未订阅</span>
                 </span>
               </div>
               <div style="color:var(--text-dim);font-size:12px;word-break:break-all">{{ item.webhook_url_masked }}</div>
               <div v-if="item.notes" style="color:var(--text-dim);font-size:12px">{{ item.notes }}</div>
+              <div style="color:var(--text-dim);font-size:12px">
+                群组：{{ channelGroupNames(item) || '未分组' }}
+              </div>
+              <div style="color:var(--text-dim);font-size:12px">
+                订阅内容：{{ channelTopicNames(item) || '未订阅任何内容' }}
+                <span v-if="(item.topics || []).some((t) => t.via_group)" class="badge" style="margin-left:4px">含群组订阅</span>
+              </div>
+              <div style="color:var(--text-dim);font-size:12px">最近一次发送成功：{{ formatSentAt(item) }}</div>
+              <div v-if="item.job_count" style="color:var(--text-dim);font-size:12px">被 {{ item.job_count }} 条推送任务引用</div>
               <div style="display:flex;gap:6px;margin-top:8px">
-                <button class="btn btn-sm" @click="editWebhook(item)">编辑</button>
-                <button class="btn btn-sm" @click="handleToggleWebhook(item)">{{ item.enabled ? '停用' : '启用' }}</button>
-                <button class="btn btn-sm" @click="handleTestWebhook(item.id)">测试</button>
-                <button class="btn btn-sm btn-danger" @click="handleDeleteWebhook(item.id)">删除</button>
+                <button class="btn btn-sm" @click="editChannel(item)">编辑</button>
+                <button class="btn btn-sm" @click="handleToggleChannel(item)">{{ item.enabled ? '停用' : '启用' }}</button>
+                <button class="btn btn-sm" @click="handleTestChannel(item.id)">测试</button>
+                <button class="btn btn-sm btn-danger" @click="handleDeleteChannel(item)">删除</button>
               </div>
             </div>
           </div>
         </div>
+      </div>
 
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <!-- 群组与成员 -->
+        <div class="card">
+          <div class="panel-title" style="display:flex;justify-content:space-between">
+            <span>渠道群组</span>
+            <span style="color:var(--text-dim);font-size:12px">{{ groups.length }} 个</span>
+          </div>
+          <p style="color:var(--text-dim);font-size:12px;margin:0 0 8px">
+            群组是可以整体订阅的一组渠道；一个渠道可以同时属于多个群组。停用群组只暂停这一组的订阅，
+            不影响成员自己的订阅。
+          </p>
+          <form @submit.prevent="handleSaveChannelGroup" style="display:flex;flex-direction:column;gap:10px">
+            <div class="badge" :style="isEditingGroup ? 'color:var(--yellow);border-color:var(--yellow)' : ''">
+              {{ isEditingGroup ? `正在编辑：${channelGroupForm.name}` : '新增群组' }}
+              <button v-if="isEditingGroup" type="button" class="btn btn-sm" style="margin-left:8px" @click="resetChannelGroupForm">取消编辑</button>
+            </div>
+            <div class="form-row">
+              <label>群组名称</label>
+              <input class="input" v-model="channelGroupForm.name" maxlength="60" placeholder="例如：日报群组" required />
+            </div>
+            <div class="form-row">
+              <label>备注</label>
+              <input class="input" v-model="channelGroupForm.notes" maxlength="200" placeholder="可选" />
+            </div>
+            <label class="luyun-check-row">
+              <LuyunCheckbox v-model="channelGroupForm.enabled" /> 启用
+            </label>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-primary" type="submit">{{ isEditingGroup ? '保存修改' : '新增群组' }}</button>
+              <button class="btn" type="button" @click="resetChannelGroupForm">清空</button>
+            </div>
+          </form>
+
+          <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+            <div v-if="!groups.length" class="empty-state">暂无群组</div>
+            <div v-for="item in groups" :key="item.id" class="card" style="padding:10px">
+              <div class="wp-hook-head">
+                <strong class="wp-hook-name">{{ item.name }}</strong>
+                <span class="wp-hook-badges">
+                  <span class="badge" :style="item.enabled ? 'color:var(--green);border-color:var(--green)' : ''">{{ item.enabled ? '启用' : '停用' }}</span>
+                  <span class="badge">{{ (item.member_channel_ids || []).length }} 个成员</span>
+                </span>
+              </div>
+              <div v-if="item.notes" style="color:var(--text-dim);font-size:12px">{{ item.notes }}</div>
+              <div style="display:flex;flex-direction:column;gap:4px;margin-top:6px">
+                <label v-for="channel in channels" :key="channel.id" class="luyun-check-row">
+                  <LuyunCheckbox
+                    :model-value="(item.member_channel_ids || []).includes(channel.id)"
+                    @update:model-value="() => handleToggleMember(item, channel.id)"
+                  />
+                  {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用）</span>
+                </label>
+              </div>
+              <div v-if="!channels.length" style="color:var(--text-dim);font-size:12px;margin-top:6px">还没有渠道可加入</div>
+              <div style="display:flex;gap:6px;margin-top:8px">
+                <button class="btn btn-sm" @click="editChannelGroup(item)">编辑</button>
+                <button class="btn btn-sm btn-danger" @click="handleDeleteChannelGroup(item)">删除</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ 订阅 ══════════════════════════════════════════════════════════ -->
+    <div v-if="activeTab === 'subscriptions'" style="display:flex;flex-direction:column;gap:12px">
+      <div class="card">
+        <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>订阅：哪类内容发给哪些渠道</span>
+          <span style="color:var(--text-dim);font-size:12px">
+            {{ matrixColumns.length }} 个渠道 · {{ matrixRows.length }} 类内容
+          </span>
+        </div>
+
+        <!-- 渠道不超过阈值：内容 × 渠道的勾选矩阵 -->
+        <template v-if="!isMultiSelectView">
+          <p v-if="!matrixColumns.length" class="empty-state">还没有渠道。先到「渠道」tab 新增一个。</p>
+          <div v-else class="data-table-wrap luyun-scrollbar" style="max-height:520px">
+            <table class="data-table wp-matrix">
+              <thead>
+                <tr>
+                  <th style="cursor:default">内容类型</th>
+                  <th v-for="channel in matrixColumns" :key="channel.id" style="cursor:default">
+                    {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用）</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in matrixRows" :key="row.id" :class="{ 'wp-matrix-zero': zeroTopicIds.includes(row.id) }">
+                  <td>
+                    <strong>{{ row.name }}</strong>
+                    <span v-if="topicHasPhotos(row)" class="badge" style="margin-left:6px;color:var(--cyan);border-color:var(--cyan)">含员工实拍照片</span>
+                    <div v-if="zeroTopicIds.includes(row.id)" style="color:var(--yellow);font-size:11px">零订阅：当前不会发出</div>
+                  </td>
+                  <td v-for="channel in matrixColumns" :key="channel.id" style="text-align:center">
+                    <LuyunCheckbox
+                      :model-value="topicSubscribed(row.id, channel.id)"
+                      @update:model-value="() => handleToggleSubscription(row, channel)"
+                    />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+
+        <!-- 渠道超过阈值：先选内容、再勾群（手机上可点） -->
+        <template v-else>
+          <p style="color:var(--text-dim);font-size:12px;margin:0 0 8px">
+            渠道已有 {{ matrixColumns.length }} 个（超过 {{ MATRIX_CHANNEL_LIMIT }} 个），
+            改为「先选内容类型、再勾渠道」—— 手机上更好点。
+          </p>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <button
+              v-for="row in matrixRows"
+              :key="row.id"
+              class="btn wp-pick-row"
+              :class="{ active: multiSelect.topicId === row.id, 'wp-matrix-zero': zeroTopicIds.includes(row.id) }"
+              type="button"
+              @click="handlePickTopic(row.id)"
+            >
+              <span>{{ row.name }}</span>
+              <span v-if="topicHasPhotos(row)" class="badge" style="color:var(--cyan);border-color:var(--cyan)">含员工实拍照片</span>
+              <span class="badge">{{ (subscriptionIds[row.id] || []).length }} 个渠道</span>
+              <span v-if="zeroTopicIds.includes(row.id)" class="badge" style="color:var(--yellow);border-color:var(--yellow)">零订阅</span>
+            </button>
+          </div>
+          <div v-if="multiSelect.topicId" style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
+            <div style="font-size:13px">
+              勾选要接收「{{ (matrixRows.find((r) => r.id === multiSelect.topicId) || {}).name }}」的渠道：
+            </div>
+            <label v-for="channel in matrixColumns" :key="channel.id" class="luyun-check-row">
+              <LuyunCheckbox
+                :model-value="(multiSelect.channelIds || []).includes(channel.id)"
+                @update:model-value="(checked) => {
+                  multiSelect.channelIds = checked
+                    ? [...multiSelect.channelIds, channel.id]
+                    : multiSelect.channelIds.filter((id) => id !== channel.id)
+                }"
+              />
+              {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用，投递会跳过）</span>
+            </label>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <button class="btn btn-primary" type="button" @click="handleSaveMultiSelect">保存订阅</button>
+              <button class="btn" type="button" @click="multiSelect.channelIds = []">全不选</button>
+            </div>
+          </div>
+          <p v-else style="color:var(--text-dim);font-size:12px;margin-top:12px">先选一类内容，再勾渠道。</p>
+        </template>
+
+        <p style="color:var(--text-dim);font-size:12px;margin:10px 0 0">
+          取消勾选是停用那条订阅（保留配置，重新勾上不用重配）；保存后下一次触发即按新订阅投递。
+          渠道停用时订阅保留、投递跳过。
+        </p>
+      </div>
+    </div>
+
+    <!-- ═══ 定时任务 / 发送记录（票 07/08 各自重做，本票原样保留）══════════ -->
+    <div v-if="activeTab === 'jobs' || activeTab === 'logs'" class="grid" style="grid-template-columns: minmax(280px, 420px) minmax(0, 1fr)">
+      <div v-if="activeTab === 'jobs'" style="display:flex;flex-direction:column;gap:12px">
         <!-- 推送任务 -->
         <div class="card">
           <div class="panel-title" style="display:flex;justify-content:space-between">
@@ -216,9 +485,9 @@ onMounted(async () => {
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
               <div class="form-row">
-                <label>目标 Webhook</label>
+                <label>目标渠道</label>
                 <select class="select" v-model="jobForm.webhook_id" required>
-                  <option v-for="w in webhooks" :key="w.id" :value="w.id">{{ w.name }}{{ w.enabled ? '' : '（停用）' }}</option>
+                  <option v-for="w in channels" :key="w.id" :value="w.id">{{ w.name }}{{ w.enabled ? '' : '（停用）' }}</option>
                 </select>
               </div>
               <div class="form-row">
@@ -255,7 +524,7 @@ onMounted(async () => {
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn btn-primary" type="submit">保存任务</button>
               <button class="btn" type="button" @click="resetJobForm">清空</button>
-              <button class="btn" type="button" @click="handleApplyTemplate('data_quality_daily')">＋ 数据质量模板</button>
+              <button class="btn" type="button" @click="handleApplyTemplate('data_quality_daily')">+ 数据质量模板</button>
             </div>
           </form>
 
@@ -275,7 +544,7 @@ onMounted(async () => {
               </div>
               <div style="color:var(--text-dim);font-size:12px">目标：{{ item.webhook_name || '未配置' }}</div>
               <div style="color:var(--text-dim);font-size:12px">
-                类型：{{ PUSH_TYPE_NAMES[item.push_type] || item.push_type }} · 日期：{{ item.date_range_mode === 'yesterday' ? '昨天' : '当天' }}
+                类型：{{ pushTypeLabel(item.push_type) }} · 日期：{{ item.date_range_mode === 'yesterday' ? '昨天' : '当天' }}
               </div>
               <div style="color:var(--text-dim);font-size:12px">上次定时发送日期：{{ item.last_sent_date || '未发送' }}</div>
               <div style="display:flex;gap:6px;margin-top:8px" @click.stop>
@@ -289,7 +558,7 @@ onMounted(async () => {
       </div>
 
       <div style="display:flex;flex-direction:column;gap:12px">
-        <div class="card">
+        <div v-if="activeTab === 'jobs'" class="card">
           <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center">
             <span>消息预览</span>
             <div style="display:flex;gap:6px">
@@ -319,7 +588,7 @@ onMounted(async () => {
           ></textarea>
         </div>
 
-        <div class="card">
+        <div v-if="activeTab === 'logs'" class="card">
           <div class="panel-title" style="display:flex;justify-content:space-between">
             <span>发送记录</span>
             <button class="btn btn-sm" @click="loadLogs">刷新</button>
@@ -334,7 +603,7 @@ onMounted(async () => {
                 <tr v-for="item in logs" :key="item.id">
                   <td>{{ fmtSentAt(item.sent_at) }}</td>
                   <td>{{ item.webhook_name }}</td>
-                  <td>{{ PUSH_TYPE_NAMES[item.push_type] || item.push_type }}</td>
+                  <td>{{ pushTypeLabel(item.push_type) }}</td>
                   <td>
                     <span class="badge" :style="item.status === 'success' ? 'color:var(--green);border-color:var(--green)' : 'color:var(--red);border-color:var(--red)'">
                       {{ item.status === 'success' ? '成功' : '失败' }}
@@ -362,14 +631,14 @@ onMounted(async () => {
      换成 `minmax(0, 1fr)` 才会真正收缩到 370px。这一层是 A11 里「卫生群 / 启用徽章
      被挤出屏幕」的根因，徽章换行只是让内容更窄，挡不住轨道自己被撑宽。 */
   .grid { grid-template-columns: minmax(0, 1fr) !important; }
-  /* 卡片本身也要能收缩：块级子元素的 min-width 默认是 auto。 */
+  /* 卡片本身也要能收缩：块级子元素的 min-width 默认是 0。 */
   .grid > div > * { min-width: 0; }
 }
 
-/* Webhook 卡片的标题行（名称 + 卫生群/启用徽章）：桌面档是左右各一边，窄屏
+/* 渠道卡片的标题行（名称 + 启用/未订阅徽章）：桌面档是左右各一边，窄屏
    （390 下卡片内容区只有 ~300px）必须允许换行 —— 原来是 `justify-content: space-between`
-   且名称不收缩，徽章被顶到 380–431px，视口 390px 直接看不见「卫生群」。
-   而"这个群是不是卫生群"正是这一页最关键的信息（卫生提醒只发勾选的群）。 */
+   且名称不收缩，徽章被顶到 380–431px，视口 390px 直接看不见。
+   而"这个群收到了什么"正是这一页最关键的信息。 */
 .wp-hook-head {
   display: flex;
   justify-content: space-between;
@@ -387,4 +656,21 @@ onMounted(async () => {
   .wp-hook-name { flex: 1 1 100%; }
   .wp-hook-badges { flex: 1 1 100%; }
 }
+
+/* 订阅矩阵：零订阅的行整行高亮（页顶还有一条提示条，两处说的是同一件事）。 */
+:deep(.data-table tr.wp-matrix-zero) td { background: rgba(245, 158, 11, 0.08); }
+:deep(.data-table.wp-matrix th),
+:deep(.data-table.wp-matrix td) { white-space: nowrap; }
+
+/* 多选列表里「先选内容类型」的那一列按钮：选中态要看得出来。 */
+.wp-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  width: 100%;
+}
+.wp-pick-row.active { border-color: var(--accent); color: var(--accent); }
+.wp-pick-row.wp-matrix-zero { color: var(--yellow); }
+.wp-pick-row.wp-matrix-zero.active { border-color: var(--yellow); }
 </style>

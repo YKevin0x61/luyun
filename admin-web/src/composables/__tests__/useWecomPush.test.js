@@ -15,10 +15,10 @@ vi.mock('../../api/client', () => ({
 }))
 
 const {
-  useWecomPush, webhookDeleteConfirmText, hygieneFeedWarning, sendNowConfirmText, canSendNow,
+  useWecomPush, sendNowConfirmText, canSendNow,
 } = await import('../useWecomPush.js')
 
-const WEBHOOK = {
+const CHANNEL = {
   id: 7,
   name: '门店群',
   enabled: 1,
@@ -26,18 +26,18 @@ const WEBHOOK = {
   webhook_url_masked: 'https://qyapi.weixin.qq.com/***',
 }
 
-describe('useWecomPush 的 webhook 启停', () => {
+describe('渠道的启停快捷开关', () => {
   beforeEach(() => {
     apiGet.mockReset()
     apiPut.mockReset()
-    apiGet.mockResolvedValue({ webhooks: [WEBHOOK], jobs: [], logs: [], meta: {} })
+    apiGet.mockResolvedValue({ channels: [CHANNEL], groups: [], topics: [] })
     apiPut.mockResolvedValue({ success: true })
   })
 
   it('停用时只改 enabled，地址传 null 表示不动原地址', async () => {
-    const { toggleWebhookEnabled } = useWecomPush()
+    const { toggleChannelEnabled } = useWecomPush()
 
-    await toggleWebhookEnabled({ ...WEBHOOK, enabled: true })
+    await toggleChannelEnabled({ ...CHANNEL, enabled: true })
 
     expect(apiPut).toHaveBeenCalledTimes(1)
     const [url, payload] = apiPut.mock.calls[0]
@@ -46,95 +46,74 @@ describe('useWecomPush 的 webhook 启停', () => {
     expect(payload.webhook_url).toBeNull()
     expect(payload.name).toBe('门店群')
     expect(payload.notes).toBe('早班')
-    // 改完要重新拉列表，页面状态不会自己变
+    // 退役的列不再由页面写（票 06：收件人只由订阅决定）
+    expect(payload.hygiene_feed).toBeUndefined()
     expect(apiGet).toHaveBeenCalledWith('/api/wecom-push/webhooks')
   })
 
-  it('停用过的 webhook 再点一次是启用', async () => {
-    const { toggleWebhookEnabled } = useWecomPush()
+  it('停用过的渠道再点一次是启用', async () => {
+    const { toggleChannelEnabled } = useWecomPush()
 
-    await toggleWebhookEnabled({ ...WEBHOOK, enabled: false })
+    await toggleChannelEnabled({ ...CHANNEL, enabled: false })
 
     expect(apiPut.mock.calls[0][1].enabled).toBe(true)
   })
 
   it('后端拒绝时不吞错，交给调用方提示', async () => {
     apiPut.mockRejectedValue(new Error('更新 webhook 失败'))
-    const { toggleWebhookEnabled } = useWecomPush()
+    const { toggleChannelEnabled } = useWecomPush()
 
-    await expect(toggleWebhookEnabled({ ...WEBHOOK, enabled: true })).rejects.toThrow(
+    await expect(toggleChannelEnabled({ ...CHANNEL, enabled: true })).rejects.toThrow(
       '更新 webhook 失败',
     )
   })
 })
 
-describe('useWecomPush 的卫生群标记', () => {
+describe('渠道表单的群组成员关系', () => {
   beforeEach(() => {
     apiGet.mockReset()
-    apiPut.mockReset()
     apiPost.mockReset()
-    apiGet.mockResolvedValue({ webhooks: [], jobs: [], logs: [], meta: {} })
-    apiPut.mockResolvedValue({ success: true })
-    apiPost.mockResolvedValue({ success: true })
+    apiDelete.mockReset()
+    apiPost.mockResolvedValue({ success: true, channel: { id: 7 }, group: { id: 1 } })
+    apiDelete.mockResolvedValue({ success: true })
   })
 
-  it('快捷开关把标记原样回传，停用不会顺手清掉它', async () => {
-    const { toggleWebhookEnabled } = useWecomPush()
-
-    await toggleWebhookEnabled({ ...WEBHOOK, enabled: true, hygiene_feed: true })
-
-    const [, payload] = apiPut.mock.calls[0]
-    expect(payload.enabled).toBe(false)
-    expect(payload.hygiene_feed).toBe(true)
-  })
-
-  it('保存表单时带着勾选状态', async () => {
-    const { webhookForm, saveWebhook } = useWecomPush()
-    Object.assign(webhookForm, {
-      name: '卫生群',
+  it('新建渠道后按勾选对齐群组成员（只发差集）', async () => {
+    apiGet.mockResolvedValue({
+      channels: [],
+      groups: [
+        { id: 1, name: '日报群组', member_channel_ids: [] },
+        { id: 2, name: '门店 A', member_channel_ids: [7] },
+      ],
+      topics: [],
+    })
+    const { channelForm, saveChannel, loadChannelGroups } = useWecomPush()
+    // 页面上的群组列表先到位：差集要拿「这次勾选之前」的成员关系来算
+    await loadChannelGroups()
+    Object.assign(channelForm, {
+      name: '门店群',
       webhook_url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc',
-      hygiene_feed: true,
+      group_ids: [1],
     })
 
-    await saveWebhook()
+    await saveChannel()
 
     const [url, payload] = apiPost.mock.calls[0]
     expect(url).toBe('/api/wecom-push/webhooks')
-    expect(payload.hygiene_feed).toBe(true)
+    expect(payload.name).toBe('门店群')
+    // 加进 1；原来在 2 里，这次没勾 → 移出
+    expect(apiPost.mock.calls[1]).toEqual([
+      '/api/wecom-push/channel-groups/1/members', { channel_id: 7 },
+    ])
+    expect(apiDelete).toHaveBeenCalledWith('/api/wecom-push/channel-groups/2/members/7')
   })
 
-  it('编辑回填把库里的 0/1 变成勾选状态', () => {
-    const { webhookForm, editWebhook } = useWecomPush()
+  it('新建时不填地址当场报错，不发请求', async () => {
+    const { channelForm, saveChannel } = useWecomPush()
+    Object.assign(channelForm, { name: '门店群', webhook_url: '' })
 
-    editWebhook({ ...WEBHOOK, hygiene_feed: 1 })
-
-    expect(webhookForm.hygiene_feed).toBe(true)
-  })
-
-  it('删除确认：卫生群点名，普通群仍是原来那句', () => {
-    expect(webhookDeleteConfirmText({ name: '卫生群', hygiene_feed: true })).toContain('是卫生群')
-    expect(webhookDeleteConfirmText({ name: '日报群', hygiene_feed: false })).toBe('确定删除该 webhook？')
-    expect(webhookDeleteConfirmText(undefined)).toBe('确定删除该 webhook？')
-  })
-})
-
-describe('卫生群空态提示', () => {
-  it('一个卫生群都没勾时给出提示', () => {
-    expect(hygieneFeedWarning([])).toContain('还没有指定卫生群')
-    expect(hygieneFeedWarning([{ hygiene_feed: false, enabled: true }])).toContain('还没有指定卫生群')
-  })
-
-  it('勾了但已停用，仍算"没有可用的卫生群"', () => {
-    expect(hygieneFeedWarning([{ hygiene_feed: true, enabled: false }])).toContain('还没有指定卫生群')
-  })
-
-  it('有启用中的卫生群就不提示', () => {
-    const webhooks = [
-      { hygiene_feed: false, enabled: true },
-      { hygiene_feed: true, enabled: true },
-    ]
-
-    expect(hygieneFeedWarning(webhooks)).toBe('')
+    await expect(saveChannel()).rejects.toThrow('必须填写 webhook 地址')
+    expect(apiPost).not.toHaveBeenCalled()
   })
 })
 

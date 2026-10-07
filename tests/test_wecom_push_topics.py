@@ -153,6 +153,19 @@ def test_a_topic_must_declare_a_params_model_for_every_trigger_it_claims():
         )
 
 
+def test_only_the_photo_topic_is_marked_as_carrying_employee_photos():
+    """票 06：「含员工实拍照片」这一行标注的判据在注册表里，不在页面里。
+
+    标错方向的代价不对称：漏标会让店长把员工照片订到不该去的群（用户故事 11），
+    多标只是少订一个群。所以这里正反两面都钉住。
+    """
+    marked = [topic.id for topic in all_topics() if topic.contains_employee_photos]
+
+    assert marked == ["hygiene_photo"]
+    assert _payload("hygiene_photo")["contains_employee_photos"] is True
+    assert _payload("hygiene_reminder")["contains_employee_photos"] is False
+
+
 def test_registry_declares_the_eight_topics_in_order():
     assert [(t.id, t.name) for t in all_topics()] == [
         (row[0], row[1]) for row in EXPECTED_TOPICS
@@ -186,6 +199,8 @@ def test_each_topic_payload_exposes_a_consumable_schema_and_uischema(
         "params_schema",
         "uischema",
         "default_schedule_time",
+        # 票 06：订阅视图上标「含员工实拍照片」用（判断依据是内容的性质，不是页面）
+        "contains_employee_photos",
     }
 
     schema = payload["params_schema"]

@@ -129,6 +129,42 @@ class _WecomSubscriptionsRepoMixin:
             logger.error(f"❌ 删除推送订阅失败: {e}")
             return False
 
+    async def wecom_subscription_delete_for(
+        self,
+        topic_id: str,
+        *,
+        target_channel_id: Optional[int] = None,
+        target_group_id: Optional[int] = None,
+    ) -> int:
+        """按「内容类型 × 目标」删订阅，返回删掉的条数。
+
+        页面上的「取消勾选」走这条路（删行），而 ``wecom_subscription_upsert`` 的
+        ``enabled=False`` 是**停用**：两者都在库里，语义不同 —— 停用保留行、恢复时不用
+        重配；删除是彻底取消。同一目标被两条路径命中时 keyset 恰好命中那一行。
+        """
+        if (target_channel_id is None) == (target_group_id is None):
+            raise ValueError("删订阅必须且只能指定一个目标（渠道或群组）")
+        try:
+            tdb = self._connection.table("wecom_push_subscriptions")
+            if target_channel_id is not None:
+                sql = """DELETE FROM wecom_push_subscriptions
+                          WHERE topic_id = ? AND target_channel_id = ?"""
+                params: tuple = (str(topic_id), int(target_channel_id))
+            else:
+                sql = """DELETE FROM wecom_push_subscriptions
+                          WHERE topic_id = ? AND target_group_id = ?"""
+                params = (str(topic_id), int(target_group_id))
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(sql, params)
+                removed = cursor.rowcount or 0
+            await tdb.commit()
+            return int(removed)
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ 删除推送订阅失败: {e}")
+            return 0
+
     # ── 渠道群组与成员 ────────────────────────────────────────────────────
 
     async def wecom_channel_groups_all(self, include_disabled: bool = True) -> List[Dict]:
@@ -268,6 +304,29 @@ class _WecomSubscriptionsRepoMixin:
         except Exception as e:
             logger.error(f"❌ 获取群组成员失败: {e}")
             return []
+
+    async def wecom_channel_group_members_map(self) -> Dict[int, List[Dict]]:
+        """一次读完所有群组的成员，返回 ``{group_id: [成员行]}``。
+
+        页面上「每个群组有哪些渠道」与「某个渠道属于哪些群组」是同一份关系的两个方向：
+        前者按群组逐条查就是 N 次往返，这里一次取全、在内存里分组。
+        """
+        try:
+            tdb = self._connection.table("wecom_channel_group_members")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT id, group_id, channel_id, created_at
+                       FROM wecom_channel_group_members ORDER BY group_id ASC, id ASC"""
+                )
+                rows = await cursor.fetchall()
+            grouped: Dict[int, List[Dict]] = {}
+            for row in rows:
+                item = dict(row)
+                grouped.setdefault(int(item["group_id"]), []).append(item)
+            return grouped
+        except Exception as e:
+            logger.error(f"❌ 获取群组成员失败: {e}")
+            return {}
 
     async def wecom_channel_groups_of_channel(self, channel_id: int) -> List[Dict]:
         """这个渠道属于哪些群组（渠道卡片与删除提示都要用）。"""

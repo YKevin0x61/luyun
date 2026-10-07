@@ -183,6 +183,42 @@ class WeComSubscriptionRepoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.db.wecom_channel_group_get(999999))
         self.assertFalse(await self.db.wecom_channel_group_add_member(999999, self.channel_id))
 
+    async def test_members_of_every_group_in_one_read(self):
+        """页面上「每个群组有哪些成员」一次读完，不按群组逐条查。"""
+        daily = await self.db.wecom_channel_group_create({"name": "日报群组"})
+        store = await self.db.wecom_channel_group_create({"name": "门店 A"})
+        await self.db.wecom_channel_group_add_member(daily, self.channel_id)
+        await self.db.wecom_channel_group_add_member(store, self.channel_b)
+
+        members = await self.db.wecom_channel_group_members_map()
+
+        self.assertEqual({int(m["channel_id"]) for m in members[daily]}, {self.channel_id})
+        self.assertEqual({int(m["channel_id"]) for m in members[store]}, {self.channel_b})
+        self.assertEqual(members.get(999999, []), [])
+
+    async def test_delete_subscription_by_its_target(self):
+        """页面上取消勾选时把那一行删掉（停用另有 upsert 的 enabled 路径）。"""
+        await self.db.wecom_subscription_upsert({
+            "topic_id": HYGIENE_TOPIC, "target_channel_id": self.channel_id})
+        await self.db.wecom_subscription_upsert({
+            "topic_id": SALES_TOPIC, "target_channel_id": self.channel_id})
+
+        removed = await self.db.wecom_subscription_delete_for(
+            HYGIENE_TOPIC, target_channel_id=self.channel_id
+        )
+
+        self.assertEqual(removed, 1)
+        remaining = await self.db.wecom_subscriptions_all()
+        self.assertEqual([row["topic_id"] for row in remaining], [SALES_TOPIC])
+
+    async def test_delete_subscription_for_an_untouched_target_removes_nothing(self):
+        self.assertEqual(
+            await self.db.wecom_subscription_delete_for(
+                HYGIENE_TOPIC, target_group_id=999999
+            ),
+            0,
+        )
+
 
 class WeComOutboxRepoTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -308,6 +344,18 @@ class WeComOutboxRepoTests(unittest.IsolatedAsyncioTestCase):
     async def test_enqueue_rejects_a_row_without_a_target(self):
         with self.assertRaises(ValueError):
             await self._enqueue(target_channel_id=None, idempotency_key="hygiene:no-target")
+
+    async def test_recent_records_can_be_filtered_by_one_channel(self):
+        """渠道卡片上的「最近一次发送成功」按渠道取一条，不必拉整页再挑。"""
+        mine = await self._enqueue()
+        await self._enqueue(idempotency_key="hygiene:r2:other")
+        await self.db.wecom_outbox_mark_sent(mine)
+
+        rows = await self.db.wecom_outbox_recent(
+            channel_id=self.other, status="sent", limit=1
+        )
+
+        self.assertEqual([int(r["id"]) for r in rows], [mine])
 
 
 if __name__ == "__main__":
