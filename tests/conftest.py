@@ -6,9 +6,14 @@
 不再存在，测试改为
 
 1. 把 ``DATABASE_BACKEND`` 与 DSN 钉死到专用测试库（``luyun_test`` 及其派生名，
-   见 ``TEST_DB_NAME_RE``）；
-2. 会话开始时用 ``migrations/pg/*.sql`` 重建 schema（0001 是 DROP + CREATE）；
-3. 每个用例开始前 ``TRUNCATE`` 全部表（``RESTART IDENTITY CASCADE``）；
+   见 ``TEST_DB_NAME_RE``）；并行跑（pytest-xdist）时**每个 worker 各拿一个库**；
+2. 会话开始时用 ``migrations/pg/*.sql`` 重建 schema（0001 是 DROP + CREATE），
+   紧接着全清一次、记下「干净基线」：哪些表该是空的、哪些序列该没被调用过；
+3. 每个用例开始前把**偏离基线的部分**清回去（``TRUNCATE ... RESTART IDENTITY
+   CASCADE``、必要时 ``ALTER SEQUENCE ... RESTART``）——库本来就干净时整段跳过。
+   语义与「每个用例前全清」完全等价（用例看到的状态一样），只是不再让没写过库的
+   用例白付一次全清；清哪些表由确定性查询决定，不依赖统计视图（后者的上报有节流，
+   见 ``_cleanup_dirty``）；
 4. ``DATABASE_DIR`` 指向临时目录，让凭据/照片这类文件不落到仓库 ``data/``。
 
 本机 ``.env`` 指向真实库（``luyun``），所以这里的 DSN 覆盖必须在 ``import config``
@@ -41,10 +46,15 @@ def _default_test_db_name(pid=None) -> str:
     """未显式给 ``LUYUN_TEST_DSN`` 时用的默认测试库名：它带**进程号**（MERGE-01）。
 
     两个并发会话（多 agent / 多 worktree / 并行分片）都落在同一个固定库名上时，
-    各自会话开始 `DROP SCHEMA public CASCADE`、每个用例前 `TRUNCATE`，会互相清空
+    各自会话开始 `DROP SCHEMA public CASCADE`、每个用例前清库，会互相清空
     对方——现场表现是一批与改动无关的 failed/error（MERGE-01）。带上 PID 后每个
     进程拿到自己的库，库名仍是 ``TEST_DB_NAME_RE`` 允许的 `luyun_test_<后缀>` 形态。
     显式 `LUYUN_TEST_DSN` 仍然优先：CI 与需要固定库名的场景不受影响。
+
+    xdist 的 worker 也是**独立进程**、PID 各不相同，所以这一条天然覆盖 `-n 4`：四个
+    worker 就是四个库，不需要为并行另起一套命名。刻意**不**用 `gw0` 这种固定 worker 名
+    做后缀——同机上两个并行会话会双双落进 `luyun_test_gw0`，正好回到 MERGE-01 那个
+    「互相清空」的老问题。
     """
     return f"{TEST_DB_NAME}_{os.getpid() if pid is None else pid}"
 
@@ -167,9 +177,10 @@ def _assert_live_connection_is_a_test_db(dsn: str | None) -> None:
 
 # 建库/建 schema 用管理连接；CI 与本地默认都走本机 trust 认证。
 # 没给 LUYUN_TEST_DSN 时按 PID 派生唯一库名（MERGE-01）；给了就完全以它为准。
-_TEST_DSN = os.environ.get("LUYUN_TEST_DSN") or (
-    f"postgresql://localhost:5432/{_default_test_db_name()}"
-)
+# 但显式 DSN 与 xdist 不能并存：那会让所有 worker 落进同一个库、互相清空对方，
+# 正是 MERGE-01 的并行版（断言在 pytest_configure，见 _refuse_shared_db_under_xdist）。
+_EXPLICIT_TEST_DSN = os.environ.get("LUYUN_TEST_DSN") or None
+_TEST_DSN = _EXPLICIT_TEST_DSN or f"postgresql://localhost:5432/{_default_test_db_name()}"
 _ADMIN_DSN = os.environ.get("LUYUN_TEST_ADMIN_DSN", "postgresql://localhost:5432/postgres")
 
 # 库名以 DSN 为准（不是常量）：并行干活时各会话可以把 LUYUN_TEST_DSN 指向自己的
@@ -225,25 +236,87 @@ def _ensure_test_database() -> None:
         _psql(_ADMIN_DSN, f'CREATE DATABASE "{_TEST_DB_NAME}"')
 
 
-def _all_tables_sql() -> str:
-    listing = subprocess.run(
-        [
-            "psql",
-            "-tAc",
-            "SELECT tablename FROM pg_tables WHERE schemaname='public'",
-            _TEST_DSN,
-        ],
+def _query(sql: str) -> list[list[str]]:
+    """跑一次只读查询，按 ``|`` 切行切列返回（空结果 → 空列表）。
+
+    用 ``-tAF'|'`` 而不是逐表一次 psql：每起一个 psql 进程约 15ms（实测），
+    56 张表各来一次就是秒级开销，而它们本来可以拼进一条查询。
+    """
+    proc = subprocess.run(
+        ["psql", "-tAF|", "-v", "ON_ERROR_STOP=1", "-d", _TEST_DSN, "-c", sql],
         capture_output=True,
         text=True,
     )
-    names = [n.strip() for n in listing.stdout.splitlines() if n.strip()]
-    # schema_migrations 记的是迁移状态；tenants 是 0001 里 seed 的默认门店行——
-    # 业务表的 tenant_id 都外键指向它，清掉它会让所有插入违反外键。
-    names = [n for n in names if n not in ("schema_migrations", "tenants")]
+    if proc.returncode != 0:
+        raise RuntimeError(f"psql 查询失败: {proc.stderr.strip() or proc.stdout.strip()}")
+    return [line.split("|") for line in proc.stdout.splitlines() if line.strip()]
+
+
+# schema_migrations 记的是迁移状态；tenants 是 0001 里 seed 的默认门店行——业务表的
+# tenant_id 都外键指向它，清掉它会让所有插入违反外键。这两张表从不参与清理，与
+# 「每例全清」时代逐字一致。
+_NEVER_CLEARED = ("schema_migrations", "tenants")
+
+
+def _business_tables() -> list[str]:
+    """public 下**参与清理**的表：除 ``_NEVER_CLEARED`` 之外的全部。"""
+    rows = _query("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY 1")
+    names = [r[0] for r in rows if r[0] not in _NEVER_CLEARED]
     if not names:
         raise RuntimeError("测试库里没有任何表——schema 没建成功？")
-    quoted = ", ".join(f'"{n}"' for n in names)
+    return names
+
+
+def _truncate_sql(tables: list[str]) -> str:
+    """``TRUNCATE`` 这些表并重置它们的序列。
+
+    ``CASCADE`` 只波及**引用**被截断表的子表；``tenants`` 是纯父表（只被引用、不引用
+    别的表），而它从不进清理集合——所以 CASCADE 永远碰不到门店基线行。
+    """
+    quoted = ", ".join(f'"{n}"' for n in tables)
     return f"TRUNCATE {quoted} RESTART IDENTITY CASCADE"
+
+
+def _owned_sequences(tables: list[str]) -> dict[str, int]:
+    """这些表拥有的序列 → 起始值（重置回它就算复位）。
+
+    归属走 ``pg_depend``（identity 是 ``'i'``、serial 是 ``'a'``，两种都算 owned），
+    不能用 ``pg_get_serial_sequence(table, 'id')``：那要求主键列恰好叫 ``id``，而这里
+    的表主键列名并不统一。
+    """
+    listed = ", ".join(f"'{t}'" for t in tables)
+    rows = _query(
+        "SELECT s.relname, seq.seqstart "
+        "FROM pg_class s "
+        "JOIN pg_namespace n ON n.oid = s.relnamespace "
+        "JOIN pg_sequence seq ON seq.seqrelid = s.oid "
+        "JOIN pg_depend d ON d.objid = s.oid "
+        "     AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass "
+        "     AND d.deptype IN ('a', 'i') "
+        "JOIN pg_class t ON t.oid = d.refobjid "
+        f"WHERE s.relkind = 'S' AND n.nspname = 'public' AND t.relname IN ({listed})"
+    )
+    return {r[0]: int(r[1]) for r in rows}
+
+
+def _used_sequences(names: list[str]) -> list[str]:
+    """其中**被调用过**的序列（``pg_sequences.last_value`` 非 NULL 即表示用过）。
+
+    ``RESTART IDENTITY`` 之外还有半条语义要守：用例「插入若干行再删光」之后表是空的，
+    但序列已经被推进——有测试直接断言新插入的行 id 从 1 开始（``test_recipe_store`` /
+    ``test_recipe_api`` 的注释就写着靠 conftest 的 RESTART IDENTITY），所以序列也得
+    复位。序列状态是直接读序列页、不是累计统计视图，没有 ``pg_stat_*`` 那种最长 1 秒
+    的上报节流，读到的就是真值（见 ``_cleanup_dirty`` 的说明）。
+    """
+    if not names:
+        return []
+    listed = ", ".join(f"'{n}'" for n in names)
+    rows = _query(
+        "SELECT sequencename FROM pg_sequences "
+        "WHERE schemaname = 'public' AND last_value IS NOT NULL "
+        f"AND sequencename IN ({listed})"
+    )
+    return [r[0] for r in rows]
 
 
 # 会话开始前清掉上一次（可能被 Ctrl-C 打断的）会话留下的后端连接：它们持有锁时
@@ -315,24 +388,12 @@ def _drop_dead_loop_connections() -> None:
             module.db_manager = None
 
 
-def _truncate_all() -> None:
-    global _TRUNCATE_SQL
-    if _TRUNCATE_SQL is None:
-        _TRUNCATE_SQL = _all_tables_sql()
-    sql = _TRUNCATE_SQL
+def _run_cleanup_command(sql: str) -> None:
+    """执行一条清理语句，失败重试三次（每次先掐掉卡在事务里的连接）。"""
     last_error = ""
     for attempt in range(3):
         proc = subprocess.run(
-            [
-                "psql",
-                "-q",
-                "-v",
-                "ON_ERROR_STOP=1",
-                "-d",
-                _TEST_DSN,
-                "-c",
-                f"SET lock_timeout = '3s'; {sql}",
-            ],
+            ["psql", "-q", "-v", "ON_ERROR_STOP=1", "-d", _TEST_DSN, "-c", sql],
             capture_output=True,
             text=True,
         )
@@ -342,6 +403,113 @@ def _truncate_all() -> None:
         _kill_stuck_backends()
         time.sleep(0.2 * (attempt + 1))
     raise RuntimeError(f"清空测试库失败（重试 3 次）: {last_error}")
+
+
+# 「干净基线」：会话开始全清一次后学到的状态。用例之间只需要把**偏离它的部分**清回去。
+# 语义上等价于「每个用例前全清」——用例开始时看到的库状态逐字相同——但没写过库的用例
+# 从此不必付那次全清（实测全清 56 张表 69ms，其中进程启动 15ms；干净时这里只要一次
+# 21ms 的探测查询，脏了才追加一次清理）。
+_CLEAN_TABLES: list[str] = []
+_CLEAN_SEQUENCES: dict[str, int] = {}
+_CLEANUP_STATS = {"skipped": 0, "cleaned": 0, "tables": 0, "sequences": 0}
+
+
+def _learn_clean_baseline() -> None:
+    """会话开始：先按老规矩全清一次，再把「清完的样子」记成基线。
+
+    为什么要先全清：清理集合必须等于「用例开始时库该有的样子」。老规矩是每个用例前
+    全清，用例看到的就是「除 ``_NEVER_CLEARED`` 外全空、序列未调用」；在会话开始时
+    复现这个状态并把它记为基线，后面「只清偏离基线的部分」才与「每例全清」等价。
+    """
+    global _CLEAN_TABLES, _CLEAN_SEQUENCES
+    _CLEAN_TABLES = _business_tables()
+    _run_cleanup_command(f"SET lock_timeout = '3s'; {_truncate_sql(_CLEAN_TABLES)}")
+    owned = _owned_sequences(_CLEAN_TABLES)
+    # 全清带 RESTART IDENTITY，这些序列理论上都回到「未调用」。真遇到没被重置到的
+    # （不属于任何表的游离序列、ownership 断了的），就从基线里摘出去不管它——那也正是
+    # 「每例全清」时代的样子：当年的 TRUNCATE 同样碰不到那种序列。
+    still_used = set(_used_sequences(list(owned)))
+    _CLEAN_SEQUENCES = {n: v for n, v in owned.items() if n not in still_used}
+
+
+def _dirty_probe_sql() -> str:
+    """一条查询回答「相对基线，哪些表有行、哪些序列被调用过」。
+
+    56 张空表的 ``EXISTS`` 拼成 ``UNION ALL`` 一次问完：实测查询本身约 6ms（整个 psql
+    调用约 21ms，其余是进程启动）。等价于「逐表 count(*) > 0」，只是遇到第一行就返回。
+    """
+    if not _CLEAN_TABLES:
+        raise RuntimeError("清理基线没建立——pytest_configure 没跑完？")
+    parts = [
+        f"SELECT 'table' AS kind, '{t}' AS name WHERE EXISTS (SELECT 1 FROM \"{t}\")"
+        for t in _CLEAN_TABLES
+    ]
+    if _CLEAN_SEQUENCES:
+        listed = ", ".join(f"'{n}'" for n in _CLEAN_SEQUENCES)
+        parts.append(
+            "SELECT 'sequence', sequencename FROM pg_sequences "
+            "WHERE schemaname = 'public' AND last_value IS NOT NULL "
+            f"AND sequencename IN ({listed})"
+        )
+    return " UNION ALL ".join(parts)
+
+
+def _cleanup_dirty() -> None:
+    """把库清回基线；本来就干净时一次探测查询就结束。
+
+    **为什么不用 ``pg_stat_user_tables`` 的写入计数判脏**（那本是这里最省事的信号）：
+    那套累计统计在后端提交时受 ``PGSTAT_MIN_INTERVAL``（1 秒）节流，没上报到共享内存
+    之前别的连接读不到。实测 20 次「asyncpg 长连接写入后立刻从另一个连接查」，20 次
+    全部看不到增长——**漏判一次就是用例间污染**，而污染的表现是相隔很远的用例莫名
+    失败。所以判据只用确定性信号：表里有没有行、序列有没有被调用过，两者都不经过统计
+    视图。代价是每例一次约 21ms 的探测（相比每例 69ms 的全清仍然是净赚）。
+    """
+    rows = _query(f"SET lock_timeout = '3s'; {_dirty_probe_sql()}")
+    dirty_tables = [r[1] for r in rows if r[0] == "table"]
+    dirty_sequences = [r[1] for r in rows if r[0] == "sequence"]
+    if not dirty_tables and not dirty_sequences:
+        _CLEANUP_STATS["skipped"] += 1
+        return
+    statements = []
+    if dirty_tables:
+        statements.append(_truncate_sql(dirty_tables))
+    if dirty_sequences:
+        # 插入后删光的用例：表已经空了，但序列被推进过，靠这一段复位（见 _used_sequences）。
+        # 与上面的 TRUNCATE 重复重置同一条序列是允许的（顺序执行，结果一致）。
+        statements.append(
+            "; ".join(
+                f'ALTER SEQUENCE "{n}" RESTART WITH {_CLEAN_SEQUENCES[n]}'
+                for n in dirty_sequences
+            )
+        )
+    _run_cleanup_command("SET lock_timeout = '3s'; " + "; ".join(statements))
+    _CLEANUP_STATS["cleaned"] += 1
+    _CLEANUP_STATS["tables"] += len(dirty_tables)
+    _CLEANUP_STATS["sequences"] += len(dirty_sequences)
+
+
+def _xdist_worker_id(config) -> str | None:
+    """这个进程是真 xdist worker 就返回它的名字（``gw0``…），否则 ``None``。
+
+    判据是 **``config.workerinput``**（xdist 只往 worker 进程里塞这个属性），刻意不用
+    ``PYTEST_XDIST_WORKER`` 环境变量：worker 起出来的**子进程**会继承那个环境变量，而
+    `tests/test_test_db_guard.py` 恰恰是用「spawn 一个 pytest 子进程」来验证拒跑行为的
+    ——用环境变量判断的话，那些子进程会被自己的「并行不许设 LUYUN_TEST_DSN」规则拒掉
+    （现场：串行全绿、并行 4 红，红的全是护栏用例）。
+    """
+    info = getattr(config, "workerinput", None)
+    return info.get("workerid") if info else None
+
+
+def _is_xdist_controller(config) -> bool:
+    """xdist 的 controller 进程？——带着 ``-n`` 但没有 ``workerinput`` 的那个。
+
+    controller 只收集与分派用例，一条用例都不跑；worker 才有 ``workerinput``。
+    串行跑（没有 ``-n``）时两个条件都不成立，仍按老路建库建 schema。
+    """
+    if hasattr(config, "workerinput"):
+        return False
+    return bool(getattr(config.option, "numprocesses", None))
 
 
 def pytest_configure(config):
@@ -359,7 +527,12 @@ def pytest_configure(config):
     _db_source = (
         "LUYUN_TEST_DSN"
         if os.environ.get("LUYUN_TEST_DSN")
-        else f"未设置 LUYUN_TEST_DSN，按 PID 派生（pid={os.getpid()}）"
+        else (
+            f"未设置 LUYUN_TEST_DSN，xdist worker={_xdist_worker_id(config)}，"
+            f"按 PID 派生（pid={os.getpid()}）"
+            if _xdist_worker_id(config)
+            else f"未设置 LUYUN_TEST_DSN，按 PID 派生（pid={os.getpid()}）"
+        )
     )
     _announce = f"[conftest] 测试库: {_TEST_DB_NAME}（来源: {_db_source}）"
     _reporter = config.pluginmanager.getplugin("terminalreporter")
@@ -367,6 +540,31 @@ def pytest_configure(config):
         _reporter.write_line(_announce)
     else:  # pragma: no cover - 只有非终端插件环境（如嵌进别的 runner）会走到
         print(_announce)
+
+    # 并行时每个 worker 必须各拿一个库：显式 LUYUN_TEST_DSN 会把所有 worker 指到同一个
+    # 库上，各自 DROP SCHEMA / 清库，互相清掉对方的夹具数据（MERGE-01 的并行版，症状是
+    # 一批与改动无关的红）。宁可拒跑，也不出一个会骗人的结果。
+    #
+    # 判据里必须**带上 controller**：只让 worker 拒跑的话，xdist 会把 worker 的
+    # `pytest.exit(3)` 当成「worker 崩溃」→ 反复重启 worker 直到
+    # "maximum crashed workers reached"，最后退出码是 5（no tests ran）而不是这里的 3，
+    # 解释信息也被淹没。controller 同样跑这个 hook，在这里拒跑就能干净收场。
+    if _EXPLICIT_TEST_DSN and (_xdist_worker_id(config) or _is_xdist_controller(config)):
+        _refuse_to_run(
+            f"[conftest] 并行（pytest-xdist）时不能设 LUYUN_TEST_DSN：库 "
+            f"{_TEST_DB_NAME!r} 会被所有 worker 共用并互相清空。去掉 LUYUN_TEST_DSN，"
+            "让每个 worker 按自己的 PID 派生一个库（luyun_test_<pid>）；"
+            "或者去掉 -n 串行跑。"
+        )
+
+    # controller 不跑用例，也就没有库可准备；建库 + 重放 migrations 在这里纯属浪费
+    # （还会多留一个没人用的库）。准备库是每个 worker 自己的事。
+    if _is_xdist_controller(config):
+        if _reporter is not None:
+            _reporter.write_line(
+                "[conftest] xdist controller：跳过建库与建 schema（各 worker 自备）"
+            )
+        return
 
     from config import settings
 
@@ -415,8 +613,7 @@ def pytest_configure(config):
     _psql(_TEST_DSN, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;")
     for path in _SCHEMA_FILES:
         _psql(_TEST_DSN, file=path)
-    global _TRUNCATE_SQL
-    _TRUNCATE_SQL = _all_tables_sql()
+    _learn_clean_baseline()
 
 
 class _CaseTimeout(Exception):
@@ -459,12 +656,28 @@ def pytest_runtest_setup(item):
 
     if _settings.DATABASE_BACKEND != "postgres":
         _settings.DATABASE_BACKEND = "postgres"
-    _truncate_all()
+    _cleanup_dirty()
     _arm_case_timeout()
 
 
 def pytest_runtest_teardown(item, nextitem):
     _disarm_case_timeout()
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """收尾报一句清理台账：跳过多少次、真清了多少表/序列。
+
+    这一行是这项优化的**可观测面**——它直接回答「清库还在不在成本里」：干净用例占
+    比越高，`跳过` 越大；如果某次改动让每个用例都写库，这里会立刻显示出来。
+    """
+    stats = _CLEANUP_STATS
+    total = stats["skipped"] + stats["cleaned"]
+    if total == 0:  # controller / --collect-only：没有用例跑过，不打印
+        return
+    terminalreporter.write_line(
+        f"[conftest] 用例间清理：{total} 个用例中 {stats['skipped']} 个跳过（库本来就干净）、"
+        f"{stats['cleaned']} 个执行过清理（共 {stats['tables']} 张表、{stats['sequences']} 条序列）"
+    )
 
 
 # ── 看门狗 ───────────────────────────────────────────────────────────

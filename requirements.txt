@@ -51,3 +51,7 @@ markdown>=3.5,<4
 python-docx>=1.1,<2
 pillow>=10.0,<12
 pytest>=7,<9
+# 并行跑测试（`pytest tests/ -n 4 --dist loadfile`）：每个 worker 各有自己的测试库
+# （按 PID 派生），全量约 550s → 约 2 分钟。串行跑用不到它，conftest 也不 import 它
+# （装了不影响单进程跑法）。并行时不能设 LUYUN_TEST_DSN，见 AGENTS.md「Testing & CI」。
+pytest-xdist>=3.6,<4
