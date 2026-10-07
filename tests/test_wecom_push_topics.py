@@ -8,6 +8,10 @@
 
 注册表 id 与迁移 ``0016_wecom_push_subscriptions.sql`` 里那批字面量必须一致：
 订阅与出站行按 topic_id 关联，改名字而不同步迁移 = 订阅与内容类型对不上。
+
+触发方式是**多值**：对账差异告警同时支持定时与事件——定时侧承载现有的「数据质量日报」
+任务（22:10 / 当天，票 08 的定时任务表单必须能选到它），事件侧是日终对账差异告警。
+其余七类各自只有一种触发方式。
 """
 
 from __future__ import annotations
@@ -50,32 +54,45 @@ class FakeOpsParams(BaseModel):
     )
 
 
-# 八类内容类型：id / 显示名 / 触发方式。来源是票面与迁移 0016 的头注释（两者一致）。
+# 八类内容类型：id / 显示名 / 触发方式（按声明顺序）。来源是票面与迁移 0016 的头注释。
+# 只有对账差异告警两种触发方式都支持。
 EXPECTED_TOPICS = [
-    ("sales_report", "销售报表", "scheduled"),
-    ("reconcile_diff", "对账差异告警", "event"),
-    ("unmapped_dish", "未映射菜品提醒", "event"),
-    ("scraper_failure", "采集失败告警", "event"),
-    ("hygiene_reminder", "卫生提醒", "event"),
-    ("hygiene_photo", "验收照片", "event"),
-    ("update_backup", "系统更新与备份结果", "event"),
-    ("resource_watermark", "磁盘与内存水位", "event"),
+    ("sales_report", "销售报表", ("scheduled",)),
+    ("reconcile_diff", "对账差异告警", ("scheduled", "event")),
+    ("unmapped_dish", "未映射菜品提醒", ("event",)),
+    ("scraper_failure", "采集失败告警", ("event",)),
+    ("hygiene_reminder", "卫生提醒", ("event",)),
+    ("hygiene_photo", "验收照片", ("event",)),
+    ("update_backup", "系统更新与备份结果", ("event",)),
+    ("resource_watermark", "磁盘与内存水位", ("event",)),
 ]
 
+TOPIC_IDS = [row[0] for row in EXPECTED_TOPICS]
+EVENT_ONLY_TOPICS = [row[0] for row in EXPECTED_TOPICS if row[2] == ("event",)]
+
+# 定时类（支持定时触发的内容类型）的默认推送时间。与 `/meta` 旧字段 job_templates 里
+# 那两个模板逐字一致：销售报表 21:30、数据质量日报（= 对账差异告警的定时侧）22:10。
+EXPECTED_SCHEDULE_TIMES = {"sales_report": "21:30", "reconcile_diff": "22:10"}
+SCHEDULED_TOPICS = list(EXPECTED_SCHEDULE_TIMES)
+
 # 每类的参数：字段名 → (控件类型, 是否必填)。事件类的参数由触发点产出，注册表不声明
-# 表单字段（照片是例外：它的参数形状已经被迁移里那批出站行的 params_json 定死了）。
+# 表单字段（照片是例外：它的参数形状已经被迁移里那批出站行的 params_json 定死了；
+# 对账差异告警是两种触发方式都有，表单形状来自它的定时侧）。
 EXPECTED_PARAMS = {
     "sales_report": {
         "schedule_time": ("time", False),
         "date_range_mode": ("select", False),
         "station": ("select", False),
     },
+    "reconcile_diff": {
+        "schedule_time": ("time", False),
+        "date_range_mode": ("select", False),
+    },
     "hygiene_photo": {
         "ref_key": ("text", True),
         "capture_id": ("text", True),
         "extra_capture_id": ("text", False),
     },
-    "reconcile_diff": {},
     "unmapped_dish": {},
     "scraper_failure": {},
     "hygiene_reminder": {},
@@ -108,23 +125,64 @@ def _one_of(payload: dict, field: str) -> dict:
     }
 
 
+def test_a_topic_must_declare_a_params_model_for_every_trigger_it_claims():
+    """注册一行时自证：声明了某种触发方式却没有对应的参数模型，等于 /meta 给不出表单。"""
+    schedule_model = get_topic("sales_report").schedule_params_model
+
+    with pytest.raises(ValueError):  # 声明定时触发，却没有定时侧模型
+        PushTopic(
+            id="broken_scheduled",
+            name="缺模型",
+            triggers=frozenset({PushTrigger.SCHEDULED}),
+        )
+    with pytest.raises(ValueError):  # 只有事件触发，却带了定时侧模型
+        PushTopic(
+            id="broken_event",
+            name="多模型",
+            triggers=frozenset({PushTrigger.EVENT}),
+            schedule_params_model=schedule_model,
+        )
+    with pytest.raises(ValueError):  # 一种触发方式都没有的内容类型推不出去
+        PushTopic(id="broken_none", name="无触发", triggers=frozenset())
+    with pytest.raises(ValueError):  # id 是订阅与出站行的关联键，不能空
+        PushTopic(
+            id="",
+            name="无 id",
+            triggers=frozenset({PushTrigger.EVENT}),
+            event_params_model=FakeOpsParams,
+        )
+
+
 def test_registry_declares_the_eight_topics_in_order():
-    assert [(t.id, t.name, t.trigger.value) for t in all_topics()] == EXPECTED_TOPICS
+    assert [(t.id, t.name) for t in all_topics()] == [
+        (row[0], row[1]) for row in EXPECTED_TOPICS
+    ]
 
 
-@pytest.mark.parametrize("topic_id,name,trigger", EXPECTED_TOPICS)
+@pytest.mark.parametrize("topic_id,name,triggers", EXPECTED_TOPICS)
+def test_each_topic_declares_its_triggers(topic_id, name, triggers):
+    """触发方式按类逐个钉住：只有对账差异告警是「定时 + 事件」。"""
+    topic = get_topic(topic_id)
+    assert topic is not None, f"注册表里没有 {topic_id}"
+    assert topic.name == name
+    assert {trigger.value for trigger in topic.triggers} == set(triggers)
+    # 输出顺序必须稳定（定时在前、事件在后），否则每次刷新 /meta 都可能变。
+    assert _payload(topic_id)["triggers"] == list(triggers)
+
+
+@pytest.mark.parametrize("topic_id,name,triggers", EXPECTED_TOPICS)
 def test_each_topic_payload_exposes_a_consumable_schema_and_uischema(
-    topic_id, name, trigger
+    topic_id, name, triggers
 ):
     payload = _payload(topic_id)
 
     assert payload["id"] == topic_id
     assert payload["name"] == name
-    assert payload["trigger"] == trigger
+    assert payload["triggers"] == list(triggers)
     assert set(payload) == {
         "id",
         "name",
-        "trigger",
+        "triggers",
         "params_schema",
         "uischema",
         "default_schedule_time",
@@ -152,7 +210,7 @@ def test_each_topic_payload_exposes_a_consumable_schema_and_uischema(
     assert set(required) <= set(_controls(payload))
 
 
-@pytest.mark.parametrize("topic_id", [row[0] for row in EXPECTED_TOPICS])
+@pytest.mark.parametrize("topic_id", TOPIC_IDS)
 def test_each_topic_declares_exactly_the_expected_params(topic_id):
     payload = _payload(topic_id)
 
@@ -166,27 +224,56 @@ def test_each_topic_declares_exactly_the_expected_params(topic_id):
     }
 
 
-# ── 推送时间：定时类有默认值，事件类没有这个参数 ──────────────────────────────
+# ── 触发方式：定时类有默认推送时间，纯事件类没有这个参数 ─────────────────────
 
 
-def test_scheduled_topic_declares_its_default_push_time():
-    """销售报表的默认推送时间与老模板一致（21:30），schema 里也带着这个默认值。"""
-    payload = _payload("sales_report")
+def test_only_the_data_quality_daily_topics_support_the_scheduled_trigger():
+    """定时类**就是**这两个：销售报表与对账差异告警（原数据质量日报）。
 
-    assert payload["default_schedule_time"] == "21:30"
+    多一个或少一个都要在这里响——票 08 的定时任务表单的内容类型下拉直接来自这一层，
+    注册表把承载定时任务的内容类型标成纯事件，等于把现有功能从表单里抹掉。
+    """
+    assert {
+        topic.id for topic in all_topics() if PushTrigger.SCHEDULED in topic.triggers
+    } == set(SCHEDULED_TOPICS)
+
+
+@pytest.mark.parametrize("topic_id", SCHEDULED_TOPICS)
+def test_every_scheduled_topic_declares_its_default_push_time(topic_id):
+    """定时类都有默认推送时间，schema 里也带着这个默认值（票 08 的表单直接用它）。"""
+    payload = _payload(topic_id)
+
+    assert payload["default_schedule_time"] == EXPECTED_SCHEDULE_TIMES[topic_id]
     assert _controls(payload)["schedule_time"] == "time"
 
     schedule_time = payload["params_schema"]["properties"]["schedule_time"]
-    assert schedule_time["default"] == "21:30"
+    assert schedule_time["default"] == EXPECTED_SCHEDULE_TIMES[topic_id]
     assert schedule_time["pattern"] == r"^([01]\d|2[0-3]):[0-5]\d$"
 
 
-@pytest.mark.parametrize(
-    "topic_id", [row[0] for row in EXPECTED_TOPICS if row[2] == "event"]
-)
-def test_event_topics_have_no_push_time_parameter(topic_id):
+def test_reconcile_diff_supports_both_triggers():
+    """对账差异告警是唯一一个「定时 + 事件」的内容类型。
+
+    定时侧承载现有的数据质量日报任务（22:10 / 当天），事件侧是日终对账差异告警；
+    `/meta` 里两个触发方式都在，票 08 的定时任务表单因此选得到它。
+    """
+    topic = get_topic("reconcile_diff")
+    payload = _payload("reconcile_diff")
+
+    assert topic.triggers == frozenset({PushTrigger.SCHEDULED, PushTrigger.EVENT})
+    assert payload["triggers"] == ["scheduled", "event"]
+
+    assert payload["default_schedule_time"] == "22:10"
+    assert _controls(payload) == {"schedule_time": "time", "date_range_mode": "select"}
+    assert _one_of(payload, "date_range_mode") == {"today": "当天", "yesterday": "昨天"}
+
+
+@pytest.mark.parametrize("topic_id", EVENT_ONLY_TOPICS)
+def test_event_only_topics_have_no_push_time_parameter(topic_id):
+    """其余六类不受影响：只有事件触发，没有推送时间参数。"""
     payload = _payload(topic_id)
 
+    assert payload["triggers"] == ["event"]
     assert payload["default_schedule_time"] is None
     assert "schedule_time" not in payload["params_schema"]["properties"]
     assert "time" not in _controls(payload).values()
@@ -194,18 +281,21 @@ def test_event_topics_have_no_push_time_parameter(topic_id):
 
 def test_the_time_rule_is_the_same_one_the_legacy_jobs_use():
     """注册表的 HH:MM 规则与 services.wecom_push_service 的同一条：不能一边收一边拒。"""
-    for value in ["21:30", "00:00", "23:59", "24:00", "9:5", "2130", ""]:
-        try:
-            validate_schedule_time(value)
-            legacy_ok = True
-        except ValueError:
-            legacy_ok = False
-        try:
-            validate_params("sales_report", {"schedule_time": value})
-            registry_ok = True
-        except ValueError:
-            registry_ok = False
-        assert registry_ok is legacy_ok, f"{value!r} 两边判定不一致"
+    for topic_id in SCHEDULED_TOPICS:
+        for value in ["21:30", "22:10", "00:00", "23:59", "24:00", "9:5", "2130", ""]:
+            try:
+                validate_schedule_time(value)
+                legacy_ok = True
+            except ValueError:
+                legacy_ok = False
+            try:
+                validate_params(
+                    topic_id, {"schedule_time": value}, trigger=PushTrigger.SCHEDULED
+                )
+                registry_ok = True
+            except ValueError:
+                registry_ok = False
+            assert registry_ok is legacy_ok, f"{topic_id} 上 {value!r} 两边判定不一致"
 
 
 # ── 下拉选项与标签也来自后端 ────────────────────────────────────────────────
@@ -241,12 +331,32 @@ def test_validate_params_fills_the_defaults_of_a_form_topic():
         "date_range_mode": "today",
         "station": "",
     }
+    # 对账差异告警的定时侧（数据质量日报）：默认时间与旧任务模板一致（22:10 / 当天）。
+    assert validate_params("reconcile_diff", {}, trigger=PushTrigger.SCHEDULED) == {
+        "schedule_time": "22:10",
+        "date_range_mode": "today",
+    }
+
+
+def test_a_dual_trigger_topic_requires_naming_the_trigger():
+    """两种触发方式的参数形状不同（表单 vs 触发点），省略触发方式不能靠猜。"""
+    with pytest.raises(ValueError):
+        validate_params("reconcile_diff", {})
+
+
+def test_validate_params_rejects_a_trigger_the_topic_does_not_support():
+    with pytest.raises(ValueError):
+        validate_params("sales_report", {}, trigger=PushTrigger.EVENT)
+    with pytest.raises(ValueError):
+        validate_params("unmapped_dish", {}, trigger=PushTrigger.SCHEDULED)
 
 
 def test_validate_params_rejects_fields_the_schema_does_not_declare():
     """表单参数严格校验：静默丢掉未知字段 = 以为改了、其实没改。"""
     with pytest.raises(ValueError):
         validate_params("sales_report", {"webhook_id": 3})
+    with pytest.raises(ValueError):
+        validate_params("reconcile_diff", {"webhook_id": 3}, trigger=PushTrigger.SCHEDULED)
 
 
 @pytest.mark.parametrize(
@@ -260,6 +370,18 @@ def test_validate_params_rejects_fields_the_schema_does_not_declare():
 def test_validate_params_rejects_values_the_schema_forbids(params):
     with pytest.raises(ValueError):
         validate_params("sales_report", params)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"date_range_mode": "last_week"},
+        {"schedule_time": "25:00"},
+    ],
+)
+def test_reconcile_diff_schedule_params_are_checked_like_the_report_form(params):
+    with pytest.raises(ValueError):
+        validate_params("reconcile_diff", params, trigger=PushTrigger.SCHEDULED)
 
 
 def test_validate_params_rejects_an_unknown_topic():
@@ -282,10 +404,14 @@ def test_photo_params_require_the_capture_references():
 
 
 def test_event_params_keep_the_fields_the_trigger_produced():
-    """事件类的参数由触发点产出：注册表不认识也要原样留着，不能悄悄吃掉。"""
+    """事件侧的参数由触发点产出：注册表不认识也要原样留着，不能悄悄吃掉。
+
+    对账差异告警两种触发方式都有，但它的定时侧默认时间（22:10 / 当天）不能漏进事件
+    参数里——事件那次投递没有推送时间，这里断言的就是「一个字段都不多」。
+    """
     params = {"biz_date": "2026-10-07", "diff_count": 3}
 
-    assert validate_params("reconcile_diff", params) == params
+    assert validate_params("reconcile_diff", params, trigger=PushTrigger.EVENT) == params
 
 
 # ── `/meta`：注册表的出口，旧字段必须原样保留 ────────────────────────────────
@@ -329,13 +455,21 @@ def test_meta_lists_the_eight_topics_with_their_schema_and_uischema(meta_client)
     assert [topic["id"] for topic in payload["topics"]] == [
         row[0] for row in EXPECTED_TOPICS
     ]
-    assert {topic["trigger"] for topic in payload["topics"]} <= {
-        entry["id"] for entry in payload["triggers"]
-    }
     assert payload["triggers"] == [
         {"id": "scheduled", "name": "定时"},
         {"id": "event", "name": "事件"},
     ]
+    # 每一类声明的触发方式都在这份名字表里，而且两种触发方式都真的被用上了。
+    declared = {entry["id"] for entry in payload["triggers"]}
+    used = {trigger for topic in payload["topics"] for trigger in topic["triggers"]}
+    assert used == declared
+    assert all(set(topic["triggers"]) <= declared for topic in payload["topics"])
+
+    by_id = {topic["id"]: topic for topic in payload["topics"]}
+    assert by_id["reconcile_diff"]["triggers"] == ["scheduled", "event"]
+    assert by_id["reconcile_diff"]["default_schedule_time"] == "22:10"
+    assert by_id["sales_report"]["triggers"] == ["scheduled"]
+
     for topic in payload["topics"]:
         assert topic["params_schema"]["type"] == "object"
         assert topic["uischema"]["type"] == "VerticalLayout"
@@ -349,8 +483,8 @@ def test_a_new_topic_reaches_the_page_without_any_frontend_change(meta_client):
         PushTopic(
             id="fake_ops_event",
             name="夹具事件",
-            trigger=PushTrigger.EVENT,
-            params_model=FakeOpsParams,
+            triggers=frozenset({PushTrigger.EVENT}),
+            event_params_model=FakeOpsParams,
         )
     )
     try:
@@ -388,7 +522,7 @@ _MAPPING_VALUES = re.compile(
     r"\(\s*VALUES\s*(" + _TUPLES + r")\)\s*AS m\(legacy_type,\s*topic_id\)"
 )
 _TUPLE = re.compile(r"\(\s*'([^']*)'\s*(?:,\s*'([^']*)'\s*)?\)")
-_HEADER_ROW = re.compile(r"^--\s+([a-z][a-z0-9_]*)\s+(\S+)\s+（(定时|事件)[^）]*）")
+_HEADER_ROW = re.compile(r"^--\s+([a-z][a-z0-9_]*)\s+(\S+)\s+（([^）]*)）")
 TRIGGER_BY_HEADER_LABEL = {"定时": "scheduled", "事件": "event"}
 
 
@@ -438,6 +572,20 @@ def _topics_documented_in_the_migration_header(sql: str) -> list:
     return rows
 
 
+def _triggers_of_header_row(label: str) -> set:
+    """头注释「触发方式」那一列 → 触发方式 id 的集合。
+
+    单个写 ``定时`` / ``事件``；两种都支持写 ``定时 + 事件``。标签后面还可以跟一句
+    说明（``事件，含员工实拍照片``）——说明不算触发方式。
+    """
+    expression = label.split("，", 1)[0]
+    return {
+        TRIGGER_BY_HEADER_LABEL[token.strip()]
+        for token in expression.split("+")
+        if token.strip()
+    }
+
+
 def test_every_topic_id_the_migration_writes_is_a_registry_topic():
     """订阅与出站行按 topic_id 关联：迁移写的字面量必须都能在注册表里找到。"""
     written = _topic_ids_the_migration_writes(_migration_sql())
@@ -450,7 +598,11 @@ def test_every_topic_id_the_migration_writes_is_a_registry_topic():
 
 
 def test_registry_matches_the_topics_documented_in_the_migration_header():
-    """注册表的 id / 显示名 / 触发方式与迁移头注释那张表逐条一致。"""
+    """注册表的 id / 显示名 / 触发方式与迁移头注释那张表逐条一致。
+
+    触发方式两边都是多值：对账差异告警在迁移注释里写 ``定时 + 事件``，注册表里就得
+    同时有 ``scheduled`` 与 ``event``——注册表把它标成纯事件就是这条断言拦下的那个缺陷。
+    """
     rows = _topics_documented_in_the_migration_header(_migration_sql())
     assert len(rows) >= 8, f"迁移头注释只解析出 {rows}"
 
@@ -458,7 +610,10 @@ def test_registry_matches_the_topics_documented_in_the_migration_header():
     for topic_id, name, trigger_label in rows:
         topic = registered.get(topic_id)
         assert topic is not None, f"注册表里没有迁移声明的 {topic_id}"
-        assert (topic.name, topic.trigger.value) == (
-            name,
-            TRIGGER_BY_HEADER_LABEL[trigger_label],
-        )
+        assert topic.name == name
+        assert {trigger.value for trigger in topic.triggers} == _triggers_of_header_row(
+            trigger_label
+        ), f"{topic_id} 的触发方式与迁移头注释不一致"
+
+    # 反方向也要对：注册表里的内容类型一个都不能漏在迁移注释之外。
+    assert set(registered) == {row[0] for row in rows}

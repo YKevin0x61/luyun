@@ -17,7 +17,7 @@
 --
 -- 内容类型 id（字符串，第二批的注册表把这些 id 与显示名 / 参数 schema 一起声明）：
 --   sales_report        销售报表            （定时）
---   reconcile_diff      对账差异告警        （事件）
+--   reconcile_diff      对账差异告警        （定时 + 事件，定时侧承载原「数据质量日报」）
 --   unmapped_dish       未映射菜品提醒      （事件）
 --   scraper_failure     采集失败告警        （事件）
 --   hygiene_reminder    卫生提醒            （事件）
