@@ -47,12 +47,12 @@ afterEach(() => {
   vi.resetModules()
 })
 
-describe('工作台级导航（今天 / 人事 / 现场 / 后勤 / 我的）', () => {
+describe('工作台级导航（今天 / 人事 / 卫生 / 后勤 / 我的）', () => {
   it('店长这一档：五个门都在，「今天」指 /workbench（B2 那条回首页的路）', async () => {
     const wrapper = await mountNav('/workbench/hr/calendar', 'super')
 
     expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
-      '今天', '人事', '现场', '选择岗位', '备货计划',
+      '今天', '人事', '卫生', '选择岗位', '备货计划',
     ])
     expect(wrapper.get('a[href="/workbench"]').text()).toBe('今天')
     // 站在人事组里，「人事」那一格亮。
@@ -61,7 +61,7 @@ describe('工作台级导航（今天 / 人事 / 现场 / 后勤 / 我的）', (
     expect(wrapper.get('nav').attributes('aria-label')).toBe('工作台导航')
   })
 
-  it('员工这一档：只有他看得见的几格（「卫生」「我的」在，人事 / 现场不在）', async () => {
+  it('员工这一档：只有他看得见的几格（「卫生」「我的」在，人事与店长那格不在）', async () => {
     const wrapper = await mountNav('/workbench/me/today', 'staff')
 
     const hrefs = wrapper.findAll('.wb-nav-item').map((item) => item.attributes('href'))

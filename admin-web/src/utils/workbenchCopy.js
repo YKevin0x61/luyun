@@ -12,7 +12,7 @@
 import { WORKBENCH_ROOT } from './workbenchPaths.js'
 
 export const WORKBENCH_TITLE = '工作台'
-export const WORKBENCH_TAGLINE = '人事 · 现场 · 后勤'
+export const WORKBENCH_TAGLINE = '人事 · 卫生 · 产品'
 
 /** 「人事」那一组的落点：排班月历（店长每天先看"今天谁上班"）。 */
 export const WORKBENCH_HR_HOME = '/workbench/hr/calendar'
@@ -30,7 +30,7 @@ export const WORKBENCH_FIELD_HOME = '/workbench/floor/daily'
 export const WORKBENCH_HOME = WORKBENCH_ROOT
 
 /** 仪表盘那张卡的说明：两组一起说，别只列现场那一组。 */
-export const WORKBENCH_DASHBOARD_BLURB = '当班排班 · 现场验收 · 整改 · 仪容仪表 · 红黑榜'
+export const WORKBENCH_DASHBOARD_BLURB = '当班排班 · 卫生验收 · 整改 · 仪容仪表 · 红黑榜'
 
 /** 页面标题的统一写法：`<页面名> · 工作台`。
  *

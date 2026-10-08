@@ -30,13 +30,17 @@ describe('工作台身份 → 清单身份', () => {
   })
 })
 
-describe('工作台的组（票 05：人事 / 现场；票 06 加上首页；票 07 加上后勤；2026-10-05 加上员工卫生）', () => {
-  it('六组：今天、人事、现场、卫生、后勤、我的（顺序就是顶栏里的顺序）', () => {
+describe('工作台的组（票 05：人事 / 卫生；票 06 加上首页；票 07 加上产品；2026-10-05 加上员工卫生）', () => {
+  it('六组：今天、人事、卫生、卫生、产品、我的 —— 两个「卫生」是同一批活的两张面', () => {
     expect(WORKBENCH_NAV_GROUPS.map((group) => group.key)).toEqual([
       'home', 'hr', 'floor', 'hygiene', 'kitchen', 'me',
     ])
+    // 组名 2026-10-08 由用户裁定：`floor` 从「现场」改成「卫生」。它与员工端那一格
+    // （`hygiene`）同名是**有意的** —— 两个身份做的是同一批卫生活，只是各自的面不同；
+    // 可见性由落点那一页的 `audience` 决定，每次只有一个身份在渲染，界面上不会同时出现
+    // 两个「卫生」（店长看到 `floor`、员工看到 `hygiene`）。
     expect(WORKBENCH_NAV_GROUPS.map((group) => group.label)).toEqual([
-      '今天', '人事', '现场', '卫生', '后勤', '我的',
+      '今天', '人事', '卫生', '卫生', '产品', '我的',
     ])
     // 第一格是子应用根（首页），不是某一组的专页。
     expect(WORKBENCH_NAV_GROUPS[0].to).toBe('/workbench')
@@ -109,16 +113,29 @@ describe('工作台的组（票 05：人事 / 现场；票 06 加上首页；票
     }
   })
 
-  it('后勤组是配方五页 + 备货计划（票 07 / 08），旧地址一条都不在清单里', () => {
-    const kitchen = workbenchPagesOf('kitchen').map((page) => page.path)
-    expect(kitchen).toEqual([
+  it('产品组：清单里是配方五页 + 备货计划，导航入口只给能当入口的那四页', () => {
+    // 页面清单仍是完整的六条 —— 路由、页面墙、页面标题都从它来。
+    expect(PAGE_ROUTES.filter((row) => row.group === 'kitchen').map((row) => row.path)).toEqual([
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/recipe/detail',
       '/workbench/kitchen/recipe/print',
       '/workbench/kitchen/recipe/qr',
       '/workbench/kitchen/recipe/manage',
-      // 票 08：备货计划从 `/prep-plan` 搬进后勤组 —— 换位置、统一导航，读写门不动。
+      // 票 08：备货计划从 `/prep-plan` 搬进这一组 —— 换位置、统一导航，读写门不动。
       '/workbench/kitchen/prep-plan',
+    ])
+    // **导航入口**是组表里手写的那四页（2026-10-08）：清单里的「配方详情」（要带 `?slug=`）
+    // 与「配方打印」（A4 预览）是**从列表点进去**的功能页 —— 当成一级入口就是两扇点不通的
+    // 死门（页头那个下拉里实测派生出来是六项，其中两项点了进不去）。
+    expect(workbenchPagesOf('kitchen').map((page) => page.path)).toEqual([
+      '/workbench/kitchen/recipe',
+      '/workbench/kitchen/recipe/qr',
+      '/workbench/kitchen/recipe/manage',
+      '/workbench/kitchen/prep-plan',
+    ])
+    // 名单里只写路径，标题仍从清单取（一处定义）。
+    expect(workbenchPagesOf('kitchen').map((page) => page.title)).toEqual([
+      '选择岗位', '岗位二维码', '配方管理', '备货计划',
     ])
     for (const old of [
       '/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr', '/recipe/manage',

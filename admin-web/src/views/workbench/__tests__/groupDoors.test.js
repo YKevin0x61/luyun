@@ -231,8 +231,8 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
       RECIPE_HOME_PATH, PREP_PLAN_PATH,
     ])
     expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
-    // rail 自己的名字没变：工作台 · 现场。
-    expect(wrapper.get('.hy-tabbar').attributes('aria-label')).toBe('工作台 · 现场')
+    // rail 自己的名字跟着组名走：工作台 · 卫生（组名 2026-10-08 由「现场」改过来）。
+    expect(wrapper.get('.hy-tabbar').attributes('aria-label')).toBe('工作台 · 卫生')
   })
 
   it('rail 里那扇单门「人事」没了：跨组由工作台级导航接手', async () => {

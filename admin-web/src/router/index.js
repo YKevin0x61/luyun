@@ -63,12 +63,12 @@ function workbenchStaffPage(path, name, loader) {
   }
 }
 
-/** 工作台「后勤」那一组（票 07：配方；票 08 的备货计划同组）里**带工作台导航**的页面：
- *  套工作台外壳（`WorkbenchLayout`：顶栏一条 + 按身份过滤的导航），页面本体在子记录里。
+/** 工作台「产品」那一组（票 07：配方；票 08 的备货计划同组）里套工作台外壳的页面：
+ *  壳是 `WorkbenchLayout`（手机档一行页头 + 按身份过滤的底栏），页面本体在子记录里。
  *
- *  组里的**沉浸页**（阅读 / 打印 / 印码）不走这个工厂 —— 扫码进来的人是来看那一条配方的，
- *  页面上只有返回 / 打印 / 目录抽屉，不套外壳（与今天配方阅读页的独立外壳行为一致）。
- *  两种在页面清单里都记 `standalone: true`（那条的语义是「不渲染管理后台那条导航」）。 */
+ *  **2026-10-08 起这一组的六页全走这个工厂**：阅读 / 打印 / 印码那三页原来不在其中
+ *  （理由见下面路由那一段），用户裁定一并套上 —— 组内导航与配色跟同组其余页面对齐。
+ *  六页在页面清单里都记 `standalone: true`（那条的语义是「不渲染管理后台那条导航」）。 */
 function workbenchKitchenPage(path, name, loader) {
   return {
     path,
@@ -123,15 +123,17 @@ const routes = [
   // （ADR 0092 里那个推翻既有刻意设计的动作）。扫码看岗位配方的路子保留：扫码 →
   // 未登录 → 登录页默认开员工栏 → 回到那条配方（回跳白名单在 `utils/loginNext.js`）。
   //
-  // 两种外壳（都不是管理后台那条导航，所以清单里一律 `standalone: true`）：
-  //   带导航 —— 列表页 / 管理页 / 备货计划套 `WorkbenchLayout`（`workbenchKitchenPage`）；
-  //   沉浸页 —— 阅读 / 打印 / 印码不套外壳，页面上只有返回 / 打印 / 目录抽屉。
+  // **六页一律套 `WorkbenchLayout`**（都不是管理后台那条导航，所以清单里一律 `standalone: true`）。
+  // 2026-10-08 用户裁定：阅读 / 打印 / 印码这三页原来**自带顶栏底栏、不套外壳**（那时的理由是
+  // "扫码进来的人是来看那一条配方的"），代价是既没有组内导航、也不吃工作台那套深青墨，
+  // 跟同组其余页面同屏就是两种观感。现在一并收进外壳；外壳自己带 `no-print`
+  // （`views/workbench/WorkbenchLayout.vue`），所以「配方打印」那一页打印时顶栏底栏不会被打进去。
   // 旧的 `/recipe*` 一条都不留（自然 404，不给别名、不做重定向）。
   workbenchKitchenPage('/workbench/kitchen/recipe', 'recipe-stations', () => import('../views/recipe/RecipeStationsView.vue')),
   workbenchKitchenPage('/workbench/kitchen/recipe/manage', 'recipe-manage', () => import('../views/recipe/RecipeManageView.vue')),
-  { path: '/workbench/kitchen/recipe/detail', name: 'recipe-detail', component: () => import('../views/recipe/RecipeDetailView.vue'), meta: pageMeta('/workbench/kitchen/recipe/detail') },
-  { path: '/workbench/kitchen/recipe/print', name: 'recipe-print', component: () => import('../views/recipe/RecipePrintView.vue'), meta: pageMeta('/workbench/kitchen/recipe/print') },
-  { path: '/workbench/kitchen/recipe/qr', name: 'recipe-qr', component: () => import('../views/recipe/RecipeQrView.vue'), meta: pageMeta('/workbench/kitchen/recipe/qr') },
+  workbenchKitchenPage('/workbench/kitchen/recipe/detail', 'recipe-detail', () => import('../views/recipe/RecipeDetailView.vue')),
+  workbenchKitchenPage('/workbench/kitchen/recipe/print', 'recipe-print', () => import('../views/recipe/RecipePrintView.vue')),
+  workbenchKitchenPage('/workbench/kitchen/recipe/qr', 'recipe-qr', () => import('../views/recipe/RecipeQrView.vue')),
   // 备货计划（票 08）：从管理后台的 `/prep-plan` 搬进「后勤」组，**与配方列表同一个形态**
   // ——套工作台外壳（顶栏那条窄栏 + 按身份过滤的导航），跟随组里的落点常量走（`links` 里
   // 那一条，页面清单只负责把这一页登记成 `kitchen` / `both`）。它进工作台只是换位置与统一

@@ -27,7 +27,7 @@
  */
 import { PAGE_ROUTES, pageMeta, pageRow } from '../router/pageRoutes.js'
 import { PREP_PLAN_PATH } from './prepPlanPaths.js'
-import { RECIPE_HOME_PATH } from './recipePaths.js'
+import { RECIPE_HOME_PATH, RECIPE_MANAGE_PATH, RECIPE_QR_PATH } from './recipePaths.js'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME } from './workbenchCopy.js'
 import { IDENTITY_ADMIN, IDENTITY_STAFF } from './workbenchIdentity.js'
 
@@ -36,11 +36,15 @@ export const WORKBENCH_NAV_GROUPS = [
   { key: 'home', label: '今天', to: WORKBENCH_HOME },
   // 人事：月历 / 待办 / 班次表 / 花名册（落点是月历，组里的页由 `workbenchPagesOf` 给）。
   { key: 'hr', label: '人事', to: WORKBENCH_HR_HOME },
-  // 现场：卫生七页，**店长那一档**的面（落点是日常验收，到了那儿由那一组自己的 rail 接手）。
+  // 卫生（组名 2026-10-08 由用户裁定，从「现场」改过来）：卫生八页，**店长那一档**的面
+  // （落点是日常验收，到了那儿由那一组自己的导航接手）。
   // 员工看不到这一格（落点那一页的 `audience` 是 `admin`）；员工做卫生走下面那一格。
-  { key: 'floor', label: '现场', to: WORKBENCH_FIELD_HOME },
+  // **两格的显示名现在都是「卫生」**（上面这一格 `floor`、下面那一格 `hygiene`）：同一批活
+  // 的两张面，靠 `key` 与 `audience` 区分，不靠名字 —— 每次只有一个身份在渲染，界面上
+  // 不会同时出现两个「卫生」。
+  { key: 'floor', label: '卫生', to: WORKBENCH_FIELD_HOME },
   // 员工端的**卫生**这一格（2026-10-05 用户裁定）：两个身份做的卫生是同一批活，但看到的是
-  // 各自的面 —— 店长走「现场」（`/workbench/floor/*` 七页，管验收与整改），员工走这一格
+  // 各自的面 —— 店长走上一格（`/workbench/floor/*` 八页，管验收与整改），员工走这一格
   // （`/workbench/me/clean`：今天要做几项、逐项拍照交）。它原来藏在「我的」下面，员工要点
   // 两层才到，而这是他们每天最常干的事 —— 给它一个一级入口。
   // 可见性仍由落点那一页的 `audience`（`staff`）决定：店长那一档自然看不到这一格。
@@ -51,12 +55,17 @@ export const WORKBENCH_NAV_GROUPS = [
   // `utils/recipePaths.js` 与 `utils/prepPlanPaths.js`，与页面里的 router-link 同一份。
   {
     key: 'kitchen',
-    label: '后勤',
+    label: '产品',
     to: RECIPE_HOME_PATH,
     links: [
       { to: RECIPE_HOME_PATH },
       { to: PREP_PLAN_PATH },
     ],
+    // 组内**一级入口**（手写）：`workbenchPagesOf` 默认从页面清单派生，而清单里
+    // 「配方详情」（要带 `?slug=`）与「配方打印」（A4 预览）是**从列表点进去**的功能页，
+    // 不是能当入口的页 —— 放进页头那个下拉就是两扇点不通的死门（2026-10-08 实测，
+    // 派生出来是六项）。名单里只写路径，标题仍从清单取。
+    pages: [RECIPE_HOME_PATH, RECIPE_QR_PATH, RECIPE_MANAGE_PATH, PREP_PLAN_PATH],
   },
   // 员工端的「今天 / 整月」同属「我的」这一组，落点是「今天」。
   // （卫生那一页已经挪到上面独立的「卫生」格；「我的」组现在只剩今天与整月两页。）
@@ -79,6 +88,15 @@ export function workbenchLinksOf(group) {
 /** 组里有哪些页（路径 + 标题，顺序照页面清单）—— 壳的组内导航从它派生。
  *  清单是唯一来源：组里加一页只改那张表，导航自己就跟上。 */
 export function workbenchPagesOf(group) {
+  // 手写的入口名单优先（见 `kitchen` 那一格的 `pages`）：清单里有些页是「从列表点进去」的
+  // 功能页，当一级入口就是点不通的死门。名单里只写路径，标题仍从清单取 —— 一处定义。
+  const cell = WORKBENCH_NAV_GROUPS.find((item) => item.key === group)
+  if (cell && cell.pages) {
+    return cell.pages.map((path) => {
+      const row = pageRow(path)
+      return { path, title: row ? row.title : path }
+    })
+  }
   return PAGE_ROUTES.filter((row) => row.group === group).map(({ path, title }) => ({ path, title }))
 }
 

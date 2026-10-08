@@ -68,23 +68,27 @@ describe('hygiene admin section shell', () => {
     expect(layout).not.toMatch(/hy-nav-link/)
   })
 
-  it('C 方向：手机档的底部那一格让给工作台级底栏，组内八项挪到内容区顶上横滑', () => {
+  it('方案 C：手机档收掉顶上那两条横带，组内八项走页头下拉（2026-10-08）', () => {
     const layout = read('../HygieneAdminLayout.vue')
     // 底栏挂上（三套壳共用同一颗）：它自己只在 ≤720 渲染（桌面档 `display: none`）。
     expect(layout).toMatch(/components\/workbench\/WorkbenchTabBar\.vue/)
     expect(layout).toMatch(/<WorkbenchTabBar class="hy-wb-tabbar" \/>/)
     // 顶栏那排组件还在（桌面档那条横条里仍是它在干活），手机档只是收起来。
     expect(layout).toMatch(/components\/workbench\/WorkbenchNav\.vue/)
+    // 手机档的换页出口：组内八页从横滑带换成这个下拉（组名 / 当前页 / 身份 / 更多）。
+    expect(layout).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
+    expect(layout).toMatch(/<WorkbenchMobileHead :items="HYGIENE_ADMIN_NAV" \/>/)
 
     const rules = mobileRules(layout)
     // 顶栏那排：手机档 `display: none` —— 落点到底栏，同一排入口不在顶上和底下同时出现。
     expect(rules).toMatch(/\.hygiene-app \.hy-wb-nav\s*\{\s*display:\s*none/)
-    // 组内八项：从底部的 6 格 grid 换成一条横滑带（`flex` + `nowrap` + `overflow-x`），
-    // 次序排在内容**之前**（order 1 < 2）—— 底部那一格留给工作台级底栏，两条底栏不叠。
-    expect(rules).toMatch(/\.hy-tabbar\s*\{[^}]*order:\s*1/)
-    expect(rules).toMatch(/\.hy-tabbar\s*\{[^}]*flex-wrap:\s*nowrap/)
-    expect(rules).toMatch(/\.hy-tabbar\s*\{[^}]*overflow-x:\s*auto/)
-    expect(rules).toMatch(/\.hy-main\s*\{[^}]*order:\s*2/)
+    // 顶上那两条横带整个撤掉：组内八项（`.hy-tabbar`，桌面档那条 238px 的左 rail，
+    // 2026-10-05~10-08 之间它还兼过"内容区顶上一条横滑带"）与顶栏横条（身份 / 退出 /
+    // 后台，`.hy-header`）在手机档都不再渲染 —— 八项进页头下拉、三件也进页头。
+    expect(rules).toMatch(/\.hy-tabbar\s*\{\s*display:\s*none/)
+    expect(rules).toMatch(/\.hy-header\s*\{\s*display:\s*none/)
+    // 横滑带连同它带出来的原生横向滚动条一起没了（那条带子是 `overflow-x: auto` 的账）。
+    expect(rules).not.toMatch(/\.hy-tabbar\s*\{[^}]*overflow-x:\s*auto/)
     // 底栏钉在视口底（组件里那条 `position: fixed` 会被共享样式表的
     // `.hygiene-admin > *:not(.modal-overlay) { position: relative }` 打回 relative ——
     // 同特异度、但那张表更晚进 head，所以壳里这条带前缀的规则是它生效的条件）。

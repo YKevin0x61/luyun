@@ -4,9 +4,8 @@ import { useRoute } from 'vue-router'
 import { api } from '../../api/client'
 import { RECIPE_DETAIL_PATH, RECIPE_HOME_PATH } from '../../utils/recipePaths'
 import { useRecipeAdmin } from '../../composables/useRecipeAdmin'
-import RecipeExitButton from '../../components/recipe/RecipeExitButton.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
-import { RECIPE_NAV_HOME_LABEL, recipeDocumentTitle } from '../../utils/recipeCopy'
+import { recipeDocumentTitle } from '../../utils/recipeCopy'
 import {
   A4_CONTENT_HEIGHT_MM,
   PRINT_CARD_GAP_MM,
@@ -21,8 +20,10 @@ import {
 
 useScopedStylesheet('/recipe.css')
 
-// 工具栏那颗「管理后台」的判据（票 07）：工作台身份，不是「有没有登录」。
-const { isAdmin } = useRecipeAdmin()
+// 身份探针：阅读 / 打印 / 印码三页原本是沉浸页、没人替它们探会话，所以在页内开场
+// （幂等 —— 正在探的时候直接返回）。2026-10-08 起它们也套了工作台外壳（壳里的身份切换器
+// 会探），这一句留着当兜底。工具栏上那两颗入口撤掉之后，`isAdmin` 不再需要。
+useRecipeAdmin()
 
 const route = useRoute()
 const slugs = computed(() =>
@@ -248,12 +249,11 @@ function doPrint() {
       <button type="button" class="btn btn-primary" :disabled="!canPrint" @click="doPrint">
         {{ pageCount > 1 ? `打印已选页` : '打印' }}
       </button>
-      <!-- 票 07：「管理后台」只给管理端那一档 —— 它是 `admin` 的页，员工点它只会落
-           越权页；打印页也是沉浸页（没有返回 / 打印之外的入口）。
-           票 10：退出入口（spec 故事 47）与工作台 / 阅读面那颗是同一个动作，挂在这条
-           `no-print` 工具栏里，所以它不会被打进 A4。 -->
-      <router-link v-if="isAdmin" class="btn btn-ghost" to="/">{{ RECIPE_NAV_HOME_LABEL }}</router-link>
-      <RecipeExitButton />
+      <!-- 2026-10-08：这一条上的「管理后台」与「退出」两颗**撤掉**了 —— 这一页现在套着
+           工作台外壳，两个出口都在那儿：桌面档在顶上那条栏里，手机档在页头的 `⋮` 里。
+           同一条工具栏上再写一遍就是同一件事两遍（用户裁定的两处冗余之一）。
+           打印动作（打印 / 全选 / 关闭）仍留在这里 —— 那些是页头没有的。
+           票 10 的「退出」行为一个字没变，只是不再从这一页发起。 -->
       <router-link class="btn btn-ghost" :to="backHref">关闭</router-link>
     </header>
     <div class="sop-print-preview-measure-host no-print" aria-hidden="true">

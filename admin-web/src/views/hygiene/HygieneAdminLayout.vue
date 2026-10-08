@@ -1,12 +1,19 @@
 <script setup>
-// 现场这一组（卫生七页）的壳：桌面是左侧 238px 的 rail，手机是底部标签栏；内容区顶上
-// 还有一条窄横条（面包屑 + 身份切换器 + 退出）。
+// 卫生这一组（八页）的壳：桌面是左侧 238px 的 rail；手机档只有**一行页头**。
 //
-// **C 方向（2026-10-05 用户裁定）**：手机档的底部那一格归**工作台级**导航
-// （`components/workbench/WorkbenchTabBar.vue`：今天 / 人事 / 现场 / 后勤 / 我的，拇指区
-// 可达）。两条底栏不能叠（一块屏上一上一下两条底栏，谁是谁都分不清），所以组内这八项
-// （`.hy-tabbar`）在 ≤720px 从底部挪到**内容区顶部**、做成一条横滑带；桌面档的左 rail
-// 与既有布局一个字没动（那一套在 `@media (min-width: 900px)` 里，不走手机档这段）。
+// **方案 C（2026-10-08 用户裁定）**：手机档顶部原来摞着两条同色横带 —— `hy-header`
+// （身份 / 退出 / 后台，87px）与 `hy-tabbar`（组内八页的横滑带，93px，图标 + 文字 +
+// 序号三行）。两条一叠就是"两条黑带"，首屏 180px 没了；而八页在 390px 下一屏只露五项，
+// 还带出一条原生横向滚动条。现在组内八页整个收进 `WorkbenchMobileHead` 的下拉，顶部只剩
+// 一行 56px（`[卫生] [当前页 ▾] … [● 身份] [⋮]`），换页 / 身份 / 退出 / 回后台四个出口
+// 一个没丢。桌面档的左 rail 与顶上那条横条**一个字没动**（那一套在
+// `@media (min-width: 900px)` 里，不走手机档这段）。
+//
+// **C 方向（2026-10-05 用户裁定，仍在）**：手机档的底部那一格归**工作台级**导航
+// （`components/workbench/WorkbenchTabBar.vue`：今天 / 人事 / 卫生 / 后勤 / 我的，拇指区
+// 可达）。两条底栏不能叠（一块屏上一上一下两条底栏，谁是谁都分不清），所以组内那八项
+// 在手机档不进底栏 —— 2026-10-05 那版是挪到内容区顶部做横滑带，2026-10-08 起改走
+// 页头下拉。
 //   - 顺带收掉上一轮审查的 B8：那条「标准图缓存 N」浮标原来压在底部标签栏上，底部这一格
 //     腾空之后不再压住底栏（浮标本身在 `components/hygiene/StandardPhotoCachePanel.vue`
 //     里，不在这两个壳的范围，这里只负责把底栏让开）。
@@ -31,6 +38,7 @@ import WorkbenchExitButton from '../../components/workbench/WorkbenchExitButton.
 import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
 import WorkbenchNav from '../../components/workbench/WorkbenchNav.vue'
 import WorkbenchTabBar from '../../components/workbench/WorkbenchTabBar.vue'
+import WorkbenchMobileHead from '../../components/workbench/WorkbenchMobileHead.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
 import { WORKBENCH_HOME } from '../../utils/workbenchCopy'
@@ -49,7 +57,8 @@ useScopedStylesheet('/hygiene-admin.css')
 const route = useRoute()
 const standardPhotoCache = useStandardPhotoCacheStore()
 
-// 「现场」那一行给 rail 一个自己的名字（工作台导航里那一格的落点与门牌由那一份组表给）。
+// 「卫生」那一行给 rail 与手机档页头一个自己的名字（工作台导航里那一格的落点与门牌
+// 由那一份组表给）。
 const fieldGroup = workbenchGroup('floor')
 
 /** 只取路径最后一段来认"现在在哪一页"：不跟前缀绑死，`/workbench/floor/daily` 与带尾斜杠的
@@ -83,6 +92,12 @@ watch(
 <template>
   <div class="hygiene-admin hygiene-app">
     <a class="hy-skip" href="#hygiene-admin-main">跳到内容</a>
+
+    <!-- 手机档的页头（方案 C）：一行装下「组名 / 当前页下拉 / 身份 / 更多」，组内八页
+         从横滑带收进那个下拉。桌面档它自己不渲染（`display: none`）。
+         `items` 传的是这一组那份**手写**名单（带图标与 code）——通用的
+         `WorkbenchMobileHead` 默认从页面清单派生，派生出来的项没有图标。 -->
+    <WorkbenchMobileHead :items="HYGIENE_ADMIN_NAV" />
 
     <nav class="hy-tabbar" :aria-label="`${HYGIENE_BRAND_TITLE} · ${fieldGroup.label}`">
       <!-- 组内八项：桌面档是左侧 rail，手机档是**内容区顶部**那条横滑带（C 方向，见样式里
@@ -177,53 +192,30 @@ watch(
 /* 顶栏窄屏时把品牌那句副题收起来，给切换器与「后台」让位（牌子本身还在）。 */
 @media (max-width: 720px) {
   .hy-brand-tagline { display: none; }
-  /* C 方向：工作台级那一排（今天 / 人事 / 现场 / 后勤 / 我的）下到底部那条
+  /* C 方向：工作台级那一排（今天 / 人事 / 卫生 / 后勤 / 我的）下到底部那条
      `WorkbenchTabBar`（拇指区可达）。这条横条因此收掉它，顶栏少一行。
      **`display: none` 不是删组件**：桌面档（>720px）还是这排在干活（那是横条右侧唯一
      有内容的东西），这里只收掉手机档那一份；两处同时出现才是错的（同一排入口两遍、
      两个高亮）。 */
   .hygiene-app .hy-wb-nav { display: none; }
 
-  /* ---- 组内八项（`.hy-tabbar`）：底部 → 内容区顶部横滑带（C 方向）---------------
-     底部那一格归工作台级底栏，两条底栏不能叠（一块屏上一上一下两条底栏谁都分不清
-     哪条管什么）。原来它是 `grid-template-columns: repeat(6…)` 在底部排成 6+2 两行，
-     还被「标准图缓存」浮标压着（上一轮审查的 B8）—— 现在一条横滑带，一行放不下就自己滑，
-     不换行、不压内容。 */
-  /* 要在「顶栏之后、内容之前」插这一条，只能把 `.hy-shell` 摊平：它把 header 与 main
-     包成一个整体，而 `.hy-tabbar` 是外壳这一列的直接子项（不是 shell 的孩子）——
-     在同一个 flex 列里，任何 `order` 都只能落在「整个 shell 之前」或「整个 shell 之后」。
-     `display: contents`（共享样式表里 `.hy-rail-items` 用的也是这一手）让 header / 这条
-     带子 / 内容 / 底栏都成为外壳这一列的直接子项，再用 `order` 排出手机档的上下次序。
-     桌面档（≥900px 的左 rail）不在这段媒体查询里，一个字没动。 */
-  .hygiene-admin.hygiene-app .hy-shell { display: contents; }
-  .hygiene-admin.hygiene-app .hy-header { order: 0; }
-  .hygiene-admin.hygiene-app .hy-tabbar {
-    order: 1;
-    display: flex;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    /* 那条 `env(safe-area-inset-bottom)` 是底部栏的账（home indicator），挪到顶上就不该
-       再留；底栏的刘海留白由 `WorkbenchTabBar` 自己付。边框跟着换边：现在它是内容区
-       顶上的一条，分隔线画在下沿。 */
-    padding: .25rem .15rem;
-    border-top: 0;
-    border-bottom: 1px solid var(--hy-line);
-  }
-  /* 一格一页：`flex: 0 0 auto` 是横滑带的关键 —— 默认 `flex-shrink: 1` 会把八格挤进一屏，
-     标签跟着缩排/折行；给它固定宽度，放不下才轮到带子横向滚。 */
-  .hygiene-admin.hygiene-app .hy-tabbar .hy-tab { flex: 0 0 auto; min-width: 62px; }
-  /* 当前那一格的指示线原来画在格子上沿（栏在底部时线朝上、指着上方的内容）；这条栏现在
-     在内容**之上**，线改画在下沿，才指得着下面那一页。 */
-  .hygiene-admin.hygiene-app .hy-tabbar .hy-tab.router-link-active::after {
-    top: auto;
-    bottom: 0;
-  }
+  /* ---- 方案 C：组内八页收进页头下拉，顶上那两条横带整个撤掉 ----------------------
+     2026-10-08 之前，手机档是「顶栏横条（87px）+ 组内横滑带（93px）」两条同色黑带摞着，
+     首屏 180px 没了；八页在 390px 下一屏只露五项，还带出一条 `::-webkit-scrollbar` 画
+     出来的原生横向滚动条。现在：
+       - `.hy-tabbar`（组内八项）在手机档**不渲染** —— 它是桌面档那条 238px 的左 rail；
+         手机档的换页出口是页头里那个八页下拉（`components/workbench/WorkbenchMobileHead.vue`）；
+       - `.hy-header`（身份 / 退出 / 后台）同样收掉 —— 三件都进页头了；
+       - 页头自己管自己的显隐（组件 scoped 样式里那一段 `max-width: 720px`）。
+     桌面档（≥900px 的左 rail 与顶上那条横条）不在这段媒体查询里，一个字没动。 */
+  .hygiene-admin.hygiene-app .hy-tabbar { display: none; }
+  .hygiene-admin.hygiene-app .hy-header { display: none; }
+
+  /* 内容区让出底栏那一条：底栏（`WorkbenchTabBar`）是 `position: fixed`（契约与样板
+     `WorkbenchLayout` 一致，样板里给它让高度的是 `.wb-main`），脱离了文档流 —— 不让出
+     最后一屏会被压在栏下、滚不到底。这里在共享样式表的 `1.4rem` 之上再加那一条
+     （56px + 1px 边框 + iPhone home indicator）。 */
   .hygiene-admin.hygiene-app .hy-main {
-    order: 2;
-    /* 底栏（`WorkbenchTabBar`）是 `position: fixed`（契约与样板 `WorkbenchLayout` 一致，
-       样板里给它让高度的是 `.wb-main`），脱离了文档流 —— 内容区要自己让出那一条的高度
-       （56px + 1px 边框 + iPhone home indicator），否则最后一屏被压在栏下、滚不到底。
-       这里在共享样式表的 `1.4rem` 之上再加那一条。 */
     padding-bottom: calc(1.4rem + 57px + env(safe-area-inset-bottom, 0px));
   }
 
@@ -233,11 +225,8 @@ watch(
      **同特异度**（都是两个类），而它更晚进 head（`useScopedStylesheet` 在挂载时才 append
      那张表）—— 平局按文档顺序判，`fixed` 会被打回 `relative`：底栏脱不出文档流，内容一长
      就跟着排到内容末尾（底栏"手机上够不着"的现象就是这个）。这两条前缀把特异度抬到
-     (0,4,0)，无论哪张表先加载都赢。
-     `order: 3` 是给「万一它回到流里」留的后路：这一列里 header / 带子 / 内容都排好了序，
-     底栏回到流里时必须仍排在最后（默认 order 是 0，那会跑到最上面去）。 */
+     (0,4,0)，无论哪张表先加载都赢。 */
   .hygiene-admin.hygiene-app .hy-wb-tabbar {
-    order: 3;
     position: fixed;
     z-index: 15;
   }

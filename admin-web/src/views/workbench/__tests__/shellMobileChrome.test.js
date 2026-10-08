@@ -17,10 +17,11 @@ const here = dirname(fileURLToPath(import.meta.url))
 const read = (rel) => readFileSync(join(here, rel), 'utf8')
 
 const SHELL = read('../WorkbenchLayout.vue')
-const NAV = read('../../../components/workbench/WorkbenchNav.vue')
 const TABBAR = read('../../../components/workbench/WorkbenchTabBar.vue')
 const EXIT_BUTTON = read('../../../components/workbench/WorkbenchExitButton.vue')
 const SWITCHER = read('../../../components/workbench/WorkbenchIdentitySwitcher.vue')
+// 方案 C（2026-10-08）：手机档顶部那一行（组名 / 当前页下拉 / 身份 / 更多）。
+const MOBILE_HEAD = read('../../../components/workbench/WorkbenchMobileHead.vue')
 const HR_SHELL = read('../../scheduling/SchedulingLayout.vue')
 const HY_SHELL = read('../../hygiene/HygieneAdminLayout.vue')
 const STAFF_HOME = read('../../hygiene/HygieneHomeView.vue')
@@ -122,32 +123,35 @@ describe('D7：「‹ 后台」对员工是一扇永远关着的门，就不该�
   })
 })
 
-describe('D8 / B6：手机档顶栏是两行、目标 ≥44px', () => {
-  it('退出并回第一行、导航整条下沉一行（三层的成因是第一行差十几个像素）', () => {
-    // 第一行那三件（‹后台 / 切换器 / 退出）在 390 上原来放不下：切换器右边框与内边距
-    // 15px、顶栏内边距与间隙 10px，加起来正好把「退出」挤到第二行（实测 104px 三层）。
-    expectMobileRule(SHELL, /\.wb-id-switcher\s*\{[^}]*padding-right:\s*0/, '切换器让出右边距')
-    expectMobileRule(SHELL, /\.wb-id-switcher\s*\{[^}]*border-right:\s*0/, '切换器去掉右边框')
-    // 退出留在第一行靠的是 `margin-left: auto`。它**不在 ≤720 段**：选择器是
-    // `:deep(.wb-exit)`，写在基线里（窄屏一样生效）。原来那条挂在外面的
-    // `.wb-exit-btn` 选不中元素 —— `WorkbenchExitButton` 是多根组件（按钮 + 确认框），
-    // 父级传下来的 class 不透传，所以那条 auto 一直是死规则、退出从来没贴过右端。
-    expect(SHELL).toMatch(/:deep\(\.wb-exit\)\s*\{[^}]*margin-left:\s*auto/)
-    // C 方向（2026-10-05 用户裁定）：工作台级导航在手机档**下到底栏**，顶栏那一条收起 ——
-    // 同一排入口不在顶上和底下同时出现。底栏自己只在 ≤720 渲染（桌面档 `display: none`），
-    // 钉在视口底并守 56px 触控下限、给 iPhone 的 home indicator 留安全区。
-    expectMobileRule(SHELL, /\.wb-nav\s*\{\s*display:\s*none/, '顶栏那条导航在手机档收起')
+describe('方案 C / B6：手机档顶部只剩一行，目标 ≥44px', () => {
+  it('顶上那一条整个收进页头一行（2026-10-08）', () => {
+    // 工作台级导航（今天 / 人事 / 卫生 / 产品 / 我的）在手机档**下到底栏**（C 方向，
+    // 2026-10-05）：同一排入口不在顶上和底下同时出现。底栏只在 ≤720 渲染，钉在视口底、
+    // 守 56px 触控下限、给 iPhone 的 home indicator 留安全区。
     expect(TABBAR).toMatch(/\.wb-tabbar\s*\{\s*display:\s*none/)
     expect(TABBAR).toMatch(/position:\s*fixed/)
     expect(TABBAR).toMatch(/min-height:\s*56px/)
     expect(TABBAR).toMatch(/env\(safe-area-inset-bottom/)
-    // 顶栏自己换行（两行），不是逐项掉行。
-    expectMobileRule(SHELL, /\.wb-top\s*\{[^}]*flex-wrap:\s*wrap/, '顶栏两行')
+    // 方案 C：连顶上那一条（`‹后台 + 牌子 + 切换器 + 退出`）在手机档也收掉 —— 三件事都进
+    // `WorkbenchMobileHead` 那一行：换页进组内下拉、退出与「回管理后台」进 `⋮`。
+    // 后勤（产品）组的配方页原来还自带一条 133px 的白色工具栏，叠起来是 182px 的「两条顶栏」。
+    expectMobileRule(SHELL, /\.wb-top\s*\{\s*display:\s*none/, '顶栏在手机档收起')
+    expect(SHELL).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
+    expect(SHELL).toMatch(/<WorkbenchMobileHead[^>]*\/>/)
+    // 底栏是 `fixed`，内容区得自己让出那一条的高度（57px = 底栏自身 + 1px 边框）。
+    expectMobileRule(SHELL, /\.wb-main\s*\{[^}]*padding-bottom:\s*calc\(57px/, '内容让出底栏高度')
+    // 退出那颗的「贴右端」仍写在基线里（桌面档那条顶栏还在用它）：`:deep(.wb-exit)` 是必须的
+    // —— `WorkbenchExitButton` 是多根组件（按钮 + 确认框），父级传下来的 class 不透传。
+    expect(SHELL).toMatch(/:deep\(\.wb-exit\)\s*\{[^}]*margin-left:\s*auto/)
   })
 
-  it('外壳四件点击目标 ≥44px：‹后台 / 导航 tab / 退出 / 切换器', () => {
-    expectMobileRule(SHELL, /\.wb-back\s*\{[^}]*min-height:\s*44px/, '‹后台')
-    expectMobileRule(NAV, /\.wb-nav-item\s*\{[^}]*min-height:\s*44px/, '导航 tab')
+  it('外壳（含页头）点击目标 ≥44px：页名 / 更多 / 下拉项 / 退出 / 切换器', () => {
+    // 顶栏收进页头之后，手机上真正要点的是页头里这几件 —— 逐个守住下限。
+    // 页头那三件写在**基线**里（所以不按媒体查询断）：整条只在手机档渲染
+    // （`.wmh` 平时是 `display: none`），尺寸规则没有分档的必要。
+    expect(MOBILE_HEAD).toMatch(/\.wmh-page\s*\{[^}]*min-height:\s*44px/)
+    expect(MOBILE_HEAD).toMatch(/\.wmh-more\s*\{[^}]*width:\s*44px/)
+    expect(MOBILE_HEAD).toMatch(/\.wmh-item\s*\{[^}]*min-height:\s*48px/)
     expectMobileRule(EXIT_BUTTON, /\.wb-exit\s*\{[^}]*min-height:\s*44px/, '退出高度')
     expectMobileRule(EXIT_BUTTON, /\.wb-exit\s*\{[^}]*min-width:\s*44px/, '退出宽度')
     // 身份那一颗的 44px 写在**基线**里（不再分桌面/手机两档 —— 它现在是一颗无框的文字按钮，

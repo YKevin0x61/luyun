@@ -19,7 +19,7 @@ export const HYGIENE_FIX_TYPES = ['卫生', '摆放', '标签']
 // 外壳也跟着换了；这里只留现场组的 rail。
 export const HYGIENE_BRAND_MARK = '台'
 export const HYGIENE_BRAND_TITLE = WORKBENCH_TITLE
-export const HYGIENE_BRAND_TAGLINE = '现场 · 对照实拍验收'
+export const HYGIENE_BRAND_TAGLINE = '卫生 · 对照实拍验收'
 export const HYGIENE_ADMIN_NAV = [
   { path: '/workbench/floor/zones', title: '卫生工作区', shortTitle: '工作区', icon: 'layout-grid', code: 'ZONES' },
   { path: '/workbench/floor/daily', title: '日常验收', shortTitle: '日常', icon: 'check-circle', code: 'DAILY' },

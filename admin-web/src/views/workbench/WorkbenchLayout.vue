@@ -7,6 +7,13 @@
 // （这些页在页面清单里是 `standalone`，跟 `SchedulingLayout` / `HygieneAdminLayout`
 // 同一个路子）。
 //
+// **方案 C（2026-10-08 用户裁定）**：手机档这一条收进 `WorkbenchMobileHead` 的一行
+// （`[组名] [当前页 ▾] … [● 身份] [⋮]`）。这一壳装着三组（今天 / 产品 / 我的），页头里的
+// 组名与页面下拉跟着**当前路径属于哪一组**走（`workbenchGroupOf`），所以三处共用同一颗
+// 组件、不用各配一份。后勤（产品）组原来更夸张：配方页自己还带着一条 133px 的白色工具栏
+// （`header.site-header`，手机档在 `recipe.css` 里收掉），加上这一条就是 182px 的「两条
+// 顶栏」。**桌面档一个字没动** —— 那里空间宽裕，顶栏那条 tab 更好用。
+//
 // 导航**跟着此刻的身份走**（不再跟着"这一页是谁的"）：身份读 `stores/workbenchIdentity`
 // （票 04），切档时这一条栏与导航面一起变。切换**只改视图与导航面** —— 页面能不能打开
 // 仍是路由守卫与服务端页面墙的事，这里一个字都不碰。
@@ -14,6 +21,7 @@ import { computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import WorkbenchExitButton from '../../components/workbench/WorkbenchExitButton.vue'
 import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
+import WorkbenchMobileHead from '../../components/workbench/WorkbenchMobileHead.vue'
 import WorkbenchNav from '../../components/workbench/WorkbenchNav.vue'
 import WorkbenchTabBar from '../../components/workbench/WorkbenchTabBar.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
@@ -29,6 +37,13 @@ useScopedStylesheet('/hygiene-admin.css')
 const route = useRoute()
 const router = useRouter()
 const identityStore = useWorkbenchIdentityStore()
+
+/** 自带底部工具栏的页面：配方阅读面那一页有自己的 `.sop-bottom-bar`（搜索 / 目录 / 字号 /
+ *  份数 —— 全是阅读动作）。手机档这里**不再叠工作台底栏**：两条 `fixed` 底栏只差 4px，
+ *  上面那条（`z-index: 50`）会把工作台那条整个盖住，留着只是白占一次渲染、内容区还要为它
+ *  让一遍高度（2026-10-08 用户裁定）。桌面档那条不在视口底，不受影响。 */
+const OWN_BOTTOM_BAR_PATHS = ['/workbench/kitchen/recipe/detail']
+const hasOwnBottomBar = computed(() => OWN_BOTTOM_BAR_PATHS.includes(route.path))
 
 // 探针由切换器自己开场（`onMounted`）。这里只在**已经探出结论**时消费它：没探完时
 // `identity` 是 null，导航不渲染 —— 不给一个可能点不通的入口。
@@ -73,7 +88,14 @@ watch(identity, keepViewAllowed)
   <div class="hygiene-admin wb-shell">
     <a class="hy-skip" href="#workbench-main">跳到内容</a>
 
-    <header class="wb-top">
+    <!-- 手机档页头（方案 C）：一行装下「组名 / 当前页下拉 / 身份 / 更多」，组里的页从
+         那条顶栏收进这个下拉。桌面档它自己不渲染（组件 scoped 样式里 `max-width: 720px`
+         那一段）。
+         `no-print`：产品组的「配方打印」是 A4 预览页（2026-10-08 起也套这个壳），打印时
+         顶栏与底栏都不该被打进去 —— `.no-print` 那条在 `recipe.css` 的 `@media print` 里。 -->
+    <WorkbenchMobileHead class="no-print" />
+
+    <header class="wb-top no-print">
       <!-- 回管理后台的门（spec 故事 11：两边各留一个入口、双向）。人事 / 现场两个壳各自
            也有一个「‹ 后台」，这里补上工作台首页、后勤与「我的」这几个页面的那一扇 ——
            少了它，店长站在子应用首页回不去后台。**员工那一档不渲染**（见 `showBackToAdmin`）。 -->
@@ -91,12 +113,12 @@ watch(identity, keepViewAllowed)
       <WorkbenchExitButton />
     </header>
 
-    <main id="workbench-main" class="wb-main">
+    <main id="workbench-main" class="wb-main" :class="{ 'has-own-bar': hasOwnBottomBar }">
       <router-view />
     </main>
     <!-- 工作台级导航在手机档的落点（C 方向）：底栏一格一组、拇指区可达；桌面档它自己
          不渲染（`display: none`），那里用顶栏那条 tab。同一排入口不在两处同时出现。 -->
-    <WorkbenchTabBar />
+    <WorkbenchTabBar v-if="!hasOwnBottomBar" class="no-print" />
   </div>
 </template>
 
@@ -150,30 +172,19 @@ watch(identity, keepViewAllowed)
 .wb-nav { margin-left: auto; }
 .wb-main { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 
-/* 窄屏（票 12 收的 O3）：顶栏换行 —— 身份切换器与退出是这一条里最不该被挤出屏幕的两件
-   （切换器自己 `flex: 0 0 auto`，见 `WorkbenchIdentitySwitcher.vue`），所以本组导航整条
-   另起一行、自己横向滑。与人事壳 `.sched-top` 同一套路。 */
+/* 窄屏：顶上那一条整个收进 `WorkbenchMobileHead` 的一行（方案 C，2026-10-08）。
+ * 「‹后台 + 牌子 + 切换器 + 退出」在这个壳里原本已经被 C 方向压到只剩一行（49px），
+ * 后勤（产品）组的配方页却还自带一条 133px 的白条 —— 页头把三件事（换页 / 身份 /
+ * 退出·后台）一并接过来之后，这一条在手机档就没有存在理由了。
+ * **是 `display: none` 不是删组件**：桌面档（>720px）还是它在干活，那里空间宽裕。 */
 @media (max-width: 720px) {
-  /* 行数钉死两行（D8）：第一行放「‹后台 + 切换器 + 退出」，第二行整条导航。
-     390px 上实测原来会掉成三层（‹后台+切换器 / 退出 / 导航，104px，视口的 12%）——
-     原因是第一行差十几个像素放不下：切换器那条右边框与内边距（15px）、顶栏的内边距与
-     间隙（10px）加起来正好把「退出」挤到下一行。这里把这三处让出来，退出用 `auto`
-     贴住右端，于是它留在第一行。 */
-  .wb-top { flex-wrap: wrap; row-gap: 6px; gap: 8px; padding: 2px 10px; }
-  /* 这一行不再为下划线 tab 留底边（那条到底栏去了），几件元素回到上下等距。 */
-  .wb-back, .wb-brand, .wb-id-switcher { margin-bottom: 0; }
-  .wb-top :deep(.wb-exit) { margin-bottom: 0; }
-  .wb-id-switcher { margin-left: 0; padding-right: 0; border-right: 0; }
-  /* C 方向：工作台级导航在手机档下到底栏（`components/workbench/WorkbenchTabBar.vue`），
-     顶栏这一条收起来 —— 同一排入口不同时出现在两处。顶栏因此只剩一行：
-     返回 + 切档 + 退出，内容区把这一行省下来的高度拿走。 */
-  .wb-nav { display: none; }
+  .wb-top { display: none; }
   /* 底栏是 `fixed`（脱离文档流），内容区得自己让出这一条的高度，否则滚到底时
      最后一块内容压在它下面够不着。57px = 底栏自身高，再加 iPhone 的安全区。 */
   .wb-main { padding-bottom: calc(57px + env(safe-area-inset-bottom, 0px)); }
-  /* 触控下限（B6）：手机上这一条栏里的三件（‹后台 / 导航胶囊 / 退出）原来高 24–29px，
-     一排互相挨着，误触率高。这里抬到 44px；退出那颗在它自己的组件里同一条。 */
-  .wb-back { min-height: 44px; padding: 4px 14px; }
+  /* 自带底栏的页（配方阅读面）：工作台那条不渲染，这份内边距也还回去 ——
+     阅读面自己的 `sop-bottom-bar` 会给自己那份。 */
+  .wb-main.has-own-bar { padding-bottom: 0; }
 }
 @media (max-width: 560px) {
   /* 牌子让位给切换器与两扇门（人事壳同一条：`.sched-name` 在 560px 收起）：

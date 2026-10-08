@@ -171,12 +171,12 @@ describe('工作台外壳的导航', () => {
 
     expect(store.identity).toBe('super')
     expect(wrapper.get('.wb-id-current').text()).toContain('超级管理员')
-    // 导航面按**他这一档**渲染：票 06 之后是首页 / 人事 / 现场三格，各自的落点是共享
+    // 导航面按**他这一档**渲染：票 06 之后是首页 / 人事 / 卫生三格，各自的落点是共享
     // 常量（而不是因为"这一页是员工页"才藏起来）。页面内容按自己的 401 处理 —— 切换器
     // 不改权限、也不改守卫。票 08 起后勤那一格是两扇门（配方 + 备货计划）。
     const items = wrapper.findAll('.wb-nav-item')
     expect(items.map((item) => item.text())).toEqual([
-      '今天', '人事', '现场', '选择岗位', '备货计划',
+      '今天', '人事', '卫生', '选择岗位', '备货计划',
     ])
     expect(items.map((item) => item.attributes('href'))).toEqual([
       '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,

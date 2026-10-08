@@ -17,6 +17,9 @@
   --jade:#1f5b41; --jade-ink:#15392a; --jade-soft:#eef4f0;
   --new:#c0392b; --new-soft:#fbeeec;
   --gold:#c9a24a; --quote:#9f1239; --quote-bg:#fff1f2;
+  /* 主色块（品牌方块 / 主按钮）上的文字色：浅色主题里主色是深墨绿，配白字；
+     深色主题里主色换成薄荷（亮），得配深字 —— 见下面深色令牌那一段。 */
+  --on-jade:#fff;
 
   --radius-sm:7px; --radius-md:10px; --radius-lg:16px;
   --shadow-sm:0 1px 2px rgba(31,29,24,.06);
@@ -26,21 +29,29 @@
   --ease:cubic-bezier(.22,1,.36,1);
   --adaptive-page-max:88rem;
 }
-[data-theme="dark"]{
-  --paper:#15140f; --surface:#201e18; --surface-2:#262219;
-  --line:#34302a; --line-strong:#403a31;
-  --ink:#efece4; --muted:#a59c8d;
-  --jade:#5fae86; --jade-ink:#bfe6d2; --jade-soft:#1d2a23;
-  --new:#ef6a5a; --new-soft:#33211d;
-  --gold:#d8b768; --quote:#f0a8b8; --quote-bg:#2a1b20;
-}
-@media (prefers-color-scheme:dark){
-  :root:not([data-theme="light"]){
-    --paper:#15140f; --surface:#201e18; --surface-2:#262219;
-    --line:#34302a; --line-strong:#403a31; --ink:#efece4; --muted:#a59c8d;
-    --jade:#5fae86; --jade-ink:#bfe6d2; --jade-soft:#1d2a23;
-    --new:#ef6a5a; --new-soft:#33211d; --gold:#d8b768; --quote:#f0a8b8; --quote-bg:#2a1b20;
-  }
+/* 深色令牌 —— 2026-10-08 起与工作台那套「深青墨」同一份口径。
+ *
+ * 配方页现在只活在工作台里（`/workbench/kitchen/*`，旧的 `/recipe*` 早删了），而工作台
+ * 外壳（`hygiene-admin.css` 的 `.hygiene-admin`）是**强制深色**的：配方页原来跟随系统
+ * 偏好，浅色手机上就整屏白底，跟深色外壳同屏撞色（用户裁定要统一）。所以除了
+ * `[data-theme="dark"]` 之外**再挂一个 `.hygiene-admin`** —— 只要在工作台壳里一律深色，
+ * 与系统偏好无关。（原来那段 `@media (prefers-color-scheme:dark){:root:not([data-theme=light])}`
+ * 随之下线：配方没有再单独出现的地方，留着就是第二份深浅判据。）
+ *
+ * 色值引用 `--hy-*` 令牌（壳里一定加载了那张表），逗号后面是它单独出现时的兜底。
+ * **打印不受影响**：`@media print` 那一套是独立的黑白硬编码（见文件末尾），不走这些变量。 */
+[data-theme="dark"],
+.hygiene-admin{
+  --paper:var(--hy-bg,#0a1719); --surface:var(--hy-surface,#112529);
+  --surface-2:var(--hy-surface-2,#0c1d20);
+  --line:var(--hy-line,rgba(133,205,198,.13)); --line-strong:var(--hy-line-strong,rgba(133,205,198,.28));
+  --ink:var(--hy-ink,#e4f0ee); --muted:var(--hy-muted,#85aaa7);
+  --jade:var(--hy-mint,#3fe0b0); --jade-ink:var(--hy-mint-bright,#63efc5);
+  --jade-soft:var(--hy-mint-soft,rgba(63,224,176,.12));
+  --new:var(--hy-seal-bright,#ef6a4f); --new-soft:var(--hy-seal-soft,rgba(217,72,47,.13));
+  --gold:var(--hy-amber,#e3a44a); --quote:var(--hy-rose,#f07ab0); --quote-bg:rgba(240,122,176,.12);
+  /* 主色块上的文字：这里的主色是薄荷（亮），配深字，不能沿用浅色主题那行白。 */
+  --on-jade:var(--hy-mint-ink,#052018);
 }
 
 /* ===== 2. 基础 ===== */
@@ -50,14 +61,14 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
   font-size:clamp(14px,2.4vw,16px);line-height:1.5;font-weight:700;-webkit-text-size-adjust:100%}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
 
-.skip-link{position:fixed;left:1rem;top:.7rem;z-index:9999;padding:.55rem .85rem;border-radius:999px;color:#fff;background:var(--jade);text-decoration:none;font-weight:800;transform:translateY(-180%);transition:transform .18s var(--ease)}
+.skip-link{position:fixed;left:1rem;top:.7rem;z-index:9999;padding:.55rem .85rem;border-radius:999px;color:var(--on-jade,#fff);background:var(--jade);text-decoration:none;font-weight:800;transform:translateY(-180%);transition:transform .18s var(--ease)}
 .skip-link:focus{transform:translateY(0);outline:none}
 
 /* ===== 3. 外壳 ===== */
 .site-header{position:sticky;top:0;z-index:40;background:var(--surface);border-bottom:1px solid var(--line)}
 .site-header-inner{max-width:var(--adaptive-page-max);margin:0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:.6rem 1rem;padding:.55rem var(--space-page)}
 .site-brand{display:flex;align-items:center;gap:.6rem;text-decoration:none;color:inherit;min-width:0}
-.site-brand-mark{flex:0 0 auto;width:2.1rem;height:2.1rem;border-radius:8px;background:var(--jade);color:#fff;display:grid;place-items:center;box-shadow:var(--shadow-sm)}
+.site-brand-mark{flex:0 0 auto;width:2.1rem;height:2.1rem;border-radius:8px;background:var(--jade);color:var(--on-jade,#fff);display:grid;place-items:center;box-shadow:var(--shadow-sm)}
 .site-brand-mark-inner{font-size:.62rem;font-weight:900;letter-spacing:.06em}
 .site-brand-text{display:flex;flex-direction:column;min-width:0}
 .site-brand-title{font-weight:900;font-size:clamp(1.02rem,2.4vw,1.18rem);color:var(--ink)}
@@ -75,7 +86,7 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 /* ===== 4. 按钮 ===== */
 .btn,.print-button{display:inline-flex;align-items:center;justify-content:center;gap:.35rem;min-height:2.35rem;padding:.5rem 1.05rem;font:inherit;font-weight:800;font-size:.9rem;text-decoration:none;border:1px solid transparent;border-radius:999px;cursor:pointer;transition:transform .18s var(--ease),box-shadow .18s var(--ease),background .18s,border-color .18s}
 .btn:active,.print-button:active{transform:translateY(0)}
-.btn-primary,.print-button{color:#fff;background:var(--jade);box-shadow:var(--shadow-sm)}
+.btn-primary,.print-button{color:var(--on-jade,#fff);background:var(--jade);box-shadow:var(--shadow-sm)}
 .btn-primary:hover,.btn-primary:focus-visible,.print-button:hover,.print-button:focus-visible{filter:brightness(1.06);transform:translateY(-1px);box-shadow:var(--shadow-md)}
 .btn-ghost{color:var(--muted);background:var(--surface);border-color:var(--line)}
 .btn-ghost:hover,.btn-ghost:focus-visible{color:var(--jade-ink);border-color:var(--jade);background:var(--surface-2)}
@@ -103,7 +114,7 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .recipe-checkbox:hover:not([data-disabled]){border-color:var(--jade)}
 .recipe-checkbox:focus-visible{outline:none;box-shadow:0 0 0 3px var(--jade-soft)}
 .recipe-checkbox[data-state='checked'],.recipe-checkbox[data-state='indeterminate']{
-  background:var(--jade);border-color:var(--jade);color:#fff;
+  background:var(--jade);border-color:var(--jade);color:var(--on-jade,#fff);
 }
 .recipe-checkbox[data-disabled]{opacity:.55;cursor:not-allowed}
 .recipe-checkbox__indicator{display:flex;align-items:center;justify-content:center;color:inherit}
@@ -129,8 +140,10 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 /* ===== 6. Flash ===== */
 .flash{padding:.6rem 1rem;border-radius:var(--radius-sm);font-size:.92rem;font-weight:700;border:1px solid transparent}
 .flash+.flash{margin-top:.45rem}
-.flash-success{color:#14532d;background:#dcfce7;border-color:#bbf7d0}
-.flash-error{color:#7f1d1d;background:var(--new-soft);border-color:#fecaca}
+/* 提示条：两套主题都走令牌（浅色是深字浅底、深色是亮字暗底）。
+   原来那两笔（#dcfce7 浅绿底 / #fecaca 浅红边）只照着浅色页面写过。 */
+.flash-success{color:var(--jade-ink);background:var(--jade-soft);border-color:var(--jade)}
+.flash-error{color:var(--new);background:var(--new-soft);border-color:var(--new)}
 
 /* ===== 7. 列表页 ===== */
 .index-section{animation:sop-fade .4s var(--ease) both}
@@ -155,7 +168,7 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .station-search-option{display:block;width:100%;text-align:left;border:0;background:transparent;color:var(--ink);font:inherit;font-weight:700;padding:.45rem .65rem;border-radius:6px;cursor:pointer}
 .station-search-option[aria-selected="true"],.station-search-option:hover{background:var(--jade-soft);color:var(--jade-ink)}
 .station-search-option-section{display:block;font-size:.75rem;font-weight:700;color:var(--muted)}
-.hero-orb{flex:0 0 auto;display:grid;place-items:center;width:clamp(7rem,16vw,11rem);aspect-ratio:1;border-radius:34% 66% 54% 46%;color:#fff;background:linear-gradient(145deg,var(--jade-ink),var(--jade) 60%,var(--gold));box-shadow:var(--shadow-md)}
+.hero-orb{flex:0 0 auto;display:grid;place-items:center;width:clamp(7rem,16vw,11rem);aspect-ratio:1;border-radius:34% 66% 54% 46%;color:var(--on-jade,#fff);background:linear-gradient(145deg,var(--jade-ink),var(--jade) 60%,var(--gold));box-shadow:var(--shadow-md)}
 .hero-orb span{font-size:clamp(1.6rem,4vw,2.6rem);font-weight:900;letter-spacing:-.05em;line-height:1}
 .hero-orb small{margin-top:-.4rem;font-size:.7rem;font-weight:900;letter-spacing:.22em;opacity:.85}
 .section-caption{display:flex;flex-wrap:wrap;align-items:end;justify-content:space-between;gap:.6rem;margin:1.3rem 0 .8rem}
@@ -167,7 +180,7 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .station-link::before{content:"";position:absolute;inset:0 auto 0 0;width:4px;background:linear-gradient(180deg,var(--jade),var(--gold))}
 .station-link:hover,.station-link:focus-visible{transform:translateY(-3px);border-color:var(--jade);box-shadow:var(--shadow-md)}
 .station-link:focus-visible{outline:2px solid var(--jade);outline-offset:2px}
-.station-link-icon{flex:0 0 auto;display:grid;place-items:center;width:2.8rem;height:2.8rem;margin-left:.2rem;border-radius:.9rem;color:#fff;font-weight:900;font-size:1.15rem;background:linear-gradient(145deg,var(--jade-ink),var(--jade))}
+.station-link-icon{flex:0 0 auto;display:grid;place-items:center;width:2.8rem;height:2.8rem;margin-left:.2rem;border-radius:.9rem;color:var(--on-jade,#fff);font-weight:900;font-size:1.15rem;background:linear-gradient(145deg,var(--jade-ink),var(--jade))}
 .station-link-copy{flex:1 1 auto;display:flex;flex-direction:column;gap:.15rem;min-width:0}
 .station-link-title{font-size:1.1rem;font-weight:900;letter-spacing:-.02em}
 .station-link-subtitle{font-size:.8rem;font-weight:700;color:var(--muted)}
@@ -202,7 +215,7 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
 .sop-reader .markdown-body .sop-doc-title{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .markdown-body .sop-section{display:flex;flex-direction:column;gap:.55rem;scroll-margin-top:5rem}
 .markdown-body .sop-section-head{margin:0;padding:0}
-.markdown-body .sop-section-head h2{margin:0;display:flex;align-items:center;gap:.5rem;padding:.46rem .75rem;font-size:clamp(.98rem,2.2vw,1.12rem);font-weight:800;letter-spacing:.02em;color:#fff;background:var(--jade);border:0;border-radius:var(--radius-sm);box-shadow:var(--shadow-sm);break-after:avoid;page-break-after:avoid}
+.markdown-body .sop-section-head h2{margin:0;display:flex;align-items:center;gap:.5rem;padding:.46rem .75rem;font-size:clamp(.98rem,2.2vw,1.12rem);font-weight:800;letter-spacing:.02em;color:var(--on-jade,#fff);background:var(--jade);border:0;border-radius:var(--radius-sm);box-shadow:var(--shadow-sm);break-after:avoid;page-break-after:avoid}
 .markdown-body .sop-section-intro{font-size:.9rem;line-height:1.5;color:var(--muted)}
 .markdown-body .sop-section-intro>*:first-child{margin-top:0}
 .markdown-body .sop-section-intro>*:last-child{margin-bottom:0}
@@ -313,13 +326,12 @@ body{margin:0;min-height:100vh;font-family:var(--font-sans);color:var(--ink);bac
   background:var(--ticket);color:var(--ticket-ink);border:1px solid #121614;border-radius:8px;
   box-shadow:0 28px 70px rgba(8,12,10,.5);min-height:min(78vh,42rem);
 }
-[data-theme="dark"] .recipe-form-modal{
-  --ticket:#1c221f;--ticket-ink:#e8ece9;--ticket-muted:#8b948e;--ticket-rule:#3d4540;--ticket-sheet:#161b18;--wall:#101412;
-}
-@media (prefers-color-scheme:dark){
-  :root:not([data-theme="light"]) .recipe-form-modal{
-    --ticket:#1c221f;--ticket-ink:#e8ece9;--ticket-muted:#8b948e;--ticket-rule:#3d4540;--ticket-sheet:#161b18;--wall:#101412;
-  }
+/* 弹层那几张「票」自己的令牌（原来是一套暖褐深色）：与上面的青墨对齐。 */
+[data-theme="dark"] .recipe-form-modal,
+.hygiene-admin .recipe-form-modal{
+  --ticket:var(--hy-surface,#112529);--ticket-ink:var(--hy-ink,#e4f0ee);--ticket-muted:var(--hy-muted,#85aaa7);
+  --ticket-rule:var(--hy-line-strong,rgba(133,205,198,.28));--ticket-sheet:var(--hy-surface-2,#0c1d20);
+  --wall:var(--hy-bg,#0a1719);
 }
 .recipe-form-modal .form-input{caret-color:var(--jade);background:var(--ticket-sheet);border-color:var(--ticket-rule);border-radius:3px;color:var(--ticket-ink)}
 .recipe-form-modal .form-input:focus-visible{border-color:var(--jade);box-shadow:0 0 0 3px color-mix(in srgb,var(--jade) 22%,transparent)}
@@ -496,7 +508,7 @@ body.sop-print-preview-page .markdown-body .sop-card-span-break{display:block;gr
 .sop-btn-group{display:inline-flex;gap:.15rem}
 .sop-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:2.1rem;padding:.3rem .7rem;border:1px solid var(--line-strong);border-radius:999px;background:var(--surface);color:var(--muted);font:inherit;font-weight:700;font-size:.8rem;cursor:pointer;transition:background .15s,border-color .15s,color .15s}
 .sop-chip:hover{border-color:var(--jade);color:var(--jade-ink)}
-.sop-chip[aria-pressed="true"]{background:var(--jade);border-color:var(--jade);color:#fff}
+.sop-chip[aria-pressed="true"]{background:var(--jade);border-color:var(--jade);color:var(--on-jade,#fff)}
 .sop-chip:focus-visible{outline:2px solid var(--jade);outline-offset:2px}
 body.sop-only-new .markdown-body article.recipe-card:not(.recipe-card--new){display:none}
 
@@ -506,7 +518,7 @@ body.sop-only-new .markdown-body article.recipe-card:not(.recipe-card--new){disp
 .sop-toc a{white-space:nowrap;padding:.4rem .55rem;border-radius:6px;color:var(--ink);text-decoration:none;font-weight:700;font-size:.85rem;display:inline-flex;gap:.4rem;align-items:center;transition:background .15s,color .15s}
 .sop-toc a .n{color:var(--muted);font-weight:700}
 .sop-toc a:hover{background:var(--jade-soft);color:var(--jade-ink)}
-.sop-toc a.on{background:var(--jade);color:#fff}
+.sop-toc a.on{background:var(--jade);color:var(--on-jade,#fff)}
 .sop-toc a.on .n{color:rgba(255,255,255,.8)}
 @media (min-width:901px){
   .sop-layout.sop-layout--with-toc{grid-template-columns:13rem minmax(0,1fr)}
@@ -562,7 +574,7 @@ body.batch-mode .station-item.is-checked .station-link{border-color:var(--jade);
 .sop-scale--popover{display:none;position:absolute;right:0;top:calc(100% + .2rem);z-index:4;padding:.2rem;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);box-shadow:var(--shadow-sm);transform:scale(.95);opacity:0;transform-origin:top right}
 .sop-scale-wrap.is-open .sop-scale--popover{display:inline-flex;transform:scale(1);opacity:1}
 .sop-scale-btn{min-width:1.7rem;height:1.6rem;padding:0 .3rem;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--muted);font:inherit;font-size:.72rem;font-weight:800;cursor:pointer}
-.sop-scale-btn.on{background:var(--jade);border-color:var(--jade);color:#fff}
+.sop-scale-btn.on{background:var(--jade);border-color:var(--jade);color:var(--on-jade,#fff)}
 .sop-scale-input{width:2.6rem;height:1.6rem;padding:0 .3rem;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit;font-size:.72rem;text-align:center;-moz-appearance:textfield;appearance:textfield}
 .sop-scale-input:focus-visible{outline:none;border-color:var(--jade);box-shadow:0 0 0 2px var(--jade-soft)}
 .sop-scale-input::-webkit-outer-spin-button,.sop-scale-input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
@@ -661,6 +673,16 @@ body.batch-mode .station-item.is-checked .station-link{border-color:var(--jade);
   .recipe-card-actions button{min-height:44px;padding:.35rem .55rem}
   .sop-reader .recipe-card.is-draggable,.sop-reader .recipe-card.is-draggable:active{cursor:auto}
   .sop-reader .recipe-card.is-dragging{opacity:1}
+}
+
+/* ===== 13.5 工作台壳里的手机档（方案 C，2026-10-08） =====
+   配方页自带的那条顶栏（品牌 + 管理后台 / 岗位列表 / 配方管理 / 退出，133px）在手机档
+   整个撤掉：上面那三件事都被工作台壳的 `WorkbenchMobileHead` 一行接走了（换页进页头的
+   组内下拉、退出与「回管理后台」进 `⋮`）。撤之前它跟壳顶栏叠成 49 + 133 = 182px 的
+   「两条顶栏」，是几屏里最扎眼的一处。
+   桌面档照旧（`>720px`）：那里空间宽裕，品牌与那几个入口摆得下，也一直好用。 */
+@media (max-width:720px){
+  .hygiene-admin header.site-header{display:none}
 }
 
 /* ===== 14. 打印 ===== */

@@ -89,8 +89,9 @@ describe('hygieneCopy', () => {
     expect(canAcceptFixTicket({ id: 10, admin_caps: ['daily_review'] }, ticket, after)).toBe(false)
   })
 
-  it('现场八页合成一个卫生板块，不把员工手机入口与人事页算进去', () => {
-    // 2026-10-04：排班与卫生合并成子系统「工作台」，这一组是它的「现场」那一组，
+  it('卫生八页合成一个板块，不把员工手机入口与人事页算进去', () => {
+    // 2026-10-04：排班与卫生合并成子系统「工作台」，这一组是它的「卫生」那一组
+    // （组名 2026-10-08 由用户裁定，从「现场」改过来），
     // 品牌三件套跟着子系统走（名字只在 workbenchCopy.js 写一次）。
     // 票 05：这一组按分组落在 `/workbench/floor/*`；花名册是**人事**页，从这条 rail 搬走。
     // 2026-10-05：加上「卫生趋势」（八页）—— 前七页都是"当下"、数据页是台账，
@@ -98,7 +99,7 @@ describe('hygieneCopy', () => {
     expect(HYGIENE_BRAND_TITLE).toBe('工作台')
     expect(hygieneDocumentTitle('花名册')).toBe('花名册 · 工作台')
     expect(HYGIENE_BRAND_MARK).toBe('台')
-    expect(HYGIENE_BRAND_TAGLINE).toBe('现场 · 对照实拍验收')
+    expect(HYGIENE_BRAND_TAGLINE).toBe('卫生 · 对照实拍验收')
     expect(HYGIENE_ADMIN_NAV.map((item) => item.path)).toEqual([
       '/workbench/floor/zones',
       '/workbench/floor/daily',
