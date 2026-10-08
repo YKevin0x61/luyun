@@ -5,7 +5,7 @@
  *  能拿真单测钉住口径 —— 页面上写死一句 `data.items.length` 是看不出「逾期」与
  *  「待回拍」这两件事的。
  *
- *  **店长侧三个数字各自的出处**（都不新增端点）：
+ *  **店长侧五个数字各自的出处**（都不新增端点）：
  *  - 待批请假 `countPendingLeaves` ← `GET /api/scheduling/inbox`（店长待办那条队列）。
  *    只数 `kind === 'leave'`：换班那条对方还没点头时店长根本看不到（服务层的
  *    `pending_peer` 口径），而「还没配规则的新人」不是申请、不算待批。
@@ -14,6 +14,10 @@
  *  - 逾期整改 `countOverdueFixes` ← `GET /api/hygiene/admin/fix`（服务端只回没通过的
  *    单子）。逾期 = **过了截止时间、还等着回拍**（`待回拍`）—— 那正是店长要盯的那批；
  *    已经回拍上来等验收的（`待验收`）超时与否是验收节奏的事，不算在这格里。
+ *  - 健康证到期 `countHealthCertDue` ← 同一个 `daily-queue` 响应里的 `health_cert_due`。
+ *  - 人事提醒 `countHrReminders` ← `GET /api/hygiene/admin/hr-reminders`（票 05 / 06 建的
+ *    那一页读的同一个端点）。本月该调工龄奖的人数 + 本月生日人数，两块相加；少一块给
+ *    `null`（见那个函数上的理由）。
  *
  *  身份词表只有一处（`utils/workbenchIdentity.js`）：这里不写 'super' / 'staff'
  *  字面量，免得第 N 个消费方各写一份、改口径时漏掉。
@@ -40,6 +44,8 @@ export const HOME_LINKS = {
   fixes: '/workbench/floor/fix',
   /** 健康证到期 → 花名册（补档案、看谁到期的地方）。 */
   certs: '/workbench/hr/roster',
+  /** 人事提醒 → 人事提醒页（本月该调的工龄奖与本月生日两块都在那一页）。 */
+  reminders: '/workbench/hr/reminders',
   /** 我的待办条数 → 卫生待办（日常 / 专项 / 整改三个 tab 都在这儿）。 */
   myItems: '/workbench/me/clean',
   /** 我的申请待回应 → 「今天」页那张卡。 */
@@ -106,6 +112,24 @@ export function countHealthCertDue(queue) {
   if (!block || block.count === undefined || block.count === null) return null
   const count = Number(block.count)
   return Number.isFinite(count) ? count : null
+}
+
+/** 人事提醒条数：本月**该调工龄奖**的人数（含历史欠调）＋ 本月**生日**人数。
+ *
+ *  两块都要在才给总数：少一块时相加出来的数会偏小、看着像「这个月没事」，而店长
+ *  正是照这个数决定要不要点进去 —— 宁可画「—」（同 `staffWorkCounts` 对三块待办
+ *  的处理）。`incomplete`（档案待补）**不算进来**：它是提醒页里的第三块，不是首页
+ *  这一格的语义（这一格回答的是「本月有几件人事的事要办」）。
+ *
+ *  `over`（档案里的工龄奖高于应为）也不计入 —— 那类只标出来、不需要人动手。
+ */
+export function countHrReminders(reminders) {
+  if (!reminders) return null
+  const due = reminders.seniority && reminders.seniority.count
+  const born = reminders.birthdays && reminders.birthdays.count
+  if (due === undefined || due === null || born === undefined || born === null) return null
+  const sum = Number(due) + Number(born)
+  return Number.isFinite(sum) ? sum : null
 }
 
 /** 今天谁上班：按班次分组，带人数与名字（休的人不在这份里 —— 服务端给了 `off_people`）。
@@ -178,6 +202,7 @@ export function staffWorkCounts({ daily, deep, fix, requests: inbox } = {}) {
  *   inbox?: object|null,    // GET /api/scheduling/inbox（店长：待批请假；员工：我的申请）
  *   queue?: object|null,    // GET /api/hygiene/admin/daily-queue（店长：待验收）
  *   fix?: object|null,      // GET /api/hygiene/admin/fix（店长：逾期整改；员工：我的整改）
+ *   reminders?: object|null,// GET /api/hygiene/admin/hr-reminders（店长：人事提醒）
  *   deep?: object|null,     // GET /api/hygiene/staff/deep-clean（员工：我的专项）
  *   daily?: object|null,    // GET /api/hygiene/staff/daily-work（员工：我的日常）
  *   me?: object|null,       // GET /api/scheduling/me（员工：我的班次 / 工作区）
@@ -187,6 +212,7 @@ export function staffWorkCounts({ daily, deep, fix, requests: inbox } = {}) {
  *   view: 'super'|'staff'|null,
  *   duty: {total: number, groups: Array<{shift: string, count: number, names: string[]}>}|null,
  *   leaves: number|null, reviews: number|null, fixes: number|null, certs: number|null,
+ *   reminders: number|null,
  *   me: {shift: {headline: string, subline: string, tone: string}, next: Array<object>}|null,
  *   work: {daily: number, deep: number, fix: number, pending: number, incoming: number}|null,
  *   incoming: number|null,
@@ -200,6 +226,7 @@ export function workbenchHomeSummary({
   inbox = null,
   queue = null,
   fix = null,
+  reminders = null,
   deep = null,
   daily = null,
   me = null,
@@ -217,6 +244,7 @@ export function workbenchHomeSummary({
       reviews: countPendingItems(queue),
       fixes: countOverdueFixes(fix, now),
       certs: countHealthCertDue(queue),
+      reminders: countHrReminders(reminders),
       me: null,
       work: null,
       incoming: null,
@@ -238,6 +266,7 @@ export function workbenchHomeSummary({
       reviews: null,
       fixes: null,
       certs: null,
+      reminders: null,
       me: { shift: staffShiftCell(today), next: staffNextDays(me) },
       work,
       incoming: work.incoming,
@@ -251,6 +280,7 @@ export function workbenchHomeSummary({
     reviews: null,
     fixes: null,
     certs: null,
+    reminders: null,
     me: null,
     work: null,
     incoming: null,

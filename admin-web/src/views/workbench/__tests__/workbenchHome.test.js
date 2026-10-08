@@ -62,6 +62,12 @@ function managerData(overrides = {}) {
       health_cert_due: { count: 0, items: [] },
     },
     '/api/hygiene/admin/fix': { items: [] },
+    // 人事提醒（第五格）：本月该调工龄奖的人数 + 本月生日人数，两块都从这一条来。
+    '/api/hygiene/admin/hr-reminders': {
+      seniority: { count: 0, items: [] },
+      birthdays: { count: 0, items: [] },
+      incomplete: { count: 0, items: [] },
+    },
     ...overrides,
   }
 }
@@ -195,10 +201,10 @@ describe('工作台首页 · 店长视角', () => {
     })
 
     const cells = wrapper.findAll('.wbh-cell')
-    expect(cells).toHaveLength(4)
+    expect(cells).toHaveLength(5)
     expect(cells.map((cell) => cell.attributes('href'))).toEqual([
       '/workbench/hr/inbox', '/workbench/floor/daily', '/workbench/floor/fix',
-      '/workbench/hr/roster',
+      '/workbench/hr/roster', '/workbench/hr/reminders',
     ])
     // 待批请假只数请假（换班那条还在等对方点头，店长这儿看不到）。
     expect(wrapper.get('.wbh-cell.leaves .wbh-num').text()).toBe('1')
@@ -242,10 +248,45 @@ describe('工作台首页 · 店长视角', () => {
     expect(wrapper.get('.wbh-cell.certs .wbh-num').text()).toBe('—')
   })
 
+  it('hr-reminders 读不出来时那一格给「—」，不是 0（少一块也不给半截数）', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({ '/api/hygiene/admin/hr-reminders': 'fail' }),
+    })
+    expect(wrapper.get('.wbh-cell.reminders .wbh-num').text()).toBe('—')
+
+    // 只回一半（缺 birthdays）：相加会得到一个偏小的数，比画「—」更误导。
+    const partial = await mountHome({
+      identity: 'super',
+      table: managerData({
+        '/api/hygiene/admin/hr-reminders': { seniority: { count: 2, items: [] } },
+      }),
+    })
+    expect(partial.wrapper.get('.wbh-cell.reminders .wbh-num').text()).toBe('—')
+  })
+
+  it('人事提醒那一格：数字是两块相加，点进人事提醒页', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({
+        '/api/hygiene/admin/hr-reminders': {
+          seniority: { count: 2, items: [] },
+          birthdays: { count: 1, items: [] },
+          // 档案待补的人数**不进这一格** —— 那是提醒页里的第三块，不是首页这一格的语义。
+          incomplete: { count: 7, items: [] },
+        },
+      }),
+    })
+
+    const cell = wrapper.get('.wbh-cell.reminders')
+    expect(cell.get('.wbh-num').text()).toBe('3')
+    expect(cell.attributes('href')).toBe('/workbench/hr/reminders')
+  })
+
   it('数字为 0 时是稳稳的 0（不是空白、也不是整块消失）', async () => {
     const { wrapper } = await mountHome({ identity: 'super', table: managerData() })
 
-    for (const key of ['leaves', 'reviews', 'fixes', 'certs']) {
+    for (const key of ['leaves', 'reviews', 'fixes', 'certs', 'reminders']) {
       const num = wrapper.get(`.wbh-cell.${key} .wbh-num`)
       expect(num.text()).toBe('0')
     }
@@ -283,6 +324,7 @@ describe('工作台首页 · 店长视角', () => {
     expect(paths).toContain('/api/scheduling/inbox')
     expect(paths).toContain('/api/hygiene/admin/daily-queue')
     expect(paths).toContain('/api/hygiene/admin/fix')
+    expect(paths).toContain('/api/hygiene/admin/hr-reminders')
     for (const path of paths) {
       expect(path.startsWith('/api/hygiene/staff/')).toBe(false)
       expect(path.startsWith('/api/scheduling/me')).toBe(false)

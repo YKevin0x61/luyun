@@ -42,6 +42,8 @@ const day = ref(null)
 const inbox = ref(null)
 const queue = ref(null)
 const fix = ref(null)
+// 人事提醒（第五格）：本月该调工龄奖 + 本月生日，两块都在这条响应里。
+const reminders = ref(null)
 const deep = ref(null)
 const daily = ref(null)
 const me = ref(null)
@@ -57,6 +59,7 @@ const summary = computed(() => workbenchHomeSummary({
   inbox: inbox.value,
   queue: queue.value,
   fix: fix.value,
+  reminders: reminders.value,
   deep: deep.value,
   daily: daily.value,
   me: me.value,
@@ -72,7 +75,7 @@ function numberText(value) {
   return String(value)
 }
 
-/** 四个并行、各拉各的：失败把那块留成 `null`，不抛出去影响别的块。 */
+/** 几块并行、各拉各的：失败把那块留成 `null`，不抛出去影响别的块。 */
 async function safe(promise, sink, pick = (data) => data) {
   try {
     sink.value = pick(await promise) ?? null
@@ -91,6 +94,7 @@ async function loadManager() {
     safe(api.get('/api/scheduling/day', date ? { date } : {}), day),
     safe(api.get('/api/scheduling/inbox'), inbox),
     safe(api.get('/api/hygiene/admin/fix'), fix),
+    safe(api.get('/api/hygiene/admin/hr-reminders'), reminders),
   ])
   businessDate.value = date
     || (day.value && day.value.business_date)
@@ -194,6 +198,17 @@ useNudgePull({
           <span class="wbh-num">{{ numberText(summary.certs) }}</span>
           <span class="wbh-label">健康证到期</span>
           <span class="wbh-go">花名册 ›</span>
+        </router-link>
+        <!-- 人事提醒（第五格）：本月**该调工龄奖**的人数 + 本月**生日**人数，两块都在
+             人事提醒页上（那里还有第三块「档案待补」，但它不进这个数字）。 -->
+        <router-link
+          class="wbh-cell reminders"
+          :to="HOME_LINKS.reminders"
+          title="本月该调工龄奖 + 本月生日的人数"
+        >
+          <span class="wbh-num">{{ numberText(summary.reminders) }}</span>
+          <span class="wbh-label">人事提醒</span>
+          <span class="wbh-go">工龄奖 · 生日 ›</span>
         </router-link>
       </div>
     </template>
