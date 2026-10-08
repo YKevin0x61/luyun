@@ -57,12 +57,60 @@ function toRow(point) {
   })
 }
 
+/**
+ * 校验说明的比较口径：**按空白规范化后比**。
+ * 后端同一条说明在不同备份点上可能带不同的缩进 / 换行 / 连续空格（尤其人工录入过的
+ * `basic_check.messages`），只比原串会把"同一段话"当成两段，去重就漏了。
+ */
+function normalizeMessage(text) {
+  return String(text ?? '').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 后端对每个备份点各返回一份基础校验说明，其中"业务数据是 PostgreSQL 整库备份……"
+ * 这类**每份备份都成立**的机制解释会在每个点上各来一遍（实测 4 个点 = 同一段 48 字说
+ * 4 遍）。这里把"本组有 ≥2 个点共有"的说明提到**组级**只留一处（默认收起的折叠），
+ * 各点行只留自己独有的那条；组里只有一个点时不合并（消息留在它自己那一行）。
+ * 逐点判断与合并都在这个组件里做，composable 的校验逻辑与返回结构不动。
+ */
+function splitGroupMessages(items) {
+  const pointCount = new Map()
+  for (const { row } of items) {
+    for (const key of new Set(row.checkMessages.map(normalizeMessage))) {
+      if (key) pointCount.set(key, (pointCount.get(key) || 0) + 1)
+    }
+  }
+  const sharedKeys = new Set(
+    [...pointCount].filter(([, count]) => count > 1).map(([key]) => key),
+  )
+  if (!sharedKeys.size) return { sharedMessages: [], items }
+
+  const sharedMessages = []
+  const seen = new Set()
+  for (const { row } of items) {
+    for (const message of row.checkMessages) {
+      const key = normalizeMessage(message)
+      if (!sharedKeys.has(key) || seen.has(key)) continue
+      seen.add(key)
+      // 保留首次出现时的原始写法（含它自己的标点与大小写）
+      sharedMessages.push(message)
+    }
+  }
+  return {
+    sharedMessages,
+    items: items.map(({ point, row }) => ({
+      point,
+      row: { ...row, checkMessages: row.checkMessages.filter((m) => !sharedKeys.has(normalizeMessage(m))) },
+    })),
+  }
+}
+
 const groups = computed(() => {
   const grouped = groupBackupPoints(props.points)
-  return GROUP_META.map((meta) => ({
-    ...meta,
-    items: (grouped[meta.key] || []).map((point) => ({ point, row: toRow(point) })),
-  }))
+  return GROUP_META.map((meta) => {
+    const items = (grouped[meta.key] || []).map((point) => ({ point, row: toRow(point) }))
+    return { ...meta, ...splitGroupMessages(items) }
+  })
 })
 
 const recoverableCount = computed(
@@ -101,6 +149,17 @@ function photoText(row) {
           <StatusPill v-if="g.readonly" tone="neutral" label="只读" />
         </div>
         <p class="points__group-hint">{{ g.hint }}</p>
+        <!-- 后端对每个备份点各返回一份基础校验说明，其中"每份备份都成立"的机制解释
+             （如"业务数据是 PostgreSQL 整库备份……"）会在每个点上各来一遍。本组有 ≥2 个点
+             共有的说明收进这里的一条折叠，只出现一次；各点行只留自己独有的那条。
+             收进折叠而不是直接铺在组头：它是机制解释（同一条后果在回滚确认弹窗里还会在
+             动作发生前再说一次），默认态不占版面、也不逐点重复。 -->
+        <details v-if="g.sharedMessages.length" class="points__shared">
+          <summary>共同的校验说明（{{ g.sharedMessages.length }} 条）</summary>
+          <ul>
+            <li v-for="(message, i) in g.sharedMessages" :key="`shared-${i}`">{{ message }}</li>
+          </ul>
+        </details>
         <p v-if="!g.items.length" class="points__note">暂无</p>
         <ul v-else class="points__list">
           <li v-for="{ point, row } in g.items" :key="point.id" class="point">
@@ -186,6 +245,22 @@ function photoText(row) {
 }
 .points__group-hint { margin: 4px 0 8px; font-size: 11px; line-height: 1.5; color: var(--text-dim); }
 
+/* 本组共有的校验说明：一条折叠，默认收起（逐点重复的那段话只在这里出现一次）。
+   窄屏（320/390）下长消息要能换行，不许把卡片或页面撑出横向滚动条。 */
+.points__shared {
+  margin: 0 0 8px; font-size: 11px; line-height: 1.6; color: var(--text-dim);
+  background: rgba(10, 13, 22, 0.45);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 2px 10px 4px;
+}
+.points__shared > summary {
+  cursor: pointer; min-height: 36px; display: flex; align-items: center;
+  overflow-wrap: anywhere;
+}
+.points__shared > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.points__shared ul { margin: 2px 0 4px; padding-left: 18px; }
+.points__shared li { margin-bottom: 4px; overflow-wrap: anywhere; }
+
 .points__list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .point {
   display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap;
@@ -205,6 +280,9 @@ function photoText(row) {
 .point__line {
   margin: 0; font-size: 11px; line-height: 1.55; color: var(--text);
   display: flex; gap: 8px; min-width: 0;
+  /* 校验说明 / 提示里可能出现长路径或长连写串：overflow-wrap 是可继承属性，
+     设在这里匿名 flex 项也吃得到，320px 下长消息换行而不是把卡片撑破。 */
+  overflow-wrap: anywhere;
 }
 .point__line.is-dim { color: var(--text-dim); }
 .point__line.is-warn { color: var(--yellow); }

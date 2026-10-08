@@ -605,3 +605,29 @@ table.data-table td.actions { display: flex; gap: 6px; }
   flex: none;
 }
 .luyun-number--compact .luyun-number__step { width: 28px; font-size: 14px; }
+
+/* ===== 触控尺寸下限（窄屏）=====
+ * 手机上一个热区只有 18–36px 时点不中：2026-10-08 的移动端实测里，配置页的勾选行只有
+ * 18px、`.btn-sm` 24px、主按钮 31–36px（`.scratch/settings-mobile-audit/report.md`）。
+ * 这里在 ≤430px 给三个通用控件压一个下限，**只动尺寸与间距，不动颜色、字号与布局**：
+ *   .btn 40px（主 / 次 / 危险三态同吃这一条）、.btn-sm 36px、勾选行 44px。
+ * 桌面不放开：鼠标下的紧凑密度是列表操作列有意为之（`.btn-sm` 24px），撑到 36px 会把
+ * 表格行整体撑高。勾选行靠 `min-height` + 上下 padding 撑热区，16×16 的方块
+ * （`.luyun-checkbox`）本身不变 —— 放大方块会让它在同一行里压到文字。
+ */
+@media (max-width: 430px) {
+  /* `!important` 是有意的：这两个下限要压过**组件里为桌面密度写的**同名覆盖 ——
+     `components/ui/PanelHeader.vue` 的 `.panel-header__actions :deep(.btn) { min-height: 36px }`
+     与备份点列表头部的按钮都是 (0,3,0) 的具体度，主题里不加重要级就赢不了（实测「验证登录」
+     「刷新连接信息」「退出登录」「刷新列表」都停在 36px）。它只作用于 min-height 一个属性、
+     只在 ≤430px，且两条规则靠先后顺序分档：`.btn` 40px、`.btn-sm` 36px。 */
+  .btn { min-height: 40px !important; }
+  .btn-sm { min-height: 36px !important; }
+  .luyun-check-row,
+  .luyun-radio-row { min-height: 44px; padding: 11px 0; }
+  /* `fieldset` 的 UA 默认是 `min-inline-size: min-content`：内容比容器宽时**整个框**会跟着
+     长出去，而不是让内容在框里换行。320px 下配置页「保留与清理」那张卡就因此比容器宽
+     38px（332 vs 294，实测越界元素 24 个）。窄屏把它按普通块处理；桌面不动，免得改变
+     既有表单的换行行为。 */
+  fieldset { min-inline-size: 0; }
+}

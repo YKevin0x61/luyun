@@ -21,7 +21,9 @@ const bulletGauge = read('BulletGauge.vue')
 const usageBar = read('UsageBar.vue')
 const readinessGrid = read('ReadinessGrid.vue')
 const reconcileProgress = read('ReconcileProgress.vue')
-const setupView = readFileSync(join(VIEWS_DIR, 'SetupView.vue'), 'utf8')
+// 7 节并成 5 节之后（ADR 0099），健康面板的正文在「状态」节组件里；
+// 壳（SetupView.vue）只留导航 / 页头 / 切换与四个弹窗的框。
+const statusSection = readFileSync(join(VIEWS_DIR, 'settings/StatusSection.vue'), 'utf8')
 
 describe('系统健康图表组件契约', () => {
   it('三类量表都用 role="img" + aria-label，且数值/阈值有可见文字', () => {
@@ -80,13 +82,9 @@ describe('系统健康图表组件契约', () => {
   })
 })
 
-describe('系统健康面板在 SetupView 中的落地', () => {
-  const healthPanel = setupView.slice(
-    setupView.indexOf('activeSection === \'health\''),
-    setupView.indexOf('activeSection === \'backup\''),
-  )
-  const scopedCss = setupView.slice(setupView.indexOf('<style scoped>'))
-  const css = compact(scopedCss)
+describe('系统健康面板在「状态」节中的落地', () => {
+  const healthPanel = statusSection.slice(0, statusSection.indexOf('<style scoped>'))
+  const css = compact(statusSection.slice(statusSection.indexOf('<style scoped>')))
 
   it('五块图表都挂在健康节里，且不再用纯文本 meta-grid 罗列核心指标', () => {
     expect(healthPanel).toContain('<HealthSummary')

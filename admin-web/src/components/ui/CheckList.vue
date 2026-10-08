@@ -43,7 +43,12 @@ defineProps({
 }
 .checks__symbol { font-size: 13px; font-weight: 700; line-height: 1; }
 .checks__status { font-weight: 700; white-space: nowrap; }
-.checks__message { color: var(--text); min-width: 0; }
+/* 说明里会出现**不可断行的长串**（宿主机路径、GitHub URL、后端异常原文）。窄屏上
+   `overflow-wrap: normal` 只会把它们硬顶出卡片：320px 实测这一行 sw/cw = 316/234，
+   整个分节被顶到 346 > 294，原因正好被裁在看不清的位置（更新自检失败时最要命）。
+   `anywhere` 只在放不下时才断，短消息一个字都不会变（行高 18.6px、单行高度与对齐都不动），
+   而且把 min-content 一并算小，卡片不会再被内容撑出去。 */
+.checks__message { color: var(--text); min-width: 0; overflow-wrap: anywhere; }
 
 .checks__item.is-ok .checks__symbol,
 .checks__item.is-ok .checks__status { color: var(--green); }

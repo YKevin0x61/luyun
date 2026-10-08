@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../../api/client'
 import ConfirmDialog from '../admin/ConfirmDialog.vue'
+import SvgIcon from '../SvgIcon.vue'
 
 // 数据库迁移面板：PG 部署的 schema 变更要靠人应用（migrations/pg/000N_*.sql），
 // 而更新作业按设计只管换代码。这里把「有哪些待应用、点一下应用」搬到界面上，
@@ -110,16 +111,22 @@ onMounted(load)
         </p>
 
         <details v-if="applied.length" class="migration-applied">
-          <summary>已应用的迁移（{{ applied.length }}）</summary>
+          <summary>
+            <SvgIcon name="chevron-right" :size="14" class="migration-summary__icon" />
+            <span>已应用的迁移（{{ applied.length }}）</span>
+          </summary>
           <ul>
-            <li v-for="item in applied" :key="item.version">
-              <code>{{ item.version }}</code> {{ item.filename }}
-            </li>
+            <!-- 只写 filename：文件名本身就带版本前缀（0002_xxx.sql），再单独排一列
+                 版本号会显示成「0002 0002_xxx.sql」。filename 缺失（老记录）才退回版本号。 -->
+            <li v-for="item in applied" :key="item.version">{{ item.filename || item.version }}</li>
           </ul>
         </details>
 
         <details v-if="bootstrapOnly.length" class="migration-bootstrap">
-          <summary>不会自动执行（含清库语句）</summary>
+          <summary>
+            <SvgIcon name="chevron-right" :size="14" class="migration-summary__icon" />
+            <span>不会自动执行（含清库语句）</span>
+          </summary>
           <p class="hint">
             这些脚本含 DROP TABLE，只用于初次建立数据库，面板永久排除它们：
             {{ bootstrapOnly.map((item) => item.filename).join('、') }}
@@ -138,3 +145,55 @@ onMounted(load)
     />
   </fieldset>
 </template>
+
+<style scoped>
+/* 面板内部的样式必须写在这里，不能指望父组件 SetupView.vue 的 <style scoped> ——
+   那条规则只覆盖到子组件的**根元素**（这一个 fieldset），面板里的 legend / p / ul /
+   details 都不带父组件的 scope 属性。缺了下面这一块，整块面板就退回浏览器默认排版
+   （16px 白字正文、原生三角、默认圆点列表），和同一页相邻分节的字号/字色明显不是一套。
+   数值一律对齐 SetupView.vue 里的同名规矩（legend、.hint、.release-more）。 */
+.db-migrations legend {
+  font-size: 12px; font-weight: 700; color: var(--text-dim);
+  padding: 0 8px; letter-spacing: 0.5px;
+}
+
+.db-migrations .hint {
+  font-size: 11px; color: var(--text-dim); margin-top: 4px; line-height: 1.5; opacity: 0.85;
+}
+.db-migrations .hint.is-warn { color: var(--yellow); opacity: 1; }
+.db-migrations .section-lead { margin: 0 0 12px; }
+
+.migration-pending .btn { margin-top: 8px; }
+
+.migration-applied,
+.migration-bootstrap { margin-top: 10px; }
+.migration-applied > summary,
+.migration-bootstrap > summary {
+  display: flex; align-items: center; gap: 6px; min-height: 36px;
+  cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-dim);
+  list-style: none;
+}
+.migration-applied > summary::-webkit-details-marker,
+.migration-bootstrap > summary::-webkit-details-marker { display: none; }
+.migration-applied > summary:focus-visible,
+.migration-bootstrap > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.migration-summary__icon { color: var(--text-dim); transition: transform 0.15s ease; }
+.migration-applied[open] > summary,
+.migration-applied[open] .migration-summary__icon,
+.migration-bootstrap[open] > summary,
+.migration-bootstrap[open] .migration-summary__icon { color: var(--text); }
+.migration-applied[open] .migration-summary__icon,
+.migration-bootstrap[open] .migration-summary__icon { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .migration-summary__icon { transition: none; }
+}
+
+/* 已应用清单是一串文件名流水账：等宽、紧凑，不要浏览器默认的圆点缩进
+   （19 条时要一眼扫完，不该被 40px 的项目符号缩进挤掉宽度）。 */
+.migration-applied ul { list-style: none; margin: 2px 0 0; padding: 0; }
+.migration-applied li {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; line-height: 1.9; color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+</style>

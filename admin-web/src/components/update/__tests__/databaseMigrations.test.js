@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const panel = readFileSync(join(here, '../DatabaseMigrations.vue'), 'utf8')
-const setup = readFileSync(join(here, '../../../views/SetupView.vue'), 'utf8')
+const systemSection = readFileSync(join(here, '../../../views/settings/SystemSection.vue'), 'utf8')
 
 describe('数据库迁移面板', () => {
   it('reads the status endpoint and posts to apply', () => {
@@ -54,13 +54,29 @@ describe('数据库迁移面板', () => {
     expect(panel).toMatch(/load\(\{ keepError: Boolean\(errorText\.value\) \}\)/)
   })
 
+  it('keeps its own scoped styles for what the parent scoped block cannot reach', () => {
+    // 所属分节（views/settings/SystemSection.vue）的 <style scoped> 只覆盖到子组件的**根元素**（那个 fieldset）：
+    // legend / p / ul / details 一个都吃不到。样式写回父组件，面板就会退回浏览器默认排版
+    // （16px 白字正文、原生三角、默认圆点列表），和同一页相邻分节明显不是一套。
+    expect(panel).toMatch(/<style scoped>/)
+    expect(panel).toMatch(/\.db-migrations legend\s*\{/)
+    expect(panel).toMatch(/\.db-migrations \.hint\s*\{/)
+    expect(panel).toMatch(/\.migration-applied > summary/)
+  })
+
+  it('lists each applied migration once instead of 0002 0002_xxx.sql', () => {
+    // 文件名本身带版本前缀，再单独排一列版本号就是重复。
+    expect(panel).toMatch(/\{\{ item\.filename \|\| item\.version \}\}/)
+    expect(panel).not.toMatch(/<code>\{\{ item\.version \}\}<\/code>/)
+  })
+
   it('is mounted in the update section of the setup page', () => {
-    expect(setup).toMatch(/import DatabaseMigrations from '\.\.\/components\/update\/DatabaseMigrations\.vue'/)
-    expect(setup).toMatch(/<DatabaseMigrations \/>/)
-    const updateSection = setup.slice(setup.indexOf("activeSection === 'update'"))
-    expect(updateSection.indexOf('<DatabaseMigrations />')).toBeGreaterThan(-1)
-    expect(updateSection.indexOf('<DatabaseMigrations />')).toBeLessThan(
-      updateSection.indexOf('正式发行版目录'),
+    expect(systemSection).toMatch(/import DatabaseMigrations from '\.\.\/\.\.\/components\/update\/DatabaseMigrations\.vue'/)
+    expect(systemSection).toMatch(/<DatabaseMigrations \/>/)
+    expect(systemSection.indexOf('<DatabaseMigrations />')).toBeGreaterThan(-1)
+    // 迁移面板排在发行版目录之前：先看"结构要不要动"，再看"能不能换版本"。
+    expect(systemSection.indexOf('<DatabaseMigrations />')).toBeLessThan(
+      systemSection.indexOf('正式发行版目录'),
     )
   })
 })

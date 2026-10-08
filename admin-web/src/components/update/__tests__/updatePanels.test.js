@@ -11,7 +11,10 @@ const VIEWS_DIR = join(here, '../../../views')
 
 const overview = readFileSync(join(UPDATE_DIR, 'UpdateOverview.vue'), 'utf8')
 const stages = readFileSync(join(UPDATE_DIR, 'UpdateStageProgress.vue'), 'utf8')
-const setupView = readFileSync(join(VIEWS_DIR, 'SetupView.vue'), 'utf8')
+// 7 节并成 5 节之后（ADR 0099），系统更新的正文在「系统」节组件里。
+const systemSection = readFileSync(join(VIEWS_DIR, 'settings/SystemSection.vue'), 'utf8')
+// 更新环境自检清单渲染用的组件（同一个 CheckList 也服务备份健康的同类结构）。
+const checkList = readFileSync(join(here, '../../ui/CheckList.vue'), 'utf8')
 
 function compact(source) {
   return source.replace(/\s+/g, '')
@@ -73,9 +76,9 @@ describe('UpdateStageProgress 契约', () => {
   })
 })
 
-describe('SetupView 系统更新接线契约', () => {
+describe('系统节（SystemSection）更新接线契约', () => {
   it('版本总览 / 自检清单 / 阶段进度都用组件', () => {
-    const src = compact(setupView)
+    const src = compact(systemSection)
     expect(src).toContain('<UpdateOverview')
     expect(src).toContain(':degraded-reason="degradedReasonLabel(versionCheck?.degraded_reason)"')
     expect(src).toContain('<CheckList:items="preflightChecks"')
@@ -83,7 +86,7 @@ describe('SetupView 系统更新接线契约', () => {
   })
 
   it('GitHub 连接折叠为 details，不再占据面板首屏', () => {
-    const src = compact(setupView)
+    const src = compact(systemSection)
     expect(src).toContain('<detailsclass="github-panel">')
     expect(src).toContain('GitHub连接（公开仓通常无需配置）')
     const detailsAt = src.indexOf('<detailsclass="github-panel">')
@@ -93,14 +96,14 @@ describe('SetupView 系统更新接线契约', () => {
   })
 
   it('危险操作仍保留两步确认与勾选项', () => {
-    const src = compact(setupView)
+    const src = compact(systemSection)
     expect(src).toContain('我确认丢弃部署目录中的本地改动')
     expect(src).toContain('我已知晓营业高峰风险，仍然执行更新')
     expect(src).toContain('确认开始更新')
   })
 
   it('发行版目录只直接列最新几个，其余折进 details 且共用同一行组件', () => {
-    const src = compact(setupView)
+    const src = compact(systemSection)
     expect(src).toContain('v-for="rinvisibleReleases"')
     expect(src).toContain('<detailsv-if="hiddenReleases.length"class="release-more">')
     expect(src).toContain('v-for="rinhiddenReleases"')
@@ -115,7 +118,7 @@ describe('SetupView 系统更新接线契约', () => {
   })
 
   it('自检未通过时只在目录级提示一次，不在每行重复', () => {
-    const src = compact(setupView)
+    const src = compact(systemSection)
     expect(src).toContain('v-if="!canShowApply"class="hintis-warnrelease-blocked"')
     expect(src).toContain('「应用此版本」入口已全部禁用')
     // 每行不再各自渲染「自检未通过」（注释里提到它是为了解释为什么没有这个标记）
@@ -123,10 +126,42 @@ describe('SetupView 系统更新接线契约', () => {
   })
 
   it('操作列右对齐、Tag/发布时间收紧，避免胶囊贴边与名称列被挤', () => {
-    const src = compact(setupView)
+    const src = compact(systemSection)
     expect(src).toContain('.release-listth:last-child,.release-listtd:last-child{width:1%;text-align:right;white-space:nowrap;}')
     expect(src).toContain('justify-content:flex-end')
     expect(src).toContain('.release-listtbodytr:hover')
+  })
+})
+
+// t17：更新环境自检的说明里会出现**不可断行的长串**（宿主机日志路径、GitHub URL、后端异常
+// 原文）。窄屏上 `overflow-wrap: normal` 只会把它们硬顶出卡片：320px 实测那一行
+// sw/cw = 316/234，整个系统节被顶到 346 > 294，而原因正好被裁在看不清的位置。
+describe('CheckList 长文本窄屏（更新环境自检清单）', () => {
+  it('说明允许在任意字符处折行，不裁切、不产生横向滚动', () => {
+    const src = compact(checkList)
+    expect(src).toContain('.checks__message{color:var(--text);min-width:0;overflow-wrap:anywhere;}')
+    // 说明列不许上 nowrap（那是状态列的特权），否则长串又会顶出卡片。
+    const messageRule = src.slice(src.indexOf('.checks__message{'), src.indexOf('.checks__message{') + 120)
+    expect(messageRule).not.toContain('nowrap')
+    expect(src).toContain('.checks__status{font-weight:700;white-space:nowrap;}')
+  })
+
+  it('网格轨道本来就是可缩的（minmax(0, 1fr)），窄屏两列回退也没变', () => {
+    const src = compact(checkList)
+    expect(src).toContain('grid-template-columns:autoautominmax(0,1fr);')
+    expect(src).toContain('@media(max-width:560px){.checks__item{grid-template-columns:autominmax(0,1fr);}')
+    expect(src).toContain('.checks__message{grid-column:1/-1;}')
+  })
+
+  it('状态仍由符号 + 文字表达（换行改动不碰可读性）', () => {
+    const src = compact(checkList)
+    expect(src).toContain('checks__symbol"aria-hidden="true"')
+    expect(src).toContain("item.ok?'✓':'!'")
+    expect(src).toContain('<spanclass="checks__status">{{item.ok?passLabel:failLabel}}</span>')
+    expect(src).toContain('<spanclass="checks__message">{{item.message}}</span>')
+    // 清单条目数与空态逻辑未动。
+    expect(src).toContain('<ulv-if="items.length"class="checks">')
+    expect(src).toContain('<pv-else-if="emptyText"class="checks__empty">{{emptyText}}</p>')
   })
 })
 
