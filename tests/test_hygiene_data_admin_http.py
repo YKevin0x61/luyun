@@ -27,6 +27,7 @@ from services.hygiene.archive import HygieneDataArchive
 from services.hygiene.captures import FileCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import HygieneWork
+from services.identity import EmployeeAccounts
 
 SUPER = {"kind": "super"}
 DAY_PHONE = "13800000001"
@@ -116,6 +117,13 @@ def _make_app(runtime, *, authed: bool):
     app.include_router(hygiene_module.router)
     app.dependency_overrides[hygiene_module._get_work] = lambda: runtime.work
     app.dependency_overrides[hygiene_module._get_archive] = lambda: runtime.archive
+    # `accounts` 也得显式给：`/admin/daily-queue` 那几条靠它算「健康证到期」。不 override
+    # 就回落到 `main.employee_accounts` 这个模块全局（默认 `None`），这几条用例于是变成
+    # 「看别的测试装配过没有」——单跑必红、全量里全靠邻居泄漏的值施舍才绿（实测：加两个
+    # 新测试文件改变了 `--dist loadfile` 的分发就当场红）。这一行把那份依赖掐断。
+    app.dependency_overrides[hygiene_module._get_accounts] = lambda: EmployeeAccounts(
+        runtime.db
+    )
     if authed:
         app.dependency_overrides[hygiene_module.require_session] = lambda: "test-admin"
     return app

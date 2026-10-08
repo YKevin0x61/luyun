@@ -408,6 +408,11 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
           </div>
           <p class="oReason">{{ entry.reason }}</p>
           <p v-if="entry.reject_reason" class="oErr">驳回理由：{{ entry.reject_reason }}</p>
+          <!-- 驳回之后「重提一笔」并不总是可行：这笔要是前天以前的，员工自己已经登不了
+               （窗口只有今天与昨天）。不说这一句，员工会以为随时能补，然后卡在日期上。 -->
+          <p v-if="entry.status === 'rejected'" class="mSub">
+            这一笔不算数。重提一笔就行；日期已经过了窗口（只能登今天与昨天）的话，请店长补录。
+          </p>
           <button
             v-if="entry.status === 'pending'"
             class="oCancel"
