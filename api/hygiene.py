@@ -1016,11 +1016,11 @@ async def admin_hr_reminders(
     _session_id: str = Depends(require_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
-    """「人事提醒」页的清单（票 05：工龄奖该调名单 + 档案待补）。
+    """「人事提醒」页的清单（工龄奖该调 + 本月生日 + 健康证到期 + 档案待补）。
 
-    首页第 5 格（票 07）读的也是这一条 —— 同一个数字与同一份名单出自一次查询，
-    所以「首页说 3 件、点进去只有 2 件」不可能发生。生日那一块是票 06 的活，
-    它按同样的 ``{items, count}`` 形状加在 ``birthdays`` 键上。
+    首页那一格读的也是这一条 —— 同一个数字与同一份名单出自一次查询，所以「首页说
+    3 件、点进去只有 2 件」不可能发生。四块都是同样的 ``{items, count}`` 形状；
+    健康证到期是 2026-10-08 从首页单独一格并进来的（同一件事不再两处报数）。
     """
     return await accounts.list_hr_reminders()
 

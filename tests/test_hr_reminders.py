@@ -180,15 +180,19 @@ def _seed(
     bonus=None,
     disabled: bool = False,
     birth: str = "19900307",
+    cert: str = CERT_OK,
 ) -> int:
-    """建一个档案齐全的人（身份证 + 健康证都填，工龄奖那两栏由参数决定）。"""
+    """建一个档案齐全的人（身份证 + 健康证都填，工龄奖那两栏由参数决定）。
+
+    `cert` 默认是 `CERT_OK`（有效期还早）；要造临期 / 过期的人就传一个更早的办理日。
+    """
     employee = _run(
         accounts.register(
             phone(serial),
             PASSWORD,
             name,
             id_card_no=id_card(serial, birth=birth),
-            health_cert_date=CERT_OK,
+            health_cert_date=cert,
         )
     )
     payload = {}
@@ -612,3 +616,48 @@ def test_staff_me_says_nothing_when_the_id_card_is_missing(reminders_http):
     employee = client.get("/api/hygiene/staff/me").json()["employee"]
 
     assert employee["birthday"] is None, "没有身份证就没有生日，不编一个"
+
+
+def test_reminders_carry_the_health_cert_block(reminders_http):
+    """健康证到期（2026-10-08 用户裁定：从首页单独一格并进这一页）。
+
+    它**复用** `list_health_cert_due`，判据仍是 `profile.health_cert_status` —— 所以这一块
+    与花名册行上的标签必然是同一个答案。这里顺带把「两处一致」也验一次，免得日后有人
+    在这一页里另写一份阈值。
+    """
+    client, _db, accounts = reminders_http
+    _admin(client)
+    _seed(client, accounts, serial=81, name="过期证", hire_date="2020-09-15", cert="2024-01-10")
+    _seed(client, accounts, serial=82, name="临期证", hire_date="2020-09-15", cert="2025-09-30")
+    _seed(client, accounts, serial=83, name="证还好", hire_date="2020-09-15")  # CERT_OK
+    _seed(
+        client,
+        accounts,
+        serial=84,
+        name="停用且过期",
+        hire_date="2020-09-15",
+        cert="2024-01-10",
+        disabled=True,
+    )
+
+    data = client.get(REMINDERS_PATH).json()
+    certs = data["certs"]
+    # 按到期日升序（最急的在上面）；停用的人不进 —— 人都停了就不用催。
+    assert [item["name"] for item in certs["items"]] == ["过期证", "临期证"]
+    assert certs["count"] == 2
+    by_name = {item["name"]: item for item in certs["items"]}
+    assert by_name["过期证"]["state"] == "expired"
+    assert by_name["临期证"]["state"] == "soon"
+    # 到期日与还剩几天都由服务端算（办理日 + 12 个月）。
+    assert by_name["过期证"]["expires_on"] == "2025-01-10"
+    assert by_name["临期证"]["expires_on"] == "2026-09-30"
+    assert by_name["临期证"]["days_left"] == 17
+
+    # 与花名册那份标签同源：同一个人在两处的状态一致。
+    roster = {
+        row["name"]: row
+        for row in client.get("/api/hygiene/admin/roster").json()["employees"]
+    }
+    assert roster["过期证"]["health_cert_state"] == "expired"
+    assert roster["临期证"]["health_cert_state"] == "soon"
+    assert roster["证还好"]["health_cert_state"] == "ok"

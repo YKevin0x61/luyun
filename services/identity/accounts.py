@@ -574,10 +574,11 @@ class EmployeeAccounts:
         return due
 
     async def list_hr_reminders(self) -> dict:
-        """超管「人事提醒」页的清单（工龄奖该调 + 本月生日 + 档案待补）。
+        """超管「人事提醒」页的清单（工龄奖该调 + 本月生日 + 档案待补 + 健康证到期）。
 
-        2026-10-07 用户裁定，口径见 `docs/adr/0101` / `0102`。**只捞未停用的人**
-        （同 :meth:`list_health_cert_due` 的口径：人都停了就不用催）。三块一次查出来，
+        2026-10-07 用户裁定，口径见 `docs/adr/0101` / `0102`；**2026-10-08 健康证到期
+        从首页那一行并进这一页**（首页少一格，同一件事不再两处报数）。**只捞未停用的人**
+        （同 :meth:`list_health_cert_due` 的口径：人都停了就不用催）。四块一次查出来，
         形状都是 ``{items, count}`` —— 首页那一格（票 07）与页面读的是同一份，
         所以「首页说有 3 件、点进去只有 2 件」不可能发生。
 
@@ -593,6 +594,10 @@ class EmployeeAccounts:
         * ``incomplete``：**算不出来**的人（入职日期缺 / 坏值 → 工龄奖算不出；身份证
           读不出生日），``missing`` 点名缺哪几项；两项都缺是**一行两项**、不是两行 ——
           「这个月没有要处理的」与「算不出来」在界面上必须长得不一样（ADR 0102）。
+        * ``certs``：健康证**临期或已过期**的人（2026-10-08 用户裁定：这一条从首页
+          单独一格并进来）。它**复用** :meth:`list_health_cert_due`，不在这里另写一遍
+          阈值 —— 判据的唯一实现是 :func:`profile.health_cert_status`，花名册行上的
+          标签、`daily-queue` 与这里必须是同一个答案。
         """
         cur = await self._conn.execute(
             """SELECT id, name, phone, hire_date, seniority_bonus, id_card_no
@@ -677,6 +682,9 @@ class EmployeeAccounts:
         )
         # 生日按日子升序（同一天按员工号，次序稳定）。
         birthday_items.sort(key=lambda item: (item["day"], item["id"]))
+        # 健康证到期：复用既有的那条查询，**不在这里重算阈值**（判据只有
+        # `profile.health_cert_status` 一份，两处各算一次迟早会分叉）。
+        cert_items = await self.list_health_cert_due()
         return {
             "seniority": {
                 "items": seniority_items,
@@ -684,6 +692,7 @@ class EmployeeAccounts:
             },
             "birthdays": {"items": birthday_items, "count": len(birthday_items)},
             "incomplete": {"items": incomplete_items, "count": len(incomplete_items)},
+            "certs": {"items": cert_items, "count": len(cert_items)},
         }
 
     async def set_job_title(self, employee_id: int, title: str) -> dict:

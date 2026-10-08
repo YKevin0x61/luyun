@@ -14,10 +14,11 @@
  *  - 逾期整改 `countOverdueFixes` ← `GET /api/hygiene/admin/fix`（服务端只回没通过的
  *    单子）。逾期 = **过了截止时间、还等着回拍**（`待回拍`）—— 那正是店长要盯的那批；
  *    已经回拍上来等验收的（`待验收`）超时与否是验收节奏的事，不算在这格里。
- *  - 健康证到期 `countHealthCertDue` ← 同一个 `daily-queue` 响应里的 `health_cert_due`。
- *  - 人事提醒 `countHrReminders` ← `GET /api/hygiene/admin/hr-reminders`（票 05 / 06 建的
- *    那一页读的同一个端点）。本月该调工龄奖的人数 + 本月生日人数，两块相加；少一块给
- *    `null`（见那个函数上的理由）。
+ *  - 人事提醒 `countHrReminders` ← `GET /api/hygiene/admin/hr-reminders`（那一页读的
+ *    同一个端点）。本月该调工龄奖的人数 + 本月生日人数 + 健康证临期/过期人数，三块
+ *    相加；少一块给 `null`（见那个函数上的理由）。**健康证到期 2026-10-08 从首页单独
+ *    一格并进这里**（用户裁定：同一件事不再两处报数，首页那一行少一格）——它因此不再
+ *    读 `daily-queue` 的 `health_cert_due`，那个字段仍留在那条已发布的 API 面上。
  *
  *  身份词表只有一处（`utils/workbenchIdentity.js`）：这里不写 'super' / 'staff'
  *  字面量，免得第 N 个消费方各写一份、改口径时漏掉。
@@ -42,9 +43,7 @@ export const HOME_LINKS = {
   reviews: '/workbench/floor/daily',
   /** 逾期整改 → 整改单。 */
   fixes: '/workbench/floor/fix',
-  /** 健康证到期 → 花名册（补档案、看谁到期的地方）。 */
-  certs: '/workbench/hr/roster',
-  /** 人事提醒 → 人事提醒页（本月该调的工龄奖与本月生日两块都在那一页）。 */
+  /** 人事提醒 → 人事提醒页（本月该调的工龄奖、本月生日、健康证到期都在这页）。 */
   reminders: '/workbench/hr/reminders',
   /** 我的待办条数 → 卫生待办（日常 / 专项 / 整改三个 tab 都在这儿）。 */
   myItems: '/workbench/me/clean',
@@ -100,35 +99,27 @@ export function countOverdueFixes(fix, now = Date.now()) {
   }).length
 }
 
-/** 健康证到期条数：`daily-queue` 里的 `health_cert_due.count`（**未停用**且临期 / 过期的人数，
- *  服务端按同一套阈值算 —— 与花名册行标签同源，30 天）。
+/** 人事提醒条数：本月**该调工龄奖**的人数（含历史欠调）＋ 本月**生日**人数 ＋
+ *  **健康证临期/过期**人数。
  *
- *  读不出来（整块没到、键没下发）给 `null`，页面画「—」：`0` 是真的没有，`—` 是没读到，
- *  店长对这两件事的动作不一样（另一格「待验收」也是这么分的）。
- */
-export function countHealthCertDue(queue) {
-  if (!queue) return null
-  const block = queue.health_cert_due
-  if (!block || block.count === undefined || block.count === null) return null
-  const count = Number(block.count)
-  return Number.isFinite(count) ? count : null
-}
-
-/** 人事提醒条数：本月**该调工龄奖**的人数（含历史欠调）＋ 本月**生日**人数。
- *
- *  两块都要在才给总数：少一块时相加出来的数会偏小、看着像「这个月没事」，而店长
+ *  三块都要在才给总数：少一块时相加出来的数会偏小、看着像「这个月没事」，而店长
  *  正是照这个数决定要不要点进去 —— 宁可画「—」（同 `staffWorkCounts` 对三块待办
- *  的处理）。`incomplete`（档案待补）**不算进来**：它是提醒页里的第三块，不是首页
- *  这一格的语义（这一格回答的是「本月有几件人事的事要办」）。
+ *  的处理）。`incomplete`（档案待补）**不算进来**：它是提醒页里的一块，不是首页
+ *  这一格的语义（这一格回答的是「本月有几件人事的事要办」——而「算不出来」不是
+ *  一件要办的事，是档案缺项）。
  *
  *  `over`（档案里的工龄奖高于应为）也不计入 —— 那类只标出来、不需要人动手。
+ *
+ *  健康证那条（2026-10-08）：它原来是首页的独立一格，读 `daily-queue` 的
+ *  `health_cert_due`；用户裁定并进这里，于是首页那一行少一格、同一件事不再两处
+ *  报数。判据仍在服务端（`profile.health_cert_status`），前端只加总。
  */
 export function countHrReminders(reminders) {
   if (!reminders) return null
-  const due = reminders.seniority && reminders.seniority.count
-  const born = reminders.birthdays && reminders.birthdays.count
-  if (due === undefined || due === null || born === undefined || born === null) return null
-  const sum = Number(due) + Number(born)
+  const blocks = [reminders.seniority, reminders.birthdays, reminders.certs]
+  const counts = blocks.map((block) => (block ? block.count : undefined))
+  if (counts.some((count) => count === undefined || count === null)) return null
+  const sum = counts.reduce((total, count) => total + Number(count), 0)
   return Number.isFinite(sum) ? sum : null
 }
 
@@ -211,8 +202,7 @@ export function staffWorkCounts({ daily, deep, fix, requests: inbox } = {}) {
  * @returns {{
  *   view: 'super'|'staff'|null,
  *   duty: {total: number, groups: Array<{shift: string, count: number, names: string[]}>}|null,
- *   leaves: number|null, reviews: number|null, fixes: number|null, certs: number|null,
- *   reminders: number|null,
+ *   leaves: number|null, reviews: number|null, fixes: number|null, reminders: number|null,
  *   me: {shift: {headline: string, subline: string, tone: string}, next: Array<object>}|null,
  *   work: {daily: number, deep: number, fix: number, pending: number, incoming: number}|null,
  *   incoming: number|null,
@@ -243,7 +233,6 @@ export function workbenchHomeSummary({
       leaves: countPendingLeaves(inbox),
       reviews: countPendingItems(queue),
       fixes: countOverdueFixes(fix, now),
-      certs: countHealthCertDue(queue),
       reminders: countHrReminders(reminders),
       me: null,
       work: null,
@@ -265,7 +254,6 @@ export function workbenchHomeSummary({
       leaves: null,
       reviews: null,
       fixes: null,
-      certs: null,
       reminders: null,
       me: { shift: staffShiftCell(today), next: staffNextDays(me) },
       work,
@@ -279,7 +267,6 @@ export function workbenchHomeSummary({
     leaves: null,
     reviews: null,
     fixes: null,
-    certs: null,
     reminders: null,
     me: null,
     work: null,

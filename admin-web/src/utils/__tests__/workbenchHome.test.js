@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   HOME_LINKS,
-  countHealthCertDue,
   countHrReminders,
   countOverdueFixes,
   countPendingItems,
@@ -49,7 +48,9 @@ const QUEUE = {
   date: '2026-10-05',
   is_today: true,
   items: [{ item_id: 1, status: '待验收' }],
-  // 2026-10 花名册改版：健康证到期那一格的数字（未停用且临期 / 过期的人数）。
+  // 健康证到期那一块（2026-10 花名册改版加的）：**首页 2026-10-08 起不再读它** —— 那个
+  // 数字并进了下面 `REMINDERS` 的 `certs`（同一件事不再两处报数）。留在这里是因为它仍是
+  // `daily-queue` 已发布的响应形状。
   health_cert_due: { count: 2, items: [{ id: 5, name: '孙平', expires_on: '2026-09-01', state: 'expired' }] },
 }
 
@@ -61,8 +62,9 @@ const FIX = {
   ],
 }
 
-// 人事提醒那一格的两块（票 05 / 06 的 `GET /api/hygiene/admin/hr-reminders`）：
-// `seniority.count` 只数「该调的」（含历史欠调），`birthdays.count` 是本月生日人数。
+// 人事提醒那一格的三块（`GET /api/hygiene/admin/hr-reminders`）：`seniority.count` 只数
+// 「该调的」（含历史欠调）、`birthdays.count` 是本月生日人数、`certs.count` 是健康证临期 /
+// 过期人数（2026-10-08 从首页单独一格并进来）。
 const REMINDERS = {
   seniority: {
     count: 2,
@@ -76,6 +78,7 @@ const REMINDERS = {
     items: [{ id: 3, name: '王五', birthday: '10-14', on: '2026-10-14', day: 14, state: 'upcoming' }],
   },
   incomplete: { count: 0, items: [] },
+  certs: { count: 1, items: [] },
 }
 
 describe('店长那三个数字', () => {
@@ -192,7 +195,7 @@ describe('员工那一档', () => {
 })
 
 describe('按身份给两个视角', () => {
-  it('店长：今天谁上班 + 五个数字（各自带跳转目标）', () => {
+  it('店长：今天谁上班 + 四个数字（各自带跳转目标）', () => {
     const summary = workbenchHomeSummary({
       identity: 'super',
       day: DAY,
@@ -208,35 +211,40 @@ describe('按身份给两个视角', () => {
     expect(summary.leaves).toBe(2)
     expect(summary.reviews).toBe(1)
     expect(summary.fixes).toBe(1)
-    expect(summary.certs).toBe(2)
-    expect(summary.reminders).toBe(3)
+    expect(summary.reminders).toBe(4)
   })
 
-  it('健康证到期：数字只认 daily-queue 的 health_cert_due.count，读不到给 null（不是 0）', () => {
-    expect(countHealthCertDue(QUEUE)).toBe(2)
-    expect(countHealthCertDue({ ...QUEUE, health_cert_due: { count: 0, items: [] } })).toBe(0)
-    // 键没下发 / 整个队列读不出来 → 「没读到」，页面画「—」。
-    expect(countHealthCertDue({ ...QUEUE, health_cert_due: undefined })).toBeNull()
-    expect(countHealthCertDue(null)).toBeNull()
-
-    const summary = workbenchHomeSummary({ identity: 'super', queue: { items: [] } })
-    expect(summary.certs).toBeNull()
+  it('健康证到期不再是首页单独一格：它的数字并进人事提醒（2026-10-08 用户裁定）', () => {
+    // 钉住「同一件事不再两处报数」：那一格的落点不该再存在，数字改由人事提醒承载。
+    expect(HOME_LINKS.certs).toBeUndefined()
+    expect(
+      countHrReminders({ seniority: { count: 2 }, birthdays: { count: 1 }, certs: { count: 3 } }),
+    ).toBe(6)
   })
 
-  it('人事提醒：两块相加；少一块就给 null（不给一个偏小的「看着没事」的数）', () => {
-    expect(countHrReminders(REMINDERS)).toBe(3)
-    expect(countHrReminders({ seniority: { count: 0 }, birthdays: { count: 0 } })).toBe(0)
-    expect(countHrReminders({ seniority: { count: 2 }, birthdays: { count: 1 } })).toBe(3)
+  it('人事提醒：三块相加；少一块就给 null（不给一个偏小的「看着没事」的数）', () => {
+    expect(countHrReminders(REMINDERS)).toBe(4)
+    expect(
+      countHrReminders({ seniority: { count: 0 }, birthdays: { count: 0 }, certs: { count: 0 } }),
+    ).toBe(0)
+    expect(
+      countHrReminders({ seniority: { count: 2 }, birthdays: { count: 1 }, certs: { count: 1 } }),
+    ).toBe(4)
     // 少一块：相加出来的数会偏小、看上去像「这个月没事」，所以整格按「没读到」办。
-    expect(countHrReminders({ seniority: { count: 2 } })).toBeNull()
-    expect(countHrReminders({ birthdays: { count: 1 } })).toBeNull()
+    expect(countHrReminders({ seniority: { count: 2 }, birthdays: { count: 1 } })).toBeNull()
+    expect(countHrReminders({ seniority: { count: 2 }, certs: { count: 1 } })).toBeNull()
+    expect(countHrReminders({ birthdays: { count: 1 }, certs: { count: 1 } })).toBeNull()
     // 计数缺失 / 不是数（服务端换了形状）同样按没读到。
-    expect(countHrReminders({ seniority: { count: null }, birthdays: { count: 1 } })).toBeNull()
-    expect(countHrReminders({ seniority: { count: 'x' }, birthdays: { count: 1 } })).toBeNull()
+    expect(
+      countHrReminders({ seniority: { count: null }, birthdays: { count: 1 }, certs: { count: 1 } }),
+    ).toBeNull()
+    expect(
+      countHrReminders({ seniority: { count: 'x' }, birthdays: { count: 1 }, certs: { count: 1 } }),
+    ).toBeNull()
     expect(countHrReminders(null)).toBeNull()
 
     const summary = workbenchHomeSummary({ identity: 'super', reminders: REMINDERS })
-    expect(summary.reminders).toBe(3)
+    expect(summary.reminders).toBe(4)
     // 整块没读到（接口失败 / 还没回来）也是 null，不是 0。
     expect(workbenchHomeSummary({ identity: 'super' }).reminders).toBeNull()
   })
@@ -269,11 +277,10 @@ describe('按身份给两个视角', () => {
 })
 
 describe('数字点进去的地方', () => {
-  it('五个数字各指一页专页，员工那两个指员工页', () => {
+  it('四个数字各指一页专页，员工那两个指员工页', () => {
     expect(HOME_LINKS.leaves).toBe('/workbench/hr/inbox')
     expect(HOME_LINKS.reviews).toBe('/workbench/floor/daily')
     expect(HOME_LINKS.fixes).toBe('/workbench/floor/fix')
-    expect(HOME_LINKS.certs).toBe('/workbench/hr/roster')
     expect(HOME_LINKS.reminders).toBe('/workbench/hr/reminders')
     expect(HOME_LINKS.duty).toBe('/workbench/hr/calendar')
     expect(HOME_LINKS.myItems).toBe('/workbench/me/clean')

@@ -62,10 +62,12 @@ function managerData(overrides = {}) {
       health_cert_due: { count: 0, items: [] },
     },
     '/api/hygiene/admin/fix': { items: [] },
-    // 人事提醒（第五格）：本月该调工龄奖的人数 + 本月生日人数，两块都从这一条来。
+    // 人事提醒：本月该调工龄奖 + 本月生日 + 健康证临期/过期的人数，三块都从这一条来
+    // （健康证到期 2026-10-08 从首页单独一格并进来）。
     '/api/hygiene/admin/hr-reminders': {
       seniority: { count: 0, items: [] },
       birthdays: { count: 0, items: [] },
+      certs: { count: 0, items: [] },
       incomplete: { count: 0, items: [] },
     },
     ...overrides,
@@ -201,10 +203,10 @@ describe('工作台首页 · 店长视角', () => {
     })
 
     const cells = wrapper.findAll('.wbh-cell')
-    expect(cells).toHaveLength(5)
+    expect(cells).toHaveLength(4)
     expect(cells.map((cell) => cell.attributes('href'))).toEqual([
       '/workbench/hr/inbox', '/workbench/floor/daily', '/workbench/floor/fix',
-      '/workbench/hr/roster', '/workbench/hr/reminders',
+      '/workbench/hr/reminders',
     ])
     // 待批请假只数请假（换班那条还在等对方点头，店长这儿看不到）。
     expect(wrapper.get('.wbh-cell.leaves .wbh-num').text()).toBe('1')
@@ -213,7 +215,7 @@ describe('工作台首页 · 店长视角', () => {
     expect(wrapper.get('.wbh-cell.fixes .wbh-num').text()).toBe('1')
   })
 
-  it('健康证到期那一格：数字与落点都来自 daily-queue 的 health_cert_due', async () => {
+  it('健康证到期不再占首页一格：它的数字并进人事提醒（2026-10-08 用户裁定）', async () => {
     const { wrapper } = await mountHome({
       identity: 'super',
       table: managerData({
@@ -221,31 +223,17 @@ describe('工作台首页 · 店长视角', () => {
           date: '2026-10-05',
           is_today: true,
           items: [],
+          // 这条接口仍然带健康证那一块，但首页已经不看它了 —— 数字走 hr-reminders。
           health_cert_due: { count: 2, items: [{ id: 5, name: '孙平', expires_on: '2026-09-01', state: 'expired' }] },
         },
       }),
     })
 
-    const cell = wrapper.get('.wbh-cell.certs')
-    expect(cell.get('.wbh-num').text()).toBe('2')
-    expect(cell.text()).toContain('健康证到期')
-    expect(cell.text()).toContain('花名册')
-    expect(cell.attributes('href')).toBe('/workbench/hr/roster')
-    expect(cell.attributes('title')).toBe('临期或已过期的人数')
+    expect(wrapper.find('.wbh-cell.certs').exists()).toBe(false)
+    expect(wrapper.get('.wbh-cell.reminders').attributes('href')).toBe('/workbench/hr/reminders')
     // 首页只摊数字：敏感字段（底薪 / 身份证号）哪里都不出现。
     expect(wrapper.text()).not.toContain('底薪')
     expect(wrapper.text()).not.toContain('身份证号')
-  })
-
-  it('health_cert_due 没下发时那一格给「—」，不是 0（没读到 ≠ 没有）', async () => {
-    const { wrapper } = await mountHome({
-      identity: 'super',
-      table: managerData({
-        '/api/hygiene/admin/daily-queue': { date: '2026-10-05', is_today: true, items: [] },
-      }),
-    })
-
-    expect(wrapper.get('.wbh-cell.certs .wbh-num').text()).toBe('—')
   })
 
   it('hr-reminders 读不出来时那一格给「—」，不是 0（少一块也不给半截数）', async () => {
@@ -265,28 +253,30 @@ describe('工作台首页 · 店长视角', () => {
     expect(partial.wrapper.get('.wbh-cell.reminders .wbh-num').text()).toBe('—')
   })
 
-  it('人事提醒那一格：数字是两块相加，点进人事提醒页', async () => {
+  it('人事提醒那一格：数字是三块相加，点进人事提醒页', async () => {
     const { wrapper } = await mountHome({
       identity: 'super',
       table: managerData({
         '/api/hygiene/admin/hr-reminders': {
           seniority: { count: 2, items: [] },
           birthdays: { count: 1, items: [] },
-          // 档案待补的人数**不进这一格** —— 那是提醒页里的第三块，不是首页这一格的语义。
+          // 健康证到期（2026-10-08 从首页单独一格并进来）：它算进这个数字。
+          certs: { count: 1, items: [] },
+          // 档案待补的人数**不进这一格** —— 那不是一件要办的事，是档案缺项。
           incomplete: { count: 7, items: [] },
         },
       }),
     })
 
     const cell = wrapper.get('.wbh-cell.reminders')
-    expect(cell.get('.wbh-num').text()).toBe('3')
+    expect(cell.get('.wbh-num').text()).toBe('4')
     expect(cell.attributes('href')).toBe('/workbench/hr/reminders')
   })
 
   it('数字为 0 时是稳稳的 0（不是空白、也不是整块消失）', async () => {
     const { wrapper } = await mountHome({ identity: 'super', table: managerData() })
 
-    for (const key of ['leaves', 'reviews', 'fixes', 'certs', 'reminders']) {
+    for (const key of ['leaves', 'reviews', 'fixes', 'reminders']) {
       const num = wrapper.get(`.wbh-cell.${key} .wbh-num`)
       expect(num.text()).toBe('0')
     }
