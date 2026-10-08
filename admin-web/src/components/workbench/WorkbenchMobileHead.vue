@@ -6,11 +6,15 @@
 // 配方页自己还带一条 133px 的 `header.site-header` 白条）。两块一叠就是「两条黑带」，
 // 首屏 180px 上下没了，而组里的页在 390px 下一屏本来也摆不下。方案 C 把组内导航整个收进
 // 一个下拉，顶部只剩一行：
-//   `[组名] [当前页 ▾] ……… [● 身份] [⋮]`
+//   `[组名 ▾] ……… [● 身份] [⋮]`
 // 56px，剩下的全还给内容。
 //
+// 2026-10-08 用户裁定「头部顶栏最左侧的页面标题不要」：原来那个 `[当前页 ▾]` 是这一行里
+// 最重的元素，而页名在页内有 H1、顶栏再写一遍是重复。于是**页面名退出顶栏，换页的入口
+// 挪到组名上**（组名保持安静小标签的外观）—— 顶栏更空，换页能力一个没丢。
+//
 // 三件事各有各的出口，一个都没丢：
-//   - **换页**（原来横滑带 / 白条上的入口）→ 点页名展开那一组的页面列表（当前页高亮）；
+//   - **换页**（原来横滑带 / 白条上的入口）→ 点**组名**展开那一组的页面列表（当前页高亮）；
 //   - **身份**（原来顶栏那颗）→ 直接挂 `WorkbenchIdentitySwitcher`，它自己是收起态 + 菜单；
 //   - **退出 / 回后台**（原来顶栏那两颗按钮）→ 收进 `⋮`。
 //
@@ -53,8 +57,14 @@ function navKey(path) {
 
 const groupKey = computed(() => workbenchGroupOf(route.path))
 const group = computed(() => workbenchGroup(groupKey.value))
-/** 组名：拿不到组（清单里没有的路径，比如测试里的临时路由）时整条不渲染页面那一段。 */
-const groupLabel = computed(() => (group.value ? group.value.label : ''))
+/** 组名标签：组表里的 `headLabel` 优先（首页那一组用它写「工作台」—— 它的组名与唯一那一页
+ *  的标题都是「今天」，并排写两遍是废话）；拿不到组（清单里没有的路径，比如测试里的临时
+ *  路由）时是空串，整条不渲染页面那一段。 */
+const groupLabel = computed(() => {
+  const g = group.value
+  if (!g) return ''
+  return g.headLabel || g.label
+})
 
 const pages = computed(() => {
   if (props.items && props.items.length) return props.items
@@ -75,11 +85,6 @@ const current = computed(() => {
 
 /** 只有一页的组（「今天」就是）不给下拉：点开是空的比不显示更糟。 */
 const canSwitch = computed(() => pages.value.length > 1)
-
-/** 组名那个小标签：组名与页名一个字不差时（「今天」那一格）不把同一个词写两遍。 */
-const showGroupTag = computed(
-  () => Boolean(groupLabel.value) && (!current.value || current.value.title !== groupLabel.value),
-)
 
 const pagesOpen = ref(false)
 const moreOpen = ref(false)
@@ -119,10 +124,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 <template>
   <header v-if="group" class="wmh">
-    <span v-if="showGroupTag" class="wmh-grp">{{ groupLabel }}</span>
-
+    <!-- 组名兼换页入口（2026-10-08 用户裁定：「头部顶栏最左侧的页面标题不要」）——
+         页面名在页内已经有 H1，顶栏再写一遍是重复；换页的入口挪到组名上，功能一个没丢。
+         视觉上它仍是个安静的小标签（热区照旧 44px），顶栏因此比原来空一截。 -->
     <button
-      class="wmh-page"
+      v-if="groupLabel"
+      class="wmh-grp"
       :class="{ 'is-static': !canSwitch }"
       type="button"
       :aria-haspopup="canSwitch ? 'true' : undefined"
@@ -130,8 +137,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       :aria-label="canSwitch ? `切换页面，当前：${current ? current.title : groupLabel}` : undefined"
       @click="togglePages"
     >
-      <span class="wmh-page-name">{{ current ? current.title : groupLabel }}</span>
-      <SvgIcon v-if="canSwitch" class="wmh-caret" name="chevron-down" :size="14" />
+      <span class="wmh-grp-name">{{ groupLabel }}</span>
+      <SvgIcon v-if="canSwitch" class="wmh-caret" name="chevron-down" :size="13" />
     </button>
 
     <span class="wmh-sp"></span>
@@ -219,38 +226,29 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   }
 }
 
-/* 组名：一个安静的标签，不做链接（回组落点 / 首页的入口在底栏那几格）。 */
+/* 组名（2026-10-08 起它同时是换页入口）：外观仍是个安静的小标签 —— 页面名已经不在
+   顶栏了，这一行最重的东西交给右边那颗身份；热区照旧 ≥44px，手机上点得动。 */
 .wmh-grp {
-  flex: 0 0 auto;
-  padding: 5px 9px;
-  border-radius: 8px;
-  background: rgba(133, 205, 198, .08);
-  color: var(--hy-faint);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-/* 当前页 = 这一行里最重的东西：它同时是"我在哪"和"换页"的入口。 */
-.wmh-page {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
+  flex: 0 0 auto;
   min-height: 44px;
-  padding: 0 12px;
-  border: 1px solid var(--hy-mint-line);
-  border-radius: 12px;
-  background: var(--hy-mint-soft);
-  color: var(--hy-ink);
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(133, 205, 198, .08);
+  color: var(--hy-muted);
   font: inherit;
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 12.5px;
+  font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
 }
-/* 组里只有一页（「今天」）：它是标题不是按钮，别画成可点的样子。 */
-.wmh-page.is-static { cursor: default; }
-.wmh-page-name { max-width: 7.5em; overflow: hidden; text-overflow: ellipsis; }
+.wmh-grp:hover { background: var(--hy-mint-soft); color: var(--hy-ink); }
+/* 组里只有一页（「今天」）：它是标签不是按钮，别画成可点的样子。 */
+.wmh-grp.is-static { cursor: default; }
+.wmh-grp-name { max-width: 7.5em; overflow: hidden; text-overflow: ellipsis; }
 .wmh-caret { color: var(--hy-mint); }
 
 .wmh-sp { flex: 1 1 auto; min-width: 0; }

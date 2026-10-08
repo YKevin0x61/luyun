@@ -20,7 +20,8 @@ const SHELL = read('../WorkbenchLayout.vue')
 const TABBAR = read('../../../components/workbench/WorkbenchTabBar.vue')
 const EXIT_BUTTON = read('../../../components/workbench/WorkbenchExitButton.vue')
 const SWITCHER = read('../../../components/workbench/WorkbenchIdentitySwitcher.vue')
-// 方案 C（2026-10-08）：手机档顶部那一行（组名 / 当前页下拉 / 身份 / 更多）。
+// 方案 C（2026-10-08）：手机档顶部那一行（组名 / 身份 / 更多）。
+// 同日第二版：页面名退出顶栏，换页入口挪到组名上（组名因此也是按钮）。
 const MOBILE_HEAD = read('../../../components/workbench/WorkbenchMobileHead.vue')
 const HR_SHELL = read('../../scheduling/SchedulingLayout.vue')
 const HY_SHELL = read('../../hygiene/HygieneAdminLayout.vue')
@@ -145,11 +146,12 @@ describe('方案 C / B6：手机档顶部只剩一行，目标 ≥44px', () => {
     expect(SHELL).toMatch(/:deep\(\.wb-exit\)\s*\{[^}]*margin-left:\s*auto/)
   })
 
-  it('外壳（含页头）点击目标 ≥44px：页名 / 更多 / 下拉项 / 退出 / 切换器', () => {
+  it('外壳（含页头）点击目标 ≥44px：组名（换页入口）/ 更多 / 下拉项 / 退出 / 切换器', () => {
     // 顶栏收进页头之后，手机上真正要点的是页头里这几件 —— 逐个守住下限。
     // 页头那三件写在**基线**里（所以不按媒体查询断）：整条只在手机档渲染
     // （`.wmh` 平时是 `display: none`），尺寸规则没有分档的必要。
-    expect(MOBILE_HEAD).toMatch(/\.wmh-page\s*\{[^}]*min-height:\s*44px/)
+    // 组名兼换页入口（2026-10-08 第二版）：页面名已退出顶栏，热区仍照 44px 守。
+    expect(MOBILE_HEAD).toMatch(/\.wmh-grp\s*\{[^}]*min-height:\s*44px/)
     expect(MOBILE_HEAD).toMatch(/\.wmh-more\s*\{[^}]*width:\s*44px/)
     expect(MOBILE_HEAD).toMatch(/\.wmh-item\s*\{[^}]*min-height:\s*48px/)
     expectMobileRule(EXIT_BUTTON, /\.wb-exit\s*\{[^}]*min-height:\s*44px/, '退出高度')
@@ -159,12 +161,18 @@ describe('方案 C / B6：手机档顶部只剩一行，目标 ≥44px', () => {
     expect(SWITCHER).toMatch(/\.wb-id-current\s*\{[^}]*min-height:\s*44px/)
   })
 
-  it('人事壳同一条账：‹后台与两排导航胶囊在手机档抬到 44px', () => {
-    expectMobileRule(HR_SHELL, /\.sched-back\s*\{[^}]*min-height:\s*44px/, '‹后台')
-    expectMobileRule(HR_SHELL, /\.sched-nav-item\s*\{[^}]*min-height:\s*44px/, '导航胶囊')
-    // 两条导航（工作台级 + 本组四页）在窄屏是**同一条**横滑带子，不各占一行。
-    expect(HR_SHELL).toMatch(/\.sched-navbar\s*\{[^}]*display:\s*flex/)
-    expectMobileRule(HR_SHELL, /\.sched-navbar\s*\{[^}]*flex-basis:\s*100%/, '导航带下沉一行')
+  it('人事壳同一条账：手机档顶部整个收进页头一行（2026-10-08）', () => {
+    // 顶上那一条在手机档 `display: none`：本组四页与退出 / 回后台都进 `WorkbenchMobileHead`。
+    // （原来那条"‹后台与两排导航胶囊抬到 44px"的账随之作废 —— 那些目标在手机档不再渲染；
+    //  页头自己的触控下限在上一段里逐个断着。）
+    expectMobileRule(HR_SHELL, /\.sched-top\s*\{\s*display:\s*none/, '顶栏在手机档收起')
+    expect(HR_SHELL).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
+    expect(HR_SHELL).toMatch(/<WorkbenchMobileHead[^>]*\/>/)
+    // 桌面档那条带子照旧：工作台级一排 + 本组四页共处一行（收的是手机档那一份）。
+    expect(HR_SHELL).toMatch(/\.sched-navbar\s*\{\s*display:\s*flex/)
+    // 底栏仍是手机档的主导航：钉在视口底，内容让出那一条。
+    expectMobileRule(HR_SHELL, /\.sched-tabbar\s*\{[^}]*position:\s*fixed/, '底栏钉在视口底')
+    expectMobileRule(HR_SHELL, /\.sched-shell\s*\{[^}]*padding-bottom:\s*calc\(57px/, '内容让出底栏高度')
   })
 
   it('共享件也补齐：现场壳的「后台」、表单按钮与输入框（花名册那种一屏 200+ 控件）', () => {
