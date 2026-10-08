@@ -27,6 +27,7 @@ from config import settings
 from database import CHINA_TZ, DatabaseManager
 from db_core.schema import ADMIN_READ_ONLY_TABLES, OVERTIME_TABLES
 from services.app_runtime import AppRuntime, set_runtime
+from services.business_day import current_business_date
 from services.hygiene.accounts import EmployeeAccounts
 from services.overtime.ledger import (
     MAX_REASON,
@@ -116,6 +117,25 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OvertimeError) as caught:
                 await self.ledger.submit(actor, early, 2, "前天加班")
             self.assertEqual(caught.exception.code, "past_window")
+
+    async def test_window_is_a_calendar_day_not_the_six_am_business_day(self):
+        """验收 3 的口径：窗口按**自然日**（零点切），不是 06:00 的营业日。
+
+        凌晨两点提交时，营业日还停在前一天 —— 窗口要是误用了营业日，「今天」那一笔
+        会被当成明天而拒掉（`docs/adr/0100` 的 _Avoid_ 点名了这一条）。所以这一条
+        把两个日期**并排**验一次：自然日的今天是 9/24，营业日仍然是 9/23。
+        """
+        employee = await self._employee()
+        night = datetime(2026, 9, 24, 2, 0, tzinfo=CHINA_TZ)
+        ledger = OvertimeLedger(self.db, now=lambda: night)
+        actor = EntryActor(employee_id=employee["id"])
+
+        self.assertEqual(current_business_date(night), "2026-09-23")  # 营业日还在前一天
+        self.assertEqual(ledger.today(), "2026-09-24")  # 自然日已经是这一天
+        self.assertEqual(ledger.yesterday(), "2026-09-23")
+
+        entry = await ledger.submit(actor, "2026-09-24", 2, "凌晨那笔加班")
+        self.assertEqual(entry["entry_date"], "2026-09-24")
 
     async def test_backfill_window_follows_the_submitter(self):
         """窗口按**提交人**判：有能力的店长与超管可补录任意过去日期，未来日期谁都收。
