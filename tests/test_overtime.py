@@ -14,6 +14,7 @@ import asyncio
 import tempfile
 import unittest
 from datetime import datetime
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -297,12 +298,161 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
             await self.ledger.list_mine(employee["id"], "2026-9")
         self.assertEqual(caught.exception.code, "invalid_month")
 
+    # ── 票 02：审批（批准 / 驳回 / 作废）与全店待办 ─────────────────────────
+
+    async def test_approve_moves_pending_to_approved_and_stamps_the_reviewer(self):
+        """验收 1：待审批能被批准；判的人与判的时间落在这一行上。"""
+        employee = await self._employee()
+        entry = await self.ledger.submit(
+            EntryActor(employee_id=employee["id"]), TODAY, 4, "下午加班"
+        )
+
+        approved = await self.ledger.approve(EntryActor(), entry["id"])
+
+        self.assertEqual(approved["status"], "approved")
+        self.assertEqual(approved["decided_by"], "super")
+        self.assertIsNotNone(approved["decided_at"])
+        self.assertEqual(approved["half_hours"], 4)
+
+    async def test_reject_needs_a_reason_and_keeps_it(self):
+        """验收 1：驳回不写理由被拒；写了就存在那一行上，员工看得到为什么。"""
+        employee = await self._employee()
+        entry = await self.ledger.submit(
+            EntryActor(employee_id=employee["id"]), TODAY, 3, "加班"
+        )
+
+        with self.assertRaises(OvertimeError) as caught:
+            await self.ledger.reject(EntryActor(), entry["id"], "   ")
+        self.assertEqual(caught.exception.code, "missing_reject_reason")
+        # 被拒的那一次一个字都没写：它还在待审批里等下一次判。
+        mine = (await self.ledger.list_mine(employee["id"]))["entries"]
+        self.assertEqual((mine[0]["status"], mine[0]["reject_reason"]), ("pending", None))
+
+        rejected = await self.ledger.reject(EntryActor(), entry["id"], "那天没有排班")
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(rejected["reject_reason"], "那天没有排班")
+        self.assertEqual(rejected["decided_by"], "super")
+
+        # 状态机只往前走：已经驳过的不再动。
+        with self.assertRaises(OvertimeError) as caught:
+            await self.ledger.reject(EntryActor(), entry["id"], "再驳一次")
+        self.assertEqual(caught.exception.code, "entry_not_pending")
+
+    async def test_void_only_applies_to_approved_entries(self):
+        """验收 3：只有已批准的能作废；作废后记录不消失、看得出被作废过。"""
+        employee = await self._employee()
+        entry = await self.ledger.submit(
+            EntryActor(employee_id=employee["id"]), TODAY, 5, "加班"
+        )
+
+        # 还没批的作废不了：作废撤销的是「已经点过的头」，不是「别急」。
+        with self.assertRaises(OvertimeError) as caught:
+            await self.ledger.void(EntryActor(), entry["id"])
+        self.assertEqual(caught.exception.code, "entry_not_approved")
+
+        await self.ledger.approve(EntryActor(), entry["id"])
+        voided = await self.ledger.void(EntryActor(), entry["id"])
+
+        self.assertEqual(voided["status"], "voided")
+        self.assertEqual(voided["decided_by"], "super")
+        self.assertIsNotNone(voided["decided_at"])
+        # 作废不是删除：那一行还在员工的列表里，状态是已作废。
+        rows = (await self.ledger.list_mine(employee["id"]))["entries"]
+        self.assertEqual(
+            [(row["id"], row["status"]) for row in rows], [(entry["id"], "voided")]
+        )
+
+        with self.assertRaises(OvertimeError) as caught:
+            await self.ledger.void(EntryActor(), entry["id"])
+        self.assertEqual(caught.exception.code, "entry_not_approved")
+
+    async def test_pending_queue_is_shop_wide_with_names(self):
+        """验收 1：管理端的待办是全店的 —— 谁提的、哪一天、多少小时、为什么。"""
+        me = await self._employee()
+        other = await self._employee(phone="13800138001", name="李四")
+        first = await self.ledger.submit(
+            EntryActor(employee_id=me["id"]), YESTERDAY, 3, "我加班"
+        )
+        second = await self.ledger.submit(
+            EntryActor(employee_id=other["id"]), TODAY, -2, "他补钟"
+        )
+        # 撤回的、已经批过的都不在队列里：待办回答的是「还等着谁点头」。
+        withdrawn = await self.ledger.submit(
+            EntryActor(employee_id=me["id"]), TODAY, 1, "撤回掉"
+        )
+        await self.ledger.cancel(me["id"], withdrawn["id"])
+        approved = await self.ledger.submit(
+            EntryActor(employee_id=other["id"]), TODAY, 4, "批过的"
+        )
+        await self.ledger.approve(EntryActor(), approved["id"])
+
+        pending = await self.ledger.list_pending()
+
+        self.assertEqual(pending["count"], 2)
+        # 旧的在前：待办是先来先处理，不是「最新动态」（同排班 inbox 的口径）。
+        self.assertEqual(
+            [row["id"] for row in pending["entries"]], [first["id"], second["id"]]
+        )
+        self.assertEqual(
+            [row["employee_name"] for row in pending["entries"]], ["张三", "李四"]
+        )
+        self.assertEqual(pending["entries"][1]["kind"], "makeup")
+        self.assertEqual(pending["today"], TODAY)
+
+    async def test_admin_list_shows_everyone_newest_first(self):
+        """验收 3 的前置：管理端要看得见**已经批过的**那几笔，作废才有地方点。"""
+        me = await self._employee()
+        other = await self._employee(phone="13800138001", name="李四")
+        august = await self.ledger.submit(
+            EntryActor(), "2026-08-31", 6, "上月忘登的加班", target_employee_id=me["id"]
+        )
+        september = await self.ledger.submit(
+            EntryActor(employee_id=other["id"]), TODAY, -3, "迟到补钟"
+        )
+        approved = await self.ledger.submit(
+            EntryActor(employee_id=me["id"]), TODAY, 4, "已批的加班"
+        )
+        await self.ledger.approve(EntryActor(), approved["id"])
+
+        listing = await self.ledger.list_entries()
+
+        self.assertEqual(listing["count"], 3)
+        # 新的在前：管理端这一页是查账（队列那一页才是先来先处理）。
+        self.assertEqual(
+            [row["id"] for row in listing["entries"]],
+            [approved["id"], september["id"], august["id"]],
+        )
+        self.assertEqual(listing["entries"][0]["employee_name"], "张三")
+        self.assertEqual(listing["entries"][0]["status"], "approved")
+
+        # 按月筛（自然月，同净时长的归月口径）：8 月只有代录的那一笔。
+        august_only = await self.ledger.list_entries(month="2026-08")
+        self.assertEqual([row["id"] for row in august_only["entries"]], [august["id"]])
+        # 按状态筛：还没批的两笔（李四的补钟在前、张三那笔代录的在后，按日期倒序）。
+        pending_only = await self.ledger.list_entries(status="pending")
+        self.assertEqual(
+            [row["id"] for row in pending_only["entries"]],
+            [september["id"], august["id"]],
+        )
+        # 按人筛：张三两笔（8 月那笔代录的也算在他头上）。
+        mine_only = await self.ledger.list_entries(employee_id=me["id"])
+        self.assertEqual(
+            [row["id"] for row in mine_only["entries"]], [approved["id"], august["id"]]
+        )
+
+        with self.assertRaises(OvertimeError) as caught:
+            await self.ledger.list_entries(month="2026-8")
+        self.assertEqual(caught.exception.code, "invalid_month")
+
 
 class OvertimeTableContractTest(unittest.TestCase):
     """验收 7：新表进表名清单，Admin 的数据浏览器里只读（写入口在 HTTP 那一侧钉）。"""
 
     def test_new_tables_are_registered_read_only(self):
-        self.assertEqual(set(OVERTIME_TABLES), {"overtime_entries"})
+        # 断言的是**「加班台账这张表在里面」，不是「清单里只有它」**：这张清单是这一批
+        # 票共享的（票 03 的底薪快照、票 05 的工龄奖留痕各自追加自己的表），写死全集
+        # 会让别人加一张表就红在这里 —— 那不是契约，那是排期。
+        self.assertIn("overtime_entries", OVERTIME_TABLES)
         for table in OVERTIME_TABLES:
             self.assertIn(table, ADMIN_READ_ONLY_TABLES)
 
@@ -517,3 +667,283 @@ def test_generic_admin_write_path_rejects_the_new_table(overtime_http):
 
     blocked = client.delete(f"/api/admin/tables/overtime_entries/rows/{entry_id}")
     assert blocked.status_code == 403, blocked.text
+
+
+# ── 票 02：管理端的审批台 ────────────────────────────────────────────────────
+
+
+def _submit(client, entry_date, half_hours, reason):
+    response = client.post(
+        "/api/overtime/me",
+        json={"entry_date": entry_date, "half_hours": half_hours, "reason": reason},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["entry"]
+
+
+def _admin_login(client):
+    """切回管理端那一套 cookie（两套 cookie 名字不同，本来就允许并存；这里清干净再登）。"""
+    client.cookies.clear()
+    response = client.post(
+        "/api/auth/login",
+        json={"username": ADMIN["username"], "password": ADMIN["password"]},
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_admin_decides_pending_entries(overtime_http):
+    """验收 1/2：管理端读得到全店待办，能批准、能驳回（驳回必须写理由）。"""
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    first = _submit(client, YESTERDAY, 13, "中秋加班")
+    second = _submit(client, TODAY, -4, "迟到补钟")
+    _admin_login(client)
+
+    pending = client.get("/api/overtime/admin/pending")
+    assert pending.status_code == 200, pending.text
+    queue = pending.json()
+    assert queue["count"] == 2
+    # 旧的在前：先来先处理。
+    assert [row["id"] for row in queue["entries"]] == [first["id"], second["id"]]
+    assert queue["entries"][0]["employee_name"] == NAME
+
+    approved = client.post(f"/api/overtime/admin/entries/{first['id']}/approve")
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["entry"]["status"] == "approved"
+
+    no_reason = client.post(f"/api/overtime/admin/entries/{second['id']}/reject", json={})
+    assert no_reason.status_code == 400
+    assert "理由" in no_reason.json()["detail"]
+
+    rejected = client.post(
+        f"/api/overtime/admin/entries/{second['id']}/reject",
+        json={"reason": "那天没有排班"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    decided = rejected.json()["entry"]
+    assert (decided["status"], decided["reject_reason"]) == ("rejected", "那天没有排班")
+
+    # 状态机只往前走：已经批过 / 驳过的再来一次都是 400（不是 500，也不是静默成功）。
+    assert client.post(f"/api/overtime/admin/entries/{first['id']}/approve").status_code == 400
+    assert client.post(f"/api/overtime/admin/entries/{second['id']}/approve").status_code == 400
+    # 队列空了，台账里两条都还在（驳回不是删除）。
+    assert client.get("/api/overtime/admin/pending").json()["count"] == 0
+    listing = client.get("/api/overtime/admin/entries").json()
+    assert [row["status"] for row in listing["entries"]] == ["rejected", "approved"]
+
+
+def test_admin_endpoints_need_an_admin_session(overtime_http):
+    """两扇门各认各的 cookie：匿名与员工会话都打不进管理端那几条。"""
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+
+    client.cookies.clear()
+    assert client.get("/api/overtime/admin/pending").status_code == 401
+    assert client.get("/api/overtime/admin/entries").status_code == 401
+    assert client.post("/api/overtime/admin/entries/1/approve").status_code == 401
+    assert client.post("/api/overtime/admin/entries/1/void").status_code == 401
+
+    # 员工会话是员工那扇门的钥匙，不是管理端的。
+    _staff_cookie(client, accounts)
+    assert client.get("/api/overtime/admin/pending").status_code == 401
+    assert client.post("/api/overtime/admin/entries/1/approve").status_code == 401
+
+
+def test_admin_lists_employees_for_backfill(overtime_http):
+    """代录要选人：这一条只回员工号 / 姓名 / 停用与否。
+
+    **不带身份证与底薪** —— 加班页只需要「选谁」，没必要把花名册整行搬进这个页面；
+    这一条也不读 `overtime_entries`，所以缺 0021 时它照样能用。
+    """
+    client, _db, accounts = overtime_http
+    employee = _employee_id(accounts)
+    _admin_login(client)
+
+    listing = client.get("/api/overtime/admin/employees")
+    assert listing.status_code == 200, listing.text
+    people = {row["id"]: row for row in listing.json()["employees"]}
+    assert people[employee]["name"] == NAME
+    assert set(people[employee]) == {"id", "name", "disabled"}
+
+    client.cookies.clear()
+    assert client.get("/api/overtime/admin/employees").status_code == 401
+
+
+def test_admin_lists_carry_the_limits(overtime_http):
+    """管理端那两条列表也把上限随响应下发：页面照它设输入，不在前端再写死一份。"""
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _admin_login(client)
+
+    for path in ("/api/overtime/admin/pending", "/api/overtime/admin/entries"):
+        payload = client.get(path).json()
+        assert payload["max_half_hours"] == 24, path
+        assert payload["max_reason"] == 50, path
+        assert payload["max_reject_reason"] == 100, path
+
+
+def test_admin_backfills_any_past_date(overtime_http):
+    """验收 4：超管能代员工补录任意过去日期，台账上认得出是代录的。"""
+    client, _db, accounts = overtime_http
+    employee = _employee_id(accounts)
+    _admin_login(client)
+
+    created = client.post(
+        "/api/overtime/admin/entries",
+        json={
+            "employee_id": employee,
+            "entry_date": "2026-08-01",
+            "half_hours": 8,
+            "reason": "上月忘登的加班",
+        },
+    )
+    assert created.status_code == 200, created.text
+    entry = created.json()["entry"]
+    assert (entry["created_by"], entry["employee_id"], entry["status"]) == (
+        "super",
+        employee,
+        "pending",
+    )
+
+    # 这笔算在被代录那个人的头上：他自己手机上看得见。
+    _staff_cookie(client, accounts)
+    mine = client.get("/api/overtime/me").json()
+    assert [row["id"] for row in mine["entries"]] == [entry["id"]]
+
+    _admin_login(client)
+    # 窗口放宽的是「过去」，不是「还没发生」；不指定算谁的也收不了（超管没有员工号）。
+    future = client.post(
+        "/api/overtime/admin/entries",
+        json={
+            "employee_id": employee,
+            "entry_date": "2026-09-25",
+            "half_hours": 2,
+            "reason": "明天加班",
+        },
+    )
+    assert future.status_code == 400
+    nobody = client.post(
+        "/api/overtime/admin/entries",
+        json={"entry_date": "2026-08-01", "half_hours": 2, "reason": "忘了选人"},
+    )
+    assert nobody.status_code == 404
+
+
+def test_admin_voids_an_approved_entry_and_it_stays_on_the_ledger(overtime_http):
+    """验收 3/5：作废只对已批准的生效；员工端看到「已作废」而不是「不见了」。"""
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    entry = _submit(client, TODAY, 4, "下午加班")
+    _admin_login(client)
+
+    # 还没批的作废不了。
+    assert client.post(f"/api/overtime/admin/entries/{entry['id']}/void").status_code == 400
+
+    assert (
+        client.post(f"/api/overtime/admin/entries/{entry['id']}/approve").status_code
+        == 200
+    )
+    voided = client.post(f"/api/overtime/admin/entries/{entry['id']}/void")
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["entry"]["status"] == "voided"
+    assert voided.json()["entry"]["decided_by"] == "super"
+    # 作废过的不能再作废。
+    assert client.post(f"/api/overtime/admin/entries/{entry['id']}/void").status_code == 400
+
+    _staff_cookie(client, accounts)
+    rows = client.get("/api/overtime/me").json()["entries"]
+    assert [(row["id"], row["status"]) for row in rows] == [(entry["id"], "voided")]
+
+
+def test_employee_sees_all_five_statuses_with_the_reject_reason(overtime_http):
+    """验收 5：员工端五种状态都显示得出来，被驳回的那笔带着理由。"""
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    pending = _submit(client, TODAY, 1, "待审批的")
+    approved = _submit(client, TODAY, 2, "批了的")
+    rejected = _submit(client, TODAY, 3, "驳了的")
+    cancelled = _submit(client, TODAY, 4, "撤了的")
+    voided = _submit(client, TODAY, 5, "批完又作废的")
+
+    client.delete(f"/api/overtime/me/{cancelled['id']}")
+    _admin_login(client)
+    # 批两笔（其中一笔稍后作废），另一笔直接驳回 —— 驳回的是「待审批」，不是「已批准」。
+    for entry in (approved, voided):
+        client.post(f"/api/overtime/admin/entries/{entry['id']}/approve")
+    client.post(
+        f"/api/overtime/admin/entries/{rejected['id']}/reject",
+        json={"reason": "那天没有排班"},
+    )
+    client.post(f"/api/overtime/admin/entries/{voided['id']}/void")
+
+    _staff_cookie(client, accounts)
+    rows = client.get("/api/overtime/me").json()["entries"]
+    by_id = {row["id"]: row for row in rows}
+    assert by_id[pending["id"]]["status"] == "pending"
+    assert by_id[approved["id"]]["status"] == "approved"
+    assert by_id[cancelled["id"]]["status"] == "cancelled"
+    assert by_id[voided["id"]]["status"] == "voided"
+    assert by_id[rejected["id"]]["status"] == "rejected"
+    assert by_id[rejected["id"]]["reject_reason"] == "那天没有排班"
+
+
+def test_staff_may_subscribe_to_the_overtime_topic():
+    """员工端页面订得上新的 topic —— 订不上，nudge 发出去了也没人听。"""
+    from services.realtime.hub import STAFF_ALLOWED_TOPICS, VALID_TOPICS
+
+    assert "overtime" in VALID_TOPICS
+    assert "overtime" in STAFF_ALLOWED_TOPICS
+
+
+def test_every_move_broadcasts_one_data_less_nudge_to_the_owner(
+    overtime_http, monkeypatch
+):
+    """验收 7：提交、撤回、批准、驳回各按一人一条广播给对应员工（nudge 不带数据）。"""
+    client, _db, accounts = overtime_http
+    employee = _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    broadcast = AsyncMock()
+    monkeypatch.setattr(overtime_module.realtime_hub, "broadcast_nudge", broadcast)
+
+    def calls():
+        return [call.args for call in broadcast.await_args_list]
+
+    entry = _submit(client, TODAY, 4, "下午加班")
+    assert ("overtime", {"reason": "entry_submitted", "employee_id": employee}) in calls()
+
+    broadcast.reset_mock()
+    client.delete(f"/api/overtime/me/{entry['id']}")
+    assert ("overtime", {"reason": "entry_cancelled", "employee_id": employee}) in calls()
+
+    second = _submit(client, TODAY, 2, "再一笔")
+    _admin_login(client)
+
+    broadcast.reset_mock()
+    approved = client.post(f"/api/overtime/admin/entries/{second['id']}/approve")
+    assert approved.status_code == 200, approved.text
+    assert ("overtime", {"reason": "entry_approved", "employee_id": employee}) in calls()
+
+    third = _submit_for(client, accounts, TODAY, -2, "补钟一笔")
+    broadcast.reset_mock()
+    rejected = client.post(
+        f"/api/overtime/admin/entries/{third['id']}/reject",
+        json={"reason": "那天没有排班"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert ("overtime", {"reason": "entry_rejected", "employee_id": employee}) in calls()
+
+    broadcast.reset_mock()
+    voided = client.post(f"/api/overtime/admin/entries/{second['id']}/void")
+    assert voided.status_code == 200, voided.text
+    assert ("overtime", {"reason": "entry_voided", "employee_id": employee}) in calls()
+
+
+def _submit_for(client, accounts, entry_date, half_hours, reason):
+    """以员工身份提一笔（供管理端上下文里造数据用：切回员工 → 提 → 再切回管理端）。"""
+    _staff_cookie(client, accounts)
+    entry = _submit(client, entry_date, half_hours, reason)
+    _admin_login(client)
+    return entry

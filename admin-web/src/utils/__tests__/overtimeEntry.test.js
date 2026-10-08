@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
   HALF_HOURS_MAX,
+  MAX_REJECT_REASON,
   entryDayOptions,
+  entryKindText,
   entryStatusText,
   entryStatusTone,
   formatHalfHours,
+  isSelfSubmitted,
   stepHalfHours,
+  submittedByText,
 } from '../overtimeEntry.js'
 
 // 加班与补钟（票 01）的界面口径：**1 格 = 0.5 小时**，库里存的就是「半小时数」
@@ -55,5 +59,30 @@ describe('加班与补钟的长度与符号（票 01）', () => {
     expect(entryStatusTone('approved')).toBe('ok')
     expect(entryStatusTone('rejected')).toBe('bad')
     expect(entryStatusText('whatever')).toBe('whatever')
+  })
+})
+
+// 票 02：管理端那一页要说清「这笔是谁提上来的」—— 员工自己提的、超管代录的、
+// 还是别的店长代录的（台账是工资依据，这一栏不能含糊）。
+describe('加班与补钟的来路（票 02）', () => {
+  it('加班与补钟的中文：符号就是类型，不另存 kind', () => {
+    expect(entryKindText('overtime')).toBe('加班')
+    expect(entryKindText('makeup')).toBe('补钟')
+  })
+
+  it('本人提的按员工号认，代录的分得清超管与同事', () => {
+    const mine = { employee_id: 7, created_by: 'staff:7' }
+    const bySuper = { employee_id: 7, created_by: 'super' }
+    const byPeer = { employee_id: 7, created_by: 'staff:9' }
+
+    expect(isSelfSubmitted(mine)).toBe(true)
+    expect(isSelfSubmitted(bySuper)).toBe(false)
+    expect(submittedByText(mine)).toBe('本人提交')
+    expect(submittedByText(bySuper)).toBe('超级管理员代录')
+    expect(submittedByText(byPeer)).toBe('同事代录')
+  })
+
+  it('驳回理由限长与后端同源（100 个字）', () => {
+    expect(MAX_REJECT_REASON).toBe(100)
   })
 })

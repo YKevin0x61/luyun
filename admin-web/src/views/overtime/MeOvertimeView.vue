@@ -20,6 +20,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { loginRedirectTarget } from '../../utils/loginNext'
 import { staffRequest } from '../../utils/hygieneStaff'
@@ -146,6 +147,10 @@ onMounted(() => {
   document.title = workbenchDocumentTitle('加班与补钟')
   load()
 })
+
+// 实时（票 02）：这一笔被批了 / 驳了 / 作废了，自己这台设备上的状态要跟着变 ——
+// 员工不用反复下拉刷新才知道「批没批」。quiet 重读：状态变化不值得把整页打回 loading。
+useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) })
 </script>
 
 <template>

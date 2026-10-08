@@ -16,15 +16,18 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from api.security import require_staff_session
+from api.security import require_session, require_staff_session
 from database import get_db
+from services.identity import EmployeeAccounts
 from services.overtime.ledger import (
     HALF_HOURS_MAX,
     MAX_REASON,
+    MAX_REJECT_REASON,
     EntryActor,
     OvertimeError,
     OvertimeLedger,
 )
+from services.realtime.hub import realtime_hub
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,12 @@ _ERROR_DETAILS = {
     "unknown_employee": "找不到这个员工：刷新一下再选",
     "unknown_entry": "这条登记不存在：可能已经被撤回，刷新看看",
     "entry_not_pending": "这条登记已经处理过了：刷新看看它现在到哪一步",
+    # 驳回的理由是给员工看的那句话：没有它，员工只会来问人（票 02 的验收 1）。
+    "missing_reject_reason": "驳回要写一句理由：员工要知道为什么不算",
+    # 带一个 `{}`：服务层把上限（`MAX_REJECT_REASON`）放在 `args[0]`。
+    "reject_reason_too_long": "驳回理由最多 {} 个字：请缩短一点再提交",
+    # 作废撤销的是「已经点过的头」：还没批的不叫作废，那叫「先别急」。
+    "entry_not_approved": "只有已批准的登记能作废：这一笔还没批，或已经被作废了",
     # 逐条点名迁移文件（同排班的 `not_migrated`）：503 要说清该应用哪一个脚本。
     # 票 03 / 05 各自加表时，也在这一句里补上自己的文件名。
     "not_migrated": (
@@ -109,6 +118,31 @@ def _who(employee: dict) -> dict:
     return {"id": employee["id"], "name": employee["name"]}
 
 
+# 上限随每条列表响应一起下去（员工端与管理端都带）：前端拿它设输入与文案，不再写死
+# 第二份 50 / 12 / 100（同 `/me/requests` 的 `max_request_note`）。服务层是唯一出处。
+_LIMITS = {
+    "max_reason": MAX_REASON,
+    "max_half_hours": HALF_HOURS_MAX,
+    "max_reject_reason": MAX_REJECT_REASON,
+}
+
+
+async def _overtime_nudge(reason: str, *employee_ids: Optional[int]) -> None:
+    """台账动了，叫相关的人自己来拉一次（nudge 不带数据，见 `services/realtime/hub.py`）。
+
+    scope 里带 `employee_id`：员工连接只会收到**自己**那条（hub 的 `_staff_owns_scope`），
+    管理端那侧不受限 —— 它本来就要看全店。一人一条，不为「多人」在 hub 里开特例
+    （同 `api/scheduling.py` 的 `_scheduling_nudge`）：一笔登记只牵一个人，所以这里
+    通常只有一条；写成可变参数是为了跟排班那条同一个形状，读的人不用想「为什么它不一样」。
+
+    读路径不广播：列表被谁刷新都不改变数据形状。
+    """
+    for employee_id in {int(item) for item in employee_ids if item is not None}:
+        await realtime_hub.broadcast_nudge(
+            "overtime", {"reason": reason, "employee_id": employee_id}
+        )
+
+
 @router.get("/me")
 async def my_entries(
     month: Optional[str] = Query(None, description="YYYY-MM；不填就是本月"),
@@ -128,8 +162,7 @@ async def my_entries(
         raise _bad_request(exc) from exc
     return {
         "employee": _who(employee),
-        "max_reason": MAX_REASON,
-        "max_half_hours": HALF_HOURS_MAX,
+        **_LIMITS,
         **data,
     }
 
@@ -151,6 +184,8 @@ async def submit_entry(
         )
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
+    # 提上去了：他自己那台设备（另一部手机 / 另一个标签页）与管理端的待办都该刷新。
+    await _overtime_nudge("entry_submitted", entry["employee_id"])
     return {"employee": _who(employee), "entry": entry}
 
 
@@ -169,4 +204,181 @@ async def cancel_entry(
         entry = await ledger.cancel(employee["id"], entry_id)
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
+    # 撤回了：管理端的待办里那一行自己就不在了，但要叫它重读一次才看得见。
+    await _overtime_nudge("entry_cancelled", entry["employee_id"])
     return {"employee": _who(employee), "entry": entry}
+
+
+# ── 管理端（票 02）：待办队列、批 / 驳 / 作废、代员工补录 ──────────────────────
+#
+# 两扇门各认各的 cookie：上面那三条只认员工会话，下面这些只认管理端会话。员工端
+# **没有**审批入口（那是票 04 的店长面，走能力键 + 员工手机端），所以这一票也不给
+# 员工门加任何管理端点 —— 「谁能批」在这份代码里是路径级别的，不是页面级别的。
+
+
+class BackfillRequest(BaseModel):
+    """超管替员工补一笔。
+
+    `employee_id` 必填：超管没有员工号，「这笔算谁的」不能猜（缺了会落到服务层的
+    `unknown_employee` 上，回一句中文 400）。日期不设窗口 —— 补录的意义就在这儿。
+    """
+
+    employee_id: Optional[int] = None
+    entry_date: Optional[str] = None
+    half_hours: Optional[float] = None
+    reason: Optional[str] = None
+
+
+class RejectRequest(BaseModel):
+    """驳回一笔。`reason` 必填 —— 缺了落到服务层的 `missing_reject_reason` 上。
+
+    给默认值而不是必填字段：pydantic 的缺失是英文 422，而这里要的是那句中文 400
+    （同 `EntryRequest` 的理由）。
+    """
+
+    reason: Optional[str] = None
+
+
+@router.get("/admin/employees")
+async def admin_employees(
+    db=Depends(get_db), _: str = Depends(require_session)
+) -> dict:
+    """代录时要选人：只回员工号、姓名、停用与否。
+
+    **不借排班或花名册那两个端点** —— 它们各自带一堆这一页用不到的东西（排班规则、
+    身份证号、底薪）；加班页只需要「选谁」。这一条也不读 `overtime_entries`，所以
+    缺 0021 那段时间里它照样能用：代录表单不该跟着那张表一起 503。
+
+    停用的人也在名单里（历史登记可能还要补在他头上），由前端标出来 —— 这一层不替
+    业务决定「停用的人还能不能被补录」。
+    """
+    roster = await EmployeeAccounts(db).list_roster()
+    return {
+        "employees": [
+            {
+                "id": int(employee["id"]),
+                "name": employee.get("name") or "",
+                "disabled": bool(employee.get("disabled")),
+            }
+            for employee in roster
+        ]
+    }
+
+
+@router.get("/admin/pending")
+async def admin_pending(
+    db=Depends(get_db), _: str = Depends(require_session)
+) -> dict:
+    """全店**等审批**的队列，旧的在前（先来先处理，同排班 `inbox` 的口径）。
+
+    每条带 `employee_name`：队列上要写成「李四 · 9/24 · +6.5 小时 · 中秋加班」。
+    """
+    ledger = OvertimeLedger(db)
+    try:
+        return {**await ledger.list_pending(), **_LIMITS}
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get("/admin/entries")
+async def admin_entries(
+    month: Optional[str] = Query(None, description="YYYY-MM；按登记日期所在自然月筛"),
+    employee_id: Optional[int] = Query(None),
+    status: Optional[str] = Query(None),
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """全店台账，**新的在前**。
+
+    管理端拿它做两件事：找一条**已经批过**的来作废（待办队列里只有待审批的），
+    以及代录之后回头确认写对了没有。
+    """
+    ledger = OvertimeLedger(db)
+    try:
+        data = await ledger.list_entries(
+            month=month, employee_id=employee_id, status=status
+        )
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    return {**data, **_LIMITS}
+
+
+@router.post("/admin/entries")
+async def admin_backfill(
+    payload: BackfillRequest,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """代员工补录一笔（任意过去日期）。
+
+    actor 是 `EntryActor()`：`created_by` 写成 `super`，台账上分得清「员工自己提的」
+    与「超管替他补的」（票 02 的验收 4）。
+    """
+    ledger = OvertimeLedger(db)
+    try:
+        entry = await ledger.submit(
+            EntryActor(),
+            payload.entry_date,
+            payload.half_hours,
+            payload.reason,
+            target_employee_id=payload.employee_id,
+        )
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    # 代录也是一笔新登记：那个人自己手机上要出现它，管理端列表也要重读。
+    await _overtime_nudge("entry_submitted", entry["employee_id"])
+    return {"entry": entry}
+
+
+@router.post("/admin/entries/{entry_id}/approve")
+async def admin_approve(
+    entry_id: int,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """批准一笔待审批的登记。状态谓词在服务层的写锁里：重复点只有第一次算数。"""
+    ledger = OvertimeLedger(db)
+    try:
+        entry = await ledger.approve(EntryActor(), entry_id)
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("entry_approved", entry["employee_id"])
+    return {"entry": entry}
+
+
+@router.post("/admin/entries/{entry_id}/reject")
+async def admin_reject(
+    entry_id: int,
+    payload: RejectRequest,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """驳回一笔待审批的登记 —— **必须写理由**，理由会出现在员工手机上。"""
+    ledger = OvertimeLedger(db)
+    try:
+        entry = await ledger.reject(EntryActor(), entry_id, payload.reason)
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    # 驳回的理由就在这条登记上：员工端重读一次才看得到为什么。
+    await _overtime_nudge("entry_rejected", entry["employee_id"])
+    return {"entry": entry}
+
+
+@router.post("/admin/entries/{entry_id}/void")
+async def admin_void(
+    entry_id: int,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """作废一笔**已批准**的登记：批准之后员工动不了它，只有这里能救回一个批错的。
+
+    作废不是删除 —— 那一行还在（状态 `voided`），员工手机上看得见它被作废过。
+    """
+    ledger = OvertimeLedger(db)
+    try:
+        entry = await ledger.void(EntryActor(), entry_id)
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    # 作废也要让员工知道：他手机上那一笔从「已批准」变成了「已作废」。
+    await _overtime_nudge("entry_voided", entry["employee_id"])
+    return {"entry": entry}

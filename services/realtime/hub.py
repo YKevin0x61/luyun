@@ -40,18 +40,22 @@ VALID_TOPICS = {
     "admin",
     "hygiene",
     "scheduling",
+    "overtime",
 }
 
 _VALID_ACTIONS = {"subscribe", "unsubscribe", "ping"}
 
-# 员工（staff）会话只允许订阅卫生与排班两个主题。nudge 不带数据，但 orders/tables/logs/admin
+# 员工（staff）会话只允许订阅卫生、排班与加班三个主题。nudge 不带数据，但 orders/tables/logs/admin
 # 的**时序**本身就是门店经营信息（几点来了几单、什么时候在改档口），而员工端没有任何页面
 # 需要它们。管理员会话不受限制。
 #
-# 光限主题还不够：员工订得到 hygiene / scheduling，就得保证**推给他的那条不是别人的事** ——
-# 那由 `_staff_owns_scope` 与订阅时的 filters 覆盖一起兜（见 `_dispatch_local` 与
-# `handle_message`）：scope 里带了别人 employee_id 的一律不推。
-STAFF_ALLOWED_TOPICS = frozenset({"hygiene", "scheduling"})
+# 光限主题还不够：员工订得到 hygiene / scheduling / overtime，就得保证**推给他的那条不是
+# 别人的事** —— 那由 `_staff_owns_scope` 与订阅时的 filters 覆盖一起兜（见 `_dispatch_local`
+# 与 `handle_message`）：scope 里带了别人 employee_id 的一律不推。
+#
+# `overtime` 是员工自己那一页要的（票 01 的「加班与补钟」页）：他的登记被批了 / 被驳了，
+# 页面上那张状态要跟着变。这一条 nudge 的 scope 恒带 employee_id，所以同事收不到。
+STAFF_ALLOWED_TOPICS = frozenset({"hygiene", "scheduling", "overtime"})
 
 
 def allowed_topics(auth: str):

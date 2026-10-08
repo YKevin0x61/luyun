@@ -35,6 +35,7 @@ __all__ = [
     "KIND_MAKEUP",
     "KIND_OVERTIME",
     "MAX_REASON",
+    "MAX_REJECT_REASON",
     "EntryActor",
     "OvertimeError",
     "OvertimeLedger",
@@ -64,6 +65,10 @@ HALF_HOURS_MAX = 24
 # 事由限长：它是登记卡上的一行话，不是留言板。超了报错而不是悄悄截断（同排班的
 # `MAX_REQUEST_NOTE`：员工写下的东西不该被系统改掉）。
 MAX_REASON = 50
+
+# 驳回理由限长。它比事由宽一倍：事由是「这笔是干什么的」，驳回理由是「为什么不算」
+# ——后者常常要说清依据（哪天的排班、哪条规矩），一句话往往不够。
+MAX_REJECT_REASON = 100
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -171,6 +176,21 @@ def _clean_reason(value: Any) -> str:
         raise OvertimeError("missing_reason", "missing_reason")
     if len(text) > MAX_REASON:
         raise OvertimeError("reason_too_long", str(MAX_REASON))
+    return text
+
+
+def _clean_reject_reason(value: Any) -> str:
+    """驳回理由：必填、限长。
+
+    它比事由更严一档的地方只有「必填」这一条 —— 员工看到的「已驳回」本身不解释任何
+    事，没有理由他就只能来问人；下一笔还会照原样提上来（`docs/adr/0100` 把它定成
+    比请假先例更严的那一条）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        raise OvertimeError("missing_reject_reason", "missing_reject_reason")
+    if len(text) > MAX_REJECT_REASON:
+        raise OvertimeError("reject_reason_too_long", str(MAX_REJECT_REASON))
     return text
 
 
@@ -369,8 +389,77 @@ class OvertimeLedger:
             "entries": rows,
         }
 
+    async def _name_index(self) -> dict[int, str]:
+        """员工号 → 姓名。管理端的列表要写「谁提的」，而表里只有员工号。
+
+        名单从公共层取（同排班 `store.inbox()` 的做法）：这一层不 import 卫生，也不
+        自己查 `hygiene_employees` —— 那两件事都会让「员工是谁」多出第二个出处。
+        """
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        return {
+            int(employee["id"]): (employee.get("name") or "")
+            for employee in roster
+        }
+
+    @_needs_migration
+    async def list_pending(self) -> dict:
+        """全店**等审批**的登记（管理端那一页的队列）。
+
+        **旧的在前**：待办是先来先处理的队列，不是「最新动态」（同排班 `inbox`）。
+        已撤回 / 已批 / 已驳 / 已作废的都不在这儿 —— 它们已经有人点过头了。
+
+        每条带 `employee_name`：队列上写成「李四 · 9/24 · +6.5 小时 · 中秋加班」，
+        只给员工号等于让店长自己去查名单。
+        """
+        rows = await self._rows(
+            " WHERE status = ?", (STATUS_PENDING,), "created_at, id"
+        )
+        names = await self._name_index()
+        for row in rows:
+            row["employee_name"] = names.get(int(row["employee_id"]), "")
+        return {"today": self.today(), "count": len(rows), "entries": rows}
+
+    @_needs_migration
+    async def list_entries(
+        self,
+        *,
+        month: Optional[str] = None,
+        employee_id: Optional[int] = None,
+        status: Optional[str] = None,
+    ) -> dict:
+        """全店登记（管理端）：可按月 / 按人 / 按状态筛，**新的在前**。
+
+        管理端拿它做两件事：找一条**已经批过**的来作废（待办队列里只有待审批的，
+        而作废要找的正是已批准的那些），以及代录之后回头确认写对了没有。
+        归月口径与净时长同一条：按 `entry_date` 的自然月，与审批时间无关。
+        """
+        where: list[str] = []
+        params: list[Any] = []
+        if month not in (None, ""):
+            where.append("entry_date LIKE ?")
+            params.append(f"{_require_month(month)}%")
+        if employee_id is not None:
+            where.append("employee_id = ?")
+            params.append(int(employee_id))
+        if status not in (None, ""):
+            where.append("status = ?")
+            params.append(str(status))
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        rows = await self._rows(clause, tuple(params), "entry_date DESC, id DESC")
+        names = await self._name_index()
+        for row in rows:
+            row["employee_name"] = names.get(int(row["employee_id"]), "")
+        return {"today": self.today(), "count": len(rows), "entries": rows}
+
     async def _claim(
-        self, entry_id: int, status: str, expect: tuple[str, ...], stamp: str
+        self,
+        entry_id: int,
+        status: str,
+        expect: tuple[str, ...],
+        stamp: str,
+        decided_by: str,
+        reject_reason: Optional[str] = None,
+        error_code: str = "entry_not_pending",
     ) -> None:
         """把这一笔从 `expect` 里的某个状态改成 `status`；没抢到就报「已经处理过了」。
 
@@ -384,20 +473,37 @@ class OvertimeLedger:
         marks = ", ".join("?" for _ in expect)
         cur = await self._conn.execute(
             f"""UPDATE overtime_entries
-                SET status = ?, decided_at = ?, updated_at = ?
+                SET status = ?, decided_at = ?, decided_by = ?, reject_reason = ?,
+                    updated_at = ?
                 WHERE id = ? AND status IN ({marks})""",
-            (status, stamp, stamp, int(entry_id), *expect),
+            (status, stamp, decided_by, reject_reason, stamp, int(entry_id), *expect),
         )
         if cur.rowcount != 1:
             # 0 = 状态已经被人改了；-1 = command tag 没解析出来。两种都按「没抢到」办 ——
             # 宁可让调用方刷新一次，也不能重复写一遍。
-            raise OvertimeError("entry_not_pending", "entry_not_pending")
+            raise OvertimeError(error_code, error_code)
 
     @serialized_write
-    async def _decide(self, entry_id: int, status: str, expect: tuple[str, ...]) -> dict:
-        """把这一笔从 `expect` 置成 `status` 并记下时间（撤回与票 02 的批 / 驳共用）。"""
+    async def _decide(
+        self,
+        entry_id: int,
+        status: str,
+        expect: tuple[str, ...],
+        decided_by: str,
+        reject_reason: Optional[str] = None,
+        error_code: str = "entry_not_pending",
+    ) -> dict:
+        """把这一笔从 `expect` 置成 `status`，并记下**谁判的、什么时候判的**。
+
+        撤回与票 02 的批 / 驳共用同一条路：`decided_by` 是 `EntryActor.stamp` 的形状
+        （`super` 或 `staff:<员工号>`），`decided_at` 是判的那一刻 —— 台账要说得清
+        「这笔是谁点头的」，那是它当工资依据的一半。
+
+        `reject_reason` 只有驳回那一条路带值；批 / 撤 / 作废传 `None`，于是那一列被
+        显式写回空（本轮之前它本来就该是空的）。
+        """
         stamp = self._now_iso()
-        await self._claim(entry_id, status, expect, stamp)
+        await self._claim(entry_id, status, expect, stamp, decided_by, reject_reason, error_code)
         await self._conn.commit()
         entry = await self._entry_by_id(int(entry_id))
         assert entry is not None  # 刚改过的那一行
@@ -418,4 +524,53 @@ class OvertimeLedger:
         if row["status"] != STATUS_PENDING:
             # 批完 / 驳完 / 已撤回 / 已作废都不再动：状态机只往前走。
             raise OvertimeError("entry_not_pending", "entry_not_pending")
-        return await self._decide(int(entry_id), STATUS_CANCELLED, (STATUS_PENDING,))
+        # 撤回也是「判」过这一笔 —— 只不过判的人是他自己。
+        return await self._decide(
+            int(entry_id), STATUS_CANCELLED, (STATUS_PENDING,), f"staff:{int(employee_id)}"
+        )
+
+    @_needs_migration
+    async def approve(self, actor: EntryActor, entry_id: int) -> dict:
+        """批准一笔**待审批**的登记（票 02）。
+
+        状态谓词落在 `_claim` 的写锁里：只有第一个改得动这一行 —— 双击、两个标签页、
+        网关重试里的第二个会拿到「已经处理过了」，而不是把同一笔批两遍。
+        """
+        return await self._decide(
+            int(entry_id), STATUS_APPROVED, (STATUS_PENDING,), actor.stamp
+        )
+
+    @_needs_migration
+    async def reject(self, actor: EntryActor, entry_id: int, reason: Any) -> dict:
+        """驳回一笔待审批的登记 —— **必须写理由**（票 02 的验收 1）。
+
+        理由比「驳回」这个结果本身更重要：员工看到的是状态，需要的是为什么 ——
+        没有理由他只能来问人，而且下一笔还会照原样提上来。
+        """
+        text = _clean_reject_reason(reason)
+        return await self._decide(
+            int(entry_id),
+            STATUS_REJECTED,
+            (STATUS_PENDING,),
+            actor.stamp,
+            reject_reason=text,
+        )
+
+    @_needs_migration
+    async def void(self, actor: EntryActor, entry_id: int) -> dict:
+        """作废一笔**已批准**的登记（票 02 的验收 3）。
+
+        批准之后员工不能动它（状态机只往前走），填错了、批错了只有管理端能救 ——
+        而「救」是把这一笔作废，不是删掉它：那一行还在（状态 `voided`），台账要留着
+        「曾经批过、又被作废」这件事本身，否则月底对不上账时无从解释。
+
+        期望状态是 `approved`（不是 `pending`），所以失败时用的 code 也不一样：
+        「还没批」与「已经不是已批准了」是两件事。
+        """
+        return await self._decide(
+            int(entry_id),
+            STATUS_VOIDED,
+            (STATUS_APPROVED,),
+            actor.stamp,
+            error_code="entry_not_approved",
+        )

@@ -20,6 +20,8 @@ const HR_PAGES = [
   ['/workbench/hr/inbox', 'SchedulingInboxView.vue'],
   ['/workbench/hr/shifts', 'SchedulingShiftsView.vue'],
   ['/workbench/hr/roster', 'HygieneRosterView.vue'],
+  // 加班统计（票 02）：超管的审批台 —— 待办、批 / 驳 / 作废、代员工补录都在这一页。
+  ['/workbench/hr/overtime', 'HrOvertimeView.vue'],
 ]
 
 const FLOOR_PAGES = [
