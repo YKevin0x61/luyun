@@ -34,7 +34,12 @@ from services.identity.profile import (
     normalize_date,
     normalize_health_cert_date,
     normalize_id_card,
+    normalize_seniority_bonus,
     profile_incomplete,
+    seniority_base_month,
+    seniority_due_month,
+    seniority_next_adjust_month,
+    seniority_should_be,
 )
 from services import password_hash
 
@@ -256,6 +261,22 @@ class EmployeeAccounts:
             "hire_date": mapping.get("hire_date") or None,
             "health_cert_expires_on": status["expires_on"],
             "health_cert_state": status["state"],
+            # 工龄奖（2026-10-07，见 `docs/adr/0101`）：`seniority_bonus` 是档案里
+            # **落库的当前值**，另两个是按入职日期派生的「应为」值与下次调整月。
+            # 员工看得到自己的档位 —— 入职日期本来就在这一份投影里，它不是底薪
+            # 那种不下发的东西（0098 的红线是 `id_card_no` / `base_salary` /
+            # `health_cert_date`，三个都没动）。派生只走 `profile.py` 一处。
+            "seniority_bonus": (
+                None
+                if mapping.get("seniority_bonus") is None
+                else int(mapping["seniority_bonus"])
+            ),
+            "seniority_should_be": seniority_should_be(
+                mapping.get("hire_date"), self._today()
+            ),
+            "seniority_next_adjust_month": seniority_next_adjust_month(
+                mapping.get("hire_date"), self._today()
+            ),
         }
 
     def _roster_row(self, row) -> dict:
@@ -286,7 +307,8 @@ class EmployeeAccounts:
     async def _fetch_employee(self, employee_id: int):
         cur = await self._conn.execute(
             """SELECT id, phone, name, job_title, permission, admin_caps, approved, disabled,
-                      created_at, id_card_no, base_salary, hire_date, health_cert_date
+                      created_at, id_card_no, base_salary, hire_date, health_cert_date,
+                      seniority_bonus
                FROM hygiene_employees WHERE id = ?""",
             (employee_id,),
         )
@@ -296,7 +318,7 @@ class EmployeeAccounts:
         cur = await self._conn.execute(
             """SELECT id, phone, name, password_hash, job_title, permission, admin_caps,
                       approved, disabled, created_at, id_card_no, base_salary, hire_date,
-                      health_cert_date
+                      health_cert_date, seniority_bonus
                FROM hygiene_employees WHERE phone = ?""",
             (phone,),
         )
@@ -488,7 +510,7 @@ class EmployeeAccounts:
         cur = await self._conn.execute(
             """SELECT e.id, e.phone, e.name, e.job_title, e.permission, e.admin_caps,
                       e.approved, e.disabled, e.created_at, e.id_card_no, e.base_salary,
-                      e.hire_date, e.health_cert_date
+                      e.hire_date, e.health_cert_date, e.seniority_bonus
                FROM hygiene_employees e
                ORDER BY e.disabled ASC, e.approved ASC, e.id ASC""",
         )
@@ -542,6 +564,81 @@ class EmployeeAccounts:
             )
         due.sort(key=lambda item: item["expires_on"])
         return due
+
+    async def list_hr_reminders(self) -> dict:
+        """超管「人事提醒」页的清单（票 05：工龄奖该调名单 + 档案待补）。
+
+        2026-10-07 用户裁定，口径见 `docs/adr/0101` / `0102`。**只捞未停用的人**
+        （同 :meth:`list_health_cert_due` 的口径：人都停了就不用催）。每块都是
+        ``{items, count}`` 的形状 —— 票 06 的生日那一块照这个形状接在同一份响应里。
+
+        * ``seniority``：**现值低于应为**的（含历史欠调）与**现值高于应为**的
+          （调过头，只标出来、绝不自动改写）都在列，``state`` 分别是 ``due`` /
+          ``over``；现值等于应为的不列 —— 所以「档位到 1000 就不再催」是这条
+          通用规则的自然结果，不需要为封顶单开一个分支。``count`` 只数 ``due``：
+          首页那一格问的是「要处理几件」。
+        * ``incomplete``：入职日期为空**或坏值**的人（本票只这一类）。他们算不出
+          工龄奖，进这里点名缺哪一项 —— 「这个月没有要调的」与「算不出来」在界面上
+          必须长得不一样（ADR 0102 的教训）。
+        """
+        cur = await self._conn.execute(
+            """SELECT id, name, phone, hire_date, seniority_bonus
+               FROM hygiene_employees
+               WHERE disabled = 0
+               ORDER BY id ASC""",
+        )
+        rows = await cur.fetchall()
+        today = self._today()
+        seniority_items: list[dict] = []
+        incomplete_items: list[dict] = []
+        for row in rows:
+            mapping = dict(row)
+            hire_date = mapping.get("hire_date") or None
+            # 「算不出来」与「还没到时候」是两件事：前者进待补，后者静默。
+            if seniority_base_month(hire_date) is None:
+                incomplete_items.append(
+                    {
+                        "id": int(mapping["id"]),
+                        "name": mapping.get("name") or "",
+                        "phone": mapping.get("phone") or "",
+                        "missing": ["hire_date"],
+                    }
+                )
+                continue
+            should_be = seniority_should_be(hire_date, today)
+            current = (
+                None
+                if mapping.get("seniority_bonus") is None
+                else int(mapping["seniority_bonus"])
+            )
+            settled = 0 if current is None else current
+            if settled == should_be:
+                continue
+            seniority_items.append(
+                {
+                    "id": int(mapping["id"]),
+                    "name": mapping.get("name") or "",
+                    "phone": mapping.get("phone") or "",
+                    "hire_date": hire_date,
+                    "current": current,
+                    "should_be": should_be,
+                    "gap": should_be - settled,
+                    "state": "due" if settled < should_be else "over",
+                    "due_month": seniority_due_month(hire_date, today),
+                    "next_adjust_month": seniority_next_adjust_month(hire_date, today),
+                }
+            )
+        # 要处理的在前，组内按「欠自哪个月」升序 —— 欠得最久的在最上面。
+        seniority_items.sort(
+            key=lambda item: (item["state"] != "due", item["due_month"] or "", item["id"])
+        )
+        return {
+            "seniority": {
+                "items": seniority_items,
+                "count": sum(1 for item in seniority_items if item["state"] == "due"),
+            },
+            "incomplete": {"items": incomplete_items, "count": len(incomplete_items)},
+        }
 
     async def set_job_title(self, employee_id: int, title: str) -> dict:
         row = await self._fetch_employee(employee_id)
@@ -707,6 +804,8 @@ class EmployeeAccounts:
         health_cert_date: Optional[str] = None,
         base_salary: Optional[Any] = None,
         hire_date: Optional[str] = None,
+        seniority_bonus: Optional[Any] = None,
+        changed_by: str = "super",
     ) -> dict:
         """花名册抽屉保存：只 SET **传进来的**列（`None` = 不动这一列）。
 
@@ -717,6 +816,11 @@ class EmployeeAccounts:
         `permission` 仍是独立的一列、`admin_caps` 仍是**整组替换**：这里不做
         permission ↔ caps 的一致性校验或派生写回（那是 ADR 0093 明确留下的现状，
         两者不一致是合法状态）。
+
+        工龄奖（`seniority_bonus`）是**钱**：值真的变了就在同一个事务里补一行
+        `seniority_bonus_changes`（谁、何时、从多少到多少）；值没变就一个字都不写。
+        `changed_by` 默认 `"super"` —— 眼下只有管理端那个共享账号能改它。它**不进**
+        「待补」四项（`profile.py` 的 `PROFILE_FIELDS`），也不挡批准。
         """
         row = await self._fetch_employee(employee_id)
         if row is None:
@@ -763,6 +867,17 @@ class EmployeeAccounts:
             # 入职日期**允许将来**（提前建档），所以只校验日期形状。
             fields.append("hire_date = ?")
             params.append(self._checked(normalize_date, hire_date))
+        # 工龄奖：先把归一后的新值与旧值比一比 —— 值没变就不写留痕（一次「保存」
+        # 不该平白多出一行历史）。旧值取自这次读到的行。
+        bonus_change = None
+        if seniority_bonus is not None:
+            current = dict(row).get("seniority_bonus")
+            old_bonus = None if current is None else int(current)
+            new_bonus = self._checked(normalize_seniority_bonus, seniority_bonus)
+            fields.append("seniority_bonus = ?")
+            params.append(new_bonus)
+            if new_bonus != old_bonus:
+                bonus_change = (old_bonus, new_bonus)
         if not fields:
             return self._employee_from_row(row)
         fields.append("updated_at = ?")
@@ -773,6 +888,20 @@ class EmployeeAccounts:
                 f"UPDATE hygiene_employees SET {', '.join(fields)} WHERE id = ?",
                 params,
             )
+            if bonus_change is not None:
+                # 与 UPDATE 同一个事务：钱改了、痕迹没落，两边一起回滚。
+                await self._conn.execute(
+                    "INSERT INTO seniority_bonus_changes"
+                    " (employee_id, old_value, new_value, changed_by, changed_at)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (
+                        int(employee_id),
+                        bonus_change[0],
+                        bonus_change[1],
+                        changed_by,
+                        self._now_iso(),
+                    ),
+                )
             await self._conn.commit()
         except Exception as exc:
             if not is_integrity_violation(exc):
@@ -813,7 +942,8 @@ class EmployeeAccounts:
         cur = await self._conn.execute(
             """SELECT s.session_id, s.expires_at, s.last_seen_at,
                       e.id, e.phone, e.name, e.job_title, e.permission, e.admin_caps,
-                      e.approved, e.disabled, e.hire_date, e.health_cert_date
+                      e.approved, e.disabled, e.hire_date, e.health_cert_date,
+                      e.seniority_bonus
                FROM hygiene_staff_sessions s
                JOIN hygiene_employees e ON e.id = s.employee_id
                WHERE s.session_id = ?""",

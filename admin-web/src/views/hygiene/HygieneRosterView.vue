@@ -236,6 +236,10 @@ function draftFrom(row) {
     health_cert_date: row.health_cert_date || '',
     base_salary: row.base_salary === null || row.base_salary === undefined ? '' : String(row.base_salary),
     hire_date: row.hire_date || '',
+    seniority_bonus:
+      row.seniority_bonus === null || row.seniority_bonus === undefined
+        ? ''
+        : String(row.seniority_bonus),
     admin_caps: normalizeCaps(row.admin_caps),
   }
 }
@@ -247,7 +251,11 @@ function salaryValue(raw) {
   return Number.isFinite(num) ? num : null
 }
 
-/** PATCH 的 body：**只有这 7 个键**（不再发 `permission`，服务端按开关派生）。 */
+/** PATCH 的 body：**只有这 8 个键**（不再发 `permission`，服务端按开关派生）。
+ *
+ *  工龄奖在列，但它**不是**「待补」四项之一 —— 空值的意思是「还没调过」，
+ *  既不参与 `profile_incomplete`，也不挡批准（`docs/adr/0101`）。
+ */
 function patchBody(source, row) {
   return {
     name: String(source.name || '').trim(),
@@ -256,6 +264,7 @@ function patchBody(source, row) {
     health_cert_date: source.health_cert_date || null,
     base_salary: salaryValue(source.base_salary),
     hire_date: source.hire_date || null,
+    seniority_bonus: salaryValue(source.seniority_bonus),
     admin_caps: normalizeCaps([...source.admin_caps, ...keepSupervisorOnlyCaps(row.admin_caps)]),
   }
 }
@@ -268,6 +277,21 @@ const dirty = computed(() => {
 
 const missingSalary = computed(() => Boolean(draft.value) && salaryValue(draft.value.base_salary) === null)
 const missingHireDate = computed(() => Boolean(draft.value) && !String(draft.value.hire_date || '').trim())
+
+/** 工龄奖那一栏旁边的对照：按入职日期算出的「应为」值（服务端派生，前端不复算）。
+ *
+ *  只提示、**不替人改** —— 高于应为值时同样只标出来（`docs/adr/0101` 说绝不自动下调），
+ *  所以这句话是「应为 N 元」，不是「将改为 N 元」。
+ */
+const seniorityNote = computed(() => {
+  const row = drawerRow.value
+  if (!row || !draft.value) return ''
+  if (!String(row.hire_date || '').trim()) return '待补入职日期'
+  const shouldBe = row.seniority_should_be
+  if (shouldBe === undefined || shouldBe === null) return ''
+  if (salaryValue(draft.value.seniority_bonus) === shouldBe) return ''
+  return `应为 ${shouldBe} 元`
+})
 const canApprove = computed(() => !missingSalary.value && !missingHireDate.value)
 /** 批准门槛那一行（常显，不藏在悬浮里 —— 手机没有 hover）。只有「待批准」的人才有这一行：
  *  已批准 / 已停用的人下面根本没有「批准」按钮，摆一句"还缺…"是在说一件不存在的事。 */
@@ -716,6 +740,26 @@ async function copyInvite() {
                 type="date"
                 :disabled="busy"
               >
+            </label>
+
+            <label title="满一年 100、第 10 年 1000 封顶；「应为」是照入职日期算出来的对照，改不改由你定">
+              <span class="roster-field-head">
+                <span>工龄奖</span>
+                <span v-if="seniorityNote" class="roster-field-note">{{ seniorityNote }}</span>
+              </span>
+              <span class="roster-input-suffix">
+                <input
+                  v-model="draft.seniority_bonus"
+                  class="input"
+                  type="number"
+                  inputmode="numeric"
+                  min="0"
+                  max="999999"
+                  step="1"
+                  :disabled="busy"
+                >
+                <span class="roster-suffix">元/月</span>
+              </span>
             </label>
 
             <label title="由管理权限派生，不能直接改">

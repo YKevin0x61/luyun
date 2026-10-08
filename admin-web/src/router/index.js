@@ -107,6 +107,11 @@ const routes = [
   // 花名册（票 05 从卫生那八页搬进人事组）：员工注册审核、卫生权限档位、那两班的口径，
   // 还有发给新店员的那张入口码。页面本体一个字没动，只是换了 URL 与外壳。
   workbenchHrPage('/workbench/hr/roster', 'workbench-hr-roster', () => import('../views/hygiene/HygieneRosterView.vue')),
+  // 人事提醒（票 05）：该调工龄奖的人（含历史欠调）+ 档案待补。只提醒，钱要人工点确认。
+  workbenchHrPage('/workbench/hr/reminders', 'workbench-hr-reminders', () => import('../views/hr/HrRemindersView.vue')),
+  // 加班统计（票 02）：超管的审批台 —— 待办队列 + 批 / 驳 / 作废 + 代员工补录。员工那一面
+  // 在 `/workbench/me/overtime`（票 01）；店长那一面在员工手机端（票 04，走能力键）。
+  workbenchHrPage('/workbench/hr/overtime', 'workbench-hr-overtime', () => import('../views/overtime/HrOvertimeView.vue')),
   hygieneAdminPage('/workbench/floor/zones', 'workbench-floor-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
   hygieneAdminPage('/workbench/floor/daily', 'workbench-floor-daily', () => import('../views/hygiene/HygieneDailyView.vue')),
   // 仪容仪表（票 12）：按人拍，名单由排班给（休假的与没排到的不在表上）。

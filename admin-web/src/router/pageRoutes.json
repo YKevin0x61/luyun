@@ -124,6 +124,22 @@
       "public": false
     },
     {
+      "path": "/workbench/hr/reminders",
+      "title": "人事提醒",
+      "group": "hr",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/hr/overtime",
+      "title": "加班统计",
+      "group": "hr",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
       "path": "/workbench/floor/zones",
       "title": "卫生工作区",
       "group": "floor",

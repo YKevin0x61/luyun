@@ -1234,6 +1234,11 @@ SPA_PAGE_ROUTES = (
     "/workbench/hr/inbox",
     "/workbench/hr/shifts",
     "/workbench/hr/roster",
+    # 人事提醒（票 05）：工龄奖该调名单 + 档案待补。同一批：漏一条就是硬导航 404。
+    "/workbench/hr/reminders",
+    # 加班统计（票 02）：超管的审批台 —— 待办队列 + 批 / 驳 / 作废 + 代员工补录。
+    # 员工那一面在 `/workbench/me/overtime`（票 01），店长那一面在员工手机端（票 04）。
+    "/workbench/hr/overtime",
     "/workbench/floor/zones",
     "/workbench/floor/daily",
     "/workbench/floor/deep-clean",

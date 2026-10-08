@@ -30,6 +30,7 @@ import { staffRequest } from '../../utils/hygieneStaff'
 import { buildWorkQueue, dailyProgress, shiftClock } from '../../utils/hygieneWorkFlow'
 import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
 import { loginRedirectTarget } from '../../utils/loginNext'
+import { monthText } from '../../utils/seniorityReminder'
 import {
   dayLabel,
   nextTwoLine,
@@ -128,6 +129,21 @@ const healthCertAlert = computed(() => {
 const healthCertTone = computed(() => (
   (staffMe.value && staffMe.value.health_cert_state) === 'soon' ? 'is-soon' : ''
 ))
+
+// 工龄奖（票 05，`docs/adr/0101`）：档位是档案里落库的那一栏（超管在花名册 / 人事提醒里
+// 维护），下次调整月是服务端按入职日期派生的 —— 前端不做日期算术，月份只做「2027-09 →
+// 2027 年 9 月」这一层翻译（`utils/seniorityReminder.js`，与提醒页同一份）。没调过时
+// 说「未调整」而不是 0 元：这个人的工龄奖是空着，不是零。
+const seniorityText = computed(() => {
+  const value = staffMe.value && staffMe.value.seniority_bonus
+  return value === null || value === undefined ? '未调整' : `${value} 元/月`
+})
+const seniorityNextText = computed(() => {
+  const me = staffMe.value
+  if (!me || !me.hire_date) return ''
+  const month = monthText(me.seniority_next_adjust_month)
+  return month ? `${month}调整` : '已封顶'
+})
 
 // 「我的成绩」（2026-10-05 用户裁定）：近 7 天的一次通过率 + 被驳回的原因分布。
 //
@@ -1114,6 +1130,16 @@ useNudgePull({
             <div>
               <dt>健康证到期日</dt>
               <dd>{{ staffMe.health_cert_expires_on || '未设置' }}</dd>
+            </div>
+            <!-- 工龄奖（票 05）：档位与下次调整月都是**自己那份**信息（入职日期本来就
+                 在这儿显示），所以这一行不碰敏感字段边界。入职日期没补时不渲染它 ——
+                 算不出来就不摆一个「未调整」在那儿让人误会。 -->
+            <div v-if="staffMe.hire_date">
+              <dt>工龄奖</dt>
+              <dd>
+                {{ seniorityText }}
+                <template v-if="seniorityNextText"> · {{ seniorityNextText }}</template>
+              </dd>
             </div>
           </dl>
           <ul class="tL-list">

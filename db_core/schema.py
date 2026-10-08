@@ -102,12 +102,14 @@ WECOM_SUBSCRIPTION_TABLES = (
 )
 
 # 加班与补钟台账（迁移 0021 起，`.scratch/overtime-and-reminders/`）：员工申报的
-# 一笔加班 / 补钟。与 SCHEDULING_TABLES 同一个理由不进 ALL_TABLES —— 它由
-# `services/overtime/ledger.py`（OvertimeLedger）写入，不该出现在 Admin 的通用
+# 一笔加班 / 补钟；以及工龄奖的变更留痕（迁移 0023，票 05）—— 它是钱的台账，
+# 刻意不写进会被保留期清掉的 `logs` 表。与 SCHEDULING_TABLES 同一个理由不进
+# ALL_TABLES —— 它们由 `services/overtime/ledger.py`（OvertimeLedger）与
+# `services/identity/accounts.py`（工龄奖那一栏）写入，不该出现在 Admin 的通用
 # 业务表写入口；数据浏览器里只读列出（分组「人事」）。
-# 后续票各自追加自己的表：票 03 的底薪快照、票 05 的工龄奖变更留痕 —— 一票一条
-# 迁移，所以这张清单也跟着一票一长，别提前把还没建的表写进来。
-OVERTIME_TABLES = ("overtime_entries",)
+# 后续票各自追加自己的表：票 03 的底薪快照 —— 一票一条迁移，所以这张清单也跟着
+# 一票一长，别提前把还没建的表写进来。
+OVERTIME_TABLES = ("overtime_entries", "seniority_bonus_changes")
 
 # Admin DataTable exposes these tables read-only; their owning feature pages
 # remain the only supported write paths.

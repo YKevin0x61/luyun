@@ -74,12 +74,16 @@ describe('工作台的组（票 05：人事 / 卫生；票 06 加上首页；票
       .toBe('/workbench/kitchen/recipe')
   })
 
-  it('组里的页从清单派生（人事四页、现场八页，顺序照清单）', () => {
+  it('组里的页从清单派生（人事六页、现场八页，顺序照清单）', () => {
     expect(workbenchPagesOf('hr').map((page) => page.path)).toEqual([
       '/workbench/hr/calendar',
       '/workbench/hr/inbox',
       '/workbench/hr/shifts',
       '/workbench/hr/roster',
+      // 人事提醒（overtime-and-reminders 票 05）：工龄奖该调名单 + 档案待补。
+      '/workbench/hr/reminders',
+      // 加班统计（overtime-and-reminders 票 02）：超管的审批台。
+      '/workbench/hr/overtime',
     ])
     expect(workbenchPagesOf('floor').map((page) => page.path)).toEqual([
       '/workbench/floor/zones',
@@ -94,15 +98,15 @@ describe('工作台的组（票 05：人事 / 卫生；票 06 加上首页；票
     ])
     // 标题也从清单来：外壳的导航与页签不另抄一份名字。
     expect(workbenchPagesOf('hr').map((page) => page.title)).toEqual([
-      '排班月历', '排班待办', '班次表', '花名册',
+      '排班月历', '排班待办', '班次表', '花名册', '人事提醒', '加班统计',
     ])
     // 认不出的组给空表（不猜、也不兜底成一整份清单）。
     expect(workbenchPagesOf('nope')).toEqual([])
   })
 
-  it('十二页正好落在人事 / 现场两组里，平铺那批地址一条都不在清单里', () => {
+  it('十四页正好落在人事 / 现场两组里，平铺那批地址一条都不在清单里', () => {
     const grouped = PAGE_ROUTES.filter((row) => row.group === 'hr' || row.group === 'floor')
-    expect(grouped).toHaveLength(12)
+    expect(grouped).toHaveLength(14)
     // 留一半最坏：「点得进去、刷新 404」。
     for (const old of [
       '/workbench/inbox', '/workbench/shifts', '/workbench/roster', '/workbench/zones',

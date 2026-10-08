@@ -15,6 +15,15 @@
 * 一律按**北京时自然日**算（不是营业日：证件上的有效期是日历日，06:00 那个切点是
   POS 的营业日口径）。
 
+工龄奖（2026-10-07，`docs/adr/0101-seniority-bonus-month-and-ledger.md`）：
+
+* **折算月是通用规则**：入职日 ≤ 15 号算当月、≥ 16 号起算下月（每月都是这个分界，
+  9 月不是特例）；
+* 满 N 年（N≥1）在「折算月 + N 年」那个月调整，第 N 年 = N×100，**第 10 年 1000 封顶**；
+* 这里算出来的都是**「应为」值**（派生的）。员工档案上那一列是**当前值**，两者不一致
+  是合法状态 —— 低于应为的持续提醒（含历史欠调），高于应为的只标出来、**绝不自动
+  改写**档案里的钱。
+
 校验失败的形状：一律抛 :class:`ProfileError`，``code`` 就是 ``api/hygiene.py`` 的
 ``_ERROR_DETAILS`` 键 —— 文案在那一处（注册、PATCH、导出共用），这一层只说"错在哪"。
 
@@ -34,6 +43,11 @@ HEALTH_CERT_SOON_DAYS = 30
 
 # 底薪：整数元/月（界面 type=number、min=0、step=1、max=999999）。
 BASE_SALARY_MAX = 999999
+
+# 工龄奖：每年 +100、第 10 年封顶 1000；入职日的 15/16 号是折算月的分界。
+SENIORITY_STEP = 100
+SENIORITY_MAX_YEARS = 10
+SENIORITY_FOLD_DAY = 15
 
 # 「待补」看的是这四项，顺序 = 抽屉里那四个字段的顺序（只影响报错措辞，不影响判定）。
 PROFILE_FIELDS = ("id_card_no", "health_cert_date", "base_salary", "hire_date")
@@ -168,6 +182,50 @@ def normalize_base_salary(raw: Any) -> Optional[int]:
     return value
 
 
+def _normalize_integer_money(
+    raw: Any, *, not_integer: str, negative: str, too_large: str
+) -> Optional[int]:
+    """整数元金额的公共形状：空 → ``None``；否则 0–999999 的整数（错误码由调用方给）。
+
+    底薪与工龄奖共用这一份形状判定，只有报错措辞分开 —— 界面上一句「底薪只能是整数元」
+    拿来报工龄奖会指错格子。
+    """
+    if is_blank(raw):
+        return None
+    if isinstance(raw, bool):
+        raise ProfileError(not_integer)
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, float):
+        if raw != raw or raw in (float("inf"), float("-inf")) or raw != int(raw):
+            raise ProfileError(not_integer)
+        value = int(raw)
+    else:
+        text = _text(raw)
+        if not re.match(r"^-?\d+$", text):
+            raise ProfileError(not_integer)
+        value = int(text)
+    if value < 0:
+        raise ProfileError(negative)
+    if value > BASE_SALARY_MAX:
+        raise ProfileError(too_large)
+    return value
+
+
+def normalize_seniority_bonus(raw: Any) -> Optional[int]:
+    """工龄奖：空 → ``None``；否则必须是 0–999999 的**整数元**（同底薪的形状）。
+
+    ``0`` 是合法值（不是"没填"）—— 它表示"这个人眼下没有工龄奖"。上限与底薪同一个
+    数：这里防的是手滑，不是替业务定政策（真正的档位上限由派生值封在 1000）。
+    """
+    return _normalize_integer_money(
+        raw,
+        not_integer="seniority_bonus_not_integer",
+        negative="seniority_bonus_negative",
+        too_large="seniority_bonus_too_large",
+    )
+
+
 def add_months(value: str, months: int) -> str:
     """``YYYY-MM-DD`` + N 个月（同日；该月没有这一天时取月末）。
 
@@ -227,6 +285,81 @@ def health_cert_status(health_cert_date: Any, today: Any) -> dict:
     return {"expires_on": expires_on, "state": state, "days_left": days_left}
 
 
+def _shift_month(month: str, months: int) -> str:
+    """``YYYY-MM`` 加 N 个月（复用 :func:`add_months` 的月末兜底，只取回年月）。"""
+    return add_months(f"{month}-01", months)[:7]
+
+
+def seniority_base_month(hire_date: Any) -> Optional[str]:
+    """入职日 → **折算月**（``YYYY-MM``）：≤ 15 号算当月、≥ 16 号起算下月。
+
+    空值 / 坏值回 ``None``，调用方按「档案待补」渲染、不抛 —— 理由同
+    :func:`health_cert_expires_on`（花名册不该因为一行坏日期打不开）。
+    """
+    value = _text(hire_date)
+    if not value:
+        return None
+    try:
+        day = date.fromisoformat(value)
+    except ValueError:
+        return None
+    year, month = day.year, day.month
+    if day.day > SENIORITY_FOLD_DAY:
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return f"{year:04d}-{month:02d}"
+
+
+def seniority_adjust_month(hire_date: Any) -> Optional[str]:
+    """**第 1 次**调整的月份（满一年那次）= 折算月 + 12 个月。"""
+    base = seniority_base_month(hire_date)
+    return None if base is None else _shift_month(base, 12)
+
+
+def seniority_years(hire_date: Any, today: Any) -> int:
+    """到 ``today`` 为止已经**满**了几个整年；没满一年回 ``0``。"""
+    base = seniority_base_month(hire_date)
+    if base is None:
+        return 0
+    try:
+        current = as_date(today)
+    except ValueError:
+        return 0
+    diff = (current.year - int(base[:4])) * 12 + (current.month - int(base[5:7]))
+    return max(0, diff // 12)
+
+
+def seniority_should_be(hire_date: Any, today: Any) -> int:
+    """**应为**工龄奖（元/月）：第 N 年 = N×100，第 10 年 1000 封顶。
+
+    入职日期为空 / 坏值（存量员工的「待补」）回 ``0``：它不代表「该给 0」，代表
+    「算不出来」—— 调用方按「档案待补」分组，别把它当成一个正常档位。
+    """
+    years = seniority_years(hire_date, today)
+    return min(years, SENIORITY_MAX_YEARS) * SENIORITY_STEP
+
+
+def seniority_due_month(hire_date: Any, today: Any) -> Optional[str]:
+    """「应为」值是哪一次调整带来的（页面标「欠自 YYYY-MM」用）；没满一年回 ``None``。"""
+    base = seniority_base_month(hire_date)
+    if base is None:
+        return None
+    years = seniority_years(hire_date, today)
+    if years <= 0:
+        return None
+    return _shift_month(base, min(years, SENIORITY_MAX_YEARS) * 12)
+
+
+def seniority_next_adjust_month(hire_date: Any, today: Any) -> Optional[str]:
+    """下一次调整的月份（``YYYY-MM``）；**已封顶回 ``None``**（再往后没有可调的了）。"""
+    base = seniority_base_month(hire_date)
+    if base is None:
+        return None
+    years = seniority_years(hire_date, today)
+    if years >= SENIORITY_MAX_YEARS:
+        return None
+    return _shift_month(base, (years + 1) * 12)
+
+
 def profile_incomplete(row: Mapping[str, Any]) -> bool:
     """「待补」= 四项（身份证号 / 健康证办理日期 / 底薪 / 入职日期）任一为空。
 
@@ -261,6 +394,9 @@ __all__ = [
     "HEALTH_CERT_STATE_OK",
     "HEALTH_CERT_STATE_SOON",
     "HEALTH_CERT_VALID_MONTHS",
+    "SENIORITY_FOLD_DAY",
+    "SENIORITY_MAX_YEARS",
+    "SENIORITY_STEP",
     "PROFILE_FIELDS",
     "ProfileError",
     "add_months",
@@ -274,5 +410,12 @@ __all__ = [
     "normalize_date",
     "normalize_health_cert_date",
     "normalize_id_card",
+    "normalize_seniority_bonus",
+    "seniority_adjust_month",
+    "seniority_base_month",
+    "seniority_due_month",
+    "seniority_next_adjust_month",
+    "seniority_should_be",
+    "seniority_years",
     "profile_incomplete",
 ]

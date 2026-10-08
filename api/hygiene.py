@@ -131,6 +131,11 @@ _ERROR_DETAILS = {
     "base_salary_not_integer": "底薪只能是整数元",
     "base_salary_negative": "底薪不能是负数",
     "base_salary_too_large": "底薪最多 999999 元",
+    # 工龄奖（2026-10-07，票 05）：形状与底薪同一套，但文案各说各的 ——
+    # 拿「底薪只能是整数元」去报工龄奖会指错格子。
+    "seniority_bonus_not_integer": "工龄奖只能是整数元",
+    "seniority_bonus_negative": "工龄奖不能是负数",
+    "seniority_bonus_too_large": "工龄奖最多 999999 元",
     # 批准门槛（三个变体都逐字取自 design §7.2/§7.4）：说清缺哪几项。
     "approve_missing_both": "底薪与入职日期补齐后才能批准",
     "approve_missing_base_salary": "还缺底薪",
@@ -390,6 +395,9 @@ class RosterPatchIn(BaseModel):
     health_cert_date: Optional[str] = None
     base_salary: Optional[Any] = None
     hire_date: Optional[str] = None
+    # 工龄奖（2026-10-07，票 05）：花名册抽屉与「人事提醒」页的「确认调整」走**同一个**
+    # 写入口。不传 = 不动这一列；`null` / 空串 = 清空成 NULL。它**不进**「待补」四项。
+    seniority_bonus: Optional[Any] = None
 
 
 class ShiftIn(BaseModel):
@@ -1003,6 +1011,20 @@ async def admin_list_roster(
     }
 
 
+@router.get("/admin/hr-reminders")
+async def admin_hr_reminders(
+    _session_id: str = Depends(require_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, Any]:
+    """「人事提醒」页的清单（票 05：工龄奖该调名单 + 档案待补）。
+
+    首页第 5 格（票 07）读的也是这一条 —— 同一个数字与同一份名单出自一次查询，
+    所以「首页说 3 件、点进去只有 2 件」不可能发生。生日那一块是票 06 的活，
+    它按同样的 ``{items, count}`` 形状加在 ``birthdays`` 键上。
+    """
+    return await accounts.list_hr_reminders()
+
+
 # ── 花名册导出（CSV，2026-10-07）──────────────────────────────────────────────
 # 路径是**单段**的 `/admin/roster-export.csv`：写成 `/admin/roster/export.csv` 会正好
 # 落进 `/admin/roster/{employee_id}` 的形状里（本仓 AGENTS.md 点过名的 FastAPI 顺序坑）。
@@ -1227,7 +1249,16 @@ async def admin_enable(
 
 
 # 花名册抽屉能改的四项档案：**只在请求里出现过**才写（`None` 与空串都算"清空"）。
-_ROSTER_PROFILE_FIELDS = ("id_card_no", "health_cert_date", "base_salary", "hire_date")
+# 抽屉里能改的那几栏（`None` = 不动、空串 = 清空成 NULL）。工龄奖在列，但它**不在**
+# `services/identity/profile.py` 的 `PROFILE_FIELDS`（「待补」四项）里 —— 空值的
+# 意思是「还没调过」，不是「档案缺一项」，它也不挡批准（`docs/adr/0101`）。
+_ROSTER_PROFILE_FIELDS = (
+    "id_card_no",
+    "health_cert_date",
+    "base_salary",
+    "hire_date",
+    "seniority_bonus",
+)
 
 
 def _profile_updates(body: RosterPatchIn) -> Dict[str, Any]:

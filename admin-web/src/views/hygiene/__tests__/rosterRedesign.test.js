@@ -237,7 +237,7 @@ describe('花名册 · 列表行内容', () => {
 })
 
 describe('花名册 · 编辑抽屉', () => {
-  it('点行打开抽屉：11 项字段按定稿顺序，手机号与注册时间只读', async () => {
+  it('点行打开抽屉：12 项字段按定稿顺序，手机号与注册时间只读', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper, '王强')
 
@@ -246,7 +246,7 @@ describe('花名册 · 编辑抽屉', () => {
     const labels = drawer.findAll('.roster-field-head > span:first-child').map((node) => node.text())
     expect(labels).toEqual([
       '姓名', '职位', '手机号', '注册时间', '身份证号', '健康证办理日期',
-      '底薪', '入职日期', '卫生权限',
+      '底薪', '入职日期', '工龄奖', '卫生权限',
     ])
     expect(drawer.text()).toContain('管理权限')
 
@@ -297,6 +297,8 @@ describe('花名册 · 编辑抽屉', () => {
       health_cert_date: '2024-05-06',
       base_salary: 5200,
       hire_date: '2024-06-01',
+      // 工龄奖（overtime-and-reminders 票 05）：这一行的假数据没有它 → 发 null（= 不动 / 清空）。
+      seniority_bonus: null,
       admin_caps: [],
     })
     // 成功反馈落在页顶那一行。

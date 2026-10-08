@@ -53,11 +53,16 @@ describe('页面清单（唯一来源）', () => {
       '/register',
       '/settings',
       '/workbench',
-      // 票 05：工作台按组落位 —— 人事四页（月历 / 待办 / 班次表 / 花名册）。
+      // 票 05：工作台按组落位 —— 人事五页（月历 / 待办 / 班次表 / 花名册 / 人事提醒）。
       '/workbench/hr/calendar',
       '/workbench/hr/inbox',
       '/workbench/hr/shifts',
       '/workbench/hr/roster',
+      // 人事提醒（overtime-and-reminders 票 05）：工龄奖该调名单 + 档案待补，同套工作台外壳。
+      '/workbench/hr/reminders',
+      // 加班统计（overtime-and-reminders 票 02）：超管的审批台（待办 / 批驳 / 作废 / 代录），
+      // 套的是人事那一组的壳。员工那一面在 `/workbench/me/overtime`（票 01）。
+      '/workbench/hr/overtime',
       // 现场七页（卫生）。
       '/workbench/floor/zones',
       '/workbench/floor/daily',
