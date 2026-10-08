@@ -9,8 +9,6 @@ import KdsBacklogPanel from '../components/dashboard/KdsBacklogPanel.vue'
 import TableLivePanel from '../components/dashboard/TableLivePanel.vue'
 import SystemAlertBanner from '../components/dashboard/SystemAlertBanner.vue'
 import { useDashboardData } from '../composables/useDashboardData'
-import { RECIPE_BRAND_TITLE, RECIPE_DASHBOARD_BLURB } from '../utils/recipeCopy'
-import { RECIPE_HOME_PATH } from '../utils/recipePaths'
 import { WORKBENCH_DASHBOARD_BLURB, WORKBENCH_HOME, WORKBENCH_TITLE } from '../utils/workbenchCopy'
 
 const { summary, loading, error, refresh } = useDashboardData()
@@ -33,10 +31,6 @@ const lastUpdateText = computed(() => {
       <div v-if="error" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> 仪表盘数据可能已过期：{{ error }}</div>
       <SystemAlertBanner :summary="summary" />
       <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr))">
-        <router-link :to="RECIPE_HOME_PATH" class="card app-shortcut">
-          <span class="app-shortcut-title">{{ RECIPE_BRAND_TITLE }}</span>
-          <span class="app-shortcut-desc">{{ RECIPE_DASHBOARD_BLURB }}</span>
-        </router-link>
         <!-- 工作台（2026-10-04：排班与卫生合并成一个子系统）：落点先给排班月历，
              现场那一组从工作台窄栏的「现场」进。 -->
         <router-link :to="WORKBENCH_HOME" class="card app-shortcut">

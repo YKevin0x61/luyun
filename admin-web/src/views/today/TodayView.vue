@@ -1009,14 +1009,17 @@ useNudgePull({
                   :disabled="attirePending"
                   @click="openAttireStandard"
                 >
-                  {{ attire.status === 'todo' ? '对着标准图拍 ›' : '重拍一张 ›' }}
+                  {{ attire.status === 'todo' ? '仪容仪表 ›' : '重拍一张 ›' }}
                 </button>
               </div>
             </template>
 
+            <!-- 入口名（2026-10-08 用户定名）：跟上面那颗「仪容仪表 ›」对称 —— 一个指人、
+                 一个指区，都不再随「还差几项」变。原来的「去交 / 继续验收 ›」把两个动作
+                 并列在一颗按钮上，而「验收」对普通员工不是他们的活。 -->
             <div class="acts">
               <button class="btn" type="button" @click="router.push('/workbench/me/clean')">
-                {{ hygieneStats.remaining ? '去交 / 继续验收 ›' : '去卫生待办 ›' }}
+                工作卫生 ›
               </button>
             </div>
           </template>

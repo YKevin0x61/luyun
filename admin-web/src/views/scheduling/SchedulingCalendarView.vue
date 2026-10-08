@@ -415,6 +415,19 @@ function weekCellText(employee, day) {
   return weekShortNames.value[cell.shift_id] || String(cell.shift_name || '班').slice(0, 1)
 }
 
+/** 格子里第二行那个工作区名（2026-10-08 用户要的）：这个人这一天在哪个区。
+ *
+ *  只有「这天真有班次」才谈得上区 —— 休 / 请假 / 还没排到的格子没有区可言，与
+ *  `sheetHasShift`、`weekCellLabel` 是同一套判据。**没配区的格子不写「未配」**：
+ *  七列平分下来一格只有 ~39px 宽，那一行留给真有区的人；空着不代表没信息可查 ——
+ *  点开抽屉的下拉能当场改区，`aria-label` 里也照旧说着「未配工作区」。 */
+function weekCellZone(employee, day) {
+  const cell = cellOf(employee, day)
+  if (!cell || !cell.scheduled) return ''
+  if (cell.shift_id === null || cell.shift_id === undefined) return ''
+  return String(cell.zone_name || '')
+}
+
 function weekCellClass(employee, day) {
   const cell = cellOf(employee, day)
   const blank = !cell || !cell.scheduled
@@ -1375,6 +1388,8 @@ useNudgePull({
                         @click="onCellClick(employee, day)"
                       >
                         <span>{{ weekCellText(employee, day) }}</span>
+                        <!-- 第二行：工作区。没配区的格子这一行整条不渲染（见 `weekCellZone`）。 -->
+                        <span v-if="weekCellZone(employee, day)" class="gW-zone">{{ weekCellZone(employee, day) }}</span>
                       </button>
                     </td>
                   </tr>
@@ -1852,6 +1867,14 @@ useNudgePull({
 }
 .gW-cell:disabled { cursor: default; }
 .gW-cell.long { font-size: 10px; letter-spacing: -.02em; }
+/* 班次下面那行工作区名（2026-10-08 用户要的）：格子只有 ~39px 宽，所以是 9px 的小字、
+   跟着班次那个色弱一档 —— 主信息仍然是班次那一个字。三个字的区名（明档1）单行放得下，
+   再长的截断，不让它撑破格子。没配区的格子这一行不渲染（见 `weekCellZone`）。 */
+.gW-cell .gW-zone {
+  display: block; max-width: 100%; margin-top: 1px;
+  font-size: 9px; line-height: 1.1; letter-spacing: -.02em; opacity: .75;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .gW-cell.tone-mint { color: var(--hy-mint); background: rgba(63, 224, 176, .14); border-color: rgba(63, 224, 176, .3); }
 .gW-cell.tone-aqua { color: var(--hy-aqua); background: rgba(95, 214, 230, .14); border-color: rgba(95, 214, 230, .3); }
 .gW-cell.tone-amber { color: var(--hy-amber); background: rgba(227, 164, 74, .14); border-color: rgba(227, 164, 74, .3); }

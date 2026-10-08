@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
@@ -139,5 +140,54 @@ describe('全局导航的溢出与当前项', () => {
     for (const call of mine()) {
       expect(call.options).toMatchObject({ inline: 'center' })
     }
+  })
+})
+
+// 手机档第二行 tab 条跨满整宽那条规则，必须写在**栅格子项**身上。
+// 2026-10-08「导航栏右边有遮挡」就是这条契约断了：A5 给 tab 条套了
+// `.global-nav-tabs-wrap`（溢出渐隐的壳），`grid-column: 1 / -1` 却还留在里层的
+// `.global-nav-tabs` 上 —— 里层不是 grid item，规则等于没写，自动排布把壳塞进第一列
+// `minmax(0,1fr)`（它的宽度先被 `.nav-right` 吃掉 161px），390 下只剩 205px：tab 被
+// `overflow-x` 硬裁在半个字上，右边一整片空着。jsdom 不做布局、量不出宽度，所以这里
+// 守的是那个**会断的接缝**：规则写在谁身上，以及谁才是 `.global-nav` 的直接孩子。
+describe('导航第二行的栅格契约（手机档）', () => {
+  const THEME_CSS = readFileSync('src/styles/theme.css', 'utf8')
+
+  /** 手机档那段 `@media (max-width: 720px)` 的正文（大括号配对，找不到就抛）。 */
+  function mobileNavCss() {
+    const start = THEME_CSS.indexOf('@media (max-width: 720px) {')
+    if (start < 0) throw new Error('theme.css 里找不到手机档的 @media (max-width: 720px)')
+    let depth = 0
+    for (let i = THEME_CSS.indexOf('{', start); i < THEME_CSS.length; i += 1) {
+      if (THEME_CSS[i] === '{') depth += 1
+      else if (THEME_CSS[i] === '}' && --depth === 0) return THEME_CSS.slice(start, i + 1)
+    }
+    throw new Error('@media (max-width: 720px) 没有闭合')
+  }
+
+  /** 取某个选择器在给定 CSS 片段里的声明正文；选择器不存在返回空串。 */
+  function declarations(css, selector) {
+    const bare = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    const chunk = bare.split('}').find((part) => part.split('{')[0].trim() === selector)
+    return chunk ? chunk.split('{')[1] : ''
+  }
+
+  it('跨满整宽写在栅格子项 .global-nav-tabs-wrap 上，里层滚动容器不带栅格定位', () => {
+    const block = mobileNavCss()
+    expect(declarations(block, '.global-nav-tabs-wrap')).toMatch(/grid-column:\s*1\s*\/\s*-1/)
+    expect(declarations(block, '.global-nav-tabs-wrap')).toMatch(/grid-row:\s*2/)
+    expect(
+      declarations(block, '.global-nav-tabs'),
+      '栅格定位写回里层了：它不是 grid item，规则会失效',
+    ).not.toMatch(/grid-(column|row)/)
+  })
+
+  it('那个栅格子项确实是 .global-nav 的直接孩子', async () => {
+    const { wrapper } = await mountNavBar('/admin')
+    expect(wrapper.find('.global-nav > .global-nav-tabs-wrap').exists()).toBe(true)
+    expect(
+      wrapper.find('.global-nav > .global-nav-tabs').exists(),
+      '嵌套一变，写在 .global-nav-tabs 上的栅格规则就失效了',
+    ).toBe(false)
   })
 })

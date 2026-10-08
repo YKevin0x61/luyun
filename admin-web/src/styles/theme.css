@@ -105,7 +105,13 @@ body {
   }
   .global-nav-brand { grid-column: 1; grid-row: 1; }
   .nav-right { grid-column: 2; grid-row: 1; }
-  .global-nav-tabs {
+  /* 第二行（tab 条）跨满整宽 —— 但**栅格子项是外面那层 `.global-nav-tabs-wrap`**
+     （`NavBar.vue` 里 A5 溢出渐隐的那层壳），里面的 `.global-nav-tabs` 只是它的孩子、
+     不是 grid item。这两条原先写在里层，因此等于没写：自动排布把壳放进第一列
+     （`minmax(0,1fr)`，其宽度已经被 `.nav-right` 吃掉一块），390 下只有 205px，
+     剩下的 tab 被 `overflow-x` 硬裁在半个字上、右边一整片空着 —— 就是 2026-10-08
+     报的「导航栏右边有遮挡」。改到壳上，手机档 tab 条才真正占满 374px。 */
+  .global-nav-tabs-wrap {
     grid-column: 1 / -1;
     grid-row: 2;
     min-width: 0;

@@ -155,6 +155,20 @@ describe('店长端周表（员工 × 周）', () => {
     expect(view).not.toMatch(/<i v-if="pendingMarks\[day\.business_date\]" class="pend"><\/i>/)
   })
 
+  it('格子里带出工作区（2026-10-08 用户要的）：班次下面一行小字', () => {
+    // 周表答的是「这个人这周怎么上」—— 光有班次不知道人在哪个区，所以每格第二行写区名。
+    expect(view).toMatch(/v-if="weekCellZone\(employee, day\)" class="gW-zone"/)
+    expect(view).toMatch(/function weekCellZone\(employee, day\)/)
+    // 只有「这天真有班次」才谈得上区：休 / 请假 / 还没排到不显示，与 `sheetHasShift` 同判据。
+    expect(view).toMatch(/if \(cell\.shift_id === null \|\| cell\.shift_id === undefined\) return ''/)
+    expect(view).toMatch(/\.gW-cell \.gW-zone \{/)
+    // 三个字的区名（明档1）在 ~39px 宽的格子里单行放得下；再长的截断，不撑破格子。
+    expect(view).toMatch(/text-overflow: ellipsis/)
+    // 没配区的格子**不写占位**（那一行留给真有区的人），但无障碍那一路照旧说清楚。
+    expect(view).toMatch(/未配工作区/)
+    expect(view).not.toMatch(/class="gW-zone">未配/)
+  })
+
   it('窗口外那几格点不动，也不冒充「休」', () => {
     expect(view).toMatch(/:disabled="!day\.in_window"/)
     expect(view).toMatch(/还没铺到（只铺到/)
