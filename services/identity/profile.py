@@ -24,6 +24,13 @@
   是合法状态 —— 低于应为的持续提醒（含历史欠调），高于应为的只标出来、**绝不自动
   改写**档案里的钱。
 
+生日（2026-10-07，`docs/adr/0102-hr-reminders-and-id-card-birthday.md`）：
+
+* **只从 18 位身份证号的第 7–14 位取**，不另存一栏（另存一份就会与身份证号打架）；
+* 15 位老号、形状坏、日历上没有那一天一律回 ``None`` —— 那个人进「档案待补」，
+  **不静默跳过**（「这个月没有生日」与「生日算不出来」在界面上必须长得不一样）；
+* 平年 2 月 29 日出生的人按 **2 月 28 日** 提醒（同 :func:`add_months` 的月末兜底）。
+
 校验失败的形状：一律抛 :class:`ProfileError`，``code`` 就是 ``api/hygiene.py`` 的
 ``_ERROR_DETAILS`` 键 —— 文案在那一处（注册、PATCH、导出共用），这一层只说"错在哪"。
 
@@ -360,6 +367,55 @@ def seniority_next_adjust_month(hire_date: Any, today: Any) -> Optional[str]:
     return _shift_month(base, (years + 1) * 12)
 
 
+def birthday_from_id_card(id_card_no: Any) -> Optional[str]:
+    """18 位身份证号 → 生日 ``MM-DD``（第 7–14 位是 ``YYYYMMDD``）。
+
+    返回**月日**而不是完整日期：下游全是「这个月谁过生日」「今天 / 已过 / 未到」的
+    判据，年份在这套系统里没用（也不该顺手把年龄算出来）。
+
+    空值、15 位老号、形状坏、日历上没有那一天（``19900230``）一律回 ``None`` ——
+    那个人进「档案待补」，**不静默跳过**。坏值不抛：花名册与提醒页不该因为一行
+    坏号打不开（同 :func:`health_cert_expires_on`）。
+
+    **不校验校验位**：库里的号已经过 :func:`normalize_id_card`；这里只解日期，
+    历史数据里手改过的号也能读出它写着的生日。
+    """
+    value = _text(id_card_no)
+    if len(value) != 18:
+        return None
+    body = value[6:14]
+    if not body.isdigit():
+        return None
+    try:
+        day = date(int(body[:4]), int(body[4:6]), int(body[6:8]))
+    except ValueError:
+        return None
+    return f"{day.month:02d}-{day.day:02d}"
+
+
+def birthday_in_year(birthday: Any, year: int) -> Optional[str]:
+    """生日 ``MM-DD`` 在某个公历年里的**生效日子**：平年的 2 月 29 日折到 2 月 28 日。
+
+    折算放在这里、不放在 :func:`birthday_from_id_card`：后者回答「他生日是哪天」，
+    这里回答「今年哪天提醒他」—— 两件事，别让前者按年份变来变去。
+    """
+    value = _text(birthday)
+    if len(value) != 5 or value[2] != "-":
+        return None
+    try:
+        month, day = int(value[:2]), int(value[3:])
+    except ValueError:
+        return None
+    try:
+        date(int(year), month, day)
+    except ValueError:
+        # 闰日落在平年：按 2 月 28 日提醒（同 `add_months` 的月末兜底口径）。
+        if (month, day) == (2, 29):
+            return "02-28"
+        return None
+    return f"{month:02d}-{day:02d}"
+
+
 def profile_incomplete(row: Mapping[str, Any]) -> bool:
     """「待补」= 四项（身份证号 / 健康证办理日期 / 底薪 / 入职日期）任一为空。
 
@@ -402,6 +458,8 @@ __all__ = [
     "add_months",
     "approve_gate",
     "as_date",
+    "birthday_from_id_card",
+    "birthday_in_year",
     "health_cert_expires_on",
     "health_cert_status",
     "id_card_check_digit",

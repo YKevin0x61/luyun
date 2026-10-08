@@ -1,5 +1,6 @@
 <script setup>
-// 管理端「人事提醒」（票 05）：本月该调工龄奖的人 + 历史欠调的 + 档案待补。
+// 管理端「人事提醒」（票 05 建页，票 06 加生日那一块）：本月该调工龄奖的人 + 历史欠调的
+// + 本月生日 + 档案待补。
 //
 // 这一页**只提醒，不替人做决定**：工龄奖要人工点「确认调整」才落账，系统绝不自动改
 // 档案里的钱。所以两种人行长得不一样 ——
@@ -9,18 +10,24 @@
 //   * `state === 'over'`（现值高于应为）：只标出来，**不给按钮** —— 一键把 500 改成
 //     100 就是自动下调，`docs/adr/0101` 明确不做；要降得去花名册手动填，那才有人工痕迹。
 //
-// 档位与折算月一律用服务端给的字段（`services/identity/profile.py` 是唯一实现），
-// 这一页只负责把它们翻成人话（口径在 `utils/seniorityReminder.js`，有单测钉住）。
+// 档位、折算月、生日、今天/已过/未到一律用服务端给的字段（`services/identity/profile.py`
+// 是唯一实现），这一页只负责把它们翻成人话（口径在两个 util 里，各有单测钉住）。
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../../api/client'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
+import {
+  birthdayStateText,
+  birthdayText,
+  leapNoteText,
+} from '../../utils/birthdayReminder'
 import {
   canConfirm,
   confirmPayload,
   currentText,
   gapText,
   isDue,
+  missingText,
   monthText,
   reminderCounts,
   stateText,
@@ -40,6 +47,7 @@ const data = ref(null)
 
 const counts = computed(() => reminderCounts(data.value))
 const items = computed(() => data.value?.seniority?.items || [])
+const birthdays = computed(() => data.value?.birthdays?.items || [])
 const incomplete = computed(() => data.value?.incomplete?.items || [])
 
 async function load() {
@@ -145,18 +153,39 @@ onMounted(() => {
         </ul>
       </section>
 
+      <!-- 生日（票 06）：生日取自身份证第 7–14 位，只列在职的人。已过 / 今天 / 未到
+           由服务端判，这里只上色 —— 「就是今天」那一行最该被一眼看见。 -->
+      <section class="hCard">
+        <div class="hCard-hd">
+          <h2>本月生日</h2>
+          <span class="hCount">{{ birthdays.length }}</span>
+        </div>
+        <p class="hLead">生日以身份证上的日期为准；平年的 2 月 29 日按 2 月 28 日提醒。</p>
+        <p v-if="!birthdays.length" class="hEmpty">这个月没有在职的人过生日。</p>
+        <ul v-else class="hPeople hBirthdays">
+          <li v-for="person in birthdays" :key="person.id">
+            <b>{{ person.name || '（没有名字）' }}</b>
+            <span class="hWhen">{{ birthdayText(person.on) }}</span>
+            <span v-if="leapNoteText(person)" class="hNext">{{ leapNoteText(person) }}</span>
+            <span class="hState" :class="person.state">{{ birthdayStateText(person) }}</span>
+          </li>
+        </ul>
+      </section>
+
       <section class="hCard">
         <div class="hCard-hd">
           <h2>档案待补</h2>
           <span class="hCount">{{ counts.incomplete }}</span>
         </div>
-        <p class="hLead">入职日期空着就算不出工龄奖 —— 他们不在上面的名单里，而是落在这儿。</p>
+        <p class="hLead">
+          入职日期空着算不出工龄奖，身份证空着算不出生日 —— 他们不在上面的名单里，而是落在这儿。
+        </p>
         <p v-if="!incomplete.length" class="hEmpty">档案都齐。</p>
         <ul v-else class="hPeople">
           <li v-for="person in incomplete" :key="person.id">
             <b>{{ person.name || '（没有名字）' }}</b>
             <span v-if="person.phone" class="hPhone">{{ person.phone }}</span>
-            <span class="hMissing">缺入职日期</span>
+            <span class="hMissing">{{ missingText(person.missing) }}</span>
           </li>
         </ul>
         <button class="btn" type="button" @click="router.push(ROSTER_PATH)">去花名册补档案</button>
@@ -208,6 +237,9 @@ onMounted(() => {
   color: var(--hy-mint); border: 1px solid var(--hy-mint-line); background: var(--hy-mint-soft);
 }
 .hState.over { color: var(--hy-coral); border-color: rgba(255, 138, 128, .35); background: rgba(255, 138, 128, .12); }
+/* 生日那三个状态：今天最醒目（实底），已过淡下去，未到就是常规那一种。 */
+.hState.today { color: var(--hy-night); background: var(--hy-amber); border-color: transparent; }
+.hState.past { color: var(--hy-faint); border-color: var(--hy-line); background: transparent; }
 .hMoney { margin: 8px 0 0; font-size: 13px; color: var(--hy-ink); }
 .hMoney b { font-family: var(--font-mono); font-size: 14px; }
 .hGap { margin-left: 8px; font-size: 12px; color: var(--hy-amber); }
@@ -224,4 +256,7 @@ onMounted(() => {
 .hPeople b { font-size: 13px; color: var(--hy-ink); }
 .hPhone { font-family: var(--font-mono); font-size: 11.5px; }
 .hMissing { margin-left: auto; font-size: 11.5px; color: var(--hy-amber); }
+/* 生日那一行的状态徽标要留在最右（`.hNext` 那个闰日说明跟在日子后面）。 */
+.hBirthdays .hState { margin-left: auto; }
+.hBirthdays .hNext { margin-left: 0; }
 </style>

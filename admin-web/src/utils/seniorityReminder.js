@@ -60,3 +60,18 @@ export function reminderCounts(data) {
 export function confirmPayload(item) {
   return { seniority_bonus: item?.should_be ?? 0 }
 }
+
+/** 档案缺哪几项：`['hire_date', 'id_card_no']` → 「缺入职日期、缺身份证」。
+ *
+ *  票 06 起「档案待补」不止缺入职日期那一类（缺身份证的人也算不出生日），两项都缺
+ *  是**一行两项**、不是两行 —— 文案跟着服务端点名的 `missing` 走，别在页面里写死。
+ */
+const MISSING_LABELS = {
+  hire_date: '缺入职日期',
+  id_card_no: '缺身份证',
+}
+
+export function missingText(missing) {
+  const list = Array.isArray(missing) ? missing : []
+  return list.map((key) => MISSING_LABELS[key] || `缺 ${key}`).join('、')
+}

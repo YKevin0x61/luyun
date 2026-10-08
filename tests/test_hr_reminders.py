@@ -29,6 +29,8 @@ from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.work import HygieneWork
 from services.identity.profile import (
+    birthday_from_id_card,
+    birthday_in_year,
     seniority_adjust_month,
     seniority_base_month,
     seniority_next_adjust_month,
@@ -177,6 +179,7 @@ def _seed(
     hire_date=None,
     bonus=None,
     disabled: bool = False,
+    birth: str = "19900307",
 ) -> int:
     """建一个档案齐全的人（身份证 + 健康证都填，工龄奖那两栏由参数决定）。"""
     employee = _run(
@@ -184,7 +187,7 @@ def _seed(
             phone(serial),
             PASSWORD,
             name,
-            id_card_no=id_card(serial),
+            id_card_no=id_card(serial, birth=birth),
             health_cert_date=CERT_OK,
         )
     )
@@ -462,3 +465,150 @@ def test_staff_me_says_nothing_when_the_hire_date_is_missing(reminders_http):
     assert employee["seniority_bonus"] is None
     assert employee["seniority_should_be"] == 0
     assert employee["seniority_next_adjust_month"] is None
+
+
+# ── 6. 生日：只从 18 位身份证的第 7–14 位取（ADR 0102）────────────────────────
+# 期望值是**字面量** —— 生日就写在造号时传进去的 `birth` 里，不是照实现再解一遍。
+
+def test_birthday_comes_from_the_id_card_digits():
+    assert birthday_from_id_card(id_card(1, birth="19900307")) == "03-07"
+    assert birthday_from_id_card(id_card(2, birth="20001231")) == "12-31"
+    assert (
+        birthday_from_id_card(id_card(3, birth="19960229")) == "02-29"
+    ), "闰年的 2 月 29 日是合法生日（平年折算见下一个用例）"
+
+
+def test_birthday_is_none_when_it_cannot_be_read():
+    """读不出来一律回 ``None`` —— 那个人进「档案待补」，不静默跳过。"""
+    assert birthday_from_id_card(None) is None
+    assert birthday_from_id_card("") is None
+    assert birthday_from_id_card("   ") is None
+    assert birthday_from_id_card("11010519900307123") is None, "15 位老号没有这一段"
+    assert birthday_from_id_card("110105199002301234") is None, "2 月 30 日：日历上没有"
+    assert birthday_from_id_card("110105199013011234") is None, "13 月"
+    assert birthday_from_id_card("11010519900A071234") is None, "形状坏"
+
+
+def test_leap_day_birthday_folds_to_the_28th_in_a_common_year():
+    assert birthday_in_year("02-29", 2028) == "02-29", "闰年原样"
+    assert birthday_in_year("02-29", 2026) == "02-28", "平年按 2 月 28 日提醒"
+    assert birthday_in_year("03-07", 2026) == "03-07"
+    assert birthday_in_year(None, 2026) is None
+    assert birthday_in_year("13-01", 2026) is None
+
+
+# ── 7. 提醒清单：本月生日按日期排，标出今天 / 已过 / 未到 ──────────────────────
+# 夹具那一刻是 2026-09-13，所以「本月」就是 2026-09。
+
+def test_birthdays_list_the_current_month_sorted_with_state(reminders_http):
+    client, _db, accounts = reminders_http
+    _admin(client)
+    _seed(client, accounts, serial=41, name="初七生", birth="19900907")
+    _seed(client, accounts, serial=42, name="十三生", birth="19960913")
+    _seed(client, accounts, serial=43, name="二十生", birth="19880920")
+    _seed(client, accounts, serial=44, name="十月生", birth="19901005")
+
+    items = _reminders(client)["birthdays"]["items"]
+
+    assert [item["name"] for item in items] == ["初七生", "十三生", "二十生"], (
+        "按日期升序；别的月份的人不进这份名单"
+    )
+    assert [item["on"] for item in items] == ["09-07", "09-13", "09-20"]
+    assert [item["state"] for item in items] == ["past", "today", "upcoming"]
+    assert _reminders(client)["birthdays"]["count"] == 3
+
+
+def test_leap_day_birthday_lands_on_february_28th_in_a_common_year(reminders_http):
+    """生日本身是 02-29，但 2027 是平年 —— 这一年按 2 月 28 日提醒他。"""
+    client, db, accounts = reminders_http
+    _admin(client)
+    _seed(client, accounts, serial=45, name="闰日生", birth="19960229")
+
+    feb = EmployeeAccounts(db, now=lambda: datetime(2027, 2, 28, 10, 0, tzinfo=CHINA_TZ))
+    data = _run(feb.list_hr_reminders())
+    item = next(i for i in data["birthdays"]["items"] if i["name"] == "闰日生")
+
+    assert item["birthday"] == "02-29", "生日本身不改写"
+    assert item["on"] == "02-28", "平年折到 2 月 28 日"
+    assert item["state"] == "today"
+
+
+def test_birthdays_skip_disabled_employees(reminders_http):
+    client, _db, accounts = reminders_http
+    _admin(client)
+    _seed(client, accounts, serial=46, name="在职的", birth="19900920")
+    _seed(client, accounts, serial=47, name="停用的", birth="19900921", disabled=True)
+
+    names = [item["name"] for item in _reminders(client)["birthdays"]["items"]]
+
+    assert names == ["在职的"], "人都停了就不用提醒生日（同健康证待办的口径）"
+
+
+# ── 8. 档案待补：缺身份证与缺入职日期各点各的名，不互相吞掉 ────────────────────
+
+def test_incomplete_names_every_missing_field(reminders_http):
+    client, _db, accounts = reminders_http
+    _admin(client)
+    # 缺身份证 → 生日与「实名」那一路算不出来
+    card_missing = _seed(
+        client, accounts, serial=61, name="缺身份证", hire_date="2024-09-10"
+    )
+    resp = client.patch(
+        f"/api/hygiene/admin/roster/{card_missing}", json={"id_card_no": ""}
+    )
+    assert resp.status_code == 200, resp.text
+    # 缺入职日期 → 工龄奖算不出来
+    _seed(client, accounts, serial=62, name="缺入职日")
+    # 两样都缺 → **一行里**两项都点名，不是两行
+    both_missing = _seed(
+        client, accounts, serial=63, name="两样都缺", hire_date="2024-09-10"
+    )
+    resp = client.patch(
+        f"/api/hygiene/admin/roster/{both_missing}",
+        json={"id_card_no": "", "hire_date": ""},
+    )
+    assert resp.status_code == 200, resp.text
+
+    data = _reminders(client)
+    by_name = {item["name"]: item["missing"] for item in data["incomplete"]["items"]}
+
+    assert by_name["缺身份证"] == ["id_card_no"]
+    assert by_name["缺入职日"] == ["hire_date"]
+    assert sorted(by_name["两样都缺"]) == ["hire_date", "id_card_no"]
+    assert data["incomplete"]["count"] == 3
+    birthday_names = [item["name"] for item in data["birthdays"]["items"]]
+    assert "缺身份证" not in birthday_names, "读不出生日的人不进名单，只进待补"
+
+
+# ── 9. 员工端：看得到自己的生日，仍然看不到身份证号（ADR 0098 的边界）──────────
+
+def test_staff_me_shows_my_birthday_but_never_the_id_card(reminders_http):
+    client, _db, accounts = reminders_http
+    _admin(client)
+    employee_id = _seed(
+        client, accounts, serial=71, name="三月生日", hire_date="2024-09-10", birth="19960314"
+    )
+    _approve(client, accounts, employee_id, 71)
+
+    resp = client.get("/api/hygiene/staff/me")
+    assert resp.status_code == 200, resp.text
+    employee = resp.json()["employee"]
+
+    assert employee["birthday"] == "03-14", "生日是单独派生下发的一列"
+    for secret in ("id_card_no", "base_salary", "health_cert_date"):
+        assert secret not in employee, f"员工端不许下发 {secret}（ADR 0098）"
+
+
+def test_staff_me_says_nothing_when_the_id_card_is_missing(reminders_http):
+    client, _db, accounts = reminders_http
+    _admin(client)
+    employee_id = _seed(client, accounts, serial=72, name="没身份证", hire_date="2024-09-10")
+    _approve(client, accounts, employee_id, 72)
+    cleared = client.patch(
+        f"/api/hygiene/admin/roster/{employee_id}", json={"id_card_no": ""}
+    )
+    assert cleared.status_code == 200, cleared.text
+
+    employee = client.get("/api/hygiene/staff/me").json()["employee"]
+
+    assert employee["birthday"] is None, "没有身份证就没有生日，不编一个"

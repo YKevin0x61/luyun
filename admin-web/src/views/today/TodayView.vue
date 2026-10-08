@@ -30,6 +30,7 @@ import { staffRequest } from '../../utils/hygieneStaff'
 import { buildWorkQueue, dailyProgress, shiftClock } from '../../utils/hygieneWorkFlow'
 import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
 import { loginRedirectTarget } from '../../utils/loginNext'
+import { birthdayText } from '../../utils/birthdayReminder'
 import { monthText } from '../../utils/seniorityReminder'
 import {
   dayLabel,
@@ -1141,6 +1142,13 @@ useNudgePull({
                 <template v-if="seniorityNextText"> · {{ seniorityNextText }}</template>
               </dd>
             </div>
+            <!-- 生日（票 06）：**从身份证号派生出来单独下发的那一列**，身份证号本身
+                 一条都不下发（`docs/adr/0098` / `0102`）。读不出身份证就不渲染这一行 ——
+                 没有生日不是「1 月 1 日」，不该摆一个值在那儿让人误会。 -->
+            <div v-if="staffMe.birthday">
+              <dt>生日</dt>
+              <dd>{{ birthdayText(staffMe.birthday) }}<span class="tL-hint">（按身份证）</span></dd>
+            </div>
           </dl>
           <ul class="tL-list">
             <li>
@@ -2038,6 +2046,13 @@ useNudgePull({
   font-size: 11px;
   line-height: 1.7;
   color: var(--hy-muted);
+}
+
+/* 「（按身份证）」这种来源说明：跟着值走、别抢值的注意力。 */
+.tL-hint {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--hy-faint);
 }
 
 .tL-err {

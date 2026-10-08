@@ -5,6 +5,7 @@ import {
   currentText,
   gapText,
   isDue,
+  missingText,
   monthText,
   reminderCounts,
   stateText,
@@ -82,5 +83,14 @@ describe('人事提醒的展示口径', () => {
   it('读不到数据时不炸', () => {
     expect(reminderCounts(null)).toEqual({ due: 0, over: 0, incomplete: 0 })
     expect(gapText(null)).toBe('')
+  })
+
+  // 票 06：待补那一块从「只缺入职日期」扩成两项，文案跟着 `missing` 走。
+  it('待补缺哪几项就说哪几项，两项都缺就说两项', () => {
+    expect(missingText(['hire_date'])).toBe('缺入职日期')
+    expect(missingText(['id_card_no'])).toBe('缺身份证')
+    expect(missingText(['hire_date', 'id_card_no'])).toBe('缺入职日期、缺身份证')
+    expect(missingText([])).toBe('')
+    expect(missingText(undefined)).toBe('')
   })
 })

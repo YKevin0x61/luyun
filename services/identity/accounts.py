@@ -29,6 +29,8 @@ from db_core.errors import is_integrity_violation
 from services.identity.capabilities import dump_caps, parse_caps
 from services.identity.profile import (
     ProfileError,
+    birthday_from_id_card,
+    birthday_in_year,
     health_cert_status,
     normalize_base_salary,
     normalize_date,
@@ -277,6 +279,12 @@ class EmployeeAccounts:
             "seniority_next_adjust_month": seniority_next_adjust_month(
                 mapping.get("hire_date"), self._today()
             ),
+            # 生日（2026-10-07，见 `docs/adr/0102`）：**从身份证号派生出来单独下发**。
+            # 员工当然知道自己生日，所以它不是敏感项；红线是 `id_card_no` 本身不掉进
+            # 这一份投影 —— `birthday_from_id_card` 只回 `MM-DD`，连年份都不带出去。
+            # 读不出来（没填 / 15 位老号 / 坏值）回 `None`：花名册那边同时会把他标进
+            # 「档案待补」，员工端这一栏就是空的，不编一个值。
+            "birthday": birthday_from_id_card(mapping.get("id_card_no")),
         }
 
     def _roster_row(self, row) -> dict:
@@ -566,77 +574,115 @@ class EmployeeAccounts:
         return due
 
     async def list_hr_reminders(self) -> dict:
-        """超管「人事提醒」页的清单（票 05：工龄奖该调名单 + 档案待补）。
+        """超管「人事提醒」页的清单（工龄奖该调 + 本月生日 + 档案待补）。
 
         2026-10-07 用户裁定，口径见 `docs/adr/0101` / `0102`。**只捞未停用的人**
-        （同 :meth:`list_health_cert_due` 的口径：人都停了就不用催）。每块都是
-        ``{items, count}`` 的形状 —— 票 06 的生日那一块照这个形状接在同一份响应里。
+        （同 :meth:`list_health_cert_due` 的口径：人都停了就不用催）。三块一次查出来，
+        形状都是 ``{items, count}`` —— 首页那一格（票 07）与页面读的是同一份，
+        所以「首页说有 3 件、点进去只有 2 件」不可能发生。
 
         * ``seniority``：**现值低于应为**的（含历史欠调）与**现值高于应为**的
           （调过头，只标出来、绝不自动改写）都在列，``state`` 分别是 ``due`` /
           ``over``；现值等于应为的不列 —— 所以「档位到 1000 就不再催」是这条
           通用规则的自然结果，不需要为封顶单开一个分支。``count`` 只数 ``due``：
           首页那一格问的是「要处理几件」。
-        * ``incomplete``：入职日期为空**或坏值**的人（本票只这一类）。他们算不出
-          工龄奖，进这里点名缺哪一项 —— 「这个月没有要调的」与「算不出来」在界面上
-          必须长得不一样（ADR 0102 的教训）。
+        * ``birthdays``：**本自然月**过生日的人，按日子升序。``birthday`` 是身份证上
+          写着的那一天（闰日就是 ``02-29``），``on`` 是**这一年**的生效日子（平年的
+          2 月 29 日折到 2 月 28 日，见 :func:`birthday_in_year`），``state`` 是
+          ``past`` / ``today`` / ``upcoming`` —— 判据在服务端算，前端只渲染。
+        * ``incomplete``：**算不出来**的人（入职日期缺 / 坏值 → 工龄奖算不出；身份证
+          读不出生日），``missing`` 点名缺哪几项；两项都缺是**一行两项**、不是两行 ——
+          「这个月没有要处理的」与「算不出来」在界面上必须长得不一样（ADR 0102）。
         """
         cur = await self._conn.execute(
-            """SELECT id, name, phone, hire_date, seniority_bonus
+            """SELECT id, name, phone, hire_date, seniority_bonus, id_card_no
                FROM hygiene_employees
                WHERE disabled = 0
                ORDER BY id ASC""",
         )
         rows = await cur.fetchall()
         today = self._today()
+        month_prefix = f"{today.month:02d}-"
         seniority_items: list[dict] = []
+        birthday_items: list[dict] = []
         incomplete_items: list[dict] = []
         for row in rows:
             mapping = dict(row)
             hire_date = mapping.get("hire_date") or None
+            birthday = birthday_from_id_card(mapping.get("id_card_no"))
             # 「算不出来」与「还没到时候」是两件事：前者进待补，后者静默。
+            missing = []
             if seniority_base_month(hire_date) is None:
+                missing.append("hire_date")
+            if birthday is None:
+                missing.append("id_card_no")
+            if missing:
                 incomplete_items.append(
                     {
                         "id": int(mapping["id"]),
                         "name": mapping.get("name") or "",
                         "phone": mapping.get("phone") or "",
-                        "missing": ["hire_date"],
+                        "missing": missing,
                     }
                 )
-                continue
-            should_be = seniority_should_be(hire_date, today)
-            current = (
-                None
-                if mapping.get("seniority_bonus") is None
-                else int(mapping["seniority_bonus"])
-            )
-            settled = 0 if current is None else current
-            if settled == should_be:
-                continue
-            seniority_items.append(
-                {
-                    "id": int(mapping["id"]),
-                    "name": mapping.get("name") or "",
-                    "phone": mapping.get("phone") or "",
-                    "hire_date": hire_date,
-                    "current": current,
-                    "should_be": should_be,
-                    "gap": should_be - settled,
-                    "state": "due" if settled < should_be else "over",
-                    "due_month": seniority_due_month(hire_date, today),
-                    "next_adjust_month": seniority_next_adjust_month(hire_date, today),
-                }
-            )
+            if "hire_date" not in missing:
+                should_be = seniority_should_be(hire_date, today)
+                current = (
+                    None
+                    if mapping.get("seniority_bonus") is None
+                    else int(mapping["seniority_bonus"])
+                )
+                settled = 0 if current is None else current
+                if settled != should_be:
+                    seniority_items.append(
+                        {
+                            "id": int(mapping["id"]),
+                            "name": mapping.get("name") or "",
+                            "phone": mapping.get("phone") or "",
+                            "hire_date": hire_date,
+                            "current": current,
+                            "should_be": should_be,
+                            "gap": should_be - settled,
+                            "state": "due" if settled < should_be else "over",
+                            "due_month": seniority_due_month(hire_date, today),
+                            "next_adjust_month": seniority_next_adjust_month(
+                                hire_date, today
+                            ),
+                        }
+                    )
+            if birthday is not None:
+                on = birthday_in_year(birthday, today.year)
+                if on is not None and on.startswith(month_prefix):
+                    day = int(on[3:])
+                    birthday_items.append(
+                        {
+                            "id": int(mapping["id"]),
+                            "name": mapping.get("name") or "",
+                            "phone": mapping.get("phone") or "",
+                            "birthday": birthday,
+                            "on": on,
+                            "day": day,
+                            "state": (
+                                "past"
+                                if day < today.day
+                                else "today"
+                                if day == today.day
+                                else "upcoming"
+                            ),
+                        }
+                    )
         # 要处理的在前，组内按「欠自哪个月」升序 —— 欠得最久的在最上面。
         seniority_items.sort(
             key=lambda item: (item["state"] != "due", item["due_month"] or "", item["id"])
         )
+        # 生日按日子升序（同一天按员工号，次序稳定）。
+        birthday_items.sort(key=lambda item: (item["day"], item["id"]))
         return {
             "seniority": {
                 "items": seniority_items,
                 "count": sum(1 for item in seniority_items if item["state"] == "due"),
             },
+            "birthdays": {"items": birthday_items, "count": len(birthday_items)},
             "incomplete": {"items": incomplete_items, "count": len(incomplete_items)},
         }
 
@@ -939,11 +985,13 @@ class EmployeeAccounts:
         # 库里存的是 sha256，cookie 是原文：哈希后再查。
         # `e.admin_caps` 必须带出来 —— 它是**判据的来源**（`_staff_actor` 把这一组交给
         # 服务层的 `has_cap(...)`），漏掉这一列会让所有管理动作静默变成 403。
+        # `e.id_card_no` 带出来**只为派生 `birthday`**：`_project_employee` 只下发那个
+        # `MM-DD`，身份证号本身一条都不下发（ADR 0098 的红线）。
         cur = await self._conn.execute(
             """SELECT s.session_id, s.expires_at, s.last_seen_at,
                       e.id, e.phone, e.name, e.job_title, e.permission, e.admin_caps,
                       e.approved, e.disabled, e.hire_date, e.health_cert_date,
-                      e.seniority_bonus
+                      e.seniority_bonus, e.id_card_no
                FROM hygiene_staff_sessions s
                JOIN hygiene_employees e ON e.id = s.employee_id
                WHERE s.session_id = ?""",
