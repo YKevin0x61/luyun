@@ -327,14 +327,17 @@ describe('C 方向：人事壳把工作台级导航让到底栏', () => {
     return blocks.join('\n')
   }
 
-  it('底栏挂上了，而顶栏那排只是收起来（桌面档还要它）', () => {
+  it('底栏挂上了，而顶栏那一条在手机档整个收起来（桌面档还要它）', () => {
     expect(shell).toMatch(/components\/workbench\/WorkbenchTabBar\.vue/)
     expect(shell).toMatch(/<WorkbenchTabBar class="sched-tabbar" \/>/)
     // 组件与它所在的带子都还在：桌面档（>720px）那条带子里仍是工作台级导航 + 本组四页。
     expect(shell).toMatch(/components\/workbench\/WorkbenchNav\.vue/)
     expect(shell).toMatch(/class="sched-navbar"/)
-    // 手机档只是把它收起来。删组件（而不是 display:none）会把桌面档那一排一起删掉。
-    expect(mobileRules(shell)).toMatch(/\.sched-shell \.sched-wb-nav\s*\{\s*display:\s*none/)
+    // 手机档：**整条** `.sched-top` 收起来（2026-10-08 方案 C）—— 组内四页与退出 / 回后台
+    // 都进 `WorkbenchMobileHead`，不再是"只收起工作台级那一排、其余留在带子上"。
+    // 删组件（而不是 `display:none`）会把桌面档那一条一起删掉。
+    expect(mobileRules(shell)).toMatch(/\.sched-top\s*\{\s*display:\s*none/)
+    expect(shell).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
   })
 
   it('底栏钉在视口底、内容给它让出高度（两条都是壳自己的账）', () => {

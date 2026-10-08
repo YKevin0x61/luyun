@@ -11,7 +11,8 @@ import { clearAuthStatusCache } from '../../utils/authStatus.js'
 //
 // 四种组合：只有管理端会话（店长）、只有员工会话（扫码的厨师）、谁都没登录、
 // 以及「探针还没回来」那一瞬间（fail-closed：先不显示管理入口，晚半拍比点错便宜）。
-// 外加「只降不升」那一条：共用电脑上记着员工档时，管理端会话还在也不给管理入口。
+// 外加「只降不升」那一条：共用电脑上两套会话都在、本机记着员工档 → 不给管理入口；
+// 而员工会话已经不在（登出 / 过期）时记忆值失去载体，按唯一可用的那一档走。
 
 function jsonResponse(data, status = 200) {
   return {
@@ -119,8 +120,22 @@ describe('配方的管理入口：由工作台身份决定', () => {
     expect(wrapper.text()).toBe('只读')
   })
 
-  it('只降不升：本机记着员工档时，管理端会话还在也不给管理入口', async () => {
-    // 共用电脑上的底线（spec 故事 6）：这台设备上次选的是员工，就不自动升回超级管理员。
+  it('只降不升：两套会话都在而本机记着员工档 → 不给管理入口', async () => {
+    // 共用电脑上的底线（spec 故事 6）：员工那一档的会话还在（人就在这台设备上），
+    // 即便店长的会话也挂着，也不自动升回超级管理员。
+    window.localStorage.setItem('luyun.login.workbench.identity', 'staff')
+    vi.stubGlobal('fetch', bothSessionsFetch())
+
+    const wrapper = mountProbe()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toBe('只读')
+  })
+
+  it('员工登出后只剩管理端会话（记忆员工仍在）：按超级管理员给管理入口', async () => {
+    // 员工会话已经没了 —— 员工那一档此刻一格都打不开（进去就被守卫弹回登录页），
+    // 记忆值失去载体，身份按唯一可用的管理端会话定，与顶栏切换器显示的那一档一致。
     window.localStorage.setItem('luyun.login.workbench.identity', 'staff')
     vi.stubGlobal('fetch', adminOnlyFetch())
 
@@ -128,7 +143,7 @@ describe('配方的管理入口：由工作台身份决定', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(wrapper.text()).toBe('只读')
+    expect(wrapper.text()).toBe('管理')
   })
 
   it('本机记着超级管理员、两套会话都在：管理入口显示', async () => {

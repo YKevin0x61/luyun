@@ -12,9 +12,10 @@
  *  两个刻意的取舍：
  *  - **探针没出结论时不显示**（`identity` 是 `null`）：宁可先不显示，也不给扫码进来的人
  *    一个点不通、还会把他弹去登录页的入口。管理端那几颗按钮晚半拍出现，比点错一次便宜。
- *  - **只降不升照旧**：这台设备记住的是员工档时，即便管理端会话还挂着也不显示管理入口
- *    （`resolveWorkbenchIdentity` 的规则）。要切回超级管理员，去套着工作台外壳的
- *    `/workbench/kitchen/recipe` 列表页，顶栏那颗切换器在那儿。
+ *  - **只降不升照旧**：这台设备记住的是员工档、而员工会话还在时，即便管理端会话也挂着
+ *    也不显示管理入口（`resolveWorkbenchIdentity` 的规则）。要切回超级管理员，去套着
+ *    工作台外壳的 `/workbench/kitchen/recipe` 列表页，顶栏那颗切换器在那儿。
+ *    （员工会话已经不在时记忆值失去载体 —— 身份按唯一可用的那一档走，见那个函数的注释。）
  */
 import { computed } from 'vue'
 import { useWorkbenchIdentityStore } from '../stores/workbenchIdentity'

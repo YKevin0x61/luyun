@@ -30,6 +30,7 @@ import { computed, inject, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import WorkbenchExitButton from '../../components/workbench/WorkbenchExitButton.vue'
 import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
+import WorkbenchMobileHead from '../../components/workbench/WorkbenchMobileHead.vue'
 import WorkbenchNav from '../../components/workbench/WorkbenchNav.vue'
 import WorkbenchTabBar from '../../components/workbench/WorkbenchTabBar.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
@@ -82,6 +83,11 @@ watch(
 
 <template>
   <div class="hygiene-admin sched-shell">
+    <!-- 手机档页头（方案 C，2026-10-08）：一行装下「组名 / 当前页下拉 / 身份 / 更多」——
+         本组四页进那个下拉、退出与「回后台」进 `⋮`，顶上这一条在手机档整个收起来。
+         桌面档它自己不渲染（组件 scoped 样式里 `max-width: 720px` 那一段）。 -->
+    <WorkbenchMobileHead />
+
     <header class="sched-top">
       <button class="sched-back" type="button" @click="backToAdmin()">‹ 后台</button>
       <!-- 牌子写的是「工作台」，就指工作台**首页**（B2）：原来它指本组首页（月历），
@@ -173,15 +179,14 @@ watch(
 .sched-conn.off i { background: var(--hy-seal-bright); }
 
 @media (max-width: 720px) {
-  .sched-top { flex-wrap: wrap; row-gap: 5px; gap: 8px; padding: 4px 8px; }
-  /* 本组四页整条另起一行（order 放到最后），上面那一行留给两个入口、切换器与实时点；
-     这条带子在窄屏自己横滑。 */
-  .sched-navbar { order: 1; flex-basis: 100%; }
-  /* C 方向：工作台级那一排（今天 / 人事 / 现场 / 后勤 / 我的）下到底栏
-     （`components/workbench/WorkbenchTabBar.vue`）—— 拇指区可达。顶栏这一排因此收起来，
-     顶栏少一行。**是 `display: none` 不是删组件**：桌面档（>720px）还是它在干活，
-     这里只收掉它在手机档的那一份；两处同时出现才是错的（同一排入口两遍、两个高亮）。 */
-  .sched-shell .sched-wb-nav { display: none; }
+  /* 方案 C（2026-10-08 用户裁定）：顶上这一条整个收进 `WorkbenchMobileHead` 的一行
+     （组名 / 当前页下拉 / 身份 / ⋮）—— 本组四页进那个下拉，退出与「回后台」进 `⋮`，
+     工作台级那一排本来就已经下到底栏。顶上因此只剩一行 57px，与卫生 / 产品 / 今天一致。
+     **是 `display: none` 不是删组件**：桌面档（>720px）还是它在干活，那里空间宽裕 ——
+     牌子、本组四页的胶囊、工作台级导航那一排都摆得下。
+     取舍：`.sched-conn`（实时断开提示）长在这一条上，收掉这条就一起收了 —— 手机档看不到
+     它。要补得给它另找位置（顶栏这一行已经满了）。 */
+  .sched-top { display: none; }
   /* 底栏（`WorkbenchTabBar`）在手机档钉在视口底 —— 与样板 `WorkbenchLayout` 同一份契约：
      组件自己是 `position: fixed; left: 0; right: 0; bottom: 0`，外壳负责给内容让出那一条的
      高度（见下面 `.sched-shell` 的 padding-bottom，样板里是 `.wb-main` 的同一条）。
@@ -195,9 +200,6 @@ watch(
   /* 底栏已脱离文档流，内容末尾要让出「56px + 1px 边框 + iPhone home indicator」的高度，
      否则最后一屏内容压在栏下、滚不到底（数字与样板 `.wb-main` 那条一致）。 */
   .sched-shell { padding-bottom: calc(57px + env(safe-area-inset-bottom, 0px)); }
-  /* 触控下限（B6）：手机上「‹后台」与导航胶囊原来高 24–29px，抬到 44px。 */
-  .sched-back { min-height: 44px; padding: 4px 14px; }
-  .sched-nav-item { min-height: 44px; padding: 4px 14px; }
 }
 @media (max-width: 560px) {
   /* 牌子让位给切换器与两扇门；子系统名字在页面标题与后台导航里都还在。 */

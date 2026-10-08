@@ -28,12 +28,15 @@
 import { PAGE_ROUTES, pageMeta, pageRow } from '../router/pageRoutes.js'
 import { PREP_PLAN_PATH } from './prepPlanPaths.js'
 import { RECIPE_HOME_PATH, RECIPE_MANAGE_PATH, RECIPE_QR_PATH } from './recipePaths.js'
-import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME } from './workbenchCopy.js'
+import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_TITLE } from './workbenchCopy.js'
 import { IDENTITY_ADMIN, IDENTITY_STAFF } from './workbenchIdentity.js'
 
 export const WORKBENCH_NAV_GROUPS = [
   // 首页（票 06）：「今天」—— 子应用根，两种身份都看得见（那一页在清单里是 `both`）。
-  { key: 'home', label: '今天', to: WORKBENCH_HOME },
+  // `headLabel`：手机档页头里**组名那一格**写什么。这一组的 `label` 与它唯一那一页的标题
+  // 都是「今天」，页头里并排写两遍是废话 —— 组名那格写「工作台」（它是子应用首页），
+  // 与「卫生 › 日常验收」「产品 › 选择岗位」同一个读法（2026-10-08 用户裁定）。
+  { key: 'home', label: '今天', headLabel: WORKBENCH_TITLE, to: WORKBENCH_HOME },
   // 人事：月历 / 待办 / 班次表 / 花名册（落点是月历，组里的页由 `workbenchPagesOf` 给）。
   { key: 'hr', label: '人事', to: WORKBENCH_HR_HOME },
   // 卫生（组名 2026-10-08 由用户裁定，从「现场」改过来）：卫生八页，**店长那一档**的面

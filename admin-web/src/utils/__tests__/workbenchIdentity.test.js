@@ -71,9 +71,14 @@ const DECISIONS = [
   ['admin', IDENTITY_ADMIN, IDENTITY_ADMIN, false, [IDENTITY_ADMIN], IDENTITY_ADMIN],
   ['staff', IDENTITY_ADMIN, IDENTITY_STAFF, true, [IDENTITY_STAFF], IDENTITY_STAFF],
   ['none', IDENTITY_ADMIN, null, false, [], IDENTITY_ADMIN],
-  // 记的是员工：**反向绝不自动升**，哪怕店长的会话就挂在这台设备上
+  // 记的是员工：**员工会话还在时反向绝不自动升**，哪怕店长的会话就挂在这台设备上
   ['both', IDENTITY_STAFF, IDENTITY_STAFF, false, [IDENTITY_ADMIN, IDENTITY_STAFF], IDENTITY_STAFF],
-  ['admin', IDENTITY_STAFF, IDENTITY_STAFF, false, [IDENTITY_ADMIN], IDENTITY_STAFF],
+  // ……但员工会话已经不在（登出 / 过期 / 被清）时，记忆值失去了载体：员工档一格都打不开
+  // （守卫会把每一页踢回登录页），再拿它当「我是谁」就是撒谎。退回唯一可用的那一档 ——
+  // 与切换器 `current` 的兜底同一条口径（`WorkbenchIdentitySwitcher.test.js` 的
+  // 「只有管理端会话：只显示超级管理员」）。落盘值保持 staff：下一个人以员工身份回来
+  // （员工会话重新有效）时，这一档照样直接生效，不会撒谎说"管理端登录已过期"。
+  ['admin', IDENTITY_STAFF, IDENTITY_ADMIN, false, [IDENTITY_ADMIN], IDENTITY_STAFF],
   ['staff', IDENTITY_STAFF, IDENTITY_STAFF, false, [IDENTITY_STAFF], IDENTITY_STAFF],
   ['none', IDENTITY_STAFF, null, false, [], IDENTITY_STAFF],
 ]
@@ -98,17 +103,42 @@ describe('工作台身份的判定（只降不升）', () => {
     })
   }
 
-  it('只降不升：定出来的一档绝不比记忆值更高（12 种组合逐个核）', () => {
+  it('两条不变式逐个核：员工会话在时不升档；定出来的档必须真的可用', () => {
     const rank = { [IDENTITY_STAFF]: 0, [IDENTITY_ADMIN]: 1 }
     for (const [sessions, saved] of DECISIONS) {
-      const { identity } = resolveWorkbenchIdentity({
+      const staffValid = sessions === 'both' || sessions === 'staff'
+      const { identity, available } = resolveWorkbenchIdentity({
         adminValid: sessions === 'both' || sessions === 'admin',
-        staffValid: sessions === 'both' || sessions === 'staff',
+        staffValid,
         saved,
       })
       if (identity === null) continue
-      expect(rank[identity]).toBeLessThanOrEqual(rank[saved] ?? rank[IDENTITY_ADMIN])
+      // (b) 认出来的这一档必须落在可用档位里：切换器按 available 选、导航面按 identity
+      // 渲染，两者一旦分歧，员工档的界面就会挂在一台只有管理端会话的设备上。
+      expect(available).toContain(identity)
+      // (a) 只降不升：员工会话还在时，定出来的一档绝不比记忆值更高。
+      if (staffValid) {
+        expect(rank[identity]).toBeLessThanOrEqual(rank[saved] ?? rank[IDENTITY_ADMIN])
+      }
     }
+  })
+
+  it('员工登出后超级管理员登录（记忆员工 + 只剩管理端会话）→ 按超级管理员显示', () => {
+    // 「普通员工退出登录 → 超管在同一台设备登录」的原样复现：登出只作废探针结论，
+    // 本机记忆还是 staff，而员工会话已经清掉了 —— 这时不能再拿员工档当身份，
+    // 否则工作台首页与底栏都按员工渲染（首页整屏「我的班」，底栏没有「人事」），
+    // 顶栏却写着「超级管理员」，而且没有员工会话、员工页一格都进不去。
+    const result = resolveWorkbenchIdentity({
+      adminValid: true,
+      staffValid: false,
+      saved: IDENTITY_STAFF,
+    })
+
+    expect(result.identity).toBe(IDENTITY_ADMIN)
+    expect(result.available).toEqual([IDENTITY_ADMIN])
+    // 落盘值不动：别把用户记下的这一档写坏（员工下次回来照样直接生效）。
+    expect(result.remembered).toBe(IDENTITY_STAFF)
+    expect(result.downgraded).toBe(false)
   })
 
   it('会话状态不明（探针没回来）时按没有算，不凭空定档', () => {
