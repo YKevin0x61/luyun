@@ -193,10 +193,10 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     expect(meta.text()).toContain('领班')
   })
 
-  it('只列员工端真有执行点的那三项：库里存着未接线的那七项也不画成能力', async () => {
-    // 花名册上可勾的只有三项，但库列里可能存着未接线那七项的键（键保留是契约层的向后
-    // 兼容）。它们对应的全是超级管理员在电脑端的活，员工端零执行点 —— 画出来就是"勾了
-    // 不生效"那类缺陷的另一面。
+  it('只列员工端真有执行点的那四项：库里存着未接线的那七项也不画成能力', async () => {
+    // 花名册上可勾的只有四项（2026-10-07 起加了「加班与补钟审批」，见 `docs/adr/0103`），
+    // 但库列里可能存着未接线那七项的键（键保留是契约层的向后兼容）。它们对应的全是超级
+    // 管理员在电脑端的活，员工端零执行点 —— 画出来就是"勾了不生效"那类缺陷的另一面。
     const { wrapper } = await mountToday({
       caps: ['daily_review', 'data', 'roster', 'standard'],
       permission: '管理员',
@@ -213,7 +213,7 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     ]) {
       expect(card.text()).not.toContain(label)
     }
-    // 卡上就三行，一项不多。
-    expect(wrapper.findAll('.cap-row')).toHaveLength(3)
+    // 卡上就四行，一项不多。
+    expect(wrapper.findAll('.cap-row')).toHaveLength(4)
   })
 })

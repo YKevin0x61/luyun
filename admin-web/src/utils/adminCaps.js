@@ -25,10 +25,11 @@
  * 所以页面不用再判断该信哪一个。
  */
 
-/** 十项能力：`key` 是契约键名，`label` / `note` 只用于界面显示，顺序 = 花名册里的显示顺序。
+/** 十一项能力：`key` 是契约键名，`label` / `note` 只用于界面显示，顺序 = 花名册里的显示顺序。
  *
  *  `staffSide` 标的是**员工端有没有执行点**（后端 `STAFF_SIDE_CAPABILITIES` 的同义字段）：
- *  只有前三项在员工手机端「卫生」页真正生效，花名册里**可勾**的也只有它们。
+ *  只有前四项在员工手机端真正生效 —— 三项在「卫生」页，`overtime` 在「加班与补钟」页
+ *  （2026-10-07 加的第 11 项，见 `docs/adr/0103`）—— 花名册里**可勾**的也只有它们。
  *
  *  ## 为什么后七项还在表里，却不可勾
  *
@@ -45,6 +46,7 @@ export const ADMIN_CAP_DEFS = [
   { key: 'daily_review', label: '日常验收', note: '判别人交的日常检查，看原图与标准图对照', staffSide: true },
   { key: 'deep_review', label: '专项验收', note: '判专项卫生的前后对照', staffSide: true },
   { key: 'fix', label: '整改单', note: '开整改单、验收或驳回整改单', staffSide: true },
+  { key: 'overtime', label: '加班与补钟审批', note: '批 / 驳加班与补钟登记，代员工补录', staffSide: true },
   { key: 'attire', label: '仪容仪表', note: '看与判仪容打卡，维护仪容标准', staffSide: false },
   { key: 'standard', label: '标准图管理', note: '换标准图、改标注、导出整套标准', staffSide: false },
   { key: 'zone', label: '工作区与检查项', note: '加/改/删工作区与检查项', staffSide: false },
@@ -57,7 +59,7 @@ export const ADMIN_CAP_DEFS = [
 /** 键名清单（顺序 = 契约）：`normalizeCaps` 的排序与后端 `dump_caps` 的写法都以它为准。 */
 export const ADMIN_CAPABILITIES = ADMIN_CAP_DEFS.map((item) => item.key)
 
-/** 花名册上**可勾**的三项（员工端有执行点）。 */
+/** 花名册上**可勾**的四项（员工端有执行点）。 */
 export const ADMIN_CAP_STAFF_DEFS = ADMIN_CAP_DEFS.filter((item) => item.staffSide)
 
 /** 花名册上**只读展示**的七项：键保留、员工端暂无入口。 */

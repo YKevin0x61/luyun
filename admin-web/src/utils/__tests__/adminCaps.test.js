@@ -20,13 +20,14 @@ function readView(name) {
   return readFileSync(join(here, `../../views/hygiene/${name}.vue`), 'utf8')
 }
 
-// 这十行是**契约本身**：与 `services/identity/capabilities.py` 的 `CAPABILITIES` 逐字同序。
+// 这十一行是**契约本身**：与 `services/identity/capabilities.py` 的 `CAPABILITIES` 逐字同序。
 // 在这里再抄一遍是有意的 —— 两边任何一侧改了键名或顺序，这个用例（或后端那份
 // `tests/test_hygiene_admin_caps.py`）就会红，而不是等到线上判据悄悄失效。
 const CONTRACT_KEYS = [
   'daily_review',
   'deep_review',
   'fix',
+  'overtime',
   'attire',
   'standard',
   'zone',
@@ -37,18 +38,19 @@ const CONTRACT_KEYS = [
 ]
 
 describe('adminCaps · 前后端契约', () => {
-  it('十项键名与顺序逐字等于后端 CAPABILITIES', () => {
+  it('十一项键名与顺序逐字等于后端 CAPABILITIES', () => {
     expect(ADMIN_CAPABILITIES).toEqual(CONTRACT_KEYS)
     expect(ADMIN_CAP_DEFS.map((item) => item.key)).toEqual(CONTRACT_KEYS)
   })
 
-  it('可勾的三项 = 员工端有执行点的那三项，其余七项只读（两组不重不漏）', () => {
-    // 这三项与后端 `STAFF_SIDE_CAPABILITIES` 同义：只有它们在员工手机端「卫生」页生效。
+  it('可勾的四项 = 员工端有执行点的那四项，其余七项只读（两组不重不漏）', () => {
+    // 这四项与后端 `STAFF_SIDE_CAPABILITIES` 同义：三项在员工手机端「卫生」页生效，
+    // `overtime` 在「加班与补钟」页生效（2026-10-07 加的第 11 项，见 `docs/adr/0103`）。
     expect(ADMIN_CAP_STAFF_DEFS.map((item) => item.key))
-      .toEqual(['daily_review', 'deep_review', 'fix'])
+      .toEqual(['daily_review', 'deep_review', 'fix', 'overtime'])
     expect(ADMIN_CAP_SUPERVISOR_ONLY_KEYS)
       .toEqual(['attire', 'standard', 'zone', 'roster', 'boards', 'clock', 'data'])
-    // 两组刚好分完十项：多一个少一个都会让"可勾面 == 生效面"这个前提失效。
+    // 两组刚好分完十一项：多一个少一个都会让"可勾面 == 生效面"这个前提失效。
     expect([...ADMIN_CAP_STAFF_DEFS.map((item) => item.key), ...ADMIN_CAP_SUPERVISOR_ONLY_KEYS])
       .toEqual(CONTRACT_KEYS)
   })

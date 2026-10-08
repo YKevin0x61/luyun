@@ -11,7 +11,7 @@
 
 ## 契约
 
-**能力键名是前后端契约**：这里十项，前端 `admin-web/src/utils/adminCaps.js` 一份，
+**能力键名是前后端契约**：这里十一项，前端 `admin-web/src/utils/adminCaps.js` 一份，
 两边键名与顺序必须逐字相同；`tests/test_hygiene_admin_caps.py` 会读前端那份文件比对。
 **线上只走键名**（英文短横线风格），中文标签只用于界面显示。
 
@@ -32,10 +32,13 @@ from __future__ import annotations
 import json
 from typing import Iterable, Optional
 
-# ── 十项能力（键名 = 契约，顺序 = 花名册里的显示顺序）────────────────────────────
+# ── 十一项能力（键名 = 契约，顺序 = 花名册里的显示顺序）──────────────────────────
+# 2026-10-07 加了第 11 项 `overtime`（加班与补钟审批）：它在员工手机端**真有执行点**，
+# 所以进下面那组「可勾」，而不是「键保留、判据暂时没有」的只读说明 —— 见 `docs/adr/0103`。
 CAP_DAILY_REVIEW = "daily_review"  # 日常验收：判别人交的日常检查、看原图与标准图
 CAP_DEEP_REVIEW = "deep_review"  # 专项验收：判专项卫生的前后对照
 CAP_FIX = "fix"  # 整改单：开单 + 验收 + 驳回
+CAP_OVERTIME = "overtime"  # 加班与补钟审批：批 / 驳登记、代员工补录
 CAP_ATTIRE = "attire"  # 仪容仪表：看/判仪容打卡、换标准
 CAP_STANDARD = "standard"  # 标准图管理：换标准图、改标注、导出
 CAP_ZONE = "zone"  # 工作区与检查项：加/改/删工作区与检查项
@@ -48,6 +51,7 @@ CAPABILITIES: tuple[str, ...] = (
     CAP_DAILY_REVIEW,
     CAP_DEEP_REVIEW,
     CAP_FIX,
+    CAP_OVERTIME,
     CAP_ATTIRE,
     CAP_STANDARD,
     CAP_ZONE,
@@ -61,6 +65,7 @@ CAPABILITY_LABELS: dict[str, str] = {
     CAP_DAILY_REVIEW: "日常验收",
     CAP_DEEP_REVIEW: "专项验收",
     CAP_FIX: "整改单",
+    CAP_OVERTIME: "加班与补钟审批",
     CAP_ATTIRE: "仪容仪表",
     CAP_STANDARD: "标准图管理",
     CAP_ZONE: "工作区与检查项",
@@ -74,6 +79,7 @@ CAPABILITY_NOTES: dict[str, str] = {
     CAP_DAILY_REVIEW: "判别人交的日常检查，看原图与标准图对照",
     CAP_DEEP_REVIEW: "判专项卫生的前后对照",
     CAP_FIX: "开整改单、验收或驳回整改单",
+    CAP_OVERTIME: "批 / 驳加班与补钟登记，代员工补录",
     CAP_ATTIRE: "看与判仪容打卡，维护仪容标准",
     CAP_STANDARD: "换标准图、改标注、导出整套标准",
     CAP_ZONE: "加/改/删工作区与检查项",
@@ -86,10 +92,17 @@ CAPABILITY_NOTES: dict[str, str] = {
 #: 升级前那个「管理员」档位等于这三项 —— 迁移 `0015` 的回填值就是它，改这里要同步改迁移。
 LEGACY_ADMIN_CAPABILITIES: tuple[str, ...] = (CAP_DAILY_REVIEW, CAP_DEEP_REVIEW, CAP_FIX)
 
-#: **员工端有执行点的**能力：只有这三项在员工手机端「卫生」页真正生效
-#: （服务层的判据见 `services/hygiene/work.py` 的 `_require_reviewer` / `_require_fix_*`）。
+#: **员工端有执行点的**能力：这四项在员工手机端真正生效 —— 日常验收 / 专项验收 /
+#: 整改单在「卫生」页（判据见 `services/hygiene/work.py` 的 `_require_reviewer` /
+#: `_require_fix_*`），加班与补钟审批在「加班与补钟」页（判据见 `api/overtime.py` 的
+#: `_require_reviewer`；2026-10-07 由十项扩成十一项，见 `docs/adr/0103`）。
 #: 花名册里**可勾**的就是这一组 —— 勾了就能用，不存在"勾了不生效"。
-STAFF_SIDE_CAPABILITIES: tuple[str, ...] = (CAP_DAILY_REVIEW, CAP_DEEP_REVIEW, CAP_FIX)
+STAFF_SIDE_CAPABILITIES: tuple[str, ...] = (
+    CAP_DAILY_REVIEW,
+    CAP_DEEP_REVIEW,
+    CAP_FIX,
+    CAP_OVERTIME,
+)
 
 #: 其余七项：**键保留、判据暂时没有**。
 #:
@@ -115,7 +128,7 @@ SUPERVISOR_ONLY_CAPABILITIES: tuple[str, ...] = (
     CAP_DATA,
 )
 
-#: 两组必须刚好把十项分完，且顺序与 `CAPABILITIES` 一致 —— 由 `tests/test_hygiene_admin_caps.py` 钉住。
+#: 两组必须刚好把十一项分完，且顺序与 `CAPABILITIES` 一致 —— 由 `tests/test_hygiene_admin_caps.py` 钉住。
 assert set(STAFF_SIDE_CAPABILITIES) | set(SUPERVISOR_ONLY_CAPABILITIES) == set(CAPABILITIES)
 assert tuple(k for k in CAPABILITIES if k in set(STAFF_SIDE_CAPABILITIES)) == STAFF_SIDE_CAPABILITIES
 

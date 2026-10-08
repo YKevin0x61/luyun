@@ -105,13 +105,13 @@ function saveButton(wrapper) {
 }
 
 describe('花名册 · 管理权限（抽屉）', () => {
-  it('可勾的只有员工端真正生效的三项；「卫生权限」只剩只读标签，没有下拉', async () => {
+  it('可勾的只有员工端真正生效的四项；「卫生权限」只剩只读标签，没有下拉', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper)
 
     expect(wrapper.findAll('.roster-cap').map((node) => node.text()))
       .toEqual(ADMIN_CAP_STAFF_DEFS.map((item) => item.label))
-    expect(capBoxes(wrapper)).toHaveLength(3)
+    expect(capBoxes(wrapper)).toHaveLength(4)
 
     // 抽屉里一个 `<select>` 都没有：卫生权限是派生标签，由服务端给值。
     expect(wrapper.findAll('select')).toHaveLength(0)
@@ -169,7 +169,7 @@ describe('花名册 · 管理权限（抽屉）', () => {
     await openDrawer(wrapper)
 
     // 界面上看不见 data / boards 的勾。
-    expect(capBoxes(wrapper)).toHaveLength(3)
+    expect(capBoxes(wrapper)).toHaveLength(4)
 
     // 再加一项「专项验收」，然后保存。
     await capBoxes(wrapper)[1].setValue(true)

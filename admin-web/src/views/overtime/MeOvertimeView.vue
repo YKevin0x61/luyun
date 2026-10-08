@@ -28,11 +28,13 @@ import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import {
   HALF_HOURS_MAX,
   MAX_REASON,
+  MAX_REJECT_REASON,
   entryDayOptions,
   entryStatusText,
   entryStatusTone,
   formatHalfHours,
   stepHalfHours,
+  submittedByText,
 } from '../../utils/overtimeEntry'
 
 useScopedStylesheet('/hygiene-admin.css')
@@ -60,6 +62,19 @@ const formError = ref('')
 const note = ref('')
 const cancelBusyId = ref(null)
 
+// 票 04：店长那一面（第 11 项能力键 `overtime`）。`can_review` 由**服务端**算好带下来，
+// 页面不自己重写一遍 caps 判据 —— 权限判据只有一处，改口径时不会漏掉这一页。
+const canReview = ref(false)
+const pending = ref([])
+const roster = ref([])
+const reviewError = ref('')
+const reviewBusyId = ref(null)
+const rejectingId = ref(null)
+const rejectReason = ref('')
+const maxRejectReason = ref(MAX_REJECT_REASON)
+// 代录：「替谁记」。空串 = 我自己（走员工那条路），否则是别人的员工号。
+const backfillFor = ref('')
+
 const dayOptions = computed(() =>
   entryDayOptions({ today: today.value, yesterday: yesterday.value })
 )
@@ -77,8 +92,13 @@ async function load(quiet = false) {
     summary.value = data.summary || null
     maxReason.value = data.max_reason || MAX_REASON
     maxHalfHours.value = data.max_half_hours || HALF_HOURS_MAX
+    maxRejectReason.value = data.max_reject_reason || MAX_REJECT_REASON
+    canReview.value = !!data.can_review
     if (!day.value) day.value = data.today
     state.value = 'ready'
+    // 店长那一面单独拉一次（他自己那份记录上面已经拿到了）：它读失败不该把整页
+    // 打回错误态 —— 登记与「我的记录」照旧能用。
+    if (canReview.value) await loadReview()
   } catch (err) {
     if (err.status === 401) {
       // 会话没了：回员工登录，回来还是这一页（跟「今天」页同一个走法）。
@@ -96,16 +116,22 @@ async function submit() {
   busy.value = true
   formError.value = ''
   note.value = ''
+  // 店长替别人记时走店长那一面（带 `employee_id`），记自己的走原来那条路 —— 两条路
+  // 在服务端落到同一个 `submit()`：窗口按**提交人**判，所以店长给自己补很久以前的
+  // 一笔也放得开（`docs/adr/0100` / `0103`）。
+  const target = canReview.value && backfillFor.value ? Number(backfillFor.value) : null
+  const body = {
+    entry_date: day.value,
+    half_hours: halfHours.value,
+    reason: reason.value.trim(),
+  }
+  if (target) body.employee_id = target
   try {
-    await staffRequest('/api/overtime/me', {
+    await staffRequest(target ? '/api/overtime/review/entries' : '/api/overtime/me', {
       method: 'POST',
-      body: {
-        entry_date: day.value,
-        half_hours: halfHours.value,
-        reason: reason.value.trim(),
-      },
+      body,
     })
-    note.value = '提上去了，等店长批'
+    note.value = target ? '替他记上了，等审批' : '提上去了，等店长批'
     reason.value = ''
     halfHours.value = 1
     await load(true)
@@ -143,11 +169,65 @@ async function cancelEntry(entry) {
   }
 }
 
+// ── 店长那一面（票 04）：待审批队列、批 / 驳、代录选人 ────────────────────────
+
+/** 拉待审批队列与选人名单。两者都只认「加班与补钟审批」能力（没给的人调它 403）。 */
+async function loadReview() {
+  reviewError.value = ''
+  try {
+    const [queue, people] = await Promise.all([
+      staffRequest('/api/overtime/review/pending'),
+      staffRequest('/api/overtime/review/employees'),
+    ])
+    pending.value = queue.entries || []
+    roster.value = people.employees || []
+  } catch (err) {
+    if (err.status === 401) {
+      const target = loginRedirectTarget(router.currentRoute.value)
+      if (target) router.replace(target)
+      return
+    }
+    reviewError.value = err.message || '读不到等着批的登记'
+  }
+}
+
+function startReject(entry) {
+  rejectingId.value = entry.id
+  rejectReason.value = ''
+  reviewError.value = ''
+}
+
+/** 批或驳一笔。`body` 只在驳回时带理由 —— 服务端强制它非空。 */
+async function decide(entry, action, body = {}) {
+  if (reviewBusyId.value) return
+  reviewBusyId.value = entry.id
+  reviewError.value = ''
+  note.value = ''
+  try {
+    await staffRequest(`/api/overtime/review/${entry.id}/${action}`, {
+      method: 'POST',
+      body,
+    })
+    note.value = action === 'approve' ? '批了，他手机上就能看到' : '驳回了，理由会给他看到'
+    rejectingId.value = null
+    rejectReason.value = ''
+    await load(true)
+  } catch (err) {
+    if (err.status === 401) {
+      const target = loginRedirectTarget(router.currentRoute.value)
+      if (target) router.replace(target)
+      return
+    }
+    reviewError.value = err.message || '没处理成'
+  } finally {
+    reviewBusyId.value = null
+  }
+}
+
 onMounted(() => {
   document.title = workbenchDocumentTitle('加班与补钟')
   load()
 })
-
 // 实时（票 02）：这一笔被批了 / 驳了 / 作废了，自己这台设备上的状态要跟着变 ——
 // 员工不用反复下拉刷新才知道「批没批」。quiet 重读：状态变化不值得把整页打回 loading。
 useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) })
@@ -181,8 +261,68 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
         <p class="oHint">只有「已批准」那一行是算数的；待审批的还可能被驳回。</p>
       </div>
 
+      <!-- 店长那一面（票 04）：打开页面第一件事是「有什么等着我批」，所以它在登记
+           表单前面。没有这个能力的人根本看不到这一块（服务端 403 兜底）。 -->
+      <div v-if="canReview" class="oList oReview">
+        <div class="oListHd">等着我批的（{{ pending.length }}）</div>
+        <p v-if="reviewError" class="oErr">{{ reviewError }}</p>
+        <div v-for="entry in pending" :key="entry.id" class="oItem">
+          <div class="oL1">
+            <span class="oDate">{{ entry.entry_date }}</span>
+            <span class="oH" :class="{ minus: entry.half_hours < 0 }">
+              {{ formatHalfHours(entry.half_hours) }} 小时
+            </span>
+            <span class="oSt wait">{{ entry.employee_name }}</span>
+          </div>
+          <p class="oReason">{{ entry.reason }}</p>
+          <p class="oWho">{{ submittedByText(entry) }}</p>
+          <div class="oBtns">
+            <button
+              class="oPill ok"
+              type="button"
+              :disabled="reviewBusyId === entry.id"
+              @click="decide(entry, 'approve')"
+            >
+              批准
+            </button>
+            <button
+              class="oPill bad"
+              type="button"
+              :disabled="reviewBusyId === entry.id"
+              @click="startReject(entry)"
+            >
+              驳回
+            </button>
+          </div>
+          <div v-if="rejectingId === entry.id" class="oRejectBox">
+            <input
+              v-model="rejectReason"
+              class="oInput"
+              type="text"
+              :maxlength="maxRejectReason"
+              placeholder="为什么不算（必填，员工看得到）"
+            />
+            <button
+              class="oPill bad"
+              type="button"
+              :disabled="!rejectReason.trim() || reviewBusyId === entry.id"
+              @click="decide(entry, 'reject', { reason: rejectReason.trim() })"
+            >
+              确认驳回
+            </button>
+          </div>
+        </div>
+        <p v-if="!pending.length && !reviewError" class="mSub">没有等着你批的登记。</p>
+      </div>
+
       <form class="oForm" @submit.prevent="submit">
-        <div class="oRow">
+        <!-- 店长能补录任意过去日期，所以给他一个日期输入；员工只有今天 / 昨天两个
+             选项，那两个按钮本身就是「窗口」的可视化。 -->
+        <div v-if="canReview" class="oRow">
+          <span class="oLabel">哪一天</span>
+          <input v-model="day" class="oInput" type="date" :max="today" />
+        </div>
+        <div v-else class="oRow">
           <span class="oLabel">哪一天</span>
           <div class="oDays">
             <button
@@ -196,6 +336,16 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
               {{ opt.label }}
             </button>
           </div>
+        </div>
+
+        <div v-if="canReview && roster.length" class="oRow">
+          <span class="oLabel">替谁记</span>
+          <select v-model="backfillFor" class="oInput">
+            <option value="">我自己</option>
+            <option v-for="person in roster" :key="person.id" :value="String(person.id)">
+              {{ person.name }}{{ person.disabled ? '（已停用）' : '' }}
+            </option>
+          </select>
         </div>
 
         <div class="oRow">
@@ -435,5 +585,51 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   border-radius: 999px;
   background: transparent;
   font-size: 13px;
+}
+
+/* 店长那一面（票 04）：待审批队列、批 / 驳、代录选人。同一页多一块，所以给它自己的
+   边框 —— 两件事（我提的 / 我判的）在视觉上不能混成一串。 */
+.oReview {
+  border: 1px solid var(--hy-line, #e3e3e3);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+.oWho {
+  font-size: 12px;
+  color: var(--hy-mute, #888);
+  margin: 2px 0 0;
+}
+.oBtns {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.oPill {
+  padding: 5px 14px;
+  border: 1px solid var(--hy-line, #e3e3e3);
+  border-radius: 999px;
+  background: transparent;
+  font-size: 13px;
+}
+.oPill.ok {
+  border-color: var(--hy-mint, #2f9e7f);
+  color: var(--hy-mint, #2f9e7f);
+}
+.oPill.bad {
+  border-color: #c0392b;
+  color: #c0392b;
+}
+.oPill:disabled {
+  opacity: 0.5;
+}
+.oRejectBox {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.oRejectBox .oInput {
+  min-width: 0;
 }
 </style>
