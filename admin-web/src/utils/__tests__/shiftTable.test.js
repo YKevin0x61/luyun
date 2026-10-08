@@ -17,10 +17,10 @@ import {
 const SHIFT = { id: 1, name: '白班', sort_order: 10, is_active: true, people: 2, days: 90 }
 
 describe('班次表那一行（票 11）', () => {
-  it('用量把两件事分开说：几个人的轮转里排着它、已经排过多少天班', () => {
-    expect(usageLine(SHIFT)).toBe('2 个人的轮转里排着它 · 已经排过 90 天班')
-    expect(usageLine({ ...SHIFT, people: 1, days: 0 })).toBe('1 个人的轮转里排着它 · 还没排过班')
-    expect(usageLine({ ...SHIFT, people: 0, days: 0 })).toBe('没有人的轮转里排着它 · 还没排过班')
+  it('用量把两件事分开说：几个人在轮转、已排过多少天（都压到最短）', () => {
+    expect(usageLine(SHIFT)).toBe('2 人在轮转 · 已排 90 天')
+    expect(usageLine({ ...SHIFT, people: 1, days: 0 })).toBe('1 人在轮转 · 还没排过班')
+    expect(usageLine({ ...SHIFT, people: 0, days: 0 })).toBe('没人在轮转 · 还没排过班')
     expect(usageLine(null)).toBe('')
   })
 
@@ -51,18 +51,12 @@ describe('删不删得掉（票 11 验收 5）', () => {
   })
 
   it('删不掉时把理由说全 —— 不是只把按钮变灰', () => {
-    expect(deleteBlockedReason(SHIFT, 2)).toBe(
-      '删不掉（已经排过 90 天班，还有 2 个人的轮转里排着它）：停用就够了，历史排班照旧显示',
-    )
-    expect(deleteBlockedReason({ ...SHIFT, people: 0 }, 2)).toBe(
-      '删不掉（已经排过 90 天班）：停用就够了，历史排班照旧显示',
-    )
-    expect(deleteBlockedReason({ ...SHIFT, days: 0 }, 2)).toBe(
-      '删不掉（还有 2 个人的轮转里排着它）：停用就够了，历史排班照旧显示',
-    )
-    // 最后一个在用的：说的是另一件事（加一条、或启用一条别的）。
+    expect(deleteBlockedReason(SHIFT, 2)).toBe('删不掉：已排 90 天 · 2 人在轮转；停用就够了')
+    expect(deleteBlockedReason({ ...SHIFT, people: 0 }, 2)).toBe('删不掉：已排 90 天；停用就够了')
+    expect(deleteBlockedReason({ ...SHIFT, days: 0 }, 2)).toBe('删不掉：2 人在轮转；停用就够了')
+    // 最后一个在用的：说的是另一件事（加一条别的）。
     expect(deleteBlockedReason({ ...SHIFT, people: 0, days: 0 }, 1)).toBe(
-      '删不掉（这是最后一个在用的班次）：先加一个或启用一个别的班次',
+      '删不掉：最后一个在用的班次，先加一个别的',
     )
     // 能删的时候没有理由可写（页面也就不显示那一行）。
     expect(deleteBlockedReason({ ...SHIFT, people: 0, days: 0 }, 2)).toBe('')

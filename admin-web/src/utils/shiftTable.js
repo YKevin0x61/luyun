@@ -14,10 +14,8 @@
  */
 export function usageLine(shift) {
   if (!shift) return ''
-  const people = shift.people
-    ? `${shift.people} 个人的轮转里排着它`
-    : '没有人的轮转里排着它'
-  const days = shift.days ? `已经排过 ${shift.days} 天班` : '还没排过班'
+  const people = shift.people ? `${shift.people} 人在轮转` : '没人在轮转'
+  const days = shift.days ? `已排 ${shift.days} 天` : '还没排过班'
   return `${people} · ${days}`
 }
 
@@ -104,13 +102,13 @@ export function canDelete(shift, activeCount = 1) {
 export function deleteBlockedReason(shift, activeCount = 1) {
   if (!shift) return ''
   const reasons = []
-  if (shift.days) reasons.push(`已经排过 ${shift.days} 天班`)
-  if (shift.people) reasons.push(`还有 ${shift.people} 个人的轮转里排着它`)
+  if (shift.days) reasons.push(`已排 ${shift.days} 天`)
+  if (shift.people) reasons.push(`${shift.people} 人在轮转`)
   if (reasons.length) {
-    return `删不掉（${reasons.join('，')}）：停用就够了，历史排班照旧显示`
+    return `删不掉：${reasons.join(' · ')}；停用就够了`
   }
   if (shift.is_active && activeCount <= 1) {
-    return '删不掉（这是最后一个在用的班次）：先加一个或启用一个别的班次'
+    return '删不掉：最后一个在用的班次，先加一个别的'
   }
   return ''
 }
