@@ -19,8 +19,10 @@ from __future__ import annotations
 import functools
 import logging
 import re
+from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Callable, Optional
 
 import asyncpg
@@ -32,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "HALF_HOURS_MAX",
+    "HOURS_PER_DAY",
     "KIND_MAKEUP",
     "KIND_OVERTIME",
     "MAX_REASON",
@@ -69,6 +72,10 @@ MAX_REASON = 50
 # 驳回理由限长。它比事由宽一倍：事由是「这笔是干什么的」，驳回理由是「为什么不算」
 # ——后者常常要说清依据（哪天的排班、哪条规矩），一句话往往不够。
 MAX_REJECT_REASON = 100
+
+# 加班费的分母：一个工作日按 8.5 小时算（用户给的口径，见 `docs/adr/0100` 与票 03）。
+# 它与 `half_hours` 的单位无关 —— 金额那一步才把「半小时数」折成小时。
+HOURS_PER_DAY = 8.5
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -216,6 +223,30 @@ def _require_month(value: Any) -> str:
     except ValueError:
         raise OvertimeError("invalid_month", "invalid_month")
     return text
+
+
+def _days_in_month(month: str) -> int:
+    """``YYYY-MM`` → 该月日历天数（加班费公式的分母之一，票 03）。
+
+    用**自然月天数**而不是门店的应出勤天数：用户给的公式字面就是「当月天数」，
+    而且这样不用另维护一张每月应出勤表（`docs/adr/0100` 的 Considered options）。
+    """
+    year, mon = int(month[:4]), int(month[5:7])
+    return monthrange(year, mon)[1]
+
+
+def _pay_for(salary: int, days: int, net_hours: float) -> int:
+    """一笔月账的加班费（元）：`salary ÷ days ÷ 8.5 × net_hours`，四舍五入到元。
+
+    走 `Decimal` 而不是 `round()`：Python 的 `round` 是**银行家舍入**（`round(2.5) == 2`），
+    而工钱这件事上「四舍五入」四个字就是它字面的意思。净时长 ≤ 0 回 0 —— 不倒扣工资
+    （倒扣是线下的事），也不把欠的钟带到下个月。
+    """
+    if net_hours <= 0:
+        return 0
+    hourly = Decimal(int(salary)) / Decimal(int(days)) / Decimal(str(HOURS_PER_DAY))
+    amount = hourly * Decimal(str(net_hours))
+    return int(amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def _month_summary(rows: list[dict], month: str) -> dict:
@@ -529,16 +560,170 @@ class OvertimeLedger:
             int(entry_id), STATUS_CANCELLED, (STATUS_PENDING,), f"staff:{int(employee_id)}"
         )
 
+    # ── 按月统计与加班费（票 03）────────────────────────────────────────────
+
+    @_needs_migration
+    async def monthly_stats(self, month: str) -> dict:
+        """全店某个月的加班费账单（管理端）：每人一行 + 合计行。
+
+        只算**已批准**的登记 —— 待审批 / 已驳回 / 已撤回 / 已作废的没换来钱，不进账
+        （与员工端月度卡同一条口径）。归月按 `entry_date` 的**自然月**，与什么时候审批
+        无关：8 月 31 日的单 9 月才批，算在 8 月。
+
+        金额 =（该月**快照**底薪 ÷ 该月日历天数 ÷ 8.5）× 该月净时长，**每人各自取整
+        到元**再加总 —— 所以合计行是各行相加。拿全店小时数重算一遍会因为取整位置不同
+        而差几块钱，那是两本账。
+
+        没有快照的人（绕过审批写进来的历史数据）金额留 `None`，并在合计里计进
+        `unpriced`：「算不出来」与「算出来是 0 元」是两件事，界面要分得开。
+        """
+        target = _require_month(month)
+        rows = await self._rows(
+            " WHERE status = ? AND entry_date LIKE ?",
+            (STATUS_APPROVED, f"{target}%"),
+            "entry_date ASC, id ASC",
+        )
+
+        snapshots: dict[int, int] = {}
+        cur = await self._conn.execute(
+            "SELECT employee_id, base_salary FROM overtime_salary_snapshots"
+            " WHERE month = ?",
+            (target,),
+        )
+        for row in await cur.fetchall():
+            snapshots[int(row["employee_id"])] = int(row["base_salary"])
+
+        days = _days_in_month(target)
+        names = await self._name_index()
+        buckets: dict[int, dict] = {}
+        for row in rows:
+            employee_id = int(row["employee_id"])
+            bucket = buckets.setdefault(
+                employee_id, {"overtime_half_hours": 0, "makeup_half_hours": 0}
+            )
+            half_hours = int(row["half_hours"])
+            key = "overtime_half_hours" if half_hours > 0 else "makeup_half_hours"
+            bucket[key] += abs(half_hours)
+
+        items: list[dict] = []
+        for employee_id in sorted(buckets):
+            bucket = buckets[employee_id]
+            overtime = bucket["overtime_half_hours"]
+            makeup = bucket["makeup_half_hours"]
+            net_half_hours = overtime - makeup
+            net_hours = net_half_hours / 2
+            salary = snapshots.get(employee_id)
+            items.append(
+                {
+                    "employee_id": employee_id,
+                    "employee_name": names.get(employee_id, ""),
+                    "overtime_half_hours": overtime,
+                    "overtime_hours": overtime / 2,
+                    "makeup_half_hours": makeup,
+                    "makeup_hours": makeup / 2,
+                    "net_half_hours": net_half_hours,
+                    "net_hours": net_hours,
+                    "base_salary": salary,
+                    "amount": (
+                        None if salary is None else _pay_for(salary, days, net_hours)
+                    ),
+                }
+            )
+
+        total = {
+            "overtime_half_hours": sum(item["overtime_half_hours"] for item in items),
+            "makeup_half_hours": sum(item["makeup_half_hours"] for item in items),
+            "net_half_hours": sum(item["net_half_hours"] for item in items),
+            "amount": sum(item["amount"] or 0 for item in items),
+            "unpriced": sum(1 for item in items if item["amount"] is None),
+        }
+        total["overtime_hours"] = total["overtime_half_hours"] / 2
+        total["makeup_hours"] = total["makeup_half_hours"] / 2
+        total["net_hours"] = total["net_half_hours"] / 2
+        return {
+            "month": target,
+            "days": days,
+            "hours_per_day": HOURS_PER_DAY,
+            "count": len(items),
+            "items": items,
+            "total": total,
+        }
+
+    # ── 计费底薪快照（票 03）────────────────────────────────────────────────
+
+    @_needs_migration
+    async def salary_snapshot(self, employee_id: int, month: str) -> Optional[int]:
+        """某个人某个月的**计费底薪**；该月还没批过任何一笔就回 `None`。
+
+        它是「这个月的钱按哪一版底薪算」的唯一答案（`CONTEXT.md` 的「底薪快照」）：
+        写下之后不再变，所以月中调薪不会把已经算出来的数改掉。
+        """
+        cur = await self._conn.execute(
+            "SELECT base_salary FROM overtime_salary_snapshots"
+            " WHERE employee_id = ? AND month = ?",
+            (int(employee_id), _require_month(month)),
+        )
+        row = await cur.fetchone()
+        return None if row is None else int(row["base_salary"])
+
+    async def _write_snapshot(
+        self, employee_id: int, month: str, base_salary: int
+    ) -> None:
+        """写下这个月的计费底薪 —— **已经有的不覆盖**（该月第一次审批定音）。
+
+        不提交：调用方把这一条 INSERT 与它后面那次状态变更收在同一个事务里，于是
+        「批了却没记底薪」与「记了底薪却没批」两种半截账都不会留在库里。
+        """
+        await self._conn.execute(
+            "INSERT INTO overtime_salary_snapshots"
+            " (employee_id, month, base_salary, created_at) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT (tenant_id, employee_id, month) DO NOTHING",
+            (int(employee_id), _require_month(month), int(base_salary), self._now_iso()),
+        )
+
+    async def _base_salary(self, employee_id: int) -> Optional[int]:
+        """档案里的底薪（元/月）；没填回 `None` —— 「待补」是审批的拦路虎，不是 0。
+
+        `0` 是合法值（不待补，同 `services/identity/profile.py` 的 `is_blank`），
+        所以这里判的是「没这一格」而不是假值。
+        """
+        row = await EmployeeAccounts(self._write_lock_owner).get_profile_row(
+            int(employee_id)
+        )
+        value = row.get("base_salary")
+        return None if value is None or value == "" else int(value)
+
     @_needs_migration
     async def approve(self, actor: EntryActor, entry_id: int) -> dict:
-        """批准一笔**待审批**的登记（票 02）。
+        """批准一笔**待审批**的登记（票 02），顺带定下这个月的计费底薪（票 03）。
 
         状态谓词落在 `_claim` 的写锁里：只有第一个改得动这一行 —— 双击、两个标签页、
         网关重试里的第二个会拿到「已经处理过了」，而不是把同一笔批两遍。
+
+        **底薪待补的人批不了**（票 03 的验收 3）：钱算不出来，先让超管去花名册补档案。
+        快照按**登记日期**那个月写（验收 4：8 月的单 9 月才批，写的还是 8 月），而且
+        只在该月还没有快照时才写 —— 于是「该月第一次点头」那一刻的底薪说了算。
         """
-        return await self._decide(
-            int(entry_id), STATUS_APPROVED, (STATUS_PENDING,), actor.stamp
-        )
+        row = await self._entry_by_id(int(entry_id))
+        if row is None:
+            raise OvertimeError("unknown_entry", "unknown_entry")
+        employee_id = int(row["employee_id"])
+        month = str(row["entry_date"])[:7]
+        if await self.salary_snapshot(employee_id, month) is None:
+            salary = await self._base_salary(employee_id)
+            if salary is None:
+                raise OvertimeError("salary_missing", "salary_missing")
+            await self._write_snapshot(employee_id, month, salary)
+        try:
+            return await self._decide(
+                int(entry_id), STATUS_APPROVED, (STATUS_PENDING,), actor.stamp
+            )
+        except OvertimeError:
+            # 没抢到（别人先批了、或这一笔已经不是待审批）：把这次还没提交的快照
+            # INSERT 一起丢掉 —— 否则它挂在一个失败的事务里，会被后面某次 commit
+            # 顺手带进去，落成一行「没人批过却有底薪」的记录。
+            await self._rollback_quietly()
+            raise
 
     @_needs_migration
     async def reject(self, actor: EntryActor, entry_id: int, reason: Any) -> dict:

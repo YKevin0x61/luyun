@@ -62,9 +62,19 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
         settings.DATABASE_DIR = self._old_database_dir
         self._tmpdir.cleanup()
 
-    async def _employee(self, phone="13800138000", name="张三"):
+    async def _employee(self, phone="13800138000", name="张三", salary=5100):
+        """一个已批准的在职员工。
+
+        票 03 起**默认补上底薪**：审批会写该月的计费底薪快照，而底薪待补的人批不了
+        （`docs/adr/0100` 的后果、票 03 的验收 3）—— 所以测试里的「普通员工」就该是
+        档案齐全的那个。要造「待补」的人传 `salary=None`。
+        """
         employee = await self.accounts.register(phone, PASSWORD, name)
         await self.accounts.approve(employee["id"])
+        if salary is not None:
+            await self.accounts.update_fields(
+                employee["id"], base_salary=salary, hire_date="2024-03-01"
+            )
         return employee
 
     async def test_employee_submits_overtime_and_sees_it_pending(self):
@@ -366,6 +376,154 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
             await self.ledger.void(EntryActor(), entry["id"])
         self.assertEqual(caught.exception.code, "entry_not_approved")
 
+    # ── 票 03：底薪快照（该月第一次审批定音）────────────────────────────────
+
+    async def test_approve_writes_the_month_snapshot_once(self):
+        """验收 1 + 2：该月第一次审批写下快照；月中调薪不改已经算出的那一版。"""
+        employee = await self._employee(salary=5100)
+        actor = EntryActor(employee_id=employee["id"])
+        first = await self.ledger.submit(actor, TODAY, 13, "中秋加班")
+        second = await self.ledger.submit(actor, TODAY, 4, "又来一笔")
+
+        await self.ledger.approve(EntryActor(), first["id"])
+        self.assertEqual(
+            await self.ledger.salary_snapshot(employee["id"], "2026-09"), 5100
+        )
+
+        # 月中调薪：第二笔审批不覆盖快照 —— 这个月的钱按第一次点头那一刻的底薪算。
+        await self.accounts.update_fields(employee["id"], base_salary=6000)
+        await self.ledger.approve(EntryActor(), second["id"])
+        self.assertEqual(
+            await self.ledger.salary_snapshot(employee["id"], "2026-09"), 5100
+        )
+
+    async def test_approve_is_blocked_while_the_base_salary_is_missing(self):
+        """验收 3：底薪待补的人批不了（先补档案），且不写快照、不改状态。"""
+        employee = await self._employee(salary=None)
+        entry = await self.ledger.submit(
+            EntryActor(employee_id=employee["id"]), TODAY, 4, "加班"
+        )
+
+        with self.assertRaises(OvertimeError) as caught:
+            await self.ledger.approve(EntryActor(), entry["id"])
+        self.assertEqual(caught.exception.code, "salary_missing")
+
+        rows = (await self.ledger.list_mine(employee["id"]))["entries"]
+        self.assertEqual(
+            [(row["id"], row["status"]) for row in rows], [(entry["id"], "pending")]
+        )
+        self.assertIsNone(
+            await self.ledger.salary_snapshot(employee["id"], "2026-09")
+        )
+
+    async def test_snapshot_follows_the_entry_month_not_the_approval_month(self):
+        """验收 4：8 月 31 日的登记 9 月才批，快照落在 8 月那一版上。"""
+        employee = await self._employee(salary=5100)
+        august = await self.ledger.submit(
+            EntryActor(), "2026-08-31", 6, "上月末加班", target_employee_id=employee["id"]
+        )
+
+        await self.ledger.approve(EntryActor(), august["id"])
+
+        self.assertEqual(
+            await self.ledger.salary_snapshot(employee["id"], "2026-08"), 5100
+        )
+        self.assertIsNone(
+            await self.ledger.salary_snapshot(employee["id"], "2026-09")
+        )
+
+    # ── 票 03：按月统计与加班费 ─────────────────────────────────────────────
+
+    async def test_monthly_stats_pay_per_person_and_the_total_row(self):
+        """验收 6 + 8：金额 =（快照底薪 ÷ 该月天数 ÷ 8.5）× 净时长，每人取整到元；合计是各行相加。
+
+        9 月 30 天：5100 元的时薪 = 5100 / 30 / 8.5 = 20 元，净 5 小时 → 100 元；
+        8500 元 = 33.333… 元，净 2 小时 = 66.67 → **67 元**（四舍五入成整数元）；
+        合计 167 元 —— 各人取整后再相加，不是拿全店小时数重算一遍。
+        """
+        me = await self._employee(salary=5100)
+        other = await self._employee(phone="13800138001", name="李四", salary=8500)
+        first = await self.ledger.submit(
+            EntryActor(employee_id=me["id"]), YESTERDAY, 13, "加班"
+        )
+        second = await self.ledger.submit(
+            EntryActor(employee_id=me["id"]), TODAY, -3, "补钟"
+        )
+        his = await self.ledger.submit(
+            EntryActor(employee_id=other["id"]), TODAY, 4, "加班"
+        )
+        for entry in (first, second, his):
+            await self.ledger.approve(EntryActor(), entry["id"])
+
+        stats = await self.ledger.monthly_stats("2026-09")
+
+        by_id = {row["employee_id"]: row for row in stats["items"]}
+        self.assertEqual(stats["month"], "2026-09")
+        self.assertEqual(stats["days"], 30)
+        self.assertEqual(stats["hours_per_day"], 8.5)
+        self.assertEqual(by_id[me["id"]]["overtime_half_hours"], 13)
+        self.assertEqual(by_id[me["id"]]["makeup_half_hours"], 3)
+        self.assertEqual(by_id[me["id"]]["net_half_hours"], 10)
+        self.assertEqual(by_id[me["id"]]["net_hours"], 5.0)
+        self.assertEqual(by_id[me["id"]]["base_salary"], 5100)
+        self.assertEqual(by_id[me["id"]]["amount"], 100)
+        self.assertEqual(by_id[me["id"]]["employee_name"], "张三")
+        self.assertEqual(by_id[other["id"]]["amount"], 67)
+        self.assertEqual(stats["count"], 2)
+        self.assertEqual(stats["total"]["amount"], 167)
+        self.assertEqual(stats["total"]["net_half_hours"], 14)
+        self.assertEqual(stats["total"]["unpriced"], 0)
+
+    async def test_monthly_stats_counts_approved_only_and_never_goes_negative(self):
+        """验收 5 + 7：净额为负算 0 元（不倒扣、不带下月）；另外四种状态都不进统计。"""
+        employee = await self._employee(salary=5100)
+        actor = EntryActor(employee_id=employee["id"])
+        overtime = await self.ledger.submit(actor, TODAY, 2, "加班")
+        makeup = await self.ledger.submit(actor, TODAY, -13, "补钟")
+        await self.ledger.approve(EntryActor(), overtime["id"])
+        await self.ledger.approve(EntryActor(), makeup["id"])
+        # 待审批、已驳回、已撤回、已作废：一笔都不该出现在这个月的账上。
+        await self.ledger.submit(actor, TODAY, 8, "还没批")
+        rejected = await self.ledger.submit(actor, TODAY, 6, "被驳")
+        await self.ledger.reject(EntryActor(), rejected["id"], "不算")
+        withdrawn = await self.ledger.submit(actor, TODAY, 5, "撤回")
+        await self.ledger.cancel(employee["id"], withdrawn["id"])
+        voided = await self.ledger.submit(actor, TODAY, 4, "批了又作废")
+        await self.ledger.approve(EntryActor(), voided["id"])
+        await self.ledger.void(EntryActor(), voided["id"])
+
+        stats = await self.ledger.monthly_stats("2026-09")
+
+        row = stats["items"][0]
+        self.assertEqual(row["overtime_half_hours"], 2)
+        self.assertEqual(row["makeup_half_hours"], 13)
+        self.assertEqual(row["net_half_hours"], -11)
+        self.assertEqual(row["net_hours"], -5.5)
+        # 净欠 5.5 小时：这个月没有加班费，也不倒扣工资、不带进下个月。
+        self.assertEqual(row["amount"], 0)
+        self.assertEqual(stats["total"]["amount"], 0)
+
+    async def test_monthly_stats_leaves_the_amount_blank_without_a_snapshot(self):
+        """没有快照 = 算不出来 → 金额留空，而不是显示成 0 元（同「待补」的诚实口径）。"""
+        employee = await self._employee(salary=5100)
+        entry = await self.ledger.submit(
+            EntryActor(employee_id=employee["id"]), TODAY, 8, "加班"
+        )
+        # 绕过审批直接标成已批准：造一行「有已批准、却没有快照」的历史数据。
+        await self._approve_raw(entry["id"])
+
+        stats = await self.ledger.monthly_stats("2026-09")
+
+        self.assertEqual(stats["items"][0]["amount"], None)
+        self.assertEqual(stats["total"]["amount"], 0)
+        self.assertEqual(stats["total"]["unpriced"], 1)
+
+    async def test_monthly_stats_rejects_a_bad_month(self):
+        """月份形状不对就说清楚，别拿它去 LIKE 出一堆奇怪的行。"""
+        with self.assertRaises(OvertimeError) as caught:
+            await self.ledger.monthly_stats("2026-9")
+        self.assertEqual(caught.exception.code, "invalid_month")
+
     async def test_pending_queue_is_shop_wide_with_names(self):
         """验收 1：管理端的待办是全店的 —— 谁提的、哪一天、多少小时、为什么。"""
         me = await self._employee()
@@ -525,9 +683,16 @@ def overtime_http(tmp_path, monkeypatch):
     settings.DATABASE_DIR = old
 
 
-def _employee_id(accounts, phone=PHONE, name=NAME):
+def _employee_id(accounts, phone=PHONE, name=NAME, salary=5100):
+    """同 `OvertimeLedgerTest._employee`：默认档案齐全（票 03 起审批要底薪）。"""
     employee = _run(accounts.register(phone, PASSWORD, name))
     _run(accounts.approve(employee["id"]))
+    if salary is not None:
+        _run(
+            accounts.update_fields(
+                employee["id"], base_salary=salary, hire_date="2024-03-01"
+            )
+        )
     return employee["id"]
 
 
@@ -941,9 +1106,258 @@ def test_every_move_broadcasts_one_data_less_nudge_to_the_owner(
     assert ("overtime", {"reason": "entry_voided", "employee_id": employee}) in calls()
 
 
+def test_admin_month_stats_carry_the_pay_and_stay_admin_only(overtime_http):
+    """验收 6：管理端按月看到加班费；员工门拿不到它 —— 金额只在管理端。
+
+    5100 元的底薪、9 月 30 天、净 6.5 小时：5100 / 30 / 8.5 = 20 元/小时 → 130 元。
+    """
+    client, _db, accounts = overtime_http
+    employee_id = _employee_id(accounts)
+    entry = _submit_for(client, accounts, TODAY, 13, "中秋加班")
+    approved = client.post(f"/api/overtime/admin/entries/{entry['id']}/approve")
+    assert approved.status_code == 200, approved.text
+
+    response = client.get("/api/overtime/admin/month", params={"month": "2026-09"})
+    assert response.status_code == 200, response.text
+    stats = response.json()["stats"]
+    assert stats["month"] == "2026-09"
+    assert stats["days"] == 30
+    row = stats["items"][0]
+    assert row["employee_id"] == employee_id
+    assert row["employee_name"] == NAME
+    assert row["net_hours"] == 6.5
+    assert row["base_salary"] == 5100
+    assert row["amount"] == 130
+    assert stats["total"]["amount"] == 130
+
+    # 员工门拿不到这一页：金额只在管理端（ADR 0098 那条边界的延伸）。
+    _staff_cookie(client, accounts)
+    assert client.get("/api/overtime/admin/month").status_code == 401
+
+
+def test_admin_approve_is_blocked_without_a_base_salary(overtime_http):
+    """验收 3：底薪待补时管理端批不了，报的是「先去补档案」而不是 500。"""
+    client, _db, accounts = overtime_http
+    _employee_id(accounts, salary=None)
+    entry = _submit_for(client, accounts, TODAY, 4, "加班")
+
+    response = client.post(f"/api/overtime/admin/entries/{entry['id']}/approve")
+
+    assert response.status_code == 400, response.text
+    assert "底薪" in response.json()["detail"]
+    # 一个字都没写进去：这一笔还在待审批里等补完档案。
+    listing = client.get("/api/overtime/admin/entries").json()["entries"]
+    assert [row["status"] for row in listing] == ["pending"]
+
+
 def _submit_for(client, accounts, entry_date, half_hours, reason):
     """以员工身份提一笔（供管理端上下文里造数据用：切回员工 → 提 → 再切回管理端）。"""
     _staff_cookie(client, accounts)
     entry = _submit(client, entry_date, half_hours, reason)
     _admin_login(client)
     return entry
+
+
+# ── 票 04：店长在手机上审批（第 11 项能力键 `overtime`）──────────────────────
+#
+# 店长**没有管理端账号**：他就是花名册上的一个真人 + 员工会话。所以这一面走员工门
+# （`require_staff_session`）**加上**能力判据（`has_cap(caps, CAP_OVERTIME)`），形状与
+# 卫生那三项（管理员在员工手机端验收）完全一样，见 `docs/adr/0103`。
+#
+# 判据一律看 `admin_caps`：`permission` 那一列只是人话标签，拿它判会放行没给的那件事。
+
+SUPERVISOR_PHONE = "13800138011"
+SUPERVISOR_NAME = "李四"
+COLLEAGUE_PHONE = "13800138012"
+COLLEAGUE_NAME = "王五"
+
+
+def _with_caps(accounts, phone, name, caps):
+    """建一个员工并给他一组管理能力开关，返回员工号。"""
+    employee_id = _employee_id(accounts, phone=phone, name=name)
+    _run(accounts.set_admin_caps(employee_id, list(caps)))
+    return employee_id
+
+
+def _supervisor(accounts):
+    """开好「加班与补钟审批」的店长 —— 仍然是员工会话，没有管理端 cookie。"""
+    return _with_caps(accounts, SUPERVISOR_PHONE, SUPERVISOR_NAME, ["overtime"])
+
+
+def test_me_says_whether_i_can_review(overtime_http):
+    """`can_review` 由服务端按开关算：前端不把 caps 判据再写一遍。"""
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+
+    _staff_cookie(client, accounts)
+    assert client.get("/api/overtime/me").json()["can_review"] is False
+
+    _supervisor(accounts)
+    _staff_cookie(client, accounts, phone=SUPERVISOR_PHONE)
+    assert client.get("/api/overtime/me").json()["can_review"] is True
+
+
+def test_without_the_cap_the_review_face_is_closed(overtime_http):
+    """验收 2/3：没勾这项的人直接调接口被拒。
+
+    被拒是 **403**（「你没这个权限」），不是 404 —— 后者会把「权限不够」说成
+    「这一笔不存在」，店长会以为是数据没了。
+    """
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+
+    assert client.get("/api/overtime/review/pending").status_code == 403
+    assert client.get("/api/overtime/review/employees").status_code == 403
+    assert client.post("/api/overtime/review/1/approve").status_code == 403
+    assert (
+        client.post("/api/overtime/review/1/reject", json={"reason": "不算"}).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/api/overtime/review/entries",
+            json={
+                "employee_id": 1,
+                "entry_date": TODAY,
+                "half_hours": 2,
+                "reason": "代录",
+            },
+        ).status_code
+        == 403
+    )
+
+
+def test_supervisor_reviews_a_colleagues_entry_on_the_phone(overtime_http):
+    """验收 2/4：勾了能力的店长看到**全店**待审批，能批准、能驳回（理由必填）。"""
+    client, _db, accounts = overtime_http
+    colleague = _employee_id(accounts, phone=COLLEAGUE_PHONE, name=COLLEAGUE_NAME)
+    _staff_cookie(client, accounts, phone=COLLEAGUE_PHONE)
+    first = _submit(client, TODAY, 4, "晚市加班")
+    second = _submit(client, YESTERDAY, -2, "早退补钟")
+
+    supervisor_id = _supervisor(accounts)
+    _staff_cookie(client, accounts, phone=SUPERVISOR_PHONE)
+
+    queue = client.get("/api/overtime/review/pending")
+    assert queue.status_code == 200, queue.text
+    payload = queue.json()
+    assert payload["count"] == 2
+    # 队列上要写得出「谁 · 哪天 · 多少 · 干什么」：只给员工号等于让店长自己查名单。
+    assert {row["employee_name"] for row in payload["entries"]} == {COLLEAGUE_NAME}
+    # 旧的在前：待办是先来先处理的队列，不是「最新动态」。
+    assert [row["id"] for row in payload["entries"]] == [first["id"], second["id"]]
+
+    approved = client.post(f"/api/overtime/review/{first['id']}/approve")
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["entry"]["status"] == "approved"
+    # 谁判的记在台账上：是这位店长的员工号，不是 `super`（两拨人不能混成一条记录）。
+    assert approved.json()["entry"]["decided_by"] == f"staff:{supervisor_id}"
+
+    # 驳回**必须写理由** —— 理由比「驳回」这个结果本身更重要。
+    no_reason = client.post(f"/api/overtime/review/{second['id']}/reject", json={})
+    assert no_reason.status_code == 400
+    rejected = client.post(
+        f"/api/overtime/review/{second['id']}/reject",
+        json={"reason": "那天你排的是休"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["entry"]["reject_reason"] == "那天你排的是休"
+
+    # 员工那一侧立刻看到结果（票面「员工立刻看到结果」）。
+    _staff_cookie(client, accounts, phone=COLLEAGUE_PHONE)
+    mine = client.get("/api/overtime/me").json()
+    by_id = {row["id"]: row for row in mine["entries"]}
+    assert by_id[first["id"]]["status"] == "approved"
+    assert by_id[second["id"]]["status"] == "rejected"
+    assert by_id[second["id"]]["reject_reason"] == "那天你排的是休"
+    assert by_id[first["id"]]["employee_id"] == colleague
+
+
+def test_supervisor_backfills_any_past_date_while_staff_cannot(overtime_http):
+    """验收 5：店长能代录任意过去日期；员工自己仍受今天 / 昨天限制。"""
+    client, _db, accounts = overtime_http
+    colleague = _employee_id(accounts, phone=COLLEAGUE_PHONE, name=COLLEAGUE_NAME)
+    _supervisor(accounts)
+    _staff_cookie(client, accounts, phone=SUPERVISOR_PHONE)
+
+    backfilled = client.post(
+        "/api/overtime/review/entries",
+        json={
+            "employee_id": colleague,
+            "entry_date": "2026-08-01",
+            "half_hours": 6,
+            "reason": "上个月月中加班，忘了登",
+        },
+    )
+    assert backfilled.status_code == 200, backfilled.text
+    entry = backfilled.json()["entry"]
+    assert entry["entry_date"] == "2026-08-01"
+    assert entry["employee_id"] == colleague
+    # 代录人是店长自己：台账上分得清「他自己提的」与「别人替他补的」。
+    assert entry["created_by"].startswith("staff:")
+
+    # 员工自己提前天（更别说上个月）：窗口还是那条。
+    _staff_cookie(client, accounts, phone=COLLEAGUE_PHONE)
+    refused = client.post(
+        "/api/overtime/me",
+        json={"entry_date": "2026-08-01", "half_hours": 6, "reason": "补登"},
+    )
+    assert refused.status_code == 400
+    assert "店长" in refused.json()["detail"]
+
+    # 但店长**给自己**登也放开了窗口（能力跟人走，不跟「替谁登」走）。
+    _staff_cookie(client, accounts, phone=SUPERVISOR_PHONE)
+    own = client.post(
+        "/api/overtime/me",
+        json={"entry_date": "2026-08-02", "half_hours": 2, "reason": "自己也补一笔"},
+    )
+    assert own.status_code == 200, own.text
+
+
+def test_supervisor_side_carries_no_money(overtime_http):
+    """验收 6：店长这一侧的响应里没有底薪、也没有任何金额字段。
+
+    他用的就是员工会话，而底薪按 `docs/adr/0098` 不下发员工端；代录要选人，所以
+    选人那条名单是**新开的窄口**（只回员工号 / 姓名 / 停用与否），不借花名册那个
+    带身份证号与底薪的端点。
+    """
+    client, _db, accounts = overtime_http
+    colleague = _employee_id(accounts, phone=COLLEAGUE_PHONE, name=COLLEAGUE_NAME)
+    _run(accounts.update_fields(colleague, base_salary=5200, hire_date="2024-09-18"))
+    _supervisor(accounts)
+    _staff_cookie(client, accounts, phone=SUPERVISOR_PHONE)
+    _submit(client, TODAY, 2, "加班")
+
+    responses = [
+        client.get("/api/overtime/me"),
+        client.get("/api/overtime/review/pending"),
+        client.get("/api/overtime/review/employees"),
+    ]
+    for response in responses:
+        assert response.status_code == 200, response.text
+        for forbidden in ("base_salary", "salary", "amount", "money", "pay", "id_card"):
+            assert forbidden not in response.text, f"店长侧不得下发 {forbidden}"
+
+    names = client.get("/api/overtime/review/employees").json()["employees"]
+    assert any(person["id"] == colleague for person in names)
+
+
+def test_the_cap_takes_effect_immediately(overtime_http):
+    """验收 7：取消勾选后**立即**失效，不需要重新登录。
+
+    判据每次请求现读 `admin_caps`（那张表就是权限本身），所以收回能力与给他能力
+    一样，下一次请求就生效 —— 没有第二份「登录时快照的权限」。
+    """
+    client, _db, accounts = overtime_http
+    supervisor_id = _supervisor(accounts)
+    _staff_cookie(client, accounts, phone=SUPERVISOR_PHONE)
+    assert client.get("/api/overtime/review/pending").status_code == 200
+
+    _run(accounts.set_admin_caps(supervisor_id, []))
+    assert client.get("/api/overtime/review/pending").status_code == 403
+    # 同一条 cookie、没有重登：被收回的是能力，不是会话。
+    assert client.get("/api/overtime/me").status_code == 200
+
+    _run(accounts.set_admin_caps(supervisor_id, ["overtime"]))
+    assert client.get("/api/overtime/review/pending").status_code == 200

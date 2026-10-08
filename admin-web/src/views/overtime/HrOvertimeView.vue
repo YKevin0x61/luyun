@@ -42,7 +42,9 @@ const today = ref('')
 const queue = ref([]) // 等审批（旧的在前）
 const entries = ref([]) // 台账（新的在前，可按月筛）
 const employees = ref([])
-const month = ref('') // '' = 不分月
+const month = ref('') // '' = 不分月（下面那块账单也跟着它：空 = 本月）
+const stats = ref(null) // 加班费账单（`/api/overtime/admin/month`，票 03）
+const statsError = ref('')
 const busyId = ref(0) // 行内动作的单槽（同排班待办页）
 const formBusy = ref(false)
 const rejectTarget = ref(null)
@@ -97,6 +99,7 @@ async function load() {
     errorText.value = err.message || '读不出加班台账'
     state.value = 'error'
   }
+  await loadStats()
 }
 
 /** 写失败：先把服务端那句话留住，重读台账，**最后**再说出来。
@@ -165,6 +168,27 @@ async function loadListing() {
     entries.value = listing.entries || []
   } catch (err) {
     errorText.value = err.message || '读不出这个月的台账'
+  }
+  await loadStats()
+}
+
+/** 这个月的加班费账单（票 03）。
+ *
+ *  金额只用**快照底薪**算（该月第一次审批通过那一刻的档案值），所以月中调薪不会把
+ *  已经算出来的数改掉；每人各自取整到元、合计是各行相加 —— 这些都在服务端
+ *  （`OvertimeLedger.monthly_stats`），这一层只负责摆出来。
+ *
+ *  这一块读失败**只让这一块报错**：审批队列、台账都还能用，不该因为账单读不出来
+ *  整页变灰（同「健康证到期」那一格读不到时的降级口径）。
+ */
+async function loadStats() {
+  statsError.value = ''
+  try {
+    const params = month.value ? { month: month.value } : undefined
+    stats.value = (await api.get('/api/overtime/admin/month', params)).stats
+  } catch (err) {
+    stats.value = null
+    statsError.value = err.message || '这个月的加班费没读出来'
   }
 }
 
@@ -389,6 +413,48 @@ useNudgePull({ id: 'workbench-hr-overtime', topics: ['overtime'], pull: load })
           </li>
         </ul>
       </section>
+
+      <section class="oCard">
+        <div class="oCard-hd">
+          <h2>加班费</h2>
+          <span v-if="stats" class="oCount">{{ stats.month }}</span>
+          <span v-if="stats" class="oNote">
+            {{ stats.days }} 天 × 每天 {{ stats.hours_per_day }} 小时
+          </span>
+        </div>
+        <p v-if="statsError" class="oErr">{{ statsError }}</p>
+        <p v-else-if="!stats || !stats.count" class="oEmpty">
+          这个月还没有批准的加班 —— 只有批过的才算钱。
+        </p>
+        <template v-else>
+          <ul class="oList">
+            <li v-for="row in stats.items" :key="row.employee_id" class="oItem">
+              <div class="oRow-hd">
+                <b>{{ row.employee_name || '（没有名字）' }}</b>
+                <span class="oH" :class="{ minus: row.net_half_hours < 0 }">
+                  {{ formatHalfHours(row.net_half_hours) }} 小时
+                </span>
+                <span class="oSt" :class="{ mute: row.amount === null }">
+                  {{ row.amount === null ? '底薪待补' : `${row.amount} 元` }}
+                </span>
+              </div>
+              <p class="oBy">
+                加班 {{ formatHalfHours(row.overtime_half_hours) }} · 补钟
+                {{ formatHalfHours(row.makeup_half_hours) }} · 底薪
+                {{ row.base_salary === null ? '待补' : `${row.base_salary} 元/月` }}
+              </p>
+            </li>
+          </ul>
+          <div class="oRow-hd oTotal">
+            <b>合计</b>
+            <span class="oH">{{ formatHalfHours(stats.total.net_half_hours) }} 小时</span>
+            <span class="oSt">{{ stats.total.amount }} 元</span>
+          </div>
+          <p v-if="stats.total.unpriced" class="oHint">
+            还有 {{ stats.total.unpriced }} 个人没算出金额（底薪待补），他们不在合计里。
+          </p>
+        </template>
+      </section>
     </template>
 
     <ConfirmDialog
@@ -455,6 +521,14 @@ useNudgePull({ id: 'workbench-hr-overtime', topics: ['overtime'], pull: load })
 .oSt.ok { color: var(--hy-mint); }
 .oSt.bad { color: var(--hy-coral); }
 .oSt.mute { color: var(--hy-faint); }
+
+/* 账单那一块：账期与分母跟在标题后面，合计行用一条虚线跟各人分开（各人各自取整，
+   合计是各行相加 —— 所以它读起来要像「这一列的和」，不是「又一次计算」）。 */
+.oNote { margin-left: auto; font-size: 11.5px; color: var(--hy-faint); }
+.oTotal {
+  margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--hy-line);
+}
+.oTotal b { letter-spacing: 0.06em; }
 .oReason { margin: 6px 0 0; font-size: 13px; line-height: 1.6; color: var(--hy-ink); }
 .oBy { margin: 4px 0 0; font-size: 11.5px; color: var(--hy-faint); }
 .oAct { display: flex; gap: 8px; margin-top: 10px; }

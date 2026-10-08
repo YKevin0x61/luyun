@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from api.security import require_session, require_staff_session
 from database import get_db
 from services.identity import EmployeeAccounts
+from services.identity.capabilities import CAP_OVERTIME, has_cap
 from services.overtime.ledger import (
     HALF_HOURS_MAX,
     MAX_REASON,
@@ -59,11 +60,14 @@ _ERROR_DETAILS = {
     "reject_reason_too_long": "驳回理由最多 {} 个字：请缩短一点再提交",
     # 作废撤销的是「已经点过的头」：还没批的不叫作废，那叫「先别急」。
     "entry_not_approved": "只有已批准的登记能作废：这一笔还没批，或已经被作废了",
+    # 票 03：金额要用底薪算，底薪没补就批不了 —— 说清去哪儿补，别只说「参数不合法」。
+    "salary_missing": "这位同事的底薪还没补：先到花名册补上底薪，再回来批这一笔",
     # 逐条点名迁移文件（同排班的 `not_migrated`）：503 要说清该应用哪一个脚本。
-    # 票 03 / 05 各自加表时，也在这一句里补上自己的文件名。
+    # 票 05 加表时也在这句里补上自己的文件名。
     "not_migrated": (
         "加班登记表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
-        "migrations/pg/0021_overtime_entries.sql，然后刷新本页"
+        "migrations/pg/0021_overtime_entries.sql 与 "
+        "migrations/pg/0022_overtime_salary_snapshots.sql，然后刷新本页"
     ),
 }
 
@@ -104,14 +108,44 @@ def _bad_request(exc: OvertimeError) -> HTTPException:
     return HTTPException(status_code=_ERROR_STATUS.get(exc.code, 400), detail=detail)
 
 
+def _can_review(employee: dict) -> bool:
+    """这个人能不能审批别人的加班登记 —— 判据只看 `admin_caps` 里那一项。
+
+    `permission` 那一列是人话标签（「管理员」/「普通员工」），**不是判据**：同一档的
+    两个人可以有完全不同的开关，拿标签判会放行没给的那件事（`docs/adr/0093`）。
+    """
+    return has_cap(employee.get("admin_caps"), CAP_OVERTIME)
+
+
 def _entry_actor(employee: dict) -> EntryActor:
     """员工会话 → 台账层的 actor。
 
-    票 01 的人**没有补录能力**：窗口就是今天与昨天（判据在服务层的 `submit()` 里）。
-    票 04 把 `overtime` 能力键接进来时，这里多一个 `can_backfill=has_cap(...)`，
-    窗口那条分支一个字都不用改。
+    窗口按**提交人**判（判据在服务层的 `submit()` 里）：普通员工只能报今天与昨天，
+    勾了「加班与补钟审批」的店长跟超管一样能补录任意过去日期 —— 能力跟人走，
+    不跟「这一笔算谁的」走（`docs/adr/0100` / `0103`）。
     """
-    return EntryActor(employee_id=int(employee["id"]))
+    return EntryActor(
+        employee_id=int(employee["id"]),
+        can_backfill=_can_review(employee),
+    )
+
+
+def _require_reviewer(employee: dict = Depends(require_staff_session)) -> dict:
+    """店长那一面的门：员工会话 **加上**「加班与补钟审批」能力。
+
+    店长**没有管理端账号** —— 他就是花名册上的一个真人 + 员工会话，所以这一面走员工门，
+    形状与卫生那三项（管理员在员工手机端验收）完全一样，见 `docs/adr/0103`。
+
+    被拒是 **403**（「你没这个权限」），不是 404：后者会把「权限不够」说成「这一笔不
+    存在」，店长会以为是数据没了。判据每次请求现读 `admin_caps`，所以收回能力与给他
+    能力一样，下一次请求就生效 —— 没有第二份「登录时快照的权限」。
+    """
+    if not _can_review(employee):
+        raise HTTPException(
+            status_code=403,
+            detail="只有开了「加班与补钟审批」的人能审批加班登记：请找超级管理员在花名册里开通",
+        )
+    return employee
 
 
 def _who(employee: dict) -> dict:
@@ -162,6 +196,9 @@ async def my_entries(
         raise _bad_request(exc) from exc
     return {
         "employee": _who(employee),
+        # 员工端那一页据此决定渲不渲染「待审批」区：判据在服务端算一次，前端不把
+        # caps 那套判据再写一遍（写两遍就有两个答案，改口径时必漏一处）。
+        "can_review": _can_review(employee),
         **_LIMITS,
         **data,
     }
@@ -303,6 +340,27 @@ async def admin_entries(
     return {**data, **_LIMITS}
 
 
+@router.get("/admin/month")
+async def admin_month(
+    month: Optional[str] = Query(None, description="YYYY-MM；不给就是本月"),
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """全店某个月的加班费账单（票 03）：每人一行 + 合计行。
+
+    金额只在管理端出现 —— 员工门没有这一页，店长在手机上的审批面也没有它
+    （`docs/adr/0098` 那条边界的延伸：算钱要用底薪，而底薪不下发员工端）。
+
+    不给月份就是**本月**：`ledger.today()` 是自然日的今天，与登记窗口同一个口径。
+    """
+    ledger = OvertimeLedger(db)
+    try:
+        stats = await ledger.monthly_stats(month or ledger.today()[:7])
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    return {"stats": stats, **_LIMITS}
+
+
 @router.post("/admin/entries")
 async def admin_backfill(
     payload: BackfillRequest,
@@ -381,4 +439,109 @@ async def admin_void(
         raise _bad_request(exc) from exc
     # 作废也要让员工知道：他手机上那一笔从「已批准」变成了「已作废」。
     await _overtime_nudge("entry_voided", entry["employee_id"])
+    return {"entry": entry}
+
+
+# ── 店长那一面（票 04）：员工会话 + 「加班与补钟审批」能力 ─────────────────────
+#
+# 与上面 `/admin/*` 那组**能力相同、门不同**：超管走管理端 cookie，店长走员工 cookie
+# 加一个能力键。两扇门落在同一套服务层方法上（`list_pending` / `approve` / `reject` /
+# `submit`），所以「批一笔」只有一份实现，不存在两种口径 —— 这也正是 `docs/adr/0103`
+# 选的形状：不发明第三种身份、也不新开第二套登录。
+#
+# 这一面**没有金额**：店长用的就是员工会话，而底薪按 `docs/adr/0098` 不下发员工端。
+# 他判断一笔该不该认，靠日期、时长、事由与这个人的历史记录。
+
+
+@router.get("/review/pending")
+async def review_pending(
+    db=Depends(get_db), _reviewer: dict = Depends(_require_reviewer)
+) -> dict:
+    """全店**等审批**的队列，旧的在前 —— 与管理端那条同一个服务层方法。"""
+    ledger = OvertimeLedger(db)
+    try:
+        return {**await ledger.list_pending(), **_LIMITS}
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get("/review/employees")
+async def review_employees(
+    db=Depends(get_db), _reviewer: dict = Depends(_require_reviewer)
+) -> dict:
+    """代录时要选人：只回员工号、姓名、停用与否。
+
+    **新开的窄口**，不借花名册那个带身份证号与底薪的端点 —— 店长用的是员工会话，
+    那两样按 `docs/adr/0098` 不下发员工端。停用的人也在名单里（历史登记可能还要补在
+    他头上），由页面标出来：这一层不替业务决定「停用的人还能不能被补录」。
+    """
+    roster = await EmployeeAccounts(db).list_roster()
+    return {
+        "employees": [
+            {
+                "id": int(employee["id"]),
+                "name": employee.get("name") or "",
+                "disabled": bool(employee.get("disabled")),
+            }
+            for employee in roster
+        ]
+    }
+
+
+@router.post("/review/entries")
+async def review_backfill(
+    payload: BackfillRequest,
+    db=Depends(get_db),
+    reviewer: dict = Depends(_require_reviewer),
+) -> dict:
+    """店长代员工补录一笔（任意过去日期）—— 与管理端那条走同一个服务层方法。
+
+    `created_by` 记的是这位店长自己（`staff:<员工号>`）：台账上分得清「他自己提的」
+    与「别人替他补的」。
+    """
+    ledger = OvertimeLedger(db)
+    try:
+        entry = await ledger.submit(
+            _entry_actor(reviewer),
+            payload.entry_date,
+            payload.half_hours,
+            payload.reason,
+            target_employee_id=payload.employee_id,
+        )
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("entry_submitted", entry["employee_id"])
+    return {"entry": entry}
+
+
+@router.post("/review/{entry_id}/approve")
+async def review_approve(
+    entry_id: int,
+    db=Depends(get_db),
+    reviewer: dict = Depends(_require_reviewer),
+) -> dict:
+    """批准一笔待审批的登记。状态谓词在服务层的写锁里：重复点只有第一次算数。"""
+    ledger = OvertimeLedger(db)
+    try:
+        entry = await ledger.approve(_entry_actor(reviewer), entry_id)
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("entry_approved", entry["employee_id"])
+    return {"entry": entry}
+
+
+@router.post("/review/{entry_id}/reject")
+async def review_reject(
+    entry_id: int,
+    payload: RejectRequest,
+    db=Depends(get_db),
+    reviewer: dict = Depends(_require_reviewer),
+) -> dict:
+    """驳回一笔待审批的登记 —— **必须写理由**，理由会出现在员工手机上。"""
+    ledger = OvertimeLedger(db)
+    try:
+        entry = await ledger.reject(_entry_actor(reviewer), entry_id, payload.reason)
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("entry_rejected", entry["employee_id"])
     return {"entry": entry}
