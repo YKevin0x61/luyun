@@ -252,6 +252,14 @@
       "public": false
     },
     {
+      "path": "/workbench/me/overtime",
+      "title": "加班与补钟",
+      "group": "me",
+      "audience": "staff",
+      "standalone": true,
+      "public": false
+    },
+    {
       "path": "/workbench/me/clean",
       "title": "卫生",
       "group": "hygiene",

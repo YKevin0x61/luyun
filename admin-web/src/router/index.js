@@ -162,6 +162,10 @@ const routes = [
   workbenchStaffPage('/workbench/me/today', 'today', () => import('../views/today/TodayView.vue')),
   // 整月：从「今天」页那张排班卡的「整月」按钮进来，看自己这个月每天上什么班。
   workbenchStaffPage('/workbench/me/month', 'today-month', () => import('../views/today/TodayMonthView.vue')),
+  // 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长。管理端的审批与
+  // 统计在票 02（`/workbench/hr/overtime`），店长在手机上的审批面在票 04 —— 这一页
+  // 现在只认员工会话（`audience: staff`）。
+  workbenchStaffPage('/workbench/me/overtime', 'me-overtime', () => import('../views/overtime/MeOvertimeView.vue')),
   // 卫生待办（员工那半）：五个 tab 与页内结构照旧。
   workbenchStaffPage('/workbench/me/clean', 'hygiene-home', () => import('../views/hygiene/HygieneHomeView.vue')),
   // 越权落点（票 03）：有会话、但这一页不是这个身份的 —— 一页说明 + 一颗回自己首页的

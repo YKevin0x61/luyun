@@ -83,6 +83,8 @@ describe('页面清单（唯一来源）', () => {
       // 越权落点也是独立一页（一页说明 + 一颗按钮，不套导航）。
       '/workbench/me/today',
       '/workbench/me/month',
+      // 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长，同套工作台外壳。
+      '/workbench/me/overtime',
       '/workbench/me/clean',
       '/workbench/forbidden',
     ])

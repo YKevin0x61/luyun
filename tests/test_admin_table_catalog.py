@@ -85,7 +85,7 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
 
     group_keys = [group["key"] for group in body["groups"]]
     assert group_keys == [
-        "business", "recipe", "hygiene", "scheduling", "wecom", "auth", "external"
+        "business", "recipe", "hygiene", "scheduling", "wecom", "overtime", "auth", "external"
     ]
 
 

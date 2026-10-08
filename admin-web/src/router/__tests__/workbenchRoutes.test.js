@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { workbenchPagesOf } from '../../utils/workbenchNav.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const router = readFileSync(join(here, '../index.js'), 'utf8')
@@ -57,6 +58,8 @@ const PAGES = [
 const STAFF_PAGES = [
   ['/workbench/me/today', 'TodayView.vue'],
   ['/workbench/me/month', 'TodayMonthView.vue'],
+  // 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长。
+  ['/workbench/me/overtime', 'MeOvertimeView.vue'],
   ['/workbench/me/clean', 'HygieneHomeView.vue'],
 ]
 
@@ -140,5 +143,12 @@ describe('工作台路由（票 05 按分组落位之后）', () => {
     const names = [...router.matchAll(/name: '([a-z-]+)'/g)].map((m) => m[1])
     const duplicated = names.filter((name, index) => names.indexOf(name) !== index)
     expect(duplicated).toEqual([])
+  })
+
+  it('「我的」那一组的导航带上加班与补钟（票 01：员工在导航里点得到它）', () => {
+    // 组内页清单从页面清单的 `group` 派生（`workbenchPagesOf`），所以新页只要落对
+    // 组就自动进导航 —— 这条断言钉的正是「落对了组」这件事，不是手写的名单。
+    const paths = workbenchPagesOf('me').map((row) => row.path)
+    expect(paths).toContain('/workbench/me/overtime')
   })
 })

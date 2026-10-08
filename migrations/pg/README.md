@@ -61,6 +61,8 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0019_wecom_push_audit.sql` | 配置变更历史 `wecom_push_audit`（只追加：时间 / 操作人 / 动作 / 对象 / 前后值快照）+ 两条按时间倒序的索引 | **配置变更不报错、只是不留痕**：审计写失败被吞成一行日志（`db_core/wecom_audit_repo.py`），所以页面「变更历史」tab 一直空、「谁在什么时候把这个群停用了」查不出来。渠道 / 订阅 / 任务本身照常工作 |
 | `0020_hygiene_employee_profile.sql` | 员工档案四列 `hygiene_employees."id_card_no"` / `"health_cert_date"` / `"base_salary"` / `"hire_date"`（全可空、无默认值）+ 身份证号的部分唯一索引 `idx_hygiene_employees_id_card`（`tenant_id, id_card_no`，`WHERE id_card_no IS NOT NULL`） | **所有读员工行的路径整条报错、页面 500**（缺列：`column e.health_cert_date does not exist`）—— 不只花名册，员工登录、审批、员工端「我的」与排班读名单都要 `SELECT` 这几列。这里**刻意不做降级**：读不到档案时把它当"没填"渲染，会让所有人静默变成「待补」、底薪空着也能批准，比报错更难查。应用后即恢复。健康证到期日是派生值、不落库（ADR 0098） |
 
+| `0021_overtime_entries.sql` | 加班与补钟台账 `overtime_entries`（票 01）：一条 = 一个**自然日** + 一个**带符号的半小时数**（`half_hours`，`CHECK <> 0`，±24 = ±12 小时）+ 必填事由 + 状态机（`pending` / `approved` / `rejected` / `cancelled` / `voided`），配三条索引（待办 / 我的记录 / 按日期统计） | 「加班与补钟」页整页 503 并点名这个文件（`OvertimeLedger` 的每个方法都把缺表异常转成 `not_migrated`）：员工提交、撤回与月度净时长都不可用。排班 / 卫生 / 员工登录不受影响（那几条路不碰这张表） |
+
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，
 别删）。
