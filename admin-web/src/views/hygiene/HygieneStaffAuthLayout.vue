@@ -1,6 +1,7 @@
 <script setup>
 import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import IcpFooter from '../../components/IcpFooter.vue'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import {
   HYGIENE_BRAND_MARK,
@@ -34,5 +35,8 @@ watch(pageTitle, (title) => {
         <router-view />
       </div>
     </main>
+    <!-- 备案号：`/register`（员工自助注册）是除 `/login` 之外另一个公开入口，同样要标。
+         颜色跟着这一层的 `--text-dim` 走（本壳把它重定义成了浅青 `--hy-muted`）。 -->
+    <IcpFooter />
   </div>
 </template>

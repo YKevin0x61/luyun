@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import IcpFooter from '../components/IcpFooter.vue'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
 import { useImageUploadQueueStore } from '../stores/imageUploadQueue'
 import { clearAuthStatusCache, setAuthLoggedIn } from '../utils/authStatus'
@@ -536,6 +537,8 @@ onMounted(() => {
         </p>
       </form>
     </div>
+    <!-- 备案号挂在公开入口（登录 / 注册页）底部 —— 这是未登录访客看到的首页。 -->
+    <IcpFooter class="login-icp" />
   </div>
 </template>
 
@@ -568,9 +571,12 @@ onMounted(() => {
   background: var(--login-bg);
   color: var(--login-ink);
   min-height: 100vh;
+  /* 竖排两件：卡片 + 底下那行备案号（`IcpFooter` 自带居中的一行）。 */
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 14px;
   padding: 24px 16px;
 }
 
@@ -610,6 +616,13 @@ onMounted(() => {
 }
 
 .login-card .input { width: 100%; }
+
+/* 备案号那一行：颜色跟当前身份那套主题走（员工栏是浅青的 dim，不是全局那支）。 */
+.login-icp {
+  --icp-footer-ink: var(--login-dim);
+  --icp-footer-ink-hover: var(--login-ink);
+  padding: 0;
+}
 
 .login-brand {
   font-size: 20px;

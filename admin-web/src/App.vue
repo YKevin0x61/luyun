@@ -1,6 +1,7 @@
 <script setup>
 import { computed, provide, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import IcpFooter from './components/IcpFooter.vue'
 import ImageUploadQueuePanel from './components/ImageUploadQueuePanel.vue'
 import NavBar from './components/NavBar.vue'
 import PwaUpdateBanner from './components/PwaUpdateBanner.vue'
@@ -78,6 +79,10 @@ watch(
     >
       <router-view />
     </div>
+    <!-- 备案号：登录后的管理端页面挂在主壳底部（登录 / 配置页自带全屏布局，另挂一份
+         在 LoginView 的卡片下方）。工作台那几页是 standalone 外壳、手机上自带底栏，
+         这里不渲染（`isStandalone` 与 App.vue 隐藏导航是同一条判据）。 -->
+    <IcpFooter v-if="!isStandalone" />
     <PwaUpdateBanner
       :visible="pwaUpdate.visible.value"
       :busy="pwaUpdate.applying.value"
