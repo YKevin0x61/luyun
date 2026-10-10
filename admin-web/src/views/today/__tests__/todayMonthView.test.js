@@ -185,4 +185,32 @@ describe('员工端「整月」页（票 06）', () => {
     expect(view).toMatch(/load\(month\.value, true\)/)
     expect(view).toMatch(/loadPendingMarks\(\)/)
   })
+
+  it('格子上写那天全店几个人在班，点开某天看当天名单（票 13）', () => {
+    // 验收 1：人数与「我的班」是两个字段、两处显示 —— 人数是格子里的第三行小字。
+    expect(view).toMatch(/staffCountLabel\(cell\.staff_count\)/)
+    expect(view).toMatch(/\.mD \.h\s*\{/)
+    // 验收 2/3：点格子拉那天的名单。**员工那扇门底下**的 `/me/day`，不是店长那条
+    // `/api/scheduling/day`（上面那条 `not.toMatch` 还在盯着后者）。
+    expect(view).toMatch(/staffRequest\(\s*`\/api\/scheduling\/me\/day\?date=/)
+    expect(view).toMatch(/aria-haspopup="dialog"/)
+    // 弹层走主题里那套（跟本页请假、加班那几处同一个容器）：
+    expect(view).toMatch(/class="modal-overlay"/)
+    expect(view).toMatch(/role="dialog"/)
+    expect(view).toMatch(/aria-modal="true"/)
+    expect(view).toMatch(/@click\.self="closeDay"/)
+    // 名单里的判据都在 util（`todayShift.test.js` 直接调它们），页面只摆版式：
+    // 「我」按 id 认、休与请假分开写、我这天那行只在上班态接工作区。
+    expect(view).toMatch(/isMe\(person, employee && employee\.id\)/)
+    expect(view).toMatch(/offLabel\(person\)/)
+    expect(view).toMatch(/myDayText\(detailMine\.value\)/)
+    // 「我这天」取的是**月历那份数据**里的同一格（不是打开弹层那一刻的快照）：
+    // 店长改了班、nudge 重读月历之后，这一行与那份名单都跟着变。
+    expect(view).toMatch(/cells\.value\.find\(\(cell\) => cell\.business_date === key\)/)
+    expect(view).toMatch(/if \(detailDay\.value\) loadDay\(detailDay\.value, true\)/)
+    // 窗口外的格子不可点：淡 = 还没铺到，点它只会问出一个注定空白的答案。
+    expect(view).toMatch(/:disabled="dayBeyondWindow\(cell, windowEnd\)"/)
+    // 页脚那句「只看得到你自己的班」作废（票 13 改的口径）：留着会跟页面自相矛盾。
+    expect(view).not.toContain('只看得到你自己的班')
+  })
 })

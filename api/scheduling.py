@@ -273,6 +273,9 @@ async def my_month(
     跟 `/me` 同一扇门、同一套口径（`scheduled` / `shift_id` / `shift_name`），只是
     窗口一个月；`month` 只决定看哪个月，决定不了看谁 —— **接口上同样没有
     `employee_id`**。月份写错是 400（`invalid_month`），不是 500。
+
+    票 13 起每天多两个字段：`staff_count` 是那天**全店**上班几个人（月历格子上
+    那个数），`zone_name` 是我那天的工作区（格子不写，点开那天的名单里写）。
     """
     store = SchedulingStore(db)
     try:
@@ -288,6 +291,34 @@ async def my_month(
         "window_end": data["window_end"],
         "days": data["days"],
     }
+
+
+@router.get("/me/day")
+async def my_day(
+    date: str = Query(..., alias="date", description="YYYY-MM-DD"),
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """员工点开某一天看到的**全店**名单（票 13）：各班是谁、在哪个区，以及谁不上班。
+
+    跟店长那版 `/day` 是同一份数据（同一个 `day_detail`），但**只出员工该看的那几项**：
+    没有 `zone_id`、没有 `overridden`（这天谁跟规则不一样）、没有 `undoable`（能不能
+    撤销覆盖）。放出去的是姓名、班次、工作区名，以及休 / 请假两种「没有班」的区分。
+
+    **不是「谁都能读某一天」的通用口**：它仍然只认员工自己的 cookie，路径上也没有
+    任何 `employee_id` —— 这一天全店都有谁，本来就是贴在墙上那张排班表上的东西；
+    手机号、职位、申请记录这些不在其中（`services/scheduling/store.py` 的 `my_day`）。
+
+    进门先补未来 90 天（幂等，跟店长那几条读路径一样）：不补的话，别人还没被铺到的
+    那几天在名单里会凭空少人。
+    """
+    store = SchedulingStore(db)
+    try:
+        await store.expand()
+        data = await store.my_day(date)
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+    return {"employee": {"id": employee["id"], "name": employee["name"]}, **data}
 
 
 @router.get("/me/requests")

@@ -677,6 +677,110 @@ def test_a_bad_month_is_a_400_not_a_500(scheduling_http, monkeypatch):
     assert resp.json()["detail"] == "月份格式应该是 YYYY-MM"
 
 
+# ── 票 13：员工点开某一天看全店名单 ─────────────────────────────────────
+
+
+def test_staff_day_lists_the_whole_store_to_a_staff_cookie(scheduling_http, monkeypatch):
+    """验收 2/3：员工点开某天 —— 上班的是谁、在哪个区，以及谁休 / 谁请假。
+
+    门仍然是员工那扇（`require_staff_session`），路径上没有任何 `employee_id`：全店名单
+    是贴在墙上那张排班表上的东西，不是「谁都能查谁」的口子。
+    """
+    client, db, accounts = scheduling_http
+    mine = _employee_id(accounts)
+    peer = _employee_id(accounts, phone="13800138001", name="李四")
+    ids = _shift_ids(client)
+    board = _zone(db, "案板")
+    steamer = _zone(db, "蒸柜")
+    assert client.put(
+        f"/api/scheduling/zone-defaults/{mine}",
+        json={"shift_id": ids["白班"], "zone_id": board},
+    ).status_code == 200
+    assert client.put(
+        f"/api/scheduling/zone-defaults/{peer}",
+        json={"shift_id": ids["夜班"], "zone_id": steamer},
+    ).status_code == 200
+    assert client.put(
+        f"/api/scheduling/rules/{mine}", json={"cycle": [ids["白班"]]}
+    ).status_code == 200
+    assert client.put(
+        f"/api/scheduling/rules/{peer}", json={"cycle": [ids["夜班"], None]}
+    ).status_code == 200
+
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+
+    resp = client.get("/api/scheduling/me/day", params={"date": TODAY})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["employee"] == {"id": mine, "name": NAME}
+    assert body["business_date"] == TODAY
+    assert body["total"] == 2
+    assert [
+        (group["shift_name"], [p["name"] for p in group["people"]])
+        for group in body["groups"]
+    ] == [("白班", [NAME]), ("夜班", ["李四"])]
+    assert [p["zone"] for group in body["groups"] for p in group["people"]] == ["案板", "蒸柜"]
+    # 店长那几个字段一个都不出去（逐键比对，不是「看着像没给」）。
+    assert set(body) == {
+        "employee", "business_date", "today", "groups", "total", "off_count", "off_people",
+    }
+    for group in body["groups"]:
+        assert set(group) == {"shift_id", "shift_name", "count", "people"}
+        for person in group["people"]:
+            assert set(person) == {"id", "name", "zone"}
+    # 第二天：李四休 —— 名字进休假名单，`leave` 假（排班给的休，不是批过的假）。
+    tomorrow = client.get("/api/scheduling/me/day", params={"date": "2026-09-25"}).json()
+    assert tomorrow["total"] == 1
+    assert [(p["name"], p["leave"]) for p in tomorrow["off_people"]] == [("李四", False)]
+
+
+def test_staff_month_carries_the_store_wide_headcount(scheduling_http, monkeypatch):
+    """验收 1：月历每天多一个「全店几个人上班」，我的班别照旧只有我自己的。"""
+    client, _db, accounts = scheduling_http
+    mine = _employee_id(accounts)
+    peer = _employee_id(accounts, phone="13800138001", name="李四")
+    ids = _shift_ids(client)
+    assert client.put(
+        f"/api/scheduling/rules/{mine}", json={"cycle": [ids["白班"]]}
+    ).status_code == 200
+    assert client.put(
+        f"/api/scheduling/rules/{peer}", json={"cycle": [ids["夜班"], None]}
+    ).status_code == 200
+
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+
+    body = client.get("/api/scheduling/me/month", params={"month": "2026-09"}).json()
+    cells = {day["business_date"]: day for day in body["days"]}
+
+    assert cells[TODAY]["staff_count"] == 2
+    # 9/25 李四休：人数 1（休不算上班），我的格子还是「白班」。
+    assert (cells["2026-09-25"]["staff_count"], cells["2026-09-25"]["shift_name"]) == (1, "白班")
+    # 别人的班次名不进我的月历（人数是人数、我的班是我的班）。
+    assert {day["shift_name"] for day in body["days"] if day["scheduled"]} == {"白班"}
+
+
+def test_staff_day_is_still_the_staff_door(scheduling_http, monkeypatch):
+    """同一扇门：管理端会话打不开它，匿名也打不开；日期写错是 400 不是 500。"""
+    client, _db, accounts = scheduling_http
+    _employee_id(accounts)
+    _wire_staff_accounts(monkeypatch, accounts)
+
+    denied = client.get("/api/scheduling/me/day", params={"date": TODAY})
+    assert denied.status_code == 401
+    assert denied.json()["detail"] == "需要员工登录"
+
+    _staff_cookie(client, accounts)
+    assert client.get("/api/scheduling/me/day", params={"date": TODAY}).status_code == 200
+    bad = client.get("/api/scheduling/me/day", params={"date": "2026-9-24"})
+    assert bad.status_code == 400
+    assert bad.json()["detail"] == "日期格式应该是 YYYY-MM-DD"
+    client.cookies.clear()
+    assert client.get("/api/scheduling/me/day", params={"date": TODAY}).status_code == 401
+
+
 # ── 票 0：周起点统一到周一 ─────────────────────────────────────────────────
 
 

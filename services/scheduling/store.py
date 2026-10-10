@@ -1775,26 +1775,38 @@ class SchedulingStore:
         名字 None）三种状态在服务层分好，前端只翻成人话。
 
         格子只写班别、不带工作区：手机一行七格放不下「白班 · 案板」，工作区在「今天」
-        页那张卡上（`spec.md` 留给第 6 步的那个待定项按这个口径定）。
+        页那张卡上（`spec.md` 留给第 6 步的那个待定项按这个口径定）。`zone_name` 仍然
+        照给（跟 `my_days` 同一套）：格子不写不等于数据没有 —— 点开某天的名单里要写
+        「我这天在哪」，那一处正是它（票 13）。
+
+        `staff_count` 是那天**全店**上班的人数（`shift_id` 非空的行数，休不算）：票 13
+        起员工月历在每个格子上写出这个数，好知道哪天店里人多。它跟「我的班」是两件事，
+        所以是两个字段，不揉进 `scheduled`。
 
         翻到过去的月份只显示已经铺过的日子（展开只往今天以后补，不回头），`window_end`
         之后的格子注定是「还没排」—— 跟店长月历同一个说法。
         """
         await self.expand(employee_id)
         start, next_month = _month_bounds(self.today()[:7] if month is None else month)
+        first = start.isoformat()
 
         cur = await self._conn.execute(
-            """SELECT business_date, shift_id FROM staff_assignments
+            """SELECT business_date, shift_id, zone_id FROM staff_assignments
                WHERE employee_id = ? AND business_date >= ? AND business_date < ?
                ORDER BY business_date""",
-            (employee_id, start.isoformat(), next_month.isoformat()),
+            (employee_id, first, next_month.isoformat()),
         )
         rows, shifts = await self._rows_and_shifts(cur)
+        zone_names = await self._zone_name_index()
         # 整月里批了请假的那几天（票 08）：`_leave_days` 的两端都含，所以末界是下月一号
         # 的前一天 —— 用 `shift_business_date` 退一天，不自己算月份长度。
         leave_days = await self._leave_days(
-            employee_id, start.isoformat(), shift_business_date(next_month.isoformat(), -1)
+            employee_id, first, shift_business_date(next_month.isoformat(), -1)
         )
+        # 每天全店上班几个人（票 13）。**只数全店**，不看是谁：这条查询跟我的行无关，
+        # 所以它一次就把整月数完，不按天循环（31 天 31 条 SQL 是没必要的）。
+        # 与 `month_calendar` 的人数同一条口径：`shift_id IS NOT NULL` 才算上班，休不算。
+        staff_count = await self._staff_counts(first, next_month.isoformat())
 
         today = self.today()
         days = []
@@ -1802,6 +1814,7 @@ class SchedulingStore:
             key = day.isoformat()
             row = rows.get(key)
             shift_id = None if row is None or row["shift_id"] is None else int(row["shift_id"])
+            zone_id = None if row is None or row["zone_id"] is None else int(row["zone_id"])
             shift = shifts.get(shift_id) if shift_id is not None else None
             days.append({
                 "business_date": key,
@@ -1810,11 +1823,73 @@ class SchedulingStore:
                 "scheduled": row is not None,
                 "shift_id": shift_id,
                 "shift_name": None if shift is None else shift["name"],
+                # 我那天在哪个区（格子里不写，点开那天的名单里写）：跟 `my_days` 同一条
+                # 口径 —— 区名来自那天结果行上的 `zone_id`，事后改固定区不改写过去。
+                "zone_name": None if zone_id is None else zone_names.get(zone_id),
                 # 跟 `my_days` 同一个字段、同一条口径：格子里的「请假」不是「休」。
                 "leave": key in leave_days,
+                "staff_count": staff_count.get(key, 0),
             })
 
         return self._month_frame(start, today, days)
+
+    async def _staff_counts(self, first: str, last: str) -> dict[str, int]:
+        """区间内每天全店有几个人上班（`shift_id` 非空的行数，休不算）。
+
+        `last` 是**右开**的（跟 `month_calendar` 那条一样是下月一号），别按两端都含读。
+        """
+        cur = await self._conn.execute(
+            """SELECT business_date, COUNT(*) AS n FROM staff_assignments
+               WHERE business_date >= ? AND business_date < ? AND shift_id IS NOT NULL
+               GROUP BY business_date""",
+            (first, last),
+        )
+        counts: dict[str, int] = {}
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            counts[mapping["business_date"]] = int(mapping["n"])
+        return counts
+
+    @_needs_migration
+    async def my_day(self, business_date: str) -> dict:
+        """员工点开某一天看到的全店名单（票 13）：各班是谁、在哪个区，以及那天谁不上班。
+
+        形状照着店长那版 `day_detail`（人名、请假、工作区都是从那一条读的，判据只有
+        一份），但**只留员工该看的那几项**：他的 `zone_id`、`overridden`（这天他跟规则
+        不一样，是「谁被临时调走」的管理信息）与 `undoable`（能不能撤销覆盖，那是店长
+        的动作）都不出去。员工面要的是「今天店里谁在、在哪」和「谁休 / 谁请假」。
+
+        请假与休分开：两个人都是没有班次，`leave` 说的是「批过的假」而不是「排班给的休」
+        （票 08 的口径，跟员工页其他几处一致）。
+
+        空组（那天某个班一个人都没有）不出去：员工看的是名单，不是「这个班今天没人」。
+        """
+        detail = await self.day_detail(business_date)
+        groups = [
+            {
+                "shift_id": group["shift"]["id"],
+                "shift_name": group["shift"]["name"],
+                "count": group["count"],
+                "people": [
+                    {"id": person["id"], "name": person["name"], "zone": person["zone"]}
+                    for person in group["people"]
+                ],
+            }
+            for group in detail["groups"]
+            if group["count"]
+        ]
+        return {
+            "business_date": detail["business_date"],
+            "today": self.today(),
+            "groups": groups,
+            "total": detail["total"],
+            "off_count": detail["off_count"],
+            # 休假名单：`leave` 分开「批过的假」与「排班给的休」，前端照它说两句话。
+            "off_people": [
+                {"id": person["id"], "name": person["name"], "leave": person["leave"]}
+                for person in detail["off_people"]
+            ],
+        }
 
     @_needs_migration
     async def roster_with_rules(self) -> dict:

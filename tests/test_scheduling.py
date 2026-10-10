@@ -661,6 +661,140 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(row["scheduled"])
         self.assertIsNone(row["shift_name"])
 
+    # ── 票 13：员工月历上的全店视角（谁在班 / 在哪个区 / 谁休假） ────────
+
+    async def test_my_month_counts_the_whole_store_but_still_shows_only_my_shift(self):
+        """验收 1：格子多一个「那天全店几个人上班」，我的班别一个字不变。
+
+        人数与「我的班」是两个字段、两条查询（票 13 的口径）：别人上什么班不进这条响应，
+        员工在月历上看到的是「今天店里 3 个人」而不是同事的班次名。
+        """
+        first = await self._employee()
+        second = await self._employee("13800138001", "李四")
+        rester = await self._employee("13800138002", "王五")
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(first["id"], [day])
+        await self.store.set_rule(second["id"], [night])
+        # 王五：9/24 上班、9/25 休 —— 「休的人不算上班人数」靠他这一行说话。
+        await self.store.set_rule(rester["id"], [day, None])
+
+        month = await self.store.my_month(first["id"], "2026-09")
+        by_date = {item["business_date"]: item for item in month["days"]}
+
+        self.assertEqual(by_date["2026-09-24"]["staff_count"], 3)
+        self.assertEqual(by_date["2026-09-25"]["staff_count"], 2)
+        # 三人的班次名里只有一个「白班」是我自己的；「夜班」（李四的）一个字都不进来。
+        self.assertEqual(by_date["2026-09-24"]["shift_name"], "白班")
+        self.assertNotIn("夜班", {item["shift_name"] for item in month["days"]})
+        # 本月过去的日子没有结果行（新装机）：人数 0 是「还没有行」，不是「那天没人上班」。
+        self.assertEqual(by_date["2026-09-23"]["staff_count"], 0)
+
+    async def test_my_month_carries_my_zone_even_though_the_grid_does_not_write_it(self):
+        """验收 2 的另一半：我那天的工作区随月历下来（格子不写，点开的名单里写）。"""
+        first = await self._employee()
+        second = await self._employee("13800138001", "李四")
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_zone_default(first["id"], day, await self._zone("案板"))
+        await self.store.set_zone_default(second["id"], night, await self._zone("蒸柜"))
+        await self.store.set_rule(first["id"], [day])
+        await self.store.set_rule(second["id"], [night])
+
+        mine = await self.store.my_month(first["id"], "2026-09")
+        by_date = {item["business_date"]: item for item in mine["days"]}
+
+        self.assertEqual(by_date[TODAY]["zone_name"], "案板")
+        # 别人的区不混进来：我这一份里只有我那一个区名。
+        self.assertEqual(
+            {item["zone_name"] for item in mine["days"] if item["scheduled"]}, {"案板"}
+        )
+
+    async def test_my_day_lists_the_whole_store_with_zones_and_leave(self):
+        """验收 2/3：点开某一天，各班是谁、在哪个区，谁休、谁请假（假与休分开）。"""
+        first = await self._employee()
+        second = await self._employee("13800138001", "李四")
+        rester = await self._employee("13800138002", "王五")
+        leaver = await self._employee("13800138003", "赵六")
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_zone_default(first["id"], day, await self._zone("案板"))
+        await self.store.set_zone_default(second["id"], night, await self._zone("蒸柜"))
+        for person in (first, second, rester, leaver):
+            await self.store.set_rule(person["id"], [day])
+        # 李四 9/25 上夜班（换一条规则把相位挪开），王五 9/25 休。
+        await self.store.set_rule(second["id"], [night, night])
+        await self.store.set_rule(rester["id"], [day, None])
+        # 赵六 9/25 请了假：申请 → 店长批 → 那天写成覆盖（票 08 的老链路）。
+        request = await self.store.submit_leave(leaver["id"], "2026-09-25")
+        await self.store.approve_request(request["id"])
+
+        detail = await self.store.my_day("2026-09-25")
+
+        self.assertEqual(detail["business_date"], "2026-09-25")
+        self.assertEqual(detail["today"], TODAY)
+        # 上班的两个人：张三在案板、李四在蒸柜 —— 名字与区名都从结果行读。
+        self.assertEqual(
+            [
+                (group["shift_name"], group["count"], [p["name"] for p in group["people"]])
+                for group in detail["groups"]
+            ],
+            [("白班", 1, ["张三"]), ("夜班", 1, ["李四"])],
+        )
+        self.assertEqual(detail["groups"][0]["people"][0]["zone"], "案板")
+        self.assertEqual(detail["groups"][1]["people"][0]["zone"], "蒸柜")
+        self.assertEqual(detail["total"], 2)
+        # 不上班的两个：王五是排班给的休（leave 假），赵六是批过的假（leave 真）。
+        self.assertEqual(detail["off_count"], 2)
+        self.assertEqual(
+            {p["name"]: p["leave"] for p in detail["off_people"]},
+            {"王五": False, "赵六": True},
+        )
+
+    async def test_my_day_leaves_out_the_manager_only_fields(self):
+        """员工面只留姓名 / 班次 / 工作区 / 假或不假：店长那几个字段不出去。
+
+        `zone_id`（拿 id 去改配置）、`overridden`（这天谁被临时调走 —— 管理信息）、
+        `undoable`（能不能撤覆盖 —— 店长的动作）都在 `day_detail` 里，员工这一条不给。
+        逐键比对，不是「看一眼觉得没给」。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_zone_default(employee["id"], day, await self._zone("案板"))
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.day_detail(TODAY)  # 店长那版照旧有那些字段（对照组）
+
+        detail = await self.store.my_day(TODAY)
+
+        self.assertEqual(
+            set(detail), {"business_date", "today", "groups", "total", "off_count", "off_people"}
+        )
+        for group in detail["groups"]:
+            self.assertEqual(set(group), {"shift_id", "shift_name", "count", "people"})
+            for person in group["people"]:
+                self.assertEqual(set(person), {"id", "name", "zone"})
+        for person in detail["off_people"]:
+            self.assertEqual(set(person), {"id", "name", "leave"})
+
+    async def test_my_day_skips_empty_shifts_and_rejects_a_bad_date(self):
+        """那天没人上的班次不占一行（员工看的是名单，不是「这个班今天没人」）；坏日期 400。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+
+        detail = await self.store.my_day(TODAY)
+
+        self.assertEqual([group["shift_name"] for group in detail["groups"]], ["白班"])
+        # 窗口外/没铺过的日子：也是空名单，不报错（跟月历同一个说法）。
+        far = await self.store.my_day("2026-09-23")
+        self.assertEqual((far["groups"], far["total"], far["off_count"]), ([], 0, 0))
+
+        for bad in ("2026-9-24", "九月", "", "2026/09/24"):
+            with self.subTest(date=bad):
+                with self.assertRaises(SchedulingError) as ctx:
+                    await self.store.my_day(bad)
+                self.assertEqual(ctx.exception.code, "invalid_business_date")
+
     # ── 票 A：「员工 × 周」矩阵 ────────────────────────────────────────
 
     async def test_week_grid_normalizes_to_monday_and_covers_seven_days(self):
@@ -3020,6 +3154,10 @@ class SchedulingLayeringTest(unittest.TestCase):
         staff_paths = {
             "/api/scheduling/me",
             "/api/scheduling/me/month",
+            # 票 13：点开某一天看**全店**名单（谁在班、在哪个区、谁休 / 谁请假）。
+            # 它仍然挂在员工这扇门底下：路径上没有 `/day`，也没有 `employee_id` ——
+            # 店长那条按天读的是 `/api/scheduling/day`，两条互不通用。
+            "/api/scheduling/me/day",
             # 票 08：我的请假申请（提、看、撤回）。
             "/api/scheduling/me/requests",
             "/api/scheduling/me/requests/{request_id}",

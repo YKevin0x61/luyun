@@ -3,12 +3,17 @@ import {
   MONTH_HEADS,
   dayBeyondWindow,
   dayLabel,
+  isMe,
   monthCell,
   monthLabel,
+  myDayText,
   nextTwoLine,
+  offLabel,
+  rosterSummary,
   shiftMonth,
   shiftText,
   shiftTone,
+  staffCountLabel,
   stepMonth,
   todayHeadline,
   todaySubline,
@@ -235,5 +240,52 @@ describe('员工端「整月」（票 06）', () => {
     expect(dayBeyondWindow({ business_date: '2026-12-01' }, '2026-12-22')).toBe(false)
     expect(dayBeyondWindow({ business_date: '2026-12-23' }, '')).toBe(false)
     expect(dayBeyondWindow(null, '2026-12-22')).toBe(false)
+  })
+})
+
+describe('全店视角（票 13）：格子上的人数与那天的名单', () => {
+  it('人群里数出「N人在班」，0 与没给都不写', () => {
+    expect(staffCountLabel(5)).toBe('5人在班')
+    expect(staffCountLabel(1)).toBe('1人在班')
+    expect(staffCountLabel('12')).toBe('12人在班') // 服务端给的是 JSON 数字，字符串也认
+    // 0 = 那天一条结果行都没有（还没铺到）：不写「0人在班」，那读起来像「店里没人上班」。
+    expect(staffCountLabel(0)).toBe('')
+    expect(staffCountLabel(null)).toBe('')
+    expect(staffCountLabel(undefined)).toBe('')
+    expect(staffCountLabel('')).toBe('')
+    expect(staffCountLabel('很多')).toBe('')
+  })
+
+  it('弹层那行小结把上班与休假分开说，没人休假时不带后半句', () => {
+    expect(rosterSummary(5, 2)).toBe('5 人在班 · 2 人休假')
+    expect(rosterSummary(3, 0)).toBe('3 人在班')
+    expect(rosterSummary(0, 0)).toBe('0 人在班')
+    // 坏数据（服务端没给）当成 0，不吐 `undefined` 给员工看。
+    expect(rosterSummary(undefined, undefined)).toBe('0 人在班')
+  })
+
+  it('休假名单里「请假」与「休」分开写，判据只看 leave 一个字段', () => {
+    expect(offLabel({ name: '李四', leave: true })).toBe('请假')
+    expect(offLabel({ name: '王五', leave: false })).toBe('休')
+    expect(offLabel({ name: '王五' })).toBe('休') // 缺字段 = 排班给的休，不猜成请假
+    expect(offLabel(null)).toBe('休')
+  })
+
+  it('「我」按 id 认，不按名字（重名不标错行）', () => {
+    expect(isMe({ id: 7, name: '张三' }, 7)).toBe(true)
+    expect(isMe({ id: 8, name: '张三' }, 7)).toBe(false)
+    expect(isMe({ id: '7', name: '张三' }, 7)).toBe(true) // JSON 里 id 是数字，字符串也认
+    expect(isMe({ name: '张三' }, 7)).toBe(false)
+    expect(isMe(null, 7)).toBe(false)
+    expect(isMe({ id: 7 }, null)).toBe(false)
+  })
+
+  it('「我这天」那行只在上班那态接工作区，休 / 请假 / 还没排都不接', () => {
+    expect(myDayText(MORNING)).toBe('白班 · 案板')
+    expect(myDayText({ ...MORNING, zone_name: null })).toBe('白班') // 没配区就只说班次
+    expect(myDayText(REST)).toBe('休')
+    expect(myDayText(LEAVE)).toBe('请假')
+    expect(myDayText(ORPHAN)).toBe('已调整')
+    expect(myDayText(NOT_ROSTERED)).toBe('还没排')
   })
 })

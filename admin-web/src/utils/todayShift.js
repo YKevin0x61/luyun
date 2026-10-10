@@ -149,3 +149,50 @@ export function monthCell(day) {
   if (tone === 'moved') return { text: '已调整', tone }
   return { text: day.shift_name, tone }
 }
+
+// ── 全店视角（票 13）：格子上的「N人在班」与点开某天那份名单 ─────────────
+
+/** 格子里那行小字：那天**全店**上班几个人（`staff_count`，服务端已把休排除在外）。
+ *
+ *  0 与「没给」都不写：0 的意思是那天一条结果行都没有（还没铺到 / 装机前），
+ *  写「0人在班」会让人以为店里那天没人上班 —— 那是另一件事（票 06 口径 4）。
+ *  也不写成「休」：这个数和「我的班」是两个字段，格子上的班别那行才是我的班。
+ */
+export function staffCountLabel(count) {
+  const n = Number(count)
+  if (!Number.isFinite(n) || n <= 0) return ''
+  return `${n}人在班`
+}
+
+/** 弹层标题下面那行小结：上班几个、休假几个（两个数都来自服务端，不在这儿重算）。 */
+export function rosterSummary(total, offCount) {
+  const working = Number(total) || 0
+  const off = Number(offCount) || 0
+  return off > 0 ? `${working} 人在班 · ${off} 人休假` : `${working} 人在班`
+}
+
+/** 休假名单里那个人写什么：批过的假 vs 排班给的休（票 08 的口径，跟格子里同一张表）。
+ *
+ *  判据只有 `person.leave` 一个字段 —— 页面不自己看班次判「他是不是请假」。
+ */
+export function offLabel(person) {
+  return person && person.leave ? '请假' : '休'
+}
+
+/** 「我」在这份名单里的那一行：按 id 认人，不按名字（重名会标错行）。 */
+export function isMe(person, employeeId) {
+  if (!person || employeeId == null) return false
+  return Number(person.id) === Number(employeeId)
+}
+
+/** 弹层顶上那行「我这天：…」：格子上的班别，加上我那天的工作区。
+ *
+ *  工作区**只在上班那一态**接上去（「休 · 案板」没有意义）；四态的判据仍在 `monthCell`
+ *  一处，这里只决定接不接区名 —— 不重写第二张表。
+ */
+export function myDayText(day) {
+  const { text, tone } = monthCell(day)
+  if (!text) return '还没排'
+  if (tone !== 'shift') return text
+  return day.zone_name ? `${text} · ${day.zone_name}` : text
+}
