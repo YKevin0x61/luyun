@@ -267,6 +267,32 @@ POSTGRES_DSN=postgresql://localhost:5432/luyun_test .venv/bin/python -c "..."
 仍在用 git checkout + 分拆前端 tar 的店面：**下一次成功的 Apply Update**
 会切到版本清单身份，无长期双轨。详见 `docs/RELEASE_AND_DEPLOY.md` §5.5。
 
+### 下载不动怎么办（发行包拉不下来）
+
+更新作业从 GitHub Release 下载发行包（`luyun-release-bundle.tar.gz`，约 6 MB）。这条下载由
+`objects.githubusercontent.com` 提供，在弱网或被中间设备干扰的链路上**经常下到一半被掐断**
+—— 更新历史与 `data/update_job.log` 里的表现是这两个：
+
+- `Remote end closed connection without response`
+- `failed to download luyun-release-bundle.tar.gz for vX.Y.Z: <urlopen error [Errno 110] Connection timed out>`
+
+先确认**不是包的问题**：版本检测能查到那个版本、且它的资产在 Release 页上可见（大小约 6 MB），
+就说明资产是好的，坏的是链路。作业自己会**断点续传 + 退避重试**（5 次，2 / 4 / 8 / 16 秒，
+每次从已下载的字节继续），多数抖动都能过去。仍然下不动时按顺序试这三条：
+
+1. **再点一次更新**：链路是时通时断的（同一台机器实测升 v0.8.3 时下载成功过一次，耗时 349 秒）。
+2. **给作业配代理**：作业用 `urllib`，它默认尊重 `https_proxy`。编辑
+   `/etc/systemd/system/luyun-update.service`，在 `[Service]` 下加一行
+   `Environment=HTTPS_PROXY=http://<代理地址>:<端口>`，然后
+   `sudo systemctl daemon-reload`（只影响下一次 Apply Update，不用重启主服务）。
+3. **指到自己的镜像**：在 `deploy/env.production` 里设 `RELEASE_DOWNLOAD_BASE`（默认
+   `https://github.com`），拼法不变 —— `{base}/{repo}/releases/download/{tag}/{name}`。
+   把官方那三个资产（`luyun-release-bundle.tar.gz` / `SHA256SUMS` / `install.sh`）原样放到
+   任意 HTTP 服务上即可。**完整性仍由 `SHA256SUMS` 硬校验**，镜像给错内容会被拦下来。
+
+第三条也是唯一能在「门店完全连不上 GitHub」时走通的路 —— 把包放到内网任何一台能访问
+GitHub 的机器上做中转即可。
+
 ### 回滚
 
 - **软件回滚（首选）**：在「系统更新」里对**更旧的正式 Release**再执行一次

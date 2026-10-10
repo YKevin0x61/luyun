@@ -195,6 +195,10 @@ class Settings(BaseSettings):
     # or Admin「系统更新」→ data/github_release.enc.
     GITHUB_REPO: str = "YKevin0x61/luyun"
     GITHUB_RELEASES_TOKEN: Optional[str] = None
+    # Release 资产的下载前缀（默认 GitHub 官方）。弱网 / 被干扰的门店可以指到自建镜像
+    # 或代理，拼法不变：`{base}/{repo}/releases/download/{tag}/{name}`。作业进程也尊重
+    # `https_proxy` 环境变量 —— 两条逃生通道见 deploy/README.md「下载不动怎么办」。
+    RELEASE_DOWNLOAD_BASE: str = "https://github.com"
     # Empty → project root (directory containing main.py).
     RELEASE_UPDATE_REPO_DIR: str = ""
 

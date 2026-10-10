@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -47,6 +48,25 @@ logger = logging.getLogger(__name__)
 
 BUNDLE_ASSET = "luyun-release-bundle.tar.gz"
 CHECKSUMS_ASSET = "SHA256SUMS"
+
+# ── Release 资产下载：断点续传 + 退避重试 ────────────────────────────────────
+# 为什么需要这一段：GitHub 的 Release 资产实际由 `objects.githubusercontent.com`
+# 提供，在弱网或被中间设备干扰的链路上经常下到一半被掐断 —— 异常是
+# `http.client.RemoteDisconnected: Remote end closed connection without response`
+# 或 `URLError: <urlopen error [Errno 110] Connection timed out>`。
+# 原来一次 `urlopen(...).read()` 没有任何重试，撞上就整单作业失败：门店实测更新到
+# v0.8.4 连着三次都挂在这两个错上（包本身在 GitHub 上完好：5.87MB、state=uploaded、
+# digest 与本地 SHA256SUMS 一致），而同一台机器升 v0.8.3 时下载成功过一次（耗时 349s）
+# —— 链路是"能通但很慢、时不时断"，所以重试 + 续传就能过去。
+# 每次尝试都从**已落盘的字节**继续（`Range: bytes=N-`），失败按指数退避重来。
+DOWNLOAD_ATTEMPTS = 5
+DOWNLOAD_BACKOFF_SECONDS = 2.0  # 2 / 4 / 8 / 16 秒
+DOWNLOAD_TIMEOUT_SECONDS = 120  # 单次尝试的 socket 超时（不是总时长）
+DOWNLOAD_CHUNK_BYTES = 256 * 1024
+
+
+class _DownloadIncomplete(RuntimeError):
+    """一次尝试读到了 0 字节 —— 交给 `_download_asset` 的退避循环重试，不直接冒到作业层。"""
 
 # Shop state that must survive atomic application-tree swap (never from the bundle).
 _PRESERVE_DIR_NAMES = ("data", ".venv", "venv", "secrets")
@@ -210,25 +230,79 @@ class ReleaseBundleInstallAdapter:
         self._staging = None
         self._verified_bundle = None
 
+    def _download_base(self) -> str:
+        """资产下载的前缀，默认 GitHub。
+
+        弱网 / 被墙的门店可以把它指到自建镜像或代理（`RELEASE_DOWNLOAD_BASE`），拼法不变：
+        `{base}/{repo}/releases/download/{tag}/{name}`。另外 `urllib` 默认尊重
+        `https_proxy` 环境变量，所以给作业进程配代理也是通的 —— 两条逃生通道都写在
+        `deploy/README.md`。"""
+        base = (settings.RELEASE_DOWNLOAD_BASE or "").strip().rstrip("/")
+        return base or "https://github.com"
+
     def _download_asset(self, tag: str, name: str, dest: Path) -> None:
-        url = (
-            f"https://github.com/{self._github_repo}/releases/download/"
-            f"{tag}/{name}"
-        )
-        headers = {"User-Agent": "luyun-update-job"}
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-            headers["Accept"] = "application/octet-stream"
-        req = urllib.request.Request(url, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                dest.write_bytes(resp.read())
-        except urllib.error.HTTPError as exc:
-            raise RuntimeError(
-                f"missing release asset {name} for {tag}: HTTP {exc.code}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"failed to download {name} for {tag}: {exc}") from exc
+        """把一份 Release 资产拉到 `dest`：分块写、失败从已下载处续传、退避重试。
+
+        返回时文件**只保证是完整读到的**（字节数 > 0），完整性由调用方的
+        `verify_bundle_checksum` 按 SHA256SUMS 硬校验 —— 续传错位会被那一步抓住。
+        """
+        url = f"{self._download_base()}/{self._github_repo}/releases/download/{tag}/{name}"
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            done = dest.stat().st_size if dest.is_file() else 0
+            headers = {"User-Agent": "luyun-update-job"}
+            if self._token:
+                headers["Authorization"] = f"Bearer {self._token}"
+                headers["Accept"] = "application/octet-stream"
+            if done:
+                headers["Range"] = f"bytes={done}-"
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_SECONDS) as resp:
+                    # 206 = 服务端接受续传（接着写）；200 = 它给的仍是整份 —— 那就从头写，
+                    # 否则新旧内容会拼在一起。
+                    resume = bool(done) and getattr(resp, "status", 200) == 206
+                    if not resume:
+                        done = 0
+                    with dest.open("ab" if resume else "wb") as handle:
+                        while True:
+                            chunk = resp.read(DOWNLOAD_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            handle.write(chunk)
+                            done += len(chunk)
+                if done <= 0:
+                    raise _DownloadIncomplete(f"downloaded 0 bytes for {name}")
+                logger.info(
+                    "Downloaded %s: %d bytes%s", name, done,
+                    f" (attempt {attempt})" if attempt > 1 else "",
+                )
+                return
+            except urllib.error.HTTPError as exc:
+                # 4xx 是「资产不存在 / 没权限」，重试没有意义；5xx 与 429 值得重来。
+                if exc.code < 500 and exc.code != 429:
+                    raise RuntimeError(
+                        f"missing release asset {name} for {tag}: HTTP {exc.code}"
+                    ) from exc
+                last_exc = exc
+            except (
+                _DownloadIncomplete,
+                urllib.error.URLError,
+                http.client.HTTPException,
+                OSError,
+            ) as exc:
+                last_exc = exc
+            if attempt < DOWNLOAD_ATTEMPTS:
+                delay = DOWNLOAD_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    "Download of %s failed (attempt %d/%d, %d bytes so far): %s — retrying in %.0fs",
+                    name, attempt, DOWNLOAD_ATTEMPTS,
+                    dest.stat().st_size if dest.is_file() else 0, last_exc, delay,
+                )
+                time.sleep(delay)
+        raise RuntimeError(
+            f"failed to download {name} for {tag} after {DOWNLOAD_ATTEMPTS} attempts: {last_exc}"
+        ) from last_exc
 
 
 def verify_bundle_checksum(bundle_path: Path, sums_path: Path) -> None:
