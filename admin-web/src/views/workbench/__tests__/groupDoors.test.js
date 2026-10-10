@@ -119,7 +119,7 @@ describe('人事壳（工作台级导航 + 本组四页）', () => {
   it('本组四页都在顶栏导航里，链接指向新地址（不是平铺的旧地址）', async () => {
     const { wrapper } = await mountShell('hr', '/workbench/hr/calendar')
 
-    const hrefs = wrapper.findAll('.sched-nav-item').map((item) => item.attributes('href'))
+    const hrefs = wrapper.findAll('.wb-rail-item').map((item) => item.attributes('href'))
     expect(hrefs).toEqual(workbenchPagesOf('hr').map((page) => page.path))
     for (const href of hrefs) {
       expect(href.startsWith('/workbench/hr/')).toBe(true)
@@ -140,14 +140,14 @@ describe('人事壳（工作台级导航 + 本组四页）', () => {
       RECIPE_HOME_PATH, PREP_PLAN_PATH,
     ])
     expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
-    // 工作台级那排与本组四页在**同一条**横滑带子里（顶栏行数没有因此变多）。
-    expect(wrapper.get('.sched-navbar').findAll('.sched-nav').length).toBe(1)
+    // ③-2：组内页挪到左 rail（统一壳一处渲染），它自己的条数 = 本组可见页数。
+    expect(wrapper.get('.wb-rail').findAll('.wb-rail-item').length).toBe(workbenchPagesOf('hr').length)
   })
 
   it('牌子写「工作台」就指工作台首页（不再指本组首页）', async () => {
     const { wrapper } = await mountShell('hr', '/workbench/hr/calendar')
 
-    const brand = wrapper.get('.sched-name')
+    const brand = wrapper.get('.wb-brand')
     expect(brand.text()).toBe('工作台')
     expect(brand.attributes('href')).toBe(WORKBENCH_HOME)
   })
@@ -170,7 +170,7 @@ describe('人事壳（工作台级导航 + 本组四页）', () => {
   it('高亮跟着新分组走：站在花名册上，花名册那一格亮', async () => {
     const { wrapper } = await mountShell('hr', '/workbench/hr/roster')
 
-    const on = wrapper.findAll('.sched-nav-item').filter((item) => item.classes().includes('is-on'))
+    const on = wrapper.findAll('.wb-rail-item').filter((item) => item.classes().includes('is-on'))
     expect(on).toHaveLength(1)
     expect(on[0].attributes('href')).toBe('/workbench/hr/roster')
   })
@@ -180,23 +180,16 @@ describe('人事壳（工作台级导航 + 本组四页）', () => {
     // 内边距一直是卫生壳 `.hy-main` 给的；换成人事壳之后必须有这一条，否则页面上
     // 文字会贴着屏幕边（其余三页自带内边距，不吃这条）。
     expect(HR_SHELL_SOURCE).toMatch(
-      /\.sched-shell > \.roster-page\s*\{[^}]*padding:\s*var\(--hy-page\)/,
+      /\.sched-shell :deep\(\.roster-page\)\s*\{[^}]*padding:\s*var\(--hy-page\)/,
     )
   })
 
-  it('那条内边距真的落得上：花名册的根节点带着这条壳的作用域标记', async () => {
-    // 上面那条只保证规则写在那儿；scoped CSS 要生效，还得让子页面的根节点带上壳的
-    // 作用域标记（Vue 对子组件根节点就是这么做的）。这一条按渲染出来的 DOM 断它。
+  it('那条内边距真的落得上：花名册挂在统一壳的内容区里', async () => {
+    // ③-2 之前这一条断的是「`.roster-page` 带着壳的作用域标记」（壳用直接子选择器给内边距）。
+    // 三壳合一之后页面挂在统一壳的 `<main class="wb-main">` 里，作用域标记挂在那一层 ——
+    // 所以这里断**挂载关系**（页面确实在壳的内容区里），内边距那条规则由上面那条源码断言钉住。
     const { wrapper } = await mountShell('hr', '/workbench/hr/roster')
-    const scopeIds = (selector) => wrapper
-      .get(selector)
-      .element
-      .getAttributeNames()
-      .filter((name) => name.startsWith('data-v-'))
-
-    const shellIds = scopeIds('.sched-top')
-    expect(shellIds.length).toBeGreaterThan(0)
-    expect(scopeIds('.roster-page').some((id) => shellIds.includes(id))).toBe(true)
+    expect(wrapper.get('.wb-main .roster-page').exists()).toBe(true)
   })
 })
 
@@ -204,7 +197,7 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
   it('rail 渲染的是现场壳自己那份名单，花名册不在其中（它现在是人事页）', async () => {
     const { wrapper } = await mountShell('floor', '/workbench/floor/daily')
 
-    const hrefs = wrapper.findAll('.hy-tab').map((item) => item.attributes('href'))
+    const hrefs = wrapper.findAll('.wb-rail-item').map((item) => item.attributes('href'))
     // **现场壳的 rail 不是从页面清单派生的**：人事壳那一侧才是 `workbenchPagesOf('hr')`，
     // 现场壳读的是 `utils/hygieneCopy.js` 里手写的 `HYGIENE_ADMIN_NAV`。所以往现场组加页要
     // **同时**动清单与那份手写名单 —— 只动一边，下面第二条断言就红。
@@ -222,7 +215,7 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
     // 现在整排工作台导航在内容区顶上那条横条里（那一条右侧原先大片空着）。
     const { wrapper } = await mountShell('floor', '/workbench/floor/daily', { identity: 'super' })
 
-    expect(wrapper.get('.hy-header').find('.wb-nav').exists()).toBe(true)
+    expect(wrapper.get('.wb-top').find('.wb-nav').exists()).toBe(true)
     const hrefs = wrapper.findAll('.wb-nav-item').map((item) => item.attributes('href'))
     // 身份过滤照旧按**落点那一页**的 `audience` 走：店长这一档没有「我的」那一格
     // （员工三页是 `staff`），与 `WorkbenchLayout` 里的判定同一份代码。
@@ -231,8 +224,9 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
       RECIPE_HOME_PATH, PREP_PLAN_PATH,
     ])
     expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
-    // rail 自己的名字跟着组名走：工作台 · 卫生（组名 2026-10-08 由「现场」改过来）。
-    expect(wrapper.get('.hy-tabbar').attributes('aria-label')).toBe('工作台 · 卫生')
+    // rail 自己的名字跟着组名走：工作台 · 卫生验收（组名 2026-10-09 由「卫生」改成「卫生验收」，
+    // 与工作台导航里那一格同一个词 —— 名单在 `utils/workbenchNav.js` 一处）。
+    expect(wrapper.get('.wb-rail').attributes('aria-label')).toBe('工作台 · 卫生验收')
   })
 
   it('rail 里那扇单门「人事」没了：跨组由工作台级导航接手', async () => {
@@ -244,7 +238,7 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
   it('品牌链接指工作台首页（牌子写的是「工作台」，不是现场组那一页）', async () => {
     const { wrapper } = await mountShell('floor', '/workbench/floor/boards')
 
-    const brands = wrapper.findAll('.hy-brand')
+    const brands = wrapper.findAll('.wb-brand')
     expect(brands.length).toBeGreaterThan(0)
     for (const brand of brands) {
       expect(brand.attributes('href')).toBe(WORKBENCH_HOME)
@@ -254,7 +248,7 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
   it('顶栏挂着身份切换器（同一颗，不改它的判定）', async () => {
     const { wrapper } = await mountShell('floor', '/workbench/floor/daily', { identity: 'super' })
 
-    expect(wrapper.find('.hy-header .wb-id').exists()).toBe(true)
+    expect(wrapper.find('.wb-top .wb-id').exists()).toBe(true)
   })
 })
 

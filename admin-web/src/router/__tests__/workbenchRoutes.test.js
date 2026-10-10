@@ -88,6 +88,8 @@ describe('工作台路由（票 05 按分组落位之后）', () => {
   })
 
   it('员工三页套同一个工作台外壳（导航按身份渲染），自己不再是一整页', () => {
+    // ③-2：导航面（`workbenchNavFor` / 身份过滤）收进统一壳；壳的包装件仍渲染 `<router-view />`。
+    const shell = readFileSync(join(here, '../../views/workbench/WorkbenchShell.vue'), 'utf8')
     const layout = readFileSync(join(here, '../../views/workbench/WorkbenchLayout.vue'), 'utf8')
     for (const [path, view] of STAFF_PAGES) {
       const line = lineFor(path)
@@ -96,7 +98,7 @@ describe('工作台路由（票 05 按分组落位之后）', () => {
       expect(line).toContain('workbenchStaffPage')
     }
     expect(router).toMatch(/const WorkbenchLayout = \(\) => import\('\.\.\/views\/workbench\/WorkbenchLayout\.vue'\)/)
-    expect(layout).toMatch(/workbenchNavFor/)
+    expect(shell).toMatch(/workbenchNavFor/)
     expect(layout).toMatch(/<router-view \/>/)
   })
 

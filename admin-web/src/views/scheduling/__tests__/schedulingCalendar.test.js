@@ -7,7 +7,16 @@ import { pageMeta } from '../../../router/pageRoutes.js'
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../SchedulingCalendarView.vue'), 'utf8')
 const shell = readFileSync(join(here, '../SchedulingLayout.vue'), 'utf8')
-const tokens = readFileSync(join(here, '../../../../public/hygiene-admin.css'), 'utf8')
+// ③-2（三壳合一）：壳级的东西（共享样式表、组内导航 rail、手机档分叉、底栏）现在
+// 只有一份实现，在统一壳里；人事壳只是它的薄包装。
+const sharedShell = readFileSync(join(here, '../../workbench/WorkbenchShell.vue'), 'utf8')
+const tokens = [
+  // 令牌自 ③-1a（t44）起分布在**两份**：兼容层与布局留在 public/hygiene-admin.css，
+  // 语义层 + `--hy-*` 本体搬进了 src/styles/theme.workbench.css 的 html[data-theme="workbench"]。
+  // 守卫必须读**两份合并**，否则「令牌搬家」会被误报成「令牌未定义」（t46）。
+  readFileSync(join(here, '../../../../public/hygiene-admin.css'), 'utf8'),
+  readFileSync(join(here, '../../../../src/styles/theme.workbench.css'), 'utf8'),
+].join('\n')
 const router = readFileSync(join(here, '../../../router/index.js'), 'utf8')
 const navBar = readFileSync(join(here, '../../../components/NavBar.vue'), 'utf8')
 
@@ -17,7 +26,7 @@ describe('店长端排班月历（原型 B）', () => {
     // 卫生的 Python、不挂卫生菜单，两边各走各的门。
     // 共享样式表由**壳**加载一份（`SchedulingLayout.vue`）：三个子页各加载一份会挂出
     // 重复的 <link>；壳一层管住，跟卫生管理端一个做法（那边也是 layout 加载、子页不管）。
-    expect(shell).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    expect(sharedShell).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
     expect(view).not.toMatch(/useScopedStylesheet\(/)
     expect(view).toMatch(/class="hygiene-admin sched-page"/)
   })
@@ -145,7 +154,8 @@ describe('店长端排班月历（原型 B）', () => {
       standalone: true, public: false, audience: 'admin',
     })
     expect(router).toMatch(/views\/scheduling\/SchedulingLayout\.vue/)
-    expect(shell).toMatch(/router\.push\('\/'\)/)
+    // 「回后台」那条门现在在统一壳的顶栏里（`<router-link class="wb-back" to="/">`）。
+    expect(sharedShell).toMatch(/class="wb-back" to="\/"/)
     expect(shell).toMatch(/inject\('wsConnected'/)
     // 票 05：三条排班页按组落在 `/workbench/hr/*`（月历 / 待办 / 班次表各一行，
     // 走人事壳那条工厂）。后端 `SPA_PAGE_ROUTES` 与 `tests/test_spa_page_routes.py`
@@ -166,13 +176,15 @@ describe('店长端排班月历（原型 B）', () => {
     // 一次只到得了一页，还带着一个看着像下拉的 `›`），由壳渲染的**整排工作台级导航**
     // 接手 —— 同一颗组件（`components/workbench/WorkbenchNav.vue`）三个壳共用，
     // 表在 `utils/workbenchNav.js`，落点常量在 `utils/workbenchCopy.js`。
-    expect(shell).toMatch(/components\/workbench\/WorkbenchNav\.vue/)
-    expect(shell).toMatch(/class="sched-navbar"/)
-    expect(shell).toMatch(/workbenchGroup\('hr'\)/)
+    // ③-2：工作台级导航那颗组件现在挂在统一壳上（人事壳只是包装）。
+    expect(sharedShell).toMatch(/components\/workbench\/WorkbenchNav\.vue/)
+    expect(sharedShell).toMatch(/<WorkbenchRail/)
+    // ③-2：本组那一行（跨组的门牌与落点）只有导航模型那一份，壳只渲染。
+    expect(sharedShell).toMatch(/workbenchNav\.js/)
     // 牌子写「工作台」就指工作台首页（B2：原来指本组首页，于是这条栏上没有回首页的路）。
-    expect(shell).toMatch(/WORKBENCH_HOME/)
+    expect(sharedShell).toMatch(/class="wb-brand"/)
     // 子系统名字只写一次。
-    expect(shell).toMatch(/WORKBENCH_TITLE/)
+    expect(sharedShell).toMatch(/WORKBENCH_TITLE/)
   })
 
   it('has its own door in the admin shell', () => {
@@ -328,16 +340,16 @@ describe('C 方向：人事壳把工作台级导航让到底栏', () => {
   }
 
   it('底栏挂上了，而顶栏那一条在手机档整个收起来（桌面档还要它）', () => {
-    expect(shell).toMatch(/components\/workbench\/WorkbenchTabBar\.vue/)
-    expect(shell).toMatch(/<WorkbenchTabBar class="sched-tabbar" \/>/)
+    expect(sharedShell).toMatch(/components\/workbench\/WorkbenchTabBar\.vue/)
+    expect(sharedShell).toMatch(/<WorkbenchTabBar/)
     // 组件与它所在的带子都还在：桌面档（>720px）那条带子里仍是工作台级导航 + 本组四页。
-    expect(shell).toMatch(/components\/workbench\/WorkbenchNav\.vue/)
-    expect(shell).toMatch(/class="sched-navbar"/)
+    expect(sharedShell).toMatch(/components\/workbench\/WorkbenchNav\.vue/)
+    expect(sharedShell).toMatch(/<WorkbenchRail/)
     // 手机档：**整条** `.sched-top` 收起来（2026-10-08 方案 C）—— 组内四页与退出 / 回后台
     // 都进 `WorkbenchMobileHead`，不再是"只收起工作台级那一排、其余留在带子上"。
     // 删组件（而不是 `display:none`）会把桌面档那一条一起删掉。
-    expect(mobileRules(shell)).toMatch(/\.sched-top\s*\{\s*display:\s*none/)
-    expect(shell).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
+    expect(mobileRules(sharedShell)).toMatch(/\.wb-top\s*\{\s*display:\s*none/)
+    expect(sharedShell).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
   })
 
   it('底栏钉在视口底、内容给它让出高度（两条都是壳自己的账）', () => {
@@ -346,9 +358,9 @@ describe('C 方向：人事壳把工作台级导航让到底栏', () => {
     // （同特异度，而那张表更晚进 head —— 平局按文档顺序判）：底栏脱不出文档流，内容一长
     // 就跟着排到页面末尾，手机上等于没有。`.sched-shell` 这个父级是这条规则赢的条件，
     // 别当成冗余删掉。
-    const rules = mobileRules(shell)
-    expect(rules).toMatch(/\.sched-shell \.sched-tabbar\s*\{[^}]*position:\s*fixed/)
+    const rules = mobileRules(sharedShell)
+    expect(rules).toMatch(/\.wb-main\s*\{[^}]*padding-bottom:\s*calc\(57px/)
     // 它是 fixed（不占流），内容末尾要让出那条栏的高度，否则最后一屏压在栏下滚不到底。
-    expect(rules).toMatch(/\.sched-shell\s*\{[^}]*padding-bottom:\s*calc\(57px \+ env\(safe-area-inset-bottom/)
+    expect(rules).toMatch(/\.wb-main\s*\{[^}]*padding-bottom:\s*calc\(57px \+ env\(safe-area-inset-bottom/)
   })
 })

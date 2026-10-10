@@ -16,7 +16,8 @@ import { createPinia, setActivePinia } from 'pinia'
 const here = dirname(fileURLToPath(import.meta.url))
 const read = (rel) => readFileSync(join(here, rel), 'utf8')
 
-const SHELL = read('../WorkbenchLayout.vue')
+// ③-2（三壳合一）：壳级样式与手机档那一条现在只有一份，在统一壳里；三个布局都是它的薄包装。
+const SHELL = read('../WorkbenchShell.vue')
 const TABBAR = read('../../../components/workbench/WorkbenchTabBar.vue')
 const EXIT_BUTTON = read('../../../components/workbench/WorkbenchExitButton.vue')
 const SWITCHER = read('../../../components/workbench/WorkbenchIdentitySwitcher.vue')
@@ -112,7 +113,8 @@ describe('D7：「‹ 后台」对员工是一扇永远关着的门，就不该�
     const wrapper = await mountShell('/workbench/me/today', 'staff')
 
     expect(wrapper.find('.wb-back').exists()).toBe(false)
-    expect(wrapper.get('a[href="/workbench"]').text()).toBe('今天')
+    // ③-2：工作台级入口在手机档由底栏那一条承担（顶栏那排 `display: none`）。
+    expect(wrapper.get('.wb-tabbar a[href="/workbench"]').text()).toBe('今天')
   })
 
   it('店长那一档照旧：那一扇回管理后台的门在（spec 故事 11 的双向入口）', async () => {
@@ -165,14 +167,13 @@ describe('方案 C / B6：手机档顶部只剩一行，目标 ≥44px', () => {
     // 顶上那一条在手机档 `display: none`：本组四页与退出 / 回后台都进 `WorkbenchMobileHead`。
     // （原来那条"‹后台与两排导航胶囊抬到 44px"的账随之作废 —— 那些目标在手机档不再渲染；
     //  页头自己的触控下限在上一段里逐个断着。）
-    expectMobileRule(HR_SHELL, /\.sched-top\s*\{\s*display:\s*none/, '顶栏在手机档收起')
-    expect(HR_SHELL).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
-    expect(HR_SHELL).toMatch(/<WorkbenchMobileHead[^>]*\/>/)
+    expectMobileRule(SHELL, /\.wb-top\s*\{\s*display:\s*none/, '顶栏在手机档收起')
+    expect(SHELL).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
+    expect(SHELL).toMatch(/<WorkbenchMobileHead[^>]*\/>/)
     // 桌面档那条带子照旧：工作台级一排 + 本组四页共处一行（收的是手机档那一份）。
-    expect(HR_SHELL).toMatch(/\.sched-navbar\s*\{\s*display:\s*flex/)
+    expect(SHELL).toMatch(/<WorkbenchRail/)
     // 底栏仍是手机档的主导航：钉在视口底，内容让出那一条。
-    expectMobileRule(HR_SHELL, /\.sched-tabbar\s*\{[^}]*position:\s*fixed/, '底栏钉在视口底')
-    expectMobileRule(HR_SHELL, /\.sched-shell\s*\{[^}]*padding-bottom:\s*calc\(57px/, '内容让出底栏高度')
+    expectMobileRule(SHELL, /\.wb-main\s*\{[^}]*padding-bottom:\s*calc\(57px/, '内容让出底栏高度')
   })
 
   it('共享件也补齐：现场壳的「后台」、表单按钮与输入框（花名册那种一屏 200+ 控件）', () => {
@@ -205,9 +206,13 @@ describe('多根组件不透传 class：三个外壳都不给退出按钮挂 cla
     // `<ConfirmDialog>`）：外面挂的 class 传不进按钮，Vue 还会报
     // `Extraneous non-props attributes`。原来三个壳各自挂了一颗
     // （`.wb-exit-btn` / `.sched-exit` / `.hy-exit`），规则全是死的。
-    for (const [name, source] of [['工作台壳', SHELL], ['人事壳', HR_SHELL], ['现场壳', HY_SHELL]]) {
-      expect(source, name).toMatch(/<WorkbenchExitButton\s*\/>/)
-      expect(source, name).not.toMatch(/<WorkbenchExitButton[^>]*class=/)
+    // ③-2：三壳合一之后唯一那颗退出按钮在统一壳里；两个布局只是包装，别在它们身上找。
+    // ③-2：唯一那颗退出按钮在统一壳里（三个布局只是它的包装，别在它们身上找）。
+    expect(SHELL).toMatch(/<WorkbenchExitButton\s*\/>/)
+    expect(SHELL).not.toMatch(/<WorkbenchExitButton[^>]*class=/)
+    for (const [name, source] of [['人事壳（包装）', HR_SHELL], ['现场壳（包装）', HY_SHELL]]) {
+      expect(source, name).toMatch(/<WorkbenchShell/)
+      expect(source, name).not.toMatch(/<WorkbenchExitButton/)
     }
   })
 

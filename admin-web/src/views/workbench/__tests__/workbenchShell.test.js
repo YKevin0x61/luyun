@@ -96,6 +96,7 @@ describe('工作台外壳的导航', () => {
     // 胶囊）里，员工两项都看得见（spec 故事 8）。一格两门时标题取各自那一页在清单里的
     // 名字（「选择岗位」/「备货计划」）：同一颗胶囊里写两遍「后勤」看不出哪一半是哪一页。
     // 2026-10-05 起员工这一档还多一格「卫生」（他们每天要做的活，一级入口）。
+    // 员工那一档：第二格仍是「卫生」（员工端那一格名字没改）。
     expect(items.map((item) => item.text())).toEqual(['今天', '卫生', '选择岗位', '备货计划', '我的'])
     expect(items.map((item) => item.attributes('href'))).toEqual([
       '/workbench', '/workbench/me/clean', '/workbench/kitchen/recipe', PREP_PLAN_PATH,
@@ -176,7 +177,7 @@ describe('工作台外壳的导航', () => {
     // 不改权限、也不改守卫。票 08 起后勤那一格是两扇门（配方 + 备货计划）。
     const items = wrapper.findAll('.wb-nav-item')
     expect(items.map((item) => item.text())).toEqual([
-      '今天', '人事', '卫生', '选择岗位', '备货计划',
+      '今天', '人事', '卫生验收', '选择岗位', '备货计划',
     ])
     expect(items.map((item) => item.attributes('href'))).toEqual([
       '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
@@ -196,6 +197,7 @@ describe('工作台外壳的导航', () => {
 
     expect(store.identity).toBe('staff')
     expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
+      // 员工那一格仍叫「卫生」（③-2 改的是超管那一格：卫生 → 卫生验收）。
       '今天', '卫生', '选择岗位', '备货计划', '我的',
     ])
   })

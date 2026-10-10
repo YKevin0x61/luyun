@@ -223,7 +223,10 @@ class SpaPageRouteContractTest(unittest.TestCase):
     def test_router_parse_covers_every_registration_form(self):
         """解析面按**写法**分组，每一组都得有东西（票 01 放宽后仍然如此）。"""
         by_form = _router_page_paths_by_form()
-        self.assertGreaterEqual(len(by_form["path:"]), 10)
+        # 这里原本是 10（票 01 定的）。`/staff/today` 随员工页迁进 `/workbench/me/*` 被删
+        # （它的陈旧性由 `admin-web/src/router/__tests__/pageRoutes.test.js:199` 的 stale
+        # 清单钉住），字面量组因此降到 9。**阈值下调要留痕：再少一条就该红。**
+        self.assertGreaterEqual(len(by_form["path:"]), 9)
         # 票 05：人事组四页与现场组七页各走一条工厂；花名册（人事）与数据页（现场）
         # 分属两边 —— 工厂名换了，解析面照样要认得出路径。
         self.assertIn("/workbench/hr/roster", by_form["workbenchHrPage"])

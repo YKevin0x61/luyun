@@ -39,18 +39,18 @@ export const WORKBENCH_NAV_GROUPS = [
   { key: 'home', label: '今天', headLabel: WORKBENCH_TITLE, to: WORKBENCH_HOME },
   // 人事：月历 / 待办 / 班次表 / 花名册（落点是月历，组里的页由 `workbenchPagesOf` 给）。
   { key: 'hr', label: '人事', to: WORKBENCH_HR_HOME },
-  // 卫生（组名 2026-10-08 由用户裁定，从「现场」改过来）：卫生八页，**店长那一档**的面
+  // 卫生（组名 2026-10-08 由用户裁定，从「现场」改过来）：卫生八页，**超级管理员那一档**的面
   // （落点是日常验收，到了那儿由那一组自己的导航接手）。
   // 员工看不到这一格（落点那一页的 `audience` 是 `admin`）；员工做卫生走下面那一格。
   // **两格的显示名现在都是「卫生」**（上面这一格 `floor`、下面那一格 `hygiene`）：同一批活
   // 的两张面，靠 `key` 与 `audience` 区分，不靠名字 —— 每次只有一个身份在渲染，界面上
   // 不会同时出现两个「卫生」。
-  { key: 'floor', label: '卫生', to: WORKBENCH_FIELD_HOME },
+  { key: 'floor', label: '卫生验收', to: WORKBENCH_FIELD_HOME },
   // 员工端的**卫生**这一格（2026-10-05 用户裁定）：两个身份做的卫生是同一批活，但看到的是
-  // 各自的面 —— 店长走上一格（`/workbench/floor/*` 八页，管验收与整改），员工走这一格
+  // 各自的面 —— 超级管理员走上一格（`/workbench/floor/*` 八页，管验收与整改），员工走这一格
   // （`/workbench/me/clean`：今天要做几项、逐项拍照交）。它原来藏在「我的」下面，员工要点
   // 两层才到，而这是他们每天最常干的事 —— 给它一个一级入口。
-  // 可见性仍由落点那一页的 `audience`（`staff`）决定：店长那一档自然看不到这一格。
+  // 可见性仍由落点那一页的 `audience`（`staff`）决定：超级管理员那一档自然看不到这一格。
   { key: 'hygiene', label: '卫生', to: '/workbench/me/clean' },
   // 后勤：配方（票 07）+ 备货计划（票 08）—— **一组一格、一格两门**。两条落点都是清单里
   // 的一页（`both`，所以员工这一档两半都看得见）；`to` 仍是这一格的主落点（也是别的壳做
@@ -58,7 +58,7 @@ export const WORKBENCH_NAV_GROUPS = [
   // `utils/recipePaths.js` 与 `utils/prepPlanPaths.js`，与页面里的 router-link 同一份。
   {
     key: 'kitchen',
-    label: '产品',
+    label: '配方',
     to: RECIPE_HOME_PATH,
     links: [
       { to: RECIPE_HOME_PATH },
@@ -89,18 +89,33 @@ export function workbenchLinksOf(group) {
 }
 
 /** 组里有哪些页（路径 + 标题，顺序照页面清单）—— 壳的组内导航从它派生。
- *  清单是唯一来源：组里加一页只改那张表，导航自己就跟上。 */
-export function workbenchPagesOf(group) {
+ *  清单是唯一来源：组里加一页只改那张表，导航自己就跟上。
+ *
+ *  **两层过滤（③-2 / spec §5.13）**：`group` 那层之外，还要按**落点页的 `audience`** 过一遍
+ *  —— 只按 group 过滤会让员工在「配方」组看到「岗位二维码 / 配方管理」两扇点不通的门
+ *  （手写名单 `pages` 与清单派生两条路都要过这一层）。`audience` 不给（老调用点、单测里那种
+ *  临时路由）时只按 group 过滤，与这一条落地之前一字不差。 */
+export function workbenchPagesOf(group, audience) {
+  const visible = (path, title) => {
+    if (!audience) return true
+    const row = pageRow(path)
+    // 清单里没登记的路径照旧渲染（单测里的临时路由）；登记了的按它的 `audience` 判。
+    return !row || row.audience === 'both' || row.audience === audience
+  }
   // 手写的入口名单优先（见 `kitchen` 那一格的 `pages`）：清单里有些页是「从列表点进去」的
   // 功能页，当一级入口就是点不通的死门。名单里只写路径，标题仍从清单取 —— 一处定义。
   const cell = WORKBENCH_NAV_GROUPS.find((item) => item.key === group)
   if (cell && cell.pages) {
-    return cell.pages.map((path) => {
-      const row = pageRow(path)
-      return { path, title: row ? row.title : path }
-    })
+    return cell.pages
+      .filter((path) => visible(path))
+      .map((path) => {
+        const row = pageRow(path)
+        return { path, title: row ? row.title : path }
+      })
   }
-  return PAGE_ROUTES.filter((row) => row.group === group).map(({ path, title }) => ({ path, title }))
+  return PAGE_ROUTES.filter((row) => row.group === group)
+    .filter((row) => visible(row.path, row.title))
+    .map(({ path, title }) => ({ path, title }))
 }
 
 /** 工作台身份（`super` / `staff`）→ 清单里的身份词（`admin` / `staff`）。

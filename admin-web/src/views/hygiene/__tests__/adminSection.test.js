@@ -58,43 +58,51 @@ describe('hygiene admin section shell', () => {
 
   it('layout owns the rail and loads the section stylesheet', () => {
     const layout = read('../HygieneAdminLayout.vue')
-    expect(layout).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
-    expect(layout).toMatch(/StandardPhotoCachePanel/)
+    const shell = read('../../workbench/WorkbenchShell.vue')
+    // ③-2：共享样式表与手机档页头都收进统一壳；卫生壳交的是本组那份手写名单。
+    expect(shell).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    expect(layout).toMatch(/:items="HYGIENE_ADMIN_NAV"/)
+    expect(layout).not.toMatch(/StandardPhotoCachePanel/)
     expect(layout).toMatch(/useStandardPhotoCacheStore/)
     expect(layout).toMatch(/HYGIENE_ADMIN_NAV/)
-    expect(layout).toMatch(/class="hy-tabbar"/)
+        // ③-2：组内八页的 rail 由统一壳渲染（`WorkbenchRail`），本壳交那份带图标的名单。
+    expect(shell).toMatch(/<WorkbenchRail/)
     expect(layout).toMatch(/HYGIENE_BACK_TO_ADMIN_LABEL/)
-    expect(layout).toMatch(/跳到内容/)
+    // ③-2：skip link 也在统一壳里（本壳的注释里提到它不算）。
+    expect(shell).toMatch(/跳到内容/)
     expect(layout).not.toMatch(/hy-nav-link/)
   })
 
   it('方案 C：手机档收掉顶上那两条横带，组内八项走页头下拉（2026-10-08）', () => {
     const layout = read('../HygieneAdminLayout.vue')
+    const shell = read('../../workbench/WorkbenchShell.vue')
     // 底栏挂上（三套壳共用同一颗）：它自己只在 ≤720 渲染（桌面档 `display: none`）。
-    expect(layout).toMatch(/components\/workbench\/WorkbenchTabBar\.vue/)
-    expect(layout).toMatch(/<WorkbenchTabBar class="hy-wb-tabbar" \/>/)
+    expect(shell).toMatch(/components\/workbench\/WorkbenchTabBar\.vue/)
+    expect(shell).toMatch(/<WorkbenchTabBar/)
     // 顶栏那排组件还在（桌面档那条横条里仍是它在干活），手机档只是收起来。
-    expect(layout).toMatch(/components\/workbench\/WorkbenchNav\.vue/)
+        // ③-2：rail 与工作台级导航都在统一壳里；本壳交的是名单与脚注。
+    expect(shell).toMatch(/components\/workbench\/WorkbenchRail\.vue/)
+    expect(layout).toMatch(/:items="HYGIENE_ADMIN_NAV"/)
     // 手机档的换页出口：组内八页从横滑带换成这个下拉（组名 / 当前页 / 身份 / 更多）。
-    expect(layout).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
-    expect(layout).toMatch(/<WorkbenchMobileHead :items="HYGIENE_ADMIN_NAV" \/>/)
+    expect(shell).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
+    expect(shell).toMatch(/<WorkbenchMobileHead[^>]*:items="props\.items \|\| undefined"/)
 
-    const rules = mobileRules(layout)
-    // 顶栏那排：手机档 `display: none` —— 落点到底栏，同一排入口不在顶上和底下同时出现。
-    expect(rules).toMatch(/\.hygiene-app \.hy-wb-nav\s*\{\s*display:\s*none/)
+    const rules = mobileRules(shell)
+    // 顶栏：手机档整条 `display: none`（方案 C）—— 换页 / 身份 / 退出 / 回后台都进了页头那个
+    // 一行，桌面档（>720px）还是它在干活。同一排入口不在顶上和底下同时出现。
+    expect(rules).toMatch(/\.wb-top\s*\{\s*display:\s*none/)
     // 顶上那两条横带整个撤掉：组内八项（`.hy-tabbar`，桌面档那条 238px 的左 rail，
     // 2026-10-05~10-08 之间它还兼过"内容区顶上一条横滑带"）与顶栏横条（身份 / 退出 /
     // 后台，`.hy-header`）在手机档都不再渲染 —— 八项进页头下拉、三件也进页头。
-    expect(rules).toMatch(/\.hy-tabbar\s*\{\s*display:\s*none/)
-    expect(rules).toMatch(/\.hy-header\s*\{\s*display:\s*none/)
-    // 横滑带连同它带出来的原生横向滚动条一起没了（那条带子是 `overflow-x: auto` 的账）。
-    expect(rules).not.toMatch(/\.hy-tabbar\s*\{[^}]*overflow-x:\s*auto/)
-    // 底栏钉在视口底（组件里那条 `position: fixed` 会被共享样式表的
-    // `.hygiene-admin > *:not(.modal-overlay) { position: relative }` 打回 relative ——
-    // 同特异度、但那张表更晚进 head，所以壳里这条带前缀的规则是它生效的条件）。
-    expect(rules).toMatch(/\.hy-wb-tabbar\s*\{[^}]*position:\s*fixed/)
-    // 它不占流，内容区自己让出那条栏的高度，否则最后一屏压在栏下滚不到底。
-    expect(rules).toMatch(/\.hy-main\s*\{[^}]*padding-bottom:\s*calc\(1\.4rem \+ 57px/)
+    // 组内八项的 rail（桌面才是它）在手机档整个收起来 —— 判据在 rail 组件里一处。
+    const rail = read('../../../components/workbench/WorkbenchRail.vue')
+    expect(mobileRules(rail)).toMatch(/\.wb-rail\s*\{\s*display:\s*none/)
+    // 底栏钉在视口底：那一份契约现在只有组件里一处（`position: fixed` + `var(--z-shell)`），
+    // 三个壳不再各钉一遍 —— 那条同特异度的通配规则已经删掉（`public/hygiene-admin.css:50`）。
+    const tabbar = read('../../../components/workbench/WorkbenchTabBar.vue')
+    expect(mobileRules(tabbar)).toMatch(/\.wb-tabbar\s*\{[^}]*position:\s*fixed/)
+    // 它不占流，内容区自己让出那条栏的高度（统一壳那一处），否则最后一屏压在栏下滚不到底。
+    expect(rules).toMatch(/\.wb-main\s*\{[^}]*padding-bottom:\s*calc\(57px/)
   })
 
   it('router wraps every floor page in a standalone shell（现场组七页）', () => {

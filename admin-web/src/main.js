@@ -6,6 +6,9 @@ import { setUnauthorizedHandler } from './api/client'
 import { applyPwaManifest } from './utils/pwaManifest'
 import { loginRedirectTarget } from './utils/loginNext'
 import './styles/theme.css'
+// 工作台主题（批次 ③-1a）：令牌上移到 html 级，只对带 data-workbench 的文档生效 ——
+// 所以这里必须**自己把开关打开**（后台页面不打，继续吃上面的 theme.css :root）。
+import './styles/theme.workbench.css'
 // JSON Forms 的参数表单（企微推送的推送任务）用 vanilla 渲染器：它不带样式，这里把
 // 它的结构与控件类映射到 theme.css 的既有样式上（ADR 0097）。
 import './styles/jsonforms.css'
@@ -26,6 +29,17 @@ setUnauthorizedHandler(() => {
 const app = createApp(App)
 app.use(createPinia())
 app.use(router)
+
+// 工作台路由 → <html data-workbench>（存在即生效）；其余路由移除该属性（后台不受影响）。
+// 属性名**刻意避开 data-theme**：配方阅读面用那个名字存自己的 light/dark（t47 跨票冲突）。
+// 放在 router 之后、与路由同源判断（/workbench 前缀，与 pwaManifest 的划分一致）。
+function syncWorkbenchTheme(path) {
+  const el = document.documentElement
+  if (String(path || '').startsWith('/workbench')) el.setAttribute('data-workbench', '')
+  else el.removeAttribute('data-workbench')
+}
+syncWorkbenchTheme(router.currentRoute.value && router.currentRoute.value.path)
+router.afterEach((to) => syncWorkbenchTheme(to.path))
 
 // 首屏**等路由定下来再挂载**（票 12 收的 O1）：早于首次导航落定时 `route` 还是
 // START_LOCATION（默认 `/`），而 `App.vue` 那个 `watch(isStandalone, {immediate: true})`

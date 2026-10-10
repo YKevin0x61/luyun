@@ -1,0 +1,156 @@
+/* 工作台主题（批次 ③-1a · t44）—— 唯一的工作台令牌层。
+ *
+ * 为什么在这一层：--hy-* 的定义与那 13 个通用别名原先都住在 .hygiene-admin,.hygiene-staff
+ * 这个**子树 class** 里（原 public/hygiene-admin.css:8-77）。现场 8 页（/workbench/floor/*）的
+ * 页面根**不带**这两个 class，令牌全靠壳祖先继承 —— 作用域一旦收窄，417 处 var(--hy-*) 与别名
+ * 引用会**静默失效**（不是报错，是掉色）。所以两者必须**一起**上移到 html 级：
+ * 选择器 = html[data-workbench]，覆盖整棵文档树，与页面里套了哪层壳无关。
+ *
+ * 三层：① 基础层 + 语义层，与 .scratch/workbench-redesign/prototype/tokens.css 逐声明相等（74 条），
+ * 组件层只写语义名；② 兼容层：--hy-* 本体 + 13 个通用别名，值一个字节没改（现场页与 recipe 视图
+ * 此刻还在用这些名字）；③ 布局刻度 --tap/--head-h/--rail-w/--tab-h/--bw/--cell/--shutter/--safe-*。
+ *
+ * 为什么是 data-workbench 而不是 data-theme：**配方阅读面（/workbench/kitchen/recipe*）已经在用
+ * `documentElement` 的 `data-theme` 存自己的阅读主题**（打印页打印前强制 `light`、详情页与岗位页按用户
+ * 选择设 `light`/`dark` 或删掉）。复用同一个属性名是**语义重载**：配方页切一次阅读主题就会把工作台
+ * 令牌层覆盖掉 → 整页掉色（t47 的跨票冲突）。换名后两者互不覆盖。
+ * 派生色一律写死 rgba，不用 color-mix()（老 WebView 不支持时是静默透明，比不写还糟）。
+ * 后台页面（/admin、/sales-report…）的 html 上没有 data-workbench，继续吃 theme.css 的 :root。
+ */
+html[data-workbench] {
+  --surface-0:#0a1719; --surface-1:#112529; --surface-2:#0c1d20; --surface-3:#16303a;
+  --chrome:#0c1d20;
+  --ink:#e4f0ee; --ink-dim:#85aaa7; --ink-faint:#739d98;
+  --line:rgba(133,205,198,.13); --line-strong:rgba(133,205,198,.28);
+  --line-control:rgba(133,205,198,.55);
+  --action:#3fe0b0; --action-ink:#052018; --action-soft:rgba(63,224,176,.12);
+  --ok:#79e9c4; --warn:#e3a44a; --danger:#d9482f; --danger-bright:#ef6a4f; --info:#5fd6e6;
+  --accent-alt:#f07ab0; --focus-ring:rgba(63,224,176,.55);
+  --ok-soft:rgba(121,233,196,.14); --warn-soft:rgba(227,164,74,.14);
+  --danger-soft:rgba(217,72,47,.16); --info-soft:rgba(95,214,230,.14);
+  --scrim:rgba(10,23,25,.82);
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-6:24px; --sp-8:32px;
+  --fs-11:11px; --fs-12:12px; --fs-13:13px; --fs-14:14px; --fs-16:16px; --fs-20:20px; --fs-24:24px;
+  --r-0:2px; --r-1:8px; --r-2:12px; --r-3:16px; --r-full:999px;
+  --z-shell:20; --z-scrim:40; --z-dialog:50; --z-toast:100; --z-queue:120;
+  --dur-1:120ms; --dur-2:200ms; --dur-3:320ms; --ease:cubic-bezier(.22,1,.36,1);
+  --ls-1:.04em; --ls-2:.08em; --ls-3:.12em; --ls-4:.16em;
+  --dot:7px; --icon-tab:21px;
+  --font-sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;
+  --font-song:"Noto Serif SC","Songti SC","STSongti-SC-Regular","STSong","SimSun",serif;
+  --font-mono:ui-monospace,"SF Mono","SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;
+  --tap:44px; --head-h:56px; --rail-w:238px; --tab-h:56px; --bw:1px;
+  --cell:54px; --shutter:72px; --h-row:calc(var(--tap) + var(--sp-3));
+  --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-l:env(safe-area-inset-left,0px); --safe-r:env(safe-area-inset-right,0px);
+
+  /* ── 兼容层：--hy-* 本体 + 通用别名（原样从 public/hygiene-admin.css 上移，值未改）── */
+  /* 字体 */
+  --font-sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  --font-song: "Noto Serif SC", "Songti SC", "STSongti-SC-Regular", "STSong", "SimSun", serif;
+  --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* 深青墨色阶 */
+  --hy-night: #060f11;
+  --hy-pool: #0f6f78;
+  --hy-bg: #0a1719;
+  --hy-surface: #112529;
+  --hy-surface-2: #0c1d20;
+  --hy-surface-3: #16303a;
+  --hy-line: rgba(133, 205, 198, .13);
+  --hy-line-strong: rgba(133, 205, 198, .28);
+  --hy-ink: #e4f0ee;
+  --hy-muted: #85aaa7;
+  /* 原来的 #5d7e7b 对 --hy-surface 只有 3.59:1，用在底部 tab 未选中标签和
+     「已停用」状态胶囊这类小字上不满足 AA（需 4.5:1）。#739d98 对 --hy-surface
+     是 5.30:1，对叠了 rgba(133,170,167,.08) 的胶囊底也是 4.64:1。 */
+  --hy-faint: #739d98;
+
+  /* 信号色 */
+  --hy-mint: #3fe0b0;
+  --hy-mint-bright: #63efc5;
+  --hy-mint-ink: #052018;
+  --hy-mint-soft: rgba(63, 224, 176, .12);
+  --hy-mint-line: rgba(63, 224, 176, .34);
+  --hy-jade: #79e9c4;
+  --hy-seal: #d9482f;
+  --hy-seal-bright: #ef6a4f;
+  --hy-seal-soft: rgba(217, 72, 47, .13);
+  --hy-seal-line: rgba(217, 72, 47, .42);
+  --hy-amber: #e3a44a;
+  --hy-amber-bright: #f4bb5f;
+  --hy-amber-soft: rgba(227, 164, 74, .12);
+  --hy-amber-line: rgba(227, 164, 74, .4);
+  --hy-aqua: #5fd6e6;
+  --hy-coral: #ff7a5c;
+  --hy-paper: #f4e9db;
+  /* 第 5、6 个班次的颜色：排班的 `SHIFT_TONES` 按排序位取色，门店可以配 5 个班次
+     （A/B/C + 主管A两头班 + 主管B两头班）。只有 4 个 tone 时第 5 个与第 1 个撞色，
+     周表的格子与图例就分不出「A班」和「主管B两头班」。 */
+  --hy-violet: #b18cf0;
+  --hy-rose: #f07ab0;
+
+  --hy-radius-sm: 8px;
+  --hy-radius-md: 12px;
+  --hy-radius-lg: 16px;
+  --hy-shadow-sm: 0 1px 2px rgba(2, 10, 9, .5);
+  --hy-shadow-md: 0 18px 44px -18px rgba(1, 8, 7, .85);
+  --hy-glow-mint: 0 8px 26px -8px rgba(63, 224, 176, .42);
+  --hy-ease: cubic-bezier(.22, 1, .36, 1);
+  --hy-page: clamp(.85rem, 2vw, 1.5rem);
+
+  /* 回退给各视图 scoped 样式用的通用别名 */
+  --bg: var(--hy-bg);
+  --text: var(--hy-ink);
+  --text-dim: var(--hy-muted);
+  --border: var(--hy-line);
+  --card: var(--hy-surface);
+  --card2: var(--hy-surface-2);
+  --accent: var(--hy-mint);
+  --green: var(--hy-jade);
+  --red: var(--hy-seal-bright);
+  --yellow: var(--hy-amber);
+  --cyan: var(--hy-mint);
+  --blue: var(--hy-mint);
+  --pink: var(--hy-seal-bright);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   壳自带的三条复位（批次 ③-1b · B5 / B7 / B8）
+   为什么放在壳里：这三件事**每一页都需要、每一页都容易忘**，而且漏了是**静默**出错
+   （打印出来是黑的 / 减弱动效系统上骨架还在脉冲 / 键盘用户看不见焦点在哪）。
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── B5 焦点环：全站只此一处。禁止用浅底当焦点指示（原型里那个 1.15:1 的写法不合格）──
+   --focus-ring 对 surface-1 实测 3.86 ≥ 3 ✓（check-contrast 口径）。 */
+:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+
+/* ── B7 打印复位：深色壳打印出来是黑的，这里一处刷白 ──
+   要点：① 令牌**连同兼容层的名字**一起重绑（页面样式用的是 --hy-* 与 --bg 这些别名，
+   只刷 --surface-* 的话 body 的 background:var(--bg) 还是深色）；② 关背景图与颗粒层。 */
+@media print{
+  html[data-workbench]{
+    --surface-0:#fff; --surface-1:#fff; --surface-2:#fff; --surface-3:#fff; --chrome:#fff;
+    --ink:#000; --ink-dim:#333; --ink-faint:#555;
+    --line:#d8d8d8; --line-strong:#b4b4b4; --line-control:#8a8a8a;
+    --hy-bg:#fff; --hy-surface:#fff; --hy-surface-2:#fff; --hy-surface-3:#fff;
+    --hy-ink:#000; --hy-muted:#333; --hy-faint:#555;
+    --hy-line:#d8d8d8; --hy-line-strong:#b4b4b4;
+    --bg:#fff; --card:#fff; --card2:#fff; --sidebar-bg:#fff;
+    --text:#000; --text-dim:#333; --border:#d8d8d8;
+  }
+  html,body{background:#fff !important;background-image:none !important}
+  .hygiene-admin,.hygiene-staff{background:#fff !important;background-image:none !important}
+  /* 颗粒层（壳 ::before 上的噪点/渐变）在纸上只会脏 */
+  .hygiene-admin::before,.hygiene-staff::before{display:none !important}
+  /* 壳 chrome（顶栏 / 底栏 / 侧栏 / 动作条）不该印出来 */
+  .no-print{display:none !important}
+}
+
+/* ── B8 动效复位：骨架的 infinite 脉冲在「减弱动态效果」下必须停 ── */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:.01ms !important;animation-iteration-count:1 !important;
+    transition-duration:.01ms !important;scroll-behavior:auto !important;
+  }
+}

@@ -175,7 +175,13 @@ describe('店长端周表（员工 × 周）', () => {
   })
 
   it('只用共享样式表里有的令牌', () => {
-    const tokens = readFileSync(join(here, '../../../../public/hygiene-admin.css'), 'utf8')
+    const tokens = [
+  // 令牌自 ③-1a（t44）起分布在**两份**：兼容层与布局留在 public/hygiene-admin.css，
+  // 语义层 + `--hy-*` 本体搬进了 src/styles/theme.workbench.css 的 html[data-theme="workbench"]。
+  // 守卫必须读**两份合并**，否则「令牌搬家」会被误报成「令牌未定义」（t46）。
+  readFileSync(join(here, '../../../../public/hygiene-admin.css'), 'utf8'),
+  readFileSync(join(here, '../../../../src/styles/theme.workbench.css'), 'utf8'),
+].join('\n')
     const used = new Set([...view.matchAll(/var\((--[a-z0-9-]+)\)/g)].map((m) => m[1]))
     const missing = [...used].filter((name) => !tokens.includes(`${name}:`))
     expect(missing).toEqual([])

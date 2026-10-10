@@ -6,9 +6,18 @@ import { describe, expect, it } from 'vitest'
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../SchedulingShiftsView.vue'), 'utf8')
 const shell = readFileSync(join(here, '../SchedulingLayout.vue'), 'utf8')
+// ③-2（三壳合一）：壳级的东西（共享样式表、组内导航 rail、手机档分叉、底栏）现在
+// 只有一份实现，在统一壳里；人事壳只是它的薄包装。
+const sharedShell = readFileSync(join(here, '../../workbench/WorkbenchShell.vue'), 'utf8')
 const calendar = readFileSync(join(here, '../SchedulingCalendarView.vue'), 'utf8')
 const copy = readFileSync(join(here, '../../../utils/shiftTable.js'), 'utf8')
-const tokens = readFileSync(join(here, '../../../../public/hygiene-admin.css'), 'utf8')
+const tokens = [
+  // 令牌自 ③-1a（t44）起分布在**两份**：兼容层与布局留在 public/hygiene-admin.css，
+  // 语义层 + `--hy-*` 本体搬进了 src/styles/theme.workbench.css 的 html[data-theme="workbench"]。
+  // 守卫必须读**两份合并**，否则「令牌搬家」会被误报成「令牌未定义」（t46）。
+  readFileSync(join(here, '../../../../public/hygiene-admin.css'), 'utf8'),
+  readFileSync(join(here, '../../../../src/styles/theme.workbench.css'), 'utf8'),
+].join('\n')
 const router = readFileSync(join(here, '../../../router/index.js'), 'utf8')
 const navBar = readFileSync(join(here, '../../../components/NavBar.vue'), 'utf8')
 const mainPy = readFileSync(join(here, '../../../../../main.py'), 'utf8')
@@ -17,7 +26,7 @@ describe('店长端班次表（票 11）', () => {
   it('借共享样式表的令牌，不进卫生模块', () => {
     // 共享样式表由**壳**加载一份（`SchedulingLayout.vue`）：三个子页各加载一份会挂出
     // 重复的 <link>；壳一层管住，跟卫生管理端一个做法（那边也是 layout 加载、子页不管）。
-    expect(shell).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    expect(sharedShell).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
     expect(view).not.toMatch(/useScopedStylesheet\(/)
     expect(view).toMatch(/class="hygiene-admin shifts-page"/)
     expect(view).not.toMatch(/\/api\/hygiene/)

@@ -98,7 +98,9 @@ describe('员工端共用的退出按钮', () => {
     }
 
     // 那一颗在外壳里，三页共用（`workbenchShell.test.js` 另有一条按员工身份点它的）。
-    const shell = readFileSync(join(here, '../../../views/workbench/WorkbenchLayout.vue'), 'utf8')
+    // ③-2（三壳合一）：顶栏那颗唯一的工作台退出按钮现在在**统一壳**里（`WorkbenchShell.vue`），
+    // 三个壳都是它的薄包装。
+    const shell = readFileSync(join(here, '../../../views/workbench/WorkbenchShell.vue'), 'utf8')
     expect(shell).toMatch(/<WorkbenchExitButton/)
 
     // 员工端卫生首页自己的顶栏也退化成页内标题条了：品牌（红色「台」+「工作台」）搬走

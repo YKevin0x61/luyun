@@ -1,80 +1,15 @@
 /* ==========================================================================
    卫生系统 · 深青墨验收台 (Inspection Desk)
    深青墨底 · 朱砂印章 · 薄荷信号色 · 宋体题签 · 等宽记数
-   作用域：.hygiene-admin（管理端）/ .hygiene-staff（员工端）
-   与全局深色导航壳互不污染。手机端：员工端底部 tabbar；管理端桌面侧栏。
+   作用域：.hygiene-admin（管理端）/ .hygiene-staff（员工端）——**只管布局与手机档分叉**。
+   颜色令牌（--hy-* 与 13 个通用别名）自批次 ③-1a 起上移到 html 级：
+   `admin-web/src/styles/theme.workbench.css` 的 `html[data-theme="workbench"]`。
+   放在那里的原因：现场 8 页的页面根不带这两个 class，令牌必须从 html 继承（否则 417 处引用静默失效）。
+   手机端：员工端底部 tabbar；管理端桌面侧栏。
    ========================================================================== */
 
 .hygiene-admin,
 .hygiene-staff {
-  /* 字体 */
-  --font-sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
-  --font-song: "Noto Serif SC", "Songti SC", "STSongti-SC-Regular", "STSong", "SimSun", serif;
-  --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
-
-  /* 深青墨色阶 */
-  --hy-night: #060f11;
-  --hy-pool: #0f6f78;
-  --hy-bg: #0a1719;
-  --hy-surface: #112529;
-  --hy-surface-2: #0c1d20;
-  --hy-surface-3: #16303a;
-  --hy-line: rgba(133, 205, 198, .13);
-  --hy-line-strong: rgba(133, 205, 198, .28);
-  --hy-ink: #e4f0ee;
-  --hy-muted: #85aaa7;
-  /* 原来的 #5d7e7b 对 --hy-surface 只有 3.59:1，用在底部 tab 未选中标签和
-     「已停用」状态胶囊这类小字上不满足 AA（需 4.5:1）。#739d98 对 --hy-surface
-     是 5.30:1，对叠了 rgba(133,170,167,.08) 的胶囊底也是 4.64:1。 */
-  --hy-faint: #739d98;
-
-  /* 信号色 */
-  --hy-mint: #3fe0b0;
-  --hy-mint-bright: #63efc5;
-  --hy-mint-ink: #052018;
-  --hy-mint-soft: rgba(63, 224, 176, .12);
-  --hy-mint-line: rgba(63, 224, 176, .34);
-  --hy-jade: #79e9c4;
-  --hy-seal: #d9482f;
-  --hy-seal-bright: #ef6a4f;
-  --hy-seal-soft: rgba(217, 72, 47, .13);
-  --hy-seal-line: rgba(217, 72, 47, .42);
-  --hy-amber: #e3a44a;
-  --hy-amber-bright: #f4bb5f;
-  --hy-amber-soft: rgba(227, 164, 74, .12);
-  --hy-amber-line: rgba(227, 164, 74, .4);
-  --hy-aqua: #5fd6e6;
-  --hy-coral: #ff7a5c;
-  --hy-paper: #f4e9db;
-  /* 第 5、6 个班次的颜色：排班的 `SHIFT_TONES` 按排序位取色，门店可以配 5 个班次
-     （A/B/C + 主管A两头班 + 主管B两头班）。只有 4 个 tone 时第 5 个与第 1 个撞色，
-     周表的格子与图例就分不出「A班」和「主管B两头班」。 */
-  --hy-violet: #b18cf0;
-  --hy-rose: #f07ab0;
-
-  --hy-radius-sm: 8px;
-  --hy-radius-md: 12px;
-  --hy-radius-lg: 16px;
-  --hy-shadow-sm: 0 1px 2px rgba(2, 10, 9, .5);
-  --hy-shadow-md: 0 18px 44px -18px rgba(1, 8, 7, .85);
-  --hy-glow-mint: 0 8px 26px -8px rgba(63, 224, 176, .42);
-  --hy-ease: cubic-bezier(.22, 1, .36, 1);
-  --hy-page: clamp(.85rem, 2vw, 1.5rem);
-
-  /* 回退给各视图 scoped 样式用的通用别名 */
-  --bg: var(--hy-bg);
-  --text: var(--hy-ink);
-  --text-dim: var(--hy-muted);
-  --border: var(--hy-line);
-  --card: var(--hy-surface);
-  --card2: var(--hy-surface-2);
-  --accent: var(--hy-mint);
-  --green: var(--hy-jade);
-  --red: var(--hy-seal-bright);
-  --yellow: var(--hy-amber);
-  --cyan: var(--hy-mint);
-  --blue: var(--hy-mint);
-  --pink: var(--hy-seal-bright);
 
   position: relative;
   /* 这里**不能**给 z-index：一旦给了就会形成层叠上下文，把容器内 `position: fixed`
@@ -1431,7 +1366,11 @@
   align-items: center;
   justify-content: space-between;
   gap: .6rem;
-  padding: .6rem max(1rem, env(safe-area-inset-right)) .65rem max(1rem, env(safe-area-inset-left));
+  /* 顶部安全区（t56 / t51-F1）：写进**简写的第一槽**，不在同一块里另起一条 `padding-top`
+     —— `_shell-spec §5.14`（T9-01）就是被「先 longhand 再 shorthand」把顶槽重置回去坑过一次。
+     基值仍取原来的 .6rem：不改无刘海机型的观感，只在有刘海时让位给状态栏。
+     （`.hy-staff-main` 已经预留顶部安全区；补的是滚动后贴顶的这条 sticky 页头。） */
+  padding: max(.6rem, env(safe-area-inset-top, 0px)) max(1rem, env(safe-area-inset-right)) .65rem max(1rem, env(safe-area-inset-left));
   min-height: 60px;
 }
 .hygiene-work .hy-work-header .hy-brand-mark {
