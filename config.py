@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # 基础配置
     APP_NAME: str = "LuyunOrder"
-    APP_VERSION: str = "0.8.3"
+    APP_VERSION: str = "0.8.4"
     # 安全默认：不开 /docs、cookie 带 Secure。开发机在 .env 里显式写 DEBUG=true。
     DEBUG: bool = False
     # 关掉 lifespan 里的常驻后台循环（爬虫轮询、卫生调度、企微推送、数据质量调度）。
