@@ -54,7 +54,6 @@ watch(
 
 <template>
   <WorkbenchShell
-    class="hygiene-app"
     :items="HYGIENE_ADMIN_NAV"
     :label="`${HYGIENE_BRAND_TITLE} · ${fieldGroup.label}`"
   >
@@ -104,9 +103,12 @@ watch(
 
 /* 手机档：底栏（`WorkbenchTabBar`）是 `fixed`，内容区得让出那一条。统一壳已经给
    `.wb-main` 加了 57px + 安全区；这里在共享样式表的 `--hy-page` 之上把那一条留给
-   `.hy-main` 自己的下内边距（与改造前 `calc(1.4rem + 57px + safe)` 同一效果）。 */
+   `.hy-main` 自己的下内边距（与改造前 `calc(1.4rem + 57px + safe)` 同一效果）。
+   钩子用 `.wb-shell`（统一壳的根）而**不是**旧卫生壳那个 `hygiene-app` 类 —— 后者在
+   共享样式表里还带着 `<900px` 的整屏锁与 `≥900px` 的 `flex-direction: row`，挂到统一壳
+   上会把顶栏与内容排成左右两栏（2026-10-10 实测：顶栏占满 900px 高、内容被挤到右上角）。 */
 @media (max-width: 720px) {
-  .hygiene-app :deep(.hy-main) {
+  .wb-shell :deep(.hy-main) {
     padding-bottom: calc(var(--hy-page) + 57px + env(safe-area-inset-bottom, 0px));
   }
 }

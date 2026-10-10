@@ -190,13 +190,14 @@
 /* ==========================================================================
    管理端外壳：桌面侧栏 / 移动顶栏+底栏
    ========================================================================== */
-.hygiene-admin.hygiene-app {
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
+/* 这里原来有一条 `.hygiene-admin.hygiene-app { height:100%; min-height:0; overflow:hidden;
+   display:flex; flex-direction:column }`（以及 `@media (min-width:900px)` 里把它改成
+   `flex-direction: row` 的那一条）—— 那是**旧卫生壳**的整屏锁，壳根同时带这两个类时才命中。
+   ③-2 三壳合一之后卫生壳只剩一层薄包装，这个类名不再有人挂；但它曾经被挂到统一壳上
+   （`HygieneAdminLayout` 的 `<WorkbenchShell class="hygiene-app">`），于是 ≥900px 时统一壳被
+   排成 `row`：顶栏撑满 900px 高、内容挤到右上角、文字竖排（2026-10-10 实测）。
+   统一壳的整屏锁由 `.hygiene-admin` 那条（`min-height:100%` + `column`）负责，不需要这两条
+   —— 类和规则一并删除，免得下次再有人把旧壳的类挂到统一壳上。 */
 .hygiene-admin .hy-shell {
   order: 1;
   flex: 1 1 auto;
@@ -362,9 +363,9 @@
 
 /* 桌面侧栏 */
 @media (min-width: 900px) {
-  .hygiene-admin.hygiene-app {
-    flex-direction: row;
-  }
+  /* 这里原来是 `.hygiene-admin.hygiene-app { flex-direction: row }` —— 旧卫生壳把「左 rail +
+     右内容」摆成两栏的那一条。统一壳的左 rail 是 `components/workbench/WorkbenchRail.vue`
+     自己摆的（`.wb-body` 那一行），不需要壳根改方向；留着它只会误伤挂了旧类名的壳。 */
   .hygiene-admin .hy-tabbar {
     order: 0;
     flex: 0 0 238px;
