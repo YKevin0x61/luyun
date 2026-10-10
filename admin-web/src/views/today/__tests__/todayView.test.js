@@ -162,17 +162,24 @@ describe('「我的成绩」卡（2026-10-05 用户裁定）', () => {
   it('空态不给数字，更没有 0%（`pass_rate === null` 是"还没开始"，不是"被扣分"）', () => {
     // 服务端用 null 表示"没有分母"。这里钉住那个分支：空态渲染的是 `.score-empty`
     // 那一句话，数字那一段（`.score-rate`）整个不在。
-    expect(view).toMatch(/v-else-if="scorePercent === null"/)
+    expect(view).toMatch(/v-else-if="score\.passRate === null"/)
     expect(view).toMatch(/class="score-empty"/)
     expect(view).toContain('还没交过活，交一项就有记录')
-    expect(view).toMatch(/if \(score\.value\.passRate === null\) return null/)
+    // 百分率整条链子都拆了（t59）：不再有 scorePercent、也不再有那个把 0.996 压成 99 的算法。
+    expect(view).not.toMatch(/scorePercent/)
   })
 
-  it('主数字旁边是两个小数字，驳回原因一行一条带次数', () => {
-    expect(view).toMatch(/class="score-rate"/)
+  it('只报三条次数（一次通过 / 被驳回 / 实拍），且没有百分率；驳回原因一行一条带次数', () => {
+    // t59 按原型 05 收敛：主数字（百分率）已删，判据改成「三条计数在、百分号不在」。
+    expect(view).not.toMatch(/class="score-rate"/)
+    // t63（t60 的 G2）：**源码级**断言 —— 只断渲染出来的 class 属性永远抓不到死 CSS。
+    // 这条盯着样式表里那两条 `.score-rate{…}` 规则本身，删掉了也要防止被写回来。
+    expect(view).not.toMatch(/\.score-rate\s*\{/)
     expect(view).toMatch(/class="score-split"/)
+    expect(view).not.toContain('<span>%</span>')
     expect(view).toContain('一次通过')
     expect(view).toContain('被驳回')
+    expect(view).toMatch(/<dt>实拍<\/dt>/)
     expect(view).toMatch(/v-for="item in score\.reasons"/)
     expect(view).toMatch(/\{\{ item\.count \}\} 次/)
   })
@@ -183,13 +190,34 @@ describe('「我的成绩」卡（2026-10-05 用户裁定）', () => {
     expect(view).toMatch(/loadScore\(true\)/)
     // 窗口与口径写清是"近 N 天"、跟红黑榜同一份记录。
     expect(view).toContain('近 {{ score.days }} 天')
-    expect(view).toContain('红黑榜是同一份记录')
+    expect(view).toContain('次数口径，与红黑榜同一份记录')
   })
 
   it('验收发生在店长那一侧：跟着卫生 nudge 重读一次', () => {
     expect(view).toMatch(/topics: \['scheduling', 'hygiene'\]/)
     const pull = view.slice(view.indexOf('useNudgePull({'), view.indexOf('</script>'))
     expect(pull).toContain('loadScore(true)')
+  })
+})
+
+describe('两个弹层的点击账约束（DO:250-251 / DO:909-914 / DO:860-869 · t67 钉住）', () => {
+  it('换班：同意 1 击（直接进确认态），拒绝 2 击（保留确认框，DO:250-251）', () => {
+    // 同意不弹确认框：按钮直接调 `answerSwap(card, true)`
+    expect(view).toMatch(/@click="answerSwap\(card, true\)"/)
+    // 拒绝要先落进确认态（`answerTarget`），所以是 2 击
+    expect(view).toMatch(/@click="answerTarget = \{ card, agree: false \}"/)
+  })
+
+  it('换班：同意按钮写「同意并转店长」（DO:925）', () => {
+    expect(view).toContain('>同意并转店长</button>')
+    expect(view).toContain('点「同意并转店长」才会轮到店长批')
+    expect(view).not.toContain('>同意</button>')
+  })
+
+  it('请假 sheet 的点击账不增加（DO:860-869：只请一天＝2 击）', () => {
+    // 一天假：选日期 + 提交，两步就走完；日期输入与提交按钮都在同一个 sheet 里
+    expect(view).toMatch(/id="leave-start"/)
+    expect(view).toMatch(/leave-sheet-title/)
   })
 })
 
@@ -250,7 +278,7 @@ describe('员工端请假（票 08）', () => {
   it('撤回与拒绝先过确认框，手机上一误触不会直接生效', () => {
     // 这两个动作服务端只往前走（撤回后要重提、拒绝后这件事就结束），点错没有回头路。
     // 同仓库对不可逆动作一律弹确认框（店长驳回、删班次、卫生端那几处），员工端这两个
-    // 是全仓少见的裸动作。「同意」不弹：后面还有店长那道闸，跟店长端「批准不弹、
+    // 是全仓少见的裸动作。「同意并转店长」不弹：后面还有店长那道闸，跟店长端「批准不弹、
     // 驳回弹」同一个口径 —— 三个都弹就成了每次都拦一道。
     expect(view).toMatch(/<ConfirmDialog/)
     expect(view).toMatch(/@click="cancelTarget = request"/)
@@ -326,7 +354,7 @@ describe('员工端换班（票 09）', () => {
     expect(view).toMatch(/@click="answerSwap\(card, true\)"/)
     // 拒绝先开确认框（同意不弹，见确认框那条用例）。
     expect(view).toMatch(/@click="answerTarget = \{ card, agree: false \}"/)
-    expect(view).toContain('你点了同意才会轮到店长批')
+    expect(view).toContain('点「同意并转店长」才会轮到店长批')
     // 同意/拒绝之后两边都要重读（对方可能自己撤了），也各有一句回执。
     expect(view).toMatch(/note\.value = agree \? '你同意了，接下来等店长批' : '你拒绝了，这件事到此为止'/)
     // 那次重读要钉在 `answerSwap` 里：`cancelLeave` 里也有一句 `await loadRequests(true)`，
@@ -377,7 +405,7 @@ describe('仪容仪表（票 12）：按人拍、两步、只在排到班次时�
     // 判据是服务端给的 `required`（排班那天有班次）：休假的与没排到的整行不显示 ——
     // 这正是需求那句「排班上面除了休假的都要拍」。
     expect(view).toMatch(/v-if="attire\.required"/)
-    expect(view).toContain('店长还没传标准图')
+    expect(view).toContain('超级管理员还没传标准图')
     expect(view).toContain('已交，等店长验收')
   })
 
@@ -459,7 +487,7 @@ describe('账号设置（2026-10-05 从卫生页的「我」整格搬来）', ()
   it('「重新选择区域和班次」不自选：说清由排班决定，并把人送回顶上那张排班卡', () => {
     // 票 10 撤掉了员工自选班次/工作区那条路，搬过来也不许偷偷装回来。
     expect(view).toMatch(/function openShiftNotice\(\)/)
-    expect(view).toMatch(/由排班决定；要改哪一天，找店长在排班页改/)
+    expect(view).toMatch(/由排班决定；要改哪一天，找超级管理员在排班页改/)
     expect(view).not.toMatch(/api\/hygiene\/staff\/assignment/)
     expect(view).not.toMatch(/HYGIENE_SHIFTS/)
   })

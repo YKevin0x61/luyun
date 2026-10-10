@@ -243,8 +243,10 @@ useNudgePull({
 <style scoped>
 /* 首页沿用工作台那套深青墨令牌（`/hygiene-admin.css`，由本页加载一次）。 */
 .wbh {
-  padding: var(--hy-page, 18px);
-  padding-bottom: 40px;
+  /* 手机安全区四项让位（t52）：顶槽取 max(--hy-page, --safe-t)，左右同 max */
+  padding: max(var(--hy-page, 18px), var(--safe-t)) max(var(--hy-page, 18px), var(--safe-r))
+    40px max(var(--hy-page, 18px), var(--safe-l));
+  padding-bottom: calc(40px + var(--safe-b));
   gap: 14px;
 }
 .wbh-head { display: flex; flex-direction: column; gap: 4px; }

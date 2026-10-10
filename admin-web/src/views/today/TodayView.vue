@@ -15,7 +15,7 @@
  * 「我的成绩」那张卡（2026-10-05 用户裁定）另读一条 `GET /api/hygiene/staff/me/stats`，
  * 同样只认员工自己的 cookie（路径上没有 `employee_id`，读谁由服务端按会话定）。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
@@ -106,7 +106,7 @@ const hygiene = ref({
 const staffMe = ref(null)
 const deepClock = ref(null)
 
-// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十项开关里**员工端真有执行点**的那三项
+// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十项开关里**员工端真有执行点**的那四项
 // （`ADMIN_CAP_STAFF_DEFS` 与后端 `STAFF_SIDE_CAPABILITIES` 同义），逐项标出开了没有。
 // 判据一律看 `admin_caps` —— `permission` 只是显示用的标签（真机走查 S10：标签写着
 // 「管理员」而一项开关都没给是合法状态），拿标签判会放行没给的那件事。
@@ -117,6 +117,15 @@ const staffCaps = computed(() => ADMIN_CAP_STAFF_DEFS.map((item) => ({
   granted: hasCap(staffMe.value && staffMe.value.admin_caps, item.key),
 })))
 const staffCapCount = computed(() => staffCaps.value.filter((item) => item.granted).length)
+
+// 能力 → 落点（§12 第 1 条裁定：能力卡计 **4 项**，三项在「卫生」页、`overtime` 在「加班与补钟」页）。
+// 落点写在数据旁边，而不是页尾一句概括句 —— 那种句子在一项能力多出来之后就会变成假话。
+const CAP_ROUTES = {
+  daily_review: '/workbench/me/clean',
+  deep_review: '/workbench/me/clean',
+  fix: '/workbench/me/clean',
+  overtime: '/workbench/me/overtime',
+}
 
 // 健康证到期（一行提示，只在临期 / 过期时渲染）：文案里**不带日期** —— 日期在下面
 // 「我的」那两行里，同一件事不说两遍。数据来自 `/api/hygiene/staff/me` 的
@@ -146,7 +155,7 @@ const seniorityNextText = computed(() => {
   return month ? `${month}调整` : '已封顶'
 })
 
-// 「我的成绩」（2026-10-05 用户裁定）：近 7 天的一次通过率 + 被驳回的原因分布。
+// 「我的成绩」（2026-10-05 用户裁定）：近 7 天的次数（一次通过 / 被驳回 / 实拍）+ 被驳回的原因分布
 //
 // **为什么放这一页**：员工端原来只有「今天要做什么」——惩罚（驳回、红黑榜）看得见，
 // 正反馈一点没有，人会躲着这个系统用。这一页是员工**登录后的落点**（`/login` 的员工栏
@@ -552,14 +561,9 @@ async function loadHygiene(quiet = false) {
   }
 }
 
-/** 大数字那位：服务端给的是 0–1 的小数。 */
-const scorePercent = computed(() => {
-  if (score.value.passRate === null) return null
-  const percent = Math.round(score.value.passRate * 100)
-  // 0.996 这种不能显示成 100%：这张卡上就写着「被驳回 N 次」，两个数并排自相矛盾 ——
-  // 少一个百分点的精度，比让员工发现页面在骗他要轻得多。
-  return percent === 100 && score.value.passRate < 1 ? 99 : percent
-})
+// 成绩只报**次数**，不算百分率（t59 对照原型 05 收敛）：原型是「N 一次通过 / N 被驳回 / N 实拍」
+// 三条计数 + 一句「次数口径，与红黑榜同一份记录」—— 与红黑榜看的是同一份记录、同一个口径。
+// 百分率离反模式 5（把员工表现做成评分）只差一步：同一个数字换个显示方式就会被读成"我被扣了几分"。
 
 /** 读自己的成绩（近 7 天）。跟卫生那块一样**自己一个 try**：读不出来只把这卡变成一句
  *  「读不出来 + 重试」，上面那几张卡照常显示。 */
@@ -575,6 +579,7 @@ async function loadScore(quiet = false) {
         : Number(data.pass_rate),
       firstPass: Number(data.first_pass) || 0,
       rejected: Number(data.rejected) || 0,
+      captured: Number(data.captured) || 0,
       reasons: Array.isArray(data.reasons) ? data.reasons : [],
       // 窗口用响应里那个 `days`：服务端有 84 天保留期这一道夹子，拿它的数显示才不会跟
       // 真实窗口对不上（文案里写死「7 天」，服务端一改口径这张卡就开始撒谎）。
@@ -744,12 +749,63 @@ async function savePassword() {
  *  用模板 ref 而不是 `document.querySelector`：那张卡只在读到了班的时候才在（loading /
  *  出错时不渲染），拿 ref 少一次"查不到就当没点"的静默分支。 */
 function openShiftNotice() {
-  note.value = '今天上哪个班、在哪个区由排班决定；要改哪一天，找店长在排班页改。'
+  // DO:747（t67）：这句话不再靠一次性的 `note` 飘出来 —— 它落在**排班卡自己的 helper** 上
+  // （见模板里 `<section ref="schedCard">` 那段的 `.tA-sub`）。点了只负责把人送到那张卡。
   const card = schedCard.value
   if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+
+/**
+ * 弹层的焦点陷阱与背景隔离（t68 / ③-3h）：**一套实现覆盖全部五个手写弹层**。
+ *
+ * 为什么不逐个弹层写：五个 `.modal-overlay` 是同一文件里的兄弟块，逐个埋监听会漂。
+ * 这里只认「有没有弹层开着」——
+ *  - 开着 → 背景 `inert`（底层对辅助技术不可达、Tab 也进不去）、焦点送进弹层、
+ *            Tab / Shift+Tab 在弹层内循环，不落到后面的页面上；
+ *  - 关掉 → 焦点回到打开它的那颗按钮（否则焦点掉到 body，键盘用户直接迷路）。
+ * 写法照 `views/hygiene/HygieneHomeView.vue` 里那套（全仓此前唯一在用 `inert` 的地方）。
+ */
+const anyModalOpen = computed(() => [attireSheet, sheet, swapSheet, profileOpen, passwordOpen].some((r) => Boolean(r.value)))
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+let lastFocusedElement = null
+
+function focusablesIn(box) {
+  if (!box) return []
+  return [...box.querySelectorAll(FOCUSABLE)]
+}
+
+function onModalKeydown(event) {
+  if (event.key !== 'Tab' || !anyModalOpen.value) return
+  const box = document.querySelector('.modal-overlay .modal-box')
+  const list = focusablesIn(box)
+  if (!box || !list.length) return
+  const first = list[0]
+  const last = list[list.length - 1]
+  const inside = box.contains(document.activeElement)
+  if (event.shiftKey && (document.activeElement === first || !inside)) {
+    event.preventDefault(); last.focus()
+  } else if (!event.shiftKey && (document.activeElement === last || !inside)) {
+    event.preventDefault(); first.focus()
+  }
+}
+
+watch(anyModalOpen, async (open) => {
+  if (open) {
+    lastFocusedElement = document.activeElement
+    await nextTick()
+    const box = document.querySelector('.modal-overlay .modal-box')
+    const list = focusablesIn(box)
+    if (list.length) list[0].focus()
+    else if (box) { box.setAttribute('tabindex', '-1'); box.focus() }
+  } else if (lastFocusedElement && lastFocusedElement.focus) {
+    lastFocusedElement.focus()
+    lastFocusedElement = null
+  }
+})
+
 onMounted(() => {
+  document.addEventListener('keydown', onModalKeydown)
   // 名字与页面清单（`router/pageRoutes.json` 里 `/workbench/me/today` 那一行）同一个：
   // 它原来是「今天」，与工作台首页（`/workbench`，也报「今天」）**撞名** —— 真机走查里
   // 员工登录落到这一页、底栏第一格「今天」却指向另一页，两页浏览器标签一模一样。
@@ -763,6 +819,8 @@ onMounted(() => {
   // 卫生那三跳后面。
   loadScore()
 })
+
+onUnmounted(() => document.removeEventListener('keydown', onModalKeydown))
 
 // 实时（票 10 收尾）：店长改了我的班、批了我的假、有人找我换班、或者我这区的卫生
 // 待办变了 —— 三块各拉各的（都是轻量 GET，nudge 本身不带数据），一次全刷到。
@@ -783,7 +841,7 @@ useNudgePull({
 
 <template>
   <div class="today-page hygiene-staff">
-    <header class="tTop">
+    <header class="tTop" :inert="anyModalOpen || null">
       <span class="tDay">今天</span>
       <span class="tDate">{{ today ? dayLabel(today.business_date) : '' }}</span>
       <span v-if="employee" class="tMe">{{ employee.name }}</span>
@@ -792,7 +850,7 @@ useNudgePull({
            一颗同名的 `.staff-exit` —— 手机上两者相距约 300px、功能完全重复。 -->
     </header>
 
-    <div class="tA-body">
+    <div class="tA-body" :inert="anyModalOpen || null">
       <!-- 健康证提示（一条一行，不可关闭）：整页最上面 —— 它是"你得去办证了"，
            比排班与今天的活都更早要处理。日期不写在这句里（下面「我的」那两行有）。 -->
       <p
@@ -813,7 +871,7 @@ useNudgePull({
         <!-- 「你能做的事」（票 01 / ADR 0093）：被放权的员工在这一页看清自己能做哪几件事。
              为什么要占页面最上面：这一页是他登录后的落点，而"我能做什么"是读这一页之前
              就得知道的事 —— 原来这信息藏在页尾账号信息那一行里，等于没写。
-             完全没有权限的员工看不到这一块：判据是 `staffCapCount`（那三项里一项都没开），
+             完全没有权限的员工看不到这一块：判据是 `staffCapCount`（那四项里一项都没开），
              界面就不给他一个空洞的头衔 —— 挂在 `permission` 标签上就会给（标签写着
              「管理员」而一项开关都没给是合法状态，见 ADR 0093）。 -->
         <section v-if="staffCapCount" class="tA-card caps">
@@ -824,7 +882,7 @@ useNudgePull({
             <em>现场复核 · {{ staffCapCount }} 项</em>
           </div>
           <ul class="cap-list">
-            <!-- 三项**都列**：没开的那一项写「店长还没开给你」，员工才知道该找店长开什么，
+            <!-- 三项**都列**：没开的那一项写「超级管理员还没开给你」，员工才知道该找店长开什么，
                  而不是以为系统就是不给（只列开了的那几项，缺的那一项就永远看不见）。 -->
             <li
               v-for="item in staffCaps"
@@ -834,19 +892,19 @@ useNudgePull({
             >
               <span class="cap-mark" aria-hidden="true">{{ item.granted ? '✓' : '—' }}</span>
               <span class="cap-name">{{ item.label }}</span>
-              <span class="cap-note">{{ item.granted ? item.note : '店长还没开给你' }}</span>
+              <span class="cap-note">{{ item.granted ? item.note : '超级管理员还没开给你' }}</span>
+              <button
+                v-if="item.granted"
+                class="cap-go"
+                type="button"
+                :data-to="CAP_ROUTES[item.key]"
+                @click="router.push(CAP_ROUTES[item.key])"
+              >去 ›</button>
             </li>
           </ul>
-          <!-- 脚注 + 入口：这三项的执行点全在手机端「卫生」页（`/workbench/me/clean`），
-               员工在电脑上找是找不到的 —— 所以这里直接给路，不让他自己猜。
-               「卫生」那一页自己也有一条从「今天」页过去的路（那张卫生卡上），两处不冲突：
-               这一条属于"知道了能做什么，接着去做"。 -->
-          <p class="tA-sub">这三项都在手机端「卫生」页里做。</p>
-          <div class="acts">
-            <button class="btn" type="button" @click="router.push('/workbench/me/clean')">
-              去「卫生」页 ›
-            </button>
-          </div>
+          <!-- 逐项给路（§12 第 1 条）：4 项能力分属两页，一句话概括不了 —— 入口挂在每一行上，
+               落点见数据区的 `CAP_ROUTES`。没开的能力不给他走（`granted` 才渲染按钮）：
+               进得去也是"勾了不生效"，那正是 ADR 0093 要避免的那类缺陷的另一面。 -->
         </section>
 
         <section ref="schedCard" class="tA-card sched">
@@ -854,6 +912,8 @@ useNudgePull({
             <span class="tag sched">排班</span>
             <em>{{ nextLine }}</em>
           </div>
+          <!-- 换班/调班的说明落在这里（DO:747）：不再是弹一下就没的提示 -->
+          <p class="tA-sub sched-note">今天上哪个班、在哪个区由排班决定；要改哪一天，找超级管理员在排班页改。</p>
           <p class="shift" :class="tone">{{ todayText }}</p>
           <p class="tA-sub">{{ todaySub }}</p>
           <div class="acts">
@@ -911,7 +971,7 @@ useNudgePull({
                   type="button"
                   :disabled="swapBusy"
                   @click="answerSwap(card, true)"
-                >同意</button>
+                >同意并转店长</button>
                 <button
                   class="btn tL-cancel"
                   type="button"
@@ -922,7 +982,7 @@ useNudgePull({
               <span v-if="card.note" class="tL-note">事由：{{ card.note }}</span>
             </li>
           </ul>
-          <p class="tA-sub">你点了同意才会轮到店长批；不点，这件事就停在你这里。</p>
+          <p class="tA-sub">点「同意并转店长」才会轮到店长批；不点，这件事就停在你这里。</p>
         </section>
 
         <!-- 我自己提的申请（票 08 请假、票 09 换班）：只在提过或读出错时才占地方。 -->
@@ -970,7 +1030,7 @@ useNudgePull({
             <p v-if="!hygieneStats.total" class="tA-sub">
               <template v-if="hygiene.shift">今天没有要交的日常检查。</template>
               <!-- 没班次就没有可交的那一份（票 10：班次由排班决定）——说清该找谁，别让人在这儿等。 -->
-              <template v-else>排班还没给你班次，今天没有可交的日常检查；找店长配一下规则。</template>
+              <template v-else>排班还没给你班次，今天没有可交的日常检查；找超级管理员配一下规则。</template>
             </p>
             <template v-else>
               <p class="shift">日常 {{ hygieneStats.passed }}/{{ hygieneStats.total }}</p>
@@ -996,7 +1056,7 @@ useNudgePull({
                   v-else-if="attire.status === 'rejected'"
                 >被驳回，要重拍</template><template
                   v-else-if="!attire.hasStandard"
-                >店长还没传标准图</template><template v-else>今天还没拍</template>
+                >超级管理员还没传标准图</template><template v-else>今天还没拍</template>
               </p>
               <p v-if="attire.note" class="tL-err" role="status">店长说：{{ attire.note }}</p>
               <p v-if="attire.error" class="tL-err" role="status">{{ attire.error }}</p>
@@ -1025,9 +1085,9 @@ useNudgePull({
           </template>
         </section>
 
-        <!-- 「我的成绩」（2026-10-05 用户裁定）：近 7 天的一次通过率 + 被驳回的原因。
-             为什么放在这一页、为什么 `null` 不能显示成 0%，见脚本里 `score` 与
-             `scorePercent` 那两段。 -->
+        <!-- 「我的成绩」（2026-10-05 用户裁定）：近 7 天的次数（一次通过 / 被驳回 / 实拍）+ 被驳回的原因分布
+             为什么放在这一页、为什么 `null` 不能显示成 0，见脚本里 `score` 那段。
+             百分率在 t59 按原型 05 收敛掉了：只报次数。 -->
         <section class="tA-card score">
           <div class="tA-hd">
             <span class="tag score">成绩</span>
@@ -1044,30 +1104,29 @@ useNudgePull({
           </template>
 
           <!-- 还没开始（`pass_rate === null`）：这一格**不给任何数字**，包括 0%。
-               0% 是"交了但都被驳"，"还没交过"是另一件事 —— 给新人看 0%，他会当成
+               0 是"交了但都被驳"，"还没交过"是另一件事 —— 给新人看 0%，他会当成
                已经被扣了一分，而这张卡存在的理由正好相反：让他愿意交第一项。 -->
-          <template v-else-if="scorePercent === null">
-            <p class="score-empty">近 {{ score.days }} 天还没交过活，交一项就有记录。</p>
-            <p class="tA-sub">一次通过率要交了第一项才算得出来，现在不算你落后。</p>
+          <template v-else-if="score.passRate === null">
+            <p class="score-empty">近 {{ score.days }} 天还没交过活，交一项就有记录 —— 现在不算你落后。</p>
           </template>
 
           <template v-else>
-            <div class="score-body">
-              <p class="score-rate">{{ scorePercent }}<span>%</span></p>
-              <dl class="score-split">
-                <div>
-                  <dt>一次通过</dt>
-                  <dd>{{ score.firstPass }} 项</dd>
-                </div>
-                <div>
-                  <dt>被驳回</dt>
-                  <dd>{{ score.rejected }} 次</dd>
-                </div>
-              </dl>
-            </div>
-            <p class="tA-sub">
-              一次通过率 = 一次通过 ÷（一次通过 + 被驳回）；跟店长看的红黑榜是同一份记录。
-            </p>
+            <dl class="score-split">
+              <div>
+                <dt>一次通过</dt>
+                <dd>{{ score.firstPass }} 项</dd>
+              </div>
+              <div>
+                <dt>被驳回</dt>
+                <dd>{{ score.rejected }} 次</dd>
+              </div>
+              <div>
+                <dt>实拍</dt>
+                <dd>{{ score.captured }} 项</dd>
+              </div>
+            </dl>
+            <!-- 原型 05 那句口径，逐字搬过来：与红黑榜同一份记录、同一个口径 -->
+            <p class="tA-sub">次数口径，与红黑榜同一份记录。</p>
           </template>
 
           <!-- 驳回原因比数字更有用：员工要知道的是"我老在哪件事上栽"。一行一条、带次数
@@ -1492,14 +1551,16 @@ useNudgePull({
   background:
     radial-gradient(130% 46% at 50% -6%, rgba(63, 224, 176, .1), transparent 62%),
     var(--hy-bg);
-  padding-bottom: 80px;
+  padding-bottom: calc(80px + var(--safe-b));
 }
 
 .tTop {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  padding: 18px 16px 14px;
+  /* 手机安全区四项都让位（t49）：顶部原写死 18px，刘海/圆角机会被压住。
+     用 padding 简写的**顶槽**（_kit 口径），左右同样取 max。 */
+  padding: max(18px, var(--safe-t)) max(16px, var(--safe-r)) 14px max(16px, var(--safe-l));
 }
 
 .tDay {
@@ -1622,6 +1683,20 @@ useNudgePull({
   margin-top: 10px;
 }
 
+/* 行内入口（t49）：触控目标 ≥44px；焦点环走令牌，不自己写一套 */
+.cap-go {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line-control);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+.cap-go:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
 /* 没开的那一项：整行退到背景里（破折号 + 灰字），与开了的那几行一眼分得开 ——
    「还没开给你」是**说明**，不是可用的能力。 */
 .cap-row.off .cap-mark {
@@ -1656,23 +1731,6 @@ useNudgePull({
   align-items: flex-end;
   gap: 14px;
   padding: 4px 0 2px;
-}
-
-/* 主数字用「英雄数字」那一档字号（`.shift` 是 52px）：这张卡的主角就是它。
-   比排班卡那个班次小一档，不抢"今天上不上班"的第一眼。 */
-.score-rate {
-  margin: 0;
-  font-family: var(--font-song);
-  font-size: 44px;
-  line-height: 1;
-  letter-spacing: .02em;
-  color: var(--hy-jade);
-}
-
-.score-rate span {
-  margin-left: 2px;
-  font-size: 18px;
-  color: var(--hy-muted);
 }
 
 .score-split {

@@ -135,7 +135,8 @@ describe('登出前要护住没传完的照片', () => {
     const button = read('../../../components/staff/StaffExitButton.vue')
     const logout = read('../../../composables/useStaffLogout.js')
     const home = read('../HygieneHomeView.vue')
-    const shell = read('../../workbench/WorkbenchLayout.vue')
+    // ③-2：唯一那颗工作台退出按钮在统一壳里。
+    const shell = read('../../workbench/WorkbenchShell.vue')
 
     expect(button).toMatch(/@click="ask"/)
     expect(button).not.toMatch(/@click="logout"/)

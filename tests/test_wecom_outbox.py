@@ -79,6 +79,23 @@ class OutboxTestCase(unittest.IsolatedAsyncioTestCase):
         settings.DATABASE_DIR = self._old_dir
         self._tmpdir.cleanup()
 
+    async def _open_loop_db(self):
+        """给**常驻循环**单开一条连接（t58 的根因就在这儿）。
+
+        循环原来和用例共用 `self.db` 的那一条连接，于是：
+        ① 用例读表时会看到循环**还没提交**的 DELETE（同一个连接内自己看得见自己），
+           轮询把「读到了未提交的删除」当成「清理完了」，紧接着 `finally` 取消循环 →
+           `await tdb.commit()` 没走到 → 事务回滚 → 行又回来 → 断言红。间歇的成因就是这个窗口
+           （`wecom_outbox_purge_finished_before` 是「先 DELETE、后 `await tdb.commit()`」）；
+        ② 两边在同一条连接上交错 await，取消时还可能互相等 —— 那就是 45s 用例超时那一次。
+        另开一条连接后：循环的写入**先提交才看得见**（READ COMMITTED），轮询到的就是已落库的
+        状态；取消也不再和用例自己的读抢同一条连接。这样等待条件与「取消时机」都不再依赖时序。
+        """
+        db = DatabaseManager()
+        self.assertTrue(await db.connect())
+        self.addAsyncCleanup(db.close)
+        return db
+
     async def _channel(self, name, url, *, enabled=True):
         return await self.db.wecom_webhook_create({
             "name": name,
@@ -599,10 +616,11 @@ class OutboxRetentionScheduleTest(OutboxTestCase):
         return {int(row["id"]) for row in await self.db.wecom_outbox_recent(limit=200)}
 
     async def test_the_resident_loop_purges_expired_rows_and_keeps_the_rest(self):
+        loop_db = await self._open_loop_db()
         with patch.object(wecom_outbox, "dispatch_pending", new=AsyncMock(return_value=0)), \
              patch.object(wecom_outbox, "requeue_stale_sending", new=AsyncMock(return_value=0)), \
              patch.object(wecom_push_service_module, "SCHEDULER_INTERVAL_SECONDS", 0.01):
-            task = asyncio.create_task(wecom_push_service.scheduler_loop(self.db))
+            task = asyncio.create_task(wecom_push_service.scheduler_loop(loop_db))
             try:
                 await self._wait_for_purge()
             finally:
@@ -1036,10 +1054,11 @@ class OutboxSchedulerLoopTest(OutboxTestCase):
         await self._enqueue("今天漏拍 2 项")
         sender = AsyncMock(return_value=(True, "ok"))
 
+        loop_db = await self._open_loop_db()
         with patch.object(wecom_push_service, "send_text", new=sender), patch.object(
             wecom_push_service_module, "SCHEDULER_INTERVAL_SECONDS", 0.01
         ):
-            task = asyncio.create_task(wecom_push_service.scheduler_loop(self.db))
+            task = asyncio.create_task(wecom_push_service.scheduler_loop(loop_db))
             try:
                 row = await self._wait_for_status("sent")
             finally:
@@ -1061,10 +1080,11 @@ class OutboxSchedulerLoopTest(OutboxTestCase):
         )
         sender = AsyncMock(return_value=(True, "ok"))
 
+        loop_db = await self._open_loop_db()
         with patch.object(wecom_push_service, "send_text", new=sender), patch.object(
             wecom_push_service_module, "SCHEDULER_INTERVAL_SECONDS", 0.01
         ):
-            task = asyncio.create_task(wecom_push_service.scheduler_loop(self.db))
+            task = asyncio.create_task(wecom_push_service.scheduler_loop(loop_db))
             try:
                 row = await self._wait_for_status("sent")
             finally:

@@ -87,7 +87,13 @@ const inbox = ref([])
  *  「本区 + 本班次」，今天别的区有人交了，他一条也看不到，权力等于没有入口
  *  （2026-10-05 用户确认：员工账号的管理员同样有验收权）。
  *  2026-10-05 同日改判据：这一档问的是**「日常验收」那一项开关**，不是「是不是管理员」
- *  —— 只开了整改单的人不该在这里看到日常的待验收活。 */
+ *  —— 只开了整改单的人不该在这里看到日常的待验收活。
+ *
+ *  「已交」不另立分组（③-3b / F3，有意为之、不是漏做）：原型里画过一个独立的「已交」组，
+ *  实现改用**组内状态标记**——自己交的那条留在它原来的那一组里，行上写「已交，等验收」。
+ *  ADR 0067 的实质是「自己交的不能自己判」，那一条由两处守住：服务层已经把范围过滤成
+ *  「不含自己交的」，页面上还有 `canDecide` 那道提交人比对（见 `reviewInbox` 渲染处）。
+ *  分不分组建的是**形式**，实质已经在了；将来要立独立组，先看这一句再决定。 */
 const reviewInbox = ref([])
 const deepInbox = ref([])
 const deepStatus = ref('')
@@ -153,6 +159,24 @@ const groupedPassed = computed(() => groupByZone(passedRows(inbox.value)))
 const openDeep = computed(() => openRows(deepInbox.value))
 const passedDeep = computed(() => passedRows(deepInbox.value))
 const deepStats = computed(() => dailyProgress(deepInbox.value))
+
+// ③-3b / F2：专项与整改这两组原来是**按载荷顺序**渲染的（日常那一组不用管 ——
+// `buildWorkQueue` 已经在共享 util 里按同一口径排好，见 `hygieneWorkFlow.js:374-377`）。
+// 这里在视图层补上同一套顺序：逾期 → 将到期 → 待拍 → 等验收。
+// · 只排**显示顺序**：逻辑里的「下一件」仍由 `nextFixWorkRow` / `openDeep.find` 自己判，
+//   它们的语义不动（所以另外起两个 computed，不去改 `openDeep` / `fixInbox` 本身）。
+// · `sort` 是稳定的（ES2019 起），同一个桶里保持服务端给的原顺序。
+// · 判据只读载荷里已有的字段（`deadline` + `status`），不是新接口、不碰服务层。
+const URGENCY_RANK = { overdue: 0, soon: 1, todo: 2, waiting: 3 }
+function urgentFirst(rows) {
+  const rankOf = (row) => {
+    if (isPendingReview(row)) return URGENCY_RANK.waiting
+    return URGENCY_RANK[deadlineUrgency(row && row.deadline, nowTick.value)] ?? URGENCY_RANK.todo
+  }
+  return [...rows].sort((left, right) => rankOf(left) - rankOf(right))
+}
+const openDeepQueue = computed(() => urgentFirst(openDeep.value))
+const fixQueue = computed(() => urgentFirst(fixInbox.value))
 const shiftDue = computed(() => shiftClock(
   employee.value && employee.value.shift,
   dailyClocks.value,
@@ -800,9 +824,9 @@ const fixZoneOptions = computed(() => {
  *  今天排给他的那个区；今天一个区都没排到就没有可开的区。所以前端这一档跟着**工作区**
  *  判：有区就能开，没区才拦。
  *
- *  原本文案让他"先找店长确认今天的排班"，可他自己就是管理员（2026-10-05 审查 F-05）：
+ *  原本文案让他"先找超级管理员确认今天的排班"，可他自己就是管理员（2026-10-05 审查 F-05）：
  *  现在直接说清缺的是什么、去哪儿补。班次与区都由排班的单日覆盖说了算（票 10），
- *  员工端没有自选入口，所以"找店长在排班页排一个区"是唯一可执行的下一步。 */
+ *  员工端没有自选入口，所以"找超级管理员在排班页排一个区"是唯一可执行的下一步。 */
 function openFixForm() {
   errorText.value = ''
   formError.value = ''
@@ -811,7 +835,7 @@ function openFixForm() {
   // 防手滑（键盘/程序化调用）——判据两处同一个开关，不会出现"按钮在、点了没反应"。
   if (!canFix.value) return
   if (!employee.value || !employee.value.zone_id) {
-    errorText.value = '今天没有排到你的工作区，开不了整改单：开单要在自己的区里开。找店长在排班页给你排一个区。'
+    errorText.value = '今天没有排到你的工作区，开不了整改单：开单要在自己的区里开。找超级管理员在排班页给你排一个区。'
     return
   }
   if (!liveOk.value) {
@@ -984,9 +1008,15 @@ function onCaptured(blob) {
   }
   if (current && current.kind === 'deep') {
     const capturedAt = chinaNowIso()
+    // ADR 0049：水印三项 = 时间 · 卫生工作区 · 姓名。第二行取「区」。
+    // 专项这一档（ADR 0054：全店一条）在 `/staff/deep-clean` 的行里**没有** zone_name，
+    // 所以退回到项目名（「冷柜一号」这类）—— 它是这一档唯一能指认"哪里"的字段。
+    // `HygieneWatermarkOverlay` 按 `item_name || zone` 渲染第二行，这里只给 `zone`，
+    // 三项就齐了（给 item_name 会把它顶掉）。
+    const zoneName = (row && row.zone_name) || (row && row.item_name)
     const watermark = {
       time: capturedAt,
-      item_name: row && row.item_name,
+      zone: zoneName,
       photographer: employee.value && (employee.value.name || employee.value.phone),
     }
     if (current.mode === 'before-camera') {
@@ -1327,7 +1357,15 @@ async function decide(action, reason = '') {
          品牌仍归外壳顶栏、退出仍归外壳那一颗（D5）——这里只报「这一页叫什么」和「我在哪」。
          页名的样式沿用 `.hy-brand-title`：它就是这条窄栏里那个标题槽（字号由
          `.hygiene-work .hy-work-header .hy-brand-title` 收到 1.02rem）。 -->
-    <header class="hy-work-header" :inert="Boolean(sheet)">
+    <!-- 弹层打开时把背景变 `inert`：底层对辅助技术不可达、Tab 也进不去（同一写法见
+         `views/hygiene/HygieneHomeView.vue` 的另一处与 `views/today/TodayView.vue`）。
+         **必须是 `Boolean(sheet) || null`，不能只写 `Boolean(sheet)`**：`inert` 是
+         「存在即生效」的布尔属性，绑成 `false` 时 Vue 仍会把 `inert="false"` 渲染到 DOM 上，
+         于是**关闭状态下背景反而永久不可达** —— 不是漏做，是反向生效（t68 照抄这里时踩过，
+         t70 修回；那次的教训是「参照物本身可能比没有参照物更危险」）。
+         `|| null` 让属性在关闭时真正消失；顺带一提：这里是**模板**表达式，`sheet` 会被自动
+         解包成值，所以不需要也不会写 `.value`（脚本里的 computed 才需要）。 -->
+    <header class="hy-work-header" :inert="Boolean(sheet) || null">
       <div class="hy-work-header-inner">
         <h1 class="hy-brand-title">卫生</h1>
         <!-- 今天在哪：**只读**（票 10）。以前点它还能重选，现在班次和工作区由排班决定，
@@ -1340,13 +1378,13 @@ async function decide(action, reason = '') {
         <!-- 被放权的那一档在界面上如实标出来：顶栏只有「员工（姓名）」两档可选，而这一页上
              他干的是判别人活的活（真机走查 O-id：角色审查 F-01 记的就是"界面层看不见它"）。
              只在真有可用的那三项时出现，普通员工看不到这一颗。 -->
-        <span v-if="employee && staffCapCount" class="hy-work-role" :title="`可判 ${staffCapCount} 项：${ADMIN_CAP_STAFF_DEFS.filter((item) => hasCap(caps, item.key)).map((item) => item.label).join('、')}`">
+        <span v-if="employee && staffCapCount" class="hy-work-role role" :title="`可判 ${staffCapCount} 项：${ADMIN_CAP_STAFF_DEFS.filter((item) => hasCap(caps, item.key)).map((item) => item.label).join('、')}`">
           现场复核 · {{ staffCapCount }} 项
         </span>
       </div>
     </header>
 
-    <main id="hygiene-work-main" class="hy-work-main" :inert="Boolean(sheet)">
+    <main id="hygiene-work-main" class="hy-work-main" :inert="Boolean(sheet) || null">
       <p v-if="connectionLost && !sheet" class="hy-staff-alert hy-staff-offline" role="status">
         和服务器断了，这一页上的数据可能不是最新的。
         <button type="button" class="btn" @click="refreshAll">刷新</button>
@@ -1362,7 +1400,7 @@ async function decide(action, reason = '') {
            样式用 `.hy-progress`（单行、mono、tabular-nums）：与专项组那条进度线同一个语义。
            刻意不摆成一排事实胶囊 —— 下面日常组第一行就是那排胶囊，两排一样的看不出哪排是
            「今天的总数」、哪排是「日常这一项的进度」。 -->
-      <p v-if="employee" class="hy-progress">
+      <p v-if="employee" class="hy-progress count">
         今天要做 {{ todoTotal }} 项
         <!-- 「待我验收」也进这一行（真机走查 O4）：原来这一行只算自己那三组，于是有验收权、
              今天没人交的人读到「今天要做 0 项」；今天真有人交时下面又列着活 —— 上下自相矛盾。
@@ -1370,7 +1408,7 @@ async function decide(action, reason = '') {
              一直缺的空状态：有这权力但没人交，和根本没这权力，从此看得出区别。
              **写在同一颗 span 里**：两颗相邻标签之间的空白会被模板编译器消掉，实测渲染成
              「整改 0· 待我验收 0」（分隔号贴在前一个数字上）。 -->
-        <span>· 日常 {{ dailyCount }} · 专项 {{ deepCount }} · 整改 {{ fixCount }}<template v-if="canDailyReview"> · 待我验收 {{ reviewInbox.length }}</template></span>
+        <span class="count">· 日常 {{ dailyCount }} · 专项 {{ deepCount }} · 整改 {{ fixCount }}<template v-if="canDailyReview"><span class="count"> · 待我验收 {{ reviewInbox.length }}</span></template></span>
       </p>
 
       <!-- 「待我验收」：只有开了**「日常验收」**那一项的人有，且**今天真有人交了**才出现
@@ -1382,7 +1420,7 @@ async function decide(action, reason = '') {
            活等的就是他这一眼，有时效。 -->
       <section v-if="canDailyReview && reviewInbox.length" class="hy-queue-group">
         <h2>待我验收 <span>{{ reviewInbox.length }}</span></h2>
-        <p class="hy-staff-lead">同事交上来的，先看原图再判。你自己交的那份不能自己验收。</p>
+        <p class="hy-staff-lead">同事交的，先看原图再判；自己交的不能自己验收。</p>
         <button
           v-for="row in reviewInbox"
           :key="`review-${row.item_id}-${row.shift}`"
@@ -1420,7 +1458,7 @@ async function decide(action, reason = '') {
             </template>
           </p>
           <p class="hy-staff-lead">
-            你的班在「今天」页；要改今天上哪个班、在哪个区，找店长在排班页改那一天。
+            你的班在「今天」页；要改今天上哪个班、在哪个区，找超级管理员在排班页改那一天。
           </p>
           <button
             type="button"
@@ -1525,7 +1563,7 @@ async function decide(action, reason = '') {
         <p class="hy-staff-lead">全店专项，不按工作区或班次。每项拍清理前和清理后。</p>
         <p v-if="!deepInbox.length" class="hy-staff-lead">这一轮没有专项卫生。</p>
         <article
-          v-for="row in openDeep"
+          v-for="row in openDeepQueue"
           :key="`deep-${row.item_id}`"
           class="hy-task"
           :class="`is-${statusTone(row.status)}`"
@@ -1598,7 +1636,7 @@ async function decide(action, reason = '') {
         >开整改单</button>
         <p v-if="!fixInbox.length" class="hy-staff-lead">现在没有整改单。</p>
         <article
-          v-for="row in fixInbox"
+          v-for="row in fixQueue"
           :key="`fix-${row.id}`"
           class="hy-task"
           :class="[`is-${statusTone(row.status)}`, `is-${fixUrgency(row)}`]"

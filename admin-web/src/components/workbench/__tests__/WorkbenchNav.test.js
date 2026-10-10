@@ -52,7 +52,7 @@ describe('工作台级导航（今天 / 人事 / 卫生 / 后勤 / 我的）', (
     const wrapper = await mountNav('/workbench/hr/calendar', 'super')
 
     expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
-      '今天', '人事', '卫生', '选择岗位', '备货计划',
+      '今天', '人事', '卫生验收', '选择岗位', '备货计划',
     ])
     expect(wrapper.get('a[href="/workbench"]').text()).toBe('今天')
     // 站在人事组里，「人事」那一格亮。

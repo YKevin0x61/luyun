@@ -263,9 +263,9 @@ describe('员工卫生页 · 判据按「管理权限开关」，不按 permissi
     // 说清缺的是什么、去哪儿补，而不是把他打发去找一个自己就属于的角色。
     expect(alert).toContain('今天没有排到你的工作区')
     expect(alert).toContain('开单要在自己的区里开')
-    expect(alert).toContain('找店长在排班页')
-    // 旧文案（"先找店长确认今天的排班"）不许再回来 —— F-05 报告的原文。
-    expect(alert).not.toContain('先找店长确认今天的排班')
+    expect(alert).toContain('找超级管理员在排班页')
+    // 旧文案（"先找超级管理员确认今天的排班"）不许再回来 —— F-05 报告的原文。
+    expect(alert).not.toContain('先找超级管理员确认今天的排班')
     expect(alert).not.toContain('今天没有排到你的班')
     // 没有区就没得开：表单不该打开。
     expect(wrapper.find('#fix-zone').exists()).toBe(false)

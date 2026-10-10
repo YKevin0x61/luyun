@@ -250,15 +250,16 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
     <template v-else>
       <div v-if="summary" class="oCard">
         <div class="oCardHd">{{ summary.month }} 这个月</div>
+        <!-- 净时长 + 两枚状态徽章（t54 / ③-3c-3）：徽章替代原来那句解释性文案 ——
+             「已批准算数、待批不算数」由两枚徽章各自说清，不再用一句话解释。 -->
         <div class="oCardRow">
-          <span>已批准</span>
+          <span class="badge ok">已批准</span>
           <b>{{ formatHalfHours(summary.approved.net_half_hours) }} 小时</b>
         </div>
         <div class="oCardRow">
-          <span>待审批</span>
+          <span class="badge warn">待批</span>
           <b>{{ formatHalfHours(summary.pending.net_half_hours) }} 小时</b>
         </div>
-        <p class="oHint">只有「已批准」那一行是算数的；待审批的还可能被驳回。</p>
       </div>
 
       <!-- 店长那一面（票 04）：打开页面第一件事是「有什么等着我批」，所以它在登记
@@ -636,5 +637,11 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
 }
 .oRejectBox .oInput {
   min-width: 0;
+}
+
+/* 手机安全区（t52）：这页的 `.tTop` 来自共享样式表、顶槽写死 —— 页内补一条 scoped 覆盖，
+   只让位刘海，不动共享规则（它同时服务别的页）。判据看计算值。 */
+.overtime-page .tTop {
+  padding-top: max(18px, var(--safe-t));
 }
 </style>

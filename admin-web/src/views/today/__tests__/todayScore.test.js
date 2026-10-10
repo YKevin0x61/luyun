@@ -89,17 +89,27 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('「我的成绩」卡：近 7 天的一次通过率', () => {
-  it('主数字是一次通过率，旁边是一次通过与驳回次数，窗口固定问 days=7', async () => {
+describe('「我的成绩」卡：近 7 天的次数口径（与红黑榜同一份记录）', () => {
+  it('只报次数：一次通过 / 被驳回 / 实拍 三项，且全卡不出现百分率（原型 05 的口径）', async () => {
     const { wrapper, statsUrls } = await mountToday()
     const card = wrapper.get('.tA-card.score')
 
-    expect(card.get('.score-rate').text()).toBe('86%')
+    // 判据比改前更严：改前只断「主数字是 86%」，现在断**一个百分号都不许有**，
+    // 并把三条计数逐条钉住（t59 按原型 05 收敛掉百分率）。
+    expect(card.find('.score-rate').exists()).toBe(false)
+    expect(card.text()).not.toContain('%')
+
+    const rows = card.get('.score-split').findAll('div')
+    expect(rows).toHaveLength(3)
     const split = card.get('.score-split').text()
     expect(split).toContain('一次通过')
     expect(split).toContain('12 项')
     expect(split).toContain('被驳回')
     expect(split).toContain('2 次')
+    expect(split).toContain('实拍')
+
+    // 原型那句口径逐字搬过来，别让两张口径同时挂在仓库里
+    expect(card.text()).toContain('次数口径，与红黑榜同一份记录')
     expect(card.text()).toContain('近 7 天')
     // 窗口是这一条请求的 query（不是页面上写死的两个字）。
     expect(statsUrls).toEqual(['/api/hygiene/staff/me/stats?days=7'])
@@ -129,12 +139,16 @@ describe('「我的成绩」卡：近 7 天的一次通过率', () => {
     expect(card.text()).toContain('交一项就有记录')
   })
 
-  it('pass_rate 为 0（交了但都被驳）时照样显示 0%', async () => {
+  it('pass_rate 为 0（交了但都被驳）时报 0 项 / 3 次，而不是 0%', async () => {
     // 边界与上一条配对：真的 0 要显示，`null` 才不显示 —— 两条都不许被合并处理。
     const { wrapper } = await mountToday({
       stats: { ...STATS, first_pass: 0, rejected: 3, pass_rate: 0, reasons: [{ reason: '有水渍', count: 3 }] },
     })
-    expect(wrapper.get('.tA-card.score').get('.score-rate').text()).toBe('0%')
+    const card = wrapper.get('.tA-card.score')
+    expect(card.find('.score-rate').exists()).toBe(false)
+    expect(card.text()).not.toContain('%')
+    expect(card.get('.score-split').text()).toContain('0 项')
+    expect(card.get('.score-split').text()).toContain('3 次')
   })
 
   it('读不出来只影响这张卡：说出话来 + 一个重试', async () => {

@@ -8,8 +8,8 @@ import { createPinia, setActivePinia } from 'pinia'
  * 「你能做的事」能力卡（票 01 / ADR 0093）。
  *
  * 病灶：被放权的员工在系统里看不见自己是谁 —— 能做什么、**还缺哪一项**都得靠撞墙试。
- * 这一块卡把十项开关里**员工端真有执行点的那三项**逐条摊开（开了的给说明，没开的写
- * 「店长还没开给你」），并说清这些事都在手机端「卫生」页里做。
+ * 这一块卡把十项开关里**员工端真有执行点的四项**逐条摊开（开了的给说明，没开的写
+ * 「超级管理员还没开给你」），并说清这些事都在手机端「卫生」页里做。
  *
  * 这一条跟同目录 `todayAccount.test.js` 一样**真挂一遍**页，断言只压外部行为：
  * 渲染出了什么文案、哪几行、整块在不在。不碰内部结构，也不断言那七项未接线的键。
@@ -83,6 +83,7 @@ async function mountToday({ caps = [], permission = '普通员工' } = {}) {
     routes: [
       { path: '/workbench/me/today', component: { template: '<div />' } },
       { path: '/workbench/me/clean', component: { template: '<div />' } },
+      { path: '/workbench/me/overtime', component: { template: '<div />' } },
     ],
   })
   await router.push('/workbench/me/today')
@@ -121,20 +122,20 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     expect(card.text()).not.toContain('admin_caps')
   })
 
-  it('没开通的能力也列出来，写明「店长还没开给你」—— 员工由此知道该找店长开什么', async () => {
-    // 只开了日常验收：他要能看出「专项验收」不是系统不给，是店长还没开。
+  it('没开通的能力也列出来，写明「超级管理员还没开给你」—— 员工由此知道该找谁开（ADR 0103）', async () => {
+    // 只开了日常验收：他要能看出「专项验收」不是系统不给，是超级管理员还没开（ADR 0103）。
     const { wrapper } = await mountToday({ caps: ['daily_review'], permission: '管理员' })
     const card = wrapper.get('.tA-card.caps')
 
-    expect(rowFor(wrapper, '专项验收').text()).toContain('店长还没开给你')
-    expect(rowFor(wrapper, '整改单').text()).toContain('店长还没开给你')
+    expect(rowFor(wrapper, '专项验收').text()).toContain('超级管理员还没开给你')
+    expect(rowFor(wrapper, '整改单').text()).toContain('超级管理员还没开给你')
     // 没开的那两项**不能**顺带把说明也摆出来（摆出来就等于说这项能用）。
     expect(rowFor(wrapper, '专项验收').text()).not.toContain('判专项卫生的前后对照')
     expect(rowFor(wrapper, '整改单').text()).not.toContain('开整改单、验收或驳回整改单')
     // 开了的那一项反过来：给的是说明，不是「还没开给你」。
     expect(rowFor(wrapper, '日常验收').text()).toContain('判别人交的日常检查，看原图与标准图对照')
-    expect(rowFor(wrapper, '日常验收').text()).not.toContain('店长还没开给你')
-    // 三项都在卡上（不是只列开了的那一项）。
+    expect(rowFor(wrapper, '日常验收').text()).not.toContain('超级管理员还没开给你')
+    // 四项都在卡上（不是只列开了的那一项）。
     expect(card.text()).toContain('日常验收')
     expect(card.text()).toContain('专项验收')
     expect(card.text()).toContain('整改单')
@@ -146,7 +147,7 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     // 整块不在：连标题都不该留一个空壳。
     expect(wrapper.find('.tA-card.caps').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('你能做的事')
-    expect(wrapper.text()).not.toContain('店长还没开给你')
+    expect(wrapper.text()).not.toContain('超级管理员还没开给你')
 
     // 其余四块一块都不少：今天上不上班、今天的活、我的成绩、账号信息。
     expect(wrapper.get('.tA-card.sched').text()).toContain('白班')
@@ -163,16 +164,31 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     expect(wrapper.text()).not.toContain('你能做的事')
   })
 
-  it('脚注说清这些事都在手机端「卫生」页里做，并给一个去那里的入口', async () => {
-    const { wrapper, router } = await mountToday({ caps: ['daily_review'], permission: '管理员' })
+  it('能力卡计 4 项，逐项各有落点，加班那项去「加班与补钟」页（§12 第 1 条）', async () => {
+    const { wrapper, router } = await mountToday({
+      caps: ['daily_review', 'deep_review', 'fix', 'overtime'],
+      permission: '管理员',
+    })
     const card = wrapper.get('.tA-card.caps')
-    expect(card.text()).toContain('这三项都在手机端「卫生」页里做')
 
-    const go = card.findAll('button').find((btn) => btn.text().includes('卫生'))
-    expect(go).toBeTruthy()
-    await go.trigger('click')
+    // 4 项都摊开（开的给说明，没开的写「超级管理员还没开给你」）
+    expect(card.findAll('.cap-row')).toHaveLength(4)
+
+    // 旧脚注那句已删：它说的是「这三项」，在三项时成立、多一项就成了假话
+    expect(card.text()).not.toContain('这三项都在手机端')
+
+    // 每一项各有自己的入口，落点写在按钮上（不是页尾一句概括）
+    const gos = card.findAll('.cap-go')
+    expect(gos).toHaveLength(4)
+    const tos = gos.map((btn) => btn.attributes('data-to'))
+    expect(new Set(tos).size).toBeGreaterThan(1)
+    expect(tos.filter((to) => to === '/workbench/me/overtime')).toHaveLength(1)
+
+    // 点加班那一项的路，真的落到加班页（不是只挂了个属性）
+    const overtime = gos.find((btn) => btn.attributes('data-to') === '/workbench/me/overtime')
+    await overtime.trigger('click')
     await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/workbench/me/clean')
+    expect(router.currentRoute.value.path).toBe('/workbench/me/overtime')
   })
 
   it('档位标签从账号信息里拿掉（信息由这张卡承载），姓名 / 区域 / 班次 / 职位照旧可读', async () => {

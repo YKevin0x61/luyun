@@ -240,7 +240,8 @@ useNudgePull({
   display: flex;
   align-items: baseline;
   gap: 10px;
-  padding: 18px 16px 14px;
+  /* 手机安全区四项让位（t52，口径同 t49）：顶槽取 max，左右同 max */
+  padding: max(18px, var(--safe-t)) max(16px, var(--safe-r)) 14px max(16px, var(--safe-l));
 }
 
 .tDay {

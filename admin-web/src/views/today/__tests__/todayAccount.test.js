@@ -222,7 +222,7 @@ describe('「今天」页尾的账号设置（从卫生页搬来）', () => {
     await rowButton(wrapper, '重新选择区域和班次').trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('今天上哪个班、在哪个区由排班决定；要改哪一天，找店长在排班页改。')
+    expect(wrapper.text()).toContain('今天上哪个班、在哪个区由排班决定；要改哪一天，找超级管理员在排班页改。')
     expect(scrolled).toHaveLength(1)
     // 一个选择器都不该弹出来，也没有任何写请求（员工改不了班次与区）。
     expect(wrapper.find('select').exists()).toBe(false)
