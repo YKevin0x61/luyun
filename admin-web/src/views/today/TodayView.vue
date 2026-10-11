@@ -612,6 +612,8 @@ const profileError = ref('')
 const profileFlash = ref('')
 const profilePhoneConfirmOpen = ref(false)
 const passwordOpen = ref(false)
+// t71：资料表折叠后的二级视图（页内弹层，不开新路由）
+const moreOpen = ref(false)
 const currentPassword = ref('')
 const newPassword = ref('')
 const confirmPassword = ref('')
@@ -766,7 +768,7 @@ function openShiftNotice() {
  *  - 关掉 → 焦点回到打开它的那颗按钮（否则焦点掉到 body，键盘用户直接迷路）。
  * 写法照 `views/hygiene/HygieneHomeView.vue` 里那套（全仓此前唯一在用 `inert` 的地方）。
  */
-const anyModalOpen = computed(() => [attireSheet, sheet, swapSheet, profileOpen, passwordOpen].some((r) => Boolean(r.value)))
+const anyModalOpen = computed(() => [attireSheet, sheet, swapSheet, profileOpen, passwordOpen, moreOpen].some((r) => Boolean(r.value)))
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 let lastFocusedElement = null
 
@@ -821,6 +823,24 @@ onMounted(() => {
 })
 
 onUnmounted(() => document.removeEventListener('keydown', onModalKeydown))
+
+/**
+ * **测试专用暴露面（t72）**：`openModal('more' | 'profile' | 'password' | 'leave' | 'swap' | 'attire')`。
+ * 为什么要开这个口子：弹层的入口按钮依赖数据（无申请 / 无班次时不渲染），
+ * 而焦点陷阱与背景隔离的判据必须在**弹层开着**的前提下实测 —— 见
+ * `__tests__/todayModalFocus.test.js`。生产代码不会调用它。
+ */
+function openModal(key) {
+  const map = {
+    more: moreOpen, profile: profileOpen, password: passwordOpen,
+    leave: sheet, swap: swapSheet,
+  }
+  if (key === 'attire') { attireSheet.value = 'standard'; return }
+  const target = map[key]
+  if (!target) throw new Error('unknown modal: ' + key)
+  target.value = true
+}
+defineExpose({ openModal })
 
 // 实时（票 10 收尾）：店长改了我的班、批了我的假、有人找我换班、或者我这区的卫生
 // 待办变了 —— 三块各拉各的（都是轻量 GET，nudge 本身不带数据），一次全刷到。
@@ -1155,12 +1175,7 @@ useNudgePull({
           </div>
           <p v-if="profileFlash" class="me-flash" role="status">{{ profileFlash }}</p>
           <p v-if="passwordFlash" class="me-flash" role="status">{{ passwordFlash }}</p>
-          <dl v-if="staffMe" class="me-meta">
-            <div>
-              <dt>姓名</dt>
-              <dd>{{ staffMe.name || '未设置' }}</dd>
-            </div>
-            <div>
+          <dl v-if="staffMe" class="me-meta">            <div>
               <dt>手机号</dt>
               <dd>{{ staffMe.phone }}</dd>
             </div>
@@ -1171,20 +1186,7 @@ useNudgePull({
             <div>
               <dt>当天班次</dt>
               <dd>{{ hygieneShiftLabel(staffMe.shift) }}</dd>
-            </div>
-            <div v-if="hygieneDue">
-              <dt>本班日常截止</dt>
-              <dd>{{ hygieneDue }} 前交</dd>
-            </div>
-            <div v-if="deepDue">
-              <dt>专项截止</dt>
-              <dd>{{ deepDue }} 前做完</dd>
-            </div>
-            <div>
-              <dt>职位</dt>
-              <dd>{{ staffMe.job_title || '未设置' }}</dd>
-            </div>
-            <!-- 档案两行（2026-10 花名册改版）：入职日期与健康证到期日由超管在花名册里补录，
+            </div>            <!-- 档案两行（2026-10 花名册改版）：入职日期与健康证到期日由超管在花名册里补录，
                  员工自己只读。底薪与身份证号**不下发也不显示**（敏感字段边界）。 -->
             <div>
               <dt>入职日期</dt>
@@ -1204,14 +1206,11 @@ useNudgePull({
                 <template v-if="seniorityNextText"> · {{ seniorityNextText }}</template>
               </dd>
             </div>
-            <!-- 生日（票 06）：**从身份证号派生出来单独下发的那一列**，身份证号本身
-                 一条都不下发（`docs/adr/0098` / `0102`）。读不出身份证就不渲染这一行 ——
-                 没有生日不是「1 月 1 日」，不该摆一个值在那儿让人误会。 -->
-            <div v-if="staffMe.birthday">
-              <dt>生日</dt>
-              <dd>{{ birthdayText(staffMe.birthday) }}<span class="tL-hint">（按身份证）</span></dd>
-            </div>
           </dl>
+          <!-- 折走的 5 项（姓名/本班日常截止/专项截止/职位/生日）：不在本屏铺开，但必须可达（t71） -->
+          <div class="me-more">
+            <button class="btn tL-cancel" type="button" @click="moreOpen = true">完整资料 ›</button>
+          </div>
           <ul class="tL-list">
             <li>
               <span class="tL-line">修改个人信息</span>
@@ -1237,6 +1236,47 @@ useNudgePull({
           排班只说班次，不说几点上班 —— 钟点只有卫生那边才有（逾期点）。
         </p>
       </template>
+    </div>
+
+    <!-- 「完整资料」二级视图（t71 / ③-3k）：本屏按裁定只列 6 行，其余 5 项在这里。
+         刻意做成**页内弹层**而不是新路由（路由路径一个字节不改），复用
+         `.modal-overlay/.modal-box` → 自动继承 t68 的焦点陷阱 + 背景 inert。 -->
+    <div
+      v-if="moreOpen"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="me-more-title"
+      @click.self="moreOpen = false"
+    >
+      <div class="modal-box">
+        <div class="modal-header">
+          <h3 id="me-more-title">完整资料</h3>
+          <button class="btn" type="button" @click="moreOpen = false">关闭</button>
+        </div>
+        <dl v-if="staffMe" class="me-meta">
+          <div>
+            <dt>姓名</dt>
+            <dd>{{ staffMe.name || '未设置' }}</dd>
+          </div>
+          <div v-if="hygieneDue">
+            <dt>本班日常截止</dt>
+            <dd>{{ hygieneDue }} 前交</dd>
+          </div>
+          <div v-if="deepDue">
+            <dt>专项截止</dt>
+            <dd>{{ deepDue }} 前做完</dd>
+          </div>
+          <div>
+            <dt>职位</dt>
+            <dd>{{ staffMe.job_title || '未设置' }}</dd>
+          </div>
+          <div v-if="staffMe.birthday">
+            <dt>生日</dt>
+            <dd>{{ birthdayText(staffMe.birthday) }}</dd>
+          </div>
+        </dl>
+      </div>
     </div>
 
     <!-- 仪容仪表的拍照弹层（票 12）：两步 —— 先看标准图、再开相机。**不同屏**是 ADR

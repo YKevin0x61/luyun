@@ -107,6 +107,18 @@ function rowFor(wrapper, label) {
   return row
 }
 
+/** t71：点开「完整资料」二级视图，并读出它的内容（折叠后的 5 项应当在这里可达）。 */
+async function openMore(wrapper) {
+  const entry = wrapper.findAll('button').find((b) => b.text().includes('完整资料'))
+  expect(entry, '主表里没有「完整资料」入口').toBeTruthy()
+  await entry.trigger('click')
+  await flushPromises()
+}
+function moreText(wrapper) {
+  const boxes = wrapper.findAll('.me-meta')
+  return boxes[boxes.length - 1].text()
+}
+
 describe('「我的」页 · 你能做的事（能力卡）', () => {
   it('开了的能力逐条列出，每条带一句说明', async () => {
     const { wrapper } = await mountToday({ caps: ['daily_review', 'fix'], permission: '管理员' })
@@ -153,7 +165,10 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     expect(wrapper.get('.tA-card.sched').text()).toContain('白班')
     expect(wrapper.find('.tA-card.hyg').exists()).toBe(true)
     expect(wrapper.find('.tA-card.score').exists()).toBe(true)
-    expect(wrapper.get('.me-meta').text()).toContain('余威威')
+    // t71：姓名已折进「完整资料」二级视图 —— 主表不再有它，但点开必须可达
+    expect(wrapper.get('.me-meta').text()).not.toContain('余威威')
+    await openMore(wrapper)
+    expect(moreText(wrapper)).toContain('余威威')
   })
 
   it('档位标签写着「管理员」但一项开关都没给：照样不渲染（判据是开关，不是标签）', async () => {
@@ -191,7 +206,7 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     expect(router.currentRoute.value.path).toBe('/workbench/me/overtime')
   })
 
-  it('档位标签从账号信息里拿掉（信息由这张卡承载），姓名 / 区域 / 班次 / 职位照旧可读', async () => {
+  it('档位标签从账号信息里拿掉（信息由这张卡承载）；主表只列 6 行，姓名 / 职位折进二级视图仍可读', async () => {
     const { wrapper } = await mountToday({ caps: ['daily_review'], permission: '管理员' })
     const card = wrapper.get('.tA-card.caps')
     const meta = wrapper.get('.me-meta')
@@ -201,12 +216,16 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     // 账号信息回到纯资料：档位那一行没了。
     expect(meta.text()).not.toContain('卫生权限')
     expect(meta.text()).not.toContain('管理员')
-    // 该读的还读得到。
-    expect(meta.text()).toContain('余威威')
+    // 主表留下的 6 行（t71 折叠后）
     expect(meta.text()).toContain('13800000000')
     expect(meta.text()).toContain('案板')
     expect(meta.text()).toContain('白班')
-    expect(meta.text()).toContain('领班')
+    // 折走的姓名 / 职位：主表不再有，但点开「完整资料」必须仍可读（不许丢）
+    expect(meta.text()).not.toContain('余威威')
+    expect(meta.text()).not.toContain('领班')
+    await openMore(wrapper)
+    expect(moreText(wrapper)).toContain('余威威')
+    expect(moreText(wrapper)).toContain('领班')
   })
 
   it('只列员工端真有执行点的那四项：库里存着未接线的那七项也不画成能力', async () => {

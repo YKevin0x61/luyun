@@ -113,17 +113,35 @@ afterEach(() => {
   Element.prototype.scrollIntoView = originalScrollIntoView
 })
 
+/** t71：点开「完整资料」二级视图，并读出它的内容（折叠后的 5 项应当在这里可达）。 */
+async function openMore(wrapper) {
+  const entry = wrapper.findAll('button').find((b) => b.text().includes('完整资料'))
+  expect(entry, '主表里没有「完整资料」入口').toBeTruthy()
+  await entry.trigger('click')
+  await flushPromises()
+}
+function moreText(wrapper) {
+  const boxes = wrapper.findAll('.me-meta')
+  return boxes[boxes.length - 1].text()
+}
+
 describe('「今天」页尾的账号设置（从卫生页搬来）', () => {
   it('三行入口都在，资料用的是卫生那条 /staff/me（不额外发请求）', async () => {
     const { wrapper } = await mountToday()
     for (const label of ['修改个人信息', '修改密码', '重新选择区域和班次']) {
       expect(wrapper.text()).toContain(label)
     }
-    expect(wrapper.get('.me-meta').text()).toContain('余威威')
-    expect(wrapper.get('.me-meta').text()).toContain('13800000000')
-    expect(wrapper.get('.me-meta').text()).toContain('案板')
-    expect(wrapper.get('.me-meta').text()).toContain('18:00 前交')
-    expect(wrapper.get('.me-meta').text()).toContain('20:00 前做完')
+    // t71：主表按裁定只列 6 行；姓名 / 两个截止 / 职位 / 生日 折进「完整资料」二级视图
+    const meta = wrapper.get('.me-meta').text()
+    expect(meta).toContain('13800000000')
+    expect(meta).toContain('案板')
+    expect(meta).not.toContain('余威威')
+    expect(meta).not.toContain('18:00 前交')
+    await openMore(wrapper)
+    const more = moreText(wrapper)
+    expect(more).toContain('余威威')
+    expect(more).toContain('18:00 前交')
+    expect(more).toContain('20:00 前做完')
   })
 
   it('改手机号：先确认再发 PATCH，body 是姓名 + 新号', async () => {
