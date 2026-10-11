@@ -367,7 +367,7 @@ function pickStandard(event) {
   opacity: 0;
   cursor: pointer;
 }
-@media (max-width: 700px) {
+@media (max-width: 720px) {
   .attire-row { grid-template-columns: 1fr; }
   .shot-cell img { width: 100%; }
 }

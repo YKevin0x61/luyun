@@ -459,7 +459,7 @@ function gotoPage(next) {
     <ConfirmDialog
       v-if="deleteTarget"
       title="删除这条记录"
-      :message="`删除「${deleteTarget.title || deleteTarget.kind_label}」（${deleteTarget.business_date}）以及它的照片。删了不能恢复；如果它还在等待验收，这一项会回到待拍。`"
+      :message="`删除「${deleteTarget.title || deleteTarget.kind_label}」（${deleteTarget.business_date}）以及它的照片。删了不能恢复；如果它还在等验收，这一项会回到待拍。`"
       confirm-label="删除"
       danger
       @confirm="confirmDelete"

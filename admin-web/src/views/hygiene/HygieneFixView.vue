@@ -330,10 +330,10 @@ async function confirmDelete() {
     <div class="daily-grid">
       <div class="table-card">
         <div class="table-card-header">
-          <h3>待验收 <span>{{ pending.length }}</span></h3>
+          <h3>等验收 <span>{{ pending.length }}</span></h3>
         </div>
         <div v-if="loading" class="roster-empty">正在加载…</div>
-        <div v-else-if="!pending.length" class="roster-empty">现在没有待验收的整改回拍。</div>
+        <div v-else-if="!pending.length" class="roster-empty">现在没有等验收的整改回拍。</div>
         <ul v-else class="queue-list">
           <li v-for="row in pending" :key="row.id">
             <button
@@ -437,7 +437,7 @@ async function confirmDelete() {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
-@media (max-width: 800px) {
+@media (max-width: 900px) {
   .open-grid { grid-template-columns: 1fr; }
 }
 .editor-field {

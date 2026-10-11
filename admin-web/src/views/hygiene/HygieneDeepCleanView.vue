@@ -365,10 +365,10 @@ async function markTeaching() {
     <div class="daily-grid">
       <div class="table-card">
         <div class="table-card-header">
-          <h3>待验收 <span>{{ queue.length }}</span></h3>
+          <h3>等验收 <span>{{ queue.length }}</span></h3>
         </div>
         <div v-if="loading" class="roster-empty">正在加载…</div>
-        <div v-else-if="!queue.length" class="roster-empty">现在没有待验收的专项前后对照。</div>
+        <div v-else-if="!queue.length" class="roster-empty">现在没有等验收的专项前后对照。</div>
         <ul v-else class="queue-list">
           <li v-for="row in queue" :key="row.item_id">
             <button
@@ -446,7 +446,7 @@ async function markTeaching() {
   gap: 14px;
   align-items: start;
 }
-@media (max-width: 980px) {
+@media (max-width: 900px) {
   .deep-grid { grid-template-columns: 1fr; }
 }
 
@@ -473,7 +473,7 @@ async function markTeaching() {
   white-space: nowrap;
 }
 .clock-field :deep(.luyun-time-picker) { width: 108px; }
-@media (max-width: 640px) {
+@media (max-width: 720px) {
   .clocks-card { grid-template-columns: 1fr; }
 }
 

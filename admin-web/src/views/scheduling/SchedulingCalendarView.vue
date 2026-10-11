@@ -1,5 +1,5 @@
 <script setup>
-// 店长端「排班」。版式按原型的 B · 月历（`.scratch/scheduling/prototype/admin-variants.html`
+// 超级管理员端「排班」。版式按原型的 B · 月历（`.scratch/scheduling/prototype/admin-variants.html`
 // 的 `[data-variant="B"]`）：一屏是本月人手网格（每格写当天白班、夜班各几人），
 // 下面一张卡是选中那天「谁上哪个班」，底下一根「还没配规则的人」的条。
 //
@@ -63,7 +63,7 @@ const shiftById = computed(() => {
 // 配规则用的班次列表：只出**还在用**的（服务端 `_require_shifts_usable` 是同一条口径，
 // 单日覆盖那条路也校验）。`shifts` 那份是显示用的，带着「这个月真有行的停用班次」——
 // 它们必须出现在月历和当天名单上（票 11：停用后历史排班照旧显示），但出现在周期解析
-// 或固定工作区的选择里，店长选完只会吃一句 400。
+// 或固定工作区的选择里，超级管理员选完只会吃一句 400。
 const activeShifts = computed(() => shifts.value.filter((shift) => shift.is_active))
 
 // 这个月有几天是被单日覆盖改过的（票 07）：>0 时图例里多一句「青点 = 这天有改动」，
@@ -73,14 +73,14 @@ const overriddenDays = computed(() =>
 )
 
 // 没有班的人分两拨：批过假的（`leave`，服务层从覆盖记录的 `kind` 认出来）与本来就休的。
-// 两者在结果表里长得一样（`shift_id` 都是空），只有这里分得开 —— 不然店长分不清
+// 两者在结果表里长得一样（`shift_id` 都是空），只有这里分得开 —— 不然超级管理员分不清
 // 「这人请假了」和「这人今天本来就休」，也分不清它跟票 07 手动改成的休。
 const offPeople = computed(() => (dayDetail.value && dayDetail.value.off_people) || [])
 const leavePeople = computed(() => offPeople.value.filter((person) => person.leave))
 const restPeople = computed(() => offPeople.value.filter((person) => !person.leave))
 
 // 展开只铺未来若干天（长度归服务层的 `EXPANSION_DAYS`，票 02 的验收项）。翻到窗口尽头那个月时，
-// 剩下一周注定是空的 —— 不说清楚的话，店长会把它读成「那天没人上班」。
+// 剩下一周注定是空的 —— 不说清楚的话，超级管理员会把它读成「那天没人上班」。
 const beyondNote = computed(() => {
   const data = calendar.value
   if (!data || !data.window_end) return ''
@@ -184,7 +184,7 @@ async function loadDay(businessDate) {
   }
   selectedDate.value = businessDate
   // 换一天先把上一天的人清掉（模板对 null 有「读取中…」兜底）：请求失败时表头已经是
-  // 新那天、名单却还列着旧那天的人，店长会照着错的名单改班（审查发现的 A2）。
+  // 新那天、名单却还列着旧那天的人，超级管理员会照着错的名单改班（审查发现的 A2）。
   dayDetail.value = null
   try {
     dayDetail.value = await api.get('/api/scheduling/day', { date: businessDate })
@@ -227,7 +227,7 @@ async function openPanel(next) {
 // 提示条要用同一个口径，所以只写这一份纯函数。
 function needsRule(employee) {
   // 「配了但读不出来」也要算进来：那种人在月历上同样不会有新班（`expand()` 会跳过他们），
-  // 而名单上只写「还没配」的话，店长会以为是没配过 —— 两拨都是要处理的人。
+  // 而名单上只写「还没配」的话，超级管理员会以为是没配过 —— 两拨都是要处理的人。
   return (!employee.rule || employee.rule.invalid) && !employee.disabled && employee.approved
 }
 
@@ -242,7 +242,7 @@ function countPending(employees) {
 // 当天卡的颜色里凭空消失 —— 而它在这个月明明还有行（票 11 验收②：停用之后历史排班照旧
 // 显示）。数人只需要 `employees`。
 //
-// 读不出来时置 `null`（**不是 0**）：显示成「全员都配好了」是一句假话，店长会照着它放心。
+// 读不出来时置 `null`（**不是 0**）：显示成「全员都配好了」是一句假话，超级管理员会照着它放心。
 const pendingCount = ref(null)
 const pendingText = computed(() => {
   if (pendingCount.value === null) return '名单没读出来：点开重试一次'
@@ -260,7 +260,7 @@ async function loadPendingCount() {
 // 月历上的**待批角标**（spec US 11）：哪天有等着批的请假 / 换班。
 //
 // 数据现成 —— `/inbox` 每条申请带 `start_date` / `end_date`，这里按天摊开数一遍就够了，
-// 不用后端再出一个接口。这条验收在票 02 与票 06 之间被转手两次、一直没人接，结果是店长
+// 不用后端再出一个接口。这条验收在票 02 与票 06 之间被转手两次、一直没人接，结果是超级管理员
 // 只能滑到底、点进待办页才知道有几条在等他批。
 //
 // 读不出来就**不标**（空表）：宁可少一个角标，也不能在一个没读到的日子上标错数字。
@@ -490,14 +490,14 @@ const weekExcludedNote = computed(() => {
 
 // ── 底部抽屉：点一格从底下弹出来选班次（照门店那套的做法）────────────────────
 // 与图片那套的一处刻意不同：抽屉弹出来时给页面**留出底部空间**（`.gB.sheet-open` 的
-// padding-bottom）—— 不这么做，它压住的正是下面几行员工，而那几行恰好是店长要对照的。
+// padding-bottom）—— 不这么做，它压住的正是下面几行员工，而那几行恰好是超级管理员要对照的。
 const sheet = ref(null) // { employeeId, date } | null
 const sheetTab = ref('shift') // 'shift' | 'cycle'
 const sheetFolded = ref(false)
 const sheetError = ref('')
 const sheetBusy = ref(false)
 // 抽屉里的「工作区」下拉（2026-10-04 补）：区字符串 id，'' = 跟这个班次的固定区。
-// 原先抽屉里改不了区，店长得跳去月历那页点这个人才行 —— 周表上发现"今天他不在案板"，
+// 原先抽屉里改不了区，超级管理员得跳去月历那页点这个人才行 —— 周表上发现"今天他不在案板"，
 // 却要换个页面才改得动，路太绕。写路径没变：还是单日覆盖那条（带上当天的班次一起提交）。
 const sheetZone = ref('')
 
@@ -592,7 +592,7 @@ async function openSheet(employee, day) {
 
 /** 打开某一格时把笔**跟着这一格走**：展开看的是它，折叠起来刷的就是"跟它一样"。
  *  格子里没有班次（休 / 假 / 还没排）时不动笔 —— 看了一眼休假日就把笔也换成"休"，
- *  接着往下刷会把别人刷成休，那不是店长要的。 */
+ *  接着往下刷会把别人刷成休，那不是超级管理员要的。 */
 function syncBrushFromCell() {
   const cell = sheetCell.value
   if (cell && cell.scheduled && cell.shift_id !== null && cell.shift_id !== undefined) {
@@ -605,7 +605,7 @@ function syncBrushFromCell() {
 }
 
 /** 笔还没选班次时给一个默认值（第一个在用的班次）：进周表笔袋就是开的，
- *  总不能让店长先面对一个"选班次"的空下拉再点格子。班次表还没读回来时先留空，
+ *  总不能让超级管理员先面对一个"选班次"的空下拉再点格子。班次表还没读回来时先留空，
  *  读回来了由下面那个 watch 补上。 */
 function ensureBrushShift() {
   if (brushShiftId.value === null && activeShifts.value.length) {
@@ -622,7 +622,7 @@ async function openBrush() {
   sheetFolded.value = true
   sheetError.value = ''
   // 工作区名单跟抽屉是同一份、也是懒加载的：不先补齐，笔袋里那个下拉就只有
-  // 「跟固定区」一项 —— 店长选不到区，会以为笔刷不支持选区。
+  // 「跟固定区」一项 —— 超级管理员选不到区，会以为笔刷不支持选区。
   if (!zones.value.length) await loadRoster()
   ensureBrushShift()
 }
@@ -644,10 +644,10 @@ async function openCycleTab() {
 async function refreshAfterWeekWrite(date) {
   await loadWeek(week.value ? week.value.start : weekStart.value)
   // 抽屉里的「工作区」下拉按服务端**回写后的结果**重新落位：不给区时后端会回填这个班次的
-  // 固定区，下拉不能停在店长刚才点的那个值上（那会跟格子里显示的对不上）。
+  // 固定区，下拉不能停在超级管理员刚才点的那个值上（那会跟格子里显示的对不上）。
   syncSheetZone()
   // 月历那一份只补**人数**，不动选中那天（`loadCalendar` 会把选中拨回今天/1 号，
-  // 店长从周表切回月历不该发现自己在月历上挑的那天被换掉了）。
+  // 超级管理员从周表切回月历不该发现自己在月历上挑的那天被换掉了）。
   await refreshMonthCounts()
   if (date && date === selectedDate.value) await loadDay(date)
 }
@@ -672,7 +672,7 @@ async function writeOverride(employeeId, date, payload) {
     await refreshAfterWeekWrite(date)
   } catch (err) {
     // 服务端把「为什么改不了」说全了（过去的日子、还没铺到的天、休不能带班次…），
-    // 原话转给店长，别拿一句「保存失败」盖掉。
+    // 原话转给超级管理员，别拿一句「保存失败」盖掉。
     sheetError.value = err.message || '这一天没改上'
   } finally {
     sheetBusy.value = false
@@ -805,7 +805,7 @@ const hasPendingMarks = computed(() => Object.keys(pendingMarks.value).length > 
 
 function ruleLabel(rule) {
   // 三种状态分开说：没配过（`null`）/ 配了但读不出来（`invalid`）/ 正常。
-  // 以前 `!rule.cycle` 一律说「还没配」—— 规则坏掉的人被显示成没配过，店长照着配一遍
+  // 以前 `!rule.cycle` 一律说「还没配」—— 规则坏掉的人被显示成没配过，超级管理员照着配一遍
   // 也修不好（那条坏行还在，得先清空再配），真正的原因（脏数据）也看不出来。
   if (!rule) return '还没配'
   if (rule.invalid) return '规则坏了，重配一条'
@@ -849,7 +849,7 @@ async function clearRule(employee) {
 }
 
 // ── 轮转周期（票 04）─────────────────────────────────────────────────
-// 一格 = 一个营业日，格子里是班次名或「休」。店长在输入框里按天写下来（空格隔开），
+// 一格 = 一个营业日，格子里是班次名或「休」。超级管理员在输入框里按天写下来（空格隔开），
 // 起点默认今天；周期长度 1 就是「固定某个班」，上面那些「固定白班」按钮是这条路径的
 // 快捷方式，走的还是同一个 PUT —— 不是另一套逻辑。
 const cycleOpenId = ref(null)
@@ -862,7 +862,7 @@ const cycleError = ref('')
 const maxCycleDays = ref(null)
 const REST_WORDS = ['休', '休息', '空', 'x', 'X', '-', '—']
 // 输入框的示例按**当前班次名**拼，不把「白班/夜班」写死在文案里（班次可配置，票 11）。
-// 名字取的是**还在用**的那份（`activeShifts`）：示例里出现一个停用班次，等于教店长
+// 名字取的是**还在用**的那份（`activeShifts`）：示例里出现一个停用班次，等于教超级管理员
 // 写一个保存必被拒的周期。
 const cyclePlaceholder = computed(() => {
   const names = (activeShifts.value || []).map((shift) => shift.name)
@@ -879,7 +879,7 @@ function openCycle(employee) {
   // 空串会在保存时被安静地丢掉，周期就少一格、后面每一格整体前移一天。
   // 「查不到」= 这个月没有它的行、又不在启用列表里（显示用的 `shifts` 只带这个月
   // 真有行的停用班次）。停用但还查得到的，会照名字写出来 —— 那一格由 `parseCycle`
-  // 拦下来（它只认启用班次），店长照样得把它改掉。
+  // 拦下来（它只认启用班次），超级管理员照样得把它改掉。
   cycleText.value = rule && rule.cycle
     ? rule.cycle.map((id) => (id === null ? '休' : (shiftById.value[id] || {}).name || `#${id}`)).join(' ')
     : ''
@@ -892,7 +892,7 @@ function closeCycle() {
 }
 
 // 输入框里的字 → 服务端要的 `cycle` 数组。错在哪一格就用「第 N 格」说出来，
-// 别让店长对着「排班参数不合法」猜。
+// 别让超级管理员对着「排班参数不合法」猜。
 function parseCycle(text) {
   const tokens = String(text || '').split(/[\s,，、·/]+/).filter(Boolean)
   // 例子按**当前班次名**拼：班次是数据（票 11 能改名、能加第三个），文案里写死
@@ -906,7 +906,7 @@ function parseCycle(text) {
   }
   // 只认**还在用**的班次名：停用班次写进周期，服务端 `_require_shifts_usable` 会拒
   // （`unknown_shift_in_cycle`），不如在这一层就说清是第几格 —— 页面上那份不该让
-  // 店长写出一个保存必失败的周期。
+  // 超级管理员写出一个保存必失败的周期。
   const byName = new Map((activeShifts.value || []).map((shift) => [shift.name, shift.id]))
   const cycle = []
   for (let index = 0; index < tokens.length; index += 1) {
@@ -1019,7 +1019,7 @@ watch(selectedDate, () => {
 })
 
 // 写完之后底下那张当天卡要重读：`loadCalendar` 会把选中那天拨回「今天/1 号」，
-// 所以再把店长刚才改的那天读回来（他刚改完还要看结果）。
+// 所以再把超级管理员刚才改的那天读回来（他刚改完还要看结果）。
 async function refreshAfterWrite(day) {
   await loadCalendar(monthValue.value)
   if (day) await loadDay(day)
@@ -1045,7 +1045,7 @@ async function saveOverride() {
     await refreshAfterWrite(day)
   } catch (err) {
     // 后端把「为什么改不了」说全了（过去的日子、还没铺到的天、休不能带班次…），
-    // 原话转给店长，别拿一句「保存失败」盖掉。
+    // 原话转给超级管理员，别拿一句「保存失败」盖掉。
     editError.value = err.message || '这一天没改上'
   } finally {
     overrideBusy.value = false
@@ -1083,7 +1083,7 @@ useNudgePull({
   pull: async () => {
     await loadCalendar(monthValue.value, true)
     await refreshNotes()
-    // 周表开着的时候它也得跟着动：员工那边换了班，店长盯着的正是这张表。
+    // 周表开着的时候它也得跟着动：员工那边换了班，超级管理员盯着的正是这张表。
     if (panel.value === 'week') await loadWeek(weekStart.value)
   },
 })
@@ -1200,7 +1200,7 @@ useNudgePull({
                 <p v-else class="gB-empty">这天没人排{{ group.shift.name }}</p>
               </div>
               <!-- 批过假的人自成一组（票 08）：跟「本来就休」在数据里同形（都没有班次），
-                   只有 `person.leave` 分得开。混在一个「休」里，店长就分不清
+                   只有 `person.leave` 分得开。混在一个「休」里，超级管理员就分不清
                    「这人请假了」和「这人今天本来就休」。 -->
               <div v-if="leavePeople.length" class="gB-grp">
                 <div class="gB-grp-t leave">

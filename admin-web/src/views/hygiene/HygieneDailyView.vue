@@ -18,7 +18,7 @@ const reviewMissing = ref(false)
 const lastPassed = ref(null)
 const teachingHint = ref('')
 
-// 空串 = 今天。服务端认这个口径：不带 date 时就是当前营业日，只回待验收。
+// 空串 = 今天。服务端认这个口径：不带 date 时就是当前营业日，只回等验收的。
 const businessDate = ref('')
 // 服务端回的营业日与"是不是今天"，历史回看只读就靠 is_today（ADR-0088）。
 const queueDate = ref('')
@@ -218,14 +218,14 @@ function statusClass(status) {
       <div class="table-card">
         <div class="table-card-header">
           <h3>
-            {{ isToday ? '待验收' : `${queueDate} 全部检查项` }}
+            {{ isToday ? '等验收' : `${queueDate} 全部检查项` }}
             <span>{{ listRows.length }}</span>
           </h3>
         </div>
         <div v-if="loading" class="roster-empty">正在加载…</div>
         <div v-else-if="errorText" class="roster-empty">加载失败，点上方「刷新」重试。</div>
         <div v-else-if="!listRows.length" class="roster-empty">
-          {{ isToday ? '现在没有待验收的日常检查。' : '这一天没有配日常检查项。' }}
+          {{ isToday ? '现在没有等验收的日常检查。' : '这一天没有配日常检查项。' }}
         </div>
         <ul v-else class="queue-list">
           <li v-for="row in listRows" :key="`${row.item_id}-${row.shift}`">

@@ -133,7 +133,7 @@ const windowLabel = computed(() => {
   return `窗口 ${payload.since} ~ ${payload.business_date} · ${payload.days} 天 · 按营业日切日`
 })
 
-// 按区：驳回降序，店长一眼看出哪个区老出问题。服务端已经这么排了（并列时按逾期、再按
+// 按区：驳回降序，超级管理员一眼看出哪个区老出问题。服务端已经这么排了（并列时按逾期、再按
 // zone_id），这里再排一次只是不让展示顺序依赖接口实现；JS 的 sort 是稳定的，并列的相对
 // 次序照旧。
 const zoneRows = computed(() => (
@@ -658,7 +658,7 @@ function pointTitle(point) {
 @media (max-width: 900px) {
   .trend-tables { grid-template-columns: minmax(0, 1fr); }
 }
-@media (max-width: 520px) {
+@media (max-width: 560px) {
   /* 窄屏让出比例条的位置给原因文本：一行里三列会挤成一团。 */
   .reason-list li { grid-template-columns: minmax(0, 1fr) auto; }
   .reason-bar { display: none; }
