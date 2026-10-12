@@ -268,11 +268,14 @@ async def build_data_quality_job_message(
     db: DatabaseManager,
     *,
     date_range_mode: str = "today",
+    business_date: str = "",
     dish_catalog=None,
 ) -> str:
     from services.scraper_health import read_health
 
-    biz_date, _ = resolve_report_dates(date_range_mode)
+    # 定时日报的发送时渲染用出站行里**冻结的营业日**（ADR 0095）：当天补发跨过 06:00 时
+    # 再解析一次「今天」会把日报算成空白的一天。
+    biz_date = business_date or resolve_report_dates(date_range_mode)[0]
     health = read_health()
     reconcile_summary = load_reconcile_summary_for_date(biz_date)
     unmapped: List[str] = []

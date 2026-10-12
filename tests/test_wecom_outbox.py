@@ -23,12 +23,14 @@ from services import wecom_push_service as wecom_push_service_module
 from services.wecom_outbox import RenderedDelivery, WeComOutbox, wecom_outbox
 from services.wecom_push_service import (
     WECOM_TEXT_BYTE_LIMIT,
+    ScheduledReportRenderer,
     encrypt_webhook_url,
     mask_webhook_url,
     wecom_push_service,
 )
 from services.wecom_push_topics import (
     TOPIC_HYGIENE_PHOTO,
+    TOPIC_SALES_REPORT,
     TOPIC_TEST_MESSAGE,
     PushTopic,
     PushTrigger,
@@ -1178,6 +1180,53 @@ class OutboxManualDeliveryTest(OutboxTestCase):
 
         self.assertEqual(payload["topic_name"], "测试消息")
         self.assertEqual(payload["channel_name"], "门店群")
+
+
+class OutboxScheduledReportTest(OutboxTestCase):
+    """报表类定时投递：正文在**发送时**按冻结的营业日现算（回归：每天的日报发不出去）。
+
+    线上那条记录是 `failed` / 0 字节 / 尝试 1 次 /「正文渲染失败：参数里没有正文（text）」：
+    报表行的参数里只有冻结的营业日，没登记渲染器就落进默认文本渲染。两条用例一红一绿 ——
+    没登记就是这个失败，登记之后按行里那一天现算正文。
+    """
+
+    async def _enqueue_sales_report(self, reference="2026-05-02"):
+        channel = await self._channel("日报群", URL_A)
+        await self._subscribe([channel], topic=TOPIC_SALES_REPORT)
+        return await self.outbox.enqueue_topic(
+            self.db,
+            TOPIC_SALES_REPORT,
+            params={"schedule_time": "21:30", "date_range_mode": "today", "station": ""},
+            trigger=PushTrigger.SCHEDULED,
+            business_reference=reference,
+            summary="每日销售报表",
+            now=self.clock,
+        )
+
+    async def test_without_a_renderer_the_row_fails_with_the_text_reason(self):
+        await self._enqueue_sales_report()
+
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 0)
+
+        row = (await self._rows())[0]
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(int(row["attempts"]), 1)
+        self.assertEqual(int(row["message_bytes"]), 0)
+        self.assertIn("正文渲染失败", row["last_error"])
+        self.assertIn("参数里没有正文（text）", row["last_error"])
+        self.assertEqual(self.sender.sent, [])
+
+    async def test_a_registered_renderer_renders_the_frozen_business_day(self):
+        self.outbox.register_renderer(
+            TOPIC_SALES_REPORT, ScheduledReportRenderer(self.db).render
+        )
+        await self._enqueue_sales_report()
+
+        self.assertEqual(await self.outbox.dispatch_pending(self.db), 1)
+
+        row = (await self._rows())[0]
+        self.assertEqual(row["status"], "sent")
+        self.assertIn("【销售报表】2026-05-02", self.sender.sent[0][1])
 
 
 if __name__ == "__main__":

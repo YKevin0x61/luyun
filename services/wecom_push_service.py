@@ -289,8 +289,18 @@ class WeComPushService:
         db: DatabaseManager,
         date_range_mode: str = "today",
         station: str = "",
+        *,
+        business_date: str = "",
     ) -> RenderedMessage:
-        start_date, end_date = resolve_report_dates(date_range_mode)
+        """销售报表正文（``business_date`` = 出站行里冻结的营业日，见 ADR 0095）。
+
+        给了具体营业日就直接用它算，不再解析「今天 / 昨天」：定时类投递失败会在当天晚些
+        补发一次，补发那一刻已经过了 06:00 的话，再解析一次就会把日报算成空白的一天。
+        """
+        if business_date:
+            start_date, end_date = business_date, business_date
+        else:
+            start_date, end_date = resolve_report_dates(date_range_mode)
         report_data = await db.reports.compute_sales_report(start_date, end_date, station or None)
         fixed_dishes = await db.report_dishes_all()
         return render_sales_report_text(report_data, fixed_dishes)
@@ -363,10 +373,14 @@ class WeComPushService:
         db: DatabaseManager,
         *,
         date_range_mode: str = "today",
+        business_date: str = "",
     ) -> RenderedMessage:
+        """数据质量日报正文（``business_date`` 口径同 `build_sales_report_message`）。"""
         from services.data_quality_alerts import build_data_quality_job_message
 
-        content = await build_data_quality_job_message(db, date_range_mode=date_range_mode)
+        content = await build_data_quality_job_message(
+            db, date_range_mode=date_range_mode, business_date=business_date
+        )
         return RenderedMessage(content=content, byte_length=len(content.encode("utf-8")))
 
     async def render_job_message(self, db: DatabaseManager, job: Mapping[str, Any]) -> RenderedMessage:
@@ -624,3 +638,52 @@ class WeComPushService:
 
 
 wecom_push_service = WeComPushService()
+
+
+class ScheduledReportRenderer:
+    """报表类内容在统一出站上的渲染器（销售报表 / 对账差异告警的**定时侧**）。
+
+    报表类的出站行里只有冻结的营业日 + 档口，正文要发送时现算数据 —— 所以这两类内容
+    **必须**在出站上登记渲染器（`main.py` 的 lifespan 里登记）。没登记就会落到默认文本
+    渲染，而参数里没有 `text`，于是每一条日报都以「正文渲染失败」落终态且不重试：
+    2026-10-11 22:10:06 的「每日销售报表 → 沟通群」（0 字节 / 尝试 1 次 / failed）
+    就是这么没发出去的。
+
+    对账差异告警是**双触发**内容类型：事件侧（日终对账差异即时告警）的正文已经算好放在
+    参数里，这里原样返回，不能被报表渲染接管。
+    """
+
+    def __init__(self, db: DatabaseManager, service: Optional[WeComPushService] = None) -> None:
+        self._db = db
+        self._service = service or wecom_push_service
+
+    async def render(
+        self, row: Mapping[str, Any], params: Mapping[str, Any]
+    ) -> "RenderedDelivery":
+        # 延迟导入：出站服务模块级 import 了本模块的发送器与拆分函数，成环。
+        from services.wecom_outbox import RenderedDelivery
+
+        text = str(params.get("text") or "").strip()
+        if text:
+            return RenderedDelivery(text=text)
+
+        topic_id = str(row.get("topic_id") or "")
+        if topic_id not in (TOPIC_SALES_REPORT, TOPIC_RECONCILE_DIFF):
+            raise ValueError(
+                f"内容类型 {topic_id} 没有登记渲染器：正文既不在参数里，也没有现算的口径"
+            )
+        business_date = str(params.get("business_date") or "").strip()
+        if not business_date:
+            raise ValueError(f"内容类型 {topic_id} 的出站行里没有冻结的营业日（business_date）")
+
+        if topic_id == TOPIC_SALES_REPORT:
+            message = await self._service.build_sales_report_message(
+                self._db,
+                business_date=business_date,
+                station=str(params.get("station") or ""),
+            )
+        else:
+            message = await self._service.build_data_quality_message(
+                self._db, business_date=business_date
+            )
+        return RenderedDelivery(text=message.content)

@@ -335,7 +335,12 @@ async def lifespan(app: FastAPI):
         from services.hygiene.wecom_share import HygieneCaptureSharer
         from services.hygiene.work import HygieneWork
         from services.wecom_outbox import wecom_outbox
-        from services.wecom_push_topics import TOPIC_HYGIENE_PHOTO
+        from services.wecom_push_service import ScheduledReportRenderer
+        from services.wecom_push_topics import (
+            TOPIC_HYGIENE_PHOTO,
+            TOPIC_RECONCILE_DIFF,
+            TOPIC_SALES_REPORT,
+        )
         from pathlib import Path
         if db_manager and db_manager.is_connected():
             employee_accounts = EmployeeAccounts(db_manager)
@@ -348,6 +353,12 @@ async def lifespan(app: FastAPI):
             # 才渲染（出站行里只有采集图引用），所以这条渲染器要挂在统一出站上。
             capture_sharer = HygieneCaptureSharer(db_manager, hygiene_captures)
             wecom_outbox.register_renderer(TOPIC_HYGIENE_PHOTO, capture_sharer.render)
+            # 报表类（销售报表 / 对账差异告警的定时侧）的正文要**发送时现算**（出站行里只有
+            # 冻结的营业日），也必须在这里登记：不登记就会被默认文本渲染当成「参数里没有
+            # 正文（text）」，每天的日报一条都发不出去（2026-10-11 22:10 那条 failed 就是）。
+            report_renderer = ScheduledReportRenderer(db_manager)
+            wecom_outbox.register_renderer(TOPIC_SALES_REPORT, report_renderer.render)
+            wecom_outbox.register_renderer(TOPIC_RECONCILE_DIFF, report_renderer.render)
             hygiene_work = HygieneWork(
                 db_manager,
                 captures=hygiene_captures,
