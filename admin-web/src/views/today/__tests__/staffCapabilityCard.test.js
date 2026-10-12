@@ -3,6 +3,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const here = dirname(fileURLToPath(import.meta.url))
+// 版式那一条按**源码**断：jsdom 不做布局，网格列宽在这里算不出来（先例：
+// `views/workbench/__tests__/shellMobileChrome.test.js` 的 `expectMobileRule`）。
+const TODAY = readFileSync(join(here, '..', 'TodayView.vue'), 'utf8')
 
 /**
  * 「你能做的事」能力卡（票 01 / ADR 0093）。
@@ -250,5 +258,20 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     }
     // 卡上就四行，一项不多。
     expect(wrapper.findAll('.cap-row')).toHaveLength(4)
+  })
+})
+
+describe('版式：行内入口不能被压成一条竖条', () => {
+  it('每一行是**四列** grid，入口那一列显式给 auto', () => {
+    // 2026-10-12 实测：`.cap-row` 只写了三列（16px 58px 1fr），第四个子元素「去 ›」
+    // 落进**隐式列**、宽度 auto —— 390px 下 1fr 先把剩余宽度吃完，它只剩 26px，
+    // `padding: 0 12px` 吃掉 24px，文字换行成两行，三颗按钮变成三根 26×52 的竖条。
+    // 这一条钉住「第 4 列必须显式存在」与「按钮不换行」。
+    expect(TODAY).toMatch(
+      /\.cap-row\s*\{[^}]*grid-template-columns:\s*16px\s+58px\s+1fr\s+auto/,
+    )
+    expect(TODAY).toMatch(/\.cap-go\s*\{[^}]*white-space:\s*nowrap/)
+    // grid item 上 `flex` 是死属性：原来那行 `flex: 0 0 auto` 从没生效，别再写回去。
+    expect(TODAY).not.toMatch(/\.cap-go\s*\{[^}]*flex:\s*0\s+0\s+auto/)
   })
 })

@@ -1695,7 +1695,11 @@ useNudgePull({
 
 .cap-row {
   display: grid;
-  grid-template-columns: 16px 58px 1fr;
+  /* 四列：记号 / 能力名 / 说明 / 行内入口（「去 ›」）。**第 4 列必须显式写出来** ——
+     只写前 3 列时按钮落进**隐式列**（宽度 `auto`），390px 下 `1fr` 先把剩余宽度吃完，
+     它只剩 26px：`padding: 0 12px` 吃掉 24px、内容区 2px，文字换行成两行，整颗按钮
+     变成一条竖条（2026-10-12 实测 26×52，三个能力就是三根竖条）。 */
+  grid-template-columns: 16px 58px 1fr auto;
   align-items: baseline;
   gap: 7px;
 }
@@ -1723,9 +1727,13 @@ useNudgePull({
   margin-top: 10px;
 }
 
-/* 行内入口（t49）：触控目标 ≥44px；焦点环走令牌，不自己写一套 */
+/* 行内入口（t49）：触控目标 ≥44px；焦点环走令牌，不自己写一套。
+   这里是 **grid item**：`flex: 0 0 auto` 那类写法一行都不起作用（原来那行从没生效），
+   宽度由上面 `.cap-row` 的第 4 列决定。`nowrap` 是兜底 —— 列再被挤窄也不把「去 ›」
+   拆成两行；`align-self: center` 是为了让它别跟着 `baseline` 陷到行底。 */
 .cap-go {
-  flex: 0 0 auto;
+  align-self: center;
+  white-space: nowrap;
   min-height: 44px;
   padding: 0 12px;
   border: 1px solid var(--line-control);
