@@ -23,7 +23,6 @@ import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { ADMIN_CAP_STAFF_DEFS, hasCap } from '../../utils/adminCaps'
 import { hygieneShiftLabel } from '../../utils/hygieneCopy'
@@ -42,8 +41,6 @@ import {
   todaySubline,
   todayTone,
 } from '../../utils/todayShift'
-
-useScopedStylesheet('/hygiene-admin.css')
 
 const router = useRouter()
 const state = ref('loading') // loading | ready | error

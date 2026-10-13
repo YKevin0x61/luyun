@@ -24,9 +24,11 @@ const mainPy = readFileSync(join(here, '../../../../../main.py'), 'utf8')
 
 describe('店长端班次表（票 11）', () => {
   it('借共享样式表的令牌，不进卫生模块', () => {
-    // 共享样式表由**壳**加载一份（`SchedulingLayout.vue`）：三个子页各加载一份会挂出
-    // 重复的 <link>；壳一层管住，跟卫生管理端一个做法（那边也是 layout 加载、子页不管）。
-    expect(sharedShell).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    // 共享样式表**票 06 起全站只有一份挂载点**：跟着 `<html data-workbench>` 走、由路由
+    // 一处安装（`utils/workbenchDocument.js` 的 `installWorkbenchDocument`）—— 原先壳一层、
+    // 页面再各挂一份，同页会挂出重复的 `<link>`。行为断言在
+    // `src/__tests__/workbenchStylesheet.test.js`。
+    expect(sharedShell).not.toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
     expect(view).not.toMatch(/useScopedStylesheet\(/)
     expect(view).toMatch(/class="hygiene-admin shifts-page"/)
     expect(view).not.toMatch(/\/api\/hygiene/)

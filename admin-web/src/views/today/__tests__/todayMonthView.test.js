@@ -34,7 +34,8 @@ describe('员工端「整月」页（票 06）', () => {
 
   it('lays out a real month grid without horizontal scrolling', () => {
     // 验收 1/5：一个月一天一格、七列，手机上不用横着划。
-    expect(view).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    // 票 06：共享样式表不再由页面挂（跟着 `<html data-workbench>` 走，路由一处安装）。
+    expect(view).not.toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
     expect(view).toMatch(/class="month-page hygiene-staff"/)
     expect(view).toMatch(/repeat\(7,\s*1fr\)/)
     for (const cls of ['mNav', 'mHead', 'mGrid', 'mD', 'mLegend', 'mFoot']) {

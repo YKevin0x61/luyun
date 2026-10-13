@@ -27,7 +27,6 @@ import WorkbenchMobileHead from '../../components/workbench/WorkbenchMobileHead.
 import WorkbenchNav from '../../components/workbench/WorkbenchNav.vue'
 import WorkbenchRail from '../../components/workbench/WorkbenchRail.vue'
 import WorkbenchTabBar from '../../components/workbench/WorkbenchTabBar.vue'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { pageRow } from '../../router/pageRoutes.js'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
 import { WORKBENCH_HOME, WORKBENCH_TITLE } from '../../utils/workbenchCopy'
@@ -57,10 +56,10 @@ const props = defineProps({
   label: { type: String, default: '' },
 })
 
-// 深青墨令牌跟工作台其他两组同一张表（`/hygiene-admin.css`）。**收进壳加载一次**：原先四个
-// 子页与三个壳各挂一份（10 处），收敛之后只剩这一处（`useScopedStylesheet` 自己不做 DOM
-// 去重，所以「少挂几份」＝少几份重复的 `<link>`）。
-useScopedStylesheet('/hygiene-admin.css')
+// 深青墨令牌跟工作台其他两组同一张表（`/hygiene-admin.css`）。**票 06 起壳也不再挂**：
+// 那一份跟着 `<html data-workbench>` 走，由路由一处安装（`utils/workbenchDocument.js`）——
+// 从「四个子页与三个壳各挂一份（10 处）→ 壳一处」再到「文档一处」，同一页不再出现两条
+// 指向同一文件的 `<link>`（壳外的 `/workbench/forbidden` 与 `/register` 也一并被覆盖到）。
 
 const route = useRoute()
 const router = useRouter()

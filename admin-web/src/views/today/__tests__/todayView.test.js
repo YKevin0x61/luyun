@@ -36,7 +36,9 @@ describe('员工端「今天」页（原型 A）', () => {
   it('keeps the chosen prototype A shape', () => {
     // 用户选的员工端首页 = today-variants.html 的 A · 两块：
     // 整屏 → 排班卡 → 往后三天 → 页脚（下半张卫生卡下一张票接）。
-    expect(view).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    // 票 06：共享样式表不再由页面挂（它跟着 `<html data-workbench>` 走，路由一处安装）——
+    // 这一页原先与壳各挂一份，同页两条指向同一文件的 <link>。
+    expect(view).not.toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
     expect(view).toMatch(/class="today-page hygiene-staff"/)
     for (const cls of ['tA-card sched', 'tA-hd', 'shift', 'acts', 'tA-h', 'next3', 'tA-foot']) {
       expect(view).toContain(cls)

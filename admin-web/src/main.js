@@ -30,23 +30,11 @@ const app = createApp(App)
 app.use(createPinia())
 app.use(router)
 
-// 工作台令牌层 → <html data-workbench>（存在即生效）；其余路由移除该属性（后台不受影响）。
-// 属性名**刻意避开 data-theme**：配方阅读面用那个名字存自己的 light/dark（t47 跨票冲突）。
-// 判据**只认路由 meta**（`meta.workbenchTheme`，由 `pageMeta` 从页面清单派生）——这里不再
-// 自己按 `/workbench` 前缀判一次：那样会漏掉「住在顶层路径、却套着工作台壳」的页面
-// （`/register`），它整页吃不到 `--hy-*` 令牌 —— 输入框的 background/border 整条声明失效
-// （变量未定义时退化为 initial，**不会**回落到浏览器默认样式），主按钮从薄荷绿渐变退化成
-// 一行裸文字，三档文字色塌成一档，聚焦零反馈（outline 已关）。开关的判据见 pageRoutes.js。
-function syncWorkbenchTheme(route) {
-  const el = document.documentElement
-  if (route && route.meta && route.meta.workbenchTheme === true) {
-    el.setAttribute('data-workbench', '')
-  } else {
-    el.removeAttribute('data-workbench')
-  }
-}
-syncWorkbenchTheme(router.currentRoute.value)
-router.afterEach((to) => syncWorkbenchTheme(to))
+// 工作台的文档级契约（`<html data-workbench>` + 共享样式表那一份 `<link>`）不在这里：
+// 票 06 起由 `router/index.js` 的 `installWorkbenchDocument(router)` 装（判据是路由 meta
+// `workbenchTheme`，由页面清单派生；实现与理由见 `utils/workbenchDocument.js`）。
+// 它注册在 `afterEach` 上，而下面等 `isReady()` 之后才挂载 —— 所以首次导航落定时属性与
+// 样式表都已经就位，首屏不吃「无样式再跳一下」。
 
 // 首屏**等路由定下来再挂载**（票 12 收的 O1）：早于首次导航落定时 `route` 还是
 // START_LOCATION（默认 `/`），而 `App.vue` 那个 `watch(isStandalone, {immediate: true})`

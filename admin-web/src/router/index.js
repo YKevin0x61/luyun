@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { isLoggedIn } from '../utils/authStatus'
 import { buildLoginNextFromRoute } from '../utils/loginNext'
 import { staffSessionState } from '../utils/hygieneStaff'
+import { installWorkbenchDocument } from '../utils/workbenchDocument'
 import { pageMeta, pageTitle } from './pageRoutes.js'
 
 const HygieneAdminLayout = () => import('../views/hygiene/HygieneAdminLayout.vue')
@@ -189,6 +190,14 @@ const router = createRouter({
   history: createWebHistory(),
   routes,
 })
+
+// 工作台的**文档级契约**（票 06 / ADR 0106 决策 7）：`<html data-workbench>` 与共享样式表
+// `hygiene-admin.css` 那一份 `<link>`。判据只有一处 —— `meta.workbenchTheme`（由 `pageMeta`
+// 从页面清单派生：`/workbench` 前缀一律开，前缀之外只有 `/register` 显式标了 true）。
+// 装在这里而不是各页面里：页面 8 处各挂一份会让同一页出现两条指向同一文件的 `<link>`
+// （`useScopedStylesheet` 自己不做 DOM 去重），而壳外的 `/workbench/forbidden` 与住在顶层
+// 路径的员工鉴权壳又必须拿得到。实现与「为什么不能用路径前缀判」都在那个 util 里。
+installWorkbenchDocument(router)
 
 // 「一个会话都没有」的落点（票 02）：登录页 + 原目标。身份不匹配走下面的
 // `forbiddenRedirect` —— 两者分开正是票 03 的验收之一。

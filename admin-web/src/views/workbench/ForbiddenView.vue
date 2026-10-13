@@ -11,7 +11,6 @@
 // 再写一份路径正则。
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { pageRow, pageTitle } from '../../router/pageRoutes.js'
 import { isLoggedIn } from '../../utils/authStatus'
 import { hygieneDocumentTitle } from '../../utils/hygieneCopy'
@@ -19,7 +18,8 @@ import { staffSession } from '../../utils/hygieneStaff'
 import { STAFF_ENTRY_PATH } from '../../utils/staffPaths'
 import { WORKBENCH_TITLE } from '../../utils/workbenchCopy'
 
-useScopedStylesheet('/hygiene-admin.css')
+// 共享样式表（`hygiene-admin.css`）不在这一页挂：它跟着 `<html data-workbench>` 走，
+// 由路由一处安装（`utils/workbenchDocument.js`）—— 这一页在 `/workbench` 前缀下，覆盖得到。
 
 const route = useRoute()
 const router = useRouter()

@@ -22,7 +22,6 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { loginRedirectTarget } from '../../utils/loginNext'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
@@ -37,8 +36,6 @@ import {
   stepHalfHours,
   submittedByText,
 } from '../../utils/overtimeEntry'
-
-useScopedStylesheet('/hygiene-admin.css')
 
 const router = useRouter()
 const state = ref('loading') // loading | ready | error

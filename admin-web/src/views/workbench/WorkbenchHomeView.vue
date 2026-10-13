@@ -22,7 +22,6 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api/client'
 import { useNudgePull } from '../../composables/useNudgePull'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { pageTitle } from '../../router/pageRoutes.js'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
 import { IDENTITY_ADMIN } from '../../utils/workbenchIdentity'
@@ -30,8 +29,6 @@ import { staffRequest } from '../../utils/hygieneStaff'
 import { dayLabel } from '../../utils/todayShift'
 import { WORKBENCH_TITLE, workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import { HOME_LINKS, workbenchHomeSummary } from '../../utils/workbenchHome'
-
-useScopedStylesheet('/hygiene-admin.css')
 
 const identityStore = useWorkbenchIdentityStore()
 const identity = computed(() => identityStore.identity)

@@ -26,7 +26,6 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { eachDayInRange } from '../../utils/dateRange'
 import { loginRedirectTarget } from '../../utils/loginNext'
@@ -43,8 +42,6 @@ import {
   staffCountLabel,
   stepMonth,
 } from '../../utils/todayShift'
-
-useScopedStylesheet('/hygiene-admin.css')
 
 const router = useRouter()
 const state = ref('loading') // loading | ready | error

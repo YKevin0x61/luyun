@@ -56,11 +56,14 @@ describe('hygiene admin section shell', () => {
     expect(nav).not.toMatch(/>红黑榜</)
   })
 
-  it('layout owns the rail and loads the section stylesheet', () => {
+  it('layout owns the rail（共享样式表已收到文档层，票 06）', () => {
     const layout = read('../HygieneAdminLayout.vue')
     const shell = read('../../workbench/WorkbenchShell.vue')
     // ③-2：共享样式表与手机档页头都收进统一壳；卫生壳交的是本组那份手写名单。
-    expect(shell).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    // 票 06：**壳也不再挂** —— 那一份跟着 `<html data-workbench>` 走，由路由一处安装
+    // （`utils/workbenchDocument.js` 的 `installWorkbenchDocument`）。行为断言在
+    // `src/__tests__/workbenchStylesheet.test.js`。
+    expect(shell).not.toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
     expect(layout).toMatch(/:items="HYGIENE_ADMIN_NAV"/)
     expect(layout).not.toMatch(/StandardPhotoCachePanel/)
     expect(layout).toMatch(/useStandardPhotoCacheStore/)

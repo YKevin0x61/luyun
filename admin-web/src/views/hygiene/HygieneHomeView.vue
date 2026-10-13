@@ -9,7 +9,6 @@ import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import HygieneWatermarkOverlay from '../../components/hygiene/HygieneWatermarkOverlay.vue'
 import StandardPhotoCachePanel from '../../components/hygiene/StandardPhotoCachePanel.vue'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import { FALLBACK_GRACE_MS } from '../../composables/useConnectionFallback'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
@@ -57,8 +56,6 @@ import {
   tabWorkCount,
 } from '../../utils/hygieneWorkFlow'
 import { loginRedirectTarget } from '../../utils/loginNext'
-
-useScopedStylesheet('/hygiene-admin.css')
 
 const router = useRouter()
 const imageUploads = useImageUploadQueueStore()

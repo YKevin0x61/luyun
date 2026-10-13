@@ -28,14 +28,14 @@ function componentFile(loader) {
     : resolvePath(ROUTER_DIR, spec)
 }
 
-/** 组件的模板根节点带了工作台那两个 class 之一，或者挂了共享样式表
- *  `hygiene-admin.css` —— 两种都意味着这一页整页在吃 `--hy-*` 令牌。
+/** 组件的模板根节点带了工作台那两个 class 之一 —— 意味着这一页整页在吃 `--hy-*` 令牌。
  *
- *  样式表要认**挂载调用**而不是文件名字符串：`/login` 的注释里就写着「不挂
- *  `/hygiene-admin.css`」（它自带 scoped 配色、明确不依赖那一套），按字面匹配会把它
- *  误判成吃令牌的页。 */
-const WORKBENCH_STYLE_RE =
-  /class="hygiene-(admin|staff)[ "]|useScopedStylesheet\(\s*['"]\/hygiene-admin\.css['"]\s*\)/
+ *  这里**曾经**还认一个证据：`useScopedStylesheet('/hygiene-admin.css')` 那条挂载调用。
+ *  票 06 之后那一层收到文档级（`utils/workbenchDocument.js`，路由一处安装），页面文件里
+ *  不再有这条调用，所以判据只剩 class —— 「凡渲染工作台壳的页面都开着令牌层」这条口径
+ *  一个字没变，只是证据换回了模板根节点上的 class（`.hygiene-admin` / `.hygiene-staff`）。
+ *  挂载条数本身的行为断言在 `src/__tests__/workbenchStylesheet.test.js`。 */
+const WORKBENCH_STYLE_RE = /class="hygiene-(admin|staff)[ "]/
 
 /** 组件文件（含它 import 进来的子组件，往下 `depth` 层）里有没有工作台那套样式？
  *

@@ -34,9 +34,11 @@ describe('hygiene staff auth gate', () => {
     })
   })
 
-  it('gate loads the shared hygiene stylesheet and the 卫 lockup', () => {
+  it('gate keeps the 卫 lockup（共享样式表由文档层给，票 06）', () => {
     const layout = read('../HygieneStaffAuthLayout.vue')
-    expect(layout).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    // 票 06：这一页住在顶层路径，样式表靠清单里 `workbenchTheme: true` 那一行从文档层拿到，
+    // 页面自己不再挂（行为断言在 `src/__tests__/workbenchStylesheet.test.js`）。
+    expect(layout).not.toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
     expect(layout).toMatch(/class="hygiene-staff"/)
     expect(layout).toMatch(/HYGIENE_BRAND_MARK/)
     expect(layout).toMatch(/HYGIENE_BRAND_TITLE/)

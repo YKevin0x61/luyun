@@ -2,7 +2,6 @@
 import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import IcpFooter from '../../components/IcpFooter.vue'
-import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import {
   HYGIENE_BRAND_MARK,
   HYGIENE_BRAND_TAGLINE,
@@ -10,7 +9,8 @@ import {
   hygieneDocumentTitle,
 } from '../../utils/hygieneCopy'
 
-useScopedStylesheet('/hygiene-admin.css')
+// 共享样式表（`hygiene-admin.css`）不再由这里挂：这一页住在顶层路径，靠页面清单里那行
+// `workbenchTheme: true` 从**文档层**拿到（`utils/workbenchDocument.js`，路由一处安装）。
 
 const route = useRoute()
 const pageTitle = computed(() => route.meta.staffPageTitle || HYGIENE_BRAND_TITLE)

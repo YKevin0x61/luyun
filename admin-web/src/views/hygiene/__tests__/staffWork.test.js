@@ -12,7 +12,8 @@ function read(rel) {
 describe('hygiene staff work app', () => {
   it('单页依次渲染三组（日常 / 专项 / 整改），页内那条五格 tab 条不再回来', () => {
     const home = read('../HygieneHomeView.vue')
-    expect(home).toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
+    // 票 06：页面不再自己挂共享样式表（那一份跟着 `<html data-workbench>` 走，路由一处安装）。
+    expect(home).not.toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
     expect(home).toMatch(/StandardPhotoCachePanel/)
     expect(home).toMatch(/useStandardPhotoCacheStore/)
     expect(home).toMatch(/class="hygiene-staff hygiene-work"/)
