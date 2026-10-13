@@ -47,7 +47,8 @@ describe('花名册页的员工入口（票 03 换新地址）', () => {
 
     const shown = wrapper.get('.staff-entry-copy code').text()
     expect(shown).toBe(`${window.location.origin}${STAFF_ENTRY_PATH}`)
-    expect(shown).toContain('/workbench/me/today')
+    // 2026-10-14 起入口是工作台首页「今天」（`/workbench`）：员工点开就落到今天。
+    expect(shown).toContain('/workbench')
     expect(shown).not.toContain('/staff/')
 
     wrapper.unmount()

@@ -437,7 +437,7 @@ describe('/login 面板：员工栏', () => {
     expect(router.currentRoute.value.path).toBe('/')
   })
 
-  it('没带 ?next 时落到员工默认落点（今天页）', async () => {
+  it('没带 ?next 时落到员工默认落点（工作台首页「今天」）', async () => {
     fetchMock
       .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
@@ -448,7 +448,9 @@ describe('/login 面板：员工栏', () => {
       'input[type="password"]': 's3cret',
     })
 
-    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
+    // 2026-10-14 用户裁定：员工端默认首页是工作台首页「今天」（`STAFF_ENTRY_PATH`），
+    // 不再是「我的今天」—— 一进来就看到今天上哪个班、今天要交什么。
+    expect(router.currentRoute.value.path).toBe('/workbench')
   })
 
   it('员工会话仍有效时自动进入员工落点', async () => {
@@ -534,7 +536,7 @@ describe('/login 面板：非法 ?next 回落', () => {
     expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
   })
 
-  it('站外地址不强制员工栏，员工登录后回落到今天页', async () => {
+  it('站外地址不强制员工栏，员工登录后回落到默认落点', async () => {
     fetchMock
       .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
@@ -546,7 +548,7 @@ describe('/login 面板：非法 ?next 回落', () => {
       'input[type="tel"]': '13800138000',
       'input[type="password"]': 's3cret',
     })
-    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.path).toBe('/workbench')
   })
 
   it('员工端路径不把超级管理员身份送进去：超级管理员栏登录后落「无权访问」并把原目标带上', async () => {

@@ -32,11 +32,22 @@ export const STAFF_PHONE_EXACT = ['/register']
 /** 员工端入口路径：员工登录后的默认落点，也是花名册页发给新店员的那个地址（票 03 把
  *  员工首页从 `/staff/today` 搬进工作台之后，旧的 `/staff/*` 已是死路径）。
  *
+ *  **2026-10-14 用户裁定：落到工作台首页「今天」（`/workbench`）** —— 员工一进来就该看到
+ *  今天上哪个班、今天要交什么（那一块卫生卡就摆在这一页上，见
+ *  `components/staff/StaffHygieneCard.vue`），而不是先落「我的今天」再点一格。这一改也与
+ *  工作台 PWA 清单的 `start_url`（`/workbench`）对齐了：从主屏打开与从 `/login` 登录落的是
+ *  同一页。「我的今天」（`/workbench/me/today`）仍是底栏「我的」那一格，放账号资料。
+ *
+ *  **它不进 `isStaffLandingPath`**（`?next=` 的员工落点白名单）：`/workbench` 是**两种身份
+ *  的共同首页**（页面清单里 `audience: both`），把它算成"员工页"会让店长点工作台首页时被
+ *  强制开员工栏。员工带着 `?next=/workbench` 登录照样回得来 —— `resolveStaffNext` 认不出
+ *  目标时落的就是这个默认值，结果一致；面板开哪一栏交给记住值（员工手机上本来就是员工栏）。
+ *
  *  **一处定义、三处消费** —— 落点默认值（`loginNext.resolveStaffNext`）、花名册页的
  *  二维码/可复制链接（`HygieneRosterView`）、以及 PWA 员工清单的 `start_url`（票 09）
  *  必须是同一个值。各写一个字面量就是本次缺陷：`/hygiene` 搬走时漏改了一处。
  */
-export const STAFF_ENTRY_PATH = '/workbench/me/today'
+export const STAFF_ENTRY_PATH = '/workbench'
 
 function underPrefix(path, prefix) {
   return path === prefix || path.startsWith(`${prefix}/`)

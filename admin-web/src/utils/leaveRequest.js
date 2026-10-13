@@ -118,16 +118,41 @@ export function swapStatusText(request) {
   }
 }
 
+/** 换班卡上「某个人那天什么样」：三态分开说，跟 `todayShift.js` 是同一张表。
+ *
+ *  这一层原来把三态压成了两句 —— 有行但班次为空（**那天休**）被写成了「班次已调整」
+ *  （那是「那条班次被删了」的意思），没有那一行（**那天还没排到**）又被写成了「休」。
+ *  两处都反了，而换班的含义正取决于它：他那天休，批了是他接走你的班；他那天有班，
+ *  批了才是两个人对调。所以按 `scheduled` / `shift_id` / `shift_name` 三个字段分开说。
+ *
+ *  判据先看名字（服务端一定会给）：名字空的时候，有 `shift_id` 才是「班次被删」，
+ *  没有 `shift_id` 就是「休」—— 只给名字与「有行」两个字段的老调用方也不会被说反。
+ */
+function personDayText(scheduled, shiftId, shiftName) {
+  if (!scheduled) return '还没排到'
+  if (shiftName) return shiftName
+  return shiftId == null ? '休' : '班次已调整'
+}
+
 /** 别人问我换班的那张卡（票 09 的验收 2）：谁、哪天、他那天什么班、我那天什么班。
  *
  *  先说「他那天」，再说「我那天」：员工要先看懂对方拿什么来换，才谈得上同意不同意。
+ *
+ *  **动词跟着他那天的状态走**（票 15 修）：他那天没有班（休 / 还没排到）时不写「想跟你换」
+ *  那三个字 —— 那种情况下批了不是两个人对调，而是他接走你那天，两件事差一整天的班。
  */
 export function incomingLine(card) {
   if (!card) return ''
+  const who = card.employee_name || '同事'
   const when = dayLabel(card.business_date)
-  const theirs = card.their_scheduled ? card.their_shift_name || '班次已调整' : '那天没班'
-  const mine = card.my_scheduled ? `你那天 ${card.my_shift_name || '班次已调整'}` : '你那天休'
-  return `${card.employee_name || '同事'} 想跟你换 ${when} · 他那天 ${theirs} · ${mine}`
+  const theirs = personDayText(card.their_scheduled, card.their_shift_id, card.their_shift_name)
+  const mine = personDayText(card.my_scheduled, card.my_shift_id, card.my_shift_name)
+  // 「休 / 还没排到」是状态词，直接贴着写（「你那天休」）；班次名前面留一个空格。
+  const idle = (text) => text === '休' || text === '还没排到'
+  const tail = (label, text) => (idle(text) ? `${label}${text}` : `${label} ${text}`)
+  if (idle(theirs) && idle(mine)) return `${who} 想跟你换 ${when} · 两个人那天都没有班`
+  if (idle(theirs)) return `${who} 想接你 ${when} 的班 · ${tail('他那天', theirs)} · ${tail('你那天', mine)}`
+  return `${who} 想跟你换 ${when} · 他那天 ${theirs} · ${tail('你那天', mine)}`
 }
 
 /** 店长待办里换班卡的那一句「批了会怎样」：两个人那天的班对调，谁上哪个班说清楚。 */

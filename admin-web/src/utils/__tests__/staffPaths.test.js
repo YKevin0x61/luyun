@@ -124,14 +124,19 @@ describe('isStaffLandingPath', () => {
 })
 
 /** 员工端入口路径（票 04 漏改过一处、票 03 又搬了一次家）：门店把地址发给员工只有
- *  花名册页那一个入口，写错就是二维码扫出来一片空白。所以既断值、也断它落在员工落点
- *  白名单里，再拿一条源码契约把「用常量、不硬编码」钉死 —— 缺陷正是硬编码漏改。
+ *  花名册页那一个入口，写错就是二维码扫出来一片空白。所以既断值、也断它**不在**员工落点
+ *  白名单里（2026-10-14 起入口是工作台首页「今天」，那是两种身份的共同首页），再拿一条
+ *  源码契约把「用常量、不硬编码」钉死 —— 缺陷正是硬编码漏改。
  */
 describe('STAFF_ENTRY_PATH', () => {
-  it('入口是「今天」页，且确实是一个员工落点', () => {
-    expect(STAFF_ENTRY_PATH).toBe('/workbench/me/today')
-    expect(isStaffLandingPath(STAFF_ENTRY_PATH)).toBe(true)
-    expect(isStaffPhonePath(STAFF_ENTRY_PATH)).toBe(true)
+  it('入口是工作台首页「今天」，不是员工前缀里的页', () => {
+    expect(STAFF_ENTRY_PATH).toBe('/workbench')
+    // 落点不靠白名单成立：`?next=` 认不出目标时回落的正是这个默认值。反过来把它算成
+    // "员工页"会让店长点工作台首页时被强制开员工栏（清单里它是 `audience: both`），
+    // 所以这里断的是 **false**；「登录后回得来」那一环钉在 `loginNext.test.js` 的
+    // 「默认落点自己也是合法回跳目标」。
+    expect(isStaffLandingPath(STAFF_ENTRY_PATH)).toBe(false)
+    expect(isStaffPhonePath(STAFF_ENTRY_PATH)).toBe(false)
   })
 
   it('花名册页的员工入口用这个常量拼绝对 URL，不许再硬编码路径（防回归）', () => {

@@ -7,27 +7,30 @@
  * 「今天上不上班」）：下面那块卫生待办卡下一张票接，这会儿留一条去老入口的路，
  * 不然员工登录后只剩这一张卡，卫生的活就没地方看了。
  *
- * 数据只有三个来源，都只认员工自己的 cookie（接口上没有 `employee_id` 可填）：
- * `GET /api/scheduling/me`（今天往后几天的班）、票 08 加的
- * `GET|POST|DELETE /api/scheduling/me/requests`（自己提的请假）与票 09 加的
- * `GET /api/scheduling/me/colleagues` + `POST /api/scheduling/me/swaps*`（换班：
- * 提一条、替对方点头或摇头）。整屏没有钟点 —— 班次没有起止时刻，钟点只在卫生那边。
+ * **那块卫生待遇 2026-10-14 又搬了一次**（用户裁定）：今天的日常检查、仪容仪表那一行与
+ * 它的两步拍照整块搬到**工作台首页**（`components/staff/StaffHygieneCard.vue`）—— 员工端的
+ * 默认首页是「今天」（`/workbench`），卫生的活在那儿一眼看得见；这一页只留自己的班、
+ * 我的申请与账号资料。
+ *
+ * 排班那两条只认员工自己的 cookie（接口上没有 `employee_id` 可填）：
+ * `GET /api/scheduling/me`（今天往后几天的班）与
+ * `GET|POST|DELETE /api/scheduling/me/requests`（我的申请：看状态、撤回；外加
+ * 「别人问我换班」那几条的同意 / 拒绝）。**发起请假与换班不在这页**（票 15）：那两件事
+ * 收进了排班月历，点某一天就在那一天的操作单里办（`StaffDaySheet`）—— 发起的地方只有
+ * 一处，不会两套表单各写一份判据；这一页那两颗按钮带着 `?date=&act=` 跳过去。
+ * 整屏没有钟点 —— 班次没有起止时刻，钟点只在卫生那边。
  * 「我的成绩」那张卡（2026-10-05 用户裁定）另读一条 `GET /api/hygiene/staff/me/stats`，
  * 同样只认员工自己的 cookie（路径上没有 `employee_id`，读谁由服务端按会话定）。
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
-import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
-import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
-import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
-import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { ADMIN_CAP_STAFF_DEFS, hasCap } from '../../utils/adminCaps'
 import { hygieneShiftLabel } from '../../utils/hygieneCopy'
 import { staffRequest } from '../../utils/hygieneStaff'
-import { buildWorkQueue, dailyProgress, shiftClock } from '../../utils/hygieneWorkFlow'
+import { shiftClock } from '../../utils/hygieneWorkFlow'
 import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
 import { loginRedirectTarget } from '../../utils/loginNext'
 import { birthdayText } from '../../utils/birthdayReminder'
@@ -49,60 +52,37 @@ const days = ref([])
 const errorText = ref('')
 const note = ref('')
 
-// 请假（票 08）：一张表单 + 一串自己的申请。表单里那两天**默认取服务端的营业日**
-// （`days[0].business_date`），不取手机上的今天 —— 手机时区可能不在东八区，
-// 而「过去的日子请不了假」是服务端按营业日判的。
-const sheet = ref(false)
-const leaveStart = ref('')
-const leaveEnd = ref('')
-const leaveNote = ref('')
-const leaveError = ref('')
-const leaveBusy = ref(false)
+// 我的申请（票 08 请假、票 09 换班）与「别人问我换班」的待回应清单。
+//
+// **发起那一步不在这页**（票 15）：请假与换班都收进了排班月历 —— 员工在月历上点某一天，
+// 就在那一天的操作单里办（`StaffDaySheet`：日期就是那个格子，换班的人在**那天在班的
+// 名单**里点）。这一页保留的是结果与回应：我的申请到哪一步、能撤回的就地撤回，别人找我
+// 的当场回话 —— 首页是员工登录后的落点，这两件事必须一眼看得见，多一次跳转就成了
+// 「不知道有人找我」。那两颗按钮带着 `?date=&act=` 跳到月历的同一天，不在这里再摆一张表单。
 const requests = ref([])
 const requestsError = ref('')
 // 进页面那次申请列表没读出来（`loadRequests(true)`）：换班那张卡是「有才显示」的，
 // 读失败时它整块不在，员工只会以为没人找他换班、也没人等他回应。这一位就是给那种
 // 情况留的一句话 + 一个重试按钮（页面上没别的重来路径，只有整页刷新）。
 const requestsUnread = ref(false)
-// 事由的长度上限由服务端给（`/me/requests` 的 `max_request_note`）：以前这里写死
-// 「最多 50 字」+ `maxlength="50"`，服务端一改就两边不一致（别的上限都是随响应下的）。
-const maxNote = ref(null)
-const noteLabel = computed(
-  () => `事由（可空${maxNote.value ? `，最多 ${maxNote.value} 字` : ''}）`,
-)
-
-// 换班（票 09）：自己提的那些跟请假在同一张卡里（`requests` 按 `kind` 分流），
-// 这里多两块 —— 提名同事的一张表单，以及「别人问我换班」的待回应清单。
-const swapSheet = ref(false)
-const colleagues = ref([])
-const swapPeer = ref('')
-const swapDay = ref('')
-const swapNote = ref('')
-const swapError = ref('')
+// 撤回与回应各有一个在飞的请求（同一时刻只放一个动作过去）。
+const leaveBusy = ref(false)
 const swapBusy = ref(false)
 const incoming = ref([])
 
-// 卫生那块（票 10）：今天的日常检查进度与逾期点，跟上面那张排班卡**各拉各的** ——
-// 一块读不出来，另一块照常显示（票 10 的验收：两块卡各自渲染）。
-// 只摊数字、不摊"下一项该拍哪个"：真正的队列（含"这张图还在传"的状态）在卫生那一屏，
-// 这里要是也列一份，员工会对着正在上传的项再拍一次。
-const hygiene = ref({
-  state: 'loading', // loading | ready | error
-  error: '',
-  items: [],
-  clocks: null,
-  shift: null,
-  zoneName: '',
-  now: 0,
-})
+// 卫生那块（票 10）**2026-10-14 起不在这里**：今天的日常检查、仪容仪表那一行与它的
+// 两步拍照、两颗入口，整块搬到工作台首页「今天」（`components/staff/StaffHygieneCard.vue`）
+// —— 员工端的默认首页就是那一页，一屏里先看班、再看今天要交什么。这一页只剩「我的」
+// 那一块要的两样东西（自己的资料、本班日常的钟点），见下面的 `loadHygiene`。
 
 // 「我的」那一块（从卫生页的「我」搬来，界面与逻辑在文件后半段）的**数据**：都跟着
 // `loadHygiene` 那条 `/api/hygiene/staff/me` 一起下来 —— `staffMe` 就是那份 employee
 // （姓名 / 手机号 / 职位 / 当天的区与班次，外加「你能做的事」那张卡要的 `admin_caps`），
-// `deepClock` 是专项的钟点。两条都是**同一个响应**，
-// 不再为「我的」多发一条请求。声明摆在这里，是因为给它们赋值的那一步在下面。
+// `deepClock` 是专项的钟点、`dailyClocks` 是日常那几档钟点（"完整资料"里"本班日常截止"
+// 那一行用）。三条都是**同一个响应**，不再为「我的」多发一条请求。
 const staffMe = ref(null)
 const deepClock = ref(null)
+const dailyClocks = ref(null)
 
 // 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十项开关里**员工端真有执行点**的那四项
 // （`ADMIN_CAP_STAFF_DEFS` 与后端 `STAFF_SIDE_CAPABILITIES` 同义），逐项标出开了没有。
@@ -180,77 +160,13 @@ const score = ref({
 // 顶上那张排班卡（「重新选择区域和班次」那一行要把人送回它）：
 const schedCard = ref(null)
 
-const hygieneStats = computed(() => dailyProgress(hygiene.value.items))
-const hygieneDue = computed(() => shiftClock(hygiene.value.shift, hygiene.value.clocks))
-const hygieneOverdue = computed(() => buildWorkQueue({
-  inbox: hygiene.value.items,
-  shiftDue: hygieneDue.value,
-  now: hygiene.value.now,
-}).filter((task) => task.bucket === 'overdue').length)
-
-// 仪容仪表（票 12）：按**人**拍，今天排到班次才要拍 —— 休假的与没排到的连这一行都
-// 不显示（`required` 由排班给，不是「谁有账号」）。它不属于工作区那三类日常，所以是
-// 这块里单独的一行，**不进** `hygieneStats` 的分子分母。
-const attire = ref({
-  state: 'loading', // loading | ready | error
-  error: '',
-  businessDate: '',
-  required: false,
-  status: 'todo', // todo | pending | passed | rejected
-  note: '',
-  hasStandard: false,
-})
-// 拍照是两步（ADR 0050：标准图那一屏与取景器**不能同屏**，也不做分屏）。所以这里存
-// 的是「现在哪一屏」而不是「弹层开没开」：standard → camera 是换屏，不是叠上去。
-const attireSheet = ref('') // '' | 'standard' | 'camera'
-const imageUploads = useImageUploadQueueStore()
-// 「这张正在传」从上传队列派生，不用本组件的 ref：刷新页面 / 回收 webview 之后草稿会
-// 恢复继续传（跟卫生那一屏同一条口径），局部状态会让员工对着正在传的那张再拍一遍。
-const attireKey = computed(() => `attire:${attire.value.businessDate}`)
-// 这一行的色调：没标准图（做不了，得找店长）= 琥珀，被驳回（要重拍）= 珊瑚，
-// 待验收 = 中性，其余（没拍 / 已通过）= 玉色。分支顺序与模板里那串 v-if 一致 ——
-// 「被驳回」先于「没标准图」，两边判据不一致的话颜色和文案会对不上。
-const attireTone = computed(() => {
-  if (attire.value.status === 'rejected') return 'rejected'
-  if (!attire.value.hasStandard) return 'nostandard'
-  if (attire.value.status === 'pending') return 'pending'
-  return ''
-})
-const attirePending = computed(() => imageUploads.activeTasks.some(
-  (task) => task.pendingKey === attireKey.value,
+// 本班日常的截止钟点（「完整资料」里"本班日常截止"那一行）：班次是自己那份资料的
+// `shift`，钟点来自同一条响应里的 `daily_clocks` —— 两者都随下面的 `loadHygiene` 下来，
+// 这一页不再为它另发请求（原先那个 52px 的「日常 n/m」随卫生那一块搬去了工作台首页）。
+const hygieneDue = computed(() => shiftClock(
+  staffMe.value && staffMe.value.shift,
+  dailyClocks.value,
 ))
-
-function openAttireStandard() {
-  attireSheet.value = 'standard'
-}
-
-function openAttireCamera() {
-  // 相机只能在有标准图时开：员工要照着它拍（没传标准图时服务端也会拒）。
-  if (!attire.value.hasStandard) return
-  attireSheet.value = 'camera'
-}
-
-/** 拍完就进上传队列（不是直接 fetch）：断网/地铁里拍的那张不丢，恢复后自己传。 */
-function onAttireCaptured(blob) {
-  attireSheet.value = ''
-  try {
-    const form = new FormData()
-    form.append('file', blob, 'attire.jpg')
-    form.append('live', 'true')
-    imageUploads.enqueue({
-      transport: 'staff',
-      path: '/api/hygiene/staff/attire/submit',
-      formData: form,
-      label: '仪容仪表 · 现场自拍',
-      detail: attire.value.businessDate ? dayLabel(attire.value.businessDate) : '',
-      pendingKey: attireKey.value,
-      onSuccess: () => loadHygiene(true),
-      onError: () => { attire.value = { ...attire.value, error: '刚才那张没传上去，可在上传列表里重试' } },
-    })
-  } catch (err) {
-    attire.value = { ...attire.value, error: err.message || '无法加入上传队列' }
-  }
-}
 
 // 撤回与「拒绝」不可逆（服务端状态机只往前走：撤回要重提、拒绝对对方就是「没同意」），
 // 手机上一误触没有回头路 —— 两个都先过确认框。同仓库对不可逆动作一律这么办（店长驳回、
@@ -270,12 +186,20 @@ const tone = computed(() => todayTone(today.value))
 const todaySub = computed(() => todaySubline(today.value))
 const nextLine = computed(() => nextTwoLine(after.value))
 
-const ENTRIES = [
-  { key: 'leave', label: '请假' },
-  { key: 'swap', label: '换班' },
-  // 整月有地方可去了（票 06）；请假（票 08）与换班（票 09）都在下面打开一张表单。
-  { key: 'month', label: '整月', to: '/workbench/me/month' },
-]
+// 三颗按钮都往月历走（票 15）：请假与换班各带一个 `act`，落在**今天那一格**上 ——
+// 跳过去就是那一天的操作单（`StaffDaySheet`），表单直接开着。为什么不在这一页就地弹：
+// 发起请假 / 换班的地方只能有一处，而日期与「那天谁在班」都在月历那屏上；这一页只回答
+// 「我今天上不上班」，顺带把这两件事送过去（`date` 取服务端的营业日，不取手机上的今天）。
+const ENTRIES = computed(() => {
+  const date = (today.value && today.value.business_date) || ''
+  const month = { path: '/workbench/me/month' }
+  return [
+    { key: 'leave', label: '请假', to: { ...month, query: { date, act: 'leave' } } },
+    { key: 'swap', label: '换班', to: { ...month, query: { date, act: 'swap' } } },
+    // 整月（票 06）：同一个月历，不带 `act` —— 进去自己挑是哪一天。
+    { key: 'month', label: '整月', to: month },
+  ]
+})
 
 // 会话没了（换了手机、店里停了账号、cookie 过期）：回员工登录，回来还是这一页。
 // 票 03 起员工登录页就是 `/login` 的员工栏（`?next=` 落在员工端前缀内时面板会强制
@@ -288,54 +212,14 @@ function leaveForStaffLogin() {
   if (target) router.replace(target)
 }
 
+/** 卡片上那三颗按钮都往月历走（见 `ENTRIES`）。`to` 用对象形式（`{ path, query }`）：
+ *  查询串交给 `vue-router` 编码，页面里不自己拼。 */
 function open(entry) {
   if (entry.to) {
     router.push(entry.to)
     return
   }
-  if (entry.key === 'leave') {
-    openLeave()
-    return
-  }
-  if (entry.key === 'swap') {
-    openSwap()
-    return
-  }
   note.value = `「${entry.label}」还没开放`
-}
-
-function openLeave() {
-  leaveError.value = ''
-  leaveStart.value = (today.value && today.value.business_date) || ''
-  leaveEnd.value = ''
-  leaveNote.value = ''
-  sheet.value = true
-  loadRequests()
-}
-
-/** 换班表单（票 09）：选一位同事、选一天。日期同样默认取服务端的营业日。 */
-function openSwap() {
-  swapError.value = ''
-  swapPeer.value = ''
-  swapDay.value = (today.value && today.value.business_date) || ''
-  swapNote.value = ''
-  swapSheet.value = true
-  loadColleagues()
-}
-
-/** 能跟谁换：服务端只回在上班的别人（停用/未批准的已经滤掉），这里不再筛一遍。 */
-async function loadColleagues() {
-  try {
-    const data = await staffRequest('/api/scheduling/me/colleagues')
-    colleagues.value = data.colleagues || []
-  } catch (err) {
-    if (err.status === 401) {
-      leaveForStaffLogin()
-      return
-    }
-    colleagues.value = []
-    swapError.value = err.message || '同事名单读不出来'
-  }
 }
 
 async function load(quiet = false) {
@@ -368,7 +252,6 @@ async function loadRequests(quiet = false) {
     const data = await staffRequest('/api/scheduling/me/requests')
     requests.value = data.requests || []
     incoming.value = data.incoming || []
-    if (data.max_request_note) maxNote.value = data.max_request_note
     requestsError.value = ''
     requestsUnread.value = false
   } catch (err) {
@@ -378,35 +261,6 @@ async function loadRequests(quiet = false) {
     }
     if (!quiet) requestsError.value = err.message || '你的申请读不出来'
     if (quiet) requestsUnread.value = true
-  }
-}
-
-async function submitLeave() {
-  if (leaveBusy.value) return
-  leaveBusy.value = true
-  leaveError.value = ''
-  try {
-    await staffRequest('/api/scheduling/me/requests', {
-      method: 'POST',
-      body: {
-        start_date: leaveStart.value,
-        // 只请一天时后一个空着：服务端把 `None` 与空串都当单日，但请求里少一个
-        // 字段更好读（日志里一眼看得出这是单日申请）。
-        end_date: leaveEnd.value || null,
-        note: leaveNote.value || null,
-      },
-    })
-    sheet.value = false
-    note.value = '请假提上去了，等店长批'
-    await loadRequests()
-  } catch (err) {
-    if (err.status === 401) {
-      leaveForStaffLogin()
-      return
-    }
-    leaveError.value = err.message || '没提交成'
-  } finally {
-    leaveBusy.value = false
   }
 }
 
@@ -433,33 +287,6 @@ async function cancelLeave(request) {
     // 清空（那是给「读不出来」用的），先说等于当场抹掉 —— 员工点了撤回看到界面什么都
     // 没变，会以为撤回了。服务端那句「已经处理过了」也就一起丢了。
     if (failure) requestsError.value = failure
-  }
-}
-
-async function submitSwap() {
-  if (swapBusy.value) return
-  swapBusy.value = true
-  swapError.value = ''
-  try {
-    await staffRequest('/api/scheduling/me/swaps', {
-      method: 'POST',
-      body: {
-        peer_employee_id: Number(swapPeer.value) || null,
-        business_date: swapDay.value,
-        note: swapNote.value || null,
-      },
-    })
-    swapSheet.value = false
-    note.value = '换班提上去了，等对方同意'
-    await loadRequests()
-  } catch (err) {
-    if (err.status === 401) {
-      leaveForStaffLogin()
-      return
-    }
-    swapError.value = err.message || '没提交成'
-  } finally {
-    swapBusy.value = false
   }
 }
 
@@ -507,55 +334,25 @@ async function confirmAnswer() {
   if (target) await answerSwap(target.card, target.agree)
 }
 
-/** 读卫生那一块（票 10）：今天的日常清单 + 本班的逾期钟点。
+/** 读自己那份卫生资料（`/api/hygiene/staff/me`）。
  *
- *  与排班那张卡**互不牵连**：它自己一个 try，失败只把这张卡变成一句「读不出来 + 重试」，
- *  上面那张排班卡照常显示（反过来也一样）。两个请求并行发，弱网下不用等两轮。
+ *  **2026-10-14 用户裁定**：今天的日常清单、仪容仪表那一行与它的两步拍照整块搬到工作台
+ *  首页「今天」（`components/staff/StaffHygieneCard.vue`）—— 员工端的默认首页就是那一页。
+ *  这一页只剩「我的」那一块要的三样：自己的资料（姓名 / 手机号 / 职位 / 当天的区与班次 /
+ *  `admin_caps`）、专项钟点、日常钟点（"完整资料"里那一行）。三条都在**同一个响应**里，
+ *  所以只发一条请求；那一块的数据由首页那个组件自己拉。
+ *
+ *  读不出来就不动上一次的资料：员工来这一页是看今天上不上班，账号设置空着比在顶上顶一句
+ *  红字好（原来那句报错是挂在卫生卡上的，卡搬走了就不在这儿报）。
  */
-async function loadHygiene(quiet = false) {
-  // 同上：静默重读不打回 loading 态。
-  if (!quiet) hygiene.value = { ...hygiene.value, state: 'loading', error: '' }
+async function loadHygiene() {
   try {
-    const [me, work, attireShot] = await Promise.all([
-      staffRequest('/api/hygiene/staff/me'),
-      staffRequest('/api/hygiene/staff/daily-work'),
-      // 仪容仪表那一条（票 12）：跟日常一起拉，但**分开存** —— 它没有钟点、不按工作区。
-      staffRequest('/api/hygiene/staff/attire'),
-    ])
-    const employee = me.employee || {}
-    const shot = attireShot.attire || {}
-    // 同一份响应里那个 employee 也喂「我的」那一块与「你能做的事」那张卡（姓名 / 手机号 /
-    // 职位 / 班次 / `admin_caps`，见下面 `staffMe`）：它是**同一个** `/api/hygiene/staff/me`，
-    // 不额外再发一条请求。
-    staffMe.value = employee
+    const me = await staffRequest('/api/hygiene/staff/me')
+    staffMe.value = me.employee || {}
     deepClock.value = me.deep_clock || null
-    attire.value = {
-      state: 'ready',
-      error: '',
-      businessDate: shot.business_date || '',
-      required: Boolean(shot.required),
-      status: shot.status || 'todo',
-      note: shot.note || '',
-      hasStandard: Boolean(shot.has_standard),
-    }
-    hygiene.value = {
-      state: 'ready',
-      error: '',
-      items: work.items || [],
-      clocks: me.daily_clocks || null,
-      shift: employee.shift || null,
-      zoneName: employee.zone_name || '',
-      // 逾期是「现在几点」跟本班钟点比出来的：进页面那一刻取一次，别在 computed 里
-      // 反复取时间（那样每次渲染结果都可能不一样）。
-      now: Date.now(),
-    }
+    dailyClocks.value = me.daily_clocks || null
   } catch (err) {
-    if (err.status === 401) {
-      leaveForStaffLogin()
-      return
-    }
-    hygiene.value = { ...hygiene.value, state: 'error', error: err.message || '卫生待办读不出来' }
-    attire.value = { ...attire.value, state: 'error', error: err.message || '仪容仪表读不出来' }
+    if (err.status === 401) leaveForStaffLogin()
   }
 }
 
@@ -766,7 +563,7 @@ function openShiftNotice() {
  *  - 关掉 → 焦点回到打开它的那颗按钮（否则焦点掉到 body，键盘用户直接迷路）。
  * 写法照 `views/hygiene/HygieneHomeView.vue` 里那套（全仓此前唯一在用 `inert` 的地方）。
  */
-const anyModalOpen = computed(() => [attireSheet, sheet, swapSheet, profileOpen, passwordOpen, moreOpen].some((r) => Boolean(r.value)))
+const anyModalOpen = computed(() => [profileOpen, passwordOpen, moreOpen].some((r) => Boolean(r.value)))
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 let lastFocusedElement = null
 
@@ -813,45 +610,44 @@ onMounted(() => {
   load()
   // 顺手读一次自己的申请：有等着批的、或别人问我换班的，首页就能看见（读不出来不吭声）。
   loadRequests(true)
-  // 卫生那一块自己拉（票 10），跟排班卡并行、失败互不影响。
+  // 自己那份卫生资料（「我的」那一块）也自己拉，跟排班卡并行、失败不影响它。
   loadHygiene()
   // 「我的成绩」也自己拉：它读的是另一条接口（`/staff/me/stats`），弱网下不用排在
-  // 卫生那三跳后面。
+  // 资料那一跳后面。
   loadScore()
 })
 
 onUnmounted(() => document.removeEventListener('keydown', onModalKeydown))
 
 /**
- * **测试专用暴露面（t72）**：`openModal('more' | 'profile' | 'password' | 'leave' | 'swap' | 'attire')`。
- * 为什么要开这个口子：弹层的入口按钮依赖数据（无申请 / 无班次时不渲染），
+ * **测试专用暴露面（t72）**：`openModal('more' | 'profile' | 'password')`。
+ * 为什么要开这个口子：弹层的入口按钮依赖数据（无班次 / 资料没读到时按钮不可点），
  * 而焦点陷阱与背景隔离的判据必须在**弹层开着**的前提下实测 —— 见
  * `__tests__/todayModalFocus.test.js`。生产代码不会调用它。
  */
 function openModal(key) {
   const map = {
     more: moreOpen, profile: profileOpen, password: passwordOpen,
-    leave: sheet, swap: swapSheet,
   }
-  if (key === 'attire') { attireSheet.value = 'standard'; return }
   const target = map[key]
   if (!target) throw new Error('unknown modal: ' + key)
   target.value = true
 }
 defineExpose({ openModal })
 
-// 实时（票 10 收尾）：店长改了我的班、批了我的假、有人找我换班、或者我这区的卫生
-// 待办变了 —— 三块各拉各的（都是轻量 GET，nudge 本身不带数据），一次全刷到。
+// 实时（nudge + pull）：店长改了我的班、批了我的假、有人找我换班、或者我这区的卫生
+// 变了 —— 三块各拉各的（都是轻量 GET，nudge 本身不带数据），一次全刷到。
 // 换班那条尤其要紧：对方不开页面就永远不知道有人找他换。
-// 成绩那一块也在这儿重读：验收（通过 / 驳回）是店长在别处做的动作，nudge 是这张卡
+// 成绩那一块也在这儿重读：验收（通过 / 驳回）是店长在别处做的动作，nudge 是那张卡
 // 唯一能自己变新的机会 —— 不挂在这条上，员工得等下次开页面才看得到新数字。
+// 今天要交的卫生那一块现在住工作台首页，它自己订阅（`StaffHygieneCard`）。
 useNudgePull({
   id: 'today-page',
   topics: ['scheduling', 'hygiene'],
   pull: () => {
     load(true)
     loadRequests(true)
-    loadHygiene(true)
+    loadHygiene()
     loadScore(true)
   },
 })
@@ -931,7 +727,7 @@ useNudgePull({
             <em>{{ nextLine }}</em>
           </div>
           <!-- 换班/调班的说明落在这里（DO:747）：不再是弹一下就没的提示 -->
-          <p class="tA-sub sched-note">今天上哪个班、在哪个区由排班决定；要改哪一天，找超级管理员在排班页改。</p>
+          <p class="tA-sub sched-note">今天上哪个班、在哪个区由排班决定；本月的班看「整月」。请假、换班在月历上点那一天办（排班页归超级管理员）。</p>
           <p class="shift" :class="tone">{{ todayText }}</p>
           <p class="tA-sub">{{ todaySub }}</p>
           <div class="acts">
@@ -1025,82 +821,6 @@ useNudgePull({
           <p class="tA-sub">
             请假批了那天写「请假」；换班要对方先同意、店长再批，批完两个人才对调。
           </p>
-        </section>
-
-        <!-- 卫生那块（原型 A 的下半张卡，票 10 接上）：今天的日常检查进度、逾期点、
-             还差几项。跟上面那张排班卡各拉各的 —— 一块读不出来，另一块照常显示。 -->
-        <section class="tA-card hyg">
-          <div class="tA-hd">
-            <span class="tag hyg">卫生</span>
-            <em v-if="hygiene.state === 'ready' && hygiene.zoneName">{{ hygiene.zoneName }}</em>
-          </div>
-
-          <p v-if="hygiene.state === 'loading'" class="tA-sub">正在读今天的日常…</p>
-
-          <template v-else-if="hygiene.state === 'error'">
-            <p class="tA-sub">{{ hygiene.error }}</p>
-            <div class="acts">
-              <button class="btn" type="button" @click="loadHygiene()">重试</button>
-            </div>
-          </template>
-
-          <template v-else>
-            <p v-if="!hygieneStats.total" class="tA-sub">
-              <template v-if="hygiene.shift">今天没有要交的日常检查。</template>
-              <!-- 没班次就没有可交的那一份（票 10：班次由排班决定）——说清该找谁，别让人在这儿等。 -->
-              <template v-else>排班还没给你班次，今天没有可交的日常检查；找超级管理员配一下规则。</template>
-            </p>
-            <template v-else>
-              <p class="shift">日常 {{ hygieneStats.passed }}/{{ hygieneStats.total }}</p>
-              <p class="tA-sub">
-                <template v-if="hygieneStats.remaining">还差 {{ hygieneStats.remaining }} 项</template>
-                <template v-else>今天的日常交齐了</template><template
-                  v-if="hygieneDue"
-                >，本班 {{ hygieneDue }} 前交</template>。
-              </p>
-              <p v-if="hygieneOverdue" class="tL-err" role="status">
-                已经过了本班的钟点，还有 {{ hygieneOverdue }} 项没交。
-              </p>
-            </template>
-            <!-- 仪容仪表（票 12）：按**人**拍，今天排到班次才有这一行 —— 休假的与没
-                 排到的人看不到它。跟上面那份日常分开：它没有钟点、也不挂在工作区上。 -->
-            <template v-if="attire.required">
-              <p class="attire-line" :class="attireTone">
-                仪容仪表：<template v-if="attirePending">正在传…</template><template
-                  v-else-if="attire.status === 'passed'"
-                >已通过</template><template
-                  v-else-if="attire.status === 'pending'"
-                >已交，等店长验收</template><template
-                  v-else-if="attire.status === 'rejected'"
-                >被驳回，要重拍</template><template
-                  v-else-if="!attire.hasStandard"
-                >超级管理员还没传标准图</template><template v-else>今天还没拍</template>
-              </p>
-              <p v-if="attire.note" class="tL-err" role="status">店长说：{{ attire.note }}</p>
-              <p v-if="attire.error" class="tL-err" role="status">{{ attire.error }}</p>
-              <!-- 已经通过的不给重拍入口（服务端也会拒 `already_accepted`）：验收过的是
-                   记录，员工端就不该摆一个按了必然失败的按钮。 -->
-              <div v-if="attire.hasStandard && attire.status !== 'passed'" class="acts">
-                <button
-                  class="btn"
-                  type="button"
-                  :disabled="attirePending"
-                  @click="openAttireStandard"
-                >
-                  {{ attire.status === 'todo' ? '仪容仪表 ›' : '重拍一张 ›' }}
-                </button>
-              </div>
-            </template>
-
-            <!-- 入口名（2026-10-08 用户定名）：跟上面那颗「仪容仪表 ›」对称 —— 一个指人、
-                 一个指区，都不再随「还差几项」变。原来的「去交 / 继续验收 ›」把两个动作
-                 并列在一颗按钮上，而「验收」对普通员工不是他们的活。 -->
-            <div class="acts">
-              <button class="btn" type="button" @click="router.push('/workbench/me/clean')">
-                工作卫生 ›
-              </button>
-            </div>
-          </template>
         </section>
 
         <!-- 「我的成绩」（2026-10-05 用户裁定）：近 7 天的次数（一次通过 / 被驳回 / 实拍）+ 被驳回的原因分布
@@ -1276,164 +996,6 @@ useNudgePull({
             <dd>{{ birthdayText(staffMe.birthday) }}</dd>
           </div>
         </dl>
-      </div>
-    </div>
-
-    <!-- 仪容仪表的拍照弹层（票 12）：两步 —— 先看标准图、再开相机。**不同屏**是 ADR
-         0050 的硬规则：标准图与取景器并排，人会照着「上一张」摆姿势而不是看镜头。 -->
-    <div
-      v-if="attireSheet"
-      class="modal-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="attire-sheet-title"
-      @click.self="attireSheet = ''"
-    >
-      <div class="modal-box">
-        <div class="modal-header">
-          <h3 id="attire-sheet-title">仪容仪表</h3>
-          <button class="btn" type="button" @click="attireSheet = ''">关闭</button>
-        </div>
-        <template v-if="attireSheet === 'standard'">
-          <p class="tA-sub">对着标准图看清再拍。这一屏故意不放取景框。</p>
-          <HygieneStandardOverlay
-            src="/api/hygiene/staff/attire/standard"
-            alt="仪容仪表标准图"
-          />
-          <button class="btn" type="button" @click="openAttireCamera">打开相机</button>
-        </template>
-        <template v-else-if="attireSheet === 'camera'">
-          <p class="tA-sub">拍现在的样子。相册里的旧照片不算，必须现场拍。</p>
-          <HygieneLiveCamera @captured="onAttireCaptured" />
-        </template>
-      </div>
-    </div>
-
-    <!-- 请假表单（票 08）。容器用主题里那套 `.modal-overlay/.modal-box`：员工端所有
-         页都加载了 theme.css，卫生那几页的确认框也是这么弹的。 -->
-    <div
-      v-if="sheet"
-      class="modal-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="leave-sheet-title"
-      @click.self="sheet = false"
-    >
-      <div class="modal-box">
-        <div class="modal-header">
-          <h3 id="leave-sheet-title">请假</h3>
-          <button class="btn" type="button" @click="sheet = false">关闭</button>
-        </div>
-        <p class="tA-sub">
-          请哪几天：只请一天就把后一格空着。今天起才能请，最多请到排班铺到的那天。
-        </p>
-        <div class="form-row">
-          <label for="leave-start">从哪天</label>
-          <!-- 日期用站内的 `LuyunDatePicker`（2026-10-13 用户裁定「日期格式要中国本土化」）：
-               原生 `<input type=date>` 的显示格式跟着**浏览器界面语言**走，页面控制不了。
-               `input-id` 把 id 透传到组件内部那个 input，上面 `<label for>` 的关联不断。
-               `min-date` 用**服务端的营业日**（不是手机上的今天）：过去的日子服务端一定会拒
-               （`past_leave`），就在这里先挡住，别让员工拨完日期、提交了才被打回来。
-               上限（排班铺到哪天）不在这里设：`/me` 没下发窗口末日，服务端那句
-               「排班还没铺到那么远：最多请到 X」说得比控件准。 -->
-          <LuyunDatePicker
-            v-model="leaveStart"
-            input-id="leave-start"
-            :min-date="today ? today.business_date : undefined"
-            placeholder="选择开始日"
-            aria-label="请假从哪天"
-          />
-        </div>
-        <div class="form-row">
-          <label for="leave-end">到哪天（可空）</label>
-          <LuyunDatePicker
-            v-model="leaveEnd"
-            input-id="leave-end"
-            :min-date="leaveStart || (today ? today.business_date : undefined)"
-            placeholder="只请一天就空着"
-            aria-label="请假到哪天"
-          />
-        </div>
-        <div class="form-row">
-          <label for="leave-note">{{ noteLabel }}</label>
-          <input
-            id="leave-note"
-            v-model="leaveNote"
-            class="input"
-            type="text"
-            :maxlength="maxNote || undefined"
-            placeholder="例如：家里有事"
-          >
-        </div>
-        <p v-if="leaveError" class="tL-err" role="alert">{{ leaveError }}</p>
-        <div class="modal-footer">
-          <button class="btn" type="button" @click="sheet = false">取消</button>
-          <button
-            class="btn btn-primary"
-            type="button"
-            :disabled="leaveBusy || !leaveStart"
-            @click="submitLeave"
-          >提交</button>
-        </div>
-      </div>
-    </div>
-    <!-- 换班表单（票 09）：选一位同事 + 选一天。跟请假同一个弹层底子。 -->
-    <div
-      v-if="swapSheet"
-      class="modal-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="swap-sheet-title"
-      @click.self="swapSheet = false"
-    >
-      <div class="modal-box">
-        <div class="modal-header">
-          <h3 id="swap-sheet-title">换班</h3>
-          <button class="btn" type="button" @click="swapSheet = false">关闭</button>
-        </div>
-        <p class="tA-sub">
-          跟谁换、换哪一天：对方在手机上点同意，店长才看得到这条；两边都点头之后才轮到店长批。
-        </p>
-        <div class="form-row">
-          <label for="swap-peer">跟谁换</label>
-          <select id="swap-peer" v-model="swapPeer" class="input">
-            <option value="">选一位同事</option>
-            <option v-for="person in colleagues" :key="person.id" :value="person.id">
-              {{ person.name }}<template v-if="person.job_title"> · {{ person.job_title }}</template>
-            </option>
-          </select>
-        </div>
-        <div class="form-row">
-          <label for="swap-day">换哪天</label>
-          <LuyunDatePicker
-            v-model="swapDay"
-            input-id="swap-day"
-            :min-date="today ? today.business_date : undefined"
-            placeholder="选择要换的那天"
-            aria-label="换哪天"
-          />
-        </div>
-        <div class="form-row">
-          <label for="swap-note">{{ noteLabel }}</label>
-          <input
-            id="swap-note"
-            v-model="swapNote"
-            class="input"
-            type="text"
-            :maxlength="maxNote || undefined"
-            placeholder="例如：那天有事，想跟他换个班"
-          >
-        </div>
-        <p v-if="swapError" class="tL-err" role="alert">{{ swapError }}</p>
-        <div class="modal-footer">
-          <button class="btn" type="button" @click="swapSheet = false">取消</button>
-          <button
-            class="btn btn-primary"
-            type="button"
-            :disabled="swapBusy || !swapPeer || !swapDay"
-            @click="submitSwap"
-          >提交</button>
-        </div>
       </div>
     </div>
 
@@ -1645,13 +1207,6 @@ useNudgePull({
 .tA-card.sched {
   border-color: var(--hy-mint-line);
   background: linear-gradient(168deg, rgba(63, 224, 176, .09), transparent 58%),
-    var(--hy-surface-2);
-}
-
-/* 这张样式表里没有 --hy-aqua-line/--hy-aqua-soft，用同色 rgba 顶上。 */
-.tA-card.hyg {
-  border-color: rgba(95, 214, 230, .36);
-  background: linear-gradient(168deg, rgba(95, 214, 230, .07), transparent 58%),
     var(--hy-surface-2);
 }
 
@@ -1946,12 +1501,6 @@ useNudgePull({
   border-color: var(--hy-mint-line);
 }
 
-.tag.hyg {
-  color: var(--hy-aqua);
-  background: rgba(95, 214, 230, .12);
-  border-color: rgba(95, 214, 230, .36);
-}
-
 /* 请假（票 08）：跟自己提的那件事同色。 */
 .tag.leave {
   color: var(--hy-aqua);
@@ -1965,22 +1514,6 @@ useNudgePull({
   background: rgba(245, 196, 81, .12);
   border-color: var(--hy-amber);
 }
-
-/* 仪容仪表那一行（票 12 加的功能）自己的字号：它是一句话 + 一个状态，不是数值。
-   原来借用了下面的 `.shift`（52px 的英雄数字），一句话会占两三行、压过「日常 n/m」。
-   中等字号 + 按状态着色，仍看得出「这条要你动手」。 */
-.attire-line {
-  margin: 0;
-  font-family: var(--font-song);
-  font-size: 20px;
-  line-height: 1.3;
-  color: var(--hy-jade);
-  padding: 2px 0;
-}
-
-.attire-line.pending { color: var(--hy-muted); }
-.attire-line.rejected { color: var(--hy-coral); }
-.attire-line.nostandard { color: var(--hy-amber); }
 
 .shift {
   margin: 0;

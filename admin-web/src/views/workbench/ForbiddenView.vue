@@ -89,8 +89,10 @@ const identityLabel = computed(() => {
   return '未登录'
 })
 
-/** 「回我首页」的去向：员工回「今天」，超级管理员回工作台首页（票 06 会把它做成两种
- *  身份各自的首页）。会话已经没了就回登录页 —— 落点由那份判据说了算，不在这里写死。 */
+/** 「回我首页」的去向：员工回「今天」、超级管理员回工作台首页 —— **2026-10-14 起两者是
+ *  同一页**（`/workbench` 是清单里 `audience: both` 的子应用首页，员工的默认落点也在那儿，
+ *  见 `staffPaths.js` 的 `STAFF_ENTRY_PATH`），所以两条分支同值、只有标签按身份说不同的话。
+ *  会话已经没了就回登录页 —— 落点由那份判据说了算，不在这里写死。 */
 const homeTo = computed(() => {
   if (identity.value === 'admin') return '/workbench'
   if (identity.value) return STAFF_ENTRY_PATH

@@ -532,7 +532,8 @@ describe('花名册 · 工具栏', () => {
 
     const box = wrapper.get('.modal-box')
     expect(box.get('canvas').attributes('aria-label')).toBe('员工入口二维码')
-    expect(box.get('code').text()).toContain('/workbench/me/today')
+    // 2026-10-14 起入口是工作台首页「今天」（`STAFF_ENTRY_PATH`）。
+    expect(box.get('code').text()).toContain('/workbench')
     expect(button(wrapper, '复制链接')).toBeTruthy()
     expect(box.get('.editor-lead').text()).toBe('扫这个码自助注册，批准后登录')
   })

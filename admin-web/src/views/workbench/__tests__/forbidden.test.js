@@ -104,7 +104,8 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
     await button.trigger('click')
     await flushPromises()
 
-    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
+    // 2026-10-14 起员工默认落点就是工作台首页「今天」（`STAFF_ENTRY_PATH`）。
+    expect(router.currentRoute.value.path).toBe('/workbench')
   })
 
   it('票 04：员工进印码页同理 —— 说清那是店长的页，仍留一条回自己首页的路', async () => {
@@ -121,7 +122,7 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
     await button.trigger('click')
     await flushPromises()
 
-    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.path).toBe('/workbench')
   })
 
   it('超级管理员进员工页：说明这是员工手机端的页，按钮回工作台首页', async () => {

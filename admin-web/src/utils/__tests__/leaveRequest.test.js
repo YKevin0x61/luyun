@@ -154,8 +154,10 @@ describe('别人问我换班的那张卡（票 09 验收 2）', () => {
     employee_name: '张三',
     business_date: '2026-09-25',
     their_scheduled: true,
+    their_shift_id: 3,
     their_shift_name: '白班',
     my_scheduled: true,
+    my_shift_id: 4,
     my_shift_name: '夜班',
   }
 
@@ -163,13 +165,35 @@ describe('别人问我换班的那张卡（票 09 验收 2）', () => {
     expect(incomingLine(CARD)).toBe('张三 想跟你换 9/25 周五 · 他那天 白班 · 你那天 夜班')
   })
 
-  it('我那天本来就休、或班次没了，都说得出来', () => {
-    expect(incomingLine({ ...CARD, my_scheduled: false, my_shift_name: null })).toBe(
+  it('我那天休、还没排到、班次被删是三件事，不许混成一句（票 15 修）', () => {
+    // 有行、班次为空 = 那天休（不是「班次已调整」—— 那三个字说的是那条班次被删了）。
+    expect(incomingLine({ ...CARD, my_shift_id: null, my_shift_name: null })).toBe(
       '张三 想跟你换 9/25 周五 · 他那天 白班 · 你那天休',
     )
-    expect(incomingLine({ ...CARD, my_shift_name: null })).toBe(
+    // 没有那一行 = 那天还没排到（原来这里被写成了「休」）。
+    expect(incomingLine({ ...CARD, my_scheduled: false, my_shift_id: null, my_shift_name: null })).toBe(
+      '张三 想跟你换 9/25 周五 · 他那天 白班 · 你那天还没排到',
+    )
+    // 有行、有班次 id、名字取不到 = 那条班次已经删了。
+    expect(incomingLine({ ...CARD, my_shift_id: 9, my_shift_name: null })).toBe(
       '张三 想跟你换 9/25 周五 · 他那天 白班 · 你那天 班次已调整',
     )
+  })
+
+  it('他那几天没有班：说「想接你那天」，不写「想跟你换」（那是对调的意思）', () => {
+    expect(incomingLine({ ...CARD, their_shift_id: null, their_shift_name: null })).toBe(
+      '张三 想接你 9/25 周五 的班 · 他那天休 · 你那天 夜班',
+    )
+    expect(incomingLine({ ...CARD, their_scheduled: false, their_shift_id: null, their_shift_name: null })).toBe(
+      '张三 想接你 9/25 周五 的班 · 他那天还没排到 · 你那天 夜班',
+    )
+    // 两个人都没有班：批了也不改什么，照实说。
+    expect(incomingLine({
+      ...CARD, their_shift_id: null, their_shift_name: null, my_shift_id: null, my_shift_name: null,
+    })).toBe('张三 想跟你换 9/25 周五 · 两个人那天都没有班')
+  })
+
+  it('空卡片给空串，不抛也不编一张卡', () => {
     expect(incomingLine(null)).toBe('')
   })
 })

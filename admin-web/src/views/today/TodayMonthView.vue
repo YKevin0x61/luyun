@@ -22,28 +22,26 @@
  * 翻月只在服务端给的展开窗口里走（`stepMonth`）：往后到 `window_end` 所在的月为止，
  * 那之后的格子算「窗口外」，淡出并单独说一句 —— 淡 = 还没铺到，不是「那天没排」。
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import StaffDaySheet from '../../components/scheduling/StaffDaySheet.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { eachDayInRange } from '../../utils/dateRange'
 import { loginRedirectTarget } from '../../utils/loginNext'
+import { actFromQuery, dateFromQuery, monthOfDate } from '../../utils/staffDayActions'
 import {
   MONTH_HEADS,
   dayBeyondWindow,
-  dayLabel,
-  isMe,
   monthCell,
   monthLabel,
-  myDayText,
-  offLabel,
-  rosterSummary,
   staffCountLabel,
   stepMonth,
 } from '../../utils/todayShift'
 
 const router = useRouter()
+const route = useRoute()
 const state = ref('loading') // loading | ready | error
 const employee = ref(null)
 const month = ref('') // 'YYYY-MM'；空着就让服务端按本营业月给
@@ -102,85 +100,67 @@ function step(delta) {
   load(next)
 }
 
-// ── 点开某一天看全店名单（票 13）─────────────────────────────────────────
+// ── 点开某一天：那一屏就是「这一天」的操作单（票 15）──────────────────────
 //
-// 名单是**按需拉的**：一个月 30 天，把每天的全店名单一次全拉下来（30 × 20 人）没人看，
-// 点开哪天才拉哪天。`detailDay` 是那一格（格子上已经有我的班别与当天人数，标题照着写）。
-const detailDay = ref(null)
-const detail = ref(null)
-const detailState = ref('idle') // idle | loading | ready | error
-const detailError = ref('')
+// 名单、请假、换班三件事都在 `StaffDaySheet` 里（票 13 那份名单是它的上半截）——
+// 它是**这一天**唯一的操作面，进去之后不再跳页：日期就是这个格子，换班的人从那天
+// 在班的人里点。名单按需拉（一个月 30 天全拉下来没人看），这件事也交给它。
+//
+// 这一页只记住「点的是哪一天」，而且存**日期字符串**不存那一格对象：月历会重读
+// （nudge / 翻月），存对象的话弹层会停在一份旧快照上，而「我这天」那行必须跟着新数据走。
+const detailDate = ref('')
+const openAct = ref('') // 从今天页带过来的那一屏：'' | 'leave' | 'swap'
+const detailDay = computed(() => (
+  detailDate.value
+    ? cells.value.find((cell) => cell.business_date === detailDate.value) || null
+    : null
+))
 
-const detailGroups = computed(() => (detail.value ? detail.value.groups : []))
-const detailOff = computed(() => (detail.value ? detail.value.off_people : []))
-const detailSummary = computed(() =>
-  detail.value ? rosterSummary(detail.value.total, detail.value.off_count) : '',
-)
-// 「我这天」那一行从**月历那份数据**里按日期取（不是打开弹层那一刻的快照）：店长改了班、
-// nudge 让月历重读之后，这一行跟着变，弹层里那份名单也由 `loadDay` 静默重拉（见下面的 pull）。
-const detailMine = computed(() => {
-  const key = detailDay.value && detailDay.value.business_date
-  return key ? cells.value.find((cell) => cell.business_date === key) || null : null
-})
-// 四态判据（`monthCell`）复用，只在上班那态后面接我自己的区名 —— 工作区不进格子
-// （票 06 口径 1），点开这一屏就是它该出现的地方。
-const mineText = computed(() => (detailMine.value ? myDayText(detailMine.value) : ''))
-
-async function loadDay(cell, quiet = false) {
-  if (!quiet) {
-    detail.value = null
-    detailState.value = 'loading'
-  }
-  try {
-    const data = await staffRequest(
-      `/api/scheduling/me/day?date=${encodeURIComponent(cell.business_date)}`,
-    )
-    // 连点两格时晚到的那份不能盖掉新的那份：按日期认人，不按「最后回来的就是对的」。
-    if (detailDay.value?.business_date !== cell.business_date) return
-    detail.value = data
-    detailState.value = 'ready'
-  } catch (err) {
-    if (err.status === 401) {
-      toLogin()
-      return
-    }
-    if (detailDay.value?.business_date !== cell.business_date) return
-    // 静默重拉失败（网络抖一下）不该把已经读出来的名单换成一句错误：留着旧的，下次再说。
-    if (quiet) return
-    detailError.value = err.message || '读不到这天的名单'
-    detailState.value = 'error'
-  }
-}
-
-function openDay(cell) {
+function openDay(cell, act = '') {
   // 窗口外的格子不可点（`:disabled`），这里再挡一次：万一键盘/脚本还能触发，
   // 也不去问服务端要一个注定空白的月外日期。
   if (dayBeyondWindow(cell, windowEnd.value)) return
-  detailDay.value = cell
-  loadDay(cell)
+  detailDate.value = cell.business_date
+  openAct.value = act
 }
 
 function closeDay() {
-  detailDay.value = null
-  detail.value = null
-  detailState.value = 'idle'
+  detailDate.value = ''
+  openAct.value = ''
 }
 
-function onKeydown(event) {
-  if (event.key === 'Escape' && detailDay.value) closeDay()
+/** 从「今天」页那两颗按钮跳过来时带的 `?date=&act=`：落到那一天，直接进那一屏。
+ *
+ *  只在挂载时读一次（`wantedDate` 用完就清）：解析之后 URL 就过期了，留着它反而会在
+ *  关掉弹层后又被 `openWanted` 打开一次。坏值由 `dateFromQuery` / `actFromQuery` 挡掉。 */
+const wantedDate = ref('')
+const wantedAct = ref('')
+
+function openWanted() {
+  const date = wantedDate.value
+  const act = wantedAct.value
+  wantedDate.value = ''
+  wantedAct.value = ''
+  if (!date) return
+  const cell = cells.value.find((item) => item.business_date === date)
+  if (cell) openDay(cell, act)
 }
 
-// 自己提的、**还没落定**的申请覆盖了哪几天（票 06 那条一直没数据源的角标验收）。
-//
-// 员工视角的「待处理」= 还在等对方点头、或等店长批的那几条；批了 / 驳了 / 撤了都不算
-// （那些已经是结果，格子上写的就是结果本身）。读不出来就不标 —— 跟店长月历同一条口径：
-// 宁可少一个记号，也别在一个没读到的日子上标错。
+// 格子上的两个记号都读同一条 `/me/requests`（一条请求两件事，不分两次拉）：
+//   · 右上角的小点  = 那天有**我的**申请还没落定；
+//   · 底下那条琥珀  = 那天**有人找我**换班，还没回应。
+// 读不出来两个都不标 —— 跟店长月历同一条口径：宁可少一个记号，也别在一个没读到的
+// 日子上标错。
 const pendingDates = ref(new Set())
-async function loadPendingMarks() {
+const incomingDates = ref(new Set())
+
+async function loadRequestMarks() {
   try {
     const data = await staffRequest('/api/scheduling/me/requests')
     const marks = new Set()
     for (const request of data.requests || []) {
+      // 还挂着的那两条才算「申请中」：等对方点头、等店长批。批了 / 驳了 / 撤了都是结果，
+      // 格子写的就是结果本身（批过的假写「请假」）。
       if (request.status !== 'pending_peer' && request.status !== 'pending_manager') continue
       const days = eachDayInRange(
         request.start_date,
@@ -189,8 +169,16 @@ async function loadPendingMarks() {
       for (const day of days) marks.add(day)
     }
     pendingDates.value = marks
+    // 有人找我换哪几天（票 09 的那几条待回应）：这件事不回应就停在员工这里，所以单独一个
+    // 记号，跟「我的申请」（右上角的点）分开 —— 一条在别人手里，一条在我手里。
+    const asks = new Set()
+    for (const card of data.incoming || []) {
+      if (card && card.business_date) asks.add(card.business_date)
+    }
+    incomingDates.value = asks
   } catch (err) {
     pendingDates.value = new Set()
+    incomingDates.value = new Set()
   }
 }
 
@@ -198,29 +186,32 @@ function backToThisMonth() {
   if (!isThisMonth.value) load()
 }
 
-onMounted(() => {
+onMounted(async () => {
   // 名字与清单里 `/workbench/me/month` 那一行同步。走 `workbenchDocumentTitle` 是为了
   // 那条「· 工作台」后缀：只写裸标题会让它在浏览器标签里跟管理后台的页面分不开。
   document.title = workbenchDocumentTitle('整月')
-  load()
+  // 「今天」页那两颗按钮带着 `?date=&act=` 跳过来（票 15）：先读那一天所在的月份，
+  // 再落到那一格 —— 不然跨月时（今天是 10/31、跳过来那天是 11/1 之类）会落在一格空白上。
+  wantedDate.value = dateFromQuery(route.query)
+  wantedAct.value = actFromQuery(route.query)
+  await load(monthOfDate(wantedDate.value) || undefined)
+  openWanted()
   // 申请那份自己拉（票 06 的角标）：跟月历并行，读不出来只是不标角标。
-  loadPendingMarks()
-  // Esc 关掉那天的名单（跟「今天」页那几个弹层同一个走法）。
-  document.addEventListener('keydown', onKeydown)
+  loadRequestMarks()
 })
 
-onUnmounted(() => document.removeEventListener('keydown', onKeydown))
+// Esc 关掉那一天那一屏：它由 `StaffDaySheet` 自己监听（弹层是它开的，它自己收），
+// 这一页不再重复埋一个 —— 两个监听器同时活着只会让「谁负责关」变得说不清。
 
 // 实时（票 10 收尾）：店长改了某一天、批了假，或者我的申请有了结果 —— 格子上的班别
-// 与那个小点都要跟着变。静默整页重读一次（一格一格改不值得）。正开着的那天名单也静默重拉：
-// 别人被临时调走时，「谁在班」这一屏不该停在旧数上（票 13）。
+// 与那两个记号都要跟着变。静默整页重读一次（一格一格改不值得）。
+// 正开着的那一天由 `StaffDaySheet` 自己订阅重读（名单 + 申请），这里不再代劳。
 useNudgePull({
   id: 'today-month',
   topics: ['scheduling'],
   pull: () => {
     load(month.value, true)
-    loadPendingMarks()
-    if (detailDay.value) loadDay(detailDay.value, true)
+    loadRequestMarks()
   },
 })
 </script>
@@ -288,6 +279,14 @@ useNudgePull({
             <!-- 申请中（票 06 那条一直没数据源的验收）：这天有我自己提的、还没落定的
                  请假或换班。跟格子里的班别是两件事，所以做成右上角的小点，不挤那一行字。 -->
             <i v-if="pendingDates.has(cell.business_date)" class="pend" aria-hidden="true" />
+            <!-- 有人找我换那天（票 09 的待回应）：另一条线的事（一条在别人手里、一条在我
+                 手里），所以是另一个记号。做成格子底下那条琥珀 —— 右上角已经被「我的申请」
+                 占了，两个圆点挨在一起谁也认不出谁。 -->
+            <i
+              v-if="incomingDates.has(cell.business_date)"
+              class="ask"
+              aria-hidden="true"
+            />
           </button>
         </div>
 
@@ -298,6 +297,7 @@ useNudgePull({
           <span><i class="dot moved" />班次已调整</span>
           <span><i class="dot none" />还没排</span>
           <span v-if="pendingDates.size"><i class="dot pending" />申请中</span>
+          <span v-if="incomingDates.size"><i class="dot asked" />找我换班</span>
         </div>
 
         <!-- 窗口尽头的两种说法：整月在窗外 vs 只有这个月后半段在窗外（淡掉的那些格子）。 -->
@@ -312,81 +312,29 @@ useNudgePull({
         </button>
 
         <p class="mFoot">
-          格子里的小字是那天全店上班的人数，点开某天看当天名单。<br />
-          空着的格子是那天还没排（不是休）—— 休的那天写着「休」。<br />
+          点开某一天：看那天的名单，也顺手请那天的假、跟那天在班的人换班。<br />
+          格子里的小字是那天全店上班的人数；空着的格子是那天还没排（不是休）——
+          休的那天写着「休」。<br />
           批过的假写「请假」（自己提的、店长批的），跟排班给的「休」不是一回事。<br />
-          右上角的小点 = 那天有你的申请还没落定（等对方点头 / 等店长批）；钟点只有卫生那边才有。
+          右上角的小点 = 那天有你的申请还没落定（等对方点头 / 等店长批）；
+          格子下面那条琥珀 = 有人找你换那天；钟点只有卫生那边才有。
         </p>
       </template>
     </div>
 
-    <!-- 某一天的名单（票 13）：点格子弹出，员工看的是「今天店里谁在、在哪、谁不来」。
-         容器走主题里那套 `.modal-overlay/.modal-box`（跟本页请假、加班那几处同一个走法）。 -->
-    <div
+    <!-- 某一天那一屏（票 13 的名单 + 票 15 的请假与换班）：点格子弹出，员工在这一屏里
+         看完那天的事、也把那天的事办掉 —— 日期就是这个格子，不用再选一次。 -->
+    <StaffDaySheet
       v-if="detailDay"
-      class="modal-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="day-roster-title"
-      @click.self="closeDay"
-    >
-      <div class="modal-box day-sheet">
-        <div class="modal-header">
-          <h3 id="day-roster-title">{{ dayLabel(detailDay.business_date) }}</h3>
-          <button class="btn" type="button" @click="closeDay">关闭</button>
-        </div>
-
-        <p v-if="detailState === 'loading'" class="mSub">读名单…</p>
-
-        <template v-else-if="detailState === 'error'">
-          <p class="mSub">{{ detailError }}</p>
-          <button class="btn btn-block" type="button" @click="openDay(detailDay)">重试</button>
-        </template>
-
-        <template v-else-if="detail">
-          <!-- 我这天：格子不写工作区（票 06 口径 1），这一屏是它该出现的地方。 -->
-          <p class="rMine">我这天：<b>{{ mineText }}</b></p>
-          <p class="rSum">{{ detailSummary }}</p>
-
-          <div v-for="group in detailGroups" :key="group.shift_name" class="rGroup">
-            <div class="rHead">
-              <span class="rName">{{ group.shift_name }}</span>
-              <span class="rCount">{{ group.count }} 人</span>
-            </div>
-            <ul class="rList">
-              <li
-                v-for="person in group.people"
-                :key="person.id"
-                :class="{ me: isMe(person, employee && employee.id) }"
-              >
-                <span class="rWho">{{ person.name }}</span>
-                <span class="rWhere">{{ person.zone || '未配区' }}</span>
-              </li>
-            </ul>
-          </div>
-          <p v-if="!detailGroups.length" class="mSub">没人排班</p>
-
-          <div v-if="detailOff.length" class="rGroup">
-            <div class="rHead">
-              <span class="rName">休假</span>
-              <span class="rCount">{{ detailOff.length }} 人</span>
-            </div>
-            <ul class="rList">
-              <li
-                v-for="person in detailOff"
-                :key="person.id"
-                :class="{ me: isMe(person, employee && employee.id) }"
-              >
-                <span class="rWho">{{ person.name }}</span>
-                <!-- 休与请假分开写（票 08 的口径）：判据在 `offLabel` 一处。 -->
-                <span class="rWhere" :class="{ leave: person.leave }">{{ offLabel(person) }}</span>
-              </li>
-            </ul>
-          </div>
-          <p v-else class="mSub">没人休假</p>
-        </template>
-      </div>
-    </div>
+      :key="detailDate"
+      :day="detailDay"
+      :employee="employee"
+      :today="today"
+      :window-end="windowEnd"
+      :initial-act="openAct"
+      @close="closeDay"
+      @changed="loadRequestMarks"
+    />
   </div>
 </template>
 
@@ -663,111 +611,24 @@ useNudgePull({
   line-height: 1.75;
 }
 
-/* ── 某一天的名单（票 13）────────────────────────────────────────────────
-   容器是主题里的 `.modal-overlay/.modal-box`（布局与遮罩都在那儿），这里只管里面
-   这份名单的版式与员工端的令牌。 */
-.day-sheet {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.day-sheet .modal-header {
-  margin-bottom: 0;
-}
-
-/* 我这天：这一屏唯一说「我」的地方，所以给它自己的分量（格子那三行都是紧凑的）。 */
-.rMine {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--hy-muted);
-}
-
-.rMine b {
-  font-family: var(--font-song);
-  font-size: 14px;
-  letter-spacing: .06em;
-  color: var(--hy-jade);
-}
-
-.rSum {
-  margin: 0;
-  font-size: 11px;
-  color: var(--hy-faint);
-}
-
-.rGroup {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.rHead {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  padding-bottom: 3px;
-  border-bottom: 1px solid var(--hy-line);
-}
-
-.rHead .rName {
-  font-family: var(--font-song);
-  font-size: 12.5px;
-  letter-spacing: .08em;
-}
-
-.rHead .rCount {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--hy-faint);
-}
-
-.rList {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.rList li {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 5px 2px;
-  font-size: 12.5px;
-  border-bottom: 1px dashed var(--hy-line);
-}
-
-.rList li:last-child {
-  border-bottom: 0;
-}
-
-/* 我在名单里的那一行：薄荷底 + 名字后面一枚「我」—— 按 id 认（`isMe`），不按名字。 */
-.rList li.me {
-  background: var(--hy-mint-soft);
-  border-radius: var(--hy-radius-sm);
-  padding-left: 6px;
-  padding-right: 6px;
-}
-
-.rList li.me .rWho::after {
-  content: '我';
-  margin-left: 6px;
-  font-size: 9.5px;
-  color: var(--hy-jade);
-  border: 1px solid var(--hy-mint-line);
+/* 有人找我换那天（票 09 的待回应）：格子底下一条琥珀短线。
+   放在底下而不是右上角：右上角是「我的申请」那个小点的地方，两个 6px 的圆点挨在一起
+   谁也认不出谁；这条横线也不占格子里那三行字的位置。 */
+.mD .ask {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 4px;
+  height: 2px;
   border-radius: 999px;
-  padding: 0 4px;
+  background: var(--hy-amber);
 }
 
-.rWhere {
-  font-size: 11.5px;
-  color: var(--hy-muted);
-}
-
-/* 请假用青色（跟月历格子里那一态同色），休仍是灰的 —— 两件事两个颜色。 */
-.rWhere.leave {
-  color: var(--hy-aqua);
+/* 图例里那一条：跟格子里的记号同形状（短横线），不画成圆点。 */
+.dot.asked {
+  width: 11px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--hy-amber);
 }
 </style>

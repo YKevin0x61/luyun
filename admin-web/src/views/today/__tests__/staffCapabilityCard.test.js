@@ -169,9 +169,11 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     expect(wrapper.text()).not.toContain('你能做的事')
     expect(wrapper.text()).not.toContain('超级管理员还没开给你')
 
-    // 其余四块一块都不少：今天上不上班、今天的活、我的成绩、账号信息。
+    // 其余几块一块都不少：今天上不上班、我的成绩、账号信息。
+    // （今天的活那一块 2026-10-14 搬去了工作台首页，这块由
+    // `components/staff/__tests__/staffHygieneCard.test.js` 盯着。）
     expect(wrapper.get('.tA-card.sched').text()).toContain('白班')
-    expect(wrapper.find('.tA-card.hyg').exists()).toBe(true)
+    expect(wrapper.find('.tA-card.hyg').exists()).toBe(false)
     expect(wrapper.find('.tA-card.score').exists()).toBe(true)
     // t71：姓名已折进「完整资料」二级视图 —— 主表不再有它，但点开必须可达
     expect(wrapper.get('.me-meta').text()).not.toContain('余威威')

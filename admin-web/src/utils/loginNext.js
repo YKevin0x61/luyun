@@ -176,9 +176,15 @@ function migrateLegacyPath(next) {
  *  - 员工前缀（`staffPaths.js` 的 `isStaffLandingPath`）：员工自己的页面。`/register`
  *    不算 —— 账号还没批准、会话也不存在，把 `?next=/register` 当落点就是把员工送进死路；
  *  - **配方阅读面**（票 07）：扫码看岗位配方的那条链路。厨师在员工栏登录、目标是
- *    `/workbench/kitchen/recipe/detail?slug=…` 时，若这里不放行就会**静默落到
- *    `/workbench/me/today`** —— 「登录后回到那条配方」当场失效，而且没有任何报错。
+ *    `/workbench/kitchen/recipe/detail?slug=…` 时，若这里不放行就会**静默落到员工默认
+ *    落点**（2026-10-14 起是工作台首页 `/workbench`，见 `staffPaths.js`）——
+ *    「登录后回到那条配方」当场失效，而且没有任何报错。
  *    阅读面在清单里是 `both`，员工进得去，所以它是合法的员工落点。
+ *
+ *  **`/workbench` 自己不在名单里**（哪怕它就是员工默认落点）：它是两种身份的共同首页
+ *  （`both`），认成"员工页"会让店长点工作台首页时被强制开员工栏。员工带着
+ *  `?next=/workbench` 登录照样回得来 —— 这里认不出时 `resolveStaffNext` 落的就是那个
+ *  默认值，两条路同一页。
  *
  *  配方**管理**页与**印码**页不在这两份里（两页都是管理端那一档），别顺手把整个
  *  `/workbench/kitchen/` 前缀放进来。印码页票 04 起从阅读面里摘出去了：印码是店长布置

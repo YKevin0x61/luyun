@@ -173,25 +173,25 @@ describe('resolveStaffNext', () => {
   })
 
   it('站外地址与协议相对地址一律回落到员工默认落点', () => {
-    expect(resolveStaffNext('https://evil.example/phish')).toBe('/workbench/me/today')
-    expect(resolveStaffNext('//evil.example')).toBe('/workbench/me/today')
-    expect(resolveStaffNext('/\\evil.example')).toBe('/workbench/me/today')
-    expect(resolveStaffNext('javascript:alert(1)')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('https://evil.example/phish')).toBe('/workbench')
+    expect(resolveStaffNext('//evil.example')).toBe('/workbench')
+    expect(resolveStaffNext('/\\evil.example')).toBe('/workbench')
+    expect(resolveStaffNext('javascript:alert(1)')).toBe('/workbench')
   })
 
   it('管理端页面不算员工落点（连名字像的也不算）', () => {
-    expect(resolveStaffNext('/admin')).toBe('/workbench/me/today')
-    expect(resolveStaffNext('/workbench/hr/roster')).toBe('/workbench/me/today')
-    expect(resolveStaffNext('/workbench/floor/zones')).toBe('/workbench/me/today')
-    expect(resolveStaffNext('/workbench/mex')).toBe('/workbench/me/today')
-    expect(resolveStaffNext('/login?next=/admin')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/admin')).toBe('/workbench')
+    expect(resolveStaffNext('/workbench/hr/roster')).toBe('/workbench')
+    expect(resolveStaffNext('/workbench/floor/zones')).toBe('/workbench')
+    expect(resolveStaffNext('/workbench/mex')).toBe('/workbench')
+    expect(resolveStaffNext('/login?next=/admin')).toBe('/workbench')
     // 票 04：印码页是 `admin` 那一档，也不再是员工落点（跟配方管理一个待遇）。
-    expect(resolveStaffNext('/workbench/kitchen/recipe/qr')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/workbench/kitchen/recipe/qr')).toBe('/workbench')
   })
 
   it('票 07：配方阅读面也是员工落点 —— 扫码的厨师登录后回到那条配方', () => {
     // 这是本票最容易漏的一处：只认「员工端落点」（`/workbench/me/*`）的话，厨师在员工栏
-    // 登录、`?next=` 是配方阅读路径时会**静默落到 `/workbench/me/today`** ——
+    // 登录、`?next=` 是配方阅读路径时会**静默落到员工默认落点** ——
     // 「登录后回到那条配方」当场失效，而且没有任何报错。
     expect(resolveStaffNext('/workbench/kitchen/recipe'))
       .toBe('/workbench/kitchen/recipe')
@@ -201,7 +201,7 @@ describe('resolveStaffNext', () => {
       .toBe('/workbench/kitchen/recipe/print?slug=changfen')
     // 管理页与印码页都不是员工落点（两页都只给管理端），照旧回落到员工默认落点。
     expect(resolveStaffNext('/workbench/kitchen/recipe/manage'))
-      .toBe('/workbench/me/today')
+      .toBe('/workbench')
   })
 
   it('票 07：老地址 ?next=/recipe* 换成新地址之后才算员工落点', () => {
@@ -212,27 +212,36 @@ describe('resolveStaffNext', () => {
 
   it('旧员工路径不再是落点：搬走之后没留别名', () => {
     for (const stale of ['/today', '/today/month', '/hygiene']) {
-      expect(resolveStaffNext(stale)).toBe('/workbench/me/today')
+      expect(resolveStaffNext(stale)).toBe('/workbench')
     }
   })
 
   it('注册页是员工侧界面，但不是登录后落点：?next=/register 回落到默认落点', () => {
     // 注册成功还在等超级管理员批准、会话也不存在 —— 把 /register 当落点就是死路。
-    expect(resolveStaffNext('/register')).toBe('/workbench/me/today')
-    expect(resolveStaffNext('/register?from=login')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/register')).toBe('/workbench')
+    expect(resolveStaffNext('/register?from=login')).toBe('/workbench')
   })
 
-  it('默认落在今天页；也认调用方给的兜底', () => {
-    expect(resolveStaffNext(null)).toBe('/workbench/me/today')
-    expect(resolveStaffNext('')).toBe('/workbench/me/today')
-    expect(resolveStaffNext(undefined)).toBe('/workbench/me/today')
+  it('默认落在工作台首页「今天」；也认调用方给的兜底', () => {
+    expect(resolveStaffNext(null)).toBe('/workbench')
+    expect(resolveStaffNext('')).toBe('/workbench')
+    expect(resolveStaffNext(undefined)).toBe('/workbench')
     expect(resolveStaffNext(undefined, '/workbench/me/clean')).toBe('/workbench/me/clean')
     expect(resolveStaffNext('/admin', '/workbench/me/clean')).toBe('/workbench/me/clean')
   })
 
+  it('默认落点自己也是合法回跳目标：401 之后登回来还是那一页', () => {
+    // `/workbench` **不进** `isStaffLandingPath`（它是两种身份的共同首页，算成"员工页"会让
+    // 店长点首页时被强制开员工栏）。认不出目标时回落的正是 `STAFF_ENTRY_PATH` —— 两条路
+    // 落在同一页，员工被踢去登录页再登回来不会换地方。
+    expect(resolveStaffNext('/workbench')).toBe('/workbench')
+    expect(resolveStaffNext('/workbench/')).toBe('/workbench')
+  })
+
   it('数组取第一个（vue-router 的 query 可能是数组）', () => {
     expect(resolveStaffNext(['/workbench/me/today', '/admin'])).toBe('/workbench/me/today')
-    expect(resolveStaffNext(['/admin', '/workbench/me/today'])).toBe('/workbench/me/today')
+    // 第一个不是员工落点 → 取不到，回落到员工默认落点（第二个不参与判定）。
+    expect(resolveStaffNext(['/admin', '/workbench/me/today'])).toBe('/workbench')
   })
 
   it('误伤的双重编码照旧解开', () => {
@@ -355,8 +364,8 @@ describe('老地址的 ?next= 迁移（票 03/04/05/07/08）', () => {
     expect(resolveLoginNext('/prep-plans')).toBe('/prep-plans')
     expect(resolveLoginNext('/prep-plan-x')).toBe('/prep-plan-x')
     // 员工栏不把它当落点（那是工作台里给管理端与员工共用的页，不是员工端前缀）：
-    // 换了地址之后仍在 `/workbench/` 底下、但不是员工端，落回员工首页。
-    expect(resolveStaffNext('/prep-plan')).toBe('/workbench/me/today')
+    // 换了地址之后仍在 `/workbench/` 底下、但不是员工端，落回员工默认落点。
+    expect(resolveStaffNext('/prep-plan')).toBe('/workbench')
   })
 
   it('票 07：独立域的 /recipe* 换成工作台「后勤」组的新地址，query 与 hash 原样带过去', () => {
@@ -436,8 +445,8 @@ describe('老地址的 ?next= 迁移（票 03/04/05/07/08）', () => {
   })
 
   it('员工栏：老的管理端地址既不是员工端、也不该被当落点', () => {
-    expect(resolveStaffNext('/hygiene/daily')).toBe('/workbench/me/today')
-    expect(resolveStaffNext('/workbench/daily')).toBe('/workbench/me/today')
+    expect(resolveStaffNext('/hygiene/daily')).toBe('/workbench')
+    expect(resolveStaffNext('/workbench/daily')).toBe('/workbench')
     expect(resolveLoginTab('/hygiene/daily', 'admin')).toBe('admin')
     expect(resolveLoginTab('/scheduling/inbox', 'admin')).toBe('admin')
     expect(resolveLoginTab('/workbench/daily', 'admin')).toBe('admin')

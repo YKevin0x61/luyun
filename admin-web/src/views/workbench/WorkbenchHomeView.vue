@@ -16,11 +16,15 @@
  *
  * 员工那一档打五个（我的班 / 我的申请 / 日常 / 专项 / 整改）：班次与工作区复用「今天」页
  * 那套翻译（`utils/todayShift.js`），待办条数与「卫生待办」页的三个角标同一口径。
+ * 那一档里还有一块**今天的活**（`components/staff/StaffHygieneCard.vue`）：它自带三条请求
+ * （`/staff/me`、`/staff/daily-work`、`/staff/attire`）与自己的实时订阅 —— 首页只摆它一行，
+ * 不把它的口径并进这套摘要里（那一块有业务动作，摘要没有）。
  * 401 的处理交给 `staffRequest` 之外的公共路径 —— 这里用的是 `api`（管理端 cookie），
  * 员工那几条走 `staffRequest`，各自与页面自己那次请求同一条链。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api/client'
+import StaffHygieneCard from '../../components/staff/StaffHygieneCard.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { pageTitle } from '../../router/pageRoutes.js'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
@@ -229,6 +233,12 @@ useNudgePull({
           </span>
         </p>
       </router-link>
+
+      <!-- 今天的活（2026-10-14 用户裁定）：原来只在「我的今天」页上的那块卫生卡整体
+           搬到这一页 —— 员工端的默认首页就是「今天」，一屏里先看班、再看今天要交什么。
+           组件自包含（自带数据加载、拍照两步与实时订阅），首页只摆它一行；
+           同一块不再在「我的今天」页渲染。 -->
+      <StaffHygieneCard />
 
       <div class="wbh-cells">
         <router-link class="wbh-cell myItems" :to="HOME_LINKS.myItems">

@@ -88,6 +88,17 @@ function staffData(overrides = {}) {
     '/api/hygiene/staff/daily-work': { items: [] },
     '/api/hygiene/staff/deep-clean': { items: [] },
     '/api/hygiene/staff/fix': { items: [] },
+    // 「今天的活」那一块（`components/staff/StaffHygieneCard.vue`，2026-10-14 从「我的今天」
+    // 页搬来）自己那三条：日常清单与上面共用一条，另两条是它自己的
+    // （班次 / 工作区 / 钟点，以及仪容仪表今天的状态）。
+    '/api/hygiene/staff/me': {
+      employee: { id: 1, name: '张三', shift: '白班', zone_id: 3, zone_name: '后厨' },
+      daily_clocks: { day_hhmm: '18:00', night_hhmm: '02:00' },
+      deep_clock: { hhmm: '20:00' },
+    },
+    '/api/hygiene/staff/attire': {
+      attire: { business_date: '2026-10-05', required: true, status: 'todo', has_standard: true },
+    },
     ...overrides,
   }
 }
@@ -427,5 +438,32 @@ describe('工作台首页 · 员工视角', () => {
 
     expect(wrapper.get('.wbh-me').text()).toContain('休')
     expect(wrapper.get('.wbh-cell.myItems .wbh-num').text()).toBe('0')
+  })
+
+  it('今天的活那一块在首页上：日常进度、仪容仪表与两颗入口（2026-10-14 用户裁定）', async () => {
+    // 这一块原来只在「我的今天」页（`/workbench/me/today`）上；用户裁定把它搬到工作台首页，
+    // 因为**员工端的默认首页就是「今天」**（`STAFF_ENTRY_PATH`）—— 一进来先看班、再看今天
+    // 要交什么。搬走之后原页不再渲染它，两块内容一处一份。
+    const { wrapper, fetchMock } = await mountHome({ identity: 'staff', table: staffData() })
+
+    expect(wrapper.text()).toContain('今天没有要交的日常检查。')
+    expect(wrapper.text()).toContain('仪容仪表：今天还没拍')
+    expect(wrapper.text()).toContain('工作卫生 ›')
+
+    // 它读的是员工自己那三条门（读谁由 cookie 定），管理端那侧一条都不打。
+    const paths = requestedPaths(fetchMock)
+    expect(paths).toContain('/api/hygiene/staff/me')
+    expect(paths).toContain('/api/hygiene/staff/daily-work')
+    expect(paths).toContain('/api/hygiene/staff/attire')
+    expect(paths.filter((p) => p.startsWith('/api/hygiene/admin'))).toEqual([])
+  })
+
+  it('店长视角没有这一块（同一页两套互斥的视角）', async () => {
+    const { wrapper, fetchMock } = await mountHome({ identity: 'super', table: managerData() })
+
+    expect(wrapper.text()).not.toContain('工作卫生 ›')
+    expect(wrapper.text()).not.toContain('仪容仪表：')
+    // 也不替员工打那三条：店长这一档连请求都不该发出去。
+    expect(requestedPaths(fetchMock).filter((p) => p.startsWith('/api/hygiene/staff'))).toEqual([])
   })
 })

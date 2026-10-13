@@ -18,11 +18,14 @@ describe('员工端「今天」页（原型 A）', () => {
     // 路径里唯一带变量的是「撤回自己那条申请」的申请号（票 08）：
     // 归属还是服务端按 cookie 判（别人的申请撤回只会拿到 404）。
     expect(view).not.toMatch(/\/api\/scheduling\/[^'"\s]*employee_id/)
-    // 票 10 起这张卡的下半张是卫生待办（今日进度 + 逾期点）：它读的是**员工自己**那两条
-    // 卫生门（`/staff/me`、`/staff/daily-work`）—— 路径里同样没有 employee_id，读谁由
-    // cookie 定；管理端那一侧的卫生接口一个都不该出现在这里。
+    // 这一页只剩**自己那份资料**那一条卫生门（`/staff/me`：给「我的」那一块与能力卡用）
+    // —— 路径里同样没有 employee_id，读谁由 cookie 定。今天的日常与仪容仪表那两条
+    // （`/staff/daily-work`、`/staff/attire`）2026-10-14 随那块卡搬去工作台首页
+    // （`components/staff/StaffHygieneCard.vue`），这一页不再发；管理端那一侧的卫生接口
+    // 一个都不该出现在这里。
     expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/me'\)/)
-    expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/daily-work'\)/)
+    expect(view).not.toMatch(/staffRequest\('\/api\/hygiene\/staff\/daily-work'\)/)
+    expect(view).not.toMatch(/staffRequest\('\/api\/hygiene\/staff\/attire'\)/)
     expect(view).not.toMatch(/\/api\/hygiene\/[^'"\s]*employee_id/)
     expect(view).not.toMatch(/\/api\/hygiene\/admin/)
     // 401 回员工登录（票 03 起是 /login 的员工栏），把当前地址整个带过去（跟卫生首页一个走法）。
@@ -149,16 +152,17 @@ describe('「我的成绩」卡（2026-10-05 用户裁定）', () => {
     expect(view).not.toMatch(/\/api\/hygiene\/admin/)
   })
 
-  it('放在卫生卡与「我的」之间：员工每天登录就落在这页，卫生页只有有活时才打开', () => {
-    // 位置是这一票的实质决定（用户让我自己判）：`/workbench/me/today` 是员工登录后的
-    // 落点、休假也打得开；`/workbench/me/clean` 只有"今天有活"时才被点开 —— 最该看到
-    // 成绩的人恰恰可能那天没活。判据压在**顺序**上：卫生卡 → 成绩卡 → 我的。
-    const hyg = view.indexOf('class="tA-card hyg"')
+  it('排在「我的」之前：这一页读序是"今天上不上班 → 我干得怎么样 → 账号设置"', () => {
+    // 位置是那一票的实质决定（用户让我自己判）：成绩属于「我干得怎么样」，而「我的」那张
+    // 是设置（不是活），所以成绩在它前面。**2026-10-14 起这一页不再是员工登录落点**
+    // （落点搬去工作台首页「今天」，那儿今天要交什么一眼看得见）—— 成绩卡留在这里，
+    // 员工从首页的「我的」那一格进来还能看到它；要不要跟着搬是另一件事，见交接说明。
     const score = view.indexOf('class="tA-card score"')
     const me = view.indexOf('class="tA-card me"')
-    expect(hyg).toBeGreaterThan(-1)
-    expect(score).toBeGreaterThan(hyg)
+    expect(score).toBeGreaterThan(-1)
     expect(me).toBeGreaterThan(score)
+    // 今天要交的那一块整块不在这页了（它随搬走一起走的，不留空壳）。
+    expect(view).not.toMatch(/class="tA-card hyg"/)
   })
 
   it('空态不给数字，更没有 0%（`pass_rate === null` 是"还没开始"，不是"被扣分"）', () => {
@@ -216,24 +220,25 @@ describe('两个弹层的点击账约束（DO:250-251 / DO:909-914 / DO:860-869 
     expect(view).not.toContain('>同意</button>')
   })
 
-  it('请假 sheet 的点击账不增加（DO:860-869：只请一天＝2 击）', () => {
-    // 一天假：选日期 + 提交，两步就走完；日期控件与提交按钮都在同一个 sheet 里。
-    // 日期从原生 `<input type=date>` 换成了 `LuyunDatePicker`（2026-10-13：原生那格的
-    // 显示格式跟浏览器界面语言走），id 改走 `input-id` 透传到组件内部的 input ——
-    // 上面那个 `<label for="leave-start">` 因此仍然关联得上。
-    expect(view).toMatch(/input-id="leave-start"/)
-    expect(view).toMatch(/leave-sheet-title/)
+  it('请假与换班：点击账不变，落点搬到月历那一天（票 15）', () => {
+    // 一天假：点「请假」→ 月历上那一天的表单已经开着（日期就是这一天）→ 提交，还是两步。
+    // 表单与判据整块住在 `components/scheduling/StaffDaySheet.vue`（那边有真挂载用例：
+    // 起始日预填、提交上去的 body、事由上限、min-date 全在），这一页只把人送过去 ——
+    // 不在这里再摆一套表单，免得同一件事两处判据各写一份。
+    expect(view).toMatch(/key: 'leave', label: '请假', to: \{ \.\.\.month, query: \{ date, act: 'leave' \} \}/)
+    expect(view).not.toContain('leave-sheet-title')
   })
 })
 
 describe('员工端请假（票 08）', () => {
-  it('三条请求都走员工门，路径上只有自己的申请号', () => {
-    // 提/看/撤：`GET|POST /api/scheduling/me/requests`、`DELETE .../<申请号>`。
-    // 都只认员工 cookie，页面上没有 employee_id 可填。
+  it('今天页只留「看状态」与「撤回」两条，发起那条搬去了月历那一天', () => {
+    // 看/撤：`GET /api/scheduling/me/requests`、`DELETE .../<申请号>`。
+    // 都只认员工 cookie，页面上没有 employee_id 可填。**提一条不再从这一页发**（票 15）：
+    // `POST` 跟着表单搬进 `StaffDaySheet`（那边的挂载用例断言了提交上去的 body）。
     expect(view).toMatch(/staffRequest\('\/api\/scheduling\/me\/requests'\)/)
     expect(view).toMatch(/staffRequest\(`\/api\/scheduling\/me\/requests\/\$\{request\.id\}`/)
-    expect(view).toMatch(/method: 'POST'/)
     expect(view).toMatch(/method: 'DELETE'/)
+    expect(view).not.toContain('/api/scheduling/me/colleagues')
     // 谁的身份由 cookie 定：管理端那几条 `/api/scheduling/inbox*` 不许出现在员工页上；
     // 请求路径里也不许出现 employee_id（只有注释里那句「没有 employee_id 可填」）。
     expect(view).not.toContain('/api/scheduling/inbox')
@@ -243,21 +248,18 @@ describe('员工端请假（票 08）', () => {
     expect(view).not.toMatch(/(^|[^_a-zA-Z])employee_id\s*[:=]/)
   })
 
-  it('表单里那两天默认是服务端给的营业日，不是手机上的今天', () => {
+  it('那两颗按钮带着日期与动作跳到月历那一天（票 15）', () => {
+    // 带过去的日期取**服务端的营业日**（`days[0].business_date`），不取手机上的今天：
     // 手机时区可能不在东八区，而「过去的日子请不了假」是服务端按营业日判的。
-    expect(view).toMatch(/leaveStart\.value = \(today\.value && today\.value\.business_date\) \|\| ''/)
-    // 只请一天时后一格空着就不发那个字段（服务端把 None 与空串都当单日）。
-    expect(view).toMatch(/end_date: leaveEnd\.value \|\| null/)
-    // 事由上限**由服务端下发**（`/me/requests` 的 `max_request_note`）：前端不再写死
-    // 第二份 50 —— 服务端一改就两边不一致（别的上限都是随响应下来的）。
-    expect(view).toMatch(/if \(data\.max_request_note\) maxNote\.value = data\.max_request_note/)
-    expect(view).toMatch(/:maxlength="maxNote \|\| undefined"/)
-    expect(view).toMatch(/note: leaveNote\.value \|\| null/)
+    expect(view).toMatch(/const date = \(today\.value && today\.value\.business_date\) \|\| ''/)
+    expect(view).toMatch(/key: 'swap', label: '换班', to: \{ \.\.\.month, query: \{ date, act: 'swap' \} \}/)
+    expect(view).toMatch(/router\.push\(entry\.to\)/)
+    // 表单那一套不在这页：日期控件、事由上限、提交按钮全在 StaffDaySheet 里。
+    expect(view).not.toContain('day-leave-start')
   })
 
-  it('提完/撤回都重读一次列表，店长那边先动过也不会留一条假记录', () => {
-    expect(view).toMatch(/note\.value = '请假提上去了，等店长批'/)
-    expect(view).toMatch(/await loadRequests\(\)/)
+  it('撤回之后重读一次列表，店长那边先动过也不会留一条假记录', () => {
+    expect(view).toMatch(/note\.value = '撤回了'/)
     expect(view).toMatch(/await loadRequests\(true\)/)
     // 进页面那一次读不出来不吭声（管理员还没应用 0008 时，首页不该顶一行红字）。
     expect(view).toMatch(/if \(!quiet\) requestsError\.value = err\.message/)
@@ -268,7 +270,7 @@ describe('员工端请假（票 08）', () => {
     // 所以「没撤成 / 没回成」那句话必须等重读完了再写：先写后读等于当场抹掉 ——
     // 员工点了撤回看到界面什么都没变，会以为撤回了（真出过这个 bug）。
     for (const [start, end] of [
-      ['async function cancelLeave', 'async function submitSwap'],
+      ['async function cancelLeave', 'async function answerSwap'],
       ['async function answerSwap', 'onMounted('],
     ]) {
       const body = view.slice(view.indexOf(start), view.indexOf(end))
@@ -305,16 +307,10 @@ describe('员工端请假（票 08）', () => {
     expect(view).toContain('没读出来')
   })
 
-  it('先挡住过去的日子；那一排按钮也放大到点得中', () => {
-    // 过去的日子服务端一定会拒（`past_leave` / `past_swap`）：在控件上先挡住，别让人
-    // 拨完日期、提交了才被打回来。下限用的是**服务端的营业日**，不是手机上的今天
-    //（手机时区可能不在东八区，判「过去」的是服务端）。
-    // 日期换成 `LuyunDatePicker` 后，这一条从原生 input 的 `:min` 变成组件的 `:min-date`。
-    expect(view).toMatch(/:min-date="today \? today\.business_date : undefined"/)
-    expect(view).toMatch(/:min-date="leaveStart \|\| \(today \? today\.business_date : undefined\)"/)
-    // 撤回 / 同意 / 拒绝那一排的触摸目标：32px 在手机上太小 —— 挨着的是不可逆动作
-    //（有确认框兜着，但手指先得点得中）。
-
+  it('撤回 / 同意 / 拒绝那一排放大到点得中', () => {
+    // 32px 在手机上太小 —— 挨着的是不可逆动作（有确认框兜着，但手指先得点得中）。
+    // 「过去的日子在控件上先挡住」那条（`:min-date` 取服务端营业日）跟着日期控件
+    // 搬进了 `StaffDaySheet`，那边的断言在 `components/scheduling/__tests__/`。
     expect(view).toMatch(/\.tL-cancel \{[\s\S]{0,260}?min-height: 40px/)
   })
 
@@ -326,16 +322,18 @@ describe('员工端请假（票 08）', () => {
     expect(view).toMatch(/@click="cancelTarget = request"/)
     expect(view).toContain('请假批了那天写')
     expect(view).toContain('换班要对方先同意、店长再批')
-    // 出错了要说出来（不吞）：钉住那一处 —— 只写 `role="alert"` 的话，将来别处再加一个
-    // 无障碍标记，这里就退化成恒真了。
-    expect(view).toMatch(/v-if="leaveError"[\s\S]{0,40}role="alert"/)
+    // 出错了要说出来（不吞）：这一页现在只有 `requestsError` 一处（表单那两处
+    // `leaveError` / `swapError` 跟着表单搬去了 StaffDaySheet）。
+    expect(view).toMatch(/v-if="requestsError"/)
+    expect(view).not.toContain('leaveError')
   })
 
-  it('「换班」也不是那句「还没开放」了，请假与换班各走各的表单', () => {
-    // 票 06 时三个入口点进去都是「还没开放」；票 08 把请假接上了、票 09 把换班接上了 ——
-    // 这三句得分开走，别把哪个入口一块写成开放（`open()` 里最后那句仍是兜底）。
-    expect(view).toMatch(/if \(entry\.key === 'leave'\) \{\s*openLeave\(\)/)
-    expect(view).toMatch(/if \(entry\.key === 'swap'\) \{\s*openSwap\(\)/)
+  it('三颗按钮都往月历走，请假与换班各带一个 act（票 15）', () => {
+    // 票 06 时三个入口点进去都是「还没开放」；票 08 接上请假、票 09 接上换班、票 15 把
+    // 这两件事收进月历那一天。`open()` 里最后那句兜底仍在（将来再加一颗没配 `to` 的按钮时，
+    // 它说的是真话，而不是静默什么都不做）。
+    expect(view).toMatch(/key: 'month', label: '整月', to: month/)
+    expect(view).toMatch(/const ENTRIES = computed/)
     expect(view).toMatch(/note\.value = `「\$\{entry\.label\}」还没开放`/)
     expect(copy).toContain('今天请假')
     expect(copy).toContain("if (day.leave) return '请假'")
@@ -343,15 +341,16 @@ describe('员工端请假（票 08）', () => {
 })
 
 describe('员工端换班（票 09）', () => {
-  it('四条请求都走员工门：名单、提一条、替对方同意 / 拒绝', () => {
-    expect(view).toMatch(/staffRequest\('\/api\/scheduling\/me\/colleagues'\)/)
-    expect(view).toMatch(/staffRequest\('\/api\/scheduling\/me\/swaps'/)
+  it('今天页只剩「替对方同意 / 拒绝」；提一条搬去了月历那一天', () => {
     expect(view).toMatch(/staffRequest\(`\/api\/scheduling\/me\/swaps\/\$\{card\.id\}\/\$\{agree \? 'accept' : 'reject'\}`/)
+    expect(view).toMatch(/method: 'POST'/)
     // 身份由 cookie 定：路径上只有申请号，没有 employee_id。
     // `peer_employee_id`（票 09 的换班）不算：那是同事的 id，不是「我的 id」。
     expect(view).not.toMatch(/(^|[^_a-zA-Z])employee_id\s*[:=]/)
-    // 表单里发的是「跟谁换」的同事 id，不是姓名（姓名可以重）。
-    expect(view).toMatch(/peer_employee_id: Number\(swapPeer\.value\) \|\| null/)
+    // 发起那两条（同事名单 + 提一条）搬进了 StaffDaySheet：它的挂载用例断言了
+    // 提交上去的 `peer_employee_id` 是那天名单里点中的那个人。
+    expect(view).not.toContain('/api/scheduling/me/colleagues')
+    expect(view).not.toContain('peer_employee_id')
   })
 
   it('别人问我换班的那几条看得见、点得动，店长那边在此之前看不见', () => {
@@ -369,83 +368,33 @@ describe('员工端换班（票 09）', () => {
     expect(answer).toContain('await loadRequests(true)')
   })
 
-  it('换班表单：同事下拉 + 哪一天 + 事由，日期默认服务端营业日', () => {
-    expect(view).toMatch(/swapDay\.value = \(today\.value && today\.value\.business_date\) \|\| ''/)
-    expect(view).toMatch(/v-for="person in colleagues"/)
-    expect(view).toMatch(/:value="person\.id"/)
-    // 事由的长度上限钉在换班那个输入框上：`maxlength="50"` 请假表单里也有一个。
-    const noteBox = view.slice(view.indexOf('id="swap-note"'))
-    expect(noteBox.slice(0, 200)).toMatch(/:maxlength="maxNote \|\| undefined"/)
-    // 三样缺一样就不让提交（同事、日期）。
-    expect(view).toMatch(/:disabled="swapBusy \|\| !swapPeer \|\| !swapDay"/)
-    expect(view).toMatch(/body: \{\s*peer_employee_id: Number\(swapPeer\.value\) \|\| null,\s*business_date: swapDay\.value/)
-    // 出错了要说出来，跟请假那一处一样的钉法。
-    expect(view).toMatch(/v-if="swapError"[\s\S]{0,40}role="alert"/)
-  })
-
   it('换班那条与我提的那些分开：暖色卡 + 自己的 tag', () => {
     expect(view).toContain('tA-card swap')
     expect(view).toMatch(/\.tA-card\.swap \{[\s\S]{0,80}--hy-amber/)
     expect(view).toMatch(/\.tag\.swap \{/)
   })
 
-  it('订阅排班与卫生 nudge：三块一起重读（票 10 收尾）', () => {
+  it('订阅排班与卫生 nudge：这块几件事一起重读（票 10 收尾）', () => {
     // 换班那条尤其要紧：对方不开页面就永远不知道有人找他换 —— 这也是这几个页面里
-    // 唯一「别人动作直接影响我」的地方。
+    // 唯一「别人动作直接影响我」的地方。今天要交的卫生那一块搬去工作台首页之后
+    // 有了自己的订阅（`StaffHygieneCard`），这一页的 pull 里只剩自己那三件。
     expect(view).toMatch(/useNudgePull\(\{/)
     expect(view).toMatch(/topics: \['scheduling', 'hygiene'\]/)
     expect(view).toMatch(/load\(true\)/)
     expect(view).toMatch(/loadRequests\(true\)/)
-    expect(view).toMatch(/loadHygiene\(true\)/)
+    expect(view).toMatch(/loadHygiene\(\)/)
+    expect(view).not.toMatch(/loadHygiene\(true\)/)
   })
 })
 
-describe('仪容仪表（票 12）：按人拍、两步、只在排到班次时出现', () => {
-  it('读员工自己那一条，不碰管理端', () => {
-    expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/attire'\)/)
-    expect(view).toMatch(/\/api\/hygiene\/staff\/attire\/submit/)
-    expect(view).not.toMatch(/\/api\/hygiene\/admin\/attire/)
-  })
-
-  it('排到班次才显示这一行', () => {
-    // 判据是服务端给的 `required`（排班那天有班次）：休假的与没排到的整行不显示 ——
-    // 这正是需求那句「排班上面除了休假的都要拍」。
-    expect(view).toMatch(/v-if="attire\.required"/)
-    expect(view).toContain('超级管理员还没传标准图')
-    expect(view).toContain('已交，等店长验收')
-  })
-
-  it('上传带 live=true，并进上传队列（断网不丢）', () => {
-    expect(view).toMatch(/form\.append\('live', 'true'\)/)
-    expect(view).toMatch(/imageUploads\.enqueue\(/)
-    // 「这张正在传」从队列派生，刷新页面之后仍然成立。
-    expect(view).toMatch(/pendingKey: attireKey\.value/)
-  })
-
-  it('ADR 0050：标准图那一屏没有取景框', () => {
-    const branch = view.slice(
-      view.indexOf("attireSheet === 'standard'"),
-      view.indexOf("attireSheet === 'camera'"),
-    )
-    expect(branch).toMatch(/HygieneStandardOverlay/)
-    expect(branch).toMatch(/打开相机/)
-    // 标准图与取景器同屏是 ADR 0050 明说不做的：这里一旦出现就是又并排了。
-    expect(branch).not.toMatch(/HygieneLiveCamera/)
-  })
-
-  it('已经通过的不给重拍入口', () => {
-    // 服务端会拒 `already_accepted`：前端不摆一个按了必然失败的按钮。
-    expect(view).toMatch(/attire\.status !== 'passed'/)
-  })
-
-  it('这一行不借英雄数字的字号，且按状态着色', () => {
-    // `.shift` 是 52px 的数值字号（「日常 n/m」那种）：一句话套上去会占两三行。
-    // 这一行有自己的中等字号类，颜色由 `attireTone` 给（与模板那串 v-if 同序）。
-    expect(view).toMatch(/<p class="attire-line" :class="attireTone">/)
-    expect(view).toMatch(/const attireTone = computed/)
-    expect(view).toMatch(/\.attire-line \{/)
-    expect(view).toMatch(/\.attire-line\.rejected \{/)
-    expect(view).toMatch(/\.attire-line\.nostandard \{/)
+describe('仪容仪表（票 12）不再是这一页的事', () => {
+  it('整块随卫生卡搬去了工作台首页，这一页一条都不留', () => {
+    // 断言整组随块搬到 `components/staff/__tests__/staffHygieneCard.test.js`：
+    // 「读员工自己那一条」「排到班次才显示」「live=true 进队列」「ADR 0050 标准图那一屏
+    // 没有取景框」「已通过不给重拍」「这一行自己的字号与色调」六条在那份测试里逐字保留。
+    expect(view).not.toMatch(/attire/)
+    expect(view).not.toMatch(/HygieneLiveCamera/)
+    expect(view).not.toMatch(/HygieneStandardOverlay/)
   })
 })
 
@@ -474,8 +423,8 @@ describe('账号设置（2026-10-05 从卫生页的「我」整格搬来）', ()
     // 改资料 / 改密码：`PATCH /api/hygiene/staff/me`、`PATCH /api/hygiene/staff/password`。
     expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/me', \{[\s\S]{0,80}?method: 'PATCH'/)
     expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/password'/)
-    // 资料那份 employee 与卫生进度同一个响应（`loadHygiene` 里顺手存下），路径上没有 id。
-    expect(view).toMatch(/staffMe\.value = employee/)
+    // 资料那份 employee 在 `loadHygiene` 那一条 `/staff/me` 里顺手存下，路径上没有 id。
+    expect(view).toMatch(/staffMe\.value = me\.employee \|\| \{\}/)
     expect(view).not.toMatch(/\/api\/hygiene\/admin/)
   })
 
@@ -493,7 +442,10 @@ describe('账号设置（2026-10-05 从卫生页的「我」整格搬来）', ()
   it('「重新选择区域和班次」不自选：说清由排班决定，并把人送回顶上那张排班卡', () => {
     // 票 10 撤掉了员工自选班次/工作区那条路，搬过来也不许偷偷装回来。
     expect(view).toMatch(/function openShiftNotice\(\)/)
-    expect(view).toMatch(/由排班决定；要改哪一天，找超级管理员在排班页改/)
+    // 那句话随票 15 更新（请假 / 换班的入口搬到了月历那一天），口径不变：
+    // 区域与班次不在这里自选，要改是排班页（超级管理员）的事。
+    expect(view).toMatch(/今天上哪个班、在哪个区由排班决定/)
+    expect(view).toMatch(/class="tA-sub sched-note"/)
     expect(view).not.toMatch(/api\/hygiene\/staff\/assignment/)
     expect(view).not.toMatch(/HYGIENE_SHIFTS/)
   })

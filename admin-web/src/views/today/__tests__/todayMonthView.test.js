@@ -150,8 +150,9 @@ describe('员工端「整月」页（票 06）', () => {
     // `tests/test_spa_page_routes.py` 拿 `main.app.routes` 的真实路径集合对表、
     // `tests/test_auth.py::test_staff_phone_pages_accessible_without_admin_session` 走请求。
     // 这里不再抓 `main.py` 的源码文本（票 02 #18：弱断言重说一遍强断言的事，改个写法就假红）。
-    // 入口：「今天」页那张卡上的「整月」不是一句「还没开放」，而是真的走过去。
-    expect(today).toMatch(/\{\s*key: 'month',\s*label: '整月',\s*to: '\/workbench\/me\/month'\s*\}/)
+    // 入口：「今天」页那张卡上的三颗按钮都真的往月历走（票 15 起请假与换班也在这条路上，
+    // 各自带一个 `act`；整月不带）。落点是同一个页面组件，另开的断言在上面那条。
+    expect(today).toMatch(/key: 'month', label: '整月', to: month/)
     expect(today).toMatch(/router\.push\(entry\.to\)/)
   })
 
@@ -161,6 +162,18 @@ describe('员工端「整月」页（票 06）', () => {
     const heads = copy.match(/MONTH_HEADS = (\[[^\]]*\])/)
     const weekdays = manager.match(/const WEEKDAYS = (\[[^\]]*\])/)
     expect(heads && heads[1].replace(/\s/g, '')).toBe(weekdays && weekdays[1].replace(/\s/g, ''))
+  })
+
+  it('支持 ?date=&act= 直达：今天页那两颗按钮落在同一天那一屏上（票 15）', () => {
+    // 「今天」页的请假 / 换班带着 `?date=<营业日>&act=leave|swap` 跳过来：先读那一天
+    // 所在的月份（跨月时不然会落在一格空白上），再落到那一格、直接进那一屏。
+    expect(view).toMatch(/import \{ actFromQuery, dateFromQuery, monthOfDate \} from '\.\.\/\.\.\/utils\/staffDayActions'/)
+    expect(view).toMatch(/wantedDate\.value = dateFromQuery\(route\.query\)/)
+    expect(view).toMatch(/wantedAct\.value = actFromQuery\(route\.query\)/)
+    expect(view).toMatch(/await load\(monthOfDate\(wantedDate\.value\) \|\| undefined\)/)
+    // 解析完就清掉：留着它会在关掉弹层之后又被打开一次。
+    expect(view).toMatch(/wantedDate\.value = ''/)
+    expect(view).toMatch(/function openWanted\(\)/)
   })
 
   it('标出「申请中」的那几天 —— 票 06 那条一直没有数据源的角标', () => {
@@ -184,31 +197,28 @@ describe('员工端「整月」页（票 06）', () => {
   it('订阅排班 nudge：店长改了某一天，格子跟着变（票 10 收尾）', () => {
     expect(view).toMatch(/id: 'today-month'/)
     expect(view).toMatch(/load\(month\.value, true\)/)
-    expect(view).toMatch(/loadPendingMarks\(\)/)
+    // 格子上的两个记号（我的申请 / 有人找我换班）读的是同一条 `/me/requests`：一次请求。
+    expect(view).toMatch(/loadRequestMarks\(\)/)
   })
 
   it('格子上写那天全店几个人在班，点开某天看当天名单（票 13）', () => {
     // 验收 1：人数与「我的班」是两个字段、两处显示 —— 人数是格子里的第三行小字。
     expect(view).toMatch(/staffCountLabel\(cell\.staff_count\)/)
     expect(view).toMatch(/\.mD \.h\s*\{/)
-    // 验收 2/3：点格子拉那天的名单。**员工那扇门底下**的 `/me/day`，不是店长那条
-    // `/api/scheduling/day`（上面那条 `not.toMatch` 还在盯着后者）。
-    expect(view).toMatch(/staffRequest\(\s*`\/api\/scheduling\/me\/day\?date=/)
+    // 验收 2/3：点格子弹出**那一天那一屏**。名单（票 13）与「那一天能办的两件事」
+    // （票 15：请假 / 换班）在同一屏里 —— 名单的判据（`/me/day`、`isMe`、`offLabel`、
+    // `myDayText`）跟着它搬进了 `components/scheduling/StaffDaySheet.vue`，那边的测试
+    // 有真挂载用例；这一页只负责把「哪一天」交出去。
     expect(view).toMatch(/aria-haspopup="dialog"/)
-    // 弹层走主题里那套（跟本页请假、加班那几处同一个容器）：
-    expect(view).toMatch(/class="modal-overlay"/)
-    expect(view).toMatch(/role="dialog"/)
-    expect(view).toMatch(/aria-modal="true"/)
-    expect(view).toMatch(/@click\.self="closeDay"/)
-    // 名单里的判据都在 util（`todayShift.test.js` 直接调它们），页面只摆版式：
-    // 「我」按 id 认、休与请假分开写、我这天那行只在上班态接工作区。
-    expect(view).toMatch(/isMe\(person, employee && employee\.id\)/)
-    expect(view).toMatch(/offLabel\(person\)/)
-    expect(view).toMatch(/myDayText\(detailMine\.value\)/)
-    // 「我这天」取的是**月历那份数据**里的同一格（不是打开弹层那一刻的快照）：
-    // 店长改了班、nudge 重读月历之后，这一行与那份名单都跟着变。
-    expect(view).toMatch(/cells\.value\.find\(\(cell\) => cell\.business_date === key\)/)
-    expect(view).toMatch(/if \(detailDay\.value\) loadDay\(detailDay\.value, true\)/)
+    expect(view).toMatch(/<StaffDaySheet/)
+    expect(view).toMatch(/:day="detailDay"/)
+    expect(view).toMatch(/:initial-act="openAct"/)
+    // 点的是哪一天存**日期**不存那一格对象：月历重读（nudge / 翻月）之后，那一屏里的
+    // 「我这天」要跟着新数据走，而不是停在打开那一刻的快照上。
+    expect(view).toMatch(/cells\.value\.find\(\(cell\) => cell\.business_date === detailDate\.value\)/)
+    expect(view).not.toMatch(/const detailDay = ref/)
+    // 办完（提交 / 撤回 / 回应）让格子上的记号跟着变，并防住「菜单栏那条」的重复：
+    expect(view).toMatch(/@changed="loadRequestMarks"/)
     // 窗口外的格子不可点：淡 = 还没铺到，点它只会问出一个注定空白的答案。
     expect(view).toMatch(/:disabled="dayBeyondWindow\(cell, windowEnd\)"/)
     // 页脚那句「只看得到你自己的班」作废（票 13 改的口径）：留着会跟页面自相矛盾。

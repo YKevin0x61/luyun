@@ -491,7 +491,8 @@ async function openInvite() {
   inviteCopied.value = false
   inviteCopyTitle.value = ''
   // 用当前 origin：门店可能是内网 IP、也可能是域名，写死哪个都会有一半人打不开。
-  // 路径取 `STAFF_ENTRY_PATH`（员工端入口 = 今天页），页面里不出现字面量路径。
+  // 路径取 `STAFF_ENTRY_PATH`（2026-10-14 起员工的默认首页是工作台首页「今天」），
+  // 页面里不出现字面量路径。
   inviteUrl.value = `${window.location.origin}${STAFF_ENTRY_PATH}`
   await nextTick()
   if (!qrCanvas.value) return

@@ -435,6 +435,16 @@
       "small_tap": 0,
       "danger_text": 0
     },
+    "src/components/staff/StaffHygieneCard.vue": {
+      "hy": 11,
+      "hex": 0,
+      "rgba": 4,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0
+    },
     "src/components/system/BulletGauge.vue": {
       "hy": 0,
       "hex": 1,
