@@ -215,8 +215,11 @@ describe('两个弹层的点击账约束（DO:250-251 / DO:909-914 / DO:860-869 
   })
 
   it('请假 sheet 的点击账不增加（DO:860-869：只请一天＝2 击）', () => {
-    // 一天假：选日期 + 提交，两步就走完；日期输入与提交按钮都在同一个 sheet 里
-    expect(view).toMatch(/id="leave-start"/)
+    // 一天假：选日期 + 提交，两步就走完；日期控件与提交按钮都在同一个 sheet 里。
+    // 日期从原生 `<input type=date>` 换成了 `LuyunDatePicker`（2026-10-13：原生那格的
+    // 显示格式跟浏览器界面语言走），id 改走 `input-id` 透传到组件内部的 input ——
+    // 上面那个 `<label for="leave-start">` 因此仍然关联得上。
+    expect(view).toMatch(/input-id="leave-start"/)
     expect(view).toMatch(/leave-sheet-title/)
   })
 })
@@ -302,10 +305,11 @@ describe('员工端请假（票 08）', () => {
 
   it('先挡住过去的日子；那一排按钮也放大到点得中', () => {
     // 过去的日子服务端一定会拒（`past_leave` / `past_swap`）：在控件上先挡住，别让人
-    // 拨完日期、提交了才被打回来。`min` 用的是**服务端的营业日**，不是手机上的今天
+    // 拨完日期、提交了才被打回来。下限用的是**服务端的营业日**，不是手机上的今天
     //（手机时区可能不在东八区，判「过去」的是服务端）。
-    expect(view).toMatch(/:min="today \? today\.business_date : undefined"/)
-    expect(view).toMatch(/:min="leaveStart \|\| \(today \? today\.business_date : undefined\)"/)
+    // 日期换成 `LuyunDatePicker` 后，这一条从原生 input 的 `:min` 变成组件的 `:min-date`。
+    expect(view).toMatch(/:min-date="today \? today\.business_date : undefined"/)
+    expect(view).toMatch(/:min-date="leaveStart \|\| \(today \? today\.business_date : undefined\)"/)
     // 撤回 / 同意 / 拒绝那一排的触摸目标：32px 在手机上太小 —— 挨着的是不可逆动作
     //（有确认框兜着，但手指先得点得中）。
 

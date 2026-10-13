@@ -212,6 +212,15 @@ describe('周表笔刷（2026-10-04：抽屉折叠成一行就是那支笔）', 
     expect(view).toMatch(/点格子就刷上去 · 长按格子看 \/ 改这一格/)
   })
 
+  it('笔刷条上的控件有能点中的高度（2026-10-13 用户反馈「太窄不好点」）', () => {
+    // 原先两个下拉 26px 高、按钮 27px，手机上指头落不准 —— 现在按护栏的触控下限 44px。
+    expect(view).toMatch(/\.gSheet-bar \.gZ-sel \{ flex: 1 1 auto; min-height: 44px;/)
+    expect(view).toMatch(/\.gSheet-bar \.gBtn \{ min-height: 44px;/)
+    expect(view).toMatch(/\.gSheet-bar \.gChip \{ min-height: 44px;/)
+    // 窄屏放不下就换行，不把下拉压到「跟固定区」都显示不全。
+    expect(view).toMatch(/\.gSheet-bar \{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; \}/)
+  })
+
   it('落笔走抽屉同一条写路径；没选班次、过去的日子都在客户端先拦', () => {
     expect(view).toMatch(/await writeOverride\(employee\.id, day\.business_date, payload\)/)
     expect(view).toMatch(/canPaintOn\(day\.business_date/)
@@ -251,7 +260,10 @@ describe('笔袋默认开着（2026-10-05 用户要的）', () => {
   })
 
   it('笔袋只占一条的高度，最后一行的格子还能滚上来', () => {
-    expect(view).toMatch(/\.gB\.brush-open \{ padding-bottom: 88px; \}/)
+    // 108px = 那一条（44px 的控件）＋ 提示文案 ＋ 上下内边距；控件抬到 44px 之前是 88。
+    expect(view).toMatch(/\.gB\.brush-open \{ padding-bottom: 108px; \}/)
+    // 手机档那一行会换行（见上一条），留白跟着多一行。
+    expect(view).toMatch(/@media \(max-width: 430px\) \{\n\s+\.gB\.brush-open \{ padding-bottom: 160px; \}/)
     expect(view).toMatch(/'brush-open': sheetFolded && panel === 'week'/)
   })
 })

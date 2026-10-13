@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import HygieneRosterView from '../HygieneRosterView.vue'
+import LuyunDatePicker from '../../../components/ui/LuyunDatePicker.vue'
 import { ADMIN_CAP_STAFF_DEFS } from '../../../utils/adminCaps'
 
 /**
@@ -219,11 +220,14 @@ describe('花名册 · 列表行内容', () => {
     expect(html).not.toContain('改今天')
   })
 
-  it('健康证正常（ok）与没办（none）都不出标签', async () => {
+  it('健康证正常（ok）不出标签；没办（none）出「未办理健康证」', async () => {
+    // 2026-10-13 用户裁定改的口径：注册页允许「暂时没有健康证」，于是**在职而没证**
+    // 成了一种合法、且必须被跟进的状态 —— 原先这里对 `none` 是静默的（那时它只可能
+    // 来自脏数据），现在得让店长在名单上一眼看见。
     const wrapper = await mountRoster()
 
     expect(rowButton(wrapper, '李娜').text()).not.toContain('健康证')
-    expect(rowButton(wrapper, '赵敏').text()).not.toContain('健康证')
+    expect(rowButton(wrapper, '赵敏').text()).toContain('未办理健康证')
   })
 
   it('过期用朱砂那一档、临期用琥珀那一档', async () => {
@@ -276,13 +280,17 @@ describe('花名册 · 编辑抽屉', () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper, '赵敏')
 
-    const inputs = wrapper.get('.roster-drawer').findAll('input.input')
-    // 顺序：姓名 / 职位 / 身份证号 / 健康证办理日期 / 底薪 / 入职日期
+    const drawer = wrapper.get('.roster-drawer')
+    // 2026-10-13 起两格日期换成 `LuyunDatePicker`（原生 date 的显示格式跟浏览器语言走），
+    // 于是还留在 `input.input` 里的只剩：姓名 / 职位 / 身份证号 / 底薪。
+    const inputs = drawer.findAll('input.input')
     await inputs[0].setValue('赵敏敏')
     await inputs[2].setValue('110101199003077213')
-    await inputs[3].setValue('2024-05-06')
-    await inputs[4].setValue('5200')
-    await inputs[5].setValue('2024-06-01')
+    await inputs[3].setValue('5200')
+    // 日期按渲染顺序：健康证办理日期在前、入职日期在后。
+    const dates = drawer.findAllComponents(LuyunDatePicker)
+    await dates[0].setValue('2024-05-06')
+    await dates[1].setValue('2024-06-01')
     await flushPromises()
 
     await button(wrapper, '保存').trigger('click')
@@ -389,9 +397,10 @@ describe('花名册 · 批准门槛与动作', () => {
 
     expect(button(wrapper, '批准').attributes('disabled')).toBeDefined()
 
-    const inputs = wrapper.get('.roster-drawer').findAll('input.input')
-    await inputs[4].setValue('6000')
-    await inputs[5].setValue('2026-09-01')
+    // 底薪留在 `input.input` 里（顺序：姓名 / 职位 / 身份证号 / 底薪），入职日期是组件。
+    const drawer = wrapper.get('.roster-drawer')
+    await drawer.findAll('input.input')[3].setValue('6000')
+    await drawer.findAllComponents(LuyunDatePicker)[1].setValue('2026-09-01')
     await flushPromises()
 
     expect(button(wrapper, '批准').attributes('disabled')).toBeUndefined()

@@ -17,6 +17,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { api } from '../../api/client'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { WORKBENCH_HR_HOME, workbenchDocumentTitle } from '../../utils/workbenchCopy'
@@ -327,7 +328,14 @@ useNudgePull({ id: 'workbench-hr-overtime', topics: ['overtime'], pull: load })
           </label>
           <label class="oField">
             <span class="oLabel">哪一天</span>
-            <input v-model="form.entry_date" class="oInput" type="date" :max="today" />
+            <!-- 日期用站内组件（2026-10-13 用户裁定「日期格式要中国本土化」）：原生
+                 `<input type=date>` 的显示格式跟着**浏览器界面语言**走，页面控制不了。 -->
+            <LuyunDatePicker
+              v-model="form.entry_date"
+              :max-date="today"
+              placeholder="选择日期"
+              aria-label="补录哪一天"
+            />
           </label>
           <div class="oField">
             <span class="oLabel">时长</span>
@@ -378,7 +386,16 @@ useNudgePull({ id: 'workbench-hr-overtime', topics: ['overtime'], pull: load })
         <div class="oCard-hd">
           <h2>台账</h2>
           <span class="oCount">{{ entries.length }}</span>
-          <input v-model="month" class="oInput oMonth" type="month" @change="loadListing" />
+          <!-- 台账的月份筛选（2026-10-13）：原生 `<input type=month>` 跟 date 一个毛病 ——
+               显示格式由浏览器界面语言决定，英文机上是一片 `---------- ----`。 -->
+          <LuyunDatePicker
+            v-model="month"
+            class="oMonth"
+            month-picker
+            placeholder="按月看"
+            aria-label="台账月份"
+            @update:model-value="loadListing"
+          />
           <button v-if="month" class="btn" type="button" @click="month = ''; loadListing()">
             看全部
           </button>
@@ -501,6 +518,9 @@ useNudgePull({ id: 'workbench-hr-overtime', topics: ['overtime'], pull: load })
   background: var(--hy-amber);
 }
 .oMonth { margin-left: auto; max-width: 150px; }
+/* 月份那一格换成日期组件之后（2026-10-13），`.oMonth` 那两条落在组件的根元素上，
+   里面那个 input 的尺寸得自己补一条。 */
+.oMonth :deep(.luyun-date-picker .dp--input) { width: 100%; font-size: 13px; }
 .oLead { margin: 0 0 10px; font-size: 12px; line-height: 1.7; color: var(--hy-muted); }
 .oEmpty { margin: 4px 0 0; font-size: 12.5px; color: var(--hy-faint); }
 .oList { list-style: none; margin: 0; padding: 0; }
@@ -542,6 +562,11 @@ useNudgePull({ id: 'workbench-hr-overtime', topics: ['overtime'], pull: load })
   background: transparent; font-size: 13px; color: var(--hy-ink);
 }
 .oField .oInput { flex: 1; }
+/* 日期组件替掉原生 date（2026-10-13）之后尺寸要自己补 —— 原来那几条（flex / padding /
+   字号）来自 `.oInput`，组件渲染出来的是 `.dp--input`。**别覆盖 `padding`**：组件默认
+   那条给左边的日历图标留了位，压掉之后文字会被图标盖住（实测过）。 */
+.oField :deep(.luyun-date-picker) { flex: 1; }
+.oField :deep(.luyun-date-picker .dp--input) { width: 100%; font-size: 13px; }
 .oStepper { display: flex; align-items: center; gap: 10px; }
 .oStep {
   width: 32px; height: 32px; border: 1px solid var(--hy-line); border-radius: 50%;

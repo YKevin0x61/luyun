@@ -171,6 +171,59 @@ def test_staff_session_can_me_not_admin_roster_writes(hygiene_http):
     assert client.get("/api/hygiene/staff/me").status_code == 401
 
 
+def test_staff_session_probe_is_always_200(hygiene_http):
+    """会话探针 `GET /staff/session`：**没登录也是 200**，判据在 body 里。
+
+    前端守卫与工作台外壳每次都要回答「这台设备有没有员工会话」。原来它们拿
+    `/staff/me` 的 401 当答案 —— 语义没错，但那条 401 是**预期**的拒绝，浏览器
+    照样把它记成控制台里的一条红色错误，于是管理端身份（没有员工 cookie）看工作台
+    时每导航一次留一条。管理端那一半早有对称的入口（`/api/auth/status`：未登录
+    200 + `logged_in=false`），这条就是员工端缺的那一半。
+
+    本用例盯三件事：未登录 200/false、有会话 200 且 employee 与 `/staff/me` 同一份
+    （前端据此在探针里就拿得到姓名与能力，不必再打一次业务接口）、登出后回到 false。
+    """
+    client, _db, accounts, _work = hygiene_http
+
+    anonymous = client.get("/api/hygiene/staff/session")
+    assert anonymous.status_code == 200
+    assert anonymous.json() == {"authenticated": False, "employee": None}
+
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
+    _run(accounts.approve(employee["id"]))
+    assert client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD},
+    ).status_code == 200
+
+    session = client.get("/api/hygiene/staff/session")
+    assert session.status_code == 200
+    body = session.json()
+    assert body["authenticated"] is True
+    assert body["employee"]["phone"] == PHONE
+    # 同一份投影：探针里拿到的就是业务接口那一份，不许多一套字段口径。
+    assert body["employee"] == client.get("/api/hygiene/staff/me").json()["employee"]
+
+    assert client.post("/api/hygiene/staff/logout").status_code == 200
+    after_logout = client.get("/api/hygiene/staff/session")
+    assert after_logout.status_code == 200
+    assert after_logout.json() == {"authenticated": False, "employee": None}
+
+
+def test_staff_session_probe_tolerates_a_bogus_cookie(hygiene_http):
+    """边界：cookie 里有值但库里查不到（伪造 / 被服务端清掉 / 换了库）→ 200 + false。
+
+    探针的契约是"永远回答得出来"，所以坏凭据不能升级成 401/500：前端拿到 401 会
+    当成"服务端拒绝"，在守卫里无法与"确实没登录"区分（两者本来就都该去登录页，
+    但网络层错误不该混进来）。`get_staff_session` 对不存在的会话 id 返回 None。
+    """
+    client, _db, _accounts, _work = hygiene_http
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, "not-a-real-session-id")
+    resp = client.get("/api/hygiene/staff/session")
+    assert resp.status_code == 200
+    assert resp.json() == {"authenticated": False, "employee": None}
+
+
 def test_staff_can_update_own_profile_name_and_phone(hygiene_http):
     client, _db, accounts, _work = hygiene_http
     employee = _run(accounts.register(PHONE, PASSWORD, NAME))

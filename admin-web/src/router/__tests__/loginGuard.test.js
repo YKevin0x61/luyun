@@ -41,6 +41,11 @@ beforeEach(() => {
     'fetch',
     vi.fn(async (url) => {
       const path = String(url)
+      if (path.includes('/api/hygiene/staff/session')) {
+        return jsonResponse({ authenticated: false, employee: null })
+      }
+      // 探针改成 200 语义不等于员工端接口不再拒绝：页面自己拉数据那条 `/staff/me`
+      // 未登录时**仍然** 401 —— 它才是页面 401 兜底的来源（下面 `today` 用例压的就是这条）。
       if (path.includes('/api/hygiene/staff/me')) {
         return jsonResponse({ detail: '需要员工登录' }, 401)
       }
@@ -119,8 +124,8 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
   function staffOnlyFetch() {
     return vi.fn(async (url) => {
       const path = String(url)
-      if (path.includes('/api/hygiene/staff/me')) {
-        return jsonResponse({ employee: { name: '张三' } })
+      if (path.includes('/api/hygiene/staff/session')) {
+        return jsonResponse({ authenticated: true, employee: { name: '张三' } })
       }
       if (path.includes('/api/auth/status')) {
         return jsonResponse({ logged_in: false, initialized: true })
@@ -133,8 +138,8 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
   function adminOnlyFetch() {
     return vi.fn(async (url) => {
       const path = String(url)
-      if (path.includes('/api/hygiene/staff/me')) {
-        return jsonResponse({ detail: '需要员工登录' }, 401)
+      if (path.includes('/api/hygiene/staff/session')) {
+        return jsonResponse({ authenticated: false, employee: null })
       }
       if (path.includes('/api/auth/status')) {
         return jsonResponse({ logged_in: true, initialized: true })
@@ -240,8 +245,8 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
       'fetch',
       vi.fn(async (url) => {
         const path = String(url)
-        if (path.includes('/api/hygiene/staff/me')) {
-          return jsonResponse({ employee: { name: '张三' } })
+        if (path.includes('/api/hygiene/staff/session')) {
+          return jsonResponse({ authenticated: true, employee: { name: '张三' } })
         }
         if (path.includes('/api/auth/status')) {
           return jsonResponse({ logged_in: true, initialized: true })
@@ -348,7 +353,8 @@ describe('/workbench/me/today 真实挂载：未登录时页面自己把 fullPat
     const TodayView = (await import('../../views/today/TodayView.vue')).default
 
     // `/api/scheduling/me` 这条**挂住**，等第一条跳转落定之后再回 401 —— 复刻真机上
-    // 「第二个 401 在导航之后才到」的时序；其余请求照 beforeEach 那份桩（卫生那条立刻 401）。
+    // 「第二个 401 在导航之后才到」的时序；其余请求照 beforeEach 那份桩：会话探针回
+    // 200 + `authenticated:false`，而页面自己拉的卫生那条（`/staff/me`）立刻 401。
     let releaseSlowRequest
     const slowResponse = new Promise((resolve) => {
       releaseSlowRequest = () => resolve(jsonResponse({ detail: '需要员工登录' }, 401))
@@ -358,6 +364,9 @@ describe('/workbench/me/today 真实挂载：未登录时页面自己把 fullPat
       vi.fn(async (url) => {
         const path = String(url)
         if (path.includes('/api/scheduling/me') && !path.includes('/me/')) return slowResponse
+        if (path.includes('/api/hygiene/staff/session')) {
+          return jsonResponse({ authenticated: false, employee: null })
+        }
         if (path.includes('/api/hygiene/staff/me')) {
           return jsonResponse({ detail: '需要员工登录' }, 401)
         }

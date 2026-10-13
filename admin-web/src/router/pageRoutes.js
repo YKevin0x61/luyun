@@ -36,10 +36,27 @@ export function pageTitle(path) {
   return requireRow(path).title
 }
 
-/** vue-router 的 meta：独立外壳、免登录，以及守卫要用的「允许的身份」三态。 */
+/** 这一页要不要开工作台令牌层（`<html data-workbench>`）：`/workbench` 前缀下的页
+ *  一律开，前缀之外只有清单里显式标了 `workbenchTheme: true` 的页才开 —— 目前只有
+ *  `/register`：它套的是工作台那套壳（`HygieneStaffAuthLayout` 的 `.hygiene-staff`）
+ *  却住在顶层路径，只按前缀判就整页吃不到 `--hy-*`（输入框无边框无底色、主按钮退化成
+ *  一行裸文字）。**判据只有这一处**，`main.js` 不再自己写一份路径前缀。
+ *
+ *  护栏：`__tests__/pageRoutes.test.js` 里那条「凡渲染工作台壳的页面都开着令牌层」。 */
+function workbenchThemeOf(row) {
+  return row.workbenchTheme === true || String(row.path).startsWith('/workbench')
+}
+
+/** vue-router 的 meta：独立外壳、免登录、守卫要用的「允许的身份」三态，
+ *  以及这一页要不要开工作台令牌层。 */
 export function pageMeta(path) {
   const row = requireRow(path)
-  return { standalone: row.standalone, public: row.public, audience: row.audience }
+  return {
+    standalone: row.standalone,
+    public: row.public,
+    audience: row.audience,
+    workbenchTheme: workbenchThemeOf(row),
+  }
 }
 
 /** 路径 → 清单里那一行；`/workbench/me/today/` 与它底下的子路径都算这一页。

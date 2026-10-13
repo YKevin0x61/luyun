@@ -151,7 +151,7 @@ describe('店长端排班月历（原型 B）', () => {
     expect(router).toMatch(/meta: pageMeta\(path\)/)
     expect(router).toMatch(/meta: pageMeta\('\/workbench'\)/)
     expect(pageMeta('/workbench/hr/calendar')).toEqual({
-      standalone: true, public: false, audience: 'admin',
+      standalone: true, public: false, audience: 'admin', workbenchTheme: true,
     })
     expect(router).toMatch(/views\/scheduling\/SchedulingLayout\.vue/)
     // 「回后台」那条门现在在统一壳的顶栏里（`<router-link class="wb-back" to="/">`）。

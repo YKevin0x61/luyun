@@ -6,7 +6,7 @@
 
 1. 身份证校验位（正确 / 错误 / 末位 X 的小写）；
 2. 同号重复注册 → 400（不是 500）；
-3. 注册两项必填与逐字中文文案；
+3. 注册三项必填与逐字中文文案；
 4. 批准门槛（底薪 + 入职日期），`/enable` 不走门槛；
 5. 健康证三态（ok / soon / expired）与到期日派生（+12 个月，到期日当天算临期）；
 6. CSV 导出（BOM / 列 / 分段 / 关键字 / 日志不落身份证号）；
@@ -56,6 +56,10 @@ CERT_EXPIRED = "2025-08-09"  # 到期 2026-08-09：35 天前 → expired
 CERT_EXPIRES_TODAY = "2025-09-13"  # 到期 2026-09-13 = 今天 → 临期最后一天
 CERT_EXPIRED_YESTERDAY = "2025-09-12"  # 到期 2026-09-12 → 昨天到期 → expired
 
+# 入职日期的用例取值（2026-10-13 起它也是注册必填）。这一项**允许将来**，两种都要压。
+HIRE_OK = "2026-01-05"
+HIRE_FUTURE = "2027-03-01"
+
 EXPORT_PATH = "/api/hygiene/admin/roster-export.csv"
 EXPORT_HEADER = (
     "姓名,手机号,职位,状态,卫生权限,管理权限,身份证号,健康证办理日期,"
@@ -69,6 +73,7 @@ DETAIL_ID_CARD_CHECKSUM = "身份证号校验位不对"
 DETAIL_ID_CARD_DUPLICATE = "该身份证号已建档"
 DETAIL_CERT_REQUIRED = "请选择健康证办理日期"
 DETAIL_CERT_FUTURE = "健康证办理日期不能是将来"
+DETAIL_HIRE_REQUIRED = "请选择入职日期"
 DETAIL_SALARY_NOT_INT = "底薪只能是整数元"
 DETAIL_SALARY_NEGATIVE = "底薪不能是负数"
 DETAIL_SALARY_TOO_LARGE = "底薪最多 999999 元"
@@ -142,17 +147,26 @@ def _admin(client) -> TestClient:
     return client
 
 
-def _register(client, *, name: str, phone_no: str, card: str, cert_date: str):
-    return client.post(
-        "/api/hygiene/staff/register",
-        json={
-            "name": name,
-            "phone": phone_no,
-            "password": PASSWORD,
-            "id_card_no": card,
-            "health_cert_date": cert_date,
-        },
-    )
+def _register(
+    client,
+    *,
+    name: str,
+    phone_no: str,
+    card: str,
+    cert_date: str,
+    hire_date: str | None = HIRE_OK,
+):
+    """注册请求。`hire_date=None` = 这一格不传（压缺项用）。"""
+    payload = {
+        "name": name,
+        "phone": phone_no,
+        "password": PASSWORD,
+        "id_card_no": card,
+        "health_cert_date": cert_date,
+    }
+    if hire_date is not None:
+        payload["hire_date"] = hire_date
+    return client.post("/api/hygiene/staff/register", json=payload)
 
 
 def _seed_profile(
@@ -330,6 +344,108 @@ def test_register_requires_id_card_and_health_cert_date(profile_http):
     )
     assert missing_cert.status_code == 400, missing_cert.text
     assert missing_cert.json()["detail"] == DETAIL_CERT_REQUIRED
+
+
+def test_register_requires_hire_date(profile_http):
+    """入职日期也是注册必填（2026-10-13 用户裁定）。
+
+    原先这一项由超管在花名册补录，而且「没补齐不能批准」。改成员工自报之后，**新注册**
+    的人天然带着它 —— 批准门槛那侧只剩底薪；`test_approve_needs_base_salary_and_hire_date`
+    里 `only_hire` 那两档压的仍是**存量**缺项的人（上线前注册的、或档案被清过的）。
+    文案与前端 `HygieneRegisterView.vue` 逐字一致。
+    """
+    client, _db, _accounts = profile_http
+
+    missing = _register(
+        client,
+        name="张三",
+        phone_no=phone(44),
+        card=id_card(44),
+        cert_date=CERT_OK,
+        hire_date=None,
+    )
+    assert missing.status_code == 400, missing.text
+    assert missing.json()["detail"] == DETAIL_HIRE_REQUIRED
+
+    blank = _register(
+        client,
+        name="张三",
+        phone_no=phone(45),
+        card=id_card(45),
+        cert_date=CERT_OK,
+        hire_date="   ",
+    )
+    assert blank.status_code == 400, blank.text
+    assert blank.json()["detail"] == DETAIL_HIRE_REQUIRED
+
+
+def test_hire_date_may_be_in_the_future_and_lands_in_the_row(profile_http):
+    """入职日期**允许将来**（提前建档）—— 与健康证办理日期正好相反。
+
+    那一项不许将来（将来是笔误），这一项将来是常态（人还没到岗先建档）。形状仍然要
+    合法：走 `normalize_date` 那一套（`YYYY-MM-DD` + 日历上真有这一天），注册与 PATCH
+    共用同一份判据。
+    """
+    client, _db, _accounts = profile_http
+
+    future = _register(
+        client,
+        name="张三",
+        phone_no=phone(46),
+        card=id_card(46),
+        cert_date=CERT_OK,
+        hire_date=HIRE_FUTURE,
+    )
+    assert future.status_code == 200, future.text
+    assert future.json()["employee"]["hire_date"] == HIRE_FUTURE
+
+    # 真的落库了，不是只在响应里回显。
+    assert scalar(
+        "SELECT hire_date FROM hygiene_employees WHERE phone = ?", (phone(46),)
+    ) == HIRE_FUTURE
+
+    bad_shape = _register(
+        client,
+        name="李四",
+        phone_no=phone(47),
+        card=id_card(47),
+        cert_date=CERT_OK,
+        hire_date="2026/01/01",
+    )
+    assert bad_shape.status_code == 400, bad_shape.text
+    assert bad_shape.json()["detail"] == "日期格式应为 YYYY-MM-DD"
+
+
+def test_register_can_declare_no_health_cert_yet(profile_http):
+    """「暂时没有健康证」（2026-10-13 用户裁定）：勾了它就不必给办理日期。
+
+    落库仍然是空 —— `health_cert_date = NULL` 就是 `profile.py` 那个 `none` 状态，
+    **不加列、不迁移**：「没有健康证」这一种事实在库里只有一种表示。与「漏填」的区别
+    只存在于接口层那一次表态上，而漏填仍然是 400（上一条用例压的就是它）。
+    """
+    client, _db, _accounts = profile_http
+    resp = client.post(
+        "/api/hygiene/staff/register",
+        json={
+            "name": "张三",
+            "phone": phone(48),
+            "password": PASSWORD,
+            "id_card_no": id_card(48),
+            "health_cert_missing": True,
+            "hire_date": HIRE_OK,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    employee = resp.json()["employee"]
+    assert employee["health_cert_state"] == "none"
+    assert employee["health_cert_expires_on"] is None
+    assert (
+        scalar(
+            "SELECT health_cert_date FROM hygiene_employees WHERE phone = ?",
+            (phone(48),),
+        )
+        is None
+    )
 
 
 def test_health_cert_date_cannot_be_in_the_future(profile_http):

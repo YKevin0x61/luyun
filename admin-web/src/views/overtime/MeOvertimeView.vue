@@ -20,6 +20,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { loginRedirectTarget } from '../../utils/loginNext'
@@ -321,7 +322,14 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
              选项，那两个按钮本身就是「窗口」的可视化。 -->
         <div v-if="canReview" class="oRow">
           <span class="oLabel">哪一天</span>
-          <input v-model="day" class="oInput" type="date" :max="today" />
+          <!-- 日期用站内组件（2026-10-13 用户裁定「日期格式要中国本土化」）：原生
+               `<input type=date>` 的显示格式跟着**浏览器界面语言**走，页面控制不了。 -->
+          <LuyunDatePicker
+            v-model="day"
+            :max-date="today"
+            placeholder="选择日期"
+            aria-label="补录哪一天"
+          />
         </div>
         <div v-else class="oRow">
           <span class="oLabel">哪一天</span>
@@ -521,6 +529,11 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   border-radius: 8px;
   font-size: 14px;
 }
+/* 日期组件替掉原生 date（2026-10-13）：尺寸照 `.oInput` 那几条补（组件渲染的是
+   `.dp--input`，`.oInput` 那组选择器对它不生效）。**别覆盖 `padding`** —— 组件默认
+   那条给左边的日历图标留了位，压掉之后文字会被图标盖住。 */
+.oRow :deep(.luyun-date-picker) { flex: 1; }
+.oRow :deep(.luyun-date-picker .dp--input) { width: 100%; font-size: 14px; }
 .oErr {
   font-size: 13px;
   color: #c0392b;

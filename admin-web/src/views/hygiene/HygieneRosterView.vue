@@ -20,6 +20,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import QRCode from 'qrcode'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import {
@@ -180,6 +181,12 @@ function healthChip(row) {
   if (row.health_cert_state === 'expired') {
     return { text: `健康证 ${row.health_cert_expires_on} 已过期`, title: '已过期', kind: 'is-danger' }
   }
+  // 未办理（2026-10-13 用户裁定）：注册页从这天起允许「暂时没有健康证」，于是
+  // **在职而没证**成了一种合法状态 —— 必须让店长在名单上一眼看见。原先这里对
+  // `none` 是静默的（那时它只可能来自脏数据或已停用的存量行，标出来是噪音）。
+  if (row.health_cert_state === 'none') {
+    return { text: '未办理健康证', title: '还没有健康证：尽快让他去办', kind: 'is-danger' }
+  }
   return null
 }
 
@@ -315,7 +322,10 @@ const createdText = computed(() => {
   return stamp ? (formatHygieneStamp(stamp) || '—') : '—'
 })
 
-const expiresText = computed(() => (drawerRow.value && drawerRow.value.health_cert_expires_on) || '未设置')
+const expiresText = computed(
+  // 「未办理」而不是「未设置」：这一格问的是"什么时候到期"，空着时要说清是**没证**。
+  () => (drawerRow.value && drawerRow.value.health_cert_expires_on) || '未办理',
+)
 
 function openDrawer(row) {
   drawerRow.value = row
@@ -699,13 +709,17 @@ async function copyInvite() {
                 <span>健康证办理日期</span>
                 <span v-if="!draft.health_cert_date" class="roster-field-note">待补</span>
               </span>
-              <input
+              <!-- 站内的日期组件（2026-10-13 用户裁定「日期格式要中国本土化」）：原生
+                   `<input type=date>` 的显示格式跟**浏览器界面语言**走 —— 中文机是
+                   `yyyy/mm/dd`、英文机是 `mm/dd/yyyy`，页面上的 `lang` 改不动它。组件
+                   把格式定死在 `yyyy-MM-dd`，与注册页那两格同一个样子。 -->
+              <LuyunDatePicker
                 v-model="draft.health_cert_date"
-                class="input"
-                type="date"
-                :max="todayDate"
                 :disabled="busy"
-              >
+                :max-date="todayDate"
+                placeholder="选择办理日期"
+                aria-label="健康证办理日期"
+              />
               <span class="roster-expiry">有效期至 {{ expiresText }}</span>
             </label>
 
@@ -734,12 +748,12 @@ async function copyInvite() {
                 <span>入职日期</span>
                 <span v-if="missingHireDate" class="roster-field-note">待补</span>
               </span>
-              <input
+              <LuyunDatePicker
                 v-model="draft.hire_date"
-                class="input"
-                type="date"
                 :disabled="busy"
-              >
+                placeholder="选择入职日期"
+                aria-label="入职日期"
+              />
             </label>
 
             <label title="满一年 100、第 10 年 1000 封顶；「应为」是照入职日期算出来的对照，改不改由你定">

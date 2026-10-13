@@ -1049,6 +1049,11 @@ PUBLIC_API_SURFACE: tuple[tuple[str, str], ...] = (
     # 卫生员工端入口：员工手机没有管理端会话，这里靠按 IP / 手机号的登录限流兜底
     ("POST", "/api/hygiene/staff/login"),
     ("POST", "/api/hygiene/staff/register"),
+    # 员工会话探针：**未登录也回 200**（`authenticated=false`），供前端守卫与工作台外壳
+    # 判「这台设备有没有员工会话」。它刻意不挂守卫：拿 401 当判据会让每次导航在浏览器
+    # 控制台留一条红色错误（管理端的对称入口是上面的 /api/auth/status）。未登录时
+    # employee 为 null，**不吐任何员工数据**。
+    ("GET", "/api/hygiene/staff/session"),
     # 配方阅读面**不在这里**（票 07）：/workbench/kitchen/recipe* 的扫码阅读面改成
     # 「任一身份」门（require_any_identity_session），三条读接口挂的是守卫，不是登记。
     # 认证例外清单里多一条就等于把「零鉴权、谁都能拉（连停用配方都能拉）」开回来。

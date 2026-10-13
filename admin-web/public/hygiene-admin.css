@@ -742,7 +742,8 @@
 .hygiene-admin textarea.input,
 .hygiene-admin .luyun-time-picker__trigger,
 .hygiene-admin .luyun-date-picker .dp--input,
-.hygiene-staff .input {
+.hygiene-staff .input,
+.hygiene-staff .luyun-date-picker .dp--input {
   background: var(--hy-surface-2);
   border: 1px solid var(--hy-line-strong);
   color: var(--hy-ink);
@@ -751,12 +752,14 @@
 }
 .hygiene-admin .input::placeholder,
 .hygiene-staff .input::placeholder,
+.hygiene-staff .luyun-date-picker .dp--input::placeholder,
 .hygiene-admin textarea.input::placeholder {
   color: var(--hy-faint);
 }
 .hygiene-admin .input:hover,
 .hygiene-admin .select:hover,
-.hygiene-staff .input:hover {
+.hygiene-staff .input:hover,
+.hygiene-staff .luyun-date-picker .dp--input:hover {
   border-color: rgba(133, 205, 198, .42);
 }
 .hygiene-admin .input:focus,
@@ -764,10 +767,30 @@
 .hygiene-admin textarea.input:focus,
 .hygiene-admin .luyun-time-picker__trigger:focus,
 .hygiene-admin .luyun-date-picker .dp--input:focus,
-.hygiene-staff .input:focus {
+.hygiene-staff .input:focus,
+.hygiene-staff .luyun-date-picker .dp--input:focus {
   outline: none;
   border-color: var(--hy-mint);
   box-shadow: 0 0 0 3px rgba(63, 224, 176, .16);
+}
+/* 员工端的日期组件（2026-10-13）：注册页的两格日期从原生 `<input type=date>` 换成
+   `LuyunDatePicker` —— 原生那一格的显示格式**跟浏览器界面语言走**（中文机是
+   `yyyy/mm/dd`、英文机是 `mm/dd/yyyy`），页面上的 `lang` 属性改不动它。组件把格式
+   定死在 `yyyy-MM-dd`，任何机器上是同一个样子，代价是要自己把尺寸补齐（原生那格是
+   `.hygiene-staff .input` 的 `width:100% / min-height:48px` 给的）。 */
+.hygiene-staff .luyun-date-picker {
+  width: 100%;
+}
+.hygiene-staff .luyun-date-picker .dp--input {
+  width: 100%;
+  min-height: 48px;
+  font-size: 16px;
+}
+/* 管理端的 `.form-row` 里那几格（今天页的请假起止 / 换班日）同样要撑满 ——
+   它们原来是 `.input`，宽度由通用 `.input` 给，组件得自己补。 */
+.hygiene-admin .form-row .luyun-date-picker,
+.hygiene-admin .form-row .luyun-date-picker .dp--input {
+  width: 100%;
 }
 .hygiene-admin .select,
 .hygiene-staff .select {
@@ -1286,7 +1309,11 @@
 .hygiene-staff .form-row {
   margin-bottom: .9rem;
 }
-.hygiene-staff .form-row label {
+/* 字段名。日期两格挂的是组件（`LuyunDatePicker` 里那个 input 的 id 拿不到），
+   `<label for>` 关联不上，于是改用 `<span>` + 组件的 `aria-label` —— 这里让它跟
+   `<label>` 长得一模一样，别让注册页出现两种字段名。 */
+.hygiene-staff .form-row label,
+.hygiene-staff .form-row .hy-staff-field-label {
   display: block;
   font-size: .78rem;
   margin-bottom: .42rem;
@@ -1302,6 +1329,34 @@
 .hygiene-staff input[type="tel"].input {
   font-family: var(--font-mono);
   letter-spacing: .04em;
+}
+/* 「暂时没有健康证」（2026-10-13）：注册页那一格日期下面的勾选行。造型照上面那条
+   「记住密码」，但语义与它无关 —— 它是**日期之外的另一条合法路径**，不是偏好开关。
+   选择器带上 `.form-row`：这一行本身就是个 `<label>`，而 `.hygiene-staff .form-row
+   label` 那条（0-2-1）比单写 `.hygiene-staff .hy-staff-nocert`（0-2-0）更具体，
+   不带上就会让字号与间距全被那一条吃回去。 */
+.hygiene-staff .form-row .hy-staff-nocert {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin: .55rem 0 0;
+  font-size: .92rem;
+  font-weight: 600;
+  color: var(--hy-muted);
+  cursor: pointer;
+}
+.hygiene-staff .form-row .hy-staff-nocert input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--hy-pool);
+  cursor: pointer;
+}
+/* 锁住的日期格：勾了「暂时没有」之后它还在（位置不跳），但明显不可用。
+   两处：原生 `.input`（其它字段）与日期组件的 input。 */
+.hygiene-staff .input:disabled,
+.hygiene-staff .luyun-date-picker .dp--input:disabled {
+  opacity: .45;
+  cursor: not-allowed;
 }
 .hygiene-staff .hy-staff-remember {
   display: flex;

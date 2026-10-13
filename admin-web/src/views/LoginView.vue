@@ -6,9 +6,9 @@ import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
 import { useImageUploadQueueStore } from '../stores/imageUploadQueue'
 import { clearAuthStatusCache, setAuthLoggedIn } from '../utils/authStatus'
 import {
-  STAFF_SESSION_PROBE_TIMEOUT_MS,
   parseApiDetail,
   staffRequest,
+  staffSession,
 } from '../utils/hygieneStaff'
 import {
   loadLoginPrefs,
@@ -230,10 +230,16 @@ async function loadAdminStatus() {
 async function loadStaffStatus() {
   staffPhase.value = 'loading'
   try {
-    const data = await staffRequest('/api/hygiene/staff/me', {
-      timeoutMs: STAFF_SESSION_PROBE_TIMEOUT_MS,
-    })
-    loggedInName.value = data?.employee?.name || data?.employee?.phone || ''
+    // 会话探针（`/api/hygiene/staff/session`）：未登录也是 200 + `authenticated:false`
+    // —— 拿 401 当判据会在控制台留一条红色错误，而这个探针每次进登录页都跑一次。
+    // 有会话时同一次响应里就带回了姓名，不必再打一次 `/staff/me`。
+    const { authenticated, employee } = await staffSession()
+    if (!authenticated) {
+      staffPhase.value = 'login'
+      await focusField(staffPhoneInput)
+      return
+    }
+    loggedInName.value = employee?.name || employee?.phone || ''
     if (wantsAccountSwitch()) {
       staffPhase.value = 'loggedIn'
       return
@@ -241,7 +247,7 @@ async function loadStaffStatus() {
     // 会话仍有效就直接进员工端，不必再登一次。
     enterStaffLanding()
   } catch {
-    // 401 是「确实没登录」；断网 / 超时也停在登录表单上（提交时会把网络问题说清楚），
+    // 断网 / 超时也停在登录表单上（提交时会把网络问题说清楚），
     // 跟原来员工登录页一样 —— 别把员工挡在一句「连不上」后面。
     staffPhase.value = 'login'
     await focusField(staffPhoneInput)

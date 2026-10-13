@@ -23,7 +23,9 @@ function jsonResponse(data, { ok = true, status = 200 } = {}) {
   }
 }
 
-const STAFF_401 = () => jsonResponse({ detail: '需要员工登录' }, { ok: false, status: 401 })
+// 员工会话探针的假响应：未登录也是 200 + `authenticated:false`（判据在 body 里，
+// 不再拿 401 当答案 —— 那条 401 会在真实控制台里留一条红色错误）。
+const STAFF_LOGGED_OUT = () => jsonResponse({ authenticated: false, employee: null })
 const ADMIN_LOGGED_OUT = () => jsonResponse({ logged_in: false, initialized: true })
 const ADMIN_UNINITIALIZED = () => jsonResponse({ logged_in: false, initialized: false })
 
@@ -146,7 +148,7 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
   })
 
   it('两个显式 Tab 都在；没记住过时默认员工栏（员工手机一打开就是员工栏）', async () => {
-    fetchMock.mockResolvedValueOnce(STAFF_401())
+    fetchMock.mockResolvedValueOnce(STAFF_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login')
 
@@ -169,23 +171,23 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
     const statusCall = findCall(fetchMock, '/api/auth/status')
     expect(statusCall).toBeTruthy()
     expect(statusCall[1].credentials).toBe('include')
-    expect(findCall(fetchMock, '/api/hygiene/staff/me')).toBeFalsy()
+    expect(findCall(fetchMock, '/api/hygiene/staff/session')).toBeFalsy()
   })
 
   it('?next 落在员工端前缀内时强制员工栏，优先于记住值', async () => {
     rememberTab('admin')
-    fetchMock.mockResolvedValueOnce(STAFF_401())
+    fetchMock.mockResolvedValueOnce(STAFF_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fmonth')
 
     expect(activeTab(wrapper)).toBe('员工')
-    expect(findCall(fetchMock, '/api/hygiene/staff/me')).toBeTruthy()
+    expect(findCall(fetchMock, '/api/hygiene/staff/session')).toBeTruthy()
     expect(findCall(fetchMock, '/api/auth/status')).toBeFalsy()
   })
 
   it('切栏会记住这次选择（下次打开落在这一栏）', async () => {
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login')
@@ -206,7 +208,7 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
     expect(activeTab(wrapper)).toBe('超级管理员')
     // 开超级管理员栏就该查管理端状态，别去敲员工探针。
     expect(findCall(fetchMock, '/api/auth/status')).toBeTruthy()
-    expect(findCall(fetchMock, '/api/hygiene/staff/me')).toBeFalsy()
+    expect(findCall(fetchMock, '/api/hygiene/staff/session')).toBeFalsy()
   })
 
   it('D13：优先于「记住的是员工栏」', async () => {
@@ -228,7 +230,7 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
 
     expect(activeTab(wrapper)).toBe('超级管理员')
     expect(findCall(fetchMock, '/api/auth/status')).toBeTruthy()
-    expect(findCall(fetchMock, '/api/hygiene/staff/me')).toBeFalsy()
+    expect(findCall(fetchMock, '/api/hygiene/staff/session')).toBeFalsy()
   })
 
   it('票 04：印码页优先于「记住的是员工栏」', async () => {
@@ -247,7 +249,7 @@ describe('/login 面板：清单归属只看路径（票 09 收敛，不再随�
     // 票 09 按票面口径把 `/login` 整个划给管理端。员工要装工作台那份，从 `/register`
     // 或已经登录后的工作台页面装（工作台前缀归工作台）。
     rememberTab('admin')
-    fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT()).mockResolvedValueOnce(STAFF_401())
+    fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT()).mockResolvedValueOnce(STAFF_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login')
     expect(activeTab(wrapper)).toBe('超级管理员')
@@ -318,7 +320,7 @@ describe('/login 面板：超级管理员栏', () => {
     // 这一条要从默认的员工栏进，覆盖掉本 describe 的「记住超级管理员栏」前置。
     window.localStorage.clear()
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(ADMIN_UNINITIALIZED())
 
     const { wrapper } = await mountLogin('/login')
@@ -396,7 +398,7 @@ describe('/login 面板：超级管理员栏', () => {
 describe('/login 面板：员工栏', () => {
   it('提交时向员工端登录端点发 POST，成功后落到 ?next 指定的员工页', async () => {
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
 
     const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fmonth')
@@ -418,7 +420,7 @@ describe('/login 面板：员工栏', () => {
 
   it('员工栏落点同样是 replace：后退不退回登录页', async () => {
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
 
     const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fmonth', {
@@ -437,7 +439,7 @@ describe('/login 面板：员工栏', () => {
 
   it('没带 ?next 时落到员工默认落点（今天页）', async () => {
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
 
     const { wrapper, router } = await mountLogin('/login')
@@ -450,7 +452,7 @@ describe('/login 面板：员工栏', () => {
   })
 
   it('员工会话仍有效时自动进入员工落点', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ employee: { name: '张三' } }))
+    fetchMock.mockResolvedValueOnce(jsonResponse({ authenticated: true, employee: { name: '张三' } }))
 
     const { router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fclean')
 
@@ -459,7 +461,7 @@ describe('/login 面板：员工栏', () => {
 
   it('?switch=1 且员工会话有效时停在确认面板，退出走员工端登出接口', async () => {
     fetchMock
-      .mockResolvedValueOnce(jsonResponse({ employee: { name: '张三' } }))
+      .mockResolvedValueOnce(jsonResponse({ authenticated: true, employee: { name: '张三' } }))
       .mockResolvedValueOnce(jsonResponse({ success: true }))
 
     const { wrapper } = await mountLogin('/login?switch=1')
@@ -481,7 +483,7 @@ describe('/login 面板：员工栏', () => {
   })
 
   it('?switch=1 但员工会话无效时不出现确认面板', async () => {
-    fetchMock.mockResolvedValueOnce(STAFF_401())
+    fetchMock.mockResolvedValueOnce(STAFF_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login?switch=1')
 
@@ -492,7 +494,7 @@ describe('/login 面板：员工栏', () => {
 
   it('失败提示不出现在另一栏', async () => {
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(
         jsonResponse({ detail: '手机号或密码错误，或账号未批准、已停用' }, { ok: false, status: 401 }),
       )
@@ -534,7 +536,7 @@ describe('/login 面板：非法 ?next 回落', () => {
 
   it('站外地址不强制员工栏，员工登录后回落到今天页', async () => {
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
 
     const { wrapper, router } = await mountLogin('/login?next=https%3A%2F%2Fevil.example%2Fphish')
@@ -549,7 +551,7 @@ describe('/login 面板：非法 ?next 回落', () => {
 
   it('员工端路径不把超级管理员身份送进去：超级管理员栏登录后落「无权访问」并把原目标带上', async () => {
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ ok: true }))
 
@@ -579,7 +581,7 @@ describe('/login 面板：扫码进来看配方（票 07）', () => {
 
   it('扫码进来默认开员工栏，优先于记住的超级管理员栏', async () => {
     rememberTab('admin')
-    fetchMock.mockResolvedValueOnce(STAFF_401())
+    fetchMock.mockResolvedValueOnce(STAFF_LOGGED_OUT())
 
     const { wrapper } = await mountLogin(SCAN)
 
@@ -590,7 +592,7 @@ describe('/login 面板：扫码进来看配方（票 07）', () => {
 
   it('厨师在员工栏登录后回到**那条配方**（不是静默落到「今天」）', async () => {
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
 
     const { wrapper, router } = await mountLogin(SCAN)
@@ -606,7 +608,7 @@ describe('/login 面板：扫码进来看配方（票 07）', () => {
 
   it('岗位码若还指着老地址，入口换成新地址后照样回到那条配方', async () => {
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
 
     const { wrapper, router } = await mountLogin('/login?next=%2Frecipe%2Fdetail%3Fslug%3Dchangfen')
@@ -621,7 +623,7 @@ describe('/login 面板：扫码进来看配方（票 07）', () => {
 
   it('店长在超级管理员栏登录后同样回到那条配方（阅读面两档都进得去）', async () => {
     fetchMock
-      .mockResolvedValueOnce(STAFF_401())
+      .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ ok: true }))
 

@@ -4,6 +4,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import HygieneRegisterView from '../HygieneRegisterView.vue'
+import LuyunDatePicker from '../../../components/ui/LuyunDatePicker.vue'
 
 // 员工自助注册的校验（审查条目 D12 / D18）。
 //
@@ -44,8 +45,22 @@ async function mountRegister() {
   return { wrapper, router }
 }
 
-/** 依次填六格并提交。传 `null` 的格子不动（留空）。 */
-async function submitWith(wrapper, { name, phone, idCard, healthCert, password, confirm }) {
+/** 两个日期走组件（`LuyunDatePicker`，2026-10-13 从原生 `<input type=date>` 换过来的）：
+ *  按**渲染顺序**取 —— 健康证办理日期在前、入职日期在后。`setValue` 会 emit
+ *  `update:modelValue`，与真人选日期同一条路。传 `null` 的格子不动。 */
+async function fillDates(wrapper, { healthCert, hireDate }) {
+  const dates = wrapper.findAllComponents(LuyunDatePicker)
+  if (healthCert !== null && healthCert !== undefined) await dates[0].setValue(healthCert)
+  if (hireDate !== null && hireDate !== undefined) await dates[1].setValue(hireDate)
+}
+
+/** 依次填七格并提交。传 `null` 的格子不动（留空）。
+ *  `noCert: true` → 勾上「暂时没有健康证」（勾了会把日期格清空并锁住，所以它排在
+ *  填日期之后 —— 与真人的操作顺序一致）。 */
+async function submitWith(
+  wrapper,
+  { name, phone, idCard, healthCert, noCert, hireDate, password, confirm },
+) {
   const fill = async (selector, value) => {
     if (value === null) return
     const input = wrapper.get(selector)
@@ -54,7 +69,8 @@ async function submitWith(wrapper, { name, phone, idCard, healthCert, password, 
   await fill('#regName', name)
   await fill('#regPhone', phone)
   await fill('#regIdCard', idCard)
-  await fill('#regHealthCert', healthCert)
+  await fillDates(wrapper, { healthCert, hireDate })
+  if (noCert) await wrapper.get('#regNoHealthCert').setValue(true)
   await fill('#regPassword', password)
   await fill('#regConfirm', confirm)
   await wrapper.get('form').trigger('submit')
@@ -68,6 +84,7 @@ function alertText(wrapper) {
 
 // 身份证与手机号一样是**必填**（2026-10 花名册改版）：样本是校验位算得过的号，
 // 校验位错的用同一个前 17 位、换掉末位（`ID_CARD_BAD`）。
+// 入职日期是 2026-10-13 起的第三项必填（原先由店长在花名册补录）。
 const ID_CARD = '110101199003077213'
 const ID_CARD_X = '11010119900307723X'
 const ID_CARD_BAD = '110101199003077211'
@@ -76,6 +93,7 @@ const VALID = {
   phone: '13800138000',
   idCard: ID_CARD,
   healthCert: '2020-01-01',
+  hireDate: '2025-01-01',
   password: 'abcd1234',
   confirm: 'abcd1234',
 }
@@ -190,7 +208,66 @@ describe('/register 校验（D12）：中文提示，且不发请求', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('校验顺序与服务端一致：姓名 → 手机号 → 身份证 → 健康证 → 密码长度 → 两次一致', async () => {
+  it('入职日期空 → 「请选择入职日期」', async () => {
+    const { wrapper } = await mountRegister()
+
+    await submitWith(wrapper, { ...VALID, hireDate: '' })
+
+    expect(alertText(wrapper)).toBe('请选择入职日期')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('勾「暂时没有健康证」：日期不必填，照样能提交（送空日期 + 标记位）', async () => {
+    const { wrapper } = await mountRegister()
+
+    await submitWith(wrapper, { ...VALID, healthCert: '', noCert: true })
+
+    const call = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes('/api/hygiene/staff/register'),
+    )
+    expect(call).toBeTruthy()
+    const body = JSON.parse(call[1].body)
+    expect(body.health_cert_missing).toBe(true)
+    expect(body.health_cert_date).toBe('')
+    expect(alertText(wrapper)).toBe('')
+    expect(wrapper.text()).toContain('已提交')
+  })
+
+  it('两格日期用站内组件（格式固定 yyyy-MM-dd），页面上不留原生 date input', async () => {
+    const { wrapper } = await mountRegister()
+
+    // 原生 `<input type=date>` 的显示格式**跟浏览器界面语言走**（中文机 `yyyy/mm/dd`、
+    // 英文机 `mm/dd/yyyy`），页面上的 `lang` 属性改不动它 —— 用户 2026-10-13 裁定的
+    // 「日期格式要中国本土化」就是这条。断言挡住"改回原生"。
+    expect(wrapper.findAll('input[type="date"]')).toEqual([])
+    expect(wrapper.findAllComponents(LuyunDatePicker)).toHaveLength(2)
+  })
+
+  it('勾上「暂时没有」会把日期格清空并锁住（不留自相矛盾的组合）', async () => {
+    const { wrapper } = await mountRegister()
+    const dates = wrapper.findAllComponents(LuyunDatePicker)
+
+    await dates[0].setValue('2025-12-01')
+    await wrapper.get('#regNoHealthCert').setValue(true)
+    await flushPromises()
+
+    expect(dates[0].props('modelValue')).toBe('')
+    expect(dates[0].props('disabled')).toBe(true)
+  })
+
+  it('入职日期可以是将来（提前建档）：与健康证办理日期刻意相反', async () => {
+    const { wrapper } = await mountRegister()
+
+    await submitWith(wrapper, { ...VALID, hireDate: '2999-01-01' })
+
+    const call = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes('/api/hygiene/staff/register'),
+    )
+    expect(call).toBeTruthy()
+    expect(JSON.parse(call[1].body).hire_date).toBe('2999-01-01')
+  })
+
+  it('校验顺序与服务端一致：姓名 → 手机号 → 身份证 → 健康证 → 入职日期 → 密码长度 → 两次一致', async () => {
     const { wrapper } = await mountRegister()
 
     // 手机号坏 + 身份证空：先报手机号。
@@ -204,6 +281,10 @@ describe('/register 校验（D12）：中文提示，且不发请求', () => {
     // 健康证空 + 密码太短：先报健康证（实名两项排在密码之前）。
     await submitWith(wrapper, { ...VALID, healthCert: '', password: 'abc', confirm: 'abc' })
     expect(alertText(wrapper)).toBe('请选择健康证办理日期')
+
+    // 入职日期空 + 密码太短：先报入职日期（它也排在密码之前）。
+    await submitWith(wrapper, { ...VALID, hireDate: '', password: 'abc', confirm: 'abc' })
+    expect(alertText(wrapper)).toBe('请选择入职日期')
 
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -238,12 +319,16 @@ describe('/register 校验（D12）：中文提示，且不发请求', () => {
 
     const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/api/hygiene/staff/register'))
     expect(call).toBeTruthy()
-    // 六项一起发：身份证与健康证办理日期是 2026-10 花名册改版新加的**必填**两项。
+    // 八项一起发：身份证与健康证办理日期是 2026-10 花名册改版新加的**必填**两项，
+    // 入职日期是 2026-10-13 起的第三项；`health_cert_missing` 是「暂时没有健康证」
+    // 那个勾选的表态位（没勾就是 false）。
     expect(JSON.parse(call[1].body)).toEqual({
       name: '张三',
       phone: '13800138000',
       id_card_no: ID_CARD,
       health_cert_date: '2020-01-01',
+      health_cert_missing: false,
+      hire_date: '2025-01-01',
       password: 'abcd1234',
     })
     expect(wrapper.text()).toContain('已提交')

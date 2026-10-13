@@ -10,6 +10,7 @@
 // （批假在 `/workbench/hr/inbox` 那一页：这一页只管排班怎么铺）；班次表的增删改在票 11。
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { api } from '../../api/client'
 // 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
 // <link>，壳一层管住就跟卫生管理端一个做法。
@@ -1472,7 +1473,13 @@ useNudgePull({
                 >
                 <label class="gC-anchor">
                   <span>起点</span>
-                  <input v-model="cycleAnchor" type="date">
+                  <!-- 日期用站内组件（2026-10-13 用户裁定「日期格式要中国本土化」）：原生
+                       `<input type=date>` 的显示格式跟着**浏览器界面语言**走。 -->
+                  <LuyunDatePicker
+                    v-model="cycleAnchor"
+                    placeholder="选择起点"
+                    aria-label="轮转周期起点"
+                  />
                 </label>
                 <div class="gC-act">
                   <button
@@ -1792,6 +1799,14 @@ useNudgePull({
   font: inherit; font-size: 11px; color: var(--hy-ink); background: var(--hy-surface);
   border: 1px solid var(--hy-line); border-radius: 7px; padding: 3px 6px;
 }
+/* 日期组件替掉原生 date（2026-10-13）：`.gC-anchor input` 那几条对组件里那个
+   `.dp--input` 不生效（scoped 样式够不进子组件），所以要补的只有**尺寸** ——
+   底色 / 边框 / 文字色共享表已经给了（`.hygiene-admin .luyun-date-picker .dp--input`），
+   在这里再写一遍既多余、又会让这份文件的 `--hy-*` 引用数越过 designGuard 的棘轮。
+   这是排班表里的一小格，字号与内边距得跟旁边的文字对齐。 */
+.gC-anchor :deep(.luyun-date-picker .dp--input) {
+  font: inherit; font-size: 11px; width: 140px; min-height: 0;
+}
 .gC-act { display: flex; gap: 6px; }
 .gC-hint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.6; }
 .gC-err { margin: 0; font-size: 11px; color: var(--hy-seal-bright); line-height: 1.6; }
@@ -1907,8 +1922,9 @@ useNudgePull({
 /* 抽屉弹出来时给页面留出底部空间：不留的话它压住的正是下面几行员工
    （门店那套就是这个毛病，图片里能看到第 4、5 行被压掉一半）。 */
 .gB.sheet-open { padding-bottom: 320px; }
-/* 笔袋开着（折叠成一行）时只留一条的高度：不占地方，最后一行也滚得上来。 */
-.gB.brush-open { padding-bottom: 88px; }
+/* 笔袋开着（折叠成一行）时只留一条的高度：不占地方，最后一行也滚得上来。
+   108px = 那一条（44px 的控件）＋ 提示文案 ＋ 上下内边距；控件抬到 44px 之前是 88。 */
+.gB.brush-open { padding-bottom: 108px; }
 
 /* ── 底部抽屉 ─────────────────────────────────────────────────────────── */
 .gSheet {
@@ -1922,15 +1938,21 @@ useNudgePull({
   border-radius: var(--hy-radius-lg) var(--hy-radius-lg) 0 0;
   box-shadow: 0 -18px 40px rgba(0, 0, 0, .55);
 }
-.gSheet-bar { display: flex; align-items: center; gap: 8px; }
+.gSheet-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .gSheet-bar .gSeg { margin: 0 auto; }
 .gSheet-fold {
-  width: 30px; height: 26px; flex: none;
+  width: 44px; height: 44px; flex: none;
   display: grid; place-items: center;
   font: inherit; font-size: 13px; line-height: 1; color: var(--hy-muted);
   background: var(--hy-surface-2); border: 1px solid var(--hy-line);
   border-radius: 999px; cursor: pointer;
 }
+/* 这一行（笔刷条 + 展开态的那排按钮）的点击目标：原先两个下拉 26px 高、按钮 27px，
+   手机上指头落不准（2026-10-13 用户反馈）。按设计护栏的触控下限抬到 44px，两个下拉
+   再把中间的空档分掉；窄屏放不下时换行，而不是把下拉压到连「跟固定区」都显示不全。 */
+.gSheet-bar .gZ-sel { flex: 1 1 auto; min-height: 44px; font-size: 12.5px; padding: 6px 10px; }
+.gSheet-bar .gBtn { min-height: 44px; padding: 8px 14px; }
+.gSheet-bar .gChip { min-height: 44px; padding: 8px 16px; }
 .gSheet-hd { display: flex; align-items: baseline; gap: 8px; margin: 0; flex-wrap: wrap; }
 .gSheet-hd b { font-family: var(--font-song); font-size: 13.5px; letter-spacing: .06em; }
 .gSheet-hd span { font-size: 11.5px; color: var(--hy-muted); }
@@ -1958,4 +1980,10 @@ useNudgePull({
 .gSheet-pick-note { font-style: normal; color: var(--hy-faint); font-size: 10.5px; }
 .gSheet-hint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.7; }
 .gSheet-err { margin: 0; font-size: 11px; color: var(--hy-seal-bright); line-height: 1.7; }
+/* 手机档（≤430，项目的断点白名单里就是这一档）那一行放不下：控件不会缩到「跟固定区」
+   显示不全，`flex-wrap` 让它换行 —— 于是底部留白得多留一行，不然最后一行员工正好
+   被压在笔刷条下面。 */
+@media (max-width: 430px) {
+  .gB.brush-open { padding-bottom: 160px; }
+}
 </style>

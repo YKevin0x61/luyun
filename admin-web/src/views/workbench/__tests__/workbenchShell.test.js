@@ -40,6 +40,8 @@ function bothSessionsFetch() {
   return vi.fn(async (url) => {
     const path = String(url)
     if (path.includes('/api/auth/status')) return jsonResponse({ logged_in: true, initialized: true })
+    // 会话探针（未登录也是 200）：判据在 body 里，不再拿 /staff/me 的 401 当答案。
+    if (path.includes('/api/hygiene/staff/session')) return jsonResponse({ authenticated: true, employee: { name: '张三' } })
     if (path.includes('/api/hygiene/staff/me')) return jsonResponse({ employee: { name: '张三' } })
     return jsonResponse({}, 404)
   })
@@ -50,6 +52,8 @@ function staffOnlyFetch() {
   return vi.fn(async (url) => {
     const path = String(url)
     if (path.includes('/api/auth/status')) return jsonResponse({ logged_in: false, initialized: true })
+    // 会话探针（未登录也是 200）：判据在 body 里，不再拿 /staff/me 的 401 当答案。
+    if (path.includes('/api/hygiene/staff/session')) return jsonResponse({ authenticated: true, employee: { name: '张三' } })
     if (path.includes('/api/hygiene/staff/me')) return jsonResponse({ employee: { name: '张三' } })
     return jsonResponse({}, 404)
   })

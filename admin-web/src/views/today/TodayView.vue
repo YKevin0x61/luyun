@@ -18,6 +18,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
@@ -1194,7 +1195,9 @@ useNudgePull({
             </div>
             <div>
               <dt>健康证到期日</dt>
-              <dd>{{ staffMe.health_cert_expires_on || '未设置' }}</dd>
+              <!-- 没办证的人（2026-10-13 起注册页允许「暂时没有健康证」）写「未办理」：
+                   这一栏本来就叫"到期日"，空着写「未设置」看不出是没证还是没填。 -->
+              <dd>{{ staffMe.health_cert_expires_on || '未办理' }}</dd>
             </div>
             <!-- 工龄奖（票 05）：档位与下次调整月都是**自己那份**信息（入职日期本来就
                  在这儿显示），所以这一行不碰敏感字段边界。入职日期没补时不渲染它 ——
@@ -1329,27 +1332,30 @@ useNudgePull({
         </p>
         <div class="form-row">
           <label for="leave-start">从哪天</label>
-          <!-- `min` 用**服务端的营业日**（不是手机上的今天）：过去的日子服务端一定会拒
+          <!-- 日期用站内的 `LuyunDatePicker`（2026-10-13 用户裁定「日期格式要中国本土化」）：
+               原生 `<input type=date>` 的显示格式跟着**浏览器界面语言**走，页面控制不了。
+               `input-id` 把 id 透传到组件内部那个 input，上面 `<label for>` 的关联不断。
+               `min-date` 用**服务端的营业日**（不是手机上的今天）：过去的日子服务端一定会拒
                （`past_leave`），就在这里先挡住，别让员工拨完日期、提交了才被打回来。
                上限（排班铺到哪天）不在这里设：`/me` 没下发窗口末日，服务端那句
                「排班还没铺到那么远：最多请到 X」说得比控件准。 -->
-          <input
-            id="leave-start"
+          <LuyunDatePicker
             v-model="leaveStart"
-            class="input"
-            type="date"
-            :min="today ? today.business_date : undefined"
-          >
+            input-id="leave-start"
+            :min-date="today ? today.business_date : undefined"
+            placeholder="选择开始日"
+            aria-label="请假从哪天"
+          />
         </div>
         <div class="form-row">
           <label for="leave-end">到哪天（可空）</label>
-          <input
-            id="leave-end"
+          <LuyunDatePicker
             v-model="leaveEnd"
-            class="input"
-            type="date"
-            :min="leaveStart || (today ? today.business_date : undefined)"
-          >
+            input-id="leave-end"
+            :min-date="leaveStart || (today ? today.business_date : undefined)"
+            placeholder="只请一天就空着"
+            aria-label="请假到哪天"
+          />
         </div>
         <div class="form-row">
           <label for="leave-note">{{ noteLabel }}</label>
@@ -1402,13 +1408,13 @@ useNudgePull({
         </div>
         <div class="form-row">
           <label for="swap-day">换哪天</label>
-          <input
-            id="swap-day"
+          <LuyunDatePicker
             v-model="swapDay"
-            class="input"
-            type="date"
-            :min="today ? today.business_date : undefined"
-          >
+            input-id="swap-day"
+            :min-date="today ? today.business_date : undefined"
+            placeholder="选择要换的那天"
+            aria-label="换哪天"
+          />
         </div>
         <div class="form-row">
           <label for="swap-note">{{ noteLabel }}</label>

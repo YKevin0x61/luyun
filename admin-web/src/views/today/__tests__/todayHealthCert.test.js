@@ -125,7 +125,7 @@ describe('员工端 · 健康证提示', () => {
     }
   })
 
-  it('「我的」补两行档案：入职日期与健康证到期日，空值写「未设置」', async () => {
+  it('「我的」补两行档案：入职日期写「未设置」，没办健康证写「未办理」', async () => {
     const wrapper = await mountToday({
       hire_date: '2026-01-01',
       health_cert_expires_on: '2026-10-25',
@@ -141,7 +141,11 @@ describe('员工端 · 健康证提示', () => {
     wrapper.unmount()
 
     const empty = await mountToday({ hire_date: null, health_cert_expires_on: null })
-    expect(empty.get('.me-meta').text()).toContain('未设置')
+    const emptyText = empty.get('.me-meta').text()
+    expect(emptyText).toContain('未设置') // 入职日期没填
+    // 健康证那一格是「未办理」（2026-10-13 起注册页允许「暂时没有健康证」，
+    // 空着要能看出是**没证**，不是没填）。
+    expect(emptyText).toContain('未办理')
   })
 
   it('敏感字段边界：底薪与身份证号不下发也不显示', async () => {

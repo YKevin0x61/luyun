@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { dirname, resolve as resolvePath } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import {
   PAGE_ROUTES,
@@ -7,6 +10,52 @@ import {
   pageTitle,
   skipsAdminLoginRedirect,
 } from '../pageRoutes.js'
+
+const ROUTER_DIR = resolvePath(dirname(fileURLToPath(import.meta.url)), '..')
+/** 应用根（`admin-web/`）：Vitest 把 `import('../views/x.vue')` 改写成
+ *  `__vite_ssr_dynamic_import__("/src/views/x.vue")` —— 那种形式是**项目根相对**的，
+ *  跟源码里写的相对路径不是一回事，两种都要认。 */
+const APP_ROOT = resolvePath(ROUTER_DIR, '../..')
+
+/** 组件（懒加载函数）→ 它的 .vue 文件绝对路径；拿不到就 null，不猜。 */
+function componentFile(loader) {
+  if (!loader) return null
+  const hit = String(loader).match(/['"]([^'"]+\.vue)['"]/)
+  if (!hit) return null
+  const spec = hit[1]
+  return spec.startsWith('/')
+    ? resolvePath(APP_ROOT, `.${spec}`)
+    : resolvePath(ROUTER_DIR, spec)
+}
+
+/** 组件的模板根节点带了工作台那两个 class 之一，或者挂了共享样式表
+ *  `hygiene-admin.css` —— 两种都意味着这一页整页在吃 `--hy-*` 令牌。
+ *
+ *  样式表要认**挂载调用**而不是文件名字符串：`/login` 的注释里就写着「不挂
+ *  `/hygiene-admin.css`」（它自带 scoped 配色、明确不依赖那一套），按字面匹配会把它
+ *  误判成吃令牌的页。 */
+const WORKBENCH_STYLE_RE =
+  /class="hygiene-(admin|staff)[ "]|useScopedStylesheet\(\s*['"]\/hygiene-admin\.css['"]\s*\)/
+
+/** 组件文件（含它 import 进来的子组件，往下 `depth` 层）里有没有工作台那套样式？
+ *
+ *  必须跟着 import 走：现场 8 页与「我的」组的壳 `HygieneAdminLayout` / `WorkbenchLayout`
+ *  自己的模板根节点**不带** `.hygiene-admin`，它们是**包着** `WorkbenchShell`（后者才是
+ *  带根 class、挂样式表的那一个）。只看 matched 链上文件的字面内容会漏掉这两组。 */
+function readsWorkbenchTokens(file, depth = 2) {
+  let source
+  try {
+    source = readFileSync(file, 'utf8')
+  } catch {
+    return false
+  }
+  if (WORKBENCH_STYLE_RE.test(source)) return true
+  if (depth <= 0) return false
+  for (const hit of source.matchAll(/['"](\.[^'"]+\.vue)['"]/g)) {
+    if (readsWorkbenchTokens(resolvePath(dirname(file), hit[1]), depth - 1)) return true
+  }
+  return false
+}
 
 // 票 01：页面清单（`router/pageRoutes.json`）是唯一来源。这里钉两件事：
 // 1. 表本身合法（六个字段齐全、取值在枚举内、路径唯一）；
@@ -198,6 +247,50 @@ describe('401 兜底豁免也从清单派生（票 10）', () => {
   it('清单里没有的（已作废的）路径没有豁免', () => {
     for (const stale of ['/setup', '/staff/today', '/recipe', '/recipe/detail', '/hygiene']) {
       expect(skipsAdminLoginRedirect(stale), stale).toBe(false)
+    }
+  })
+})
+
+describe('工作台令牌层（`html[data-workbench]`）从清单派生', () => {
+  // 实测缺陷（2026-10-13 截图复核）：`/register` 套的是工作台那套壳
+  // （`HygieneStaffAuthLayout` 的 `.hygiene-staff`），但令牌层当时只按 `/workbench`
+  // 路径前缀打开，于是注册页整页**吃不到 `--hy-*`**：输入框的 background/border
+  // 整条声明失效（CSS 变量未定义时退化为 initial，**不会**回落到浏览器默认样式）→
+  // 无边框无底色；`btn-primary` 的薄荷渐变失效 → 主按钮退化成一行裸文字；三档文字色
+  // 塌成一档；`:focus` 的边框与光晕失效而 `outline:none` 还在 → 聚焦零反馈。
+  //
+  // 判据从此只有一处：清单里的 `workbenchTheme`（由页面清单的读取口算出），
+  // main.js 不再自己写一份路径前缀。
+
+  it('注册页与工作台全部页面开着令牌层，其余页面关着', () => {
+    for (const row of PAGE_ROUTES) {
+      const expected = row.path === '/register' || row.path.startsWith('/workbench')
+      expect(pageMeta(row.path).workbenchTheme, row.path).toBe(expected)
+    }
+  })
+
+  it('注册页在表里显式标了 workbenchTheme（不在工作台前缀下，只能点名）', () => {
+    expect(pageRow('/register').workbenchTheme).toBe(true)
+  })
+
+  it('凡渲染工作台壳的页面都开着令牌层 —— 漏开就是整页掉色', async () => {
+    const router = await freshRouter()
+    const shelled = []
+    for (const row of PAGE_ROUTES) {
+      const matched = router.resolve(row.path).matched
+      const usesShell = matched.some((record) =>
+        readsWorkbenchTokens(componentFile(record.components?.default)),
+      )
+      if (usesShell) shelled.push(row.path)
+    }
+    // 防空转：壳的解析一旦失效（换写法 / 改懒加载形态），先在这条上红，
+    // 而不是让下面那个循环空转着绿。
+    expect(shelled, '没解析出注册页的工作台壳，检查 componentFile 的路径解析').toContain(
+      '/register',
+    )
+    expect(shelled.length, `解析出的壳页面偏少：${JSON.stringify(shelled)}`).toBeGreaterThan(20)
+    for (const path of shelled) {
+      expect(pageMeta(path).workbenchTheme, `${path} 套了工作台壳却没开令牌层`).toBe(true)
     }
   })
 })

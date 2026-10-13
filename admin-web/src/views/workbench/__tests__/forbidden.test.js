@@ -32,7 +32,9 @@ function jsonResponse(data, status = 200) {
 function staffOnlyFetch() {
   return vi.fn(async (url) => {
     const path = String(url)
-    if (path.includes('/api/hygiene/staff/me')) return jsonResponse({ employee: { name: '张三' } })
+    if (path.includes('/api/hygiene/staff/session')) {
+      return jsonResponse({ authenticated: true, employee: { name: '张三' } })
+    }
     if (path.includes('/api/auth/status')) return jsonResponse({ logged_in: false, initialized: true })
     return jsonResponse({}, 404)
   })
@@ -42,7 +44,9 @@ function staffOnlyFetch() {
 function adminOnlyFetch() {
   return vi.fn(async (url) => {
     const path = String(url)
-    if (path.includes('/api/hygiene/staff/me')) return jsonResponse({ detail: '需要员工登录' }, 401)
+    if (path.includes('/api/hygiene/staff/session')) {
+      return jsonResponse({ authenticated: false, employee: null })
+    }
     if (path.includes('/api/auth/status')) return jsonResponse({ logged_in: true, initialized: true })
     return jsonResponse({}, 404)
   })
@@ -52,7 +56,9 @@ function adminOnlyFetch() {
 function noSessionFetch() {
   return vi.fn(async (url) => {
     const path = String(url)
-    if (path.includes('/api/hygiene/staff/me')) return jsonResponse({ detail: '需要员工登录' }, 401)
+    if (path.includes('/api/hygiene/staff/session')) {
+      return jsonResponse({ authenticated: false, employee: null })
+    }
     if (path.includes('/api/auth/status')) return jsonResponse({ logged_in: false, initialized: true })
     return jsonResponse({}, 404)
   })

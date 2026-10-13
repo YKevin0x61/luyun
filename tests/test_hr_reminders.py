@@ -409,6 +409,28 @@ def test_reminders_puts_missing_hire_date_into_the_incomplete_group(reminders_ht
     assert data["incomplete"]["count"] == 1
 
 
+def test_reminders_lists_who_has_no_health_cert_yet(reminders_http):
+    """未办理健康证的人也进「健康证」那一栏（2026-10-13 用户裁定）。
+
+    注册页从这天起允许「暂时没有健康证」，于是在职而没证成了一种**合法**状态。这一批
+    人原先哪个清单里都不出现 —— `certs` 直接复用 `list_health_cert_due`，而那只捞临期
+    与过期。没证的人还要排在临期/过期的人**前面**：没证比证要到期更急。
+    """
+    client, _db, accounts = reminders_http
+    _admin(client)
+    no_cert = _seed(client, accounts, serial=91, name="陈晓", cert=None)
+    with_cert = _seed(client, accounts, serial=92, name="李娜")
+
+    data = _reminders(client)
+    items = data["certs"]["items"]
+    assert [item["id"] for item in items] == [no_cert], items
+    assert items[0]["state"] == "none"
+    assert items[0]["expires_on"] is None
+    assert items[0]["days_left"] is None
+    assert with_cert not in [item["id"] for item in items]
+    assert data["certs"]["count"] == 1
+
+
 def test_reminders_needs_the_admin_session(reminders_http):
     """提醒里有工龄奖（钱）—— 没登录一律拿不到（401），不是空清单。"""
     client, _db, _accounts = reminders_http

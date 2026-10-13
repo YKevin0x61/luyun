@@ -52,13 +52,23 @@ const incomplete = computed(() => data.value?.incomplete?.items || [])
 // 健康证到期（2026-10-08 从首页那一格并进来）：临期与已过期的人，判据在服务端。
 const certs = computed(() => data.value?.certs?.items || [])
 
-/** 到期还剩几天 / 过期几天。`days_left` 由服务端按同一套阈值算好，这里只翻文案。 */
+/** 到期还剩几天 / 过期几天。`days_left` 由服务端按同一套阈值算好，这里只翻文案。
+ *
+ *  未办理的人（`state: 'none'`）`days_left` 是 `null`，**必须先判它** ——
+ *  `Number(null)` 是 0，直接往下算会把他们写成「今天到期」。 */
 function certDaysText(person) {
-  const days = Number(person?.days_left)
+  if (person?.days_left === null || person?.days_left === undefined) return ''
+  const days = Number(person.days_left)
   if (!Number.isFinite(days)) return ''
   if (days < 0) return `已过期 ${Math.abs(days)} 天`
   if (days === 0) return '今天到期'
   return `还剩 ${days} 天`
+}
+
+/** 健康证那一栏的三种状态（2026-10-13 起含「未办理」）：none / soon / expired。 */
+function certStateText(person) {
+  if (person?.state === 'none') return '未办理'
+  return person?.state === 'expired' ? '已过期' : '临期'
 }
 
 async function load() {
@@ -183,27 +193,31 @@ onMounted(() => {
         </ul>
       </section>
 
-      <!-- 健康证到期（2026-10-08 从首页那一格并进来）：临期与已过期的人。阈值在服务端
-           （`profile.health_cert_status`：办理日 + 12 个月，到期前 30 天算临期），这里只上色。 -->
+      <!-- 健康证（2026-10-08 从首页那一格并进来；2026-10-13 加入「未办理」）：未办理 /
+           临期 / 已过期三种人。阈值在服务端（`profile.health_cert_status`：办理日 +
+           12 个月，到期前 30 天算临期），这里只上色。**未办理的人排在最前面** ——
+           没证比证要到期更急（服务端就是按这个次序拼的）。 -->
       <section class="hCard">
         <div class="hCard-hd">
-          <h2>健康证到期</h2>
+          <h2>健康证</h2>
           <span class="hCount">{{ certs.length }}</span>
         </div>
-        <p class="hLead">按办理日期起满一年算；到期前 30 天算临期，从满一年那天次日起算过期。</p>
-        <p v-if="!certs.length" class="hEmpty">没有临期或过期的健康证。</p>
+        <p class="hLead">
+          还没办证的人排在最前面，接下去才是临期与已过期的（按办理日期起满一年算，到期前 30 天算临期）。
+        </p>
+        <p v-if="!certs.length" class="hEmpty">在职的人健康证都齐、也都没到期。</p>
         <ul v-else class="hPeople hCerts">
           <li v-for="person in certs" :key="person.id">
             <b>{{ person.name || '（没有名字）' }}</b>
             <span class="hPhone">{{ person.phone }}</span>
             <span class="hWhen">{{ person.expires_on || '—' }}</span>
             <span class="hNext">{{ certDaysText(person) }}</span>
-            <span class="hState" :class="{ over: person.state === 'expired' }">
-              {{ person.state === 'expired' ? '已过期' : '临期' }}
+            <span class="hState" :class="{ over: person.state !== 'ok' }">
+              {{ certStateText(person) }}
             </span>
           </li>
         </ul>
-        <button class="btn" type="button" @click="router.push(ROSTER_PATH)">去花名册换证</button>
+        <button class="btn" type="button" @click="router.push(ROSTER_PATH)">去花名册登记</button>
       </section>
 
       <section class="hCard">

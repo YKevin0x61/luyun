@@ -60,6 +60,15 @@ function fetchFor(session, { name = '张三' } = {}) {
     if (path.includes('/api/auth/status')) {
       return jsonResponse({ logged_in: session.admin, initialized: true })
     }
+    // 员工会话探针：未登录也是 200 + `authenticated:false`（原来的 401 语义已退役）。
+    if (path.includes('/api/hygiene/staff/session')) {
+      return jsonResponse(
+        session.staff
+          ? { authenticated: true, employee: { name } }
+          : { authenticated: false, employee: null },
+      )
+    }
+    // 切换器拿到员工会话后才去取姓名（`store.loadStaffName`），这条仍是业务接口。
     if (path.includes('/api/hygiene/staff/me')) {
       return session.staff
         ? jsonResponse({ employee: { name } })

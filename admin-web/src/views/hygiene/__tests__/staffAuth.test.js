@@ -23,7 +23,12 @@ describe('hygiene staff auth gate', () => {
     // 清单（`meta: pageMeta('/login')`）—— 这里断清单里的值，注册出来对不对由
     // `router/__tests__/pageRoutes.test.js` 对着真实路由表钉。
     expect(router).toMatch(/path: '\/login'[\s\S]{0,200}?meta: pageMeta\('\/login'\)/)
-    expect(pageMeta('/login')).toEqual({ standalone: true, public: true, audience: 'both' })
+    // 令牌层开关（2026-10-13）：登录页自带 scoped 配色、明确不吃卫生那套样式表，
+    // 所以它是 false；注册页在同一套壳里却住在顶层路径，是这一档里唯一的 true
+    // （见 pageRoutes.json 的 workbenchTheme 字段）。
+    expect(pageMeta('/login')).toEqual({
+      standalone: true, public: true, audience: 'both', workbenchTheme: false,
+    })
   })
 
   it('gate loads the shared hygiene stylesheet and the 卫 lockup', () => {

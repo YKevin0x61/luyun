@@ -15,7 +15,7 @@ import { useScopedStylesheet } from '../../composables/useScopedStylesheet'
 import { pageRow, pageTitle } from '../../router/pageRoutes.js'
 import { isLoggedIn } from '../../utils/authStatus'
 import { hygieneDocumentTitle } from '../../utils/hygieneCopy'
-import { staffRequest, staffSessionState } from '../../utils/hygieneStaff'
+import { staffSession } from '../../utils/hygieneStaff'
 import { STAFF_ENTRY_PATH } from '../../utils/staffPaths'
 import { WORKBENCH_TITLE } from '../../utils/workbenchCopy'
 
@@ -62,22 +62,24 @@ onMounted(async () => {
     identity.value = 'admin'
     return
   }
-  if ((await staffSessionState()) === 'unauthenticated') {
+  // 员工会话探针（200 + `authenticated`，不是 401）：有会话时连能力档一起带回来，
+  // 不必再打一次业务接口。问不到（断网 / 超时）按旧口径当他普通员工 —— 这里
+  // **不做授权判断**（拦截在守卫与接口），只影响措辞，所以失败不弹错、不拦人。
+  let session = null
+  try {
+    session = await staffSession()
+  } catch (err) {
+    /* 断网或超时：保持 'staff' */
+  }
+  if (session && !session.authenticated) {
     identity.value = null
     return
   }
   identity.value = 'staff'
-  // 拿不到就问不出来 —— 这里**不做授权判断**（拦截在守卫与接口），只影响措辞，
-  // 所以失败就当他普通员工，不弹错、不拦人。
   // 判据是**管理权限开关**（2026-10-05 起）：`permission` 那个标签不再代表能力，
   // 只看它会把"标签是管理员、一个勾都没给"的人说成有复核工作（正好说反）。
-  try {
-    const me = await staffRequest('/api/hygiene/staff/me', { timeoutMs: 4000 })
-    const caps = (me && me.employee && me.employee.admin_caps) || []
-    if (Array.isArray(caps) && caps.length > 0) identity.value = 'staff-admin'
-  } catch (err) {
-    /* 断网或超时：保持 'staff' */
-  }
+  const caps = (session && session.employee && session.employee.admin_caps) || []
+  if (Array.isArray(caps) && caps.length > 0) identity.value = 'staff-admin'
 })
 
 const identityLabel = computed(() => {

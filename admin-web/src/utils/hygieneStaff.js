@@ -14,6 +14,31 @@ function offlineError(message) {
 }
 
 /**
+ * 员工会话探针：**服务端永远回 200**，判据在 body 的 `authenticated` 里。
+ *
+ * 为什么不拿 `/staff/me` 的 401 当「没登录」：判断是对的，代价是浏览器控制台里一条
+ * 红色错误 —— 401 在探针里是**预期**结果，而探针跑在路由守卫与工作台外壳上，等于每次
+ * 导航都留一条（管理端身份看工作台时尤其吵）。管理端那一半早有对称入口
+ * （`/api/auth/status`：未登录 200 + `logged_in=false`），`/api/hygiene/staff/session`
+ * 就是员工端缺的那一半。
+ *
+ * 网络层失败（断网 / 超时 / 服务未就绪）**仍然抛**，带 `offline` 标记：调用方要能区分
+ * 「确实没登录」与「问不到」（后者不该把员工甩去登录页）。
+ *
+ * @returns {Promise<{authenticated: boolean, employee: object|null}>}
+ *   有会话时 `employee` 就是 `/staff/me` 那一份投影（姓名、能力档），于是探针拿到结论
+ *   的同时也拿到了姓名，不必为一个名字再打一次业务接口。
+ */
+export async function staffSession({ timeoutMs = STAFF_SESSION_PROBE_TIMEOUT_MS } = {}) {
+  const data = await staffRequest('/api/hygiene/staff/session', { timeoutMs })
+  const payload = data && typeof data === 'object' ? data : {}
+  return {
+    authenticated: Boolean(payload.authenticated),
+    employee: payload.employee || null,
+  }
+}
+
+/**
  * 会话探测的三态结果。
  *
  * ``'unauthenticated'`` 才是"确实没登录"；``'unknown'`` 表示网络层不明（断网、
@@ -22,10 +47,8 @@ function offlineError(message) {
  */
 export async function staffSessionState() {
   try {
-    await staffRequest('/api/hygiene/staff/me', {
-      timeoutMs: STAFF_SESSION_PROBE_TIMEOUT_MS,
-    })
-    return 'ok'
+    const { authenticated } = await staffSession()
+    return authenticated ? 'ok' : 'unauthenticated'
   } catch (err) {
     return err && err.offline ? 'unknown' : 'unauthenticated'
   }

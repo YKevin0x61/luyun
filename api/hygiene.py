@@ -128,6 +128,9 @@ _ERROR_DETAILS = {
     "duplicate_id_card": "该身份证号已建档",
     "health_cert_required": "请选择健康证办理日期",
     "health_cert_future": "健康证办理日期不能是将来",
+    # 入职日期（2026-10-13）：只有"必填"这一句 —— 它**允许将来**（提前建档），所以没有
+    # 健康证那种 `*_future` 对照文案；形状不对走 profile.py 共用的 `bad_date`。
+    "hire_date_required": "请选择入职日期",
     "base_salary_not_integer": "底薪只能是整数元",
     "base_salary_negative": "底薪不能是负数",
     "base_salary_too_large": "底薪最多 999999 元",
@@ -325,12 +328,26 @@ def _clear_staff_cookie(response: Response) -> None:
     response.delete_cookie(settings.STAFF_SESSION_COOKIE_NAME, path="/")
 
 
+async def _staff_from_cookie(
+    request: Request,
+    accounts: EmployeeAccounts,
+) -> Optional[Dict[str, Any]]:
+    """从员工会话 cookie 解出员工；没有 cookie、查不到、已过期 / 被清一律 None。
+
+    判据只有这一处：`require_staff_session`（401 那一版）与 `/staff/session` 探针
+    必须对「这个 cookie 算不算数」给出同一个答案。
+    """
+    return await accounts.get_staff_session(
+        request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    )
+
+
 async def require_staff_session(
     request: Request,
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
     session_id = request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
-    employee = await accounts.get_staff_session(session_id)
+    employee = await _staff_from_cookie(request, accounts)
     if employee is None:
         raise HTTPException(status_code=401, detail="需要员工登录")
     return {"session_id": session_id, "employee": employee}
@@ -355,11 +372,21 @@ class StaffRegisterIn(BaseModel):
     name: str
     phone: str
     password: str
-    # 两项必填的档案（2026-10-07）：注册页 `HygieneRegisterView.vue` 也校验同样两条。
+    # 三项必填的档案（2026-10-07 两项，2026-10-13 加入职日期）：注册页
+    # `HygieneRegisterView.vue` 也校验同样三条。
     # 这里刻意声明成可选（而不是 `str` 必填）：pydantic 缺字段回的是 422 的英文结构，
     # 而票面要求「缺项 → 400 + 逐字中文原因」——必填在 `staff_register` 里判。
     id_card_no: Optional[str] = None
     health_cert_date: Optional[str] = None
+    # 「暂时没有健康证」（2026-10-13 用户裁定）：勾了它就不必给办理日期 —— 两者必有
+    # 其一，都不给仍是 400 +「请选择健康证办理日期」（加了这个选项不等于可以空着交）。
+    # 落库仍然是空：`health_cert_date = NULL` 就是 `profile.py` 里那个 `none` 状态，
+    # **不加列、不迁移** —— 「没有健康证」这一种事实在库里只有一种表示。
+    health_cert_missing: bool = False
+    # 入职日期（2026-10-13 用户裁定）：原先由超管在花名册补录、且「没补齐不能批准」，
+    # 改成员工在注册页自报（**允许将来** —— 提前建档；工龄奖按它派生）。花名册里超管
+    # 照样能改。它不再是批准门槛里"缺项"的来源，门槛那侧只剩底薪。
+    hire_date: Optional[str] = None
 
 
 class StaffLoginIn(BaseModel):
@@ -722,15 +749,27 @@ async def staff_register(
 ) -> Dict[str, Any]:
     """员工自助注册。
 
-    姓名、手机号、密码之外，2026-10-07 起**必填**身份证号与健康证办理日期（注册页
-    同步校验，这里才是判据）：缺项、形状不对、同号重复都答 400 + 逐字中文
-    （`_ERROR_DETAILS`），页面原话显示。健康证办理日期不得晚于今天。
+    姓名、手机号、密码之外，2026-10-07 起**必填**身份证号与健康证办理日期，
+    2026-10-13 起**必填**入职日期（注册页同步校验，这里才是判据）：缺项、形状不对、
+    同号重复都答 400 + 逐字中文（`_ERROR_DETAILS`），页面原话显示。
+
+    健康证办理日期有一条**替代路径**（2026-10-13）：确实还没有证的人可以勾「暂时没有
+    健康证」（`health_cert_missing`），这时日期为空是**明确表态**而不是漏填。两者都
+    不给仍然是「请选择健康证办理日期」。两个都给了以日期为准（前端勾选会清空日期格，
+    走不到这种组合）。
+
+    两个日期的将来口径**刻意相反**：健康证办理日期不得晚于今天（将来是笔误），
+    入职日期允许将来（提前建档，人还没到岗先注册）。
     """
     if not (body.id_card_no or "").strip():
         raise HTTPException(status_code=400, detail=_ERROR_DETAILS["id_card_required"])
-    if not (body.health_cert_date or "").strip():
+    if not (body.health_cert_date or "").strip() and not body.health_cert_missing:
         raise HTTPException(
             status_code=400, detail=_ERROR_DETAILS["health_cert_required"]
+        )
+    if not (body.hire_date or "").strip():
+        raise HTTPException(
+            status_code=400, detail=_ERROR_DETAILS["hire_date_required"]
         )
     try:
         employee = await accounts.register(
@@ -739,6 +778,7 @@ async def staff_register(
             body.name,
             id_card_no=body.id_card_no,
             health_cert_date=body.health_cert_date,
+            hire_date=body.hire_date,
         )
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
@@ -855,6 +895,28 @@ async def staff_login(
     _clear_staff_login_failures(keys)
     _set_staff_cookie(response, result["session_id"], remember=body.remember)
     return {"success": True, "employee": result["employee"]}
+
+
+@router.get("/staff/session")
+async def staff_session(
+    request: Request,
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, Any]:
+    """员工会话探针：**总是 200**，有没有会话都由 body 说。
+
+    前端路由守卫与工作台外壳每次导航都要回答「这台设备有没有员工会话」，原来它们拿
+    `/staff/me` 的 401 当答案 —— 判断是对的，代价是浏览器控制台里一条红色错误：401
+    在探针里是**预期**结果，而探针跑在每一次导航上（管理端身份看工作台时每切一页留一条，
+    排障时很吵）。管理端那一半早有对称入口（`/api/auth/status`：未登录回
+    200 + `logged_in=false`），这条补的就是员工端缺的那一半。
+
+    因此这里**不**挂 `require_staff_session`：免鉴权、永远 200，未登录回
+    `{"authenticated": false, "employee": null}`；有会话时 `employee` 就是 `/staff/me`
+    那一份投影（同一个 `_staff_from_cookie`），前端在探针里就能拿到姓名与能力档，
+    不必为一个名字再打一次业务接口。免鉴权路由必须在 `main.PUBLIC_API_SURFACE` 登记。
+    """
+    employee = await _staff_from_cookie(request, accounts)
+    return {"authenticated": employee is not None, "employee": employee}
 
 
 @router.get("/staff/me")

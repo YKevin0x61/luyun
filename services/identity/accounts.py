@@ -28,6 +28,7 @@ from database import CHINA_TZ
 from db_core.errors import is_integrity_violation
 from services.identity.capabilities import dump_caps, parse_caps
 from services.identity.profile import (
+    HEALTH_CERT_STATE_NONE,
     ProfileError,
     birthday_from_id_card,
     birthday_in_year,
@@ -348,14 +349,18 @@ class EmployeeAccounts:
         *,
         id_card_no: Optional[str] = None,
         health_cert_date: Optional[str] = None,
+        hire_date: Optional[str] = None,
     ) -> dict:
         """员工自助注册。
 
-        两个档案项（身份证号、健康证办理日期）是**注册页的必填项**，但"必填"这一层
-        由接口层把住（`StaffRegisterIn` + `_ERROR_DETAILS` 的逐字文案）；这里为空时
-        照旧落库成 NULL —— 存量行与测试夹具都走这条路，档案缺项是合法状态（显示
-        「待补」、挡在批准门槛前），不是错误。**给了值就必须合法**：形状/校验位
+        三个档案项（身份证号、健康证办理日期、入职日期）是**注册页的必填项**，但
+        "必填"这一层由接口层把住（`StaffRegisterIn` + `_ERROR_DETAILS` 的逐字文案）；
+        这里为空时照旧落库成 NULL —— 存量行与测试夹具都走这条路，档案缺项是合法状态
+        （显示「待补」、挡在批准门槛前），不是错误。**给了值就必须合法**：形状/校验位
         （`services/identity/profile.py`）与同号唯一都在这里判，注册与 PATCH 共用。
+
+        两个日期的**将来口径刻意相反**（判据都在 `profile.py` 的两个归一函数里）：
+        健康证办理日期不得晚于今天（将来是笔误），入职日期允许将来（提前建档）。
         """
         normalized = self._normalize_phone(phone)
         employee_name = self._normalize_name(name)
@@ -364,6 +369,7 @@ class EmployeeAccounts:
         cert_date = self._checked(
             normalize_health_cert_date, health_cert_date, self._today()
         )
+        hire_value = self._checked(normalize_date, hire_date)
         existing = await self._fetch_employee_by_phone(normalized)
         if existing is not None:
             raise EmployeeAccountsError("duplicate_phone", "duplicate_phone")
@@ -375,8 +381,8 @@ class EmployeeAccounts:
             cur = await self._conn.execute(
                 """INSERT INTO hygiene_employees
                    (phone, name, password_hash, job_title, permission, approved, disabled,
-                    id_card_no, health_cert_date, created_at, updated_at)
-                   VALUES (?, ?, ?, '', ?, 0, 0, ?, ?, ?, ?)""",
+                    id_card_no, health_cert_date, hire_date, created_at, updated_at)
+                   VALUES (?, ?, ?, '', ?, 0, 0, ?, ?, ?, ?, ?)""",
                 (
                     normalized,
                     employee_name,
@@ -384,6 +390,7 @@ class EmployeeAccounts:
                     PERMISSION_STAFF,
                     id_card,
                     cert_date,
+                    hire_value,
                     now,
                     now,
                 ),
@@ -594,13 +601,17 @@ class EmployeeAccounts:
         * ``incomplete``：**算不出来**的人（入职日期缺 / 坏值 → 工龄奖算不出；身份证
           读不出生日），``missing`` 点名缺哪几项；两项都缺是**一行两项**、不是两行 ——
           「这个月没有要处理的」与「算不出来」在界面上必须长得不一样（ADR 0102）。
-        * ``certs``：健康证**临期或已过期**的人（2026-10-08 用户裁定：这一条从首页
-          单独一格并进来）。它**复用** :meth:`list_health_cert_due`，不在这里另写一遍
-          阈值 —— 判据的唯一实现是 :func:`profile.health_cert_status`，花名册行上的
-          标签、`daily-queue` 与这里必须是同一个答案。
+        * ``certs``：健康证**未办理 / 临期 / 已过期**的人（2026-10-08 用户裁定：这一条从
+          首页单独一格并进来；2026-10-13 加上「未办理」）。临期与过期两块**复用**
+          :meth:`list_health_cert_due`，不在这里另写一遍阈值 —— 判据的唯一实现是
+          :func:`profile.health_cert_status`，花名册行上的标签、`daily-queue` 与这里必须
+          是同一个答案。未办理（``state == "none"``，即办理日期为空）在**本次查询里顺带
+          收出来**、排在最前面：注册页从 2026-10-13 起允许「暂时没有健康证」，这种人在职
+          而没证，是这一栏里最该被看见的一批。
         """
         cur = await self._conn.execute(
-            """SELECT id, name, phone, hire_date, seniority_bonus, id_card_no
+            """SELECT id, name, phone, hire_date, seniority_bonus, id_card_no,
+                      health_cert_date
                FROM hygiene_employees
                WHERE disabled = 0
                ORDER BY id ASC""",
@@ -611,6 +622,7 @@ class EmployeeAccounts:
         seniority_items: list[dict] = []
         birthday_items: list[dict] = []
         incomplete_items: list[dict] = []
+        no_cert_items: list[dict] = []
         for row in rows:
             mapping = dict(row)
             hire_date = mapping.get("hire_date") or None
@@ -628,6 +640,20 @@ class EmployeeAccounts:
                         "name": mapping.get("name") or "",
                         "phone": mapping.get("phone") or "",
                         "missing": missing,
+                    }
+                )
+            # 没办健康证的人（2026-10-13 用户裁定）：办理日期为空 = `none` 状态。
+            # 注册放开「暂时没有健康证」之后，这种人在职是合法的、而且**必须被催办** ——
+            # 原先 `list_health_cert_due` 只捞临期/过期，他们哪个清单里都不出现。
+            if not (mapping.get("health_cert_date") or "").strip():
+                no_cert_items.append(
+                    {
+                        "id": int(mapping["id"]),
+                        "name": mapping.get("name") or "",
+                        "phone": mapping.get("phone") or "",
+                        "expires_on": None,
+                        "state": HEALTH_CERT_STATE_NONE,
+                        "days_left": None,
                     }
                 )
             if "hire_date" not in missing:
@@ -685,6 +711,9 @@ class EmployeeAccounts:
         # 健康证到期：复用既有的那条查询，**不在这里重算阈值**（判据只有
         # `profile.health_cert_status` 一份，两处各算一次迟早会分叉）。
         cert_items = await self.list_health_cert_due()
+        # 「未办理」排在「要换证」前面：没证比证要到期更急。两块合起来算一个数 ——
+        # 首页那一格（`workbenchHome.countHrReminders`）只加总 `certs.count`。
+        cert_items = no_cert_items + cert_items
         return {
             "seniority": {
                 "items": seniority_items,
