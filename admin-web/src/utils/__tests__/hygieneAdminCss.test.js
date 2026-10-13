@@ -113,8 +113,17 @@ describe.each(Object.entries(CSS_FILES))('%s hygiene admin chrome', (_label, pat
     expect(css).not.toMatch(/\.luyun-date-picker \.dp__input\b/)
     if (css.includes('.hygiene-admin .luyun-time-picker__popover')) {
       // 承载逾期点的卡片带 backdrop-filter，会形成层叠上下文；这张卡必须抬起来，
-      // 否则弹窗会被后面的卡片盖住。
-      expect(css).toMatch(/\.hygiene-admin \.clocks-card \{[\s\S]*?z-index: 30/)
+      // 否则弹窗会被后面的卡片盖住。**但只许抬到同级卡片之上，不许越过工作台壳**：
+      // 壳的页头 / 粘住的顶栏是 `--z-shell`，原先写死的 30 会盖住手机档「卫生验收 ▾」
+      // 下拉菜单的后三项与桌面档的顶栏（2026-10-12 报「这个组件的层级有问题」）。
+      const shellZ = Number(readFileSync(THEME, 'utf8').match(/--z-shell:\s*(\d+)/)[1])
+      expect(shellZ).toBeGreaterThan(0)
+      const rule = css.match(/\.hygiene-admin \.clocks-card \{[\s\S]*?\}/)
+      expect(rule, 'clocks-card 抬起规则还在').toBeTruthy()
+      const z = Number((rule[0].match(/z-index:\s*(\d+)/) || [])[1])
+      expect(Number.isInteger(z)).toBe(true)
+      expect(z).toBeGreaterThanOrEqual(1)
+      expect(z, 'z-index 越过了壳层，会盖住页头与下拉菜单').toBeLessThan(shellZ)
     }
   })
 })

@@ -789,10 +789,13 @@
 /* 时间选择器 */
 .hygiene-admin .luyun-time-picker { position: relative; }
 /* 卡片带 backdrop-filter，本身就是一个层叠上下文，弹窗会被后一张卡片盖住；
-   把承载逾期点的卡片抬起来，弹窗才能盖过下列卡片。 */
+   把承载逾期点的卡片抬起来，弹窗才能盖过下列卡片。
+   **抬到同级卡片之上就够（1），不许越过工作台壳**：壳的页头与粘住的顶栏是
+   `--z-shell: 20`，原先这里的 `30` 会盖住它们 —— 手机档「卫生验收 ▾」下拉菜单的后三项、
+   桌面档滚起来粘住的顶栏都被这张卡片压住（2026-10-12 报「这个组件的层级有问题」）。 */
 .hygiene-admin .clocks-card {
   position: relative;
-  z-index: 30;
+  z-index: 1;
 }
 .hygiene-admin .luyun-time-picker__trigger {
   display: flex;
