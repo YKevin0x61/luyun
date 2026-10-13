@@ -113,6 +113,35 @@ async function mountShell(path) {
   return { wrapper, router, store: useWorkbenchIdentityStore() }
 }
 
+/** 直接挂**壳本身**（不套那三个薄包装），组由 `props.group` 给。
+ *
+ *  存在的理由只有一个**对照**：`flush` 那一页在清单里的组（`kitchen`）今天本来就是 0，所以
+ *  「路径派生组」这条路永远看不出那个字段有没有被消费 —— 必须能把**铺满的页挂到另一个非零
+ *  的组上**，与同组的非铺满页并排比。三个薄包装（`WorkbenchLayout` / `SchedulingLayout` /
+ *  `HygieneAdminLayout`）都把自己的组写死在模板里，换组就得改它们，所以这里挂的是壳。 */
+async function mountShellForGroup(path, group) {
+  vi.resetModules()
+  localStorage.clear()
+  const [{ default: WorkbenchShell }, { useWorkbenchIdentityStore }] = await Promise.all([
+    import('../WorkbenchShell.vue'),
+    import('../../../stores/workbenchIdentity'),
+  ])
+
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  const router = createRouter({ history: createMemoryHistory(), routes: ROUTES })
+  await router.push(path)
+  await router.isReady()
+
+  const wrapper = mount(WorkbenchShell, {
+    props: { group },
+    global: { plugins: [router, pinia] },
+  })
+  await flushPromises()
+  await flushPromises()
+  return { wrapper, router, store: useWorkbenchIdentityStore() }
+}
+
 beforeEach(() => {
   vi.stubGlobal('fetch', bothSessionsFetch())
 })
@@ -355,15 +384,25 @@ describe('opt-out 两个字段从页面清单派生（票 02）', () => {
   })
 
   it('「铺满」的判据是这个字段，不是"组恰好是 0"', async () => {
-    // 后勤组今天本来就是 0，光断打印页看不出这条字段有没有被消费 —— 所以拿一个
-    // **组值非零**的组做对照：同一份壳，铺满的页 0、同壳里非铺满的页拿到组值。
+    // 后勤组今天本来就是 0，光断打印页看不出这条字段有没有被消费 —— 所以把铺满的**那一页
+    // 挂到另一个组上**做对照：同一份壳、同一个 `group` prop（现场组的 `floor`，值非零），
+    // 两个挂载只差 `route.meta.flush`（打印页那份清单行标了 true，日常验收页没有）。
+    // 组值一样而结果一个是 0、一个不是，能解释这个差的就只剩那个字段：把壳里
+    // `route.meta.flush` 的读取改成恒 false，铺满那一侧会当场拿回 `floor` 的值（红）。
     stubTiers({ mobile: true, wide: true })
-    const print = await mountShell(RECIPE_PRINT_PATH)
+    const print = await mountShellForGroup(RECIPE_PRINT_PATH, 'floor')
+    const plain = await mountShellForGroup('/workbench/floor/daily', 'floor')
+
+    // 对照组先站住：同一个组在**非**铺满的页上算出来是非零（否则下面那两个 0 是空转的，
+    // 组表哪天把 floor 归零、或者 props.group 没被壳读，这里当场红）。
+    expect(insetOf(plain.wrapper, '--wb-inset-top'), 'floor 组该给非零的上内边距').not.toBe('0px')
+    expect(insetOf(plain.wrapper, '--wb-inset-inline'), 'floor 组该给非零的横向内边距').not.toBe('0px')
+
+    // 铺满那个输入来自清单那一行（不是这里手写的），壳把这一组的非零值压成 0。
+    expect(pageRow(RECIPE_PRINT_PATH).flush, '配方打印该标 flush').toBe(true)
+    expect(pageRow('/workbench/floor/daily').flush).toBeUndefined()
     expect(insetOf(print.wrapper, '--wb-inset-top')).toBe('0px')
     expect(insetOf(print.wrapper, '--wb-inset-inline')).toBe('0px')
-
-    const plain = await mountShell('/workbench/floor/daily')
-    expect(insetOf(plain.wrapper, '--wb-inset-top')).not.toBe('0px')
   })
 })
 
