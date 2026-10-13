@@ -60,7 +60,11 @@ function workbenchThemeOf(row) {
  *  护栏：`views/workbench/__tests__/workbenchShell.test.js` 里那组「opt-out 两个字段从
  *  页面清单派生」（清单点名哪页自带底栏，那一页就不渲染工作台底栏、算出来的下 inset 是 0
  *  —— 票 03 起那份让位由壳算，见 `WorkbenchShell.vue` 的 `contentInsetStyle`，不再是
- *  `<main>` 上的钩子 class）。 */
+ *  `<main>` 上的钩子 class）。
+ *
+ *  **壳读的也是这一份**：`pageMeta` 在路由注册时把它填进 `meta`，壳读
+ *  `route.meta.ownBottomBar` —— 壳不再从清单那一行自己判一次（`!!` 与 `=== true` 是两个
+ *  口径，清单里出现 `1` / `"true"` 这类真值时结论相反；code-review 收尾修正）。 */
 function ownBottomBarOf(row) {
   return row.ownBottomBar === true
 }
@@ -70,7 +74,8 @@ function ownBottomBarOf(row) {
  *
  *  **与「自带底栏」互不隐含**：这两件事只是恰好都曾被壳里那一份 `has-own-bar` 名单表达，
  *  拆开之后各标各的（配方阅读面自带底栏但不铺满，配方打印铺满但不自带底栏）。
- *  壳今天还不消费它：把内边距收进壳的是 ADR 0106 的下一票，届时壳从这里读。
+ *  壳消费的是 `pageMeta` 归一化后填进路由 `meta` 的那一份（`route.meta.flush`，票 04 起）
+ *  —— 与 `ownBottomBar` 同一条读取路径，这里仍只负责归一化。
  *
  *  护栏：`__tests__/pageRoutes.test.js` 的「两个字段互不隐含」（今天真实使用它们的两页
  *  各标各的）。 */

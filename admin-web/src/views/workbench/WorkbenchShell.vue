@@ -70,24 +70,22 @@ const identityStore = useWorkbenchIdentityStore()
  *  底栏**：两条 `fixed` 底栏只差 4px，上面那条会把工作台那条整个盖住，留着只是白占一次
  *  渲染、内容区还要为它让一遍高度（2026-10-08 用户裁定）。桌面档那条不在视口底，不受影响。
  *
- *  **判据在页面清单里，壳只读它**（ADR 0106 决策 5）：这份路径名单原来手写在壳里
- *  （`OWN_BOTTOM_BAR_PATHS`），票 02 起退场 —— 「这一页是什么」只有清单一处来源。
+ *  **判据只有一处归一化点**（ADR 0106 决策 5）：页面清单那一行由 `pageRoutes.js` 的
+ *  `pageMeta`（`ownBottomBarOf`）在**路由注册时**归一成布尔填进 `meta`，壳读这一份
+ *  （`route.meta.ownBottomBar`）—— 不再拿 `pageRow(...)` 自己 `!!` 一遍：`!!` 与
+ *  `=== true` 是两个口径，清单里出现 `1` / `"true"` 这类真值时结论相反（code-review
+ *  收尾修正）。那份手写路径名单（`OWN_BOTTOM_BAR_PATHS`）票 02 起已退场。
  *  清单里那一行的另一个 opt-out 是 `flush`（铺满），两者互不隐含。
  *
  *  票 03 起它还是**下 inset 的输入之一**：底栏没渲染，内容区就不留那一条的高度
  *  （见下面的 `contentInsetStyle`）。 */
-const hasOwnBottomBar = computed(() => {
-  const row = pageRow(route.path)
-  return !!(row && row.ownBottomBar)
-})
+const ownBottomBar = computed(() => route.meta.ownBottomBar)
 
 /** 这一页**铺满**吗（清单里的 `flush`，ADR 0106 决策 5）：A4 预览那一类页面不要壳给的
- *  横向与上内边距 —— 多留一圈就摆不下。**票 04 起壳消费它**（同一行清单、同一个读取口；
- *  「自带底栏」与「铺满」互不隐含：底下那条栏是谁的、内边距留不留，是两件事）。 */
-const hasFlush = computed(() => {
-  const row = pageRow(route.path)
-  return !!(row && row.flush)
-})
+ *  横向与上内边距 —— 多留一圈就摆不下。**票 04 起壳消费它**，读的是同一个归一化点的产物
+ *  （`pageMeta` 的 `flushOf` → `route.meta.flush`；「自带底栏」与「铺满」互不隐含：
+ *  底下那条栏是谁的、内边距留不留，是两件事）。 */
+const flush = computed(() => route.meta.flush)
 
 /** 本组的 key（三个调用点之一：显式给的组优先，否则按当前路径算）。**在内容区的度量之前
  *  定出来** —— `contentInsetStyle` 按它查组表。 */
@@ -160,12 +158,12 @@ onBeforeUnmount(() => {
  *  全局命名空间（ADR 0106 决策 4）。三根名字只在这个文件里出现，消费方也只有 `.wb-main`。 */
 const contentInsetStyle = computed(() => {
   const barOnScreen = tabBarOnScreen({
-    hasOwnBottomBar: hasOwnBottomBar.value,
+    ownBottomBar: ownBottomBar.value,
     mobile: mobile.value,
   })
   const content = contentInsetFor(groupKey.value, {
     wide: wide.value,
-    flush: hasFlush.value,
+    flush: flush.value,
   })
   return {
     '--wb-inset-top': content.top,
@@ -252,7 +250,7 @@ watch(identity, keepViewAllowed)
 
     <!-- 工作台级导航在手机档的落点（C 方向）：底栏一格一组、拇指区可达；桌面档它自己
          不渲染（`display: none`），那里用顶栏那条 tab。同一排入口不在两处同时出现。 -->
-    <WorkbenchTabBar v-if="!hasOwnBottomBar" class="no-print" />
+    <WorkbenchTabBar v-if="!ownBottomBar" class="no-print" />
   </div>
 </template>
 

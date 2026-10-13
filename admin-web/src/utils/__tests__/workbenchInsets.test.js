@@ -18,23 +18,23 @@ import { PAGE_ROUTES } from '../../router/pageRoutes.js'
 
 describe('tabBarOnScreen：本屏此刻渲染了底栏吗', () => {
   it('手机档 + 这一页不自带底栏 → 在屏上', () => {
-    expect(tabBarOnScreen({ hasOwnBottomBar: false, mobile: true })).toBe(true)
+    expect(tabBarOnScreen({ ownBottomBar: false, mobile: true })).toBe(true)
   })
 
   it('自带底栏的页（配方阅读面）→ 工作台那条不渲染，也就不在屏上', () => {
-    expect(tabBarOnScreen({ hasOwnBottomBar: true, mobile: true })).toBe(false)
+    expect(tabBarOnScreen({ ownBottomBar: true, mobile: true })).toBe(false)
   })
 
   it('桌面档 → 底栏 `display: none`，不在屏上（今天桌面档没有下留白）', () => {
-    expect(tabBarOnScreen({ hasOwnBottomBar: false, mobile: false })).toBe(false)
+    expect(tabBarOnScreen({ ownBottomBar: false, mobile: false })).toBe(false)
   })
 
   it('判据里没有 `audience`：管理端与员工端在手机档是一回事', () => {
     // 2026-10-13 基线实测：管理端手机档同样有那条 57px 底栏（`WorkbenchTabBar` 只看
-    // `!hasOwnBottomBar`）。所以「按 audience 给管理端算 0」在这里根本无从表达 ——
+    // `!ownBottomBar`）。所以「按 audience 给管理端算 0」在这里根本无从表达 ——
     // 输入里就没有 audience 这一项。
     expect(tabBarOnScreen.length, 'tabBarOnScreen 只该有一个入参对象').toBe(1)
-    expect(tabBarOnScreen({ hasOwnBottomBar: false, mobile: true })).toBe(true)
+    expect(tabBarOnScreen({ ownBottomBar: false, mobile: true })).toBe(true)
   })
 })
 

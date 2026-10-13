@@ -104,15 +104,16 @@ export function contentInsetFor(group, { wide = false, flush = false } = {}) {
 }
 
 /** 本屏此刻**渲染了底栏**吗 —— 只看两件事，**不看 `audience`**：
- *   - `hasOwnBottomBar`：这一页自带底栏吗（页面清单里那一行的 `ownBottomBar`）。自带的话
+ *   - `ownBottomBar`：这一页自带底栏吗，名字与页面清单那一行的 `ownBottomBar` 一致
+ *     （壳喂进来的是 `pageMeta` 归一化后挂在 `route.meta` 上的那一份）。自带的话
  *     工作台那条整条不渲染（2026-10-08 用户裁定），也就谈不上让位；
  *   - `mobile`：现在是不是手机档（底栏只在 ≤720px 渲染）。
  *
  *  为什么刻意没有 `audience`：底栏**不是按身份渲染的** —— 管理端手机档同样有那条 57px
  *  底栏（2026-10-13 基线 `floor-zones-390.png` 实测）。按身份给管理端算 0 会当场少掉
  *  一段让位，滚到底时最后一块内容压在底栏下面。 */
-export function tabBarOnScreen({ hasOwnBottomBar, mobile }) {
-  return !hasOwnBottomBar && !!mobile
+export function tabBarOnScreen({ ownBottomBar, mobile }) {
+  return !ownBottomBar && !!mobile
 }
 
 /** 内容区的下 inset（px）：底栏在屏上就是「底栏高 + 安全区」，否则 0。

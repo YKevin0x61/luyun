@@ -32,22 +32,30 @@ function ruleBodies(source, selector) {
 // - 顶栏那颗切换器换一档，导航面跟着换。
 // 断言的都是渲染出来的东西（有几格、点去哪、亮不亮），不是组件的内部结构。
 
+/** 一条挂载用的路由：`meta` 拿**页面清单派生的那一份**（`pageMeta(path)`，与
+ *  `router/index.js` 注册时同一个调用）。壳读的内容区 opt-out 就在 `route.meta` 上
+ *  （`ownBottomBar` / `flush`），所以这里不能手写一份自己的 meta —— 那样装的就不是
+ *  生产那条路了（收尾修正前壳从清单行自己判，测试才敢手写 `{ audience, standalone }`）。
+ *  路径都是清单里真实存在的页，`pageMeta` 直接可用（清单里没有的路径它会当场报错）。 */
+const page = (path, template) => ({ path, component: { template }, meta: pageMeta(path) })
+
 const ROUTES = [
-  { path: '/workbench', component: { template: '<div>今天</div>' }, meta: { audience: 'both', standalone: true } },
-  { path: '/workbench/me/today', component: { template: '<div>今天</div>' }, meta: { audience: 'staff', standalone: true } },
-  { path: '/workbench/me/month', component: { template: '<div>整月</div>' }, meta: { audience: 'staff', standalone: true } },
-  // 店长那几页与清单里一样带 `audience: 'admin'`（这里只压外壳，页面本体给个占位）。
-  // 票 05：工作台按组分家，人事 / 现场各有自己的落点。票 06：首页（`/workbench`）是 `both`。
-  { path: '/workbench/hr/calendar', component: { template: '<div>排班月历</div>' }, meta: { audience: 'admin', standalone: true } },
-  { path: '/workbench/floor/daily', component: { template: '<div>日常验收</div>' }, meta: { audience: 'admin', standalone: true } },
+  page('/workbench', '<div>今天</div>'),
+  page('/workbench/me/today', '<div>今天</div>'),
+  page('/workbench/me/month', '<div>整月</div>'),
+  // 店长那几页与清单里一样是 `audience: 'admin'`（`audience` / `standalone` 也由
+  // `pageMeta` 从清单取，不再手写一份）。票 05：工作台按组分家，人事 / 现场各有落点。
+  // 票 06：首页（`/workbench`）是 `both`。
+  page('/workbench/hr/calendar', '<div>排班月历</div>'),
+  page('/workbench/floor/daily', '<div>日常验收</div>'),
   // 票 07：后勤那一格的落点（配方列表，`both` —— 员工也看得见）。
-  { path: '/workbench/kitchen/recipe', component: { template: '<div>配方</div>' }, meta: { audience: 'both', standalone: true } },
+  page('/workbench/kitchen/recipe', '<div>配方</div>'),
   // 票 08：后勤那一格的第二扇门（备货计划，`both`）—— 换位置、统一导航，不扩权。
-  { path: PREP_PLAN_PATH, component: { template: '<div>备货计划</div>' }, meta: { audience: 'both', standalone: true } },
+  page(PREP_PLAN_PATH, '<div>备货计划</div>'),
   // 票 02（内容区）：opt-out 两个字段的落点页 —— 配方阅读面「自带底栏」、配方打印「铺满」。
-  // 它们本来就是路由里的页面（这里只补两条供挂载用）。
-  { path: RECIPE_DETAIL_PATH, component: { template: '<div>配方详情</div>' }, meta: { audience: 'both', standalone: true } },
-  { path: RECIPE_PRINT_PATH, component: { template: '<div>配方打印</div>' }, meta: { audience: 'both', standalone: true } },
+  // 它们本来就是路由里的页面（这里只补两条供挂载用），opt-out 值由 `pageMeta` 从清单带过来。
+  page(RECIPE_DETAIL_PATH, '<div>配方详情</div>'),
+  page(RECIPE_PRINT_PATH, '<div>配方打印</div>'),
 ]
 
 function jsonResponse(data, status = 200) {
