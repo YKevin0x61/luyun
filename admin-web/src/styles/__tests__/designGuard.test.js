@@ -63,13 +63,20 @@ const SKIP = /(__tests__|node_modules|dist)/
 // 换写法不许改次序：票 05 逐处核对过「同一层叠上下文里的相对次序」，改动只发生在
 // **同一个 context 内、彼此不可能同屏**的层之间（例如钉住的表头列 2/3 → `--z-shell`，
 // 与页面粘住的页头 30 不同屏）。真机核对见 `.scratch/workbench-content-area/baseline/checks-05/`。
+//
+// **票 11 的更正（2026-10-14）**：上面那个前提有两个反例 —— 钉住的表头列 2/3 恰恰**同屏**
+// （表头 sticky 浮起来时正好压在表体行上），拍摄弹层 60 与上传队列条 55 也同屏。所以从这一票起
+// 加一条硬规矩：**同屏的层之间必须严格分先后，不许同档靠 DOM 次序**；档位表里没有的位置，
+// 用 `calc(var(--z-x) + N)` 从令牌派生（`N` = 改动前那个数字与档位的差），并在该处注释里写明原值。
+// 今天共有五处派生：拍摄/对照弹层 60、两个后台抽屉 60、确认框 100、页内时间浮层 120、更新提示条 201。
+// 真机核对见 `.scratch/workbench-content-area/baseline/checks-11/`。
 // ══════════════════════════════════════════════════════════════════════════════
 const LAYERS = [
   ['--z-tabbar', 15, '页内底栏：`.wb-tabbar` / 共享表的 `.hy-tabbar`（在壳 chrome 之下）'],
   ['--z-shell', 20, '页 chrome：壳的顶栏 / 手机页头 / 底栏、页内粘住的页头、钉住的表头列、面板内的抬升'],
   ['--z-scrim', 40, '遮罩：页头下拉的遮罩与面板、页内浮层的遮罩、时间浮层、首次下载提示'],
   ['--z-dialog', 55, '弹层：确认框、抽屉、拍摄 / 对照弹层、标准图管理面板、上传队列条'],
-  ['--z-toast', 100, '提示：更新提示条、日志页筛选抽屉（压住它自己的遮罩）'],
+  ['--z-toast', 100, '提示：非阻塞的通知与浮层。**票 11 起这一档暂时没有点名使用者** —— 原先归它的两个抽屉（`.dt-sidebar` / `.logs-sidebar`）要压住自己的遮罩、又要被确认框压住，落在 55 与 100 之间，改从 `--z-dialog` 派生 60；档位本身保留（ADR 0106 决策 6 点名过它），语义没变'],
   ['--z-queue', 200, '队列：跳转链接、图片灯箱、抽屉之上的确认框、排班笔栏、设置页遮罩'],
 ]
 const LAYER_NAMES = LAYERS.map(([name]) => name)
@@ -274,18 +281,20 @@ describe('设计护栏 · 共享样式表 hygiene-admin.css 的层级（票 05�
 
   it('挡在壳层之上的那些层（页内 sticky / 弹层 / 遮罩）都在名单里', () => {
     const src = stripComments(readFileSync('public/hygiene-admin.css', 'utf8'))
+    // 值 = 该规则里 `z-index:` 后面**一字不差**的表达式（票 11 起允许从令牌派生 ——
+    // 拍摄/对照弹层必须严格高于同一档的队列条，六档里没有那个位置）。
     const expect_ = {
-      '.hygiene-admin .hy-skip': '--z-queue',
-      '.hygiene-admin .hy-header': '--z-shell',
-      '.hygiene-admin .clocks-card': '--z-shell',
-      '.hygiene-admin .luyun-time-picker__popover': '--z-scrim',
-      '.hygiene-work .hy-work-header': '--z-shell',
-      '.hygiene-work .staff-preview': '--z-dialog',
+      '.hygiene-admin .hy-skip': 'var(--z-queue)',
+      '.hygiene-admin .hy-header': 'var(--z-shell)',
+      '.hygiene-admin .clocks-card': 'var(--z-shell)',
+      '.hygiene-admin .luyun-time-picker__popover': 'var(--z-scrim)',
+      '.hygiene-work .hy-work-header': 'var(--z-shell)',
+      '.hygiene-work .staff-preview': 'calc(var(--z-dialog) + 5)',
     }
-    for (const [selector, token] of Object.entries(expect_)) {
+    for (const [selector, expr] of Object.entries(expect_)) {
       const rule = ruleOf(src, selector)
       expect(rule, `${selector} 这条规则还在`).toBeTruthy()
-      expect(rule, `${selector} 该走 ${token}`).toContain(`z-index: var(${token})`)
+      expect(rule, `${selector} 该走 ${expr}`).toContain(`z-index: ${expr}`)
     }
   })
 

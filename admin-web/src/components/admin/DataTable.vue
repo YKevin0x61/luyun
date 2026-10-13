@@ -605,7 +605,10 @@ function formatCellText(col, val) {
     bottom: 0;
     width: min(268px, 88vw);
     max-height: none;
-    z-index: var(--z-toast);
+    /* 抽屉要压住它自己的遮罩（那条 `--z-dialog`），又要被确认框压住（`.modal-overlay`）。
+       六档里没有「比 dialog 高一档、比确认框低一档」的位置，所以从 `--z-dialog` 派生：
+       原值 60，与改动前一致；票 05 曾把它抬到 `--z-toast`，于是抽屉反过来盖住确认框。 */
+    z-index: calc(var(--z-dialog) + 5);
     border-radius: 0;
     transform: translateX(-105%);
     transition: transform .25s ease-out, box-shadow .25s ease-out;
@@ -651,8 +654,12 @@ function formatCellText(col, val) {
   :deep(table.data-table) thead .dt-col-key,
   :deep(table.data-table) thead .dt-col-actions {
     background: var(--card2);
-    /* 表头本身也是 sticky 的（theme.css），钉住的列要在它之上才能盖住滚过来的列 */
-    z-index: var(--z-shell);
+    /* 表头本身也是 sticky 的（theme.css），钉住的列要在它之上才能盖住滚过来的列。
+       必须**严格高于**表体那条 `--z-shell`：同档时 `tbody` 在 DOM 里靠后，纵向滚到
+       表头压住行的时候会反过来盖住表头（票 11 的回归；票 05 把这里的 3 与表体的 2
+       一起压成了同档）。六档里没有「比 shell 高一档」的位置，所以从 `--z-shell` 派生：
+       原值 3，表体保持原来的 2 —— 相对次序与改动前一致。 */
+    z-index: calc(var(--z-shell) + 1);
   }
   /* 宽度原来写在模板的 inline style 上，挪到这里是因为钉住的列必须能算准偏移 */
   :deep(table.data-table) .dt-col-key { left: 0; width: 60px; }

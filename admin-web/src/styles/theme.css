@@ -232,9 +232,14 @@ table.data-table td.actions { display: flex; gap: 6px; }
 .pagination { display: flex; align-items: center; gap: 8px; justify-content: flex-end; margin-top: 10px; font-size: 12px; color: var(--text-dim); }
 
 /* ===== 弹窗 ===== */
+/* 确认框这一层要**压住**抽屉（`.dt-sidebar` / `.logs-sidebar` 是 `calc(var(--z-dialog) + 5)`
+   即 60）与标准图管理面板，又要被时间浮层与更新提示条压住。原值 100；六档里（55 之后就是
+   100 的 `--z-toast`，而那一档是「非阻塞提示」的语义）没有它的位置，所以仍从 `--z-dialog`
+   派生 —— 归类不变（它还是弹层），只是同一档里最高的那一层。票 05 把它压到 55 之后，
+   抽屉（当时被抬到 `--z-toast`）反过来盖住了确认框。 */
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); display: flex; align-items: center;
-  justify-content: center; z-index: var(--z-dialog); padding: 20px;
+  justify-content: center; z-index: calc(var(--z-dialog) + 45); padding: 20px;
 }
 .modal-box {
   background: var(--card); border: 1px solid var(--border); border-radius: 12px; width: min(520px, 100%);
@@ -496,12 +501,17 @@ table.data-table td.actions { display: flex; gap: 6px; }
   pointer-events: none;
 }
 
+/* 页内浮层（时间选择器的下拉）。要压住确认框（`.modal-overlay`，100），又要被设置页那张
+   原值 1000 的遮罩（`SetupView.vue` 的 scoped `.modal-overlay`，今天 `--z-queue`）压住 ——
+   两者在 `/settings?section=collect` 上真的会同屏（营业时间用这个组件、清空凭据走壳的两步确认）。
+   原值 120；六档里 (100, 200) 之间没有位置，所以从 `--z-toast` 派生 +20（= 原值）。
+   票 05 把它抬到 `--z-queue` 之后，它与那张遮罩同档、只能由 DOM 次序决定谁在上。 */
 .luyun-time-picker__popover {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
   right: 0;
-  z-index: var(--z-queue);
+  z-index: calc(var(--z-toast) + 20);
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 10px;

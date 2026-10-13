@@ -28,7 +28,11 @@ defineEmits(['apply', 'dismiss'])
 <style scoped>
 .pwa-update-banner {
   position: fixed;
-  z-index: var(--z-queue);
+  /* 全站最高的那一条（原值 1200）：它要在**任何**页面浮层之上，包括设置页那张
+     原值 1000 的遮罩（`SetupView.vue` 的 scoped `.modal-overlay`，票 05 起是 `--z-queue`）。
+     同档就只能由 DOM 次序决定 —— 今天恰好对（`App.vue` 里提示条排在 `router-view` 之后），
+     但那是巧合。六档里没有更高的一档，所以从 `--z-queue` 派生 +1。 */
+  z-index: calc(var(--z-queue) + 1);
   top: 72px;
   right: 18px;
   width: min(420px, calc(100vw - 36px));

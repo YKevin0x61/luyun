@@ -456,7 +456,11 @@ onBeforeUnmount(() => {
     left: 0;
     bottom: 0;
     width: min(280px, 86vw);
-    z-index: var(--z-toast);
+    /* 抽屉要压住它自己的遮罩（下面那条 `--z-dialog`），又要被确认框压住
+       （`.modal-overlay`）。六档里没有「比 dialog 高一档、比确认框低一档」的位置，
+       所以从 `--z-dialog` 派生：原值 60，与改动前一致；票 05 曾把它抬到 `--z-toast`，
+       于是抽屉反过来盖住确认框。 */
+    z-index: calc(var(--z-dialog) + 5);
     border-radius: 0;
     transform: translateX(-105%);
     transition: transform .25s ease-out, box-shadow .25s ease-out;
