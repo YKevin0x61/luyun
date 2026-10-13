@@ -13,8 +13,75 @@ import { createPinia, setActivePinia } from 'pinia'
 // 触控尺寸与换行都是**布局**（jsdom 不做布局、也不解析媒体查询），所以那部分按源码断：
 // 仓库里已有先例（`groupDoors.test.js` 的花名册内边距、`hygieneAdminCss.test.js` 的
 // 样式契约）。断的是"720 档那条规则里写了 min-height: 44px"这种可复核的事实。
+//
+// ── 两类东西的界线（票 07 / ADR 0106 Consequences）─────────────────────────────
+// 本文件里那几条「不许出现 X」是**有意为之的源码断言**，不是偷懒的行为测试：
+//   · 安全区只在令牌层写一遍（`env(safe-area-inset-*)` 不许在页面里直写）；
+//   · 页面区之外不许有第二个滚动容器（`.hy-main` / `.hy-work-main` 不自己滚）；
+//   · 三根内容区度量只在统一壳里（没有第二处定义、壳外没有消费者）。
+// 它们盯的是「一个名字 / 一条声明有没有被写进源码」这种**文本判定即结论**的事实 ——
+// 写没写 `overflow-y: auto` 不需要跑起来看。这跟「拿源码文本去断**行为**」是两回事：
+// 「这一页滚得动」「底栏没盖住最后一块内容」「内边距落在屏幕上是不是那个数」必须靠浏览器里
+// 量（`.scratch/workbench-content-area/baseline/checks-0N/` 那套 Playwright 探针；
+// 票 07 那一轮在 `checks-07/`），jsdom 不做布局、也解析不了媒体查询。
+// 两类混起来写，下一个维护者就会以为文本断言能替代真机核对，或者反过来把这类断言当反模式
+// 清掉。**同一条界线在 `src/styles/__tests__/designGuard.test.js` 的文件头也写了一遍**
+// （那边管层级棘轮与裸 z-index 数字），两处说的是同一件事。
 const here = dirname(fileURLToPath(import.meta.url))
 const read = (rel) => readFileSync(join(here, rel), 'utf8')
+
+/** 剥掉源码里的注释，三种都剥（票 07）：
+ *   · Vue 模板注释（`<!--` 到 `-->`）；
+ *   · 块注释（斜杠星号那一对，CSS 与 JS 里都有）；
+ *   · 行注释（双斜杠到行尾）。
+ *
+ *  **为什么要这么一层**（票 07 修掉的那条假红）：「三根名字只出现在统一壳里」这条的判据是
+ *  「这个名字有没有被写进源码」，而**注释里追述一句**既不是定义也不是消费 —— 它却会把这条
+ *  判红。2026-10-13 实测过：并行工作流在 `SchedulingCalendarView.vue` 的一句注释里写了
+ *  `--wb-inset-bottom`，于是全量 `npm test` 一直红这一条（HEAD 里 0 次、工作区 1 次，
+ *  与本组票无关）；本文件里那条「假红复现」的变异记录在
+ *  `.scratch/workbench-content-area/baseline/checks-07/`。
+ *
+ *  剥掉注释之后这条仍然盯得住真违规：**第二处定义**（`--wb-inset-*:` 那种声明）与
+ *  **壳外的消费者**（`var(--wb-inset-*)`）都写在声明 / 表达式里，剥注释剥不掉它们 ——
+ *  要挡的正是那两样（ADR 0106 决策 4）。
+ *
+ *  引号里的内容**不剥**：壳自己就是用字符串 `'--wb-inset-top'` 定义这三根的，
+ *  字符串里出现这个名字同样是「写进了源码」。
+ *
+ *  实现按字符扫一遍、不靠正则猜边界；唯一的近似是 JS 正则字面量里的双斜杠会被当成行注释，
+ *  把同一行后面的内容一起剥掉 —— 那只会**漏判**（假绿），不会误判，方向是安全的那一侧。 */
+function stripComments(source) {
+  let out = ''
+  let quote = null
+  for (let i = 0; i < source.length;) {
+    const ch = source[i]
+    const next = source[i + 1]
+    if (quote) {
+      out += ch
+      if (ch === '\\') { out += next ?? ''; i += 2; continue }
+      if (ch === quote) quote = null
+      i += 1
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; out += ch; i += 1; continue }
+    if (ch === '/' && next === '/') { while (i < source.length && source[i] !== '\n') i += 1; continue }
+    if (ch === '/' && next === '*') {
+      i += 2
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i += 1
+      i += 2
+      continue
+    }
+    if (ch === '<' && source.startsWith('<!--', i)) {
+      const end = source.indexOf('-->', i)
+      i = end === -1 ? source.length : end + 3
+      continue
+    }
+    out += ch
+    i += 1
+  }
+  return out
+}
 
 // ③-2（三壳合一）：壳级样式与手机档那一条现在只有一份，在统一壳里；三个布局都是它的薄包装。
 const SHELL = read('../WorkbenchShell.vue')
@@ -214,7 +281,9 @@ describe('内容区的三根度量只在壳里（票 03）', () => {
   // 仓库根（`admin-web/`）：这个文件在 `src/views/workbench/__tests__/` 下。
   const ROOT = join(here, '../../../..')
 
-  /** 扫 `src/` 与 `public/` 的源码（跳过 `__tests__` / dist）：谁提到了这三根名字。 */
+  /** 扫 `src/` 与 `public/` 的源码（跳过 `__tests__` / dist）：谁提到了这三根名字。
+   *  **先剥注释**（票 07）：注释里追述一句变量名既不是定义也不是消费，不该把这条判红 ——
+   *  理由与那次假红的实测见文件顶部 `stripComments` 的注释。 */
   function sourcesMentioning(names) {
     const hits = []
     const walk = (dir) => {
@@ -223,7 +292,7 @@ describe('内容区的三根度量只在壳里（票 03）', () => {
         if (statSync(p).isDirectory()) {
           if (!/(__tests__|node_modules|dist)$/.test(name)) walk(p)
         } else if (/\.(vue|js|css)$/.test(name)) {
-          const src = readFileSync(p, 'utf8')
+          const src = stripComments(readFileSync(p, 'utf8'))
           if (names.some((n) => src.includes(n))) hits.push(relative(ROOT, p))
         }
       }
@@ -235,6 +304,8 @@ describe('内容区的三根度量只在壳里（票 03）', () => {
   it('三根名字只出现在统一壳这一个文件里（页面 / 样式表 / 令牌层一处都没有）', () => {
     // 唯一来源：壳里 `contentInsetStyle` 定义它们、`.wb-main` 消费它们。多一处出现就是
     // 「第二处定义」或壳外的消费者 —— 那正是 ADR 0106 决策 4 要挡的。
+    // **这只是「剥掉注释后」的结论**：注释里提到名字不算违规（票 07 改），
+    // 声明与消费（含字符串里的名字）照旧算。
     expect(sourcesMentioning(INSETS)).toEqual(['src/views/workbench/WorkbenchShell.vue'])
   })
 
@@ -372,5 +443,95 @@ describe('内容区搬进壳之后的护栏（票 04）', () => {
     for (const body of bodies) {
       expect(body, `壳的内容容器在滚：${body}`).not.toMatch(/overflow/)
     }
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 票 07（安全区）：`env(safe-area-inset-*)` 只在令牌层写一遍 —— ADR 0106 背景里点名的第二处
+// 「已经存在却被绕过」（令牌层有 `--safe-t/-b/-l/-r`，页面却各自直写 `env()`），也是
+// Consequences 那条「护栏只加『不许出现 X』型」里的第一条。
+//
+// 判据：令牌层 `theme.workbench.css` 把那四根定义成 `env(safe-area-inset-*)`（它俩是
+// 全前端 `env()` 的**唯一**出现处），页面与共享样式表消费令牌、不直写。今天页面侧仍有存量
+// 直写（页内底栏 / 浮层 / 拍摄面板 / 页头，它们自己就贴着视口边、要绕开 home indicator）——
+// 本票只加护栏、**不夹带实现改动**，所以存量按棘轮钉住、未列出的文件按 strict 0：
+// 新写的页面直写 `env()` 会当场红。
+//
+// 范围：`src/`（除 `__tests__` 与 `src/styles/`）加共享样式表 `public/hygiene-admin.css`。
+// `src/styles/` 两份是令牌层自己与管理后台那套（ADR 0106 决策 10：那套不动）；
+// `public/recipe.css` 与 KDS 是 ADR 点名的非目标，不扫。
+//
+// 与上面那三条一样，这是**源码断言**（文本判定即结论），不是行为测试：安全区在真机上
+// 解出来是多少 px 只能在浏览器里量（票 07 那一轮在 `baseline/checks-07/`）。
+// ══════════════════════════════════════════════════════════════════════════════
+describe('安全区只在令牌层写一遍（票 07 / ADR 0106 决策 4）', () => {
+  const APP_ROOT = join(here, '../../../..')
+  const TOKEN_LAYER = 'src/styles/theme.workbench.css'
+  // 数**出现次数**而不是行数：一行里左右各取一次 max 的行内 padding 是两处
+  // （`WorkbenchMobileHead` 那条就是）。
+  const SAFE_ENV = /env\(\s*safe-area-inset-(top|right|bottom|left)/g
+  const SKIP_DIR = /(__tests__|node_modules|dist)$/
+
+  /** 存量直写（**只减不增**）：文件 → 允许的出现次数；未列出的文件必须为 0。
+   *  清单里这些是**安全区的正当消费者**（页内底栏 / 浮层 / 拍摄面板 / 页头，都钉在视口边），
+   *  把它们收敛成令牌层的 `var(--safe-*)` 是改版面 —— 另开票，不进这张护栏票。 */
+  const LEGACY = {
+    'public/hygiene-admin.css': 16,
+    'src/components/ImageUploadQueuePanel.vue': 1,
+    'src/components/hygiene/HygieneImageLightbox.vue': 2,
+    'src/components/workbench/WorkbenchMobileHead.vue': 2,
+    'src/components/workbench/WorkbenchTabBar.vue': 1,
+    'src/views/PrepPlanView.vue': 1,
+    'src/views/hygiene/HygieneAdminLayout.vue': 1,
+    'src/views/hygiene/HygieneRosterView.vue': 3,
+    'src/views/scheduling/SchedulingCalendarView.vue': 2,
+  }
+
+  /** 「页面侧」的全部源码：`src/`（跳过 `__tests__` / dist / `src/styles/`）+ 共享样式表正本。
+   *  两份物理副本逐字节相等由 `utils/__tests__/hygieneAdminCss.test.js` 钉着，这里读正本
+   *  （与上面 `HYGIENE_CSS` 同一口径）。 */
+  function pageSideSources() {
+    const stylesDir = join(APP_ROOT, 'src', 'styles')
+    const out = [join(APP_ROOT, 'public', 'hygiene-admin.css')]
+    const walk = (dir) => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name)
+        if (statSync(p).isDirectory()) {
+          if (!SKIP_DIR.test(name) && p !== stylesDir) walk(p)
+        } else if (/\.(vue|js|css)$/.test(name)) out.push(p)
+      }
+    }
+    walk(join(APP_ROOT, 'src'))
+    return out.sort()
+  }
+
+  const envCount = (file) => (stripComments(readFileSync(file, 'utf8')).match(SAFE_ENV) || []).length
+
+  it('令牌层仍是这四根的唯一来源（删了它，整站的安全区一起失效）', () => {
+    const theme = read('../../../styles/theme.workbench.css')
+    for (const [name, area] of [['--safe-t', 'top'], ['--safe-b', 'bottom'],
+                                ['--safe-l', 'left'], ['--safe-r', 'right']]) {
+      expect(theme, `${name} 该由 env(safe-area-inset-${area}) 定义`)
+        .toMatch(new RegExp(`${name}\\s*:\\s*env\\(\\s*safe-area-inset-${area}`))
+    }
+  })
+
+  it('页面与共享样式表里不再新增直写：存量逐文件钉住（只减不增）', () => {
+    const added = []
+    let watched = 0
+    for (const file of pageSideSources()) {
+      const n = envCount(file)
+      if (!n) continue
+      watched += 1
+      const rel = relative(APP_ROOT, file)
+      const max = LEGACY[rel] ?? 0
+      if (n > max) {
+        added.push(`${rel}：${n} > 存量 ${max}${LEGACY[rel] === undefined
+          ? '（未登记，按 strict 必须为 0：安全区请消费令牌层的 var(--safe-t/-b/-l/-r)）' : ''}`)
+      }
+    }
+    expect(added, `安全区只准在 ${TOKEN_LAYER} 里写一遍；页面消费 --safe-* 令牌`).toEqual([])
+    // 防空转：这条今天真的在盯着存量；哪天清单收敛空了，这条与 LEGACY 一起删。
+    expect(watched, '剥注释后真的还有存量直写在被这条盯着').toBeGreaterThan(0)
   })
 })

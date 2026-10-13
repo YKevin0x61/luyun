@@ -9,7 +9,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenchCopy.js'
 import { PREP_PLAN_PATH } from '../../../utils/prepPlanPaths.js'
 import { RECIPE_DETAIL_PATH, RECIPE_PRINT_PATH } from '../../../utils/recipePaths.js'
-import { PAGE_ROUTES, pageRow } from '../../../router/pageRoutes.js'
+import { PAGE_ROUTES, pageMeta, pageRow } from '../../../router/pageRoutes.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const read = (rel) => readFileSync(join(here, rel), 'utf8')
@@ -549,5 +549,82 @@ describe('内容区的横向与上内边距按组给（票 04）', () => {
     expect(body, 'TodayView 里没有 `.today-page` 的基线规则了？').toBeTruthy()
     expect(body).not.toMatch(/padding\s*:/)
     expect(body).toMatch(/padding-bottom:\s*calc\(80px \+ var\(--safe-b\)\)/)
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 票 07（内容区契约的**范围**）：ADR 0106 决策 4 说那三根度量**不发布**、只在壳内消费；
+// 决策 7 说共享样式表覆盖全部工作台页面（含壳外这两页）；决策 10 把范围写死成
+// 「`/workbench/*` 的 26 页 + 壳外的 `/workbench/forbidden` 与员工鉴权壳那几页」。
+//
+// 这一组把范围**在页面上**钉住（不是读路由源码猜）：套壳的页才有内容容器与三根度量；
+// 壳外这两页披的是各自的容器（`ForbiddenView` 自己那个 / 员工鉴权壳的 `.hygiene-staff`），
+// **读不到**那三根 —— 它们吃到的是**文档层**那一份（样式表 + `<html data-workbench>` 令牌层；
+// 逐页的条数与属性由 `src/__tests__/workbenchStylesheet.test.js` 断着，那两条用例点名了
+// `/register` 与 `/workbench/forbidden`）。两半合起来才是「范围与 ADR 一致」：
+// 文档层覆盖到壳外，内容区只覆盖套壳的那些页。
+// ══════════════════════════════════════════════════════════════════════════════
+describe('内容区契约的范围：壳外两页不在内容区里（票 07 / ADR 0106 决策 4、7、10）', () => {
+  const INSETS = ['--wb-inset-top', '--wb-inset-bottom', '--wb-inset-inline']
+
+  it('`/workbench/forbidden`：越权落点不套统一壳 —— 没有内容容器，也就没有三根度量', async () => {
+    const ForbiddenView = (await import('../ForbiddenView.vue')).default
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: ['/workbench/forbidden', '/workbench/me/today', '/login'].map((path) => ({
+        path, component: { template: '<div />' },
+      })),
+    })
+    await router.push('/workbench/forbidden')
+    await router.isReady()
+    const wrapper = mount(ForbiddenView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    // 它在清单里是工作台的一页（所以吃文档层那一份样式表与令牌层）……
+    expect(pageRow('/workbench/forbidden'), '清单里得有这一页').toBeTruthy()
+    expect(pageMeta('/workbench/forbidden').workbenchTheme, '靠 `/workbench` 前缀开令牌层').toBe(true)
+    // ……但它不套内容区那套壳：没有内容容器、没有底栏，页面上一个 `--wb-inset-` 都没有。
+    expect(wrapper.find('#workbench-main').exists()).toBe(false)
+    expect(wrapper.find('.wb-shell').exists()).toBe(false)
+    expect(wrapper.find('.wb-tabbar').exists()).toBe(false)
+    expect(wrapper.html(), '壳外的页不许出现这三根度量').not.toMatch(/--wb-inset-/)
+  })
+
+  it('`/register`：员工鉴权壳（`.hygiene-staff`）同样不在内容区里，靠清单里那行 `workbenchTheme` 拿文档层', async () => {
+    const Layout = (await import('../../hygiene/HygieneStaffAuthLayout.vue')).default
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{
+        path: '/register',
+        component: Layout,
+        children: [{ path: '', component: { template: '<div>注册表单</div>' } }],
+      }],
+    })
+    await router.push('/register')
+    await router.isReady()
+    const wrapper = mount(Layout, { global: { plugins: [router] } })
+
+    // 「吃同一份样式表与令牌层」的判据是清单里**显式那一行** —— 它住在顶层路径，
+    // 前缀判不到它（`workbenchThemeOf` 的第二个条件正是为它写的）。
+    expect(pageRow('/register').workbenchTheme, '/register 靠清单里 workbenchTheme: true').toBe(true)
+    // 披的是员工鉴权壳，不是统一壳：没有内容容器、没有底栏，读不到三根度量。
+    expect(wrapper.find('.hygiene-staff').exists()).toBe(true)
+    expect(wrapper.find('#workbench-main').exists()).toBe(false)
+    expect(wrapper.find('.wb-shell').exists()).toBe(false)
+    expect(wrapper.html(), '壳外的页不许出现这三根度量').not.toMatch(/--wb-inset-/)
+    for (const name of INSETS) {
+      expect(document.documentElement.style.getPropertyValue(name),
+        `${name} 不许发布到 <html>`).toBe('')
+    }
+  })
+
+  it('对照：同一个清单里套壳的页有内容容器、三根度量都在（范围的两侧一起看）', async () => {
+    stubTiers({ mobile: true, wide: false })
+    const { wrapper } = await mountShell('/workbench/floor/daily')
+
+    expect(wrapper.find('#workbench-main').exists()).toBe(true)
+    for (const name of INSETS) {
+      expect(insetOf(wrapper, name), `${name} 该挂在内容容器上`).not.toBe('')
+    }
   })
 })
