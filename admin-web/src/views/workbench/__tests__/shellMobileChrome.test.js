@@ -400,6 +400,15 @@ describe('内容区搬进壳之后的护栏（票 04）', () => {
         .not.toMatch(/padding(-top|-left|-right)?\s*:/)
       expect(body).toMatch(/padding-bottom\s*:/)
     }
+    // **值也要钉住**（票 08 补）：票 04 把 base 从 `var(--hy-page)` 漂成 `1.4rem` 时没有
+    // 任何护栏拦得住 —— 当时只断「有没有 `padding-bottom`」、不断取值，于是 721–899px 那一段
+    // 悄悄少了 6.4px 的页内留白（那一段既不被组壳的移动档覆盖、也够不到 ≥900px 的媒体查询）。
+    // 两条规则的取值就是这两个，多一个少一个都算漂移。
+    const bottoms = bodies.map(
+      (body) => (body.match(/padding-bottom\s*:\s*([^;]+);/) || [])[1]?.trim()
+    )
+    expect(new Set(bottoms), `hy-main 的下内边距取值漂了：${bottoms}`)
+      .toEqual(new Set(['var(--hy-page)', '2rem']))
   })
 
   it('页面区之外没有第二个滚动容器：`.hy-main` 不再声明 `overflow-y: auto`', () => {
@@ -423,18 +432,19 @@ describe('内容区搬进壳之后的护栏（票 04）', () => {
   it('两个组壳里不再有内边距规则：只剩 rail 名单 / 脚注 / 实时点', () => {
     // 人事壳那条 `:deep(.roster-page)`（票 05 花名册从卫生搬过来时补的）与现场壳那条
     // 手机档 `:deep(.hy-main)` —— 前者把值交还给页面自己的样式（组里另外五页的根自带
-    // 内边距，组级给非零值会把它们推走），后者是**下**内边距（本票范围是横向与上）。
+    // 内边距，组级给非零值会把它们推走）。
     const hrShell = withoutComments(HR_SHELL)
     expect(hrShell).not.toMatch(/padding/)
     expect(hrShell).not.toMatch(/:deep\(/)
-    // 现场壳那条是手机档的下内边距补丁，不是横向 / 上 —— 它今天仍在（见 04 票的
-    // 「与票面冲突」一节），所以这里只钉住它**没有**横向 / 上的内边距。
-    for (const body of bodiesOf(HY_SHELL, '.wb-shell :deep(.hy-main)')) {
-      // 现场壳那条是手机档的**下**内边距补丁（`padding-bottom`），不是横向 / 上。
-      expect(body, `现场壳又在补横向 / 上内边距：${body}`)
-        .not.toMatch(/padding(-top|-left|-right)?\s*:/)
-      expect(body).toMatch(/padding-bottom\s*:/)
-    }
+    // 现场壳那条手机档 `:deep(.hy-main)`（重复表达底栏让位，与壳的 `--wb-inset-bottom`
+    // 叠加）已由票 08 删除：底栏让位只剩壳一处。这里把它钉成「不许回来」—— 它一旦回来，
+    // 手机档底部就是 57px + `--hy-page` 再叠一份。（`.hy-rail-foot` 自己的
+    // `padding: 12px 10px 0` 是脚注的内衬，与内容区无关，所以只禁 `:deep()` 与下内边距。）
+    const hyShell = withoutComments(HY_SHELL)
+    expect(hyShell, '现场壳又长出 :deep() 规则（内容区归壳，见 ADR 0106 决策 2/3）')
+      .not.toMatch(/:deep\(/)
+    expect(hyShell, '现场壳又在补下内边距（底栏让位只剩壳一处）')
+      .not.toMatch(/padding-bottom/)
   })
 
   it('壳自己不滚：内容容器的规则里没有 overflow 声明', () => {
@@ -474,7 +484,10 @@ describe('安全区只在令牌层写一遍（票 07 / ADR 0106 决策 4）', ()
 
   /** 存量直写（**只减不增**）：文件 → 允许的出现次数；未列出的文件必须为 0。
    *  清单里这些是**安全区的正当消费者**（页内底栏 / 浮层 / 拍摄面板 / 页头，都钉在视口边），
-   *  把它们收敛成令牌层的 `var(--safe-*)` 是改版面 —— 另开票，不进这张护栏票。 */
+   *  把它们收敛成令牌层的 `var(--safe-*)` 是改版面 —— 另开票，不进这张护栏票。
+   *  `views/hygiene/HygieneAdminLayout.vue` 那一处（手机档 `:deep(.hy-main)` 里的
+   *  `env(safe-area-inset-bottom)`，与壳下 inset 叠加的重复让位）已由票 08 连同那条规则
+   *  一起删掉，它随之收敛到 0、从这张表里退出：这个文件现在按 strict 0 盯着。 */
   const LEGACY = {
     'public/hygiene-admin.css': 16,
     'src/components/ImageUploadQueuePanel.vue': 1,
@@ -482,7 +495,6 @@ describe('安全区只在令牌层写一遍（票 07 / ADR 0106 决策 4）', ()
     'src/components/workbench/WorkbenchMobileHead.vue': 2,
     'src/components/workbench/WorkbenchTabBar.vue': 1,
     'src/views/PrepPlanView.vue': 1,
-    'src/views/hygiene/HygieneAdminLayout.vue': 1,
     'src/views/hygiene/HygieneRosterView.vue': 3,
     'src/views/scheduling/SchedulingCalendarView.vue': 2,
   }

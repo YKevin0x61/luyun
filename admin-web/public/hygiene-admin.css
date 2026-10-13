@@ -214,11 +214,17 @@
      内容容器上的两根度量（`utils/workbenchInsets.js` 的组表），值就是这里原来那两条
      （base `var(--hy-page)`、左右 `max(...)`；≥900px 见下面那条媒体查询）—— 页面与共享
      样式表不再出这一份。剩下的是页面正文自己的**下**内边距（收尾留白）。
+     **`<900px` 一律 `var(--hy-page)`（票 08 收口）**：底栏让位只剩壳一处
+     （`--wb-inset-bottom`，手机档 57px + 安全区），页面不再重复表达 —— 组壳那条手机档
+     `:deep(.hy-main){ padding-bottom: calc(var(--hy-page) + 57px + …) }` 与本节这条 base
+     规则原来是叠加关系（390px 实测 70.6px）。04 票把本节写成 `1.4rem`，于是 721–899px
+     这一段（既不被组壳的移动档覆盖、也够不到下面那条 ≥900px 的媒体查询）从 `--hy-page`
+     （800px = 16px）漂到 22.4px；这里写回 `--hy-page`，两档一起等价。
      `overflow-y: auto` 与 `-webkit-overflow-scrolling` 一并删掉（决策 8）：在「整页滚」
      的口径下它们是内层滚动声明的那一半，今天只因为高度是 `auto` 才无害 ——
      2026-10-12「八页滑不动」就是这个形状。护栏见
      `views/workbench/__tests__/shellMobileChrome.test.js`。 */
-  padding-bottom: 1.4rem;
+  padding-bottom: var(--hy-page);
 }
 
 /* 顶栏（移动端显示品牌，桌面显示题签） */

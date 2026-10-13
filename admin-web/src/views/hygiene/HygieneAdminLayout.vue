@@ -68,8 +68,9 @@ watch(
       </div>
     </template>
 
-    <!-- 页面本体：`.hy-main` 的内边距与最大宽度由共享样式表（`public/hygiene-admin.css` 的
-         `.hygiene-admin .hy-main`）给，与改造前一字不差。 -->
+    <!-- 页面本体：`.hy-main` 的横向与上内边距由壳按 group 给（票 04），最大宽度与**下**内边距
+         只有共享样式表（`public/hygiene-admin.css` 的 `.hygiene-admin .hy-main`）这一处
+         —— 本组壳不再出内边距（票 08 删掉了那条手机档的重复让位，见下面的 style）。 -->
     <div id="hygiene-admin-main" class="hy-main">
       <router-view />
     </div>
@@ -101,15 +102,14 @@ watch(
 }
 .hy-back:hover { color: var(--hy-ink); }
 
-/* 手机档：底栏（`WorkbenchTabBar`）是 `fixed`，内容区得让出那一条。统一壳已经给
-   `.wb-main` 加了 57px + 安全区；这里在共享样式表的 `--hy-page` 之上把那一条留给
-   `.hy-main` 自己的下内边距（与改造前 `calc(1.4rem + 57px + safe)` 同一效果）。
-   钩子用 `.wb-shell`（统一壳的根）而**不是**旧卫生壳那个 `hygiene-app` 类 —— 后者在
-   共享样式表里还带着 `<900px` 的整屏锁与 `≥900px` 的 `flex-direction: row`，挂到统一壳
-   上会把顶栏与内容排成左右两栏（2026-10-10 实测：顶栏占满 900px 高、内容被挤到右上角）。 */
-@media (max-width: 720px) {
-  .wb-shell :deep(.hy-main) {
-    padding-bottom: calc(var(--hy-page) + 57px + env(safe-area-inset-bottom, 0px));
-  }
-}
+/* 现场八页**不再自己让开底栏**（票 08）。手机档底栏（`WorkbenchTabBar`）是 `fixed`，那
+   57px + 安全区由统一壳算成一个数挂在内容容器上（`--wb-inset-bottom` → `.wb-main` 的下
+   内边距，ADR 0106 决策 2），页面侧再补一份就是**叠加**：这里原来那条
+   `@media (max-width: 720px) { .wb-shell :deep(.hy-main) { … } }` 就在 `--hy-page` 之上
+   又补了一次 57px + 安全区，390px 实测底部空白 70.6 + 57 = 127.6px（比需要多 57px），已删。
+   `.hy-main` 的下内边距只剩共享样式表那份「页面正文自己的收尾留白」：`<900px` 一律取
+   `--hy-page`（390 → 13.6px / 800 → 16px），≥900px = `2rem`。
+   当年钩子用 `.wb-shell` 而**不是**旧卫生壳那个 `hygiene-app` 类，是因为后者在共享样式表里
+   还带着 `<900px` 的整屏锁与 `≥900px` 的 `flex-direction: row`（挂到统一壳上会把顶栏与
+   内容排成左右两栏，2026-10-10 实测）—— 这条规则删了，那个钩子也别再挂回去。 */
 </style>
