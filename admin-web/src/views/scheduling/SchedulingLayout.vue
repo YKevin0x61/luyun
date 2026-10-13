@@ -3,10 +3,10 @@
 //
 // **③-2 起它只是统一壳的一层薄包装**：顶上那条栏、身份切换器、工作台级导航、退出、手机档
 // 页头、底栏、样式表挂载全在 `views/workbench/WorkbenchShell.vue` 里（三个壳共用一份，
-// ADR 0105）。这里只留两样本组自己的东西：
+// ADR 0105）。这里只留本组自己的东西：
 //   ① 实时连接点（`App.vue` provide 的 `wsConnected`）—— 排班页要能看出「别人改了会不会
-//      自己刷新」，它是人事这一组的附加件；
-//   ② 花名册页的页内边距（页面组件自己的样式一个字没动，见下面那段）。
+//      自己刷新」，它是人事这一组的附加件。
+// 花名册那条补内边距在票 04 退场（见下面那段注释）：值与页面组件的样式一起走。
 import { computed, inject } from 'vue'
 import WorkbenchShell from '../workbench/WorkbenchShell.vue'
 
@@ -43,17 +43,9 @@ const offline = computed(() => connected && connected.value === false)
 .sched-conn.off { color: var(--hy-seal-bright); }
 .sched-conn.off i { background: var(--hy-seal-bright); }
 
-/* 花名册（票 05 从卫生那八页搬进人事组）原来套在卫生壳的 `.hy-main` 里，内边距是那一层
-   给的；搬到这条窄栏下面之后由这里补上（数字与 `.hy-main` 那条一致），页面组件自己的
-   样式一个字没动。其余几页自带内边距，不吃这条。 */
-.sched-shell :deep(.roster-page) {
-  padding: var(--hy-page);
-  padding-left: max(var(--hy-page), env(safe-area-inset-left));
-  padding-right: max(var(--hy-page), env(safe-area-inset-right));
-}
-@media (min-width: 900px) {
-  .sched-shell :deep(.roster-page) {
-    padding: clamp(1.1rem, 2.2vw, 2rem) clamp(1.2rem, 3vw, 2.6rem) 2rem;
-  }
-}
+/* 花名册那条补内边距（票 05 从卫生搬过来时补的 `:deep(.roster-page)`）随票 04 退场：
+   组壳只剩本组自己的东西（实时点）。它的**数字一字不差**地落在花名册页面自己的样式里
+   （`views/hygiene/HygieneRosterView.vue`）—— 人事组里另外五页的根自带内边距
+   （`18px 16px 40px` 那一档），组级给一个非零值会把它们推走 4–14px，所以壳给人事组 0、
+   这一页的值跟着它自己走。 */
 </style>

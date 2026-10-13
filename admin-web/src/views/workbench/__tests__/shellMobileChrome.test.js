@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
@@ -142,7 +142,10 @@ describe('方案 C / B6：手机档顶部只剩一行，目标 ≥44px', () => {
     expect(SHELL).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
     expect(SHELL).toMatch(/<WorkbenchMobileHead[^>]*\/>/)
     // 底栏是 `fixed`，内容区得自己让出那一条的高度（57px = 底栏自身 + 1px 边框）。
-    expectMobileRule(SHELL, /\.wb-main\s*\{[^}]*padding-bottom:\s*calc\(57px/, '内容让出底栏高度')
+    // **票 03 起这份让位不写在媒体查询里**：底栏高 + 安全区由壳算成一个数挂在内容容器上
+    // （`--wb-inset-bottom`，桌面档算出来就是 0），规则只剩「谁消费」这一条 —— 否则
+    // 「本屏渲染了底栏吗」会有两处各答一半（媒体查询一处、壳的算法一处）。
+    expect(SHELL).toMatch(/\.wb-main\s*\{[^}]*padding:[^}]*var\(--wb-inset-bottom/)
     // 退出那颗的「贴右端」仍写在基线里（桌面档那条顶栏还在用它）：`:deep(.wb-exit)` 是必须的
     // —— `WorkbenchExitButton` 是多根组件（按钮 + 确认框），父级传下来的 class 不透传。
     expect(SHELL).toMatch(/:deep\(\.wb-exit\)\s*\{[^}]*margin-left:\s*auto/)
@@ -172,8 +175,9 @@ describe('方案 C / B6：手机档顶部只剩一行，目标 ≥44px', () => {
     expect(SHELL).toMatch(/<WorkbenchMobileHead[^>]*\/>/)
     // 桌面档那条带子照旧：工作台级一排 + 本组四页共处一行（收的是手机档那一份）。
     expect(SHELL).toMatch(/<WorkbenchRail/)
-    // 底栏仍是手机档的主导航：钉在视口底，内容让出那一条。
-    expectMobileRule(SHELL, /\.wb-main\s*\{[^}]*padding-bottom:\s*calc\(57px/, '内容让出底栏高度')
+    // 底栏仍是手机档的主导航：钉在视口底，内容让出那一条（票 03 起那个数由壳算，
+    // 见上面「顶上那一条整个收进页头一行」里那条消费点）。
+    expect(SHELL).toMatch(/\.wb-main\s*\{[^}]*padding:[^}]*var\(--wb-inset-bottom/)
   })
 
   it('共享件也补齐：现场壳的「后台」、表单按钮与输入框（花名册那种一屏 200+ 控件）', () => {
@@ -197,6 +201,57 @@ describe('方案 C / B6：手机档顶部只剩一行，目标 ≥44px', () => {
     const shellIds = scopeIds('.wb-top')
     expect(shellIds.length).toBeGreaterThan(0)
     expect(scopeIds('.wb-nav').some((id) => shellIds.includes(id))).toBe(true)
+  })
+})
+
+// 票 03（内容区）：三根让位度量（`--wb-inset-top` / `--wb-inset-bottom` /
+// `--wb-inset-inline`）是**壳的私事**，不是主题令牌（ADR 0106 决策 4）—— 只在壳内部定义与
+// 消费：壳外读不到、不发布到 `<html data-workbench>`、没有第二处定义。
+// 「读不到」由 `workbenchShell.test.js` 那组 DOM 契约断（挂上之后 `<html>` 与壳根上都没有）；
+// 这里断**定义点只有一个**，以及壳问的档位与底栏自己的媒体查询说的是同一个数。
+describe('内容区的三根度量只在壳里（票 03）', () => {
+  const INSETS = ['--wb-inset-top', '--wb-inset-bottom', '--wb-inset-inline']
+  // 仓库根（`admin-web/`）：这个文件在 `src/views/workbench/__tests__/` 下。
+  const ROOT = join(here, '../../../..')
+
+  /** 扫 `src/` 与 `public/` 的源码（跳过 `__tests__` / dist）：谁提到了这三根名字。 */
+  function sourcesMentioning(names) {
+    const hits = []
+    const walk = (dir) => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name)
+        if (statSync(p).isDirectory()) {
+          if (!/(__tests__|node_modules|dist)$/.test(name)) walk(p)
+        } else if (/\.(vue|js|css)$/.test(name)) {
+          const src = readFileSync(p, 'utf8')
+          if (names.some((n) => src.includes(n))) hits.push(relative(ROOT, p))
+        }
+      }
+    }
+    for (const dir of ['src', 'public']) walk(join(ROOT, dir))
+    return hits.sort()
+  }
+
+  it('三根名字只出现在统一壳这一个文件里（页面 / 样式表 / 令牌层一处都没有）', () => {
+    // 唯一来源：壳里 `contentInsetStyle` 定义它们、`.wb-main` 消费它们。多一处出现就是
+    // 「第二处定义」或壳外的消费者 —— 那正是 ADR 0106 决策 4 要挡的。
+    expect(sourcesMentioning(INSETS)).toEqual(['src/views/workbench/WorkbenchShell.vue'])
+  })
+
+  it('令牌层不认它们：`html[data-workbench]` 里没有这三根（度量不进全局命名空间）', () => {
+    const theme = read('../../../styles/theme.workbench.css')
+    for (const name of INSETS) expect(theme).not.toContain(name)
+  })
+
+  it('壳问的档位与底栏自己那条媒体查询是同一个数（漂开＝凭空多 / 少 57px）', async () => {
+    // 底栏在桌面档是 `display: none`（组件自己那条 ≤720px 媒体查询），所以壳算下 inset 时
+    // 必须先问出同一个档位。两边各写一个数、谁也不看着谁，就是「桌面档凭空多出 57px 下留白」
+    // 或「手机档少了 57px、最后一块内容被底栏压住」的来源。
+    const { MOBILE_MAX_WIDTH_PX } = await import('../../../utils/workbenchInsets.js')
+    const bpOf = (src) => [...new Set([...src.matchAll(/max-width:\s*([0-9]+)px/g)].map((m) => m[1]))]
+
+    expect(bpOf(TABBAR), '底栏组件的手机档断点').toEqual([String(MOBILE_MAX_WIDTH_PX)])
+    expect(bpOf(SHELL), '壳自己的手机档断点里也要有它').toContain(String(MOBILE_MAX_WIDTH_PX))
   })
 })
 
@@ -239,5 +294,83 @@ describe('D9：员工卫生页那条页内条退化成标题条', () => {
 
   it('那颗只读胶囊不再被 50% 的宽度压到比内容还窄（原来 scrollWidth 187 / clientWidth 177）', () => {
     expect(HYGIENE_CSS).toMatch(/\.hygiene-work \.hy-work-shift\s*\{[^}]*max-width:\s*100%/)
+  })
+})
+
+// 票 04（内容区）：横向与上内边距搬进壳之后，两条「不许再出现」型护栏（ADR 0106 决策 8）。
+// 断的是源码里可复核的事实 —— 布局与媒体查询 jsdom 都不做，这些是"下一次谁会把它加回来"
+// 的哨兵，不是行为测试（W2：用源码文本断行为是另一回事，这条界线写在 ADR 里）。
+describe('内容区搬进壳之后的护栏（票 04）', () => {
+  /** 一份样式源码里某个选择器的全部声明块（同一个选择器可能出现在好几段媒体查询里）。
+   *  **注释先剥掉**：这几条断的是"声明还在不在"，注释里提一句 `overflow-y: auto`
+   *  讲清楚为什么删掉，不该把自己判红。 */
+  function bodiesOf(source, selector) {
+    const stripped = source.replace(/\/\*[\s\S]*?\*\//g, '')
+    const bodies = []
+    let from = 0
+    for (;;) {
+      const at = stripped.indexOf(`${selector} {`, from)
+      if (at === -1) return bodies
+      const end = stripped.indexOf('}', at)
+      bodies.push(stripped.slice(at, end + 1))
+      from = end + 1
+    }
+  }
+
+  /** 整份源码去掉注释（断言"文件里不再有 X"时用）。 */
+  const withoutComments = (source) => source.replace(/\/\*[\s\S]*?\*\//g, '')
+
+  it('`.hy-main` 只剩页面正文自己的下内边距：横向 / 上内边距已归壳', () => {
+    const bodies = bodiesOf(HYGIENE_CSS, '.hygiene-admin .hy-main')
+    expect(bodies.length, '共享样式表里没有 `.hy-main` 这条了？').toBe(2)
+    for (const body of bodies) {
+      // 允许 `padding-bottom`（收尾留白，页面正文自己的）；不许再有上 / 横向。
+      expect(body, `.hy-main 还在出横向 / 上内边距：${body}`)
+        .not.toMatch(/padding(-top|-left|-right)?\s*:/)
+      expect(body).toMatch(/padding-bottom\s*:/)
+    }
+  })
+
+  it('页面区之外没有第二个滚动容器：`.hy-main` 不再声明 `overflow-y: auto`', () => {
+    // 2026-10-12「卫生八页滑不动」的形状就是「高度锁 + 内部滚」只留了一半：
+    // `.hy-main` 这条 `overflow-y: auto` 是内层滚动声明的那一半，今天只因为高度是
+    // `auto` 才无害。整页滚的口径下它必须没有（ADR 0106 决策 1 与 8）。
+    // 两份物理副本逐字节相等由 `utils/__tests__/hygieneAdminCss.test.js` 钉着，这里只读正本。
+    for (const source of [HYGIENE_CSS]) {
+      for (const body of bodiesOf(source, '.hygiene-admin .hy-main')) {
+        expect(body, `.hy-main 又在自己滚：${body}`).not.toMatch(/overflow/)
+      }
+      // 员工端那一页的内容容器同理（`/workbench/me/clean` 的 `.hy-work-main`）：
+      // 高度也是 `auto`（`.hygiene-staff` 是 min-height 的 flex 列），滚不动；
+      // 留着就是下一个同形状的半条声明。
+      for (const body of bodiesOf(source, '.hygiene-work .hy-work-main')) {
+        expect(body, `.hy-work-main 又在自己滚：${body}`).not.toMatch(/overflow/)
+      }
+    }
+  })
+
+  it('两个组壳里不再有内边距规则：只剩 rail 名单 / 脚注 / 实时点', () => {
+    // 人事壳那条 `:deep(.roster-page)`（票 05 花名册从卫生搬过来时补的）与现场壳那条
+    // 手机档 `:deep(.hy-main)` —— 前者把值交还给页面自己的样式（组里另外五页的根自带
+    // 内边距，组级给非零值会把它们推走），后者是**下**内边距（本票范围是横向与上）。
+    const hrShell = withoutComments(HR_SHELL)
+    expect(hrShell).not.toMatch(/padding/)
+    expect(hrShell).not.toMatch(/:deep\(/)
+    // 现场壳那条是手机档的下内边距补丁，不是横向 / 上 —— 它今天仍在（见 04 票的
+    // 「与票面冲突」一节），所以这里只钉住它**没有**横向 / 上的内边距。
+    for (const body of bodiesOf(HY_SHELL, '.wb-shell :deep(.hy-main)')) {
+      // 现场壳那条是手机档的**下**内边距补丁（`padding-bottom`），不是横向 / 上。
+      expect(body, `现场壳又在补横向 / 上内边距：${body}`)
+        .not.toMatch(/padding(-top|-left|-right)?\s*:/)
+      expect(body).toMatch(/padding-bottom\s*:/)
+    }
+  })
+
+  it('壳自己不滚：内容容器的规则里没有 overflow 声明', () => {
+    const bodies = bodiesOf(SHELL, '.wb-main')
+    expect(bodies.length).toBeGreaterThan(0)
+    for (const body of bodies) {
+      expect(body, `壳的内容容器在滚：${body}`).not.toMatch(/overflow/)
+    }
   })
 })

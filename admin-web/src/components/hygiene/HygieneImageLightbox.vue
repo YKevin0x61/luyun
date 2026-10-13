@@ -72,7 +72,7 @@ onBeforeUnmount(() => {
   --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   position: fixed;
   inset: 0;
-  z-index: 200;
+  z-index: var(--z-queue);
   display: grid;
   place-items: center;
   padding: 18px;
@@ -97,7 +97,7 @@ onBeforeUnmount(() => {
   position: fixed;
   top: max(12px, env(safe-area-inset-top));
   right: max(12px, env(safe-area-inset-right));
-  z-index: 1;
+  z-index: var(--z-shell);
   border: 1px solid var(--hy-line-strong);
   border-radius: 999px;
   background: rgba(8, 22, 20, .92);

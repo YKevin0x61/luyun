@@ -9,7 +9,7 @@
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -22,7 +22,12 @@ from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
 from services.business_day import current_business_date
 from services.hygiene.accounts import EmployeeAccounts
-from services.scheduling.store import MAX_REQUEST_NOTE, SchedulingStore
+from services.scheduling.store import (
+    BACKFILL_DAYS,
+    MAX_BATCH_CELLS,
+    MAX_REQUEST_NOTE,
+    SchedulingStore,
+)
 
 PASSWORD = "password123"
 ADMIN = {"username": "admin", "password": PASSWORD, "confirm_password": PASSWORD}
@@ -139,9 +144,12 @@ def test_scheduling_routes_require_admin_session(scheduling_http):
     assert client.put(
         "/api/scheduling/zone-defaults/1", json={"shift_id": 1, "zone_id": 1}
     ).status_code == 401
-    # 票 07 的两条单日覆盖也挂同一扇门（读写都算店长的动作）。
+    # 票 07 的两条单日覆盖也挂同一扇门（读写都算店长的动作）；票 14 的批量落笔同理。
     assert client.put("/api/scheduling/overrides/1/2026-09-25", json={}).status_code == 401
     assert client.delete("/api/scheduling/overrides/1/2026-09-25").status_code == 401
+    assert client.post(
+        "/api/scheduling/overrides/batch", json={"action": "rest", "items": []}
+    ).status_code == 401
     # 票 08 的待办三条同理：批 / 驳是店长的动作。
     assert client.get("/api/scheduling/inbox").status_code == 401
     assert client.post("/api/scheduling/inbox/1/approve").status_code == 401
@@ -977,16 +985,19 @@ def test_rest_override_leaves_the_headcount_and_keeps_its_mark(scheduling_http):
 
 
 def test_override_errors_are_readable_400s(scheduling_http):
-    """改不了的三种情形各说各的 —— 不是一个「参数不合法」打包（票 07 的验收 7）。"""
+    """改不了的几种情形各说各的 —— 不是一个「参数不合法」打包（票 07 的验收 7）。"""
     client, _db, accounts = scheduling_http
     employee_id = _employee_id(accounts)
     shifts = client.get("/api/scheduling/shifts").json()["shifts"]
     day_id = shifts[0]["id"]
     base = f"/api/scheduling/overrides/{employee_id}"
 
-    past = client.put(f"{base}/2026-09-23", json={"shift_id": day_id})
+    # 票 14 起过去 30 天内可以补记，所以这一条要挑**超出可补记窗口**的那一天。
+    # 报的是真实的可补记窗口第一天（`{}` 由服务层填），不是把「30 天」写死在文案里。
+    floor = (datetime.fromisoformat(TODAY) - timedelta(days=BACKFILL_DAYS)).date().isoformat()
+    past = client.put(f"{base}/2026-08-01", json={"shift_id": day_id})
     assert past.status_code == 400
-    assert past.json()["detail"] == "已经过去的日子改不了：排班写下的历史不重写"
+    assert past.json()["detail"] == f"超出可补记窗口：{floor} 之前的日子不再改写"
 
     beyond = client.put(f"{base}/2026-12-23", json={"shift_id": day_id})
     assert beyond.status_code == 400
@@ -1019,6 +1030,455 @@ def test_override_errors_are_readable_400s(scheduling_http):
     undo_bad_date = client.delete(f"{base}/9-25")
     assert undo_bad_date.status_code == 400
     assert undo_bad_date.json()["detail"] == "日期格式应该是 YYYY-MM-DD"
+
+
+# ── 票 14：选区批量落笔（批量端点 + 行序 + 近 30 天可补记）──────────────────
+
+
+def _batch(client, action, items, shift_id=None, zone_id=None):
+    """打一次批量端点。`shift_id` / `zone_id` 不给就是不放进请求体（= 跟固定区）。"""
+    payload = {"action": action, "items": items}
+    if shift_id is not None:
+        payload["shift_id"] = shift_id
+    if zone_id is not None:
+        payload["zone_id"] = zone_id
+    return client.post("/api/scheduling/overrides/batch", json=payload)
+
+
+def _backfill_floor():
+    """可补记窗口的第一天（第 30 天，含）—— 夹具的钟钉在 `TODAY` 上。"""
+    return (datetime.fromisoformat(TODAY) - timedelta(days=BACKFILL_DAYS)).date().isoformat()
+
+
+def _week_cells(client, start="2026-09-21"):
+    body = client.get("/api/scheduling/week", params={"start": start}).json()
+    return {row["name"]: row["cells"] for row in body["employees"]}
+
+
+def test_batch_paints_a_region_with_each_action(scheduling_http):
+    """验收 1：`shift` / `rest` / `clear` 三种动作各自写对 —— 一次请求写一片。"""
+    client, _db, accounts = scheduling_http
+    first = _employee_id(accounts, "13800138001", "李四")
+    second = _employee_id(accounts, "13800138002", "王五")
+    ids = _shift_ids(client)
+    zone = _zone(_db, "案板")
+    # 第一个人的夜班有固定区：批量刷夜班时他应该跟过去，第二个人没配 → 没有区。
+    assert client.put(
+        f"/api/scheduling/zone-defaults/{first}",
+        json={"shift_id": ids["夜班"], "zone_id": zone},
+    ).status_code == 200
+    for employee_id in (first, second):
+        assert client.put(
+            f"/api/scheduling/rules/{employee_id}", json={"cycle": [ids["白班"]]}
+        ).status_code == 200
+
+    painted = _batch(
+        client,
+        "shift",
+        [
+            {"employee_id": first, "business_date": "2026-09-25"},
+            {"employee_id": first, "business_date": "2026-09-26"},
+            {"employee_id": second, "business_date": "2026-09-25"},
+            {"employee_id": second, "business_date": "2026-09-26"},
+        ],
+        shift_id=ids["夜班"],
+    )
+
+    assert painted.status_code == 200, painted.text
+    # 契约就是这三个键（`employee_ids` 是给广播用的，不出响应）。
+    assert painted.json() == {"applied": 4, "skipped": [], "reminders": []}
+    cells = _week_cells(client)
+    for name in ("李四", "王五"):
+        assert (
+            cells[name]["2026-09-25"]["shift_id"],
+            cells[name]["2026-09-25"]["overridden"],
+        ) == (ids["夜班"], True)
+        assert cells[name]["2026-09-26"]["shift_id"] == ids["夜班"]
+    # 没点名要哪个区 → 各自跟自己在**这个班次**上的固定区（跟单格 PUT 同一条口径）。
+    assert (cells["李四"]["2026-09-25"]["zone_id"], cells["李四"]["2026-09-25"]["zone_name"]) == (
+        zone,
+        "案板",
+    )
+    assert cells["王五"]["2026-09-25"]["zone_id"] is None
+    # 没选中的那天没被碰：规则铺的白班、没有覆盖标记。
+    assert (
+        cells["李四"]["2026-09-24"]["shift_id"],
+        cells["李四"]["2026-09-24"]["overridden"],
+    ) == (ids["白班"], False)
+
+    rested = _batch(
+        client,
+        "rest",
+        [
+            {"employee_id": first, "business_date": "2026-09-25"},
+            {"employee_id": second, "business_date": "2026-09-25"},
+        ],
+    )
+
+    assert rested.status_code == 200, rested.text
+    assert rested.json()["applied"] == 2
+    cells = _week_cells(client)
+    assert cells["李四"]["2026-09-25"] == {
+        "scheduled": True,
+        "shift_id": None,
+        "shift_name": None,
+        "zone_id": None,
+        "zone_name": None,
+        "overridden": True,
+        "leave": False,
+    }
+
+    cleared = _batch(
+        client,
+        "clear",
+        [
+            {"employee_id": first, "business_date": "2026-09-25"},
+            {"employee_id": second, "business_date": "2026-09-25"},
+        ],
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["applied"] == 2
+    cells = _week_cells(client)
+    for name in ("李四", "王五"):
+        # 清除 = 退回轮转规则（不是「那天休」）：班次回到白班、覆盖标记消失。
+        assert (
+            cells[name]["2026-09-25"]["shift_id"],
+            cells[name]["2026-09-25"]["overridden"],
+        ) == (ids["白班"], False)
+    # 只动选中的那格：前一天刷的夜班还在。
+    assert cells["李四"]["2026-09-26"]["shift_id"] == ids["夜班"]
+
+
+def test_batch_skips_what_it_cannot_paint_and_names_every_reason(scheduling_http):
+    """验收 2/7：不能刷的一格一格跳过并点名（词表定死），其余照写 —— **部分成功**。"""
+    client, db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    leaver = _employee_id(accounts, "13800138002", "王五")
+    stopped = _employee_id(accounts, "13800138003", "赵六")
+    ids = _shift_ids(client)
+    store = SchedulingStore(db)
+    # 王五 9/25 那天有**已批的假**（覆盖记录就是那条假，谁都不许动它）。
+    request = _run(store.submit_leave(leaver, "2026-09-25"))
+    _run(store.approve_request(request["id"]))
+    _run(accounts.disable(stopped))
+
+    resp = _batch(
+        client,
+        "shift",
+        [
+            {"employee_id": employee_id, "business_date": "2026-09-25"},
+            {"employee_id": employee_id, "business_date": "2026-08-01"},  # 第 31 天之外
+            {"employee_id": employee_id, "business_date": "2026-12-23"},  # 未来窗口之外
+            {"employee_id": leaver, "business_date": "2026-09-25"},
+            {"employee_id": stopped, "business_date": "2026-09-25"},
+            {"employee_id": 987654, "business_date": "2026-09-25"},  # 查无此人
+        ],
+        shift_id=ids["夜班"],
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["applied"] == 1  # 一格刷不了不拖累别人
+    assert [
+        (item["employee_id"], item["business_date"], item["reason"])
+        for item in body["skipped"]
+    ] == [
+        (employee_id, "2026-08-01", "past_day"),
+        (employee_id, "2026-12-23", "beyond_window"),
+        (leaver, "2026-09-25", "leave_approved"),
+        (stopped, "2026-09-25", "out_of_roster"),
+        (987654, "2026-09-25", "out_of_roster"),
+    ]
+    # 能写的那一格真写下去了。
+    row = [
+        item
+        for item in client.get(
+            "/api/scheduling/week", params={"start": "2026-09-21"}
+        ).json()["employees"]
+        if item["id"] == employee_id
+    ][0]
+    assert (
+        row["cells"]["2026-09-25"]["shift_id"],
+        row["cells"]["2026-09-25"]["overridden"],
+    ) == (ids["夜班"], True)
+
+    # 同一片换成 clear：过去的日子只能改成某个班，不能退回规则（`past_clear`）。
+    cleared = _batch(
+        client,
+        "clear",
+        [
+            {"employee_id": employee_id, "business_date": "2026-09-10"},  # 14 天前
+            {"employee_id": employee_id, "business_date": "2026-09-25"},
+        ],
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["applied"] == 1
+    assert cleared.json()["skipped"] == [
+        {"employee_id": employee_id, "business_date": "2026-09-10", "reason": "past_clear"}
+    ]
+
+
+def test_batch_reminds_about_pending_requests_but_still_paints(scheduling_http):
+    """验收 3：那天有等着批的申请人被点名提醒，但**照刷**（提醒不阻断写入）。"""
+    client, db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    ids = _shift_ids(client)
+    _run(SchedulingStore(db).submit_leave(employee_id, "2026-09-25", "2026-09-26"))
+
+    resp = _batch(
+        client,
+        "shift",
+        [
+            {"employee_id": employee_id, "business_date": "2026-09-25"},
+            {"employee_id": employee_id, "business_date": "2026-09-26"},
+            {"employee_id": employee_id, "business_date": "2026-09-27"},  # 没申请：不提醒
+        ],
+        shift_id=ids["夜班"],
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["applied"] == 3  # 有待批的申请照样刷下去
+    assert body["skipped"] == []
+    assert body["reminders"] == [
+        {"employee_id": employee_id, "business_date": "2026-09-25", "kind": "pending_request"},
+        {"employee_id": employee_id, "business_date": "2026-09-26", "kind": "pending_request"},
+    ]
+    # 刷下去是真的：那两天现在是夜班（覆盖记录 kind=manual）。
+    cells = _week_cells(client)
+    assert cells[NAME]["2026-09-25"]["shift_id"] == ids["夜班"]
+
+
+def test_batch_refuses_more_than_two_hundred_cells(scheduling_http):
+    """验收 4：一次最多 200 格 —— 超限**整批拒绝**（400 + 一句中文），不是跳过。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    ids = _shift_ids(client)
+    cell = {"employee_id": employee_id, "business_date": "2026-09-25"}
+
+    too_many = _batch(
+        client, "shift", [cell] * (MAX_BATCH_CELLS + 1), shift_id=ids["白班"]
+    )
+
+    assert too_many.status_code == 400
+    assert too_many.json()["detail"] == f"一次最多刷 {MAX_BATCH_CELLS} 格：请缩小选区再试"
+    # 刚好 200 格照收（上限是含的）。
+    full = _batch(client, "shift", [cell] * MAX_BATCH_CELLS, shift_id=ids["白班"])
+    assert full.status_code == 200, full.text
+    assert full.json() == {"applied": MAX_BATCH_CELLS, "skipped": [], "reminders": []}
+
+
+def test_batch_rejects_bad_requests_and_needs_a_manager_session(scheduling_http):
+    """验收 4/7：请求本身不成立的那几种都有一句中文 400；没会话 401。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    ids = _shift_ids(client)
+    cell = {"employee_id": employee_id, "business_date": "2026-09-25"}
+
+    bad_action = _batch(client, "paint", [cell])
+    assert bad_action.status_code == 400
+    assert bad_action.json()["detail"] == (
+        "这条批量动作不认识：只能是选一个班次、改成休，或清除班次"
+    )
+
+    no_shift = _batch(client, "shift", [cell])
+    assert no_shift.status_code == 400
+    assert no_shift.json()["detail"] == (
+        "要改班次就得给一个班次；班次留空表示那天休，请用「改成休」"
+    )
+
+    unknown_shift = _batch(client, "shift", [cell], shift_id=987654)
+    assert unknown_shift.status_code == 400
+    assert unknown_shift.json()["detail"] == "班次不存在或已停用"
+
+    unknown_zone = _batch(client, "shift", [cell], shift_id=ids["白班"], zone_id=987654)
+    assert unknown_zone.status_code == 400
+    assert unknown_zone.json()["detail"] == (
+        "工作区不存在：请先在卫生的工作区页面新建，或刷新本页"
+    )
+
+    no_person = _batch(client, "rest", [{"business_date": "2026-09-25"}])
+    assert no_person.status_code == 400
+    assert no_person.json()["detail"] == "格子里的员工编号不合法：请刷新页面重新选一次"
+
+    bad_date = _batch(client, "rest", [{"employee_id": employee_id, "business_date": "9/25"}])
+    assert bad_date.status_code == 400
+    assert bad_date.json()["detail"] == "日期格式应该是 YYYY-MM-DD"
+
+    client.cookies.clear()
+    anonymous = client.post(
+        "/api/scheduling/overrides/batch", json={"action": "rest", "items": [cell]}
+    )
+    assert anonymous.status_code == 401
+
+
+def test_a_batch_broadcasts_one_nudge_per_painted_person(scheduling_http, monkeypatch):
+    """验收 9：写完只播一次，**一人一条**（同一个人两格还是一条），跳过的那些人一条都不播。"""
+    client, _db, accounts = scheduling_http
+    first = _employee_id(accounts, "13800138001", "李四")
+    second = _employee_id(accounts, "13800138002", "王五")
+    ids = _shift_ids(client)
+
+    seen = []
+
+    async def _record(topic, scope=None):
+        seen.append((topic, scope))
+
+    monkeypatch.setattr(scheduling_module.realtime_hub, "broadcast_nudge", _record)
+
+    resp = _batch(
+        client,
+        "shift",
+        [
+            {"employee_id": first, "business_date": "2026-09-25"},
+            {"employee_id": first, "business_date": "2026-09-26"},
+            {"employee_id": second, "business_date": "2026-09-25"},
+            {"employee_id": 987654, "business_date": "2026-09-25"},  # 跳过的：不播
+        ],
+        shift_id=ids["白班"],
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert sorted(seen, key=lambda item: item[1]["employee_id"]) == [
+        ("scheduling", {"reason": "overrides_batched", "employee_id": first}),
+        ("scheduling", {"reason": "overrides_batched", "employee_id": second}),
+    ]
+
+
+def test_single_day_editor_can_backfill_within_thirty_days(scheduling_http):
+    """验收 5/6：月历那页的单格编辑器（同一条 PUT）也放开过去 —— 第 30 天可改、第 31 天拒。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    ids = _shift_ids(client)
+    floor = _backfill_floor()
+    older = (datetime.fromisoformat(floor) - timedelta(days=1)).date().isoformat()
+    base = f"/api/scheduling/overrides/{employee_id}"
+
+    saved = client.put(f"{base}/{floor}", json={"shift_id": ids["夜班"]})
+
+    assert saved.status_code == 200, saved.text
+    assert client.put(f"{base}/{older}", json={"shift_id": ids["夜班"]}).status_code == 400
+    refused = client.put(f"{base}/{older}", json={"shift_id": ids["夜班"]})
+    assert refused.json()["detail"] == f"超出可补记窗口：{floor} 之前的日子不再改写"
+    # 补记那天真的能读出来（月历点开那天看到的名单）。
+    detail = client.get("/api/scheduling/day", params={"date": floor}).json()
+    groups = {group["shift"]["name"]: group for group in detail["groups"]}
+    assert (groups["白班"]["count"], groups["夜班"]["count"]) == (0, 1)
+    assert groups["夜班"]["people"][0]["overridden"] is True
+
+
+def test_undoing_a_past_override_is_refused(scheduling_http):
+    """验收 7：过去的日子不给撤（`past_clear`）—— 覆盖记录与结果行都留着。"""
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    ids = _shift_ids(client)
+    floor = _backfill_floor()
+    base = f"/api/scheduling/overrides/{employee_id}"
+    assert client.put(
+        f"/api/scheduling/rules/{employee_id}", json={"cycle": [ids["白班"]]}
+    ).status_code == 200
+    assert client.put(f"{base}/{floor}", json={"shift_id": ids["夜班"]}).status_code == 200
+
+    refused = client.delete(f"{base}/{floor}")
+
+    assert refused.status_code == 400
+    assert refused.json()["detail"] == (
+        "过去的日子只能改成某个班：清除班次（退回轮转规则）只对今天和以后有效"
+    )
+    # 还是刚补记的夜班 + 覆盖标记；`undoable=False`（前端据此把撤销收起来）。
+    detail = client.get("/api/scheduling/day", params={"date": floor}).json()
+    groups = {group["shift"]["name"]: group for group in detail["groups"]}
+    assert (groups["白班"]["count"], groups["夜班"]["count"]) == (0, 1)
+    assert groups["夜班"]["people"][0]["overridden"] is True
+    assert detail["undoable"] is False
+    # 今天以后照旧撤得掉（这条口径没被一起改坏）。
+    assert client.put(f"{base}/2026-09-25", json={"is_rest": True}).status_code == 200
+    assert client.delete(f"{base}/2026-09-25").status_code == 200
+
+
+def test_the_week_grid_orders_rows_by_lead_shift_then_management(scheduling_http):
+    """验收 5：行序 —— 有规则的人按**规则起点班次**分片（片序用班次表的排序字段）、
+    片内管理层置顶、没规则（含整轮全休、规则读不出来）整块沉底。
+
+    注册先后故意与目标顺序处处相反：管理层最后注册、整轮全休那位最先注册。
+    """
+    client, _db, accounts = scheduling_http
+    rest_only = _employee_id(accounts, "13800138001", "李四")   # id 2，整轮全休
+    day_person = _employee_id(accounts, "13800138002", "王五")  # id 3，白班片
+    manager = _employee_id(accounts, "13800138003", "赵六")     # id 4，白班片 + 管理层
+    night_person = _employee_id(accounts, "13800138004", "钱七")  # id 5，夜班片（起点是休）
+    ruleless = _employee_id(accounts, "13800138005", "孙八")    # id 6，没配规则
+    ids = _shift_ids(client)
+    for employee_id, cycle in (
+        (rest_only, [None, None]),
+        (day_person, [ids["白班"]]),
+        (manager, [ids["白班"], ids["夜班"]]),
+        (night_person, [None, ids["夜班"]]),  # 起点是「休」→ 往后找第一个非休
+    ):
+        assert client.put(
+            f"/api/scheduling/rules/{employee_id}", json={"cycle": cycle}
+        ).status_code == 200
+    _run(accounts.set_admin_caps(manager, ["roster"]))
+
+    body = client.get("/api/scheduling/week", params={"start": "2026-09-21"}).json()
+
+    assert [(row["name"], row["has_rule"]) for row in body["employees"]] == [
+        ("赵六", True),   # 白班片：管理层置顶
+        ("王五", True),   # 白班片：注册在先的员工
+        ("钱七", True),   # 夜班片：起点是休，往后找到夜班
+        ("李四", True),   # 整轮全休 = 当没规则 → 沉底
+        ("孙八", False),  # 没配规则 → 沉底
+    ]
+    # 片的先后就是班次表的显示顺序（票 11 的「上移 / 下移」）：把夜班调到前面，
+    # 两个片整块换位（不是按班次 id、也不是按注册先后）。
+    all_ids = [
+        shift["id"]
+        for shift in client.get("/api/scheduling/shifts/manage").json()["shifts"]
+    ]
+    assert client.put(
+        "/api/scheduling/shifts/order", json={"ids": list(reversed(all_ids))}
+    ).status_code == 200
+    body = client.get("/api/scheduling/week", params={"start": "2026-09-21"}).json()
+    assert [row["name"] for row in body["employees"]] == [
+        "钱七",
+        "赵六",
+        "王五",
+        "李四",
+        "孙八",
+    ]
+
+
+def test_a_broken_rule_sinks_to_the_bottom_without_breaking_the_week(scheduling_http):
+    """坏数据降级：`cycle` 读不出来的人当「没规则」沉底，周表照常 200。
+
+    `scheduling_rules` 是人工 SQL 也会碰的表（`expand()` 对坏规则是跳过这个人、
+    名单面板是标成 `invalid`）—— 一条脏规则不该把整张周表变成 400。
+    """
+    client, db, accounts = scheduling_http
+    broken = _employee_id(accounts, "13800138001", "李四")
+    configured = _employee_id(accounts, "13800138002", "王五")
+    ids = _shift_ids(client)
+    assert client.put(
+        f"/api/scheduling/rules/{configured}", json={"cycle": [ids["白班"]]}
+    ).status_code == 200
+
+    async def _write_broken():
+        now = FIXED_NOW.isoformat()
+        await db._conn.execute(
+            """INSERT INTO scheduling_rules (employee_id, cycle, anchor_date, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (broken, "{不是 JSON", TODAY, now, now),
+        )
+        await db._conn.commit()
+
+    _run(_write_broken())
+
+    resp = client.get("/api/scheduling/week", params={"start": "2026-09-21"})
+
+    assert resp.status_code == 200, resp.text
+    assert [row["name"] for row in resp.json()["employees"]] == ["王五", "李四"]
 
 
 # ── 请假申请（票 08）───────────────────────────────────────────────────────
@@ -1227,7 +1687,8 @@ def test_leave_errors_are_readable_400s(scheduling_http, monkeypatch):
 
     past = client.post(base, json={"start_date": "2026-09-23"})
     assert past.status_code == 400
-    # 员工读到的是「请不了假」，不是店长那句「排班写下的历史不重写」。
+    # 员工读到的是「请不了假」：请假只能从今天起（这个 30 天回溯窗口只管店长手改的排班，
+    # 不是给员工补提申请的）。
     assert past.json()["detail"] == "已经过去的日子请不了假：请从今天起选"
 
     beyond = client.post(base, json={"start_date": "2026-12-23"})

@@ -101,8 +101,12 @@ describe('hygiene admin section shell', () => {
     // 三个壳不再各钉一遍 —— 那条同特异度的通配规则已经删掉（`public/hygiene-admin.css:50`）。
     const tabbar = read('../../../components/workbench/WorkbenchTabBar.vue')
     expect(mobileRules(tabbar)).toMatch(/\.wb-tabbar\s*\{[^}]*position:\s*fixed/)
-    // 它不占流，内容区自己让出那条栏的高度（统一壳那一处），否则最后一屏压在栏下滚不到底。
-    expect(rules).toMatch(/\.wb-main\s*\{[^}]*padding-bottom:\s*calc\(57px/)
+    // 它不占流，内容区自己让出那条栏的高度，否则最后一屏压在栏下滚不到底。**票 03 起这条
+    // 让位不写在媒体查询里**：底栏高（57px）+ 安全区由壳算成一个数（`--wb-inset-bottom`，
+    // 桌面档算出来就是 0），壳把它套在内容容器上也在这里消费 —— 于是断的是**消费点**
+    // （`.wb-main` 的 padding 里有那根变量），数的部分由 DOM 契约测试断
+    // （`views/workbench/__tests__/workbenchShell.test.js` 那组「内容区的下 inset」）。
+    expect(shell).toMatch(/\.wb-main\s*\{[^}]*padding:[^}]*var\(--wb-inset-bottom/)
   })
 
   it('router wraps every floor page in a standalone shell（现场组七页）', () => {
@@ -112,8 +116,11 @@ describe('hygiene admin section shell', () => {
     // （`meta: pageMeta(path)`）。值本身在这里对着清单断一次；「注册出来的路由确实
     // 等于清单」由 `router/__tests__/pageRoutes.test.js` 对着真实路由表钉。
     expect(router).toMatch(/meta: pageMeta\(path\)/)
+    // 票 02：meta 里还多了内容区的两个 opt-out（`ownBottomBar` / `flush`）—— 现场这几页
+    // 两项都关着（清单里没标），断的是整份 meta 的形状。
     expect(pageMeta('/workbench/floor/daily')).toEqual({
       standalone: true, public: false, audience: 'admin', workbenchTheme: true,
+      ownBottomBar: false, flush: false,
     })
     expect(router).toMatch(/hygieneAdminPage\('\/workbench\/floor\/zones'/)
     expect(router).toMatch(/hygieneAdminPage\('\/workbench\/floor\/daily'/)

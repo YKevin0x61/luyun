@@ -294,3 +294,68 @@ describe('工作台令牌层（`html[data-workbench]`）从清单派生', () => 
     }
   })
 })
+
+describe('内容区 opt-out 也从清单派生（票 02 / ADR 0106 决策 5）', () => {
+  // opt-out 原来是壳里的一份手写路径名单（`WorkbenchShell.vue` 的 `OWN_BOTTOM_BAR_PATHS`）。
+  // 两个可选字段接过来之后，判据只有清单这一处，壳只读它渲染。
+  const OPT_OUT_FIELDS = ['ownBottomBar', 'flush']
+
+  it('两个字段都只接受 true（缺省即不生效），不写第二份默认值', () => {
+    for (const row of PAGE_ROUTES) {
+      for (const field of OPT_OUT_FIELDS) {
+        if (field in row) {
+          expect(row[field], `${row.path} 的 ${field} 只认 true`).toBe(true)
+        }
+      }
+    }
+  })
+
+  it('两个字段互不隐含：今天真实用着它们的两页各标各的', () => {
+    // 配方阅读面：自带底栏（页内那条 `.sop-bottom-bar`），不铺满。
+    expect(pageRow('/workbench/kitchen/recipe/detail').ownBottomBar).toBe(true)
+    expect(pageRow('/workbench/kitchen/recipe/detail').flush).toBeUndefined()
+    // 配方打印：A4 预览要铺满，但它底下没有自带底栏 —— 这正是两个字段拆开的意义
+    // （旧名单里 `has-own-bar` 同时做了这两件事）。
+    expect(pageRow('/workbench/kitchen/recipe/print').flush).toBe(true)
+    expect(pageRow('/workbench/kitchen/recipe/print').ownBottomBar).toBeUndefined()
+  })
+
+  it('壳那侧读的就是这两个字段（缺省即不生效）', () => {
+    expect(pageMeta('/workbench/kitchen/recipe/detail').ownBottomBar).toBe(true)
+    expect(pageMeta('/workbench/kitchen/recipe/detail').flush).toBe(false)
+    expect(pageMeta('/workbench/kitchen/recipe/print').flush).toBe(true)
+    expect(pageMeta('/workbench/kitchen/recipe/print').ownBottomBar).toBe(false)
+    // 其余页面一个字没变：两项都关着。
+    for (const path of ['/workbench', '/workbench/me/today', '/workbench/floor/daily', '/login']) {
+      expect(pageMeta(path).ownBottomBar, path).toBe(false)
+      expect(pageMeta(path).flush, path).toBe(false)
+    }
+  })
+
+  it('清单里那行 `_comment` 写明了字段名 / 默认值 / 判据在哪 / 护栏在哪', () => {
+    // 可选字段的先例（`authRedirect` / `workbenchTheme`）：说明行里这四件事缺一不可 ——
+    // 只写「有这个字段」，下一个维护者就得回源码里反推默认值与护栏。
+    const comment = readFileSync(resolvePath(ROUTER_DIR, 'pageRoutes.json'), 'utf8')
+    for (const field of OPT_OUT_FIELDS) {
+      const line = comment.split('\n').find((text) => text.includes(`可选字段 ${field}`))
+      expect(line, `pageRoutes.json 的 _comment 里没有「可选字段 ${field}」那一条`).toBeTruthy()
+      expect(line, `${field} 那条没写默认值`).toContain('默认')
+      expect(line, `${field} 那条没写判据在哪`).toContain('判据在 admin-web/src/router/pageRoutes.js')
+      expect(line, `${field} 那条没写护栏在哪`).toContain('护栏：')
+      // 护栏指向的用例必须真的存在（说明行指错文件就是又一次漂移）。
+      expect(line).toContain('workbenchShell.test.js')
+    }
+  })
+
+  it('两个字段都只给套工作台壳的页面用（壳外的页面没有这份 opt-out）', () => {
+    const users = PAGE_ROUTES.filter((row) =>
+      OPT_OUT_FIELDS.some((field) => row[field] === true),
+    ).map((row) => row.path)
+    for (const path of users) {
+      expect(path.startsWith('/workbench'), `${path} 不在工作台里，壳管不到它`).toBe(true)
+    }
+    // 防空转：今天至少有一页在用（`ownBottomBar` 与 `flush` 各一页）。
+    expect(users).toContain('/workbench/kitchen/recipe/detail')
+    expect(users).toContain('/workbench/kitchen/recipe/print')
+  })
+})

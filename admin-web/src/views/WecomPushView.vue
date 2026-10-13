@@ -1393,10 +1393,10 @@ onMounted(async () => {
 :deep(.data-table.wp-matrix td:first-child) {
   position: sticky;
   left: 0;
-  z-index: 1;
+  z-index: var(--z-shell);
   background: var(--card);
 }
-:deep(.data-table.wp-matrix th:first-child) { background: var(--card2); z-index: 2; }
+:deep(.data-table.wp-matrix th:first-child) { background: var(--card2); z-index: var(--z-shell); }
 
 /* ══ U16 · 发送记录里的「最后一次错误」 ════════════════════════════════════
    原来是 `overflow:hidden` 硬裁 + 只有桌面 hover 才看得到的 `title`。现在：行内最多两行

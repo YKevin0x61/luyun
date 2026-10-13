@@ -605,7 +605,7 @@ function formatCellText(col, val) {
     bottom: 0;
     width: min(268px, 88vw);
     max-height: none;
-    z-index: 60;
+    z-index: var(--z-toast);
     border-radius: 0;
     transform: translateX(-105%);
     transition: transform .25s ease-out, box-shadow .25s ease-out;
@@ -621,7 +621,7 @@ function formatCellText(col, val) {
     left: 0; right: 0; bottom: 0;
     top: clamp(38px, 4.4vh, 46px);
     background: rgba(0, 0, 0, 0.55);
-    z-index: 55;
+    z-index: var(--z-dialog);
     opacity: 0;
     pointer-events: none;
     transition: opacity .25s ease-out;
@@ -646,13 +646,13 @@ function formatCellText(col, val) {
   :deep(table.data-table) .dt-col-actions {
     position: sticky;
     background: var(--card);
-    z-index: 2;
+    z-index: var(--z-shell);
   }
   :deep(table.data-table) thead .dt-col-key,
   :deep(table.data-table) thead .dt-col-actions {
     background: var(--card2);
     /* 表头本身也是 sticky 的（theme.css），钉住的列要在它之上才能盖住滚过来的列 */
-    z-index: 3;
+    z-index: var(--z-shell);
   }
   /* 宽度原来写在模板的 inline style 上，挪到这里是因为钉住的列必须能算准偏移 */
   :deep(table.data-table) .dt-col-key { left: 0; width: 60px; }

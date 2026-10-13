@@ -634,6 +634,15 @@
       "small_tap": 0,
       "danger_text": 0
     },
+    "src/utils/workbenchInsets.js": {
+      "hy": 4,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0
+    },
     "src/views/AdminView.vue": {
       "hy": 0,
       "hex": 0,
@@ -831,7 +840,7 @@
       ]
     },
     "src/views/hygiene/HygieneRosterView.vue": {
-      "hy": 48,
+      "hy": 51,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
@@ -1059,10 +1068,15 @@
       "hy": 9,
       "hex": 0,
       "rgba": 0,
-      "style=": 0,
+      "style=": 1,
       "bp": 0,
       "small_tap": 1,
-      "danger_text": 0
+      "danger_text": 0,
+      "undef": [
+        "--wb-inset-bottom",
+        "--wb-inset-inline",
+        "--wb-inset-top"
+      ]
     }
   }
 }

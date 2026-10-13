@@ -35,19 +35,32 @@ _ERROR_DETAILS = {
     "unknown_shift_in_cycle": "轮转周期第 {} 格引用的班次不存在或已停用：请重新选那一天的班次",
     "unknown_employee": "员工不存在",
     "unknown_zone": "工作区不存在：请先在卫生的工作区页面新建，或刷新本页",
-    # 单日覆盖（票 07）三种「这天改不了」的原因，各说各的：
-    "past_day": "已经过去的日子改不了：排班写下的历史不重写",
+    # 单日覆盖「这天改不了」的原因，各说各的。票 14 起**过去 30 天内是可以补记的**
+    # （ADR 0108）：这句话说的不再是「历史不重写」，而是「太旧了，超出可补记窗口」。
+    # 带一个 `{}`：服务层把可补记窗口的第一天放在 `args[0]`（同 `beyond_window`，
+    # 不把「30 天」这个数写死在文案里 —— 那个数是 `BACKFILL_DAYS` 的事）。
+    "past_day": "超出可补记窗口：{} 之前的日子不再改写",
+    # 过去的日子只能改成某个班，不能退回规则 —— 以前那种「摘掉覆盖记录、结果行不动」
+    # 是没人看得出发生了什么的半个动作（ADR 0108 决策 6）。
+    "past_clear": "过去的日子只能改成某个班：清除班次（退回轮转规则）只对今天和以后有效",
     # 带一个 `{}`：服务层把展开窗口的末日放在 `args[0]`。**不写死「90 天」** ——
     # 窗口长度是 `EXPANSION_DAYS` 的事，改那个数不该让文案说谎。
     "beyond_window": "这天还没排到：排班只铺到 {}，等它进窗口再改",
     "missing_shift": "要改班次就得给一个班次；班次留空表示那天休，请用「改成休」",
     "rest_with_details": "「改成休」的那天不能再带班次或工作区：请把这两项留空",
+    # 批量落笔（票 14）：只有这四种是**整批拒绝**的（其余「这一格刷不了」一律跳过并点名 ——
+    # 部分成功是那张票的预期语义）。带 `{}` 的那条由服务层填 `MAX_BATCH_CELLS`。
+    "batch_too_large": "一次最多刷 {} 格：请缩小选区再试",
+    "invalid_batch_action": "这条批量动作不认识：只能是选一个班次、改成休，或清除班次",
+    "invalid_batch_items": "这一批格子没看懂：请刷新页面重新选一次",
+    "invalid_employee_id": "格子里的员工编号不合法：请刷新页面重新选一次",
     # 请假申请（票 08）：日期没给、区间反了、事由太长、申请不存在 / 已经处理过，各说各的。
     # 字段整个没给（`{}`）也走这条：模型里 `start_date` 有默认值，缺字段不会变成
     # pydantic 的 422 —— 那个 `detail` 是一串英文的字段错误，员工看不懂。
     "missing_day": "请先选一个开始日期：请假从哪天开始",
     "bad_range": "结束日期不能早于开始日期：请重新选一遍这几天",
-    # 「过去不改」这条口径跟票 07 是同一条，但话得对员工说：他不是在改排班，是在提申请。
+    # 请假只能从今天起 —— 跟店长手改排班那条 30 天回溯窗口**不是一条**：员工不是在改
+    # 排班，是在提申请，过去的日子补提没有意义（话得对员工说）。
     "past_leave": "已经过去的日子请不了假：请从今天起选",
     # 带一个 `{}`：服务层把展开窗口的末日放在 `args[0]`（跟 `beyond_window` 同一条口径）。
     "beyond_leave": "排班还没铺到那么远：最多请到 {}",
@@ -63,7 +76,7 @@ _ERROR_DETAILS = {
     "unknown_peer": "找不到这位同事：刷新一下名单再选",
     "peer_unavailable": "这位同事现在不在排班名单里（已停用或还没批准）：换个人吧",
     "missing_swap_day": "请先选换哪一天",
-    # 「过去不改」这条口径跟票 07、请假是同一条，话是对员工说的。
+    # 跟请假同一条（`past_leave`）：不能给过去的日子提换班，话是对员工说的。
     "past_swap": "已经过去的日子换不了班：请从今天起选",
     # 带一个 `{}`：服务层把展开窗口的末日放在 `args[0]`（跟 `beyond_leave` 同一条口径）。
     "beyond_swap": "排班还没铺到那么远：最多换到 {}",
@@ -175,6 +188,34 @@ class SetOverrideRequest(BaseModel):
     is_rest: bool = False
     shift_id: Optional[int] = None
     zone_id: Optional[int] = None
+
+
+class BatchOverrideItem(BaseModel):
+    """批量刷的一格（票 14）：谁、哪天。
+
+    两个字段都不是必填（同 `LeaveRequest.start_date` 的理由）：缺字段、空串、显式 `null`
+    都落到服务层那道闸上，回一句中文的 400，而不是 pydantic 那串英文的 422 字段错误。
+    """
+
+    employee_id: Optional[int] = None
+    business_date: Optional[str] = None
+
+
+class BatchOverrideRequest(BaseModel):
+    """一次刷一片（票 14；ADR 0107 决策 5/6）：`action` 整批同一个，`items` 最多 200 格。
+
+    `action` = `shift`（`shift_id` 必给）/ `rest` / `clear`。`zone_id` 只对 `shift` 有意义，
+    不给（或 `null`）= 每格跟**这个人这个班次**的固定区。`action` 特意不是必填：缺字段、
+    写个不认识的值都由服务层报一句中文的 400（同 `CreateShiftRequest.name`）。
+
+    `items` 的形状是**固定**的（谁、哪天）；格数上限不在这里判 —— 上限是服务层的数
+    （`MAX_BATCH_CELLS`），超了要给一句中文话，而不是 pydantic 的 422。
+    """
+
+    action: Optional[str] = None
+    shift_id: Optional[int] = None
+    zone_id: Optional[int] = None
+    items: list[BatchOverrideItem] = Field(default_factory=list)
 
 
 class LeaveRequest(BaseModel):
@@ -701,6 +742,43 @@ async def clear_rule(
     return {"employee_id": employee_id, "rule": None}
 
 
+@router.post("/overrides/batch")
+async def batch_overrides(
+    payload: BatchOverrideRequest,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """先选一片、再一次刷完（票 14；ADR 0107 决策 5/6）。
+
+    **一次校验、一次写锁、一次提交**，写完只播一次 nudge（前端照它整批只重拉一次周表）。
+    能写的写、不能写的逐格进 `skipped`（`reason` 是定死的词表）—— 部分成功是预期语义，
+    不是整批拒绝。`reminders` 是「这一格的人那天有申请等着批」：照刷，只提醒。
+
+    整批拒绝只有三种：格数超上限、动作不认识、输入本身写错（日期 / 人员编号 / 班次 /
+    工作区）—— 那些不是「某一格刷不了」，是这次请求不成立。
+
+    让位给批量：`POST /overrides/batch` 与单格的 `PUT /overrides/{employee_id}/{business_date}`
+    路径段数不同，不会互相遮住；声明顺序仍是批量在前，跟 `/shifts/order` 那条一个道理。
+    """
+    store = SchedulingStore(db)
+    try:
+        result = await store.set_overrides_batch(
+            payload.action,
+            payload.shift_id,
+            payload.zone_id,
+            [
+                {"employee_id": item.employee_id, "business_date": item.business_date}
+                for item in payload.items
+            ],
+        )
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+    # 真写下去的那些人一人一条（`_scheduling_nudge` 自己去重）：nudge 不带数据，员工
+    # 自己重拉那几天。`employee_ids` 只给这一行用，响应里不带出去 —— 契约就三个键。
+    await _scheduling_nudge("overrides_batched", *result.pop("employee_ids", ()))
+    return result
+
+
 @router.put("/overrides/{employee_id}/{business_date}")
 async def set_override(
     employee_id: int,
@@ -712,7 +790,9 @@ async def set_override(
     """改某人某一天：换班次、改成休、或只换工作区 —— **只动这一天**（票 07）。
 
     改过的那天在月历上有标记，改规则不会把它冲掉；撤掉覆盖（`DELETE` 同一条路径）
-    那天就回到规则铺出来的样子。过去的日子不给改（400 `past_day`）。
+    那天就回到规则铺出来的样子。**过去 30 天内的日子照样能改**（票 14；ADR 0108）：
+    漏排、补记发生在上周，这是店长唯一能补上的地方；只有超出可补记窗口的日子给 400
+    `past_day`，未来那一头仍是展开窗口（`beyond_window`）。
     """
     store = SchedulingStore(db)
     try:
@@ -739,8 +819,10 @@ async def clear_override(
 ) -> dict:
     """撤掉某人某天的覆盖，那天回到规则铺出来的样子（票 07）。
 
-    今天以后按**现在的规则**重算；已经过去的日子只把覆盖记录摘掉，结果行不动
-    （过去就是过去：撤销不重写历史，界面靠 `day_detail.undoable` 把按钮收起来）。
+    今天与以后按**现在的规则**重算；**过去的日子不给撤**（票 14；ADR 0108 决策 6）——
+    以前对过去是「摘掉覆盖记录、结果行不动」的半个动作（青点没了、格子里的班次没变），
+    现在过去只能改成某个班，要退回规则就先把那天改到今天或以后。拒绝的理由是
+    `past_clear`；界面靠 `day_detail.undoable` 把按钮收起来。
     """
     store = SchedulingStore(db)
     try:
@@ -778,8 +860,9 @@ async def approve_request(
     """批一条申请：请假那几天变成请假，换班两个人那天对调。
 
     换班批的是「两个人都点过头」的那条：对方那一步（`answer_swap`）是它进这扇门的条件。
-    已经过去的日子不重写（票 07 的「过去不改」）：响应里的 `applied_days` / `skipped_days`
-    说清到底写了哪几天，界面照实说，不假装。
+    批准**只补写今天与以后的天**（跟店长手改的 30 天回溯窗口不是同一条：批得晚了就是
+    晚了）：响应里的 `applied_days` / `skipped_days` 说清到底写了哪几天，界面照实说，
+    不假装。
     """
     store = SchedulingStore(db)
     try:

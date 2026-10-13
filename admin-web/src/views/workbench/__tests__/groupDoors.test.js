@@ -14,6 +14,9 @@ import { workbenchPagesOf } from '../../../utils/workbenchNav.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const HR_SHELL_SOURCE = readFileSync(join(here, '../../scheduling/SchedulingLayout.vue'), 'utf8')
+// 票 04 起花名册的内边距归它自己的 scoped 样式（组里另外五页的根自带内边距，
+// 组级给非零值会把它们推走），所以这一条要连页面那份一起看。
+const ROSTER_SOURCE = readFileSync(join(here, '../../hygiene/HygieneRosterView.vue'), 'utf8')
 
 // 工作台三个壳的关系（B1 的小步之后）：
 //   - `WorkbenchLayout`（首页 / 后勤 / 我的）：一条顶栏，工作台级导航；
@@ -175,12 +178,25 @@ describe('人事壳（工作台级导航 + 本组四页）', () => {
     expect(on[0].attributes('href')).toBe('/workbench/hr/roster')
   })
 
-  it('花名册搬过来之后页面自己不带内边距：由这条壳补上（原来那份是卫生壳给的）', () => {
-    // jsdom 不做布局，所以这一条按源码断：花名册的 `.roster-page` 只设了宽度与居中，
-    // 内边距一直是卫生壳 `.hy-main` 给的；换成人事壳之后必须有这一条，否则页面上
-    // 文字会贴着屏幕边（其余三页自带内边距，不吃这条）。
-    expect(HR_SHELL_SOURCE).toMatch(
-      /\.sched-shell :deep\(\.roster-page\)\s*\{[^}]*padding:\s*var\(--hy-page\)/,
+  it('花名册的内边距由页面自己给：壳那条补丁随票 04 退场（值一字不差地搬过去）', () => {
+    // jsdom 不做布局，所以这一条按源码断。票 05 从卫生搬过来时内边距是人事壳的
+    // `:deep(.roster-page)` 补的；票 04 收口之后**组壳只剩本组自己的东西**（实时点），
+    // 值搬进花名册页面自己的 scoped 样式 —— 人事组里另外五页的根自带内边距
+    // （`18px 16px 40px` 那一档），组级给一个非零值会把它们推走 4–14px，所以壳给
+    // 人事组的 inset 是 0，花名册跟它的五页邻居一样自带。数字与老规则逐字相同。
+    // 注释先剥掉：壳里那段注释正是**讲**这条 `:deep(.roster-page)` 为什么退场。
+    const hrShell = HR_SHELL_SOURCE.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(hrShell).not.toMatch(/:deep\(/)
+    expect(hrShell).not.toMatch(/padding/)
+    expect(ROSTER_SOURCE).toMatch(/\.roster-page\s*\{[^}]*padding:\s*var\(--hy-page\)/)
+    expect(ROSTER_SOURCE).toMatch(
+      /padding-left:\s*max\(var\(--hy-page\),\s*var\(--safe-l\)\)/,
+    )
+    expect(ROSTER_SOURCE).toMatch(
+      /padding-right:\s*max\(var\(--hy-page\),\s*var\(--safe-r\)\)/,
+    )
+    expect(ROSTER_SOURCE).toMatch(
+      /padding:\s*clamp\(1\.1rem,\s*2\.2vw,\s*2rem\)\s+clamp\(1\.2rem,\s*3vw,\s*2\.6rem\)\s+2rem/,
     )
   })
 

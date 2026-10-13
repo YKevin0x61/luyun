@@ -890,16 +890,35 @@ async function copyInvite() {
 </template>
 
 <style scoped>
+/* 内容区的横向与上内边距**归这一页自己**（票 04 收口）。
+   票 05 把它从卫生那八页搬进人事组时，这一层是组壳 `SchedulingLayout.vue` 的
+   `:deep(.roster-page)` 补的；票 04 删掉组壳那条之后值照抄到这里 —— 人事组里另外五页
+   （月历 / 待办 / 班次表 / 人事提醒 / 加班统计）的根自带内边距，给**组**一个非零值会把
+   它们推走 4–14px，所以壳给人事组的 inset 是 0，这一页跟它的五页邻居一样自带。
+   数字与组壳那条逐字相同（含 ≥900px 那一档），页面组件其余样式一个字没动。 */
+.roster-page {
+  padding: var(--hy-page);
+  padding-left: max(var(--hy-page), var(--safe-l));
+  padding-right: max(var(--hy-page), var(--safe-r));
+}
+@media (min-width: 900px) {
+  .roster-page {
+    padding: clamp(1.1rem, 2.2vw, 2rem) clamp(1.2rem, 3vw, 2.6rem) 2rem;
+  }
+}
+
 /* 三个浮层都是 `.roster-page` 的直接子元素，共享表给直接子元素挂了 `hy-rise`：
    那个动画的 `transform`（`both` 保留到最终帧）会让内部 `position: fixed` 相对卡片
    定位而不是视口 —— 抽屉会滑进内容流里、确认框会掉到视口外。这里统一摘掉。 */
 .roster-page > .modal-overlay {
   animation: none;
 }
-/* 确认框（停用 / 放弃改动）是**叠在抽屉之上**的一层：抽屉自己的遮罩 `z-index: 120`，
-   确认框必须更高 —— 手机上抽屉是全屏的，低一层就等于整个被盖住、点不到。 */
+/* 确认框（停用 / 放弃改动）是**叠在抽屉之上**的一层：抽屉自己的遮罩与它同属**队列档**
+   （`--z-queue`，档内不再分先后）—— 抽屉遮罩在模板里排在前面，同档内靠 DOM 次序压住它，
+   手机上抽屉是全屏的，低一档就等于整个被盖住、点不到。票 05 起这两处的相对次序由
+   `designGuard` 的档位清单管（详见那份文件里的表）。 */
 .roster-page > .roster-dialog {
-  z-index: 130;
+  z-index: var(--z-queue);
 }
 
 /* ── 页头工具组 ─────────────────────────────────────────────────────── */
@@ -1052,7 +1071,7 @@ async function copyInvite() {
   align-items: stretch;
   justify-content: flex-end;
   padding: 0;
-  z-index: 120;
+  z-index: var(--z-queue);
   touch-action: none;
 }
 .roster-page .roster-drawer {
@@ -1072,7 +1091,7 @@ async function copyInvite() {
 .roster-page .roster-drawer-head {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--z-shell);
   display: flex;
   align-items: center;
   justify-content: space-between;

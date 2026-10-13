@@ -66,57 +66,104 @@ describe('店长端周表（员工 × 周）', () => {
     }
   })
 
-  it('点一格从底下弹抽屉，并且给页面留出底部空间', () => {
-    // 2026-10-04 起这一下走 `onCellClick`：抽屉折叠着（手里有笔）时它落笔，展开时才是开抽屉。
-    expect(view).toMatch(/@click="onCellClick\(employee, day\)"/)
-    expect(view).toMatch(/class="gSheet"/)
-    expect(view).toMatch(/\.gSheet \{[\s\S]{0,200}?position: fixed/)
-    // 门店那套的抽屉压住了下面几行员工（截图里能看到第 4、5 行被压掉一半）——
-    // 这里弹出来时给页面补底部内边距，人能滚上来。
-    expect(view).toMatch(/\.gB\.sheet-open \{ padding-bottom: 320px; \}/)
-    // 只有**展开着**才留 320px；折成笔刷条时只留一条（\.gB\.brush-open）。
-    expect(view).toMatch(/'sheet-open': !!sheet && !sheetFolded/)
-    // 点同一格 = 收起来：抽屉不会自己走开，得有个关掉的手势。
-    expect(view).toMatch(/if \(same\) \{[\s\S]{0,60}?closeSheet\(\)/)
+  it('点一格＝立刻落笔；笔栏常驻并给页面留出底部空间', () => {
+    // 票 14 修订（2026-10-13 用户真机裁定）：「还是之前点击方格就改写班次那种比较好」——
+    // 格子从「选区手柄」改回**落笔点**：点一格 = 用笔栏上那支笔立刻写这一格
+    // （用户①：原来点完格子还要再点一次班次才生效，多一步）。
+    expect(view).toMatch(/@click="paintCell\(employee, day\)"/)
+    // 选区还在，但手柄只剩两个：日期列头 = 整列、人名 = 整行（只为批量存在）。
+    expect(view).toMatch(/@click="onColPick\(day\)"/)
+    expect(view).toMatch(/@click="onRowPick\(employee\)"/)
+    expect(view).toMatch(/nextPick\(colHandle\(day\.business_date\)\)/)
+    expect(view).toMatch(/pickAt\(current, handle\)/)
+    // 笔栏**常驻**在周表这一栏的底部（不是选中才升起）：页面得一直让出它的高度，
+    // 不留的话它压住的正是下面几行员工（门店那套就是这个毛病，截图里能看到第 4、5 行被压掉一半）。
+    expect(view).toMatch(/v-if="panel === 'week'"/)
+    expect(view).toMatch(/class="gPick"/)
+    expect(view).toMatch(/\.gPick \{[\s\S]{0,240}?position: fixed/)
+    expect(view).toMatch(/\.gB\.pen-open \{ padding-bottom: 76px; \}/)
+    expect(view).toMatch(/'pen-open': panel === 'week'/)
+    // 点回锚点 / 点表格外的空白 = 取消（ADR 0107 决策 3）：展开与取消的规则在纯逻辑模块里
+    // （那边有单测），这一页负责把手柄接上去、把「点空白」翻成一次取消。
+    expect(view).toMatch(/pickAt,/)
+    expect(view).toMatch(/function onPageClick\(event\)/)
   })
 
-  it('抽屉里那一栏就是「班次 / 周期」，且周期只看不改', () => {
-    expect(view).toMatch(/sheetTab === 'shift'/)
-    expect(view).toMatch(/sheetTab === 'cycle'/)
-    // 写路径复用票 07 的单日覆盖，一个写接口都不新增。
-    expect(view).toMatch(/api\.put\(`\/api\/scheduling\/overrides\/\$\{employeeId\}\/\$\{date\}`/)
-    expect(view).toMatch(/api\.delete\(`\/api\/scheduling\/overrides\/\$\{target\.employeeId\}\/\$\{target\.date\}`\)/)
-    expect(view).toMatch(/is_rest: true/)
-    // 工作区不带 = 跟这个班次的固定区（票 03）；要单独改区走月历那页的编辑器。
-    expect(view).toMatch(/writeCell\(\{ shift_id: shift\.id, zone_id: null \}\)/)
-    // 规则是另一件事：抽屉只把人送到名单页，不在周表上改。
-    expect(view).toMatch(/await openPanel\('roster'\)/)
-    expect(view).toMatch(/openCycle\(row\)/)
+  it('笔栏上是笔（班次按钮组 / 工作区 / 休 / ↺），批量动作只在选区那一行', () => {
+    // 点色卡 = **换笔**（不是立刻写）：班次选一次就一直用，这就是用户要的「一支笔」的感觉
+    // （用户④：每次都要重新挑班次和工作区）。默认仍是第一个在用的班次。
+    expect(view).toMatch(/@click="pickPenShift\(shift\)"/)
+    expect(view).toMatch(/@click="pickPenRest\(\)"/)
+    expect(view).toMatch(/const penShift = computed/)
+    // 工作区默认收起、点按钮才多展开一行横滑的区名（用户②：动作条太高）。
+    expect(view).toMatch(/v-if="penZoneOpen" class="gPick-zones"/)
+    // 那颗按钮是**开关**，不是选项：展开时它写「收起」（窄，别把「休」挤出视野），
+    // 也不带选中态 —— 否则展开后两颗「跟固定区」一起亮（2026-10-13 用户截图）。
+    expect(view).toMatch(/penZoneOpen \? '收起' : penZoneName/)
+    expect(view).not.toMatch(/:class="\{ on: penZoneOpen \}"/)
+    // 批量只走选区那一行的「刷」/「清」；不选区时那一行整条不渲染。
+    expect(view).toMatch(/@click="applyRegion\(\)"/)
+    expect(view).toMatch(/@click="applyRegionClear\(\)"/)
+    // 写路径是**批量端点**（单格也只是 items 里的一条）：一次校验、一次写锁、一次提交。
+    expect(view).toMatch(/api\.post\('\/api\/scheduling\/overrides\/batch'/)
+    expect(view).toMatch(/batchPayload\(action, options, cells\)/)
+    // 一笔写完只重拉一次周表（不是每格一次）。
+    expect(view).toMatch(/await loadWeek\(week\.value \? week\.value\.start : weekStart\.value\)/)
+    // 规则仍是另一件事：在「名单」里改（上一版那条「去名单改规则」是单格摘要的一部分，
+    // 单格不再有摘要 —— 点一格就是落笔）。
+    expect(view).toMatch(/openPanel\('roster'\)/)
+    expect(view).toMatch(/openCycle\(employee\)/)
+    // 笔栏里**没有原生 `<select>`**：那个弹层由系统画，在这个贴底的位置会飘到页面中间
+    // （2026-10-13 用户截图），而那层我们一个像素都改不了。班次与工作区都是按钮组。
+    const pen = view.slice(view.indexOf('class="gPick"'), view.indexOf('<!-- 选区里有过去的日子'))
+    expect(pen).not.toMatch(/<select/)
   })
 
-  it('抽屉里能只改这一天的「工作区」（2026-10-04 补）', () => {
-    // 原先抽屉里改不了区：周表上发现"今天他不在案板"，得跳去月历那页点这个人才行。
-    // 补的是**单日**改区（长期固定区仍然归名单）——写路径没变，还是单日覆盖那条。
-    expect(view).toMatch(/const sheetZone = ref\(''\)/)
-    expect(view).toMatch(/function pickZone\(value\) \{/)
-    // 只改区：班次不动，带着当天那个班次一起提交（后端「只改区」走的就是这条路）。
-    expect(view).toMatch(
-      /writeCell\(\{ shift_id: cell\.shift_id, zone_id: value === '' \? null : Number\(value\) \}\)/
-    )
-    // 休 / 请假 / 还没排到的格子没有区：下拉禁掉，并说一句。
-    expect(view).toMatch(/const sheetHasShift = computed/)
-    expect(view).toMatch(/:disabled="sheetBusy \|\| !sheetUndoable \|\| !sheetHasShift"/)
-    expect(view).toContain('休 / 请假的日子没有区')
-    // 下拉按 **id** 预填、按服务端回写后的结果重新落位（按名字反查会指到重名的区）。
-    expect(view).toMatch(/function syncSheetZone\(\)/)
-    expect(view).toMatch(/String\(cell\.zone_id\)/)
-    expect(view).toMatch(/syncSheetZone\(\)\n  syncBrushFromCell\(\)\n\}/)
+  it('选区那一行：摘要 + 影响格数 + 「刷」「清」，只在有选区时出现；↺ 没得撤就禁用', () => {
+    // 用户不用批量（③），所以这一行不选区时**完全不出现** —— 它只在选了整列 / 整行后长出来。
+    expect(view).toMatch(/class="gPick-sum"/)
+    expect(view).toMatch(/v-if="pickActive" class="gPick-region"/)
+    expect(view).toMatch(/全店 \$\{view\.rows\.length\} 人 · \$\{view\.count\} 格/)
+    expect(view).toMatch(/这一周 · \$\{view\.count\} 格/)
+    // ↺ 撤销：只留最近一批；没有可撤销的那一批时禁用（口径 1）。
+    expect(view).toMatch(/@click="undoLast\(\)"/)
+    expect(view).toMatch(/:disabled="pickBusy \|\| !pickUndo"/)
+    // 撤销是内存级的：这台手机、刷新之前（ADR 0107 决策 7）。这句说明跟着回执那一行走。
+    expect(view).toMatch(/撤销只留最近一批、也只在这台手机上/)
+    expect(view).toMatch(/undoPlan\(snapshot, result\.skipped\)/)
   })
 
-  it('过去的日子改不动，说的是实话而不是给个按不动的按钮', () => {
-    expect(view).toMatch(/sheet\.value\.date >= data\.today/)
-    expect(view).toMatch(/过去的日子不改写/)
-    expect(view).toMatch(/:disabled="sheetBusy \|\| !sheetUndoable/)
+  it('过去的日子：点一下就弹一次确认；超 30 天与已批的假先拦下来点名', () => {
+    // ADR 0108：过去 30 天内可补记，弹**一次**确认点名是哪几天（不是每格弹一次）——
+    // 单格也一样，点一格就是一笔。
+    expect(view).toMatch(/const dates = pastDatesIn\(cells, \{ today: week\.value/)
+    expect(view).toMatch(/pastConfirm\.value = \{ action, options, cells, dates, clear: action === PICK_CLEAR \}/)
+    expect(view).toMatch(/<ConfirmDialog/)
+    expect(view).toMatch(/:message="pastConfirmText"/)
+    expect(view).toMatch(/@confirm="runPaint\(pastConfirm\.action, pastConfirm\.options, pastConfirm\.cells\)"/)
+    // 会被跳过的格子**不发请求**：超 30 天、已批的假（词表与回执同一套 `PICK_SKIP_TEXT`）。
+    expect(view).toMatch(/const \[skip\] = predictSkips\(cells, skipContext\(action\)\)/)
+    expect(view).toMatch(/跳过：\$\{skipText\(\[skip\]\)\}/)
+    // 整片刷的时候谁被跳过由服务端回执点名（它才是权威）。
+    expect(view).toMatch(/skipText\(result\.skipped\)/)
+    expect(view).toMatch(/PICK_SKIP_TEXT/)
+  })
+
+  it('回执与待批提醒收进一行提示，逐格点名的进「看全部」，而且会自己消失', () => {
+    expect(view).toMatch(/已刷 \$\{result\.applied\} 格/)
+    expect(view).toMatch(/跳过 \$\{result\.skipped\.length\} 格/)
+    expect(view).toMatch(/可撤销（只留最近一批、也只在这台手机上）/)
+    // 待批提醒看得出是「照刷」：先信服务端回执里那一份，它没给就退回既有的待办那一份。
+    expect(view).toMatch(/api\.get\('\/api\/scheduling\/inbox'\)/)
+    expect(view).toMatch(/pickPending\(cells, pendingCells\.value\)/)
+    expect(view).toMatch(/批了会盖掉你刚刷的班/)
+    // **一行** aria-live，几秒后自己消失（下一次操作替换它）——不再同时挂 4~6 行把表格压掉半屏。
+    expect(view).toMatch(/const PICK_NOTICE_MS = 6000/)
+    expect(view).toMatch(/noticeTimer = setTimeout/)
+    expect(view).toMatch(/aria-live="polite"/)
+    // 跳过 / 待批那几行**不丢**：收进 `details`，点「看全部」展开。
+    expect(view).toMatch(/v-if="pickNotice\.details\.length"/)
+    expect(view).toContain('看全部')
   })
 
   it('没配规则的人在行内标出来（行内，不是表下注释）', () => {
@@ -188,82 +235,85 @@ describe('店长端周表（员工 × 周）', () => {
   })
 })
 
-describe('周表笔刷（2026-10-04：抽屉折叠成一行就是那支笔）', () => {
-  it('折叠着点格子 = 落笔，不弹抽屉', () => {
-    expect(view).toMatch(/if \(sheetFolded\.value\) \{\n\s+paintCell\(employee, day\)/)
-    expect(view).toMatch(/@click="onCellClick\(employee, day\)"/)
-    expect(view).toMatch(/import \{ BRUSH_REST, BRUSH_SHIFT, brushPayload, canPaintOn \}/)
+// 票 14（ADR 0107）把那支常驻的笔整套换掉了：底部常驻笔刷条、展开的编辑抽屉、长按
+// （550ms）看 / 改这一格 —— 三样一起退役，单格的「看 / 改」由「点一格 → 动作条」接走。
+// 这一组断的就是「旧三样不在」＋「新的选区手柄与动作条在」。
+describe('旧三样退役：笔刷条 / 编辑抽屉 / 长按都不在了（票 14）', () => {
+  it('底部常驻的笔刷条没有了（连它的控件与提示语一起）', () => {
+    expect(view).not.toMatch(/gBrush-tag/)
+    expect(view).not.toMatch(/gBrush-hint/)
+    expect(view).not.toContain('点格子就刷上去')
+    expect(view).not.toMatch(/aria-label="笔刷班次"/)
+    expect(view).not.toMatch(/aria-label="笔刷工作区"/)
+    // 一进周表就开笔袋那套也没了：动作条只在**选中**那一刻出现（ADR 0107 决策 2）。
+    expect(view).not.toMatch(/openBrush\(\)/)
+    expect(view).not.toMatch(/sheetFolded/)
+    expect(view).not.toMatch(/\.gB\.brush-open/)
   })
 
-  it('长按格子 = 展开看 / 改这一格（pointer 计时，长按那次 click 被吞掉）', () => {
-    expect(view).toMatch(/@pointerdown="onCellDown\(employee, day\)"/)
-    expect(view).toMatch(/@contextmenu\.prevent/)
-    expect(view).toMatch(/LONG_PRESS_MS = 550/)
-    expect(view).toMatch(/if \(pressFired\) \{/)
-    // 展开时不需要长按（点一下本来就是开抽屉）。
-    expect(view).toMatch(/if \(!sheetFolded\.value\) return/)
+  it('展开的编辑抽屉没有了：写一格不再走单日覆盖那条路', () => {
+    expect(view).not.toMatch(/class="gSheet"/)
+    expect(view).not.toMatch(/sheetTab/)
+    expect(view).not.toMatch(/sheetZone/)
+    expect(view).not.toMatch(/writeOverride/)
+    // 单日覆盖那条接口仍然有主（月历那页的编辑器），但周表不再用它写格子。
+    expect(view).not.toMatch(/api\.put\(`\/api\/scheduling\/overrides\/\$\{target\.employeeId\}/)
   })
 
-  it('笔刷条上就是班次、工作区与「休」，控件沿用抽屉那套外观', () => {
-    expect(view).toMatch(/aria-label="笔刷班次"/)
-    expect(view).toMatch(/aria-label="笔刷工作区"/)
-    expect(view).toMatch(/toggleBrushRest\(\)/)
-    expect(view).toMatch(/class="gBrush-tag">刷</)
-    expect(view).toMatch(/点格子就刷上去 · 长按格子看 \/ 改这一格/)
-  })
-
-  it('笔刷条上的控件有能点中的高度（2026-10-13 用户反馈「太窄不好点」）', () => {
-    // 原先两个下拉 26px 高、按钮 27px，手机上指头落不准 —— 现在按护栏的触控下限 44px。
-    expect(view).toMatch(/\.gSheet-bar \.gZ-sel \{ flex: 1 1 auto; min-height: 44px;/)
-    expect(view).toMatch(/\.gSheet-bar \.gBtn \{ min-height: 44px;/)
-    expect(view).toMatch(/\.gSheet-bar \.gChip \{ min-height: 44px;/)
-    // 窄屏放不下就换行，不把下拉压到「跟固定区」都显示不全。
-    expect(view).toMatch(/\.gSheet-bar \{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; \}/)
-  })
-
-  it('落笔走抽屉同一条写路径；没选班次、过去的日子都在客户端先拦', () => {
-    expect(view).toMatch(/await writeOverride\(employee\.id, day\.business_date, payload\)/)
-    expect(view).toMatch(/canPaintOn\(day\.business_date/)
-    expect(view).toMatch(/过去的日子不改写：往前翻只能看。/)
-    expect(view).toMatch(/先在上面选一个班次（或点「休」），再点格子。/)
-  })
-
-  it('打开一格时笔跟着这一格走，但休 / 假 / 还没排的格子不动笔', () => {
-    expect(view).toMatch(/syncBrushFromCell\(\)/)
-    expect(view).toMatch(/cell\.shift_id !== null && cell\.shift_id !== undefined/)
-    expect(view).toMatch(/看了一眼休假日就把笔也换成"休"/)
-  })
-
-  it('长按别被手机当成选中文字', () => {
-    expect(view).toMatch(/-webkit-touch-callout: none; user-select: none;/)
+  it('长按（550ms）语义没有了：格子只有「点一下 = 落笔」这一种手势', () => {
+    expect(view).not.toMatch(/LONG_PRESS_MS/)
+    expect(view).not.toMatch(/onCellDown/)
+    expect(view).not.toMatch(/pressFired/)
+    expect(view).not.toMatch(/@pointerdown/)
+    expect(view).not.toMatch(/-webkit-touch-callout/)
+    expect(view).not.toMatch(/@contextmenu\.prevent/)
   })
 })
 
-describe('笔袋默认开着（2026-10-05 用户要的）', () => {
-  it('一切到周表就开笔袋：不用先点一格再收起', () => {
-    expect(view).toMatch(/await loadWeek\(weekStart\.value \|\| mondayOf\(today\.value\)\)\n\s+\/\/ 读完再开笔袋[\s\S]{0,80}?openBrush\(\)/)
-    expect(view).toMatch(/function openBrush\(\) \{\n\s+sheet\.value = null\n\s+sheetFolded\.value = true/)
-    // 工作区名单也是懒加载的：不先补齐，笔袋里那个下拉就只有「跟固定区」一项。
-    expect(view).toMatch(/if \(!zones\.value\.length\) await loadRoster\(\)\n\s+ensureBrushShift\(\)/)
+// 选区手柄与笔栏：这一组是**最小量**的「新东西在」（组件级渲染测试不在这条接缝上，
+// 展开规则 / 影响格数 / 跳过预判 / 请求体 / 撤销计划全在 `utils/schedulingWeekPick` 的单测里）。
+describe('选区手柄与笔栏（票 14 / ADR 0107，2026-10-13 方向修订）', () => {
+  it('日期列头与人名列可点、可聚焦、有正确的角色与名称', () => {
+    // 它们原来是完全不可交互的 `<th>`：现在里面是一个真按钮（Tab 到得了、读屏有名字）。
+    expect(view).toMatch(/class="gW-th"/)
+    expect(view).toMatch(/:aria-label="`\$\{formatDayLabel\(day\.business_date\)\}：选中这一列全店`"/)
+    expect(view).toMatch(/:aria-label="`\$\{employee\.name\}：选中这一整周`"/)
+    expect(view).toMatch(/:aria-pressed="pickedCols\.includes\(day\.business_date\) \? 'true' : 'false'"/)
+    // 窗口外的列照旧不可选（未来窗口的上限没变）。
+    expect(view).toMatch(/:disabled="!day\.in_window"/)
+    // 待批琥珀角标在按钮**外面**：点它不触发选列。
+    expect(view).toMatch(/<\/button>\n\s+<!-- 待批的天数[\s\S]{0,300}?class="pend"/)
   })
 
-  it('没有"正在看的那一格"也渲染抽屉（只在周表这一栏）', () => {
-    expect(view).toMatch(/v-if="\(sheet \|\| sheetFolded\) && panel === 'week'"/)
-    // 没有格子时折叠按钮没有意义：笔袋本来就是折着的。
-    expect(view).toMatch(/<button\n\s+v-if="sheet"\n\s+class="gSheet-fold"/)
+  it('选中高亮复用既有的选中外环，没有新增颜色引用', () => {
+    expect(view).toMatch(/\.gW-cell\.on, \.gW-th\.on \{ box-shadow: 0 0 0 2px var\(--hy-mint\); \}/)
+    expect(view).toMatch(/on: pickKeys\.value\.has\(`\$\{employee\.id\}\|\$\{day\.business_date\}`\)/)
+    expect(view).toMatch(/const pickedRows = computed/)
   })
 
-  it('「收起」连笔袋一起收；笔的默认班次等班次名单到货再补', () => {
-    expect(view).toMatch(/sheetFolded\.value = false \/\/ 收起 = 连笔袋一起收/)
-    expect(view).toMatch(/function ensureBrushShift\(\)/)
-    expect(view).toMatch(/watch\(activeShifts, \(\) => \{\n\s+if \(sheetFolded\.value\) ensureBrushShift\(\)/)
+  it('笔栏常驻并叠在底部导航之上：那套「底栏让位」整条退役', () => {
+    // 上一版是「选中那一刻动作条升起、**替换**底栏」（`body.sched-picking` + 文件末尾那条
+    // 无作用域规则）；用户裁定回到常驻笔栏、底栏照旧留在原位（那是他熟悉的旧形态）。
+    expect(view).not.toMatch(/sched-picking/)
+    expect(view).not.toMatch(/wb-tabbar/)
+    expect(view).toMatch(/v-if="panel === 'week'"/)
+    // 笔栏是 `fixed` + `--z-queue`（200，壳底栏是 `--z-shell` 20），所以它压在底栏上面。
+    // 这条成立的前提是页面根**不自建层叠上下文** —— 给了 z-index 就会把 fixed 的笔栏锁在
+    // 底栏下面（票 12 的笔刷条正是这么坏的：ADR 0107 记着「真机截图里那句提示语被压掉一半」）。
+    // 票 05 起这里断**语义名**（数字不准再出现在源码里）：要动的只有档位，见 designGuard 的清单。
+    expect(view).toMatch(/\.gPick \{[\s\S]{0,240}?z-index: var\(--z-queue\)/)
+    const page = view.match(/\.sched-page \{[\s\S]*?\n\}/)[0]
+    expect(page).not.toMatch(/\n\s*z-index:/)
+    // 「6 行压掉半屏」不回来：笔栏本体是一行 —— 没有换行、也没有 64vh 那种滚动高度。
+    const pen = view.slice(view.indexOf('class="gPick"'), view.indexOf('<!-- 选区里有过去的日子'))
+    expect(pen).not.toMatch(/max-height/)
+    expect(pen).not.toMatch(/flex-wrap/)
   })
 
-  it('笔袋只占一条的高度，最后一行的格子还能滚上来', () => {
-    // 108px = 那一条（44px 的控件）＋ 提示文案 ＋ 上下内边距；控件抬到 44px 之前是 88。
-    expect(view).toMatch(/\.gB\.brush-open \{ padding-bottom: 108px; \}/)
-    // 手机档那一行会换行（见上一条），留白跟着多一行。
-    expect(view).toMatch(/@media \(max-width: 430px\) \{\n\s+\.gB\.brush-open \{ padding-bottom: 160px; \}/)
-    expect(view).toMatch(/'brush-open': sheetFolded && panel === 'week'/)
+  it('提示区域在笔栏里，一行、能读出来（aria-live），并且会自己消失', () => {
+    expect(view).toMatch(/v-if="pickNotice"/)
+    expect(view).toMatch(/noticeOpen/)
+    expect(view).toMatch(/aria-live="polite"/)
+    expect(view).toMatch(/@click="noticeOpen = !noticeOpen"/)
   })
 })

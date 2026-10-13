@@ -766,7 +766,7 @@ onBeforeUnmount(() => {
   max-height: min(94vh, 58rem);
   overflow: hidden;
   padding: 0;
-  z-index: 1;
+  z-index: var(--z-shell);
   container-type: inline-size;
   container-name: recipe-form;
 }
@@ -789,13 +789,13 @@ onBeforeUnmount(() => {
   cursor: grabbing;
 }
 .confirm-dialog {
-  z-index: 2100;
+  z-index: var(--z-queue);
 }
 .confirm-dialog-panel {
   position: relative;
   max-width: 28rem;
   width: 92%;
   padding: 24px;
-  z-index: 1;
+  z-index: var(--z-shell);
 }
 </style>

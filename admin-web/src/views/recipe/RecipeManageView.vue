@@ -469,7 +469,7 @@ applyManageQuery()
     <!-- 弹窗：新增岗位 -->
     <div v-if="modal.kind === 'add-station'" class="print-preview-modal" @click.self="closeModal">
       <div class="print-preview-modal-backdrop" @click="closeModal"></div>
-      <div class="sop-panel" style="position:relative;max-width:640px;width:92%;max-height:86vh;overflow:auto;padding:24px;z-index:1">
+      <div class="sop-panel" style="position:relative;max-width:640px;width:92%;max-height:86vh;overflow:auto;padding:24px;z-index:var(--z-shell)">
         <h2 class="page-title" style="font-size:1.2rem">新增岗位</h2>
         <label class="form-label">标识（作 URL，建议拼音/英文）</label>
         <input class="form-input" v-model="stationForm.slug">
@@ -486,7 +486,7 @@ applyManageQuery()
     <!-- 弹窗：重命名岗位 -->
     <div v-if="modal.kind === 'rename-station'" class="print-preview-modal" @click.self="closeModal">
       <div class="print-preview-modal-backdrop" @click="closeModal"></div>
-      <div class="sop-panel" style="position:relative;max-width:640px;width:92%;max-height:86vh;overflow:auto;padding:24px;z-index:1">
+      <div class="sop-panel" style="position:relative;max-width:640px;width:92%;max-height:86vh;overflow:auto;padding:24px;z-index:var(--z-shell)">
         <h2 class="page-title" style="font-size:1.2rem">重命名岗位</h2>
         <input class="form-input" v-model="renameForm.title">
         <div class="row-actions" style="margin-top:16px">
@@ -510,7 +510,7 @@ applyManageQuery()
     <!-- 弹窗：导入 CSV -->
     <div v-if="modal.kind === 'import-csv'" class="print-preview-modal" @click.self="closeModal">
       <div class="print-preview-modal-backdrop" @click="closeModal"></div>
-      <div class="sop-panel" style="position:relative;max-width:560px;width:92%;max-height:86vh;overflow:auto;padding:24px;z-index:1">
+      <div class="sop-panel" style="position:relative;max-width:560px;width:92%;max-height:86vh;overflow:auto;padding:24px;z-index:var(--z-shell)">
         <h2 class="page-title" style="font-size:1.2rem">导入 CSV</h2>
         <p class="form-hint" style="margin-bottom:12px">导入会追加到当前岗位「{{ currentTitle }}」。同名配方会各留一条，不会合并。</p>
         <RecipeFileDropzone
@@ -529,7 +529,7 @@ applyManageQuery()
     <!-- 弹窗：历史 -->
     <div v-if="modal.kind === 'history'" class="print-preview-modal" @click.self="closeModal">
       <div class="print-preview-modal-backdrop" @click="closeModal"></div>
-      <div class="sop-panel" style="position:relative;max-width:640px;width:92%;max-height:86vh;overflow:auto;padding:24px;z-index:1">
+      <div class="sop-panel" style="position:relative;max-width:640px;width:92%;max-height:86vh;overflow:auto;padding:24px;z-index:var(--z-shell)">
         <h2 class="page-title" style="font-size:1.2rem">修改历史</h2>
         <ul class="station-list">
           <li v-if="!historyItems.length" class="station-item muted">暂无历史</li>
@@ -616,13 +616,13 @@ applyManageQuery()
   gap: 0.35rem;
 }
 .confirm-dialog {
-  z-index: 2100;
+  z-index: var(--z-queue);
 }
 .confirm-dialog-panel {
   position: relative;
   max-width: 28rem;
   width: 92%;
   padding: 24px;
-  z-index: 1;
+  z-index: var(--z-shell);
 }
 </style>

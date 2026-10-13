@@ -32,7 +32,7 @@ html[data-workbench] {
   --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-6:24px; --sp-8:32px;
   --fs-11:11px; --fs-12:12px; --fs-13:13px; --fs-14:14px; --fs-16:16px; --fs-20:20px; --fs-24:24px;
   --r-0:2px; --r-1:8px; --r-2:12px; --r-3:16px; --r-full:999px;
-  --z-shell:20; --z-scrim:40; --z-dialog:50; --z-toast:100; --z-queue:120;
+  --z-shell:20; --z-scrim:40; --z-dialog:55; --z-toast:100; --z-queue:200;
   --dur-1:120ms; --dur-2:200ms; --dur-3:320ms; --ease:cubic-bezier(.22,1,.36,1);
   --ls-1:.04em; --ls-2:.08em; --ls-3:.12em; --ls-4:.16em;
   --dot:7px; --icon-tab:21px;

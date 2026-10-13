@@ -19,7 +19,7 @@
 // 组内页（rail 与页头下拉里的那些）= `workbenchPagesOf(group, audience)`：**group + 落点页
 // `audience` 双层过滤**（spec §5.13），所以员工在「配方」组看不到「岗位二维码 / 配方管理」
 // 那两扇点不通的门。
-import { computed, onMounted, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import WorkbenchExitButton from '../../components/workbench/WorkbenchExitButton.vue'
 import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
@@ -32,6 +32,14 @@ import { pageRow } from '../../router/pageRoutes.js'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
 import { WORKBENCH_HOME, WORKBENCH_TITLE } from '../../utils/workbenchCopy'
 import { IDENTITY_STAFF } from '../../utils/workbenchIdentity'
+import {
+  MOBILE_MAX_WIDTH_PX,
+  WIDE_INSET_MIN_WIDTH_PX,
+  bottomInsetPx,
+  contentInsetFor,
+  readSafeBottomPx,
+  tabBarOnScreen,
+} from '../../utils/workbenchInsets'
 import {
   workbenchAudienceFor,
   workbenchGroup,
@@ -58,21 +66,120 @@ const route = useRoute()
 const router = useRouter()
 const identityStore = useWorkbenchIdentityStore()
 
-/** 自带底部工具栏的页面：配方阅读面那一页有自己的 `.sop-bottom-bar`（搜索 / 目录 / 字号 /
- *  份数 —— 全是阅读动作）。手机档这里**不再叠工作台底栏**：两条 `fixed` 底栏只差 4px，
- *  上面那条会把工作台那条整个盖住，留着只是白占一次渲染、内容区还要为它让一遍高度
- *  （2026-10-08 用户裁定）。桌面档那条不在视口底，不受影响。 */
-const OWN_BOTTOM_BAR_PATHS = ['/workbench/kitchen/recipe/detail']
-const hasOwnBottomBar = computed(() => OWN_BOTTOM_BAR_PATHS.includes(route.path))
+/** 这一页自带底部工具栏吗（清单里的 `ownBottomBar`）—— 配方阅读面那一页有自己的
+ *  `.sop-bottom-bar`（搜索 / 目录 / 字号 / 份数，全是阅读动作）。手机档这里**不再叠工作台
+ *  底栏**：两条 `fixed` 底栏只差 4px，上面那条会把工作台那条整个盖住，留着只是白占一次
+ *  渲染、内容区还要为它让一遍高度（2026-10-08 用户裁定）。桌面档那条不在视口底，不受影响。
+ *
+ *  **判据在页面清单里，壳只读它**（ADR 0106 决策 5）：这份路径名单原来手写在壳里
+ *  （`OWN_BOTTOM_BAR_PATHS`），票 02 起退场 —— 「这一页是什么」只有清单一处来源。
+ *  清单里那一行的另一个 opt-out 是 `flush`（铺满），两者互不隐含。
+ *
+ *  票 03 起它还是**下 inset 的输入之一**：底栏没渲染，内容区就不留那一条的高度
+ *  （见下面的 `contentInsetStyle`）。 */
+const hasOwnBottomBar = computed(() => {
+  const row = pageRow(route.path)
+  return !!(row && row.ownBottomBar)
+})
 
+/** 这一页**铺满**吗（清单里的 `flush`，ADR 0106 决策 5）：A4 预览那一类页面不要壳给的
+ *  横向与上内边距 —— 多留一圈就摆不下。**票 04 起壳消费它**（同一行清单、同一个读取口；
+ *  「自带底栏」与「铺满」互不隐含：底下那条栏是谁的、内边距留不留，是两件事）。 */
+const hasFlush = computed(() => {
+  const row = pageRow(route.path)
+  return !!(row && row.flush)
+})
+
+/** 本组的 key（三个调用点之一：显式给的组优先，否则按当前路径算）。**在内容区的度量之前
+ *  定出来** —— `contentInsetStyle` 按它查组表。 */
+const groupKey = computed(() => props.group || workbenchGroupOf(route.path) || '')
+
+/** 现在是不是手机档。底栏只在 ≤720px 渲染（`WorkbenchTabBar.vue` 自己那条媒体查询），桌面档
+ *  它是 `display: none` —— 那它就不该在内容区里占地方。**首帧就要对**：初始值直接问一次，
+ *  别等 `onMounted`（手机上会闪一帧没有让位的版）。jsdom / SSR 没有 `matchMedia`：按桌面档算
+ *  （测试替它回答，见 `__tests__/workbenchShell.test.js`）。 */
+function mobileTierNow() {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+  return window.matchMedia(`(max-width: ${MOBILE_MAX_WIDTH_PX}px)`).matches
+}
+const mobile = ref(mobileTierNow())
+
+/** 现在是不是**内边距宽档**（≥900px）：共享样式表里给现场八页换一套内边距的那条媒体查询
+ *  （票 04）。它与 720 那条不是一回事 —— 721–899 之间底栏已经收起来了，但那八页仍吃 base
+ *  那份内边距。同样首帧就要对（宽屏上闪一帧窄档的版比手机上更显眼）。 */
+function wideTierNow() {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+  return window.matchMedia(`(min-width: ${WIDE_INSET_MIN_WIDTH_PX}px)`).matches
+}
+const wide = ref(wideTierNow())
+
+/** 安全区原始值：从令牌层那一根 `--safe-b` 读（`theme.workbench.css` 里写着 `env()`，
+ *  浏览器在计算值里就把它解成 px）—— 本票不再写第二遍 `env()`；横向与上的安全区留给 04。 */
+const safeBottomPx = ref(readSafeBottomPx())
+let mobileMq = null
+let wideMq = null
+
+/** 档位变了（拖窗口 / 转屏）就重算，并顺手重读安全区（它本来就随横竖屏变）。
+ *  少了这一步，桌面窗口被拖到 720 以下时底栏会冒出来、内容区却不给它让位；宽档同理
+ *  （拖过 900 时现场八页要换成另一套内边距）。 */
+function onTierChange(event) {
+  mobile.value = event.matches
+  safeBottomPx.value = readSafeBottomPx()
+}
+
+function onWideChange(event) {
+  wide.value = event.matches
+}
+
+onMounted(() => {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+  mobileMq = window.matchMedia(`(max-width: ${MOBILE_MAX_WIDTH_PX}px)`)
+  mobileMq.addEventListener('change', onTierChange)
+  wideMq = window.matchMedia(`(min-width: ${WIDE_INSET_MIN_WIDTH_PX}px)`)
+  wideMq.addEventListener('change', onWideChange)
+})
+onBeforeUnmount(() => {
+  mobileMq?.removeEventListener('change', onTierChange)
+  wideMq?.removeEventListener('change', onWideChange)
+})
+
+/** **内容区的让位**：壳持有内容容器，三根度量由壳算、套在唯一的内容容器上（ADR 0106
+ *  决策 2 与 4）。
+ *
+ *  - `--wb-inset-bottom`（票 03）：判据是「**本屏此刻渲染了底栏吗**」——底栏在屏上就是
+ *    「底栏高 + 安全区」，否则 0。**不看 `audience`**：管理端手机档同样有那条 57px 的底栏
+ *    （2026-10-13 基线实测），按身份给管理端算 0 会当场少掉一段让位。
+ *  - `--wb-inset-top` / `--wb-inset-inline`（票 04）：按页面清单里的 `group` 查表给
+ *    （`utils/workbenchInsets.js` 的 `contentInsetFor`），值就是收口前那一处的原文 ——
+ *    现场八页原来在共享样式表的 `.hy-main`、工作台首页原来在页面自己的 `.wbh`；其余几组
+ *    今天的内边距长在页面自己身上，表里给 0（每一组的依据写在那一行上）。**铺满的页**
+ *    （清单里的 `flush`，A4 预览那一类）不吃这一份。
+ *  - 顶栏（桌面 `.wb-top` 是 sticky、手机 `WorkbenchMobileHead` 是普通流）自己占位，
+ *    所以上的这一根只承载页面那层内边距，不额外加顶栏高度。
+ *
+ *  **不发布到 `<html data-workbench>`**：那是给主题（颜色 / 字体 / 层级）用的层，度量不进
+ *  全局命名空间（ADR 0106 决策 4）。三根名字只在这个文件里出现，消费方也只有 `.wb-main`。 */
+const contentInsetStyle = computed(() => {
+  const barOnScreen = tabBarOnScreen({
+    hasOwnBottomBar: hasOwnBottomBar.value,
+    mobile: mobile.value,
+  })
+  const content = contentInsetFor(groupKey.value, {
+    wide: wide.value,
+    flush: hasFlush.value,
+  })
+  return {
+    '--wb-inset-top': content.top,
+    '--wb-inset-bottom': `${bottomInsetPx({ barOnScreen, safeBottomPx: safeBottomPx.value })}px`,
+    '--wb-inset-inline': content.inline,
+  }
+})
 // 探针由切换器自己开场（`onMounted`）。这里只在**已经探出结论**时消费它：没探完时
 // `identity` 是 null，导航不渲染 —— 不给一个可能点不通的入口。
 const identity = computed(() => identityStore.identity)
 const audience = computed(() => workbenchAudienceFor(identity.value))
 const navItems = computed(() => workbenchNavFor(identity.value))
 
-// 本组的 key（三个调用点之一：显式给的组优先，否则按当前路径算）。
-const groupKey = computed(() => props.group || workbenchGroupOf(route.path) || '')
 const groupRow = computed(() => workbenchGroup(groupKey.value))
 /** 本组名（rail 的 `aria-label` 与页头下拉的组名格都用它）。 */
 const groupLabel = computed(() => (groupRow.value ? groupRow.value.label : ''))
@@ -139,7 +246,7 @@ watch(identity, keepViewAllowed)
       <WorkbenchRail :items="groupPages" :label="props.label || groupLabel">
         <slot name="rail" />
       </WorkbenchRail>
-      <main id="workbench-main" class="wb-main" :class="{ 'has-own-bar': hasOwnBottomBar }">
+      <main id="workbench-main" class="wb-main" :style="contentInsetStyle">
         <slot />
       </main>
     </div>
@@ -207,17 +314,30 @@ watch(identity, keepViewAllowed)
 .wb-nav { margin-left: auto; }
 /* 内容区：左 rail + 页面本体。 */
 .wb-body { display: flex; align-items: flex-start; flex: 1; min-height: 0; }
-.wb-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+/* **壳持有内容容器**（ADR 0106 决策 2 与 3）：三根度量挂在 `.wb-main` 的 inline style 上
+   （见 `contentInsetStyle`），消费它们的也只有这一条规则 —— 底栏是 `fixed`（脱离文档流），
+   不让出那一条的高度，滚到底时最后一块内容就压在它下面够不着。
+   手机档底栏在时 = 底栏高 + 安全区（今天那条
+   `calc(57px + env(safe-area-inset-bottom, 0px))` 的等价物，01 票基线实测 57px），
+   自带底栏的页与桌面档都是 0。顶与横向按**页面清单里的 `group`** 查表给（票 04）：值就是
+   收口前那一处的原文（现场八页的 `.hy-main`、工作台首页的 `.wbh`；其余几组今天长在页面
+   自己身上，表里是 0），「铺满」的页不吃这一份。 */
+.wb-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--wb-inset-top, 0px) var(--wb-inset-inline, 0px) var(--wb-inset-bottom, 0px);
+}
 
 /* 窄屏：顶上那一条整个收进 `WorkbenchMobileHead` 的一行（方案 C）。是 `display: none`
-   不是删组件：桌面档（>720px）还是它在干活。 */
+   不是删组件：桌面档（>720px）还是它在干活。
+   内容区那份底部让位**不在这里**了（票 03）：底栏高与安全区由壳算成一个数
+   （`--wb-inset-bottom`，桌面档算出来就是 0），媒体查询不再是第二个判据 —— 否则
+   「本屏渲染了底栏吗」会有两处各答一半。 */
 @media (max-width: 720px) {
   .wb-top { display: none; }
-  /* 底栏是 `fixed`（脱离文档流），内容区得自己让出这一条的高度，否则滚到底时最后一块内容
-     压在它下面够不着。57px = 底栏自身高 + 1px 边框，再加 iPhone 的安全区。 */
-  .wb-main { padding-bottom: calc(57px + env(safe-area-inset-bottom, 0px)); }
-  /* 自带底栏的页（配方阅读面）：工作台那条不渲染，这份内边距也还回去。 */
-  .wb-main.has-own-bar { padding-bottom: 0; }
 }
 @media (max-width: 560px) {
   /* 牌子让位给切换器与两扇门：子系统名字在页面标题与工作台导航里都还在。 */

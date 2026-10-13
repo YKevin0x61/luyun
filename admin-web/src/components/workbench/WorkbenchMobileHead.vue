@@ -216,9 +216,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     align-items: center;
     gap: 8px;
     flex: 0 0 auto;
-    /* 浮层要相对这一条定位；z-index 压在内容之上、底栏（15）之上。 */
+    /* 浮层要相对这一条定位；层级与底栏同档（`--z-shell`），靠 DOM 次序压住它。 */
     position: relative;
-    z-index: 20;
+    z-index: var(--z-shell);
     min-height: 56px;
     padding: 6px max(12px, env(safe-area-inset-right)) 6px max(12px, env(safe-area-inset-left));
     background: rgba(8, 19, 21, .96);
@@ -275,7 +275,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 .wmh-panel {
   position: absolute;
   top: calc(100% - 2px);
-  z-index: 41;
+  z-index: var(--z-dialog);
   padding: 6px;
   background: var(--hy-surface);
   border: 1px solid var(--hy-line-strong);
@@ -327,7 +327,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 .wmh-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: var(--z-scrim);
   background: rgba(5, 13, 15, .55);
 }
 </style>

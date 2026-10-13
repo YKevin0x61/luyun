@@ -407,7 +407,7 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65);
-  z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 20px;
+  z-index: var(--z-queue); display: flex; align-items: center; justify-content: center; padding: 20px;
 }
 .modal-box {
   background: var(--card); border: 1px solid var(--border); border-radius: 12px;

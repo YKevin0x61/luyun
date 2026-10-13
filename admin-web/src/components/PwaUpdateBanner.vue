@@ -28,7 +28,7 @@ defineEmits(['apply', 'dismiss'])
 <style scoped>
 .pwa-update-banner {
   position: fixed;
-  z-index: 1200;
+  z-index: var(--z-queue);
   top: 72px;
   right: 18px;
   width: min(420px, calc(100vw - 36px));

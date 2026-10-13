@@ -22,8 +22,10 @@
   排班一个字不变。
 
 **已经写下的行不重算**：展开时窗口内哪天（哪个人）已经有行就跳过。所以「改规则只影响
-今天以后」是这个做法本身的结果，不是额外加的一段逻辑 —— 过去那些行早就写在那儿了，
-没人会去动它们（`spec.md` 的「展开」）。
+今天以后」是这个做法本身的结果，不是额外加的一段逻辑 —— 过去那些行早就写在那儿，
+展开不会回头补写（`spec.md` 的「展开」）。它们仍可以被**补记**：店长手改一格
+（`set_override`）或一次刷一片（`set_overrides_batch`）在近 `BACKFILL_DAYS` 天内动得了，
+再往前就不改（ADR 0108）。
 
 营业日复用 `services.business_day.py`（06:00 切日），不另起一套。
 """
@@ -67,12 +69,14 @@ def _needs_migration(method):
     return wrapper
 
 __all__ = [
+    "BACKFILL_DAYS",
     "DEFAULT_SHIFTS",
     "DUTY_SLOTS",
     "EXPANSION_DAYS",
     "KIND_LEAVE",
     "KIND_MANUAL",
     "KIND_SWAP",
+    "MAX_BATCH_CELLS",
     "MAX_CYCLE_DAYS",
     "MAX_REQUEST_NOTE",
     "MAX_SHIFT_NAME",
@@ -91,6 +95,15 @@ __all__ = [
 # 排班窗口：从今天起铺这么多天（含今天）。
 EXPANSION_DAYS = 90
 
+# 可补记窗口：今天**往前**这么多天（含）以内，过去的日子还能补记 / 改（ADR 0108）。
+# **一处定义**：单日覆盖的 `past_day` 与批量端点的逐格跳过都读它。
+# 与 `EXPANSION_DAYS` 是两个方向的窗口，别并成一个数 —— 未来那头照旧只到展开窗口。
+BACKFILL_DAYS = 30
+
+# 一次批量落笔的上限（格）。超了**整批拒绝**：那不是「某一格刷不了」，是这次请求本身
+# 太大（前端照这个数把选区卡住，服务端这道才是权威）。
+MAX_BATCH_CELLS = 200
+
 # 排班结果这一行是谁写的。
 SOURCE_RULE = "rule"
 SOURCE_OVERRIDE = "override"
@@ -101,6 +114,18 @@ SOURCE_OVERRIDE = "override"
 KIND_MANUAL = "manual"
 KIND_LEAVE = "leave"
 KIND_SWAP = "swap"
+
+# 批量落笔（`POST /overrides/batch`）的三种动作：整批同一个。`clear` 是**退回轮转规则**
+# （摘掉覆盖记录 + 按现在的规则重算那天），不是「那天休」—— 后者是 `rest`。
+BATCH_SHIFT = "shift"
+BATCH_REST = "rest"
+BATCH_CLEAR = "clear"
+BATCH_ACTIONS = (BATCH_SHIFT, BATCH_REST, BATCH_CLEAR)
+
+# 批量回执里「这个人这天有申请等着批」那一条的 kind（前端照它渲染提醒）。
+# 提醒**不阻断**写入：申请批下来会把那天换成请假 / 对调（`_write_override_row` 的既有
+# 语义），刷不刷由店长定（ADR 0107 决策 6）。
+REMINDER_PENDING_REQUEST = "pending_request"
 
 # 申请的状态（`spec.md` 的状态机）。`pending_peer` 是换班专用（票 09）：提出来先等对方
 # 点头，对方同意了才轮到店长（`pending_manager`）；请假从「等店长批」直接到批 / 驳，
@@ -373,6 +398,15 @@ class SchedulingStore:
         请求正好跨过 06:00 的切日点时删和铺会算在不同的营业日上（见 `set_rule`）。
         """
         return today, shift_business_date(today, EXPANSION_DAYS - 1)
+
+    @staticmethod
+    def _backfill_floor(today: str) -> str:
+        """可补记窗口的第一天：``today - BACKFILL_DAYS``（含这一天）。
+
+        只有这一处算它 —— 单日覆盖的 `past_day` 与批量端点的逐格跳过读的是同一个数、
+        同一种算法；`BACKFILL_DAYS` 一改，两处一起跟着走。
+        """
+        return shift_business_date(today, -BACKFILL_DAYS)
 
     # ── 班次 ────────────────────────────────────────────────────────────
 
@@ -929,6 +963,26 @@ class SchedulingStore:
             return {"cycle": None, "anchor_date": None, "invalid": True}
         return {"cycle": cycle, "anchor_date": raw["anchor_date"]}
 
+    def _cycle_lead_shift(self, raw: dict) -> Optional[int]:
+        """这条路规则认出来的「起点班次」：``cycle`` 里第一个不是「休」的班次 id。
+
+        周表行序的分片依据（票 14；ADR 0107 决策 10）。**整轮全是休**给 `None` —— 那等于
+        没规则（这个人每天都休，没有哪个片是他的）。`cycle` 读不出来时也给 `None`，
+        **不抛错**：`week_grid` 是只读的一条路，而 `scheduling_rules` 是人工 SQL 也会碰的
+        表，一条脏规则不该把整张周表变成 400（`expand()` 对它是跳过这个人、
+        `roster_with_rules()` 是标成 `invalid`，这条排序跟着一起降级）。
+
+        解码复用 `_decode_cycle`（唯一那份 JSON 解析），不在这里另写一份。
+        """
+        try:
+            cycle = self._decode_cycle(raw["cycle"])
+        except SchedulingError:
+            return None
+        for shift_id in cycle:
+            if shift_id is not REST:
+                return int(shift_id)
+        return None
+
     @_needs_migration
     async def set_rule(
         self,
@@ -1068,19 +1122,26 @@ class SchedulingStore:
         `shift_id IS NULL` 就是休）；否则 `shift_id` 必给。`zone_id` 不给时跟这个班次的
         **固定区**（`scheduling_zone_defaults`），跟展开时是同一条口径。
 
+        **过去的日子在可补记窗口内照改**（票 14；ADR 0108）：漏排、补记发生在上周，
+        这是店长唯一能补上的地方；只有早于 `_backfill_floor(today)` 的才拒（`past_day`）。
+        未来那一头仍是展开窗口（`beyond_window`），不动。
+
         校验在锁外（都是读）；写覆盖记录与写结果行在**一次**写锁、一次提交里。
 
         **今天与窗口末日只在这里读一次**：两次各读一次钟，请求正好跨过 06:00 的切日点时
-        「过去不改」和「还没排到」会按两个不同的营业日判（`beyond_window` 那句文案里的
-        日期也会跟刚判过的那个不一样）。
+        「超出可补记窗口」和「还没排到」会按两个不同的营业日判（`beyond_window` 那句文案
+        里的日期也会跟刚判过的那个不一样）。
         """
         employee_id = int(employee_id)
         day = _require_business_date(business_date)
         today = self.today()
+        first_day = self._backfill_floor(today)
         _, last_day = self._window_from(today)
-        if day < today:
-            # 过去不改（`spec.md`）：那时那天是什么样就是什么样，改它等于改历史。
-            raise SchedulingError("past_day", "past_day")
+        if day < first_day:
+            # 超出可补记窗口：太旧的日子不再改写。第二参填进那句提示的 `{}`：报**真实的
+            # 窗口第一天**，别把「30 天」这个数写死在文案里（那个数一改，店长看到的就是
+            # 假话 —— 同 `beyond_window` 的理由）。
+            raise SchedulingError("past_day", first_day)
         if day > last_day:
             # 窗口尽头之后是「还没铺到」。在那里写一行，月历上就会出现一个
             # 「规则还没算到、却已经有人上班」的格子 —— 那是另一件事（先配规则）。
@@ -1175,8 +1236,12 @@ class SchedulingStore:
     async def clear_override(self, employee_id: int, business_date: str) -> dict:
         """撤掉某人某天的覆盖，那天回到规则铺出来的样子（票 07 的验收项）。
 
-        今天以后按**现在的规则**重算一遍；已经过去的日期只把覆盖记录摘掉、结果行不动
-        —— 那天当时确实是被改过的，写下来的历史就是那样（`spec.md` 的「过去不改」）。
+        今天与以后按**现在的规则**重算一遍。
+
+        **过去的日子不给撤**（票 14；ADR 0108 决策 6）：以前对过去是「摘掉覆盖记录、
+        结果行不动」—— 月历上的青点消失了、格子里的班次一点没变，没人看得出发生了
+        什么。新口径下过去只能**改成某个班**（`set_override` 在可补记窗口内照常写），
+        不能退回规则；要撤就先把它改回今天或以后 —— 拒绝的理由是 `past_clear`。
 
         **今天只读一次**往下传：「这一天算不算过去」与「那天还在不在窗口里」两处各读
         一次钟的话，请求正好跨过 06:00 时会重算一个已经结束的营业日（或者漏算刚到的
@@ -1184,18 +1249,27 @@ class SchedulingStore:
         """
         employee_id = int(employee_id)
         day = _require_business_date(business_date)
-        await self._clear_override(employee_id, day, self.today())
+        today = self.today()
+        if day < today:
+            raise SchedulingError("past_clear", "past_clear")
+        await self._clear_override(employee_id, day, today)
         return {"employee_id": employee_id, "business_date": day}
 
     @serialized_write
     async def _clear_override(self, employee_id: int, day: str, today: str) -> None:
+        await self._delete_override_row(employee_id, day)
+        await self._restore_day(employee_id, day, today)
+        await self._conn.commit()
+
+    async def _delete_override_row(self, employee_id: int, day: str) -> None:
+        """摘掉某人某天的覆盖记录（结果行不动）。不自己上锁、不提交。
+
+        批量端点的「清除班次」也走它 —— 一条覆盖记录的删法只此一处。
+        """
         await self._conn.execute(
             "DELETE FROM scheduling_overrides WHERE employee_id = ? AND business_date = ?",
             (employee_id, day),
         )
-        if day >= today:
-            await self._restore_day(employee_id, day, today)
-        await self._conn.commit()
 
     async def _restore_day(self, employee_id: int, day: str, today: str) -> None:
         """把某一天按**现在的规则**重算回 `source='rule'`。不自己上锁、不提交。
@@ -1252,6 +1326,231 @@ class SchedulingStore:
                    WHERE employee_id = ? AND business_date = ?""",
                 (shift_id, zone_id, source, stamp, employee_id, day),
             )
+
+    # ── 批量落笔（票 14） ───────────────────────────────────────────────
+
+    @_needs_migration
+    async def set_overrides_batch(
+        self,
+        action: Any,
+        shift_id: Any = None,
+        zone_id: Any = None,
+        items: Any = None,
+    ) -> dict:
+        """一次刷一片：能写的写、不能写的逐格点名（票 14；ADR 0107 决策 5/6）。
+
+        `action` 整批同一个：`shift` 改成某个班（`shift_id` 必给）、`rest` 改成休、
+        `clear` 清除班次退回轮转规则。`zone_id` 只对 `shift` 有意义 —— 不给（或给
+        `null`）表示每格跟**这个人这个班次**的固定区，跟 `set_override` 同一条口径；
+        `rest` 与 `clear` 带着 `shift_id` / `zone_id` 也不报错（客户端把当前选中的班次
+        一起发过来是常态，那两个值在那两支里没有意义）。
+
+        **部分成功是预期语义**：`skipped` 逐格说清谁、哪天、为什么（词表定死在
+        `past_day` / `past_clear` / `beyond_window` / `leave_approved` / `out_of_roster`），
+        不接受「一格里有人请假、整片白刷」。整批拒绝的只有三类：格数超上限
+        （`MAX_BATCH_CELLS`）、动作不认识、输入本身写错（日期 / 人员编号 / 班次 / 工作区）
+        —— 那些不是「某一格刷不了」，是这次请求不成立。
+
+        `reminders` 是「这一格的人那天有申请等着批」：**照刷，只提醒**（批下来会把那天
+        换成请假 / 对调），选择权留给店长。
+
+        校验与筛选全在**锁外**（都是读），锁里只写、循环外一次提交 —— 与批请假
+        （`_approve`）同构。今天、可补记窗口的第一天、展开窗口的末日只在这里读一次：
+        跨 06:00 的一次批量不再出现「前半批按今天算、后半批按明天算」。
+
+        `employee_ids` 是**真写下去的那些人**，只给路由层广播用（响应里不带出去）。
+        """
+        if action not in BATCH_ACTIONS:
+            raise SchedulingError("invalid_batch_action", "invalid_batch_action")
+        if not isinstance(items, (list, tuple)):
+            raise SchedulingError("invalid_batch_items", "invalid_batch_items")
+        if len(items) > MAX_BATCH_CELLS:
+            raise SchedulingError("batch_too_large", str(MAX_BATCH_CELLS))
+
+        today = self.today()
+        first_day = self._backfill_floor(today)
+        last_day = self._window_from(today)[1]
+        cells = [self._batch_cell(item) for item in items]
+
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        # 「不在册」= 花名册里没有这个人，或他停用 / 还没批准（周表也是这么筛的）。
+        known = {
+            employee["id"]
+            for employee in roster
+            if not employee["disabled"] and employee["approved"]
+        }
+
+        shift: Optional[int] = None
+        zone: Optional[int] = None
+        defaults: dict[int, dict[int, Optional[int]]] = {}
+        if action == BATCH_SHIFT:
+            shift = await self._batch_shift(shift_id)
+            zone, defaults = await self._batch_zone(zone_id)
+
+        # 一格一格判「能不能刷」，判完还留在场上的才去查请假 —— 那天有已批的假的一格
+        # 都不许动（连「清除」也不行：覆盖记录就是那条假，删了等于把批过的假抹掉）。
+        reasons: list[Optional[str]] = [None] * len(cells)
+        for index, (employee_id, day) in enumerate(cells):
+            if employee_id not in known:
+                reasons[index] = "out_of_roster"
+            elif day > last_day:
+                reasons[index] = "beyond_window"
+            elif day < today and action == BATCH_CLEAR:
+                # 过去只能改成某个班，不能退回规则（ADR 0108 决策 6）。
+                reasons[index] = "past_clear"
+            elif day < first_day:
+                reasons[index] = "past_day"
+
+        leave_days: dict[str, set[int]] = {}
+        for index, (_, day) in enumerate(cells):
+            if reasons[index] is not None or day in leave_days:
+                continue
+            leave_days[day] = await self._leave_ids(
+                [
+                    employee_id
+                    for other, (employee_id, item_day) in enumerate(cells)
+                    if item_day == day and reasons[other] is None
+                ],
+                day,
+            )
+        for index, (employee_id, day) in enumerate(cells):
+            if reasons[index] is None and employee_id in leave_days[day]:
+                reasons[index] = "leave_approved"
+
+        written = [cell for cell, reason in zip(cells, reasons) if reason is None]
+        if action == BATCH_CLEAR:
+            await self._clear_batch_rows(written, today)
+        else:
+            rows = []
+            for employee_id, day in written:
+                # 没点名要哪个区 → 跟这个人在这个班次上的固定区（没配过就是没有区）。
+                cell_zone = zone if zone is not None else defaults.get(employee_id, {}).get(shift)
+                rows.append((employee_id, day, shift, cell_zone))
+            await self._write_batch_rows(rows, self._now_iso())
+
+        pending = await self._pending_request_days({item[0] for item in written})
+        return {
+            "applied": len(written),
+            "skipped": [
+                {"employee_id": employee_id, "business_date": day, "reason": reason}
+                for (employee_id, day), reason in zip(cells, reasons)
+                if reason is not None
+            ],
+            "reminders": [
+                {
+                    "employee_id": employee_id,
+                    "business_date": day,
+                    "kind": REMINDER_PENDING_REQUEST,
+                }
+                for employee_id, day in written
+                if self._covers(pending.get(employee_id), day)
+            ],
+            "employee_ids": sorted({employee_id for employee_id, _ in written}),
+        }
+
+    @staticmethod
+    def _batch_cell(item: Any) -> tuple[int, str]:
+        """一格批量输入 → ``(employee_id, business_date)``。
+
+        人、日期都指不出「第几格」（整批一次发过来，序号对店长没有意义），所以报的是
+        这一项本身不合法：`invalid_employee_id` / `invalid_business_date`，各一句中文。
+        """
+        mapping = item if isinstance(item, dict) else {}
+        try:
+            employee_id = int(mapping.get("employee_id"))
+        except (TypeError, ValueError):
+            raise SchedulingError("invalid_employee_id", "invalid_employee_id")
+        return employee_id, _require_business_date(mapping.get("business_date"))
+
+    async def _batch_shift(self, shift_id: Any) -> int:
+        """批量 `action=shift` 的那个班次：必给、必须在用（跟 `set_override` 同一道闸）。"""
+        if shift_id in (None, ""):
+            raise SchedulingError("missing_shift", "missing_shift")
+        try:
+            shift = int(shift_id)
+        except (TypeError, ValueError):
+            raise SchedulingError("unknown_shift", "unknown_shift")
+        if shift not in {item["id"] for item in await self.list_shifts()}:
+            raise SchedulingError("unknown_shift", "unknown_shift")
+        return shift
+
+    async def _batch_zone(self, zone_id: Any) -> tuple[Optional[int], dict[int, dict]]:
+        """批量 `action=shift` 的工作区：``(点名的那个区, 整张固定区表)``。
+
+        `zone_id` 没给就是「每格跟这个人这个班次的固定区」—— 固定区是按人配的（票 03），
+        所以一次读全表，别在 200 格上逐格查。
+        """
+        if zone_id in (None, ""):
+            return None, await self.zone_defaults()
+        try:
+            zone = int(zone_id)
+        except (TypeError, ValueError):
+            raise SchedulingError("unknown_zone", "unknown_zone")
+        if zone not in {item["id"] for item in await self._zone_directory().list_zones()}:
+            raise SchedulingError("unknown_zone", "unknown_zone")
+        return zone, {}
+
+    @serialized_write
+    async def _write_batch_rows(
+        self, rows: list[tuple[int, str, Optional[int], Optional[int]]], stamp: str
+    ) -> None:
+        """把这一批覆盖记录与结果行一次写完，**循环外一次提交**。
+
+        复用那两个不上锁、不提交的写入件（`_write_override_row` / `_write_day_row`）——
+        批量不另造一套写库逻辑（与批请假 `_approve` 同构）。中途哪一格抛错都会被
+        `serialized_write` 整批回滚：不会留下「写了一半」的排班。
+        """
+        for employee_id, day, shift_id, zone_id in rows:
+            await self._write_override_row(
+                employee_id, day, shift_id, zone_id, KIND_MANUAL, stamp
+            )
+            await self._write_day_row(
+                employee_id, day, shift_id, zone_id, SOURCE_OVERRIDE, stamp
+            )
+        await self._conn.commit()
+
+    @serialized_write
+    async def _clear_batch_rows(self, cells: list[tuple[int, str]], today: str) -> None:
+        """这一批「清除班次」：每格摘掉覆盖记录、按现在的规则重算，最后一次提交。
+
+        与单格撤销（`_clear_override`）共用同一个删法 —— 批量清除与逐格撤销必须落到
+        同一件事上。能走到这里的每一格都 ≥ 今天（过去的日子在筛选那一步就跳过了）。
+        """
+        for employee_id, day in cells:
+            await self._delete_override_row(employee_id, day)
+            await self._restore_day(employee_id, day, today)
+        await self._conn.commit()
+
+    async def _pending_request_days(
+        self, employee_ids: set[int]
+    ) -> dict[int, list[tuple[str, str]]]:
+        """还在等店长批的申请：``employee_id → [(起, 止), …]``（请假与换班都在里面）。
+
+        批量落笔只拿它做**提醒**（"王五 10/15 有一条待批的请假，批了会盖掉你刚刷的"），
+        **不阻断写入**，所以这一整段是尽力而为：申请表不在（0008 没应用）时返回空表并
+        记一条日志，别让一次刷一片因为读不到提醒而整批失败（同 `_leave_ids` 的口径）。
+        """
+        if not employee_ids:
+            return {}
+        try:
+            rows = await self._request_rows(status=STATUS_PENDING_MANAGER)
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            await self._rollback_quietly()
+            logger.warning("待批申请读不了（0008 未应用？），这次批量不做提醒: %s", exc)
+            return {}
+        pending: dict[int, list[tuple[str, str]]] = {}
+        for row in rows:
+            employee_id = int(row["employee_id"])
+            if employee_id in employee_ids:
+                pending.setdefault(employee_id, []).append(
+                    (row["start_date"], row["end_date"])
+                )
+        return pending
+
+    @staticmethod
+    def _covers(ranges: Optional[list[tuple[str, str]]], day: str) -> bool:
+        """这一天在不在那几条申请区间里（两端都算）——ISO 文本按字典序比就是按日期比。"""
+        return any(start <= day <= end for start, end in ranges or ())
 
     # ── 展开 ────────────────────────────────────────────────────────────
 
@@ -1481,7 +1780,7 @@ class SchedulingStore:
         还带人数和名字，同名会让调用方以为形状一样。
 
         工作区读的是**结果行上的 `zone_id`**，不是现在的固定区配置：那天写下来是什么
-        就是什么 —— 事后改固定区不该改写已经过去的日子（`spec.md` 的「过去不改」）。
+        就是什么 —— 事后改固定区只管今天与以后，不回头改写已经过去的日子。
 
         每个人带一个 `overridden`：这一行的 `source` 是 `override`（票 07 的单日覆盖），
         也就是「这天他跟规则不一样」。面板靠它标出来、并给出「撤销覆盖」这个动作。
@@ -1580,6 +1879,12 @@ class SchedulingStore:
         `days[].row_count` 是那天**全体**的行数（含休）：0 表示那天一行都没有
         （系统启用前、或谁都没配规则），不能读成「大家都在休」。
 
+        **行序在服务端算完再给出去**（票 14；ADR 0107 决策 10）：有规则的人按**规则起点
+        班次**分片（`cycle` 里第一个不是「休」的班次；整轮全是休、或规则读不出来的当
+        没规则），片的先后用班次表的 `sort_order`（同序按 id）；片内管理层
+        （`admin_caps` 非空）置顶，其余按注册先后（`hygiene_employees.id` 升序）；
+        没规则的人整块沉底，内部同样按注册先后。前端不重排。
+
         窗口外照样返回 7 天、不报错：店长会往两头翻，翻到的那一周得是空的而不是 400。
         """
         today = self.today()
@@ -1640,6 +1945,36 @@ class SchedulingStore:
         shifts = await self._shifts_for_display(used)
         shift_names = {int(shift["id"]): shift["name"] for shift in shifts}
         rules = await self._rule_rows()
+        # 行序（票 14）：有规则的人按**规则起点班次**分片 —— `cycle` 里第一个不是「休」的
+        # 班次（整轮全是休 / 规则读不出来都当没规则，见 `_cycle_lead_shift`）。
+        leads = {
+            employee_id: self._cycle_lead_shift(raw) for employee_id, raw in rules.items()
+        }
+        # 片的先后 = 班次表的显示顺序（`sort_order`，同序按 id）：票 11 让店长自己排的那个。
+        # 用**全表**（含停用）建索引 —— 停用的班次仍可能留在某人的轮转里（人工 SQL 写下的
+        # 历史数据），它照样该有自己的位置；表里已经没有的那个班次排在所有片之后。
+        shard_order = {
+            int(shift["id"]): index
+            for index, shift in enumerate(await self.list_shifts(include_inactive=True))
+        }
+        last_shard = len(shard_order)
+
+        def row_order(employee: dict) -> tuple:
+            """行序的排序键：``(有没有分片, 片序, 管理层, 注册先后)``。
+
+            管理层 = `admin_caps` 非空 —— 与花名册那个「管理员」派生标签同一判据
+            （`_roster_row` 已经用 `parse_caps` 解析过，这里不再解一次 JSON）。
+            """
+            lead = leads.get(employee["id"])
+            if lead is None:
+                # 没规则（含整轮全休、规则读不出来）：整块沉底，内部按注册先后。
+                return (1, last_shard, 0, employee["id"])
+            return (
+                0,
+                shard_order.get(lead, last_shard),
+                0 if employee["admin_caps"] else 1,
+                employee["id"],
+            )
 
         # 每天的请假判据：只问那天不上班的人（`day_detail` 就是这么调的 —— 查询按
         # employee_id 领头，对齐 0007 那条索引）。
@@ -1656,7 +1991,8 @@ class SchedulingStore:
         employees = []
         # 被过滤掉的人也要说一句（§3.7）：静默丢人正是「以为漏排」的来源。
         excluded = {"disabled": 0, "pending": 0}
-        for employee in await EmployeeAccounts(self._write_lock_owner).list_roster():
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        for employee in sorted(roster, key=row_order):
             if employee["disabled"]:
                 excluded["disabled"] += 1
                 continue
@@ -2052,7 +2388,8 @@ class SchedulingStore:
         「只提示、不阻止」在实现上就是**根本没有那道闸**（票面的口径）。
 
         `days` 是申请区间的每一天（两端都算；换班就一天），`past=True` 的那几天批了也
-        不会动：过去不改写（跟票 07 同一条口径），先说清楚，别让店长以为批了就改了历史。
+        不会动（批准只写今天与以后 —— 跟店长手改排班那条 30 天回溯窗口不是同一条），
+        先说清楚，别让店长以为批了就改了历史。
 
         **等对方点头的换班不在这里**（`pending_peer`）：那就是票 09 要的那条规矩 ——
         对方还没点，店长看不到。旧申请在前（先来先处理）：这是待办队列，不是「最新动态」。
@@ -2177,7 +2514,7 @@ class SchedulingStore:
 
         两种都只认 `pending_manager`：对方的点头（换班）是进这道门的条件，不是能跳过的一步。
 
-        已经过去的日子**不重写**（票 07 同一条「过去不改」）：批得晚了就是晚了，那天当时
+        已经过去的日子**不补写**（批准只写今天与以后）：批得晚了就是晚了，那天当时
         怎么排的就留着。申请照样记成已批准，`applied_days` 说清写了哪几天 ——
         调用方把 `skipped_days` 明说出来，而不是假装那几天也改了。
         """
@@ -2456,7 +2793,7 @@ class SchedulingStore:
 
         工作区按各自**新班次**的固定区取（验收：区跟着班次走）；新班次是「休 / 没排到」
         时区也留空。当天已经过去 / 超出展开窗口的那一天只记「没动」：批得晚了就是晚了
-        （跟请假那一支、票 07 同一条「过去不改」）。
+        （跟请假那一支同一条：批准只写今天与以后）。
 
         `today` / `last_day` 是 `_approve` 在分岔前取的那一份快照（见那里）：两处各读
         一次钟的话，跨 06:00 的请求会按两个不同的营业日判这一天算不算过去。

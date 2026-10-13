@@ -98,7 +98,7 @@
   position: absolute;
   left: 1rem;
   top: .7rem;
-  z-index: 90;
+  z-index: var(--z-queue);
   padding: .55rem .95rem;
   border-radius: 999px;
   color: var(--hy-mint-ink);
@@ -210,11 +210,14 @@
   width: 100%;
   max-width: 76rem;
   margin: 0 auto;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  padding: var(--hy-page);
-  padding-left: max(var(--hy-page), env(safe-area-inset-left));
-  padding-right: max(var(--hy-page), env(safe-area-inset-right));
+  /* **横向与上内边距自票 04 起由壳按 group 给**（ADR 0106 决策 3）：统一壳把这一份算成
+     内容容器上的两根度量（`utils/workbenchInsets.js` 的组表），值就是这里原来那两条
+     （base `var(--hy-page)`、左右 `max(...)`；≥900px 见下面那条媒体查询）—— 页面与共享
+     样式表不再出这一份。剩下的是页面正文自己的**下**内边距（收尾留白）。
+     `overflow-y: auto` 与 `-webkit-overflow-scrolling` 一并删掉（决策 8）：在「整页滚」
+     的口径下它们是内层滚动声明的那一半，今天只因为高度是 `auto` 才无害 ——
+     2026-10-12「八页滑不动」就是这个形状。护栏见
+     `views/workbench/__tests__/shellMobileChrome.test.js`。 */
   padding-bottom: 1.4rem;
 }
 
@@ -223,7 +226,7 @@
   flex: 0 0 auto;
   position: sticky;
   top: 0;
-  z-index: 30;
+  z-index: var(--z-shell);
   background: rgba(8, 19, 21, .82);
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
@@ -305,7 +308,7 @@
   backdrop-filter: blur(14px);
   border-top: 1px solid var(--hy-line);
   padding: .25rem .15rem calc(.25rem + env(safe-area-inset-bottom));
-  z-index: 30;
+  z-index: var(--z-shell);
 }
 .hygiene-admin .hy-rail-items {
   display: contents;
@@ -457,7 +460,10 @@
   .hygiene-admin .hy-back-top { display: none; }
   .hygiene-admin .hy-main {
     max-width: none;
-    padding: clamp(1.1rem, 2.2vw, 2rem) clamp(1.2rem, 3vw, 2.6rem) 2rem;
+    /* 上 / 横向那两项自票 04 起由壳的宽档给（同一个 900px 断点，见
+       `utils/workbenchInsets.js` 的 `WIDE_INSET_MIN_WIDTH_PX`）；这里只剩页面正文自己的
+       下内边距。**这个断点与壳里那个数是一对**，改一个就要改另一个。 */
+    padding-bottom: 2rem;
   }
 }
 
@@ -818,7 +824,7 @@
    桌面档滚起来粘住的顶栏都被这张卡片压住（2026-10-12 报「这个组件的层级有问题」）。 */
 .hygiene-admin .clocks-card {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-shell);
 }
 .hygiene-admin .luyun-time-picker__trigger {
   display: flex;
@@ -831,7 +837,7 @@
 .hygiene-admin .luyun-time-picker__chevron { color: var(--hy-muted); }
 .hygiene-admin .luyun-time-picker__popover {
   position: absolute;
-  z-index: 40;
+  z-index: var(--z-scrim);
   margin-top: 6px;
   background: var(--hy-surface);
   border: 1px solid var(--hy-line-strong);
@@ -1414,7 +1420,7 @@
   flex: 0 0 auto;
   position: sticky;
   top: 0;
-  z-index: 30;
+  z-index: var(--z-shell);
   background: rgba(8, 19, 21, .86);
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
@@ -1513,8 +1519,12 @@
 
 .hygiene-work .hy-work-main {
   flex: 1 1 auto;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  /* `overflow-y: auto` 与 `-webkit-overflow-scrolling` 随票 04 删掉（ADR 0106 决策 8）：
+     这是同一形状的第二处 —— 高度是 `auto`（`.hygiene-staff` 是 `min-height` 的 flex 列），
+     实测 `clientHeight == scrollHeight`（两档 canScroll 都是 0），所以它一次都没滚过；
+     留着就是「高度锁 + 内部滚」里那半条声明，页面区（`.page-body`）才是唯一的滚动容器。
+     横向与上内边距仍在这里（票面明确不碰 recipe 那一类，且这个容器是 `46rem` 居中框，
+     搬到壳上会让居中框整体左移）。 */
   padding: 1.05rem max(1rem, env(safe-area-inset-right)) 1.3rem max(1rem, env(safe-area-inset-left));
 }
 .hygiene-work h1 {
@@ -1982,7 +1992,7 @@
   backdrop-filter: blur(14px);
   border-top: 1px solid var(--hy-line);
   padding: .28rem .15rem calc(.3rem + env(safe-area-inset-bottom));
-  z-index: 30;
+  z-index: var(--z-shell);
 }
 .hygiene-work .hy-tab {
   position: relative;
@@ -2047,7 +2057,7 @@
 .hygiene-work .staff-preview {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  z-index: var(--z-dialog);
   background: rgba(3, 10, 9, .62);
   -webkit-backdrop-filter: blur(5px);
   backdrop-filter: blur(5px);

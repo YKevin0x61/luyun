@@ -416,7 +416,7 @@ onBeforeUnmount(() => {
 .logs-mobile-filter-toggle { display: none; }
 .logs-wrap { flex: 1; overflow-y: auto; background: #07090f; font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace; font-size: 11.5px; line-height: 1.55; border: 1px solid var(--border); border-top: none; border-radius: 0 0 10px 10px; }
 .logs-empty { min-height: 180px; display: grid; place-items: center; }
-.logs-columns { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 166px 58px minmax(120px, 190px) minmax(0, 1fr) 58px; gap: 10px; padding: 6px 14px; background: rgba(11,16,26,0.98); border-bottom: 1px solid var(--border); color: #7f8a9b; font-family: system-ui, sans-serif; font-size: 10px; letter-spacing: .04em; }
+.logs-columns { position: sticky; top: 0; z-index: var(--z-shell); display: grid; grid-template-columns: 166px 58px minmax(120px, 190px) minmax(0, 1fr) 58px; gap: 10px; padding: 6px 14px; background: rgba(11,16,26,0.98); border-bottom: 1px solid var(--border); color: #7f8a9b; font-family: system-ui, sans-serif; font-size: 10px; letter-spacing: .04em; }
 .logs-line { display: grid; grid-template-columns: 166px 58px minmax(120px, 190px) minmax(0, 1fr) 58px; gap: 10px; padding: 4px 14px; border-bottom: 1px solid rgba(31,41,55,0.4); align-items: start; word-break: break-word; white-space: pre-wrap; }
 .logs-line.lvl-WARNING { background: rgba(245,158,11,0.025); }
 .logs-line.lvl-ERROR { background: rgba(239,68,68,0.035); }
@@ -456,7 +456,7 @@ onBeforeUnmount(() => {
     left: 0;
     bottom: 0;
     width: min(280px, 86vw);
-    z-index: 60;
+    z-index: var(--z-toast);
     border-radius: 0;
     transform: translateX(-105%);
     transition: transform .25s ease-out, box-shadow .25s ease-out;
@@ -472,7 +472,7 @@ onBeforeUnmount(() => {
     left: 0; right: 0; bottom: 0;
     top: var(--global-nav-height, 46px);
     background: rgba(0, 0, 0, 0.55);
-    z-index: 55;
+    z-index: var(--z-dialog);
     opacity: 0;
     pointer-events: none;
     transition: opacity .25s ease-out;

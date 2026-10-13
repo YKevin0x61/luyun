@@ -3,7 +3,7 @@
 """排班服务层（票 02）：配固定班次 → 展开 90 天 → 月历数得出来。
 
 主缝 = 服务层 + 真库 + 注入时钟（见 `.scratch/scheduling/spec.md` 的「测试缝」）：
-排班的窗口、相位、过去不改都由**营业日**决定，所以时钟必须能拨。
+排班的窗口、相位、可补记窗口（票 14）都由**营业日**决定，所以时钟必须能拨。
 """
 
 import ast
@@ -976,9 +976,14 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater((await self.store.week_grid("2026-09-24"))["days"][3]["row_count"], 0)
 
     async def test_week_grid_lists_a_ruleless_person_and_counts_who_is_out(self):
-        """验收 8：没配规则的人仍在表里（`has_rule=False`）；停用/未批准的不出现但计数对得上。"""
-        configured = await self._employee("13800138001", "李四")
-        ruleless = await self._employee("13800138002", "王五")
+        """验收 8：没配规则的人仍在表里（`has_rule=False`）；停用/未批准的不出现但计数对得上。
+
+        **行序按票 14 的规则，不是注册先后**：先注册的这位没配规则，于是整块沉到底，
+        后注册的那位有规则、排在片上 —— 这两行的顺序与 `list_roster()`（id 升序）
+        刚好相反（票面的反向用例）。
+        """
+        ruleless = await self._employee("13800138001", "李四")
+        configured = await self._employee("13800138002", "王五")
         gone = await self._employee("13800138003", "赵六")
         pending = await self.accounts.register("13800138004", PASSWORD, "钱七")
         day = await self._shift_id("白班")
@@ -987,10 +992,10 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
         grid = await self.store.week_grid(TODAY)
 
-        # 顺序就是 `list_roster()` 的顺序（disabled ASC, approved ASC, id ASC），过滤不改它。
+        # 有规则的（王五，id 大、后注册）在片上，没规则的（李四）沉底 —— 注册先后说了不算。
         self.assertEqual(
             [(row["name"], row["has_rule"]) for row in grid["employees"]],
-            [("李四", True), ("王五", False)],
+            [("王五", True), ("李四", False)],
         )
         self.assertEqual(
             {row["id"] for row in grid["employees"]},
@@ -1001,6 +1006,27 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         # 没配规则的人整周都是「还没有你的班」，不是「休」。
         self.assertEqual(
             {cell["scheduled"] for cell in grid["employees"][1]["cells"].values()}, {False}
+        )
+
+    async def test_week_grid_puts_managers_on_top_of_their_shift(self):
+        """行序（票 14）：同一个片里管理层排在最上面，其余按注册先后。
+
+        `admin_caps` 非空就是管理层 —— 与花名册那个「管理员」派生标签同一判据
+        （这次连一个班次 id 都没多给，判据只在那一组开关上）。
+        """
+        worker = await self._employee("13800138001", "李四")
+        manager = await self._employee("13800138002", "王五")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(worker["id"], [day])
+        await self.store.set_rule(manager["id"], [day])
+        await self.accounts.set_admin_caps(manager["id"], ["roster"])
+
+        grid = await self.store.week_grid(TODAY)
+
+        # 两个人同在白班那片：后注册的管理层排在先注册的员工前面。
+        self.assertEqual([row["name"] for row in grid["employees"]], ["王五", "李四"])
+        self.assertEqual(
+            [row["has_rule"] for row in grid["employees"]], [True, True]
         )
 
     # ── 票 03：每人每班次一个固定工作区 ────────────────────────────────
@@ -1034,7 +1060,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(zones[LAST_DAY], second)
 
     async def test_past_days_keep_the_zone_they_were_written_with(self):
-        """读的那一侧也守住「过去不改」：那天写下来是什么区，点开就是什么区。"""
+        """读的那一侧不回头改写：那天写下来是什么区，点开就是什么区（改固定区只管今天以后）。"""
         employee = await self._employee()
         day = await self._shift_id("白班")
         first = await self._zone("案板")
@@ -1537,11 +1563,13 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         days = (await self.store.month_calendar("2026-09"))["days"]
         self.assertEqual([d["overridden"] for d in days if d["business_date"] == "2026-09-25"], [0])
 
-    async def test_clearing_a_past_override_keeps_the_history(self):
-        """撤销只对今天以后生效：过去那天的结果行一个字都不改（记录还是会删）。
+    async def test_clearing_a_past_override_is_refused(self):
+        """票 14：过去的日子不能「清除班次」，只能改成某个班（`past_clear`）。
 
-        这是「过去不改」在撤销这条路的样子。店长不该看到一个点了没反应的按钮 ——
-        所以 `day_detail` 顺手给出 `undoable`，前端据此把撤销收起来。
+        以前对过去是**半个动作**：覆盖记录摘掉了、结果行一点没变（青点消失、格子里的
+        班次照旧），没人看得出发生了什么 —— ADR 0108 决策 6 把这条改掉了。现在整条拒
+        掉：覆盖记录与结果行都原样留着，`day_detail.undoable` 照旧是 False（前端据此
+        把撤销收起来），要改就改成某个班。
         """
         employee = await self._employee()
         day = await self._shift_id("白班")
@@ -1552,18 +1580,22 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stamp["source"], "override")
         self.assertEqual((await self.store.day_detail("2026-09-25"))["undoable"], True)
 
-        # 时钟推到那天之后：9/25 成了过去（把 `if day >= self.today()` 改成 `if True` 会红）。
+        # 时钟推到那天之后：9/25 成了过去（还在可补记窗口里，撤销照样不给）。
         self.fixed_now = datetime(2026, 9, 28, 10, 0, tzinfo=CHINA_TZ)
         self.assertEqual((await self.store.day_detail("2026-09-25"))["undoable"], False)
 
-        await self.store.clear_override(employee["id"], "2026-09-25")
+        with self.assertRaises(SchedulingError) as past:
+            await self.store.clear_override(employee["id"], "2026-09-25")
+        self.assertEqual(past.exception.code, "past_clear")
 
+        # 覆盖记录还在（旧行为会把它删掉、只留下没标记的结果行），结果行也没动。
         self.assertEqual((await self._full_rows(employee["id"]))["2026-09-25"], stamp)
-        cur = await self.db._conn.execute(
-            "SELECT COUNT(*) AS n FROM scheduling_overrides WHERE employee_id = ?",
-            (employee["id"],),
+        self.assertEqual(
+            [item["business_date"] for item in await self._overrides()], ["2026-09-25"]
         )
-        self.assertEqual(dict(await cur.fetchone())["n"], 0)
+        # 同一天改成某个班是允许的：过去只能「改成某个班」，不能退回规则。
+        saved = await self.store.set_override(employee["id"], "2026-09-25", shift_id=day)
+        self.assertEqual(saved["shift_id"], day)
 
     async def test_rule_change_does_not_wipe_an_overridden_day(self):
         """验收 6：改规则时已被覆盖的那天不被冲掉（一个字都不动，含 `updated_at`）。"""
@@ -1625,15 +1657,18 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         zone_ids = await self._zone_ids(employee["id"])
         self.assertEqual((zone_ids["2026-09-25"], zone_ids["2026-09-24"]), (other, third))
 
-    async def test_override_refuses_a_past_day_and_a_day_past_the_window(self):
-        """验收 7：只影响今天以后 —— 昨天不给改（`past_day`），窗口外不给改。"""
+    async def test_override_allows_the_backfill_window_and_refuses_older_days(self):
+        """票 14：过去**30 天内**能补记（第 30 天可改），第 31 天拒（`past_day`）；
+        未来那一头没动，仍是展开窗口（`beyond_window`）。"""
         employee = await self._employee()
         day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
         await self.store.set_rule(employee["id"], [day])
         before = await self._full_rows(employee["id"])
 
+        # 第 31 天（8/24，今天 9/24）：超出可补记窗口，写不了 —— 结果行一个字没动。
         with self.assertRaises(SchedulingError) as past:
-            await self.store.set_override(employee["id"], "2026-09-23", shift_id=day)
+            await self.store.set_override(employee["id"], "2026-08-24", shift_id=day)
         self.assertEqual(past.exception.code, "past_day")
         with self.assertRaises(SchedulingError) as beyond:
             await self.store.set_override(employee["id"], "2026-12-23", shift_id=day)
@@ -1641,11 +1676,21 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SchedulingError) as bad_date:
             await self.store.set_override(employee["id"], "9/25", shift_id=day)
         self.assertEqual(bad_date.exception.code, "invalid_business_date")
-
         self.assertEqual(await self._full_rows(employee["id"]), before)
-        # 窗口最后一天还是能改的（边界是含的，跟展开的窗口同一口径）。
-        saved = await self.store.set_override(employee["id"], LAST_DAY, is_rest=True)
-        self.assertEqual(saved["business_date"], LAST_DAY)
+
+        # 窗口的**边界是含的**：第 30 天（8/25）能补记 —— 那里于是多了一行 override。
+        saved = await self.store.set_override(employee["id"], "2026-08-25", shift_id=night)
+        self.assertEqual(saved["business_date"], "2026-08-25")
+        self.assertEqual(
+            (await self._full_rows(employee["id"]))["2026-08-25"]["source"], "override"
+        )
+        # 未来那一头的最后一天照样能改（边界含，跟展开的窗口同一口径）。
+        self.assertEqual(
+            (await self.store.set_override(employee["id"], LAST_DAY, is_rest=True))[
+                "business_date"
+            ],
+            LAST_DAY,
+        )
 
     async def test_override_validates_its_own_payload(self):
         """「改成休」不能顺带带班次或区；改班次必须给班次；人、班次、区都得存在。"""
@@ -2021,7 +2066,11 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_a_late_approval_does_not_rewrite_past_days(self):
-        """批得晚了：过去那几天不重写（票 07 的「过去不改」），申请照样记成已批准。"""
+        """批得晚了：过去那几天不补写（批准只写今天与以后），申请照样记成已批准。
+
+        这跟店长手改的 30 天回溯窗口（票 14）是两条路：批准一条**申请**晚了就是晚了，
+        申请里的过去那几天留在原地。
+        """
         employee = await self._employee()
         day = await self._shift_id("白班")
         await self.store.set_rule(employee["id"], [day])
@@ -3144,7 +3193,8 @@ class SchedulingLayeringTest(unittest.TestCase):
         管理端会话，员工那几条只认手机端 cookie。票 08 在两边各加了请假申请的路由
         （员工提/撤回、店长批/驳），票 09 又加了换班那几条（找谁换、提、对方同意/拒绝），
         票 11 再给店长那扇门加了班次表的编辑（增、改、删、调顺序），本次「员工 × 周」
-        视图又加了只读的 `/week`，员工那扇门仍然全挂在 `/me` 底下。
+        视图又加了只读的 `/week`，票 14 给店长那扇门加了**批量落笔**（`/overrides/batch`），
+        员工那扇门仍然全挂在 `/me` 底下。
 
         断言路由表本身，不是源码文本 —— 文本比对会被注释或文档字符串误伤
         （写一句「这里不用 require_staff_session」就红了）。
@@ -3182,6 +3232,8 @@ class SchedulingLayeringTest(unittest.TestCase):
             "/api/scheduling/zone-defaults/{employee_id}",
             # 票 07：单日覆盖的改与撤。
             "/api/scheduling/overrides/{employee_id}/{business_date}",
+            # 票 14：选区批量落笔（一次校验、一次写锁、一次提交）。
+            "/api/scheduling/overrides/batch",
             # 票 08：待办（申请进来，批或驳出去）；票 09 的换班批完在对调两个人那天的班。
             "/api/scheduling/inbox",
             "/api/scheduling/inbox/{request_id}/approve",

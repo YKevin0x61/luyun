@@ -195,13 +195,13 @@ onBeforeUnmount(() => {
 <style scoped>
 .std-cache-ui {
   position: relative;
-  z-index: 40;
+  z-index: var(--z-scrim);
 }
 .std-cache-trigger {
   position: fixed;
   right: 14px;
   bottom: 76px;
-  z-index: 41;
+  z-index: var(--z-scrim);
   border: 1px solid var(--hy-line);
   border-radius: 999px;
   background: var(--hy-surface);
@@ -217,7 +217,7 @@ onBeforeUnmount(() => {
 .std-cache-mask {
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: var(--z-dialog);
   display: grid;
   place-items: center;
   padding: 18px;
@@ -228,7 +228,7 @@ onBeforeUnmount(() => {
    z-index 高于相机时会直接压在取景画面上，员工点不到快门。管理面板是用户主动打开
    的，保持在上层。 */
 .std-cache-mask.is-first-prompt {
-  z-index: 55;
+  z-index: var(--z-scrim);
 }
 .std-cache-card {
   width: min(520px, 100%);
@@ -266,7 +266,7 @@ onBeforeUnmount(() => {
 .std-cache-banner {
   position: fixed;
   left: 50%;
-  z-index: 42;
+  z-index: var(--z-scrim);
   transform: translateX(-50%);
   width: min(620px, calc(100vw - 24px));
   border: 1px solid var(--hy-line);

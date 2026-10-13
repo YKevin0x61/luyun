@@ -243,9 +243,10 @@ useNudgePull({
 <style scoped>
 /* 首页沿用工作台那套深青墨令牌（`/hygiene-admin.css`，由本页加载一次）。 */
 .wbh {
-  /* 手机安全区四项让位（t52）：顶槽取 max(--hy-page, --safe-t)，左右同 max */
-  padding: max(var(--hy-page, 18px), var(--safe-t)) max(var(--hy-page, 18px), var(--safe-r))
-    40px max(var(--hy-page, 18px), var(--safe-l));
+  /* 横向与上内边距**自票 04 起由壳给**（ADR 0106 决策 3）：这一页是 `home` 那一组，
+     值就是这里原来那条 `max(--hy-page, --safe-*)`（含手机安全区的顶槽与左右两侧），
+     现在写在 `utils/workbenchInsets.js` 的组表里、由统一壳套在内容容器上。
+     这里只剩页面正文自己的**下**内边距（收尾留白 + 安全区）。 */
   padding-bottom: calc(40px + var(--safe-b));
   gap: 14px;
 }

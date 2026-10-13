@@ -8,8 +8,9 @@
 // 票 02 做「配固定班次」、票 03 加工作区、票 04 加轮转周期编辑、票 07 加单日覆盖
 // （点当天卡里的一个人就地改那一天）、票 08 加底下那根「请假待办」的条
 // （批假在 `/workbench/hr/inbox` 那一页：这一页只管排班怎么铺）；班次表的增删改在票 11。
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { api } from '../../api/client'
 // 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
@@ -17,7 +18,29 @@ import { api } from '../../api/client'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { mergeShiftList } from '../../utils/shiftTable'
 import { eachDayInRange } from '../../utils/dateRange'
-import { BRUSH_REST, BRUSH_SHIFT, brushPayload, canPaintOn } from '../../utils/schedulingBrush'
+// 周表的落笔与选区（票 14 / ADR 0107，2026-10-13 方向修订）：纯逻辑在
+// `utils/schedulingWeekPick.js` 里 —— 这一页只负责把手柄接上去、把笔与回执接上去。
+// `cellHandle` 不再被这一页用：格子从「选区手柄」改回「点一下就落笔」，手柄只剩
+// 日期列头与人名两种（纯逻辑那边仍覆盖格子手柄，见它的单测）。
+import {
+  PICK_CLEAR,
+  PICK_MAX_CELLS,
+  PICK_REST,
+  PICK_SHIFT,
+  PICK_SKIP_TEXT,
+  batchPayload,
+  colHandle,
+  normalizeResult,
+  overLimit,
+  pastDatesIn,
+  pickAt,
+  pickPending,
+  pickRegion,
+  predictSkips,
+  rowHandle,
+  snapshotCells,
+  undoPlan,
+} from '../../utils/schedulingWeekPick'
 
 
 const router = useRouter()
@@ -215,12 +238,16 @@ async function loadRoster() {
 
 async function openPanel(next) {
   panel.value = next
+  // 切走就把选区收掉：动作条只在周表这一栏有意义，它替换的是这一页的底部。
+  if (next !== 'week') clearPick()
   if (next === 'roster') await loadRoster()
   // 周表按需读：默认落在月历上，没切过去就不发这个请求。
   else if (next === 'week') {
     await loadWeek(weekStart.value || mondayOf(today.value))
-    // 读完再开笔袋：班次名单在这份数据里，先开就会面对一个空下拉。
-    await openBrush()
+    // 单格摘要要写「这个人的轮转规则」，规则与工作区名单都在名单那一份数据里：懒加载补一次。
+    if (!roster.value.length || !zones.value.length) await loadRoster()
+    // 待批提醒按天取（周表每格没有这个字段）：进周表时把待办读一遍。
+    await loadPendingMarks()
   }
 }
 
@@ -266,6 +293,9 @@ async function loadPendingCount() {
 //
 // 读不出来就**不标**（空表）：宁可少一个角标，也不能在一个没读到的日子上标错数字。
 const pendingMarks = ref({})
+// 待办那一份原样留一手：周表每格没有「待批」字段，票 14 的待批提醒只能从这儿按天 / 按人取
+// （`pendingCells` 就是它摊平出来的）（多读一次接口不值当）。
+const inboxRequests = ref([])
 async function loadPendingMarks() {
   try {
     const data = await api.get('/api/scheduling/inbox')
@@ -279,8 +309,10 @@ async function loadPendingMarks() {
       for (const day of days) marks[day] = (marks[day] || 0) + 1
     }
     pendingMarks.value = marks
+    inboxRequests.value = data.requests || []
   } catch (err) {
     pendingMarks.value = {}
+    inboxRequests.value = []
   }
 }
 
@@ -341,6 +373,7 @@ const weekRangeLabel = computed(() => {
 
 async function loadWeek(start) {
   weekError.value = ''
+  const previousStart = weekStart.value
   try {
     // `start` 空着就交给服务端按「今天所在周」算：首屏还没读到 today 时也点得动。
     const data = await api.get('/api/scheduling/week', { start: start || '' })
@@ -349,11 +382,10 @@ async function loadWeek(start) {
     // 并集：周表这份带的是「这 7 天真有行的停用班次」，直接替换会把月历那边的班次列挤掉
     // （`mergeShiftList` 里写了为什么不能那么走）。
     if (data.shifts && data.shifts.length) shifts.value = mergeShiftList(shifts.value, data.shifts)
-    // 翻到别的周就把抽屉收起来：它冻着的是上一周的某一天，留在屏幕上会让人以为
-    // 改的是新这周的同一天（票 07 那条「换一天就收编辑器」是同一个道理）。
-    if (sheet.value && !(data.days || []).some((day) => day.business_date === sheet.value.date)) {
-      closeSheet()
-    }
+    // 翻到别的周就把选区收起来：它冻着的是上一周那几天，留在屏幕上会让人以为刷的是新这一周
+    // 的同一天（票 07 那条「换一天就收编辑器」是同一个道理）。**同一周重读不收** ——
+    // 应用完接着点下一列继续刷，正是这个交互的意义（ADR 0107 决策 3）。
+    if (previousStart && data.start !== previousStart) clearPick(true)
   } catch (err) {
     weekError.value = err.message || '周表读不出来'
   }
@@ -419,7 +451,7 @@ function weekCellText(employee, day) {
 /** 格子里第二行那个工作区名（2026-10-08 用户要的）：这个人这一天在哪个区。
  *
  *  只有「这天真有班次」才谈得上区 —— 休 / 请假 / 还没排到的格子没有区可言，与
- *  `sheetHasShift`、`weekCellLabel` 是同一套判据。**没配区的格子不写「未配」**：
+ *  `gW-zone`、`weekCellLabel` 是同一套判据。**没配区的格子不写「未配」**：
  *  七列平分下来一格只有 ~39px 宽，那一行留给真有区的人；空着不代表没信息可查 ——
  *  点开抽屉的下拉能当场改区，`aria-label` 里也照旧说着「未配工作区」。 */
 function weekCellZone(employee, day) {
@@ -445,21 +477,24 @@ function weekCellClass(employee, day) {
     // 三个字的缩写（「主管A」这种）在 40px 的格子里会折成两行，缩一号字就一行放得下。
     long: weekCellText(employee, day).length > 2,
     today: !!day.is_today,
-    on: !!sheet.value && sheet.value.employeeId === employee.id
-      && sheet.value.date === day.business_date,
+    // 选中高亮：复用既有的选中外环（`.gW-cell.on`），不新增任何颜色引用。
+    on: pickKeys.value.has(`${employee.id}|${day.business_date}`),
   }
 }
 
 function weekCellLabel(employee, day) {
   const cell = cellOf(employee, day)
   const when = `${day.month}月${day.day}日 周${WEEK_HEADS[day.weekday]}`
+  // 格子是**落笔点**（票 14 修订：点一下就用笔栏上那支笔改写这一格）：名字里那半句是给
+  // 读屏的（角色是 button，光有内容读不出点下去会发生什么）。
+  const pick = '，点一下就用笔栏上的班次或休改写这一格'
   if (!cell || !cell.scheduled) {
-    return `${employee.name} ${when}：${blankReason(day, cell) || '还没排到'}`
+    return `${employee.name} ${when}：${blankReason(day, cell) || '还没排到'}${pick}`
   }
   const what = cell.shift_id === null || cell.shift_id === undefined
     ? (cell.leave ? '请假' : '休')
     : `${cell.shift_name}${cell.zone_name ? `，${cell.zone_name}` : '，未配工作区'}`
-  return `${employee.name} ${when}：${what}${cell.overridden ? '，已手动调整' : ''}`
+  return `${employee.name} ${when}：${what}${cell.overridden ? '，已手动调整' : ''}${pick}`
 }
 
 const weekOverriddenCount = computed(() => {
@@ -489,170 +524,382 @@ const weekExcludedNote = computed(() => {
   return parts.length ? `另有 ${parts.join('、')}，不在表里（去「名单」看）。` : ''
 })
 
-// ── 底部抽屉：点一格从底下弹出来选班次（照门店那套的做法）────────────────────
-// 与图片那套的一处刻意不同：抽屉弹出来时给页面**留出底部空间**（`.gB.sheet-open` 的
-// padding-bottom）—— 不这么做，它压住的正是下面几行员工，而那几行恰好是超级管理员要对照的。
-const sheet = ref(null) // { employeeId, date } | null
-const sheetTab = ref('shift') // 'shift' | 'cycle'
-const sheetFolded = ref(false)
-const sheetError = ref('')
-const sheetBusy = ref(false)
-// 抽屉里的「工作区」下拉（2026-10-04 补）：区字符串 id，'' = 跟这个班次的固定区。
-// 原先抽屉里改不了区，超级管理员得跳去月历那页点这个人才行 —— 周表上发现"今天他不在案板"，
-// 却要换个页面才改得动，路太绕。写路径没变：还是单日覆盖那条（带上当天的班次一起提交）。
-const sheetZone = ref('')
+// ── 笔栏与选区（票 14 修订，2026-10-13 用户真机裁定）────────────────────────
+// 「还是之前点击方格就改写班次那种比较好」—— 于是回到**一支笔**：
+//
+//   · 底部一条**常驻**的笔栏（`刷` 标签 + 班次按钮组 + 工作区 + ↺ 撤销），折叠态 ~70px；
+//   · **点一格 = 立刻用当前笔写这一格**，没有「先选中、再点应用」那一步；
+//   · 选区还在，但只为批量存在：点日期列头 = 整列、点人名 = 整行，这时笔栏多出一行摘要与
+//     一个「刷」按钮；不选区时这一行完全不出现（不用批量的人不该看见它）；
+//   · 提示一律走**一行** `aria-live`，几秒后自己消失、下一次操作替换它 —— 不再同时挂五六行
+//     把表格压掉半屏（跳过与待批的信息收进「看全部」，**不丢**）。
+//
+// 笔上的班次 / 工作区是**样式**：选一次就一直用（这就是用户要的「一支笔」）。工作区按钮点开
+// 才展开一行横滑的区名，默认收起 —— 少一行就少压掉一行员工。班次用按钮组而不是原生
+// `<select>`：那个弹层由系统画，在这个贴底的位置会飘到页面中间（2026-10-13 用户截图），
+// 而那层我们一个像素都改不了。
+//
+// 不变量（这一票一个字都不动）：行序照周表给（前端不重排）、撤销只留最近一批且是内存级、
+// 过去 30 天内补记要先弹一次确认（ADR 0108 决策 3）、`skipped` / `reminders` 照旧点名。
+const penShiftId = ref(null) // 笔上的班次；null = 还没选过，用第一个在用的班次
+const penRest = ref(false) // 笔是「休」：写下去的是 action=rest
+const penZoneId = ref('') // '' = 跟这个班次的固定区
+const penZoneOpen = ref(false) // 工作区按钮点开才多展开一行
+const pick = ref(null) // { anchor, target } | null；手柄只有日期列头与人名两种
+const pickBusy = ref(false)
+// 撤销只留**最近一批**、内存级（ADR 0107 决策 7）：刷新或换设备就没了。
+const pickUndo = ref(null) // { plan: [...] } | null
+const pastConfirm = ref(null) // { action, options, cells, dates, clear }：过去的二次确认（只弹一次）
 
-// ── 笔刷：抽屉折叠成那一行时手里的笔（2026-10-04 用户要的交互）──────────────
-// 折叠**不只是收起来**：折叠之后表上单击 = 落笔，长按 = 展开看/改这一格。
-// 为什么要分：给一个人改一天原来是三步（点格子 → 抽屉 → 选班次），排一周要来回二十几次；
-// 但「这一格现在到底是什么」也必须有地方去，所以长按留着。
-const brushKind = ref(BRUSH_SHIFT) // 'shift' | 'rest'
-const brushShiftId = ref(null) // 班次 id；null = 还没选，落笔前先提示
-const brushZoneId = ref('') // 工作区 id 字符串；'' = 跟这个班次的固定区
-
-const sheetEmployee = computed(() => {
-  if (!sheet.value) return null
-  return weekEmployees.value.find((item) => item.id === sheet.value.employeeId) || null
+/** 笔上此刻的班次：没选过（或选中的那个停用了）就是**第一个还在用的班次** —— 与旧口径一致。 */
+const penShift = computed(
+  () => activeShifts.value.find((shift) => shift.id === penShiftId.value) || activeShifts.value[0] || null
+)
+// 工作区按钮上写的就是**当前值**（「跟固定区」/「案板」）：点它才展开那一行区名。
+const penZoneName = computed(() => {
+  if (penZoneId.value === '') return '跟固定区'
+  const zone = zones.value.find((item) => String(item.id) === penZoneId.value)
+  return zone ? zone.name : '跟固定区'
 })
 
-const sheetDay = computed(() => {
-  if (!sheet.value) return null
-  return weekDays.value.find((day) => day.business_date === sheet.value.date) || null
+function pickPenShift(shift) {
+  penShiftId.value = shift.id
+  penRest.value = false
+}
+
+function pickPenRest() {
+  penRest.value = true
+}
+
+function penAction() {
+  return penRest.value ? PICK_REST : PICK_SHIFT
+}
+
+function penOptions() {
+  return { shiftId: penShift.value ? penShift.value.id : null, zoneId: penZoneId.value }
+}
+
+// 表里看得见的那几行 / 那几列就是选区的轴：筛了人之后选区跟着缩，不会偷偷刷到看不见的人。
+const pickAxes = computed(() => ({
+  rows: weekRows.value.map((employee) => employee.id),
+  cols: weekDays.value.map((day) => day.business_date),
+}))
+const pickView = computed(() => pickRegion(pick.value, pickAxes.value))
+// 一格都选不到（换了一周、筛掉了人）就是**没有选区**：摘要行与「刷」都不出现。
+const pickActive = computed(() => (pickView.value && pickView.value.count ? pickView.value : null))
+// 高亮按集合查（19 人 × 7 天 = 133 格，逐格 `includes` 太笨）。
+const pickKeys = computed(() => {
+  const keys = new Set()
+  const view = pickView.value
+  if (view) for (const cell of view.cells) keys.add(`${cell.employeeId}|${cell.date}`)
+  return keys
+})
+// 表头 / 人名列的高亮：只有**整列 / 整行被完整覆盖**时才亮（`.gW-th.on`，与格子同一条外环
+// 规则）。用「覆盖到就亮」的话，选一整列会让 19 个人名一起描框 —— 比选区本身还抢眼。
+const pickedCols = computed(() => (pickView.value ? pickView.value.fullCols : []))
+const pickedRows = computed(() => (pickView.value ? pickView.value.fullRows : []))
+
+// 摘要（选区那一行）：选了什么 + 影响多少格 —— 防误刷就靠这一行（「周三 · 全店 19 人 · 19 格」）。
+const pickTitle = computed(() => {
+  const view = pickActive.value
+  if (!view) return ''
+  if (view.kind === 'cols') {
+    return view.cols.length === 1
+      ? formatDayLabel(view.cols[0])
+      : `${shortDate(view.cols[0])}–${shortDate(view.cols[view.cols.length - 1])}`
+  }
+  if (view.kind === 'rows') {
+    return view.rows.length === 1
+      ? employeeName(view.rows[0])
+      : `${employeeName(view.rows[0])} 等 ${view.rows.length} 人`
+  }
+  // 混合手柄（列头 + 人名）会落到这里：那是交叉出来的一个格子。
+  return `${employeeName(view.rows[0])} · ${formatDayLabel(view.cols[0])}`
 })
 
-const sheetCell = computed(() => {
-  const employee = sheetEmployee.value
-  const day = sheetDay.value
+const pickCountText = computed(() => {
+  const view = pickActive.value
+  if (!view) return ''
+  // 「全店」只在真选了全店时说：筛了人之后那句是假话，而这一行正是用来防误刷的。
+  if (view.kind === 'cols' && view.rows.length === weekEmployees.value.length) {
+    return `全店 ${view.rows.length} 人 · ${view.count} 格`
+  }
+  if (view.kind === 'rows' && view.cols.length === weekDays.value.length) {
+    return `这一周 · ${view.count} 格`
+  }
+  return `${view.rows.length} 人 × ${view.cols.length} 天 · ${view.count} 格`
+})
+
+function employeeAt(employeeId) {
+  return weekEmployees.value.find((item) => item.id === employeeId) || null
+}
+
+function employeeName(employeeId) {
+  const employee = employeeAt(employeeId)
+  return employee ? employee.name : `#${employeeId}`
+}
+
+function dayAt(date) {
+  return weekDays.value.find((day) => day.business_date === date) || null
+}
+
+/** 那一格的当前值：原值快照（撤销）、跳过预判（已批的假）都要它。
+ *  `cellOf` 收的是**当天那一列**（用 `day.business_date` 取格），不是日期字符串。 */
+function weekCellAt(employeeId, date) {
+  const employee = employeeAt(employeeId)
+  const day = dayAt(date)
   return employee && day ? cellOf(employee, day) : null
-})
-
-const sheetIsRest = computed(() => {
-  const cell = sheetCell.value
-  return !!cell && cell.scheduled && (cell.shift_id === null || cell.shift_id === undefined) && !cell.leave
-})
-
-// 过去的日子不改写（口径 5）：那天可以看，但不能改 —— 服务端也会拒（`past_day`）。
-const sheetUndoable = computed(() => {
-  const data = week.value
-  return !!(sheet.value && data && data.today && sheet.value.date >= data.today)
-})
-
-const sheetNowText = computed(() => {
-  const cell = sheetCell.value
-  if (!cell || !cell.scheduled) return blankReason(sheetDay.value, cell) || '还没排'
-  if (cell.shift_id === null || cell.shift_id === undefined) return cell.leave ? '请假' : '休'
-  return `${cell.shift_name}${cell.zone_name ? ` · ${cell.zone_name}` : ' · 未配区'}`
-})
-
-// 只有"这天真有班次"才谈得上工作区：休、请假、还没排到的格子，区是没有意义的。
-const sheetHasShift = computed(() => {
-  const cell = sheetCell.value
-  return !!cell && cell.scheduled && cell.shift_id !== null && cell.shift_id !== undefined
-})
-
-/** 下拉停在哪一项：按 **id** 预填（区名没有唯一约束，按名字反查会指到别人身上）。 */
-function syncSheetZone() {
-  const cell = sheetCell.value
-  sheetZone.value = cell && cell.zone_id !== null && cell.zone_id !== undefined
-    ? String(cell.zone_id)
-    : ''
 }
 
-/** 班次名单是异步来的：到货时给笔补一个默认班次（早班）。 */
-watch(activeShifts, () => {
-  if (sheetFolded.value) ensureBrushShift()
-})
-
-const sheetRuleText = computed(() => {
-  const employee = sheetEmployee.value
-  if (!employee) return ''
-  const row = roster.value.find((item) => item.id === employee.id)
-  if (row) return ruleLabel(row.rule)
-  return employee.has_rule ? '（去「名单」看这条规则）' : '还没配规则'
-})
-
-async function openSheet(employee, day) {
-  // 点同一格 = 收起来：抽屉不会自己走开，得有个关掉的手势。
-  const same = sheet.value && sheet.value.employeeId === employee.id
-    && sheet.value.date === day.business_date
-  if (same) {
-    closeSheet()
-    return
-  }
-  sheet.value = { employeeId: employee.id, date: day.business_date }
-  sheetTab.value = 'shift'
-  sheetFolded.value = false
-  sheetError.value = ''
-  // 工作区名单只在名单面板里读过：**先把名单补齐，再决定下拉停在哪一项**。反过来的话，
-  // 这个会话里第一次开抽屉时 `zones` 还是空的 → 下拉里没有选项 → 保存时区被悄悄退回
-  // 固定区（跟票 07 当天编辑器踩过的是同一个坑）。
-  if (!zones.value.length) await loadRoster()
-  syncSheetZone()
-  syncBrushFromCell()
+function onColPick(day) {
+  if (!day.in_window) return
+  nextPick(colHandle(day.business_date))
 }
 
-/** 打开某一格时把笔**跟着这一格走**：展开看的是它，折叠起来刷的就是"跟它一样"。
- *  格子里没有班次（休 / 假 / 还没排）时不动笔 —— 看了一眼休假日就把笔也换成"休"，
- *  接着往下刷会把别人刷成休，那不是超级管理员要的。 */
-function syncBrushFromCell() {
-  const cell = sheetCell.value
-  if (cell && cell.scheduled && cell.shift_id !== null && cell.shift_id !== undefined) {
-    brushShiftId.value = cell.shift_id
-    brushZoneId.value = cell.zone_id === null || cell.zone_id === undefined ? '' : String(cell.zone_id)
-    brushKind.value = BRUSH_SHIFT
-    return
-  }
-  ensureBrushShift()
+function onRowPick(employee) {
+  nextPick(rowHandle(employee.id))
 }
 
-/** 笔还没选班次时给一个默认值（第一个在用的班次）：进周表笔袋就是开的，
- *  总不能让超级管理员先面对一个"选班次"的空下拉再点格子。班次表还没读回来时先留空，
- *  读回来了由下面那个 watch 补上。 */
-function ensureBrushShift() {
-  if (brushShiftId.value === null && activeShifts.value.length) {
-    brushShiftId.value = activeShifts.value[0].id
-  }
-}
-
-/** 开笔袋（2026-10-05 用户要的：**一进周表它就是开的**）。
+/** 点一个手柄：已有的选区还在就以它锚点展开，否则从这一点重新开始。
  *
- *  不用先点一格再收起 —— 一进周表底部就是那支笔，选好班次/工作区直接点格子。
- *  `sheet` 置空：这时候还没有"正在看的那一格"，长按哪一格才展开到哪一格。 */
-async function openBrush() {
-  sheet.value = null
-  sheetFolded.value = true
-  sheetError.value = ''
-  // 工作区名单跟抽屉是同一份、也是懒加载的：不先补齐，笔袋里那个下拉就只有
-  // 「跟固定区」一项 —— 超级管理员选不到区，会以为笔刷不支持选区。
-  if (!zones.value.length) await loadRoster()
-  ensureBrushShift()
+ *  「已经不在了」= 当前选区一格都选不到（锚点那行被筛掉了、或者换了一批人）——那种时候
+ *  接着用旧锚点展开只会得到又一片空，点几次都像没反应，所以直接从这一点重开。 */
+function nextPick(handle) {
+  const current = pickActive.value ? pick.value : null
+  pick.value = pickAt(current, handle)
 }
 
-function closeSheet() {
-  sheet.value = null
-  sheetFolded.value = false // 收起 = 连笔袋一起收（不然关不干净）
-  sheetError.value = ''
+/** 取消选中：点回锚点、点表格外的空白、切走这一栏，都走这里。
+ *  `dropUndo` 只在**换了周**时给：那一批属于上一周，留着撤的是一个看不见的选区。 */
+function clearPick(dropUndo = false) {
+  pick.value = null
+  pastConfirm.value = null
+  if (dropUndo) pickUndo.value = null
 }
 
-async function openCycleTab() {
-  sheetTab.value = 'cycle'
-  // 周期那栏要的是这个人的规则文本，规则在名单那份数据里（`/roster`）：没读过就补一次，
-  // 不为它多开一个接口。
-  if (!roster.value.length) await loadRoster()
+// 筛一次人 = 重新选一遍：选区是按**看得见的行**算的（见 `pickAxes`），筛完还留着，
+// 店长会以为刷的还是筛之前那一片。
+watch(weekFind, () => {
+  if (pick.value) clearPick()
+})
+
+/** 点表格外的空白 = 取消（ADR 0107 决策 3）：控件上的点击各有各的意思，不算「空白」。 */
+function onPageClick(event) {
+  if (!pick.value) return
+  const target = event.target
+  const skip = target && typeof target.closest === 'function'
+    && target.closest('.gW, .gPick, .gD, button, input, select, label, a')
+  if (skip) return
+  clearPick()
 }
 
-/** 抽屉里改完一天：重读当周（格子与抽屉里的现状都跟着变），再把月历那一份人数补上。 */
-async function refreshAfterWeekWrite(date) {
+// ── 提示：一行，几秒后自己消失（票 14 修订口径 4）─────────────────────────────
+// 原来同时挂 4~6 行（预判、回执、待批提醒、撤销说明、错误）把表格压掉半屏。现在只有一个槽：
+// 最新的那条说了算，几秒后自己消失。逐格点名（谁被跳过、谁有待批申请）收进 `details`，
+// 由「看全部」展开 —— 跳过与待批的信息**不能丢**，但也不必常驻。
+const PICK_NOTICE_MS = 6000
+const pickNotice = ref(null) // { text, details: [], warn } | null
+const noticeOpen = ref(false)
+let noticeTimer = null
+
+function sayNotice(text, details = [], warn = false) {
+  if (noticeTimer) clearTimeout(noticeTimer)
+  noticeTimer = null
+  noticeOpen.value = false
+  pickNotice.value = text || details.length ? { text, details, warn } : null
+  if (!pickNotice.value) return
+  noticeTimer = setTimeout(() => {
+    pickNotice.value = null
+    noticeTimer = null
+  }, PICK_NOTICE_MS)
+}
+
+onUnmounted(() => {
+  if (noticeTimer) clearTimeout(noticeTimer)
+  noticeTimer = null
+})
+
+function skipText(items) {
+  return items.map((item) => {
+    const why = PICK_SKIP_TEXT[item.reason] || item.reason
+    return `${employeeName(item.employeeId)} ${shortDate(item.date)} ${why}`
+  }).join('、')
+}
+
+function skipContext(action) {
+  return {
+    action: action || PICK_SHIFT,
+    today: week.value ? week.value.today : '',
+    windowEnd: week.value ? week.value.window_end : '',
+    cellOf: weekCellAt,
+  }
+}
+
+// 待批提醒的数据来源：周表每格没有「待批」这个字段，只有既有的待办那一份（按天粒度）。
+const pendingCells = computed(() => {
+  const map = {}
+  for (const request of inboxRequests.value) {
+    const days = eachDayInRange(request.start_date, request.end_date || request.start_date)
+    for (const day of days) map[`${request.employee_id}|${day}`] = request.kind
+  }
+  return map
+})
+
+function reminderText(items) {
+  const who = items.map((item) => `${employeeName(item.employeeId)} ${shortDate(item.date)}`).join('、')
+  return `待批提醒：${who} 那天有申请等着批，批了会盖掉你刚刷的班。`
+}
+
+/** 一次落笔之后的回执（**一行**）：写了几格、跳过几格、能不能撤。
+ *  逐格点名的那几行收进 `details`（「看全部」展开）—— 跳过与待批的信息不丢。 */
+function sayResult(result, cells) {
+  const undoable = !!pickUndo.value && pickUndo.value.plan.length > 0
+  const parts = []
+  if (result.applied) parts.push(`已刷 ${result.applied} 格`)
+  if (result.skipped.length) parts.push(`跳过 ${result.skipped.length} 格`)
+  if (!parts.length) parts.push('没有格子被改动')
+  // 「撤销只留最近一批、只在这台手机上」这句说明跟着回执走（ADR 0107 决策 7）。
+  const text = `${parts.join(' · ')}${undoable ? ' · 可撤销（只留最近一批、也只在这台手机上）' : ''}`
+  const details = []
+  if (result.skipped.length) details.push(`跳过：${skipText(result.skipped)}`)
+  // 待批提醒：先信服务端回执里那一份（它知道谁那天真有申请），它没给就退回既有的待办那一份。
+  let reminders = result.reminders
+  if (!reminders.length) {
+    const missed = new Set(result.skipped.map((item) => `${item.employeeId}|${item.date}`))
+    reminders = pickPending(cells, pendingCells.value)
+      .filter((item) => !missed.has(`${item.employeeId}|${item.date}`))
+  }
+  if (reminders.length) details.push(reminderText(reminders))
+  sayNotice(text, details)
+}
+
+/** 点一格 = 立刻用当前笔写这一格（票 14 修订口径 2）：不选区、不点「应用」，一步。
+ *
+ *  会被跳过的那种格子**不发请求**：超 30 天、已批的假（词表与回执同一套 `PICK_SKIP_TEXT`）。
+ *  整片刷的时候跳过由服务端回执点名（它才是权威），这里只是省掉一次注定被跳过的往返。 */
+async function paintCell(employee, day) {
+  if (pickBusy.value) return
+  const cells = [{ employeeId: employee.id, date: day.business_date }]
+  const action = penAction()
+  const options = penOptions()
+  const [skip] = predictSkips(cells, skipContext(action))
+  if (skip) {
+    sayNotice(`跳过：${skipText([skip])}`)
+    return
+  }
+  await requestPaint(action, options, cells)
+}
+
+/** 选区那一行的「刷」：把当前笔整片写下去（选区唯一的存在理由）。 */
+async function applyRegion() {
+  const view = pickActive.value
+  if (!view) return
+  await requestPaint(penAction(), penOptions(), view.cells)
+}
+
+/** 选区那一行的「清」：撤掉这一片的手动覆盖，让它们回到规则（过去的日子服务端照旧跳过）。 */
+async function applyRegionClear() {
+  const view = pickActive.value
+  if (!view) return
+  await requestPaint(PICK_CLEAR, {}, view.cells)
+}
+
+/** 落笔前的三道闸（有没有格子 / 超没超 200 格 / 请求体全不全）；这一笔里有过去的日子
+ *  再弹**一次**确认并点名是哪几天（ADR 0108 决策 3），确认之后才真写。 */
+async function requestPaint(action, options, cells) {
+  if (!cells.length) return
+  if (overLimit(cells)) {
+    sayNotice(`一次最多 ${PICK_MAX_CELLS} 格，现在选了 ${cells.length} 格：缩小选区再刷。`, [], true)
+    return
+  }
+  if (!batchPayload(action, options, cells)) {
+    sayNotice('这一笔没有班次可写：先在笔栏上选一个班次。', [], true)
+    return
+  }
+  const dates = pastDatesIn(cells, { today: week.value ? week.value.today : '' })
+  if (dates.length) {
+    pastConfirm.value = { action, options, cells, dates, clear: action === PICK_CLEAR }
+    return
+  }
+  await runPaint(action, options, cells)
+}
+
+const pastConfirmText = computed(() => {
+  const confirm = pastConfirm.value
+  if (!confirm) return ''
+  const days = confirm.dates.map((date) => formatDayLabel(date)).join('、')
+  // 单格也走这一条（点一格就是一笔）：一句里说清「哪一天过去了」，不写「这一批」。
+  const when = confirm.cells.length > 1
+    ? `这一批 ${confirm.cells.length} 格里有 ${confirm.dates.length} 天已经过去了（${days}）`
+    : `这天已经过去了（${days}）`
+  if (confirm.clear) {
+    return `${when}：「清除班次」在过去的日子上不生效，那几天只能改成某个班（会被跳过），其余照常清除。`
+  }
+  return `${when}：改了以后员工看到的记录也会跟着变，而且没有「退回上一次」这一步。照改吗？`
+})
+
+/** 真写：一次请求写完（单格也只是 `items` 里的一条），写完只重拉一次周表。
+ *  撤销要的是**应用前**的原值 —— 服务端不留快照（`staff_assignments` 是原地 upsert）。 */
+async function runPaint(action, options, cells) {
+  pastConfirm.value = null
+  pickBusy.value = true
+  const snapshot = snapshotCells(cells, weekCellAt)
+  try {
+    const result = normalizeResult(
+      await api.post('/api/scheduling/overrides/batch', batchPayload(action, options, cells)),
+    )
+    // 这一笔顶掉上一笔：撤销只留最近一批（ADR 0107 决策 7）。
+    const plan = undoPlan(snapshot, result.skipped)
+    pickUndo.value = plan.length ? { plan } : null
+    sayResult(result, cells)
+    await loadWeek(week.value ? week.value.start : weekStart.value)
+    await refreshMonthCounts()
+  } catch (err) {
+    // 服务端把「为什么刷不上」说全了（超限、没这个班次…）：原话转过来，别拿一句「保存失败」盖掉。
+    sayNotice(err.message || '这一笔没写上去', [], true)
+  } finally {
+    pickBusy.value = false
+  }
+}
+
+/** 撤销刚才那一笔：逐格还原（原本没覆盖的走删除覆盖、原本有覆盖的写回原值）。 */
+async function undoLast() {
+  const undo = pickUndo.value
+  if (!undo || !undo.plan.length) return
+  pickBusy.value = true
+  let undone = 0
+  let kept = 0
+  const failed = []
+  for (const step of undo.plan) {
+    if (step.kind === 'keep') {
+      // 那一格原本是**批出来的假**：覆盖行的 kind=leave 不是这两条接口写得回去的，
+      // 如实说「撤不回来」，不拿一个「休」把它盖掉。
+      kept += 1
+      continue
+    }
+    try {
+      if (step.kind === 'clear') {
+        await api.delete(`/api/scheduling/overrides/${step.employeeId}/${step.date}`)
+      } else {
+        await api.put(`/api/scheduling/overrides/${step.employeeId}/${step.date}`, step.payload)
+      }
+      undone += 1
+    } catch (err) {
+      failed.push(step)
+    }
+  }
+  // 只留最近一批：撤过就没了（内存级，刷新或换设备也不在）。
+  pickUndo.value = null
   await loadWeek(week.value ? week.value.start : weekStart.value)
-  // 抽屉里的「工作区」下拉按服务端**回写后的结果**重新落位：不给区时后端会回填这个班次的
-  // 固定区，下拉不能停在超级管理员刚才点的那个值上（那会跟格子里显示的对不上）。
-  syncSheetZone()
-  // 月历那一份只补**人数**，不动选中那天（`loadCalendar` 会把选中拨回今天/1 号，
-  // 超级管理员从周表切回月历不该发现自己在月历上挑的那天被换掉了）。
   await refreshMonthCounts()
-  if (date && date === selectedDate.value) await loadDay(date)
+  pickBusy.value = false
+  const details = []
+  if (failed.length) details.push(`有 ${failed.length} 格没撤回来（过去的日子只能改成某个班，退不回规则）`)
+  if (kept) details.push(`有 ${kept} 格原本是批过的假，撤不回原样`)
+  sayNotice(`已撤回 ${undone} 格`, details, failed.length > 0)
 }
 
+/** 单日覆盖（票 07）写完之后，月历那一份的人数跟着变。 */
 async function refreshMonthCounts() {
   if (!monthValue.value) return
   try {
@@ -662,143 +909,6 @@ async function refreshMonthCounts() {
   } catch (err) {
     // 周表已经是最新的；月历这一份下次进页面再补，不拿一句错盖住刚做成的改动。
   }
-}
-
-/** 写一天的覆盖。抽屉里点班次、表上落笔，走的都是这一条 —— 不新开接口。 */
-async function writeOverride(employeeId, date, payload) {
-  sheetBusy.value = true
-  sheetError.value = ''
-  try {
-    await api.put(`/api/scheduling/overrides/${employeeId}/${date}`, payload)
-    await refreshAfterWeekWrite(date)
-  } catch (err) {
-    // 服务端把「为什么改不了」说全了（过去的日子、还没铺到的天、休不能带班次…），
-    // 原话转给超级管理员，别拿一句「保存失败」盖掉。
-    sheetError.value = err.message || '这一天没改上'
-  } finally {
-    sheetBusy.value = false
-  }
-}
-
-async function writeCell(payload) {
-  const target = sheet.value
-  if (!target) return
-  await writeOverride(target.employeeId, target.date, payload)
-}
-
-function pickShift(shift) {
-  // 工作区留空 = 跟这个班次的固定区（票 03）。要单独改这一天在哪个区，去月历那页点这个人
-  // —— 票 07 的编辑器管那件事，职责没变。
-  writeCell({ shift_id: shift.id, zone_id: null })
-}
-
-function pickRest() {
-  writeCell({ is_rest: true })
-}
-
-/** 只改这一天的区：班次不动，把当天那个班次一起提交（后端「只改区」走的就是这条路）。 */
-function pickZone(value) {
-  const cell = sheetCell.value
-  if (!cell || cell.shift_id === null || cell.shift_id === undefined) return
-  sheetZone.value = value
-  writeCell({ shift_id: cell.shift_id, zone_id: value === '' ? null : Number(value) })
-}
-
-function toggleBrushRest() {
-  if (brushKind.value === BRUSH_REST) {
-    brushKind.value = BRUSH_SHIFT
-    if (brushShiftId.value === null && activeShifts.value.length) {
-      brushShiftId.value = activeShifts.value[0].id
-    }
-    return
-  }
-  brushKind.value = BRUSH_REST
-}
-
-/** 点一格 = 落笔。落完**不关抽屉**：下一格接着点 —— 这就是这个交互的全部意义。 */
-async function paintCell(employee, day) {
-  if (!canPaintOn(day.business_date, week.value ? week.value.today : '')) {
-    sheetError.value = '过去的日子不改写：往前翻只能看。'
-    return
-  }
-  const payload = brushPayload({
-    kind: brushKind.value,
-    shiftId: brushShiftId.value,
-    zoneId: brushZoneId.value,
-  })
-  if (!payload) {
-    sheetError.value = '先在上面选一个班次（或点「休」），再点格子。'
-    return
-  }
-  await writeOverride(employee.id, day.business_date, payload)
-}
-
-// 长按 = 展开看/改这一格。用 pointer 计时，`@click` 仍是唯一语义入口：
-// 长按已经处理过，就把它后面那一次 click 吞掉 —— 不然会"开了抽屉又立刻落笔"。
-const LONG_PRESS_MS = 550
-let pressTimer = null
-let pressFired = false
-
-function onCellDown(employee, day) {
-  pressFired = false
-  if (!sheetFolded.value) return // 展开时点一下本来就是开抽屉
-  pressTimer = setTimeout(() => {
-    pressTimer = null
-    pressFired = true
-    unfoldToCell(employee, day)
-  }, LONG_PRESS_MS)
-}
-
-function cancelCellPress() {
-  if (pressTimer) {
-    clearTimeout(pressTimer)
-    pressTimer = null
-  }
-}
-
-function onCellClick(employee, day) {
-  if (pressFired) {
-    pressFired = false
-    return
-  }
-  if (sheetFolded.value) {
-    paintCell(employee, day)
-    return
-  }
-  openSheet(employee, day)
-}
-
-async function unfoldToCell(employee, day) {
-  const same = sheet.value && sheet.value.employeeId === employee.id
-    && sheet.value.date === day.business_date
-  sheetFolded.value = false
-  sheetError.value = ''
-  if (same) return // 就是当前这一格：展开就行，别再走一次"同一格 = 收起来"
-  await openSheet(employee, day)
-}
-
-async function clearCell() {
-  const target = sheet.value
-  if (!target) return
-  sheetBusy.value = true
-  sheetError.value = ''
-  try {
-    await api.delete(`/api/scheduling/overrides/${target.employeeId}/${target.date}`)
-    await refreshAfterWeekWrite(target.date)
-  } catch (err) {
-    sheetError.value = err.message || '没撤掉'
-  } finally {
-    sheetBusy.value = false
-  }
-}
-
-/** 「周期」栏那句「去名单改」：把人带到名单页，并直接展开他的周期编辑器。 */
-async function gotoRoster() {
-  const id = sheet.value && sheet.value.employeeId
-  closeSheet()
-  await openPanel('roster')
-  const row = roster.value.find((item) => item.id === id)
-  if (row) openCycle(row)
 }
 
 // 图例里那条「有申请等着批」：有角标才显示（没角标时图例列一个用不上的记号反而费解）。
@@ -1092,7 +1202,7 @@ useNudgePull({
 
 <template>
   <div class="hygiene-admin sched-page">
-    <div class="gB" :class="{ 'sheet-open': !!sheet && !sheetFolded, 'brush-open': sheetFolded && panel === 'week' }">
+    <div class="gB" :class="{ 'pen-open': panel === 'week', 'pen-tall': activeShifts.length > 3 }" @click="onPageClick">
       <div class="gB-body">
         <div class="gB-mon">
           <b v-if="panel === 'week'">{{ weekRangeLabel || '本周' }}</b>
@@ -1304,7 +1414,7 @@ useNudgePull({
               <p class="gD-hint">
                 改的是这一天，不是规则：规则以后怎么变都不动它。撤掉覆盖，这天就回到规则铺出来的样子。
               </p>
-              <p v-if="editError" class="gC-err">{{ editError }}</p>
+              <p v-if="editError" class="gErr">{{ editError }}</p>
             </div>
           </div>
 
@@ -1330,7 +1440,9 @@ useNudgePull({
           </button>
         </template>
 
-        <!-- 周表：员工 × 周。列是七天，行是人；点一格从底下弹抽屉选班次。 -->
+        <!-- 周表：员工 × 周。列是七天，行是人。**点一个格子 = 用笔栏那支笔立刻写这一格**；
+             点**日期列头**选整天、点**人名**选整周（已经有选区时再点一个手柄就以锚点展开，
+             这时笔栏多一行摘要与「刷」）—— 手柄只有这两种，选区只为批量存在（票 14 修订）。 -->
         <template v-else-if="panel === 'week'">
           <p v-if="weekError" class="gMsg">{{ weekError }}</p>
           <p v-if="!week" class="gB-empty">周表读取中……</p>
@@ -1354,11 +1466,24 @@ useNudgePull({
                       :key="day.business_date"
                       :class="{ today: day.is_today, weekend: day.is_weekend, mute: !day.in_window }"
                     >
-                      <span class="w">周{{ WEEK_HEADS[day.weekday] }}</span>
-                      <span class="d">{{ day.day }}</span>
-                      <em v-if="day.month !== week.days[0].month">{{ day.month }}月</em>
+                      <!-- 表头是**手柄**：可点、可聚焦、有名字（票 14 的验收）。窗口外那几天
+                           照旧灰着不可选（未来窗口的上限没变）。 -->
+                      <button
+                        type="button"
+                        class="gW-th"
+                        :class="{ on: pickedCols.includes(day.business_date) }"
+                        :disabled="!day.in_window"
+                        :aria-pressed="pickedCols.includes(day.business_date) ? 'true' : 'false'"
+                        :aria-label="`${formatDayLabel(day.business_date)}：选中这一列全店`"
+                        @click="onColPick(day)"
+                      >
+                        <span class="w">周{{ WEEK_HEADS[day.weekday] }}</span>
+                        <span class="d">{{ day.day }}</span>
+                        <em v-if="day.month !== week.days[0].month">{{ day.month }}月</em>
+                      </button>
                       <!-- 待批的天数是一天一条事实，挂在**这一列的表头**上；挂在每一格里
-                           会变成 11 个一模一样的点（一天 11 个人）。 -->
+                           会变成 11 个一模一样的点（一天 11 个人）。它是展示层，放在按钮
+                           **外面**：点它不会触发选列（票 14 的验收）。 -->
                       <i
                         v-if="pendingMarks[day.business_date]"
                         class="pend"
@@ -1370,9 +1495,18 @@ useNudgePull({
                 <tbody>
                   <tr v-for="employee in weekRows" :key="employee.id">
                     <th class="gW-name">
-                      <b>{{ employee.name }}</b>
-                      <!-- 没配规则的人整行都是空的 —— 不在这里说一句，看着像这店不给他排班。 -->
-                      <em v-if="!employee.has_rule" class="gW-norule" title="这个人还没有轮转规则">没规则</em>
+                      <button
+                        type="button"
+                        class="gW-th"
+                        :class="{ on: pickedRows.includes(employee.id) }"
+                        :aria-pressed="pickedRows.includes(employee.id) ? 'true' : 'false'"
+                        :aria-label="`${employee.name}：选中这一整周`"
+                        @click="onRowPick(employee)"
+                      >
+                        <b>{{ employee.name }}</b>
+                        <!-- 没配规则的人整行都是空的 —— 不在这里说一句，看着像这店不给他排班。 -->
+                        <em v-if="!employee.has_rule" class="gW-norule" title="这个人还没有轮转规则">没规则</em>
+                      </button>
                     </th>
                     <td v-for="day in weekDays" :key="day.business_date">
                       <button
@@ -1381,12 +1515,7 @@ useNudgePull({
                         :class="weekCellClass(employee, day)"
                         :aria-label="weekCellLabel(employee, day)"
                         :disabled="!day.in_window"
-                        @pointerdown="onCellDown(employee, day)"
-                        @pointerup="cancelCellPress()"
-                        @pointerleave="cancelCellPress()"
-                        @pointercancel="cancelCellPress()"
-                        @contextmenu.prevent
-                        @click="onCellClick(employee, day)"
+                        @click="paintCell(employee, day)"
                       >
                         <span>{{ weekCellText(employee, day) }}</span>
                         <!-- 第二行：工作区。没配区的格子这一行整条不渲染（见 `weekCellZone`）。 -->
@@ -1415,7 +1544,8 @@ useNudgePull({
               那几格还是虚的。
             </p>
             <p class="gB-note">
-              点一格从底下选班次；「清除班次」只把<span class="gW-em">手改过</span>的那天退回规则。
+              点一格 = 用底下笔栏上的班次写这一格；点日期列头 / 人名选一片，再用「刷」批量写。
+              「清」把选中的日子里<span class="gW-em">手改过</span>的那几天退回规则。
               改轮转规则（白白白夜夜休休）在「名单」里，它跟单日改动是两件事。
             </p>
             <p v-if="weekExcludedNote" class="gB-note">{{ weekExcludedNote }}</p>
@@ -1490,8 +1620,8 @@ useNudgePull({
                   >保存周期</button>
                   <button type="button" class="gBtn ghost" @click="closeCycle()">取消</button>
                 </div>
-                <p class="gC-hint">空格隔开，一格一天，从起点那天算第 1 格；「休」= 那天不排班。起点留空就是今天。</p>
-                <p v-if="cycleError" class="gC-err">{{ cycleError }}</p>
+                <p class="gHint">空格隔开，一格一天，从起点那天算第 1 格；「休」= 那天不排班。起点留空就是今天。</p>
+                <p v-if="cycleError" class="gErr">{{ cycleError }}</p>
               </div>
               <div class="gZ">
                 <label v-for="shift in activeShifts" :key="shift.id" class="gZ-pick">
@@ -1515,132 +1645,130 @@ useNudgePull({
         </template>
       </div>
 
-      <!-- 底部抽屉（照门店那套排班页的做法）：点周表里的一格，从底下弹出来选班次。
-           与那套的两处刻意不同：① 弹出来时页面留出底部空间（`.gB.sheet-open`），不然它
-           压住的正是下面几行员工；② 不做顶栏那个「保存」—— 本模块是**即时写**，
-           点一下就落库，多一个保存按钮只会让人以为不点就不生效。 -->
+      <!-- 笔栏（票 14 修订，2026-10-13 用户真机裁定）：**常驻**在周表这一栏的底部，折叠态
+           一行 ~70px —— `刷` 标签、班次按钮组（横滑）、工作区、↺ 撤销。**点一格就用当前笔
+           写那一格**，不需要「应用」（用户①：原来多一步）。底部导航不让位、照旧留在原位，
+           笔栏叠在它上面（`.sched-page` 不再自建层叠上下文，见那一处的注释）。
+           上一版那套底栏让位（含文件末尾那条无作用域规则）也一并退役。 -->
       <div
-        v-if="(sheet || sheetFolded) && panel === 'week'"
-        class="gSheet"
-        role="dialog"
-        :aria-label="sheetFolded ? '笔刷' : '改这一天'"
+        v-if="panel === 'week'"
+        class="gPick"
+        role="group"
+        aria-label="落笔"
       >
-        <div class="gSheet-bar">
+        <!-- 提示只有这一行（票 14 修订口径 4）：出现后几秒自己消失，下一次操作替换它。
+             逐格点名（谁被跳过、谁有待批申请）收进「看全部」——信息不丢，但不再常驻五六行。 -->
+        <p
+          v-if="pickNotice"
+          class="gPick-note"
+          :class="{ gErr: pickNotice.warn }"
+          aria-live="polite"
+        >
+          <span class="gPick-note-text">{{ pickNotice.text }}</span>
           <button
-            v-if="sheet"
-            class="gSheet-fold"
+            v-if="pickNotice.details.length"
+            class="gBtn ghost"
             type="button"
-            :aria-expanded="sheetFolded ? 'false' : 'true'"
-            :title="sheetFolded ? '展开' : '收起'"
-            @click="sheetFolded = !sheetFolded"
-          >{{ sheetFolded ? '⌃' : '⌄' }}</button>
-          <!-- 折叠着 = 手里有笔：这一行就是笔刷条。班次 / 周期那两栏是"看这一格"用的，
-               折叠时让位给笔刷控件；展开回去它们还在。 -->
-          <template v-if="sheetFolded">
-            <span class="gBrush-tag">刷</span>
-            <select
-              v-model="brushShiftId"
-              class="gZ-sel"
-              aria-label="笔刷班次"
-              :disabled="brushKind === BRUSH_REST"
-            >
-              <option :value="null" disabled>选班次</option>
-              <option v-for="shift in activeShifts" :key="shift.id" :value="shift.id">{{ shift.name }}</option>
-            </select>
-            <select
-              v-model="brushZoneId"
-              class="gZ-sel"
-              aria-label="笔刷工作区"
-              :disabled="brushKind === BRUSH_REST"
-            >
-              <option value="">跟固定区</option>
-              <option v-for="zone in zones" :key="zone.id" :value="String(zone.id)">{{ zone.name }}</option>
-            </select>
-            <button
-              class="gChip"
-              type="button"
-              :class="{ on: brushKind === BRUSH_REST }"
-              :aria-pressed="brushKind === BRUSH_REST ? 'true' : 'false'"
-              @click="toggleBrushRest()"
-            ><i class="dt rest"></i>休</button>
-          </template>
-          <div v-else class="gSeg">
-            <button class="gBtn" :class="{ on: sheetTab === 'shift' }" type="button" @click="sheetTab = 'shift'">班次</button>
-            <button class="gBtn" :class="{ on: sheetTab === 'cycle' }" type="button" @click="openCycleTab()">周期</button>
-          </div>
-          <button class="gBtn ghost" type="button" @click="closeSheet()">收起</button>
+            aria-controls="gPick-detail"
+            :aria-expanded="noticeOpen ? 'true' : 'false'"
+            @click="noticeOpen = !noticeOpen"
+          >{{ noticeOpen ? '收起' : '看全部' }}</button>
+        </p>
+        <div v-if="noticeOpen && pickNotice" id="gPick-detail" class="gPick-detail">
+          <p v-for="(line, index) in pickNotice.details" :key="index" class="gHint">{{ line }}</p>
         </div>
-        <p v-if="sheetFolded" class="gBrush-hint">点格子就刷上去 · 长按格子看 / 改这一格</p>
-        <p v-if="sheetFolded && sheetError" class="gSheet-err">{{ sheetError }}</p>
 
-        <template v-if="!sheetFolded">
-          <p class="gSheet-hd">
-            <b>{{ sheetEmployee ? sheetEmployee.name : '' }}</b>
-            <span>{{ formatDayLabel(sheet.date) }}</span>
-            <em>{{ sheetNowText }}</em>
-          </p>
+        <!-- 选区摘要：**只在选了整列 / 整行时出现**（点「刷」才批量应用）。不选区时这一行
+             完全不出现 —— 不用批量的人不该看见它（用户③：我就想逐格改）。 -->
+        <div v-if="pickActive" class="gPick-region">
+          <b class="gPick-sum">{{ pickTitle }}</b>
+          <span class="gW-tip">{{ pickCountText }}</span>
+          <button class="gChip" type="button" :disabled="pickBusy" @click="applyRegion()">刷</button>
+          <button
+            class="gChip"
+            type="button"
+            :disabled="pickBusy"
+            title="清除班次：把选中的日子里手改过的那几天退回规则"
+            @click="applyRegionClear()"
+          >清</button>
+        </div>
 
-          <template v-if="sheetTab === 'shift'">
-            <div class="gSheet-row">
-              <button
-                class="gChip"
-                type="button"
-                :disabled="sheetBusy || !sheetUndoable || !(sheetCell && sheetCell.overridden)"
-                @click="clearCell()"
-              >清除班次</button>
-              <button
-                class="gChip"
-                type="button"
-                :class="{ on: sheetIsRest }"
-                :disabled="sheetBusy || !sheetUndoable"
-                @click="pickRest()"
-              ><i class="dt rest"></i>休息</button>
-            </div>
-            <!-- 工作区（2026-10-04 补）：改这里只动这一天，不动这个班次的固定区。
-                 休 / 请假 / 还没排到的格子没有区可言 → 禁用并说一句。 -->
-            <label class="gZ-pick">
-              <span>工作区</span>
-              <select
-                class="gZ-sel"
-                :value="sheetZone"
-                :disabled="sheetBusy || !sheetUndoable || !sheetHasShift"
-                @change="pickZone($event.target.value)"
-              >
-                <option value="">跟固定区</option>
-                <option v-for="zone in zones" :key="zone.id" :value="String(zone.id)">
-                  {{ zone.name }}
-                </option>
-              </select>
-              <em v-if="!sheetHasShift" class="gSheet-pick-note">休 / 请假的日子没有区</em>
-            </label>
-            <div class="gSheet-list">
-              <button
-                v-for="shift in activeShifts"
-                :key="shift.id"
-                type="button"
-                class="gChip wide"
-                :class="[toneClass(shift.id), { on: !!sheetCell && sheetCell.shift_id === shift.id }]"
-                :disabled="sheetBusy || !sheetUndoable"
-                @click="pickShift(shift)"
-              ><i class="dt"></i>{{ shift.name }}</button>
-            </div>
-            <p v-if="!sheetUndoable" class="gSheet-hint">过去的日子不改写：这天的记录留着，从这里改不了。</p>
-            <p v-else class="gSheet-hint">
-              点一下就落库。「工作区」改的是<span class="gW-em">这一天</span>；
-              要改长期的（他以后每个早班都在哪）去「名单」。
-            </p>
-            <p v-if="sheetError" class="gSheet-err">{{ sheetError }}</p>
-          </template>
+        <!-- 工作区：点按钮才展开这一行横滑的区名（默认收起 —— 少一行就少压掉一行员工）。
+             按钮组而不是原生下拉控件：那个弹层由系统画，在这个贴底的位置会飘到页面中间
+             （2026-10-13 用户截图），而那层我们一个像素都改不了。 -->
+        <div v-if="penZoneOpen" class="gPick-zones">
+          <button
+            class="gChip"
+            type="button"
+            :class="{ on: penZoneId === '' }"
+            :disabled="pickBusy"
+            @click="penZoneId = ''"
+          >跟固定区</button>
+          <button
+            v-for="zone in zones"
+            :key="zone.id"
+            class="gChip"
+            type="button"
+            :class="{ on: penZoneId === String(zone.id) }"
+            :disabled="pickBusy"
+            @click="penZoneId = String(zone.id)"
+          >{{ zone.name }}</button>
+        </div>
 
-          <template v-else>
-            <p class="gSheet-rule">{{ sheetEmployee ? sheetEmployee.name : '' }} 的轮转规则：{{ sheetRuleText }}</p>
-            <div class="gSheet-row">
-              <button class="gBtn on" type="button" @click="gotoRoster()">去「名单」改规则</button>
-            </div>
-            <p class="gSheet-hint">规则一人一条，改了只重排今天以后 —— 所以它不在这张周表上改。</p>
-          </template>
-        </template>
+        <!-- 笔栏本体：一行。笔上的班次 / 工作区选一次就一直用（用户④：要「一支笔」的感觉）。
+             棋子直接排在整行里、由整行换行 —— 班次多于 3 张时两行排开（见 `.gPick-row`），
+             而不是在一条窄横滑里把后两个班次藏起来。 -->
+        <div class="gPick-row">
+          <span class="gPen-tag">刷</span>
+          <button
+            v-for="shift in activeShifts"
+            :key="shift.id"
+            type="button"
+            class="gChip"
+            :class="[toneClass(shift.id), { on: !penRest && !!penShift && penShift.id === shift.id }]"
+            :aria-pressed="!penRest && !!penShift && penShift.id === shift.id ? 'true' : 'false'"
+            :disabled="pickBusy"
+            @click="pickPenShift(shift)"
+          ><i class="dt"></i>{{ shift.name }}</button>
+          <button
+            class="gChip"
+            type="button"
+            :class="{ on: penRest }"
+            :aria-pressed="penRest ? 'true' : 'false'"
+            :disabled="pickBusy"
+            @click="pickPenRest()"
+          ><i class="dt rest"></i>休</button>
+          <button
+            class="gChip gPen-zone"
+            type="button"
+            :aria-expanded="penZoneOpen ? 'true' : 'false'"
+            :disabled="pickBusy"
+            @click="penZoneOpen = !penZoneOpen"
+          >{{ penZoneOpen ? '收起' : penZoneName }}</button>
+          <!-- 撤销：没有可撤销的那一批时禁用（口径 1）。撤销是内存级的（ADR 0107 决策 7），
+               那句说明跟着回执走；按钮上再挂一条 title 兜底。 -->
+          <button
+            class="gChip gPick-undo"
+            type="button"
+            :disabled="pickBusy || !pickUndo"
+            title="撤销只留最近一批、也只在这台手机上"
+            aria-label="撤销刚才那一批"
+            @click="undoLast()"
+          >↺</button>
+        </div>
       </div>
+
+      <!-- 选区里有过去的日子时，点应用弹**一次**确认并点名是哪几天（ADR 0108 决策 3）：
+           不是每次应用都弹，也不是每格弹一次。 -->
+      <ConfirmDialog
+        v-if="pastConfirm"
+        :title="pastConfirm.clear ? '过去的日子只能改成某个班' : '改过去的日子'"
+        :message="pastConfirmText"
+        :confirm-label="pastConfirm.clear ? '照样清除' : '照改'"
+        cancel-label="再想想"
+        @confirm="runPaint(pastConfirm.action, pastConfirm.options, pastConfirm.cells)"
+        @cancel="pastConfirm = null"
+      />
     </div>
   </div>
 </template>
@@ -1650,7 +1778,11 @@ useNudgePull({
    令牌来自 /hygiene-admin.css；这里只补原型里没有的两样：月切换条、名单行。 */
 .sched-page {
   position: relative;
-  z-index: 1;
+  /* **这里不能给 z-index**（原来那条 `z-index: 1` 已删）：一给就自建层叠上下文，把容器内
+     `position: fixed` 的笔栏锁在这一层 —— 壳那条底栏（`WorkbenchTabBar`，`--z-shell`=20）
+     会整个画在笔栏上面，70px 的笔栏被压掉 57px，等于废掉（票 12 的笔刷条正是这么坏的：
+     ADR 0107 的背景里记着「真机截图里那句提示语被压掉一半」）。同一处口径见共享样式表
+     `public/hygiene-admin.css` 里 `.hygiene-admin` 那条「这里**不能**给 z-index」。 */
   min-height: 100%;
 }
 .gB {
@@ -1777,12 +1909,6 @@ useNudgePull({
   border: 1px solid var(--hy-line); border-radius: 7px; padding: 3px 6px; cursor: pointer;
 }
 .gZ-sel:disabled { opacity: .45; cursor: default; }
-/* 笔刷条（折叠成一行时的那支笔）：控件直接复用工作区下拉的外观，不另起一套视觉。 */
-.gBrush-tag {
-  font-size: 11px; color: var(--hy-mint); background: var(--hy-surface-2);
-  border: 1px solid var(--hy-line); border-radius: 999px; padding: 2px 8px;
-}
-.gBrush-hint { margin: 6px 0 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.7; }
 .gZ-none { font-size: 11px; color: var(--hy-faint); }
 /* 轮转周期编辑器（票 04）。原型 B 的名单行里没有这一块 —— 展开后长在那一行下面。 */
 .gC {
@@ -1808,8 +1934,9 @@ useNudgePull({
   font: inherit; font-size: 11px; width: 140px; min-height: 0;
 }
 .gC-act { display: flex; gap: 6px; }
-.gC-hint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.6; }
-.gC-err { margin: 0; font-size: 11px; color: var(--hy-seal-bright); line-height: 1.6; }
+/* 提示与错误：周期编辑器（票 04）与选区动作条（票 14）共用同一对样式。 */
+.gHint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.6; }
+.gErr { margin: 0; font-size: 11px; color: var(--hy-seal-bright); line-height: 1.6; }
 .gB-zone {
   margin-left: 5px; font-style: normal; font-family: var(--font-mono); font-size: 10px;
   color: var(--hy-mint);
@@ -1851,7 +1978,7 @@ useNudgePull({
 .gW-cname { width: 4.6em; }
 /* 表头粘住：滚下去以后还得知道哪一列是哪天（门店那套滚动时表头也在）。 */
 .gW thead th {
-  position: sticky; top: 0; z-index: 3;
+  position: sticky; top: 0; z-index: var(--z-queue);
   padding: 3px 0 5px; border-radius: 8px;
   background: var(--hy-bg);
   font-weight: 400; font-size: 10px; color: var(--hy-faint); line-height: 1.3;
@@ -1863,6 +1990,14 @@ useNudgePull({
 .gW thead th.today .d { color: var(--hy-mint-bright); font-weight: 700; }
 .gW thead th.mute { opacity: .45; }
 .gW thead th.weekend .w { color: var(--hy-muted); }
+/* 表头与人名列是**手柄**（票 14 / ADR 0107 决策 9）：它们原来是完全不可交互的 <th>，
+   现在是一个真按钮 —— 键盘 Tab 得到、读屏有名字，聚焦圈用浏览器默认那一圈（共享表没给
+   这几个类写 focus 规则，这里也**不新写**：这一份的令牌配额只减不增）。 */
+.gW-th {
+  width: 100%; padding: 0; display: block; font: inherit; color: inherit;
+  text-align: inherit; background: none; border: 0; cursor: pointer;
+}
+.gW-th:disabled { cursor: default; }
 .gW-name {
   padding: 0 2px; text-align: left; vertical-align: middle;
   font-weight: 400; font-size: 11.5px; color: var(--hy-ink); line-height: 1.35;
@@ -1877,8 +2012,6 @@ useNudgePull({
   border: 1px solid transparent; border-radius: 9px;
   background: var(--hy-surface-2); color: var(--hy-ink);
   font: inherit; font-size: 12px; cursor: pointer;
-  /* 长按要看/改这一格：别让手机把它当成"选中文字"或弹放大镜。 */
-  -webkit-touch-callout: none; user-select: none;
 }
 .gW-cell:disabled { cursor: default; }
 .gW-cell.long { font-size: 10px; letter-spacing: -.02em; }
@@ -1902,7 +2035,7 @@ useNudgePull({
 .gW-cell.mute { background: transparent; border: 1px dashed var(--hy-line); opacity: .5; }
 .gW-cell.none { background: transparent; border: 1px dashed var(--hy-line-strong); }
 .gW-cell.today { box-shadow: inset 0 0 0 1px var(--hy-mint-line); }
-.gW-cell.on { box-shadow: 0 0 0 2px var(--hy-mint); }
+.gW-cell.on, .gW-th.on { box-shadow: 0 0 0 2px var(--hy-mint); }
 /* 这天被单日覆盖改过（票 07 的青点，跟月历同一个记号）。 */
 .gW-cell.over::after {
   content: ""; position: absolute; top: 3px; right: 3px;
@@ -1919,53 +2052,24 @@ useNudgePull({
 .gW-em { color: var(--hy-ink); }
 .gB-legend i.off { background: var(--hy-faint); }
 .gB-legend i.leave { background: var(--hy-aqua); }
-/* 抽屉弹出来时给页面留出底部空间：不留的话它压住的正是下面几行员工
-   （门店那套就是这个毛病，图片里能看到第 4、5 行被压掉一半）。 */
-.gB.sheet-open { padding-bottom: 320px; }
-/* 笔袋开着（折叠成一行）时只留一条的高度：不占地方，最后一行也滚得上来。
-   108px = 那一条（44px 的控件）＋ 提示文案 ＋ 上下内边距；控件抬到 44px 之前是 88。 */
-.gB.brush-open { padding-bottom: 108px; }
+/* 笔栏常驻在周表这一栏的底部，所以页面永远要让出它的高度：不留的话它压住的正是
+   下面几行员工（门店那套就是这个毛病，截图里能看到第 4、5 行被压掉一半）。
+   76px = 折叠态的笔栏（一行 44px 的控件 + 上下内边距 ≈ 66px）再留一点余量；手机档壳
+   还会另外让出工作台底栏那 57px（那份让位由壳算，见 `WorkbenchShell.vue` 的
+   `contentInsetStyle`），所以这里只管笔栏自己那一段。 */
+.gB.pen-open { padding-bottom: 76px; }
+/* 班次多于 3 张时笔栏的班次那排会换成两行（笔栏 ≈ 116px），让位跟着加 —— 否则最后一行
+   员工滚上来时正好被压在笔栏下面（`week-view.md:43` 记的就是门店那套的这个毛病）。 */
+.gB.pen-open.pen-tall { padding-bottom: 140px; }
 
-/* ── 底部抽屉 ─────────────────────────────────────────────────────────── */
-.gSheet {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
-  max-width: 560px; margin: 0 auto;
-  display: flex; flex-direction: column; gap: 9px;
-  max-height: 64vh; overflow-y: auto;
-  padding: 10px 16px calc(14px + env(safe-area-inset-bottom));
-  background: var(--hy-surface);
-  border-top: 1px solid var(--hy-line-strong);
-  border-radius: var(--hy-radius-lg) var(--hy-radius-lg) 0 0;
-  box-shadow: 0 -18px 40px rgba(0, 0, 0, .55);
-}
-.gSheet-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.gSheet-bar .gSeg { margin: 0 auto; }
-.gSheet-fold {
-  width: 44px; height: 44px; flex: none;
-  display: grid; place-items: center;
-  font: inherit; font-size: 13px; line-height: 1; color: var(--hy-muted);
-  background: var(--hy-surface-2); border: 1px solid var(--hy-line);
-  border-radius: 999px; cursor: pointer;
-}
-/* 这一行（笔刷条 + 展开态的那排按钮）的点击目标：原先两个下拉 26px 高、按钮 27px，
-   手机上指头落不准（2026-10-13 用户反馈）。按设计护栏的触控下限抬到 44px，两个下拉
-   再把中间的空档分掉；窄屏放不下时换行，而不是把下拉压到连「跟固定区」都显示不全。 */
-.gSheet-bar .gZ-sel { flex: 1 1 auto; min-height: 44px; font-size: 12.5px; padding: 6px 10px; }
-.gSheet-bar .gBtn { min-height: 44px; padding: 8px 14px; }
-.gSheet-bar .gChip { min-height: 44px; padding: 8px 16px; }
-.gSheet-hd { display: flex; align-items: baseline; gap: 8px; margin: 0; flex-wrap: wrap; }
-.gSheet-hd b { font-family: var(--font-song); font-size: 13.5px; letter-spacing: .06em; }
-.gSheet-hd span { font-size: 11.5px; color: var(--hy-muted); }
-.gSheet-hd em { margin-left: auto; font-style: normal; font-size: 11px; color: var(--hy-mint); }
-.gSheet-row { display: flex; gap: 8px; flex-wrap: wrap; }
-.gSheet-list { display: flex; gap: 8px; flex-wrap: wrap; }
+/* 笔栏上的每一颗棋子（班次 / 休 / 工作区 / ↺ / 摘要行的「刷」「清」）：一套外观，
+   不另起第二套视觉。这一族从票 12 的笔刷条就在，原样留着。 */
 .gChip {
   display: inline-flex; align-items: center;
   font: inherit; font-size: 12px; color: var(--hy-ink);
   background: var(--hy-surface-2); border: 1px solid var(--hy-line);
   border-radius: 999px; padding: 7px 14px; cursor: pointer;
 }
-.gChip.wide { min-width: 104px; }
 .gChip:disabled { opacity: .45; cursor: default; }
 .gChip.on { box-shadow: 0 0 0 2px var(--hy-mint); }
 .gChip.tone-mint { color: var(--hy-mint); background: rgba(63, 224, 176, .14); border-color: rgba(63, 224, 176, .3); }
@@ -1976,14 +2080,65 @@ useNudgePull({
 .gChip.tone-rose { color: var(--hy-rose); background: rgba(240, 122, 176, .14); border-color: rgba(240, 122, 176, .3); }
 .gChip .dt { width: 9px; height: 9px; flex: none; margin-right: 7px; border-radius: 50%; background: currentColor; }
 .gChip .dt.rest { background: var(--hy-faint); }
-.gSheet-rule { margin: 0; font-size: 11.5px; color: var(--hy-ink); line-height: 1.7; }
-.gSheet-pick-note { font-style: normal; color: var(--hy-faint); font-size: 10.5px; }
-.gSheet-hint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.7; }
-.gSheet-err { margin: 0; font-size: 11px; color: var(--hy-seal-bright); line-height: 1.7; }
-/* 手机档（≤430，项目的断点白名单里就是这一档）那一行放不下：控件不会缩到「跟固定区」
-   显示不全，`flex-wrap` 让它换行 —— 于是底部留白得多留一行，不然最后一行员工正好
-   被压在笔刷条下面。 */
-@media (max-width: 430px) {
-  .gB.brush-open { padding-bottom: 160px; }
+/* ── 笔栏（票 14 修订，2026-10-13 用户真机裁定）──────────────────────────────
+   **一行**：`刷` 标签 + 班次按钮组（横滑）+ 工作区 + ↺ 撤销；选区的摘要行、工作区的展开行
+   与那一行提示都只在需要时出现。目标高度 ~70px —— 上一版那条 6 行、把表格压掉半屏的动作条
+   是这一票要拆掉的东西（用户②）。
+   层级：`fixed` + `--z-queue`（200），**叠在底部导航之上**（底栏是 `--z-shell`=20）。它成立的前提是
+   `.sched-page` 不自建层叠上下文（见那一处的注释）—— 少了那一条，这一条就是个摆设。
+   控件一律 44px 触控下限（票 12 那次「太窄不好点」的账）；这一段的 `--hy-*` 引用一条都没
+   新增：颜色全部蹭既有的 `.gChip` / `.gErr` / `.gHint` / `.gB-legend` 那几族
+   （`designGuard` 的棘轮只减不增）。 */
+.gPick {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-queue);
+  max-width: 560px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
+  background: var(--hy-surface);
+  border-top: 1px solid var(--hy-line-strong);
+  border-radius: var(--hy-radius-lg) var(--hy-radius-lg) 0 0;
+  box-shadow: 0 -18px 40px rgba(0, 0, 0, .55);
 }
+/* 手机档：笔栏停在底部导航**上面** —— 两条都得露出来，否则在周表这一栏里就切不到
+   「今天 / 卫生验收 / 配方」（用户熟悉的那一版就是两条并排）。底栏已经吃掉安全区，
+   这里不再重复要一遍，免得笔栏底下多出一条空白。 */
+@media (max-width: 720px) {
+  .gPick {
+    bottom: calc(57px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: 12px;
+  }
+}
+/* 班次按钮组**换行**，不横滑。笔的场景要「一眼看全才能点」—— 5 个班次时横滑会把后两个藏起来
+   （2026-10-13 实测：容器 214px、内容 426px，而滚动条又刚被用户要求拿掉，界面上就没有任何
+   "还有更多"的提示了）。棋子直接由这一行换行：多于 3 张时排成两行，一行装得下就还是一行。
+   横向一律不画滚动条（展开的工作区仍是横滑：最多 9 个区名，换行会到三行）。 */
+.gPick-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+/* `刷` 标签：不带颜色（继承 `.hygiene-admin` 的正文色），只做个记号 —— 这一份的
+   令牌配额只减不增，能不引就不引。 */
+.gPen-tag { flex: none; font-size: 11px; letter-spacing: .08em; }
+/* 笔栏里所有控件（班次 / 休 / 工作区 / ↺ / 摘要行那两个）的触控下限；水平方向比通用 chip
+   收一档，好让最常见的情况（两个班次 ＋ 休 ＋ 工作区 ＋ 撤销）在一行里排得下、不产生横滑。 */
+.gPick-row .gChip, .gPick-region .gChip, .gPick-zones .gChip { min-height: 44px; flex: none; }
+.gPick-row .gChip { padding: 7px 11px; }
+.gPen-zone { max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 撤销那颗是圆形的：要压过上面那条 `.gPick-row .gChip` 的水平内边距（同权重才比顺序）。 */
+.gPick-row .gPick-undo { min-width: 44px; padding: 0; justify-content: center; font-size: 15px; }
+/* 工作区的展开行：也是一条横滑的按钮组（原生 `<select>` 的弹层在这个位置会飘到页面中间）。 */
+.gPick-zones {
+  display: flex; gap: 6px; overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.gPick-zones::-webkit-scrollbar { display: none; }
+/* 选区摘要行（只在选了整列 / 整行时出现）：摘要让位给「刷」「清」两个按钮，窄屏截断。 */
+.gPick-region { display: flex; align-items: center; gap: 8px; }
+.gPick-region .gW-tip {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gPick-sum { flex: none; font-family: var(--font-song); font-size: 13px; letter-spacing: .06em; }
+/* 一行提示：不加颜色（正文色），出错时蹭既有的 `.gErr`（朱砂）—— 那一族已经有了。 */
+.gPick-note { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.gPick-note-text { flex: 1 1 auto; min-width: 0; }
+.gPick-detail { display: flex; flex-direction: column; gap: 4px; }
 </style>

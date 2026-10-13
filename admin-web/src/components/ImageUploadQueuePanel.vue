@@ -169,7 +169,7 @@ function closePanel() {
   right: 14px;
   /* 必须低于拍摄/对照弹层（.staff-preview 是 60）：原来 95 会盖住弹层里的照片预览，
      员工看不到自己刚拍的那张。仍高于底部 tabbar（30），收起态也还能点到。 */
-  z-index: 55;
+  z-index: var(--z-dialog);
   width: min(360px, calc(100vw - 28px));
 }
 .image-upload-queue.is-collapsed { width: auto; }

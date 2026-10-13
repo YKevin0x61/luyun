@@ -1,10 +1,12 @@
 /** 页面清单（`pageRoutes.json`）的读取口 —— 加一页先改那张表，再在这里/路由里消费。
  *
  *  表是**唯一来源**：`path` / `title` / `group` / `audience` / `standalone` / `public`
- *  （字段含义见 JSON 里的 `_comment`）。前端路由注册的 meta（是否独立外壳 / 是否免登录）
- *  与页面标题都从它派生；后端 `main.py` 的页面路由清单与两张页面豁免表由
- *  `tests/test_spa_page_routes.py` 对着同一张表强校验。两边一起动的时候，
- *  只要表是对的，前端与后端就不会各说各话（这正是票 01 要消掉的那类漂移）。
+ *  六个必填字段 + 可选字段（`aliases` / `authRedirect` / `workbenchTheme` /
+ *  `ownBottomBar` / `flush`，含义见 JSON 里的 `_comment`）。前端路由注册的 meta
+ *  （是否独立外壳 / 是否免登录 / 内容区那两个 opt-out）与页面标题都从它派生；后端
+ *  `main.py` 的页面路由清单与两张页面豁免表由 `tests/test_spa_page_routes.py` 对着
+ *  同一张表强校验。两边一起动的时候，只要表是对的，前端与后端就不会各说各话
+ *  （这正是票 01 要消掉的那类漂移）。
  *
  *  身份（`audience`）由路由守卫消费（票 02 起）：`admin` 只认管理端会话、`staff` 只认
  *  员工会话、`both` 任一会话有效即可 —— 与 `main.py` 的页面墙对工作台前缀的判定同一口径。
@@ -47,8 +49,37 @@ function workbenchThemeOf(row) {
   return row.workbenchTheme === true || String(row.path).startsWith('/workbench')
 }
 
+/** 这一页**自带底部工具栏**（`ownBottomBar`，ADR 0106 决策 5）：手机档不叠工作台底栏、
+ *  内容区那份底部让位也还回去。
+ *
+ *  这份路径名单原先手写在壳里（`WorkbenchShell.vue` 的 `OWN_BOTTOM_BAR_PATHS`），票 02 起
+ *  搬进清单 —— 「这一页是什么」只有清单一处来源，壳不再认路径。
+ *  **与「铺满」互不隐含**：底下那条栏是谁的不是一回事，内边距还留不留是另一回事；今天
+ *  自带底栏的那一页**没有**标铺满，标了铺满的打印页也**没有**自带底栏。
+ *
+ *  护栏：`views/workbench/__tests__/workbenchShell.test.js` 里那组「opt-out 两个字段从
+ *  页面清单派生」（清单点名哪页自带底栏，那一页就不渲染工作台底栏、算出来的下 inset 是 0
+ *  —— 票 03 起那份让位由壳算，见 `WorkbenchShell.vue` 的 `contentInsetStyle`，不再是
+ *  `<main>` 上的钩子 class）。 */
+function ownBottomBarOf(row) {
+  return row.ownBottomBar === true
+}
+
+/** 这一页**铺满**（`flush`，ADR 0106 决策 5）：内容区不要壳给的横向与上内边距 —— A4 预览
+ *  （配方打印）与全幅画布那一类页面。
+ *
+ *  **与「自带底栏」互不隐含**：这两件事只是恰好都曾被壳里那一份 `has-own-bar` 名单表达，
+ *  拆开之后各标各的（配方阅读面自带底栏但不铺满，配方打印铺满但不自带底栏）。
+ *  壳今天还不消费它：把内边距收进壳的是 ADR 0106 的下一票，届时壳从这里读。
+ *
+ *  护栏：`__tests__/pageRoutes.test.js` 的「两个字段互不隐含」（今天真实使用它们的两页
+ *  各标各的）。 */
+function flushOf(row) {
+  return row.flush === true
+}
+
 /** vue-router 的 meta：独立外壳、免登录、守卫要用的「允许的身份」三态，
- *  以及这一页要不要开工作台令牌层。 */
+ *  这一页要不要开工作台令牌层，以及内容区的两个 opt-out。 */
 export function pageMeta(path) {
   const row = requireRow(path)
   return {
@@ -56,6 +87,8 @@ export function pageMeta(path) {
     public: row.public,
     audience: row.audience,
     workbenchTheme: workbenchThemeOf(row),
+    ownBottomBar: ownBottomBarOf(row),
+    flush: flushOf(row),
   }
 }
 

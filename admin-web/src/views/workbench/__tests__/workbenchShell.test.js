@@ -1,10 +1,30 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenchCopy.js'
 import { PREP_PLAN_PATH } from '../../../utils/prepPlanPaths.js'
+import { RECIPE_DETAIL_PATH, RECIPE_PRINT_PATH } from '../../../utils/recipePaths.js'
+import { PAGE_ROUTES, pageRow } from '../../../router/pageRoutes.js'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const read = (rel) => readFileSync(join(here, rel), 'utf8')
+/** 一份样式源码里某条规则的声明块（同一个选择器可能出现多次，全给出来）。 */
+function ruleBodies(source, selector) {
+  const bodies = []
+  let from = 0
+  for (;;) {
+    const at = source.indexOf(`${selector} {`, from)
+    if (at === -1) return bodies
+    const end = source.indexOf('}', at)
+    bodies.push(source.slice(at, end + 1))
+    from = end + 1
+  }
+}
 
 // 工作台外壳（票 03 立、票 04 接上身份）：
 // - 导航跟着**此刻的身份**走，不跟着"这一页是谁的"。店长的会话挂在「我的」页上时，
@@ -24,6 +44,10 @@ const ROUTES = [
   { path: '/workbench/kitchen/recipe', component: { template: '<div>配方</div>' }, meta: { audience: 'both', standalone: true } },
   // 票 08：后勤那一格的第二扇门（备货计划，`both`）—— 换位置、统一导航，不扩权。
   { path: PREP_PLAN_PATH, component: { template: '<div>备货计划</div>' }, meta: { audience: 'both', standalone: true } },
+  // 票 02（内容区）：opt-out 两个字段的落点页 —— 配方阅读面「自带底栏」、配方打印「铺满」。
+  // 它们本来就是路由里的页面（这里只补两条供挂载用）。
+  { path: RECIPE_DETAIL_PATH, component: { template: '<div>配方详情</div>' }, meta: { audience: 'both', standalone: true } },
+  { path: RECIPE_PRINT_PATH, component: { template: '<div>配方打印</div>' }, meta: { audience: 'both', standalone: true } },
 ]
 
 function jsonResponse(data, status = 200) {
@@ -85,7 +109,38 @@ beforeEach(() => {
   vi.stubGlobal('fetch', bothSessionsFetch())
 })
 
+// ── 内容区让位的两个输入（票 03）──────────────────────────────────────────────
+// 两个真实来源在 jsdom 里都量不到：底栏的几何要布局，媒体查询要解析 CSS。所以壳问
+// `matchMedia`、读令牌层的 `--safe-b`，测试替这两处回答 —— 断言的是壳**算出来**的那个数。
+
+/** 手机档：底栏那条只在 ≤720px 渲染（`WorkbenchTabBar.vue` 自己的媒体查询）。 */
+function stubMobileTier({ matches = true } = {}) {
+  vi.stubGlobal('matchMedia', (query) => ({
+    media: query, matches, addEventListener() {}, removeEventListener() {},
+  }))
+}
+
+/** 两个档位各答各的（票 04 起壳问两条：720 的底栏档、900 的内边距宽档）。 */
+function stubTiers({ mobile = false, wide = false } = {}) {
+  vi.stubGlobal('matchMedia', (query) => ({
+    media: query,
+    matches: /min-width/.test(query) ? wide : mobile,
+    addEventListener() {}, removeEventListener() {},
+  }))
+}
+
+/** 安全区：生产里令牌层写的是 `env(safe-area-inset-bottom, 0px)`，浏览器自己解成 px；
+ *  这里直接把它摆成算好的值 —— 注入点就是令牌层那一根（壳读的就是它）。 */
+function stubSafeBottom(raw) {
+  document.documentElement.style.setProperty('--safe-b', raw)
+}
+
+/** 内容容器上算出来的下 inset，例如 `57px` / `91px` / `0px`。 */
+function insetOf(wrapper, name = '--wb-inset-bottom') {
+  return wrapper.get('#workbench-main').element.style.getPropertyValue(name)
+}
 afterEach(() => {
+  document.documentElement.style.removeProperty('--safe-b')
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -234,5 +289,265 @@ describe('工作台外壳的导航', () => {
     expect(back.exists()).toBe(true)
     expect(back.text()).toContain('后台')
     expect(back.attributes('href')).toBe('/')
+  })
+})
+
+// 票 02（内容区）：opt-out 不再是一份**手写在壳里的路径名单**，而是页面清单上的两个可选
+// 字段 —— 壳只读清单渲染。两件事各管各的，`ownBottomBar` 不再隐含 `flush`（ADR 0106
+// 决策 5）。这组用例断的是**渲染出来的东西**（底栏在不在、让位的钩子在不在），不是源码
+// 写法：清单那一行改一下，断言就跟着变。
+describe('opt-out 两个字段从页面清单派生（票 02）', () => {
+  /** 清单里今天真实使用某一页的路径 —— 这一组用例的**输入就是清单自身**：
+   *  手写名单满足不了它（名单与清单是两份），这正是红→绿那一步。 */
+  function pagesUsing(field) {
+    return PAGE_ROUTES.filter((row) => row[field] === true).map((row) => row.path)
+  }
+
+  it('清单里点名的「自带底栏」页不渲染工作台底栏，其余页面照旧渲染', async () => {
+    const ownBarPages = pagesUsing('ownBottomBar')
+    // 防空转：这一组要真的有人在用，否则下面两个循环都会空转着绿。
+    expect(ownBarPages, '清单里没有一页用 ownBottomBar').toContain(RECIPE_DETAIL_PATH)
+    expect(ownBarPages).not.toContain(PREP_PLAN_PATH)
+
+    for (const path of ownBarPages) {
+      const { wrapper } = await mountShell(path)
+      // 手机档底栏与页内那条 `.sop-bottom-bar` 只差 4px，两条都在就是上面那条被整个盖住
+      // （2026-10-08 用户裁定）—— 所以这一页整条不渲染。
+      expect(wrapper.find('.wb-tabbar').exists(), `${path} 不该叠工作台底栏`).toBe(false)
+    }
+
+    const { wrapper } = await mountShell(PREP_PLAN_PATH)
+    expect(wrapper.find('.wb-tabbar').exists()).toBe(true)
+  })
+
+  it('「自带底栏」页把手机档那份底部让位还回去，其余页面留着', async () => {
+    stubMobileTier()
+    const ownBar = await mountShell(RECIPE_DETAIL_PATH)
+    // jsdom 不做布局、也不解析媒体查询，所以断的是**壳算出来并挂到内容容器上的那个数**
+    // （票 03 起 inset 是壳算的：底栏没渲染就不留它的高度）—— 规则本身由 shellMobileChrome
+    // 那组断。
+    expect(insetOf(ownBar.wrapper)).toBe('0px')
+
+    const plain = await mountShell(PREP_PLAN_PATH)
+    expect(insetOf(plain.wrapper)).toBe('57px')
+  })
+
+  it('两个字段互不隐含：配方打印页只「铺满」、不自带底栏', async () => {
+    // ADR 0106 决策 5 点名的那个反例：配方打印是 A4 预览页（要铺满），它顶上有自己那条
+    // 打印工具条、底下没有自带底栏 —— 于是工作台底栏照渲染、让位照留。
+    expect(pageRow(RECIPE_PRINT_PATH).flush, '配方打印该标 flush').toBe(true)
+    expect(pageRow(RECIPE_PRINT_PATH).ownBottomBar).toBeUndefined()
+
+    stubMobileTier()
+    const { wrapper } = await mountShell(RECIPE_PRINT_PATH)
+    expect(wrapper.find('.wb-tabbar').exists()).toBe(true)
+    // **票 04 起「铺满」被消费**：横向与上内边距算出来是 0（A4 预览按纸张宽度排版，
+    // 多留一圈就摆不下）；底下那条让位照留 57px（铺满只免横向与上，不免底栏那一条）。
+    expect(insetOf(wrapper)).toBe('57px')
+  })
+
+  it('「铺满」的判据是这个字段，不是"组恰好是 0"', async () => {
+    // 后勤组今天本来就是 0，光断打印页看不出这条字段有没有被消费 —— 所以拿一个
+    // **组值非零**的组做对照：同一份壳，铺满的页 0、同壳里非铺满的页拿到组值。
+    stubTiers({ mobile: true, wide: true })
+    const print = await mountShell(RECIPE_PRINT_PATH)
+    expect(insetOf(print.wrapper, '--wb-inset-top')).toBe('0px')
+    expect(insetOf(print.wrapper, '--wb-inset-inline')).toBe('0px')
+
+    const plain = await mountShell('/workbench/floor/daily')
+    expect(insetOf(plain.wrapper, '--wb-inset-top')).not.toBe('0px')
+  })
+})
+
+// 票 03（内容区）：壳第一次持有内容容器与下 inset。三根变量（`--wb-inset-top` /
+// `--wb-inset-bottom` / `--wb-inset-inline`）只在壳内部定义与消费，**不发布到
+// `<html data-workbench>`**（那是主题层，ADR 0106 决策 4）；下 inset 的判据是
+// 「本屏此刻渲染了底栏吗」——**不看 `audience`**（2026-10-13 基线实测：管理端手机档
+// 同样有那条 57px 底栏）。
+//
+// 这里的断言全是**渲染出来的数**（`<main>` 上那三个自定义属性）：底栏高与安全区都是
+// 壳的输入，测试把值注入进去，不量真实几何（jsdom 也不做布局）。
+describe('内容区的下 inset（票 03）', () => {
+  it('管理端手机档：底栏在屏上，下 inset = 57px（不许被算成 0）', async () => {
+    stubMobileTier()
+    const { wrapper } = await mountShell('/workbench/floor/daily')
+
+    expect(insetOf(wrapper)).toBe('57px')
+  })
+
+  it('员工端手机档：同一笔账 —— 两档的 inset 一样，判据里没有 audience', async () => {
+    stubMobileTier()
+    const admin = await mountShell('/workbench/floor/daily')
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    const staff = await mountShell('/workbench/me/today')
+
+    expect(insetOf(staff.wrapper)).toBe('57px')
+    expect(insetOf(staff.wrapper)).toBe(insetOf(admin.wrapper))
+  })
+
+  it('安全区是可注入的输入：34px → 57 + 34 = 91px', async () => {
+    stubMobileTier()
+    stubSafeBottom('34px')
+    const { wrapper } = await mountShell('/workbench/me/today')
+
+    expect(insetOf(wrapper)).toBe('91px')
+  })
+
+  it('桌面档：底栏 `display: none`，下 inset 与今天一致（无下留白 ⇒ 0）', async () => {
+    // jsdom 里没有 `matchMedia`（等于桌面档），这里显式再钉一次 false 的那条路。
+    stubMobileTier({ matches: false })
+    const { wrapper } = await mountShell('/workbench/floor/daily')
+
+    expect(insetOf(wrapper)).toBe('0px')
+  })
+
+  it('拖窗口跨过 720px：让位跟着变（不是只在挂载时算一次）', async () => {
+    // 底栏跟不跟着出现是 CSS 的事（≤720px 才 `display: flex`），所以壳必须订阅那条媒体查询
+    // 回调重算 —— 只在挂载时算一次的话，桌面窗口被拖窄之后底栏冒出来、内容区却不给它让位。
+    // **票 04 起壳订阅两条**（720 的底栏档 + 900 的内边距宽档），所以这里按 query 分开记：
+    // 这一条驱动的是底栏那一条，另一条的监听在下面「宽档」那条里断。
+    const added = []
+    const removed = []
+    let mobileMatches = false
+    vi.stubGlobal('matchMedia', (query) => ({
+      media: query,
+      get matches() { return /max-width/.test(query) ? mobileMatches : false },
+      addEventListener(type, fn) { if (type === 'change') added.push({ query, fn }) },
+      removeEventListener(type, fn) { if (type === 'change') removed.push({ query, fn }) },
+    }))
+    const { wrapper } = await mountShell('/workbench/floor/daily')
+    const mobileHandlers = added.filter((it) => /max-width/.test(it.query))
+    expect(mobileHandlers, '挂载时就该订阅底栏那条媒体查询').toHaveLength(1)
+    expect(insetOf(wrapper)).toBe('0px')
+
+    mobileMatches = true
+    mobileHandlers.forEach(({ fn }) => fn({ matches: true }))
+    await flushPromises()
+    expect(insetOf(wrapper)).toBe('57px')
+
+    mobileMatches = false
+    mobileHandlers.forEach(({ fn }) => fn({ matches: false }))
+    await flushPromises()
+    expect(insetOf(wrapper)).toBe('0px')
+
+    wrapper.unmount()
+    expect(removed, '卸载时要退订（别在别人的页上留监听）').toEqual(added)
+  })
+
+  it('三根度量都套在内容容器上，且不外发：`<html>` 与壳根都没有它们', async () => {
+    stubMobileTier()
+    const { wrapper } = await mountShell('/workbench/me/today')
+    const main = wrapper.get('#workbench-main').element
+
+    for (const name of ['--wb-inset-top', '--wb-inset-bottom', '--wb-inset-inline']) {
+      expect(main.style.getPropertyValue(name), `${name} 该挂在内容容器上`).not.toBe('')
+    }
+    // 不发布到 `<html data-workbench>`（令牌层是主题的东西）——
+    // `<html>` 上挂着的只有 `data-workbench` 这个开关本身。
+    expect(document.documentElement.style.getPropertyValue('--wb-inset-bottom')).toBe('')
+    expect(document.body.style.getPropertyValue('--wb-inset-bottom')).toBe('')
+    // 壳根与顶栏也读不到（它们是内容容器的祖先/兄弟，自定义属性只往下继承）。
+    const root = wrapper.get('.wb-shell').element
+    expect(root.style.getPropertyValue('--wb-inset-bottom')).toBe('')
+    expect(wrapper.get('.wb-top').element.style.getPropertyValue('--wb-inset-bottom')).toBe('')
+  })
+
+  it('自带底栏的页：底栏整条不渲染，下 inset 0（安全区也不加）', async () => {
+    stubMobileTier()
+    stubSafeBottom('34px')
+    const { wrapper } = await mountShell(RECIPE_DETAIL_PATH)
+
+    expect(wrapper.find('.wb-tabbar').exists()).toBe(false)
+    expect(insetOf(wrapper)).toBe('0px')
+  })
+})
+
+// 票 04（内容区）：横向与上内边距按页面清单里的 `group` 查表给（ADR 0106 决策 3），
+// 页面与共享样式表不再出这一份。三组数值不同是现状的事实，本票**不归一**：
+// 每一行的取值就是收口前那一处的原文，浏览器解算式的时候看到的还是同一个数。
+//
+// 这一组**三组各一条**（票面验收 5），每条断两件事：
+//   ① 壳给这一组算出来的那两根变量（渲染出来的 inline style，jsdom 能读）；
+//   ② 这一组原来那一份内边距在页面上**不再有**（页面 / 共享样式表那一侧，按源码断 ——
+//      jsdom 不做布局、也不解析 SFC 的 `<style>`）。
+describe('内容区的横向与上内边距按组给（票 04）', () => {
+  it('现场八页：值来自共享样式表那条 `.hy-main`，那一侧的上 / 横向已经交出去', async () => {
+    stubTiers({ mobile: true, wide: false })
+    const { wrapper } = await mountShell('/workbench/floor/daily')
+
+    // base 档（<900px）：`padding: var(--hy-page)` + 左右 `max(...)`
+    expect(insetOf(wrapper, '--wb-inset-top')).toBe('var(--hy-page)')
+    expect(insetOf(wrapper, '--wb-inset-inline'))
+      .toBe('max(var(--hy-page), var(--safe-l), var(--safe-r))')
+
+    // 宽档（≥900px）：共享样式表那条媒体查询里的上 / 横向 clamp（第三个数 2rem 是**下**
+    // 内边距，属于页面正文自己的收尾留白，不搬）。
+    stubTiers({ mobile: false, wide: true })
+    const wide = await mountShell('/workbench/floor/daily')
+    expect(insetOf(wide.wrapper, '--wb-inset-top')).toBe('clamp(1.1rem, 2.2vw, 2rem)')
+    expect(insetOf(wide.wrapper, '--wb-inset-inline')).toBe('clamp(1.2rem, 3vw, 2.6rem)')
+
+    // 页面侧：`.hygiene-admin .hy-main` 只剩页面正文自己的下内边距与宽度约束。
+    const bodies = ruleBodies(read('../../../../public/hygiene-admin.css'),
+      '.hygiene-admin .hy-main')
+    expect(bodies.length, '共享样式表里没有 `.hy-main` 这条了？').toBeGreaterThan(0)
+    for (const body of bodies) {
+      expect(body, `.hy-main 还在出横向 / 上内边距：${body}`)
+        .not.toMatch(/padding(-top|-left|-right)?\s*:(?!\s*2rem)/)
+      expect(body).toMatch(/padding-bottom\s*:/)
+    }
+  })
+
+  it('人事组：组壳那条补内边距退场，值随它落到花名册自己的样式里（数字一字不差）', async () => {
+    stubTiers({ mobile: true, wide: false })
+    const { wrapper } = await mountShell('/workbench/hr/roster')
+
+    // 组里另外五页（月历 / 待办 / 班次表 / 人事提醒 / 加班统计）的根自带内边距，
+    // 组级给一个非零值会把它们推走 —— 所以壳给人事组 0，花名册那份跟着老规则走。
+    expect(insetOf(wrapper, '--wb-inset-top')).toBe('0px')
+    expect(insetOf(wrapper, '--wb-inset-inline')).toBe('0px')
+
+    // 页面侧：组壳里不再有内边距规则；花名册自己那一份与老规则逐字相同（含宽档那条）。
+    const shell = read('../../scheduling/SchedulingLayout.vue')
+    expect(shell).not.toMatch(/padding/)
+    const roster = read('../../hygiene/HygieneRosterView.vue')
+    expect(roster).toMatch(/\.roster-page\s*\{[^}]*padding:\s*var\(--hy-page\)/)
+    expect(roster).toMatch(/padding-left:\s*max\(var\(--hy-page\),\s*var\(--safe-l\)\)/)
+    expect(roster).toMatch(/padding-right:\s*max\(var\(--hy-page\),\s*var\(--safe-r\)\)/)
+    expect(roster).toMatch(/padding:\s*clamp\(1\.1rem,\s*2\.2vw,\s*2rem\)\s+clamp\(1\.2rem,\s*3vw,\s*2\.6rem\)\s+2rem/)
+  })
+
+  it('工作台首页（`home`）：值来自页面自己那条 `.wbh`，页面侧只剩正文自己的下内边距', async () => {
+    // 票面的「三组」只点了现场 / 人事 / 我的，而清单里会套统一壳的组不止三个 ——
+    // 首页这一组（一页）同样收口：值与 `.wbh` 原来那条逐字相同，两个档通用。
+    stubTiers({ mobile: true, wide: false })
+    const { wrapper } = await mountShell('/workbench')
+
+    expect(insetOf(wrapper, '--wb-inset-top')).toBe('max(var(--hy-page, 18px), var(--safe-t))')
+    expect(insetOf(wrapper, '--wb-inset-inline'))
+      .toBe('max(var(--hy-page, 18px), var(--safe-l), var(--safe-r))')
+
+    const body = ruleBodies(read('../../workbench/WorkbenchHomeView.vue'), '.wbh')
+      .find((text) => text.includes('.wbh {'))
+    expect(body, 'WorkbenchHomeView 里没有 `.wbh` 的基线规则了？').toBeTruthy()
+    expect(body).not.toMatch(/padding\s*:/)
+    expect(body).toMatch(/padding-bottom:\s*calc\(40px \+ var\(--safe-b\)\)/)
+  })
+
+  it('我的组：四页各由自己的容器给（今天 / 整月 / 卫生的根是 0，页头自己带），壳给 0', async () => {
+    vi.stubGlobal('fetch', staffOnlyFetch())
+    stubTiers({ mobile: true, wide: false })
+    const { wrapper } = await mountShell('/workbench/me/today')
+
+    expect(insetOf(wrapper, '--wb-inset-top')).toBe('0px')
+    expect(insetOf(wrapper, '--wb-inset-inline')).toBe('0px')
+
+    // 页面侧：`.today-page` 只有下内边距（收尾留白 + 安全区），横向与上在 `.tTop` 上 ——
+    // 那一份是页头自己的，不是「内容区内边距」（搬它会把页内其它几块一起推走）。
+    const body = ruleBodies(read('../../today/TodayView.vue'), '.today-page')
+      .find((text) => text.includes('.today-page {'))
+    expect(body, 'TodayView 里没有 `.today-page` 的基线规则了？').toBeTruthy()
+    expect(body).not.toMatch(/padding\s*:/)
+    expect(body).toMatch(/padding-bottom:\s*calc\(80px \+ var\(--safe-b\)\)/)
   })
 })

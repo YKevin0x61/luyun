@@ -150,8 +150,11 @@ describe('店长端排班月历（原型 B）', () => {
     // `audience: 'admin'` 的独立外壳标记（由 `workbenchHrPage` 那条工厂从清单派生）。
     expect(router).toMatch(/meta: pageMeta\(path\)/)
     expect(router).toMatch(/meta: pageMeta\('\/workbench'\)/)
+    // 票 02：meta 里还多了内容区的两个 opt-out（`ownBottomBar` / `flush`）—— 人事这几页
+    // 两项都关着（清单里没标），断的是整份 meta 的形状。
     expect(pageMeta('/workbench/hr/calendar')).toEqual({
       standalone: true, public: false, audience: 'admin', workbenchTheme: true,
+      ownBottomBar: false, flush: false,
     })
     expect(router).toMatch(/views\/scheduling\/SchedulingLayout\.vue/)
     // 「回后台」那条门现在在统一壳的顶栏里（`<router-link class="wb-back" to="/">`）。
@@ -239,12 +242,11 @@ describe('店长端排班月历（原型 B）', () => {
     // 单日覆盖那条路也校验）：停用班次出现在周期的解析表或固定工作区的选择里，
     // 店长选完只会吃一句 400。页面照同一口径把它们挡在选择之外。
     expect(view).toMatch(/const activeShifts = computed/)
-    // 四处按「还在用的班次」渲染：名单行的「固定X班」按钮、每人每班次的固定工作区下拉、
-    // 周表的图例、周表底部抽屉里的班次色卡（后两处是 2026-09-30 加的）。
-    // 多一处少一处都是有意的改动，所以钉住数量。
-    // 五处：月历图例、抽屉里的班次按钮、笔刷条的班次下拉（2026-10-04 加）、
-    // 名单里的固定班次按钮、月历当天卡里的班次选择。
-    expect((view.match(/v-for="shift in activeShifts"/g) || []).length).toBe(5)
+    // 票 14（ADR 0107）之后是**四处**：月历图例、名单里的固定班次按钮、每人每班次的固定
+    // 工作区下拉、月历当天卡里的班次选择。同一条决策退役了抽屉里的班次按钮与笔刷条的班次
+    // 下拉（两处），换上周表底部那条选区动作条的班次色卡（一处）—— 5 → 4，是有意的改动，
+    // 所以这个数字继续钉住。
+    expect((view.match(/v-for="shift in activeShifts"/g) || []).length).toBe(4)
     // 当天卡那个下拉列的是**显示用**那份（他那天可能就是停用的那个班）——
     // 停用的那条标出来并禁掉。
     expect(view).toMatch(/v-for="shift in shifts"[\s\S]{0,260}?已停用/)
@@ -359,8 +361,11 @@ describe('C 方向：人事壳把工作台级导航让到底栏', () => {
     // 就跟着排到页面末尾，手机上等于没有。`.sched-shell` 这个父级是这条规则赢的条件，
     // 别当成冗余删掉。
     const rules = mobileRules(sharedShell)
-    expect(rules).toMatch(/\.wb-main\s*\{[^}]*padding-bottom:\s*calc\(57px/)
     // 它是 fixed（不占流），内容末尾要让出那条栏的高度，否则最后一屏压在栏下滚不到底。
-    expect(rules).toMatch(/\.wb-main\s*\{[^}]*padding-bottom:\s*calc\(57px \+ env\(safe-area-inset-bottom/)
+    // **票 03 起这份让位不在媒体查询里**：底栏高（57px）+ 安全区由壳算成一个数挂在内容
+    // 容器上，媒体查询只剩「顶栏收起」那一条（否则「本屏渲染了底栏吗」会有两处各答一半）。
+    // 这里断消费点；数与档位由 DOM 契约测试断（`views/workbench/__tests__/workbenchShell.test.js`）。
+    expect(sharedShell).toMatch(/\.wb-main\s*\{[^}]*padding:[^}]*var\(--wb-inset-bottom/)
+    expect(rules).not.toMatch(/\.wb-main\s*\{[^}]*padding-bottom/)
   })
 })

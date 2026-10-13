@@ -145,7 +145,7 @@ const statusText = computed(() => store.notice || '')
 
 /* 菜单：从当前身份下方展开，只在那一个场景里出现。 */
 .wb-id-menu {
-  position: absolute; top: calc(100% + 4px); left: 0; z-index: 60;
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: var(--z-dialog);
   min-width: 176px; padding: 5px;
   background: var(--hy-surface); border: 1px solid var(--hy-line-strong);
   border-radius: 12px; box-shadow: var(--hy-shadow-md);
