@@ -8,7 +8,6 @@ import PwaUpdateBanner from './components/PwaUpdateBanner.vue'
 import { useRealtime } from './composables/useRealtime'
 import { usePwaUpdate } from './composables/usePwaUpdate'
 import { useStationsStore } from './stores/stations'
-import { isHygieneAdminPath } from './utils/hygieneCopy'
 import { applyPwaManifest, selectPwaManifest } from './utils/pwaManifest'
 
 const route = useRoute()
@@ -22,7 +21,6 @@ const pwaApp = computed(() => selectPwaManifest(route.path))
 const pwaUpdate = usePwaUpdate(pwaApp)
 // 登录 / 配置页是独立全屏页，不显示主导航壳（见 router meta.standalone）。
 const isStandalone = computed(() => !!route.meta.standalone)
-const isHygieneAdmin = computed(() => isHygieneAdminPath(route.path))
 const realtimeEnabled = computed(() => route.meta.realtime === true || !route.meta.public)
 // 员工端页面的实时连接显式声明自己是员工（票 08）：同一浏览器可能同时持管理端与
 // 员工端两套 cookie，服务端默认「管理端优先」，不声明就会被判成管理端身份——主题
@@ -72,10 +70,7 @@ watch(
     <NavBar v-if="!isStandalone" :connected="connected" :latency-ms="latencyMs" />
     <div
       class="page-body luyun-scrollbar"
-      :class="{
-        'page-body-standalone': isStandalone || isHygieneAdmin,
-        'page-body-hygiene': isHygieneAdmin,
-      }"
+      :class="{ 'page-body-standalone': isStandalone }"
     >
       <router-view />
     </div>
@@ -95,13 +90,20 @@ watch(
 </template>
 
 <style scoped>
-/* 登录 / 配置页自带全屏背景与内边距，去掉主壳给 .page-body 加的外边距，避免双重滚动条。 */
+/* 登录 / 配置页自带全屏背景与内边距，去掉主壳给 `.page-body` 加的外边距，避免双重滚动条。
+   工作台那几组（今天 / 人事 / 卫生验收 / 配方 / 我的）也是 `standalone`，走的是同一条：
+   **页面区就是它们唯一的滚动容器**（统一壳 `WorkbenchShell` 的 `.wb-top` sticky 也挂在这条上）。
+
+   **不许再给哪一组把页面区锁成 `overflow: hidden`** —— 2026-10-12 报的「卫生验收八页
+   一根手指都推不动」就是这么来的：现场那八页原先靠**旧卫生壳**的整屏锁（`.hygiene-app`
+   的 `height: 100%` + `min-height: 0`）让 `.hy-main` 自己在内部滚，三壳合一（ADR 0105）
+   把那条整屏锁删掉了，却把 `page-body-hygiene { overflow: hidden }` 留在页面区上：外层
+   被裁、内层的高度又是 `auto`（被内容撑到 3661px，`clientHeight == scrollHeight`，
+   `overflow-y: auto` 一次都没生效）—— 中间没有第二个人能滚，内容就整段卡在视口里。
+   要么整页滚（当前口径），要么「高度锁 + 内部滚」成对出现，不许只留一半。
+   守卫：`admin-web/src/__tests__/App.pageScroll.test.js`。 */
 .page-body-standalone {
   padding: 0;
   overflow-y: auto;
-}
-
-.page-body-hygiene {
-  overflow: hidden;
 }
 </style>

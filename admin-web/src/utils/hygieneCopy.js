@@ -47,19 +47,11 @@ export const HYGIENE_STAFF_TABS = [
 
 export const HYGIENE_BACK_TO_ADMIN_LABEL = '后台'
 
-/** 这一组（七页）的路径判据。
- *
- *  **不能再只看前缀**：票 05 之后工作台按组排（`/workbench/hr/*` 人事、`/workbench/floor/*`
- *  现场、`/workbench/me/*` 我的），只比 `/workbench` 前缀会把它们一起算成现场页 ——
- *  那会让它们套上"内部自己滚动"的壳（`.page-body-hygiene`），人事组与员工页的吸顶窄栏
- *  就废了。所以只认**清单里那七条**。
- *  （`/workbench/hr/roster` 票 05 起是人事页，也不在清单里；`/register` 这些员工侧页面
- *  本来就不在。）
- */
-export function isHygieneAdminPath(pathname) {
-  const path = String(pathname || '')
-  return HYGIENE_ADMIN_NAV.some((item) => path === item.path || path.startsWith(`${item.path}/`))
-}
+// 这里原先还有一个 `isHygieneAdminPath(pathname)`：按上面那份八页清单判「这一页是不是
+// 现场页」，`App.vue` 拿它给页面区套 `.page-body-hygiene`（`overflow: hidden`，配合旧卫生
+// 壳的整屏锁让 `.hy-main` 内部滚）。三壳合一（ADR 0105）把整屏锁删掉之后，那条类名就成了
+// 只裁不滚的死锁（2026-10-12「卫生验收八页滑不动」），于是连带这个判据一起删掉 ——
+// 页面区的滚动不再按组分叉，统一由 `.page-body` 承担。
 
 /** 页面标题：`<页面名> · 工作台`。规格在 `workbenchCopy.js` 写一次，这里只转发
  *  （三个壳与配方阅读面共用同一份写法）。 */
