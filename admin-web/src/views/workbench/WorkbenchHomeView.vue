@@ -158,16 +158,25 @@ useNudgePull({
           <span class="wbh-card-more">排班月历 ›</span>
         </div>
         <p v-if="!day" class="wbh-sub">今天的排班读不出来，点进月历看</p>
-        <template v-else-if="!summary.duty.groups.length">
+        <template v-else-if="!summary.duty.groups.length && !summary.duty.off.length">
           <p class="wbh-sub">今天还没排班</p>
         </template>
         <template v-else>
           <p class="wbh-duty-total">{{ summary.duty.total }} 人上班</p>
-          <ul class="wbh-shifts">
+          <ul v-if="summary.duty.groups.length" class="wbh-shifts">
             <li v-for="group in summary.duty.groups" :key="group.shift">
               <b class="wbh-shift-name">{{ group.shift }}</b>
               <span class="wbh-shift-count">{{ group.count }} 人</span>
               <span class="wbh-shift-people">{{ group.names.join('、') }}</span>
+            </li>
+          </ul>
+          <!-- 不在岗的那两行（请假 / 休）：同一份响应里的 `off_people`，与上面各班
+               隔一条细线 —— 读的是「今天谁没来」，跟「谁上班」是同一件事的两半。 -->
+          <ul v-if="summary.duty.off.length" class="wbh-offs">
+            <li v-for="group in summary.duty.off" :key="group.label" :class="group.tone">
+              <b class="wbh-off-name">{{ group.label }}</b>
+              <span class="wbh-off-count">{{ group.count }} 人</span>
+              <span class="wbh-off-people">{{ group.names.join('、') }}</span>
             </li>
           </ul>
         </template>
@@ -275,16 +284,27 @@ useNudgePull({
 .wbh-card-more { margin-left: auto; font-size: 11.5px; color: var(--hy-mint); }
 .wbh-sub { margin: 6px 0 0; font-size: 12.5px; color: var(--hy-muted); }
 
-/* 今天谁上班：人数一行、各班一行。 */
+/* 今天谁上班：人数一行、各班一行。上班的与不在岗的（请假 / 休）两份名单共用这套
+   排版（每行三格：名 / 人数 / 名单），所以选择器写在一起 —— 既是一套字，也少一处
+   令牌引用（`src/styles/__tests__/designGuard.test.js` 的存量棘轮盯着这个数）。 */
 .wbh-duty-total {
   margin: 8px 0 0;
   font-size: 22px; color: var(--hy-ink);
 }
-.wbh-shifts { margin: 10px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
-.wbh-shifts li { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; }
-.wbh-shift-name { color: var(--hy-mint); font-weight: 600; }
-.wbh-shift-count { color: var(--hy-muted); }
-.wbh-shift-people { color: var(--hy-ink); min-width: 0; overflow-wrap: anywhere; }
+.wbh-shifts, .wbh-offs { margin: 10px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.wbh-shifts li, .wbh-offs li { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; }
+.wbh-shift-name, .wbh-off-name { color: var(--hy-mint); font-weight: 600; }
+.wbh-shift-count, .wbh-off-count { color: var(--hy-muted); }
+/* 名 / 人数这两格不许折行（店长 2026-10 反馈：手机上「早班」被名单挤成上下两个字、
+   「9 人」也被拆开）。可折的只有最后那格名单。 */
+.wbh-shift-name, .wbh-off-name, .wbh-shift-count, .wbh-off-count { white-space: nowrap; }
+.wbh-shift-people, .wbh-off-people { color: var(--hy-ink); min-width: 0; overflow-wrap: anywhere; }
+
+/* 不在岗的那两行：与上面各班隔一条细线。请假用青色（跟月历、员工端那张卡同一个
+   语气），本来就休的用灰 —— 「谁请假了」是店长要记着的事，不该跟「谁本来休」长得一样。 */
+.wbh-offs { padding-top: 8px; border-top: 1px solid var(--hy-line); }
+.wbh-offs li.rest .wbh-off-name { color: var(--hy-muted); }
+.wbh-offs li.leave .wbh-off-name { color: var(--hy-aqua); }
 
 /* 那几格数字：一格一扇门。 */
 .wbh-cells { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }

@@ -29,6 +29,12 @@ const DAY = {
     { shift: { id: 1, name: '白班' }, count: 2, people: [{ id: 1, name: '张三' }, { id: 2, name: '李四' }] },
     { shift: { id: 2, name: '夜班' }, count: 1, people: [{ id: 3, name: '王五' }] },
   ],
+  // 不在岗的（2026-10 店长要求摊在首页）：一个批了假、一个本来就休。
+  off_count: 2,
+  off_people: [
+    { id: 4, name: '赵六', leave: true },
+    { id: 5, name: '孙平', leave: false },
+  ],
 }
 
 const ME = {
@@ -177,9 +183,48 @@ describe('工作台首页 · 店长视角', () => {
     expect(duty.text()).toContain('白班')
     expect(duty.text()).toContain('张三')
     expect(duty.text()).toContain('夜班')
+    // 休假名单：请假与休各一行，请假在前（店长要记着的是那批请假的）。
+    const offs = duty.findAll('.wbh-offs li')
+    expect(offs).toHaveLength(2)
+    expect(offs[0].classes()).toContain('leave')
+    expect(offs[0].text()).toContain('请假')
+    expect(offs[0].text()).toContain('赵六')
+    expect(offs[1].classes()).toContain('rest')
+    expect(offs[1].text()).toContain('孙平')
     expect(wrapper.get('.wbh-duty').attributes('href')).toBe('/workbench/hr/calendar')
     // 员工那一档的东西一个都不在。
     expect(wrapper.find('.wbh-me').exists()).toBe(false)
+  })
+
+  it('今天没人不在岗：休假那两行整块不出现（不留一行空的「休 0 人」）', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({ '/api/scheduling/day': { ...DAY, off_count: 0, off_people: [] } }),
+    })
+
+    expect(wrapper.find('.wbh-offs').exists()).toBe(false)
+    expect(wrapper.get('.wbh-duty').text()).toContain('今天谁上班')
+  })
+
+  it('全员休的那天：不写「今天还没排班」，把休假名单摊出来', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({
+        '/api/scheduling/day': {
+          business_date: '2026-10-05',
+          total: 0,
+          groups: [],
+          off_count: 2,
+          off_people: DAY.off_people,
+        },
+      }),
+    })
+
+    const duty = wrapper.get('.wbh-duty')
+    expect(duty.text()).toContain('0 人上班')
+    expect(duty.text()).not.toContain('今天还没排班')
+    expect(duty.get('.wbh-offs').text()).toContain('赵六')
+    expect(duty.get('.wbh-offs').text()).toContain('孙平')
   })
 
   it('四个数字各自渲染，各点进对应专页', async () => {

@@ -73,10 +73,9 @@ BUSINESS_READ_PATHS = (
 # 除了「无凭据 401」，它还有两条自己的断言（员工会话 200 拿到同一份内容、写端点仍 401）——
 # 见下面的 `test_prep_plan_reads_accept_any_identity_session`。
 PREP_PLAN_READ_PATHS = (
+    "/api/prep-plan/closed-days",
     "/api/prep-plan/current",
     "/api/prep-plan/forecast",
-    "/api/prep-plan/movements",
-    "/api/prep-plan/expiring",
     # `/accuracy` 也是读端点（code-review 指出：票 08 曾把它留在管理端 router，与 ADR 0092
     # 契约表的「备货计划读端点 → 任一身份」不符；收尾时并到 reader_router）。
     "/api/prep-plan/accuracy",
@@ -91,9 +90,9 @@ PREP_PLAN_READ_QUERY = {
 PREP_PLAN_WRITE_PATHS = (
     ("POST", "/api/prep-plan/generate", {"method": "weighted_history"}),
     ("POST", "/api/prep-plan/init-items-from-rules", None),
-    ("POST", "/api/prep-plan/batches", {
-        "item_name": "不存在的备货品", "unit": "份", "produced_qty": 1,
-    }),
+    # 歇业日的增删也走写面：页面上那块维护区只有管理端渲染得出按钮
+    ("POST", "/api/prep-plan/closed-days", {"day": "2026-12-25"}),
+    ("DELETE", "/api/prep-plan/closed-days/2026-12-25", None),
 )
 
 

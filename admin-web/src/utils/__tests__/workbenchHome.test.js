@@ -5,6 +5,7 @@ import {
   countOverdueFixes,
   countPendingItems,
   countPendingLeaves,
+  offDutyNames,
   onDutyNames,
   staffShiftCell,
   staffWorkCounts,
@@ -31,7 +32,11 @@ const DAY = {
     },
     { shift: { id: 2, name: '夜班' }, count: 1, people: [{ id: 3, name: '王五', zone: '洗碗间' }] },
   ],
-  off_people: [],
+  // 不在岗的：一个批了假、一个本来就休（`leave` 是服务端 `day_detail` 给的判据）。
+  off_people: [
+    { id: 4, name: '赵六', zone: null, overridden: true, leave: true },
+    { id: 5, name: '孙平', zone: null, overridden: false, leave: false },
+  ],
 }
 
 const INBOX = {
@@ -119,6 +124,30 @@ describe('店长那三个数字', () => {
     expect(onDutyNames({ groups: [{ shift: { name: '白班' }, people: [{ id: 9, name: '' }] }] }))
       .toEqual([{ shift: '白班', count: 0, names: [] }])
     expect(onDutyNames(null)).toEqual([])
+  })
+
+  it('休假名单：请假与休分成两组、请假的排在前面（请假的人也在名单里）', () => {
+    const off = offDutyNames(DAY)
+    expect(off.map((group) => group.label)).toEqual(['请假', '休'])
+    expect(off.map((group) => group.tone)).toEqual(['leave', 'rest'])
+    expect(off.map((group) => group.count)).toEqual([1, 1])
+    expect(off[0].names).toEqual(['赵六'])
+    expect(off[1].names).toEqual(['孙平'])
+  })
+
+  it('休假名单：没有的那一组不占一行，`leave` 缺失按「休」算，空名字不渲染', () => {
+    // 只有请假的人：不给一行空的「休 0 人」（页面渲染空名字行只会让人以为漏了谁）。
+    expect(offDutyNames({ off_people: [{ id: 4, name: '赵六', leave: true }] }))
+      .toEqual([{ label: '请假', tone: 'leave', count: 1, names: ['赵六'] }])
+    // 只有休的人：同样只有一行。
+    expect(offDutyNames({ off_people: [{ id: 5, name: '孙平' }] }))
+      .toEqual([{ label: '休', tone: 'rest', count: 1, names: ['孙平'] }])
+    // 名字缺失（花名册里刚被清掉）：不渲染空名字，也不抛错；人数跟着名字走。
+    expect(offDutyNames({ off_people: [{ id: 9, name: '  ' }, { id: 4, name: '赵六', leave: true }] }))
+      .toEqual([{ label: '请假', tone: 'leave', count: 1, names: ['赵六'] }])
+    // 今天没人不在岗 / 响应里根本没有这一块：空数组（页面据此整块不渲染）。
+    expect(offDutyNames({ groups: [] })).toEqual([])
+    expect(offDutyNames(null)).toEqual([])
   })
 })
 
@@ -208,6 +237,8 @@ describe('按身份给两个视角', () => {
     expect(summary.view).toBe('super')
     expect(summary.duty.total).toBe(3)
     expect(summary.duty.groups.map((group) => group.shift)).toEqual(['白班', '夜班'])
+    // 不在岗的也在这份 summary 里（页面拿它渲染「请假 / 休」那两行）。
+    expect(summary.duty.off.map((group) => group.label)).toEqual(['请假', '休'])
     expect(summary.leaves).toBe(2)
     expect(summary.reviews).toBe(1)
     expect(summary.fixes).toBe(1)

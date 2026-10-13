@@ -6,6 +6,9 @@
  *  「待回拍」这两件事的。
  *
  *  **店长侧五个数字各自的出处**（都不新增端点）：
+ *  - 今天谁上班 `onDutyNames` / `offDutyNames` ← `GET /api/scheduling/day`：同一条响应
+ *    里既有上班的 `groups`，也有不在岗的 `off_people`（每人带 `leave`）。首页摊的是两半
+ *    —— 谁在岗、以及谁请假 / 谁休（后者是 2026-10 店长要求加上的）。
  *  - 待批请假 `countPendingLeaves` ← `GET /api/scheduling/inbox`（店长待办那条队列）。
  *    只数 `kind === 'leave'`：换班那条对方还没点头时店长根本看不到（服务层的
  *    `pending_peer` 口径），而「还没配规则的新人」不是申请、不算待批。
@@ -142,6 +145,32 @@ export function onDutyNames(day) {
   })
 }
 
+/** 今天不在岗的人：**请假**与**休**两组，各自带人数与名字 —— 「今天谁上班」那一格给出的
+ *  自然还有它的补集（2026-10 店长要求：休假名单也要摊在首页，请假的人算在里面）。
+ *
+ *  两组不能合成一份：`off_people[].leave` 是服务端给的判据（`true` = 批过假的请假、
+ *  `false` = 本来就休），店长对这两件事的动作不一样（请假那条要记着、要管家里的排班；
+ *  本来就休的不用管）。所以**请假排前面**，用户一眼看到的是真正有事的那批。
+ *
+ *  `count` 与 `onDutyNames` 同口径：只数有名字的人（名字渲染不出来时，人数与名单对不上
+ *  比人数少一个更难查）。没人不在岗时给空数组，页面据此整块不渲染。
+ */
+export function offDutyNames(day) {
+  const people = (day && day.off_people) || []
+  const buckets = { leave: [], rest: [] }
+  for (const person of people) {
+    const name = String((person && person.name) || '').trim()
+    if (!name) continue
+    buckets[person && person.leave ? 'leave' : 'rest'].push(name)
+  }
+  return [
+    { label: '请假', tone: 'leave', names: buckets.leave },
+    { label: '休', tone: 'rest', names: buckets.rest },
+  ]
+    .filter((group) => group.names.length)
+    .map((group) => ({ ...group, count: group.names.length }))
+}
+
 /** 员工那一档的「我的班次」：三行字与语气都复用「今天」页那套（`utils/todayShift.js`）。
  *
  *  「休」「请假」「还没排」「班次已调整」四态必须分得开 —— 从工作台首页与从「今天」页
@@ -201,7 +230,8 @@ export function staffWorkCounts({ daily, deep, fix, requests: inbox } = {}) {
  * }} input
  * @returns {{
  *   view: 'super'|'staff'|null,
- *   duty: {total: number, groups: Array<{shift: string, count: number, names: string[]}>}|null,
+ *   duty: {total: number, groups: Array<{shift: string, count: number, names: string[]}>,
+ *          off: Array<{label: string, tone: string, count: number, names: string[]}>}|null,
  *   leaves: number|null, reviews: number|null, fixes: number|null, reminders: number|null,
  *   me: {shift: {headline: string, subline: string, tone: string}, next: Array<object>}|null,
  *   work: {daily: number, deep: number, fix: number, pending: number, incoming: number}|null,
@@ -229,6 +259,8 @@ export function workbenchHomeSummary({
       duty: {
         total: (day && typeof day.total === 'number') ? day.total : groups.reduce((sum, group) => sum + group.count, 0),
         groups,
+        // 不在岗的（请假 / 休）：跟上班名单同一份响应里的 `off_people`。
+        off: offDutyNames(day),
       },
       leaves: countPendingLeaves(inbox),
       reviews: countPendingItems(queue),
