@@ -57,6 +57,16 @@ describe('配方样式只有一份来源（防漂移 · t48）', () => {
 })
 
 const THEME = join(here, '../../../src/styles/theme.workbench.css')
+// 层级档位表的唯一来源（票 05）：这一份测试只读它，不另存一份数字。
+const GUARD = join(here, '../../../src/styles/__tests__/designGuard.test.js')
+// 取某条选择器的规则体（按索引走，避免正则跨选择器列表匹配到别人的块）
+const ruleOf = (css, selector) => {
+  const at = css.indexOf(selector)
+  if (at === -1) return ''
+  const open = css.indexOf('{', at)
+  const close = css.indexOf('}', open)
+  return open === -1 || close === -1 ? '' : css.slice(open + 1, close)
+}
 
 describe('工作台令牌层（③-1a 上移到 html 级；t47 换名 data-workbench 避开配方页的 data-theme）', () => {
   const theme = readFileSync(THEME, 'utf8')
@@ -116,14 +126,32 @@ describe.each(Object.entries(CSS_FILES))('%s hygiene admin chrome', (_label, pat
       // 否则弹窗会被后面的卡片盖住。**但只许抬到同级卡片之上，不许越过工作台壳**：
       // 壳的页头 / 粘住的顶栏是 `--z-shell`，原先写死的 30 会盖住手机档「卫生验收 ▾」
       // 下拉菜单的后三项与桌面档的顶栏（2026-10-12 报「这个组件的层级有问题」）。
-      const shellZ = Number(readFileSync(THEME, 'utf8').match(/--z-shell:\s*(\d+)/)[1])
-      expect(shellZ).toBeGreaterThan(0)
-      const rule = css.match(/\.hygiene-admin \.clocks-card \{[\s\S]*?\}/)
+      //
+      // 票 05 起源码里不再有裸数字（层级只准写语义名），所以这条改断**语义**：
+      //   · 卡片与它的时间浮层各走一个**档位表里定义过**的语义名；
+      //   · 两者的先后由设计护栏的档位表管（`designGuard.test.js` 的 LAYERS：档位必须严格
+      //     递增，且 `--z-shell` 是「页 chrome」那一档）。
+      // 档位表是唯一来源：这里读它，避免在同一处维护第二份数字。
+      const guard = readFileSync(GUARD, 'utf8')
+      const layers = [...guard.matchAll(/\['(--z-[a-z-]+)',\s*(\d+),/g)]
+        .map((m) => [m[1], Number(m[2])])
+      const values = Object.fromEntries(layers)
+      const names = layers.map(([n]) => n)
+      expect(names, '工作台壳那一档必须在档位表里').toContain('--z-shell')
+      expect(values['--z-shell']).toBeGreaterThan(0)
+      const rule = ruleOf(css, '.hygiene-admin .clocks-card')
       expect(rule, 'clocks-card 抬起规则还在').toBeTruthy()
-      const z = Number((rule[0].match(/z-index:\s*(\d+)/) || [])[1])
-      expect(Number.isInteger(z)).toBe(true)
-      expect(z).toBeGreaterThanOrEqual(1)
-      expect(z, 'z-index 越过了壳层，会盖住页头与下拉菜单').toBeLessThan(shellZ)
+      const z = rule.match(/z-index:\s*var\((--z-[a-z-]+)\)/)
+      expect(z, 'clocks-card 该走某个语义名（裸数字不许再出现在源码里）').toBeTruthy()
+      expect(names, `${z && z[1]} 必须在档位表里`).toContain(z[1])
+      const popover = ruleOf(css, '.hygiene-admin .luyun-time-picker__popover')
+      const pz = popover.match(/z-index:\s*var\((--z-[a-z-]+)\)/)
+      expect(pz, '时间浮层也走语义名').toBeTruthy()
+      expect(values[z[1]], '卡片那一档要低过它的时间浮层')
+        .toBeLessThan(values[pz[1]])
+      // 注释里追述旧值（`z-index: 40/41 被压成 1`）不算 —— 只看声明
+      expect(css.replace(/\/\*[\s\S]*?\*\//g, ''), '整份共享样式表里不许再有裸 z-index 数字')
+        .not.toMatch(/z-index:[ \t]*(?<!-)\d+/)
     }
   })
 })

@@ -125,7 +125,7 @@ const ICONS = {
     left: 0;
     right: 0;
     bottom: 0;
-    z-index: var(--z-shell);
+    z-index: var(--z-tabbar);
     background: var(--hy-bg);
     border-top: 1px solid var(--hy-line);
     /* iPhone 的 home indicator 区域：不给这一条留白，最后一格会被系统手势条压住。 */

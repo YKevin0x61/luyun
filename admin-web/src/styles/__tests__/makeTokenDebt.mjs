@@ -8,13 +8,21 @@
 //   * style= = 内联 `style="…"` 的出现次数
 //   * bp   = `@media` 里 max-width 不在白名单 {430,560,720,900} 的次数（记下具体值）
 //   * undef= `var(--x)` 里 `--x` 在令牌层/theme.css 都没定义的变量名（去重）
+//   * z    = 裸 `z-index` **数字**（含负数）的条数（票 05）。层级只准写那五个语义名
+//            （`--z-shell/--z-scrim/--z-dialog/--z-toast/--z-queue`）；数之前**先剥掉注释**，
+//            否则「注释里提到 z-index: 30」会把这条棘轮弄红（t46 在 color-mix 上踩过同款）。
 // **只减不增**：测试拿这份快照当上界。跑 `node src/styles/__tests__/makeTokenDebt.mjs` 重出。
+//
+// ⚠ 排他提醒：`tokenDebt.json` 同时被别的在途工作流当棘轮用（令牌降债那条线在改 hy 计数）。
+//   重出会**把你那份之外的所有列一起改写**。只想放开一条时，手改那一列并说明理由。
 import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 
 const ROOT = 'src'
 const BP_OK = new Set(['430', '560', '720', '900'])
 const SKIP = /(__tests__|node_modules|dist)/
+const BARE_Z = /z-index:[ \t]*(?<!-)\d+/g
+const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '')
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
@@ -40,8 +48,9 @@ const count = (s, re) => (s.match(re) || []).length
 const files = {}
 for (const p of walk(ROOT).sort()) {
   const s = readFileSync(p, 'utf8')
+  const bare = stripComments(s)   // 注释里的 z-index / var(--x) 不算
   const bps = [...s.matchAll(/@media[^{]*max-width:\s*([0-9]+)px/g)].map((m) => m[1]).filter((v) => !BP_OK.has(v))
-  const undef = [...new Set([...s.matchAll(/var\(\s*(--[a-z0-9-]+)/g)].map((m) => m[1]).filter((n) => !DEF.has(n)))].sort()
+  const undef = [...new Set([...bare.matchAll(/var\(\s*(--[a-z0-9-]+)/g)].map((m) => m[1]).filter((n) => !DEF.has(n)))].sort()
   const rec = {
     hy: count(s, /var\(\s*--hy-/g),
     hex: count(s, /#[0-9a-fA-F]{3,8}\b/g),
@@ -52,6 +61,9 @@ for (const p of walk(ROOT).sort()) {
     // 单测里这两条也要棘轮，否则它们一上来就红，谁也推进不了。
     small_tap: (s.match(/min-height:\s*([0-9]+)px/g) || []).map((x) => Number(x.match(/([0-9]+)/)[1])).filter((v) => v > 0 && v < 44).length,
     danger_text: (s.match(/(^|[;{\s])color:\s*var\(--danger\)\s*[;}]/gm) || []).length,
+    // 层级的存量（票 05）：裸 z-index 数字。归零之后这一列恒为 0，留着它当上界——
+    // 新增一处裸数字就是 `1 > 0`，测试当场红。
+    z: count(bare, BARE_Z),
   }
   if (bps.length) rec.bp_values = [...new Set(bps)].sort()
   if (undef.length) rec.undef = undef

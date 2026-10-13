@@ -308,7 +308,7 @@
   backdrop-filter: blur(14px);
   border-top: 1px solid var(--hy-line);
   padding: .25rem .15rem calc(.25rem + env(safe-area-inset-bottom));
-  z-index: var(--z-shell);
+  z-index: var(--z-tabbar);
 }
 .hygiene-admin .hy-rail-items {
   display: contents;
@@ -1992,7 +1992,7 @@
   backdrop-filter: blur(14px);
   border-top: 1px solid var(--hy-line);
   padding: .28rem .15rem calc(.3rem + env(safe-area-inset-bottom));
-  z-index: var(--z-shell);
+  z-index: var(--z-tabbar);
 }
 .hygiene-work .hy-tab {
   position: relative;

@@ -27,13 +27,15 @@
      仍是铜色、与金银同一档亮度），组件改成 `color: var(--rank-bronze)` 即可生效；
      组件本身不归本次改动范围，故未直接改它。 */
   --rank-bronze: #d97706;
-  /* 层级：五档语义名，与工作台令牌层（`theme.workbench.css` 的 `html[data-workbench]`）同值。
-     **基础层**（ADR 0104）：这里给的是**后台页**的解 —— 组件只写 `var(--z-*)`，两套主题各自
-     回答「壳 / 遮罩 / 弹层 / 提示 / 队列」各是多少。定义在这里而不是只在工作台那份，是因为
-     `LogsView` / `DataTable` / `SetupView` / `PwaUpdateBanner` 这些**两边都用**的组件也写
-     语义名：少了这一条，它们在后台页上会解析成 `z-index: auto`（弹窗静默掉到内容下面）。
-     档位口径与「哪些层必须排在谁上面」写在 `src/styles/__tests__/designGuard.test.js`。 */
-  --z-shell: 20; --z-scrim: 40; --z-dialog: 55; --z-toast: 100; --z-queue: 200;
+  /* 层级：语义名，与工作台令牌层（`theme.workbench.css` 的 `html[data-workbench]`）同值。
+     **基础层**（ADR 0104）：这里给的是**后台页**的解 —— 组件只写这五个语义名（不写数字），
+     两套主题各自回答「页内底栏 / 壳 / 遮罩 / 弹层 / 提示 / 队列」各是多少。定义在这里而不是
+     只在工作台那份，是因为 `LogsView` / `DataTable` / `SetupView` / `PwaUpdateBanner` 这些
+     **两边都用**的组件也写语义名：少了这一条，它们在后台页上会解析成 `z-index: auto`
+     （弹窗静默掉到内容下面）。`--z-tabbar` 是那张表里唯一比壳 chrome 更低的一档
+     （它属于内容区，为什么不能与壳同档见令牌层那条注释）；档位口径写在
+     `src/styles/__tests__/designGuard.test.js`。 */
+  --z-tabbar: 15; --z-shell: 20; --z-scrim: 40; --z-dialog: 55; --z-toast: 100; --z-queue: 200;
 }
 
 * { box-sizing: border-box; }

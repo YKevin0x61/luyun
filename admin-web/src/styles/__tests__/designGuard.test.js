@@ -35,8 +35,11 @@ const SKIP = /(__tests__|node_modules|dist)/
 // 直接写数字），同一屏里谁能压住谁要靠读注释推。归类的判据是**「这一层和内容的关系」**，
 // 不是「它现在的数字是多少」：
 //
-//   · 页 chrome（粘住的页头 / 钉住的列 / 底栏）——**滚动时留在原地、但不接管输入**。
-//     它们和页面内容在同一棵树里，只要求「在内容之上」，不要求「在文档流之外」。
+//   · 页内底栏（tabbar）——固定在视口底那条**属于内容区**的栏。它必须在壳 chrome 之下：
+//     手机页头自己建了层叠上下文，它的下拉遮罩再高也出不了那一层，底栏一抬到同档就会反过来
+//     盖住遮罩（菜单打开时底栏不被压暗、还能点穿）。
+//   · 页 chrome（shell）——**滚动时留在原地、但不接管输入**。它们和页面内容在同一棵树里，
+//     只要求「在内容之上」，不要求「在文档流之外」。
 //   · 遮罩（scrim）——**盖住页面、等用户先处理它**的半透明层，以及贴在它上面的浮层
 //     （页头下拉面板、时间浮层、页内浮层的遮罩）。它必须在壳 chrome 之上：壳的顶栏与
 //     底栏要能被它盖住，否则手机上点得到底下的导航（`135b037` 就是被反着踩的）。
@@ -47,9 +50,13 @@ const SKIP = /(__tests__|node_modules|dist)/
 //   · 队列（queue）——**顶档**：全站提示、整屏只留一件事的查看器（图片灯箱）、
 //     叠在抽屉之上的确认框、以及页面里那条 `fixed` 的动作条（排班笔栏）。
 //
-// 两条硬约束（改这张表之前先看这里）：
-//   1. **五档的值必须严格递增**，且 `--z-shell` > 0。下面「档位清单」那条用例会断。
-//   2. **后台页也要有同一份**：`theme.css` 的 `:root` 与工作台令牌层同值。`LogsView` /
+// 三条硬约束（改这张表之前先看这里）：
+//   1. **六档的值必须严格递增**，且最低一档 > 0（要高出 `auto` 那层）。下面「档位清单」会断。
+//   2. **`--z-tabbar` 是唯一一处「按 ADR 0106 决策 6 的字面」多出来的名字**：那五档
+//      （shell / scrim / dialog / toast / queue）表达不了「比壳 chrome 更低、又比内容更高」。
+//      它不新开档位语义，只是底栏那一处的**次序**没法用五档写出来又不能改（见上面第一条）。
+//      真要合并，得先改 ADR 0106 决策 6 / ADR 0104 的两层结构。
+//   3. **后台页也要有同一份**：`theme.css` 的 `:root` 与工作台令牌层同值。`LogsView` /
 //      `DataTable` / `SetupView` / `PwaUpdateBanner` 这些两边都用的组件也写语义名，
 //      少了后台那份，它们会解析成 `z-index: auto`（弹窗静默掉到内容下面）。
 //
@@ -58,6 +65,7 @@ const SKIP = /(__tests__|node_modules|dist)/
 // 与页面粘住的页头 30 不同屏）。真机核对见 `.scratch/workbench-content-area/baseline/checks-05/`。
 // ══════════════════════════════════════════════════════════════════════════════
 const LAYERS = [
+  ['--z-tabbar', 15, '页内底栏：`.wb-tabbar` / 共享表的 `.hy-tabbar`（在壳 chrome 之下）'],
   ['--z-shell', 20, '页 chrome：壳的顶栏 / 手机页头 / 底栏、页内粘住的页头、钉住的表头列、面板内的抬升'],
   ['--z-scrim', 40, '遮罩：页头下拉的遮罩与面板、页内浮层的遮罩、时间浮层、首次下载提示'],
   ['--z-dialog', 55, '弹层：确认框、抽屉、拍摄 / 对照弹层、标准图管理面板、上传队列条'],
@@ -65,10 +73,15 @@ const LAYERS = [
   ['--z-queue', 200, '队列：跳转链接、图片灯箱、抽屉之上的确认框、排班笔栏、设置页遮罩'],
 ]
 const LAYER_NAMES = LAYERS.map(([name]) => name)
-// 裸 `z-index` **数字**（含负数）——令牌引用不算。负数只有一处刻意保留的例外：
-// `hygiene-admin.css` 的 `.hygiene-admin::before` 纸面颗粒层（`-1`）必须待在内容之下，
-// 五档里没有负数档，硬塞任何名字都会把它抬到内容上面（颗粒会糊在字上）。
-const BARE_Z = /z-index:\s*-?\d+/g
+// 裸 `z-index` **数字** —— 令牌引用（`var(--z-…)`）与 `auto` 都不算。**不含负数**：
+// 全仓唯一一处负数在共享样式表的 `.hygiene-admin::before`（纸面颗粒层 `-1`），它必须待在
+// 内容之下；这两份令牌层里没有负数档，硬塞任何名字都会把它抬到内容上面（颗粒会糊在字上）。
+// 那一条由下面「纸面颗粒层」那条用例单独盯着（它要求它**仍在**，方向与这条相反）。
+// 注释里的写法约定：提到数字时加反引号（`` `z-index: 30` ``）—— 反引号后面的字符不是数字，
+// 于是「注释里追述旧值」不会被这条算进去（`z-index:30` 这种**声明**式写法一律会被算到）。
+const BARE_Z = /z-index:[ \t]*(?<!-)\d+/g
+// 上面那条负向后行断言 `(?<!-)` 是给 `z-index: -1` 留的口子：`[ \t]*` 是贪婪的，
+// 只写 `\d+` 会在 `-1` 的 `1` 上匹配成功。
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
@@ -80,6 +93,8 @@ function walk(dir, out = []) {
 }
 
 const DEF = new Set()
+// 三份令牌层都要读：`theme.workbench.css`（工作台）/ `theme.css`（后台，票 05 起也定义五档
+// 层级）/ `hygiene-admin.css`（共享样式表里的存量）。少一份，那套主题里的合法引用会被误报。
 for (const f of ['src/styles/theme.workbench.css', 'src/styles/theme.css', 'public/hygiene-admin.css']) {
   try { for (const m of readFileSync(f, 'utf8').matchAll(/(--[a-z0-9-]+)\s*:/g)) DEF.add(m[1]) } catch { /* 缺文件跳过 */ }
 }
@@ -95,7 +110,7 @@ describe('设计护栏 · 存量棘轮（只减不增）', () => {
       const bp = [...src.matchAll(/@media[^{]*max-width:\s*([0-9]+)px/g)].map((m) => m[1]).filter((v) => !BP_OK.has(v))
       const now = { hy: count(src, /var\(\s*--hy-/g), hex: count(src, /#[0-9a-fA-F]{3,8}\b/g),
                     rgba: count(src, /\brgba?\(/g), 'style=': count(src, /style="/g), bp: bp.length,
-                    z: count(src, BARE_Z) }
+                    z: count(stripComments(src), BARE_Z) }
       const limit = pinned || { hy: 0, hex: 0, rgba: 0, 'style=': 0, bp: 0 }   // 未列出 = strict
       for (const [k, v] of Object.entries(now)) {
         const max = limit[k] ?? 0
@@ -163,5 +178,123 @@ describe('设计护栏 · 令牌层', () => {
       if (small.length > pinned) bad.push(`${path}：${small.length} > ${pinned}`)
     }
     expect(bad).toEqual([])
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 设计护栏 · 层级（票 05 / ADR 0106 决策 6）
+//
+// 本节的两条「不许出现 X」都是**源码断言**（文本判定即结论），不是拿文本去断行为：
+// 「这里有没有写一个裸数字」与「这些层在屏幕上谁压住谁」是两件事，后者在
+// `.scratch/workbench-content-area/checks-05/` 那套浏览器探针里量。界线的完整说法见文件头。
+// ══════════════════════════════════════════════════════════════════════════════
+const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '')
+// 取某条选择器的规则体。**不用正则跨选择器列表**：那样会在 `.a, .hygiene-admin .clocks-card {`
+// 这种同名前缀上匹配到别人的块（`.hygiene-admin .clocks-card` 就有一条媒体查询里的同名前缀）。
+// 这里按索引走：找到选择器 → 往后找第一个 `{` → 往前退到上一条声明的末尾 → 取到配对的 `}`。
+const ruleOf = (css, selector) => {
+  const at = css.indexOf(selector)
+  if (at === -1) return null
+  const open = css.indexOf('{', at)
+  if (open === -1) return null
+  const close = css.indexOf('}', open)
+  if (close === -1) return null
+  return css.slice(open + 1, close)
+}
+const layerValue = (src, name) => {
+  const m = src.match(new RegExp(`${name}\\s*:\\s*(-?\\d+)`))
+  return m ? Number(m[1]) : null
+}
+
+describe('设计护栏 · 层级档位（票 05）', () => {
+  it('档位表里的每一档在两套主题里都有定义、值与清单一致，且严格递增、最低一档 > 0', () => {
+    const values = {}
+    for (const [name, value] of LAYERS) {
+      for (const [label, src] of [['theme.workbench.css', THEME], ['theme.css', THEME_ADMIN]]) {
+        expect(layerValue(src, name), `${label} 缺 ${name}（两套主题都要回答这些档）`).toBe(value)
+      }
+      values[name] = value
+    }
+    const nums = LAYER_NAMES.map((n) => values[n])
+    expect(nums, `档位必须严格递增：${LAYER_NAMES.join(' < ')}`).toEqual([...nums].sort((a, b) => a - b))
+    expect(new Set(nums).size, '档位不许有重复值（同一档就是同一档，别再分先后）').toBe(nums.length)
+    expect(nums[0], '最低一档必须 > 0：它得高出 auto 那一层').toBeGreaterThan(0)
+    // ADR 0106 决策 6 点名的五个名字一个都不许少（`--z-tabbar` 是那一处写不进五档的次序）
+    for (const must of ['--z-shell', '--z-scrim', '--z-dialog', '--z-toast', '--z-queue']) {
+      expect(LAYER_NAMES, `ADR 0106 决策 6 点名的 ${must} 必须在档位表里`).toContain(must)
+    }
+  })
+
+  it('`src/` 里不再有裸 `z-index` 数字，全部走档位表里的语义名', () => {
+    const bad = []
+    for (const [path, src] of SOURCES) {
+      for (const m of stripComments(src).matchAll(BARE_Z)) {
+        bad.push(`${path}：${m[0]}`)
+      }
+    }
+    expect(bad, `层级只准写 ${LAYER_NAMES.map((n) => `var(${n})`).join(' / ')}；`
+      + '归类依据见本文件顶部的档位清单').toEqual([])
+  })
+
+  it('棘轮：每份文件里裸 z-index 数字的条数都不超过快照（这两项的计数今天已归零）', () => {
+    const over = []
+    for (const [path, src] of SOURCES) {
+      const n = count(stripComments(src), BARE_Z)
+      const pinned = (DEBT.files[path] && DEBT.files[path].z) || 0
+      if (n > pinned) over.push(`${path}：${n} > 快照 ${pinned}`)
+    }
+    expect(over, '只减不增：新增一处裸 z-index 就会红。重出快照：'
+      + 'node src/styles/__tests__/makeTokenDebt.mjs（本票只手改了 z 这一列）').toEqual([])
+  })
+})
+
+describe('设计护栏 · 共享样式表 hygiene-admin.css 的层级（票 05）', () => {
+  // 两份物理副本（构建期 `public/` 复制到 `dist/`，根 `public/` 是 main.py 的回落目标）；
+  // 逐字节相等由 `src/utils/__tests__/hygieneAdminCss.test.js` 盯着，这里只管层级。
+  const COPIES = ['public/hygiene-admin.css', '../public/hygiene-admin.css']
+
+  it('不再有裸 `z-index` 数字（唯一的例外是纸面颗粒层那条 `-1`，见下面一条）', () => {
+    const bad = []
+    for (const rel of COPIES) {
+      const src = stripComments(readFileSync(rel, 'utf8'))
+      for (const m of src.matchAll(BARE_Z)) bad.push(`${rel}：${m[0]}`)
+    }
+    expect(bad, `共享样式表的层级也走档位表：${LAYER_NAMES.map((n) => `var(${n})`).join(' / ')}`)
+      .toEqual([])
+  })
+
+  it('纸面颗粒层那条 `-1` 仍在：档位表里没有负数档，硬塞名字会把颗粒抬到字上', () => {
+    for (const rel of COPIES) {
+      const src = stripComments(readFileSync(rel, 'utf8'))
+      const rule = src.match(/\.hygiene-admin::before,[\s\S]*?\}/)
+      expect(rule, `${rel} 里颗粒层规则还在`).toBeTruthy()
+      expect(rule[0]).toMatch(/z-index:\s*-1/)
+    }
+  })
+
+  it('挡在壳层之上的那些层（页内 sticky / 弹层 / 遮罩）都在名单里', () => {
+    const src = stripComments(readFileSync('public/hygiene-admin.css', 'utf8'))
+    const expect_ = {
+      '.hygiene-admin .hy-skip': '--z-queue',
+      '.hygiene-admin .hy-header': '--z-shell',
+      '.hygiene-admin .clocks-card': '--z-shell',
+      '.hygiene-admin .luyun-time-picker__popover': '--z-scrim',
+      '.hygiene-work .hy-work-header': '--z-shell',
+      '.hygiene-work .staff-preview': '--z-dialog',
+    }
+    for (const [selector, token] of Object.entries(expect_)) {
+      const rule = ruleOf(src, selector)
+      expect(rule, `${selector} 这条规则还在`).toBeTruthy()
+      expect(rule, `${selector} 该走 ${token}`).toContain(`z-index: var(${token})`)
+    }
+  })
+
+  it('两条页内底栏走 `--z-tabbar`（比壳 chrome 低一档的那条次序）', () => {
+    const src = stripComments(readFileSync('public/hygiene-admin.css', 'utf8'))
+    for (const sel of ['.hygiene-admin .hy-tabbar', '.hygiene-work .hy-tabbar']) {
+      const rule = ruleOf(src, sel)
+      expect(rule, `${sel} 这条规则还在`).toBeTruthy()
+      expect(rule, `${sel} 该走 --z-tabbar`).toContain('z-index: var(--z-tabbar)')
+    }
   })
 })
