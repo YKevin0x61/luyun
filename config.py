@@ -102,10 +102,9 @@ class Settings(BaseSettings):
             "dish_stations": app_db_path,
             "semi_finished_rules": app_db_path,
             "report_dishes": app_db_path,
-            # 备货计划相关表
+            # 备货计划相关表（批次与库存流水已随 ADR 0111 退场）
             "prep_items": app_db_path,
-            "prep_batches": app_db_path,
-            "prep_stock_movements": app_db_path,
+            "prep_closed_days": app_db_path,
             "prep_plan_runs": app_db_path,
             "prep_plan_items": app_db_path,
             "prep_plan_item_slots": app_db_path,

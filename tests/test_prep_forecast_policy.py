@@ -10,7 +10,9 @@ from services.prep_forecast_policy import (
     DEFAULT_SAFETY_STOCK_RATIO,
     MAX_SAFETY_STOCK_RATIO,
     MODEL_CALIBRATED_SAFETY_RATIO,
+    SAFETY_RATIO_TIERS,
     SLOT_BASE_WEIGHTS,
+    assign_volatility_safety_ratios,
     calculate_coverage,
     calculate_wape,
     compute_effective_safety_ratio,
@@ -123,6 +125,50 @@ class PrepForecastPolicyTests(unittest.TestCase):
         # 单品配置超过 40% (0.60) -> 强制封顶 0.40
         eff_capped = compute_effective_safety_ratio(item_safety_ratio=0.60, model_safety_ratio=0.31)
         self.assertAlmostEqual(eff_capped, 0.40)
+
+    def test_volatility_tiering_orders_items_by_their_own_swing(self):
+        # ADR 0110：波动小的拿最少裕度、波动大的拿最多；中档正好等于模型校准系数
+        ratios = assign_volatility_safety_ratios(
+            {
+                "steady": [80.0] * 30,           # CV = 0
+                "middling": [80.0, 120.0] * 15,  # CV ≈ 0.2
+                "wild": [10.0, 400.0] * 15,      # CV ≈ 0.95
+            }
+        )
+        self.assertAlmostEqual(ratios["steady"], SAFETY_RATIO_TIERS[0])
+        self.assertAlmostEqual(ratios["middling"], MODEL_CALIBRATED_SAFETY_RATIO)
+        self.assertAlmostEqual(ratios["wild"], SAFETY_RATIO_TIERS[2])
+
+    def test_volatility_tiering_falls_back_to_mid_when_too_few_items(self):
+        # 品数不足三件时「三分位」没有意义 —— 全部中档，行为与分档前一致
+        ratios = assign_volatility_safety_ratios({"only-one": [1.0, 2.0, 3.0]})
+        self.assertAlmostEqual(ratios["only-one"], MODEL_CALIBRATED_SAFETY_RATIO)
+
+    def test_missing_volatility_takes_the_widest_margin(self):
+        # 算不出 CV（>0 样本不足 5 个）的品排到最后、拿最大裕度：信息少就多备
+        ratios = assign_volatility_safety_ratios(
+            {
+                "steady": [80.0] * 30,
+                "middling": [80.0, 120.0] * 15,
+                "unknown": [3.0, 0.0, 0.0],
+            }
+        )
+        self.assertAlmostEqual(ratios["unknown"], SAFETY_RATIO_TIERS[2])
+
+    def test_low_volatility_item_can_go_below_the_model_default(self):
+        # 语义变更（ADR 0110）：model_safety_ratio 是「该品的默认值」，不再是全店下限
+        eff = compute_effective_safety_ratio(
+            item_safety_ratio=None, model_safety_ratio=SAFETY_RATIO_TIERS[0]
+        )
+        self.assertAlmostEqual(eff, SAFETY_RATIO_TIERS[0])
+        self.assertLess(eff, MODEL_CALIBRATED_SAFETY_RATIO)
+
+    def test_item_config_still_overrides_volatility_default(self):
+        # 人工配的单品系数仍然覆盖按波动算出来的默认值
+        eff = compute_effective_safety_ratio(
+            item_safety_ratio=0.35, model_safety_ratio=SAFETY_RATIO_TIERS[0]
+        )
+        self.assertAlmostEqual(eff, 0.35)
 
     def test_weight_constraints(self):
         # 验证所有时段权重均符合已确定约束：

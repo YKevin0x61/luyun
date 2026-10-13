@@ -9,46 +9,23 @@ export const EXPORT_TITLE = '复制清单 — 预览'
 export const EXPORT_HINT = '预览后复制，不推企业微信。'
 export const EMPTY_LIST_TEXT = '暂无建议'
 export const CUSTOM_TIME_LABEL = '自定义时间'
-export const RECORD_LABEL = '登记'
-export const RECORD_QTY_LABEL = '这次做了'
-export const UNDO_LABEL = '撤销'
-export const DISCARD_LABEL = '报废'
-export const SKIP_LABEL = '不用做'
-export const EXTRA_RECORD_LABEL = '多做一笔'
 export const FORMULA_LABEL = '怎么算的'
-export const BATCHES_LABEL = '本品批次'
 export const FORECAST_LABEL = '预测'
 export const SAFETY_LABEL = '安全库存'
 export const CONFIDENCE_FIELD_LABEL = '信心'
-export const NO_MASTER_REASON = '没有备货品主数据，不能登记'
 export const EMPTY_HINT = '点「刷新建议」，按档口列出备货品。'
 export const ALL_STATIONS_LABEL = '全部后厨'
 export const UNCATEGORIZED_STATION = '未分类'
 export const TODO_COUNT_LABEL = '还要做'
 export const RECOMMENDED_LABEL = '建议制作量'
-export const PRODUCED_LABEL = '已做'
-export const FRESH_AVAILABLE_LABEL = '非临期可用'
-export const NEAR_AVAILABLE_LABEL = '临期可用'
-export const NEAR_EXPIRY_TITLE = '临期批次'
-export const REMAINING_LABEL = '剩余'
-export const EXPIRES_AT_LABEL = '过期时间'
-/** 员工这一档的页面顶上那一句（票 08）：这一页**看得到、改不了** —— 不是静默少了几颗
- *  按钮（那样员工会以为自己看漏了）。写控件本身在 `PrepPlanView` 里按身份收起。 */
-export const READ_ONLY_HINT = '只读：备货计划的登记与报废由管理端账号操作。'
+/** 员工这一档的页面顶上那一句（票 08）：这一页**看得到、改不了**。备货数量不登记，
+ *  计算每次都按 0 库存 —— 所以这一页两种身份都没有写控件，这句话对谁都成立。 */
+export const READ_ONLY_HINT = '只读：备货计划由管理端查看与刷新。'
 
 export const PRESET_LABELS = {
   future24: '未来 24 小时',
   morning: '早班',
   afternoon: '午后补货',
-}
-
-export const RISK_LABELS = {
-  high: '缺货高',
-  medium: '缺货',
-  low: '略缺',
-  waste_risk: '可能多了',
-  expiry_risk: '临期',
-  normal: '',
 }
 
 export const CONFIDENCE_LABELS = {
@@ -58,22 +35,30 @@ export const CONFIDENCE_LABELS = {
   none: '样本不足',
 }
 
-export function riskLabel(level) {
-  return RISK_LABELS[level] || ''
-}
+/** 安全裕度按每个品自己的消耗波动定（ADR 0110）—— 师傅会问「怎么比以前少做了」。 */
+export const SAFETY_TIER_HINT = '裕度按每个品最近的消耗波动定：波动小的备得少、波动大的备得多。'
+
+/** 目标窗口整段落在歇业日里（`prep_closed_days`）时的那块提示。
+ *  没有它的话页面上只有一份空清单，看起来像「今天不用做」，实际是「今天不做生意」。 */
+export const CLOSED_DAY_TITLE = '这段时间不做生意'
+export const CLOSED_DAY_FALLBACK = '这个窗口整段落在歇业日里。'
+export const CLOSED_DAY_HINT = '歇业日在「数据管理 → 备货歇业日」里维护。'
+
+/** 页面上那块「歇业日」维护区（管理端能改，员工只看得到）。 */
+export const CLOSED_DAYS_TITLE = '歇业日'
+export const CLOSED_DAYS_HINT = '这几天整天不做生意：不给建议，也不算进预测样本。'
+export const CLOSED_DAYS_EMPTY = '还没录过歇业日。'
+export const CLOSED_DAY_ADD_LABEL = '加一天'
+export const CLOSED_DAY_REMOVE_LABEL = '取消'
+export const CLOSED_DAY_NOTE_PLACEHOLDER = '说明（选填，如「春节」）'
 
 export function confidenceLabel(level) {
   return CONFIDENCE_LABELS[level] || ''
 }
 
-export function discardConfirmCopy(batch) {
-  const name = batch?.item_name || '这批'
-  const qty = Number(batch?.remaining_qty || 0)
-  const unit = batch?.unit || ''
-  const expires = batch?.expires_at || ''
-  return {
-    title: `报废「${name}」？`,
-    body: `剩余 ${qty} ${unit}。过期时间 ${expires}。报废后不能再用于备货。`,
-    confirmLabel: DISCARD_LABEL,
-  }
+/** 「怎么算的」里的裕度读数：同一个品比从前做得少时，师傅能在这里查到为什么。 */
+export function safetyRatioText(ratio) {
+  const value = Number(ratio)
+  if (!Number.isFinite(value) || value < 0) return ''
+  return `裕度 ${Math.round(value * 100)}%`
 }

@@ -45,6 +45,13 @@ MODEL_CALIBRATED_SAFETY_RATIO = 0.31
 DEFAULT_SAFETY_STOCK_RATIO = 0.15
 MAX_SAFETY_STOCK_RATIO = 0.40
 
+# 安全裕度按备货品自身的波动分档（ADR 0110）：波动最小的三分之一 / 中间 / 最大的三分之一。
+# 中档必须等于 MODEL_CALIBRATED_SAFETY_RATIO —— 分档用不上时（品数不足）回落到它，
+# 线上行为与"全店一个数"时完全一致。
+SAFETY_RATIO_TIERS: Tuple[float, float, float] = (0.22, 0.31, 0.40)
+MIN_ITEMS_FOR_TIERING = 3
+VOLATILITY_LOOKBACK_DAYS = 30
+
 
 def parse_date_str(d: str | date | datetime) -> date:
     """将日期字符串或 datetime 转换为 date 对象。"""
@@ -203,6 +210,58 @@ def score_confidence(
     return "low"
 
 
+def compute_volatility_cv(values: Sequence[float]) -> Optional[float]:
+    """
+    变异系数（标准差 / 均值），衡量这个品自己卖得稳不稳。只用 >0 的样本，不足 5 个返回 None。
+
+    这个口径是**回测定下来的、ADR 0110 的证据依据**（`scripts/prototype_prep_bucket_backtest/`
+    与新写的 `safety_by_item.py` 都调它）。改这里等于改那份证据的口径，别顺手改。
+    """
+    filtered = [float(v) for v in values if v > 0]
+    if len(filtered) < 5:
+        return None
+    mean = sum(filtered) / len(filtered)
+    if mean == 0:
+        return None
+    variance = sum((v - mean) ** 2 for v in filtered) / len(filtered)
+    return math.sqrt(variance) / mean
+
+
+def assign_volatility_safety_ratios(
+    daily_series: Dict[Any, Sequence[float]],
+    tiers: Sequence[float] = SAFETY_RATIO_TIERS,
+) -> Dict[Any, float]:
+    """
+    按每个备货品**近期日总量**的波动三分位分档，给出各自的默认安全系数。
+
+    两种回落都落在中档（= `MODEL_CALIBRATED_SAFETY_RATIO`），所以用不上分档的调用方
+    拿到的仍是原来的数：
+
+    - 品数不足 `MIN_ITEMS_FOR_TIERING`：全部给中档。三件东西的「三分位」没有意义，
+      这个分支同时让测试夹具这类小规模调用保持分档前的行为。
+    - 算不出 CV 的排到最后、拿最大裕度：信息少就多备一点，别假装它稳。
+    """
+    if not daily_series:
+        return {}
+    mid = float(tiers[len(tiers) // 2])
+    keys = list(daily_series.keys())
+    if len(keys) < MIN_ITEMS_FOR_TIERING:
+        return {key: mid for key in keys}
+
+    scored: List[Tuple[float, bool, Any]] = []
+    for key in keys:
+        cv = compute_volatility_cv(daily_series[key])
+        scored.append((cv if cv is not None else 0.0, cv is None, key))
+    scored.sort(key=lambda row: (row[1], row[0]))
+
+    n = len(scored)
+    out: Dict[Any, float] = {}
+    for i, (_cv, _missing, key) in enumerate(scored):
+        rank = 0 if i < n / 3 else (1 if i < (2 * n) / 3 else 2)
+        out[key] = float(tiers[min(rank, len(tiers) - 1)])
+    return out
+
+
 def compute_effective_safety_ratio(
     item_safety_ratio: Optional[float] = None,
     model_safety_ratio: float = MODEL_CALIBRATED_SAFETY_RATIO,
@@ -211,6 +270,10 @@ def compute_effective_safety_ratio(
     """
     计算有效安全库存系数：
     effective = min(max_safety_ratio, max(model_safety_ratio, item_safety_ratio))
+
+    `model_safety_ratio` 是**该品的默认系数**，不是全店下限：调用方按波动分档
+    （`assign_volatility_safety_ratios`）把值传进来，低波动品因此可以低于
+    `MODEL_CALIBRATED_SAFETY_RATIO` —— 见 ADR 0110。人工配的单品系数仍然覆盖它。
     """
     item_ratio = DEFAULT_SAFETY_STOCK_RATIO if item_safety_ratio is None else float(item_safety_ratio)
     model_ratio = float(model_safety_ratio)

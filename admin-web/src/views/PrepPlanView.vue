@@ -1,48 +1,41 @@
 <script setup>
 import { computed, onMounted } from 'vue'
-import ConfirmDialog from '../components/admin/ConfirmDialog.vue'
 import TextExportModal from '../components/salesreport/TextExportModal.vue'
-import LuyunNumberInput from '../components/ui/LuyunNumberInput.vue'
 import { usePrepPlan } from '../composables/usePrepPlan'
 import { workbenchDocumentTitle } from '../utils/workbenchCopy'
 import { usePrepPlanAdmin } from '../composables/usePrepPlanAdmin'
 import { useStationsStore } from '../stores/stations'
 import {
   ALL_STATIONS_LABEL,
-  BATCHES_LABEL,
   CONFIDENCE_LABELS,
   CONFIDENCE_FIELD_LABEL,
   CUSTOM_TIME_LABEL,
-  DISCARD_LABEL,
+  CLOSED_DAY_ADD_LABEL,
+  CLOSED_DAY_HINT,
+  CLOSED_DAY_NOTE_PLACEHOLDER,
+  CLOSED_DAY_REMOVE_LABEL,
+  CLOSED_DAY_TITLE,
+  CLOSED_DAYS_EMPTY,
+  CLOSED_DAYS_HINT,
+  CLOSED_DAYS_TITLE,
   EMPTY_HINT,
   EXPORT_HINT,
   EXPORT_LABEL,
   EXPORT_TITLE,
-  EXPIRES_AT_LABEL,
-  EXTRA_RECORD_LABEL,
   FORECAST_LABEL,
   FORMULA_LABEL,
-  FRESH_AVAILABLE_LABEL,
-  NEAR_AVAILABLE_LABEL,
-  NEAR_EXPIRY_TITLE,
-  NO_MASTER_REASON,
   PREP_PLAN_TITLE,
   PRESET_LABELS,
-  PRODUCED_LABEL,
   READ_ONLY_HINT,
   RECOMMENDED_LABEL,
-  RECORD_LABEL,
-  RECORD_QTY_LABEL,
   REFRESH_LABEL,
   REFRESHING_LABEL,
-  REMAINING_LABEL,
   SAFETY_LABEL,
-  SKIP_LABEL,
+  SAFETY_TIER_HINT,
   TODO_COUNT_LABEL,
   UNCATEGORIZED_STATION,
-  UNDO_LABEL,
-  discardConfirmCopy,
   confidenceLabel,
+  safetyRatioText,
 } from '../utils/prepPlanCopy'
 import { buildPrepPlanText } from '../utils/prepPlanText'
 import {
@@ -51,7 +44,6 @@ import {
   PRESET_FUTURE_24H,
   PRESET_MORNING,
   formatPrepTime,
-  rowTone,
 } from '../utils/prepPlanWindow'
 
 const LOUMIAN_STATION = 'loumian'
@@ -68,31 +60,31 @@ const {
   customEnd,
   showCustom,
   stationFilter,
-  extraRecordOpen,
-  registerQty,
   busy,
   statusText,
   errorText,
   items,
   missingRules,
   lowConfidence,
-  expiring,
-  discardTarget,
   windowStart,
   windowEnd,
+  closedReason,
+  closedDays,
+  newClosedDay,
+  newClosedNote,
+  closedError,
   exportOpen,
-  itemKey,
   windowRange,
   refresh,
-  recordItem,
-  undoItem,
-  discardBatch,
+  loadClosedDays,
+  addClosedDay,
+  removeClosedDay,
 } = usePrepPlan()
 
-// 票 08：这一页两种身份都能打开（工作台「后勤」组、清单里 `audience: both`），但**写入口
-// 只给管理端那一档**（ADR 0092：进工作台只是换位置与统一导航，不扩权）。判据是工作台身份
-// （`composables/usePrepPlanAdmin.js`，形态照票 07 的配方）；员工这一档页面是只读的，写路径
-// 的入口一颗都不渲染 —— 真去打写接口由服务端那一道 401 兜住，前端这一层只是不给点。
+// 票 08：这一页两种身份都能打开（工作台「后勤」组、清单里 `audience: both`）。写入口一颗
+// 都不渲染 —— 备货数量不登记、每次计算都按 0 库存，读与写在这里已经不是同一个问题了。
+// 身份判据（`composables/usePrepPlanAdmin.js`）留着只为一件事：那句话只说给员工听 ——
+// 管理端在这一页本来就没有能改的东西，不必再解释一遍。
 // 读路径（刷新建议 / 复制清单 / 时间窗 / 档口筛选）两档都在：它们不写库。
 const { readOnly } = usePrepPlanAdmin()
 
@@ -120,6 +112,7 @@ onMounted(() => {
   // 默认值「厨务管家 · 管理后台」，跟管理后台任意一页分不开（手机上多标签时尤其明显）。
   document.title = workbenchDocumentTitle('备货计划')
   stationsStore.load()
+  loadClosedDays()
 })
 
 const stationChips = computed(() => [
@@ -138,13 +131,6 @@ const filteredKitchenItems = computed(() => {
   const filter = stationFilter.value
   if (!filter) return kitchenItems.value
   return kitchenItems.value.filter((item) => stationIdOf(item) === filter)
-})
-
-const filteredExpiring = computed(() => {
-  const kitchenExpiring = expiring.value.filter((row) => stationIdOf(row) !== LOUMIAN_STATION)
-  const filter = stationFilter.value
-  if (!filter) return kitchenExpiring
-  return kitchenExpiring.filter((row) => stationIdOf(row) === filter)
 })
 
 const todoCount = computed(
@@ -187,15 +173,6 @@ const board = computed(() => {
   }))
 })
 
-const discardCopy = computed(() => {
-  const target = discardTarget.value
-  if (!target) return { title: '', body: '', confirmLabel: DISCARD_LABEL }
-  return discardConfirmCopy({
-    ...target,
-    expires_at: formatPrepTime(target.expires_at),
-  })
-})
-
 const exportText = computed(() =>
   buildPrepPlanText({
     windowStart: windowStart.value,
@@ -204,7 +181,6 @@ const exportText = computed(() =>
       stationLabel: group.label,
       items: group.items,
     })),
-    expiring: filteredExpiring.value,
     missingRules: missingRules.value,
   })
 )
@@ -213,34 +189,8 @@ function qtyText(value) {
   return Number.isFinite(Number(value)) ? String(Math.round(Number(value))) : '0'
 }
 
-function usableBatches(item) {
-  return (item.batches || []).filter((batch) => Number(batch.remaining_qty || 0) > 0)
-}
-
 function isLowSample(item) {
   return item.confidence === 'low'
-}
-
-function registerFormOpen(item) {
-  if (!item.can_record) return false
-  if (Number(item.recommended_qty || 0) > 0) return true
-  return Boolean(extraRecordOpen[itemKey(item)])
-}
-
-function showExtraRecord(item) {
-  return Boolean(item.can_record) && Number(item.recommended_qty || 0) <= 0 && !extraRecordOpen[itemKey(item)]
-}
-
-function openExtraRecord(item) {
-  extraRecordOpen[itemKey(item)] = true
-}
-
-function openDiscard(batch) {
-  discardTarget.value = batch
-}
-
-function cancelDiscard() {
-  discardTarget.value = null
 }
 </script>
 
@@ -251,8 +201,8 @@ function cancelDiscard() {
         <h1 class="prep-title">{{ PREP_PLAN_TITLE }}</h1>
         <p v-if="kitchenItems.length" class="prep-todo">{{ TODO_COUNT_LABEL }} {{ todoCount }} 项</p>
       </header>
-      <!-- 员工这一档：明说这一页只读（票 08）。不是静默少几颗按钮 —— 那样后厨会以为
-           自己看漏了、或者以为页面坏了。 -->
+      <!-- 员工这一档：明说这一页只读（票 08）。这一页对谁都没有写控件，员工不会因为
+           「少了几颗按钮」而犯嘀咕 —— 那句话是替这件事说的。 -->
       <p v-if="readOnly" class="prep-readonly">{{ READ_ONLY_HINT }}</p>
       <div class="prep-toolbar-row prep-preset-row" role="group" aria-label="时间窗">
         <button
@@ -332,39 +282,51 @@ function cancelDiscard() {
       </div>
     </div>
 
-    <section v-if="filteredExpiring.length" class="card prep-expiring" aria-label="临期批次">
-      <h2 class="prep-station-title">{{ NEAR_EXPIRY_TITLE }}</h2>
-      <ul class="prep-expiring-list">
-        <li v-for="batch in filteredExpiring" :key="batch.batch_id" class="prep-expiring-row">
-          <div class="prep-expiring-main">
-            <div class="prep-item-name">{{ batch.item_name }}</div>
-            <div class="prep-metrics prep-metrics--expiring">
-              <div class="prep-metric">
-                <span class="prep-metric-label">{{ REMAINING_LABEL }}</span>
-                <span class="prep-metric-value">{{ qtyText(batch.remaining_qty) }}</span>
-                <span class="prep-metric-unit">{{ batch.unit }}</span>
-              </div>
-              <div class="prep-metric prep-metric--wide">
-                <span class="prep-metric-label">{{ EXPIRES_AT_LABEL }}</span>
-                <span class="prep-metric-value prep-metric-time">{{ formatPrepTime(batch.expires_at) }}</span>
-              </div>
-            </div>
-          </div>
+    <!-- 歇业日维护区：产品要求"在工作台里能改"，不是让人去数据管理页填表。
+         写控件只给管理端（后端写端点也挂 verify_admin_token，两边一致）。 -->
+    <details class="card prep-closed-days">
+      <summary>{{ CLOSED_DAYS_TITLE }}</summary>
+      <p class="prep-closed-hint">{{ CLOSED_DAYS_HINT }}</p>
+      <ul v-if="closedDays.length" class="prep-closed-list">
+        <li v-for="row in closedDays" :key="row.day">
+          <span class="prep-closed-day">{{ row.day }}</span>
+          <span v-if="row.note" class="prep-closed-note">{{ row.note }}</span>
           <button
             v-if="!readOnly"
             type="button"
-            class="btn btn-danger prep-discard"
-            :disabled="busy"
-            @click="openDiscard(batch)"
+            class="btn prep-closed-remove"
+            @click="removeClosedDay(row.day)"
           >
-            {{ DISCARD_LABEL }}
+            {{ CLOSED_DAY_REMOVE_LABEL }}
           </button>
         </li>
       </ul>
-    </section>
+      <p v-else class="prep-closed-hint">{{ CLOSED_DAYS_EMPTY }}</p>
+      <div v-if="!readOnly" class="prep-closed-add">
+        <input v-model="newClosedDay" type="date" class="prep-closed-input" />
+        <input
+          v-model="newClosedNote"
+          type="text"
+          class="prep-closed-input"
+          :placeholder="CLOSED_DAY_NOTE_PLACEHOLDER"
+        />
+        <button
+          type="button"
+          class="btn btn-primary"
+          :disabled="!newClosedDay"
+          @click="addClosedDay"
+        >
+          {{ CLOSED_DAY_ADD_LABEL }}
+        </button>
+      </div>
+      <p v-if="closedError" class="prep-closed-error">{{ closedError }}</p>
+    </details>
 
-    <div v-if="!kitchenItems.length && !filteredExpiring.length" class="card prep-empty">
-      <p class="empty-state">{{ errorText ? errorText : EMPTY_HINT }}</p>
+    <div v-if="!kitchenItems.length" class="card prep-empty">
+      <p v-if="closedReason" class="empty-state">
+        <strong>{{ CLOSED_DAY_TITLE }}</strong> —— {{ closedReason }} {{ CLOSED_DAY_HINT }}
+      </p>
+      <p v-else class="empty-state">{{ errorText ? errorText : EMPTY_HINT }}</p>
       <button
         type="button"
         class="btn btn-primary prep-refresh"
@@ -375,81 +337,27 @@ function cancelDiscard() {
       </button>
     </div>
 
-    <div v-else-if="kitchenItems.length" class="prep-board">
+    <div v-else class="prep-board">
       <section v-for="group in board" :key="group.stationId" class="card prep-station">
         <h2 class="prep-station-title">{{ group.label }}</h2>
         <ul class="prep-rows">
-          <li v-for="item in group.items" :key="`${item.item_name}|${item.unit}`" class="prep-row" :class="`is-${rowTone(item)}`">
+          <li
+            v-for="item in group.items"
+            :key="`${item.item_name}|${item.unit}`"
+            class="prep-row"
+            :class="Number(item.recommended_qty || 0) <= 0 ? 'is-skip' : 'is-todo'"
+          >
             <div class="prep-row-main">
               <div class="prep-item-name">
                 {{ item.item_name }}
                 <span v-if="isLowSample(item)" class="badge prep-sample-badge">{{ CONFIDENCE_LABELS.low }}</span>
               </div>
-              <div class="prep-stamp" :class="`is-${rowTone(item)}`">
+              <div class="prep-stamp" :class="Number(item.recommended_qty || 0) <= 0 ? 'is-skip' : 'is-todo'">
                 <span class="prep-stamp-label">{{ RECOMMENDED_LABEL }}</span>
                 <span class="prep-stamp-qty">{{ qtyText(item.recommended_qty) }}</span>
                 <span class="prep-stamp-unit">{{ item.unit }}</span>
-                <span v-if="Number(item.recommended_qty || 0) <= 0" class="prep-skip">{{ SKIP_LABEL }}</span>
+                <span v-if="Number(item.recommended_qty || 0) <= 0" class="prep-skip">不用做</span>
               </div>
-            </div>
-            <div class="prep-metrics">
-              <div class="prep-metric">
-                <span class="prep-metric-label">{{ FRESH_AVAILABLE_LABEL }}</span>
-                <span class="prep-metric-value">{{ qtyText(item.available_fresh_qty) }}</span>
-                <span class="prep-metric-unit">{{ item.unit }}</span>
-              </div>
-              <div class="prep-metric" :class="{ 'is-warn': Number(item.available_near_expiry_qty || 0) > 0 }">
-                <span class="prep-metric-label">{{ NEAR_AVAILABLE_LABEL }}</span>
-                <span class="prep-metric-value">{{ qtyText(item.available_near_expiry_qty) }}</span>
-                <span class="prep-metric-unit">{{ item.unit }}</span>
-              </div>
-              <div class="prep-metric">
-                <span class="prep-metric-label">{{ PRODUCED_LABEL }}</span>
-                <span class="prep-metric-value">{{ qtyText(item.produced_qty) }}</span>
-                <span class="prep-metric-unit">{{ item.unit }}</span>
-              </div>
-            </div>
-            <p v-if="!item.can_record" class="prep-no-master">{{ NO_MASTER_REASON }}</p>
-            <!-- 写入口（票 08）：员工这一档整条收起来 —— 「多做一笔」/「登记」/「撤销」
-                 都是写路径，不是"点不动"，而是不给点。管理端那一档一字未改。 -->
-            <div v-else-if="!readOnly" class="prep-row-actions">
-              <button
-                v-if="showExtraRecord(item)"
-                type="button"
-                class="btn prep-extra"
-                :disabled="busy"
-                @click="openExtraRecord(item)"
-              >
-                {{ EXTRA_RECORD_LABEL }}
-              </button>
-              <form
-                v-else-if="registerFormOpen(item)"
-                class="prep-register"
-                @submit.prevent="recordItem(item)"
-              >
-                <div class="prep-qty-field">
-                  <span class="prep-qty-label">{{ RECORD_QTY_LABEL }}</span>
-                  <LuyunNumberInput
-                    v-model="registerQty[itemKey(item)]"
-                    decimal
-                    :step="1"
-                    :disabled="busy"
-                  />
-                  <span class="prep-qty-unit">{{ item.unit }}</span>
-                </div>
-                <button type="submit" class="btn btn-primary prep-record" :disabled="busy">
-                  {{ RECORD_LABEL }}
-                </button>
-              </form>
-              <button
-                v-if="item.undo_batch_id"
-                type="button"
-                class="btn prep-undo"
-                :disabled="busy"
-                @click="undoItem(item)"
-              >
-                {{ UNDO_LABEL }}
-              </button>
             </div>
             <details class="prep-row-more">
               <summary>{{ FORMULA_LABEL }}</summary>
@@ -460,15 +368,12 @@ function cancelDiscard() {
                 </div>
                 <div>
                   <dt>{{ SAFETY_LABEL }}</dt>
-                  <dd>{{ qtyText(item.safety_qty) }} {{ item.unit }}</dd>
-                </div>
-                <div>
-                  <dt>{{ FRESH_AVAILABLE_LABEL }}</dt>
-                  <dd>{{ qtyText(item.available_fresh_qty) }} {{ item.unit }}</dd>
-                </div>
-                <div>
-                  <dt>{{ NEAR_AVAILABLE_LABEL }}</dt>
-                  <dd>{{ qtyText(item.available_near_expiry_qty) }} {{ item.unit }}</dd>
+                  <dd>
+                    {{ qtyText(item.safety_qty) }} {{ item.unit }}
+                    <span v-if="safetyRatioText(item.effective_safety_ratio)" class="prep-safety-ratio">
+                      （{{ safetyRatioText(item.effective_safety_ratio) }}）
+                    </span>
+                  </dd>
                 </div>
                 <div>
                   <dt>{{ RECOMMENDED_LABEL }}</dt>
@@ -479,16 +384,10 @@ function cancelDiscard() {
                   <dd>{{ confidenceLabel(item.confidence) }}</dd>
                 </div>
               </dl>
+              <!-- 裕度按品不同（ADR 0110）：同一个品比以前做得少时，师傅要能自己查到为什么。
+                   复用 .prep-min-batch 的「面板里一句小字说明」样式，免得碰 CSS 契约测试。 -->
+              <p class="prep-min-batch">{{ SAFETY_TIER_HINT }}</p>
               <p v-if="item.min_batch_applied && item.reason" class="prep-min-batch">{{ item.reason }}</p>
-              <template v-if="usableBatches(item).length">
-                <h3 class="prep-batches-title">{{ BATCHES_LABEL }}</h3>
-                <ul class="prep-batches">
-                  <li v-for="batch in usableBatches(item)" :key="batch.batch_id">
-                    {{ REMAINING_LABEL }} {{ qtyText(batch.remaining_qty) }} {{ item.unit }}
-                    · {{ EXPIRES_AT_LABEL }} {{ formatPrepTime(batch.expires_at) }}
-                  </li>
-                </ul>
-              </template>
             </details>
           </li>
         </ul>
@@ -515,16 +414,6 @@ function cancelDiscard() {
       </ul>
     </details>
 
-    <ConfirmDialog
-      v-if="discardTarget"
-      class="prep-discard-confirm"
-      :title="discardCopy.title"
-      :message="discardCopy.body"
-      :confirm-label="discardCopy.confirmLabel"
-      danger
-      @confirm="discardBatch(discardTarget)"
-      @cancel="cancelDiscard"
-    />
     <TextExportModal
       v-if="exportOpen"
       class="prep-export-modal"
@@ -543,7 +432,6 @@ function cancelDiscard() {
   --prep-chit: #161c2e;
   --prep-stamp-todo: rgba(245, 158, 11, 0.16);
   --prep-stamp-skip: rgba(34, 197, 94, 0.12);
-  --prep-stamp-danger: rgba(239, 68, 68, 0.16);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -592,11 +480,7 @@ function cancelDiscard() {
 }
 .prep-chip,
 .prep-refresh,
-.prep-export,
-.prep-record,
-.prep-extra,
-.prep-undo,
-.prep-discard {
+.prep-export {
   min-height: 44px;
   padding: 10px 16px;
   font-size: 15px;
@@ -667,13 +551,11 @@ function cancelDiscard() {
   max-width: 280px;
 }
 .prep-board,
-.prep-expiring-list,
 .prep-rows {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
-.prep-expiring-list,
 .prep-rows {
   list-style: none;
   margin: 0;
@@ -685,7 +567,6 @@ function cancelDiscard() {
   font-weight: 700;
   margin: 0 0 8px;
 }
-.prep-expiring-row,
 .prep-row {
   display: flex;
   flex-direction: column;
@@ -706,21 +587,8 @@ function cancelDiscard() {
 .prep-row.is-todo {
   border-left-color: var(--yellow);
 }
-.prep-row.is-danger {
-  border-left-color: var(--red);
-}
-.prep-expiring-row:first-child,
 .prep-row:first-child {
   border-top: 0;
-}
-.prep-expiring-row {
-  gap: 12px;
-}
-.prep-expiring-main {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
 }
 .prep-item-name {
   display: flex;
@@ -755,9 +623,6 @@ function cancelDiscard() {
 .prep-stamp.is-skip {
   background: var(--prep-stamp-skip);
 }
-.prep-stamp.is-danger {
-  background: var(--prep-stamp-danger);
-}
 .prep-stamp-label {
   font-size: 11px;
   letter-spacing: 0.02em;
@@ -772,9 +637,6 @@ function cancelDiscard() {
 .prep-stamp.is-skip .prep-stamp-qty {
   color: var(--green);
 }
-.prep-stamp.is-danger .prep-stamp-qty {
-  color: var(--red);
-}
 .prep-stamp-unit,
 .prep-skip {
   font-size: 13px;
@@ -785,93 +647,6 @@ function cancelDiscard() {
 }
 .prep-skip {
   color: var(--green);
-}
-.prep-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-.prep-metrics--expiring {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
-}
-.prep-metric {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  padding: 8px;
-  border-radius: 8px;
-  background: rgba(10, 13, 22, 0.45);
-}
-.prep-metric.is-warn {
-  background: rgba(245, 158, 11, 0.12);
-}
-.prep-metric-label {
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--prep-mute);
-}
-.prep-metric-value {
-  font-size: 16px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-  overflow-wrap: anywhere;
-}
-.prep-metric-time {
-  font-size: 14px;
-  font-weight: 600;
-}
-.prep-metric-unit {
-  font-size: 12px;
-  color: var(--prep-mute);
-}
-.prep-no-master {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--prep-mute);
-}
-.prep-row-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-}
-.prep-register {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.prep-qty-field {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  color: var(--prep-mute);
-}
-.prep-qty-label,
-.prep-qty-unit {
-  white-space: nowrap;
-}
-.prep-register :deep(.luyun-number) {
-  width: 100%;
-}
-.prep-register :deep(.luyun-number__step) {
-  width: 44px;
-  min-height: 44px;
-}
-.prep-register :deep(.luyun-number__input) {
-  min-height: 44px;
-  font-size: 16px;
-}
-.prep-record,
-.prep-extra,
-.prep-undo,
-.prep-discard {
-  width: 100%;
-  justify-content: center;
 }
 .prep-aux {
   font-size: 13px;
@@ -920,17 +695,6 @@ function cancelDiscard() {
   margin: 8px 0 0;
   color: var(--text);
 }
-.prep-batches-title {
-  margin: 12px 0 6px;
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--text);
-}
-.prep-batches {
-  margin: 0;
-  padding-left: 18px;
-  color: var(--text);
-}
 .prep-plan :is(button, .btn, input, summary):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -974,26 +738,9 @@ function cancelDiscard() {
     grid-template-columns: 1fr 1fr;
   }
   .prep-action-row .prep-refresh,
-  .prep-action-row .prep-export,
-  .prep-record,
-  .prep-extra,
-  .prep-undo,
-  .prep-discard {
+  .prep-action-row .prep-export {
     width: auto;
     flex: 0 0 auto;
-  }
-  .prep-row-actions {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: flex-end;
-  }
-  .prep-register {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: flex-end;
-  }
-  .prep-qty-field {
-    min-width: 220px;
   }
   .prep-plan :deep(.modal-overlay) {
     align-items: center;
@@ -1023,9 +770,6 @@ function cancelDiscard() {
     justify-content: center;
     min-width: 0;
   }
-  .prep-metrics--expiring {
-    grid-template-columns: 1fr;
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   .prep-plan .btn,
@@ -1033,5 +777,52 @@ function cancelDiscard() {
     transition: none;
     transform: none;
   }
+}
+
+/* 歇业日维护区：折叠着，日常不占视线，要改的时候点开 */
+.prep-closed-days {
+  margin-bottom: 12px;
+  padding: 12px 16px;
+}
+.prep-closed-days > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.prep-closed-hint,
+.prep-closed-note {
+  color: var(--prep-mute);
+  font-size: 13px;
+}
+.prep-closed-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+}
+.prep-closed-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.prep-closed-day {
+  font-variant-numeric: tabular-nums;
+}
+.prep-closed-remove {
+  margin-left: auto;
+}
+.prep-closed-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.prep-closed-input {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+.prep-closed-error {
+  color: var(--red);
+  font-size: 13px;
+  margin: 8px 0 0;
 }
 </style>

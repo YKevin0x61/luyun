@@ -6,7 +6,6 @@ import {
   PRESET_MORNING,
   itemKey,
   resolvePrepWindow,
-  rowTone,
 } from '../prepPlanWindow.js'
 
 describe('resolvePrepWindow', () => {
@@ -41,13 +40,16 @@ describe('resolvePrepWindow', () => {
     expect(end.getDate()).toBe(31)
   })
 
-  it('午后补货终点是明天 12:00', () => {
+  it('午后补货终点是明天 13:00 —— 撑到午市的三分之二', () => {
     const now = new Date(2026, 7, 30, 16, 0, 0)
     const { start, end } = resolvePrepWindow(PRESET_AFTERNOON, now)
     expect(start.getTime()).toBe(now.getTime())
-    expect(end.getHours()).toBe(12)
+    expect(end.getHours()).toBe(13)
     expect(end.getMinutes()).toBe(0)
     expect(end.getDate()).toBe(31)
+    // 终点必须落在午市时段（11:00–14:00）**里面**：停在 11:00 或 12:00 都等于午市没盖住
+    expect(end.getHours()).toBeGreaterThan(11)
+    expect(end.getHours()).toBeLessThan(14)
   })
 
   it('上午十点点午后补货，从今天 14:00 起', () => {
@@ -85,26 +87,12 @@ describe('resolvePrepWindow', () => {
 })
 
 describe('itemKey', () => {
-  it('空档口和未分类用同一把钥匙，报废才能改到对应行', () => {
+  it('空档口和未分类用同一把钥匙', () => {
     const emptyStation = itemKey({ station: '', item_name: '虾饺馅', unit: '份' })
     const missingStation = itemKey({ item_name: '虾饺馅', unit: '份' })
     const uncategorized = itemKey({ station: '未分类', item_name: '虾饺馅', unit: '份' })
     expect(emptyStation).toBe('未分类|虾饺馅|份')
     expect(missingStation).toBe(emptyStation)
     expect(uncategorized).toBe(emptyStation)
-  })
-})
-
-describe('rowTone', () => {
-  it('建议量为 0 是不用做', () => {
-    expect(rowTone({ recommended_qty: 0, risk_level: 'high' })).toBe('skip')
-  })
-
-  it('缺货高是危险', () => {
-    expect(rowTone({ recommended_qty: 12, risk_level: 'high' })).toBe('danger')
-  })
-
-  it('还要做是待办', () => {
-    expect(rowTone({ recommended_qty: 8, risk_level: 'normal' })).toBe('todo')
   })
 })

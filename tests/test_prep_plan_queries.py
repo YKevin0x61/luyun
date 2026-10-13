@@ -21,9 +21,8 @@ class PrepPlanQueryTests(PrepPlanServiceFixture):
                 """
                 INSERT INTO prep_plan_runs (
                     plan_date, target_start, target_end, method, created_by,
-                    item_count, missing_rule_count, high_risk_count,
-                    expiry_risk_count, waste_risk_count, summary_json, created_at
-                ) VALUES (?, ?, ?, 'weighted_history', '', 1, 0, 0, 0, 0, '{}', ?)
+                    item_count, missing_rule_count, summary_json, created_at
+                ) VALUES (?, ?, ?, 'weighted_history', '', 1, 0, '{}', ?)
                 """,
                 (NOW.strftime("%Y-%m-%d"), start, end, self.stamp),
             )
@@ -34,9 +33,9 @@ class PrepPlanQueryTests(PrepPlanServiceFixture):
                 """
                 INSERT INTO prep_plan_items (
                     run_id, item_name, station, position, unit,
-                    forecast_qty, safety_qty, available_qty, recommended_qty,
-                    risk_level, confidence, reason, created_at
-                ) VALUES (?, '虾饺馅', 'shulong', '熟笼', '份', 10, 0, 0, 10, 'normal', 'none', '', ?)
+                    forecast_qty, safety_qty, recommended_qty,
+                    confidence, reason, created_at
+                ) VALUES (?, '虾饺馅', 'shulong', '熟笼', '份', 10, 0, 10, 'none', '', ?)
                 """,
                 (run_id, self.stamp),
             )
@@ -47,10 +46,6 @@ class PrepPlanQueryTests(PrepPlanServiceFixture):
         )
         self.assertEqual(result["run"]["id"], run_id)
         self.assertEqual(result["items"][0]["item_name"], "虾饺馅")
-
-    async def test_update_batch_missing_raises_key_error(self):
-        with self.assertRaises(KeyError):
-            await self.service.update_batch(self.db, batch_id=999)
 
     async def test_init_items_from_rules_uses_position_station_map(self):
         rules = self.db.table("semi_finished_rules")

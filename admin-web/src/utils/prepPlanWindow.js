@@ -35,7 +35,9 @@ export function resolvePrepWindow(preset, now = new Date(), customStart, customE
   if (preset === PRESET_AFTERNOON) {
     const open = atTime(current, 14, 0)
     const start = current.getTime() > open.getTime() ? current : open
-    return { start, end: atTime(addDays(current, 1), 12, 0) }
+    // 终点撑到第二天 13:00（午市 11:00–14:00 的三分之二），不是午市刚开始的 12:00：
+    // 一次备货要盖住整个上午段的午市需求，只算一小时等于把午市少算三分之二。
+    return { start, end: atTime(addDays(current, 1), 13, 0) }
   }
   return { start: current, end: new Date(current.getTime() + 24 * 3600 * 1000) }
 }
@@ -62,10 +64,4 @@ export function formatPrepTime(value) {
 export function itemKey(item) {
   const station = (item?.station || '').trim() || UNCATEGORIZED_STATION
   return `${station}|${item?.item_name || ''}|${item?.unit || ''}`
-}
-
-export function rowTone(item) {
-  if (Number(item?.recommended_qty || 0) <= 0) return 'skip'
-  if (item?.risk_level === 'high') return 'danger'
-  return 'todo'
 }

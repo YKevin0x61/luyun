@@ -19,7 +19,7 @@
   岗位二维码；阅读面两种身份都进得去（扫码看岗位配方的路子保留），管理页只给超级管理员
 - 企微推送（`/wecom-push`）：Webhook 管理、推送任务管理、消息预览与立即发送、发送记录
 - 备货计划（`/workbench/kitchen/prep-plan`，工作台「后勤」组；员工这一档只读）：
-  一键生成执行清单、档口执行板、辅助信息
+  刷新建议、按档口列出每个备货品还要做多少、点开看算法说明（不登记备货数量，见 ADR 0111）
 - 实时日志（`/logs`）：实时跟踪 / 历史查询、级别与 logger 过滤、统计面板
 - 卫生管理端（`/workbench/floor/zones`、`/workbench/floor/daily`、
   `/workbench/floor/attire`、`/workbench/floor/deep-clean`、`/workbench/floor/fix`、

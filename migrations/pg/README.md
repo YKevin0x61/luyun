@@ -62,10 +62,18 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0020_hygiene_employee_profile.sql` | 员工档案四列 `hygiene_employees."id_card_no"` / `"health_cert_date"` / `"base_salary"` / `"hire_date"`（全可空、无默认值）+ 身份证号的部分唯一索引 `idx_hygiene_employees_id_card`（`tenant_id, id_card_no`，`WHERE id_card_no IS NOT NULL`） | **所有读员工行的路径整条报错、页面 500**（缺列：`column e.health_cert_date does not exist`）—— 不只花名册，员工登录、审批、员工端「我的」与排班读名单都要 `SELECT` 这几列。这里**刻意不做降级**：读不到档案时把它当"没填"渲染，会让所有人静默变成「待补」、底薪空着也能批准，比报错更难查。应用后即恢复。健康证到期日是派生值、不落库（ADR 0098） |
 
 | `0021_overtime_entries.sql` | 加班与补钟台账 `overtime_entries`（票 01）：一条 = 一个**自然日** + 一个**带符号的半小时数**（`half_hours`，`CHECK <> 0`，±24 = ±12 小时）+ 必填事由 + 状态机（`pending` / `approved` / `rejected` / `cancelled` / `voided`），配三条索引（待办 / 我的记录 / 按日期统计） | 「加班与补钟」页整页 503 并点名这个文件（`OvertimeLedger` 的每个方法都把缺表异常转成 `not_migrated`）：员工提交、撤回与月度净时长都不可用。排班 / 卫生 / 员工登录不受影响（那几条路不碰这张表） |
+| `0024_drop_prep_batch_tables.sql` | **例外：非加成性**（见下）。备货计划不再登记备货数量（ADR 0111）：删掉 `prep_batches` / `prep_stock_movements` 两张表，并清掉三张计划快照表上只服务批次模型的废列（`prep_plan_items.available_qty` / `.risk_level`、`prep_plan_item_slots.available_qty`、`prep_plan_runs` 的三个风险计数） | 不应用也不报错：新代码既不读也不写这些表与列，先切代码还是先跑迁移都不影响可用性 —— 代价只是库里多留两张死表、快照表上多几个恒为 0 的列 |
+| `0025_prep_closed_days.sql` | `prep_closed_days`：店自己的**歇业日历**（整天不做生意的营业日，如春节 / 国庆头几天）。落在这些日子的时段不进建议，它们也从「完整营业日」样本里剔除 | 不应用也不报错：`_load_closed_days` 读不到表就按「没有歇业日」降级（一行 warning）。代价是节假日那天会照同星期算出一份看着像模像样的建议 —— 实测国庆当天给过「52 个品、合计 1311」，金莎的信心还是 `high`，师傅照做就是报废 |
 
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，
 别删）。
+
+**`0024` 是唯一一条非加成性例外**：它 `DROP TABLE` / `DROP COLUMN`，而上面那条规矩是
+增量脚本只做加成性变更。允许它的理由写在脚本头注释里 —— 单机单实例、更新作业在
+`applying_migrations` 阶段同批切代码与 schema，不存在「旧代码跑新 schema」的窗口；
+被删的是从来没被用起来的执行记录。决策见 [ADR 0111](../../docs/adr/0111-prep-plan-does-not-track-produced-qty.md)。
+**再要破这条规矩之前先问一次**：例外有一次就够，多了这条规矩就等于没有。
 
 **为什么不在启动时自动补**：`_connect_postgres` 明确不承担结构变更（见其 docstring），
 「schema 是谁改的」要可追溯。所以**改了结构就必须出脚本**，没有「重启即自愈」这条捷径。

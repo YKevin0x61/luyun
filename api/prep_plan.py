@@ -6,7 +6,7 @@
 
 - `reader_router` —— 读面。备货计划搬进工作台的「后勤」组
   （`/workbench/kitchen/prep-plan`，页面清单里是 `audience: both`），后厨在工作台里
-  得看得到"今天要备什么"，所以四条读端点（forecast / current / movements / expiring）
+  得看得到"今天要备什么"，所以两条读端点（forecast / current）
   挂的是「任一身份」门 `require_any_identity_session`（管理端会话或员工会话）。
   门本身在 `api/security.py`，注册处是 `main.py`（**不挂** verify_admin_token）。
 - `router` —— 业务面（写端点 + 不属于阅读面的那些）。注册处统一挂
@@ -20,7 +20,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from database import get_db
 from services.prep_plan_service import prep_plan_service
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/prep-plan", tags=["备货计划"])
 
 # 读面（任一身份：管理端会话或员工会话）。与 `router` 同前缀，见模块开头那段说明。
-# 门挂在 **router 级**（一处，四条读端点一起受保护）：读面没有"某一条只给管理端"的分支，
+# 门挂在 **router 级**（一处，两条读端点一起受保护）：读面没有"某一条只给管理端"的分支，
 # 「含停用」那种按身份裁剪的参数备货计划这边不存在 —— 有分支了再往单条路由上挂。
 reader_router = APIRouter(
     prefix="/api/prep-plan",
@@ -51,34 +51,6 @@ class GeneratePlanRequest(BaseModel):
     station: Optional[str] = None
 
 
-class CreateBatchRequest(BaseModel):
-    item_name: str = Field(..., min_length=1)
-    produced_qty: float = Field(..., gt=0)
-    unit: str = Field("", min_length=0)
-    produced_at: Optional[str] = None
-    operator: str = ""
-    notes: str = ""
-
-
-class UpdateBatchRequest(BaseModel):
-    remaining_qty: Optional[float] = None
-    status: Optional[str] = None
-    notes: Optional[str] = None
-    operator: str = ""
-
-
-class CreateMovementRequest(BaseModel):
-    batch_id: int = Field(..., gt=0)
-    item_name: str = Field(..., min_length=1)
-    unit: str = ""
-    movement_type: str
-    qty_delta: float
-    reason: str = ""
-    operator: str = ""
-    source_type: str = ""
-    source_id: str = ""
-
-
 @reader_router.get("/forecast")
 async def get_forecast(
     target_start: Optional[str] = Query(None, description="ISO 时间，默认 now()"),
@@ -92,7 +64,6 @@ async def get_forecast(
             target_start=target_start,
             target_end=target_end,
             station=station,
-            include_inventory=True,
         )
         return result
     except ValueError as exc:
@@ -132,124 +103,41 @@ async def get_current_plan(db=Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"查询当前计划失败: {exc}")
 
 
-@router.post("/batches", dependencies=_ADMIN_WRITE)
-async def create_batch(payload: CreateBatchRequest, db=Depends(get_db)):
+class ClosedDayRequest(BaseModel):
+    day: str
+    note: str = ""
+
+
+@reader_router.get("/closed-days")
+async def get_closed_days(db=Depends(get_db)):
+    """歇业日日历：读面（任一身份）—— 员工也该看得出「今天为什么没建议」。"""
     try:
-        return await prep_plan_service.record_batch(
-            db=db,
-            item_name=payload.item_name,
-            produced_qty=payload.produced_qty,
-            unit=payload.unit,
-            produced_at=payload.produced_at,
-            operator=payload.operator,
-            notes=payload.notes,
-        )
+        return await prep_plan_service.list_closed_days(db)
+    except Exception as exc:
+        logger.exception("查询歇业日失败")
+        raise HTTPException(status_code=500, detail=f"查询歇业日失败: {exc}")
+
+
+@router.post("/closed-days", dependencies=_ADMIN_WRITE)
+async def add_closed_day(payload: ClosedDayRequest, db=Depends(get_db)):
+    try:
+        return await prep_plan_service.add_closed_day(db, payload.day, payload.note)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        logger.exception("创建备货批次失败")
-        raise HTTPException(status_code=500, detail=f"创建备货批次失败: {exc}")
+        logger.exception("新增歇业日失败")
+        raise HTTPException(status_code=500, detail=f"新增歇业日失败: {exc}")
 
 
-@router.post("/batches/{batch_id}/undo", dependencies=_ADMIN_WRITE)
-async def undo_batch(batch_id: int, db=Depends(get_db)):
+@router.delete("/closed-days/{day}", dependencies=_ADMIN_WRITE)
+async def remove_closed_day(day: str, db=Depends(get_db)):
     try:
-        return await prep_plan_service.undo_record(db, batch_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="批次不存在")
+        return await prep_plan_service.remove_closed_day(db, day)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        logger.exception("撤销登记失败")
-        raise HTTPException(status_code=500, detail=f"撤销登记失败: {exc}")
-
-
-@router.post("/batches/{batch_id}/discard", dependencies=_ADMIN_WRITE)
-async def discard_batch(batch_id: int, db=Depends(get_db)):
-    try:
-        return await prep_plan_service.discard_batch(db, batch_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="批次不存在")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        logger.exception("报废批次失败")
-        raise HTTPException(status_code=500, detail=f"报废批次失败: {exc}")
-
-
-@router.patch("/batches/{batch_id}", dependencies=_ADMIN_WRITE)
-async def update_batch(batch_id: int, payload: UpdateBatchRequest, db=Depends(get_db)):
-    try:
-        return await prep_plan_service.update_batch(
-            db,
-            batch_id,
-            remaining_qty=payload.remaining_qty,
-            status=payload.status,
-            notes=payload.notes,
-            operator=payload.operator,
-        )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="批次不存在")
-    except Exception as exc:
-        logger.exception("更新备货批次失败")
-        raise HTTPException(status_code=500, detail=f"更新备货批次失败: {exc}")
-
-
-@reader_router.get("/movements")
-async def get_movements(
-    item_name: Optional[str] = Query(None),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    limit: int = Query(200, ge=1, le=2000),
-    db=Depends(get_db),
-):
-    try:
-        return await prep_plan_service.list_movements(
-            db,
-            item_name=item_name,
-            start_date=start_date,
-            end_date=end_date,
-            limit=limit,
-        )
-    except Exception as exc:
-        logger.exception("查询库存流水失败")
-        raise HTTPException(status_code=500, detail=f"查询库存流水失败: {exc}")
-
-
-@router.post("/movements", dependencies=_ADMIN_WRITE)
-async def create_movement(payload: CreateMovementRequest, db=Depends(get_db)):
-    try:
-        return await prep_plan_service.create_movement(
-            db,
-            batch_id=payload.batch_id,
-            item_name=payload.item_name,
-            movement_type=payload.movement_type,
-            qty_delta=payload.qty_delta,
-            unit=payload.unit,
-            reason=payload.reason,
-            operator=payload.operator,
-            source_type=payload.source_type,
-            source_id=payload.source_id,
-        )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="批次不存在")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        logger.exception("新增库存流水失败")
-        raise HTTPException(status_code=500, detail=f"新增库存流水失败: {exc}")
-
-
-@reader_router.get("/expiring")
-async def get_expiring_batches(
-    within_hours: int = Query(4, ge=1, le=72),
-    db=Depends(get_db),
-):
-    try:
-        return await prep_plan_service.list_expiring_batches(db, within_hours=within_hours)
-    except Exception as exc:
-        logger.exception("查询临期批次失败")
-        raise HTTPException(status_code=500, detail=f"查询临期批次失败: {exc}")
+        logger.exception("删除歇业日失败")
+        raise HTTPException(status_code=500, detail=f"删除歇业日失败: {exc}")
 
 
 @reader_router.get("/accuracy")

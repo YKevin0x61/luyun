@@ -37,10 +37,8 @@ describe('PrepPlanView mobile layout', () => {
   const desktop = mediaBody(css, 'min-width: 721px')
 
   it('keeps kitchen controls at 44px and 16px text to avoid iOS zoom', () => {
-    expect(compact).toContain('.prep-chip,.prep-refresh,.prep-export,.prep-record,.prep-extra,.prep-undo,.prep-discard{min-height:44px')
+    expect(compact).toContain('.prep-chip,.prep-refresh,.prep-export{min-height:44px')
     expect(compact).toContain('.prep-datetime{min-height:44px;width:100%;min-width:0;font-size:16px')
-    expect(compact).toContain('.prep-register:deep(.luyun-number__step){width:44px;min-height:44px')
-    expect(compact).toContain('.prep-register:deep(.luyun-number__input){min-height:44px;font-size:16px')
     expect(compact).toContain('.prep-auxsummary,.prep-row-moresummary{cursor:pointer;min-height:44px')
   })
 
@@ -49,9 +47,9 @@ describe('PrepPlanView mobile layout', () => {
     expect(compact.includes('.prep-datetime{min-height:44px;min-width:220px')).toBe(false)
   })
 
-  it('uses a wrapping chip collection and a 3-cell inventory rail', () => {
+  it('uses a wrapping chip collection and the row / stamp layout', () => {
     expect(compact).toContain('.prep-toolbar-row{display:flex;flex-wrap:wrap')
-    expect(compact).toContain('.prep-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))')
+    expect(compact).toContain('.prep-row-main{display:grid;grid-template-columns:minmax(0,1fr)auto')
     expect(compact).toContain('.prep-stamp{')
   })
 
@@ -61,10 +59,28 @@ describe('PrepPlanView mobile layout', () => {
     expect(compact).toContain('.prep-plan:deep(.modal-box){width:min(600px,100%)!important')
   })
 
-  it('keeps register actions in a row on desktop and stacked on phones', () => {
-    expect(compact).toContain('.prep-row-actions{display:flex;flex-direction:column')
-    expect(desktop).toContain('.prep-row-actions{flex-direction:row')
+  it('keeps refresh / export in a row on desktop', () => {
+    expect(desktop).toContain('.prep-action-row.prep-refresh,.prep-action-row.prep-export{width:auto')
     expect(compact).toContain('prefers-reduced-motion:reduce')
     expect(compact).toContain(':focus-visible')
+  })
+
+  it('写控件那一套样式也不再留着', () => {
+    for (const dead of [
+      '.prep-row-actions',
+      '.prep-register',
+      '.prep-qty-field',
+      '.prep-record',
+      '.prep-extra',
+      '.prep-undo',
+      '.prep-discard',
+      '.prep-no-master',
+      '.prep-metrics',
+      '.prep-expiring',
+      '.prep-batches',
+      'is-danger',
+    ]) {
+      expect(compact.includes(dead), `${dead} 的样式还在`).toBe(false)
+    }
   })
 })

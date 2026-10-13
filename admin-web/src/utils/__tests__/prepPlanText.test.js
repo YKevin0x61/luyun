@@ -14,39 +14,17 @@ describe('buildPrepPlanText', () => {
         {
           stationLabel: '西饼档',
           items: [
-            {
-              item_name: '酥皮',
-              unit: '份',
-              recommended_qty: 20,
-              available_fresh_qty: 4,
-              available_near_expiry_qty: 2,
-              produced_qty: 0,
-            },
-            {
-              item_name: '蛋挞液',
-              unit: '份',
-              recommended_qty: 0,
-              available_fresh_qty: 10,
-              available_near_expiry_qty: 0,
-              produced_qty: 8,
-            },
+            { item_name: '酥皮', unit: '份', recommended_qty: 20 },
+            { item_name: '蛋挞液', unit: '份', recommended_qty: 0 },
           ],
         },
         {
           stationLabel: '肠粉档',
           items: [
-            {
-              item_name: '虾饺馅',
-              unit: '份',
-              recommended_qty: 12,
-              available_fresh_qty: 1,
-              available_near_expiry_qty: 0,
-              produced_qty: 3,
-            },
+            { item_name: '虾饺馅', unit: '份', recommended_qty: 12 },
           ],
         },
       ],
-      expiring: [],
       missingRules: [],
     })
     expect(text).toContain('【备货计划】')
@@ -61,72 +39,47 @@ describe('buildPrepPlanText', () => {
     expect(text).not.toContain('建议 0')
   })
 
-  it('行上写出可用、临期、已做的数字', () => {
+  it('行上只有名字与建议量 —— 可用 / 临期 / 已做那三个数不再出现', () => {
     const text = buildPrepPlanText({
       ...WINDOW,
       stations: [
         {
           stationLabel: '西饼档',
           items: [
-            {
-              item_name: '酥皮',
-              unit: '份',
-              recommended_qty: 20,
-              available_fresh_qty: 4,
-              available_near_expiry_qty: 2,
-              produced_qty: 0,
-            },
-            {
-              item_name: '蛋挞液',
-              unit: '份',
-              recommended_qty: 0,
-              available_fresh_qty: 10,
-              available_near_expiry_qty: 0,
-              produced_qty: 8,
-            },
+            // 后端已经不再返回 available_* / produced_qty；这里连传都不传，
+            // 文本里若还冒出这几个词就是前端自己在编库存。
+            { item_name: '酥皮', unit: '份', recommended_qty: 20 },
+            { item_name: '蛋挞液', unit: '份', recommended_qty: 0 },
           ],
         },
       ],
-      expiring: [],
       missingRules: [],
     })
-    expect(text).toContain('可用 4份')
-    expect(text).toContain('临期 2份')
-    expect(text).toContain('已做 0份')
-    expect(text).toContain('可用 10份')
-    expect(text).toContain('临期 0份')
-    expect(text).toContain('已做 8份')
+    const pastryLine = text.split('\n').find((line) => line.includes('酥皮'))
+    expect(pastryLine).toBe('酥皮  建议 20份')
+    expect(text).not.toContain('可用')
+    expect(text).not.toContain('临期')
+    expect(text).not.toContain('已做')
+    expect(text).not.toContain('剩余')
+    expect(text).not.toContain('undefined')
   })
 
-  it('页末有临期和缺规则', () => {
+  it('页末有缺规则', () => {
     const text = buildPrepPlanText({
       ...WINDOW,
       stations: [
         {
           stationLabel: '西饼档',
-          items: [
-            {
-              item_name: '酥皮',
-              unit: '份',
-              recommended_qty: 20,
-              available_fresh_qty: 4,
-              available_near_expiry_qty: 2,
-              produced_qty: 0,
-            },
-          ],
+          items: [{ item_name: '酥皮', unit: '份', recommended_qty: 20 }],
         },
-      ],
-      expiring: [
-        { item_name: '虾饺馅', unit: '份', remaining_qty: 30, expires_at: '2026-08-30T18:00:00+08:00' },
       ],
       missingRules: [{ dish_name: '示例菜', reason: '没有配置半成品换算规则，无法换算为备货品' }],
     })
-    expect(text).toContain('【临期】')
-    expect(text).toContain('虾饺馅')
-    expect(text).toContain('剩余 30份')
     expect(text).toContain('【缺规则】')
     expect(text).toContain('示例菜')
     expect(text).toContain('没有配置半成品换算规则，无法换算为备货品')
+    // 临期那一段随临期批次一起删了（响应顶层也没有 `expiring`）。
+    expect(text).not.toContain('【临期】')
   })
 
   it('文案不含英文枚举', () => {
@@ -136,21 +89,9 @@ describe('buildPrepPlanText', () => {
         {
           stationLabel: '西饼档',
           items: [
-            {
-              item_name: '酥皮',
-              unit: '份',
-              recommended_qty: 20,
-              available_fresh_qty: 4,
-              available_near_expiry_qty: 2,
-              produced_qty: 0,
-              risk_level: 'high',
-              confidence: 'low',
-            },
+            { item_name: '酥皮', unit: '份', recommended_qty: 20, confidence: 'low' },
           ],
         },
-      ],
-      expiring: [
-        { item_name: '虾饺馅', unit: '份', remaining_qty: 30, expires_at: '2026-08-30T18:00:00+08:00' },
       ],
       missingRules: [{ dish_name: '示例菜', reason: '没有配置半成品换算规则，无法换算为备货品' }],
     })
@@ -166,7 +107,6 @@ describe('buildPrepPlanText', () => {
     const text = buildPrepPlanText({
       ...WINDOW,
       stations: [],
-      expiring: [],
       missingRules: [],
     })
     expect(text).toContain('暂无建议')

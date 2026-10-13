@@ -24,6 +24,8 @@ from services.prep_forecast_policy import (
     MODEL_CALIBRATED_SAFETY_RATIO,
     SAME_WEEK_LOOKBACK_DAYS,
     SLOT_BASE_WEIGHTS,
+    VOLATILITY_LOOKBACK_DAYS,
+    assign_volatility_safety_ratios,
     compute_effective_safety_ratio,
     compute_signals,
     extract_signal_dates,
@@ -58,77 +60,6 @@ POSITION_STATION_MAP = {
     "明档1": "mingdang1",
     "煎炸": "jianzha",
 }
-
-NEAR_EXPIRY_HOURS = 4.0
-UNDO_MOVEMENT_REASON = "undo_record"
-
-
-def split_available_qty(batches: List[Dict[str, Any]], now_dt: datetime, near_hours: float = NEAR_EXPIRY_HOURS) -> Tuple[float, float]:
-    """Split live remaining into non-near-expiry vs near-expiry (still usable)."""
-    near_end = now_dt + timedelta(hours=near_hours)
-    fresh = 0.0
-    near = 0.0
-    for batch in batches:
-        qty = float(batch.get("remaining_qty") or 0)
-        if qty <= 0:
-            continue
-        expires_at = ensure_beijing_datetime(batch["expires_at"])
-        if expires_at <= now_dt:
-            continue
-        if expires_at <= near_end:
-            near += qty
-        else:
-            fresh += qty
-    return fresh, near
-
-
-def cover_slot_demand(
-    slots: List[Dict[str, Any]],
-    forecasts: List[float],
-    safety_ratio: float,
-    batches: List[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], float]:
-    """
-    FEFO coverage: a batch can only cover a slot if expires_at >= slot_end.
-    Demand per slot is forecast * (1 + safety_ratio).
-    """
-    remaining = [max(float(batch.get("remaining_qty") or 0), 0.0) for batch in batches]
-    order = sorted(
-        range(len(batches)),
-        key=lambda index: ensure_beijing_datetime(batches[index]["expires_at"]),
-    )
-    slot_results: List[Dict[str, Any]] = []
-    total_uncovered = 0.0
-    for slot, forecast in zip(slots, forecasts):
-        demand = max(float(forecast or 0), 0.0) * (1.0 + float(safety_ratio or 0))
-        covered = 0.0
-        slot_end = slot["slot_end"]
-        if demand > 0:
-            for index in order:
-                expires_at = ensure_beijing_datetime(batches[index]["expires_at"])
-                if expires_at < slot_end:
-                    continue
-                take = min(remaining[index], demand - covered)
-                if take <= 0:
-                    continue
-                remaining[index] -= take
-                covered += take
-                if covered >= demand:
-                    break
-        uncovered = max(demand - covered, 0.0)
-        total_uncovered += uncovered
-        slot_results.append(
-            {
-                "slot_name": slot.get("slot_name") or "",
-                "slot_start": slot["slot_start"].isoformat() if hasattr(slot["slot_start"], "isoformat") else slot["slot_start"],
-                "slot_end": slot["slot_end"].isoformat() if hasattr(slot["slot_end"], "isoformat") else slot["slot_end"],
-                "forecast_qty": float(forecast or 0),
-                "available_qty": covered,
-                "recommended_qty": uncovered,
-            }
-        )
-    return slot_results, total_uncovered
-
 
 class PrepPlanService:
     """备货计划业务服务。"""
@@ -297,77 +228,84 @@ class PrepPlanService:
         return prep_map
 
     @staticmethod
-    async def _load_live_batches(db, now_dt: datetime) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
-        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
-        tdb = db.table("prep_batches")
-        async with tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                SELECT id, prep_item_id, item_name, unit, produced_qty, remaining_qty,
-                       produced_at, expires_at, status, notes
-                FROM prep_batches
-                WHERE status IN ('active', 'near_expiry')
-                  AND remaining_qty > 0
-                  AND expires_at > ?
-                ORDER BY expires_at ASC, id ASC
-                """,
-                (now_dt.isoformat(),),
-            )
-            rows = await cursor.fetchall()
-        for row in rows:
-            key = (row["item_name"], row["unit"] or "")
-            grouped[key].append(dict(row))
-        return dict(grouped)
+    async def _load_closed_days(db) -> Set[str]:
+        """读「备货歇业日」日历（迁移 0025），返回营业日字符串集合。
+
+        表读不到时按「没有歇业日」处理 —— 与其它迁移的降级口径一致（见 migrations/pg/README.md）。
+        """
+        try:
+            tdb = db.table("prep_closed_days")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute("SELECT day FROM prep_closed_days")
+                rows = await cursor.fetchall()
+        except Exception:  # noqa: BLE001
+            logger.warning("备货歇业日读不到（迁移 0025 未应用？），按「没有歇业日」处理")
+            return set()
+        return {str(row["day"]) for row in rows if row["day"]}
 
     @staticmethod
-    async def _load_undo_batch_ids(db) -> set:
-        tdb = db.table("prep_stock_movements")
-        async with tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                SELECT DISTINCT batch_id
-                FROM prep_stock_movements
-                WHERE reason = ?
-                """,
-                (UNDO_MOVEMENT_REASON,),
-            )
-            rows = await cursor.fetchall()
-        return {int(row["batch_id"]) for row in rows if row["batch_id"] is not None}
+    def _normalize_day(value: str) -> str:
+        """把入参收敛成营业日 `YYYY-MM-DD`；不合法就抛 ValueError（路由转 400）。
+
+        允许传完整 ISO 时间（`2026-10-17T07:30:00`）—— 前端的时间窗输入就是那个形状。
+        """
+        try:
+            return datetime.strptime((value or "").strip()[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError(f"日期格式应为 YYYY-MM-DD：{value}") from exc
 
     @staticmethod
-    async def _load_window_production(
-        db,
-        start_dt: datetime,
-        end_dt: datetime,
-        undo_ids: set,
-    ) -> Dict[Tuple[str, str], Dict[str, Any]]:
-        produced: Dict[Tuple[str, str], Dict[str, Any]] = defaultdict(
-            lambda: {"qty": 0.0, "undo_batch_id": None, "latest_at": ""}
-        )
-        tdb = db.table("prep_batches")
+    async def list_closed_days(db) -> Dict[str, Any]:
+        """列出全部歇业日，按日期升序。"""
+        tdb = db.table("prep_closed_days")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute("SELECT day, note FROM prep_closed_days ORDER BY day ASC")
+            rows = await cursor.fetchall()
+        return {
+            "success": True,
+            "days": [{"day": str(r["day"]), "note": r["note"] or ""} for r in rows],
+        }
+
+    @staticmethod
+    async def add_closed_day(db, day: str, note: str = "") -> Dict[str, Any]:
+        """把一个营业日标成歇业。同一天重复标只更新说明、不报错（幂等，前端好写）。"""
+        value = PrepPlanService._normalize_day(day)
+        now_iso = datetime.now(CHINA_TZ).isoformat()
+        tdb = db.table("prep_closed_days")
+
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute("SELECT id FROM prep_closed_days WHERE day = ? LIMIT 1", (value,))
+            existing = await cursor.fetchone()
+
+        if existing:
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    "UPDATE prep_closed_days SET note = ?, updated_at = ? WHERE id = ?",
+                    (note or "", now_iso, existing["id"]),
+                )
+            await tdb.commit()
+            return {"success": True, "day": value, "created": False}
+
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT id, item_name, unit, produced_qty, produced_at
-                FROM prep_batches
-                WHERE produced_at >= ?
-                  AND produced_at <= ?
-                ORDER BY produced_at DESC, id DESC
+                INSERT INTO prep_closed_days (day, note, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                (start_dt.isoformat(), end_dt.isoformat()),
+                (value, note or "", now_iso, now_iso),
             )
-            rows = await cursor.fetchall()
-        for row in rows:
-            batch_id = int(row["id"])
-            if batch_id in undo_ids:
-                continue
-            key = (row["item_name"], row["unit"] or "")
-            entry = produced[key]
-            entry["qty"] += float(row["produced_qty"] or 0)
-            if entry["undo_batch_id"] is None:
-                entry["undo_batch_id"] = batch_id
-                entry["latest_at"] = row["produced_at"] or ""
-        return dict(produced)
+        await tdb.commit()
+        return {"success": True, "day": value, "created": True}
+
+    @staticmethod
+    async def remove_closed_day(db, day: str) -> Dict[str, Any]:
+        """取消某天的歇业标记。那天本来就没标也不报错。"""
+        value = PrepPlanService._normalize_day(day)
+        tdb = db.table("prep_closed_days")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute("DELETE FROM prep_closed_days WHERE day = ?", (value,))
+        await tdb.commit()
+        return {"success": True, "day": value}
 
     async def compute_forecast(
         self,
@@ -375,18 +313,42 @@ class PrepPlanService:
         target_start: Optional[str],
         target_end: Optional[str],
         station: Optional[str] = None,
-        include_inventory: bool = False,
         now: Optional[datetime] = None,
         model_safety_ratio: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         计算备货预测。
-        include_inventory=False => MVP1 行为（库存全部按 0）
-        now: inventory clock; defaults to datetime.now(CHINA_TZ).
+
+        **库存一律按 0**：这个功能不登记备货数量（ADR 0111），每次计算只回答
+        「这个窗口还要做多少」，不看已经做过什么 —— 所以建议制作量 = 各时段预测 + 安全量。
+        窗口里若有**歇业日**（`prep_closed_days`），落在那几天的时段直接不进建议；
+        整段都在歇业日里时返回 `closed=True`，而不是一份算出来的清单。
+        now: 计算时刻；默认 datetime.now(CHINA_TZ)。
         """
         start_dt, end_dt = self._parse_window(target_start, target_end)
         now_dt = ensure_beijing_datetime(now) if now is not None else datetime.now(CHINA_TZ)
         slots = self._build_slots(start_dt, end_dt)
+
+        # 歇业日：预测器对「哪天不做生意」一无所知，会照同星期算出一份像模像样的清单
+        # （实测国庆当天给出 52 个品、合计 1311，金莎的信心还是 high）。师傅照做就是报废。
+        closed_days = await self._load_closed_days(db)
+        if closed_days:
+            slots = [s for s in slots if s["slot_start"].strftime("%Y-%m-%d") not in closed_days]
+        if not slots:
+            return {
+                "success": True,
+                "closed": True,
+                "closed_reason": "这个窗口整段落在歇业日里",
+                "target_window": {
+                    "start": start_dt.isoformat(),
+                    "end": end_dt.isoformat(),
+                    "station": station or "all_kitchen",
+                },
+                "summary": {"item_count": 0, "todo_count": 0, "missing_rule_count": 0},
+                "items": [],
+                "missing_rules": [],
+                "low_confidence": [],
+            }
 
         # 历史窗口：严格冻结在 start_dt 之前，避免目标日订单泄漏
         history_start = (start_dt - timedelta(days=SAME_WEEK_LOOKBACK_DAYS + 7)).replace(
@@ -396,11 +358,6 @@ class PrepPlanService:
 
         exact_rules, norm_rules = await self._load_rules(db)
         prep_item_map = await self._load_prep_item_map(db)
-        live_batches = await self._load_live_batches(db, now_dt) if include_inventory else {}
-        undo_ids = await self._load_undo_batch_ids(db) if include_inventory else set()
-        window_production = (
-            await self._load_window_production(db, start_dt, end_dt, undo_ids) if include_inventory else {}
-        )
 
         orders_tdb = db.table("orders")
 
@@ -429,6 +386,11 @@ class PrepPlanService:
 
         complete_days = find_complete_store_days(day_spans)
         effective_complete_days = complete_days if complete_days else set(day_spans.keys())
+        if closed_days:
+            # 歇业日不进样本：它们的零消耗不是「那天用得少」，是那天没开门
+            effective_complete_days = {
+                d for d in effective_complete_days if d not in closed_days
+            }
 
         # 2. 查询档口在 [history_start, start_dt) 内的历史订单
         query_params: List[Any] = [history_start.isoformat(), history_end.isoformat()]
@@ -503,6 +465,26 @@ class PrepPlanService:
         items: List[Dict[str, Any]] = []
         low_confidence_items: List[Dict[str, Any]] = []
 
+        # 安全裕度按备货品自身的波动分配（ADR 0110）：波动小的备得少、波动大的备得多，
+        # 全店的总预算不变。品数不足或算不出波动时 `assign_volatility_safety_ratios`
+        # 会回落到中档（= MODEL_CALIBRATED_SAFETY_RATIO），行为与分档前一致。
+        # 调用方显式给了 model_safety_ratio 就不启用 —— 那是「照我说的来」。
+        volatility_ratios: Dict[Tuple[str, str, str, str], float] = {}
+        if model_safety_ratio is None:
+            volatility_days = sorted(effective_complete_days)[-VOLATILITY_LOOKBACK_DAYS:]
+            volatility_ratios = assign_volatility_safety_ratios(
+                {
+                    key: [
+                        sum(
+                            series_map.get(key, {}).get((d, s), 0.0)
+                            for s in ("morning", "lunch", "afternoon", "dinner")
+                        )
+                        for d in volatility_days
+                    ]
+                    for key in all_series_keys
+                }
+            )
+
         for series_key in sorted(all_series_keys):
             item_name, unit, station_id, position = series_key
             prep_key = (item_name, unit)
@@ -549,42 +531,20 @@ class PrepPlanService:
             else:
                 eff_safety_ratio = compute_effective_safety_ratio(
                     item_safety_ratio=item_safety_ratio,
-                    model_safety_ratio=MODEL_CALIBRATED_SAFETY_RATIO,
+                    model_safety_ratio=volatility_ratios.get(
+                        series_key, MODEL_CALIBRATED_SAFETY_RATIO
+                    ),
                 )
 
             safety_qty = total_forecast * eff_safety_ratio
             min_batch_qty = float(item_meta.get("min_batch_qty", DEFAULT_MIN_BATCH_QTY))
-            item_batches = live_batches.get(prep_key, []) if include_inventory else []
-            available_fresh, available_near = split_available_qty(item_batches, now_dt)
-            total_available = available_fresh + available_near
 
-            if include_inventory:
-                slot_results, uncovered = cover_slot_demand(slots, slot_forecasts, eff_safety_ratio, item_batches)
-            else:
-                slot_results, uncovered = cover_slot_demand(slots, slot_forecasts, eff_safety_ratio, [])
-
-            recommended_qty = max(uncovered, 0.0)
+            # 0 库存口径：没有批次可抵，建议制作量就是各时段预测加安全量
+            recommended_qty = max(total_forecast + safety_qty, 0.0)
             min_batch_applied = False
             if recommended_qty > 0 and min_batch_qty > 0 and recommended_qty < min_batch_qty:
                 recommended_qty = min_batch_qty
                 min_batch_applied = True
-
-            if not include_inventory:
-                risk_level = "normal"
-            else:
-                gap = recommended_qty
-                shortage_rate = gap / max(total_forecast, 1.0)
-                overload_rate = total_available / max(total_forecast, 1.0)
-                if shortage_rate >= 0.5:
-                    risk_level = "high"
-                elif shortage_rate >= 0.2:
-                    risk_level = "medium"
-                elif gap > 0:
-                    risk_level = "low"
-                elif overload_rate > 1.3:
-                    risk_level = "waste_risk"
-                else:
-                    risk_level = "normal"
 
             if "low" in confidence_values:
                 item_confidence = "low"
@@ -595,32 +555,17 @@ class PrepPlanService:
             else:
                 item_confidence = "none"
 
-            production = window_production.get(prep_key, {})
-            can_record = bool(item_meta.get("prep_item_id"))
             display_slots = []
-            for slot_row, raw_forecast in zip(slot_results, slot_forecasts):
+            for slot_def, raw_forecast in zip(slots, slot_forecasts):
                 display_slots.append(
                     {
-                        "slot_name": slot_row["slot_name"],
-                        "slot_start": slot_row["slot_start"],
-                        "slot_end": slot_row["slot_end"],
+                        "slot_name": slot_def["slot_name"],
+                        "slot_start": slot_def["slot_start"],
+                        "slot_end": slot_def["slot_end"],
                         "forecast_qty": int(math.ceil(raw_forecast)),
-                        "available_qty": round(float(slot_row["available_qty"]), 2),
-                        "recommended_qty": int(math.ceil(float(slot_row["recommended_qty"]))),
-                    }
-                )
-
-            live_batch_payload = []
-            for batch in item_batches:
-                expires_at = ensure_beijing_datetime(batch["expires_at"])
-                live_batch_payload.append(
-                    {
-                        "batch_id": batch["id"],
-                        "produced_qty": round(float(batch.get("produced_qty") or 0), 2),
-                        "remaining_qty": round(float(batch.get("remaining_qty") or 0), 2),
-                        "produced_at": batch.get("produced_at") or "",
-                        "expires_at": batch.get("expires_at") or "",
-                        "near_expiry": expires_at <= now_dt + timedelta(hours=NEAR_EXPIRY_HOURS),
+                        "recommended_qty": int(
+                            math.ceil(raw_forecast * (1.0 + eff_safety_ratio))
+                        ),
                     }
                 )
 
@@ -634,20 +579,12 @@ class PrepPlanService:
                 "safety_qty": round(safety_qty, 2),
                 "safety_stock_ratio": round(item_safety_ratio, 4),
                 "effective_safety_ratio": round(eff_safety_ratio, 4),
-                "available_qty": round(total_available, 2),
-                "available_fresh_qty": round(available_fresh, 2),
-                "available_near_expiry_qty": round(available_near, 2),
                 "recommended_qty": int(math.ceil(recommended_qty)),
-                "produced_qty": round(float(production.get("qty") or 0), 2),
-                "undo_batch_id": production.get("undo_batch_id"),
                 "min_batch_qty": round(min_batch_qty, 2),
                 "min_batch_applied": min_batch_applied,
-                "can_record": can_record,
-                "risk_level": risk_level,
                 "confidence": item_confidence,
                 "reason": "",
                 "slots": display_slots,
-                "batches": live_batch_payload,
             }
 
             if item_confidence == "none":
@@ -665,14 +602,10 @@ class PrepPlanService:
             reason = (
                 f"预测需求 {base_item['forecast_qty']} {unit}，"
                 f"安全库存 {base_item['safety_qty']} {unit}，"
-                f"可用 {base_item['available_fresh_qty']} {unit}，"
-                f"临期 {base_item['available_near_expiry_qty']} {unit}，"
                 f"建议制作 {base_item['recommended_qty']} {unit}"
             )
             if min_batch_applied:
                 reason += f"（已按最小批量 {int(math.ceil(min_batch_qty))} {unit} 上调）"
-            if not can_record:
-                reason += "。没有备货品主数据，不能登记"
             base_item["reason"] = reason
             items.append(base_item)
 
@@ -687,36 +620,10 @@ class PrepPlanService:
                 }
             )
 
-        expiring = []
-        if include_inventory:
-            near_end = now_dt + timedelta(hours=NEAR_EXPIRY_HOURS)
-            for key, batches in live_batches.items():
-                item_name, unit = key
-                meta = prep_item_map.get(key, {})
-                for batch in batches:
-                    expires_at = ensure_beijing_datetime(batch["expires_at"])
-                    if expires_at > near_end:
-                        continue
-                    expiring.append(
-                        {
-                            "batch_id": batch["id"],
-                            "item_name": item_name,
-                            "unit": unit,
-                            "station": meta.get("station") or "",
-                            "position": meta.get("position") or "",
-                            "remaining_qty": round(float(batch.get("remaining_qty") or 0), 2),
-                            "expires_at": batch.get("expires_at") or "",
-                        }
-                    )
-            expiring.sort(key=lambda row: row["expires_at"])
-
         summary = {
             "item_count": len(items),
             "todo_count": sum(1 for item in items if item["recommended_qty"] > 0),
             "missing_rule_count": len(missing_rules),
-            "high_risk_count": sum(1 for item in items if item["risk_level"] == "high"),
-            "expiry_risk_count": sum(1 for item in items if item["available_near_expiry_qty"] > 0),
-            "waste_risk_count": sum(1 for item in items if item["risk_level"] == "waste_risk"),
         }
 
         return {
@@ -730,7 +637,6 @@ class PrepPlanService:
             "items": sorted(items, key=lambda x: (x["station"], x["position"], -x["recommended_qty"], x["item_name"])),
             "missing_rules": missing_rules,
             "low_confidence": low_confidence_items,
-            "expiring": expiring,
         }
 
     async def create_plan_run(
@@ -747,7 +653,6 @@ class PrepPlanService:
             target_start=target_start,
             target_end=target_end,
             station=station,
-            include_inventory=True,
         )
 
         start_dt = ensure_beijing_datetime(forecast_result["target_window"]["start"])
@@ -765,9 +670,8 @@ class PrepPlanService:
                 """
                 INSERT INTO prep_plan_runs (
                     plan_date, target_start, target_end, method, created_by,
-                    item_count, missing_rule_count, high_risk_count,
-                    expiry_risk_count, waste_risk_count, summary_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    item_count, missing_rule_count, summary_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     plan_date,
@@ -777,9 +681,6 @@ class PrepPlanService:
                     created_by or "",
                     int(summary["item_count"]),
                     int(summary["missing_rule_count"]),
-                    int(summary["high_risk_count"]),
-                    int(summary["expiry_risk_count"]),
-                    int(summary["waste_risk_count"]),
                     "",
                     now_iso,
                 ),
@@ -793,9 +694,9 @@ class PrepPlanService:
                     """
                     INSERT INTO prep_plan_items (
                         run_id, prep_item_id, item_name, station, position, unit,
-                        forecast_qty, safety_qty, available_qty, recommended_qty,
-                        risk_level, confidence, reason, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        forecast_qty, safety_qty, recommended_qty,
+                        confidence, reason, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -806,9 +707,7 @@ class PrepPlanService:
                         item["unit"],
                         float(item["forecast_qty"]),
                         float(item["safety_qty"]),
-                        float(item["available_qty"]),
                         float(item["recommended_qty"]),
-                        item["risk_level"],
                         item.get("confidence", "none"),
                         item.get("reason", ""),
                         now_iso,
@@ -823,8 +722,8 @@ class PrepPlanService:
                         """
                         INSERT INTO prep_plan_item_slots (
                             run_id, plan_item_id, prep_item_id, item_name, unit,
-                            slot_start, slot_end, forecast_qty, available_qty, recommended_qty, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            slot_start, slot_end, forecast_qty, recommended_qty, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             run_id,
@@ -835,7 +734,6 @@ class PrepPlanService:
                             slot["slot_start"],
                             slot["slot_end"],
                             float(slot["forecast_qty"]),
-                            float(slot["available_qty"]),
                             float(slot["recommended_qty"]),
                             now_iso,
                         ),
@@ -848,194 +746,6 @@ class PrepPlanService:
             "plan_date": plan_date,
             "summary": summary,
         }
-
-    async def record_batch(
-        self,
-        db,
-        item_name: str,
-        produced_qty: float,
-        unit: str = "",
-        produced_at: Optional[str] = None,
-        operator: str = "",
-        notes: str = "",
-    ) -> Dict[str, Any]:
-        qty = float(produced_qty)
-        if qty <= 0:
-            raise ValueError("登记数量必须大于 0")
-
-        prep_items_tdb = db.table("prep_items")
-        batches_tdb = db.table("prep_batches")
-        movements_tdb = db.table("prep_stock_movements")
-
-        async with prep_items_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                SELECT id, item_name, unit, shelf_life_hours
-                FROM prep_items
-                WHERE item_name = ? AND unit = ? AND active = 1
-                LIMIT 1
-                """,
-                (item_name, unit),
-            )
-            prep_item = await cursor.fetchone()
-        if not prep_item:
-            raise ValueError(f"备货品不存在或未启用: {item_name} ({unit})")
-
-        produced_dt = ensure_beijing_datetime(produced_at) if produced_at else datetime.now(CHINA_TZ)
-        now_iso = datetime.now(CHINA_TZ).isoformat()
-        shelf_life_hours = float(prep_item["shelf_life_hours"] or DEFAULT_SHELF_LIFE_HOURS)
-        expires_dt = produced_dt + timedelta(hours=shelf_life_hours)
-
-        async with batches_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO prep_batches (
-                    prep_item_id, item_name, produced_qty, remaining_qty, unit,
-                    produced_at, expires_at, status, operator, notes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
-                """,
-                (
-                    prep_item["id"],
-                    item_name,
-                    qty,
-                    qty,
-                    unit,
-                    produced_dt.isoformat(),
-                    expires_dt.isoformat(),
-                    operator or "",
-                    notes or "",
-                    now_iso,
-                    now_iso,
-                ),
-            )
-            batch_id = cursor.lastrowid
-
-        async with movements_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO prep_stock_movements (
-                    batch_id, prep_item_id, item_name, unit, movement_type, qty_delta,
-                    reason, operator, source_type, source_id, created_at
-                ) VALUES (?, ?, ?, ?, 'produce', ?, 'batch_create', ?, 'batch', ?, ?)
-                """,
-                (
-                    batch_id,
-                    prep_item["id"],
-                    item_name,
-                    unit,
-                    qty,
-                    operator or "",
-                    str(batch_id),
-                    now_iso,
-                ),
-            )
-        await movements_tdb.commit()
-
-        return {
-            "success": True,
-            "batch_id": batch_id,
-            "produced_qty": qty,
-            "remaining_qty": qty,
-            "produced_at": produced_dt.isoformat(),
-            "expires_at": expires_dt.isoformat(),
-        }
-
-    async def retire_batch(
-        self,
-        db,
-        batch_id: int,
-        reason: str,
-        operator: str = "",
-    ) -> Dict[str, Any]:
-        if reason not in {UNDO_MOVEMENT_REASON, "discard"}:
-            raise ValueError("不支持的批次处理原因")
-        batches_tdb = db.table("prep_batches")
-        movements_tdb = db.table("prep_stock_movements")
-        now_iso = datetime.now(CHINA_TZ).isoformat()
-
-        async with batches_tdb.conn.cursor() as cursor:
-            await cursor.execute("SELECT * FROM prep_batches WHERE id = ? LIMIT 1", (batch_id,))
-            batch = await cursor.fetchone()
-        if not batch:
-            raise KeyError("批次不存在")
-        batch_dict = dict(batch)
-        remaining = float(batch_dict["remaining_qty"] or 0)
-        if remaining <= 0 and batch_dict.get("status") == "discarded":
-            return {
-                "success": True,
-                "batch_id": batch_id,
-                "remaining_qty": 0.0,
-                "status": "discarded",
-            }
-
-        qty_delta = -remaining if remaining > 0 else 0.0
-        movement_type = "discard"
-        async with movements_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO prep_stock_movements (
-                    batch_id, prep_item_id, item_name, unit, movement_type, qty_delta,
-                    reason, operator, source_type, source_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'batch', ?, ?)
-                """,
-                (
-                    batch_id,
-                    batch_dict.get("prep_item_id"),
-                    batch_dict["item_name"],
-                    batch_dict["unit"] or "",
-                    movement_type,
-                    qty_delta,
-                    reason,
-                    operator or "",
-                    str(batch_id),
-                    now_iso,
-                ),
-            )
-        await movements_tdb.commit()
-
-        async with batches_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                UPDATE prep_batches
-                SET remaining_qty = 0, status = 'discarded', updated_at = ?
-                WHERE id = ?
-                """,
-                (now_iso, batch_id),
-            )
-        await batches_tdb.commit()
-        return {
-            "success": True,
-            "batch_id": batch_id,
-            "remaining_qty": 0.0,
-            "status": "discarded",
-            "reason": reason,
-        }
-
-    async def undo_record(
-        self,
-        db,
-        batch_id: int,
-        operator: str = "",
-    ) -> Dict[str, Any]:
-        return await self.retire_batch(
-            db,
-            batch_id,
-            reason=UNDO_MOVEMENT_REASON,
-            operator=operator,
-        )
-
-    async def discard_batch(
-        self,
-        db,
-        batch_id: int,
-        operator: str = "",
-    ) -> Dict[str, Any]:
-        return await self.retire_batch(
-            db,
-            batch_id,
-            reason="discard",
-            operator=operator,
-        )
 
     async def get_current_plan(self, db, now: Optional[datetime] = None) -> Dict[str, Any]:
         now_iso = (now or datetime.now(CHINA_TZ)).isoformat()
@@ -1085,226 +795,6 @@ class PrepPlanService:
             "items": items,
             "missing_rules": [],
         }
-
-    async def update_batch(
-        self,
-        db,
-        batch_id: int,
-        remaining_qty: Optional[float] = None,
-        status: Optional[str] = None,
-        notes: Optional[str] = None,
-        operator: str = "",
-    ) -> Dict[str, Any]:
-        batches_tdb = db.table("prep_batches")
-        movements_tdb = db.table("prep_stock_movements")
-        now_iso = datetime.now(CHINA_TZ).isoformat()
-
-        async with batches_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                "SELECT * FROM prep_batches WHERE id = ? LIMIT 1",
-                (batch_id,),
-            )
-            current = await cursor.fetchone()
-        if not current:
-            raise KeyError("批次不存在")
-        current_dict = dict(current)
-
-        update_fields = []
-        update_values: List[Any] = []
-
-        if remaining_qty is not None:
-            new_qty = float(remaining_qty)
-            old_qty = float(current_dict["remaining_qty"] or 0)
-            delta = new_qty - old_qty
-            if abs(delta) > 1e-9:
-                async with movements_tdb.conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO prep_stock_movements (
-                            batch_id, prep_item_id, item_name, unit, movement_type, qty_delta,
-                            reason, operator, source_type, source_id, created_at
-                        ) VALUES (?, ?, ?, ?, 'adjust', ?, 'batch_update', ?, 'batch', ?, ?)
-                        """,
-                        (
-                            batch_id,
-                            current_dict.get("prep_item_id"),
-                            current_dict["item_name"],
-                            current_dict["unit"],
-                            delta,
-                            operator or "",
-                            str(batch_id),
-                            now_iso,
-                        ),
-                    )
-                await movements_tdb.commit()
-            update_fields.append("remaining_qty = ?")
-            update_values.append(new_qty)
-
-        if status is not None:
-            update_fields.append("status = ?")
-            update_values.append(status)
-
-        if notes is not None:
-            update_fields.append("notes = ?")
-            update_values.append(notes)
-
-        update_fields.append("updated_at = ?")
-        update_values.append(now_iso)
-        update_values.append(batch_id)
-
-        async with batches_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                f"UPDATE prep_batches SET {', '.join(update_fields)} WHERE id = ?",
-                tuple(update_values),
-            )
-            affected = cursor.rowcount
-        await batches_tdb.commit()
-        return {"success": True, "affected": affected}
-
-    async def list_movements(
-        self,
-        db,
-        item_name: Optional[str] = None,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        limit: int = 200,
-    ) -> Dict[str, Any]:
-        tdb = db.table("prep_stock_movements")
-        conditions = []
-        params: List[Any] = []
-        if item_name:
-            conditions.append("item_name = ?")
-            params.append(item_name)
-        if start_date:
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=CHINA_TZ)
-            conditions.append("created_at >= ?")
-            params.append(start_dt.isoformat())
-        if end_date:
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=CHINA_TZ) + timedelta(days=1)
-            conditions.append("created_at < ?")
-            params.append(end_dt.isoformat())
-        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-        async with tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                f"""
-                SELECT *
-                FROM prep_stock_movements
-                {where_clause}
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-                """,
-                tuple(params + [limit]),
-            )
-            rows = [dict(row) for row in await cursor.fetchall()]
-        return {"success": True, "items": rows, "count": len(rows)}
-
-    async def create_movement(
-        self,
-        db,
-        batch_id: int,
-        item_name: str,
-        movement_type: str,
-        qty_delta: float,
-        unit: str = "",
-        reason: str = "",
-        operator: str = "",
-        source_type: str = "",
-        source_id: str = "",
-    ) -> Dict[str, Any]:
-        allowed_types = {"produce", "discard", "adjust", "expire"}
-        if movement_type not in allowed_types:
-            raise ValueError(f"不支持的 movement_type: {movement_type}")
-        if movement_type == "produce" and qty_delta <= 0:
-            raise ValueError("produce 的 qty_delta 必须 > 0")
-        if movement_type in {"discard", "expire"} and qty_delta >= 0:
-            raise ValueError(f"{movement_type} 的 qty_delta 必须 < 0")
-
-        batches_tdb = db.table("prep_batches")
-        movements_tdb = db.table("prep_stock_movements")
-        now_iso = datetime.now(CHINA_TZ).isoformat()
-
-        async with batches_tdb.conn.cursor() as cursor:
-            await cursor.execute("SELECT * FROM prep_batches WHERE id = ? LIMIT 1", (batch_id,))
-            batch = await cursor.fetchone()
-        if not batch:
-            raise KeyError("批次不存在")
-        batch_dict = dict(batch)
-
-        async with movements_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO prep_stock_movements (
-                    batch_id, prep_item_id, item_name, unit, movement_type, qty_delta,
-                    reason, operator, source_type, source_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    batch_id,
-                    batch_dict.get("prep_item_id"),
-                    item_name,
-                    unit,
-                    movement_type,
-                    float(qty_delta),
-                    reason or "",
-                    operator or "",
-                    source_type or "",
-                    source_id or "",
-                    now_iso,
-                ),
-            )
-            movement_id = cursor.lastrowid
-        await movements_tdb.commit()
-
-        old_remaining = float(batch_dict["remaining_qty"] or 0)
-        new_remaining = old_remaining + float(qty_delta)
-        if new_remaining < 0:
-            new_remaining = 0.0
-
-        new_status = batch_dict["status"]
-        if new_remaining <= 0 and new_status in {"active", "near_expiry"}:
-            new_status = "active"  # MVP2: do not introduce used_up yet
-        if movement_type == "discard":
-            new_status = "discarded"
-        if movement_type == "expire":
-            new_status = "expired"
-
-        async with batches_tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                UPDATE prep_batches
-                SET remaining_qty = ?, status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (new_remaining, new_status, now_iso, batch_id),
-            )
-        await batches_tdb.commit()
-        return {
-            "success": True,
-            "movement_id": movement_id,
-            "remaining_qty": round(new_remaining, 2),
-            "status": new_status,
-        }
-
-    async def list_expiring_batches(self, db, within_hours: int = 4) -> Dict[str, Any]:
-        now_dt = datetime.now(CHINA_TZ)
-        end_dt = now_dt + timedelta(hours=within_hours)
-        tdb = db.table("prep_batches")
-        async with tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                SELECT *
-                FROM prep_batches
-                WHERE status IN ('active', 'near_expiry')
-                  AND remaining_qty > 0
-                  AND expires_at > ?
-                  AND expires_at <= ?
-                ORDER BY expires_at ASC
-                """,
-                (now_dt.isoformat(), end_dt.isoformat()),
-            )
-            rows = [dict(row) for row in await cursor.fetchall()]
-        return {"success": True, "items": rows, "count": len(rows)}
 
     async def get_accuracy(self, db, start_date: str, end_date: str) -> Dict[str, Any]:
         runs_tdb = db.table("prep_plan_runs")
