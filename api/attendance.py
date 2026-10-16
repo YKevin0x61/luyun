@@ -9,7 +9,12 @@
 班次）。它**没有第二套写排班的方式** —— 走的是排班服务层的单日覆盖
 （`SchedulingStore.set_day_override`，结果行来源 `override`），这里只做三件事：
 挑出那扇门、把那层的错误翻成人话、按排班既有惯例（`api/scheduling.py` 的
-`_scheduling_nudge`）广播**一人一条**的排班通知。手填列在票 05、封账在票 04。
+`_scheduling_nudge`）广播**一人一条**的排班通知。手填列在票 05。
+
+票 04 加的是**封账上月**（`POST /api/attendance/seal`）：超级管理员点一次，上一个自然月
+的存假结余就落进月度考勤台账（`services/attendance/store.py` 的 `AttendanceStore.seal`）。
+只封已经过完的月份，封过的月不再封；这一条**不广播 nudge** —— 它改的是管理端那张表自己
+的账，员工手机上没有任何东西跟着变。
 """
 
 from __future__ import annotations
@@ -80,6 +85,39 @@ _WRITE_DETAILS = {
 
 # 申请那两种说法（`pending_request` 的 `{}` 就是它）。
 _PENDING_WORDS = {"leave": "请假", "swap": "换班"}
+
+# 封账（票 04）的拒绝理由。带 `{}` 的那两条由 `_seal_error` 填**月份**：店长要知道
+# 自己点的到底是哪一个月，以及它为什么封不了。`not_migrated` 复用上面那一份文案
+# （缺的还是同一个 0027），所以这里只写封账自己的三条。
+_SEAL_DETAILS = {
+    "invalid_month": "月份格式应该是 YYYY-MM",
+    "month_not_finished": "封账只能封已经过完的月份：{} 还没过完，等它过完再封",
+    "already_sealed": "{} 已经封过账了：封过的月不再重算，也不用再封一次",
+}
+
+# 封过的月 = 这次的写入与台账里已经定稿的那一行**冲突**：409 比 400 诚实
+# （同逐日改格的 `pending_request`）。
+_SEAL_STATUS = {
+    "month_not_finished": 400,
+    "invalid_month": 400,
+    "already_sealed": 409,
+}
+
+
+def _seal_error(exc: AttendanceError) -> HTTPException:
+    """把封账的拒绝翻成一句能看懂的中文（票 04 验收 2/3）。
+
+    `{}` 由服务层放在 `args[0]` 的月份填，用 `replace` 而不是 `format`（同
+    `api/scheduling.py` 的 `_bad_request`）。没写文案的 code（`not_migrated`）退回
+    考勤那一层的通用出口 —— 缺表要说的是「去应用哪个迁移」，那句话只有一份。
+    """
+    raw = exc.args[0] if exc.args else ""
+    detail = _SEAL_DETAILS.get(exc.code) or _ERROR_DETAILS.get(exc.code, "这次封账没成")
+    if "{}" in detail:
+        detail = detail.replace("{}", str(raw) if raw and raw != exc.code else "这个月")
+    logger.info("封账被拒: code=%s", exc.code)
+    status = _SEAL_STATUS.get(exc.code) or _ERROR_STATUS.get(exc.code, 400)
+    return HTTPException(status_code=status, detail=detail)
 
 
 def _bad_request(exc: AttendanceError) -> HTTPException:
@@ -152,6 +190,40 @@ async def attendance_sheet(
         return await store.sheet()
     except AttendanceError as exc:
         raise _bad_request(exc) from exc
+
+
+class SealRequest(BaseModel):
+    """封账的输入：什么都不给 = 封**上一个自然月**（页面上那颗按钮打的就是这一条）。
+
+    `month` 是给「点名封某一个月」的调用方用的；当月与未来的月一律被拒（还没过完），
+    已经封过的月也一律被拒。字段有默认值，所以缺字段不会变成 pydantic 的英文 422。
+    """
+
+    month: Optional[str] = None
+
+
+@router.post("/seal")
+async def seal_month(
+    payload: Optional[SealRequest] = None,
+    db=Depends(get_db),
+    _session: str = Depends(require_session),
+) -> dict:
+    """把**已经过完的**某个自然月的存假结余写进月度考勤台账并定稿（票 04 / ADR 0113）。
+
+    不给 `month` 就是上一个自然月 —— 页面上那颗「封账上月」按钮的全部输入就这一条。
+    写下去的那一行（`closing_balance` + `sealed_at`）从此就是当月卡片上「上月存假」的
+    来源：之后再改上月的排班，封下的结余不跟着漂。
+
+    只封已经过完的月份（当月与未来 400）、封过的月不再封（409），那些理由都翻成中文
+    由 `_seal_error` 给。缺表（0027 没应用）照旧是一个点名脚本的 503。
+
+    **不广播 nudge**：封的是管理端这张表自己的账，员工手机上的班与假一个字都没变。
+    """
+    store = AttendanceStore(db)
+    try:
+        return await store.seal(payload.month if payload else None)
+    except AttendanceError as exc:
+        raise _seal_error(exc) from exc
 
 
 @router.put("/sheet/{employee_id}/{business_date}")

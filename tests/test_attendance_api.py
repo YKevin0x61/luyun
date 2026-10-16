@@ -178,6 +178,12 @@ def _edit(client, admin, employee_id, business_date, body):
     return client.put(f"/api/attendance/sheet/{employee_id}/{business_date}", json=body)
 
 
+def _seal(client, admin, body=None):
+    """以管理端会话封一次账：不给月份 = 封**上一个自然月**（页面上那颗按钮打的就是这一条）。"""
+    _as_admin(client, admin)
+    return client.post("/api/attendance/seal", json={} if body is None else body)
+
+
 def _staff_days(client, staff_session):
     """以**员工自己的** cookie 读他手机上的班（票 06 验收 5）。"""
     client.cookies.clear()
@@ -652,6 +658,24 @@ def _put_ledger_row(db, employee_id, month, **values):
     _run(db._conn.commit())
 
 
+def _ledger_row(db, employee_id, month):
+    """直接读台账里那一行（封账的**落库**证据：结余与封账时刻，造数通道之外只读一次）。
+
+    断言的主体仍然是接口返回值；这里只用来回答「库里那行到底是什么」—— 尤其是
+    「第二次封账有没有动它」与「别人写下的期初还在不在」这两件从响应上看不见的事。
+    """
+    async def _read():
+        cur = await db._conn.execute(
+            """SELECT * FROM attendance_ledger
+               WHERE employee_id = ? AND "month" = ?""",
+            (int(employee_id), month),
+        )
+        rows = await cur.fetchall()
+        return dict(rows[0]) if rows else None
+
+    return _run(_read())
+
+
 # ── 票 03 验收 1/2：实际出勤只数已过的日子，月例休按它折算 ──────────────────
 
 
@@ -1059,6 +1083,143 @@ def test_the_current_month_is_flagged_as_provisional(attendance_http):
     assert body["provisional"] is True
 
 
+# ══ 票 04：封账上月（下面这一整段都是票 04 加的） ═════════════════════════════
+#
+# 封账 = 把**已经过完的**某个自然月的存假结余写进月度考勤台账并定稿（`GLOSSARY.md`
+# 的「封账」、`docs/adr/0113`）。写的是**上一个自然月那一行**的 `closing_balance` +
+# `sealed_at`；当月那一位 `provisional` 一个字都不改 —— 当月永远只算不落库。
+# 判据全部从 HTTP 主缝进，库里那一行只在「响应上看不见的事」上用一次只读。
+
+
+def test_sealing_the_last_month_writes_the_balance_the_card_then_reads(attendance_http):
+    """验收 1/5：点一次封账，上月结余落库、带上封账时刻，当月卡片上的「上月存假」随即换成它。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    shifts = _shift_ids(db)
+    # 上月（2026-08，31 天）在可补记窗口里铺 7 天白班：出勤 7 → 例休 1 → 池 8，结余 8 − 31。
+    for day in range(25, 32):
+        _run(_scheduler(db).set_override(employee_id, f"2026-08-{day:02d}", shift_id=shifts["白班"]))
+    # 上月那一行本来就有**人工期初**（票 03 的入口），本月那一行是人工写的「上月末余额」。
+    _put_ledger_row(db, employee_id, "2026-08", opening_balance=2.0)
+    _put_ledger_row(db, employee_id, "2026-09", opening_balance=4.5)
+
+    before = _sheet(client, admin)
+    # 还没封账：卡片上的「上月存假」来自本月那一行的人工期初，页面也还没有封账时刻。
+    assert _leave(before, employee_id)["previous_balance"] == 4.5
+    assert before["provisional"] is True
+    assert before["previous_month"] == {"month": "2026-08", "sealed_at": None}
+
+    resp = _seal(client, admin)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["month"] == "2026-08"
+    assert body["sealed_at"]
+    assert body["sealed_employees"] >= 1
+
+    row = _ledger_row(db, employee_id, "2026-08")
+    # 封账写的是**结余与封账时刻**：期初 2 参与了这个月的算式，但一个字都没被改掉。
+    assert row["opening_balance"] == 2.0
+    assert row["closing_balance"] == -21.0
+    assert row["sealed_at"] == body["sealed_at"]
+
+    after = _sheet(client, admin)
+    assert _leave(after, employee_id)["previous_balance"] == -21.0
+    # 封账行看得出是什么时候封的（验收 5）：时刻随当月这张表一起下发。
+    assert after["previous_month"] == {"month": "2026-08", "sealed_at": body["sealed_at"]}
+    # 当月照旧是暂算值：封的是上月，不是这个月。
+    assert after["provisional"] is True
+
+
+def test_sealing_refuses_a_month_that_has_not_finished(attendance_http):
+    """验收 2：当月（与未来）封不了，被拒且中文说得清；一个字都没写下去。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+
+    for month in (MONTH, "2026-10"):  # 当月与未来的月都还没过完
+        refused = _seal(client, admin, {"month": month})
+        assert refused.status_code == 400, refused.text
+        assert "过完" in refused.json()["detail"]
+
+    bad = _seal(client, admin, {"month": "2026-8"})
+    assert bad.status_code == 400, bad.text
+    assert "YYYY-MM" in bad.json()["detail"]
+
+    # 三次都被拒 = 台账里一行都没多出来。
+    assert _ledger_row(db, employee_id, MONTH) is None
+
+
+def test_sealing_a_month_twice_is_refused_and_the_written_row_stands(attendance_http):
+    """验收 3：封过的月再封一次被拒，且已写下的那一行一个字都不动。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    shifts = _shift_ids(db)
+    _run(_scheduler(db).set_override(employee_id, "2026-08-25", shift_id=shifts["白班"]))
+
+    assert _seal(client, admin).status_code == 200
+    stamped = _ledger_row(db, employee_id, "2026-08")
+    assert stamped["sealed_at"]
+    assert stamped["closing_balance"] == -30.0  # 出勤 1 天：池 1 − 31 天
+
+    again = _seal(client, admin)
+    assert again.status_code == 409, again.text
+    assert "封过" in again.json()["detail"]
+
+    # 上月的排班也改了（真重算会是另一个数）：封下的那一行仍然不动。
+    _run(_scheduler(db).set_override(employee_id, "2026-08-26", shift_id=shifts["白班"]))
+    assert _seal(client, admin).status_code == 409
+
+    after = _ledger_row(db, employee_id, "2026-08")
+    assert after["sealed_at"] == stamped["sealed_at"]
+    assert after["closing_balance"] == stamped["closing_balance"]
+
+
+def test_a_sealed_balance_does_not_move_when_last_months_schedule_changes(attendance_http):
+    """验收 4：封账之后再去改上月的排班，封下的结余不变（当月卡片读的是那一行）。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    shifts = _shift_ids(db)
+    for day in range(25, 32):
+        _run(_scheduler(db).set_override(employee_id, f"2026-08-{day:02d}", shift_id=shifts["白班"]))
+
+    assert _seal(client, admin).status_code == 200
+    sealed = _leave(_sheet(client, admin), employee_id)["previous_balance"]
+    assert sealed == -23.0
+
+    # 封完再改上月的排班（可补记窗口里真改得动）：把两天改成休、另一天换个班次。
+    assert _edit(client, admin, employee_id, "2026-08-26", {"is_rest": True}).status_code == 200
+    assert (
+        _edit(client, admin, employee_id, "2026-08-27", {"shift_id": shifts["夜班"]}).status_code
+        == 200
+    )
+
+    assert _leave(_sheet(client, admin), employee_id)["previous_balance"] == sealed
+
+
+def test_sealing_is_the_admin_door(attendance_http):
+    """验收 6：匿名与员工会话都被拒 —— 封账是管理端那一档的事。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    staff_session = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+
+    client.cookies.clear()
+    anonymous = client.post("/api/attendance/seal", json={})
+    assert anonymous.status_code == 401
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    denied = client.post("/api/attendance/seal", json={})
+    assert denied.status_code == 401
+    assert denied.json()["detail"] == "需要登录"
+
+    # 两次都被拒 = 台账里没有封账行。
+    assert _ledger_row(db, employee_id, "2026-08") is None
+    _as_admin(client, admin)
+
+
 # ── 票 03 验收 8：加成性迁移 / 进表清单 / 管理端只读 / 唯一键 ────────────────
 
 
@@ -1417,3 +1578,33 @@ def test_half_rest_does_not_touch_the_hygiene_duty(attendance_http):
         shifts["白班"],
         None,
     )
+
+
+def test_sealing_the_last_month_also_folds_half_rest_at_half_a_day(attendance_http):
+    """验收 4 的另一半（与票 04 的接线）：**封账那条算式**也按 0.5 天折算。
+
+    「休半天」只能在**当月**设（写口那一道闸），所以这一天是在它还叫「当月」的时候标上
+    的 —— 真实流程正是这样：8 月 31 日标上半天休，9 月封 8 月的账。这里用一个「8 月的
+    钟」走同一扇门，而不是往库里手写标志；封账仍走 9 月这张表的 HTTP 口。
+
+    期望值：8 月铺 7 天班、其中 1 天标半天休 → 实际出勤 6.5 → 例休 1 → 池 7.5 →
+    结余 7.5 − 31 = **−23.5**。当整天算会是 −23（8 − 31），当 0 天算会是 −24
+    （6 + 1 − 31）—— 三个数互不相等，所以这一个数认得出「0.5」。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    shifts = _shift_ids(db)
+    for day in range(25, 32):
+        _run(
+            _scheduler(db).set_override(
+                employee_id, f"2026-08-{day:02d}", shift_id=shifts["白班"]
+            )
+        )
+    august = datetime(2026, 8, 31, 10, 0, tzinfo=CHINA_TZ)
+    _run(AttendanceStore(db, now=lambda: august).set_half_rest(employee_id, "2026-08-31", True))
+
+    resp = _seal(client, admin)
+
+    assert resp.status_code == 200, resp.text
+    assert _ledger_row(db, employee_id, "2026-08")["closing_balance"] == -23.5
