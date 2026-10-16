@@ -109,10 +109,15 @@ export function shiftNameDefault(person) {
   return landed ? `默认：当月最多 ${landed}` : '这个月还没有排班'
 }
 
-/** 手填的四项那一块（票 05）在卡片上的摆法：标签 + 台账里的值（空 = `—`）。 */
+/** 手填的四项那一块（票 05）在卡片上的摆法：标签 + **台账里存的那一列**（空 = `—`）。
+ *
+ *  「本月班次」念的是 `shift_name_stored`（台账的原始列，没填过就是 `null` → `—`），
+ *  **不是** `shift_name`：那是读侧的回填值（没填过时是当月众数），导出件用它，
+ *  但回显拿它当「填过的值」就是在替店长认账。
+ */
 export function manualStats(person) {
   return [
-    { label: '本月班次', value: person?.shift_name },
+    { label: '本月班次', value: person?.shift_name_stored },
     { label: '是否住宿', value: person?.lodging },
     { label: '借调门店', value: person?.borrowed_store },
     { label: '是否离职', value: person?.resigned },

@@ -102,7 +102,10 @@ function employees() {
     // 四个**手填列**（票 05）原样带过来：它们是台账那一行上的值，页面只摆出来。
     // 单独列一遍是为了让「这一页认哪几个键」看得见 —— 手滑写错一个键名，输入框会
     // 一直空着（`manualValue` 读不到就是空），看起来像「服务端没给」。
+    // `shift_name` 是**读侧的回填值**（没填过时是当月众数，导出件 A 列用它）；
+    // 输入框绑的是 `shift_name_stored`（台账的原始列，没填过就是 `null` → 空格子）。
     shift_name: person.shift_name,
+    shift_name_stored: person.shift_name_stored,
     default_shift_name: person.default_shift_name,
     lodging: person.lodging,
     borrowed_store: person.borrowed_store,
@@ -231,6 +234,14 @@ function leaveStats(person) {
 const savingManual = ref(0)
 const manualError = ref(null) // { employee_id, text } | null
 
+/** 「借调门店」与历史样表的**唯一**一处有意偏差（收尾修复 ⑥）：样表把它写在**某一天**的
+ *  格子上（`城光荟` / `同和` / `调东莞`），而本版的台账是按月记的、没有日期可落 —— 所以
+ *  导出件里**不落进日格**（这一列只留在卡片上）。要 1:1 就得给这一项加日期，那是另开票的事。
+ *
+ *  这处说明**必须留着**，但不必占三行可视小字（那三行会把一排四个输入口拽得参差不齐）：
+ *  它压在输入框的 `title` 上，悬停可见。 */
+const BORROWED_STORE_NOTE = '历史样表写在某一天的格子上；本版台账按月记，不落进导出件的日格'
+
 /** 四个手填列的输入口（票 05）。**四项一起存**：空着的项发 `null`（清空存 NULL，与从没
  *  填过同义）。逐项自动存会让「清空」在打字的每一拍都发一次请求、也会把没动的那几项
  *  顺手覆盖成空，所以这里只按钮存一次。
@@ -238,18 +249,29 @@ const manualError = ref(null) // { employee_id, text } | null
  *  字段名 ↔ 台账列名（`0027_attendance_ledger.sql`）的对应就这一处：写错了服务端不认
  *  那一列（`model_fields_set` 只认这四个），页面上看到的是「没存进去」。
  *
- *  「本月班次」那一格的提示语说的是**默认**：台账里没填过（或清空了）时，卡片与导出的表
- *  用的是这条默认（当月众数）—— 所以「空着」有含义，店长要看得见它。 */
+ *  `key` 是**发出去的那一位**（服务端只认这四个名字）；`stored` 是输入框**读**的那一位。
+ *  两者只有「本月班次」不同：写的是 `shift_name`（台账列），读的是 `shift_name_stored`
+ *  —— 台账里的原始值，没填过就是 `null`。**不能读 `shift_name`**：读侧没填过时会把它
+ *  回填成当月众数，输入框显示的就是那条默认值，店长只改「是否住宿」点一下「存这四项」
+ *  就把这条默认**固化**成他定的值了（以后再改排班也不跟着变）。默认值只写在提示语里。
+ *
+ *  `hint` 说的就是那份**默认**（当月众数）：空着有含义，店长要看得见用的是哪条。 */
 const MANUAL_INPUTS = [
-  { key: 'shift_name', label: '本月班次', hint: (person) => shiftNameDefault(person) },
+  {
+    key: 'shift_name',
+    stored: 'shift_name_stored',
+    label: '本月班次',
+    hint: (person) => shiftNameDefault(person),
+  },
   { key: 'lodging', label: '是否住宿', hint: () => '写「是」或「否」' },
   { key: 'borrowed_store', label: '借调门店', hint: () => '如「调东莞」' },
   { key: 'resigned', label: '是否离职', hint: () => '写「是」或「否」' },
 ]
 
-/** 输入框里现在是什么：服务端那一份，读出来是空就给空串（受控输入）。 */
+/** 输入框里现在是什么：服务端那一份，读出来是空就给空串（受控输入）。
+ *  `stored` 缺席时读的就是 `key` 那一位（那三项没有读写的分别）。 */
 function manualValue(person, field) {
-  const value = person[field.key]
+  const value = person[field.stored || field.key]
   return value === null || value === undefined ? '' : String(value)
 }
 
@@ -342,6 +364,11 @@ function openingErrorOn(employeeId) {
     : ''
 }
 
+/** 封账那句确认（B 批返工 ⑦）：封账**不可逆** —— 写的是上月结余，封过不再重算，
+ *  所以点下去先问一次，不能只靠按钮的颜色挡人。一句话说清它写的是什么、为什么问了。 */
+const SEAL_CONFIRM_TEXT =
+  '封账会把上月的存假结余定下来：封过就不再重算，之后改排班或加班也不再影响它。要继续吗？'
+
 /** 封账上月（票 04）：封的是**上一个自然月**，接口上不给月份 —— 按钮只有一个动作。
  *
  *  服务端拒绝时（当月封不了、已经封过、缺迁移）把理由原样写出来；成功之后自己重拉一次
@@ -349,6 +376,7 @@ function openingErrorOn(employeeId) {
  *  这一步**不广播 nudge**（员工手机上的班与假一个字都没变），所以只能自己拉。 */
 async function sealLastMonth() {
   if (sealing.value) return
+  if (!window.confirm(SEAL_CONFIRM_TEXT)) return
   sealing.value = true
   sealError.value = ''
   try {
@@ -404,7 +432,7 @@ onMounted(() => {
 <template>
   <div class="hygiene-admin attendance-page">
     <header class="aTop">
-      <div>
+      <div class="aIntro">
         <p class="aKicker">人事</p>
         <h1>考勤表</h1>
         <p class="aSub">
@@ -431,9 +459,10 @@ onMounted(() => {
           回到月历
         </button>
         <!-- 导出当月这张表（票 08）：版式与店长用了两年的那份《厨房排班表》一致。
-             文件名由服务端在响应头里给（`考勤表-YYYY-MM.xlsx`），这一页不拼。 -->
+             文件名由服务端在响应头里给（`考勤表-YYYY-MM.xlsx`），这一页不拼。
+             它是这一页的主动作（B 批返工 ⑦），给主按钮样式。 -->
         <button
-          class="btn"
+          class="btn btn-primary"
           type="button"
           :disabled="exporting"
           @click="exportSheet"
@@ -491,24 +520,32 @@ onMounted(() => {
             class="aDay"
             :class="[
               `is-${cell.state || 'future'}`,
-              { 'is-today': cell.is_today, 'is-half': cell.state === 'work' && cell.half_rest },
+              {
+                'is-today': cell.is_today,
+                'is-half': cell.state === 'work' && cell.half_rest,
+                'is-editing': editingDate === cell.business_date,
+              },
             ]"
             :title="cell.business_date"
           >
             <!-- 还没到的日子是一块**死的**格子（不渲染任何控件）：验收 45 说的是
                  「不能编辑」，能点一下再弹一句拒绝不算数。 -->
-            <select
-              v-if="editingDate === cell.business_date"
-              class="aDayPick"
-              :aria-label="`改 ${person.name} ${cell.business_date} 的班`"
-              :value="cell.shift_id === null || cell.shift_id === undefined ? 'rest' : String(cell.shift_id)"
-              @change="pick(person, cell, $event)"
-            >
-              <option v-for="shift in person.shifts" :key="shift.id" :value="String(shift.id)">
-                {{ shift.name }}
-              </option>
-              <option value="rest">休</option>
-            </select>
+            <template v-if="editingDate === cell.business_date">
+              <!-- 编辑态那一格**独占整行**（B 批返工 ⑥）：日期数字照旧摆在最前面，
+                   不然展开之后在改哪一天看不出来。 -->
+              <i class="aDayNum">{{ cell.day }}<em v-if="cell.is_today" class="aTodayMark">今</em></i>
+              <select
+                class="aDayPick"
+                :aria-label="`改 ${person.name} ${cell.business_date} 的班`"
+                :value="cell.shift_id === null || cell.shift_id === undefined ? 'rest' : String(cell.shift_id)"
+                @change="pick(person, cell, $event)"
+              >
+                <option v-for="shift in person.shifts" :key="shift.id" :value="String(shift.id)">
+                  {{ shift.name }}
+                </option>
+                <option value="rest">休</option>
+              </select>
+            </template>
             <button
               v-else-if="editable(cell)"
               class="aDayBtn"
@@ -516,11 +553,11 @@ onMounted(() => {
               :disabled="Boolean(savingDate)"
               @click="openEditor(cell)"
             >
-              <i class="aDayNum">{{ cell.day }}</i>
+              <i class="aDayNum">{{ cell.day }}<em v-if="cell.is_today" class="aTodayMark">今</em></i>
               <b class="aDayText">{{ cellLabel(person, cell) }}</b>
             </button>
             <template v-else>
-              <i class="aDayNum">{{ cell.day }}</i>
+              <i class="aDayNum">{{ cell.day }}<em v-if="cell.is_today" class="aTodayMark">今</em></i>
               <b class="aDayText">{{ cellLabel(person, cell) }}</b>
             </template>
             <!-- 半天休（票 07 / ADR 0114）：那一格**有班次**（上班那一态）时才谈得上
@@ -562,20 +599,35 @@ onMounted(() => {
                 :data-field="field.key"
                 :aria-label="`${person.name || ''} 的${field.label}`"
                 :value="manualValue(person, field)"
+                :title="field.key === 'borrowed_store' ? BORROWED_STORE_NOTE : undefined"
               />
               <small class="aManualHint">{{ field.hint(person) }}</small>
-              <!-- 「借调门店」与历史表的**唯一**一处偏差（收尾修复 ⑥）：样表是把它写在
-                   **某一天**的格子上（`城光荟` / `同和` / `调东莞`），而本版的台账是按月记的、
-                   没有日期可落 —— 所以导出件里**不落进日格**（这一列只留在卡片上）。
-                   要 1:1 就得给这一项加日期，那是另开票的事。 -->
-              <small v-if="field.key === 'borrowed_store'" class="aManualNote">
-                历史样表写在某一天的格子上；本版台账按月记，不落进导出件的日格
-              </small>
             </label>
           </div>
           <!-- 人工期初（收尾修复 ② / 故事 35）：**上线当月手工给一次**的「上月末余额」，
                写的是月度台账**本月那一行**的 `opening_balance`（票 03 的裁定）。与服务端
-               那条月级写口同一扇门，但自己一颗按钮：它是一次性的账，不是日常那一格。 -->
+               那条月级写口同一扇门，但自己一颗按钮：它是一次性的账，不是日常那一格。
+               B 批返工 ③：它排在**回显与「存这四项」之后** —— 那两者是一对（存了什么、存
+               在下边那颗按钮上），中间岔进期初这一块，店长会以为这一格也归「存这四项」管。 -->
+          <!-- 「这一块现在是什么」由服务端那一份说了算（重拉之后写的就是最新的）。 -->
+          <p class="aManualNow">
+            <span v-for="stat in manualStats(person)" :key="stat.label" class="aManualNowOne">
+              <i>{{ stat.label }}</i><b>{{ manualText(stat.value) }}</b>
+            </span>
+          </p>
+          <div class="aManualFoot">
+            <button
+              class="btn btn-sm btn-primary aSave"
+              type="button"
+              :disabled="savingManual === person.id"
+              @click="saveManual(person, $event)"
+            >
+              存这四项
+            </button>
+            <small v-if="manualErrorOn(person.id)" class="aManualErr" role="alert">
+              {{ manualErrorOn(person.id) }}
+            </small>
+          </div>
           <div class="aOpening">
             <label class="aOpeningField">
               <span class="aOpeningLabel">期初存假（上月结转）</span>
@@ -599,25 +651,6 @@ onMounted(() => {
             </button>
             <small v-if="openingErrorOn(person.id)" class="aOpeningErr" role="alert">
               {{ openingErrorOn(person.id) }}
-            </small>
-          </div>
-          <!-- 「这一块现在是什么」由服务端那一份说了算（重拉之后写的就是最新的）。 -->
-          <p class="aManualNow">
-            <span v-for="stat in manualStats(person)" :key="stat.label" class="aManualNowOne">
-              <i>{{ stat.label }}</i><b>{{ manualText(stat.value) }}</b>
-            </span>
-          </p>
-          <div class="aManualFoot">
-            <button
-              class="btn btn-sm aSave"
-              type="button"
-              :disabled="savingManual === person.id"
-              @click="saveManual(person, $event)"
-            >
-              存这四项
-            </button>
-            <small v-if="manualErrorOn(person.id)" class="aManualErr" role="alert">
-              {{ manualErrorOn(person.id) }}
             </small>
           </div>
         </div>
@@ -645,15 +678,29 @@ onMounted(() => {
    新文件在设计护栏里按 strict 处理（`__tests__/tokenDebt.json` 的棘轮只认存量，
    `src/styles/__tests__/designGuard.test.js` 盯着），写兼容层的 `--hy-*` 或不透明色值会红。 */
 .attendance-page { padding: 18px 16px 40px; max-width: 860px; margin: 0 auto; }
-.aTop { display: flex; align-items: flex-start; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+/* 顶部那一行（B 批返工 ①）：手机上三颗按钮的 `flex: none` 会吃掉约 287px，不换行就把
+   标题与说明挤成一条竖排的字（「考勤 / 表」）。照人事组的节假日日历页（`.hTop`）写：
+   **允许换行**；标题块给一个 `flex-basis`，否则它的 max-content 是整段说明、宽屏也会
+   把按钮组顶到第二行去；按钮组自己也能换行，窄屏就整行落到标题下面。 */
+.aTop {
+  display: flex; align-items: flex-start; gap: var(--sp-3); flex-wrap: wrap;
+  margin-bottom: var(--sp-4);
+}
+.aIntro { flex: 1 1 320px; min-width: 0; }
 .aTop h1 { margin: 2px 0 var(--sp-1); font-size: var(--fs-20); color: var(--ink); }
 .aKicker { margin: 0; font-size: var(--fs-11); letter-spacing: var(--ls-4); color: var(--ink-faint); }
 .aSub { margin: 0; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
 .aTop .btn { margin-left: auto; flex: none; }
 /* 封账（票 04）与「回到月历」并排在右边：回执是一句话、没封过时是一颗按钮。
    `.aTop .btn` 那个 `margin-left: auto` 是给「header 里只有一颗按钮」写的，
-   包进这一行之后由这一行的 `margin-left: auto` 顶上，里面的按钮不再各自外推。 */
-.aActions { display: flex; align-items: center; gap: var(--sp-2); margin-left: auto; flex: none; }
+   包进这一行之后由这一行的 `margin-left: auto` 顶上，里面的按钮不再各自外推。
+   **能缩、能换行**（B 批返工 ①）：这一组最宽的时候是封账回执那句话 + 两颗按钮（约 420px），
+   `flex: none` 会让它整条顶出 390px 的屏幕（实测溢出到 438px）；`min-width: 0` 解开
+   flex 的 `auto` 下限，窄屏就在这一组内部折成两行，右对齐。 */
+.aActions {
+  display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end;
+  gap: var(--sp-2); margin-left: auto; flex: 0 1 auto; min-width: 0;
+}
 .aTop .aActions .btn { margin-left: 0; }
 .aSealed { margin: 0; font-size: var(--fs-12); color: var(--ink-dim); }
 .aHint, .aEmpty { margin: 0; font-size: var(--fs-13); color: var(--ink-dim); }
@@ -670,11 +717,19 @@ onMounted(() => {
 }
 .aCard {
   margin-bottom: var(--sp-4); padding: var(--sp-4); border: 1px solid var(--line);
-  border-radius: var(--r-3); background: var(--surface-1);
+  /* 圆角与节假日日历页的卡片一致（`--r-2`，B 批返工 ⑧）：同一个人事组里两张卡不该
+     一个 16px 一个 12px。 */
+  border-radius: var(--r-2); background: var(--surface-1);
 }
 .aCard-hd { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-2); }
-.aName { font-size: var(--fs-14); color: var(--ink); }
+/* 长名字不许把「待补」那颗 pill 挤出卡片（B 批返工 ⑧）：名字自己截断、
+   `min-width: 0` 让它在 flex 里真的能缩下去（默认 `min-width: auto` 会顶住）。 */
+.aName {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-14); color: var(--ink);
+}
 .aTodo {
+  flex: none;
   padding: 1px var(--sp-2); border-radius: var(--r-full); font-size: var(--fs-11);
   color: var(--warn); border: 1px solid var(--warn); background: transparent;
 }
@@ -694,6 +749,9 @@ onMounted(() => {
   cursor: default;
 }
 .aDayNum { font-family: var(--font-mono); font-size: var(--fs-11); font-style: normal; color: var(--ink-faint); }
+/* 「今天」的第二个记号（B 批返工 ②）：颜色不是唯一线索，格子里那个数字后面跟一个
+   「今」字。它跟日期数字同一行，格子高度不变。 */
+.aTodayMark { margin-left: 2px; font-style: normal; color: var(--accent); }
 .aDayText { font-size: var(--fs-11); font-weight: 500; color: var(--ink-dim); }
 /* 能点的那一格是一颗按钮，但长得跟别的格子一样：卡片是 30 个格子，多一层按钮边框会吵。 */
 .aDayBtn {
@@ -732,7 +790,20 @@ onMounted(() => {
 .aDay.is-todo .aDayText { color: var(--warn); }
 /* 今天之后：**留空**，连边框都不给 —— 一眼看得出那一片还没发生。 */
 .aDay.is-future { border-color: transparent; }
-.aDay.is-today { outline: 1px solid var(--warn); outline-offset: 1px; }
+/* 「今天」（B 批返工 ②）：描边走 `--accent`。原先它与「待补」同用 `--warn`，而「今天」
+   没有任何文字标记 —— 两者在卡片上分不开。琥珀色从此只归「待补」，今天的第二重标记
+   是格子里那个「今」字（`--accent` 也用在它身上）。 */
+.aDay.is-today { outline: 1px solid var(--accent); outline-offset: 1px; }
+.aDay.is-today .aDayNum { color: var(--ink); font-weight: 700; }
+/* 就地编辑（票 06/07，B 批返工 ⑥）：被点的那一格**独占整行** —— 43px 宽的格子里塞不下
+   一个班次下拉加一颗「休半天」，硬塞会把那一行撑到 ~55px、整张卡跟着跳。独占一行之后
+   两颗控件横着摆，这一行反而比别的行矮，卡片一共只多出一行的高度。 */
+.aDay.is-editing {
+  grid-column: 1 / -1; flex-direction: row; justify-content: center; gap: var(--sp-2);
+  border-color: var(--line-strong);
+}
+.aDay.is-editing .aDayPick { width: auto; max-width: none; }
+.aDay.is-editing .aHalfBtn { width: auto; padding: 1px var(--sp-2); }
 /* 未审批的加班 / 补钟（票 03 / 故事 14）：**只标色**，数不进净时长。 */
 .aStat.is-pending .aNet { color: var(--warn); }
 .aPending {
@@ -769,12 +840,8 @@ onMounted(() => {
 .aManualFoot { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); }
 .aManualFoot .aSave { flex: none; }
 .aManualErr { font-size: var(--fs-11); color: var(--danger-bright); }
-/* 「借调门店」旁边那处与历史表的偏差（收尾修复 ⑥）：一行小字，说清它为什么不进导出件。
-   宽度收窄一点，免得把那一排四个输入口挤散。 */
-.aManualNote {
-  margin: 2px 0 0; max-width: 140px; font-size: var(--fs-11); line-height: 1.5;
-  color: var(--ink-faint);
-}
+/* 「借调门店」那处与历史表的偏差（收尾修复 ⑥）现在挂在输入框的 `title` 上（见
+   `BORROWED_STORE_NOTE`）—— 悬停可见，不占三行可视小字把这一排输入口拽散。 */
 /* 人工期初（收尾修复 ②）：上线当月手工给一次的那一位，自己一颗按钮（见 `saveOpening`）。 */
 .aOpening {
   display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--sp-2);
