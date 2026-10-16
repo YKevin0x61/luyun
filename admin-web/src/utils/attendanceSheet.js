@@ -134,6 +134,45 @@ export function sealedAtText(value) {
   return match ? `${match[1]} ${match[2]}` : text
 }
 
+/** 期末存假（本月剩余，票 09）那一格旁边那句话：「系统建议」是**公式算出来的那个数**
+ *  （`leave.balance_computed`），输入框绑的是台账里的原始值（`closing_balance_stored`）
+ *  —— 两个不一致时，店长要一眼看得出当前这个数是他填的还是系统算的。
+ *
+ *  填过（`balance_is_manual`）时把「你填的」（有效值）与建议并排说清；老载荷没给这几位
+ *  时给空串，不编一个数字出来。 */
+export function closeSuggestionText(leave) {
+  if (!leave) return ''
+  const computed = leave.balance_computed
+  if (computed === null || computed === undefined) return ''
+  const suggestion = `系统建议：${formatDays(computed)}`
+  if (!leave.balance_is_manual) return suggestion
+  // 拼在一起时把冒号去掉，否则会念成「…，系统建议：−27 天」（逗号与冒号撞在一起）。
+  const told = `系统建议 ${formatDays(computed)}`
+  return `你填的是 ${formatDays(leave.balance)}，${told}`
+}
+
+/** 「这个月（卡片上这一份表）是不是已经封账」。封账之后**期末那一格**锁定：两个输入框
+ *  都禁用，并写清「这个月已经封账，结余定稿」（票 09 验收）。
+ *
+ *  判据按「服务端下发的封账信息**优先**」取：顶层 / 本月那一行 / 卡片上的 `sealed_at`
+ *  任何一种给了值就算封（后端把这一位放在哪一层都接得住）。
+ *
+ *  **降级**：本仓库这一版的服务端载荷里**没有**「当月是否已封账」这一位
+ *  （`services/attendance/store.py` 的 `sheet()` 只给 `previous_month.sealed_at`），
+ *  于是这一位缺席时退回用 `previous_month.sealed_at` —— 本页只显示当月，而封账封的是
+ *  **已经过完的**月，所以「上月封过账」在本页上就是「这一个月的结余已经定稿」。
+ *  后端补上当月那一位之后，这段降级自动不再生效（优先级在它前面）。
+ *
+ *  为什么非要用这位字段：这一页是**当月**表，`previous_month.sealed_at` 说的是上个月，
+ *  拿它当判据是这次实现里唯一一处语义近似 —— 已在报告里点名。 */
+export function isMonthSealed(sheet) {
+  if (!sheet) return false
+  if (sheet.sealed_at) return true
+  const rows = Array.isArray(sheet.employees) ? sheet.employees : []
+  if (rows.some((row) => row && row.sealed_at)) return true
+  return Boolean(sheet.previous_month && sheet.previous_month.sealed_at)
+}
+
 /** 上月封账那一句（票 04）：「2026-08 已封账（2026-09-24 10:00）」。
  *
  *  入参是服务端下发的 `previous_month`（`{month, sealed_at}`）。还没封账 / 老载荷没有
