@@ -187,11 +187,11 @@ def _write_error(exc: SchedulingError) -> HTTPException:
             filled = str(raw) if raw and raw != exc.code else "？"
         detail = detail.replace("{}", filled)
     logger.info("逐日改格被拒: code=%s", exc.code)
+    # 状态码优先查**与月级写口共用**的那张表（`unknown_employee` = 404、`not_migrated` = 503）——
+    # 同一个 code 在同一个模块里只该有一种状态码；表里没有的才落回「参数不合法 = 400」。
     # 那天还有未决申请 = 这次的写入与另一条请求**冲突**：409 比 400 诚实
     # （`spec.md` 的 Testing Decisions 也点的是 409）。
-    status = 409 if exc.code == "pending_request" else 400
-    if exc.code == "not_migrated":
-        status = 503
+    status = _ERROR_STATUS.get(exc.code) or (409 if exc.code == "pending_request" else 400)
     return HTTPException(status_code=status, detail=detail)
 
 
