@@ -28,10 +28,16 @@
  *
  * 票 04 加了**封账上月**那颗按钮：点一次就把上一个自然月的存假结余定下来（写进月度考勤
  * 台账），卡片上的「上月存假」随即改成结转来的那个数，按钮的位置换成一句「某月已于某时
- * 封账」的回执。当月照旧是暂算值 —— 封的是上月。手填列（票 05）与导出（票 08）各有
- * 自己的票。
+ * 封账」的回执。当月照旧是暂算值 —— 封的是上月。
  *
- * 这一页只算当月：没有月份选择器、没有导出按钮。
+ * 票 05 往每张卡上加的是**四个手填列**（本月班次 / 是否住宿 / 借调门店 / 是否离职）：
+ * 系统里没有这几项，填一次存进月度考勤台账，只进卡片与**导出件**。
+ *
+ * 票 08 加了**导出 .xlsx** 那颗按钮：`GET /api/attendance/sheet.xlsx` 直接把工作簿下发
+ * （服务端投影，不落服务器），文件名由响应头带回来（`考勤表-YYYY-MM.xlsx`）。这一页
+ * 自己不拼文件名、也不碰工作簿内容。
+ *
+ * 这一页只算当月：没有月份选择器。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -297,6 +303,28 @@ async function load() {
   }
 }
 
+/** 正在等导出件（票 08）：只是按钮上那句「导出中…」，不挡页面上的别的动作。 */
+const exporting = ref(false)
+const exportError = ref('')
+
+/** 一键导出当月考勤表（票 08）：一条 GET，服务端把工作簿直接下发。
+ *
+ *  文件名由**响应头**（`Content-Disposition`）带回来 —— 这一页不拼 `考勤表-YYYY-MM.xlsx`，
+ *  否则页面上的月份与服务端算的月份会各说各话。`api.download` 会触发浏览器的保存对话框，
+ *  失败（401 / 缺表 503）时把理由写出来，页面不装作导出成功了。 */
+async function exportSheet() {
+  if (exporting.value) return
+  exporting.value = true
+  exportError.value = ''
+  try {
+    await api.download('/api/attendance/sheet.xlsx')
+  } catch (err) {
+    exportError.value = err.message || '这个月的考勤表没导出来'
+  } finally {
+    exporting.value = false
+  }
+}
+
 onMounted(() => {
   document.title = workbenchDocumentTitle('考勤表')
   load()
@@ -332,12 +360,23 @@ onMounted(() => {
         <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">
           回到月历
         </button>
+        <!-- 导出当月这张表（票 08）：版式与店长用了两年的那份《厨房排班表》一致。
+             文件名由服务端在响应头里给（`考勤表-YYYY-MM.xlsx`），这一页不拼。 -->
+        <button
+          class="btn"
+          type="button"
+          :disabled="exporting"
+          @click="exportSheet"
+        >
+          {{ exporting ? '导出中…' : '导出这个月' }}
+        </button>
       </div>
     </header>
 
     <p v-if="state === 'loading'" class="aHint">正在读这个月的考勤表…</p>
     <p v-if="state === 'error' && errorText" class="aErr" role="alert">{{ errorText }}</p>
     <p v-if="sealError" class="aErr" role="alert">{{ sealError }}</p>
+    <p v-if="exportError" class="aErr" role="alert">{{ exportError }}</p>
 
     <!-- 卡片这一棵**不进 `v-if/v-else`**（用 `v-show` 藏）：它是改完一格要立刻重画的那
          一棵，而重挂一棵 `v-else` 子树会让里面的格子停在旧值上（实测：整页重新挂载的

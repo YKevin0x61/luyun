@@ -13,6 +13,10 @@ redis>=5,<9
 # 或做数据分析（pandas，会连带拉回 numpy）再按需加回。
 # 注意：更新作业走 `pip install -r requirements.txt`（不卸载），所以**老机器不会自动瘦身**，
 # 只有新装 / 新建 venv 才省得下这份体积。
+# 2026-10-16 按上面那句把 **openpyxl 单独**加回来：「考勤表」页的「一键导出 .xlsx」
+# （`services/attendance/export.py`）要写工作簿。**只加它** —— pandas 仍然留在删除名单里
+# （它会连带拉回 numpy，那 115 MB 里 109 MB 是这两个），全仓 0 处 import 它。
+openpyxl>=3.1,<4
 pydantic==2.5.0
 pydantic-settings==2.1.0
 # 0.0.6 命中 CVE-2024-24762：解析 multipart 的 Content-Type 时正则灾难性回溯，
