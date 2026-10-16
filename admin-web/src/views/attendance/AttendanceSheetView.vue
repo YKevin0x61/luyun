@@ -71,8 +71,10 @@ const state = ref('loading') // 'loading' | 'ready' | 'error'
 const errorText = ref('')
 const sheet = ref(null)
 
-/** 正在改的那一格（`营业日` 或 null）与正在等回执的那一格。 */
-const editingDate = ref('')
+/** 正在改的那一格（`{ employeeId, date }` 或 null）与正在等回执的那一格。
+ *  编辑态按「**这个人 + 这一天**」记，不按日期记：店长是在某人的那张卡上点某一天的，
+ *  只按日期记会让每张含这一天的卡都开一条编辑带（父级裁定，见 64 号截图）。 */
+const editing = ref(null)
 const savingDate = ref('')
 /** 那一格上要显示的话（服务端拒绝的理由）。 */
 const dayError = ref(null) // { business_date, text } | null
@@ -149,24 +151,31 @@ function editable(cell) {
   return Boolean(cell.state) && !cell.is_future
 }
 
-function openEditor(cell) {
+function openEditor(person, cell) {
   if (!editable(cell) || savingDate.value) return
   dayError.value = null
-  editingDate.value = editingDate.value === cell.business_date ? '' : cell.business_date
+  const same =
+    editing.value?.employeeId === person.id && editing.value?.date === cell.business_date
+  editing.value = same ? null : { employeeId: person.id, date: cell.business_date }
 }
 
 /** 收起编辑带（带子里那颗「取消」）：店长自己撤了，理由也一并收掉。 */
 function closeEditor() {
-  editingDate.value = ''
+  editing.value = null
   dayError.value = null
+}
+
+/** 这一格是不是正被改：一次点击只认「这个人 + 这一天」。格子上的记号与下面的编辑带
+ *  都走这一个判据 —— 少一处跟着改，记号与带子就会各自说一套。 */
+function isEditing(person, cell) {
+  return editing.value?.employeeId === person.id && editing.value?.date === cell.business_date
 }
 
 /** 这张卡上正在改的那一天（0 或 1 个）：编辑带就挂在 `.aDays` **下面**、同一张卡里 ——
  *  被点的那一格留在它原来的列位上（B 批返工 ⑥）。写成「哪些格子在被改」而不是
  *  「这张卡在不在改」，是为了让带子直接拿到那一格的 `cell`（班次、半天休标志都在上面）。 */
 function editingCells(person) {
-  if (!editingDate.value) return []
-  return (person.cells || []).filter((cell) => cell.business_date === editingDate.value)
+  return (person.cells || []).filter((cell) => isEditing(person, cell))
 }
 
 function errorOn(businessDate) {
@@ -191,7 +200,7 @@ async function pick(person, cell, value) {
     )
     // **写成了才收工**：重拉一次整表（不走 `load()` —— 那条路会把 `state` 打回
     // `loading`，整页闪一下），那天（与「待补」计数）立刻变。
-    editingDate.value = ''
+    editing.value = null
     sheet.value = await api.get('/api/attendance/sheet')
   } catch (err) {
     // 被拒时**带子留着**：理由就写在带子里（票 06 的「不装作改成功」），那一格给红边；
@@ -214,7 +223,7 @@ async function toggleHalf(person, cell) {
     await api.put(`/api/attendance/sheet/${person.id}/${cell.business_date}`, {
       half_rest: !cell.half_rest,
     })
-    editingDate.value = ''
+    editing.value = null
     sheet.value = await api.get('/api/attendance/sheet')
   } catch (err) {
     dayError.value = {
@@ -535,7 +544,7 @@ onMounted(() => {
               {
                 'is-today': cell.is_today,
                 'is-half': cell.state === 'work' && cell.half_rest,
-                'is-editing': editingDate === cell.business_date,
+                'is-editing': isEditing(person, cell),
                 // 服务端拒过的那些天给红边（理由在下面的编辑带里）。
                 'is-error': Boolean(errorOn(cell.business_date)),
               },
@@ -547,7 +556,7 @@ onMounted(() => {
             <!-- 编辑态那一格**留在它原来的列位上**（B 批返工 ⑥）：日期数字与文案照旧，
                  只多一个 `is-editing` 记号（显眼的边框底色）；控件在网格下面的编辑带里。
                  它自己**不吃点击** —— 收工走带子里那颗「取消」，免得再点一下把带子收了。 -->
-            <template v-if="editingDate === cell.business_date">
+            <template v-if="isEditing(person, cell)">
               <i class="aDayNum">{{ cell.day }}<em v-if="cell.is_today" class="aTodayMark">今</em></i>
               <b class="aDayText">{{ cellLabel(person, cell) }}</b>
             </template>
@@ -556,7 +565,7 @@ onMounted(() => {
               class="aDayBtn"
               type="button"
               :disabled="Boolean(savingDate)"
-              @click="openEditor(cell)"
+              @click="openEditor(person, cell)"
             >
               <i class="aDayNum">{{ cell.day }}<em v-if="cell.is_today" class="aTodayMark">今</em></i>
               <b class="aDayText">{{ cellLabel(person, cell) }}</b>

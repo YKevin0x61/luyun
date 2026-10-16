@@ -74,7 +74,14 @@ describe('考勤表页（票 01 / 票 06 / 票 04 / 票 05 / 票 08）', () => {
   it('只给已经到的那几天装控件（今天之后是死的格子）', () => {
     // 验收 45：今天之后的日子**不能编辑** —— 不是「点了再弹一句拒绝」，是压根没有
     // 能点的东西。挂控件的那两处都由 `editable(cell)` 守着。
-    expect(view).toMatch(/v-if="editingDate === cell\.business_date"/)
+    // 编辑记号只出现在**被点的那一格**：判据是「这个人 + 这一天」，不是单靠日期
+    // （旧版按日期记编辑态，点一天会让每张含这天的卡各开一条编辑带）。格子上的记号与
+    // 网格下面那条编辑带都走这一个判据 `isEditing`，别处不自己再算一遍。
+    expect(view).toMatch(
+      /editing\.value\?\.employeeId === person\.id && editing\.value\?\.date === cell\.business_date/,
+    )
+    expect(view).toMatch(/v-if="isEditing\(person, cell\)"/)
+    expect(view).toMatch(/'is-editing': isEditing\(person, cell\)/)
     expect(view).toMatch(/v-else-if="editable\(cell\)"/)
     expect(view).toMatch(/function editable\(cell\)/)
     expect(view).toMatch(/state\)\s*&&\s*!cell\.is_future|Boolean\(cell\.state\)/)
@@ -388,6 +395,35 @@ describe('考勤表页渲染（票 01 / 票 06）', () => {
     expect(after[0].find('.aDayText').text()).toBe('夜班')
     expect(after[1].find('.aDayText').text()).toBe('休') // 别的日子没动
     expect(wrapper.findAll('.aCard')[0].find('.aEditBar').exists()).toBe(false)
+  })
+
+  it('一次点击只有一个编辑目标：点第一张卡的那天，只有第一张卡出带子', async () => {
+    // 两张卡都含 9/1。旧版编辑态按**日期**记（`editingDate` 是个字符串），点一次会让
+    // 两张卡各开一条带子；用户的操作是「在某人那张卡上点某一天」，一次点击只能有一个目标。
+    const { wrapper } = await mountSheet()
+    expect(wrapper.findAll('.aCard')).toHaveLength(2)
+
+    await wrapper
+      .findAll('.aCard')[0]
+      .findAll('.aDay')[0]
+      .find('button.aDayBtn')
+      .trigger('click')
+
+    // 有且**只有一条**带子，且它落在第一张卡（张三）里、指的是 1 号。
+    expect(wrapper.findAll('.aCard')[0].find('.aName').text()).toBe('张三')
+    const bands = wrapper.findAll('.aEditBar')
+    expect(bands).toHaveLength(1)
+    expect(bands[0].attributes('aria-label')).toBe('改 1 号的班')
+    expect(wrapper.findAll('.aCard')[0].find('.aEditBar').exists()).toBe(true)
+    // 第二张卡（李四）的同一天不进这一态：没有带子，那一格也没有编辑记号。
+    expect(wrapper.findAll('.aCard')[1].find('.aEditBar').exists()).toBe(false)
+    expect(
+      wrapper.findAll('.aCard')[1].findAll('.aDay')[0].classes(),
+    ).not.toContain('is-editing')
+    // 第一张卡里也只有被点的那一格进这一态。
+    const first = wrapper.findAll('.aCard')[0].findAll('.aDay')
+    expect(first[0].classes()).toContain('is-editing')
+    expect(first[1].classes()).not.toContain('is-editing')
   })
 
   it('编辑带的抬头写着改的是哪一天、那一天现在是什么', async () => {
