@@ -113,6 +113,9 @@ const routes = [
   // 加班统计（票 02）：超管的审批台 —— 待办队列 + 批 / 驳 / 作废 + 代员工补录。员工那一面
   // 在 `/workbench/me/overtime`（票 01）；店长那一面在员工手机端（票 04，走能力键）。
   workbenchHrPage('/workbench/hr/overtime', 'workbench-hr-overtime', () => import('../views/overtime/HrOvertimeView.vue')),
+  // 节假日日历（考勤面，票 02）：超管逐日标「这天是法定节假日」并写名称。它是「法定节假日
+  // 补休」的唯一依据（代码里没有年度表），所以这一页只给管理端这一档。
+  workbenchHrPage('/workbench/hr/holidays', 'workbench-hr-holidays', () => import('../views/hr/HolidayCalendarView.vue')),
   hygieneAdminPage('/workbench/floor/zones', 'workbench-floor-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
   hygieneAdminPage('/workbench/floor/daily', 'workbench-floor-daily', () => import('../views/hygiene/HygieneDailyView.vue')),
   // 仪容仪表（票 12）：按人拍，名单由排班给（休假的与没排到的不在表上）。

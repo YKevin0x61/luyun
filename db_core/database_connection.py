@@ -23,6 +23,7 @@ from config import settings
 
 from db_core.schema import (
     ALL_TABLES,
+    ATTENDANCE_TABLES,
     HYGIENE_TABLES,
     OVERTIME_TABLES,
     RECIPE_TABLES,
@@ -75,6 +76,7 @@ class DatabaseConnection:
                 + list(SCHEDULING_TABLES)
                 + list(WECOM_SUBSCRIPTION_TABLES)
                 + list(OVERTIME_TABLES)
+                + list(ATTENDANCE_TABLES)
             )
             for table in tables:
                 self._table_views[table] = TableView(table, self)

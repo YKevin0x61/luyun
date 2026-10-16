@@ -85,7 +85,9 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
 
     group_keys = [group["key"] for group in body["groups"]]
     assert group_keys == [
-        "business", "recipe", "hygiene", "scheduling", "wecom", "overtime", "auth", "external"
+        "business", "recipe", "hygiene", "scheduling", "wecom", "overtime",
+        # 考勤（票 02）：法定节假日日历 —— 人事之外单开一格，03 的月度考勤台账同组。
+        "attendance", "auth", "external"
     ]
 
 
