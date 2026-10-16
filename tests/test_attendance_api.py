@@ -2940,3 +2940,217 @@ def test_the_manual_columns_write_refuses_an_employee_that_does_not_exist(attend
     # 真员工照旧写得进：闸只挡「压根没有这个人」。
     assert _put_manual(client, admin, real, {"lodging": "是"}).status_code == 200
     assert _ledger_row(db, real, MONTH)["lodging"] == "是"
+
+
+# ══ 票 09：期末存假（本月剩余）可人工定稿 ══════════════════════════════════
+#
+# 卡片上那一对补成**期初 / 期末**：期末那一位（`closing_balance`）当月未封账前随时可填
+# 可改，填了就以它为准 —— 封账把它写进台账定稿、导出件的「存休天数」也用它；没填过就
+# 照公式值（池 − 本月自然天数）。
+#
+# 三个词在这一段里的分工（票面口径）：
+#
+# * `leave.balance` = **有效值**（手填 ?? 公式）。它的含义从「公式值」变成了「有效值」，
+#   导出件的「存休天数」读的就是它，所以导出件自动跟着走（这一票没碰 `export.py`），
+#   既有那条写死 `1.5 - 30` 的断言照旧成立 —— 它那一行**没人手填过**，有效值就是公式值。
+# * `leave.balance_computed` = 公式值（页面上的「系统建议」）；
+# * `closing_balance_stored` = 台账里的**原始**值（没填过 / 清空 = `None`）—— 照
+#   `shift_name_stored` 的先例；写回执里**不给**这一位（那一次点名写了什么调用方手里就有）。
+#
+# 封账那一侧：有手填值就写手填值、没有就照旧写公式值；封过账之后**只拒
+# `closing_balance` 这一个字段**（409 `month_sealed`），另外几个手填列照旧可写（05 的裁定）。
+
+
+def test_the_card_reports_the_effective_and_computed_closing_balance(attendance_http):
+    """验收 1：没填过时 `leave.balance == leave.balance_computed`、`balance_is_manual` 为假、
+    `closing_balance_stored` 是 `None`（台账上一个字都没有）。
+
+    没排班的人公式值是**池 0 − 30 天 = −30**（30 天的九月），这个数是从算式外独立写下来的
+    （同票 03 那几条用例的口径）。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138301", "没填过期末")
+
+    card = _card(_sheet(client, admin), employee_id)
+
+    assert card["leave"]["balance"] == -30.0
+    assert card["leave"]["balance_computed"] == -30.0
+    assert card["leave"]["balance_is_manual"] is False
+    assert card["closing_balance_stored"] is None
+
+
+def test_the_manual_door_writes_the_closing_balance_of_this_month(attendance_http):
+    """验收 2：月级写口多认 `closing_balance`（可为负、可带 .5、显式 `null` 清空回公式值），
+    与别的列**同一条 upsert、只更新点名的那一列**。
+
+    同一行上先有票 03/04/05 写下的账（期初 / 三个手填列 / 封账时刻）：这一票写期末那一位，
+    它们一个都不许动。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138302", "手填期末")
+    untouched = {
+        "opening_balance": 2.5,
+        "shift_name": "早班",
+        "lodging": "是",
+        "borrowed_store": "调东莞",
+        "resigned": "否",
+        "sealed_at": None,
+    }
+    _put_ledger_row(db, employee_id, MONTH, **untouched)
+    columns = [*untouched, "closing_balance"]
+
+    first = _put_manual(client, admin, employee_id, {"closing_balance": 10})
+
+    assert first.status_code == 200, first.text
+    # 回执形状不变（既有用例逐字钉着那七个键）：`closing_balance_stored` 不给 ——
+    # 照 `shift_name_stored` 的先例，那一次点名写了什么调用方手里就有。
+    assert set(first.json()) == {
+        "employee_id",
+        "month",
+        "shift_name",
+        "lodging",
+        "borrowed_store",
+        "resigned",
+        "default_shift_name",
+    }
+    # 库里：只有期末那一列动了，期初 / 三个手填列 / 封账时刻原样。
+    assert _ledger_values(db, employee_id, MONTH, columns) == {
+        **untouched,
+        "closing_balance": 10.0,
+    }
+    # 卡片：有效值 = 手填的 10，公式值那一位照旧是算式那个数（池 2.5 − 30 天 = −27.5），
+    # 「填过没有」那一位是**原始值**。
+    card = _card(_sheet(client, admin), employee_id)
+    assert card["leave"]["balance"] == 10.0
+    assert card["leave"]["balance_computed"] == 2.5 - 30
+    assert card["leave"]["balance_is_manual"] is True
+    assert card["closing_balance_stored"] == 10.0
+
+    # 可为负（欠班），也可带 .5。
+    assert (
+        _put_manual(client, admin, employee_id, {"closing_balance": -1.5}).status_code == 200
+    )
+    assert _ledger_values(db, employee_id, MONTH, columns) == {
+        **untouched,
+        "closing_balance": -1.5,
+    }
+    assert _card(_sheet(client, admin), employee_id)["leave"]["balance"] == -1.5
+
+    # 显式 `null` = 清空（与从没填过同义）：有效值退回公式值。
+    assert (
+        _put_manual(client, admin, employee_id, {"closing_balance": None}).status_code == 200
+    )
+    assert _ledger_values(db, employee_id, MONTH, columns) == {
+        **untouched,
+        "closing_balance": None,
+    }
+    card = _card(_sheet(client, admin), employee_id)
+    assert card["closing_balance_stored"] is None
+    assert card["leave"]["balance_is_manual"] is False
+    assert card["leave"]["balance"] == card["leave"]["balance_computed"] == 2.5 - 30
+
+
+def test_writing_the_closing_balance_is_refused_on_a_sealed_month(attendance_http):
+    """验收 3：那一行封过账（`sealed_at` 非空）→ 写 `closing_balance` 是 **409**、文案说得清
+    「这个月已经封账了」，且那一行**一个字都没动**（连 `updated_at` 那个指纹都不动）。
+
+    05 的裁定不变：同一次只点名**别的**字段（手填列）照旧放行 —— 封账锁的只是期末存假
+    这一格，不是整行。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138303", "封账后还想改期末")
+    _put_ledger_row(
+        db,
+        employee_id,
+        MONTH,
+        opening_balance=2.5,
+        closing_balance=8.0,
+        sealed_at="2026-10-01T10:00:00+08:00",
+    )
+    before = _ledger_row(db, employee_id, MONTH)
+
+    refused = _put_manual(client, admin, employee_id, {"closing_balance": 10})
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    # 文案要能看懂：点明「这个月已经封账了」（带上被封的那个月更好）。
+    assert "已经封账" in detail
+    assert MONTH in detail
+    # 那一行一个字没动：`SELECT *` 逐列比对（含 `updated_at`）。
+    assert _ledger_row(db, employee_id, MONTH) == before
+
+    # 只点名别的字段（票 05 的四列）照旧可写 —— 封账锁的只是期末存假那一格。
+    allowed = _put_manual(client, admin, employee_id, {"lodging": "否", "resigned": "是"})
+    assert allowed.status_code == 200, allowed.text
+    assert _ledger_values(
+        db, employee_id, MONTH, ["closing_balance", "sealed_at", "lodging", "resigned"]
+    ) == {
+        "closing_balance": 8.0,
+        "sealed_at": "2026-10-01T10:00:00+08:00",
+        "lodging": "否",
+        "resigned": "是",
+    }
+
+
+def test_sealing_writes_the_manual_closing_balance_when_there_is_one(attendance_http):
+    """验收 4：那一行上有手填的期末存假（10）→ 封账把**手填值**连同 `sealed_at` 一起定稿
+    （台账 `closing_balance = 10`）；没手填过的人照旧写公式值（出勤 1 天 → 池 1 − 31 天
+    = −30，04 的既有行为不破）。
+
+    手填那一位是**上个月**那一行上的（写口只写当月，封账封的是已经过完的月）——
+    造数走 `_put_ledger_row`，判据看封账之后台账里那一行。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    hand_filled = _employee_id(accounts, "13800138304", "八月手填过期末")
+    computed = _employee_id(accounts, "13800138305", "八月没手填过")
+    shifts = _shift_ids(db)
+    # 两个人八月都有排班记录：封账的名单 = **那个月有记录的人**（A 批返工 ①）。
+    for employee_id in (hand_filled, computed):
+        _run(_scheduler(db).set_override(employee_id, "2026-08-26", shift_id=shifts["白班"]))
+    # 手填那一位：八月那一行上已经有他自己的 10（还没封账）。
+    _put_ledger_row(db, hand_filled, "2026-08", closing_balance=10.0)
+
+    resp = _seal(client, admin, {"month": "2026-08"})
+
+    assert resp.status_code == 200, resp.text
+    # 有手填值就写手填值：10（不是公式那个 −30），并且封账时刻落上了。
+    row = _ledger_row(db, hand_filled, "2026-08")
+    assert row["closing_balance"] == 10.0
+    assert row["sealed_at"] == resp.json()["sealed_at"]
+    # 没手填过的人照旧写公式值（04 的既有行为一字未改）。
+    row = _ledger_row(db, computed, "2026-08")
+    assert row["closing_balance"] == -30.0
+    assert row["sealed_at"] == resp.json()["sealed_at"]
+    # 封下的那位从此是卡片上的「上月存假」：结转读的是定稿的结余。
+    assert _leave(_sheet(client, admin), hand_filled)["previous_balance"] == 10.0
+
+
+def test_the_export_writes_the_effective_closing_balance(attendance_http):
+    """验收 5：导出件「存休天数」写的是**有效值** —— 手填 10 的那一行读回工作簿就是 10，
+    不是公式那个 −30（30 天的月、池 0）。
+
+    这条缝不碰 `services/attendance/export.py`：它读的一直是 `leave.balance`，票 09 把
+    那一位的含义改成有效值之后**导出件自动跟着走**。既有那条写死 `1.5 - 30` 的导出断言
+    （`test_the_day_cells_write_only_rest_half_rest_and_todo`）那一行没人手填过，有效值
+    就是公式值，所以照旧成立。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138306", "存休天数用手填的")
+    assert (
+        _put_manual(client, admin, employee_id, {"closing_balance": 10}).status_code == 200
+    )
+
+    worksheet = _only_sheet(_workbook(_export(client, admin)))
+
+    # 30 天的月：汇总三列从第 39 列（AM）起，「存休天数」是第一列。
+    row = _row_of(worksheet, "存休天数用手填的")
+    assert worksheet.cell(row=row, column=8 + 30 + 1).value == 10
+    # 公式值那一位在卡片上是 −30（池 0 − 30 天）—— 导出件写的**不是**它。
+    card = _card(_sheet(client, admin), employee_id)
+    assert card["leave"]["balance_computed"] == -30.0
+    assert card["leave"]["balance"] == 10.0

@@ -48,8 +48,15 @@
 点一次，就把**上一个自然月**那一行的 `closing_balance`（存假结余）与 `sealed_at` 写进
 月度考勤台账。写下去之后，当月卡片上的「上月存假」读的就是那一行的结余 —— 之后再改
 上月的排班也不会让它漂（那正是这张表存在的理由）。**只有已经过完的月份能封**：当月与
-未来一律拒；已经封过的月再封一次也拒，一个字都不改已写下的那一行。这是本服务**唯一
-的写口**（逐日改格那扇门在排班那一边，只借道 `api/attendance.py`）。
+未来一律拒；已经封过的月再封一次也拒，一个字都不改已写下的那一行。
+
+票 09 让那一笔账**可以人工定稿**：期末存假（本月剩余）在当月未封账前随时可填可改
+（月级写口的 `closing_balance`），填了就以它为准。于是卡片上的 `leave.balance` 是
+**有效值**（手填 ?? 公式），另给 `balance_computed`（公式值 = 池 − 本月自然天数，页面上
+的「系统建议」）与 `balance_is_manual`；封账写的是**有效值**（有手填值就写手填值，没有
+就照旧写公式值），封过之后只拒 `closing_balance` 这一个字段（409 `month_sealed`），
+另外几个手填列照旧可写（05 的裁定）。**不加新列、不出迁移** —— 就是 `0027` 那一列
+（`closing_balance`）：人工填过就是它，没填过就是 `NULL`（读取时才算公式值，不落库）。
 """
 
 from __future__ import annotations
@@ -430,25 +437,32 @@ class AttendanceStore:
     async def set_manual_columns(
         self, employee_id: int, values: dict[str, Optional[Any]]
     ) -> dict[str, Any]:
-        """把点名的几列写在本月那**一行**台账上（票 05 的四个手填列 + 人工期初）。
-        返回写完之后那四个手填列。
+        """把点名的几列写在本月那**一行**台账上（票 05 的四个手填列 + 人工期初 + 票 09 的
+        期末存假）。返回写完之后那四个手填列。
 
         `values` 里**只放点名要改的那几列**（键取自 `LEDGER_WRITE_FIELDS`）：没点名的列一个都
         不碰 —— 这就是「只更新自己那几列」。点名成 `None`（手填列空串也一样）是**清空**：存
-        NULL，与从没填过同义（读回来照旧退回「本月班次」那条默认；期初退回 0）。
+        NULL，与从没填过同义（读回来照旧退回「本月班次」那条默认；期初退回 0；期末存假退回
+        公式值）。数值那两位在 SQL 里是 `DOUBLE PRECISION`：可为负（欠班）、可带 .5。
 
         **人工期初（`opening_balance`）**是故事 35 的那一次手工录入：写的是**本月这一行**，
-        可为负（欠班）、可带 .5，`None` 清空 —— 与手填列同一条语句、同一条 upsert，于是
-        「一次点名一列」的纪律对它也成立（04 的结余 / 封账时刻不受影响）。
+        与手填列同一条语句、同一条 upsert，于是「一次点名一列」的纪律对它也成立。
+
+        **期末存假（`closing_balance`，票 09）**是那一对里的另一半：当月未封账前随时可填可
+        改，填了卡片上的 `leave.balance`（有效值）与导出件的「存休天数」就以它为准；封账把
+        它定稿（有手填值就写手填值，没有就写公式值）。它落在**票 04 封账也写的那一列**上，
+        所以多一道闸：那一行的 `sealed_at` 非空而本次点名了它 → `month_sealed`（HTTP 409），
+        判在写之前，被拒的那一次一个字节都不动。**只锁这一列** —— 同一次点名别的字段照旧
+        放行（05 的裁定：封账定的是存假那一笔账，不是整行只读）。
 
         缺表（0027 没应用）时与读侧同一个出口：`AttendanceError("not_migrated")`，
         HTTP 层翻成 503 点名那个脚本 —— 店长该看到的是「去做数据库迁移」，不是一个 500。
 
-        台账那一行是**票 04 的封账、票 05 的手填列与人工期初**共用的一行
+        台账那一行是**票 04 的封账、票 05 的手填列与人工期初、票 09 的期末存假**共用的一行
         （`UNIQUE(员工, 月份)`）：整行覆盖会把别人写下的数抹掉，所以 INSERT 时只写
         `employee_id` / `month`（别的列留给各自的写入口），冲突时**只有点名的那几列进
-        `SET`**，`closing_balance` 与 `sealed_at` 一个都不在语句里 —— 哪怕这一次是新建
-        那一行（`DO UPDATE` 因此也**不更新** `created_at`，那一行是什么时候建的仍然说得清）。
+        `SET`**，没点名的列（含 `sealed_at`）一个都不在语句里 —— 哪怕这一次是新建那一行
+        （`DO UPDATE` 因此也**不更新** `created_at`，那一行是什么时候建的仍然说得清）。
 
         **写之前先认人**（返工 ④）：`employee_id` 上得真有一个员工，否则报
         `unknown_employee` —— 不校验的话，一个手搓的 id 会在台账里建出一行**孤儿**
@@ -461,6 +475,15 @@ class AttendanceStore:
         if not fields:
             raise AttendanceError("nothing_to_write")
         month = self.today()[:7]
+        # **封过账的那一行只锁期末存假这一格**（票 09 的口径，05 的裁定不变）：本次点名了
+        # `closing_balance` 而那一行的 `sealed_at` 非空就拒（409 `month_sealed`），只点名
+        # 别的字段照旧放行 —— 另外几列（本月班次 / 是否住宿 / 借调门店 / 是否离职）与期初
+        # 都是系统推不出来的手填值，封账定的是存假那一笔账，不是整行只读。
+        # 判在**写之前**（只读一次台账），被拒的那一次一个字节都不动。
+        if "closing_balance" in fields and int(employee_id) in await self._sealed_employee_ids(
+            month
+        ):
+            raise AttendanceError("month_sealed", month)
         now = self._now_iso()
         primary = ", ".join(f'"{field}"' for field in fields)
         placeholders = ", ".join(["?"] * len(fields))
@@ -547,6 +570,12 @@ class AttendanceStore:
             # 这个人当月标了「休半天」的那几天（票 07）：格子上写出来、例休折算按 0.5 天。
             their_half_rests = half_rests.get(employee_id, set())
             hire_date = employee.get("hire_date") or None
+            # 本月那一行上的**期末存假**（票 09）：台账里的原始值，没填过 / 清空 = `None`。
+            # 有它就以它为准（有效值），没有就照公式值；卡片另给 `closing_balance_stored`
+            # 给前端判「填过没有」（照 `shift_name_stored` 的先例）。
+            stored_closing_balance = _ledger_number(
+                ledger.get((employee_id, month)), "closing_balance"
+            )
             employees.append(
                 {
                     "id": employee_id,
@@ -565,17 +594,23 @@ class AttendanceStore:
                     "pending_hours": pending.get(employee_id, {}).get("half_hours", 0) / 2,
                     "pending_count": pending.get(employee_id, {}).get("count", 0),
                     # 假期台账（票 03）：这一块全是**暂算值**，当月只算不落库。
-                    "leave": _leave_terms(
-                        today=today,
-                        theirs=theirs,
-                        half_rest_days=their_half_rests,
-                        holidays=holidays,
-                        employee=employee,
-                        month_days=len(days),
-                        previous_balance=_previous_balance(
-                            ledger.get((employee_id, previous_month)),
-                            ledger.get((employee_id, month)),
+                    # 票 09 在算式外面盖了一层**人工定稿**：台账本月那一行填过
+                    # `closing_balance` 就以它为准，`balance` 因此是**有效值**
+                    # （手填 ?? 公式），公式值另给 `balance_computed`。
+                    "leave": _with_manual_balance(
+                        _leave_terms(
+                            today=today,
+                            theirs=theirs,
+                            half_rest_days=their_half_rests,
+                            holidays=holidays,
+                            employee=employee,
+                            month_days=len(days),
+                            previous_balance=_previous_balance(
+                                ledger.get((employee_id, previous_month)),
+                                ledger.get((employee_id, month)),
+                            ),
                         ),
+                        closing_balance=stored_closing_balance,
                     ),
                     "days": [
                         {
@@ -615,6 +650,11 @@ class AttendanceStore:
                     "opening_balance": _ledger_number(
                         ledger.get((employee_id, month)), "opening_balance"
                     ),
+                    # **期末存假（本月剩余）的原始值**（票 09）：台账上真写了什么，没填过
+                    # （或清空）就是 `None`。与 `leave.balance`（有效值）刻意分开 —— 页面上
+                    # 那一格改绑这一位，没填过时输入框就是**空**的，公式值只出现在
+                    # 「系统建议」那句话里（`leave.balance_computed`）。
+                    "closing_balance_stored": stored_closing_balance,
                 }
             )
 
@@ -711,9 +751,10 @@ class AttendanceStore:
         """把某个**已经过完的**自然月的存假结余写进台账并定稿（票 04 / ADR 0113）。
 
         `month` 不给就是**上一个自然月**（页面上那颗「封账上月」按钮打的就是这一条）。
-        写下去的是那一行的 `closing_balance`（本月结余 = 池 − 本月自然天数）与
-        `sealed_at`；**行里别的列一个字都不动** —— 期初（票 03 的人工录入）与手填列
-        （票 05）是别人写下的真相，封账只加自己那一份。
+        写下去的是那一行 `closing_balance` 的**定稿值**：那个月手填过期末存假（票 09）就以
+        手填值为准，没填过就照旧写公式值（本月结余 = 池 − 本月自然天数，04 的既有行为）；
+        `sealed_at` 与它一起落库。**行里别的列一个字都不动** —— 期初（票 03 的人工录入）与
+        手填列（票 05）是别人写下的真相，封账只加自己那一份。
 
         三道闸：
 
@@ -769,20 +810,28 @@ class AttendanceStore:
             # 「现在在职」的人那个月可能一条记录都没有，给他封一笔负数就是永久冻结的假账。
             if employee_id not in on_record:
                 continue
-            leave = _leave_terms(
-                today=as_of,
-                theirs=rows.get(employee_id, {}),
-                # 封账与当月卡片同一套算式：标了「休半天」的那天算 0.5 天出勤（票 07）。
-                # 少了这一句，封下来的存假会比卡片上多算半天。
-                half_rest_days=half_rests.get(employee_id, set()),
-                holidays=holidays,
-                employee=employee,
-                month_days=month_days,
-                previous_balance=_previous_balance(
-                    ledger.get((employee_id, before)),
-                    ledger.get((employee_id, target)),
+            leave = _with_manual_balance(
+                _leave_terms(
+                    today=as_of,
+                    theirs=rows.get(employee_id, {}),
+                    # 封账与当月卡片同一套算式：标了「休半天」的那天算 0.5 天出勤（票 07）。
+                    # 少了这一句，封下来的存假会比卡片上多算半天。
+                    half_rest_days=half_rests.get(employee_id, set()),
+                    holidays=holidays,
+                    employee=employee,
+                    month_days=month_days,
+                    previous_balance=_previous_balance(
+                        ledger.get((employee_id, before)),
+                        ledger.get((employee_id, target)),
+                    ),
+                    month=target,
                 ),
-                month=target,
+                # 票 09：那个月那一行上**手填过**期末存假就以它为准（先填 10 → 封账 → 10），
+                # 没填过就是 `None`，照旧写公式值（04 的既有行为不破）。封的是**已经过完的**
+                # 月，所以那一行还没封过（`already_sealed` 上面挡着）—— 手填值在这里就是定稿值。
+                closing_balance=_ledger_number(
+                    ledger.get((employee_id, target)), "closing_balance"
+                ),
             )
             outcome = await self._conn.execute(
                 """INSERT INTO attendance_ledger
@@ -813,6 +862,15 @@ class AttendanceStore:
         )
         return [dict(row) for row in await cur.fetchall()]
 
+    async def _sealed_employee_ids(self, month: str) -> set[int]:
+        """那个月**已经封过账**的员工号（空集 = 那个月还没封过 / 谁都没封）。
+
+        `set_manual_columns` 用它判「期末存假那一格锁没锁」（票 09）：「那一行封了吗」只有
+        一个判据 —— `sealed_at` 非空，与逐日改格的 `ensure_day_editable` 同源（同一句
+        `WHERE sealed_at IS NOT NULL`）。
+        """
+        return {int(row["employee_id"]) for row in await self._sealed_rows(month)}
+
     async def _require_employee(self, employee_id: int) -> None:
         """这个 id 上得真有一个员工，否则 `unknown_employee`（返工 ④）。
 
@@ -837,12 +895,20 @@ class AttendanceStore:
 # 在卡片上填一次、存在**月度考勤台账**当月那一行上，只进导出件与卡片，**不写回员工档案**。
 MANUAL_FIELDS = ("shift_name", "lodging", "borrowed_store", "resigned")
 
-# 那条**月级写口**能点名的列（票 05 的四个手填列 + 修 ② 的 `opening_balance`）。
+# 那条**月级写口**能点名的列（票 05 的四个手填列 + 修 ② 的 `opening_balance` +
+# 票 09 的 `closing_balance`）。
 # 「人工期初」是故事 35 让超管在**上线当月手工给一次**的「上月末余额」—— 它写的是
 # **本月那一行**的 `opening_balance`（票 03 的裁定：人工期初读的就是本月这一行），
-# 所以并进同一条 upsert：一次点名只写点名的列，04 的 `closing_balance` / `sealed_at`
-# 与别的手填列一个都不碰（`_ledger_value` 只管值的归一）。
-LEDGER_WRITE_FIELDS = MANUAL_FIELDS + ("opening_balance",)
+# 所以并进同一条 upsert：一次点名只写点名的列，别的手填列一个都不碰（`_ledger_value`
+# 只管值的归一）。
+# 「期末存假（本月剩余）」（票 09）走**同一条** upsert：写的是本月那一行的
+# `closing_balance` —— 当月未封账前随时可填可改，填了就以它为准（有效值）。
+# 它落在票 04 封账也写的那一列上：封账把当时的手填值（没有就照公式值）定稿，
+# 所以**封过账的那一行只拒这一列**（`set_manual_columns` 里那一道闸）。
+LEDGER_WRITE_FIELDS = MANUAL_FIELDS + ("opening_balance", "closing_balance")
+
+# 台账上那几位**数字**列（可为负、可带 .5，`None` = 清空）。手填列是自由文本，不走这里。
+_NUMERIC_LEDGER_FIELDS = ("opening_balance", "closing_balance")
 
 
 def _manual_columns(row: Optional[dict], *, default_shift_name: Optional[str]) -> dict[str, Any]:
@@ -892,19 +958,19 @@ def _text(value: Any) -> Optional[str]:
 
 def _ledger_value(field: str, value: Any) -> Any:
     """写台账那一行时把一位值归一：手填列是文本（空串 = 清空 = NULL），
-    `opening_balance` 是数字（可为负、可带 .5，`None` = 清空）。
+    `opening_balance` / `closing_balance` 是数字（可为负、可带 .5，`None` = 清空）。
 
-    数字那一位的**值域**由 HTTP 层的 `Optional[float]` 把着（`ManualColumnsRequest`），
+    数字那两位的**值域**由 HTTP 层的 `Optional[float]` 把着（`ManualColumnsRequest`），
     这里只管把「清空」与「一个数」分开 —— 手填列那几位是自由文本，服务端不做值域校验
-    （票 05 的裁定），期初这一位照旧只想拿到一个数，拿到别的就是调用方的错。
+    （票 05 的裁定），存假那两位照旧只想拿到一个数，拿到别的就是调用方的错。
     """
-    if field == "opening_balance":
+    if field in _NUMERIC_LEDGER_FIELDS:
         if value is None:
             return None
         try:
             return float(value)
         except (TypeError, ValueError) as exc:
-            raise AttendanceError("invalid_opening_balance", str(value)) from exc
+            raise AttendanceError(f"invalid_{field}", str(value)) from exc
     return _text(value)
 
 
@@ -1026,6 +1092,31 @@ def _leave_terms(
         "month_attendance_days": min(pool, float(month_days)),
         "balance": pool - month_days,
     }
+
+
+def _with_manual_balance(
+    terms: dict[str, Any], closing_balance: Optional[float]
+) -> dict[str, Any]:
+    """给算式的结果盖上**人工定稿**那一层（票 09）。``terms`` 就是 `_leave_terms` 的返回值。
+
+    `_leave_terms` 只算**公式值**（池 − 本月自然天数）；人工那一位是本票加在它**外面**的
+    一层覆盖：台账那一行填过 `closing_balance` 就以它为准，没填过就照公式值。覆盖刻意
+    留在算式之外 —— 07 的半天休折算与 03 的口径用例因此仍然读得出「公式说的是什么」。
+
+    返回的 dict 在原有键之外多两位（`balance` 的含义因此从「公式值」变成「**有效值**」，
+    导出件的「存休天数」读的就是它，所以导出件自动跟着走）：
+
+    * ``balance_computed`` —— 公式值（页面上的「系统建议」）；
+    * ``balance_is_manual`` —— 这一次用的是不是手填值。
+
+    ``closing_balance`` 是台账上的**原始**值（`None` = 没填过 / 清空 = 退回公式值）。
+    """
+    computed = terms["balance"]
+    terms["balance_computed"] = computed
+    terms["balance_is_manual"] = closing_balance is not None
+    if closing_balance is not None:
+        terms["balance"] = closing_balance
+    return terms
 
 
 def _sealed_at(ledger: dict[tuple[int, str], dict], month: str) -> Optional[str]:
