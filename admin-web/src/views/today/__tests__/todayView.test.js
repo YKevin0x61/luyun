@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { resolveStates, resolveVar, sameValueCollisions } from './themeTokens.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../TodayView.vue'), 'utf8')
@@ -89,6 +90,47 @@ describe('员工端「今天」页（原型 A）', () => {
     // 三态的判据读两遍就会漂：页面里不许再出现 scheduled / shift_id。
     expect(view).not.toMatch(/day\.scheduled/)
     expect(view).not.toMatch(/shift_id/)
+  })
+
+  it('卡上那行大字：五态色值两两不同（票 07 / C 批返工第二轮）', () => {
+    // 两轮返工都栽在同一件事上：撞车撞的是**值**不是名字。第一轮 `.shift.half` 取
+    // `--info`，值跟「请假」的 `--hy-aqua` 一样；第二轮改用 `--warn`，又跟「已调整」的
+    // `--hy-amber` 一样。只断一对时两轮都是绿的 —— 所以要 work / rest / half / leave /
+    // moved 一起解析回令牌层的值，整组两两比（`themeTokens.js` 的 `sameValueCollisions`）。
+    const headline = resolveStates(view, [
+      ['work', /\.shift\s*\{[^}]*color:\s*var\((--[\w-]+)\)/],
+      ['rest', /\.shift\.rest\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['half', /\.shift\.half\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['leave', /\.shift\.leave\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['moved', /\.shift\.moved\s*\{[^}]*var\((--[\w-]+)\)/],
+    ])
+    expect(headline.half.name).toBe('--accent-alt')
+    expect(sameValueCollisions(headline), '两个态指到同值令牌，卡上就会有两句一样颜色的话')
+      .toEqual([])
+  })
+
+  it('往后三天的格子认识「休半天」：不给它上班色（票 07 / C 批返工）', () => {
+    // 三格的类名来自同一个 `shiftTone(day)`（`.next3 .s` 上的 `:class`），所以
+    // `half` 这个类**本来就已经带上**了；返工前缺的是这条规则 —— 没有它就落回
+    // `.next3 .s` 的兜底色（上班的薄荷），员工看着那天跟平常上班一样。
+    expect(view).toMatch(/<span class="s" :class="shiftTone\(day\)"/)
+    // 那一行五态一起比，判据与卡上那行大字同一套。
+    const row = resolveStates(view, [
+      ['work', /\.next3 \.s\s*\{[^}]*color:\s*var\((--[\w-]+)\)/],
+      ['rest', /\.next3 \.s\.rest\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['half', /\.next3 \.s\.half\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['leave', /\.next3 \.s\.leave\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['moved', /\.next3 \.s\.moved\s*\{[^}]*var\((--[\w-]+)\)/],
+    ])
+    expect(sameValueCollisions(row), '三格里两个态同色，那一天就看不出是哪种安排')
+      .toEqual([])
+    // 点名那条最要紧的区分：它不能落回上班色（薄荷），`half` 规则缺了就会这样。
+    expect(row.half.value).not.toBe(row.work.value)
+    // 一色一处：跟卡上那行大字同源，改色只改一个地方。
+    const headline = resolveVar(view, /\.shift\.half\s*\{[^}]*var\((--[\w-]+)\)/)
+    expect(row.half.name).toBe(headline.name)
+    // 类名的来源仍是语气那一张表（页面不自己判 half_rest，也不另起一个类名）。
+    expect(copy).toMatch(/if \(day\.half_rest\) return 'half'/)
   })
 
   it('offers the three entries and no clock time anywhere', () => {
