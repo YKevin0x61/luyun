@@ -280,6 +280,8 @@ def test_admin_can_pin_a_fixed_zone_per_shift(scheduling_http):
             "zone": "案板",
             "zone_id": zone_id,
             "overridden": False,
+            # 票 07：这一行不是「休半天」（那天上整天）。
+            "half_rest": False,
             "leave": False,
         }
     ]
@@ -656,6 +658,75 @@ def test_staff_month_returns_their_own_calendar(scheduling_http, monkeypatch):
     assert {item["shift_name"] for item in theirs["days"] if item["scheduled"]} == set()
 
 
+def test_half_rest_reaches_the_staff_pages_and_the_manager_views(scheduling_http, monkeypatch):
+    """票 07 验收 2/3：半天休在员工端与店长那两版视图上都读得到，**只能读不能设**。
+
+    写它的是考勤表页那扇唯一的门（`AttendanceStore.set_half_rest`，鉴权与拒绝理由的
+    HTTP 用例在 `tests/test_attendance_api.py`）；这里验排班这一侧的四个读口都把它带出来，
+    且与「还没排 / 休 / 上班」分得开：
+
+    * `/me`（员工「今天上什么班」）：`half_rest=True` 且**仍然** `scheduled=True`、有班次；
+    * `/me/month`（员工整月）：那天的格子也带着它；
+    * `/week`（店长周表）与 `/day`（月历点开那天）：只读地显示，人数口径不变。
+    """
+    from services.attendance.store import AttendanceStore
+
+    client, db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    ids = _shift_ids(client)
+    zone_id = _zone(db, "案板")
+    assert (
+        client.put(
+            f"/api/scheduling/zone-defaults/{employee_id}",
+            json={"shift_id": ids["白班"], "zone_id": zone_id},
+        ).status_code
+        == 200
+    )
+    # 「白班 / 休」两天一轮：9-24 上班、9-25 休、9-26 上班（那天标半天休）。
+    assert (
+        client.put(
+            f"/api/scheduling/rules/{employee_id}", json={"cycle": [ids["白班"], None]}
+        ).status_code
+        == 200
+    )
+    _run(AttendanceStore(db, now=lambda: FIXED_NOW).set_half_rest(employee_id, "2026-09-26", True))
+
+    admin = _admin_cookie(client)
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+    me = client.get("/api/scheduling/me").json()
+    rows = {item["business_date"]: item for item in me["days"]}
+    assert (rows["2026-09-24"]["half_rest"], rows["2026-09-26"]["half_rest"]) == (False, True)
+    assert (rows["2026-09-25"]["scheduled"], rows["2026-09-25"]["shift_id"]) == (True, None)
+    # 半天休仍然是**上班**那一态：有班次、有区 —— 员工页才能说「上半天」而不是「休」。
+    assert (rows["2026-09-26"]["scheduled"], rows["2026-09-26"]["shift_id"]) == (
+        True,
+        ids["白班"],
+    )
+    assert rows["2026-09-26"]["zone_name"] == "案板"
+
+    month = client.get("/api/scheduling/me/month", params={"month": "2026-09"}).json()
+    month_rows = {item["business_date"]: item for item in month["days"]}
+    assert month_rows["2026-09-26"]["half_rest"] is True
+    assert month_rows["2026-09-24"]["half_rest"] is False
+
+    # 店长那两版：周表那格带着它；月历点开那天，这个人在**白班那一组**里带着它。
+    _as_manager(client, admin)
+    week = client.get("/api/scheduling/week", params={"start": "2026-09-21"}).json()
+    assert week["employees"][0]["cells"]["2026-09-26"]["half_rest"] is True
+    assert week["employees"][0]["cells"]["2026-09-24"]["half_rest"] is False
+    day = client.get("/api/scheduling/day", params={"date": "2026-09-26"}).json()
+    assert [
+        (item["name"], item["half_rest"]) for item in day["groups"][0]["people"]
+    ] == [(NAME, True)]
+    # 人数口径没变：半天休的人照旧算进那天上班的人数（他确实上了半天）。
+    assert day["total"] == 1
+    calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    calendar_days = {item["business_date"]: item for item in calendar["days"]}
+    assert (calendar_days["2026-09-26"]["half_rest"], calendar_days["2026-09-26"]["total"]) == (1, 1)
+    assert calendar_days["2026-09-24"]["half_rest"] == 0
+
+
 def test_staff_month_is_still_the_staff_door(scheduling_http, monkeypatch):
     """同一扇门：管理端会话打不开它，匿名也打不开（验收 4 的另一半）。"""
     client, _db, accounts = scheduling_http
@@ -869,6 +940,8 @@ def test_manager_reads_the_week_grid(scheduling_http):
         "zone_id": None,
         "zone_name": None,
         "overridden": False,
+        # 票 07：那天不是「休半天」（这个字段只在考勤表页设得上）。
+        "half_rest": False,
         "leave": False,
     }
     # 昨天那格还没有行（展开只往今天以后铺）：`scheduled=False` 但键在。
@@ -1125,6 +1198,8 @@ def test_batch_paints_a_region_with_each_action(scheduling_http):
         "zone_id": None,
         "zone_name": None,
         "overridden": True,
+        # 票 07：刷成「休」的那天不会留着「休半天」（排班这条写路径会把它清掉）。
+        "half_rest": False,
         "leave": False,
     }
 

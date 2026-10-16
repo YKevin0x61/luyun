@@ -1158,3 +1158,262 @@ def test_missing_holiday_and_ledger_tables_are_named_in_the_503(attendance_http)
             assert script in resp.json()["detail"]
         finally:
             _run(_rename(f"{table}_tmp", table))
+
+
+# ── 票 07 验收 6：半天休是排班结果上的**加成性**一列（0028） ─────────────────
+
+
+class StaffAssignmentHalfRestMigrationTest(unittest.TestCase):
+    """验 6：`staff_assignments.half_rest` 是加成性加列（带默认值），既有行不受影响。
+
+    断言的是「这一列在、非空、默认 0、没写它的行读出来是 0」—— 不是「表里只有它」：
+    排班那几张表别的票还会继续加列。
+    """
+
+    TABLE = "staff_assignments"
+    COLUMN = "half_rest"
+
+    def test_the_column_is_there_not_null_and_defaults_to_zero(self):
+        from tests.pg_probe import fetch_one, table_columns
+
+        self.assertIn(self.COLUMN, table_columns(self.TABLE))
+        nullable, default = fetch_one(
+            "SELECT is_nullable, column_default FROM information_schema.columns"
+            " WHERE table_schema = 'public' AND table_name = ? AND column_name = ?",
+            (self.TABLE, self.COLUMN),
+        )
+        # 非空 + 默认 0：不加列也能读的所有既有查询，行为一个字都不变。
+        self.assertEqual(nullable, "NO")
+        self.assertIn("0", str(default))
+
+    def test_a_row_written_without_the_column_reads_as_zero(self):
+        """既有写得出来的行（不列这一列）读出来是 0，不是 NULL —— 「默认否」是数据事实。"""
+        from tests.pg_probe import fetch_all, fetch_one
+
+        # 这一列在迁移前就存在的行不可能还在测试库里（conftest 每次重建 schema），所以
+        # 这里造一行**不写这一列**的，验的就是默认值本身。
+        fetch_all(
+            "INSERT INTO staff_assignments"
+            " (tenant_id, employee_id, business_date, shift_id, source, created_at, updated_at)"
+            " VALUES (1, ?, ?, NULL, 'rule',"
+            " '2026-10-01T00:00:00+08:00', '2026-10-01T00:00:00+08:00')",
+            (990071, "2026-10-01"),
+        )
+        row = fetch_one(
+            "SELECT half_rest FROM staff_assignments"
+            " WHERE employee_id = ? AND business_date = ?",
+            (990071, "2026-10-01"),
+        )
+        self.assertEqual(row[0], 0)
+
+
+# ══ 票 07：半天休（下面这一整段都是票 07 加的） ══════════════════════════════
+#
+# 见 `GLOSSARY.md` 的「半天休」与 `docs/adr/0114`：半天休是**排班结果那一行上**的一个
+# 标志，不是第二个班次 —— 那天仍然只挂本来那个班次、仍然只有一行。只有考勤表页能设它
+# （`PUT /api/attendance/sheet/{员工}/{营业日}` 的 body 里那个 `half_rest`），
+# 排班月历 / 周表 / 员工端只**读**它并显示「休半天」。
+
+
+def _half(client, admin, employee_id, business_date, half_rest=True):
+    """以管理端会话标 / 取消「休半天」（票 07 的那扇门，与票 06 同一条路径）。"""
+    return _edit(client, admin, employee_id, business_date, {"half_rest": half_rest})
+
+
+def _assignment_rows(employee_id, business_date):
+    """库里那一天的那几行（`(班次 id, 半天休标志)`）—— 验「仍然只有一行」。"""
+    from tests.pg_probe import fetch_all
+
+    return fetch_all(
+        "SELECT shift_id, half_rest FROM staff_assignments"
+        " WHERE employee_id = ? AND business_date = ?",
+        (int(employee_id), business_date),
+    )
+
+
+def test_a_day_can_be_marked_half_rest_and_unmarked(attendance_http, monkeypatch):
+    """验收 1：标成「休半天」也能取消；卡片上那一格立刻是「休半天」，班次没被动过。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    shifts = _shift_ids(db)
+    _run(_scheduler(db).set_rule(employee_id, [shifts["白班"]]))
+
+    seen = []
+
+    async def _record(topic, scope=None):
+        seen.append((topic, scope))
+
+    monkeypatch.setattr(scheduling_module.realtime_hub, "broadcast_nudge", _record)
+
+    resp = _half(client, admin, employee_id, TODAY)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "employee_id": employee_id,
+        "business_date": TODAY,
+        "half_rest": True,
+    }
+    # 一人一条：员工手机上那一屏要跟着重拉（nudge 不带数据）。
+    assert seen == [("scheduling", {"reason": "half_rest_set", "employee_id": employee_id})]
+    # 那天**仍然只挂一个班次、仍然只有一行**（ADR 0114）：标志是加在结果行上的。
+    assert _assignment_rows(employee_id, TODAY) == [(shifts["白班"], 1)]
+    mine = {day["business_date"]: day for day in _card(_sheet(client, admin), employee_id)["days"]}
+    assert (mine[TODAY]["half_rest"], mine[TODAY]["state"], mine[TODAY]["shift_id"]) == (
+        True,
+        "work",
+        shifts["白班"],
+    )
+
+    # 取消：同一天再来一次 `half_rest: false`，那天回到「上班」而不是「休」。
+    assert _half(client, admin, employee_id, TODAY, False).status_code == 200
+    assert _assignment_rows(employee_id, TODAY) == [(shifts["白班"], 0)]
+    mine = {day["business_date"]: day for day in _card(_sheet(client, admin), employee_id)["days"]}
+    assert (mine[TODAY]["half_rest"], mine[TODAY]["state"]) == (False, "work")
+
+
+def test_half_rest_needs_a_shift_on_that_day(attendance_http):
+    """那天没有班次（休 / 还没排到）就标不上：「休半天」不是「休」的另一种写法。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    _run(_scheduler(db).set_override(employee_id, "2026-09-22", is_rest=True))
+
+    not_rostered = _half(client, admin, employee_id, "2026-09-21")  # 压根没有排班行
+    on_rest = _half(client, admin, employee_id, "2026-09-22")  # 有行、班次为空 = 休
+
+    assert (not_rostered.status_code, on_rest.status_code) == (400, 400)
+    assert "班次" in not_rostered.json()["detail"]
+    assert _assignment_rows(employee_id, "2026-09-21") == []  # 没顺手写出一行
+    assert _assignment_rows(employee_id, "2026-09-22") == [(None, 0)]
+
+
+def test_half_rest_is_refused_outside_the_current_month(attendance_http):
+    """这一页只算当月：上个月的格子标不了（那条路上的门就该是关着的）。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    _run(_scheduler(db).set_rule(employee_id, [_shift_ids(db)["白班"]]))
+
+    resp = _half(client, admin, employee_id, "2026-08-20")
+
+    assert resp.status_code == 400, resp.text
+    assert "当月" in resp.json()["detail"]
+
+
+def test_a_half_rest_day_counts_as_half_a_day_of_attendance(attendance_http):
+    """验收 4：标了「休半天」的那天按**实际出勤 0.5 天**算，月例休与存假跟着走。
+
+    三张卡把这个 0.5 钉住（期望值是票面写死的数，不是把公式再算一遍）：
+
+    * 12 整天 + 1 个半天休 = 实际出勤 **12.5 天** → 月例休 2 天（票面原话）；
+    * 5 整天 + 1 个半天休 = **5.5 天** → 月例休 0 天。**这一条认的是 0.5 而不是 1**：
+      把半天当整天就是 6 天 → 1 天。
+    * 对照组：13 整天 → 池比上面那位多 0.5 天，存假就跟着多 0.5 天。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    shifts = _shift_ids(db)
+    scheduler = _scheduler(db)
+    days = [f"2026-09-{day:02d}" for day in range(1, 14)]
+
+    def paint(employee_id, count):
+        _run(
+            scheduler.set_overrides_batch(
+                "shift",
+                shift_id=shifts["白班"],
+                items=[
+                    {"employee_id": employee_id, "business_date": day}
+                    for day in days[:count]
+                ],
+            )
+        )
+
+    twelve_and_a_half = _employee_id(accounts, "13800138081", "十二天半")
+    five_and_a_half = _employee_id(accounts, "13800138082", "五天半")
+    thirteen = _employee_id(accounts, "13800138083", "十三整天")
+    paint(twelve_and_a_half, 13)
+    paint(five_and_a_half, 6)
+    paint(thirteen, 13)
+    # 各自把最后那一天标成半天休（走的是考勤表页那扇门）。
+    assert _half(client, admin, twelve_and_a_half, "2026-09-13").status_code == 200
+    assert _half(client, admin, five_and_a_half, "2026-09-06").status_code == 200
+
+    sheet = _sheet(client, admin)
+
+    half_card = _leave(sheet, twelve_and_a_half)
+    assert half_card["actual_days"] == 12.5
+    assert half_card["monthly_rest"] == 2
+    assert half_card["pool"] == 14.5  # 12.5 + 2（没有别的假）
+    assert half_card["balance"] == -15.5  # 14.5 − 30：那 0.5 天真进了存假
+
+    short_card = _leave(sheet, five_and_a_half)
+    assert short_card["actual_days"] == 5.5
+    assert short_card["monthly_rest"] == 0  # 当整天算的话这里会是 1
+
+    full_card = _leave(sheet, thirteen)
+    assert full_card["actual_days"] == 13.0
+    assert full_card["pool"] - half_card["pool"] == 0.5
+
+
+def test_only_the_attendance_sheet_can_set_half_rest(attendance_http):
+    """验收 7：员工会话只能读不能设；排班那扇门（单日覆盖）也设不了它。
+
+    这一条钉的是「写入口只有一处」：员工自己打不了，排班页那条 PUT 的 body 里塞
+    `half_rest` 也写不进去（它只认 `is_rest` / `shift_id` / `zone_id`）。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    shifts = _shift_ids(db)
+    _run(_scheduler(db).set_rule(employee_id, [shifts["白班"]]))
+    staff_session = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+
+    # 1) 员工 / 匿名都打不了这一页的写口。
+    client.cookies.clear()
+    anonymous = client.put(
+        f"/api/attendance/sheet/{employee_id}/{TODAY}", json={"half_rest": True}
+    )
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    denied = client.put(
+        f"/api/attendance/sheet/{employee_id}/{TODAY}", json={"half_rest": True}
+    )
+    assert (anonymous.status_code, denied.status_code) == (401, 401)
+    assert denied.json()["detail"] == "需要登录"
+    assert _assignment_rows(employee_id, TODAY) == [(shifts["白班"], 0)]
+
+    # 2) 排班页那条单日覆盖：body 里带 `half_rest` 也只会落回它自己那套校验，
+    #    标志一个都不写（要改成休得走 `is_rest`，那会**清掉**半天休）。
+    _as_admin(client, admin)
+    refused = client.put(
+        f"/api/scheduling/overrides/{employee_id}/{TODAY}", json={"half_rest": True}
+    )
+    assert refused.status_code == 400, refused.text
+    assert _assignment_rows(employee_id, TODAY) == [(shifts["白班"], 0)]
+
+    # 3) 考勤表页设得上 —— 与上面两条对照，「只有一处能设」才不是空话。
+    assert _half(client, admin, employee_id, TODAY).status_code == 200
+    assert _assignment_rows(employee_id, TODAY) == [(shifts["白班"], 1)]
+
+
+def test_half_rest_does_not_touch_the_hygiene_duty(attendance_http):
+    """验收 5：卫生的「当日分工」读到的仍是一个班次、一个工作区（半天休不改分工）。"""
+    from services.identity.duty import DutyRoster
+
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    shifts = _shift_ids(db)
+    _run(_scheduler(db).set_rule(employee_id, [shifts["白班"]]))
+
+    before = _run(DutyRoster(db).duty_for(employee_id, TODAY))
+    assert _half(client, admin, employee_id, TODAY).status_code == 200
+    after = _run(DutyRoster(db).duty_for(employee_id, TODAY))
+
+    # 半天休前后**逐字段一样**：那天仍是一个班次、一个工作区（没配区就是没配）。
+    assert after == before
+    assert (after["scheduled"], after["shift_id"], after["zone_id"]) == (
+        True,
+        shifts["白班"],
+        None,
+    )

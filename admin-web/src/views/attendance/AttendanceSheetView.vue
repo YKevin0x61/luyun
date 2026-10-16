@@ -15,6 +15,12 @@
  * 不写轮转规则、不动下个月。拒绝的理由（那天有未决的换班 / 请假、超出可补记窗口、
  * 班次已停用）由服务端给中文，这一层原样显示在那一格的下面。
  *
+ * 票 07（ADR 0114）：同一格上还有一颗「休半天」的按钮，走**同一条 PUT** 的另一个字段
+ * （`half_rest`）—— 那天仍然挂本来那个班次、仍然只有一行，只是只上半天；标上 / 取消
+ * 都只动那一个标志。这一页是**全仓唯一**能设置它的地方（排班月历 / 周表 / 员工端只读地
+ * 显示它）。它自己一颗按钮、不塞进那个班次下拉：下拉回答「那天上哪个班」，它回答
+ * 「上不上满一整天」。
+ *
  * 票 03 往卡片上加的是**假期台账**那一块：实际出勤 / 月例休 / 法定节假日补休 / 生日假 /
  * 年假 / 上月存假，与由它们相加得到的可用天数池、本月出勤天数、存假；展开能看算式。
  * 当月**只算不落库**，所以顶部明写「暂算值（未封账）」—— 这一页的数还会随排班与加班变。
@@ -29,6 +35,7 @@ import { useRouter } from 'vue-router'
 
 import { api } from '../../api/client'
 import {
+  HALF_REST_TEXT,
   dayStateText,
   formatDays,
   formatNetHours,
@@ -84,9 +91,14 @@ function shiftName(person, shiftId) {
   return shift ? shift.name : ''
 }
 
-/** 那一格上写什么：休 / 上班（跟班次）/ 待补；今天之后留空。 */
+/** 那一格上写什么：休 / 休半天 / 上班（跟班次）/ 待补；今天之后留空。 */
 function cellLabel(person, cell) {
-  if (cell.state === 'work') return shiftName(person, cell.shift_id) || dayStateText(cell.state)
+  if (cell.state === 'work') {
+    // 半天休（票 07）：那天仍然挂着班次，只是只上半天 —— 这一句必须排在班次名前面，
+    // 否则卡片上写个「白班」，店长与员工都以为要上整天（ADR 0114）。
+    if (cell.half_rest) return HALF_REST_TEXT
+    return shiftName(person, cell.shift_id) || dayStateText(cell.state)
+  }
   return dayStateText(cell.state)
 }
 
@@ -130,6 +142,31 @@ async function pick(person, cell, event) {
     sheet.value = await api.get('/api/attendance/sheet')
   } catch (err) {
     dayError.value = { business_date: cell.business_date, text: err.message || '这天没改成' }
+  } finally {
+    savingDate.value = ''
+  }
+}
+
+/** 标 / 取消「休半天」（票 07）：一次**单独**的动作 —— 只改结果行上那个标志，
+ *  班次、工作区与「那天上哪个班」都不动（ADR 0114）。
+ *
+ *  跟 `pick` 同一条 PUT、同一套做法（写之前收起编辑、重拉一次、失败就写在那一格
+ *  下面）：这样写完那一格立刻写着新的样子，服务端说没写成时也一个字都不改。 */
+async function toggleHalf(person, cell) {
+  if (savingDate.value) return
+  editingDate.value = ''
+  savingDate.value = cell.business_date
+  dayError.value = null
+  try {
+    await api.put(`/api/attendance/sheet/${person.id}/${cell.business_date}`, {
+      half_rest: !cell.half_rest,
+    })
+    sheet.value = await api.get('/api/attendance/sheet')
+  } catch (err) {
+    dayError.value = {
+      business_date: cell.business_date,
+      text: err.message || '这天的「休半天」没改成',
+    }
   } finally {
     savingDate.value = ''
   }
@@ -178,7 +215,8 @@ onMounted(() => {
         <p class="aSub">
           <template v-if="sheet">当月 {{ sheet.month }} · 今天 {{ sheet.today }} · </template>
           一人一张卡，打开就是当月：今天之后的日子留空，没铺到排班的那天写「待补」。
-          点一个已经过去的日子就能改它 —— 只改那一天，不动轮转规则。
+          点一个已经过去的日子就能改它 —— 只改那一天，不动轮转规则；那颗「休半天」
+          只把那天标成上半天，班次照旧。
         </p>
       </div>
       <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">
@@ -230,7 +268,10 @@ onMounted(() => {
             v-for="cell in person.cells"
             :key="cell.business_date"
             class="aDay"
-            :class="[`is-${cell.state || 'future'}`, { 'is-today': cell.is_today }]"
+            :class="[
+              `is-${cell.state || 'future'}`,
+              { 'is-today': cell.is_today, 'is-half': cell.state === 'work' && cell.half_rest },
+            ]"
             :title="cell.business_date"
           >
             <!-- 还没到的日子是一块**死的**格子（不渲染任何控件）：验收 45 说的是
@@ -261,6 +302,20 @@ onMounted(() => {
               <i class="aDayNum">{{ cell.day }}</i>
               <b class="aDayText">{{ cellLabel(person, cell) }}</b>
             </template>
+            <!-- 半天休（票 07 / ADR 0114）：那一格**有班次**（上班那一态）时才谈得上
+                 「只上半天」—— 休与待补的两天没有半天可标，所以这颗按钮不出现。
+                 它是**单独的**一次写：班次下拉回答「那天上哪个班」，这一颗回答
+                 「上不上满一整天」，两件事不塞进同一个控件。 -->
+            <button
+              v-if="editingDate === cell.business_date && cell.state === 'work'"
+              class="aHalfBtn"
+              type="button"
+              :disabled="Boolean(savingDate)"
+              :aria-pressed="cell.half_rest ? 'true' : 'false'"
+              @click="toggleHalf(person, cell)"
+            >
+              {{ cell.half_rest ? '取消休半天' : HALF_REST_TEXT }}
+            </button>
             <small v-if="errorOn(cell.business_date)" class="aDayErr" role="alert">
               {{ errorOn(cell.business_date) }}
             </small>
@@ -347,11 +402,24 @@ onMounted(() => {
   width: 100%; max-width: 100%; padding: 0; border: 0; background: transparent;
   color: var(--ink); font-size: var(--fs-11); text-align: center; text-align-last: center;
 }
+/* 「休半天」那颗（票 07）：跟下拉并排在这一格里。它是**一次单独的写**，所以是自己的
+   按钮而不是下拉的第四个选项 —— 下拉那一列是班次，混进一个动作会让人以为那天换班了。 */
+.aHalfBtn {
+  width: 100%; padding: 1px 2px; border: 1px solid var(--info); border-radius: var(--r-1);
+  background: transparent; color: var(--info);
+  font: inherit; font-size: var(--fs-11); line-height: 1.4; cursor: pointer;
+}
+.aHalfBtn:disabled { opacity: .5; cursor: default; }
+.aHalfBtn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 /* 服务端拒绝的理由写在**那一格**下面（不是页面顶端）：店长点的就是这一格。 */
 .aDayErr { font-size: var(--fs-11); line-height: 1.4; color: var(--danger-bright); text-align: center; }
 /* 三态各自的色：上班是常规（薄荷）、休淡下去、待补最醒目（琥珀，要人工确认）。 */
 .aDay.is-work { border-color: var(--line-strong); background: var(--ok-soft); }
 .aDay.is-work .aDayText { color: var(--ok); }
+/* 半天休（票 07）：仍然上班，只是只上半天 —— 自己一档色（信息蓝），跟「待补」的琥珀
+   与「上班」的薄荷都分得开。 */
+.aDay.is-half { border-color: var(--info); background: var(--info-soft); }
+.aDay.is-half .aDayText { color: var(--info); }
 .aDay.is-rest { background: transparent; }
 .aDay.is-rest .aDayText { color: var(--ink-faint); }
 .aDay.is-todo { border-color: var(--warn); background: transparent; }

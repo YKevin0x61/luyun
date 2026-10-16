@@ -37,9 +37,14 @@ _ERROR_DETAILS = {
     "not_migrated": (
         "考勤表要读的表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
         "migrations/pg/0005_scheduling.sql、migrations/pg/0021_overtime_entries.sql、"
-        "migrations/pg/0026_statutory_holidays.sql 与 "
-        "migrations/pg/0027_attendance_ledger.sql，然后刷新本页"
+        "migrations/pg/0026_statutory_holidays.sql、"
+        "migrations/pg/0027_attendance_ledger.sql 与 "
+        "migrations/pg/0028_staff_assignments_half_rest.sql，然后刷新本页"
     ),
+    # 逐日写口（票 07 的「休半天」）那三句。带 `{}` 的那几句由 `_bad_request` 填细节。
+    "invalid_business_date": "日期格式应该是 YYYY-MM-DD",
+    "out_of_month": "考勤表只算当月：只能改 {} 所在那个月的格子",
+    "half_rest_needs_shift": "那天没有班次（休 / 还没排到），标不上「休半天」：先给那天排一个班次",
 }
 
 _ERROR_STATUS = {
@@ -79,6 +84,11 @@ _PENDING_WORDS = {"leave": "请假", "swap": "换班"}
 
 def _bad_request(exc: AttendanceError) -> HTTPException:
     detail = _ERROR_DETAILS.get(exc.code, "考勤参数不合法")
+    # 带 `{}` 的模板由服务层放在 `args[0]` 的细节填（同 `_write_error`：用 `replace`
+    # 而不是 `format`，模板里出现一个字面花括号也不会变成 500）。
+    if "{}" in detail:
+        raw = exc.args[0] if exc.args else ""
+        detail = detail.replace("{}", str(raw) if raw else "？")
     logger.info("考勤请求被拒: code=%s", exc.code)
     return HTTPException(status_code=_ERROR_STATUS.get(exc.code, 400), detail=detail)
 
@@ -113,14 +123,18 @@ def _write_error(exc: SchedulingError) -> HTTPException:
 
 
 class DayEditRequest(BaseModel):
-    """逐日改格的输入：改成休（`is_rest`），或者换成某个班次（`shift_id`）。
+    """逐日改格的输入：改成休（`is_rest`），换成某个班次（`shift_id`），或者标「休半天」
+    （`half_rest`）。
 
-    两项都有默认值，所以缺字段不会变成 pydantic 的英文 422：什么都不给会落到服务层
-    那道闸上，回一句中文。
+    三项都有默认值，所以缺字段不会变成 pydantic 的英文 422：什么都不给会落到服务层
+    那道闸上，回一句中文。前两项是票 06 的「改这一天」，`half_rest` 是票 07 的**半天休**
+    —— 它是一次**单独**的动作（ADR 0114）：只改结果行上那个标志，班次、工作区、来源都
+    不动，所以不能与 `is_rest` / `shift_id` 一起发（两者一起发是 400，不是「猜一个」）。
     """
 
     is_rest: bool = False
     shift_id: Optional[int] = None
+    half_rest: Optional[bool] = None
 
 
 @router.get("/sheet")
@@ -148,17 +162,26 @@ async def set_attendance_day(
     db=Depends(get_db),
     _session: str = Depends(require_session),
 ) -> dict:
-    """把某人某一天改成休、或换成另一个启用中的班次 —— **只动那一天**（票 06）。
+    """把某人某一天改成休、换成另一个启用中的班次（票 06），或标「休半天」（票 07）。
 
-    复用排班的单日覆盖（`SchedulingStore.set_day_override`）：不动他的轮转规则、
-    不动同一个月的别的日子、不动下个月，超出自可补记窗口的日子照旧拒（`past_day`）。
-    那天还有**没批的**换班 / 请假申请时**拒绝**（409）且一个字都不写 —— 店长不该在
-    这一页把员工刚提的请求悄悄冲掉。
+    **改这一天**（票 06）复用排班的单日覆盖（`SchedulingStore.set_day_override`）：不动
+    他的轮转规则、不动同一个月的别的日子、不动下个月，超出自可补记窗口的日子照旧拒
+    （`past_day`）。那天还有**没批的**换班 / 请假申请时**拒绝**（409）且一个字都不写 ——
+    店长不该在这一页把员工刚提的请求悄悄冲掉。
 
-    写完按排班既有惯例广播：`_scheduling_nudge` 一人一条、scope 带他自己的
+    **「休半天」**（票 07，ADR 0114）走的是另一条路（`AttendanceStore.set_half_rest`）：
+    它只改结果行上的那个标志，**不是**一次单日覆盖 —— 那天仍然挂本来那个班次、仍然只有
+    一行、`source` 也不变（所以它没有「改完这天就跟规则不一样了」那个含义）。这是**全仓
+    唯一**能设置它的地方：排班月历 / 周表 / 员工端只读地显示它。
+
+    两条路写完都按排班既有惯例广播：`_scheduling_nudge` 一人一条、scope 带他自己的
     `employee_id`（员工连接只收得到与自己有关的那条，见 `services/realtime/hub.py`）。
     nudge 不带数据，员工手机收到后自己重拉 —— 与月历上改一天完全同一条链路。
     """
+    if payload.half_rest is not None:
+        return await _set_half_rest(
+            db, employee_id, business_date, bool(payload.half_rest), payload
+        )
     store = SchedulingStore(db)
     try:
         result = await store.set_day_override(
@@ -171,4 +194,28 @@ async def set_attendance_day(
         raise _write_error(exc) from exc
     # 被临时调走（或被改成休）的人手机上的「今天」页要跟着变 —— 跟月历那条 PUT 一样。
     await _scheduling_nudge("override_set", employee_id)
+    return result
+
+
+async def _set_half_rest(
+    db, employee_id: int, business_date: str, half_rest: bool, payload: DayEditRequest
+) -> dict:
+    """「休半天」那一支：先挡住「一次改两件事」，再交给服务层那扇唯一的写口。
+
+    `is_rest` 与 `shift_id` 与 `half_rest` 一起发是 400 —— 「改成休，但只休半天」不是
+    一句说得通的话（那天到底上不上班？），服务层也不该替调用方猜。
+    """
+    if payload.is_rest or payload.shift_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="「休半天」是一次单独的动作：不要再带班次或「改成休」；"
+            "要换班次 / 改成休就单独发一次",
+        )
+    store = AttendanceStore(db)
+    try:
+        result = await store.set_half_rest(employee_id, business_date, half_rest)
+    except AttendanceError as exc:
+        raise _bad_request(exc) from exc
+    # 员工手机上那一屏要跟着变（班次没变，但那天从「上班」变成了「上半天」）。
+    await _scheduling_nudge("half_rest_set", employee_id)
     return result

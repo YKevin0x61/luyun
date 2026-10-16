@@ -66,6 +66,22 @@ describe('店长端周表（员工 × 周）', () => {
     }
   })
 
+  it('半天休在格子上写一个「半」，只读（票 07 / ADR 0114）', () => {
+    // 那天仍然挂着班次（格子里照旧是班次缩写），只是旁边多一个「半」——
+    // 员工与店长都不会以为要上整天。**只读**的一位：这里没有设置它的控件，
+    // 设置它的地方只有考勤表页（考勤表那条 PUT 的 `half_rest`）。
+    expect(view).toMatch(/v-if="weekCellHalf\(employee, day\)"/)
+    expect(view).toMatch(/function weekCellHalf\(employee, day\)/)
+    expect(view).toMatch(/class="gW-half"/)
+    expect(view).toMatch(/cell\.half_rest \? '（休半天）' : ''/)
+    // 图例里解释那个「半」（只在真有这样的格子时才出现）。
+    expect(view).toMatch(/const weekHalfCount = computed/)
+    expect(view).toMatch(/class="gB-half"><i><\/i>半 = 休半天/)
+    // 周表上**没有**写它的路：那一行只有「刷」/「清」/ 班次 / 休。
+    expect(view).not.toMatch(/half_rest:\s*true/)
+    expect(view).not.toMatch(/half_rest:\s*!/)
+  })
+
   it('点一格＝立刻落笔；笔栏常驻并给页面留出底部空间', () => {
     // 票 14 修订（2026-10-13 用户真机裁定）：「还是之前点击方格就改写班次那种比较好」——
     // 格子从「选区手柄」改回**落笔点**：点一格 = 用笔栏上那支笔立刻写这一格

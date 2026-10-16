@@ -116,7 +116,8 @@ _ERROR_DETAILS = {
         "排班表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
         "migrations/pg/0005_scheduling.sql、0006_scheduling_zone_defaults.sql、"
         "0007_scheduling_overrides.sql、0008_scheduling_requests.sql、"
-        "0009_scheduling_swap.sql 与 0010_shift_duty_slot.sql，然后刷新本页"
+        "0009_scheduling_swap.sql、0010_shift_duty_slot.sql 与 "
+        "0028_staff_assignments_half_rest.sql，然后刷新本页"
     ),
 }
 

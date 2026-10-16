@@ -1536,6 +1536,16 @@ useNudgePull({
   color: var(--hy-amber);
 }
 
+/* 半天休（票 07 / ADR 0114）：那天**仍然上班**，只是只上半天 —— 跟「休」分开上色，
+   字号也降一档：它是一句话，不是一个班次名。颜色用语义令牌（`--info`），不新增
+   `--hy-*` 引用（设计护栏的存量棘轮只减不增）。 */
+.shift.half {
+  font-size: 30px;
+  line-height: 1.4;
+  letter-spacing: var(--ls-1);
+  color: var(--info);
+}
+
 /* 「今天没有你的班」是一句话不是两个大字：这句按正文大小排，不然会顶出屏幕。 */
 .shift.none {
   font-size: 20px;
