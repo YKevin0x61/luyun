@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { resolveVar } from './themeTokens.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../TodayMonthView.vue'), 'utf8')
@@ -140,15 +141,31 @@ describe('员工端「整月」页（票 06）', () => {
 
   it('半天休那格有自己的颜色与图例，不跟「休」「上班」混（票 07）', () => {
     // 判据在 util 里（`todayShift.test.js` 的四态表）；这一页只管上色与图例。
-    // 颜色走语义令牌（`--info`）而不是新增 `--hy-*`：设计护栏的存量棘轮只减不增。
-    expect(view).toMatch(/\.mD\.half \.s\s*\{[^}]*var\(--info\)/)
-    expect(view).toMatch(/\.dot\.half\s*\{[^}]*var\(--info\)/)
+    // 颜色走语义令牌（`--warn`）而不是新增 `--hy-*`：设计护栏的存量棘轮只减不增。
+    expect(view).toMatch(/\.mD\.half \.s\s*\{[^}]*var\(--warn\)/)
+    expect(view).toMatch(/\.dot\.half\s*\{[^}]*var\(--warn\)/)
     expect(view).toMatch(/class="dot half"[^<]*\/>休半天/)
     expect(copy).toContain("if (tone === 'half') return { text: '休半天', tone }")
     // 四态各自的名字都在图例上（少一条员工就猜「这格子什么意思」）。
     for (const word of ['上班', '休', '休半天', '还没排']) {
       expect(view).toContain(word)
     }
+  })
+
+  it('「休半天」与「请假」的令牌取值不同（C 批返工）', () => {
+    // 返工前的坑是「两个**不同名字**的令牌取了同一个值」：`--info` 与 `--hy-aqua`
+    // 都是 #5fd6e6，图例上两个色块看着是一回事。所以只断言名字不同是假绿 ——
+    // 这里把两个名字解析回令牌层里的**值**再比，值撞了这条就红。
+    const half = resolveVar(view, /\.mD\.half \.s\s*\{[^}]*var\((--[\w-]+)\)/)
+    const leave = resolveVar(view, /\.mD\.leave \.s\s*\{[^}]*var\((--[\w-]+)\)/)
+    expect(half.name).not.toBe(leave.name)
+    expect(half.value).not.toBe(leave.value)
+    // 图例那两个点必须跟格子同源（图例说一套、格子画一套是最阴的一种漂）。
+    const dotHalf = resolveVar(view, /\.dot\.half\s*\{[^}]*var\((--[\w-]+)\)/)
+    const dotLeave = resolveVar(view, /\.dot\.leave\s*\{[^}]*var\((--[\w-]+)\)/)
+    expect(dotHalf.value).toBe(half.value)
+    expect(dotLeave.value).toBe(leave.value)
+    expect(dotHalf.value).not.toBe(dotLeave.value)
   })
 
   it('is registered as a staff page on both sides', () => {

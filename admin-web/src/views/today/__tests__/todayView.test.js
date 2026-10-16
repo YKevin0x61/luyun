@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { resolveVar } from './themeTokens.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../TodayView.vue'), 'utf8')
@@ -89,6 +90,34 @@ describe('员工端「今天」页（原型 A）', () => {
     // 三态的判据读两遍就会漂：页面里不许再出现 scheduled / shift_id。
     expect(view).not.toMatch(/day\.scheduled/)
     expect(view).not.toMatch(/shift_id/)
+  })
+
+  it('「休半天」那行大字有自己的色，不跟「请假」同色（票 07 / C 批返工）', () => {
+    // 返工前 `.shift.half` 取 `--info`，而它的值跟「请假」的 `--hy-aqua` 一模一样
+    // （都是 #5fd6e6）—— 名字不同、看着同色，只断名字会假绿。这里把两个名字解析回
+    // 令牌层的值再比（`themeTokens.js`），值撞了就红。
+    const half = resolveVar(view, /\.shift\.half\s*\{[^}]*var\((--[\w-]+)\)/)
+    const leave = resolveVar(view, /\.shift\.leave\s*\{[^}]*var\((--[\w-]+)\)/)
+    expect(half.name).toBe('--warn')
+    expect(half.value).not.toBe(leave.value)
+  })
+
+  it('往后三天的格子认识「休半天」：不给它上班色（票 07 / C 批返工）', () => {
+    // 三格的类名来自同一个 `shiftTone(day)`（`.next3 .s` 上的 `:class`），所以
+    // `half` 这个类**本来就已经带上**了；返工前缺的是这条规则 —— 没有它就落回
+    // `.next3 .s` 的兜底色（上班的薄荷），员工看着那天跟平常上班一样。
+    expect(view).toMatch(/<span class="s" :class="shiftTone\(day\)"/)
+    const base = resolveVar(view, /\.next3 \.s\s*\{[^}]*color:\s*var\((--[\w-]+)\)/)
+    const half = resolveVar(view, /\.next3 \.s\.half\s*\{[^}]*var\((--[\w-]+)\)/)
+    const leave = resolveVar(view, /\.next3 \.s\.leave\s*\{[^}]*var\((--[\w-]+)\)/)
+    // 不是上班色（薄荷），也不是请假色 —— 三格里四态各自分得开。
+    expect(half.value).not.toBe(base.value)
+    expect(half.value).not.toBe(leave.value)
+    // 一色一处：跟卡上那行大字同源，改色只改一个地方。
+    const headline = resolveVar(view, /\.shift\.half\s*\{[^}]*var\((--[\w-]+)\)/)
+    expect(half.name).toBe(headline.name)
+    // 类名的来源仍是语气那一张表（页面不自己判 half_rest，也不另起一个类名）。
+    expect(copy).toMatch(/if \(day\.half_rest\) return 'half'/)
   })
 
   it('offers the three entries and no clock time anywhere', () => {
