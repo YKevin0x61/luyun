@@ -1,0 +1,36 @@
+-- 0028_staff_assignments_half_rest.sql
+--
+-- 半天休（考勤面，票 07）：给排班结果 `staff_assignments` 加一个「那天是否休半天」的
+-- 布尔式标志。见 `GLOSSARY.md` 的「半天休」与 `docs/adr/0114`。
+--
+-- 为什么是标志、不是第二个班次：排班有两条前提 ——「一个员工 × 一个营业日只有一行」
+-- （`staff_assignments` 的 `UNIQUE (tenant_id, employee_id, business_date)`）与「班次没有
+-- 起止时刻」（0005 的头注释，「一天一个班次值」）。建「上午半天 / 下午半天」两个专用班次
+-- 等于拿班次名当状态用，它会跟着进班次表、月历、周表与员工端；改唯一键让一天挂两个班次
+-- 等于重做半天排班，所有读排班的地方都要跟着改。所以取第三条：那天仍然挂它本来那个班次，
+-- 只在结果行上加这一个标志（ADR 0114）。
+--
+-- 谁写它：**只有考勤表页**（`services/attendance/store.py` 的 `AttendanceStore.set_half_rest`，
+-- 经 `PUT /api/attendance/sheet/{员工}/{营业日}`）。排班月历 / 周表 / 员工端只**读**它并显示
+-- 「休半天」—— 在排班页开第二扇设置它的门，就是同一个事实有两个写入方（GLOSSARY 的
+-- 「半天休」_Avoid_ 点名了这条）。
+--
+-- 谁不认它：卫生的「当日分工」（`services/identity/duty.py` 的 `DutyRoster`）读到的仍是一个
+-- 班次、一个工作区 —— 上了半天班照样要做那半天那一档日常检查，半天休不改分工。
+-- `duty.py` 的查询**一个字都不动**（连这一列都不 SELECT），所以没应用本脚本时它也照常工作。
+--
+-- 默认值：`NOT NULL DEFAULT 0`。加列是**加成性**变更，既有行一律回填 0（没有半天休），
+-- 既有查询（月历人数、周表、`/me`、当日分工）在应用前后的结果完全一样 —— 只有本票
+-- 显式读这一列的那几条路会多一个字段。
+--
+-- 布尔口径沿用仓库既有写法：BIGINT 0/1（同 `staff_shifts.is_active`、
+-- `hygiene_employees.approved`/`disabled`），不是 PG 的 BOOLEAN —— 0005 的头注释把这条
+-- 定在排班这一批表上，这里跟着它。判断一律写 `half_rest = 1`，不要写 `IS TRUE`。
+--
+-- 一个字都不改既有列：这一列只与「那天有没有班次」搭配使用，`shift_id IS NULL`（那天休）
+-- 的行上它没有意义 —— 写路径（排班 `set_override` 的「改成休」）会把这种行上的标志清成 0，
+-- 读路径（`AttendanceStore` / `SchedulingStore`）也只在 `shift_id` 非空时才认它。
+--
+-- 幂等：IF NOT EXISTS，可重复执行。这是**加成性**变更（加列带默认值），符合 README 的规矩。
+
+ALTER TABLE staff_assignments ADD COLUMN IF NOT EXISTS "half_rest" BIGINT NOT NULL DEFAULT 0;

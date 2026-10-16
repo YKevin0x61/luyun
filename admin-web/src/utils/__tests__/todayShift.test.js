@@ -37,6 +37,16 @@ const NOT_ROSTERED = {
 }
 // 行上写着 shift_id、但那条班次已经被删（票 11 管增删）：名字取不到。
 const ORPHAN = { business_date: '2026-09-25', scheduled: true, shift_id: 9, shift_name: null }
+// 票 07：半天休（ADR 0114）。那天**仍然有班次**（`scheduled=true`、`shift_id` 非空），
+// 只是只上半天 —— 员工页必须说「休半天」，否则员工会以为要上整天。
+const HALF = {
+  business_date: '2026-09-25',
+  scheduled: true,
+  shift_id: 3,
+  shift_name: '白班',
+  zone_name: '案板',
+  half_rest: true,
+}
 // 票 08：批过的请假。结果行跟「本来就休」长得一样（都没有班次），只有 `leave` 分得出。
 const LEAVE = {
   business_date: '2026-09-25',
@@ -112,6 +122,51 @@ describe('「休」和「还没排」是两件事（验收 3）', () => {
     expect(todayHeadline(undefined)).toBe('今天没有你的班')
     expect(todaySubline(null)).toBe('店长还没排到你')
     expect(todayTone(null)).toBe('none')
+  })
+})
+
+describe('半天休是第四态（票 07）', () => {
+  it('「还没排 / 休 / 休半天 / 上班」四态各说各的话', () => {
+    expect(shiftText(NOT_ROSTERED)).toBe('还没排')
+    expect(shiftText(REST)).toBe('休')
+    expect(shiftText(HALF)).toBe('休半天')
+    expect(shiftText(MORNING)).toBe('白班')
+    const words = [shiftText(NOT_ROSTERED), shiftText(REST), shiftText(HALF), shiftText(MORNING)]
+    expect(new Set(words).size).toBe(4)
+  })
+
+  it('半天休说「上半天班」，不许说成整天、也不许说成休', () => {
+    expect(todayHeadline(HALF)).toBe('休半天')
+    expect(todaySubline(HALF)).toBe('今天上半天班 · 案板')
+    expect(todaySubline({ ...HALF, zone_name: null })).toBe('今天上半天班')
+    expect(todayHeadline(HALF)).not.toBe(todayHeadline(REST))
+    expect(todayHeadline(HALF)).not.toBe(todayHeadline(MORNING))
+    // 语气自成一档：不跟「休」共用最弱的那一档（那会看着像不用上班）。
+    expect(shiftTone(HALF)).toBe('half')
+    expect(todayTone(HALF)).toBe('half')
+    expect(shiftTone(HALF)).not.toBe(shiftTone(REST))
+  })
+
+  it('整月格子里写「休半天」，跟「休」「请假」「已调整」都不同字不同色', () => {
+    expect(monthCell(HALF)).toEqual({ text: '休半天', tone: 'half' })
+    for (const other of [REST, LEAVE, ORPHAN]) {
+      expect(monthCell(HALF).text).not.toBe(monthCell(other).text)
+      expect(monthCell(HALF).tone).not.toBe(monthCell(other).tone)
+    }
+  })
+
+  it('往后三天那三格与点名那行也认这一档', () => {
+    expect(nextTwoLine([HALF, MORNING])).toBe('明天 休半天 · 后天 白班')
+    expect(myDayText(HALF)).toBe('休半天')
+  })
+
+  it('没有 half_rest 这一位的老载荷还是「上班」', () => {
+    // 服务端一定会给这个字段（`/me`、`/me/month` 都给了）；万一没有，
+    // 不许把「上班」猜成「休半天」。
+    expect(shiftText(MORNING)).toBe('白班')
+    expect(shiftText({ ...MORNING, half_rest: false })).toBe('白班')
+    expect(shiftText({ ...REST, half_rest: true })).toBe('休')
+    expect(shiftTone({ ...REST, half_rest: true })).toBe('rest')
   })
 })
 

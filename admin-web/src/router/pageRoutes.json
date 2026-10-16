@@ -148,6 +148,22 @@
       "public": false
     },
     {
+      "path": "/workbench/hr/attendance",
+      "title": "考勤表",
+      "group": "hr",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/hr/holidays",
+      "title": "节假日日历",
+      "group": "hr",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
       "path": "/workbench/floor/zones",
       "title": "卫生工作区",
       "group": "floor",

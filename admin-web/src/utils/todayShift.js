@@ -12,6 +12,10 @@
  * 班次），区别只在覆盖记录的 `kind` 上 —— 服务端读出来放这里，页面照它说「请假」，
  * 不许把请假说成「休」。
  *
+ * 票 07 起多一个 `half_rest`（ADR 0114）：那天**仍然上班**（`scheduled=true`、
+ * `shift_id` 非空），只是只上半天。它自己是一档 —— 四态是「还没排 / 休 / 休半天 /
+ * 上班」，混进哪一档都是错的：说成「上班」员工会以为要上整天，说成「休」他就不来了。
+ *
  * 整屏没有钟点（验收 5）：班次没有起止时刻，钟点只有卫生那边才有（逾期点），
  * 所以这里只碰营业日，不碰时刻。放在 util 里而不是页面里，是为了能用真单测钉住
  * 上面那张表 —— 页面模板的 grep 断言抓不住「休」被写成「还没排」。
@@ -34,6 +38,9 @@ export function shiftText(day) {
   if (day.leave) return '请假'
   if (!day.scheduled) return '还没排'
   if (day.shift_id == null) return '休'
+  // 票 07：半天休 —— 那天仍然上班，只是只上半天。这一句要排在班次名前面，
+  // 否则格子里写「白班」，员工以为要上整天（ADR 0114 的 Consequences）。
+  if (day.half_rest) return '休半天'
   // 行上写着班次、但那条班次已经没了：说「已调整」，不要假装那天是休。
   return day.shift_name || '班次已调整'
 }
@@ -44,21 +51,24 @@ export function todayHeadline(day) {
   if (day.leave) return '请假'
   if (!day.scheduled) return '今天没有你的班'
   if (day.shift_id == null) return '休'
+  if (day.half_rest) return '休半天'
   return day.shift_name || '班次已调整'
 }
 
-/** 那天的语气（五态五色）：'shift' 上班 / 'rest' 休 / 'leave' 请假（票 08）/
- *  'moved' 班次被删 / 'none' 还没排。
+/** 那天的语气（六态六色）：'shift' 上班 / 'rest' 休 / 'half' 休半天（票 07）/
+ *  'leave' 请假（票 08）/ 'moved' 班次被删 / 'none' 还没排。
  *
  *  票 05 审查记过一条：原来「班次已调整」跟「休」共用最弱的灰色，看着像那天休息。
  *  这里把各态拆开，「已调整」给琥珀色 —— 那天的班次没了，不等于那天不上班；
  *  「请假」给青色：是自己提的、店长批过的，跟「排班给了一天休」不是一回事。
+ *  「休半天」也自成一档：它既不是整整一天班，也不是一天休。
  */
 export function shiftTone(day) {
   if (!day) return 'none'
   if (day.leave) return 'leave'
   if (!day.scheduled) return 'none'
   if (day.shift_id == null) return 'rest'
+  if (day.half_rest) return 'half'
   return day.shift_name ? 'shift' : 'moved'
 }
 
@@ -75,6 +85,10 @@ export function todaySubline(day) {
   if (day.leave) return '今天请假'
   if (!day.scheduled) return '店长还没排到你'
   if (day.shift_id == null) return '今天休息'
+  // 票 07：上半天班也是上班 —— 工作区照挂（那半天他在那个区）。
+  if (day.half_rest) {
+    return day.zone_name ? `今天上半天班 · ${day.zone_name}` : '今天上半天班'
+  }
   // 验收 2：班次和工作区都落在这张卡上（原型里工作区挂在下面那张卫生卡上，
   // 那张卡这一票还没有）。工作区没配就只说班次。
   return day.zone_name ? `今天上班 · ${day.zone_name}` : '今天上班'
@@ -134,17 +148,19 @@ export function dayBeyondWindow(day, windowEnd) {
   return String(day.business_date) > end
 }
 
-/** 整月格子里写什么：班别 / 「休」/ 「请假」（票 08）/ 「已调整」/ 空（还没排）。
+/** 整月格子里写什么：班别 / 「休」/ 「休半天」（票 07）/ 「请假」（票 08）/ 「已调整」/
+ *  空（还没排）。
  *
  *  语气只有一张表（上面的 `shiftTone`）：这里只负责把语气翻成小格子里的话 ——
- *  休 → 「休」，请假 → 「请假」，班次被删 → 「已调整」（不许假装那天是休），
- *  还没铺到 → 空着。
- *  两处各写一份五态的话，改一处忘另一处就会漂（票 02 审查记过同一类问题）。
+ *  休 → 「休」，休半天 → 「休半天」（那天仍然上班，只是半天），请假 → 「请假」，
+ *  班次被删 → 「已调整」（不许假装那天是休），还没铺到 → 空着。
+ *  两处各写一份六态的话，改一处忘另一处就会漂（票 02 审查记过同一类问题）。
  */
 export function monthCell(day) {
   const tone = shiftTone(day)
   if (tone === 'none') return { text: '', tone }
   if (tone === 'rest') return { text: '休', tone }
+  if (tone === 'half') return { text: '休半天', tone }
   if (tone === 'leave') return { text: '请假', tone }
   if (tone === 'moved') return { text: '已调整', tone }
   return { text: day.shift_name, tone }

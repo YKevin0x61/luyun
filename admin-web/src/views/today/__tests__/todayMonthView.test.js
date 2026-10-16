@@ -138,6 +138,19 @@ describe('员工端「整月」页（票 06）', () => {
     expect(copy).toContain("if (tone === 'leave') return { text: '请假', tone }")
   })
 
+  it('半天休那格有自己的颜色与图例，不跟「休」「上班」混（票 07）', () => {
+    // 判据在 util 里（`todayShift.test.js` 的四态表）；这一页只管上色与图例。
+    // 颜色走语义令牌（`--info`）而不是新增 `--hy-*`：设计护栏的存量棘轮只减不增。
+    expect(view).toMatch(/\.mD\.half \.s\s*\{[^}]*var\(--info\)/)
+    expect(view).toMatch(/\.dot\.half\s*\{[^}]*var\(--info\)/)
+    expect(view).toMatch(/class="dot half"[^<]*\/>休半天/)
+    expect(copy).toContain("if (tone === 'half') return { text: '休半天', tone }")
+    // 四态各自的名字都在图例上（少一条员工就猜「这格子什么意思」）。
+    for (const word of ['上班', '休', '休半天', '还没排']) {
+      expect(view).toContain(word)
+    }
+  })
+
   it('is registered as a staff page on both sides', () => {
     expect(router).toMatch(/workbenchStaffPage\('\/workbench\/me\/month', 'today-month'/)
     expect(router).toMatch(/views\/today\/TodayMonthView\.vue/)

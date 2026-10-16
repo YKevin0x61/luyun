@@ -219,6 +219,19 @@ def _require_business_date(value: Any) -> str:
         raise SchedulingError("invalid_business_date", "invalid_business_date")
 
 
+def _is_half_rest(shift_id: Any, value: Any) -> bool:
+    """这一行是不是「休半天」（票 07 / ADR 0114）：**那天得有班次**，标志才作数。
+
+    `half_rest` 是 BIGINT 0/1（仓库口径的布尔，同 `staff_shifts.is_active`）。写路径
+    （`_write_day_row`）把「改成休」那天的标志清成 0，所以正常情况下不会出现
+    「`shift_id` 空 + 标志为 1」的行；这里对读到的行再挡一次 —— 手工 SQL / 历史数据里
+    那种行不该在页面上变成「休半天」（`休 + 休半天` 是自相矛盾的一句话）。
+    """
+    if shift_id is None:
+        return False
+    return bool(int(value or 0))
+
+
 def _clean_shift_name(value: Any) -> str:
     """班次名去掉两头空白；空、太长、保留词、带分隔符各报一句能照做的错（票 11）。
 
@@ -331,6 +344,30 @@ def _rule_anchor(rule: dict) -> date:
         return date.fromisoformat(rule["anchor_date"])
     except (TypeError, ValueError):
         raise SchedulingError("invalid_anchor", "invalid_anchor")
+
+
+def _peer_id(row: dict) -> int:
+    """申请里「对方」那一个员工号；请假没有这一项（回 -1，谁都不是）。
+
+    `peer_employee_id` 是 0009 才有的列：读路径在没有它时会退回另一份列清单
+    （`_select_request_rows`），此时 `row` 里根本没有这个键。
+    """
+    peer = row.get("peer_employee_id")
+    return -1 if peer in (None, "") else int(peer)
+
+
+def _request_touches(row: dict, employee_id: int, day: str) -> bool:
+    """这条申请管不管「这个人这一天」（区间两端都算）。
+
+    两个方向都算：我提的（``employee_id`` 是我）、别人问我换班的（``peer_employee_id``
+    是我）—— 票 09 的对方点头之前那条申请还没作数，但它已经挂在那一天的两个人身上了。
+    区间按 ISO 文本比就是按日期比（同 `_covers`）。状态由调用方先筛（只留还在等的
+    那几种），这里只管「人」与「天」。
+    """
+    employee_id = int(employee_id)
+    if employee_id not in (int(row["employee_id"]), _peer_id(row)):
+        return False
+    return row["start_date"] <= day <= row["end_date"]
 
 
 def _cycle_shift(rule: dict, business_date: str, anchor: Optional[date] = None) -> Optional[int]:
@@ -1132,6 +1169,32 @@ class SchedulingStore:
         「超出可补记窗口」和「还没排到」会按两个不同的营业日判（`beyond_window` 那句文案
         里的日期也会跟刚判过的那个不一样）。
         """
+        employee_id, day, shift, zone = await self._resolve_override(
+            employee_id, business_date, is_rest, shift_id, zone_id
+        )
+        await self._apply_override(employee_id, day, shift, zone)
+        return {
+            "employee_id": employee_id,
+            "business_date": day,
+            "shift_id": shift,
+            "zone_id": zone,
+            "is_rest": shift is REST,
+        }
+
+    async def _resolve_override(
+        self,
+        employee_id: int,
+        business_date: str,
+        is_rest: bool,
+        shift_id: Optional[int],
+        zone_id: Optional[int],
+    ) -> tuple[int, str, Optional[int], Optional[int]]:
+        """`set_override` 的**校验与定值**那一半：这一天该写成什么（班次 id / 工作区 id）。
+
+        **一个字节都不写**（全是读）—— 晚一步的那道闸（`set_day_override` 要查的未决申请）
+        走的就是「先把这一天算明白 → 再查闸 → 最后才落笔」这个次序，所以校验必须能单独
+        走一遍。返回 `(员工号, 营业日, 班次 id, 工作区 id)`；班次 id 为空就是「那天休」。
+        """
         employee_id = int(employee_id)
         day = _require_business_date(business_date)
         today = self.today()
@@ -1172,6 +1235,49 @@ class SchedulingStore:
                 # 没点名要哪个区 → 跟这个班次的固定区（没配过就是没有区，不是错误）
                 zone = (await self._zone_defaults_for(employee_id)).get(shift)
 
+        return employee_id, day, shift, zone
+
+    @_needs_migration
+    async def set_day_override(
+        self,
+        employee_id: int,
+        business_date: str,
+        is_rest: bool = False,
+        shift_id: Optional[int] = None,
+        zone_id: Optional[int] = None,
+    ) -> dict:
+        """``set_override`` 再加一道闸：**那天还有未决的换班 / 请假申请就不写**（票 06）。
+
+        考勤表页是店长逐日改格的第二个入口，而那张卡片上同时躺着别人刚提、还没批的
+        申请。跟月历上的单日覆盖唯一的区别就在这里：月历上批量落笔**只提醒不阻断**
+        （`set_overrides_batch` 的 `reminders`），这一页要的是**拒绝并说清**——店长在
+        一张写着「9/25 请假待批」的卡片上点「改成休」，不该把人家那条请求悄悄冲掉。
+        所以这里多回一个 `pending_request` 错误，由调用方翻成一句人话。
+
+        除这道闸之外**没有第二套写排班的方式**：校验、写覆盖记录与结果行、只动那一天、
+        可补记窗口，全部原样走 `set_override`（校验是它那一半 `_resolve_override`，
+        落笔是 `_apply_override`）。`pending_request` 的 `args[0]` 是
+        ``"leave"`` 或 ``"swap"``，API 层照它说「请假」还是「换班」。
+
+        **判据与批准端同一条**：当事人是这个人（提的、或被问的）、那天落在那条申请的
+        区间里（两端都算），而且**申请还没落定** —— `pending_manager`（等店长批）与
+        `pending_peer`（换班还在等对方点头）都算：两种状态批下来写的都是那一天，
+        而店长此刻手上正拿着那一天的格子。对方摇头、或申请人自己撤回之后
+        （`rejected` / `cancelled`）就不再挡。
+
+        **写前查**：先把这一天算明白（`_resolve_override`，全是读）、再读那道闸，
+        两道都过了才落笔。被拒的那一次**一个字节都不碰** `staff_assignments` 与
+        `scheduling_overrides` —— 原先那种「先写、再读、判出未决就按原样写回去」的补偿式
+        写法终态虽然一样，却在「写完到读完」那一瞬把那一行重写过一遍：一次「没写成」的
+        动作不该在库里留下任何写入。申请插入与「那天有没有未决的」读的是同一条连接，
+        所以员工在店长点下去之前提上来的申请照样读得到。
+        """
+        employee_id, day, shift, zone = await self._resolve_override(
+            employee_id, business_date, is_rest, shift_id, zone_id
+        )
+        pending = await self._pending_request_on(employee_id, day)
+        if pending is not None:
+            raise SchedulingError("pending_request", pending)
         await self._apply_override(employee_id, day, shift, zone)
         return {
             "employee_id": employee_id,
@@ -1180,6 +1286,27 @@ class SchedulingStore:
             "zone_id": zone,
             "is_rest": shift is REST,
         }
+
+    async def _pending_request_on(self, employee_id: int, day: str) -> Optional[str]:
+        """那天这个人有没有一条**还没落定**的申请：有就回 ``"leave"`` / ``"swap"``。
+
+        两种「还在等」都算（见 `set_day_override`）：等店长批的、以及换班里等对方点头的。
+        读不出来（0008 没应用）**不挡**：申请表不在时逐日改格照常能用，别让一次点格子
+        因为读不到申请而整页 500（口径同 `_pending_request_days` 的尽力而为）。
+        """
+        try:
+            rows = await self._request_rows()
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            await self._rollback_quietly()
+            logger.warning("待批申请读不了（0008 未应用？），这次逐日改格不挡: %s", exc)
+            return None
+        for row in rows:
+            if row.get("status") not in (STATUS_PENDING_MANAGER, STATUS_PENDING_PEER):
+                continue
+            if not _request_touches(row, employee_id, day):
+                continue
+            return KIND_SWAP if row.get("kind") == KIND_SWAP else KIND_LEAVE
+        return None
 
     @serialized_write
     async def _apply_override(
@@ -1305,7 +1432,19 @@ class SchedulingStore:
         source: str,
         stamp: str,
     ) -> None:
-        """把某人某天的结果行写成给定样子（有则改、无则插）。不自己上锁、不提交。"""
+        """把某人某天的结果行写成给定样子（有则改、无则插）。不自己上锁、不提交。
+
+        **写成「休」（`shift_id` 为空）时把 `half_rest` 一起清成 0**（票 07）：`休 + 休半天`
+        是自相矛盾的一行，而且标志留着的话，哪天这一格又被改回某个班次，它会**自己**变成
+        「休半天」—— 没人点过它。反过来，写成某个班次时**一个字都不动它**：店长改的是
+        「上哪个班」，不是「上不上这半天」（半天休只由考勤表页那扇门设/清，
+        `AttendanceStore.set_half_rest`），而且 `set_day_override` 判出未决申请要把这一天
+        **原样写回去**时，也不该顺手抹掉一个跟这次请求无关的决定。
+
+        清标志那条 UPDATE 才引用 `half_rest`（加列 0028）：没应用迁移的库上，写「休」会
+        报缺列并由 `_needs_migration` 翻成 503，**其余写路径（改班次、改区、铺规则）
+        照旧一个字都不碰它**。
+        """
         cur = await self._conn.execute(
             """SELECT id FROM staff_assignments
                WHERE employee_id = ? AND business_date = ?""",
@@ -1318,6 +1457,13 @@ class SchedulingStore:
                        (employee_id, business_date, shift_id, zone_id, source, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (employee_id, day, shift_id, zone_id, source, stamp, stamp),
+            )
+        elif shift_id is None:
+            await self._conn.execute(
+                """UPDATE staff_assignments
+                   SET shift_id = ?, zone_id = ?, source = ?, updated_at = ?, half_rest = 0
+                   WHERE employee_id = ? AND business_date = ?""",
+                (shift_id, zone_id, source, stamp, employee_id, day),
             )
         else:
             await self._conn.execute(
@@ -1551,7 +1697,6 @@ class SchedulingStore:
     def _covers(ranges: Optional[list[tuple[str, str]]], day: str) -> bool:
         """这一天在不在那几条申请区间里（两端都算）——ISO 文本按字典序比就是按日期比。"""
         return any(start <= day <= end for start, end in ranges or ())
-
     # ── 展开 ────────────────────────────────────────────────────────────
 
     @_needs_migration
@@ -1756,6 +1901,21 @@ class SchedulingStore:
             mapping = dict(row)
             overridden[mapping["business_date"]] = int(mapping["n"])
 
+        # 那天有几个人**休半天**（票 07）：他们仍然算进上面那个人数（那天确实上班），
+        # 这一位只让月历在格子上多报一句「有几个人只上半天」—— 半天休是结果行上的一个
+        # 标志，不改人数口径，所以单开一条查询、不往 `counts` 里掺。
+        cur = await self._conn.execute(
+            """SELECT business_date, COUNT(*) AS n FROM staff_assignments
+               WHERE business_date >= ? AND business_date < ? AND half_rest = 1
+                 AND shift_id IS NOT NULL
+               GROUP BY business_date""",
+            (first, next_month.isoformat()),
+        )
+        half_rest: dict[str, int] = {}
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            half_rest[mapping["business_date"]] = int(mapping["n"])
+
         today = self.today()
         days = []
         for day in _each_day(start, next_month):
@@ -1768,6 +1928,8 @@ class SchedulingStore:
                 "counts": {str(s["id"]): per_shift.get(s["id"], 0) for s in shifts},
                 "total": sum(per_shift.get(s["id"], 0) for s in shifts),
                 "overridden": overridden.get(key, 0),
+                # 那天几个人「休半天」（票 07）；0 = 没有（月历不画这个标记）。
+                "half_rest": half_rest.get(key, 0),
             })
 
         return {**self._month_frame(start, today, days), "shifts": shifts}
@@ -1791,28 +1953,37 @@ class SchedulingStore:
         同样是「这天没有班」，每人还带一个 `leave`：`True` 是**批了请假**，`False` 是本来
         就休。结果行里两者都是 `shift_id` 空，区别只在覆盖记录的 `kind`（票 08）——
         这个字段就是为那句「和本来就休看得出区别」给的判据，前端不自己猜。
+
+        `half_rest`（票 07 / ADR 0114）是「这个人这天只上半天」：他仍然在自己的班次那一
+        组里（那天确实上班），面板靠这个字段在他名字旁边写一句「休半天」。**只读** ——
+        设置它的地方只有考勤表页。
         """
         day = _require_business_date(business_date)
         names = await self._name_index()
         zone_names = await self._zone_name_index()
 
         cur = await self._conn.execute(
-            """SELECT employee_id, shift_id, zone_id, source FROM staff_assignments
+            """SELECT employee_id, shift_id, zone_id, source, half_rest
+               FROM staff_assignments
                WHERE business_date = ?""",
             (day,),
         )
-        by_shift: dict[Any, list[tuple[int, Optional[int], bool]]] = {}
+        by_shift: dict[Any, list[tuple[int, Optional[int], bool, bool]]] = {}
         for row in await cur.fetchall():
             mapping = dict(row)
             key = REST if mapping["shift_id"] is None else int(mapping["shift_id"])
             zone = None if mapping["zone_id"] is None else int(mapping["zone_id"])
             overridden = mapping["source"] == SOURCE_OVERRIDE
-            by_shift.setdefault(key, []).append((int(mapping["employee_id"]), zone, overridden))
+            half_rest = _is_half_rest(mapping["shift_id"], mapping["half_rest"])
+            by_shift.setdefault(key, []).append(
+                (int(mapping["employee_id"]), zone, overridden, half_rest)
+            )
 
         def person(
             employee_id: int,
             zone: Optional[int],
             overridden: bool,
+            half_rest: bool = False,
             leave: bool = False,
         ) -> dict:
             return {
@@ -1825,6 +1996,8 @@ class SchedulingStore:
                 # （`hygiene_zones` 的名字没有唯一约束，重名会挑错那个）。
                 "zone_id": zone,
                 "overridden": overridden,
+                # 半天休（票 07）：那天仍然在这个班次这一组里，只是上半天。
+                "half_rest": half_rest,
                 # 只有不上班的人可能是请假；上班的人这里恒为 False（票 08）。
                 "leave": leave,
             }
@@ -1851,8 +2024,8 @@ class SchedulingStore:
             "total": sum(group["count"] for group in groups),
             "off_count": len(rest_ids),
             "off_people": [
-                person(employee_id, zone, overridden, employee_id in leave_ids)
-                for employee_id, zone, overridden in rest_ids
+                person(employee_id, zone, overridden, leave=employee_id in leave_ids)
+                for employee_id, zone, overridden, _half in rest_ids
             ],
             # 过去的日子不改写（口径 5）：这天的覆盖撤不掉 —— 前端据此把「撤销」收起来，
             # 而不是给一个按了没反应的按钮。
@@ -1886,6 +2059,10 @@ class SchedulingStore:
         没规则的人整块沉底，内部同样按注册先后。前端不重排。
 
         窗口外照样返回 7 天、不报错：店长会往两头翻，翻到的那一周得是空的而不是 400。
+
+        `cells[].half_rest`（票 07 / ADR 0114）：这一格是**半天休** —— 那天仍然挂着
+        `shift_id` 那个班次（格子里照旧写班次缩写），只是旁边多一个「半」标记；店长在
+        周表上**只读**这一位，设置它的地方只有考勤表页。
         """
         today = self.today()
         if start in (None, ""):
@@ -1900,7 +2077,7 @@ class SchedulingStore:
 
         # 7 天一条 SQL：区间右开（`last + 1 天`），`business_date` 是 TEXT 列。
         cur = await self._conn.execute(
-            """SELECT employee_id, business_date, shift_id, zone_id, source
+            """SELECT employee_id, business_date, shift_id, zone_id, source, half_rest
                FROM staff_assignments
                WHERE business_date >= ? AND business_date < ?""",
             (first.isoformat(), shift_business_date(last.isoformat(), 1)),
@@ -1920,6 +2097,8 @@ class SchedulingStore:
                 "zone_id": None if mapping["zone_id"] is None else int(mapping["zone_id"]),
                 # 跟 `day_detail` 同一个判据：这一行是单日覆盖写的。
                 "overridden": mapping["source"] == SOURCE_OVERRIDE,
+                # 半天休（票 07）：只读的一位，周表照旧写班次缩写 + 一个「半」标记。
+                "half_rest": _is_half_rest(shift_id, mapping["half_rest"]),
             }
 
         days = []
@@ -2014,6 +2193,9 @@ class SchedulingStore:
                     "zone_id": zone_id,
                     "zone_name": None if zone_id is None else zone_names.get(zone_id),
                     "overridden": False if row is None else row["overridden"],
+                    # 半天休（票 07）：这一格是「只上半天」——**只读**的一位，周表照旧
+                    # 写班次缩写，旁边多一个「半」标记（设置它的地方只有考勤表页）。
+                    "half_rest": False if row is None else row["half_rest"],
                     # 只有不上班的人可能是请假（跟 `day_detail` 同一条口径）。
                     "leave": bool(
                         row is not None
@@ -2059,13 +2241,17 @@ class SchedulingStore:
 
         `leave=True` 是第三种「没有班」：**批了的请假**（票 08）。员工自己提的那条申请
         批下来那天，他该看到的不是「休」而是「请假」。
+
+        `half_rest`（票 07）是「那天上了半天班」：**仍然是上班那一态**（`scheduled=True`
+        且 `shift_id` 非空），只是员工页要说「休半天」而不是「上班」—— 否则员工会以为
+        要上整天（ADR 0114）。四态因此是：还没排 / 休 / 休半天 / 上班。
         """
         await self.expand(employee_id)
         first = self.today()
         count = max(int(days), 1)
         last = shift_business_date(first, count - 1)
         cur = await self._conn.execute(
-            """SELECT business_date, shift_id, zone_id FROM staff_assignments
+            """SELECT business_date, shift_id, zone_id, half_rest FROM staff_assignments
                WHERE employee_id = ? AND business_date >= ? AND business_date <= ?
                ORDER BY business_date""",
             (employee_id, first, last),
@@ -2098,6 +2284,9 @@ class SchedulingStore:
                 "zone_name": None if zone_id is None else zone_names.get(zone_id),
                 # 批了的请假（票 08）：「那天休」与「那天请假」是两句话。
                 "leave": key in leave_days,
+                # 半天休（票 07）：那天仍然上班（`shift_id` 非空），只是上半天。
+                # 员工页靠它把「上班」说成「休半天」（ADR 0114 的四态）。
+                "half_rest": row is not None and _is_half_rest(row["shift_id"], row["half_rest"]),
             })
         return {"today": first, "days": out}
 
@@ -2121,13 +2310,16 @@ class SchedulingStore:
 
         翻到过去的月份只显示已经铺过的日子（展开只往今天以后补，不回头），`window_end`
         之后的格子注定是「还没排」—— 跟店长月历同一个说法。
+
+        `half_rest`（票 07 / ADR 0114）：那一天是**半天休** —— 仍然是上班那一态
+        （`scheduled=True`、有班次），只是格子里写「休半天」而不是班别。
         """
         await self.expand(employee_id)
         start, next_month = _month_bounds(self.today()[:7] if month is None else month)
         first = start.isoformat()
 
         cur = await self._conn.execute(
-            """SELECT business_date, shift_id, zone_id FROM staff_assignments
+            """SELECT business_date, shift_id, zone_id, half_rest FROM staff_assignments
                WHERE employee_id = ? AND business_date >= ? AND business_date < ?
                ORDER BY business_date""",
             (employee_id, first, next_month.isoformat()),
@@ -2164,6 +2356,8 @@ class SchedulingStore:
                 "zone_name": None if zone_id is None else zone_names.get(zone_id),
                 # 跟 `my_days` 同一个字段、同一条口径：格子里的「请假」不是「休」。
                 "leave": key in leave_days,
+                # 半天休（票 07）：那一天仍然是上班（有班次），格子里写「休半天」。
+                "half_rest": row is not None and _is_half_rest(row["shift_id"], row["half_rest"]),
                 "staff_count": staff_count.get(key, 0),
             })
 

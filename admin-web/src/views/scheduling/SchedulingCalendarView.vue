@@ -96,6 +96,12 @@ const overriddenDays = computed(() =>
   ((calendar.value && calendar.value.days) || []).filter((day) => day.overridden > 0).length
 )
 
+// 这个月有几天有人「休半天」（票 07 / ADR 0114）：>0 时图例里多一句，免得格子上那个
+// 「半N」看起来像装饰。**只读** —— 设置它的地方只有考勤表页。
+const halfRestDays = computed(() =>
+  ((calendar.value && calendar.value.days) || []).filter((day) => day.half_rest > 0).length
+)
+
 // 没有班的人分两拨：批过假的（`leave`，服务层从覆盖记录的 `kind` 认出来）与本来就休的。
 // 两者在结果表里长得一样（`shift_id` 都是空），只有这里分得开 —— 不然超级管理员分不清
 // 「这人请假了」和「这人今天本来就休」，也分不清它跟票 07 手动改成的休。
@@ -461,6 +467,13 @@ function weekCellZone(employee, day) {
   return String(cell.zone_name || '')
 }
 
+/** 这一格是不是「休半天」（票 07 / ADR 0114）：那天仍然挂着班次，只是只上半天 ——
+ *  格子里在班次缩写后面加一个「半」。**只读**的一位（设置它的地方只有考勤表页）。 */
+function weekCellHalf(employee, day) {
+  const cell = cellOf(employee, day)
+  return Boolean(cell && cell.half_rest)
+}
+
 function weekCellClass(employee, day) {
   const cell = cellOf(employee, day)
   const blank = !cell || !cell.scheduled
@@ -493,9 +506,21 @@ function weekCellLabel(employee, day) {
   }
   const what = cell.shift_id === null || cell.shift_id === undefined
     ? (cell.leave ? '请假' : '休')
-    : `${cell.shift_name}${cell.zone_name ? `，${cell.zone_name}` : '，未配工作区'}`
+    : `${cell.shift_name}${cell.half_rest ? '（休半天）' : ''}` +
+      `${cell.zone_name ? `，${cell.zone_name}` : '，未配工作区'}`
   return `${employee.name} ${when}：${what}${cell.overridden ? '，已手动调整' : ''}${pick}`
 }
+
+// 这一周有几格是「休半天」（票 07）：>0 时图例里多一句，免得格子里那个「半」没人解释。
+const weekHalfCount = computed(() => {
+  let count = 0
+  for (const employee of weekEmployees.value) {
+    for (const day of weekDays.value) {
+      if (weekCellHalf(employee, day)) count += 1
+    }
+  }
+  return count
+})
 
 const weekOverriddenCount = computed(() => {
   let count = 0
@@ -1265,6 +1290,9 @@ useNudgePull({
               </span>
               <!-- 待批角标（spec US 11）：这天有等着批的申请。票 07 定标记时特意把琥珀留给
                    「待处理」、青点留给「这天被改过」—— 两种记号不能混。 -->
+              <!-- 半天休（票 07）：这天有几个人只上半天。只读的一位 —— 设置它的地方
+                   只有考勤表页（ADR 0114）；跟右上角那个「待批」的琥珀圆点分开摆。 -->
+              <span v-if="day.half_rest" class="half">半{{ day.half_rest }}</span>
               <span v-if="pendingMarks[day.business_date]" class="pend">
                 {{ pendingMarks[day.business_date] }}
               </span>
@@ -1276,6 +1304,7 @@ useNudgePull({
               <i :class="toneClass(shift.id)"></i>{{ shift.name }}
             </span>
             <span v-if="overriddenDays" class="gB-ov"><i></i>这天有改动</span>
+            <span v-if="halfRestDays" class="gB-half"><i></i>半N = 这天 N 人休半天</span>
             <span v-if="hasPendingMarks" class="gB-pend"><i></i>有申请等着批</span>
           </div>
           <p v-if="beyondNote" class="gB-note">{{ beyondNote }}</p>
@@ -1304,6 +1333,7 @@ useNudgePull({
                     @click="openDayEdit(person, group.shift.id)"
                   >
                     {{ person.name }}
+                    <em v-if="person.half_rest" class="gB-zone half">休半天</em>
                     <em v-if="person.zone" class="gB-zone">{{ person.zone }}</em>
                     <em v-else class="gB-zone off">未配区</em>
                   </button>
@@ -1517,7 +1547,13 @@ useNudgePull({
                         :disabled="!day.in_window"
                         @click="paintCell(employee, day)"
                       >
-                        <span>{{ weekCellText(employee, day) }}</span>
+                        <span>
+                          {{ weekCellText(employee, day) }}<i
+                            v-if="weekCellHalf(employee, day)"
+                            class="gW-half"
+                            title="休半天（只上半天）"
+                          >半</i>
+                        </span>
                         <!-- 第二行：工作区。没配区的格子这一行整条不渲染（见 `weekCellZone`）。 -->
                         <span v-if="weekCellZone(employee, day)" class="gW-zone">{{ weekCellZone(employee, day) }}</span>
                       </button>
@@ -1535,6 +1571,7 @@ useNudgePull({
               <span><i class="off"></i>休</span>
               <span><i class="leave"></i>假（批过的请假）</span>
               <span v-if="weekOverriddenCount" class="gB-ov"><i></i>青点 = 这天被单独改过（{{ weekOverriddenCount }} 处）</span>
+              <span v-if="weekHalfCount" class="gB-half"><i></i>半 = 休半天（{{ weekHalfCount }} 处）</span>
               <span v-if="hasPendingMarks" class="gB-pend"><i></i>有申请等着批</span>
             </div>
 
@@ -1824,6 +1861,13 @@ useNudgePull({
   font-family: var(--font-mono); font-size: 9.5px; font-weight: 700; line-height: 15px;
   text-align: center;
 }
+/* 半天休（票 07）：这天有几个人只上半天。摆在**左下**（右上留给待批那个圆点）、
+   用信息蓝 —— 语义令牌，不新增 `--hy-*` 引用（设计护栏的存量棘轮只减不增）。 */
+.gB-d .half {
+  position: absolute; bottom: 3px; left: 3px; height: 13px; padding: 0 3px;
+  border-radius: var(--r-full); border: 1px solid var(--info); color: var(--info);
+  font-family: var(--font-mono); font-size: 9px; line-height: 11px;
+}
 .gB-d.sel { border-color: var(--hy-mint); box-shadow: var(--hy-glow-mint); }
 /* 这天被单日覆盖改过（票 07）：右上角一个青点 —— 人数会变，但「改成休」那种改动
    在人数里根本看不出来，得有个跟人数无关的标记。 */
@@ -1842,6 +1886,7 @@ useNudgePull({
 .gB-legend span { color: var(--hy-faint); }
 .gB-legend .gB-ov i { background: var(--hy-aqua); }
 .gB-legend .gB-pend i { background: var(--hy-amber); }
+.gB-legend .gB-half i { background: var(--info); }
 .gB-card { margin-top: 14px; border: 1px solid var(--hy-line); border-radius: var(--hy-radius-lg); background: var(--hy-surface); padding: 13px 14px; }
 .gB-card-plain { margin-top: 0; }
 .gB-card-hd { display: flex; align-items: baseline; gap: 9px; padding-bottom: 11px; border-bottom: 1px solid var(--hy-line); }
@@ -1943,6 +1988,7 @@ useNudgePull({
 }
 .gB-zone.off { color: var(--hy-faint); }
 .gB-zone.leave { color: var(--hy-aqua); }  /* 批过的假：跟「休」和「未配区」都不一个色 */
+.gB-zone.half { color: var(--info); }  /* 休半天（票 07）：那天仍然上班，只是半天 */
 /* 单日覆盖编辑器（票 07）：点当天卡里的一个人，就地展开 —— 原型 B 里没有这一块，
    它是「那一天跟规则不一样」的唯一入口。 */
 .gD {
@@ -2018,6 +2064,11 @@ useNudgePull({
 /* 班次下面那行工作区名（2026-10-08 用户要的）：格子只有 ~39px 宽，所以是 9px 的小字、
    跟着班次那个色弱一档 —— 主信息仍然是班次那一个字。三个字的区名（明档1）单行放得下，
    再长的截断，不让它撑破格子。没配区的格子这一行不渲染（见 `weekCellZone`）。 */
+/* 周表格子里的「半」（票 07）：那天仍然挂着这个班次，只是只上半天 —— 跟在班次缩写
+   后面，小一号、信息蓝（语义令牌）。 */
+.gW-cell .gW-half {
+  margin-left: 1px; font-style: normal; font-size: 9px; color: var(--info);
+}
 .gW-cell .gW-zone {
   display: block; max-width: 100%; margin-top: 1px;
   font-size: 9px; line-height: 1.1; letter-spacing: -.02em; opacity: .75;

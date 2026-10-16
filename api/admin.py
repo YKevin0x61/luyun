@@ -23,6 +23,7 @@ from config import settings
 from database import ALL_TABLES, get_db
 from db_core.business_day import business_day_window
 from db_core.schema import (
+    ATTENDANCE_TABLES,
     AUTH_PHYSICAL_TABLES,
     HYGIENE_TABLES,
     OVERTIME_TABLES,
@@ -46,6 +47,7 @@ _ADMIN_READ_ONLY_TABLES = frozenset({
     *SCHEDULING_TABLES,
     *WECOM_SUBSCRIPTION_TABLES,
     *OVERTIME_TABLES,
+    *ATTENDANCE_TABLES,
 })
 _ADMIN_WRITABLE_TABLES = frozenset(
     table for table in ALL_TABLES
@@ -58,6 +60,7 @@ _ADMIN_TABLE_GROUPS = (
     ("scheduling", "排班", SCHEDULING_TABLES),
     ("wecom", "企微推送", WECOM_SUBSCRIPTION_TABLES),
     ("overtime", "人事", OVERTIME_TABLES),
+    ("attendance", "考勤", ATTENDANCE_TABLES),
     ("auth", "登录认证", AUTH_PHYSICAL_TABLES),
     ("external", "其他数据源", ("logs",)),
 )
@@ -100,6 +103,10 @@ def _reject_read_only_table_write(table_name: str) -> None:
         )
     if table_name in OVERTIME_TABLES:
         raise HTTPException(status_code=403, detail="人事表为只读表，请通过加班与补钟页面维护")
+    if table_name in ATTENDANCE_TABLES:
+        raise HTTPException(
+            status_code=403, detail="考勤表为只读表，请通过节假日日历页面维护"
+        )
     if table_name not in _ADMIN_WRITABLE_TABLES:
         raise HTTPException(status_code=403, detail="系统表禁止修改")
 
@@ -137,6 +144,8 @@ def _admin_catalog() -> Dict[str, Any]:
                 meta["read_only_reason"] = "请通过企微推送页面维护"
             elif table in OVERTIME_TABLES:
                 meta["read_only_reason"] = "请通过加班与补钟页面维护"
+            elif table in ATTENDANCE_TABLES:
+                meta["read_only_reason"] = "请通过节假日日历页面维护"
             redacted = sorted(_ADMIN_REDACTED_COLUMNS.get(table, ()))
             if redacted:
                 meta["redacted_columns"] = redacted

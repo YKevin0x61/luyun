@@ -293,6 +293,7 @@ useNudgePull({
         <div class="mLegend">
           <span><i class="dot shift" />上班</span>
           <span><i class="dot rest" />休</span>
+          <span><i class="dot half" />休半天</span>
           <span><i class="dot leave" />请假</span>
           <span><i class="dot moved" />班次已调整</span>
           <span><i class="dot none" />还没排</span>
@@ -516,6 +517,14 @@ useNudgePull({
   color: var(--hy-aqua);
 }
 
+/* 半天休（票 07 / ADR 0114）：那天仍然上班，只是只上半天。自己一档色 ——
+   既不是整整一天班（薄荷），也不是一天休（灰）。用语义令牌（`--info`），
+   不新增 `--hy-*` 引用（设计护栏的存量棘轮只减不增）。 */
+.mD.half .s {
+  color: var(--info);
+  font-size: 10.5px;
+}
+
 .mD.moved .s {
   color: var(--hy-amber);
   font-size: 10.5px;
@@ -580,6 +589,11 @@ useNudgePull({
 
 .dot.leave {
   background: var(--hy-aqua);
+}
+
+/* 半天休（票 07）：跟 `.mD.half` 同一个颜色来源（语义令牌 `--info`）。 */
+.dot.half {
+  background: var(--info);
 }
 
 .dot.moved {
