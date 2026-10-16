@@ -876,6 +876,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
                 "zone_id": zone,
                 "zone_name": "案板",
                 "overridden": True,
+                # 票 07：那天不是「休半天」（这个字段只在考勤表页设得上）。
+                "half_rest": False,
                 "leave": False,
             },
         )
@@ -894,6 +896,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
                 "zone_id": None,
                 "zone_name": None,
                 "overridden": False,
+                # 票 07：没有排班行的那天也没有「休半天」（键在、值是 False）。
+                "half_rest": False,
                 "leave": False,
             },
         )
