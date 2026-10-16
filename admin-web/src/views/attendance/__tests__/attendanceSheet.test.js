@@ -6,6 +6,9 @@
  * 导出按钮（导出是票 08）。这三条是验收里最容易在后续几票里被顺手破坏的：加一颗按钮、
  * 抄一个月份下拉，页面就悄悄变成了另一件事。所以在这里钉住。
  *
+ * 票 06 往集合里加了逐日改格那条 PUT，票 04 加了封账那条 POST —— 集合仍然是硬钉的：
+ * 多一条没人测的路径（导出、手填列）会让它红。
+ *
  * 另外钉「三处登记」：页面清单（`router/pageRoutes.json`）、vue-router（`index.js`）、
  * 服务端页面清单（`main.py` 的 `SPA_PAGE_ROUTES`）。漏掉任何一处就是「点得进去、
  * 一刷新 404」或者「导航里没有这一页」—— `tests/test_spa_page_routes.py` 从服务端那
@@ -31,17 +34,18 @@ const mainPy = readFileSync(join(here, '../../../../../main.py'), 'utf8')
 
 const PATH = '/workbench/hr/attendance'
 
-describe('考勤表页（票 01 / 票 06）', () => {
-  it('请求集合就这两条：读当月 + 改某一天', () => {
-    // 票 01 时这里钉的是「整页只有一条 GET」；票 06 加上了逐日改格的那一条 PUT，
-    // 票 05 又加上了手填列那一条 PUT。
-    // 集合本身仍然是硬钉的：多一条没人测的路径（导出、封账）会让它红。
+describe('考勤表页（票 01 / 票 06 / 票 04 / 票 05）', () => {
+  it('请求集合就这四条：读当月 + 改某一天 + 封账上月 + 存手填列', () => {
+    // 票 01 时这里钉的是「整页只有一条 GET」；票 06 加上了逐日改格那一条 PUT、
+    // 票 04 加上了封账那一 POST、票 05 又加上了手填列那一条 PUT。
+    // 集合本身仍然是硬钉的：多一条没人测的路径（导出）会让它红。
     const calls = [
       ...view.matchAll(/api\.(get|post|put|delete|patch)\(\s*[`']([^`']*)/g),
     ].map((match) => `${match[1]} ${match[2]}`)
     // 顺序不钉（页面里谁先写不影响契约），集合钉死。
     expect([...new Set(calls)].sort()).toEqual([
       'get /api/attendance/sheet',
+      'post /api/attendance/seal',
       'put /api/attendance/sheet/${person.id}/${cell.business_date}',
       'put /api/attendance/sheet/${person.id}/manual',
     ].sort())
@@ -160,6 +164,11 @@ const SHEET = {
   ],
 }
 
+// 封账（票 04）那几个固定值：mock 服务端封完账之后回给页面的那一刻与那个数。
+const SEALED_MONTH = '2026-08'
+const SEALED_AT = '2026-09-24T10:00:00+08:00'
+const SEALED_BALANCE = -21
+
 function jsonResponse(data, status = 200) {
   return {
     ok: status >= 200 && status < 300,
@@ -169,19 +178,37 @@ function jsonResponse(data, status = 200) {
   }
 }
 
-/** 一份「服务端」：GET 出表、PUT 改某一天（并记下收到的请求）。
+/** 一份「服务端」：GET 出表、PUT 改某一天、POST 封账上月（并记下收到的请求）。
  *
- *  `edits` 决定那次 PUT 回什么（票 06 的拒绝理由走的就是这条）。改成功之后，
- *  之后那次 GET 要回**改过的**表 —— 页面在这一页上立刻变，靠的就是「重拉一次」，
- *  这条 mock 必须真的跟着变，否则验的就只是本地状态自己骗自己。
+ *  `refuse` 决定那次 PUT 回什么（票 06 的拒绝理由走的就是这条）；`sealRefuse` 是封账
+ *  那条 POST 的拒绝理由（票 04：当月封不了 / 已经封过）。改成功之后，之后那次 GET 要回
+ *  **改过的**表 —— 页面在这一页上立刻变，靠的就是「重拉一次」，这条 mock 必须真的跟着变，
+ *  否则验的就只是本地状态自己骗自己。封账也一样：封下的结余成为每张卡上的「上月存假」。
  */
-function attendanceServer({ refuse = null, sheet = SHEET } = {}) {
+function attendanceServer({ refuse = null, sheet = SHEET, sealRefuse = null } = {}) {
   let current = JSON.parse(JSON.stringify(sheet))
   const puts = []
+  const seals = []
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url).split('?')[0]
     if (path === '/api/attendance/sheet' && (options.method || 'GET') === 'GET') {
-      return jsonResponse(current)
+      // 每次 GET 都给一个**新的**对象（真 HTTP 响应本来就是一串新解析出来的 JSON）：
+      // 回同一个引用的话，页面里 `sheet.value = await api.get(...)` 那一下是同一个值、
+      // 不触发重渲染，重拉之后的改动就永远画不出来（票 04 的封账回执正是这么发现的）。
+      return jsonResponse(JSON.parse(JSON.stringify(current)))
+    }
+    if (path === '/api/attendance/seal' && options.method === 'POST') {
+      seals.push(JSON.parse(options.body || '{}'))
+      if (sealRefuse) return jsonResponse({ detail: sealRefuse }, 409)
+      current.previous_month = { month: SEALED_MONTH, sealed_at: SEALED_AT }
+      current.employees.forEach((row) => {
+        if (row.leave) row.leave.previous_balance = SEALED_BALANCE
+      })
+      return jsonResponse({
+        month: SEALED_MONTH,
+        sealed_at: SEALED_AT,
+        sealed_employees: current.employees.length,
+      })
     }
     const manual = path.match(/^\/api\/attendance\/sheet\/(\d+)\/manual$/)
     if (manual && options.method === 'PUT') {
@@ -220,7 +247,7 @@ function attendanceServer({ refuse = null, sheet = SHEET } = {}) {
     }
     return jsonResponse({ detail: 'not found' }, 404)
   })
-  return { fetchMock, puts }
+  return { fetchMock, puts, seals }
 }
 
 async function mountSheet(server = attendanceServer()) {
@@ -354,6 +381,8 @@ const SHEET_WITH_LEAVE = {
   month: '2026-09',
   today: '2026-09-24',
   provisional: true,
+  // 上月的封账状态（票 04）：还没封过 —— 页面上这时候画的是「封账上月」那颗按钮。
+  previous_month: { month: '2026-08', sealed_at: null },
   days: [{ day: 1, business_date: '2026-09-01', is_today: false, is_future: false }],
   employees: [
     {
@@ -519,5 +548,71 @@ describe('考勤表页的手填列（票 05）', () => {
     // 手填列**不进员工档案**：页面这一块只打考勤表那一扇门（请求集合那条用例钉着），
     // 这里再钉一次「没有第二个写档案的接口」。
     expect(view).not.toMatch(/employees\/\$\{person\.id\}\/profile/)
+  })
+})
+
+// ── 票 04：封账上月（按钮 / 回执 / 拒绝） ──────────────────────────────────
+
+/** 顶部那一行里那颗「封账上月」（没有就是 null）。 */
+function sealButton(wrapper) {
+  return wrapper.findAll('.aActions .btn').find((btn) => btn.text().includes('封账上月')) || null
+}
+
+describe('考勤表页的封账上月（票 04）', () => {
+  it('没封过账时给一颗按钮，点一次打 POST，卡片上的「上月存假」随即换成刚封下的数', async () => {
+    const server = attendanceServer({ sheet: SHEET_WITH_LEAVE })
+    const { wrapper, seals, fetchMock } = await mountSheet(server)
+    // 打开只读一次：封账要等店长点下去。
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      '/api/attendance/sheet',
+    ])
+    expect(sealButton(wrapper).text()).toBe('封账上月')
+    expect(wrapper.find('.aSealed').exists()).toBe(false)
+    // 封账之前，卡片上那个数是人工期初（票 03 的 5.5）。
+    expect(
+      wrapper.findAll('.aCard .aLv').find((stat) => stat.find('i').text() === '上月存假')
+        .find('b').text(),
+    ).toBe('5.5 天')
+
+    await sealButton(wrapper).trigger('click')
+    await flushPromises()
+
+    // 封的是上个月，页面上不给月份 —— body 是空的。
+    expect(seals).toEqual([{}])
+    // 重拉回来的那张表：回执顶掉按钮，那个数换成封下的结余。
+    expect(wrapper.find('.aSealed').text()).toBe('2026-08 已封账（2026-09-24 10:00）')
+    expect(sealButton(wrapper)).toBe(null)
+    expect(
+      wrapper.findAll('.aCard .aLv').find((stat) => stat.find('i').text() === '上月存假')
+        .find('b').text(),
+    ).toBe('−21 天')
+  })
+
+  it('已经封过的月不给按钮，只交代什么时候封的（打开就是不动的）', async () => {
+    const sealed = {
+      ...SHEET_WITH_LEAVE,
+      previous_month: { month: SEALED_MONTH, sealed_at: SEALED_AT },
+    }
+    const { wrapper, fetchMock } = await mountSheet(attendanceServer({ sheet: sealed }))
+
+    expect(wrapper.find('.aSealed').text()).toBe('2026-08 已封账（2026-09-24 10:00）')
+    expect(sealButton(wrapper)).toBe(null)
+    expect(wrapper.findAll('.aActions .btn').map((btn) => btn.text())).toEqual(['回到月历'])
+    expect(fetchMock.mock.calls).toHaveLength(1) // 只读一次，没有多出来的请求
+  })
+
+  it('服务端拒了就把理由写出来，按钮照旧在（不装作封成功了）', async () => {
+    const refused = attendanceServer({
+      sheet: SHEET_WITH_LEAVE,
+      sealRefuse: '2026-09 还没过完，等它过完再封',
+    })
+    const { wrapper } = await mountSheet(refused)
+
+    await sealButton(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.aErr').text()).toBe('2026-09 还没过完，等它过完再封')
+    expect(sealButton(wrapper).text()).toBe('封账上月') // 没封成，按钮还在
+    expect(wrapper.find('.aSealed').exists()).toBe(false)
   })
 })

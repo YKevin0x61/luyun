@@ -103,3 +103,24 @@ export function manualStats(person) {
     { label: '是否离职', value: person?.resigned },
   ]
 }
+
+/** ISO 时刻 → `YYYY-MM-DD HH:MM`（票 04 的封账时刻就是这种串）。
+ *
+ *  只截字符串、**不在这里做时区换算**：服务端给的就是 +08:00 那一刻的墙上时间，
+ *  再经一次 `Date` 反而会因为浏览器时区把它挪走。截不出形状就原样显示。 */
+export function sealedAtText(value) {
+  const text = String(value || '')
+  const match = text.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/)
+  return match ? `${match[1]} ${match[2]}` : text
+}
+
+/** 上月封账那一句（票 04）：「2026-08 已封账（2026-09-24 10:00）」。
+ *
+ *  入参是服务端下发的 `previous_month`（`{month, sealed_at}`）。还没封账 / 老载荷没有
+ *  这一位时给空串 —— 页面据此决定画「封账上月」那颗按钮，还是画这句已经封过的回执。
+ *  封账行「看得出是什么时候封的」（验收 5）就靠这一句。 */
+export function sealedMonthText(previous) {
+  if (!previous || !previous.sealed_at) return ''
+  const when = sealedAtText(previous.sealed_at)
+  return previous.month ? `${previous.month} 已封账（${when}）` : `已封账（${when}）`
+}

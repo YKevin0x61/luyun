@@ -16,6 +16,8 @@ import {
   manualText,
   newHireText,
   pendingOvertimeText,
+  sealedAtText,
+  sealedMonthText,
   shiftNameDefault,
 } from '../attendanceSheet.js'
 
@@ -122,5 +124,27 @@ describe('手填列的写法（票 05）', () => {
       { label: '借调门店', value: null },
       { label: '是否离职', value: '是' },
     ])
+  })
+})
+
+describe('封账上月那句回执（票 04）', () => {
+  it('封过账的月说清是哪个月、什么时候封的', () => {
+    expect(
+      sealedMonthText({ month: '2026-08', sealed_at: '2026-09-24T10:00:00+08:00' }),
+    ).toBe('2026-08 已封账（2026-09-24 10:00）')
+  })
+
+  it('还没封账 / 老载荷没有这一位时是空串（页面照旧画那颗按钮）', () => {
+    expect(sealedMonthText({ month: '2026-08', sealed_at: null })).toBe('')
+    expect(sealedMonthText(null)).toBe('')
+    expect(sealedMonthText(undefined)).toBe('')
+  })
+
+  it('时刻只截字符串、不按浏览器时区挪（服务端给的就是北京时）', () => {
+    expect(sealedAtText('2026-09-24T10:00:00+08:00')).toBe('2026-09-24 10:00')
+    expect(sealedAtText('2026-09-24T23:05:00+08:00')).toBe('2026-09-24 23:05')
+    // 截不出形状（比如只给了日期）就原样显示，不编一个时刻出来。
+    expect(sealedAtText('2026-09-24')).toBe('2026-09-24')
+    expect(sealedAtText(null)).toBe('')
   })
 })
