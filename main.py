@@ -35,7 +35,9 @@ from api.runtime_settings import router as runtime_settings_router
 from api.logs import router as logs_router
 from api.scheduling import router as scheduling_router
 from api.overtime import router as overtime_router
-# 法定节假日日历（考勤面，票 02）：管理端专属，三条路由自己带 require_session。
+# 考勤表（考勤表导出 票 01）：只有管理端那一面，路由自己带 require_session。
+from api.attendance import router as attendance_router
+# 法定节假日日历（考勤表导出 票 02）：管理端专属，路由自己带 require_session。
 from api.attendance_holidays import router as attendance_holidays_router
 from api.tables import router as tables_router
 from api.analytics import router as analytics_router
@@ -1101,7 +1103,10 @@ app.include_router(scheduling_router)
 # 票 02 的管理面会自己带 require_session —— 都不挂 verify_admin_token，
 # 因为员工手机端根本没有 API token。
 app.include_router(overtime_router)
-# 法定节假日日历（考勤面，票 02）：三条路由都只认管理端会话（`require_session`），
+# 考勤表（考勤表导出票 01）同理：只有管理端那一面，自己带 require_session ——
+# 这一页有全店人的底薪与假期，员工那一档连页面都进不去。
+app.include_router(attendance_router)
+# 法定节假日日历（考勤表导出 票 02）：三条路由都只认管理端会话（`require_session`），
 # 匿名与员工 cookie 一律 401 —— 这张日历决定「法定节假日补休」怎么算，员工改不得。
 app.include_router(attendance_holidays_router)
 
@@ -1260,8 +1265,10 @@ SPA_PAGE_ROUTES = (
     # 加班统计（票 02）：超管的审批台 —— 待办队列 + 批 / 驳 / 作废 + 代员工补录。
     # 员工那一面在 `/workbench/me/overtime`（票 01），店长那一面在员工手机端（票 04）。
     "/workbench/hr/overtime",
-    # 节假日日历（考勤面，票 02）：超管逐日标「这天是法定节假日」+ 名称，一年一个网格。
-    # 同一批：漏一条就是直连 uvicorn 硬导航 404。
+    # 考勤表（考勤表导出票 01）：人事组的第七页 —— 当月一人一张卡。同一批：漏一条就是
+    # 直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
+    "/workbench/hr/attendance",
+    # 节假日日历（考勤表导出 票 02）：超管逐日标「这天是法定节假日」+ 名称，一年一个网格。
     "/workbench/hr/holidays",
     "/workbench/floor/zones",
     "/workbench/floor/daily",

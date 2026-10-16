@@ -113,7 +113,11 @@ const routes = [
   // 加班统计（票 02）：超管的审批台 —— 待办队列 + 批 / 驳 / 作废 + 代员工补录。员工那一面
   // 在 `/workbench/me/overtime`（票 01）；店长那一面在员工手机端（票 04，走能力键）。
   workbenchHrPage('/workbench/hr/overtime', 'workbench-hr-overtime', () => import('../views/overtime/HrOvertimeView.vue')),
-  // 节假日日历（考勤面，票 02）：超管逐日标「这天是法定节假日」并写名称。它是「法定节假日
+  // 考勤表（考勤表导出 票 01）：当月一人一张卡，逐日是「上班 / 休 / 待补」+ 职位 / 底薪 /
+  // 年限 / 是否新入职 / 当月净时长。**只读、只算当月** —— 逐日改格在票 06、手填列在票 05、
+  // 封账在票 04、导出在票 08，都往同一页上加。
+  workbenchHrPage('/workbench/hr/attendance', 'workbench-hr-attendance', () => import('../views/attendance/AttendanceSheetView.vue')),
+  // 节假日日历（考勤表导出 票 02）：超管逐日标「这天是法定节假日」并写名称。它是「法定节假日
   // 补休」的唯一依据（代码里没有年度表），所以这一页只给管理端这一档。
   workbenchHrPage('/workbench/hr/holidays', 'workbench-hr-holidays', () => import('../views/hr/HolidayCalendarView.vue')),
   hygieneAdminPage('/workbench/floor/zones', 'workbench-floor-zones', () => import('../views/hygiene/HygieneZonesView.vue')),

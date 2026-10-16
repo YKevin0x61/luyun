@@ -112,6 +112,8 @@ describe('页面清单（唯一来源）', () => {
       // 加班统计（overtime-and-reminders 票 02）：超管的审批台（待办 / 批驳 / 作废 / 代录），
       // 套的是人事那一组的壳。员工那一面在 `/workbench/me/overtime`（票 01）。
       '/workbench/hr/overtime',
+      // 考勤表（考勤表导出 票 01）：人事组的第七页 —— 当月一人一张卡，同套人事壳。
+      '/workbench/hr/attendance',
       // 节假日日历（考勤表导出 票 02）：超管逐日标「这天是法定节假日」，套人事那一组的壳。
       '/workbench/hr/holidays',
       // 现场七页（卫生）。
