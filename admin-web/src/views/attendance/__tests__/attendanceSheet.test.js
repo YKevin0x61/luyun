@@ -364,12 +364,12 @@ const LEAVE_LABELS = [
 
 describe('考勤表页的假期台账（票 03）', () => {
   it('顶部明写当月是暂算值（未封账）', async () => {
-    const { wrapper } = await mountSheet({ '/api/attendance/sheet': SHEET_WITH_LEAVE })
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_LEAVE }))
     expect(wrapper.find('.aProvisional').text()).toContain('暂算值（未封账）')
   })
 
   it('每张卡摊开假期那九项，存假带负号、可带 .5', async () => {
-    const { wrapper } = await mountSheet({ '/api/attendance/sheet': SHEET_WITH_LEAVE })
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_LEAVE }))
     const stats = wrapper.find('.aCard').findAll('.aLv')
     expect(stats.map((stat) => stat.find('i').text())).toEqual(LEAVE_LABELS)
     expect(stats.map((stat) => stat.find('b').text())).toEqual([
@@ -378,7 +378,7 @@ describe('考勤表页的假期台账（票 03）', () => {
   })
 
   it('算式收在「看算式」后面，摊开是六项相加', async () => {
-    const { wrapper } = await mountSheet({ '/api/attendance/sheet': SHEET_WITH_LEAVE })
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_LEAVE }))
     expect(wrapper.find('.aFormula summary').text()).toBe('看算式')
     expect(wrapper.find('.aFormulaText').text()).toBe(
       '实际出勤 12 天 + 月例休 2 天 + 法定节假日补休 1 天 + 生日假 1 天 + ' +
@@ -387,7 +387,7 @@ describe('考勤表页的假期台账（票 03）', () => {
   })
 
   it('未审批的加班标色并报出待批小时数，净时长那一格不动', async () => {
-    const { wrapper } = await mountSheet({ '/api/attendance/sheet': SHEET_WITH_LEAVE })
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_LEAVE }))
     const stat = wrapper.find('.aCard .aStat.is-pending')
     expect(stat.find('i').text()).toBe('当月净时长')
     expect(stat.find('b').text()).toBe('+3.5 小时') // 只算已批准的那份
