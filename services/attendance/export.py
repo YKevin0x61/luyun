@@ -236,7 +236,9 @@ def _write_employee(worksheet, row: int, employee: dict, day_count: int) -> None
     worksheet.row_dimensions[row].height = ROW_HEIGHT_BODY
     leave = employee.get("leave") or {}
     values = [
-        None,  # A 班次：留空 —— 系统里没有这一项（历史表靠手写）
+        # A 班次：台账上「本月班次」那一项（票 05）—— 填过的是他填的，没填过的是服务端
+        # 给的默认（当月众数）；当月一天排班都没有的人是空串/`None`，**留空**，不编一个名字。
+        employee.get("shift_name"),
         employee.get("name") or "",
         employee.get("job_title") or "",
         employee.get("base_salary"),

@@ -2387,3 +2387,78 @@ def test_the_export_door_is_the_same_admin_door_as_the_page(attendance_http):
 
     assert _export(client, admin).status_code == 200
 
+
+# ── 票 08 验收 5（返工）：A 列「班次」写台账里手填的那一项 ────────────────────
+#
+# 历史样表的 A 列就是台账上的「本月班次」（票 05）：填过的人写他填的那一项，没填过的
+# 写服务端给的那份默认（当月众数）。当月一天排班都没有的人**留空** —— 不编一个名字。
+
+
+def _row_of(worksheet, name):
+    """按姓名那一格定位那一行（导出件里没有员工号，B 列是唯一认得出人的一列）。"""
+    rows = [
+        row
+        for row in range(6, worksheet.max_row + 1)
+        if worksheet.cell(row=row, column=2).value == name
+    ]
+    assert len(rows) == 1, (name, rows)
+    return rows[0]
+
+
+def test_column_a_writes_the_shift_filled_in_the_ledger(attendance_http):
+    """验收 5 的前半句：台账里填过的人，A 列 == 他填的那一项（**压过**当月众数）。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    shifts = _shift_ids(db)
+    scheduler = _scheduler(db)
+    employee_id = _employee_id(accounts, "13800138201", "手填了班次")
+    # 当月铺成白班 3 天 + 夜班 1 天：众数是**白班**。台账里填的却是「早班」——两个
+    # 答案不一样，A 列写哪个就验出来了（写众数的那一版会在这里看到「白班」）。
+    _run(
+        scheduler.set_overrides_batch(
+            "shift",
+            shift_id=shifts["白班"],
+            items=[
+                {"employee_id": employee_id, "business_date": day}
+                for day in ("2026-09-01", "2026-09-02", "2026-09-03")
+            ],
+        )
+    )
+    _run(scheduler.set_override(employee_id, "2026-09-04", shift_id=shifts["夜班"]))
+    _put_ledger_row(db, employee_id, MONTH, shift_name="早班")
+
+    worksheet = _only_sheet(_workbook(_export(client, admin)))
+
+    assert worksheet.cell(row=_row_of(worksheet, "手填了班次"), column=1).value == "早班"
+
+
+def test_column_a_writes_the_months_mode_when_the_ledger_is_blank(attendance_http):
+    """验收 5 的后半句：没填过的人 A 列 == 服务端的默认（当月众数）；没排班的人留空。
+
+    众数用票 05 已有的造数形状验：白班 3 天 + 夜班 1 天 → 白班（并列取显示顺序那一半
+    由票 05 的用例钉着，这一条只管「导出件取的是这一项」）。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    shifts = _shift_ids(db)
+    scheduler = _scheduler(db)
+    scheduled = _employee_id(accounts, "13800138202", "没填过班次")
+    unscheduled = _employee_id(accounts, "13800138203", "这个月没排班")
+    _run(
+        scheduler.set_overrides_batch(
+            "shift",
+            shift_id=shifts["白班"],
+            items=[
+                {"employee_id": scheduled, "business_date": day}
+                for day in ("2026-09-01", "2026-09-02", "2026-09-03")
+            ],
+        )
+    )
+    _run(scheduler.set_override(scheduled, "2026-09-04", shift_id=shifts["夜班"]))
+
+    worksheet = _only_sheet(_workbook(_export(client, admin)))
+
+    assert worksheet.cell(row=_row_of(worksheet, "没填过班次"), column=1).value == "白班"
+    # 当月一天排班都没有的人：A 列**留空**（卡片上他也是空的），不编一个班次名出来。
+    assert worksheet.cell(row=_row_of(worksheet, "这个月没排班"), column=1).value is None
+
