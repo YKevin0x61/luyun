@@ -68,7 +68,7 @@ import asyncpg
 from db_core.utils import CHINA_TZ
 from services.business_day import current_business_date
 from services.holiday_calendar import HolidayCalendar, HolidayError
-from services.identity import EmployeeAccounts, serialized_write
+from services.identity import EmployeeAccounts, EmployeeAccountsError, serialized_write
 from services.identity.profile import (
     birthday_in_year,
     seniority_due_month,
@@ -449,7 +449,14 @@ class AttendanceStore:
         `employee_id` / `month`（别的列留给各自的写入口），冲突时**只有点名的那几列进
         `SET`**，`closing_balance` 与 `sealed_at` 一个都不在语句里 —— 哪怕这一次是新建
         那一行（`DO UPDATE` 因此也**不更新** `created_at`，那一行是什么时候建的仍然说得清）。
+
+        **写之前先认人**（返工 ④）：`employee_id` 上得真有一个员工，否则报
+        `unknown_employee` —— 不校验的话，一个手搓的 id 会在台账里建出一行**孤儿**
+        （`sheet()` 念的是花名册，那一行永远不显示，只有 Admin 数据浏览器看得见）。
+        逐日那条写口（排班的单日覆盖）本来就是这么校验的，这一条对齐它。
         """
+        # 先认人再谈写什么：「这个 id 上有没有人」比「你点名了哪几列」更根本。
+        await self._require_employee(employee_id)
         fields = [field for field in LEDGER_WRITE_FIELDS if field in values]
         if not fields:
             raise AttendanceError("nothing_to_write")
@@ -596,6 +603,11 @@ class AttendanceStore:
                         ledger.get((employee_id, month)),
                         default_shift_name=default_shift_names.get(employee_id),
                     ),
+                    # 「本月班次」的**原始**值（返工 ③）：台账上真写了什么，没填过（或清空）
+                    # 就是 `None`。上面那个 `shift_name` 一个字没改 —— 导出件的 A 列读的
+                    # 仍是它；页面上的输入框改绑这一位，一次「只改了是否住宿」的保存才不会
+                    # 把那条众数默认固化成「他定的值」。
+                    "shift_name_stored": _stored_shift_name(ledger.get((employee_id, month))),
                     # **人工期初**（故事 35）：上线当月由超管手工给一次的「上月末余额」。
                     # 读的是**本月那一行**的 `opening_balance`（票 03 的裁定），写口是那条
                     # 月级写口（`set_manual_columns`）。它与 `leave.previous_balance` 是两件
@@ -711,12 +723,17 @@ class AttendanceStore:
           （重算一遍历史只会得到另一个数，见 ADR 0113）。
         * 缺表（0027 没应用）照旧走 `not_migrated`。
 
-        名单与算式跟 `sheet()` **同一套**：这个人那个月在表上（当月有排班 / 加班记录，
-        或现在在职）就在封账名单里，算的是那个月的实际出勤、当月法定节假日补休、生日假、
-        年假与**再上一月**的存假。所以封下的数就是那个月卡片上那张账。
+        **名单 = 那个月有记录的人**（排过班或登过加班，即 `sheet()` 的 `on_record`）——
+        与卡片那条「在职的也在表上」的口径**刻意不同**：卡片说的是「现在谁在职」，
+        封账说的是「那个月谁有账」。一个当前在职、那个月却零排班零加班的人（9 月入职的
+        新人、整月请假的老人）在卡片上要看得见，但**不该被那个月封上一笔「出勤 0 天」的
+        负数**——封下去就是永久冻结的假账。封的算式与 `sheet()` 同一条：那个月的实际出勤、
+        当月法定节假日补休、生日假、年假与**再上一月**的存假。所以封下的数就是那个月
+        卡片上那张账。
 
         写入用 `ON CONFLICT ... WHERE sealed_at IS NULL` 兜并发：两个请求同时走到这里时
-        后一个不覆盖前一个（`sealed_employees` 是这次落在表上的人数）。
+        后一个不覆盖前一个。`sealed_employees` 报的是**这次真落库的行数**（被那一句跳过
+        的行不计）—— 它是「封了几个人」的答案，不是「循环转了几圈」。
         """
         today = self.today()
         current_month = today[:7]
@@ -747,7 +764,10 @@ class AttendanceStore:
         sealed = 0
         for employee in roster:
             employee_id = int(employee["id"])
-            if not _is_on_the_sheet(employee, employee_id in on_record):
+            # 名单只认**那个月有记录的人**（`on_record` = 排过班或登过加班）。
+            # `_is_on_the_sheet` 的「在职也进表」是**卡片**的口径，封账不跟它：
+            # 「现在在职」的人那个月可能一条记录都没有，给他封一笔负数就是永久冻结的假账。
+            if employee_id not in on_record:
                 continue
             leave = _leave_terms(
                 today=as_of,
@@ -764,7 +784,7 @@ class AttendanceStore:
                 ),
                 month=target,
             )
-            await self._conn.execute(
+            outcome = await self._conn.execute(
                 """INSERT INTO attendance_ledger
                    (tenant_id, employee_id, "month", closing_balance, sealed_at,
                     created_at, updated_at)
@@ -776,7 +796,10 @@ class AttendanceStore:
                    WHERE attendance_ledger.sealed_at IS NULL""",
                 (employee_id, target, leave["balance"], sealed_at, sealed_at, sealed_at),
             )
-            sealed += 1
+            # 数字只认**真落库的行**：上面那句 `ON CONFLICT ... WHERE sealed_at IS NULL`
+            # 可能把这一笔整条跳过（那一行已经被别人封过），此时影响行数是 0 —— 无条件
+            # `+1` 报出去的就是「循环转了几圈」，不是「写进去几个人」。
+            sealed += 1 if (outcome.rowcount or 0) > 0 else 0
         await self._conn.commit()
         logger.info("封账: month=%s rows=%s", target, sealed)
         return {"month": target, "sealed_at": sealed_at, "sealed_employees": sealed}
@@ -789,6 +812,24 @@ class AttendanceStore:
             (month,),
         )
         return [dict(row) for row in await cur.fetchall()]
+
+    async def _require_employee(self, employee_id: int) -> None:
+        """这个 id 上得真有一个员工，否则 `unknown_employee`（返工 ④）。
+
+        走公共层的 `get_profile_row`：找不到人时它抛 `employee_not_found` —— 员工档案的
+        真相只有一个出处（同排班那几处都从公共层念人）。这里翻成考勤这一层的
+        `unknown_employee`，HTTP 层映射成 **404**，与排班（`api/scheduling.py`）和
+        加班（`api/overtime.py`）里同名 code 的状态码一致。
+
+        停用的、待批准的员工都算「存在」：这里挡的是**压根没有这个人**，不是「这个人
+        现在能不能上考勤表」（那几个手填列本来就是给当月离职的人填的）。
+        """
+        try:
+            await EmployeeAccounts(self._write_lock_owner, now=self._now).get_profile_row(
+                int(employee_id)
+            )
+        except EmployeeAccountsError as exc:
+            raise AttendanceError("unknown_employee", str(employee_id)) from exc
 
 
 # 卡片上那四个**手填**列（票 05），列名与 `0027_attendance_ledger.sql` 一一对应：
@@ -824,6 +865,21 @@ def _manual_columns(row: Optional[dict], *, default_shift_name: Optional[str]) -
     # 不能靠它自己反推「这是默认还是他定的」。
     values["default_shift_name"] = _text(default_shift_name)
     return values
+
+
+def _stored_shift_name(row: Optional[dict]) -> Optional[str]:
+    """台账那一行上「本月班次」的**原始**值（没有那一行 / 没填过 / 清空 = `None`）。
+
+    与 `_manual_columns` 的 `shift_name` 刻意分开：那是「这一格该显示的值」（没填过时是
+    当月众数），这是「他自己到底填过什么」。卡片把这一位给页面上的输入框 —— 输入框读
+    `shift_name` 的话，店长只改「是否住宿」再点保存，就会把那条**默认值**当成他填的值
+    写进台账，从此再也不跟排班变（返工 ③）。**导出件的 A 列读的仍是 `shift_name`**：
+    那一格要的是「该显示什么」。空串按没填（`_text` 的口径，同那四个手填列）。
+
+    写回执（`set_manual_columns`）里不给这一位：回执说的是**这一次写的结果**，那一次
+    点名写了什么调用方手里就有，两位在回执里必然相等。
+    """
+    return _text(row.get("shift_name")) if row else None
 
 
 def _text(value: Any) -> Optional[str]:
