@@ -333,6 +333,30 @@ def _rule_anchor(rule: dict) -> date:
         raise SchedulingError("invalid_anchor", "invalid_anchor")
 
 
+def _peer_id(row: dict) -> int:
+    """申请里「对方」那一个员工号；请假没有这一项（回 -1，谁都不是）。
+
+    `peer_employee_id` 是 0009 才有的列：读路径在没有它时会退回另一份列清单
+    （`_select_request_rows`），此时 `row` 里根本没有这个键。
+    """
+    peer = row.get("peer_employee_id")
+    return -1 if peer in (None, "") else int(peer)
+
+
+def _request_touches(row: dict, employee_id: int, day: str) -> bool:
+    """这条申请管不管「这个人这一天」（区间两端都算）。
+
+    两个方向都算：我提的（``employee_id`` 是我）、别人问我换班的（``peer_employee_id``
+    是我）—— 票 09 的对方点头之前那条申请还没作数，但它已经挂在那一天的两个人身上了。
+    区间按 ISO 文本比就是按日期比（同 `_covers`）。状态由调用方先筛（只留还在等的
+    那几种），这里只管「人」与「天」。
+    """
+    employee_id = int(employee_id)
+    if employee_id not in (int(row["employee_id"]), _peer_id(row)):
+        return False
+    return row["start_date"] <= day <= row["end_date"]
+
+
 def _cycle_shift(rule: dict, business_date: str, anchor: Optional[date] = None) -> Optional[int]:
     """规则在那一天排的是哪个班（`None` = 休）。
 
@@ -1181,6 +1205,126 @@ class SchedulingStore:
             "is_rest": shift is REST,
         }
 
+    @_needs_migration
+    async def set_day_override(
+        self,
+        employee_id: int,
+        business_date: str,
+        is_rest: bool = False,
+        shift_id: Optional[int] = None,
+        zone_id: Optional[int] = None,
+    ) -> dict:
+        """``set_override`` 再加一道闸：**那天还有未决的换班 / 请假申请就不写**（票 06）。
+
+        考勤表页是店长逐日改格的第二个入口，而那张卡片上同时躺着别人刚提、还没批的
+        申请。跟月历上的单日覆盖唯一的区别就在这里：月历上批量落笔**只提醒不阻断**
+        （`set_overrides_batch` 的 `reminders`），这一页要的是**拒绝并说清**——店长在
+        一张写着「9/25 请假待批」的卡片上点「改成休」，不该把人家那条请求悄悄冲掉。
+        所以这里多回一个 `pending_request` 错误，由调用方翻成一句人话。
+
+        除这道闸之外**没有第二套写排班的方式**：校验、写覆盖记录与结果行、只动那一天、
+        可补记窗口，全部原样走 `set_override`。`pending_request` 的 `args[0]` 是
+        ``"leave"`` 或 ``"swap"``，API 层照它说「请假」还是「换班」。
+
+        **判据与批准端同一条**：当事人是这个人（提的、或被问的）、那天落在那条申请的
+        区间里（两端都算），而且**申请还没落定** —— `pending_manager`（等店长批）与
+        `pending_peer`（换班还在等对方点头）都算：两种状态批下来写的都是那一天，
+        而店长此刻手上正拿着那一天的格子。对方摇头、或申请人自己撤回之后
+        （`rejected` / `cancelled`）就不再挡。
+
+        **先写、再读一次那道闸**：申请插入与「那天有没有未决的」读的是**同一条连接**，
+        所以员工在店长点下去的那一瞬间提上来的申请也读得到（提交后才读，读到的一定是
+        最新的那份）。判出未决就把那一天**恢复成写之前的样子**（覆盖记录与结果行都按
+        原样写回去，本来没有覆盖就摘掉、按现在的规则重算）—— 客户端的「没写进去」
+        因此是可观测的：不是「回到规则」，是「跟点之前一模一样」。
+        """
+        # 先记下这一天现在长什么样：判出未决时要**原样写回去**。覆盖记录是那一天
+        # 唯一的事实来源（结果行可能被规则重铺、也可能本来就丢过），所以按它恢复。
+        before = await self._day_override_row(int(employee_id), business_date)
+        result = await self.set_override(
+            employee_id,
+            business_date,
+            is_rest=is_rest,
+            shift_id=shift_id,
+            zone_id=zone_id,
+        )
+        pending = await self._pending_request_on(result["employee_id"], result["business_date"])
+        if pending is not None:
+            await self._restore_day_override(result["employee_id"], result["business_date"], before)
+            raise SchedulingError("pending_request", pending)
+        return result
+
+    async def _day_override_row(self, employee_id: int, business_date: str) -> Optional[dict]:
+        """某人某天**现在**的覆盖记录（没有则 ``None``）；不自己上锁、不提交。
+
+        只读三件事：`shift_id`（`None` = 那天休）、`zone_id`、`kind` ——
+        `_restore_day_override` 照着它们原样写回去。日期先规整过（调用方是
+        `set_day_override`，`day` 已经被它校验过一遍）。
+        """
+        cur = await self._conn.execute(
+            """SELECT shift_id, zone_id, kind FROM scheduling_overrides
+               WHERE employee_id = ? AND business_date = ?""",
+            (int(employee_id), business_date),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        mapping = dict(row)
+        return {
+            "shift_id": None if mapping["shift_id"] is None else int(mapping["shift_id"]),
+            "zone_id": None if mapping["zone_id"] is None else int(mapping["zone_id"]),
+            "kind": mapping["kind"],
+        }
+
+    @serialized_write
+    async def _restore_day_override(
+        self, employee_id: int, day: str, before: Optional[dict]
+    ) -> None:
+        """把这一天恢复成 `before`（`set_day_override` 判出未决申请时用）。
+
+        `before` 是那次写入**之前**的覆盖记录：有就照它原样写回（连 `kind` 一起，
+        比如那天本来就是批准过的请假），没有就把覆盖记录摘掉、结果行按**现在的规则**
+        重算 —— 后者与 `clear_override` 是同一条路（规则没铺到的过去那天回到「没有行」）。
+        """
+        if before is None:
+            await self._delete_override_row(employee_id, day)
+            await self._restore_day(employee_id, day, self.today())
+        else:
+            await self._write_override_row(
+                employee_id, day, before["shift_id"], before["zone_id"], before["kind"], self._now_iso()
+            )
+            await self._write_day_row(
+                employee_id, day, before["shift_id"], before["zone_id"], SOURCE_OVERRIDE, self._now_iso()
+            )
+        await self._conn.commit()
+        logger.info(
+            "逐日改格撤销（那天有未决申请）: employee_id=%s day=%s 恢复成=%s",
+            employee_id,
+            day,
+            "原来的覆盖" if before is not None else "规则 / 没有行",
+        )
+
+    async def _pending_request_on(self, employee_id: int, day: str) -> Optional[str]:
+        """那天这个人有没有一条**还没落定**的申请：有就回 ``"leave"`` / ``"swap"``。
+
+        两种「还在等」都算（见 `set_day_override`）：等店长批的、以及换班里等对方点头的。
+        读不出来（0008 没应用）**不挡**：申请表不在时逐日改格照常能用，别让一次点格子
+        因为读不到申请而整页 500（口径同 `_pending_request_days` 的尽力而为）。
+        """
+        try:
+            rows = await self._request_rows()
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            await self._rollback_quietly()
+            logger.warning("待批申请读不了（0008 未应用？），这次逐日改格不挡: %s", exc)
+            return None
+        for row in rows:
+            if row.get("status") not in (STATUS_PENDING_MANAGER, STATUS_PENDING_PEER):
+                continue
+            if not _request_touches(row, employee_id, day):
+                continue
+            return KIND_SWAP if row.get("kind") == KIND_SWAP else KIND_LEAVE
+        return None
+
     @serialized_write
     async def _apply_override(
         self,
@@ -1551,7 +1695,6 @@ class SchedulingStore:
     def _covers(ranges: Optional[list[tuple[str, str]]], day: str) -> bool:
         """这一天在不在那几条申请区间里（两端都算）——ISO 文本按字典序比就是按日期比。"""
         return any(start <= day <= end for start, end in ranges or ())
-
     # ── 展开 ────────────────────────────────────────────────────────────
 
     @_needs_migration
