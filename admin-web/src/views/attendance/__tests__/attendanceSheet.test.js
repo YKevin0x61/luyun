@@ -1474,11 +1474,11 @@ describe('考勤表页的期末存假（票 09）', () => {
     expect(card.find('.aClosingSealed').text()).toContain('这个月已经封账')
   })
 
-  // 这是**后端还没并进来**时的降级那一态（票 09 报告里点名过）：真载荷里没有「当月是否
-  // 已封账」这一位，只有 `previous_month.sealed_at`。本页只显示当月、而封账封的是**已经
-  // 过完的**月，所以「上月封过账」在本页上就是「这一个月的结余已经定稿」。后端补上当月那
-  // 一位（顶层或本月那一行）之后，上面那两条的判据先生效，这一段降级自动不再被用到。
-  it('后端只给了 `previous_month.sealed_at` 时也锁定（降级那一态）', async () => {
+  // **反向钉住一条很容易踩的错**：真载荷里现在只有 `previous_month.sealed_at`（**上月**的
+  // 封账时刻），没有任何「**当月**是否已封账」的位。绝不能拿它当本月的锁定判据 ——
+  // 上月封账说的是「本月的期初定了」，本月的期末照样要能填；拿它当判据，门店**第一次封账
+  // 之后期末就永远填不了**。真正的锁在服务端那条月级写口上（封账后写 `closing_balance` → 409）。
+  it('只给了 `previous_month.sealed_at` 时**不**锁定（上月封账 ≠ 本月定稿）', async () => {
     const fallback = {
       ...SHEET_WITH_CLOSING,
       previous_month: { month: '2026-08', sealed_at: SEALED_AT },
@@ -1486,9 +1486,9 @@ describe('考勤表页的期末存假（票 09）', () => {
     const { wrapper } = await mountSheet(attendanceServer({ sheet: fallback }))
     const card = wrapper.findAll('.aCard')[0]
 
-    expect(closingInputOf(card).element.disabled).toBe(true)
-    expect(card.find('.aOpeningInput').element.disabled).toBe(true)
-    expect(card.find('.aClosingSealed').text()).toContain('这个月已经封账')
+    expect(closingInputOf(card).element.disabled).toBe(false)
+    expect(card.find('.aOpeningInput').element.disabled).toBe(false)
+    expect(card.find('.aClosingSealed').exists()).toBe(false)
   })
 
   it('还没封过账时两个框都能写（默认那一态，既有行为不破）', async () => {

@@ -245,6 +245,11 @@ describe('封账后那一格锁定（票 09）', () => {
   it('没封过账时按「还没封」画', () => {
     expect(isMonthSealed({ month: '2026-09', sealed_at: null })).toBe(false)
     expect(isMonthSealed({ previous_month: { month: '2026-08', sealed_at: null } })).toBe(false)
+    // **上月封过账也不算本月锁定**：那是本月的期初定了，本月的期末还是可以填的。
+    // 拿 `previous_month.sealed_at` 当判据，门店第一次封账之后期末就再也填不了。
+    expect(
+      isMonthSealed({ previous_month: { month: '2026-08', sealed_at: '2026-09-24T10:00:00+08:00' } }),
+    ).toBe(false)
     expect(isMonthSealed(null)).toBe(false)
     expect(isMonthSealed(undefined)).toBe(false)
   })
