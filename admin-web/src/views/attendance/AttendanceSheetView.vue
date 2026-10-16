@@ -71,11 +71,13 @@ const state = ref('loading') // 'loading' | 'ready' | 'error'
 const errorText = ref('')
 const sheet = ref(null)
 
-/** 正在改的那一格（`营业日` 或 null）与正在等回执的那一格。 */
-const editingDate = ref('')
+/** 正在改的那一格（`{ employeeId, date }` 或 null）与正在等回执的那一格。
+ *  编辑态按「**这个人 + 这一天**」记，不按日期记：店长是在某人的那张卡上点某一天的，
+ *  只按日期记会让每张含这一天的卡都开一条编辑带（父级裁定，见 64 号截图）。 */
+const editing = ref(null)
 const savingDate = ref('')
 /** 那一格上要显示的话（服务端拒绝的理由）。 */
-const dayError = ref(null) // { business_date, text } | null
+const dayError = ref(null) // { employeeId, business_date, text } | null
 
 /** 封账（票 04）：正等着服务端回执 / 服务端拒绝的理由。 */
 const sealing = ref(false)
@@ -149,27 +151,49 @@ function editable(cell) {
   return Boolean(cell.state) && !cell.is_future
 }
 
-function openEditor(cell) {
+function openEditor(person, cell) {
   if (!editable(cell) || savingDate.value) return
   dayError.value = null
-  editingDate.value = editingDate.value === cell.business_date ? '' : cell.business_date
+  const same =
+    editing.value?.employeeId === person.id && editing.value?.date === cell.business_date
+  editing.value = same ? null : { employeeId: person.id, date: cell.business_date }
 }
 
-function errorOn(businessDate) {
-  return dayError.value && dayError.value.business_date === businessDate
-    ? dayError.value.text
+/** 收起编辑带（带子里那颗「取消」）：店长自己撤了，理由也一并收掉。 */
+function closeEditor() {
+  editing.value = null
+  dayError.value = null
+}
+
+/** 这一格是不是正被改：一次点击只认「这个人 + 这一天」。格子上的记号与下面的编辑带
+ *  都走这一个判据 —— 少一处跟着改，记号与带子就会各自说一套。 */
+function isEditing(person, cell) {
+  return editing.value?.employeeId === person.id && editing.value?.date === cell.business_date
+}
+
+/** 这张卡上正在改的那一天（0 或 1 个）：编辑带就挂在 `.aDays` **下面**、同一张卡里 ——
+ *  被点的那一格留在它原来的列位上（B 批返工 ⑥）。写成「哪些格子在被改」而不是
+ *  「这张卡在不在改」，是为了让带子直接拿到那一格的 `cell`（班次、半天休标志都在上面）。 */
+function editingCells(person) {
+  return (person.cells || []).filter((cell) => isEditing(person, cell))
+}
+
+function errorOn(person, cell) {
+  // **按「这个人 + 这一天」认**（与编辑态同一个口径）：只按日期认的话，某个人某天被拒的
+  // 红边会落到**别人同一天**那一格上 —— 编辑带只属于被点的那个人，红边也只该落在他的格子上。
+  const err = dayError.value
+  return err && err.employeeId === person.id && err.business_date === cell.business_date
+    ? err.text
     : ''
 }
 
-/** 下拉里选了什么 → 写请求的 body。`rest` 是「那天休」，`todo` 没进下拉（没有「删掉那天」这个动作）。 */
+/** 带子里选了哪个 → 写请求的 body。`rest` 是「那天休」；没有「删掉那天」这个动作。 */
 function bodyFor(value) {
   return value === 'rest' ? { is_rest: true } : { shift_id: Number(value) }
 }
 
 /** 选完就写：那天立刻按服务端的样子重画（不猜一个本地状态自己改）。 */
-async function pick(person, cell, event) {
-  const value = event.target.value
-  editingDate.value = ''
+async function pick(person, cell, value) {
   savingDate.value = cell.business_date
   dayError.value = null
   try {
@@ -177,13 +201,18 @@ async function pick(person, cell, event) {
       `/api/attendance/sheet/${person.id}/${cell.business_date}`,
       bodyFor(value),
     )
-    // nudge 不带数据，这一页也不等它：自己重拉一次，那天（与「待补」计数）立刻变。
-    // **这次重拉不走 `load()`**：那条路会把 `state` 打回 `loading`（整页闪一下），
-    // 而改一格只该让那一格动。失败时**不动**页面上已经渲染的那一份 ——
-    // 显示一个没落库的班次比报错更糟。
+    // **写成了才收工**：重拉一次整表（不走 `load()` —— 那条路会把 `state` 打回
+    // `loading`，整页闪一下），那天（与「待补」计数）立刻变。
+    editing.value = null
     sheet.value = await api.get('/api/attendance/sheet')
   } catch (err) {
-    dayError.value = { business_date: cell.business_date, text: err.message || '这天没改成' }
+    // 被拒时**带子留着**：理由就写在带子里（票 06 的「不装作改成功」），那一格给红边；
+    // 页面上已经渲染的那一份一个字都不动 —— 显示一个没落库的班次比报错更糟。
+    dayError.value = {
+      employeeId: person.id,
+      business_date: cell.business_date,
+      text: err.message || '这天没改成',
+    }
   } finally {
     savingDate.value = ''
   }
@@ -192,20 +221,20 @@ async function pick(person, cell, event) {
 /** 标 / 取消「休半天」（票 07）：一次**单独**的动作 —— 只改结果行上那个标志，
  *  班次、工作区与「那天上哪个班」都不动（ADR 0114）。
  *
- *  跟 `pick` 同一条 PUT、同一套做法（写之前收起编辑、重拉一次、失败就写在那一格
- *  下面）：这样写完那一格立刻写着新的样子，服务端说没写成时也一个字都不改。 */
+ *  跟 `pick` 同一条 PUT、同一套做法（写成了才收起带子、重拉一次，失败就写在带子里）。 */
 async function toggleHalf(person, cell) {
   if (savingDate.value) return
-  editingDate.value = ''
   savingDate.value = cell.business_date
   dayError.value = null
   try {
     await api.put(`/api/attendance/sheet/${person.id}/${cell.business_date}`, {
       half_rest: !cell.half_rest,
     })
+    editing.value = null
     sheet.value = await api.get('/api/attendance/sheet')
   } catch (err) {
     dayError.value = {
+      employeeId: person.id,
       business_date: cell.business_date,
       text: err.message || '这天的「休半天」没改成',
     }
@@ -523,35 +552,28 @@ onMounted(() => {
               {
                 'is-today': cell.is_today,
                 'is-half': cell.state === 'work' && cell.half_rest,
-                'is-editing': editingDate === cell.business_date,
+                'is-editing': isEditing(person, cell),
+                // 服务端拒过的那些天给红边（理由在下面的编辑带里）。
+                'is-error': Boolean(errorOn(person, cell)),
               },
             ]"
             :title="cell.business_date"
           >
             <!-- 还没到的日子是一块**死的**格子（不渲染任何控件）：验收 45 说的是
                  「不能编辑」，能点一下再弹一句拒绝不算数。 -->
-            <template v-if="editingDate === cell.business_date">
-              <!-- 编辑态那一格**独占整行**（B 批返工 ⑥）：日期数字照旧摆在最前面，
-                   不然展开之后在改哪一天看不出来。 -->
+            <!-- 编辑态那一格**留在它原来的列位上**（B 批返工 ⑥）：日期数字与文案照旧，
+                 只多一个 `is-editing` 记号（显眼的边框底色）；控件在网格下面的编辑带里。
+                 它自己**不吃点击** —— 收工走带子里那颗「取消」，免得再点一下把带子收了。 -->
+            <template v-if="isEditing(person, cell)">
               <i class="aDayNum">{{ cell.day }}<em v-if="cell.is_today" class="aTodayMark">今</em></i>
-              <select
-                class="aDayPick"
-                :aria-label="`改 ${person.name} ${cell.business_date} 的班`"
-                :value="cell.shift_id === null || cell.shift_id === undefined ? 'rest' : String(cell.shift_id)"
-                @change="pick(person, cell, $event)"
-              >
-                <option v-for="shift in person.shifts" :key="shift.id" :value="String(shift.id)">
-                  {{ shift.name }}
-                </option>
-                <option value="rest">休</option>
-              </select>
+              <b class="aDayText">{{ cellLabel(person, cell) }}</b>
             </template>
             <button
               v-else-if="editable(cell)"
               class="aDayBtn"
               type="button"
               :disabled="Boolean(savingDate)"
-              @click="openEditor(cell)"
+              @click="openEditor(person, cell)"
             >
               <i class="aDayNum">{{ cell.day }}<em v-if="cell.is_today" class="aTodayMark">今</em></i>
               <b class="aDayText">{{ cellLabel(person, cell) }}</b>
@@ -560,25 +582,67 @@ onMounted(() => {
               <i class="aDayNum">{{ cell.day }}<em v-if="cell.is_today" class="aTodayMark">今</em></i>
               <b class="aDayText">{{ cellLabel(person, cell) }}</b>
             </template>
-            <!-- 半天休（票 07 / ADR 0114）：那一格**有班次**（上班那一态）时才谈得上
-                 「只上半天」—— 休与待补的两天没有半天可标，所以这颗按钮不出现。
-                 它是**单独的**一次写：班次下拉回答「那天上哪个班」，这一颗回答
-                 「上不上满一整天」，两件事不塞进同一个控件。 -->
-            <button
-              v-if="editingDate === cell.business_date && cell.state === 'work'"
-              class="aHalfBtn"
-              type="button"
-              :disabled="Boolean(savingDate)"
-              :aria-pressed="cell.half_rest ? 'true' : 'false'"
-              @click="toggleHalf(person, cell)"
-            >
-              {{ cell.half_rest ? '取消休半天' : HALF_REST_TEXT }}
-            </button>
-            <small v-if="errorOn(cell.business_date)" class="aDayErr" role="alert">
-              {{ errorOn(cell.business_date) }}
-            </small>
           </span>
         </div>
+        <!-- 编辑带（B 批返工 ⑥）：控件摊在网格**下面**这一条带子里，网格一格都不动。
+             上一版把被点的那一格 `grid-column: 1 / -1` 拔出来独占整行，于是它离开原列、
+             后面的日子被挤到下一行开头，7 格一行的对齐在编辑期间全破（用户截图就是这个）。
+             只在有一格进入编辑态时才出现（`editingCells` 给 0 或 1 个）。 -->
+        <template v-for="cell in editingCells(person)" :key="`edit-${cell.business_date}`">
+          <div class="aEditBar" role="group" :aria-label="`改 ${cell.day} 号的班`">
+            <p class="aEditNow">
+              <b>{{ cell.day }} 号</b>
+              <span v-if="cell.is_today" class="aEditToday">（今天）</span>
+              <!-- 那一天**现在**是什么：用格子上的同一套说法（`cellLabel`），不编第二种。 -->
+              <span>现在 {{ cellLabel(person, cell) }}</span>
+            </p>
+            <div class="aEditChips">
+              <!-- 该员工**启用中**的班次各一颗（与原先那个下拉里的选项同源）。 -->
+              <button
+                v-for="shift in person.shifts"
+                :key="shift.id"
+                class="aChip"
+                type="button"
+                :class="{ 'is-on': cell.state === 'work' && cell.shift_id === shift.id }"
+                :disabled="Boolean(savingDate)"
+                @click="pick(person, cell, shift.id)"
+              >
+                {{ shift.name }}
+              </button>
+              <button
+                class="aChip"
+                type="button"
+                :class="{ 'is-on': cell.state === 'rest' }"
+                :disabled="Boolean(savingDate)"
+                @click="pick(person, cell, 'rest')"
+              >
+                休
+              </button>
+              <!-- 半天休（票 07 / ADR 0114）：那一格**有班次**（上班那一态）时才谈得上
+                   「只上半天」—— 休与待补的两天没有半天可标，所以这颗 chip 不出现。
+                   它是**单独的**一次写：班次 chip 回答「那天上哪个班」，这一颗回答
+                   「上不上满一整天」，两件事不塞进同一个控件。 -->
+              <button
+                v-if="cell.state === 'work'"
+                class="aChip aHalfBtn"
+                type="button"
+                :class="{ 'is-on': cell.half_rest }"
+                :disabled="Boolean(savingDate)"
+                :aria-pressed="cell.half_rest ? 'true' : 'false'"
+                @click="toggleHalf(person, cell)"
+              >
+                {{ cell.half_rest ? '取消休半天' : HALF_REST_TEXT }}
+              </button>
+              <button class="aChip aChipQuiet" type="button" @click="closeEditor">
+                取消
+              </button>
+            </div>
+            <!-- 服务端拒绝的理由写在**这条带子**里（不装作改成功了）。 -->
+            <small v-if="errorOn(person, cell)" class="aDayErr" role="alert">
+              {{ errorOn(person, cell) }}
+            </small>
+          </div>
+        </template>
         <!-- 四个**手填列**（票 05）：系统里推不出来的那几项（是否住宿 / 借调门店 / 是否离职
              在花名册里压根没有字段），由超管在这儿填一次、存在月度考勤台账当月那一行上。
              只进卡片与（票 08 的）导出件，**不写回员工档案**。
@@ -761,22 +825,8 @@ onMounted(() => {
 }
 .aDayBtn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .aDay:has(.aDayBtn:hover) { border-color: var(--line-strong); background: var(--ok-soft); }
-/* 就地编辑：下拉就摆在这一格里（比弹层少一次「我在改谁」的确认）。 */
-.aDayPick {
-  width: 100%; max-width: 100%; padding: 0; border: 0; background: transparent;
-  color: var(--ink); font-size: var(--fs-11); text-align: center; text-align-last: center;
-}
-/* 「休半天」那颗（票 07）：跟下拉并排在这一格里。它是**一次单独的写**，所以是自己的
-   按钮而不是下拉的第四个选项 —— 下拉那一列是班次，混进一个动作会让人以为那天换班了。 */
-.aHalfBtn {
-  width: 100%; padding: 1px 2px; border: 1px solid var(--info); border-radius: var(--r-1);
-  background: transparent; color: var(--info);
-  font: inherit; font-size: var(--fs-11); line-height: 1.4; cursor: pointer;
-}
-.aHalfBtn:disabled { opacity: .5; cursor: default; }
-.aHalfBtn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-/* 服务端拒绝的理由写在**那一格**下面（不是页面顶端）：店长点的就是这一格。 */
-.aDayErr { font-size: var(--fs-11); line-height: 1.4; color: var(--danger-bright); text-align: center; }
+/* 服务端拒绝的理由写在**编辑带**里（见 `.aEditBar`），这一格只给一条红边。 */
+.aDayErr { font-size: var(--fs-11); line-height: 1.5; color: var(--danger-bright); }
 /* 三态各自的色：上班是常规（薄荷）、休淡下去、待补最醒目（琥珀，要人工确认）。 */
 .aDay.is-work { border-color: var(--line-strong); background: var(--ok-soft); }
 .aDay.is-work .aDayText { color: var(--ok); }
@@ -795,15 +845,46 @@ onMounted(() => {
    是格子里那个「今」字（`--accent` 也用在它身上）。 */
 .aDay.is-today { outline: 1px solid var(--accent); outline-offset: 1px; }
 .aDay.is-today .aDayNum { color: var(--ink); font-weight: 700; }
-/* 就地编辑（票 06/07，B 批返工 ⑥）：被点的那一格**独占整行** —— 43px 宽的格子里塞不下
-   一个班次下拉加一颗「休半天」，硬塞会把那一行撑到 ~55px、整张卡跟着跳。独占一行之后
-   两颗控件横着摆，这一行反而比别的行矮，卡片一共只多出一行的高度。 */
-.aDay.is-editing {
-  grid-column: 1 / -1; flex-direction: row; justify-content: center; gap: var(--sp-2);
-  border-color: var(--line-strong);
+/* 就地编辑（票 06/07，B 批返工 ⑥）：被点的那一格**留在它原来的列位上** —— 只给一个
+   显眼的边框与底色，让人看得出正在改哪一天。控件**不在这格里**，它们在网格下面的
+   编辑带里（`.aEditBar`）。上一版把这一格 `grid-column: 1 / -1` 拔出来独占整行，
+   于是它离开原列、后面的日子被挤到下一行开头，7 格一行的对齐在编辑期间全破。
+   这两条排在 `is-half` 之后：半天休的那天被点开时，编辑记号要盖过它的蓝。 */
+.aDay.is-editing { border-color: var(--accent); background: var(--info-soft); }
+.aDay.is-editing .aDayText { color: var(--ink); }
+.aDay.is-editing .aDayNum { color: var(--ink); font-weight: 700; }
+/* 服务端拒过的那一格给红边：页面上不装作改成功了（理由在编辑带里）。 */
+.aDay.is-error { border-color: var(--danger); }
+/* 编辑带（B 批返工 ⑥）：控件摊在 `.aDays` **下面**的一条带子里 —— 网格一格都不动。
+   抬头一行说清「改哪一天、那一天现在是什么」，下面一排 chips（能换行，390px 下不溢出）。 */
+.aEditBar {
+  display: flex; flex-direction: column; gap: var(--sp-1);
+  margin-top: var(--sp-2); padding: var(--sp-2);
+  border: 1px solid var(--accent); border-radius: var(--r-2); background: var(--surface-2);
 }
-.aDay.is-editing .aDayPick { width: auto; max-width: none; }
-.aDay.is-editing .aHalfBtn { width: auto; padding: 1px var(--sp-2); }
+.aEditNow {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px; margin: 0;
+  font-size: var(--fs-12); color: var(--ink-dim);
+}
+.aEditNow b { font-size: var(--fs-13); color: var(--ink); }
+.aEditToday { color: var(--accent); }
+.aEditChips { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+/* 每一颗 chip 都是**自己的按钮**（`type="button"`）：班次 / 休 / 休半天 各是一次写，
+   「取消」只是收起带子。当前生效的那一颗给 `is-on`（那天上哪个班、是不是休、是不是只上半天）。 */
+.aChip {
+  padding: 2px var(--sp-2); border: 1px solid var(--line-strong); border-radius: var(--r-full);
+  background: transparent; color: var(--ink-dim);
+  font: inherit; font-size: var(--fs-11); line-height: 1.6; cursor: pointer;
+}
+.aChip:hover:not(:disabled) { border-color: var(--accent); color: var(--ink); }
+.aChip:disabled { opacity: .5; cursor: default; }
+.aChip:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.aChip.is-on { border-color: var(--accent); background: var(--info-soft); color: var(--ink); font-weight: 600; }
+/* 「休半天」那一颗（票 07）：跟「半天休」那一档格子同色（信息蓝），与班次 / 休分得开。 */
+.aChip.aHalfBtn { border-color: var(--info); color: var(--info); }
+.aChip.aHalfBtn.is-on { background: var(--info-soft); color: var(--info); }
+/* 「取消」是条安静的路：不跟那几颗写动作抢眼。 */
+.aChipQuiet { border-color: var(--line); color: var(--ink-faint); }
 /* 未审批的加班 / 补钟（票 03 / 故事 14）：**只标色**，数不进净时长。 */
 .aStat.is-pending .aNet { color: var(--warn); }
 .aPending {

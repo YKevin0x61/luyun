@@ -74,7 +74,14 @@ describe('考勤表页（票 01 / 票 06 / 票 04 / 票 05 / 票 08）', () => {
   it('只给已经到的那几天装控件（今天之后是死的格子）', () => {
     // 验收 45：今天之后的日子**不能编辑** —— 不是「点了再弹一句拒绝」，是压根没有
     // 能点的东西。挂控件的那两处都由 `editable(cell)` 守着。
-    expect(view).toMatch(/v-if="editingDate === cell\.business_date"/)
+    // 编辑记号只出现在**被点的那一格**：判据是「这个人 + 这一天」，不是单靠日期
+    // （旧版按日期记编辑态，点一天会让每张含这天的卡各开一条编辑带）。格子上的记号与
+    // 网格下面那条编辑带都走这一个判据 `isEditing`，别处不自己再算一遍。
+    expect(view).toMatch(
+      /editing\.value\?\.employeeId === person\.id && editing\.value\?\.date === cell\.business_date/,
+    )
+    expect(view).toMatch(/v-if="isEditing\(person, cell\)"/)
+    expect(view).toMatch(/'is-editing': isEditing\(person, cell\)/)
     expect(view).toMatch(/v-else-if="editable\(cell\)"/)
     expect(view).toMatch(/function editable\(cell\)/)
     expect(view).toMatch(/state\)\s*&&\s*!cell\.is_future|Boolean\(cell\.state\)/)
@@ -355,38 +362,97 @@ describe('考勤表页渲染（票 01 / 票 06）', () => {
     expect(cells[3].find('select').exists()).toBe(false)
   })
 
-  it('点某一天 → 选另一个班次 → 打 PUT 并立刻变', async () => {
+  // 编辑带（B 批返工 ⑥）：控件从格子里搬到了网格下面那条带子 —— 这三条用例的
+  // **判据一字没改**（打哪条 PUT、带什么 body、页面上立刻写成什么、被拒时不许改样子），
+  // 换掉的只有「点什么」：原先点格子里的下拉，现在点带子里的 chip。
+  function bandOf(wrapper) {
+    return wrapper.findAll('.aCard')[0].find('.aEditBar')
+  }
+
+  it('点某一天 → 编辑带里选另一个班次 → 打 PUT 并立刻变', async () => {
     const server = attendanceServer()
     const { wrapper, puts } = await mountSheet(server)
     const cells = wrapper.findAll('.aCard')[0].findAll('.aDay')
 
     await cells[0].find('button.aDayBtn').trigger('click')
-    const select = wrapper.findAll('.aCard')[0].findAll('.aDay')[0].find('select')
-    expect(select.exists()).toBe(true)
-    // 下拉里是**启用中的班次** + 休（现在挂着的白班是选中项）。
-    expect(select.findAll('option').map((option) => option.text())).toEqual([
-      '白班', '夜班', '休',
-    ])
-    expect(select.element.value).toBe('1')
+    // 带子里是**启用中的班次** + 休 + 休半天（那天是上班）+ 取消；
+    // 现在挂着的白班是 `is-on` 那颗（原先断的是「下拉的选中项」）。
+    const chips = bandOf(wrapper).findAll('button.aChip')
+    expect(chips.map((chip) => chip.text())).toEqual(['白班', '夜班', '休', '休半天', '取消'])
+    expect(chips[0].classes()).toContain('is-on')
+    expect(chips[1].classes()).not.toContain('is-on')
+    // 格子里**不再**有下拉（控件搬家了，那一格只剩日期与文案）。
+    expect(cells[0].find('select').exists()).toBe(false)
 
-    await select.setValue('2')
+    await chips[1].trigger('click')
     await flushPromises()
 
     expect(puts).toEqual([
       { employeeId: 1, date: '2026-09-01', body: { shift_id: 2 } },
     ])
-    // 重拉之后那一格立刻写成新班次（页面不等 nudge）。
+    // 重拉之后那一格立刻写成新班次（页面不等 nudge），带子收起。
     const after = wrapper.findAll('.aCard')[0].findAll('.aDay')
     expect(after[0].find('.aDayText').text()).toBe('夜班')
     expect(after[1].find('.aDayText').text()).toBe('休') // 别的日子没动
+    expect(wrapper.findAll('.aCard')[0].find('.aEditBar').exists()).toBe(false)
+  })
+
+  it('一次点击只有一个编辑目标：点第一张卡的那天，只有第一张卡出带子', async () => {
+    // 两张卡都含 9/1。旧版编辑态按**日期**记（`editingDate` 是个字符串），点一次会让
+    // 两张卡各开一条带子；用户的操作是「在某人那张卡上点某一天」，一次点击只能有一个目标。
+    const { wrapper } = await mountSheet()
+    expect(wrapper.findAll('.aCard')).toHaveLength(2)
+
+    await wrapper
+      .findAll('.aCard')[0]
+      .findAll('.aDay')[0]
+      .find('button.aDayBtn')
+      .trigger('click')
+
+    // 有且**只有一条**带子，且它落在第一张卡（张三）里、指的是 1 号。
+    expect(wrapper.findAll('.aCard')[0].find('.aName').text()).toBe('张三')
+    const bands = wrapper.findAll('.aEditBar')
+    expect(bands).toHaveLength(1)
+    expect(bands[0].attributes('aria-label')).toBe('改 1 号的班')
+    expect(wrapper.findAll('.aCard')[0].find('.aEditBar').exists()).toBe(true)
+    // 第二张卡（李四）的同一天不进这一态：没有带子，那一格也没有编辑记号。
+    expect(wrapper.findAll('.aCard')[1].find('.aEditBar').exists()).toBe(false)
+    expect(
+      wrapper.findAll('.aCard')[1].findAll('.aDay')[0].classes(),
+    ).not.toContain('is-editing')
+    // 第一张卡里也只有被点的那一格进这一态。
+    const first = wrapper.findAll('.aCard')[0].findAll('.aDay')
+    expect(first[0].classes()).toContain('is-editing')
+    expect(first[1].classes()).not.toContain('is-editing')
+  })
+
+  it('编辑带的抬头写着改的是哪一天、那一天现在是什么', async () => {
+    const { wrapper } = await mountSheet()
+    const card = wrapper.findAll('.aCard')[0]
+
+    await card.findAll('.aDay')[0].find('button.aDayBtn').trigger('click')
+    const band = bandOf(wrapper)
+    expect(band.attributes('role')).toBe('group')
+    expect(band.attributes('aria-label')).toBe('改 1 号的班')
+    expect(band.find('.aEditNow b').text()).toBe('1 号')
+    expect(band.find('.aEditNow').text()).toContain('现在 白班')
+
+    // 9/3 是「今天」：抬头补一句「（今天）」；那天的现状走 `dayStateText`（待补）。
+    await card.findAll('.aDay')[2].find('button.aDayBtn').trigger('click')
+    const today = bandOf(wrapper)
+    expect(today.attributes('aria-label')).toBe('改 3 号的班')
+    expect(today.find('.aEditNow').text()).toContain('3 号（今天）')
+    expect(today.find('.aEditNow').text()).toContain('现在 待补')
   })
 
   it('选「休」就把那天改成休（`is_rest`，不带班次）', async () => {
     const { wrapper, puts } = await mountSheet()
     await wrapper.findAll('.aCard')[0].findAll('.aDay')[0].find('button.aDayBtn').trigger('click')
-    const select = wrapper.findAll('.aCard')[0].findAll('.aDay')[0].find('select')
+    const rest = bandOf(wrapper)
+      .findAll('button.aChip')
+      .find((chip) => chip.text() === '休')
 
-    await select.setValue('rest')
+    await rest.trigger('click')
     await flushPromises()
 
     expect(puts).toEqual([
@@ -397,17 +463,73 @@ describe('考勤表页渲染（票 01 / 票 06）', () => {
     ).toBe('休')
   })
 
-  it('服务端拒绝时把理由写在那一格上，页面不装作改成功了', async () => {
+  it('服务端拒绝时把理由写在编辑带里，页面不装作改成功了', async () => {
     const refused = attendanceServer({ refuse: '那天有一条待批的请假在等店长批' })
     const { wrapper } = await mountSheet(refused)
     const cells = wrapper.findAll('.aCard')[0].findAll('.aDay')
     await cells[1].find('button.aDayBtn').trigger('click')
-    await wrapper.findAll('.aCard')[0].findAll('.aDay')[1].find('select').setValue('1')
+    await bandOf(wrapper)
+      .findAll('button.aChip')
+      .find((chip) => chip.text() === '白班')
+      .trigger('click')
     await flushPromises()
 
+    // 理由留在**这条带子**里（被拒时带子不收，店长正好接着改），并且带 `role="alert"`。
+    const err = bandOf(wrapper).find('.aDayErr')
+    expect(err.text()).toBe('那天有一条待批的请假在等店长批')
+    expect(err.attributes('role')).toBe('alert')
+    // 那一格给红边（`is-error`），且**不许**变样子。
     const after = wrapper.findAll('.aCard')[0].findAll('.aDay')
-    expect(after[1].find('.aDayErr').text()).toBe('那天有一条待批的请假在等店长批')
+    expect(after[1].classes()).toContain('is-error')
     expect(after[1].find('.aDayText').text()).toBe('休') // 服务端说没写，就不改样子
+    // 红边**只落在他那一格**上：另一张卡**同一天**不许有 `is-error`。
+    // 判据同时把「同一天」钉住（两张卡的标题必须一样），否则这条断言可能比的是两个不同的日子。
+    const other = wrapper.findAll('.aCard')[1]
+    expect(other.find('.aName').text()).toBe('李四')
+    expect(other.findAll('.aDay')[1].attributes('title')).toBe(after[1].attributes('title'))
+    expect(other.findAll('.aDay')[1].classes()).not.toContain('is-error')
+  })
+
+  // ── B 批返工 ⑥：编辑态**不动网格**（用户截图里的那个错位） ─────────────────
+  //
+  // 断的是**结构不变**而不是 CSS 里有没有某条规则：jsdom 不做布局，`offsetTop` /
+  // `offsetLeft` 在这里恒为 0，拿它断「没错位」永远绿（tautology）。真正决定
+  // 「7 格一行」的是 `.aDays` 里那串格子的**顺序与各自画出来的东西**——只要进编辑态
+  // 前后这两样一字不变，格子就不可能换列换行。真实的 `offsetTop/offsetLeft` 实测在
+  // Chromium 里做（见 `.scratch/考勤表导出/shots/` 那组截图脚本），这里守住结构。
+  it('零重排：进编辑态不改网格的格子序列与内容（编辑带在网格外面）', async () => {
+    const { wrapper } = await mountSheet()
+    const card = wrapper.findAll('.aCard')[0]
+    const snapshot = () =>
+      card.find('.aDays').findAll('.aDay').map((cell) => ({
+        date: cell.attributes('title'),
+        // 格子**自己画出来的**东西（日期数字 + 那一格的文案）：进编辑态不许动它。
+        // 曾经这里被换成一个下拉 —— 选项文字也会落进 textContent，于是这一条会红。
+        text: cell.element.textContent,
+        html: cell.element.innerHTML,
+      }))
+
+    const before = snapshot()
+    expect(card.find('.aDays').find('.aEditBar').exists()).toBe(false)
+
+    await card.findAll('.aDay')[0].find('button.aDayBtn').trigger('click')
+
+    const after = snapshot()
+    // ① 格子一个不多、一个不少、顺序不变（7 格一行的对齐靠的就是这个序列）。
+    expect(after.map((cell) => cell.date)).toEqual(before.map((cell) => cell.date))
+    // ② 每一格画出来的东西一字不变（被点那格也一样：它只是不再是一颗按钮）。
+    expect(after.map((cell) => cell.text)).toEqual(before.map((cell) => cell.text))
+    // ③ 没被点的那些格子连 DOM 都一字不变（只有被点那格多了 `is-editing` 这个记号）。
+    expect(after.slice(1).map((cell) => cell.html)).toEqual(before.slice(1).map((cell) => cell.html))
+    // ④ 被点的那一格仍然在网格里，只是多一个记号（看得出在改哪一天）。
+    const cells = card.find('.aDays').findAll('.aDay')
+    expect(cells[0].classes()).toContain('is-editing')
+    expect(cells[1].classes()).not.toContain('is-editing')
+    // ⑤ 编辑带在 `.aDays` **外面**、同一张卡里：网格多不出第二个子元素来撑出行结构。
+    expect(card.find('.aDays').find('.aEditBar').exists()).toBe(false)
+    expect(card.find('.aEditBar').exists()).toBe(true)
+    // ⑥ 顺带钉住那条把格子拔出网格的规则不再回来。
+    expect(view).not.toMatch(/\.aDay\.is-editing[^{]*\{[^}]*grid-column/)
   })
 })
 
@@ -449,6 +571,12 @@ describe('考勤表页的「休半天」（票 07）', () => {
     return wrapper.findAll('.aCard')[0].findAll('.aDay')
   }
 
+  // 「休半天」那颗搬进了网格下面的编辑带（B 批返工 ⑥）：它仍然是**单独**的一次写，
+  // 只是不再挤在 43px 的格子里。
+  function bandOf(wrapper) {
+    return wrapper.findAll('.aCard')[0].find('.aEditBar')
+  }
+
   it('卡片上写着「休半天」，班次没丢、别的天照旧', async () => {
     const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_HALF_REST }))
     expect(cellsOf(wrapper).map((cell) => cell.find('.aDayText').text())).toEqual([
@@ -462,14 +590,14 @@ describe('考勤表页的「休半天」（票 07）', () => {
     expect(cellsOf(wrapper)[1].classes()).not.toContain('is-half')
   })
 
-  it('点开那格能标「休半天」，也能取消（打的是同一条 PUT）', async () => {
+  it('点开那格能在编辑带里标「休半天」，也能取消（打的是同一条 PUT）', async () => {
     const server = attendanceServer({ sheet: SHEET_WITH_HALF_REST })
     const { wrapper, puts } = await mountSheet(server)
 
-    // 1) 整天班那天：编辑里那颗按钮是「休半天」→ 点下去发 `{ half_rest: true }`。
+    // 1) 整天班那天：编辑带里那颗按钮是「休半天」→ 点下去发 `{ half_rest: true }`。
     const plain = cellsOf(wrapper)[1]
     await plain.find('button.aDayBtn').trigger('click')
-    const toggle = cellsOf(wrapper)[1].find('button.aHalfBtn')
+    const toggle = bandOf(wrapper).find('button.aHalfBtn')
     expect(toggle.exists()).toBe(true)
     expect(toggle.text()).toBe('休半天')
 
@@ -484,7 +612,7 @@ describe('考勤表页的「休半天」（票 07）', () => {
     // 2) 已经在半天休的那天：按钮变成「取消休半天」→ 发 `{ half_rest: false }`。
     const half = cellsOf(wrapper)[0]
     await half.find('button.aDayBtn').trigger('click')
-    const cancel = cellsOf(wrapper)[0].find('button.aHalfBtn')
+    const cancel = bandOf(wrapper).find('button.aHalfBtn')
     expect(cancel.text()).toBe('取消休半天')
 
     await cancel.trigger('click')
@@ -494,20 +622,32 @@ describe('考勤表页的「休半天」（票 07）', () => {
     expect(cellsOf(wrapper)[0].find('.aDayText').text()).toBe('白班')
   })
 
-  it('没有班次的那天不给标（编辑里没有那颗按钮）', async () => {
+  it('没有班次的那天不给标（编辑带里没有那颗按钮）', async () => {
     const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_HALF_REST }))
 
-    // 待补那天（有排班行都没有）：编辑里只有班次下拉，没有「休半天」。
+    // 待补那天（有排班行都没有）：编辑带里只有班次与休，没有「休半天」。
     await cellsOf(wrapper)[2].find('button.aDayBtn').trigger('click')
-    expect(cellsOf(wrapper)[2].find('select').exists()).toBe(true)
-    expect(cellsOf(wrapper)[2].find('button.aHalfBtn').exists()).toBe(false)
+    expect(cellsOf(wrapper)[2].find('select').exists()).toBe(false)
+    expect(bandOf(wrapper).find('button.aHalfBtn').exists()).toBe(false)
 
-    // 今天之后那格是死的：既没有下拉也没有它。
-    expect(cellsOf(wrapper)[3].find('button.aHalfBtn').exists()).toBe(false)
+    // 今天之后那格是死的：既点不开，也没有那颗按钮。
+    expect(cellsOf(wrapper)[3].find('button.aDayBtn').exists()).toBe(false)
     expect(cellsOf(wrapper)[3].find('select').exists()).toBe(false)
   })
 
-  it('服务端拒绝时把理由写在那一格上，页面不装作标上了', async () => {
+  it('「休半天」那颗只在**上班**那一态出现（休 / 待补 都没有）', async () => {
+    // 与服务的 `half_rest_needs_shift` 同一条口径：没有班次就谈不上「只上半天」。
+    const { wrapper } = await mountSheet()
+    const states = ['work', 'rest', 'todo']
+
+    for (const [index, state] of states.entries()) {
+      await cellsOf(wrapper)[index].find('button.aDayBtn').trigger('click')
+      expect(cellsOf(wrapper)[index].classes()).toContain(`is-${state}`)
+      expect(bandOf(wrapper).find('button.aHalfBtn').exists()).toBe(state === 'work')
+    }
+  })
+
+  it('服务端拒绝时把理由写在编辑带里，页面不装作标上了', async () => {
     const refused = attendanceServer({
       sheet: SHEET_WITH_HALF_REST,
       refuse: '那天没有班次（休 / 还没排到），标不上「休半天」',
@@ -515,10 +655,10 @@ describe('考勤表页的「休半天」（票 07）', () => {
     const { wrapper } = await mountSheet(refused)
 
     await cellsOf(wrapper)[1].find('button.aDayBtn').trigger('click')
-    await cellsOf(wrapper)[1].find('button.aHalfBtn').trigger('click')
+    await bandOf(wrapper).find('button.aHalfBtn').trigger('click')
     await flushPromises()
 
-    expect(cellsOf(wrapper)[1].find('.aDayErr').text()).toBe(
+    expect(bandOf(wrapper).find('.aDayErr').text()).toBe(
       '那天没有班次（休 / 还没排到），标不上「休半天」',
     )
     expect(cellsOf(wrapper)[1].find('.aDayText').text()).toBe('夜班')
@@ -1085,17 +1225,27 @@ describe('考勤表页的版式（B 批返工 ③②⑥⑧①）', () => {
     expect(today).not.toContain('var(--warn)')
   })
 
-  it('⑥ 编辑态那一格独占整行（下拉与「休半天」横着摆，不把那一行撑高）', async () => {
+  // ⑥ 的**旧版**钉的是「被点的那一格独占整行（`grid-column: 1 / -1`）」—— 那正是
+  // 用户截图里 7 格一行错位的成因：那一格离开原列、后面的日子被挤到下一行开头。
+  // 现在控件搬到了网格下面的编辑带，这条改成钉「格子留在原列 + 带子在网格后面」。
+  it('⑥ 编辑态那一格留在原来的列位上（控件在网格下面的编辑带里）', async () => {
     const { wrapper } = await mountSheet()
-    await wrapper.findAll('.aCard')[0].findAll('.aDay')[0].find('button.aDayBtn').trigger('click')
+    const card = wrapper.findAll('.aCard')[0]
+    await card.findAll('.aDay')[0].find('button.aDayBtn').trigger('click')
 
-    const editing = wrapper.findAll('.aCard')[0].findAll('.aDay')[0]
+    const editing = card.findAll('.aDay')[0]
     expect(editing.classes()).toContain('is-editing')
-    // 展开之后仍然看得出在改哪一天（日期数字跟下拉同一行）。
+    // 被点之后仍然看得出在改哪一天（日期数字照旧在格子里）。
     expect(editing.find('.aDayNum').text()).toBe('1')
     // 别的格子不进这一态（一次只改一天）。
-    expect(wrapper.findAll('.aCard')[0].findAll('.aDay')[1].classes()).not.toContain('is-editing')
-    expect(view).toMatch(/\.aDay\.is-editing\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/)
+    expect(card.findAll('.aDay')[1].classes()).not.toContain('is-editing')
+    // 控件搬出格子：那条把格子拔出网格的规则不再回来。
+    expect(view).not.toMatch(/\.aDay\.is-editing\s*\{[^}]*grid-column/)
+    expect(view).not.toMatch(/\.aDay\.is-editing\s*\{[^}]*flex-direction:\s*row/)
+    // 编辑带挂在网格**后面**（DOM 上紧挨着 `.aDays`）。
+    const band = card.find('.aEditBar')
+    expect(band.exists()).toBe(true)
+    expect(band.element.previousElementSibling).toBe(card.find('.aDays').element)
   })
 
   it('⑧ 卡片圆角走语义令牌 `--r-2`；长名字省略号 + `min-width: 0`', () => {
