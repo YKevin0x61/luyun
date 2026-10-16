@@ -113,13 +113,18 @@ OVERTIME_TABLES = (
     "seniority_bonus_changes",
 )
 
-# 考勤面的表（迁移 0026 起，`.scratch/考勤表导出/`）：**法定节假日日历**
-# `statutory_holidays` —— 超级管理员逐日标记「这天是法定节假日」（日期唯一 + 名称），
-# 它是「法定节假日补休」（ADR 0113）的唯一依据，代码里没有写死的年度表。
-# 与 SCHEDULING_TABLES 同一个理由不进 ALL_TABLES —— 写入只有 `services/holiday_calendar.py`
-# 一个口（管理端「节假日日历」页），不该出现在 Admin 的通用业务表写入口；数据浏览器里
-# 只读列出（分组「考勤」）。票 03 的月度考勤台账也归这里。
-ATTENDANCE_TABLES = ("statutory_holidays",)
+# 考勤面的表（迁移 0026 起，`.scratch/考勤表导出/`）：
+#
+# * **法定节假日日历** `statutory_holidays` —— 超级管理员逐日标记「这天是法定节假日」
+#   （日期唯一 + 名称），它是「法定节假日补休」（ADR 0113）的唯一依据，代码里没有写死的
+#   年度表。写入只有 `services/holiday_calendar.py` 一个口（管理端「节假日日历」页）。
+# * **月度考勤台账** `attendance_ledger`（迁移 0027，票 03）—— 员工 × 自然月一行：假期
+#   期初余额、封账后的本月结余（存假）与四个手填列。封账写它的是票 04、手填列写它的是
+#   票 05；票 03 只**读**上一月已封账的结余来算「上月存假」，当月只算不落库。
+#
+# 与 SCHEDULING_TABLES 同一个理由不进 ALL_TABLES —— 它们不该出现在 Admin 的通用业务表
+# 写入口；数据浏览器里只读列出（分组「考勤」）。
+ATTENDANCE_TABLES = ("statutory_holidays", "attendance_ledger")
 
 # Admin DataTable exposes these tables read-only; their owning feature pages
 # remain the only supported write paths.

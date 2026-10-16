@@ -65,6 +65,7 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0024_drop_prep_batch_tables.sql` | **例外：非加成性**（见下）。备货计划不再登记备货数量（ADR 0111）：删掉 `prep_batches` / `prep_stock_movements` 两张表，并清掉三张计划快照表上只服务批次模型的废列（`prep_plan_items.available_qty` / `.risk_level`、`prep_plan_item_slots.available_qty`、`prep_plan_runs` 的三个风险计数） | 不应用也不报错：新代码既不读也不写这些表与列，先切代码还是先跑迁移都不影响可用性 —— 代价只是库里多留两张死表、快照表上多几个恒为 0 的列 |
 | `0025_prep_closed_days.sql` | `prep_closed_days`：店自己的**歇业日历**（整天不做生意的营业日，如春节 / 国庆头几天）。落在这些日子的时段不进建议，它们也从「完整营业日」样本里剔除 | 不应用也不报错：`_load_closed_days` 读不到表就按「没有歇业日」降级（一行 warning）。代价是节假日那天会照同星期算出一份看着像模像样的建议 —— 实测国庆当天给过「52 个品、合计 1311」，金莎的信心还是 `high`，师傅照做就是报废 |
 | `0026_statutory_holidays.sql` | `statutory_holidays`：**法定节假日日历**（考勤面，票 02）。一条 = 一个自然日 + 名称，日期唯一（同一天重复标记是覆盖）；`ATTENDANCE_TABLES` 里只读列在数据浏览器，写入口是管理端「节假日日历」页。它是「法定节假日补休」（ADR 0113）的**唯一依据** —— 代码里没有写死的年度表 | 「节假日日历」页读 / 标 / 取消三条都 503 并点名这个文件（`HolidayCalendar` 把缺表异常转成 `not_migrated`）；补休因此算不出来（票 03 读的就是这张表）。其余功能不受影响（排班 / 卫生 / 加班 / 员工登录都不碰它） |
+| `0027_attendance_ledger.sql` | `attendance_ledger`：**月度考勤台账**（考勤面，票 03）。员工 × 自然月一行（唯一键 `tenant_id, employee_id, month`）：假期期初余额、封账后的本月结余（存假）与四个手填列（本月班次 / 是否住宿 / 借调门店 / 是否离职）。它是存假跨月结转的载体（ADR 0113）：封账写它的是票 04、手填列写它的是票 05，票 03 只读它算「上月存假」。`ATTENDANCE_TABLES` 里只读列在数据浏览器 | 考勤表整页 503 并点名这个文件（票 03 的读路径要读它 —— `AttendanceStore` 把缺表异常转成 `not_migrated`，与缺 0026 同一个出口）：实际出勤、例休、补休、生日假、年假、上月存假与存假一个都算不出来。其余功能不受影响（排班 / 卫生 / 加班 / 节假日日历都不碰它） |
 
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，
