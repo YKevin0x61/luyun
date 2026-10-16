@@ -75,6 +75,35 @@ export function pendingOvertimeText(count, hours) {
   return `待批 ${formatNetHours(hours)}`
 }
 
+/** 手填的那几列（票 05）在卡片上的**只读写法**：空值显示为 `—`，不是留一个空白的窟窿。
+ *  「没填」与「填了个空字符串」在页面上必须长得一样 —— 读侧已经把空串收敛成 `null`。 */
+export function manualText(value) {
+  const text = value === null || value === undefined ? '' : String(value).trim()
+  return text || '—'
+}
+
+/** 「本月班次」那一格的**默认值**：台账里没填过（或清空了）时，服务端给的是当月众数
+ *  （并列取班次显示顺序），写在输入框的提示语里；当月没排班的人没有这一项。
+ *
+ *  为什么输入框里要放空的、把默认写在提示语里：那四个值都是「手填」，填过与没填过在
+ *  台账里是两件事（一个存了字、一个是 NULL）。给没填过的人预填上默认值，店长一存就把
+ *  这条默认**固化**成他定的值，以后再改排班这一格也不会跟着变了。
+ */
+export function shiftNameDefault(person) {
+  const landed = person?.default_shift_name
+  return landed ? `默认：当月最多 ${landed}` : '这个月还没有排班'
+}
+
+/** 手填的四项那一块（票 05）在卡片上的摆法：标签 + 台账里的值（空 = `—`）。 */
+export function manualStats(person) {
+  return [
+    { label: '本月班次', value: person?.shift_name },
+    { label: '是否住宿', value: person?.lodging },
+    { label: '借调门店', value: person?.borrowed_store },
+    { label: '是否离职', value: person?.resigned },
+  ]
+}
+
 /** ISO 时刻 → `YYYY-MM-DD HH:MM`（票 04 的封账时刻就是这种串）。
  *
  *  只截字符串、**不在这里做时区换算**：服务端给的就是 +08:00 那一刻的墙上时间，

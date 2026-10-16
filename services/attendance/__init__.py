@@ -10,6 +10,7 @@
 """
 
 from services.attendance.store import (
+    MANUAL_FIELDS,
     STATE_REST,
     STATE_TODO,
     STATE_WORK,
@@ -18,6 +19,7 @@ from services.attendance.store import (
 )
 
 __all__ = [
+    "MANUAL_FIELDS",
     "STATE_REST",
     "STATE_TODO",
     "STATE_WORK",

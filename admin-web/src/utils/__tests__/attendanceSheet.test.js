@@ -12,10 +12,13 @@ import {
   formatDays,
   formatNetHours,
   leaveFormulaText,
+  manualStats,
+  manualText,
   newHireText,
   pendingOvertimeText,
   sealedAtText,
   sealedMonthText,
+  shiftNameDefault,
 } from '../attendanceSheet.js'
 
 describe('逐日三态（验收 3/4）', () => {
@@ -85,6 +88,42 @@ describe('假期台账那一块的写法（票 03）', () => {
     expect(pendingOvertimeText(1, -1.5)).toBe('待批 −1.5 小时')
     expect(pendingOvertimeText(0, 0)).toBe('')
     expect(pendingOvertimeText(undefined, undefined)).toBe('')
+  })
+})
+
+describe('手填列的写法（票 05）', () => {
+  it('空值写成一个破折号，不是留一个孔', () => {
+    expect(manualText('是')).toBe('是')
+    expect(manualText('调东莞')).toBe('调东莞')
+    // 「没填过」与「填了个空串」在页面上长得一样（读侧已经把空串收敛成 `null`）。
+    expect(manualText(null)).toBe('—')
+    expect(manualText(undefined)).toBe('—')
+    expect(manualText('')).toBe('—')
+    expect(manualText('   ')).toBe('—')
+  })
+
+  it('「本月班次」的提示语说清默认是当月众数；没排班的人直说', () => {
+    expect(shiftNameDefault({ default_shift_name: '白班' })).toBe('默认：当月最多 白班')
+    // 当月一条排班都没有的人：这一格没有默认，直说「还没有排班」。
+    expect(shiftNameDefault({ default_shift_name: null })).toBe('这个月还没有排班')
+    expect(shiftNameDefault({})).toBe('这个月还没有排班')
+    expect(shiftNameDefault(null)).toBe('这个月还没有排班')
+  })
+
+  it('四项摊在卡片上：标签与值一一对应，空的就是破折号', () => {
+    expect(
+      manualStats({
+        shift_name: '早班',
+        lodging: '是',
+        borrowed_store: null,
+        resigned: '是',
+      }),
+    ).toEqual([
+      { label: '本月班次', value: '早班' },
+      { label: '是否住宿', value: '是' },
+      { label: '借调门店', value: null },
+      { label: '是否离职', value: '是' },
+    ])
   })
 })
 

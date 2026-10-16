@@ -29,7 +29,7 @@ from api.scheduling import _bad_request as _scheduling_bad_request
 from api.scheduling import _scheduling_nudge
 from api.security import require_session
 from database import get_db
-from services.attendance import AttendanceError, AttendanceStore
+from services.attendance import MANUAL_FIELDS, AttendanceError, AttendanceStore
 from services.scheduling.store import SchedulingError, SchedulingStore
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,9 @@ _ERROR_DETAILS = {
         "migrations/pg/0026_statutory_holidays.sql 与 "
         "migrations/pg/0027_attendance_ledger.sql，然后刷新本页"
     ),
+    # 手填列（票 05）：四列一项都没点名。这不是「参数写错了」那么难懂 —— 页面上那颗
+    # 保存按钮本来就是四项一起发，走到这里说明请求是手搓的（或表单全空没拿住）。
+    "nothing_to_write": "这次没有任何一项要存：把要改的那几项填上再存一次",
 }
 
 _ERROR_STATUS = {
@@ -161,6 +164,24 @@ class DayEditRequest(BaseModel):
     shift_id: Optional[int] = None
 
 
+class ManualColumnsRequest(BaseModel):
+    """四个**手填列**（票 05）的输入：本月班次 / 是否住宿 / 借调门店 / 是否离职。
+
+    系统里没有这几项（花名册里压根没有「是否住宿 / 借调门店 / 是否离职」这几个字段），
+    所以由超管在卡片上填一次、存在月度考勤台账当月那一行上。
+
+    **`None` 是「清空」，缺字段是「不碰」** —— 两者在 JSON 里都是「没给值」之外的两件事，
+    但 `Optional[...] = None` 分不开它们，所以这一层用 `model_fields_set` 拿「这次点名了
+    哪几列」，只把那几列交给服务层。清空存 NULL，与从没填过同义：页面上显示为空，
+    「本月班次」那一格退回当月众数。
+    """
+
+    shift_name: Optional[str] = None
+    lodging: Optional[str] = None
+    borrowed_store: Optional[str] = None
+    resigned: Optional[str] = None
+
+
 @router.get("/sheet")
 async def attendance_sheet(
     db=Depends(get_db),
@@ -174,6 +195,35 @@ async def attendance_sheet(
     store = AttendanceStore(db)
     try:
         return await store.sheet()
+    except AttendanceError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.put("/sheet/{employee_id}/manual")
+async def set_attendance_manual_columns(
+    employee_id: int,
+    payload: ManualColumnsRequest,
+    db=Depends(get_db),
+    _session: str = Depends(require_session),
+) -> dict:
+    """把某人**本月的四个手填列**存进月度考勤台账（票 05）。
+
+    写在本月那一行上（`UNIQUE(租户, 员工, 月份)`，upsert）：这一次点名了哪几列就只写哪几
+    列，没点名的一列都不碰 —— 票 04 写的 `closing_balance` / `sealed_at` 也在这同一行上，
+    谁也不整行覆盖谁。清空某一项存 NULL（与从没填过同义）。
+
+    **这里没有任何 nudge**：这几个值只进卡片与（票 08 的）导出件，员工手机上不显示它们，
+    所以没有第二个端要重拉。它们也**不写回员工档案** —— 档案里没有这几个字段。
+    """
+    store = AttendanceStore(db)
+    # `model_fields_set` 是「这一次点名了哪几列」的判据：缺字段 = 不碰，显式 `null` = 清空。
+    values = {
+        field: getattr(payload, field)
+        for field in payload.model_fields_set
+        if field in MANUAL_FIELDS
+    }
+    try:
+        return await store.set_manual_columns(employee_id, values)
     except AttendanceError as exc:
         raise _bad_request(exc) from exc
 

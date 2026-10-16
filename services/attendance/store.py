@@ -190,6 +190,9 @@ class AttendanceStore:
             return value.replace(tzinfo=CHINA_TZ)
         return value
 
+    def _now_iso(self) -> str:
+        return self._now_dt().isoformat()
+
     def today(self) -> str:
         """当前营业日（06:00 切，北京时）—— 与 `staff_assignments.business_date` 同一个词。"""
         return current_business_date(self._now_dt())
@@ -288,11 +291,17 @@ class AttendanceStore:
     async def _ledger_rows(self, months: tuple[str, str]) -> dict[tuple[int, str], dict]:
         """本月与上一月的台账行：``{(员工号, 月份): 那一行}``。
 
-        **只读**（票 03 不写这张表）：写它的是封账（票 04）与手填列（票 05）。缺表
+        形状不动（**两格月份**）：只想读一个月（票 05 写完的回执）时两格给同一个月份 ——
+        少一个调用形状，票 04 的封账那一处也不用跟着改。
+
+        四个手填列（`shift_name` / `lodging` / `borrowed_store` / `resigned`，票 05）
+        与假期那几列一起读出来 —— 读的是同一行，不再打第二个查询。写这一行的是封账
+        （票 04，`closing_balance` / `sealed_at`）与手填列（票 05，那四列）。缺表
         （0027 没应用）时照旧走 `not_migrated` 那条出口。
         """
         cur = await self._conn.execute(
-            """SELECT employee_id, "month", opening_balance, closing_balance, sealed_at
+            """SELECT employee_id, "month", opening_balance, closing_balance, sealed_at,
+                      shift_name, lodging, borrowed_store, resigned
                FROM attendance_ledger WHERE "month" IN (?, ?)""",
             months,
         )
@@ -318,6 +327,114 @@ class AttendanceStore:
             for row in await cur.fetchall()
         ]
 
+    async def _shift_name_defaults(
+        self, rows: dict[int, dict[str, Any]]
+    ) -> dict[int, str]:
+        """「本月班次」的默认值：这个人当月**出现次数最多**的班次名（票 05）。
+
+        并列时取 `staff_shifts.sort_order` 靠前的那个（票面口径：并列取班次显示顺序）。
+        **当月一条排班行都没有的人不进这份字典** —— 卡片上留空，不是报错、也不是编一个
+        默认班次。只挑**排在上班**的行（班次非空）：休的那些行不投任何票。
+
+        班次名从 `staff_shifts` 取、**不看 `is_active`**：这是已经在员工身上的历史班次，
+        后来把这个班次停用不会让他这个月没上过班（同 `list_shifts(include_inactive=True)`
+        的理由）。班次行被硬删掉的人照旧计票，只在名字那一格留空。
+
+        ``rows`` 就是 `_assignment_rows` 那一份（``{员工号: {营业日: 班次 id 或 None}}``）
+        —— 不再打第二个「这个月谁排了什么班」的查询。
+        """
+        counts: dict[int, dict[int, int]] = {}
+        for employee_id, theirs in rows.items():
+            for shift_id in theirs.values():
+                if shift_id is None:
+                    continue
+                per_person = counts.setdefault(employee_id, {})
+                per_person[shift_id] = per_person.get(shift_id, 0) + 1
+        if not counts:
+            return {}
+        shift_ids = {shift_id for per_person in counts.values() for shift_id in per_person}
+        placeholders = ", ".join(["?"] * len(shift_ids))
+        cur = await self._conn.execute(
+            f"""SELECT id, name, sort_order FROM staff_shifts WHERE id IN ({placeholders})""",
+            tuple(sorted(shift_ids)),
+        )
+        names: dict[int, tuple[str, int]] = {}
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            names[int(mapping["id"])] = (mapping["name"], int(mapping["sort_order"]))
+        defaults: dict[int, str] = {}
+        for employee_id, per_person in counts.items():
+            # 先比次数（多的赢），再比显示顺序（靠前的赢），最后拿班次号兜底 ——
+            # 顺序是全序，两次调用不会给出两个答案。
+            best = min(
+                per_person,
+                key=lambda shift_id: (
+                    -per_person[shift_id],
+                    names.get(shift_id, ("", 0))[1],
+                    shift_id,
+                ),
+            )
+            name = names.get(best, ("", 0))[0]
+            if name:
+                defaults[employee_id] = name
+        return defaults
+
+    @_needs_migration
+    async def set_manual_columns(
+        self, employee_id: int, values: dict[str, Optional[str]]
+    ) -> dict[str, Any]:
+        """把四个手填列写在本月那**一行**台账上（票 05）。返回写完之后的那四个值。
+
+        `values` 里**只放点名要改的那几列**（键取自 `MANUAL_FIELDS`）：没点名的列一个都
+        不碰 —— 这就是「只更新自己那几列」。点名成 `None`（或空串）是**清空**：存 NULL，
+        与从没填过同义（读回来照旧退回「本月班次」那条默认）。
+
+        缺表（0027 没应用）时与读侧同一个出口：`AttendanceError("not_migrated")`，
+        HTTP 层翻成 503 点名那个脚本 —— 店长该看到的是「去做数据库迁移」，不是一个 500。
+
+        台账那一行是**票 04 的封账与票 05 的手填列共用**的一行（`UNIQUE(员工, 月份)`）：
+        整行覆盖会把对方写下的数抹掉，所以 INSERT 时只写 `employee_id` / `month`（别的列
+        留给各自的写入口），冲突时**只有点名的那几列进 `SET`**，`closing_balance` 与
+        `sealed_at` 一个都不在语句里 —— 哪怕这一次是新建那一行（`DO UPDATE` 因此也
+        **不更新** `created_at`，那一行是什么时候建的仍然说得清）。
+        """
+        fields = [field for field in MANUAL_FIELDS if field in values]
+        if not fields:
+            raise AttendanceError("nothing_to_write")
+        month = self.today()[:7]
+        now = self._now_iso()
+        primary = ", ".join(f'"{field}"' for field in fields)
+        placeholders = ", ".join(["?"] * len(fields))
+        do_update = ", ".join(f'"{field}" = excluded."{field}"' for field in fields)
+        try:
+            await self._conn.execute(
+                f"""INSERT INTO attendance_ledger
+                        (tenant_id, employee_id, "month", {primary}, created_at, updated_at)
+                    VALUES (1, ?, ?, {placeholders}, ?, ?)
+                    ON CONFLICT (tenant_id, employee_id, "month") DO UPDATE SET
+                        {do_update}, updated_at = excluded.updated_at""",
+                (
+                    int(employee_id),
+                    month,
+                    *(_text(values[field]) for field in fields),
+                    now,
+                    now,
+                ),
+            )
+            await self._conn.commit()
+        except Exception:
+            # 半截事务不能留在连接上（同 `serialized_write` 的理由）。
+            await self._rollback_quietly()
+            raise
+        # 回执**重读那一行**（不是拿这次写进去的几列拼一个）：写完之后这一行上是什么，
+        # 卡片与导出件就照着那个走，调用方不用自己拼「没点名的那几列还是原样」。
+        ledger = await self._ledger_rows((month, month))
+        return {
+            "employee_id": int(employee_id),
+            "month": month,
+            **_manual_columns(ledger.get((int(employee_id), month)), default_shift_name=None),
+        }
+
     @_needs_migration
     async def sheet(self) -> dict:
         """当月那一张考勤表：月框 + 一人一张卡。**唯一的读口**，没有月份参数。"""
@@ -338,6 +455,9 @@ class AttendanceStore:
         previous_month = (start - timedelta(days=1)).isoformat()[:7]
         ledger = await self._ledger_rows((previous_month, month))
         shifts = await self._shifts()
+        # 「本月班次」的默认值（票 05）：当月众数，并列取班次显示顺序。没有排班的人不进这份
+        # 字典 —— 卡片上留空（不是报错，也不是编一个班次）。
+        default_shift_names = await self._shift_name_defaults(rows)
         # 当月有排班或加班记录的人：离职的人靠它进表（票 01 验收 5）。
         on_record = set(rows) | recorded
         # 员工是谁只从公共层取（同排班的路子）：职位 / 底薪 / 工龄奖 / 入职日期都在
@@ -405,6 +525,18 @@ class AttendanceStore:
                         }
                         for day in days
                     ],
+                    # 四个手填列（票 05）：卡片上那四个输入口读的就是这一份 —— 顺序与
+                    # `0027_attendance_ledger.sql` 的列序一致。
+                    # * `shift_name` 是**这一格上该显示的值**：台账里填过就用填的，没填过
+                    #   （或清空了）就是**当月众数**（并列取班次显示顺序），当月压根没排班
+                    #   的人留空。
+                    # * `default_shift_name` 另给一份**没填过时的默认**：页面把它放在输入框
+                    #   的提示语里，店长才分得清「这是默认」与「这是我定的」—— 给没填过的人
+                    #   预填上默认值，一存就把这条默认固化成了他定的值。
+                    **_manual_columns(
+                        ledger.get((employee_id, month)),
+                        default_shift_name=default_shift_names.get(employee_id),
+                    ),
                 }
             )
 
@@ -517,6 +649,42 @@ class AttendanceStore:
             (month,),
         )
         return [dict(row) for row in await cur.fetchall()]
+
+
+# 卡片上那四个**手填**列（票 05），列名与 `0027_attendance_ledger.sql` 一一对应：
+# 系统里没有这几个字段（是否住宿 / 借调门店 / 是否离职在花名册里压根没有），所以由超管
+# 在卡片上填一次、存在**月度考勤台账**当月那一行上，只进导出件与卡片，**不写回员工档案**。
+MANUAL_FIELDS = ("shift_name", "lodging", "borrowed_store", "resigned")
+
+
+def _manual_columns(row: Optional[dict], *, default_shift_name: Optional[str]) -> dict[str, Any]:
+    """卡片上那四个手填列（票 05）。``row`` 是这个人**本月**台账那一行（没有就是 `None`）。
+
+    * **本月班次**：台账里填过就用填的；没填过（或清空了 —— 「从没填过」与「清空」同义）
+      退回 ``default_shift_name`` —— 当月众数，并列取班次显示顺序；当月一条排班都没有的
+      人两个都没有，留空（`None`），不是报错。
+    * **是否住宿 / 借调门店 / 是否离职**：台账里有什么给什么，没有就是 `None`（页面上
+      显示为空）。空串一律当没填（`None`）—— 一个「存进去的空串」不该在页面上与
+      「没填过」长得不一样。
+
+    返回值恒有那四个键（`None` = 空）**外加** `default_shift_name`（没填过时的默认，
+    页面放进输入框的提示语），前端不用判 `undefined`。
+    """
+    values = {field: _text(row.get(field)) if row else None for field in MANUAL_FIELDS}
+    if values["shift_name"] is None:
+        values["shift_name"] = _text(default_shift_name)
+    # 没填过时的默认另给一份（提示语用）—— `shift_name` 是**这一格上该显示的值**，
+    # 不能靠它自己反推「这是默认还是他定的」。
+    values["default_shift_name"] = _text(default_shift_name)
+    return values
+
+
+def _text(value: Any) -> Optional[str]:
+    """手填列的文本：空串 / 空白一律当没填（`None`）。不是字符串的原样转成字符串。"""
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    return text.strip() or None
 
 
 def _is_on_the_sheet(employee: dict, on_record: bool) -> bool:
