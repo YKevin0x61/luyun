@@ -148,3 +148,37 @@ describe('封账上月那句回执（票 04）', () => {
     expect(sealedAtText(null)).toBe('')
   })
 })
+
+// ── 收尾修复 ⑥：日格那几个字不许前后端各说各话 ───────────────────────────────
+//
+// 卡片上的「休 / 休半天 / 待补」由这一份出，导出件（服务端
+// `services/attendance/export.py`）是 Python、import 不到它，于是自己另存了一份
+// `DAY_TEXT` / `HALF_REST_TEXT` / `TODO_TEXT`。两边**不是**同一批字，所以这里把
+// 服务端那份**读出来逐字比一遍**（同仓库既有的读源码式断言）：改一边忘另一边就红。
+
+describe('日格文案与导出件的常量钉在一起（收尾修复 ⑥）', () => {
+  it('export.py 的 DAY_TEXT / HALF_REST_TEXT / TODO_TEXT 与这一份逐字相等', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { dirname, join } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const { HALF_REST_TEXT: halfRest } = await import('../attendanceSheet.js')
+
+    const source = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        '../../../../services/attendance/export.py',
+      ),
+      'utf8',
+    )
+    const constant = (name) => {
+      const matched = source.match(new RegExp(`^${name} = "(.+)"$`, 'm'))
+      expect(matched, `${name} 不在 export.py 里了`).not.toBeNull()
+      return matched[1]
+    }
+
+    // 「上班」在导出件里是**留空的空格子**（出勤不写字），所以只比另外三种写法。
+    expect(constant('DAY_TEXT')).toBe(dayStateText('rest'))
+    expect(constant('HALF_REST_TEXT')).toBe(halfRest)
+    expect(constant('TODO_TEXT')).toBe(dayStateText('todo'))
+  })
+})

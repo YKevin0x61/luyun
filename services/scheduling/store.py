@@ -1169,6 +1169,32 @@ class SchedulingStore:
         「超出可补记窗口」和「还没排到」会按两个不同的营业日判（`beyond_window` 那句文案
         里的日期也会跟刚判过的那个不一样）。
         """
+        employee_id, day, shift, zone = await self._resolve_override(
+            employee_id, business_date, is_rest, shift_id, zone_id
+        )
+        await self._apply_override(employee_id, day, shift, zone)
+        return {
+            "employee_id": employee_id,
+            "business_date": day,
+            "shift_id": shift,
+            "zone_id": zone,
+            "is_rest": shift is REST,
+        }
+
+    async def _resolve_override(
+        self,
+        employee_id: int,
+        business_date: str,
+        is_rest: bool,
+        shift_id: Optional[int],
+        zone_id: Optional[int],
+    ) -> tuple[int, str, Optional[int], Optional[int]]:
+        """`set_override` 的**校验与定值**那一半：这一天该写成什么（班次 id / 工作区 id）。
+
+        **一个字节都不写**（全是读）—— 晚一步的那道闸（`set_day_override` 要查的未决申请）
+        走的就是「先把这一天算明白 → 再查闸 → 最后才落笔」这个次序，所以校验必须能单独
+        走一遍。返回 `(员工号, 营业日, 班次 id, 工作区 id)`；班次 id 为空就是「那天休」。
+        """
         employee_id = int(employee_id)
         day = _require_business_date(business_date)
         today = self.today()
@@ -1209,14 +1235,7 @@ class SchedulingStore:
                 # 没点名要哪个区 → 跟这个班次的固定区（没配过就是没有区，不是错误）
                 zone = (await self._zone_defaults_for(employee_id)).get(shift)
 
-        await self._apply_override(employee_id, day, shift, zone)
-        return {
-            "employee_id": employee_id,
-            "business_date": day,
-            "shift_id": shift,
-            "zone_id": zone,
-            "is_rest": shift is REST,
-        }
+        return employee_id, day, shift, zone
 
     @_needs_migration
     async def set_day_override(
@@ -1236,7 +1255,8 @@ class SchedulingStore:
         所以这里多回一个 `pending_request` 错误，由调用方翻成一句人话。
 
         除这道闸之外**没有第二套写排班的方式**：校验、写覆盖记录与结果行、只动那一天、
-        可补记窗口，全部原样走 `set_override`。`pending_request` 的 `args[0]` 是
+        可补记窗口，全部原样走 `set_override`（校验是它那一半 `_resolve_override`，
+        落笔是 `_apply_override`）。`pending_request` 的 `args[0]` 是
         ``"leave"`` 或 ``"swap"``，API 层照它说「请假」还是「换班」。
 
         **判据与批准端同一条**：当事人是这个人（提的、或被问的）、那天落在那条申请的
@@ -1245,77 +1265,27 @@ class SchedulingStore:
         而店长此刻手上正拿着那一天的格子。对方摇头、或申请人自己撤回之后
         （`rejected` / `cancelled`）就不再挡。
 
-        **先写、再读一次那道闸**：申请插入与「那天有没有未决的」读的是**同一条连接**，
-        所以员工在店长点下去的那一瞬间提上来的申请也读得到（提交后才读，读到的一定是
-        最新的那份）。判出未决就把那一天**恢复成写之前的样子**（覆盖记录与结果行都按
-        原样写回去，本来没有覆盖就摘掉、按现在的规则重算）—— 客户端的「没写进去」
-        因此是可观测的：不是「回到规则」，是「跟点之前一模一样」。
+        **写前查**：先把这一天算明白（`_resolve_override`，全是读）、再读那道闸，
+        两道都过了才落笔。被拒的那一次**一个字节都不碰** `staff_assignments` 与
+        `scheduling_overrides` —— 原先那种「先写、再读、判出未决就按原样写回去」的补偿式
+        写法终态虽然一样，却在「写完到读完」那一瞬把那一行重写过一遍：一次「没写成」的
+        动作不该在库里留下任何写入。申请插入与「那天有没有未决的」读的是同一条连接，
+        所以员工在店长点下去之前提上来的申请照样读得到。
         """
-        # 先记下这一天现在长什么样：判出未决时要**原样写回去**。覆盖记录是那一天
-        # 唯一的事实来源（结果行可能被规则重铺、也可能本来就丢过），所以按它恢复。
-        before = await self._day_override_row(int(employee_id), business_date)
-        result = await self.set_override(
-            employee_id,
-            business_date,
-            is_rest=is_rest,
-            shift_id=shift_id,
-            zone_id=zone_id,
+        employee_id, day, shift, zone = await self._resolve_override(
+            employee_id, business_date, is_rest, shift_id, zone_id
         )
-        pending = await self._pending_request_on(result["employee_id"], result["business_date"])
+        pending = await self._pending_request_on(employee_id, day)
         if pending is not None:
-            await self._restore_day_override(result["employee_id"], result["business_date"], before)
             raise SchedulingError("pending_request", pending)
-        return result
-
-    async def _day_override_row(self, employee_id: int, business_date: str) -> Optional[dict]:
-        """某人某天**现在**的覆盖记录（没有则 ``None``）；不自己上锁、不提交。
-
-        只读三件事：`shift_id`（`None` = 那天休）、`zone_id`、`kind` ——
-        `_restore_day_override` 照着它们原样写回去。日期先规整过（调用方是
-        `set_day_override`，`day` 已经被它校验过一遍）。
-        """
-        cur = await self._conn.execute(
-            """SELECT shift_id, zone_id, kind FROM scheduling_overrides
-               WHERE employee_id = ? AND business_date = ?""",
-            (int(employee_id), business_date),
-        )
-        row = await cur.fetchone()
-        if row is None:
-            return None
-        mapping = dict(row)
+        await self._apply_override(employee_id, day, shift, zone)
         return {
-            "shift_id": None if mapping["shift_id"] is None else int(mapping["shift_id"]),
-            "zone_id": None if mapping["zone_id"] is None else int(mapping["zone_id"]),
-            "kind": mapping["kind"],
+            "employee_id": employee_id,
+            "business_date": day,
+            "shift_id": shift,
+            "zone_id": zone,
+            "is_rest": shift is REST,
         }
-
-    @serialized_write
-    async def _restore_day_override(
-        self, employee_id: int, day: str, before: Optional[dict]
-    ) -> None:
-        """把这一天恢复成 `before`（`set_day_override` 判出未决申请时用）。
-
-        `before` 是那次写入**之前**的覆盖记录：有就照它原样写回（连 `kind` 一起，
-        比如那天本来就是批准过的请假），没有就把覆盖记录摘掉、结果行按**现在的规则**
-        重算 —— 后者与 `clear_override` 是同一条路（规则没铺到的过去那天回到「没有行」）。
-        """
-        if before is None:
-            await self._delete_override_row(employee_id, day)
-            await self._restore_day(employee_id, day, self.today())
-        else:
-            await self._write_override_row(
-                employee_id, day, before["shift_id"], before["zone_id"], before["kind"], self._now_iso()
-            )
-            await self._write_day_row(
-                employee_id, day, before["shift_id"], before["zone_id"], SOURCE_OVERRIDE, self._now_iso()
-            )
-        await self._conn.commit()
-        logger.info(
-            "逐日改格撤销（那天有未决申请）: employee_id=%s day=%s 恢复成=%s",
-            employee_id,
-            day,
-            "原来的覆盖" if before is not None else "规则 / 没有行",
-        )
 
     async def _pending_request_on(self, employee_id: int, day: str) -> Optional[str]:
         """那天这个人有没有一条**还没落定**的申请：有就回 ``"leave"`` / ``"swap"``。

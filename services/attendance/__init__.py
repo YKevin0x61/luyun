@@ -10,6 +10,7 @@
 """
 
 from services.attendance.store import (
+    LEDGER_WRITE_FIELDS,
     MANUAL_FIELDS,
     STATE_REST,
     STATE_TODO,
@@ -19,6 +20,7 @@ from services.attendance.store import (
 )
 
 __all__ = [
+    "LEDGER_WRITE_FIELDS",
     "MANUAL_FIELDS",
     "STATE_REST",
     "STATE_TODO",

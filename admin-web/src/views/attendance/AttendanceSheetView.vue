@@ -37,6 +37,13 @@
  * （服务端投影，不落服务器），文件名由响应头带回来（`考勤表-YYYY-MM.xlsx`）。这一页
  * 自己不拼文件名、也不碰工作簿内容。
  *
+ * 收尾修复（两轴 code-review 之后）：手填那一块多了**期初存假（上月结转）**那个输入口
+ * —— 故事 35 让超管在**上线当月手工给一次**「上月末余额」，写的是月度台账**本月那一行**
+ * 的 `opening_balance`（票 03 的裁定），走的是与四列手填**同一条**月级 PUT；「借调门店」
+ * 那一项旁边注明了它与历史表的偏差（历史表写在某一天的格子上，本版按月记、不落进导出件
+ * 的日格）；日格上那三种写法由 `utils/__tests__` 里一条断言与服务端
+ * `services/attendance/export.py` 的常量钉在一起（不许前后端各说各话）。
+ *
  * 这一页只算当月：没有月份选择器。
  */
 import { computed, onMounted, ref } from 'vue'
@@ -100,6 +107,10 @@ function employees() {
     lodging: person.lodging,
     borrowed_store: person.borrowed_store,
     resigned: person.resigned,
+    // 人工期初（收尾修复 ② / 故事 35）：台账**本月那一行**的 `opening_balance`，
+    // 上线当月手工给一次。它与 `leave.previous_balance` 是两件事：后者只在上一月
+    // 还没封账时才读它。
+    opening_balance: person.opening_balance,
     cells: (person.days || []).map((day) => ({
       ...day,
       ...(frame.value.get(day.business_date) || {}),
@@ -269,6 +280,65 @@ async function saveManual(person, event) {
 function manualErrorOn(employeeId) {
   return manualError.value && manualError.value.employee_id === employeeId
     ? manualError.value.text
+    : ''
+}
+
+/** 人工期初（收尾修复 ② / 故事 35）：那一格的输入口与它自己那一次写。
+ *
+ *  为什么它**不并进**上面那「存这四项」：那四列是每张卡随时会改的日常项，而期初是
+ *  上线当月手工给**一次**的账（再往后以封账结转）。分开一颗按钮，误点「存这四项」
+ *  不会把这一格顺手清掉 —— 写口那边的纪律是「点名谁才写谁」，空着就一个字节都不碰。
+ */
+const savingOpening = ref(0)
+const openingError = ref(null) // { employee_id, text } | null
+
+/** 输入框里现在是什么：服务端那一份；`null`（没给过）留空，不是 `undefined`。 */
+function openingValue(person) {
+  const value = person.opening_balance
+  return value === null || value === undefined ? '' : String(value)
+}
+
+/** 存期初存假：**只发这一格**（`{ opening_balance }`），空着发 `null` = 清空。
+ *
+ *  填了不是数字的东西**不发请求**：服务端那一位是数字，而 `Number('七点五')` 是 `NaN`，
+ *  转成 JSON 会变成 `null` —— 那会把这一格悄悄清掉。前端先说人话（同「存这四项」：
+ *  失败时不动页面上已经渲染的那一份）。
+ */
+async function saveOpening(person, event) {
+  if (savingOpening.value) return
+  const form = event.target.closest('.aOpening')
+  const input = form && form.querySelector('[data-field="opening_balance"]')
+  const raw = input ? input.value.trim() : ''
+  let value = null
+  if (raw !== '') {
+    value = Number(raw)
+    if (!Number.isFinite(value)) {
+      openingError.value = {
+        employee_id: person.id,
+        text: '期初存假要写一个数字（可以是负的、也可以带 .5）；要清空就把那一格留空',
+      }
+      return
+    }
+  }
+  openingError.value = null
+  savingOpening.value = person.id
+  try {
+    await api.put(`/api/attendance/sheet/${person.id}/manual`, { opening_balance: value })
+    // 与手填那四列同一条路：自己重拉一次（nudge 不带数据，这一页也不等它）。
+    sheet.value = await api.get('/api/attendance/sheet')
+  } catch (err) {
+    openingError.value = {
+      employee_id: person.id,
+      text: err.message || '期初存假没存进去',
+    }
+  } finally {
+    savingOpening.value = 0
+  }
+}
+
+function openingErrorOn(employeeId) {
+  return openingError.value && openingError.value.employee_id === employeeId
+    ? openingError.value.text
     : ''
 }
 
@@ -494,7 +564,42 @@ onMounted(() => {
                 :value="manualValue(person, field)"
               />
               <small class="aManualHint">{{ field.hint(person) }}</small>
+              <!-- 「借调门店」与历史表的**唯一**一处偏差（收尾修复 ⑥）：样表是把它写在
+                   **某一天**的格子上（`城光荟` / `同和` / `调东莞`），而本版的台账是按月记的、
+                   没有日期可落 —— 所以导出件里**不落进日格**（这一列只留在卡片上）。
+                   要 1:1 就得给这一项加日期，那是另开票的事。 -->
+              <small v-if="field.key === 'borrowed_store'" class="aManualNote">
+                历史样表写在某一天的格子上；本版台账按月记，不落进导出件的日格
+              </small>
             </label>
+          </div>
+          <!-- 人工期初（收尾修复 ② / 故事 35）：**上线当月手工给一次**的「上月末余额」，
+               写的是月度台账**本月那一行**的 `opening_balance`（票 03 的裁定）。与服务端
+               那条月级写口同一扇门，但自己一颗按钮：它是一次性的账，不是日常那一格。 -->
+          <div class="aOpening">
+            <label class="aOpeningField">
+              <span class="aOpeningLabel">期初存假（上月结转）</span>
+              <input
+                class="aOpeningInput"
+                type="text"
+                inputmode="decimal"
+                data-field="opening_balance"
+                :aria-label="`${person.name || ''} 的期初存假`"
+                :value="openingValue(person)"
+              />
+              <small class="aOpeningHint">只在上线当月手工给一次；可为负、可带 .5</small>
+            </label>
+            <button
+              class="btn btn-sm aOpeningSave"
+              type="button"
+              :disabled="savingOpening === person.id"
+              @click="saveOpening(person, $event)"
+            >
+              存期初存假
+            </button>
+            <small v-if="openingErrorOn(person.id)" class="aOpeningErr" role="alert">
+              {{ openingErrorOn(person.id) }}
+            </small>
           </div>
           <!-- 「这一块现在是什么」由服务端那一份说了算（重拉之后写的就是最新的）。 -->
           <p class="aManualNow">
@@ -664,4 +769,24 @@ onMounted(() => {
 .aManualFoot { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); }
 .aManualFoot .aSave { flex: none; }
 .aManualErr { font-size: var(--fs-11); color: var(--danger-bright); }
+/* 「借调门店」旁边那处与历史表的偏差（收尾修复 ⑥）：一行小字，说清它为什么不进导出件。
+   宽度收窄一点，免得把那一排四个输入口挤散。 */
+.aManualNote {
+  margin: 2px 0 0; max-width: 140px; font-size: var(--fs-11); line-height: 1.5;
+  color: var(--ink-faint);
+}
+/* 人工期初（收尾修复 ②）：上线当月手工给一次的那一位，自己一颗按钮（见 `saveOpening`）。 */
+.aOpening {
+  display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.aOpeningField { display: flex; flex-direction: column; gap: 2px; }
+.aOpeningLabel { font-size: var(--fs-11); color: var(--ink-faint); }
+.aOpeningInput {
+  width: 110px; padding: 4px var(--sp-2); border: 1px solid var(--line);
+  border-radius: var(--r-1); background: var(--surface-2); color: var(--ink);
+  font-size: var(--fs-12); font-family: inherit;
+}
+.aOpeningHint { margin: var(--sp-2) 0 0; font-size: var(--fs-11); color: var(--ink-faint); }
+.aOpeningErr { font-size: var(--fs-11); color: var(--danger-bright); }
 </style>

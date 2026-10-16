@@ -812,3 +812,168 @@ describe('考勤表页的导出这个月（票 08）', () => {
     expect(exportButton(wrapper).text()).toBe('导出这个月') // 没导成，按钮还在
   })
 })
+
+// ── 收尾修复 ②：手填那一块里的「期初存假（上月结转）」 ──────────────────────
+//
+// 它写的是月度台账**本月那一行**的 `opening_balance`（票 03 的裁定：人工期初读的就是
+// 本月那一行），走的是与四列手填**同一条**月级 PUT —— 但自己一颗按钮：那四列是每张卡
+// 随时会改的日常项，期初是上线当月手工给**一次**的账，混在一起会把这一格顺手清掉。
+
+/** 一份带人工期初的当月考勤表（其余照票 03 那份）。 */
+const SHEET_WITH_OPENING = {
+  ...SHEET_WITH_LEAVE,
+  employees: [{ ...SHEET_WITH_LEAVE.employees[0], opening_balance: 5.5 }],
+}
+
+/** 一份只认月级 PUT 的「服务端」：GET 出表、PUT 记下 body 并把期初写回去。 */
+function openingServer() {
+  const current = JSON.parse(JSON.stringify(SHEET_WITH_OPENING))
+  const puts = []
+  const fetchMock = vi.fn(async (url, options = {}) => {
+    const path = String(url).split('?')[0]
+    if (path === '/api/attendance/sheet' && (options.method || 'GET') === 'GET') {
+      return jsonResponse(JSON.parse(JSON.stringify(current)))
+    }
+    const manual = path.match(/^\/api\/attendance\/sheet\/(\d+)\/manual$/)
+    if (manual && options.method === 'PUT') {
+      const body = JSON.parse(options.body || '{}')
+      puts.push({ employeeId: Number(manual[1]), manual: body })
+      const person = current.employees.find((row) => row.id === Number(manual[1]))
+      person.opening_balance = body.opening_balance
+      return jsonResponse({ employee_id: person.id, month: current.month })
+    }
+    return jsonResponse({ detail: 'not found' }, 404)
+  })
+  return { fetchMock, puts }
+}
+
+describe('考勤表页的期初存假（收尾修复 ②）', () => {
+  it('卡片上有这个输入口：标签说清是哪一位、提示语说清只在上线当月给一次', async () => {
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_OPENING }))
+    const card = wrapper.findAll('.aCard')[0]
+
+    expect(card.find('.aOpeningLabel').text()).toBe('期初存假（上月结转）')
+    // 输入框里是服务端那一份（人工期初是台账上的值，不是页面自己记的）。
+    expect(card.find('.aOpeningInput').element.value).toBe('5.5')
+    expect(card.find('.aOpeningHint').text()).toContain('只在上线当月手工给一次')
+  })
+
+  it('老载荷没给这一位时留空，不是 `undefined`', async () => {
+    const { wrapper } = await mountSheet() // 票 01 那份 SHEET：压根没有 `opening_balance`
+    expect(wrapper.findAll('.aCard')[0].find('.aOpeningInput').element.value).toBe('')
+  })
+
+  it('改完点「存期初存假」→ 打同一条月级 PUT（只带这一位）→ 卡片立刻变', async () => {
+    const server = openingServer()
+    const { wrapper, puts } = await mountSheet(server)
+    const card = wrapper.findAll('.aCard')[0]
+
+    await card.find('.aOpeningInput').setValue('7.5')
+    await card.find('.aOpeningSave').trigger('click')
+    await flushPromises()
+
+    expect(puts).toEqual([{ employeeId: 1, manual: { opening_balance: 7.5 } }])
+    expect(wrapper.findAll('.aCard')[0].find('.aOpeningInput').element.value).toBe('7.5')
+  })
+
+  it('清空那一格 → 发 `null`（清空存 NULL，与从没填过同义）', async () => {
+    const server = openingServer()
+    const { wrapper, puts } = await mountSheet(server)
+    const card = wrapper.findAll('.aCard')[0]
+
+    await card.find('.aOpeningInput').setValue('')
+    await card.find('.aOpeningSave').trigger('click')
+    await flushPromises()
+
+    expect(puts).toEqual([{ employeeId: 1, manual: { opening_balance: null } }])
+  })
+
+  it('填了不是数字的东西就不发请求，理由写在那一块上', async () => {
+    const server = openingServer()
+    const { wrapper, puts } = await mountSheet(server)
+    const card = wrapper.findAll('.aCard')[0]
+
+    await card.find('.aOpeningInput').setValue('七点五')
+    await card.find('.aOpeningSave').trigger('click')
+    await flushPromises()
+
+    // `Number('七点五')` 是 `NaN`，发出去会变成 `null` —— 那会把这一格悄悄清掉。
+    expect(puts).toEqual([])
+    expect(wrapper.findAll('.aCard')[0].find('.aOpeningErr').text()).toContain('数字')
+  })
+
+  it('服务端拒了就把理由写出来，页面不装作存进去了', async () => {
+    const refused = attendanceServer({
+      sheet: SHEET_WITH_OPENING,
+      refuse: '台账还没建好，请先做数据库迁移',
+    })
+    const { wrapper } = await mountSheet(refused)
+    const card = wrapper.findAll('.aCard')[0]
+
+    await card.find('.aOpeningInput').setValue('7.5')
+    await card.find('.aOpeningSave').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('.aCard')[0].find('.aOpeningErr').text()).toBe(
+      '台账还没建好，请先做数据库迁移',
+    )
+    expect(wrapper.findAll('.aCard')[0].find('.aOpeningInput').element.value).toBe('5.5')
+  })
+})
+
+// ── 收尾修复 ⑥：「借调门店」旁边那处与历史表的偏差 ─────────────────────────
+
+describe('「借调门店」旁边注明这一处例外（收尾修复 ⑥）', () => {
+  it('页面上写清：历史表写在某一天的格子上，本版按月记、不落进导出件的日格', async () => {
+    const { wrapper } = await mountSheet()
+    const note = wrapper.findAll('.aCard')[0].find('.aManualNote')
+
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('某一天')
+    expect(note.text()).toContain('不落进')
+    expect(note.text()).toContain('导出')
+  })
+
+  it('这处注明只跟着「借调门店」那一项，别的三项不挂它', async () => {
+    const { wrapper } = await mountSheet()
+    const card = wrapper.findAll('.aCard')[0]
+
+    expect(card.findAll('.aManualNote')).toHaveLength(1)
+    // 借调门店是第三个字段（`MANUAL_INPUTS` 的顺序）：它那一格里有这行小字。
+    expect(card.findAll('.aManualField')[2].find('.aManualNote').exists()).toBe(true)
+    expect(card.findAll('.aManualField')[1].find('.aManualNote').exists()).toBe(false)
+  })
+})
+
+// ── 收尾修复 ⑥：日格那几个字，把两份源文件钉在一起 ──────────────────────────
+
+describe('日格文案与导出件的常量逐字相同（收尾修复 ⑥）', () => {
+  it('export.py 的 DAY_TEXT / HALF_REST_TEXT / TODO_TEXT == attendanceSheet.js 的三种写法', () => {
+    // 这一份文件的注释原先自称「卡片与导出件共用同一批字」，而导出件是 Python、import
+    // 不到 `utils/attendanceSheet.js`，只好在 `services/attendance/export.py` 里另存一份
+    // （同仓库既有的读源码式断言，如前端那几条 `readFileSync` 读 `.py` / `main.py`）。
+    // 那一句话本身没法成立，于是改成这条**把两份源文件都读出来**的比对：改一边忘另一边
+    // 就红 —— 比注释诚实。
+    const exportPy = readFileSync(join(here, '../../../../../services/attendance/export.py'), 'utf8')
+
+    const constant = (name) => {
+      const matched = exportPy.match(new RegExp(`^${name} = "(.+)"$`, 'm'))
+      expect(matched, `${name} 不在 export.py 里了`).not.toBeNull()
+      return matched[1]
+    }
+    // 前端那三种写法也从源码里读出来（不是 import 之后再比）：这一条要钉的是「两份源文件
+    // 里写的是同一批字」，所以两边都读源码，谁也不比谁多一层加工。
+    const written = (pattern) => {
+      const matched = copy.match(pattern)
+      expect(matched, `attendanceSheet.js 里那一种写法找不到了：${pattern}`).not.toBeNull()
+      return matched[1]
+    }
+
+    expect(constant('DAY_TEXT')).toBe(written(/^\s*rest: '(.*)',$/m))
+    expect(constant('HALF_REST_TEXT')).toBe(written(/^export const HALF_REST_TEXT = '(.*)'$/m))
+    expect(constant('TODO_TEXT')).toBe(written(/^\s*todo: '(.*)',$/m))
+    // 「上班」是唯一一处**有意**不同：导出件里出勤是**空格子**（不写字），所以
+    // `export.py` 里压根没有它的常量 —— 不是漏了，是那一位在纸面上就是空的。
+    expect(written(/^\s*work: '(.*)',$/m)).toBe('上班')
+  })
+})
