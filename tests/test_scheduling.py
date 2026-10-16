@@ -1445,6 +1445,16 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["business_date"], TODAY)
         rows = {row["business_date"]: row for row in await self._rows(employee["id"])}
         self.assertEqual((rows[TODAY]["shift_id"], rows[TODAY]["source"]), (night, "override"))
+        # 票 06 验收 7 的另一半：**下个月也是规则的样子**。规则从今天起铺 90 天，
+        # 9/25 改的那一天不该把 10 月的任何一格写成 `override` — 覆盖是整天的快照，
+        # 但它只落在点下去的那一天上。
+        october = [
+            row
+            for row in await self._rows(employee["id"])
+            if row["business_date"].startswith("2026-10")
+        ]
+        self.assertTrue(october, "规则该铺到 10 月：窗口有 90 天")
+        self.assertEqual({row["source"] for row in october}, {"rule"})
 
     async def test_override_to_rest_takes_the_person_out_of_the_count(self):
         """验收 2：改成休 —— 那天少一个人、多一个「休」，别的时候不受影响。"""
@@ -1545,7 +1555,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((detail["total"], detail["off_count"]), (1, 1))
 
     async def test_clearing_an_override_puts_the_rule_back(self):
-        """验收 5：撤掉覆盖 → 那天回到规则铺出来的样子（连工作区一起）。"""
+        """验收 5（票 06 验收 7 的那条断言也落在这里）：撤掉覆盖 → 回到规则（连工作区一起）。"""
         employee = await self._employee()
         day = await self._shift_id("白班")
         zone = await self._zone("案板")
@@ -1557,6 +1567,11 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
         row = (await self._full_rows(employee["id"]))["2026-09-25"]
         self.assertEqual((row["shift_id"], row["zone_id"], row["source"]), (day, zone, "rule"))
+        # 撤掉之后覆盖记录也没了：那一天回到**规则**的样子，不是「还有一个空覆盖」。
+        self.assertEqual(await self._overrides(), [])
+        # 别的日子一模一样（撤一天不该顺手重铺别的天）。
+        untouched = (await self._full_rows(employee["id"]))["2026-09-26"]
+        self.assertEqual((untouched["shift_id"], untouched["source"]), (day, "rule"))
         detail = await self.store.day_detail("2026-09-25")
         self.assertEqual(detail["total"], 1)
         self.assertEqual(detail["groups"][0]["people"][0]["overridden"], False)

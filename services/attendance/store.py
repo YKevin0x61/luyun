@@ -16,6 +16,8 @@
   人（含当月离职的）。没有当月记录的**历史**离职人员不进表。
 * 卡片列：职位 / 底薪 / 年限（工龄奖）/ 是否新入职 / 当月净时长。入职日期为空的人
   `new_hire` 是 `None`（留空），不是 `False`（「算不出来」与「不是新来的」是两件事）。
+* 票 06 起格子上多一个 `shift_id`、卡片上多一份 `shifts`（**启用中的**班次）：逐日改格
+  要能标出「现在是哪个班」并挑另一个。这一层仍然**只读** —— 写路径在排班那一边。
 
 「今天」取**营业日**（06:00 切，同排班）：考勤表的格子就是
 `staff_assignments.business_date`，两边的「哪一天」必须是同一个词。
@@ -157,6 +159,22 @@ class AttendanceStore:
                 totals[employee_id] = totals.get(employee_id, 0) + int(mapping["half_hours"])
         return totals, recorded
 
+    async def _shifts(self) -> list[dict[str, Any]]:
+        """卡片上那个下拉里能挑的班次：**启用中的**，按显示顺序（票 06）。
+
+        挑班次的下拉与排班月历读的是同一张表、同一条「只在用的班次」口径 ——
+        停用的班次摆在这里等于给店长一个点下去就 400 的选项。名字之外还带 `id`：
+        改格是按 id 写的（班次可以改名，名字不是键）。
+        """
+        cur = await self._conn.execute(
+            """SELECT id, name FROM staff_shifts WHERE is_active = 1
+               ORDER BY sort_order ASC, id ASC"""
+        )
+        return [
+            {"id": int(dict(row)["id"]), "name": dict(row)["name"]}
+            for row in await cur.fetchall()
+        ]
+
     @_needs_migration
     async def sheet(self) -> dict:
         """当月那一张考勤表：月框 + 一人一张卡。**唯一的读口**，没有月份参数。"""
@@ -169,6 +187,7 @@ class AttendanceStore:
 
         rows = await self._assignment_rows(first, until)
         totals, recorded = await self._month_entries(first, until)
+        shifts = await self._shifts()
         # 当月有排班或加班记录的人：离职的人靠它进表（票 01 验收 5）。
         on_record = set(rows) | recorded
         # 员工是谁只从公共层取（同排班的路子）：职位 / 底薪 / 工龄奖 / 入职日期都在
@@ -207,10 +226,16 @@ class AttendanceStore:
                     # 入职日期落在当月 = 新入职；没填入职日期 = 留空（`None`），不是「不是新来的」。
                     "new_hire": None if not hire_date else str(hire_date)[:7] == month,
                     "net_hours": totals.get(employee_id, 0) / 2,
+                    # 这一页的逐日改格（票 06）能挑的班次：**启用中的**那一份。
+                    # 每个员工带一份，前端不用再打第二个接口，也就不会有两份会漂的名单。
+                    "shifts": shifts,
                     "days": [
                         {
                             "business_date": day["business_date"],
                             "state": _day_state(today, day["business_date"], theirs),
+                            # 那天挂的是哪个班（`None` = 休 / 没排到 / 还没到）。
+                            # 状态之外再给班次号：卡片上的下拉要标出「现在是哪个」。
+                            "shift_id": theirs.get(day["business_date"]),
                         }
                         for day in days
                     ],
