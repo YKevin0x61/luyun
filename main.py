@@ -35,6 +35,7 @@ from api.runtime_settings import router as runtime_settings_router
 from api.logs import router as logs_router
 from api.scheduling import router as scheduling_router
 from api.overtime import router as overtime_router
+from api.attendance import router as attendance_router
 from api.tables import router as tables_router
 from api.analytics import router as analytics_router
 from api.export_api import router as export_router
@@ -1099,6 +1100,9 @@ app.include_router(scheduling_router)
 # 票 02 的管理面会自己带 require_session —— 都不挂 verify_admin_token，
 # 因为员工手机端根本没有 API token。
 app.include_router(overtime_router)
+# 考勤表（考勤表导出票 01）同理：只有管理端那一面，自己带 require_session ——
+# 这一页有全店人的底薪与假期，员工那一档连页面都进不去。
+app.include_router(attendance_router)
 
 # 静态文件（仪表盘 + 管理后台）
 from fastapi.staticfiles import StaticFiles
@@ -1255,6 +1259,9 @@ SPA_PAGE_ROUTES = (
     # 加班统计（票 02）：超管的审批台 —— 待办队列 + 批 / 驳 / 作废 + 代员工补录。
     # 员工那一面在 `/workbench/me/overtime`（票 01），店长那一面在员工手机端（票 04）。
     "/workbench/hr/overtime",
+    # 考勤表（考勤表导出票 01）：人事组的第七页 —— 当月一人一张卡。同一批：漏一条就是
+    # 直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
+    "/workbench/hr/attendance",
     "/workbench/floor/zones",
     "/workbench/floor/daily",
     "/workbench/floor/deep-clean",
