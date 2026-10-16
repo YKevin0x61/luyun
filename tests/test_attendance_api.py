@@ -2722,3 +2722,221 @@ def test_the_attendance_store_defines_its_shared_helpers_once():
     assert len(re.findall(r"^    def _write_lock\(", source, re.M)) == 1
     assert len(re.findall(r"^    def _now_iso\(", source, re.M)) == 1
 
+
+
+# ══ A 批返工（后端正确性四条） ══════════════════════════════════════════
+#
+# 父级复核复现出来的四条，全部只碰后端：① 封账给「那个月零记录的人」封了一笔负数、
+# ② `sealed_employees` 报的是循环次数、③ 手填列缺一个「只有填过才有值」的位、
+# ④ 手填列的写口不校验员工。判据与前文同一套：HTTP 主缝 + 真库。
+
+# ── ① 封账的名单 = **那个月有记录的人**（不是「现在在职」） ──────────────────
+
+
+def _ledger_rows_in_month(db, month):
+    """那个月在台账里落了几行 —— 封账「到底写进去几人份」的直接证据。"""
+
+    async def _count():
+        cur = await db._conn.execute(
+            'SELECT COUNT(*) AS n FROM attendance_ledger WHERE "month" = ?', (month,)
+        )
+        return int(dict(await cur.fetchone())["n"])
+
+    return _run(_count())
+
+
+def test_sealing_covers_the_people_with_a_record_and_leaves_the_others_alone(attendance_http):
+    """① 那个月**有排班记录**的人封一行；**当前在职、但那个月零排班零加班**的人一行都不封。
+
+    父级复现的原样：全店只有 2 人那个月有记录，封完却报 19 人，其中 17 人
+    `closing_balance = -30`（「本月出勤 0 天」）并带上 `sealed_at` **永久冻结**。封账的
+    输入是那个月的排班 / 加班（`sheet()` 的 `on_record`），「现在在职」不是那个月的记录 ——
+    一个 9 月入职的人不该被 8 月的账封上一笔负数。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    worked = _employee_id(accounts, "13800138241", "八月有班")
+    idle = _employee_id(accounts, "13800138242", "八月一条记录都没有")
+    shifts = _shift_ids(db)
+    _run(_scheduler(db).set_override(worked, "2026-08-26", shift_id=shifts["白班"]))
+
+    resp = _seal(client, admin, {"month": "2026-08"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # 有记录的那一位照旧封上：出勤 1 天 → 池 1 − 31 天 = −30。
+    assert body["sealed_employees"] == 1
+    assert _ledger_row(db, worked, "2026-08")["closing_balance"] == -30.0
+    # 零记录的那一位：台账里**一行都没有**（不是「有一行但是 0」）。
+    assert _ledger_row(db, idle, "2026-08") is None
+    # 卡片那一侧的口径一个字没动：他仍然在**当月**的表上（「在职」进的是卡片，不是封账）。
+    assert _card(_sheet(client, admin), idle)["id"] == idle
+
+
+def test_sealing_a_month_nobody_has_a_record_for_writes_nothing(attendance_http):
+    """① 封一个**谁都没记录**的月：写 0 行，返回 `sealed_employees: 0`。
+
+    这是上一条的极端情形，也是判据最干净的一条 —— 台账那一列的 COUNT 是 0，
+    响应上的数字也是 0。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    _employee_id(accounts, "13800138243", "在职但八月没记录")
+    _employee_id(accounts, "13800138244", "另一位也没记录")
+
+    resp = _seal(client, admin, {"month": "2026-08"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["sealed_employees"] == 0
+    assert _ledger_rows_in_month(db, "2026-08") == 0
+
+
+# ── ② `sealed_employees` = **真落库的行数**（不是循环次数） ──────────────────
+
+
+def _ledger_rows_stamped(db, month, sealed_at):
+    """那个月里 `sealed_at` 正好是这次那个时刻的行数 —— 「这一笔到底写了几行」。"""
+
+    async def _count():
+        cur = await db._conn.execute(
+            'SELECT COUNT(*) AS n FROM attendance_ledger'
+            ' WHERE "month" = ? AND sealed_at = ?',
+            (month, sealed_at),
+        )
+        return int(dict(await cur.fetchone())["n"])
+
+    return _run(_count())
+
+
+def test_the_sealed_count_is_the_rows_that_really_landed(attendance_http):
+    """② `sealed_employees` 报的是**这次真写进台账的行数**。
+
+    判据不靠循环：响应上的数字 == 台账里 `sealed_at` 正好是这次那个时刻的行数，而且
+    台账里**先前就有**的行（手填列建出来的别的月份那一行、还没封的当月行）一行都不算。
+
+    `ON CONFLICT ... DO UPDATE ... WHERE attendance_ledger.sealed_at IS NULL` 会把
+    「已经被别人封过的那一行」整条跳过 —— 那一笔一行都没落地，就不该进这个数字。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    worked = _employee_id(accounts, "13800138251", "八月有班")
+    overtime_only = _employee_id(accounts, "13800138252", "八月只登过加班")
+    idle = _employee_id(accounts, "13800138253", "八月没记录")
+    _run(
+        _scheduler(db).set_override(worked, "2026-08-26", shift_id=_shift_ids(db)["白班"])
+    )
+    # `on_record` 的另一半：只登过加班（还没批也算「那个月上过班」）的人也在名单里。
+    _run(
+        _ledger(db).submit(
+            EntryActor(employee_id=overtime_only, can_backfill=True),
+            "2026-08-10",
+            4,
+            "八月加班",
+        )
+    )
+    # 台账里先前就有一行（当月那一行，手填列建的）：它不是这次封账写下的行。
+    _put_ledger_row(db, idle, MONTH, lodging="是")
+
+    resp = _seal(client, admin, {"month": "2026-08"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sealed_employees"] == 2
+    assert _ledger_rows_stamped(db, "2026-08", body["sealed_at"]) == 2
+    # 先前那一行（当月、手填列建的）没被封账碰过。
+    assert _ledger_row(db, idle, "2026-08") is None
+    assert _ledger_row(db, idle, MONTH)["sealed_at"] is None
+
+
+# ── ③ 「本月班次」多一个**只有填过才有值**的位（`shift_name_stored`） ─────────
+
+
+def test_the_card_marks_whether_the_month_shift_was_ever_filled(attendance_http):
+    """③ 没写过台账的人：`shift_name` 是**这一格该显示的值**（当月众数），
+    `shift_name_stored` 明说「台账上一个字都没有」（`None`）。
+
+    这是给前端输入框的那一位：那一格改绑 `shift_name_stored` 之后，店长只改「是否住宿」
+    再点保存，就不会把「当月众数」这条**默认值**当成他填的值写进台账（写进去之后就再也
+    不跟排班变了）。`shift_name` 的语义一个字没动 —— 导出件的 A 列读的仍是它。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    scheduled = _employee_id(accounts, "13800138261", "排过班但没填过")
+    unscheduled = _employee_id(accounts, "13800138262", "没排班也没填过")
+    _run(
+        _scheduler(db).set_override(
+            scheduled, "2026-09-01", shift_id=_shift_ids(db)["夜班"]
+        )
+    )
+
+    card = _card(_sheet(client, admin), scheduled)
+
+    assert card["shift_name"] == "夜班"
+    assert card["shift_name"] == card["default_shift_name"]
+    assert card["shift_name_stored"] is None
+    # 只写「是否住宿」那一次：台账上的班次那一位照旧是空的 —— 服务端不替谁编一个值。
+    assert _put_manual(client, admin, scheduled, {"lodging": "是"}).status_code == 200
+    after = _card(_sheet(client, admin), scheduled)
+    assert (after["shift_name"], after["shift_name_stored"]) == ("夜班", None)
+    # 当月一条排班行都没有的人：三位都是 `None`（留空，不是报错）。
+    blank = _card(_sheet(client, admin), unscheduled)
+    assert (
+        blank["shift_name"],
+        blank["default_shift_name"],
+        blank["shift_name_stored"],
+    ) == (None, None, None)
+
+
+def test_clearing_the_month_shift_takes_the_stored_bit_back_to_empty(attendance_http):
+    """③ 写过的人：`shift_name` 与 `shift_name_stored` 都等于写进去的那个值；
+    清空之后 `shift_name_stored` **回到 `None`**、`shift_name` 回到当月众数。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138263", "填了又清")
+    _run(
+        _scheduler(db).set_override(
+            employee_id, "2026-09-01", shift_id=_shift_ids(db)["夜班"]
+        )
+    )
+
+    assert _put_manual(client, admin, employee_id, {"shift_name": "早班"}).status_code == 200
+    filled = _card(_sheet(client, admin), employee_id)
+    assert (filled["shift_name"], filled["shift_name_stored"]) == ("早班", "早班")
+    assert filled["default_shift_name"] == "夜班"
+
+    assert _put_manual(client, admin, employee_id, {"shift_name": None}).status_code == 200
+    cleared = _card(_sheet(client, admin), employee_id)
+    # 清空与「从没填过」同义：那一位回到空，显示的仍是当月众数。
+    assert cleared["shift_name_stored"] is None
+    assert cleared["shift_name"] == cleared["default_shift_name"] == "夜班"
+
+
+# ── ④ 手填列的写口要校验员工（不存在的 id 不许建孤儿行） ─────────────────────
+
+
+def test_the_manual_columns_write_refuses_an_employee_that_does_not_exist(attendance_http):
+    """④ 不存在的员工 → 拒（**404**），台账里连那一行都不该建出来。
+
+    改之前：`PUT /api/attendance/sheet/999999/manual {"lodging":"是"}` 回 200 并在
+    `attendance_ledger` 里建一行**孤儿**——`sheet()` 念的是花名册，那一行永远不显示，
+    只有 Admin 的数据浏览器看得见。逐日那条写口是校验的（排班单日覆盖的
+    `unknown_employee`），这条月级写口漏了。
+
+    状态码选 **404** 而不是 400：这条 URL 上缺的是**资源本身**（那个员工不存在），与
+    「参数不合法」是两件事，而且仓库里同名 code 的既有两条（`api/scheduling.py`、
+    `api/overtime.py` 的 `_ERROR_STATUS`）都是 404。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    real = _employee_id(accounts, "13800138271", "真员工")
+
+    refused = _put_manual(client, admin, 999999, {"lodging": "是"})
+
+    assert refused.status_code == 404, refused.text
+    assert "找不到" in refused.json()["detail"]
+    # 台账里没有那一行孤儿，也没有任何别的行（这次请求一个字节都没写）。
+    assert _ledger_row(db, 999999, MONTH) is None
+    assert _ledger_rows_in_month(db, MONTH) == 0
+    # 真员工照旧写得进：闸只挡「压根没有这个人」。
+    assert _put_manual(client, admin, real, {"lodging": "是"}).status_code == 200
+    assert _ledger_row(db, real, MONTH)["lodging"] == "是"
