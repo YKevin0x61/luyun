@@ -138,6 +138,15 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
         return {dict(row)["business_date"]: dict(row) for row in await cur.fetchall()}
 
+    async def _half_rest(self, employee_id):
+        """某人每天的「休半天」标志（`{营业日: 0/1}`）—— 票 07 只读它、不解释它。"""
+        cur = await self.db._conn.execute(
+            """SELECT business_date, half_rest FROM staff_assignments
+               WHERE employee_id = ?""",
+            (employee_id,),
+        )
+        return {dict(row)["business_date"]: dict(row)["half_rest"] for row in await cur.fetchall()}
+
     async def _requests(self):
         """申请表的整表快照：排序固定，方便整体比对（新用例大多只落一条）。"""
         cur = await self.db._conn.execute(
@@ -867,6 +876,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
                 "zone_id": zone,
                 "zone_name": "案板",
                 "overridden": True,
+                # 票 07：那天不是「休半天」（这个字段只在考勤表页设得上）。
+                "half_rest": False,
                 "leave": False,
             },
         )
@@ -885,6 +896,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
                 "zone_id": None,
                 "zone_name": None,
                 "overridden": False,
+                # 票 07：没有排班行的那天也没有「休半天」（键在、值是 False）。
+                "half_rest": False,
                 "leave": False,
             },
         )
@@ -1500,6 +1513,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
                     # 区也按 id 给一份：编辑器要按 id 预填下拉（名字没有唯一约束）。
                     "zone_id": other,
                     "overridden": True,
+                    # 票 07：那天没标「休半天」（这一票只改区，不动那个标志）。
+                    "half_rest": False,
                     # 票 08：那天在上班，`leave` 是「批了请假的没班」那个标记。
                     "leave": False,
                 }
@@ -1553,6 +1568,124 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             [("张三", None, True)],
         )
         self.assertEqual((detail["total"], detail["off_count"]), (1, 1))
+
+    async def test_a_half_rest_flag_hangs_on_the_row_and_a_rest_day_clears_it(self):
+        """票 07（ADR 0114）：半天休是**结果行上一个标志** —— 一行、一个班次、来源不变。
+
+        写它的是考勤表页那扇唯一的门（`AttendanceStore.set_half_rest`，HTTP 面在
+        `tests/test_attendance_api.py`）；这里验的是它与排班那条写路径的接线：
+
+        * 标志落在 `staff_assignments` 那一行上，**班次与 `source` 一个字都不动**；
+        * 那天**改成休** → 标志跟着清掉（`休 + 休半天` 是自相矛盾的，留着的话哪天再
+          改回班次，那一格会**自己**变成「休半天」——没人点过它）；
+        * 只是换个班次 → 标志留着：店长改的是「上哪个班」，不是「上不上这半天」。
+        """
+        from services.attendance.store import AttendanceStore
+
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+        attendance = AttendanceStore(self.db, now=lambda: self.fixed_now)
+
+        await attendance.set_half_rest(employee["id"], TODAY, True)
+
+        row = (await self._full_rows(employee["id"]))[TODAY]
+        self.assertEqual((row["shift_id"], row["source"]), (day, SOURCE_RULE))
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 1)
+
+        # 换个班次（不是改成休）：半天休留着。
+        await self.store.set_override(employee["id"], TODAY, shift_id=night)
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 1)
+        self.assertEqual((await self._rows(employee["id"]))[0]["shift_id"], night)
+
+        # 改成休：那天没有班次可言，标志必须下来。
+        await self.store.set_override(employee["id"], TODAY, is_rest=True)
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 0)
+
+        # 再改回班次：不会自己变回「休半天」。
+        await self.store.set_override(employee["id"], TODAY, shift_id=day)
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 0)
+
+        # 取消（回到「上班」）：写口把它清成 0，班次仍在。
+        await attendance.set_half_rest(employee["id"], TODAY, True)
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 1)
+        await attendance.set_half_rest(employee["id"], TODAY, False)
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 0)
+        self.assertEqual((await self._rows(employee["id"]))[0]["shift_id"], day)
+
+    async def test_half_rest_shows_up_on_every_read_side(self):
+        """票 07：那一个标志在**四个只读口**上都看得见，而且口径一致。
+
+        员工今天（`my_days`，员工端「今天上什么班」）/ 员工整月（`my_month`，四态里的
+        「休半天」）/ 周表（`week_grid`，店长那一版）/ 月历 + 当天（`month_calendar`
+        的计数与 `day_detail` 的名单）。**一处都不写**就等于「员工以为要上整天」
+        （ADR 0114 的 Consequences），所以四处一起钉。
+        """
+        from services.attendance.store import AttendanceStore
+
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        await AttendanceStore(self.db, now=lambda: self.fixed_now).set_half_rest(
+            employee["id"], TODAY, True
+        )
+
+        today_row = (await self.store.my_days(employee["id"]))["days"][0]
+        self.assertEqual(
+            (today_row["business_date"], today_row["scheduled"], today_row["half_rest"]),
+            (TODAY, True, True),
+        )
+        month_row = {
+            item["business_date"]: item
+            for item in (await self.store.my_month(employee["id"]))["days"]
+        }[TODAY]
+        self.assertEqual((month_row["shift_id"], month_row["half_rest"]), (day, True))
+        week_cell = (await self.store.week_grid(TODAY))["employees"][0]["cells"][TODAY]
+        self.assertEqual((week_cell["shift_id"], week_cell["half_rest"]), (day, True))
+        # 月历那一天：人数照旧把他算进去（那天确实上班），另有一个「几个人休半天」的计数。
+        calendar_day = {
+            item["business_date"]: item
+            for item in (await self.store.month_calendar("2026-09"))["days"]
+        }[TODAY]
+        self.assertEqual((calendar_day["total"], calendar_day["half_rest"]), (1, 1))
+        detail = await self.store.day_detail(TODAY)
+        self.assertEqual(
+            [(item["name"], item["half_rest"]) for item in detail["groups"][0]["people"]],
+            [("张三", True)],
+        )
+        # 没标的那天：四处都还是普通的「上班」。
+        next_day = (await self.store.my_days(employee["id"]))["days"][1]
+        self.assertFalse(next_day["half_rest"])
+        self.assertEqual(
+            (await self.store.week_grid(TODAY))["employees"][0]["cells"]["2026-09-26"]["half_rest"],
+            False,
+        )
+
+    async def test_a_rest_row_with_the_flag_set_is_not_half_rest(self):
+        """手工 SQL 造出的「休 + 休半天」不该在页面上变成「休半天」（读口再挡一次）。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.db._conn.execute(
+            """UPDATE staff_assignments SET shift_id = NULL, half_rest = 1
+               WHERE employee_id = ? AND business_date = ?""",
+            (employee["id"], "2026-09-25"),
+        )
+        await self.db._conn.commit()
+
+        week_cell = (await self.store.week_grid(TODAY))["employees"][0]["cells"]["2026-09-25"]
+        self.assertEqual((week_cell["scheduled"], week_cell["half_rest"]), (True, False))
+        self.assertFalse(
+            (await self.store.my_month(employee["id"]))["days"][24]["half_rest"]
+        )
+        self.assertEqual(
+            (await self.store.month_calendar("2026-09"))["days"][24]["half_rest"], 0
+        )
+        detail = await self.store.day_detail("2026-09-25")
+        self.assertEqual(
+            [item["half_rest"] for item in detail["off_people"]], [False]
+        )
 
     async def test_clearing_an_override_puts_the_rule_back(self):
         """验收 5（票 06 验收 7 的那条断言也落在这里）：撤掉覆盖 → 回到规则（连工作区一起）。"""

@@ -236,9 +236,13 @@ function attendanceServer({ refuse = null, sheet = SHEET, sealRefuse = null } = 
       if (refuse) return jsonResponse({ detail: refuse }, 409)
       const person = current.employees.find((row) => row.id === Number(edit[1]))
       const cell = person.days.find((row) => row.business_date === edit[2])
-      if (body.is_rest) {
+      if (body.half_rest !== undefined) {
+        // 票 07：「休半天」是一次单独的动作 —— 只改那个标志，班次与状态都不动。
+        cell.half_rest = body.half_rest
+      } else if (body.is_rest) {
         cell.state = 'rest'
         cell.shift_id = null
+        cell.half_rest = false
       } else {
         cell.state = 'work'
         cell.shift_id = body.shift_id
@@ -371,6 +375,120 @@ describe('考勤表页渲染（票 01 / 票 06）', () => {
     const after = wrapper.findAll('.aCard')[0].findAll('.aDay')
     expect(after[1].find('.aDayErr').text()).toBe('那天有一条待批的请假在等店长批')
     expect(after[1].find('.aDayText').text()).toBe('休') // 服务端说没写，就不改样子
+  })
+})
+
+// ── 票 07：半天休（标 / 取消 / 卡片上写着它） ─────────────────────────────
+
+/** 一份带「休半天」的当月考勤表：一天半天休、一天整天班、一天待补、一天还没到。 */
+const SHEET_WITH_HALF_REST = {
+  month: '2026-09',
+  today: '2026-09-03',
+  days: [
+    { day: 1, business_date: '2026-09-01', is_today: false, is_future: false },
+    { day: 2, business_date: '2026-09-02', is_today: false, is_future: false },
+    { day: 3, business_date: '2026-09-03', is_today: true, is_future: false },
+    { day: 4, business_date: '2026-09-04', is_today: false, is_future: true },
+  ],
+  employees: [
+    {
+      id: 1,
+      name: '张三',
+      job_title: '炒锅',
+      base_salary: 6800,
+      seniority_bonus: 300,
+      new_hire: true,
+      net_hours: 0,
+      shifts: SHIFTS,
+      days: [
+        // 半天休：仍然挂着白班、仍然是「上班」那一态。
+        { business_date: '2026-09-01', state: 'work', shift_id: 1, half_rest: true },
+        { business_date: '2026-09-02', state: 'work', shift_id: 2, half_rest: false },
+        { business_date: '2026-09-03', state: 'todo', shift_id: null, half_rest: false },
+        { business_date: '2026-09-04', state: null, shift_id: null, half_rest: false },
+      ],
+    },
+  ],
+}
+
+describe('考勤表页的「休半天」（票 07）', () => {
+  function cellsOf(wrapper) {
+    return wrapper.findAll('.aCard')[0].findAll('.aDay')
+  }
+
+  it('卡片上写着「休半天」，班次没丢、别的天照旧', async () => {
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_HALF_REST }))
+    expect(cellsOf(wrapper).map((cell) => cell.find('.aDayText').text())).toEqual([
+      '休半天', // 那天仍然上白班，只是只上半天
+      '夜班',
+      '待补',
+      '',
+    ])
+    // 半天休那一格有自己的记号（页面靠它上色，不是靠班次名）。
+    expect(cellsOf(wrapper)[0].classes()).toContain('is-half')
+    expect(cellsOf(wrapper)[1].classes()).not.toContain('is-half')
+  })
+
+  it('点开那格能标「休半天」，也能取消（打的是同一条 PUT）', async () => {
+    const server = attendanceServer({ sheet: SHEET_WITH_HALF_REST })
+    const { wrapper, puts } = await mountSheet(server)
+
+    // 1) 整天班那天：编辑里那颗按钮是「休半天」→ 点下去发 `{ half_rest: true }`。
+    const plain = cellsOf(wrapper)[1]
+    await plain.find('button.aDayBtn').trigger('click')
+    const toggle = cellsOf(wrapper)[1].find('button.aHalfBtn')
+    expect(toggle.exists()).toBe(true)
+    expect(toggle.text()).toBe('休半天')
+
+    await toggle.trigger('click')
+    await flushPromises()
+
+    expect(puts).toEqual([
+      { employeeId: 1, date: '2026-09-02', body: { half_rest: true } },
+    ])
+    expect(cellsOf(wrapper)[1].find('.aDayText').text()).toBe('休半天')
+
+    // 2) 已经在半天休的那天：按钮变成「取消休半天」→ 发 `{ half_rest: false }`。
+    const half = cellsOf(wrapper)[0]
+    await half.find('button.aDayBtn').trigger('click')
+    const cancel = cellsOf(wrapper)[0].find('button.aHalfBtn')
+    expect(cancel.text()).toBe('取消休半天')
+
+    await cancel.trigger('click')
+    await flushPromises()
+
+    expect(puts[1]).toEqual({ employeeId: 1, date: '2026-09-01', body: { half_rest: false } })
+    expect(cellsOf(wrapper)[0].find('.aDayText').text()).toBe('白班')
+  })
+
+  it('没有班次的那天不给标（编辑里没有那颗按钮）', async () => {
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_HALF_REST }))
+
+    // 待补那天（有排班行都没有）：编辑里只有班次下拉，没有「休半天」。
+    await cellsOf(wrapper)[2].find('button.aDayBtn').trigger('click')
+    expect(cellsOf(wrapper)[2].find('select').exists()).toBe(true)
+    expect(cellsOf(wrapper)[2].find('button.aHalfBtn').exists()).toBe(false)
+
+    // 今天之后那格是死的：既没有下拉也没有它。
+    expect(cellsOf(wrapper)[3].find('button.aHalfBtn').exists()).toBe(false)
+    expect(cellsOf(wrapper)[3].find('select').exists()).toBe(false)
+  })
+
+  it('服务端拒绝时把理由写在那一格上，页面不装作标上了', async () => {
+    const refused = attendanceServer({
+      sheet: SHEET_WITH_HALF_REST,
+      refuse: '那天没有班次（休 / 还没排到），标不上「休半天」',
+    })
+    const { wrapper } = await mountSheet(refused)
+
+    await cellsOf(wrapper)[1].find('button.aDayBtn').trigger('click')
+    await cellsOf(wrapper)[1].find('button.aHalfBtn').trigger('click')
+    await flushPromises()
+
+    expect(cellsOf(wrapper)[1].find('.aDayErr').text()).toBe(
+      '那天没有班次（休 / 还没排到），标不上「休半天」',
+    )
+    expect(cellsOf(wrapper)[1].find('.aDayText').text()).toBe('夜班')
   })
 })
 

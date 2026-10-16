@@ -115,6 +115,18 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/formatDayLabel\(editing\.day\)/)
   })
 
+  it('月历那天报「几个人休半天」，当天卡里那个人写着「休半天」（票 07）', () => {
+    // 月历每格是**人数**，半天休不改人数口径（那天确实上了半天班）——所以多一个计数，
+    // 靠它才看得出「这天有人只上半天」。当天卡里逐个点名，跟工作区那个标签同一处。
+    expect(view).toMatch(/v-if="day\.half_rest" class="half">半\{\{ day\.half_rest \}\}/)
+    expect(view).toMatch(/const halfRestDays = computed/)
+    expect(view).toMatch(/class="gB-half"><i><\/i>半N = 这天 N 人休半天/)
+    expect(view).toMatch(/v-if="person\.half_rest" class="gB-zone half">休半天/)
+    // 只读：月历 / 当天卡上没有任何写 `half_rest` 的地方（设置它只有考勤表页一条路）。
+    expect(view).not.toMatch(/half_rest:\s*true/)
+    expect(view).not.toMatch(/half_rest:\s*!/)
+  })
+
   it('marks the days that were changed by hand (票 07)', () => {
     // 格子右上角一个点 + 图例里一句解释：「改成休」在人数里根本看不出来，
     // 只有这个跟人数无关的标记记得住。图例那句只在当月真有过改动时出现。

@@ -19,15 +19,19 @@
    入职日期为空的人 `new_hire` 是 `None`（留空），不是 `False`（「算不出来」与「不是
    新来的」是两件事）。
  * 票 06 起格子上多一个 `shift_id`、卡片上多一份 `shifts`（**启用中的**班次）：逐日改格
-   要能标出「现在是哪个班」并挑另一个。这一层仍然**只读** —— 写路径在排班那一边。
+   要能标出「现在是哪个班」并挑另一个。
+ * 票 07 起格子再多一个 `half_rest`（**半天休**，ADR 0114）：那天仍然只挂本来那个班次、
+   仍然只算「上班」，只是上半天。这一层是**唯一**设置它的地方（`set_half_rest`）——
+   排班月历 / 周表 / 员工端只读地显示它。除此之外这一层仍**只读**：逐日改格的写路径
+   在排班那一边（票 06）。
 
 「今天」取**营业日**（06:00 切，同排班）：考勤表的格子就是
 `staff_assignments.business_date`，两边的「哪一天」必须是同一个词。
 
 假期台账（票 03，口径见 `GLOSSARY.md` 的「假期」那几节与 `docs/adr/0113`）：
 
-* **实际出勤天数**：本月**已过**的营业日里「排了班、又没标休」的天数（半天休在票 07
-  之后算 0.5 天）。今天之后排的班一天都不算 —— 那些日子还没发生。
+* **实际出勤天数**：本月**已过**的营业日里「排了班、又没标休」的天数；**标了「休半天」
+  的那天算 0.5 天**（票 07，ADR 0114）。今天之后排的班一天都不算 —— 那些日子还没发生。
 * **月例休** = `min(4, floor(实际出勤 ÷ 6))`；**法定节假日补休** = 当月每个法定节假日
   那天排了班 +1（休不给，没标日历就没有 —— 日历是唯一依据）；**生日假** = 身份证号
   派生的生日月份落在当月 +1（没填身份证号算不出来，不给）；**年假**只在工龄奖调整
@@ -101,7 +105,7 @@ ANNUAL_LEAVE_STAFF = 3
 
 
 def _needs_migration(method):
-    """要读的表还没建（0005 / 0021 / 0026 / 0027 没应用）时，换成一个能照做的错。
+    """要读的表 / 列还没建（0005 / 0021 / 0026 / 0027 / 0028 没应用）时，换成一个能照做的错。
 
     照排班 `store.py` 的同一个装饰器：整页不该是一个 500 traceback，店长要看到的是
     「去 Admin『系统更新 → 数据库迁移』应用哪个脚本」。顺带把失败的事务回滚掉，否则
@@ -130,6 +134,24 @@ class AttendanceError(ValueError):
 def _next_month(start: date) -> date:
     """下月一号 —— 区间一律**右开**（`>= 本月一号 AND < 下月一号`），不自己数月份长度。"""
     return (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+
+def _is_half_rest(value: Any) -> bool:
+    """`half_rest` 是 BIGINT 0/1（仓库口径的布尔，同 `staff_shifts.is_active`）。
+
+    读出来是 `int`，写进去是 `1` / `0` —— 这一对转换只在这里与 `set_half_rest` 两处，
+    别让调用方各自 `bool()` 一遍（`"0"` 这种字符串在别处会变成 `True`）。
+    """
+    return bool(int(value)) if value is not None else False
+
+
+def _require_business_date(value: Any) -> str:
+    """营业日规整成 `YYYY-MM-DD`（同排班那句 `invalid_business_date`）。"""
+    text = str(value or "")
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        raise AttendanceError("invalid_business_date", "invalid_business_date")
 
 
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -167,6 +189,24 @@ class AttendanceStore:
         self._conn = conn
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._write_lock_owner = conn_or_db
+        self._local_write_lock = None
+
+    @property
+    def _write_lock(self):
+        """写口那一个动作要用的锁：跟排班 / 节假日日历共用**同一个**全局写锁
+        （同 `HolidayCalendar._write_lock` 的做法）。
+
+        拿不到 owner 上那把锁（测试里塞的是裸连接）时退回一把本实例自己的 —— 那一档
+        没有别的写方，串行化仍然成立。
+        """
+        shared = getattr(self._write_lock_owner, "_write_lock", None)
+        if shared is not None:
+            return shared
+        if self._local_write_lock is None:
+            import asyncio
+
+            self._local_write_lock = asyncio.Lock()
+        return self._local_write_lock
 
     @property
     def _write_lock(self):
@@ -197,30 +237,57 @@ class AttendanceStore:
         """当前营业日（06:00 切，北京时）—— 与 `staff_assignments.business_date` 同一个词。"""
         return current_business_date(self._now_dt())
 
+    def _now_iso(self) -> str:
+        """写库的时间戳（ISO 字符串，带 +08:00）—— 与排班那边 `_now_iso()` 同一条口径。"""
+        return self._now_dt().isoformat()
+
     async def _rollback_quietly(self) -> None:
         try:
             await self._conn.rollback()
         except Exception:  # pragma: no cover - 回滚失败不该盖住原始错误
             logger.debug("回滚失败（忽略）", exc_info=True)
 
-    async def _assignment_rows(self, first: str, next_month: str) -> dict[int, dict[str, Any]]:
-        """当月每天每人的排班行：``{员工号: {营业日: 班次 id 或 None}}``。
+    async def _assignment_rows(
+        self, first: str, next_month: str
+    ) -> tuple[dict[int, dict[str, Any]], dict[int, set[str]]]:
+        """当月每天每人的排班行，两份索引：
+
+        * ``{员工号: {营业日: 班次 id 或 None}}`` —— 三态（上班 / 休 / 待补）与班次号；
+        * ``{员工号: {标了「休半天」的营业日}}`` —— 只装**那天真有班次**的那些（票 07）。
 
         **有行**就说明那天被铺过（`None` = 休）；没有这一格就是「待补」，所以这里不
         过滤班次为空的行 —— 过滤掉的话「休」会与「没铺到」塌成同一件事。
+
+        「休半天」在 `shift_id IS NULL`（那天休）的行上没有意义：`休 + 休半天` 是自相
+        矛盾的，写路径（排班 `set_override` 的「改成休」）也会把那种行上的标志清成 0。
+        这里再挡一次，是为了不让手工 SQL / 历史数据里那种行在页面上变成「休半天」。
         """
         cur = await self._conn.execute(
-            """SELECT employee_id, business_date, shift_id FROM staff_assignments
+            """SELECT employee_id, business_date, shift_id, half_rest FROM staff_assignments
                WHERE business_date >= ? AND business_date < ?""",
             (first, next_month),
         )
         rows: dict[int, dict[str, Any]] = {}
+        half_rests: dict[int, set[str]] = {}
         for row in await cur.fetchall():
             mapping = dict(row)
-            rows.setdefault(int(mapping["employee_id"]), {})[mapping["business_date"]] = (
+            employee_id = int(mapping["employee_id"])
+            rows.setdefault(employee_id, {})[mapping["business_date"]] = (
                 None if mapping["shift_id"] is None else int(mapping["shift_id"])
             )
-        return rows
+            if mapping["shift_id"] is not None and _is_half_rest(mapping["half_rest"]):
+                half_rests.setdefault(employee_id, set()).add(mapping["business_date"])
+        return rows, half_rests
+
+    async def _assignment_row(self, employee_id: int, day: str) -> Optional[dict]:
+        """某人某天那一行（没有则 ``None``）—— 逐日写口要判「那天到底有没有班次」。"""
+        cur = await self._conn.execute(
+            """SELECT shift_id, half_rest FROM staff_assignments
+               WHERE employee_id = ? AND business_date = ?""",
+            (int(employee_id), day),
+        )
+        row = await cur.fetchone()
+        return None if row is None else dict(row)
 
     async def _month_entries(self, first: str, next_month: str) -> tuple[dict[int, int], set[int]]:
         """当月加班登记：``(已批准的半小时数合计, 这个月有登记的人)``。
@@ -445,7 +512,7 @@ class AttendanceStore:
         # 区间右开：`[本月一号, 下月一号)` —— 不自己数月份长度（2 月与 31 天的月各一次坑）。
         first, until = start.isoformat(), next_month.isoformat()
 
-        rows = await self._assignment_rows(first, until)
+        rows, half_rests = await self._assignment_rows(first, until)
         totals, recorded = await self._month_entries(first, until)
         # 还没批的加班 / 补钟：只标色，不进净时长、也不进存假（故事 14）。
         pending = await self._pending_entries(first, until)
@@ -485,6 +552,8 @@ class AttendanceStore:
             if not _is_on_the_sheet(employee, employee_id in on_record):
                 continue
             theirs = rows.get(employee_id, {})
+            # 这个人当月标了「休半天」的那几天（票 07）：格子上写出来、例休折算按 0.5 天。
+            their_half_rests = half_rests.get(employee_id, set())
             hire_date = employee.get("hire_date") or None
             employees.append(
                 {
@@ -507,6 +576,7 @@ class AttendanceStore:
                     "leave": _leave_terms(
                         today=today,
                         theirs=theirs,
+                        half_rest_days=their_half_rests,
                         holidays=holidays,
                         employee=employee,
                         month_days=len(days),
@@ -522,6 +592,10 @@ class AttendanceStore:
                             # 那天挂的是哪个班（`None` = 休 / 没排到 / 还没到）。
                             # 状态之外再给班次号：卡片上的下拉要标出「现在是哪个」。
                             "shift_id": theirs.get(day["business_date"]),
+                            # 半天休（票 07）：那天仍然只挂上面那个班次，只是上半天。
+                            # 只有「上班」那一态才可能是 `True`（写路径与读口都挡了
+                            # 「休 + 休半天」那种自相矛盾的行）。
+                            "half_rest": day["business_date"] in their_half_rests,
                         }
                         for day in days
                     ],
@@ -555,6 +629,49 @@ class AttendanceStore:
             },
             "days": days,
             "employees": employees,
+        }
+
+    @_needs_migration
+    @serialized_write
+    async def set_half_rest(
+        self, employee_id: int, business_date: str, half_rest: bool = True
+    ) -> dict:
+        """把某人某一天标成「休半天」/ 取消（票 07，ADR 0114）。**只有这一扇门能设它。**
+
+        改的是 `staff_assignments` 那一行上的 `half_rest` 一个字段：班次、工作区、来源
+        （`source`）与那一天是不是单日覆盖，**一个字都不动** —— 半天休不是第二个班次，
+        也不是一次「跟规则不一样」的改写（那天仍然只挂本来那个班次、仍然只有一行）。
+
+        三道闸，都在写之前：
+
+        * 日期得是 `YYYY-MM-DD`（坏格式 = `invalid_business_date`）；
+        * 得落在**当月**（这一页只算当月，写口也只认当月：上个月的格子它压根不显示）；
+        * 那天得**真有班次**（`shift_id` 非空）。没有排班行 = 「待补」、行在但班次空 =
+          「休」—— 两种都标不上「休半天」：那两天本来就没有半天班可言（`half_rest_needs_shift`）。
+
+        写完 `commit` 一次。广播与鉴权在 `api/attendance.py`（这一层不碰 HTTP）。
+        """
+        today = self.today()
+        day = _require_business_date(business_date)
+        if day[:7] != today[:7]:
+            raise AttendanceError("out_of_month", today)
+        employee_id = int(employee_id)
+        row = await self._assignment_row(employee_id, day)
+        if row is None or row["shift_id"] is None:
+            raise AttendanceError("half_rest_needs_shift", day)
+        await self._conn.execute(
+            """UPDATE staff_assignments SET half_rest = ?, updated_at = ?
+               WHERE employee_id = ? AND business_date = ?""",
+            (1 if half_rest else 0, self._now_iso(), employee_id, day),
+        )
+        await self._conn.commit()
+        logger.info(
+            "逐日改格：%s %s 的「休半天」=%s", employee_id, day, "是" if half_rest else "否"
+        )
+        return {
+            "employee_id": employee_id,
+            "business_date": day,
+            "half_rest": bool(half_rest),
         }
 
     @_needs_migration
@@ -598,7 +715,8 @@ class AttendanceStore:
         if await self._sealed_rows(target):
             raise AttendanceError("already_sealed", target)
 
-        rows = await self._assignment_rows(first, until)
+        # 两份索引：三态（`rows`）与「哪天标了休半天」（`half_rests`）—— 后者进例休折算。
+        rows, half_rests = await self._assignment_rows(first, until)
         _, recorded = await self._month_entries(first, until)
         holidays = await self._statutory_holidays(target)
         before = _previous_month(target)
@@ -615,6 +733,9 @@ class AttendanceStore:
             leave = _leave_terms(
                 today=as_of,
                 theirs=rows.get(employee_id, {}),
+                # 封账与当月卡片同一套算式：标了「休半天」的那天算 0.5 天出勤（票 07）。
+                # 少了这一句，封下来的存假会比卡片上多算半天。
+                half_rest_days=half_rests.get(employee_id, set()),
                 holidays=holidays,
                 employee=employee,
                 month_days=month_days,
@@ -713,18 +834,23 @@ def _leave_terms(
     employee: dict,
     month_days: int,
     previous_balance: float,
+    half_rest_days: Optional[set[str]] = None,
     month: Optional[str] = None,
 ) -> dict[str, Any]:
     """卡片上那一块假期算式（票 03，ADR 0113 的口径）。**全是派生值，不落库。**
 
-    ``theirs`` 是这个人当月的排班行（``{营业日: 班次 id 或 None}``）；``holidays`` 是
+    ``theirs`` 是这个人当月的排班行（``{营业日: 班次 id 或 None}``）；``half_rest_days``
+    是其中**标了「休半天」**的那几天（票 07，只含班次非空的日子）；``holidays`` 是
     当月法定节假日（`HolidayCalendar.days_in_month`，日历是唯一依据）；``employee`` 是
     花名册那一行（生日从身份证号派生、工龄奖与入职日期都在里面）。
 
     * **实际出勤天数**只数**已过**的日子 —— 今天之后排了班也是「还没发生」。
+      **标了「休半天」的那天算 0.5 天**（`GLOSSARY.md` 的月例休：「出勤半天算 0.5 天
+      参与折算」）：月例休与存假都跟着这半个天走。
     * **法定节假日补休**按**当月每个**法定节假日算：那天排了班（有排班行、班次非空）
       就 +1，休的不给，没标日历的没有。这条不跟「已过」：日历与轮转都已经知道那天他
-      上班，池子又是整月的量（票 03 验收 3）。
+      上班，池子又是整月的量（票 03 验收 3）。**半天休照给整天**：那天他确实上了班
+      （补休的判据是「那天排了班」，不是「上了几个半天」）。
     * **生日假**：身份证号派生的生日落在当月 +1。生日那一栏是**派生值**（`MM-DD`，
       没填身份证号 / 号码读不出日期就是 `None`）—— 算不出来的人没有这一项，不是 0 天。
       平年 2 月 29 日折到 28 日由 `birthday_in_year` 负责（与人事提醒同一处口径）。
@@ -743,10 +869,11 @@ def _leave_terms(
     不跟 `today` 的月份 —— 否则封 8 月的账会拿 9 月的生日去给假。
     """
     month = month or today[:7]
+    half_rest_days = half_rest_days or set()
     actual_days = 0.0
     for business_date, shift_id in theirs.items():
         if business_date <= today and shift_id is not None:
-            actual_days += 1.0
+            actual_days += 0.5 if business_date in half_rest_days else 1.0
     holiday_makeup = sum(1 for day in holidays if theirs.get(day) is not None)
     birthday_leave = 0
     birthday = employee.get("birthday")
