@@ -1,6 +1,7 @@
 <script setup>
 /**
- * 人事端的「考勤表」页（票 01 + 票 06）：**当月、一人一张卡**，点某一天就地改。
+ * 人事端的「考勤表」页（票 01 + 票 03 假期台账 + 票 06 逐日改格）：**当月、一人一张卡**，
+ * 点某一天就地改。
  *
  * 卡片上是这个人本月每一天的「上班 / 休 / 待补」：排了班 = 上班、有排班行但班次为空
  * = 休、**压根没有排班行** = 待补（轮转规则没铺到，要人工确认那几天）。**今天之后的
@@ -14,13 +15,27 @@
  * 不写轮转规则、不动下个月。拒绝的理由（那天有未决的换班 / 请假、超出可补记窗口、
  * 班次已停用）由服务端给中文，这一层原样显示在那一格的下面。
  *
- * 封账（票 04）、手填列（票 05）与导出（票 08）都往这一页上加，但它们各有自己的票。
+ * 票 03 往卡片上加的是**假期台账**那一块：实际出勤 / 月例休 / 法定节假日补休 / 生日假 /
+ * 年假 / 上月存假，与由它们相加得到的可用天数池、本月出勤天数、存假；展开能看算式。
+ * 当月**只算不落库**，所以顶部明写「暂算值（未封账）」—— 这一页的数还会随排班与加班变。
+ * 还没批的加班 / 补钟只**标色**并给出待批小时数，一分都不进净时长（故事 14）。
+ *
+ * 这一页只算当月：没有月份选择器、没有导出按钮。**写请求只有一条**（票 06 的逐日改格）；
+ * 手填列（票 05）、封账（票 04）与导出（票 08）各有自己的票 —— 在那之前，这一页上多一颗
+ * 按钮就是多一条没人测的路径。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { api } from '../../api/client'
-import { dayStateText, formatNetHours, newHireText } from '../../utils/attendanceSheet'
+import {
+  dayStateText,
+  formatDays,
+  formatNetHours,
+  leaveFormulaText,
+  newHireText,
+  pendingOvertimeText,
+} from '../../utils/attendanceSheet'
 import { WORKBENCH_HR_HOME, workbenchDocumentTitle } from '../../utils/workbenchCopy'
 
 const router = useRouter()
@@ -119,6 +134,22 @@ async function pick(person, cell, event) {
     savingDate.value = ''
   }
 }
+/** 卡片上假期台账那几项的摆法（标签 + 服务端算好的值）：顺序与 `spec.md` 的公式一致，
+ *  展开的算式也按这个顺序念 —— 店长对着卡片能一格一格核。 */
+function leaveStats(person) {
+  const leave = person.leave || {}
+  return [
+    { label: '实际出勤', value: formatDays(leave.actual_days) },
+    { label: '月例休', value: formatDays(leave.monthly_rest) },
+    { label: '法定节假日补休', value: formatDays(leave.holiday_makeup) },
+    { label: '生日假', value: formatDays(leave.birthday_leave) },
+    { label: '年假', value: formatDays(leave.annual_leave) },
+    { label: '上月存假', value: formatDays(leave.previous_balance) },
+    { label: '可用天数池', value: formatDays(leave.pool) },
+    { label: '本月出勤天数', value: formatDays(leave.month_attendance_days) },
+    { label: '存假', value: formatDays(leave.balance) },
+  ]
+}
 
 async function load() {
   state.value = 'loading'
@@ -161,6 +192,10 @@ onMounted(() => {
     <!-- 卡片这一棵**不进 `v-if/v-else`**（用 `v-show` 藏）：它是改完一格要立刻重画的那
          一棵，而重挂一棵 `v-else` 子树会让里面的格子停在旧值上（实测：整页重新挂载的
          那一拍，格子还是改之前的班次名）。 -->
+    <!-- 当月只算不落库（票 03 / ADR 0113）：这一条要看得见，否则半个月的数会被拿去结账。 -->
+    <p v-if="sheet && sheet.provisional" class="aProvisional" role="status">
+      暂算值（未封账）：这个月的数还会随排班与加班变，封账之后才定稿。
+    </p>
     <div v-show="state === 'ready'" class="aSheet">
       <p v-if="!employees().length" class="aEmpty">
         这个月还没有在职员工，也没有人有排班或加班记录。
@@ -181,8 +216,13 @@ onMounted(() => {
           <!-- 入职日期为空的人这一格是**空的**（服务端给 `null`）：留空，不写成「否」——
                「算不出来」与「不是新来的」是两件事。 -->
           <span class="aStat"><i>是否新入职</i><b>{{ newHireText(person.new_hire) }}</b></span>
-          <span class="aStat">
+          <!-- 净时长只算**已批准**的单：还没批的那几笔在这儿标色并报出小时数，
+               一分都不进这个数字（故事 14）。 -->
+          <span class="aStat" :class="{ 'is-pending': person.pending_count > 0 }">
             <i>当月净时长</i><b class="aNet">{{ formatNetHours(person.net_hours) }}</b>
+            <em v-if="person.pending_count" class="aPending">
+              {{ pendingOvertimeText(person.pending_count, person.pending_hours) }}
+            </em>
           </span>
         </p>
         <div class="aDays">
@@ -226,6 +266,19 @@ onMounted(() => {
             </small>
           </span>
         </div>
+        <!-- 假期台账（票 03）：每张卡把自己的账摊开；算式收在「看算式」后面，
+             摊开后能一格一格核（服务端下发的数，页面一个都不自己算）。 -->
+        <div v-if="person.leave" class="aLeave">
+          <p class="aLvRow">
+            <span v-for="stat in leaveStats(person)" :key="stat.label" class="aLv">
+              <i>{{ stat.label }}</i><b>{{ stat.value }}</b>
+            </span>
+          </p>
+          <details class="aFormula">
+            <summary>看算式</summary>
+            <p class="aFormulaText">{{ leaveFormulaText(person.leave) }}</p>
+          </details>
+        </div>
       </article>
     </div>
   </div>
@@ -243,6 +296,12 @@ onMounted(() => {
 .aSub { margin: 0; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
 .aTop .btn { margin-left: auto; flex: none; }
 .aHint, .aEmpty { margin: 0; font-size: var(--fs-13); color: var(--ink-dim); }
+/* 当月是暂算值（票 03）：这一条不是装饰 —— 它是「别拿这个数去结账」的告示。 */
+.aProvisional {
+  margin: 0 0 var(--sp-3); padding: 9px var(--sp-3); border-radius: var(--r-2);
+  border: 1px solid var(--info); background: var(--info-soft);
+  font-size: var(--fs-12); color: var(--ink);
+}
 .aErr {
   margin: 0 0 var(--sp-3); padding: 9px var(--sp-3); border-radius: var(--r-2);
   border: 1px solid var(--danger); background: var(--danger-soft);
@@ -300,4 +359,21 @@ onMounted(() => {
 /* 今天之后：**留空**，连边框都不给 —— 一眼看得出那一片还没发生。 */
 .aDay.is-future { border-color: transparent; }
 .aDay.is-today { outline: 1px solid var(--warn); outline-offset: 1px; }
+/* 未审批的加班 / 补钟（票 03 / 故事 14）：**只标色**，数不进净时长。 */
+.aStat.is-pending .aNet { color: var(--warn); }
+.aPending {
+  padding: 0 var(--sp-2); border-radius: var(--r-full); border: 1px solid var(--warn);
+  font-style: normal; font-size: var(--fs-11); color: var(--warn);
+}
+/* 假期台账那一块（票 03）：九项摊在卡片上，算式收在「看算式」后面。 */
+.aLeave { margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--line); }
+.aLvRow { display: flex; flex-wrap: wrap; gap: 5px var(--sp-4); margin: 0 0 var(--sp-2); }
+.aLv { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--fs-12); }
+.aLv i { font-style: normal; color: var(--ink-faint); }
+.aLv b { font-family: var(--font-mono); font-size: var(--fs-13); color: var(--ink); }
+.aFormula summary { cursor: pointer; font-size: var(--fs-12); color: var(--ink-dim); }
+.aFormulaText {
+  margin: var(--sp-2) 0 0; font-family: var(--font-mono); font-size: var(--fs-11);
+  line-height: 1.9; color: var(--ink-dim);
+}
 </style>

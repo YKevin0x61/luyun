@@ -1,5 +1,6 @@
 /**
- * 考勤表（考勤表导出票 01）的界面口径：逐日三态与卡片上那两项的说法。
+ * 考勤表（考勤表导出票 01 / 假期台账票 03）的界面口径：逐日三态、卡片上那两项，
+ * 以及假期台账那一块（天数的写法、可展开的算式、待批加班那一句）。
  *
  * 服务端下发的是**状态码**（`work` / `rest` / `todo` / `null`）与派生值（`new_hire`
  * 可能是 `null`）：「是什么」在服务端算，「怎么写」只在这一处翻 —— 卡片与（票 08 的）
@@ -34,4 +35,42 @@ export function formatNetHours(hours) {
   const sign = value > 0 ? '+' : '−'
   const size = Math.abs(value)
   return `${sign}${Number.isInteger(size) ? size : size.toFixed(1)} 小时`
+}
+
+/** 天数（假期台账那一套，可带 .5、可为负）：`12 天` / `19.5 天` / `−10.5 天` / `0 天`。
+ *
+ *  正数不写 `+`（「实际出勤 12 天」不是一笔增减），负数写全角减号 —— 与
+ *  `formatNetHours` 同一个字符：**欠班**与攒下的假在纸面上必须分得开
+ *  （`GLOSSARY.md` 的存假：负数是欠班，不是脏数据）。 */
+export function formatDays(days) {
+  const value = Number(days) || 0
+  if (value === 0) return '0 天'
+  const sign = value > 0 ? '' : '−'
+  const size = Math.abs(value)
+  return `${sign}${Number.isInteger(size) ? size : size.toFixed(1)} 天`
+}
+
+/** 假期算式的展开文字（票 03 验收 9 的「可展开看算式」）。
+ *
+ *  六项照着 `spec.md` 的公式相加得到可用天数池，再拿池减本月自然天数就是存假。
+ *  每一项都带单位：「哪一项算错了」要能一眼看出是哪一项。 */
+export function leaveFormulaText(leave) {
+  if (!leave) return ''
+  const terms = [
+    ['实际出勤', leave.actual_days],
+    ['月例休', leave.monthly_rest],
+    ['法定节假日补休', leave.holiday_makeup],
+    ['生日假', leave.birthday_leave],
+    ['年假', leave.annual_leave],
+    ['上月存假', leave.previous_balance],
+  ]
+  const sum = terms.map(([label, value]) => `${label} ${formatDays(value)}`).join(' + ')
+  return `${sum} = 可用 ${formatDays(leave.pool)}；本月 ${leave.month_days} 天，存假 ${formatDays(leave.balance)}`
+}
+
+/** 未审批的加班 / 补钟（故事 14）：有单子等着批就把这一格标色，并说清待批几小时。
+ *  `null`（没有待批的单）时不留任何痕迹 —— 与「待批 0 小时」是两件事。 */
+export function pendingOvertimeText(count, hours) {
+  if (!count) return ''
+  return `待批 ${formatNetHours(hours)}`
 }

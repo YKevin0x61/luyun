@@ -35,9 +35,10 @@ router = APIRouter(prefix="/api/attendance", tags=["考勤"])
 # 翻成一句能照着改的话 —— 逐条点名该应用哪个迁移（同排班的 `not_migrated`）。
 _ERROR_DETAILS = {
     "not_migrated": (
-        "考勤表要读的排班表或加班登记表还没建好：请在 Admin「系统更新 → 数据库迁移」"
-        "应用 migrations/pg/0005_scheduling.sql 与 "
-        "migrations/pg/0021_overtime_entries.sql，然后刷新本页"
+        "考勤表要读的表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
+        "migrations/pg/0005_scheduling.sql、migrations/pg/0021_overtime_entries.sql、"
+        "migrations/pg/0026_statutory_holidays.sql 与 "
+        "migrations/pg/0027_attendance_ledger.sql，然后刷新本页"
     ),
 }
 
