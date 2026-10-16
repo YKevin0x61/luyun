@@ -20,9 +20,12 @@
  * 当月**只算不落库**，所以顶部明写「暂算值（未封账）」—— 这一页的数还会随排班与加班变。
  * 还没批的加班 / 补钟只**标色**并给出待批小时数，一分都不进净时长（故事 14）。
  *
- * 这一页只算当月：没有月份选择器、没有导出按钮。**写请求只有一条**（票 06 的逐日改格）；
- * 手填列（票 05）、封账（票 04）与导出（票 08）各有自己的票 —— 在那之前，这一页上多一颗
- * 按钮就是多一条没人测的路径。
+ * 票 04 加了**封账上月**那颗按钮：点一次就把上一个自然月的存假结余定下来（写进月度考勤
+ * 台账），卡片上的「上月存假」随即改成结转来的那个数，按钮的位置换成一句「某月已于某时
+ * 封账」的回执。当月照旧是暂算值 —— 封的是上月。手填列（票 05）与导出（票 08）各有
+ * 自己的票。
+ *
+ * 这一页只算当月：没有月份选择器、没有导出按钮。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -35,6 +38,7 @@ import {
   leaveFormulaText,
   newHireText,
   pendingOvertimeText,
+  sealedMonthText,
 } from '../../utils/attendanceSheet'
 import { WORKBENCH_HR_HOME, workbenchDocumentTitle } from '../../utils/workbenchCopy'
 
@@ -49,6 +53,13 @@ const editingDate = ref('')
 const savingDate = ref('')
 /** 那一格上要显示的话（服务端拒绝的理由）。 */
 const dayError = ref(null) // { business_date, text } | null
+
+/** 封账（票 04）：正等着服务端回执 / 服务端拒绝的理由。 */
+const sealing = ref(false)
+const sealError = ref('')
+
+/** 上月封账的那句回执（没封过时是空串，页面上画按钮）。 */
+const sealStamp = computed(() => sealedMonthText(sheet.value?.previous_month))
 
 /** 表头那一份月框（哪一天是今天 / 还没到）按营业日索引，卡片上的日子从它取号与标记 ——
  *  页面不自己从 1 数到 30（那样 2 月与 31 天的月份会各错一次）。 */
@@ -151,6 +162,25 @@ function leaveStats(person) {
   ]
 }
 
+/** 封账上月（票 04）：封的是**上一个自然月**，接口上不给月份 —— 按钮只有一个动作。
+ *
+ *  服务端拒绝时（当月封不了、已经封过、缺迁移）把理由原样写出来；成功之后自己重拉一次
+ *  整张表 —— 卡片上的「上月存假」立刻换成刚封下的结余，按钮的位置换成封账时刻那句回执。
+ *  这一步**不广播 nudge**（员工手机上的班与假一个字都没变），所以只能自己拉。 */
+async function sealLastMonth() {
+  if (sealing.value) return
+  sealing.value = true
+  sealError.value = ''
+  try {
+    await api.post('/api/attendance/seal')
+    sheet.value = await api.get('/api/attendance/sheet')
+  } catch (err) {
+    sealError.value = err.message || '这个月没封成'
+  } finally {
+    sealing.value = false
+  }
+}
+
 async function load() {
   state.value = 'loading'
   errorText.value = ''
@@ -181,13 +211,28 @@ onMounted(() => {
           点一个已经过去的日子就能改它 —— 只改那一天，不动轮转规则。
         </p>
       </div>
-      <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">
-        回到月历
-      </button>
+      <div class="aActions">
+        <!-- 封过账的月只交代一句「什么时候封的」（验收 5）；没封过才给那颗按钮。
+             回执取自服务端下发的封账时刻，页面不自己记一个「我刚封过」的本地状态。 -->
+        <span v-if="sealStamp" class="aSealed" role="status">{{ sealStamp }}</span>
+        <button
+          v-else
+          class="btn"
+          type="button"
+          :disabled="sealing"
+          @click="sealLastMonth"
+        >
+          {{ sealing ? '封账中…' : '封账上月' }}
+        </button>
+        <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">
+          回到月历
+        </button>
+      </div>
     </header>
 
     <p v-if="state === 'loading'" class="aHint">正在读这个月的考勤表…</p>
     <p v-if="state === 'error' && errorText" class="aErr" role="alert">{{ errorText }}</p>
+    <p v-if="sealError" class="aErr" role="alert">{{ sealError }}</p>
 
     <!-- 卡片这一棵**不进 `v-if/v-else`**（用 `v-show` 藏）：它是改完一格要立刻重画的那
          一棵，而重挂一棵 `v-else` 子树会让里面的格子停在旧值上（实测：整页重新挂载的
@@ -295,6 +340,12 @@ onMounted(() => {
 .aKicker { margin: 0; font-size: var(--fs-11); letter-spacing: var(--ls-4); color: var(--ink-faint); }
 .aSub { margin: 0; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
 .aTop .btn { margin-left: auto; flex: none; }
+/* 封账（票 04）与「回到月历」并排在右边：回执是一句话、没封过时是一颗按钮。
+   `.aTop .btn` 那个 `margin-left: auto` 是给「header 里只有一颗按钮」写的，
+   包进这一行之后由这一行的 `margin-left: auto` 顶上，里面的按钮不再各自外推。 */
+.aActions { display: flex; align-items: center; gap: var(--sp-2); margin-left: auto; flex: none; }
+.aTop .aActions .btn { margin-left: 0; }
+.aSealed { margin: 0; font-size: var(--fs-12); color: var(--ink-dim); }
 .aHint, .aEmpty { margin: 0; font-size: var(--fs-13); color: var(--ink-dim); }
 /* 当月是暂算值（票 03）：这一条不是装饰 —— 它是「别拿这个数去结账」的告示。 */
 .aProvisional {

@@ -39,13 +39,22 @@
   （可为负 = 欠班、可带 .5）。**加班与补钟不参与这一套**（净时长单独结算）。
 
 当月的一切都是**暂算值**：这一层只算不落库，封账（写结余）是票 04 的事。
+
+票 04 加的是**封账**（`GLOSSARY.md` 的「封账」、`docs/adr/0113`）：超级管理员在考勤表页
+点一次，就把**上一个自然月**那一行的 `closing_balance`（存假结余）与 `sealed_at` 写进
+月度考勤台账。写下去之后，当月卡片上的「上月存假」读的就是那一行的结余 —— 之后再改
+上月的排班也不会让它漂（那正是这张表存在的理由）。**只有已经过完的月份能封**：当月与
+未来一律拒；已经封过的月再封一次也拒，一个字都不改已写下的那一行。这是本服务**唯一
+的写口**（逐日改格那扇门在排班那一边，只借道 `api/attendance.py`）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import math
+import re
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional
@@ -55,7 +64,7 @@ import asyncpg
 from db_core.utils import CHINA_TZ
 from services.business_day import current_business_date
 from services.holiday_calendar import HolidayCalendar, HolidayError
-from services.identity import EmployeeAccounts
+from services.identity import EmployeeAccounts, serialized_write
 from services.identity.profile import (
     birthday_in_year,
     seniority_due_month,
@@ -123,8 +132,33 @@ def _next_month(start: date) -> date:
     return (start.replace(day=28) + timedelta(days=4)).replace(day=1)
 
 
+_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
+
+
+def _validated_month(month: Any) -> str:
+    """把「封哪个月」收敛成 `YYYY-MM`，写错就报 `invalid_month`。
+
+    只认格式还不够：`2026-13` 过得了正则，得真解析一次（顺带拦下 `2026-00`）。
+    与 `HolidayCalendar` 的同名收敛同口径 —— 月份在这套系统里只有一种写法。
+    """
+    text = str(month or "").strip()
+    if not _MONTH_RE.match(text):
+        raise AttendanceError("invalid_month", f"invalid month: {month!r}")
+    try:
+        date.fromisoformat(f"{text}-01")
+    except ValueError as exc:
+        raise AttendanceError("invalid_month", str(exc)) from exc
+    return text
+
+
+def _previous_month(month: str) -> str:
+    """上一个自然月（`YYYY-MM`）—— 封账封的就是它。"""
+    return (date.fromisoformat(f"{month}-01") - timedelta(days=1)).isoformat()[:7]
+
+
 class AttendanceStore:
-    """当月考勤表的读口。构造要一个已打开的库连接（同 `SchedulingStore` 的口径）。"""
+    """当月考勤表的读口（`sheet`）+ 封账那一处写口（`seal`）。构造要一个已打开的库连接
+    （同 `SchedulingStore` 的口径）。"""
 
     def __init__(self, conn_or_db, now: Optional[Callable[[], datetime]] = None):
         conn = getattr(conn_or_db, "_conn", conn_or_db)
@@ -133,6 +167,22 @@ class AttendanceStore:
         self._conn = conn
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._write_lock_owner = conn_or_db
+
+    @property
+    def _write_lock(self):
+        """写锁：跟着 holder（`DatabaseManager`）那一把全局锁走，别自己另开一把。
+
+        同 `HolidayCalendar` / `SchedulingStore` 的口径 —— 两个服务各持一把私有锁的话，
+        隐式事务会交错。拿不到共享锁时（直接传连接）才退化成一把本实例的锁。
+        """
+        shared = getattr(self._write_lock_owner, "_write_lock", None)
+        if shared is not None:
+            return shared
+        lock = getattr(self, "_local_write_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._local_write_lock = lock
+        return lock
 
     def _now_dt(self) -> datetime:
         value = self._now()
@@ -365,9 +415,108 @@ class AttendanceStore:
             # 页面照着这一位标「暂算值（未封账）」。封账封的是**已经过完的**月份
             # （票 04 写台账那一行），当月永远不封 —— 所以这一位眼下恒为 True。
             "provisional": True,
+            # 上月封账（票 04）：`sealed_at` 是那一刻的定稿时刻，有它才说明卡片上的
+            # 「上月存假」来自结转而不是人工期初。没有这一位（老载荷）时页面按「还没封」画。
+            "previous_month": {
+                "month": previous_month,
+                "sealed_at": _sealed_at(ledger, previous_month),
+            },
             "days": days,
             "employees": employees,
         }
+
+    @_needs_migration
+    @serialized_write
+    async def seal(self, month: Optional[str] = None) -> dict:
+        """把某个**已经过完的**自然月的存假结余写进台账并定稿（票 04 / ADR 0113）。
+
+        `month` 不给就是**上一个自然月**（页面上那颗「封账上月」按钮打的就是这一条）。
+        写下去的是那一行的 `closing_balance`（本月结余 = 池 − 本月自然天数）与
+        `sealed_at`；**行里别的列一个字都不动** —— 期初（票 03 的人工录入）与手填列
+        （票 05）是别人写下的真相，封账只加自己那一份。
+
+        三道闸：
+
+        * **只有已经过完的月能封**（`month_not_finished`）：当月与未来一律拒 —— 这个月的
+          实际出勤、例休、补休都还会变，封了就是把暂算值当定稿。
+        * **封过的月不再封**（`already_sealed`）：整月拒，已写下的那一行一个字都不改
+          （重算一遍历史只会得到另一个数，见 ADR 0113）。
+        * 缺表（0027 没应用）照旧走 `not_migrated`。
+
+        名单与算式跟 `sheet()` **同一套**：这个人那个月在表上（当月有排班 / 加班记录，
+        或现在在职）就在封账名单里，算的是那个月的实际出勤、当月法定节假日补休、生日假、
+        年假与**再上一月**的存假。所以封下的数就是那个月卡片上那张账。
+
+        写入用 `ON CONFLICT ... WHERE sealed_at IS NULL` 兜并发：两个请求同时走到这里时
+        后一个不覆盖前一个（`sealed_employees` 是这次落在表上的人数）。
+        """
+        today = self.today()
+        current_month = today[:7]
+        target = _validated_month(month) if month else _previous_month(current_month)
+        if target >= current_month:
+            # 当月与未来都还没过完：封账是给「已经定下来的那一个月」用的。
+            raise AttendanceError("month_not_finished", target)
+
+        start = date.fromisoformat(f"{target}-01")
+        month_days = monthrange(start.year, start.month)[1]
+        first, until = start.isoformat(), _next_month(start).isoformat()
+        # 这个月最后一天：整月都过完了，算「已过」的天数时它就是那个月的「今天」。
+        as_of = (start + timedelta(days=month_days - 1)).isoformat()
+
+        if await self._sealed_rows(target):
+            raise AttendanceError("already_sealed", target)
+
+        rows = await self._assignment_rows(first, until)
+        _, recorded = await self._month_entries(first, until)
+        holidays = await self._statutory_holidays(target)
+        before = _previous_month(target)
+        ledger = await self._ledger_rows((before, target))
+        roster = await EmployeeAccounts(self._write_lock_owner, now=self._now).list_roster()
+        on_record = set(rows) | recorded
+        sealed_at = self._now_dt().isoformat()
+
+        sealed = 0
+        for employee in roster:
+            employee_id = int(employee["id"])
+            if not _is_on_the_sheet(employee, employee_id in on_record):
+                continue
+            leave = _leave_terms(
+                today=as_of,
+                theirs=rows.get(employee_id, {}),
+                holidays=holidays,
+                employee=employee,
+                month_days=month_days,
+                previous_balance=_previous_balance(
+                    ledger.get((employee_id, before)),
+                    ledger.get((employee_id, target)),
+                ),
+                month=target,
+            )
+            await self._conn.execute(
+                """INSERT INTO attendance_ledger
+                   (tenant_id, employee_id, "month", closing_balance, sealed_at,
+                    created_at, updated_at)
+                   VALUES (1, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (tenant_id, employee_id, "month") DO UPDATE SET
+                     closing_balance = excluded.closing_balance,
+                     sealed_at = excluded.sealed_at,
+                     updated_at = excluded.updated_at
+                   WHERE attendance_ledger.sealed_at IS NULL""",
+                (employee_id, target, leave["balance"], sealed_at, sealed_at, sealed_at),
+            )
+            sealed += 1
+        await self._conn.commit()
+        logger.info("封账: month=%s rows=%s", target, sealed)
+        return {"month": target, "sealed_at": sealed_at, "sealed_employees": sealed}
+
+    async def _sealed_rows(self, month: str) -> list[dict]:
+        """这个月**已经封过账**的行（空 = 还没封，可以封）。"""
+        cur = await self._conn.execute(
+            """SELECT employee_id FROM attendance_ledger
+               WHERE "month" = ? AND sealed_at IS NOT NULL""",
+            (month,),
+        )
+        return [dict(row) for row in await cur.fetchall()]
 
 
 def _is_on_the_sheet(employee: dict, on_record: bool) -> bool:
@@ -396,6 +545,7 @@ def _leave_terms(
     employee: dict,
     month_days: int,
     previous_balance: float,
+    month: Optional[str] = None,
 ) -> dict[str, Any]:
     """卡片上那一块假期算式（票 03，ADR 0113 的口径）。**全是派生值，不落库。**
 
@@ -418,8 +568,13 @@ def _leave_terms(
       **存假** = `池 − 本月自然天数`（可为负 = 欠班、可带 .5）。
 
     **加班与补钟不参与这一套**（`GLOSSARY.md` 的存假：净时长单独结算）。
+
+    `month` 是「算的是哪个月」—— `sheet()` 不给，就取 `today` 那个月（当月的卡片）；
+    封账（票 04）算的是**上一个自然月**，于是它明说哪个月，并把 `today` 顶到那个月的
+    最后一天（整月都过完了，那个月的每一天都算「已过」）。生日假与年假按 `month` 判，
+    不跟 `today` 的月份 —— 否则封 8 月的账会拿 9 月的生日去给假。
     """
-    month = today[:7]
+    month = month or today[:7]
     actual_days = 0.0
     for business_date, shift_id in theirs.items():
         if business_date <= today and shift_id is not None:
@@ -466,6 +621,20 @@ def _leave_terms(
         "month_attendance_days": min(pool, float(month_days)),
         "balance": pool - month_days,
     }
+
+
+def _sealed_at(ledger: dict[tuple[int, str], dict], month: str) -> Optional[str]:
+    """这个月**已经封账**的时刻（一行都没有 / 都没封账时是 `None`）。
+
+    取的是一行上的 `sealed_at` —— 同一次封账写下的行时刻相同，取最大值只为确定性
+    （页面上那句话要一个稳定的字符串）。这一位就是「封账行看得出是什么时候封的」。
+    """
+    stamps = [
+        row["sealed_at"]
+        for (_, row_month), row in ledger.items()
+        if row_month == month and row.get("sealed_at")
+    ]
+    return max(str(stamp) for stamp in stamps) if stamps else None
 
 
 def _previous_balance(previous_row: Optional[dict], current_row: Optional[dict]) -> float:
