@@ -130,7 +130,10 @@ const SHEET = {
       net_hours: -1.5,
       shifts: SHIFTS,
       // 票 05：台账里填过的四个手填列 + 「没填过时」的默认（当月众数）。
+      // `shift_name_stored` 是台账里的**原始**列（A 批加的那一位）：输入框绑它。
+      // `shift_name` 是读侧的回填值（没填过时 = 当月众数），导出件 A 列用它。
       shift_name: '早班',
+      shift_name_stored: '早班',
       default_shift_name: '早班',
       lodging: '是',
       borrowed_store: '调东莞',
@@ -152,8 +155,10 @@ const SHEET = {
       new_hire: null,
       net_hours: 0,
       shifts: SHIFTS,
-      // 这一位四项一项都没填过：`shift_name` 给的是当月众数，`default_shift_name` 也是它。
+      // 这一位一项都没填过：`shift_name_stored` 是 `null`（输入框空的），
+      // `shift_name` 是服务端回填的当月众数（导出件用它 —— 别把它预填进输入框）。
       shift_name: '夜班',
+      shift_name_stored: null,
       default_shift_name: '夜班',
       lodging: null,
       borrowed_store: null,
@@ -620,19 +625,24 @@ describe('考勤表页的手填列（票 05）', () => {
     const { wrapper } = await mountSheet()
     const rows = wrapper.findAll('.aCard')[0].findAll('.aManualRow .aManualLabel')
     expect(rows.map((label) => label.text())).toEqual(MANUAL_LABELS)
-    // 「本月班次」那一格写的是服务端给的那份值（填过就是填的，没填过就是当月众数），
-    // 提示语里说清「空着的时候用的是哪条默认」—— 空着有含义，店长要看得见它。
+    // 「本月班次」那一格绑的是**台账里的原始值**（`shift_name_stored`）：填过就显示填的，
+    // 没填过就是**空的**；当月众数只出现在提示语里 —— 预填它，店长一存就把这条默认
+    // 固化成了他定的值（导出件的 A 列读的是 `shift_name`，那一位的含义没动）。
     const first = wrapper.findAll('.aCard')[0]
     expect(first.findAll('.aManualInput').map((input) => input.element.value)).toEqual([
       '早班', '是', '调东莞', '',
     ])
-    // 这一位一项都没填过：「本月班次」那一格显示的是服务端给的**当月众数**（夜班）；
-    // 提示语里是同一个说法 —— 「这是默认」与「这是我定的」在页面上分得开。
+    // 这一位一项都没填过：「本月班次」那一格是**空的**（空着有含义：用默认），
+    // 提示语里说清那条默认是什么 —— 「这是默认」与「这是我定的」在页面上分得开。
     const second = wrapper.findAll('.aCard')[1]
     expect(second.findAll('.aManualInput').map((input) => input.element.value)).toEqual([
-      '夜班', '', '', '',
+      '', '', '', '',
     ])
     expect(second.find('.aManualHint').text()).toBe('默认：当月最多 夜班')
+    // 回显那一行念的也是**台账里存了什么**（没填过 = `—`），不是服务端回填的众数。
+    const [shiftNow] = second.findAll('.aManualNowOne')
+    expect(shiftNow.find('i').text()).toBe('本月班次')
+    expect(shiftNow.find('b').text()).toBe('—')
     // 另外三项的提示语说的是「怎么写」（不是默认值 —— 那三项没有默认）。
     expect(second.findAll('.aManualHint').map((hint) => hint.text())).toEqual([
       '默认：当月最多 夜班', '写「是」或「否」', '如「调东莞」', '写「是」或「否」',
@@ -673,6 +683,29 @@ describe('考勤表页的手填列（票 05）', () => {
     ])
   })
 
+  it('只改别的那几项、班次那格不动 → 不会把服务端回填的众数写进台账', async () => {
+    // 这一位一项都没填过（`shift_name_stored` = `null`，服务端把 `shift_name` 回填成当月众数
+    // 「夜班」）。店长只改「是否住宿」，班次那格一个字没打 —— 发出去的必须是 `null`，
+    // 不能是 `夜班`：写进去就把这条默认**固化**成他定的值了，以后再改排班这一格也不跟着变。
+    const server = attendanceServer()
+    const { wrapper, puts } = await mountSheet(server)
+    const card = wrapper.findAll('.aCard')[1]
+    expect(card.findAll('.aManualInput')[0].element.value).toBe('')
+
+    await card.findAll('.aManualInput')[1].setValue('是')
+    await card.find('.aManual .aSave').trigger('click')
+    await flushPromises()
+
+    expect(puts).toEqual([
+      {
+        employeeId: 2,
+        manual: { shift_name: null, lodging: '是', borrowed_store: null, resigned: null },
+      },
+    ])
+    // 重拉之后那一格**还是空的**（页面也没替服务端认下这条默认）。
+    expect(wrapper.findAll('.aCard')[1].findAll('.aManualInput')[0].element.value).toBe('')
+  })
+
   it('服务端拒绝时把理由写在这一块上，页面不装作存进去了', async () => {
     const refused = attendanceServer({ refuse: '台账还没建好，请先做数据库迁移' })
     const { wrapper } = await mountSheet(refused)
@@ -704,10 +737,11 @@ function sealButton(wrapper) {
   return wrapper.findAll('.aActions .btn').find((btn) => btn.text().includes('封账上月')) || null
 }
 
-describe('考勤表页的封账上月（票 04）', () => {
-  it('没封过账时给一颗按钮，点一次打 POST，卡片上的「上月存假」随即换成刚封下的数', async () => {
+describe('考勤表页的封账上月（票 04 / B 批返工 ⑦）', () => {
+  it('没封过账时给一颗按钮，点一次先确认、再打 POST，卡片上的「上月存假」随即换成刚封下的数', async () => {
     const server = attendanceServer({ sheet: SHEET_WITH_LEAVE })
     const { wrapper, seals, fetchMock } = await mountSheet(server)
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     // 打开只读一次：封账要等店长点下去。
     expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
       '/api/attendance/sheet',
@@ -723,6 +757,10 @@ describe('考勤表页的封账上月（票 04）', () => {
     await sealButton(wrapper).trigger('click')
     await flushPromises()
 
+    // 封账**不可逆**（写的是上月结余、封过不再重算）：点下去先问一次。
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(confirm.mock.calls[0][0]).toContain('上月')
+    expect(confirm.mock.calls[0][0]).toContain('不再重算')
     // 封的是上个月，页面上不给月份 —— body 是空的。
     expect(seals).toEqual([{}])
     // 重拉回来的那张表：回执顶掉按钮，那个数换成封下的结余。
@@ -732,6 +770,21 @@ describe('考勤表页的封账上月（票 04）', () => {
       wrapper.findAll('.aCard .aLv').find((stat) => stat.find('i').text() === '上月存假')
         .find('b').text(),
     ).toBe('−21 天')
+  })
+
+  it('确认框里点「取消」就一个字节都不写（按钮还在、没有回执）', async () => {
+    const server = attendanceServer({ sheet: SHEET_WITH_LEAVE })
+    const { wrapper, seals, fetchMock } = await mountSheet(server)
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    await sealButton(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(seals).toEqual([]) // 没发那条 POST
+    expect(fetchMock.mock.calls).toHaveLength(1) // 也没多拉一次表
+    expect(sealButton(wrapper).text()).toBe('封账上月')
+    expect(wrapper.find('.aSealed').exists()).toBe(false)
   })
 
   it('已经封过的月不给按钮，只交代什么时候封的（打开就是不动的）', async () => {
@@ -756,6 +809,7 @@ describe('考勤表页的封账上月（票 04）', () => {
       sealRefuse: '2026-09 还没过完，等它过完再封',
     })
     const { wrapper } = await mountSheet(refused)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     await sealButton(wrapper).trigger('click')
     await flushPromises()
@@ -763,6 +817,24 @@ describe('考勤表页的封账上月（票 04）', () => {
     expect(wrapper.find('.aErr').text()).toBe('2026-09 还没过完，等它过完再封')
     expect(sealButton(wrapper).text()).toBe('封账上月') // 没封成，按钮还在
     expect(wrapper.find('.aSealed').exists()).toBe(false)
+  })
+})
+
+// ── B 批返工 ⑦：五颗按钮的主次 ──────────────────────────────────────────────
+//
+// 「导出这个月」（这一页的主动作）与「存这四项」用主按钮样式；「封账上月」是不可逆的
+// 那一颗，所以它点下去先确认一次（不是靠颜色挡人）。
+
+describe('按钮主次（B 批返工 ⑦）', () => {
+  it('「导出这个月」与「存这四项」是主按钮，其余三颗是次按钮', async () => {
+    const { wrapper } = await mountSheet()
+
+    expect(exportButton(wrapper).classes()).toContain('btn-primary')
+    expect(wrapper.findAll('.aCard')[0].find('.aManual .aSave').classes()).toContain('btn-primary')
+    // 不可逆的那颗不用主色招人（它靠确认框挡），「回到月历」也不抢。
+    expect(sealButton(wrapper).classes()).not.toContain('btn-primary')
+    const back = wrapper.findAll('.aActions .btn').find((btn) => btn.text() === '回到月历')
+    expect(back.classes()).not.toContain('btn-primary')
   })
 })
 
@@ -921,27 +993,31 @@ describe('考勤表页的期初存假（收尾修复 ②）', () => {
   })
 })
 
-// ── 收尾修复 ⑥：「借调门店」旁边那处与历史表的偏差 ─────────────────────────
+// ── 收尾修复 ⑥ / B 批返工 ⑤：「借调门店」那处与历史表的偏差 ────────────────
+//
+// 这处偏差**必须留着**（它是与历史样表唯一的有意偏差），只是不必占三行可视小字 ——
+// 那三行把一排四个输入口拽得参差不齐，现在压进输入框的 `title`（悬停可见）。
 
-describe('「借调门店」旁边注明这一处例外（收尾修复 ⑥）', () => {
-  it('页面上写清：历史表写在某一天的格子上，本版按月记、不落进导出件的日格', async () => {
+describe('「借调门店」那处例外压进 title（B 批返工 ⑤）', () => {
+  it('那一格的 title 说清：历史表写在某一天的格子上，本版按月记、不落进导出件的日格', async () => {
     const { wrapper } = await mountSheet()
-    const note = wrapper.findAll('.aCard')[0].find('.aManualNote')
+    const field = wrapper.findAll('.aCard')[0].findAll('.aManualField')[2]
 
-    expect(note.exists()).toBe(true)
-    expect(note.text()).toContain('某一天')
-    expect(note.text()).toContain('不落进')
-    expect(note.text()).toContain('导出')
+    expect(field.find('.aManualLabel').text()).toBe('借调门店')
+    const title = field.find('input').attributes('title')
+    expect(title).toContain('某一天')
+    expect(title).toContain('不落进')
+    expect(title).toContain('导出')
   })
 
-  it('这处注明只跟着「借调门店」那一项，别的三项不挂它', async () => {
+  it('这处注明只跟着「借调门店」那一项，页面上不再占那三行小字', async () => {
     const { wrapper } = await mountSheet()
     const card = wrapper.findAll('.aCard')[0]
 
-    expect(card.findAll('.aManualNote')).toHaveLength(1)
-    // 借调门店是第三个字段（`MANUAL_INPUTS` 的顺序）：它那一格里有这行小字。
-    expect(card.findAll('.aManualField')[2].find('.aManualNote').exists()).toBe(true)
-    expect(card.findAll('.aManualField')[1].find('.aManualNote').exists()).toBe(false)
+    expect(card.findAll('.aManualNote')).toHaveLength(0)
+    // 借调门店是第三个字段（`MANUAL_INPUTS` 的顺序）：只有它那一格挂 title。
+    expect(card.findAll('.aManualField')[2].find('input').attributes('title')).toBeTruthy()
+    expect(card.findAll('.aManualField')[1].find('input').attributes('title')).toBeUndefined()
   })
 })
 
@@ -975,5 +1051,63 @@ describe('日格文案与导出件的常量逐字相同（收尾修复 ⑥）', 
     // 「上班」是唯一一处**有意**不同：导出件里出勤是**空格子**（不写字），所以
     // `export.py` 里压根没有它的常量 —— 不是漏了，是那一位在纸面上就是空的。
     expect(written(/^\s*work: '(.*)',$/m)).toBe('上班')
+  })
+})
+
+// ── B 批返工 ③②⑥⑧①：这一页的版式（窄屏、撞色、编辑态、圆角、按钮排布） ──────
+//
+// 这几条改的都是「页面上看到什么」。能挂起来量的（DOM 次序、有没有那个标记）就挂起来量；
+// 剩下的是**写在 CSS 里的一个事实**（两条规则用了同一个颜色 / 有没有 `flex-wrap`），
+// 照本仓既有的写法读源码断它 —— 判定即结论，不是拿文本去断行为。
+
+describe('考勤表页的版式（B 批返工 ③②⑥⑧①）', () => {
+  it('③ 手填那一块的次序：四输入 → 回显 + 存这四项 → 期初块 + 存期初存假', async () => {
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_OPENING }))
+    const manual = wrapper.findAll('.aCard')[0].find('.aManual')
+    // 回显与它自己那颗「存这四项」必须挨着（中间不再岔进期初那一块）。
+    const order = [...manual.element.querySelectorAll(
+      '.aManualRow, .aManualNow, .aManualFoot, .aOpening',
+    )].map((el) => el.className.split(' ')[0])
+    expect(order).toEqual(['aManualRow', 'aManualNow', 'aManualFoot', 'aOpening'])
+  })
+
+  it('② 「今天」那一格用 `--accent` 描边（`--warn` 留给待补），格子里另有「今」字', async () => {
+    const { wrapper } = await mountSheet()
+    const cells = wrapper.findAll('.aCard')[0].findAll('.aDay')
+    // fixture 里第 3 天同时是「今天」与「待补」—— 正是撞色那一格。
+    expect(cells[2].classes()).toContain('is-today')
+    expect(cells[2].classes()).toContain('is-todo')
+    expect(cells[2].find('.aTodayMark').text()).toBe('今')
+    expect(cells[0].find('.aTodayMark').exists()).toBe(false)
+
+    const today = view.match(/\.aDay\.is-today\s*\{[^}]*\}/)[0]
+    expect(today).toContain('var(--accent)')
+    expect(today).not.toContain('var(--warn)')
+  })
+
+  it('⑥ 编辑态那一格独占整行（下拉与「休半天」横着摆，不把那一行撑高）', async () => {
+    const { wrapper } = await mountSheet()
+    await wrapper.findAll('.aCard')[0].findAll('.aDay')[0].find('button.aDayBtn').trigger('click')
+
+    const editing = wrapper.findAll('.aCard')[0].findAll('.aDay')[0]
+    expect(editing.classes()).toContain('is-editing')
+    // 展开之后仍然看得出在改哪一天（日期数字跟下拉同一行）。
+    expect(editing.find('.aDayNum').text()).toBe('1')
+    // 别的格子不进这一态（一次只改一天）。
+    expect(wrapper.findAll('.aCard')[0].findAll('.aDay')[1].classes()).not.toContain('is-editing')
+    expect(view).toMatch(/\.aDay\.is-editing\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/)
+  })
+
+  it('⑧ 卡片圆角走语义令牌 `--r-2`；长名字省略号 + `min-width: 0`', () => {
+    expect(view).toMatch(/\.aCard\s*\{[^}]*border-radius:\s*var\(--r-2\)/)
+    const name = view.match(/^\.aName\s*\{[^}]*\}/m)[0]
+    expect(name).toContain('text-overflow: ellipsis')
+    expect(name).toContain('min-width: 0')
+  })
+
+  it('① 顶部那一行会换行：标题块给基准宽、按钮组自己也能换行', () => {
+    expect(view).toMatch(/\.aTop\s*\{[^}]*flex-wrap:\s*wrap/)
+    expect(view).toMatch(/\.aActions\s*\{[^}]*flex-wrap:\s*wrap/)
+    expect(view).toMatch(/\.aIntro\s*\{[^}]*flex:\s*1 1 320px/)
   })
 })

@@ -113,7 +113,7 @@ describe('手填列的写法（票 05）', () => {
   it('四项摊在卡片上：标签与值一一对应，空的就是破折号', () => {
     expect(
       manualStats({
-        shift_name: '早班',
+        shift_name_stored: '早班',
         lodging: '是',
         borrowed_store: null,
         resigned: '是',
@@ -124,6 +124,14 @@ describe('手填列的写法（票 05）', () => {
       { label: '借调门店', value: null },
       { label: '是否离职', value: '是' },
     ])
+  })
+
+  it('「本月班次」的回显念台账里的原始值，不拿服务端回填的众数冒充填过', () => {
+    // 没填过的人：读侧把 `shift_name` 回填成当月众数（导出件 A 列用的是它），
+    // 但回显念的是台账里那一列（`shift_name_stored` = `null` → 页面画成 `—`）。
+    const [shift] = manualStats({ shift_name: '夜班', shift_name_stored: null })
+    expect(shift.label).toBe('本月班次')
+    expect(shift.value).toBe(null)
   })
 })
 
