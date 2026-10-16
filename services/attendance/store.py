@@ -193,23 +193,6 @@ class AttendanceStore:
 
     @property
     def _write_lock(self):
-        """写口那一个动作要用的锁：跟排班 / 节假日日历共用**同一个**全局写锁
-        （同 `HolidayCalendar._write_lock` 的做法）。
-
-        拿不到 owner 上那把锁（测试里塞的是裸连接）时退回一把本实例自己的 —— 那一档
-        没有别的写方，串行化仍然成立。
-        """
-        shared = getattr(self._write_lock_owner, "_write_lock", None)
-        if shared is not None:
-            return shared
-        if self._local_write_lock is None:
-            import asyncio
-
-            self._local_write_lock = asyncio.Lock()
-        return self._local_write_lock
-
-    @property
-    def _write_lock(self):
         """写锁：跟着 holder（`DatabaseManager`）那一把全局锁走，别自己另开一把。
 
         同 `HolidayCalendar` / `SchedulingStore` 的口径 —— 两个服务各持一把私有锁的话，
@@ -229,9 +212,6 @@ class AttendanceStore:
         if value.tzinfo is None:
             return value.replace(tzinfo=CHINA_TZ)
         return value
-
-    def _now_iso(self) -> str:
-        return self._now_dt().isoformat()
 
     def today(self) -> str:
         """当前营业日（06:00 切，北京时）—— 与 `staff_assignments.business_date` 同一个词。"""
@@ -448,24 +428,29 @@ class AttendanceStore:
 
     @_needs_migration
     async def set_manual_columns(
-        self, employee_id: int, values: dict[str, Optional[str]]
+        self, employee_id: int, values: dict[str, Optional[Any]]
     ) -> dict[str, Any]:
-        """把四个手填列写在本月那**一行**台账上（票 05）。返回写完之后的那四个值。
+        """把点名的几列写在本月那**一行**台账上（票 05 的四个手填列 + 人工期初）。
+        返回写完之后那四个手填列。
 
-        `values` 里**只放点名要改的那几列**（键取自 `MANUAL_FIELDS`）：没点名的列一个都
-        不碰 —— 这就是「只更新自己那几列」。点名成 `None`（或空串）是**清空**：存 NULL，
-        与从没填过同义（读回来照旧退回「本月班次」那条默认）。
+        `values` 里**只放点名要改的那几列**（键取自 `LEDGER_WRITE_FIELDS`）：没点名的列一个都
+        不碰 —— 这就是「只更新自己那几列」。点名成 `None`（手填列空串也一样）是**清空**：存
+        NULL，与从没填过同义（读回来照旧退回「本月班次」那条默认；期初退回 0）。
+
+        **人工期初（`opening_balance`）**是故事 35 的那一次手工录入：写的是**本月这一行**，
+        可为负（欠班）、可带 .5，`None` 清空 —— 与手填列同一条语句、同一条 upsert，于是
+        「一次点名一列」的纪律对它也成立（04 的结余 / 封账时刻不受影响）。
 
         缺表（0027 没应用）时与读侧同一个出口：`AttendanceError("not_migrated")`，
         HTTP 层翻成 503 点名那个脚本 —— 店长该看到的是「去做数据库迁移」，不是一个 500。
 
-        台账那一行是**票 04 的封账与票 05 的手填列共用**的一行（`UNIQUE(员工, 月份)`）：
-        整行覆盖会把对方写下的数抹掉，所以 INSERT 时只写 `employee_id` / `month`（别的列
-        留给各自的写入口），冲突时**只有点名的那几列进 `SET`**，`closing_balance` 与
-        `sealed_at` 一个都不在语句里 —— 哪怕这一次是新建那一行（`DO UPDATE` 因此也
-        **不更新** `created_at`，那一行是什么时候建的仍然说得清）。
+        台账那一行是**票 04 的封账、票 05 的手填列与人工期初**共用的一行
+        （`UNIQUE(员工, 月份)`）：整行覆盖会把别人写下的数抹掉，所以 INSERT 时只写
+        `employee_id` / `month`（别的列留给各自的写入口），冲突时**只有点名的那几列进
+        `SET`**，`closing_balance` 与 `sealed_at` 一个都不在语句里 —— 哪怕这一次是新建
+        那一行（`DO UPDATE` 因此也**不更新** `created_at`，那一行是什么时候建的仍然说得清）。
         """
-        fields = [field for field in MANUAL_FIELDS if field in values]
+        fields = [field for field in LEDGER_WRITE_FIELDS if field in values]
         if not fields:
             raise AttendanceError("nothing_to_write")
         month = self.today()[:7]
@@ -483,7 +468,7 @@ class AttendanceStore:
                 (
                     int(employee_id),
                     month,
-                    *(_text(values[field]) for field in fields),
+                    *(_ledger_value(field, values[field]) for field in fields),
                     now,
                     now,
                 ),
@@ -611,6 +596,13 @@ class AttendanceStore:
                         ledger.get((employee_id, month)),
                         default_shift_name=default_shift_names.get(employee_id),
                     ),
+                    # **人工期初**（故事 35）：上线当月由超管手工给一次的「上月末余额」。
+                    # 读的是**本月那一行**的 `opening_balance`（票 03 的裁定），写口是那条
+                    # 月级写口（`set_manual_columns`）。它与 `leave.previous_balance` 是两件
+                    # 事：后者只在上一月**还没封账**时才读它（封过账就以封下的结余为准）。
+                    "opening_balance": _ledger_number(
+                        ledger.get((employee_id, month)), "opening_balance"
+                    ),
                 }
             )
 
@@ -630,6 +622,33 @@ class AttendanceStore:
             "days": days,
             "employees": employees,
         }
+
+    @_needs_migration
+    async def ensure_day_editable(self, business_date: Any) -> str:
+        """逐日写口（票 06 的改格 / 票 07 的休半天）**共用**的三道服务端闸。
+
+        这一页只算当月、只记已经发生的班。两条写路各自的旧实现各漏了一部分：
+        `set_half_rest` 只挡了非当月，排班那层的单日覆盖**能写未来日子、也能写已经封账的
+        上月**。三道闸所以统一在这里，路由在分派到任何一条支路**之前**先过它：
+
+        * **非当月**（`out_of_month`）：这一页不提供月份选择，别的月份一个格子都不显示；
+        * **今天之后**（`future_day`，故事 45）：「还没到」不是「待补」，更不该被填成事实；
+        * **那个月已经有封账行**（`month_sealed`，故事 33）：封过的月只读 —— 它里面每一格
+          都已经结过账，再改它等于让封下的结余与现状各说各话。
+
+        **判序把封账放在最前**：上月既非当月又已封账时，店长该看到的是更具体的那一句
+        「封过的月只读」，而不是泛泛的「只算当月」。日期格式照旧是 `invalid_business_date`
+        （同 `_require_business_date`）。返回规整过的营业日，调用方不用再解析一次。
+        """
+        today = self.today()
+        day = _require_business_date(business_date)
+        if await self._sealed_rows(day[:7]):
+            raise AttendanceError("month_sealed", day[:7])
+        if day[:7] != today[:7]:
+            raise AttendanceError("out_of_month", today)
+        if day > today:
+            raise AttendanceError("future_day", day)
+        return day
 
     @_needs_migration
     @serialized_write
@@ -777,6 +796,13 @@ class AttendanceStore:
 # 在卡片上填一次、存在**月度考勤台账**当月那一行上，只进导出件与卡片，**不写回员工档案**。
 MANUAL_FIELDS = ("shift_name", "lodging", "borrowed_store", "resigned")
 
+# 那条**月级写口**能点名的列（票 05 的四个手填列 + 修 ② 的 `opening_balance`）。
+# 「人工期初」是故事 35 让超管在**上线当月手工给一次**的「上月末余额」—— 它写的是
+# **本月那一行**的 `opening_balance`（票 03 的裁定：人工期初读的就是本月这一行），
+# 所以并进同一条 upsert：一次点名只写点名的列，04 的 `closing_balance` / `sealed_at`
+# 与别的手填列一个都不碰（`_ledger_value` 只管值的归一）。
+LEDGER_WRITE_FIELDS = MANUAL_FIELDS + ("opening_balance",)
+
 
 def _manual_columns(row: Optional[dict], *, default_shift_name: Optional[str]) -> dict[str, Any]:
     """卡片上那四个手填列（票 05）。``row`` 是这个人**本月**台账那一行（没有就是 `None`）。
@@ -806,6 +832,34 @@ def _text(value: Any) -> Optional[str]:
         return None
     text = value if isinstance(value, str) else str(value)
     return text.strip() or None
+
+
+def _ledger_value(field: str, value: Any) -> Any:
+    """写台账那一行时把一位值归一：手填列是文本（空串 = 清空 = NULL），
+    `opening_balance` 是数字（可为负、可带 .5，`None` = 清空）。
+
+    数字那一位的**值域**由 HTTP 层的 `Optional[float]` 把着（`ManualColumnsRequest`），
+    这里只管把「清空」与「一个数」分开 —— 手填列那几位是自由文本，服务端不做值域校验
+    （票 05 的裁定），期初这一位照旧只想拿到一个数，拿到别的就是调用方的错。
+    """
+    if field == "opening_balance":
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise AttendanceError("invalid_opening_balance", str(value)) from exc
+    return _text(value)
+
+
+def _ledger_number(row: Optional[dict], column: str) -> Optional[float]:
+    """台账那一行上的一个数字列（没有那一行 / 没填过 = `None`，**不是 0**）。
+
+    「从没给过期初」与「期初是 0」是两件事：页面上一格留空、`0` 是一个真写下的数。
+    """
+    if not row or row.get(column) is None:
+        return None
+    return float(row[column])
 
 
 def _is_on_the_sheet(employee: dict, on_record: bool) -> bool:

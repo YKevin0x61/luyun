@@ -35,7 +35,11 @@ from api.scheduling import _bad_request as _scheduling_bad_request
 from api.scheduling import _scheduling_nudge
 from api.security import require_session
 from database import get_db
-from services.attendance import MANUAL_FIELDS, AttendanceError, AttendanceStore
+from services.attendance import (
+    LEDGER_WRITE_FIELDS,
+    AttendanceError,
+    AttendanceStore,
+)
 from services.attendance.export import (
     EXPORT_CONTENT_TYPE,
     attendance_export_filename,
@@ -60,15 +64,25 @@ _ERROR_DETAILS = {
     # 手填列（票 05）：四列一项都没点名。这不是「参数写错了」那么难懂 —— 页面上那颗
     # 保存按钮本来就是四项一起发，走到这里说明请求是手搓的（或表单全空没拿住）。
     "nothing_to_write": "这次没有任何一项要存：把要改的那几项填上再存一次",
+    # 期初存假（故事 35）那一位是数字：给了读不出来的东西就直说该怎么写。
+    "invalid_opening_balance": (
+        "期初存假要写一个数字（可以是负的、也可以带 .5）；要清空就把那一格留空"
+    ),
     # 逐日写口（票 07 的「休半天」）那三句。带 `{}` 的那几句由 `_bad_request` 填细节。
     "invalid_business_date": "日期格式应该是 YYYY-MM-DD",
     "out_of_month": "考勤表只算当月：只能改 {} 所在那个月的格子",
+    # 逐日写口的另外两道闸（收尾修复 ③）：故事 45 与故事 33 各一句。
+    "future_day": "今天之后的日子不能改：{} 还没到，考勤表只记已经发生的班",
+    "month_sealed": "{} 已经封账了：封过的月只读，它里面的格子不再改",
     "half_rest_needs_shift": "那天没有班次（休 / 还没排到），标不上「休半天」：先给那天排一个班次",
 }
 
 _ERROR_STATUS = {
     # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
     "not_migrated": 503,
+    # 封过的月 = 这次的写入与台账里已经定稿的那一行**冲突**：409 比 400 诚实
+    # （同逐日改格的 `pending_request` 与封账的 `already_sealed`）。
+    "month_sealed": 409,
 }
 
 # 逐日改格（票 06）的拒绝理由：单日覆盖那几条 + 这一页多出来的那一条。文案跟排班
@@ -190,21 +204,27 @@ class DayEditRequest(BaseModel):
 
 
 class ManualColumnsRequest(BaseModel):
-    """四个**手填列**（票 05）的输入：本月班次 / 是否住宿 / 借调门店 / 是否离职。
+    """那条**月级写口**的输入：四个**手填列**（票 05）+ **期初存假**（故事 35）。
 
     系统里没有这几项（花名册里压根没有「是否住宿 / 借调门店 / 是否离职」这几个字段），
-    所以由超管在卡片上填一次、存在月度考勤台账当月那一行上。
+    所以由超管在卡片上填一次、存在月度考勤台账**当月那一行**上。
 
     **`None` 是「清空」，缺字段是「不碰」** —— 两者在 JSON 里都是「没给值」之外的两件事，
     但 `Optional[...] = None` 分不开它们，所以这一层用 `model_fields_set` 拿「这次点名了
     哪几列」，只把那几列交给服务层。清空存 NULL，与从没填过同义：页面上显示为空，
     「本月班次」那一格退回当月众数。
+
+    `opening_balance`（期初存假 / 上月末余额）是故事 35 让超管**上线当月手工给一次**的
+    那一位：写在本月那一行上，可为负（欠班）、可带 .5，显式 `null` 即清空。它与其他几位
+    共用这一条 upsert —— 一次点名一列，谁也不覆盖谁。数值本身由 `float` 这一档把着：
+    给了非数字是 pydantic 的 422，不是悄悄存一个 0。
     """
 
     shift_name: Optional[str] = None
     lodging: Optional[str] = None
     borrowed_store: Optional[str] = None
     resigned: Optional[str] = None
+    opening_balance: Optional[float] = None
 
 
 @router.get("/sheet")
@@ -269,11 +289,14 @@ async def set_attendance_manual_columns(
     db=Depends(get_db),
     _session: str = Depends(require_session),
 ) -> dict:
-    """把某人**本月的四个手填列**存进月度考勤台账（票 05）。
+    """把某人**本月的四个手填列**（外加期初存假）存进月度考勤台账（票 05 + 故事 35）。
 
     写在本月那一行上（`UNIQUE(租户, 员工, 月份)`，upsert）：这一次点名了哪几列就只写哪几
     列，没点名的一列都不碰 —— 票 04 写的 `closing_balance` / `sealed_at` 也在这同一行上，
     谁也不整行覆盖谁。清空某一项存 NULL（与从没填过同义）。
+
+    `opening_balance`（期初存假）走的是**同一条** upsert：写的是**本月那一行**的
+    `opening_balance`（票 03 的裁定：人工期初读的就是本月这一行），只在上线当月手工给一次。
 
     **这里没有任何 nudge**：这几个值只进卡片与（票 08 的）导出件，员工手机上不显示它们，
     所以没有第二个端要重拉。它们也**不写回员工档案** —— 档案里没有这几个字段。
@@ -283,7 +306,7 @@ async def set_attendance_manual_columns(
     values = {
         field: getattr(payload, field)
         for field in payload.model_fields_set
-        if field in MANUAL_FIELDS
+        if field in LEDGER_WRITE_FIELDS
     }
     try:
         return await store.set_manual_columns(employee_id, values)
@@ -348,7 +371,17 @@ async def set_attendance_day(
     两条路写完都按排班既有惯例广播：`_scheduling_nudge` 一人一条、scope 带他自己的
     `employee_id`（员工连接只收得到与自己有关的那条，见 `services/realtime/hub.py`）。
     nudge 不带数据，员工手机收到后自己重拉 —— 与月历上改一天完全同一条链路。
+
+    **收尾修复 ③：分派之前先过三道服务端闸**（`AttendanceStore.ensure_day_editable`）——
+    非当月（这一页只算当月）、今天之后（故事 45）、那个月已经有封账行（故事 33）。
+    它们加在**分派之前**，所以上面两条支路的门是同一条：改班次、改成休、标「休半天」
+    一个都绕不过去。
     """
+    # 三道闸在**任何写动作之前**：被拒的那一次一个字节都不写（同逐日改格的 409）。
+    try:
+        await AttendanceStore(db).ensure_day_editable(business_date)
+    except AttendanceError as exc:
+        raise _bad_request(exc) from exc
     if payload.half_rest is not None:
         return await _set_half_rest(
             db, employee_id, business_date, bool(payload.half_rest), payload

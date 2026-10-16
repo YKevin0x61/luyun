@@ -242,7 +242,9 @@ def _write_employee(worksheet, row: int, employee: dict, day_count: int) -> None
         employee.get("name") or "",
         employee.get("job_title") or "",
         employee.get("base_salary"),
-        None,  # E 是否住宿：手填项，**不进导出件**（见票面：只有是否离职进表末）
+        # E 是否住宿：票 05 手填的那一项，**照它的字面值写**（没填过 = 空格子）。
+        # 它与表末的「是否离职」一样是手填列，只是位置在表头那一段里。
+        employee.get("lodging"),
         leave.get("month_attendance_days"),
         employee.get("net_hours"),
         employee.get("seniority_bonus"),

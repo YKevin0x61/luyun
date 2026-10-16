@@ -1193,11 +1193,14 @@ def test_a_sealed_balance_does_not_move_when_last_months_schedule_changes(attend
     sealed = _leave(_sheet(client, admin), employee_id)["previous_balance"]
     assert sealed == -23.0
 
-    # 封完再改上月的排班（可补记窗口里真改得动）：把两天改成休、另一天换个班次。
-    assert _edit(client, admin, employee_id, "2026-08-26", {"is_rest": True}).status_code == 200
-    assert (
-        _edit(client, admin, employee_id, "2026-08-27", {"shift_id": shifts["夜班"]}).status_code
-        == 200
+    # 封完再改上月的排班。**这一处驱动在收尾修复 ③ 之后改过**：原先是从考勤表页那条
+    # 逐日写口打的 HTTP，而 ③ 正是要给那条路补上「非当月 / 已封账」——封过的月只读
+    # （故事 33）。所以改走**排班服务层**（本文件的既有约定：造数走服务层）—— 店长在
+    # 排班月历上补记那条路照旧开着（ADR 0108 的可补记窗口）。这一条要验的
+    # 「封下的结余不随后来的排班改动漂」，与从哪扇门改上月无关。
+    _run(_scheduler(db).set_override(employee_id, "2026-08-26", is_rest=True))
+    _run(
+        _scheduler(db).set_override(employee_id, "2026-08-27", shift_id=shifts["夜班"])
     )
 
     assert _leave(_sheet(client, admin), employee_id)["previous_balance"] == sealed
@@ -2461,4 +2464,261 @@ def test_column_a_writes_the_months_mode_when_the_ledger_is_blank(attendance_htt
     assert worksheet.cell(row=_row_of(worksheet, "没填过班次"), column=1).value == "白班"
     # 当月一天排班都没有的人：A 列**留空**（卡片上他也是空的），不编一个班次名出来。
     assert worksheet.cell(row=_row_of(worksheet, "这个月没排班"), column=1).value is None
+
+
+# ══ 收尾修复（两轴 code-review 之后父级挑出来的六条） ═══════════════════════
+#
+# 这一段**只在文件尾追加**：上面每一票的用例一个字都没动。六条各自的判据都在下面
+# 那几条用例里；第五条（删重复定义）另有一条读源码的契约用例。
+#
+# 一条例外必须点名：`test_a_sealed_balance_does_not_move_when_last_months_schedule_changes`
+# （票 04）原先是**从考勤页那条 HTTP 写口**去改上月排班的，而修复 ③ 之后那条路对
+# 非当月/已封账的月一律关闭 —— 那两行驱动改走排班服务层（本文件既有约定：造数走
+# 服务层），它的核心断言（封下的存假不漂）一个字都没改。
+
+
+# ── ① E 列「是否住宿」写台账里手填的那一项 ──────────────────────────────────
+
+
+def test_column_e_writes_the_lodging_filled_in_the_ledger(attendance_http):
+    """① E 列 == 票 05 手填的 `lodging`；**没填过就留空**（不是「否」、不是编一个值）。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    ids = _export_employees(accounts, db)
+    assert _put_manual(client, admin, ids["整月都在"], {"lodging": "是"}).status_code == 200
+
+    worksheet = _only_sheet(_workbook(_export(client, admin)))
+
+    assert worksheet.cell(row=_row_of(worksheet, "整月都在"), column=5).value == "是"
+    # 没填过的人 E 列是**空格子**：「没填过」与「填了个空串」在导出件里同义。
+    assert worksheet.cell(row=_row_of(worksheet, "月底新来的"), column=5).value is None
+
+
+# ── ② 期初存假（故事 35：上线当月手工给一次） ──────────────────────────────
+
+
+def test_the_manual_door_writes_the_opening_balance_of_this_month(attendance_http):
+    """② 月级写口多认 `opening_balance`：写**本月那一行**、可为负、可带 .5、`null` 清空。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138211", "上线当月给期初")
+    # 先给**上月**造一行：这次写入只许动本月那一行（03 的裁定：人工期初读本月那一行）。
+    _put_ledger_row(db, employee_id, "2026-08", opening_balance=2.0)
+
+    first = _put_manual(client, admin, employee_id, {"opening_balance": 7.5})
+
+    assert first.status_code == 200, first.text
+    # 回执形状不变（既有用例逐字钉着那七个键）：期初是台账上的一位，不往这里塞。
+    assert set(first.json()) == {
+        "employee_id",
+        "month",
+        "shift_name",
+        "lodging",
+        "borrowed_store",
+        "resigned",
+        "default_shift_name",
+    }
+    assert _ledger_values(db, employee_id, MONTH, ["opening_balance"]) == {
+        "opening_balance": 7.5
+    }
+    assert _ledger_values(db, employee_id, "2026-08", ["opening_balance"]) == {
+        "opening_balance": 2.0
+    }
+    card = _card(_sheet(client, admin), employee_id)
+    assert card["opening_balance"] == 7.5
+    # 03 的读路径跟着走：上一月还没封账时「上月存假」读的就是本月这一行的期初。
+    assert card["leave"]["previous_balance"] == 7.5
+
+    # 可为负（欠班），也可带 .5。
+    assert (
+        _put_manual(client, admin, employee_id, {"opening_balance": -1.5}).status_code == 200
+    )
+    assert _ledger_values(db, employee_id, MONTH, ["opening_balance"]) == {
+        "opening_balance": -1.5
+    }
+
+    # 显式 `null` = 清空（与从没填过同义）：卡片上留空、存假退回 0。
+    assert (
+        _put_manual(client, admin, employee_id, {"opening_balance": None}).status_code == 200
+    )
+    assert _ledger_values(db, employee_id, MONTH, ["opening_balance"]) == {
+        "opening_balance": None
+    }
+    card = _card(_sheet(client, admin), employee_id)
+    assert card["opening_balance"] is None
+    assert card["leave"]["previous_balance"] == 0.0
+
+
+def test_the_opening_balance_write_never_touches_the_other_ledger_columns(attendance_http):
+    """② 同一行上的四列手填 / 04 的结余与封账时刻：点名谁就只写谁，谁都不整行覆盖谁。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138212", "期初与封账同住一行")
+    _put_ledger_row(
+        db,
+        employee_id,
+        MONTH,
+        opening_balance=2.5,
+        closing_balance=8.0,
+        sealed_at="2026-10-01T10:00:00+08:00",
+        lodging="是",
+    )
+
+    assert (
+        _put_manual(client, admin, employee_id, {"opening_balance": 4.5}).status_code == 200
+    )
+    assert _ledger_values(
+        db,
+        employee_id,
+        MONTH,
+        ["opening_balance", "closing_balance", "sealed_at", "lodging"],
+    ) == {
+        "opening_balance": 4.5,
+        "closing_balance": 8.0,
+        "sealed_at": "2026-10-01T10:00:00+08:00",
+        "lodging": "是",
+    }
+
+    # 反方向：只点名手填列时，期初一个字都不动。
+    assert _put_manual(client, admin, employee_id, {"lodging": "否"}).status_code == 200
+    assert _ledger_values(db, employee_id, MONTH, ["opening_balance", "lodging"]) == {
+        "opening_balance": 4.5,
+        "lodging": "否",
+    }
+
+
+# ── ③ 逐日写口的三道服务端闸（非当月 / 今天之后 / 已封账） ────────────────────
+
+
+def test_the_day_editor_refuses_a_month_that_is_already_sealed(attendance_http):
+    """③ 故事 33：那个月已经有封账行 → 拒（409），理由点名「封账」，那一行一个字都不写。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138221", "封过账的上月")
+    shifts = _shift_ids(db)
+    _run(_scheduler(db).set_override(employee_id, "2026-08-26", shift_id=shifts["白班"]))
+    assert _seal(client, admin, {"month": "2026-08"}).status_code == 200, "8 月没封上"
+    before = _assignment_rows(employee_id, "2026-08-26")
+    assert before == [(shifts["白班"], 0)]
+
+    refused = _edit(client, admin, employee_id, "2026-08-26", {"is_rest": True})
+
+    assert refused.status_code == 409, refused.text
+    assert "封账" in refused.json()["detail"]
+    # 「改成休」那一次没落库：那一行还是那个班次、还是那个半天休标志。
+    assert _assignment_rows(employee_id, "2026-08-26") == before
+
+
+def test_the_day_editor_refuses_a_month_that_is_not_this_one(attendance_http):
+    """③ 故事 44：**非当月** → 拒（400），理由点名「只算当月」（八月这一条还没封账）。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138222", "没封账的上月")
+    shifts = _shift_ids(db)
+    _run(_scheduler(db).set_override(employee_id, "2026-08-26", shift_id=shifts["白班"]))
+
+    refused = _edit(client, admin, employee_id, "2026-08-26", {"is_rest": True})
+
+    assert refused.status_code == 400, refused.text
+    assert "当月" in refused.json()["detail"]
+    assert _assignment_rows(employee_id, "2026-08-26") == [(shifts["白班"], 0)]
+
+
+def test_the_day_editor_refuses_a_day_after_today(attendance_http):
+    """③ 故事 45：**今天之后** → 拒（400）—— 改班次与标「休半天」两条支路都关着。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138223", "明天还没到")
+    shifts = _shift_ids(db)
+    # 规则铺到今天之后：25 号本来就有一行白班（旧实现改得动它、也标得上半天休）。
+    _run(_scheduler(db).set_rule(employee_id, [shifts["白班"]]))
+    assert _assignment_rows(employee_id, "2026-09-25") == [(shifts["白班"], 0)]
+
+    refused = _edit(client, admin, employee_id, "2026-09-25", {"is_rest": True})
+    half = _half(client, admin, employee_id, "2026-09-25")
+
+    assert refused.status_code == 400, refused.text
+    assert "今天之后" in refused.json()["detail"]
+    assert half.status_code == 400, half.text
+    assert "今天之后" in half.json()["detail"]
+    # 规则铺的那一行原样：既没被改成休，也没被标半天休。
+    assert _assignment_rows(employee_id, "2026-09-25") == [(shifts["白班"], 0)]
+
+
+# ── ④ 逐日改格：未决申请改成「写前查」（拒绝的那一次一个字节都不碰） ──────────
+
+
+def _row_snapshot(db, table, employee_id, business_date):
+    """库里那一行的**原样**（`SELECT *`，含 `updated_at` / `created_at`）。
+
+    `updated_at` 是判「这次有没有写过它」的指纹：这条链路上任何一次写都会盖一个新时刻。
+    """
+
+    async def _read():
+        cur = await db._conn.execute(
+            f"SELECT * FROM {table} WHERE employee_id = ? AND business_date = ?",
+            (int(employee_id), business_date),
+        )
+        rows = await cur.fetchall()
+        return dict(rows[0]) if rows else None
+
+    return _run(_read())
+
+
+def test_a_refused_day_edit_never_writes_the_assignment_row(attendance_http, monkeypatch):
+    """④ 判出未决申请的那一次**一个字节都不碰** `staff_assignments` / `scheduling_overrides`。
+
+    补偿式实现（先写、再读那道闸、判出未决就恢复原样）的**终态**与「写前查」一样，所以
+    只比对内容看不出差别 —— 这里把路由里那个 `SchedulingStore` 的钟**往后拨一小时**：
+    写前查则那一行一个字节都没动（时刻还是原来那个），补偿式会留下 11:00 那个新时刻。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138231", "有未决申请的格子")
+    shifts = _shift_ids(db)
+    store = _scheduler(db)
+    _run(store.set_rule(employee_id, [shifts["白班"]]))
+    _run(store.set_override(employee_id, TODAY, shift_id=shifts["夜班"]))
+    _run(store.submit_leave(employee_id, TODAY, note="家里有事"))
+
+    tables = ("staff_assignments", "scheduling_overrides")
+    before = {table: _row_snapshot(db, table, employee_id, TODAY) for table in tables}
+    # 那一行确实是「点之前的样子」（覆盖记录上是夜班、时刻是钉死的钟）。
+    assert before["scheduling_overrides"]["shift_id"] == shifts["夜班"]
+    assert before["staff_assignments"]["updated_at"] == FIXED_NOW.isoformat()
+
+    later = datetime(2026, 9, 24, 11, 0, tzinfo=CHINA_TZ)
+    real_init = SchedulingStore.__init__
+
+    def _late_init(self, *args, **kwargs):
+        # 路由里现造的那个 `SchedulingStore(db)` 的钟换成 11:00：任何一次写都会留下新时刻。
+        kwargs.setdefault("now", lambda: later)
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(SchedulingStore, "__init__", _late_init)
+
+    refused = _edit(client, admin, employee_id, TODAY, {"is_rest": True})
+
+    assert refused.status_code == 409, refused.text
+    assert "请假" in refused.json()["detail"]
+    assert {table: _row_snapshot(db, table, employee_id, TODAY) for table in tables} == before
+
+
+# ── ⑤ 删掉重复定义（前一份是被后一份盖掉的死代码，行为零变化） ────────────────
+
+
+def test_the_attendance_store_defines_its_shared_helpers_once():
+    """⑤ `_write_lock` 与 `_now_iso` 在同一个类体里**各只留一份**。
+
+    这是一条读源码的契约（同前端那几条 `readFileSync` 式断言）：定义两遍时，前一遍谁也
+    不执行 —— 改它没有任何效果，改错了也看不出来。这里把「只剩一份」钉住。
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "services" / "attendance" / "store.py"
+    ).read_text(encoding="utf-8")
+
+    assert len(re.findall(r"^    def _write_lock\(", source, re.M)) == 1
+    assert len(re.findall(r"^    def _now_iso\(", source, re.M)) == 1
 
