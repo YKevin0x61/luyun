@@ -34,16 +34,17 @@ const mainPy = readFileSync(join(here, '../../../../../main.py'), 'utf8')
 
 const PATH = '/workbench/hr/attendance'
 
-describe('考勤表页（票 01 / 票 06 / 票 04 / 票 05）', () => {
-  it('请求集合就这四条：读当月 + 改某一天 + 封账上月 + 存手填列', () => {
+describe('考勤表页（票 01 / 票 06 / 票 04 / 票 05 / 票 08）', () => {
+  it('请求集合就这五条：读当月 + 改某一天 + 封账上月 + 存手填列 + 导出当月', () => {
     // 票 01 时这里钉的是「整页只有一条 GET」；票 06 加上了逐日改格那一条 PUT、
-    // 票 04 加上了封账那一 POST、票 05 又加上了手填列那一条 PUT。
-    // 集合本身仍然是硬钉的：多一条没人测的路径（导出）会让它红。
+    // 票 04 加上了封账那一 POST、票 05 又加上了手填列那一条 PUT，票 08 加上导出。
+    // 集合本身仍然是硬钉的：多一条没人测的路径会让它红。
     const calls = [
-      ...view.matchAll(/api\.(get|post|put|delete|patch)\(\s*[`']([^`']*)/g),
+      ...view.matchAll(/api\.(get|post|put|delete|patch|download|downloadPost)\(\s*[`']([^`']*)/g),
     ].map((match) => `${match[1]} ${match[2]}`)
     // 顺序不钉（页面里谁先写不影响契约），集合钉死。
     expect([...new Set(calls)].sort()).toEqual([
+      'download /api/attendance/sheet.xlsx',
       'get /api/attendance/sheet',
       'post /api/attendance/seal',
       'put /api/attendance/sheet/${person.id}/${cell.business_date}',
@@ -51,14 +52,17 @@ describe('考勤表页（票 01 / 票 06 / 票 04 / 票 05）', () => {
     ].sort())
   })
 
-  it('不提供月份选择、也不导出', () => {
+  it('不提供月份选择：打开就是当月', () => {
     // 月份选择器（原生 month 与站内那个组件）一个都不许有：打开就是当月。
     expect(view).not.toMatch(/month-picker/)
     expect(view).not.toMatch(/LuyunDatePicker/)
     expect(view).not.toMatch(/type="month"/)
-    // 导出是票 08 的事：这一页上没有它 —— 没有下载动作、也没有工作簿
-    // （上面那条用例已经把请求集合钉死在两条上了）。
-    expect(view).not.toMatch(/xlsx|download|Blob|\.blob\(/i)
+    // 导出（票 08）不自己拼文件名 —— 名字由服务端的 `Content-Disposition` 带回来，
+    // 页面这一侧写死的月份迟早与服务端算的那个对不上：那条下载请求必须是**一条写死的
+    // 路径**（没有模板占位、没有拼接）。
+    expect([...view.matchAll(/api\.download\(\s*([^)]*)\)/g)].map((m) => m[1].trim())).toEqual([
+      "'/api/attendance/sheet.xlsx'",
+    ])
   })
 
   it('三态与两列的说法从 util 来，页面不自己写第二份', () => {
@@ -185,10 +189,11 @@ function jsonResponse(data, status = 200) {
  *  **改过的**表 —— 页面在这一页上立刻变，靠的就是「重拉一次」，这条 mock 必须真的跟着变，
  *  否则验的就只是本地状态自己骗自己。封账也一样：封下的结余成为每张卡上的「上月存假」。
  */
-function attendanceServer({ refuse = null, sheet = SHEET, sealRefuse = null } = {}) {
+function attendanceServer({ refuse = null, sheet = SHEET, sealRefuse = null, exportRefuse = null } = {}) {
   let current = JSON.parse(JSON.stringify(sheet))
   const puts = []
   const seals = []
+  const exports = []
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url).split('?')[0]
     if (path === '/api/attendance/sheet' && (options.method || 'GET') === 'GET') {
@@ -196,6 +201,23 @@ function attendanceServer({ refuse = null, sheet = SHEET, sealRefuse = null } = 
       // 回同一个引用的话，页面里 `sheet.value = await api.get(...)` 那一下是同一个值、
       // 不触发重渲染，重拉之后的改动就永远画不出来（票 04 的封账回执正是这么发现的）。
       return jsonResponse(JSON.parse(JSON.stringify(current)))
+    }
+    // 导出（票 08）：一条 GET，服务端把工作簿当附件下发 —— 前端只看响应头里那个名字。
+    if (path === '/api/attendance/sheet.xlsx') {
+      exports.push(path)
+      if (exportRefuse) return jsonResponse({ detail: exportRefuse }, 503)
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          'content-type':
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(
+            `考勤表-${current.month}.xlsx`,
+          )}`,
+        }),
+        blob: async () => new Blob(['fake-xlsx']),
+      }
     }
     if (path === '/api/attendance/seal' && options.method === 'POST') {
       seals.push(JSON.parse(options.body || '{}'))
@@ -251,12 +273,17 @@ function attendanceServer({ refuse = null, sheet = SHEET, sealRefuse = null } = 
     }
     return jsonResponse({ detail: 'not found' }, 404)
   })
-  return { fetchMock, puts, seals }
+  return { fetchMock, puts, seals, exports }
 }
 
 async function mountSheet(server = attendanceServer()) {
   vi.resetModules()
   vi.stubGlobal('fetch', server.fetchMock)
+  // jsdom 没有 objectURL / 下载：导出那条路（票 08）走的是 `api.download`，
+  // 它建一个 `<a download>` 再点一下 —— 这两个动作在这里都得存在才不会抛。
+  URL.createObjectURL = vi.fn(() => 'blob:mock')
+  URL.revokeObjectURL = vi.fn()
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   const [{ default: AttendanceSheetView }] = await Promise.all([
     import('../AttendanceSheetView.vue'),
   ])
@@ -271,6 +298,7 @@ async function mountSheet(server = attendanceServer()) {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('考勤表页渲染（票 01 / 票 06）', () => {
@@ -715,7 +743,10 @@ describe('考勤表页的封账上月（票 04）', () => {
 
     expect(wrapper.find('.aSealed').text()).toBe('2026-08 已封账（2026-09-24 10:00）')
     expect(sealButton(wrapper)).toBe(null)
-    expect(wrapper.findAll('.aActions .btn').map((btn) => btn.text())).toEqual(['回到月历'])
+    expect(wrapper.findAll('.aActions .btn').map((btn) => btn.text())).toEqual([
+      '回到月历',
+      '导出这个月',
+    ])
     expect(fetchMock.mock.calls).toHaveLength(1) // 只读一次，没有多出来的请求
   })
 
@@ -732,5 +763,52 @@ describe('考勤表页的封账上月（票 04）', () => {
     expect(wrapper.find('.aErr').text()).toBe('2026-09 还没过完，等它过完再封')
     expect(sealButton(wrapper).text()).toBe('封账上月') // 没封成，按钮还在
     expect(wrapper.find('.aSealed').exists()).toBe(false)
+  })
+})
+
+// ── 票 08：一键导出 .xlsx（顶部那颗按钮） ────────────────────────────────────
+
+/** 顶部那一行里那颗「导出这个月」（没有就是 null）。 */
+function exportButton(wrapper) {
+  return wrapper.findAll('.aActions .btn').find((btn) => btn.text().includes('导出')) || null
+}
+
+describe('考勤表页的导出这个月（票 08）', () => {
+  it('打开不导出：只有店长点下去才打那一条 GET', async () => {
+    const { wrapper, fetchMock, exports } = await mountSheet()
+    expect(exportButton(wrapper).text()).toBe('导出这个月')
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      '/api/attendance/sheet',
+    ])
+    expect(exports).toEqual([])
+  })
+
+  it('点一次导出 → 打 GET /api/attendance/sheet.xlsx，并用响应头里的文件名落盘', async () => {
+    const server = attendanceServer()
+    const { wrapper, exports } = await mountSheet(server)
+
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click')
+    await exportButton(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(exports).toEqual(['/api/attendance/sheet.xlsx'])
+    // 文件名由服务端的 `Content-Disposition` 带回来（`考勤表-YYYY-MM.xlsx`）——
+    // 页面不自己拼那个月份。
+    const anchor = click.mock.instances[0]
+    expect(anchor.download).toBe('考勤表-2026-09.xlsx')
+    expect(wrapper.find('.aErr').exists()).toBe(false)
+    expect(exportButton(wrapper).text()).toBe('导出这个月') // 回执之后按钮回到常态
+  })
+
+  it('服务端拒了就把理由写出来，页面不装作导出来了', async () => {
+    const refused = attendanceServer({ exportRefuse: '考勤表要读的表还没建好' })
+    const { wrapper, exports } = await mountSheet(refused)
+
+    await exportButton(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(exports).toEqual(['/api/attendance/sheet.xlsx'])
+    expect(wrapper.find('.aErr').text()).toBe('考勤表要读的表还没建好')
+    expect(exportButton(wrapper).text()).toBe('导出这个月') // 没导成，按钮还在
   })
 })

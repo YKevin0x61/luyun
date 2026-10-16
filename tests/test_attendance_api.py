@@ -18,12 +18,15 @@
 
 import asyncio
 import contextlib
+import re
 import unittest
-from datetime import datetime
+from datetime import date, datetime
+from urllib.parse import unquote
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from openpyxl.utils import get_column_letter
 
 import api.attendance as attendance_module
 import api.auth as auth_module
@@ -2015,3 +2018,372 @@ def test_sealing_the_last_month_also_folds_half_rest_at_half_a_day(attendance_ht
 
     assert resp.status_code == 200, resp.text
     assert _ledger_row(db, employee_id, "2026-08")["closing_balance"] == -23.5
+
+
+# ══ 票 08：一键导出 .xlsx（下面这一整段都是票 08 加的） ══════════════════════
+#
+# 版式规格在 `.scratch/考勤表导出/export-layout.md`（6 份历史样表逐格实测）。这一条缝
+# **不给生成器另开一扇门**（spec.md 的 Testing Decisions）：从 HTTP 响应体里把那个工作簿
+# **读回来**再断言 —— 请求进去、.xlsx 出来，与页面看到的是同一份投影。
+#
+# 断言只碰「店长看得见的那几样」：表名 / 表头逐字 / 列数随天数 / 日格取值 / 底部三块 /
+# 文件名 / 打印设置。字体名、色值与列宽的具体数字也在样表里实测过，但那些是「版式复刻」
+# 的细节，逐位钉死只会让以后微调版式时被迫改测试。
+
+EXPORT_URL = "/api/attendance/sheet.xlsx"
+# 样表里底部「注意」那一行的原文（六份一字不差，票面要求照抄）。
+NOTE_TEXT = (
+    "注意：①早班、夜班人员都填在一张表；②对应人员新入职或离职都要填"
+    "写好；③班次时间可根据自个门店修改；④人员对应班次一定要填写；⑤"
+    "考勤表中有啥特殊的事项就写在“备注”"
+)
+
+
+def _export(client, session):
+    """以管理端会话导出当月考勤表（票 08 那扇门）。"""
+    _as_admin(client, session)
+    return client.get(EXPORT_URL)
+
+
+def _workbook(resp):
+    """把响应体读回工作簿（**从 HTTP 出来**，不经生成器）。
+
+    表名在这里**不 strip**：`Sheet1 ` 那个尾随空格是票面点名要的一位，剥掉就验不出来了。
+    """
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    assert resp.status_code == 200, resp.text
+    return load_workbook(BytesIO(resp.content))
+
+
+def _only_sheet(workbook):
+    assert workbook.sheetnames == ["Sheet1 "], workbook.sheetnames
+    return workbook["Sheet1 "]
+
+
+def _disposition_filename(resp):
+    """取 `Content-Disposition` 里的文件名（前端 `api.download` 读的是同一位）。
+
+    优先 RFC 5987 的 `filename*=UTF-8''…`（中文名要靠它），退回纯 `filename="…"`。
+    """
+    header = resp.headers["content-disposition"]
+    encoded = re.search(r"filename\*\s*=\s*UTF-8''([^;]+)", header)
+    if encoded:
+        return unquote(encoded.group(1))
+    plain = re.search(r'filename\s*=\s*"?([^";]+)"?', header)
+    assert plain, header
+    return plain.group(1)
+
+
+def _export_employees(accounts, db):
+    """造两个导出件要看的人，返回 `{姓名: 员工号}`。
+
+    * 「整月都在」：21 号上班、22 号休、23 号**休半天**（票 07 的标志进导出件的那一格）；
+    * 「月底新来的」：这个月一条排班行都没有（每格 = 待补）。
+
+    两件事覆盖日格的全部四种写法：出勤留空 / 休 / 休半天 / 待补。
+    """
+    shifts = _shift_ids(db)
+    scheduler = _scheduler(db)
+    on_duty = _employee_id(
+        accounts,
+        "13800138111",
+        "整月都在",
+        job_title="炒锅",
+        base_salary=6800,
+        seniority_bonus=300,
+        hire_date="2024-05-01",
+    )
+    newcomer = _employee_id(accounts, "13800138112", "月底新来的", hire_date="2026-09-03")
+    for day in ("2026-09-21", "2026-09-22", "2026-09-23"):
+        _run(scheduler.set_override(on_duty, day, shift_id=shifts["白班"]))
+    # 22 号改成休（有排班行、班次为空）—— 待补与休在表上是两件事（票 01 的口径）。
+    _run(scheduler.set_override(on_duty, "2026-09-22", is_rest=True))
+    return {"整月都在": on_duty, "月底新来的": newcomer}
+
+
+def _mark_half_rest(db, employee_id, business_date):
+    """标「休半天」走服务层那扇唯一的写口（票 07）—— 造数，不是断言通道。"""
+    _run(
+        AttendanceStore(db, now=lambda: FIXED_NOW).set_half_rest(
+            employee_id, business_date, True
+        )
+    )
+
+
+# ── 票 08 验收 1/2/3/7：表名、表头逐字、列数随天数、汇总列顺序 ──────────────
+
+
+def test_the_export_is_the_history_template_named_sheet1_with_a_trailing_space(attendance_http):
+    """验收 1/2：表名 `Sheet1 `（**带尾随空格**）、R1 大标题、月份行**不写店名**。
+
+    表头逐字与历史模板一致：A~H 那八个字段列 + 日期列 1..N + 星期行 + 三个汇总列。
+    日期列的数字与星期汉字按**真实月历**（2026-09-01 是周二）。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    _export_employees(accounts, db)
+    month_days = 30  # 2026-09
+
+    worksheet = _only_sheet(_workbook(_export(client, admin)))
+
+    assert worksheet["A1"].value == "厨房排班表"
+    # 月份行只说月份：**门店那一段不写**（系统里没有这一项、只有一家店）。
+    assert worksheet["A2"].value == "月份 ：9月份"
+    assert "猎德" not in str(worksheet["A2"].value)
+
+    headers = [worksheet.cell(row=4, column=column).value for column in range(1, 9)]
+    assert headers == ["班次", "姓名", "职位", "底薪", "是否住宿", "本月出勤天数", "加班小时", "年限"]
+    # 日期列从 I 列起，R4 放 1..30；30 天的月**没有 31 日那一列**（验收 3）。
+    assert [worksheet.cell(row=4, column=9 + index).value for index in range(month_days)] == list(
+        range(1, month_days + 1)
+    )
+    assert worksheet.cell(row=4, column=9 + month_days).value == "存休\n天数"
+    assert worksheet.cell(row=4, column=10 + month_days).value == "是否新入职"
+    assert worksheet.cell(row=4, column=11 + month_days).value == "是否离职"
+    # 汇总三列就停在 AP：没有第 32 列（30 天的月那个 31 日列不存在）。
+    assert worksheet.max_column == 8 + month_days + 3
+
+    # 星期汉字按真实月历（2026-09-01 周二），六/日两列正是周末那两格。
+    weekdays = [worksheet.cell(row=5, column=9 + index).value for index in range(month_days)]
+    assert weekdays == ["二", "三", "四", "五", "六", "日", "一"] * 4 + ["二", "三"]
+    weekend_columns = [
+        9 + index
+        for index in range(month_days)
+        if date(2026, 9, index + 1).weekday() >= 5
+    ]
+    assert len(weekend_columns) == 8  # 九月的四个周末
+    for column in weekend_columns:
+        assert worksheet.cell(row=5, column=column).fill.fgColor.rgb == "FFFFFF00"
+    assert worksheet.cell(row=5, column=9).fill.patternType is None  # 周二那格没有底色
+
+    # A~H 是 R4:R5 纵向合并（两行表头）；三个汇总列也是。
+    for column in list(range(1, 9)) + [9 + month_days + offset for offset in (0, 1, 2)]:
+        letter = get_column_letter(column)
+        assert f"{letter}4:{letter}5" in {
+            str(merged) for merged in worksheet.merged_cells.ranges
+        }, letter
+
+
+def test_a_thirty_day_month_has_no_day_31_column(attendance_http):
+    """验收 3 的另一半：**列数随当月天数变** —— 与历史表同一件事，不是写死 31 列。
+
+    这一条在 30 天的月里看「没有 31 日那一列」；31 天的月里同一条会看到 31 那一列
+    （`test_the_export_grows_a_day_31_column_in_a_thirty_one_day_month`）。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    _export_employees(accounts, db)
+
+    worksheet = _only_sheet(_workbook(_export(client, admin)))
+
+    assert worksheet.cell(row=4, column=8 + 30).value == 30  # 第 30 天是这一列
+    assert worksheet.cell(row=4, column=9 + 30).value == "存休\n天数"  # 紧接着就是表末三列
+    assert worksheet.cell(row=5, column=8 + 30).value == "三"  # 2026-09-30 是周三
+    # 31 那一列根本不存在：第 30 天往右就是汇总列（不是「31 日」）。
+    assert 31 not in [
+        worksheet.cell(row=4, column=column).value for column in range(9, 9 + 40)
+    ]
+
+
+# ── 票 08 验收 4/5/6：日格取值、汇总列、手填项 ──────────────────────────────
+
+
+def test_the_day_cells_write_only_rest_half_rest_and_todo(attendance_http):
+    """验收 4：出勤**留空**、休写「休」、半天写「休半天」、没有排班行写「待补」并标色。
+
+    汇总列（验收 6/7 的另一半）也在同一行上核一遍：本月出勤天数 / 加班小时 / 年限 /
+    存休天数（票 03 的 `balance`，可为负）/ 是否新入职 / 是否离职（**台账里手填的那一项**）。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    ids = _export_employees(accounts, db)
+    _mark_half_rest(db, ids["整月都在"], "2026-09-23")
+    # 手填「是否离职」（票 05 那一列）——导出件读的就是台账上这个值。
+    assert (
+        _put_manual(client, admin, ids["整月都在"], {"resigned": "是"}).status_code == 200
+    )
+
+    worksheet = _only_sheet(_workbook(_export(client, admin)))
+    row = 6  # 第一个人在 R6
+    cells = {
+        day: worksheet.cell(row=row, column=8 + day).value for day in (1, 21, 22, 23, 24)
+    }
+
+    # 1 号没铺到 = 待补；21 号上班 = **留空**（出勤在纸上就是空白）；22 号休；23 号休半天；
+    # 24 号（今天）压根没有排班行 = 又是待补 —— 四种写法在同一行上各出现一次。
+    assert cells == {1: "待补", 21: None, 22: "休", 23: "休半天", 24: "待补"}
+    # 待补那一格**黄底标出**（验收 4 的后半句）：「休」与「上班」不标。
+    assert worksheet.cell(row=row, column=8 + 1).fill.fgColor.rgb == "FFFFFF00"
+    assert worksheet.cell(row=row, column=8 + 22).fill.patternType is None
+    assert worksheet.cell(row=row, column=8 + 21).fill.patternType is None
+
+    # 汇总列：位置随天数平移，顺序是 存休天数 → 是否新入职 → 是否离职（验收 7）。
+    # 存休天数 = 票 03 的 `balance`（池 − 本月自然天数）：21 号整天 + 23 号半天 = 池 1.5，
+    # 减 30 天 = −28.5（**负值照写**，样表里存休本来就有负数）。
+    assert worksheet.cell(row=row, column=9 + 30).value == 1.5 - 30
+    assert worksheet.cell(row=row, column=10 + 30).value == "否"  # 2024 年入职，不是新来的
+    assert worksheet.cell(row=row, column=11 + 30).value == "是"  # 台账里手填的「是否离职」
+    # 其余列跟着花名册与台账：姓名 / 职位 / 底薪 / 年限 / 本月出勤天数 / 加班小时。
+    assert worksheet.cell(row=row, column=2).value == "整月都在"
+    assert worksheet.cell(row=row, column=3).value == "炒锅"
+    assert worksheet.cell(row=row, column=4).value == 6800
+    assert worksheet.cell(row=row, column=6).value == 1.5  # 本月出勤天数（半天休按 0.5 折）
+    assert worksheet.cell(row=row, column=7).value == 0  # 这个月没有加班（净时长 0）
+    assert worksheet.cell(row=row, column=8).value == 300
+
+    # 第二个人：22 / 23 号没有排班行 = 待补；本月新入职 = 「是」；没填离职 = 留空。
+    assert worksheet.cell(row=7, column=2).value == "月底新来的"
+    assert worksheet.cell(row=7, column=8 + 22).value == "待补"
+    assert worksheet.cell(row=7, column=8 + 23).value == "待补"
+    assert worksheet.cell(row=7, column=8 + 22).fill.fgColor.rgb == "FFFFFF00"
+    assert worksheet.cell(row=7, column=10 + 30).value == "是"
+    assert worksheet.cell(row=7, column=11 + 30).value is None
+
+
+def test_borrowed_store_is_not_written_into_any_day_cell(attendance_http):
+    """票面验收 5：**借调门店不写进文件**。
+
+    历史表是把它写在**某一天**的格子上（`城光荟` / `同和` / `调东莞`），而台账是按月记的、
+    没有日期可落 —— 父级裁定不造一个日期出来。这一条把那个裁定钉住：卡片上填了借调门店，
+    导出的表里**任何一格都不该出现它**（日格与表末三列都不写）。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    ids = _export_employees(accounts, db)
+    assert (
+        _put_manual(
+            client, admin, ids["整月都在"], {"borrowed_store": "调东莞", "resigned": "是"}
+        ).status_code
+        == 200
+    )
+
+    worksheet = _only_sheet(_workbook(_export(client, admin)))
+    written = [
+        worksheet.cell(row=row, column=column).value
+        for row in range(6, worksheet.max_row + 1)
+        for column in range(1, worksheet.max_column + 1)
+    ]
+
+    assert "调东莞" not in written
+    assert "是" in written  # 「是否离职」照旧写（借调门店是**唯一**不进文件的那一项）
+
+
+# ── 票 08 验收 2/8：底部三块与打印设置 ─────────────────────────────────────
+
+
+def test_the_footer_blocks_and_the_print_setup_match_the_template(attendance_http):
+    """验收 8：底部三块（含「注意：①…⑤」原文）整行合并；横向 / A4 / fitToPage / 页边距 0。
+
+    三块的落位在样表里是**随当月人数浮动**的（注意行在 R30~R33 之间），所以这里按
+    「表体之后」相对定位，不写死行号。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    _export_employees(accounts, db)
+
+    worksheet = _only_sheet(_workbook(_export(client, admin)))
+    anchors = {}
+    for row in range(6, worksheet.max_row + 1):
+        value = worksheet.cell(row=row, column=1).value
+        if value in ("班次时间：", NOTE_TEXT):
+            anchors[value] = row
+    assert set(anchors) == {"班次时间：", NOTE_TEXT}, anchors
+
+    shift_row = anchors["班次时间："]
+    note_row = anchors[NOTE_TEXT]
+    assert note_row == shift_row + 1  # 两块紧挨着
+    last_column = 8 + 30 + 3
+    merges = {str(merged) for merged in worksheet.merged_cells.ranges}
+    last_letter = get_column_letter(last_column)
+    assert f"A{shift_row}:{last_letter}{shift_row}" in merges
+    assert f"A{note_row}:{last_letter}{note_row + 7}" in merges
+    # 尾部还有一块空的合并块（样表 A46:AP53 那一档）。
+    assert f"A{note_row + 8}:{last_letter}{note_row + 15}" in merges
+    assert worksheet.cell(row=note_row + 8, column=1).value is None
+
+    # 打印设置：横向 / A4(9) / fitToPage / 缩放 24 / 页边距全 0 / 有 Print_Area。
+    assert worksheet.page_setup.orientation == "landscape"
+    assert worksheet.page_setup.paperSize == 9
+    assert worksheet.sheet_properties.pageSetUpPr.fitToPage is True
+    assert worksheet.page_setup.scale == 24
+    assert worksheet.page_setup.fitToHeight == 0
+    assert (
+        worksheet.page_margins.left,
+        worksheet.page_margins.right,
+        worksheet.page_margins.top,
+        worksheet.page_margins.bottom,
+    ) == (0, 0, 0, 0)
+    assert worksheet.print_area  # 定义名 `_xlnm.Print_Area` 在就行，具体行随人数浮动
+
+
+def test_the_two_kinds_of_conditional_formatting_are_on_the_summary_columns(attendance_http):
+    """验收 9：题面那两类条件格式（`F` 列 0~31、末尾两列 containsText「是」）。
+
+    **不作用在日期格上**：历史表里日格的颜色都是手工填的底色。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    _export_employees(accounts, db)
+
+    worksheet = _only_sheet(_workbook(_export(client, admin)))
+    by_range = {
+        str(rng): rules for rng, rules in worksheet.conditional_formatting._cf_rules.items()
+    }
+
+    # 整整三条，而且只落在这三处：日期格上一条都没有。
+    assert sorted(by_range) == ["<ConditionalFormatting AN6:AN7>",
+                                "<ConditionalFormatting AO6:AO7>",
+                                "<ConditionalFormatting F6:F7>"]
+    assert [(rule.type, rule.operator, rule.formula) for rule in by_range["<ConditionalFormatting F6:F7>"]] == [
+        ("cellIs", "between", ["0", "31"])
+    ]
+    for letter in ("AN", "AO"):
+        key = f"<ConditionalFormatting {letter}6:{letter}7>"
+        assert [(rule.type, rule.text, rule.formula) for rule in by_range[key]] == [
+            ("containsText", "是", [f'NOT(ISERROR(SEARCH("是",{letter}6)))'])
+        ]
+
+
+# ── 票 08 验收 1：文件名带月份 / 8：鉴权 ───────────────────────────────────
+
+
+def test_the_download_is_named_after_the_month_the_response_reports(attendance_http):
+    """验收 1：文件名 `考勤表-YYYY-MM.xlsx`，月份取**响应上的** `month`（不是服务器时钟另算）。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    _export_employees(accounts, db)
+
+    resp = _export(client, admin)
+
+    assert resp.headers["content-disposition"].startswith("attachment;")
+    assert _disposition_filename(resp) == f"考勤表-{MONTH}.xlsx"
+    # 表内那个月与文件名同一个（同一份响应算出来的），不是两处各写一遍。
+    assert _only_sheet(_workbook(resp))["A2"].value == "月份 ：9月份"
+    # 响应体真的是那个 MIME（浏览器据此落盘成 .xlsx）。
+    assert resp.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
+def test_the_export_door_is_the_same_admin_door_as_the_page(attendance_http):
+    """验收 10：匿名与员工会话都被拒 —— 这一份表里有全店人的底薪与假期。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    _export_employees(accounts, db)
+    staff_session = _run(accounts.login("13800138111", PASSWORD))["session_id"]
+
+    client.cookies.clear()
+    anonymous = client.get(EXPORT_URL)
+    assert anonymous.status_code == 401
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    denied = client.get(EXPORT_URL)
+    assert denied.status_code == 401
+    assert denied.json()["detail"] == "需要登录"
+    # 两次都被拒 = 没有工作簿漏出去（成功那条路是 200 + 那个 MIME）。
+    assert "spreadsheetml" not in denied.headers.get("content-type", "")
+
+    assert _export(client, admin).status_code == 200
+

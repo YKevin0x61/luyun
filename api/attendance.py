@@ -15,14 +15,20 @@
 的存假结余就落进月度考勤台账（`services/attendance/store.py` 的 `AttendanceStore.seal`）。
 只封已经过完的月份，封过的月不再封；这一条**不广播 nudge** —— 它改的是管理端那张表自己
 的账，员工手机上没有任何东西跟着变。
+
+票 08 加的是**一键导出**（`GET /api/attendance/sheet.xlsx`）：把同一份 `sheet()` 响应投影成
+那份《厨房排班表》.xlsx 直接下发（`services/attendance/export.py`），**不落服务器、不推送**。
+文件名（`考勤表-YYYY-MM.xlsx`）与表内月份都用**响应上的 `month`** —— 不拿服务器时钟另算一个，
+否则跨零点那一刻页面上的月份与文件名会各说各话。
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Optional
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
 from api.scheduling import _bad_request as _scheduling_bad_request
@@ -30,6 +36,11 @@ from api.scheduling import _scheduling_nudge
 from api.security import require_session
 from database import get_db
 from services.attendance import MANUAL_FIELDS, AttendanceError, AttendanceStore
+from services.attendance.export import (
+    EXPORT_CONTENT_TYPE,
+    attendance_export_filename,
+    build_attendance_workbook,
+)
 from services.scheduling.store import SchedulingError, SchedulingStore
 
 logger = logging.getLogger(__name__)
@@ -211,6 +222,44 @@ async def attendance_sheet(
         return await store.sheet()
     except AttendanceError as exc:
         raise _bad_request(exc) from exc
+
+
+@router.get("/sheet.xlsx")
+async def export_attendance_sheet(
+    db=Depends(get_db),
+    _session: str = Depends(require_session),
+) -> Response:
+    """一键导出当月考勤表（票 08）：一份 `.xlsx` 直接下发，**不落服务器、不推送**。
+
+    读的还是 `AttendanceStore.sheet()` 那**同一个读口** —— 页面上看到的与导出的表是同一份
+    投影，不存在「导出的数跟页面对不上」这条路。版式在 `services/attendance/export.py`。
+
+    月份取**响应上的** `month`（不拿服务器时钟另算）：文件名与表内月份因此与那张卡片
+    同源。文件名按 RFC 5987 的 `filename*=UTF-8''…` 给（中文名不靠 ASCII 兜底），前端
+    `api.download` 优先读它。
+
+    鉴权与这一页的其它门一样是 `require_session`：匿名与员工会话都拿不到（票面最后一条）
+    —— 这一份表里有全店人的底薪与假期。
+    """
+    store = AttendanceStore(db)
+    try:
+        sheet = await store.sheet()
+    except AttendanceError as exc:
+        raise _bad_request(exc) from exc
+
+    filename = attendance_export_filename(str(sheet["month"]))
+    logger.info("导出考勤表: month=%s rows=%s", sheet["month"], len(sheet.get("employees") or []))
+    return Response(
+        content=build_attendance_workbook(sheet),
+        media_type=EXPORT_CONTENT_TYPE,
+        headers={
+            # `quote` 只做一次编码：文件名里没有引号/换行，但仍按 RFC 3986 转义一遍
+            # （同 `api/recipes.py` 的导出：将来改名也不会把响应头写坏）。
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            # 导出件是「此刻的暂算值」，别让反向代理/浏览器缓存住它。
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.put("/sheet/{employee_id}/manual")
