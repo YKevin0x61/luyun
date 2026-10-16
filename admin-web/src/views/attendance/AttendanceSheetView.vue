@@ -33,8 +33,11 @@ import {
   formatDays,
   formatNetHours,
   leaveFormulaText,
+  manualStats,
+  manualText,
   newHireText,
   pendingOvertimeText,
+  shiftNameDefault,
 } from '../../utils/attendanceSheet'
 import { WORKBENCH_HR_HOME, workbenchDocumentTitle } from '../../utils/workbenchCopy'
 
@@ -65,6 +68,14 @@ const frame = computed(
 function employees() {
   return (sheet.value?.employees || []).map((person) => ({
     ...person,
+    // 四个**手填列**（票 05）原样带过来：它们是台账那一行上的值，页面只摆出来。
+    // 单独列一遍是为了让「这一页认哪几个键」看得见 —— 手滑写错一个键名，输入框会
+    // 一直空着（`manualValue` 读不到就是空），看起来像「服务端没给」。
+    shift_name: person.shift_name,
+    default_shift_name: person.default_shift_name,
+    lodging: person.lodging,
+    borrowed_store: person.borrowed_store,
+    resigned: person.resigned,
     cells: (person.days || []).map((day) => ({
       ...day,
       ...(frame.value.get(day.business_date) || {}),
@@ -149,6 +160,62 @@ function leaveStats(person) {
     { label: '本月出勤天数', value: formatDays(leave.month_attendance_days) },
     { label: '存假', value: formatDays(leave.balance) },
   ]
+}
+
+/** 正在等回执的那张卡（`员工号` 或 null）与这一块上要显示的话（服务端拒绝的理由）。 */
+const savingManual = ref(0)
+const manualError = ref(null) // { employee_id, text } | null
+
+/** 四个手填列的输入口（票 05）。**四项一起存**：空着的项发 `null`（清空存 NULL，与从没
+ *  填过同义）。逐项自动存会让「清空」在打字的每一拍都发一次请求、也会把没动的那几项
+ *  顺手覆盖成空，所以这里只按钮存一次。
+ *
+ *  字段名 ↔ 台账列名（`0027_attendance_ledger.sql`）的对应就这一处：写错了服务端不认
+ *  那一列（`model_fields_set` 只认这四个），页面上看到的是「没存进去」。
+ *
+ *  「本月班次」那一格的提示语说的是**默认**：台账里没填过（或清空了）时，卡片与导出的表
+ *  用的是这条默认（当月众数）—— 所以「空着」有含义，店长要看得见它。 */
+const MANUAL_INPUTS = [
+  { key: 'shift_name', label: '本月班次', hint: (person) => shiftNameDefault(person) },
+  { key: 'lodging', label: '是否住宿', hint: () => '写「是」或「否」' },
+  { key: 'borrowed_store', label: '借调门店', hint: () => '如「调东莞」' },
+  { key: 'resigned', label: '是否离职', hint: () => '写「是」或「否」' },
+]
+
+/** 输入框里现在是什么：服务端那一份，读出来是空就给空串（受控输入）。 */
+function manualValue(person, field) {
+  const value = person[field.key]
+  return value === null || value === undefined ? '' : String(value)
+}
+
+/** 存：四项一起发。空着的项发 `null`（不是空串）—— 服务端把两者都当清空，但 `null` 更直说。 */
+async function saveManual(person, event) {
+  if (savingManual.value) return
+  const form = event.target.closest('.aManual')
+  const read = (key) => {
+    const input = form && form.querySelector(`[data-field="${key}"]`)
+    return input ? input.value.trim() : ''
+  }
+  const body = {}
+  for (const field of MANUAL_INPUTS) body[field.key] = read(field.key) || null
+  manualError.value = null
+  savingManual.value = person.id
+  try {
+    await api.put(`/api/attendance/sheet/${person.id}/manual`, body)
+    // 与逐日改格同一条路：自己重拉一次（nudge 不带数据，这一页也不等它）——
+    // 写进去的那几项立刻在卡片上；**失败时不改页面上已经渲染的那一份**。
+    sheet.value = await api.get('/api/attendance/sheet')
+  } catch (err) {
+    manualError.value = { employee_id: person.id, text: err.message || '这四项没存进去' }
+  } finally {
+    savingManual.value = 0
+  }
+}
+
+function manualErrorOn(employeeId) {
+  return manualError.value && manualError.value.employee_id === employeeId
+    ? manualError.value.text
+    : ''
 }
 
 async function load() {
@@ -266,6 +333,50 @@ onMounted(() => {
             </small>
           </span>
         </div>
+        <!-- 四个**手填列**（票 05）：系统里推不出来的那几项（是否住宿 / 借调门店 / 是否离职
+             在花名册里压根没有字段），由超管在这儿填一次、存在月度考勤台账当月那一行上。
+             只进卡片与（票 08 的）导出件，**不写回员工档案**。
+
+             「本月班次」那一格：填过就显示台账里的值；没填过时输入框是**空的**、把当月
+             众数放在提示语里 —— 默认值不能被预填，否则店长一存就把这条默认固化成他定的值，
+             以后再改排班这一格也不跟着变了。 -->
+        <div class="aManual">
+          <p class="aManualTitle">
+            手填列：这几项系统里没有，填一次就进台账，导出的表直接用它。
+          </p>
+          <div class="aManualRow">
+            <label v-for="field in MANUAL_INPUTS" :key="field.key" class="aManualField">
+              <span class="aManualLabel">{{ field.label }}</span>
+              <input
+                class="aManualInput"
+                type="text"
+                :data-field="field.key"
+                :aria-label="`${person.name || ''} 的${field.label}`"
+                :value="manualValue(person, field)"
+              />
+              <small class="aManualHint">{{ field.hint(person) }}</small>
+            </label>
+          </div>
+          <!-- 「这一块现在是什么」由服务端那一份说了算（重拉之后写的就是最新的）。 -->
+          <p class="aManualNow">
+            <span v-for="stat in manualStats(person)" :key="stat.label" class="aManualNowOne">
+              <i>{{ stat.label }}</i><b>{{ manualText(stat.value) }}</b>
+            </span>
+          </p>
+          <div class="aManualFoot">
+            <button
+              class="btn btn-sm aSave"
+              type="button"
+              :disabled="savingManual === person.id"
+              @click="saveManual(person, $event)"
+            >
+              存这四项
+            </button>
+            <small v-if="manualErrorOn(person.id)" class="aManualErr" role="alert">
+              {{ manualErrorOn(person.id) }}
+            </small>
+          </div>
+        </div>
         <!-- 假期台账（票 03）：每张卡把自己的账摊开；算式收在「看算式」后面，
              摊开后能一格一格核（服务端下发的数，页面一个都不自己算）。 -->
         <div v-if="person.leave" class="aLeave">
@@ -376,4 +487,23 @@ onMounted(() => {
   margin: var(--sp-2) 0 0; font-family: var(--font-mono); font-size: var(--fs-11);
   line-height: 1.9; color: var(--ink-dim);
 }
+/* 四个手填列（票 05）：系统里没有的那几项，填一次就进台账。 */
+.aManual { margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--line); }
+.aManualTitle { margin: 0 0 var(--sp-2); font-size: var(--fs-12); color: var(--ink-dim); }
+.aManualRow { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); }
+.aManualField { display: flex; flex-direction: column; gap: 2px; }
+.aManualLabel { font-size: var(--fs-11); color: var(--ink-faint); }
+.aManualInput {
+  width: 110px; padding: 4px var(--sp-2); border: 1px solid var(--line);
+  border-radius: var(--r-1); background: var(--surface-2); color: var(--ink);
+  font-size: var(--fs-12); font-family: inherit;
+}
+.aManualHint { margin: var(--sp-2) 0 0; font-size: var(--fs-11); color: var(--ink-faint); }
+.aManualNow { display: flex; flex-wrap: wrap; gap: 5px var(--sp-4); margin: var(--sp-2) 0 0; }
+.aManualNowOne { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--fs-12); }
+.aManualNowOne i { font-style: normal; color: var(--ink-faint); }
+.aManualNowOne b { font-size: var(--fs-13); color: var(--ink); }
+.aManualFoot { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); }
+.aManualFoot .aSave { flex: none; }
+.aManualErr { font-size: var(--fs-11); color: var(--danger-bright); }
 </style>

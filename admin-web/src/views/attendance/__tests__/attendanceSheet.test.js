@@ -33,8 +33,9 @@ const PATH = '/workbench/hr/attendance'
 
 describe('考勤表页（票 01 / 票 06）', () => {
   it('请求集合就这两条：读当月 + 改某一天', () => {
-    // 票 01 时这里钉的是「整页只有一条 GET」；票 06 加上了逐日改格的那一条 PUT。
-    // 集合本身仍然是硬钉的：多一条没人测的路径（导出、封账、手填列）会让它红。
+    // 票 01 时这里钉的是「整页只有一条 GET」；票 06 加上了逐日改格的那一条 PUT，
+    // 票 05 又加上了手填列那一条 PUT。
+    // 集合本身仍然是硬钉的：多一条没人测的路径（导出、封账）会让它红。
     const calls = [
       ...view.matchAll(/api\.(get|post|put|delete|patch)\(\s*[`']([^`']*)/g),
     ].map((match) => `${match[1]} ${match[2]}`)
@@ -42,6 +43,7 @@ describe('考勤表页（票 01 / 票 06）', () => {
     expect([...new Set(calls)].sort()).toEqual([
       'get /api/attendance/sheet',
       'put /api/attendance/sheet/${person.id}/${cell.business_date}',
+      'put /api/attendance/sheet/${person.id}/manual',
     ].sort())
   })
 
@@ -119,6 +121,12 @@ const SHEET = {
       new_hire: true,
       net_hours: -1.5,
       shifts: SHIFTS,
+      // 票 05：台账里填过的四个手填列 + 「没填过时」的默认（当月众数）。
+      shift_name: '早班',
+      default_shift_name: '早班',
+      lodging: '是',
+      borrowed_store: '调东莞',
+      resigned: null,
       days: [
         { business_date: '2026-09-01', state: 'work', shift_id: 1 },
         { business_date: '2026-09-02', state: 'rest', shift_id: null },
@@ -136,6 +144,12 @@ const SHEET = {
       new_hire: null,
       net_hours: 0,
       shifts: SHIFTS,
+      // 这一位四项一项都没填过：`shift_name` 给的是当月众数，`default_shift_name` 也是它。
+      shift_name: '夜班',
+      default_shift_name: '夜班',
+      lodging: null,
+      borrowed_store: null,
+      resigned: null,
       days: [
         { business_date: '2026-09-01', state: 'todo', shift_id: null },
         { business_date: '2026-09-02', state: 'todo', shift_id: null },
@@ -168,6 +182,25 @@ function attendanceServer({ refuse = null, sheet = SHEET } = {}) {
     const path = String(url).split('?')[0]
     if (path === '/api/attendance/sheet' && (options.method || 'GET') === 'GET') {
       return jsonResponse(current)
+    }
+    const manual = path.match(/^\/api\/attendance\/sheet\/(\d+)\/manual$/)
+    if (manual && options.method === 'PUT') {
+      const body = JSON.parse(options.body || '{}')
+      puts.push({ employeeId: Number(manual[1]), manual: body })
+      if (refuse) return jsonResponse({ detail: refuse }, 409)
+      const person = current.employees.find((row) => row.id === Number(manual[1]))
+      for (const field of ['shift_name', 'lodging', 'borrowed_store', 'resigned']) {
+        if (field in body) person[field] = body[field]
+      }
+      return jsonResponse({
+        employee_id: person.id,
+        month: current.month,
+        shift_name: person.shift_name,
+        lodging: person.lodging,
+        borrowed_store: person.borrowed_store,
+        resigned: person.resigned,
+        default_shift_name: person.default_shift_name,
+      })
     }
     const edit = path.match(/^\/api\/attendance\/sheet\/(\d+)\/(\d{4}-\d{2}-\d{2})$/)
     if (edit && options.method === 'PUT') {
@@ -399,5 +432,92 @@ describe('考勤表页的假期台账（票 03）', () => {
     expect(wrapper.find('.aLeave').exists()).toBe(false)
     expect(wrapper.find('.aStat.is-pending').exists()).toBe(false)
     expect(wrapper.find('.aProvisional').exists()).toBe(false)
+  })
+})
+
+// ── 票 05：卡片上的四个手填列 ────────────────────────────────────────────────
+
+const MANUAL_LABELS = ['本月班次', '是否住宿', '借调门店', '是否离职']
+const MANUAL_FIELDS = ['shift_name', 'lodging', 'borrowed_store', 'resigned']
+
+describe('考勤表页的手填列（票 05）', () => {
+  it('四个输入口都在卡片上，标签按票面的四项来', async () => {
+    const { wrapper } = await mountSheet()
+    const rows = wrapper.findAll('.aCard')[0].findAll('.aManualRow .aManualLabel')
+    expect(rows.map((label) => label.text())).toEqual(MANUAL_LABELS)
+    // 「本月班次」那一格写的是服务端给的那份值（填过就是填的，没填过就是当月众数），
+    // 提示语里说清「空着的时候用的是哪条默认」—— 空着有含义，店长要看得见它。
+    const first = wrapper.findAll('.aCard')[0]
+    expect(first.findAll('.aManualInput').map((input) => input.element.value)).toEqual([
+      '早班', '是', '调东莞', '',
+    ])
+    // 这一位一项都没填过：「本月班次」那一格显示的是服务端给的**当月众数**（夜班）；
+    // 提示语里是同一个说法 —— 「这是默认」与「这是我定的」在页面上分得开。
+    const second = wrapper.findAll('.aCard')[1]
+    expect(second.findAll('.aManualInput').map((input) => input.element.value)).toEqual([
+      '夜班', '', '', '',
+    ])
+    expect(second.find('.aManualHint').text()).toBe('默认：当月最多 夜班')
+    // 另外三项的提示语说的是「怎么写」（不是默认值 —— 那三项没有默认）。
+    expect(second.findAll('.aManualHint').map((hint) => hint.text())).toEqual([
+      '默认：当月最多 夜班', '写「是」或「否」', '如「调东莞」', '写「是」或「否」',
+    ])
+  })
+
+  it('改完点「存这四项」→ 一次 PUT 带上四项（空着的发 `null`）→ 卡片立刻变', async () => {
+    const server = attendanceServer()
+    const { wrapper, puts } = await mountSheet(server)
+    const card = wrapper.findAll('.aCard')[0]
+    const inputs = card.findAll('.aManualInput')
+    const button = wrapper.findAll('.aCard')[0].find('.aManual .aSave')
+
+    // 清空「借调门店」（文本输入清空之后 `value` 是 `''`）+ 改成「否」+ 填上班次与离职。
+    await inputs[2].setValue('')
+    await inputs[1].setValue('否')
+    await inputs[0].setValue('早班')
+    await inputs[3].setValue('是')
+    await button.trigger('click')
+    await flushPromises()
+
+    // **四项一起发**：空着的那几项发 `null`（清空存 NULL，与从没填过同义）。
+    expect(puts).toEqual([
+      {
+        employeeId: 1,
+        manual: {
+          shift_name: '早班',
+          lodging: '否',
+          borrowed_store: null,
+          resigned: '是',
+        },
+      },
+    ])
+    // 重拉之后卡片上写的就是最新的那一份（页面不等 nudge）。
+    const after = wrapper.findAll('.aCard')[0]
+    expect(after.findAll('.aManualInput').map((input) => input.element.value)).toEqual([
+      '早班', '否', '', '是',
+    ])
+  })
+
+  it('服务端拒绝时把理由写在这一块上，页面不装作存进去了', async () => {
+    const refused = attendanceServer({ refuse: '台账还没建好，请先做数据库迁移' })
+    const { wrapper } = await mountSheet(refused)
+    const card = wrapper.findAll('.aCard')[0]
+    await card.find('.aManualInput').setValue('早班')
+    await wrapper.findAll('.aCard')[0].find('.aManual .aSave').trigger('click')
+    await flushPromises()
+
+    const after = wrapper.findAll('.aCard')[0]
+    expect(after.find('.aManualErr').text()).toBe('台账还没建好，请先做数据库迁移')
+    // 服务端说没写，就不改样子：这一格还是原来填过的那个值。
+    expect(after.findAll('.aManualInput')[0].element.value).toBe('早班')
+  })
+
+  it('这一块的四项说法都从 util 来，页面不自己写第二份', () => {
+    expect(view).toMatch(/manualText\(/)
+    expect(view).toMatch(/manualStats\(/)
+    expect(view).toMatch(/shiftNameDefault\(/)
+    // 手填列**不进员工档案**：页面这一块只打考勤表那一扇门（请求集合那条用例钉着），
+    // 这里再钉一次「没有第二个写档案的接口」。
+    expect(view).not.toMatch(/employees\/\$\{person\.id\}\/profile/)
   })
 })

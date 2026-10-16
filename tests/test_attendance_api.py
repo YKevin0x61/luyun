@@ -1158,3 +1158,410 @@ def test_missing_holiday_and_ledger_tables_are_named_in_the_503(attendance_http)
             assert script in resp.json()["detail"]
         finally:
             _run(_rename(f"{table}_tmp", table))
+
+
+# ══ 票 05：手填列（下面这一整段都是票 05 加的） ═════════════════════════════════
+#
+# 那四项系统推不出来的值（本月班次 / 是否住宿 / 借调门店 / 是否离职）由超管在卡片上
+# 填一次、存在**月度考勤台账**（0027，`GLOSSARY.md` 的「月度考勤台账」）当月那一行上：
+#
+# * 读：卡片上四个键（`shift_name` / `lodging` / `borrowed_store` / `resigned`）。
+#   台账里没填过 `shift_name` 时给**当月众数**（并列取 `staff_shifts.sort_order` 靠前）；
+#   当月一条排班都没有的人**留空**，不是报错。
+# * 写：`PUT /api/attendance/sheet/{员工}/manual` —— 台账那一行 upsert，
+#   **只更新点名的那几列**（票 04 写的 `closing_balance` / `sealed_at` 一个都不碰）。
+#
+# 「从没填过」与「清空」同义：清空存 NULL，读回来照旧退回上面那条默认。
+
+
+MANUAL_FIELDS = ("shift_name", "lodging", "borrowed_store", "resigned")
+
+
+def _manual(card):
+    """这个人卡片上那四个手填列。"""
+    return {field: card[field] for field in MANUAL_FIELDS}
+
+
+def _put_manual(client, admin, employee_id, body):
+    """以管理端会话填某人的手填列（票 05 的那扇门）。"""
+    _as_admin(client, admin)
+    return client.put(f"/api/attendance/sheet/{employee_id}/manual", json=body)
+
+
+# ── 票 05 验收 1：四列能填能改、刷新后还在（读侧先落库一行看它读不读得出来） ──
+
+
+def test_the_card_reads_the_four_manual_columns_back(attendance_http):
+    """台账那一行上填过的值原样回到卡片上；没填过的人是「空」（不是报错）。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    filled = _employee_id(accounts, "13800138081", "填过的")
+    blank = _employee_id(accounts, "13800138082", "没填过的")
+
+    _put_ledger_row(
+        db,
+        filled,
+        MONTH,
+        shift_name="早班",
+        lodging="是",
+        borrowed_store="调东莞",
+        resigned="是",
+    )
+
+    sheet = _sheet(client, admin)
+
+    assert _manual(_card(sheet, filled)) == {
+        "shift_name": "早班",
+        "lodging": "是",
+        "borrowed_store": "调东莞",
+        "resigned": "是",
+    }
+    # 没填过的人四项都是空：页面上显示为空，不是编一个值出来。
+    assert _manual(_card(sheet, blank)) == {field: None for field in MANUAL_FIELDS}
+
+
+# ── 票 05 验收 2：本月班次默认是当月众数；没有排班的人留空（不是报错） ────────
+
+
+def test_the_month_shift_default_is_the_months_mode_by_display_order(attendance_http):
+    """当月出现次数最多的那个班次名；**并列取 `sort_order` 靠前的**；没排班的人留空。
+
+    这条默认值属于**读侧**（票 05 的「本月班次」那一格）：它与票 06 卡片上那个
+    「启用中的班次」下拉不是同一件事 —— 那个是能挑什么，这个是**现在是什么**。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    shifts = _shift_ids(db)
+    scheduler = _scheduler(db)
+
+    majority = _employee_id(accounts, "13800138091", "白班多")
+    tied = _employee_id(accounts, "13800138092", "一样多")
+    unscheduled = _employee_id(accounts, "13800138093", "这个月没排班")
+    # 多数：白班 3 天、夜班 1 天 → 白班。
+    _run(
+        scheduler.set_overrides_batch(
+            "shift",
+            shift_id=shifts["白班"],
+            items=[
+                {"employee_id": majority, "business_date": day}
+                for day in ("2026-09-01", "2026-09-02", "2026-09-03")
+            ],
+        )
+    )
+    _run(scheduler.set_override(majority, "2026-09-04", shift_id=shifts["夜班"]))
+    # 并列：把**夜班**的显示顺序挪到白班前面（默认表里白班 10、夜班 20）—— 这时
+    # 「取 `sort_order` 靠前的」与「取班次号小的」给出两个不同答案（夜班号更大）。
+    _run(scheduler.update_shift(shifts["夜班"], sort_order=5))
+    _run(scheduler.set_override(tied, "2026-09-01", shift_id=shifts["白班"]))
+    _run(scheduler.set_override(tied, "2026-09-02", shift_id=shifts["夜班"]))
+
+    sheet = _sheet(client, admin)
+
+    assert _manual(_card(sheet, majority))["shift_name"] == "白班"
+    assert _manual(_card(sheet, tied))["shift_name"] == "夜班"
+    # 单独再给一份**没填过时的默认**（页面上放进输入框的提示语）：不能靠 `shift_name`
+    # 自己反推「这是默认还是他定的」，否则店长分不出这两件事。
+    assert _card(sheet, majority)["default_shift_name"] == "白班"
+    assert _card(sheet, tied)["default_shift_name"] == "夜班"
+    # 当月一条排班行都没有的人：留空（`None`），不是报错、也不是编一个默认班次。
+    assert _manual(_card(sheet, unscheduled))["shift_name"] is None
+    assert _card(sheet, unscheduled)["default_shift_name"] is None
+
+
+# ── 票 05 验收 1/3/5：填与改 —— 一次点名一项、只动自己那一列 ─────────────────
+#
+# 台账那一行是票 04（封账写 `closing_balance` / `sealed_at`）与票 05（手填那四列）
+# **共用**的一行：两边的 upsert 都只更新自己点名的列，谁都不整行覆盖谁。
+
+
+def _ledger_values(db, employee_id, month, columns):
+    """直接读台账那一行上几列的原值（判据用：接口返回之外还要看**没被覆盖**）。"""
+    sql = (
+        f"SELECT {', '.join(columns)} FROM attendance_ledger"
+        ' WHERE employee_id = ? AND "month" = ?'
+    )
+    cur = _run(db._conn.execute(sql, (int(employee_id), month)))
+    row = _run(cur.fetchone())
+    assert row is not None, f"台账里没有 {employee_id} / {month} 那一行"
+    return dict(row)
+
+
+def test_each_manual_column_is_written_on_its_own_without_clearing_the_others(attendance_http):
+    """一次点名一项：写了谁就是谁，别的那几列原样留着（**不清空、不整行覆盖**）。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138094", "一项一项填")
+
+    # 1) 先填班次与住宿。
+    first = _put_manual(
+        client, admin, employee_id, {"shift_name": "早班", "lodging": "是"}
+    )
+    assert first.status_code == 200, first.text
+    assert first.json() == {
+        "employee_id": employee_id,
+        "month": MONTH,
+        "shift_name": "早班",
+        "lodging": "是",
+        "borrowed_store": None,
+        "resigned": None,
+        # 这一次是**手填**，回执里没有「默认」这一份（它不是台账上的值）。
+        "default_shift_name": None,
+    }
+    # 刚写下的那一行，卡片上立刻是这两个值；没填过的两项还是空。
+    assert _manual(_card(_sheet(client, admin), employee_id)) == {
+        "shift_name": "早班",
+        "lodging": "是",
+        "borrowed_store": None,
+        "resigned": None,
+    }
+
+    # 2) 再只填借调门店：上面那两项**不动**（只更新点名的那一列）。
+    second = _put_manual(client, admin, employee_id, {"borrowed_store": "调东莞"})
+    assert second.status_code == 200, second.text
+    assert second.json() == {
+        "employee_id": employee_id,
+        "month": MONTH,
+        "shift_name": "早班",
+        "lodging": "是",
+        "borrowed_store": "调东莞",
+        "resigned": None,
+        "default_shift_name": None,
+    }
+
+    # 3) 最后只点离职：前三项一个都不动。
+    third = _put_manual(client, admin, employee_id, {"resigned": "是"})
+    assert third.status_code == 200, third.text
+    assert third.json() == {
+        "employee_id": employee_id,
+        "month": MONTH,
+        "shift_name": "早班",
+        "lodging": "是",
+        "borrowed_store": "调东莞",
+        "resigned": "是",
+        "default_shift_name": None,
+    }
+    # 刷新之后还在（验收 1 的后半句）—— 而且是同一行，不是每写一次多一行。
+    assert _manual(_card(_sheet(client, admin), employee_id)) == {
+        "shift_name": "早班",
+        "lodging": "是",
+        "borrowed_store": "调东莞",
+        "resigned": "是",
+    }
+    assert _ledger_values(db, employee_id, MONTH, ["shift_name", "lodging"]) == {
+        "shift_name": "早班",
+        "lodging": "是",
+    }
+
+
+def test_writing_a_manual_column_never_touches_the_sealed_columns(attendance_http):
+    """同一行上封账那两列（票 04 写的）不被手填列冲掉；写之前是空的两列也不被顺手写上。
+
+    台账那一行是**两个写入口共用**的一行：这一次只点名了 `lodging`，`closing_balance`
+    与 `sealed_at` 连语句里都不该出现（整行覆盖就是在这里把票 04 的账抹掉的）。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    sealed = _employee_id(accounts, "13800138095", "已经封过账的")
+    fresh = _employee_id(accounts, "13800138096", "还没封账的")
+    _put_ledger_row(
+        db, sealed, MONTH, opening_balance=2.5, closing_balance=8.0, sealed_at="2026-10-01T10:00:00+08:00"
+    )
+
+    assert _put_manual(client, admin, sealed, {"lodging": "否"}).status_code == 200
+    assert _put_manual(client, admin, fresh, {"borrowed_store": "同和"}).status_code == 200
+
+    # 封账那一行原样：期初 / 结余 / 封账时刻一个都没动，只多了这次点名的那一列。
+    assert _ledger_values(
+        db,
+        sealed,
+        MONTH,
+        ["opening_balance", "closing_balance", "sealed_at", "lodging"],
+    ) == {
+        "opening_balance": 2.5,
+        "closing_balance": 8.0,
+        "sealed_at": "2026-10-01T10:00:00+08:00",
+        "lodging": "否",
+    }
+    # 这一次是**新建**那一行：只该写员工 / 月份 / 点名的列 + 两个时刻，不该顺手把
+    # 结余写成 0（「还没算过」与「结余是 0」是两件事）。
+    assert _ledger_values(
+        db, fresh, MONTH, ["opening_balance", "closing_balance", "sealed_at"]
+    ) == {"opening_balance": None, "closing_balance": None, "sealed_at": None}
+    # 同一员工同一月仍然只有一行（写三次也是 upsert，不是追加）。
+    cur = _run(
+        db._conn.execute(
+            'SELECT COUNT(*) AS n FROM attendance_ledger WHERE employee_id = ? AND "month" = ?',
+            (int(fresh), MONTH),
+        )
+    )
+    assert dict(_run(cur.fetchone()))["n"] == 1
+
+
+def test_clearing_a_manual_column_stores_null_and_falls_back_to_the_default(attendance_http):
+    """清空某一项存 NULL（与从没填过同义）：页面上显示为空，「本月班次」退回当月众数。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138097", "清空看看")
+    _run(_scheduler(db).set_override(employee_id, "2026-09-01", shift_id=_shift_ids(db)["夜班"]))
+
+    filled = _put_manual(
+        client,
+        admin,
+        employee_id,
+        {
+            "shift_name": "早班",
+            "lodging": "是",
+            "borrowed_store": "调东莞",
+            "resigned": "是",
+        },
+    )
+    assert filled.status_code == 200, filled.text
+    assert _manual(_card(_sheet(client, admin), employee_id))["shift_name"] == "早班"
+
+    # 四项一起清空（页面上的保存按钮就是这么发的：空着的项发 `null`）。
+    cleared = _put_manual(
+        client,
+        admin,
+        employee_id,
+        {"shift_name": None, "lodging": None, "borrowed_store": None, "resigned": None},
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json() == {
+        "employee_id": employee_id,
+        "month": MONTH,
+        "shift_name": None,  # 存的是 NULL：这一次写进去的没有值
+        "lodging": None,
+        "borrowed_store": None,
+        "resigned": None,
+        "default_shift_name": None,
+    }
+    # 库里真的存的是 NULL（不是空串）：显式 `null` = 清空，与从没填过同义。
+    assert _ledger_values(
+        db, employee_id, MONTH, ["shift_name", "lodging", "borrowed_store", "resigned"]
+    ) == {field: None for field in MANUAL_FIELDS}
+    # 读回来：三项留空，「本月班次」退回**当月众数**（这个人这个月只排了夜班）。
+    assert _manual(_card(_sheet(client, admin), employee_id)) == {
+        "shift_name": "夜班",
+        "lodging": None,
+        "borrowed_store": None,
+        "resigned": None,
+    }
+
+
+def test_the_manual_columns_stay_in_the_ledger_and_never_touch_the_roster(attendance_http):
+    """手填的值只进卡片（与票 08 的导出件），**不写回员工档案**（验收 5）。
+
+    档案里压根没有「是否住宿 / 借调门店 / 是否离职」这几个字段 —— 这条用例盯的是
+    「没有谁顺手在花名册上开一栏、或者拿档案上的字段冒充这几个值」。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138098", "只进台账")
+
+    assert (
+        _put_manual(
+            client,
+            admin,
+            employee_id,
+            {"lodging": "是", "borrowed_store": "调东莞", "resigned": "是", "shift_name": "夜班"},
+        ).status_code
+        == 200
+    )
+
+    roster = _run(accounts.list_roster())
+    mine = [row for row in roster if int(row["id"]) == employee_id][0]
+    for field in MANUAL_FIELDS:
+        assert field not in mine, f"档案里不该有 {field}"
+    # 档案上那几个值一个都没被这次写入改动（离职不是「停用」：是否离职是人事口的手填，
+    # 与档案里的停用状态是两件事）。
+    assert mine["disabled"] in (False, 0)
+    # 卡片上照旧是填进去的那几个值。
+    assert _manual(_card(_sheet(client, admin), employee_id))["borrowed_store"] == "调东莞"
+    assert _ledger_values(db, employee_id, MONTH, ["resigned"]) == {"resigned": "是"}
+
+
+def test_the_manual_columns_door_is_still_the_admin_door(attendance_http):
+    """验收 6：匿名与员工会话都被拒 —— 而且**一个字都没写进去**。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138099", "员工打不开这扇门")
+    staff_session = _run(accounts.login("13800138099", PASSWORD))["session_id"]
+    url = f"/api/attendance/sheet/{employee_id}/manual"
+
+    client.cookies.clear()
+    assert client.put(url, json={"lodging": "是"}).status_code == 401
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    denied = client.put(url, json={"lodging": "是"})
+    assert denied.status_code == 401
+    assert denied.json()["detail"] == "需要登录"
+
+    # 两次都被拒 = 台账那一行压根没被建出来（凭据不对就没写进去）。
+    cur = _run(
+        db._conn.execute(
+            'SELECT COUNT(*) AS n FROM attendance_ledger WHERE employee_id = ? AND "month" = ?',
+            (int(employee_id), MONTH),
+        )
+    )
+    assert dict(_run(cur.fetchone()))["n"] == 0
+    # 管理端那扇门照旧打得开。
+    assert _put_manual(client, admin, employee_id, {"lodging": "是"}).status_code == 200
+
+
+def test_a_blank_string_is_clearing_not_a_stored_empty_value(attendance_http):
+    """空串与清空同义：存 NULL、读回来照旧退回默认 —— 页面上不许出现「一个空串」这种值。
+
+    页面上那四个输入口是文本输入（清空之后 `value` 就是 `''`，不是 `null`），所以服务端
+    必须把空串收敛成「没填」，否则导出的表里会多出一格空字符串。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138101", "清成空串")
+
+    resp = _put_manual(client, admin, employee_id, {"lodging": "", "borrowed_store": "   "})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["lodging"] is None
+    assert resp.json()["borrowed_store"] is None
+    assert _ledger_values(db, employee_id, MONTH, ["lodging", "borrowed_store"]) == {
+        "lodging": None,
+        "borrowed_store": None,
+    }
+
+
+def test_a_request_that_names_no_column_is_refused_with_a_readable_line(attendance_http):
+    """四个字段一个都不给：拒绝（400）并说人话，而不是默默写一行空台账出来。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138102", "什么都没点名")
+
+    refused = _put_manual(client, admin, employee_id, {})
+
+    assert refused.status_code == 400, refused.text
+    assert "没有" in refused.json()["detail"]
+    cur = _run(
+        db._conn.execute(
+            'SELECT COUNT(*) AS n FROM attendance_ledger WHERE employee_id = ? AND "month" = ?',
+            (int(employee_id), MONTH),
+        )
+    )
+    assert dict(_run(cur.fetchone()))["n"] == 0
+
+
+def test_a_missing_ledger_table_is_a_503_on_the_write_too(attendance_http):
+    """台账表没建时手填列照旧是「去做数据库迁移」（503 点名脚本），不是一个 500。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts, "13800138103", "台账还没建")
+
+    async def _rename(source, target):
+        await db._conn.execute(f"ALTER TABLE {source} RENAME TO {target}")
+        await db._conn.commit()
+
+    _run(_rename("attendance_ledger", "attendance_ledger_tmp"))
+    try:
+        resp = _put_manual(client, admin, employee_id, {"lodging": "是"})
+        assert resp.status_code == 503, resp.text
+        assert "0027_attendance_ledger.sql" in resp.json()["detail"]
+    finally:
+        _run(_rename("attendance_ledger_tmp", "attendance_ledger"))
