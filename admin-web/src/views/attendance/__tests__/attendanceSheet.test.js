@@ -1261,3 +1261,269 @@ describe('考勤表页的版式（B 批返工 ③②⑥⑧①）', () => {
     expect(view).toMatch(/\.aIntro\s*\{[^}]*flex:\s*1 1 320px/)
   })
 })
+
+// ── 票 09：期末存假（本月剩余）可人工定稿 ─────────────────────────────────────
+//
+// 期初与期末摆成**一对**（一个块、一颗按钮一起存），但仍然**不并进**「存这四项」那颗
+// —— 那四项是随手会改的手填列，这两条是台账的结余（父级 05 的裁定：手填列与封账的
+// 结余各自一条路）。期末输入框绑的是 `closing_balance_stored`（台账里的**原始**值，
+// 没填过就是空的），公式算出来的那个数只出现在「系统建议」那句话里。
+
+/** 一份带期初 + 期末的当月考勤表（假期那一份照票 03，多给票 09 的三位）。 */
+const SHEET_WITH_CLOSING = {
+  ...SHEET_WITH_LEAVE,
+  employees: [
+    {
+      ...SHEET_WITH_LEAVE.employees[0],
+      opening_balance: 5.5,
+      // 台账里**没填过**期末（`closing_balance_stored` = `null`）—— 输入框必须是空的，
+      // 公式算出来的那个数只出现在「系统建议」那句话里。
+      closing_balance_stored: null,
+      leave: {
+        ...SHEET_WITH_LEAVE.employees[0].leave,
+        balance: -3.5,
+        balance_computed: -27,
+        balance_is_manual: false,
+      },
+    },
+  ],
+}
+
+/** 期末那一格所在的块里，属于**期末**的那条输入口。 */
+function closingInputOf(card) {
+  return card.find('[data-field="closing_balance_stored"]')
+}
+
+/** 一份只认月级 PUT 的「服务端」：GET 出表、PUT 把期初 / 期末写回去（并记下 body）。
+ *  期末写回时有效值 = 填的值（人工优先），没填就回到公式值 —— 与票面的口径一致，
+ *  这样「重拉一次之后卡片立刻变」验的才是真的服务端行为，不是本地状态自己骗自己。 */
+function closingServer(sheet = SHEET_WITH_CLOSING) {
+  const current = JSON.parse(JSON.stringify(sheet))
+  const puts = []
+  const fetchMock = vi.fn(async (url, options = {}) => {
+    const path = String(url).split('?')[0]
+    if (path === '/api/attendance/sheet' && (options.method || 'GET') === 'GET') {
+      return jsonResponse(JSON.parse(JSON.stringify(current)))
+    }
+    const manual = path.match(/^\/api\/attendance\/sheet\/(\d+)\/manual$/)
+    if (manual && options.method === 'PUT') {
+      const body = JSON.parse(options.body || '{}')
+      puts.push({ employeeId: Number(manual[1]), manual: body })
+      const person = current.employees.find((row) => row.id === Number(manual[1]))
+      person.opening_balance = body.opening_balance
+      person.closing_balance_stored = body.closing_balance
+      if (person.leave) {
+        person.leave.balance_is_manual = body.closing_balance !== null
+        person.leave.balance =
+          body.closing_balance === null ? person.leave.balance_computed : body.closing_balance
+      }
+      return jsonResponse({ employee_id: person.id, month: current.month })
+    }
+    return jsonResponse({ detail: 'not found' }, 404)
+  })
+  return { fetchMock, puts }
+}
+
+describe('考勤表页的期末存假（票 09）', () => {
+  it('期初 / 期末摆成一对：两个标签、两个输入口，都在同一个块里', async () => {
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_CLOSING }))
+    const card = wrapper.findAll('.aCard')[0]
+
+    expect(card.find('.aOpeningLabel').text()).toBe('期初存假（上月结转）')
+    expect(card.find('.aClosingLabel').text()).toBe('期末存假（本月剩余）')
+    // 期初那一位的判据一字没改（既有断言就在上面那个 describe 里）：`opening_balance`
+    // 是台账上的值，5.5 照旧在框里。
+    expect(card.find('.aOpeningInput').element.value).toBe('5.5')
+    // 期末这一格绑的是台账里的**原始**值：没填过 = 空框，公式那个数绝不预填。
+    expect(closingInputOf(card).element.value).toBe('')
+    expect(closingInputOf(card).element.value).not.toContain('27')
+    expect(card.find('.aClosingHint').text()).toContain('可为负')
+  })
+
+  it('公式那个数只出现在「系统建议」那句话里（没填过 = 只说系统建议）', async () => {
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_CLOSING }))
+    const card = wrapper.findAll('.aCard')[0]
+
+    expect(card.find('.aClosingNote').text()).toBe('系统建议：−27 天')
+    // 台账九项里那个「存假」念的仍是**有效值**（`leave.balance`）—— 一个字没动。
+    const stats = card.findAll('.aLv')
+    expect(stats.map((stat) => stat.find('i').text())).toEqual(LEAVE_LABELS)
+    expect(stats[8].find('b').text()).toBe('−3.5 天')
+  })
+
+  it('填过期末（人工优先）时，那句话改说清「你填的是 X，系统建议 Y」', async () => {
+    const manual = JSON.parse(JSON.stringify(SHEET_WITH_CLOSING))
+    manual.employees[0].closing_balance_stored = 10
+    manual.employees[0].leave.balance = 10
+    manual.employees[0].leave.balance_is_manual = true
+
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: manual }))
+    const card = wrapper.findAll('.aCard')[0]
+
+    expect(closingInputOf(card).element.value).toBe('10')
+    expect(card.find('.aClosingNote').text()).toBe('你填的是 10 天，系统建议 −27 天')
+    // 九项里的「存假」跟着走**有效值**（人工优先），两处都留是有意的。
+    expect(card.findAll('.aLv')[8].find('b').text()).toBe('10 天')
+  })
+
+  it('只改期末 → 一次 PUT 只带 `closing_balance` → 卡片立刻变（人工优先）', async () => {
+    const server = closingServer()
+    const { wrapper, puts } = await mountSheet(server)
+    const card = wrapper.findAll('.aCard')[0]
+    // 期末先填个 3，让「填过」与「没填过」在框里真的分得开（`closing_balance_stored`）。
+    await closingInputOf(card).setValue('3')
+    await card.find('.aOpeningSave').trigger('click')
+    await flushPromises()
+
+    expect(puts[0]).toEqual({ employeeId: 1, manual: { closing_balance: 3 } })
+
+    await closingInputOf(wrapper.findAll('.aCard')[0]).setValue('7.5')
+    await wrapper.findAll('.aCard')[0].find('.aOpeningSave').trigger('click')
+    await flushPromises()
+
+    // 期初那一格没动过 → 请求里就没有它（写口的纪律：点名谁才写谁）。
+    expect(puts[1]).toEqual({ employeeId: 1, manual: { closing_balance: 7.5 } })
+    const after = wrapper.findAll('.aCard')[0]
+    expect(closingInputOf(after).element.value).toBe('7.5')
+    expect(after.find('.aClosingNote').text()).toBe('你填的是 7.5 天，系统建议 −27 天')
+    // 九项里的「存假」跟着走**有效值**（人工优先），两处都留是有意的。
+    expect(after.findAll('.aLv')[8].find('b').text()).toBe('7.5 天')
+  })
+
+  it('期初 / 期末都改过 → 一颗按钮一次 PUT 带两位（就是「一起存」）', async () => {
+    const server = closingServer()
+    const { wrapper, puts } = await mountSheet(server)
+    const card = wrapper.findAll('.aCard')[0]
+
+    await card.find('.aOpeningInput').setValue('6')
+    await closingInputOf(card).setValue('-2.5')
+    await card.find('.aOpeningSave').trigger('click')
+    await flushPromises()
+
+    expect(puts).toEqual([
+      { employeeId: 1, manual: { opening_balance: 6, closing_balance: -2.5 } },
+    ])
+    const after = wrapper.findAll('.aCard')[0]
+    expect(after.find('.aOpeningInput').element.value).toBe('6')
+    expect(closingInputOf(after).element.value).toBe('-2.5')
+    // 负数照样走有效值（欠班是欠班，不是脏数据）。
+    expect(after.findAll('.aLv')[8].find('b').text()).toBe('−2.5 天')
+    expect(after.find('.aClosingNote').text()).toBe('你填的是 −2.5 天，系统建议 −27 天')
+  })
+
+  it('清空期末 → 发 `null`（清空回公式值），框里那个数跟着回到系统建议', async () => {
+    const seeded = JSON.parse(JSON.stringify(SHEET_WITH_CLOSING))
+    seeded.employees[0].closing_balance_stored = 3
+    seeded.employees[0].leave.balance = 3
+    seeded.employees[0].leave.balance_is_manual = true
+
+    const server = closingServer(seeded)
+    const { wrapper, puts } = await mountSheet(server)
+    const card = wrapper.findAll('.aCard')[0]
+    expect(closingInputOf(card).element.value).toBe('3')
+
+    await closingInputOf(card).setValue('')
+    await card.find('.aOpeningSave').trigger('click')
+    await flushPromises()
+
+    expect(puts).toEqual([{ employeeId: 1, manual: { closing_balance: null } }])
+    const after = wrapper.findAll('.aCard')[0]
+    expect(closingInputOf(after).element.value).toBe('')
+    // 清空之后有效值回到公式值 —— 那句话也说回「只有系统建议」。
+    expect(after.find('.aClosingNote').text()).toBe('系统建议：−27 天')
+    expect(after.findAll('.aLv')[8].find('b').text()).toBe('−27 天')
+  })
+
+  it('填了不是数字的东西就不发请求，理由写在那一块上', async () => {
+    const server = closingServer()
+    const { wrapper, puts } = await mountSheet(server)
+    const card = wrapper.findAll('.aCard')[0]
+
+    await closingInputOf(card).setValue('七点五')
+    await card.find('.aOpeningSave').trigger('click')
+    await flushPromises()
+
+    expect(puts).toEqual([])
+    expect(wrapper.findAll('.aCard')[0].find('.aOpeningErr').text()).toContain('数字')
+  })
+
+  it('这个月已经封账 → 两个框都禁用，并在块里写清原因', async () => {
+    const sealed = {
+      ...SHEET_WITH_CLOSING,
+      sealed_at: '2026-10-01T09:00:00+08:00',
+      previous_month: { month: '2026-08', sealed_at: SEALED_AT },
+    }
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: sealed }))
+    const card = wrapper.findAll('.aCard')[0]
+
+    expect(closingInputOf(card).element.disabled).toBe(true)
+    expect(card.find('.aOpeningInput').element.disabled).toBe(true)
+    expect(card.find('.aOpeningSave').element.disabled).toBe(true)
+    expect(card.find('.aClosingSealed').text()).toContain('这个月已经封账')
+    expect(card.find('.aClosingSealed').text()).toContain('结余定稿')
+  })
+
+  it('当月那一行自己带封账时刻（`employees[].sealed_at`）也锁定', async () => {
+    const sealed = { ...SHEET_WITH_CLOSING }
+    sealed.employees = [{ ...sealed.employees[0], sealed_at: SEALED_AT }]
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: sealed }))
+    const card = wrapper.findAll('.aCard')[0]
+
+    expect(closingInputOf(card).element.disabled).toBe(true)
+    expect(card.find('.aOpeningInput').element.disabled).toBe(true)
+    expect(card.find('.aClosingSealed').text()).toContain('这个月已经封账')
+  })
+
+  // **反向钉住一条很容易踩的错**：真载荷里现在只有 `previous_month.sealed_at`（**上月**的
+  // 封账时刻），没有任何「**当月**是否已封账」的位。绝不能拿它当本月的锁定判据 ——
+  // 上月封账说的是「本月的期初定了」，本月的期末照样要能填；拿它当判据，门店**第一次封账
+  // 之后期末就永远填不了**。真正的锁在服务端那条月级写口上（封账后写 `closing_balance` → 409）。
+  it('只给了 `previous_month.sealed_at` 时**不**锁定（上月封账 ≠ 本月定稿）', async () => {
+    const fallback = {
+      ...SHEET_WITH_CLOSING,
+      previous_month: { month: '2026-08', sealed_at: SEALED_AT },
+    }
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: fallback }))
+    const card = wrapper.findAll('.aCard')[0]
+
+    expect(closingInputOf(card).element.disabled).toBe(false)
+    expect(card.find('.aOpeningInput').element.disabled).toBe(false)
+    expect(card.find('.aClosingSealed').exists()).toBe(false)
+  })
+
+  it('还没封过账时两个框都能写（默认那一态，既有行为不破）', async () => {
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_CLOSING }))
+    const card = wrapper.findAll('.aCard')[0]
+
+    expect(closingInputOf(card).element.disabled).toBe(false)
+    expect(card.find('.aOpeningInput').element.disabled).toBe(false)
+    expect(card.find('.aOpeningSave').element.disabled).toBe(false)
+    expect(card.find('.aClosingSealed').exists()).toBe(false)
+  })
+
+  it('既有的「存这四项」不并进这两条结余（三期权的分界照旧）', async () => {
+    const { wrapper, puts } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_CLOSING }))
+    const card = wrapper.findAll('.aCard')[0]
+
+    await card.find('.aManual .aSave').trigger('click')
+    await flushPromises()
+
+    expect(puts).toHaveLength(1)
+    expect(Object.keys(puts[0].manual).sort()).toEqual([
+      'borrowed_store',
+      'lodging',
+      'resigned',
+      'shift_name',
+    ])
+  })
+
+  it('老载荷没给期末那两位时留空、也不编一句系统建议出来', async () => {
+    const { wrapper } = await mountSheet() // 票 01 那份 SHEET：没有 closing_balance_stored
+    const card = wrapper.findAll('.aCard')[0]
+
+    expect(closingInputOf(card).element.value).toBe('')
+    // 服务端没给 `balance_computed` 时那句话压根不出现（老载荷照旧，不编数字）。
+    expect(card.find('.aClosingNote').exists()).toBe(false)
+    expect(card.find('.aClosingSealed').exists()).toBe(false)
+  })
+})

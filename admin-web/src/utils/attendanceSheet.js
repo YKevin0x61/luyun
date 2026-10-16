@@ -134,6 +134,48 @@ export function sealedAtText(value) {
   return match ? `${match[1]} ${match[2]}` : text
 }
 
+/** 期末存假（本月剩余，票 09）那一格旁边那句话：「系统建议」是**公式算出来的那个数**
+ *  （`leave.balance_computed`），输入框绑的是台账里的原始值（`closing_balance_stored`）
+ *  —— 两个不一致时，店长要一眼看得出当前这个数是他填的还是系统算的。
+ *
+ *  填过（`balance_is_manual`）时把「你填的」（有效值）与建议并排说清；老载荷没给这几位
+ *  时给空串，不编一个数字出来。 */
+export function closeSuggestionText(leave) {
+  if (!leave) return ''
+  const computed = leave.balance_computed
+  if (computed === null || computed === undefined) return ''
+  const suggestion = `系统建议：${formatDays(computed)}`
+  if (!leave.balance_is_manual) return suggestion
+  // 拼在一起时把冒号去掉，否则会念成「…，系统建议：−27 天」（逗号与冒号撞在一起）。
+  const told = `系统建议 ${formatDays(computed)}`
+  return `你填的是 ${formatDays(leave.balance)}，${told}`
+}
+
+/** 「这个月（卡片上这一份表）是不是已经封账」。封账之后**期末那一格**锁定：两个输入框
+ *  都禁用，并写清「这个月已经封账，结余定稿」（票 09 验收）。
+ *
+ *  判据是「**当月这一行**（或顶层）的 `sealed_at`」—— 后端把这一位放在哪一层都接得住。
+ *
+ *  **拿不到这一位就不锁定**（现在的真载荷就是这种：`sheet()` 只给 `previous_month.sealed_at`）。
+ *  绝**不能**退回用 `previous_month.sealed_at` 当判据：那是**上月**的封账时刻，它定稿的是
+ *  上月的结余（变成本月的期初），与本月期末是否定稿无关 —— 拿它当判据，门店**第一次封账
+ *  之后期末就永远填不了了**（这一页只显示当月，而封账只封已经过完的月；当月那一行不可能
+ *  有 `sealed_at`）。真正的锁在服务端那条月级写口上：封账后再写 `closing_balance` → 409。
+ *
+ *  所以这一位现在只是**防御性**的：哪天这一页开始显示历史月（或服务端补上当月封账位），
+ *  它才会真的生效。 */
+export function isMonthSealed(sheet) {
+  if (!sheet) return false
+  if (sheet.sealed_at) return true
+  const rows = Array.isArray(sheet.employees) ? sheet.employees : []
+  // **只认「当月这一行（或顶层）的封账时刻」**。`previous_month.sealed_at` 说的是**上月**
+  // 已经定稿 —— 它变成本月的期初，与**本月**的期末是不是定稿没有关系；拿它当判据的话，
+  // 门店**第一次封账之后期末就永远填不了了**（这一页只显示当月，而封账只封已经过完的月）。
+  // 所以拿不到这一位就**不锁定** —— 真正的锁在服务端那条月级写口上
+  // （封账后再写 `closing_balance` → 409 `month_sealed`）。
+  return rows.some((row) => row && row.sealed_at)
+}
+
 /** 上月封账那一句（票 04）：「2026-08 已封账（2026-09-24 10:00）」。
  *
  *  入参是服务端下发的 `previous_month`（`{month, sealed_at}`）。还没封账 / 老载荷没有

@@ -8,9 +8,11 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  closeSuggestionText,
   dayStateText,
   formatDays,
   formatNetHours,
+  isMonthSealed,
   leaveFormulaText,
   manualStats,
   manualText,
@@ -188,5 +190,67 @@ describe('日格文案与导出件的常量钉在一起（收尾修复 ⑥）', 
     expect(constant('DAY_TEXT')).toBe(dayStateText('rest'))
     expect(constant('HALF_REST_TEXT')).toBe(halfRest)
     expect(constant('TODO_TEXT')).toBe(dayStateText('todo'))
+  })
+})
+
+// ── 票 09：期末存假（本月剩余）可人工定稿 ─────────────────────────────────────
+//
+// 期末这一格有三位在说话，页面必须让人一眼分得开：台账里**填过没有**
+// （`closing_balance_stored`，输入框绑的就是它）、**有效值**（`leave.balance` = 人工优先，
+// 台账九项里那个「存假」念的还是它）、以及**公式算出来的那个数**
+// （`leave.balance_computed`）—— 后者只出现在「系统建议」那句话里，绝不预填进输入框。
+
+describe('期末存假的「系统建议」（票 09）', () => {
+  it('没填过时只报系统建议那个数（公式值不预填进输入框）', () => {
+    expect(closeSuggestionText({ balance_computed: -27, balance_is_manual: false })).toBe(
+      '系统建议：−27 天',
+    )
+    // 负数照 `formatDays` 写全角减号（欠班，不是脏数据）；带 .5 也如实。
+    expect(closeSuggestionText({ balance_computed: -3.5, balance_is_manual: false })).toBe(
+      '系统建议：−3.5 天',
+    )
+    expect(closeSuggestionText({ balance_computed: 2, balance_is_manual: false })).toBe(
+      '系统建议：2 天',
+    )
+  })
+
+  it('填过时把「你填的」与「系统建议」并排说清（两个不一致时看得见）', () => {
+    expect(
+      closeSuggestionText({
+        balance: 10,
+        balance_is_manual: true,
+        balance_computed: -27,
+      }),
+    ).toBe('你填的是 10 天，系统建议 −27 天')
+  })
+
+  it('服务端没给这几位（老载荷）时是空串 —— 不编一个数字出来', () => {
+    expect(closeSuggestionText(null)).toBe('')
+    expect(closeSuggestionText(undefined)).toBe('')
+    expect(closeSuggestionText({})).toBe('')
+  })
+})
+
+describe('封账后那一格锁定（票 09）', () => {
+  it('当月给封账时刻（顶层 `sealed_at`）就锁定', () => {
+    expect(isMonthSealed({ sealed_at: '2026-10-01T09:00:00+08:00' })).toBe(true)
+  })
+
+  it('当月那一行自己带 `sealed_at` 也算锁定', () => {
+    expect(
+      isMonthSealed({ employees: [{ id: 1, sealed_at: '2026-10-01T09:00:00+08:00' }] }),
+    ).toBe(true)
+  })
+
+  it('没封过账时按「还没封」画', () => {
+    expect(isMonthSealed({ month: '2026-09', sealed_at: null })).toBe(false)
+    expect(isMonthSealed({ previous_month: { month: '2026-08', sealed_at: null } })).toBe(false)
+    // **上月封过账也不算本月锁定**：那是本月的期初定了，本月的期末还是可以填的。
+    // 拿 `previous_month.sealed_at` 当判据，门店第一次封账之后期末就再也填不了。
+    expect(
+      isMonthSealed({ previous_month: { month: '2026-08', sealed_at: '2026-09-24T10:00:00+08:00' } }),
+    ).toBe(false)
+    expect(isMonthSealed(null)).toBe(false)
+    expect(isMonthSealed(undefined)).toBe(false)
   })
 })

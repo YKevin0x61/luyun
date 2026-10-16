@@ -44,6 +44,13 @@
  * 的日格）；日格上那三种写法由 `utils/__tests__` 里一条断言与服务端
  * `services/attendance/export.py` 的常量钉在一起（不许前后端各说各话）。
  *
+ * 票 09 把那一条**补成一对**：期初旁边多了「期末存假（本月剩余）」—— 当月未封账前随时
+ * 可填可改、填了就以它为准（封账把它连同 `sealed_at` 一起写进台账定稿，导出件的「存休
+ * 天数」也跟着走）；没填过就照旧用公式算出来的那个数，那个数只出现在「系统建议」那句话
+ * 里（两个不一致时一眼看得见）。封账之后这一格锁定：两个输入框都禁用并写清为什么。
+ * 台账九项里的「上月存假 / 存假」**两处都留**（用户与父级已确认接受这处重复显示），
+ * 九项那个「存假」念的仍是**有效值**（人工优先）。
+ *
  * 这一页只算当月：没有月份选择器。
  */
 import { computed, onMounted, ref } from 'vue'
@@ -52,9 +59,11 @@ import { useRouter } from 'vue-router'
 import { api } from '../../api/client'
 import {
   HALF_REST_TEXT,
+  closeSuggestionText,
   dayStateText,
   formatDays,
   formatNetHours,
+  isMonthSealed,
   leaveFormulaText,
   manualStats,
   manualText,
@@ -334,14 +343,25 @@ function manualErrorOn(employeeId) {
     : ''
 }
 
-/** 人工期初（收尾修复 ② / 故事 35）：那一格的输入口与它自己那一次写。
+/** 人工期初（收尾修复 ② / 故事 35）与人工期末（票 09）那一格的输入口与它自己那一次写。
  *
- *  为什么它**不并进**上面那「存这四项」：那四列是每张卡随时会改的日常项，而期初是
- *  上线当月手工给**一次**的账（再往后以封账结转）。分开一颗按钮，误点「存这四项」
- *  不会把这一格顺手清掉 —— 写口那边的纪律是「点名谁才写谁」，空着就一个字节都不碰。
+ *  为什么它**不并进**上面那「存这四项」：那四列是每张卡随时会改的日常项，而期初 / 期末
+ *  是台账上的**结余**（上线当月手工给一次、当月随时可定稿），分开一颗按钮，误点
+ *  「存这四项」不会把这两格顺手清掉 —— 写口那边的纪律是「点名谁才写谁」，空着就一个
+ *  字节都不碰。
+ *
+ *  两条结余**一起存**（一颗按钮），但**只发真被改过的那几位** —— 与「存这四项」同一条
+ *  纪律（写口那边「点名谁才写谁」）：期初那一格没动过时，请求里就没有 `opening_balance`，
+ *  既有那两条断言（「只带这一位」）因此一字不用改；期末那一格没动过时同理不发
+ *  `closing_balance` —— 免得一次只改期初的保存把台账里的期末顺手覆盖成空。
  */
 const savingOpening = ref(0)
 const openingError = ref(null) // { employee_id, text } | null
+
+/** 这个月（卡片上这一份表）是不是已经封账：封过账之后**期末这一格**锁定 ——
+ *  两个输入框都不给写，并在块里写清为什么（票 09 验收）。判据在 util 里（那一位从哪一层
+ *  下发都接得住，另有降级说明）。 */
+const sealedNow = computed(() => isMonthSealed(sheet.value))
 
 /** 输入框里现在是什么：服务端那一份；`null`（没给过）留空，不是 `undefined`。 */
 function openingValue(person) {
@@ -349,38 +369,69 @@ function openingValue(person) {
   return value === null || value === undefined ? '' : String(value)
 }
 
-/** 存期初存假：**只发这一格**（`{ opening_balance }`），空着发 `null` = 清空。
+/** 期末那一格读的是**台账里的原始值**（`closing_balance_stored`）：没填过 / 清空 = 空框。
+ *  **不能读 `leave.balance`**：那是有效值（人工优先），没填过时它等于公式值 —— 预填进
+ *  输入框就等于替店长认了账，他改一下「是否住宿」点个按钮就把公式值固化成手工值了。
+ *  公式算出来的那个数只出现在「系统建议」那句话里（`closeSuggestionText`）。 */
+function closingValue(person) {
+  const value = person.closing_balance_stored
+  return value === null || value === undefined ? '' : String(value)
+}
+
+/** 期末旁边那句话：没填过只说系统建议，填过就说清「你填的是 X，系统建议 Y」。 */
+function closingNote(person) {
+  return closeSuggestionText(person.leave)
+}
+
+/** 存期初 / 期末（票 09）：一颗按钮，**只发真被改过的那几位**
+ *  （`{ opening_balance }` / `{ closing_balance }` / 两条都改了就两位一起），
+ *  空着发 `null`（期末清空 = 回公式值）。
  *
- *  填了不是数字的东西**不发请求**：服务端那一位是数字，而 `Number('七点五')` 是 `NaN`，
+ *  为什么不用「两位全发、没动过的回填原值」：那看起来更省事，却把「今天点了一下按钮」
+ *  变成一次对另一位结余的**重写**（并发的另一张卡刚好改过它时会被盖回去）。只发改过的
+ *  那几位，语义与「存这四项」逐字一致：点名谁才写谁。
+ *
+ *  填了不是数字的东西**不发请求**：服务端那两位是数字，而 `Number('七点五')` 是 `NaN`，
  *  转成 JSON 会变成 `null` —— 那会把这一格悄悄清掉。前端先说人话（同「存这四项」：
  *  失败时不动页面上已经渲染的那一份）。
  */
 async function saveOpening(person, event) {
   if (savingOpening.value) return
   const form = event.target.closest('.aOpening')
-  const input = form && form.querySelector('[data-field="opening_balance"]')
-  const raw = input ? input.value.trim() : ''
-  let value = null
-  if (raw !== '') {
-    value = Number(raw)
-    if (!Number.isFinite(value)) {
+  const read = (field) => {
+    const input = form && form.querySelector(`[data-field="${field}"]`)
+    return input ? input.value.trim() : ''
+  }
+  // 两条结余现在读出来的是什么（与页面上渲的那一份比「有没有被改过」）。
+  const fields = [
+    { key: 'opening_balance', read: read('opening_balance'), value: openingValue(person) },
+    { key: 'closing_balance', read: read('closing_balance_stored'), value: closingValue(person) },
+  ]
+  for (const field of fields) {
+    if (field.read === '' || field.read === field.value) continue
+    if (!Number.isFinite(Number(field.read))) {
       openingError.value = {
         employee_id: person.id,
-        text: '期初存假要写一个数字（可以是负的、也可以带 .5）；要清空就把那一格留空',
+        text: '期初 / 期末存假都要写数字（可以是负的、也可以带 .5）；要清空就把那一格留空',
       }
       return
     }
   }
+  const body = {}
+  for (const field of fields) {
+    if (field.read === field.value) continue
+    body[field.key] = field.read === '' ? null : Number(field.read)
+  }
   openingError.value = null
   savingOpening.value = person.id
   try {
-    await api.put(`/api/attendance/sheet/${person.id}/manual`, { opening_balance: value })
+    await api.put(`/api/attendance/sheet/${person.id}/manual`, body)
     // 与手填那四列同一条路：自己重拉一次（nudge 不带数据，这一页也不等它）。
     sheet.value = await api.get('/api/attendance/sheet')
   } catch (err) {
     openingError.value = {
       employee_id: person.id,
-      text: err.message || '期初存假没存进去',
+      text: err.message || '期初 / 期末存假没存进去',
     }
   } finally {
     savingOpening.value = 0
@@ -702,17 +753,41 @@ onMounted(() => {
                 data-field="opening_balance"
                 :aria-label="`${person.name || ''} 的期初存假`"
                 :value="openingValue(person)"
+                :disabled="sealedNow"
               />
               <small class="aOpeningHint">只在上线当月手工给一次；可为负、可带 .5</small>
+            </label>
+            <!-- 期末存假（本月剩余，票 09）：当月**随时可填可改**，填了就以它为准
+                 （封账把它连同 `sealed_at` 写进台账定稿，导出件的「存休天数」也跟着走）；
+                 没填过就照旧用公式算出来的那个数 —— 那一位只出现在下面那句「系统建议」里，
+                 绝不预填进输入框（预填等于替店长认账）。 -->
+            <label class="aClosingField">
+              <span class="aClosingLabel">期末存假（本月剩余）</span>
+              <input
+                class="aClosingInput"
+                type="text"
+                inputmode="decimal"
+                data-field="closing_balance_stored"
+                :aria-label="`${person.name || ''} 的期末存假`"
+                :value="closingValue(person)"
+                :disabled="sealedNow"
+              />
+              <small class="aClosingHint">不填就用系统建议；可为负、可带 .5</small>
+              <small v-if="closingNote(person)" class="aClosingNote">{{ closingNote(person) }}</small>
             </label>
             <button
               class="btn btn-sm aOpeningSave"
               type="button"
-              :disabled="savingOpening === person.id"
+              :disabled="savingOpening === person.id || sealedNow"
               @click="saveOpening(person, $event)"
             >
-              存期初存假
+              存期初 / 期末
             </button>
+            <!-- 封账之后这一格锁定（票 09）：两个框都禁用，原因写在块里 ——
+                 光把按钮变灰，店长看不出来是「这次没写上」还是「这个月已经定稿」。 -->
+            <small v-if="sealedNow" class="aClosingSealed" role="status">
+              这个月已经封账，结余定稿 —— 期初 / 期末都不再改。
+            </small>
             <small v-if="openingErrorOn(person.id)" class="aOpeningErr" role="alert">
               {{ openingErrorOn(person.id) }}
             </small>
@@ -923,18 +998,37 @@ onMounted(() => {
 .aManualErr { font-size: var(--fs-11); color: var(--danger-bright); }
 /* 「借调门店」那处与历史表的偏差（收尾修复 ⑥）现在挂在输入框的 `title` 上（见
    `BORROWED_STORE_NOTE`）—— 悬停可见，不占三行可视小字把这一排输入口拽散。 */
-/* 人工期初（收尾修复 ②）：上线当月手工给一次的那一位，自己一颗按钮（见 `saveOpening`）。 */
+/* 人工期初（收尾修复 ②）与人工期末（票 09）：台账上的两条结余摆成**一对**、一颗按钮
+   一起存（见 `saveOpening`）—— 期初是上线当月手工给一次的那一位，期末是当月随时能定稿的
+   那一位。两条的版式一样（标签 / 输入口 / 提示语 / 建议那一句）。
+   **一格成一整块**（`flex: 1 1 118px` + `min-width: 0`）：窄屏上不许在标签与它的输入框
+   之间断行 —— 那会把「期末存假（本月剩余）」与下面那个空框拆到两行去（390px 上`flex: none`
+   实测：按钮挤在两条中间，读起来像是第三项）。
+   对齐用 `flex-start`（**不是** `flex-end`）：期末那一格多一句「系统建议」之后它就比期初
+   高了，`flex-end` 会把期初的两行整体往下推、两个输入框不再齐平。 */
 .aOpening {
-  display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--sp-2);
+  display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--sp-2);
   margin-top: var(--sp-2);
 }
-.aOpeningField { display: flex; flex-direction: column; gap: 2px; }
-.aOpeningLabel { font-size: var(--fs-11); color: var(--ink-faint); }
-.aOpeningInput {
-  width: 110px; padding: 4px var(--sp-2); border: 1px solid var(--line);
+.aOpeningField,
+.aClosingField { display: flex; flex-direction: column; gap: 2px; flex: 1 1 118px; min-width: 0; }
+.aOpeningLabel,
+.aClosingLabel { font-size: var(--fs-11); color: var(--ink-faint); }
+.aOpeningInput,
+.aClosingInput {
+  width: 110px; max-width: 100%; padding: 4px var(--sp-2); border: 1px solid var(--line);
   border-radius: var(--r-1); background: var(--surface-2); color: var(--ink);
   font-size: var(--fs-12); font-family: inherit;
 }
+/* 封账之后这一格锁定（票 09）：两个框都禁用 —— 只在视觉上弱化（`.btn:disabled` 那套
+   是全站既有的写法），真正的闸在服务端（409 `month_sealed`）。 */
+.aOpeningInput:disabled,
+.aClosingInput:disabled { opacity: .5; cursor: not-allowed; }
 .aOpeningHint { margin: var(--sp-2) 0 0; font-size: var(--fs-11); color: var(--ink-faint); }
+.aClosingHint { margin: var(--sp-2) 0 0; font-size: var(--fs-11); color: var(--ink-faint); }
+/* 「系统建议」那一句（票 09）：公式算出来的那个数只在这里出现 —— 与输入框里那个
+   **人工值**用颜色分开（`--accent`：这是一句提示，不是可以照抄进框里的现值）。 */
+.aClosingNote { margin: 2px 0 0; font-size: var(--fs-11); color: var(--accent); }
+.aClosingSealed { font-size: var(--fs-11); color: var(--warn); }
 .aOpeningErr { font-size: var(--fs-11); color: var(--danger-bright); }
 </style>
