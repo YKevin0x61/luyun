@@ -77,7 +77,7 @@ const sheet = ref(null)
 const editing = ref(null)
 const savingDate = ref('')
 /** 那一格上要显示的话（服务端拒绝的理由）。 */
-const dayError = ref(null) // { business_date, text } | null
+const dayError = ref(null) // { employeeId, business_date, text } | null
 
 /** 封账（票 04）：正等着服务端回执 / 服务端拒绝的理由。 */
 const sealing = ref(false)
@@ -178,9 +178,12 @@ function editingCells(person) {
   return (person.cells || []).filter((cell) => isEditing(person, cell))
 }
 
-function errorOn(businessDate) {
-  return dayError.value && dayError.value.business_date === businessDate
-    ? dayError.value.text
+function errorOn(person, cell) {
+  // **按「这个人 + 这一天」认**（与编辑态同一个口径）：只按日期认的话，某个人某天被拒的
+  // 红边会落到**别人同一天**那一格上 —— 编辑带只属于被点的那个人，红边也只该落在他的格子上。
+  const err = dayError.value
+  return err && err.employeeId === person.id && err.business_date === cell.business_date
+    ? err.text
     : ''
 }
 
@@ -205,7 +208,11 @@ async function pick(person, cell, value) {
   } catch (err) {
     // 被拒时**带子留着**：理由就写在带子里（票 06 的「不装作改成功」），那一格给红边；
     // 页面上已经渲染的那一份一个字都不动 —— 显示一个没落库的班次比报错更糟。
-    dayError.value = { business_date: cell.business_date, text: err.message || '这天没改成' }
+    dayError.value = {
+      employeeId: person.id,
+      business_date: cell.business_date,
+      text: err.message || '这天没改成',
+    }
   } finally {
     savingDate.value = ''
   }
@@ -227,6 +234,7 @@ async function toggleHalf(person, cell) {
     sheet.value = await api.get('/api/attendance/sheet')
   } catch (err) {
     dayError.value = {
+      employeeId: person.id,
       business_date: cell.business_date,
       text: err.message || '这天的「休半天」没改成',
     }
@@ -546,7 +554,7 @@ onMounted(() => {
                 'is-half': cell.state === 'work' && cell.half_rest,
                 'is-editing': isEditing(person, cell),
                 // 服务端拒过的那些天给红边（理由在下面的编辑带里）。
-                'is-error': Boolean(errorOn(cell.business_date)),
+                'is-error': Boolean(errorOn(person, cell)),
               },
             ]"
             :title="cell.business_date"
@@ -630,8 +638,8 @@ onMounted(() => {
               </button>
             </div>
             <!-- 服务端拒绝的理由写在**这条带子**里（不装作改成功了）。 -->
-            <small v-if="errorOn(cell.business_date)" class="aDayErr" role="alert">
-              {{ errorOn(cell.business_date) }}
+            <small v-if="errorOn(person, cell)" class="aDayErr" role="alert">
+              {{ errorOn(person, cell) }}
             </small>
           </div>
         </template>

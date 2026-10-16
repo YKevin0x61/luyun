@@ -482,6 +482,12 @@ describe('考勤表页渲染（票 01 / 票 06）', () => {
     const after = wrapper.findAll('.aCard')[0].findAll('.aDay')
     expect(after[1].classes()).toContain('is-error')
     expect(after[1].find('.aDayText').text()).toBe('休') // 服务端说没写，就不改样子
+    // 红边**只落在他那一格**上：另一张卡**同一天**不许有 `is-error`。
+    // 判据同时把「同一天」钉住（两张卡的标题必须一样），否则这条断言可能比的是两个不同的日子。
+    const other = wrapper.findAll('.aCard')[1]
+    expect(other.find('.aName').text()).toBe('李四')
+    expect(other.findAll('.aDay')[1].attributes('title')).toBe(after[1].attributes('title'))
+    expect(other.findAll('.aDay')[1].classes()).not.toContain('is-error')
   })
 
   // ── B 批返工 ⑥：编辑态**不动网格**（用户截图里的那个错位） ─────────────────
