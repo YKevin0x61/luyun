@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { resolveVar } from './themeTokens.js'
+import { resolveStates, resolveVar, sameValueCollisions } from './themeTokens.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../TodayMonthView.vue'), 'utf8')
@@ -141,9 +141,10 @@ describe('员工端「整月」页（票 06）', () => {
 
   it('半天休那格有自己的颜色与图例，不跟「休」「上班」混（票 07）', () => {
     // 判据在 util 里（`todayShift.test.js` 的四态表）；这一页只管上色与图例。
-    // 颜色走语义令牌（`--warn`）而不是新增 `--hy-*`：设计护栏的存量棘轮只减不增。
-    expect(view).toMatch(/\.mD\.half \.s\s*\{[^}]*var\(--warn\)/)
-    expect(view).toMatch(/\.dot\.half\s*\{[^}]*var\(--warn\)/)
+    // 颜色走语义令牌（`--accent-alt`）而不是新增 `--hy-*`：设计护栏的存量棘轮只减不增。
+    // 为什么是它：C 批返工第二轮，`--warn` 与「已调整」的 `--hy-amber` 同值。
+    expect(view).toMatch(/\.mD\.half \.s\s*\{[^}]*var\(--accent-alt\)/)
+    expect(view).toMatch(/\.dot\.half\s*\{[^}]*var\(--accent-alt\)/)
     expect(view).toMatch(/class="dot half"[^<]*\/>休半天/)
     expect(copy).toContain("if (tone === 'half') return { text: '休半天', tone }")
     // 四态各自的名字都在图例上（少一条员工就猜「这格子什么意思」）。
@@ -152,20 +153,31 @@ describe('员工端「整月」页（票 06）', () => {
     }
   })
 
-  it('「休半天」与「请假」的令牌取值不同（C 批返工）', () => {
-    // 返工前的坑是「两个**不同名字**的令牌取了同一个值」：`--info` 与 `--hy-aqua`
-    // 都是 #5fd6e6，图例上两个色块看着是一回事。所以只断言名字不同是假绿 ——
-    // 这里把两个名字解析回令牌层里的**值**再比，值撞了这条就红。
-    const half = resolveVar(view, /\.mD\.half \.s\s*\{[^}]*var\((--[\w-]+)\)/)
-    const leave = resolveVar(view, /\.mD\.leave \.s\s*\{[^}]*var\((--[\w-]+)\)/)
-    expect(half.name).not.toBe(leave.name)
-    expect(half.value).not.toBe(leave.value)
-    // 图例那两个点必须跟格子同源（图例说一套、格子画一套是最阴的一种漂）。
-    const dotHalf = resolveVar(view, /\.dot\.half\s*\{[^}]*var\((--[\w-]+)\)/)
-    const dotLeave = resolveVar(view, /\.dot\.leave\s*\{[^}]*var\((--[\w-]+)\)/)
-    expect(dotHalf.value).toBe(half.value)
-    expect(dotLeave.value).toBe(leave.value)
-    expect(dotHalf.value).not.toBe(dotLeave.value)
+  it('整月视图那一行里各态的色值两两不同（C 批返工第二轮）', () => {
+    // 返工前的坑是「两个**不同名字**的令牌取了同一个值」：第一轮是 `--info` 撞
+    // 「请假」的 `--hy-aqua`，第二轮是修好后的 `--warn` 撞「已调整」的 `--hy-amber`。
+    // 所以只断「某一对不相等」两轮都会假绿 —— 它修好一对、撞上第三个态，断言看不见。
+    // 这里把 work / rest / half / leave / moved 五个态一起解析回令牌层的**值**，整组两两比。
+    const states = resolveStates(view, [
+      ['work', /\.mD\.shift \.s\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['rest', /\.mD\.rest \.s\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['half', /\.mD\.half \.s\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['leave', /\.mD\.leave \.s\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['moved', /\.mD\.moved \.s\s*\{[^}]*var\((--[\w-]+)\)/],
+    ])
+    expect(sameValueCollisions(states), '两个态指到同值令牌，格子和图例上就会有两块一样的颜色')
+      .toEqual([])
+    // 图例那五个点必须跟各自格子同源（图例说一套、格子画一套是最阴的一种漂；
+    // 同源之后它们自然也两两不同，不必再比一遍）。
+    for (const [state, pattern] of [
+      ['work', /\.dot\.shift\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['rest', /\.dot\.rest\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['half', /\.dot\.half\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['leave', /\.dot\.leave\s*\{[^}]*var\((--[\w-]+)\)/],
+      ['moved', /\.dot\.moved\s*\{[^}]*var\((--[\w-]+)\)/],
+    ]) {
+      expect(resolveVar(view, pattern).value, `.dot.${state} 跟格子里那一态同色`).toBe(states[state].value)
+    }
   })
 
   it('is registered as a staff page on both sides', () => {
