@@ -9,8 +9,11 @@
  * 明细那一半带三把筛子（范围 / 原因 / 关键词）与分页，每行能点开照片。范围默认跟**当前
  * 看的那个月**走，也可以切成近 30 / 60 天或全部 —— 源项目那张独立列表页的常用范围。
  *
- * 只给管理端（页面清单里 `audience: admin`）：全店损耗与「谁记的」不是员工要看的东西；
- * 员工那一面是登记页。接口那一侧 `/statistics` 对员工会话回 403，这里是第二道。
+ * 页面清单里 `audience: admin` + `staffCap: wastage`（2026-10-14 用户裁定）：管理端会话照旧
+ * 直接进；员工会话**勾了「损耗分析」这一项能力**的也进这一页（看全店统计与含「谁记的」的
+ * 明细）。其余员工手输 URL 落 `/workbench/forbidden`；接口那一侧 `/statistics` 对他们的
+ * 员工会话回 403 —— 页面能不能打开与接口能不能读是两件事，两处都判。
+ * 员工自己登记与看自己那几笔仍走登记页（`/workbench/me/loss`）。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'

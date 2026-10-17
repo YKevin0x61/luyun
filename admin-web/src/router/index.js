@@ -1,7 +1,9 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { hasCap } from '../utils/adminCaps'
 import { isLoggedIn } from '../utils/authStatus'
 import { buildLoginNextFromRoute } from '../utils/loginNext'
 import { staffSessionState } from '../utils/hygieneStaff'
+import { staffCapsProbe } from '../utils/staffCaps'
 import { installWorkbenchDocument } from '../utils/workbenchDocument'
 import { pageMeta, pageTitle } from './pageRoutes.js'
 
@@ -155,9 +157,11 @@ const routes = [
   // 不给别名、不做重定向；`?next=` 里的老地址由 `utils/loginNext.js` 换成新地址）。
   workbenchKitchenPage('/workbench/kitchen/prep-plan', 'prep-plan', () => import('../views/PrepPlanView.vue')),
   // 损耗分析（从 worktool2 那个小程序搬过来）：后勤组的第三页 —— 店长按月看损耗的
-  // 总数 / 原因分布 / 高损耗物料 / 逐日趋势，下半页是按条件翻的明细。**只给管理端**
-  // （`audience: admin`）：全店的损耗数据与「谁记的」不是员工要看的东西；员工那一面是
-  // 登记页（`/workbench/me/loss`），接口那一侧同一批端点按归属分。
+  // 总数 / 原因分布 / 高损耗物料 / 逐日趋势，下半页是按条件翻的明细。清单里是
+  // `audience: admin` + `staffCap: wastage`（2026-10-14 用户裁定）：管理端会话直接进，
+  // 员工会话勾了「损耗分析」这一项也能进（看全店统计与含「谁记的」的明细）。
+  // 没勾的员工手输 URL 落 `/workbench/forbidden`；员工自己登记仍走登记页
+  // （`/workbench/me/loss`），接口那一侧同一批端点按归属分、统计另有一道能力门。
   workbenchKitchenPage('/workbench/kitchen/loss', 'wastage-analysis', () => import('../views/wastage/WastageAnalysisView.vue')),
   // 子应用根（票 06）：就是「今天」首页 —— 按身份用已有接口聚合今日摘要，只做分流与
   // 摘要、不做业务动作。它套**工作台外壳**（`WorkbenchLayout`：顶栏一条 + 按身份过滤的
@@ -267,6 +271,20 @@ router.beforeEach(async (to) => {
   }
 
   if (await isLoggedIn()) return true
+
+  // **员工会话 + 那项能力**也能进店长专属页（2026-10-14 用户裁定，清单里的 `staffCap`）：
+  // 排班三页与损耗分析归这一档。探针顺带把 `admin_caps` 带回来（`utils/staffCaps.js`），
+  // 所以这里只问一次「这个员工有没有那一项」。
+  //   有 → 放行（与 `both` 同等）；
+  //   没有 → 越权落点，不静默改道（票 03 的口径）；
+  //   问不到（断网 / 超时）→ 放行到页面：不能因为一次网络失败就把员工判成越权，
+  //     页面自己那条 401 / 断网兜底会处理。
+  if (audience === 'admin' && to.meta.staffCap) {
+    const probe = await staffCapsProbe()
+    if (probe.state === 'unauthenticated') return loginRedirect(to)
+    if (probe.state === 'unknown') return true
+    return hasCap(probe.caps, to.meta.staffCap) ? true : forbiddenRedirect(to)
+  }
 
   const staff = await staffSessionState()
   if (staff !== 'unauthenticated') {

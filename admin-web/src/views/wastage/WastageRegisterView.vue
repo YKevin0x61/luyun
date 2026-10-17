@@ -175,6 +175,8 @@ async function removeTemplate(tpl) {
   }
 }
 
+/** 拍照回来的那一张（系统相机一次交一张；循环留着是因为桌面档的 file input 仍然可能
+ *  一次给出多张，那条路不该因为这次改动就坏掉）。 */
 async function onPickFiles(event) {
   const files = Array.from(event.target.files || [])
   event.target.value = ''
@@ -271,6 +273,36 @@ onMounted(() => {
       <p v-if="formError" class="loss-error" role="alert">{{ formError }}</p>
       <p v-if="note" class="loss-note" role="status">{{ note }}</p>
 
+      <!-- 现场照片**排在最前**（2026-10-17 用户裁定）：损耗是当场发生的事 —— 先把眼前
+           这一堆拍下来，再慢慢填物料与数量。点一下就**直接调起系统相机**
+           （`capture="environment"` 让手机浏览器开相机而不是弹「拍照 / 相册」菜单），
+           所以这里没有「从相册选」这条路：登记的是此刻现场，不是相册里的旧图。
+           一次拍一张（系统相机就是一张一交），最多三张。 -->
+      <section class="loss-block">
+        <div class="loss-block-hd">
+          <span>现场照片</span>
+          <span class="loss-hint">最多 {{ maxImages }} 张，每张 {{ maxImageMb }} MB 以内</span>
+        </div>
+        <div class="loss-shots">
+          <figure v-for="(shot, index) in images" :key="shot.capture_id" class="loss-shot">
+            <img :src="shot.url" alt="现场照片" />
+            <button type="button" class="loss-shot-x" :aria-label="`删掉第 ${index + 1} 张`" @click="removeImage(index)">×</button>
+          </figure>
+          <label v-if="images.length < maxImages" class="loss-shot-add loss-shot-camera">
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              class="loss-file"
+              @change="onPickFiles"
+            />
+            <span class="loss-shot-plus" aria-hidden="true">＋</span>
+            <span>{{ uploading ? '上传中…' : '拍一张' }}</span>
+          </label>
+        </div>
+        <p class="loss-hint loss-photo-tip">点一下打开相机；拍完先搁着，接着填下面这一笔。</p>
+      </section>
+
       <!-- 常用模板：我存过的（可删）在前，我最近常这么记的在后。 -->
       <section class="loss-block">
         <div class="loss-block-hd">
@@ -363,20 +395,6 @@ onMounted(() => {
           <span class="loss-label">哪一天</span>
           <LuyunDatePicker v-model="day" :max-date="today" placeholder="选择日期" aria-label="损耗日期" />
         </label>
-
-        <div class="loss-field">
-          <span class="loss-label">现场照片<span class="loss-hint">最多 {{ maxImages }} 张，每张 {{ maxImageMb }} MB 以内</span></span>
-          <div class="loss-shots">
-            <figure v-for="(shot, index) in images" :key="shot.capture_id" class="loss-shot">
-              <img :src="shot.url" alt="现场照片" />
-              <button type="button" class="loss-shot-x" :aria-label="`删掉第 ${index + 1} 张`" @click="removeImage(index)">×</button>
-            </figure>
-            <label v-if="images.length < maxImages" class="loss-shot-add">
-              <input type="file" accept="image/*" multiple class="loss-file" @change="onPickFiles" />
-              <span>{{ uploading ? '上传中…' : '＋ 加照片' }}</span>
-            </label>
-          </div>
-        </div>
 
         <label class="loss-field">
           <span class="loss-label">
@@ -501,17 +519,21 @@ onMounted(() => {
 }
 .loss-chip-x:hover { color: var(--danger-bright); }
 .loss-shots { display: flex; flex-wrap: wrap; gap: 8px; }
-.loss-shot { position: relative; margin: 0; width: 76px; height: 76px; border-radius: 8px; overflow: hidden; }
+.loss-shot { position: relative; margin: 0; width: 84px; height: 84px; border-radius: 8px; overflow: hidden; }
 .loss-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .loss-shot-x {
   position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; line-height: 1;
   border: 0; border-radius: 50%; background: var(--scrim); color: var(--ink); cursor: pointer;
 }
 .loss-shot-add {
-  display: flex; align-items: center; justify-content: center; width: 76px; height: 76px;
+  display: flex; align-items: center; justify-content: center; width: 84px; height: 84px;
   border: 1px dashed var(--line-strong); border-radius: 8px;
   font-size: 12px; color: var(--ink-dim); cursor: pointer; text-align: center;
 }
+/* 首位那颗「拍一张」：竖排（加号在上、字在下），触控面积就是一整格。 */
+.loss-shot-camera { flex-direction: column; gap: 2px; }
+.loss-shot-plus { font-size: 20px; line-height: 1; }
+.loss-photo-tip { margin: 8px 0 0; }
 .loss-file { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .loss-actions { display: flex; gap: 10px; }
 /* 触控下限走令牌（`--tap` = 44px）：手机上登记是常做的事，按钮不该小于一指宽。 */

@@ -1100,8 +1100,8 @@ app.include_router(release_update_router)
 app.include_router(db_migrations_router)
 app.include_router(runtime_settings_router)
 app.include_router(logs_router)
-# 排班自己带 require_session（管理端页面用），不挂 verify_admin_token：
-# 店长用的是浏览器会话，不是 API token。
+# 排班自己带 `_require_scheduler`（管理端会话，或带「排班管理」能力的员工会话 ——
+# 2026-10-14），不挂 verify_admin_token：店长用的是浏览器会话，不是 API token。
 app.include_router(scheduling_router)
 # 加班与补钟同理（票 01 起）：员工那一面自己带 require_staff_session，
 # 票 02 的管理面会自己带 require_session —— 都不挂 verify_admin_token，
@@ -1301,9 +1301,10 @@ SPA_PAGE_ROUTES = (
     # 两种身份都进得去，员工那一档页面是只读的）。旧 `/prep-plan` 从这一份清单与
     # vue-router 一起删掉 —— 自然 404、不留别名（`?next=` 里的老地址由前端换）。
     "/workbench/kitchen/prep-plan",
-    # 日常损耗登记（从 worktool2 那个小程序搬过来）：管理端的分析与明细在后勤组
-    # （`/workbench/kitchen/loss`，只给管理端 —— 全店数据与原因分布不是员工要看的东西）；
-    # 员工端的登记页在「我的」组（`/workbench/me/loss`，两种身份都能进：店长也登记）。
+    # 日常损耗登记（从 worktool2 那个小程序搬过来）：分析与明细在后勤组
+    # （`/workbench/kitchen/loss`）：管理端会话直接进，开了「损耗分析」能力的员工会话也进
+    # （2026-10-14，页面清单里的 `staffCap: wastage`）；员工端的登记页在「我的」组
+    # （`/workbench/me/loss`，两种身份都能进：店长也登记）。
     # 同一批：漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
     "/workbench/kitchen/loss",
     "/workbench/me/today",

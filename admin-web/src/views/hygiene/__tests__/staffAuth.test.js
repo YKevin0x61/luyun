@@ -29,8 +29,8 @@ describe('hygiene staff auth gate', () => {
     // 票 02：meta 里还多了内容区的两个 opt-out（`ownBottomBar` / `flush`）—— 入口页
     // 不套工作台外壳，两项都关着，断的是整份 meta 的形状。
     expect(pageMeta('/login')).toEqual({
-      standalone: true, public: true, audience: 'both', workbenchTheme: false,
-      ownBottomBar: false, flush: false,
+      standalone: true, public: true, audience: 'both', staffCap: null,
+      workbenchTheme: false, ownBottomBar: false, flush: false,
     })
   })
 

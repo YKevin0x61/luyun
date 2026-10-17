@@ -83,14 +83,30 @@ function flushOf(row) {
   return row.flush === true
 }
 
-/** vue-router 的 meta：独立外壳、免登录、守卫要用的「允许的身份」三态，
- *  这一页要不要开工作台令牌层，以及内容区的两个 opt-out。 */
+/** 这一页对**员工身份**额外要求的那一项管理能力（`staffCap`，2026-10-14）。
+ *
+ *  audience 是三态（`admin` / `staff` / `both`），表达不了「店长专属页，但勾了某项能力的
+ *  员工也能进」—— 排班三页与损耗分析就是这一档。于是给它一个可选的第四维：
+ *  audience 仍是 `admin`（管理端会话照旧直接放行），员工身份还要在花名册上勾了这一项。
+ *
+ *  **认不出的值原样给出去**：判据是 `hasCap(caps, staffCap)`，不在能力表里的键一律判否
+ *  （fail-closed）。这里不校验键名 —— 校验在本文件之外没有任何好处，而清单里的键写错时，
+ *  症状会是「员工进不去」而不是「员工乱进」，安全方向是错的。
+ *  没有这一项时给 null（守卫与导航都按「不额外要求」处理）。 */
+function staffCapOf(row) {
+  const value = row.staffCap
+  return typeof value === 'string' && value ? value : null
+}
+
+/** vue-router 的 meta：独立外壳、免登录、守卫要用的「允许的身份」三态、
+ *  员工身份额外要求的那一项能力，这一页要不要开工作台令牌层，以及内容区的两个 opt-out。 */
 export function pageMeta(path) {
   const row = requireRow(path)
   return {
     standalone: row.standalone,
     public: row.public,
     audience: row.audience,
+    staffCap: staffCapOf(row),
     workbenchTheme: workbenchThemeOf(row),
     ownBottomBar: ownBottomBarOf(row),
     flush: flushOf(row),
@@ -125,6 +141,8 @@ function runtimeRow(pathname) {
  *  - `public`（`/login`、`/register`）：本来就不需要会话，登录页自己拿 401 渲染错误；
  *  - `audience !== 'admin'`（`staff` / `both`：我的三页、配方阅读面、工作台首页、
  *    备货计划、无权访问页）：钥匙可能是员工 cookie，甩去管理端登录页是走错门；
+ *  - `staffCap`（2026-10-14：排班三页与损耗分析）：这一页也接受**员工会话 + 那项能力**，
+ *    员工会话过期时该回员工登录那一栏，不是管理端登录页；
  *  - 表里显式标了 `authRedirect: false` 的页（`/settings`）：它自己把 401 渲染成
  *    「当前未登录」，跳转会和它自己的状态机打架。
  *
@@ -135,5 +153,10 @@ function runtimeRow(pathname) {
 export function skipsAdminLoginRedirect(pathname) {
   const row = runtimeRow(pathname)
   if (!row) return false
-  return row.public === true || row.audience !== 'admin' || row.authRedirect === false
+  return (
+    row.public === true
+    || row.audience !== 'admin'
+    || Boolean(row.staffCap)
+    || row.authRedirect === false
+  )
 }

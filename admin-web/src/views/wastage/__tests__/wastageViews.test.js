@@ -198,6 +198,21 @@ describe('损耗登记页（员工端）', () => {
     await reasons[5].trigger('click')
     expect(wrapper.text()).toContain('选了「其他」要说明')
   })
+
+  it('现场照片排在登记页最前，且只走系统相机（没有相册这条路）', async () => {
+    const wrapper = await mountView(WastageRegisterView, '/workbench/me/loss')
+    await flushPromises()
+
+    // 第一块就是照片（2026-10-17 用户裁定：先拍现场、再填物料）。
+    expect(wrapper.findAll('.loss-block')[0].text()).toContain('现场照片')
+
+    // `capture="environment"` 让手机浏览器直接开系统相机；没有 `multiple` —— 相机一张一交。
+    // 这两条一起才是「不用相册」：去掉 capture 或加回 multiple，手机就会弹「拍照 / 相册」。
+    const file = wrapper.get('input[type="file"]')
+    expect(file.attributes('capture')).toBe('environment')
+    expect(file.attributes('multiple')).toBeUndefined()
+    expect(file.attributes('accept')).toBe('image/*')
+  })
 })
 
 describe('损耗分析页（管理端）', () => {

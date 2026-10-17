@@ -25,20 +25,23 @@
  * 所以页面不用再判断该信哪一个。
  */
 
-/** 十一项能力：`key` 是契约键名，`label` / `note` 只用于界面显示，顺序 = 花名册里的显示顺序。
+/** 十三项能力：`key` 是契约键名，`label` / `note` 只用于界面显示，顺序 = 花名册里的显示顺序。
  *
  *  `staffSide` 标的是**员工端有没有执行点**（后端 `STAFF_SIDE_CAPABILITIES` 的同义字段）：
- *  只有前四项在员工手机端真正生效 —— 三项在「卫生」页，`overtime` 在「加班与补钟」页
- *  （2026-10-07 加的第 11 项，见 `docs/adr/0103`）—— 花名册里**可勾**的也只有它们。
+ *  只有前六项在员工手机端真正生效 —— 三项在「卫生」页，`overtime` 在「加班与补钟」页
+ *  （2026-10-07 加的第 11 项，见 `docs/adr/0103`），`schedule` 在人事组三页（月历 / 待办 /
+ *  班次表），`wastage` 在后勤组的损耗分析页（2026-10-14 加的两项）—— 花名册里**可勾**的
+ *  也只有它们。
  *
  *  ## 为什么后七项还在表里，却不可勾
  *
  *  2026-10-06 的真机实测：十项并排画在一次，超管勾「数据与归档」→ 保存成功 → 员工端**零变化**
- *  （那七项对应的是现场八页与排班，全是超级管理员在电脑端的活，员工端根本没有入口）。勾了
+ *  （那七项对应的是现场八页，全是超级管理员在电脑端的活，员工端根本没有入口）。勾了
  *  不生效、界面也不说，是最坏的一类缺陷。所以把这一组降级成**只读说明**。
  *
  *  **键不删** —— 真理由是**把「这七项归超级管理员」显式编码进契约**，并保留扩展路径：将来
- *  真给员工端开出这些入口，把 `staffSide` 改回 `true` 即可，契约与数据面都不用动。（旧注释
+ *  真给员工端开出这些入口，把 `staffSide` 改回 `true` 即可，契约与数据面都不用动。2026-10-14
+ *  的排班就是这么走的（`schedule` 从这一组拆出去，`roster` 留在这一组只管花名册）。（旧注释
  *  把这句理由写成"删了会静默丢掉库里已有的值、不可逆"，而 2026-10-06 实测生产库含这七项的
  *  是 **0 行** —— 那句理由与数据不符，别照抄。）
  */
@@ -47,10 +50,12 @@ export const ADMIN_CAP_DEFS = [
   { key: 'deep_review', label: '专项验收', note: '判专项卫生的前后对照', staffSide: true },
   { key: 'fix', label: '整改单', note: '开整改单、验收或驳回整改单', staffSide: true },
   { key: 'overtime', label: '加班与补钟审批', note: '批 / 驳加班与补钟登记，代员工补录', staffSide: true },
+  { key: 'schedule', label: '排班管理', note: '改全店排班、批请假与换班、管班次表', staffSide: true },
+  { key: 'wastage', label: '损耗分析', note: '看全店损耗统计与明细，含「谁记的」', staffSide: true },
   { key: 'attire', label: '仪容仪表', note: '看与判仪容打卡，维护仪容标准', staffSide: false },
   { key: 'standard', label: '标准图管理', note: '换标准图、改标注、导出整套标准', staffSide: false },
   { key: 'zone', label: '工作区与检查项', note: '加/改/删工作区与检查项', staffSide: false },
-  { key: 'roster', label: '花名册与排班', note: '审批入职、停用、改权限与班次', staffSide: false },
+  { key: 'roster', label: '花名册', note: '审批入职、停用、改权限', staffSide: false },
   { key: 'boards', label: '红黑榜与教材', note: '标记合格对照、发红黑榜、编教材', staffSide: false },
   { key: 'clock', label: '时限设置', note: '设日常与专项的时限', staffSide: false },
   { key: 'data', label: '数据与归档', note: '看历史记录、导出归档、清理数据', staffSide: false },

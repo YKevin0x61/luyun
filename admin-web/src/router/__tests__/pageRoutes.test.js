@@ -96,6 +96,24 @@ describe('页面清单（唯一来源）', () => {
     expect(aliases.filter((alias) => paths.includes(alias))).toEqual([])
   })
 
+  it('staffCap 只标在这四页上，audience 仍是 admin（它是第四维，不是第二份 audience）', () => {
+    // 2026-10-14 用户裁定：排班三页（人事组）与损耗分析（后勤组）对「勾了对应能力的员工」
+    // 也开。audience 仍是 admin —— 管理端会话照旧直接放行，员工身份再要那一项能力。
+    const withCap = PAGE_ROUTES.filter((row) => row.staffCap)
+    expect(withCap.map((row) => [row.path, row.staffCap])).toEqual([
+      ['/workbench/hr/calendar', 'schedule'],
+      ['/workbench/hr/inbox', 'schedule'],
+      ['/workbench/hr/shifts', 'schedule'],
+      ['/workbench/kitchen/loss', 'wastage'],
+    ])
+    for (const row of withCap) expect(row.audience, row.path).toBe('admin')
+    // meta 透出同一个值；没有这一项的页给 null（守卫与导航都按「不额外要求」处理）。
+    expect(pageMeta('/workbench/hr/calendar').staffCap).toBe('schedule')
+    expect(pageMeta('/workbench/kitchen/loss').staffCap).toBe('wastage')
+    expect(pageMeta('/workbench/hr/roster').staffCap).toBeNull()
+    expect(pageMeta('/workbench/me/today').staffCap).toBeNull()
+  })
+
   it('独立外壳的页面就是这些（其余页面才渲染后台导航）', () => {
     expect(PAGE_ROUTES.filter((row) => row.standalone).map((row) => row.path)).toEqual([
       '/login',
@@ -228,6 +246,17 @@ describe('401 兜底豁免也从清单派生（票 10）', () => {
     expect(skipsAdminLoginRedirect('/workbench/kitchen/prep-plan')).toBe(true)
     expect(skipsAdminLoginRedirect('/workbench')).toBe(true)
     expect(skipsAdminLoginRedirect('/workbench/forbidden')).toBe(true)
+  })
+
+  it('带 staffCap 的店长页也豁免（钥匙可能是员工会话 + 那项能力）', () => {
+    // 2026-10-14：排班三页与损耗分析接受「员工会话 + 勾了那项能力」，所以员工会话过期时
+    // 该回员工登录那一栏，不该被管理端 401 兜底甩去 `/login`。
+    expect(skipsAdminLoginRedirect('/workbench/hr/calendar')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/hr/inbox')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/hr/shifts')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/kitchen/loss')).toBe(true)
+    // 花名册没有 staffCap（身份证明细与底薪不下发员工端）：仍按管理端那一档跳登录。
+    expect(skipsAdminLoginRedirect('/workbench/hr/roster')).toBe(false)
   })
 
   it('管理端专属的页照样跳登录（会话没了就该去登录）', () => {

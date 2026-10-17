@@ -195,6 +195,10 @@ export function staffNextTarget(raw) {
   if (!next) return null
   const pathname = pathnameOf(next)
   if (isStaffLandingPath(pathname) || isRecipeReaderPath(pathname)) return next
+  // 带 `staffCap` 的店长页（排班三页、损耗分析，2026-10-14）：员工会话 + 那项能力也进得去，
+  // 所以它同样是合法的员工落点 —— 员工会话在那一页过期、重新登录之后要回到那一页。
+  const row = pageRow(pathname)
+  if (row && row.audience === 'admin' && row.staffCap) return next
   return null
 }
 
@@ -236,12 +240,15 @@ export function resolveStaffNext(raw, fallback = STAFF_ENTRY_PATH) {
 
 /** 面板默认开在哪一栏。判据按优先级从上到下，第一条命中即用：
  *
- *  1. `?next=` 是**管理端专属页**（页面清单里 `audience === 'admin'`）→ 强制管理员栏。
+ *  1. `?next=` 是**两种身份都能开的店长页**（`audience: admin` 且带 `staffCap`：排班三页、
+ *     损耗分析，2026-10-14）→ **不强制**，按记住值走。这类页管理端与「勾了那项能力的员工」
+ *     都进得去，写死任何一侧都会让另一侧白填一次。
+ *  2. `?next=` 是**管理端专属页**（页面清单里 `audience === 'admin'`）→ 强制管理员栏。
  *     这类目标只认管理端 cookie，开员工栏等于让人在手机号表单上白填一次（D13 实测：
  *     `/login?next=/workbench/hr/roster` 开的是员工栏，管理端还得自己找 tab）。
- *  2. `?next=` 落在员工端前缀或**配方阅读面**内 → 强制员工栏，优先于记住值
+ *  3. `?next=` 落在员工端前缀或**配方阅读面**内 → 强制员工栏，优先于记住值
  *     （扫码的绝大多数是厨师，不该先看到管理栏）。
- *  3. 其余（含没有记住值、记住值脏了、站外地址、清单里没有的路径）按记住值走，
+ *  4. 其余（含没有记住值、记住值脏了、站外地址、清单里没有的路径）按记住值走，
  *     没记住过就落员工栏：员工手机上打开 `/login` 就该直接看到手机号那一栏，
  *     不必先点一下（spec 故事 3 / ADR 0091）。管理端机器靠「上次选的是管理员栏」记住
  *     —— 见 `loginPrefs.js` 的 `loadLoginTab`。
@@ -250,6 +257,16 @@ export function resolveStaffNext(raw, fallback = STAFF_ENTRY_PATH) {
  *  这里再写一份前缀正则；清单里没有的路径（老地址、手改的）一律不强制，交回记住值。
  */
 export function resolveLoginTab(raw, remembered) {
+  // 带 `staffCap` 的页（排班三页 / 损耗分析）**两种身份都可能开**：既不强制员工栏、
+  // 也不强制管理员栏，交回记住值（没记住过就落员工栏，手机为主）。写死任何一侧都会
+  // 让另一侧在登录面板上白填一次 —— 员工不许看管理员栏，管理端也不该被塞进手机号表单。
+  const next = sanitizeNext(raw)
+  if (next) {
+    const row = pageRow(pathnameOf(next))
+    if (row && row.audience === 'admin' && row.staffCap) {
+      return remembered === 'admin' ? 'admin' : 'staff'
+    }
+  }
   if (staffNextTarget(raw)) return 'staff'
   if (adminTarget(raw)) return 'admin'
   return remembered === 'admin' ? 'admin' : 'staff'

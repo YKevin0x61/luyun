@@ -631,3 +631,72 @@ def test_upload_rejects_a_non_image(wastage_http):
         files={"file": ("evil.svg", b"<svg onload=alert(1)></svg>", "image/svg+xml")},
     )
     assert rejected.status_code == 400, rejected.text
+
+
+def test_employee_with_wastage_cap_sees_the_whole_shop(wastage_http):
+    """开了「损耗分析」（`wastage`）的员工与店长同一面（2026-10-14 用户裁定）。
+
+    判据只在 `admin_caps` 那一列、每次请求现读：给他能力就当场生效，收回就当场 403
+    —— 没有第二份「登录时快照的权限」。
+    """
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    upload = client.post(
+        "/api/wastage/images",
+        files={"file": ("shot.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+    assert upload.status_code == 200, upload.text
+    capture_id = upload.json()["image"]["capture_id"]
+    created = client.post(
+        "/api/wastage/records",
+        json={
+            "item_name": "五花肉",
+            "quantity": 1,
+            "unit": "kg",
+            "reason": "spoiled",
+            "wastage_date": TODAY,
+            "image_ids": [capture_id],
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    # 另一位员工（李四）自己记一笔 —— 没开能力时只看得到自己那一笔、统计 403。
+    other_id = _employee_id(accounts, PHONE2, NAME2)
+    _staff_cookie(client, accounts, PHONE2)
+    other = client.post(
+        "/api/wastage/records",
+        json={
+            "item_name": "生菜",
+            "quantity": 2,
+            "unit": "kg",
+            "reason": "expired",
+            "wastage_date": TODAY,
+        },
+    )
+    assert other.status_code == 200, other.text
+    assert client.get("/api/wastage/records").json()["total"] == 1
+    assert client.get(
+        "/api/wastage/statistics", params={"month": "2026-09"}
+    ).status_code == 403
+    assert client.get(f"/api/wastage/images/{capture_id}").status_code == 404
+
+    # 勾上「损耗分析」之后（同一个会话，不重登）：统计 200、明细是全店的、别人的照片也看得到。
+    _run(accounts.set_admin_caps(other_id, ["wastage"]))
+    stats = client.get("/api/wastage/statistics", params={"month": "2026-09"})
+    assert stats.status_code == 200, stats.text
+    assert stats.json()["total_count"] == 2
+    listed = client.get("/api/wastage/records").json()
+    assert listed["total"] == 2
+    assert {row["item_name"] for row in listed["records"]} == {"五花肉", "生菜"}
+    assert client.get(f"/api/wastage/images/{capture_id}").status_code == 200
+    # 补全也跟着看全店（他登记时该认得店里所有会坏的物料）。
+    suggestions = client.get("/api/wastage/suggestions").json()["suggestions"]
+    assert set(suggestions) >= {"五花肉", "生菜"}
+
+    # 收回就当场收回：下一次请求 403，明细回到只看自己的那几笔。
+    _run(accounts.set_admin_caps(other_id, []))
+    assert client.get(
+        "/api/wastage/statistics", params={"month": "2026-09"}
+    ).status_code == 403
+    assert client.get("/api/wastage/records").json()["total"] == 1

@@ -31,7 +31,8 @@ const identityStore = useWorkbenchIdentityStore()
 // 身份还没探出来（`null`）时不渲染任何一格：不给一个可能点不通的入口。
 // 探针由身份切换器开场（`onMounted`），三个壳里都挂着它。
 const identity = computed(() => identityStore.identity)
-const navItems = computed(() => workbenchNavFor(identity.value))
+// 员工那一档还要按能力键过滤（`staffCap` 页：排班三页与损耗分析，2026-10-14）。
+const navItems = computed(() => workbenchNavFor(identity.value, identityStore.staffCaps))
 const currentGroup = computed(() => workbenchGroupOf(route.path))
 
 /** 按**格**把条目分好组（一处渲染）：一格里的条目共享一个 key，键序仍是组表里的顺序。

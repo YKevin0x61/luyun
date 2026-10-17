@@ -29,7 +29,8 @@ const currentGroup = computed(() => workbenchGroupOf(route.path))
  *  第一条当落点，标签仍用**组名**。 */
 const cells = computed(() => {
   const seen = new Map()
-  for (const item of workbenchNavFor(identity.value)) {
+  // 员工那一档按能力键过滤（`staffCap` 页：排班三页与损耗分析，2026-10-14）。
+  for (const item of workbenchNavFor(identity.value, identityStore.staffCaps)) {
     if (!seen.has(item.key)) {
       seen.set(item.key, { key: item.key, label: item.label, to: item.to })
     }

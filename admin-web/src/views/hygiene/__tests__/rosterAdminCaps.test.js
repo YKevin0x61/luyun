@@ -11,7 +11,7 @@ import {
  * 花名册的「管理权限」（2026-10 改版：动作搬进编辑抽屉）。
  *
  * 三件事在这一组里压死：
- * 1. **可勾的只有员工端真有执行点的三项**；只读那七项**整块不渲染** —— 名字、说明、
+ * 1. **可勾的只有员工端真有执行点的六项**；只读那七项**整块不渲染** —— 名字、说明、
  *    连 `title` 都不给（design §3.4）。页面不显示 ≠ 键可以抹掉，见第 4 条。
  * 2. **「卫生权限」不再是下拉**：它只是服务端派生的人话标签，页面也不再 PATCH `permission`。
  * 3. **勾选不发请求**：点「保存」才发**一次** PATCH，`admin_caps` 是整组（归一化成契约顺序），
@@ -105,13 +105,13 @@ function saveButton(wrapper) {
 }
 
 describe('花名册 · 管理权限（抽屉）', () => {
-  it('可勾的只有员工端真正生效的四项；「卫生权限」只剩只读标签，没有下拉', async () => {
+  it('可勾的只有员工端真正生效的六项；「卫生权限」只剩只读标签，没有下拉', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper)
 
     expect(wrapper.findAll('.roster-cap').map((node) => node.text()))
       .toEqual(ADMIN_CAP_STAFF_DEFS.map((item) => item.label))
-    expect(capBoxes(wrapper)).toHaveLength(4)
+    expect(capBoxes(wrapper)).toHaveLength(6)
 
     // 抽屉里一个 `<select>` 都没有：卫生权限是派生标签，由服务端给值。
     expect(wrapper.findAll('select')).toHaveLength(0)
@@ -125,10 +125,12 @@ describe('花名册 · 管理权限（抽屉）', () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper)
 
-    const html = wrapper.html()
+    // 只看「管理权限」那一块（整页里「花名册」这四个字到处都是 —— 页面标题、分组名、
+    // 页头的落点都是它，拿整页 HTML 判那个名字必然误红）。
+    const capsBlock = wrapper.get('.roster-caps').html()
     for (const cap of ADMIN_CAP_SUPERVISOR_ONLY_DEFS) {
-      expect(html).not.toContain(cap.label)
-      expect(html).not.toContain(cap.note)
+      expect(capsBlock).not.toContain(cap.label)
+      expect(capsBlock).not.toContain(cap.note)
     }
     expect(wrapper.find('.roster-caps-readonly').exists()).toBe(false)
 
@@ -169,7 +171,7 @@ describe('花名册 · 管理权限（抽屉）', () => {
     await openDrawer(wrapper)
 
     // 界面上看不见 data / boards 的勾。
-    expect(capBoxes(wrapper)).toHaveLength(4)
+    expect(capBoxes(wrapper)).toHaveLength(6)
 
     // 再加一项「专项验收」，然后保存。
     await capBoxes(wrapper)[1].setValue(true)
@@ -215,7 +217,7 @@ describe('花名册 · 管理权限（抽屉）', () => {
     wrapper.unmount()
   })
 
-  it('行内标签的项数只数员工端真正生效的三项（超管专属七项不计入）', async () => {
+  it('行内标签的项数只数员工端真正生效的六项（超管专属七项不计入）', async () => {
     rows = [serverRow({
       permission: '管理员',
       admin_caps: ['daily_review', 'fix', 'data', 'boards'],

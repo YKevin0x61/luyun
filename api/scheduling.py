@@ -10,8 +10,9 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from api.security import require_session, require_staff_session
+from api.security import require_any_identity_session, require_staff_session
 from database import get_db
+from services.identity.capabilities import CAP_SCHEDULE, has_cap
 from services.realtime.hub import realtime_hub
 from services.scheduling import MAX_CYCLE_DAYS, MAX_REQUEST_NOTE, MAX_SHIFT_NAME
 from services.scheduling.store import SchedulingError, SchedulingStore
@@ -281,6 +282,32 @@ async def _scheduling_nudge(reason: str, *employee_ids: Optional[int]) -> None:
         )
 
 
+async def _require_scheduler(identity: dict = Depends(require_any_identity_session)) -> dict:
+    """店长那一面的门：管理端会话，**或**员工会话加「排班管理」（`schedule`）能力。
+
+    2026-10-14 用户裁定：排班不再只给超级管理员 —— 花名册上勾了「排班管理」的店长用
+    **员工会话**也能改全店排班（月历 / 待办 / 班次表三页）。他本来就有员工账号，不该为了
+    改一个班次专门去电脑上登录管理端。判据与加班审批那扇门（`api/overtime.py` 的
+    `_require_reviewer`）同一形状：员工会话 + 一项能力，每次请求现读 `admin_caps`。
+
+    **花名册不在这扇门后面**：`roster`（审批入职、停用、改权限）是另一个键，仍只给
+    超级管理员 —— 身份证明细与底薪按 `docs/adr/0098` 不下发员工端，所以「能改排班」
+    不能连带拿到花名册页。
+
+    被拒是 **403**（「你没这个权限」），不是 404：后者会把「权限不够」说成「这一笔不
+    存在」。收回能力后下一次请求就 403 —— 权限不在登录时快照。
+    """
+    if identity.get("kind") == "admin":
+        return identity
+    employee = identity.get("employee") or {}
+    if not has_cap(employee.get("admin_caps"), CAP_SCHEDULE):
+        raise HTTPException(
+            status_code=403,
+            detail="只有开了「排班管理」权限的人能改排班：请找超级管理员在花名册里开通",
+        )
+    return identity
+
+
 @router.get("/me")
 async def my_days(
     db=Depends(get_db),
@@ -288,9 +315,10 @@ async def my_days(
 ) -> dict:
     """员工自己这几天的班（「今天」页读的就是这一条）。
 
-    跟店长那扇门不是一回事：那边要管理端会话（`require_session`），这边要员工自己的手机端
-    cookie（`require_staff_session`）。**接口上故意没有 `employee_id` 参数** —— 员工会话能读到的只有自己，
-    想读别人的班也没地方填。
+    跟店长那扇门不是一回事：那边是 `_require_scheduler`（管理端会话，或带「排班管理」
+    能力的员工会话 —— 2026-10-14 起），这边要员工自己的手机端 cookie
+    （`require_staff_session`），读的永远是自己。**接口上故意没有 `employee_id` 参数** ——
+    员工会话能读到的只有自己，想读别人的班也没地方填。
     """
     store = SchedulingStore(db)
     try:
@@ -522,7 +550,7 @@ async def reject_swap(
 
 
 @router.get("/shifts")
-async def list_shifts(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
+async def list_shifts(db=Depends(get_db), _: dict = Depends(_require_scheduler)) -> dict:
     """班次表（白班、夜班……）。UI 按 N 个班次渲染，不写死两个。"""
     store = SchedulingStore(db)
     try:
@@ -532,7 +560,7 @@ async def list_shifts(db=Depends(get_db), _: str = Depends(require_session)) -> 
 
 
 @router.get("/shifts/manage")
-async def manage_shifts(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
+async def manage_shifts(db=Depends(get_db), _: dict = Depends(_require_scheduler)) -> dict:
     """班次表**连停用的一起**，每条带上「有多少人在用」：票 11 的编辑页读这一条。
 
     编辑页要看到停用的那几条（给它们改名、重新启用、看还有没有历史行），所以不能
@@ -562,7 +590,7 @@ async def manage_shifts(db=Depends(get_db), _: str = Depends(require_session)) -
 async def create_shift(
     payload: CreateShiftRequest,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """加一个班次（票 11）。加完就是一条普通的班次：月历图例、配规则的下拉、员工端
     的卡片都按 N 个班次渲染，不需要改代码（验收项）。"""
@@ -579,7 +607,7 @@ async def create_shift(
 async def reorder_shifts(
     payload: ShiftOrderRequest,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """按给定的顺序重铺显示顺序（票 11 的「上移 / 下移」）。要**给全**所有班次 id。"""
     store = SchedulingStore(db)
@@ -594,7 +622,7 @@ async def update_shift(
     shift_id: int,
     payload: UpdateShiftRequest,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """改名 / 调顺序 / 启用停用（票 11）。停用还有人在上的班次会被拦下来说清人数。"""
     store = SchedulingStore(db)
@@ -612,7 +640,7 @@ async def update_shift(
 async def delete_shift(
     shift_id: int,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """删掉刚建错、还没人用过的班次（票 11）。排过班的删不掉，那句话里说清为什么。"""
     store = SchedulingStore(db)
@@ -626,7 +654,7 @@ async def delete_shift(
 async def month_calendar(
     month: str = Query(..., description="YYYY-MM"),
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """一个月的月历：每天各班几个人。打开就先补齐未来 90 天（幂等）。"""
     store = SchedulingStore(db)
@@ -641,7 +669,7 @@ async def month_calendar(
 async def day_detail(
     date: str = Query(..., alias="date", description="YYYY-MM-DD"),
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """某一天各班是谁（月历点开那天看的就是这个）。"""
     store = SchedulingStore(db)
@@ -656,7 +684,7 @@ async def day_detail(
 async def week(
     start: Optional[str] = Query(None, description="YYYY-MM-DD"),
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """「员工 × 周」矩阵：这一周每人每天上什么班、在哪个区（票 A，只读）。
 
@@ -675,7 +703,7 @@ async def week(
 
 
 @router.get("/roster")
-async def roster(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
+async def roster(db=Depends(get_db), _: dict = Depends(_require_scheduler)) -> dict:
     """全体花名册 + 每人当前那条规则 + 每人每班次的固定工作区（没配就是 `{}`）。
 
     名单面板会一起读固定工作区（票 03），所以缺 0006 时这里也要出 503 那句话 ——
@@ -696,7 +724,7 @@ async def set_zone_default(
     employee_id: int,
     payload: SetZoneDefaultRequest,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """给「某人 × 某班次」定一个固定工作区；今天以后已经铺好的行一起改。
 
@@ -714,7 +742,7 @@ async def set_rule(
     employee_id: int,
     payload: SetRuleRequest,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """给一个人配轮转规则；今天以后的规则行立刻重铺，月历随即可见。"""
     store = SchedulingStore(db)
@@ -731,7 +759,7 @@ async def set_rule(
 async def clear_rule(
     employee_id: int,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """拿掉一个人的规则（连今天以后的规则行）。过去写过的不动。"""
     store = SchedulingStore(db)
@@ -747,7 +775,7 @@ async def clear_rule(
 async def batch_overrides(
     payload: BatchOverrideRequest,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """先选一片、再一次刷完（票 14；ADR 0107 决策 5/6）。
 
@@ -786,7 +814,7 @@ async def set_override(
     business_date: str,
     payload: SetOverrideRequest,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """改某人某一天：换班次、改成休、或只换工作区 —— **只动这一天**（票 07）。
 
@@ -816,7 +844,7 @@ async def clear_override(
     employee_id: int,
     business_date: str,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """撤掉某人某天的覆盖，那天回到规则铺出来的样子（票 07）。
 
@@ -836,7 +864,7 @@ async def clear_override(
 
 
 @router.get("/inbox")
-async def inbox(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
+async def inbox(db=Depends(get_db), _: dict = Depends(_require_scheduler)) -> dict:
     """店长待办：等他批的申请 + 还没配规则的人（票 08 的待办页，票 09 起也收换班）。
 
     每条请假带一份预览（`days[*].after`：批了之后那天每个班次还剩几个人）。人手够不够
@@ -856,7 +884,7 @@ async def inbox(db=Depends(get_db), _: str = Depends(require_session)) -> dict:
 async def approve_request(
     request_id: int,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """批一条申请：请假那几天变成请假，换班两个人那天对调。
 
@@ -881,7 +909,7 @@ async def approve_request(
 async def reject_request(
     request_id: int,
     db=Depends(get_db),
-    _: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """驳回一条申请：排班一个字不改，只把申请记为驳回（票 08 的验收项；换班同理）。"""
     store = SchedulingStore(db)

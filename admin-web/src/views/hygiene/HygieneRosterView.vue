@@ -166,7 +166,7 @@ function segmentText(item) {
 }
 
 /** 「管理员 · N 项 / 普通员工 · 无」：标签用服务端派生的值，**项数只数员工端真正生效的
- *  三项**（`admin_caps` 里可能存着超管专属七项，按全长度报会写成「管理员 · 8 项」而实际
+ *  六项**（`admin_caps` 里可能存着超管专属七项，按全长度报会写成「管理员 · 8 项」而实际
  *  能用 0 项）。边缘情况照实显示「管理员 · 0 项」。 */
 function capChip(row) {
   const caps = normalizeCaps(row.admin_caps)
@@ -1176,7 +1176,7 @@ async function copyInvite() {
   color: var(--hy-muted);
 }
 
-/* 管理权限：三项可勾（员工端真有执行点的那些）。 */
+/* 管理权限：六项可勾（员工端真有执行点的那些）。 */
 .roster-page .roster-caps {
   min-width: 0;
   margin: 0;

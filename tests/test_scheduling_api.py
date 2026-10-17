@@ -131,7 +131,14 @@ def _zone(db, name="案板"):
     return _run(_insert())
 
 
-def test_scheduling_routes_require_admin_session(scheduling_http):
+def test_scheduling_routes_need_a_session_or_the_schedule_cap(scheduling_http, monkeypatch):
+    """匿名 401；员工会话有效但没有「排班管理」能力 → 403（不是 404、也不再是 401）。
+
+    2026-10-14 用户裁定：排班那一面不再只认管理端会话 —— 花名册上勾了「排班管理」
+    （`schedule`）的员工用**员工会话**也能改全店排班。判定见 `api/scheduling.py` 的
+    `_require_scheduler`：管理端会话直接放行，员工会话要那一项能力，被拒是 403
+    （「你没这个权限」）而不是 401（「你没登录」）—— 后者会把「权限不够」说成「会话没了」。
+    """
     client, db, accounts = scheduling_http
     client.cookies.clear()
 
@@ -161,12 +168,15 @@ def test_scheduling_routes_require_admin_session(scheduling_http):
     assert client.put("/api/scheduling/shifts/1", json={"name": "早班"}).status_code == 401
     assert client.delete("/api/scheduling/shifts/1").status_code == 401
 
-    # 员工会话不是店长的门：换一个 cookie 名字照样 401（排班只认管理端会话）。
-    employee_id = _employee_id(accounts)
+    # 员工会话本身不是店长那一档：没勾「排班管理」时一律 403（会话在、权限不在）。
+    _employee_id(accounts)
+    _wire_staff_accounts(monkeypatch, accounts)
     login = _run(accounts.login(PHONE, PASSWORD))
     client.cookies.clear()
     client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, login["session_id"])
-    assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 401
+    denied = client.get("/api/scheduling/calendar", params={"month": "2026-09"})
+    assert denied.status_code == 403, denied.text
+    assert "排班管理" in denied.json()["detail"]
 
 
 def test_admin_can_configure_and_see_it_on_the_calendar(scheduling_http):
@@ -581,16 +591,18 @@ def test_the_two_doors_do_not_open_each_other(scheduling_http, monkeypatch):
     assert client.get("/api/scheduling/me/requests").status_code == 200
     assert client.get("/api/scheduling/me/colleagues").status_code == 200
     # 反过来也一样：员工会话读不到店长的任何一条（周表、待办、班次表的编辑都在里面）。
-    assert client.get("/api/scheduling/roster").status_code == 401
-    assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 401
-    assert client.get("/api/scheduling/week").status_code == 401
-    assert client.get("/api/scheduling/inbox").status_code == 401
-    assert client.post("/api/scheduling/inbox/1/approve").status_code == 401
-    assert client.get("/api/scheduling/shifts/manage").status_code == 401
-    assert client.post("/api/scheduling/shifts", json={"name": "中班"}).status_code == 401
-    assert client.put("/api/scheduling/shifts/order", json={"ids": [1, 2]}).status_code == 401
-    assert client.put("/api/scheduling/shifts/1", json={"name": "早班"}).status_code == 401
-    assert client.delete("/api/scheduling/shifts/1").status_code == 401
+    # 被拒是 403（会话在、权限不在）—— 2026-10-14 起店长那一面也认「员工会话 + 排班管理」，
+    # 所以「没登录」那句 401 不再是这里的答案。
+    assert client.get("/api/scheduling/roster").status_code == 403
+    assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 403
+    assert client.get("/api/scheduling/week").status_code == 403
+    assert client.get("/api/scheduling/inbox").status_code == 403
+    assert client.post("/api/scheduling/inbox/1/approve").status_code == 403
+    assert client.get("/api/scheduling/shifts/manage").status_code == 403
+    assert client.post("/api/scheduling/shifts", json={"name": "中班"}).status_code == 403
+    assert client.put("/api/scheduling/shifts/order", json={"ids": [1, 2]}).status_code == 403
+    assert client.put("/api/scheduling/shifts/1", json={"name": "早班"}).status_code == 403
+    assert client.delete("/api/scheduling/shifts/1").status_code == 403
 
     client.cookies.clear()
     assert client.get("/api/scheduling/me").status_code == 401
@@ -2581,3 +2593,53 @@ def test_my_requests_carries_the_note_limit(scheduling_http, monkeypatch):
 
     assert body.status_code == 200, body.text
     assert body.json()["max_request_note"] == MAX_REQUEST_NOTE
+
+
+def test_staff_with_schedule_cap_can_manage_the_whole_shop(scheduling_http, monkeypatch):
+    """勾了「排班管理」（`schedule`）的员工用员工会话就能改全店排班（2026-10-14 用户裁定）。
+
+    判据只在 `admin_caps` 那一列、每次请求现读：勾上就当场生效，收回就当场 403。
+    **`roster`（花名册）是另一个键**：能改排班不等于能看花名册（身份证号与底薪不下发
+    员工端，见 `docs/adr/0098`），但排班这一面本身要读 `/roster` 那份「人 + 规则」名单
+    —— 那一份只带姓名 / 手机号 / 职位 / 规则，与档口的隐私无关。
+    """
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    _wire_staff_accounts(monkeypatch, accounts)
+    _staff_cookie(client, accounts)
+
+    # 没勾之前：会话在、权限不在 → 403。
+    assert client.get(
+        "/api/scheduling/calendar", params={"month": "2026-09"}
+    ).status_code == 403
+    assert client.put(
+        f"/api/scheduling/rules/{employee_id}", json={"cycle": [1]}
+    ).status_code == 403
+
+    _run(accounts.set_admin_caps(employee_id, ["schedule"]))
+
+    # 月历、名单、班次表：读得到。
+    shifts = client.get("/api/scheduling/shifts").json()["shifts"]
+    assert [shift["name"] for shift in shifts] == ["白班", "夜班"]
+    day_id = shifts[0]["id"]
+    assert client.get("/api/scheduling/roster").status_code == 200
+    assert client.get("/api/scheduling/week").status_code == 200
+
+    # 改排班（轮转规则 + 班次表 + 待办队列）：写得进去。
+    saved = client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]})
+    assert saved.status_code == 200, saved.text
+    calendar = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    cells = {day["business_date"]: day for day in calendar["days"]}
+    assert cells[TODAY]["counts"][str(day_id)] == 1
+    created = client.post("/api/scheduling/shifts", json={"name": "中班"})
+    assert created.status_code == 200, created.text
+    assert client.get("/api/scheduling/inbox").status_code == 200
+
+    # 收回能力：下一次请求就 403，规则也不再可写。
+    _run(accounts.set_admin_caps(employee_id, []))
+    assert client.get(
+        "/api/scheduling/calendar", params={"month": "2026-09"}
+    ).status_code == 403
+    assert client.put(
+        f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]}
+    ).status_code == 403

@@ -5,11 +5,15 @@
 **两个身份走同一个面**（`require_any_identity_session`：管理端会话或员工会话）：
 
 - 员工手机端（`/workbench/me/loss`）：登记、看自己的记录、存自己的模板；
-- 管理端工作台（`/workbench/kitchen/loss`）：看全店、按月统计、按条件翻明细。
+- 管理端工作台（`/workbench/kitchen/loss`）：看全店、按月统计、按条件翻明细；
+- **开了「损耗分析」能力（`admin_caps` 里的 `wastage`）的员工**：与店长同一面 ——
+  全店统计与含「谁记的」的明细都看得到（2026-10-14 用户裁定）。没开的那一档照旧
+  只看自己记的，统计 403。
 
 区别不在路径上，而在**归属**：员工那几档的读写都带 `employee_id` 过滤（服务层的
-`_scope_clause` 一处判），所以接口上根本没有「看别人的」这个参数。统计是唯一的例外
-——它只给管理端（`403`），因为「这个月店里损耗了多少」不是员工要关心的数字。
+`_scope_clause` 一处判），所以接口上根本没有「看别人的」这个参数。有能力看全店的
+员工由 `WastageActor.sees_all` 带出去（API 层现读 `admin_caps`，服务层只认这个标记）。
+统计是另一道门：`_require_wastage_reader`（管理端或带那一项能力的员工）。
 
 **照片上传与登记是两步**（同源项目：先 `uploadFile` 拿到 fileID 数组，提交时再带上）：
 `POST /images` 落盘并记一行元数据，返回 `capture_id`；提交记录时把它放进 `image_ids`。
@@ -35,6 +39,7 @@ from config import settings
 from database import get_db
 from db_core.utils import CHINA_TZ
 from services.hygiene.images import sniff_image_content_type
+from services.identity.capabilities import CAP_WASTAGE, has_cap
 from services.wastage.store import (
     KIND_ADMIN,
     KIND_STAFF,
@@ -136,23 +141,38 @@ def _bad_request(exc: WastageError) -> HTTPException:
 
 
 def _actor(identity: dict) -> WastageActor:
-    """两种会话 → 台账层的 actor。归属（谁能看谁记的）由它带出去。"""
+    """两种会话 → 台账层的 actor。归属（谁能看谁记的）由它带出去。
+
+    员工的 `sees_all` 按 `admin_caps` 里那一项现读：开了「损耗分析」（`wastage`）的员工
+    看全店统计与明细，没开的那一档照旧只看自己记的。判据每次请求现读，所以收回能力与
+    给他能力一样，下一次请求就生效。
+    """
     if identity.get("kind") == "staff":
         employee = identity.get("employee") or {}
         return WastageActor(
             kind=KIND_STAFF,
             employee_id=int(employee["id"]),
             name=str(employee.get("name") or ""),
+            sees_all=has_cap(employee.get("admin_caps"), CAP_WASTAGE),
         )
     # 管理端那台共享账号：没有员工号，名字写「管理端」（明细里「谁登记的」那一列）。
     return WastageActor(kind=KIND_ADMIN, employee_id=None, name="管理端")
 
 
-def _require_admin(identity: dict) -> None:
-    """统计只给管理端。员工拿到的是 403「你没这个权限」，不是 404 —— 后者会把
-    「权限不够」说成「数据没了」。"""
-    if identity.get("kind") != "admin":
-        raise HTTPException(status_code=403, detail="只有店长能看损耗统计")
+def _require_wastage_reader(identity: dict) -> None:
+    """全店统计的门：管理端，**或**开了「损耗分析」能力（`wastage`）的员工。
+
+    员工拿到的是 403「你没这个权限」，不是 404 —— 后者会把「权限不够」说成
+    「数据没了」。收回能力后下一次请求就 403（权限不在登录时快照）。
+    """
+    if identity.get("kind") == "admin":
+        return
+    employee = identity.get("employee") or {}
+    if not has_cap(employee.get("admin_caps"), CAP_WASTAGE):
+        raise HTTPException(
+            status_code=403,
+            detail="只有开了「损耗分析」权限的人能看全店损耗统计：请找超级管理员在花名册里开通",
+        )
 
 
 _capture_store = None
@@ -237,7 +257,8 @@ async def list_records(
     db=Depends(get_db),
     identity: dict = Depends(require_any_identity_session),
 ) -> dict:
-    """明细，新的在前。员工只拿得到自己那几笔（归属过滤在服务层）。"""
+    """明细，新的在前。员工拿得到自己那几笔；开了「损耗分析」能力的员工与店长一样看全店
+    （归属过滤在服务层的 `_scope_clause` 一处判）。"""
     store = _store(db)
     try:
         data = await store.list_records(
@@ -262,8 +283,11 @@ async def read_statistics(
     db=Depends(get_db),
     identity: dict = Depends(require_any_identity_session),
 ) -> dict:
-    """按月（或一段日期）的汇总：总笔数、物料种类、原因分布、物料排行、逐日趋势。"""
-    _require_admin(identity)
+    """按月（或一段日期）的汇总：总笔数、物料种类、原因分布、物料排行、逐日趋势。
+
+    门是「管理端或开了『损耗分析』能力的员工」（`_require_wastage_reader`）。
+    """
+    _require_wastage_reader(identity)
     store = _store(db)
     try:
         data = await store.statistics(
@@ -381,7 +405,8 @@ async def read_image(
     db=Depends(get_db),
     identity: dict = Depends(require_any_identity_session),
 ) -> Response:
-    """读一张照片。员工只读得到自己传的；读不到一律 404（不区分「没有」与「不是你的」）。"""
+    """读一张照片。员工只读得到自己传的（开了「损耗分析」能力的员工看全部）；
+    读不到一律 404（不区分「没有」与「不是你的」）。"""
     store = _store(db)
     found = await store.image_bytes(_actor(identity), capture_id)
     if found is None:

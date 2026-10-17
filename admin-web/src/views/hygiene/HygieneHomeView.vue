@@ -196,11 +196,17 @@ const isManager = computed(() => caps.value.length > 0)
 const canDailyReview = computed(() => hasCap(caps.value, 'daily_review'))
 const canDeepReview = computed(() => hasCap(caps.value, 'deep_review'))
 const canFix = computed(() => hasCap(caps.value, 'fix'))
-/** 他手里**真正能用**的管理能力有几项（就是花名册上可勾的那三项）。
+/** 卫生这一页只数**卫生那三项**（日常验收 / 专项验收 / 整改单）—— 2026-10-14 起花名册
+ *  上可勾的还有「排班管理」与「损耗分析」，但那两项是别的页的事，数进来会让这页的身份
+ *  胶囊写成「可判 5 项」，而它们不是「判」。
+ *
  *  页首那颗身份胶囊用它 —— 顶栏只写「员工（张三）」，被放权的这一档在界面上一直看不出来
  *  （真机走查 O-id：他自己不知道有验收权，也看不到"我在店里能做哪三件事"）。 */
+const HYGIENE_REVIEW_CAP_KEYS = ['daily_review', 'deep_review', 'fix']
 const staffCapCount = computed(
-  () => ADMIN_CAP_STAFF_DEFS.filter((item) => hasCap(caps.value, item.key)).length,
+  () => ADMIN_CAP_STAFF_DEFS.filter(
+    (item) => HYGIENE_REVIEW_CAP_KEYS.includes(item.key) && hasCap(caps.value, item.key),
+  ).length,
 )
 const liveOk = computed(() => hasLiveCamera())
 // 已入队、还没确认上传成功的任务（键与 buildWorkQueue 的 task.key 一致）：让待办
@@ -1375,7 +1381,7 @@ async function decide(action, reason = '') {
         <!-- 被放权的那一档在界面上如实标出来：顶栏只有「员工（姓名）」两档可选，而这一页上
              他干的是判别人活的活（真机走查 O-id：角色审查 F-01 记的就是"界面层看不见它"）。
              只在真有可用的那三项时出现，普通员工看不到这一颗。 -->
-        <span v-if="employee && staffCapCount" class="hy-work-role role" :title="`可判 ${staffCapCount} 项：${ADMIN_CAP_STAFF_DEFS.filter((item) => hasCap(caps, item.key)).map((item) => item.label).join('、')}`">
+        <span v-if="employee && staffCapCount" class="hy-work-role role" :title="`可判 ${staffCapCount} 项：${ADMIN_CAP_STAFF_DEFS.filter((item) => HYGIENE_REVIEW_CAP_KEYS.includes(item.key) && hasCap(caps, item.key)).map((item) => item.label).join('、')}`">
           现场复核 · {{ staffCapCount }} 项
         </span>
       </div>

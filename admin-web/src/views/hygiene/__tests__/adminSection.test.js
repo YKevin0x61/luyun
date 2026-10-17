@@ -122,8 +122,8 @@ describe('hygiene admin section shell', () => {
     // 票 02：meta 里还多了内容区的两个 opt-out（`ownBottomBar` / `flush`）—— 现场这几页
     // 两项都关着（清单里没标），断的是整份 meta 的形状。
     expect(pageMeta('/workbench/floor/daily')).toEqual({
-      standalone: true, public: false, audience: 'admin', workbenchTheme: true,
-      ownBottomBar: false, flush: false,
+      standalone: true, public: false, audience: 'admin', staffCap: null,
+      workbenchTheme: true, ownBottomBar: false, flush: false,
     })
     expect(router).toMatch(/hygieneAdminPage\('\/workbench\/floor\/zones'/)
     expect(router).toMatch(/hygieneAdminPage\('\/workbench\/floor\/daily'/)

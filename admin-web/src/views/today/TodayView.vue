@@ -84,11 +84,11 @@ const staffMe = ref(null)
 const deepClock = ref(null)
 const dailyClocks = ref(null)
 
-// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十项开关里**员工端真有执行点**的那四项
+// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十三项开关里**员工端真有执行点**的那六项
 // （`ADMIN_CAP_STAFF_DEFS` 与后端 `STAFF_SIDE_CAPABILITIES` 同义），逐项标出开了没有。
 // 判据一律看 `admin_caps` —— `permission` 只是显示用的标签（真机走查 S10：标签写着
 // 「管理员」而一项开关都没给是合法状态），拿标签判会放行没给的那件事。
-// 未接线的那七项**不进这张卡**：它们对应的是超级管理员在电脑端的活，员工端没有入口，
+// 未接线的七项**不进这张卡**：它们对应的是超级管理员在电脑端的活，员工端没有入口，
 // 画出来就是"勾了不生效"那类缺陷的另一面。
 const staffCaps = computed(() => ADMIN_CAP_STAFF_DEFS.map((item) => ({
   ...item,
@@ -98,11 +98,15 @@ const staffCapCount = computed(() => staffCaps.value.filter((item) => item.grant
 
 // 能力 → 落点（§12 第 1 条裁定：能力卡计 **4 项**，三项在「卫生」页、`overtime` 在「加班与补钟」页）。
 // 落点写在数据旁边，而不是页尾一句概括句 —— 那种句子在一项能力多出来之后就会变成假话。
+// 2026-10-14 加的两项：`schedule` 落到人事组的月历（管理端那一面，员工会话 + 能力即可进），
+// `wastage` 落到后勤组的损耗分析（同上）。两页都是 `audience: admin` + `staffCap`。
 const CAP_ROUTES = {
   daily_review: '/workbench/me/clean',
   deep_review: '/workbench/me/clean',
   fix: '/workbench/me/clean',
   overtime: '/workbench/me/overtime',
+  schedule: '/workbench/hr/calendar',
+  wastage: '/workbench/kitchen/loss',
 }
 
 // 健康证到期（一行提示，只在临期 / 过期时渲染）：文案里**不带日期** —— 日期在下面
@@ -691,9 +695,10 @@ useNudgePull({
         <section v-if="staffCapCount" class="tA-card caps">
           <div class="tA-hd">
             <span class="tag caps">你能做的事</span>
-            <!-- 档位那颗胶囊（`现场复核 · n 项`，与卫生页页头那颗同一个措辞）：原来在账号
-                 信息里的「卫生权限」那一行，票 01 起搬到这里 —— 同一件事只说一遍。 -->
-            <em>现场复核 · {{ staffCapCount }} 项</em>
+            <!-- 档位那颗胶囊：原来在账号信息里的「卫生权限」那一行，票 01 起搬到这里 ——
+                 同一件事只说一遍。措辞 2026-10-14 从「现场复核」改成「管理权限」：花名册上
+                 可勾的现在有六项，其中排班管理与损耗分析不是「复核」，写着那个词就成假话。 -->
+            <em>管理权限 · {{ staffCapCount }} 项</em>
           </div>
           <ul class="cap-list">
             <!-- 三项**都列**：没开的那一项写「超级管理员还没开给你」，员工才知道该找店长开什么，
@@ -727,7 +732,7 @@ useNudgePull({
             <em>{{ nextLine }}</em>
           </div>
           <!-- 换班/调班的说明落在这里（DO:747）：不再是弹一下就没的提示 -->
-          <p class="tA-sub sched-note">今天上哪个班、在哪个区由排班决定；本月的班看「整月」。请假、换班在月历上点那一天办（排班页归超级管理员）。</p>
+          <p class="tA-sub sched-note">今天上哪个班、在哪个区由排班决定；本月的班看「整月」。请假、换班在月历上点那一天办（排班页由店长管理）。</p>
           <p class="shift" :class="tone">{{ todayText }}</p>
           <p class="tA-sub">{{ todaySub }}</p>
           <div class="acts">

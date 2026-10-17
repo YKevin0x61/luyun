@@ -40,6 +40,7 @@ import {
   tabBarOnScreen,
 } from '../../utils/workbenchInsets'
 import {
+  pageVisibleFor,
   workbenchAudienceFor,
   workbenchGroup,
   workbenchGroupOf,
@@ -175,28 +176,29 @@ const contentInsetStyle = computed(() => {
 // `identity` 是 null，导航不渲染 —— 不给一个可能点不通的入口。
 const identity = computed(() => identityStore.identity)
 const audience = computed(() => workbenchAudienceFor(identity.value))
-const navItems = computed(() => workbenchNavFor(identity.value))
+// 能力键只在员工那一档用得上（`staffCap` 页：排班三页与损耗分析，2026-10-14）。
+const caps = computed(() => identityStore.staffCaps)
+const navItems = computed(() => workbenchNavFor(identity.value, caps.value))
 
 const groupRow = computed(() => workbenchGroup(groupKey.value))
 /** 本组名（rail 的 `aria-label` 与页头下拉的组名格都用它）。 */
 const groupLabel = computed(() => (groupRow.value ? groupRow.value.label : ''))
-/** 本组可见页：**group + audience 双层过滤**（spec §5.13）。手写名单（`items`）原样用。 */
+/** 本组可见页：**group + audience + staffCap 三层过滤**（spec §5.13）。手写名单（`items`）原样用。 */
 const groupPages = computed(() =>
   props.items && props.items.length
     ? props.items
-    : workbenchPagesOf(groupKey.value, audience.value))
+    : workbenchPagesOf(groupKey.value, audience.value, caps.value))
 
 /** 员工那一档不渲染「‹ 后台」（D7）：那一扇门通向 `/`（运营仪表盘）—— 超管专属页，
  *  员工点下去只会吃一张「无权访问」。挂着一扇**必然被拒**的门比没有门更糟：
  *  它天天在那里，点一次损失一次。超管那一档照旧（spec 故事 11 的双向入口）。 */
 const showBackToAdmin = computed(() => identity.value !== IDENTITY_STAFF)
 
-/** 此刻这一页还属于当前身份吗（判据是页面清单里那一行的 `audience`，不猜路径前缀）。 */
+/** 此刻这一页还属于当前身份吗（判据是页面清单里那一行的 `audience` / `staffCap`，
+ *  与导航同一个 `pageVisibleFor`，不猜路径前缀）。 */
 function viewAllowedHere() {
   if (identity.value === null) return true
-  const row = pageRow(route.path)
-  if (!row) return true
-  return row.audience === 'both' || row.audience === audience.value
+  return pageVisibleFor(pageRow(route.path), audience.value, caps.value)
 }
 
 /** 切档之后人还站在别人的页上时，把他送回**这一档**能看的最近一页；导航里那几格就是落点。

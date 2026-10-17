@@ -32,7 +32,7 @@ import WorkbenchIdentitySwitcher from './WorkbenchIdentitySwitcher.vue'
 import { useWorkbenchLogout } from '../../composables/useWorkbenchLogout'
 import { pageRow } from '../../router/pageRoutes.js'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
-import { workbenchGroup, workbenchGroupOf, workbenchPagesOf } from '../../utils/workbenchNav'
+import { workbenchAudienceFor, workbenchGroup, workbenchGroupOf, workbenchPagesOf } from '../../utils/workbenchNav'
 import { IDENTITY_STAFF } from '../../utils/workbenchIdentity'
 
 const props = defineProps({
@@ -68,7 +68,14 @@ const groupLabel = computed(() => {
 
 const pages = computed(() => {
   if (props.items && props.items.length) return props.items
-  return groupKey.value ? workbenchPagesOf(groupKey.value) : []
+  if (!groupKey.value) return []
+  // 组里的页按**当前身份 + 员工能力键**过滤（2026-10-14）：员工那一档的人事组只该看到
+  // 月历 / 待办 / 班次表（勾了「排班管理」时），花名册与另外四页不出现。
+  return workbenchPagesOf(
+    groupKey.value,
+    workbenchAudienceFor(identityStore.identity),
+    identityStore.staffCaps,
+  )
 })
 
 /** 这一刻站的那一页：**页面清单优先**。

@@ -124,15 +124,26 @@ class WastageActor:
 
     `kind` 是 `staff` / `admin`（见模块头常量）。员工的 `employee_id` 一定有值；
     管理端那台共享账号没有员工号，所以 `employee_id` 为空、`owner_key` 是 `super`。
+
+    `sees_all`：**看全店**（管理端，或开了「损耗分析」能力的员工）。它只由 API 层按
+    `admin_caps` 给，服务层不自己去读权限 —— 归属判据因此仍然只有 `_scope_clause` 一处。
+    记录落在谁名下与谁能看是两件事：有能力看全店的员工，自己记的那笔照样记在自己名下
+    （`operator_kind` / `employee_id` 不变），只是查询不再按归属过滤。
     """
 
     kind: str
     employee_id: Optional[int] = None
     name: str = ""
+    sees_all: bool = False
 
     @property
     def is_admin(self) -> bool:
         return self.kind == KIND_ADMIN
+
+    @property
+    def can_see_all(self) -> bool:
+        """查全店（管理端，或开了「损耗分析」能力的员工）。"""
+        return self.is_admin or bool(self.sees_all)
 
     @property
     def owner_key(self) -> str:
@@ -455,11 +466,11 @@ class WastageStore:
         """归属 + 筛选 → `WHERE` 子句与参数。**只有这一处**决定员工看不看得到别人的。
 
         员工那一档按 `employee_id` 过滤（管理端在员工手机上登记的那几笔不算他的）；
-        管理端那一档不加这一条，看全店。
+        管理端那一档、以及开了「损耗分析」能力的员工（`can_see_all`）不加这一条，看全店。
         """
         where: list[str] = []
         params: list[Any] = []
-        if not actor.is_admin:
+        if not actor.can_see_all:
             where.append("employee_id = ?")
             params.append(int(actor.employee_id))
         if start_date not in (None, ""):
@@ -612,8 +623,9 @@ class WastageStore:
         """物料名称建议：近 N 天登记过的名字，去重、保留最近的顺序。
 
         员工那一档只看自己登记过的（他填的多半是自己经手过的东西）；管理端看全店
-        —— 他登记时该认得店里所有会坏的物料。源项目的 `getSuggestions` 只给员工自己
-        那一份，这里多出来的一档是给「店长也能登记」这条定的。
+        —— 他登记时该认得店里所有会坏的物料。开了「损耗分析」能力的员工也看全店
+        （他看得到全店的明细，补全就不该只给一半）。源项目的 `getSuggestions` 只给员工
+        自己那一份，这里多出来的一档是给「店长也能登记」这条定的。
         """
         since = (self._now_dt().date() - timedelta(days=max(1, int(days)))).isoformat()
         clause, params = self._scope_clause(actor, start_date=since)
@@ -785,12 +797,13 @@ class WastageStore:
     async def image_meta(self, actor: WastageActor, capture_id: str) -> Optional[dict]:
         """这张图这个人能不能看 —— 能就回元数据，不能回 None（调用方一律回 404）。
 
-        管理端看全部；员工只能看**自己传的**。不区分「不存在」与「不是你的」：
+        管理端看全部；开了「损耗分析」能力的员工也看全部（明细里每一笔都带照片）；
+        其余员工只能看**自己传的**。不区分「不存在」与「不是你的」：
         否则别人传过什么图能被一条 403 问出来。
         """
         params: list[Any] = [str(capture_id or "")]
         scope = ""
-        if not actor.is_admin:
+        if not actor.can_see_all:
             scope = " AND owner_key = ?"
             params.append(actor.owner_key)
         rows = await self._rows(

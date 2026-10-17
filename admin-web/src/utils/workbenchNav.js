@@ -8,9 +8,10 @@
  *  「人事」）的落点与名字就是这里那一行，不各写一遍。
  *
  *  **可见性不另写一份名单**：每一格的 `to`（以及票 08 起 `links` 里的每一条）指向清单里
- *  的一页，那一页的 `audience` 就是这一项的可见性（`both` 谁都看得见、`admin` / `staff`
- *  各给一边）。`to` 指不到一页时 `pageMeta` 当场抛错 —— 导航指一条不存在或没登记的路径，
- *  员工点下去就是白屏。
+ *  的一页，那一页的 `audience`（以及员工那一档的 `staffCap`）就是这一项的可见性（`both`
+ *  谁都看得见、`admin` / `staff` 各给一边、`admin + staffCap` 给「勾了那项能力的员工」）。
+ *  判据只有 `pageVisibleFor` 一处。`to` 指不到一页时 `pageMeta` 仍当场抛错 —— 导航指一条
+ *  不存在或没登记的路径，员工点下去就是白屏。
  *
  *  **一组一格，但一格可以有两扇门**（票 08）：后勤组装着配方与备货计划两页，员工导航里
  *  两项都要有（spec 故事 8）。做法是给那一格加 `links`（**一组多条目**），而不是把后勤
@@ -26,6 +27,7 @@
  *  —— 不叫「管理员」）。两者的映射就在 `workbenchAudienceFor` 这一处，别在别处再写一遍。
  */
 import { PAGE_ROUTES, pageMeta, pageRow } from '../router/pageRoutes.js'
+import { hasCap } from './adminCaps.js'
 import { PREP_PLAN_PATH } from './prepPlanPaths.js'
 import { RECIPE_HOME_PATH, RECIPE_MANAGE_PATH, RECIPE_QR_PATH } from './recipePaths.js'
 import { WASTAGE_ANALYSIS_PATH } from './wastagePaths.js'
@@ -93,19 +95,42 @@ export function workbenchLinksOf(group) {
   return group.links ? [...group.links] : [{ to: group.to }]
 }
 
+/** 这一页对**这个身份 + 这组能力**可不可见（导航与组内导航的唯一判据）。
+ *
+ *  三态 `audience` 之外还有 `staffCap`（2026-10-14）：店长专属页（`audience: admin`）可以
+ *  对「勾了某项能力的员工」也开一扇门 —— 排班三页（`schedule`）与损耗分析（`wastage`）。
+ *
+ *  判定顺序（fail-closed）：
+ *  1. `both` 谁都看得见；
+ *  2. `audience` 与这一档相同 —— 管理端看 admin 页，员工看 staff 页；
+ *  3. 员工这一档再看 `staffCap`：勾了这一项就开，没勾就不开（管理端的 `admin` 页
+ *     对管理端永远开着，不看 `staffCap`）；
+ *  4. 其余不可见。
+ *
+ *  清单里没登记的路径（单测里的临时路由）按可见处理 —— 与这条落地之前一字不差。
+ */
+export function pageVisibleFor(row, audience, caps) {
+  if (!row) return true
+  const allowed = row.audience
+  if (allowed === 'both') return true
+  if (allowed === audience) return true
+  if (audience === 'staff' && row.staffCap) return hasCap(caps, row.staffCap)
+  return false
+}
+
 /** 组里有哪些页（路径 + 标题，顺序照页面清单）—— 壳的组内导航从它派生。
  *  清单是唯一来源：组里加一页只改那张表，导航自己就跟上。
  *
- *  **两层过滤（③-2 / spec §5.13）**：`group` 那层之外，还要按**落点页的 `audience`** 过一遍
- *  —— 只按 group 过滤会让员工在「配方」组看到「岗位二维码 / 配方管理」两扇点不通的门
- *  （手写名单 `pages` 与清单派生两条路都要过这一层）。`audience` 不给（老调用点、单测里那种
- *  临时路由）时只按 group 过滤，与这一条落地之前一字不差。 */
-export function workbenchPagesOf(group, audience) {
-  const visible = (path, title) => {
+ *  **两层过滤（③-2 / spec §5.13）**：`group` 那层之外，还要按**落点页的 `audience`**
+ *  （以及员工那一档的 `staffCap`）过一遍 —— 只按 group 过滤会让员工在「配方」组看到
+ *  「岗位二维码 / 配方管理」两扇点不通的门，也会让没勾「排班管理」的员工在人事组
+ *  看到月历 / 待办 / 班次表三扇同样点不通的门（手写名单 `pages` 与清单派生两条路都要过
+ *  这一层）。`audience` 不给（老调用点、单测里那种临时路由）时只按 group 过滤，与这一条
+ *  落地之前一字不差。 */
+export function workbenchPagesOf(group, audience, caps) {
+  const visible = (path) => {
     if (!audience) return true
-    const row = pageRow(path)
-    // 清单里没登记的路径照旧渲染（单测里的临时路由）；登记了的按它的 `audience` 判。
-    return !row || row.audience === 'both' || row.audience === audience
+    return pageVisibleFor(pageRow(path), audience, caps)
   }
   // 手写的入口名单优先（见 `kitchen` 那一格的 `pages`）：清单里有些页是「从列表点进去」的
   // 功能页，当一级入口就是点不通的死门。名单里只写路径，标题仍从清单取 —— 一处定义。
@@ -119,7 +144,7 @@ export function workbenchPagesOf(group, audience) {
       })
   }
   return PAGE_ROUTES.filter((row) => row.group === group)
-    .filter((row) => visible(row.path, row.title))
+    .filter((row) => visible(row.path))
     .map(({ path, title }) => ({ path, title }))
 }
 
@@ -131,22 +156,21 @@ export function workbenchAudienceFor(identity) {
   return null
 }
 
-/** 身份 → 导航项（一项 = 一格里的一个链接，`key` 是它所属的那一格）。
+/** 身份 + 能力键 → 导航项（一项 = 一格里的一个链接，`key` 是它所属的那一格）。
  *
- *  **过滤按项、不按格**：每条链接的可见性只看它自己落点那一页的 `audience`；整格一起藏的
- *  反面（组里一页给管理端、一页给两边）也就自然成立 —— 后勤那一格的后半扇门对员工可见
- *  （票 08 的验收），而「配方管理」那样的 admin 页不在 `links` 里，也就永远不会被渲染
- *  出来。身份认不出（没登录、探针还没回来）时不渲染任何一格，宁可没有导航，也不给一个
- *  点不通的入口。 */
-export function workbenchNavFor(identity) {
+ *  **过滤按项、不按格**：每条链接的可见性只看它自己落点那一页的 `audience`（员工那一档
+ *  再看 `staffCap`，判据是 `pageVisibleFor` 一处）；整格一起藏的反面（组里一页给管理端、
+ *  一页给两边）也就自然成立 —— 后勤那一格的后半扇门对员工可见（票 08 的验收），而
+ *  「配方管理」那样的 admin 页不在 `links` 里，也就永远不会被渲染出来。
+ *  身份认不出（没登录、探针还没回来）时不渲染任何一格，宁可没有导航，也不给一个
+ *  点不通的入口。`caps` 只对员工那一档有用（管理端不看能力键）。
+ */
+export function workbenchNavFor(identity, caps) {
   const audience = workbenchAudienceFor(identity)
   if (!audience) return []
   return WORKBENCH_NAV_GROUPS.flatMap((group) =>
     workbenchLinksOf(group)
-      .filter(({ to }) => {
-        const { audience: allowed } = pageMeta(to)
-        return allowed === 'both' || allowed === audience
-      })
+      .filter(({ to }) => pageVisibleFor(pageMeta(to), audience, caps))
       .map(({ to }) => ({ key: group.key, label: group.label, to }))
   )
 }

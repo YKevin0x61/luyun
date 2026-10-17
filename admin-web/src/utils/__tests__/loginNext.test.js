@@ -204,6 +204,17 @@ describe('resolveStaffNext', () => {
       .toBe('/workbench')
   })
 
+  it('2026-10-14：带 staffCap 的店长页也是员工落点（员工会话 + 那项能力能进）', () => {
+    // 员工会话在排班页 / 损耗分析页上过期、重新登录后要回到那一页 —— 不认它就会静默落到
+    // 工作台首页，而且没有任何报错。
+    expect(resolveStaffNext('/workbench/hr/calendar')).toBe('/workbench/hr/calendar')
+    expect(resolveStaffNext('/workbench/hr/inbox')).toBe('/workbench/hr/inbox')
+    expect(resolveStaffNext('/workbench/hr/shifts')).toBe('/workbench/hr/shifts')
+    expect(resolveStaffNext('/workbench/kitchen/loss')).toBe('/workbench/kitchen/loss')
+    // 花名册没有 staffCap（身份证与底薪不下发员工端）：仍不是员工落点。
+    expect(resolveStaffNext('/workbench/hr/roster')).toBe('/workbench')
+  })
+
   it('票 07：老地址 ?next=/recipe* 换成新地址之后才算员工落点', () => {
     expect(resolveStaffNext('/recipe/detail?slug=changfen'))
       .toBe('/workbench/kitchen/recipe/detail?slug=changfen')
@@ -287,6 +298,20 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
     expect(resolveLoginTab('/workbench/kitchen/recipe/manage', 'admin')).toBe('admin')
   })
 
+  it('2026-10-14：带 staffCap 的页两种身份都可能开，不强制任何一栏（交回记住值）', () => {
+    // 排班三页与损耗分析：管理端与「勾了那项能力的员工」都进得去。写死员工栏会让管理端
+    // 在手机号表单上白填一次；写死管理员栏会让员工找不到自己的入口。
+    for (const path of [
+      '/workbench/hr/calendar',
+      '/workbench/hr/shifts?month=2026-10',
+      '/workbench/kitchen/loss',
+    ]) {
+      expect(resolveLoginTab(path, 'admin'), path).toBe('admin')
+      expect(resolveLoginTab(path, 'staff'), path).toBe('staff')
+      expect(resolveLoginTab(path, null), path).toBe('staff')
+    }
+  })
+
   it('管理端路径、站外地址、登录页自身都不强制员工栏', () => {
     expect(resolveLoginTab('/admin', 'admin')).toBe('admin')
     expect(resolveLoginTab('/workbench/hr/roster', 'admin')).toBe('admin')
@@ -321,14 +346,20 @@ describe('resolveLoginTab（D13）：?next 是管理端专属页时强制管理�
   })
 
   it('优先于「记住的是员工栏」：目标进不去就不该开员工栏让人白填', () => {
-    expect(resolveLoginTab('/workbench/hr/calendar', 'staff')).toBe('admin')
+    // 2026-10-14 起月历 / 待办 / 班次表带 `staffCap`，不再属于「只认管理端」那一档
+    // （它们按记住值走，见下面那条）。这里拿不带 staffCap 的花名册当例子。
+    expect(resolveLoginTab('/workbench/hr/roster', 'staff')).toBe('admin')
     expect(resolveLoginTab('/admin?tab=orders', 'staff')).toBe('admin')
   })
 
   it('带 query 与老地址（先迁移再判身份）都认', () => {
-    expect(resolveLoginTab('/workbench/hr/shifts?tab=add', null)).toBe('admin')
+    expect(resolveLoginTab('/workbench/hr/roster?tab=profile', null)).toBe('admin')
     expect(resolveLoginTab('/hygiene/daily', null)).toBe('admin')
-    expect(resolveLoginTab('/scheduling/inbox', null)).toBe('admin')
+    // 老地址先迁移、再按迁移**之后**那一页判身份：`/workbench/roster` 换到花名册
+    // （不带 `staffCap`，强制管理员栏）；`/scheduling/inbox` 换到排班待办（2026-10-14 起
+    // 带 `staffCap`，按记住值走，没有记住值时是员工栏）。
+    expect(resolveLoginTab('/workbench/roster', null)).toBe('admin')
+    expect(resolveLoginTab('/scheduling/inbox', null)).toBe('staff')
   })
 
   it('员工栏那两档不被抢走：员工页与配方阅读面照旧强制员工栏', () => {

@@ -228,6 +228,47 @@ describe('按身份过滤导航', () => {
     expect(pageMeta('/workbench/kitchen/recipe/manage').audience).toBe('admin')
     expect(pageMeta('/workbench/me/today').audience).toBe('staff')
   })
+
+  it('员工勾了「排班管理」/「损耗分析」之后，那两扇门才出现（2026-10-14）', () => {
+    const keysOf = (identity, caps) => [
+      ...new Set(workbenchNavFor(identity, caps).map((item) => item.key)),
+    ]
+    // 没有能力键时与这条落地之前一字不差。
+    expect(keysOf('staff', [])).toEqual(['home', 'hygiene', 'kitchen', 'me'])
+    // 勾了排班管理：人事那一格出现（落点是月历）。
+    expect(keysOf('staff', ['schedule'])).toEqual(['home', 'hr', 'hygiene', 'kitchen', 'me'])
+    // 勾了损耗分析：后勤那一格多出第三扇门。
+    const kitchenTo = (caps) => workbenchNavFor('staff', caps)
+      .filter((item) => item.key === 'kitchen')
+      .map((item) => item.to)
+    expect(kitchenTo([])).toEqual(['/workbench/kitchen/recipe', PREP_PLAN_PATH])
+    expect(kitchenTo(['wastage'])).toEqual([
+      '/workbench/kitchen/recipe', PREP_PLAN_PATH, WASTAGE_ANALYSIS_PATH,
+    ])
+    // 管理端不看能力键：四格照旧（排班三页与损耗分析本来就在他那一档里）。
+    expect(keysOf('super', [])).toEqual(['home', 'hr', 'floor', 'kitchen'])
+  })
+
+  it('组内导航：员工进人事组只看到他能用的三页', () => {
+    const hrPages = (audience, caps) => workbenchPagesOf('hr', audience, caps)
+      .map((page) => page.path)
+    expect(hrPages('staff', ['schedule'])).toEqual([
+      '/workbench/hr/calendar',
+      '/workbench/hr/inbox',
+      '/workbench/hr/shifts',
+    ])
+    // 没勾就一页都不给（花名册 / 人事提醒 / 加班统计 / 考勤表 / 节假日日历都是管理端那一档）。
+    expect(hrPages('staff', [])).toEqual([])
+    expect(hrPages('admin', [])).toHaveLength(8)
+    // 后勤组：员工带「损耗分析」能力才多那一页（配方的印码与管理面仍是管理端专属）。
+    const kitchenPages = (audience, caps) => workbenchPagesOf('kitchen', audience, caps)
+      .map((page) => page.path)
+    expect(kitchenPages('staff', [])).toEqual([
+      '/workbench/kitchen/recipe',
+      PREP_PLAN_PATH,
+    ])
+    expect(kitchenPages('staff', ['wastage'])).toContain(WASTAGE_ANALYSIS_PATH)
+  })
 })
 
 describe('高亮跟着新分组走', () => {

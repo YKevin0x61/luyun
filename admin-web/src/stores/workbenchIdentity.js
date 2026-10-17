@@ -8,8 +8,9 @@
  *  （`meta.audience`）与服务端页面墙说了算 —— 本票一个字都不改那两条链。
  */
 import { defineStore } from 'pinia'
+import { normalizeCaps } from '../utils/adminCaps'
 import { isLoggedIn } from '../utils/authStatus'
-import { staffRequest, staffSessionState, STAFF_SESSION_PROBE_TIMEOUT_MS } from '../utils/hygieneStaff'
+import { staffRequest, staffSession, STAFF_SESSION_PROBE_TIMEOUT_MS } from '../utils/hygieneStaff'
 import {
   IDENTITY_ADMIN,
   IDENTITY_STAFF,
@@ -37,6 +38,9 @@ export const useWorkbenchIdentityStore = defineStore('workbenchIdentity', {
     notice: null,
     /** 员工姓名（拿不到就是空串，界面据此不显示空括号）。 */
     staffName: '',
+    /** 员工会话的能力键（`admin_caps` 归一化后的数组）。导航按它过滤 `staffCap` 页
+     *  （2026-10-14）：排班三页与损耗分析对员工那一档要这一项。 */
+    staffCaps: [],
     probing: false,
   }),
   getters: {
@@ -62,13 +66,16 @@ export const useWorkbenchIdentityStore = defineStore('workbenchIdentity', {
       if (this.probing) return
       this.probing = true
       try {
-        const [adminValid, staffState] = await Promise.all([
+        const [adminValid, staffProbe] = await Promise.all([
           isLoggedIn().catch(() => false),
-          staffSessionState().catch(() => 'unauthenticated'),
+          // `staffSession` 一次带回「有没有会话」与那一份 employee 投影（姓名 + 能力键），
+          // 不必为导航过滤再打一条 `/staff/me`（2026-10-14：导航要按能力过滤）。
+          staffSession().catch(() => ({ authenticated: false, employee: null })),
         ])
-        // `unknown`（断网 / 超时）不当作「确实没登录」，但也不够格当有效会话：
-        // 定档按无效算，避免弱网下把员工的名义身份顶成超级管理员。
-        const staffValid = staffState === 'ok'
+        // 网络层失败（断网 / 超时）在上面的 catch 里落到「没登录」：与 `staffSessionState`
+        // 的 `unknown` 同一处理 —— 不够格当有效会话，避免弱网下把名义身份顶成超级管理员。
+        const staffValid = Boolean(staffProbe && staffProbe.authenticated)
+        const employee = (staffProbe && staffProbe.employee) || null
 
         const next = resolveWorkbenchIdentity({
           adminValid,
@@ -79,6 +86,9 @@ export const useWorkbenchIdentityStore = defineStore('workbenchIdentity', {
         this.sessions = { admin: adminValid, staff: staffValid }
         this.identity = next.identity
         this.available = next.available
+        // 员工的能力键：工作台导航与组内导航按它过滤（`staffCap` 页对员工那一档的入口）。
+        // 没有员工会话时清空 —— 别让上次会话的能力留在内存里给下一次显示用。
+        this.staffCaps = staffValid ? normalizeCaps(employee && employee.admin_caps) : []
         if (next.remembered !== this.remembered) {
           this.remembered = next.remembered
           if (next.remembered) saveWorkbenchIdentity(next.remembered)
@@ -87,7 +97,10 @@ export const useWorkbenchIdentityStore = defineStore('workbenchIdentity', {
           this.notice = '管理端的登录已过期，已按员工身份显示。'
         }
 
-        if (staffValid && !this.staffName) await this.loadStaffName()
+        if (staffValid && !this.staffName && employee) {
+          // 与登录页同一套兜底：没填名字时用手机号，两者都没有才算拿不到。
+          this.staffName = String(employee.name || employee.phone || '')
+        }
       } finally {
         this.probing = false
       }
@@ -133,6 +146,7 @@ export const useWorkbenchIdentityStore = defineStore('workbenchIdentity', {
       this.sessions = unknownState()
       this.notice = null
       this.staffName = ''
+      this.staffCaps = []
     },
 
     /** 员工姓名（`/api/hygiene/staff/me` 的 `employee.name`）。拿不到就留空，不抛错。 */
