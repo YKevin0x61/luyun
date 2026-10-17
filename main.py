@@ -35,6 +35,10 @@ from api.runtime_settings import router as runtime_settings_router
 from api.logs import router as logs_router
 from api.scheduling import router as scheduling_router
 from api.overtime import router as overtime_router
+# 日常损耗登记（从 worktool2 那个小程序搬过来）：**两个身份走同一个面**，
+# 每条路由自己带 require_any_identity_session（管理端会话或员工会话），
+# 所以注册处不挂 verify_admin_token —— 员工手机端没有 API token。
+from api.wastage import router as wastage_router
 # 考勤表（考勤表导出 票 01）：只有管理端那一面，路由自己带 require_session。
 from api.attendance import router as attendance_router
 # 法定节假日日历（考勤表导出 票 02）：管理端专属，路由自己带 require_session。
@@ -1103,6 +1107,9 @@ app.include_router(scheduling_router)
 # 票 02 的管理面会自己带 require_session —— 都不挂 verify_admin_token，
 # 因为员工手机端根本没有 API token。
 app.include_router(overtime_router)
+# 日常损耗登记：两个身份一个面（读写在服务层按归属分），路由自己带
+# require_any_identity_session —— 与加班同理，不挂 verify_admin_token。
+app.include_router(wastage_router)
 # 考勤表（考勤表导出票 01）同理：只有管理端那一面，自己带 require_session ——
 # 这一页有全店人的底薪与假期，员工那一档连页面都进不去。
 app.include_router(attendance_router)
@@ -1294,11 +1301,18 @@ SPA_PAGE_ROUTES = (
     # 两种身份都进得去，员工那一档页面是只读的）。旧 `/prep-plan` 从这一份清单与
     # vue-router 一起删掉 —— 自然 404、不留别名（`?next=` 里的老地址由前端换）。
     "/workbench/kitchen/prep-plan",
+    # 日常损耗登记（从 worktool2 那个小程序搬过来）：管理端的分析与明细在后勤组
+    # （`/workbench/kitchen/loss`，只给管理端 —— 全店数据与原因分布不是员工要看的东西）；
+    # 员工端的登记页在「我的」组（`/workbench/me/loss`，两种身份都能进：店长也登记）。
+    # 同一批：漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
+    "/workbench/kitchen/loss",
     "/workbench/me/today",
     "/workbench/me/month",
     # 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长。同这一批：
     # 漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
     "/workbench/me/overtime",
+    # 损耗登记（员工端那一面）：登记 + 看自己最近记的几笔。
+    "/workbench/me/loss",
     "/workbench/me/clean",
     "/workbench/forbidden",
 )

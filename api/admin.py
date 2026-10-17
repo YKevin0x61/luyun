@@ -29,6 +29,7 @@ from db_core.schema import (
     OVERTIME_TABLES,
     RECIPE_TABLES,
     SCHEDULING_TABLES,
+    WASTAGE_TABLES,
     WECOM_SUBSCRIPTION_TABLES,
 )
 from api.security import verify_admin_token
@@ -48,6 +49,7 @@ _ADMIN_READ_ONLY_TABLES = frozenset({
     *WECOM_SUBSCRIPTION_TABLES,
     *OVERTIME_TABLES,
     *ATTENDANCE_TABLES,
+    *WASTAGE_TABLES,
 })
 _ADMIN_WRITABLE_TABLES = frozenset(
     table for table in ALL_TABLES
@@ -61,6 +63,7 @@ _ADMIN_TABLE_GROUPS = (
     ("wecom", "企微推送", WECOM_SUBSCRIPTION_TABLES),
     ("overtime", "人事", OVERTIME_TABLES),
     ("attendance", "考勤", ATTENDANCE_TABLES),
+    ("wastage", "损耗", WASTAGE_TABLES),
     ("auth", "登录认证", AUTH_PHYSICAL_TABLES),
     ("external", "其他数据源", ("logs",)),
 )

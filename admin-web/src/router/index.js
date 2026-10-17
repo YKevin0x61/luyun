@@ -154,6 +154,11 @@ const routes = [
   // （`composables/usePrepPlanAdmin.js`）。旧 `/prep-plan` 从路由里删干净（自然 404，
   // 不给别名、不做重定向；`?next=` 里的老地址由 `utils/loginNext.js` 换成新地址）。
   workbenchKitchenPage('/workbench/kitchen/prep-plan', 'prep-plan', () => import('../views/PrepPlanView.vue')),
+  // 损耗分析（从 worktool2 那个小程序搬过来）：后勤组的第三页 —— 店长按月看损耗的
+  // 总数 / 原因分布 / 高损耗物料 / 逐日趋势，下半页是按条件翻的明细。**只给管理端**
+  // （`audience: admin`）：全店的损耗数据与「谁记的」不是员工要看的东西；员工那一面是
+  // 登记页（`/workbench/me/loss`），接口那一侧同一批端点按归属分。
+  workbenchKitchenPage('/workbench/kitchen/loss', 'wastage-analysis', () => import('../views/wastage/WastageAnalysisView.vue')),
   // 子应用根（票 06）：就是「今天」首页 —— 按身份用已有接口聚合今日摘要，只做分流与
   // 摘要、不做业务动作。它套**工作台外壳**（`WorkbenchLayout`：顶栏一条 + 按身份过滤的
   // 导航），跟「我的」那三页同一个壳；月历仍自己占一行（人事组的落点），两行不再指
@@ -179,6 +184,11 @@ const routes = [
   // 统计在票 02（`/workbench/hr/overtime`），店长在手机上的审批面在票 04 —— 这一页
   // 现在只认员工会话（`audience: staff`）。
   workbenchStaffPage('/workbench/me/overtime', 'me-overtime', () => import('../views/overtime/MeOvertimeView.vue')),
+  // 损耗登记（从 worktool2 那个小程序搬过来）：记一笔（物料 / 数量 / 原因 / 照片），
+  // 顺带看自己最近记的几笔。`audience: both` —— 员工用员工会话、店长用管理端会话，
+  // **都能登记**（店长也天天在厨房里，让他为了记一笔先去做员工登录不合理）。
+  // 接口那一侧按归属分：员工只看得到自己记的，全店数据在管理端的分析页。
+  workbenchStaffPage('/workbench/me/loss', 'me-wastage', () => import('../views/wastage/WastageRegisterView.vue')),
   // 卫生待办（员工那半）：五个 tab 与页内结构照旧。
   workbenchStaffPage('/workbench/me/clean', 'hygiene-home', () => import('../views/hygiene/HygieneHomeView.vue')),
   // 越权落点（票 03）：有会话、但这一页不是这个身份的 —— 一页说明 + 一颗回自己首页的

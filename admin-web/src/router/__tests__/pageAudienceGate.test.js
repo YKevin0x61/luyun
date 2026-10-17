@@ -318,6 +318,8 @@ describe('员工专属页不出现在管理端导航里（同一道门的反向�
       '/workbench/floor/daily',
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/prep-plan',
+      // 损耗分析（从 worktool2 那个小程序搬过来）：后勤那一格的第三条，只给管理端。
+      '/workbench/kitchen/loss',
     ])
     expect(unreachableEntries(wrapper, IDENTITY_ADMIN)).toEqual([])
     wrapper.unmount()

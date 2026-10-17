@@ -87,7 +87,9 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
     assert group_keys == [
         "business", "recipe", "hygiene", "scheduling", "wecom", "overtime",
         # 考勤（票 02）：法定节假日日历 —— 人事之外单开一格，03 的月度考勤台账同组。
-        "attendance", "auth", "external"
+        "attendance",
+        # 损耗（迁移 0029：登记台账 / 现场照片 / 常用模板）—— 同「只读展示」的待遇。
+        "wastage", "auth", "external"
     ]
 
 

@@ -14,6 +14,7 @@ import {
   workbenchPagesOf,
 } from '../workbenchNav.js'
 import { PREP_PLAN_PATH } from '../prepPlanPaths.js'
+import { WASTAGE_ANALYSIS_PATH } from '../wastagePaths.js'
 
 // 票 04：导航的判据从「这一页的身份」换成「**此刻的身份**」，于是工作台身份那两档
 // （`super` / `staff`）要先映射成清单里的身份词（`admin` / `staff`）。
@@ -123,8 +124,8 @@ describe('工作台的组（票 05：人事 / 卫生；票 06 加上首页；票
     }
   })
 
-  it('产品组：清单里是配方五页 + 备货计划，导航入口只给能当入口的那四页', () => {
-    // 页面清单仍是完整的六条 —— 路由、页面墙、页面标题都从它来。
+  it('产品组：清单里是配方五页 + 备货计划 + 损耗分析，导航入口只给能当入口的那五页', () => {
+    // 页面清单仍是完整的七条 —— 路由、页面墙、页面标题都从它来。
     expect(PAGE_ROUTES.filter((row) => row.group === 'kitchen').map((row) => row.path)).toEqual([
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/recipe/detail',
@@ -133,8 +134,10 @@ describe('工作台的组（票 05：人事 / 卫生；票 06 加上首页；票
       '/workbench/kitchen/recipe/manage',
       // 票 08：备货计划从 `/prep-plan` 搬进这一组 —— 换位置、统一导航，读写门不动。
       '/workbench/kitchen/prep-plan',
+      // 损耗分析（从 worktool2 那个小程序搬过来）：只给管理端（`audience: admin`）。
+      '/workbench/kitchen/loss',
     ])
-    // **导航入口**是组表里手写的那四页（2026-10-08）：清单里的「配方详情」（要带 `?slug=`）
+    // **导航入口**是组表里手写的那几页（2026-10-08）：清单里的「配方详情」（要带 `?slug=`）
     // 与「配方打印」（A4 预览）是**从列表点进去**的功能页 —— 当成一级入口就是两扇点不通的
     // 死门（页头那个下拉里实测派生出来是六项，其中两项点了进不去）。
     expect(workbenchPagesOf('kitchen').map((page) => page.path)).toEqual([
@@ -142,10 +145,11 @@ describe('工作台的组（票 05：人事 / 卫生；票 06 加上首页；票
       '/workbench/kitchen/recipe/qr',
       '/workbench/kitchen/recipe/manage',
       '/workbench/kitchen/prep-plan',
+      '/workbench/kitchen/loss',
     ])
     // 名单里只写路径，标题仍从清单取（一处定义）。
     expect(workbenchPagesOf('kitchen').map((page) => page.title)).toEqual([
-      '选择岗位', '岗位二维码', '配方管理', '备货计划',
+      '选择岗位', '岗位二维码', '配方管理', '备货计划', '损耗分析',
     ])
     for (const old of [
       '/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr', '/recipe/manage',
@@ -176,27 +180,32 @@ describe('按身份过滤导航', () => {
     }
   })
 
-  it('后勤那一格是「一组两门」：两条链接各自按落点那一页的 audience 过滤', () => {
+  it('后勤那一格是「一组多门」：每条链接各自按落点那一页的 audience 过滤', () => {
     // 票 08 的形态：组表里 `links` 是**一组多条目**的入口，不是把同一组拆成两格
     // （拆成两格的话 `workbenchGroupOf` 会让两格同时高亮）。每条链接的可见性仍只看
-    // 它自己落点那一页的身份 —— 不另写一份名单。
+    // 它自己落点那一页的身份 —— 不另写一份名单。损耗分析（`admin`）进来之后，这一格
+    // 第一次出现「店长看得见、员工看不见」的那半扇门。
     const kitchen = WORKBENCH_NAV_GROUPS.find((group) => group.key === 'kitchen')
     expect(kitchen.links.map((link) => link.to)).toEqual([
       '/workbench/kitchen/recipe',
       PREP_PLAN_PATH,
+      WASTAGE_ANALYSIS_PATH,
     ])
     for (const link of kitchen.links) {
       const row = pageRow(link.to)
       expect(row, `后勤的落点 ${link.to} 不在页面清单里`).toBeTruthy()
       expect(row.group, `后勤的落点 ${link.to} 落在别组`).toBe('kitchen')
     }
-    // 两页都是 `both` —— 员工这一档两条都看得见（票面验收：员工导航加上备货计划）。
+    // 配方与备货计划是 `both`（员工两条都看得见）；损耗分析只给管理端。
     expect(pageMeta(PREP_PLAN_PATH).audience).toBe('both')
+    expect(pageMeta(WASTAGE_ANALYSIS_PATH).audience).toBe('admin')
 
     const toOf = (identity) => workbenchNavFor(identity)
       .filter((item) => item.key === 'kitchen')
       .map((item) => item.to)
-    expect(toOf('super')).toEqual(['/workbench/kitchen/recipe', PREP_PLAN_PATH])
+    expect(toOf('super')).toEqual([
+      '/workbench/kitchen/recipe', PREP_PLAN_PATH, WASTAGE_ANALYSIS_PATH,
+    ])
     expect(toOf('staff')).toEqual(['/workbench/kitchen/recipe', PREP_PLAN_PATH])
   })
 

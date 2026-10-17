@@ -28,6 +28,7 @@
 import { PAGE_ROUTES, pageMeta, pageRow } from '../router/pageRoutes.js'
 import { PREP_PLAN_PATH } from './prepPlanPaths.js'
 import { RECIPE_HOME_PATH, RECIPE_MANAGE_PATH, RECIPE_QR_PATH } from './recipePaths.js'
+import { WASTAGE_ANALYSIS_PATH } from './wastagePaths.js'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_TITLE } from './workbenchCopy.js'
 import { IDENTITY_ADMIN, IDENTITY_STAFF } from './workbenchIdentity.js'
 
@@ -63,12 +64,16 @@ export const WORKBENCH_NAV_GROUPS = [
     links: [
       { to: RECIPE_HOME_PATH },
       { to: PREP_PLAN_PATH },
+      // 损耗分析（从 worktool2 那个小程序搬过来）：店长按月看「这个月损耗了多少、什么
+      // 原因最多、哪几样最费」，是天天会看的数，不是配置页 —— 所以给它一扇直达的门，
+      // 不学「配方管理」那样只留在组内导航里。员工那一档看不到它（清单里 `audience: admin`）。
+      { to: WASTAGE_ANALYSIS_PATH },
     ],
     // 组内**一级入口**（手写）：`workbenchPagesOf` 默认从页面清单派生，而清单里
     // 「配方详情」（要带 `?slug=`）与「配方打印」（A4 预览）是**从列表点进去**的功能页，
     // 不是能当入口的页 —— 放进页头那个下拉就是两扇点不通的死门（2026-10-08 实测，
     // 派生出来是六项）。名单里只写路径，标题仍从清单取。
-    pages: [RECIPE_HOME_PATH, RECIPE_QR_PATH, RECIPE_MANAGE_PATH, PREP_PLAN_PATH],
+    pages: [RECIPE_HOME_PATH, RECIPE_QR_PATH, RECIPE_MANAGE_PATH, PREP_PLAN_PATH, WASTAGE_ANALYSIS_PATH],
   },
   // 员工端的「今天 / 整月」同属「我的」这一组，落点是「今天」。
   // （卫生那一页已经挪到上面独立的「卫生」格；「我的」组现在只剩今天与整月两页。）
