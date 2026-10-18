@@ -124,7 +124,10 @@ const daily = computed(() => data.value?.daily || [])
 const totals = computed(() => data.value?.totals || {
   first_pass: 0, rejected: 0, captured: 0, missed: 0, pass_rate: null,
 })
-const hasEvents = computed(() => daily.value.length > 0)
+/* 「有图可画」的判据是**窗口内有没有判定**，不是有没有事件：只有事件、0 判定时画出来
+   是一张只剩坐标轴的空图，与面板头「0 天有判定」自相矛盾（审查发现）。
+   折线自己的口径（`points` 里那些 rate）就是按判定日算的，这里跟着它走。 */
+const hasEvents = computed(() => points.value.length > 0)
 const sinceDay = computed(() => dayNumber(data.value?.since))
 
 const windowLabel = computed(() => {
@@ -285,11 +288,11 @@ function pointTitle(point) {
 
 <template>
   <div class="trend-page">
-    <div class="card roster-head">
-      <div>
-        <p class="hy-eyebrow">Trend · 卫生趋势</p>
-        <h1>卫生趋势</h1>
-        <p>按营业日回看窗口内的一次通过率、驳回与逾期：这一周比上一周好还是差。</p>
+    <header class="wbx-head">
+      <div class="wbx-head-main">
+        <p class="wbx-kicker">TREND · 卫生趋势</p>
+        <h1 class="wbx-title">卫生趋势</h1>
+        <p class="wbx-sub">按营业日回看窗口内的一次通过率、驳回与逾期：这一周比上一周好还是差。</p>
         <details class="rule-help">
           <summary>规则说明</summary>
           <p>
@@ -310,7 +313,8 @@ function pointTitle(point) {
           </p>
         </details>
       </div>
-      <div class="roster-head-actions">
+      <div class="wbx-pills">
+        <span v-if="windowLabel" class="wbx-range">{{ windowLabel }}</span>
         <div class="trend-range" role="group" aria-label="回看窗口">
           <button
             v-for="option in WINDOWS"
@@ -327,48 +331,39 @@ function pointTitle(point) {
         </div>
         <button type="button" class="btn" :disabled="loading" @click="load">刷新</button>
       </div>
-    </div>
+    </header>
 
-    <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>
+    <p v-if="errorText" class="wbx-error roster-error" role="alert">{{ errorText }}</p>
 
-    <div class="card trend-summary">
-      <div class="trend-headline">
-        <strong>{{ formatRate(totals.pass_rate) }}</strong>
+    <div class="wbx-readline trend-summary">
+      <span class="wbx-read is-hero trend-headline">
         <span>一次通过率</span>
-      </div>
-      <ul class="trend-figures">
-        <li>
-          <strong>{{ totals.first_pass }}</strong>
-          <span>一次通过（项）</span>
-        </li>
-        <li>
-          <strong>{{ totals.rejected }}</strong>
-          <span>被驳回（次）</span>
-        </li>
-        <li class="is-missed">
-          <strong>{{ totals.missed }}</strong>
-          <span>逾期（次）· 另一条轴</span>
-        </li>
-      </ul>
-      <!-- 窗口首尾与天数都用服务端回的（营业日在服务端 06:00 切，前端不自己算「今天」）。 -->
-      <p v-if="windowLabel" class="trend-window">{{ windowLabel }}</p>
-      <p v-if="weekCompare" class="trend-wow" :class="{ 'is-better': weekCompare.better }" role="status">
-        最近 7 天 {{ weekCompare.recentText }} · 前 7 天 {{ weekCompare.previousText }}
-        <em>（{{ weekCompare.deltaText }}，两段各自把计数相加再相除）</em>
-      </p>
+        <b>{{ formatRate(totals.pass_rate) }}</b>
+        <span class="wbx-inline-gauge" aria-hidden="true">
+          <i v-for="n in 5" :key="n" :class="{ on: totals.pass_rate != null && n <= Math.round(totals.pass_rate * 5) }"></i>
+        </span>
+      </span>
+      <span class="wbx-read"><span>一次通过</span><b>{{ totals.first_pass }}</b><em>项</em></span>
+      <span class="wbx-read"><span>被驳回</span><b>{{ totals.rejected }}</b><em>次</em></span>
+      <span class="wbx-read"><span>逾期（次）· 另一条轴</span><b class="is-missed">{{ totals.missed }}</b></span>
     </div>
+    <p v-if="weekCompare" class="trend-wow" :class="{ 'is-better': weekCompare.better }" role="status">
+      最近 7 天 {{ weekCompare.recentText }} · 前 7 天 {{ weekCompare.previousText }}
+      <em>（{{ weekCompare.deltaText }}，两段各自把计数相加再相除）</em>
+    </p>
 
-    <div class="card trend-card">
-      <div class="table-card-header">
-        <h3>按天一次通过率 <span>{{ points.length }}</span></h3>
-        <p class="trend-note">纵轴固定 0%–100%；没有判定的那天断开，不插值。</p>
-      </div>
+    <section class="wbx-panel trend-card">
+      <header class="wbx-ph">
+        <i class="led sig"></i>
+        <h2>按天一次通过率</h2>
+        <span class="wbx-hint">{{ points.length }} 天有判定</span>
+      </header>
+      <p class="trend-note wbx-lead">纵轴固定 0%–100%；没有判定的那天断开，不插值。</p>
       <div class="trend-chart">
         <div ref="chartHost" class="trend-plot">
-          <div v-if="loading" class="roster-empty">正在加载…</div>
-          <div v-else-if="!hasEvents" class="roster-empty">
-            这 {{ data?.days || days }} 天里一条验收事件都没有：没有判定就没有通过率，所以不画图。
-            换一个窗口看看，或者等今天的验收开始。
+          <div v-if="loading" class="wbx-empty-bar">正在加载…</div>
+          <div v-else-if="!hasEvents" class="wbx-empty-bar">
+            这 {{ data?.days || days }} 天里一条验收事件都没有：换一个窗口看看，或等今天的验收开始。
           </div>
           <svg
             v-else
@@ -377,7 +372,6 @@ function pointTitle(point) {
             role="img"
             :aria-label="chartLabel"
           >
-            <!-- 参照线：0% / 50% / 100%（50% 用虚线，与首尾两条分开） -->
             <g v-for="line in gridLines" :key="line.label">
               <line
                 class="trend-grid"
@@ -391,7 +385,6 @@ function pointTitle(point) {
                 {{ line.label }}
               </text>
             </g>
-            <!-- 横轴只标几个日期（全部标出来在手机上会叠成一团） -->
             <text
               v-for="tick in xTicks"
               :key="`tick-${tick.x}-${tick.label}`"
@@ -402,14 +395,12 @@ function pointTitle(point) {
             >
               {{ tick.label }}
             </text>
-            <!-- 折线：一段 = 连续有判定的日子，中间断掉的那几天就是不画 -->
             <path
               v-for="(segment, index) in segments"
               :key="`seg-${index}`"
               class="trend-line"
               :d="segmentPath(segment)"
             />
-            <!-- 点仍然每个都画：只有一天有判定的那种「孤点」在折线里是画不出来的 -->
             <circle
               v-for="point in points"
               :key="point.date"
@@ -423,15 +414,17 @@ function pointTitle(point) {
           </svg>
         </div>
       </div>
-    </div>
+    </section>
 
-    <div class="trend-tables">
-      <div class="table-card">
-        <div class="table-card-header">
-          <h3>按工作区 <span>{{ zoneRows.length }}</span></h3>
-        </div>
-        <div v-if="loading" class="roster-empty">正在加载…</div>
-        <div v-else-if="!zoneRows.length" class="roster-empty">这一段没有工作区的判定记录。</div>
+    <div class="wbx-cols">
+      <section class="wbx-panel">
+        <header class="wbx-ph">
+          <i class="led ok"></i>
+          <h2>按工作区</h2>
+          <span class="wbx-hint">{{ zoneRows.length }} 区</span>
+        </header>
+        <div v-if="loading" class="wbx-empty">正在加载…</div>
+        <div v-else-if="!zoneRows.length" class="wbx-empty">这一段没有工作区的判定记录。</div>
         <div v-else class="data-table-wrap luyun-scrollbar">
           <table class="data-table trend-table">
             <thead>
@@ -449,21 +442,22 @@ function pointTitle(point) {
                 <td class="trend-num">{{ row.first_pass }}</td>
                 <td class="trend-num">{{ row.rejected }}</td>
                 <td class="trend-num">{{ row.missed }}</td>
-                <!-- 没有判定的区显示「—」：不是 0% -->
                 <td class="trend-num">{{ formatRate(row.pass_rate) }}</td>
               </tr>
             </tbody>
           </table>
         </div>
-        <p class="trend-note trend-note-block">按驳回降序 —— 老出问题的排在最上面。</p>
-      </div>
+        <p class="trend-note wbx-lead">按驳回降序 —— 老出问题的排在最上面。</p>
+      </section>
 
-      <div class="table-card">
-        <div class="table-card-header">
-          <h3>驳回原因 TOP <span>{{ reasonRows.length }}</span></h3>
-        </div>
-        <div v-if="loading" class="roster-empty">正在加载…</div>
-        <div v-else-if="!reasonRows.length" class="roster-empty">这一段没有被驳回的记录。</div>
+      <section class="wbx-panel">
+        <header class="wbx-ph">
+          <i class="led warn"></i>
+          <h2>驳回原因 TOP</h2>
+          <span class="wbx-hint">{{ reasonRows.length }} 条</span>
+        </header>
+        <div v-if="loading" class="wbx-empty">正在加载…</div>
+        <div v-else-if="!reasonRows.length" class="wbx-empty">这一段没有被驳回的记录。</div>
         <ul v-else class="reason-list">
           <li v-for="row in reasonRows" :key="row.reason">
             <span class="reason-text">{{ row.reason }}</span>
@@ -471,196 +465,121 @@ function pointTitle(point) {
             <span class="reason-count">{{ row.count }}</span>
           </li>
         </ul>
-        <p class="trend-note trend-note-block">尺度问题出在哪，看这一列。</p>
-      </div>
+        <p class="trend-note wbx-lead">尺度问题出在哪，看这一列。</p>
+      </section>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* 页面骨架：与别页同形（宽度上限 + 竖向 14px 间距 + 依次入场），但共享表
-   `public/hygiene-admin.css` 那份是别的页面的底盘（两份副本要同步，不放这页的类名进去），
-   所以骨架在这页自己写一份，用的还是同一套 `--hy-*` 令牌。 */
+/* B 案 v2 版式（2026-10-17）：页头 + 读数面板（大数字 + 5 段 gauge + 三格计数）
+   + 图表面板 + 两张表面板。颜色/字体只走语义令牌；共享表的 hero 在这里不参与。 */
 .trend-page {
-  width: 100%;
-  max-width: 80rem;
-  margin-inline: auto;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
+  padding-bottom: calc(40px + var(--safe-b));
 }
+.wbx-head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+.wbx-kicker { margin: 0 0 7px; font: 500 9.5px/1 var(--font-sans); letter-spacing: .26em; color: var(--ink-faint); }
+.wbx-title { margin: 0; font: 600 26px/1.1 var(--font-sans); letter-spacing: .01em; color: var(--ink); }
+.wbx-sub { margin: 8px 0 0; font-size: 12px; line-height: 1.6; color: var(--ink-dim); }
+.wbx-head .rule-help { margin-top: 8px; }
+.wbx-pills { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.trend-range { display: inline-flex; gap: 6px; }
+.wbx-error { margin: 0; font-size: 11px; color: var(--danger-bright); }
+.led { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; background: var(--line-strong); }
+.led.ok { background: var(--ok); }
+.led.warn { background: var(--warn); }
+.led.bad { background: var(--danger); }
+.led.sig { background: var(--action); }
 
-/* ── 顶部汇总 ─────────────────────────────────────────────── */
-.trend-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px 26px;
+.wbx-panel {
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: var(--hy-shadow-sm); overflow: hidden;
 }
-.trend-headline {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-.trend-headline strong {
-  font-family: var(--font-mono);
-  font-size: 32px;
-  font-weight: 700;
-  color: var(--hy-mint);
-  font-variant-numeric: tabular-nums;
-}
-.trend-headline span {
-  color: var(--hy-muted);
-  font-size: .82rem;
-}
-.trend-figures {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 22px;
-}
-.trend-figures li {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-.trend-figures strong {
-  font-size: 19px;
-  font-variant-numeric: tabular-nums;
-}
-.trend-figures span {
-  color: var(--hy-muted);
-  font-size: .78rem;
-}
-/* 逾期是另一条轴：给它自己的琥珀色，免得被读成通过率的一部分。 */
-.trend-figures .is-missed strong { color: var(--hy-amber); }
-.trend-window {
-  flex: 0 0 100%;
-  margin: 0;
-  color: var(--hy-faint);
-  font-size: .74rem;
-  font-variant-numeric: tabular-nums;
-}
-.trend-wow {
-  flex: 0 0 100%;
-  margin: 0;
-  color: var(--hy-muted);
-  font-size: .8rem;
-  font-variant-numeric: tabular-nums;
-}
-.trend-wow em {
-  font-style: normal;
-  color: var(--hy-faint);
-  font-size: .74rem;
-}
-.trend-wow.is-better { color: var(--hy-jade); }
+.wbx-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.wbx-ph h2 { margin: 0; font: 600 12.5px/1 var(--font-sans); letter-spacing: .06em; color: var(--ink); }
+.wbx-hint { margin-left: auto; font: 500 9.5px/1 var(--font-mono); color: var(--ink-faint); }
+.wbx-empty { margin: 0; padding: 14px; font-size: 11px; color: var(--ink-dim); }
+.wbx-lead { margin: 0; padding: 10px 14px 12px; font-size: 10px; line-height: 1.6; color: var(--ink-faint); }
 
-/* ── 曲线 ─────────────────────────────────────────────────── */
-.trend-note {
-  margin: .35rem 0 0;
-  color: var(--hy-faint);
-  font-size: .74rem;
+.wbx-readline {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 26px;
+  padding: 10px 14px;
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08);
 }
-.trend-note-block {
-  margin: 0;
-  padding: .6rem 1.1rem .8rem;
-}
-.trend-chart {
-  padding: .5rem .75rem .25rem;
-}
-/* 量宽度量的是这一个：外层的内边距不能算进去，否则 SVG 的坐标系比实际渲染宽一点，
-   整张图（连同轴上的字）会被等比缩小几个百分点 —— 差得不多，但没必要差。 */
-.trend-plot {
-  padding: 0;
-}
-.trend-plot svg {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-/* 网格与参照线 */
-.trend-grid {
-  stroke: var(--hy-line);
-  stroke-width: 1;
-}
-.trend-grid.is-mid {
-  stroke: var(--hy-line-strong);
-  stroke-dasharray: 4 5;
-}
-.trend-axis {
-  fill: var(--hy-faint);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.trend-line {
-  fill: none;
-  stroke: var(--hy-mint);
-  stroke-width: 2;
-  stroke-linejoin: round;
-  stroke-linecap: round;
-}
-.trend-dot {
-  fill: var(--hy-mint-bright);
-  stroke: var(--hy-night);
-  stroke-width: 1;
-}
+.trend-headline { display: inline-flex; align-items: baseline; gap: 8px; }
+.trend-headline > span { font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint); }
+.trend-headline b { font: 500 26px/1 var(--font-mono); letter-spacing: -.02em; color: var(--ink); }
+.wbx-inline-gauge { display: inline-flex; gap: 2px; width: 88px; margin-left: 4px; }
+.wbx-inline-gauge i { flex: 1; height: 3px; border-radius: 1px; background: var(--line); }
+.wbx-inline-gauge i.on { background: var(--action); }
+.wbx-read { display: inline-flex; align-items: baseline; gap: 6px; }
+.wbx-read span { font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint); }
+.wbx-read b { font: 500 20px/1 var(--font-mono); color: var(--ink); }
+.wbx-read b.is-missed { color: var(--warn); }
+.wbx-read em { font-style: normal; font-size: 9.5px; color: var(--ink-faint); }
+.wbx-range { font: 500 9.5px/1 var(--font-mono); color: var(--ink-faint); }
 
-/* ── 两张小表 ─────────────────────────────────────────────── */
-.trend-tables {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-  gap: 14px;
-  align-items: start;
+.trend-wow { margin: 0; font-size: 10.5px; color: var(--ink-dim); }
+.trend-wow em { font-style: normal; color: var(--ink-faint); font-size: 9.5px; }
+.trend-wow.is-better { color: var(--ok); }
+
+.trend-note { margin: 0; font-size: 10px; color: var(--ink-faint); }
+.trend-chart { padding: 6px 14px 12px; }
+.trend-plot { padding: 0; }
+.trend-plot svg { display: block; width: 100%; height: auto; }
+.trend-grid { stroke: var(--line); stroke-width: 1; }
+.trend-grid.is-mid { stroke: var(--line-strong); stroke-dasharray: 4 5; }
+.trend-axis { fill: var(--ink-faint); font-family: var(--font-mono); font-size: 10px; font-variant-numeric: tabular-nums; }
+.trend-line { fill: none; stroke: var(--action); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.trend-dot { fill: var(--action); stroke: var(--surface-1); stroke-width: 1; }
+
+.wbx-cols { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; align-items: stretch; }
+.wbx-empty-bar {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 44px; margin: 0; padding: 10px 14px;
+  font-size: 10.5px; color: var(--ink-faint);
+  border: 1px dashed var(--line-strong); border-radius: var(--r-1);
+  background: var(--surface-1);
 }
-/* 共享表给数据表表头配了「可点排序」的手型（数据管理那页要用），这两张表不排序 ——
-   两个类比全局那条 `.hygiene-admin table.data-table th` 多一个，才压得住它。 */
+.wbx-panel .wbx-empty-bar { border: 0; border-radius: 0; background: transparent; min-height: 52px; }
+.trend-chart .wbx-empty-bar { min-height: 72px; max-height: 120px; }
+.data-table-wrap { overflow-x: auto; }
+.data-table.trend-table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
 .data-table.trend-table th {
-  cursor: default;
+  padding: 7px 14px; text-align: left; background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  font: 500 8.5px/1 var(--font-sans); letter-spacing: .2em; color: var(--ink-faint); white-space: nowrap;
 }
-.trend-num { font-variant-numeric: tabular-nums; }
-.reason-list {
-  list-style: none;
-  margin: 0;
-  padding: .6rem 1.1rem .8rem;
-  display: flex;
-  flex-direction: column;
-  gap: .45rem;
-}
+.data-table.trend-table td { padding: 8px 14px; border-bottom: 1px solid var(--wb-ink-a08); color: var(--ink-dim); }
+.data-table.trend-table tbody tr:last-child td { border-bottom: 0; }
+.data-table.trend-table tbody tr:hover td { background: var(--surface-2); }
+.trend-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.reason-list { list-style: none; margin: 0; padding: 4px 0; display: flex; flex-direction: column; }
 .reason-list li {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px auto;
-  gap: .6rem;
-  align-items: center;
-  font-size: .82rem;
+  display: grid; grid-template-columns: minmax(0, 1fr) 96px auto; gap: 10px; align-items: center;
+  min-height: 44px; padding: 9px 14px; border-bottom: 1px solid var(--wb-ink-a08); font-size: 10.5px;
 }
-.reason-text {
-  overflow-wrap: anywhere;
-}
-.reason-bar {
-  height: 4px;
-  border-radius: 999px;
-  background: var(--hy-seal-soft);
-  overflow: hidden;
-}
-.reason-bar i {
-  display: block;
-  height: 100%;
-  background: var(--hy-seal-bright);
-}
-.reason-count {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--hy-muted);
-}
+.reason-list li:last-child { border-bottom: 0; }
+.reason-text { overflow-wrap: anywhere; color: var(--ink); }
+.reason-bar { height: 3px; border-radius: var(--r-full); background: var(--danger-soft); overflow: hidden; }
+.reason-bar i { display: block; height: 100%; background: var(--danger); }
+.reason-count { font: 500 10px/1 var(--font-mono); color: var(--ink-dim); text-align: right; }
+.trend-page :deep(.btn) { min-height: 44px !important; border-radius: var(--r-1); }
 @media (max-width: 900px) {
-  .trend-tables { grid-template-columns: minmax(0, 1fr); }
+  .wbx-cols { grid-template-columns: 1fr; }
+  .wbx-summary-row { grid-template-columns: 1fr; }
 }
-@media (max-width: 560px) {
-  /* 窄屏让出比例条的位置给原因文本：一行里三列会挤成一团。 */
-  .reason-list li { grid-template-columns: minmax(0, 1fr) auto; }
+@media (max-width: 720px) {
+  .wbx-head { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .wbx-pills { margin-left: 0; }
+  .wbx-title { font-size: 22px; }
+  .wbx-summary-row { gap: 12px; }
+  .trend-figures { grid-template-columns: 1fr 1fr; }
   .reason-bar { display: none; }
+  .reason-list li { grid-template-columns: minmax(0, 1fr) auto; }
 }
 </style>

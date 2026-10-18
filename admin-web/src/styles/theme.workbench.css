@@ -2,7 +2,7 @@
  *
  * 为什么在这一层：--hy-* 的定义与那 13 个通用别名原先都住在 .hygiene-admin,.hygiene-staff
  * 这个**子树 class** 里（原 public/hygiene-admin.css:8-77）。现场 8 页（/workbench/floor/*）的
- * 页面根**不带**这两个 class，令牌全靠壳祖先继承 —— 作用域一旦收窄，417 处 var(--hy-*) 与别名
+ * 页面根**不带**这两个 class，令牌全靠壳祖先继承 —— 作用域一旦收窄，417 处 --hy-* 引用与别名
  * 引用会**静默失效**（不是报错，是掉色）。所以两者必须**一起**上移到 html 级：
  * 选择器 = html[data-workbench]，覆盖整棵文档树，与页面里套了哪层壳无关。
  *
@@ -107,6 +107,38 @@ html[data-workbench] {
   --hy-ease: cubic-bezier(.22, 1, .36, 1);
   --hy-page: clamp(.85rem, 2vw, 1.5rem);
 
+  /* ── 效果令牌（2026-10-17 双主题收口）：共享样式表与存量页面里那些半透明 rgba 的归并 ──
+     为什么要有这一层：旧皮是暗色，`public/hygiene-admin.css` 与 30 个页面里写死了 60 多种
+     rgba（薄荷光晕、半透明深面板、深遮罩、发丝线）。只切 --hy-* 的值，这些 rgba 会原样留在
+     浅色页上 —— 光晕变成绿斑、半透明深面板变成黑块。这里按**语义 + 透明度档**归并成 26 根，
+     深色与浅色主题各给一组值；共享表与页面改色只改这一处，不再写裸 rgba。 */
+  --wb-tint-04: rgba(63,224,176,.06);
+  --wb-tint-08: rgba(63,224,176,.10);
+  --wb-tint-14: rgba(63,224,176,.16);
+  --wb-tint-22: rgba(63,224,176,.24);
+  --wb-tint-45: rgba(63,224,176,.45);
+  --wb-tint-60: rgba(63,224,176,.60);
+  --wb-ink-a04: rgba(228,240,238,.04);
+  --wb-ink-a08: rgba(228,240,238,.08);
+  --wb-ink-a14: rgba(228,240,238,.14);
+  --wb-ink-a22: rgba(228,240,238,.22);
+  --wb-ink-a45: rgba(228,240,238,.45);
+  --wb-ink-a60: rgba(228,240,238,.60);
+  --wb-panel-a: rgba(17,37,41,.70);
+  --wb-scrim: rgba(6,15,17,.55);
+  --wb-scrim-strong: rgba(6,15,17,.72);
+  --wb-danger-a10: rgba(217,72,47,.12);
+  --wb-danger-a16: rgba(217,72,47,.18);
+  --wb-danger-a45: rgba(217,72,47,.45);
+  --wb-warn-a10: rgba(227,164,74,.12);
+  --wb-warn-a16: rgba(227,164,74,.18);
+  --wb-warn-a45: rgba(227,164,74,.45);
+  --wb-ok-a10: rgba(121,233,196,.12);
+  --wb-ok-a16: rgba(121,233,196,.18);
+  --wb-ok-a45: rgba(121,233,196,.45);
+  --wb-paper-a: rgba(244,233,219,.42);
+  --wb-highlight: rgba(255,255,255,.16);
+
   /* 回退给各视图 scoped 样式用的通用别名 */
   --bg: var(--hy-bg);
   --text: var(--hy-ink);
@@ -124,6 +156,103 @@ html[data-workbench] {
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
+   浅色主题（B 案「钢面 · 仪」· 日间档）—— 2026-10-17 新增，深色仍是默认
+   开关是 `html[data-workbench][data-wb-theme="light"]`，由 `utils/workbenchTheme.js`
+   挂/摘（用户选「浅色」或「跟随系统 + 系统是浅色」时挂）。
+   **只覆盖颜色相关的名字**：布局刻度、字体栈、层级、时长与语义结构全部沿用上面那一段 ——
+   两套主题的差异只在调色，在结构上分叉就等于每加一页要维护两套版式。
+   语义名与深色一一声明对应（--surface-* / --ink* / --line* / --action* / 信号色 / --hy-*）；
+   13 个通用别名不必重复：别名在元素上解析，主色阶梯已被这一段覆盖。
+   浅底实测：--hy-ink 对白 15.6:1、--hy-muted 5.6:1、--hy-faint 5.0:1、
+   主色 #0d7ea6 4.7:1（可以当文字色）、--danger-bright 6.0:1、--hy-amber 5.0:1、--hy-jade 4.6:1。
+   ════════════════════════════════════════════════════════════════════════════ */
+html[data-workbench][data-wb-theme="light"] {
+  --surface-0:#edeff3; --surface-1:#ffffff; --surface-2:#f6f8fa; --surface-3:#eef1f4;
+  --chrome:#ffffff;
+  --ink:#0f1b24; --ink-dim:#5b6b78; --ink-faint:#5f6d79;
+  --line:#d6dee6; --line-strong:#c2cdd7;
+  --line-control:#7f909f;
+  --action:#0d7ea6; --action-ink:#ffffff; --action-soft:#e6f4fa;
+  --ok:#16855a; --warn:#a86400; --danger:#c9342a; --danger-bright:#a8281f; --info:#0b6b8f;
+  --accent-alt:#a33d74; --focus-ring:#0d7ea6;
+  --ok-soft:#e8f7ef; --warn-soft:#fdf3e0;
+  --danger-soft:#fdecea; --info-soft:#e6f4fa;
+  --scrim:rgba(15,27,36,.48);
+
+  /* B 案是方角语言：面板 4px、小件 2px；--r-full 只留给胶囊类（徽章 / 圆点）。 */
+  --r-0:2px; --r-1:4px; --r-2:6px; --r-3:8px;
+
+  --wb-tint-04: rgba(13,126,166,.04);
+  --wb-tint-08: rgba(13,126,166,.08);
+  --wb-tint-14: rgba(13,126,166,.14);
+  --wb-tint-22: rgba(13,126,166,.22);
+  --wb-tint-45: rgba(13,126,166,.45);
+  --wb-tint-60: rgba(13,126,166,.60);
+  --wb-ink-a04: rgba(15,27,36,.04);
+  --wb-ink-a08: rgba(15,27,36,.08);
+  --wb-ink-a14: rgba(15,27,36,.14);
+  --wb-ink-a22: rgba(15,27,36,.22);
+  --wb-ink-a45: rgba(15,27,36,.45);
+  --wb-ink-a60: rgba(15,27,36,.60);
+  --wb-panel-a: rgba(255,255,255,.78);
+  --wb-scrim: rgba(15,27,36,.48);
+  --wb-scrim-strong: rgba(15,27,36,.66);
+  --wb-danger-a10: rgba(201,52,42,.10);
+  --wb-danger-a16: rgba(201,52,42,.16);
+  --wb-danger-a45: rgba(201,52,42,.45);
+  --wb-warn-a10: rgba(168,100,0,.10);
+  --wb-warn-a16: rgba(168,100,0,.16);
+  --wb-warn-a45: rgba(168,100,0,.45);
+  --wb-ok-a10: rgba(22,133,90,.10);
+  --wb-ok-a16: rgba(22,133,90,.16);
+  --wb-ok-a45: rgba(22,133,90,.45);
+  --wb-paper-a: rgba(255,255,255,.62);
+  --wb-highlight: rgba(15,27,36,.04);
+
+  /* 冷钢白色阶 */
+  --hy-night: #e3e8ee;
+  --hy-pool: #0b6b8f;
+  --hy-bg: #edeff3;
+  --hy-surface: #ffffff;
+  --hy-surface-2: #f6f8fa;
+  --hy-surface-3: #eef1f4;
+  --hy-line: #d6dee6;
+  --hy-line-strong: #c2cdd7;
+  --hy-ink: #0f1b24;
+  --hy-muted: #5b6b78;
+  /* #5f6d79 对 --hy-surface 白 5.0:1、对 --hy-bg #edeff3 4.6:1，AA 过线。 */
+  --hy-faint: #5f6d79;
+
+  /* 信号色：浅底上深一档，全部可以当文字色用 */
+  --hy-mint: #0d7ea6;
+  --hy-mint-bright: #0a6a8c;
+  --hy-mint-ink: #ffffff;
+  --hy-mint-soft: #e6f4fa;
+  --hy-mint-line: #9ccde0;
+  --hy-jade: #16855a;
+  --hy-seal: #c9342a;
+  --hy-seal-bright: #a8281f;
+  --hy-seal-soft: #fdecea;
+  --hy-seal-line: #e6a9a3;
+  --hy-amber: #a86400;
+  --hy-amber-bright: #8a5200;
+  --hy-amber-soft: #fdf3e0;
+  --hy-amber-line: #e2c69a;
+  --hy-aqua: #0b6b8f;
+  --hy-coral: #b5452e;
+  --hy-paper: #ffffff;
+  --hy-violet: #6b4fa8;
+  --hy-rose: #a33d74;
+
+  --hy-radius-sm: 4px;
+  --hy-radius-md: 6px;
+  --hy-radius-lg: 8px;
+  --hy-shadow-sm: 0 1px 2px rgba(15, 27, 36, .05);
+  --hy-shadow-md: 0 10px 30px -14px rgba(15, 27, 36, .22);
+  --hy-glow-mint: 0 0 0 3px rgba(13, 126, 166, .12);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
    壳自带的三条复位（批次 ③-1b · B5 / B7 / B8）
    为什么放在壳里：这三件事**每一页都需要、每一页都容易忘**，而且漏了是**静默**出错
    （打印出来是黑的 / 减弱动效系统上骨架还在脉冲 / 键盘用户看不见焦点在哪）。
@@ -137,7 +266,8 @@ html[data-workbench] {
    要点：① 令牌**连同兼容层的名字**一起重绑（页面样式用的是 --hy-* 与 --bg 这些别名，
    只刷 --surface-* 的话 body 的 background:var(--bg) 还是深色）；② 关背景图与颗粒层。 */
 @media print{
-  html[data-workbench]{
+  html[data-workbench],
+  html[data-workbench][data-wb-theme="light"]{
     --surface-0:#fff; --surface-1:#fff; --surface-2:#fff; --surface-3:#fff; --chrome:#fff;
     --ink:#000; --ink-dim:#333; --ink-faint:#555;
     --line:#d8d8d8; --line-strong:#b4b4b4; --line-control:#8a8a8a;

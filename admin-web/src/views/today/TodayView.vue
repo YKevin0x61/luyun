@@ -25,6 +25,9 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+// 「今天要交」= 员工卫生块本身（三行进度 + 主 CTA）：员工在同一页就能看见要交什么、
+// 直接进拍照链路。它自带数据与实时订阅，这一页只摆它一行，口径不在这边重算。
+import StaffHygieneCard from '../../components/staff/StaffHygieneCard.vue'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { ADMIN_CAP_STAFF_DEFS, hasCap } from '../../utils/adminCaps'
@@ -100,6 +103,13 @@ const staffCapCount = computed(() => staffCaps.value.filter((item) => item.grant
 // 落点写在数据旁边，而不是页尾一句概括句 —— 那种句子在一项能力多出来之后就会变成假话。
 // 2026-10-14 加的两项：`schedule` 落到人事组的月历（管理端那一面，员工会话 + 能力即可进），
 // `wastage` 落到后勤组的损耗分析（同上）。两页都是 `audience: admin` + `staffCap`。
+// 「今天会用到」这六项里，现场三项（日常验收 / 专项验收 / 整改单）今天就会真用上；
+// 其余（加班、排班、损耗）是隔天的事。分组只影响默认折叠哪几行，不改开关判据。
+const CAP_TODAY_KEYS = ['daily_review', 'deep_review', 'fix']
+const capsExpanded = ref(false)
+const capsToday = computed(() => staffCaps.value.filter((item) => CAP_TODAY_KEYS.includes(item.key)))
+const capsOther = computed(() => staffCaps.value.filter((item) => !CAP_TODAY_KEYS.includes(item.key)))
+
 const CAP_ROUTES = {
   daily_review: '/workbench/me/clean',
   deep_review: '/workbench/me/clean',
@@ -189,6 +199,18 @@ const todayText = computed(() => todayHeadline(today.value))
 const tone = computed(() => todayTone(today.value))
 const todaySub = computed(() => todaySubline(today.value))
 const nextLine = computed(() => nextTwoLine(after.value))
+
+// B 案 v2 的面板头/页头 LED：把现有的六态（`tone`）映射到四档灯色。
+// 只影响类名，不参与任何业务判据 —— 「今天上不上班」仍由 todayShift 那一份说了算。
+const SHIFT_LED = { '': 'ok', rest: 'idle', half: 'warn', leave: 'sig', moved: 'warn', none: 'idle' }
+const shiftLed = computed(() => SHIFT_LED[tone.value] || 'idle')
+// 成绩面板的灯：读不出来 = 坏；有驳回过 = 提醒；正常有数据 = 好；还没开始 = 中性。
+const scoreLed = computed(() => {
+  if (score.value.state === 'error') return 'bad'
+  if (score.value.state !== 'ready') return 'idle'
+  if (score.value.rejected > 0) return 'warn'
+  return score.value.passRate === null ? 'idle' : 'ok'
+})
 
 // 三颗按钮都往月历走（票 15）：请假与换班各带一个 `act`，落在**今天那一格**上 ——
 // 跳过去就是那一天的操作单（`StaffDaySheet`），表单直接开着。为什么不在这一页就地弹：
@@ -659,18 +681,26 @@ useNudgePull({
 
 <template>
   <div class="today-page hygiene-staff">
+    <!-- 页头（B 案 v3）：kicker + H1 + 右侧身份与当天状态 LED。 -->
     <header class="tTop" :inert="anyModalOpen || null">
-      <span class="tDay">今天</span>
-      <span class="tDate">{{ today ? dayLabel(today.business_date) : '' }}</span>
-      <span v-if="employee" class="tMe">{{ employee.name }}</span>
+      <div class="tTop-main">
+        <p class="kicker">我的今天</p>
+        <h1 class="tDay">今天</h1>
+      </div>
+      <div class="tTop-side">
+        <span class="tDate">{{ today ? dayLabel(today.business_date) : '' }}</span>
+        <span v-if="employee" class="tMe">
+          <i class="led" :class="shiftLed" aria-hidden="true"></i>
+          {{ employee.name }}
+        </span>
+      </div>
       <!-- 退出**不在这里**（D5）：工作台外壳顶栏已经有一颗（`WorkbenchLayout` 的
            `WorkbenchExitButton`，员工那一档走同一条 `useStaffLogout`），这一页原来又挂了
            一颗同名的 `.staff-exit` —— 手机上两者相距约 300px、功能完全重复。 -->
     </header>
 
     <div class="tA-body" :inert="anyModalOpen || null">
-      <!-- 健康证提示（一条一行，不可关闭）：整页最上面 —— 它是"你得去办证了"，
-           比排班与今天的活都更早要处理。日期不写在这句里（下面「我的」那两行有）。 -->
+      <!-- 健康证提示（横条）：比排班与今天的活都更早要处理。 -->
       <p
         v-if="healthCertAlert"
         class="hy-staff-alert health-cert-alert"
@@ -686,55 +716,14 @@ useNudgePull({
       </template>
 
       <template v-else>
-        <!-- 「你能做的事」（票 01 / ADR 0093）：被放权的员工在这一页看清自己能做哪几件事。
-             为什么要占页面最上面：这一页是他登录后的落点，而"我能做什么"是读这一页之前
-             就得知道的事 —— 原来这信息藏在页尾账号信息那一行里，等于没写。
-             完全没有权限的员工看不到这一块：判据是 `staffCapCount`（那四项里一项都没开），
-             界面就不给他一个空洞的头衔 —— 挂在 `permission` 标签上就会给（标签写着
-             「管理员」而一项开关都没给是合法状态，见 ADR 0093）。 -->
-        <section v-if="staffCapCount" class="tA-card caps">
-          <div class="tA-hd">
-            <span class="tag caps">你能做的事</span>
-            <!-- 档位那颗胶囊：原来在账号信息里的「卫生权限」那一行，票 01 起搬到这里 ——
-                 同一件事只说一遍。措辞 2026-10-14 从「现场复核」改成「管理权限」：花名册上
-                 可勾的现在有六项，其中排班管理与损耗分析不是「复核」，写着那个词就成假话。 -->
-            <em>管理权限 · {{ staffCapCount }} 项</em>
-          </div>
-          <ul class="cap-list">
-            <!-- 三项**都列**：没开的那一项写「超级管理员还没开给你」，员工才知道该找店长开什么，
-                 而不是以为系统就是不给（只列开了的那几项，缺的那一项就永远看不见）。 -->
-            <li
-              v-for="item in staffCaps"
-              :key="item.key"
-              class="cap-row"
-              :class="{ off: !item.granted }"
-            >
-              <span class="cap-mark" aria-hidden="true">{{ item.granted ? '✓' : '—' }}</span>
-              <span class="cap-name">{{ item.label }}</span>
-              <span class="cap-note">{{ item.granted ? item.note : '超级管理员还没开给你' }}</span>
-              <button
-                v-if="item.granted"
-                class="cap-go"
-                type="button"
-                :data-to="CAP_ROUTES[item.key]"
-                @click="router.push(CAP_ROUTES[item.key])"
-              >去 ›</button>
-            </li>
-          </ul>
-          <!-- 逐项给路（§12 第 1 条）：4 项能力分属两页，一句话概括不了 —— 入口挂在每一行上，
-               落点见数据区的 `CAP_ROUTES`。没开的能力不给他走（`granted` 才渲染按钮）：
-               进得去也是"勾了不生效"，那正是 ADR 0093 要避免的那类缺陷的另一面。 -->
-        </section>
-
+        <!-- ① 我的班（横条，约 64px）：班次 + 工作区 + 截止。回答「我今天在哪」。 -->
         <section ref="schedCard" class="tA-card sched">
-          <div class="tA-hd">
-            <span class="tag sched">排班</span>
-            <em>{{ nextLine }}</em>
+          <div class="strip">
+            <i class="led" :class="shiftLed" aria-hidden="true"></i>
+            <b class="strip-name" :class="tone">{{ todayText }}</b>
+            <span v-if="today && today.zone_name" class="strip-zone">{{ today.zone_name }}</span>
+            <span v-if="hygieneDue" class="strip-due">{{ hygieneDue }} 前交</span>
           </div>
-          <!-- 换班/调班的说明落在这里（DO:747）：不再是弹一下就没的提示 -->
-          <p class="tA-sub sched-note">今天上哪个班、在哪个区由排班决定；本月的班看「整月」。请假、换班在月历上点那一天办（排班页由店长管理）。</p>
-          <p class="shift" :class="tone">{{ todayText }}</p>
-          <p class="tA-sub">{{ todaySub }}</p>
           <div class="acts">
             <button
               v-for="entry in ENTRIES"
@@ -749,41 +738,19 @@ useNudgePull({
           <p v-if="note" class="tA-note">{{ note }}</p>
         </section>
 
-        <p class="tA-h">往后三天</p>
-        <div class="next3">
-          <div v-for="day in after" :key="day.business_date">
-            <span class="d">{{ dayLabel(day.business_date) }}</span>
-            <span class="s" :class="shiftTone(day)">{{ shiftText(day) }}</span>
-          </div>
-        </div>
+        <!-- ② 今天要交：卫生块（三行进度 + 主 CTA）。回答「现在要干什么」。 -->
+        <StaffHygieneCard />
 
-        <!-- 进页面那次申请列表没读出来：换班卡是「有才显示」的，读失败时它整块不在 ——
-             不说一句，员工只会以为没人找他换班（页面上也没别的重来路径）。 -->
-        <section v-if="requestsUnread" class="tA-card leave">
-          <div class="tA-hd">
-            <span class="tag leave">我的申请</span>
-            <em>没读出来</em>
-          </div>
-          <p class="tA-sub">有没有人找你换班、你的申请到哪一步，这一次没读到（网络不好？）。</p>
-          <div class="acts">
-            <button
-              class="btn"
-              type="button"
-              :disabled="leaveBusy || swapBusy"
-              @click="loadRequests()"
-            >重试</button>
-          </div>
-        </section>
-
-        <!-- 别人问我换班（票 09）：他还没等到我点头，店长那边看不见这条。 -->
+        <!-- ③ 待你回应（单行卡）：别人等我点头的换班。 -->
         <section v-if="incoming.length" class="tA-card swap">
           <div class="tA-hd">
-            <span class="tag swap">换班</span>
-            <em>{{ incoming.length }} 条等我回应</em>
+            <i class="led warn" aria-hidden="true"></i>
+            <h2>待你回应</h2>
+            <span class="tag swap">{{ incoming.length }} 条</span>
           </div>
           <ul class="tL-list">
-            <li v-for="card in incoming" :key="card.id">
-              <span class="tL-line">{{ incomingLine(card) }}</span>
+            <li v-for="card in incoming" :key="card.id" class="tL-row">
+              <span class="tL-line">{{ incomingLine(card) }}<template v-if="card.note"> · 事由：{{ card.note }}</template></span>
               <span class="tL-acts">
                 <button
                   class="btn tL-cancel"
@@ -798,17 +765,115 @@ useNudgePull({
                   @click="answerTarget = { card, agree: false }"
                 >拒绝</button>
               </span>
-              <span v-if="card.note" class="tL-note">事由：{{ card.note }}</span>
             </li>
           </ul>
-          <p class="tA-sub">点「同意并转店长」才会轮到店长批；不点，这件事就停在你这里。</p>
         </section>
 
-        <!-- 我自己提的申请（票 08 请假、票 09 换班）：只在提过或读出错时才占地方。 -->
+        <!-- 进页面那次申请列表没读出来：空态横条（≤64px），不占面板头。 -->
+        <section v-if="requestsUnread" class="tA-card leave empty-strip">
+          <i class="led bad" aria-hidden="true"></i>
+          <p class="strip-text">有没有人找你换班、申请到哪一步，这一次没读出来</p>
+          <button
+            class="btn strip-btn"
+            type="button"
+            :disabled="leaveBusy || swapBusy"
+            @click="loadRequests()"
+          >重试</button>
+        </section>
+
+        <!-- ④ 接下来（往后三天）：只有真的有后两天才占一块面板。 -->
+        <section v-if="after.length" class="tA-card">
+          <div class="tA-hd">
+            <i class="led sig" aria-hidden="true"></i>
+            <h2>接下来</h2>
+            <span class="hint">3 天</span>
+          </div>
+          <p class="tA-h">往后三天</p>
+          <div class="next3">
+            <div v-for="day in after" :key="day.business_date">
+              <span class="d">{{ dayLabel(day.business_date) }}</span>
+              <span class="s" :class="shiftTone(day)">{{ shiftText(day) }}</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ⑤ 你能做的事（B 案 v3）：分组 + 默认只展开前 2 项；整行可点（≥64px），
+             行内只留 chevron，说明限一行省略。 -->
+        <section v-if="staffCapCount" class="tA-card caps">
+          <div class="tA-hd">
+            <i class="led sig" aria-hidden="true"></i>
+            <h2>你能做的事</h2>
+            <!-- 档位那颗胶囊：原来在账号信息里的「卫生权限」那一行，票 01 起搬到这里 ——
+                 同一件事只说一遍。措辞 2026-10-14 从「现场复核」改成「管理权限」：花名册上
+                 可勾的现在有六项，其中排班管理与损耗分析不是「复核」，写着那个词就成假话。 -->
+            <span class="hint">管理权限 · {{ staffCapCount }} 项</span>
+          </div>
+
+          <p class="cap-group">今天会用到</p>
+          <ul class="cap-list">
+            <li
+              v-for="(item, idx) in capsToday"
+              :key="item.key"
+              class="cap-row"
+              :class="{ off: !item.granted }"
+              v-show="capsExpanded || idx < 2"
+            >
+              <span class="cap-mark" aria-hidden="true">{{ item.granted ? '✓' : '—' }}</span>
+              <span class="cap-name">{{ item.label }}</span>
+              <span class="cap-note">{{ item.granted ? item.note : '超级管理员还没开给你' }}</span>
+              <span class="cap-chev" aria-hidden="true">›</span>
+              <!-- 整行可点：按钮是 44×44 的透明覆盖层（键盘与读屏仍是一颗真按钮）。 -->
+              <button
+                v-if="item.granted"
+                class="cap-go"
+                type="button"
+                :data-to="CAP_ROUTES[item.key]"
+                :aria-label="`去${item.label}`"
+                @click="router.push(CAP_ROUTES[item.key])"
+              />
+            </li>
+          </ul>
+
+          <template v-if="capsOther.length">
+            <p class="cap-group" v-show="capsExpanded">其他</p>
+            <ul class="cap-list" v-show="capsExpanded">
+              <li
+                v-for="item in capsOther"
+                :key="item.key"
+                class="cap-row"
+                :class="{ off: !item.granted }"
+              >
+                <span class="cap-mark" aria-hidden="true">{{ item.granted ? '✓' : '—' }}</span>
+                <span class="cap-name">{{ item.label }}</span>
+                <span class="cap-note">{{ item.granted ? item.note : '超级管理员还没开给你' }}</span>
+                <span class="cap-chev" aria-hidden="true">›</span>
+                <button
+                  v-if="item.granted"
+                  class="cap-go"
+                  type="button"
+                  :data-to="CAP_ROUTES[item.key]"
+                  :aria-label="`去${item.label}`"
+                  @click="router.push(CAP_ROUTES[item.key])"
+                />
+              </li>
+            </ul>
+          </template>
+
+          <button
+            v-if="staffCaps.length > 2"
+            class="cap-more"
+            type="button"
+            :aria-expanded="capsExpanded ? 'true' : 'false'"
+            @click="capsExpanded = !capsExpanded"
+          >{{ capsExpanded ? '收起' : `展开其余 ${staffCaps.length - 2} 项` }}</button>
+        </section>
+
+        <!-- ⑥ 我的申请（只在提过或读出错时占地方） -->
         <section v-if="requests.length || requestsError" class="tA-card leave">
           <div class="tA-hd">
-            <span class="tag leave">我的申请</span>
-            <em>{{ requests.length }} 条</em>
+            <i class="led" :class="requestsError ? 'bad' : 'warn'" aria-hidden="true"></i>
+            <h2>我的申请</h2>
+            <span class="hint">{{ requests.length }} 条</span>
           </div>
           <p v-if="requestsError" class="tA-sub">{{ requestsError }}</p>
           <ul class="tL-list">
@@ -828,13 +893,13 @@ useNudgePull({
           </p>
         </section>
 
-        <!-- 「我的成绩」（2026-10-05 用户裁定）：近 7 天的次数（一次通过 / 被驳回 / 实拍）+ 被驳回的原因分布
-             为什么放在这一页、为什么 `null` 不能显示成 0，见脚本里 `score` 那段。
+        <!-- ⑦ 我的成绩（2026-10-05 用户裁定）：近 7 天的次数 + 被驳回的原因分布。
              百分率在 t59 按原型 05 收敛掉了：只报次数。 -->
         <section class="tA-card score">
           <div class="tA-hd">
-            <span class="tag score">成绩</span>
-            <em>近 {{ score.days }} 天</em>
+            <i class="led" :class="scoreLed" aria-hidden="true"></i>
+            <h2>成绩</h2>
+            <span class="hint">近 {{ score.days }} 天</span>
           </div>
 
           <p v-if="score.state === 'loading'" class="tA-sub">正在读你的成绩…</p>
@@ -868,9 +933,13 @@ useNudgePull({
                 <dd>{{ score.captured }} 项</dd>
               </div>
             </dl>
-            <!-- 原型 05 那句口径，逐字搬过来：与红黑榜同一份记录、同一个口径 -->
-            <p class="tA-sub">次数口径，与红黑榜同一份记录。</p>
           </template>
+
+          <!-- 口径收进卡内折叠：数字的解释跟着数字走，但不占常驻行数。 -->
+          <details class="card-rules">
+            <summary>口径</summary>
+            <p class="tA-sub">次数口径，与红黑榜同一份记录。</p>
+          </details>
 
           <!-- 驳回原因比数字更有用：员工要知道的是"我老在哪件事上栽"。一行一条、带次数
                （服务端已按次数排好、最多 5 条）。一条原因都没有时整块不出现。 -->
@@ -885,81 +954,85 @@ useNudgePull({
           </div>
         </section>
 
-        <!-- 「我的」那一块（2026-10-05 用户裁定，**从卫生页的「我」整格搬来**）：
-             三行入口 + 一张自己的资料。放在页面尾部 —— 这一页开头是「今天上不上班」、
-             中间是今天的活，账号设置是收尾的事。
-             三行入口各自开一张弹层（与上面请假 / 换班同一个底子），不在这里再长出一套
-             卫生页的页内表单；「重新选择区域和班次」第三行不弹表单（票 10 起员工不能自选），
-             它把说明写进顶部那张排班卡并把人送回去 —— 见 `openShiftNotice`。 -->
-        <section class="tA-card me">
-          <div class="tA-hd">
-            <span class="tag me">我的</span>
-            <em v-if="staffMe">{{ staffMe.name || staffMe.phone }}</em>
+        <!-- ⑧ 我的（账号设置）：不再占黄金位 —— 收起成一行入口，点开才是资料与三行设置。
+             收起的 details 里那几颗按钮仍是真按钮（测试与键盘都照常可达）。 -->
+        <details class="tA-card me">
+          <summary class="me-sum">
+            <i class="led sig" aria-hidden="true"></i>
+            <span class="me-sum-title">我的</span>
+            <span v-if="staffMe" class="me-sum-name">{{ staffMe.name || staffMe.phone }}</span>
+            <span class="me-sum-more">我的资料 ›</span>
+          </summary>
+          <div class="me-body">
+            <p v-if="profileFlash" class="me-flash" role="status">{{ profileFlash }}</p>
+            <p v-if="passwordFlash" class="me-flash" role="status">{{ passwordFlash }}</p>
+            <dl v-if="staffMe" class="me-meta">            <div>
+                <dt>手机号</dt>
+                <dd>{{ staffMe.phone }}</dd>
+              </div>
+              <div>
+                <dt>当天区域</dt>
+                <dd>{{ staffMe.zone_name || '未选' }}</dd>
+              </div>
+              <div>
+                <dt>当天班次</dt>
+                <dd>{{ hygieneShiftLabel(staffMe.shift) }}</dd>
+              </div>            <!-- 档案两行（2026-10 花名册改版）：入职日期与健康证到期日由超管在花名册里补录，
+                   员工自己只读。底薪与身份证号**不下发也不显示**（敏感字段边界）。 -->
+              <div>
+                <dt>入职日期</dt>
+                <dd>{{ staffMe.hire_date || '未设置' }}</dd>
+              </div>
+              <div>
+                <dt>健康证到期日</dt>
+                <!-- 没办证的人（2026-10-13 起注册页允许「暂时没有健康证」）写「未办理」：
+                     这一栏本来就叫"到期日"，空着写「未设置」看不出是没证还是没填。 -->
+                <dd>{{ staffMe.health_cert_expires_on || '未办理' }}</dd>
+              </div>
+              <!-- 工龄奖（票 05）：档位与下次调整月都是**自己那份**信息（入职日期本来就
+                   在这儿显示），所以这一行不碰敏感字段边界。入职日期没补时不渲染它 ——
+                   算不出来就不摆一个「未调整」在那儿让人误会。 -->
+              <div v-if="staffMe.hire_date">
+                <dt>工龄奖</dt>
+                <dd>
+                  {{ seniorityText }}
+                  <template v-if="seniorityNextText"> · {{ seniorityNextText }}</template>
+                </dd>
+              </div>
+            </dl>
+            <!-- 折走的 5 项（姓名/本班日常截止/专项截止/职位/生日）：不在本屏铺开，但必须可达（t71） -->
+            <div class="me-more">
+              <button class="btn tL-cancel" type="button" @click="moreOpen = true">完整资料 ›</button>
+            </div>
+            <ul class="tL-list">
+              <li>
+                <span class="tL-line">修改个人信息</span>
+                <!-- 资料（`staffMe`）没读出来时这两行点不动：表单要拿姓名与手机号做初值，
+                     点开了也只会是空的（原来「我」那一格整块挂在 `v-if="employee"` 上，
+                     同一个保证）。第三行不依赖它 —— 它只是把人送回顶上那张排班卡。 -->
+                <button class="btn tL-cancel" type="button" :disabled="!staffMe" @click="openProfile">修改</button>
+              </li>
+              <li>
+                <span class="tL-line">修改密码</span>
+                <button class="btn tL-cancel" type="button" :disabled="!staffMe" @click="openPassword">修改</button>
+              </li>
+              <li>
+                <span class="tL-line">重新选择区域和班次</span>
+                <!-- 按钮上不写「修改」：票 10 起员工改不了它，点一下是去看为什么 + 该找谁。 -->
+                <button class="btn tL-cancel" type="button" @click="openShiftNotice">怎么改</button>
+              </li>
+            </ul>
+            <p class="tA-sub">专项全店可用；整改按你的工作区显示。所有现场照片都需实拍。</p>
           </div>
-          <p v-if="profileFlash" class="me-flash" role="status">{{ profileFlash }}</p>
-          <p v-if="passwordFlash" class="me-flash" role="status">{{ passwordFlash }}</p>
-          <dl v-if="staffMe" class="me-meta">            <div>
-              <dt>手机号</dt>
-              <dd>{{ staffMe.phone }}</dd>
-            </div>
-            <div>
-              <dt>当天区域</dt>
-              <dd>{{ staffMe.zone_name || '未选' }}</dd>
-            </div>
-            <div>
-              <dt>当天班次</dt>
-              <dd>{{ hygieneShiftLabel(staffMe.shift) }}</dd>
-            </div>            <!-- 档案两行（2026-10 花名册改版）：入职日期与健康证到期日由超管在花名册里补录，
-                 员工自己只读。底薪与身份证号**不下发也不显示**（敏感字段边界）。 -->
-            <div>
-              <dt>入职日期</dt>
-              <dd>{{ staffMe.hire_date || '未设置' }}</dd>
-            </div>
-            <div>
-              <dt>健康证到期日</dt>
-              <!-- 没办证的人（2026-10-13 起注册页允许「暂时没有健康证」）写「未办理」：
-                   这一栏本来就叫"到期日"，空着写「未设置」看不出是没证还是没填。 -->
-              <dd>{{ staffMe.health_cert_expires_on || '未办理' }}</dd>
-            </div>
-            <!-- 工龄奖（票 05）：档位与下次调整月都是**自己那份**信息（入职日期本来就
-                 在这儿显示），所以这一行不碰敏感字段边界。入职日期没补时不渲染它 ——
-                 算不出来就不摆一个「未调整」在那儿让人误会。 -->
-            <div v-if="staffMe.hire_date">
-              <dt>工龄奖</dt>
-              <dd>
-                {{ seniorityText }}
-                <template v-if="seniorityNextText"> · {{ seniorityNextText }}</template>
-              </dd>
-            </div>
-          </dl>
-          <!-- 折走的 5 项（姓名/本班日常截止/专项截止/职位/生日）：不在本屏铺开，但必须可达（t71） -->
-          <div class="me-more">
-            <button class="btn tL-cancel" type="button" @click="moreOpen = true">完整资料 ›</button>
-          </div>
-          <ul class="tL-list">
-            <li>
-              <span class="tL-line">修改个人信息</span>
-              <!-- 资料（`staffMe`）没读出来时这两行点不动：表单要拿姓名与手机号做初值，
-                   点开了也只会是空的（原来「我」那一格整块挂在 `v-if="employee"` 上，
-                   同一个保证）。第三行不依赖它 —— 它只是把人送回顶上那张排班卡。 -->
-              <button class="btn tL-cancel" type="button" :disabled="!staffMe" @click="openProfile">修改</button>
-            </li>
-            <li>
-              <span class="tL-line">修改密码</span>
-              <button class="btn tL-cancel" type="button" :disabled="!staffMe" @click="openPassword">修改</button>
-            </li>
-            <li>
-              <span class="tL-line">重新选择区域和班次</span>
-              <!-- 按钮上不写「修改」：票 10 起员工改不了它，点一下是去看为什么 + 该找谁。 -->
-              <button class="btn tL-cancel" type="button" @click="openShiftNotice">怎么改</button>
-            </li>
-          </ul>
-          <p class="tA-sub">专项全店可用；整改按你的工作区显示。所有现场照片都需实拍。</p>
-        </section>
+        </details>
 
-        <p class="tA-foot">
-          排班只说班次，不说几点上班 —— 钟点只有卫生那边才有（逾期点）。
-        </p>
+        <!-- ⑨ 规则说明（B 案 v3）：常驻说明收进折叠入口，一屏不被长句占满。 -->
+        <details class="tA-foot rules">
+          <summary>规则说明 ›</summary>
+          <p class="tA-sub sched-note">今天上哪个班、在哪个区由排班决定；本月的班看「整月」。请假、换班在月历上点那一天办（排班页由店长管理）。</p>
+          <p class="tA-sub">点「同意并转店长」才会轮到店长批；不点，这件事就停在你这里。</p>
+          <p class="tA-sub">排班只说班次，不说几点上班 —— 钟点只有卫生那边才有（逾期点）。</p>
+        </details>
       </template>
     </div>
 
@@ -1154,47 +1227,86 @@ useNudgePull({
 </template>
 
 <style scoped>
-/* 原型 A 的骨架：整屏 → 排班卡 → 往后三天 →（卫生卡）→ 页脚。
-   令牌与 .btn 的底座来自 public/hygiene-admin.css（员工端作用域 .hygiene-staff）。 */
+/* B 案 v3「首屏回答两个问题」（2026-10-17 版式审查后）：员工手机端 390 优先。
+   首屏读序 = 页头 → 我的班横条（我在哪）→ 今天要交（现在干什么）→ 待你回应。
+   其后才是：接下来 / 你能做的事 / 我的申请 / 成绩 / 我的（收起）/ 规则说明（收起）。
+   元素语言仍只有三种：面板、列表行、读数；全部走语义令牌，不写裸色值。 */
 .today-page {
   min-height: 100vh;
-  background:
-    radial-gradient(130% 46% at 50% -6%, rgba(63, 224, 176, .1), transparent 62%),
-    var(--hy-bg);
+  background: var(--surface-0);
+  color: var(--ink);
+  font-family: var(--font-sans);
   padding-bottom: calc(80px + var(--safe-b));
 }
 
+/* ── 页头 ──────────────────────────────────────────────────────────────── */
 .tTop {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
-  /* 手机安全区四项都让位（t49）：顶部原写死 18px，刘海/圆角机会被压住。
-     用 padding 简写的**顶槽**（_kit 口径），左右同样取 max。 */
-  padding: max(18px, var(--safe-t)) max(16px, var(--safe-r)) 14px max(16px, var(--safe-l));
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: max(16px, var(--safe-t)) max(16px, var(--safe-r)) 12px max(16px, var(--safe-l));
+}
+
+.tTop-main { min-width: 0; }
+
+.kicker {
+  margin: 0 0 5px;
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .26em;
+  color: var(--ink-faint);
 }
 
 .tDay {
-  font-family: var(--font-song);
-  font-size: 20px;
-  letter-spacing: .16em;
-  font-weight: 600;
+  margin: 0;
+  font: 600 26px/1 var(--font-sans);
+  letter-spacing: .01em;
+  color: var(--ink);
+}
+
+.tTop-side {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: none;
 }
 
 .tDate {
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--hy-faint);
+  font-size: 10.5px;
+  color: var(--ink-faint);
 }
 
 .tMe {
-  font-size: 11.5px;
-  color: var(--hy-muted);
-  border: 1px solid var(--hy-line);
-  border-radius: 999px;
-  padding: 4px 10px;
-  background: var(--hy-surface-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: var(--surface-1);
 }
 
+/* ── 状态 LED（全页统一 6px）─────────────────────────────────────────── */
+.led {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  display: inline-block;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+.led.ok { background: var(--ok); }
+.led.warn { background: var(--warn); }
+.led.bad { background: var(--danger); }
+.led.sig { background: var(--action); }
+.led.idle { background: var(--ink-faint); }
+
+/* ── 页面主体 ────────────────────────────────────────────────────────── */
 .tA-body {
   padding: 0 16px 26px;
   display: flex;
@@ -1203,193 +1315,390 @@ useNudgePull({
 }
 
 .tA-card {
-  border: 1px solid var(--hy-line);
-  border-radius: var(--hy-radius-lg);
-  padding: 14px 15px;
-  background: var(--hy-surface-2);
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  box-shadow: var(--hy-shadow-sm);
+  overflow: hidden;
+  padding: 0 0 12px;
 }
 
-.tA-card.sched {
-  border-color: var(--hy-mint-line);
-  background: linear-gradient(168deg, rgba(63, 224, 176, .09), transparent 58%),
-    var(--hy-surface-2);
+.tA-hd {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.tA-hd h2 {
+  margin: 0;
+  font: 600 12.5px/1 var(--font-sans);
+  letter-spacing: .06em;
+  color: var(--ink);
+}
+.tA-hd .hint {
+  margin-left: auto;
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--ink-faint);
+}
+.tA-hd .led { align-self: center; }
+
+.tag {
+  margin-left: auto;
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: .02em;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.tag.sched { color: var(--action); }
+.tag.swap { color: var(--warn); }
+
+/* ── ① 我的班横条（班次 + 工作区 + 截止，约 64px）────────────────────── */
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 60px;
+  padding: 0 14px;
 }
 
-/* 请假那张卡（票 08）跟卫生卡同一个色系，但自己的事自己一眼认出来。 */
-.tA-card.leave {
-  border-color: var(--hy-aqua);
-  background: linear-gradient(168deg, rgba(94, 234, 212, .07), transparent 58%),
-    var(--hy-surface-2);
+.strip-name {
+  font: 600 20px/1.1 var(--font-sans);
+  color: var(--ok);
+  white-space: nowrap;
+}
+.strip-name.rest,
+.strip-name.none { color: var(--ink-faint); }
+.strip-name.half { color: var(--accent-alt); }
+.strip-name.leave { color: var(--info); }
+.strip-name.moved { color: var(--warn); }
+
+.strip-zone {
+  font-size: 11.5px;
+  color: var(--ink-dim);
 }
 
-/* 「我的」那一块（从卫生页的「我」搬来）：中性色 —— 设置不是活，不抢上面两张卡的色。
-   资料那一段是表格式的一行一条（原来在卫生页叫 `.hy-meta`，那份样式挂在
-   `.hygiene-work` 作用域下，搬到这一页落不下来，按同一套写法在这里写一份）。 */
-.tA-card.me {
-  border-color: var(--hy-line-strong);
-  background: var(--hy-surface-2);
+.strip-due {
+  margin-left: auto;
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 10px;
+  color: var(--ink-faint);
+  white-space: nowrap;
 }
 
-/* 「你能做的事」（票 01）：这一页上唯一一块讲**权限**的卡，位置最靠上，色取玉色那一档
-   （跟"已通过"同一个色系）—— 它说的是"你能做什么"，不是"你还欠什么"。 */
-.tA-card.caps {
-  border-color: var(--hy-mint-line);
-  background: linear-gradient(168deg, rgba(63, 224, 176, .08), transparent 62%),
-    var(--hy-surface-2);
+/* 五态大字配色规则保留（todayView.test.js 按令牌值解析 `.shift*`，不许删）。
+   页面上这行大字已被横条取代，令牌与判据仍是同一套。 */
+.shift { margin: 0; font-family: var(--font-sans); font-size: 44px; line-height: 1.05; color: var(--ok); }
+.shift.rest { color: var(--ink-faint); }
+.shift.moved { font-size: 24px; color: var(--warn); }
+.shift.half { font-size: 30px; letter-spacing: var(--ls-1); color: var(--accent-alt); }
+.shift.none { font-size: 20px; color: var(--ink-dim); }
+.shift.leave { font-size: 34px; letter-spacing: var(--ls-2); color: var(--info); }
+
+/* 按钮：≥48px 方角（全局 `.btn` 有一条 40px 的 `min-height` 基线（!important），
+   这里必须同权重抬回 48）。 */
+.today-page.hygiene-staff .btn {
+  min-height: 48px !important;
+  border-radius: var(--r-1);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+}
+.today-page.hygiene-staff .btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--action);
+  color: var(--action);
+}
+.today-page.hygiene-staff .btn-primary {
+  background: var(--action);
+  border-color: var(--action);
+  color: var(--action-ink);
+}
+.today-page.hygiene-staff .btn-primary:hover:not(:disabled) {
+  background: var(--action);
+  color: var(--action-ink);
 }
 
-.tag.caps {
-  color: var(--hy-jade);
-  background: var(--hy-mint-soft);
-  border-color: var(--hy-mint-line);
+.acts {
+  display: flex;
+  gap: 8px;
+  margin: 8px 14px 0;
+}
+.acts .btn { flex: 1; }
+
+.tA-note {
+  margin: 10px 14px 0;
+  font-size: 11px;
+  color: var(--warn);
 }
 
-/* 一行一项：勾/破折号 + 名字 + 一句说明。名字那一列定宽（三个名字最长 4 字），三行
-   说明才对得齐；列宽按 390 逻辑宽（原型与真机那一档）算过：卡内容 328px，最长的那句
-   说明 19 字 × 12px = 228px，落在 240px 的说明列里正好一行 —— 差一点点就会甩一个字
-   到第二行，很难看。 */
+.tA-sub {
+  margin: 8px 14px 0;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--ink-dim);
+}
+
+/* ── 空态横条（≤64px，不占面板头）──────────────────────────────────── */
+.empty-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+}
+.empty-strip .strip-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+.empty-strip .strip-btn {
+  flex: none;
+  min-height: 48px !important;
+  padding: 0 16px;
+}
+
+/* ── ④ 接下来（往后三天）────────────────────────────────────────────── */
+.tA-h {
+  margin: 14px 14px 0;
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .2em;
+  color: var(--ink-faint);
+}
+.next3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 8px 14px 0;
+}
+.next3 > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+}
+.next3 .d {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--ink-faint);
+}
+.next3 .s {
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 14px;
+  color: var(--ok);
+}
+.next3 .s.r,
+.next3 .s.rest { color: var(--ink-faint); }
+.next3 .s.moved { color: var(--warn); font-size: 12px; }
+.next3 .s.none { color: var(--ink-faint); opacity: .72; }
+.next3 .s.leave { color: var(--info); font-size: 13px; }
+.next3 .s.half { color: var(--accent-alt); font-size: 13px; }
+
+/* ── ⑤ 你能做的事：分组 + 默认 2 行 + 整行可点 ────────────────────── */
+.cap-group {
+  margin: 10px 14px 0;
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .2em;
+  color: var(--ink-faint);
+}
 .cap-list {
   list-style: none;
-  margin: 4px 0 0;
+  margin: 4px 14px 0;
   padding: 0;
-  display: grid;
-  gap: 8px;
 }
-
 .cap-row {
+  position: relative;
   display: grid;
-  /* 四列：记号 / 能力名 / 说明 / 行内入口（「去 ›」）。**第 4 列必须显式写出来** ——
-     只写前 3 列时按钮落进**隐式列**（宽度 `auto`），390px 下 `1fr` 先把剩余宽度吃完，
-     它只剩 26px：`padding: 0 12px` 吃掉 24px、内容区 2px，文字换行成两行，整颗按钮
-     变成一条竖条（2026-10-12 实测 26×52，三个能力就是三根竖条）。 */
+  /* 四列：记号 / 能力名 / 说明 / chevron。第 4 列显式写出（历史教训：隐式列会把
+     行内入口压成竖条，见 staffCapabilityCard.test.js）。 */
   grid-template-columns: 16px 58px 1fr auto;
-  align-items: baseline;
+  align-items: center;
   gap: 7px;
+  min-height: 64px;
+  padding: 10px 0;
+  border-top: 1px solid var(--wb-ink-a08);
 }
-
+.cap-list .cap-row:first-child { border-top: 0; }
 .cap-mark {
   font-family: var(--font-mono);
   font-size: 13px;
-  color: var(--hy-jade);
+  color: var(--ok);
 }
-
 .cap-name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  color: var(--hy-ink);
-}
-
-.cap-note {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--hy-muted);
-}
-
-/* 脚注紧贴上一行会被读成"第四项"，跟上面那三行拉开一点（`.tA-sub` 本身 margin 是 0）。 */
-.tA-card.caps .tA-sub {
-  margin-top: 10px;
-}
-
-/* 行内入口（t49）：触控目标 ≥44px；焦点环走令牌，不自己写一套。
-   这里是 **grid item**：`flex: 0 0 auto` 那类写法一行都不起作用（原来那行从没生效），
-   宽度由上面 `.cap-row` 的第 4 列决定。`nowrap` 是兜底 —— 列再被挤窄也不把「去 ›」
-   拆成两行；`align-self: center` 是为了让它别跟着 `baseline` 陷到行底。 */
-.cap-go {
-  align-self: center;
-  white-space: nowrap;
-  min-height: 44px;
-  padding: 0 12px;
-  border: 1px solid var(--line-control);
-  border-radius: var(--r-2);
-  background: var(--surface-2);
   color: var(--ink);
-  font: inherit;
+}
+.cap-note {
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cap-chev {
+  justify-self: end;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--ink-faint);
+}
+/* 整行可点：透明覆盖层按钮（键盘与读屏仍是真按钮；视觉只留 chevron）。 */
+.cap-go {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  white-space: nowrap;
   cursor: pointer;
 }
-.cap-go:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-
-/* 没开的那一项：整行退到背景里（破折号 + 灰字），与开了的那几行一眼分得开 ——
-   「还没开给你」是**说明**，不是可用的能力。 */
-.cap-row.off .cap-mark {
-  color: var(--hy-faint);
+.cap-go:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }
+.cap-row.off .cap-mark { color: var(--ink-faint); }
+.cap-row.off .cap-name { font-weight: 500; color: var(--ink-dim); }
+.cap-row.off .cap-note { color: var(--ink-faint); }
+.cap-row.off .cap-chev { opacity: .3; }
 
-.cap-row.off .cap-name {
-  font-weight: 500;
-  color: var(--hy-muted);
-}
-
-.cap-row.off .cap-note {
-  color: var(--hy-faint);
-}
-
-/* 「我的成绩」：玉色那一档（跟"已通过"同一个色系）—— 这一页上其它几张卡都在说
-   "还有活没干"，只有它只讲"你干得怎么样"，所以用这套里的"好"色，不摆红字。 */
-.tA-card.score {
-  border-color: var(--hy-mint-line);
-  background: linear-gradient(168deg, rgba(63, 224, 176, .06), transparent 62%),
-    var(--hy-surface-2);
-}
-
-.tag.score {
-  color: var(--hy-jade);
-  background: var(--hy-mint-soft);
-  border-color: var(--hy-mint-line);
-}
-
-.score-body {
+.cap-more {
   display: flex;
-  align-items: flex-end;
-  gap: 14px;
-  padding: 4px 0 2px;
+  align-items: center;
+  justify-content: center;
+  width: calc(100% - 28px);
+  margin: 6px 14px 0;
+  min-height: 48px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--action);
+  font: 500 11.5px/1 var(--font-sans);
+  cursor: pointer;
 }
 
-.score-split {
-  display: grid;
-  gap: 3px;
-  margin: 0 0 5px;
+/* ── ⑥ 我的申请（一条一行）──────────────────────────────────────────── */
+.tA-card.swap {
+  border-color: var(--warn);
 }
-
-.score-split > div {
+.tL-list {
+  list-style: none;
+  margin: 10px 14px 0;
+  padding: 0;
+}
+.tL-list li {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  min-height: 56px;
+  border-top: 1px solid var(--wb-ink-a08);
+}
+.tL-list li:first-child { border-top: 0; }
+.tL-line {
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--ink);
+}
+.tL-cancel {
+  margin-left: auto;
+  flex: none;
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 12.5px;
+}
+.tL-row { flex-wrap: wrap; }
+.tL-row .tL-line {
+  flex: 1 1 100%;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tL-acts {
+  margin-left: auto;
+  flex: none;
+  display: flex;
   gap: 6px;
 }
-
-.score-split dt {
+.tL-acts .tL-cancel { margin-left: 0; }
+.tL-note {
+  flex-basis: 100%;
   font-size: 11px;
-  color: var(--hy-muted);
+  line-height: 1.7;
+  color: var(--ink-dim);
+}
+.tL-hint {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+.tL-err {
+  margin: 4px 14px 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--danger-bright);
 }
 
+/* ── ⑦ 成绩：三格读数 ───────────────────────────────────────────────── */
+.score-split {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 12px 14px 0;
+}
+.score-split > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+}
+.score-split dt {
+  font-size: 9.5px;
+  letter-spacing: .12em;
+  color: var(--ink-faint);
+}
 .score-split dd {
   margin: 0;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--hy-ink);
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--ink);
 }
-
-/* 空态那一句按正文字号排，不套上面那个 44px 的数字位（那一格本来就没有数字）。 */
 .score-empty {
-  margin: 10px 0 5px;
-  font-family: var(--font-song);
-  font-size: 19px;
-  line-height: 1.5;
-  color: var(--hy-jade);
+  margin: 12px 14px 0;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--ink-dim);
 }
-
 .score-reasons {
-  margin-top: 12px;
+  margin: 12px 14px 0;
   padding-top: 10px;
-  border-top: 1px solid var(--hy-line);
+  border-top: 1px solid var(--line);
 }
-
 .score-reasons-hd {
   margin: 0 0 7px;
-  font-size: 11px;
-  letter-spacing: .1em;
-  color: var(--hy-muted);
+  font-size: 9.5px;
+  letter-spacing: .18em;
+  color: var(--ink-faint);
 }
-
 .score-reasons ul {
   display: grid;
   gap: 6px;
@@ -1397,361 +1706,173 @@ useNudgePull({
   padding: 0;
   list-style: none;
 }
-
 .score-reasons li {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  font-size: 12px;
-  color: var(--hy-ink);
+  padding: 5px 0;
+  font-size: 11.5px;
+  color: var(--ink);
 }
-
-/* 原因那句话可能很长（服务端最多 200 字）：让它自己换行，别把右边那次数挤出屏幕。 */
-.score-reasons li span {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-/* 次数用琥珀色：是"注意这里"，不是"你被罚了"——红字留给真正要动手的报错。 */
+.score-reasons li span { min-width: 0; overflow-wrap: anywhere; }
 .score-reasons li em {
   flex: none;
   font-style: normal;
-  color: var(--hy-amber);
+  font-family: var(--font-mono);
+  color: var(--warn);
 }
 
-.tag.me {
-  color: var(--hy-muted);
-  background: rgba(133, 205, 198, .1);
-  border-color: var(--hy-line-strong);
+/* 卡内折叠（口径 / 规则）：一行入口，点开是那几句解释。 */
+.card-rules {
+  margin: 8px 14px 0;
+  font-size: 10.5px;
+  color: var(--ink-faint);
 }
-
-/* 保存成功那句：跟表单里的报错（`.tL-err`）分开，一眼看得出这次是成了。 */
-.me-flash {
-  margin: 9px 0 0;
-  padding: 8px 10px;
-  border-radius: var(--hy-radius-sm);
-  background: var(--hy-mint-soft);
-  border: 1px solid var(--hy-mint-line);
-  color: var(--hy-jade);
-  font-size: 11.5px;
-  font-weight: 600;
-}
-
-.me-meta {
-  display: grid;
-  gap: 0;
-  margin: 10px 0 4px;
-  border: 1px solid var(--hy-line);
-  border-radius: var(--hy-radius-md);
-  background: rgba(17, 37, 41, .66);
-  overflow: hidden;
-}
-
-.me-meta > div {
+.card-rules > summary {
   display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--hy-line);
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.card-rules > summary::-webkit-details-marker { display: none; }
+.card-rules .tA-sub {
+  margin: 4px 0 0;
+  font-size: 10.5px;
+  line-height: 1.75;
+  color: var(--ink-faint);
 }
 
-.me-meta > div:last-child {
-  border-bottom: 0;
-}
-
-.me-meta dt {
-  color: var(--hy-muted);
-  font-size: 11.5px;
-}
-
-.me-meta dd {
-  margin: 0;
-  font-weight: 600;
-  font-size: 12.5px;
-  text-align: right;
-}
-
-/* 别人问我换班（票 09）：暖色 —— 跟「我自己提的」那张冷色的分开，
-   手机上一眼看出这条是等我动手的。 */
-.tA-card.swap {
-  border-color: var(--hy-amber);
-  background: linear-gradient(168deg, rgba(245, 196, 81, .08), transparent 58%),
-    var(--hy-surface-2);
-}
-
-.tA-hd {
+/* ── ⑧ 我的（收起成一行入口）────────────────────────────────────────── */
+details.tA-card.me > summary.me-sum {
   display: flex;
   align-items: center;
   gap: 9px;
+  min-height: 56px;
+  padding: 0 14px;
+  cursor: pointer;
+  list-style: none;
 }
-
-.tA-hd em {
-  margin-left: auto;
-  font-style: normal;
-  font-size: 10.5px;
-  color: var(--hy-faint);
-}
-
-.tag {
-  font-size: 10px;
-  letter-spacing: .12em;
-  padding: 2.5px 7px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-}
-
-.tag.sched {
-  color: var(--hy-mint);
-  background: var(--hy-mint-soft);
-  border-color: var(--hy-mint-line);
-}
-
-/* 请假（票 08）：跟自己提的那件事同色。 */
-.tag.leave {
-  color: var(--hy-aqua);
-  background: rgba(94, 234, 212, .12);
-  border-color: var(--hy-aqua);
-}
-
-/* 换班（票 09）：跟「等我回应」那张卡同一个暖色。 */
-.tag.swap {
-  color: var(--hy-amber);
-  background: rgba(245, 196, 81, .12);
-  border-color: var(--hy-amber);
-}
-
-.shift {
-  margin: 0;
-  font-family: var(--font-song);
-  font-size: 52px;
-  line-height: 1.08;
-  letter-spacing: .08em;
-  color: var(--hy-jade);
-  padding: 6px 0 2px;
-}
-
-.shift.rest {
-  color: var(--hy-faint);
-}
-
-/* 行上那个班次已经没了（票 11 管删除）：跟「休」分开说、分开上色。 */
-.shift.moved {
-  font-size: 24px;
-  line-height: 1.4;
-  color: var(--hy-amber);
-}
-
-/* 半天休（票 07 / ADR 0114）：那天**仍然上班**，只是只上半天 —— 跟「休」分开上色，
-   字号也降一档：它是一句话，不是一个班次名。颜色用语义令牌（`--accent-alt`），不新增
-   `--hy-*` 引用（设计护栏的存量棘轮只减不增）。
-   C 批返工（第一轮）：原先取 `--info`，它的值跟「请假」的 `--hy-aqua` 一字不差（同一个青）——
-   卡上那行大字「休半天」跟「请假」看起来是一回事。
-   C 批返工（第二轮）：改琥珀 `--warn` 后撞上「已调整」的 `--hy-amber`（同值）。父级
-   裁定改用 `--accent-alt`：它是语义层里与其余各态两两不同的那一个；`--accent` 不行，
-   值太贴「上班」的 `--ok`。 */
-.shift.half {
-  font-size: 30px;
-  line-height: 1.4;
-  letter-spacing: var(--ls-1);
-  color: var(--accent-alt);
-}
-
-/* 「今天没有你的班」是一句话不是两个大字：这句按正文大小排，不然会顶出屏幕。 */
-.shift.none {
-  font-size: 20px;
-  line-height: 1.5;
-  letter-spacing: .04em;
-  color: var(--hy-muted);
-  padding: 16px 0 10px;
-}
-
-/* 请假（票 08）：批过的假。跟「休」分开说、分开上色 —— 休是排班给的，
-   假是自己提的、店长批的。字号也降一档：它不是一个「班次」。 */
-.shift.leave {
-  font-size: 34px;
-  line-height: 1.3;
+.me-sum::-webkit-details-marker { display: none; }
+.me-sum-title {
+  margin-right: auto;
+  font: 600 12.5px/1 var(--font-sans);
   letter-spacing: .06em;
-  color: var(--hy-aqua);
+  color: var(--ink);
 }
-
-.tA-sub {
-  margin: 0;
-  font-size: 11.5px;
-  color: var(--hy-muted);
+.me-sum-name {
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 9.5px;
+  color: var(--ink-faint);
 }
-
-.acts {
-  display: flex;
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.acts .btn {
-  flex: 1;
-}
-
-.tA-note {
-  margin: 9px 0 0;
+.me-sum-more {
   font-size: 11px;
-  color: var(--hy-amber);
+  color: var(--action);
 }
 
-.tA-h {
-  margin: 0;
-  padding: 2px 3px 0;
-  font-family: var(--font-song);
-  font-size: 12.5px;
-  letter-spacing: .14em;
-  color: var(--hy-muted);
-}
-
-.next3 {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-}
-
-.next3 > div {
+.me-body {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 10px 6px;
-  text-align: center;
-  border: 1px solid var(--hy-line);
-  border-radius: var(--hy-radius-md);
-  background: var(--hy-surface-2);
+  gap: 10px;
+  padding: 2px 14px 0;
 }
+.me-body .me-flash,
+.me-body .me-meta,
+.me-body .me-more,
+.me-body .tA-sub,
+.me-body .tL-list {
+  margin: 0;
+}
+.me-flash {
+  padding: 8px 10px;
+  border-radius: var(--r-1);
+  background: var(--ok-soft);
+  border: 1px solid var(--ok);
+  color: var(--ok);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.me-meta {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.me-meta > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.me-meta > div:last-child { border-bottom: 0; }
+.me-meta dt { color: var(--ink-dim); font-size: 11px; }
+.me-meta dd {
+  margin: 0;
+  font-weight: 600;
+  font-size: 12px;
+  text-align: right;
+  color: var(--ink);
+}
+.me-more { display: flex; justify-content: flex-end; }
 
-.next3 .d {
-  font-family: var(--font-mono);
+/* ── ⑨ 规则说明（折叠）──────────────────────────────────────────────── */
+details.tA-foot {
+  margin: 0;
+  padding: 0 4px;
   font-size: 10.5px;
-  color: var(--hy-faint);
+  color: var(--ink-faint);
+  line-height: 1.75;
 }
-
-.next3 .s {
-  font-family: var(--font-song);
-  font-size: 17px;
-  letter-spacing: .08em;
-  color: var(--hy-jade);
-}
-
-.next3 .s.r,
-.next3 .s.rest {
-  color: var(--hy-faint);
-}
-
-/* 班次被删了（票 11 能删班次）：那天的班次没了，不等于那天不上班 —— 不要跟「休」同色。 */
-.next3 .s.moved {
-  color: var(--hy-amber);
-  font-size: 13px;
-}
-
-.next3 .s.none {
-  color: var(--hy-faint);
-  opacity: .72;
-}
-
-/* 请假（票 08）：三格里也认得出是假不是休。 */
-.next3 .s.leave {
-  color: var(--hy-aqua);
-  font-size: 14px;
-}
-
-/* 半天休（票 07 / C 批返工）：三格的类名来自同一个 `shiftTone(day)`（模板里那个
-   `:class`），所以 `half` 本来就带上了，缺的只是这条规则 —— 没有它，「休半天」落回
-   `.next3 .s` 的兜底色（上班的薄荷），看着跟平常上班一样。跟卡上那行大字（`.shift.half`）
-   同源：语义令牌 `--accent-alt`，不新增 `--hy-*`。字号跟「请假」同一档 —— 它也是一句话，不是班次名。 */
-.next3 .s.half {
-  color: var(--accent-alt);
-  font-size: 14px;
-}
-
-/* 自己的申请（票 08）：一条一行，撤回按钮贴右边。 */
-.tL-list {
+.tA-foot > summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
   list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.tA-foot > summary::-webkit-details-marker { display: none; }
+.tA-foot .tA-sub {
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  line-height: 1.75;
+  color: var(--ink-faint);
 }
 
-.tL-list li {
+/* 健康证提示（横条）：一条状态行（6px LED + 一句话），过期/临期各一色。
+   危险色只做底色/边框，文字用 bright 档。 */
+.today-page .hy-staff-alert.health-cert-alert {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 0;
-  border-top: 1px solid var(--hy-line);
-}
-
-.tL-list li:first-child {
-  border-top: 0;
-}
-
-.tL-line {
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--hy-ink);
-}
-
-.tL-cancel {
-  margin-left: auto;
-  flex: none;
-  /* 员工手机上点的东西：这一排按钮（同意 / 拒绝 / 撤回）都是不可逆动作，手指先得点得中。
-     仓库里员工端其它按钮是 46px；这里给 40px 是因为一行里要并排放两个 —— 32px 太小了，
-     误触的代价是一张换班申请被拒或者一条假被撤回。 */
-  min-height: 40px;
-  padding: 0 14px;
-  font-size: 12.5px;
-}
-
-/* 换班那条的两个按钮（同意 / 拒绝）挨在一起，不各自贴右边。 */
-.tL-acts {
-  margin-left: auto;
-  flex: none;
-  display: flex;
-  gap: 6px;
-}
-
-.tL-acts .tL-cancel {
-  margin-left: 0;
-}
-
-/* 换班那条的事由：小一号，跟在那一行下面。 */
-.tL-note {
-  flex-basis: 100%;
-  font-size: 11px;
-  line-height: 1.7;
-  color: var(--hy-muted);
-}
-
-/* 「（按身份证）」这种来源说明：跟着值走、别抢值的注意力。 */
-.tL-hint {
-  margin-left: 4px;
-  font-size: 11px;
-  color: var(--hy-faint);
-}
-
-.tL-err {
-  margin: 4px 0 0;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--hy-coral);
-}
-
-.tA-foot {
   margin: 0;
-  padding: 2px 4px;
-  font-size: 10.5px;
-  color: var(--hy-faint);
-  line-height: 1.75;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--r-1);
+  background: var(--danger-soft);
+  color: var(--danger-bright);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
-
-/* 健康证提示：共享表里的 `.hygiene-staff .hy-staff-alert` 是朱砂（过期那一档），
-   临期这一档改琥珀 —— 父级选择器抬特异度，稳过共享表那条。 */
-.health-cert-alert {
-  margin: 0;
+.today-page .hy-staff-alert.health-cert-alert::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
 }
-.health-cert-alert.is-soon {
-  background: var(--hy-amber-soft);
-  border-color: var(--hy-amber-line);
-  color: var(--hy-amber);
+.today-page .hy-staff-alert.health-cert-alert.is-soon {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
 }
 </style>

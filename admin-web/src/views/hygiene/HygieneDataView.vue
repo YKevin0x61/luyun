@@ -44,6 +44,12 @@ const deleteTarget = ref(null)
 const busy = ref(false)
 
 const purgeOpen = ref(false)
+/** 「按区间清理」共用列表那份筛选（v3 布局纪律）：不再维护第二套类型复选，
+   点清理时把当前筛中的类型直接带进确认框。 */
+function startPurge() {
+  purgeKinds.value = [...selectedKinds.value]
+  purgeOpen.value = true
+}
 const purgeKinds = ref(PURGE_KINDS.map((kind) => kind.value))
 
 const exportJob = ref(null)
@@ -282,110 +288,121 @@ function gotoPage(next) {
 
 <template>
   <div class="data-page">
-    <div class="card roster-head">
-      <div>
-        <p class="hy-eyebrow">Archive · 数据与照片</p>
-        <h1>数据与照片</h1>
-        <p>按营业日翻看日常实拍、专项前后、整改原图与回拍、教材和标准图版本，导出台账，清理旧照片。</p>
-        <details class="rule-help">
-          <summary>规则说明</summary>
-          <p>营业日按 06:00 切，与员工端一致。删除是硬删除：记录和它的照片一起消失，红黑榜的历史计数不回滚。</p>
-          <p>当前标准图、以及被任何一次提交当作对照用过的版本都不能删。</p>
-        </details>
+    <header class="wbx-head">
+      <div class="wbx-head-main">
+        <p class="wbx-kicker">ARCHIVE · 数据与照片</p>
+        <h1 class="wbx-title">数据与照片</h1>
       </div>
-      <button type="button" class="btn" :disabled="loading" @click="loadRecords">刷新</button>
-    </div>
-
-    <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>
-    <p v-if="storageHint" class="clocks-hint" role="status">{{ storageHint }}</p>
-
-    <div v-if="storage" class="card storage-card">
-      <div class="storage-total">
-        <strong>{{ storage.total.count }}</strong>
-        <span>张照片 · {{ formatBytes(storage.total.bytes) }}</span>
+      <div class="wbx-pills">
+        <button type="button" class="btn" :disabled="loading" @click="loadRecords">刷新</button>
       </div>
-      <ul class="storage-list">
-        <li v-for="bucket in storage.kinds" :key="bucket.kind">
-          <span>{{ bucket.label }}</span>
-          <em>{{ bucket.count }} 张 · {{ formatBytes(bucket.bytes) }}</em>
-        </li>
-      </ul>
-      <p v-if="storage.missing_files" class="clocks-hint">
-        有 {{ storage.missing_files }} 张照片在库里但没有文件，取图会显示占位。
-      </p>
-      <p v-if="storage.orphan_files.count" class="clocks-hint">
-        另有 {{ storage.orphan_files.count }} 个无主文件（{{ formatBytes(storage.orphan_files.bytes) }}），后台会自动清掉。
-      </p>
-    </div>
+      <p class="wbx-sub">按营业日翻看日常实拍、专项前后、整改原图与回拍、教材和标准图版本，导出台账，清理旧照片。</p>
+      <details class="rule-help">
+        <summary>规则说明</summary>
+        <p>营业日按 06:00 切，与员工端一致。删除是硬删除：记录和它的照片一起消失，红黑榜的历史计数不回滚。</p>
+        <p>当前标准图、以及被任何一次提交当作对照用过的版本都不能删。</p>
+      </details>
+    </header>
 
-    <div class="card filter-card">
-      <label class="clock-field">
-        从
-        <LuyunDatePicker v-model="dateFrom" dark placeholder="开始日期" aria-label="数据查询开始日期" />
-      </label>
-      <label class="clock-field">
-        到
-        <LuyunDatePicker v-model="dateTo" dark placeholder="结束日期" aria-label="数据查询结束日期" />
-      </label>
-      <label class="clock-field">
-        工作区
-        <select v-model="zoneId" class="input" aria-label="按工作区筛选">
-          <option value="">全部</option>
-          <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
-        </select>
-      </label>
-      <fieldset class="kind-field">
-        <legend>类型</legend>
-        <label v-for="kind in KINDS" :key="kind.value" class="kind-option">
-          <input v-model="selectedKinds" type="checkbox" :value="kind.value">
-          <span>{{ kind.label }}</span>
+    <p v-if="errorText" class="wbx-error roster-error" role="alert">{{ errorText }}</p>
+    <p v-if="storageHint" class="wbx-hintline" role="status">{{ storageHint }}</p>
+
+    <section v-if="storage" class="wbx-panel">
+      <header class="wbx-ph">
+        <i class="led sig"></i>
+        <h2>存储概况</h2>
+        <span class="wbx-hint">{{ storage.kinds.length }} 类</span>
+      </header>
+      <div class="storage-body">
+        <div class="storage-total">
+          <strong>{{ storage.total.count }}</strong>
+          <span>张照片 · {{ formatBytes(storage.total.bytes) }}</span>
+        </div>
+        <ul class="storage-list">
+          <li v-for="bucket in storage.kinds" :key="bucket.kind">
+            <span>{{ bucket.label }}</span>
+            <em>{{ bucket.count }} 张 · {{ formatBytes(bucket.bytes) }}</em>
+          </li>
+        </ul>
+        <p v-if="storage.missing_files" class="wbx-hintline">
+          有 {{ storage.missing_files }} 张照片在库里但没有文件，取图会显示占位。
+        </p>
+        <p v-if="storage.orphan_files.count" class="wbx-hintline">
+          另有 {{ storage.orphan_files.count }} 个无主文件（{{ formatBytes(storage.orphan_files.bytes) }}），后台会自动清掉。
+        </p>
+      </div>
+    </section>
+
+    <section class="wbx-panel">
+      <header class="wbx-ph">
+        <i class="led ok"></i>
+        <h2>记录</h2>
+        <span class="wbx-hint">{{ total }} 条</span>
+        <span v-if="rangeLabel" class="wbx-hint data-range">{{ rangeLabel }}</span>
+      </header>
+
+      <!-- 筛选条合并进列表面板：它是这张表的范围，不占第二块面板 -->
+      <div class="filter-card">
+        <label class="wbx-field">
+          <span>从</span>
+          <LuyunDatePicker v-model="dateFrom" dark placeholder="开始日期" aria-label="数据查询开始日期" />
         </label>
-      </fieldset>
-      <div class="filter-actions">
-        <button type="button" class="btn btn-primary" :disabled="loading" @click="applyFilters">查询</button>
-        <button
-          type="button"
-          class="btn"
-          :disabled="
-            loading
+        <label class="wbx-field">
+          <span>到</span>
+          <LuyunDatePicker v-model="dateTo" dark placeholder="结束日期" aria-label="数据查询结束日期" />
+        </label>
+        <label class="wbx-field">
+          <span>工作区</span>
+          <select v-model="zoneId" class="input" aria-label="按工作区筛选">
+            <option value="">全部</option>
+            <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
+          </select>
+        </label>
+        <details class="kind-fold">
+          <summary>类型 · {{ selectedKinds.length }} / {{ KINDS.length }}</summary>
+          <fieldset class="kind-field">
+            <legend>类型</legend>
+            <label v-for="kind in KINDS" :key="kind.value" class="kind-option">
+              <input v-model="selectedKinds" type="checkbox" :value="kind.value">
+              <span>{{ kind.label }}</span>
+            </label>
+          </fieldset>
+        </details>
+        <div class="filter-actions">
+          <button type="button" class="btn btn-primary" :disabled="loading" @click="applyFilters">查询</button>
+          <button
+            type="button"
+            class="btn"
+            :disabled="
+              loading
               || !selectedKinds.length
               || !records.length
               || (exportJob && exportJob.state === 'running')
-          "
-          @click="startExport"
-        >
-          导出台账
-        </button>
+            "
+            @click="startExport"
+          >
+            导出台账
+          </button>
+          <button
+            type="button"
+            class="btn"
+            :disabled="exportToday || (exportJob && exportJob.state === 'running')"
+            @click="saveTodayPhotos"
+          >
+            一键保存今天的照片
+          </button>
+        </div>
+        <p v-if="exportJob && exportJob.state === 'running'" class="wbx-hintline" role="status">
+          正在打包 {{ exportJob.done || 0 }} / {{ exportJob.total || '…' }} 张…
+        </p>
+        <p v-if="exportHint" class="wbx-hintline" role="status">{{ exportHint }}</p>
+        <p v-if="exportError" class="roster-error wbx-error" role="alert">{{ exportError }}</p>
       </div>
-      <!-- 一键保存今天的照片（票 12 收尾）：不分类型、不看上面的筛选 —— 管理员下班
-           前把今天的存档一次拿走。**不带日期**：营业日由服务端算（06:00 切日），
-           前端算会在凌晨那一段差一天。 -->
-      <div class="filter-actions">
-        <button
-          type="button"
-          class="btn btn-primary"
-          :disabled="exportToday || (exportJob && exportJob.state === 'running')"
-          @click="saveTodayPhotos"
-        >
-          一键保存今天的照片
-        </button>
-      </div>
-      <p v-if="exportJob && exportJob.state === 'running'" class="clocks-hint" role="status">
-        正在打包 {{ exportJob.done || 0 }} / {{ exportJob.total || '…' }} 张…
-      </p>
-      <p v-if="exportHint" class="clocks-hint" role="status">{{ exportHint }}</p>
-      <p v-if="exportError" class="roster-error" role="alert">{{ exportError }}</p>
-    </div>
 
-    <div class="table-card">
-      <div class="table-card-header">
-        <h3>记录 <span>{{ total }}</span></h3>
-        <span v-if="rangeLabel" class="data-range">{{ rangeLabel }}</span>
-      </div>
-      <div v-if="loading" class="roster-empty">正在加载…</div>
-      <div v-else-if="!records.length" class="roster-empty">这一段没有符合条件的记录。</div>
+      <div v-if="loading" class="wbx-empty-bar">正在加载…</div>
+      <div v-else-if="!records.length" class="wbx-empty-bar">这一段没有符合条件的记录。</div>
       <template v-else>
-        <p v-if="truncated" class="clocks-hint">这一段记录太多，只显示了每个类型最近的部分，请收窄日期区间。</p>
+        <p v-if="truncated" class="wbx-hintline">这一段记录太多，只显示了每个类型最近的部分，请收窄日期区间。</p>
         <ul class="data-list">
           <li v-for="record in records" :key="`${record.kind}-${record.record_id}`" class="data-row">
             <div class="data-photos">
@@ -434,27 +451,24 @@ function gotoPage(next) {
           <button type="button" class="btn" :disabled="page >= pageCount || loading" @click="gotoPage(page + 1)">下一页</button>
         </div>
       </template>
-    </div>
+    </section>
 
-    <div class="card danger-card">
-      <div>
-        <h3>按区间清理</h3>
+    <section class="wbx-panel danger-card">
+      <header class="wbx-ph">
+        <i class="led bad"></i>
+        <h2>按区间清理</h2>
+        <span class="wbx-hint">硬删除 · 不可恢复</span>
+      </header>
+      <div class="danger-body">
         <p class="data-meta">
-          删掉 {{ dateFrom || '最早' }} ~ {{ dateTo || '今天' }} 之间的记录与照片。这是硬删除，
-          删了就找不回来；红黑榜的历史计数不回滚。
+          删掉 {{ dateFrom || '最早' }} ~ {{ dateTo || '今天' }} 之间、当前筛选里的 {{ selectedKinds.length }} 类记录与照片。
+          这是硬删除，删了就找不回来；红黑榜的历史计数不回滚。
         </p>
+        <button type="button" class="btn btn-danger" :disabled="!canPurge" @click="startPurge">
+          清理这一段
+        </button>
       </div>
-      <fieldset class="kind-field">
-        <legend>清理哪些类型</legend>
-        <label v-for="kind in PURGE_KINDS" :key="kind.value" class="kind-option">
-          <input v-model="purgeKinds" type="checkbox" :value="kind.value">
-          <span>{{ kind.label }}</span>
-        </label>
-      </fieldset>
-      <button type="button" class="btn btn-danger" :disabled="!canPurge" @click="purgeOpen = true">
-        清理这一段
-      </button>
-    </div>
+    </section>
 
     <ConfirmDialog
       v-if="deleteTarget"
@@ -486,148 +500,104 @@ function gotoPage(next) {
 </template>
 
 <style scoped>
-.storage-card {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+/* B 案 v2 + v3：页头右手只留刷新；读数与存储概况二选一（保留存储概况）；
+   筛选条合并进列表面板；清理共用同一份筛选；行高压到 72、缩略图列 64。 */
+.data-page {
+  display: flex; flex-direction: column; gap: 14px;
+  padding-bottom: calc(40px + var(--safe-b));
 }
-.storage-total {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+.wbx-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; align-items: end; }
+.wbx-head-main { grid-column: 1; grid-row: 1; }
+.wbx-kicker { margin: 0 0 7px; font: 500 9.5px/1 var(--font-sans); letter-spacing: .26em; color: var(--ink-faint); }
+.wbx-title { margin: 0; font: 600 26px/1.1 var(--font-sans); letter-spacing: .01em; color: var(--ink); }
+.wbx-pills { grid-column: 2; grid-row: 1; justify-self: end; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.wbx-sub { grid-column: 1 / -1; grid-row: 2; margin: 8px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--ink-dim); }
+.wbx-head .rule-help { grid-column: 1 / -1; grid-row: 3; margin-top: 6px; }
+.wbx-error { margin: 0; font-size: 11px; color: var(--danger-bright); }
+.wbx-hintline { margin: 0; font-size: 10.5px; color: var(--ink-dim); }
+.led { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; background: var(--line-strong); }
+.led.ok { background: var(--ok); }
+.led.warn { background: var(--warn); }
+.led.bad { background: var(--danger); }
+.led.sig { background: var(--action); }
+
+.wbx-panel {
+  display: flex; flex-direction: column;
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08); overflow: hidden;
 }
-.storage-total strong {
-  font-size: 28px;
-  font-variant-numeric: tabular-nums;
+.wbx-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.wbx-ph h2 { margin: 0; font: 600 12.5px/1 var(--font-sans); letter-spacing: .06em; color: var(--ink); }
+.wbx-hint { margin-left: auto; font: 500 9.5px/1 var(--font-mono); color: var(--ink-faint); }
+.wbx-empty-bar {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 44px; margin: 0; padding: 10px 14px;
+  font-size: 10.5px; color: var(--ink-faint);
 }
-.storage-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 18px;
-}
-.storage-list li {
-  display: flex;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--hy-muted);
-}
-.storage-list em {
-  font-style: normal;
-  font-variant-numeric: tabular-nums;
-}
+
+.storage-body { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
+.storage-total { display: flex; align-items: baseline; gap: 8px; }
+.storage-total strong { font: 500 24px/1 var(--font-mono); color: var(--ink); }
+.storage-total span { font-size: 10px; color: var(--ink-faint); }
+.storage-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.storage-list li { display: flex; gap: 6px; font-size: 10.5px; color: var(--ink-dim); }
+.storage-list em { font-style: normal; font-family: var(--font-mono); color: var(--ink-faint); }
+
 .filter-card {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 12px;
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px;
+  padding: 10px 14px; border-bottom: 1px solid var(--wb-ink-a08);
 }
-.filter-actions {
-  display: flex;
-  gap: 8px;
-}
+.filter-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.wbx-field { display: flex; flex-direction: column; gap: 5px; font-size: 10px; color: var(--ink-dim); }
+.wbx-field :deep(.luyun-date-picker) { width: 150px; }
+.kind-fold { font-size: 10px; color: var(--ink-dim); }
+.kind-fold summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
 .kind-field {
-  border: 1px solid var(--hy-line, rgba(133, 205, 198, .28));
-  border-radius: 8px;
-  padding: 6px 10px 8px;
-  margin: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+  border: 1px solid var(--line); border-radius: var(--r-1);
+  padding: 6px 10px 8px; margin: 0; display: flex; flex-wrap: wrap; gap: 8px;
 }
-.kind-field legend {
-  padding: 0 4px;
-  font-size: 12px;
-  color: var(--hy-muted);
-}
-.kind-option {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-}
-.data-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
+.kind-field legend { padding: 0 4px; font: 500 9.5px/1 var(--font-sans); letter-spacing: .12em; color: var(--ink-faint); }
+.kind-option { display: flex; align-items: center; gap: 4px; min-height: 44px; font-size: 10.5px; color: var(--ink-dim); }
+.kind-option input { accent-color: var(--action); }
+
+.data-list { list-style: none; margin: 0; padding: 0; }
 .data-row {
-  display: grid;
-  grid-template-columns: 220px 1fr auto;
-  gap: 12px;
-  align-items: center;
-  padding: 10px 14px;
-  border-top: 1px solid var(--hy-line, rgba(133, 205, 198, .18));
+  display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 10px; align-items: center;
+  min-height: 72px; padding: 8px 14px; border-bottom: 1px solid var(--wb-ink-a08);
 }
-.data-row:first-child { border-top: none; }
-.data-photos {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
+.data-row:last-child { border-bottom: 0; }
+.data-row:hover { background: var(--surface-2); }
+.data-photos { display: flex; gap: 4px; flex-wrap: wrap; }
 .data-thumb {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 0;
-  border: 1px solid var(--hy-line, rgba(133, 205, 198, .28));
-  border-radius: 6px;
-  background: none;
-  cursor: pointer;
-  overflow: hidden;
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 0; border: 1px solid var(--line); border-radius: var(--r-1);
+  background: none; cursor: pointer; overflow: hidden;
 }
-.data-thumb img {
-  width: 72px;
-  height: 54px;
-  object-fit: cover;
-  display: block;
-}
-.data-thumb span {
-  font-size: 10px;
-  color: var(--hy-muted);
-  padding-bottom: 2px;
-}
-.data-nophoto { color: var(--hy-muted); font-size: 12px; }
-.data-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.data-body strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.data-meta {
-  color: var(--hy-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-.data-range {
-  color: var(--hy-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
+.data-thumb img { width: 56px; height: 42px; object-fit: cover; display: block; }
+.data-thumb span { font: 500 8px/1 var(--font-mono); color: var(--ink-faint); padding: 1px 0 2px; }
+.data-nophoto { font-size: 9.5px; color: var(--ink-faint); }
+.data-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.data-body strong { font-size: 11.5px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.data-meta { font: 500 9.5px/1.45 var(--font-mono); color: var(--ink-faint); }
+.data-range { margin-left: 8px; }
 .data-pager {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 12px;
-  font-variant-numeric: tabular-nums;
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 10px; border-top: 1px solid var(--wb-ink-a08);
+  font: 500 10px/1 var(--font-mono); color: var(--ink-dim);
 }
-.danger-card {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  align-items: flex-start;
-  border-color: rgba(255, 120, 120, .35);
-}
+.danger-card { border-color: var(--danger); }
+.danger-body { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; align-items: flex-start; }
+.danger-body .data-meta { font: 500 10px/1.6 var(--font-mono); color: var(--ink-dim); }
+.data-page :deep(.btn) { min-height: 44px !important; border-radius: var(--r-1); }
 @media (max-width: 900px) {
-  .data-row { grid-template-columns: 1fr; }
+  .data-row { grid-template-columns: 64px minmax(0, 1fr); }
+  .data-actions { grid-column: 2; justify-self: end; }
+}
+@media (max-width: 720px) {
+  .wbx-head { grid-template-columns: minmax(0, 1fr); }
+  .wbx-pills { grid-column: 1; grid-row: 2; justify-self: start; margin-top: 10px; }
+  .wbx-sub { grid-row: 3; }
+  .wbx-head .rule-help { grid-row: 4; }
+  .wbx-title { font-size: 22px; }
 }
 </style>

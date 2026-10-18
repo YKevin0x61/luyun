@@ -23,6 +23,8 @@
  *  护栏：`src/__tests__/workbenchStylesheet.test.js`（真实路由 → 数 `<link>` 条数）。
  */
 
+import { applyStoredWorkbenchTheme, clearWorkbenchTheme } from './workbenchTheme'
+
 /** 共享样式表的地址（同一份在 `public/hygiene-admin.css`，由后端静态挂载）。 */
 export const WORKBENCH_STYLESHEET_HREF = '/hygiene-admin.css'
 
@@ -55,6 +57,11 @@ export function applyWorkbenchDocument(route) {
 
   if (enabled) html.setAttribute('data-workbench', '')
   else html.removeAttribute('data-workbench')
+
+  /* 2026-10-17 起多带一件：浅 / 深主题（`data-wb-theme`）。三件事**同一个开关**，
+     否则会出现「令牌开着、主题没挂」—— 浅色用户进工作台先闪一帧深色再跳浅色。 */
+  if (enabled) applyStoredWorkbenchTheme()
+  else clearWorkbenchTheme()
 
   if (enabled) mountStylesheet()
   else unmountStylesheet()

@@ -29,15 +29,21 @@ const { loggingOut, confirmOpen, queuedCount, ask, cancel, logout } = useStaffLo
 
 <style scoped>
 /* 靠 `margin-left: auto` 顶到顶栏最右；用它的页面只要把它放在顶栏最后一项即可
-   （今天页原来靠 `.tMe` 撑右，票 10 把那边的 auto 让给了这颗按钮）。 */
+   （今天页原来靠 `.tMe` 撑右，票 10 把那边的 auto 让给了这颗按钮）。
+   B 案 v2「钢面 · 仪」：方角（--r-1）+ 1px 控件边界（--line-strong）、透明底；
+   触控目标 ≥44px（手机端顶栏里也能点中）。 */
 .staff-exit {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding: 0 14px;
+  font-family: var(--font-sans);
   font-size: 11.5px;
-  color: var(--hy-muted);
-  border: 1px solid var(--hy-line);
-  border-radius: 999px;
-  padding: 4px 10px;
-  background: var(--hy-surface-2);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: transparent;
   cursor: pointer;
 }
 

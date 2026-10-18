@@ -61,7 +61,7 @@ watch(
          手机档整条 rail 收起来，出口在页头那个 `⋮` 里）。 -->
     <template #rail>
       <div class="hy-rail-foot">
-        <p class="hy-rail-note">对照实拍 · 当日验收<br>INSPECTION DESK</p>
+        <p class="hy-rail-note"><b>INSPECTION DESK</b>对照实拍 · 当日验收<br>当日验收 · 红黑榜 · 趋势</p>
         <router-link class="hy-back" to="/" :title="HYGIENE_BACK_TO_ADMIN_LABEL">
           {{ HYGIENE_BACK_TO_ADMIN_LABEL }}
         </router-link>
@@ -78,38 +78,36 @@ watch(
 </template>
 
 <style scoped>
+/* B 案 v2（2026-10-17）：rail 脚注收成一枚小面板 —— kicker / 说明 / 回后台按钮，
+   与页面里的面板同一套字号与间距。桌面档的 rail 才是它的位置，手机档整条收起。 */
 .hy-rail-foot {
   margin-top: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   padding: 12px 10px 0;
+  border-top: 1px solid var(--line);
 }
 .hy-rail-note {
   margin: 0;
-  font-size: 10.5px;
-  line-height: 1.6;
-  letter-spacing: .04em;
-  color: var(--hy-faint);
+  font: 500 9.5px/1.7 var(--font-sans);
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
 }
+.hy-rail-note b { display: block; margin-bottom: 3px; font-weight: 600; color: var(--ink-dim); }
 .hy-back {
   display: inline-flex;
   align-items: center;
-  min-height: 32px;
-  font-size: 12px;
-  color: var(--hy-muted);
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: var(--surface-1);
+  font-size: 11px;
+  color: var(--ink);
   text-decoration: none;
 }
-.hy-back:hover { color: var(--hy-ink); }
-
-/* 现场八页**不再自己让开底栏**（票 08）。手机档底栏（`WorkbenchTabBar`）是 `fixed`，那
-   57px + 安全区由统一壳算成一个数挂在内容容器上（`--wb-inset-bottom` → `.wb-main` 的下
-   内边距，ADR 0106 决策 2），页面侧再补一份就是**叠加**：这里原来那条
-   `@media (max-width: 720px) { .wb-shell :deep(.hy-main) { … } }` 就在 `--hy-page` 之上
-   又补了一次 57px + 安全区，390px 实测底部空白 70.6 + 57 = 127.6px（比需要多 57px），已删。
-   `.hy-main` 的下内边距只剩共享样式表那份「页面正文自己的收尾留白」：`<900px` 一律取
-   `--hy-page`（390 → 13.6px / 800 → 16px），≥900px = `2rem`。
-   当年钩子用 `.wb-shell` 而**不是**旧卫生壳那个 `hygiene-app` 类，是因为后者在共享样式表里
-   还带着 `<900px` 的整屏锁与 `≥900px` 的 `flex-direction: row`（挂到统一壳上会把顶栏与
-   内容排成左右两栏，2026-10-10 实测）—— 这条规则删了，那个钩子也别再挂回去。 */
+.hy-back:hover { border-color: var(--action); color: var(--action); }
 </style>

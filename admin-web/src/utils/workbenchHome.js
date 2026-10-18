@@ -102,6 +102,59 @@ export function countOverdueFixes(fix, now = Date.now()) {
   }).length
 }
 
+/** 店长首页「等我处理」：三类待办各取几条，拼成可点的行（2026-10-18 实用性改进）。
+ *
+ *  为什么要有它：四个读数只回答「有几件」，不回答「是哪几件」—— 店长得挨个点进去才
+ *  知道今天具体要办什么。数据全部来自首页**已经在拉**的三份响应（不新增接口），
+ *  一条一类、按「越急越靠前」排：逾期整改 → 待验收 → 待批请假。
+ *
+ *  口径与三个专页一致（只数店长真能动手的那些）：验收只取「待验收」、请假只取
+ *  `kind === 'leave'`（换班要对方点头才进待办）、整改只取「待回拍且已过 deadline」。
+ *  `null`（那块读不出来）不编造条目 —— 少一类就少一类，别把「没读到」说成「没有」。
+ */
+/** 首页只展示前 6 条（一屏摘要）；**总数**由调用方拿去写「还有 N 件」。 */
+export const MANAGER_TODO_LIMIT = 6
+export function managerTodoRows({ inbox = null, queue = null, fix = null, now = Date.now() } = {}) {
+  const rows = []
+  for (const row of (fix && fix.items) || []) {
+    if (!row || row.status !== STATUS_FIX_TODO || !row.deadline) continue
+    const stamp = Date.parse(row.deadline)
+    if (!Number.isFinite(stamp) || stamp > now) continue
+    rows.push({
+      key: `fix-${row.id}`,
+      kind: '整改',
+      title: [row.zone_name, row.ticket_type].filter(Boolean).join(' · ') || '整改单',
+      meta: (row.body_text || '').trim().slice(0, 24) || '已过整改时限',
+      to: '/workbench/floor/fix',
+      tone: 'bad',
+    })
+  }
+  for (const row of (queue && queue.items) || []) {
+    if (!row || row.status !== STATUS_PENDING) continue
+    rows.push({
+      key: `daily-${row.item_id}-${row.shift}`,
+      kind: '验收',
+      title: [row.zone_name, row.item_name].filter(Boolean).join(' · ') || '日常验收',
+      meta: [row.shift, row.submitter_phone].filter(Boolean).join(' · ') || '待验收',
+      to: '/workbench/floor/daily',
+      tone: 'warn',
+    })
+  }
+  for (const req of (inbox && inbox.requests) || []) {
+    if (!req || req.kind !== 'leave') continue
+    const span = req.end_date && req.end_date !== req.start_date ? `${req.start_date} ~ ${req.end_date}` : req.start_date
+    rows.push({
+      key: `leave-${req.id}`,
+      kind: '请假',
+      title: `${req.employee_name || '（没有名字）'} · ${span || ''}`.trim(),
+      meta: (req.days || []).length ? `${req.days.length} 天 · 待批` : '待批',
+      to: '/workbench/hr/inbox',
+      tone: 'warn',
+    })
+  }
+  return rows
+}
+
 /** 人事提醒条数：本月**该调工龄奖**的人数（含历史欠调）＋ 本月**生日**人数 ＋
  *  **健康证临期/过期**人数。
  *
@@ -266,6 +319,8 @@ export function workbenchHomeSummary({
       reviews: countPendingItems(queue),
       fixes: countOverdueFixes(fix, now),
       reminders: countHrReminders(reminders),
+      // 四个数字的「展开版」：具体哪几件事（按急迫排，最多 6 条）。
+      todos: managerTodoRows({ inbox, queue, fix, now }),
       me: null,
       work: null,
       incoming: null,
@@ -290,6 +345,7 @@ export function workbenchHomeSummary({
       me: { shift: staffShiftCell(today), next: staffNextDays(me) },
       work,
       incoming: work.incoming,
+      todos: null,
     }
   }
 
@@ -300,6 +356,7 @@ export function workbenchHomeSummary({
     reviews: null,
     fixes: null,
     reminders: null,
+    todos: null,
     me: null,
     work: null,
     incoming: null,

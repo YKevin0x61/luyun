@@ -1255,10 +1255,12 @@ describe('考勤表页的版式（B 批返工 ③②⑥⑧①）', () => {
     expect(name).toContain('min-width: 0')
   })
 
-  it('① 顶部那一行会换行：标题块给基准宽、按钮组自己也能换行', () => {
-    expect(view).toMatch(/\.aTop\s*\{[^}]*flex-wrap:\s*wrap/)
+  it('① 页头三行（kicker / 标题 + 动作 / 说明 + 月份），窄屏自动落到单列', () => {
+    // v3 版式审查：页头改成三行网格（kicker / H1 + 动作同基线 / 说明 + 范围），旧的
+    // 「一行 flex-wrap」不再成立；要守的意图不变 —— 390px 下不横向溢出。
+    expect(view).toMatch(/\.aTop\s*\{[^}]*flex-direction:\s*column/)
     expect(view).toMatch(/\.aActions\s*\{[^}]*flex-wrap:\s*wrap/)
-    expect(view).toMatch(/\.aIntro\s*\{[^}]*flex:\s*1 1 320px/)
+    expect(view).toMatch(/\.aTitleRow\s*\{[^}]*align-items:\s*baseline/)
   })
 })
 

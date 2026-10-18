@@ -130,8 +130,10 @@ describe('员工端「整月」页（票 06）', () => {
 
   it('请假那格有自己的颜色与图例，不跟「休」混（票 08）', () => {
     // 语气与文案的判据在 util 里（todayShift.test.js）；这一页只管上色与图例。
-    expect(view).toMatch(/\.mD\.leave \.s\s*\{[^}]*var\(--hy-aqua\)/)
-    expect(view).toMatch(/\.dot\.leave\s*\{[^}]*var\(--hy-aqua\)/)
+    // 纯视觉断言维护（2026-10-17 B 案「钢面 · 仪」）：请假从兼容层 --hy-aqua 换成语义层
+    // 的 --info（信息一档）；判据仍是「请假与休、上班各自一色」。
+    expect(view).toMatch(/\.mD\.leave \.s\s*\{[^}]*var\(--info\)/)
+    expect(view).toMatch(/\.dot\.leave\s*\{[^}]*var\(--info\)/)
     // 图例三条排开：上班 / 休 / 请假（少一条员工就猜「这格子什么意思」）。
     expect(view).toMatch(/class="dot shift"[^<]*\/>上班/)
     expect(view).toMatch(/class="dot rest"[^<]*\/>休/)
@@ -229,7 +231,9 @@ describe('员工端「整月」页（票 06）', () => {
     expect(view).toMatch(/v-if="pendingDates\.has\(cell\.business_date\)"/)
     expect(view).toMatch(/class="dot pending"/)
     // 颜色跟「班次已调整」的琥珀分开（两件事，同色最容易看错）。
-    expect(view).toMatch(/\.dot\.pending \{[\s\S]{0,90}?var\(--hy-coral\)/)
+    // 纯视觉断言维护（2026-10-17 B 案「钢面 · 仪」）：从兼容层 --hy-coral 换成语义层
+    // 的 --action（当前/信息一档），仍与 moved 的 --warn 不同色。
+    expect(view).toMatch(/\.dot\.pending \{[\s\S]{0,90}?var\(--action\)/)
     // 页脚不再说「等那张票做好再加」——那张票早做完了，这句话留着会让人等一个不存在的东西。
     expect(view).not.toContain('换班的角标等那张票做好再加')
 

@@ -208,7 +208,7 @@ onBeforeUnmount(() => {
   color: var(--hy-muted);
   padding: 7px 11px;
   font: 700 11px/1 var(--font-mono);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, .24);
+  box-shadow: 0 8px 20px var(--wb-scrim);
 }
 .std-cache-trigger span {
   margin-left: 5px;
@@ -239,7 +239,7 @@ onBeforeUnmount(() => {
   background: var(--hy-surface);
   color: var(--hy-ink);
   padding: 20px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, .38);
+  box-shadow: 0 24px 60px var(--wb-scrim);
 }
 .std-cache-card h2 {
   margin: 0 0 10px;
@@ -272,7 +272,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--hy-line);
   border-radius: 8px;
   background: var(--hy-surface);
-  box-shadow: 0 16px 36px rgba(0, 0, 0, .3);
+  box-shadow: 0 16px 36px var(--wb-scrim);
 }
 .std-cache-progress {
   bottom: 14px;

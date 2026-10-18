@@ -30,6 +30,7 @@ import ConfirmDialog from '../admin/ConfirmDialog.vue'
 import SvgIcon from '../SvgIcon.vue'
 import WorkbenchIdentitySwitcher from './WorkbenchIdentitySwitcher.vue'
 import { useWorkbenchLogout } from '../../composables/useWorkbenchLogout'
+import { useWorkbenchTheme } from '../../composables/useWorkbenchTheme'
 import { pageRow } from '../../router/pageRoutes.js'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
 import { workbenchAudienceFor, workbenchGroup, workbenchGroupOf, workbenchPagesOf } from '../../utils/workbenchNav'
@@ -43,6 +44,9 @@ const props = defineProps({
 const route = useRoute()
 const identityStore = useWorkbenchIdentityStore()
 const { ask, exit, confirmOpen, queuedCount, cancel } = useWorkbenchLogout()
+/** 浅 / 深皮肤（2026-10-17）：手机上放 `⋮` 菜单里 —— 页头一行只有 56px，
+ *  皮肤不是高频操作，塞进菜单不占那一行。 */
+const { isDark, toggle: toggleTheme } = useWorkbenchTheme()
 
 /** 员工那一档不渲染「回管理后台」（D7，与 `WorkbenchLayout` 的 `showBackToAdmin` 同一条
  *  判据）：那一扇门通向 `/` —— 店长专属的运营仪表盘，员工点下去只会吃一张「无权访问」。
@@ -120,6 +124,12 @@ function onExit() {
   void ask()
 }
 
+/** 切皮肤：先收菜单，再翻 —— 翻完页面立刻变色，菜单留着会挡住第一眼。 */
+function onToggleTheme() {
+  closeAll()
+  toggleTheme()
+}
+
 /** ESC 关浮层（键盘 / 外接键盘的场景）。 */
 function onKeydown(event) {
   if (event.key === 'Escape') closeAll()
@@ -187,6 +197,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
     <!-- 退出 / 回后台：原来顶栏那两颗按钮，收到这儿。 -->
     <div v-if="moreOpen" class="wmh-panel wmh-more-menu" role="menu">
+      <button class="wmh-item wmh-item-btn" type="button" role="menuitem" @click="onToggleTheme">
+        <svg v-if="isDark" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <circle cx="12" cy="12" r="4.1" />
+          <path d="M12 2.8v2.1M12 19.1v2.1M2.8 12h2.1M19.1 12h2.1M5.5 5.5l1.5 1.5M17 17l1.5 1.5M18.5 5.5 17 7M7 17l-1.5 1.5" />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20.2 14.3A8.1 8.1 0 0 1 9.7 3.8 8.4 8.4 0 1 0 20.2 14.3Z" />
+        </svg>
+        <span class="wmh-item-name">{{ isDark ? '用浅色模式' : '用深色模式' }}</span>
+      </button>
       <button class="wmh-item wmh-item-btn" type="button" role="menuitem" @click="onExit">
         <SvgIcon name="x-circle" :size="18" />
         <span class="wmh-item-name">退出登录</span>
@@ -228,7 +248,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     z-index: var(--z-shell);
     min-height: 56px;
     padding: 6px max(12px, env(safe-area-inset-right)) 6px max(12px, env(safe-area-inset-left));
-    background: rgba(8, 19, 21, .96);
+    background: var(--surface-1);
     border-bottom: 1px solid var(--hy-line);
   }
 }
@@ -243,8 +263,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   min-height: 44px;
   padding: 0 10px;
   border: 0;
-  border-radius: 10px;
-  background: rgba(133, 205, 198, .08);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
   color: var(--hy-muted);
   font: inherit;
   font-size: 12.5px;
@@ -272,7 +292,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--r-1);
   background: none;
   color: var(--hy-muted);
   cursor: pointer;
@@ -286,7 +306,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   padding: 6px;
   background: var(--hy-surface);
   border: 1px solid var(--hy-line-strong);
-  border-radius: 14px;
+  border-radius: var(--r-2);
   box-shadow: var(--hy-shadow-md);
 }
 .wmh-pages { left: 8px; right: 8px; }

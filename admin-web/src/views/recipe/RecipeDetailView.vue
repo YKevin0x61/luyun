@@ -57,6 +57,8 @@ const errorMsg = ref('')
 const bodyRef = ref(null)
 const tocHtml = ref('')
 const tocVisible = ref(false)
+// 章节 <3 时不再占左栏：改成正文上方一条横滚 tab（v3 版式审查）。
+const tocCompact = ref(false)
 
 const theme = ref(RC.readPref(window.localStorage, 'sop.theme', 'auto'))
 const density = ref(RC.readPref(window.localStorage, 'sop.density', 'compact') !== 'grid')
@@ -76,6 +78,9 @@ const drawerRef = ref(null)
 // 「谁能编辑配方」以前只由一个前端登录开关决定，界面上没有任何来源可查（audit 条目 11）。
 // 拖拽排序 / 删除这些入口跟着它一起收；接口自己也有一道 401。
 const { isAdmin: canEdit } = useRecipeAdmin()
+/* 顶栏那两颗管理端入口按身份出现，模板读的是 `isAdmin`（与另外四个阅读页同一写法）；
+   拖拽排序那几个入口历史上读 `canEdit`。两个名字指向同一个值，别在模板里混用。 */
+const isAdmin = canEdit
 const editRecipeId = ref(null)
 const confirmDialog = reactive({
   open: false,
@@ -204,6 +209,7 @@ function buildToc() {
     targets.push(sec)
   }
   tocHtml.value = html
+  tocCompact.value = sections.length < 3
   tocVisible.value = true
 
   nextTick(() => {
@@ -815,7 +821,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="sop-reader">
-    <header class="site-header no-print" style="position:static">
+    <header class="site-header no-print sop-site-header">
       <div class="site-header-inner">
         <router-link class="site-brand" :to="RECIPE_HOME_PATH">
           <span class="site-brand-mark" aria-hidden="true"><span class="site-brand-mark-inner">{{ RECIPE_BRAND_MARK }}</span></span>
@@ -875,30 +881,42 @@ onBeforeUnmount(() => {
       </div>
     </header>
     <main class="site-main">
-      <div class="sop-layout" :class="{ 'sop-layout--with-toc': tocVisible }">
-        <aside class="sop-toc no-print" id="sopToc" v-show="tocVisible" v-html="tocHtml"></aside>
+      <div class="sop-layout" :class="{ 'sop-layout--with-toc': tocVisible && !tocCompact }">
+        <aside v-if="tocVisible && !tocCompact" class="sop-toc no-print" id="sopToc" v-html="tocHtml"></aside>
         <article class="sop-article">
           <div class="sop-toolbar no-print">
             <router-link class="back-link" :to="RECIPE_HOME_PATH"><span class="back-link-icon" aria-hidden="true">←</span>返回列表</router-link>
-            <span class="sop-toolbar-chip">{{ title }}</span>
-            <div v-if="servingsControlVisible" class="sop-servings sop-servings--toolbar no-print" aria-live="polite">
-              <label class="sop-servings-label" for="sop-target-servings">目标份数</label>
-              <input
-                id="sop-target-servings"
-                v-model="targetServingsQty"
-                type="number"
-                inputmode="decimal"
-                min="0.1"
-                step="any"
-                class="sop-servings-input"
-                aria-label="目标份数"
-              >
-              <span class="sop-servings-unit">{{ servingsUnitLabel }}</span>
+            <div class="reader-toolbar-copy">
+              <p class="reader-kicker">配方 · 阅读</p>
+              <span class="reader-title sop-toolbar-chip">{{ title }}</span>
             </div>
-            <button type="button" class="sop-chip" :aria-pressed="onlyNew" @click="toggleOnlyNew"><SvgIcon name="star" :size="12" /> 只看新品</button>
-            <button type="button" class="sop-chip" :aria-pressed="showInactive" @click="toggleShowInactive">显示停用</button>
-            <span class="sop-search-count" aria-live="polite">{{ searchCount }}</span>
+            <div class="reader-toolbar-tools">
+              <div v-if="servingsControlVisible" class="sop-servings sop-servings--toolbar no-print" aria-live="polite">
+                <label class="sop-servings-label" for="sop-target-servings">目标份数</label>
+                <input
+                  id="sop-target-servings"
+                  v-model="targetServingsQty"
+                  type="number"
+                  inputmode="decimal"
+                  min="0.1"
+                  step="any"
+                  class="sop-servings-input"
+                  aria-label="目标份数"
+                >
+                <span class="sop-servings-unit">{{ servingsUnitLabel }}</span>
+              </div>
+              <button type="button" class="sop-chip" :aria-pressed="onlyNew" @click="toggleOnlyNew"><SvgIcon name="star" :size="12" /> 只看新品</button>
+              <button type="button" class="sop-chip" :aria-pressed="showInactive" @click="toggleShowInactive">显示停用</button>
+              <span class="sop-search-count" aria-live="polite">{{ searchCount }}</span>
+            </div>
           </div>
+          <nav
+            v-if="tocVisible && tocCompact"
+            id="sopToc"
+            class="sop-toc-tabs no-print"
+            aria-label="章节目录"
+            v-html="tocHtml"
+          ></nav>
           <div class="sop-panel">
             <div v-if="loading" class="sop-body markdown-body">加载中…</div>
             <div v-else-if="errorMsg" class="sop-body markdown-body">{{ errorMsg }}</div>
@@ -1025,7 +1043,7 @@ onBeforeUnmount(() => {
               >
                 <span aria-hidden="true">◱</span>打印预览
               </router-link>
-              <router-link v-if="canEdit" class="btn btn-ghost" :to="RECIPE_MANAGE_PATH">{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
+              <router-link v-if="isAdmin" class="btn btn-ghost" :to="RECIPE_MANAGE_PATH">{{ RECIPE_NAV_MANAGE_LABEL }}</router-link>
             </div>
           </div>
         </div>
@@ -1066,7 +1084,7 @@ onBeforeUnmount(() => {
         <h3 id="recipe-reader-confirm-title" class="qr-modal-title">{{ confirmDialog.title }}</h3>
         <p id="recipe-reader-confirm-body" class="qr-url">{{ confirmDialog.body }}</p>
         <p v-if="confirmDialog.error" class="flash flash-error">{{ confirmDialog.error }}</p>
-        <div class="qr-actions" style="gap:.5rem">
+        <div class="qr-actions qr-actions-confirm">
           <button
             type="button"
             class="btn btn-danger"
@@ -1081,9 +1099,332 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 沉浸阅读面：页头不粘（原来写在内联 style 里）。**只碰外观**：
+   `.sop-bottom-bar` 的 fixed 定位、`.sop-reader` 那套滚动规则一概不动。 */
+.sop-site-header {
+  position: static;
+}
 .site-nav-link {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+}
+.qr-actions-confirm {
+  gap: var(--sp-2);
+}
+
+/* ── 页头式工具栏：kicker / 标题 / 右侧工具（B 案 v2 页面骨架）───────── */
+.reader-toolbar-copy {
+  min-width: 0;
+}
+.reader-kicker {
+  margin: 0 0 5px;
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .26em;
+  color: var(--ink-faint);
+}
+.reader-title {
+  display: inline-block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 600 18px/1.2 var(--font-sans);
+  letter-spacing: .01em;
+}
+.reader-toolbar-tools {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 章节 <3：正文上方的横滚 tab（不占左栏） */
+.sop-toc-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  margin: 0 0 12px;
+  padding: 2px 0 8px;
+  border-bottom: 1px solid var(--line);
+}
+.sop-toc-tabs h5 {
+  display: none;
+}
+.sop-toc-tabs :deep(a) {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-1);
+  font-size: 12px;
+  color: var(--ink-dim);
+  text-decoration: none;
+}
+.sop-toc-tabs :deep(a .n) {
+  font-family: var(--font-mono);
+  color: var(--ink-faint);
+}
+.sop-toc-tabs :deep(a.on) {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+  box-shadow: inset 2px 0 0 var(--action);
+}
+.reader-led {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 6px;
+}
+.reader-led.ok { background: var(--ok); box-shadow: 0 0 0 3px var(--wb-ok-a16); }
+.reader-led.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--wb-warn-a16); }
+.reader-led.bad { background: var(--danger); box-shadow: 0 0 0 3px var(--wb-danger-a16); }
+.reader-led.sig { background: var(--action); box-shadow: 0 0 0 3px var(--wb-tint-14); }
+
+/* ── B 案「钢面 · 仪」（屏幕）────────────────────────────────────────────
+   `recipe.css` 里章节头是整条薄荷底、配方卡是 10px 圆角 + 顶部渐变光条 + 悬停浮起；
+   B 案要：章节头退成「LED + 刻度小标题」，配方卡是唯一面板（配方名当面板头），
+   卡内用料 / 步骤 / 小贴士用 border-top 分成三段（次级分组，不再卡片套卡片）。
+   全部圈在 `@media screen`：打印仍走 `recipe.css` 末尾那套白纸版面，
+   一个字都不改。 */
+@media screen {
+  .sop-toolbar {
+    display: flex;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .back-link {
+    border-radius: var(--r-1);
+    color: var(--ink-dim);
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .sop-toolbar-chip {
+    border-radius: var(--r-1);
+    border: 1px solid var(--line-strong);
+    background: var(--surface-1);
+    color: var(--ink);
+  }
+  .sop-chip {
+    border-radius: var(--r-1);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ink-dim);
+  }
+
+  /* 阅读正文宽限 880px（v3：卡片网格 280 起跳铺满这个宽度，不再拉满整屏） */
+  .sop-article {
+    max-width: 880px;
+    margin: 0 auto;
+  }
+  .sop-layout--with-toc .sop-article {
+    margin: 0;
+  }
+
+  /* 阅读面板 */
+  .sop-panel {
+    border-color: var(--line);
+    border-radius: var(--r-2);
+    box-shadow: var(--hy-shadow-sm);
+  }
+
+  /* 章节目录（aside）：面板 + 行，选中项用左条 + 正文色，不再整块薄荷填充。 */
+  .sop-toc {
+    border: 1px solid var(--line);
+    border-radius: var(--r-2);
+    background: var(--surface-1);
+    box-shadow: var(--hy-shadow-sm);
+  }
+  .sop-toc :deep(a) {
+    border-radius: var(--r-1);
+    font-size: 12px;
+    color: var(--ink-dim);
+  }
+  .sop-toc :deep(a .n) {
+    font-family: var(--font-mono);
+    color: var(--ink-faint);
+  }
+  .sop-toc :deep(a:hover) {
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+  .sop-toc :deep(a.on) {
+    background: var(--surface-2);
+    color: var(--ink);
+    box-shadow: inset 2px 0 0 var(--action);
+  }
+  .sop-toc :deep(a.on .n) {
+    color: var(--ink-faint);
+  }
+
+  /* 文档：章节 = 小节标题 + 卡片网格（不再堆第三种卡片） */
+  .sop-body :deep(.sop-doc) {
+    gap: 18px;
+  }
+  .sop-body :deep(.sop-section) {
+    gap: 10px;
+  }
+  .sop-body :deep(.sop-section-head h2) {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 0 0 8px;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    font: 600 13px/1.2 var(--font-sans);
+    letter-spacing: .06em;
+    color: var(--ink);
+  }
+  .sop-body :deep(.sop-section-head h2::before) {
+    content: "";
+    flex: 0 0 6px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--action);
+    box-shadow: 0 0 0 3px var(--wb-tint-14);
+  }
+  .sop-body :deep(.sop-section-intro) {
+    font-size: 12.5px;
+    color: var(--ink-dim);
+  }
+  .sop-body :deep(.sop-section-grid) {
+    gap: 10px;
+    /* v3：卡片网格按 280px 起跳铺满正文宽，不再 3 张 210px 窄卡并排 */
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)) !important;
+  }
+
+  /* 配方卡 = 面板（唯一卡片语言）：去顶部渐变光条、去悬停浮起。 */
+  .sop-body :deep(.recipe-card) {
+    border: 1px solid var(--line);
+    border-radius: var(--r-2);
+    background: var(--surface-1);
+    box-shadow: var(--hy-shadow-sm);
+  }
+  .sop-body :deep(.recipe-card::before) {
+    display: none;
+  }
+  .sop-body :deep(.recipe-card:hover) {
+    transform: none;
+    border-color: var(--line-strong);
+    box-shadow: var(--hy-shadow-sm);
+  }
+  .sop-body :deep(.recipe-card.recipe-card--focus) {
+    border-color: var(--action);
+    box-shadow: 0 0 0 3px var(--wb-tint-14), var(--hy-shadow-sm);
+  }
+  .sop-body :deep(.recipe-card-head) {
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--line);
+  }
+  .sop-body :deep(.recipe-card-head h3) {
+    padding: 11px 14px;
+    font: 600 12.5px/1.3 var(--font-sans);
+    letter-spacing: .06em;
+    color: var(--ink);
+  }
+  /* 用料 / 步骤 / 小贴士：卡内三段，用 border-top 分隔（次级分组）。 */
+  .sop-body :deep(.recipe-card-body) {
+    padding: 0;
+    line-height: 1.5;
+  }
+  .sop-body :deep(.recipe-card-body > *) {
+    margin: 0;
+    padding: 10px 14px;
+    border-top: 1px solid var(--wb-ink-a08);
+  }
+  .sop-body :deep(.recipe-card-body > :first-child) {
+    border-top: 0;
+  }
+  /* 用料：表格退成行（名称左 / 用量右对齐 mono）。 */
+  .sop-body :deep(.recipe-card-body table) {
+    margin: 0;
+    border: 0;
+    border-collapse: collapse;
+    border-radius: 0;
+    font-size: inherit;
+  }
+  .sop-body :deep(.recipe-ingredients-name) {
+    border-right: 0;
+  }
+  .sop-body :deep(.recipe-ingredients-amount) {
+    border-right: 0;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+  .sop-body :deep(.recipe-card-body td) {
+    border-right: 0;
+    border-bottom: 1px solid var(--wb-ink-a08);
+  }
+  .sop-body :deep(.recipe-card-body tr:last-child td) {
+    border-bottom: 0;
+  }
+  /* 步骤：编号仍是圆形小记号，换成动作色。 */
+  .sop-body :deep(ol.recipe-steps > li.recipe-steps-item::before) {
+    color: var(--action);
+    background: var(--wb-tint-08);
+    border-color: var(--line-strong);
+  }
+  /* 小贴士：提示块用 warn 左条，不做整块高饱和填充。 */
+  .sop-body :deep(ul.recipe-tips) {
+    border-left: 3px solid var(--warn);
+    background: var(--surface-2);
+  }
+  /* 新品 / 停用：状态用小徽章。 */
+  .sop-body :deep(article.recipe-card.recipe-card--new) {
+    border-color: var(--wb-warn-a45);
+  }
+  .sop-body :deep(article.recipe-card.recipe-card--new::after) {
+    top: 10px;
+    right: 12px;
+    padding: 2px 8px;
+    border: 1px solid var(--wb-warn-a45);
+    border-radius: var(--r-full);
+    background: var(--wb-warn-a10);
+    color: var(--warn);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: .06em;
+  }
+  .sop-body :deep(article.recipe-card.recipe-card--new .recipe-card-head) {
+    background: var(--surface-2);
+    border-bottom-color: var(--line);
+  }
+  .sop-body :deep(article.recipe-card.recipe-card--new .recipe-card-head h3) {
+    color: var(--ink);
+    padding-right: 3.6rem;
+  }
+  .sop-body :deep(article.recipe-card.recipe-card--inactive::after) {
+    top: 10px;
+    right: 12px;
+    padding: 2px 8px;
+    border-radius: var(--r-full);
+    font-size: 10px;
+    font-weight: 500;
+  }
+}
+@media (max-width: 720px) {
+  /* v3：390 下标题不套 chip 框 */
+  .reader-title.sop-toolbar-chip {
+    border: 0;
+    background: transparent;
+    padding: 0;
+  }
 }
 </style>

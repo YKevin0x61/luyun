@@ -241,12 +241,12 @@ onMounted(() => {
 <template>
   <div class="hygiene-admin shifts-page">
     <header class="sTop">
-      <div>
-        <p class="sKicker">排班</p>
+      <p class="sKicker">人事 · 排班</p>
+      <div class="sTitleRow">
         <h1>班次表</h1>
-        <p class="sSub">改动只影响以后：已经排好的班不动。</p>
+        <button class="btn sAction" type="button" @click="router.push(WORKBENCH_HR_HOME)">回到月历</button>
       </div>
-      <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">回到月历</button>
+      <p class="sSub">改动只影响以后：已经排好的班不动。</p>
     </header>
 
     <p v-if="state === 'loading'" class="sHint">正在读班次表…</p>
@@ -257,10 +257,10 @@ onMounted(() => {
 
       <section class="sCard">
         <div class="sCard-hd">
+          <i class="sLed sig"></i>
           <h2>全部班次</h2>
-          <span class="sCount">{{ shifts.length }}</span>
+          <span class="sCard-hint">{{ shifts.length }} 个 · 启用 {{ activeCount }}</span>
         </div>
-        <p class="sLead">卫生日常认档不认名字：改名不丢档，新加的默认不挂档。</p>
 
         <div class="sAdd">
           <input
@@ -281,83 +281,101 @@ onMounted(() => {
         </div>
 
         <p v-if="!shifts.length" class="sEmpty">一个班次都没有：先加一个，不然谁都没班可排。</p>
-        <ul v-else class="sList">
-          <li v-for="(shift, index) in shifts" :key="shift.id" class="sRow" :class="{ off: !shift.is_active }">
-            <span class="sOrd">{{ index + 1 }}</span>
+        <template v-else>
+          <div class="sTh" aria-hidden="true">
+            <span>#</span>
+            <span>班次 / 在用</span>
+            <span>状态</span>
+            <span>卫生日常</span>
+            <span class="sTh-act">操作</span>
+          </div>
+          <ul class="sList">
+            <li v-for="(shift, index) in shifts" :key="shift.id" class="sRow" :class="{ off: !shift.is_active }">
+              <span class="sOrd">{{ index + 1 }}</span>
 
-            <template v-if="editingId === shift.id">
-              <input
-                v-model="editName"
-                class="input sNameInput"
-                type="text"
-                :maxlength="maxName || undefined"
-                :aria-label="`改「${shift.name}」的名字`"
-                @keyup.enter="saveName(shift)"
-                @keyup.esc="cancelRename"
-              >
-              <span class="sActs">
-                <button class="btn btn-primary" type="button" :disabled="busy || !editName.trim()" @click="saveName(shift)">保存</button>
-                <button class="btn" type="button" @click="cancelRename">取消</button>
-              </span>
-            </template>
-
-            <template v-else>
-              <span class="sName">{{ shift.name }}</span>
-              <span class="sTag" :class="{ off: !shift.is_active }">{{ statusText(shift) }}</span>
-              <span class="sUsage">{{ usageLine(shift) }}</span>
-              <!-- 读和写是同一个控件：选中的那一条就是这条班次现在的档位（停用的也能改 ——
-                   它的历史排班还要照这档交日常）。选项来自 util，模板里不写死档位说法。 -->
-              <label class="sDuty">
-                <span class="sDutyLab">卫生日常</span>
-                <select
-                  class="select sDutySel"
-                  :value="dutySlotValue(shift)"
-                  :disabled="busy"
-                  @change="setDutySlot(shift, $event.target.value)"
+              <template v-if="editingId === shift.id">
+                <input
+                  v-model="editName"
+                  class="input sNameInput"
+                  type="text"
+                  :maxlength="maxName || undefined"
+                  :aria-label="`改「${shift.name}」的名字`"
+                  @keyup.enter="saveName(shift)"
+                  @keyup.esc="cancelRename"
                 >
-                  <option v-for="choice in DUTY_SLOT_CHOICES" :key="choice.value" :value="choice.value">{{ choice.label }}</option>
-                </select>
-              </label>
-              <span class="sActs">
-                <button
-                  class="btn sMini"
-                  type="button"
-                  title="上移一位"
-                  :disabled="index === 0 || busy"
-                  @click="moveShift(shift, -1)"
-                >↑</button>
-                <button
-                  class="btn sMini"
-                  type="button"
-                  title="下移一位"
-                  :disabled="index === shifts.length - 1 || busy"
-                  @click="moveShift(shift, 1)"
-                >↓</button>
-                <button
-                  class="btn sMini"
-                  type="button"
-                  :disabled="busy"
-                  @click="startRename(shift)"
-                >改名</button>
-                <button
-                  class="btn sMini"
-                  type="button"
-                  :disabled="busy"
-                  @click="toggleActive(shift)"
-                >{{ toggleLabel(shift) }}</button>
-                <button
-                  class="btn btn-danger sMini"
-                  type="button"
-                  :disabled="!canDelete(shift, activeCount) || busy"
-                  :title="canDelete(shift, activeCount) ? '删掉这个班次' : deleteBlockedReason(shift, activeCount)"
-                  @click="deleteTarget = shift"
-                >删除</button>
-              </span>
-            </template>
+                <span class="sActs">
+                  <button class="btn btn-primary" type="button" :disabled="busy || !editName.trim()" @click="saveName(shift)">保存</button>
+                  <button class="btn" type="button" @click="cancelRename">取消</button>
+                </span>
+              </template>
 
-            <span v-if="!canDelete(shift, activeCount)" class="sWhy">{{ deleteBlockedReason(shift, activeCount) }}</span>
-          </li>
-        </ul>
+              <template v-else>
+                <span class="sMain">
+                  <b class="sName">{{ shift.name }}</b>
+                  <span class="sUsage">{{ usageLine(shift) }}</span>
+                </span>
+                <span class="sTag" :class="{ off: !shift.is_active }">{{ statusText(shift) }}</span>
+                <!-- 读和写是同一个控件：选中的那一条就是这条班次现在的档位（停用的也能改 ——
+                     它的历史排班还要照这档交日常）。选项来自 util，模板里不写死档位说法。 -->
+                <label class="sDuty">
+                  <span class="sDutyLab">卫生日常</span>
+                  <select
+                    class="select sDutySel"
+                    :value="dutySlotValue(shift)"
+                    :disabled="busy"
+                    @change="setDutySlot(shift, $event.target.value)"
+                  >
+                    <option v-for="choice in DUTY_SLOT_CHOICES" :key="choice.value" :value="choice.value">{{ choice.label }}</option>
+                  </select>
+                </label>
+                <span class="sActs">
+                  <button
+                    class="btn sMini"
+                    type="button"
+                    title="上移一位"
+                    :disabled="index === 0 || busy"
+                    @click="moveShift(shift, -1)"
+                  >↑</button>
+                  <button
+                    class="btn sMini"
+                    type="button"
+                    title="下移一位"
+                    :disabled="index === shifts.length - 1 || busy"
+                    @click="moveShift(shift, 1)"
+                  >↓</button>
+                  <button
+                    class="btn sMini"
+                    type="button"
+                    :disabled="busy"
+                    @click="startRename(shift)"
+                  >改名</button>
+                  <button
+                    class="btn sMini"
+                    type="button"
+                    :disabled="busy"
+                    @click="toggleActive(shift)"
+                  >{{ toggleLabel(shift) }}</button>
+                  <button
+                    class="btn btn-danger sMini"
+                    type="button"
+                    :disabled="!canDelete(shift, activeCount) || busy"
+                    :title="canDelete(shift, activeCount) ? '删掉这个班次' : deleteBlockedReason(shift, activeCount)"
+                    @click="deleteTarget = shift"
+                  >删除</button>
+                </span>
+              </template>
+
+            </li>
+          </ul>
+          <div class="sNotes">
+            <p
+              v-for="blocked in shifts"
+              v-show="!canDelete(blocked, activeCount)"
+              :key="`note-${blocked.id}`"
+              class="sWhy"
+            >{{ blocked.name }}：{{ deleteBlockedReason(blocked, activeCount) }}</p>
+          </div>
+        </template>
       </section>
 
     </template>
@@ -375,65 +393,120 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* 版式照待办页（票 08/09）：深青墨底 + 一张卡一个话题。令牌来自 /hygiene-admin.css。 */
-.shifts-page { padding: 18px 16px 40px; max-width: 780px; margin: 0 auto; }
-.sTop { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
-.sTop h1 { margin: 2px 0 4px; font-size: 20px; color: var(--hy-ink); }
-.sKicker { margin: 0; font-size: 11px; letter-spacing: .18em; color: var(--hy-faint); }
-.sSub { margin: 0; font-size: 12px; line-height: 1.7; color: var(--hy-muted); }
-.sTop .btn { margin-left: auto; flex: none; }
-.sHint { margin: 0; font-size: 12.5px; color: var(--hy-muted); }
+/* B 案 v2 版式（2026-10-17）：页头 kicker + H1 + 右侧读数胶囊；三块读数（mono 数字 + 5 段
+   gauge）先摆出来；班次改成「表头 + 行列」结构（行高 44px、状态 = 6px LED + 小字）。
+   面板仍是 1px 边框 + --r-2 + --hy-shadow-sm，配色全走语义令牌。 */
+.shifts-page {
+  display: flex; flex-direction: column; gap: var(--sp-4);
+  padding: 18px clamp(16px, 4vw, 32px) calc(40px + var(--safe-b));
+  width: 100%; max-width: 1052px; margin: 0 auto; font-family: var(--font-sans);
+}
+/* 页头 3 行网格：kicker / H1 + 主操作同基线 / 副标题。 */
+.sTop {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "kick kick" "title action" "sub sub";
+  align-items: end; column-gap: var(--sp-4); row-gap: 7px;
+}
+.sKicker {
+  grid-area: kick; margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
+  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+}
+.sTitleRow {
+  grid-area: title; display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0;
+}
+.sTop h1 {
+  margin: 0; font-family: var(--font-sans); font-size: 26px; line-height: 1;
+  font-weight: 600; letter-spacing: .01em; color: var(--ink);
+}
+.sAction { margin-left: auto; flex: none; border-radius: var(--r-1); min-height: var(--tap); }
+.sSub { grid-area: sub; margin: 0; font-size: var(--fs-12); line-height: 1.6; color: var(--ink-dim); }
+.sLed { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; }
+.sLed.ok { background: var(--ok); box-shadow: 0 0 0 3px var(--wb-ok-a16); }
+.sLed.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--wb-warn-a16); }
+.sLed.sig { background: var(--action); box-shadow: 0 0 0 3px var(--wb-tint-14); }
+.sHint { margin: 0; font-size: 12.5px; color: var(--ink-dim); }
 .sErr {
-  margin: 0 0 12px; padding: 9px 12px; border-radius: var(--hy-radius-md);
-  border: 1px solid rgba(255, 138, 128, .35); background: rgba(255, 138, 128, .12);
-  color: var(--hy-coral); font-size: 12.5px; line-height: 1.7;
+  margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
+  border: 1px solid var(--wb-danger-a45); background: var(--danger-soft);
+  color: var(--danger-bright); font-size: 12.5px; line-height: 1.7;
 }
 .sOk {
-  margin: 0 0 12px; padding: 9px 12px; border-radius: var(--hy-radius-md);
-  border: 1px solid var(--hy-mint-line); background: var(--hy-mint-soft);
-  color: var(--hy-mint); font-size: 12.5px; line-height: 1.7;
+  margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
+  border: 1px solid var(--line-strong); background: var(--ok-soft);
+  color: var(--ok); font-size: 12.5px; line-height: 1.7;
 }
+/* 面板（唯一卡片语言）。 */
 .sCard {
-  background: var(--hy-surface-2); border: 1px solid var(--hy-line);
-  border-radius: var(--hy-radius-lg); padding: 14px 14px 12px;
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: var(--hy-shadow-sm); overflow: hidden;
 }
-.sCard + .sCard { margin-top: 12px; }
-.sCard-hd { display: flex; align-items: center; gap: 8px; }
-.sCard-hd h2 { margin: 0; font-size: 14px; color: var(--hy-ink); }
-.sCount {
-  margin-left: auto; font-family: var(--font-mono); font-size: 12px; color: var(--hy-faint);
+.sCard-hd { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.sCard-hd h2 {
+  margin: 0; font-family: var(--font-sans); font-size: 12.5px; line-height: 1;
+  font-weight: 600; letter-spacing: .06em; color: var(--ink);
 }
-.sLead { margin: 8px 0 0; font-size: 12px; line-height: 1.8; color: var(--hy-muted); }
-.sEmpty { margin: 10px 0 0; font-size: 12.5px; color: var(--hy-muted); }
-.sAdd { display: flex; gap: 8px; margin-top: 10px; }
-.sAdd .input { flex: 1; }
-.sAdd .btn { flex: none; }
-.sList { list-style: none; margin: 10px 0 0; padding: 0; }
+.sCard-hint { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-faint); }
+.sAdd { display: flex; align-items: center; gap: var(--sp-2); padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.sAdd .input { flex: 0 1 320px; }
+.sAdd .btn { flex: none; border-radius: var(--r-1); min-height: var(--tap); }
+.sEmpty { margin: 0; padding: 14px; font-size: 12px; color: var(--ink-dim); }
+/* 表头：小字 + 字距，跟着行的列走。 */
+.sTh {
+  display: grid; grid-template-columns: 28px minmax(0, 1fr) 64px 200px 300px;
+  gap: 10px; padding: 7px 14px; background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-sans); font-size: 8.5px; line-height: 1;
+  font-weight: 500; letter-spacing: .2em; color: var(--ink-faint);
+}
+.sTh-act { text-align: right; }
+.sList { list-style: none; margin: 0; padding: 0; }
+/* 一条班次 = 一行：# / 名称 · 在用 / 状态 / 卫生日常 / 操作。 */
 .sRow {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 9px 0; border-top: 1px solid var(--hy-line);
+  display: grid; grid-template-columns: 28px minmax(0, 1fr) 64px 200px 300px;
+  gap: 10px; align-items: center; min-height: 56px; padding: 9px 14px;
+  border-top: 1px solid var(--wb-ink-a08);
 }
 .sRow:first-child { border-top: 0; }
-.sRow.off .sName { color: var(--hy-muted); }
-.sOrd {
-  width: 20px; flex: none; text-align: center; font-family: var(--font-mono);
-  font-size: 11.5px; color: var(--hy-faint);
-}
-.sName { font-size: 13.5px; color: var(--hy-ink); }
-.sNameInput { flex: 1; min-width: 120px; }
+.sRow:hover { background: var(--surface-2); }
+.sRow.off .sName { color: var(--ink-dim); }
+.sOrd { text-align: center; font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); }
+.sMain { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sName { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.sUsage { font-family: var(--font-mono); font-size: 9.5px; line-height: 1.3; color: var(--ink-faint); }
+.sNameInput { grid-column: 2 / 4; }
+/* 状态 = 6px LED + 9px 小字（不再做胶囊底色）。 */
 .sTag {
-  padding: 1px 8px; border-radius: 999px; font-size: 11px;
-  color: var(--hy-mint); border: 1px solid var(--hy-mint-line); background: var(--hy-mint-soft);
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  font-size: 9px; letter-spacing: .06em; color: var(--ok);
 }
-.sTag.off {
-  color: var(--hy-faint); border-color: var(--hy-line-strong); background: transparent;
+.sTag::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; }
+.sTag.off { color: var(--ink-faint); }
+.sDuty { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sDutyLab {
+  flex: none; font-size: 8.5px; letter-spacing: .06em; color: var(--ink-faint);
 }
-.sUsage { font-size: 11.5px; color: var(--hy-muted); }
-/* 档位三选一贴着用量、在动作之前：它说的是「这条班次是什么」，不是「拿它做什么」。
-   里层是全局 `.select`（同 `.input`，admin 那一套），这里只把它压到这一行的高度。 */
-.sDuty { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--hy-faint); }
-.sDutySel { min-height: 28px; padding-top: 2px; padding-bottom: 2px; font-size: 11.5px; }
-.sActs { margin-left: auto; display: flex; gap: 6px; flex: none; }
-.sMini { min-height: 30px; padding: 0 10px; font-size: 12px; }
-.sWhy { flex-basis: 100%; font-size: 11px; line-height: 1.7; color: var(--hy-faint); }
+.sDutySel {
+  min-height: var(--tap); padding-top: 2px; padding-bottom: 2px;
+  font-family: var(--font-sans); font-size: 11px; color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+}
+.sActs { display: flex; gap: 4px; justify-content: flex-end; }
+.sMini { min-height: var(--tap); padding: 0 10px; font-size: 12px; border-radius: var(--r-1); }
+.sNotes { padding: 10px 14px 12px; border-top: 1px solid var(--line); }
+.sWhy { margin: 0; font-size: 10px; line-height: 1.7; color: var(--ink-faint); }
+.sWhy + .sWhy { margin-top: 2px; }
+@media (max-width: 720px) {
+  .sTop { grid-template-columns: 1fr; grid-template-areas: "kick" "title" "sub"; }
+  .sTop h1 { font-size: 22px; }
+  .sTh { display: none; }
+  .sRow { grid-template-columns: 24px minmax(0, 1fr) auto; row-gap: 8px; }
+  .sMain { grid-column: 2; }
+  .sTag { grid-column: 3; justify-self: end; }
+  .sDuty { grid-column: 2 / 4; flex-wrap: wrap; }
+  .sActs { grid-column: 2 / 4; justify-content: flex-start; flex-wrap: wrap; }
+  .sWhy { grid-column: 1 / -1; }
+  .sNameInput { grid-column: 2 / 4; }
+  .sRow > .sNameInput + .sActs { grid-column: 2 / 4; justify-content: flex-start; }
+}
 </style>

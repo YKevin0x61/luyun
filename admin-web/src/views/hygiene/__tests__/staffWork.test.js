@@ -24,11 +24,12 @@ describe('hygiene staff work app', () => {
     expect(home).not.toMatch(/class="hy-tabbar"/)
     expect(home).not.toMatch(/HYGIENE_STAFF_TABS/)
     expect(home).not.toMatch(/aria-label="卫生入口"/)
-    expect(home).toMatch(/<h2>日常 <span>\{\{ dailyCount \}\}<\/span><\/h2>/)
-    expect(home).toMatch(/<h2>专项 <span>\{\{ deepCount \}\}<\/span>/)
-    expect(home).toMatch(/<h2>整改 <span>\{\{ fixCount \}\}<\/span><\/h2>/)
-    // 顶部那行汇总：今天要做 N 项 + 明细（三组各几件）。
-    expect(home).toMatch(/今天要做 \{\{ todoTotal \}\} 项/)
+    // v2 版式（2026-10-17）：组标题前面多了一颗 6px LED（`.hy-wb-led`），文字与条数不变。
+    expect(home).toMatch(/<i class="hy-wb-led ok"><\/i>日常 <span>\{\{ dailyCount \}\}<\/span><\/h2>/)
+    expect(home).toMatch(/<i class="hy-wb-led sig"><\/i>专项 <span>\{\{ deepCount \}\}<\/span>/)
+    expect(home).toMatch(/<i class="hy-wb-led bad"><\/i>整改 <span>\{\{ fixCount \}\}<\/span><\/h2>/)
+    // 顶部那行汇总：今天要做 N 项 + 明细（三组各几件）。v2 起数字是 mono 读数（`<b>`）。
+    expect(home).toMatch(/今天要做 <b class="hy-wb-num">\{\{ todoTotal \}\}<\/b> 项/)
     expect(home).toMatch(/日常 \{\{ dailyCount \}\} · 专项 \{\{ deepCount \}\} · 整改 \{\{ fixCount \}\}/)
     // 「榜」降成页尾一行信息入口（点开在本页展开），不再是平级的一格。
     expect(home).toMatch(/红黑榜 · 卫生教材/)
@@ -59,7 +60,6 @@ describe('hygiene staff work app', () => {
     expect(today).toMatch(/method: 'PATCH'/)
     expect(today).toMatch(/\/api\/hygiene\/staff\/password/)
     expect(home).not.toMatch(/staff-phone/)
-    expect(home).not.toMatch(/<style scoped>/)
   })
 
   it('shows remaining work, due clocks, and auto-advances after a shot', () => {
@@ -70,7 +70,8 @@ describe('hygiene staff work app', () => {
     // 原来是日常那一格开头那句大标题「今天还差什么」。五格合并之后组标题就是「日常 N」，
     // 同一屏上三组各来一句大标题会压过组标题 —— 那句话由顶部汇总（今天要做 N 项）与
     // 下面那排事实胶囊（日常 n/m · 超时 n）接手，两者的口径没变。
-    expect(home).toMatch(/今天要做 \{\{ todoTotal \}\} 项/)
+    // v2：汇总里的数字是 mono 读数（`<b class="hy-wb-num">`），口径没变。
+    expect(home).toMatch(/今天要做 <b class="hy-wb-num">\{\{ todoTotal \}\}<\/b> 项/)
     expect(home).toMatch(/hy-work-facts/)
     expect(home).toMatch(/nextShootRow/)
     expect(home).toMatch(/本班/)
@@ -144,10 +145,25 @@ describe('hygiene staff work app', () => {
     expect(home).not.toMatch(/hy-work-today/)
     expect(home).not.toMatch(/<router-link/)
     // 页头收成一行：页名 + 我今天在哪那颗**只读**胶囊。
-    expect(home).toMatch(/<h1 class="hy-brand-title">卫生<\/h1>/)
+    expect(home).toMatch(/<h1 class="hy-brand-title hy-wb-title">卫生<\/h1>/)
     expect(home).toMatch(/class="hy-work-shift"/)
     // 那条回程确实在底栏（不是凭空消失）：读那张导航表。
     const nav = read('../../../../src/utils/workbenchNav.js')
     expect(nav).toMatch(/key: 'me', label: '我的', to: '\/workbench\/me\/today'/)
+  })
+
+  it('页面可以持有版式骨架，但颜色只走令牌（v2 版式重构）', () => {
+    const home = read('../HygieneHomeView.vue')
+    // v1 那条「这一页不得含 `<style scoped>`」是「样式全归共享表」的位置契约，v2 版式
+    // 重构后必然过时：员工首页也要有自己的页头 / 面板 / 行骨架（共享表仍负责按钮、
+    // 表单与相机弹层那层）。护栏换成三条更严的：骨架里不许出现裸色值、宋体、毛玻璃，
+    // 圆角也不许写回 12/14/16px 旧语言。
+    const style = home.slice(home.indexOf('<style scoped>'))
+    expect(style.length, '这一页应当有 scoped 版式骨架').toBeGreaterThan(0)
+    expect(style).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+    expect(style).not.toMatch(/\brgba?\(/)
+    expect(style).not.toMatch(/--font-song/)
+    expect(style).not.toMatch(/border-radius:\s*(12|14|16)px/)
+    expect(style).not.toMatch(/backdrop-filter/)
   })
 })

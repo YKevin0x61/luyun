@@ -53,8 +53,12 @@ describe('PrepPlanView mobile layout', () => {
     expect(compact).toContain('.prep-stamp{')
   })
 
-  it('hides the duplicate page title on phones and pads modal safe area', () => {
-    expect(phone).toContain('.prep-title{position:absolute')
+  it('keeps the page title on phones and stacks header above the filter bar', () => {
+    // v3 版式审查（2026-10-17）：原来 390 下把 H1 视觉隐藏（position:absolute），
+    // 结果页面没有标题、用户不知道自己在哪一页。审查要求「H1 一行 + 筛选/动作一行」，
+    // 所以这里反过来钉住：标题保留、页头在手机上竖排。
+    expect(phone).toContain('.prep-page-head{flex-direction:column')
+    expect(phone.includes('.prep-title{position:absolute')).toBe(false)
     expect(compact).toContain('env(safe-area-inset-bottom,0px)')
     expect(compact).toContain('.prep-plan:deep(.modal-box){width:min(600px,100%)!important')
   })

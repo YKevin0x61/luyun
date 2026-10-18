@@ -32,7 +32,8 @@ export const PICK_CLEAR = 'clear'
 /** 服务端 `skipped[].reason` 的词表 → 回执里那句人话（词表定死，见 ADR 0107 决策 6）。 */
 export const PICK_SKIP_TEXT = {
   past_day: '超出 30 天',
-  past_clear: '过去的日子只能改成某个班',
+  // 2026-10-18 起不再产生（过去的日子也能清除）；词条留着兼容老服务端的错误码。
+  past_clear: '过去的日子只能改成某个班（旧口径）',
   beyond_window: '还没铺到',
   leave_approved: '已批的假',
   out_of_roster: '不在册',
@@ -183,7 +184,6 @@ export function skipReason(cell, ctx) {
   if (data && data.leave) return 'leave_approved'
   const floor = pastFloor(today, pastDays)
   if (floor && cell.date < floor) return 'past_day'
-  if (action === PICK_CLEAR && today && cell.date < today) return 'past_clear'
   return ''
 }
 

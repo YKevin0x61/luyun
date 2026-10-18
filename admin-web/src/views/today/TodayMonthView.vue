@@ -54,6 +54,20 @@ const errorText = ref('')
 const title = computed(() => monthLabel(month.value, today.value))
 // 每格只算一次四态：`:class` 与格子里的字共用这份（判据仍在 util 里读一次）。
 const cells = computed(() => days.value.map((day) => ({ ...day, ...monthCell(day) })))
+// 顶部固定摘要（B 案 v3）：今天在哪、点格子看什么。数据全部来自这条 month 响应。
+const todayCell = computed(() => cells.value.find((cell) => cell.is_today) || null)
+const todayLine = computed(() => {
+  const cell = todayCell.value
+  const [, month, day] = String(today.value || '').split('-').map(Number)
+  const parts = []
+  if (month && day) parts.push(`今天 ${month}/${day}`)
+  if (cell) {
+    parts.push(cell.text || '还没排')
+    if (cell.zone_name) parts.push(cell.zone_name)
+  }
+  parts.push('点日期看名单')
+  return parts.join(' · ')
+})
 // 窗口之外的日子：排班还没铺到，跟「那天还没排」不是一回事 —— 格子淡出，整月在窗外时另说一句。
 const beyond = computed(() => days.value.filter((day) => dayBeyondWindow(day, windowEnd.value)).length)
 const outside = computed(() => days.value.length > 0 && beyond.value === days.value.length)
@@ -218,10 +232,16 @@ useNudgePull({
 
 <template>
   <div class="month-page hygiene-staff">
+    <!-- 页头（B 案 v2）：kicker + H1 + 右侧主动作（回今天）。 -->
     <header class="tTop" :inert="detailDay ? true : null">
-      <span class="tDay">整月</span>
-      <span class="tDate">{{ employee ? employee.name : '' }}</span>
-      <button class="tBack" type="button" @click="router.push('/workbench/me/today')">‹ 今天</button>
+      <div class="tTop-main">
+        <p class="kicker">我的排班</p>
+        <h1 class="tDay">整月</h1>
+        <p class="tDate">{{ employee ? employee.name : '' }}</p>
+      </div>
+      <div class="tTop-side">
+        <button class="tBack" type="button" @click="router.push('/workbench/me/today')">‹ 今天</button>
+      </div>
       <!-- 退出**不在这里**（D5）：工作台外壳顶栏那一颗是员工三页共用的唯一一颗
            （`WorkbenchLayout` 的 `WorkbenchExitButton`，员工那一档走 `useStaffLogout`）。 -->
     </header>
@@ -239,57 +259,64 @@ useNudgePull({
       </template>
 
       <template v-else>
-        <div class="mNav">
-          <button class="mArrow" type="button" aria-label="上个月" @click="step(-1)">‹</button>
-          <span class="mLabel">{{ title }}</span>
-          <button
-            class="mArrow"
-            type="button"
-            aria-label="下个月"
-            :disabled="!canNext"
-            @click="step(1)"
-          >
-            ›
-          </button>
-        </div>
+        <!-- 固定摘要（B 案 v3）：一条说清「今天在哪、点格子看什么」。 -->
+        <p class="mSummary">{{ todayLine }}</p>
 
-        <div class="mHead">
-          <span v-for="head in MONTH_HEADS" :key="head">{{ head }}</span>
-        </div>
+        <!-- 月历面板（B 案 v2）：翻月条 + 周表头 + 钢面方格，三件在一张面板里。 -->
+        <section class="mBoard">
+          <div class="mNav">
+            <button class="mArrow" type="button" aria-label="上个月" @click="step(-1)">‹</button>
+            <span class="mLabel">{{ title }}</span>
+            <button
+              class="mArrow"
+              type="button"
+              aria-label="下个月"
+              :disabled="!canNext"
+              @click="step(1)"
+            >
+              ›
+            </button>
+          </div>
 
-        <div class="mGrid">
-          <div v-for="n in lead" :key="`lead-${n}`" class="mD mute" />
-          <!-- 格子从 div 改成 button（票 13）：点开看那天的名单。窗口外的格子 `:disabled`
-               —— 淡 = 还没铺到，点它只会问出一个注定空白的答案。 -->
-          <button
-            v-for="cell in cells"
-            :key="cell.business_date"
-            type="button"
-            class="mD"
-            :class="[cell.tone, { today: cell.is_today, mute: dayBeyondWindow(cell, windowEnd) }]"
-            :disabled="dayBeyondWindow(cell, windowEnd)"
-            aria-haspopup="dialog"
-            @click="openDay(cell)"
-          >
-            <span class="n">{{ cell.day }}</span>
-            <span class="s">{{ cell.text }}</span>
-            <!-- 那天全店上班几个人（票 13）：跟上面那行班别是两个字段 —— 这一行说的是
-                 店里，上面那行说的是我。0 与窗口外都不写（`staffCountLabel` 判）。 -->
-            <span class="h">{{ staffCountLabel(cell.staff_count) }}</span>
-            <!-- 申请中（票 06 那条一直没数据源的验收）：这天有我自己提的、还没落定的
-                 请假或换班。跟格子里的班别是两件事，所以做成右上角的小点，不挤那一行字。 -->
-            <i v-if="pendingDates.has(cell.business_date)" class="pend" aria-hidden="true" />
-            <!-- 有人找我换那天（票 09 的待回应）：另一条线的事（一条在别人手里、一条在我
-                 手里），所以是另一个记号。做成格子底下那条琥珀 —— 右上角已经被「我的申请」
-                 占了，两个圆点挨在一起谁也认不出谁。 -->
-            <i
-              v-if="incomingDates.has(cell.business_date)"
-              class="ask"
-              aria-hidden="true"
-            />
-          </button>
-        </div>
+          <div class="mHead">
+            <span v-for="head in MONTH_HEADS" :key="head">{{ head }}</span>
+          </div>
 
+          <div class="mGrid">
+            <div v-for="n in lead" :key="`lead-${n}`" class="mD mute" />
+            <!-- 格子从 div 改成 button（票 13）：点开看那天的名单。窗口外的格子 `:disabled`
+                 —— 淡 = 还没铺到，点它只会问出一个注定空白的答案。 -->
+            <button
+              v-for="cell in cells"
+              :key="cell.business_date"
+              type="button"
+              class="mD"
+              :class="[cell.tone, { today: cell.is_today, mute: dayBeyondWindow(cell, windowEnd) }]"
+              :disabled="dayBeyondWindow(cell, windowEnd)"
+              aria-haspopup="dialog"
+              @click="openDay(cell)"
+            >
+              <span class="n">{{ cell.day }}</span>
+              <span class="s">{{ cell.text }}</span>
+              <!-- 那天全店上班几个人（票 13）：跟上面那行班别是两个字段 —— 这一行说的是
+                   店里，上面那行说的是我。0 与窗口外都不写（`staffCountLabel` 判）。 -->
+              <span class="h">{{ staffCountLabel(cell.staff_count) }}</span>
+              <!-- 申请中（票 06 那条一直没数据源的验收）：这天有我自己提的、还没落定的
+                   请假或换班。跟格子里的班别是两件事，所以做成右上角的小点，不挤那一行字。 -->
+              <i v-if="pendingDates.has(cell.business_date)" class="pend" aria-hidden="true" />
+              <!-- 有人找我换那天（票 09 的待回应）：另一条线的事（一条在别人手里、一条在我
+                   手里），所以是另一个记号。做成格子底下那条琥珀 —— 右上角已经被「我的申请」
+                   占了，两个圆点挨在一起谁也认不出谁。 -->
+              <i
+                v-if="incomingDates.has(cell.business_date)"
+                class="ask"
+                aria-hidden="true"
+              />
+            </button>
+          </div>
+        </section>
+
+        <!-- 图例 LED 行：一格里那几笔各是什么，用 6px 灯 + 小字说清。 -->
         <div class="mLegend">
           <span><i class="dot shift" />上班</span>
           <span><i class="dot rest" />休</span>
@@ -312,19 +339,21 @@ useNudgePull({
           回到本月
         </button>
 
-        <p class="mFoot">
-          点开某一天：看那天的名单，也顺手请那天的假、跟那天在班的人换班。<br />
-          格子里的小字是那天全店上班的人数；空着的格子是那天还没排（不是休）——
-          休的那天写着「休」。<br />
-          批过的假写「请假」（自己提的、店长批的），跟排班给的「休」不是一回事。<br />
-          右上角的小点 = 那天有你的申请还没落定（等对方点头 / 等店长批）；
-          格子下面那条琥珀 = 有人找你换那天；钟点只有卫生那边才有。
-        </p>
+        <!-- 页尾说明（B 案 v3）：四段口径收进折叠入口，常驻只留一行入口。 -->
+        <details class="mFoot rules">
+          <summary>怎么看这张表 ›</summary>
+          <p>
+            点开某一天：看那天的名单，也顺手请那天的假、跟那天在班的人换班。<br />
+            空着的格子是那天还没排（不是休）—— 休的那天写着「休」。批过的假写「请假」（自己提的、店长批的），跟排班给的「休」不是一回事。右上角的小点 = 那天有你的申请还没落定；格子下面那条琥珀 = 有人找你换那天。<br />
+            点开那天能看到完整名单。
+          </p>
+        </details>
       </template>
     </div>
 
     <!-- 某一天那一屏（票 13 的名单 + 票 15 的请假与换班）：点格子弹出，员工在这一屏里
-         看完那天的事、也把那天的事办掉 —— 日期就是这个格子，不用再选一次。 -->
+         看完那天的事、也把那天的事办掉 —— 日期就是这个格子，不用再选一次。
+         B 案 v2 起它是从底部升起的当日面板（只改这一页里的定位，组件本身不动）。 -->
     <StaffDaySheet
       v-if="detailDay"
       :key="detailDate"
@@ -340,48 +369,84 @@ useNudgePull({
 </template>
 
 <style scoped>
-/* 一屏装完整月（验收 5）：七列 + 六行，格子 54px，手机上不横向滚动。
-   令牌与 .btn 的底座来自 public/hygiene-admin.css（员工端作用域 .hygiene-staff）。 */
+/* B 案 v2「钢面 · 仪」版式（2026-10-17）：员工手机端 390 优先。
+   结构 = 页头（kicker + H1 + 回今天）→ 月历面板（翻月条 + 周表头 + 钢面方格）
+   → 图例 LED 行 → 页脚；点格子从底部升起「那一天」的当日面板。
+   元素语言只有三种：面板（.mBoard）、方格（.mD）、读数/图例 LED（.dot + 小字）。
+   全部走语义令牌；这一页不写裸色值（面板只用 1px 线，不叠投影 —— 设计护栏的
+   存量棘轮对本文件是 0 基线，投影由共享壳/弹层那层给）。 */
 .month-page {
   min-height: 100vh;
-  background:
-    radial-gradient(130% 46% at 50% -6%, rgba(63, 224, 176, .1), transparent 62%),
-    var(--hy-bg);
+  background: var(--surface-0);
+  color: var(--ink);
+  font-family: var(--font-sans);
   padding-bottom: 40px;
 }
 
+/* ── 页头 ──────────────────────────────────────────────────────────────── */
 .tTop {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
   /* 手机安全区四项让位（t52，口径同 t49）：顶槽取 max，左右同 max */
   padding: max(18px, var(--safe-t)) max(16px, var(--safe-r)) 14px max(16px, var(--safe-l));
 }
 
+.tTop-main { min-width: 0; }
+
+.kicker {
+  margin: 0 0 7px;
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .26em;
+  color: var(--ink-faint);
+}
+
 .tDay {
-  font-family: var(--font-song);
-  font-size: 20px;
-  letter-spacing: .16em;
-  font-weight: 600;
+  margin: 0;
+  font: 600 26px/1 var(--font-sans);
+  letter-spacing: .01em;
+  color: var(--ink);
 }
 
 .tDate {
-  font-size: 11.5px;
-  color: var(--hy-muted);
+  margin: 7px 0 0;
+  font-size: 10.5px;
+  color: var(--ink-dim);
 }
 
+.tTop-side { flex: none; }
+
+/* 回「今天」是一颗按钮：触控 ≥44px、方角（--r-1）。 */
 .tBack {
-  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
   font: inherit;
   font-size: 11.5px;
-  color: var(--hy-muted);
-  border: 1px solid var(--hy-line);
-  border-radius: 999px;
-  padding: 4px 11px;
-  background: var(--hy-surface-2);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  padding: 0 12px;
+  background: transparent;
   cursor: pointer;
 }
 
+/* 员工手机上点的主按钮 ≥48px（与「今天」页同一档）；方角。 */
+.month-page.hygiene-staff .btn {
+  min-height: 48px !important;
+  border-radius: var(--r-1);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+}
+.month-page.hygiene-staff .btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--action);
+  color: var(--action);
+}
+
+/* ── 月历面板 ─────────────────────────────────────────────────────────── */
 .mBody {
   padding: 0 14px 26px;
   display: flex;
@@ -389,27 +454,57 @@ useNudgePull({
   gap: 12px;
 }
 
+/* 固定摘要（B 案 v3）：滚动时贴顶，一直回答「今天在哪」。
+   底色取页面底，格子从它下面滚过去。 */
+.mSummary {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-shell);
+  margin: 0;
+  padding: 10px 2px;
+  background: var(--surface-0);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+
 .mSub {
   margin: 0;
   font-size: 11.5px;
-  color: var(--hy-muted);
+  color: var(--ink-dim);
+}
+
+.mBoard {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  overflow: hidden;
 }
 
 .mNav {
   display: flex;
   align-items: center;
   gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
 }
 
+/* 翻月箭头：控件边界取 --line-strong，触控 ≥44px，方角。 */
 .mArrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--tap);
+  min-height: var(--tap);
   font: inherit;
   font-size: 16px;
   line-height: 1;
-  color: var(--hy-muted);
-  border: 1px solid var(--hy-line);
-  border-radius: var(--hy-radius-sm);
-  background: var(--hy-surface-2);
-  padding: 7px 13px;
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: transparent;
+  padding: 0 12px;
   cursor: pointer;
 }
 
@@ -419,41 +514,48 @@ useNudgePull({
 }
 
 .mLabel {
-  font-family: var(--font-song);
-  font-size: 16px;
-  letter-spacing: .12em;
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 15px;
+  letter-spacing: .02em;
+  color: var(--ink);
 }
 
+/* 周表头：小字 + 宽字距，底一档次级色。 */
 .mHead {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  gap: 4px;
-  padding: 0 0 5px;
+  gap: 5px;
+  padding: 8px 12px 6px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
 }
 
 .mHead span {
   text-align: center;
-  font-size: 10px;
-  color: var(--hy-faint);
+  font-size: 9.5px;
+  letter-spacing: .12em;
+  color: var(--ink-faint);
 }
 
 .mGrid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  gap: 4px;
+  gap: 5px;
+  padding: 10px 12px 12px;
 }
 
+/* 钢面方格：1px 线 + 次级底 + 方角；54px 高（行 ≥44px）。 */
 .mD {
   position: relative;
   height: 54px;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  background: var(--hy-surface-2);
-  padding: 6px 4px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  padding: 5px 4px 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   /* 票 13 起格子是个 button（点开那天的名单）：把浏览器的按钮外观收掉，
      版式仍由上面这几条说了算。 */
   font: inherit;
@@ -467,8 +569,8 @@ useNudgePull({
 }
 
 /* 申请中（票 06 那条角标）：跟格子里那个班别是两件事，所以做成右上角的小点，
-   不挤「白班 / 休 / 请假」那一行字。颜色用珊瑚：琥珀这一页已经被「已调整」占了
-   （图例里那两个色块挨着看，同色不同义最容易看错）。 */
+   不挤「白班 / 休 / 请假」那一行字。颜色用 action（当前/信息），
+   与底下那条琥珀（等我回应的换班）分开。 */
 .mD .pend {
   position: absolute;
   top: 4px;
@@ -476,20 +578,19 @@ useNudgePull({
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--hy-coral);
+  background: var(--action);
 }
 
 .mD .n {
   font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--hy-muted);
+  font-size: 10px;
+  color: var(--ink-dim);
   line-height: 1;
 }
 
 .mD .s {
-  font-family: var(--font-song);
-  font-size: 12.5px;
-  letter-spacing: .06em;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
   line-height: 1.15;
   text-align: center;
 }
@@ -497,159 +598,208 @@ useNudgePull({
 /* 那天全店上班的人数（票 13）：格子里的第三行，最小的字 —— 它说的是「店里」，
    上面那行班别说的是「我」，所以比班别弱一档，别抢了主行。 */
 .mD .h {
-  font-family: var(--font-mono);
-  font-size: 9px;
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 8.5px;
   line-height: 1;
-  color: var(--hy-faint);
+  color: var(--ink-faint);
   white-space: nowrap;
+  /* B 案 v3：格子只留「日号 + 班次」两行；「N 人在班」只在点开那天的面板里看
+     （面板的名单头会写「N 人在班 · N 人休假」）。留着节点与类名，口径不变。 */
+  display: none;
 }
 
 .mD.shift .s {
-  color: var(--hy-jade);
+  color: var(--ok);
 }
 
 .mD.rest .s {
-  color: var(--hy-faint);
+  color: var(--ink-faint);
 }
 
 /* 请假（票 08）：批过的假。跟「休」分开上色 —— 休是排班给的，假是自己提的。 */
 .mD.leave .s {
-  color: var(--hy-aqua);
+  color: var(--info);
 }
 
-/* 半天休（票 07 / ADR 0114）：那天仍然上班，只是只上半天。自己一档色 ——
-   既不是整整一天班（薄荷），也不是一天休（灰）。用语义令牌（`--accent-alt`），
-   不新增 `--hy-*` 引用（设计护栏的存量棘轮只减不增）。
-   C 批返工（第一轮）：原先取 `--info`，它的值跟「请假」的 `--hy-aqua` 一字不差（同一个青）——
-   整月视图与图例里「休半天」和「请假」看着是一回事。
-   C 批返工（第二轮）：改琥珀 `--warn` 只挪了撞车的地方 —— 它的值跟「班次已调整」的
-   `--hy-amber` 又是一字不差，图例里两块琥珀、格子里同色同字号。
-   父级裁定落在 `--accent-alt`：语义层里与其余各态**两两不同**的只剩它。不用
-   `--accent` —— 它的值跟「上班」的 `--ok` 太近，恰好毁掉「上半天 vs 上班」这个最要紧的区分。 */
+/* 半天休（票 07 / ADR 0114）：仍然上班，只是只上半天。自己一档色 ——
+   用语义令牌（`--accent-alt`），不新增 `--hy-*` 引用（设计护栏的存量棘轮只减不增）。 */
 .mD.half .s {
   color: var(--accent-alt);
-  font-size: 10.5px;
+  font-size: 10px;
 }
 
 .mD.moved .s {
-  color: var(--hy-amber);
-  font-size: 10.5px;
+  color: var(--warn);
+  font-size: 10px;
 }
 
 .mD.none {
   background: transparent;
-  border-color: var(--hy-line);
+  border-color: var(--line);
 }
 
 .mD.none .n {
-  color: var(--hy-faint);
+  color: var(--ink-faint);
 }
 
 /* 月首空格与窗口外的格子都淡掉（跟店长月历的 `.gB-d.mute` 同一个做法）：
    淡 = 这里没有排班可看，不是「那天休」。 */
 .mD.mute {
   background: transparent;
-  border-color: var(--hy-line);
+  border-color: var(--line);
   opacity: .35;
 }
 
+/* 今天那格：action 色边框 + 极浅 action 底（当前/信息那一档，不是发光）。 */
 .mD.today {
-  border-color: var(--hy-mint-line);
-  background: var(--hy-mint-soft);
+  border-color: var(--action);
+  background: var(--surface-2);
 }
 
+/* 今天格用实心标记：日号是一枚实心圆，不再只靠描边。 */
 .mD.today .n {
-  color: var(--hy-jade);
-  font-weight: 700;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--action);
+  color: var(--action-ink);
+  font-weight: 600;
 }
 
+/* ── 图例 LED 行 ──────────────────────────────────────────────────────── */
 .mLegend {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  font-size: 10.5px;
-  color: var(--hy-faint);
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-1);
+  font-size: 9px;
+  color: var(--ink-faint);
 }
 
 .mLegend span {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
+  flex: none;
+  white-space: nowrap;
 }
 
+/* 图例灯：6px 圆点 + 小字（B 案的状态语言）。 */
 .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--r-full);
   display: inline-block;
-  background: var(--hy-surface-3);
+  background: var(--surface-3);
 }
 
 .dot.shift {
-  background: var(--hy-jade);
+  background: var(--ok);
 }
 
 .dot.rest {
-  background: var(--hy-faint);
+  background: var(--ink-faint);
 }
 
 .dot.leave {
-  background: var(--hy-aqua);
+  background: var(--info);
 }
 
-/* 半天休（票 07）：跟 `.mD.half` 同一个颜色来源（语义令牌 `--accent-alt`，C 批返工改的）——
+/* 半天休（票 07）：跟 `.mD.half` 同一个颜色来源（语义令牌 `--accent-alt`）——
    图例说一套、格子画一套是最阴的一种漂。 */
 .dot.half {
   background: var(--accent-alt);
 }
 
 .dot.moved {
-  background: var(--hy-amber);
+  background: var(--warn);
 }
 
 .dot.none {
-  border: 1px solid var(--hy-line);
+  border: 1px solid var(--line-strong);
   background: transparent;
 }
 
-/* 申请中：圆点 + 珊瑚色，跟旁边「班次已调整」的琥珀方块区分开（两件事，别同色）。 */
+/* 申请中：圆点 + action 色（当前/信息），与旁边「班次已调整」的琥珀分开。 */
 .dot.pending {
-  border-radius: 50%;
-  background: var(--hy-coral);
+  background: var(--action);
 }
 
 .mWarn {
   margin: 0;
+  padding: 0 2px;
   font-size: 11px;
-  color: var(--hy-amber);
+  color: var(--warn);
 }
 
 .mFoot {
   margin: 0;
-  padding: 2px 4px;
+  padding: 0 2px;
   font-size: 10.5px;
-  color: var(--hy-faint);
+  color: var(--ink-faint);
   line-height: 1.75;
 }
 
-/* 有人找我换那天（票 09 的待回应）：格子底下一条琥珀短线。
+.mFoot > summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+
+.mFoot > summary::-webkit-details-marker { display: none; }
+
+.mFoot p {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.75;
+  color: var(--ink-faint);
+}
+
+/* 有人找我换那天（票 09 的待回应）：格子底下一条琥珀短线（待我回应 = --warn）。
    放在底下而不是右上角：右上角是「我的申请」那个小点的地方，两个 6px 的圆点挨在一起
    谁也认不出谁；这条横线也不占格子里那三行字的位置。 */
 .mD .ask {
   position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 4px;
+  left: 7px;
+  right: 7px;
+  bottom: 3px;
   height: 2px;
-  border-radius: 999px;
-  background: var(--hy-amber);
+  border-radius: var(--r-full);
+  background: var(--warn);
 }
 
 /* 图例里那一条：跟格子里的记号同形状（短横线），不画成圆点。 */
 .dot.asked {
   width: 11px;
   height: 2px;
-  border-radius: 999px;
-  background: var(--hy-amber);
+  border-radius: var(--r-full);
+  background: var(--warn);
+}
+
+/* ── 底部当日面板（B 案 v2）：点格子那一天从底部升起，宽度铺满。 ──────
+   组件本身（StaffDaySheet）不在这一票的范围里，这里只改它在本页里的定位：
+   遮罩贴底、面板铺满、上两角收圆，内容与交互一个字不动。 */
+.month-page :deep(.modal-overlay) {
+  align-items: flex-end;
+  padding: 0;
+}
+
+.month-page :deep(.day-sheet) {
+  width: 100%;
+  max-width: 100%;
+  max-height: 86vh;
+  border-radius: var(--r-2) var(--r-2) 0 0;
+  padding-bottom: calc(16px + var(--safe-b));
 }
 </style>

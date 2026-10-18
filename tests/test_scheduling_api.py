@@ -1290,7 +1290,8 @@ def test_batch_skips_what_it_cannot_paint_and_names_every_reason(scheduling_http
         row["cells"]["2026-09-25"]["overridden"],
     ) == (ids["夜班"], True)
 
-    # 同一片换成 clear：过去的日子只能改成某个班，不能退回规则（`past_clear`）。
+    # 同一片换成 clear：2026-10-18 起过去的日子也能清（放开 ADR 0108 决策 6），
+    # 只剩可补记窗口这一条下界 —— 两格都在窗口内，整片写完、一格不跳。
     cleared = _batch(
         client,
         "clear",
@@ -1301,10 +1302,17 @@ def test_batch_skips_what_it_cannot_paint_and_names_every_reason(scheduling_http
     )
 
     assert cleared.status_code == 200, cleared.text
-    assert cleared.json()["applied"] == 1
-    assert cleared.json()["skipped"] == [
-        {"employee_id": employee_id, "business_date": "2026-09-10", "reason": "past_clear"}
-    ]
+    assert cleared.json()["applied"] == 2
+    assert cleared.json()["skipped"] == []
+    after = [
+        item
+        for item in client.get(
+            "/api/scheduling/week", params={"start": "2026-09-21"}
+        ).json()["employees"]
+        if item["id"] == employee_id
+    ][0]
+    # 9/25 的夜班覆盖被摘掉、按规则重算（这条规则是白班），青点也没了。
+    assert after["cells"]["2026-09-25"]["overridden"] is False
 
 
 def test_batch_reminds_about_pending_requests_but_still_paints(scheduling_http):
@@ -1456,8 +1464,11 @@ def test_single_day_editor_can_backfill_within_thirty_days(scheduling_http):
     assert groups["夜班"]["people"][0]["overridden"] is True
 
 
-def test_undoing_a_past_override_is_refused(scheduling_http):
-    """验收 7：过去的日子不给撤（`past_clear`）—— 覆盖记录与结果行都留着。"""
+def test_undoing_a_past_override_is_allowed(scheduling_http):
+    """2026-10-18 用户裁定：过去的日子也能撤（放开 ADR 0108 决策 6）。
+
+    窗口内的日子清掉覆盖、按规则重算；超出可补记窗口仍是 `past_day`。
+    """
     client, _db, accounts = scheduling_http
     employee_id = _employee_id(accounts)
     ids = _shift_ids(client)
@@ -1468,18 +1479,22 @@ def test_undoing_a_past_override_is_refused(scheduling_http):
     ).status_code == 200
     assert client.put(f"{base}/{floor}", json={"shift_id": ids["夜班"]}).status_code == 200
 
-    refused = client.delete(f"{base}/{floor}")
+    ok = client.delete(f"{base}/{floor}")
 
-    assert refused.status_code == 400
-    assert refused.json()["detail"] == (
-        "过去的日子只能改成某个班：清除班次（退回轮转规则）只对今天和以后有效"
-    )
-    # 还是刚补记的夜班 + 覆盖标记；`undoable=False`（前端据此把撤销收起来）。
+    assert ok.status_code == 200, ok.text
+    # 覆盖摘掉了，那天按规则重算回白班；青点消失、撤销按钮还在（窗口内）。
     detail = client.get("/api/scheduling/day", params={"date": floor}).json()
     groups = {group["shift"]["name"]: group for group in detail["groups"]}
-    assert (groups["白班"]["count"], groups["夜班"]["count"]) == (0, 1)
-    assert groups["夜班"]["people"][0]["overridden"] is True
-    assert detail["undoable"] is False
+    assert (groups["白班"]["count"], groups["夜班"]["count"]) == (1, 0)
+    assert groups["白班"]["people"][0]["overridden"] is False
+    assert detail["undoable"] is True
+
+    # 超出可补记窗口的日子还是撤不了（窗口是数据保留口径）。
+    older = (datetime.fromisoformat(floor) - timedelta(days=1)).date().isoformat()
+    refused = client.delete(f"{base}/{older}")
+    assert refused.status_code == 400
+    assert "超出可补记窗口" in refused.json()["detail"]
+
     # 今天以后照旧撤得掉（这条口径没被一起改坏）。
     assert client.put(f"{base}/2026-09-25", json={"is_rest": True}).status_code == 200
     assert client.delete(f"{base}/2026-09-25").status_code == 200

@@ -135,157 +135,227 @@ onMounted(() => {
 <template>
   <div class="hygiene-admin hr-holidays">
     <header class="hTop">
-      <div>
-        <p class="hKicker">人事</p>
+      <p class="hKicker">人事 · 考勤</p>
+      <div class="hTitleRow">
         <h1>{{ TITLE }}</h1>
+        <div class="hYear">
+          <button class="btn hAction" type="button" :disabled="busy" @click="goYear(-1)">‹ {{ year - 1 }}</button>
+          <span class="hYearNow">{{ year }} 年</span>
+          <button class="btn hAction" type="button" :disabled="busy" @click="goYear(1)">{{ year + 1 }} ›</button>
+        </div>
+      </div>
+      <details class="hHelp">
+        <summary>怎么用</summary>
         <p class="hSub">
           点某一天就把它标成法定节假日并写一个名称（国庆、春节），再点它一次就能取消。
           只标法定节假日，<b>不标调休上班日</b>：法定节假日补休只认这里标出来的日子，
           代码里没有一张写死的年度表。
         </p>
-      </div>
-      <div class="hYear">
-        <button class="btn" type="button" :disabled="busy" @click="goYear(-1)">‹ {{ year - 1 }}</button>
-        <b>{{ year }} 年</b>
-        <button class="btn" type="button" :disabled="busy" @click="goYear(1)">{{ year + 1 }} ›</button>
-      </div>
+      </details>
     </header>
 
     <p v-if="errorText" class="hErr" role="alert">{{ errorText }}</p>
     <p v-else-if="receipt" class="hOk" role="status">{{ receipt }}</p>
 
-    <!-- 选中的那一格：没标过的是「写名称」，标过的是「改名字 / 取消标记」。 -->
-    <section v-if="selected" class="hCard hEditor">
-      <div class="hCard-hd">
-        <h2>{{ selected }}</h2>
-        <span v-if="selectedName" class="hCount">已标记</span>
-        <span v-else class="hCount hCount-new">新标记</span>
-        <button class="btn hClose" type="button" @click="selected = ''">收起</button>
-      </div>
+    <!-- 选中的那一格：一行编辑带（输入 + 标记 / 取消），跟页头同宽。 -->
+    <section v-if="selected" class="hEditorBar">
+      <i class="hLed sig"></i>
+      <b class="hEditorDay">{{ selected }}</b>
+      <span v-if="selectedName" class="hCount">已标记</span>
+      <span v-else class="hCount hCount-new">新标记</span>
       <label class="hField">
-        <span>节假日名称</span>
         <input v-model="draft" type="text" placeholder="比如：国庆" @keyup.enter="save" />
       </label>
-      <p v-if="draftHint" class="hLead hBad">{{ draftHint }}</p>
-      <p class="hLead">
-        1~{{ MAX_HOLIDAY_NAME }} 个字。同一天重复标记是覆盖这个名称，不会多出一条记录。
-      </p>
+      <span v-if="draftHint" class="hBad">{{ draftHint }}</span>
+      <span class="hEditorHint">1~{{ MAX_HOLIDAY_NAME }} 个字；同名覆盖</span>
       <div class="hAct">
         <button class="btn btn-primary" type="button" :disabled="busy" @click="save">标记</button>
         <button v-if="selectedName" class="btn" type="button" :disabled="busy" @click="remove">
           取消标记
         </button>
+        <button class="btn" type="button" @click="selected = ''">收起</button>
       </div>
     </section>
 
     <p v-if="state === 'loading'" class="hHint">正在读这一年的日历…</p>
-    <p v-else-if="!markedCount" class="hHint">
-      {{ year }} 年还一天都没标。左边没有「法定节假日」的日子，补休一分都不给。
-    </p>
 
-    <div class="hGrid">
-      <section v-for="month in months" :key="month.month" class="hMonth">
-        <h2>{{ month.label }}</h2>
-        <div class="hWeekdays">
-          <span v-for="day in WEEKDAYS" :key="day">{{ day }}</span>
-        </div>
-        <div v-for="(week, index) in month.weeks" :key="index" class="hWeek">
-          <template v-for="(day, cell) in week" :key="cell">
-            <span v-if="!day" class="hCell hCell-blank" aria-hidden="true"></span>
-            <button
-              v-else
-              class="hCell"
-              :class="{ 'is-marked': !!marked[day], 'is-picked': selected === day }"
-              type="button"
-              :title="marked[day] ? `${day} ${marked[day]}（点它取消）` : `${day}（点它标成法定节假日）`"
-              @click="pick(day)"
-            >
-              <b>{{ Number(day.slice(-2)) }}</b>
-              <em v-if="marked[day]">{{ marked[day] }}</em>
-            </button>
-          </template>
-        </div>
-      </section>
-    </div>
+    <section class="hPanel hYearPanel">
+      <div class="hPanel-hd">
+        <i class="hLed sig"></i>
+        <h2>全年 12 个月</h2>
+        <span class="hPanel-hint">{{ year }} 年 · 已标 {{ markedCount }} 天</span>
+      </div>
+      <p v-if="!markedCount && state === 'ready'" class="hEmptyLine">
+        这一年还一天都没标：没有「法定节假日」的日子，补休一分都不给。点下面任意一天开始标。
+      </p>
+      <div class="hGrid">
+        <section v-for="month in months" :key="month.month" class="hMonth">
+          <h2>{{ month.label }}</h2>
+          <div class="hWeekdays">
+            <span v-for="day in WEEKDAYS" :key="day">{{ day }}</span>
+          </div>
+          <div v-for="(week, index) in month.weeks" :key="index" class="hWeek">
+            <template v-for="(day, cell) in week" :key="cell">
+              <span v-if="!day" class="hCell hCell-blank" aria-hidden="true"></span>
+              <button
+                v-else
+                class="hCell"
+                :class="{ 'is-marked': !!marked[day], 'is-picked': selected === day }"
+                type="button"
+                :title="marked[day] ? `${day} ${marked[day]}（点它取消）` : `${day}（点它标成法定节假日）`"
+                @click="pick(day)"
+              >
+                <b>{{ Number(day.slice(-2)) }}</b>
+                <em v-if="marked[day]">{{ marked[day] }}</em>
+              </button>
+            </template>
+          </div>
+        </section>
+      </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
-/* 版式照人事组其余页面（深青墨底 + 一张卡一个话题）。令牌一律用**语义名**
-   （`--ink` / `--surface-1` / `--danger-bright` …，定义在 `src/styles/theme.workbench.css`
-   的 `html[data-workbench]`）：`--hy-*` 是兼容层，新文件不用它 —— 设计护栏
-   （`src/styles/__tests__/designGuard.test.js`）对没进存量快照的文件按 strict 卡这一条。 */
-.hr-holidays { padding: var(--sp-4) var(--sp-4) var(--sp-8); max-width: 1120px; margin: 0 auto; }
-.hTop { display: flex; align-items: flex-start; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-4); }
-.hTop h1 { margin: var(--sp-1) 0 var(--sp-1); font-size: var(--fs-20); color: var(--ink); }
-.hKicker { margin: 0; font-size: var(--fs-11); letter-spacing: var(--ls-4); color: var(--ink-faint); }
-.hSub { margin: 0; max-width: 640px; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
+/* B 案 v3（2026-10-17 版式审查）：1052 容器；页头 3 行（kicker / H1 + 年切换 / 怎么用），
+   右栏两块并进页头（编辑带一行）；12 个月一屏 4 列 × 3 行；格子 32×32，点击区靠伪元素
+   扩到 40。已标记天数只出现在面板头。 */
+.hr-holidays {
+  display: flex; flex-direction: column; gap: var(--sp-4);
+  padding: 18px clamp(16px, 4vw, 32px) calc(40px + var(--safe-b));
+  width: 100%; max-width: 1052px; margin: 0 auto; font-family: var(--font-sans);
+}
+/* 页头 3 行网格：kicker / H1 + 年切换（同基线）/ 说明折叠。 */
+.hTop {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "kick kick" "title action" "sub sub";
+  align-items: end; column-gap: var(--sp-4); row-gap: 7px;
+}
+.hKicker {
+  grid-area: kick; margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
+  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+}
+.hTitleRow { grid-area: title; display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
+.hTop h1 {
+  margin: 0; font-family: var(--font-sans); font-size: 26px; line-height: 1;
+  font-weight: 600; letter-spacing: .01em; color: var(--ink);
+}
+.hYear { margin-left: auto; display: flex; align-items: baseline; gap: var(--sp-2); }
+.hYearNow { font-family: var(--font-mono); font-size: 12px; color: var(--ink); }
+.hAction { border-radius: var(--r-1); min-height: var(--tap); }
+.hHelp { grid-area: sub; }
+.hHelp summary {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  font-size: 10px; letter-spacing: .06em; color: var(--ink-faint);
+}
+.hHelp summary::before {
+  content: "?"; width: 14px; height: 14px; display: grid; place-items: center;
+  border: 1px solid var(--line-strong); border-radius: 50%; font-size: 8px;
+}
+.hSub { margin: 8px 0 0; max-width: 760px; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
 .hSub b { color: var(--warn); }
-.hYear { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); }
-.hYear b { font-family: var(--font-mono); font-size: var(--fs-13); color: var(--ink); }
-.hHint { margin: 0; font-size: var(--fs-12); color: var(--ink-dim); }
+.hLed { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; }
+.hLed.sig { background: var(--action); box-shadow: 0 0 0 3px var(--wb-tint-14); }
+.hHint { margin: 0; font-size: 12.5px; color: var(--ink-dim); }
 .hErr {
-  margin: 0 0 var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--danger-bright); background: var(--danger-soft);
-  font-size: var(--fs-12); color: var(--danger-bright);
+  margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
+  border: 1px solid var(--danger); background: var(--danger-soft);
+  font-size: 12.5px; color: var(--danger-bright);
 }
 .hOk {
-  margin: 0 0 var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-1);
+  margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
   border: 1px solid var(--line-strong); background: var(--ok-soft);
-  font-size: var(--fs-12); color: var(--ok);
+  font-size: 12.5px; color: var(--ok);
 }
-.hCard {
-  margin-bottom: var(--sp-3); padding: var(--sp-3); border: 1px solid var(--line);
-  border-radius: var(--r-2); background: var(--surface-1);
+/* 编辑带：一行（色点 / 日期 / 状态 / 名称 / 提示 / 动作）。 */
+.hEditorBar {
+  display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+  padding: 8px 14px; border: 1px solid var(--action); border-radius: var(--r-2);
+  background: var(--action-soft);
 }
-.hCard-hd { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-1); }
-.hCard-hd h2 { margin: 0; font-size: var(--fs-14); color: var(--ink); }
-.hCount {
-  padding: 1px var(--sp-2); border-radius: var(--r-full); font-size: var(--fs-11);
-  color: var(--action); border: 1px solid var(--line-strong); background: var(--action-soft);
-}
-.hCount-new { color: var(--ink-dim); border-color: var(--line); background: transparent; }
-.hClose { margin-left: auto; }
-.hField { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-12); color: var(--ink-dim); }
+.hEditorDay { font-family: var(--font-mono); font-size: 12px; color: var(--ink); }
+.hEditorHint { font-size: 9.5px; color: var(--ink-faint); }
 .hField input {
-  width: 220px; padding: var(--sp-1) var(--sp-2); font-size: var(--fs-13); color: var(--ink);
-  border: 1px solid var(--line-control); border-radius: var(--r-1); background: var(--surface-2);
+  width: 220px; min-height: var(--tap); padding: var(--sp-1) var(--sp-2);
+  font-family: var(--font-sans); font-size: var(--fs-13); color: var(--ink);
+  border: 1px solid var(--line-control); border-radius: var(--r-1); background: var(--surface-1);
 }
-.hLead { margin: var(--sp-2) 0 0; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
-.hBad { color: var(--danger-bright); }
-.hAct { margin-top: var(--sp-3); display: flex; align-items: center; gap: var(--sp-3); }
-/* 一年 12 个月：窄屏一行一张两张，宽屏一行四张（跟卡片最小宽度走）。 */
+.hBad { font-size: 10px; color: var(--danger-bright); }
+.hAct { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.hAct .btn { border-radius: var(--r-1); min-height: var(--tap); }
+/* 唯一的主面板：全年 12 个月。 */
+.hPanel {
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: none; overflow: hidden;
+}
+.hPanel-hd {
+  display: flex; align-items: center; gap: 9px;
+  padding: 11px 14px; border-bottom: 1px solid var(--line);
+}
+.hPanel-hd h2 {
+  margin: 0; font-family: var(--font-sans); font-size: 12.5px; line-height: 1;
+  font-weight: 600; letter-spacing: .06em; color: var(--ink);
+}
+.hPanel-hint { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; line-height: 1; color: var(--ink-faint); }
+.hEmptyLine {
+  margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line);
+  font-size: 11px; color: var(--ink-faint);
+}
+/* 12 个月：一屏 4 列 × 3 行。 */
 .hGrid {
-  display: grid; gap: var(--sp-3);
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  display: grid; gap: 12px; padding: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 .hMonth {
-  padding: var(--sp-2) var(--sp-3) var(--sp-3); border: 1px solid var(--line);
-  border-radius: var(--r-2); background: var(--surface-1);
+  padding: 0 0 4px; border: 1px solid var(--line);
+  border-radius: var(--r-1); background: var(--surface-2); min-width: 0;
 }
-.hMonth h2 { margin: 0 0 var(--sp-1); font-size: var(--fs-12); color: var(--ink); }
-.hWeekdays, .hWeek { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.hMonth h2 {
+  margin: 0; padding: 6px 8px; border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--font-sans); font-size: 9.5px; font-weight: 600;
+  letter-spacing: .12em; color: var(--ink);
+}
+.hMonth h2::before {
+  content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%;
+  background: var(--action);
+}
+.hWeekdays, .hWeek { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0; padding: 0 4px; }
 .hWeekdays span {
-  text-align: center; font-size: var(--fs-11); color: var(--ink-faint); padding-bottom: var(--sp-1);
+  text-align: center; font-family: var(--font-sans); font-size: 8px; line-height: 1;
+  letter-spacing: .04em; color: var(--ink-faint); padding: 5px 0 3px;
 }
-/* 一天一格：`min-height` 取触控下限 `--tap`（44px）—— 这一页的主要操作就是点格子，
-   手指按不准就等于点错一天。格子窄时七列正好占满一屏宽。 */
+/* 一天一格：32×32（审查口径），伪元素把点击区扩到 40。 */
 .hCell {
+  position: relative; width: 32px; height: 32px; margin: 0 auto;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  min-height: var(--tap); padding: 2px 0; gap: 1px;
+  gap: 0; padding: 0;
   border: 1px solid transparent; border-radius: var(--r-1); background: transparent;
-  font-size: var(--fs-11); color: var(--ink-dim); cursor: pointer;
+  font-family: var(--font-sans); font-size: 8px; color: var(--ink-dim); cursor: pointer;
 }
+.hCell::after { content: ""; position: absolute; inset: -4px; }
 .hCell:hover { border-color: var(--line-strong); color: var(--ink); }
 .hCell-blank { cursor: default; }
-.hCell b { font-weight: 500; font-family: var(--font-mono); font-size: var(--fs-13); }
+.hCell b { font-weight: 500; font-family: var(--font-mono); font-size: 10px; line-height: 1.1; }
 .hCell em {
-  font-style: normal; font-size: var(--fs-11); line-height: 1.1; max-width: 100%;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--surface-0);
+  font-style: normal; font-size: 7px; line-height: 1.1; max-width: 32px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--warn);
 }
-/* 已标记的那一天：实底 + 名字写在格子里 —— 一眼看得出是哪个节。 */
-.hCell.is-marked {
-  background: var(--warn); border-color: transparent; color: var(--surface-0);
-}
+.hCell.is-marked { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
 .hCell.is-picked { border-color: var(--action); box-shadow: 0 0 0 1px var(--focus-ring); }
+.hCount {
+  padding: 1px var(--sp-2); border-radius: var(--r-full); font-family: var(--font-mono);
+  font-size: 9px; color: var(--action);
+  border: 1px solid var(--line-strong); background: var(--surface-1);
+}
+.hCount-new { color: var(--ink-dim); border-color: var(--line); background: transparent; }
+@media (max-width: 900px) {
+  .hGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hTop { grid-template-columns: 1fr; grid-template-areas: "kick" "title" "sub"; }
+  .hTop h1 { font-size: 22px; }
+  .hYear { margin-left: 0; }
+}
+@media (max-width: 560px) {
+  .hGrid { grid-template-columns: 1fr; }
+}
 </style>

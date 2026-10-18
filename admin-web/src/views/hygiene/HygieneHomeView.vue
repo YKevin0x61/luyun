@@ -1,6 +1,6 @@
 <script setup>
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import SvgIcon from '../../components/SvgIcon.vue'
 import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
@@ -58,6 +58,8 @@ import {
 import { loginRedirectTarget } from '../../utils/loginNext'
 
 const router = useRouter()
+// 消费页「卫生」带过来的意图参数（`?group=deep|fix` / `?shoot=next`）：只读不写路由。
+const route = useRoute()
 const imageUploads = useImageUploadQueueStore()
 const standardPhotoCache = useStandardPhotoCacheStore()
 // **没有页内 tab 了**（2026-10-05 用户裁定）：原来待办 / 专项 / 整改 / 榜 / 我 五格平级，
@@ -542,13 +544,17 @@ onMounted(() => {
   startClock()
   window.addEventListener('keydown', onKeydown)
   document.addEventListener('visibilitychange', onVisibilityChange)
-  loadMe()
+  // 意图参数要等三组数据都回来才消费（`?group` 要滚的那块、`?shoot=next` 要拍的那项
+  // 都得先存在）；`loadMe` 自己吃掉错误，这里不会多出一条未处理的 rejection。
+  void loadMe().then(consumePageIntent)
 })
 
 onBeforeUnmount(() => {
   stopClock()
   if (meRetryTimer) window.clearTimeout(meRetryTimer)
   meRetryTimer = null
+  if (intentTimer) window.clearTimeout(intentTimer)
+  intentTimer = null
   if (connectionTimer) window.clearTimeout(connectionTimer)
   connectionTimer = null
   window.removeEventListener('keydown', onKeydown)
@@ -620,6 +626,48 @@ async function loadMe() {
     }
     errorText.value = (failed.reason && failed.reason.message) || '无法加载卫生待办'
   }
+}
+
+// ── 页「今天」/「工作台」带进来的意图参数（2026-10-18）────────────────────────────
+// `?group=deep|fix`：滚到那一组并高亮一下；`?shoot=next`：直接打开首项的拍摄弹层。
+// 只消费、不新增路由：参数非法（拼错、不是单个字符串）就静默忽略，地址栏也不去改。
+const GROUP_IDS = { deep: 'hy-group-deep', fix: 'hy-group-fix' }
+const intentGroup = ref('')
+let intentTimer = null
+
+function queryValue(name) {
+  const raw = route.query ? route.query[name] : undefined
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+function highlightGroup(group) {
+  const target = document.getElementById(GROUP_IDS[group])
+  if (!target) return
+  // jsdom 里没有 scrollIntoView：单测不该为了一个滚动去装桩。
+  if (typeof target.scrollIntoView === 'function') {
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  intentGroup.value = group
+  if (intentTimer) window.clearTimeout(intentTimer)
+  intentTimer = window.setTimeout(() => {
+    intentGroup.value = ''
+    intentTimer = null
+  }, 1600)
+}
+
+/** `?shoot=next` 对着**首件日常**：队列第一件若是专项 / 整改，"去拍卫生"不该把他
+ *  领进别人的验收面板 —— 那就退回这组里第一件能拍的日常。 */
+function shootFirstDaily() {
+  const first = workQueue.value.find((task) => task.kind === 'daily')
+  if (first) openStandard(first.row)
+}
+
+async function consumePageIntent() {
+  // 等这一轮数据渲染进 DOM：`?group` 要滚的那块得先有位置，`?shoot=next` 也一样。
+  await nextTick()
+  const group = queryValue('group')
+  if (Object.prototype.hasOwnProperty.call(GROUP_IDS, group)) highlightGroup(group)
+  if (queryValue('shoot') === 'next') shootFirstDaily()
 }
 
 async function loadInbox() {
@@ -736,6 +784,13 @@ function queueLabelFor(task) {
 
 function canShootDeep(row) {
   return Boolean(employee.value && row.status !== '已通过')
+}
+
+/** 日常行要不要给「重拍」：这一项已经交了、还在等验收（ADR 0071 允许再交一张替换）。
+ *  判据与专项那行同一份（`isPendingReview`）—— 它跟谁能验收无关，所以别挂在 `dailyAction` 上
+ *  （那样没开验收的人的入口会跟着一起消失）。 */
+function canReshootDaily(task) {
+  return Boolean(employee.value) && Boolean(task) && isPendingReview(task.row)
 }
 
 function isDeepSheet() {
@@ -1369,8 +1424,12 @@ async function decide(action, reason = '') {
          `|| null` 让属性在关闭时真正消失；顺带一提：这里是**模板**表达式，`sheet` 会被自动
          解包成值，所以不需要也不会写 `.value`（脚本里的 computed 才需要）。 -->
     <header class="hy-work-header" :inert="Boolean(sheet) || null">
-      <div class="hy-work-header-inner">
-        <h1 class="hy-brand-title">卫生</h1>
+      <div class="hy-work-header-inner hy-wb-head">
+        <div class="hy-wb-head-main">
+          <span class="hy-wb-kicker">HYGIENE · 员工端</span>
+          <h1 class="hy-brand-title hy-wb-title">卫生</h1>
+        </div>
+        <div class="hy-wb-head-meta">
         <!-- 今天在哪：**只读**（票 10）。以前点它还能重选，现在班次和工作区由排班决定，
              要改得去排班页改那一天 —— 所以这里只报「排班说你今天在哪」，点不动。
              「还没定区」与「今天没排班」是两件事：前者有班次但店长没给他配这个班的固定区
@@ -1381,6 +1440,7 @@ async function decide(action, reason = '') {
         <!-- 被放权的那一档在界面上如实标出来：顶栏只有「员工（姓名）」两档可选，而这一页上
              他干的是判别人活的活（真机走查 O-id：角色审查 F-01 记的就是"界面层看不见它"）。
              只在真有可用的那三项时出现，普通员工看不到这一颗。 -->
+        </div>
         <span v-if="employee && staffCapCount" class="hy-work-role role" :title="`可判 ${staffCapCount} 项：${ADMIN_CAP_STAFF_DEFS.filter((item) => HYGIENE_REVIEW_CAP_KEYS.includes(item.key) && hasCap(caps, item.key)).map((item) => item.label).join('、')}`">
           现场复核 · {{ staffCapCount }} 项
         </span>
@@ -1403,8 +1463,9 @@ async function decide(action, reason = '') {
            样式用 `.hy-progress`（单行、mono、tabular-nums）：与专项组那条进度线同一个语义。
            刻意不摆成一排事实胶囊 —— 下面日常组第一行就是那排胶囊，两排一样的看不出哪排是
            「今天的总数」、哪排是「日常这一项的进度」。 -->
-      <p v-if="employee" class="hy-progress count">
-        今天要做 {{ todoTotal }} 项
+      <div v-if="employee" class="hy-wb-summary">
+        <p class="hy-progress count">
+        今天要做 <b class="hy-wb-num">{{ todoTotal }}</b> 项
         <!-- 「待我验收」也进这一行（真机走查 O4）：原来这一行只算自己那三组，于是有验收权、
              今天没人交的人读到「今天要做 0 项」；今天真有人交时下面又列着活 —— 上下自相矛盾。
              它按「日常验收」那一项开关判（不是"是不是管理员"），0 也照报，等于给这一档补上
@@ -1412,7 +1473,8 @@ async function decide(action, reason = '') {
              **写在同一颗 span 里**：两颗相邻标签之间的空白会被模板编译器消掉，实测渲染成
              「整改 0· 待我验收 0」（分隔号贴在前一个数字上）。 -->
         <span class="count">· 日常 {{ dailyCount }} · 专项 {{ deepCount }} · 整改 {{ fixCount }}<template v-if="canDailyReview"><span class="count"> · 待我验收 {{ reviewInbox.length }}</span></template></span>
-      </p>
+        </p>
+      </div>
 
       <!-- 「待我验收」：只有开了**「日常验收」**那一项的人有，且**今天真有人交了**才出现
            （拉不拉是这一档的另一半，在 `loadMe` 里、同一个开关）。
@@ -1421,8 +1483,8 @@ async function decide(action, reason = '') {
            （2026-10-05 用户确认：员工账号的管理员同样有验收权）。
            所以这一组不看他自己的班，只看"有没有别人交的活等着判"；放在最前，因为别人交完
            活等的就是他这一眼，有时效。 -->
-      <section v-if="canDailyReview && reviewInbox.length" class="hy-queue-group">
-        <h2>待我验收 <span>{{ reviewInbox.length }}</span></h2>
+      <section v-if="canDailyReview && reviewInbox.length" class="hy-queue-group hy-wb-panel">
+        <h2><i class="hy-wb-led warn"></i>待我验收 <span>{{ reviewInbox.length }}</span></h2>
         <p class="hy-staff-lead">同事交的，先看原图再判；自己交的不能自己验收。</p>
         <button
           v-for="row in reviewInbox"
@@ -1443,8 +1505,8 @@ async function decide(action, reason = '') {
 
       <!-- 第 1 组 · 日常（原来的「待办」那一格）。三个组依次排下去，每组一个小标题带条数，
            条数与上面那行明细同一口径（都是 `tabWorkCount`）。 -->
-      <section class="hy-queue-group">
-        <h2>日常 <span>{{ dailyCount }}</span></h2>
+      <section class="hy-queue-group hy-wb-panel">
+        <h2 :data-hint="shiftDue ? `本班 ${shiftDue} 前交` : '按截止排序'"><i class="hy-wb-led ok"></i>日常 <span>{{ dailyCount }}</span></h2>
         <!-- 票 10：班次和工作区不再由员工当天自己选 —— 排班说今天在哪个班、哪个区，
              卫生就认哪个。这一屏以前是个选择器，现在换成一句实话 + 一条去「今天」页的路：
              没有班次（新人没配规则 / 今天休 / 那条班次还没标卫生档位）就没有日常可交，
@@ -1476,10 +1538,6 @@ async function decide(action, reason = '') {
             <span v-else-if="queueSummary.soon" class="is-soon">快到时 {{ queueSummary.soon }}</span>
             <span v-if="queueSummary.waiting">等验收 {{ queueSummary.waiting }}</span>
           </div>
-          <p class="hy-staff-lead">
-            <template v-if="shiftDue">本班 {{ shiftDue }} 前交。专项和整改在下面两组。</template>
-            <template v-else>按超时、快到截止、待拍的顺序排好，照下一个做就行。</template>
-          </p>
 
           <article
             v-if="nextWork"
@@ -1491,7 +1549,11 @@ async function decide(action, reason = '') {
               <span class="hy-status" :class="`is-${statusTone(nextWork.status)}`">{{ nextWork.status }}</span>
             </div>
             <h2>{{ nextWork.title }}</h2>
-            <p class="hy-next-context">{{ nextWork.context }}</p>
+            <!-- 这一颗就是员工最该点的那颗按钮所在卡片：驳回原因必须写在这里，
+                 否则他只知道"又回到待拍"，照原样再拍一遍。与下面行同一个类名。 -->
+            <p v-if="nextWork.rejected" class="hy-work-reject">
+              {{ nextWork.rejectReason ? `已驳回：${nextWork.rejectReason}` : '已驳回，请重拍' }}
+            </p>
             <p v-if="nextWork.dueText" class="hy-next-due">{{ nextWork.dueText }}</p>
             <button
               type="button"
@@ -1514,28 +1576,39 @@ async function decide(action, reason = '') {
             </template>
           </div>
 
-          <section v-for="group in restWorkGroups" :key="group.id" class="hy-queue-group">
-            <h2>{{ group.label }} <span>{{ group.rows.length }}</span></h2>
-            <button
-              v-for="task in group.rows"
-              :key="task.key"
-              type="button"
-              class="hy-work-row"
-              :class="[`is-${task.bucket}`, `is-${statusTone(task.status)}`]"
-              :disabled="busy"
-              @click="runQueueTask(task)"
-            >
-              <span class="hy-task-kind">{{ task.typeLabel }}</span>
-              <span class="hy-work-copy">
-                <strong>{{ task.title }}</strong>
-                <span>{{ task.context }}</span>
-              </span>
-              <span v-if="task.rejected" class="hy-work-reject">
-                {{ task.rejectReason ? `已驳回：${task.rejectReason}` : '已驳回，请重拍' }}
-              </span>
-              <span class="hy-work-due">{{ task.dueText || task.status }}</span>
-              <SvgIcon name="chevron-right" :size="18" />
-            </button>
+          <section v-for="group in restWorkGroups" :key="group.id" class="hy-queue-group hy-wb-panel">
+            <h2><i class="hy-wb-led sig"></i>{{ group.label }} <span>{{ group.rows.length }}</span></h2>
+            <!-- 行 = 容器 + 主按钮 + 行尾独立动作：整行可点，但「重拍」不能嵌在 button 里
+                 （button 里不能再套 button，键盘也聚不到它身上）。 -->
+            <div v-for="task in group.rows" :key="task.key" class="hy-work-row-group">
+              <button
+                type="button"
+                class="hy-work-row"
+                :class="[`is-${task.bucket}`, `is-${statusTone(task.status)}`]"
+                :disabled="busy"
+                @click="runQueueTask(task)"
+              >
+                <span class="hy-task-kind">{{ task.typeLabel }}</span>
+                <span class="hy-work-copy">
+                  <strong>{{ task.title }}</strong>
+                  <span>{{ task.context }}</span>
+                </span>
+                <span v-if="task.rejected" class="hy-work-reject">
+                  {{ task.rejectReason ? `已驳回：${task.rejectReason}` : '已驳回，请重拍' }}
+                </span>
+                <span class="hy-work-due">{{ task.dueText || task.status }}</span>
+                <SvgIcon name="chevron-right" :size="18" />
+              </button>
+              <!-- 日常行在「待验收」时给一颗重拍：ADR 0071 允许再交一张替换自己那份，
+                   服务端覆盖 pending 后再提交，不用改后端。 -->
+              <button
+                v-if="canReshootDaily(task)"
+                type="button"
+                class="btn hy-work-reshoot"
+                :disabled="busy"
+                @click="openStandard(task.row)"
+              >重拍</button>
+            </div>
           </section>
 
           <details v-if="groupedPassed.length" class="hy-done">
@@ -1557,13 +1630,16 @@ async function decide(action, reason = '') {
       <!-- 第 2 组 · 专项。原来的那一格自带一句大标题「专项卫生 · 待办 / 已完成 / 无专项」：
            五格合并之后组标题已经写着「专项 N」，大标题里那两个字就成了重复，所以只把
            **状态**接在组标题后面（它是服务端给的这一轮结论，不能丢）。 -->
-      <section class="hy-queue-group">
-        <h2>专项 <span>{{ deepCount }}</span><span v-if="deepStatus">{{ deepStatus }}</span></h2>
+      <section
+        id="hy-group-deep"
+        class="hy-queue-group hy-wb-panel"
+        :class="{ 'is-intent': intentGroup === 'deep' }"
+      >
+        <h2 data-hint="全店 · 拍前后"><i class="hy-wb-led sig"></i>专项 <span>{{ deepCount }}</span><span v-if="deepStatus">{{ deepStatus }}</span></h2>
         <p v-if="deepStats.total" class="hy-progress">
           {{ deepStats.passed }}/{{ deepStats.total }}
           <span v-if="deepDue"> · {{ deepDue }} 前做完</span>
         </p>
-        <p class="hy-staff-lead">全店专项，不按工作区或班次。每项拍清理前和清理后。</p>
         <p v-if="!deepInbox.length" class="hy-staff-lead">这一轮没有专项卫生。</p>
         <article
           v-for="row in openDeepQueue"
@@ -1627,9 +1703,12 @@ async function decide(action, reason = '') {
 
       <!-- 第 3 组 · 整改（原来的「整改」那一格）。同样只留组标题 + 条数：大标题里的
            「整改单」与组标题重复。 -->
-      <section class="hy-queue-group">
-        <h2>整改 <span>{{ fixCount }}</span></h2>
-        <p class="hy-staff-lead">按所选区域显示和提交。先看开单原图再拍，镜头不叠图。</p>
+      <section
+        id="hy-group-fix"
+        class="hy-queue-group hy-wb-panel"
+        :class="{ 'is-intent': intentGroup === 'fix' }"
+      >
+        <h2 data-hint="先看原图再拍"><i class="hy-wb-led bad"></i>整改 <span>{{ fixCount }}</span></h2>
         <button
           v-if="canFix"
           type="button"
@@ -1684,11 +1763,10 @@ async function decide(action, reason = '') {
            这一屏的数据本来就是员工 cookie 读的（`/api/hygiene/staff/boards` 等），展开
            只是换一位 `v-if`；跳去店长那侧的 `/workbench/floor/boards` 只会吃 403，
            为它另开一条员工路由又要再搬一遍登录与实时那一套，得不偿失。
-           行上那个「展开 / 收起」是**文字**不是箭头：箭头得配一个旋转动画才说得清开没开，
-           而这一页没有自己的 scoped 样式块（样式全在共享的 hygiene-admin.css 里，
-           本次改动只动页面结构，不动那张表）。 -->
-      <section class="hy-queue-group">
-        <h2>信息</h2>
+           行上那个「展开 / 收起」是**文字**不是箭头：箭头得配一个旋转动画才说得清开没开
+           （v2 起这一页有自己的 scoped 版式骨架，但这条交互口径不变）。 -->
+      <section class="hy-queue-group hy-wb-panel hy-wb-info">
+        <h2><i class="hy-wb-led sig"></i>信息</h2>
         <button
           type="button"
           class="hy-work-row"
@@ -2051,3 +2129,392 @@ async function decide(action, reason = '') {
     <!-- 「确认改手机号」那个框跟着「我」那一格搬去 `views/today/TodayView.vue` 了。 -->
   </div>
 </template>
+
+<style scoped>
+/* B 案 v2 版式（2026-10-17）：员工端首页 —— 静态页头（kicker / H1 / 位置与班次）
+   + 一屏读数 + 三块面板（日常 / 专项 / 整改，信息入口同语言）。
+   页面持有版式骨架，**颜色与字体仍只走令牌层**（共享样式表仍是按钮、表单、相机弹层的来源）；
+   共享表里的 hero 渐变 / 毛玻璃 / 大圆角在这一层用 scoped 覆盖掉。
+   两步拍照、aria、弹层 inert 与全部业务逻辑不动。 */
+.hygiene-work header.hy-work-header {
+  position: static;
+  top: auto;
+  z-index: auto;
+  background: transparent;
+  border-bottom: 0;
+  padding: 10px 0 6px;
+}
+.hygiene-work .hy-work-header-inner.hy-wb-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 0 max(1rem, var(--safe-l)) 0 max(1rem, var(--safe-r));
+}
+.hy-wb-head-main { display: flex; flex-direction: column; gap: 6px; }
+.hy-wb-kicker {
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .26em;
+  color: var(--ink-faint);
+}
+.hygiene-work .hy-wb-title {
+  margin: 0;
+  font: 600 26px/1.1 var(--font-sans);
+  letter-spacing: .01em;
+  color: var(--ink);
+}
+.hy-wb-head-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.hygiene-work .hy-work-shift {
+  max-width: 100%;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+  background: var(--surface-1);
+  font: 500 10px/1.4 var(--font-mono);
+  letter-spacing: .02em;
+  color: var(--ink-dim);
+}
+.hygiene-work .hy-work-shift::before {
+  width: 6px;
+  height: 6px;
+  box-shadow: none;
+  background: var(--ok);
+}
+.hygiene-work .hy-work-role {
+  padding: 4px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-full);
+  background: var(--surface-1);
+  font-size: 9.5px;
+  letter-spacing: .06em;
+  color: var(--action);
+}
+.hy-wb-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: var(--surface-1);
+  color: var(--ink-dim);
+  font: 500 10px/1 var(--font-mono);
+}
+.hy-wb-led { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; background: var(--line-strong); }
+.hy-wb-led.ok { background: var(--ok); }
+.hy-wb-led.warn { background: var(--warn); }
+.hy-wb-led.bad { background: var(--danger); }
+.hy-wb-led.sig { background: var(--action); }
+
+/* ── 一屏读数：今天要做几项 + 5 段 gauge ─────────────────────────────── */
+/* 一条读数行（v3：纯计数不画 5 段 gauge，高度压到 76 以内） */
+.hy-wb-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  padding: 10px 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  box-shadow: 0 1px 2px var(--wb-ink-a08);
+}
+.hygiene-work .hy-wb-summary .hy-progress {
+  margin: 0;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  font: 500 11px/1.5 var(--font-sans);
+  letter-spacing: .01em;
+  color: var(--ink-dim);
+}
+.hygiene-work .hy-wb-summary .hy-progress .hy-wb-num {
+  font: 500 20px/1 var(--font-mono);
+  letter-spacing: -.02em;
+  color: var(--ink);
+  margin: 0 2px;
+}
+.hygiene-work .hy-wb-summary .hy-progress .count {
+  display: inline;
+  margin: 0 0 0 6px;
+  font: 500 9.5px/1.5 var(--font-mono);
+  color: var(--ink-faint);
+}
+
+/* ── 面板（唯一卡片语言） ───────────────────────────────────────────── */
+.hygiene-work .hy-queue-group.hy-wb-panel {
+  margin: 0 0 14px;
+  padding: 0;
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  box-shadow: 0 1px 2px var(--wb-ink-a08);
+  overflow: hidden;
+}
+/* 页「今天」带 `?group=deep|fix` 进来时高亮那一组；类由脚本在 1.6s 后摘掉。 */
+.hygiene-work .hy-queue-group.hy-wb-panel.is-intent {
+  box-shadow: inset 0 0 0 2px var(--action);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel > h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+  font: 600 12.5px/1 var(--font-sans);
+  letter-spacing: .06em;
+  color: var(--ink);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel > h2 span {
+  font: 500 9.5px/1 var(--font-mono);
+  letter-spacing: .02em;
+  color: var(--ink-faint);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel > h2 span + span { margin-left: 2px; }
+/* 面板头 hint：只写口径，不占一行说明。用 `::after` 画出来，标题本身的 textContent
+   不变（标题行的测试按 `h2.text()` 精确断言「日常 1」这类字符串）。 */
+.hygiene-work .hy-queue-group.hy-wb-panel > h2[data-hint]::after {
+  content: attr(data-hint);
+  margin-left: auto;
+  font: 500 9.5px/1 var(--font-mono);
+  letter-spacing: 0;
+  color: var(--ink-faint);
+}
+/* 信息卡：页尾一段（发丝线 + kicker + 行入口），不再作为第四张任务面板 */
+.hygiene-work .hy-queue-group.hy-wb-info {
+  margin: 4px 0 0;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+}
+.hygiene-work .hy-queue-group.hy-wb-info > h2 {
+  padding: 10px 0 2px;
+  border-bottom: 0;
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .2em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel > .hy-staff-lead {
+  margin: 0;
+  padding: 10px 14px 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--ink-dim);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel > .hy-staff-lead + * { margin-top: 8px; }
+.hygiene-work .hy-queue-group.hy-wb-panel > .hy-progress {
+  margin: 0;
+  padding: 10px 14px 0;
+  font: 500 10px/1.5 var(--font-mono);
+  color: var(--ink-faint);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel > .hy-staff-done {
+  margin: 0;
+  padding: 12px 14px;
+  font-size: 10.5px;
+  color: var(--ink-faint);
+}
+
+/* ── 行：类型 / 事项（主副） / 状态；发丝分隔、≥48px ───────────────── */
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  margin: 0;
+  padding: 11px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--wb-ink-a08);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-row:last-child { border-bottom: 0; }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-row:hover { background: var(--surface-2); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+/* 行 = 容器 + 主按钮 + 行尾独立动作：发丝线挂在容器上，主按钮撑满剩余宽度。
+   （「重拍」不能嵌在 `.hy-work-row` 这颗 button 里 —— button 里不能再套 button。） */
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-row-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 10px;
+  border-bottom: 1px solid var(--wb-ink-a08);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-row-group:last-child { border-bottom: 0; }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-row-group .hy-work-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: 0;
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-reshoot { flex: 0 0 auto; }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-task-kind {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font: 500 9px/1.4 var(--font-mono);
+  letter-spacing: .08em;
+  color: var(--ink-faint);
+}
+.hy-work-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.hy-work-copy strong { font-size: 12px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.hy-work-copy span { font: 500 9.5px/1.5 var(--font-mono); color: var(--ink-faint); }
+.hygiene-work .hy-work-due,
+.hygiene-work .hy-task .hy-work-due {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: 500 9px/1 var(--font-mono);
+  letter-spacing: .04em;
+  color: var(--warn);
+  white-space: nowrap;
+}
+.hygiene-work .hy-work-row .hy-work-due::before,
+.hygiene-work .hy-task .hy-work-due::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 6px;
+}
+.hygiene-work .hy-work-row.is-overdue .hy-work-due,
+.hygiene-work .hy-task.is-overdue .hy-work-due { color: var(--danger-bright); }
+.hygiene-work .hy-work-row.is-soon .hy-work-due,
+.hygiene-work .hy-task.is-soon .hy-work-due { color: var(--warn); }
+.hygiene-work .hy-work-row.is-done .hy-work-due,
+.hygiene-work .hy-task.is-done .hy-work-due { color: var(--ok); }
+.hygiene-work .hy-work-row .hy-work-reject { font: 500 9px/1.4 var(--font-mono); color: var(--danger-bright); }
+
+/* 状态签（待拍 / 待验收 / 已通过 / 整改）：整块填充胶囊收成「6px LED + 9px 小字」 */
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font: 500 9px/1.4 var(--font-mono);
+  letter-spacing: .06em;
+  color: var(--ink-faint);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-status::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 6px;
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-status.is-todo { color: var(--action); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-status.is-pending { color: var(--warn); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-status.is-fix { color: var(--danger-bright); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-status.is-done { color: var(--ok); }
+
+/* 任务行（专项 / 整改）：共享表那层卡片与整块渐变在这里收成行 */
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-task {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 11px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--wb-ink-a08);
+  border-left: 3px solid transparent;
+  border-radius: 0;
+  background: transparent;
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-task:last-child { border-bottom: 0; }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-task.is-overdue {
+  border-left-color: var(--danger);
+  background: transparent;
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-task.is-soon {
+  border-left-color: var(--warn);
+  background: transparent;
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-task.is-done {
+  border-left-color: var(--ok);
+  background: transparent;
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-task strong { font-size: 12px; font-weight: 600; color: var(--ink); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-task p { margin: 3px 0 0; font-size: 10px; line-height: 1.5; color: var(--ink-faint); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-task-actions { display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto; }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-task-actions .btn { min-height: 44px; min-width: 4.8rem; }
+
+/* 下一件主卡：左 3px 语义条 + 1px 线（共享表那层光晕已经撤掉，这里再收一次圆角与底色） */
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-next {
+  margin: 12px 14px;
+  padding: 13px 14px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--action);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-next.is-overdue { border-color: var(--line); border-left-color: var(--danger); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-next.is-soon { border-color: var(--line); border-left-color: var(--warn); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-next h2 { margin: 8px 0 3px; font: 600 16px/1.35 var(--font-sans); color: var(--ink); }
+/* 首项大卡的驳回原因：与行上那个 `.hy-work-reject` 同一个类名、同一层语义色。 */
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-next > .hy-work-reject {
+  margin: 4px 0 0;
+  font: 500 10px/1.5 var(--font-mono);
+  color: var(--danger-bright);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-next-context { margin: 0; font-size: 10.5px; color: var(--ink-dim); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-next-due { margin: 6px 0 0; font: 500 10px/1 var(--font-mono); color: var(--ink-faint); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-next-action { width: 100%; min-height: 48px !important; margin-top: 10px; }
+
+/* 事实胶囊：只留 LED + 小字 */
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-facts { display: flex; flex-wrap: wrap; gap: 10px; margin: 0; padding: 10px 14px; border-top: 1px solid var(--wb-ink-a08); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-facts span {
+  display: inline-flex; align-items: center; gap: 5px;
+  min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent;
+  font: 500 9px/1.4 var(--font-mono);
+  color: var(--ink-faint);
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-facts span::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: 0 0 6px;
+}
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-facts .is-overdue { color: var(--danger-bright); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-work-facts .is-soon { color: var(--warn); }
+
+/* 已完成折叠：面板内一条分隔 */
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-done { margin: 0; padding: 4px 14px 10px; border-top: 1px solid var(--wb-ink-a08); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-done summary { min-height: 44px; font-size: 10px; letter-spacing: .06em; color: var(--ink-faint); }
+.hygiene-work .hy-queue-group.hy-wb-panel .hy-done summary::before { width: 16px; height: 16px; font-size: 9px; background: var(--surface-2); color: var(--ok); }
+
+/* 无班 / 空态那几条（共享类）：面板内节奏 */
+.hygiene-work .hy-queue-group.hy-wb-panel h1 { font: 600 15px/1.3 var(--font-sans); letter-spacing: 0; margin: 12px 14px 0; color: var(--ink); }
+.hygiene-work .hy-queue-group.hy-wb-panel .btn-block { margin: 10px 14px 14px; width: calc(100% - 28px); }
+
+/* 触控：大按钮 48、行内动作 44（theme.css 的 430 档 !important 需要同权重压回） */
+.hygiene-work :deep(.btn.btn) { min-height: 48px !important; border-radius: var(--r-1); }
+.hygiene-work :deep(.hy-task-actions .btn.btn) { min-height: 44px !important; }
+.hygiene-work :deep(.hy-work-row .btn.btn) { min-height: 44px !important; }
+/* 行尾那颗「重拍」在主按钮外面（不是 `.hy-work-row` 的后代）：按 44px 行内动作。 */
+.hygiene-work :deep(.hy-work-reshoot.btn) { min-height: 44px !important; }
+
+@media (max-width: 720px) {
+  .hygiene-work .hy-wb-title { font-size: 22px; }
+  .hygiene-work .hy-wb-summary .hy-progress .hy-wb-num { font-size: 26px; }
+  .hygiene-work .hy-queue-group.hy-wb-panel .hy-work-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+  .hygiene-work .hy-queue-group.hy-wb-panel .hy-work-row > :deep(.svg-icon) { display: none; }
+  .hygiene-work .hy-queue-group.hy-wb-panel .hy-next { margin: 10px 12px; }
+}
+</style>

@@ -505,6 +505,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   background: transparent;
   font-size: 18px;
   line-height: 1;
+  min-height: var(--tap);
 }
 .oHours {
   min-width: 66px;
@@ -601,6 +602,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   border-radius: 999px;
   background: transparent;
   font-size: 13px;
+  min-height: var(--tap);
 }
 
 /* 店长那一面（票 04）：待审批队列、批 / 驳、代录选人。同一页多一块，所以给它自己的
@@ -627,6 +629,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   border-radius: 999px;
   background: transparent;
   font-size: 13px;
+  min-height: var(--tap);
 }
 .oPill.ok {
   border-color: var(--hy-mint, #2f9e7f);

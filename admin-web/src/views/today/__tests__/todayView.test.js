@@ -353,7 +353,9 @@ describe('员工端请假（票 08）', () => {
     // 32px 在手机上太小 —— 挨着的是不可逆动作（有确认框兜着，但手指先得点得中）。
     // 「过去的日子在控件上先挡住」那条（`:min-date` 取服务端营业日）跟着日期控件
     // 搬进了 `StaffDaySheet`，那边的断言在 `components/scheduling/__tests__/`。
-    expect(view).toMatch(/\.tL-cancel \{[\s\S]{0,260}?min-height: 40px/)
+    // 纯视觉断言维护（2026-10-17 B 案「钢面 · 仪」）：触控下限从 40px 提到 44px，
+    // 与员工端其它行对齐（行 ≥44px）；判据仍是「这一排点得中」，只是数变了。
+    expect(view).toMatch(/\.tL-cancel \{[\s\S]{0,260}?min-height: 44px/)
   })
 
   it('自己那条申请在页面上看得见、能撤回，批了才写成请假', () => {
@@ -412,7 +414,9 @@ describe('员工端换班（票 09）', () => {
 
   it('换班那条与我提的那些分开：暖色卡 + 自己的 tag', () => {
     expect(view).toContain('tA-card swap')
-    expect(view).toMatch(/\.tA-card\.swap \{[\s\S]{0,80}--hy-amber/)
+    // 纯视觉断言维护（2026-10-17 B 案「钢面 · 仪」）：暖色从兼容层 --hy-amber 换成
+    // 语义层的 --warn（待批一档），判据仍是「暖色卡 + 与自己提的那张分开」。
+    expect(view).toMatch(/\.tA-card\.swap \{[\s\S]{0,80}var\(--warn\)/)
     expect(view).toMatch(/\.tag\.swap \{/)
   })
 

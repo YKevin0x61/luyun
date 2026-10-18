@@ -169,7 +169,7 @@ onBeforeUnmount(() => {
   right: 8px;
   border: 1px solid var(--hy-mint-line);
   border-radius: 999px;
-  background: rgba(8, 22, 20, .9);
+  background: var(--wb-scrim-strong);
   color: var(--hy-mint-bright);
   padding: 6px 10px;
   font: 700 11px/1 var(--font-sans);

@@ -22,6 +22,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import WorkbenchExitButton from '../../components/workbench/WorkbenchExitButton.vue'
+import WorkbenchThemeToggle from '../../components/workbench/WorkbenchThemeToggle.vue'
 import WorkbenchIdentitySwitcher from '../../components/workbench/WorkbenchIdentitySwitcher.vue'
 import WorkbenchMobileHead from '../../components/workbench/WorkbenchMobileHead.vue'
 import WorkbenchNav from '../../components/workbench/WorkbenchNav.vue'
@@ -236,6 +237,8 @@ watch(identity, keepViewAllowed)
       <WorkbenchNav class="wb-nav" />
       <!-- 本组的附加件（人事壳那个实时点）。 -->
       <slot name="meta" />
+      <!-- 浅 / 深皮肤（2026-10-17）：与退出同放在栏尾，切一次全站跟着变。 -->
+      <WorkbenchThemeToggle class="no-print wb-theme-toggle" />
       <!-- 退出入口：工作台是子应用，页页都得退得出去；行为只有一处（`useWorkbenchLogout`）。 -->
       <WorkbenchExitButton />
     </header>
@@ -270,9 +273,9 @@ watch(identity, keepViewAllowed)
   /* 高度是**下限**不是定值：单行 flex 会把胶囊压到内容宽度以下、汉字逐字换行，整条栏溢出后
      被裁掉（实测 clientWidth 390 / scrollWidth 442）。**底部不留内边距**：导航是下划线 tab，
      那条指示线要落在这一栏的分隔线上。 */
-  min-height: 40px;
-  padding: 4px 12px 0;
-  background: var(--hy-bg);
+  min-height: 52px;
+  padding: 6px 20px 0;
+  background: var(--chrome);
   border-bottom: 1px solid var(--hy-line);
 }
 /* 不占满整行的那几件：补 4px 下边距；导航（下划线 tab）不在此列 —— 它要贴到底边。 */
@@ -280,13 +283,16 @@ watch(identity, keepViewAllowed)
 /* 退出按钮要**:deep() 才选得中** —— 也别在挂它的地方传 class：它的模板是多根，父级传下去的
    class 不透传，Vue 还会当场报 `Extraneous non-props attributes`。 */
 .wb-top :deep(.wb-exit) { margin-left: auto; margin-bottom: 4px; }
+/* 皮肤开关紧挨在退出左边（退出自己带 `margin-left:auto`，这一颗不需要）。 */
+.wb-theme-toggle { margin-bottom: 4px; }
 .wb-brand {
   /* 牌子占掉剩下的宽度：切换器与导航一起贴在右端。窄屏放不下时它先让位（见下面的媒体查询）。 */
   flex: 1 1 auto;
   min-width: 0;
-  font-family: var(--font-song);
-  font-size: 13.5px;
-  letter-spacing: .06em;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .04em;
   color: var(--hy-ink);
   text-decoration: none;
   white-space: nowrap;
@@ -301,9 +307,9 @@ watch(identity, keepViewAllowed)
   color: var(--hy-muted);
   text-decoration: none;
   background: var(--hy-surface-2);
-  border: 1px solid var(--hy-line);
-  border-radius: 999px;
-  padding: 4px 11px;
+  border: 1px solid var(--hy-line-strong);
+  border-radius: var(--r-1);
+  padding: 5px 10px;
   white-space: nowrap;
 }
 .wb-back:hover { color: var(--hy-ink); border-color: var(--hy-line-strong); }

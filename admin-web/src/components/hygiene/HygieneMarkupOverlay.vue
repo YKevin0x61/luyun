@@ -110,19 +110,19 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 .std-svg line {
-  filter: drop-shadow(0 0 3px rgba(63, 224, 176, .65));
+  filter: drop-shadow(0 0 3px var(--wb-tint-45));
 }
 .std-circle {
   position: absolute;
   transform: translate(-50%, -50%);
   border: 2px solid var(--hy-mint-bright);
   border-radius: 50%;
-  filter: drop-shadow(0 0 3px rgba(63, 224, 176, .65));
+  filter: drop-shadow(0 0 3px var(--wb-tint-45));
 }
 .std-caption {
   position: absolute;
   transform: translate(-50%, -110%);
-  background: rgba(8, 22, 20, .92);
+  background: var(--wb-scrim-strong);
   color: var(--hy-mint-bright);
   border: 1px solid var(--hy-mint-line);
   border-radius: 6px;

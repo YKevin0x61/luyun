@@ -25,6 +25,7 @@ import {
   noteText,
   previewLine,
   requestRangeText,
+  shortDay,
   splitRuleless,
   swapApproveReceipt,
   swapPreviewLine,
@@ -43,6 +44,9 @@ const busyId = ref(0)
 // 谁最后发生谁说话（这里只在动作成功后写，出错时 errorText 会顶掉它）。
 const receipt = ref('')
 const rejectTarget = ref(null)
+// 批准也要先问一句：批错了没有撤回按钮，员工已经看到「批了」，复原得去月历把那天
+// 的班次一格一格改回来。驳回本来就有确认，闸要加在同一侧（见下方 `approveMessage`）。
+const approveTarget = ref(null)
 
 // 「要提醒的」与「不提醒的」两拨新人（口径见 `utils/leaveRequest.js` 的 `splitRuleless`）。
 const ruleless = computed(() => splitRuleless(withoutRule.value))
@@ -107,6 +111,47 @@ async function confirmReject() {
   if (target) await decide(target, 'reject')
 }
 
+/** 「批准」确认框里那句「批了会怎样」：从卡片第二行已经摊开的预览数据里挑一天说。
+ *
+ *  **不能把整段预览搬进框里** —— 那正是卡片第二行的内容，框里再抄一遍既长又难读。
+ *  所以只说挑出来的那一天（同一天多个班次就说全，人头的判据与 `previewLine` 一致），
+ *  跨天的补一句「共 N 天」。已经过去的日子不算：批了它也不动排班，说了反而误导。
+ *  没有任何可用预览数据时退一句通用的，**绝不空着**（空话比不弹框更糟）。
+ *  换班照 `swapPreviewLine` 的三种情况说：对调 / 一方接走 / 都没班。
+ */
+function approveMessage(request) {
+  const days = (request && request.days) || []
+  const live = days.filter((day) => day && !day.past)
+  if (!live.length) {
+    return days.length
+      ? '这几天都已经过去：批了只记成已批准，排班不动。'
+      : '批了就写进排班，员工会收到通知。'
+  }
+  const day = live[0]
+  const when = shortDay(day.business_date)
+  const more = live.length > 1 ? `（共 ${live.length} 天）` : ''
+  if (request.kind === 'swap') {
+    const mine = day.current_shift_name || ''
+    const theirs = day.peer_scheduled ? day.peer_shift_name || '班次已调整' : ''
+    if (mine && theirs) return `批了之后 ${when} 两个人的班对调：${mine} ⇄ ${theirs}${more}`
+    if (mine) return `批了之后 ${when} 对方接你的${mine}${more}`
+    if (theirs) return `批了之后 ${when} 你接对方的${theirs}${more}`
+    return `批了之后 ${when} 两个人都没有班，排班不动${more}`
+  }
+  const left = (day.after || []).map((item) => `${item.shift_name}剩 ${item.count} 人`).join('、')
+  if (left) return `批了之后 ${when} ${left}${more}`
+  if (!day.scheduled) return `批了之后 ${when} 没有你的班，排班不动${more}`
+  return day.current_shift_name
+    ? `批了之后 ${when} 空出${day.current_shift_name}${more}`
+    : `批了之后 ${when} 那天本来就休，排班不动${more}`
+}
+
+async function confirmApprove() {
+  const request = approveTarget.value
+  approveTarget.value = null
+  if (request) await decide(request, 'approve')
+}
+
 onMounted(() => {
   // 名字与清单里 `/workbench/hr/inbox` 那一行同步，后缀走 `workbenchDocumentTitle`（同上）。
   document.title = workbenchDocumentTitle('排班待办')
@@ -121,26 +166,43 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
 <template>
   <div class="hygiene-admin inbox-page">
     <header class="iTop">
-      <div>
-        <p class="iKicker">排班</p>
+      <p class="iKicker">人事 · 排班</p>
+      <div class="iTitleRow">
         <h1>待办</h1>
-        <p class="iSub">
-          <template v-if="today">今天 {{ today }} · </template>请假与换班都在这里批；批完那天就记成请假 / 对调，月历上带青点。
-        </p>
+        <button class="btn iAction" type="button" @click="router.push(WORKBENCH_HR_HOME)">回到月历</button>
       </div>
-      <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">回到月历</button>
+      <div class="iSubRow">
+        <p class="iSub">
+          <template v-if="today">今天 {{ today }} · </template>请假与换班都在这里批；批完那天就记成请假 / 对调。
+        </p>
+        <!-- 页头只放要动手的未处理数（零值不显示）；申请条数在面板头，不重复。 -->
+        <button
+          v-if="ruleless.active.length"
+          class="iChip"
+          type="button"
+          @click="router.push(WORKBENCH_HR_HOME)"
+        >未配规则 <b>{{ ruleless.active.length }}</b> 人 ›</button>
+      </div>
     </header>
 
     <p v-if="state === 'loading'" class="iHint">正在读待办…</p>
 
+    <!-- 读失败**独占内容区**：原来错误只占一行、下面照常渲染「没有等着批的申请」，
+         故障被读成「今天没假条」是漏批的直接原因。 -->
+    <section v-else-if="state === 'error'" class="iFail">
+      <p class="iErr" role="alert">{{ errorText }}</p>
+      <button class="btn" type="button" @click="load()">重试</button>
+    </section>
+
     <template v-else>
+      <p v-if="receipt" class="iOk" role="status">{{ receipt }}</p>
       <p v-if="errorText" class="iErr" role="alert">{{ errorText }}</p>
-      <p v-else-if="receipt" class="iOk" role="status">{{ receipt }}</p>
 
       <section class="iCard">
         <div class="iCard-hd">
+          <i class="iLed warn"></i>
           <h2>申请等着批</h2>
-          <span class="iCount">{{ requests.length }}</span>
+          <span class="iHint">{{ requests.length }} 条</span>
         </div>
         <p v-if="!requests.length" class="iEmpty">
           没有等着批的申请。员工在手机上提了请假会出现在这里；换班要对方先点同意，才会轮到这儿。
@@ -148,63 +210,75 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
         <ul v-else class="iList">
           <li v-for="request in requests" :key="request.id" class="iItem">
             <div class="iItem-hd">
+              <span class="iKind">{{ kindText(request.kind) }}</span>
               <b>{{ request.employee_name || '（没有名字）' }}</b>
               <span v-if="request.kind === 'swap'" class="iPeer">⇄ {{ request.peer_name || '（对方）' }}</span>
-              <span class="iKind">{{ kindText(request.kind) }}</span>
               <span class="iWhen">{{ requestRangeText(request.start_date, request.end_date) }}</span>
               <span class="iDays">{{ (request.days || []).length }} 天</span>
-              <span class="iPend">等你批</span>
+              <span class="iPend"><i class="iLed warn"></i>等你批</span>
+              <div class="iAct">
+                <button
+                  class="btn btn-primary"
+                  type="button"
+                  :disabled="busyId !== 0"
+                  @click="approveTarget = request"
+                >批准</button>
+                <button
+                  class="btn btn-danger"
+                  type="button"
+                  :disabled="busyId !== 0"
+                  @click="rejectTarget = request"
+                >驳回</button>
+              </div>
             </div>
-            <p v-if="noteText(request.note)" class="iNote">{{ noteText(request.note) }}</p>
-            <ul class="iPrev">
-              <li
-                v-for="day in request.days"
-                :key="day.business_date"
-                :class="{ past: day.past, none: !day.scheduled }"
-              >{{ request.kind === 'swap'
-                ? swapPreviewLine(day, request.employee_name, request.peer_name)
-                : previewLine(day) }}</li>
-            </ul>
-            <div class="iAct">
-              <button
-                class="btn btn-primary"
-                type="button"
-                :disabled="busyId !== 0"
-                @click="decide(request, 'approve')"
-              >批准</button>
-              <button
-                class="btn btn-danger"
-                type="button"
-                :disabled="busyId !== 0"
-                @click="rejectTarget = request"
-              >驳回</button>
+            <div class="iItem-bd">
+              <p v-if="noteText(request.note)" class="iNote">{{ noteText(request.note) }}</p>
+              <ul class="iPrev">
+                <li
+                  v-for="day in request.days"
+                  :key="day.business_date"
+                  :class="{ past: day.past, none: !day.scheduled }"
+                >{{ request.kind === 'swap'
+                  ? swapPreviewLine(day, request.employee_name, request.peer_name)
+                  : previewLine(day) }}</li>
+              </ul>
             </div>
           </li>
         </ul>
       </section>
 
-      <section class="iCard">
-        <div class="iCard-hd">
-          <h2>还没配规则的人</h2>
-          <span class="iCount">{{ ruleless.active.length }}</span>
+      <!-- 未配规则：页头胶囊只给数字，完整名单折在这一行里（展开才占地方）。 -->
+      <details v-if="ruleless.active.length" class="iRuleless">
+        <summary>还没配规则的人 {{ ruleless.active.length }} 人 ›</summary>
+        <div class="iRuleless-bd">
+          <p class="iLead">
+            没配规则就不会被排班，请假提了也没班可改。名单上停用或没批准的人不在这儿提醒。
+          </p>
+          <ul class="iPeople">
+            <li v-for="person in ruleless.active" :key="person.id">
+              <b>{{ person.name }}</b>
+              <span>{{ person.job_title || '员工' }}</span>
+              <span v-if="person.phone" class="iPhone">{{ person.phone }}</span>
+            </li>
+          </ul>
+          <p v-if="ruleless.muted.length" class="iMuted">
+            另有 {{ ruleless.muted.length }} 个人已停用或还没批准，不提醒。
+          </p>
+          <div class="iSide-act">
+            <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">去配固定班</button>
+          </div>
         </div>
-        <p class="iLead">
-          没配规则就不会被排班，请假提了也没班可改。名单上停用或没批准的人不在这儿提醒。
-        </p>
-        <p v-if="!ruleless.active.length" class="iEmpty">在职的人都配好了。</p>
-        <ul v-else class="iPeople">
-          <li v-for="person in ruleless.active" :key="person.id">
-            <b>{{ person.name }}</b>
-            <span>{{ person.job_title || '员工' }}</span>
-            <span v-if="person.phone" class="iPhone">{{ person.phone }}</span>
-          </li>
-        </ul>
-        <p v-if="ruleless.muted.length" class="iMuted">
-          另有 {{ ruleless.muted.length }} 个人已停用或还没批准，不提醒。
-        </p>
-        <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">去配固定班</button>
-      </section>
+      </details>
     </template>
+
+    <ConfirmDialog
+      v-if="approveTarget"
+      :title="`批准这次${kindText(approveTarget.kind)}`"
+      :message="approveMessage(approveTarget)"
+      confirm-label="批准"
+      @confirm="confirmApprove"
+      @cancel="approveTarget = null"
+    />
 
     <ConfirmDialog
       v-if="rejectTarget"
@@ -219,67 +293,153 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
 </template>
 
 <style scoped>
-/* 版式照票 07 的月历页：深青墨底 + 一张卡一个话题。令牌来自 /hygiene-admin.css；
-   `.btn` 那一族也在那儿。 */
-.inbox-page { padding: 18px 16px 40px; max-width: 780px; margin: 0 auto; }
-.iTop { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
-.iTop h1 { margin: 2px 0 4px; font-size: 20px; color: var(--hy-ink); }
-.iKicker { margin: 0; font-size: 11px; letter-spacing: .18em; color: var(--hy-faint); }
-.iSub { margin: 0; font-size: 12px; line-height: 1.7; color: var(--hy-muted); }
-.iTop .btn { margin-left: auto; flex: none; }
-.iHint { margin: 0; font-size: 12.5px; color: var(--hy-muted); }
+/* B 案 v3（2026-10-17 版式审查）：1052 容器、页头 3 行、一页一块面板；申请卡压成
+   两行（类型 · 姓名 · 日期 · 状态 · 动作 / 影响说明），右栏「未配规则」降级成页头胶囊
+   + 一行折叠。页头胶囊只放要动手的未处理数，零值不显示。 */
+.iFail {
+  display: flex; flex-direction: column; gap: 12px; align-items: flex-start;
+  padding: 16px 18px;
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+}
+.inbox-page {
+  display: flex; flex-direction: column; gap: var(--sp-4);
+  padding: 18px clamp(16px, 4vw, 32px) calc(40px + var(--safe-b));
+  width: 100%; max-width: 1052px; margin: 0 auto; font-family: var(--font-sans);
+}
+.iTop {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "kick kick" "title action" "sub chip";
+  align-items: end; column-gap: var(--sp-4); row-gap: 7px;
+}
+.iKicker {
+  grid-area: kick; margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
+  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+}
+.iTitleRow { grid-area: title; display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
+.iTop h1 {
+  margin: 0; font-family: var(--font-sans); font-size: 26px; line-height: 1;
+  font-weight: 600; letter-spacing: .01em; color: var(--ink);
+}
+.iAction { margin-left: auto; flex: none; border-radius: var(--r-1); min-height: var(--tap); }
+.iSubRow { grid-area: sub; display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; min-width: 0; }
+.iSub { margin: 0; max-width: 720px; font-size: var(--fs-12); line-height: 1.6; color: var(--ink-dim); }
+/* 页头胶囊：只放「要动手的未处理数」，零值不渲染。 */
+.iChip {
+  grid-area: chip; margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  background: var(--surface-1); color: var(--warn); cursor: pointer;
+  font-family: var(--font-mono); font-size: 10px; line-height: 1;
+}
+.iChip b { color: var(--ink); font-weight: 500; }
+.iLed { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; }
+.iLed.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--wb-warn-a16); }
+.iHint { margin: 0; font-size: 12.5px; color: var(--ink-dim); }
 .iErr {
-  margin: 0 0 12px; padding: 9px 12px; border-radius: var(--hy-radius-md);
-  border: 1px solid rgba(255, 138, 128, .35); background: rgba(255, 138, 128, .12);
-  font-size: 12.5px; color: var(--hy-coral);
+  margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
+  border: 1px solid var(--wb-danger-a45); background: var(--danger-soft);
+  font-size: 12.5px; color: var(--danger-bright);
 }
 .iOk {
-  margin: 0 0 12px; padding: 9px 12px; border-radius: var(--hy-radius-md);
-  border: 1px solid var(--hy-mint-line); background: var(--hy-mint-soft);
-  font-size: 12.5px; color: var(--hy-mint);
+  margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
+  border: 1px solid var(--line-strong); background: var(--ok-soft);
+  font-size: 12.5px; color: var(--ok);
 }
+/* 唯一的主面板：头 + 行。 */
 .iCard {
-  margin-bottom: 14px; padding: 14px; border: 1px solid var(--hy-line);
-  border-radius: var(--hy-radius-lg); background: var(--hy-surface);
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: var(--hy-shadow-sm); overflow: hidden;
 }
-.iCard-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.iCard-hd h2 { margin: 0; font-size: 14px; color: var(--hy-ink); }
-.iCount {
-  min-width: 20px; padding: 1px 7px; border-radius: 999px; text-align: center;
-  font-family: var(--font-mono); font-size: 11.5px; color: var(--hy-night); background: var(--hy-amber);
+.iCard-hd {
+  display: flex; align-items: center; gap: 9px;
+  padding: 11px 14px; border-bottom: 1px solid var(--line);
 }
-.iLead { margin: 0 0 10px; font-size: 12px; line-height: 1.7; color: var(--hy-muted); }
-.iEmpty { margin: 4px 0 0; font-size: 12.5px; color: var(--hy-faint); }
-.iMuted { margin: 10px 0; font-size: 11.5px; color: var(--hy-faint); }
+.iCard-hd h2 {
+  margin: 0; font-family: var(--font-sans); font-size: 12.5px; line-height: 1;
+  font-weight: 600; letter-spacing: .06em; color: var(--ink);
+}
+.iCard-hd .iHint {
+  margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; line-height: 1;
+  color: var(--ink-faint);
+}
+.iEmpty { margin: 0; padding: 14px; font-size: 12px; color: var(--ink-faint); }
 .iList { list-style: none; margin: 0; padding: 0; }
-.iItem { padding: 12px 0; border-top: 1px solid var(--hy-line); }
-.iItem:first-child { border-top: 0; padding-top: 6px; }
-.iItem-hd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.iItem-hd b { font-size: 14px; color: var(--hy-ink); }
+/* 一条申请 = 两行：类型 / 姓名 / 日期 / 状态 / 动作（右对齐）；第二行影响说明。 */
+.iItem {
+  padding: 10px 14px; border-top: 1px solid var(--wb-ink-a08);
+}
+.iItem:first-child { border-top: 0; }
+.iItem:hover { background: var(--surface-2); }
+.iItem-hd { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 44px; }
+.iItem-hd b { min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
 .iKind {
-  padding: 1px 8px; border-radius: 999px; font-size: 11px;
-  color: var(--hy-aqua); border: 1px solid var(--hy-aqua); background: rgba(94, 234, 212, .10);
+  font-family: var(--font-sans); font-size: 8.5px; line-height: 1;
+  font-weight: 500; letter-spacing: .2em; color: var(--info);
 }
-.iWhen { font-family: var(--font-mono); font-size: 12.5px; color: var(--hy-ink); }
-/* 换班卡上的「⇄ 对方」：这件事是两个人，姓名并排写才看得懂谁跟谁换。 */
-.iPeer { font-size: 13px; color: var(--hy-amber); }
-.iDays { font-size: 11.5px; color: var(--hy-muted); }
-.iPend { margin-left: auto; font-size: 11.5px; color: var(--hy-amber); }
-.iNote { margin: 8px 0 0; font-size: 12.5px; line-height: 1.7; color: var(--hy-muted); }
-.iPrev { list-style: none; margin: 8px 0 0; padding: 0; }
+.iWhen { font-family: var(--font-mono); font-size: 11px; color: var(--ink); }
+.iDays { font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); }
+.iPeer { font-size: var(--fs-12); color: var(--hy-amber); }
+.iPend {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 9px; letter-spacing: .06em; color: var(--warn); white-space: nowrap;
+}
+.iAct { margin-left: auto; display: flex; gap: var(--sp-2); }
+.iAct .btn { border-radius: var(--r-1); min-height: var(--tap); }
+.iItem-bd { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
+.iNote {
+  margin: 0; padding-left: 9px; border-left: 2px solid var(--line-strong);
+  font-size: 10.5px; line-height: 1.6; color: var(--ink-dim);
+}
+.iPrev { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 2px 14px; }
 .iPrev li {
-  font-size: 12px; line-height: 1.9; color: var(--hy-ink);
-  padding-left: 10px; border-left: 2px solid var(--hy-mint-line);
+  display: flex; align-items: center; padding-left: 9px;
+  border-left: 2px solid var(--line-strong);
+  font-family: var(--font-mono); font-size: 10px; line-height: 1.5; color: var(--ink);
 }
-.iPrev li.past { color: var(--hy-faint); border-left-color: var(--hy-line-strong); }
-.iPrev li.none { color: var(--hy-muted); border-left-color: var(--hy-line-strong); }
-.iAct { display: flex; gap: 8px; margin-top: 10px; }
-.iPeople { list-style: none; margin: 0 0 12px; padding: 0; }
+.iPrev li:first-child { border-left-color: var(--action); }
+.iPrev li.past { color: var(--ink-faint); border-left-color: var(--line); }
+.iPrev li.none { color: var(--ink-dim); border-left-color: var(--line-strong); }
+/* 未配规则：一行折叠入口，展开才出名单。 */
+.iRuleless {
+  border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-1);
+}
+.iRuleless summary {
+  display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 14px;
+  cursor: pointer; font-size: 11px; color: var(--ink-dim);
+  font-family: var(--font-mono);
+}
+.iRuleless summary::before {
+  content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--warn);
+}
+.iRuleless-bd { padding: 0 14px 14px; }
+.iLead { margin: 0 0 8px; font-size: 11px; line-height: 1.7; color: var(--ink-dim); }
+.iMuted { margin: 8px 0 0; font-size: 10.5px; color: var(--ink-faint); }
+.iPeople { list-style: none; margin: 0; padding: 0; }
 .iPeople li {
-  display: flex; align-items: center; gap: 9px; padding: 7px 0;
-  border-top: 1px solid var(--hy-line); font-size: 12.5px; color: var(--hy-muted);
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center;
+  gap: 10px; min-height: 44px; border-top: 1px solid var(--wb-ink-a08);
+  font-size: 12px; color: var(--ink-dim);
 }
 .iPeople li:first-child { border-top: 0; }
-.iPeople b { font-size: 13px; color: var(--hy-ink); }
-.iPhone { margin-left: auto; font-family: var(--font-mono); font-size: 11.5px; }
+.iPeople b { min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.iPhone { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-faint); }
+.iSide-act { padding-top: 10px; }
+.iSide-act .btn { border-radius: var(--r-1); min-height: var(--tap); }
+@media (max-width: 900px) {
+  .iTop { grid-template-columns: 1fr; grid-template-areas: "kick" "title" "sub"; }
+  .iChip { margin-left: 0; grid-area: sub; justify-self: start; }
+  .iSubRow { flex-wrap: wrap; }
+  .iTop h1 { font-size: 22px; }
+  .iAct { margin-left: 0; }
+}
+@media (max-width: 560px) {
+  .iItem { padding: 8px 12px; }
+  .iItem-hd { gap: 6px; row-gap: 4px; min-height: var(--tap); }
+  .iWhen { font-size: 10px; }
+  .iPend { margin-left: auto; }
+  .iAct { width: 100%; margin-left: 0; }
+  .iAct .btn { flex: 1; }
+  .iItem-bd { margin-top: 0; }
+}
 </style>

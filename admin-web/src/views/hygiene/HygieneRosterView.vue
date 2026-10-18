@@ -522,51 +522,57 @@ async function copyInvite() {
 
 <template>
   <div class="roster-page">
-    <div class="card roster-head">
-      <h1>花名册</h1>
-      <div class="roster-tools">
-        <div class="roster-search">
-          <input
-            v-model="keyword"
-            class="input"
-            type="text"
-            autocomplete="off"
-            enterkeyhint="search"
-            aria-label="按姓名或手机号搜索"
-            placeholder="搜索姓名或手机号"
-          >
-          <button
-            v-if="keyword"
-            type="button"
-            class="roster-search-clear"
-            aria-label="清空搜索"
-            @click="keyword = ''"
-          >✕</button>
-        </div>
-        <div class="roster-seg" role="group" aria-label="花名册筛选">
-          <button
-            v-for="item in SEGMENTS"
-            :key="item.id"
-            type="button"
-            class="roster-seg-item"
-            :class="{ 'is-on': segment === item.id }"
-            :title="item.title"
-            :aria-pressed="segment === item.id ? 'true' : 'false'"
-            @click="segment = item.id"
-          >
-            <span>{{ segmentText(item) }}</span>
-          </button>
-        </div>
-        <div class="roster-tools-actions">
-          <button type="button" class="btn" @click="openInvite">邀请店员</button>
-          <button
-            type="button"
-            class="btn"
-            :disabled="!exportable"
-            :title="exportable ? '导出当前分组' : '这个分组没有可导出的人'"
-            @click="exportRoster"
-          >导出</button>
-        </div>
+    <header class="card roster-head wbx-head">
+      <div class="wbx-head-main roster-head-main">
+        <span class="roster-kicker">HR · 花名册</span>
+        <h1>花名册</h1>
+      </div>
+      <div class="wbx-pills roster-pills">
+        <button type="button" class="btn" @click="openInvite">邀请店员</button>
+        <button
+          type="button"
+          class="btn"
+          :disabled="!exportable"
+          :title="exportable ? '导出当前分组' : '这个分组没有可导出的人'"
+          @click="exportRoster"
+        >导出</button>
+        <button type="button" class="btn" :disabled="loading" @click="loadRoster()">刷新</button>
+      </div>
+    </header>
+
+    <!-- 搜索 + 分段：一行「面板头」（v3：不再各占一条工具栏；页头右手只留动作） -->
+    <div class="roster-tools-bar">
+      <div class="roster-search">
+        <input
+          v-model="keyword"
+          class="input"
+          type="text"
+          autocomplete="off"
+          enterkeyhint="search"
+          aria-label="按姓名或手机号搜索"
+          placeholder="搜索姓名或手机号"
+        >
+        <button
+          v-if="keyword"
+          type="button"
+          class="roster-search-clear"
+          aria-label="清空搜索"
+          @click="keyword = ''"
+        >✕</button>
+      </div>
+      <div class="roster-seg" role="group" aria-label="花名册筛选">
+        <button
+          v-for="item in SEGMENTS"
+          :key="item.id"
+          type="button"
+          class="roster-seg-item"
+          :class="{ 'is-on': segment === item.id }"
+          :title="item.title"
+          :aria-pressed="segment === item.id ? 'true' : 'false'"
+          @click="segment = item.id"
+        >
+          <span>{{ segmentText(item) }}</span>
+        </button>
       </div>
     </div>
 
@@ -601,6 +607,7 @@ async function copyInvite() {
            「已停用」分段里出现（默认隐藏）。分区的行集合与标题在 `rosterGroups` 里算。 -->
       <section v-for="group in rosterGroups" :key="group.key" class="table-card">
         <div class="table-card-header">
+          <i class="roster-led" :class="group.key === 'pending' ? 'warn' : group.key === 'disabled' ? 'bad' : 'ok'"></i>
           <h3>{{ group.title }} <span>{{ group.rows.length }}</span></h3>
         </div>
         <div class="hy-person-list">
@@ -627,6 +634,7 @@ async function copyInvite() {
               >{{ healthChip(row).text }}</span>
             </span>
             <span class="roster-row-tail">
+              <i class="roster-led" :class="row.disabled ? 'bad' : (row.approved ? 'ok' : 'warn')"></i>
               <span class="roster-status" :data-status="rosterStatusLabel(row)">{{ rosterStatusLabel(row) }}</span>
               <span class="roster-row-go" aria-hidden="true">›</span>
             </span>
@@ -891,16 +899,17 @@ async function copyInvite() {
 </template>
 
 <style scoped>
-/* 内容区的横向与上内边距**归这一页自己**（票 04 收口）。
-   票 05 把它从卫生那八页搬进人事组时，这一层是组壳 `SchedulingLayout.vue` 的
-   `:deep(.roster-page)` 补的；票 04 删掉组壳那条之后值照抄到这里 —— 人事组里另外五页
-   （月历 / 待办 / 班次表 / 人事提醒 / 加班统计）的根自带内边距，给**组**一个非零值会把
-   它们推走 4–14px，所以壳给人事组的 inset 是 0，这一页跟它的五页邻居一样自带。
-   数字与组壳那条逐字相同（含 ≥900px 那一档），页面组件其余样式一个字没动。 */
+/* B 案 v2 版式（2026-10-17）：页头 = kicker / H1 / 读数 pills + 一条工具栏；分区 = 面板；
+   行 = 姓名手机（左）/ 标签（中）/ LED + 状态（右）；抽屉同语言。
+   hero 渐变与毛玻璃用 scoped 覆盖掉（共享表不改）。 */
 .roster-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
   padding: var(--hy-page);
   padding-left: max(var(--hy-page), var(--safe-l));
   padding-right: max(var(--hy-page), var(--safe-r));
+  padding-bottom: calc(40px + var(--safe-b));
 }
 @media (min-width: 900px) {
   .roster-page {
@@ -908,166 +917,152 @@ async function copyInvite() {
   }
 }
 
-/* 三个浮层都是 `.roster-page` 的直接子元素，共享表给直接子元素挂了 `hy-rise`：
-   那个动画的 `transform`（`both` 保留到最终帧）会让内部 `position: fixed` 相对卡片
-   定位而不是视口 —— 抽屉会滑进内容流里、确认框会掉到视口外。这里统一摘掉。 */
-.roster-page > .modal-overlay {
-  animation: none;
-}
-/* 确认框（停用 / 放弃改动）是**叠在抽屉之上**的一层：抽屉自己的遮罩与它同属**队列档**
-   （`--z-queue`，档内不再分先后）—— 抽屉遮罩在模板里排在前面，同档内靠 DOM 次序压住它，
-   手机上抽屉是全屏的，低一档就等于整个被盖住、点不到。票 05 起这两处的相对次序由
-   `designGuard` 的档位清单管（详见那份文件里的表）。 */
-.roster-page > .roster-dialog {
-  z-index: var(--z-queue);
-}
-
-/* ── 页头工具组 ─────────────────────────────────────────────────────── */
-.roster-page .roster-tools {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: .5rem;
-}
-.roster-page .roster-search {
-  position: relative;
-  display: flex;
-  align-items: center;
-  min-width: 0;
-}
-.roster-page .roster-search .input {
-  width: 100%;
-  padding-right: 2.4rem;
-}
-.roster-page .roster-search-clear {
-  position: absolute;
-  right: 0;
-  top: 0;
-  bottom: 0;
+/* 页头：回归统一骨架 —— kicker/H1 与右侧动作同一行（右手与 H1 基线底对齐），
+   同时压掉共享表那层 hero（渐变 / 装饰竖条 / 毛玻璃 / 大投影）。 */
+.roster-page .roster-head.card {
   display: grid;
-  place-items: center;
-  width: 2.4rem;
-  min-height: 40px;
-  border: 0;
-  background: transparent;
-  color: var(--hy-muted);
-  font: inherit;
-  font-size: .9rem;
-  cursor: pointer;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 16px;
+  align-items: end;
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  box-shadow: 0 1px 2px var(--wb-ink-a08);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  padding: 14px 16px;
+  overflow: visible;
 }
-.roster-page .roster-search-clear:hover { color: var(--hy-ink); }
+.roster-page header.roster-head.card::before { display: none; }
+.roster-kicker {
+  display: block;
+  margin: 0 0 7px;
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .26em;
+  color: var(--ink-faint);
+}
+.roster-page header.roster-head.card h1 {
+  margin: 0;
+  font: 600 26px/1.1 var(--font-sans);
+  letter-spacing: .01em;
+  color: var(--ink);
+}
+/* 搜索 + 分段合成一行面板头 */
+.roster-tools-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  padding: 8px 14px;
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08);
+}
+.roster-led { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; background: var(--line-strong); }
+.roster-led.ok { background: var(--ok); }
+.roster-led.warn { background: var(--warn); }
+.roster-led.bad { background: var(--danger); }
 
+/* 工具栏：搜索 / 分段 / 动作，一条平铺 */
+.roster-page .roster-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.roster-page .roster-search { position: relative; display: flex; align-items: center; min-width: 0; }
+.roster-page .roster-search .input { width: 100%; padding-right: 2.4rem; min-height: 44px; border-radius: var(--r-1); }
+.roster-page .roster-search-clear {
+  position: absolute; right: 0; top: 0; bottom: 0;
+  display: grid; place-items: center; width: 2.4rem; min-height: 44px;
+  border: 0; background: transparent; color: var(--ink-dim); font: inherit; font-size: .9rem; cursor: pointer;
+}
+.roster-page .roster-search-clear:hover { color: var(--ink); }
 .roster-page .roster-seg {
-  display: flex;
-  align-items: center;
-  gap: .2rem;
-  padding: .18rem;
-  border: 1px solid var(--hy-line);
-  border-radius: var(--hy-radius-sm);
-  background: var(--hy-surface-2);
+  display: flex; align-items: center; gap: .2rem; padding: .18rem;
+  border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-2);
 }
 .roster-page .roster-seg-item {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: .3rem;
-  min-height: 40px;
-  padding: 0 .7rem;
-  border: 1px solid transparent;
-  border-radius: var(--hy-radius-sm);
-  background: transparent;
-  color: var(--hy-muted);
-  font: inherit;
-  font-size: .8rem;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: color .18s var(--hy-ease), background .18s var(--hy-ease), border-color .18s var(--hy-ease);
+  display: inline-flex; align-items: center; justify-content: center; gap: .3rem;
+  min-height: 40px; padding: 0 .7rem;
+  border: 1px solid transparent; border-radius: var(--r-1); background: transparent;
+  color: var(--ink-dim); font: inherit; font-size: .8rem; white-space: nowrap; cursor: pointer;
+  transition: color .18s var(--ease), background .18s var(--ease), border-color .18s var(--ease);
 }
-.roster-page .roster-seg-item:hover { color: var(--hy-ink); }
-.roster-page .roster-seg-item.is-on {
-  background: var(--hy-mint-soft);
-  border-color: var(--hy-mint-line);
-  color: var(--hy-mint);
-}
-
-.roster-page .roster-tools-actions {
-  display: flex;
-  align-items: center;
-  gap: .5rem;
-}
+.roster-page .roster-seg-item:hover { color: var(--ink); }
+.roster-page .roster-seg-item.is-on { background: var(--surface-1); border-color: var(--action); color: var(--action); }
+.roster-page .roster-tools-actions { display: flex; align-items: center; gap: .5rem; }
 .roster-page .roster-tools-actions .btn { min-height: 40px; }
 
-/* ── 列表行 ─────────────────────────────────────────────────────────── */
-/* 姓名 + 手机号那一格：竖排两行（共享表里那两套样式挂在 `.hy-person-top` 下，
-   改版后行是 grid、不再是 `.hy-person-top` 的两段结构，所以在这里补一份）。 */
-.roster-page .roster-person-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
+/* 分区 = 面板（唯一卡片语言） */
+.roster-page section.table-card,
+.roster-page div.table-card {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  box-shadow: var(--hy-shadow-sm);
+  overflow: hidden;
 }
-.roster-page .roster-person-copy strong {
-  font-family: var(--font-song);
-  font-size: 1.02rem;
-  font-weight: 700;
+.roster-page section.table-card > .table-card-header {
+  display: flex; align-items: center; justify-content: flex-start; gap: 9px;
+  padding: 11px 14px;
+  background: transparent;
+  border-bottom: 1px solid var(--line);
 }
-.roster-page .roster-person-copy span { font-family: var(--font-mono); }
+.roster-page section.table-card > .table-card-header h3 {
+  margin: 0;
+  font: 600 12.5px/1 var(--font-sans);
+  letter-spacing: .06em;
+  color: var(--ink);
+}
+.roster-page section.table-card > .table-card-header h3 span {
+  display: inline-grid; place-items: center;
+  min-width: 1.4rem; height: 1.2rem; padding: 0 .35rem;
+  border: 1px solid var(--line); border-radius: var(--r-full);
+  background: var(--surface-2); color: var(--ink-dim);
+  font: 500 9.5px/1 var(--font-mono);
+}
 
-.roster-page .roster-row {
+/* 列表行：≥44px、发丝分隔、hover 只换底色 */
+.roster-page .hy-person-list { display: flex; flex-direction: column; }
+.roster-page button.roster-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: .8rem;
   width: 100%;
-  min-height: 56px;
+  min-height: 64px;
+  padding: 6px 14px;
   font: inherit;
-  color: var(--hy-ink);
+  color: var(--ink);
   text-align: left;
   cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--wb-ink-a08);
 }
-.roster-page .roster-row-meta {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: .3rem;
-  min-width: 0;
+.roster-page button.roster-row:last-child { border-bottom: 0; }
+.roster-page button.roster-row:hover { background: var(--surface-2); }
+.roster-page .roster-person-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.roster-page .roster-person-copy strong { font-family: var(--font-sans); font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.roster-page .roster-person-copy span { font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); }
+.roster-page .roster-row-meta { display: flex; flex-wrap: nowrap; justify-content: flex-end; gap: .3rem; min-width: 0; overflow: hidden; }
+.roster-page .roster-row-tail { display: inline-flex; align-items: center; gap: .5rem; }
+.roster-page .roster-row-go { color: var(--ink-faint); font-size: 1.05rem; line-height: 1; }
+.roster-page .roster-row .roster-chip {
+  display: inline-flex; align-items: center;
+  min-height: 22px; padding: .15rem .5rem;
+  border: 1px solid var(--line); border-radius: var(--r-full);
+  background: var(--surface-2); color: var(--ink-dim);
+  font-size: .7rem; line-height: 1.5; overflow-wrap: anywhere;
 }
-.roster-page .roster-row-tail {
-  display: inline-flex;
-  align-items: center;
-  gap: .5rem;
-}
-.roster-page .roster-row-go {
-  color: var(--hy-faint);
-  font-size: 1.05rem;
-  line-height: 1;
-}
-.roster-page .roster-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 22px;
-  padding: .15rem .5rem;
-  border: 1px solid var(--hy-line);
-  border-radius: 999px;
-  background: var(--hy-surface-3);
-  color: var(--hy-muted);
-  font-size: .7rem;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-.roster-page .roster-chip.is-warn {
-  background: var(--hy-amber-soft);
-  border-color: var(--hy-amber-line);
-  color: var(--hy-amber);
-}
-.roster-page .roster-chip.is-danger {
-  background: var(--hy-seal-soft);
-  border-color: var(--hy-seal-line);
-  color: var(--hy-seal-bright);
-}
+.roster-page .roster-row .roster-chip.is-warn { background: var(--warn-soft); border-color: var(--wb-warn-a45); color: var(--warn); }
+.roster-page .roster-row .roster-chip.is-danger { background: var(--danger-soft); border-color: var(--wb-danger-a45); color: var(--danger-bright); }
+.roster-page .roster-status { font-size: 9px; letter-spacing: .08em; color: var(--ink-dim); white-space: nowrap; }
 
-/* ── 抽屉 ───────────────────────────────────────────────────────────── */
-/* 遮罩要盖掉 theme.css 的居中：拉伸 + 靠右。父级限定抬特异度，不用 `!important`。 */
+/* 空态 / 提示 */
+.roster-page .roster-empty {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 44px; padding: 10px 14px; text-align: center; font-size: 10.5px; color: var(--ink-faint);
+}
+.roster-page .roster-empty .btn { margin-left: .6rem; }
+.roster-page .roster-error { margin: 0; font-size: 11px; color: var(--danger-bright); }
+.roster-page .roster-saved { margin: 0; font-size: 11px; color: var(--ok); }
+
+/* 抽屉 / 弹层：抽屉是叠在队列档上的浮层（档位契约不变） */
+.roster-page > .modal-overlay { animation: none; }
+.roster-page > .roster-dialog { z-index: var(--z-queue); }
 .roster-page .roster-drawer-overlay {
   align-items: stretch;
   justify-content: flex-end;
@@ -1081,203 +1076,103 @@ async function copyInvite() {
   width: min(480px, 100vw);
   height: 100dvh;
   max-height: 100dvh;
-  background: var(--hy-surface);
-  border-left: 1px solid var(--hy-line-strong);
-  border-radius: var(--hy-radius-lg) 0 0 var(--hy-radius-lg);
+  background: var(--surface-1);
+  border-left: 1px solid var(--line);
+  border-radius: 0;
   box-shadow: var(--hy-shadow-md);
   touch-action: auto;
   overscroll-behavior: contain;
-  animation: roster-slide .22s var(--hy-ease) both;
+  animation: roster-slide .22s var(--ease) both;
 }
 .roster-page .roster-drawer-head {
-  position: sticky;
-  top: 0;
-  z-index: var(--z-shell);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: .6rem;
+  position: sticky; top: 0; z-index: var(--z-shell);
+  display: flex; align-items: center; justify-content: space-between; gap: .6rem;
   padding: .85rem 1rem;
-  border-bottom: 1px solid var(--hy-line);
-  background: var(--hy-surface);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-1);
 }
 .roster-page .roster-drawer-title {
-  margin: 0;
-  min-width: 0;
-  font-family: var(--font-song);
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--hy-ink);
+  margin: 0; min-width: 0;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--ink);
   overflow-wrap: anywhere;
 }
 .roster-page .roster-drawer-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
   overscroll-behavior: contain;
   padding: 1rem;
 }
 .roster-page .roster-drawer-foot {
-  position: sticky;
-  bottom: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: .5rem;
+  position: sticky; bottom: 0;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .5rem;
   padding: .7rem 1rem calc(.7rem + env(safe-area-inset-bottom));
-  border-top: 1px solid var(--hy-line);
-  background: var(--hy-surface);
+  border-top: 1px solid var(--line);
+  background: var(--surface-1);
 }
 .roster-page .roster-drawer-foot .roster-field-note { margin-right: auto; }
-.roster-page .roster-foot-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: .5rem;
-}
+.roster-page .roster-foot-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 .roster-page .roster-readonly {
-  display: inline-flex;
-  align-items: center;
-  min-height: 38px;
-  padding: 0 .7rem;
-  border: 1px dashed var(--hy-line);
-  border-radius: var(--hy-radius-sm);
-  background: var(--hy-surface-2);
-  color: var(--hy-ink);
-  font-weight: 400;
+  display: inline-flex; align-items: center;
+  min-height: 38px; padding: 0 .7rem;
+  border: 1px dashed var(--line-strong); border-radius: var(--r-1);
+  background: var(--surface-2); color: var(--ink); font-weight: 400;
 }
 .roster-page .roster-readonly.is-mono { font-family: var(--font-mono); }
-.roster-page .roster-field-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: .35rem;
-}
-.roster-page .roster-field-note {
-  color: var(--hy-amber);
-  font-size: .72rem;
-  font-weight: 600;
-}
-.roster-page .roster-expiry {
-  font-size: .72rem;
-  font-weight: 400;
-  color: var(--hy-faint);
-}
-.roster-page .roster-input-suffix {
-  display: flex;
-  align-items: center;
-  gap: .4rem;
-}
+.roster-page .roster-field-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem; }
+.roster-page .roster-field-note { color: var(--warn); font-size: .72rem; font-weight: 600; }
+.roster-page .roster-expiry { font-size: .72rem; font-weight: 400; color: var(--ink-faint); }
+.roster-page .roster-input-suffix { display: flex; align-items: center; gap: .4rem; }
 .roster-page .roster-input-suffix .input { flex: 1 1 auto; min-width: 0; }
-.roster-page .roster-suffix {
-  flex: 0 0 auto;
-  font-size: .76rem;
-  font-weight: 400;
-  color: var(--hy-muted);
-}
-
-/* 管理权限：六项可勾（员工端真有执行点的那些）。 */
-.roster-page .roster-caps {
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  display: flex;
-  flex-direction: column;
-  gap: .35rem;
-}
-.roster-page .roster-caps-title {
-  padding: 0;
-  font-size: .76rem;
-  font-weight: 600;
-  color: var(--hy-muted);
-}
-.roster-page .roster-caps-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
-  gap: .15rem .7rem;
-  max-width: 44rem;
-}
+.roster-page .roster-suffix { flex: 0 0 auto; font-size: .76rem; font-weight: 400; color: var(--ink-dim); }
+.roster-page .roster-caps { min-width: 0; margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: .35rem; }
+.roster-page .roster-caps-title { padding: 0; font-size: .76rem; font-weight: 600; color: var(--ink-faint); }
+.roster-page .roster-caps-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr)); gap: .15rem .7rem; max-width: 44rem; }
 .roster-page .hy-person-fields .roster-cap {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: .4rem;
-  min-height: 34px;
-  font-weight: 500;
-  color: var(--hy-ink);
-  cursor: pointer;
+  display: flex; flex-direction: row; align-items: center; gap: .4rem;
+  min-height: 34px; font-weight: 500; color: var(--ink); cursor: pointer;
 }
-.roster-page .roster-cap input {
-  flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  accent-color: var(--hy-mint);
-}
+.roster-page .roster-cap input { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--action); }
 .roster-page .roster-cap span { min-width: 0; }
 .roster-page .roster-cap input:disabled { cursor: not-allowed; }
-.roster-page .roster-cap:has(input:disabled) { cursor: not-allowed; color: var(--hy-faint); }
-
-/* 保存成功的一次性反馈（`role="status"`）：与 `roster-error` 同一个位置与尺寸，颜色相反。 */
-.roster-page .roster-saved {
-  margin: 0 0 .6rem;
-  font-size: .8rem;
-  color: var(--hy-jade);
-}
-.roster-page .roster-empty .btn { margin-left: .6rem; }
+.roster-page .roster-cap:has(input:disabled) { cursor: not-allowed; color: var(--ink-faint); }
 
 @keyframes roster-slide {
   from { transform: translateX(16px); opacity: .6; }
   to { transform: translateX(0); opacity: 1; }
 }
 
-/* ── 桌面（>720px） ─────────────────────────────────────────────────── */
+/* 桌面（>720px） */
 @media (min-width: 721px) {
   .roster-page .roster-search { width: 15rem; }
 }
 
-/* ── 手机（≤720px）：工具栏竖排、行两行、抽屉全屏、触控 ≥44 ─────────── */
+/* 手机（≤720px）：工具栏竖排、行两行、抽屉全屏、触控 ≥44 */
 @media (max-width: 720px) {
-  .roster-page .roster-tools {
-    flex-direction: column;
-    align-items: stretch;
-    width: 100%;
-  }
+  .roster-page .roster-tools { flex-direction: column; align-items: stretch; width: 100%; }
   .roster-page .roster-search { width: 100%; }
   .roster-page .roster-search-clear { width: 44px; min-height: 44px; }
-  .roster-page .roster-seg {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    padding: .2rem;
-  }
+  .roster-page .roster-seg { display: grid; grid-template-columns: repeat(3, 1fr); padding: .2rem; }
   .roster-page .roster-seg-item { min-height: 44px; padding: 0 .4rem; }
-  .roster-page .roster-tools-actions {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-  }
+  .roster-page .roster-tools-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .roster-page .roster-tools-actions .btn { min-height: 44px; }
+  .roster-page .roster-head.card h1 { font-size: 22px; }
+  .roster-page .roster-pills { gap: 6px; }
 
-  .roster-page .roster-row {
+  .roster-page button.roster-row {
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: start;
     gap: .45rem .6rem;
     min-height: 64px;
     padding: .85rem .9rem;
   }
-  .roster-page .roster-row .roster-person-copy { grid-column: 1; }
-  .roster-page .roster-row .roster-row-meta {
-    grid-column: 1 / -1;
-    justify-content: flex-start;
-  }
-  .roster-page .roster-row .roster-row-tail { grid-column: 2; grid-row: 1; }
+  .roster-page button.roster-row .roster-person-copy { grid-column: 1; }
+  .roster-page button.roster-row .roster-row-meta { grid-column: 1 / -1; justify-content: flex-start; flex-wrap: wrap; overflow: visible; }
+  .roster-page button.roster-row .roster-row-tail { grid-column: 2; grid-row: 1; }
 
-  /* 抽屉全屏：头部吸顶、动作条吸底。 */
-  .roster-page .roster-drawer {
-    width: 100vw;
-    border-left: 0;
-    border-radius: 0;
-  }
+  .roster-page .roster-drawer { width: 100vw; border-left: 0; }
   .roster-page .roster-drawer-body,
   .roster-page .roster-drawer-foot {
     padding-left: max(1rem, env(safe-area-inset-left));
@@ -1285,19 +1180,11 @@ async function copyInvite() {
   }
   .roster-page .roster-readonly { min-height: 44px; }
   .roster-page .hy-person-fields .roster-cap { min-height: 44px; }
-  /* 危险动作单独一行、跨两列：手机上最不容易误触的排法。 */
-  .roster-page .roster-foot-actions {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: .5rem;
-    width: 100%;
-  }
+  .roster-page .roster-foot-actions { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; width: 100%; }
   .roster-page .roster-foot-actions .btn { width: 100%; min-height: 44px; }
-  .roster-page .roster-foot-actions .roster-danger {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
+  .roster-page .roster-foot-actions .roster-danger { grid-column: 1 / -1; grid-row: 2; }
   .roster-page .roster-foot-actions .roster-save { grid-column: 1; grid-row: 1; }
   .roster-page .roster-foot-actions .roster-primary { grid-column: 2; grid-row: 1; }
 }
+.roster-page :deep(.btn) { min-height: 44px !important; border-radius: var(--r-1); }
 </style>

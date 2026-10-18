@@ -22,10 +22,10 @@
   color: var(--hy-ink);
   background-color: var(--hy-bg);
   background-image:
-    radial-gradient(1100px 540px at 80% -14%, rgba(63, 224, 176, .10), transparent 62%),
-    radial-gradient(820px 520px at -14% 112%, rgba(217, 72, 47, .08), transparent 60%),
-    repeating-linear-gradient(0deg, rgba(133, 205, 198, .03) 0 1px, transparent 1px 46px),
-    repeating-linear-gradient(90deg, rgba(133, 205, 198, .03) 0 1px, transparent 1px 46px);
+    radial-gradient(1100px 540px at 80% -14%, var(--wb-tint-08), transparent 62%),
+    radial-gradient(820px 520px at -14% 112%, var(--wb-danger-a10), transparent 60%),
+    repeating-linear-gradient(0deg, var(--wb-ink-a04) 0 1px, transparent 1px 46px),
+    repeating-linear-gradient(90deg, var(--wb-ink-a04) 0 1px, transparent 1px 46px);
   background-attachment: fixed;
   font-family: var(--font-sans);
   font-weight: 500;
@@ -71,7 +71,7 @@
 .hygiene-staff h2,
 .hygiene-admin h3,
 .hygiene-staff h3 {
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   color: var(--hy-ink);
   letter-spacing: .01em;
 }
@@ -135,19 +135,19 @@
   height: 2.35rem;
   display: grid;
   place-items: center;
-  border-radius: 8px;
+  border-radius: var(--hy-radius-sm);
   background:
-    radial-gradient(120% 120% at 22% 12%, rgba(255, 255, 255, .16), transparent 55%),
+    radial-gradient(120% 120% at 22% 12%, var(--wb-highlight), transparent 55%),
     linear-gradient(152deg, #e8543b 0%, #c33a24 78%);
   color: var(--hy-paper);
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: 1.18rem;
   font-weight: 900;
   line-height: 1;
   box-shadow:
-    inset 0 0 0 1.5px rgba(244, 233, 219, .42),
-    inset 0 0 0 4px rgba(195, 58, 36, .9),
-    0 7px 20px -6px rgba(217, 72, 47, .65);
+    inset 0 0 0 1.5px var(--wb-paper-a),
+    inset 0 0 0 4px var(--hy-seal),
+    0 7px 20px -6px var(--wb-danger-a45);
   animation: hy-stamp .55s var(--hy-ease) both;
 }
 .hygiene-admin .hy-brand-text,
@@ -158,7 +158,7 @@
 }
 .hygiene-admin .hy-brand-title,
 .hygiene-staff .hy-brand-title {
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: 1.12rem;
   font-weight: 900;
   letter-spacing: .08em;
@@ -233,9 +233,7 @@
   position: sticky;
   top: 0;
   z-index: var(--z-shell);
-  background: rgba(8, 19, 21, .82);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
+  background: var(--wb-panel-a);
   border-bottom: 1px solid var(--hy-line);
 }
 .hygiene-admin .hy-header-inner {
@@ -251,7 +249,7 @@
   align-items: center;
   gap: .6rem;
   margin: 0;
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: .95rem;
   letter-spacing: .14em;
   color: var(--hy-muted);
@@ -280,7 +278,7 @@
   padding: 0 .95rem;
   border-radius: 999px;
   color: var(--hy-muted);
-  background: rgba(133, 205, 198, .07);
+  background: var(--wb-ink-a08);
   border: 1px solid var(--hy-line);
   text-decoration: none;
   font-size: .82rem;
@@ -309,9 +307,7 @@
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 0;
-  background: rgba(8, 19, 21, .92);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
+  background: var(--wb-panel-a);
   border-top: 1px solid var(--hy-line);
   padding: .25rem .15rem calc(.25rem + env(safe-area-inset-bottom));
   z-index: var(--z-tabbar);
@@ -339,7 +335,7 @@
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  border-radius: 10px;
+  border-radius: var(--hy-radius-sm);
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
   transition: color .2s var(--hy-ease);
@@ -367,7 +363,7 @@
 }
 .hygiene-admin .hy-tab.router-link-active .svg-icon {
   transform: translateY(-1px);
-  filter: drop-shadow(0 0 7px rgba(63, 224, 176, .55));
+  filter: drop-shadow(0 0 7px var(--wb-tint-45));
 }
 
 /* 桌面侧栏 */
@@ -384,12 +380,12 @@
     gap: 0;
     grid-template-columns: none;
     background:
-      linear-gradient(180deg, rgba(17, 37, 41, .72), rgba(6, 15, 17, .92)),
-      repeating-linear-gradient(0deg, rgba(133, 205, 198, .035) 0 1px, transparent 1px 40px);
+      linear-gradient(180deg, var(--wb-panel-a), var(--wb-scrim-strong)),
+      repeating-linear-gradient(0deg, var(--wb-ink-a04) 0 1px, transparent 1px 40px);
     border-top: 0;
     border-right: 1px solid var(--hy-line);
     padding: 1.15rem .8rem calc(.9rem + env(safe-area-inset-bottom));
-    box-shadow: inset -1px 0 0 rgba(0, 0, 0, .35);
+    box-shadow: inset -1px 0 0 var(--wb-scrim);
   }
   .hygiene-admin .hy-brand-rail {
     display: flex;
@@ -444,7 +440,7 @@
     letter-spacing: .08em;
   }
   .hygiene-admin .hy-tab.router-link-active {
-    background: linear-gradient(90deg, var(--hy-mint-soft), rgba(63, 224, 176, .02));
+    background: linear-gradient(90deg, var(--hy-mint-soft), var(--wb-tint-04));
     color: var(--hy-mint-bright);
     box-shadow: inset 3px 0 0 var(--hy-mint);
   }
@@ -454,7 +450,7 @@
   }
   .hygiene-admin .hy-tab:not(.router-link-active):hover {
     color: var(--hy-ink);
-    background: rgba(133, 205, 198, .06);
+    background: var(--wb-ink-a08);
   }
   .hygiene-admin .hy-rail-foot .hy-back {
     width: 100%;
@@ -503,9 +499,9 @@
   padding: 1.15rem 1.35rem;
   overflow: hidden;
   background:
-    linear-gradient(135deg, rgba(63, 224, 176, .07), transparent 46%),
-    linear-gradient(315deg, rgba(217, 72, 47, .06), transparent 42%),
-    rgba(17, 37, 41, .72);
+    linear-gradient(135deg, var(--wb-tint-08), transparent 46%),
+    linear-gradient(315deg, var(--wb-danger-a10), transparent 42%),
+    var(--wb-panel-a);
   border: 1px solid var(--hy-line);
   box-shadow: var(--hy-shadow-md);
 }
@@ -516,7 +512,7 @@
   top: 0;
   bottom: 0;
   width: 3px;
-  background: linear-gradient(180deg, var(--hy-mint), rgba(63, 224, 176, 0));
+  background: linear-gradient(180deg, var(--hy-mint), var(--wb-tint-04));
 }
 /* 工作区页头部：导出标准图 + 刷新并排，窄屏时换行。 */
 .hygiene-admin .roster-head-actions {
@@ -535,8 +531,8 @@
 }
 .hygiene-admin .export-size select {
   border: 1px solid var(--hy-line);
-  border-radius: 8px;
-  background: rgba(8, 22, 20, .6);
+  border-radius: var(--hy-radius-sm);
+  background: var(--surface-2);
   color: var(--hy-ink);
   padding: .35rem .5rem;
   font: inherit;
@@ -546,7 +542,7 @@
   height: 4px;
   margin: 0 0 .9rem;
   border-radius: 999px;
-  background: rgba(63, 224, 176, .16);
+  background: var(--wb-tint-14);
   overflow: hidden;
 }
 .hygiene-admin .export-progress-bar {
@@ -615,24 +611,24 @@
 .hygiene-admin .card,
 .hygiene-admin .table-card,
 .hygiene-admin .open-card {
-  background: rgba(17, 37, 41, .74);
+  /* B 案（2026-10-17）：卡片是实色面板 + 1px 线 + 极轻接触阴影，不用大范围投影与磨砂
+     （深色档的磨砂在浅色档会变成一层灰雾，两套主题只保留一套更干净的语言）。 */
+  background: var(--surface-1);
   border: 1px solid var(--hy-line);
-  border-radius: var(--hy-radius-lg);
-  box-shadow: var(--hy-shadow-md);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
+  border-radius: var(--hy-radius-md);
+  box-shadow: var(--hy-shadow-sm);
 }
 .hygiene-admin .table-card-header {
   padding: .8rem 1.1rem;
   border-bottom: 1px solid var(--hy-line);
-  background: rgba(12, 29, 32, .7);
+  background: var(--wb-panel-a);
 }
 .hygiene-admin .table-card-header h3 {
   margin: 0;
   display: inline-flex;
   align-items: baseline;
   gap: .5rem;
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: .95rem;
   font-weight: 700;
   letter-spacing: .06em;
@@ -646,7 +642,7 @@
   padding: 0 .4rem;
   border-radius: 999px;
   background: var(--hy-mint-soft);
-  border: 1px solid rgba(63, 224, 176, .24);
+  border: 1px solid var(--wb-tint-22);
   color: var(--hy-mint);
   font-family: var(--font-mono);
   font-size: .72rem;
@@ -662,13 +658,14 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-height: 40px;
-  padding: 7px 16px;
-  border-radius: 10px;
+  /* 触控下限 44（v3）：旧值 40 在审查里被逐页点名。 */
+  min-height: 44px;
+  padding: 8px 16px;
+  border-radius: var(--hy-radius-sm);
   font-family: inherit;
   font-size: .85rem;
   font-weight: 600;
-  background: rgba(133, 205, 198, .06);
+  background: var(--wb-ink-a08);
   border: 1px solid var(--hy-line-strong);
   color: var(--hy-ink);
   cursor: pointer;
@@ -731,12 +728,12 @@
   min-height: 34px;
   padding: 5px 12px;
   font-size: .78rem;
-  border-radius: 8px;
+  border-radius: var(--hy-radius-sm);
 }
 .hygiene-staff .btn {
   min-height: 46px;
   font-size: .98rem;
-  border-radius: 12px;
+  border-radius: var(--hy-radius-md);
 }
 .hygiene-admin .btn-block,
 .hygiene-staff .btn-block {
@@ -772,7 +769,7 @@
 .hygiene-admin .select:hover,
 .hygiene-staff .input:hover,
 .hygiene-staff .luyun-date-picker .dp--input:hover {
-  border-color: rgba(133, 205, 198, .42);
+  border-color: var(--wb-ink-a45);
 }
 .hygiene-admin .input:focus,
 .hygiene-admin .select:focus,
@@ -783,7 +780,7 @@
 .hygiene-staff .luyun-date-picker .dp--input:focus {
   outline: none;
   border-color: var(--hy-mint);
-  box-shadow: 0 0 0 3px rgba(63, 224, 176, .16);
+  box-shadow: 0 0 0 3px var(--wb-tint-14);
 }
 /* 员工端的日期组件（2026-10-13）：注册页的两格日期从原生 `<input type=date>` 换成
    `LuyunDatePicker` —— 原生那一格的显示格式**跟浏览器界面语言走**（中文机是
@@ -853,12 +850,12 @@
 }
 .hygiene-admin .luyun-time-picker__wheel {
   gap: 4px;
-  border-radius: 8px;
+  border-radius: var(--hy-radius-sm);
 }
 .hygiene-admin .luyun-time-picker__wheel::before,
 .hygiene-admin .luyun-time-picker__wheel::after {
-  background: rgba(63, 224, 176, .08);
-  border-color: rgba(63, 224, 176, .25);
+  background: var(--wb-tint-08);
+  border-color: var(--wb-tint-22);
 }
 .hygiene-admin .luyun-time-picker__item {
   padding: 7px 0;
@@ -866,10 +863,10 @@
   font-family: var(--font-mono);
   font-size: .85rem;
   color: var(--hy-muted);
-  border-radius: 7px;
+  border-radius: var(--hy-radius-sm);
   cursor: pointer;
 }
-.hygiene-admin .luyun-time-picker__item:hover { background: rgba(133, 205, 198, .08); color: var(--hy-ink); }
+.hygiene-admin .luyun-time-picker__item:hover { background: var(--wb-ink-a08); color: var(--hy-ink); }
 .hygiene-admin .luyun-time-picker__item.is-active {
   background: var(--hy-mint-soft);
   color: var(--hy-mint-bright);
@@ -880,20 +877,20 @@
 .hygiene-admin .data-table-wrap {
   border-color: var(--hy-line);
   border-radius: var(--hy-radius-md);
-  background: rgba(17, 37, 41, .6);
+  background: var(--wb-panel-a);
 }
 .hygiene-admin table.data-table th,
 .hygiene-admin table.data-table td {
   border-bottom-color: var(--hy-line);
 }
 .hygiene-admin table.data-table th {
-  background: rgba(63, 224, 176, .07);
+  background: var(--wb-tint-08);
   color: var(--hy-mint);
   font-weight: 700;
   letter-spacing: .06em;
 }
 .hygiene-admin table.data-table tbody tr:hover {
-  background: rgba(133, 205, 198, .05);
+  background: var(--wb-ink-a04);
 }
 
 /* 提示 / 空态 */
@@ -955,7 +952,7 @@
   flex-direction: column;
   gap: 4px;
   text-align: left;
-  border-radius: 10px;
+  border-radius: var(--hy-radius-sm);
   padding: 11px 13px;
   cursor: pointer;
   font-family: inherit;
@@ -980,7 +977,7 @@
 .hygiene-admin .zone-btn.active,
 .hygiene-admin .queue-btn.active {
   border-color: var(--hy-mint);
-  background: linear-gradient(90deg, var(--hy-mint-soft), rgba(63, 224, 176, .02));
+  background: linear-gradient(90deg, var(--hy-mint-soft), var(--wb-tint-04));
   box-shadow: inset 3px 0 0 var(--hy-mint);
 }
 .hygiene-admin .zone-btn.active strong,
@@ -989,7 +986,7 @@
 }
 .hygiene-admin .queue-btn.overdue {
   border-color: var(--hy-seal-line);
-  background: linear-gradient(90deg, var(--hy-seal-soft), rgba(217, 72, 47, .02));
+  background: linear-gradient(90deg, var(--hy-seal-soft), var(--wb-danger-a10));
   box-shadow: inset 3px 0 0 var(--hy-seal);
 }
 .hygiene-admin .cal-row {
@@ -997,7 +994,7 @@
   justify-content: space-between;
   gap: 8px;
   padding: 9px 11px;
-  border-radius: 9px;
+  border-radius: var(--hy-radius-sm);
   font-size: .8rem;
 }
 .hygiene-admin .cal-row .missed { color: var(--hy-seal-bright); font-weight: 700; }
@@ -1008,7 +1005,7 @@
   flex-direction: column;
   gap: 4px;
   text-align: left;
-  border-radius: 10px;
+  border-radius: var(--hy-radius-sm);
   padding: 11px 13px;
   font-family: inherit;
 }
@@ -1019,7 +1016,7 @@
 }
 
 .hygiene-admin .item-row {
-  border-radius: 10px;
+  border-radius: var(--hy-radius-sm);
 }
 
 /* 教材横幅 */
@@ -1029,7 +1026,7 @@
   align-items: center;
   gap: 10px;
   padding: 12px 15px;
-  background: linear-gradient(90deg, var(--hy-mint-soft), rgba(63, 224, 176, .02));
+  background: linear-gradient(90deg, var(--hy-mint-soft), var(--wb-tint-04));
   border-color: var(--hy-mint-line);
 }
 .hygiene-admin .teach-banner p {
@@ -1102,7 +1099,7 @@
   gap: .6rem;
 }
 .hygiene-admin .hy-person-top strong {
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: 1.02rem;
   font-weight: 700;
 }
@@ -1131,7 +1128,7 @@
   color: var(--hy-mint);
 }
 .hygiene-admin .roster-status[data-status='已停用'] {
-  background: rgba(133, 170, 167, .08);
+  background: var(--wb-ink-a08);
   border: 1px solid var(--hy-line);
   color: var(--hy-faint);
 }
@@ -1197,9 +1194,7 @@
 
 /* 确认弹窗 */
 .hygiene-admin .modal-overlay {
-  background: rgba(3, 9, 9, .66);
-  -webkit-backdrop-filter: blur(4px);
-  backdrop-filter: blur(4px);
+  background: var(--wb-scrim);
 }
 .hygiene-admin .modal-box {
   background: var(--hy-surface);
@@ -1209,7 +1204,7 @@
   border-radius: var(--hy-radius-lg);
 }
 .hygiene-admin .modal-header h3 {
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-weight: 700;
 }
 
@@ -1242,13 +1237,11 @@
   margin: auto 0;
   padding: 1.7rem 1.4rem 1.5rem;
   background:
-    linear-gradient(160deg, rgba(63, 224, 176, .06), transparent 40%),
-    rgba(17, 37, 41, .78);
+    linear-gradient(160deg, var(--wb-tint-08), transparent 40%),
+    var(--wb-panel-a);
   border: 1px solid var(--hy-line-strong);
   border-radius: var(--hy-radius-lg);
-  box-shadow: var(--hy-shadow-md), 0 0 0 1px rgba(0, 0, 0, .3);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
+  box-shadow: var(--hy-shadow-md), 0 0 0 1px var(--wb-scrim);
   animation: hy-rise .55s var(--hy-ease) both;
 }
 /* 通行证四角 */
@@ -1282,7 +1275,7 @@
   width: 2.9rem;
   height: 2.9rem;
   font-size: 1.45rem;
-  border-radius: 10px;
+  border-radius: var(--hy-radius-sm);
 }
 .hygiene-staff .hy-staff-brand .hy-brand-title {
   font-size: 1.3rem;
@@ -1427,9 +1420,7 @@
   position: sticky;
   top: 0;
   z-index: var(--z-shell);
-  background: rgba(8, 19, 21, .86);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
+  background: var(--wb-panel-a);
   border-bottom: 1px solid var(--hy-line);
 }
 .hygiene-work .hy-work-header-inner {
@@ -1464,7 +1455,7 @@
   padding: 0 .8rem;
   border-radius: 999px;
   background: var(--hy-mint-soft);
-  border: 1px solid rgba(63, 224, 176, .24);
+  border: 1px solid var(--wb-tint-22);
   color: var(--hy-mint-bright);
   font-size: .78rem;
   font-weight: 600;
@@ -1559,7 +1550,7 @@
   align-items: center;
   padding: 0 .7rem;
   border-radius: 999px;
-  background: rgba(133, 205, 198, .07);
+  background: var(--wb-ink-a08);
   border: 1px solid var(--hy-line);
   color: var(--hy-muted);
   font-size: .76rem;
@@ -1582,39 +1573,23 @@
   margin: 0 0 1.1rem;
   padding: 1.15rem 1.1rem 1.05rem;
   border: 1px solid var(--hy-mint-line);
-  border-radius: var(--hy-radius-lg);
-  background:
-    radial-gradient(420px 200px at 88% -30%, rgba(63, 224, 176, .14), transparent 60%),
-    linear-gradient(158deg, rgba(63, 224, 176, .08), rgba(17, 37, 41, .85) 52%);
-  box-shadow: var(--hy-shadow-md);
+  border-radius: var(--hy-radius-md);
+  /* B 案（2026-10-17）：主卡是钢面面板 —— 实色底、1px 线、左侧 3px 语义条表示状态，
+     不再用径向光晕 + 8.5rem 水印字（那层装饰在浅色档会糊成一片）。 */
+  background: var(--surface-1);
+  box-shadow: var(--hy-shadow-sm);
+  border-left-width: 3px;
   overflow: hidden;
-  animation: hy-rise .5s var(--hy-ease) both;
 }
-.hygiene-work .hy-next::after {
-  content: "验";
-  position: absolute;
-  right: -.35rem;
-  bottom: -2.1rem;
-  font-family: var(--font-song);
-  font-size: 8.5rem;
-  font-weight: 900;
-  line-height: 1;
-  color: var(--hy-mint);
-  opacity: .06;
-  pointer-events: none;
-}
+.hygiene-work .hy-next::after { display: none; }
 .hygiene-work .hy-next.is-overdue {
   border-color: var(--hy-seal-line);
-  background:
-    radial-gradient(420px 200px at 88% -30%, rgba(217, 72, 47, .16), transparent 60%),
-    linear-gradient(158deg, rgba(217, 72, 47, .09), rgba(28, 17, 16, .85) 52%);
+  border-left-color: var(--danger);
 }
 .hygiene-work .hy-next.is-overdue::after { color: var(--hy-seal); opacity: .08; }
 .hygiene-work .hy-next.is-soon {
   border-color: var(--hy-amber-line);
-  background:
-    radial-gradient(420px 200px at 88% -30%, rgba(227, 164, 74, .15), transparent 60%),
-    linear-gradient(158deg, rgba(227, 164, 74, .08), rgba(30, 24, 15, .85) 52%);
+  border-left-color: var(--warn);
 }
 .hygiene-work .hy-next.is-soon::after { color: var(--hy-amber); opacity: .08; }
 .hygiene-work .hy-next-head {
@@ -1663,10 +1638,10 @@
   min-height: 27px;
   padding: 0 .62rem;
   border-radius: 999px;
-  background: rgba(63, 224, 176, .12);
-  border: 1px solid rgba(63, 224, 176, .26);
+  background: var(--wb-tint-14);
+  border: 1px solid var(--wb-tint-22);
   color: var(--hy-mint);
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: .76rem;
   font-weight: 700;
   letter-spacing: .08em;
@@ -1678,7 +1653,7 @@
   display: inline-block;
   padding: .12rem .58rem;
   border-radius: 999px;
-  background: rgba(133, 170, 167, .1);
+  background: var(--wb-ink-a08);
   border: 1px solid var(--hy-line);
   color: var(--hy-muted);
   font-size: .72rem;
@@ -1687,7 +1662,7 @@
 }
 .hygiene-work .hy-status.is-todo {
   background: var(--hy-mint-soft);
-  border-color: rgba(63, 224, 176, .26);
+  border-color: var(--wb-tint-22);
   color: var(--hy-mint);
 }
 .hygiene-work .hy-status.is-pending {
@@ -1701,8 +1676,8 @@
   color: var(--hy-seal-bright);
 }
 .hygiene-work .hy-status.is-done {
-  background: rgba(121, 233, 196, .1);
-  border-color: rgba(121, 233, 196, .3);
+  background: var(--wb-ok-a10);
+  border-color: var(--wb-ok-a45);
   color: var(--hy-jade);
 }
 
@@ -1715,7 +1690,7 @@
   align-items: baseline;
   gap: .5rem;
   margin: 0 0 .55rem;
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: .98rem;
   font-weight: 700;
   letter-spacing: .06em;
@@ -1737,7 +1712,7 @@
   padding: .68rem .8rem;
   border: 1px solid var(--hy-line);
   border-radius: var(--hy-radius-md);
-  background: rgba(17, 37, 41, .66);
+  background: var(--wb-panel-a);
   color: var(--hy-ink);
   text-align: left;
   font: inherit;
@@ -1751,11 +1726,11 @@
 }
 .hygiene-work .hy-work-row.is-overdue {
   border-color: var(--hy-seal-line);
-  background: linear-gradient(90deg, var(--hy-seal-soft), rgba(28, 17, 16, .5));
+  background: linear-gradient(90deg, var(--hy-seal-soft), var(--wb-scrim));
 }
 .hygiene-work .hy-work-row.is-soon {
   border-color: var(--hy-amber-line);
-  background: linear-gradient(90deg, var(--hy-amber-soft), rgba(30, 24, 15, .5));
+  background: linear-gradient(90deg, var(--hy-amber-soft), var(--wb-scrim));
 }
 .hygiene-work .hy-work-copy {
   min-width: 0;
@@ -1809,11 +1784,11 @@
   padding: .9rem .95rem;
   border: 1px solid var(--hy-line);
   border-radius: var(--hy-radius-md);
-  background: rgba(17, 37, 41, .66);
+  background: var(--wb-panel-a);
 }
 .hygiene-work .hy-task strong {
   display: block;
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: .96rem;
   font-weight: 700;
 }
@@ -1824,11 +1799,11 @@
 }
 .hygiene-work .hy-task.is-overdue {
   border-color: var(--hy-seal-line);
-  background: linear-gradient(90deg, var(--hy-seal-soft), rgba(28, 17, 16, .45));
+  background: linear-gradient(90deg, var(--hy-seal-soft), var(--wb-scrim));
 }
 .hygiene-work .hy-task.is-soon {
   border-color: var(--hy-amber-line);
-  background: linear-gradient(90deg, var(--hy-amber-soft), rgba(30, 24, 15, .45));
+  background: linear-gradient(90deg, var(--hy-amber-soft), var(--wb-scrim));
 }
 .hygiene-work .hy-task-main {
   flex: 1 1 auto;
@@ -1873,8 +1848,8 @@
   margin: 0 0 .95rem;
   padding: .9rem .95rem;
   border-radius: var(--hy-radius-md);
-  background: rgba(121, 233, 196, .09);
-  border: 1px solid rgba(121, 233, 196, .28);
+  background: var(--wb-ok-a10);
+  border: 1px solid var(--wb-ok-a45);
   color: var(--hy-jade);
   font-size: .86rem;
   font-weight: 600;
@@ -1907,15 +1882,15 @@
   font-weight: 800;
 }
 .hygiene-work .hy-task.is-done {
-  background: rgba(121, 233, 196, .05);
-  border-color: rgba(121, 233, 196, .2);
+  background: var(--wb-ok-a10);
+  border-color: var(--wb-ok-a16);
 }
 .hygiene-work .hy-section {
   margin: 0 0 1.15rem;
 }
 .hygiene-work .hy-section h2 {
   margin: 0 0 .6rem;
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: 1.02rem;
   font-weight: 700;
 }
@@ -1927,7 +1902,7 @@
   margin: 0 0 1rem;
   border: 1px solid var(--hy-line);
   border-radius: var(--hy-radius-md);
-  background: rgba(17, 37, 41, .66);
+  background: var(--wb-panel-a);
   overflow: hidden;
 }
 .hygiene-work .hy-meta div {
@@ -1958,7 +1933,7 @@
 }
 .hygiene-work .hy-shift-choices .btn {
   min-height: 66px;
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: 1.2rem;
   font-weight: 700;
 }
@@ -1993,9 +1968,7 @@
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0;
-  background: rgba(8, 19, 21, .94);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
+  background: var(--wb-panel-a);
   border-top: 1px solid var(--hy-line);
   padding: .28rem .15rem calc(.3rem + env(safe-area-inset-bottom));
   z-index: var(--z-tabbar);
@@ -2016,7 +1989,7 @@
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  border-radius: 10px;
+  border-radius: var(--hy-radius-sm);
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
   transition: color .2s var(--hy-ease);
@@ -2027,7 +2000,7 @@
 }
 .hygiene-work .hy-tab.is-active .svg-icon {
   transform: translateY(-1px);
-  filter: drop-shadow(0 0 7px rgba(63, 224, 176, .55));
+  filter: drop-shadow(0 0 7px var(--wb-tint-45));
 }
 .hygiene-work .hy-tab.is-active::before {
   content: "";
@@ -2056,7 +2029,7 @@
   font-weight: 800;
   line-height: 1.08rem;
   text-align: center;
-  box-shadow: 0 3px 10px -2px rgba(217, 72, 47, .7);
+  box-shadow: 0 3px 10px -2px var(--wb-danger-a45);
 }
 
 /* 底部弹层（对照/拍摄）。
@@ -2069,9 +2042,7 @@
   position: fixed;
   inset: 0;
   z-index: calc(var(--z-dialog) + 5);
-  background: rgba(3, 10, 9, .62);
-  -webkit-backdrop-filter: blur(5px);
-  backdrop-filter: blur(5px);
+  background: var(--wb-scrim);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -2086,10 +2057,10 @@
   max-height: min(92dvh, 54rem);
   overflow: auto;
   background:
-    linear-gradient(180deg, rgba(22, 48, 58, .55), transparent 160px),
-    rgba(14, 30, 33, .97);
+    linear-gradient(180deg, var(--wb-panel-a), transparent 160px),
+    var(--wb-panel-a);
   border: 1px solid var(--hy-line-strong);
-  border-radius: 20px 20px var(--hy-radius-lg) var(--hy-radius-lg);
+  border-radius: var(--hy-radius-md);
   box-shadow: var(--hy-shadow-md);
   padding: 1.2rem 1.05rem calc(1.2rem + env(safe-area-inset-bottom));
   color: var(--hy-ink);
@@ -2115,7 +2086,7 @@
 }
 .hygiene-work .staff-preview-head h2 {
   margin: 0;
-  font-family: var(--font-song);
+  font-family: var(--font-sans);
   font-size: 1.12rem;
   font-weight: 800;
 }
@@ -2126,7 +2097,7 @@
   padding: 0 .7rem;
   border: 1px solid var(--hy-line-strong);
   border-radius: 999px;
-  background: rgba(133, 205, 198, .06);
+  background: var(--wb-ink-a08);
   color: var(--hy-muted);
   font: inherit;
   font-size: .8rem;
@@ -2147,8 +2118,8 @@
   margin: 0 0 .7rem;
   padding: .7rem .85rem;
   border-radius: var(--hy-radius-sm);
-  background: rgba(121, 233, 196, .1);
-  border: 1px solid rgba(121, 233, 196, .3);
+  background: var(--wb-ok-a10);
+  border: 1px solid var(--wb-ok-a45);
   color: var(--hy-jade);
   font-size: .84rem;
   font-weight: 600;
@@ -2197,7 +2168,7 @@
 .hygiene-work .staff-preview-card textarea:focus {
   outline: none;
   border-color: var(--hy-mint);
-  box-shadow: 0 0 0 3px rgba(63, 224, 176, .16);
+  box-shadow: 0 0 0 3px var(--wb-tint-14);
 }
 .hygiene-work .staff-decide {
   display: grid;
@@ -2210,7 +2181,7 @@
 }
 .hygiene-work .capture-preview {
   position: relative;
-  border-radius: 12px;
+  border-radius: var(--hy-radius-md);
   overflow: hidden;
   background: #04100d;
   border: 1px solid var(--hy-line);
@@ -2257,12 +2228,12 @@
 .hygiene-admin ::-webkit-scrollbar-thumb,
 .hygiene-staff ::-webkit-scrollbar-thumb,
 .hygiene-admin .luyun-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(133, 205, 198, .22);
+  background: var(--wb-ink-a22);
   border-radius: 999px;
 }
 .hygiene-admin ::-webkit-scrollbar-thumb:hover,
 .hygiene-staff ::-webkit-scrollbar-thumb:hover {
-  background: rgba(133, 205, 198, .38);
+  background: var(--wb-ink-a45);
 }
 .hygiene-admin ::-webkit-scrollbar-track,
 .hygiene-staff ::-webkit-scrollbar-track { background: transparent; }
@@ -2451,3 +2422,16 @@
     display: none;
   }
 }
+
+/* ── 浅色主题（B 案日间档 · 2026-10-17）：旧皮的网纹与噪点在白底上会脏成一张方格纸 ──
+   深色档保持原样（网格在暗底上是质感，在白底上是脏）。日间档只留一层冷灰底。 */
+html[data-workbench][data-wb-theme="light"] .hygiene-admin,
+html[data-workbench][data-wb-theme="light"] .hygiene-staff {
+  background-image: none;
+  background-color: var(--hy-bg);
+}
+html[data-workbench][data-wb-theme="light"] .hygiene-admin::before,
+html[data-workbench][data-wb-theme="light"] .hygiene-staff::before { display: none; }
+/* 日间档下卡片的投影只留 1px 的接触感，不做大范围发光。 */
+html[data-workbench][data-wb-theme="light"] .hy-card,
+html[data-workbench][data-wb-theme="light"] .hy-panel { box-shadow: 0 1px 2px rgba(15,27,36,.05); }

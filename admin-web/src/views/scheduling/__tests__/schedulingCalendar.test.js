@@ -141,7 +141,8 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/v-if="editing\.overridden && editing\.undoable"/)
     expect(view).toMatch(/撤销覆盖，回到规则/)
     expect(view).toMatch(/v-if="editing\.overridden && !editing\.undoable"/)
-    expect(view).toMatch(/这天的改动已经是历史了/)
+    // 2026-10-18：过去的日子也能撤销了，这句改成「超出可补记窗口不给撤」。
+    expect(view).toMatch(/超出可补记窗口/)
     expect(view).toMatch(/editError\.value = err\.message/)
   })
 
@@ -218,7 +219,7 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/class="gPend gTodo"/)
     expect(view).toMatch(/router\.push\('\/workbench\/hr\/inbox'\)/)
     expect(view).toContain('请假待办')
-    // 那一条是按钮不是链接：跟旁边那条同一个形状，点哪儿都算。
+    // v3：三条待处理改成右栏的列表行；请假待办仍是列表行入口（按钮不是链接）。
     expect(view).toMatch(/<button class="gPend gTodo" type="button"/)
     expect(view).toMatch(/\.gTodo \{[\s\S]{0,120}?var\(--hy-aqua\)/)
   })

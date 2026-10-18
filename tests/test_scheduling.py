@@ -1711,13 +1711,12 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         days = (await self.store.month_calendar("2026-09"))["days"]
         self.assertEqual([d["overridden"] for d in days if d["business_date"] == "2026-09-25"], [0])
 
-    async def test_clearing_a_past_override_is_refused(self):
-        """票 14：过去的日子不能「清除班次」，只能改成某个班（`past_clear`）。
+    async def test_clearing_a_past_override_is_allowed(self):
+        """2026-10-18 用户裁定：过去的日子也能「清除班次」（放开 ADR 0108 决策 6）。
 
-        以前对过去是**半个动作**：覆盖记录摘掉了、结果行一点没变（青点消失、格子里的
-        班次照旧），没人看得出发生了什么 —— ADR 0108 决策 6 把这条改掉了。现在整条拒
-        掉：覆盖记录与结果行都原样留着，`day_detail.undoable` 照旧是 False（前端据此
-        把撤销收起来），要改就改成某个班。
+        下界仍是可补记窗口：窗口内（过去 30 天）与今天一样，清掉覆盖后按**现在的规则**
+        重算那天；更早的日子才是 `past_day`。`day_detail.undoable` 跟着放开 —— 前端
+        据此在过去的日子上照样显示「撤销覆盖」。
         """
         employee = await self._employee()
         day = await self._shift_id("白班")
@@ -1728,22 +1727,20 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stamp["source"], "override")
         self.assertEqual((await self.store.day_detail("2026-09-25"))["undoable"], True)
 
-        # 时钟推到那天之后：9/25 成了过去（还在可补记窗口里，撤销照样不给）。
+        # 时钟推到那天之后：9/25 成了过去，但还在可补记窗口里 —— 照样能清。
         self.fixed_now = datetime(2026, 9, 28, 10, 0, tzinfo=CHINA_TZ)
-        self.assertEqual((await self.store.day_detail("2026-09-25"))["undoable"], False)
+        self.assertEqual((await self.store.day_detail("2026-09-25"))["undoable"], True)
 
+        await self.store.clear_override(employee["id"], "2026-09-25")
+        # 覆盖记录摘掉了，那天按现在的规则重算回白班（不是原样不动、也不是「还没铺到」）。
+        self.assertEqual(await self._overrides(), [])
+        row = (await self._full_rows(employee["id"]))["2026-09-25"]
+        self.assertEqual((row["shift_id"], row["source"]), (day, "rule"))
+
+        # 更早（超出可补记窗口）的日子仍是 `past_day`：窗口是数据保留口径，不随这次放开。
         with self.assertRaises(SchedulingError) as past:
-            await self.store.clear_override(employee["id"], "2026-09-25")
-        self.assertEqual(past.exception.code, "past_clear")
-
-        # 覆盖记录还在（旧行为会把它删掉、只留下没标记的结果行），结果行也没动。
-        self.assertEqual((await self._full_rows(employee["id"]))["2026-09-25"], stamp)
-        self.assertEqual(
-            [item["business_date"] for item in await self._overrides()], ["2026-09-25"]
-        )
-        # 同一天改成某个班是允许的：过去只能「改成某个班」，不能退回规则。
-        saved = await self.store.set_override(employee["id"], "2026-09-25", shift_id=day)
-        self.assertEqual(saved["shift_id"], day)
+            await self.store.clear_override(employee["id"], "2026-08-01")
+        self.assertEqual(past.exception.code, "past_day")
 
     async def test_rule_change_does_not_wipe_an_overridden_day(self):
         """验收 6：改规则时已被覆盖的那天不被冲掉（一个字都不动，含 `updated_at`）。"""

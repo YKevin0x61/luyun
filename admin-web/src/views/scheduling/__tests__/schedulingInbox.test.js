@@ -94,8 +94,12 @@ describe('店长端排班待办（票 08、09）', () => {
     expect(view).toMatch(/rejectTarget\.employee_name/)
     expect(view).toMatch(/confirm-label="驳回"/)
     expect(view).toMatch(/danger/)
-    // 批准不弹框（可逆：批错了再改那天）；两条动作都防连点 —— 而且按「任一动作在飞」
-    // 全灰（见下一条）。
+    // 2026-10-18：批准**也弹确认**了（原来只有驳回弹，闸加错了边 —— 批错了要复原得去
+    // 月历改回班次、5 步以上）。正文由 `approveMessage()` 从行内预览数据生成。
+    expect(view).toMatch(/approveTarget/)
+    expect(view).toMatch(/confirmApprove/)
+    expect(view).toMatch(/confirm-label="批准"/)
+    // 两条动作都防连点 —— 而且按「任一动作在飞」全灰（见下一条）。
     expect((view.match(/:disabled="busyId !== 0"/g) || []).length).toBe(2)
     expect(view).not.toMatch(/:disabled="busyId === request\.id"/)
   })

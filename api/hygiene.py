@@ -51,6 +51,7 @@ from services.hygiene.attire import HygieneAttire
 from services.hygiene.work import (
     BOARD_EVENT_DEFAULT_LIMIT,
     BOARD_EVENT_MAX_LIMIT,
+    DAILY_BACKFILL_DAYS,
     MAX_STANDARD_BYTES,
     HygieneWork,
     HygieneWorkError,
@@ -183,6 +184,8 @@ _ERROR_DETAILS = {
     "cannot_self_accept": "交这张的人不能自己验收",
     "already_accepted": "这项已经通过，不能再交",
     "not_pending": "没有待验收的实拍",
+    # 隔夜补验的边界：能补验最近几天，再往前是历史回看（改判会动到红黑榜与趋势的旧数）。
+    "past_day": f"只能补验收最近 {DAILY_BACKFILL_DAYS} 天内的日常：更早的请到历史回看里查",
     "photographer_required": "拍摄人未知",
     "invalid_clock": "逾期点须为 HH:MM，例如 15:00",
     "invalid_weekday": "请选择周一到周日",
@@ -431,6 +434,9 @@ class ShiftIn(BaseModel):
     shift: str
     # 驳回时可附一句原因：员工端会显示出来，否则他只能原样重拍。
     reason: Optional[str] = None
+    # 隔夜验收（2026-10-18）：要验的是哪个营业日。不传 = 今天，与旧行为逐字一致；
+    # 传了就是补验（下界由服务层 ``DAILY_BACKFILL_DAYS`` 判，更早报 ``past_day``）。
+    business_date: Optional[str] = None
 
 
 class RejectIn(BaseModel):
@@ -2119,8 +2125,11 @@ async def admin_daily_queue(
 ) -> Dict[str, Any]:
     """某个营业日的日常检查（超管首页也读这一条）。
 
-    不带日期时与验收动线一致：只回「待验收」。带日期是历史回看（ADR-0088）：
-    回当天全部检查项与状态，让管理员看见漏拍与已通过的，但那边不能验收。
+    不带日期时与验收动线一致：`items` 只回「今天待验收」（字段名与形状不变），
+    另给 `pending_past` —— 过去 ``DAILY_BACKFILL_DAYS`` 天里还没验收的行，每行带
+    `business_date`，按日期倒序（今天在前）。隔夜交的照片早上还能验，靠的就是这一块。
+    带日期是历史回看（ADR-0088）：回当天全部检查项与状态，让管理员看见漏拍与已通过的，
+    那边只能看、不能验收。
 
     另带一块 `health_cert_due`（2026-10-07，首页第四格「健康证到期」用）：未停用、
     健康证**临期或已过期**的人。它是「现在」的事，与查的是哪一天无关，所以两个分支
@@ -2131,10 +2140,21 @@ async def admin_daily_queue(
     health_cert_due = {"count": len(due), "items": due}
     if date is None or not str(date).strip():
         items = await work.list_daily_work(SUPER_ACTOR)
+        # 隔夜验收（2026-10-18）：`items` 保持原样（只回今天待验收），过去营业日里
+        # 还没验的单独给一块 `pending_past`，每行带 `business_date`，按日期倒序。
+        # 首页与现有前端读 `items` 不受影响；要不要展示由前端决定。
+        pending_past = [
+            row
+            for row in await work.list_pending_daily(
+                SUPER_ACTOR, days=DAILY_BACKFILL_DAYS + 1
+            )
+            if row.get("business_date") != today
+        ]
         return {
             "date": today,
             "is_today": True,
             "items": [row for row in items if row.get("status") == "待验收"],
+            "pending_past": pending_past,
             "health_cert_due": health_cert_due,
         }
     target = _clean_business_date(date)
@@ -2155,7 +2175,12 @@ async def admin_accept_daily(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        accepted = await work.accept_daily(SUPER_ACTOR, item_id, body.shift)
+        accepted = await work.accept_daily(
+            SUPER_ACTOR,
+            item_id,
+            body.shift,
+            business_date=_optional_business_date(body.business_date),
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
     await _hygiene_nudge("daily", "accepted", item_id=item_id)
@@ -2172,7 +2197,11 @@ async def admin_reject_daily(
 ) -> Dict[str, Any]:
     try:
         rejected = await work.reject_daily(
-            SUPER_ACTOR, item_id, body.shift, reason=_require_reject_reason(body.reason)
+            SUPER_ACTOR,
+            item_id,
+            body.shift,
+            reason=_require_reject_reason(body.reason),
+            business_date=_optional_business_date(body.business_date),
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc

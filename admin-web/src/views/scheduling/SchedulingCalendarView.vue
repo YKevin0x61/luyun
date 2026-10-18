@@ -278,6 +278,55 @@ function countPending(employees) {
 //
 // 读不出来时置 `null`（**不是 0**）：显示成「全员都配好了」是一句假话，超级管理员会照着它放心。
 const pendingCount = ref(null)
+/** 手机：点一天后当天名单走底部抽屉（桌面是右栏常驻）。 */
+const mobileDayOpen = ref(false)
+/** 周表「搜成员」收进成员列头的放大镜。 */
+const weekFindOpen = ref(false)
+/** 笔栏工具条上「选中：…」那一行（最近点过的那一格）。 */
+const lastCellText = ref('')
+
+function pickDay(date) {
+  mobileDayOpen.value = true
+  loadDay(date)
+}
+
+/** 待批请假影响的日子：待批请假覆盖到的未来日子（每多一条请假，那天就可能少一个人）。
+ *  后端没有「需求人数」这个字段，所以这里只报**已提申请**的缺口，口径写在面板提示里。 */
+const gapDays = computed(() => {
+  const counts = {}
+  for (const request of inboxRequests.value) {
+    if (request.kind !== 'leave') continue
+    const days = eachDayInRange(request.start_date, request.end_date || request.start_date)
+    for (const day of days) {
+      if (today.value && day < today.value) continue
+      counts[day] = (counts[day] || 0) + 1
+    }
+  }
+  return Object.entries(counts)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, 6)
+    .map(([date, count]) => ({ date, count }))
+})
+
+/** 名单卡上的规则摘要：当前这一周的 7 格（周一起），跟周表同宽。
+ *  只用于展示：相位按服务端的口径（营业日与起点之差取模）现算。 */
+function ruleWeekCells(employee) {
+  const rule = employee && employee.rule
+  if (!rule || rule.invalid || !Array.isArray(rule.cycle) || !rule.cycle.length) return []
+  const anchor = toLocalDate(rule.anchor_date || today.value)
+  const monday = toLocalDate(mondayOf(today.value))
+  if (Number.isNaN(anchor.getTime()) || Number.isNaN(monday.getTime())) return []
+  return Array.from({ length: 7 }, (_, index) => {
+    const day = new Date(monday)
+    day.setDate(day.getDate() + index)
+    const diff = Math.round((day - anchor) / 86400000)
+    const length = rule.cycle.length
+    const shiftId = rule.cycle[((diff % length) + length) % length]
+    if (shiftId === null || shiftId === undefined) return '休'
+    const shift = shiftById.value[shiftId]
+    return shift ? shift.name.slice(0, 2) : '?'
+  })
+}
 const pendingText = computed(() => {
   if (pendingCount.value === null) return '名单没读出来：点开重试一次'
   return pendingCount.value ? '点这里给谁配固定班' : '全员都配好了'
@@ -568,6 +617,7 @@ const weekExcludedNote = computed(() => {
 // 过去 30 天内补记要先弹一次确认（ADR 0108 决策 3）、`skipped` / `reminders` 照旧点名。
 const penShiftId = ref(null) // 笔上的班次；null = 还没选过，用第一个在用的班次
 const penRest = ref(false) // 笔是「休」：写下去的是 action=rest
+const penClear = ref(false) // 笔是「清」：写下去的是 action=clear（把这格的班次清掉、回到规则）
 const penZoneId = ref('') // '' = 跟这个班次的固定区
 const penZoneOpen = ref(false) // 工作区按钮点开才多展开一行
 const pick = ref(null) // { anchor, target } | null；手柄只有日期列头与人名两种
@@ -575,6 +625,20 @@ const pickBusy = ref(false)
 // 撤销只留**最近一批**、内存级（ADR 0107 决策 7）：刷新或换设备就没了。
 const pickUndo = ref(null) // { plan: [...] } | null
 const pastConfirm = ref(null) // { action, options, cells, dates, clear }：过去的二次确认（只弹一次）
+/** 区域「退回规则」的二次确认（4 秒不点自动复位）。 */
+const regionClearArmed = ref(false)
+let regionClearTimer = 0
+function askRegionClear() {
+  if (regionClearArmed.value) {
+    regionClearArmed.value = false
+    clearTimeout(regionClearTimer)
+    void applyRegionClear()
+    return
+  }
+  regionClearArmed.value = true
+  clearTimeout(regionClearTimer)
+  regionClearTimer = setTimeout(() => { regionClearArmed.value = false }, 4000)
+}
 
 /** 笔上此刻的班次：没选过（或选中的那个停用了）就是**第一个还在用的班次** —— 与旧口径一致。 */
 const penShift = computed(
@@ -590,13 +654,22 @@ const penZoneName = computed(() => {
 function pickPenShift(shift) {
   penShiftId.value = shift.id
   penRest.value = false
+  penClear.value = false
 }
 
 function pickPenRest() {
   penRest.value = true
+  penClear.value = false
+}
+
+/** 「清」也是一支笔：点一格 = 清掉这一格的班次（写 action=clear，与选区那个「清」同一口径）。 */
+function pickPenClear() {
+  penClear.value = true
+  penRest.value = false
 }
 
 function penAction() {
+  if (penClear.value) return PICK_CLEAR
   return penRest.value ? PICK_REST : PICK_SHIFT
 }
 
@@ -777,10 +850,12 @@ function reminderText(items) {
 
 /** 一次落笔之后的回执（**一行**）：写了几格、跳过几格、能不能撤。
  *  逐格点名的那几行收进 `details`（「看全部」展开）—— 跳过与待批的信息不丢。 */
-function sayResult(result, cells) {
+function sayResult(result, cells, action) {
   const undoable = !!pickUndo.value && pickUndo.value.plan.length > 0
   const parts = []
-  if (result.applied) parts.push(`已刷 ${result.applied} 格`)
+  // 回执说清**这一笔是什么**：原来一律「已刷 N 格」，选错笔（清当成了休）也看不出来。
+  const verb = action === PICK_CLEAR ? '已清' : action === PICK_REST ? '已排休' : '已改班'
+  if (result.applied) parts.push(`${verb} ${result.applied} 格`)
   if (result.skipped.length) parts.push(`跳过 ${result.skipped.length} 格`)
   if (!parts.length) parts.push('没有格子被改动')
   // 「撤销只留最近一批、只在这台手机上」这句说明跟着回执走（ADR 0107 决策 7）。
@@ -804,6 +879,9 @@ function sayResult(result, cells) {
  *  整片刷的时候跳过由服务端回执点名（它才是权威），这里只是省掉一次注定被跳过的往返。 */
 async function paintCell(employee, day) {
   if (pickBusy.value) return
+  lastCellText.value =
+    `周${WEEK_HEADS[day.weekday]} · ${employee.name} ${weekCellText(employee, day)}` +
+    `${weekCellHalf(employee, day) ? '半' : ''}`
   const cells = [{ employeeId: employee.id, date: day.business_date }]
   const action = penAction()
   const options = penOptions()
@@ -858,7 +936,7 @@ const pastConfirmText = computed(() => {
     ? `这一批 ${confirm.cells.length} 格里有 ${confirm.dates.length} 天已经过去了（${days}）`
     : `这天已经过去了（${days}）`
   if (confirm.clear) {
-    return `${when}：「清除班次」在过去的日子上不生效，那几天只能改成某个班（会被跳过），其余照常清除。`
+    return `${when}：「清除班次」也会把过去那几天清掉（回到规则铺出来的样子），员工看到的记录会跟着变。照清吗？`
   }
   return `${when}：改了以后员工看到的记录也会跟着变，而且没有「退回上一次」这一步。照改吗？`
 })
@@ -876,7 +954,7 @@ async function runPaint(action, options, cells) {
     // 这一笔顶掉上一笔：撤销只留最近一批（ADR 0107 决策 7）。
     const plan = undoPlan(snapshot, result.skipped)
     pickUndo.value = plan.length ? { plan } : null
-    sayResult(result, cells)
+    sayResult(result, cells, action)
     await loadWeek(week.value ? week.value.start : weekStart.value)
     await refreshMonthCounts()
   } catch (err) {
@@ -919,7 +997,7 @@ async function undoLast() {
   await refreshMonthCounts()
   pickBusy.value = false
   const details = []
-  if (failed.length) details.push(`有 ${failed.length} 格没撤回来（过去的日子只能改成某个班，退不回规则）`)
+  if (failed.length) details.push(`有 ${failed.length} 格没撤回来（超出可补记窗口的日子还是撤不了）`)
   if (kept) details.push(`有 ${kept} 格原本是批过的假，撤不回原样`)
   sayNotice(`已撤回 ${undone} 格`, details, failed.length > 0)
 }
@@ -1229,39 +1307,65 @@ useNudgePull({
   <div class="hygiene-admin sched-page">
     <div class="gB" :class="{ 'pen-open': panel === 'week', 'pen-tall': activeShifts.length > 3 }" @click="onPageClick">
       <div class="gB-body">
-        <div class="gB-mon">
-          <b v-if="panel === 'week'">{{ weekRangeLabel || '本周' }}</b>
-          <b v-else>{{ monthTitle(monthValue) }}</b>
-          <span v-if="panel === 'week'">{{ weekEmployees.length }} 人 × 7 天</span>
-          <span v-else>{{ shifts.map((s) => s.name).join(' / ') }} 人数</span>
-          <em>{{ formatTodayLabel() }}</em>
-        </div>
-
-        <div class="gB-bar">
-          <!-- 三个视角：月历（哪天缺人）· 周表（这个人这周怎么上）· 名单（配规则）。 -->
-          <div class="gSeg">
-            <button class="gBtn" :class="{ on: panel === 'month' }" type="button" @click="openPanel('month')">月历</button>
-            <button class="gBtn" :class="{ on: panel === 'week' }" type="button" @click="openPanel('week')">周表</button>
-            <button class="gBtn" :class="{ on: panel === 'roster' }" type="button" @click="openPanel('roster')">名单</button>
+        <header class="gHead">
+          <p class="gKicker">人事 · 排班</p>
+          <div class="gTitleRow">
+            <h1 class="gTitle">排班</h1>
+            <div class="gHeadActions">
+              <button class="gBtn gLink" type="button" @click="router.push('/workbench/hr/shifts')"><b>班次表</b> ›</button>
+            </div>
           </div>
-          <template v-if="panel === 'roster'">
-            <span class="gW-tip">配规则 / 固定区在这里</span>
-          </template>
-          <template v-else-if="panel === 'week'">
-            <button class="gBtn" type="button" @click="loadWeek(shiftWeek(weekStart, -1))">‹ 上周</button>
-            <button class="gBtn" type="button" @click="loadWeek(mondayOf(today))">本周</button>
-            <button class="gBtn" type="button" @click="loadWeek(shiftWeek(weekStart, 1))">下周 ›</button>
-          </template>
-          <template v-else>
-            <button class="gBtn" type="button" @click="loadCalendar(shiftMonth(monthValue, -1))">‹ 上月</button>
-            <button class="gBtn" type="button" @click="loadCalendar(currentMonthValue())">本月</button>
-            <button class="gBtn" type="button" @click="loadCalendar(shiftMonth(monthValue, 1))">下月 ›</button>
-          </template>
-        </div>
+          <div class="gMetaRow">
+            <p class="gPeriod">
+              <template v-if="panel === 'week'">
+                <b>{{ weekRangeLabel || '本周' }}</b>
+                <span>{{ weekEmployees.length }} 人 × 7 天</span>
+              </template>
+              <template v-else>
+                <b>{{ monthTitle(monthValue) }}</b>
+                <span>{{ shifts.map((s) => s.name).join(' / ') }} 人数</span>
+              </template>
+              <em>{{ formatTodayLabel() }}</em>
+            </p>
+            <div class="gSeg" role="group" aria-label="排班视角">
+              <button class="gBtn" :class="{ on: panel === 'month' }" type="button" @click="openPanel('month')">月历</button>
+              <button class="gBtn" :class="{ on: panel === 'week' }" type="button" @click="openPanel('week')">周表</button>
+              <button class="gBtn" :class="{ on: panel === 'roster' }" type="button" @click="openPanel('roster')">名单</button>
+            </div>
+            <!-- 手机把视角切换与翻月并到同一行；桌面这份收起，翻月在面板头。 -->
+            <div class="gNav gNav--head">
+              <template v-if="panel === 'roster'">
+                <span class="gW-tip">配规则 / 固定区在这里</span>
+              </template>
+              <template v-else-if="panel === 'week'">
+                <button class="gBtn" type="button" @click="loadWeek(shiftWeek(weekStart, -1))">‹ 上周</button>
+                <button class="gBtn" type="button" @click="loadWeek(mondayOf(today))">本周</button>
+                <button class="gBtn" type="button" @click="loadWeek(shiftWeek(weekStart, 1))">下周 ›</button>
+              </template>
+              <template v-else>
+                <button class="gBtn" type="button" @click="loadCalendar(shiftMonth(monthValue, -1))">‹ 上月</button>
+                <button class="gBtn" type="button" @click="loadCalendar(currentMonthValue())">本月</button>
+                <button class="gBtn" type="button" @click="loadCalendar(shiftMonth(monthValue, 1))">下月 ›</button>
+              </template>
+            </div>
+          </div>
+        </header>
 
         <p v-if="errorText" class="gMsg">{{ errorText }}</p>
 
         <template v-if="panel === 'month'">
+          <div class="gDash" :class="{ 'gDash--drawer': mobileDayOpen }">
+            <section class="gPanel gCalPanel">
+              <div class="gPanel-hd">
+                <i class="gLed sig"></i>
+                <h2>{{ monthTitle(monthValue) }}</h2>
+                <span class="gPanel-hint">{{ formatTodayLabel() }}</span>
+                <div class="gNav gNav--panel">
+                  <button class="gBtn" type="button" @click="loadCalendar(shiftMonth(monthValue, -1))">‹ 上月</button>
+                  <button class="gBtn" type="button" @click="loadCalendar(currentMonthValue())">本月</button>
+                  <button class="gBtn" type="button" @click="loadCalendar(shiftMonth(monthValue, 1))">下月 ›</button>
+                </div>
+              </div>
           <div class="gB-head">
             <span v-for="label in WEEKDAYS" :key="label">{{ label }}</span>
           </div>
@@ -1278,15 +1382,16 @@ useNudgePull({
                 mute: !!(calendar && calendar.window_end && day.business_date > calendar.window_end),
                 over: day.overridden > 0,
               }"
-              @click="loadDay(day.business_date)"
+              @click="pickDay(day.business_date)"
             >
               <span class="n">{{ day.day }}</span>
               <span class="c">
-                <template v-for="(item, index) in cellCounts(day)" :key="item.id">
-                  <em v-if="index">·</em>
-                  <b v-if="!index" :class="item.tone">{{ item.count }}</b>
-                  <i v-else :class="item.tone">{{ item.count }}</i>
-                </template>
+                <span
+                  v-for="item in cellCounts(day)"
+                  :key="item.id"
+                  class="cItem"
+                  :class="item.tone"
+                ><i class="cBar"></i>{{ item.count }}</span>
               </span>
               <!-- 待批角标（spec US 11）：这天有等着批的申请。票 07 定标记时特意把琥珀留给
                    「待处理」、青点留给「这天被改过」—— 两种记号不能混。 -->
@@ -1309,12 +1414,44 @@ useNudgePull({
           </div>
           <p v-if="beyondNote" class="gB-note">{{ beyondNote }}</p>
 
+              <!-- 待批请假影响的日子：待批请假会让那天缺人；点一天直接切过去看名单。 -->
+              <div class="gGap">
+                <div class="gGap-hd">
+                  <span>待批请假影响的日子</span>
+                  <em>待批请假 · 点一天看当天名单</em>
+                </div>
+                <p v-if="!gapDays.length" class="gGap-empty">这个月没有待批请假。</p>
+                <ul v-else class="gGapList">
+                  <li v-for="gap in gapDays" :key="gap.date">
+                    <button type="button" class="gGapRow" @click="pickDay(gap.date)">
+                      <b>{{ formatDayLabel(gap.date) }}</b>
+                      <span class="gGapN">缺 {{ gap.count }} 人</span>
+                      <span class="gGapGo">›</span>
+                    </button>
+                  </li>
+                </ul>
+              </div>
+            </section>
+
+            <div v-if="mobileDayOpen" class="gDrawerScrim" @click="mobileDayOpen = false"></div>
+            <aside class="gSide">
+              <!-- 顶部 40px 待批条（零值不渲染）。 -->
+              <button class="gPend gTodo" type="button" v-if="Object.keys(pendingMarks).length" @click="router.push('/workbench/hr/inbox')">
+                <span class="n">假</span>
+                <b>请假待办</b>
+                <span>{{ Object.keys(pendingMarks).length }} 条申请等着批</span>
+                <span class="go">›</span>
+              </button>
+
           <div class="gB-card">
             <div class="gB-card-hd">
+              <i class="gLed sig"></i>
               <b>{{ formatDayLabel(selectedDate) }}</b>
               <span v-if="selectedDate && selectedDate === today">今天</span>
-              <em>合计 {{ dayDetail ? dayDetail.total : 0 }} 人</em>
+              <em v-if="dayDetail">上班 {{ dayDetail.total }} 人 · 不在岗 {{ offPeople.length }} 人</em>
+              <button class="gDrawerClose" type="button" aria-label="收起当天名单" @click="mobileDayOpen = false">收起</button>
             </div>
+            <div class="gB-dayBody">
             <template v-if="dayDetail">
               <div v-for="group in dayDetail.groups" :key="group.shift.id" class="gB-grp">
                 <div class="gB-grp-t" :class="toneOf(group.shift.id)">
@@ -1390,6 +1527,7 @@ useNudgePull({
             </template>
             <p v-else class="gB-empty">{{ loading ? '读取中……' : '选一天看是谁' }}</p>
 
+            </div>
             <div v-if="editing" class="gD">
               <div class="gD-hd">
                 <b>{{ editing.name }}</b>
@@ -1439,7 +1577,7 @@ useNudgePull({
               </div>
               <!-- 过去的日子：记录还在，但历史不重写 —— 不给一个点了也不变的按钮。 -->
               <p v-if="editing.overridden && !editing.undoable" class="gD-hint">
-                这天的改动已经是历史了：撤销只对今天以后的日子生效，过去怎么排就怎么留着。
+                这天的改动超出可补记窗口了（30 天）：再往前的日子撤不回规则，怎么排就怎么留着。
               </p>
               <p class="gD-hint">
                 改的是这一天，不是规则：规则以后怎么变都不动它。撤掉覆盖，这天就回到规则铺出来的样子。
@@ -1448,38 +1586,163 @@ useNudgePull({
             </div>
           </div>
 
-          <button class="gPend gTodo" type="button" @click="router.push('/workbench/hr/inbox')">
-            <span class="n">假</span>
-            <b>请假待办</b>
-            <span>员工提的请假在这儿批：批完那天记成请假，先看清批了还剩几个人</span>
-            <span class="go">›</span>
-          </button>
 
-          <button class="gPend" type="button" @click="router.push('/workbench/hr/shifts')">
-            <span class="n">班</span>
-            <b>班次表</b>
-            <span>加一个班次、改名字、调顺序、停用 —— 加完月历和员工卡片自己就多一种班别</span>
-            <span class="go">›</span>
-          </button>
-
-          <button class="gPend" type="button" @click="openPanel('roster')">
-            <span class="n">{{ pendingCount === null ? '—' : pendingCount }}</span>
-            <b>个人还没配规则</b>
-            <span>{{ pendingText }}</span>
-            <span class="go">›</span>
-          </button>
+              <!-- 配置缺口：折叠一行；零值不渲染。 -->
+              <button
+                v-if="pendingCount"
+                class="gPend gConfigGap"
+                type="button"
+                @click="openPanel('roster')"
+              >
+                <span class="n">{{ pendingCount === null ? '—' : pendingCount }}</span>
+                <b>个人还没配规则</b>
+                <span>{{ pendingText }}</span>
+                <span class="go">›</span>
+              </button>
+            </aside>
+          </div>
         </template>
 
-        <!-- 周表：员工 × 周。列是七天，行是人。**点一个格子 = 用笔栏那支笔立刻写这一格**；
-             点**日期列头**选整天、点**人名**选整周（已经有选区时再点一个手柄就以锚点展开，
-             这时笔栏多一行摘要与「刷」）—— 手柄只有这两种，选区只为批量存在（票 14 修订）。 -->
         <template v-else-if="panel === 'week'">
+          <section class="gPanel gWeekPanel">
+            <div class="gPanel-hd">
+              <i class="gLed sig"></i>
+              <h2>周表</h2>
+              <span class="gPanel-hint">{{ weekRangeLabel || '本周' }}</span>
+            </div>
+          <div
+        v-if="panel === 'week'"
+        class="gPick"
+        role="group"
+        aria-label="落笔"
+      >
+        <!-- 提示只有这一行（票 14 修订口径 4）：出现后几秒自己消失，下一次操作替换它。
+             逐格点名（谁被跳过、谁有待批申请）收进「看全部」——信息不丢，但不再常驻五六行。 -->
+        <p
+          v-if="pickNotice"
+          class="gPick-note"
+          :class="{ gErr: pickNotice.warn }"
+          aria-live="polite"
+        >
+          <span class="gPick-note-text">{{ pickNotice.text }}</span>
+          <button
+            v-if="pickNotice.details.length"
+            class="gBtn ghost"
+            type="button"
+            aria-controls="gPick-detail"
+            :aria-expanded="noticeOpen ? 'true' : 'false'"
+            @click="noticeOpen = !noticeOpen"
+          >{{ noticeOpen ? '收起' : '看全部' }}</button>
+        </p>
+        <div v-if="noticeOpen && pickNotice" id="gPick-detail" class="gPick-detail">
+          <p v-for="(line, index) in pickNotice.details" :key="index" class="gHint">{{ line }}</p>
+        </div>
+
+        <!-- 工具条：选中对象常驻一行（点过哪一格 / 选了哪一片），选区摘要与「刷」「清」
+             只在批量时多一行。 -->
+        <p v-if="!pickActive && lastCellText" class="gPick-now">选中：{{ lastCellText }}</p>
+        <!-- 选区摘要：**只在选了整列 / 整行时出现**（点「刷」才批量应用）。不选区时这一行
+             完全不出现 —— 不用批量的人不该看见它（用户③：我就想逐格改）。 -->
+        <div v-if="pickActive" class="gPick-region">
+          <b class="gPick-sum">{{ pickTitle }}</b>
+          <span class="gW-tip">{{ pickCountText }}</span>
+          <button class="gChip" type="button" :disabled="pickBusy" @click="applyRegion()">刷</button>
+          <!-- 这一颗原来也叫「清」、与笔上那颗同名又同距，点一下立刻清掉整片（最多 200 格）。
+               v5（2026-10-18 审查）：改名「退回规则」+ 点两次（第二次才真写，4 秒不点自动复位）。 -->
+          <button
+            class="gChip"
+            type="button"
+            :class="{ on: regionClearArmed, danger: regionClearArmed }"
+            :disabled="pickBusy"
+            :title="regionClearArmed
+              ? '再点一次就清掉这一片（最多 200 格）'
+              : '退回规则：把选中的日子里手改过的那几天清掉、回到轮转规则'"
+            @click="askRegionClear()"
+          >{{ regionClearArmed ? '确认清' : '退回规则' }}</button>
+        </div>
+
+        <!-- 工作区：点按钮才展开这一行横滑的区名（默认收起 —— 少一行就少压掉一行员工）。
+             按钮组而不是原生下拉控件：那个弹层由系统画，在这个贴底的位置会飘到页面中间
+             （2026-10-13 用户截图），而那层我们一个像素都改不了。 -->
+        <div v-if="penZoneOpen" class="gPick-zones">
+          <button
+            class="gChip"
+            type="button"
+            :class="{ on: penZoneId === '' }"
+            :disabled="pickBusy"
+            @click="penZoneId = ''"
+          >跟固定区</button>
+          <button
+            v-for="zone in zones"
+            :key="zone.id"
+            class="gChip"
+            type="button"
+            :class="{ on: penZoneId === String(zone.id) }"
+            :disabled="pickBusy"
+            @click="penZoneId = String(zone.id)"
+          >{{ zone.name }}</button>
+        </div>
+
+        <!-- 笔栏本体：一行。笔上的班次 / 工作区选一次就一直用（用户④：要「一支笔」的感觉）。
+             棋子直接排在整行里、由整行换行 —— 班次多于 3 张时两行排开（见 `.gPick-row`），
+             而不是在一条窄横滑里把后两个班次藏起来。 -->
+        <div class="gPick-row">
+          <span class="gPen-tag">刷</span>
+          <button
+            v-for="shift in activeShifts"
+            :key="shift.id"
+            type="button"
+            class="gChip"
+            :class="[toneClass(shift.id), { on: !penRest && !penClear && !!penShift && penShift.id === shift.id }]"
+            :aria-pressed="!penRest && !penClear && !!penShift && penShift.id === shift.id ? 'true' : 'false'"
+            :disabled="pickBusy"
+            @click="pickPenShift(shift)"
+          ><i class="dt"></i>{{ shift.name }}</button>
+          <button
+            class="gChip"
+            type="button"
+            :class="{ on: penRest }"
+            :aria-pressed="penRest ? 'true' : 'false'"
+            :disabled="pickBusy"
+            @click="pickPenRest()"
+          ><i class="dt rest"></i>休</button>
+          <!-- 「清」：清掉这一格的班次（回到规则）。它不是「休」——休是排班的一种值，清是把值撤掉。 -->
+          <button
+            class="gChip gPen-clear"
+            type="button"
+            :class="{ on: penClear }"
+            :aria-pressed="penClear ? 'true' : 'false'"
+            :disabled="pickBusy"
+            title="清：把这格的班次清掉（回到规则）"
+            @click="pickPenClear()"
+          ><i class="dt clear"></i>清</button>
+          <button
+            class="gChip gPen-zone"
+            type="button"
+            :aria-expanded="penZoneOpen ? 'true' : 'false'"
+            :disabled="pickBusy"
+            @click="penZoneOpen = !penZoneOpen"
+          >{{ penZoneOpen ? '收起' : penZoneName }}</button>
+          <!-- 撤销：没有可撤销的那一批时禁用（口径 1）。撤销是内存级的（ADR 0107 决策 7），
+               那句说明跟着回执走；按钮上再挂一条 title 兜底。 -->
+          <button
+            class="gChip gPick-undo"
+            type="button"
+            :disabled="pickBusy || !pickUndo"
+            title="撤销只留最近一批、也只在这台手机上"
+            aria-label="撤销刚才那一批"
+            @click="undoLast()"
+          >↺</button>
+        </div>
+      </div>
+          <!-- 笔栏结束 -->
           <p v-if="weekError" class="gMsg">{{ weekError }}</p>
           <p v-if="!week" class="gB-empty">周表读取中……</p>
           <template v-else>
-            <div class="gW-find">
+            <div v-if="weekFindOpen || weekFind.trim()" class="gW-find">
               <input v-model="weekFind" type="search" placeholder="搜成员" spellcheck="false">
               <span v-if="weekFind.trim()">{{ weekRows.length }} 人 · 筛掉 {{ weekFilteredOut }} 人</span>
+              <button class="gBtn" type="button" @click="weekFindOpen = false; weekFind = ''">收起</button>
             </div>
             <div class="gW-wrap">
               <table class="gW">
@@ -1490,7 +1753,17 @@ useNudgePull({
                 </colgroup>
                 <thead>
                   <tr>
-                    <th class="gW-name">成员</th>
+                    <th class="gW-name">
+                      <span>成员</span>
+                      <button
+                        class="gW-findBtn"
+                        type="button"
+                        title="搜成员"
+                        aria-label="搜成员"
+                        :aria-expanded="weekFindOpen ? 'true' : 'false'"
+                        @click="weekFindOpen = !weekFindOpen"
+                      >⌕</button>
+                    </th>
                     <th
                       v-for="day in weekDays"
                       :key="day.business_date"
@@ -1575,231 +1848,143 @@ useNudgePull({
               <span v-if="hasPendingMarks" class="gB-pend"><i></i>有申请等着批</span>
             </div>
 
-            <p v-if="weekNoDataNote" class="gB-note">{{ weekNoDataNote }}</p>
-            <p v-if="weekBeyondDays.length" class="gB-note">
-              这一周里有 {{ weekBeyondDays.length }} 天超出了展开窗口（只铺到 {{ week.window_end }}），
-              那几格还是虚的。
-            </p>
-            <p class="gB-note">
-              点一格 = 用底下笔栏上的班次写这一格；点日期列头 / 人名选一片，再用「刷」批量写。
-              「清」把选中的日子里<span class="gW-em">手改过</span>的那几天退回规则。
-              改轮转规则（白白白夜夜休休）在「名单」里，它跟单日改动是两件事。
-            </p>
-            <p v-if="weekExcludedNote" class="gB-note">{{ weekExcludedNote }}</p>
+            <div class="gW-hintLine">
+              点一格落笔；点列头 / 人名选区，再用工具条「刷」批量。改规则在「名单」里。
+              <details class="gW-help">
+                <summary>?</summary>
+                <p class="gB-note">
+                  点一格 = 用上方工具条上的班次写这一格；点日期列头 / 人名选一片，再用「刷」批量写。
+                  「清」把选中日子里手改过的那几天退回规则；改轮转规则在「名单」里。
+                </p>
+                <p v-if="weekNoDataNote" class="gB-note">{{ weekNoDataNote }}</p>
+                <p v-if="weekBeyondDays.length" class="gB-note">
+                  这一周里有 {{ weekBeyondDays.length }} 天超出了展开窗口（只铺到 {{ week.window_end }}），
+                  那几格还是虚的。
+                </p>
+                <p v-if="weekExcludedNote" class="gB-note">{{ weekExcludedNote }}</p>
+              </details>
+            </div>
           </template>
+          </section>
         </template>
 
         <template v-else-if="panel === 'roster'">
-          <div class="gB-card gB-card-plain">
-            <div class="gB-card-hd">
-              <b>名单 · 规则</b>
-              <span>一人一条</span>
-              <em>{{ roster.length }} 人</em>
+          <section class="gPanel gRosterPanel">
+            <div class="gPanel-hd">
+              <i class="gLed sig"></i>
+              <h2>名单 · 规则</h2>
+              <span class="gPanel-hint">一人一条 · {{ roster.length }} 人</span>
+              <span class="gPanel-more">固定班 / 编周期</span>
             </div>
-            <div v-for="employee in roster" :key="employee.id" class="gR">
-              <div class="gR-main">
-                <b>{{ employee.name || employee.phone }}</b>
-                <span>{{ employee.job_title || '—' }}</span>
-                <span v-if="employee.disabled" class="gR-off">已停用</span>
-                <span v-else-if="!employee.approved" class="gR-off">待批准</span>
-                <em :class="{ on: employee.rule }">{{ ruleLabel(employee.rule) }}</em>
-              </div>
-              <div class="gR-act">
-                <button
-                  v-for="shift in activeShifts"
-                  :key="shift.id"
-                  type="button"
-                  class="gBtn"
-                  :disabled="busyEmployeeId === employee.id"
-                  @click="setFixedShift(employee, shift.id)"
-                >固定{{ shift.name }}</button>
-                <button
-                  v-if="employee.rule"
-                  type="button"
-                  class="gBtn ghost"
-                  :disabled="busyEmployeeId === employee.id"
-                  @click="clearRule(employee)"
-                >清空</button>
-                <button
-                  type="button"
-                  class="gBtn ghost"
-                  :class="{ on: cycleOpenId === employee.id }"
-                  :disabled="busyEmployeeId === employee.id"
-                  @click="cycleOpenId === employee.id ? closeCycle() : openCycle(employee)"
-                >{{ cycleOpenId === employee.id ? '收起' : '编周期' }}</button>
-              </div>
-              <div v-if="cycleOpenId === employee.id" class="gC">
-                <input
-                  v-model="cycleText"
-                  class="gC-in"
-                  type="text"
-                  spellcheck="false"
-                  :placeholder="cyclePlaceholder"
-                  :disabled="busyEmployeeId === employee.id"
-                  @keyup.enter="saveCycle(employee)"
-                >
-                <label class="gC-anchor">
-                  <span>起点</span>
-                  <!-- 日期用站内组件（2026-10-13 用户裁定「日期格式要中国本土化」）：原生
-                       `<input type=date>` 的显示格式跟着**浏览器界面语言**走。 -->
-                  <LuyunDatePicker
-                    v-model="cycleAnchor"
-                    placeholder="选择起点"
-                    aria-label="轮转周期起点"
-                  />
-                </label>
-                <div class="gC-act">
+            <p v-if="!roster.length" class="gB-empty">名单是空的</p>
+            <div v-else class="gRosterGrid">
+              <div v-for="employee in roster" :key="employee.id" class="gR">
+                <div class="gR-main">
+                  <b>{{ employee.name || employee.phone }}</b>
+                  <span>{{ employee.job_title || '—' }}</span>
+                  <span v-if="employee.disabled" class="gR-off">已停用</span>
+                  <span v-else-if="!employee.approved" class="gR-off">待批准</span>
+                </div>
+                <!-- 规则摘要：本周 7 格（一…日），与周表同一套读法。 -->
+                <div class="gR-week" :title="ruleLabel(employee.rule)">
+                  <span
+                    v-for="(cell, index) in ruleWeekCells(employee)"
+                    :key="index"
+                    class="gR-day"
+                    :class="{ off: cell === '休' }"
+                  ><i>{{ WEEK_HEADS[index] }}</i><b>{{ cell }}</b></span>
+                  <span v-if="!ruleWeekCells(employee).length" class="gR-norule">
+                    {{ employee.rule && employee.rule.invalid ? '规则坏了，重配一条' : '还没配规则' }}
+                  </span>
+                </div>
+                <div class="gR-act">
                   <button
+                    v-for="shift in activeShifts"
+                    :key="shift.id"
                     type="button"
                     class="gBtn"
                     :disabled="busyEmployeeId === employee.id"
-                    @click="saveCycle(employee)"
-                  >保存周期</button>
-                  <button type="button" class="gBtn ghost" @click="closeCycle()">取消</button>
-                </div>
-                <p class="gHint">空格隔开，一格一天，从起点那天算第 1 格；「休」= 那天不排班。起点留空就是今天。</p>
-                <p v-if="cycleError" class="gErr">{{ cycleError }}</p>
-              </div>
-              <div class="gZ">
-                <label v-for="shift in activeShifts" :key="shift.id" class="gZ-pick">
-                  <span>{{ shift.name }}</span>
-                  <select
-                    class="gZ-sel"
-                    :value="zoneOf(employee, shift.id)"
+                    @click="setFixedShift(employee, shift.id)"
+                  >固定{{ shift.name }}</button>
+                  <button
+                    v-if="employee.rule"
+                    type="button"
+                    class="gBtn ghost"
                     :disabled="busyEmployeeId === employee.id"
-                    @change="setZoneDefault(employee, shift.id, $event.target.value)"
+                    @click="clearRule(employee)"
+                  >清空</button>
+                  <button
+                    type="button"
+                    class="gBtn ghost"
+                    :class="{ on: cycleOpenId === employee.id }"
+                    :disabled="busyEmployeeId === employee.id"
+                    @click="cycleOpenId === employee.id ? closeCycle() : openCycle(employee)"
+                  >{{ cycleOpenId === employee.id ? '收起' : '编周期' }}</button>
+                </div>
+                <div v-if="cycleOpenId === employee.id" class="gC">
+                  <input
+                    v-model="cycleText"
+                    class="gC-in"
+                    type="text"
+                    spellcheck="false"
+                    :placeholder="cyclePlaceholder"
+                    :disabled="busyEmployeeId === employee.id"
+                    @keyup.enter="saveCycle(employee)"
                   >
-                    <option value="">未配区</option>
-                    <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
-                  </select>
-                </label>
-                <span v-if="!zones.length" class="gZ-none">还没有工作区，先去卫生的工作区页面建一个</span>
+                  <label class="gC-anchor">
+                    <span>起点</span>
+                    <!-- 日期用站内组件（2026-10-13 用户裁定「日期格式要中国本土化」）：原生
+                         `<input type=date>` 的显示格式跟着**浏览器界面语言**走。 -->
+                    <LuyunDatePicker
+                      v-model="cycleAnchor"
+                      placeholder="选择起点"
+                      aria-label="轮转周期起点"
+                    />
+                  </label>
+                  <div class="gC-act">
+                    <button
+                      type="button"
+                      class="gBtn"
+                      :disabled="busyEmployeeId === employee.id"
+                      @click="saveCycle(employee)"
+                    >保存周期</button>
+                    <button type="button" class="gBtn ghost" @click="closeCycle()">取消</button>
+                  </div>
+                  <p class="gHint">空格隔开，一格一天，从起点那天算第 1 格；「休」= 那天不排班。起点留空就是今天。</p>
+                  <p v-if="cycleError" class="gErr">{{ cycleError }}</p>
+                </div>
+                <div class="gZ">
+                  <label v-for="shift in activeShifts" :key="shift.id" class="gZ-pick">
+                    <span>{{ shift.name }}</span>
+                    <select
+                      class="gZ-sel"
+                      :value="zoneOf(employee, shift.id)"
+                      :disabled="busyEmployeeId === employee.id"
+                      @change="setZoneDefault(employee, shift.id, $event.target.value)"
+                    >
+                      <option value="">未配区</option>
+                      <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
+                    </select>
+                  </label>
+                  <span v-if="!zones.length" class="gZ-none">还没有工作区，先去卫生的工作区页面建一个</span>
+                </div>
               </div>
             </div>
-            <p v-if="!roster.length" class="gB-empty">名单是空的</p>
-            <p class="gB-note">「固定一个班」和「编周期」（白白白夜夜休休）配的是同一样东西：一人一条轮转规则。规则改了只重排今天以后，过去的日子不动。</p>
-          </div>
+            <details class="gW-help">
+              <summary>?</summary>
+              <p class="gB-note">「固定一个班」和「编周期」（白白白夜夜休休）配的是同一样东西：一人一条轮转规则。规则改了只重排今天以后，过去的日子不动。</p>
+            </details>
+          </section>
         </template>
       </div>
 
-      <!-- 笔栏（票 14 修订，2026-10-13 用户真机裁定）：**常驻**在周表这一栏的底部，折叠态
-           一行 ~70px —— `刷` 标签、班次按钮组（横滑）、工作区、↺ 撤销。**点一格就用当前笔
-           写那一格**，不需要「应用」（用户①：原来多一步）。底部导航不让位、照旧留在原位，
-           笔栏叠在它上面（`.sched-page` 不再自建层叠上下文，见那一处的注释）。
-           上一版那套底栏让位（含文件末尾那条无作用域规则）也一并退役。 -->
-      <div
-        v-if="panel === 'week'"
-        class="gPick"
-        role="group"
-        aria-label="落笔"
-      >
-        <!-- 提示只有这一行（票 14 修订口径 4）：出现后几秒自己消失，下一次操作替换它。
-             逐格点名（谁被跳过、谁有待批申请）收进「看全部」——信息不丢，但不再常驻五六行。 -->
-        <p
-          v-if="pickNotice"
-          class="gPick-note"
-          :class="{ gErr: pickNotice.warn }"
-          aria-live="polite"
-        >
-          <span class="gPick-note-text">{{ pickNotice.text }}</span>
-          <button
-            v-if="pickNotice.details.length"
-            class="gBtn ghost"
-            type="button"
-            aria-controls="gPick-detail"
-            :aria-expanded="noticeOpen ? 'true' : 'false'"
-            @click="noticeOpen = !noticeOpen"
-          >{{ noticeOpen ? '收起' : '看全部' }}</button>
-        </p>
-        <div v-if="noticeOpen && pickNotice" id="gPick-detail" class="gPick-detail">
-          <p v-for="(line, index) in pickNotice.details" :key="index" class="gHint">{{ line }}</p>
-        </div>
 
-        <!-- 选区摘要：**只在选了整列 / 整行时出现**（点「刷」才批量应用）。不选区时这一行
-             完全不出现 —— 不用批量的人不该看见它（用户③：我就想逐格改）。 -->
-        <div v-if="pickActive" class="gPick-region">
-          <b class="gPick-sum">{{ pickTitle }}</b>
-          <span class="gW-tip">{{ pickCountText }}</span>
-          <button class="gChip" type="button" :disabled="pickBusy" @click="applyRegion()">刷</button>
-          <button
-            class="gChip"
-            type="button"
-            :disabled="pickBusy"
-            title="清除班次：把选中的日子里手改过的那几天退回规则"
-            @click="applyRegionClear()"
-          >清</button>
-        </div>
-
-        <!-- 工作区：点按钮才展开这一行横滑的区名（默认收起 —— 少一行就少压掉一行员工）。
-             按钮组而不是原生下拉控件：那个弹层由系统画，在这个贴底的位置会飘到页面中间
-             （2026-10-13 用户截图），而那层我们一个像素都改不了。 -->
-        <div v-if="penZoneOpen" class="gPick-zones">
-          <button
-            class="gChip"
-            type="button"
-            :class="{ on: penZoneId === '' }"
-            :disabled="pickBusy"
-            @click="penZoneId = ''"
-          >跟固定区</button>
-          <button
-            v-for="zone in zones"
-            :key="zone.id"
-            class="gChip"
-            type="button"
-            :class="{ on: penZoneId === String(zone.id) }"
-            :disabled="pickBusy"
-            @click="penZoneId = String(zone.id)"
-          >{{ zone.name }}</button>
-        </div>
-
-        <!-- 笔栏本体：一行。笔上的班次 / 工作区选一次就一直用（用户④：要「一支笔」的感觉）。
-             棋子直接排在整行里、由整行换行 —— 班次多于 3 张时两行排开（见 `.gPick-row`），
-             而不是在一条窄横滑里把后两个班次藏起来。 -->
-        <div class="gPick-row">
-          <span class="gPen-tag">刷</span>
-          <button
-            v-for="shift in activeShifts"
-            :key="shift.id"
-            type="button"
-            class="gChip"
-            :class="[toneClass(shift.id), { on: !penRest && !!penShift && penShift.id === shift.id }]"
-            :aria-pressed="!penRest && !!penShift && penShift.id === shift.id ? 'true' : 'false'"
-            :disabled="pickBusy"
-            @click="pickPenShift(shift)"
-          ><i class="dt"></i>{{ shift.name }}</button>
-          <button
-            class="gChip"
-            type="button"
-            :class="{ on: penRest }"
-            :aria-pressed="penRest ? 'true' : 'false'"
-            :disabled="pickBusy"
-            @click="pickPenRest()"
-          ><i class="dt rest"></i>休</button>
-          <button
-            class="gChip gPen-zone"
-            type="button"
-            :aria-expanded="penZoneOpen ? 'true' : 'false'"
-            :disabled="pickBusy"
-            @click="penZoneOpen = !penZoneOpen"
-          >{{ penZoneOpen ? '收起' : penZoneName }}</button>
-          <!-- 撤销：没有可撤销的那一批时禁用（口径 1）。撤销是内存级的（ADR 0107 决策 7），
-               那句说明跟着回执走；按钮上再挂一条 title 兜底。 -->
-          <button
-            class="gChip gPick-undo"
-            type="button"
-            :disabled="pickBusy || !pickUndo"
-            title="撤销只留最近一批、也只在这台手机上"
-            aria-label="撤销刚才那一批"
-            @click="undoLast()"
-          >↺</button>
-        </div>
-      </div>
 
       <!-- 选区里有过去的日子时，点应用弹**一次**确认并点名是哪几天（ADR 0108 决策 3）：
            不是每次应用都弹，也不是每格弹一次。 -->
       <ConfirmDialog
         v-if="pastConfirm"
-        :title="pastConfirm.clear ? '过去的日子只能改成某个班' : '改过去的日子'"
+        :title="pastConfirm.clear ? '清除过去的日子' : '改过去的日子'"
         :message="pastConfirmText"
         :confirm-label="pastConfirm.clear ? '照样清除' : '照改'"
         cancel-label="再想想"
@@ -1811,8 +1996,10 @@ useNudgePull({
 </template>
 
 <style scoped>
-/* 版式照抄原型 B（`.scratch/scheduling/prototype/admin-variants.html` 的 .gB-*），
-   令牌来自 /hygiene-admin.css；这里只补原型里没有的两样：月切换条、名单行。 */
+/* B 案 v2 版式（2026-10-17）：页头 = kicker + H1 + 读数胶囊 + 视角 / 周期切换；月历是钢面
+   方格（1px 线、--r-1、日期 mono、班次 = 色条 + 人数）；当天名单挪到右侧面板（面板头 LED
+   + 人名列）；底部三条待处理改成列表行。周表 / 笔栏 / 选区 / 撤销的交互一个字不动。
+   配色只走语义令牌；字体只分 sans / mono。 */
 .sched-page {
   position: relative;
   /* **这里不能给 z-index**（原来那条 `z-index: 1` 已删）：一给就自建层叠上下文，把容器内
@@ -1822,42 +2009,128 @@ useNudgePull({
      `public/hygiene-admin.css` 里 `.hygiene-admin` 那条「这里**不能**给 z-index」。 */
   min-height: 100%;
 }
-.gB {
-  min-height: 100%;
-  background: radial-gradient(90% 40% at 85% 0%, rgba(95, 214, 230, .08), transparent 60%);
-  padding-bottom: 28px;
+.gB { min-height: 100%; padding-bottom: 28px; }
+.gB-body {
+  display: flex; flex-direction: column; gap: var(--sp-4);
+  width: 100%; max-width: 1052px; margin: 0 auto;
+  padding: 18px clamp(16px, 4vw, 32px) 22px;
 }
-.gB-body { max-width: 560px; margin: 0 auto; padding: 4px 16px 22px; }
-.gB-mon { display: flex; align-items: baseline; gap: 10px; padding: 2px 2px 10px; }
-.gB-mon b { font-family: var(--font-song); font-size: 16px; letter-spacing: .12em; }
-.gB-mon span { font-size: 10.5px; color: var(--hy-faint); }
-.gB-mon em { font-style: normal; margin-left: auto; font-size: 10.5px; color: var(--hy-faint); }
-.gB-bar { display: flex; align-items: center; gap: 6px; padding: 0 2px 10px; flex-wrap: wrap; }
-.gMsg { margin: 0 0 10px; font-size: 12px; color: var(--hy-seal-bright); }
-.gB-head { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; padding: 0 0 5px; }
-.gB-head span { text-align: center; font-size: 10px; color: var(--hy-faint); letter-spacing: .06em; }
-.gB-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
-.gB-d {
-  position: relative; min-height: 62px; border-radius: 10px; border: 1px solid transparent;
-  background: var(--hy-surface-2); padding: 7px 6px 6px; display: flex; flex-direction: column;
-  gap: 5px; font: inherit; color: inherit; text-align: left; cursor: pointer;
-  /* 五个班次时「6 · 0 · 2 · 1 · 1」这一行会把格子撑宽（grid 项的 min-width 默认是 auto），
-     七列一起涨就把最后两列顶出屏幕 —— 让它自己在格子里换行。 */
+/* ── 页头（3 行：kicker / H1 + 主操作同基线 / 范围 + 视角）─────────────── */
+.gHead {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "kick kick" "title action" "meta meta";
+  align-items: end; column-gap: var(--sp-4); row-gap: 7px;
+}
+.gKicker {
+  grid-area: kick; margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
+  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+}
+.gTitleRow { grid-area: title; display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
+.gTitle {
+  margin: 0; font-family: var(--font-sans); font-size: 26px; line-height: 1;
+  font-weight: 600; letter-spacing: .01em; color: var(--ink);
+}
+.gHeadActions { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); }
+.gLink { flex: none; min-height: var(--tap); background: transparent; border-color: transparent; color: var(--ink-dim); }
+.gLink b { font-weight: 600; color: var(--ink); }
+.gMetaRow {
+  grid-area: meta; display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
   min-width: 0;
 }
-.gB-d.mute { background: transparent; border-color: var(--hy-line); opacity: .35; }
-.gB-d .n { font-family: var(--font-mono); font-size: 11px; color: var(--hy-muted); line-height: 1; }
-.gB-d .c { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px; font-family: var(--font-mono); font-size: 11.5px; line-height: 1; }
-.gB-d .c b { font-weight: 600; }
-.gB-d .c i { font-style: normal; font-weight: 600; }
-.gB-d .c em { font-style: normal; color: var(--hy-faint); font-size: 9px; }
-.gB-d.today { border-color: var(--hy-mint-line); background: var(--hy-mint-soft); }
-.gB-d.today .n { color: var(--hy-jade); font-weight: 700; }
-/* 待批角标（spec US 11）：这天有等着批的申请。琥珀是票 07 特意留给「待处理」的颜色，
-   青点留给「这天被手改过」—— 两种记号各说各的事，不能混。 */
+.gPeriod { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0; }
+.gPeriod b { font-family: var(--font-sans); font-size: 13px; font-weight: 600; color: var(--ink); }
+.gPeriod span { font-family: var(--font-mono); font-size: 10px; color: var(--ink-dim); }
+.gPeriod em { font-style: normal; font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); }
+/* 桌面：翻月在面板头；手机：翻月与视角切换同一行（页头这份才出现）。 */
+.gNav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.gNav--head { display: none; margin-left: auto; }
+.gNav--panel { margin-left: auto; }
+.gSeg { display: inline-flex; align-items: center; gap: 4px; }
+.gMsg { margin: 0; font-size: 12px; color: var(--danger-bright); }
+/* ── 面板（唯一卡片语言） ─────────────────────────────────────────────── */
+.gPanel {
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: var(--hy-shadow-sm); overflow: hidden;
+}
+.gPanel-hd {
+  display: flex; align-items: center; gap: 9px;
+  padding: 11px 14px; border-bottom: 1px solid var(--line);
+}
+.gPanel-hd h2 {
+  margin: 0; font-family: var(--font-sans); font-size: 12.5px; line-height: 1;
+  font-weight: 600; letter-spacing: .06em; color: var(--ink);
+}
+.gPanel-hint { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; line-height: 1; color: var(--ink-faint); }
+.gPanel-more { font-size: 10.5px; color: var(--ink-dim); }
+/* 月历 / 周表全宽；名单面板沿用 gB-card 的挂点。 */
+.gWeekPanel { overflow: visible; }
+/* ── 月历：主面板 + 右侧当天名单 ──────────────────────────────────────── */
+.gDash { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; align-items: start; }
+.gSide { display: flex; flex-direction: column; gap: 10px; }
+/* 右栏顶/底两条：与面板同宽、单行 44px。 */
+.gSide > .gPend {
+  margin: 0; min-height: 44px; padding: 7px 12px;
+  border: 1px solid var(--line); border-radius: var(--r-2);
+  background: var(--surface-1);
+}
+.gSide > .gConfigGap { border-style: dashed; margin-top: auto; }
+.gB-card { display: flex; flex-direction: column; }
+/* 当天名单：固定高度内滚，头部不动。 */
+.gB-dayBody { max-height: 460px; overflow-y: auto; padding-bottom: 10px; }
+.gDrawerClose { display: none; margin-left: auto; min-height: var(--tap); padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--r-1); background: transparent; color: var(--ink-dim); font: inherit; font-size: 10px; cursor: pointer; }
+/* 待批请假影响的日子：日卡/笔栏之外的一条段（不是第四块面板）。 */
+.gGap { margin-top: 12px; border-top: 1px solid var(--line); }
+.gGap-hd {
+  display: flex; align-items: baseline; gap: 10px; padding: 9px 14px 5px;
+}
+.gGap-hd span {
+  font-family: var(--font-sans); font-size: 9px; font-weight: 500;
+  letter-spacing: .18em; color: var(--ink-faint);
+}
+.gGap-hd em { margin-left: auto; font-style: normal; font-family: var(--font-mono); font-size: 9px; color: var(--ink-faint); }
+.gGap-empty { margin: 0; padding: 6px 14px 12px; font-size: 10.5px; color: var(--ink-faint); }
+.gGapList { list-style: none; margin: 0; padding: 0 0 8px; }
+.gGapRow {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center;
+  gap: 10px; width: 100%; min-height: var(--tap); padding: 4px 14px;
+  border: 0; background: transparent; color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.gGapRow:hover { background: var(--surface-2); }
+.gGapRow b { font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
+.gGapN { font-family: var(--font-mono); font-size: 10px; color: var(--warn); }
+.gGapGo { color: var(--ink-faint); }
+.gCalPanel { padding-bottom: 12px; }
+.gB-head { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; padding: 12px 14px 6px; }
+.gB-head span {
+  text-align: center; font-family: var(--font-sans); font-size: 8.5px;
+  line-height: 1; letter-spacing: .18em; color: var(--ink-faint);
+}
+.gB-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; padding: 0 14px; }
+/* 钢面方格：1px 线 + --r-1，日期 mono，班次在下面排成「色条 + 人数」。 */
+.gB-d {
+  position: relative; min-height: 64px; min-width: 0; padding: 6px 5px 5px;
+  display: flex; flex-direction: column; gap: 5px;
+  border: 1px solid var(--line); border-radius: var(--r-1);
+  background: var(--surface-1); color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.gB-d:hover { border-color: var(--line-strong); }
+.gB-d.mute { background: transparent; border-style: dashed; opacity: .35; }
+.gB-d .n { font-family: var(--font-mono); font-size: 11px; line-height: 1; color: var(--ink-dim); }
+.gB-d .c { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; }
+.gB-d .cItem {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-family: var(--font-mono); font-size: 10px; line-height: 1; color: inherit;
+}
+.gB-d .cBar { width: 3px; height: 10px; border-radius: 1px; background: currentColor; flex: none; }
+.gB-d.today { border-color: var(--action); background: var(--action-soft); }
+.gB-d.today .n { color: var(--action); font-weight: 700; }
+/* 待批角标（spec US 11）：这天有等着批的申请。琥珀留给「待处理」、青点留给「这天被
+   手改过」—— 两种记号各说各的事，不能混。 */
 .gB-d .pend {
   position: absolute; top: 3px; right: 3px; min-width: 15px; height: 15px;
-  padding: 0 3px; border-radius: 999px; background: var(--hy-amber); color: var(--hy-night);
+  padding: 0 3px; border-radius: var(--r-full); background: var(--warn); color: var(--action-ink);
   font-family: var(--font-mono); font-size: 9.5px; font-weight: 700; line-height: 15px;
   text-align: center;
 }
@@ -1868,12 +2141,13 @@ useNudgePull({
   border-radius: var(--r-full); border: 1px solid var(--info); color: var(--info);
   font-family: var(--font-mono); font-size: 9px; line-height: 11px;
 }
-.gB-d.sel { border-color: var(--hy-mint); box-shadow: var(--hy-glow-mint); }
-/* 这天被单日覆盖改过（票 07）：右上角一个青点 —— 人数会变，但「改成休」那种改动
-   在人数里根本看不出来，得有个跟人数无关的标记。 */
+.gB-d.sel { border-color: var(--action); box-shadow: 0 0 0 1px var(--action); }
+/* 这天被单日覆盖改过（票 07）：右下角一个 6px 青点 —— 人数会变，但「改成休」那种改动
+   在人数里根本看不出来，得有个跟人数无关的标记。放右下是为了不跟右上「待批」、左下
+   「半天休」两个记号叠在一起。 */
 .gB-d.over::after {
-  content: ""; position: absolute; top: 6px; right: 6px; width: 5px; height: 5px;
-  border-radius: 50%; background: var(--hy-aqua);
+  content: ""; position: absolute; bottom: 5px; right: 5px; width: 6px; height: 6px;
+  border-radius: 50%; background: var(--info);
 }
 .tone-mint { color: var(--hy-mint); }
 .tone-aqua { color: var(--hy-aqua); }
@@ -1881,94 +2155,169 @@ useNudgePull({
 .tone-seal { color: var(--hy-seal-bright); }
 .tone-violet { color: var(--hy-violet); }
 .tone-rose { color: var(--hy-rose); }
-.gB-legend { display: flex; align-items: center; gap: 12px; margin-top: 11px; font-size: 10.5px; color: var(--hy-faint); padding: 0 2px; flex-wrap: wrap; }
-.gB-legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: middle; background: currentColor; }
-.gB-legend span { color: var(--hy-faint); }
+.gB-legend {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px 0; font-size: 10px; color: var(--ink-faint);
+}
+.gB-legend i {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  margin-right: 5px; vertical-align: middle; background: currentColor;
+}
+.gB-legend span { color: var(--ink-faint); }
 .gB-legend .gB-ov i { background: var(--hy-aqua); }
 .gB-legend .gB-pend i { background: var(--hy-amber); }
 .gB-legend .gB-half i { background: var(--info); }
-.gB-card { margin-top: 14px; border: 1px solid var(--hy-line); border-radius: var(--hy-radius-lg); background: var(--hy-surface); padding: 13px 14px; }
-.gB-card-plain { margin-top: 0; }
-.gB-card-hd { display: flex; align-items: baseline; gap: 9px; padding-bottom: 11px; border-bottom: 1px solid var(--hy-line); }
-.gB-card-hd b { font-family: var(--font-song); font-size: 15px; letter-spacing: .08em; }
-.gB-card-hd span { font-size: 11px; color: var(--hy-muted); }
-.gB-card-hd em { margin-left: auto; font-style: normal; font-size: 10.5px; color: var(--hy-faint); }
-.gB-grp { padding-top: 11px; }
-.gB-grp-t { display: flex; align-items: center; gap: 7px; font-size: 11px; margin-bottom: 7px; }
-.gB-grp-t .d { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.gB-grp-t b { font-family: var(--font-song); font-size: 12.5px; letter-spacing: .08em; }
-.gB-grp-t i { font-style: normal; font-family: var(--font-mono); color: var(--hy-ink); }
-.gB-grp-t.off { color: var(--hy-faint); }  /* 「休」那一组：没有班次色，就是不在班上 */
-.gB-grp-t.leave { color: var(--hy-aqua); }  /* 「请假」那一组（票 08）：批过的假，跟「休」分开 */
-.gB-names { display: flex; flex-wrap: wrap; gap: 6px; }
-/* 名字是一颗可以按的棋子（票 07）：点它就地改这一天。 */
-.gB-name {
-  font: inherit; font-size: 11.5px; color: var(--hy-ink); background: var(--hy-surface-2);
-  border: 1px solid var(--hy-line); border-radius: 7px; padding: 3px 8px; cursor: pointer;
+.gB-note { margin: 10px 14px 0; font-size: 10px; line-height: 1.7; color: var(--ink-faint); }
+/* ── 当天名单（右侧面板） ─────────────────────────────────────────────── */
+.gB-card {
+  border: 1px solid var(--line); border-radius: var(--r-2);
+  background: var(--surface-1); overflow: hidden;
 }
-.gB-name.over { border-color: var(--hy-aqua); }  /* 这天跟规则不一样 */
-.gB-name.on { border-color: var(--hy-mint); box-shadow: var(--hy-glow-mint); }
-.gB-empty { margin: 6px 0 0; font-size: 11.5px; color: var(--hy-faint); }
-.gB-note { margin: 14px 0 0; font-size: 11px; color: var(--hy-faint); line-height: 1.7; }
-.gPend {
-  margin-top: 12px; width: 100%; display: flex; align-items: center; gap: 9px; padding: 10px 12px;
-  border: 1px solid var(--hy-amber-line); border-radius: var(--hy-radius-md);
-  background: var(--hy-amber-soft); font-size: 12.5px; color: var(--hy-ink); font: inherit;
+.gB-card-hd {
+  display: flex; align-items: center; gap: 9px;
+  padding: 11px 14px; border-bottom: 1px solid var(--line);
+}
+.gB-card-hd b {
+  font-family: var(--font-sans); font-size: 12.5px; line-height: 1;
+  font-weight: 600; letter-spacing: .06em; color: var(--ink);
+}
+.gB-card-hd span { font-size: 10px; color: var(--ink-dim); }
+.gB-card-hd em { margin-left: auto; font-style: normal; font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-faint); }
+.gB-grp { padding: 10px 14px 0; }
+.gB-grp-t { display: flex; align-items: center; gap: 7px; font-size: 10px; margin-bottom: 4px; }
+.gB-grp-t .d { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.gB-grp-t b { font-family: var(--font-sans); font-size: 10px; font-weight: 600; letter-spacing: .12em; }
+.gB-grp-t i { font-style: normal; font-family: var(--font-mono); font-size: 10px; color: var(--ink); }
+.gB-grp-t.off { color: var(--ink-faint); }  /* 「休」那一组：没有班次色，就是不在班上 */
+.gB-grp-t.leave { color: var(--hy-aqua); }  /* 「请假」那一组（票 08）：批过的假，跟「休」分开 */
+/* 人名列：一行一个人（44px 触控），名字在左、工作区在右。 */
+.gB-names { display: flex; flex-direction: column; }
+.gB-name {
+  width: 100%; min-height: 44px; display: flex; align-items: center; gap: 8px;
+  padding: 0 2px; border: 0; border-top: 1px solid var(--wb-ink-a08);
+  background: transparent; color: var(--ink);
+  font: inherit; font-family: var(--font-sans); font-size: 11.5px;
   text-align: left; cursor: pointer;
 }
-.gPend .n { width: 20px; height: 20px; flex: none; border-radius: 6px; display: grid; place-items: center; font-family: var(--font-mono); font-size: 11.5px; font-weight: 700; color: #2a1c05; background: var(--hy-amber); }
-.gPend b { font-weight: 600; color: var(--hy-ink); font-size: 12.5px; }
-.gPend span { color: var(--hy-muted); font-size: 12.5px; }
-.gPend .go { margin-left: auto; color: var(--hy-amber); font-size: 14px; }
+.gB-name:hover { background: var(--surface-2); }
+.gB-name.over { color: var(--ink); }  /* 这天跟规则不一样 */
+.gB-name.over::before {
+  content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%;
+  background: var(--info);
+}
+.gB-name.on { background: var(--action-soft); color: var(--action); font-weight: 600; }
+.gB-empty { margin: 0; padding: 10px 14px 14px; font-size: 11px; color: var(--ink-faint); }
+/* 单日覆盖编辑器（票 07）。当前 / 信息态用 --action 描边。 */
+.gD {
+  margin: 10px 14px 14px; padding: 10px; display: flex; flex-direction: column; gap: 7px;
+  border: 1px solid var(--action); border-radius: var(--r-2); background: var(--surface-2);
+}
+.gD-hd { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.gD-hd b { font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--ink); }
+.gD-hd span { font-family: var(--font-mono); font-size: 10px; color: var(--ink-dim); }
+.gD-hd em { margin-left: auto; font-style: normal; font-size: 9.5px; color: var(--info); }
+.gD-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-faint); }
+.gD-act { display: flex; gap: 6px; flex-wrap: wrap; }
+.gD-hint { margin: 0; font-size: 10px; color: var(--ink-faint); line-height: 1.6; }
+/* ── 待处理：三条列表行 ──────────────────────────────────────────────── */
+.gTasks { display: flex; flex-direction: column; }
+.gPend {
+  display: grid; grid-template-columns: 24px minmax(0, 1fr) auto;
+  grid-template-areas: "n b go" "n span go";
+  align-items: center; gap: 2px 10px;
+  width: 100%; min-height: 44px; padding: 10px 14px;
+  border: 0; border-top: 1px solid var(--wb-ink-a08); background: transparent;
+  color: var(--ink); font: inherit; text-align: left; cursor: pointer;
+}
+.gPend:first-child { border-top: 0; }
+.gPend:hover { background: var(--surface-2); }
+.gPend .n {
+  grid-area: n; width: 24px; height: 24px; border-radius: var(--r-1);
+  display: grid; place-items: center;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 700;
+  color: var(--action-ink); background: var(--warn);
+}
+.gPend b { grid-area: b; font-size: 11.5px; font-weight: 600; color: var(--ink); }
+.gPend span { grid-area: span; font-size: 9.5px; line-height: 1.5; color: var(--ink-dim); }
+.gPend .go { grid-area: go; color: var(--ink-faint); font-size: 14px; }
 /* 请假待办（票 08）：同一根条换个色 —— 青=请假，琥珀=要配规则。
    两根条的活不一样：这根是去另一页批假，那根是在本页开名单。 */
-.gTodo { border-color: var(--hy-aqua); background: rgba(94, 234, 212, .08); }
-.gTodo .n { color: var(--hy-night); background: var(--hy-aqua); }
+.gTodo { border-color: var(--hy-aqua); background: transparent; }
+.gTodo .n { color: var(--action-ink); background: var(--hy-aqua); }
 .gTodo .go { color: var(--hy-aqua); }
+/* ── 小控件 ───────────────────────────────────────────────────────────── */
 .gBtn {
-  font: inherit; font-size: 11px; color: var(--hy-muted); background: var(--hy-surface-2);
-  border: 1px solid var(--hy-line); border-radius: 999px; padding: 4px 10px; cursor: pointer;
+  font: inherit; font-family: var(--font-sans); font-size: 10.5px; color: var(--ink-dim);
+  background: var(--surface-1); border: 1px solid var(--line-strong);
+  border-radius: var(--r-1); padding: 6px 10px; cursor: pointer;
 }
 .gBtn:disabled { opacity: .45; cursor: default; }
-.gBtn.ghost { color: var(--hy-faint); }
-.gBtn.on { color: var(--hy-mint); border-color: var(--hy-mint-line); background: var(--hy-mint-soft); }
+.gBtn.ghost { color: var(--ink-faint); }
+.gBtn.on { color: var(--action); border-color: var(--action); background: var(--action-soft); }
+.gSeg .gBtn.on { color: var(--action); border-color: var(--action); background: var(--action-soft); }
 .gAct {
-  margin-left: auto; font: inherit; font-size: 11px; color: var(--hy-mint);
-  border: 1px solid var(--hy-mint-line); background: var(--hy-mint-soft);
-  border-radius: 999px; padding: 4px 10px; cursor: pointer;
+  margin-left: auto; font: inherit; font-size: 10px; color: var(--action);
+  border: 1px solid var(--action); background: var(--action-soft);
+  border-radius: var(--r-full); padding: 4px 10px; cursor: pointer;
 }
-.gR { padding-top: 11px; }
-.gR + .gR { border-top: 1px solid var(--hy-line); margin-top: 11px; }
+/* ── 名单（规则 / 固定区） ───────────────────────────────────────────── */
+.gB-card-plain { margin-top: 0; }
+.gB-card-plain .gB-card-hd span { font-size: 10px; color: var(--ink-dim); }
+.gB-card-plain .gB-card-hd em { margin-left: auto; font-style: normal; font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-faint); }
+.gRosterGrid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px; padding: 14px; align-items: stretch;
+}
+.gR {
+  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-2);
+  background: var(--surface-2);
+}
 .gR-main { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.gR-main b { font-size: 13px; }
-.gR-main span { font-size: 11px; color: var(--hy-faint); }
-.gR-main .gR-off { color: var(--hy-seal-bright); }
-.gR-main em { margin-left: auto; font-style: normal; font-family: var(--font-mono); font-size: 11px; color: var(--hy-faint); }
-.gR-main em.on { color: var(--hy-mint); }
+.gR-main b { font-family: var(--font-sans); font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.gR-main span { font-size: 10px; color: var(--ink-faint); }
+.gR-main .gR-off { color: var(--danger-bright); }
+.gR-week {
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px;
+}
+.gR-day {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 4px 0; border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  background: var(--surface-1); min-width: 0;
+}
+.gR-day i { font-style: normal; font-size: 8px; color: var(--ink-faint); }
+.gR-day b {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 500; color: var(--ink);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gR-day.off { border-style: dashed; }
+.gR-day.off b { color: var(--ink-faint); }
+.gR-norule { grid-column: 1 / -1; font-size: 10px; color: var(--warn); }
 .gR-act { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
 /* 每个班的固定工作区（票 03）。一行两个班次的下拉，窄屏自动换行。 */
 .gZ { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 7px; }
-.gZ-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--hy-faint); }
+.gZ-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-faint); }
 .gZ-sel {
-  font: inherit; font-size: 11px; color: var(--hy-ink); background: var(--hy-surface-2);
-  border: 1px solid var(--hy-line); border-radius: 7px; padding: 3px 6px; cursor: pointer;
+  font: inherit; font-family: var(--font-mono); font-size: 10.5px; color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--line-strong);
+  border-radius: var(--r-1); padding: 6px; min-height: var(--tap); cursor: pointer;
 }
 .gZ-sel:disabled { opacity: .45; cursor: default; }
-.gZ-none { font-size: 11px; color: var(--hy-faint); }
+.gZ-none { font-size: 10px; color: var(--ink-faint); }
 /* 轮转周期编辑器（票 04）。原型 B 的名单行里没有这一块 —— 展开后长在那一行下面。 */
 .gC {
-  margin-top: 8px; padding: 9px 10px; display: flex; flex-direction: column; gap: 7px;
-  border: 1px solid var(--hy-line); border-radius: var(--hy-radius-md); background: var(--hy-surface-2);
+  margin-top: var(--sp-2); padding: 9px 10px; display: flex; flex-direction: column; gap: 7px;
+  border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-2);
 }
 .gC-in {
-  font: inherit; font-family: var(--font-mono); font-size: 12px; color: var(--hy-ink);
-  background: var(--hy-surface); border: 1px solid var(--hy-line); border-radius: 7px; padding: 6px 8px;
-  letter-spacing: .06em;
+  font: inherit; font-family: var(--font-mono); font-size: 12px; color: var(--ink);
+  background: var(--surface-1); border: 1px solid var(--line-strong);
+  border-radius: var(--r-1); padding: 6px 8px; min-height: var(--tap); letter-spacing: .06em;
 }
-.gC-anchor { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--hy-faint); }
+.gC-anchor { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-faint); }
 .gC-anchor input {
-  font: inherit; font-size: 11px; color: var(--hy-ink); background: var(--hy-surface);
-  border: 1px solid var(--hy-line); border-radius: 7px; padding: 3px 6px;
+  font: inherit; font-size: 10.5px; color: var(--ink); background: var(--surface-1);
+  border: 1px solid var(--line-strong); border-radius: var(--r-1); padding: 3px 6px;
 }
 /* 日期组件替掉原生 date（2026-10-13）：`.gC-anchor input` 那几条对组件里那个
    `.dp--input` 不生效（scoped 样式够不进子组件），所以要补的只有**尺寸** ——
@@ -1976,88 +2325,88 @@ useNudgePull({
    在这里再写一遍既多余、又会让这份文件的 `--hy-*` 引用数越过 designGuard 的棘轮。
    这是排班表里的一小格，字号与内边距得跟旁边的文字对齐。 */
 .gC-anchor :deep(.luyun-date-picker .dp--input) {
-  font: inherit; font-size: 11px; width: 140px; min-height: 0;
+  font: inherit; font-size: 10.5px; width: 140px; min-height: 0;
 }
 .gC-act { display: flex; gap: 6px; }
-/* 提示与错误：周期编辑器（票 04）与选区动作条（票 14）共用同一对样式。 */
-.gHint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.6; }
-.gErr { margin: 0; font-size: 11px; color: var(--hy-seal-bright); line-height: 1.6; }
+.gHint { margin: 0; font-size: 10px; color: var(--ink-faint); line-height: 1.6; }
+.gErr { margin: 0; font-size: 10.5px; color: var(--danger-bright); line-height: 1.6; }
 .gB-zone {
-  margin-left: 5px; font-style: normal; font-family: var(--font-mono); font-size: 10px;
-  color: var(--hy-mint);
+  margin-left: auto; font-style: normal; font-family: var(--font-mono); font-size: 9.5px;
+  color: var(--action);
 }
-.gB-zone.off { color: var(--hy-faint); }
+.gB-zone.off { color: var(--ink-faint); }
 .gB-zone.leave { color: var(--hy-aqua); }  /* 批过的假：跟「休」和「未配区」都不一个色 */
 .gB-zone.half { color: var(--info); }  /* 休半天（票 07）：那天仍然上班，只是半天 */
-/* 单日覆盖编辑器（票 07）：点当天卡里的一个人，就地展开 —— 原型 B 里没有这一块，
-   它是「那一天跟规则不一样」的唯一入口。 */
-.gD {
-  margin-top: 11px; padding: 9px 10px; display: flex; flex-direction: column; gap: 7px;
-  border: 1px solid var(--hy-mint-line); border-radius: var(--hy-radius-md);
-  background: var(--hy-mint-soft);
-}
-.gD-hd { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.gD-hd b { font-size: 12.5px; }
-.gD-hd span { font-size: 11px; color: var(--hy-muted); }
-.gD-hd em { margin-left: auto; font-style: normal; font-size: 10.5px; color: var(--hy-aqua); }
-.gD-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--hy-faint); }
-.gD-act { display: flex; gap: 6px; flex-wrap: wrap; }
-.gD-hint { margin: 0; font-size: 10.5px; color: var(--hy-faint); line-height: 1.6; }
-
 /* ── 周表（员工 × 周，2026-09-30）────────────────────────────────────────
    版式：表头粘住、姓名列定宽、七列平分 —— 手机上不横向滚（跟月历那边同一个做法）。
    颜色只做辅助：格子里一定留一个字，因为 `SHIFT_TONES` 只有 4 个，第 5 个班次起会
    与第 1 个撞色（门店那套的图例就有 5 个班次）。 */
-.gSeg { display: inline-flex; align-items: center; gap: 4px; }
-.gSeg .gBtn.on { color: var(--hy-mint); border-color: var(--hy-mint-line); background: var(--hy-mint-soft); }
-.gW-tip { font-size: 10.5px; color: var(--hy-faint); }
+.gW-tip { font-size: 10px; color: var(--ink-faint); }
 /* 筛人：一屏只放得下四行多，名单十几号人时靠翻页找人太慢（图片里那套也有这个框）。 */
-.gW-find { display: flex; align-items: center; gap: 9px; padding: 0 2px 8px; }
-.gW-find input {
-  flex: 1; min-width: 0; font: inherit; font-size: 12px; color: var(--hy-ink);
-  background: var(--hy-surface-2); border: 1px solid var(--hy-line);
-  border-radius: 999px; padding: 6px 12px;
+.gW-findBtn {
+  margin-left: auto; min-width: var(--tap); min-height: var(--tap); padding: 0;
+  border: 0; border-radius: var(--r-1);
+  background: transparent; color: var(--ink-faint); font: inherit; font-size: 14px; line-height: 1; cursor: pointer;
 }
-.gW-find input::placeholder { color: var(--hy-faint); }
-.gW-find span { flex: none; font-size: 10.5px; color: var(--hy-faint); }
+.gW-find { display: flex; align-items: center; gap: 9px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.gW-hintLine { margin: 10px 14px 0; font-size: 10.5px; line-height: 1.6; color: var(--ink-faint); }
+.gW-help { display: inline; }
+.gW-help[open] { display: block; border-top: 1px solid var(--line); margin-top: 4px; }
+.gW-help summary {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; margin: 8px 14px; cursor: pointer;
+  border: 1px solid var(--line-strong); border-radius: 50%;
+  font-size: 10px; color: var(--ink-faint);
+}
+.gW-help .gB-note { margin: 0 14px 10px; }
+.gW-find input {
+  flex: 1; min-width: 0; min-height: var(--tap);
+  font: inherit; font-family: var(--font-sans); font-size: 12px; color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--line-strong);
+  border-radius: var(--r-1); padding: 6px 12px;
+}
+.gW-find input::placeholder { color: var(--ink-faint); }
+.gW-find span { flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); }
 .gW { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 4px; }
 .gW-cname { width: 4.6em; }
 /* 表头粘住：滚下去以后还得知道哪一列是哪天（门店那套滚动时表头也在）。 */
 .gW thead th {
-  position: sticky; top: 0; z-index: var(--z-queue);
-  padding: 3px 0 5px; border-radius: 8px;
-  background: var(--hy-bg);
-  font-weight: 400; font-size: 10px; color: var(--hy-faint); line-height: 1.3;
+  position: sticky; top: 0; z-index: var(--z-shell);
+  padding: 3px 0 5px; border-radius: var(--r-1);
+  background: var(--surface-2);
+  font-family: var(--font-sans); font-weight: 400; font-size: 9px;
+  letter-spacing: .06em; color: var(--ink-faint); line-height: 1.3;
 }
-.gW thead th .d { display: block; font-family: var(--font-mono); font-size: 12px; color: var(--hy-ink); }
-.gW thead th .m { display: block; font-style: normal; font-size: 9px; color: var(--hy-faint); }
-.gW thead th.today { background: var(--hy-mint-soft); box-shadow: inset 0 0 0 1px var(--hy-mint-line); }
-.gW thead th.today .w { color: var(--hy-mint); }
-.gW thead th.today .d { color: var(--hy-mint-bright); font-weight: 700; }
+.gW thead th .d { display: block; font-family: var(--font-mono); font-size: 12px; color: var(--ink); }
+.gW thead th .m { display: block; font-style: normal; font-size: 9px; color: var(--ink-faint); }
+.gW thead th.today { background: var(--action-soft); box-shadow: inset 0 0 0 1px var(--action); }
+.gW thead th.today .w { color: var(--action); }
+.gW thead th.today .d { color: var(--action); font-weight: 700; }
 .gW thead th.mute { opacity: .45; }
-.gW thead th.weekend .w { color: var(--hy-muted); }
+.gW thead th.weekend .w { color: var(--ink-dim); }
 /* 表头与人名列是**手柄**（票 14 / ADR 0107 决策 9）：它们原来是完全不可交互的 <th>，
    现在是一个真按钮 —— 键盘 Tab 得到、读屏有名字，聚焦圈用浏览器默认那一圈（共享表没给
    这几个类写 focus 规则，这里也**不新写**：这一份的令牌配额只减不增）。 */
 .gW-th {
-  width: 100%; padding: 0; display: block; font: inherit; color: inherit;
+  width: 100%; min-height: var(--tap); padding: 0; display: block; font: inherit; color: inherit;
   text-align: inherit; background: none; border: 0; cursor: pointer;
 }
 .gW-th:disabled { cursor: default; }
 .gW-name {
   padding: 0 2px; text-align: left; vertical-align: middle;
-  font-weight: 400; font-size: 11.5px; color: var(--hy-ink); line-height: 1.35;
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--font-sans); font-weight: 400; font-size: 11px; color: var(--ink); line-height: 1.35;
   overflow-wrap: anywhere;
 }
 .gW-name b { font-weight: 600; }
 /* 没配规则的人整行都是空的 —— 行内就得说一句，不然看着像这店不给他排班。 */
-.gW-norule { display: block; font-style: normal; font-size: 9.5px; color: var(--hy-amber); }
+.gW-norule { display: block; font-style: normal; font-size: 9px; color: var(--warn); }
 .gW-cell {
-  position: relative; width: 100%; min-height: 40px; padding: 0;
+  position: relative; width: 100%; min-height: var(--tap); padding: 0;
   display: grid; place-items: center;
-  border: 1px solid transparent; border-radius: 9px;
-  background: var(--hy-surface-2); color: var(--hy-ink);
-  font: inherit; font-size: 12px; cursor: pointer;
+  border: 1px solid transparent; border-radius: var(--r-1);
+  background: var(--surface-2); color: var(--ink);
+  font: inherit; font-family: var(--font-sans); font-size: 11.5px; cursor: pointer;
 }
 .gW-cell:disabled { cursor: default; }
 .gW-cell.long { font-size: 10px; letter-spacing: -.02em; }
@@ -2067,41 +2416,43 @@ useNudgePull({
 /* 周表格子里的「半」（票 07）：那天仍然挂着这个班次，只是只上半天 —— 跟在班次缩写
    后面，小一号、信息蓝（语义令牌）。 */
 .gW-cell .gW-half {
-  margin-left: 1px; font-style: normal; font-size: 9px; color: var(--info);
+  margin-left: 1px; font-style: normal; font-family: var(--font-mono); font-size: 9px; color: var(--info);
 }
 .gW-cell .gW-zone {
   display: block; max-width: 100%; margin-top: 1px;
   font-size: 9px; line-height: 1.1; letter-spacing: -.02em; opacity: .75;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.gW-cell.tone-mint { color: var(--hy-mint); background: rgba(63, 224, 176, .14); border-color: rgba(63, 224, 176, .3); }
-.gW-cell.tone-aqua { color: var(--hy-aqua); background: rgba(95, 214, 230, .14); border-color: rgba(95, 214, 230, .3); }
-.gW-cell.tone-amber { color: var(--hy-amber); background: rgba(227, 164, 74, .14); border-color: rgba(227, 164, 74, .3); }
-.gW-cell.tone-seal { color: var(--hy-seal-bright); background: rgba(239, 106, 79, .14); border-color: rgba(239, 106, 79, .3); }
-.gW-cell.tone-violet { color: var(--hy-violet); background: rgba(177, 140, 240, .14); border-color: rgba(177, 140, 240, .3); }
-.gW-cell.tone-rose { color: var(--hy-rose); background: rgba(240, 122, 176, .14); border-color: rgba(240, 122, 176, .3); }
-.gW-cell.off { color: var(--hy-faint); background: rgba(133, 205, 198, .07); border-color: var(--hy-line); }
-.gW-cell.leave { color: var(--hy-aqua); background: rgba(95, 214, 230, .1); border-color: rgba(95, 214, 230, .28); }
+.gW-cell.tone-mint { color: var(--hy-mint); background: var(--wb-tint-14); border-color: var(--wb-tint-22); }
+.gW-cell.tone-aqua { color: var(--hy-aqua); background: var(--wb-tint-14); border-color: var(--wb-tint-22); }
+.gW-cell.tone-amber { color: var(--hy-amber); background: var(--wb-warn-a16); border-color: var(--wb-warn-a45); }
+.gW-cell.tone-seal { color: var(--hy-seal-bright); background: var(--wb-danger-a16); border-color: var(--wb-danger-a45); }
+/* 第 5、6 个班次的色（violet / rose）没有同色相的 --wb-* 档：底色退回中性淡层，
+   靠文字色区分 —— 不写裸 rgba（设计护栏只减不增）。 */
+.gW-cell.tone-violet { color: var(--hy-violet); background: var(--wb-ink-a04); border-color: var(--line-strong); }
+.gW-cell.tone-rose { color: var(--hy-rose); background: var(--wb-ink-a04); border-color: var(--line-strong); }
+.gW-cell.off { color: var(--ink-faint); background: var(--wb-ink-a08); border-color: var(--line); }
+.gW-cell.leave { color: var(--hy-aqua); background: var(--wb-tint-14); border-color: var(--wb-tint-22); }
 /* 两种「空」分开：整列没有数据 / 还没铺到 = 虚线淡掉；这天有数据但这个人没排到 = 淡框。 */
-.gW-cell.mute { background: transparent; border: 1px dashed var(--hy-line); opacity: .5; }
-.gW-cell.none { background: transparent; border: 1px dashed var(--hy-line-strong); }
-.gW-cell.today { box-shadow: inset 0 0 0 1px var(--hy-mint-line); }
+.gW-cell.mute { background: transparent; border: 1px dashed var(--line); opacity: .5; }
+.gW-cell.none { background: transparent; border: 1px dashed var(--line-strong); }
+.gW-cell.today { box-shadow: inset 0 0 0 1px var(--action); }
 .gW-cell.on, .gW-th.on { box-shadow: 0 0 0 2px var(--hy-mint); }
 /* 这天被单日覆盖改过（票 07 的青点，跟月历同一个记号）。 */
 .gW-cell.over::after {
   content: ""; position: absolute; top: 3px; right: 3px;
-  width: 5px; height: 5px; border-radius: 50%; background: var(--hy-aqua);
+  width: 6px; height: 6px; border-radius: 50%; background: var(--info);
 }
 /* 这一列有申请等着批（票 02 的琥珀记号）：挂在表头上，一格一个数。 */
 .gW thead th .pend {
   position: absolute; top: 0; right: 2px;
   min-width: 14px; height: 14px; padding: 0 3px;
-  border-radius: 999px; background: var(--hy-amber); color: var(--hy-night);
+  border-radius: var(--r-full); background: var(--warn); color: var(--action-ink);
   font-family: var(--font-mono); font-size: 9.5px; font-weight: 700;
   line-height: 14px; text-align: center; font-style: normal;
 }
-.gW-em { color: var(--hy-ink); }
-.gB-legend i.off { background: var(--hy-faint); }
+.gW-em { color: var(--ink); }
+.gB-legend i.off { background: var(--ink-faint); }
 .gB-legend i.leave { background: var(--hy-aqua); }
 /* 笔栏常驻在周表这一栏的底部，所以页面永远要让出它的高度：不留的话它压住的正是
    下面几行员工（门店那套就是这个毛病，截图里能看到第 4、5 行被压掉一半）。
@@ -2117,20 +2468,20 @@ useNudgePull({
    不另起第二套视觉。这一族从票 12 的笔刷条就在，原样留着。 */
 .gChip {
   display: inline-flex; align-items: center;
-  font: inherit; font-size: 12px; color: var(--hy-ink);
-  background: var(--hy-surface-2); border: 1px solid var(--hy-line);
-  border-radius: 999px; padding: 7px 14px; cursor: pointer;
+  font: inherit; font-family: var(--font-sans); font-size: 12px; color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--line-strong);
+  border-radius: var(--r-full); padding: 7px 14px; cursor: pointer;
 }
 .gChip:disabled { opacity: .45; cursor: default; }
-.gChip.on { box-shadow: 0 0 0 2px var(--hy-mint); }
-.gChip.tone-mint { color: var(--hy-mint); background: rgba(63, 224, 176, .14); border-color: rgba(63, 224, 176, .3); }
-.gChip.tone-aqua { color: var(--hy-aqua); background: rgba(95, 214, 230, .14); border-color: rgba(95, 214, 230, .3); }
-.gChip.tone-amber { color: var(--hy-amber); background: rgba(227, 164, 74, .14); border-color: rgba(227, 164, 74, .3); }
-.gChip.tone-seal { color: var(--hy-seal-bright); background: rgba(239, 106, 79, .14); border-color: rgba(239, 106, 79, .3); }
-.gChip.tone-violet { color: var(--hy-violet); background: rgba(177, 140, 240, .14); border-color: rgba(177, 140, 240, .3); }
-.gChip.tone-rose { color: var(--hy-rose); background: rgba(240, 122, 176, .14); border-color: rgba(240, 122, 176, .3); }
+.gChip.on { box-shadow: 0 0 0 2px var(--action); }
+.gChip.tone-mint { color: var(--hy-mint); background: var(--wb-tint-14); border-color: var(--wb-tint-22); }
+.gChip.tone-aqua { color: var(--hy-aqua); background: var(--wb-tint-14); border-color: var(--wb-tint-22); }
+.gChip.tone-amber { color: var(--hy-amber); background: var(--wb-warn-a16); border-color: var(--wb-warn-a45); }
+.gChip.tone-seal { color: var(--hy-seal-bright); background: var(--wb-danger-a16); border-color: var(--wb-danger-a45); }
+.gChip.tone-violet { color: var(--hy-violet); background: var(--wb-ink-a04); border-color: var(--line-strong); }
+.gChip.tone-rose { color: var(--hy-rose); background: var(--wb-ink-a04); border-color: var(--line-strong); }
 .gChip .dt { width: 9px; height: 9px; flex: none; margin-right: 7px; border-radius: 50%; background: currentColor; }
-.gChip .dt.rest { background: var(--hy-faint); }
+.gChip .dt.rest { background: var(--ink-faint); }
 /* ── 笔栏（票 14 修订，2026-10-13 用户真机裁定）──────────────────────────────
    **一行**：`刷` 标签 + 班次按钮组（横滑）+ 工作区 + ↺ 撤销；选区的摘要行、工作区的展开行
    与那一行提示都只在需要时出现。目标高度 ~70px —— 上一版那条 6 行、把表格压掉半屏的动作条
@@ -2141,32 +2492,37 @@ useNudgePull({
    新增：颜色全部蹭既有的 `.gChip` / `.gErr` / `.gHint` / `.gB-legend` 那几族
    （`designGuard` 的棘轮只减不增）。 */
 .gPick {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-queue);
-  max-width: 560px; margin: 0 auto;
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
-  background: var(--hy-surface);
-  border-top: 1px solid var(--hy-line-strong);
-  border-radius: var(--hy-radius-lg) var(--hy-radius-lg) 0 0;
-  box-shadow: 0 -18px 40px rgba(0, 0, 0, .55);
+  position: sticky; top: 0; z-index: var(--z-queue);
+  /* v4（2026-10-17 用户裁定「太占地方」）：从三行堆叠压成**一行 56px** ——
+     左：选中/选区摘要（auto，最长 240px 截断）；中：笔的棋子横向滚动；右：工作区与撤销。
+     选区摘要与「选中」互斥（同一列），两者都没有时那一列宽度是 0，笔吃满整行。 */
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 14px; margin: 0;
+  background: var(--surface-1);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line-strong);
 }
-/* 手机档：笔栏停在底部导航**上面** —— 两条都得露出来，否则在周表这一栏里就切不到
-   「今天 / 卫生验收 / 配方」（用户熟悉的那一版就是两条并排）。底栏已经吃掉安全区，
-   这里不再重复要一遍，免得笔栏底下多出一条空白。 */
-@media (max-width: 720px) {
-  .gPick {
-    bottom: calc(57px + env(safe-area-inset-bottom, 0px));
-    padding-bottom: 12px;
-  }
-}
+/* 提示行 / 选区摘要 / 工作区展开行：通栏（第二行起）。 */
+.gPick-note, .gPick-detail, .gPick-zones { grid-column: 1 / -1; }
+.gPick-now, .gPick-region { grid-column: 1; }
+.gPick-row { grid-column: 2; }
+
 /* 班次按钮组**换行**，不横滑。笔的场景要「一眼看全才能点」—— 5 个班次时横滑会把后两个藏起来
    （2026-10-13 实测：容器 214px、内容 426px，而滚动条又刚被用户要求拿掉，界面上就没有任何
    "还有更多"的提示了）。棋子直接由这一行换行：多于 3 张时排成两行，一行装得下就还是一行。
    横向一律不画滚动条（展开的工作区仍是横滑：最多 9 个区名，换行会到三行）。 */
-.gPick-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-/* `刷` 标签：不带颜色（继承 `.hygiene-admin` 的正文色），只做个记号 —— 这一份的
-   令牌配额只减不增，能不引就不引。 */
-.gPen-tag { flex: none; font-size: 11px; letter-spacing: .08em; }
+.gPick-row {
+  display: flex; align-items: center; gap: 6px;
+  /* 笔的棋子**不换行**：一行横滑，窄屏也不会把笔栏撑成三行（用户裁定「太占地方」）。 */
+  flex-wrap: nowrap; overflow-x: auto;
+  scrollbar-width: none;
+}
+.gPick-row::-webkit-scrollbar { display: none; }
+/* `刷` 标签：不带颜色（继承正文色），只做个记号。 */
+.gPen-tag { flex: none; font-size: 11px; letter-spacing: .08em; color: var(--ink-faint); }
 /* 笔栏里所有控件（班次 / 休 / 工作区 / ↺ / 摘要行那两个）的触控下限；水平方向比通用 chip
    收一档，好让最常见的情况（两个班次 ＋ 休 ＋ 工作区 ＋ 撤销）在一行里排得下、不产生横滑。 */
 .gPick-row .gChip, .gPick-region .gChip, .gPick-zones .gChip { min-height: 44px; flex: none; }
@@ -2187,9 +2543,50 @@ useNudgePull({
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.gPick-sum { flex: none; font-family: var(--font-song); font-size: 13px; letter-spacing: .06em; }
+.gPick-sum { flex: none; font-family: var(--font-sans); font-size: 13px; font-weight: 600; letter-spacing: .06em; }
 /* 一行提示：不加颜色（正文色），出错时蹭既有的 `.gErr`（朱砂）—— 那一族已经有了。 */
-.gPick-note { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.gPick-now { margin: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 10px; color: var(--ink-dim); }
+.gPick-note { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--ink-dim); }
 .gPick-note-text { flex: 1 1 auto; min-width: 0; }
 .gPick-detail { display: flex; flex-direction: column; gap: 4px; }
+/* ── 窄屏：单列 ───────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .gDash { grid-template-columns: 1fr; }
+  .gB-body { padding-bottom: 22px; }
+  .gRosterGrid { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .gHead {
+    grid-template-columns: 1fr;
+    grid-template-areas: "kick" "title" "meta";
+  }
+  .gHeadActions { margin-left: 0; }
+  .gTitle { font-size: 22px; }
+  .gMetaRow { display: grid; grid-template-columns: 1fr; gap: 7px; }
+  .gSeg { grid-row: 2; }
+  .gNav--head { display: flex; grid-row: 2; margin-left: 0; }
+  .gNav--panel { display: none; }
+  .gB-d { min-height: 56px; padding: 5px 4px 4px; }
+  .gB-d .cItem { font-size: 9px; }
+  /* 当天名单走底部抽屉：点日期后从底部升起，点遮罩或「收起」关闭。 */
+  .gSide { display: none; }
+  .gDash--drawer .gSide {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0;
+    z-index: var(--z-dialog); max-height: 72vh; overflow-y: auto;
+    padding-bottom: var(--safe-b);
+    background: var(--surface-0);
+    border-top: 1px solid var(--line-strong);
+    border-radius: var(--r-2) var(--r-2) 0 0;
+    box-shadow: 0 -18px 40px var(--wb-scrim);
+  }
+  .gDash--drawer .gSide > .gPend { display: none; }
+  .gDash--drawer .gSide > .gB-card { border-radius: var(--r-2) var(--r-2) 0 0; border-left: 0; border-right: 0; }
+  .gDrawerScrim {
+    position: fixed; inset: 0; z-index: var(--z-scrim);
+    background: var(--wb-scrim);
+  }
+  .gDrawerClose { display: inline-flex; }
+  .gB-dayBody { max-height: none; }
+  .gW-wrap { overflow-x: auto; }
+}
 </style>

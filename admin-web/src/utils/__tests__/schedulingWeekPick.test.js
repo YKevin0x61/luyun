@@ -202,13 +202,17 @@ describe('周表选区：跳过预判（服务端仍是权威）', () => {
     expect(items).toEqual([{ employeeId: 9, date: '2026-10-13', reason: 'leave_approved' }])
   })
 
-  it('过去的日子上执行清除 = past_clear（改成某个班照旧放行）', () => {
+  it('过去的日子上执行清除**不再跳过**（2026-10-18 用户裁定：清也能清过去的）', () => {
+    // 放开 ADR 0108 决策 6 的「过去只能改成某个班」：清除与改班次同一条下界
+    // （可补记窗口），窗口内过去的日子照常写，超出窗口才是 past_day。
     const clear = { ...ctx, action: PICK_CLEAR }
-    expect(predictSkips([{ employeeId: 7, date: '2026-10-13' }], clear))
-      .toEqual([{ employeeId: 7, date: '2026-10-13', reason: 'past_clear' }])
+    expect(predictSkips([{ employeeId: 7, date: '2026-10-13' }], clear)).toEqual([])
     expect(predictSkips([{ employeeId: 7, date: '2026-10-13' }], ctx)).toEqual([])
     // 今天清除照旧
     expect(predictSkips([{ employeeId: 7, date: '2026-10-14' }], clear)).toEqual([])
+    // 超窗口仍然是 past_day（窗口是数据保留口径，不随这次放开）
+    expect(predictSkips([{ employeeId: 7, date: '2026-08-01' }], clear))
+      .toEqual([{ employeeId: 7, date: '2026-08-01', reason: 'past_day' }])
   })
 
   it('过去但还在窗口内的日子点出来（点应用要弹一次确认）', () => {

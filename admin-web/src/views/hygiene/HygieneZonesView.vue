@@ -46,6 +46,8 @@ const mode = ref('circle')
 const captionText = ref('')
 const arrowStart = ref(null)
 const replacingId = ref(null)
+/** 「新增检查项」默认折叠：v3 布局纪律 —— 一行入口，点开才展开整块编辑面板。 */
+const editorOpen = ref(false)
 // 「编辑标注」模式：不换图，只改圈注/箭头/批注。服务层会新插一版标准并把
 // current_standard_id 指过去，历史冻结标准不动。
 const markupEditing = ref(false)
@@ -312,6 +314,7 @@ function clearPreview() {
 }
 
 function clearEditor() {
+  editorOpen.value = false
   itemName.value = ''
   file.value = null
   clearPreview()
@@ -354,6 +357,7 @@ function removeMark(index) {
 }
 
 function startReplace(item) {
+  editorOpen.value = true
   replacingId.value = item.id
   markupEditing.value = false
   itemName.value = item.name
@@ -364,6 +368,7 @@ function startReplace(item) {
 }
 
 function startEditMarkup(item) {
+  editorOpen.value = true
   replacingId.value = item.id
   markupEditing.value = true
   itemName.value = item.name
@@ -433,17 +438,12 @@ function markLabel(mark) {
 
 <template>
   <div class="zones-page">
-    <div class="card roster-head">
-      <div>
-        <p class="hy-eyebrow">Zones · 工作区</p>
-        <h1>卫生工作区</h1>
-        <p>维护各卫生工作区的日常检查项和当前标准图。</p>
-        <details class="rule-help">
-          <summary>规则说明</summary>
-          <p>卫生工作区与档口、配方岗位相互独立。每个工作区可选白班、夜班或只跑其中一个班次；没有当前标准图的检查项不会出现在员工端；更换标准图后，新检查使用新图。删除工作区或检查项会同时删除进行中的待办和该区未闭环整改单。</p>
-        </details>
+    <header class="wbx-head">
+      <div class="wbx-head-main">
+        <p class="wbx-kicker">ZONES · 工作区</p>
+        <h1 class="wbx-title">卫生工作区</h1>
       </div>
-      <div class="roster-head-actions">
+      <div class="wbx-pills">
         <label class="export-size">
           图片
           <select v-model="exportSize" :disabled="exporting" aria-label="导出图片规格">
@@ -451,15 +451,15 @@ function markLabel(mark) {
             <option value="original">原图（最清晰）</option>
           </select>
         </label>
-        <button
-          type="button"
-          class="btn"
-          :disabled="exporting"
-          @click="exportStandards"
-        >{{ exportLabel }}</button>
+        <button type="button" class="btn" :disabled="exporting" @click="exportStandards">{{ exportLabel }}</button>
         <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
       </div>
-    </div>
+      <p class="wbx-sub">维护各卫生工作区的日常检查项和当前标准图。</p>
+      <details class="rule-help">
+        <summary>规则说明</summary>
+        <p>卫生工作区与档口、配方岗位相互独立。每个工作区可选白班、夜班或只跑其中一个班次；没有当前标准图的检查项不会出现在员工端；更换标准图后，新检查使用新图。删除工作区或检查项会同时删除进行中的待办和该区未闭环整改单。</p>
+      </details>
+    </header>
 
     <div
       v-if="exporting && exportProgress && exportProgress.total"
@@ -470,32 +470,44 @@ function markLabel(mark) {
       <div class="export-progress-bar" :style="{ width: exportPercent + '%' }"></div>
     </div>
 
-    <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>
+    <p v-if="errorText" class="wbx-error roster-error" role="alert">{{ errorText }}</p>
 
-    <form class="card clocks-card" @submit.prevent="saveClocks">
-      <div>
-        <h3>日常逾期点</h3>
-        <p>白班、夜班各一个钟点，到点仍未交才给企微群发文字。已交待验不算逾期，也不会点名某个人。</p>
-      </div>
-      <label class="clock-field" aria-label="白班日常逾期点">
-        白班
-        <LuyunTimePicker v-model="dayClock" />
-      </label>
-      <label class="clock-field" aria-label="夜班日常逾期点">
-        夜班
-        <LuyunTimePicker v-model="nightClock" />
-      </label>
-      <button type="submit" class="btn btn-primary" :disabled="savingClocks">保存逾期点</button>
-      <p v-if="clocksHint" class="clocks-hint">{{ clocksHint }}</p>
-    </form>
+    <div class="wbx-readline">
+      <span class="wbx-read"><span>工作区</span><b>{{ zones.length }}</b></span>
+      <span class="wbx-read"><span>检查项</span><b>{{ zones.reduce((n, z) => n + (z.items || []).length, 0) }}</b></span>
+      <span class="wbx-read"><span>日常逾期点</span><b class="is-clock">{{ dayClock }} / {{ nightClock }}</b></span>
+      <span class="wbx-read is-unit"><em>白班 · 夜班 · 到点未交才提醒</em></span>
+    </div>
 
-    <div class="zones-grid">
-      <div class="table-card">
-        <div class="table-card-header">
-          <h3>工作区 <span>{{ zones.length }}</span></h3>
-        </div>
-        <div v-if="loading" class="roster-empty">正在加载…</div>
-        <ul v-else class="zone-list">
+    <section class="wbx-panel">
+      <header class="wbx-ph">
+        <i class="led warn"></i>
+        <h2>日常逾期点</h2>
+        <span class="wbx-hint">全店两个钟点</span>
+      </header>
+      <form class="wbx-clocks" @submit.prevent="saveClocks">
+        <label class="wbx-field" aria-label="白班日常逾期点">
+          <span>白班</span>
+          <LuyunTimePicker v-model="dayClock" />
+        </label>
+        <label class="wbx-field" aria-label="夜班日常逾期点">
+          <span>夜班</span>
+          <LuyunTimePicker v-model="nightClock" />
+        </label>
+        <button type="submit" class="btn btn-primary" :disabled="savingClocks">保存逾期点</button>
+        <p v-if="clocksHint" class="wbx-lead">{{ clocksHint }}</p>
+      </form>
+    </section>
+
+    <div class="wbx-cols">
+      <section class="wbx-panel">
+        <header class="wbx-ph">
+          <i class="led sig"></i>
+          <h2>工作区</h2>
+          <span class="wbx-hint">{{ zones.length }} 个</span>
+        </header>
+        <div v-if="loading" class="wbx-empty-bar">正在加载…</div>
+        <ul v-else-if="zones.length" class="zone-list">
           <li v-for="zone in zones" :key="zone.id" class="zone-row">
             <button
               type="button"
@@ -504,7 +516,7 @@ function markLabel(mark) {
               @click="selectZone(zone)"
             >
               <strong>{{ zone.name }}</strong>
-              <span>
+              <span class="wbx-subline">
                 {{ (zone.items || []).length }} 项
                 <template v-if="missedByZone[zone.id]"> · 漏拍 {{ missedByZone[zone.id] }}</template>
               </span>
@@ -518,6 +530,23 @@ function markLabel(mark) {
             >删除</button>
           </li>
         </ul>
+        <div v-else class="wbx-empty-bar">还没有工作区，先在下面加一个。</div>
+
+        <!-- 班次编辑从右栏挪进工作区卡：它改的是「这个区跑哪几档」，属于工作区属性 -->
+        <form v-if="selected" class="zone-shifts-editor" @submit.prevent="saveZoneShifts">
+          <span class="zone-shifts-title">{{ selected.name }} · 班次</span>
+          <label
+            v-for="shift in HYGIENE_SHIFTS"
+            :key="`zone-${shift}`"
+            class="zone-shift-toggle"
+          >
+            <input v-model="zoneShifts" type="checkbox" :value="shift">
+            {{ shift }}
+          </label>
+          <button type="submit" class="btn btn-sm" :disabled="savingShifts">保存班次</button>
+          <p v-if="shiftsHint" class="zone-shifts-hint">{{ shiftsHint }}</p>
+        </form>
+
         <form class="zone-add" @submit.prevent="createZone">
           <input
             v-model="newZoneName"
@@ -539,27 +568,16 @@ function markLabel(mark) {
           </div>
           <button type="submit" class="btn btn-primary" :disabled="creatingZone || !newZoneName.trim()">新增</button>
         </form>
-      </div>
+      </section>
 
-      <div class="table-card">
-        <div class="table-card-header">
-          <h3>{{ selected ? selected.name + ' 日常清单' : '日常清单' }}</h3>
-        </div>
+      <section class="wbx-panel">
+        <header class="wbx-ph">
+          <i class="led ok"></i>
+          <h2>{{ selected ? selected.name + ' 日常清单' : '日常清单' }}</h2>
+          <span class="wbx-hint">{{ selected ? (selected.items || []).length : 0 }} 项</span>
+        </header>
         <template v-if="selected">
-          <form class="zone-shifts-editor" @submit.prevent="saveZoneShifts">
-            <span class="zone-shifts-title">班次</span>
-            <label
-              v-for="shift in HYGIENE_SHIFTS"
-              :key="`zone-${shift}`"
-              class="zone-shift-toggle"
-            >
-              <input v-model="zoneShifts" type="checkbox" :value="shift">
-              {{ shift }}
-            </label>
-            <button type="submit" class="btn btn-sm" :disabled="savingShifts">保存班次</button>
-            <p v-if="shiftsHint" class="zone-shifts-hint">{{ shiftsHint }}</p>
-          </form>
-          <div v-if="!(selected.items || []).length" class="roster-empty">这个区还没有带标准图的检查项。</div>
+          <div v-if="!(selected.items || []).length" class="wbx-empty-bar">这个区还没有带标准图的检查项。</div>
           <ul v-else class="item-list">
             <li v-for="item in selected.items" :key="item.id" class="item-row">
               <HygieneStandardOverlay
@@ -587,8 +605,16 @@ function markLabel(mark) {
             </li>
           </ul>
 
-          <form class="item-editor" @submit.prevent="saveItem">
-            <h4>{{ markupEditing ? '编辑标准图标注' : (replacingId ? '更新标准图' : '新增检查项') }}</h4>
+          <!-- 新增检查项：默认折叠成一行入口（v3：折叠表单，不常驻半个空面板） -->
+          <button
+            v-if="!editorOpen"
+            type="button"
+            class="wbx-fold-entry"
+            @click="editorOpen = true"
+          >＋ 新增检查项</button>
+
+          <form v-if="editorOpen" class="item-editor" @submit.prevent="saveItem">
+            <h2 class="wbx-subhead"><i class="led sig"></i>{{ markupEditing ? '编辑标准图标注' : (replacingId ? '更新标准图' : '新增检查项') }}</h2>
             <p v-if="markupEditing" class="editor-lead">
               只改标注、不换图：保存后会生成新一版标准图，员工端会提示重新对照；已经交过的记录仍看当时那一版。
             </p>
@@ -637,14 +663,15 @@ function markLabel(mark) {
               </li>
             </ul>
             <div class="editor-actions">
-              <button v-if="replacingId" type="button" class="btn" @click="clearEditor">取消</button>
+              <button type="button" class="btn" @click="clearEditor">取消</button>
               <button type="submit" class="btn btn-primary" :disabled="!canSave || savingMarkup">
                 {{ markupEditing ? (savingMarkup ? '保存中…' : '保存标注') : (replacingId ? '保存新标准图' : '新增检查项') }}
               </button>
             </div>
           </form>
         </template>
-      </div>
+        <div v-else class="wbx-empty-bar">先选一个工作区。</div>
+      </section>
     </div>
 
     <ConfirmDialog
@@ -669,182 +696,138 @@ function markLabel(mark) {
 </template>
 
 <style scoped>
-@media (min-width: 721px) {
-  .hygiene-admin .zones-page .clocks-card {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    gap: 12px 16px;
-  }
+/* B 案 v2 + v3 布局纪律：页头右手只留范围（图片规格）与动作；一条读数行；
+   左栏 320（工作区 + 班次），右栏检查项；行高压到 72；新增检查项默认折叠。 */
+.zones-page {
+  display: flex; flex-direction: column; gap: 14px;
+  padding-bottom: calc(40px + var(--safe-b));
 }
-.clocks-card p {
-  max-width: 42em;
+.wbx-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; align-items: end; }
+.wbx-head-main { grid-column: 1; grid-row: 1; }
+.wbx-kicker { margin: 0 0 7px; font: 500 9.5px/1 var(--font-sans); letter-spacing: .26em; color: var(--ink-faint); }
+.wbx-title { margin: 0; font: 600 26px/1.1 var(--font-sans); letter-spacing: .01em; color: var(--ink); }
+.wbx-pills { grid-column: 2; grid-row: 1; justify-self: end; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.wbx-sub { grid-column: 1 / -1; grid-row: 2; margin: 8px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--ink-dim); }
+.wbx-head .rule-help { grid-column: 1 / -1; grid-row: 3; margin-top: 6px; }
+.export-size { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-dim); }
+.export-size select {
+  min-height: 44px; padding: 0 8px; border-radius: var(--r-1);
+  background: var(--surface-1); border: 1px solid var(--line-strong); color: var(--ink);
+  font: inherit; font-size: 10px;
 }
-.clock-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--hy-muted);
+.wbx-error { margin: 0; font-size: 11px; color: var(--danger-bright); }
+.led { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; background: var(--line-strong); }
+.led.ok { background: var(--ok); }
+.led.warn { background: var(--warn); }
+.led.bad { background: var(--danger); }
+.led.sig { background: var(--action); }
+.export-progress { height: 3px; background: var(--line); border-radius: var(--r-full); overflow: hidden; margin: -6px 0 0; }
+.export-progress-bar { height: 100%; background: var(--action); transition: width .2s var(--ease); }
+
+.wbx-readline {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 26px;
+  padding: 10px 14px;
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08);
 }
-.clock-field .input {
-  min-width: 140px;
+.wbx-read { display: inline-flex; align-items: baseline; gap: 6px; }
+.wbx-read span { font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint); }
+.wbx-read b { font: 500 20px/1 var(--font-mono); color: var(--ink); }
+.wbx-read b.is-clock { font-size: 16px; }
+.wbx-read em { font-style: normal; font-size: 9.5px; color: var(--ink-faint); }
+
+.wbx-panel {
+  display: flex; flex-direction: column;
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08); overflow: hidden;
 }
-.clock-field :deep(.luyun-time-picker) {
-  width: 104px;
+.wbx-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.wbx-ph h2 { margin: 0; font: 600 12.5px/1 var(--font-sans); letter-spacing: .06em; color: var(--ink); }
+.wbx-hint { margin-left: auto; font: 500 9.5px/1 var(--font-mono); color: var(--ink-faint); }
+.wbx-empty-bar {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 44px; margin: 0; padding: 10px 14px;
+  font-size: 10.5px; color: var(--ink-faint);
 }
-.clocks-hint {
-  flex: 1 1 100%;
-}
-.zones-grid {
-  display: grid;
-  grid-template-columns: 280px 1fr;
-  gap: 14px;
-  align-items: start;
-}
-@media (max-width: 900px) {
-  .zones-grid { grid-template-columns: 1fr; }
-}
-.zone-list {
-  list-style: none;
-  margin: 0;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.zone-row {
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
-}
+.wbx-lead { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--ink-dim); }
+.wbx-subline { font: 500 9.5px/1.5 var(--font-mono); color: var(--ink-faint); }
+.wbx-subhead { margin: 0; display: flex; align-items: center; gap: 8px; font: 600 11px/1 var(--font-sans); letter-spacing: .18em; text-transform: uppercase; color: var(--ink-faint); }
+
+.wbx-clocks { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; padding: 12px 14px 14px; }
+.wbx-field { display: flex; flex-direction: column; gap: 6px; font-size: 10px; color: var(--ink-dim); }
+.wbx-field :deep(.luyun-time-picker) { width: 108px; }
+
+.wbx-cols { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 14px; align-items: stretch; }
+.zone-list { list-style: none; margin: 0; padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
+.zone-row { display: flex; align-items: stretch; gap: 6px; }
 .zone-row .zone-btn { flex: 1; }
 .zone-row .btn-danger { flex: 0 0 auto; align-self: center; }
-.zone-shifts {
-  font-style: normal;
-  font-size: 11px;
-  color: var(--hy-mint);
+.zone-btn {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  min-height: 56px; padding: 8px 10px; text-align: left; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-1); color: var(--ink);
 }
+.zone-btn:hover { background: var(--surface-2); }
+.zone-btn.active { background: var(--surface-2); border-color: var(--action); box-shadow: inset 3px 0 0 var(--action); }
+.zone-btn strong { font-size: 11.5px; font-weight: 600; }
+.zone-shifts { font-style: normal; font: 500 9px/1.4 var(--font-mono); letter-spacing: .06em; color: var(--action); }
+
+.zone-shifts-editor {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  padding: 10px 12px; border-top: 1px solid var(--wb-ink-a08);
+  font-size: 10px; color: var(--ink-dim);
+}
+.zone-shifts-title { flex: 1 1 100%; font-weight: 600; color: var(--ink); }
+.zone-shift-toggle { display: inline-flex; align-items: center; gap: 5px; min-height: 44px; cursor: pointer; white-space: nowrap; }
+.zone-shift-toggle input { accent-color: var(--action); }
+.zone-shifts-hint { flex: 1 1 100%; margin: 0; font: 500 9.5px/1.5 var(--font-mono); color: var(--action); }
 .zone-add {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 10px 12px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 10px 12px 12px; border-top: 1px solid var(--wb-ink-a08); margin-top: auto;
 }
-.zone-add .input { flex: 1; }
-.zone-shift-picks,
-.zone-shifts-editor {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-}
-.zone-shifts-editor {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--hy-line);
-  font-size: 12px;
-  color: var(--hy-muted);
-}
-.zone-shifts-title { font-weight: 600; color: var(--hy-ink); }
-.zone-shift-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.zone-shift-toggle input { accent-color: var(--hy-mint); }
-.zone-shifts-hint {
-  flex: 1 1 100%;
-  margin: 0;
-  font-size: 11px;
-  color: var(--hy-mint);
-}
-.item-list {
-  list-style: none;
-  margin: 0;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
+.zone-add .input { flex: 1; min-width: 0; }
+.zone-shift-picks { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+.item-list { list-style: none; margin: 0; padding: 4px 12px 8px; display: flex; flex-direction: column; }
 .item-row {
-  display: grid;
-  grid-template-columns: 148px 1fr;
-  gap: 12px;
-  align-items: center;
-  padding: 10px;
+  display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; align-items: center;
+  min-height: 72px; padding: 8px 0; border-bottom: 1px solid var(--wb-ink-a08);
 }
-.item-thumb { min-height: 0; }
+.item-row:last-child { border-bottom: 0; }
+.item-thumb { min-height: 0; width: 56px; }
 .item-thumb :deep(.std-frame) { min-height: 0; }
-.item-thumb :deep(.std-photo img) { max-height: 104px; }
-.item-meta {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
+.item-thumb :deep(.std-photo img) { max-height: 56px; }
+.item-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
+.item-meta strong { font-size: 11.5px; font-weight: 600; }
+.item-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; align-self: stretch; }
+.item-actions .btn { min-height: 44px !important; }
+
+.wbx-fold-entry {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  min-height: 48px; padding: 10px 14px; margin-top: auto;
+  border: 0; border-top: 1px solid var(--wb-ink-a08); background: transparent;
+  color: var(--action); font: 500 11px/1 var(--font-sans); letter-spacing: .04em;
+  text-align: left; cursor: pointer;
 }
-.item-meta strong {
-  font-weight: 600;
-}
-.item-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.item-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  border-top: 1px solid var(--hy-line);
-}
-.item-editor h4 {
-  margin: 0;
-  font-family: var(--font-song);
-  font-size: 15px;
-  letter-spacing: .04em;
-}
-.editor-lead {
-  margin: 0;
-  color: var(--hy-muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-.editor-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--hy-muted);
-}
-.mark-tools {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
+.wbx-fold-entry:hover { background: var(--surface-2); }
+.item-editor { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 14px; border-top: 1px solid var(--wb-ink-a08); }
+.editor-lead { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--ink-dim); }
+.editor-field { display: flex; flex-direction: column; gap: 6px; font-size: 10px; color: var(--ink-dim); }
+.editor-hint { font: 500 9.5px/1.5 var(--font-mono); color: var(--ink-faint); }
+.editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.mark-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .mark-tools .input { min-width: 180px; flex: 1; }
-.mark-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.mark-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.mark-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 10px; color: var(--ink-dim); }
+.zones-page :deep(.btn) { min-height: 44px !important; border-radius: var(--r-1); }
+@media (max-width: 900px) {
+  .wbx-cols { grid-template-columns: 1fr; }
 }
-.mark-list li {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--hy-muted);
-}
-.editor-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
+@media (max-width: 720px) {
+  .wbx-head { grid-template-columns: minmax(0, 1fr); }
+  .wbx-pills { grid-column: 1; grid-row: 2; justify-self: start; margin-top: 10px; }
+  .wbx-sub { grid-row: 3; }
+  .wbx-head .rule-help { grid-row: 4; }
+  .wbx-title { font-size: 22px; }
 }
 </style>

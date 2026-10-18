@@ -399,9 +399,11 @@ describe('月历页与今天页把这两件事送过来（票 15 的接线）', 
     expect(monthView).toMatch(/incomingDates/)
     expect(monthView).toMatch(/v-if="incomingDates\.has\(cell\.business_date\)"/)
     expect(monthView).toMatch(/class="ask"/)
-    expect(monthView).toMatch(/\.mD \.ask \{[\s\S]{0,220}?var\(--hy-amber\)/)
+    /* B 案重构（2026-10-17）：这条记号的调色从旧的 --hy-amber 换成语义名 --warn
+       （两套主题各答一次颜色；断言钉的是「它有一条自己的、与 asked 相同的提示色」）。 */
+    expect(monthView).toMatch(/\.mD \.ask \{[\s\S]{0,220}?var\(--warn\)/)
     expect(monthView).toMatch(/class="dot asked"/)
-    expect(monthView).toMatch(/\.dot\.asked \{[\s\S]{0,120}?var\(--hy-amber\)/)
+    expect(monthView).toMatch(/\.dot\.asked \{[\s\S]{0,120}?var\(--warn\)/)
   })
 
   it('页脚说清点开某一天能办什么（两件事写在最前面）', () => {

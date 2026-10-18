@@ -510,7 +510,7 @@ describe('花名册 · 导出', () => {
 })
 
 describe('花名册 · 工具栏', () => {
-  it('标题行只有「花名册」+ 搜索 + 分段 + 邀请店员 + 导出，没有 eyebrow / 副标题 / 刷新', async () => {
+  it('统一页头骨架：kicker + 花名册 + 右侧邀请 / 导出 / 刷新（搜索与分段合成一行面板头）', async () => {
     const wrapper = await mountRoster()
     const head = wrapper.get('.roster-head')
 
@@ -519,7 +519,9 @@ describe('花名册 · 工具栏', () => {
     expect(head.findAll('p')).toHaveLength(0)
     expect(head.find('.rule-help').exists()).toBe(false)
     expect(head.find('.hy-eyebrow').exists()).toBe(false)
-    expect(button(wrapper, '刷新')).toBeUndefined()
+    // v3 布局审查（2026-10-17）：页头右手统一成「动作」，刷新与其它工作台页一致地回来；
+    // 搜索与分段不再占页头，合成列表上方的一行面板头（所以 head 里仍无 p / eyebrow）。
+    expect(button(wrapper, '刷新')).toBeTruthy()
     expect(button(wrapper, '邀请店员')).toBeTruthy()
     expect(button(wrapper, '导出')).toBeTruthy()
   })

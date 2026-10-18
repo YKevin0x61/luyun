@@ -4,6 +4,7 @@ import App from './App.vue'
 import router from './router'
 import { setUnauthorizedHandler } from './api/client'
 import { applyPwaManifest } from './utils/pwaManifest'
+import { installWorkbenchTheme } from './composables/useWorkbenchTheme'
 import { loginRedirectTarget } from './utils/loginNext'
 import './styles/theme.css'
 // 工作台主题（批次 ③-1a）：令牌上移到 html 级，只对带 data-workbench 的文档生效 ——
@@ -15,6 +16,12 @@ import './styles/jsonforms.css'
 import '@vuepic/vue-datepicker/dist/main.css'
 
 applyPwaManifest(window.location.pathname)
+
+// 浅 / 深皮肤的响应式层（2026-10-17）：在入口装**一次**。放在这里而不是壳里 ——
+// 系统主题变化的监听是全局单例，壳挂载/卸载时成对注册会让每次切页重新订一遍，
+// 也会污染「壳卸载时退订自己的媒体查询」那条护栏。`<html data-wb-theme>` 的落点仍由
+// `utils/workbenchDocument.js` 在导航时给出（与 `data-workbench` 同一个开关）。
+installWorkbenchTheme()
 
 // 401 兜底的落点注入（票 10）：`api/client.js` 是非组件模块、拿不到 `useRouter()`，
 // 由这里把 SPA 的 router 交给它 —— 会话没了就走**客户端导航**回登录页并带上原目标

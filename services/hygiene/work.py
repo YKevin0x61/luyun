@@ -14,12 +14,12 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 
 from database import CHINA_TZ
 from db_core.errors import is_integrity_violation
-from services.business_day import business_date_range
+from services.business_day import business_date_range, shift_business_date
 from services.hygiene.accounts import (
     PERMISSION_ADMIN,
     SHIFT_DAY,
@@ -58,6 +58,9 @@ FIX_TYPES = ("卫生", "摆放", "标签")
 OPENER_STAFF = "staff"
 OPENER_SUPER = "super"
 DAILY_SHIFTS = (SHIFT_DAY, SHIFT_NIGHT)
+# 隔夜补验下界：昨天交的照片今早还得能验，但再往前就是历史回看、不再允许改判。
+# 与「管理员最多回看 / 补验最近几天」是同一个数，`list_pending_daily` 也按它收口。
+DAILY_BACKFILL_DAYS = 7
 DEFAULT_DAY_OVERDUE_HHMM = "15:00"
 DEFAULT_NIGHT_OVERDUE_HHMM = "21:30"
 SETTING_DAY_OVERDUE = "daily_overdue_day_hhmm"
@@ -1951,6 +1954,29 @@ class HygieneWork:
             )
         return inbox
 
+    async def list_pending_daily(self, actor: dict, days: int = 7) -> list[dict]:
+        """最近 ``days`` 个营业日（含今天）里**还没验收**的日常行，今天在前。
+
+        隔夜验收（2026-10-18）的清单：昨天甚至前几晚交的照片，早上仍要能被看见、
+        能一键验。``list_daily_work`` 对历史日期会回**全部**检查项（历史回看语义），
+        所以这里按 ``status == 待验收`` 过滤，并保证每行都带 ``business_date``。
+
+        范围收在 ``DAILY_BACKFILL_DAYS``（可补验下界）内：更早的行就算出现也点不了，
+        列出来只会让人白点一次，所以上限取「今天 + 下界天数」。
+        """
+        limit = min(max(int(days), 1), DAILY_BACKFILL_DAYS + 1)
+        today = hygiene_business_date(self._now_dt())
+        pending: list[dict] = []
+        for offset in range(limit):
+            target = shift_business_date(today, -offset)
+            for row in await self.list_daily_work(actor, target):
+                if row.get("status") != STATUS_PENDING:
+                    continue
+                # list_daily_work 已经带上这个字段；显式覆盖保证它是**这一轮**的日期
+                # （历史日期与今天的行混在一张列表里时，调用方靠它区分是哪天）。
+                pending.append({**row, "business_date": target})
+        return pending
+
     async def get_daily_review(
         self,
         item_id: int,
@@ -2028,10 +2054,36 @@ class HygieneWork:
         if int(actor.get("id") or 0) == int(submitter_id):
             raise HygieneWorkError("cannot_self_accept", "cannot_self_accept")
 
-    async def _pending_instance(self, item_id: int, shift: str) -> tuple[dict, dict]:
+    def _review_business_date(self, business_date: Optional[str]) -> str:
+        """验收/驳回针对哪个营业日：不给就是今天，给了就往回补。
+
+        隔夜验收（2026-10-18）：06:00 切日之后，昨晚交的照片归**昨天**那个营业日，
+        不带日期只查今天等于今早既看不到也点不了通过。下界 ``DAILY_BACKFILL_DAYS``：
+        再早的单子已经进了历史回看（ADR-0088），允许补判会改掉红黑榜与趋势的旧数。
+        """
+        today = hygiene_business_date(self._now_dt())
+        if business_date is None or not str(business_date).strip():
+            return today
+        try:
+            target = date.fromisoformat(str(business_date).strip()[:10]).isoformat()
+        except ValueError as exc:
+            raise HygieneWorkError("bad_date", "bad_date") from exc
+        if target < shift_business_date(today, -DAILY_BACKFILL_DAYS):
+            raise HygieneWorkError("past_day", "past_day")
+        if target > today:
+            # 未来营业日没有实例（也不该有人提前验收）：按「没有待验收」处理。
+            raise HygieneWorkError("not_pending", "not_pending")
+        return target
+
+    async def _pending_instance(
+        self,
+        item_id: int,
+        shift: str,
+        business_date: Optional[str] = None,
+    ) -> tuple[dict, dict]:
         if shift not in DAILY_SHIFTS:
             raise HygieneWorkError("shift_mismatch", "shift_mismatch")
-        business_date = hygiene_business_date(self._now_dt())
+        business_date = self._review_business_date(business_date)
         instance_row = await self._fetch_instance(business_date, shift, item_id)
         if instance_row is None:
             raise HygieneWorkError("not_pending", "not_pending")
@@ -2054,8 +2106,11 @@ class HygieneWork:
         )
         return await cur.fetchone() is not None
 
-    async def _deep_clean_rejected_reasons(self, business_date: str, item_ids) -> dict:
-        """当天被驳回过的专项项 → 最近一次原因。
+    async def _deep_clean_rejected_reasons(self, item_ids) -> dict:
+        """被驳回过的专项项 → 最近一次原因（**不限营业日**）。
+
+        专项项是「全店一项、每周固定的那一项」，被驳回后状态回到待拍、跨天仍是同一条
+        待办；原先按营业日过滤，隔夜后原因就查不到了（员工只看到"待拍"，照着原样再拍）。
 
         专项驳回事件的 shift 留空（那是对日常的判据），所以这里按 item_id + shift IS NULL
         区分；一次查完，不在行循环里逐条查。
@@ -2066,10 +2121,10 @@ class HygieneWork:
         placeholders = ",".join("?" * len(ids))
         cur = await self._conn.execute(
             f"""SELECT item_id, reason FROM hygiene_board_events
-                WHERE board = ? AND event_type = ? AND business_date = ?
+                WHERE board = ? AND event_type = ?
                   AND shift IS NULL AND item_id IN ({placeholders})
                 ORDER BY id DESC""",
-            [BOARD_PERSON, EVENT_REJECT, business_date, *ids],
+            [BOARD_PERSON, EVENT_REJECT, *ids],
         )
         found: dict = {}
         for row in await cur.fetchall():
@@ -2077,18 +2132,23 @@ class HygieneWork:
             found.setdefault(int(mapping["item_id"]), mapping.get("reason"))
         return found
 
-    async def _fix_rejected_reasons(self, business_date: str, ticket_ids) -> dict:
-        """当天被驳回过的整改单 → 最近一次原因（按事件上的 ticket_id 关联）。"""
+    async def _fix_rejected_reasons(self, ticket_ids) -> dict:
+        """被驳回过的整改单 → 最近一次原因（按事件上的 ticket_id 关联）。
+
+        **不再按营业日过滤**：整改单被驳回后状态是"待回拍"，跨天仍在待办里，
+        只按当天查的话第二天就看不到"哪里不合格"，员工只能照着原样再拍一遍。
+        每张单取 ``id DESC`` 的第一条（最近一次驳回）。
+        """
         ids = [int(ticket_id) for ticket_id in ticket_ids if ticket_id is not None]
         if not ids or self._has_event_ticket is not True:
             return {}
         placeholders = ",".join("?" * len(ids))
         cur = await self._conn.execute(
             f"""SELECT ticket_id, reason FROM hygiene_board_events
-                WHERE board = ? AND event_type = ? AND business_date = ?
+                WHERE board = ? AND event_type = ?
                   AND ticket_id IN ({placeholders})
                 ORDER BY id DESC""",
-            [BOARD_PERSON, EVENT_REJECT, business_date, *ids],
+            [BOARD_PERSON, EVENT_REJECT, *ids],
         )
         found: dict = {}
         for row in await cur.fetchall():
@@ -2132,8 +2192,15 @@ class HygieneWork:
         return found
 
     @serialized_write
-    async def accept_daily(self, actor: dict, item_id: int, shift: str) -> dict:
-        instance, submission = await self._pending_instance(item_id, shift)
+    async def accept_daily(
+        self,
+        actor: dict,
+        item_id: int,
+        shift: str,
+        business_date: Optional[str] = None,
+    ) -> dict:
+        """验收一次日常提交。``business_date`` 不给就是今天（隔夜补验见 ``_review_business_date``）。"""
+        instance, submission = await self._pending_instance(item_id, shift, business_date)
         item_row = await self._fetch_item_with_zone(item_id)
         if item_row is not None:
             self._require_zone_access(actor, item_row["zone_id"])
@@ -2202,8 +2269,10 @@ class HygieneWork:
         item_id: int,
         shift: str,
         reason: Optional[str] = None,
+        business_date: Optional[str] = None,
     ) -> dict:
-        instance, submission = await self._pending_instance(item_id, shift)
+        """驳回一次日常提交；``business_date`` 语义同 ``accept_daily``。"""
+        instance, submission = await self._pending_instance(item_id, shift, business_date)
         item_row = await self._fetch_item_with_zone(item_id)
         if item_row is not None:
             self._require_zone_access(actor, item_row["zone_id"])
@@ -3382,7 +3451,7 @@ class HygieneWork:
         )
         raw_rows = [dict(row) for row in await cur.fetchall()]
         rejected_reasons = await self._deep_clean_rejected_reasons(
-            business_date, [row["item_id"] for row in raw_rows]
+            [row["item_id"] for row in raw_rows]
         )
         rows = []
         for mapping in raw_rows:
@@ -3956,7 +4025,6 @@ class HygieneWork:
         cur = await self._conn.execute(sql, params)
         raw_rows = [dict(row) for row in await cur.fetchall()]
         rejected_reasons = await self._fix_rejected_reasons(
-            hygiene_business_date(self._now_dt()),
             [row["id"] for row in raw_rows],
         )
         rows = []

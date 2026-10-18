@@ -1377,8 +1377,11 @@ class SchedulingStore:
         employee_id = int(employee_id)
         day = _require_business_date(business_date)
         today = self.today()
-        if day < today:
-            raise SchedulingError("past_clear", "past_clear")
+        # 2026-10-18 用户裁定：过去的日子也能「清除班次」（退回到规则铺出来的样子）。
+        # 下界与「改班次」同一条：可补记窗口的第一天（`_backfill_floor`），更早的仍是
+        # `past_day` —— 窗口是数据保留口径，不是这一次的交互取舍。
+        if day < self._backfill_floor(today):
+            raise SchedulingError("past_day", "past_day")
         await self._clear_override(employee_id, day, today)
         return {"employee_id": employee_id, "business_date": day}
 
@@ -1541,10 +1544,9 @@ class SchedulingStore:
                 reasons[index] = "out_of_roster"
             elif day > last_day:
                 reasons[index] = "beyond_window"
-            elif day < today and action == BATCH_CLEAR:
-                # 过去只能改成某个班，不能退回规则（ADR 0108 决策 6）。
-                reasons[index] = "past_clear"
             elif day < first_day:
+                # 2026-10-18 用户裁定：`clear` 在过去的日子上**也生效**（放开 ADR 0108
+                # 决策 6 的「过去只能改成某个班」）；这里只剩可补记窗口这一条下界。
                 reasons[index] = "past_day"
 
         leave_days: dict[str, set[int]] = {}
@@ -1660,7 +1662,8 @@ class SchedulingStore:
         """这一批「清除班次」：每格摘掉覆盖记录、按现在的规则重算，最后一次提交。
 
         与单格撤销（`_clear_override`）共用同一个删法 —— 批量清除与逐格撤销必须落到
-        同一件事上。能走到这里的每一格都 ≥ 今天（过去的日子在筛选那一步就跳过了）。
+        同一件事上。能走到这里的格子都在可补记窗口内（含过去 30 天；更早的在筛选那一步
+        就记 `past_day`）。
         """
         for employee_id, day in cells:
             await self._delete_override_row(employee_id, day)
@@ -2027,9 +2030,9 @@ class SchedulingStore:
                 person(employee_id, zone, overridden, leave=employee_id in leave_ids)
                 for employee_id, zone, overridden, _half in rest_ids
             ],
-            # 过去的日子不改写（口径 5）：这天的覆盖撤不掉 —— 前端据此把「撤销」收起来，
-            # 而不是给一个按了没反应的按钮。
-            "undoable": day >= self.today(),
+            # 过去的日子也能撤（2026-10-18 用户裁定放开）：前端据此显示「撤销覆盖」按钮。
+            # 下界与「清除班次」同一条（可补记窗口），超窗口才收起来。
+            "undoable": day >= self._backfill_floor(self.today()),
         }
 
     @_needs_migration

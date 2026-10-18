@@ -22,26 +22,37 @@ const offline = computed(() => connected && connected.value === false)
         class="sched-conn"
         :class="{ off: offline }"
         :title="offline ? '实时已断开：别人改了排班这一页不会自己刷新' : '实时已连接'"
-      ><i aria-hidden="true"></i>{{ offline ? '实时已断开' : '' }}</span>
+      ><i aria-hidden="true"></i><b>实时</b><span>{{ offline ? '已断开' : '已连接' }}</span></span>
     </template>
     <router-view />
   </WorkbenchShell>
 </template>
 
 <style scoped>
-/* 实时点：贴在顶栏右端（退出按钮之前）。手机档那条顶栏整个收起来，它就跟着收 ——
-   手机上顶栏只有 56px 一行（组名 / 当前页 / 身份 / ⋮），塞不进第四件。 */
+/* 实时状态做成一枚三段读数：LED · 标签 · 状态（不是只闪一个点）。组壳只放本组自己的
+   东西：内容区的内边距与 `:deep()` 都归统一壳（ADR 0106 决策 2/3），这里不写。 */
 .sched-conn {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 10.5px;
-  color: var(--hy-faint);
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: .06em;
+  color: var(--ink-faint);
 }
-.sched-conn i { width: 7px; height: 7px; border-radius: 50%; background: var(--hy-mint); }
-.sched-conn.off { color: var(--hy-seal-bright); }
-.sched-conn.off i { background: var(--hy-seal-bright); }
+.sched-conn i {
+  width: 6px; height: 6px; flex: none; border-radius: 50%;
+  background: var(--action); box-shadow: 0 0 0 3px var(--wb-tint-14);
+}
+.sched-conn b {
+  font-family: var(--font-sans); font-size: 9.5px; font-weight: 500;
+  letter-spacing: .12em; color: var(--ink-dim);
+}
+.sched-conn.off { color: var(--danger-bright); }
+.sched-conn.off i { background: var(--danger); box-shadow: 0 0 0 3px var(--wb-danger-a16); }
+.sched-conn.off b { color: var(--danger-bright); }
 
 /* 花名册那条补内边距（票 05 从卫生搬过来时补的 `:deep(.roster-page)`）随票 04 退场：
    组壳只剩本组自己的东西（实时点）。它的**数字一字不差**地落在花名册页面自己的样式里

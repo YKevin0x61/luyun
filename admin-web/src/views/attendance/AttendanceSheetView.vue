@@ -53,7 +53,7 @@
  *
  * 这一页只算当月：没有月份选择器。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { api } from '../../api/client'
@@ -363,6 +363,34 @@ const openingError = ref(null) // { employee_id, text } | null
  *  下发都接得住，另有降级说明）。 */
 const sealedNow = computed(() => isMonthSealed(sheet.value))
 
+/** 员工面板默认折叠成一行表格；点排行或点「展开」才出明细。 */
+const openEmployeeId = ref(0)
+function toggleEmployee(person) {
+  openEmployeeId.value = openEmployeeId.value === person.id ? 0 : person.id
+}
+function focusEmployee(person) {
+  openEmployeeId.value = person.id
+  nextTick(() => {
+    const el = document.getElementById(`emp-${person.id}`)
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    }
+  })
+}
+/** 待补排行：按待补天数降序（只列入有缺口的）。 */
+const todoRank = computed(() =>
+  employees()
+    .filter((person) => todoDays(person) > 0)
+    .sort((a, b) => todoDays(b) - todoDays(a) || a.id - b.id),
+)
+
+/** 读数行要的两个聚合：待补天数合计、本月天数。**只读展示** —— 不改任何判定，
+ *  也不参与写口；值仍全部来自服务端下发的 `person.cells` 与 `sheet.days`。 */
+const todoTotal = computed(() =>
+  employees().reduce((sum, person) => sum + todoDays(person), 0),
+)
+const monthDayCount = computed(() => (sheet.value?.days || []).length)
+
 /** 输入框里现在是什么：服务端那一份；`null`（没给过）留空，不是 `undefined`。 */
 function openingValue(person) {
   const value = person.opening_balance
@@ -513,42 +541,46 @@ onMounted(() => {
   <div class="hygiene-admin attendance-page">
     <header class="aTop">
       <div class="aIntro">
-        <p class="aKicker">人事</p>
-        <h1>考勤表</h1>
-        <p class="aSub">
-          <template v-if="sheet">当月 {{ sheet.month }} · 今天 {{ sheet.today }} · </template>
-          一人一张卡，打开就是当月：今天之后的日子留空，没铺到排班的那天写「待补」。
-          点一个已经过去的日子就能改它 —— 只改那一天，不动轮转规则；那颗「休半天」
-          只把那天标成上半天，班次照旧。
-        </p>
+        <p class="aKicker">人事 · 考勤</p>
+        <div class="aTitleRow">
+          <h1>考勤表</h1>
+        <div class="aActions">
+          <!-- 封过账的月只交代一句「什么时候封的」（验收 5）；没封过才给那颗按钮。
+               回执取自服务端下发的封账时刻，页面不自己记一个「我刚封过」的本地状态。 -->
+          <span v-if="sealStamp" class="aSealed" role="status">{{ sealStamp }}</span>
+          <button
+            v-else
+            class="btn"
+            type="button"
+            :disabled="sealing"
+            @click="sealLastMonth"
+          >
+            {{ sealing ? '封账中…' : '封账上月' }}
+          </button>
+          <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">
+            回到月历
+          </button>
+          <button
+            class="btn btn-primary"
+            type="button"
+            :disabled="exporting"
+            @click="exportSheet"
+          >
+            {{ exporting ? '导出中…' : '导出这个月' }}
+          </button>
+        </div>
+        </div>
       </div>
-      <div class="aActions">
-        <!-- 封过账的月只交代一句「什么时候封的」（验收 5）；没封过才给那颗按钮。
-             回执取自服务端下发的封账时刻，页面不自己记一个「我刚封过」的本地状态。 -->
-        <span v-if="sealStamp" class="aSealed" role="status">{{ sealStamp }}</span>
-        <button
-          v-else
-          class="btn"
-          type="button"
-          :disabled="sealing"
-          @click="sealLastMonth"
-        >
-          {{ sealing ? '封账中…' : '封账上月' }}
-        </button>
-        <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">
-          回到月历
-        </button>
-        <!-- 导出当月这张表（票 08）：版式与店长用了两年的那份《厨房排班表》一致。
-             文件名由服务端在响应头里给（`考勤表-YYYY-MM.xlsx`），这一页不拼。
-             它是这一页的主动作（B 批返工 ⑦），给主按钮样式。 -->
-        <button
-          class="btn btn-primary"
-          type="button"
-          :disabled="exporting"
-          @click="exportSheet"
-        >
-          {{ exporting ? '导出中…' : '导出这个月' }}
-        </button>
+      <div class="aMetaRow">
+        <details class="aHelp">
+          <summary>怎么用</summary>
+          <p class="aSub">
+            <template v-if="sheet">当月 {{ sheet.month }} · 今天 {{ sheet.today }} · </template>
+            员工面板默认折叠，点「待补排行」里的人或右边「展开」看明细。
+            点一个已经过去的日子就能改它 —— 只改那一天，不动轮转规则。
+          </p>
+        </details>
+        <span class="aScope">{{ sheet ? sheet.month : '—' }} 月</span>
       </div>
     </header>
 
@@ -564,14 +596,57 @@ onMounted(() => {
     <p v-if="sheet && sheet.provisional" class="aProvisional" role="status">
       暂算值（未封账）：这个月的数还会随排班与加班变，封账之后才定稿。
     </p>
+
+    <!-- 读数：一条三格（在职 / 待补 / 本月），高度 ≤ 76px。 -->
+    <div v-if="state === 'ready'" class="aKpis">
+      <span class="aKpi"><i>在职</i><b>{{ employees().length }}</b><em>人</em></span>
+      <span class="aKpi"><i>待补</i><b>{{ todoTotal }}</b><em>天</em></span>
+      <span class="aKpi"><i>本月</i><b>{{ monthDayCount }}</b><em>天</em></span>
+    </div>
+
+    <!-- 页头下第一块：待补排行（降序，点人展开他的面板）。 -->
+    <section v-if="state === 'ready'" class="aRankPanel">
+      <div class="aRank-hd">
+        <i class="aLed warn"></i>
+        <h2>待补排行</h2>
+        <span class="aRank-hint">按待补天数降序 · 点人展开</span>
+      </div>
+      <p v-if="!todoRank.length" class="aEmptyLine">没有待补：这个月每条排班都铺到了。</p>
+      <ul v-else class="aRank">
+        <li v-for="person in todoRank" :key="person.id">
+          <button type="button" class="aRankRow" @click="focusEmployee(person)">
+            <b>{{ person.name || '（没有名字）' }}</b>
+            <span class="aRankDays">待补 {{ todoDays(person) }} 天</span>
+            <span class="aRankNet">{{ formatNetHours(person.net_hours) }}</span>
+            <span class="aRankGo">›</span>
+          </button>
+        </li>
+      </ul>
+    </section>
+
     <div v-show="state === 'ready'" class="aSheet">
       <p v-if="!employees().length" class="aEmpty">
         这个月还没有在职员工，也没有人有排班或加班记录。
       </p>
-      <article v-for="person in employees()" :key="person.id" class="aCard">
+      <article
+        v-for="person in employees()"
+        :id="`emp-${person.id}`"
+        :key="person.id"
+        class="aCard"
+        :class="{ 'is-open': openEmployeeId === person.id }"
+      >
         <header class="aCard-hd">
+          <i class="aLed sig"></i>
           <b class="aName">{{ person.name || '（没有名字）' }}</b>
+          <span class="aCardMeta">{{ person.job_title || '—' }}</span>
           <span v-if="todoDays(person)" class="aTodo">待补 {{ todoDays(person) }} 天</span>
+          <span class="aCardNet">{{ formatNetHours(person.net_hours) }}</span>
+          <button
+            class="aCardToggle"
+            type="button"
+            :aria-expanded="openEmployeeId === person.id ? 'true' : 'false'"
+            @click="toggleEmployee(person)"
+          >{{ openEmployeeId === person.id ? '收起' : '展开' }}</button>
         </header>
         <p class="aStats">
           <span class="aStat"><i>职位</i><b>{{ person.job_title || '—' }}</b></span>
@@ -593,6 +668,10 @@ onMounted(() => {
             </em>
           </span>
         </p>
+        <div class="aDaysHead">
+          <span>当月明细</span>
+          <span class="aDaysHint">{{ person.cells.length }} 天 · 点过去的日子改</span>
+        </div>
         <div class="aDays">
           <span
             v-for="cell in person.cells"
@@ -796,6 +875,7 @@ onMounted(() => {
         <!-- 假期台账（票 03）：每张卡把自己的账摊开；算式收在「看算式」后面，
              摊开后能一格一格核（服务端下发的数，页面一个都不自己算）。 -->
         <div v-if="person.leave" class="aLeave">
+          <p class="aSectionHead">假期台账</p>
           <p class="aLvRow">
             <span v-for="stat in leaveStats(person)" :key="stat.label" class="aLv">
               <i>{{ stat.label }}</i><b>{{ stat.value }}</b>
@@ -816,20 +896,90 @@ onMounted(() => {
    / `--line` / `--ok` / `--warn` / `--r-*` / `--fs-*`，定义在 `theme.workbench.css`）——
    新文件在设计护栏里按 strict 处理（`__tests__/tokenDebt.json` 的棘轮只认存量，
    `src/styles/__tests__/designGuard.test.js` 盯着），写兼容层的 `--hy-*` 或不透明色值会红。 */
-.attendance-page { padding: 18px 16px 40px; max-width: 860px; margin: 0 auto; }
-/* 顶部那一行（B 批返工 ①）：手机上三颗按钮的 `flex: none` 会吃掉约 287px，不换行就把
-   标题与说明挤成一条竖排的字（「考勤 / 表」）。照人事组的节假日日历页（`.hTop`）写：
-   **允许换行**；标题块给一个 `flex-basis`，否则它的 max-content 是整段说明、宽屏也会
-   把按钮组顶到第二行去；按钮组自己也能换行，窄屏就整行落到标题下面。 */
-.aTop {
-  display: flex; align-items: flex-start; gap: var(--sp-3); flex-wrap: wrap;
-  margin-bottom: var(--sp-4);
+/* B 案 v2 版式（2026-10-17）：页头 kicker + H1 + 右侧读数胶囊 / 动作；下面是三块读数，
+   再往下是「一人一张面板」。配色不变（语义令牌；本文件 strict，不引 --hy-*）。 */
+.attendance-page {
+  display: flex; flex-direction: column; gap: var(--sp-4);
+  padding: 18px clamp(16px, 4vw, 32px) calc(40px + var(--safe-b));
+  width: 100%; max-width: 1052px; margin: 0 auto; font-family: var(--font-sans);
 }
-.aIntro { flex: 1 1 320px; min-width: 0; }
-.aTop h1 { margin: 2px 0 var(--sp-1); font-size: var(--fs-20); color: var(--ink); }
-.aKicker { margin: 0; font-size: var(--fs-11); letter-spacing: var(--ls-4); color: var(--ink-faint); }
-.aSub { margin: 0; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
-.aTop .btn { margin-left: auto; flex: none; }
+/* 页头 3 行：kicker / H1 + 动作同基线 / 怎么用 + 月份 scope。 */
+.aTop {
+  display: flex; flex-direction: column; gap: 7px; flex-wrap: wrap;
+}
+.aIntro { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.aTitleRow { display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
+.aTop h1 {
+  margin: 0; font-family: var(--font-sans); font-size: 26px; line-height: 1;
+  font-weight: 600; letter-spacing: .01em; color: var(--ink);
+}
+.aKicker {
+  margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
+  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+}
+.aMetaRow { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; }
+.aScope {
+  margin-left: auto; padding: 6px 10px; border: 1px solid var(--line-strong);
+  border-radius: var(--r-1); background: var(--surface-1); color: var(--ink-dim);
+  font-family: var(--font-mono); font-size: 10px; line-height: 1;
+}
+.aSub { margin: 0; padding: 0 14px 12px; max-width: 760px; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
+.aHelp {
+  border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-1);
+}
+.aHelp summary {
+  display: flex; align-items: center; gap: 8px; min-height: var(--tap);
+  padding: 0 14px; cursor: pointer;
+  font-family: var(--font-sans); font-size: 9.5px; letter-spacing: .18em; color: var(--ink-faint);
+}
+.aHelp summary::before {
+  content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--action);
+}
+.aHelp .aSub { padding-top: 2px; }
+.aLed { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; }
+.aLed.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--wb-warn-a16); }
+.aLed.sig { background: var(--action); box-shadow: 0 0 0 3px var(--wb-tint-14); }
+/* 读数行：一条三格（在职 / 待补 / 本月），高约 54px。 */
+.aKpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.aKpi {
+  display: flex; align-items: baseline; gap: 8px; padding: 10px 14px;
+  background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--r-2);
+}
+.aKpi i {
+  font-style: normal; font-family: var(--font-sans); font-size: 9.5px;
+  letter-spacing: .18em; color: var(--ink-faint);
+}
+.aKpi b { font-family: var(--font-mono); font-size: 20px; line-height: 1; font-weight: 500; color: var(--ink); }
+.aKpi em { font-style: normal; font-size: 9.5px; color: var(--ink-faint); }
+/* 待补排行（页头下第一块）：姓名 / 待补天数 / 净时长，点人展开。 */
+.aRankPanel {
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: var(--r-2); box-shadow: none; overflow: hidden;
+}
+.aRank-hd {
+  display: flex; align-items: center; gap: 9px;
+  padding: 11px 14px; border-bottom: 1px solid var(--line);
+}
+.aRank-hd h2 {
+  margin: 0; font-family: var(--font-sans); font-size: 12.5px; line-height: 1;
+  font-weight: 600; letter-spacing: .06em; color: var(--ink);
+}
+.aRank-hint { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; line-height: 1; color: var(--ink-faint); }
+.aRank { list-style: none; margin: 0; padding: 0; }
+.aRankRow {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 6px 14px;
+  border: 0; border-top: 1px solid var(--wb-ink-a08); background: transparent;
+  color: var(--ink); font: inherit; text-align: left; cursor: pointer;
+}
+.aRank li:first-child .aRankRow { border-top: 0; }
+.aRankRow:hover { background: var(--surface-2); }
+.aRankRow b { font-size: 12.5px; font-weight: 600; }
+.aRankDays { font-family: var(--font-mono); font-size: 10px; color: var(--warn); }
+.aRankNet { font-family: var(--font-mono); font-size: 10px; color: var(--ink-dim); }
+.aRankGo { color: var(--ink-faint); }
+.aEmptyLine { margin: 0; padding: 12px 14px; font-size: 11px; color: var(--ink-faint); }
+.aSheet { display: flex; flex-direction: column; gap: 14px; }.aSheet { display: flex; flex-direction: column; gap: 14px; }
 /* 封账（票 04）与「回到月历」并排在右边：回执是一句话、没封过时是一颗按钮。
    `.aTop .btn` 那个 `margin-left: auto` 是给「header 里只有一颗按钮」写的，
    包进这一行之后由这一行的 `margin-left: auto` 顶上，里面的按钮不再各自外推。
@@ -841,47 +991,92 @@ onMounted(() => {
   gap: var(--sp-2); margin-left: auto; flex: 0 1 auto; min-width: 0;
 }
 .aTop .aActions .btn { margin-left: 0; }
-.aSealed { margin: 0; font-size: var(--fs-12); color: var(--ink-dim); }
+.aSealed { margin: 0; font-family: var(--font-mono); font-size: var(--fs-12); color: var(--ink-dim); }
 .aHint, .aEmpty { margin: 0; font-size: var(--fs-13); color: var(--ink-dim); }
 /* 当月是暂算值（票 03）：这一条不是装饰 —— 它是「别拿这个数去结账」的告示。 */
 .aProvisional {
-  margin: 0 0 var(--sp-3); padding: 9px var(--sp-3); border-radius: var(--r-2);
+  margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
   border: 1px solid var(--info); background: var(--info-soft);
   font-size: var(--fs-12); color: var(--ink);
 }
 .aErr {
-  margin: 0 0 var(--sp-3); padding: 9px var(--sp-3); border-radius: var(--r-2);
+  margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
   border: 1px solid var(--danger); background: var(--danger-soft);
   font-size: var(--fs-13); color: var(--danger-bright);
 }
 .aCard {
-  margin-bottom: var(--sp-4); padding: var(--sp-4); border: 1px solid var(--line);
+  padding: 0; border: 1px solid var(--line); overflow: hidden;
   /* 圆角与节假日日历页的卡片一致（`--r-2`，B 批返工 ⑧）：同一个人事组里两张卡不该
      一个 16px 一个 12px。 */
   border-radius: var(--r-2); background: var(--surface-1);
 }
-.aCard-hd { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-2); }
+.aCard-hd {
+  display: flex; align-items: center; gap: 9px; min-height: 56px; padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.aCard:not(.is-open) .aCard-hd { border-bottom: 0; }
+/* 默认折叠：只留头一行表格；点「展开」或排行里的人再出明细。 */
+.aCard:not(.is-open) .aStats,
+.aCard:not(.is-open) .aDaysHead,
+.aCard:not(.is-open) .aDays,
+.aCard:not(.is-open) .aEditBar,
+.aCard:not(.is-open) .aManual,
+.aCard:not(.is-open) .aLeave { display: none; }
 /* 长名字不许把「待补」那颗 pill 挤出卡片（B 批返工 ⑧）：名字自己截断、
    `min-width: 0` 让它在 flex 里真的能缩下去（默认 `min-width: auto` 会顶住）。 */
 .aName {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: var(--fs-14); color: var(--ink);
+  font-size: 12.5px; line-height: 1; font-weight: 600; letter-spacing: .06em; color: var(--ink);
+}
+.aCardMeta { flex: none; font-size: 10px; color: var(--ink-faint); }
+.aCardNet {
+  margin-left: auto; flex: none; font-family: var(--font-mono);
+  font-size: 10px; line-height: 1; color: var(--ink-dim);
+}
+.aCardToggle {
+  flex: none; min-height: var(--tap); padding: 0 10px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  background: transparent; color: var(--ink-dim); font: inherit; font-size: 10px; cursor: pointer;
 }
 .aTodo {
-  flex: none;
-  padding: 1px var(--sp-2); border-radius: var(--r-full); font-size: var(--fs-11);
-  color: var(--warn); border: 1px solid var(--warn); background: transparent;
+  flex: none; display: inline-flex; align-items: center; gap: 5px;
+  font-size: 9px; letter-spacing: .06em; color: var(--warn); white-space: nowrap;
 }
-.aStats { display: flex; flex-wrap: wrap; gap: 6px var(--sp-4); margin: 0 0 var(--sp-3); }
-.aStat { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--fs-12); }
-.aStat i { font-style: normal; color: var(--ink-faint); }
-.aStat b { font-size: var(--fs-13); color: var(--ink); }
+/* 状态 = 6px 圆点 + 小字（待补 / 待批 = --warn）。 */
+.aTodo::before {
+  content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%;
+  background: var(--warn);
+}
+.aStats {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px;
+  margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line);
+}
+.aStat { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: var(--fs-11); }
+.aStat i {
+  font-style: normal; font-family: var(--font-sans); font-size: 8.5px;
+  letter-spacing: .12em; color: var(--ink-faint); white-space: nowrap;
+}
+.aStat b {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 13px; color: var(--ink);
+}
 .aNet { font-family: var(--font-mono); }
+.aDaysHead {
+  display: flex; align-items: baseline; gap: 10px; padding: 11px 14px 7px;
+  border-top: 1px solid var(--wb-ink-a08);
+}
+.aDaysHead > span:first-child {
+  font-family: var(--font-sans); font-size: 9px; font-weight: 500;
+  letter-spacing: .18em; color: var(--ink-faint);
+}
+.aDaysHint { margin-left: auto; font-family: var(--font-mono); font-size: 9px; color: var(--ink-faint); }
 .aDays {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); gap: var(--sp-1);
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--sp-1); padding: 0 14px 14px;
 }
 .aDay {
-  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 1px; min-height: var(--tap);
   padding: var(--sp-1) 2px; border-radius: var(--r-1);
   border: 1px solid var(--line); background: transparent;
   /* 改不了的那一格（今天之后）不该出现可点的光标。 */
@@ -947,7 +1142,8 @@ onMounted(() => {
 /* 每一颗 chip 都是**自己的按钮**（`type="button"`）：班次 / 休 / 休半天 各是一次写，
    「取消」只是收起带子。当前生效的那一颗给 `is-on`（那天上哪个班、是不是休、是不是只上半天）。 */
 .aChip {
-  padding: 2px var(--sp-2); border: 1px solid var(--line-strong); border-radius: var(--r-full);
+  min-height: var(--tap); padding: 2px var(--sp-2);
+  border: 1px solid var(--line-strong); border-radius: var(--r-full);
   background: transparent; color: var(--ink-dim);
   font: inherit; font-size: var(--fs-11); line-height: 1.6; cursor: pointer;
 }
@@ -963,28 +1159,38 @@ onMounted(() => {
 /* 未审批的加班 / 补钟（票 03 / 故事 14）：**只标色**，数不进净时长。 */
 .aStat.is-pending .aNet { color: var(--warn); }
 .aPending {
-  padding: 0 var(--sp-2); border-radius: var(--r-full); border: 1px solid var(--warn);
-  font-style: normal; font-size: var(--fs-11); color: var(--warn);
+  display: inline-flex; align-items: center; gap: 5px;
+  font-style: normal; font-size: 9px; letter-spacing: .06em; color: var(--warn);
+}
+.aPending::before {
+  content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--warn);
 }
 /* 假期台账那一块（票 03）：九项摊在卡片上，算式收在「看算式」后面。 */
-.aLeave { margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--line); }
+.aLeave { margin-top: 0; padding: 12px 14px 14px; border-top: 1px solid var(--line); }
+.aSectionHead {
+  margin: 0 0 9px; font-family: var(--font-sans); font-size: 9px;
+  font-weight: 500; letter-spacing: .18em; color: var(--ink-faint);
+}
 .aLvRow { display: flex; flex-wrap: wrap; gap: 5px var(--sp-4); margin: 0 0 var(--sp-2); }
 .aLv { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--fs-12); }
 .aLv i { font-style: normal; color: var(--ink-faint); }
 .aLv b { font-family: var(--font-mono); font-size: var(--fs-13); color: var(--ink); }
-.aFormula summary { cursor: pointer; font-size: var(--fs-12); color: var(--ink-dim); }
+.aFormula summary {
+  display: inline-flex; align-items: center; min-height: var(--tap);
+  cursor: pointer; font-size: var(--fs-12); color: var(--ink-dim);
+}
 .aFormulaText {
   margin: var(--sp-2) 0 0; font-family: var(--font-mono); font-size: var(--fs-11);
   line-height: 1.9; color: var(--ink-dim);
 }
 /* 四个手填列（票 05）：系统里没有的那几项，填一次就进台账。 */
-.aManual { margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--line); }
-.aManualTitle { margin: 0 0 var(--sp-2); font-size: var(--fs-12); color: var(--ink-dim); }
+.aManual { margin-top: 0; padding: 12px 14px 14px; border-top: 1px solid var(--line); }
+.aManualTitle { margin: 0 0 10px; font-size: 10.5px; line-height: 1.6; color: var(--ink-dim); }
 .aManualRow { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); }
 .aManualField { display: flex; flex-direction: column; gap: 2px; }
 .aManualLabel { font-size: var(--fs-11); color: var(--ink-faint); }
 .aManualInput {
-  width: 110px; padding: 4px var(--sp-2); border: 1px solid var(--line);
+  width: 110px; min-height: var(--tap); padding: 4px var(--sp-2); border: 1px solid var(--line);
   border-radius: var(--r-1); background: var(--surface-2); color: var(--ink);
   font-size: var(--fs-12); font-family: inherit;
 }
@@ -992,7 +1198,7 @@ onMounted(() => {
 .aManualNow { display: flex; flex-wrap: wrap; gap: 5px var(--sp-4); margin: var(--sp-2) 0 0; }
 .aManualNowOne { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--fs-12); }
 .aManualNowOne i { font-style: normal; color: var(--ink-faint); }
-.aManualNowOne b { font-size: var(--fs-13); color: var(--ink); }
+.aManualNowOne b { font-family: var(--font-mono); font-size: var(--fs-13); color: var(--ink); }
 .aManualFoot { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); }
 .aManualFoot .aSave { flex: none; }
 .aManualErr { font-size: var(--fs-11); color: var(--danger-bright); }
@@ -1008,7 +1214,7 @@ onMounted(() => {
    高了，`flex-end` 会把期初的两行整体往下推、两个输入框不再齐平。 */
 .aOpening {
   display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--sp-2);
-  margin-top: var(--sp-2);
+  margin-top: var(--sp-2); max-width: 420px;
 }
 .aOpeningField,
 .aClosingField { display: flex; flex-direction: column; gap: 2px; flex: 1 1 118px; min-width: 0; }
@@ -1016,7 +1222,7 @@ onMounted(() => {
 .aClosingLabel { font-size: var(--fs-11); color: var(--ink-faint); }
 .aOpeningInput,
 .aClosingInput {
-  width: 110px; max-width: 100%; padding: 4px var(--sp-2); border: 1px solid var(--line);
+  width: 110px; max-width: 100%; min-height: var(--tap); padding: 4px var(--sp-2); border: 1px solid var(--line);
   border-radius: var(--r-1); background: var(--surface-2); color: var(--ink);
   font-size: var(--fs-12); font-family: inherit;
 }
@@ -1031,4 +1237,22 @@ onMounted(() => {
 .aClosingNote { margin: 2px 0 0; font-size: var(--fs-11); color: var(--accent); }
 .aClosingSealed { font-size: var(--fs-11); color: var(--warn); }
 .aOpeningErr { font-size: var(--fs-11); color: var(--danger-bright); }
+/* 页内动作（封账 / 回到月历 / 导出 / 存这四项 / 存期初期末）：触控 44px、圆角 --r-1。 */
+.aActions .btn,
+.aManualFoot .btn,
+.aOpening .btn { border-radius: var(--r-1); min-height: var(--tap); }
+@media (max-width: 900px) {
+  .aStats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .aTop h1 { font-size: 22px; }
+  .aTitleRow { flex-wrap: wrap; }
+  .aActions { width: 100%; justify-content: flex-start; }
+  .aKpis { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .aKpi { flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px 10px; }
+  .aKpi b { font-size: 20px; }
+  .aDaysHead { padding: 10px 12px 6px; }
+  .aDays { gap: 3px; padding: 0 12px 12px; }
+  .aDay { min-height: 44px; }
+}
 </style>

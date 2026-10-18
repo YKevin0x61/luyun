@@ -32,7 +32,11 @@ const PAGES = [
 
 const CJK = /[\u4e00-\u9fff]/
 // 排除集：这些 class 里的文字不是「说明性文案」（控件名 / 数据标注 / 身份 / 小样 / 表格值）
-const LATE_ANCHORS = ['modal-overlay']  // 「靠后的元素」锚点：切片必须覆盖到它，见 templateOf 的自证
+/* 「靠后的元素」锚点：切片必须覆盖到至少一个，见 templateOf 的自证。
+   v2 版式重构后「整月」页的弹层从 `modal-overlay` 换成了底部的 `StaffDaySheet` 面板，
+   原来的单一锚点会误判成「切片被截断」—— 这里改成**候选集**：文件里出现哪些锚点，
+   模板里就必须覆盖到其中至少一个（自证的意图是「切到页面末端」，不是钉死某个类名）。 */
+const LATE_ANCHORS = ['modal-overlay', 'StaffDaySheet', 'hy-next', 'day-sheet']
 const SKIP_CLASS = new Set([
   'btn', 'primary', 'danger', 'block', 'pill', 'step', 'arrow', 'close', 'grp', 'more', 'pitem',
   'badge', 'num', 'label', 'kind', 'goto', 'count', 'date', 'who', 'due', 'tag', 'code', 'tagline',
@@ -42,6 +46,11 @@ const SKIP_CLASS = new Set([
   // 注意 **不排除 `.wbh-sub`** —— 说明性文案正是在它上面（与 `.tA-sub` 同理，排除它规则就空了）。
   'wbh-go', 'wbh-card-more', 'wbh-label', 'wbh-num', 'wbh-brand', 'wbh-title', 'wbh-shift-name',
   'wbh-shift-count', 'wbh-shift-people', 'wbh-duty-total', 'wbh-next', 'wbh-wait', 'wbh-date',
+  // B 案重构（2026-10-17）：读数卡的标签/单位/读数说明、面板头与常用入口都是控件文本或数据标注。
+  'wbh-kicker', 'wbh-pill', 'wbh-kh', 'wbh-kf', 'wbh-hint', 'wbh-sh', 'wbh-shift-big', 'wbh-onsite',
+  // v2 版式统一：员工卫生页的页头眉标（HYGIENE · 员工端）与 wbh-kicker 同一口径。
+  'hy-wb-kicker',
+  'wbh-quick', 'wbh-rem-row', 'wbh-rem-go', 'wbh-empty', 'wbh-led',
   // 注意：**不排除 `.tA-sub`** —— 真实代码里说明性文案正是在这个类上（原型 check-copy.py 排的是
   // 数据标注 `sub`，两边的语义不同）。排除它等于把这一条规则做成空的（t49 实测踩过）。
 
@@ -66,10 +75,13 @@ function templateOf(src) {
   const tpl = src.slice(start, end).replace(/<!--[\s\S]*?-->/g, '')
   // 自证：切片必须真的覆盖到页面末端（拿文件里靠后的那个弹层当锚点）。
   // 少了这一条，将来谁把 `lastIndexOf` 改回 `indexOf`，预算又会静默变成空守。
-  for (const late of LATE_ANCHORS) {
-    if (src.includes(late)) {
-      expect(tpl, `模板切片没覆盖到 ${late}（切片被截断了，预算在这段上等于空守）`).toContain(late)
-    }
+  const present = LATE_ANCHORS.filter((late) => src.includes(late))
+  if (present.length) {
+    const covered = present.filter((late) => tpl.includes(late))
+    expect(
+      covered.length,
+      `模板切片没覆盖到任何靠后锚点（${present.join(' / ')}）—— 切片被截断了，预算在这段上等于空守`,
+    ).toBeGreaterThan(0)
   }
   return tpl
 }

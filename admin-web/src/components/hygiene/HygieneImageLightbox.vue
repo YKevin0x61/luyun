@@ -66,8 +66,8 @@ onBeforeUnmount(() => {
   --hy-ink: #e4f0ee;
   --hy-mint: #3fe0b0;
   --hy-mint-bright: #63efc5;
-  --hy-mint-line: rgba(63, 224, 176, .34);
-  --hy-line-strong: rgba(133, 205, 198, .28);
+  --hy-mint-line: var(--wb-tint-22);
+  --hy-line-strong: var(--wb-ink-a22);
   --font-sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   position: fixed;
@@ -100,7 +100,7 @@ onBeforeUnmount(() => {
   z-index: var(--z-shell);
   border: 1px solid var(--hy-line-strong);
   border-radius: 999px;
-  background: rgba(8, 22, 20, .92);
+  background: var(--wb-scrim-strong);
   color: var(--hy-ink);
   padding: 9px 14px;
   font: 700 12px/1 var(--font-sans);

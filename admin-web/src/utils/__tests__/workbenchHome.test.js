@@ -5,6 +5,8 @@ import {
   countOverdueFixes,
   countPendingItems,
   countPendingLeaves,
+  managerTodoRows,
+  MANAGER_TODO_LIMIT,
   offDutyNames,
   onDutyNames,
   staffShiftCell,
@@ -316,5 +318,57 @@ describe('数字点进去的地方', () => {
     expect(HOME_LINKS.duty).toBe('/workbench/hr/calendar')
     expect(HOME_LINKS.myItems).toBe('/workbench/me/clean')
     expect(HOME_LINKS.myRequests).toBe('/workbench/me/today')
+  })
+})
+
+describe('店长首页「等我处理」：四个读数的展开版（2026-10-18 实用性改进）', () => {
+  const now = Date.parse('2026-10-18T09:00:00+08:00')
+  const queue = {
+    items: [
+      { item_id: 1, shift: '白班', zone_name: '案板', item_name: '案板桌面', status: '待验收', submitter_phone: '刘厨' },
+      { item_id: 2, shift: '夜班', zone_name: '熟笼', item_name: '冰箱内部', status: '已通过' },
+    ],
+  }
+  const inbox = {
+    requests: [
+      { id: 7, kind: 'leave', employee_name: '张姐', start_date: '2026-10-18', end_date: '2026-10-19', days: [{}, {}] },
+      { id: 8, kind: 'swap', employee_name: '小陈', start_date: '2026-10-20', end_date: '2026-10-20', days: [{}] },
+    ],
+  }
+  const fix = {
+    items: [
+      { id: 3, zone_name: '煎炸', ticket_type: '卫生', body_text: '地板有垃圾', status: '待回拍', deadline: '2026-10-18T08:00:00+08:00' },
+      { id: 4, zone_name: '案板', ticket_type: '标签', body_text: '标签没贴', status: '待回拍', deadline: '2026-10-19T08:00:00+08:00' },
+      { id: 5, zone_name: '明档1', ticket_type: '卫生', body_text: '已交', status: '待验收', deadline: '2026-10-17T08:00:00+08:00' },
+    ],
+  }
+
+  it('三类各取「店长真能动手的」，按急迫排：逾期整改 → 待验收 → 待批请假', () => {
+    const rows = managerTodoRows({ inbox, queue, fix, now })
+    expect(rows.map((row) => row.kind)).toEqual(['整改', '验收', '请假'])
+    // 只取逾期的整改（未到时限那条、已交的那条都不进来）
+    expect(rows[0].title).toContain('煎炸')
+    // 只取「待验收」的日常项
+    expect(rows[1].title).toContain('案板')
+    // 只取请假（换班要对方点头才进店长待办）
+    expect(rows[2].title).toContain('张姐')
+    expect(rows[2].meta).toContain('2 天')
+    // 每条都能直达对应专页
+    expect(rows.map((row) => row.to)).toEqual([
+      '/workbench/floor/fix',
+      '/workbench/floor/daily',
+      '/workbench/hr/inbox',
+    ])
+  })
+
+  it('一块读不出来就是少一类，不编造条目', () => {
+    expect(managerTodoRows({ inbox: null, queue, fix: null, now }).map((r) => r.kind)).toEqual(['验收'])
+    expect(managerTodoRows({ inbox: null, queue: null, fix: null, now })).toEqual([])
+  })
+
+  it('聚合不截断，截断交给页面（标题要如实报「共 N 件」）', () => {
+    const many = { items: Array.from({ length: 20 }, (_, i) => ({ item_id: i, shift: '白班', status: '待验收' })) }
+    expect(managerTodoRows({ queue: many }).length).toBe(20)
+    expect(MANAGER_TODO_LIMIT).toBe(6)
   })
 })

@@ -43,6 +43,20 @@ const printTailIndex = computed(() => lastSelectedPageIndex(selectedPages.value)
 const canPrint = computed(() => selectedCount.value > 0)
 const measureRef = ref(null)
 const probeRef = ref(null)
+const sheetWrapRef = ref(null)
+// v3：屏幕预览是全屏 overlay，纸张按可用宽度 fit-width 缩放（1280 以下不横向滚）。
+const zoomMode = ref('fit')
+const fitScale = ref(1)
+const manualScale = ref(1)
+const scalePercent = computed(() => Math.round(
+  (zoomMode.value === 'fit' ? fitScale.value : manualScale.value) * 100,
+))
+// 纸面头：站点 / 日期（固定成本次预览的那一天）
+const stationTitles = ref([])
+const todayText = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`
+const stationLabel = computed(() => (
+  stationTitles.value.length ? stationTitles.value.join('、') : slugs.value.join('、')
+))
 const backHref = computed(() => (slugs.value.length === 1
   ? `${RECIPE_DETAIL_PATH}?slug=${encodeURIComponent(slugs.value[0])}`
   : RECIPE_HOME_PATH))
@@ -134,6 +148,7 @@ async function layoutPages() {
   if (document.fonts?.ready) await document.fonts.ready
   await nextTick()
   remesurePages()
+  measureFit()
 }
 
 onMounted(async () => {
@@ -155,6 +170,7 @@ onMounted(async () => {
       try {
         const data = await api.get(`/api/recipes/stations/${encodeURIComponent(slug)}`)
         parts.push(`<section class="sop-print-station">${data.content_html}</section>`)
+        stationTitles.value.push(String(data.title || slug))
       } catch (e) { /* 单个岗位加载失败时跳过，不阻塞其余岗位 */ }
     }
     if (!parts.length) {
@@ -170,8 +186,11 @@ onMounted(async () => {
   await layoutPages()
   bindMeasureResize()
   bindPrintMedia()
+  measureFit()
+  window.addEventListener('resize', onWindowResize)
 })
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', onWindowResize)
   printMediaQuery?.removeEventListener('change', onPrintMediaChange)
   resizeObserver?.disconnect()
   document.body.classList.remove('sop-print-preview-page')
@@ -182,6 +201,41 @@ onBeforeUnmount(() => {
 watch(bodyHtml, () => {
   layoutPages()
 })
+
+function zoomValue() {
+  return zoomMode.value === 'fit' ? fitScale.value : manualScale.value
+}
+// 直接给每张纸设 zoom：不新增 CSS 变量（它不在令牌层里，设计护栏会当成未定义令牌）。
+function syncZoom() {
+  const wrap = sheetWrapRef.value
+  if (!wrap) return
+  const value = String(zoomValue())
+  wrap.querySelectorAll('.sop-print-preview-sheet').forEach((el) => {
+    el.style.zoom = value
+  })
+}
+function measureFit() {
+  const el = sheetWrapRef.value
+  if (!el) return
+  const available = (el.clientWidth || window.innerWidth) - 32
+  fitScale.value = Math.max(0.3, Math.min(1, available / mmToPx(210)))
+  syncZoom()
+}
+function zoomBy(delta) {
+  if (zoomMode.value === 'fit') {
+    manualScale.value = fitScale.value
+    zoomMode.value = 'manual'
+  }
+  manualScale.value = Math.max(0.3, Math.min(2, Math.round((manualScale.value + delta) * 100) / 100))
+  syncZoom()
+}
+function zoomFit() {
+  zoomMode.value = 'fit'
+  measureFit()
+}
+function onWindowResize() {
+  if (zoomMode.value === 'fit') measureFit()
+}
 
 function bindMeasureResize() {
   if (!measureRef.value || typeof ResizeObserver === 'undefined') return
@@ -240,27 +294,39 @@ function doPrint() {
 </script>
 
 <template>
-  <div>
-    <header class="sop-print-preview-toolbar no-print">
-      <span class="sop-print-preview-title">{{ pageTitle }} · {{ pageCount }} 页 A4</span>
-      <span v-if="pageCount > 1" class="sop-print-preview-pick-hint">已选 {{ selectedCount }} 页</span>
-      <button v-if="pageCount > 1" type="button" class="btn btn-ghost" @click="selectAllPages">全选</button>
-      <span class="sop-print-preview-spacer"></span>
-      <button type="button" class="btn btn-primary" :disabled="!canPrint" @click="doPrint">
-        {{ pageCount > 1 ? `打印已选页` : '打印' }}
-      </button>
-      <!-- 2026-10-08：这一条上的「管理后台」与「退出」两颗**撤掉**了 —— 这一页现在套着
-           工作台外壳，两个出口都在那儿：桌面档在顶上那条栏里，手机档在页头的 `⋮` 里。
-           同一条工具栏上再写一遍就是同一件事两遍（用户裁定的两处冗余之一）。
-           打印动作（打印 / 全选 / 关闭）仍留在这里 —— 那些是页头没有的。
-           票 10 的「退出」行为一个字没变，只是不再从这一页发起。 -->
-      <router-link class="btn btn-ghost" :to="backHref">关闭</router-link>
+  <div class="print-page">
+    <!-- 页头：kicker / H1 / 右侧读数 + 动作（B 案 v2 页面骨架）。
+         打印时整条由壳的 `.no-print` 与 recipe.css 的 @media print 隐藏。 -->
+    <header class="sop-print-preview-toolbar no-print print-head">
+      <div class="print-head-copy">
+        <p class="print-kicker">配方 · 打印预览</p>
+        <h1 class="print-title">{{ pageTitle }}</h1>
+      </div>
+      <div class="print-head-pills">
+        <span class="print-pill"><i class="print-led sig" aria-hidden="true"></i>A4 · {{ pageCount }} 页</span>
+        <span v-if="pageCount > 1" class="print-pill">
+          <i class="print-led warn" aria-hidden="true"></i>已选 {{ selectedCount }} 页
+        </span>
+      </div>
+      <div class="print-head-actions">
+        <!-- v3：屏幕预览是全屏 overlay，页头只留 返回 / 缩放 / 打印 / 关闭 -->
+        <router-link class="btn btn-ghost" :to="backHref">返回</router-link>
+        <div class="print-zoom" role="group" aria-label="缩放">
+          <button type="button" class="btn btn-ghost print-zoom-btn" aria-label="缩小" @click="zoomBy(-0.1)">−</button>
+          <button type="button" class="btn btn-ghost print-zoom-value" @click="zoomFit">{{ scalePercent }}%</button>
+          <button type="button" class="btn btn-ghost print-zoom-btn" aria-label="放大" @click="zoomBy(0.1)">+</button>
+        </div>
+        <button type="button" class="btn btn-primary" :disabled="!canPrint" @click="doPrint">
+          {{ pageCount > 1 ? `打印已选页` : '打印' }}
+        </button>
+        <router-link class="btn btn-ghost" :to="RECIPE_HOME_PATH">关闭</router-link>
+      </div>
     </header>
     <div class="sop-print-preview-measure-host no-print" aria-hidden="true">
       <div ref="measureRef" class="sop-print-preview-measure sop-body markdown-body" v-html="bodyHtml"></div>
       <div ref="probeRef" class="sop-print-preview-measure sop-body markdown-body"></div>
     </div>
-    <div class="sop-print-preview-sheet-wrap">
+    <div ref="sheetWrapRef" class="sop-print-preview-sheet-wrap print-stage">
       <div
         v-for="(html, index) in pageHtmls"
         :key="index"
@@ -270,13 +336,184 @@ function doPrint() {
           'is-print-tail': index === printTailIndex,
         }"
       >
+        <div class="print-sheet-head" aria-hidden="true">
+          <span>{{ stationLabel }}</span>
+          <span>{{ todayText }} · {{ index + 1 }} / {{ pageCount }}</span>
+        </div>
         <label v-if="pageCount > 1" class="sop-print-preview-sheet-pick no-print" @click.prevent="togglePage(index)">
           <input type="checkbox" :checked="isPageSelected(index)" tabindex="-1">
           第 {{ index + 1 }} 页
         </label>
         <div class="sop-body markdown-body sop-print-preview-sheet-content" v-html="html"></div>
-        <div class="sop-print-preview-page-index">{{ index + 1 }} / {{ pageCount }}</div>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+/* B 案 v2——**只在屏幕上**是「预览台」，纸面必须白底黑字。
+   纸张与打印的那套规则住在 `recipe.css` 末尾的 `@media print` 与壳的打印复位里，
+   这里所有覆盖都圈在 `@media screen`，打印时一条都不生效，别把白纸弄脏。 */
+/* v3：屏幕预览是全屏 overlay（只留 返回 / 缩放 / 打印 / 关闭 四个动作）。
+   打印时这条 overlay 必须解除，否则 fixed 层会被印成一张空白页。 */
+.print-page {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-queue);
+  overflow: auto;
+  background: var(--surface-0);
+  padding-bottom: calc(24px + var(--safe-b));
+}
+.print-kicker {
+  margin: 0 0 7px;
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .26em;
+  color: var(--ink-faint);
+}
+.print-title {
+  margin: 0;
+  font: 600 26px/1.05 var(--font-sans);
+  letter-spacing: .01em;
+  color: var(--ink);
+}
+.print-head-copy {
+  min-width: 0;
+}
+.print-head-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.print-head-actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.print-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: var(--surface-1);
+  color: var(--ink-dim);
+  font: 500 10px/1 var(--font-mono);
+}
+.print-led {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 6px;
+}
+.print-led.ok { background: var(--ok); box-shadow: 0 0 0 3px var(--wb-ok-a16); }
+.print-led.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--wb-warn-a16); }
+.print-led.bad { background: var(--danger); box-shadow: 0 0 0 3px var(--wb-danger-a16); }
+.print-led.sig { background: var(--action); box-shadow: 0 0 0 3px var(--wb-tint-14); }
+
+.print-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.print-zoom-btn {
+  min-width: 44px;
+  padding: 0 10px;
+}
+.print-zoom-value {
+  min-width: 64px;
+  padding: 0 10px;
+  font: 500 11px/1 var(--font-mono);
+}
+
+/* 纸面头：站点 · 日期 · 页码 —— 绝对定位在纸张上内边距里，
+   不占正文内容流，所以分页测量（A4 内容高度）一个字都不用改。 */
+.print-sheet-head {
+  position: absolute;
+  top: 3.5mm;
+  left: 10mm;
+  right: 10mm;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8mm;
+  font: 500 7.5pt/1.2 var(--font-mono);
+  letter-spacing: .04em;
+  color: var(--ink-dim);
+  pointer-events: none;
+}
+
+@media screen {
+  /* 屏上的页头：替代 recipe.css 那条写死的深色渐变工具条。 */
+  .sop-print-preview-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: var(--z-shell);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px 16px;
+    padding: 14px 18px;
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--line);
+    color: var(--ink);
+    box-shadow: var(--hy-shadow-sm);
+  }
+  .sop-print-preview-sheet-pick {
+    background: var(--surface-1);
+    border: 1px solid var(--line);
+    border-radius: var(--r-1);
+    color: var(--ink);
+  }
+  /* 预览台：纸张浮在钢面底上（纸张本身的白色由 recipe.css 的预览令牌定）。 */
+  .sop-print-preview-sheet-wrap {
+    padding: 20px 16px 32px;
+  }
+  /* 比 recipe.css 那条同特异性规则更具体一层：动态注入的 recipe.css 在
+     组件样式之后加载，同特异性会反压回来。 */
+  .sop-print-preview-sheet-wrap .sop-print-preview-sheet {
+    border-radius: var(--r-1);
+    box-shadow: var(--hy-shadow-md);
+  }
+  .sop-print-preview-page-index {
+    color: var(--ink-faint);
+    font-family: var(--font-mono);
+  }
+}
+
+
+@media print {
+  /* 只解除本页新增的内容（overlay / 缩放），recipe.css 的 A4 规则照旧。 */
+  .print-page {
+    position: static;
+    inset: auto;
+    overflow: visible;
+    background: transparent;
+    padding-bottom: 0;
+  }
+  .sop-print-preview-sheet {
+    zoom: 1 !important;
+  }
+}
+
+@media (max-width: 720px) {
+  .print-page {
+    padding-bottom: calc(12px + var(--safe-b));
+  }
+  .print-head-pills {
+    display: none;
+  }
+  .print-head-actions {
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+  .print-title {
+    font-size: 18px;
+  }
+  .print-zoom-value {
+    min-width: 52px;
+  }
+}
+</style>

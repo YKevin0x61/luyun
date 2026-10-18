@@ -6,9 +6,13 @@ import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import { dailyCaptureUrl, frozenStandardUrl } from '../../utils/hygieneMarkup'
+import { dayLabel as businessDayLabel } from '../../utils/todayShift'
 import { dailyQueueKey, nextAfterRemove } from '../../utils/hygieneWorkFlow'
 
 const rows = ref([])
+// 隔夜验收（2026-10-18）：过去几个营业日里还挂着「待验收」的行。服务端**只在
+// 不带 date 的今天这一档**回 `pending_past`，每行带 `business_date`。
+const pendingPast = ref([])
 const loading = ref(true)
 const errorText = ref('')
 const busy = ref(false)
@@ -26,7 +30,43 @@ const isToday = ref(true)
 
 const pendingRows = computed(() => rows.value.filter((row) => row.status === '待验收'))
 const listRows = computed(() => (isToday.value ? pendingRows.value : rows.value))
-const reviewDate = computed(() => businessDate.value || '')
+// 只有「当前待验收」的行能操作：今天这一档的 `items` 与漏验都在内，
+// 历史回看（手动选了过去的营业日）那份只读。
+const pastPendingRows = computed(() => pendingPast.value.filter((row) => row.status === '待验收'))
+const operableRows = computed(() => (
+  isToday.value ? [...listRows.value, ...pastPendingRows.value] : []
+))
+// 漏验按营业日分组的显示标题：『10/17 周六』（日期倒序由服务端给，这里只做分组）。
+const pastGroups = computed(() => {
+  const groups = []
+  for (const row of pastPendingRows.value) {
+    const date = row.business_date || ''
+    const found = groups.find((group) => group.date === date)
+    if (found) {
+      found.rows.push(row)
+      continue
+    }
+    groups.push({ date, title: businessDayLabel(date) || date, rows: [row] })
+  }
+  return groups
+})
+// 对照图与验收请求要的那一天：漏验行跟着它自己的 `business_date`，其余按当前回看日
+// （今天这一档不带日期，与旧口径逐字一致 —— 服务端不传 date 就是今天）。
+const reviewDate = computed(() => {
+  const row = selected.value
+  const rowDate = (row && row.business_date) || ''
+  if (rowDate && rowDate !== queueDate.value) return rowDate
+  return businessDate.value || ''
+})
+const emptyText = computed(() => {
+  if (!isToday.value) return '这一天没有配日常检查项。'
+  if (pastPendingRows.value.length) return '今天没有待验收的日常检查。'
+  return '今天没有待验收的日常检查，也没有漏验。'
+})
+// 「验完这一件之后选下一件」的键要带上营业日：同一项同班次在漏验那几天各是一条。
+function queueKeyOf(row) {
+  return `${dailyQueueKey(row)}@${(row && row.business_date) || ''}`
+}
 
 onMounted(loadQueue)
 
@@ -44,11 +84,15 @@ async function loadQueue() {
       date: businessDate.value || undefined,
     })
     rows.value = data.items || []
+    pendingPast.value = data.pending_past || []
     queueDate.value = data.date || ''
     isToday.value = data.is_today !== false
     if (selected.value) {
-      const still = rows.value.find(
-        (row) => row.item_id === selected.value.item_id && row.shift === selected.value.shift,
+      const current = selected.value
+      const still = [...rows.value, ...pendingPast.value].find(
+        (row) => row.item_id === current.item_id
+          && row.shift === current.shift
+          && (row.business_date || '') === (current.business_date || ''),
       )
       if (still) {
         selected.value = still
@@ -119,12 +163,15 @@ async function confirmReject(reason) {
 async function decide(action, reason = '') {
   if (!selected.value || busy.value) return
   const current = selected.value
-  const previous = [...listRows.value]
+  const previous = [...operableRows.value]
+  const targetDate = reviewDate.value
   busy.value = true
   errorText.value = ''
   try {
     await api.post(`/api/hygiene/admin/daily/${selected.value.item_id}/${action}`, {
       shift: selected.value.shift,
+      // 漏验要补在它自己那一天；今天这一档不传 = 今天（与旧行为一致）。
+      ...(targetDate ? { business_date: targetDate } : {}),
       // 只在驳回时带上原因：员工端会把它显示在待办行上。
       ...(action === 'reject' && reason ? { reason } : {}),
     })
@@ -141,7 +188,7 @@ async function decide(action, reason = '') {
     review.value = null
     reviewMissing.value = false
     await loadQueue()
-    const next = nextAfterRemove(previous, current, dailyQueueKey)
+    const next = nextAfterRemove(previous, current, queueKeyOf)
     if (next) await selectRow(next)
   } catch (err) {
     errorText.value = err.message || (action === 'accept' ? '验收失败' : '驳回失败')
@@ -178,7 +225,7 @@ function statusClass(status) {
 
 <template>
   <div class="daily-page">
-    <div class="card roster-head">
+    <header class="roster-head">
       <div>
         <p class="hy-eyebrow">Daily · 当日对照</p>
         <h1>日常验收</h1>
@@ -187,6 +234,7 @@ function statusClass(status) {
           <summary>规则说明</summary>
           <p>左标准图、右实拍。提交人不能验收自己的实拍，超级管理员可在这里验收。</p>
           <p>切到过去的营业日只是回看：能看到那天交了什么、漏了哪些，不能补验收。</p>
+          <p>漏验的（最近几个营业日还没验的）在「今天等验收」下面按天列出，可以补验。</p>
         </details>
       </div>
       <div class="daily-datebar">
@@ -202,7 +250,7 @@ function statusClass(status) {
         </button>
         <button type="button" class="btn" :disabled="loading" @click="loadQueue">刷新</button>
       </div>
-    </div>
+    </header>
 
     <p v-if="!isToday" class="daily-history-hint" role="status">
       正在回看 {{ queueDate }}：这一天只读，不能通过或驳回。
@@ -217,36 +265,69 @@ function statusClass(status) {
     <div class="daily-grid">
       <div class="table-card">
         <div class="table-card-header">
+          <i class="daily-led warn"></i>
           <h3>
-            {{ isToday ? '等验收' : `${queueDate} 全部检查项` }}
-            <span>{{ listRows.length }}</span>
+            {{ isToday ? '今天等验收' : `${queueDate} 全部检查项` }}
+            <span class="daily-hint">{{ listRows.length }}</span>
           </h3>
         </div>
         <div v-if="loading" class="roster-empty">正在加载…</div>
         <div v-else-if="errorText" class="roster-empty">加载失败，点上方「刷新」重试。</div>
-        <div v-else-if="!listRows.length" class="roster-empty">
-          {{ isToday ? '现在没有等验收的日常检查。' : '这一天没有配日常检查项。' }}
-        </div>
-        <ul v-else class="queue-list">
-          <li v-for="row in listRows" :key="`${row.item_id}-${row.shift}`">
-            <button
-              type="button"
-              class="queue-btn"
-              :class="{ active: selected && selected.item_id === row.item_id && selected.shift === row.shift }"
-              @click="selectRow(row)"
-            >
-              <strong>{{ row.zone_name }} · {{ row.item_name }}</strong>
-              <span>
-                {{ row.shift }} · {{ row.submitter_phone || '拍摄人未知' }}
-                <em v-if="!isToday" class="queue-status" :class="statusClass(row.status)">{{ row.status }}</em>
-              </span>
-            </button>
-          </li>
-        </ul>
+        <div
+          v-else-if="isToday ? !listRows.length && !pastPendingRows.length : !listRows.length"
+          class="roster-empty"
+        >{{ emptyText }}</div>
+        <template v-else>
+          <ul v-if="listRows.length" class="queue-list">
+            <li v-for="row in listRows" :key="`${row.item_id}-${row.shift}`">
+              <button
+                type="button"
+                class="queue-btn"
+                :class="{ active: selected && selected.item_id === row.item_id && selected.shift === row.shift }"
+                @click="selectRow(row)"
+              >
+                <strong>{{ row.zone_name }} · {{ row.item_name }}</strong>
+                <span>
+                  {{ row.shift }} · {{ row.submitter_phone || '拍摄人未知' }}
+                  <em v-if="!isToday" class="queue-status" :class="statusClass(row.status)">{{ row.status }}</em>
+                </span>
+              </button>
+            </li>
+          </ul>
+          <p v-else class="roster-empty">{{ emptyText }}</p>
+
+          <!-- 漏验（隔夜验收）：过去几个营业日还没验的行，按天分组、各带条数；
+               点开后对照图会带上那一天（`reviewDate`），通过 / 驳回也带上 `business_date`。 -->
+          <div v-if="isToday && pastGroups.length" class="queue-past">
+            <p class="queue-past-kicker">漏验 · 共 {{ pastPendingRows.length }} 项</p>
+            <div v-for="group in pastGroups" :key="`past-${group.date}`" class="queue-group">
+              <div class="queue-group-head">
+                <h4>{{ group.title }} · {{ group.rows.length }} 项待补验</h4>
+              </div>
+              <ul class="queue-list">
+                <li v-for="row in group.rows" :key="`${group.date}-${row.item_id}-${row.shift}`">
+                  <button
+                    type="button"
+                    class="queue-btn"
+                    :class="{ active: selected && selected.item_id === row.item_id && selected.shift === row.shift && selected.business_date === row.business_date }"
+                    @click="selectRow(row)"
+                  >
+                    <strong>{{ row.zone_name }} · {{ row.item_name }}</strong>
+                    <span>
+                      {{ row.shift }} · {{ row.submitter_phone || '拍摄人未知' }}
+                      <em class="queue-status" :class="statusClass(row.status)">{{ row.status }}</em>
+                    </span>
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </template>
       </div>
 
       <div class="table-card">
         <div class="table-card-header">
+          <i class="daily-led sig"></i>
           <h3>{{ selected ? selected.item_name : '对照验收' }}</h3>
         </div>
         <div v-if="!selected" class="roster-empty">点一项，对照提交当时的标准图。</div>
@@ -255,7 +336,7 @@ function statusClass(status) {
         </div>
         <div v-else-if="review" class="review-body">
           <p class="review-meta">
-            {{ selected.zone_name }} · {{ selected.shift }} · 拍摄人 {{ review.submitter_phone }}
+            <template v-if="reviewDate">{{ reviewDate }} · </template>{{ selected.zone_name }} · {{ selected.shift }} · 拍摄人 {{ review.submitter_phone }}
             <template v-if="!isToday"> · 状态 {{ review.status }}</template>
           </p>
           <HygieneReviewPair
@@ -312,8 +393,8 @@ function statusClass(status) {
 .daily-history-hint {
   margin: 0 0 10px;
   padding: 8px 12px;
-  border-left: 3px solid var(--hy-mint, #3fe0b0);
-  background: rgba(63, 224, 176, .08);
+  border-left: 3px solid var(--action);
+  background: var(--wb-tint-08);
   color: var(--hy-muted);
   font-size: 13px;
 }
@@ -326,17 +407,44 @@ function statusClass(status) {
   gap: 8px;
 }
 .queue-status {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   margin-left: 6px;
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--r-full);
   font-size: 11px;
   font-style: normal;
-  border: 1px solid var(--hy-line, rgba(133, 205, 198, .28));
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
 }
-.queue-status.pending { color: #ffd479; border-color: rgba(255, 212, 121, .5); }
-.queue-status.passed { color: #3fe0b0; border-color: rgba(63, 224, 176, .5); }
-.queue-status.todo { color: var(--hy-muted); }
+/* 状态 = 6px 圆点 + 小字；圆点取文字色，胶囊只做底色/边框。 */
+.queue-status::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: currentColor;
+}
+.queue-status.pending { color: var(--warn); border-color: var(--wb-warn-a45); }
+.queue-status.passed { color: var(--ok); border-color: var(--wb-ok-a45); }
+.queue-status.todo { color: var(--ink-faint); }
+/* 漏验分组（隔夜验收）：组标题写日期 + 条数，组与组之间一条发丝线分开。 */
+.queue-past { border-top: 1px solid var(--wb-ink-a08); }
+.queue-past-kicker {
+  margin: 0;
+  padding: 10px 14px 0;
+  font: 600 10px/1.4 var(--font-sans);
+  letter-spacing: .08em;
+  color: var(--warn);
+}
+.queue-past .queue-group + .queue-group { border-top: 1px dashed var(--wb-ink-a08); }
+.queue-group-head { display: flex; align-items: center; gap: 6px; padding: 8px 14px 0; }
+.queue-group-head h4 {
+  margin: 0;
+  font: 500 10.5px/1.4 var(--font-sans);
+  color: var(--ink-dim);
+}
 .review-body { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
 .review-meta {
   margin: 0;
@@ -351,4 +459,102 @@ function statusClass(status) {
   gap: 8px;
 }
 .teach-banner p { max-width: 60em; }
+
+/* ── B 案版式（2026-10-17 结构重构）：页面头 + 面板 + 行列，替代旧的 hero 卡 + 按钮块 ── */
+.daily-page { display: flex; flex-direction: column; gap: 16px; }
+/* 页头不再是卡片：没有底色/边框/渐变，只留排版层级（共享表的 .roster-head.card 规则靠
+   scoped 属性选择器的特异性被这里覆盖）。 */
+.daily-page .roster-head {
+  background: none;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+}
+.daily-page .roster-head::before { display: none; }
+.daily-page .roster-head h1 {
+  margin: 0;
+  font: 600 26px/1.1 var(--font-sans);
+  letter-spacing: .01em;
+  color: var(--ink);
+}
+.daily-page .roster-head p {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink-dim);
+}
+.daily-datebar { margin-left: auto; }
+.daily-datebar .btn { min-height: 44px; border-radius: var(--r-1); }
+.daily-led { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; }
+.daily-led.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--wb-warn-a16); }
+.daily-led.sig { background: var(--action); box-shadow: 0 0 0 3px var(--wb-tint-14); }
+.daily-page .table-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  padding: 11px 14px;
+}
+/* 共享表的老规则把面板头排成「标题贴右」（space-between + 无左侧元素时才成立）；
+   B 案的面板头是「LED + 标题 + hint」一串左对齐。 */
+.daily-page .table-card-header h3 {
+  margin: 0;
+  font: 600 12.5px/1 var(--font-sans);
+  letter-spacing: .06em;
+  color: var(--ink);
+}
+.daily-page .table-card-header h3 { flex: 0 1 auto; }
+.daily-page .table-card-header h3 span { margin-left: 6px; }
+.daily-page .daily-datebar { flex-wrap: wrap; justify-content: flex-end; }
+.daily-page .daily-datebar .btn { flex: 0 0 auto; white-space: nowrap; }
+.daily-hint { font: 500 9.5px/1 var(--font-mono); color: var(--ink-faint); }
+/* 队列从「一叠按钮」改成「一张表」：两行网格 + 状态贴右。 */
+.daily-page .queue-list { padding: 0; gap: 0; }
+.daily-page .queue-btn {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 3px 10px;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 14px;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--wb-ink-a08);
+  border-radius: 0;
+  text-align: left;
+}
+.daily-page .queue-btn strong {
+  grid-column: 1;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+  letter-spacing: .01em;
+}
+.daily-page .queue-btn > span {
+  grid-column: 1;
+  font: 400 9.5px/1 var(--font-mono);
+  color: var(--ink-faint);
+}
+.daily-page .queue-btn > span > em { grid-column: 2; }
+.daily-page .queue-btn em { align-self: center; }
+.daily-page .queue-btn.active { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--action); }
+.daily-page .review-meta { font: 400 10px/1.6 var(--font-mono); color: var(--ink-faint); }
+.daily-page .review-actions .btn { min-height: 44px; border-radius: var(--r-1); }
+/* 空态在分组里也保持同一套留白（今天那一组空、漏验还有时用得上）。 */
+.daily-page .roster-empty { margin: 0; }
+
+/* 手机 390（审查实测）：页头左右分栏把说明挤成窄栏、眉标「DAILY · 当日对照」断成两行、
+   日期与「今天/刷新」只有 35–38px。改成「标题独占一行 + 筛选条独占一行 + 控件 48px」。 */
+@media (max-width: 720px) {
+  .daily-page .roster-head { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .daily-datebar { margin-left: 0; width: 100%; justify-content: flex-start; }
+  .daily-page .daily-datebar .btn { min-height: 48px; }
+  .daily-page .daily-datebar :deep(.dpx),
+  .daily-page .daily-datebar :deep(input) { min-height: 48px; }
+  .daily-page .hy-eyebrow { white-space: nowrap; }
+}
 </style>

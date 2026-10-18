@@ -498,7 +498,7 @@ useNudgePull({ id: 'workbench-hr-overtime', topics: ['overtime'], pull: load })
 .oHint { margin: 8px 0 0; font-size: 12px; line-height: 1.7; color: var(--hy-muted); }
 .oErr {
   margin: 0 0 12px; padding: 9px 12px; border-radius: var(--hy-radius-md);
-  border: 1px solid rgba(255, 138, 128, 0.35); background: rgba(255, 138, 128, 0.12);
+  border: 1px solid var(--wb-danger-a45); background: var(--wb-danger-a16);
   font-size: 12.5px; color: var(--hy-coral);
 }
 .oOk {

@@ -69,7 +69,7 @@ function isCurrent(page) {
   flex-direction: column;
   gap: 2px;
   padding: 10px 8px 14px;
-  background: var(--hy-bg);
+  background: var(--surface-3);
   border-right: 1px solid var(--hy-line);
 }
 .wb-rail-item {
@@ -78,13 +78,13 @@ function isCurrent(page) {
   gap: 8px;
   min-height: 40px;
   padding: 0 10px;
-  border-radius: 8px;
+  border-radius: var(--r-1);
   color: var(--hy-muted);
   font-size: 13px;
   text-decoration: none;
 }
 .wb-rail-item:hover { color: var(--hy-ink); background: var(--hy-surface-2); }
-.wb-rail-item.is-on { color: var(--hy-mint); background: var(--hy-mint-soft); }
+.wb-rail-item.is-on { color: var(--ink); background: var(--surface-1); box-shadow: inset 3px 0 0 var(--action); font-weight: 600; }
 .wb-rail-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 手机档：rail 整个收起来（组内页走页头那个下拉，拇指区走底栏）。 */

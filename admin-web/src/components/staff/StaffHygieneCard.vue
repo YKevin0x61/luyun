@@ -87,6 +87,60 @@ const overdue = computed(() => buildWorkQueue({
   now: now.value,
 }).filter((task) => task.bucket === 'overdue').length)
 
+// 三行进度（B 案 v3）：日常 / 专项 / 整改。日常本来就在这一块里；专项与整改各拉一条
+// 员工自己的门（跟「卫生待办」页同一口径）。**这两条各自失败只让那一行显示「—」**，
+// 不把整卡打回错误态 —— 员工看得到日常，就不该被一条读不到的专项挡住。
+const deepItems = ref(null)
+const fixItems = ref(null)
+const deepProgress = computed(() => (deepItems.value ? dailyProgress(deepItems.value) : null))
+const fixProgress = computed(() => (fixItems.value ? dailyProgress(fixItems.value) : null))
+/** 三块没通过的合计（「还差 N 项」只报这一处，不再各块各报一遍）。 */
+const remainingTotal = computed(() => (
+  status.value.remaining
+  + (deepProgress.value ? deepProgress.value.remaining : 0)
+  + (fixProgress.value ? fixProgress.value.remaining : 0)
+))
+/** 行尾读数：「2/5」；那一块没读到时写「—」（与首页「—」同一条口径）。 */
+function progressText(progress) {
+  return progress ? `${progress.passed}/${progress.total}` : '—'
+}
+/** 三块加起来的应做项数：0 就是「今天没有要交的」，面板头不摆一个「已交齐」自欺。 */
+const totalWork = computed(() => (
+  status.value.total
+  + (deepProgress.value ? deepProgress.value.total : 0)
+  + (fixProgress.value ? fixProgress.value.total : 0)
+))
+/** 面板头右栏那一句（合计只报这一处）：今天没有 / 已交齐 / 还差 N 项（+ 截止）。 */
+const headText = computed(() => {
+  if (!totalWork.value) return '今天没有要交的'
+  return remainingTotal.value ? `还差 ${remainingTotal.value} 项` : '已交齐'
+})
+async function loadExtras() {
+  const settle = (promise) => promise.then((data) => data.items || [], () => null)
+  const [deep, fix] = await Promise.all([
+    settle(staffRequest('/api/hygiene/staff/deep-clean')),
+    settle(staffRequest('/api/hygiene/staff/fix')),
+  ])
+  deepItems.value = deep
+  fixItems.value = fix
+}
+
+// B 案 v3 的 LED（只由上面这几份已有数据派生，不新增判据）：
+// 面板头的灯 = 这块整体「要不要动手」（逾期坏 / 还差提醒 / 空或全齐中性/好）；
+// 仪容仪表那一行的灯跟它自己的三种语气一一对应（ADR 0050 的分支不动）。
+const shcLed = computed(() => {
+  if (state.value === 'error') return 'bad'
+  if (state.value !== 'ready') return 'idle'
+  if (overdue.value > 0) return 'bad'
+  if (status.value.remaining > 0) return 'warn'
+  return status.value.total > 0 ? 'ok' : 'idle'
+})
+const attireLed = computed(() => {
+  if (attire.value.status === 'rejected') return 'bad'
+  if (attire.value.status === 'pending' || !attire.value.hasStandard) return 'warn'
+  return 'ok'
+})
+
 /** 会话没了（换了手机、店里停了账号、cookie 过期）：回员工登录页，回来还是这一页。
  *  与「我的今天」页同一个走法（`loginRedirectTarget` 一处算落点）：几个并发请求会各拿一个
  *  401 各自调到这里，**已经在登录页上时它返回 null** —— 不返回的话第二个 401 会把
@@ -125,6 +179,7 @@ async function load(quiet = false) {
     zoneName.value = employee.zone_name || ''
     now.value = Date.now()
     state.value = 'ready'
+    void loadExtras()
   } catch (err) {
     if (err.status === 401) {
       leaveForStaffLogin()
@@ -175,15 +230,18 @@ onMounted(() => { void load() })
 useNudgePull({
   id: 'staff-hygiene-card',
   topics: ['hygiene', 'scheduling'],
-  pull: () => load(true),
+  pull: () => { load(true); void loadExtras() },
 })
 </script>
 
 <template>
   <section class="shc">
+    <!-- 面板头（B 案 v3）：6px LED + 标题 + 右栏当天工作区。 -->
     <div class="shc-hd">
-      <span class="shc-tag">卫生</span>
-      <em v-if="state === 'ready' && zoneName">{{ zoneName }}</em>
+      <i class="led" :class="shcLed" aria-hidden="true"></i>
+      <h2>今天要交</h2>
+      <!-- 右栏只报一处合计：还差几项 + 本班截止（首页/今天页都不再各写一行说明）。 -->
+      <em v-if="state === 'ready'" class="shc-due">{{ headText }}<template v-if="due && totalWork"> · {{ due }} 前交</template></em>
     </div>
 
     <p v-if="state === 'loading'" class="shc-sub">正在读今天的日常…</p>
@@ -195,61 +253,91 @@ useNudgePull({
       </div>
     </template>
 
-    <template v-else>
+    <div v-else class="shc-body">
+      <!-- 三行进度（B 案 v3）：日常 / 专项 / 整改，一行一件事；
+           首行是主 CTA「继续拍」，其余行尾「去」。 -->
+      <ul class="shc-progress">
+        <li v-if="status.total" class="shc-prog">
+          <i class="led" :class="status.remaining ? 'warn' : 'ok'" aria-hidden="true"></i>
+          <span class="shc-prog-label">日常 </span>
+          <b class="shc-prog-num">{{ progressText(status) }}</b>
+          <button
+            class="shc-go is-primary"
+            type="button"
+            @click="router.push({ path: '/workbench/me/clean', query: { shoot: 'next' } })"
+          >
+            继续拍
+          </button>
+        </li>
+        <li v-if="!deepProgress || deepProgress.total" class="shc-prog">
+          <i class="led" :class="deepProgress && deepProgress.remaining ? 'warn' : 'ok'" aria-hidden="true"></i>
+          <span class="shc-prog-label">专项 </span>
+          <b class="shc-prog-num">{{ progressText(deepProgress) }}</b>
+          <button
+            class="shc-go"
+            type="button"
+            @click="router.push({ path: '/workbench/me/clean', query: { group: 'deep' } })"
+          >去 ›</button>
+        </li>
+        <li v-if="!fixProgress || fixProgress.total" class="shc-prog">
+          <i class="led" :class="fixProgress && fixProgress.remaining ? 'warn' : 'ok'" aria-hidden="true"></i>
+          <span class="shc-prog-label">整改 </span>
+          <b class="shc-prog-num">{{ progressText(fixProgress) }}</b>
+          <button
+            class="shc-go"
+            type="button"
+            @click="router.push({ path: '/workbench/me/clean', query: { group: 'fix' } })"
+          >去 ›</button>
+        </li>
+      </ul>
+
       <p v-if="!status.total" class="shc-sub">
         <template v-if="shift">今天没有要交的日常检查。</template>
         <!-- 没班次就没有可交的那一份（班次由排班决定）——说清该找谁，别让人在这儿等。 -->
         <template v-else>排班还没给你班次，今天没有可交的日常检查；找超级管理员配一下规则。</template>
       </p>
-      <template v-else>
-        <p class="shc-big">日常 {{ status.passed }}/{{ status.total }}</p>
-        <p class="shc-sub">
-          <template v-if="status.remaining">还差 {{ status.remaining }} 项</template>
-          <template v-else>今天的日常交齐了</template><template
-            v-if="due"
-          >，本班 {{ due }} 前交</template>。
-        </p>
-        <p v-if="overdue" class="shc-err" role="status">
-          已经过了本班的钟点，还有 {{ overdue }} 项没交。
-        </p>
-      </template>
+      <p v-if="overdue" class="shc-err" role="status">
+        已经过了本班的钟点，还有 {{ overdue }} 项没交。
+      </p>
 
-      <template v-if="attire.required">
-        <p class="shc-attire" :class="attireTone">
-          仪容仪表：<template v-if="attirePending">正在传…</template><template
-            v-else-if="attire.status === 'passed'"
-          >已通过</template><template
-            v-else-if="attire.status === 'pending'"
-          >已交，等店长验收</template><template
-            v-else-if="attire.status === 'rejected'"
-          >被驳回，要重拍</template><template
-            v-else-if="!attire.hasStandard"
-          >超级管理员还没传标准图</template><template v-else>今天还没拍</template>
-        </p>
+      <!-- 仪容仪表那一行（按人拍，排到班次才出现）：状态 LED + 一行字。 -->
+      <div v-if="attire.required" class="shc-rows">
+        <div class="shc-row">
+          <i class="led" :class="attireLed" aria-hidden="true"></i>
+          <p class="shc-attire" :class="attireTone">
+            仪容仪表：<template v-if="attirePending">正在传…</template><template
+              v-else-if="attire.status === 'passed'"
+            >已通过</template><template
+              v-else-if="attire.status === 'pending'"
+            >已交，等店长验收</template><template
+              v-else-if="attire.status === 'rejected'"
+            >被驳回，要重拍</template><template
+              v-else-if="!attire.hasStandard"
+            >超级管理员还没传标准图</template><template v-else>今天还没拍</template>
+          </p>
+        </div>
         <p v-if="attire.note" class="shc-err" role="status">店长说：{{ attire.note }}</p>
         <p v-if="attire.error" class="shc-err" role="status">{{ attire.error }}</p>
-        <!-- 已经通过的不给重拍入口（服务端也会拒 `already_accepted`）：验收过的是记录，
-             员工端就不该摆一个按了必然失败的按钮。 -->
-        <div v-if="attire.hasStandard && attire.status !== 'passed'" class="acts">
-          <button
-            class="btn"
-            type="button"
-            :disabled="attirePending"
-            @click="openAttireStandard"
-          >
-            {{ attire.status === 'todo' ? '仪容仪表 ›' : '重拍一张 ›' }}
-          </button>
-        </div>
-      </template>
+      </div>
 
-      <!-- 入口名（2026-10-08 用户定名）：跟上面那颗「仪容仪表 ›」对称 —— 一个指人、
-           一个指区，都不再随「还差几项」变。 -->
+      <!-- 两颗动作并排在一行（省一屏高度）：左边是「仪容仪表」（两步拍照入口），
+           右边是「工作卫生」。已经通过的不给重拍入口（服务端也会拒 `already_accepted`）：
+           验收过的是记录，员工端就不该摆一个按了必然失败的按钮。 -->
       <div class="acts">
+        <button
+          v-if="attire.required && attire.hasStandard && attire.status !== 'passed'"
+          class="btn"
+          type="button"
+          :disabled="attirePending"
+          @click="openAttireStandard"
+        >
+          {{ attire.status === 'todo' ? '仪容仪表 ›' : '重拍一张 ›' }}
+        </button>
         <button class="btn" type="button" @click="router.push('/workbench/me/clean')">
           工作卫生 ›
         </button>
       </div>
-    </template>
+    </div>
   </section>
 
   <!-- 仪容仪表的拍照弹层（票 12）：两步 —— 先看标准图、再开相机。**不同屏**是 ADR 0050
@@ -284,68 +372,175 @@ useNudgePull({
 </template>
 
 <style scoped>
-/* 卡面沿用「今天的活」那一档：青色描边 + 一层淡渐变（与「我的今天」页上这块同一个色系，
-   `views/today/TodayView.vue` 的 `.tA-card.hyg`）。 */
+/* B 案 v3「三行进度」（2026-10-17 版式审查后）：这一块挂在首页/今天页的员工视角上。
+   骨架 = 面板头（6px LED + 标题 + 当天工作区）→ 三行进度（日常 / 专项 / 整改，
+   行尾「继续拍」/「去」）→ 一行合计（还差 N 项）→ 仪容仪表行 → 动作行。
+   全部走语义令牌；卡片 = 1px 线 + --hy-shadow-sm，没有渐变光晕。 */
 .shc {
-  border: 1px solid rgba(95, 214, 230, .36);
-  border-radius: var(--hy-radius-lg);
-  padding: 14px 15px;
-  background: linear-gradient(168deg, rgba(95, 214, 230, .07), transparent 58%),
-    var(--hy-surface-2);
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  box-shadow: var(--hy-shadow-sm);
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  padding: 0 0 14px;
 }
 
-.shc-hd { display: flex; align-items: center; gap: 9px; }
+.shc-hd {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.shc-hd h2 {
+  margin: 0;
+  font: 600 12.5px/1 var(--font-sans);
+  letter-spacing: .06em;
+  color: var(--ink);
+}
 .shc-hd em {
   margin-left: auto;
   font-style: normal;
-  font-size: 10.5px;
-  color: var(--hy-faint);
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 9.5px;
+  color: var(--ink-faint);
 }
 
-.shc-tag {
-  font-size: 10px;
-  letter-spacing: .12em;
-  padding: 2.5px 7px;
-  border-radius: 999px;
-  color: var(--hy-aqua);
-  background: rgba(95, 214, 230, .12);
-  border: 1px solid rgba(95, 214, 230, .36);
+/* 状态灯：6px（ok / warn / bad / sig / idle）。 */
+.led {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  display: inline-block;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+.led.ok { background: var(--ok); }
+.led.warn { background: var(--warn); }
+.led.bad { background: var(--danger); }
+.led.sig { background: var(--action); }
+.led.idle { background: var(--ink-faint); }
+
+.shc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 14px 0;
 }
 
-/* 首页挂在 `.hygiene-admin` 那一档下，`.btn` 的基础样式来自 `/hygiene-admin.css`；
-   这里只把**卡内**那几颗按员工端那一档放大（`.hygiene-staff .btn` 是 46px / .98rem）——
-   这块是员工在手机上点的，跟「我的今天」页上原来是同一颗按钮。弹层里的保持默认
-   （它是 `.modal-header` 里那几个，撑大了反而挤）。 */
-.shc .btn { min-height: 46px; font-size: .98rem; border-radius: 12px; }
-
-.shc-big {
+/* 三行进度：一行一件事，行高 56px、动作贴行尾。 */
+.shc-progress {
+  list-style: none;
   margin: 0;
-  font-family: var(--font-song);
-  font-size: 52px;
-  line-height: 1.08;
-  letter-spacing: .08em;
-  color: var(--hy-jade);
-  padding: 6px 0 2px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.shc-prog {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 56px;
+  border-top: 1px solid var(--wb-ink-a08);
+}
+.shc-prog:first-child { border-top: 0; }
+.shc-prog-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.shc-prog-num {
+  margin-left: auto;
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--ink);
 }
 
-/* 仪容仪表那一行：它是一句话 + 一个状态，不是数值 —— 中等字号 + 按状态着色，
-   仍看得出「这条要你动手」（原来借用 `.shift` 那个 52px 英雄数字会占两三行）。 */
+/* 行尾动作：主 CTA ≥48px 方角；其余行是次按钮。 */
+.shc-go {
+  flex: none;
+  min-height: 48px;
+  min-width: 64px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.shc-go.is-primary {
+  background: var(--action);
+  border-color: var(--action);
+  color: var(--action-ink);
+}
+
+/* 读不出来 / 重试两态直接挂在面板里（没有 .shc-body 包一层）。 */
+.shc > .shc-sub,
+.shc > .acts {
+  margin: 12px 14px 0;
+}
+
+.shc-sub {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--ink-dim);
+}
+
+/* 行列表：一行 = LED + 一行字（仪容仪表这条按人拍）。 */
+.shc-rows {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+  padding-top: 4px;
+}
+.shc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 0;
+}
 .shc-attire {
   margin: 0;
-  font-family: var(--font-song);
-  font-size: 20px;
-  line-height: 1.3;
-  color: var(--hy-jade);
-  padding: 2px 0;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ok);
+}
+.shc-attire.pending { color: var(--warn); }
+.shc-attire.rejected { color: var(--danger-bright); }
+.shc-attire.nostandard { color: var(--warn); }
+
+.shc-err {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--danger-bright);
 }
 
-.shc-attire.pending { color: var(--hy-muted); }
-.shc-attire.rejected { color: var(--hy-coral); }
-.shc-attire.nostandard { color: var(--hy-amber); }
+.acts {
+  display: flex;
+  gap: 8px;
+}
+.acts .btn {
+  flex: 1;
+}
 
-.shc-sub { margin: 0; font-size: 11.5px; color: var(--hy-muted); }
-.shc-err { margin: 9px 0 0; font-size: 11.5px; color: var(--hy-coral); }
-
-.acts { display: flex; gap: 8px; margin-top: 14px; }
-.acts .btn { flex: 1; }
+/* 卡内按钮：≥48px、方角、描边式。全局 `.btn` 有一条 40px 的 min-height 基线
+   （!important），这里同权重抬回 48。弹层里那几颗保持默认（撑大反而挤）。 */
+.shc .btn {
+  min-height: 48px !important;
+  font-size: .95rem;
+  border-radius: var(--r-1);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+}
 </style>

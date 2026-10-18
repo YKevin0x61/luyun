@@ -23,6 +23,9 @@ let wideMode = false
 let standardDeviceId = ''
 let wideDeviceId = ''
 let savedZoom = null
+// 重开相机的并发闸：`visibilitychange` 与 track 的 `ended` 可能同时触发，
+// 不挡的话会连着要两路流，旧的那路就成了没主的镜头（手机上是"黑屏但灯亮着"）。
+let opening = false
 
 const canUseNativeCamera = supportsNativeCameraCapture()
 
@@ -39,6 +42,10 @@ function canZoomWide(track = videoTrack()) {
 
 async function attachStream(nextStream) {
   stream = nextStream
+  const track = nextStream.getVideoTracks()[0]
+  // 相机被系统收走（切后台 / 被别的 app 抢 / 设备被拔）时 track 会 ended 且不再有画面。
+  // 只认"当前这一条"：切镜头与卸载是主动 stop()，不该被当成故障。
+  if (track) track.addEventListener('ended', () => onTrackEnded(track))
   if (videoEl.value) {
     videoEl.value.srcObject = nextStream
     await videoEl.value.play()
@@ -134,9 +141,16 @@ async function toggleWide() {
 }
 
 async function startCamera() {
+  if (opening) return
+  opening = true
   errorText.value = ''
   starting.value = true
   try {
+    // 重开（回前台 / 失败重试 / 系统收走 track）时先把上一路流停掉：留着它既占着镜头，
+    // 在手机上还可能是一条已经被系统关死的黑画面。
+    if (stream) stopCamera()
+    // 新流默认是标准视角：把上一次的广角档位清掉，下面会重新按默认（广角）开一次。
+    wideMode = false
     const nextStream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: 'environment' },
@@ -152,6 +166,7 @@ async function startCamera() {
     errorText.value = '无法打开相机。请在浏览器设置中允许相机权限，或换一部手机；卫生拍照必须现场完成。'
     emit('error', err)
   } finally {
+    opening = false
     starting.value = false
   }
 }
@@ -163,6 +178,31 @@ function stopCamera() {
     stream = null
   }
   if (videoEl.value) videoEl.value.srcObject = null
+}
+
+/** 失败态那颗「重新打开相机」：就地重试，不依赖父层重开弹层。 */
+async function retryCamera() {
+  stopCamera()
+  await startCamera()
+}
+
+/** 系统把相机收走了（track `ended`）：清掉死流重开；在后台时先不动，等回前台那一下。 */
+function onTrackEnded(track) {
+  const current = videoTrack()
+  if (!current || current !== track) return
+  if (document.visibilityState === 'hidden') return
+  stopCamera()
+  void startCamera()
+}
+
+/** 回到前台：iOS / Android 在后台会关掉相机（track 已 ended，或画面停在最后一帧）。
+ *  还有可用画面就不动它，免得每次切标签都重新申请一次镜头。 */
+function onVisibilityChange() {
+  if (document.visibilityState !== 'visible') return
+  const track = videoTrack()
+  const healthy = Boolean(track) && track.readyState === 'live' && cameraReady.value && !errorText.value
+  if (healthy) return
+  void retryCamera()
 }
 
 // 抓拍尺寸：相机给的是 1920×1080（或更高），而这张图只用来看清脏污 + 存档，
@@ -226,13 +266,27 @@ function onNativeCameraChange(event) {
   emit('captured', file)
 }
 
-onMounted(startCamera)
-onBeforeUnmount(stopCamera)
+onMounted(() => {
+  // 切后台回来时相机多半已经被系统关了：监听可见性，回前台自动重开。
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  void startCamera()
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  stopCamera()
+})
 </script>
 
 <template>
   <div class="live-camera">
     <p v-if="errorText" class="live-alert">{{ errorText }}</p>
+    <button
+      v-if="errorText"
+      type="button"
+      class="btn live-retry"
+      :disabled="starting"
+      @click="retryCamera"
+    >重新打开相机</button>
     <p v-else-if="hintText" class="live-hint is-warn">{{ hintText }}</p>
     <p v-else-if="starting" class="live-hint">正在打开后置相机…</p>
     <video ref="videoEl" class="live-video" playsinline muted autoplay></video>

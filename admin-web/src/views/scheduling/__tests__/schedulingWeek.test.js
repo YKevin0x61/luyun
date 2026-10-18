@@ -92,11 +92,11 @@ describe('店长端周表（员工 × 周）', () => {
     expect(view).toMatch(/@click="onRowPick\(employee\)"/)
     expect(view).toMatch(/nextPick\(colHandle\(day\.business_date\)\)/)
     expect(view).toMatch(/pickAt\(current, handle\)/)
-    // 笔栏**常驻**在周表这一栏的底部（不是选中才升起）：页面得一直让出它的高度，
-    // 不留的话它压住的正是下面几行员工（门店那套就是这个毛病，截图里能看到第 4、5 行被压掉一半）。
+    // 笔栏**常驻**在周表这一栏的表格上方（v3 版式审查：动作要贴着作用对象，不再固定在
+    // 屏幕底部）。它仍是一条常驻工具条，选中的那一格会写在工具条上。
     expect(view).toMatch(/v-if="panel === 'week'"/)
     expect(view).toMatch(/class="gPick"/)
-    expect(view).toMatch(/\.gPick \{[\s\S]{0,240}?position: fixed/)
+    expect(view).toMatch(/\.gPick \{[\s\S]{0,240}?position: sticky/)
     expect(view).toMatch(/\.gB\.pen-open \{ padding-bottom: 76px; \}/)
     expect(view).toMatch(/'pen-open': panel === 'week'/)
     // 点回锚点 / 点表格外的空白 = 取消（ADR 0107 决策 3）：展开与取消的规则在纯逻辑模块里
@@ -119,7 +119,9 @@ describe('店长端周表（员工 × 周）', () => {
     expect(view).not.toMatch(/:class="\{ on: penZoneOpen \}"/)
     // 批量只走选区那一行的「刷」/「清」；不选区时那一行整条不渲染。
     expect(view).toMatch(/@click="applyRegion\(\)"/)
-    expect(view).toMatch(/@click="applyRegionClear\(\)"/)
+    // v5（2026-10-18 审查）：区域那颗改名「退回规则」并加二次确认（`askRegionClear`），
+    // 与笔上那颗「清」分开 —— 原来同名同距，点一下立刻清一片。
+    expect(view).toMatch(/@click="askRegionClear\(\)"/)
     // 写路径是**批量端点**（单格也只是 items 里的一条）：一次校验、一次写锁、一次提交。
     expect(view).toMatch(/api\.post\('\/api\/scheduling\/overrides\/batch'/)
     expect(view).toMatch(/batchPayload\(action, options, cells\)/)
@@ -131,7 +133,9 @@ describe('店长端周表（员工 × 周）', () => {
     expect(view).toMatch(/openCycle\(employee\)/)
     // 笔栏里**没有原生 `<select>`**：那个弹层由系统画，在这个贴底的位置会飘到页面中间
     // （2026-10-13 用户截图），而那层我们一个像素都改不了。班次与工作区都是按钮组。
-    const pen = view.slice(view.indexOf('class="gPick"'), view.indexOf('<!-- 选区里有过去的日子'))
+    // 只取工具条自己那一段（用页面里的 `<!-- 笔栏结束 -->` 标记收口）：再往后就是周表
+    // 与名单的模板，名单本来就有工作区 `<select>`，不属于这支笔。
+    const pen = view.slice(view.indexOf('class="gPick"'), view.indexOf('<!-- 笔栏结束 -->'))
     expect(pen).not.toMatch(/<select/)
   })
 
@@ -166,7 +170,7 @@ describe('店长端周表（员工 × 周）', () => {
   })
 
   it('回执与待批提醒收进一行提示，逐格点名的进「看全部」，而且会自己消失', () => {
-    expect(view).toMatch(/已刷 \$\{result\.applied\} 格/)
+    expect(view).toMatch(/已(清|排休|改班)/)
     expect(view).toMatch(/跳过 \$\{result\.skipped\.length\} 格/)
     expect(view).toMatch(/可撤销（只留最近一批、也只在这台手机上）/)
     // 待批提醒看得出是「照刷」：先信服务端回执里那一份，它没给就退回既有的待办那一份。

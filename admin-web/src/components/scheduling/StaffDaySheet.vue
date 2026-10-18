@@ -212,6 +212,19 @@ function startSwap() {
   view.value = DAY_VIEW.swap
 }
 
+/** 名单行尾的「换班」：日期就是这一天、人就是他 —— 进换班那一屏时对象已经点好。
+ *  判据仍走 `acts.swap`（过去的日子 / 窗口外 / 我那天请假都不可换），这里不另写一份。 */
+function swapWith(group, person) {
+  if (!acts.value.swap.ok || !person) return
+  startSwap()
+  picked.value = {
+    id: person.id,
+    name: person.name,
+    zone: person.zone || '',
+    shift_name: (group && group.shift_name) || '',
+  }
+}
+
 /** 全部同事那份只在真展开时才拉：多数换班就在那天的名单里点完了。 */
 async function loadColleagues() {
   if (colleaguesState.value === 'loading' || colleaguesState.value === 'ready') return
@@ -380,6 +393,7 @@ useNudgePull({
     @click.self="close"
   >
     <div class="modal-box day-sheet">
+      <div class="ds-grab" aria-hidden="true" />
       <!-- ── 这一天 ─────────────────────────────────────────────────── -->
       <template v-if="view === DAY_VIEW.day">
         <div class="modal-header">
@@ -427,24 +441,6 @@ useNudgePull({
 
         <p v-if="requestsError" class="ds-err" role="alert">{{ requestsError }}</p>
 
-        <!-- 这一天能办的两件事：日期就是这一天，不用再选。 -->
-        <p class="ds-h">这一天能办</p>
-        <div class="ds-acts">
-          <button
-            class="btn ds-act"
-            type="button"
-            :disabled="!acts.leave.ok"
-            @click="startLeave"
-          >请这天的假</button>
-          <button
-            class="btn ds-act"
-            type="button"
-            :disabled="!acts.swap.ok"
-            @click="startSwap"
-          >换这天的班</button>
-        </div>
-        <p v-if="whyNote" class="ds-why">{{ whyNote }}</p>
-
         <!-- 那天的名单（票 13）：点开这一屏就是它该出现的地方。 -->
         <p v-if="rosterState === 'loading'" class="ds-sub">读名单…</p>
         <template v-else-if="rosterState === 'error'">
@@ -465,6 +461,16 @@ useNudgePull({
               >
                 <span class="rWho">{{ person.name }}</span>
                 <span class="rWhere">{{ person.zone || '未配区' }}</span>
+                <!-- 行尾「换班」：文字由 CSS 出（::after），不往这一行里塞文本节点 ——
+                     这一行的文本口径是「姓名 + 工作区」，测试按整行文本断言。 -->
+                <button
+                  v-if="!isMe(person, employee && employee.id)"
+                  class="r-swap"
+                  type="button"
+                  :disabled="!acts.swap.ok"
+                  :aria-label="`换 ${person.name} 的班`"
+                  @click="swapWith(group, person)"
+                />
               </li>
             </ul>
           </div>
@@ -489,6 +495,27 @@ useNudgePull({
           </div>
           <p v-else class="ds-sub">没人休假</p>
         </template>
+
+        <!-- 这一天能办的两件事（B 案 v3）：固定在面板底部拇指区，滚名单时随手就能点。
+             日期就是这一天，不用再选。 -->
+        <footer class="ds-footer">
+          <p class="ds-h">这一天能办</p>
+          <div class="ds-acts">
+            <button
+              class="btn ds-act"
+              type="button"
+              :disabled="!acts.leave.ok"
+              @click="startLeave"
+            >请这天的假</button>
+            <button
+              class="btn ds-act"
+              type="button"
+              :disabled="!acts.swap.ok"
+              @click="startSwap"
+            >换这天的班</button>
+          </div>
+          <p v-if="whyNote" class="ds-why">{{ whyNote }}</p>
+        </footer>
       </template>
 
       <!-- ── 请这天的假 ─────────────────────────────────────────────── -->
@@ -660,6 +687,37 @@ useNudgePull({
   gap: 10px;
 }
 
+/* B 案 v3：底部当日面板 —— 顶部拖拽条（只做视觉提示，拖拽本身不实现）。 */
+.ds-grab {
+  width: 36px;
+  height: 4px;
+  flex: none;
+  margin: 0 auto 2px;
+  border-radius: var(--r-full);
+  background: var(--line-strong);
+}
+
+/* 按钮统一 ≥48px 方角（面板头那颗「关闭」48×48）。全局 `.btn` 有一条
+   `min-height` 40px 基线（!important），这里同权重抬回 48。 */
+.day-sheet .btn {
+  min-height: 48px !important;
+  border-radius: var(--r-1);
+}
+
+/* 撤回那颗只要 44px（挨着行，不占主导）；写在通用 48 之后，同分靠后覆盖。 */
+.day-sheet .btn.ds-mini {
+  min-height: var(--tap) !important;
+  padding: 0 14px;
+  font-size: 12px;
+  flex: none;
+}
+
+.day-sheet .modal-header .btn {
+  min-width: 48px;
+  min-height: 48px !important;
+  padding: 0 12px;
+}
+
 .day-sheet .modal-header {
   margin-bottom: 0;
 }
@@ -768,6 +826,22 @@ useNudgePull({
 }
 
 /* ── 这一天能办的两件事 ───────────────────────────────────────────────── */
+/* 底部拇指区（B 案 v3）：「请这天的假 / 换这天的班」钉在面板底部，滚名单时随手可点。
+   面板本身是 `overflow-y:auto` 的滚动容器，sticky bottom 在内容末尾生效。 */
+.ds-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--z-shell);
+  margin: 12px -18px 0;
+  padding: 10px 18px 4px;
+  background: var(--surface-1);
+  border-top: 1px solid var(--line);
+}
+
+.ds-footer .ds-h {
+  margin: 0 0 7px;
+}
+
 .ds-acts {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -869,9 +943,8 @@ useNudgePull({
 }
 
 .rMine b {
-  font-family: var(--font-song);
   font-size: 14px;
-  letter-spacing: .06em;
+  letter-spacing: .02em;
   color: var(--ok);
 }
 
@@ -897,9 +970,9 @@ useNudgePull({
 }
 
 .rHead .rName {
-  font-family: var(--font-song);
   font-size: 12.5px;
-  letter-spacing: .08em;
+  font-weight: 600;
+  letter-spacing: .04em;
 }
 
 .rHead .rCount {
@@ -916,10 +989,11 @@ useNudgePull({
 
 .rList li {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 5px 2px;
+  min-height: 44px;
+  padding: 0 2px;
   font-size: 12.5px;
   border-bottom: 1px dashed var(--line);
 }
@@ -947,8 +1021,35 @@ useNudgePull({
 }
 
 .rWhere {
+  margin-left: auto;
   font-size: 11.5px;
   color: var(--ink-dim);
+}
+
+/* 名单行尾的「换班」入口：文字由 CSS 出（不往这一行塞文本节点，整行文本口径不变）。
+   触控 44×44；那一天能不能换仍由 `acts.swap` 判（过去 / 窗口外 / 我那天请假）。 */
+.r-swap {
+  flex: none;
+  margin-left: 8px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--action);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.r-swap::after {
+  content: "换班";
+}
+
+.r-swap:disabled {
+  opacity: .4;
+  cursor: default;
 }
 
 /* 请假用青色（跟月历格子里那一态同色），休仍是灰的 —— 两件事两个颜色。 */
