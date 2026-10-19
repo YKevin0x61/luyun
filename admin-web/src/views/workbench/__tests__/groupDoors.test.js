@@ -311,7 +311,7 @@ describe('工作台的外壳都有退出入口', () => {
     store.sessions = { admin: false, staff: true }
     store.available = ['staff']
     const router = createRouter({ history: createMemoryHistory(), routes: ROUTES })
-    await router.push('/workbench/me/today')
+    await router.push('/workbench/staff/today')
     await router.isReady()
     const wrapper = mount(Shell, { global: { plugins: [router, pinia] }, attachTo: document.body })
     await flushPromises()
@@ -323,6 +323,6 @@ describe('工作台的外壳都有退出入口', () => {
     // 员工那一档不走管理端那条门。
     expect(callsTo('/api/auth/logout')).toHaveLength(0)
     expect(router.currentRoute.value.path).toBe('/login')
-    expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/staff/today')
   })
 })

@@ -17,8 +17,8 @@ const ROUTES = [
   { path: '/workbench/hr/roster', component: { template: '<div />' } },
   { path: '/workbench/floor/daily', component: { template: '<div />' } },
   { path: '/workbench/floor/fix', component: { template: '<div />' } },
-  { path: '/workbench/me/today', component: { template: '<div />' } },
-  { path: '/workbench/me/clean', component: { template: '<div />' } },
+  { path: '/workbench/staff/today', component: { template: '<div />' } },
+  { path: '/workbench/staff/clean', component: { template: '<div />' } },
   { path: '/login', component: { template: '<div />' } },
 ]
 
@@ -393,7 +393,7 @@ describe('工作台首页 · 员工视角', () => {
     const me = wrapper.get('.wbh-me')
     expect(me.text()).toContain('白班')
     expect(me.text()).toContain('后厨')
-    expect(me.attributes('href')).toBe('/workbench/me/today')
+    expect(me.attributes('href')).toBe('/workbench/staff/today')
     // 店长那三个数字与今天谁上班都不在。
     expect(wrapper.find('.wbh-duty').exists()).toBe(false)
     expect(wrapper.findAll('.wbh-cell.leaves')).toHaveLength(0)
@@ -410,7 +410,7 @@ describe('工作台首页 · 员工视角', () => {
     })
 
     expect(wrapper.get('.wbh-cell.myItems .wbh-num').text()).toBe('3')
-    expect(wrapper.get('.wbh-cell.myItems').attributes('href')).toBe('/workbench/me/clean')
+    expect(wrapper.get('.wbh-cell.myItems').attributes('href')).toBe('/workbench/staff/clean')
   })
 
   it('等我回应的换班算一条待办，点进「今天」页处理', async () => {
@@ -421,7 +421,7 @@ describe('工作台首页 · 员工视角', () => {
 
     const cell = wrapper.get('.wbh-cell.myRequests')
     expect(cell.get('.wbh-num').text()).toBe('1')
-    expect(cell.attributes('href')).toBe('/workbench/me/today')
+    expect(cell.attributes('href')).toBe('/workbench/staff/today')
   })
 
   it('没班 / 数据为空时给一句人话，不是空白', async () => {
@@ -441,7 +441,7 @@ describe('工作台首页 · 员工视角', () => {
   })
 
   it('今天的活那一块在首页上：日常进度、仪容仪表与两颗入口（2026-10-14 用户裁定）', async () => {
-    // 这一块原来只在「我的今天」页（`/workbench/me/today`）上；用户裁定把它搬到工作台首页，
+    // 这一块原来只在「我的今天」页（`/workbench/staff/today`）上；用户裁定把它搬到工作台首页，
     // 因为**员工端的默认首页就是「今天」**（`STAFF_ENTRY_PATH`）—— 一进来先看班、再看今天
     // 要交什么。搬走之后原页不再渲染它，两块内容一处一份。
     const { wrapper, fetchMock } = await mountHome({ identity: 'staff', table: staffData() })

@@ -5,7 +5,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
 
 /**
- * 员工卫生页（`/workbench/me/clean`）**渲染出来的结构**（2026-10-05 用户裁定）。
+ * 员工卫生页（`/workbench/staff/clean`）**渲染出来的结构**（2026-10-05 用户裁定）。
  *
  * 同目录其它用例都是"读源码断字符串"的契约式断言。这一条不一样：五格合并成"单页依次
  * 渲染三组 + 页尾一行信息入口"之后，"三组按顺序排、汇总在最上面、榜默认收起"这件事
@@ -80,9 +80,9 @@ async function mountHome() {
   setActivePinia(pinia)
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/workbench/me/clean', component: { template: '<div />' } }],
+    routes: [{ path: '/workbench/staff/clean', component: { template: '<div />' } }],
   })
-  await router.push('/workbench/me/clean')
+  await router.push('/workbench/staff/clean')
   await router.isReady()
 
   const wrapper = mount(HygieneHomeView, {

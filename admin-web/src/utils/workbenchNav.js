@@ -1,7 +1,7 @@
 /** 工作台外壳的导航（票 03 起）：**一组一格**，按身份过滤。
  *
  *  工作台的路径按组排（`pageRoutes.json` 的 `group`）：人事（`/workbench/hr/*`）、现场
- *  （`/workbench/floor/*`）票 05 落位，「我的」（`/workbench/me/*`）票 03 就在，后勤
+ *  （`/workbench/floor/*`）票 05 落位，「我的」（`/workbench/staff/*`）票 03 就在，后勤
  *  （`/workbench/kitchen/*`：配方票 07、备货计划票 08）随后进来 —— 外壳
  *  （`views/workbench/WorkbenchLayout.vue`）只认这张表与身份，不认具体有哪些组，所以加组
  *  不用改结构。两个管理端壳（人事壳 / 现场壳）也引这张表：它们的跨组门（「现场 ›」/
@@ -51,10 +51,10 @@ export const WORKBENCH_NAV_GROUPS = [
   { key: 'floor', label: '卫生验收', to: WORKBENCH_FIELD_HOME },
   // 员工端的**卫生**这一格（2026-10-05 用户裁定）：两个身份做的卫生是同一批活，但看到的是
   // 各自的面 —— 超级管理员走上一格（`/workbench/floor/*` 八页，管验收与整改），员工走这一格
-  // （`/workbench/me/clean`：今天要做几项、逐项拍照交）。它原来藏在「我的」下面，员工要点
+  // （`/workbench/staff/clean`：今天要做几项、逐项拍照交）。它原来藏在「我的」下面，员工要点
   // 两层才到，而这是他们每天最常干的事 —— 给它一个一级入口。
   // 可见性仍由落点那一页的 `audience`（`staff`）决定：超级管理员那一档自然看不到这一格。
-  { key: 'hygiene', label: '卫生', to: '/workbench/me/clean' },
+  { key: 'hygiene', label: '卫生', to: '/workbench/staff/clean' },
   // 后勤：配方（票 07）+ 备货计划（票 08）—— **一组一格、一格两门**。两条落点都是清单里
   // 的一页（`both`，所以员工这一档两半都看得见）；`to` 仍是这一格的主落点（也是别的壳做
   // 跨组门时用的那一个），`links` 是这一格要渲染出来的全部条目。落点常量分别住在
@@ -79,7 +79,7 @@ export const WORKBENCH_NAV_GROUPS = [
   },
   // 员工端的「今天 / 整月」同属「我的」这一组，落点是「今天」。
   // （卫生那一页已经挪到上面独立的「卫生」格；「我的」组现在只剩今天与整月两页。）
-  { key: 'me', label: '我的', to: '/workbench/me/today' },
+  { key: 'me', label: '我的', to: '/workbench/staff/today' },
 ]
 
 /** 那一组那一行（外壳做跨组的门用：门牌与落点都从这儿来，不写第二份）。 */

@@ -97,9 +97,9 @@ async function mountSheet({
   const { default: StaffDaySheet } = await import('../StaffDaySheet.vue')
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/workbench/me/month', component: { template: '<div />' } }],
+    routes: [{ path: '/workbench/staff/month', component: { template: '<div />' } }],
   })
-  await router.push('/workbench/me/month')
+  await router.push('/workbench/staff/month')
   await router.isReady()
 
   const wrapper = mount(StaffDaySheet, {

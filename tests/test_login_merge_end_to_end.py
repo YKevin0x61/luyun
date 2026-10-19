@@ -94,7 +94,7 @@ OLD_URLS = (
     "/setup",
 )
 
-STAFF_PAGES = ("/workbench/me/today", "/workbench/me/month", "/workbench/me/clean")
+STAFF_PAGES = ("/workbench/staff/today", "/workbench/staff/month", "/workbench/staff/clean")
 
 # 票 05：现场七页按分组落在 `/workbench/floor/*`；花名册是人事页（`/workbench/hr/*`），
 # 但它的服务端待遇与现场页一样（工作台的页面壳对任一会话放行，未登录 302 到 `/login`）。
@@ -203,7 +203,7 @@ def test_staff_entry_landing_is_a_served_page_behind_the_workbench_wall(app_clie
     assert match, f"{STAFF_PATHS_JS} 里找不到 STAFF_ENTRY_PATH"
     entry = match.group(1)
 
-    assert entry == "/workbench/me/today"
+    assert entry == "/workbench/staff/today"
     assert entry in main_module.SPA_PAGE_ROUTES, entry
 
     # 员工三页都可达（在页面注册清单里），但未登录不再放行 —— 工作台是「进去要登录」的。

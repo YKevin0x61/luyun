@@ -10,7 +10,7 @@
  */
 
 /** 员工端（也是店长能进的那一面）：登记一笔 + 看自己最近记的。 */
-export const WASTAGE_REGISTER_PATH = '/workbench/me/loss'
+export const WASTAGE_REGISTER_PATH = '/workbench/staff/loss'
 
 /** 管理端：按月统计 + 按条件的明细。 */
 export const WASTAGE_ANALYSIS_PATH = '/workbench/kitchen/loss'

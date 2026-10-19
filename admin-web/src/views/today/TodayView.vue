@@ -113,10 +113,10 @@ const capsToday = computed(() => staffCaps.value.filter((item) => CAP_TODAY_KEYS
 const capsOther = computed(() => staffCaps.value.filter((item) => !CAP_TODAY_KEYS.includes(item.key)))
 
 const CAP_ROUTES = {
-  daily_review: '/workbench/me/clean',
-  deep_review: '/workbench/me/clean',
-  fix: '/workbench/me/clean',
-  overtime: '/workbench/me/overtime',
+  daily_review: '/workbench/staff/clean',
+  deep_review: '/workbench/staff/clean',
+  fix: '/workbench/staff/clean',
+  overtime: '/workbench/staff/overtime',
   schedule: '/workbench/hr/calendar',
   wastage: '/workbench/kitchen/loss',
 }
@@ -154,7 +154,7 @@ const seniorityNextText = computed(() => {
 // **为什么放这一页**：员工端原来只有「今天要做什么」——惩罚（驳回、红黑榜）看得见，
 // 正反馈一点没有，人会躲着这个系统用。这一页是员工**登录后的落点**（`/login` 的员工栏
 // 就落在这儿，见 `utils/loginNext.js`），休假的、当天没排到班的日子照样打得开；卫生页
-// `/workbench/me/clean` 只有"今天有活"的时候才会被点开 —— 恰恰是那些被驳回过、最该看
+// `/workbench/staff/clean` 只有"今天有活"的时候才会被点开 —— 恰恰是那些被驳回过、最该看
 // 一眼自己成绩的人，那天可能压根没有活干，也就永远看不到这张卡。成绩记的是**验收之后**
 // 的结果，不是交照片那一刻，也不需要贴着取景框才有意义。
 // 卡的位置在卫生卡与「我的」之间：这一页的读序是"今天上不上班 → 今天的活 → 我干得
@@ -220,7 +220,7 @@ const scoreLed = computed(() => {
 // 「我今天上不上班」，顺带把这两件事送过去（`date` 取服务端的营业日，不取手机上的今天）。
 const ENTRIES = computed(() => {
   const date = (today.value && today.value.business_date) || ''
-  const month = { path: '/workbench/me/month' }
+  const month = { path: '/workbench/staff/month' }
   return [
     { key: 'leave', label: '请假', to: { ...month, query: { date, act: 'leave' } } },
     { key: 'swap', label: '换班', to: { ...month, query: { date, act: 'swap' } } },
@@ -241,7 +241,7 @@ function leaveForStaffLogin() {
 }
 
 /** 工作台首页「我的班」副行那两个入口（请假 / 换班）直接落到这一页的地址：
- *  `/workbench/me/today?act=leave|swap&date=<营业日>`。这一页**没有表单**（发起只在月历
+ *  `/workbench/staff/today?act=leave|swap&date=<营业日>`。这一页**没有表单**（发起只在月历
  *  那一天的操作单里，票 15 收的口子），所以这里只负责把它转进月历并打开那一天 ——
  *  一次点击到操作单，且不在这两处各摆一套表单。没有 `act` 就照常渲染本页。 */
 function forwardDayAction() {
@@ -249,7 +249,7 @@ function forwardDayAction() {
   if (!act) return false
   const date = dateFromQuery(route.query)
   router.replace({
-    path: '/workbench/me/month',
+    path: '/workbench/staff/month',
     query: date ? { date, act } : { act },
   })
   return true
@@ -434,9 +434,9 @@ async function loadScore(quiet = false) {
 
 // 「我的」那一块（2026-10-05 用户裁定）——**从卫生页整块搬来**。
 //
-// 原来它在 `/workbench/me/clean` 是第五格 tab「我」，与待办 / 专项 / 整改 / 榜四条平级：
+// 原来它在 `/workbench/staff/clean` 是第五格 tab「我」，与待办 / 专项 / 整改 / 榜四条平级：
 // 一条 tab 条上混了三种性质（任务 / 信息 / 设置）。账号设置属于「我的」这一页
-// （底栏那一格指的就是 `/workbench/me/today`），所以连人带逻辑搬到这一页尾部：
+// （底栏那一格指的就是 `/workbench/staff/today`），所以连人带逻辑搬到这一页尾部：
 // 三行入口（修改个人信息 / 修改密码 / 重新选择区域和班次）+ 一条自己的资料。
 // 逻辑是照搬的（手机号正则、改号前那次确认、两条 PATCH、成功与失败的提示语），
 // 只换了容器写法：这一页的表单走 `.form-row` / `.input` / `.modal-*`（与请假、换班
@@ -646,7 +646,7 @@ watch(anyModalOpen, async (open) => {
 
 onMounted(() => {
   document.addEventListener('keydown', onModalKeydown)
-  // 名字与页面清单（`router/pageRoutes.json` 里 `/workbench/me/today` 那一行）同一个：
+  // 名字与页面清单（`router/pageRoutes.json` 里 `/workbench/staff/today` 那一行）同一个：
   // 它原来是「今天」，与工作台首页（`/workbench`，也报「今天」）**撞名** —— 真机走查里
   // 员工登录落到这一页、底栏第一格「今天」却指向另一页，两页浏览器标签一模一样。
   document.title = workbenchDocumentTitle('我的今天')

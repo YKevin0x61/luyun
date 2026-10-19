@@ -13,7 +13,7 @@
  * 直接进；员工会话**勾了「损耗分析」这一项能力**的也进这一页（看全店统计与含「谁记的」的
  * 明细）。其余员工手输 URL 落 `/workbench/forbidden`；接口那一侧 `/statistics` 对他们的
  * 员工会话回 403 —— 页面能不能打开与接口能不能读是两件事，两处都判。
- * 员工自己登记与看自己那几笔仍走登记页（`/workbench/me/loss`）。
+ * 员工自己登记与看自己那几笔仍走登记页（`/workbench/staff/loss`）。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'

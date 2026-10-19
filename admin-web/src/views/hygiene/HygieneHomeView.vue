@@ -254,7 +254,7 @@ const queueSummary = computed(() => ({
   waiting: workQueue.value.filter((task) => task.bucket === 'waiting').length,
 }))
 // 那条五格 tab 条撤掉之后，文档标题不再跟着"当前是哪一格"走：这一页整体就叫「卫生」
-// （页面清单里 `/workbench/me/clean` 的 title 也是它），与外壳顶栏 / 底栏那一格同名。
+// （页面清单里 `/workbench/staff/clean` 的 title 也是它），与外壳顶栏 / 底栏那一格同名。
 document.title = hygieneDocumentTitle('卫生')
 
 watch(sheet, async (value, previous) => {
@@ -1458,7 +1458,7 @@ async function decide(action, reason = '') {
     <a class="hy-skip" href="#hygiene-work-main">跳到内容</a>
     <!-- 页头收成一行（2026-10-05 用户裁定）：页名 +「我今天在哪」那颗只读胶囊。
          原来这里还有一条 `‹ 今天`（D9 给页内条留的唯一一条回程），现在去掉 —— 工作台
-         底栏那一格「我的」指向的正是 `/workbench/me/today`（`utils/workbenchNav.js` 的
+         底栏那一格「我的」指向的正是 `/workbench/staff/today`（`utils/workbenchNav.js` 的
          `me` 那一格，`WorkbenchTabBar` 按身份渲染出来），页内再摆一条就是**同一个目的地
          两个入口**；「今天」页自己也有一条来卫生的路（那张卫生卡上的按钮），两边都不缺路。
          （更早以前这一条还兼职"给没有返回键的 iOS PWA 留一条回程"，那件事现在由底栏接手。）
@@ -1578,7 +1578,7 @@ async function decide(action, reason = '') {
           <button
             type="button"
             class="btn btn-primary btn-block hy-staff-submit"
-            @click="router.push('/workbench/me/today')"
+            @click="router.push('/workbench/staff/today')"
           >去看我的班 ›</button>
         </template>
         <template v-else-if="employee">

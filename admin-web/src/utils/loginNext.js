@@ -92,7 +92,7 @@ function pathnameOf(next) {
  *  - 票 05（工作台按组分家）那批：票 04 的平铺 `/workbench/*`（刚作废的正式地址）
  *    与更早的 `/hygiene/*`、`/scheduling*` 一起换成 `/workbench/hr/*` 或
  *    `/workbench/floor/*`；
- *  - 票 03 的 `/staff/*` → `/workbench/me/*`：`/staff/today` 是**唯一被发出去过**的
+ *  - 票 03 的 `/staff/*` → `/workbench/staff/*`：`/staff/today` 是**唯一被发出去过**的
  *    员工地址（花名册页那张二维码、登录页的 `?next=`），所以这条最值钱；
  *  - 最后是老的裸前缀兜底（`/hygiene/` → `/workbench/`），挂不上具体某一页的那些。
  *
@@ -140,7 +140,7 @@ const LEGACY_NEXT_PATHS = [
   ['/scheduling/shifts', '/workbench/hr/shifts'],
   ['/scheduling', '/workbench/hr/calendar'],
   // ── 票 03：员工端三页搬进工作台的「我的」组 ─────────────────────────────────
-  ['/staff/', '/workbench/me/'],
+  ['/staff/', '/workbench/staff/'],
   // ── 兜底：老前缀底下别的地址（今天已经没有对应的页了，换过去也是 404，但至少还在
   //    工作台里，不会把人送进一个连外壳都没有的空路径）────────────────────────
   ['/hygiene/', '/workbench/'],
@@ -208,7 +208,7 @@ export function staffNextTarget(raw) {
  *  路径。
  *
  *  **落点不是管理端能进的页时返回 `fallback`，而调用方给的是「无权访问」页** ——
- *  这里以前硬回落到 `/`：管理端会话打开 `/login?next=/workbench/me/month` 时，`?next=`
+ *  这里以前硬回落到 `/`：管理端会话打开 `/login?next=/workbench/staff/month` 时，`?next=`
  *  被**消费掉却什么也没说**（D4 实测最终落在 `/workbench`，目标消失）。按 ADR 0092
  *  「不静默改道」，这种情况下要带人去 forbidden 并把原目标一起带上 —— 那一页会说明
  *  「这是员工手机端的页面」，还留一条回自己首页的路。默认值仍是 `/`，给那些不想要

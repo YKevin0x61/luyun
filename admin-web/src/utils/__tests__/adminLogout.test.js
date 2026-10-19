@@ -43,11 +43,11 @@ describe('logoutAdminSession（管理端登出唯一实现）', () => {
     stubFetch()
     const router = fakeRouter('/settings')
 
-    await logoutAdminSession(router, '/workbench/me/today')
+    await logoutAdminSession(router, '/workbench/staff/today')
 
     expect(router.replace).toHaveBeenCalledWith({
       path: '/login',
-      query: { next: '/workbench/me/today' },
+      query: { next: '/workbench/staff/today' },
     })
   })
 

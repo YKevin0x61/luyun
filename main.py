@@ -705,7 +705,7 @@ from starlette.requests import Request
 # The SPA shell is public (it only boots the client router); protected pages are
 # still enforced by the router/API. The Service Worker also needs to precache it.
 # 员工页面**不再在免墙名单里**：票 03 起员工三页住进工作台的「我的」组
-# （`/workbench/me/*`），工作台的页面壳对任一会话都放行（下面的 `_has_staff_session`），
+# （`/workbench/staff/*`），工作台的页面壳对任一会话都放行（下面的 `_has_staff_session`），
 # 员工自己的会话就是那把钥匙 —— 工作台是「进去要登录」的页面区，标成免墙就是把壳也对
 # 未登录访客敞开。旧的裸条目 `/staff` 与免墙前缀 `/staff/` 同时删掉（audit 条目 15）。
 # `/register` 是员工自助注册页（票 02 从 `/hygiene/register` 搬到顶层，在工作台之外，
@@ -737,7 +737,7 @@ HTML_AUTH_PREFIXES = (
     # 搬进 `/hygiene/*` 之后它们就对未登录访客放行了 —— 这是本次唯一会造成未授权
     # 访问的地方，`tests/test_auth.py` 里有反向断言（前缀名单里没有 `/hygiene/`）
     # 与正向断言（八个页面未登录仍 302 到 `/login`）各一条。
-    # 票 03 同时删掉了 `/staff/`：员工三页搬进工作台（`/workbench/me/*`）之后，这条前缀
+    # 票 03 同时删掉了 `/staff/`：员工三页搬进工作台（`/workbench/staff/*`）之后，这条前缀
     # 底下再没有员工页，而工作台是「进去要登录」的页面区 —— 它现在的放行根据是会话
     # （`_is_workbench_page` + `_has_staff_session`），不是路径。`tests/test_auth.py`
     # 有反向断言（前缀表里没有 `/staff/`）与正向断言（三页未登录 302、带员工会话 200）。
@@ -1270,7 +1270,7 @@ SPA_PAGE_ROUTES = (
     # 人事提醒（票 05）：工龄奖该调名单 + 档案待补。同一批：漏一条就是硬导航 404。
     "/workbench/hr/reminders",
     # 加班统计（票 02）：超管的审批台 —— 待办队列 + 批 / 驳 / 作废 + 代员工补录。
-    # 员工那一面在 `/workbench/me/overtime`（票 01），店长那一面在员工手机端（票 04）。
+    # 员工那一面在 `/workbench/staff/overtime`（票 01），店长那一面在员工手机端（票 04）。
     "/workbench/hr/overtime",
     # 考勤表（考勤表导出票 01）：人事组的第七页 —— 当月一人一张卡。同一批：漏一条就是
     # 直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
@@ -1304,17 +1304,17 @@ SPA_PAGE_ROUTES = (
     # 日常损耗登记（从 worktool2 那个小程序搬过来）：分析与明细在后勤组
     # （`/workbench/kitchen/loss`）：管理端会话直接进，开了「损耗分析」能力的员工会话也进
     # （2026-10-14，页面清单里的 `staffCap: wastage`）；员工端的登记页在「我的」组
-    # （`/workbench/me/loss`，两种身份都能进：店长也登记）。
+    # （`/workbench/staff/loss`，两种身份都能进：店长也登记）。
     # 同一批：漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
     "/workbench/kitchen/loss",
-    "/workbench/me/today",
-    "/workbench/me/month",
+    "/workbench/staff/today",
+    "/workbench/staff/month",
     # 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长。同这一批：
     # 漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
-    "/workbench/me/overtime",
+    "/workbench/staff/overtime",
     # 损耗登记（员工端那一面）：登记 + 看自己最近记的几笔。
-    "/workbench/me/loss",
-    "/workbench/me/clean",
+    "/workbench/staff/loss",
+    "/workbench/staff/clean",
     "/workbench/forbidden",
 )
 

@@ -89,12 +89,12 @@ async function mountToday({ caps = [], permission = '普通员工' } = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/workbench/me/today', component: { template: '<div />' } },
-      { path: '/workbench/me/clean', component: { template: '<div />' } },
-      { path: '/workbench/me/overtime', component: { template: '<div />' } },
+      { path: '/workbench/staff/today', component: { template: '<div />' } },
+      { path: '/workbench/staff/clean', component: { template: '<div />' } },
+      { path: '/workbench/staff/overtime', component: { template: '<div />' } },
     ],
   })
-  await router.push('/workbench/me/today')
+  await router.push('/workbench/staff/today')
   await router.isReady()
 
   const wrapper = mount(TodayView, { global: { plugins: [router, pinia] } })
@@ -207,13 +207,13 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     expect(gos).toHaveLength(6)
     const tos = gos.map((btn) => btn.attributes('data-to'))
     expect(new Set(tos).size).toBeGreaterThan(1)
-    expect(tos.filter((to) => to === '/workbench/me/overtime')).toHaveLength(1)
+    expect(tos.filter((to) => to === '/workbench/staff/overtime')).toHaveLength(1)
 
     // 点加班那一项的路，真的落到加班页（不是只挂了个属性）
-    const overtime = gos.find((btn) => btn.attributes('data-to') === '/workbench/me/overtime')
+    const overtime = gos.find((btn) => btn.attributes('data-to') === '/workbench/staff/overtime')
     await overtime.trigger('click')
     await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/workbench/me/overtime')
+    expect(router.currentRoute.value.path).toBe('/workbench/staff/overtime')
   })
 
   it('档位标签从账号信息里拿掉（信息由这张卡承载）；主表只列 6 行，姓名 / 职位折进二级视图仍可读', async () => {

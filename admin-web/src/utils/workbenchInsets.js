@@ -82,7 +82,7 @@ export const GROUP_CONTENT_INSETS = {
   // `.site-header-inner` / `.sop-*`，票面明确不碰 recipe.css）、备货计划的根是 0
   // （内容内边距由 `.card` 自己给）。
   kitchen: { base: NO_CONTENT_INSET },
-  // 员工卫生那一页（`/workbench/me/clean`）→ 0：它的内容容器是共享样式表里的
+  // 员工卫生那一页（`/workbench/staff/clean`）→ 0：它的内容容器是共享样式表里的
   // `.hy-work-main`，而那个容器是 `width: min(100%, 46rem); margin: 0 auto` 的居中框 ——
   // 横向内边距搬到壳上，居中框会在窄了 32px 的可用宽度里重新居中，内容整列**左移 16px**
   // （1440 实测：内容 x 368 → 352；390 上居中框不 binding，两个效果正好抵消、位移 0）。

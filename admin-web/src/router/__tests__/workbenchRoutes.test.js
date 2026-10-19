@@ -58,11 +58,11 @@ const PAGES = [
 
 // 工作台「我的」那一组（员工端）：套 `WorkbenchLayout`（工作台外壳），页面本体在子记录里。
 const STAFF_PAGES = [
-  ['/workbench/me/today', 'TodayView.vue'],
-  ['/workbench/me/month', 'TodayMonthView.vue'],
+  ['/workbench/staff/today', 'TodayView.vue'],
+  ['/workbench/staff/month', 'TodayMonthView.vue'],
   // 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长。
-  ['/workbench/me/overtime', 'MeOvertimeView.vue'],
-  ['/workbench/me/clean', 'HygieneHomeView.vue'],
+  ['/workbench/staff/overtime', 'MeOvertimeView.vue'],
+  ['/workbench/staff/clean', 'HygieneHomeView.vue'],
 ]
 
 describe('工作台路由（票 05 按分组落位之后）', () => {
@@ -153,6 +153,6 @@ describe('工作台路由（票 05 按分组落位之后）', () => {
     // 组内页清单从页面清单的 `group` 派生（`workbenchPagesOf`），所以新页只要落对
     // 组就自动进导航 —— 这条断言钉的正是「落对了组」这件事，不是手写的名单。
     const paths = workbenchPagesOf('me').map((row) => row.path)
-    expect(paths).toContain('/workbench/me/overtime')
+    expect(paths).toContain('/workbench/staff/overtime')
   })
 })

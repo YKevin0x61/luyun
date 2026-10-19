@@ -7,7 +7,7 @@ describe('workbenchPaths', () => {
       '/workbench',
       '/workbench/',
       '/workbench/hr/calendar',
-      '/workbench/me/today',
+      '/workbench/staff/today',
       '/workbench/kitchen/prep-plan',
       '/workbench/forbidden',
     ]) {

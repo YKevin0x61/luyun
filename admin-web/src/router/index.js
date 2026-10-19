@@ -113,7 +113,7 @@ const routes = [
   // 人事提醒（票 05）：该调工龄奖的人（含历史欠调）+ 档案待补。只提醒，钱要人工点确认。
   workbenchHrPage('/workbench/hr/reminders', 'workbench-hr-reminders', () => import('../views/hr/HrRemindersView.vue')),
   // 加班统计（票 02）：超管的审批台 —— 待办队列 + 批 / 驳 / 作废 + 代员工补录。员工那一面
-  // 在 `/workbench/me/overtime`（票 01）；店长那一面在员工手机端（票 04，走能力键）。
+  // 在 `/workbench/staff/overtime`（票 01）；店长那一面在员工手机端（票 04，走能力键）。
   workbenchHrPage('/workbench/hr/overtime', 'workbench-hr-overtime', () => import('../views/overtime/HrOvertimeView.vue')),
   // 考勤表（考勤表导出 票 01）：当月一人一张卡，逐日是「上班 / 休 / 待补」+ 职位 / 底薪 /
   // 年限 / 是否新入职 / 当月净时长。**只读、只算当月** —— 逐日改格在票 06、手填列在票 05、
@@ -161,7 +161,7 @@ const routes = [
   // `audience: admin` + `staffCap: wastage`（2026-10-14 用户裁定）：管理端会话直接进，
   // 员工会话勾了「损耗分析」这一项也能进（看全店统计与含「谁记的」的明细）。
   // 没勾的员工手输 URL 落 `/workbench/forbidden`；员工自己登记仍走登记页
-  // （`/workbench/me/loss`），接口那一侧同一批端点按归属分、统计另有一道能力门。
+  // （`/workbench/staff/loss`），接口那一侧同一批端点按归属分、统计另有一道能力门。
   workbenchKitchenPage('/workbench/kitchen/loss', 'wastage-analysis', () => import('../views/wastage/WastageAnalysisView.vue')),
   // 子应用根（票 06）：就是「今天」首页 —— 按身份用已有接口聚合今日摘要，只做分流与
   // 摘要、不做业务动作。它套**工作台外壳**（`WorkbenchLayout`：顶栏一条 + 按身份过滤的
@@ -176,25 +176,25 @@ const routes = [
     ],
   },
   // ── 工作台 · 我的（员工端，票 03）──────────────────────────────────────────
-  // 三页从 `/staff/*` 搬进 `/workbench/me/*`：**只改前缀与名字**，页内结构与那五个
+  // 三页从 `/staff/*` 搬进 `/workbench/staff/*`：**只改前缀与名字**，页内结构与那五个
   // tab 一个不动。旧前缀连带 `main.py` 里那条裸 `/staff` 免墙条目一起删掉、不留别名
   // （旧书签自然 404，spec 故事 48）。员工登录后的落点、登录回跳白名单、花名册页那张
   // 二维码、PWA 归属判据都从 `utils/staffPaths.js` 那一份常量走，不各写一遍。
   // 三页都套工作台外壳（导航里只有「我的」一格，票 07 / 08 往里加配方与备货计划）。
-  workbenchStaffPage('/workbench/me/today', 'today', () => import('../views/today/TodayView.vue')),
+  workbenchStaffPage('/workbench/staff/today', 'today', () => import('../views/today/TodayView.vue')),
   // 整月：从「今天」页那张排班卡的「整月」按钮进来，看自己这个月每天上什么班。
-  workbenchStaffPage('/workbench/me/month', 'today-month', () => import('../views/today/TodayMonthView.vue')),
+  workbenchStaffPage('/workbench/staff/month', 'today-month', () => import('../views/today/TodayMonthView.vue')),
   // 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长。管理端的审批与
   // 统计在票 02（`/workbench/hr/overtime`），店长在手机上的审批面在票 04 —— 这一页
   // 现在只认员工会话（`audience: staff`）。
-  workbenchStaffPage('/workbench/me/overtime', 'me-overtime', () => import('../views/overtime/MeOvertimeView.vue')),
+  workbenchStaffPage('/workbench/staff/overtime', 'me-overtime', () => import('../views/overtime/MeOvertimeView.vue')),
   // 损耗登记（从 worktool2 那个小程序搬过来）：记一笔（物料 / 数量 / 原因 / 照片），
   // 顺带看自己最近记的几笔。`audience: both` —— 员工用员工会话、店长用管理端会话，
   // **都能登记**（店长也天天在厨房里，让他为了记一笔先去做员工登录不合理）。
   // 接口那一侧按归属分：员工只看得到自己记的，全店数据在管理端的分析页。
-  workbenchStaffPage('/workbench/me/loss', 'me-wastage', () => import('../views/wastage/WastageRegisterView.vue')),
+  workbenchStaffPage('/workbench/staff/loss', 'me-wastage', () => import('../views/wastage/WastageRegisterView.vue')),
   // 卫生待办（员工那半）：五个 tab 与页内结构照旧。
-  workbenchStaffPage('/workbench/me/clean', 'hygiene-home', () => import('../views/hygiene/HygieneHomeView.vue')),
+  workbenchStaffPage('/workbench/staff/clean', 'hygiene-home', () => import('../views/hygiene/HygieneHomeView.vue')),
   // 越权落点（票 03）：有会话、但这一页不是这个身份的 —— 一页说明 + 一颗回自己首页的
   // 按钮，不再静默改道（旧行为把员工换成 `/staff/today`，`?next=` 也丢了）。
   { path: '/workbench/forbidden', name: 'workbench-forbidden', component: () => import('../views/workbench/ForbiddenView.vue'), meta: pageMeta('/workbench/forbidden') },
@@ -246,12 +246,12 @@ router.beforeEach(async (to) => {
 
   const audience = to.meta.audience
 
-  // 员工页（`/workbench/me/*`）：只认员工会话。
+  // 员工页（`/workbench/staff/*`）：只认员工会话。
   if (audience === 'staff') {
     // **管理端会话先判**，而且要判在 `staffProbe` 短路之前：这类页拿管理端 cookie 去
     // 请求员工接口必然 401，页面自己那条 401 兜底会把人送去 `/login?next=<员工页>`
     // —— 落成**员工登录页**，与 `forbiddenRedirect` 的口径打架（D3：管理端打开
-    // `/workbench/me/today` 看到的是手机号表单，页面上还一个出口都没有）。
+    // `/workbench/staff/today` 看到的是手机号表单，页面上还一个出口都没有）。
     // 有会话但身份不匹配是 forbidden 那一档，不是 login 那一档，所以这一条不能参与
     // 「跳过探针」——跳过的只是**员工会话**探针（让员工在弱网下少等一次超时），
     // 不是「这页该不该给这个身份看」的判定。

@@ -49,9 +49,9 @@ export const HOME_LINKS = {
   /** 人事提醒 → 人事提醒页（本月该调的工龄奖、本月生日、健康证到期都在这页）。 */
   reminders: '/workbench/hr/reminders',
   /** 我的待办条数 → 卫生待办（日常 / 专项 / 整改三个 tab 都在这儿）。 */
-  myItems: '/workbench/me/clean',
+  myItems: '/workbench/staff/clean',
   /** 我的申请待回应 → 「今天」页那张卡。 */
-  myRequests: '/workbench/me/today',
+  myRequests: '/workbench/staff/today',
 }
 
 /** 工作台身份 → 清单里的身份词。与 `utils/workbenchNav.js` 同一张表的两档词，

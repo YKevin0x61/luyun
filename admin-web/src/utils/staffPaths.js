@@ -8,8 +8,8 @@
  *    员工侧界面（前缀 ∪ `STAFF_PHONE_EXACT`）与工作台前缀共用一个 App，不再有单独的
  *    「青绿员工清单」。
  *
- *  **票 03 起员工三页住在工作台的「我的」组里**（今天 `/workbench/me/today`、整月
- *  `/workbench/me/month`、卫生待办 `/workbench/me/clean`）：前缀就是 `/workbench/me`。
+ *  **票 03 起员工三页住在工作台的「我的」组里**（今天 `/workbench/staff/today`、整月
+ *  `/workbench/staff/month`、卫生待办 `/workbench/staff/clean`）：前缀就是 `/workbench/staff`。
  *  服务端**不再为它单独免墙** —— 工作台的页面壳对任一会话都放行（票 02 的
  *  `_is_workbench_page` + `_has_staff_session`），员工自己的会话就是那把钥匙；
  *  `main.py` 里旧的 `/staff` 精确条目与 `/staff/` 前缀同时删掉（工作台是「进去要登录」
@@ -24,7 +24,7 @@
  *    进来 —— 注册成功还在等超级管理员批准、会话也不存在，把它当落点就是把员工送进一个
  *    自己进不去的页。所以 `?next=/register` 必须回落到员工默认落点。
  */
-export const STAFF_PHONE_PREFIXES = ['/workbench/me']
+export const STAFF_PHONE_PREFIXES = ['/workbench/staff']
 
 /** 前缀罩不住、但确实属于员工侧界面的精确路径。只给「员工侧界面」用，不进落点白名单。 */
 export const STAFF_PHONE_EXACT = ['/register']
@@ -36,7 +36,7 @@ export const STAFF_PHONE_EXACT = ['/register']
  *  今天上哪个班、今天要交什么（那一块卫生卡就摆在这一页上，见
  *  `components/staff/StaffHygieneCard.vue`），而不是先落「我的今天」再点一格。这一改也与
  *  工作台 PWA 清单的 `start_url`（`/workbench`）对齐了：从主屏打开与从 `/login` 登录落的是
- *  同一页。「我的今天」（`/workbench/me/today`）仍是底栏「我的」那一格，放账号资料。
+ *  同一页。「我的今天」（`/workbench/staff/today`）仍是底栏「我的」那一格，放账号资料。
  *
  *  **它不进 `isStaffLandingPath`**（`?next=` 的员工落点白名单）：`/workbench` 是**两种身份
  *  的共同首页**（页面清单里 `audience: both`），把它算成"员工页"会让店长点工作台首页时被

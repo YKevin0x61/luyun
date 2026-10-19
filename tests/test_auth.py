@@ -656,7 +656,7 @@ def test_kds_html_not_redirected_to_login(auth_app_client):
 
 
 def test_staff_pages_are_walled_workbench_pages_now(auth_app_client):
-    """票 03：员工三页搬进工作台（`/workbench/me/*`），**不再靠路径免墙**。
+    """票 03：员工三页搬进工作台（`/workbench/staff/*`），**不再靠路径免墙**。
 
     旧口径（票 04）是「手机上没有管理端会话，所以 `/staff/*` 必须免墙，否则员工永远进
     不去」——页面壳的放行只看管理端 cookie。票 02 把工作台改成「任一会话有效」之后，
@@ -671,7 +671,7 @@ def test_staff_pages_are_walled_workbench_pages_now(auth_app_client):
     import main as main_module
 
     client, _ = auth_app_client
-    for path in ("/workbench/me/today", "/workbench/me/month", "/workbench/me/clean"):
+    for path in ("/workbench/staff/today", "/workbench/staff/month", "/workbench/staff/clean"):
         assert path in main_module.SPA_PAGE_ROUTES, path
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         assert resp.status_code == 302, (path, resp.status_code)
@@ -719,7 +719,7 @@ def test_old_staff_paths_are_gone(auth_app_client):
         assert client.get(older, follow_redirects=False).status_code == 404, older
 
     # 新落点反过来都在：三页进页面注册清单（工作台里的一页）。
-    for fresh in ("/workbench/me/today", "/workbench/me/month", "/workbench/me/clean"):
+    for fresh in ("/workbench/staff/today", "/workbench/staff/month", "/workbench/staff/clean"):
         assert fresh in main_module.SPA_PAGE_ROUTES, fresh
 
 
@@ -840,7 +840,7 @@ def test_staff_path_list_matches_the_frontend_copy(auth_app_client):
     免墙表里的条目」—— 员工页当时靠路径免墙（手机上没有管理端会话）。
 
     票 03 把三页搬进工作台之后，页面壳的放行根据换成会话（`_is_workbench_page` +
-    `_has_staff_session`，票 02），路径免墙那条口子必须消失：留着 `/workbench/me/`
+    `_has_staff_session`，票 02），路径免墙那条口子必须消失：留着 `/workbench/staff/`
     前缀，整段员工页就对未登录访客放行了 —— 工作台是「进去要登录」的页面区。
 
     所以这里断三件事，判据仍然只有 JS 那一份 + 页面清单那一份：
@@ -942,9 +942,9 @@ WORKBENCH_PAGES = (
     "/workbench/floor/attire",
     # 票 03：员工三页搬进「我的」组，越权落点也是工作台里的一页 —— 服务端对它们一视
     # 同仁（任一会话有效即可拿到壳，页面级权限在前端守卫与各接口 401）。
-    "/workbench/me/today",
-    "/workbench/me/month",
-    "/workbench/me/clean",
+    "/workbench/staff/today",
+    "/workbench/staff/month",
+    "/workbench/staff/clean",
     "/workbench/forbidden",
     # 票 07：配方五页搬进「后勤」组（阅读四页 + 管理页）—— 服务端同样一视同仁。
     "/workbench/kitchen/recipe",
@@ -1008,7 +1008,7 @@ def test_workbench_page_wall_accepts_a_staff_session(auth_app_client):
     """员工会话（没有管理端会话）硬导航工作台每一页 → 200 页面壳。
 
     这就是「工作台包含员工端」在服务端成立的那一半：以前页面墙只读管理端 cookie，
-    员工对自己的那半边（票 03 起是 `/workbench/me/*`）也永远进不去。票 03 之前员工页
+    员工对自己的那半边（票 03 起是 `/workbench/staff/*`）也永远进不去。票 03 之前员工页
     是靠路径免墙（`/staff/*`）绕过去的；现在它们跟工作台别的页一个待遇。
     """
     client, _ = auth_app_client

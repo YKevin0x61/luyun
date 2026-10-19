@@ -80,7 +80,7 @@ function fetchFor(session, { name = '张三' } = {}) {
 
 const ROUTES = [
   '/workbench',
-  '/workbench/me/today',
+  '/workbench/staff/today',
   '/workbench/floor/daily',
 ]
 
@@ -109,7 +109,7 @@ async function mountSwitcher({ session, saved = null, staffName = '张三' } = {
     history: createMemoryHistory(),
     routes: ROUTES.map((path) => ({ path, component: { template: '<div />' } })),
   })
-  await router.push('/workbench/me/today')
+  await router.push('/workbench/staff/today')
   await router.isReady()
 
   // 探针由组件自己开场（`onMounted` 里那次 refresh），测试不替它调 —— 挂上去之后

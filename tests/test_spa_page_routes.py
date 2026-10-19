@@ -60,7 +60,7 @@ PAGE_ROUTES_JSON = REPO_ROOT / "admin-web" / "src" / "router" / "pageRoutes.json
 
 # 表里的取值域。`home` 是工作台首页那一组（票 06 才有行），先在这里登记，免得以后
 # 加一页时两边枚举对不上。`hygiene` 是**员工**那一档的卫生组（2026-10-05 起
-# `/workbench/me/clean` 从 `me` 挪进它自己的组，因为员工底栏给了它一个一级入口；
+# `/workbench/staff/clean` 从 `me` 挪进它自己的组，因为员工底栏给了它一个一级入口；
 # 店长那一档走的是 `floor` 那七页，两组人做同一批活、看到的是各自的面）。
 PAGE_GROUPS = {"home", "hr", "floor", "hygiene", "kitchen", "me", "system", "entry"}
 PAGE_AUDIENCES = {"admin", "staff", "both"}
@@ -68,7 +68,7 @@ PAGE_AUDIENCES = {"admin", "staff", "both"}
 # 免墙表里**不属于任何页面**的壳层条目，逐条写明理由与归属。表里每一条要么对应清单里
 # 的一页（或它的服务端别名），要么在这里留痕 —— 不许有清单之外的页面悄悄免墙。
 #
-# 票 03 起 `/staff` 那条不在了：员工三页搬进工作台（`/workbench/me/*`），页面壳的放行
+# 票 03 起 `/staff` 那条不在了：员工三页搬进工作台（`/workbench/staff/*`），页面壳的放行
 # 根据是「任一会话有效」（`HTML_AUTH_EXACT` 收不了这个），旧的裸条目与 `/staff/` 前缀
 # 一起删掉 —— `tests/test_auth.py` 有反向断言盯着它们不许回来。
 NON_PAGE_AUTH_ENTRIES = {
@@ -223,7 +223,7 @@ class SpaPageRouteContractTest(unittest.TestCase):
     def test_router_parse_covers_every_registration_form(self):
         """解析面按**写法**分组，每一组都得有东西（票 01 放宽后仍然如此）。"""
         by_form = _router_page_paths_by_form()
-        # 这里原本是 10（票 01 定的）。`/staff/today` 随员工页迁进 `/workbench/me/*` 被删
+        # 这里原本是 10（票 01 定的）。`/staff/today` 随员工页迁进 `/workbench/staff/*` 被删
         # （它的陈旧性由 `admin-web/src/router/__tests__/pageRoutes.test.js:199` 的 stale
         # 清单钉住），字面量组因此降到 9。**阈值下调要留痕：再少一条就该红。**
         self.assertGreaterEqual(len(by_form["path:"]), 9)
@@ -289,9 +289,9 @@ class SpaPageRouteContractTest(unittest.TestCase):
             # 「点得进去、刷新 404」。
             "/workbench/floor/trend",
             # 票 03：员工三页搬进「我的」组，越权落点也是工作台里的一页。
-            "/workbench/me/today",
-            "/workbench/me/month",
-            "/workbench/me/clean",
+            "/workbench/staff/today",
+            "/workbench/staff/month",
+            "/workbench/staff/clean",
             "/workbench/forbidden",
             # 后勤组（票 07）：配方五页；（票 08）备货计划一并搬进来。
             "/workbench/kitchen/recipe",
@@ -417,12 +417,12 @@ class RouterParseSurfaceTest(unittest.TestCase):
         source = (
             "const routes = [\n"
             "  workbenchPage('/workbench/hr/roster', 'roster', () => import('x')),\n"
-            "  staffPage(`/workbench/me/today`, 'today', () => import('y')),\n"
+            "  staffPage(`/workbench/staff/today`, 'today', () => import('y')),\n"
             "]"
         )
         by_form = parse_page_paths(source)
         self.assertEqual(by_form["workbenchPage"], ["/workbench/hr/roster"])
-        self.assertEqual(by_form["staffPage"], ["/workbench/me/today"])
+        self.assertEqual(by_form["staffPage"], ["/workbench/staff/today"])
 
     def test_interpolated_template_path_is_rejected_loudly(self):
         source = "const routes = [\n  { path: `/workbench/${slug}`, name: 'x' },\n]"

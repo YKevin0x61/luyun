@@ -69,7 +69,7 @@ async function mountCard({ me = ME, items = [], attire = ATTIRE_REQUIRED } = {})
     history: createMemoryHistory(),
     routes: [
       { path: '/workbench', component: { template: '<div />' } },
-      { path: '/workbench/me/clean', component: { template: '<div />' } },
+      { path: '/workbench/staff/clean', component: { template: '<div />' } },
     ],
   })
   await router.push('/workbench')
@@ -239,6 +239,6 @@ describe('今天要交什么 · 真挂一遍', () => {
     const go = wrapper.findAll('button').find((node) => node.text() === '工作卫生 ›')
     await go.trigger('click')
     await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/workbench/me/clean')
+    expect(router.currentRoute.value.path).toBe('/workbench/staff/clean')
   })
 })

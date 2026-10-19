@@ -63,13 +63,13 @@ afterEach(() => {
 })
 
 describe('vue-router 登录守卫：未登录时带 ?next= 送到 /login', () => {
-  it('员工页 /workbench/me/clean 放行：落点由页面自己那次 401 决定', async () => {
+  it('员工页 /workbench/staff/clean 放行：落点由页面自己那次 401 决定', async () => {
     // 三页现在是 `staffProbe: false`（守卫不先陪探针等一次，弱网下最多 4 秒），未登录时
     // `HygieneHomeView.leaveForStaffLogin` 拿到 401 再把 `fullPath` 带回 `/login`。
     const router = await freshRouter()
-    await router.push('/workbench/me/clean')
+    await router.push('/workbench/staff/clean')
 
-    expect(router.currentRoute.value.path).toBe('/workbench/me/clean')
+    expect(router.currentRoute.value.path).toBe('/workbench/staff/clean')
   })
 
   it('管理端卫生页 /workbench/floor/daily', async () => {
@@ -105,13 +105,13 @@ describe('vue-router 登录守卫：未登录时带 ?next= 送到 /login', () =>
     expect(router.currentRoute.value.path).toBe('/login')
   })
 
-  it('员工页 /workbench/me/today 是显式例外：守卫放行，落点由页面自己那一次 401 决定', async () => {
+  it('员工页 /workbench/staff/today 是显式例外：守卫放行，落点由页面自己那一次 401 决定', async () => {
     const router = await freshRouter()
-    await router.push('/workbench/me/today')
+    await router.push('/workbench/staff/today')
 
     // 不是被守卫送到 /login —— meta.staffProbe=false（弱网下别让员工先陪守卫白等一次
     // 探针超时）。页面拿到 401 时自己 replace 到 /login?next=<fullPath>，见下半段。
-    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.path).toBe('/workbench/staff/today')
   })
 })
 
@@ -215,27 +215,27 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
   })
 
   // D3：**真实**的员工三页带 `staffProbe: false`（守卫不替员工等那次探针），原来这条短路
-  // 写在「有管理端会话 → forbidden」之前，于是管理端打开 `/workbench/me/today` 被放行到
+  // 写在「有管理端会话 → forbidden」之前，于是管理端打开 `/workbench/staff/today` 被放行到
   // 页面，页面自己那次员工接口 401 又把人送去 `/login?next=<员工页>` —— 落成**员工登录页**，
   // 页面上连一个出口都没有。跳过的只是员工会话探针，不是身份判定。
   it('D3：员工三页（staffProbe:false）遇管理端会话也落「无权访问」，不被 401 兜底带去员工登录页', async () => {
     vi.stubGlobal('fetch', adminOnlyFetch())
     const router = await freshRouter()
 
-    await router.push('/workbench/me/today')
+    await router.push('/workbench/staff/today')
 
     expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
-    expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/staff/today')
   })
 
-  it('D3：`/workbench/me/clean` 同样落 forbidden；员工页自己那三页行为一致', async () => {
+  it('D3：`/workbench/staff/clean` 同样落 forbidden；员工页自己那三页行为一致', async () => {
     vi.stubGlobal('fetch', adminOnlyFetch())
     const router = await freshRouter()
 
-    await router.push('/workbench/me/clean')
+    await router.push('/workbench/staff/clean')
 
     expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
-    expect(router.currentRoute.value.query.next).toBe('/workbench/me/clean')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/staff/clean')
   })
 
   it('D3 不误伤双会话：管理端 cookie 也在、但员工会话有效时员工页照开', async () => {
@@ -256,17 +256,17 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
     )
     const router = await freshRouter()
 
-    await router.push('/workbench/me/today')
+    await router.push('/workbench/staff/today')
 
-    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.path).toBe('/workbench/staff/today')
   })
 
   it('D3 不误伤未登录：一个会话都没有的员工页仍然放行（落点由页面那次 401 决定）', async () => {
     const router = await freshRouter()
 
-    await router.push('/workbench/me/month')
+    await router.push('/workbench/staff/month')
 
-    expect(router.currentRoute.value.path).toBe('/workbench/me/month')
+    expect(router.currentRoute.value.path).toBe('/workbench/staff/month')
   })
 
   it('「无权访问」页本身对两种身份都开：员工会话不被再拦一道（守卫不能自己绕圈）', async () => {
@@ -309,19 +309,19 @@ describe('身份三态（票 02）：守卫按清单里的 audience 判定', () 
   })
 })
 
-describe('/workbench/me/today 真实挂载：未登录时页面自己把 fullPath 带到 /login', () => {
-  it('页面那次请求 401 → /login?next=%2Fworkbench%2Fme%2Ftoday', async () => {
+describe('/workbench/staff/today 真实挂载：未登录时页面自己把 fullPath 带到 /login', () => {
+  it('页面那次请求 401 → /login?next=%2Fworkbench%2Fstaff%2Ftoday', async () => {
     vi.resetModules()
     const TodayView = (await import('../../views/today/TodayView.vue')).default
 
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
-        { path: '/workbench/me/today', component: TodayView },
+        { path: '/workbench/staff/today', component: TodayView },
         { path: '/login', component: { template: '<div />' } },
       ],
     })
-    await router.push('/workbench/me/today')
+    await router.push('/workbench/staff/today')
     await router.isReady()
 
     const pinia = createPinia()
@@ -340,14 +340,14 @@ describe('/workbench/me/today 真实挂载：未登录时页面自己把 fullPat
     await flushPromises()
 
     expect(router.currentRoute.value.path).toBe('/login')
-    expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/staff/today')
     wrapper.unmount()
   })
 
   // 票 12 收的 O2：这条链上**并发的 401** 才是真机上的形态 —— 页面一挂载就并行发几条
   // 请求（排班 / 申请 / 卫生），各自 catch 里都会调 `leaveForStaffLogin`。第一个把人送到
   // `/login?next=X`，第二个若再跳一次，就会把「已经是登录页的当前地址」当成目标包进去：
-  // 真机实测的最终 URL 就是 `/login?next=/login?next=/workbench/me/today`。
+  // 真机实测的最终 URL 就是 `/login?next=/login?next=/workbench/staff/today`。
   it('第二个 401 晚到（此刻已站在 /login 上）：URL 不套娃', async () => {
     vi.resetModules()
     const TodayView = (await import('../../views/today/TodayView.vue')).default
@@ -380,11 +380,11 @@ describe('/workbench/me/today 真实挂载：未登录时页面自己把 fullPat
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
-        { path: '/workbench/me/today', component: TodayView },
+        { path: '/workbench/staff/today', component: TodayView },
         { path: '/login', component: { template: '<div />' } },
       ],
     })
-    await router.push('/workbench/me/today')
+    await router.push('/workbench/staff/today')
     await router.isReady()
 
     const pinia = createPinia()
@@ -402,7 +402,7 @@ describe('/workbench/me/today 真实挂载：未登录时页面自己把 fullPat
     await flushPromises()
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/login')
-    expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/staff/today')
 
     // 迟到的那个 401 到达：这一跳**不该**发生。
     releaseSlowRequest()
@@ -410,7 +410,7 @@ describe('/workbench/me/today 真实挂载：未登录时页面自己把 fullPat
     await flushPromises()
 
     expect(router.currentRoute.value.path).toBe('/login')
-    expect(router.currentRoute.value.query.next).toBe('/workbench/me/today')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/staff/today')
     expect(router.currentRoute.value.fullPath.match(/next=/g)).toHaveLength(1)
     wrapper.unmount()
   })

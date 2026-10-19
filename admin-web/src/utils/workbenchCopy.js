@@ -5,7 +5,7 @@
  *  子系统自己的用语与分组，不列任何一组的具体页面清单（那些归各组的导航）。
  *
  *  票 05 起路径按组排（`admin-web/src/router/pageRoutes.json` 的 `group`）：人事
- *  `/workbench/hr/*`、现场 `/workbench/floor/*`、我的 `/workbench/me/*`。两个壳
+ *  `/workbench/hr/*`、现场 `/workbench/floor/*`、我的 `/workbench/staff/*`。两个壳
  *  （`views/scheduling/SchedulingLayout.vue` 与 `views/hygiene/HygieneAdminLayout.vue`）
  *  互相开门，门牌就是这里两个**落点**常量 —— 一处定义，两个壳与页内跳转都引它。
  */

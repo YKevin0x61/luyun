@@ -111,7 +111,7 @@ describe('页面清单（唯一来源）', () => {
     expect(pageMeta('/workbench/hr/calendar').staffCap).toBe('schedule')
     expect(pageMeta('/workbench/kitchen/loss').staffCap).toBe('wastage')
     expect(pageMeta('/workbench/hr/roster').staffCap).toBeNull()
-    expect(pageMeta('/workbench/me/today').staffCap).toBeNull()
+    expect(pageMeta('/workbench/staff/today').staffCap).toBeNull()
   })
 
   it('独立外壳的页面就是这些（其余页面才渲染后台导航）', () => {
@@ -128,7 +128,7 @@ describe('页面清单（唯一来源）', () => {
       // 人事提醒（overtime-and-reminders 票 05）：工龄奖该调名单 + 档案待补，同套工作台外壳。
       '/workbench/hr/reminders',
       // 加班统计（overtime-and-reminders 票 02）：超管的审批台（待办 / 批驳 / 作废 / 代录），
-      // 套的是人事那一组的壳。员工那一面在 `/workbench/me/overtime`（票 01）。
+      // 套的是人事那一组的壳。员工那一面在 `/workbench/staff/overtime`（票 01）。
       '/workbench/hr/overtime',
       // 考勤表（考勤表导出 票 01）：人事组的第七页 —— 当月一人一张卡，同套人事壳。
       '/workbench/hr/attendance',
@@ -159,14 +159,14 @@ describe('页面清单（唯一来源）', () => {
       '/workbench/kitchen/loss',
       // 员工三页搬进工作台的「我的」组（票 03）：套工作台外壳，后台导航照样不渲染；
       // 越权落点也是独立一页（一页说明 + 一颗按钮，不套导航）。
-      '/workbench/me/today',
-      '/workbench/me/month',
+      '/workbench/staff/today',
+      '/workbench/staff/month',
       // 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长，同套工作台外壳。
-      '/workbench/me/overtime',
-      '/workbench/me/clean',
+      '/workbench/staff/overtime',
+      '/workbench/staff/clean',
       // 损耗登记（从 worktool2 那个小程序搬过来）：「我的」组里那一页 —— 记一笔 + 看自己
       // 最近记的。`audience: both`（店长也登记），外壳与同组那几页一样。
-      '/workbench/me/loss',
+      '/workbench/staff/loss',
       '/workbench/forbidden',
     ])
   })
@@ -237,9 +237,9 @@ describe('401 兜底豁免也从清单派生（票 10）', () => {
   })
 
   it('员工身份与「两者皆可」的页豁免（钥匙可能是员工 cookie）', () => {
-    expect(skipsAdminLoginRedirect('/workbench/me/today')).toBe(true)
-    expect(skipsAdminLoginRedirect('/workbench/me/month')).toBe(true)
-    expect(skipsAdminLoginRedirect('/workbench/me/clean')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/staff/today')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/staff/month')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/staff/clean')).toBe(true)
     // 扫码看配方那条链路：厨师用员工会话读，不该被甩去管理端登录页。
     expect(skipsAdminLoginRedirect('/workbench/kitchen/recipe/detail')).toBe(true)
     expect(skipsAdminLoginRedirect('/workbench/kitchen/recipe')).toBe(true)
@@ -278,7 +278,7 @@ describe('401 兜底豁免也从清单派生（票 10）', () => {
   })
 
   it('尾斜杠与子路径按同一页算（浏览器地址栏里多一个斜杠不该换待遇）', () => {
-    expect(skipsAdminLoginRedirect('/workbench/me/today/')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/staff/today/')).toBe(true)
     expect(skipsAdminLoginRedirect('/admin/')).toBe(false)
   })
 
@@ -364,7 +364,7 @@ describe('内容区 opt-out 也从清单派生（票 02 / ADR 0106 决策 5）',
     expect(pageMeta('/workbench/kitchen/recipe/print').flush).toBe(true)
     expect(pageMeta('/workbench/kitchen/recipe/print').ownBottomBar).toBe(false)
     // 其余页面一个字没变：两项都关着。
-    for (const path of ['/workbench', '/workbench/me/today', '/workbench/floor/daily', '/login']) {
+    for (const path of ['/workbench', '/workbench/staff/today', '/workbench/floor/daily', '/login']) {
       expect(pageMeta(path).ownBottomBar, path).toBe(false)
       expect(pageMeta(path).flush, path).toBe(false)
     }

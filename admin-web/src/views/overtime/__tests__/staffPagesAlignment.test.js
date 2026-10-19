@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest'
 const here = dirname(fileURLToPath(import.meta.url))
 const read = (p) => readFileSync(join(here, p), 'utf8')
 
-describe('整月六态一眼可辨（/workbench/me/month）', () => {
+describe('整月六态一眼可辨（/workbench/staff/month）', () => {
   const src = read('../../today/TodayMonthView.vue')
 
   it('图例六态齐全：上班 / 休 / 请假 / 班次已调整 / 还没排 / 申请中', () => {
@@ -35,7 +35,7 @@ describe('整月六态一眼可辨（/workbench/me/month）', () => {
   })
 })
 
-describe('加班与补钟（/workbench/me/overtime）', () => {
+describe('加班与补钟（/workbench/staff/overtime）', () => {
   const src = read('../../overtime/MeOvertimeView.vue')
 
   it('净时长 + 两枚状态徽章：已批准 / 待批', () => {

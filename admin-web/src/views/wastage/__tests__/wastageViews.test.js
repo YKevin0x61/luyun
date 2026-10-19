@@ -102,7 +102,7 @@ function route() {
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: { template: '<div />' } },
-      { path: '/workbench/me/loss', component: { template: '<div />' } },
+      { path: '/workbench/staff/loss', component: { template: '<div />' } },
       { path: '/workbench/kitchen/loss', component: { template: '<div />' } },
     ],
   })
@@ -148,7 +148,7 @@ describe('损耗登记页（员工端）', () => {
   })
 
   it('读四样东西：清单与上限、模板、名字补全、我最近的登记', async () => {
-    const wrapper = await mountView(WastageRegisterView, '/workbench/me/loss')
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
     const calls = get.mock.calls.map(([url]) => url)
@@ -167,7 +167,7 @@ describe('损耗登记页（员工端）', () => {
   })
 
   it('提交的 body 是服务端要的那几个字段（数量转数字、图片带 capture_id）', async () => {
-    const wrapper = await mountView(WastageRegisterView, '/workbench/me/loss')
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
     await wrapper.get('input[type="text"]').setValue('五花肉')
@@ -190,7 +190,7 @@ describe('损耗登记页（员工端）', () => {
   })
 
   it('选了「其他」时把备注标成必填（判据仍在服务端）', async () => {
-    const wrapper = await mountView(WastageRegisterView, '/workbench/me/loss')
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
     const reasons = wrapper.findAll('.loss-reason')
@@ -200,7 +200,7 @@ describe('损耗登记页（员工端）', () => {
   })
 
   it('现场照片排在登记页最前，且只走系统相机（没有相册这条路）', async () => {
-    const wrapper = await mountView(WastageRegisterView, '/workbench/me/loss')
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
     // 第一块就是照片（2026-10-17 用户裁定：先拍现场、再填物料）。
@@ -268,6 +268,6 @@ describe('损耗分析页（管理端）', () => {
   it('页头那颗「去登记一笔」指着员工端那一页', async () => {
     const wrapper = await mountView(WastageAnalysisView, '/workbench/kitchen/loss')
     await flushPromises()
-    expect(wrapper.get('.loss-head a').attributes('href')).toBe('/workbench/me/loss')
+    expect(wrapper.get('.loss-head a').attributes('href')).toBe('/workbench/staff/loss')
   })
 })

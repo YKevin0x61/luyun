@@ -86,9 +86,9 @@ async function mountToday({ onPatch } = {}) {
   setActivePinia(pinia)
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/workbench/me/today', component: { template: '<div />' } }],
+    routes: [{ path: '/workbench/staff/today', component: { template: '<div />' } }],
   })
-  await router.push('/workbench/me/today')
+  await router.push('/workbench/staff/today')
   await router.isReady()
 
   const wrapper = mount(TodayView, { global: { plugins: [router, pinia] } })

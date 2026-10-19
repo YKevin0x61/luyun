@@ -52,7 +52,7 @@ describe('驳回原因：验收人写得出，员工看得到', () => {
   })
 
   it('七个驳回入口的内核都拿得到原因（员工端三处共用同一个弹窗）', () => {
-    // 员工端那条路（`/workbench/me/clean` 上管理员验收的日常 / 专项 / 整改）走的是
+    // 员工端那条路（`/workbench/staff/clean` 上管理员验收的日常 / 专项 / 整改）走的是
     // 同一个 `rejectConfirmOpen` 弹窗：一个 `required: true` 管三条路。
     const home = read('../HygieneHomeView.vue')
     expect(home).toMatch(/const rejectConfirmOpen = ref\(false\)/)

@@ -226,7 +226,7 @@ describe('按身份过滤导航', () => {
     // 后勤的落点是配方列表：`both` —— 员工也要看得到配方这一项（票面验收）。
     expect(pageMeta('/workbench/kitchen/recipe').audience).toBe('both')
     expect(pageMeta('/workbench/kitchen/recipe/manage').audience).toBe('admin')
-    expect(pageMeta('/workbench/me/today').audience).toBe('staff')
+    expect(pageMeta('/workbench/staff/today').audience).toBe('staff')
   })
 
   it('员工勾了「排班管理」/「损耗分析」之后，那两扇门才出现（2026-10-14）', () => {
@@ -273,10 +273,10 @@ describe('按身份过滤导航', () => {
 
 describe('高亮跟着新分组走', () => {
   it('整组下的任意一页都算在那一格上', () => {
-    expect(workbenchGroupOf('/workbench/me/month')).toBe('me')
+    expect(workbenchGroupOf('/workbench/staff/month')).toBe('me')
     // 卫生那一页 2026-10-05 从「我的」组挪进了自己的「卫生」组（它有了一级入口，
     // 再挂在「我的」组上会让两格同时亮）。
-    expect(workbenchGroupOf('/workbench/me/clean')).toBe('hygiene')
+    expect(workbenchGroupOf('/workbench/staff/clean')).toBe('hygiene')
     expect(workbenchGroupOf('/workbench/hr/calendar')).toBe('hr')
     expect(workbenchGroupOf('/workbench/hr/roster')).toBe('hr')
     expect(workbenchGroupOf('/workbench/floor/daily')).toBe('floor')

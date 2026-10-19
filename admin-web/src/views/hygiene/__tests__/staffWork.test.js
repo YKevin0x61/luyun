@@ -136,7 +136,7 @@ describe('hygiene staff work app', () => {
 
   it('不再有页内那条「‹ 今天」：底栏「我的」就是去「今天」的路', () => {
     const home = read('../HygieneHomeView.vue')
-    // 2026-10-05 用户裁定：页内那条 `‹ 今天` 撤掉。它回的是 `/workbench/me/today`，而工作台
+    // 2026-10-05 用户裁定：页内那条 `‹ 今天` 撤掉。它回的是 `/workbench/staff/today`，而工作台
     // 底栏「我的」那一格指的**正是**同一个目的地（`WorkbenchTabBar` 按身份渲染
     // `utils/workbenchNav.js` 的 `me` 格）—— 同一屏两个入口通向同一页，页内这条只是重复。
     // 当年它兼职的那件事（给没有返回键的 iOS PWA 留一条回程）现在由底栏接手。
@@ -149,7 +149,7 @@ describe('hygiene staff work app', () => {
     expect(home).toMatch(/class="hy-work-shift"/)
     // 那条回程确实在底栏（不是凭空消失）：读那张导航表。
     const nav = read('../../../../src/utils/workbenchNav.js')
-    expect(nav).toMatch(/key: 'me', label: '我的', to: '\/workbench\/me\/today'/)
+    expect(nav).toMatch(/key: 'me', label: '我的', to: '\/workbench\/staff\/today'/)
   })
 
   it('页面可以持有版式骨架，但颜色只走令牌（v2 版式重构）', () => {

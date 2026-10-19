@@ -9,7 +9,7 @@
  * 而不是「源码里有没有那一行挂载代码」。
  *
  * 改动前的实测（`.scratch/workbench-content-area/baseline/checks-06/before/`）：
- * `/workbench/me/today` 与 `/workbench/me/clean` 同页 **2 条** 指向同一文件的 `<link>`
+ * `/workbench/staff/today` 与 `/workbench/staff/clean` 同页 **2 条** 指向同一文件的 `<link>`
  * （壳 `WorkbenchShell.vue` 一份 + 页面自己 `useScopedStylesheet` 一份），
  * `document.styleSheets` 里也是两份、规则数 600（= 2 × 300）。
  *
@@ -101,7 +101,7 @@ describe('工作台文档级契约：一份样式表 + 一个属性（票 06）'
     // 票面点名的四页：三页在工作台里，`/register` 住在顶层路径、靠清单里显式那一行。
     for (const path of [
       '/workbench',
-      '/workbench/me/today',
+      '/workbench/staff/today',
       '/workbench/floor/daily',
       '/workbench/forbidden',
       '/register',
@@ -123,13 +123,13 @@ describe('工作台文档级契约：一份样式表 + 一个属性（票 06）'
     const { router } = await freshRouter()
 
     // 改动前这一页挂两份（壳 + 页面），票面验收 1 点名的就是它。
-    await router.push('/workbench/me/today')
-    expect(router.currentRoute.value.path).toBe('/workbench/me/today')
+    await router.push('/workbench/staff/today')
+    expect(router.currentRoute.value.path).toBe('/workbench/staff/today')
     expect(stylesheetLinks().length).toBe(1)
     const mounted = stylesheetLinks()[0]
 
     // 工作台页 → 工作台页：不摘了再挂（摘挂之间那一帧正是「首屏无样式跳一下」）。
-    await router.push('/workbench/me/month')
+    await router.push('/workbench/staff/month')
     expect(stylesheetLinks().length).toBe(1)
     expect(stylesheetLinks()[0]).toBe(mounted)
 
@@ -152,14 +152,14 @@ describe('工作台文档级契约：一份样式表 + 一个属性（票 06）'
 
   it('同一页重复应用不会挂出第二份（composable 自己不做 DOM 去重，这一层必须做）', async () => {
     const { router, doc } = await freshRouter()
-    const route = router.resolve('/workbench/me/today')
+    const route = router.resolve('/workbench/staff/today')
 
     doc.applyWorkbenchDocument(route)
     const mounted = stylesheetLinks()[0]
     expect(mounted).toBeTruthy()
 
     doc.applyWorkbenchDocument(route)
-    doc.applyWorkbenchDocument(router.resolve('/workbench/me/clean'))
+    doc.applyWorkbenchDocument(router.resolve('/workbench/staff/clean'))
     expect(stylesheetLinks().length).toBe(1)
     expect(stylesheetLinks()[0]).toBe(mounted)
     expect(mounted.getAttribute('href')).toBe(WORKBENCH_STYLESHEET_HREF)

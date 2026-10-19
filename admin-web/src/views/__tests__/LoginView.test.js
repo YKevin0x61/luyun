@@ -33,9 +33,9 @@ const ROUTES = [
   { path: '/', component: { template: '<div />' } },
   { path: '/login', component: { template: '<div />' } },
   { path: '/admin', component: { template: '<div />' } },
-  { path: '/workbench/me/today', component: { template: '<div />' } },
-  { path: '/workbench/me/month', component: { template: '<div />' } },
-  { path: '/workbench/me/clean', component: { template: '<div />' } },
+  { path: '/workbench/staff/today', component: { template: '<div />' } },
+  { path: '/workbench/staff/month', component: { template: '<div />' } },
+  { path: '/workbench/staff/clean', component: { template: '<div />' } },
   { path: '/workbench/hr/roster', component: { template: '<div />' } },
   // 越权落点（D4：超级管理员栏拿到进不去的 `?next=` 时落这里，原目标一起带过去）。
   { path: '/workbench/forbidden', component: { template: '<div />' } },
@@ -178,7 +178,7 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
     rememberTab('admin')
     fetchMock.mockResolvedValueOnce(STAFF_LOGGED_OUT())
 
-    const { wrapper } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fmonth')
+    const { wrapper } = await mountLogin('/login?next=%2Fworkbench%2Fstaff%2Fmonth')
 
     expect(activeTab(wrapper)).toBe('员工')
     expect(findCall(fetchMock, '/api/hygiene/staff/session')).toBeTruthy()
@@ -401,7 +401,7 @@ describe('/login 面板：员工栏', () => {
       .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
 
-    const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fmonth')
+    const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fstaff%2Fmonth')
     await submitWith(wrapper, {
       'input[type="tel"]': '13800138000',
       'input[type="password"]': 's3cret',
@@ -415,7 +415,7 @@ describe('/login 面板：员工栏', () => {
       password: 's3cret',
       remember: true,
     })
-    expect(router.currentRoute.value.path).toBe('/workbench/me/month')
+    expect(router.currentRoute.value.path).toBe('/workbench/staff/month')
   })
 
   it('员工栏落点同样是 replace：后退不退回登录页', async () => {
@@ -423,7 +423,7 @@ describe('/login 面板：员工栏', () => {
       .mockResolvedValueOnce(STAFF_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
 
-    const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fmonth', {
+    const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fstaff%2Fmonth', {
       from: '/',
     })
     await submitWith(wrapper, {
@@ -456,9 +456,9 @@ describe('/login 面板：员工栏', () => {
   it('员工会话仍有效时自动进入员工落点', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ authenticated: true, employee: { name: '张三' } }))
 
-    const { router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Fclean')
+    const { router } = await mountLogin('/login?next=%2Fworkbench%2Fstaff%2Fclean')
 
-    expect(router.currentRoute.value.path).toBe('/workbench/me/clean')
+    expect(router.currentRoute.value.path).toBe('/workbench/staff/clean')
   })
 
   it('?switch=1 且员工会话有效时停在确认面板，退出走员工端登出接口', async () => {
@@ -557,7 +557,7 @@ describe('/login 面板：非法 ?next 回落', () => {
       .mockResolvedValueOnce(ADMIN_LOGGED_OUT())
       .mockResolvedValueOnce(jsonResponse({ ok: true }))
 
-    const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fme%2Ftoday')
+    const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fstaff%2Ftoday')
     // 带员工端 next 时面板开在员工栏；超级管理员自己切回超级管理员栏。
     expect(activeTab(wrapper)).toBe('员工')
     await clickTab(wrapper, '超级管理员')
@@ -578,7 +578,7 @@ describe('/login 面板：非法 ?next 回落', () => {
 describe('/login 面板：扫码进来看配方（票 07）', () => {
   // 本票风险最高的一条链路：扫码 → 未登录 → 登录页默认开员工栏 → 登录后回到那条配方。
   // 两处最容易漏：面板开错栏（厨师范不着超级管理员栏）、员工栏把配方路径当「不是员工落点」
-  // 静默落到 `/workbench/me/today`。
+  // 静默落到 `/workbench/staff/today`。
   const SCAN = '/login?next=%2Fworkbench%2Fkitchen%2Frecipe%2Fdetail%3Fslug%3Dchangfen'
 
   it('扫码进来默认开员工栏，优先于记住的超级管理员栏', async () => {

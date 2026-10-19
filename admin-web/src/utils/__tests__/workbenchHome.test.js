@@ -316,8 +316,8 @@ describe('数字点进去的地方', () => {
     expect(HOME_LINKS.fixes).toBe('/workbench/floor/fix')
     expect(HOME_LINKS.reminders).toBe('/workbench/hr/reminders')
     expect(HOME_LINKS.duty).toBe('/workbench/hr/calendar')
-    expect(HOME_LINKS.myItems).toBe('/workbench/me/clean')
-    expect(HOME_LINKS.myRequests).toBe('/workbench/me/today')
+    expect(HOME_LINKS.myItems).toBe('/workbench/staff/clean')
+    expect(HOME_LINKS.myRequests).toBe('/workbench/staff/today')
   })
 })
 

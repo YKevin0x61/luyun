@@ -2,7 +2,7 @@
 /**
  * 员工手机端的「整月」页（票 06）。
  *
- * 从「今天」页那张排班卡的「整月」按钮进来（`/workbench/me/month`）。这一页回答两件事：
+ * 从「今天」页那张排班卡的「整月」按钮进来（`/workbench/staff/month`）。这一页回答两件事：
  * 这个月我哪几天上班、上什么班；以及**哪天店里人多**（票 13）。
  *
  * 数据两个来源，各管一件事：
@@ -201,7 +201,7 @@ function backToThisMonth() {
 }
 
 onMounted(async () => {
-  // 名字与清单里 `/workbench/me/month` 那一行同步。走 `workbenchDocumentTitle` 是为了
+  // 名字与清单里 `/workbench/staff/month` 那一行同步。走 `workbenchDocumentTitle` 是为了
   // 那条「· 工作台」后缀：只写裸标题会让它在浏览器标签里跟管理后台的页面分不开。
   document.title = workbenchDocumentTitle('整月')
   // 「今天」页那两颗按钮带着 `?date=&act=` 跳过来（票 15）：先读那一天所在的月份，
@@ -240,7 +240,7 @@ useNudgePull({
         <p class="tDate">{{ employee ? employee.name : '' }}</p>
       </div>
       <div class="tTop-side">
-        <button class="tBack" type="button" @click="router.push('/workbench/me/today')">‹ 今天</button>
+        <button class="tBack" type="button" @click="router.push('/workbench/staff/today')">‹ 今天</button>
       </div>
       <!-- 退出**不在这里**（D5）：工作台外壳顶栏那一颗是员工三页共用的唯一一颗
            （`WorkbenchLayout` 的 `WorkbenchExitButton`，员工那一档走 `useStaffLogout`）。 -->

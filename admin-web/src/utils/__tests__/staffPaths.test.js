@@ -6,8 +6,8 @@
  *
  *  票 02 起名单拆成两层语义：`isStaffPhonePath`（员工侧界面 = 前缀 ∪ 精确）与
  *  `isStaffLandingPath`（登录后落点 = 只要前缀）。`/register` 属于前者、不属于后者。
- *  票 03 起前缀是 `/workbench/me`（三页：今天 /workbench/me/today、整月
- *  /workbench/me/month、卫生待办 /workbench/me/clean），旧的 `/staff/*` 一律不再算
+ *  票 03 起前缀是 `/workbench/staff`（三页：今天 /workbench/staff/today、整月
+ *  /workbench/staff/month、卫生待办 /workbench/staff/clean），旧的 `/staff/*` 一律不再算
  *  员工路径 —— 它连页面都不是了（自然 404，不留别名）。
  */
 import { readFileSync } from 'node:fs'
@@ -26,16 +26,16 @@ const here = dirname(fileURLToPath(import.meta.url))
 
 describe('isStaffPhonePath', () => {
   it('员工端三页都算员工端', () => {
-    expect(isStaffPhonePath('/workbench/me/today')).toBe(true)
-    expect(isStaffPhonePath('/workbench/me/month')).toBe(true)
-    expect(isStaffPhonePath('/workbench/me/clean')).toBe(true)
+    expect(isStaffPhonePath('/workbench/staff/today')).toBe(true)
+    expect(isStaffPhonePath('/workbench/staff/month')).toBe(true)
+    expect(isStaffPhonePath('/workbench/staff/clean')).toBe(true)
   })
 
   it('前缀下面的子页面算员工端，带尾斜杠也算', () => {
-    expect(isStaffPhonePath('/workbench/me')).toBe(true)
-    expect(isStaffPhonePath('/workbench/me/')).toBe(true)
-    expect(isStaffPhonePath('/workbench/me/today/')).toBe(true)
-    expect(isStaffPhonePath('/workbench/me/month/')).toBe(true)
+    expect(isStaffPhonePath('/workbench/staff')).toBe(true)
+    expect(isStaffPhonePath('/workbench/staff/')).toBe(true)
+    expect(isStaffPhonePath('/workbench/staff/today/')).toBe(true)
+    expect(isStaffPhonePath('/workbench/staff/month/')).toBe(true)
   })
 
   it('注册页在前缀之外，靠精确名单算员工端（装出来才是员工 PWA）', () => {
@@ -53,8 +53,8 @@ describe('isStaffPhonePath', () => {
   })
 
   it('长得像但不是子路径的不算（管理端那几页最容易被前缀顺手带走）', () => {
-    expect(isStaffPhonePath('/workbench/mex')).toBe(false)
-    expect(isStaffPhonePath('/workbench/mex/today')).toBe(false)
+    expect(isStaffPhonePath('/workbench/staffx')).toBe(false)
+    expect(isStaffPhonePath('/workbench/staffx/today')).toBe(false)
     expect(isStaffPhonePath('/staffx')).toBe(false)
     expect(isStaffPhonePath('/hygienex')).toBe(false)
     // 工作台里店长那几页与员工三页只差一个词，别顺手带走。
@@ -85,17 +85,17 @@ describe('isStaffPhonePath', () => {
   })
 
   it('名单本身是这一条（服务端免墙表**不再**照着它放行，见 tests/test_auth.py）', () => {
-    expect(STAFF_PHONE_PREFIXES).toEqual(['/workbench/me'])
+    expect(STAFF_PHONE_PREFIXES).toEqual(['/workbench/staff'])
   })
 })
 
 describe('isStaffLandingPath', () => {
   it('员工前缀下的页是登录后落点', () => {
-    expect(isStaffLandingPath('/workbench/me/today')).toBe(true)
-    expect(isStaffLandingPath('/workbench/me/today/')).toBe(true)
-    expect(isStaffLandingPath('/workbench/me/month')).toBe(true)
-    expect(isStaffLandingPath('/workbench/me/clean')).toBe(true)
-    expect(isStaffLandingPath('/workbench/me')).toBe(true)
+    expect(isStaffLandingPath('/workbench/staff/today')).toBe(true)
+    expect(isStaffLandingPath('/workbench/staff/today/')).toBe(true)
+    expect(isStaffLandingPath('/workbench/staff/month')).toBe(true)
+    expect(isStaffLandingPath('/workbench/staff/clean')).toBe(true)
+    expect(isStaffLandingPath('/workbench/staff')).toBe(true)
   })
 
   it('注册页不是落点：还没批准、会话也不存在，送过去就是死路', () => {
@@ -114,7 +114,7 @@ describe('isStaffLandingPath', () => {
   })
 
   it('两份名单的层级：精确名单只加「员工侧界面」，不加「落点」', () => {
-    expect(STAFF_PHONE_PREFIXES).toEqual(['/workbench/me'])
+    expect(STAFF_PHONE_PREFIXES).toEqual(['/workbench/staff'])
     expect(STAFF_PHONE_EXACT).toEqual(['/register'])
     for (const exact of STAFF_PHONE_EXACT) {
       expect(isStaffPhonePath(exact)).toBe(true)

@@ -17,13 +17,13 @@ const here = dirname(fileURLToPath(import.meta.url))
 let fetchMock
 let pinia
 
-async function mountButton(path = '/workbench/me/today') {
+async function mountButton(path = '/workbench/staff/today') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: '/login', component: { template: '<div />' } },
-      { path: '/workbench/me/today', component: { template: '<div />' } },
-      { path: '/workbench/me/clean', component: { template: '<div />' } },
+      { path: '/workbench/staff/today', component: { template: '<div />' } },
+      { path: '/workbench/staff/clean', component: { template: '<div />' } },
     ],
   })
   await router.push(path)
@@ -50,7 +50,7 @@ afterEach(() => {
 
 describe('员工端共用的退出按钮', () => {
   it('队列空时直接退：打员工登出接口，并回 /login 带上当前页', async () => {
-    const { wrapper, router } = await mountButton('/workbench/me/clean')
+    const { wrapper, router } = await mountButton('/workbench/staff/clean')
 
     await wrapper.get('button').trigger('click')
     await flushPromises()
@@ -59,7 +59,7 @@ describe('员工端共用的退出按钮', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0][1].method).toBe('POST')
     expect(router.currentRoute.value.path).toBe('/login')
-    expect(router.currentRoute.value.query.next).toBe('/workbench/me/clean')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/staff/clean')
   })
 
   it('队列里还有照片时先确认，确认之后才真退出', async () => {

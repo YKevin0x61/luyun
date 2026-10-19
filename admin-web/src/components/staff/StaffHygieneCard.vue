@@ -292,7 +292,7 @@ useNudgePull({
           <button
             class="shc-go is-primary"
             type="button"
-            @click="router.push({ path: '/workbench/me/clean', query: { shoot: 'next' } })"
+            @click="router.push({ path: '/workbench/staff/clean', query: { shoot: 'next' } })"
           >
             拍摄
           </button>
@@ -304,7 +304,7 @@ useNudgePull({
           <button
             class="shc-go"
             type="button"
-            @click="router.push({ path: '/workbench/me/clean', query: { group: 'deep' } })"
+            @click="router.push({ path: '/workbench/staff/clean', query: { group: 'deep' } })"
           >去 ›</button>
         </li>
         <li v-if="!fixProgress || fixProgress.total" class="shc-prog">
@@ -314,7 +314,7 @@ useNudgePull({
           <button
             class="shc-go"
             type="button"
-            @click="router.push({ path: '/workbench/me/clean', query: { group: 'fix' } })"
+            @click="router.push({ path: '/workbench/staff/clean', query: { group: 'fix' } })"
           >去 ›</button>
         </li>
       </ul>
@@ -361,7 +361,7 @@ useNudgePull({
         >
           {{ attire.status === 'todo' ? '仪容仪表 ›' : '重拍一张 ›' }}
         </button>
-        <button class="btn" type="button" @click="router.push('/workbench/me/clean')">
+        <button class="btn" type="button" @click="router.push('/workbench/staff/clean')">
           工作卫生 ›
         </button>
       </div>

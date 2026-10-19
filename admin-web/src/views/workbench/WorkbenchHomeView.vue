@@ -128,7 +128,7 @@ async function loadManager() {
 }
 
 /**
- * 员工「我的班」副行下面那两个小入口的落点：`/workbench/me/today?act=leave|swap&date=<营业日>`。
+ * 员工「我的班」副行下面那两个小入口的落点：`/workbench/staff/today?act=leave|swap&date=<营业日>`。
  *
  * 为什么落「今天」页而不是直接写月历：员工登录后的默认落点就是「今天」，从首页点过来
  * 先经过它、再转进月历那一天的操作单（`TodayView` 里只做转发，不在这两页摆第二套表单）。
@@ -136,7 +136,7 @@ async function loadManager() {
  */
 function staffDayLink(act) {
   return {
-    path: '/workbench/me/today',
+    path: '/workbench/staff/today',
     query: { act, date: businessDate.value || '' },
   }
 }

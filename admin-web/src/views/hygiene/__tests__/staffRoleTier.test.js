@@ -5,7 +5,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
 
 /**
- * 员工卫生页（`/workbench/me/clean`）在**不同的管理权限开关**下的差别
+ * 员工卫生页（`/workbench/staff/clean`）在**不同的管理权限开关**下的差别
  * （2026-10-05 审查 F-04 / F-05；同日按用户的裁定从"一个档位"换成"十项开关"）。
  *
  * 同目录其它用例多是"读源码断字符串"的契约式断言。这一条跟 `staffHomeRender` 一样
@@ -129,9 +129,9 @@ async function mountHome(person) {
   setActivePinia(pinia)
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/workbench/me/clean', component: { template: '<div />' } }],
+    routes: [{ path: '/workbench/staff/clean', component: { template: '<div />' } }],
   })
-  await router.push('/workbench/me/clean')
+  await router.push('/workbench/staff/clean')
   await router.isReady()
 
   const wrapper = mount(HygieneHomeView, {

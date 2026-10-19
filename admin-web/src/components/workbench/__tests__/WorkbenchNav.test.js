@@ -13,7 +13,7 @@ const ROUTES = [
   { path: '/workbench/floor/daily', component: { template: '<div>日常</div>' } },
   { path: '/workbench/kitchen/recipe', component: { template: '<div>配方</div>' } },
   { path: '/workbench/kitchen/prep-plan', component: { template: '<div>备货</div>' } },
-  { path: '/workbench/me/today', component: { template: '<div>我的</div>' } },
+  { path: '/workbench/staff/today', component: { template: '<div>我的</div>' } },
 ]
 
 async function mountNav(path, identity) {
@@ -64,12 +64,12 @@ describe('工作台级导航（今天 / 人事 / 卫生 / 后勤 / 我的）', (
   })
 
   it('员工这一档：只有他看得见的几格（「卫生」「我的」在，人事与店长那格不在）', async () => {
-    const wrapper = await mountNav('/workbench/me/today', 'staff')
+    const wrapper = await mountNav('/workbench/staff/today', 'staff')
 
     const hrefs = wrapper.findAll('.wb-nav-item').map((item) => item.attributes('href'))
     expect(hrefs).toEqual([
-      '/workbench', '/workbench/me/clean', '/workbench/kitchen/recipe',
-      '/workbench/kitchen/prep-plan', '/workbench/me/today',
+      '/workbench', '/workbench/staff/clean', '/workbench/kitchen/recipe',
+      '/workbench/kitchen/prep-plan', '/workbench/staff/today',
     ])
     expect(wrapper.find('a[href="/workbench/floor/daily"]').exists()).toBe(false)
   })

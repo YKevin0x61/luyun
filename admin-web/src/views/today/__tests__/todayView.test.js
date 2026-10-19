@@ -146,18 +146,18 @@ describe('员工端「今天」页（原型 A）', () => {
 
   it('is registered as a staff page on both sides', () => {
     // SPA 页面要登记在：vue-router、main.py 的 SPA_PAGE_ROUTES（直连/反代硬导航）。
-    // **票 03 起不再登记进免墙表**：员工页搬进工作台（`/workbench/me/*`）之后，页面壳的
+    // **票 03 起不再登记进免墙表**：员工页搬进工作台（`/workbench/staff/*`）之后，页面壳的
     // 放行根据是「任一会话有效」（`main.py` 的 `_is_workbench_page` + `_has_staff_session`），
     // 不是路径 —— 工作台是「进去要登录」的页面区，服务端行为由
     // `tests/test_auth.py` 的两条请求级用例盯着（未登录 302、带员工会话 200）。
-    expect(router).toMatch(/workbenchStaffPage\('\/workbench\/me\/today', 'today'/)
+    expect(router).toMatch(/workbenchStaffPage\('\/workbench\/staff\/today', 'today'/)
     expect(router).toMatch(/views\/today\/TodayView\.vue/)
     // 票 02：「这是员工页」不再由路由级的 `staffAuth` 布尔表达，而是页面清单里的
     // audience —— 三页共用的工厂 `workbenchStaffPage` 里由 `pageMeta(path)` 带进来
     // （守卫与 App.vue 都按它判）。
     expect(router).toMatch(/function workbenchStaffPage\(path, name, loader\)[\s\S]{0,300}?pageMeta\(path\)/)
     expect(router).not.toMatch(/staffAuth/)
-    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/workbench\/me\/today"/)
+    expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/workbench\/staff\/today"/)
     // 反向：旧的 `/staff` 与 `/staff/` 一条都不在免墙表里（audit 条目 15 的那条裸条目）。
     expect(mainPy).not.toMatch(/HTML_AUTH_EXACT = \{[^}]*"\/staff"/)
     expect(mainPy).not.toMatch(/HTML_AUTH_PREFIXES = \([\s\S]*?"\/staff\/"/)

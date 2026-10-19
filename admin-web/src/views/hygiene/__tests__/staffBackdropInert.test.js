@@ -70,9 +70,9 @@ async function mountHome() {
   setActivePinia(pinia)
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/workbench/me/clean', component: { template: '<div />' } }],
+    routes: [{ path: '/workbench/staff/clean', component: { template: '<div />' } }],
   })
-  await router.push('/workbench/me/clean')
+  await router.push('/workbench/staff/clean')
   await router.isReady()
   const wrapper = mount(HygieneHomeView, {
     global: { plugins: [router, pinia], stubs: { StandardPhotoCachePanel: true } },

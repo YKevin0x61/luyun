@@ -28,8 +28,8 @@
   工作区、日常与专项计划、整改单、红黑榜、卫生数据台账（浏览 / 导出 / 清理）、
   仪容仪表（按人拍，名单由排班给）
 - 排班（店长端工作台「人事」组 `/workbench/hr/calendar`、`/workbench/hr/inbox` 与
-  `/workbench/hr/shifts`，员工端「我的」组 `/workbench/me/today` 与
-  `/workbench/me/month`）：
+  `/workbench/hr/shifts`，员工端「我的」组 `/workbench/staff/today` 与
+  `/workbench/staff/month`）：
   固定班次、工作区默认、轮转周期，由系统展开成月历；店长能点某天的某人**就地改那一天**
   （票 07：换班次 / 改成休 / 只换区，只动这一天、规则一个字不改，改过的日子带青点、
   撤掉覆盖就回到规则）；员工在「今天」页**提请假**（一天或一段，没批之前能撤回），
@@ -46,10 +46,10 @@
   那行小字，点开某一天能看到那天的全店名单**（票 13：各班是谁、在哪个区，以及谁休、谁请假
   —— 读 `/api/scheduling/me/day`，人数与名单都到此为止，同事的班次名不进月历）
   （卫生那块下一张票接到「今天」页上）
-- 员工手机端（工作台「我的」组：`/workbench/me/today`、`/workbench/me/month`、
-  `/workbench/me/clean`，另有 `/register`）：**员工入口是 `/login`** 的员工栏
+- 员工手机端（工作台「我的」组：`/workbench/staff/today`、`/workbench/staff/month`、
+  `/workbench/staff/clean`，另有 `/register`）：**员工入口是 `/login`** 的员工栏
   （一个面板两个 Tab，独立员工登录页早已删除）。旧书签 `/staff/today` 随员工端
-  搬进工作台作废，给员工重发一次 `/login` 即可（登录后落到 `/workbench/me/today`）。
+  搬进工作台作废，给员工重发一次 `/login` 即可（登录后落到 `/workbench/staff/today`）。
   独立员工会话、实时 nudge 刷新、离线重试；卫生那块也在同一套会话下。旧的
   `/staff/*`、`/today`、`/today/month`、`/hygiene/*`、`/scheduling*` 一律删除、不留别名
 - 系统配置页（`/settings`）：POS 凭据、数据库凭据、备份中心、系统更新（版本检测 /

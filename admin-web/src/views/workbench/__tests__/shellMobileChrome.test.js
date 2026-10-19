@@ -137,7 +137,7 @@ function expectMobileRule(source, pattern, label = '') {
 
 const ROUTES = [
   { path: '/workbench', component: { template: '<div>今天</div>' } },
-  { path: '/workbench/me/today', component: { template: '<div>我的</div>' } },
+  { path: '/workbench/staff/today', component: { template: '<div>我的</div>' } },
   { path: '/workbench/hr/calendar', component: { template: '<div>月历</div>' } },
   { path: '/workbench/floor/daily', component: { template: '<div>日常</div>' } },
   { path: '/workbench/kitchen/recipe', component: { template: '<div>配方</div>' } },
@@ -177,7 +177,7 @@ afterEach(() => {
 
 describe('D7：「‹ 后台」对员工是一扇永远关着的门，就不该渲染', () => {
   it('员工这一档没有「‹ 后台」，但「今天」还在（回得去自己的首页）', async () => {
-    const wrapper = await mountShell('/workbench/me/today', 'staff')
+    const wrapper = await mountShell('/workbench/staff/today', 'staff')
 
     expect(wrapper.find('.wb-back').exists()).toBe(false)
     // ③-2：工作台级入口在手机档由底栏那一条承担（顶栏那排 `display: none`）。
@@ -258,7 +258,7 @@ describe('方案 C / B6：手机档顶部只剩一行，目标 ≥44px', () => {
     // 导航搬进 `WorkbenchNav` 之后，`.wb-nav { margin-left: auto }`、「整条下沉一行」
     // 这些仍然挂在外壳的 scoped 样式里：它们要生效，子组件的根节点必须带上外壳的
     // 作用域标记（Vue 就是这么做的）。jsdom 不做布局，所以只断这个机制在。
-    const wrapper = await mountShell('/workbench/me/today', 'super')
+    const wrapper = await mountShell('/workbench/staff/today', 'super')
     const scopeIds = (selector) => wrapper
       .get(selector)
       .element
@@ -355,7 +355,7 @@ describe('多根组件不透传 class：三个外壳都不给退出按钮挂 cla
 describe('D9：员工卫生页那条页内条退化成标题条', () => {
   it('牌子（红色「台」+「工作台」）与第二颗退出都不在了，只留那颗只读胶囊', () => {
     // 品牌与退出归外壳顶栏。页内那条 `‹ 今天` 在 2026-10-05 的卫生页重构里去掉了 ——
-    // 底部工作台底栏的「我的」指向的正是 `/workbench/me/today`，同一个目的地不该有两个
+    // 底部工作台底栏的「我的」指向的正是 `/workbench/staff/today`，同一个目的地不该有两个
     // 入口（PWA 独立窗口那条回程的需求由底栏那一格满足）。
     expect(STAFF_HOME).not.toMatch(/class="hy-brand"/)
     expect(STAFF_HOME).not.toMatch(/<StaffExitButton/)
@@ -420,7 +420,7 @@ describe('内容区搬进壳之后的护栏（票 04）', () => {
       for (const body of bodiesOf(source, '.hygiene-admin .hy-main')) {
         expect(body, `.hy-main 又在自己滚：${body}`).not.toMatch(/overflow/)
       }
-      // 员工端那一页的内容容器同理（`/workbench/me/clean` 的 `.hy-work-main`）：
+      // 员工端那一页的内容容器同理（`/workbench/staff/clean` 的 `.hy-work-main`）：
       // 高度也是 `auto`（`.hygiene-staff` 是 min-height 的 flex 列），滚不动；
       // 留着就是下一个同形状的半条声明。
       for (const body of bodiesOf(source, '.hygiene-work .hy-work-main')) {

@@ -2,7 +2,7 @@
 // 工作台**级**导航（今天 / 人事 / 现场 / 后勤 / 我的）：从一个壳里抽出来，三个壳共用。
 //
 // 为什么会有这个文件（B1 那一条的结构性来龙去脉）：工作台现在是「一个子系统、三套壳」——
-//   - `/workbench`、`/workbench/me/*`、`/workbench/kitchen/*` 套 `WorkbenchLayout`（一条顶栏）；
+//   - `/workbench`、`/workbench/staff/*`、`/workbench/kitchen/*` 套 `WorkbenchLayout`（一条顶栏）；
 //   - `/workbench/hr/*` 套 `SchedulingLayout`（人事自己的窄栏）；
 //   - `/workbench/floor/*` 套 `HygieneAdminLayout`（左侧 238px rail + 内容区横条）。
 // 三套壳各有各的导航，于是**人事 / 现场那 11 页里根本没有一条通往工作台首页「今天」的链接**

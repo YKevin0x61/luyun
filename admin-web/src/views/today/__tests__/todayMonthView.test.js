@@ -183,7 +183,7 @@ describe('员工端「整月」页（票 06）', () => {
   })
 
   it('is registered as a staff page on both sides', () => {
-    expect(router).toMatch(/workbenchStaffPage\('\/workbench\/me\/month', 'today-month'/)
+    expect(router).toMatch(/workbenchStaffPage\('\/workbench\/staff\/month', 'today-month'/)
     expect(router).toMatch(/views\/today\/TodayMonthView\.vue/)
     // 票 02：员工身份来自页面清单的 audience —— 三页共用的工厂 `workbenchStaffPage`
     // 里由 `pageMeta(path)` 带进来，不再是路由级的 `staffAuth` 布尔。

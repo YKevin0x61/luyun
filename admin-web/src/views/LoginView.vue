@@ -20,7 +20,7 @@ import { resolveLoginNext, resolveLoginTab, resolveStaffNext } from '../utils/lo
 
 /** 「无权访问」页（守卫的落点之一）。管理栏登录时 `?next=` 指向员工专属页的话，
  *  落点由 `resolveLoginNext` 返回这里 —— 让守卫去说明「这页是谁的」，而不是把
- *  `?next=` 悄悄丢掉换成 `/`（D4：`/login?next=/workbench/me/month` 原来落到 `/workbench`）。 */
+ *  `?next=` 悄悄丢掉换成 `/`（D4：`/login?next=/workbench/staff/month` 原来落到 `/workbench`）。 */
 const FORBIDDEN_PATH = '/workbench/forbidden'
 
 // 迁移自 public/login.html：登录 / 首次初始化超级管理员 / 已登录三态页面。

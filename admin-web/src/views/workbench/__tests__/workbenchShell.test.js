@@ -42,8 +42,8 @@ const page = (path, template) => ({ path, component: { template }, meta: pageMet
 
 const ROUTES = [
   page('/workbench', '<div>今天</div>'),
-  page('/workbench/me/today', '<div>今天</div>'),
-  page('/workbench/me/month', '<div>整月</div>'),
+  page('/workbench/staff/today', '<div>今天</div>'),
+  page('/workbench/staff/month', '<div>整月</div>'),
   // 店长那几页与清单里一样是 `audience: 'admin'`（`audience` / `standalone` 也由
   // `pageMeta` 从清单取，不再手写一份）。票 05：工作台按组分家，人事 / 现场各有落点。
   // 票 06：首页（`/workbench`）是 `both`。
@@ -186,7 +186,7 @@ afterEach(() => {
 describe('工作台外壳的导航', () => {
   it('员工这一档：今天 / 后勤（配方 + 备货计划）/ 我的 —— 店长那几页点不到', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
-    const { wrapper } = await mountShell('/workbench/me/today')
+    const { wrapper } = await mountShell('/workbench/staff/today')
 
     const items = wrapper.findAll('.wb-nav-item')
     // 票 08：后勤那一格是**一格两门** —— 配方与备货计划各占一半，都在同一格（同一颗
@@ -196,8 +196,8 @@ describe('工作台外壳的导航', () => {
     // 员工那一档：第二格仍是「卫生」（员工端那一格名字没改）。
     expect(items.map((item) => item.text())).toEqual(['今天', '卫生', '选择岗位', '备货计划', '我的'])
     expect(items.map((item) => item.attributes('href'))).toEqual([
-      '/workbench', '/workbench/me/clean', '/workbench/kitchen/recipe', PREP_PLAN_PATH,
-      '/workbench/me/today',
+      '/workbench', '/workbench/staff/clean', '/workbench/kitchen/recipe', PREP_PLAN_PATH,
+      '/workbench/staff/today',
     ])
     expect(wrapper.findAll('.wb-nav-cell.is-multi')).toHaveLength(1)
     // 员工点不到店长那几页（它们在清单里是 admin，导航按身份过滤）。
@@ -229,7 +229,7 @@ describe('工作台外壳的导航', () => {
 
   it('整组都亮：站在「整月」上，「我的」那一格仍是当前项（首页那一格不亮）', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
-    const { wrapper } = await mountShell('/workbench/me/month')
+    const { wrapper } = await mountShell('/workbench/staff/month')
 
     const items = wrapper.findAll('.wb-nav-item')
     const on = items.filter((item) => item.classes().includes('is-on'))
@@ -240,7 +240,7 @@ describe('工作台外壳的导航', () => {
 
   it('点一下真的走到那一格（外壳是路由链接，不是摆设）', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
-    const { wrapper, router } = await mountShell('/workbench/me/month')
+    const { wrapper, router } = await mountShell('/workbench/staff/month')
 
     // 2026-10-05 起员工那一档的顺序是：今天 / 卫生 / 后勤（两门）/ 我的 ——
     // 第二格是「卫生」，后勤从第二格挪到了第三、四格。
@@ -251,7 +251,7 @@ describe('工作台外壳的导航', () => {
   })
 
   it('顶栏挂着身份切换器，显示的是**当前**那一档（「超级管理员」不写成「管理员」）', async () => {
-    const { wrapper } = await mountShell('/workbench/me/today')
+    const { wrapper } = await mountShell('/workbench/staff/today')
 
     const switcher = wrapper.get('.wb-id')
     expect(switcher.text()).toContain('超级管理员')
@@ -265,7 +265,7 @@ describe('工作台外壳的导航', () => {
   })
 
   it('店长的会话挂在员工页上时，顶栏仍是店长那一档（导航不跟着页面走）', async () => {
-    const { wrapper, store } = await mountShell('/workbench/me/today')
+    const { wrapper, store } = await mountShell('/workbench/staff/today')
 
     expect(store.identity).toBe('super')
     expect(wrapper.get('.wb-id-current').text()).toContain('超级管理员')
@@ -283,7 +283,7 @@ describe('工作台外壳的导航', () => {
   })
 
   it('在顶栏切成员工：导航面当场跟着换', async () => {
-    const { wrapper, store } = await mountShell('/workbench/me/today')
+    const { wrapper, store } = await mountShell('/workbench/staff/today')
 
     // 切换器现在**只显示当前身份**（2026-10-05 裁定），另一档收在点开的菜单里：
     // 先点当前这一档，再选菜单里那一项。
@@ -427,7 +427,7 @@ describe('内容区的下 inset（票 03）', () => {
     stubMobileTier()
     const admin = await mountShell('/workbench/floor/daily')
     vi.stubGlobal('fetch', staffOnlyFetch())
-    const staff = await mountShell('/workbench/me/today')
+    const staff = await mountShell('/workbench/staff/today')
 
     expect(insetOf(staff.wrapper)).toBe('57px')
     expect(insetOf(staff.wrapper)).toBe(insetOf(admin.wrapper))
@@ -436,7 +436,7 @@ describe('内容区的下 inset（票 03）', () => {
   it('安全区是可注入的输入：34px → 57 + 34 = 91px', async () => {
     stubMobileTier()
     stubSafeBottom('34px')
-    const { wrapper } = await mountShell('/workbench/me/today')
+    const { wrapper } = await mountShell('/workbench/staff/today')
 
     expect(insetOf(wrapper)).toBe('91px')
   })
@@ -484,7 +484,7 @@ describe('内容区的下 inset（票 03）', () => {
 
   it('三根度量都套在内容容器上，且不外发：`<html>` 与壳根都没有它们', async () => {
     stubMobileTier()
-    const { wrapper } = await mountShell('/workbench/me/today')
+    const { wrapper } = await mountShell('/workbench/staff/today')
     const main = wrapper.get('#workbench-main').element
 
     for (const name of ['--wb-inset-top', '--wb-inset-bottom', '--wb-inset-inline']) {
@@ -585,7 +585,7 @@ describe('内容区的横向与上内边距按组给（票 04）', () => {
   it('我的组：四页各由自己的容器给（今天 / 整月 / 卫生的根是 0，页头自己带），壳给 0', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     stubTiers({ mobile: true, wide: false })
-    const { wrapper } = await mountShell('/workbench/me/today')
+    const { wrapper } = await mountShell('/workbench/staff/today')
 
     expect(insetOf(wrapper, '--wb-inset-top')).toBe('0px')
     expect(insetOf(wrapper, '--wb-inset-inline')).toBe('0px')
@@ -619,7 +619,7 @@ describe('内容区契约的范围：壳外两页不在内容区里（票 07 / A
     const ForbiddenView = (await import('../ForbiddenView.vue')).default
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: ['/workbench/forbidden', '/workbench/me/today', '/login'].map((path) => ({
+      routes: ['/workbench/forbidden', '/workbench/staff/today', '/login'].map((path) => ({
         path, component: { template: '<div />' },
       })),
     })

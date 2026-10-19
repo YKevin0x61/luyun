@@ -275,10 +275,10 @@ describe('管理端专属页不出现在员工可达的面上（票 05 那道门
     // 导航不是空的（身份认不出时它会一格都不渲染，那样下面那条断言会空过）。
     expect(navItemsOf(wrapper)).toEqual([
       '/workbench',
-      '/workbench/me/clean',
+      '/workbench/staff/clean',
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/prep-plan',
-      '/workbench/me/today',
+      '/workbench/staff/today',
     ])
     expect(unreachableEntries(wrapper, IDENTITY_STAFF)).toEqual([])
     wrapper.unmount()
@@ -329,7 +329,7 @@ describe('员工专属页不出现在管理端导航里（同一道门的反向�
     const staffOnly = PAGE_ROUTES.filter((row) => row.audience === 'staff').map((row) => row.path)
     expect(staffOnly.length).toBeGreaterThan(0)
     // 员工端那三页都在里面（它们是「员工专属」这一档的实体）。
-    expect(staffOnly).toContain('/workbench/me/today')
-    expect(staffOnly).toContain('/workbench/me/clean')
+    expect(staffOnly).toContain('/workbench/staff/today')
+    expect(staffOnly).toContain('/workbench/staff/clean')
   })
 })
