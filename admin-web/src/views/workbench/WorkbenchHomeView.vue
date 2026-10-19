@@ -75,8 +75,10 @@ const SHIFT_STATES = {
   moved: { text: '已调整', led: 'warn' },
   none: { text: '未排', led: 'off' },
 }
+// 「上班」那一态在 `todayShift.todayTone` 里用**空串**表示（页面默认色），不是 `shift`；
+// 这里把它归一成 `shift`，否则上班的日子右上角会写「未排」、灯也是灰的。
 function shiftState(tone) {
-  return SHIFT_STATES[tone] || SHIFT_STATES.none
+  return SHIFT_STATES[tone || 'shift'] || SHIFT_STATES.none
 }
 
 const QUICK_LINKS = [
@@ -123,6 +125,20 @@ async function loadManager() {
     || (day.value && day.value.business_date)
     || (inbox.value && inbox.value.today)
     || ''
+}
+
+/**
+ * 员工「我的班」副行下面那两个小入口的落点：`/workbench/me/today?act=leave|swap&date=<营业日>`。
+ *
+ * 为什么落「今天」页而不是直接写月历：员工登录后的默认落点就是「今天」，从首页点过来
+ * 先经过它、再转进月历那一天的操作单（`TodayView` 里只做转发，不在这两页摆第二套表单）。
+ * 日期取服务端营业日 `businessDate`（`/me` 的 `today`），不拿手机上的今天。
+ */
+function staffDayLink(act) {
+  return {
+    path: '/workbench/me/today',
+    query: { act, date: businessDate.value || '' },
+  }
 }
 
 async function loadStaff() {
@@ -271,18 +287,27 @@ useNudgePull({
            这句。身份探针先回、`/me` 后回，从别的页点回「今天」时每次都会闪一下。 -->
       <p v-if="state !== 'ready'" class="wbh-wait">正在读你的班…</p>
       <template v-else>
-      <router-link class="wbh-me" :to="HOME_LINKS.myRequests">
-        <div class="wbh-kh">
-          <span>我的班</span>
-          <!-- 状态不能再写死「在岗」：休 / 请假 / 未排的那天大字写「休」、右上角却亮绿灯，
-               是员工每天第一眼就能看到的错话。tone 与「今天」页那五态同一份口径。 -->
-          <em class="wbh-onsite" :class="'is-' + (summary.me.shift.tone || 'none')">
-            <i class="wbh-led" :class="shiftState(summary.me.shift.tone).led"></i>{{ shiftState(summary.me.shift.tone).text }}
-          </em>
+      <!-- 我的班：卡片本体仍然整块点进「今天」页（测试挂点 `.wbh-me` 保持是那个链接）；
+           副行下面多一行两个小入口，请假 / 换班一次点击直达「今天」页并带上动作与营业日 ——
+           那一页把 `?act=&date=` 转进月历当天的操作单（发起只有那一处表单）。 -->
+      <section class="wbh-me-card">
+        <router-link class="wbh-me" :to="HOME_LINKS.myRequests">
+          <div class="wbh-kh">
+            <span>我的班</span>
+            <!-- 状态不能再写死「在岗」：休 / 请假 / 未排的那天大字写「休」、右上角却亮绿灯，
+                 是员工每天第一眼就能看到的错话。tone 与「今天」页那五态同一份口径。 -->
+            <em class="wbh-onsite" :class="'is-' + (summary.me.shift.tone || 'shift')">
+              <i class="wbh-led" :class="shiftState(summary.me.shift.tone).led"></i>{{ shiftState(summary.me.shift.tone).text }}
+            </em>
+          </div>
+          <b class="wbh-shift-big">{{ summary.me.shift.headline }}</b>
+          <p class="wbh-sub">{{ summary.me.shift.subline }}</p>
+        </router-link>
+        <div class="wbh-me-acts">
+          <router-link class="wbh-me-act" :to="staffDayLink('leave')">请假</router-link>
+          <router-link class="wbh-me-act" :to="staffDayLink('swap')">换班</router-link>
         </div>
-        <b class="wbh-shift-big">{{ summary.me.shift.headline }}</b>
-        <p class="wbh-sub">{{ summary.me.shift.subline }}</p>
-      </router-link>
+      </section>
 
       <StaffHygieneCard />
 
@@ -454,18 +479,37 @@ useNudgePull({
 }
 .wbh-quick a:nth-child(odd) { border-right: 1px solid var(--wb-ink-a08); }
 
-/* 员工档 */
-.wbh-me {
-  display: flex; flex-direction: column; gap: 10px;
-  padding: 14px 16px 15px;
+/* 员工档：卡片外壳（底 / 边 / 阴影 / 左侧语义条）+ 里面的班次链接 + 一行直达入口。
+   外壳不是链接：请假 / 换班 是两张碰得到的入口，链接不能套链接。 */
+.wbh-me-card {
   background: var(--surface-1);
   border: 1px solid var(--line);
   border-radius: var(--r-2);
   box-shadow: var(--hy-shadow-sm);
-  text-decoration: none;
-  position: relative; overflow: hidden;
+  overflow: hidden;
+  position: relative;
 }
-.wbh-me::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--action); }
+.wbh-me-card::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--action); }
+.wbh-me {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 16px 12px;
+  text-decoration: none;
+}
+.wbh-me-acts {
+  display: flex;
+  border-top: 1px solid var(--wb-ink-a08);
+}
+.wbh-me-act {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  font-size: 11.5px;
+  color: var(--action);
+  text-decoration: none;
+}
+.wbh-me-act + .wbh-me-act { border-left: 1px solid var(--wb-ink-a08); }
 .wbh-onsite { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; font-style: normal; font-size: 9.5px; color: var(--ok); letter-spacing: .1em; }
 .wbh-shift-big { font: 600 30px/1.1 var(--font-sans); letter-spacing: .02em; color: var(--ink); }
 .wbh-sub { margin: 0; font-size: 11.5px; color: var(--ink-dim); }

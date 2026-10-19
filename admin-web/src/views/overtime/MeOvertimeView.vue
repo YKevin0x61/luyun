@@ -375,6 +375,9 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
               +
             </button>
             <span class="oUnit">小时</span>
+            <!-- 读数后面补一句「加班 / 补钟」：这一页名字就叫「加班与补钟」，光看正负号
+                 不够直白。0 时既不是加班也不是补钟，写「—」。 -->
+            <span class="oKind" :class="{ 'is-overtime': halfHours > 0, 'is-clock': halfHours < 0 }">{{ halfHours > 0 ? '加班' : halfHours < 0 ? '补钟' : '—' }}</span>
           </div>
         </div>
 
@@ -519,6 +522,24 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
 .oUnit {
   font-size: 12px;
   color: var(--hy-mute, #888);
+}
+/* 读数后面的「加班 / 补钟」：小标签，颜色跟正负号同一套语义（加班 action、补钟 info）。 */
+.oKind {
+  margin-left: 2px;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+}
+.oKind.is-overtime {
+  color: var(--action);
+  border-color: var(--action);
+}
+.oKind.is-clock {
+  color: var(--info);
+  border-color: var(--info);
 }
 .oInput {
   flex: 1;

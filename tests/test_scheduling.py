@@ -1837,6 +1837,43 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             LAST_DAY,
         )
 
+    async def test_set_override_refuses_a_day_with_an_approved_leave(self):
+        """那天有已批的假就不许改班 / 改成休：与批量端点的 `leave_approved` 同一判据。
+
+        请假批下来就是一条 `kind=leave` 的覆盖记录，覆盖记录本身就是那条假；再写一次
+        会把 `kind` 换成 `manual`，审批记录与排班事实就对不上了。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+        request = await self.store.submit_leave(employee["id"], "2026-09-25")
+        await self.store.approve_request(request["id"])
+        before = (await self.store.week_grid("2026-09-24"))["employees"][0]["cells"][
+            "2026-09-25"
+        ]
+        self.assertEqual((before["scheduled"], before["shift_id"], before["leave"]), (True, None, True))
+
+        for payload in ({"shift_id": night}, {"is_rest": True}):
+            with self.subTest(payload=payload):
+                with self.assertRaises(SchedulingError) as caught:
+                    await self.store.set_override(employee["id"], "2026-09-25", **payload)
+                self.assertEqual(caught.exception.code, "leave_approved")
+
+        # 一个字节都没写：那天仍是批过的假，覆盖记录没被换成 manual / 班次。
+        after = (await self.store.week_grid("2026-09-24"))["employees"][0]["cells"][
+            "2026-09-25"
+        ]
+        self.assertEqual(after, before)
+        rows = [
+            row for row in await self._rows(employee["id"]) if row["business_date"] == "2026-09-25"
+        ]
+        self.assertEqual([(row["shift_id"], row["source"]) for row in rows], [(None, "override")])
+
+        # 闸只挡那一天：别的日子照常能改。
+        saved = await self.store.set_override(employee["id"], "2026-09-26", shift_id=night)
+        self.assertEqual(saved["shift_id"], night)
+
     async def test_override_validates_its_own_payload(self):
         """「改成休」不能顺带带班次或区；改班次必须给班次；人、班次、区都得存在。"""
         employee = await self._employee()

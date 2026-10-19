@@ -1165,6 +1165,12 @@ class SchedulingStore:
 
         校验在锁外（都是读）；写覆盖记录与写结果行在**一次**写锁、一次提交里。
 
+        **那天有已批的假就不写**（2026-10-18）：请假批下来就是一条 `kind=leave` 的覆盖
+        记录，覆盖记录本身就是那条假；再写一次会把它的 `kind` 换成 `manual`，审批记录与
+        排班事实就对不上了。判据与批量端点逐字相同 —— ``set_overrides_batch`` 的
+        ``leave_approved`` 用的也是 ``_leave_ids([employee_id], day)``：命中就抛
+        ``SchedulingError("leave_approved", ...)``，一个字节都不写。先撤掉那条假，再改班。
+
         **今天与窗口末日只在这里读一次**：两次各读一次钟，请求正好跨过 06:00 的切日点时
         「超出可补记窗口」和「还没排到」会按两个不同的营业日判（`beyond_window` 那句文案
         里的日期也会跟刚判过的那个不一样）。
@@ -1172,6 +1178,9 @@ class SchedulingStore:
         employee_id, day, shift, zone = await self._resolve_override(
             employee_id, business_date, is_rest, shift_id, zone_id
         )
+        leave_ids = await self._leave_ids([employee_id], day)
+        if employee_id in leave_ids:
+            raise SchedulingError("leave_approved", "leave_approved")
         await self._apply_override(employee_id, day, shift, zone)
         return {
             "employee_id": employee_id,

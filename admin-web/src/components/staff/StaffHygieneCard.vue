@@ -22,7 +22,7 @@
  * 文案、分支与色调逐字沿用原块（那里的注释还在 TodayView 的历史里）：日常交齐 / 还差 N 项 /
  * 过了钟点，仪容仪表的五种状态各自一色。改这里等于改员工每天看的那句话。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import HygieneLiveCamera from '../hygiene/HygieneLiveCamera.vue'
 import HygieneStandardOverlay from '../hygiene/HygieneStandardOverlay.vue'
@@ -41,9 +41,27 @@ const items = ref([])
 const clocks = ref(null)
 const shift = ref(null)
 const zoneName = ref('')
-// 逾期是「现在几点」跟本班钟点比出来的：进页面那一刻取一次，别在 computed 里反复取时间
-// （那样每次渲染结果都可能不一样）。
+// 逾期是「现在几点」跟本班钟点比出来的：别在 computed 里反复取时间（那样每次渲染结果都
+// 可能不一样），但也不能只在加载那一刻取一次 —— 那样过点之后灯和那句「已经过了本班的
+// 钟点」要等下一次 nudge 才变红，员工盯着屏幕也看不到它自己变色。30 秒 tick 一次，
+// 口径照 `HygieneHomeView` 的 `tickClock`（量化到分钟，秒级抖动不会白重算）。
 const now = ref(0)
+let clockTimer = null
+
+function tickClock() {
+  now.value = Math.floor(Date.now() / 60_000) * 60_000
+}
+
+function startClock() {
+  if (clockTimer) window.clearInterval(clockTimer)
+  tickClock()
+  clockTimer = window.setInterval(tickClock, 30_000)
+}
+
+function stopClock() {
+  if (clockTimer) window.clearInterval(clockTimer)
+  clockTimer = null
+}
 
 // 仪容仪表（票 12）：按**人**拍，今天排到班次才要拍 —— 休假的与没排到的连这一行都不显示
 // （`required` 由排班给，不是「谁有账号」）。它不属于工作区那三类日常，所以是这块里
@@ -110,11 +128,11 @@ const totalWork = computed(() => (
   + (deepProgress.value ? deepProgress.value.total : 0)
   + (fixProgress.value ? fixProgress.value.total : 0)
 ))
-/** 面板头右栏那一句（合计只报这一处）：今天没有 / 已交齐 / 还差 N 项（+ 截止）。 */
-const headText = computed(() => {
-  if (!totalWork.value) return '今天没有要交的'
-  return remainingTotal.value ? `还差 ${remainingTotal.value} 项` : '已交齐'
-})
+/** 进度行末尾那句合计（面板头只报截止）：还差 N 项 / 已交齐。
+ *  放在进度行里，是因为首页另有一格「我的待办 N」—— 同一件事在面板头再说一遍是重复。 */
+const remainingText = computed(() => (
+  remainingTotal.value ? `还差 ${remainingTotal.value} 项` : '已交齐'
+))
 async function loadExtras() {
   const settle = (promise) => promise.then((data) => data.items || [], () => null)
   const [deep, fix] = await Promise.all([
@@ -177,7 +195,7 @@ async function load(quiet = false) {
     clocks.value = me.daily_clocks || null
     shift.value = employee.shift || null
     zoneName.value = employee.zone_name || ''
-    now.value = Date.now()
+    tickClock()
     state.value = 'ready'
     void loadExtras()
   } catch (err) {
@@ -223,7 +241,14 @@ function onAttireCaptured(blob) {
   }
 }
 
-onMounted(() => { void load() })
+onMounted(() => {
+  startClock()
+  void load()
+})
+
+// 30 秒 tick 的定时器必须跟着组件走：首页切走 / 换身份时这块会被卸载，留着就是一条
+// 没人用的 interval。
+onBeforeUnmount(stopClock)
 
 // 实时（nudge + pull）：店长改了排班、自己交了一项 —— 这块跟着重读。nudge 不带数据，
 // 收到就重取这三条轻量 GET。断线兜底由 `useConnectionFallback` 挂载时 pull 一次。
@@ -240,8 +265,9 @@ useNudgePull({
     <div class="shc-hd">
       <i class="led" :class="shcLed" aria-hidden="true"></i>
       <h2>今天要交</h2>
-      <!-- 右栏只报一处合计：还差几项 + 本班截止（首页/今天页都不再各写一行说明）。 -->
-      <em v-if="state === 'ready'" class="shc-due">{{ headText }}<template v-if="due && totalWork"> · {{ due }} 前交</template></em>
+      <!-- 面板头只报截止：合计已经在三行进度里报过，首页另有一格「我的待办 N」——
+           同一件事不再各写一遍。 -->
+      <em v-if="state === 'ready' && due && totalWork" class="shc-due">{{ due }} 前交</em>
     </div>
 
     <p v-if="state === 'loading'" class="shc-sub">正在读今天的日常…</p>
@@ -255,18 +281,20 @@ useNudgePull({
 
     <div v-else class="shc-body">
       <!-- 三行进度（B 案 v3）：日常 / 专项 / 整改，一行一件事；
-           首行是主 CTA「继续拍」，其余行尾「去」。 -->
+           合计（还差 N 项 / 已交齐）并进首行末尾，首行是主 CTA「拍摄」，其余行尾「去」
+           （与卫生页队列上那颗「拍摄」同名，同一件事不换三种叫法）。 -->
       <ul class="shc-progress">
         <li v-if="status.total" class="shc-prog">
           <i class="led" :class="status.remaining ? 'warn' : 'ok'" aria-hidden="true"></i>
           <span class="shc-prog-label">日常 </span>
           <b class="shc-prog-num">{{ progressText(status) }}</b>
+          <span v-if="totalWork" class="shc-prog-remain">{{ remainingText }}</span>
           <button
             class="shc-go is-primary"
             type="button"
             @click="router.push({ path: '/workbench/me/clean', query: { shoot: 'next' } })"
           >
-            继续拍
+            拍摄
           </button>
         </li>
         <li v-if="!deepProgress || deepProgress.total" class="shc-prog">
@@ -373,8 +401,8 @@ useNudgePull({
 
 <style scoped>
 /* B 案 v3「三行进度」（2026-10-17 版式审查后）：这一块挂在首页/今天页的员工视角上。
-   骨架 = 面板头（6px LED + 标题 + 当天工作区）→ 三行进度（日常 / 专项 / 整改，
-   行尾「继续拍」/「去」）→ 一行合计（还差 N 项）→ 仪容仪表行 → 动作行。
+   骨架 = 面板头（6px LED + 标题 + 本班截止）→ 三行进度（日常 / 专项 / 整改；
+   首行主 CTA「拍摄」，其余「去」；合计「还差 N 项」并进首行末尾）→ 仪容仪表行 → 动作行。
    全部走语义令牌；卡片 = 1px 线 + --hy-shadow-sm，没有渐变光晕。 */
 .shc {
   background: var(--surface-1);
@@ -457,6 +485,14 @@ useNudgePull({
   font-size: 16px;
   font-weight: 500;
   color: var(--ink);
+}
+/* 合计并进首行末尾（面板头只报截止）：与 16px 读数同一行，用 mono 小字。 */
+.shc-prog-remain {
+  margin-left: 6px;
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 9.5px;
+  color: var(--ink-faint);
+  white-space: nowrap;
 }
 
 /* 行尾动作：主 CTA ≥48px 方角；其余行是次按钮。 */

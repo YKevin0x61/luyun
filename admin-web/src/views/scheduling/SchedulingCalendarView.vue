@@ -9,7 +9,7 @@
 // （点当天卡里的一个人就地改那一天）、票 08 加底下那根「请假待办」的条
 // （批假在 `/workbench/hr/inbox` 那一页：这一页只管排班怎么铺）；班次表的增删改在票 11。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { api } from '../../api/client'
@@ -44,6 +44,44 @@ import {
 
 
 const router = useRouter()
+const route = useRoute()
+
+// ── URL 里的视角 / 月份 / 周起点（v4）────────────────────────────────────────
+// 换页 / 翻月 / 翻周都写进 query（`router.replace`，不进历史）；`onMounted` 读回，
+// 缺省落在「今天所在的月 + 月历视角」。只同步这三个键，别把页面其它 query 扔掉。
+const VIEW_KEYS = ['month', 'week', 'roster']
+const QUERY_MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
+const QUERY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+let queryReady = false
+
+function queryText(value) {
+  if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : ''
+  return typeof value === 'string' ? value : ''
+}
+
+function currentQuerySnapshot() {
+  return {
+    view: VIEW_KEYS.includes(panel.value) ? panel.value : 'month',
+    month: monthValue.value || currentMonthValue(),
+    // 周起点只在周表视角下有意义；其它视角不写，免得 URL 带着一个看不见的日期。
+    start: panel.value === 'week' && weekStart.value ? weekStart.value : '',
+  }
+}
+
+/** 把当前视角 / 月份 / 周起点同步到 URL（replace，不产生历史）。 */
+function syncQuery() {
+  if (!queryReady) return
+  const next = currentQuerySnapshot()
+  const query = route.query
+  const same = queryText(query.view) === next.view
+    && queryText(query.month) === next.month
+    && queryText(query.start) === next.start
+  if (same) return
+  const merged = { ...query, view: next.view, month: next.month }
+  if (next.start) merged.start = next.start
+  else delete merged.start
+  void router.replace({ query: merged })
+}
 
 // 周一开头（2026-09-30 全模块从周日开头改过来）：服务端 `_month_frame` 的 `lead` 与
 // 员工端月历的 `MONTH_HEADS` 是同一套，三个地方必须一起动，否则同一页两个周框。
@@ -203,7 +241,10 @@ async function loadCalendar(month, silent = false) {
     if (seq !== calendarSeq) return
     errorText.value = err.message || '排班月历加载失败'
   } finally {
-    if (seq === calendarSeq && !silent) loading.value = false
+    if (seq === calendarSeq) {
+      if (!silent) loading.value = false
+      syncQuery()
+    }
   }
 }
 
@@ -306,6 +347,19 @@ const gapDays = computed(() => {
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .slice(0, 6)
     .map(([date, count]) => ({ date, count }))
+})
+
+/** 本月空档：当月**所有班次都 0 人**的日子（月历窗口之外的不算 —— 那叫「还没铺到」）。 */
+const monthEmptyDays = computed(() => {
+  const data = calendar.value
+  if (!data || !Array.isArray(data.days)) return []
+  const shiftList = shifts.value
+  if (!shiftList.length) return []
+  const windowEnd = data.window_end || '9999-12-31'
+  return data.days.filter((day) => {
+    if (!day || !day.business_date || day.business_date > windowEnd) return false
+    return shiftList.every((shift) => !(day.counts && day.counts[String(shift.id)]))
+  })
 })
 
 /** 名单卡上的规则摘要：当前这一周的 7 格（周一起），跟周表同宽。
@@ -444,6 +498,7 @@ async function loadWeek(start) {
   } catch (err) {
     weekError.value = err.message || '周表读不出来'
   }
+  syncQuery()
 }
 
 const weekDays = computed(() => (week.value && week.value.days) || [])
@@ -873,24 +928,68 @@ function sayResult(result, cells, action) {
   sayNotice(text, details)
 }
 
-/** 点一格 = 立刻用当前笔写这一格（票 14 修订口径 2）：不选区、不点「应用」，一步。
- *
- *  会被跳过的那种格子**不发请求**：超 30 天、已批的假（词表与回执同一套 `PICK_SKIP_TEXT`）。
- *  整片刷的时候跳过由服务端回执点名（它才是权威），这里只是省掉一次注定被跳过的往返。 */
-async function paintCell(employee, day) {
-  if (pickBusy.value) return
-  lastCellText.value =
-    `周${WEEK_HEADS[day.weekday]} · ${employee.name} ${weekCellText(employee, day)}` +
-    `${weekCellHalf(employee, day) ? '半' : ''}`
+/** 连点不丢格：上一笔还在写时，点到的格子进队列，等这一笔落库后再按点击顺序写。
+ *  同一格重复点只留最后一次（用户要的是最后那个班次）；上限 20，超了只提示、不排队。
+ *  **不做乐观更新**：格子的样子仍以服务端回执 + 重读为准。 */
+const PENDING_PAINT_LIMIT = 20
+const pendingPaints = ref([]) // [{ key, employee, day, action, options }]
+let drainingPaints = false
+
+function queuePaint(employee, day, action, options) {
+  const key = `${employee.id}|${day.business_date}`
+  const rest = pendingPaints.value.filter((item) => item.key !== key)
+  if (rest.length >= PENDING_PAINT_LIMIT) {
+    sayNotice('点太快了，等这一笔写完', [], true)
+    return
+  }
+  rest.push({ key, employee, day, action, options })
+  pendingPaints.value = rest
+}
+
+/** 按序把队列里的格子写完：每写完一格，`runPaint` 会再回来 drain 一次。 */
+async function drainPendingPaints() {
+  if (drainingPaints || pickBusy.value) return
+  drainingPaints = true
+  try {
+    while (pendingPaints.value.length && !pickBusy.value && !pastConfirm.value) {
+      const next = pendingPaints.value[0]
+      pendingPaints.value = pendingPaints.value.slice(1)
+      await executePaint(next.employee, next.day, next.action, next.options)
+      // 队列里的格子也可能是过去的日子：确认框先处理，余下的等下一笔完成再继续。
+      if (pastConfirm.value) break
+    }
+  } finally {
+    drainingPaints = false
+  }
+}
+
+/** 真写一格（paintCell 与队列共用）：跳过预判 → requestPaint。 */
+async function executePaint(employee, day, action, options) {
   const cells = [{ employeeId: employee.id, date: day.business_date }]
-  const action = penAction()
-  const options = penOptions()
   const [skip] = predictSkips(cells, skipContext(action))
   if (skip) {
     sayNotice(`跳过：${skipText([skip])}`)
     return
   }
   await requestPaint(action, options, cells)
+}
+
+/** 点一格 = 立刻用当前笔写这一格（票 14 修订口径 2）：不选区、不点「应用」，一步。
+ *
+ *  会被跳过的那种格子**不发请求**：超 30 天、已批的假（词表与回执同一套 `PICK_SKIP_TEXT`）。
+ *  整片刷的时候跳过由服务端回执点名（它才是权威），这里只是省掉一次注定被跳过的往返。
+ *  **上一笔还在写时不再静默丢弃**：进队列，写完这一笔按顺序补（见上面 `queuePaint`）。 */
+async function paintCell(employee, day) {
+  lastCellText.value =
+    `周${WEEK_HEADS[day.weekday]} · ${employee.name} ${weekCellText(employee, day)}` +
+    `${weekCellHalf(employee, day) ? '半' : ''}`
+  const action = penAction()
+  const options = penOptions()
+  if (pickBusy.value) {
+    queuePaint(employee, day, action, options)
+    return
+  }
+  await executePaint(employee, day, action, options)
 }
 
 /** 选区那一行的「刷」：把当前笔整片写下去（选区唯一的存在理由）。 */
@@ -962,6 +1061,7 @@ async function runPaint(action, options, cells) {
     sayNotice(err.message || '这一笔没写上去', [], true)
   } finally {
     pickBusy.value = false
+    void drainPendingPaints()
   }
 }
 
@@ -972,34 +1072,52 @@ async function undoLast() {
   pickBusy.value = true
   let undone = 0
   let kept = 0
+  let processed = 0
   const failed = []
-  for (const step of undo.plan) {
-    if (step.kind === 'keep') {
-      // 那一格原本是**批出来的假**：覆盖行的 kind=leave 不是这两条接口写得回去的，
-      // 如实说「撤不回来」，不拿一个「休」把它盖掉。
-      kept += 1
-      continue
+  const total = undo.plan.length
+  const UNDO_BATCH = 5
+  sayNotice(`撤销中 0/${total}`)
+  try {
+    // 每批 5 格并发（原来逐格串行，19 格要等 19 个来回）；批与批之间仍按顺序。
+    for (let start = 0; start < undo.plan.length; start += UNDO_BATCH) {
+      const batch = undo.plan.slice(start, start + UNDO_BATCH)
+      await Promise.all(batch.map(async (step) => {
+        if (step.kind === 'keep') {
+          // 那一格原本是**批出来的假**：覆盖行的 kind=leave 不是这两条接口写得回去的，
+          // 如实说「撤不回来」，不拿一个「休」把它盖掉。
+          kept += 1
+          return
+        }
+        try {
+          if (step.kind === 'clear') {
+            await api.delete(`/api/scheduling/overrides/${step.employeeId}/${step.date}`)
+          } else {
+            await api.put(`/api/scheduling/overrides/${step.employeeId}/${step.date}`, step.payload)
+          }
+          undone += 1
+        } catch (err) {
+          failed.push(step)
+        }
+      }))
+      processed += batch.length
+      if (processed < total) sayNotice(`撤销中 ${processed}/${total}`)
     }
-    try {
-      if (step.kind === 'clear') {
-        await api.delete(`/api/scheduling/overrides/${step.employeeId}/${step.date}`)
-      } else {
-        await api.put(`/api/scheduling/overrides/${step.employeeId}/${step.date}`, step.payload)
-      }
-      undone += 1
-    } catch (err) {
-      failed.push(step)
-    }
+    // 只留最近一批：撤过就没了（内存级，刷新或换设备也不在）。
+    pickUndo.value = null
+    sayNotice(`撤销中 ${total}/${total}`)
+    await loadWeek(week.value ? week.value.start : weekStart.value)
+    await refreshMonthCounts()
+  } finally {
+    pickBusy.value = false
+    void drainPendingPaints()
   }
-  // 只留最近一批：撤过就没了（内存级，刷新或换设备也不在）。
-  pickUndo.value = null
-  await loadWeek(week.value ? week.value.start : weekStart.value)
-  await refreshMonthCounts()
-  pickBusy.value = false
   const details = []
-  if (failed.length) details.push(`有 ${failed.length} 格没撤回来（超出可补记窗口的日子还是撤不了）`)
+  // 失败逐格点名收进「看全部」（不是只报一个总数）。
+  if (failed.length) {
+    details.push(`没撤回来：${failed.map((step) => `${employeeName(step.employeeId)} ${shortDate(step.date)}`).join('、')}`)
+  }
   if (kept) details.push(`有 ${kept} 格原本是批过的假，撤不回原样`)
-  sayNotice(`已撤回 ${undone} 格`, details, failed.length > 0)
+  sayNotice(`已撤销 ${undone} 格`, details, failed.length > 0)
 }
 
 /** 单日覆盖（票 07）写完之后，月历那一份的人数跟着变。 */
@@ -1284,9 +1402,21 @@ async function undoOverride() {
 }
 
 onMounted(async () => {
-  monthValue.value = currentMonthValue()
-  await loadCalendar(monthValue.value)
+  // 读回 URL（`?view=week&month=2026-10&start=2026-10-12`），缺省是「今天所在的月 + 月历」。
+  const query = route.query
+  const rawMonth = queryText(query.month)
+  const wantMonth = QUERY_MONTH_RE.test(rawMonth) ? rawMonth : currentMonthValue()
+  const rawView = queryText(query.view)
+  const wantView = VIEW_KEYS.includes(rawView) ? rawView : 'month'
+  const rawStart = queryText(query.start)
+  if (QUERY_DATE_RE.test(rawStart)) weekStart.value = rawStart
+  monthValue.value = wantMonth
+  await loadCalendar(wantMonth)
+  await openPanel(wantView)
   await refreshNotes()
+  // 首屏把缺省值也写回 URL（replace，不产生历史），刷新后落在同一屏。
+  queryReady = true
+  syncQuery()
 })
 
 // 实时（票 10 收尾）：员工提了申请、撤回了、或者改动了排班 —— 月历、待批角标与底下
@@ -1390,7 +1520,7 @@ useNudgePull({
                   v-for="item in cellCounts(day)"
                   :key="item.id"
                   class="cItem"
-                  :class="item.tone"
+                  :class="[item.tone, { 'is-empty': !item.count }]"
                 ><i class="cBar"></i>{{ item.count }}</span>
               </span>
               <!-- 待批角标（spec US 11）：这天有等着批的申请。票 07 定标记时特意把琥珀留给
@@ -1426,6 +1556,24 @@ useNudgePull({
                     <button type="button" class="gGapRow" @click="pickDay(gap.date)">
                       <b>{{ formatDayLabel(gap.date) }}</b>
                       <span class="gGapN">缺 {{ gap.count }} 人</span>
+                      <span class="gGapGo">›</span>
+                    </button>
+                  </li>
+                </ul>
+              </div>
+
+              <!-- 本月空档：当月所有班次都 0 人的日子（窗口之外的不算）。也是段，不是面板。 -->
+              <div class="gGap gGap--empty">
+                <div class="gGap-hd">
+                  <span>本月空档 · {{ monthEmptyDays.length }} 天</span>
+                  <em>当天所有班次都 0 人 · 点一天看名单</em>
+                </div>
+                <p v-if="!monthEmptyDays.length" class="gGap-empty">这个月每天都在排人。</p>
+                <ul v-else class="gGapList gGapList--scroll">
+                  <li v-for="day in monthEmptyDays" :key="`empty-${day.business_date}`">
+                    <button type="button" class="gGapRow" @click="pickDay(day.business_date)">
+                      <b>{{ formatDayLabel(day.business_date) }}</b>
+                      <span class="gGapN">0 人</span>
                       <span class="gGapGo">›</span>
                     </button>
                   </li>
@@ -1609,6 +1757,11 @@ useNudgePull({
               <i class="gLed sig"></i>
               <h2>周表</h2>
               <span class="gPanel-hint">{{ weekRangeLabel || '本周' }}</span>
+              <div class="gNav gNav--panel gNav--week">
+                <button class="gBtn" type="button" @click="loadWeek(shiftWeek(weekStart, -1))">‹ 上周</button>
+                <button class="gBtn" type="button" @click="loadWeek(mondayOf(today))">本周</button>
+                <button class="gBtn" type="button" @click="loadWeek(shiftWeek(weekStart, 1))">下周 ›</button>
+              </div>
             </div>
           <div
         v-if="panel === 'week'"
@@ -2090,6 +2243,7 @@ useNudgePull({
 .gGap-hd em { margin-left: auto; font-style: normal; font-family: var(--font-mono); font-size: 9px; color: var(--ink-faint); }
 .gGap-empty { margin: 0; padding: 6px 14px 12px; font-size: 10.5px; color: var(--ink-faint); }
 .gGapList { list-style: none; margin: 0; padding: 0 0 8px; }
+.gGapList--scroll { max-height: 180px; overflow-y: auto; }
 .gGapRow {
   display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center;
   gap: 10px; width: 100%; min-height: var(--tap); padding: 4px 14px;
@@ -2124,6 +2278,9 @@ useNudgePull({
   font-family: var(--font-mono); font-size: 10px; line-height: 1; color: inherit;
 }
 .gB-d .cBar { width: 3px; height: 10px; border-radius: 1px; background: currentColor; flex: none; }
+/* 0 人的班次段：灰条 + 淡字（不是「有一个 0」那么醒目的数字）。 */
+.gB-d .cItem.is-empty { color: var(--ink-faint); opacity: .55; }
+.gB-d .cItem.is-empty .cBar { background: var(--line-strong); }
 .gB-d.today { border-color: var(--action); background: var(--action-soft); }
 .gB-d.today .n { color: var(--action); font-weight: 700; }
 /* 待批角标（spec US 11）：这天有等着批的申请。琥珀留给「待处理」、青点留给「这天被
@@ -2249,7 +2406,8 @@ useNudgePull({
 .gBtn {
   font: inherit; font-family: var(--font-sans); font-size: 10.5px; color: var(--ink-dim);
   background: var(--surface-1); border: 1px solid var(--line-strong);
-  border-radius: var(--r-1); padding: 6px 10px; cursor: pointer;
+  border-radius: var(--r-1); padding: 6px 12px; min-height: var(--tap);
+  cursor: pointer;
 }
 .gBtn:disabled { opacity: .45; cursor: default; }
 .gBtn.ghost { color: var(--ink-faint); }

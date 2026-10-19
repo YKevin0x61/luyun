@@ -45,6 +45,14 @@ function backoffDelay(attempt) {
 
 export const useImageUploadQueueStore = defineStore('imageUploadQueue', () => {
   const tasks = ref([])
+  // 「拍完先存着、等员工点提交才放行」的草稿（2026-10-18）：拍照预览那一屏的照片
+  // 必须**先落进 IndexedDB**，否则被叫走/锁屏/切后台就丢了。它们不进 `tasks`，
+  // 所以上传面板、待办隐藏（`activeTasks`）与计数都不受影响；`release()` 之后
+  // 才变成正常的排队任务。
+  //
+  // 落盘时**不记状态**（`serializeTask` 只存数据）：刷新/重新打开页面时
+  // `restoreDrafts()` 会把它们当普通排队任务捞回来续传 —— 这正是"不丢"的兜底。
+  const heldTasks = ref([])
   const activeUploads = ref(0)
   const successHandlers = new Map()
   const errorHandlers = new Map()
@@ -117,6 +125,10 @@ export const useImageUploadQueueStore = defineStore('imageUploadQueue', () => {
 
   function findTask(taskId) {
     return tasks.value.find((task) => task.id === taskId) || null
+  }
+
+  function findHeld(taskId) {
+    return heldTasks.value.find((task) => task.id === taskId) || null
   }
 
   /** 等待退避的任务不能被 pump 立刻捞走，否则退避等于没有。 */
@@ -234,6 +246,8 @@ export const useImageUploadQueueStore = defineStore('imageUploadQueue', () => {
     onError = null,
     pendingKey = '',
     autoRetry = true,
+    // true = 先只落草稿、不开始上传（拍照预览那一屏用）；点「提交」时再 release()。
+    hold = false,
   }) {
     if (!path || !formData) {
       throw new Error('上传任务缺少接口地址或图片数据')
@@ -251,19 +265,37 @@ export const useImageUploadQueueStore = defineStore('imageUploadQueue', () => {
       pendingKey: pendingKey || '',
       // false = 这个接口不是幂等的，失败只允许人工重试（见 shouldAutoRetry）。
       autoRetry: autoRetry !== false,
-      status: 'queued',
+      status: hold ? 'held' : 'queued',
       percent: 0,
       error: '',
       attempt: 0,
       retryAt: 0,
       createdAt: Date.now(),
     }
-    tasks.value.push(task)
+    if (hold) {
+      heldTasks.value.push(task)
+    } else {
+      tasks.value.push(task)
+    }
     if (typeof onSuccess === 'function') successHandlers.set(task.id, onSuccess)
     if (typeof onError === 'function') errorHandlers.set(task.id, onError)
+    // 草稿也立刻落盘：这一条就是"被叫走也不丢"的那份。
     persist(task)
-    pump()
+    if (!hold) pump()
     return task.id
+  }
+
+  /** 把「拍完先存的草稿」放行成真正可上传的任务（预览页点「提交待验收」）。
+   *  已经放行/正在传的 id 当成成功（重复点提交不会排第二份）；真没了才返回 false。 */
+  function release(taskId) {
+    const held = findHeld(taskId)
+    if (!held) return Boolean(findTask(taskId))
+    heldTasks.value = heldTasks.value.filter((item) => item.id !== taskId)
+    held.status = 'queued'
+    held.retryAt = 0
+    tasks.value.push(held)
+    pump()
+    return true
   }
 
   function retry(taskId) {
@@ -279,6 +311,16 @@ export const useImageUploadQueueStore = defineStore('imageUploadQueue', () => {
   }
 
   function remove(taskId) {
+    const held = findHeld(taskId)
+    if (held) {
+      // 预览态「重拍 / 放弃」= 删掉这条草稿，别留孤儿。
+      held.formData = null
+      heldTasks.value = heldTasks.value.filter((item) => item.id !== taskId)
+      successHandlers.delete(taskId)
+      errorHandlers.delete(taskId)
+      forget(taskId)
+      return true
+    }
     const task = findTask(taskId)
     if (!task || ACTIVE_STATUSES.has(task.status)) return false
     task.formData = null
@@ -304,12 +346,18 @@ export const useImageUploadQueueStore = defineStore('imageUploadQueue', () => {
 
   function clearTasksByTransport(transport) {
     clearedGeneration += 1
+    const heldMatching = heldTasks.value.filter((task) => task.transport === transport)
     const matching = tasks.value.filter((task) => task.transport === transport)
-    const removed = new Set(matching.map((task) => task.id))
+    const removed = new Set([
+      ...matching.map((task) => task.id),
+      ...heldMatching.map((task) => task.id),
+    ])
     if (!removed.size) {
       void drafts.clearByTransport(transport)
       return 0
     }
+    for (const task of heldMatching) task.formData = null
+    heldTasks.value = heldTasks.value.filter((task) => task.transport !== transport)
     for (const task of matching) task.formData = null
     tasks.value = tasks.value.filter((task) => !removed.has(task.id))
     for (const taskId of removed) {
@@ -326,6 +374,7 @@ export const useImageUploadQueueStore = defineStore('imageUploadQueue', () => {
 
   return {
     tasks,
+    heldTasks,
     activeUploads,
     activeTasks,
     failedTasks,
@@ -333,6 +382,7 @@ export const useImageUploadQueueStore = defineStore('imageUploadQueue', () => {
     pendingCount,
     uploadingCount,
     enqueue,
+    release,
     retry,
     remove,
     clearCompleted,

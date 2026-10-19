@@ -21,7 +21,32 @@ const emit = defineEmits(['point'])
 const standardPhotoCache = useStandardPhotoCacheStore()
 const resolvedSrc = ref(props.src)
 const lightboxOpen = ref(false)
+// 标准图加载失败（弱网 / 缓存里那份坏了 / 服务端那一下 500）：不能只留一块黑色空帧，
+// 面板里给一句 + 一颗重试。重试靠换 key + 给 URL 加一个随机 query（blob: 是内存地址，
+// 加 query 反而取不到，只换 key 重新渲染）。
+const imgFailed = ref(false)
+const retryNonce = ref(0)
 let resolveGeneration = 0
+
+const imgSrc = computed(() => {
+  const src = resolvedSrc.value
+  if (!src || !retryNonce.value || src.startsWith('blob:')) return src
+  const sep = src.includes('?') ? '&' : '?'
+  return `${src}${sep}retry=${retryNonce.value}`
+})
+
+function onImageError() {
+  imgFailed.value = true
+}
+
+function onImageLoad() {
+  imgFailed.value = false
+}
+
+function retryImage() {
+  imgFailed.value = false
+  retryNonce.value += 1
+}
 
 const missingOffline = computed(() => Boolean(
   props.standardId
@@ -51,6 +76,9 @@ function onSurfaceClick(event) {
 async function resolveSource() {
   resolveGeneration += 1
   const generation = resolveGeneration
+  // 换了图（或缓存换版）：上一张的失败态、重试计数都归零。
+  imgFailed.value = false
+  retryNonce.value = 0
   const previous = resolvedSrc.value
   if (missingOffline.value) {
     resolvedSrc.value = ''
@@ -101,6 +129,11 @@ onBeforeUnmount(() => {
       <button type="button" @click="standardPhotoCache.checkForUpdates({ download: true })">重试下载</button>
     </div>
     <p v-else-if="!resolvedSrc" class="std-empty">还没有标准图</p>
+    <!-- 图片本身加载失败：换 key（http 源再加随机 query）重试，不改变「先看标准图再开相机」的流程。 -->
+    <div v-else-if="imgFailed" class="std-empty">
+      <p>标准图没加载出来</p>
+      <button type="button" @click="retryImage">重试</button>
+    </div>
     <div
       v-else
       class="std-photo"
@@ -110,7 +143,7 @@ onBeforeUnmount(() => {
       @click="onSurfaceClick"
       @keydown.enter.prevent="openLightbox"
     >
-      <img :src="resolvedSrc" :alt="alt">
+      <img :key="retryNonce" :src="imgSrc" :alt="alt" @error="onImageError" @load="onImageLoad">
       <HygieneMarkupOverlay :markup="markup" />
       <button
         v-if="editable && zoomable"
@@ -187,6 +220,7 @@ onBeforeUnmount(() => {
 }
 .std-empty button {
   margin-top: 8px;
+  min-height: 44px;
   border: 0;
   background: transparent;
   color: var(--hy-mint);

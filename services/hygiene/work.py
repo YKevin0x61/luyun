@@ -1639,6 +1639,12 @@ class HygieneWork:
             "reject_reason": reject_reason or None,
             "submitter_id": None if submission is None else int(submission["submitter_id"]),
             "submitter_phone": None if submission is None else submission["submitter_phone"],
+            # 拍摄人**姓名**（2026-10-18）：`submitter_phone` 这个字段名是历史遗留，实际存的
+            # 是提交时的姓名/手机号（水印取的是同一个值）。这里另给一份从花名册现查的姓名，
+            # 供「拍摄人」展示用；没有对应员工行、或姓名为空时是 NULL。
+            "submitter_name": None
+            if submission is None
+            else (submission.get("submitter_name") or None),
             "capture_id": None if submission is None else submission["capture_id"],
             "frozen_standard_id": None if submission is None else int(submission["frozen_standard_id"]),
             "current_standard_id": int(item["current_standard_id"])
@@ -1880,6 +1886,7 @@ class HygieneWork:
                         sub.id AS submission_id, sub.capture_id, sub.content_type,
                         sub.frozen_standard_id, sub.submitter_id,
                         sub.submitter_phone, sub.zone_name AS submission_zone_name,
+                        e.name AS submitter_name,
                         sub.captured_at, sh.shift AS shift
                  FROM hygiene_daily_items i
                  JOIN hygiene_zones z ON z.id = i.zone_id
@@ -1891,6 +1898,8 @@ class HygieneWork:
                   AND inst.shift = sh.shift
                  LEFT JOIN hygiene_daily_submissions sub
                    ON sub.id = inst.pending_submission_id
+                 LEFT JOIN hygiene_employees e
+                   ON e.id = sub.submitter_id
                  WHERE i.current_standard_id IS NOT NULL"""
         params: list = [*shifts, target]
         if zone_id is not None:
@@ -1937,6 +1946,7 @@ class HygieneWork:
                     "frozen_standard_id": mapping["frozen_standard_id"],
                     "submitter_id": mapping["submitter_id"],
                     "submitter_phone": mapping["submitter_phone"],
+                    "submitter_name": (mapping.get("submitter_name") or "").strip() or None,
                     "zone_name": mapping["submission_zone_name"],
                     "captured_at": mapping["captured_at"],
                 }
@@ -2260,6 +2270,91 @@ class HygieneWork:
             "shift": shift,
             "business_date": instance["business_date"],
             "status": STATUS_PASSED,
+        }
+
+    @serialized_write
+    async def undo_accept_daily(
+        self,
+        actor: dict,
+        item_id: int,
+        shift: str,
+        business_date: Optional[str] = None,
+    ) -> dict:
+        """撤销一次日常验收：实例回到「待验收」，并撤掉这次验收记的「一次通过」。
+
+        ``business_date`` 语义同 ``accept_daily``（不给就是今天；下界同样是可补验窗口）。
+
+        权限与 ``accept_daily`` 同一条：区（``_require_zone_access``）+
+        ``_require_reviewer``（日常验收开关、不能判自己交的那条）。只认当前状态是
+        「已通过」的实例，别的状态报 ``not_pending`` —— 撤销不是「重开一条待办」。
+
+        **提交不动**：``accept_daily`` 本来就不清 ``pending_submission_id``，所以撤销后
+        实例仍是「待验收」、那张实拍还在，可以再次验收；不需要把照片找回来。
+
+        ``hygiene_board_events`` 里那条 ``一次通过`` 按 ``item_id + shift + business_date``
+        取 ``id DESC`` 最近一条删掉（这次验收写下的就是最近那条；没有就跳过）。只删事件，
+        不碰其它看板数据。
+
+        **不撤回企微分享**（2026-10-18）：验收时那条分享已经入队、多半也已经发到群里，
+        消息发出去就收不回来。撤销只改站内状态与「一次通过」计数；要更正群里的说法，
+        只能在群里另说一句 —— 这里既不做，也不假装做过。
+        """
+        if shift not in DAILY_SHIFTS:
+            raise HygieneWorkError("shift_mismatch", "shift_mismatch")
+        target = self._review_business_date(business_date)
+        instance_row = await self._fetch_instance(target, shift, item_id)
+        if instance_row is None:
+            raise HygieneWorkError("not_pending", "not_pending")
+        instance = dict(instance_row)
+        if instance["status"] != STATUS_PASSED:
+            raise HygieneWorkError("not_pending", "not_pending")
+        submission = await self._fetch_submission(instance.get("pending_submission_id"))
+        if submission is None:
+            # 没有提交就看不出是谁交的，`_require_reviewer` 的「本人不能判自己」也就无从
+            # 判起；正常路径不会出现（验收本身就要求存在待验收提交），按没有可撤销处理。
+            raise HygieneWorkError("not_pending", "not_pending")
+        item_row = await self._fetch_item_with_zone(item_id)
+        if item_row is not None:
+            self._require_zone_access(actor, item_row["zone_id"])
+        self._require_reviewer(actor, submission["submitter_id"], CAP_DAILY_REVIEW)
+        now = self._now_iso()
+        cur = await self._conn.execute(
+            """UPDATE hygiene_daily_instances
+               SET status = ?, updated_at = ?
+               WHERE id = ? AND status = ?""",
+            (STATUS_PENDING, now, instance["id"], STATUS_PASSED),
+        )
+        if cur.rowcount != 1:
+            await self._conn.rollback()
+            raise HygieneWorkError("not_pending", "not_pending")
+        cur = await self._conn.execute(
+            """SELECT id FROM hygiene_board_events
+               WHERE board = ? AND event_type = ? AND item_id = ?
+                 AND shift = ? AND business_date = ?
+               ORDER BY id DESC LIMIT 1""",
+            (
+                BOARD_PERSON,
+                EVENT_FIRST_PASS,
+                int(item_id),
+                shift,
+                instance["business_date"],
+            ),
+        )
+        event = await cur.fetchone()
+        if event is not None:
+            await self._conn.execute(
+                "DELETE FROM hygiene_board_events WHERE id = ?",
+                (int(dict(event)["id"]),),
+            )
+        await self._conn.commit()
+        logger.info(
+            "hygiene daily acceptance undone item=%s shift=%s", item_id, shift
+        )
+        return {
+            "item_id": int(item_id),
+            "shift": shift,
+            "business_date": instance["business_date"],
+            "status": STATUS_PENDING,
         }
 
     @serialized_write
@@ -4021,7 +4116,13 @@ class HygieneWork:
         if zone_id is not None:
             sql += " AND t.zone_id = ?"
             params.append(zone_id)
-        sql += " ORDER BY t.id ASC"
+        # 逾期最早的在最前、没时限的排最后（2026-10-18）：首页的「逾期」数字与门店看新
+        # 增单都靠这个顺序，「先处理最急的」不该埋在 id 序里。时间为 TEXT（ISO 串），
+        # 字典序即时间序；deadline 为 NULL 的老数据单独归到最后一档。
+        sql += (
+            " ORDER BY CASE WHEN t.deadline IS NULL THEN 1 ELSE 0 END,"
+            " t.deadline ASC, t.id ASC"
+        )
         cur = await self._conn.execute(sql, params)
         raw_rows = [dict(row) for row in await cur.fetchall()]
         rejected_reasons = await self._fix_rejected_reasons(

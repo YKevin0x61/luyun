@@ -23,7 +23,7 @@
  * 同样只认员工自己的 cookie（路径上没有 `employee_id`，读谁由服务端按会话定）。
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 // 「今天要交」= 员工卫生块本身（三行进度 + 主 CTA）：员工在同一页就能看见要交什么、
 // 直接进拍照链路。它自带数据与实时订阅，这一页只摆它一行，口径不在这边重算。
@@ -33,6 +33,7 @@ import { useNudgePull } from '../../composables/useNudgePull'
 import { ADMIN_CAP_STAFF_DEFS, hasCap } from '../../utils/adminCaps'
 import { hygieneShiftLabel } from '../../utils/hygieneCopy'
 import { staffRequest } from '../../utils/hygieneStaff'
+import { actFromQuery, dateFromQuery } from '../../utils/staffDayActions'
 import { shiftClock } from '../../utils/hygieneWorkFlow'
 import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
 import { loginRedirectTarget } from '../../utils/loginNext'
@@ -49,6 +50,7 @@ import {
 } from '../../utils/todayShift'
 
 const router = useRouter()
+const route = useRoute()
 const state = ref('loading') // loading | ready | error
 const employee = ref(null)
 const days = ref([])
@@ -236,6 +238,21 @@ const ENTRIES = computed(() => {
 function leaveForStaffLogin() {
   const target = loginRedirectTarget(router.currentRoute.value)
   if (target) router.replace(target)
+}
+
+/** 工作台首页「我的班」副行那两个入口（请假 / 换班）直接落到这一页的地址：
+ *  `/workbench/me/today?act=leave|swap&date=<营业日>`。这一页**没有表单**（发起只在月历
+ *  那一天的操作单里，票 15 收的口子），所以这里只负责把它转进月历并打开那一天 ——
+ *  一次点击到操作单，且不在这两处各摆一套表单。没有 `act` 就照常渲染本页。 */
+function forwardDayAction() {
+  const act = actFromQuery(route.query)
+  if (!act) return false
+  const date = dateFromQuery(route.query)
+  router.replace({
+    path: '/workbench/me/month',
+    query: date ? { date, act } : { act },
+  })
+  return true
 }
 
 /** 卡片上那三颗按钮都往月历走（见 `ENTRIES`）。`to` 用对象形式（`{ path, query }`）：
@@ -633,6 +650,8 @@ onMounted(() => {
   // 它原来是「今天」，与工作台首页（`/workbench`，也报「今天」）**撞名** —— 真机走查里
   // 员工登录落到这一页、底栏第一格「今天」却指向另一页，两页浏览器标签一模一样。
   document.title = workbenchDocumentTitle('我的今天')
+  // 从首页「请假 / 换班」直达过来的（`?act=&date=`）：转进月历那一天，不在这一页再挂表单。
+  if (forwardDayAction()) return
   load()
   // 顺手读一次自己的申请：有等着批的、或别人问我换班的，首页就能看见（读不出来不吭声）。
   loadRequests(true)

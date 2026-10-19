@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import HygieneReviewPair from '../../components/hygiene/HygieneReviewPair.vue'
@@ -21,6 +21,16 @@ const review = ref(null)
 const reviewMissing = ref(false)
 const lastPassed = ref(null)
 const teachingHint = ref('')
+// 「通过」是可撤销的（2026-10-18）：验完留一条回执，10 秒后自动消失。
+// 回执放在一条**固定高度**的提示条里，连批时不会改变下方布局 —— 通过/驳回按钮
+// 因此不会在指下漂移（原来那条「刚通过…标为卫生教材」横幅会把对照区往下推）。
+const undoOffer = ref(null)
+const undoError = ref('')
+const undoNotice = ref('')
+const reviewError = ref('')
+let undoTimer = null
+let noticeTimer = null
+const UNDO_TTL_MS = 10_000
 
 // 空串 = 今天。服务端认这个口径：不带 date 时就是当前营业日，只回等验收的。
 const businessDate = ref('')
@@ -68,7 +78,59 @@ function queueKeyOf(row) {
   return `${dailyQueueKey(row)}@${(row && row.business_date) || ''}`
 }
 
+function clearUndoTimer() {
+  if (undoTimer) window.clearTimeout(undoTimer)
+  undoTimer = null
+}
+
+function clearNoticeTimer() {
+  if (noticeTimer) window.clearTimeout(noticeTimer)
+  noticeTimer = null
+}
+
+/** 一次「通过」之后留一条可撤销的回执（同一项同班次同营业日才算同一条）。 */
+function offerUndo(row, targetDate) {
+  const offer = {
+    item_id: row.item_id,
+    shift: row.shift,
+    business_date: targetDate || '',
+    item_name: row.item_name,
+  }
+  undoOffer.value = offer
+  undoError.value = ''
+  undoNotice.value = ''
+  clearUndoTimer()
+  undoTimer = window.setTimeout(() => {
+    undoTimer = null
+    const current = undoOffer.value
+    // 10 秒里已经验了下一项的话，回执被换过 —— 别把新的收掉。
+    if (
+      current
+      && current.item_id === offer.item_id
+      && current.shift === offer.shift
+      && current.business_date === offer.business_date
+    ) {
+      undoOffer.value = null
+    }
+  }, UNDO_TTL_MS)
+}
+
+/** 一句状态话（「已撤销，回到待验收」这类），同样 10 秒后自己收掉。 */
+function setNotice(text) {
+  undoNotice.value = text
+  clearNoticeTimer()
+  noticeTimer = window.setTimeout(() => {
+    noticeTimer = null
+    undoNotice.value = ''
+  }, UNDO_TTL_MS)
+}
+
 onMounted(loadQueue)
+
+onBeforeUnmount(() => {
+  clearUndoTimer()
+  clearNoticeTimer()
+})
 
 useHygieneRealtime({
   id: 'hygiene-admin-daily',
@@ -96,11 +158,12 @@ async function loadQueue() {
       )
       if (still) {
         selected.value = still
-        await loadReview(still)
+        await openReviewPanel(still)
       } else {
         selected.value = null
         review.value = null
         reviewMissing.value = false
+        reviewError.value = ''
       }
     }
   } catch (err) {
@@ -136,10 +199,29 @@ async function selectRow(row) {
   selected.value = row
   busy.value = true
   try {
+    await openReviewPanel(row)
+  } finally {
+    busy.value = false
+  }
+}
+
+/** 打开对照：404 是「那天没交照片」（面板里说清楚），其余失败落到面板内的错误态 ——
+ *  不能只写页面顶上那条 alert，否则右侧整块面板三个分支都不渲染、看起来像卡死了。 */
+async function openReviewPanel(row) {
+  reviewError.value = ''
+  try {
     await loadReview(row)
   } catch (err) {
     review.value = null
-    errorText.value = err.message || '无法打开对照'
+    reviewError.value = err.message || '无法打开对照'
+  }
+}
+
+async function retryReview() {
+  if (!selected.value || busy.value) return
+  busy.value = true
+  try {
+    await openReviewPanel(selected.value)
   } finally {
     busy.value = false
   }
@@ -183,15 +265,45 @@ async function decide(action, reason = '') {
         zone_name: selected.value.zone_name,
       }
       teachingHint.value = ''
+      // 通过后这个项就能撤：回执里带着它的 item_id / shift / 营业日。
+      offerUndo(current, targetDate)
     }
     selected.value = null
     review.value = null
     reviewMissing.value = false
+    reviewError.value = ''
     await loadQueue()
     const next = nextAfterRemove(previous, current, queueKeyOf)
     if (next) await selectRow(next)
   } catch (err) {
     errorText.value = err.message || (action === 'accept' ? '验收失败' : '驳回失败')
+  } finally {
+    busy.value = false
+  }
+}
+
+/** 撤销刚才这次「通过」：成功回执收掉、队列重拉；失败保留回执并说出原因，人可以再点一次。 */
+async function undoAccept() {
+  if (!undoOffer.value || busy.value) return
+  const offer = undoOffer.value
+  busy.value = true
+  undoError.value = ''
+  errorText.value = ''
+  try {
+    await api.post(`/api/hygiene/admin/daily/${offer.item_id}/undo-accept`, {
+      shift: offer.shift,
+      // 漏验要撤它自己那一天；今天这一档不传 = 今天（与通过/驳回同一口径）。
+      ...(offer.business_date ? { business_date: offer.business_date } : {}),
+    })
+    undoOffer.value = null
+    clearUndoTimer()
+    // 撤销之后「刚通过」不再成立，标教材那条回执跟着收掉。
+    lastPassed.value = null
+    teachingHint.value = ''
+    setNotice('已撤销，回到待验收')
+    await loadQueue()
+  } catch (err) {
+    undoError.value = err.message || '撤销失败'
   } finally {
     busy.value = false
   }
@@ -256,10 +368,26 @@ function statusClass(status) {
       正在回看 {{ queueDate }}：这一天只读，不能通过或驳回。
     </p>
     <p v-if="errorText" class="roster-error" role="alert">{{ errorText }}</p>
-    <div v-if="lastPassed && isToday" class="card teach-banner">
-      <p>刚通过：{{ lastPassed.zone_name }} · {{ lastPassed.item_name }} · {{ lastPassed.shift }}。</p>
-      <button type="button" class="btn btn-primary" :disabled="busy" @click="markTeaching">标为卫生教材</button>
-      <p v-if="teachingHint" class="clocks-hint">{{ teachingHint }}</p>
+    <!-- 通过回执 + 标教材：一条**固定高度**的提示行（今天这一档常驻，空着也占同一行高）。
+         通过/驳回只换内容、不改高度 —— 连批时下方的通过/驳回按钮不会因此在指下漂移；
+         原来那条横幅插在对照区上方，每验一项都把按钮往下推。撤销回执 10 秒后自动收掉，
+         「刚通过 → 标为卫生教材」留到下一次验收。 -->
+    <div v-if="isToday" class="daily-receipt" aria-live="polite">
+      <span v-if="undoOffer" class="daily-receipt-item">
+        <b class="daily-receipt-verb">{{ undoError ? '撤销失败' : '已通过' }}</b>
+        <span v-if="undoError" class="daily-receipt-reason" role="alert">{{ undoError }}</span>
+        <span v-else class="daily-receipt-text">{{ undoOffer.item_name }}</span>
+        <button type="button" class="btn daily-receipt-btn" :disabled="busy" @click="undoAccept">撤销</button>
+      </span>
+      <span v-else-if="undoNotice" class="daily-receipt-item">
+        <b class="daily-receipt-verb is-ok">{{ undoNotice }}</b>
+      </span>
+      <span v-if="lastPassed" class="daily-receipt-item">
+        <b class="daily-receipt-verb">刚通过</b>
+        <span class="daily-receipt-text">{{ lastPassed.zone_name }} · {{ lastPassed.item_name }} · {{ lastPassed.shift }}</span>
+        <button type="button" class="btn daily-receipt-btn" :disabled="busy" @click="markTeaching">标为卫生教材</button>
+      </span>
+      <span v-if="teachingHint" class="daily-receipt-text">{{ teachingHint }}</span>
     </div>
 
     <div class="daily-grid">
@@ -288,7 +416,7 @@ function statusClass(status) {
               >
                 <strong>{{ row.zone_name }} · {{ row.item_name }}</strong>
                 <span>
-                  {{ row.shift }} · {{ row.submitter_phone || '拍摄人未知' }}
+                  {{ row.shift }} · {{ row.submitter_name || row.submitter_phone || '拍摄人未知' }}
                   <em v-if="!isToday" class="queue-status" :class="statusClass(row.status)">{{ row.status }}</em>
                 </span>
               </button>
@@ -314,7 +442,7 @@ function statusClass(status) {
                   >
                     <strong>{{ row.zone_name }} · {{ row.item_name }}</strong>
                     <span>
-                      {{ row.shift }} · {{ row.submitter_phone || '拍摄人未知' }}
+                      {{ row.shift }} · {{ row.submitter_name || row.submitter_phone || '拍摄人未知' }}
                       <em class="queue-status" :class="statusClass(row.status)">{{ row.status }}</em>
                     </span>
                   </button>
@@ -334,9 +462,14 @@ function statusClass(status) {
         <div v-else-if="reviewMissing" class="roster-empty">
           「{{ selected.item_name }}」在这一天没有照片（未提交，或已经被清理）。
         </div>
+        <!-- 对照接口失败（不是 404）：面板里给一句 + 重试，别让右侧整块空着看起来像卡死。 -->
+        <div v-else-if="reviewError" class="roster-empty review-error">
+          <p class="review-note">对照图没加载出来。</p>
+          <button type="button" class="btn" :disabled="busy" @click="retryReview">重试</button>
+        </div>
         <div v-else-if="review" class="review-body">
           <p class="review-meta">
-            <template v-if="reviewDate">{{ reviewDate }} · </template>{{ selected.zone_name }} · {{ selected.shift }} · 拍摄人 {{ review.submitter_phone }}
+            <template v-if="reviewDate">{{ reviewDate }} · </template>{{ selected.zone_name }} · {{ selected.shift }} · 拍摄人 {{ review.submitter_name || review.submitter_phone }}
             <template v-if="!isToday"> · 状态 {{ review.status }}</template>
           </p>
           <HygieneReviewPair
@@ -458,7 +591,39 @@ function statusClass(status) {
   justify-content: flex-end;
   gap: 8px;
 }
-.teach-banner p { max-width: 60em; }
+/* 通过回执 / 刚通过：固定高度一行，内容换了行高也不变（连批时通过/驳回按钮不漂移）。 */
+.daily-receipt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 48px;
+  min-height: 48px;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.daily-receipt-item { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.daily-receipt-verb { font: 600 11px/1 var(--font-sans); color: var(--ink-dim); }
+.daily-receipt-verb.is-ok { color: var(--ok); }
+.daily-receipt-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font: 400 10px/1.4 var(--font-mono);
+  color: var(--ink-faint);
+}
+.daily-receipt-reason {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font: 400 10px/1.4 var(--font-mono);
+  color: var(--danger-bright);
+}
+/* 44px 触控下限：≤430px 的全局 `.btn` 有 min-height 40px !important，这里要压过它。 */
+.daily-receipt-btn { flex: 0 0 auto; min-height: 44px !important; border-radius: var(--r-1); }
+/* 对照接口失败的面板内错误态：一句 + 重试（按钮 ≥44px）。 */
+.review-error { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 14px; }
+.review-error .btn { min-height: 44px !important; border-radius: var(--r-1); }
 
 /* ── B 案版式（2026-10-17 结构重构）：页面头 + 面板 + 行列，替代旧的 hero 卡 + 按钮块 ── */
 .daily-page { display: flex; flex-direction: column; gap: 16px; }
@@ -548,7 +713,8 @@ function statusClass(status) {
 .daily-page .roster-empty { margin: 0; }
 
 /* 手机 390（审查实测）：页头左右分栏把说明挤成窄栏、眉标「DAILY · 当日对照」断成两行、
-   日期与「今天/刷新」只有 35–38px。改成「标题独占一行 + 筛选条独占一行 + 控件 48px」。 */
+   日期与「今天/刷新」只有 35–38px。改成「标题独占一行 + 筛选条独占一行 + 控件 48px」。
+   提示条仍然一行：窄屏只留动作按钮，项目名那截让位（行高固定，按钮不漂移）。 */
 @media (max-width: 720px) {
   .daily-page .roster-head { flex-direction: column; align-items: flex-start; gap: 12px; }
   .daily-datebar { margin-left: 0; width: 100%; justify-content: flex-start; }
@@ -556,5 +722,8 @@ function statusClass(status) {
   .daily-page .daily-datebar :deep(.dpx),
   .daily-page .daily-datebar :deep(input) { min-height: 48px; }
   .daily-page .hy-eyebrow { white-space: nowrap; }
+}
+@media (max-width: 560px) {
+  .daily-receipt-text { display: none; }
 }
 </style>

@@ -1117,6 +1117,31 @@ def test_override_errors_are_readable_400s(scheduling_http):
     assert undo_bad_date.json()["detail"] == "日期格式应该是 YYYY-MM-DD"
 
 
+def test_single_day_override_refuses_an_approved_leave(scheduling_http):
+    """那天有已批的假：PUT 单日覆盖整笔 400（与批量端点的 `leave_approved` 同判据）。
+
+    请假批下来就是那条覆盖记录；改班 / 改成休都会把它换掉，所以两种都拒 ——
+    先撤掉假再改。
+    """
+    client, db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    store = SchedulingStore(db)
+    request = _run(store.submit_leave(employee_id, "2026-09-25"))
+    _run(store.approve_request(request["id"]))
+    base = f"/api/scheduling/overrides/{employee_id}/2026-09-25"
+    day_id = client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
+
+    for payload in ({"shift_id": day_id}, {"is_rest": True}):
+        response = client.put(base, json=payload)
+        assert response.status_code == 400, (payload, response.text)
+        assert response.json()["detail"] == "这天有已批准的假：先撤掉假再改班"
+
+    # 那天仍是批过的假：整笔请求什么都没写。
+    day = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
+    leavers = [person for person in day["off_people"] if person["id"] == employee_id]
+    assert [person["leave"] for person in leavers] == [True]
+
+
 # ── 票 14：选区批量落笔（批量端点 + 行序 + 近 30 天可补记）──────────────────
 
 

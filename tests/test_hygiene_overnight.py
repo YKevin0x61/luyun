@@ -34,6 +34,7 @@ from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import (
     DAILY_BACKFILL_DAYS,
+    EVENT_FIRST_PASS,
     HygieneWork,
     HygieneWorkError,
 )
@@ -265,3 +266,102 @@ def test_deep_reject_reason_survives_into_the_next_week(env):
     assert row["status"] == "待拍"
     assert row["rejected"] is True
     assert row["reject_reason"] == "滤网没拆下来洗"
+
+
+# ── 撤销验收（2026-10-18）───────────────────────────────────────────────────
+
+
+def _first_pass_events(db):
+    cur = _run(
+        db._conn.execute(
+            "SELECT id FROM hygiene_board_events WHERE event_type = ? ORDER BY id ASC",
+            (EVENT_FIRST_PASS,),
+        )
+    )
+    return [int(dict(row)["id"]) for row in _run(cur.fetchall())]
+
+
+def test_a_passed_day_can_be_undone_and_accepted_again(env, http):
+    """验收可撤销（HTTP 面）：状态回待验收、一次通过事件删掉、还能再验一次。"""
+    accepted = http.post(
+        f"{DAILY}/{env.yesterday_item['id']}/accept",
+        json={"shift": "白班", "business_date": YESTERDAY},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["status"] == "已通过"
+    assert len(_first_pass_events(env.db)) == 1
+
+    undone = http.post(
+        f"{DAILY}/{env.yesterday_item['id']}/undo-accept",
+        json={"shift": "白班", "business_date": YESTERDAY},
+    )
+    assert undone.status_code == 200, undone.text
+    assert undone.json() == {
+        "item_id": env.yesterday_item["id"],
+        "shift": "白班",
+        "business_date": YESTERDAY,
+        "status": "待验收",
+    }
+    # 昨天的行重新进待验收；这次验收记的一次通过撤掉了。
+    queue = http.get(QUEUE).json()
+    assert [row["business_date"] for row in queue["pending_past"]] == [YESTERDAY]
+    assert _first_pass_events(env.db) == []
+
+    again = http.post(
+        f"{DAILY}/{env.yesterday_item['id']}/accept",
+        json={"shift": "白班", "business_date": YESTERDAY},
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["status"] == "已通过"
+    assert len(_first_pass_events(env.db)) == 1
+
+
+def test_undo_accept_of_a_pending_day_is_a_readable_400(env, http):
+    """还没验的行不能「撤销」：同一套错误映射，400 + 中文文案。"""
+    response = http.post(
+        f"{DAILY}/{env.yesterday_item['id']}/undo-accept",
+        json={"shift": "白班", "business_date": YESTERDAY},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "没有待验收的实拍"
+
+
+# ── 整改单排序（2026-10-18）─────────────────────────────────────────────────
+
+
+def test_fix_tickets_are_ordered_by_deadline_earliest_first(env):
+    """整改单按 deadline 升序：逾期最早的在最前（同一时限按 id）。
+
+    首页「逾期」数字与门店看新增单都靠这个顺序 —— 原来按 id 升序，最急的那张可能
+    沉在最后。当前 schema 里 ``deadline`` 是 NOT NULL（0001），造不出「没时限」的行；
+    ``ORDER BY`` 里「NULL 归最后一档」那段是对老 / 手工数据的防御，这里钉住可造的部分。
+    """
+    work = env.work
+    db = env.db
+    opener = env.open_fix_actor
+    not_due = _run(
+        work.open_fix(opener, env.zone["id"], "卫生", "还没到期", timedelta(hours=2), _live())
+    )
+    latest = _run(
+        work.open_fix(opener, env.zone["id"], "摆放", "排最后一张", timedelta(hours=2), _live())
+    )
+    for ticket_id, deadline in (
+        (env.ticket["id"], "2026-09-14T09:00:00+08:00"),  # 最早逾期
+        (not_due["id"], "2026-09-16T09:00:00+08:00"),
+        (latest["id"], "2026-09-18T09:00:00+08:00"),
+    ):
+        _run(
+            db._conn.execute(
+                "UPDATE hygiene_fix_tickets SET deadline = ? WHERE id = ?",
+                (deadline, ticket_id),
+            )
+        )
+    _run(db._conn.commit())
+
+    rows = _run(work.list_fix_tickets(SUPER))
+    assert [row["id"] for row in rows] == [
+        env.ticket["id"],
+        not_due["id"],
+        latest["id"],
+    ]
+

@@ -15,7 +15,7 @@
  * 判据一律在 `utils/staffDayActions.js`（能不能请、能不能换、能点谁、批了会怎样）——
  * 这一层只摆版式，不在模板里重写第二份判断。
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ConfirmDialog from '../admin/ConfirmDialog.vue'
 import LuyunDatePicker from '../ui/LuyunDatePicker.vue'
@@ -148,22 +148,35 @@ function startLeave() {
   leaveError.value = ''
   // 起始日就是点开的那一天 —— 员工在月历上点的是哪一天，这里就是哪一天。
   leaveStart.value = props.day.business_date
-  leaveEnd.value = ''
+  // 「到哪天」默认同一天（B 案 v4）：绝大多数假是一天，先把后一格填上同一天，
+  // 想请多天再改；清空它仍按一天算（服务端把 None 当单日）。
+  leaveEnd.value = props.day.business_date
   leaveNote.value = ''
   view.value = DAY_VIEW.leave
 }
+
+/** 改起始日时把「到哪天」跟着走，但不吃掉员工自己改过的区间：
+ *  结束日还是空的、或还停在上一段起始日（= 没动过）时，跟着填成新的同一天；
+ *  填过别的日子就保留，只在它早于新起始日时夹到起始日，避免提交一个倒序区间。 */
+watch(leaveStart, (next, prev) => {
+  if (!next) return
+  if (!leaveEnd.value || leaveEnd.value === prev) leaveEnd.value = next
+  else if (leaveEnd.value < next) leaveEnd.value = next
+})
 
 async function submitLeave() {
   if (leaveBusy.value) return
   leaveBusy.value = true
   leaveError.value = ''
   try {
+    // 只用一天（同一天或后一格空着）时不发 `end_date`：服务端把 None 当单日。
+    // 这样「默认同一天」不会把单日假变成一条写了起止的区间，老口径一个字没变。
+    const singleDay = !leaveEnd.value || leaveEnd.value === leaveStart.value
     await staffRequest('/api/scheduling/me/requests', {
       method: 'POST',
       body: {
         start_date: leaveStart.value,
-        // 只请一天时后一格空着就不发那个字段（服务端把 None 与空串都当单日）。
-        end_date: leaveEnd.value || null,
+        end_date: singleDay ? null : leaveEnd.value,
         note: leaveNote.value || null,
       },
     })

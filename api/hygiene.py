@@ -2188,6 +2188,32 @@ async def admin_accept_daily(
     return accepted
 
 
+@router.post("/admin/daily/{item_id}/undo-accept")
+async def admin_undo_accept_daily(
+    item_id: int,
+    body: ShiftIn,
+    _session_id: str = Depends(require_session),
+    work: HygieneWork = Depends(_get_work),
+) -> Dict[str, Any]:
+    """撤销一次日常验收（2026-10-18）：状态回到「待验收」，可再验一次。
+
+    只改站内状态与看板上的「一次通过」事件；**不撤回企微分享**（已入队/已发送）。
+    """
+    try:
+        restored = await work.undo_accept_daily(
+            SUPER_ACTOR,
+            item_id,
+            body.shift,
+            business_date=_optional_business_date(body.business_date),
+        )
+    except HygieneWorkError as exc:
+        raise _work_http_error(exc) from exc
+    # 撤销也要让别的端刷新：日常页要变回「待验收」，看板/首页的计数也跟着少一条。
+    await _hygiene_nudge("daily", "accepted", item_id=item_id)
+    await _hygiene_nudge("boards", "changed")
+    return restored
+
+
 @router.post("/admin/daily/{item_id}/reject")
 async def admin_reject_daily(
     item_id: int,

@@ -22,9 +22,11 @@ from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import (
+    EVENT_FIRST_PASS,
     EVENT_REJECT,
     MAX_REJECT_REASON_LENGTH,
     HygieneWork,
+    HygieneWorkError,
 )
 from tests.hygiene_duty import assign_duty
 
@@ -104,6 +106,16 @@ def _reject_events(db):
         )
     )
     return int(dict(_run(cur.fetchone()))["n"])
+
+
+def _event_ids(db, event_type):
+    cur = _run(
+        db._conn.execute(
+            "SELECT id FROM hygiene_board_events WHERE event_type = ? ORDER BY id ASC",
+            (event_type,),
+        )
+    )
+    return [int(dict(row)["id"]) for row in _run(cur.fetchall())]
 
 
 def test_reject_reason_reaches_the_staff_inbox(env):
@@ -244,3 +256,78 @@ def test_reason_still_works_when_only_0002_was_applied(env):
     )
     assert row["rejected"] is True
     assert row["reject_reason"] == "台面还有油", "reason 列在就该给原因"
+
+
+# ── 验收可撤销（2026-10-18）─────────────────────────────────────────────────
+
+
+def test_accept_can_be_undone_and_redone(env):
+    """撤销验收：状态回「待验收」、这次验收的「一次通过」事件被删、还能再验一次。
+
+    ``accept_daily`` 不清 ``pending_submission_id``，所以撤销后提交还在 —— 这条用例
+    同时把这个前提钉住：撤销后列表里重新是待验收，而且可以原样再 accept。
+    """
+    db, work, daily, _deep, actor = env
+    _run(work.submit_daily(actor, daily["id"], _capture()))
+    accepted = _run(work.accept_daily(SUPER, daily["id"], "白班"))
+    assert accepted["status"] == "已通过"
+    assert len(_event_ids(db, EVENT_FIRST_PASS)) == 1
+
+    undone = _run(work.undo_accept_daily(SUPER, daily["id"], "白班"))
+
+    assert undone == {
+        "item_id": daily["id"],
+        "shift": "白班",
+        "business_date": accepted["business_date"],
+        "status": "待验收",
+    }
+    row = next(
+        item for item in _run(work.list_daily_work(actor)) if item["item_id"] == daily["id"]
+    )
+    assert row["status"] == "待验收", "撤销后实例回到待验收（提交没被清掉）"
+    assert _event_ids(db, EVENT_FIRST_PASS) == [], "这次验收记的一次通过要一起撤掉"
+
+    again = _run(work.accept_daily(SUPER, daily["id"], "白班"))
+    assert again["status"] == "已通过"
+    assert len(_event_ids(db, EVENT_FIRST_PASS)) == 1, "再验一次会重新记一条"
+
+
+def test_undo_accept_requires_a_passed_instance(env):
+    """只有「已通过」的实例能撤销；待验收（还没验）报 not_pending，不重开待办。"""
+    _db, work, daily, _deep, actor = env
+    _run(work.submit_daily(actor, daily["id"], _capture()))
+
+    with pytest.raises(HygieneWorkError) as raised:
+        _run(work.undo_accept_daily(SUPER, daily["id"], "白班"))
+    assert raised.value.code == "not_pending"
+
+
+# ── 拍摄人姓名（2026-10-18）───────────────────────────────────────────────
+
+
+def test_submitter_name_comes_from_the_roster(env):
+    """``list_daily_work`` 多给一个从花名册查的 ``submitter_name``；没姓名是 NULL。
+
+    ``submitter_phone`` 是历史字段名（实际存的是提交时的姓名），这里不改它 —— 新字段
+    只负责「展示拍摄人姓名」，花名册里查不到 / 没填姓名就是 NULL。
+    """
+    db, work, daily, _deep, actor = env
+    _run(work.submit_daily(actor, daily["id"], _capture()))
+
+    row = next(
+        item for item in _run(work.list_daily_work(actor)) if item["item_id"] == daily["id"]
+    )
+    assert row["submitter_phone"] == "张三"
+    assert row["submitter_name"] == "张三"
+
+    # 花名册里的姓名被清空 → NULL（不拿手机号或水印里的旧值顶上）。
+    _run(
+        db._conn.execute(
+            "UPDATE hygiene_employees SET name = '' WHERE id = ?", (actor["id"],)
+        )
+    )
+    _run(db._conn.commit())
+    row = next(
+        item for item in _run(work.list_daily_work(actor)) if item["item_id"] == daily["id"]
+    )
+    assert row["submitter_name"] is None

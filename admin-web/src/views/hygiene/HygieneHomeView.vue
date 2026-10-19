@@ -1042,6 +1042,46 @@ async function openDeepReview(row) {
   }
 }
 
+/** 拍完**立刻**把这一张存进草稿队列（IndexedDB）：预览那一屏看到的就是队列里这一张，
+ *  点「提交待验收」时才 `release()` 放行上传。被叫走 / 锁屏 / 切后台 / 刷新之后它仍然
+ *  在队列里（页面重开时 `restoreDrafts()` 会当普通排队任务续传）—— 在预览和提交之间
+ *  不会丢 blob。
+ *
+ *  返回草稿 id（空串 = 没能入队：IndexedDB 不可用时是静默降级，这里只兜 enqueue 自身
+ *  的异常，预览照旧能看，提交时会再现场补一条）。 */
+function holdDailyDraft(row, blob) {
+  const pendingKey = `daily:${row.item_id}:${row.shift}`
+  try {
+    const form = new FormData()
+    form.append('file', blob, 'capture.jpg')
+    form.append('live', 'true')
+    form.append('shift', row.shift)
+    return imageUploads.enqueue({
+      pendingKey,
+      transport: 'staff',
+      path: `/api/hygiene/staff/daily/${row.item_id}/submit`,
+      formData: form,
+      label: `日常实拍 · ${row.item_name}`,
+      detail: `${row.zone_name} · ${row.shift}`,
+      onSuccess: loadInbox,
+      onError: () => notifySubmitFailed(row.item_name),
+      // 先只落草稿，不去传：等员工在预览页点「提交待验收」。
+      hold: true,
+    })
+  } catch (err) {
+    errorText.value = err.message || '照片暂存失败，提交前别离开这一页'
+    return ''
+  }
+}
+
+/** 只删**还是草稿**的那一条：已经放行/失败/完成的任务归上传队列自己管。 */
+function discardHeldDraft(target = sheet.value) {
+  const taskId = target && target.draftTaskId
+  if (!taskId) return
+  if (!imageUploads.heldTasks.some((task) => task.id === taskId)) return
+  imageUploads.remove(taskId)
+}
+
 function onCaptured(blob) {
   const current = sheet.value
   const row = current && current.row
@@ -1093,6 +1133,8 @@ function onCaptured(blob) {
     }
   }
   clearPreview()
+  // 万一上一张还没提交就又来一张（重复事件）：先把旧草稿撤掉，别留孤儿。
+  discardHeldDraft()
   previewUrl.value = URL.createObjectURL(blob)
   localWatermark.value = {
     time: chinaNowIso(),
@@ -1103,6 +1145,8 @@ function onCaptured(blob) {
     mode: 'preview',
     row,
     blob,
+    // 拍完立即进草稿队列；预览显示的是这一条。重拍 / 放弃会把它删掉，不留孤儿。
+    draftTaskId: holdDailyDraft(row, blob),
     seenStandardId: current && current.seenStandardId,
   }
 }
@@ -1154,9 +1198,17 @@ function closeSheet(force = false) {
     return
   }
   confirmCloseOpen.value = false
+  // 放弃预览 = 取消这一张：把还没提交的草稿删掉，别留孤儿（已放行/失败的任务不动）。
+  discardHeldDraft()
   clearPreview()
   sheet.value = null
   flashText.value = ''
+}
+
+/** 预览态「重拍」：删掉队首这条草稿再回取景器 —— 等价于撤销这一张，不留孤儿。 */
+function retakePreview() {
+  discardHeldDraft()
+  openCamera()
 }
 
 function continueDaily(current) {
@@ -1214,23 +1266,21 @@ function submitCapture() {
     }
     return
   }
-  const pendingKey = `daily:${row.item_id}:${row.shift}`
   errorText.value = ''
   try {
-    const form = new FormData()
-    form.append('file', sheet.value.blob, 'capture.jpg')
-    form.append('live', 'true')
-    form.append('shift', row.shift)
-    imageUploads.enqueue({
-      pendingKey,
-      transport: 'staff',
-      path: `/api/hygiene/staff/daily/${row.item_id}/submit`,
-      formData: form,
-      label: `日常实拍 · ${row.item_name}`,
-      detail: `${row.zone_name} · ${row.shift}`,
-      onSuccess: loadInbox,
-      onError: () => notifySubmitFailed(row.item_name),
-    })
+    // 预览时那张已经在草稿队列里了：提交 = 把这一条放行成可上传，不再重新入队。
+    // 它不在了（登出清理 / 更早的页面）就现场补一条草稿再放行，避免丢这张。
+    const draftId = sheet.value.draftTaskId
+    const released = draftId ? imageUploads.release(draftId) : false
+    if (!released) {
+      const freshId = holdDailyDraft(row, sheet.value.blob)
+      if (!freshId || !imageUploads.release(freshId)) {
+        errorText.value = '这张照片没能进上传队列，请重拍。'
+        return
+      }
+    }
+    // 放行之后这条就不归预览管了（失败/重试由上传队列负责）。
+    sheet.value = { ...sheet.value, draftTaskId: '' }
     clearPreview()
     continueDaily(row)
   } catch (err) {
@@ -2023,7 +2073,7 @@ async function decide(action, reason = '') {
           <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="submitCapture">
             提交待验收
           </button>
-          <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="openCamera">重拍</button>
+          <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="retakePreview">重拍</button>
         </template>
 
         <template v-else-if="sheet.kind === 'teaching' && sheet.row">
