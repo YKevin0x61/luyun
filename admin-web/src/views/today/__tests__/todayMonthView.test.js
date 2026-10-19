@@ -194,10 +194,11 @@ describe('员工端「整月」页（票 06）', () => {
     // `tests/test_spa_page_routes.py` 拿 `main.app.routes` 的真实路径集合对表、
     // `tests/test_auth.py::test_staff_phone_pages_accessible_without_admin_session` 走请求。
     // 这里不再抓 `main.py` 的源码文本（票 02 #18：弱断言重说一遍强断言的事，改个写法就假红）。
-    // 入口：「今天」页那张卡上的三颗按钮都真的往月历走（票 15 起请假与换班也在这条路上，
-    // 各自带一个 `act`；整月不带）。落点是同一个页面组件，另开的断言在上面那条。
-    expect(today).toMatch(/key: 'month', label: '整月', to: month/)
-    expect(today).toMatch(/router\.push\(entry\.to\)/)
+    // 入口：IA 第二层（2026-10-19）后「我的」页（原「我的今天」）只剩页头右手一颗
+    // 「整月 ›」；请假/换班不再由那一页发起，首页那两个直达入口靠 `?act=` 转发到这里
+    // （转发逻辑仍钉在 `todayView.test.js` 的「我的」页那组里）。
+    expect(today).toMatch(/class="tTop-link" to="\/workbench\/staff\/month">整月 ›</)
+    expect(today).not.toMatch(/const ENTRIES = computed/)
   })
 
   it('表头跟店长月历是同一份（口径 9：两边都周一开头）', () => {

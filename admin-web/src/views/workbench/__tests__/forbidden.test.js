@@ -9,7 +9,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 //
 // 文案与去向对着页面清单写（目标那一页的身份来自清单那一行），所以这里也按清单里的
 // 标题断言：`/workbench/floor/daily` 是「日常验收」（店长的页），`/workbench/staff/today`
-// 是「今天」（员工的页）。
+// 是「我的」（员工的页；页面清单里那一行的 `title` 已从「今天」收口成「我的」）。
 
 const SESSION_ROUTES = [
   '/workbench/forbidden',
@@ -130,7 +130,9 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
     const { wrapper, router } = await mountForbidden('/workbench/staff/today')
 
     expect(wrapper.text()).toContain('员工手机端')
-    expect(wrapper.text()).toContain('今天')
+    // IA 第二层（2026-10-19）：`/workbench/staff/today` 的清单标题从「我的今天」改成
+    // 「我的」，无权页照着清单报页面名 —— 判据仍是「报出了是哪一页」，只是名字变了。
+    expect(wrapper.text()).toContain('我的')
     expect(wrapper.text()).toContain('超级管理员')
 
     const button = wrapper.get('button')

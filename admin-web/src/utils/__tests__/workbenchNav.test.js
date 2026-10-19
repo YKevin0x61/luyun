@@ -7,7 +7,8 @@ import {
   workbenchDocumentTitle,
 } from '../workbenchCopy.js'
 import {
-  WORKBENCH_NAV_GROUPS,
+  ADMIN_NAV_GROUPS,
+  STAFF_NAV_GROUPS,
   workbenchAudienceFor,
   workbenchGroupOf,
   workbenchNavFor,
@@ -31,25 +32,44 @@ describe('工作台身份 → 清单身份', () => {
   })
 })
 
-describe('工作台的组（票 05：人事 / 卫生；票 06 加上首页；票 07 加上产品；2026-10-05 加上员工卫生）', () => {
-  it('六组：今天、人事、卫生、卫生、产品、我的 —— 两个「卫生」是同一批活的两张面', () => {
-    expect(WORKBENCH_NAV_GROUPS.map((group) => group.key)).toEqual([
-      'home', 'hr', 'floor', 'hygiene', 'kitchen', 'me',
+describe('两套一级导航表（2026-10-19 信息架构重排第二层）', () => {
+  it('管理端：今天 / 人事 / 现场 / 后勤 —— 员工那两格不在里面', () => {
+    expect(ADMIN_NAV_GROUPS.map((group) => group.key)).toEqual([
+      'home', 'hr', 'floor', 'kitchen',
     ])
-    // 组名 2026-10-08 由用户裁定：`floor` 从「现场」改成「卫生」。它与员工端那一格
-    // （`hygiene`）同名是**有意的** —— 两个身份做的是同一批卫生活，只是各自的面不同；
-    // 可见性由落点那一页的 `audience` 决定，每次只有一个身份在渲染，界面上不会同时出现
-    // 两个「卫生」（店长看到 `floor`、员工看到 `hygiene`）。
-    expect(WORKBENCH_NAV_GROUPS.map((group) => group.label)).toEqual([
-      // ③-2 改名：超管那一格「卫生」→「卫生验收」（员工那一格仍叫「卫生」）；「产品」→「配方」。
-      '今天', '人事', '卫生验收', '卫生', '配方', '我的',
+    // 名字收口：`floor` 从「卫生验收」改回「现场」；`kitchen` 从「配方」改成「后勤」。
+    expect(ADMIN_NAV_GROUPS.map((group) => group.label)).toEqual([
+      '今天', '人事', '现场', '后勤',
     ])
+    expect(ADMIN_NAV_GROUPS.map((group) => group.key)).not.toContain('hygiene')
+    expect(ADMIN_NAV_GROUPS.map((group) => group.key)).not.toContain('me')
     // 第一格是子应用根（首页），不是某一组的专页。
-    expect(WORKBENCH_NAV_GROUPS[0].to).toBe('/workbench')
+    expect(ADMIN_NAV_GROUPS[0].to).toBe('/workbench')
   })
 
-  it('每组的落点是清单里真实的一页，且那一页就属于这一组', () => {
-    for (const group of WORKBENCH_NAV_GROUPS) {
+  it('员工端：今天 / 卫生 / 后勤 / 我的（+ 人事那一格留作能力键页）', () => {
+    // `hr` 在表里、默认不渲染：落点页是 `admin + staffCap: schedule`，由 `pageVisibleFor`
+    // 过滤 —— 删掉它会让勾了「排班管理」的员工再也进不去人事三页（2026-10-14 的既有行为）。
+    expect(STAFF_NAV_GROUPS.map((group) => group.key)).toEqual([
+      'home', 'hr', 'hygiene', 'kitchen', 'me',
+    ])
+    expect(STAFF_NAV_GROUPS.map((group) => group.label)).toEqual([
+      '今天', '人事', '卫生', '后勤', '我的',
+    ])
+    // 身份隔离：员工那两格只在员工表；管理端那一格（现场）不在员工表。
+    expect(STAFF_NAV_GROUPS.map((group) => group.key)).toContain('hygiene')
+    expect(STAFF_NAV_GROUPS.map((group) => group.key)).toContain('me')
+    expect(STAFF_NAV_GROUPS.map((group) => group.key)).not.toContain('floor')
+  })
+
+  it('旧的合并表不再导出（消费点只能走两套显式表）', async () => {
+    const nav = await import('../workbenchNav.js')
+    const legacyName = ['WORKBENCH', 'NAV', 'GROUPS'].join('_')
+    expect(legacyName in nav).toBe(false)
+  })
+
+  it('两张表的落点都是清单里真实的一页，且那一页就属于这一组', () => {
+    for (const group of [...ADMIN_NAV_GROUPS, ...STAFF_NAV_GROUPS]) {
       const row = pageRow(group.to)
       expect(row, `${group.key} 的落点 ${group.to} 不在页面清单里`).toBeTruthy()
       expect(row.group, `${group.key} 的落点落在别组`).toBe(group.key)
@@ -70,9 +90,9 @@ describe('工作台的组（票 05：人事 / 卫生；票 06 加上首页；票
     // 谁都不许再写一遍字面量。后勤那一格的落点是清单里那一条（票 07）。
     expect(WORKBENCH_HR_HOME).toBe('/workbench/hr/calendar')
     expect(WORKBENCH_FIELD_HOME).toBe('/workbench/floor/daily')
-    expect(WORKBENCH_NAV_GROUPS.find((group) => group.key === 'hr').to).toBe(WORKBENCH_HR_HOME)
-    expect(WORKBENCH_NAV_GROUPS.find((group) => group.key === 'floor').to).toBe(WORKBENCH_FIELD_HOME)
-    expect(WORKBENCH_NAV_GROUPS.find((group) => group.key === 'kitchen').to)
+    expect(ADMIN_NAV_GROUPS.find((group) => group.key === 'hr').to).toBe(WORKBENCH_HR_HOME)
+    expect(ADMIN_NAV_GROUPS.find((group) => group.key === 'floor').to).toBe(WORKBENCH_FIELD_HOME)
+    expect(ADMIN_NAV_GROUPS.find((group) => group.key === 'kitchen').to)
       .toBe('/workbench/kitchen/recipe')
   })
 
@@ -169,7 +189,7 @@ describe('按身份过滤导航', () => {
   })
 
   it('每一格的可见性来自它指向那一页的 audience（不另写一份名单）', () => {
-    for (const group of WORKBENCH_NAV_GROUPS) {
+    for (const group of [...ADMIN_NAV_GROUPS, ...STAFF_NAV_GROUPS]) {
       const { audience } = pageMeta(group.to)
       const shown = workbenchNavFor(audience === 'admin' ? 'super' : 'staff')
       expect(shown.map((item) => item.key), `${group.key} 的可见性`).toContain(group.key)
@@ -185,7 +205,7 @@ describe('按身份过滤导航', () => {
     // （拆成两格的话 `workbenchGroupOf` 会让两格同时高亮）。每条链接的可见性仍只看
     // 它自己落点那一页的身份 —— 不另写一份名单。损耗分析（`admin`）进来之后，这一格
     // 第一次出现「店长看得见、员工看不见」的那半扇门。
-    const kitchen = WORKBENCH_NAV_GROUPS.find((group) => group.key === 'kitchen')
+    const kitchen = ADMIN_NAV_GROUPS.find((group) => group.key === 'kitchen')
     expect(kitchen.links.map((link) => link.to)).toEqual([
       '/workbench/kitchen/recipe',
       PREP_PLAN_PATH,

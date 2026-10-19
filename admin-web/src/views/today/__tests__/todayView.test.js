@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { resolveStates, resolveVar, sameValueCollisions } from './themeTokens.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const view = readFileSync(join(here, '../TodayView.vue'), 'utf8')
@@ -11,176 +10,123 @@ const router = readFileSync(join(here, '../../../router/index.js'), 'utf8')
 const login = readFileSync(join(here, '../../LoginView.vue'), 'utf8')
 const mainPy = readFileSync(join(here, '../../../../../main.py'), 'utf8')
 
-describe('员工端「今天」页（原型 A）', () => {
-  it('reads its own endpoint and nothing else', () => {
-    // 员工会话读的是排班自己那条门：路径写死 `/me`，不带模板参数 ——
-    // 读谁由服务端按 cookie 定，页面上没有 employee_id 可以填。
-    expect(view).toMatch(/staffRequest\('\/api\/scheduling\/me'\)/)
-    // 路径里唯一带变量的是「撤回自己那条申请」的申请号（票 08）：
-    // 归属还是服务端按 cookie 判（别人的申请撤回只会拿到 404）。
-    expect(view).not.toMatch(/\/api\/scheduling\/[^'"\s]*employee_id/)
-    // 这一页只剩**自己那份资料**那一条卫生门（`/staff/me`：给「我的」那一块与能力卡用）
-    // —— 路径里同样没有 employee_id，读谁由 cookie 定。今天的日常与仪容仪表那两条
-    // （`/staff/daily-work`、`/staff/attire`）2026-10-14 随那块卡搬去工作台首页
-    // （`components/staff/StaffHygieneCard.vue`），这一页不再发；管理端那一侧的卫生接口
-    // 一个都不该出现在这里。
+const month = readFileSync(join(here, '../TodayMonthView.vue'), 'utf8')
+const pageRoutes = readFileSync(join(here, '../../../router/pageRoutes.json'), 'utf8')
+
+/**
+ * 员工端「我的」页（信息架构重排第二层 · 2026-10-19）。
+ *
+ * 这一页从「我的今天」收窄成「我的」：工作台首页的员工档回答「我今天在哪」（我的班 +
+ * 请假/换班入口），所以「我的班」整块、请假/换班/整月三颗按钮都从这里删掉，只留页头
+ * 右手「整月 ›」。下面这些断言跟着结构走：
+ *   · 旧「原型 A 骨架 / 五态大字 / 往后三天 / 三个入口」那几条**整体下线** —— 它们断的
+ *     是不再存在于本页的块（班次与未来三天归工作台首页/整月）；判据本身的真单测在
+ *     `utils/__tests__/todayShift.test.js`，没有丢。
+ *   · 新断言盯：标题与路由标题、页头「整月 ›」、四段顺序、`?act` 转发仍在、接口面没扩。
+ */
+describe('员工端「我的」页（IA 第二层）', () => {
+  it('标题就是「我的」：页头、document.title、页面清单三处同一个词', () => {
+    // 用户裁定：这一页不再承担「今天」——与工作台首页的员工档（也叫「今天」）撞名。
+    expect(view).toMatch(/class="kicker">我的</)
+    expect(view).toMatch(/class="tDay">我的</)
+    expect(view).toContain("workbenchDocumentTitle('我的')")
+    // 页面清单里这一行的 title 也跟着改（底栏「我的」那一格点进来时页头/标签一致）。
+    expect(pageRoutes).toMatch(/"path": "\/workbench\/staff\/today",\s*"title": "我的"/)
+    // 旧的「我的今天」不许再从这一页或清单里冒出来。
+    expect(view).not.toContain('我的今天')
+    expect(pageRoutes).not.toContain('"title": "我的今天"')
+  })
+
+  it('「我的班」块整块下线；「整月」只留页头右手一个入口', () => {
+    // 班次大字 / 副行 / 请假·换班·整月三颗按钮都归工作台首页的员工档（上一批加的入口）。
+    for (const gone of [
+      /class="tA-card sched"/,
+      /class="strip"/,
+      /class="strip-name"/,
+      /const ENTRIES = computed/,
+      /function open\(entry\)/,
+      /还没开放/,
+    ]) {
+      expect(view, String(gone)).not.toMatch(gone)
+    }
+    // 「整月」没有丢：页头右手那颗链接（不是旧的三颗按钮之一）。
+    expect(view).toMatch(/class="tTop-link" to="\/workbench\/staff\/month">整月 ›</)
+    // 请假 / 换班不再由这一页发起（只有首页那两个直达入口 + 月历操作单）。
+    expect(view).not.toMatch(/@click="open\(entry\)"/)
+  })
+
+  it('内容按「我的」重排：待你回应 → 成绩 → 我的资料 → 你能做的事', () => {
+    const order = [
+      'class="group-h">待你回应<',
+      'class="tA-card score"',
+      'class="tA-card me"',
+      'class="tA-card caps"',
+    ].map((needle) => {
+      const at = view.indexOf(needle)
+      expect(at, needle).toBeGreaterThan(-1)
+      return at
+    })
+    expect(order, '四段顺序变了').toEqual([...order].sort((a, b) => a - b))
+  })
+
+  it('首页「请假 / 换班」直达的转发逻辑留在这一页（?act=leave|swap&date=）', () => {
+    // 首页员工档那两个入口落在 `/workbench/staff/today?act=...&date=<营业日>`；这一页
+    // 没有表单，只负责把它转进月历并打开那一天 —— 这条链不能因为本页改版而断。
+    expect(view).toMatch(/function forwardDayAction\(\)/)
+    expect(view).toMatch(/actFromQuery\(route\.query\)/)
+    expect(view).toMatch(/dateFromQuery\(route\.query\)/)
+    expect(view).toMatch(/path: '\/workbench\/staff\/month'/)
+    expect(view).toMatch(/router\.replace\(\{/)
+    expect(view).toMatch(/if \(forwardDayAction\(\)\) return/)
+  })
+
+  it('不再拉「我的班」那条排班请求：接口面只剩自己的申请 / 资料 / 成绩', () => {
+    // 这一页不再回答「今天上不上班」，`/api/scheduling/me` 那条不该再发。
+    expect(view).not.toMatch(/staffRequest\('\/api\/scheduling\/me'\)/)
+    // 自己那三扇门（申请 / 资料 / 成绩）都在，且只认员工自己的 cookie。
+    expect(view).toMatch(/staffRequest\('\/api\/scheduling\/me\/requests'\)/)
     expect(view).toMatch(/staffRequest\('\/api\/hygiene\/staff\/me'\)/)
-    expect(view).not.toMatch(/staffRequest\('\/api\/hygiene\/staff\/daily-work'\)/)
-    expect(view).not.toMatch(/staffRequest\('\/api\/hygiene\/staff\/attire'\)/)
-    expect(view).not.toMatch(/\/api\/hygiene\/[^'"\s]*employee_id/)
+    expect(view).toMatch(/staffRequest\(`\/api\/hygiene\/staff\/me\/stats\?days=\$\{SCORE_DAYS\}`\)/)
     expect(view).not.toMatch(/\/api\/hygiene\/admin/)
-    // 401 回员工登录（票 03 起是 /login 的员工栏），把当前地址整个带过去（跟卫生首页一个走法）。
-    // 票 12 起落点算在 `utils/loginNext.js` 的 `loginRedirectTarget` 一处：它会拒绝在
-    // 登录页上再跳一次（O2 的 `?next=` 套娃），所以页面里不再手拼 `{ path, query }`。
-    expect(view).not.toMatch(/path: '\/workbench\/login'/)
+    expect(view).not.toMatch(/\/api\/scheduling\/[^'"\s]*employee_id/)
+    // 401 仍回员工登录（票 12 收在 `loginRedirectTarget` 一处）。
     expect(view).toMatch(/import \{ loginRedirectTarget \} from '\.\.\/\.\.\/utils\/loginNext'/)
     expect(view).toMatch(/loginRedirectTarget\(router\.currentRoute\.value\)/)
   })
 
-  it('keeps the chosen prototype A shape', () => {
-    // 用户选的员工端首页 = today-variants.html 的 A · 两块：
-    // 整屏 → 排班卡 → 往后三天 → 页脚（下半张卫生卡下一张票接）。
-    // 票 06：共享样式表不再由页面挂（它跟着 `<html data-workbench>` 走，路由一处安装）——
-    // 这一页原先与壳各挂一份，同页两条指向同一文件的 <link>。
-    expect(view).not.toMatch(/useScopedStylesheet\('\/hygiene-admin\.css'\)/)
-    expect(view).toMatch(/class="today-page hygiene-staff"/)
-    for (const cls of ['tA-card sched', 'tA-hd', 'shift', 'acts', 'tA-h', 'next3', 'tA-foot']) {
-      expect(view).toContain(cls)
-    }
-    expect(view).toMatch(/repeat\(3,\s*1fr\)/)
-  })
-
-  it('renders however many shifts the API returns', () => {
-    // 班次可配置（票 11 会加「早班」之类）：页面上不写死白/夜两个名字，
-    // 班次与工作区都从 `/me` 下来的那一行上取。
-    expect(view).not.toMatch(/['"]白班['"]/)
-    expect(view).not.toMatch(/['"]夜班['"]/)
-    expect(copy).not.toMatch(/['"]白班['"]/)
-    expect(copy).not.toMatch(/['"]夜班['"]/)
-    expect(copy).toMatch(/day\.shift_name/)
-    expect(copy).toMatch(/day\.zone_name/)
-  })
-
-  it('says the three things an employee can be', () => {
-    // 验收 2/3/6：「没你的班」「休」「白班 · 案板」是三句不同的话。
-    // 判据（`scheduled` / 空的 shift_id）只在 utils/todayShift.js 里读一次，
-    // 真单测在那儿（src/utils/__tests__/todayShift.test.js）；这一页只管摆版式。
-    expect(copy).toContain('今天没有你的班')
-    expect(copy).toContain('今天休息')
-    expect(copy).toMatch(/\$\{day\.zone_name\}/)
-    expect(copy).toMatch(/day\.scheduled/)
-    expect(copy).toMatch(/day\.shift_id == null/)
-    // 明天 / 后天写在卡片上。
-    expect(copy).toContain('明天')
-    expect(copy).toContain('后天')
-  })
-
-  it('把「休 / 还没排」的翻译交给 todayShift，不在这页重写一份', () => {
-    expect(view).toMatch(/from '\.\.\/\.\.\/utils\/todayShift'/)
-    for (const fn of [
-      'dayLabel',
-      'shiftText',
-      'todayHeadline',
-      'todaySubline',
-      'todayTone',
-      'nextTwoLine',
-    ]) {
-      expect(view).toContain(fn)
-    }
-    // 三态的判据读两遍就会漂：页面里不许再出现 scheduled / shift_id。
-    expect(view).not.toMatch(/day\.scheduled/)
-    expect(view).not.toMatch(/shift_id/)
-  })
-
-  it('卡上那行大字：五态色值两两不同（票 07 / C 批返工第二轮）', () => {
-    // 两轮返工都栽在同一件事上：撞车撞的是**值**不是名字。第一轮 `.shift.half` 取
-    // `--info`，值跟「请假」的 `--hy-aqua` 一样；第二轮改用 `--warn`，又跟「已调整」的
-    // `--hy-amber` 一样。只断一对时两轮都是绿的 —— 所以要 work / rest / half / leave /
-    // moved 一起解析回令牌层的值，整组两两比（`themeTokens.js` 的 `sameValueCollisions`）。
-    const headline = resolveStates(view, [
-      ['work', /\.shift\s*\{[^}]*color:\s*var\((--[\w-]+)\)/],
-      ['rest', /\.shift\.rest\s*\{[^}]*var\((--[\w-]+)\)/],
-      ['half', /\.shift\.half\s*\{[^}]*var\((--[\w-]+)\)/],
-      ['leave', /\.shift\.leave\s*\{[^}]*var\((--[\w-]+)\)/],
-      ['moved', /\.shift\.moved\s*\{[^}]*var\((--[\w-]+)\)/],
-    ])
-    expect(headline.half.name).toBe('--accent-alt')
-    expect(sameValueCollisions(headline), '两个态指到同值令牌，卡上就会有两句一样颜色的话')
-      .toEqual([])
-  })
-
-  it('往后三天的格子认识「休半天」：不给它上班色（票 07 / C 批返工）', () => {
-    // 三格的类名来自同一个 `shiftTone(day)`（`.next3 .s` 上的 `:class`），所以
-    // `half` 这个类**本来就已经带上**了；返工前缺的是这条规则 —— 没有它就落回
-    // `.next3 .s` 的兜底色（上班的薄荷），员工看着那天跟平常上班一样。
-    expect(view).toMatch(/<span class="s" :class="shiftTone\(day\)"/)
-    // 那一行五态一起比，判据与卡上那行大字同一套。
-    const row = resolveStates(view, [
-      ['work', /\.next3 \.s\s*\{[^}]*color:\s*var\((--[\w-]+)\)/],
-      ['rest', /\.next3 \.s\.rest\s*\{[^}]*var\((--[\w-]+)\)/],
-      ['half', /\.next3 \.s\.half\s*\{[^}]*var\((--[\w-]+)\)/],
-      ['leave', /\.next3 \.s\.leave\s*\{[^}]*var\((--[\w-]+)\)/],
-      ['moved', /\.next3 \.s\.moved\s*\{[^}]*var\((--[\w-]+)\)/],
-    ])
-    expect(sameValueCollisions(row), '三格里两个态同色，那一天就看不出是哪种安排')
-      .toEqual([])
-    // 点名那条最要紧的区分：它不能落回上班色（薄荷），`half` 规则缺了就会这样。
-    expect(row.half.value).not.toBe(row.work.value)
-    // 一色一处：跟卡上那行大字同源，改色只改一个地方。
-    const headline = resolveVar(view, /\.shift\.half\s*\{[^}]*var\((--[\w-]+)\)/)
-    expect(row.half.name).toBe(headline.name)
-    // 类名的来源仍是语气那一张表（页面不自己判 half_rest，也不另起一个类名）。
-    expect(copy).toMatch(/if \(day\.half_rest\) return 'half'/)
-  })
-
-  it('offers the three entries and no clock time anywhere', () => {
-    // 验收 4：三个入口（这一票点进去还是空的，页面上直说「还没开放」）。
-    for (const label of ['请假', '换班', '整月']) {
-      expect(view).toContain(label)
-    }
-    expect(view).toMatch(/还没开放/)
-    // 验收 5：整屏没有钟点 —— 班次没有起止时刻（文案与页面都不许冒出来）。
-    expect(view).not.toMatch(/\d{1,2}:\d{2}/)
-    expect(copy).not.toMatch(/\d{1,2}:\d{2}/)
+  it('卫生块不再挂在这一页（它归工作台首页），两条卫生接口这里一条都不发', () => {
+    expect(view).not.toMatch(/StaffHygieneCard/)
+    expect(view).not.toMatch(/staffRequest\('\/api\/hygiene\/staff\/daily-work'\)/)
+    expect(view).not.toMatch(/staffRequest\('\/api\/hygiene\/staff\/attire'\)/)
   })
 
   it('is registered as a staff page on both sides', () => {
     // SPA 页面要登记在：vue-router、main.py 的 SPA_PAGE_ROUTES（直连/反代硬导航）。
-    // **票 03 起不再登记进免墙表**：员工页搬进工作台（`/workbench/staff/*`）之后，页面壳的
-    // 放行根据是「任一会话有效」（`main.py` 的 `_is_workbench_page` + `_has_staff_session`），
-    // 不是路径 —— 工作台是「进去要登录」的页面区，服务端行为由
-    // `tests/test_auth.py` 的两条请求级用例盯着（未登录 302、带员工会话 200）。
     expect(router).toMatch(/workbenchStaffPage\('\/workbench\/staff\/today', 'today'/)
     expect(router).toMatch(/views\/today\/TodayView\.vue/)
-    // 票 02：「这是员工页」不再由路由级的 `staffAuth` 布尔表达，而是页面清单里的
-    // audience —— 三页共用的工厂 `workbenchStaffPage` 里由 `pageMeta(path)` 带进来
-    // （守卫与 App.vue 都按它判）。
     expect(router).toMatch(/function workbenchStaffPage\(path, name, loader\)[\s\S]{0,300}?pageMeta\(path\)/)
     expect(router).not.toMatch(/staffAuth/)
     expect(mainPy).toMatch(/SPA_PAGE_ROUTES = \([\s\S]*?"\/workbench\/staff\/today"/)
-    // 反向：旧的 `/staff` 与 `/staff/` 一条都不在免墙表里（audit 条目 15 的那条裸条目）。
     expect(mainPy).not.toMatch(/HTML_AUTH_EXACT = \{[^}]*"\/staff"/)
     expect(mainPy).not.toMatch(/HTML_AUTH_PREFIXES = \([\s\S]*?"\/staff\/"/)
-    // 旧路径连 vue-router 里的别名都不许留（票 04 的取舍）。
     expect(router).not.toMatch(/path: '\/staff/)
     expect(router).not.toMatch(/path: '\/today'/)
     expect(router).not.toMatch(/path: '\/today\/month'/)
     expect(router).not.toMatch(/path: '\/hygiene'/)
-    // 票 03 起员工登录页是 `/login` 的员工栏：守卫把原目标带上，不再是 `/hygiene/login`。
     expect(router).not.toMatch(/'\/workbench\/login'/)
     expect(router).toMatch(/path: '\/login', query: \{ next: buildLoginNextFromRoute\(to\) \}/)
+    // 整月页的返回按钮跟着改叫「我的」（这一格底栏标签也是「我的」）。
+    expect(month).toMatch(/@click="router\.push\('\/workbench\/staff\/today'\)">‹ 我的</)
   })
 
-  it('does not wait for the session probe before showing the shift', () => {
-    // 这一页自己那次请求就分得清 401 与断网（`load()`），守卫那次探针是重复劳动：
-    // 弱网下先白等一次超时（最长 4 秒）才轮到排班那条请求。三页都从同一个工厂拿
-    // 这个标记（票 03 把卫生待办那页也收齐了）。
+  it('does not wait for the session probe before showing the page', () => {
+    // 三页都从同一个工厂拿 `staffProbe: false`：弱网下不先白等一次探针超时。
     expect(router).toMatch(/function workbenchStaffPage\(path, name, loader\)[\s\S]{0,300}?staffProbe: false/)
     expect(router).toMatch(/if \(to\.meta\.staffProbe === false\) return true/)
   })
 
-  it('drops the employee on the today page after logging in', () => {
-    // 验收 1：登录后落到这一页。判据不在登录页里手写（那份比 util 弱，放松了没人拦），
+  it('drops the employee on the staff landing page after logging in', () => {
+    // 验收 1：登录后落到员工首页。判据不在登录页里手写（那份比 util 弱，放松了没人拦），
     // 而在 `utils/loginNext.js` 的 `resolveStaffNext` —— 真单测在 loginNext.test.js。
     expect(login).toMatch(/resolveStaffNext\(route\.query\.next\)/)
     expect(login).not.toContain('hygiene|today')
@@ -267,7 +213,10 @@ describe('两个弹层的点击账约束（DO:250-251 / DO:909-914 / DO:860-869 
     // 表单与判据整块住在 `components/scheduling/StaffDaySheet.vue`（那边有真挂载用例：
     // 起始日预填、提交上去的 body、事由上限、min-date 全在），这一页只把人送过去 ——
     // 不在这里再摆一套表单，免得同一件事两处判据各写一份。
-    expect(view).toMatch(/key: 'leave', label: '请假', to: \{ \.\.\.month, query: \{ date, act: 'leave' \} \}/)
+    // IA 第二层后这一页没有发起按钮（`ENTRIES` 已删）：表单只有月历那一处这条契约
+    // 由首页「请假」入口 → 本页 `?act` 转发 → 月历操作单这条链保证（断言见上面那组）。
+    expect(view).not.toMatch(/const ENTRIES = computed/)
+    expect(view).toMatch(/function forwardDayAction\(\)/)
     expect(view).not.toContain('leave-sheet-title')
   })
 })
@@ -290,14 +239,16 @@ describe('员工端请假（票 08）', () => {
     expect(view).not.toMatch(/(^|[^_a-zA-Z])employee_id\s*[:=]/)
   })
 
-  it('那两颗按钮带着日期与动作跳到月历那一天（票 15）', () => {
-    // 带过去的日期取**服务端的营业日**（`days[0].business_date`），不取手机上的今天：
-    // 手机时区可能不在东八区，而「过去的日子请不了假」是服务端按营业日判的。
-    expect(view).toMatch(/const date = \(today\.value && today\.value\.business_date\) \|\| ''/)
-    expect(view).toMatch(/key: 'swap', label: '换班', to: \{ \.\.\.month, query: \{ date, act: 'swap' \} \}/)
-    expect(view).toMatch(/router\.push\(entry\.to\)/)
+  it('这一页不再发起请假 / 换班：只留「我的申请」的看状态与撤回（票 15 / IA 第二层）', () => {
+    // 请假与换班的发起只有月历那一天的操作单（`StaffDaySheet`）。首页的员工档给了两个
+    // 直达入口，落到本页的 `?act=` 由 `forwardDayAction` 转进月历 —— 这一页自己不摆表单、
+    // 也不再有三颗入口按钮（`ENTRIES` 已随「我的班」块下线）。
+    expect(view).not.toMatch(/const ENTRIES = computed/)
+    expect(view).not.toMatch(/key: 'swap', label: '换班'/)
     // 表单那一套不在这页：日期控件、事由上限、提交按钮全在 StaffDaySheet 里。
     expect(view).not.toContain('day-leave-start')
+    // 撤回那条仍在这里（`DELETE .../<申请号>`）。
+    expect(view).toMatch(/staffRequest\(`\/api\/scheduling\/me\/requests\/\$\{request\.id\}`/)
   })
 
   it('撤回之后重读一次列表，店长那边先动过也不会留一条假记录', () => {
@@ -372,13 +323,12 @@ describe('员工端请假（票 08）', () => {
     expect(view).not.toContain('leaveError')
   })
 
-  it('三颗按钮都往月历走，请假与换班各带一个 act（票 15）', () => {
-    // 票 06 时三个入口点进去都是「还没开放」；票 08 接上请假、票 09 接上换班、票 15 把
-    // 这两件事收进月历那一天。`open()` 里最后那句兜底仍在（将来再加一颗没配 `to` 的按钮时，
-    // 它说的是真话，而不是静默什么都不做）。
-    expect(view).toMatch(/key: 'month', label: '整月', to: month/)
-    expect(view).toMatch(/const ENTRIES = computed/)
-    expect(view).toMatch(/note\.value = `「\$\{entry\.label\}」还没开放`/)
+  it('页头右手的「整月 ›」是这一页唯一去月历的入口（IA 第二层）', () => {
+    // 「我的班」块删掉后，整月入口只剩页头这一颗；请假/换班的发起仍只有月历那一天，
+    // 首页那两个直达入口靠本页的 `?act` 转发（断言在上面 IA 第二层那组里）。
+    expect(view).toMatch(/class="tTop-link" to="\/workbench\/staff\/month">整月 ›</)
+    expect(view).not.toMatch(/key: 'month', label: '整月', to: month/)
+    // 五态翻译仍由 utils 负责（页面不再摆班次，但这张表还是全仓唯一一份）。
     expect(copy).toContain('今天请假')
     expect(copy).toContain("if (day.leave) return '请假'")
   })
@@ -420,15 +370,15 @@ describe('员工端换班（票 09）', () => {
     expect(view).toMatch(/\.tag\.swap \{/)
   })
 
-  it('订阅排班与卫生 nudge：这块几件事一起重读（票 10 收尾）', () => {
-    // 换班那条尤其要紧：对方不开页面就永远不知道有人找他换 —— 这也是这几个页面里
-    // 唯一「别人动作直接影响我」的地方。今天要交的卫生那一块搬去工作台首页之后
-    // 有了自己的订阅（`StaffHygieneCard`），这一页的 pull 里只剩自己那三件。
+  it('订阅排班与卫生 nudge：申请 / 资料 / 成绩三块一起重读（票 10 收尾）', () => {
+    // 换班那条尤其要紧：对方不开页面就永远不知道有人找他换。这一页不再读「我的班」，
+    // 所以 pull 里没有那条排班请求，只剩自己的三份数据。
     expect(view).toMatch(/useNudgePull\(\{/)
     expect(view).toMatch(/topics: \['scheduling', 'hygiene'\]/)
-    expect(view).toMatch(/load\(true\)/)
     expect(view).toMatch(/loadRequests\(true\)/)
     expect(view).toMatch(/loadHygiene\(\)/)
+    expect(view).toMatch(/loadScore\(true\)/)
+    expect(view).not.toMatch(/load\(true\)/)
     expect(view).not.toMatch(/loadHygiene\(true\)/)
   })
 })
@@ -485,11 +435,12 @@ describe('账号设置（2026-10-05 从卫生页的「我」整格搬来）', ()
     expect(view).toMatch(/if \(newPassword\.value !== confirmPassword\.value\)/)
   })
 
-  it('「重新选择区域和班次」不自选：说清由排班决定，并把人送回顶上那张排班卡', () => {
+  it('「重新选择区域和班次」不自选：说清由排班决定，并把人送到整月', () => {
     // 票 10 撤掉了员工自选班次/工作区那条路，搬过来也不许偷偷装回来。
+    // IA 第二层后「我的班」块已删：这一行改成送到整月（那一天点开就是名单与工作区），
+    // 口径不变 —— 区域与班次不在这里自选，要改是排班页（超级管理员）的事。
     expect(view).toMatch(/function openShiftNotice\(\)/)
-    // 那句话随票 15 更新（请假 / 换班的入口搬到了月历那一天），口径不变：
-    // 区域与班次不在这里自选，要改是排班页（超级管理员）的事。
+    expect(view).toMatch(/router\.push\('\/workbench\/staff\/month'\)/)
     expect(view).toMatch(/今天上哪个班、在哪个区由排班决定/)
     expect(view).toMatch(/class="tA-sub sched-note"/)
     expect(view).not.toMatch(/api\/hygiene\/staff\/assignment/)

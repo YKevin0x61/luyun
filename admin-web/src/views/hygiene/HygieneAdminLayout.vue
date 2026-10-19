@@ -1,5 +1,5 @@
 <script setup>
-// 卫生验收这一组（八页）的落点壳。
+// 现场（卫生验收八页）这一组的落点壳。
 //
 // **③-2 起它只是统一壳的一层薄包装**（ADR 0105）：顶栏 / 身份 / 退出 / 工作台级导航 /
 // 手机档页头 / 底栏 / 样式表挂载都在 `views/workbench/WorkbenchShell.vue` 里。这里只留
@@ -26,7 +26,7 @@ import { workbenchGroup } from '../../utils/workbenchNav'
 const route = useRoute()
 const standardPhotoCache = useStandardPhotoCacheStore()
 
-// 「卫生验收」那一行给 rail 与手机档页头一个自己的名字（工作台导航里那一格的落点与门牌
+// 这一行给 rail 与手机档页头一个自己的名字（工作台导航里「现场」那一格的落点与门牌
 // 由那一份组表给）。
 const fieldGroup = workbenchGroup('floor')
 

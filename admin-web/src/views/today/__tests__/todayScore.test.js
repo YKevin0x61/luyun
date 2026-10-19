@@ -156,7 +156,8 @@ describe('「我的成绩」卡：近 7 天的次数口径（与红黑榜同一�
     const card = wrapper.get('.tA-card.score')
     expect(card.text()).toContain('统计读不出来')
     expect(card.findAll('button').some((btn) => btn.text() === '重试')).toBe(true)
-    // 上面那几张卡不受牵连。
-    expect(wrapper.find('.tA-card.sched').exists()).toBe(true)
+    // 上面那几张卡不受牵连。IA 第二层后本页不再有「我的班」卡（`/workbench/staff/today`
+    // 收窄成「我的」）—— 用「我的资料」那张卡作「别的块照常」的判据。
+    expect(wrapper.find('.tA-card.me').exists()).toBe(true)
   })
 })

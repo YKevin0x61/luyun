@@ -274,7 +274,7 @@ describe('工作台外壳的导航', () => {
     // 不改权限、也不改守卫。票 08 起后勤那一格是多扇门（配方 + 备货计划 + 损耗分析）。
     const items = wrapper.findAll('.wb-nav-item')
     expect(items.map((item) => item.text())).toEqual([
-      '今天', '人事', '卫生验收', '选择岗位', '备货计划', '损耗分析',
+      '今天', '人事', '现场', '选择岗位', '备货计划', '损耗分析',
     ])
     expect(items.map((item) => item.attributes('href'))).toEqual([
       '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
@@ -294,7 +294,7 @@ describe('工作台外壳的导航', () => {
 
     expect(store.identity).toBe('staff')
     expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
-      // 员工那一格仍叫「卫生」（③-2 改的是超管那一格：卫生 → 卫生验收）。
+      // 员工那一格叫「卫生」；管理端那一格 2026-10-19 起叫「现场」。
       '今天', '卫生', '选择岗位', '备货计划', '我的',
     ])
   })

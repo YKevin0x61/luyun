@@ -86,7 +86,11 @@ async function mountToday({ onPatch } = {}) {
   setActivePinia(pinia)
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/workbench/staff/today', component: { template: '<div />' } }],
+    routes: [
+      { path: '/workbench/staff/today', component: { template: '<div />' } },
+      // 「重新选择区域和班次」按 IA 第二层改送到整月（那一页点开每一天就是名单与工作区）。
+      { path: '/workbench/staff/month', component: { template: '<div />' } },
+    ],
   })
   await router.push('/workbench/staff/today')
   await router.isReady()
@@ -94,7 +98,7 @@ async function mountToday({ onPatch } = {}) {
   const wrapper = mount(TodayView, { global: { plugins: [router, pinia] } })
   await flushPromises()
   await flushPromises()
-  return { wrapper, writes }
+  return { wrapper, writes, router }
 }
 
 /** 找到那三行入口里的一行（按钮文案是「修改」/「怎么改」）。 */
@@ -231,20 +235,16 @@ describe('「今天」页尾的账号设置（从卫生页搬来）', () => {
     expect(wrapper.text()).toContain('密码已修改，其他设备上的登录已失效。')
   })
 
-  it('第三行不自选：点一下只说清由排班决定，并把页面送回顶上那张排班卡', async () => {
-    const { wrapper, writes } = await mountToday()
-    const scrolled = []
-    Element.prototype.scrollIntoView = function scrollIntoView(options) {
-      scrolled.push({ el: this, options })
-    }
+  it('第三行不自选：点一下送到整月（班/区就在那一天的面板里）', async () => {
+    // IA 第二层（2026-10-19）：本页不再有「我的班」卡可滚回去，第三行改成送到整月 ——
+    // 口径不变（区域与班次不在这里自选，要改是排班页/超级管理员的事）。
+    const { wrapper, writes, router } = await mountToday()
     await rowButton(wrapper, '重新选择区域和班次').trigger('click')
     await flushPromises()
 
-    // 那句话随票 15 更新（月历成了请假 / 换班的入口）：口径不变 —— 区域与班次不在这里
-    // 自选，要改是排班页（超级管理员）的事。
+    expect(router.currentRoute.value.path).toBe('/workbench/staff/month')
     expect(wrapper.text()).toContain('今天上哪个班、在哪个区由排班决定')
     expect(wrapper.text()).toContain('请假、换班在月历上点那一天办')
-    expect(scrolled).toHaveLength(1)
     // 一个选择器都不该弹出来，也没有任何写请求（员工改不了班次与区）。
     expect(wrapper.find('select').exists()).toBe(false)
     expect(writes).toEqual([])

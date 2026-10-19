@@ -10,7 +10,7 @@
 //
 // 这次不把三组硬并进同一个 Layout（那是大改结构，风险与收益不成比例），走的是**小步**：
 // 把工作台级那一排导航抽成这一颗组件，让三个壳都渲染同一份 ——
-//   - 表还是那唯一一张（`utils/workbenchNav.js`，一格一组、按身份过滤）；
+//   - 表是 `utils/workbenchNav.js` 里的两张显式表（管理端 / 员工端各一张，按身份取）；
 //   - 高亮还是那一个判据（页面的 `group`，不按路径前缀比）；
 //   - 布局（要不要换行、横滑、靠哪边）留给各自的壳：组件自己只出**一条 nav 与它的胶囊**，
 //     不带 `margin-left: auto` 这类"我在顶栏最右"的假设（那是 `WorkbenchLayout` 的事）。
@@ -38,8 +38,8 @@ const currentGroup = computed(() => workbenchGroupOf(route.path))
 /** 按**格**把条目分好组（一处渲染）：一格里的条目共享一个 key，键序仍是组表里的顺序。
  *
  *  标题的取法跟着"这一格有几扇门"走：
- *  - **一格一门**（今天 / 人事 / 现场 / 我的）—— 用组表里的 `label`；
- *  - **一格多门**（后勤：配方 + 备货计划）—— 每一半用它**自己那一页在清单里的名字**
+ *  - **一格一门**（今天 / 人事 / 现场 / 卫生 / 我的）—— 用组表里的 `label`；
+ *  - **一格多门**（后勤：配方 + 备货计划 + 损耗分析）—— 每一半用它**自己那一页在清单里的名字**
  *    （同一颗胶囊里写两遍「后勤」看不出哪一半是哪一页）。名字从页面清单取（`pageTitle`），
  *    不在这里另写一份词表。 */
 const navCells = computed(() => {
@@ -72,7 +72,7 @@ function isCurrentLink(cell, item) {
 
 <template>
   <nav class="wb-nav" aria-label="工作台导航">
-    <!-- 一格一颗胶囊：单条目那一格就是一个链接；多条目那一格（后勤）是同一颗里的两条
+    <!-- 一格一颗胶囊：单条目那一格就是一个链接；多条目那一格（后勤）是同一颗里的多条
          链接，`is-multi` 只收窄内边距。整格是否当前由 `is-on` 判（按页面清单的 group），
          哪一半贴着"当前"由 `is-current` 判（这一格 + 这条链接自己的路径）。 -->
     <span
@@ -103,7 +103,7 @@ function isCurrentLink(cell, item) {
 .wb-nav { display: flex; align-items: stretch; gap: 2px; min-width: 0; }
 .wb-nav-cell {
   position: relative; display: inline-flex; align-items: stretch;
-  /* 下划线挂在格上（不是链接上）：`.is-multi`（后勤两扇门）因此只有一条线。 */
+  /* 下划线挂在格上（不是链接上）：`.is-multi`（后勤多扇门）因此只有一条线。 */
 }
 .wb-nav-item {
   display: inline-flex; align-items: center;

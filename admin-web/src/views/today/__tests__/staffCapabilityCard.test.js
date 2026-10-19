@@ -169,10 +169,11 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     expect(wrapper.text()).not.toContain('你能做的事')
     expect(wrapper.text()).not.toContain('超级管理员还没开给你')
 
-    // 其余几块一块都不少：今天上不上班、我的成绩、账号信息。
-    // （今天的活那一块 2026-10-14 搬去了工作台首页，这块由
-    // `components/staff/__tests__/staffHygieneCard.test.js` 盯着。）
-    expect(wrapper.get('.tA-card.sched').text()).toContain('白班')
+    // 其余几块一块都不少：页头（我的）、我的成绩、我的资料。
+    // （IA 第二层 2026-10-19：「我的班」块从本页删掉，班次/请假/换班归工作台首页；
+    // 今天的活那一块 2026-10-14 搬去工作台首页，由 staffHygieneCard.test 盯着。）
+    expect(wrapper.get('.tDay').text()).toBe('我的')
+    expect(wrapper.find('.tA-card.sched').exists()).toBe(false)
     expect(wrapper.find('.tA-card.hyg').exists()).toBe(false)
     expect(wrapper.find('.tA-card.score').exists()).toBe(true)
     // t71：姓名已折进「完整资料」二级视图 —— 主表不再有它，但点开必须可达

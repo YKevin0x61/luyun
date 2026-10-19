@@ -2,7 +2,7 @@
 // **统一的壳**（③-2 / ADR 0105：三壳合一）。
 //
 // 在此之前工作台有三套壳，各自实现导航 / 身份 / 退出 / 手机页头：`WorkbenchLayout`（首页 /
-// 后勤 / 我的）、`SchedulingLayout`（人事）、`HygieneAdminLayout`（卫生验收）。三份的差异
+// 后勤 / 我的）、`SchedulingLayout`（人事）、`HygieneAdminLayout`（现场）。三份的差异
 // 只有「怎么摆」，共用件与导航表本来就已经是同一份 —— 于是这一票把「怎么摆」也收拢到一处：
 // 三个壳都变成这一个外壳的薄包装，各自只留自己的附加件（实时点、本组牌子、页内边距）。
 //
@@ -17,7 +17,7 @@
 // 与导航面一起变 —— 切换**只改视图与导航面**，页面能不能打开仍是路由守卫与服务端页面墙的事。
 //
 // 组内页（rail 与页头下拉里的那些）= `workbenchPagesOf(group, audience)`：**group + 落点页
-// `audience` 双层过滤**（spec §5.13），所以员工在「配方」组看不到「岗位二维码 / 配方管理」
+// `audience` 双层过滤**（spec §5.13），所以员工在「后勤」组看不到「岗位二维码 / 配方管理」
 // 那两扇点不通的门。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -54,7 +54,7 @@ const props = defineProps({
   group: { type: String, default: '' },
   /** 本组条目（手写名单优先，如卫生八页带图标）；不给就从页面清单派生。 */
   items: { type: Array, default: null },
-  /** rail 的 `aria-label`；不给就用组名（卫生那一组要「工作台 · 卫生验收」那种读法）。 */
+  /** rail 的 `aria-label`；不给就用组名（现场那一组读「工作台 · 现场」）。 */
   label: { type: String, default: '' },
 })
 
@@ -232,7 +232,7 @@ watch(identity, keepViewAllowed)
       <!-- 牌子写的是「工作台」，就指工作台首页（B2）。 -->
       <router-link class="wb-brand" :to="WORKBENCH_HOME">{{ WORKBENCH_TITLE }}</router-link>
       <WorkbenchIdentitySwitcher class="wb-id-switcher" />
-      <!-- 工作台级导航（今天 / 人事 / 卫生验收 / 配方 / 我的）：表与高亮都在
+      <!-- 工作台级导航（今天 / 人事 / 现场 / 后勤 / 我的）：表与高亮都在
            `components/workbench/WorkbenchNav.vue` 里，三个壳渲染的是同一颗。 -->
       <WorkbenchNav class="wb-nav" />
       <!-- 本组的附加件（人事壳那个实时点）。 -->

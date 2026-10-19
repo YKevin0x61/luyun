@@ -372,11 +372,17 @@ describe('月历页与今天页把这两件事送过来（票 15 的接线）', 
     expect(monthView).not.toMatch(/staffRequest\([^)]*me\/day/)
   })
 
-  it('今天页那两颗按钮带着日期与动作跳到月历，不再就地弹表单', () => {
-    expect(todayView).toMatch(/const ENTRIES = computed/)
-    expect(todayView).toMatch(/key: 'leave', label: '请假', to: \{ \.\.\.month, query: \{ date, act: 'leave' \} \}/)
-    expect(todayView).toMatch(/key: 'swap', label: '换班', to: \{ \.\.\.month, query: \{ date, act: 'swap' \} \}/)
-    expect(todayView).toMatch(/router\.push\(entry\.to\)/)
+  it('「我的」页不再就地弹表单：首页那两个入口落到本页后转进月历', () => {
+    // IA 第二层（2026-10-19）：`/workbench/staff/today` 收窄成「我的」，「我的班」块与
+    // 三颗入口按钮（`ENTRIES`）都删了。首页员工档的「请假 / 换班」两个直达入口落在
+    // `?act=leave|swap&date=`，由本页 `forwardDayAction()` 转进月历那一天的操作单 ——
+    // 所以“表单只有月历那一处”这条契约不变，只是入口从本页按钮换成了首页链接。
+    expect(todayView).toMatch(/function forwardDayAction\(\)/)
+    expect(todayView).toMatch(/actFromQuery\(route\.query\)/)
+    expect(todayView).toMatch(/dateFromQuery\(route\.query\)/)
+    expect(todayView).toMatch(/path: '\/workbench\/staff\/month'/)
+    expect(todayView).toMatch(/router\.replace\(\{/)
+    expect(todayView).not.toMatch(/const ENTRIES = computed/)
     // 两套表单退场：这一页不再有请假 / 换班的输入框与提交。
     expect(todayView).not.toContain('leave-sheet-title')
     expect(todayView).not.toContain('swap-sheet-title')

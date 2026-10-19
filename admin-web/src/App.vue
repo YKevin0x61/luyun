@@ -91,10 +91,10 @@ watch(
 
 <style scoped>
 /* 登录 / 配置页自带全屏背景与内边距，去掉主壳给 `.page-body` 加的外边距，避免双重滚动条。
-   工作台那几组（今天 / 人事 / 卫生验收 / 配方 / 我的）也是 `standalone`，走的是同一条：
+   工作台那几组（今天 / 人事 / 现场 / 后勤 / 我的）也是 `standalone`，走的是同一条：
    **页面区就是它们唯一的滚动容器**（统一壳 `WorkbenchShell` 的 `.wb-top` sticky 也挂在这条上）。
 
-   **不许再给哪一组把页面区锁成 `overflow: hidden`** —— 2026-10-12 报的「卫生验收八页
+   **不许再给哪一组把页面区锁成 `overflow: hidden`** —— 2026-10-12 报的「现场八页
    一根手指都推不动」就是这么来的：现场那八页原先靠**旧卫生壳**的整屏锁（`.hygiene-app`
    的 `height: 100%` + `min-height: 0`）让 `.hy-main` 自己在内部滚，三壳合一（ADR 0105）
    把那条整屏锁删掉了，却把 `page-body-hygiene { overflow: hidden }` 留在页面区上：外层

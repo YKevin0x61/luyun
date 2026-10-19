@@ -47,14 +47,14 @@ afterEach(() => {
   vi.resetModules()
 })
 
-describe('工作台级导航（今天 / 人事 / 卫生 / 后勤 / 我的）', () => {
+describe('工作台级导航（管理端：今天 / 人事 / 现场 / 后勤；员工端：今天 / 卫生 / 后勤 / 我的）', () => {
   it('店长这一档：五个门都在，「今天」指 /workbench（B2 那条回首页的路）', async () => {
     const wrapper = await mountNav('/workbench/hr/calendar', 'super')
 
     // 后勤那一格现在有三条：配方（选择岗位）/ 备货计划 / 损耗分析 —— 前两条 `both`、
     // 最后一条只给管理端，所以店长这一档三条都在。
     expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
-      '今天', '人事', '卫生验收', '选择岗位', '备货计划', '损耗分析',
+      '今天', '人事', '现场', '选择岗位', '备货计划', '损耗分析',
     ])
     expect(wrapper.get('a[href="/workbench"]').text()).toBe('今天')
     // 站在人事组里，「人事」那一格亮。

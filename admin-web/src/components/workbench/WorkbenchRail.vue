@@ -17,7 +17,7 @@ import SvgIcon from '../SvgIcon.vue'
 defineProps({
   /** `[{ path, title, icon?, shortTitle? }]` —— 组内页；标题一律来自页面清单（不许硬编码）。 */
   items: { type: Array, default: () => [] },
-  /** rail 的 `aria-label`（本组名，如「卫生验收」）。 */
+  /** rail 的 `aria-label`（本组名，如「现场」「人事」）。 */
   label: { type: String, default: '' },
 })
 

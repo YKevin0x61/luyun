@@ -242,9 +242,10 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
       RECIPE_HOME_PATH, PREP_PLAN_PATH, WASTAGE_ANALYSIS_PATH,
     ])
     expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
-    // rail 自己的名字跟着组名走：工作台 · 卫生验收（组名 2026-10-09 由「卫生」改成「卫生验收」，
-    // 与工作台导航里那一格同一个词 —— 名单在 `utils/workbenchNav.js` 一处）。
-    expect(wrapper.get('.wb-rail').attributes('aria-label')).toBe('工作台 · 卫生验收')
+    // rail 自己的名字跟着组名走：工作台 · 现场（2026-10-19 信息架构重排第二层：
+    // 管理端那一格从「卫生验收」收口成「现场」，与工作台导航里那一格同一个词 ——
+    // 名单在 `utils/workbenchNav.js` 的 ADMIN_NAV_GROUPS 一处）。
+    expect(wrapper.get('.wb-rail').attributes('aria-label')).toBe('工作台 · 现场')
   })
 
   it('rail 里那扇单门「人事」没了：跨组由工作台级导航接手', async () => {

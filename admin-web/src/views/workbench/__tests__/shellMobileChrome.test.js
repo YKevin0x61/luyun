@@ -204,7 +204,7 @@ describe('方案 C / B6：手机档顶部只剩一行，目标 ≥44px', () => {
     expect(TABBAR).toMatch(/env\(safe-area-inset-bottom/)
     // 方案 C：连顶上那一条（`‹后台 + 牌子 + 切换器 + 退出`）在手机档也收掉 —— 三件事都进
     // `WorkbenchMobileHead` 那一行：换页进组内下拉、退出与「回管理后台」进 `⋮`。
-    // 后勤（产品）组的配方页原来还自带一条 133px 的白色工具栏，叠起来是 182px 的「两条顶栏」。
+    // 后勤组的配方页原来还自带一条 133px 的白色工具栏，叠起来是 182px 的「两条顶栏」。
     expectMobileRule(SHELL, /\.wb-top\s*\{\s*display:\s*none/, '顶栏在手机档收起')
     expect(SHELL).toMatch(/components\/workbench\/WorkbenchMobileHead\.vue/)
     expect(SHELL).toMatch(/<WorkbenchMobileHead[^>]*\/>/)

@@ -240,7 +240,9 @@ useNudgePull({
         <p class="tDate">{{ employee ? employee.name : '' }}</p>
       </div>
       <div class="tTop-side">
-        <button class="tBack" type="button" @click="router.push('/workbench/staff/today')">‹ 今天</button>
+        <!-- 返回的那一页（`/workbench/staff/today`）从「我的今天」收窄成「我的」：标签跟着走，
+         底栏那一格也叫「我的」，两个名字对得上。 -->
+        <button class="tBack" type="button" @click="router.push('/workbench/staff/today')">‹ 我的</button>
       </div>
       <!-- 退出**不在这里**（D5）：工作台外壳顶栏那一颗是员工三页共用的唯一一颗
            （`WorkbenchLayout` 的 `WorkbenchExitButton`，员工那一档走 `useStaffLogout`）。 -->
