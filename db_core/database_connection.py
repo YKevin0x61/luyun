@@ -28,6 +28,7 @@ from db_core.schema import (
     OVERTIME_TABLES,
     RECIPE_TABLES,
     SCHEDULING_TABLES,
+    WASTAGE_TABLES,
     WECOM_SUBSCRIPTION_TABLES,
 )
 
@@ -77,6 +78,7 @@ class DatabaseConnection:
                 + list(WECOM_SUBSCRIPTION_TABLES)
                 + list(OVERTIME_TABLES)
                 + list(ATTENDANCE_TABLES)
+                + list(WASTAGE_TABLES)
             )
             for table in tables:
                 self._table_views[table] = TableView(table, self)

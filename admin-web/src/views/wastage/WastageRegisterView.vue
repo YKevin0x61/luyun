@@ -6,8 +6,8 @@
  * 以及**看自己最近记的几笔**（员工最常问的是「我那天记了没有」）。
  *
  * 两个身份都能进（页面清单里是 `audience: both`）：员工用员工会话、店长用管理端会话。
- * 接口按**归属**分——员工只看得到自己记的，全店数据在管理端的 `/workbench/kitchen/loss`。
- * 所以这一页上没有任何「看别人的」入口。
+ * 接口按**归属**分——员工只看得到自己记的；全店统计与明细在 `/workbench/kitchen/loss`
+ * （管理端，或勾了「损耗分析」能力的员工）。所以这一页上没有任何「看别人的」入口。
  *
  * 三样东西来自服务端，页面不写第二份：`GET /api/wastage/meta`（六个原因、常用单位、
  * 那四个上限、今天）、`/templates`（我存过的 + 我最近常这么记的）、`/suggestions`
@@ -20,6 +20,10 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
+// 页内取景用卫生那套现成的相机（`getUserMedia` + canvas 出 JPEG）：2026-10-17 用户裁定
+// 「像拍卫生照一样，不跳系统相机」。它同时解决了 iPhone 的 HEIC —— 页内相机拍出来直接是
+// JPEG；走系统相机拿到的是 HEIC，后端认不出格式会拒（用户真机上撞的就是这个）。
+import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import { api } from '../../api/client.js'
 import { loginRedirectTarget } from '../../utils/loginNext'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
@@ -49,6 +53,8 @@ const remark = ref('')
 const day = ref('')
 const images = ref([])
 const uploading = ref(false)
+/** 页内相机是否展开：点「拍一张」就地打开取景框（不跳系统相机），拍满 3 张自动收起。 */
+const cameraOpen = ref(false)
 
 const templates = ref([])
 const suggestions = ref([])
@@ -175,26 +181,34 @@ async function removeTemplate(tpl) {
   }
 }
 
-/** 拍照回来的那一张（系统相机一次交一张；循环留着是因为桌面档的 file input 仍然可能
- *  一次给出多张，那条路不该因为这次改动就坏掉）。 */
-async function onPickFiles(event) {
-  const files = Array.from(event.target.files || [])
-  event.target.value = ''
-  formError.value = ''
-  for (const file of files) {
-    if (images.value.length >= maxImages.value) {
-      formError.value = `现场照片最多 ${maxImages.value} 张`
-      break
-    }
-    await uploadOne(file)
+/** 点「拍一张」：就地展开取景框（页内相机，不跳系统相机）。 */
+function openCamera() {
+  if (images.value.length >= maxImages.value) {
+    formError.value = `现场照片最多 ${maxImages.value} 张`
+    return
   }
+  formError.value = ''
+  cameraOpen.value = true
 }
 
-async function uploadOne(file) {
+function closeCamera() {
+  cameraOpen.value = false
+}
+
+/** 页内相机交回一张 JPEG（长边 1600、q0.75）：直接传，传完缩略图就出现在首位那块里。
+ *
+ *  拍满 3 张自动收起相机 —— 否则取景框还开着、按钮已经点不动，看着像卡住了。 */
+async function onCaptured(blob) {
+  await uploadOne(blob, 'wastage.jpg')
+  if (images.value.length >= maxImages.value) cameraOpen.value = false
+}
+
+async function uploadOne(file, filename = 'wastage.jpg') {
   uploading.value = true
+  formError.value = ''
   try {
     const form = new FormData()
-    form.append('file', file)
+    form.append('file', file, filename)
     const data = await api.upload('/api/wastage/images', form)
     images.value = [...images.value, data.image]
   } catch (err) {
@@ -274,10 +288,9 @@ onMounted(() => {
       <p v-if="note" class="loss-note" role="status">{{ note }}</p>
 
       <!-- 现场照片**排在最前**（2026-10-17 用户裁定）：损耗是当场发生的事 —— 先把眼前
-           这一堆拍下来，再慢慢填物料与数量。点一下就**直接调起系统相机**
-           （`capture="environment"` 让手机浏览器开相机而不是弹「拍照 / 相册」菜单），
-           所以这里没有「从相册选」这条路：登记的是此刻现场，不是相册里的旧图。
-           一次拍一张（系统相机就是一张一交），最多三张。 -->
+           这一堆拍下来，再慢慢填物料与数量。点「拍一张」**就地展开取景框**
+           （页内相机，不跳系统相机）：拍出来是 JPEG，也没有「从相册选」这条路 ——
+           登记的是此刻现场。一次一张、最多三张，拍满自动收起。 -->
       <section class="loss-block">
         <div class="loss-block-hd">
           <span>现场照片</span>
@@ -288,19 +301,32 @@ onMounted(() => {
             <img :src="shot.url" alt="现场照片" />
             <button type="button" class="loss-shot-x" :aria-label="`删掉第 ${index + 1} 张`" @click="removeImage(index)">×</button>
           </figure>
-          <label v-if="images.length < maxImages" class="loss-shot-add loss-shot-camera">
-            <input
-              type="file"
-              accept="image/*"
-              capture="environment"
-              class="loss-file"
-              @change="onPickFiles"
-            />
+          <button
+            v-if="images.length < maxImages && !cameraOpen"
+            type="button"
+            class="loss-shot-add loss-shot-camera"
+            @click="openCamera"
+          >
             <span class="loss-shot-plus" aria-hidden="true">＋</span>
             <span>{{ uploading ? '上传中…' : '拍一张' }}</span>
-          </label>
+          </button>
         </div>
-        <p class="loss-hint loss-photo-tip">点一下打开相机；拍完先搁着，接着填下面这一笔。</p>
+
+        <!-- 页内相机：点「拍一张」**就地**展开取景框，拍完立刻上传 —— 不是跳系统相机，
+             所以拍出来是 JPEG（iPhone 系统相机给的 HEIC 后端认不出）。相机组件是卫生
+             那套（`components/hygiene/HygieneLiveCamera.vue`）：后置镜头、可切广角，
+             拍满 3 张自动收起。 -->
+        <div v-if="cameraOpen" class="loss-camera">
+          <HygieneLiveCamera @captured="onCaptured" />
+          <div class="loss-camera-actions">
+            <button type="button" class="btn" @click="closeCamera">收起相机</button>
+            <span class="loss-hint">
+              {{ uploading ? '正在上传…' : `拍完自动上传，最多 ${maxImages} 张` }}
+            </span>
+          </div>
+        </div>
+
+        <p class="loss-hint loss-photo-tip">点「拍一张」就地打开相机；拍完先搁着，接着填下面这一笔。</p>
       </section>
 
       <!-- 常用模板：我存过的（可删）在前，我最近常这么记的在后。 -->
@@ -528,13 +554,17 @@ onMounted(() => {
 .loss-shot-add {
   display: flex; align-items: center; justify-content: center; width: 84px; height: 84px;
   border: 1px dashed var(--line-strong); border-radius: 8px;
-  font-size: 12px; color: var(--ink-dim); cursor: pointer; text-align: center;
+  background: transparent;
+  font-family: inherit; font-size: 12px; color: var(--ink-dim);
+  cursor: pointer; text-align: center;
 }
 /* 首位那颗「拍一张」：竖排（加号在上、字在下），触控面积就是一整格。 */
 .loss-shot-camera { flex-direction: column; gap: 2px; }
 .loss-shot-plus { font-size: 20px; line-height: 1; }
+/* 页内相机：取景框 + 一条「收起相机」。视频尺寸由组件自己定（宽 100%、最小 240px 高）。 */
+.loss-camera { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.loss-camera-actions { display: flex; align-items: center; gap: 10px; }
 .loss-photo-tip { margin: 8px 0 0; }
-.loss-file { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .loss-actions { display: flex; gap: 10px; }
 /* 触控下限走令牌（`--tap` = 44px）：手机上登记是常做的事，按钮不该小于一指宽。 */
 .loss-actions .btn { min-height: var(--tap); }

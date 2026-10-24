@@ -68,31 +68,21 @@ BUSINESS_READ_PATHS = (
     "/api/recipes/stations/changfen",
 )
 
-# 备货计划的读面（票 08）：搬进工作台的「后勤」组之后，读端点从「仅管理端」改成
-# 「任一身份」门（ADR 0092 那张契约表的「备货计划读端点」一行）。单独列一份是因为
-# 除了「无凭据 401」，它还有两条自己的断言（员工会话 200 拿到同一份内容、写端点仍 401）——
-# 见下面的 `test_prep_plan_reads_accept_any_identity_session`。
+# 备货计划的读面（ADR 0117 重建后只剩四条）：今天这张清单、首页卡片、备货品主数据、
+# 员工今天的档口。改「任一身份门」的原因没变（ADR 0092）：师傅自己就要看得见、勾得动。
 PREP_PLAN_READ_PATHS = (
-    "/api/prep-plan/closed-days",
-    "/api/prep-plan/current",
-    "/api/prep-plan/forecast",
-    # `/accuracy` 也是读端点（code-review 指出：票 08 曾把它留在管理端 router，与 ADR 0092
-    # 契约表的「备货计划读端点 → 任一身份」不符；收尾时并到 reader_router）。
-    "/api/prep-plan/accuracy",
+    "/api/prep-plan/today",
+    "/api/prep-plan/summary",
+    "/api/prep-plan/items",
+    "/api/prep-plan/staff-station",
 )
 
-# 少数读端点要参数才是 200（缺参数会是 422，那是形态问题、与鉴权门无关）。
-PREP_PLAN_READ_QUERY = {
-    "/api/prep-plan/accuracy": {"start_date": "2026-10-01", "end_date": "2026-10-05"},
-}
+PREP_PLAN_READ_QUERY = {}
 
-# 备货计划的写面（票 08 不动的部分）：**仍只认管理端**。
+# 备货计划的写面：**仍只认管理端**。「改全店的数」不该握在师傅手里。
 PREP_PLAN_WRITE_PATHS = (
-    ("POST", "/api/prep-plan/generate", {"method": "weighted_history"}),
-    ("POST", "/api/prep-plan/init-items-from-rules", None),
-    # 歇业日的增删也走写面：页面上那块维护区只有管理端渲染得出按钮
-    ("POST", "/api/prep-plan/closed-days", {"day": "2026-12-25"}),
-    ("DELETE", "/api/prep-plan/closed-days/2026-12-25", None),
+    ("POST", "/api/prep-plan/today/recompute", None),
+    ("PATCH", "/api/prep-plan/items/1", {"kind": "bought"}),
 )
 
 
@@ -581,10 +571,10 @@ def test_prep_plan_reads_accept_any_identity_session(api):
         as_staff = api.as_staff("GET", path, params=PREP_PLAN_READ_QUERY.get(path))
         assert as_staff.status_code == 200, f"{path} 员工会话 {as_staff.status_code}: {as_staff.text}"
 
-    # 两把钥匙拿到的是同一份内容（读面不分身份裁剪）。
-    as_admin = api.as_cookie("GET", "/api/prep-plan/current")
-    as_staff = api.as_staff("GET", "/api/prep-plan/current")
-    assert as_admin.json() == as_staff.json()
+    # 两把钥匙读的是同一天（内容按身份裁剪：员工在选档口之前拿到的是空清单）。
+    as_admin = api.as_cookie("GET", "/api/prep-plan/today")
+    as_staff = api.as_staff("GET", "/api/prep-plan/today")
+    assert as_admin.json()["plan_day"] == as_staff.json()["plan_day"]
 
 
 def test_prep_plan_writes_still_require_admin(api):
@@ -600,12 +590,10 @@ def test_prep_plan_writes_still_require_admin(api):
         assert staff_resp.status_code == 401, f"{method} {path} 员工居然 {staff_resp.status_code}"
         assert staff_resp.json() == AUTH_GATE_BODY, staff_resp.text
 
-    # 管理端照常：`init-items-from-rules` 是一条不依赖业务状态的写路由（空库也是 200），
-    # 拿它证明写面本身没被这一票弄坏 —— 而且真的写进去了（created 计数从 0 变 1）。
-    _seed_semi_finished_rule(api)
-    admin_resp = api.as_cookie("POST", "/api/prep-plan/init-items-from-rules")
+    # 管理端照常：重算是一条不依赖业务状态的写路由（空库也是 200）。
+    admin_resp = api.as_cookie("POST", "/api/prep-plan/today/recompute")
     assert admin_resp.status_code == 200, admin_resp.text
-    assert admin_resp.json()["created"] == 1, admin_resp.text
+    assert admin_resp.json()["success"] is True, admin_resp.text
 
 
 # ---------------------------------------------------------------------------

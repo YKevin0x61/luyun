@@ -40,13 +40,15 @@ describe('导出标准图', () => {
   it('默认导出预览图，可切原图', () => {
     // 门店 36 项原图合计 80+ MB；预览图 1600px，页面显示 440px、打印也够。
     expect(zones).toMatch(/const exportSize = ref\('preview'\)/)
-    expect(zones).toMatch(/<option value="preview">/)
-    expect(zones).toMatch(/<option value="original">/)
+    // 2026-10-19：原生 select 的弹层向上弹盖住标题，改成两个分段 chip（判据不变：两个值都要在）。
+    expect(zones).toMatch(/exportSize === 'preview'/)
+    expect(zones).toMatch(/exportSize === 'original'/)
     expect(css).toMatch(/\.hygiene-admin \.export-size\s*\{/)
   })
 
   it('导出期间禁用按钮与规格选择', () => {
     expect(zones).toMatch(/:disabled="exporting"/)
-    expect(zones).toMatch(/<select v-model="exportSize" :disabled="exporting"/)
+    expect(zones).toMatch(/class="export-chip"/)
+    expect((zones.match(/:disabled="exporting"/g) || []).length).toBeGreaterThanOrEqual(3)
   })
 })

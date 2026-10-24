@@ -134,8 +134,10 @@ describe('页面清单（唯一来源）', () => {
       '/workbench/hr/attendance',
       // 节假日日历（考勤表导出 票 02）：超管逐日标「这天是法定节假日」，套人事那一组的壳。
       '/workbench/hr/holidays',
-      // 现场七页（卫生）。
+      // 现场页（卫生）。
       '/workbench/floor/zones',
+      // 日常清单（2026-10-19）：手机的独立落点（桌面端仍是工作区页右栏），套同一套现场壳。
+      '/workbench/floor/zone-items',
       '/workbench/floor/daily',
       '/workbench/floor/attire',
       '/workbench/floor/deep-clean',

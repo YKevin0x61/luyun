@@ -631,6 +631,28 @@ def test_upload_rejects_a_non_image(wastage_http):
         files={"file": ("evil.svg", b"<svg onload=alert(1)></svg>", "image/svg+xml")},
     )
     assert rejected.status_code == 400, rejected.text
+    assert "重新拍一张" in rejected.json()["detail"]
+
+
+def test_upload_explains_the_iphone_heic_case(wastage_http):
+    """iPhone 相机默认的 HEIC 要单独说一句：那不是坏图，是这台机器存不了的格式。
+
+    2026-10-17 真机撞过：用系统相机拍 → 后端只回「换个 JPG / PNG」，用户不知道该换什么。
+    """
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+
+    # `....ftypheic`：HEIF 容器的文件头（PIL 解不了，除 Safari 外的浏览器也显示不了）。
+    heic = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 32
+    rejected = client.post(
+        "/api/wastage/images",
+        files={"file": ("IMG_0001.HEIC", heic, "image/heic")},
+    )
+    assert rejected.status_code == 400, rejected.text
+    detail = rejected.json()["detail"]
+    assert "HEIC" in detail
+    assert "拍一张" in detail
 
 
 def test_employee_with_wastage_cap_sees_the_whole_shop(wastage_http):

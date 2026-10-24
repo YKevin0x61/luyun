@@ -123,6 +123,8 @@ const routes = [
   // 补休」的唯一依据（代码里没有年度表），所以这一页只给管理端这一档。
   workbenchHrPage('/workbench/hr/holidays', 'workbench-hr-holidays', () => import('../views/hr/HolidayCalendarView.vue')),
   hygieneAdminPage('/workbench/floor/zones', 'workbench-floor-zones', () => import('../views/hygiene/HygieneZonesView.vue')),
+  // 日常清单（手机单独一页；桌面端仍是工作区页右栏，这里只是手机的落点）。
+  hygieneAdminPage('/workbench/floor/zone-items', 'workbench-floor-zone-items', () => import('../views/hygiene/HygieneZoneItemsView.vue')),
   hygieneAdminPage('/workbench/floor/daily', 'workbench-floor-daily', () => import('../views/hygiene/HygieneDailyView.vue')),
   // 仪容仪表（票 12）：按人拍，名单由排班给（休假的与没排到的不在表上）。
   hygieneAdminPage('/workbench/floor/attire', 'workbench-floor-attire', () => import('../views/hygiene/HygieneAttireView.vue')),

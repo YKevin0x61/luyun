@@ -22,12 +22,13 @@ describe('hygiene image upload queue', () => {
   })
 
   it('queues standard photos instead of blocking the admin editor', () => {
-    const zones = read('../HygieneZonesView.vue')
+    // 2026-10-19：标准图上传在编辑组件里（桌面右栏与手机独立页共用同一个编辑器）。
+    const editor = read('../../../components/hygiene/HygieneItemEditor.vue')
 
-    expect(zones).toMatch(/useImageUploadQueueStore/)
-    expect(zones).toMatch(/imageUploads\.enqueue\(/)
-    expect(zones).toMatch(/onSuccess: loadZones/)
-    expect(zones).not.toMatch(/await api\.upload/)
+    expect(editor).toMatch(/useImageUploadQueueStore/)
+    expect(editor).toMatch(/imageUploads\.enqueue\(/)
+    expect(editor).toMatch(/onSuccess: \(\) => emit\('saved'\)/)
+    expect(editor).not.toMatch(/await api\.upload/)
   })
 
   it('lets staff continue shooting while earlier captures upload', () => {

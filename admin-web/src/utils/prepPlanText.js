@@ -1,41 +1,37 @@
-import {
-  EMPTY_LIST_TEXT,
-  PREP_PLAN_TITLE,
-} from './prepPlanCopy'
-import { formatPrepTime } from './prepPlanWindow'
+import { EMPTY_LIST_TEXT, PREP_PLAN_TITLE } from './prepPlanCopy'
+
+/** 复制清单：今天这张清单的纯文本版，发群里用。
+ *
+ *  只导出当前页签那一档（页面上「复制清单」就在档口页签下面），
+ *  不再有「时间窗」这个概念（ADR 0117）。
+ */
 
 function qtyLine(item) {
+  const value = Number(item.final_qty ?? item.suggested_qty ?? 0)
   const unit = item.unit || ''
-  const recommended = Number(item.recommended_qty || 0)
-  if (recommended <= 0) {
-    return `${item.item_name}  不用做`
-  }
-  return `${item.item_name}  建议 ${recommended}${unit}`
+  if (value <= 0) return `${item.item_name}  不用做`
+  return `${item.item_name}  ${value}${unit}`
 }
 
-export function buildPrepPlanText({ windowStart, windowEnd, stations, missingRules }) {
-  const lines = []
-  const startText = formatPrepTime(windowStart)
-  const endText = formatPrepTime(windowEnd)
-  lines.push(`【${PREP_PLAN_TITLE}】${startText} ~ ${endText}`)
-  lines.push('')
+export function buildPrepPlanText({ windowEnd, stations, closed }) {
+  const clock = String(windowEnd || '').slice(11, 16)
+  const lines = [
+    closed || !clock ? `【${PREP_PLAN_TITLE}】今天` : `【${PREP_PLAN_TITLE}】现在 → ${clock}`,
+    '',
+  ]
+
+  if (closed) {
+    lines.push('今天已打烊。')
+    return lines.join('\n')
+  }
 
   if (!stations || !stations.length) {
     lines.push(EMPTY_LIST_TEXT)
   } else {
     stations.forEach((group) => {
       lines.push(`【${group.stationLabel}】`)
-      group.items.forEach((item) => {
-        lines.push(qtyLine(item))
-      })
+      group.items.forEach((item) => lines.push(qtyLine(item)))
       lines.push('')
-    })
-  }
-
-  if (missingRules && missingRules.length) {
-    lines.push('【缺规则】')
-    missingRules.forEach((row) => {
-      lines.push(`${row.dish_name}  ${row.reason || ''}`)
     })
   }
 

@@ -22,9 +22,22 @@
 DROP TABLE IF EXISTS prep_stock_movements;
 DROP TABLE IF EXISTS prep_batches;
 
-ALTER TABLE prep_plan_items DROP COLUMN IF EXISTS available_qty;
-ALTER TABLE prep_plan_items DROP COLUMN IF EXISTS risk_level;
-ALTER TABLE prep_plan_item_slots DROP COLUMN IF EXISTS available_qty;
-ALTER TABLE prep_plan_runs DROP COLUMN IF EXISTS high_risk_count;
-ALTER TABLE prep_plan_runs DROP COLUMN IF EXISTS expiry_risk_count;
-ALTER TABLE prep_plan_runs DROP COLUMN IF EXISTS waste_risk_count;
+-- 三张计划快照表在 `0030`（ADR 0117 重建）里会被整张删掉。这里的 DROP COLUMN 因此要
+-- 允许「表已经不在」：迁移记录被清空后**按顺序重放**（发行包升级适配器的用例就是这么跑的）
+-- 时，`0030` 已经动过手，`ALTER TABLE prep_plan_items ...` 会在表不存在处直接报错，
+-- 整次重放就断在这儿。用 `to_regclass` 判一下，已应用过的门店与全新建库都走同一条路。
+DO $$
+BEGIN
+    IF to_regclass('prep_plan_items') IS NOT NULL THEN
+        ALTER TABLE prep_plan_items DROP COLUMN IF EXISTS available_qty;
+        ALTER TABLE prep_plan_items DROP COLUMN IF EXISTS risk_level;
+    END IF;
+    IF to_regclass('prep_plan_item_slots') IS NOT NULL THEN
+        ALTER TABLE prep_plan_item_slots DROP COLUMN IF EXISTS available_qty;
+    END IF;
+    IF to_regclass('prep_plan_runs') IS NOT NULL THEN
+        ALTER TABLE prep_plan_runs DROP COLUMN IF EXISTS high_risk_count;
+        ALTER TABLE prep_plan_runs DROP COLUMN IF EXISTS expiry_risk_count;
+        ALTER TABLE prep_plan_runs DROP COLUMN IF EXISTS waste_risk_count;
+    END IF;
+END $$;

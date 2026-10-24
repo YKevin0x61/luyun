@@ -84,7 +84,10 @@ describe('驳回原因：验收人写得出，员工看得到', () => {
   it('ConfirmDialog 的必填档：没写就不让提交，旁边给一句为什么', () => {
     const dialog = read('../../../components/admin/ConfirmDialog.vue')
     expect(dialog).toMatch(/const promptRequired = computed\(\(\) => Boolean\(props\.prompt && props\.prompt\.required\)\)/)
-    expect(dialog).toMatch(/const canConfirm = computed\(\(\) => !promptRequired\.value \|\| value\.value\.trim\(\)\.length > 0\)/)
+    expect(dialog).toMatch(/const canConfirm = computed\(\(\) => \{/)
+    // 必填档：空文本（或只有空格）不让提交；另有可选的 `equals`（清理要输「清理」两字）
+    expect(dialog).toMatch(/if \(!promptRequired\.value\) return true/)
+    expect(dialog).toMatch(/if \(!text\) return false/)
     expect(dialog).toMatch(/:disabled="!canConfirm"/)
     expect(dialog).toMatch(/<em v-if="prompt\.hint">/)
   })

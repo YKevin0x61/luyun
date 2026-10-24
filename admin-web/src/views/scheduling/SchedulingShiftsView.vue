@@ -277,7 +277,7 @@ onMounted(() => {
             type="button"
             :disabled="addBusy || !newName.trim()"
             @click="addShift"
-          >加一个班次</button>
+          ><span class="sAdd-full">加一个班次</span><span class="sAdd-short">新建</span></button>
         </div>
 
         <p v-if="!shifts.length" class="sEmpty">一个班次都没有：先加一个，不然谁都没班可排。</p>
@@ -496,17 +496,61 @@ onMounted(() => {
 .sNotes { padding: 10px 14px 12px; border-top: 1px solid var(--line); }
 .sWhy { margin: 0; font-size: 10px; line-height: 1.7; color: var(--ink-faint); }
 .sWhy + .sWhy { margin-top: 2px; }
+/* 手机（≤720）：一条班次 = 两行。
+   行一：序号 · 名称/用量 · 状态；行二：卫生日常下拉（撑满）＋ 等宽动作条。
+   原来这里是三行（名称 / 卫生日常 / 五个宽窄不一的按钮），两个班次就吃掉一整屏。 */
+/* 桌面档才有长文案按钮（手机在断点里换成「新建」）。规则必须写在断点之前，
+   否则同权重的 display:none 会把断点里的 display:inline 盖掉。 */
+.sAdd-short { display: none; }
 @media (max-width: 720px) {
-  .sTop { grid-template-columns: 1fr; grid-template-areas: "kick" "title" "sub"; }
+  .sAdd-full { display: none; }
+  .sAdd-short { display: inline; }
+  .sTop { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "kick kick" "title action" "sub sub"; }
   .sTop h1 { font-size: 22px; }
+  .sAction { padding: 0 12px; font-size: 12px; }
+  .sSub { font-size: 11px; }
   .sTh { display: none; }
-  .sRow { grid-template-columns: 24px minmax(0, 1fr) auto; row-gap: 8px; }
-  .sMain { grid-column: 2; }
-  .sTag { grid-column: 3; justify-self: end; }
-  .sDuty { grid-column: 2 / 4; flex-wrap: wrap; }
-  .sActs { grid-column: 2 / 4; justify-content: flex-start; flex-wrap: wrap; }
-  .sWhy { grid-column: 1 / -1; }
-  .sNameInput { grid-column: 2 / 4; }
-  .sRow > .sNameInput + .sActs { grid-column: 2 / 4; justify-content: flex-start; }
+
+  .sCard-hd { padding: 10px 12px; }
+  .sAdd { padding: 10px 12px; gap: 6px; }
+  .sAdd .input { flex: 1 1 auto; min-width: 0; }
+  .sAdd .btn { flex: none; padding: 0 12px; }
+
+  /* 两行网格：第一行（序号 / 名称 / 状态），第二行（卫生日常，跨满）。 */
+  .sRow {
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "ord main tag"
+      "duty duty duty"
+      "acts acts acts";
+    row-gap: 10px; column-gap: 8px;
+    padding: 12px;
+  }
+  .sOrd { grid-area: ord; align-self: start; padding-top: 3px; font-size: 11px; }
+  .sMain { grid-area: main; gap: 4px; }
+  .sName { font-size: 14px; }
+  .sUsage { font-size: 10.5px; }
+  .sTag { grid-area: tag; align-self: start; padding-top: 2px; font-size: 9.5px; }
+  .sDuty {
+    grid-area: duty;
+    display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center;
+    gap: 8px; padding-top: 2px;
+  }
+  .sDutyLab { font-size: 9px; letter-spacing: .1em; }
+  .sDutySel { width: 100%; font-size: 12.5px; }
+  /* 动作条：五个等宽格。删除仍然是最后一格（danger 边框），等宽后不再紧贴「停用」。 */
+  .sActs {
+    grid-area: acts;
+    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px; justify-content: stretch;
+  }
+  /* 全局在 ≤430px 把 `.btn` 钉成 40px（theme.css 的 !important），这里要的是 44。 */
+  .sMini { padding: 0; font-size: 12.5px; min-height: 44px !important; }
+  .sAdd .btn { min-height: 44px !important; }
+  .sNotes { padding: 8px 12px 10px; }
+  .sWhy { font-size: 10px; line-height: 1.6; }
+  .sNameInput { grid-area: main / main / duty / duty; }
+  .sRow > .sNameInput + .sActs { grid-area: acts; }
 }
+
 </style>

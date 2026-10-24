@@ -33,6 +33,8 @@ import { staffRequest } from '../../utils/hygieneStaff'
 import { dayLabel } from '../../utils/todayShift'
 import { WORKBENCH_TITLE, workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import { HOME_LINKS, MANAGER_TODO_LIMIT, workbenchHomeSummary } from '../../utils/workbenchHome'
+import { PREP_PLAN_PATH } from '../../utils/prepPlanPaths.js'
+import { useStationsStore } from '../../stores/stations'
 
 const identityStore = useWorkbenchIdentityStore()
 const identity = computed(() => identityStore.identity)
@@ -45,6 +47,9 @@ const queue = ref(null)
 const fix = ref(null)
 // 人事提醒（第五格）：本月该调工龄奖 + 本月生日，两块都在这条响应里。
 const reminders = ref(null)
+// 备货计划：今天各档口还差几项（ADR 0117 把入口从「后勤」组提到首页这张卡片上）
+const prep = ref(null)
+const stationsStore = useStationsStore()
 const deep = ref(null)
 const daily = ref(null)
 const me = ref(null)
@@ -110,6 +115,9 @@ async function safe(promise, sink, pick = (data) => data) {
 }
 
 async function loadManager() {
+  // 备货卡片上的档口名要中文：档口表没拉过就先拉一次（读不到时退回 id，不影响其他块）。
+  // 只挂在店长这一档 —— 员工会话调 `/api/stations` 是 401，没必要白打一次。
+  void stationsStore.load().catch(() => {})
   // 先拿营业日：`daily-queue` 不带日期时回的就是服务端那个营业日（`date`），三处读的
   // 是同一天。**不能拿手机上的今天去问排班** —— 手机时区可能不在东八区，问出隔壁那天
   // 只会得到一句「这天没铺」，店长看到「今天没人上班」。
@@ -120,6 +128,7 @@ async function loadManager() {
     safe(api.get('/api/scheduling/inbox'), inbox),
     safe(api.get('/api/hygiene/admin/fix'), fix),
     safe(api.get('/api/hygiene/admin/hr-reminders'), reminders),
+    safe(api.get('/api/prep-plan/summary'), prep),
   ])
   businessDate.value = date
     || (day.value && day.value.business_date)
@@ -134,6 +143,10 @@ async function loadManager() {
  * 先经过它、再转进月历那一天的操作单（`TodayView` 里只做转发，不在这两页摆第二套表单）。
  * 日期取服务端营业日 `businessDate`（`/me` 的 `today`），不拿手机上的今天。
  */
+function prepStationName(id) {
+  return id === 'uncategorized' ? '未分类' : stationsStore.nameOf(id)
+}
+
 function staffDayLink(act) {
   return {
     path: '/workbench/staff/today',
@@ -250,6 +263,22 @@ useNudgePull({
         </router-link>
 
         <div class="wbh-side">
+          <!-- 备货计划（ADR 0117）：首页第一眼就该看到「今天还差什么」，不用记着去后勤组里翻。 -->
+          <section class="wbh-panel">
+            <header class="wbh-ph">
+              <i class="wbh-led sig"></i><h2>备货计划</h2>
+              <span v-if="prep" class="wbh-hint">还差 {{ prep.remaining }} 项</span>
+              <router-link class="wbh-more" :to="PREP_PLAN_PATH">去备货 ›</router-link>
+            </header>
+            <ul v-if="prep && prep.stations && prep.stations.length" class="wbh-prep">
+              <li v-for="row in prep.stations" :key="row.station">
+                <b>{{ prepStationName(row.station) }}</b>
+                <span>{{ row.remaining }}</span>
+              </li>
+            </ul>
+            <p v-else class="wbh-empty">今天还没算（进备货计划页就开始算）</p>
+          </section>
+
           <!-- 等我处理：把四个读数展开成「具体哪几件事」（2026-10-18 实用性改进）。
                一条一行、点行直达那个专页；数据全部来自本页已经在拉的三份响应。 -->
           <section class="wbh-panel">
@@ -478,6 +507,20 @@ useNudgePull({
   border-bottom: 1px solid var(--wb-ink-a08);
 }
 .wbh-quick a:nth-child(odd) { border-right: 1px solid var(--wb-ink-a08); }
+
+/* 备货计划（ADR 0117）：一行一个档口，右边是「还差几项」。 */
+.wbh-prep { list-style: none; margin: 0; padding: 0; }
+.wbh-prep li {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  min-height: 44px; padding: 0 14px;
+  border-bottom: 1px solid var(--wb-ink-a08);
+}
+.wbh-prep li:last-child { border-bottom: 0; }
+.wbh-prep b { font-weight: 500; font-size: 12px; color: var(--ink); }
+.wbh-prep span {
+  font-size: 13px; font-weight: 600; color: var(--action);
+  font-variant-numeric: tabular-nums;
+}
 
 /* 员工档：卡片外壳（底 / 边 / 阴影 / 左侧语义条）+ 里面的班次链接 + 一行直达入口。
    外壳不是链接：请假 / 换班 是两张碰得到的入口，链接不能套链接。 */

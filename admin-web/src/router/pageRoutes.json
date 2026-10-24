@@ -176,6 +176,15 @@
       "public": false
     },
     {
+      "path": "/workbench/floor/zone-items",
+      "_note": "日常清单（2026-10-19 用户裁定：手机单独一页、电脑端仍是工作区页的右栏）。区由 ?zone= 指定，路径保持静态 —— 与配方详情 ?slug= 同一先例，前后端清单才能逐条对上。",
+      "title": "日常清单",
+      "group": "floor",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
       "path": "/workbench/floor/daily",
       "title": "日常验收",
       "group": "floor",

@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""备货计划 API。
+"""备货计划 API（ADR 0117 重建）。
 
-**票 08 起模块里有两条 router**（形态照票 07 的 `api/recipes.py`）：
+两条 router，形态照 `api/recipes.py`：
 
-- `reader_router` —— 读面。备货计划搬进工作台的「后勤」组
-  （`/workbench/kitchen/prep-plan`，页面清单里是 `audience: both`），后厨在工作台里
-  得看得到"今天要备什么"，所以两条读端点（forecast / current）
-  挂的是「任一身份」门 `require_any_identity_session`（管理端会话或员工会话）。
-  门本身在 `api/security.py`，注册处是 `main.py`（**不挂** verify_admin_token）。
-- `router` —— 业务面（写端点 + 不属于阅读面的那些）。注册处统一挂
-  `verify_admin_token`：**进工作台只是换位置与统一导航，不扩权**（ADR 0092）。
+- `reader_router` —— **任一身份**（管理端会话或员工会话）。今天这张清单、首页卡片、
+  员工选档口、勾选与改数量都在这一侧：后厨师傅自己就要能勾，不该被踢回管理端。
+- `router` —— 管理端（注册处挂 `verify_admin_token`，见 `main.py`）。重算与改主数据
+  归属属于「改全店的数」，员工不做。
 
-两条 router 的路径前缀相同，靠"哪条路由挂在哪个 router 上"分工 —— 新增端点时先想清楚
-它是读还是写，别顺手挂错。
+新增端点时先想清楚：这条是「看/勾自己那档」还是「改全店」。
 """
 
 import logging
@@ -22,16 +18,13 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from api.security import require_any_identity_session, verify_admin_token
 from database import get_db
 from services.prep_plan_service import prep_plan_service
-from api.security import require_any_identity_session, verify_admin_token
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/prep-plan", tags=["备货计划"])
 
-# 读面（任一身份：管理端会话或员工会话）。与 `router` 同前缀，见模块开头那段说明。
-# 门挂在 **router 级**（一处，两条读端点一起受保护）：读面没有"某一条只给管理端"的分支，
-# 「含停用」那种按身份裁剪的参数备货计划这边不存在 —— 有分支了再往单条路由上挂。
+router = APIRouter(prefix="/api/prep-plan", tags=["备货计划"])
 reader_router = APIRouter(
     prefix="/api/prep-plan",
     tags=["备货计划"],
@@ -41,134 +34,200 @@ reader_router = APIRouter(
 _ADMIN_WRITE = [Depends(verify_admin_token)]
 
 
+def _staff(identity: dict) -> tuple[Optional[int], str]:
+    """员工身份返回 (员工 id, 姓名)；管理端返回 (None, "")。"""
+    if identity.get("kind") != "staff":
+        return None, ""
+    employee = identity.get("employee") or {}
+    employee_id = int(employee["id"]) if employee.get("id") is not None else None
+    return employee_id, str(employee.get("name") or "")
 
 
-class GeneratePlanRequest(BaseModel):
-    target_start: Optional[str] = None
-    target_end: Optional[str] = None
-    method: str = "weighted_history"
-    created_by: str = ""
-    station: Optional[str] = None
+def _wrap(exc: Exception, action: str) -> HTTPException:
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail="只能操作自己档口的备货项")
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    logger.exception("%s失败", action)
+    return HTTPException(status_code=500, detail=f"{action}失败: {exc}")
 
 
-@reader_router.get("/forecast")
-async def get_forecast(
-    target_start: Optional[str] = Query(None, description="ISO 时间，默认 now()"),
-    target_end: Optional[str] = Query(None, description="ISO 时间，默认 target_start + 24h"),
-    station: Optional[str] = Query(None, description="档口 ID，禁止 loumian"),
+# --------------------------------------------------------------------- 读面
+
+
+@reader_router.get("/today")
+async def get_today(
+    station: Optional[str] = Query(None, description="档口 id；员工身份忽略（只看自己那档）"),
+    identity: dict = Depends(require_any_identity_session),
     db=Depends(get_db),
 ):
     try:
-        result = await prep_plan_service.compute_forecast(
-            db=db,
-            target_start=target_start,
-            target_end=target_end,
-            station=station,
-        )
-        return result
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        employee_id, _name = _staff(identity)
+        return await prep_plan_service.get_today(db, station=station, employee_id=employee_id)
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("forecast 计算失败")
-        raise HTTPException(status_code=500, detail=f"预测计算失败: {exc}")
+        raise _wrap(exc, "读取今天备货清单")
 
 
-@router.post("/generate", dependencies=_ADMIN_WRITE)
-async def generate_plan(payload: GeneratePlanRequest, db=Depends(get_db)):
+@reader_router.get("/summary")
+async def get_summary(db=Depends(get_db)):
     try:
-        result = await prep_plan_service.create_plan_run(
-            db=db,
-            target_start=payload.target_start,
-            target_end=payload.target_end,
-            method=payload.method,
-            created_by=payload.created_by,
-            station=payload.station,
-        )
-        return result
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        return await prep_plan_service.get_summary(db)
     except Exception as exc:
-        logger.exception("生成计划失败")
-        raise HTTPException(status_code=500, detail=f"生成计划失败: {exc}")
+        raise _wrap(exc, "读取备货汇总")
 
 
-@reader_router.get("/current")
-async def get_current_plan(db=Depends(get_db)):
+@reader_router.get("/items")
+async def list_items(db=Depends(get_db)):
     try:
-        return await prep_plan_service.get_current_plan(db)
+        return {"success": True, "items": await prep_plan_service.list_items(db)}
     except Exception as exc:
-        logger.exception("查询当前计划失败")
-        raise HTTPException(status_code=500, detail=f"查询当前计划失败: {exc}")
+        raise _wrap(exc, "读取备货品主数据")
 
 
-class ClosedDayRequest(BaseModel):
-    day: str
-    note: str = ""
+class StationPickRequest(BaseModel):
+    station: str
 
 
-@reader_router.get("/closed-days")
-async def get_closed_days(db=Depends(get_db)):
-    """歇业日日历：读面（任一身份）—— 员工也该看得出「今天为什么没建议」。"""
+@reader_router.get("/staff-station")
+async def get_staff_station(
+    identity: dict = Depends(require_any_identity_session), db=Depends(get_db)
+):
     try:
-        return await prep_plan_service.list_closed_days(db)
+        employee_id, _name = _staff(identity)
+        if employee_id is None:
+            return {"success": True, "station": None, "staff": False}
+        station = await prep_plan_service.get_staff_station(db, employee_id)
+        return {"success": True, "station": station, "staff": True}
     except Exception as exc:
-        logger.exception("查询歇业日失败")
-        raise HTTPException(status_code=500, detail=f"查询歇业日失败: {exc}")
+        raise _wrap(exc, "读取员工档口")
 
 
-@router.post("/closed-days", dependencies=_ADMIN_WRITE)
-async def add_closed_day(payload: ClosedDayRequest, db=Depends(get_db)):
-    try:
-        return await prep_plan_service.add_closed_day(db, payload.day, payload.note)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        logger.exception("新增歇业日失败")
-        raise HTTPException(status_code=500, detail=f"新增歇业日失败: {exc}")
-
-
-@router.delete("/closed-days/{day}", dependencies=_ADMIN_WRITE)
-async def remove_closed_day(day: str, db=Depends(get_db)):
-    try:
-        return await prep_plan_service.remove_closed_day(db, day)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        logger.exception("删除歇业日失败")
-        raise HTTPException(status_code=500, detail=f"删除歇业日失败: {exc}")
-
-
-@reader_router.get("/accuracy")
-async def get_accuracy(
-    start_date: str = Query(...),
-    end_date: str = Query(...),
+@reader_router.post("/staff-station")
+async def set_staff_station(
+    payload: StationPickRequest,
+    identity: dict = Depends(require_any_identity_session),
     db=Depends(get_db),
 ):
-    """
-    MVP3 基础版准确率：按计划项聚合统计 abs(预测-实际)/实际。
-    实际值暂以 orders + semi_rules 换算（简化版：同周期总量）。
-
-    **挂在 reader_router 上**（票 08 的原实现把它留在业务 router，code-review 指出这与
-    spec 的 API 契约表不符 —— 那张表写的是「备货计划读端点：仅管理端 → 任一身份」，没有
-    给「页面没消费的读端点」留例外）。它只读、没有副作用，放宽到任一身份不扩权；写端点
-    仍然只认管理端。
-    """
     try:
-        return await prep_plan_service.get_accuracy(db, start_date, end_date)
+        employee_id, _name = _staff(identity)
+        if employee_id is None:
+            raise HTTPException(status_code=400, detail="只有员工身份需要选档口")
+        return await prep_plan_service.set_staff_station(db, employee_id, payload.station)
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.exception("查询准确率失败")
-        raise HTTPException(status_code=500, detail=f"查询准确率失败: {exc}")
+        raise _wrap(exc, "选择员工档口")
 
 
-@router.post("/init-items-from-rules", dependencies=_ADMIN_WRITE)
-async def init_items_from_rules(db=Depends(get_db)):
-    """
-    从 semi_finished_rules 自动补齐 prep_items（仅新增不存在的 item_name+unit）。
-    """
+class UpdateEntryRequest(BaseModel):
+    final_qty: Optional[float] = None
+    done: Optional[bool] = None
+    # v2：勾必须带「这次做了多少」（ADR 0118）。同一品可勾多次，累加进在库量。
+    produced_qty: Optional[float] = None
+
+
+@reader_router.patch("/today/entries/{entry_id}")
+async def update_entry(
+    entry_id: int,
+    payload: UpdateEntryRequest,
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+):
+    """改数量或勾选。默认带建议量、能改但不强制（ADR 0117）。"""
     try:
-        return await prep_plan_service.init_items_from_rules(db)
+        employee_id, done_by = _staff(identity)
+        return await prep_plan_service.update_entry(
+            db,
+            entry_id,
+            final_qty=payload.final_qty,
+            done=payload.done,
+            produced_qty=payload.produced_qty,
+            done_by=done_by,
+            employee_id=employee_id,
+        )
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.exception("初始化 prep_items 失败")
-        raise HTTPException(status_code=500, detail=f"初始化 prep_items 失败: {exc}")
+        raise _wrap(exc, "更新备货项")
+
+
+@reader_router.get("/restock")
+async def get_restock(
+    station: Optional[str] = Query(None, description="档口 id；员工身份忽略（只看自己那档）"),
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+):
+    """补货 tab：在库量不够再卖 1 小时的品，以及「补到打烊」要做的量。"""
+    try:
+        employee_id, _name = _staff(identity)
+        return await prep_plan_service.get_restock(db, employee_id=employee_id, station=station)
+    except Exception as exc:
+        raise _wrap(exc, "读取补货提醒")
+
+
+class WasteRequest(BaseModel):
+    prep_item_id: int
+    quantity: float
+    reason: str
+    remark: str = ""
+
+
+@reader_router.post("/waste")
+async def add_waste(
+    payload: WasteRequest,
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+):
+    """报废一笔：写进既有损耗台账，物料名就是备货品名（ADR 0118 决策 6）。"""
+    try:
+        employee_id, employee_name = _staff(identity)
+        return await prep_plan_service.add_waste(
+            db,
+            payload.prep_item_id,
+            payload.quantity,
+            payload.reason,
+            remark=payload.remark,
+            employee_id=employee_id,
+            employee_name=employee_name,
+        )
+    except Exception as exc:
+        raise _wrap(exc, "登记报废")
+
+
+# --------------------------------------------------------------------- 管理端
+
+
+@router.post("/today/recompute", dependencies=_ADMIN_WRITE)
+async def recompute_today(db=Depends(get_db)):
+    """按当前时刻重算建议量。手改过的数与勾选状态不动。"""
+    try:
+        return await prep_plan_service.get_today(db)
+    except Exception as exc:
+        raise _wrap(exc, "重算备货清单")
+
+
+class UpdateItemRequest(BaseModel):
+    kind: Optional[str] = None
+    station: Optional[str] = None
+
+
+@router.get("/review", dependencies=_ADMIN_WRITE)
+async def get_review(day: Optional[str] = Query(None, description="默认昨天"), db=Depends(get_db)):
+    """复盘 tab：建议 / 实际做 / 卖出 / 剩 / 报废 + 偏差。只读。"""
+    try:
+        return await prep_plan_service.get_review(db, day=day)
+    except Exception as exc:
+        raise _wrap(exc, "读取复盘")
+
+
+@router.patch("/items/{item_id}", dependencies=_ADMIN_WRITE)
+async def update_item(item_id: int, payload: UpdateItemRequest, db=Depends(get_db)):
+    """改「做的 / 要买的」归属或所属档口（ADR 0117：系统先猜，人在页面上改）。"""
+    try:
+        return await prep_plan_service.update_item(
+            db, item_id, kind=payload.kind, station=payload.station
+        )
+    except Exception as exc:
+        raise _wrap(exc, "更新备货品")

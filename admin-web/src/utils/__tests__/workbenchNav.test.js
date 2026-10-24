@@ -113,6 +113,8 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
     ])
     expect(workbenchPagesOf('floor').map((page) => page.path)).toEqual([
       '/workbench/floor/zones',
+      // 日常清单（2026-10-19 用户裁定）：手机单独一页、电脑端仍是工作区页的右栏。
+      '/workbench/floor/zone-items',
       '/workbench/floor/daily',
       '/workbench/floor/attire',
       '/workbench/floor/deep-clean',
@@ -130,10 +132,10 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
     expect(workbenchPagesOf('nope')).toEqual([])
   })
 
-  it('十六页正好落在人事 / 现场两组里，平铺那批地址一条都不在清单里', () => {
+  it('十七页正好落在人事 / 现场两组里，平铺那批地址一条都不在清单里', () => {
     const grouped = PAGE_ROUTES.filter((row) => row.group === 'hr' || row.group === 'floor')
-    // 人事八页（+考勤表、+节假日日历，考勤表导出 票 01/02）+ 现场八页。
-    expect(grouped).toHaveLength(16)
+    // 人事八页（+考勤表、+节假日日历，考勤表导出 票 01/02）+ 现场九页（+日常清单，2026-10-19）。
+    expect(grouped).toHaveLength(17)
     // 留一半最坏：「点得进去、刷新 404」。
     for (const old of [
       '/workbench/inbox', '/workbench/shifts', '/workbench/roster', '/workbench/zones',

@@ -32,8 +32,15 @@ const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select
 /** 这个框的输入是不是必填。只有驳回那几处传 `required: true`；其余（删除 / 排除 /
  *  改号确认）都不传，行为与以前完全一样 —— 它们没有输入框，或者输入本来就可有可无。 */
 const promptRequired = computed(() => Boolean(props.prompt && props.prompt.required))
-/** 必填时，一个字都没写（或只有空格）就不让提交。 */
-const canConfirm = computed(() => !promptRequired.value || value.value.trim().length > 0)
+/** 必填时，一个字都没写（或只有空格）就不让提交。
+ *  `prompt.equals`（可选）：还要一字不差 —— 清理这种硬删除要求输入「清理」两字防误触。 */
+const canConfirm = computed(() => {
+  if (!promptRequired.value) return true
+  const text = value.value.trim()
+  if (!text) return false
+  if (props.prompt && props.prompt.equals) return text === props.prompt.equals
+  return true
+})
 
 function focusables() {
   if (!boxEl.value) return []
@@ -96,7 +103,7 @@ onBeforeUnmount(() => {
         <textarea
           ref="promptEl"
           v-model="value"
-          rows="2"
+          :rows="prompt.rows || 2"
           :maxlength="prompt.maxlength || 120"
           :placeholder="prompt.placeholder || ''"
           :aria-required="promptRequired ? 'true' : undefined"

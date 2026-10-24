@@ -1278,6 +1278,8 @@ SPA_PAGE_ROUTES = (
     # 节假日日历（考勤表导出 票 02）：超管逐日标「这天是法定节假日」+ 名称，一年一个网格。
     "/workbench/hr/holidays",
     "/workbench/floor/zones",
+    # 日常清单（2026-10-19 用户裁定：手机单独一页、电脑端仍是工作区页的右栏）。
+    "/workbench/floor/zone-items",
     "/workbench/floor/daily",
     "/workbench/floor/deep-clean",
     "/workbench/floor/fix",

@@ -374,6 +374,28 @@ def _too_large_detail(label: str) -> str:
     return f"{label}不能超过 {limit_mb} MB"
 
 
+# iPhone 相机默认存 HEIC / HEIF（`....ftyp<brand>`），PIL 解码不了、除 Safari 外的浏览器
+# 也显示不了。它不是「坏图」，而是这台机器**存不了**的格式 —— 所以单独认出来、单独说一句
+# 能照做的话（用页面里的相机拍，出来的就是 JPEG）；笼统的「换个 JPG」对 iPhone 用户等于
+# 没说（2026-10-17 真机撞的就是这个）。
+_HEIF_BRANDS = (
+    b"heic",
+    b"heix",
+    b"hevc",
+    b"heim",
+    b"heis",
+    b"hevm",
+    b"hevs",
+    b"mif1",
+    b"msf1",
+    b"avif",
+)
+
+
+def _looks_like_heif(data: bytes) -> bool:
+    return len(data) >= 12 and data[4:8] == b"ftyp" and data[8:12] in _HEIF_BRANDS
+
+
 @router.post("/images")
 async def upload_image(
     file: UploadFile = File(...),
@@ -390,7 +412,15 @@ async def upload_image(
         raise HTTPException(status_code=400, detail="照片是空的：请重拍或重选一张")
     content_type = sniff_image_content_type(data)
     if content_type is None:
-        raise HTTPException(status_code=400, detail="这不是一张能用的图片：请换 JPG / PNG 再试")
+        if _looks_like_heif(data):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "这是 iPhone 相机默认的 HEIC 格式，网页这边存不了："
+                    "请点页面里的「拍一张」直接拍（拍好的就是 JPG）"
+                ),
+            )
+        raise HTTPException(status_code=400, detail="这不是一张能用的图片：请重新拍一张")
     store = _store(db)
     try:
         image = await store.add_image(_actor(identity), data, content_type)

@@ -1,19 +1,11 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
-import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import { HYGIENE_SHIFTS } from '../../utils/hygieneCopy'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+import HygieneZoneItemsPanel from '../../components/hygiene/HygieneZoneItemsPanel.vue'
 import LuyunTimePicker from '../../components/ui/LuyunTimePicker.vue'
-import HygieneStandardOverlay from '../../components/hygiene/HygieneStandardOverlay.vue'
-import {
-  createArrowMark,
-  createCaptionMark,
-  createCircleMark,
-  parseMarkup,
-  standardImageUrl,
-} from '../../utils/hygieneMarkup'
 
 const zones = ref([])
 const selectedId = ref(null)
@@ -36,23 +28,6 @@ const savingClocks = ref(false)
 const clocksHint = ref('')
 const boards = ref({ zones: [] })
 const deleteZoneTarget = ref(null)
-const deleteItemTarget = ref(null)
-
-const itemName = ref('')
-const file = ref(null)
-const previewUrl = ref('')
-const markup = ref([])
-const mode = ref('circle')
-const captionText = ref('')
-const arrowStart = ref(null)
-const replacingId = ref(null)
-/** 「新增检查项」默认折叠：v3 布局纪律 —— 一行入口，点开才展开整块编辑面板。 */
-const editorOpen = ref(false)
-// 「编辑标注」模式：不换图，只改圈注/箭头/批注。服务层会新插一版标准并把
-// current_standard_id 指过去，历史冻结标准不动。
-const markupEditing = ref(false)
-const savingMarkup = ref(false)
-const imageUploads = useImageUploadQueueStore()
 
 const selected = computed(() => {
   return zones.value.find((zone) => zone.id === selectedId.value) || zones.value[0] || null
@@ -62,26 +37,6 @@ watch(selected, (zone) => {
   zoneShifts.value = zone ? [...(zone.shifts || HYGIENE_SHIFTS)] : []
   shiftsHint.value = ''
 }, { immediate: true })
-
-const replacingItem = computed(() => {
-  if (!replacingId.value || !selected.value) return null
-  return (selected.value.items || []).find((item) => item.id === replacingId.value) || null
-})
-
-const editorSrc = computed(() => {
-  if (previewUrl.value) return previewUrl.value
-  if (replacingItem.value) return standardImageUrl('admin', replacingItem.value)
-  return ''
-})
-
-const canSave = computed(() => {
-  if (!selected.value) return false
-  // 只改标注时不需要选文件——这正是这个模式存在的理由。
-  if (markupEditing.value) return Boolean(replacingId.value)
-  if (!file.value) return false
-  if (replacingId.value) return true
-  return Boolean(itemName.value.trim())
-})
 
 const missedByZone = computed(() => {
   const counts = {}
@@ -95,8 +50,6 @@ const missedByZone = computed(() => {
 onMounted(() => {
   refreshPage()
 })
-
-onBeforeUnmount(clearPreview)
 
 useHygieneRealtime({
   id: 'hygiene-admin-zones',
@@ -220,7 +173,6 @@ async function saveClocks() {
 
 function selectZone(zone) {
   selectedId.value = zone.id
-  clearEditor()
 }
 
 function zoneShiftLabel(zone) {
@@ -287,153 +239,12 @@ async function confirmDeleteZone() {
   try {
     await api.delete(`/api/hygiene/admin/zones/${zone.id}`)
     if (selectedId.value === zone.id) selectedId.value = null
-    clearEditor()
     await loadZones()
   } catch (err) {
     errorText.value = err.message || '无法删除卫生工作区'
   }
 }
 
-async function confirmDeleteItem() {
-  const item = deleteItemTarget.value
-  deleteItemTarget.value = null
-  if (!item) return
-  errorText.value = ''
-  try {
-    await api.delete(`/api/hygiene/admin/items/${item.id}`)
-    if (replacingId.value === item.id) clearEditor()
-    await loadZones()
-  } catch (err) {
-    errorText.value = err.message || '无法删除日常检查项'
-  }
-}
-
-function clearPreview() {
-  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
-  previewUrl.value = ''
-}
-
-function clearEditor() {
-  editorOpen.value = false
-  itemName.value = ''
-  file.value = null
-  clearPreview()
-  markup.value = []
-  arrowStart.value = null
-  replacingId.value = null
-  markupEditing.value = false
-}
-
-function onFile(event) {
-  const picked = event.target.files && event.target.files[0]
-  clearPreview()
-  file.value = picked || null
-  previewUrl.value = picked ? URL.createObjectURL(picked) : ''
-  arrowStart.value = null
-}
-
-function onPoint(point) {
-  if (mode.value === 'circle') {
-    markup.value = [...markup.value, createCircleMark(point.x, point.y)]
-    return
-  }
-  if (mode.value === 'caption') {
-    markup.value = [...markup.value, createCaptionMark(point.x, point.y, captionText.value)]
-    return
-  }
-  if (!arrowStart.value) {
-    arrowStart.value = point
-    return
-  }
-  markup.value = [
-    ...markup.value,
-    createArrowMark(arrowStart.value.x, arrowStart.value.y, point.x, point.y),
-  ]
-  arrowStart.value = null
-}
-
-function removeMark(index) {
-  markup.value = markup.value.filter((_, i) => i !== index)
-}
-
-function startReplace(item) {
-  editorOpen.value = true
-  replacingId.value = item.id
-  markupEditing.value = false
-  itemName.value = item.name
-  markup.value = parseMarkup(item.markup)
-  file.value = null
-  clearPreview()
-  arrowStart.value = null
-}
-
-function startEditMarkup(item) {
-  editorOpen.value = true
-  replacingId.value = item.id
-  markupEditing.value = true
-  itemName.value = item.name
-  markup.value = parseMarkup(item.markup)
-  file.value = null
-  clearPreview()
-  arrowStart.value = null
-  mode.value = 'circle'
-  captionText.value = ''
-  errorText.value = ''
-}
-
-async function saveMarkup() {
-  if (savingMarkup.value || !replacingId.value) return
-  savingMarkup.value = true
-  errorText.value = ''
-  try {
-    await api.patch(`/api/hygiene/admin/items/${replacingId.value}/standard/markup`, {
-      markup: markup.value,
-    })
-    clearEditor()
-    await loadZones()
-  } catch (err) {
-    errorText.value = err.message || '无法保存标准图标注'
-  } finally {
-    savingMarkup.value = false
-  }
-}
-
-function saveItem() {
-  if (!canSave.value) return
-  if (markupEditing.value) {
-    void saveMarkup()
-    return
-  }
-  errorText.value = ''
-  const replacing = Boolean(replacingId.value)
-  const itemLabel = replacingItem.value ? replacingItem.value.name : itemName.value.trim()
-  const form = new FormData()
-  form.append('file', file.value)
-  form.append('markup', JSON.stringify(markup.value))
-  if (!replacing) form.append('name', itemName.value.trim())
-  try {
-    imageUploads.enqueue({
-      path: replacing
-        ? `/api/hygiene/admin/items/${replacingId.value}/standard`
-        : `/api/hygiene/admin/zones/${selected.value.id}/items`,
-      formData: form,
-      label: replacing ? `更新标准图 · ${itemLabel}` : `标准图 · ${itemLabel}`,
-      detail: file.value.name,
-      onSuccess: loadZones,
-      // 建检查项 / 换标准图都是无条件 INSERT：自动重试会重复建行，只允许人工重试。
-      autoRetry: false,
-    })
-    clearEditor()
-  } catch (err) {
-    errorText.value = err.message || '无法加入上传队列'
-  }
-}
-
-function markLabel(mark) {
-  if (mark.kind === 'circle') return '圆圈'
-  if (mark.kind === 'arrow') return '箭头'
-  return mark.text ? `批注：${mark.text}` : '批注'
-}
 </script>
 
 <template>
@@ -444,13 +255,29 @@ function markLabel(mark) {
         <h1 class="wbx-title">卫生工作区</h1>
       </div>
       <div class="wbx-pills">
-        <label class="export-size">
-          图片
-          <select v-model="exportSize" :disabled="exporting" aria-label="导出图片规格">
-            <option value="preview">预览图（快）</option>
-            <option value="original">原图（最清晰）</option>
-          </select>
-        </label>
+        <!-- 两个选项做成 chip：原生 select 的弹层由系统画、方向不可控（2026-10-19 截图里
+             向上弹盖住了标题）。分段控件零弹层，语义也更直白。 -->
+        <div class="export-size" role="group" aria-label="导出图片规格">
+          <span>图片</span>
+          <button
+            class="export-chip"
+            type="button"
+            :class="{ on: exportSize === 'preview' }"
+            :aria-pressed="exportSize === 'preview' ? 'true' : 'false'"
+            :disabled="exporting"
+            title="1600px 宽，导出快（门店 36 项约 8MB）"
+            @click="exportSize = 'preview'"
+          >预览图</button>
+          <button
+            class="export-chip"
+            type="button"
+            :class="{ on: exportSize === 'original' }"
+            :aria-pressed="exportSize === 'original' ? 'true' : 'false'"
+            :disabled="exporting"
+            title="原始分辨率，最清晰但导出慢（原图合计 80MB+）"
+            @click="exportSize = 'original'"
+          >原图</button>
+        </div>
         <button type="button" class="btn" :disabled="exporting" @click="exportStandards">{{ exportLabel }}</button>
         <button type="button" class="btn" :disabled="loading" @click="refreshPage">刷新</button>
       </div>
@@ -528,6 +355,10 @@ function markLabel(mark) {
               :aria-label="`删除卫生工作区 ${zone.name}`"
               @click="deleteZoneTarget = zone"
             >删除</button>
+            <router-link
+              class="zone-items-link"
+              :to="{ path: '/workbench/floor/zone-items', query: { zone: zone.id } }"
+            >查看清单 ›</router-link>
           </li>
         </ul>
         <div v-else class="wbx-empty-bar">还没有工作区，先在下面加一个。</div>
@@ -570,108 +401,10 @@ function markLabel(mark) {
         </form>
       </section>
 
-      <section class="wbx-panel">
-        <header class="wbx-ph">
-          <i class="led ok"></i>
-          <h2>{{ selected ? selected.name + ' 日常清单' : '日常清单' }}</h2>
-          <span class="wbx-hint">{{ selected ? (selected.items || []).length : 0 }} 项</span>
-        </header>
-        <template v-if="selected">
-          <div v-if="!(selected.items || []).length" class="wbx-empty-bar">这个区还没有带标准图的检查项。</div>
-          <ul v-else class="item-list">
-            <li v-for="item in selected.items" :key="item.id" class="item-row">
-              <HygieneStandardOverlay
-                class="item-thumb"
-                :src="standardImageUrl('admin', item, 'thumb')"
-                display-variant="thumb"
-                :lightbox-src="standardImageUrl('admin', item)"
-                :standard-id="item.current_standard_id"
-                :markup="item.markup || []"
-                :alt="item.name"
-              />
-              <div class="item-meta">
-                <strong>{{ item.name }}</strong>
-                <div class="item-actions">
-                  <button type="button" class="btn btn-sm" @click="startEditMarkup(item)">编辑标注</button>
-                  <button type="button" class="btn btn-sm" @click="startReplace(item)">换标准图</button>
-                  <button
-                    type="button"
-                    class="btn btn-sm btn-danger"
-                    :aria-label="`删除日常检查项 ${item.name}`"
-                  @click="deleteItemTarget = item"
-                  >删除</button>
-                </div>
-              </div>
-            </li>
-          </ul>
-
-          <!-- 新增检查项：默认折叠成一行入口（v3：折叠表单，不常驻半个空面板） -->
-          <button
-            v-if="!editorOpen"
-            type="button"
-            class="wbx-fold-entry"
-            @click="editorOpen = true"
-          >＋ 新增检查项</button>
-
-          <form v-if="editorOpen" class="item-editor" @submit.prevent="saveItem">
-            <h2 class="wbx-subhead"><i class="led sig"></i>{{ markupEditing ? '编辑标准图标注' : (replacingId ? '更新标准图' : '新增检查项') }}</h2>
-            <p v-if="markupEditing" class="editor-lead">
-              只改标注、不换图：保存后会生成新一版标准图，员工端会提示重新对照；已经交过的记录仍看当时那一版。
-            </p>
-            <p v-else class="editor-lead">标准图保存后检查项才会出现在员工端。可在图上画圆圈、箭头和批注。</p>
-            <label v-if="!markupEditing" class="editor-field">
-              检查项名称
-              <input
-                v-model="itemName"
-                class="input"
-                type="text"
-                maxlength="40"
-                :disabled="Boolean(replacingId)"
-                placeholder="比如案板表面"
-              >
-            </label>
-            <label v-if="!markupEditing" class="editor-field">
-              标准图
-              <input class="input" type="file" accept="image/*" @change="onFile">
-            </label>
-            <div class="mark-tools">
-              <button type="button" class="btn btn-sm" :class="{ 'btn-primary': mode === 'circle' }" @click="mode = 'circle'">圆圈</button>
-              <button type="button" class="btn btn-sm" :class="{ 'btn-primary': mode === 'arrow' }" @click="mode = 'arrow'; arrowStart = null">箭头</button>
-              <button type="button" class="btn btn-sm" :class="{ 'btn-primary': mode === 'caption' }" @click="mode = 'caption'">批注</button>
-              <input
-                v-if="mode === 'caption'"
-                v-model="captionText"
-                class="input"
-                type="text"
-                maxlength="40"
-                placeholder="批注文字，再点图放上去"
-              >
-              <span v-if="mode === 'arrow' && arrowStart" class="editor-hint">再点一次画出箭头</span>
-            </div>
-            <HygieneStandardOverlay
-              :src="editorSrc"
-              :standard-id="replacingItem ? replacingItem.current_standard_id : null"
-              :markup="markup"
-              editable
-              :alt="itemName || '标准图预览'"
-              @point="onPoint"
-            />
-            <ul v-if="markup.length" class="mark-list">
-              <li v-for="(mark, index) in markup" :key="index">
-                <span>{{ markLabel(mark) }}</span>
-                <button type="button" class="btn btn-sm" @click="removeMark(index)">删除标注</button>
-              </li>
-            </ul>
-            <div class="editor-actions">
-              <button type="button" class="btn" @click="clearEditor">取消</button>
-              <button type="submit" class="btn btn-primary" :disabled="!canSave || savingMarkup">
-                {{ markupEditing ? (savingMarkup ? '保存中…' : '保存标注') : (replacingId ? '保存新标准图' : '新增检查项') }}
-              </button>
-            </div>
-          </form>
-        </template>
-        <div v-else class="wbx-empty-bar">先选一个工作区。</div>
-      </section>
+      <!-- 桌面：右栏清单面板（手机档整块隐藏，改走 /workbench/floor/zone-items 独立页） -->
+      <div class="zone-items-wrap">
+        <HygieneZoneItemsPanel :zone="selected" @changed="refreshPage" />
+      </div>
     </div>
 
     <ConfirmDialog
@@ -682,15 +415,6 @@ function markLabel(mark) {
       danger
       @confirm="confirmDeleteZone"
       @cancel="deleteZoneTarget = null"
-    />
-    <ConfirmDialog
-      v-if="deleteItemTarget"
-      title="删除日常检查项"
-      :message="`删除「${deleteItemTarget.name}」会同时删除该项进行中的待办。`"
-      confirm-label="删除"
-      danger
-      @confirm="confirmDeleteItem"
-      @cancel="deleteItemTarget = null"
     />
   </div>
 </template>
@@ -710,11 +434,15 @@ function markLabel(mark) {
 .wbx-sub { grid-column: 1 / -1; grid-row: 2; margin: 8px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--ink-dim); }
 .wbx-head .rule-help { grid-column: 1 / -1; grid-row: 3; margin-top: 6px; }
 .export-size { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-dim); }
-.export-size select {
-  min-height: 44px; padding: 0 8px; border-radius: var(--r-1);
+.export-chip {
+  min-height: 44px; padding: 0 12px; border-radius: var(--r-1);
   background: var(--surface-1); border: 1px solid var(--line-strong); color: var(--ink);
-  font: inherit; font-size: 10px;
+  font: inherit; font-size: 10.5px; cursor: pointer;
 }
+.export-chip.on {
+  background: var(--wb-tint-14); border-color: var(--action); color: var(--action); font-weight: 600;
+}
+.export-chip:disabled { opacity: .6; cursor: default; }
 .wbx-error { margin: 0; font-size: 11px; color: var(--danger-bright); }
 .led { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; background: var(--line-strong); }
 .led.ok { background: var(--ok); }
@@ -751,7 +479,6 @@ function markLabel(mark) {
 }
 .wbx-lead { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--ink-dim); }
 .wbx-subline { font: 500 9.5px/1.5 var(--font-mono); color: var(--ink-faint); }
-.wbx-subhead { margin: 0; display: flex; align-items: center; gap: 8px; font: 600 11px/1 var(--font-sans); letter-spacing: .18em; text-transform: uppercase; color: var(--ink-faint); }
 
 .wbx-clocks { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; padding: 12px 14px 14px; }
 .wbx-field { display: flex; flex-direction: column; gap: 6px; font-size: 10px; color: var(--ink-dim); }
@@ -788,42 +515,26 @@ function markLabel(mark) {
 .zone-add .input { flex: 1; min-width: 0; }
 .zone-shift-picks { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
-.item-list { list-style: none; margin: 0; padding: 4px 12px 8px; display: flex; flex-direction: column; }
-.item-row {
-  display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; align-items: center;
-  min-height: 72px; padding: 8px 0; border-bottom: 1px solid var(--wb-ink-a08);
+/* 右栏清单：桌面是第二栏；≤720 整块隐藏，手机从每张工作区卡片的入口进独立页 */
+.zone-items-wrap { display: flex; min-width: 0; }
+.zone-items-link {
+  display: none;
+  align-items: center; justify-content: center;
+  min-height: 44px; padding: 0 12px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  background: var(--surface-1); color: var(--ink);
+  font-size: 11px; text-decoration: none;
 }
-.item-row:last-child { border-bottom: 0; }
-.item-thumb { min-height: 0; width: 56px; }
-.item-thumb :deep(.std-frame) { min-height: 0; }
-.item-thumb :deep(.std-photo img) { max-height: 56px; }
-.item-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
-.item-meta strong { font-size: 11.5px; font-weight: 600; }
-.item-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; align-self: stretch; }
-.item-actions .btn { min-height: 44px !important; }
+.zone-items-link:active { background: var(--surface-2); }
 
-.wbx-fold-entry {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  min-height: 48px; padding: 10px 14px; margin-top: auto;
-  border: 0; border-top: 1px solid var(--wb-ink-a08); background: transparent;
-  color: var(--action); font: 500 11px/1 var(--font-sans); letter-spacing: .04em;
-  text-align: left; cursor: pointer;
-}
-.wbx-fold-entry:hover { background: var(--surface-2); }
-.item-editor { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 14px; border-top: 1px solid var(--wb-ink-a08); }
-.editor-lead { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--ink-dim); }
-.editor-field { display: flex; flex-direction: column; gap: 6px; font-size: 10px; color: var(--ink-dim); }
-.editor-hint { font: 500 9.5px/1.5 var(--font-mono); color: var(--ink-faint); }
-.editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
-.mark-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.mark-tools .input { min-width: 180px; flex: 1; }
-.mark-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.mark-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 10px; color: var(--ink-dim); }
 .zones-page :deep(.btn) { min-height: 44px !important; border-radius: var(--r-1); }
 @media (max-width: 900px) {
   .wbx-cols { grid-template-columns: 1fr; }
 }
 @media (max-width: 720px) {
+  .zone-items-wrap { display: none; }
+  .zone-row { flex-wrap: wrap; }
+  .zone-items-link { display: flex; width: 100%; }
   .wbx-head { grid-template-columns: minmax(0, 1fr); }
   .wbx-pills { grid-column: 1; grid-row: 2; justify-self: start; margin-top: 10px; }
   .wbx-sub { grid-row: 3; }

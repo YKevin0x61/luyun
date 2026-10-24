@@ -66,17 +66,19 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0025_prep_closed_days.sql` | `prep_closed_days`：店自己的**歇业日历**（整天不做生意的营业日，如春节 / 国庆头几天）。落在这些日子的时段不进建议，它们也从「完整营业日」样本里剔除 | 不应用也不报错：`_load_closed_days` 读不到表就按「没有歇业日」降级（一行 warning）。代价是节假日那天会照同星期算出一份看着像模像样的建议 —— 实测国庆当天给过「52 个品、合计 1311」，金莎的信心还是 `high`，师傅照做就是报废 |
 | `0026_statutory_holidays.sql` | `statutory_holidays`：**法定节假日日历**（考勤面，票 02）。一条 = 一个自然日 + 名称，日期唯一（同一天重复标记是覆盖）；`ATTENDANCE_TABLES` 里只读列在数据浏览器，写入口是管理端「节假日日历」页。它是「法定节假日补休」（ADR 0113）的**唯一依据** —— 代码里没有写死的年度表 | 「节假日日历」页读 / 标 / 取消三条都 503 并点名这个文件（`HolidayCalendar` 把缺表异常转成 `not_migrated`）；补休因此算不出来（票 03 读的就是这张表）。其余功能不受影响（排班 / 卫生 / 加班 / 员工登录都不碰它） |
 | `0027_attendance_ledger.sql` | `attendance_ledger`：**月度考勤台账**（考勤面，票 03）。员工 × 自然月一行（唯一键 `tenant_id, employee_id, month`）：假期期初余额、封账后的本月结余（存假）与四个手填列（本月班次 / 是否住宿 / 借调门店 / 是否离职）。它是存假跨月结转的载体（ADR 0113）：封账写它的是票 04、手填列写它的是票 05，票 03 只读它算「上月存假」。`ATTENDANCE_TABLES` 里只读列在数据浏览器 | 考勤表整页 503 并点名这个文件（票 03 的读路径要读它 —— `AttendanceStore` 把缺表异常转成 `not_migrated`，与缺 0026 同一个出口）：实际出勤、例休、补休、生日假、年假、上月存假与存假一个都算不出来。其余功能不受影响（排班 / 卫生 / 加班 / 节假日日历都不碰它） |
+| `0030_prep_plan_rebuild.sql` | **例外：非加成性**（第二例，见下）。备货计划重建（ADR 0117）：删掉三张计划快照表（`prep_plan_runs` / `prep_plan_items` / `prep_plan_item_slots`）与歇业日日历（`prep_closed_days`），重建为「一天一行」的 `prep_plan_days` + 「一行一个品」的 `prep_plan_entries`，另建员工当日档口 `prep_staff_station_picks`；`prep_items` 加一列 `kind`（厨房做的 / 要买的，按 `category` 回填）。`prep_items` 与 `semi_finished_rules` 原样保留 | 不应用也不报错：新代码只读新表，旧表在不在都不影响 —— 代价是页面读到空清单（`prep_plan_days` 缺表时服务层会 500 并点名这个文件）。被删的旧计划记录是 2026-04 / 08 的测试性质数据，`prep_closed_days` 一条都没有，删除不构成业务损失 |
 | `0028_staff_assignments_half_rest.sql` | `staff_assignments."half_rest"`（考勤面，票 07）：**半天休** —— 那天仍然只挂本来那个班次，只在结果行上加一个「是否休半天」的布尔式标志（BIGINT 0/1，`NOT NULL DEFAULT 0`）。见 `GLOSSARY.md` 的「半天休」与 ADR 0114。只有考勤表页能设它（`AttendanceStore.set_half_rest`），排班月历 / 周表 / 员工端只读地显示它，例休折算时那天算 0.5 天出勤 | **考勤表整页 503 并点名这个文件**（票 07 的读路径要 SELECT 这一列，`AttendanceStore` 把缺列转成 `not_migrated`）；`/api/scheduling/*` 那几条也一起 503（周表 / 员工端整月 / 今天要读它才分得出四态）。不应用也**不弄坏既有查询**：加列带默认值，月历人数、`/me`、卫生的当日分工（`services/identity/duty.py` 连这一列都不 SELECT）照常 |
 
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，
 别删）。
 
-**`0024` 是唯一一条非加成性例外**：它 `DROP TABLE` / `DROP COLUMN`，而上面那条规矩是
-增量脚本只做加成性变更。允许它的理由写在脚本头注释里 —— 单机单实例、更新作业在
+**`0024` 与 `0030` 是非加成性例外**：它们 `DROP TABLE` / `DROP COLUMN`，而上面那条规矩是
+增量脚本只做加成性变更。允许它们的理由写在脚本头注释里 —— 单机单实例、更新作业在
 `applying_migrations` 阶段同批切代码与 schema，不存在「旧代码跑新 schema」的窗口；
-被删的是从来没被用起来的执行记录。决策见 [ADR 0111](../../docs/adr/0111-prep-plan-does-not-track-produced-qty.md)。
-**再要破这条规矩之前先问一次**：例外有一次就够，多了这条规矩就等于没有。
+被删的是从来没被用起来的执行记录。决策见 [ADR 0111](../../docs/adr/0111-prep-plan-does-not-track-produced-qty.md)
+与 [ADR 0117](../../docs/adr/0117-prep-plan-rebuild-round-one-question.md)。
+**再要破这条规矩之前先问一次**：两次都已经问过了，第三次尤其要问。
 
 **为什么不在启动时自动补**：`_connect_postgres` 明确不承担结构变更（见其 docstring），
 「schema 是谁改的」要可追溯。所以**改了结构就必须出脚本**，没有「重启即自愈」这条捷径。

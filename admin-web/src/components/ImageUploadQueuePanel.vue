@@ -1,11 +1,13 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import ConfirmDialog from './admin/ConfirmDialog.vue'
 import SvgIcon from './SvgIcon.vue'
 import { useImageUploadQueueStore } from '../stores/imageUploadQueue'
 
 const store = useImageUploadQueueStore()
-const collapsed = ref(false)
+// 默认收起（2026-10-19 用户裁定）：上传在后台跑，不自动弹面板打断正在做的事；
+// 需要看进度/重试时点那颗胶囊展开。
+const collapsed = ref(true)
 // 待确认「移除」的任务。只有失败项才拦——成功项的照片已经在服务端了，移除只是清
 // 列表；失败项的移除等于当场放弃这张照片，且草稿也会一起删掉。
 const removeTarget = ref(null)
@@ -33,12 +35,8 @@ const chipLabel = computed(() => {
   return `图片已上传 ${store.completedTasks.length}`
 })
 
-watch(
-  () => store.activeTasks.length,
-  (count) => {
-    if (count) collapsed.value = false
-  },
-)
+// 不再「有任务就自动展开」：原来上传一开始就把面板顶出来，正在填表的人被打断。
+// 现在一律由用户点胶囊展开（失败也一样，胶囊会变红并报数）。
 
 function statusText(task) {
   if (task.status === 'queued') return '排队中'
@@ -163,88 +161,83 @@ function closePanel() {
 </template>
 
 <style scoped>
+/* B 案面板语言（2026-10-19）：与工作台的卡片/行同一套 —— 语义令牌、1px 细边、方角小圆角、
+   纯色 3px 进度条、9.5px mono 状态。原来这里是后台旧皮肤（10px 圆角 + rgba 深底 +
+   渐变进度条 + 旧令牌 --border/--text/--accent），所以它在改造过的页面里显得没改。 */
 .image-upload-queue {
   position: fixed;
   top: calc(var(--global-nav-height, 46px) + 12px);
   right: 14px;
-  /* 必须低于拍摄/对照弹层（.staff-preview 是 60）：原来 95 会盖住弹层里的照片预览，
-     员工看不到自己刚拍的那张。仍高于底部 tabbar（30），收起态也还能点到。 */
+  /* 仍低于拍摄/对照弹层（.staff-preview = 60），高于底部 tabbar：收起态也点得到。 */
   z-index: var(--z-dialog);
-  width: min(360px, calc(100vw - 28px));
+  width: min(340px, calc(100vw - 28px));
 }
 .image-upload-queue.is-collapsed { width: auto; }
 .image-upload-panel,
 .image-upload-chip {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: rgba(17, 24, 39, .98);
-  color: var(--text);
-  box-shadow: 0 18px 42px rgba(0, 0, 0, .38);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+  color: var(--ink);
+  /* 不挂模糊阴影：B 案浮层靠 1px 边 + 实底分层（设计护栏也不允许新增 --hy-* 引用）。 */
 }
 .image-upload-panel { overflow: hidden; }
 .image-upload-chip {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 7px;
-  min-height: 36px;
+  gap: 8px;
+  min-height: 44px;
   padding: 0 12px;
-  font: 600 12px/1 var(--font-sans, inherit);
+  font: 500 11px/1 var(--font-sans, inherit);
+  letter-spacing: .04em;
   cursor: pointer;
 }
-.image-upload-chip-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, .18);
-}
-.image-upload-chip-dot.is-error { background: var(--red); box-shadow: 0 0 0 3px rgba(239, 68, 68, .16); }
+.image-upload-chip-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--action); }
+.image-upload-chip-dot.is-error { background: var(--danger); }
 .image-upload-head {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px;
-  padding: 11px 12px;
-  border-bottom: 1px solid var(--border);
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--line);
 }
+/* 图标块改小：B 案的面板头是「一个记号 + 标题」，不做彩色图标砖。 */
 .image-upload-head-icon {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  background: rgba(99, 102, 241, .14);
-  color: var(--accent);
+  width: 20px;
+  height: 20px;
+  color: var(--action);
 }
 .image-upload-head strong,
-.image-upload-head span {
-  display: block;
-  min-width: 0;
+.image-upload-head span { display: block; min-width: 0; }
+.image-upload-head strong {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--ink);
 }
-.image-upload-head strong { font-size: 12px; }
 .image-upload-head div > span {
   margin-top: 3px;
-  color: var(--text-dim);
-  font-size: 11px;
+  color: var(--ink-dim);
+  font-size: 10.5px;
   line-height: 1.4;
 }
 .image-upload-icon-btn {
   display: inline-grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-1);
   background: transparent;
-  color: var(--text-dim);
+  color: var(--ink-dim);
   cursor: pointer;
 }
 .image-upload-icon-btn:hover,
-.image-upload-icon-btn:focus-visible {
-  background: var(--card2);
-  color: var(--text);
-}
+.image-upload-icon-btn:focus-visible { background: var(--surface-2); color: var(--ink); }
 .image-upload-list {
   max-height: min(48vh, 380px);
   overflow-y: auto;
@@ -257,7 +250,7 @@ function closePanel() {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px 10px;
   padding: 10px 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
 }
 .image-upload-task:first-child { border-top: 0; }
 .image-upload-task-copy { min-width: 0; }
@@ -269,33 +262,32 @@ function closePanel() {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.image-upload-task-copy strong { font-size: 12px; }
+.image-upload-task-copy strong { font-size: 12px; font-weight: 500; color: var(--ink); }
 .image-upload-task-copy span {
   margin-top: 2px;
-  color: var(--text-dim);
-  font-size: 11px;
+  color: var(--ink-dim);
+  font-size: 10.5px;
 }
 .image-upload-task-copy small {
   margin-top: 4px;
-  color: var(--accent);
-  font-size: 11px;
+  color: var(--ink-faint);
+  font: 400 9.5px/1.2 var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
-.image-upload-task.is-processing .image-upload-task-copy small { color: var(--cyan); }
-.image-upload-task.is-success .image-upload-task-copy small { color: var(--green); }
-.image-upload-task.is-error .image-upload-task-copy small { color: var(--red); }
+/* 状态也用语义色，不再用后台那套 --accent/--cyan/--green/--red。 */
+.image-upload-task.is-processing .image-upload-task-copy small { color: var(--info); }
+.image-upload-task.is-success .image-upload-task-copy small { color: var(--ok); }
+.image-upload-task.is-error .image-upload-task-copy small { color: var(--danger-bright); }
 .image-upload-bar {
   grid-column: 1 / -1;
-  height: 4px;
+  height: 3px;
   overflow: hidden;
-  border-radius: 999px;
-  background: var(--card2);
+  background: var(--line);
 }
 .image-upload-bar span {
   display: block;
   height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--accent), var(--cyan));
+  background: var(--action);
   transition: width .18s ease-out;
 }
 .image-upload-task.is-processing .image-upload-bar span {
@@ -305,9 +297,9 @@ function closePanel() {
 .image-upload-error {
   grid-column: 1 / -1;
   margin: 0;
-  color: var(--red);
-  font-size: 11px;
-  line-height: 1.45;
+  color: var(--danger-bright);
+  font-size: 10.5px;
+  line-height: 1.5;
 }
 .image-upload-task-actions {
   grid-column: 2;
@@ -319,34 +311,37 @@ function closePanel() {
 .image-upload-retry {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  min-height: 28px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--card2);
-  color: var(--text);
-  font: 600 11px/1 var(--font-sans, inherit);
+  gap: 5px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--ink);
+  font: 500 11px/1 var(--font-sans, inherit);
   cursor: pointer;
 }
 .image-upload-retry:hover,
-.image-upload-retry:focus-visible { border-color: var(--accent); }
+.image-upload-retry:focus-visible { border-color: var(--action); }
 .image-upload-foot {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  padding: 9px 12px;
-  border-top: 1px solid var(--border);
+  gap: 2px;
+  padding: 2px 6px;
+  border-top: 1px solid var(--line);
 }
 .image-upload-clear {
+  min-height: 44px;
+  padding: 0 10px;
   border: 0;
+  border-radius: var(--r-1);
   background: transparent;
-  color: var(--text-dim);
-  font: 600 11px/1 var(--font-sans, inherit);
+  color: var(--ink-dim);
+  font: 500 11px/1 var(--font-sans, inherit);
   cursor: pointer;
 }
 .image-upload-clear:hover,
-.image-upload-clear:focus-visible { color: var(--text); }
+.image-upload-clear:focus-visible { color: var(--ink); background: var(--surface-2); }
 @keyframes image-upload-pulse {
   0%, 100% { opacity: .55; }
   50% { opacity: 1; }
@@ -363,11 +358,7 @@ function closePanel() {
     left: 10px;
     width: auto;
   }
-  .image-upload-queue.is-collapsed {
-    right: 10px;
-    left: auto;
-    width: auto;
-  }
+  .image-upload-queue.is-collapsed { right: 10px; left: auto; width: auto; }
   .image-upload-list { max-height: min(42vh, 320px); }
 }
 </style>

@@ -16,13 +16,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const get = vi.fn()
 const post = vi.fn()
 const del = vi.fn()
+const upload = vi.fn()
 
 vi.mock('../../../api/client.js', () => ({
   api: {
     get: (...args) => get(...args),
     post: (...args) => post(...args),
     delete: (...args) => del(...args),
-    upload: vi.fn(),
+    upload: (...args) => upload(...args),
   },
 }))
 
@@ -116,7 +117,12 @@ async function mountView(component, path) {
   return mount(component, {
     global: {
       plugins: [router],
-      stubs: { LuyunDatePicker: { template: '<input />' } },
+      stubs: {
+        LuyunDatePicker: { template: '<input />' },
+        // 页内相机挂的是真组件（`getUserMedia` 在 jsdom 里没有）：这里替身只负责
+        // 「在不在、交不交得回一张图」。
+        HygieneLiveCamera: { name: 'HygieneLiveCamera', template: '<div class="stub-camera" />' },
+      },
     },
   })
 }
@@ -125,6 +131,7 @@ beforeEach(() => {
   get.mockReset()
   post.mockReset()
   del.mockReset()
+  upload.mockReset()
 })
 
 describe('损耗登记页（员工端）', () => {
@@ -199,19 +206,33 @@ describe('损耗登记页（员工端）', () => {
     expect(wrapper.text()).toContain('选了「其他」要说明')
   })
 
-  it('现场照片排在登记页最前，且只走系统相机（没有相册这条路）', async () => {
+  it('现场照片排在登记页最前，点「拍一张」就地开相机（不跳系统相机）', async () => {
     const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
     // 第一块就是照片（2026-10-17 用户裁定：先拍现场、再填物料）。
     expect(wrapper.findAll('.loss-block')[0].text()).toContain('现场照片')
 
-    // `capture="environment"` 让手机浏览器直接开系统相机；没有 `multiple` —— 相机一张一交。
-    // 这两条一起才是「不用相册」：去掉 capture 或加回 multiple，手机就会弹「拍照 / 相册」。
-    const file = wrapper.get('input[type="file"]')
-    expect(file.attributes('capture')).toBe('environment')
-    expect(file.attributes('multiple')).toBeUndefined()
-    expect(file.attributes('accept')).toBe('image/*')
+    // 没有 file input：这一版不走「系统相机 / 相册」那条路 —— 那条路在 iPhone 上拿到的是
+    // HEIC，后端认不出格式（用户真机上撞过）。（相机组件内部那个降级入口不算这一页的）
+    expect(wrapper.find('input[type="file"]').exists()).toBe(false)
+    // 相机默认收着，点一下才展开 —— 页内取景，不跳出去。
+    expect(wrapper.find('.stub-camera').exists()).toBe(false)
+    await wrapper.get('.loss-shot-add').trigger('click')
+    expect(wrapper.find('.stub-camera').exists()).toBe(true)
+
+    // 相机交回一张 JPEG → 立刻上传，缩略图落进首位那一块。
+    upload.mockResolvedValue({
+      image: { capture_id: 'abc', url: '/api/wastage/images/abc' },
+    })
+    wrapper
+      .findComponent({ name: 'HygieneLiveCamera' })
+      .vm.$emit('captured', new Blob(['jpeg'], { type: 'image/jpeg' }))
+    await flushPromises()
+
+    expect(upload).toHaveBeenCalledTimes(1)
+    expect(upload.mock.calls[0][0]).toBe('/api/wastage/images')
+    expect(wrapper.findAll('.loss-shot')).toHaveLength(1)
   })
 })
 
