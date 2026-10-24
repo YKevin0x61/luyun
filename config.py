@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # 基础配置
     APP_NAME: str = "LuyunOrder"
-    APP_VERSION: str = "0.8.15"
+    APP_VERSION: str = "0.8.16"
     # 安全默认：不开 /docs、cookie 带 Secure。开发机在 .env 里显式写 DEBUG=true。
     DEBUG: bool = False
     # 关掉 lifespan 里的常驻后台循环（爬虫轮询、卫生调度、企微推送、数据质量调度）。
@@ -102,12 +102,11 @@ class Settings(BaseSettings):
             "dish_stations": app_db_path,
             "semi_finished_rules": app_db_path,
             "report_dishes": app_db_path,
-            # 备货计划相关表（批次与库存流水已随 ADR 0111 退场）
+            # 备货计划相关表（批次与库存流水随 ADR 0111 退场；快照三表随 ADR 0117 重建退场）
             "prep_items": app_db_path,
-            "prep_closed_days": app_db_path,
-            "prep_plan_runs": app_db_path,
-            "prep_plan_items": app_db_path,
-            "prep_plan_item_slots": app_db_path,
+            "prep_plan_days": app_db_path,
+            "prep_plan_entries": app_db_path,
+            "prep_staff_station_picks": app_db_path,
             "wecom_push_webhooks": app_db_path,
             "wecom_push_jobs": app_db_path,
             "wecom_push_logs": app_db_path,
