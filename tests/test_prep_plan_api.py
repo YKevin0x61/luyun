@@ -195,53 +195,26 @@ def test_staff_cannot_change_item_kind(staff_client):
     assert resp.status_code == 401
 
 
-def test_restock_endpoint_contract(admin_client):
-    """补货 tab 的契约：任一身份可读、返回 rows 列表（触发语义由 service 测试覆盖）。"""
-    client, db = admin_client
-    _seed(db)
-    body = client.get("/api/prep-plan/restock").json()
-    assert body["success"] is True
-    assert isinstance(body["rows"], list)
-    assert body["needs_station_pick"] is False
-
-
-def test_tick_without_produced_qty_is_rejected(admin_client):
+def test_tick_does_not_need_produced_qty(admin_client):
+    """ADR 0121：不登记产量，勾选只是「这项处理过了」。"""
     client, db = admin_client
     _seed(db)
     body = client.get("/api/prep-plan/today").json()
     entry = [row for row in body["entries"] if row["item_name"] == "虾饺馅"][0]
     resp = client.patch(f"/api/prep-plan/today/entries/{entry['id']}", json={"done": True})
-    assert resp.status_code == 400
-
-
-def test_tick_with_produced_qty_accumulates(admin_client):
-    client, db = admin_client
-    _seed(db)
-    body = client.get("/api/prep-plan/today").json()
-    entry = [row for row in body["entries"] if row["item_name"] == "虾饺馅"][0]
-    for qty in (80, 30):
-        resp = client.patch(
-            f"/api/prep-plan/today/entries/{entry['id']}",
-            json={"done": True, "produced_qty": qty},
-        )
-        assert resp.status_code == 200
+    assert resp.status_code == 200
     refreshed = client.get("/api/prep-plan/today").json()
     row = [r for r in refreshed["entries"] if r["item_name"] == "虾饺馅"][0]
-    assert row["produced_qty"] == 110
+    assert row["done_at"]
 
 
-def test_waste_endpoint_writes_ledger(admin_client):
+def test_restock_and_review_are_gone(admin_client):
+    """补货 / 复盘 / 报废三个端点随 v2 层一起退场，直接 404。"""
     client, db = admin_client
-    item_id = _seed(db)
-    resp = client.post(
-        "/api/prep-plan/waste",
-        json={"prep_item_id": item_id, "quantity": 4, "reason": "excess"},
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["record"]["item_name"] == "虾饺馅"
+    _seed(db)
+    assert client.get("/api/prep-plan/restock").status_code == 404
+    assert client.get("/api/prep-plan/review").status_code == 404
+    assert client.post("/api/prep-plan/waste", json={}).status_code == 404
 
 
-def test_review_is_admin_only(staff_client):
-    client, _db = staff_client
-    resp = client.get("/api/prep-plan/review")
-    assert resp.status_code == 401
+

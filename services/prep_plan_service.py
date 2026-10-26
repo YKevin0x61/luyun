@@ -34,9 +34,6 @@ from config import KITCHEN_STATIONS
 from database import CHINA_TZ
 from services.dish_normalize import normalize_dish_name
 
-# 报损复用既有的损耗台账（ADR 0118 决策 6）：不另写一套报废账。
-from services.wastage.store import WastageActor, WastageStore
-
 logger = logging.getLogger(__name__)
 
 SAME_WEEKDAY_LOOKBACK = 4
@@ -48,22 +45,21 @@ FORECAST_SETTINGS_KEY = "prep_plan_forecast"
 FALLBACK_RUNTIME_SETTINGS_KEY = "scraper_runtime"
 LOUMIAN_STATION = "loumian"
 
-# 预测口径（默认值 = 真实数据回测选出来的点，见 .scratch/prep-plan-backtest/）
-FORECAST_ALPHA = 0.10          # 残差分位：覆盖率目标 1-α；0.10 实测 93.2% @ 1.76x 备货量
-FORECAST_RESIDUAL_DAYS = 28    # 残差样本窗口（天）
+# 预测口径（ADR 0120：少剩货优先，取需求分布的 p40，不再加任何安全缓冲）
+#
+# 为什么不加缓冲：24 小时保质 + 不能结转，多做出来的就是报废。实测（90 个营业日、8 周
+# 同星期几、07:00 快照）「单边多出」随分位的变化是：p30 12.0% / p40 15.7% / 均量 20.2%
+# / p80 36.3%。上一轮的 conformal 缓冲为了「九成够卖」把净多做推到 +76.7%，与新鲜度直接冲突。
+FORECAST_QUANTILE = 0.40       # 取需求分位；0.4 = 剩货 15.7%、缺货 21.6%
+FORECAST_WINDOW_WEEKS = 8      # 同星期几取近 8 周（p40 在 4 个样本上估不稳）
 STORE_FACTOR_SHORT_DAYS = 7    # 整店水位：近 7 天 …
 STORE_FACTOR_LONG_DAYS = 21    # … 对前 21 天
-STORE_FACTOR_MIN = 0.8
-STORE_FACTOR_MAX = 1.3
-# 残差样本少于这个数时 conformal 分位退化（n 很小时它等于取最大值），改用比例兜底。
-# 定 7 而不是 14：实测 14 会把评估期早期的历史缺口日切成冷启动，覆盖率白掉 2.7 个点
-# （07:00 92.8% → 90.1%）。样本少时宁可多备，也不要用更小的缓冲。
-MIN_RESIDUAL_DAYS = 7
-COLD_START_BUFFER_RATIO = 0.5
-# 缓冲上限：**实测不该设**。压到 2× 基准量覆盖率掉 3.4 个点（07:00 92.8% → 89.4%），
-# 压到 5× 也掉 2.8 个点、19:00 掉 5.5 个点——尖峰品的缓冲本来就该比基准量大一个量级，
-# 上限只会让这些品重新变成「经常不够卖」。要限流请改 alpha，不要用上限。
-BUFFER_CAP_RATIO = 0.0
+# 水位限幅收到 ±15%：趋势修正是真需求，但 ±30% 对「少剩货」太激进
+STORE_FACTOR_MIN = 0.85
+STORE_FACTOR_MAX = 1.15
+# 偶发品下限：近 7 天卖出过的品，建议量至少 1 个单位，否则 p40 会让长尾品静默消失
+SPARSE_FLOOR_DAYS = 7
+SPARSE_FLOOR_QTY = 1.0
 
 # 配方岗位 → 档口（沿用旧口径；半成品规则里 position 用的就是这一套名字）
 POSITION_STATION_MAP = {
@@ -80,18 +76,22 @@ POSITION_STATION_MAP = {
 }
 
 
-def _conformal_quantile(residuals: List[float], alpha: float) -> float:
-    """conformal 的次序统计量：取第 ceil((n+1)(1-α)) 个最小残差。
+def _quantile(values: List[float], q: float) -> float:
+    """经验分位（线性插值）。
 
-    有限样本下这条保证「真实值 <= 预测值」的比例不低于 1-α，比直接用经验分位可靠。
-    残差为负说明均量本来就估高了，不给负缓冲（不能靠少备来凑覆盖率）。
+    ADR 0120 起建议量取需求分布的 p40：少剩货优先，不加任何安全缓冲。
+    24 小时保质下多做出来的就是报废，缓冲的代价是真金白银。
     """
-    if not residuals:
+    if not values:
         return 0.0
-    n = len(residuals)
-    rank = min(max(int(math.ceil((n + 1) * (1 - alpha))), 1), n)
-    value = sorted(residuals)[rank - 1]
-    return max(0.0, float(value))
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    q = min(max(q, 0.0), 1.0)
+    pos = q * (len(ordered) - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(ordered) - 1)
+    return float(ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo))
 
 
 class _UsageIndex:
@@ -170,6 +170,20 @@ def _epoch(moment: datetime) -> int:
     return int(moment.timestamp())
 
 
+def _parse_stamp(text) -> Optional[datetime]:
+    """解析库里存的 ISO 时间戳；解析不了就返回 None（宁可不结转，也不认过期货）。"""
+    raw = (text or "").strip() if isinstance(text, str) else text
+    if not raw:
+        return None
+    try:
+        parsed = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=CHINA_TZ)
+    return parsed.astimezone(CHINA_TZ)
+
+
 def _loads_json(raw: Optional[str]) -> dict:
     if not raw:
         return {}
@@ -246,13 +260,13 @@ class PrepPlanService:
 
     # ------------------------------------------------------------------ 算法
     #
-    # 建议量 = 整店水位缩放后的「近 4 周同星期几、同钟点窗口」均量
-    #        + 该品自己的残差 conformal 分位（近 28 天，默认 α=0.10）
+    # 建议量 = p40(近 8 周同星期几、同钟点窗口) × 整店水位 − 未过期的在库量
     #
-    # 为什么加「残差」而不是直接对需求量取高分位：需求是尖峰分布，直接取 9 折分位会把
-    # 本来稳定的品一起抬高；按「这个品历史上均量估偏了多少」加缓冲，稳定的加一点、
-    # 尖峰的加很多，同样的覆盖率备货量少得多（证据见 .scratch/prep-plan-backtest/）。
-    # conformal 的次序统计量保证有限样本下覆盖率 >= 1-α，不是拍一个系数。
+    # 三段各有各的职责，谁都能单独复核：
+    #   1. p40：少剩货优先。不做安全缓冲——24 小时保质下多做出来的就是报废。
+    #   2. 整店水位：修「最近明显比前几周旺/淡」的系统性偏差，限幅 0.85~1.15。
+    #   3. 扣在库：昨天剩的（且没过期）先从今天的量里抵掉，否则就是重复生产。
+    # 偶发品给 1 个单位下限，避免 p40 把长尾品压成 0 后静默消失。
 
     async def _fetch_range(self, db, start_dt: datetime, end_dt: datetime) -> List[dict]:
         """一次取出一个时间跨度内的订单行，Python 侧再分桶。"""
@@ -321,17 +335,17 @@ class PrepPlanService:
         except Exception:  # 配置表读不到不该让整页挂掉
             logger.warning("备货预测参数读不到，用默认值")
         cfg = raw if isinstance(raw, dict) else {}
-        alpha = float(cfg.get("alpha") or FORECAST_ALPHA)
-        alpha = min(max(alpha, 0.01), 0.99)
-        residual_days = int(cfg.get("residual_days") or FORECAST_RESIDUAL_DAYS)
-        residual_days = min(max(residual_days, 7), 56)
+        quantile = float(cfg.get("quantile", FORECAST_QUANTILE))
+        quantile = min(max(quantile, 0.05), 0.95)
+        weeks = int(cfg.get("window_weeks") or FORECAST_WINDOW_WEEKS)
+        weeks = min(max(weeks, 4), 12)
         return {
-            "alpha": alpha,
-            "residual_days": residual_days,
-            # 残差窗口 28 天 + 每个残差日还要回看 4 周 → 至少 56 天历史
-            "lookback_days": residual_days + 28,
-            "factor_min": float(cfg.get("factor_min") or STORE_FACTOR_MIN),
-            "factor_max": float(cfg.get("factor_max") or STORE_FACTOR_MAX),
+            "quantile": quantile,
+            "window_weeks": weeks,
+            # 水位要回看 28 天（7+21），同星期几要回看 weeks*7 天，取大者再加 1 天余量
+            "lookback_days": max(weeks * 7, STORE_FACTOR_SHORT_DAYS + STORE_FACTOR_LONG_DAYS) + 1,
+            "factor_min": float(cfg.get("factor_min", STORE_FACTOR_MIN)),
+            "factor_max": float(cfg.get("factor_max", STORE_FACTOR_MAX)),
         }
 
     async def compute_suggestions(self, db, now: datetime) -> dict:
@@ -370,26 +384,17 @@ class PrepPlanService:
 
         days_with_orders = usage.days()
         today_candidates = [
-            today - timedelta(days=7 * i) for i in range(1, SAME_WEEKDAY_LOOKBACK + 1)
+            today - timedelta(days=7 * i) for i in range(1, cfg["window_weeks"] + 1)
         ]
         active_candidates = [day for day in today_candidates if day in days_with_orders]
-        residual_days = [
+        recent_days = [
             today - timedelta(days=i)
-            for i in range(1, cfg["residual_days"] + 1)
+            for i in range(1, SPARSE_FLOOR_DAYS + 1)
             if (today - timedelta(days=i)) in days_with_orders
         ]
 
         def window_qty(day, key):
             return usage.window(day, key, _epoch(_at(day, clock_t)), _epoch(_at(day, close_t)))
-
-        def same_weekday_base(day, key):
-            """某一天在同样钟点窗口的「4 周同星期几」均量，不含任何缓冲。"""
-            vals = [
-                window_qty(c, key)
-                for c in (day - timedelta(days=7 * i) for i in range(1, SAME_WEEKDAY_LOOKBACK + 1))
-                if c in days_with_orders
-            ]
-            return (sum(vals) / len(vals)) if vals else 0.0
 
         def store_volume(day):
             if day not in days_with_orders:
@@ -428,42 +433,32 @@ class PrepPlanService:
             for rules in exact_rules.values()
             for rule in rules
         }
-
         entries: List[dict] = []
         for item in items:
             key = (item["item_name"], item["unit"])
             has_rule = key in rule_index
             values = [window_qty(day, key) for day in active_candidates]
             if not has_rule:
-                base = 0.0
-                residuals: List[float] = []
+                demand_qty = 0.0
                 status = "missing_rule"
             elif not active_candidates:
-                base = 0.0
-                residuals = []
+                demand_qty = 0.0
                 status = "no_history"
             else:
-                base = sum(values) / len(values)
-                residuals = []
-                for dd in residual_days:
-                    # 基线为 0 的日子（同星期几那几天没数据 / 店主歇业）也要算：
-                    # 那正是「没有可比日时公式会估成 0」这个失败模式的实测记录，
-                    # 把它剔掉等于假装断档不会发生，覆盖率会掉回去（实测 92.8% → 88.3%）。
-                    base_dd = same_weekday_base(dd, key)
-                    residuals.append(window_qty(dd, key) - base_dd * day_factor(dd))
+                # 需求分位（p40）：少剩货优先，不加任何安全缓冲
+                demand_qty = round(max(0.0, _quantile(values, cfg["quantile"]) * factor), 1)
                 status = "ok"
 
-            if len(residuals) >= MIN_RESIDUAL_DAYS:
-                buffer_qty = _conformal_quantile(residuals, cfg["alpha"])
-                buffer_source = "conformal"
-                if BUFFER_CAP_RATIO > 0 and base > 0 and buffer_qty > base * BUFFER_CAP_RATIO:
-                    buffer_qty = base * BUFFER_CAP_RATIO
-                    buffer_source = "capped"
-            else:
-                # 新店 / 刚上线：还没有足够残差，先按比例给保守裕度，别让首月裸奔
-                buffer_qty = base * COLD_START_BUFFER_RATIO
-                buffer_source = "cold_start"
-            suggested = round(max(0.0, base * factor + buffer_qty), 1)
+            floor_applied = False
+            if status in ("ok", "no_history") and demand_qty < SPARSE_FLOOR_QTY:
+                # p40 会把偶发品压成 0；近 7 天真的卖出过就保底 1 个单位
+                if any(window_qty(dd, key) > 0 for dd in recent_days):
+                    demand_qty = SPARSE_FLOOR_QTY
+                    floor_applied = True
+
+            # ADR 0121：不登记产量，也不维护在库量。页面给的就是「今天参考值」，
+            # 师傅拿它减掉自己看到的实物库存，决定还要备多少。
+            suggested = demand_qty
 
             hour_values = [
                 usage.window(
@@ -492,9 +487,10 @@ class PrepPlanService:
                         ],
                         "active_days": len(active_candidates),
                         "store_factor": round(factor, 3),
-                        "buffer_qty": round(buffer_qty, 1),
-                        "buffer_source": buffer_source,
-                        "residual_days": len(residuals),
+                        "quantile": cfg["quantile"],
+                        # 未扣在库的需求量：页面拿它显示「今天要卖多少」
+                        "demand_qty": demand_qty,
+                        "floor_applied": floor_applied,
                     },
                     "history7": [
                         {
@@ -529,8 +525,8 @@ class PrepPlanService:
                 e["item_name"] for e in entries if e["basis"]["status"] == "missing_rule"
             ],
             "forecast": {
-                "alpha": cfg["alpha"],
-                "residual_days": cfg["residual_days"],
+                "quantile": cfg["quantile"],
+                "window_weeks": cfg["window_weeks"],
                 "store_factor": round(factor, 3),
             },
         }
@@ -611,7 +607,7 @@ class PrepPlanService:
             await cursor.execute(
                 """
                 SELECT id, prep_item_id, item_name, unit, station, kind,
-                       suggested_qty, final_qty, qty_source, produced_qty,
+                       suggested_qty, final_qty, qty_source,
                        done_at, done_by, basis_json
                 FROM prep_plan_entries
                 WHERE plan_day_id = ?
@@ -631,7 +627,6 @@ class PrepPlanService:
                 "suggested_qty": float(row["suggested_qty"] or 0),
                 "final_qty": float(row["final_qty"] or 0),
                 "qty_source": row["qty_source"] or "suggested",
-                "produced_qty": float(row["produced_qty"] or 0),
                 "done_at": row["done_at"],
                 "done_by": row["done_by"] or "",
                 "basis": _loads_json(row["basis_json"]),
@@ -699,13 +694,10 @@ class PrepPlanService:
         entry_id: int,
         final_qty: Optional[float] = None,
         done: Optional[bool] = None,
-        produced_qty: Optional[float] = None,
         done_by: str = "",
         employee_id: Optional[int] = None,
     ) -> dict:
-        # v2（ADR 0118）：勾必须带「这次做了多少」。只勾不填数等于 v1，在库量就无从算起。
-        if done and produced_qty is None:
-            raise ValueError("produced_qty_required")
+        # ADR 0121：不再登记产量，勾选只是「这项处理过了」的标记。
         tdb = db.table("prep_plan_entries")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
@@ -719,18 +711,6 @@ class PrepPlanService:
                 if not staff_station or row["station"] != staff_station:
                     raise PermissionError("station_forbidden")
             stamp = datetime.now(CHINA_TZ).isoformat()
-            if produced_qty is not None:
-                await cursor.execute(
-                    """
-                    UPDATE prep_plan_entries
-                       SET produced_qty = produced_qty + ?,
-                           produced_by = ?,
-                           produced_at = ?,
-                           updated_at = ?
-                     WHERE id = ?
-                    """,
-                    (float(produced_qty), done_by, stamp, stamp, entry_id),
-                )
             if final_qty is not None:
                 await cursor.execute(
                     """
@@ -851,268 +831,6 @@ class PrepPlanService:
             )
         await tdb.commit()
         return {"success": True, "id": item_id}
-
-
-    # ------------------------------------------------------------------ v2：产量、在库量、补货、复盘
-
-    async def _production_map(self, db, plan_day: str) -> Dict[int, dict]:
-        """某一天每个品的建议量与产量（按 prep_item_id）。"""
-        tdb = db.table("prep_plan_entries")
-        async with tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                SELECT e.prep_item_id, e.item_name, e.unit, e.suggested_qty, e.produced_qty
-                FROM prep_plan_entries e
-                JOIN prep_plan_days d ON d.id = e.plan_day_id
-                WHERE d.plan_day = ?
-                """,
-                (plan_day,),
-            )
-            rows = await cursor.fetchall()
-        out: Dict[int, dict] = {}
-        for row in rows:
-            item_id = int(row["prep_item_id"] or 0)
-            if not item_id:
-                continue
-            out[item_id] = {
-                "item_name": row["item_name"] or "",
-                "unit": row["unit"] or "",
-                "suggested_qty": float(row["suggested_qty"] or 0),
-                "produced_qty": float(row["produced_qty"] or 0),
-            }
-        return out
-
-    async def _consumed_map(
-        self, db, start_dt: datetime, end_dt: datetime
-    ) -> Dict[Tuple[str, str], float]:
-        """一段时间里「卖出菜品 × 配方系数」的用量，按 (备货品, 单位) 聚合。"""
-        rows = await self._fetch_orders(db, [("consumed", start_dt, end_dt)])
-        exact_rules, norm_rules = await self._load_rules(db)
-        totals: Dict[Tuple[str, str], float] = defaultdict(float)
-        for row in rows:
-            if row["quantity"] == 0:
-                continue
-            dishes = exact_rules.get(row["dish_name"]) or norm_rules.get(
-                normalize_dish_name(row["dish_name"]), []
-            )
-            for rule in dishes:
-                totals[(rule["semi_name"], rule["unit"])] += row["quantity"] * rule["factor"]
-        return totals
-
-    async def _waste_map(self, db, day: str) -> Dict[str, float]:
-        """某一天按备货品名汇总的报损量（来自既有损耗台账）。"""
-        try:
-            tdb = db.table("wastage_records")
-            async with tdb.conn.cursor() as cursor:
-                await cursor.execute(
-                    "SELECT item_name, SUM(quantity) AS total FROM wastage_records"
-                    " WHERE wastage_date = ? GROUP BY item_name",
-                    (day,),
-                )
-                rows = await cursor.fetchall()
-        except Exception:  # 台账表缺失时按「没有报损」处理，不让备货页整页挂掉
-            logger.warning("报损表读不到，按 0 处理（迁移 0029 是否已应用？）")
-            return {}
-        return {row["item_name"]: float(row["total"] or 0) for row in rows}
-
-    async def _on_hand_map(self, db, now: datetime) -> Dict[int, float]:
-        """在库量 = 今天做的 + 昨天剩的 − 今天卖的 − 今天报损。
-
-        只结转昨天（ADR 0118）：再早的不算，过期不自动扣，靠报损体现。
-        """
-        today = now.date()
-        yesterday = today - timedelta(days=1)
-        today_items = await self._production_map(db, today.isoformat())
-        yday_items = await self._production_map(db, yesterday.isoformat())
-        sold_today = await self._consumed_map(db, _at(today, time(0, 0)), now)
-        sold_yday = await self._consumed_map(
-            db, _at(yesterday, time(0, 0)), _at(yesterday, time(23, 59, 59))
-        )
-        waste_today = await self._waste_map(db, today.isoformat())
-        waste_yday = await self._waste_map(db, yesterday.isoformat())
-
-        items = await self._load_items(db)
-        on_hand: Dict[int, float] = {}
-        for item in items:
-            item_id = item["prep_item_id"]
-            key = (item["item_name"], item["unit"])
-            produced_today = (today_items.get(item_id) or {}).get("produced_qty", 0.0)
-            produced_yday = (yday_items.get(item_id) or {}).get("produced_qty", 0.0)
-            left_yday = max(
-                0.0,
-                produced_yday - sold_yday.get(key, 0.0) - waste_yday.get(item["item_name"], 0.0),
-            )
-            value = (
-                produced_today
-                + left_yday
-                - sold_today.get(key, 0.0)
-                - waste_today.get(item["item_name"], 0.0)
-            )
-            on_hand[item_id] = round(max(0.0, value), 1)
-        return on_hand
-
-    async def get_restock(
-        self,
-        db,
-        now: Optional[datetime] = None,
-        employee_id: Optional[int] = None,
-        station: Optional[str] = None,
-    ) -> dict:
-        """补货 tab：在库量不够再卖 1 小时的品，以及「补到打烊」要做的量。"""
-        now = now or datetime.now(CHINA_TZ)
-        # 补货要能直接勾：先把今天的计划落库，拿到每条明细的 id
-        today = await self.get_today(db, now=now)
-        entry_ids = {row["prep_item_id"]: row["id"] for row in today["entries"]}
-        computed = await self.compute_suggestions(db, now)
-        on_hand = await self._on_hand_map(db, now)
-
-        staff_station = await self.get_staff_station(db, employee_id, now) if employee_id else None
-        if employee_id is not None and not staff_station:
-            return {
-                "success": True,
-                "closed": computed["window"]["closed"],
-                "rows": [],
-                "needs_station_pick": True,
-                "staff_station": None,
-                "produced_today": 0,
-            }
-
-        rows: List[dict] = []
-        for entry in computed["entries"]:
-            hour = float(entry.get("next_hour_qty") or 0)
-            hand = float(on_hand.get(entry["prep_item_id"], 0.0))
-            if computed["window"]["closed"] or hour <= 0 or hand >= hour:
-                continue
-            if staff_station and entry["station"] != staff_station:
-                continue
-            if station and station not in ("", "all") and entry["station"] != station:
-                continue
-            cover_minutes = int(round(hand / hour * 60)) if hour > 0 else 0
-            rows.append(
-                {
-                    "entry_id": entry_ids.get(entry["prep_item_id"]),
-                    "prep_item_id": entry["prep_item_id"],
-                    "item_name": entry["item_name"],
-                    "unit": entry["unit"],
-                    "station": entry["station"],
-                    "kind": entry["kind"],
-                    "on_hand": round(hand, 1),
-                    "next_hour_qty": round(hour, 1),
-                    "cover_minutes": max(0, min(cover_minutes, 60)),
-                    "restock_qty": round(max(0.0, entry["suggested_qty"] - hand), 1),
-                    "suggested_qty": entry["suggested_qty"],
-                }
-            )
-        rows.sort(key=lambda r: (r["cover_minutes"], -r["restock_qty"]))
-        produced_today = sum(
-            row["produced_qty"]
-            for row in (await self._production_map(db, now.date().isoformat())).values()
-        )
-        return {
-            "success": True,
-            "closed": computed["window"]["closed"],
-            "rows": rows,
-            "needs_station_pick": False,
-            "staff_station": staff_station,
-            "produced_today": round(produced_today, 1),
-        }
-
-    async def get_review(
-        self, db, day: Optional[str] = None, now: Optional[datetime] = None
-    ) -> dict:
-        """复盘：看昨天（或指定日）每个品的建议 / 实际做 / 卖出 / 剩 / 报废。"""
-        now = now or datetime.now(CHINA_TZ)
-        target = day or (now.date() - timedelta(days=1)).isoformat()
-        entries = await self._production_map(db, target)
-        sold = await self._consumed_map(
-            db,
-            datetime.fromisoformat(f"{target}T00:00:00").replace(tzinfo=CHINA_TZ),
-            datetime.fromisoformat(f"{target}T23:59:59").replace(tzinfo=CHINA_TZ),
-        )
-        waste = await self._waste_map(db, target)
-
-        rows: List[dict] = []
-        over = under = 0
-        waste_total = 0.0
-        for item in await self._load_items(db):
-            item_id = item["prep_item_id"]
-            record = entries.get(item_id)
-            if record is None:
-                continue
-            key = (item["item_name"], item["unit"])
-            sold_qty = round(sold.get(key, 0.0), 1)
-            waste_qty = round(waste.get(item["item_name"], 0.0), 1)
-            produced = record["produced_qty"]
-            left = round(max(0.0, produced - sold_qty - waste_qty), 1)
-            delta = round(produced - record["suggested_qty"], 1)
-            if delta >= max(1.0, record["suggested_qty"] * 0.2):
-                over += 1
-            elif delta <= -max(1.0, record["suggested_qty"] * 0.2):
-                under += 1
-            waste_total += waste_qty
-            rows.append(
-                {
-                    "prep_item_id": item_id,
-                    "item_name": item["item_name"],
-                    "unit": item["unit"],
-                    "station": item["station"],
-                    "suggested_qty": record["suggested_qty"],
-                    "produced_qty": produced,
-                    "sold_qty": sold_qty,
-                    "left_qty": left,
-                    "waste_qty": waste_qty,
-                    "delta": delta,
-                }
-            )
-        rows.sort(key=lambda r: -abs(r["delta"]))
-        return {
-            "success": True,
-            "day": target,
-            "rows": rows,
-            "summary": {
-                "over": over,
-                "under": under,
-                "waste_total": round(waste_total, 1),
-            },
-        }
-
-    async def add_waste(
-        self,
-        db,
-        prep_item_id: int,
-        quantity: float,
-        reason: str,
-        remark: str = "",
-        employee_id: Optional[int] = None,
-        employee_name: str = "",
-        now: Optional[datetime] = None,
-    ) -> dict:
-        """备货页的「报废」：写进既有损耗台账，物料名就是备货品名。"""
-        now = now or datetime.now(CHINA_TZ)
-        items = await self._load_items(db)
-        item = next((row for row in items if row["prep_item_id"] == int(prep_item_id)), None)
-        if item is None:
-            raise ValueError("item_not_found")
-        if employee_id is not None:
-            staff_station = await self.get_staff_station(db, employee_id, now)
-            if not staff_station or item["station"] != staff_station:
-                raise PermissionError("station_forbidden")
-        actor = WastageActor(
-            kind="staff" if employee_id is not None else "admin",
-            employee_id=employee_id,
-            name=employee_name,
-        )
-        store = WastageStore(db)
-        record = await store.add_record(
-            actor,
-            item_name=item["item_name"],
-            quantity=quantity,
-            unit=item["unit"],
-            reason=reason,
-            remark=remark,
-            wastage_date=now.date().isoformat(),
-        )
-        return {"success": True, "record": record}
 
 
 prep_plan_service = PrepPlanService()

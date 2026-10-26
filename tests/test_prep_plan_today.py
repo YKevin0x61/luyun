@@ -10,7 +10,7 @@ import unittest
 from datetime import datetime, timedelta
 
 from database import CHINA_TZ, DatabaseManager
-from services.prep_plan_service import PrepPlanService, _conformal_quantile
+from services.prep_plan_service import PrepPlanService, _quantile
 
 ITEM_NAME = "虾饺馅"
 UNIT = "份"
@@ -122,10 +122,9 @@ class SameWeekdayMeanTests(PrepPlanRebuildFixture):
         entry = self._entry(result)
         self.assertEqual(entry["suggested_qty"], 80)
         self.assertEqual(entry["basis"]["status"], "ok")
-        self.assertEqual(len(entry["basis"]["weekdays"]), 4)
-        # 序列稳定 → 残差全 0，不该凭空加裕度
-        self.assertEqual(entry["basis"]["buffer_qty"], 0)
-        self.assertEqual(entry["basis"]["buffer_source"], "conformal")
+        self.assertEqual(len(entry["basis"]["weekdays"]), 8)
+        # 没有安全缓冲：p40 就是 p40
+        self.assertEqual(entry["basis"]["quantile"], 0.40)
 
     async def test_remaining_window_only_counts_the_rest_of_day(self):
         """中午 12 点看，只剩 18:30 那 40 → 建议量 40，不是全天 80。"""
@@ -145,7 +144,7 @@ class SameWeekdayMeanTests(PrepPlanRebuildFixture):
         result = await self.service.compute_suggestions(self.db, TODAY_MORNING)
         entry = self._entry(result)
         self.assertEqual(entry["suggested_qty"], 80)
-        self.assertEqual(entry["basis"]["active_days"], 3)
+        self.assertEqual(entry["basis"]["active_days"], 7)
 
     async def test_after_close_gives_zero(self):
         """打烊后没有「今天还要做多少」这回事。"""
@@ -179,33 +178,30 @@ class SameWeekdayMeanTests(PrepPlanRebuildFixture):
         self.assertEqual(entry["history7"][0]["day"], "2026-10-22")
 
 
-class ForecastBufferTests(PrepPlanRebuildFixture):
-    """ADR 0119：建议量 = 同星期几均量 × 整店水位 + 该品自己的残差 conformal 分位。"""
+class ForecastQuantileTests(PrepPlanRebuildFixture):
+    """ADR 0120：建议量 = p40(8 周同星期几) × 整店水位 − 未过期的在库量。"""
 
-    def test_conformal_quantile_is_the_finite_sample_order_statistic(self):
-        # n=4, α=0.1 → ceil(5×0.9)=5 → 夹到 n → 取最大值
-        self.assertEqual(_conformal_quantile([1, 2, 3, 4], 0.10), 4)
-        # n=28, α=0.1 → 第 27 个（保证有限样本下覆盖率 ≥ 90%）
-        self.assertEqual(_conformal_quantile(list(range(1, 29)), 0.10), 27)
-        self.assertEqual(_conformal_quantile([7], 0.10), 7)
-        self.assertEqual(_conformal_quantile([], 0.10), 0.0)
-        # 均量估高了不给负缓冲
-        self.assertEqual(_conformal_quantile([-9, -3, -1], 0.10), 0.0)
+    def test_quantile_is_linear_interpolated(self):
+        self.assertEqual(_quantile([1, 2, 3, 4], 0.0), 1)
+        self.assertEqual(_quantile([1, 2, 3, 4], 1.0), 4)
+        self.assertEqual(_quantile([5], 0.4), 5)
+        self.assertEqual(_quantile([], 0.4), 0.0)
+        # 8 个样本、p40 → 位置 0.4×7 = 2.8 → 第 3、4 个之间插值
+        self.assertAlmostEqual(_quantile([10, 20, 30, 40, 50, 60, 70, 80], 0.4), 38.0)
 
-    async def test_cold_start_uses_proportional_buffer(self):
-        """只有 4 个候选日、残差不足 14 天：按 50% 比例兜底，不硬套 conformal 分位。"""
+    async def test_stationary_series_gives_p40_without_any_buffer(self):
+        """稳定序列 → p40 就是 80，不额外加任何安全量（上一轮的 conformal 缓冲已删）。"""
         await self._seed_item()
         await self._seed_rule()
-        await self._seed_orders(CANDIDATE_DAYS, hour=9, minute=0, qty=40)
-        await self._seed_orders(CANDIDATE_DAYS, hour=18, minute=30, qty=40)
+        await self._seed_stationary()
 
         entry = self._entry(await self.service.compute_suggestions(self.db, TODAY_MORNING))
-        self.assertEqual(entry["basis"]["buffer_source"], "cold_start")
-        self.assertLess(entry["basis"]["residual_days"], 14)
-        self.assertEqual(entry["suggested_qty"], 120)  # 80 × 1.0 + 80 × 0.5
+        self.assertEqual(entry["suggested_qty"], 80)
+        self.assertEqual(entry["basis"]["quantile"], 0.40)
+        self.assertFalse(entry["basis"]["floor_applied"])
 
-    async def test_store_factor_is_clipped(self):
-        """近 7 天是前 21 天的 1.5 倍 → 系数夹到 1.3，不会跟着疯涨。"""
+    async def test_store_factor_is_clipped_to_115_percent(self):
+        """近 7 天是前 21 天的 1.5 倍 → 水位夹到 1.15，不再跟到 1.3（少剩货口径）。"""
         await self._seed_item()
         await self._seed_rule()
         await self._seed_stationary()
@@ -215,8 +211,34 @@ class ForecastBufferTests(PrepPlanRebuildFixture):
         await self._seed_orders(last_week, hour=20, minute=0, qty=80)
 
         entry = self._entry(await self.service.compute_suggestions(self.db, TODAY_MORNING))
-        self.assertEqual(entry["basis"]["store_factor"], 1.3)
-        self.assertGreaterEqual(entry["suggested_qty"], 104)
+        self.assertEqual(entry["basis"]["store_factor"], 1.15)
+        # p40(80,80,160…) 仍按分位算，再乘 1.15
+        self.assertGreaterEqual(entry["suggested_qty"], 80 * 1.15)
+
+    async def test_sparse_item_gets_floor_of_one(self):
+        """8 周同星期几全是 0、但近 7 天卖过 → 保底 1，不让长尾品静默消失。"""
+        await self._seed_item(item_name="马拉盏")
+        await self._seed_rule(semi_name="马拉盏")
+        recent = [
+            (TODAY_MORNING.date() - timedelta(days=i)).isoformat() for i in range(1, 4)
+        ]
+        await self._seed_orders(recent, hour=9, minute=0, qty=1, dish_name=DISH_NAME)
+
+        entry = self._entry(
+            await self.service.compute_suggestions(self.db, TODAY_MORNING), item_name="马拉盏"
+        )
+        self.assertTrue(entry["basis"]["floor_applied"])
+        self.assertEqual(entry["suggested_qty"], 1)
+
+    async def test_demand_qty_is_reported_next_to_suggested(self):
+        """页面要同时显示「今天要卖多少」和「还要做多少」，前者不扣在库。"""
+        await self._seed_item()
+        await self._seed_rule()
+        await self._seed_stationary()
+
+        entry = self._entry(await self.service.compute_suggestions(self.db, TODAY_MORNING))
+        self.assertEqual(entry["basis"]["demand_qty"], 80)
+        self.assertEqual(entry["suggested_qty"], 80)
 
 
 class PlanPersistenceTests(PrepPlanRebuildFixture):
@@ -231,7 +253,7 @@ class PlanPersistenceTests(PrepPlanRebuildFixture):
         self.assertEqual(entry["suggested_qty"], 80)
 
         await self.service.update_entry(
-            self.db, entry["id"], final_qty=95, done=True, produced_qty=80
+            self.db, entry["id"], final_qty=95, done=True
         )
         await self.service.update_entry(self.db, entry["id"], done=False)
 
@@ -239,6 +261,7 @@ class PlanPersistenceTests(PrepPlanRebuildFixture):
         refreshed = self._entry(again)
         self.assertEqual(refreshed["final_qty"], 95)
         self.assertEqual(refreshed["qty_source"], "manual")
+        # ADR 0121 起建议量不再扣在库，参考值不因勾选而变
         self.assertEqual(refreshed["suggested_qty"], 80)
 
     async def test_manual_qty_is_not_overwritten_by_a_later_window(self):
@@ -263,7 +286,7 @@ class PlanPersistenceTests(PrepPlanRebuildFixture):
 
         today = await self.service.get_today(self.db, now=TODAY_MORNING)
         entry = self._entry(today)
-        await self.service.update_entry(self.db, entry["id"], done=True, produced_qty=10)
+        await self.service.update_entry(self.db, entry["id"], done=True)
 
         summary = await self.service.get_summary(self.db, now=TODAY_MORNING)
         self.assertEqual(summary["remaining"], 0)
@@ -307,5 +330,5 @@ class StaffStationTests(PrepPlanRebuildFixture):
 
         with self.assertRaises(PermissionError):
             await self.service.update_entry(
-                self.db, entry["id"], done=True, produced_qty=1, employee_id=self.employee_id
+                self.db, entry["id"], done=True, employee_id=self.employee_id
             )

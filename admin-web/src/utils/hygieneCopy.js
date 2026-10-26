@@ -22,6 +22,9 @@ export const HYGIENE_BRAND_TITLE = WORKBENCH_TITLE
 export const HYGIENE_BRAND_TAGLINE = '卫生 · 对照实拍验收'
 export const HYGIENE_ADMIN_NAV = [
   { path: '/workbench/floor/zones', title: '卫生工作区', shortTitle: '工作区', icon: 'layout-grid', code: 'ZONES' },
+  // 日常清单（2026-10-19 用户裁定）：手机上是独立一页、电脑端仍是工作区页的右栏；
+  // 入口两档都要有 —— 手机走页头下拉、电脑走左 rail，读的都是下面这份名单。
+  { path: '/workbench/floor/zone-items', title: '日常清单', shortTitle: '清单', icon: 'list', code: 'ITEMS' },
   { path: '/workbench/floor/daily', title: '日常验收', shortTitle: '日常', icon: 'check-circle', code: 'DAILY' },
   // 仪容仪表（票 12）：按人拍，名单由排班给（休假的与没排到的不在表上）。
   { path: '/workbench/floor/attire', title: '仪容仪表', shortTitle: '仪容', icon: 'sparkles', code: 'ATTIRE' },

@@ -5,7 +5,10 @@
 两条 router，形态照 `api/recipes.py`：
 
 - `reader_router` —— **任一身份**（管理端会话或员工会话）。今天这张清单、首页卡片、
-  员工选档口、勾选与改数量都在这一侧：后厨师傅自己就要能勾，不该被踢回管理端。
+  员工选档口都在这一侧：师傅要能自己打开看参考值。
+
+  ADR 0121 起**不登记产量、也不维护在库量**：页面给的是「今天参考值」，
+  师傅拿它减掉自己看到的实物库存，决定还要备多少。补货 / 复盘 / 报废三个端点随之退场。
 - `router` —— 管理端（注册处挂 `verify_admin_token`，见 `main.py`）。重算与改主数据
   归属属于「改全店的数」，员工不做。
 
@@ -124,8 +127,6 @@ async def set_staff_station(
 class UpdateEntryRequest(BaseModel):
     final_qty: Optional[float] = None
     done: Optional[bool] = None
-    # v2：勾必须带「这次做了多少」（ADR 0118）。同一品可勾多次，累加进在库量。
-    produced_qty: Optional[float] = None
 
 
 @reader_router.patch("/today/entries/{entry_id}")
@@ -143,7 +144,6 @@ async def update_entry(
             entry_id,
             final_qty=payload.final_qty,
             done=payload.done,
-            produced_qty=payload.produced_qty,
             done_by=done_by,
             employee_id=employee_id,
         )
@@ -151,49 +151,6 @@ async def update_entry(
         raise
     except Exception as exc:
         raise _wrap(exc, "更新备货项")
-
-
-@reader_router.get("/restock")
-async def get_restock(
-    station: Optional[str] = Query(None, description="档口 id；员工身份忽略（只看自己那档）"),
-    identity: dict = Depends(require_any_identity_session),
-    db=Depends(get_db),
-):
-    """补货 tab：在库量不够再卖 1 小时的品，以及「补到打烊」要做的量。"""
-    try:
-        employee_id, _name = _staff(identity)
-        return await prep_plan_service.get_restock(db, employee_id=employee_id, station=station)
-    except Exception as exc:
-        raise _wrap(exc, "读取补货提醒")
-
-
-class WasteRequest(BaseModel):
-    prep_item_id: int
-    quantity: float
-    reason: str
-    remark: str = ""
-
-
-@reader_router.post("/waste")
-async def add_waste(
-    payload: WasteRequest,
-    identity: dict = Depends(require_any_identity_session),
-    db=Depends(get_db),
-):
-    """报废一笔：写进既有损耗台账，物料名就是备货品名（ADR 0118 决策 6）。"""
-    try:
-        employee_id, employee_name = _staff(identity)
-        return await prep_plan_service.add_waste(
-            db,
-            payload.prep_item_id,
-            payload.quantity,
-            payload.reason,
-            remark=payload.remark,
-            employee_id=employee_id,
-            employee_name=employee_name,
-        )
-    except Exception as exc:
-        raise _wrap(exc, "登记报废")
 
 
 # --------------------------------------------------------------------- 管理端
@@ -211,15 +168,6 @@ async def recompute_today(db=Depends(get_db)):
 class UpdateItemRequest(BaseModel):
     kind: Optional[str] = None
     station: Optional[str] = None
-
-
-@router.get("/review", dependencies=_ADMIN_WRITE)
-async def get_review(day: Optional[str] = Query(None, description="默认昨天"), db=Depends(get_db)):
-    """复盘 tab：建议 / 实际做 / 卖出 / 剩 / 报废 + 偏差。只读。"""
-    try:
-        return await prep_plan_service.get_review(db, day=day)
-    except Exception as exc:
-        raise _wrap(exc, "读取复盘")
 
 
 @router.patch("/items/{item_id}", dependencies=_ADMIN_WRITE)
