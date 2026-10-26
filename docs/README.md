@@ -21,6 +21,7 @@
 | [UPGRADE_TO_0_6_0.md](./UPGRADE_TO_0_6_0.md) | **升级到 0.6.0 操作方案（历史）**（Docker/systemd、切 PG、回滚、排查；0.6.x 后 SQLite 已退场，只保留迁移路径供参考） |
 | [release-asset-layout.md](./release-asset-layout.md) | GitHub Release 发行包附件契约（`luyun-release-bundle.tar.gz` / `SHA256SUMS` / `install.sh`；旧的分拆前端 tar.gz 已退役） |
 | `MULTI_STORE_PLAN.md`（仅本机） | **多店 / 多人 / 三方接入改造方案**（规划中，含性能地基实测与迁移路径） |
+| `DB_TABLES.md`（仅本机） | **数据库表总览**（65 张表按域分组、写入入口、迁移来源、待应用迁移、备份覆盖对照） |
 | [adr/](./adr/) | 架构决策记录（编号 0001–0090）；发行包只带 0011 / 0012 / 0013 / 0082，其余只在本机——数据库后端现状见 ADR 0089、Redis 只做 nudge 跨进程广播见 ADR 0090；仓库布局规则见 [ADR 0012](./adr/0012-repo-layout.md) |
 | `agents/`（仅本机） | agent 工作流：issue tracker / triage 标签 / domain 文档 |
 | `superpowers/`（仅本机） | 历史实施计划（`plans/`）与设计稿（`specs/`），按日期命名，只读不改 |

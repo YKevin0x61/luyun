@@ -35,6 +35,9 @@ async def seed_hygiene_photo_refs(
     standards: Sequence[str] = (),
     others: Sequence[str] = (),
     variants: Iterable[Tuple[str, str]] = (),
+    attire_standards: Sequence[str] = (),
+    attire_shots: Sequence[str] = (),
+    wastage: Sequence[str] = (),
 ) -> None:
     """在测试库里插入卫生照片引用。
 
@@ -44,6 +47,11 @@ async def seed_hygiene_photo_refs(
       连带建一条最小可用行（同一用例里多次调用会复用已有的 zone/item）。
     * 其它照片走 ``hygiene_teaching_examples``：它是唯一能独立插入的引用表
       （``item_id`` 可空），不必为了一张照片再搭一套日常检查实例。
+    * 仪容仪表的两类照片（迁移 0011）各走一张表：合格参照进
+      ``hygiene_attire_standard``（标准图），按人按日的自拍进
+      ``hygiene_attire_shots``（其它照片）。两张表都能独立插入，不需要先建员工。
+    * 损耗登记照片进 ``wastage_images``（迁移 0029）。它们落在**另一个**目录
+      ``wastage-captures/``，`record_id` 可为空，所以不必先建一条损耗登记。
     * 派生图进 ``hygiene_capture_variants``。
     """
     if standards:
@@ -99,6 +107,36 @@ async def seed_hygiene_photo_refs(
             " capture_id, content_type, width, height, byte_size, content_sha256,"
             " created_at) VALUES (?, 'thumb', ?, 'image/jpeg', 10, 10, 4, 'x', ?)",
             (source_id, variant_id, _PHOTO_STAMP),
+        )
+
+    for capture_id in attire_standards:
+        await conn.execute(
+            "INSERT INTO hygiene_attire_standard (capture_id, content_type,"
+            " markup_json, created_at) VALUES (?, 'image/jpeg', '[]', ?)",
+            (capture_id, _PHOTO_STAMP),
+        )
+
+    for index, capture_id in enumerate(attire_shots):
+        # 唯一键是 (tenant_id, employee_id, business_date)：一人一天一行，用序号错开。
+        await conn.execute(
+            "INSERT INTO hygiene_attire_shots (employee_id, business_date, status,"
+            " capture_id, content_type, created_at, updated_at)"
+            " VALUES (?, ?, 'pending', ?, 'image/jpeg', ?, ?)",
+            (
+                90000 + index,
+                f"2026-01-{index + 1:02d}",
+                capture_id,
+                _PHOTO_STAMP,
+                _PHOTO_STAMP,
+            ),
+        )
+
+    for index, capture_id in enumerate(wastage):
+        await conn.execute(
+            "INSERT INTO wastage_images (record_id, capture_id, owner_key,"
+            " content_type, byte_size, sort_order, created_at)"
+            " VALUES (NULL, ?, 'fixture', 'image/jpeg', 4, ?, ?)",
+            (capture_id, index, _PHOTO_STAMP),
         )
 
     await conn.commit()

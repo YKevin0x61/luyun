@@ -100,6 +100,29 @@ function pointsPayload() {
   }
 }
 
+/** 「这个包里装了什么」的表清单：三组，其中一张声明了但迁移未应用。 */
+function tablesPayload() {
+  return {
+    success: true,
+    groups: [
+      {
+        key: 'business',
+        label: '业务数据',
+        tables: [{ name: 'orders', present: true }, { name: 'tables', present: true }],
+      },
+      {
+        key: 'hygiene',
+        label: '卫生管理',
+        tables: [{ name: 'hygiene_employees', present: true }],
+      },
+      { key: 'system', label: '系统表', tables: [{ name: 'tenants', present: false }] },
+    ],
+    total: 4,
+    present_count: 3,
+    pending: ['tenants'],
+  }
+}
+
 /** 保留与清理的预览：2 份快照 + 1 份导出备份将被删，2 份受保护。 */
 function cleanupPreview() {
   return {
@@ -210,6 +233,7 @@ function createServer() {
     points: pointsPayload(),
     retention: retentionPayload(),
     dbCred: dbCredPayload(),
+    tables: tablesPayload(),
     exportStart: { success: true, job_id: 'job-1' },
     exportStartError: null,
     exportJob: { state: 'done', name: 'luyun_backup.luyunbak', stage: 'done', done: 1, total: 1, unit: 'count' },
@@ -237,6 +261,7 @@ function installApi() {
     if (url === '/api/backup/health') return server.health
     if (url === '/api/backup/points') return server.points
     if (url === '/api/backup/retention') return server.retention
+    if (url === '/api/backup/tables') return server.tables
     if (url === '/api/admin/db-credentials') return server.dbCred
     if (url.startsWith('/api/backup/export/jobs/')) return server.exportJob
     throw new Error(`测试没有为 GET ${url} 准备桩`)
@@ -468,6 +493,21 @@ describe('默认态：只留操作必需与风险/后果提示', () => {
     }
     // 折叠区的内容仍在 DOM 里（不是删掉，只是收起）
     expect(all).toContain('deploy/README.md')
+  })
+
+  it('「这个包里装了什么」按分组列出全部数据表，未应用迁移的表带标记', async () => {
+    const { wrapper } = await mountSection()
+    const folded = detailsText(wrapper.element)
+
+    expect(folded).toContain('整库快照含全部 3 张数据表')
+    expect(folded).toContain('1 张结构已声明但迁移未应用')
+    for (const table of ['orders', 'tables', 'hygiene_employees']) {
+      expect(folded, `折叠区应列出 ${table}`).toContain(table)
+    }
+    // 未应用的表要标出来，不能假装备份里有
+    expect(folded).toContain('tenants（未应用）')
+    // 默认态仍收起：表清单不出现在可见文字里
+    expect(visibleText(wrapper.element)).not.toContain('hygiene_employees')
   })
 
   it('风险与后果类提示保留可见原文，破坏性按钮都是 danger 样式', async () => {

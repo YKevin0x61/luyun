@@ -14,7 +14,7 @@ import {
   workbenchNavFor,
   workbenchPagesOf,
 } from '../workbenchNav.js'
-import { PREP_PLAN_PATH } from '../prepPlanPaths.js'
+import { PREP_PLAN_PATH, PREP_REVIEW_PATH } from '../prepPlanPaths.js'
 import { WASTAGE_ANALYSIS_PATH } from '../wastagePaths.js'
 
 // 票 04：导航的判据从「这一页的身份」换成「**此刻的身份**」，于是工作台身份那两档
@@ -156,6 +156,8 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
       '/workbench/kitchen/recipe/manage',
       // 票 08：备货计划从 `/prep-plan` 搬进这一组 —— 换位置、统一导航，读写门不动。
       '/workbench/kitchen/prep-plan',
+      // 备货复盘（ADR 0123）：每小时快照 vs 实际，只给管理端。
+      '/workbench/kitchen/prep-review',
       // 损耗分析（从 worktool2 那个小程序搬过来）：只给管理端（`audience: admin`）。
       '/workbench/kitchen/loss',
     ])
@@ -167,11 +169,12 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
       '/workbench/kitchen/recipe/qr',
       '/workbench/kitchen/recipe/manage',
       '/workbench/kitchen/prep-plan',
+      '/workbench/kitchen/prep-review',
       '/workbench/kitchen/loss',
     ])
     // 名单里只写路径，标题仍从清单取（一处定义）。
     expect(workbenchPagesOf('kitchen').map((page) => page.title)).toEqual([
-      '选择岗位', '岗位二维码', '配方管理', '备货计划', '损耗分析',
+      '选择岗位', '岗位二维码', '配方管理', '备货计划', '备货复盘', '损耗分析',
     ])
     for (const old of [
       '/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr', '/recipe/manage',
@@ -211,6 +214,7 @@ describe('按身份过滤导航', () => {
     expect(kitchen.links.map((link) => link.to)).toEqual([
       '/workbench/kitchen/recipe',
       PREP_PLAN_PATH,
+      PREP_REVIEW_PATH,
       WASTAGE_ANALYSIS_PATH,
     ])
     for (const link of kitchen.links) {
@@ -226,7 +230,7 @@ describe('按身份过滤导航', () => {
       .filter((item) => item.key === 'kitchen')
       .map((item) => item.to)
     expect(toOf('super')).toEqual([
-      '/workbench/kitchen/recipe', PREP_PLAN_PATH, WASTAGE_ANALYSIS_PATH,
+      '/workbench/kitchen/recipe', PREP_PLAN_PATH, PREP_REVIEW_PATH, WASTAGE_ANALYSIS_PATH,
     ])
     expect(toOf('staff')).toEqual(['/workbench/kitchen/recipe', PREP_PLAN_PATH])
   })

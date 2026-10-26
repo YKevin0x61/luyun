@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 import time
@@ -23,9 +24,12 @@ from services.backup_service import (
     CONTENT_APP_PG,
     CONTENT_CREDENTIALS,
     CONTENT_OTHER_PHOTOS,
+    CONTENT_SCRAPER_STATE,
     CONTENT_STANDARD_PHOTOS,
+    CONTENT_WASTAGE_PHOTOS,
     PHOTO_OTHER,
     PHOTO_STANDARD,
+    PHOTO_WASTAGE,
     PROVENANCE_PRE_IMPORT,
 )
 from services.credentials_store import CredentialBundle
@@ -127,6 +131,8 @@ class RestoreFlowTest(unittest.IsolatedAsyncioTestCase):
             apply_recipes=False,
             apply_standard_photos=True,
             apply_other_photos=True,
+            apply_wastage_photos=False,
+            apply_scraper_state=False,
             force=False,
         )
         kwargs.update(overrides)
@@ -153,6 +159,88 @@ class RestoreFlowTest(unittest.IsolatedAsyncioTestCase):
 
         snaps = {s["ts"]: s for s in backup_service.list_snapshots()}
         self.assertIn(result["snapshot_ts"], snaps)
+
+    async def test_scraper_state_is_exported_and_restored(self):
+        """采集状态跟备份一起走：恢复后采集器不会以为旧单都采过而漏采。"""
+        state_payload = {
+            "biz_date": "2026-01-01",
+            "table_states": {"1": 1.0},
+            "table_orders": {},
+        }
+        bills_payload = {"biz_date": "2026-01-01", "bills": ["bill-1"]}
+        table_path = Path(settings.DATABASE_DIR) / "table_state.json"
+        bills_path = Path(settings.DATABASE_DIR) / "delivery_bills.json"
+        table_path.write_text(json.dumps(state_payload), encoding="utf-8")
+        bills_path.write_text(json.dumps(bills_payload), encoding="utf-8")
+
+        blob = backup_service.build_backup(
+            "pass1234",
+            include_runtime=False,
+            runtime_data=None,
+            include_app_db=True,
+            app_pg_bytes=b"PGDMP-CONTENT",
+            include_scraper_state=True,
+            app_version="0.1.0",
+        )
+        parsed = backup_service.parse_backup(blob, "pass1234")
+        self.assertEqual(parsed["run_state"]["table_state"], state_payload)
+        self.assertTrue(parsed["meta"]["includes"]["scraper_state"])
+
+        table_path.unlink()
+        bills_path.unlink()
+
+        result = await self._apply(
+            parsed, apply_app_db=False, apply_scraper_state=True
+        )
+
+        self.assertTrue(result["applied"][CONTENT_SCRAPER_STATE])
+        self.assertEqual(
+            json.loads(table_path.read_text(encoding="utf-8")), state_payload
+        )
+        self.assertEqual(
+            json.loads(bills_path.read_text(encoding="utf-8")), bills_payload
+        )
+
+    async def test_wastage_photos_restore_into_their_own_directory(self):
+        """损耗照片回 wastage-captures：混进其它照片会被写进卫生目录。"""
+        wastage_root = Path(self._tmpdir.name) / "wastage-captures"
+        wastage_root.mkdir(parents=True, exist_ok=True)
+        await seed_hygiene_photo_refs(self.db._conn, wastage=["waste-1"])
+
+        manifest = {
+            PHOTO_STANDARD: {
+                "count": 0, "bytes": 0, "sha256": "s", "referenced": 0, "missing": 0,
+            },
+            PHOTO_OTHER: {
+                "count": 0, "bytes": 0, "sha256": "o", "referenced": 0, "missing": 0,
+            },
+            PHOTO_WASTAGE: {
+                "count": 1, "bytes": 11, "sha256": "w", "referenced": 1, "missing": 0,
+            },
+        }
+        blob = backup_service.build_backup(
+            "pass1234",
+            include_runtime=False,
+            runtime_data=None,
+            include_app_db=True,
+            app_pg_bytes=b"PGDMP-CONTENT",
+            include_standard_photos=False,
+            include_other_photos=False,
+            include_wastage_photos=True,
+            photo_members={"photos/wastage/waste-1": b"photo-waste"},
+            photo_manifest=manifest,
+            app_version="0.1.0",
+        )
+        parsed = backup_service.parse_backup(blob, "pass1234")
+
+        result = await self._apply(
+            parsed, apply_app_db=False, apply_wastage_photos=True
+        )
+
+        self.assertTrue(result["applied"][CONTENT_WASTAGE_PHOTOS])
+        self.assertTrue((wastage_root / "waste-1").is_file())
+        # 不能落进卫生照片目录 —— 那是「并进其它照片」时会发生的事。
+        self.assertFalse((self.capture_root / "waste-1").exists())
 
     async def test_pre_snapshot_records_pre_import_provenance(self):
         await self._seed_hygiene(standard=["s1"])

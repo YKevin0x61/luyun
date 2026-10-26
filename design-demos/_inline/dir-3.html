@@ -1,0 +1,4897 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>厨务管家 · 招牌墙</title>
+  <style>
+/* =========================================================
+   厨务管家 · 方向三 · 招牌墙
+   所有颜色/阴影/描边只在这里定义，页面与组件只用 var()。
+   ========================================================= */
+
+:root {
+  /* 夜墙 */
+  --night: #0A2E38;
+  --wall: #0B3A46;
+  --wall-2: #0F4653;
+
+  /* 纸与墨 */
+  --paper: #F6EFE2;
+  --ink: #101010;
+
+  /* 招牌色 */
+  --red: #C8322A;
+  --yellow: #E8B12E;
+  --green: #2E7D5B;
+  --blue: #1C6E8C;
+
+  /* 由招牌色派生的深面（奶白字才够读） */
+  --green-deep: #235C44;
+  --blue-deep: #15566E;
+
+  /* 奶白的层级（只用于深底） */
+  --paper-dim: #C9BFAF;
+  --paper-faint: rgba(246, 239, 226, 0.16);
+  --paper-faint-2: rgba(246, 239, 226, 0.08);
+  --line-strong: rgba(246, 239, 226, 0.34);
+
+  /* 墨的层级（只用于奶白底） */
+  --ink-dim: #5B554D;
+  --ink-line: rgba(16, 16, 16, 0.22);
+
+  /* 硬投影：不做柔和阴影 */
+  --bevel: 4px 4px 0 rgba(0, 0, 0, 0.55);
+  --bevel-sm: 2px 2px 0 rgba(0, 0, 0, 0.55);
+  --bevel-lg: 8px 8px 0 rgba(0, 0, 0, 0.55);
+  --bevel-hover: 5px 5px 0 rgba(0, 0, 0, 0.55);
+  --bevel-press: 1px 1px 0 rgba(0, 0, 0, 0.55);
+
+  /* 招牌描边 */
+  --edge: 2px solid var(--paper);
+
+  /* 抽象不锈钢台面（SVG 用） */
+  --steel-1: #A7B0AC;
+  --steel-2: #858F8A;
+  --steel-3: #5E6964;
+  --steel-4: #39433F;
+
+  /* 弹层 */
+  --scrim: rgba(10, 46, 56, 0.88);
+
+  --font: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--night);
+  color: var(--paper);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:focus-visible,
+[tabindex]:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--yellow);
+  outline-offset: 2px;
+}
+
+h1, h2, h3, p { margin: 0; font-weight: inherit; }
+
+/* 数字：等宽，读得快 */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.vert {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+}
+
+.dim { color: var(--paper-dim); }
+.sign--paper .dim,
+.sign--yellow .dim { color: var(--ink-dim); }
+
+.meta {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--paper-dim);
+  letter-spacing: 0.2px;
+}
+.sign--paper .meta { color: var(--ink-dim); }
+.sign--yellow .meta { color: var(--ink); opacity: 0.82; }
+.sign--red .kicker,
+.sign--red .rev-stat__k { color: var(--paper); }
+.sign--green .kicker { color: var(--paper); }
+
+.kicker {
+  font-size: 13px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--paper-dim);
+}
+.sign--paper .kicker,
+.sign--yellow .kicker { color: var(--ink); }
+
+.rule {
+  height: 2px;
+  background: var(--paper-faint);
+  border: 0;
+}
+.sign--paper .rule { background: var(--ink-line); }
+
+.icon { display: block; flex: 0 0 auto; }
+
+/* =========================================================
+   桌面壳：64px 竖排名牌导航 + 44px 状态带 + 主区
+   ========================================================= */
+
+.desk {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--night);
+}
+
+.rail {
+  background: var(--ink);
+  border-right: var(--edge);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rail-brand {
+  height: 64px;
+  flex: 0 0 64px;
+  background: var(--red);
+  color: var(--paper);
+  border-bottom: var(--edge);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 1px;
+}
+
+.rail-nav { display: flex; flex-direction: column; }
+
+.rail-item {
+  height: 104px;
+  flex: 0 0 104px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ink);
+  color: var(--paper);
+  border-bottom: var(--edge);
+}
+
+.rail-item__text {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 7px;
+  line-height: 1;
+}
+
+.rail-item:hover { background: var(--wall-2); }
+
+.rail-item.is-on {
+  background: var(--red);
+  color: var(--paper);
+}
+.rail-item.is-on:hover { background: var(--red); }
+
+.rail-item.is-off {
+  color: var(--paper-dim);
+  cursor: default;
+}
+.rail-item.is-off:hover { background: var(--ink); }
+
+.rail-spacer { flex: 1 1 auto; }
+
+.rail-foot {
+  flex: 0 0 auto;
+  padding: 14px 0 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  border-top: var(--edge);
+}
+
+.rail-foot__text {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: var(--paper-dim);
+}
+
+.desk-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--wall);
+}
+
+.statusbar {
+  height: 44px;
+  flex: 0 0 44px;
+  background: var(--ink);
+  border-bottom: var(--edge);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 16px;
+  min-width: 0;
+}
+
+.status-store {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.status-chop {
+  width: 12px;
+  height: 12px;
+  background: var(--red);
+  border: 2px solid var(--paper);
+  flex: 0 0 auto;
+}
+
+.status-name {
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+.status-branch {
+  font-size: 13px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
+
+.status-sep {
+  width: 2px;
+  height: 18px;
+  background: var(--paper-faint);
+  flex: 0 0 auto;
+}
+
+.status-day {
+  font-size: 13px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
+
+.status-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+}
+
+.live { display: flex; align-items: center; gap: 7px; }
+
+.live__dot {
+  width: 10px;
+  height: 10px;
+  background: var(--green);
+  border: 2px solid var(--paper);
+  flex: 0 0 auto;
+}
+
+.live__text {
+  font-size: 13px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
+
+.identity {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 30px;
+  padding: 0 10px;
+  border: var(--edge);
+  background: var(--ink);
+  box-shadow: var(--bevel-sm);
+}
+
+.identity__role {
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  background: var(--red);
+  color: var(--paper);
+  padding: 2px 5px;
+  line-height: 1.2;
+}
+
+.identity__name {
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+.desk-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  background: var(--wall);
+}
+
+/* =========================================================
+   招牌：实色块 + 2px 奶白描边 + 4px 硬投影 + 竖排窄条
+   ========================================================= */
+
+.wall {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.wall-row {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
+/* 招牌互相压边 9px：后一块压住前一块的右缘 */
+.wall-row + .wall-row { margin-top: -9px; }
+.wall-row:nth-child(2) { z-index: 2; }
+.wall-row:nth-child(3) { z-index: 3; }
+.wall-row:nth-child(4) { z-index: 4; }
+
+.wall-row > .sign { flex: 1 1 0; min-width: 0; }
+.wall-row > .sign + .sign { margin-left: -9px; }
+
+.wall-row > .sign:not(:last-child) { padding-right: 24px; }
+
+.sign {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 16px;
+  background: var(--wall-2);
+  color: var(--paper);
+  border: var(--edge);
+  box-shadow: var(--bevel);
+  border-radius: 0;
+}
+
+.sign--red { background: var(--red); color: var(--paper); }
+.sign--yellow { background: var(--yellow); color: var(--ink); }
+.sign--green { background: var(--green-deep); color: var(--paper); }
+.sign--blue { background: var(--blue); color: var(--paper); }
+.sign--blue-deep { background: var(--blue-deep); color: var(--paper); }
+.sign--paper { background: var(--paper); color: var(--ink); }
+.sign--ink { background: var(--ink); color: var(--paper); }
+.sign--wall2 { background: var(--wall-2); color: var(--paper); }
+
+/* 竖排域标签：贴在招牌左缘的窄条 */
+.sign__tag {
+  position: absolute;
+  left: -2px;
+  top: -2px;
+  bottom: -2px;
+  width: 32px;
+  background: var(--ink);
+  color: var(--paper);
+  border: var(--edge);
+  box-shadow: var(--bevel-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.sign__tag .vert {
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 6px;
+  line-height: 1;
+}
+
+.sign__tag--red { background: var(--red); color: var(--paper); }
+.sign__tag--yellow { background: var(--yellow); color: var(--ink); }
+.sign__tag--green { background: var(--green-deep); color: var(--paper); }
+.sign__tag--blue { background: var(--blue); color: var(--paper); }
+.sign__tag--paper { background: var(--paper); color: var(--ink); }
+
+.sign__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sign--tagged .sign__body { margin-left: 30px; }
+
+/* 红章式按钮 */
+.stamp {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 44px;
+  padding: 0 16px;
+  background: var(--red);
+  color: var(--paper);
+  border: var(--edge);
+  box-shadow: var(--bevel-sm);
+  border-radius: 0;
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  line-height: 1;
+  white-space: nowrap;
+  transition: transform 80ms ease, box-shadow 80ms ease;
+}
+
+.stamp:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--bevel-hover);
+}
+
+.stamp:active {
+  transform: translate(2px, 2px);
+  box-shadow: var(--bevel-press);
+}
+
+.stamp--ghost {
+  background: var(--ink);
+  color: var(--paper);
+  border: var(--edge);
+  box-shadow: none;
+}
+.stamp--ghost:hover { box-shadow: var(--bevel-sm); }
+
+.stamp--paper {
+  background: var(--paper);
+  color: var(--ink);
+  border: 2px solid var(--ink);
+  box-shadow: var(--bevel-sm);
+}
+
+.stamp--wide { padding: 0 22px; }
+
+/* 小票签（不可点的标签） */
+.plate {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border: 2px solid var(--paper);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.plate--red { background: var(--red); color: var(--paper); }
+.plate--yellow { background: var(--yellow); color: var(--ink); }
+.plate--green { background: var(--green-deep); color: var(--paper); }
+.plate--ink { background: var(--ink); color: var(--paper); }
+.plate--paper { background: var(--paper); color: var(--ink); border-color: var(--ink); }
+
+/* =========================================================
+   今天（桌面）
+   ========================================================= */
+
+.rev-line {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  min-width: 0;
+}
+
+.money {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  line-height: 0.9;
+  letter-spacing: -1px;
+}
+
+.money__cur {
+  font-size: 22px;
+  font-weight: 900;
+  padding-top: 7px;
+}
+
+.money__val {
+  font-size: 44px;
+  font-weight: 900;
+  line-height: 0.92;
+}
+
+.rev-sub {
+  display: flex;
+  gap: 18px;
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.rev-sub__item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.rev-stats {
+  display: flex;
+  align-items: baseline;
+  gap: 22px;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 2px solid var(--paper-faint);
+}
+
+.rev-stat { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.rev-stat__n { font-size: 20px; font-weight: 900; line-height: 1; }
+.rev-stat__u { font-size: 13px; font-weight: 700; }
+.rev-stat__k { font-size: 13px; color: var(--paper-dim); }
+
+.yield {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.yield__big {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  line-height: 0.9;
+  margin-top: 8px;
+}
+
+.yield__n {
+  font-size: 44px;
+  font-weight: 900;
+  line-height: 0.92;
+}
+
+.yield__u {
+  font-size: 17px;
+  font-weight: 900;
+  padding-top: 6px;
+}
+
+.yield__overdue {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.yield__note {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 2px solid var(--ink-line);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  opacity: 0.86;
+}
+
+.tables__big {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  line-height: 0.9;
+  margin-top: 8px;
+}
+
+.tables__n {
+  font-size: 44px;
+  font-weight: 900;
+  line-height: 0.92;
+}
+
+.tables__u {
+  font-size: 16px;
+  font-weight: 900;
+  padding-top: 6px;
+  color: var(--paper-dim);
+}
+
+.occ {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(8, 12px);
+  grid-auto-rows: 12px;
+  gap: 4px;
+}
+
+.occ__cell {
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--paper-dim);
+}
+
+.occ__cell.is-on {
+  background: var(--paper);
+  border-color: var(--paper);
+}
+
+.tables__rate {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 2px solid var(--paper-faint);
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.todo-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid var(--paper-faint);
+}
+
+.todo-title {
+  font-size: 26px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  line-height: 1;
+}
+
+.todo-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.todo-row {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 0;
+  border-bottom: 2px solid var(--paper-faint);
+}
+
+.todo-row:last-child { border-bottom: 0; padding-bottom: 0; }
+
+.todo-char {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--wall-2);
+  color: var(--paper);
+  border: 2px solid var(--paper);
+  box-shadow: var(--bevel-sm);
+  font-size: 18px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.todo-char--yellow { background: var(--yellow); color: var(--ink); }
+.todo-char--paper { background: var(--paper); color: var(--ink); }
+.todo-char--red { background: var(--red); color: var(--paper); }
+
+.todo-main { flex: 1 1 auto; min-width: 0; }
+
+.todo-title-line {
+  font-size: 19px;
+  font-weight: 900;
+  line-height: 1.25;
+  letter-spacing: 0.3px;
+}
+
+.todo-meta {
+  margin-top: 3px;
+  font-size: 13px;
+  color: var(--paper-dim);
+  line-height: 1.4;
+}
+
+.todo-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.who-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid var(--paper-faint);
+}
+
+.who-title {
+  font-size: 24px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0.5px;
+}
+
+.who-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  justify-content: center;
+  min-height: 0;
+}
+
+.who-row {
+  display: grid;
+  grid-template-columns: 6px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 2px solid var(--paper-faint);
+}
+
+.who-row:last-child { border-bottom: 0; }
+
+.who-bar {
+  width: 6px;
+  height: 38px;
+  background: var(--yellow);
+}
+
+.who-bar--mid { background: var(--green); }
+.who-bar--late { background: var(--blue); }
+
+.who-label {
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  line-height: 1.2;
+}
+
+.who-time {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--paper-dim);
+  letter-spacing: 0.4px;
+}
+
+.who-count {
+  font-size: 32px;
+  font-weight: 900;
+  line-height: 0.9;
+}
+
+.who-foot {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 2px solid var(--paper-faint);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.prep-row {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.prep-hero {
+  flex: 0 0 auto;
+  min-width: 150px;
+}
+
+.prep-big {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 6px;
+  line-height: 0.9;
+}
+
+.prep-n {
+  font-size: 44px;
+  font-weight: 900;
+  line-height: 0.92;
+}
+
+.prep-u {
+  font-size: 15px;
+  font-weight: 900;
+  padding-top: 6px;
+}
+
+.prep-ticks {
+  display: flex;
+  gap: 5px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.prep-tick {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--ink);
+  box-shadow: none;
+}
+.prep-tick--red { background: var(--red); }
+.prep-tick--yellow { background: var(--yellow); }
+.prep-tick--green { background: var(--green); }
+
+.prep-cells {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+}
+
+.prep-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border-left: 2px solid var(--ink-line);
+  padding-left: 20px;
+}
+
+.prep-cell:first-child { border-left: 0; padding-left: 0; }
+
+.prep-cell__n {
+  font-size: 30px;
+  font-weight: 900;
+  line-height: 0.9;
+}
+
+.prep-cell__k {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+
+.slow {
+  justify-content: space-between;
+}
+
+.slow__row {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.slow__name {
+  font-size: 30px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 1px;
+}
+
+.slow__n {
+  font-size: 44px;
+  font-weight: 900;
+  line-height: 0.9;
+  color: var(--yellow);
+}
+
+.slow__u {
+  font-size: 15px;
+  font-weight: 900;
+  color: var(--paper-dim);
+}
+
+.scale { margin-top: 16px; }
+
+.scale__track {
+  position: relative;
+  height: 8px;
+  background: var(--wall-2);
+  border: 2px solid var(--paper-faint);
+}
+
+.scale__fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--red);
+}
+
+.scale__tick {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--paper-faint);
+}
+
+.scale__labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--paper-dim);
+}
+
+.slow__note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* =========================================================
+   手机壳
+   ========================================================= */
+
+.stage {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--night);
+  overflow: hidden;
+}
+
+.phone {
+  width: 390px;
+  height: 844px;
+  flex: 0 0 390px;
+  background: var(--wall);
+  border: 1px solid var(--line-strong);
+  border-radius: 24px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  box-shadow: var(--bevel-lg);
+}
+
+.phone-top {
+  height: 44px;
+  flex: 0 0 44px;
+  background: var(--ink);
+  border-bottom: var(--edge);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  min-width: 0;
+}
+
+.phone-top__chop {
+  width: 10px;
+  height: 10px;
+  background: var(--red);
+  border: 2px solid var(--paper);
+  flex: 0 0 auto;
+}
+
+.phone-top__title {
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+.phone-top__date {
+  font-size: 13px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
+
+.phone-top__role {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
+
+.phone-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--wall);
+  padding: 12px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.phone-body::-webkit-scrollbar { width: 8px; }
+.phone-body::-webkit-scrollbar-track { background: transparent; }
+.phone-body::-webkit-scrollbar-thumb { background: var(--line-strong); }
+
+.phone-tabs {
+  height: 64px;
+  flex: 0 0 64px;
+  display: flex;
+  background: var(--ink);
+  border-top: var(--edge);
+  position: relative;
+  z-index: 20;
+}
+
+.ptab {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ink);
+  color: var(--paper-dim);
+  border-right: var(--edge);
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  line-height: 1;
+}
+
+.ptab:last-child { border-right: 0; }
+.ptab:hover { background: var(--wall-2); }
+.ptab.is-on { background: var(--red); color: var(--paper); }
+.ptab.is-on:hover { background: var(--red); }
+.ptab.is-off { color: var(--paper-dim); cursor: default; }
+.ptab.is-off:hover { background: var(--ink); }
+
+/* 手机内的招牌堆：竖着压 8px，横着压 8px */
+.m-stack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.m-stack > .sign + .sign { margin-top: -8px; }
+
+.m-row {
+  display: flex;
+  min-width: 0;
+}
+.m-row > .sign { flex: 1 1 0; min-width: 0; }
+.m-row > .sign + .sign { margin-left: -8px; }
+.m-row > .sign:not(:last-child) { padding-right: 22px; }
+
+/* 期间 chip */
+.chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0 4px;
+  scrollbar-width: none;
+}
+.chips::-webkit-scrollbar { display: none; }
+
+.chip {
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ink);
+  color: var(--paper);
+  border: var(--edge);
+  box-shadow: var(--bevel-sm);
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.chip.is-on {
+  background: var(--red);
+  color: var(--paper);
+}
+
+.chip--locked {
+  color: var(--paper-dim);
+  border-color: var(--line-strong);
+  box-shadow: none;
+  cursor: default;
+}
+
+.chip:hover:not(.chip--locked) { transform: translate(-1px, -1px); }
+
+/* =========================================================
+   销售报表（手机）
+   ========================================================= */
+
+.sales-head {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  margin-bottom: 10px;
+  min-height: 92px;
+}
+
+.sales-spine {
+  width: 34px;
+  flex: 0 0 34px;
+  background: var(--red);
+  color: var(--paper);
+  border: var(--edge);
+  box-shadow: var(--bevel-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 0;
+}
+
+.sales-spine span {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 4px;
+  line-height: 1;
+}
+
+.sales-head__main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2px 0;
+}
+
+.sales-eyebrow {
+  font-size: 13px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sales-h1 {
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: 0.5px;
+}
+
+.sales-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--paper-dim);
+}
+
+.readonly {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 6px;
+  border: 2px solid var(--paper);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  line-height: 1;
+  color: var(--paper);
+}
+
+.sales-hero {
+  min-height: 140px;
+  margin-top: 8px;
+}
+
+.sales-hero__label {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 2px;
+}
+
+.sales-hero__money {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 10px;
+  line-height: 0.9;
+}
+
+.sales-hero__cur {
+  font-size: 20px;
+  font-weight: 900;
+  padding-top: 7px;
+}
+
+.sales-hero__val {
+  font-size: 36px;
+  font-weight: 900;
+  line-height: 0.94;
+  letter-spacing: -1px;
+}
+
+.sales-hero__foot {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 2px solid var(--paper-faint);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.sales-mini {
+  min-height: 94px;
+}
+.sales-mini .sign__body { justify-content: space-between; }
+
+.sales-mini__label {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--ink-dim);
+}
+
+.sales-mini__n {
+  font-size: 30px;
+  font-weight: 900;
+  line-height: 1;
+  margin-top: 4px;
+}
+
+.sales-mini__sub {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 2px solid var(--ink-line);
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.chart-sign { min-height: 186px; }
+
+.chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.chart-title {
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+
+.chart-range {
+  font-size: 12px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
+
+.chart-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 2px;
+}
+
+.chart-svg { display: block; width: 100%; height: auto; }
+
+.station-sign { margin-top: 8px; }
+
+.station-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.station-row {
+  display: grid;
+  grid-template-columns: 46px 1fr 54px;
+  align-items: center;
+  gap: 10px;
+  min-height: 24px;
+}
+
+.station-name {
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+.station-track {
+  height: 10px;
+  background: var(--wall-2);
+  border: 1px solid var(--paper-faint);
+  position: relative;
+  min-width: 0;
+}
+
+.station-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  box-shadow: inset -2px 0 0 var(--paper);
+}
+
+.station-pct {
+  font-size: 16px;
+  font-weight: 900;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.dish-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 14px 0 8px;
+  padding: 0 2px;
+}
+
+.dish-head__title {
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+
+.dish-head__sub {
+  font-size: 13px;
+  color: var(--paper-dim);
+}
+
+.dish-list { display: flex; flex-direction: column; }
+
+.dish-row {
+  display: grid;
+  grid-template-columns: 28px 1fr 38px 48px 48px;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 8px 12px;
+  background: var(--ink);
+  border: var(--edge);
+  box-shadow: var(--bevel-sm);
+  position: relative;
+}
+.dish-row + .dish-row { margin-top: -6px; }
+
+.dish-rank {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--red);
+  color: var(--paper);
+  border: 2px solid var(--paper);
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.dish-name {
+  font-size: 16px;
+  font-weight: 900;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dish-station {
+  font-size: 13px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
+
+.dish-count {
+  font-size: 17px;
+  font-weight: 900;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.dish-pct {
+  font-size: 13px;
+  color: var(--paper-dim);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.export {
+  margin-top: 14px;
+  width: 100%;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--ink);
+  color: var(--paper);
+  border: var(--edge);
+  box-shadow: var(--bevel);
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 2px;
+}
+.export:hover { transform: translate(-1px, -1px); box-shadow: var(--bevel-hover); }
+.export:active { transform: translate(2px, 2px); box-shadow: var(--bevel-sm); }
+
+/* =========================================================
+   日常验收（手机）
+   ========================================================= */
+
+.daily-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.mini-row {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.mini {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 10px 16px;
+  border: var(--edge);
+  box-shadow: var(--bevel-sm);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+}
+.mini + .mini { margin-left: -6px; }
+
+.mini--yellow { background: var(--yellow); color: var(--ink); }
+.mini--paper { background: var(--paper); color: var(--ink); }
+.mini--green { background: var(--green-deep); color: var(--paper); }
+.mini--red { background: var(--red); color: var(--paper); }
+
+.mini__n {
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.mini__k {
+  margin-top: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.mini--yellow .mini__k { color: var(--ink); opacity: 0.8; }
+.mini--paper .mini__k { color: var(--ink-dim); }
+.mini--green .mini__k { color: var(--paper); }
+.mini--red .mini__k { color: var(--paper); }
+
+.verify-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.verify-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid var(--paper-faint);
+}
+
+.verify-title {
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1.1;
+  letter-spacing: 1px;
+}
+
+.verify-sub {
+  margin-top: 4px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--paper-dim);
+  line-height: 1.3;
+}
+
+.verify-head__right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.verify-count {
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  color: var(--yellow);
+  white-space: nowrap;
+}
+
+.photo-row {
+  flex: 1 1 auto;
+  min-height: 220px;
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.photo {
+  flex: 1 1 0;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+  border: var(--edge);
+  background: var(--steel-3);
+}
+
+.photo__svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.photo-tag {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  background: var(--paper);
+  color: var(--ink);
+  border: 2px solid var(--ink);
+  box-shadow: var(--bevel-sm);
+  padding: 4px 7px;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  line-height: 1.25;
+}
+
+.photo-tag__sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: var(--ink-dim);
+}
+
+.grease-tag {
+  position: absolute;
+  bottom: 10px;
+  left: 8px;
+  z-index: 2;
+  background: var(--red);
+  color: var(--paper);
+  border: 2px solid var(--paper);
+  box-shadow: var(--bevel-sm);
+  padding: 4px 7px;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  line-height: 1.25;
+}
+
+.queue {
+  flex: 0 0 auto;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px 8px 8px;
+  background: var(--ink);
+  color: var(--paper);
+  border: var(--edge);
+  box-shadow: var(--bevel-sm);
+}
+
+.queue__tag {
+  width: 30px;
+  align-self: stretch;
+  flex: 0 0 30px;
+  background: var(--yellow);
+  color: var(--ink);
+  border: 2px solid var(--paper);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.queue__tag span {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 3px;
+  line-height: 1;
+}
+
+.queue__main { flex: 1 1 auto; min-width: 0; }
+
+.queue__k {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--paper-dim);
+  line-height: 1.1;
+}
+
+.queue__t {
+  margin-top: 2px;
+  font-size: 16px;
+  font-weight: 900;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queue__n {
+  font-size: 14px;
+  font-weight: 900;
+  color: var(--yellow);
+  white-space: nowrap;
+}
+
+.actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+}
+
+.big-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: var(--edge);
+  box-shadow: var(--bevel);
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: 4px;
+  line-height: 1;
+  border-radius: 0;
+  transition: transform 80ms ease, box-shadow 80ms ease;
+}
+
+.big-btn:hover { transform: translate(-1px, -1px); box-shadow: var(--bevel-hover); }
+.big-btn:active { transform: translate(2px, 2px); box-shadow: var(--bevel-sm); }
+
+.big-btn--pass { background: var(--green); color: var(--paper); }
+.big-btn--reject { background: var(--red); color: var(--paper); }
+
+.verdict {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 2px solid var(--paper);
+  background: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--paper);
+}
+.verdict--pass { background: var(--green-deep); }
+.verdict--reject { background: var(--red); }
+.verdict--reject .verdict__txt { color: var(--paper); }
+
+/* 弹层：驳回理由 */
+.scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  background: var(--scrim);
+  display: flex;
+  align-items: flex-end;
+  padding: 14px;
+}
+
+.sheet {
+  width: 100%;
+  background: var(--ink);
+  color: var(--paper);
+  border: var(--edge);
+  box-shadow: var(--bevel-lg);
+  padding: 16px;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sheet-title {
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+
+.sheet-sub {
+  margin-top: 3px;
+  font-size: 13px;
+  color: var(--paper-dim);
+}
+
+.sheet-close {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: var(--edge);
+  color: var(--paper);
+}
+
+.sheet-label {
+  display: block;
+  margin-top: 14px;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1.4;
+}
+
+.reason {
+  margin-top: 8px;
+  width: 100%;
+  min-height: 120px;
+  resize: none;
+  padding: 12px;
+  background: var(--paper);
+  color: var(--ink);
+  border: 2px solid var(--paper);
+  border-radius: 0;
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.sheet-hint {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--paper-dim);
+}
+
+.sheet-err {
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--yellow);
+}
+
+.sheet-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* =========================================================
+   排班月历（桌面）
+   ========================================================= */
+
+.cal-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cal-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 4px;
+}
+
+.cal-title-wrap { min-width: 0; }
+
+.cal-kicker {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--paper-dim);
+}
+
+.cal-h1 {
+  margin-top: 2px;
+  font-size: 36px;
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: 1px;
+}
+
+.cal-tools {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.seg {
+  display: flex;
+  border: var(--edge);
+  box-shadow: var(--bevel-sm);
+  background: var(--ink);
+}
+
+.seg-btn {
+  height: 44px;
+  min-width: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  color: var(--paper);
+  border-right: 2px solid var(--paper);
+}
+.seg-btn:last-child { border-right: 0; }
+.seg-btn.is-on { background: var(--red); }
+.seg-btn:hover:not(.is-on) { background: var(--wall-2); }
+
+.cal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 10px;
+}
+
+.cal-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--wall);
+  border: var(--edge);
+}
+
+.legend {
+  flex: 0 0 38px;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 12px;
+  background: var(--ink);
+  border-bottom: 2px solid var(--paper);
+  overflow: hidden;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
+
+.legend-swatch {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+}
+.legend-swatch--early { background: var(--yellow); }
+.legend-swatch--mid { background: var(--green); }
+.legend-swatch--late { background: var(--blue); }
+.legend-swatch--off { background: var(--paper-dim); }
+.legend-swatch--pending { background: var(--red); border: 2px solid var(--paper); }
+.legend-swatch--empty { border: 1px dashed var(--paper-dim); }
+
+.cal-weekdays {
+  flex: 0 0 34px;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  background: var(--wall-2);
+  border-bottom: 1px solid var(--paper-faint);
+}
+
+.cal-weekday {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: var(--paper-dim);
+  border-left: 1px solid var(--paper-faint);
+}
+.cal-weekday:first-child { border-left: 0; }
+
+.cal-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-template-rows: repeat(5, 1fr);
+  gap: 1px;
+  background: var(--paper-faint);
+}
+
+.cal-grid.is-week {
+  grid-template-rows: 1fr;
+}
+
+.cell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--wall);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  overflow: hidden;
+  text-align: left;
+  border: 0;
+  color: var(--paper);
+}
+
+.cell:hover { background: var(--wall-2); }
+.cell.is-ghost { background: var(--night); color: var(--paper-dim); cursor: default; }
+.cell.is-ghost:hover { background: var(--night); }
+.cell.is-sel { background: var(--wall-2); box-shadow: inset 0 0 0 2px var(--red); }
+
+.cell-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 26px;
+}
+
+.cell-date {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  font-weight: 900;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.cell.is-sel .cell-date { background: var(--red); color: var(--paper); }
+.cell.is-ghost .cell-date { font-size: 13px; opacity: 0.7; }
+
+.cell-pending {
+  height: 20px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  background: var(--red);
+  color: var(--paper);
+  border: 2px solid var(--paper);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.cell-bars {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.cell-track {
+  position: relative;
+  height: 3px;
+  width: 100%;
+  background: var(--paper-faint-2);
+}
+
+.cell-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 3px;
+}
+
+.cell-bar--early { background: var(--yellow); }
+.cell-bar--mid { background: var(--green); }
+.cell-bar--late { background: var(--blue); }
+.cell-bar--off { background: var(--paper-dim); opacity: 0.55; }
+
+.cell-count {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 3px;
+  font-size: 13px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  color: var(--paper-dim);
+}
+
+.cell-count__n { font-size: 15px; color: var(--paper); }
+.cell.is-sel .cell-count__n { color: var(--paper); }
+.cell.is-empty .cell-count { color: var(--paper-dim); }
+
+.cell-empty-note {
+  margin: auto 0;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--paper-dim);
+  border: 1px dashed var(--paper-faint);
+  padding: 6px 2px;
+}
+
+/* 周视图：格子放大，班次变成行 */
+.cell.is-week { padding: 12px; }
+.cell.is-week .cell-date { font-size: 24px; height: 32px; min-width: 32px; }
+.cell.is-week .cell-pending { height: 22px; }
+
+.week-shifts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.week-shift {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.week-shift__k { color: var(--paper-dim); font-size: 13px; }
+.week-shift__n { font-variant-numeric: tabular-nums; }
+
+.week-names {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 2px solid var(--paper-faint);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--paper-dim);
+  overflow: hidden;
+}
+
+.week-names__row { display: flex; justify-content: space-between; gap: 6px; }
+.week-names__n { color: var(--paper); font-weight: 700; }
+
+.cal-side {
+  flex: 0 0 360px;
+  min-height: 0;
+  background: var(--ink);
+  border: var(--edge);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  overflow: hidden;
+}
+
+.side-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 2px solid var(--paper-faint);
+}
+
+.side-date {
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.side-week {
+  font-size: 14px;
+  font-weight: 900;
+  padding-top: 4px;
+  color: var(--paper-dim);
+}
+
+.side-today {
+  margin-left: auto;
+  height: 22px;
+  padding: 0 6px;
+  background: var(--red);
+  color: var(--paper);
+  border: 2px solid var(--paper);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+}
+
+.side-sum {
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--paper-dim);
+  letter-spacing: 0.3px;
+}
+
+.side-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.side-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0;
+  border-bottom: 1px solid var(--paper-faint-2);
+}
+
+.side-row:last-child { border-bottom: 0; }
+
+.side-name {
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.side-detail {
+  margin-top: 0;
+  font-size: 12px;
+  color: var(--paper-dim);
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.side-shift {
+  height: 20px;
+  min-width: 26px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--paper);
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+}
+.side-shift--early { background: var(--yellow); color: var(--ink); }
+.side-shift--mid { background: var(--green-deep); color: var(--paper); }
+.side-shift--late { background: var(--blue); color: var(--paper); }
+.side-shift--off { background: var(--ink); color: var(--paper-dim); border-color: var(--paper-dim); }
+
+.side-more {
+  margin-top: 4px;
+  padding-top: 4px;
+  font-size: 12px;
+  color: var(--paper-dim);
+}
+
+.side-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 2px solid var(--paper-faint);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.side-section__t {
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+
+.side-pending {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--paper-faint-2);
+}
+
+.side-pending:last-of-type { border-bottom: 0; }
+
+.side-pending__main { flex: 1 1 auto; min-width: 0; }
+
+.side-pending__n {
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.side-pending__d {
+  margin-top: 1px;
+  font-size: 12px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.side-pending__tag {
+  flex: 0 0 auto;
+  height: 20px;
+  padding: 0 5px;
+  display: flex;
+  align-items: center;
+  background: var(--red);
+  color: var(--paper);
+  border: 2px solid var(--paper);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  line-height: 1;
+}
+
+.side-rule {
+  margin-top: auto;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 2px solid var(--paper-faint);
+  padding-top: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--paper);
+  width: 100%;
+  text-align: left;
+}
+
+.side-rule:hover { color: var(--yellow); }
+
+/* 底部笔栏 */
+.cal-pen {
+  flex: 0 0 64px;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--ink);
+  border: var(--edge);
+  box-shadow: var(--bevel-sm);
+  overflow: hidden;
+}
+
+.pen-tag {
+  width: 32px;
+  align-self: stretch;
+  flex: 0 0 32px;
+  background: var(--red);
+  color: var(--paper);
+  border: 2px solid var(--paper);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pen-tag span {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 5px;
+  line-height: 1;
+}
+
+.pen-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pen-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+}
+
+.pen-shift {
+  height: 44px;
+  min-width: 48px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ink);
+  color: var(--paper);
+  border: 2px solid var(--line-strong);
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  line-height: 1;
+  position: relative;
+}
+
+.pen-shift::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 3px;
+  background: var(--line-strong);
+}
+
+.pen-shift--early::before { background: var(--yellow); }
+.pen-shift--mid::before { background: var(--green); }
+.pen-shift--late::before { background: var(--blue); }
+.pen-shift--off::before { background: var(--paper-dim); }
+
+.pen-shift.is-on {
+  background: var(--paper);
+  color: var(--ink);
+  border-color: var(--paper);
+}
+.pen-shift.is-on::before { background: var(--ink); }
+.pen-shift.is-on.pen-shift--early { background: var(--yellow); color: var(--ink); }
+.pen-shift.is-on.pen-shift--mid { background: var(--green-deep); color: var(--paper); }
+.pen-shift.is-on.pen-shift--mid::before { background: var(--paper); }
+.pen-shift.is-on.pen-shift--late { background: var(--blue); color: var(--paper); }
+.pen-shift.is-on.pen-shift--late::before { background: var(--paper); }
+.pen-shift.is-on.pen-shift--off { background: var(--paper-dim); color: var(--ink); }
+.pen-shift.is-on.pen-shift--off::before { background: var(--ink); }
+
+.pen-zone {
+  height: 44px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--line-strong);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+.pen-zone.is-on { background: var(--paper); color: var(--ink); border-color: var(--paper); }
+
+.pen-hint {
+  font-size: 12px;
+  color: var(--paper-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pen-msg {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--yellow);
+  white-space: nowrap;
+}
+
+.pen-undo {
+  margin-left: auto;
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: var(--edge);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+.pen-undo:hover:not(:disabled) { background: var(--wall-2); }
+.pen-undo:disabled { color: var(--paper-dim); cursor: default; }
+
+/* 防止 390 手机页出现横向滚动（chips 行除外） */
+@media (max-width: 430px) {
+  .stage { display: block; }
+  .phone {
+    width: 390px;
+    height: 844px;
+    border-radius: 0;
+    margin: 0 auto;
+    box-shadow: none;
+  }
+}
+
+</style>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script>
+    /* Babel standalone 在浏览器里编译 text/babel 时必定打一条「建议预编译」的
+       开发提示（console.warn，不是报错）。只过滤这一条固定文案，其它警告照常。 */
+    (function () {
+      var warn = console.warn;
+      console.warn = function () {
+        if (arguments.length && typeof arguments[0] === 'string' &&
+            arguments[0].indexOf('in-browser Babel transformer') !== -1) {
+          return;
+        }
+        return warn.apply(console, arguments);
+      };
+    })();
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script>
+/* 厨务管家 · 方向三 · 招牌墙
+   mock 数据：数字逐字按 spec 第 6 节。
+   日历只为 10/25 这一天给了完整文案；其余日期沿用同一套班次人数与花名册，
+   让 7×5 网格不至于空洞，属于设计稿内必要的排班铺底。 */
+
+(function () {
+  var store = {
+    name: '云味小馆',
+    branch: '中山路店',
+    full: '云味小馆 · 中山路店',
+    date: '2026-10-25',
+    dateLabel: '10 月 25 日',
+    weekday: '周六',
+    businessDay: '2026-10-25',
+    businessDayLabel: '10 月 25 日 周六'
+  };
+
+  var roles = {
+    manager: { key: 'manager', label: '店长', name: '陈静' },
+    boss: { key: 'boss', label: '老板', name: '周志远' },
+    chef: { key: 'chef', label: '厨师长', name: '王国强' },
+    staff: { key: 'staff', label: '员工', name: '李小雨' }
+  };
+
+  var today = {
+    revenue: 28640,
+    revenueYesterday: 25480,
+    revenueLastSat: 26820,
+    orders: 412,
+    avgTicket: 69.5,
+    output: 1286,
+    tables: 18,
+    tablesTotal: 24,
+    rate30: 76,
+    overdueAcceptance: 1,
+    pendingAcceptance: 9,
+    pendingLeave: 2,
+    rectificationOverdue: 1,
+    hrReminders: 3,
+    prepShort: 7
+  };
+
+  var shifts = {
+    early: { key: 'early', label: '早班', short: '早', time: '09:00–15:00', count: 8, tone: 'yellow' },
+    mid: { key: 'mid', label: '中班', short: '中', time: '12:00–20:00', count: 6, tone: 'green' },
+    late: { key: 'late', label: '晚班', short: '晚', time: '16:00–22:30', count: 11, tone: 'blue' },
+    off: { key: 'off', label: '休', short: '休', count: 3 },
+    leave: { key: 'leave', label: '请假', short: '假', count: 1, who: '张伟' }
+  };
+
+  var todo = [
+    {
+      kind: '人',
+      tone: 'yellow',
+      title: '张伟 请假',
+      meta: '事假 10/26–10/27，共 2 天',
+      note: '待你批',
+      action: '批准',
+      alt: '驳回'
+    },
+    {
+      kind: '卫',
+      tone: 'paper',
+      title: '后厨 灶台 等 9 项待验收',
+      meta: '其中逾期 1 项',
+      note: '待验收',
+      action: '去验收',
+      page: 'daily'
+    },
+    {
+      kind: '整',
+      tone: 'red',
+      title: '前厅 B 区 垃圾桶未加盖',
+      meta: '整改单，距截止 1 小时 20 分',
+      note: '整改',
+      action: '查看'
+    }
+  ];
+
+  var prep = {
+    short: 7,
+    items: [
+      { label: '热菜', n: 3, tone: 'red' },
+      { label: '蒸笼', n: 2, tone: 'yellow' },
+      { label: '凉菜', n: 2, tone: 'green' }
+    ]
+  };
+
+  var slowest = {
+    station: '烧烤',
+    minutes: 12.5,
+    scaleMax: 15
+  };
+
+  var sales = {
+    amount: 186420,
+    orders: 6028,
+    avgTicket: 30.9,
+    dishes: 86,
+    returns: 14,
+    rangeLabel: '10/19–10/25',
+    days: [
+      { label: '周一', value: 22180, date: '10/19' },
+      { label: '周二', value: 24060, date: '10/20' },
+      { label: '周三', value: 25340, date: '10/21' },
+      { label: '周四', value: 26120, date: '10/22' },
+      { label: '周五', value: 29480, date: '10/23' },
+      { label: '周六', value: 31240, date: '10/24' },
+      { label: '周日', value: 28000, date: '10/25' }
+    ]
+  };
+
+  var stations = [
+    { name: '热菜', pct: 42.6, tone: 'red' },
+    { name: '蒸笼', pct: 18.3, tone: 'yellow' },
+    { name: '烧烤', pct: 15.1, tone: 'green' },
+    { name: '凉菜', pct: 9.7, tone: 'blue' },
+    { name: '面点', pct: 8.2, tone: 'paper' },
+    { name: '吧台', pct: 6.1, tone: 'paper-dim' }
+  ];
+
+  var dishes = [
+    { rank: 1, name: '招牌酸菜鱼', station: '热菜', count: 682, pct: 11.3 },
+    { rank: 2, name: '藤椒鸡', station: '热菜', count: 514, pct: 8.5 },
+    { rank: 3, name: '干锅花菜', station: '蒸笼', count: 471, pct: 7.8 },
+    { rank: 4, name: '红糖糍粑', station: '面点', count: 398, pct: 6.6 },
+    { rank: 5, name: '手打鱼丸汤', station: '蒸笼', count: 342, pct: 5.7 }
+  ];
+
+  var hygiene = {
+    passRate: 92,
+    judged: 1864,
+    pending: 9,
+    overdue: 1,
+    toShoot: 4,
+    passed: 118,
+    missed: 2,
+    item: {
+      name: '灶台',
+      detail: '油污与残渣',
+      zone: '后厨',
+      index: 2,
+      total: 9,
+      nextName: '蒸笼区',
+      nextIndex: 3
+    },
+    photo: { by: '王芳', shift: '白班', time: '10:24' }
+  };
+
+  var hr = {
+    roster: 28,
+    certificates: 3,
+    birthdays: 1,
+    seniority: 2,
+    overtime: 3,
+    overtimeHours: 5.5
+  };
+
+  var zones = ['前厅 A 区', '前厅 B 区', '后厨', '收银', '保洁', '全店'];
+
+  var sideStaff = [
+    { name: '王芳', shift: 'early', zone: '后厨' },
+    { name: '李小雨', shift: 'early', zone: '前厅 A 区' },
+    { name: '陈静', shift: 'early', zone: '全店' },
+    { name: '王国强', shift: 'mid', zone: '后厨' },
+    { name: '刘洋', shift: 'mid', zone: '后厨' },
+    { name: '赵敏', shift: 'mid', zone: '前厅 B 区' },
+    { name: '孙强', shift: 'late', zone: '后厨' },
+    { name: '周婷', shift: 'late', zone: '前厅 A 区' },
+    { name: '吴昊', shift: 'late', zone: '收银' },
+    { name: '郑凯', shift: 'late', zone: '保洁' }
+  ];
+
+  var staffPool = [
+    '王芳', '李小雨', '陈静', '王国强', '刘洋', '赵敏', '孙强',
+    '周婷', '吴昊', '郑凯', '高翔', '马倩', '许峰', '何静'
+  ];
+
+  var pendingLeaves = [
+    { name: '张伟', type: '事假', date: '10/26–10/27', days: 2 },
+    { name: '高翔', type: '事假', date: '10/27', days: 1 }
+  ];
+
+  /* 10/1 按「周三」起排，于是 10/25 落在周六——与 spec 的营业日文案一致
+     （真实 2026-10-25 是周日；这里以 spec 的「周六」为准，保证页内自洽）。 */
+  var weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  var patterns = [
+    { early: 7, mid: 5, late: 9 },
+    { early: 7, mid: 6, late: 9 },
+    { early: 8, mid: 5, late: 10 },
+    { early: 8, mid: 6, late: 10 },
+    { early: 9, mid: 7, late: 11 },
+    { early: 8, mid: 6, late: 11 },
+    { early: 7, mid: 6, late: 10 }
+  ];
+
+  var days = [];
+  for (var d = 1; d <= 31; d += 1) {
+    var wi = (2 + (d - 1)) % 7;
+    var counts = patterns[wi];
+    if (d === 25) counts = { early: 8, mid: 6, late: 11 };
+    if (d === 31) counts = { early: 0, mid: 0, late: 0 };
+    var total = counts.early + counts.mid + counts.late;
+    days.push({
+      day: d,
+      date: '2026-10-' + (d < 10 ? '0' + d : '' + d),
+      month: 10,
+      weekday: weekdays[wi],
+      weekIndex: wi,
+      early: counts.early,
+      mid: counts.mid,
+      late: counts.late,
+      total: total,
+      off: Math.max(0, hr.roster - total),
+      pending: d === 26 || d === 27,
+      unplanned: d === 31,
+      isToday: d === 25
+    });
+  }
+
+  var ghosts = [
+    { day: 29, month: 9, date: '2026-09-29', weekday: '周一' },
+    { day: 30, month: 9, date: '2026-09-30', weekday: '周二' }
+  ];
+
+  var calendar = {
+    year: 2026,
+    month: 10,
+    monthLabel: '2026 年 10 月',
+    selected: '2026-10-25',
+    weekdays: weekdays,
+    days: days,
+    ghostsBefore: ghosts,
+    ghostsAfter: [
+      { day: 1, month: 11, date: '2026-11-01', weekday: '周六' },
+      { day: 2, month: 11, date: '2026-11-02', weekday: '周日' }
+    ],
+    weekDates: ['2026-10-20', '2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24', '2026-10-25', '2026-10-26'],
+    selectedDay: days[24],
+    sideStaff: sideStaff,
+    staffPool: staffPool,
+    zones: zones,
+    pendingLeaves: pendingLeaves,
+    shiftTime: {
+      early: '09:00–15:00',
+      mid: '12:00–20:00',
+      late: '16:00–22:30',
+      off: '—'
+    }
+  };
+
+  window.DATA = {
+    store: store,
+    roles: roles,
+    today: today,
+    shifts: shifts,
+    todo: todo,
+    prep: prep,
+    slowest: slowest,
+    sales: sales,
+    stations: stations,
+    dishes: dishes,
+    hygiene: hygiene,
+    hr: hr,
+    calendar: calendar
+  };
+})();
+
+</script>
+  <script type="text/babel">
+/* 厨务管家 · 方向三 · 招牌墙
+   共享 UI：壳、招牌、竖排标签、红章按钮、图标、SVG 折线/条形。 */
+
+(function () {
+  var React = window.React;
+
+  function fmt(n) {
+    return Number(n).toLocaleString('en-US');
+  }
+
+  function money(n) {
+    return '¥' + fmt(n);
+  }
+
+  function one(n) {
+    return Number(n).toFixed(1);
+  }
+
+  function pct(n) {
+    return one(n) + '%';
+  }
+
+  var NAV_ITEMS = [
+    { key: 'today', label: '今天', page: 'today' },
+    { key: 'business', label: '生意', page: 'sales' },
+    { key: 'people', label: '人', page: 'calendar' },
+    { key: 'floor', label: '现场', page: 'daily' },
+    { key: 'kitchen', label: '厨房', page: null },
+    { key: 'system', label: '系统', page: null },
+    { key: 'me', label: '我的', page: null }
+  ];
+
+  var ROLE_NAV = {
+    manager: ['today', 'business', 'people', 'floor', 'kitchen', 'system'],
+    boss: ['today', 'business', 'floor'],
+    chef: ['today', 'floor', 'kitchen', 'business'],
+    staff: ['today', 'floor', 'kitchen', 'me']
+  };
+
+  var PHONE_TABS = {
+    manager: [
+      { key: 'today', label: '今天', page: 'today' },
+      { key: 'business', label: '生意', page: 'sales' },
+      { key: 'people', label: '人', page: 'calendar' },
+      { key: 'floor', label: '现场', page: 'daily' }
+    ],
+    boss: [
+      { key: 'today', label: '今天', page: 'today' },
+      { key: 'business', label: '生意', page: 'sales' },
+      { key: 'floor', label: '现场', page: 'daily' },
+      { key: 'me', label: '我的', page: null }
+    ],
+    chef: [
+      { key: 'today', label: '今天', page: 'today' },
+      { key: 'floor', label: '现场', page: 'daily' },
+      { key: 'kitchen', label: '厨房', page: null },
+      { key: 'me', label: '我的', page: null }
+    ],
+    staff: [
+      { key: 'today', label: '今天', page: 'today' },
+      { key: 'floor', label: '卫生', page: 'daily' },
+      { key: 'kitchen', label: '厨房', page: null },
+      { key: 'me', label: '我的', page: null }
+    ]
+  };
+
+  var PAGE_DOMAIN = {
+    today: 'today',
+    sales: 'business',
+    daily: 'floor',
+    calendar: 'people'
+  };
+
+  /* ---------- 图标：只用 SVG，不用 emoji ---------- */
+
+  function Icon(props) {
+    var name = props.name;
+    var size = props.size || 18;
+    var sw = props.strokeWidth || 2.4;
+    var common = {
+      className: 'icon',
+      width: size,
+      height: size,
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: sw,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      'aria-hidden': 'true',
+      focusable: 'false'
+    };
+    if (name === 'check') {
+      return React.createElement('svg', common, React.createElement('path', { d: 'M4 12.5l5 5L20 6.5' }));
+    }
+    if (name === 'close') {
+      return React.createElement('svg', common,
+        React.createElement('path', { d: 'M6 6l12 12' }),
+        React.createElement('path', { d: 'M18 6L6 18' })
+      );
+    }
+    if (name === 'chevron') {
+      return React.createElement('svg', common, React.createElement('path', { d: 'M9 5l7 7-7 7' }));
+    }
+    if (name === 'undo') {
+      return React.createElement('svg', common,
+        React.createElement('path', { d: 'M9 6H4v5' }),
+        React.createElement('path', { d: 'M4 11c1.6-3.2 4.6-5 8.2-4.6 3.4.4 6 3 6.4 6.4.4 3.4-1.6 6.4-4.8 7.4' })
+      );
+    }
+    if (name === 'download') {
+      return React.createElement('svg', common,
+        React.createElement('path', { d: 'M12 3v12' }),
+        React.createElement('path', { d: 'M7 10l5 5 5-5' }),
+        React.createElement('path', { d: 'M4 20h16' })
+      );
+    }
+    if (name === 'up') {
+      return React.createElement('svg', Object.assign({}, common, { fill: 'currentColor', stroke: 'none' }),
+        React.createElement('path', { d: 'M12 5l5 8H7l5-8z' })
+      );
+    }
+    if (name === 'alert') {
+      return React.createElement('svg', common,
+        React.createElement('path', { d: 'M12 4l9 16H3L12 4z' }),
+        React.createElement('path', { d: 'M12 10v4' }),
+        React.createElement('path', { d: 'M12 17.4v.6' })
+      );
+    }
+    return null;
+  }
+
+  /* ---------- 招牌：实色块 + 奶白描边 + 硬投影 + 竖排窄条 ---------- */
+
+  function Sign(props) {
+    var cls = ['sign', 'sign--' + (props.tone || 'wall2')];
+    if (props.tag) cls.push('sign--tagged');
+    if (props.className) cls.push(props.className);
+    var style = Object.assign({}, props.style || {});
+    if (props.grow != null) style.flexGrow = props.grow;
+    return React.createElement(
+      'section',
+      { className: cls.join(' '), style: style, 'aria-label': props.ariaLabel },
+      props.tag
+        ? React.createElement(
+            'div',
+            { className: 'sign__tag sign__tag--' + (props.tagTone || 'ink') },
+            React.createElement('span', { className: 'vert' }, props.tag)
+          )
+        : null,
+      React.createElement('div', { className: 'sign__body' }, props.children)
+    );
+  }
+
+  function Stamp(props) {
+    var cls = ['stamp'];
+    if (props.ghost) cls.push('stamp--ghost');
+    if (props.wide) cls.push('stamp--wide');
+    if (props.className) cls.push(props.className);
+    return React.createElement(
+      'button',
+      {
+        type: 'button',
+        className: cls.join(' '),
+        onClick: props.onClick,
+        disabled: props.disabled,
+        'aria-label': props.ariaLabel,
+        style: props.style
+      },
+      props.icon ? React.createElement(Icon, { name: props.icon, size: 16 }) : null,
+      props.children
+    );
+  }
+
+  /* ---------- 桌面壳 ---------- */
+
+  function Rail(props) {
+    var roleKey = props.roleKey || 'manager';
+    var keys = ROLE_NAV[roleKey] || ROLE_NAV.manager;
+    var items = keys
+      .map(function (k) {
+        return NAV_ITEMS.filter(function (n) { return n.key === k; })[0];
+      })
+      .filter(Boolean);
+
+    return React.createElement(
+      'nav',
+      { className: 'rail', 'aria-label': '主导航' },
+      React.createElement('div', { className: 'rail-brand', 'aria-label': '厨务管家' }, '厨'),
+      React.createElement(
+        'div',
+        { className: 'rail-nav' },
+        items.map(function (item) {
+          var on = item.key === props.current;
+          var off = !item.page;
+          var cls = ['rail-item'];
+          if (on) cls.push('is-on');
+          if (off) cls.push('is-off');
+          return React.createElement(
+            'button',
+            {
+              key: item.key,
+              type: 'button',
+              className: cls.join(' '),
+              onClick: function () { if (!off && props.onNav) props.onNav(item.page); },
+              'aria-current': on ? 'page' : undefined,
+              'aria-disabled': off ? 'true' : undefined
+            },
+            React.createElement('span', { className: 'rail-item__text' }, item.label)
+          );
+        })
+      ),
+      React.createElement('div', { className: 'rail-spacer' }),
+      React.createElement(
+        'div',
+        { className: 'rail-foot' },
+        React.createElement('span', { className: 'live__dot' }),
+        React.createElement('span', { className: 'rail-foot__text' }, '营业中')
+      )
+    );
+  }
+
+  function StatusBar(props) {
+    var role = props.role;
+    var store = window.DATA.store;
+    return React.createElement(
+      'header',
+      { className: 'statusbar' },
+      React.createElement(
+        'div',
+        { className: 'status-store' },
+        React.createElement('span', { className: 'status-chop' }),
+        React.createElement('span', { className: 'status-name' }, store.name),
+        React.createElement('span', { className: 'status-branch' }, store.branch)
+      ),
+      React.createElement('span', { className: 'status-sep' }),
+      React.createElement('span', { className: 'status-day' }, '营业日 ' + store.businessDayLabel),
+      React.createElement(
+        'div',
+        { className: 'status-right' },
+        React.createElement(
+          'div',
+          { className: 'live' },
+          React.createElement('span', { className: 'live__dot' }),
+          React.createElement('span', { className: 'live__text' }, '实时已连接')
+        ),
+        React.createElement(
+          'div',
+          { className: 'identity' },
+          React.createElement('span', { className: 'identity__role' }, role.label),
+          React.createElement('span', { className: 'identity__name' }, role.name)
+        )
+      )
+    );
+  }
+
+  /* ---------- 手机壳 ---------- */
+
+  function PhoneShell(props) {
+    var role = props.role;
+    var roleKey = props.roleKey;
+    var tabs = PHONE_TABS[roleKey] || PHONE_TABS.manager;
+    return React.createElement(
+      'div',
+      { className: 'stage' },
+      React.createElement(
+        'div',
+        { className: 'phone' },
+        React.createElement(
+          'header',
+          { className: 'phone-top' },
+          React.createElement('span', { className: 'phone-top__chop' }),
+          React.createElement('span', { className: 'phone-top__title' }, props.title),
+          props.date ? React.createElement('span', { className: 'phone-top__date' }, props.date) : null,
+          React.createElement('span', { className: 'phone-top__role' }, role.label + ' ' + role.name)
+        ),
+        React.createElement('div', { className: 'phone-body' }, props.children),
+        React.createElement(
+          'nav',
+          { className: 'phone-tabs', 'aria-label': '底部导航' },
+          tabs.map(function (t) {
+            var on = t.key === props.activeTab;
+            var off = !t.page;
+            var cls = ['ptab'];
+            if (on) cls.push('is-on');
+            if (off) cls.push('is-off');
+            return React.createElement(
+              'button',
+              {
+                key: t.key,
+                type: 'button',
+                className: cls.join(' '),
+                onClick: function () { if (!off && props.onNav) props.onNav(t.page); },
+                'aria-current': on ? 'page' : undefined,
+                'aria-disabled': off ? 'true' : undefined
+              },
+              t.label
+            );
+          })
+        ),
+        props.overlay ? props.overlay : null
+      )
+    );
+  }
+
+  /* ---------- 数据小件 ---------- */
+
+  function Occupancy(props) {
+    var filled = props.filled;
+    var total = props.total;
+    var cells = [];
+    for (var i = 0; i < total; i += 1) {
+      cells.push(
+        React.createElement('span', {
+          key: i,
+          className: 'occ__cell' + (i < filled ? ' is-on' : '')
+        })
+      );
+    }
+    return React.createElement('div', { className: 'occ', 'aria-label': '在店桌台 ' + filled + ' / ' + total }, cells);
+  }
+
+  function StationBars(props) {
+    return React.createElement(
+      'div',
+      { className: 'station-list' },
+      props.items.map(function (s) {
+        return React.createElement(
+          'div',
+          { className: 'station-row', key: s.name },
+          React.createElement('div', { className: 'station-name' }, s.name),
+          React.createElement(
+            'div',
+            { className: 'station-track' },
+            React.createElement('div', {
+              className: 'station-fill',
+              style: { width: s.pct + '%', background: 'var(--' + s.tone + ')' }
+            })
+          ),
+          React.createElement('div', { className: 'station-pct num' }, pct(s.pct))
+        );
+      })
+    );
+  }
+
+  /* 折线：黑底招牌里的 SVG，橙黄线，标最高点与周六 */
+  function SalesLine(props) {
+    var days = props.days;
+    var W = 320;
+    var H = 124;
+    var left = 12;
+    var right = 308;
+    var top = 22;
+    var bottom = 88;
+
+    var vals = days.map(function (d) { return d.value; });
+    var max = Math.max.apply(null, vals);
+    var min = Math.min.apply(null, vals);
+    var maxI = vals.indexOf(max);
+
+    function x(i) {
+      return left + (i * (right - left)) / (days.length - 1);
+    }
+    function y(v) {
+      return bottom - ((v - min) / (max - min)) * (bottom - top);
+    }
+
+    var points = days.map(function (d, i) { return x(i) + ',' + y(d.value); }).join(' ');
+
+    var grid = [0, 1, 2].map(function (k) {
+      var gy = top + (k * (bottom - top)) / 2;
+      return React.createElement('line', {
+        key: 'g' + k,
+        x1: left,
+        x2: right,
+        y1: gy,
+        y2: gy,
+        stroke: 'var(--paper-faint)',
+        strokeWidth: 1
+      });
+    });
+
+    var dots = days.map(function (d, i) {
+      var isMax = i === maxI;
+      return React.createElement('circle', {
+        key: 'd' + d.label,
+        cx: x(i),
+        cy: y(d.value),
+        r: isMax ? 5 : 3.5,
+        fill: 'var(--paper)',
+        stroke: 'var(--yellow)',
+        strokeWidth: isMax ? 3 : 2
+      });
+    });
+
+    var xLabels = days.map(function (d, i) {
+      return React.createElement(
+        'text',
+        {
+          key: 'x' + d.label,
+          x: x(i),
+          y: 108,
+          textAnchor: 'middle',
+          style: {
+            fill: i === 5 ? 'var(--yellow)' : 'var(--paper-dim)',
+            fontSize: 12,
+            fontWeight: i === 5 ? 900 : 700,
+            fontFamily: 'var(--font)'
+          }
+        },
+        d.label
+      );
+    });
+
+    return React.createElement(
+      'svg',
+      {
+        className: 'chart-svg',
+        viewBox: '0 0 ' + W + ' ' + H,
+        role: 'img',
+        'aria-label': '近 7 天营业额折线，周六最高，' + fmt(max) + ' 元'
+      },
+      React.createElement('title', null, '近 7 天营业额折线'),
+      grid,
+      React.createElement('line', {
+        x1: x(maxI),
+        x2: x(maxI),
+        y1: top,
+        y2: bottom,
+        stroke: 'var(--paper-faint)',
+        strokeWidth: 1,
+        strokeDasharray: '3 4'
+      }),
+      React.createElement('polyline', {
+        points: points,
+        fill: 'none',
+        stroke: 'var(--yellow)',
+        strokeWidth: 3,
+        strokeLinejoin: 'round',
+        strokeLinecap: 'round'
+      }),
+      dots,
+      React.createElement(
+        'text',
+        {
+          x: Math.min(Math.max(x(maxI), 34), W - 34),
+          y: 15,
+          textAnchor: 'middle',
+          style: {
+            fill: 'var(--yellow)',
+            fontSize: 12,
+            fontWeight: 900,
+            fontFamily: 'var(--font)'
+          }
+        },
+        fmt(max)
+      ),
+      xLabels
+    );
+  }
+
+  /* 抽象不锈钢台面：灰面 + 油污点 + 红圈标注，不用照片。
+     竖幅构图，正好落在手机里两块并排的半屏照片框内。 */
+  function Stove(props) {
+    var dirty = props.dirty;
+    var brushed = [];
+    for (var i = 0; i < 35; i += 1) {
+      brushed.push(
+        React.createElement('line', {
+          key: 'b' + i,
+          x1: 0,
+          x2: 180,
+          y1: 92 + i * 8.4,
+          y2: 92 + i * 8.4,
+          stroke: 'var(--steel-1)',
+          strokeOpacity: dirty ? 0.1 : 0.2,
+          strokeWidth: 1
+        })
+      );
+    }
+
+    var dirt = dirty
+      ? React.createElement(
+          'g',
+          null,
+          React.createElement('ellipse', { cx: 88, cy: 232, rx: 36, ry: 19, fill: 'var(--ink)', opacity: 0.62 }),
+          React.createElement('ellipse', { cx: 112, cy: 255, rx: 19, ry: 11, fill: 'var(--ink)', opacity: 0.55 }),
+          React.createElement('ellipse', { cx: 66, cy: 272, rx: 22, ry: 9, fill: 'var(--ink)', opacity: 0.48 }),
+          React.createElement('path', {
+            d: 'M40 168 Q68 190 102 182',
+            stroke: 'var(--ink)',
+            strokeWidth: 10,
+            strokeLinecap: 'round',
+            fill: 'none',
+            opacity: 0.4
+          }),
+          React.createElement('ellipse', { cx: 93, cy: 230, rx: 9, ry: 4, fill: 'var(--steel-1)', opacity: 0.45 }),
+          React.createElement('ellipse', { cx: 118, cy: 252, rx: 5, ry: 2.5, fill: 'var(--steel-1)', opacity: 0.35 }),
+          React.createElement('path', {
+            d: 'M98 386 q-5 18 2 34',
+            stroke: 'var(--ink)',
+            strokeWidth: 6,
+            fill: 'none',
+            opacity: 0.55
+          })
+        )
+      : null;
+
+    return React.createElement(
+      'svg',
+      {
+        className: 'photo__svg',
+        viewBox: '0 0 180 430',
+        preserveAspectRatio: 'xMidYMid slice',
+        role: 'img',
+        'aria-label': dirty ? '实拍：灶台表面有油污与残渣' : '标准图：洁净的不锈钢灶台'
+      },
+      React.createElement('rect', { x: 0, y: 0, width: 180, height: 430, fill: 'var(--steel-4)' }),
+
+      /* 后挡板 */
+      React.createElement('rect', { x: 0, y: 0, width: 180, height: 86, fill: 'var(--steel-3)' }),
+      React.createElement('line', { x1: 0, y1: 86, x2: 180, y2: 86, stroke: 'var(--steel-1)', strokeWidth: 2 }),
+      React.createElement('line', { x1: 60, y1: 0, x2: 60, y2: 86, stroke: 'var(--steel-4)', strokeWidth: 1, opacity: 0.55 }),
+      React.createElement('line', { x1: 120, y1: 0, x2: 120, y2: 86, stroke: 'var(--steel-4)', strokeWidth: 1, opacity: 0.55 }),
+
+      /* 台面与前沿 */
+      React.createElement('rect', {
+        x: 0,
+        y: 86,
+        width: 180,
+        height: 300,
+        fill: dirty ? 'var(--steel-3)' : 'var(--steel-2)'
+      }),
+      React.createElement('rect', { x: 0, y: 386, width: 180, height: 44, fill: 'var(--steel-3)' }),
+      React.createElement('line', { x1: 0, y1: 386, x2: 180, y2: 386, stroke: 'var(--steel-1)', strokeWidth: 2 }),
+      brushed,
+
+      /* 两个灶眼 */
+      React.createElement('circle', { cx: 56, cy: 198, r: 44, fill: 'var(--steel-3)', stroke: 'var(--steel-4)', strokeWidth: 4 }),
+      React.createElement('circle', { cx: 56, cy: 198, r: 25, fill: 'var(--steel-4)' }),
+      React.createElement('line', { x1: 22, y1: 198, x2: 90, y2: 198, stroke: 'var(--steel-4)', strokeWidth: 4 }),
+      React.createElement('circle', { cx: 126, cy: 306, r: 38, fill: 'var(--steel-3)', stroke: 'var(--steel-4)', strokeWidth: 4 }),
+      React.createElement('circle', { cx: 126, cy: 306, r: 20, fill: 'var(--steel-4)' }),
+      React.createElement('line', { x1: 100, y1: 306, x2: 152, y2: 306, stroke: 'var(--steel-4)', strokeWidth: 4 }),
+
+      dirt,
+
+      /* 检查范围：实线圈 + 虚线圈 */
+      React.createElement('circle', {
+        cx: 88,
+        cy: 250,
+        r: 70,
+        fill: 'none',
+        stroke: 'var(--red)',
+        strokeWidth: 3
+      }),
+      React.createElement('circle', {
+        cx: 88,
+        cy: 250,
+        r: 77,
+        fill: 'none',
+        stroke: 'var(--red)',
+        strokeWidth: 1,
+        strokeDasharray: '4 5',
+        opacity: 0.75
+      })
+    );
+  }
+
+  Object.assign(window, {
+    fmt: fmt,
+    money: money,
+    one: one,
+    pct: pct,
+    Icon: Icon,
+    Sign: Sign,
+    Stamp: Stamp,
+    Rail: Rail,
+    StatusBar: StatusBar,
+    PhoneShell: PhoneShell,
+    Occupancy: Occupancy,
+    StationBars: StationBars,
+    SalesLine: SalesLine,
+    Stove: Stove,
+    NAV_ITEMS: NAV_ITEMS,
+    ROLE_NAV: ROLE_NAV,
+    PHONE_TABS: PHONE_TABS,
+    PAGE_DOMAIN: PAGE_DOMAIN
+  });
+})();
+
+</script>
+  <script type="text/babel">
+/* 厨务管家 · 方向三 · 招牌墙
+   四张代表页：今天 / 销售报表 / 日常验收 / 排班月历。 */
+
+(function () {
+  var React = window.React;
+  var useState = React.useState;
+  var useEffect = React.useEffect;
+
+  var Sign = window.Sign;
+  var Stamp = window.Stamp;
+  var Icon = window.Icon;
+  var Occupancy = window.Occupancy;
+  var StationBars = window.StationBars;
+  var SalesLine = window.SalesLine;
+  var Stove = window.Stove;
+  var PhoneShell = window.PhoneShell;
+  var fmt = window.fmt;
+  var money = window.money;
+  var one = window.one;
+  var pct = window.pct;
+
+  function shortDate(date) {
+    var p = date.split('-');
+    return Number(p[1]) + '.' + p[2];
+  }
+
+  /* =========================================================
+     1 · 今天（桌面 1440，店长）
+     ========================================================= */
+
+  function TodayPage(props) {
+    var D = window.DATA;
+    var T = D.today;
+    var S = D.shifts;
+    var leaveState = useState('pending');
+    var leave = leaveState[0];
+    var setLeave = leaveState[1];
+    var working = S.early.count + S.mid.count + S.late.count;
+    var prepTicks = [];
+    D.prep.items.forEach(function (it) {
+      for (var i = 0; i < it.n; i += 1) prepTicks.push(it.tone);
+    });
+
+    return React.createElement(
+      'div',
+      { className: 'wall' },
+
+      /* 第一排：生意 · 现场 · 生意 */
+      React.createElement(
+        'div',
+        { className: 'wall-row', style: { flexGrow: 1.05 } },
+        React.createElement(
+          Sign,
+          { tone: 'red', tag: '生意', grow: 5.6, ariaLabel: '今日营业额' },
+          React.createElement(
+            'div',
+            { className: 'rev-line', style: { justifyContent: 'space-between' } },
+            React.createElement(
+              'div',
+              null,
+              React.createElement('div', { className: 'kicker' }, '今日营业额'),
+              React.createElement(
+                'div',
+                { className: 'money', style: { marginTop: 10 } },
+                React.createElement('span', { className: 'money__cur' }, '¥'),
+                React.createElement('span', { className: 'money__val num' }, fmt(T.revenue))
+              )
+            ),
+            React.createElement(
+              'div',
+              { style: { textAlign: 'right', paddingTop: 2 } },
+              React.createElement('span', { className: 'plate plate--paper' }, '营业中')
+            )
+          ),
+          React.createElement(
+            'div',
+            { className: 'rev-sub' },
+            React.createElement(
+              'span',
+              { className: 'rev-sub__item' },
+              React.createElement(Icon, { name: 'up', size: 12 }),
+              '较昨日 +12.4%'
+            ),
+            React.createElement(
+              'span',
+              { className: 'rev-sub__item' },
+              React.createElement(Icon, { name: 'up', size: 12 }),
+              '较上周六 +6.8%'
+            )
+          ),
+          React.createElement(
+            'div',
+            { className: 'rev-stats' },
+            React.createElement(
+              'div',
+              { className: 'rev-stat' },
+              React.createElement('span', { className: 'rev-stat__n num' }, fmt(T.orders)),
+              React.createElement('span', { className: 'rev-stat__u' }, '单')
+            ),
+            React.createElement(
+              'div',
+              { className: 'rev-stat' },
+              React.createElement('span', { className: 'rev-stat__k' }, '客单'),
+              React.createElement('span', { className: 'rev-stat__n num' }, '¥' + one(T.avgTicket))
+            ),
+            React.createElement(
+              'div',
+              { className: 'rev-stat' },
+              React.createElement('span', { className: 'rev-stat__k' }, '出品'),
+              React.createElement('span', { className: 'rev-stat__n num' }, fmt(T.output)),
+              React.createElement('span', { className: 'rev-stat__u' }, '件')
+            )
+          )
+        ),
+
+        React.createElement(
+          Sign,
+          { tone: 'yellow', tag: '现场', grow: 2.7, ariaLabel: '待验收 9 项' },
+          React.createElement(
+            'div',
+            { className: 'yield' },
+            React.createElement('div', { className: 'kicker' }, '待验收'),
+            React.createElement(
+              'div',
+              { className: 'yield__big' },
+              React.createElement('span', { className: 'yield__n num' }, T.pendingAcceptance),
+              React.createElement('span', { className: 'yield__u' }, '项')
+            ),
+            React.createElement(
+              'div',
+              { className: 'yield__overdue' },
+              React.createElement('span', { className: 'plate plate--red' }, '逾期 1 项')
+            ),
+            React.createElement('div', { className: 'yield__note' }, '按标准图逐项对照')
+          )
+        ),
+
+        React.createElement(
+          Sign,
+          { tone: 'green', tag: '生意', grow: 2.7, ariaLabel: '在店桌台 18 / 24' },
+          React.createElement(
+            'div',
+            { className: 'kicker' },
+            '在店桌台'
+          ),
+          React.createElement(
+            'div',
+            { className: 'tables__big' },
+            React.createElement('span', { className: 'tables__n num' }, T.tables),
+            React.createElement('span', { style: { fontSize: 26, fontWeight: 900, paddingTop: 6, color: 'var(--paper-dim)' } }, '/' + T.tablesTotal),
+            React.createElement('span', { className: 'tables__u' }, '桌')
+          ),
+          React.createElement(Occupancy, { filled: T.tables, total: T.tablesTotal }),
+          React.createElement(
+            'div',
+            { className: 'tables__rate' },
+            '近 30 分钟 ',
+            React.createElement('span', { className: 'num', style: { fontSize: 19, fontWeight: 900 } }, T.rate30),
+            ' 单/时'
+          )
+        )
+      ),
+
+      /* 第二排：待办 · 人 */
+      React.createElement(
+        'div',
+        { className: 'wall-row', style: { flexGrow: 1.55 } },
+        React.createElement(
+          Sign,
+          { tone: 'ink', tag: '今天', tagTone: 'red', grow: 2.2, ariaLabel: '今天要处理' },
+          React.createElement(
+            'div',
+            { className: 'todo-head' },
+            React.createElement('h2', { className: 'todo-title' }, '今天要处理'),
+            React.createElement('span', { className: 'plate plate--paper' }, '3 件')
+          ),
+          React.createElement(
+            'div',
+            { className: 'todo-list' },
+            D.todo.map(function (item, idx) {
+              var isLeave = idx === 0;
+              return React.createElement(
+                'div',
+                { className: 'todo-row', key: item.title },
+                React.createElement(
+                  'div',
+                  { className: 'todo-char todo-char--' + item.tone },
+                  item.kind
+                ),
+                React.createElement(
+                  'div',
+                  { className: 'todo-main' },
+                  React.createElement(
+                    'div',
+                    { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+                    React.createElement('div', { className: 'todo-title-line' }, item.title),
+                    isLeave && leave === 'pending'
+                      ? React.createElement('span', { className: 'plate plate--yellow' }, '待你批')
+                      : null,
+                    isLeave && leave === 'approved'
+                      ? React.createElement('span', { className: 'plate plate--green' }, '已批准')
+                      : null,
+                    isLeave && leave === 'rejected'
+                      ? React.createElement('span', { className: 'plate plate--red' }, '已驳回')
+                      : null,
+                    idx === 1
+                      ? React.createElement('span', { className: 'plate plate--red' }, '逾期 1')
+                      : null
+                  ),
+                  React.createElement('div', { className: 'todo-meta' }, item.meta)
+                ),
+                React.createElement(
+                  'div',
+                  { className: 'todo-actions' },
+                  isLeave && leave === 'pending'
+                    ? React.createElement(
+                        React.Fragment,
+                        null,
+                        React.createElement(
+                          Stamp,
+                          {
+                            onClick: function () { setLeave('approved'); },
+                            ariaLabel: '批准张伟的请假'
+                          },
+                          '批准'
+                        ),
+                        React.createElement(
+                          Stamp,
+                          {
+                            ghost: true,
+                            onClick: function () { setLeave('rejected'); },
+                            ariaLabel: '驳回张伟的请假'
+                          },
+                          '驳回'
+                        )
+                      )
+                    : null,
+                  isLeave && leave !== 'pending'
+                    ? React.createElement(
+                        'span',
+                        { className: 'plate ' + (leave === 'approved' ? 'plate--green' : 'plate--red') },
+                        leave === 'approved' ? '已批准' : '已驳回'
+                      )
+                    : null,
+                  idx === 1
+                    ? React.createElement(
+                        Stamp,
+                        {
+                          icon: 'check',
+                          onClick: function () { if (props.go) props.go('daily'); },
+                          ariaLabel: '去验收后厨灶台等 9 项'
+                        },
+                        '去验收'
+                      )
+                    : null,
+                  idx === 2
+                    ? React.createElement(
+                        Stamp,
+                        { ghost: true, ariaLabel: '查看 B 区整改单' },
+                        '查看'
+                      )
+                    : null
+                )
+              );
+            })
+          )
+        ),
+
+        React.createElement(
+          Sign,
+          { tone: 'ink', tag: '人', tagTone: 'yellow', grow: 1, ariaLabel: '今天谁上班' },
+          React.createElement(
+            'div',
+            { className: 'who-head' },
+            React.createElement('h2', { className: 'who-title' }, '今天谁上班'),
+            React.createElement('span', { className: 'meta', style: { fontSize: 13 } }, '在班 ' + working + ' 人')
+          ),
+          React.createElement(
+            'div',
+            { className: 'who-list' },
+            ['early', 'mid', 'late'].map(function (k) {
+              return React.createElement(
+                'div',
+                { className: 'who-row', key: k },
+                React.createElement('span', { className: 'who-bar who-bar--' + k }),
+                React.createElement(
+                  'div',
+                  null,
+                  React.createElement('div', { className: 'who-label' }, S[k].label),
+                  React.createElement('div', { className: 'who-time' }, S[k].time)
+                ),
+                React.createElement('div', { className: 'who-count num' }, S[k].count)
+              );
+            })
+          ),
+          React.createElement(
+            'div',
+            { className: 'who-foot' },
+            React.createElement('span', null, '休 3，含请假 1'),
+            React.createElement('span', { className: 'plate plate--red' }, '张伟 事假')
+          )
+        )
+      ),
+
+      /* 第三排：备货 · 最慢档口 */
+      React.createElement(
+        'div',
+        { className: 'wall-row', style: { flexGrow: 1.0 } },
+        React.createElement(
+          Sign,
+          { tone: 'paper', tag: '厨房', grow: 1.55, ariaLabel: '备货还差 7 项' },
+          React.createElement(
+            'div',
+            { className: 'prep-row' },
+            React.createElement(
+              'div',
+              { className: 'prep-hero' },
+              React.createElement('div', { className: 'kicker' }, '备货还差'),
+              React.createElement(
+                'div',
+                { className: 'prep-big' },
+                React.createElement('span', { className: 'prep-n num' }, D.prep.short),
+                React.createElement('span', { className: 'prep-u' }, '项')
+              ),
+              React.createElement(
+                'div',
+                { className: 'prep-ticks', 'aria-label': '还差 7 项' },
+                prepTicks.map(function (tone, i) {
+                  return React.createElement('span', {
+                    key: 't' + i,
+                    className: 'prep-tick prep-tick--' + tone
+                  });
+                })
+              )
+            ),
+            React.createElement(
+              'div',
+              { className: 'prep-cells' },
+              D.prep.items.map(function (it) {
+                return React.createElement(
+                  'div',
+                  { className: 'prep-cell', key: it.label },
+                  React.createElement('span', { className: 'prep-cell__n num' }, it.n),
+                  React.createElement('span', { className: 'prep-cell__k' }, it.label)
+                );
+              })
+            ),
+            React.createElement(
+              Stamp,
+              { onClick: function () {}, ariaLabel: '去备货' },
+              '去备货'
+            )
+          )
+        ),
+
+        React.createElement(
+          Sign,
+          { tone: 'ink', tag: '厨房', tagTone: 'yellow', grow: 1, ariaLabel: '档口最慢 烧烤 12.5 分钟' },
+          React.createElement('div', { className: 'kicker' }, '档口最慢'),
+          React.createElement(
+            'div',
+            { className: 'slow__row' },
+            React.createElement('span', { className: 'slow__name' }, D.slowest.station),
+            React.createElement('span', { className: 'slow__n num' }, one(D.slowest.minutes)),
+            React.createElement('span', { className: 'slow__u' }, '分钟'),
+            React.createElement('span', { className: 'plate plate--red', style: { marginLeft: 'auto' } }, '全店最慢')
+          ),
+          React.createElement(
+            'div',
+            { className: 'scale' },
+            React.createElement(
+              'div',
+              { className: 'scale__track' },
+              React.createElement('div', {
+                className: 'scale__fill',
+                style: { width: (D.slowest.minutes / D.slowest.scaleMax) * 100 + '%' }
+              })
+            ),
+            React.createElement(
+              'div',
+              { className: 'scale__labels' },
+              React.createElement('span', null, '0'),
+              React.createElement('span', null, '5'),
+              React.createElement('span', null, '10'),
+              React.createElement('span', null, '15 分')
+            )
+          ),
+          React.createElement(
+            'div',
+            { className: 'slow__note' },
+            React.createElement(Icon, { name: 'alert', size: 15 }),
+            '全店最慢，先看这一档'
+          )
+        )
+      )
+    );
+  }
+
+  /* =========================================================
+     2 · 销售报表（手机 390，老板 周志远）
+     ========================================================= */
+
+  function SalesPeriodChips() {
+    var periods = ['今天', '昨天', '近 7 天', '本月'];
+    return React.createElement(
+      'div',
+      { className: 'chips', role: 'group', 'aria-label': '统计期间' },
+      periods.map(function (p) {
+        var on = p === '近 7 天';
+        return React.createElement(
+          'span',
+          {
+            key: p,
+            className: 'chip' + (on ? ' is-on' : ' chip--locked'),
+            'aria-disabled': on ? undefined : 'true'
+          },
+          p
+        );
+      })
+    );
+  }
+
+  function SalesPage(props) {
+    var D = window.DATA;
+    var S = D.sales;
+    return React.createElement(
+      PhoneShell,
+      {
+        title: '销售报表',
+        date: '10.25 周六',
+        role: props.role,
+        roleKey: props.roleKey,
+        activeTab: 'business',
+        onNav: props.go
+      },
+      React.createElement(
+        'div',
+        { className: 'sales-head' },
+        React.createElement(
+          'div',
+          { className: 'sales-spine' },
+          React.createElement('span', null, '销售报表')
+        ),
+        React.createElement(
+          'div',
+          { className: 'sales-head__main' },
+          React.createElement('div', { className: 'sales-eyebrow' }, '云味小馆 中山路店'),
+          React.createElement('h1', { className: 'sales-h1' }, '近 7 天'),
+          React.createElement(
+            'div',
+            { className: 'sales-sub' },
+            React.createElement('span', null, '统计周期 7 天'),
+            React.createElement('span', { className: 'readonly' }, '只读')
+          )
+        )
+      ),
+
+      React.createElement(SalesPeriodChips),
+
+      React.createElement(
+        'div',
+        { className: 'm-stack', style: { marginTop: 6 } },
+
+        React.createElement(
+          Sign,
+          { tone: 'red', tag: '生意', className: 'sales-hero', ariaLabel: '销售金额 186,420' },
+          React.createElement('div', { className: 'sales-hero__label' }, '销售金额'),
+          React.createElement(
+            'div',
+            { className: 'sales-hero__money' },
+            React.createElement('span', { className: 'sales-hero__cur' }, '¥'),
+            React.createElement('span', { className: 'sales-hero__val num' }, fmt(S.amount))
+          ),
+          React.createElement(
+            'div',
+            { className: 'sales-hero__foot' },
+            React.createElement('span', null, '近 7 天合计'),
+            React.createElement('span', null, '7 个营业日')
+          )
+        ),
+
+        React.createElement(
+          'div',
+          { className: 'm-row', style: { marginTop: -8 } },
+          React.createElement(
+            Sign,
+            { tone: 'paper', className: 'sales-mini', ariaLabel: '订单 6,028' },
+            React.createElement('div', { className: 'sales-mini__label' }, '订单'),
+            React.createElement('div', { className: 'sales-mini__n num' }, fmt(S.orders)),
+            React.createElement(
+              'div',
+              { className: 'sales-mini__sub' },
+              React.createElement('span', null, '退菜 ' + S.returns + ' 行')
+            )
+          ),
+          React.createElement(
+            Sign,
+            { tone: 'paper', className: 'sales-mini', ariaLabel: '客单价 30.9' },
+            React.createElement('div', { className: 'sales-mini__label' }, '客单'),
+            React.createElement('div', { className: 'sales-mini__n num' }, '¥' + one(S.avgTicket)),
+            React.createElement(
+              'div',
+              { className: 'sales-mini__sub' },
+              React.createElement('span', null, '菜品 ' + S.dishes + ' 道')
+            )
+          )
+        ),
+
+        React.createElement(
+          Sign,
+          {
+            tone: 'ink',
+            tag: '生意',
+            tagTone: 'yellow',
+            className: 'chart-sign',
+            ariaLabel: '近 7 天营业额折线'
+          },
+          React.createElement(
+            'div',
+            { className: 'chart-head' },
+            React.createElement('div', { className: 'chart-title' }, '近 7 天营业额'),
+            React.createElement('div', { className: 'chart-range' }, '周一 至 周日')
+          ),
+          React.createElement(
+            'div',
+            { className: 'chart-wrap' },
+            React.createElement(SalesLine, { days: S.days })
+          )
+        ),
+
+        React.createElement(
+          Sign,
+          {
+            tone: 'ink',
+            tag: '生意',
+            tagTone: 'blue',
+            className: 'station-sign',
+            ariaLabel: '档口收入占比'
+          },
+          React.createElement(
+            'div',
+            { className: 'chart-head' },
+            React.createElement('div', { className: 'chart-title' }, '档口收入占比'),
+            React.createElement('div', { className: 'chart-range' }, '7 天')
+          ),
+          React.createElement(StationBars, { items: D.stations })
+        )
+      ),
+
+      React.createElement(
+        'div',
+        { className: 'dish-head' },
+        React.createElement('div', { className: 'dish-head__title' }, '菜品榜 前 5'),
+        React.createElement('div', { className: 'dish-head__sub' }, '按销量')
+      ),
+
+      React.createElement(
+        'div',
+        { className: 'dish-list' },
+        D.dishes.map(function (d) {
+          return React.createElement(
+            'div',
+            { className: 'dish-row', key: d.rank },
+            React.createElement('div', { className: 'dish-rank num' }, d.rank),
+            React.createElement('div', { className: 'dish-name' }, d.name),
+            React.createElement('div', { className: 'dish-station' }, d.station),
+            React.createElement('div', { className: 'dish-count num' }, fmt(d.count)),
+            React.createElement('div', { className: 'dish-pct num' }, pct(d.pct))
+          );
+        })
+      ),
+
+      React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'export',
+          onClick: function () {},
+          'aria-label': '导出 CSV'
+        },
+        React.createElement(Icon, { name: 'download', size: 18 }),
+        '导出 CSV'
+      )
+    );
+  }
+
+  /* =========================================================
+     3 · 日常验收（手机 390，厨师长 王国强）
+     ========================================================= */
+
+  function DailyPage(props) {
+    var D = window.DATA;
+    var H = D.hygiene;
+    var openState = useState(false);
+    var open = openState[0];
+    var setOpen = openState[1];
+    var reasonState = useState('');
+    var reason = reasonState[0];
+    var setReason = reasonState[1];
+    var errState = useState('');
+    var err = errState[0];
+    var setErr = errState[1];
+    var verdictState = useState('idle');
+    var verdict = verdictState[0];
+    var setVerdict = verdictState[1];
+
+    function closeModal() {
+      setOpen(false);
+      setErr('');
+    }
+
+    function submitReject() {
+      if (!reason.trim()) {
+        setErr('请写清楚哪里不合格，员工会看到这段文字');
+        return;
+      }
+      setOpen(false);
+      setVerdict('rejected');
+    }
+
+    useEffect(
+      function () {
+        if (!open) return undefined;
+        var el = document.getElementById('reject-reason');
+        if (el) el.focus();
+        function onKey(e) {
+          if (e.key === 'Escape') closeModal();
+        }
+        window.addEventListener('keydown', onKey);
+        return function () {
+          window.removeEventListener('keydown', onKey);
+        };
+      },
+      [open]
+    );
+
+    var overlay = open
+      ? React.createElement(
+          'div',
+          {
+            className: 'scrim',
+            onMouseDown: function (e) {
+              if (e.target === e.currentTarget) closeModal();
+            }
+          },
+          React.createElement(
+            'div',
+            {
+              className: 'sheet',
+              role: 'dialog',
+              'aria-modal': 'true',
+              'aria-label': '驳回理由'
+            },
+            React.createElement(
+              'div',
+              { className: 'sheet-head' },
+              React.createElement(
+                'div',
+                null,
+                React.createElement('div', { className: 'sheet-title' }, '驳回这一项'),
+                React.createElement('div', { className: 'sheet-sub' }, H.item.name + ' ' + H.item.detail + '　' + H.item.zone)
+              ),
+              React.createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'sheet-close',
+                  'aria-label': '关闭',
+                  onClick: closeModal
+                },
+                React.createElement(Icon, { name: 'close', size: 20 })
+              )
+            ),
+            React.createElement(
+              'label',
+              { className: 'sheet-label', htmlFor: 'reject-reason' },
+              '哪里不合格（必填，员工能看到）'
+            ),
+            React.createElement('textarea', {
+              id: 'reject-reason',
+              className: 'reason',
+              value: reason,
+              onChange: function (e) {
+                setReason(e.target.value);
+                if (err) setErr('');
+              }
+            }),
+            err
+              ? React.createElement('div', { className: 'sheet-err' }, err)
+              : React.createElement('div', { className: 'sheet-hint' }, '员工会在手机端看到这段文字'),
+            React.createElement(
+              'div',
+              { className: 'sheet-actions' },
+              React.createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'big-btn',
+                  style: { background: 'var(--ink)' },
+                  onClick: closeModal
+                },
+                '取消'
+              ),
+              React.createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'big-btn big-btn--reject',
+                  onClick: submitReject
+                },
+                '提交驳回'
+              )
+            )
+          )
+        )
+      : null;
+
+    var actions =
+      verdict === 'idle'
+        ? React.createElement(
+            'div',
+            { className: 'actions' },
+            React.createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'big-btn big-btn--pass',
+                onClick: function () { setVerdict('passed'); }
+              },
+              React.createElement(Icon, { name: 'check', size: 20 }),
+              '通过'
+            ),
+            React.createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'big-btn big-btn--reject',
+                onClick: function () { setOpen(true); }
+              },
+              React.createElement(Icon, { name: 'close', size: 20 }),
+              '驳回'
+            )
+          )
+        : React.createElement(
+            'div',
+            { className: 'verdict verdict--' + (verdict === 'passed' ? 'pass' : 'reject') },
+            React.createElement(Icon, { name: verdict === 'passed' ? 'check' : 'close', size: 18 }),
+            React.createElement(
+              'span',
+              { className: 'verdict__txt' },
+              verdict === 'passed'
+                ? '已通过，下一项 蒸笼区（3/9）'
+                : '已驳回，理由已记录，员工能看到'
+            )
+          );
+
+    return React.createElement(
+      PhoneShell,
+      {
+        title: '日常验收',
+        date: '10.25 周六',
+        role: props.role,
+        roleKey: props.roleKey,
+        activeTab: 'floor',
+        onNav: props.go,
+        overlay: overlay
+      },
+      React.createElement(
+        'div',
+        { className: 'daily-body' },
+
+        React.createElement(
+          'div',
+          { className: 'mini-row', 'aria-label': '今日卫生摘要' },
+          React.createElement(
+            'div',
+            { className: 'mini mini--yellow' },
+            React.createElement('div', { className: 'mini__n num' }, H.pending),
+            React.createElement('div', { className: 'mini__k' }, '待验收')
+          ),
+          React.createElement(
+            'div',
+            { className: 'mini mini--paper' },
+            React.createElement('div', { className: 'mini__n num' }, H.toShoot),
+            React.createElement('div', { className: 'mini__k' }, '待拍')
+          ),
+          React.createElement(
+            'div',
+            { className: 'mini mini--green' },
+            React.createElement('div', { className: 'mini__n num' }, H.passed),
+            React.createElement('div', { className: 'mini__k' }, '已通过')
+          ),
+          React.createElement(
+            'div',
+            { className: 'mini mini--red' },
+            React.createElement('div', { className: 'mini__n num' }, H.missed),
+            React.createElement('div', { className: 'mini__k' }, '漏验')
+          )
+        ),
+
+        React.createElement(
+          Sign,
+          {
+            tone: 'ink',
+            tag: '现场',
+            tagTone: 'red',
+            className: 'verify-card',
+            ariaLabel: '验收 灶台 油污与残渣'
+          },
+          React.createElement(
+            'div',
+            { className: 'verify-head' },
+            React.createElement(
+              'div',
+              null,
+              React.createElement('div', { className: 'kicker' }, '检查项'),
+              React.createElement('div', { className: 'verify-title' }, H.item.name),
+              React.createElement('div', { className: 'verify-sub' }, H.item.detail)
+            ),
+            React.createElement(
+              'div',
+              { className: 'verify-head__right' },
+              React.createElement('span', { className: 'plate plate--paper' }, H.item.zone),
+              React.createElement('span', { className: 'verify-count' }, '第 ' + H.item.index + ' / ' + H.item.total + ' 项')
+            )
+          ),
+          React.createElement(
+            'div',
+            { className: 'photo-row' },
+            React.createElement(
+              'div',
+              { className: 'photo' },
+              React.createElement('div', { className: 'photo-tag' }, '标准图'),
+              React.createElement(Stove, { dirty: false })
+            ),
+            React.createElement(
+              'div',
+              { className: 'photo' },
+              React.createElement(
+                'div',
+                { className: 'photo-tag' },
+                '实拍',
+                React.createElement('span', { className: 'photo-tag__sub' }, H.photo.by + ' ' + H.photo.shift + ' ' + H.photo.time)
+              ),
+              React.createElement(Stove, { dirty: true }),
+              React.createElement('span', { className: 'grease-tag' }, '油污残留')
+            )
+          )
+        ),
+
+        React.createElement(
+          'div',
+          { className: 'queue' },
+          React.createElement(
+            'div',
+            { className: 'queue__tag' },
+            React.createElement('span', null, '下一')
+          ),
+          React.createElement(
+            'div',
+            { className: 'queue__main' },
+            React.createElement('div', { className: 'queue__k' }, '下一项'),
+            React.createElement('div', { className: 'queue__t' }, H.item.nextName + '（' + H.item.nextIndex + '/' + H.item.total + '）')
+          ),
+          React.createElement(Icon, { name: 'chevron', size: 18 })
+        ),
+
+        actions
+      )
+    );
+  }
+
+  /* =========================================================
+     4 · 排班月历（桌面 1440，店长）
+     ========================================================= */
+
+  function CalendarPage() {
+    var D = window.DATA;
+    var C = D.calendar;
+    var S = D.shifts;
+    var viewState = useState('month');
+    var view = viewState[0];
+    var setView = viewState[1];
+    var selState = useState(C.selected);
+    var selected = selState[0];
+    var setSelected = selState[1];
+    var shiftState = useState(null);
+    var shift = shiftState[0];
+    var setShift = shiftState[1];
+    var zoneState = useState('前厅');
+    var zone = zoneState[0];
+    var setZone = zoneState[1];
+    var adjState = useState([]);
+    var adj = adjState[0];
+    var setAdj = adjState[1];
+    var msgState = useState('');
+    var msg = msgState[0];
+    var setMsg = msgState[1];
+
+    function findDay(date) {
+      for (var i = 0; i < C.days.length; i += 1) {
+        if (C.days[i].date === date) return C.days[i];
+      }
+      return null;
+    }
+
+    function countsFor(date) {
+      var d = findDay(date);
+      if (!d) return null;
+      var early = d.early;
+      var mid = d.mid;
+      var late = d.late;
+      var offAdj = 0;
+      adj.forEach(function (a) {
+        if (a.date !== date) return;
+        if (a.shift === 'early') early += 1;
+        else if (a.shift === 'mid') mid += 1;
+        else if (a.shift === 'late') late += 1;
+        else offAdj += 1;
+      });
+      var total = early + mid + late;
+      return {
+        early: early,
+        mid: mid,
+        late: late,
+        total: total,
+        off: Math.max(0, D.hr.roster - total) + offAdj
+      };
+    }
+
+    function shiftName(k) {
+      return S[k] ? S[k].label : '';
+    }
+
+    function onCell(day) {
+      if (!day) return;
+      setSelected(day.date);
+      if (!shift) {
+        setMsg('');
+        return;
+      }
+      var c = countsFor(day.date);
+      if (shift !== 'off' && c.total >= 28) {
+        setMsg('该日已满 28 人，没有加人');
+        return;
+      }
+      setAdj(adj.concat([{ date: day.date, shift: shift }]));
+      setMsg('已加 ' + shortDate(day.date) + ' ' + shiftName(shift) + ' ' + zone);
+    }
+
+    function undo() {
+      if (!adj.length) return;
+      var next = adj.slice(0, adj.length - 1);
+      setAdj(next);
+      setMsg('已撤销最近一批');
+    }
+
+    function staffFor(day, c) {
+      if (day.date === C.selected) return C.sideStaff;
+      var pool = C.staffPool;
+      var start = (day.day * 3) % pool.length;
+      var n = Math.min(10, c.total);
+      var rows = [];
+      for (var i = 0; i < n; i += 1) {
+        var key = i < c.early ? 'early' : i < c.early + c.mid ? 'mid' : 'late';
+        rows.push({
+          name: pool[(start + i) % pool.length],
+          shift: key,
+          zone: C.zones[(day.day + i) % C.zones.length]
+        });
+      }
+      return rows;
+    }
+
+    function buildMonthCells() {
+      var out = [];
+      C.ghostsBefore.forEach(function (g) {
+        out.push({ ghost: true, key: 'g' + g.date, day: g });
+      });
+      C.days.forEach(function (d) {
+        out.push({ ghost: false, key: d.date, day: d });
+      });
+      C.ghostsAfter.forEach(function (g) {
+        out.push({ ghost: true, key: 'g' + g.date, day: g });
+      });
+      return out;
+    }
+
+    function renderBars(c) {
+      var order = ['early', 'mid', 'late', 'off'];
+      return React.createElement(
+        'div',
+        { className: 'cell-bars' },
+        order.map(function (k) {
+          var n = c[k];
+          var w = Math.min(100, (n / 12) * 100);
+          return React.createElement(
+            'div',
+            { className: 'cell-track', key: k },
+            React.createElement('div', {
+              className: 'cell-bar cell-bar--' + k,
+              style: { width: w + '%' }
+            })
+          );
+        })
+      );
+    }
+
+    function renderMonthCell(item) {
+      var day = item.day;
+      if (item.ghost) {
+        return React.createElement(
+          'div',
+          { className: 'cell is-ghost', key: item.key, 'aria-hidden': 'true' },
+          React.createElement(
+            'div',
+            { className: 'cell-top' },
+            React.createElement('span', { className: 'cell-date' }, day.month + '/' + day.day)
+          )
+        );
+      }
+      var c = countsFor(day.date);
+      var isSel = day.date === selected;
+      var cls = ['cell'];
+      if (isSel) cls.push('is-sel');
+      if (c.total === 0) cls.push('is-empty');
+      return React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: cls.join(' '),
+          key: item.key,
+          onClick: function () { onCell(day); },
+          'aria-label':
+            day.month + ' 月 ' + day.day + ' 日 ' + day.weekday +
+            '，在班 ' + c.total + ' 人' + (day.pending ? '，有待批请假' : '')
+        },
+        React.createElement(
+          'div',
+          { className: 'cell-top' },
+          React.createElement('span', { className: 'cell-date' }, day.day),
+          day.pending ? React.createElement('span', { className: 'cell-pending' }, '待批') : null
+        ),
+        c.total === 0
+          ? React.createElement('div', { className: 'cell-empty-note' }, '未排')
+          : React.createElement(
+              React.Fragment,
+              null,
+              renderBars(c),
+              React.createElement(
+                'div',
+                { className: 'cell-count' },
+                React.createElement('span', { className: 'cell-count__n num' }, c.total),
+                React.createElement('span', null, '人')
+              )
+            )
+      );
+    }
+
+    function renderWeekCell(day) {
+      var c = countsFor(day.date);
+      var isSel = day.date === selected;
+      var cls = ['cell', 'is-week'];
+      if (isSel) cls.push('is-sel');
+      var staff = staffFor(day, c);
+      return React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: cls.join(' '),
+          key: day.date,
+          onClick: function () { onCell(day); },
+          'aria-label': day.month + ' 月 ' + day.day + ' 日 ' + day.weekday + '，在班 ' + c.total + ' 人'
+        },
+        React.createElement(
+          'div',
+          { className: 'cell-top' },
+          React.createElement('span', { className: 'cell-date' }, day.day),
+          day.pending ? React.createElement('span', { className: 'cell-pending' }, '待批') : null
+        ),
+        c.total === 0
+          ? React.createElement('div', { className: 'cell-empty-note' }, '未排')
+          : React.createElement(
+              React.Fragment,
+              null,
+              React.createElement(
+                'div',
+                { className: 'week-shifts' },
+                ['early', 'mid', 'late'].map(function (k) {
+                  return React.createElement(
+                    'div',
+                    { className: 'week-shift', key: k },
+                    React.createElement('span', {
+                      style: {
+                        width: 10,
+                        height: 10,
+                        background: 'var(--' + S[k].tone + ')',
+                        display: 'block'
+                      }
+                    }),
+                    React.createElement('span', { className: 'week-shift__k' }, shiftName(k)),
+                    React.createElement('span', { className: 'week-shift__n num' }, c[k] + ' 人')
+                  );
+                })
+              ),
+              React.createElement(
+                'div',
+                { className: 'week-names' },
+                staff.slice(0, 4).map(function (s, i) {
+                  return React.createElement(
+                    'div',
+                    { className: 'week-names__row', key: s.name + i },
+                    React.createElement('span', { className: 'week-names__n' }, s.name),
+                    React.createElement('span', null, S[s.shift].short)
+                  );
+                })
+              ),
+              React.createElement(
+                'div',
+                { className: 'cell-count', style: { marginTop: 8 } },
+                React.createElement('span', { className: 'cell-count__n num' }, c.total),
+                React.createElement('span', null, '人')
+              )
+            )
+      );
+    }
+
+    var monthCells = buildMonthCells();
+    var selDay = findDay(selected);
+    var selCounts = selDay ? countsFor(selected) : null;
+    var selStaff = selDay && selCounts ? staffFor(selDay, selCounts) : [];
+    var weekDays = C.weekDates.map(findDay).filter(Boolean);
+
+    var sideContent = null;
+    if (selDay) {
+      sideContent = React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(
+          'div',
+          { className: 'side-head' },
+          React.createElement('span', { className: 'side-date' }, shortDate(selected)),
+          React.createElement('span', { className: 'side-week' }, selDay.weekday),
+          selected === C.selected
+            ? React.createElement('span', { className: 'side-today' }, '今天')
+            : null
+        ),
+        React.createElement(
+          'div',
+          { className: 'side-sum' },
+          '在班 ' + selCounts.total + '　休 ' + selCounts.off + (selected === C.selected ? '　含请假 1' : '')
+        ),
+        React.createElement(
+          'div',
+          { className: 'side-list' },
+          selCounts.total === 0
+            ? React.createElement('div', { className: 'side-pending__d', style: { padding: '10px 0' } }, '这一天还没排班')
+            : selStaff.map(function (s, i) {
+                return React.createElement(
+                  'div',
+                  { className: 'side-row', key: s.name + i },
+                  React.createElement(
+                    'div',
+                    { style: { minWidth: 0 } },
+                    React.createElement('div', { className: 'side-name' }, s.name),
+                    React.createElement(
+                      'div',
+                      { className: 'side-detail' },
+                      C.shiftTime[s.shift] + '　' + s.zone
+                    )
+                  ),
+                  React.createElement(
+                    'span',
+                    { className: 'side-shift side-shift--' + s.shift },
+                    S[s.shift].short
+                  )
+                );
+              })
+        ),
+        selCounts.total > selStaff.length
+          ? React.createElement(
+              'div',
+              { className: 'side-more' },
+              '另有 ' + (selCounts.total - selStaff.length) + ' 人在班'
+            )
+          : null,
+        React.createElement(
+          'div',
+          { className: 'side-section' },
+          React.createElement('div', { className: 'side-section__t' }, '待批请假'),
+          React.createElement('span', { className: 'plate plate--red' }, '2 条')
+        ),
+        C.pendingLeaves.map(function (p) {
+          return React.createElement(
+            'div',
+            { className: 'side-pending', key: p.name + p.date },
+            React.createElement(
+              'div',
+              { className: 'side-pending__main' },
+              React.createElement('div', { className: 'side-pending__n' }, p.name + ' ' + p.type),
+              React.createElement(
+                'div',
+                { className: 'side-pending__d' },
+                p.date + '　' + p.days + ' 天'
+              )
+            ),
+            React.createElement('span', { className: 'side-pending__tag' }, '待批')
+          );
+        }),
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'side-rule',
+            onClick: function () { setMsg('固定班规则页不在本原型'); }
+          },
+          React.createElement('span', null, '固定班规则'),
+          React.createElement(Icon, { name: 'chevron', size: 16 })
+        )
+      );
+    }
+
+    return React.createElement(
+      'div',
+      { className: 'cal-page' },
+
+      React.createElement(
+        'div',
+        { className: 'cal-head' },
+        React.createElement(
+          'div',
+          { className: 'cal-title-wrap' },
+          React.createElement('div', { className: 'cal-kicker' }, '排班'),
+          React.createElement('h1', { className: 'cal-h1' }, C.monthLabel)
+        ),
+        React.createElement(
+          'div',
+          { className: 'cal-tools' },
+          React.createElement('span', { className: 'meta', style: { fontSize: 13 } }, '花名册 28 人'),
+          React.createElement(
+            'div',
+            { className: 'seg', role: 'group', 'aria-label': '视图切换' },
+            React.createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'seg-btn' + (view === 'month' ? ' is-on' : ''),
+                onClick: function () { setView('month'); },
+                'aria-pressed': view === 'month'
+              },
+              '月'
+            ),
+            React.createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'seg-btn' + (view === 'week' ? ' is-on' : ''),
+                onClick: function () { setView('week'); },
+                'aria-pressed': view === 'week'
+              },
+              '周'
+            )
+          )
+        )
+      ),
+
+      React.createElement(
+        'div',
+        { className: 'cal-body' },
+        React.createElement(
+          'section',
+          { className: 'cal-panel', 'aria-label': '排班月历' },
+          React.createElement(
+            'div',
+            { className: 'legend' },
+            React.createElement(
+              'div',
+              { className: 'legend-item' },
+              React.createElement('span', { className: 'legend-swatch legend-swatch--early' }),
+              '早班'
+            ),
+            React.createElement(
+              'div',
+              { className: 'legend-item' },
+              React.createElement('span', { className: 'legend-swatch legend-swatch--mid' }),
+              '中班'
+            ),
+            React.createElement(
+              'div',
+              { className: 'legend-item' },
+              React.createElement('span', { className: 'legend-swatch legend-swatch--late' }),
+              '晚班'
+            ),
+            React.createElement(
+              'div',
+              { className: 'legend-item' },
+              React.createElement('span', { className: 'legend-swatch legend-swatch--off' }),
+              '休 含假'
+            ),
+            React.createElement(
+              'div',
+              { className: 'legend-item' },
+              React.createElement('span', { className: 'legend-swatch legend-swatch--pending' }),
+              '待批'
+            ),
+            React.createElement(
+              'div',
+              { className: 'legend-item' },
+              React.createElement('span', { className: 'legend-swatch legend-swatch--empty' }),
+              '未排'
+            )
+          ),
+          React.createElement(
+            'div',
+            { className: 'cal-weekdays' },
+            C.weekdays.map(function (w) {
+              return React.createElement('div', { className: 'cal-weekday', key: w }, w);
+            })
+          ),
+          React.createElement(
+            'div',
+            { className: 'cal-grid' + (view === 'week' ? ' is-week' : '') },
+            view === 'week'
+              ? weekDays.map(renderWeekCell)
+              : monthCells.map(renderMonthCell)
+          )
+        ),
+
+        React.createElement(
+          'aside',
+          { className: 'cal-side', 'aria-label': '当天名单' },
+          sideContent
+        )
+      ),
+
+      React.createElement(
+        'div',
+        { className: 'cal-pen', 'aria-label': '排班笔栏' },
+        React.createElement(
+          'div',
+          { className: 'pen-tag' },
+          React.createElement('span', null, '排班')
+        ),
+        React.createElement(
+          'div',
+          { className: 'pen-group' },
+          React.createElement('span', { className: 'pen-label' }, '班次'),
+          ['early', 'mid', 'late', 'off'].map(function (k) {
+            return React.createElement(
+              'button',
+              {
+                type: 'button',
+                key: k,
+                className: 'pen-shift pen-shift--' + k + (shift === k ? ' is-on' : ''),
+                onClick: function () { setShift(shift === k ? null : k); },
+                'aria-pressed': shift === k
+              },
+              S[k].short
+            );
+          })
+        ),
+        React.createElement(
+          'div',
+          { className: 'pen-group' },
+          React.createElement('span', { className: 'pen-label' }, '工作区'),
+          ['前厅', '后厨', '保洁', '收银'].map(function (z) {
+            return React.createElement(
+              'button',
+              {
+                type: 'button',
+                key: z,
+                className: 'pen-zone' + (zone === z ? ' is-on' : ''),
+                onClick: function () { setZone(z); },
+                'aria-pressed': zone === z
+              },
+              z
+            );
+          })
+        ),
+        React.createElement(
+          'div',
+          { className: 'pen-hint' },
+          shift ? '点日期格子加一位' : '选班次，点日期加人'
+        ),
+        msg ? React.createElement('div', { className: 'pen-msg' }, msg) : null,
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'pen-undo',
+            onClick: undo,
+            disabled: adj.length === 0,
+            'aria-label': '撤销最近一批'
+          },
+          React.createElement(Icon, { name: 'undo', size: 16 }),
+          '撤销最近一批'
+        )
+      )
+    );
+  }
+
+  Object.assign(window, {
+    TodayPage: TodayPage,
+    SalesPage: SalesPage,
+    DailyPage: DailyPage,
+    CalendarPage: CalendarPage
+  });
+})();
+
+</script>
+  <script type="text/babel">
+/* 厨务管家 · 方向三 · 招牌墙
+   读 ?p=&role= 选页与身份；桌面页铺满视口，手机页居中在 390×844 框内。 */
+
+(function () {
+  var React = window.React;
+  var ReactDOM = window.ReactDOM;
+  var DATA = window.DATA;
+  var Rail = window.Rail;
+  var StatusBar = window.StatusBar;
+  var TodayPage = window.TodayPage;
+  var SalesPage = window.SalesPage;
+  var DailyPage = window.DailyPage;
+  var CalendarPage = window.CalendarPage;
+  var PAGE_DOMAIN = window.PAGE_DOMAIN;
+
+  var PAGES = ['today', 'sales', 'daily', 'calendar'];
+  var ROLE_KEYS = ['manager', 'boss', 'chef', 'staff'];
+
+  function readParams() {
+    var p = 'today';
+    var role = 'manager';
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var qp = params.get('p');
+      var qr = params.get('role');
+      if (qp && PAGES.indexOf(qp) !== -1) p = qp;
+      if (qr && ROLE_KEYS.indexOf(qr) !== -1) role = qr;
+    } catch (e) {
+      /* 原型不需要兼容老浏览器 */
+    }
+    return { p: p, role: role };
+  }
+
+  function App() {
+    var q = readParams();
+    var roleKey = q.role;
+    var role = DATA.roles[roleKey];
+    var page = q.p;
+    var current = PAGE_DOMAIN[page] || 'today';
+
+    function go(next) {
+      window.location.href = '?p=' + next + '&role=' + roleKey;
+    }
+
+    if (page === 'sales') {
+      return React.createElement(SalesPage, { role: role, roleKey: roleKey, go: go });
+    }
+    if (page === 'daily') {
+      return React.createElement(DailyPage, { role: role, roleKey: roleKey, go: go });
+    }
+
+    var body =
+      page === 'calendar'
+        ? React.createElement(CalendarPage, null)
+        : React.createElement(TodayPage, { go: go });
+
+    return React.createElement(
+      'div',
+      { className: 'desk' },
+      React.createElement(Rail, { roleKey: roleKey, current: current, onNav: go }),
+      React.createElement(
+        'div',
+        { className: 'desk-main' },
+        React.createElement(StatusBar, { role: role }),
+        React.createElement('main', { className: 'desk-page' }, body)
+      )
+    );
+  }
+
+  var root = document.getElementById('root');
+  ReactDOM.createRoot(root).render(React.createElement(App));
+})();
+
+</script>
+</body>
+</html>

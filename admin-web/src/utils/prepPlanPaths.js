@@ -11,3 +11,6 @@
 
 /** 后勤组里备货计划那一页。`both`：管理端与员工都进得去（员工那一档是只读的）。 */
 export const PREP_PLAN_PATH = '/workbench/kitchen/prep-plan'
+
+/** 备货复盘（ADR 0123）：每小时参考值快照 vs 实际销量。 */
+export const PREP_REVIEW_PATH = '/workbench/kitchen/prep-review'

@@ -53,12 +53,18 @@ BACKUP_VERSION = 3
 EXPORT_DIRNAME = "backup_exports"
 SNAPSHOT_DIRNAME = "restore_snapshots"
 
-# —— 卫生照片归档内目录 ——
+# —— 照片归档内目录 ——
+# 卫生那批照片在 `hygiene-captures/`，损耗登记的现场照片在 `wastage-captures/`
+# （api/wastage.py 用的是另一个 FileCaptureStore，目录刻意分开）。两个目录的
+# capture_id 各自生成，恢复时必须各回各的家，所以「损耗照片」是独立类别，
+# 不并进「其它照片」—— 合并会让恢复把损耗照片写进卫生目录。
 PHOTO_STANDARD = "standard"
 PHOTO_OTHER = "other"
+PHOTO_WASTAGE = "wastage"
 PHOTO_MEMBER_DIRS = {
     PHOTO_STANDARD: "photos/standard",
     PHOTO_OTHER: "photos/other",
+    PHOTO_WASTAGE: "photos/wastage",
 }
 
 # —— 快照来由 ——
@@ -83,6 +89,10 @@ CONTENT_APP_PG = "app_pg"
 CONTENT_RECIPES = "recipes_db"
 CONTENT_STANDARD_PHOTOS = "standard_photos"
 CONTENT_OTHER_PHOTOS = "other_photos"
+CONTENT_WASTAGE_PHOTOS = "wastage_photos"
+# 采集器的运行期状态（差分基线 / 外卖去重清单）。不是业务数据，但恢复时若只回滚
+# 库、不回滚它，采集器会以为今天的单都已采过 —— 恢复后到当前的订单会漏采。
+CONTENT_SCRAPER_STATE = "scraper_state"
 CONTENT_LABELS = {
     CONTENT_CREDENTIALS: "凭据",
     CONTENT_RUNTIME: "运行配置",
@@ -91,6 +101,8 @@ CONTENT_LABELS = {
     CONTENT_RECIPES: "配方数据",
     CONTENT_STANDARD_PHOTOS: "标准图",
     CONTENT_OTHER_PHOTOS: "其它照片",
+    CONTENT_WASTAGE_PHOTOS: "损耗照片",
+    CONTENT_SCRAPER_STATE: "采集状态",
 }
 
 # 内容类别的等价覆盖关系：PG 后端的整库 pg_dump 同时含业务数据与配方数据
@@ -131,8 +143,82 @@ def get_hygiene_capture_root() -> Path:
     return Path(settings.DATABASE_DIR) / "hygiene-captures"
 
 
+def get_wastage_capture_root() -> Path:
+    """损耗登记照片目录（``api/wastage.py`` 的 FileCaptureStore 根）。
+
+    与卫生照片分开放，是**两个** FileCaptureStore；备份/恢复必须各回各的家，
+    不能借用同一个目录（借用会把损耗照片恢复成卫生目录里的孤儿文件）。
+    """
+    return Path(settings.DATABASE_DIR) / "wastage-captures"
+
+
+def photo_capture_root(kind: str) -> Path:
+    """某类照片在运行实例上的目录（导出收集与恢复共用）。"""
+    if kind == PHOTO_WASTAGE:
+        return get_wastage_capture_root()
+    return get_hygiene_capture_root()
+
+
 def get_credentials_file_path() -> str:
     return os.path.join(settings.DATABASE_DIR, "credentials.enc")
+
+
+def get_github_release_credential_path() -> Path:
+    """更新用的 GitHub Release 凭据（加密文件，与 POS 凭据同一把密钥）。"""
+    return Path(settings.DATABASE_DIR) / "github_release.enc"
+
+
+# 采集器的运行期状态文件（`scraper/state_store.py` 读写；文件名固定）。
+# 它们与库里的订单是**同一份事实的两种形态**：库回滚了状态没回滚，采集器会以为
+# 今天的单都采过了，恢复后到当前的订单从此漏采。所以备份要带上、恢复要一起回写。
+RUN_STATE_FILES = {
+    "table_state": "table_state.json",
+    "delivery_bills": "delivery_bills.json",
+}
+
+
+def run_state_path(name: str, base: Optional[Path] = None) -> Path:
+    return (Path(base) if base is not None else Path(settings.DATABASE_DIR)) / RUN_STATE_FILES[name]
+
+
+def collect_run_state(base: Optional[Path] = None) -> Dict[str, Any]:
+    """读出采集状态（文件不存在按 ``None`` 记，不报错）。"""
+    payload: Dict[str, Any] = {}
+    for name in RUN_STATE_FILES:
+        path = run_state_path(name, base)
+        try:
+            if not path.is_file():
+                payload[name] = None
+                continue
+            payload[name] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning("读取采集状态失败（%s）：%s", path, exc)
+            payload[name] = None
+    return payload
+
+
+def restore_run_state(
+    payload: Optional[Dict[str, Any]],
+    base: Optional[Path] = None,
+) -> Dict[str, bool]:
+    """把采集状态写回运行实例（原子写，与 state_store 的写法一致）。"""
+    restored: Dict[str, bool] = {}
+    for name in RUN_STATE_FILES:
+        data = (payload or {}).get(name)
+        if data is None:
+            continue
+        path = run_state_path(name, base)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(str(path) + ".tmp")
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8"
+            )
+            os.replace(tmp, path)
+            restored[name] = True
+        except (OSError, TypeError) as exc:
+            logger.warning("恢复采集状态失败（%s）：%s", path, exc)
+    return restored
 
 
 def get_cold_backup_dir() -> Path:
@@ -162,11 +248,15 @@ def _read_tar_member(tar: tarfile.TarFile, name: str) -> bytes:
 # ==================== 卫生照片分类 ====================
 
 # 标准图：日常检查项的合格参照，含全部历史版本（hygiene_standards 每一行一个版本）
+# 仪容仪表的合格参照（`hygiene_attire_standard`，迁移 0011）同样落在
+# `hygiene-captures/` 目录里，只是当初漏登记 —— 不补的话这类照片不进备份包，
+# 恢复后「库里有引用、磁盘上没有」也查不出来（分类漏 = 一致性检查看不见它）。
 _STANDARD_PHOTO_QUERIES: Tuple[str, ...] = (
     "SELECT capture_id FROM hygiene_standards",
+    "SELECT capture_id FROM hygiene_attire_standard",
 )
 
-# 其它照片：日常实拍、专项（深度清洁）、整改与回拍、教材
+# 其它照片：日常实拍、专项（深度清洁）、整改与回拍、教材、仪容仪表实拍
 _OTHER_PHOTO_QUERIES: Tuple[str, ...] = (
     "SELECT capture_id FROM hygiene_daily_submissions",
     "SELECT before_capture_id AS capture_id FROM hygiene_deep_clean_submissions",
@@ -175,6 +265,13 @@ _OTHER_PHOTO_QUERIES: Tuple[str, ...] = (
     "SELECT capture_id FROM hygiene_fix_reshoots",
     "SELECT left_capture_id AS capture_id FROM hygiene_teaching_examples",
     "SELECT right_capture_id AS capture_id FROM hygiene_teaching_examples",
+    "SELECT capture_id FROM hygiene_attire_shots",
+)
+
+# 损耗照片：日常损耗登记时拍的现场照（迁移 0029）。**独立目录**，见
+# ``get_wastage_capture_root``；不并进「其它照片」是因为恢复要写回不同目录。
+_WASTAGE_PHOTO_QUERIES: Tuple[str, ...] = (
+    "SELECT capture_id FROM wastage_images",
 )
 
 # 派生图（缩略图/预览图）由源照片派生，随源照片一起归类
@@ -231,7 +328,11 @@ async def classify_hygiene_capture_ids(
     一致性检查只关心原始照片（派生图缺失时接口会回退到原图）。
     """
     conn = _business_conn(db)
-    result: Dict[str, List[str]] = {PHOTO_STANDARD: [], PHOTO_OTHER: []}
+    result: Dict[str, List[str]] = {
+        PHOTO_STANDARD: [],
+        PHOTO_OTHER: [],
+        PHOTO_WASTAGE: [],
+    }
 
     standard: set = set()
     for sql in _STANDARD_PHOTO_QUERIES:
@@ -240,8 +341,16 @@ async def classify_hygiene_capture_ids(
     other: set = set()
     for sql in _OTHER_PHOTO_QUERIES:
         other.update(await _query_capture_ids(conn, sql))
-    # 一张照片同时被两类引用时，标准图优先（标准图更严格）
+
+    wastage: set = set()
+    for sql in _WASTAGE_PHOTO_QUERIES:
+        wastage.update(await _query_capture_ids(conn, sql))
+
+    # 一张照片同时被两类引用时，标准图优先（标准图更严格）；损耗照片与卫生
+    # 照片分属两个目录，正常情况下不会重叠，这里只是保证分类结果互斥。
     other -= standard
+    wastage -= standard
+    wastage -= other
 
     # 派生图跟随源照片归类
     if include_variants:
@@ -252,9 +361,12 @@ async def classify_hygiene_capture_ids(
                 standard.add(variant_id)
             elif source_id in other:
                 other.add(variant_id)
+            elif source_id in wastage:
+                wastage.add(variant_id)
 
     result[PHOTO_STANDARD] = sorted(standard)
     result[PHOTO_OTHER] = sorted(other)
+    result[PHOTO_WASTAGE] = sorted(wastage)
     return result
 
 
@@ -280,16 +392,31 @@ def collect_photo_blobs(
 async def missing_hygiene_capture_ids(
     db,
     capture_root: Optional[Path] = None,
+    wastage_capture_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """核对「库里引用的照片」是否真的在磁盘上（只做存在性检查，不读字节）。
 
     恢复/回滚之后调用：库可以被单独换掉，照片文件却不会跟着来，于是库指向
     不存在的图片，前端清单里这些标准图静默缺失。这里把缺口显式报出来。
+
+    三类照片各查自己的目录：卫生两类在 ``hygiene-captures/``、损耗在
+    ``wastage-captures/``。分类漏一类，这里就查不出来（那正是仪容仪表当初的缺口）。
     """
-    root = Path(capture_root) if capture_root is not None else get_hygiene_capture_root()
+    roots = {
+        PHOTO_STANDARD: Path(capture_root)
+        if capture_root is not None
+        else get_hygiene_capture_root(),
+        PHOTO_OTHER: Path(capture_root)
+        if capture_root is not None
+        else get_hygiene_capture_root(),
+        PHOTO_WASTAGE: Path(wastage_capture_root)
+        if wastage_capture_root is not None
+        else get_wastage_capture_root(),
+    }
     classified = await classify_hygiene_capture_ids(db, include_variants=False)
     missing: Dict[str, List[str]] = {}
-    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER, PHOTO_WASTAGE):
+        root = roots[kind]
         gone = []
         for capture_id in classified[kind]:
             try:
@@ -304,6 +431,7 @@ async def missing_hygiene_capture_ids(
         "missing": missing,
         "standard_missing": len(missing.get(PHOTO_STANDARD, [])),
         "other_missing": len(missing.get(PHOTO_OTHER, [])),
+        "wastage_missing": len(missing.get(PHOTO_WASTAGE, [])),
         "checked_at": datetime.now(CHINA_TZ).isoformat(),
     }
 
@@ -311,23 +439,40 @@ async def missing_hygiene_capture_ids(
 async def collect_hygiene_photo_paths(
     db,
     capture_root: Optional[Path] = None,
+    wastage_capture_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """收集两类卫生照片的**路径**（不读字节）。
+    """收集三类照片的**路径**（不读字节）。
 
     照片动辄几十上百 MB，导出时没必要先全读进内存再写进 tar：tarfile 可以直接从
     文件流式读（``addfile`` 分块），校验和边读边算。返回
     ``members = [(归档内路径, 磁盘路径)]``，顺序稳定（类别内按 capture_id 排序），
-    与 ``manifest`` 的口径一致。
+    与 ``manifest`` 的口径一致。卫生两类共用 ``capture_root``，损耗照片走
+    ``wastage_capture_root``（两个目录）。
     """
-    root = Path(capture_root) if capture_root is not None else get_hygiene_capture_root()
+    roots = {
+        PHOTO_STANDARD: Path(capture_root)
+        if capture_root is not None
+        else get_hygiene_capture_root(),
+        PHOTO_OTHER: Path(capture_root)
+        if capture_root is not None
+        else get_hygiene_capture_root(),
+        PHOTO_WASTAGE: Path(wastage_capture_root)
+        if wastage_capture_root is not None
+        else get_wastage_capture_root(),
+    }
     classified = await classify_hygiene_capture_ids(db)
 
     members: List[Tuple[str, Path]] = []
     manifest: Dict[str, Any] = {}
-    missing: Dict[str, List[str]] = {PHOTO_STANDARD: [], PHOTO_OTHER: []}
+    missing: Dict[str, List[str]] = {
+        PHOTO_STANDARD: [],
+        PHOTO_OTHER: [],
+        PHOTO_WASTAGE: [],
+    }
 
-    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER, PHOTO_WASTAGE):
         member_dir = PHOTO_MEMBER_DIRS[kind]
+        root = roots[kind]
         # 先探一遍可用性：摘要一旦开始喂数据就没法回退，读不了的照片必须在这一步
         # 就排除掉，否则 manifest.sha256 会与归档内容对不上。
         available: List[Tuple[str, Path, int]] = []
@@ -365,6 +510,17 @@ async def collect_hygiene_photo_paths(
         }
 
     return {"members": members, "manifest": manifest, "missing": missing}
+
+
+def photo_included_kinds(manifest: Optional[dict]) -> List[str]:
+    """清单里实际包含照片的类别（count > 0）。"""
+    if not manifest:
+        return []
+    return [
+        kind
+        for kind in (PHOTO_STANDARD, PHOTO_OTHER, PHOTO_WASTAGE)
+        if int((manifest.get(kind) or {}).get("count") or 0) > 0
+    ]
 
 
 def photo_included_kinds(manifest: Optional[dict]) -> List[str]:
@@ -547,6 +703,8 @@ def build_export_backup_to_file(
     app_pg_source: Optional[MemberSource] = None,
     include_standard_photos: bool = False,
     include_other_photos: bool = False,
+    include_wastage_photos: bool = False,
+    include_scraper_state: bool = False,
     photo_members: Optional[Sequence[Tuple[str, MemberSource]]] = None,
     photo_manifest: Optional[dict] = None,
     photo_missing: Optional[dict] = None,
@@ -595,20 +753,21 @@ def build_export_backup_to_file(
         bundle.to_storage(), ensure_ascii=False
     ).encode("utf-8")
 
-    if include_standard_photos and include_other_photos:
-        want_photo_kinds = {PHOTO_STANDARD, PHOTO_OTHER}
-    elif include_standard_photos:
-        want_photo_kinds = {PHOTO_STANDARD}
-    elif include_other_photos:
-        want_photo_kinds = {PHOTO_OTHER}
-    else:
-        want_photo_kinds = set()
+    want_photo_kinds: set = set()
+    if include_standard_photos:
+        want_photo_kinds.add(PHOTO_STANDARD)
+    if include_other_photos:
+        want_photo_kinds.add(PHOTO_OTHER)
+    if include_wastage_photos:
+        want_photo_kinds.add(PHOTO_WASTAGE)
 
     includes = {
         "runtime": False,
         "app_pg": False,
         CONTENT_STANDARD_PHOTOS: False,
         CONTENT_OTHER_PHOTOS: False,
+        CONTENT_WASTAGE_PHOTOS: False,
+        CONTENT_SCRAPER_STATE: False,
     }
 
     _report("collecting")
@@ -627,6 +786,18 @@ def build_export_backup_to_file(
         # 配方表（sop_*）就在同一个库里：整库 dump 确实含配方，清单如实标出来，
         # 页面才不会一边打包了配方、一边显示「含配方：否」。
         includes["recipes_db"] = True
+    if include_scraper_state:
+        run_state = collect_run_state()
+        if any(value is not None for value in run_state.values()):
+            members.append(
+                ("run_state.json", json.dumps(run_state, ensure_ascii=False).encode("utf-8"))
+            )
+            includes[CONTENT_SCRAPER_STATE] = True
+    # 更新用的 GitHub 凭据与 POS 凭据同属「凭据」：丢了要重新申请 PAT 才能检查更新，
+    # 所以跟 credentials.enc 一起打包（它本身是加密文件，原样带走）。
+    github_cred = get_github_release_credential_path()
+    if github_cred.is_file():
+        members.append(("github_release.enc", github_cred))
 
     prefix_ok = {kind: PHOTO_MEMBER_DIRS[kind] + "/" for kind in want_photo_kinds}
     photo_list: List[Tuple[str, MemberSource]] = [
@@ -637,7 +808,12 @@ def build_export_backup_to_file(
 
     photos_meta: Dict[str, Any] = {}
     member_manifest = photo_manifest or {}
-    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+    content_by_kind = {
+        PHOTO_STANDARD: CONTENT_STANDARD_PHOTOS,
+        PHOTO_OTHER: CONTENT_OTHER_PHOTOS,
+        PHOTO_WASTAGE: CONTENT_WASTAGE_PHOTOS,
+    }
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER, PHOTO_WASTAGE):
         entry = dict(member_manifest.get(kind) or {})
         entry.setdefault("count", 0)
         entry.setdefault("bytes", 0)
@@ -645,9 +821,7 @@ def build_export_backup_to_file(
         entry.setdefault("missing", 0)
         entry["included"] = kind in want_photo_kinds
         if kind in want_photo_kinds:
-            includes[
-                CONTENT_STANDARD_PHOTOS if kind == PHOTO_STANDARD else CONTENT_OTHER_PHOTOS
-            ] = True
+            includes[content_by_kind[kind]] = True
         photos_meta[kind] = entry
 
     fd, tar_path = tempfile.mkstemp(suffix=".tar", prefix="luyun-export-")
@@ -744,6 +918,8 @@ def build_export_backup(
     app_pg_bytes: Optional[bytes] = None,
     include_standard_photos: bool = False,
     include_other_photos: bool = False,
+    include_wastage_photos: bool = False,
+    include_scraper_state: bool = False,
     photo_members: Optional[Dict[str, bytes]] = None,
     photo_manifest: Optional[dict] = None,
     photo_missing: Optional[dict] = None,
@@ -772,6 +948,8 @@ def build_export_backup(
             app_pg_source=app_pg_bytes,
             include_standard_photos=include_standard_photos,
             include_other_photos=include_other_photos,
+            include_wastage_photos=include_wastage_photos,
+            include_scraper_state=include_scraper_state,
             photo_members=[(name, data) for name, data in (photo_members or {}).items()],
             photo_manifest=photo_manifest,
             photo_missing=photo_missing,
@@ -798,6 +976,8 @@ def build_backup(
     app_pg_bytes: Optional[bytes] = None,
     include_standard_photos: bool = False,
     include_other_photos: bool = False,
+    include_wastage_photos: bool = False,
+    include_scraper_state: bool = False,
     photo_members: Optional[Dict[str, bytes]] = None,
     photo_manifest: Optional[dict] = None,
     photo_missing: Optional[dict] = None,
@@ -814,6 +994,8 @@ def build_backup(
         app_pg_bytes=app_pg_bytes,
         include_standard_photos=include_standard_photos,
         include_other_photos=include_other_photos,
+        include_wastage_photos=include_wastage_photos,
+        include_scraper_state=include_scraper_state,
         photo_members=photo_members,
         photo_manifest=photo_manifest,
         photo_missing=photo_missing,
@@ -840,21 +1022,23 @@ def archive_integrity_errors(
     photo_counts: Dict[str, int],
 ) -> List[str]:
     """归档内一致性：清单声明的照片数量必须与归档内容一致。"""
+    labels = {
+        PHOTO_STANDARD: CONTENT_LABELS[CONTENT_STANDARD_PHOTOS],
+        PHOTO_OTHER: CONTENT_LABELS[CONTENT_OTHER_PHOTOS],
+        PHOTO_WASTAGE: CONTENT_LABELS[CONTENT_WASTAGE_PHOTOS],
+    }
     errors: List[str] = []
     declared = meta.get("photos") or {}
-    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER, PHOTO_WASTAGE):
         entry = declared.get(kind) or {}
         if not entry or not entry.get("included"):
             continue
         expected = int(entry.get("count") or 0)
         actual = int(photo_counts.get(kind) or 0)
         if expected != actual:
-            label = (
-                CONTENT_LABELS[CONTENT_STANDARD_PHOTOS]
-                if kind == PHOTO_STANDARD
-                else CONTENT_LABELS[CONTENT_OTHER_PHOTOS]
+            errors.append(
+                f"{labels[kind]}数量与清单不符（清单 {expected}，归档 {actual}）"
             )
-            errors.append(f"{label}数量与清单不符（清单 {expected}，归档 {actual}）")
     return errors
 
 
@@ -914,6 +1098,19 @@ def parse_backup(blob: bytes, passphrase: str) -> dict:
                 raise ValueError("备份校验失败（文件可能被篡改）")
             runtime_data = json.loads(runtime_bytes.decode("utf-8"))
 
+        run_state = None
+        if "run_state.json" in names:
+            run_state_bytes = _read_tar_member(tar, "run_state.json")
+            if expected_sha.get("run_state.json") != _sha256_hex(run_state_bytes):
+                raise ValueError("备份校验失败（文件可能被篡改）")
+            run_state = json.loads(run_state_bytes.decode("utf-8"))
+
+        github_release_enc = None
+        if "github_release.enc" in names:
+            github_release_enc = _read_tar_member(tar, "github_release.enc")
+            if expected_sha.get("github_release.enc") != _sha256_hex(github_release_enc):
+                raise ValueError("备份校验失败（文件可能被篡改）")
+
         app_db_bytes = None
         if "app.db" in names:
             app_db_bytes = _read_tar_member(tar, "app.db")
@@ -929,7 +1126,11 @@ def parse_backup(blob: bytes, passphrase: str) -> dict:
         raw_photos = _read_photo_members(tar)
 
     # 归档内一致性：清单声明与归档内容必须对得上（不一致 = 这份备份坏了）
-    photos: Dict[str, Dict[str, bytes]] = {PHOTO_STANDARD: {}, PHOTO_OTHER: {}}
+    photos: Dict[str, Dict[str, bytes]] = {
+        PHOTO_STANDARD: {},
+        PHOTO_OTHER: {},
+        PHOTO_WASTAGE: {},
+    }
     for kind, member_dir in PHOTO_MEMBER_DIRS.items():
         prefix = member_dir + "/"
         photos[kind] = {
@@ -947,12 +1148,15 @@ def parse_backup(blob: bytes, passphrase: str) -> dict:
         "meta": meta,
         "credentials": credentials,
         "runtime": runtime_data,
+        "run_state": run_state,
+        "github_release_enc": github_release_enc,
         # SQLite 时代的 app.db 成员只用于识别与明确拒绝（灌不进 PostgreSQL），
         # 新备份里不会再有它。
         "app_db_bytes": app_db_bytes,
         "app_pg_bytes": app_pg_bytes,
         "standard_photos": photos[PHOTO_STANDARD],
         "other_photos": photos[PHOTO_OTHER],
+        "wastage_photos": photos[PHOTO_WASTAGE],
         "archive_integrity_errors": integrity_errors,
     }
 
@@ -1363,43 +1567,66 @@ async def restore_app_pg_from_bytes(db, dump_bytes: bytes) -> None:
             pass
 
 
-def _scan_capture_members(root: Path) -> Dict[str, Any]:
+def _scan_capture_members(
+    root: Optional[Path] = None,
+    wastage_root: Optional[Path] = None,
+) -> Dict[str, Any]:
     """照片收集兜底：直接扫目录，不查库。
 
     ``_write_snapshot_photos_pg`` 在分类不可用（psql 缺失 / 查询失败）时退到这里：
-    照片全部落在同一个目录里，恢复也是整目录写回。多带上几个孤儿文件（库里已删、
-    磁盘未清）比漏带业务照片安全得多——但清单会标 ``unclassified``，不假装分成
-    了两类。
+    照片全部落在目录里，恢复也是整目录写回。多带上几个孤儿文件（库里已删、
+    磁盘未清）比漏带业务照片安全得多——但清单会标 ``unclassified``，不假装分成了
+    标准 / 其它两类。
+
+    扫**两个**目录：卫生照片在 ``hygiene-captures/``（兜底时全部计入其它照片），
+    损耗照片在 ``wastage-captures/``（计入损耗照片——它们的恢复目录不同，混进
+    「其它照片」会被写到卫生目录里去）。
     """
+    layout = (
+        (PHOTO_OTHER, Path(root) if root is not None else get_hygiene_capture_root()),
+        (
+            PHOTO_WASTAGE,
+            Path(wastage_root) if wastage_root is not None else get_wastage_capture_root(),
+        ),
+    )
     members: Dict[str, bytes] = {}
-    kind_dir = PHOTO_MEMBER_DIRS[PHOTO_OTHER]
-    total_bytes = 0
-    if root.is_dir():
-        for entry in sorted(root.iterdir()):
-            if not entry.is_file():
-                continue
-            try:
-                data = entry.read_bytes()
-            except OSError:
-                continue
-            members[f"{kind_dir}/{entry.name}"] = data
-            total_bytes += len(data)
-    digest = hashlib.sha256()
-    for name in sorted(members):
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(members[name])
+    sources: Dict[str, Path] = {}
+    per_kind: Dict[str, Dict[str, Any]] = {}
+    for kind, base in layout:
+        kind_dir = PHOTO_MEMBER_DIRS[kind]
+        count = 0
+        total_bytes = 0
+        digest = hashlib.sha256()
+        if base.is_dir():
+            for entry in sorted(base.iterdir()):
+                if not entry.is_file():
+                    continue
+                try:
+                    data = entry.read_bytes()
+                except OSError:
+                    continue
+                name = f"{kind_dir}/{entry.name}"
+                members[name] = data
+                sources[name] = entry
+                digest.update(name.encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(data)
+                count += 1
+                total_bytes += len(data)
+        per_kind[kind] = {
+            "count": count,
+            "bytes": total_bytes,
+            "sha256": digest.hexdigest(),
+        }
     return {
         "members": members,
+        "sources": sources,
         "manifest": {
             PHOTO_STANDARD: {"count": 0, "bytes": 0},
-            PHOTO_OTHER: {
-                "count": len(members),
-                "bytes": total_bytes,
-                "sha256": digest.hexdigest(),
-            },
+            PHOTO_OTHER: per_kind[PHOTO_OTHER],
+            PHOTO_WASTAGE: per_kind[PHOTO_WASTAGE],
         },
-        "missing": {PHOTO_STANDARD: [], PHOTO_OTHER: []},
+        "missing": {PHOTO_STANDARD: [], PHOTO_OTHER: [], PHOTO_WASTAGE: []},
     }
 
 
@@ -1442,15 +1669,16 @@ def _pg_psql_rows(sql: str) -> Optional[List[List[str]]]:
 
 
 def _classify_capture_ids_pg() -> Optional[Dict[str, List[str]]]:
-    """同步版分类：psql 查业务库，按库引用把 capture_id 分成标准图 / 其它照片。
+    """同步版分类：psql 查业务库，按库引用把 capture_id 分成标准图 / 其它照片 / 损耗照片。
 
     快照创建是同步路径（更新作业在独立进程里跑，没有事件循环可用），所以这里用
     ``psql`` 而不是 ``DatabaseManager``；SQL 与 :func:`classify_hygiene_capture_ids`
     共用同一批常量，口径一致（标准图优先、派生图跟随源图）。
-    恢复端只按 capture_id 写回同一目录，因此分类只影响清单与覆盖结论。
+    恢复端按类别写回各自的目录，因此分类同时决定清单与覆盖结论。
     """
     standard: set = set()
     other: set = set()
+    wastage: set = set()
     for sql in _STANDARD_PHOTO_QUERIES:
         rows = _pg_psql_rows(sql)
         if rows is None:
@@ -1461,8 +1689,15 @@ def _classify_capture_ids_pg() -> Optional[Dict[str, List[str]]]:
         if rows is None:
             return None
         other.update(row[0] for row in rows if row and row[0])
+    for sql in _WASTAGE_PHOTO_QUERIES:
+        rows = _pg_psql_rows(sql)
+        if rows is None:
+            return None
+        wastage.update(row[0] for row in rows if row and row[0])
     # 一张照片同时被两类引用时标准图优先（与异步分类口径一致）
     other -= standard
+    wastage -= standard
+    wastage -= other
 
     variants = _pg_psql_rows(_VARIANT_QUERY)
     if variants is None:
@@ -1475,8 +1710,14 @@ def _classify_capture_ids_pg() -> Optional[Dict[str, List[str]]]:
             standard.add(variant_id)
         elif source_id in other:
             other.add(variant_id)
+        elif source_id in wastage:
+            wastage.add(variant_id)
 
-    return {PHOTO_STANDARD: sorted(standard), PHOTO_OTHER: sorted(other)}
+    return {
+        PHOTO_STANDARD: sorted(standard),
+        PHOTO_OTHER: sorted(other),
+        PHOTO_WASTAGE: sorted(wastage),
+    }
 
 
 def _write_snapshot_photos_pg(snap_dir: Path) -> Dict[str, Any]:
@@ -1485,17 +1726,17 @@ def _write_snapshot_photos_pg(snap_dir: Path) -> Dict[str, Any]:
     psql 不可用 / 查询失败时退化为「目录扫描 + 全部计入其它照片」，并把
     ``unclassified`` 标出来：标准图恒为 0 是「没分类」，不是「本来就没有」。
     """
-    root = get_hygiene_capture_root()
     classified = _classify_capture_ids_pg()
     if classified is None:
         logger.warning(
             "PG 照片分类不可用（psql 缺失或查询失败），退化为目录扫描：照片全部计入其它照片"
         )
-        return _write_snapshot_photos_scan(snap_dir, root)
+        return _write_snapshot_photos_scan(snap_dir)
 
     manifest: Dict[str, Any] = {}
     missing: Dict[str, List[str]] = {}
-    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER, PHOTO_WASTAGE):
+        root = photo_capture_root(kind)
         blobs, gone = collect_photo_blobs(root, classified[kind])
         if gone:
             missing[kind] = gone
@@ -1520,17 +1761,17 @@ def _write_snapshot_photos_pg(snap_dir: Path) -> Dict[str, Any]:
     return {"manifest": manifest, "missing": missing}
 
 
-def _write_snapshot_photos_scan(snap_dir: Path, root: Path) -> Dict[str, Any]:
-    """目录扫描兜底：capture 目录里的文件平铺存放，全部计入其它照片。"""
-    collected = _scan_capture_members(root)
+def _write_snapshot_photos_scan(snap_dir: Path) -> Dict[str, Any]:
+    """目录扫描兜底：两个 capture 目录里的文件平铺存放，按目录归类别。"""
+    collected = _scan_capture_members()
     manifest: Dict[str, Any] = {}
-    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER, PHOTO_WASTAGE):
         prefix = PHOTO_MEMBER_DIRS[kind] + "/"
         written = 0
-        for name in collected["members"]:
+        for name, source in collected["sources"].items():
             if not name.startswith(prefix):
                 continue
-            _link_or_copy(root / name[len(prefix):], snap_dir / name)
+            _link_or_copy(source, snap_dir / name)
             written += 1
         entry = dict(collected["manifest"].get(kind) or {})
         entry["count"] = written
@@ -1553,19 +1794,19 @@ def photo_consistency(
     直接抛错、快照根本建不出来。能走到这里的缺失说明源文件本来就不在，因此
     ``blocking=False`` —— 恢复数据不该被它拦下（页面上只作警告展示）。
     """
+    labels = {
+        PHOTO_STANDARD: CONTENT_LABELS[CONTENT_STANDARD_PHOTOS],
+        PHOTO_OTHER: CONTENT_LABELS[CONTENT_OTHER_PHOTOS],
+        PHOTO_WASTAGE: CONTENT_LABELS[CONTENT_WASTAGE_PHOTOS],
+    }
     messages: List[str] = []
     missing_total = 0
-    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER, PHOTO_WASTAGE):
         gone = missing.get(kind) or []
         missing_total += len(gone)
         if gone:
-            label = (
-                CONTENT_LABELS[CONTENT_STANDARD_PHOTOS]
-                if kind == PHOTO_STANDARD
-                else CONTENT_LABELS[CONTENT_OTHER_PHOTOS]
-            )
             messages.append(
-                f"{label}有 {len(gone)} 个文件在源磁盘上已缺失（备份里没有，恢复后仍缺）"
+                f"{labels[kind]}有 {len(gone)} 个文件在源磁盘上已缺失（备份里没有，恢复后仍缺）"
             )
     return {
         "ok": not messages,
@@ -1574,6 +1815,7 @@ def photo_consistency(
         "errors": messages,
         "standard": manifest.get(PHOTO_STANDARD, {}),
         "other": manifest.get(PHOTO_OTHER, {}),
+        "wastage": manifest.get(PHOTO_WASTAGE, {}),
     }
 
 
@@ -1584,7 +1826,7 @@ def create_restore_snapshot(
     include_photos: bool = True,
     keep: Optional[int] = None,
 ) -> str:
-    """创建本机回滚快照（整库 dump + 凭据 + 两类卫生照片），按保留配置清理旧快照。
+    """创建本机回滚快照（整库 dump + 凭据 + 采集状态 + 三类照片），按保留配置清理旧快照。
 
     ``provenance`` 标注这次快照是谁在什么场景下建的，供清理保护与页面展示识别。
     ``keep`` 为 ``None`` 时使用保留配置中的本机回滚快照份数。
@@ -1621,6 +1863,28 @@ def create_restore_snapshot(
         except OSError:
             pass
 
+    # 更新用的 GitHub 凭据：与 POS 凭据同属「凭据」类别，回滚时一起换回去，
+    # 否则换机/回滚后「系统更新」页要重新申请 PAT。
+    github_cred = get_github_release_credential_path()
+    if github_cred.is_file():
+        dest_gh = snap_dir / github_cred.name
+        shutil.copy2(github_cred, dest_gh)
+        try:
+            os.chmod(dest_gh, 0o600)
+        except OSError:
+            pass
+        if CONTENT_CREDENTIALS not in contents:
+            contents.append(CONTENT_CREDENTIALS)
+
+    # 采集状态：库回滚时这两份文件必须一起回滚，否则采集器的差分基线比库新，
+    # 恢复后到当前的订单会漏采。
+    run_state = collect_run_state()
+    if any(value is not None for value in run_state.values()):
+        (snap_dir / "run_state.json").write_text(
+            json.dumps(run_state, ensure_ascii=False, default=str), encoding="utf-8"
+        )
+        contents.append(CONTENT_SCRAPER_STATE)
+
     photo_info: Dict[str, Any] = {
         "manifest": {},
         "missing": {},
@@ -1632,6 +1896,7 @@ def create_restore_snapshot(
         for kind, content_key in (
             (PHOTO_STANDARD, CONTENT_STANDARD_PHOTOS),
             (PHOTO_OTHER, CONTENT_OTHER_PHOTOS),
+            (PHOTO_WASTAGE, CONTENT_WASTAGE_PHOTOS),
         ):
             if int(manifest.get(kind, {}).get("written") or 0) > 0:
                 contents.append(content_key)
@@ -1831,25 +2096,33 @@ def _infer_snapshot_contents(files: Sequence[str]) -> List[str]:
         contents.append(CONTENT_RUNTIME)
     if "recipes.db" in names:
         contents.append(CONTENT_RECIPES)
-    if "credentials.enc" in names:
+    if "credentials.enc" in names or "github_release.enc" in names:
         contents.append(CONTENT_CREDENTIALS)
+    if "run_state.json" in names:
+        contents.append(CONTENT_SCRAPER_STATE)
     if any(f.startswith(PHOTO_MEMBER_DIRS[PHOTO_STANDARD] + "/") for f in files):
         contents.append(CONTENT_STANDARD_PHOTOS)
     if any(f.startswith(PHOTO_MEMBER_DIRS[PHOTO_OTHER] + "/") for f in files):
         contents.append(CONTENT_OTHER_PHOTOS)
+    if any(f.startswith(PHOTO_MEMBER_DIRS[PHOTO_WASTAGE] + "/") for f in files):
+        contents.append(CONTENT_WASTAGE_PHOTOS)
     return contents
 
 
 def restore_snapshot_photos(ts: str, kinds: Sequence[str]) -> Dict[str, int]:
-    """把快照里的指定照片类别复制回运行实例，返回各类恢复数量。"""
+    """把快照里的指定照片类别复制回运行实例，返回各类恢复数量。
+
+    三类照片各回各的目录：卫生两类回 ``hygiene-captures/``，损耗回
+    ``wastage-captures/``（见 :func:`photo_capture_root`）。
+    """
     snap_dir = _snapshot_root() / ts
-    root = get_hygiene_capture_root()
-    root.mkdir(parents=True, exist_ok=True)
     restored: Dict[str, int] = {}
     for kind in kinds:
         member_dir = PHOTO_MEMBER_DIRS.get(kind)
         if member_dir is None:
             continue
+        root = photo_capture_root(kind)
+        root.mkdir(parents=True, exist_ok=True)
         src_dir = snap_dir / member_dir
         count = 0
         if src_dir.is_dir():
@@ -1862,7 +2135,7 @@ def restore_snapshot_photos(ts: str, kinds: Sequence[str]) -> Dict[str, int]:
                         shutil.copy2(src, dst)
                     count += 1
                 except OSError:
-                    logger.warning("恢复卫生照片失败: %s", src)
+                    logger.warning("恢复照片失败（%s）: %s", kind, src)
         restored[kind] = count
     return restored
 
@@ -1963,7 +2236,11 @@ def build_cold_backup_archive(
 
     # 照片按目录全量带走：整库 dump 里虽然有引用关系，但冷备跑在独立进程里，
     # 分类要另开数据库连接，收益不抵复杂度（多带几个孤儿文件比漏带安全）。
-    photo_info = _scan_capture_members(capture_root or get_hygiene_capture_root())
+    # 两个目录都要扫：损耗照片在 wastage-captures，漏掉这个目录它们就不在冷备里。
+    photo_info = _scan_capture_members(
+        capture_root or get_hygiene_capture_root(),
+        get_wastage_capture_root(),
+    )
     members: Dict[str, bytes] = {}
     if app_db_bytes is not None:
         members["app.pgdump"] = app_db_bytes
@@ -1978,6 +2255,15 @@ def build_cold_backup_archive(
         members["runtime.json"] = json.dumps(
             runtime_data, ensure_ascii=False
         ).encode("utf-8")
+    run_state = collect_run_state()
+    if any(value is not None for value in run_state.values()):
+        members["run_state.json"] = json.dumps(
+            run_state, ensure_ascii=False, default=str
+        ).encode("utf-8")
+    github_cred = get_github_release_credential_path()
+    if github_cred.is_file():
+        with open(github_cred, "rb") as handle:
+            members["github_release.enc"] = handle.read()
     for name, data in photo_info["members"].items():
         members[name] = data
 
@@ -1990,7 +2276,11 @@ def build_cold_backup_archive(
             (CONTENT_APP_PG, app_db_bytes is not None),
             # 运行配置存在同一个库的 app_settings 表里，随整库 dump 一并带走
             (CONTENT_RUNTIME, app_db_bytes is not None or runtime_data is not None),
-            (CONTENT_CREDENTIALS, "credentials.enc" in members),
+            (
+                CONTENT_CREDENTIALS,
+                "credentials.enc" in members or "github_release.enc" in members,
+            ),
+            (CONTENT_SCRAPER_STATE, "run_state.json" in members),
             (
                 CONTENT_STANDARD_PHOTOS,
                 bool(photo_info["manifest"].get(PHOTO_STANDARD, {}).get("count")),
@@ -1998,6 +2288,10 @@ def build_cold_backup_archive(
             (
                 CONTENT_OTHER_PHOTOS,
                 bool(photo_info["manifest"].get(PHOTO_OTHER, {}).get("count")),
+            ),
+            (
+                CONTENT_WASTAGE_PHOTOS,
+                bool(photo_info["manifest"].get(PHOTO_WASTAGE, {}).get("count")),
             ),
         )
         if present

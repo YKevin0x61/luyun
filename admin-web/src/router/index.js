@@ -158,6 +158,10 @@ const routes = [
   // （`composables/usePrepPlanAdmin.js`）。旧 `/prep-plan` 从路由里删干净（自然 404，
   // 不给别名、不做重定向；`?next=` 里的老地址由 `utils/loginNext.js` 换成新地址）。
   workbenchKitchenPage('/workbench/kitchen/prep-plan', 'prep-plan', () => import('../views/PrepPlanView.vue')),
+  // 备货复盘（ADR 0123）：每小时快照 vs 实际销量，只有管理端看得到。
+  workbenchKitchenPage('/workbench/kitchen/prep-review', 'prep-review', () =>
+    import('../views/PrepReviewView.vue'),
+  ),
   // 损耗分析（从 worktool2 那个小程序搬过来）：后勤组的第三页 —— 店长按月看损耗的
   // 总数 / 原因分布 / 高损耗物料 / 逐日趋势，下半页是按条件翻的明细。清单里是
   // `audience: admin` + `staffCap: wastage`（2026-10-14 用户裁定）：管理端会话直接进，

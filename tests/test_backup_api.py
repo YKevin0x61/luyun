@@ -450,6 +450,33 @@ class BackupExportBackendCapabilityTest(_ApiTestBase):
             "include_other_photos": False,
         }
 
+    async def test_table_inventory_lists_every_group_and_flags_pending(self):
+        """「包里装了什么」要列出整库覆盖的全部表，未应用迁移的表标 present=false。"""
+        resp = await self.client.get("/api/backup/tables")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+
+        names = [t["name"] for g in body["groups"] for t in g["tables"]]
+        # 每个分组都要出现在清单里，且表名不重复（分组口径与数据管理页共用
+        # `db_core/schema.py` 的 TABLE_GROUPS，2026-10-26 按业务域重排）
+        labels = [g["label"] for g in body["groups"]]
+        for expected in (
+            "点餐数据", "备货计划", "配方库", "卫生管理", "排班",
+            "企微推送", "人事考勤", "损耗", "系统设置", "系统表",
+        ):
+            self.assertIn(expected, labels)
+        self.assertEqual(len(names), len(set(names)))
+        # 仪容仪表两张表当初漏登记，现在必须能在清单里看到
+        self.assertIn("hygiene_attire_standard", names)
+        self.assertIn("hygiene_attire_shots", names)
+        self.assertIn("tenants", names)
+        self.assertEqual(body["total"], len(names))
+
+        # 测试库按 migrations/pg/*.sql 全量建过 schema：除了代码里已声明、
+        # 但迁移尚未提交应用的表之外，都应该 present。
+        present = {t["name"] for g in body["groups"] for t in g["tables"] if t["present"]}
+        self.assertEqual(present | set(body["pending"]), set(names))
+
     async def test_points_reports_postgres_capability(self):
         response = await self.client.get("/api/backup/points")
         body = response.json()

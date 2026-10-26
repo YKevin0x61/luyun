@@ -339,6 +339,8 @@ describe('useBackupCenter', () => {
       include_recipes: true,
       include_standard_photos: false,
       include_other_photos: true,
+      include_wastage_photos: true,
+      include_scraper_state: true,
     })
     // 打包完成才下载，文件名用服务端给的那个
     expect(downloadUrl).toHaveBeenCalledWith(
@@ -880,7 +882,11 @@ describe('useBackupCenter', () => {
     expect(apiPost).toHaveBeenCalledWith(
       '/api/backup/snapshots/20260901_100000/rollback',
       {},
-      { apply_standard_photos: true, apply_other_photos: true },
+      {
+        apply_standard_photos: true,
+        apply_other_photos: true,
+        apply_wastage_photos: false,
+      },
     )
     expect(confirmState.open).toBe(false)
     expect(rollingBackTs.value).toBe('')

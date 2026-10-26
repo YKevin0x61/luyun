@@ -19,7 +19,7 @@ export const LOADING_TEXT = '正在按现在到打烊算…'
 export const PICK_STATION_TITLE = '先选你在哪个档口'
 export const PICK_STATION_HINT = '选了只看得到这个档口的备货项，今天随时能改。'
 
-export const BASIS_HINT = '参考值 = 近 8 周同星期几的 p40 × 整店水位；再减掉你看到的实物库存，才是要备的量'
+export const BASIS_HINT = '参考值 = 未来 24 小时要卖多少（近 8 周同星期几的 p40 × 整店水位）；再减掉你看到的实物库存，才是要备的量'
 export const FORMULA_HINT =
   '取近 8 周同星期几里偏保守的那个量（p40），不加安全量——24 小时保质，多做出来就是报废。'
 export const MISSING_RULE_TEXT = '没有配方系数，算不出建议量'

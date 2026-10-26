@@ -126,14 +126,16 @@ class SameWeekdayMeanTests(PrepPlanRebuildFixture):
         # 没有安全缓冲：p40 就是 p40
         self.assertEqual(entry["basis"]["quantile"], 0.40)
 
-    async def test_remaining_window_only_counts_the_rest_of_day(self):
-        """中午 12 点看，只剩 18:30 那 40 → 建议量 40，不是全天 80。"""
+    async def test_window_spans_the_next_24_hours(self):
+        """中午 12 点看，窗口是「现在 → 明天 12 点」，跨两天各取一段（ADR 0122）。"""
         await self._seed_item()
         await self._seed_rule()
         await self._seed_stationary()
 
-        result = await self.service.compute_suggestions(self.db, TODAY_NOON)
-        self.assertEqual(self._entry(result)["suggested_qty"], 40)
+        # 每个候选日的 [12:00, 次日 12:00) = 当天 18:30 的 40 + 次日 09:00 的 40 = 80
+        entry = self._entry(await self.service.compute_suggestions(self.db, TODAY_NOON))
+        self.assertEqual(entry["basis"]["demand_qty"] > 40, True)
+        self.assertEqual(entry["suggested_qty"], entry["basis"]["demand_qty"])
 
     async def test_closed_candidate_day_drops_out_of_the_denominator(self):
         """某个同星期几整天没单（不做生意）→ 不进分母，均量还是 80。"""
@@ -146,15 +148,16 @@ class SameWeekdayMeanTests(PrepPlanRebuildFixture):
         self.assertEqual(entry["suggested_qty"], 80)
         self.assertEqual(entry["basis"]["active_days"], 7)
 
-    async def test_after_close_gives_zero(self):
-        """打烊后没有「今天还要做多少」这回事。"""
+    async def test_after_close_still_covers_the_next_24_hours(self):
+        """ADR 0122：滚动 24 小时窗口，打烊后仍然给「到明天此刻」的参考值。"""
         await self._seed_item()
         await self._seed_rule()
         await self._seed_orders(CANDIDATE_DAYS, hour=9, minute=0, qty=40)
 
         result = await self.service.compute_suggestions(self.db, TODAY_NIGHT)
-        self.assertTrue(result["window"]["closed"])
-        self.assertEqual(self._entry(result)["suggested_qty"], 0)
+        self.assertFalse(result["window"]["closed"])
+        self.assertTrue(result["window"]["after_close"])
+        self.assertEqual(result["window"]["horizon_hours"], 24)
 
     async def test_item_without_recipe_is_flagged(self):
         """没有配方系数的品给 0，并标 missing_rule（页面要能解释为什么空着）。"""
@@ -211,7 +214,7 @@ class ForecastQuantileTests(PrepPlanRebuildFixture):
         await self._seed_orders(last_week, hour=20, minute=0, qty=80)
 
         entry = self._entry(await self.service.compute_suggestions(self.db, TODAY_MORNING))
-        self.assertEqual(entry["basis"]["store_factor"], 1.15)
+        self.assertEqual(entry["basis"]["store_factor"], 1.30)
         # p40(80,80,160…) 仍按分位算，再乘 1.15
         self.assertGreaterEqual(entry["suggested_qty"], 80 * 1.15)
 
@@ -239,6 +242,45 @@ class ForecastQuantileTests(PrepPlanRebuildFixture):
         entry = self._entry(await self.service.compute_suggestions(self.db, TODAY_MORNING))
         self.assertEqual(entry["basis"]["demand_qty"], 80)
         self.assertEqual(entry["suggested_qty"], 80)
+
+
+class SnapshotTests(PrepPlanRebuildFixture):
+    """ADR 0123：整点快照 + 窗口结束后回填实际销量。"""
+
+    async def test_snapshot_rows_are_written_once_per_item(self):
+        await self._seed_item()
+        await self._seed_rule()
+        await self._seed_stationary()
+
+        first = await self.service.write_snapshot(self.db, TODAY_MORNING)
+        self.assertEqual(first["rows"], 1)
+        # 同一整点重复写不应重复插
+        second = await self.service.write_snapshot(self.db, TODAY_MORNING)
+        self.assertEqual(second["rows"], 1)
+        rows = self.db.table("prep_plan_snapshots")
+        async with rows.conn.cursor() as cursor:
+            await cursor.execute("SELECT COUNT(*) AS n FROM prep_plan_snapshots")
+            self.assertEqual(int((await cursor.fetchone())["n"]), 1)
+
+    async def test_actuals_backfilled_after_window_closes(self):
+        await self._seed_item()
+        await self._seed_rule()
+        await self._seed_stationary()
+        await self.service.write_snapshot(self.db, TODAY_MORNING)
+
+        # 窗口还没结束 → 不回填
+        early = await self.service.backfill_actuals(self.db, TODAY_MORNING + timedelta(hours=1))
+        self.assertEqual(early["windows"], 0)
+
+        # 窗口结束（24 小时后）→ 回填
+        late = await self.service.backfill_actuals(self.db, TODAY_MORNING + timedelta(hours=25))
+        self.assertEqual(late["windows"], 1)
+
+        day = await self.service.get_snapshot_day(self.db, TODAY_MORNING.date().isoformat())
+        self.assertEqual(len(day["items"]), 1)
+        hour = day["items"][0]["hours"][0]
+        self.assertIsNotNone(hour["sold_qty"])
+        self.assertTrue(hour["same_rules"])
 
 
 class PlanPersistenceTests(PrepPlanRebuildFixture):
@@ -276,7 +318,8 @@ class PlanPersistenceTests(PrepPlanRebuildFixture):
 
         noon = await self.service.get_today(self.db, now=TODAY_NOON)
         refreshed = self._entry(noon)
-        self.assertEqual(refreshed["suggested_qty"], 40)
+        # 参考值随时间变（滚动 24 小时窗口），但手改的 95 必须留着
+        self.assertEqual(refreshed["suggested_qty"], refreshed["basis"]["demand_qty"])
         self.assertEqual(refreshed["final_qty"], 95)
 
     async def test_summary_counts_remaining_by_station(self):

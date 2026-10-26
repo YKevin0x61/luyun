@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Data-management catalog covers every physical table read-only where needed."""
+"""Data-management catalog covers every physical table read-only where needed.
+
+另外钉一条中文标签契约：catalog 里的每一张表、每一个列都必须在
+``admin-web/src/utils/adminLabels.js`` 里有中文名（见文件末尾的
+``test_every_catalog_table_and_column_has_a_chinese_label``）。
+"""
 
 from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
+import re
 
+import pg_probe
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -85,12 +93,56 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
 
     group_keys = [group["key"] for group in body["groups"]]
     assert group_keys == [
-        "business", "recipe", "hygiene", "scheduling", "wecom", "overtime",
-        # 考勤（票 02）：法定节假日日历 —— 人事之外单开一格，03 的月度考勤台账同组。
-        "attendance",
-        # 损耗（迁移 0029：登记台账 / 现场照片 / 常用模板）—— 同「只读展示」的待遇。
-        "wastage", "auth", "external"
+        # 2026-10-26 按业务域重排：原来的「业务数据」把点餐、备货、企微历史表混在
+        # 一格，侧边栏滚两屏才找到「企微推送」。
+        "dining", "prep", "recipe", "hygiene", "scheduling",
+        "wecom",      # 旧任务三张 + 迁移 0016 的订阅 / 出站 / 审计
+        "hr",         # 加班与补钟（人事）+ 法定节假日 / 月度考勤台账
+        "wastage",
+        "config",     # 应用设置 + 登录凭据三张 + 运行日志入口
     ]
+
+
+def test_table_groups_cover_every_table_exactly_once(admin_client):
+    """分组是侧边栏与备份清单的唯一口径：不能漏表，也不能一张表挂两组。"""
+    client, _ = admin_client
+    body = client.get("/api/admin/tables").json()
+
+    grouped: list[str] = []
+    for group in body["groups"]:
+        grouped.extend(group["tables"])
+
+    assert len(grouped) == len(set(grouped)), "同一张表出现在多个分组里"
+    assert set(grouped) == set(body["tables"]), "分组与 catalog 的表清单不一致"
+
+    labels = {group["key"]: group["label"] for group in body["groups"]}
+    assert labels["dining"] == "点餐数据"
+    assert labels["prep"] == "备货计划"
+    assert labels["hr"] == "人事考勤"
+    assert labels["config"] == "系统设置"
+
+
+def test_prep_and_wecom_tables_live_in_their_own_groups(admin_client):
+    """点餐那格只装点餐的表；备货与企微各自成组，不再混进「业务数据」。"""
+    client, _ = admin_client
+    groups = {
+        group["label"]: group["tables"]
+        for group in client.get("/api/admin/tables").json()["groups"]
+    }
+
+    assert groups["点餐数据"] == [
+        "orders", "tables", "stations", "dish_stations",
+        "semi_finished_rules", "report_dishes",
+    ]
+    assert "prep_plan_snapshots" in groups["备货计划"]
+    assert "prep_items" in groups["备货计划"]
+    assert "wecom_push_jobs" in groups["企微推送"]
+    assert "wecom_push_logs" in groups["企微推送"]
+    assert "app_settings" in groups["系统设置"]
+    assert groups["系统设置"][-1] == "logs"
+
+    for table in ("wecom_push_jobs", "prep_items", "app_settings"):
+        assert table not in groups["点餐数据"]
 
 
 def test_push_subscription_tables_are_browsable_but_read_only(admin_client):
@@ -229,3 +281,121 @@ def test_logs_external_entry_is_not_a_generic_table(admin_client):
     response = client.get("/api/admin/tables/logs/rows")
     assert response.status_code == 400
     assert "/logs" in response.json()["detail"]
+
+
+# ==================== 中文标签覆盖 ====================
+# 数据管理页的表名 / 列名只有一个翻译口：`admin-web/src/utils/adminLabels.js`。
+# 那里缺一条映射，页面上露出的就是 `staff_shifts` / `shift_id` 这种裸标识符 ——
+# 2026-10-26 用户报「数据管理页面，中文化」时，侧边栏整列都是英文。
+#
+# 为什么由 Python 侧钉：表清单的唯一来源是后端（`db_core/schema.py` 的表常量 +
+# `api/admin.py` 的分组），列清单的唯一来源是数据库结构；前端再抄一份清单必然漂。
+# 这里只**解析**前端文件里的键、不执行 JS（CI 的 Python job 没有 node）。
+
+_LABELS_JS = (
+    Path(__file__).resolve().parents[1] / "admin-web" / "src" / "utils" / "adminLabels.js"
+)
+
+
+def _js_object_body(source: str, name: str) -> str:
+    match = re.search(rf"export const {name} = \{{(.*?)\n\}}", source, re.S)
+    assert match, f"adminLabels.js 里找不到 {name}"
+    return re.sub(r"//[^\n]*", "", match.group(1))
+
+
+def _frontend_label_keys() -> dict[str, set[str]]:
+    source = _LABELS_JS.read_text(encoding="utf-8")
+    table_block = _js_object_body(source, "TABLE_LABELS")
+    column_block = _js_object_body(source, "COLUMN_LABELS")
+    keys = set(re.findall(r"([A-Za-z_][A-Za-z0-9_.]*)['\"]?\s*:", column_block))
+    return {
+        "tables": set(
+            re.findall(r"^\s{2}([A-Za-z_][A-Za-z0-9_]*):", table_block, re.M)
+        ),
+        "pairs": {key for key in keys if "." in key},
+        "columns": {key for key in keys if "." not in key},
+    }
+
+
+def test_every_catalog_table_and_column_has_a_chinese_label(admin_client):
+    client, _ = admin_client
+    body = client.get("/api/admin/tables").json()
+    labels = _frontend_label_keys()
+
+    tables = body["tables"]
+    missing_tables = sorted(t for t in tables if t not in labels["tables"])
+
+    missing_columns: list[str] = []
+    for table in tables:
+        meta = body["table_meta"].get(table, {})
+        if meta.get("route"):
+            # 点了会跳走的入口（logs）：数据管理页不展示它的列。
+            continue
+        columns = pg_probe.table_columns(table)
+        assert columns, f"catalog 里的 {table} 在测试库里没有列"
+        for column in columns:
+            if f"{table}.{column}" in labels["pairs"]:
+                continue
+            if column in labels["columns"] or column.lower() in labels["columns"]:
+                continue
+            missing_columns.append(f"{table}.{column}")
+
+    assert not missing_tables, (
+        "这些表在数据管理页会露出英文表名，请在 adminLabels.js 的 TABLE_LABELS 补中文名："
+        + ", ".join(missing_tables)
+    )
+    assert not missing_columns, (
+        "这些列在数据管理页会露出英文列名，请在 adminLabels.js 的 COLUMN_LABELS 补中文名："
+        + ", ".join(missing_columns)
+    )
+
+
+# ==================== 未应用迁移时的提示 ====================
+
+
+class _MissingTableConn:
+    """模拟「库里还没建这张表」：asyncpg 抛 UndefinedTableError。"""
+
+    def _raise(self):
+        import asyncpg
+
+        raise asyncpg.UndefinedTableError(
+            'relation "prep_plan_snapshots" does not exist'
+        )
+
+    async def execute(self, *_args, **_kwargs):
+        self._raise()
+
+    def cursor(self):
+        @asynccontextmanager
+        async def _cursor():
+            self._raise()
+            yield  # pragma: no cover —— 上面的 raise 一定先发生
+
+        return _cursor()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/admin/tables/prep_plan_snapshots/schema",
+        "/api/admin/tables/prep_plan_snapshots/rows",
+    ],
+)
+def test_unmigrated_table_answers_with_migration_hint(admin_client, monkeypatch, path):
+    """迁移没应用时，页面要看到「去数据库迁移」，而不是 asyncpg 的英文原文。
+
+    清单来自代码常量、不查库，所以「列表里有、库里没有」是正常中间态；把
+    `relation "x" does not exist` 原样渲染给店长看才是缺陷。
+    """
+    client, _ = admin_client
+    monkeypatch.setattr("api.admin._table_conn", lambda db, table: _MissingTableConn())
+
+    response = client.get(path)
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "数据库迁移" in detail
+    assert "does not exist" not in detail
+
+

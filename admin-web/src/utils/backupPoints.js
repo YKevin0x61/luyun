@@ -16,9 +16,15 @@ export const CONTENT_APP_PG = 'app_pg'
 export const CONTENT_RECIPES = 'recipes_db'
 export const CONTENT_STANDARD_PHOTOS = 'standard_photos'
 export const CONTENT_OTHER_PHOTOS = 'other_photos'
+/** 损耗登记照片：独立目录（wastage-captures），恢复必须回自己的目录。 */
+export const CONTENT_WASTAGE_PHOTOS = 'wastage_photos'
 
-/** 两类卫生照片：标准图（含历史版本）与其它照片，可独立恢复。 */
-export const PHOTO_CONTENTS = [CONTENT_STANDARD_PHOTOS, CONTENT_OTHER_PHOTOS]
+/** 三类照片：标准图（含历史版本）、其它照片、损耗照片，可独立恢复。 */
+export const PHOTO_CONTENTS = [
+  CONTENT_STANDARD_PHOTOS,
+  CONTENT_OTHER_PHOTOS,
+  CONTENT_WASTAGE_PHOTOS,
+]
 
 export const CONTENT_LABELS = {
   [CONTENT_CREDENTIALS]: '凭据',
@@ -27,6 +33,7 @@ export const CONTENT_LABELS = {
   [CONTENT_RECIPES]: '配方数据',
   [CONTENT_STANDARD_PHOTOS]: '标准图',
   [CONTENT_OTHER_PHOTOS]: '其它照片',
+  [CONTENT_WASTAGE_PHOTOS]: '损耗照片',
 }
 
 /** 清理预览里一组（本机回滚快照 / 导出备份 / 冷备）的可删项与受保护项。 */

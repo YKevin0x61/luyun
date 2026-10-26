@@ -28,9 +28,12 @@ from services.backup_service import (
     CONTENT_OTHER_PHOTOS,
     CONTENT_RECIPES,
     CONTENT_RUNTIME,
+    CONTENT_SCRAPER_STATE,
     CONTENT_STANDARD_PHOTOS,
+    CONTENT_WASTAGE_PHOTOS,
     PHOTO_OTHER,
     PHOTO_STANDARD,
+    PHOTO_WASTAGE,
     PROVENANCE_LABELS,
     PROVENANCE_MANUAL,
 )
@@ -54,16 +57,20 @@ MEDIUM_PURPOSES = {
 }
 
 # 明确不纳入备份的内容与理由（页面就近展示）
+#
+# 「采集状态文件」与「更新访问凭据」原先是列在这里的，后来都补进了备份：
+# 库回滚而采集基线不回滚会让恢复后到当前的订单漏采；GitHub PAT 丢了要重新申请。
+# 两者都是小文件，凭据本身是加密文件（与 POS 凭据同一把密钥，快照里本来就有 .cred_key）。
 NOT_BACKED_UP = [
     {"name": "日志库", "reason": "写入量大且非业务数据，回滚它没有意义"},
-    {"name": "采集状态文件", "reason": "随运行过程自愈，恢复旧值反而会漏采或重采"},
-    {"name": "更新访问凭据", "reason": "敏感材料留在受控位置，不随备份外流"},
     {"name": "更新作业状态", "reason": "数据回滚后不应与旧版本历史互相矛盾"},
+    {"name": "原始单据存档", "reason": "settled_raw / reconcile 等过程产物，业务数据已在库里"},
 ]
 
 PHOTO_CONTENT_BY_KIND = {
     PHOTO_STANDARD: CONTENT_STANDARD_PHOTOS,
     PHOTO_OTHER: CONTENT_OTHER_PHOTOS,
+    PHOTO_WASTAGE: CONTENT_WASTAGE_PHOTOS,
 }
 
 _health_cache: Optional[dict] = None
@@ -271,6 +278,8 @@ def _contents_from_includes(includes: Dict[str, Any]) -> List[str]:
         (CONTENT_RECIPES, "recipes_db"),
         (CONTENT_STANDARD_PHOTOS, "standard_photos"),
         (CONTENT_OTHER_PHOTOS, "other_photos"),
+        (CONTENT_WASTAGE_PHOTOS, "wastage_photos"),
+        (CONTENT_SCRAPER_STATE, "scraper_state"),
     )
     contents = [content for content, key in mapping if includes.get(key)]
     # 运行配置（营业时段 / 轮询间隔等）落在 app_settings 表里，整库副本会带上它，
@@ -525,7 +534,7 @@ async def photo_difference(
             raise ValueError("photo_difference 需要 db 或 current 才能算出差异")
         current = await current_photo_ids(db)
     diff: Dict[str, List[str]] = {}
-    for kind in (PHOTO_STANDARD, PHOTO_OTHER):
+    for kind in (PHOTO_STANDARD, PHOTO_OTHER, PHOTO_WASTAGE):
         present = set(backup_ids.get(kind) or [])
         missing = sorted(set(current.get(kind) or []) - present)
         if missing:
@@ -535,12 +544,17 @@ async def photo_difference(
         "missing": diff,
         "standard_missing": len(diff.get(PHOTO_STANDARD, [])),
         "other_missing": len(diff.get(PHOTO_OTHER, [])),
+        "wastage_missing": len(diff.get(PHOTO_WASTAGE, [])),
     }
 
 
 def photo_ids_in_snapshot(ts: str) -> Dict[str, List[str]]:
     snap_dir = backup_service._snapshot_root() / ts
-    result: Dict[str, List[str]] = {PHOTO_STANDARD: [], PHOTO_OTHER: []}
+    result: Dict[str, List[str]] = {
+        PHOTO_STANDARD: [],
+        PHOTO_OTHER: [],
+        PHOTO_WASTAGE: [],
+    }
     for kind, member_dir in backup_service.PHOTO_MEMBER_DIRS.items():
         directory = snap_dir / member_dir
         if directory.is_dir():
@@ -553,14 +567,31 @@ def photo_ids_in_snapshot(ts: str) -> Dict[str, List[str]]:
 def restore_photos(
     standard: Dict[str, bytes],
     other: Dict[str, bytes],
+    wastage: Optional[Dict[str, bytes]] = None,
     *,
     capture_root: Optional[Path] = None,
+    wastage_capture_root: Optional[Path] = None,
 ) -> Dict[str, int]:
-    """把两类照片写回运行实例；只补齐缺失文件，不删除现有照片。"""
-    root = capture_root or backup_service.get_hygiene_capture_root()
-    root.mkdir(parents=True, exist_ok=True)
-    restored = {PHOTO_STANDARD: 0, PHOTO_OTHER: 0}
-    for kind, blobs in ((PHOTO_STANDARD, standard), (PHOTO_OTHER, other)):
+    """把三类照片写回运行实例；只补齐缺失文件，不删除现有照片。
+
+    卫生两类回 ``hygiene-captures/``，损耗照片回 ``wastage-captures/``（两个
+    FileCaptureStore，目录不同）。
+    """
+    roots = {
+        PHOTO_STANDARD: capture_root or backup_service.get_hygiene_capture_root(),
+        PHOTO_OTHER: capture_root or backup_service.get_hygiene_capture_root(),
+        PHOTO_WASTAGE: wastage_capture_root
+        or backup_service.get_wastage_capture_root(),
+    }
+    for root in set(roots.values()):
+        Path(root).mkdir(parents=True, exist_ok=True)
+    restored = {PHOTO_STANDARD: 0, PHOTO_OTHER: 0, PHOTO_WASTAGE: 0}
+    for kind, blobs in (
+        (PHOTO_STANDARD, standard),
+        (PHOTO_OTHER, other),
+        (PHOTO_WASTAGE, wastage or {}),
+    ):
+        root = Path(roots[kind])
         for capture_id, data in blobs.items():
             target = root / capture_id
             if target.name.startswith(".") or "/" in capture_id:
@@ -570,7 +601,7 @@ def restore_photos(
                     target.write_bytes(data)
                 restored[kind] += 1
             except OSError:
-                logger.warning("恢复卫生照片失败: %s", capture_id)
+                logger.warning("恢复照片失败（%s）: %s", kind, capture_id)
     return restored
 
 

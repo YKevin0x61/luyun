@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>厨务管家 · 招牌墙</title>
+  <link rel="stylesheet" href="tokens.css">
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script>
+    /* Babel standalone 在浏览器里编译 text/babel 时必定打一条「建议预编译」的
+       开发提示（console.warn，不是报错）。只过滤这一条固定文案，其它警告照常。 */
+    (function () {
+      var warn = console.warn;
+      console.warn = function () {
+        if (arguments.length && typeof arguments[0] === 'string' &&
+            arguments[0].indexOf('in-browser Babel transformer') !== -1) {
+          return;
+        }
+        return warn.apply(console, arguments);
+      };
+    })();
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="data.js"></script>
+  <script type="text/babel" data-presets="react" src="ui.jsx"></script>
+  <script type="text/babel" data-presets="react" src="pages.jsx"></script>
+  <script type="text/babel" data-presets="react" src="app.jsx"></script>
+
+  <script>
+    /* file:// 打开时，Babel 用 XHR 取 .jsx 会被浏览器按跨源拦掉（file:// 没有源）。
+       只在这种情况下换成同源预编译的 prebuilt/*.js；HTTP 下仍走上面的 text/babel 源文件。 */
+    (function () {
+      if (location.protocol !== 'file:') return;
+      var tags = document.querySelectorAll('script[type="text/babel"]');
+      for (var i = 0; i < tags.length; i += 1) tags[i].type = 'text/plain';
+      ['prebuilt/ui.js', 'prebuilt/pages.js', 'prebuilt/app.js'].forEach(function (src) {
+        var s = document.createElement('script');
+        s.src = src;
+        s.async = false;
+        document.body.appendChild(s);
+      });
+    })();
+  </script>
+</body>
+</html>

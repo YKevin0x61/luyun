@@ -150,6 +150,11 @@ const {
   pointsError,
   loadPoints,
   notBackedUp,
+  backupTableGroups,
+  backupTableTotal,
+  backupTablePresentCount,
+  backupTablePending,
+  loadBackupTables,
   coldPoints,
   mediumLabels,
   mediumPurposes,
@@ -329,6 +334,7 @@ watch(
     if (!on) return
     loadHealth()
     loadPoints()
+    loadBackupTables()
     runSpotted('retention', loadRetention)
     loadDbCred()
   },
@@ -405,6 +411,18 @@ watch(
             <span>同时打包其它照片（日常实拍、专项、整改回拍、教材）</span>
           </label>
         </div>
+        <div class="full">
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="exportForm.include_wastage_photos" />
+            <span>同时打包损耗登记照片</span>
+          </label>
+        </div>
+        <div class="full">
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="exportForm.include_scraper_state" />
+            <span>同时打包采集状态（恢复后不会漏采当天订单）</span>
+          </label>
+        </div>
       </div>
       <!-- 风险提示：口令遗失不可解密，是本节唯一一处 .luyunbak 口令说明 -->
       <p class="hint is-warn">导出的 <code>.luyunbak</code> 由口令加密，口令遗失将无法解密恢复，请牢记。</p>
@@ -439,6 +457,18 @@ watch(
         <p v-if="appDbExportFormat === 'pgdump'" class="hint">
           PostgreSQL 门店的业务数据以整库快照（<code>pg_dump</code>）打包；宿主机冷备命令见 <code>deploy/README.md</code> 第 10.4 节。恢复时的行为见下面「恢复」一节。
         </p>
+        <!-- 整库快照覆盖的每一张表：分组与表名都来自后端，页面不自己维护 -->
+        <p v-if="backupTableTotal" class="hint">
+          整库快照含全部 {{ backupTablePresentCount }} 张数据表（按用途分组，随快照一起恢复）<template v-if="backupTablePending.length">；另有 {{ backupTablePending.length }} 张结构已声明但迁移未应用，标为「未应用」</template>：
+        </p>
+        <ul v-if="backupTableGroups.length" class="bullet-list">
+          <li v-for="group in backupTableGroups" :key="group.key">
+            <strong>{{ group.label }}</strong>：
+            <template v-for="(table, index) in group.tables" :key="table.name">
+              <code>{{ table.name }}{{ table.present ? '' : '（未应用）' }}</code><span v-if="index < group.tables.length - 1">、</span>
+            </template>
+          </li>
+        </ul>
       </details>
     </fieldset>
 
@@ -542,6 +572,14 @@ watch(
           <label class="luyun-check-row">
             <LuyunCheckbox v-model="importState.apply_other_photos" :disabled="!importIncludes.other_photos" />
             <span>其它照片</span>
+          </label>
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="importState.apply_wastage_photos" :disabled="!importIncludes.wastage_photos" />
+            <span>损耗照片</span>
+          </label>
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="importState.apply_scraper_state" :disabled="!importIncludes.scraper_state" />
+            <span>采集状态</span>
           </label>
         </div>
       </div>

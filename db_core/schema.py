@@ -20,6 +20,8 @@ ALL_TABLES = [
     "prep_items",
     "prep_plan_days",
     "prep_plan_entries",
+    "prep_plan_snapshots",
+    "prep_plan_actuals",
     "prep_staff_station_picks",
     "wecom_push_webhooks",
     "wecom_push_jobs",
@@ -60,6 +62,10 @@ HYGIENE_TABLES = (
     "hygiene_teaching_examples",
     "hygiene_capture_variants",
     "hygiene_wecom_shares",
+    # 仪容仪表（迁移 0011）：按人的自拍与合格参照图。当初只加了建表脚本、漏了这一处
+    # 登记，于是 Admin 数据浏览器看不到它们、备份「包里装了什么」也列不出来。
+    "hygiene_attire_standard",
+    "hygiene_attire_shots",
 )
 
 # Scheduling tables: `staff_shifts` / `staff_assignments` are the shared vocabulary
@@ -144,3 +150,46 @@ ADMIN_READ_ONLY_TABLES = (
     *ATTENDANCE_TABLES,
     *WASTAGE_TABLES,
 )
+
+# 表按域分组的口径：Admin 数据浏览器与「备份 → 这个包里装了什么」共用同一份，
+# 免得两处各列一遍然后漂移。
+#
+# 2026-10-26 重排：原来的「业务数据」一格装了三件不相干的事 —— 点餐数据、备货计划、
+# 企微推送的历史表，还夹着 `app_settings`。16 张表挤在一个标题下，侧边栏滚两屏才
+# 找到「企微推送」，而企微推送自己另有一格。现在按**业务域**拆开。
+#
+# `auth` 是逻辑表名（物理表是 AUTH_PHYSICAL_TABLES 那三张），不属于任何业务域；
+# 「系统设置」收的是配置、登录凭据与运行日志入口 —— 它们都是「改这台机器」的事，
+# 不是「看这天的生意」。`logs` 仍单独只读、不参与业务写入口。
+TABLE_GROUPS = (
+    ("dining", "点餐数据", (
+        "orders",
+        "tables",
+        "stations",
+        "dish_stations",
+        "semi_finished_rules",
+        "report_dishes",
+    )),
+    ("prep", "备货计划", (
+        "prep_items",
+        "prep_plan_days",
+        "prep_plan_entries",
+        "prep_plan_snapshots",
+        "prep_plan_actuals",
+        "prep_staff_station_picks",
+    )),
+    ("recipe", "配方库", RECIPE_TABLES),
+    ("hygiene", "卫生管理", HYGIENE_TABLES),
+    ("scheduling", "排班", SCHEDULING_TABLES),
+    ("wecom", "企微推送", (
+        "wecom_push_webhooks",
+        "wecom_push_jobs",
+        "wecom_push_logs",
+    ) + WECOM_SUBSCRIPTION_TABLES),
+    ("hr", "人事考勤", OVERTIME_TABLES + ATTENDANCE_TABLES),
+    ("wastage", "损耗", WASTAGE_TABLES),
+    ("config", "系统设置", ("app_settings",) + AUTH_PHYSICAL_TABLES + ("logs",)),
+)
+
+# 整库 pg_dump 里有、但不在任何业务分组里的系统表（备份清单要如实列出它们）。
+SYSTEM_TABLES = ("tenants", "schema_migrations")

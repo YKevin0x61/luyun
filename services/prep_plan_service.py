@@ -22,6 +22,7 @@
 两点打开看；零点到开店前这段落在自然日边界上的偏差是已知的，不修。
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -55,8 +56,10 @@ FORECAST_WINDOW_WEEKS = 8      # 同星期几取近 8 周（p40 在 4 个样本�
 STORE_FACTOR_SHORT_DAYS = 7    # 整店水位：近 7 天 …
 STORE_FACTOR_LONG_DAYS = 21    # … 对前 21 天
 # 水位限幅收到 ±15%：趋势修正是真需求，但 ±30% 对「少剩货」太激进
-STORE_FACTOR_MIN = 0.85
-STORE_FACTOR_MAX = 1.15
+STORE_FACTOR_MIN = 0.75
+STORE_FACTOR_MAX = 1.30
+# 参考值的时间跨度：现在起的未来 24 小时（与保质期对齐，见 ADR 0122）
+FORECAST_HORIZON_HOURS = 24
 # 偶发品下限：近 7 天卖出过的品，建议量至少 1 个单位，否则 p40 会让长尾品静默消失
 SPARSE_FLOOR_DAYS = 7
 SPARSE_FLOOR_QTY = 1.0
@@ -353,9 +356,12 @@ class PrepPlanService:
         open_t, close_t = await self._runtime(db)
         cfg = await self._forecast_config(db)
         today = now.date()
-        window_start = max(now, _at(today, open_t))
-        window_end = _at(today, close_t)
-        closed = now >= window_end
+        # ADR 0122：参考值覆盖「现在起的未来 24 小时」，与 24 小时保质对齐。
+        # 这样下午打开页面不会因为「到打烊只剩 7 小时」而看着数字腰斩。
+        window_start = now
+        window_end = now + timedelta(hours=FORECAST_HORIZON_HOURS)
+        after_close = now.time() >= close_t
+        closed = False  # 滚动窗口下不存在「今天已打烊就没数」这回事
         clock_t = window_start.time()
 
         rows = await self._fetch_range(
@@ -393,13 +399,25 @@ class PrepPlanService:
             if (today - timedelta(days=i)) in days_with_orders
         ]
 
+        def _span(day):
+            """从 day 的同钟点起算、往后 24 小时：[start, end)。跨天要拆成两段求和。"""
+            start = _at(day, clock_t)
+            return start, start + timedelta(hours=FORECAST_HORIZON_HOURS)
+
         def window_qty(day, key):
-            return usage.window(day, key, _epoch(_at(day, clock_t)), _epoch(_at(day, close_t)))
+            start, end = _span(day)
+            total = usage.window(day, key, _epoch(start), _epoch(end))
+            # 窗口跨过零点：把次日那段补上
+            total += usage.window(day + timedelta(days=1), key, _epoch(start), _epoch(end))
+            return total
 
         def store_volume(day):
             if day not in days_with_orders:
                 return None
-            return usage.raw_window(day, _epoch(_at(day, clock_t)), _epoch(_at(day, close_t)))
+            start, end = _span(day)
+            total = usage.raw_window(day, _epoch(start), _epoch(end))
+            total += usage.raw_window(day + timedelta(days=1), _epoch(start), _epoch(end))
+            return total
 
         factor_cache: Dict[date, float] = {}
 
@@ -519,6 +537,8 @@ class PrepPlanService:
                 "start": window_start.isoformat(),
                 "end": window_end.isoformat(),
                 "closed": closed,
+                "after_close": after_close,
+                "horizon_hours": FORECAST_HORIZON_HOURS,
             },
             "entries": entries,
             "missing_rule": [
@@ -831,6 +851,193 @@ class PrepPlanService:
             )
         await tdb.commit()
         return {"success": True, "id": item_id}
+
+
+    # ------------------------------------------------------------------ 快照与复盘（ADR 0123）
+
+    async def _sold_qty_map(self, db, start_dt: datetime, end_dt: datetime) -> Dict[Tuple[str, str], float]:
+        """一段时间里「卖出菜品 × 配方系数」的用量，按 (备货品, 单位) 聚合。复盘用。"""
+        rows = await self._fetch_orders(db, [("sold", start_dt, end_dt)])
+        exact_rules, norm_rules = await self._load_rules(db)
+        totals: Dict[Tuple[str, str], float] = defaultdict(float)
+        for row in rows:
+            if row["quantity"] == 0:
+                continue
+            dishes = exact_rules.get(row["dish_name"]) or norm_rules.get(
+                normalize_dish_name(row["dish_name"]), ()
+            )
+            for rule in dishes:
+                totals[(rule["semi_name"], rule["unit"])] += row["quantity"] * rule["factor"]
+        return totals
+
+    async def _rules_fingerprint(self, db) -> str:
+        """当日配方表的指纹。配方一改，历史窗口的「实际销量」就与当时的预测不同源。"""
+        tdb = db.table("semi_finished_rules")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                "SELECT dish_name, semi_name, unit, factor FROM semi_finished_rules"
+            )
+            rows = await cursor.fetchall()
+        parts = sorted(
+            f"{row['dish_name'] or ''}|{row['semi_name'] or ''}|{row['unit'] or ''}|"
+            f"{float(row['factor'] or 1):.6f}"
+            for row in rows
+        )
+        return hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()
+
+    async def write_snapshot(self, db, now: Optional[datetime] = None) -> dict:
+        """整点写一份参考值快照。同一天同一整点重复调用按 upsert 处理。"""
+        now = now or datetime.now(CHINA_TZ)
+        stamp = now.replace(minute=0, second=0, microsecond=0)
+        computed = await self.compute_suggestions(db, stamp)
+        fingerprint = await self._rules_fingerprint(db)
+        created = datetime.now(CHINA_TZ).isoformat()
+        window = computed["window"]
+        tdb = db.table("prep_plan_snapshots")
+        written = 0
+        async with tdb.conn.cursor() as cursor:
+            for entry in computed["entries"]:
+                basis = entry.get("basis") or {}
+                await cursor.execute(
+                    """
+                    INSERT INTO prep_plan_snapshots (
+                        snapshot_at, window_start, window_end, plan_day,
+                        prep_item_id, item_name, unit, station,
+                        suggested_qty, demand_qty, store_factor, quantile,
+                        basis_json, rules_fingerprint, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (tenant_id, snapshot_at, prep_item_id) DO NOTHING
+                    """,
+                    (
+                        stamp.isoformat(),
+                        window["start"],
+                        window["end"],
+                        computed["plan_day"],
+                        entry["prep_item_id"],
+                        entry["item_name"],
+                        entry["unit"],
+                        entry["station"],
+                        entry["suggested_qty"],
+                        basis.get("demand_qty", entry["suggested_qty"]),
+                        basis.get("store_factor", 1.0),
+                        basis.get("quantile", FORECAST_QUANTILE),
+                        json.dumps(basis, ensure_ascii=False),
+                        fingerprint,
+                        created,
+                    ),
+                )
+                written += 1
+        await tdb.commit()
+        return {"success": True, "snapshot_at": stamp.isoformat(), "rows": written}
+
+    async def backfill_actuals(self, db, now: Optional[datetime] = None) -> dict:
+        """把「窗口已经结束、实际还缺」的快照窗口补算出来。
+
+        实际销量 = 卖出菜品 × 配方系数，与参考值同源口径；用当前配方算，
+        因此把当前指纹一起存下来，复盘页据此判断两边是否同源。
+        """
+        now = now or datetime.now(CHINA_TZ)
+        tdb = db.table("prep_plan_snapshots")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT DISTINCT s.window_start, s.window_end
+                FROM prep_plan_snapshots s
+                LEFT JOIN prep_plan_actuals a
+                       ON a.window_start = s.window_start AND a.window_end = s.window_end
+                WHERE a.id IS NULL AND s.window_end <= ?
+                ORDER BY s.window_start
+                """,
+                (now.isoformat(),),
+            )
+            pending = await cursor.fetchall()
+        if not pending:
+            return {"success": True, "windows": 0, "rows": 0}
+
+        fingerprint = await self._rules_fingerprint(db)
+        computed_at = datetime.now(CHINA_TZ).isoformat()
+        items = await self._load_items(db)
+        written = 0
+        adb = db.table("prep_plan_actuals")
+        for row in pending:
+            start = datetime.fromisoformat(row["window_start"])
+            end = datetime.fromisoformat(row["window_end"])
+            sold = await self._sold_qty_map(db, start, end)
+            async with adb.conn.cursor() as cursor:
+                for item in items:
+                    key = (item["item_name"], item["unit"])
+                    await cursor.execute(
+                        """
+                        INSERT INTO prep_plan_actuals (
+                            window_start, window_end, prep_item_id, item_name, unit,
+                            station, sold_qty, rules_fingerprint, computed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (tenant_id, window_start, window_end, prep_item_id)
+                        DO NOTHING
+                        """,
+                        (
+                            row["window_start"],
+                            row["window_end"],
+                            item["prep_item_id"],
+                            item["item_name"],
+                            item["unit"],
+                            item["station"] or POSITION_STATION_MAP.get(item["position"], ""),
+                            round(sold.get(key, 0.0), 2),
+                            fingerprint,
+                            computed_at,
+                        ),
+                    )
+                    written += 1
+            await adb.commit()
+        return {"success": True, "windows": len(pending), "rows": written}
+
+    async def get_snapshot_day(self, db, day: str) -> dict:
+        """某一天的快照 + 实际，按品聚合。复盘页的唯一数据源。"""
+        tdb = db.table("prep_plan_snapshots")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT s.snapshot_at, s.window_start, s.prep_item_id, s.item_name,
+                       s.unit, s.station, s.suggested_qty, s.final_qty, s.store_factor,
+                       s.rules_fingerprint, s.snapshot_at,
+                       a.sold_qty, a.rules_fingerprint AS actual_fingerprint
+                FROM prep_plan_snapshots s
+                LEFT JOIN prep_plan_actuals a
+                       ON a.window_start = s.window_start
+                      AND a.window_end = s.window_end
+                      AND a.prep_item_id = s.prep_item_id
+                WHERE s.plan_day = ?
+                ORDER BY s.item_name, s.snapshot_at
+                """,
+                (day,),
+            )
+            rows = await cursor.fetchall()
+
+        by_item: Dict[Tuple[str, str], dict] = {}
+        for row in rows:
+            key = (row["item_name"] or "", row["unit"] or "")
+            bucket = by_item.setdefault(
+                key,
+                {
+                    "item_name": key[0],
+                    "unit": key[1],
+                    "station": row["station"] or "",
+                    "hours": [],
+                },
+            )
+            same_rules = (row["rules_fingerprint"] or "") == (row["actual_fingerprint"] or "")
+            bucket["hours"].append(
+                {
+                    "snapshot_at": row["snapshot_at"],
+                    "suggested_qty": float(row["suggested_qty"] or 0),
+                    "final_qty": row["final_qty"],
+                    "sold_qty": None if row["sold_qty"] is None else float(row["sold_qty"]),
+                    "store_factor": float(row["store_factor"] or 1),
+                    "same_rules": same_rules if row["sold_qty"] is not None else None,
+                }
+            )
+        items = sorted(by_item.values(), key=lambda b: (-len(b["hours"]), b["item_name"]))
+        return {"success": True, "day": day, "items": items, "rows": len(rows)}
 
 
 prep_plan_service = PrepPlanService()

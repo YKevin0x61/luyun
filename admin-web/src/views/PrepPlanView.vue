@@ -54,10 +54,9 @@ const title = PREP_PLAN_TITLE
 workbenchDocumentTitle(title)
 
 const windowText = computed(() => {
-  if (closed.value) return '今天已打烊'
   if (!windowEnd.value) return ''
   const clock = windowEnd.value.slice(11, 16)
-  return `现在 → ${clock}`
+  return `现在 → 明天 ${clock}（未来 24 小时）`
 })
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
@@ -205,7 +204,6 @@ watch(activeStation, () => {
     </section>
 
     <p v-else-if="state === 'loading'" class="pp-empty">正在按现在到打烊算…</p>
-    <p v-else-if="closed" class="pp-empty">今天已打烊，明天早上再看。</p>
     <p v-else-if="!groups.length" class="pp-empty">今天不用做。</p>
 
     <template v-else>

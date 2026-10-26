@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>厨务管家重做 · 六候选缩略图</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0b0b0b;color:#d9d9d4;font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;padding:28px 24px 60px}
+  h1{font-size:15px;font-weight:700;letter-spacing:.02em;color:#f2f2ec;margin-bottom:4px}
+  .sub{font-size:12px;color:#8b8b84;margin-bottom:22px}
+  .grid{display:grid;grid-template-columns:480px 480px;gap:22px 26px}
+  .cell{width:480px}
+  .cap{display:flex;align-items:baseline;gap:8px;margin-top:9px;font-size:12px;color:#9b9b93}
+  .cap b{color:#f0f0ea;font-size:12.5px;font-weight:700}
+  .cap i{font-style:normal;color:#6f6f68;font-size:11px}
+  .thumb{width:480px;height:300px;overflow:hidden;position:relative;border:1px solid #232323}
+
+  /* ── 1 仪表台 ───────────────────────────────── */
+  .t1{background:#14150F;color:#EDEBE3;font-size:10px;display:flex;flex-direction:column}
+  .t1-status{height:22px;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #2B2E28;font-size:8.5px;letter-spacing:.08em;color:#9CA095}
+  .t1-status .nm{color:#EDEBE3;letter-spacing:.04em}
+  .t1-status .dot{width:5px;height:5px;background:#6E9E7E;border-radius:50%}
+  .t1-status .sp{flex:1}
+  .t1-body{flex:1;display:flex;min-height:0}
+  .t1-rail{width:34px;border-right:1px solid #2B2E28;display:flex;flex-direction:column;align-items:center;gap:9px;padding-top:10px}
+  .t1-rail i{display:block;width:13px;height:13px;border:1px solid #5c6157;border-radius:1px}
+  .t1-rail i.on{border-color:#C8551F;background:rgba(200,85,31,.18)}
+  .t1-main{flex:1;padding:9px 10px;display:flex;flex-direction:column;gap:8px;min-width:0}
+  .t1-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#2B2E28;border:1px solid #2B2E28}
+  .t1-kpis>div{background:#1B1D18;padding:7px 8px}
+  .t1-kpis .lbl{font-size:7.5px;letter-spacing:.14em;color:#9CA095}
+  .t1-kpis .val{font-size:17px;font-weight:600;letter-spacing:-.01em;margin-top:2px;font-variant-numeric:tabular-nums}
+  .t1-kpis .dt{font-size:7.5px;color:#6E9E7E;margin-top:1px}
+  .t1-kpis .dt.warn{color:#C8551F}
+  .t1-scale{position:relative;border:1px solid #2B2E28;background:#1B1D18;padding:7px 8px 4px}
+  .t1-scale .lbl{font-size:7.5px;letter-spacing:.14em;color:#9CA095;display:flex;justify-content:space-between}
+  .t1-scale .ruler{height:26px;margin-top:4px;background:
+     repeating-linear-gradient(90deg,#3a3e36 0 1px,transparent 1px 12px) bottom/100% 9px no-repeat,
+     linear-gradient(180deg,transparent 60%,rgba(200,85,31,.10) 60%);
+     border-bottom:1px solid #3a3e36;position:relative}
+  .t1-scale .ruler .bar{position:absolute;left:4%;right:26%;bottom:9px;height:12px;
+     background:linear-gradient(180deg,rgba(200,85,31,.55),rgba(200,85,31,.12));clip-path:polygon(0 40%,6% 18%,14% 46%,22% 10%,30% 38%,38% 6%,46% 34%,54% 14%,62% 44%,70% 12%,78% 40%,86% 20%,94% 48%,100% 26%,100% 100%,0 100%)}
+  .t1-scale .now{position:absolute;left:62%;top:0;bottom:0;width:1.5px;background:#C8551F}
+  .t1-scale .now b{position:absolute;top:-1px;left:3px;font-size:7px;color:#C8551F;font-weight:600;letter-spacing:.06em}
+  .t1-two{display:grid;grid-template-columns:1.15fr .85fr;gap:8px;flex:1;min-height:0}
+  .t1-box{border:1px solid #2B2E28;background:#1B1D18;padding:7px 8px;overflow:hidden;display:flex;flex-direction:column;min-height:0}
+  .t1-box h4{font-size:7.5px;letter-spacing:.14em;color:#9CA095;font-weight:500;margin-bottom:5px;display:flex;justify-content:space-between}
+  .t1-box h4 em{font-style:normal;color:#C8551F}
+  .t1-row{display:flex;align-items:center;gap:5px;padding:3px 0;border-bottom:1px solid #23261f;font-size:8.5px;color:#c9c7bd}
+  .t1-row:last-child{border:0}
+  .t1-row .who{color:#EDEBE3;width:30px;flex:none}
+  .t1-row .mid{flex:1;color:#9CA095;font-size:8px}
+  .t1-row .st{font-size:7.5px;color:#C8551F;letter-spacing:.04em}
+  .t1-sh{display:flex;align-items:flex-end;gap:3px;flex:1;min-height:0;padding-top:2px}
+  .t1-sh .blk{flex:1;background:rgba(237,235,227,.14);border-top:1px solid #6E9E7E;height:62%}
+  .t1-sh .blk:nth-child(2n){height:78%}
+  .t1-sh .blk:nth-child(3n){height:46%}
+  .t1-sh .blk.b2{height:90%}
+  .t1-sh .blk.b2{border-top-color:#C8551F;background:rgba(200,85,31,.18)}
+
+  /* ── 2 一个字 ───────────────────────────────── */
+  .t2{background:#171512;color:#F2EDE3;display:flex}
+  .t2-left{width:38%;background:#D8361F;padding:14px 14px;display:flex;flex-direction:column;justify-content:space-between}
+  .t2-left .k{font-size:8px;letter-spacing:.2em;color:rgba(242,237,227,.72)}
+  .t2-left .big{font-size:44px;font-weight:900;letter-spacing:-.04em;line-height:.92;margin-top:-2px;font-variant-numeric:tabular-nums}
+  .t2-left .big small{font-size:15px;font-weight:700;letter-spacing:0}
+  .t2-left .d{font-size:8px;letter-spacing:.04em;color:rgba(242,237,227,.8)}
+  .t2-right{flex:1;padding:15px 14px;display:flex;flex-direction:column}
+  .t2-right .hd{font-size:8px;letter-spacing:.22em;color:#8f887b}
+  .t2-right .title{font-size:13px;font-weight:900;letter-spacing:-.01em;margin-top:3px}
+  .t2-list{margin-top:12px;display:flex;flex-direction:column;gap:9px;flex:1}
+  .t2-it{display:flex;align-items:baseline;gap:8px;padding-bottom:8px;border-bottom:1px solid #2b2721}
+  .t2-it .n{font-size:19px;font-weight:900;letter-spacing:-.03em;width:34px;flex:none;font-variant-numeric:tabular-nums}
+  .t2-it .n.red{color:#E8C24A}
+  .t2-it .tx{flex:1;font-size:8.5px;line-height:1.5;color:#c9c2b4}
+  .t2-it .tx b{display:block;color:#F2EDE3;font-size:9.5px;font-weight:700;margin-bottom:1px}
+
+  /* ── 3 作业流 ───────────────────────────────── */
+  .t3{background:#0E1110;color:#E8EEEA;display:flex}
+  .t3-nav{width:96px;border-right:1px solid #232A27;padding:11px 9px;font-size:8px}
+  .t3-nav .brand{font-size:9px;font-weight:700;color:#E8EEEA;letter-spacing:.02em;margin-bottom:11px}
+  .t3-nav .it{padding:4px 0;color:#92A39B;display:flex;gap:5px;align-items:center}
+  .t3-nav .it.on{color:#E8EEEA}
+  .t3-nav .it.on::before{content:"";width:3px;height:3px;background:#2FB98A;border-radius:2px}
+  .t3-main{flex:1;padding:11px 12px;display:flex;flex-direction:column;min-width:0}
+  .t3-top{display:flex;align-items:center;gap:8px}
+  .t3-top .h{font-size:12px;font-weight:700;letter-spacing:-.02em;flex:1}
+  .t3-days{display:flex;gap:3px;margin-top:9px}
+  .t3-days span{flex:1;text-align:center;font-size:7px;padding:4px 0;border-radius:4px;color:#92A39B;background:#151A18}
+  .t3-days span.on{background:#2FB98A;color:#08110d;font-weight:700}
+  .t3-card{margin-top:9px;background:#171C1A;border:1px solid #232A27;border-radius:8px;padding:10px 11px;display:flex;flex-direction:column;justify-content:space-between}
+  .t3-mini{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:7px}
+  .t3-mini>div{background:#151A18;border:1px solid #232A27;border-radius:7px;padding:7px 9px}
+  .t3-mini .k{font-size:7px;color:#92A39B;letter-spacing:.08em}
+  .t3-mini .v{font-size:14px;font-weight:700;letter-spacing:-.02em;margin-top:2px}
+  .t3-card .tag{display:inline-block;font-size:7px;padding:2px 6px;border-radius:999px;background:rgba(224,139,60,.16);color:#E08B3C;letter-spacing:.06em}
+  .t3-card .who{font-size:14px;font-weight:700;letter-spacing:-.01em;margin-top:7px}
+  .t3-card .meta{font-size:8px;color:#92A39B;margin-top:3px;line-height:1.6}
+  .t3-card .btn{margin-top:9px;height:26px;border-radius:6px;background:#2FB98A;color:#08110d;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700}
+  .t3-side{width:104px;border-left:1px solid #232A27;padding:11px 9px;font-size:8px;color:#92A39B}
+  .t3-side b{display:block;color:#E8EEEA;font-size:8.5px;margin-bottom:6px}
+  .t3-side .ln{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1C2320}
+
+  /* ── 4 按钮优先 ─────────────────────────────── */
+  .t4{background:#101211;color:#F0F2EE;display:flex}
+  .t4-rail{width:36px;border-right:1px solid #232825;display:flex;flex-direction:column;align-items:center;gap:8px;padding-top:9px}
+  .t4-rail i{width:12px;height:12px;border:1px solid #4c544f;border-radius:2px}
+  .t4-main{flex:1;padding:9px 10px;display:flex;flex-direction:column;gap:7px;min-width:0}
+  .t4-hd{display:flex;align-items:baseline;gap:6px}
+  .t4-hd .t{font-size:11.5px;font-weight:700;letter-spacing:-.02em}
+  .t4-hd .s{font-size:7.5px;color:#8f9a93}
+  .t4-big{font-size:26px;font-weight:800;letter-spacing:-.03em;font-variant-numeric:tabular-nums;line-height:1}
+  .t4-big small{font-size:9px;font-weight:600;color:#8f9a93;letter-spacing:.06em;margin-left:4px}
+  .t4-tiles{display:grid;grid-template-columns:1fr 1fr;gap:7px;flex:1}
+  .t4-tile{border-radius:8px;padding:8px 9px;display:flex;flex-direction:column;justify-content:space-between;background:#1C211E}
+  .t4-tile .k{font-size:7.5px;letter-spacing:.1em;color:#8f9a93}
+  .t4-tile .v{font-size:15px;font-weight:700;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+  .t4-tile .a{height:22px;border-radius:5px;background:#37C08A;color:#08110d;display:flex;align-items:center;justify-content:center;font-size:8.5px;font-weight:700}
+  .t4-tile.warn{background:#241d18}
+  .t4-tile.warn .a{background:#E6A23C;color:#1a1206}
+
+  /* ── 5 终端核 ───────────────────────────────── */
+  .t5{background:#0B0D14;color:#F2F0EF;font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;display:flex;flex-direction:column}
+  .t5-status{height:22px;display:flex;align-items:center;gap:9px;padding:0 10px;border-bottom:1px solid #23262E;font-size:8px;color:#8B9099;letter-spacing:.04em}
+  .t5-status b{color:#F2F0EF;font-weight:500}
+  .t5-status .ok{color:#E2743A}
+  .t5-status .sp{flex:1}
+  .t5-grid{flex:1;display:grid;grid-template-columns:1.1fr 1fr 1fr;grid-template-rows:1fr 1fr;gap:1px;background:#23262E;padding:1px;min-height:0}
+  .t5-b{background:#0B0D14;padding:7px 8px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+  .t5-b .h{font-size:7.5px;color:#8B9099;letter-spacing:.08em;margin-bottom:5px}
+  .t5-b .h b{color:#F2F0EF;font-weight:500}
+  .t5-b .n{font-size:20px;letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums}
+  .t5-b .n em{font-style:normal;font-size:9px;color:#8B9099;margin-left:4px;letter-spacing:.02em}
+  .t5-b .ln{font-size:7.5px;color:#8B9099;margin-top:3px;letter-spacing:.02em}
+  .t5-b .row{display:flex;justify-content:space-between;font-size:7.5px;color:#b9bcc2;padding:2px 0;border-bottom:1px solid #171a20}
+  .t5-b .row span:last-child{color:#8B9099}
+  .t5-b.big{grid-row:span 2;display:flex;flex-direction:column;justify-content:space-between}
+  .t5-b .scale{height:22px;background:repeating-linear-gradient(90deg,#2e323c 0 1px,transparent 1px 9px) bottom/100% 6px no-repeat;border-bottom:1px solid #2e323c;position:relative}
+  .t5-b .scale::after{content:"";position:absolute;left:58%;top:0;bottom:0;width:1px;background:#E2743A}
+
+  /* ── 6 招牌墙 ───────────────────────────────── */
+  .t6{background:#0B3A46;color:#F6EFE2;display:flex;overflow:hidden}
+  .t6-nav{width:30px;background:#101010;display:flex;flex-direction:column;align-items:center;gap:7px;padding:8px 0}
+  .t6-nav b{writing-mode:vertical-rl;font-size:7.5px;letter-spacing:.24em;color:#F6EFE2;padding:3px 0}
+  .t6-nav span{writing-mode:vertical-rl;font-size:6.5px;letter-spacing:.18em;color:rgba(246,239,226,.45);padding:2px 0}
+  .t6-main{flex:1;padding:9px 10px;display:flex;flex-direction:column;gap:7px;position:relative;min-width:0}
+  .t6-hd{display:flex;align-items:baseline;gap:7px}
+  .t6-hd .t{font-size:12px;font-weight:900;letter-spacing:.02em}
+  .t6-hd .s{font-size:7px;letter-spacing:.16em;color:rgba(246,239,226,.55)}
+  .t6-signs{display:grid;grid-template-columns:1.2fr 1fr;gap:7px;flex:1;min-height:0}
+  .sign{border:2px solid #F6EFE2;box-shadow:4px 4px 0 rgba(0,0,0,.55);padding:7px 9px;display:flex;flex-direction:column;justify-content:space-between;border-radius:1px;position:relative;overflow:hidden}
+  .sign.red{background:#C8322A}
+  .sign.yellow{background:#E8B12E;color:#1a1206;border-color:#F6EFE2}
+  .sign.green{background:#2E7D5B;grid-column:1/-1;flex-direction:row;align-items:center;gap:10px}
+  .sign .k{font-size:7px;letter-spacing:.18em;opacity:.78}
+  .sign .v{font-size:17px;font-weight:900;letter-spacing:-.01em;line-height:1}
+  .sign .v small{font-size:9px;font-weight:700}
+  .sign.green .v{font-size:13px}
+  .sign .stamp{position:absolute;right:6px;bottom:6px;width:20px;height:20px;border:2px solid rgba(246,239,226,.85);border-radius:2px;transform:rotate(-6deg);display:flex;align-items:center;justify-content:center;font-size:7px;font-weight:900}
+  .sign .btn{height:19px;background:#101010;color:#F6EFE2;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;letter-spacing:.06em;border-radius:1px}
+</style>
+</head>
+<body>
+
+<h1>六个候选 · 同一屏「今天」（店长桌面）</h1>
+<div class="sub">缩略图只画骨架与气质。下面三张会做成完整版：1、3、6。</div>
+
+<div class="grid">
+
+  <!-- 1 -->
+  <div class="cell">
+    <div class="thumb t1">
+      <div class="t1-status"><span class="nm">云味小馆 · 中山路店</span><span>10.25 周六 · 营业日</span><span class="dot"></span><span>在线</span><span class="sp"></span><span>店长 陈静</span></div>
+      <div class="t1-body">
+        <div class="t1-rail"><i class="on"></i><i></i><i></i><i></i><i></i></div>
+        <div class="t1-main">
+          <div class="t1-kpis">
+            <div><div class="lbl">今日营业额</div><div class="val">28,640</div><div class="dt">+12.4% 较昨日</div></div>
+            <div><div class="lbl">今日订单</div><div class="val">412</div><div class="dt">客单 ¥69.5</div></div>
+            <div><div class="lbl">待验收</div><div class="val">9</div><div class="dt warn">逾期 1</div></div>
+          </div>
+          <div class="t1-scale">
+            <div class="lbl"><span>出餐速率 · 每 15 分钟</span><span>76 单/时</span></div>
+            <div class="ruler"><div class="bar"></div><div class="now"><b>18:40</b></div></div>
+          </div>
+          <div class="t1-two">
+            <div class="t1-box"><h4><span>今天要处理</span><em>3</em></h4>
+              <div class="t1-row"><span class="who">张伟</span><span class="mid">事假 10/26–27</span><span class="st">待批</span></div>
+              <div class="t1-row"><span class="who">灶台</span><span class="mid">9 项待验收</span><span class="st">去验收</span></div>
+              <div class="t1-row"><span class="who">B 区</span><span class="mid">垃圾桶未加盖</span><span class="st">逾期</span></div>
+            </div>
+            <div class="t1-box"><h4><span>今天谁上班</span><span>25 人</span></h4>
+              <div class="t1-sh"><div class="blk"></div><div class="blk"></div><div class="blk b2"></div><div class="blk"></div><div class="blk"></div><div class="blk"></div><div class="blk"></div><div class="blk"></div><div class="blk b2"></div><div class="blk"></div><div class="blk"></div><div class="blk"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>1 · 仪表台</b><i>Dieter Rams / Braun 控制面板 · 刻度、发丝线、单一信号橙</i></div>
+  </div>
+
+  <!-- 2 -->
+  <div class="cell">
+    <div class="thumb t2">
+      <div class="t2-left">
+        <div class="k">今天 · 10.25 周六</div>
+        <div><div class="big">28,640<small>元</small></div><div class="d">较昨日 +12.4%</div></div>
+        <div class="k">412 单 · 客单 69.5</div>
+      </div>
+      <div class="t2-right">
+        <div class="hd">今天要处理</div>
+        <div class="title">三件事，做完就下班</div>
+        <div class="t2-list">
+          <div class="t2-it"><div class="n red">02</div><div class="tx"><b>待批请假</b>张伟 · 事假 10/26–27</div></div>
+          <div class="t2-it"><div class="n">09</div><div class="tx"><b>待验收</b>后厨 · 灶台等 9 项</div></div>
+          <div class="t2-it"><div class="n">01</div><div class="tx"><b>逾期整改</b>前厅 B 区 · 垃圾桶未加盖</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>2 · 一个字</b><i>佐藤可士和 · 一块朱红只放一个数，其余全安静</i></div>
+  </div>
+
+  <!-- 3 -->
+  <div class="cell">
+    <div class="thumb t3">
+      <div class="t3-nav">
+        <div class="brand">厨务管家</div>
+        <div class="it on">今天</div>
+        <div class="it">生意</div>
+        <div class="it">人</div>
+        <div class="it">现场</div>
+        <div class="it">厨房</div>
+        <div class="it">系统</div>
+      </div>
+      <div class="t3-main">
+        <div class="t3-top"><div class="h">今天</div><div style="font-size:7.5px;color:#92A39B">陈静 · 店长</div></div>
+        <div class="t3-days"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span class="on">六 25</span><span>日</span></div>
+        <div class="t3-card">
+          <div><span class="tag">现在最该处理</span>
+            <div class="who">张伟请假待批</div>
+            <div class="meta">事假 · 10/26 – 10/27 · 2 天<br>批准后自动写入排班</div>
+          </div>
+          <div class="btn">批准</div>
+        </div>
+        <div class="t3-mini">
+          <div><div class="k">卫生待验收</div><div class="v">9 项</div></div>
+          <div><div class="k">备货还差</div><div class="v">7 项</div></div>
+        </div>
+      </div>
+      <div class="t3-side">
+        <b>接下来</b>
+        <div class="ln"><span>卫生验收</span><span>9</span></div>
+        <div class="ln"><span>整改单</span><span>1</span></div>
+        <div class="ln"><span>备货</span><span>7</span></div>
+        <div class="ln"><span>人事提醒</span><span>3</span></div>
+      </div>
+    </div>
+    <div class="cap"><b>3 · 作业流</b><i>7shifts 一类排班产品 · 一次一件事，卡片 + 日期带 + 大按钮</i></div>
+  </div>
+
+  <!-- 4 -->
+  <div class="cell">
+    <div class="thumb t4">
+      <div class="t4-rail"><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="t4-main">
+        <div class="t4-hd"><div class="t">今天</div><div class="s">10.25 周六 · 店长 陈静</div></div>
+        <div class="t4-big">28,640<small>元 · 412 单</small></div>
+        <div class="t4-tiles">
+          <div class="t4-tile warn"><div><div class="k">待处理</div><div class="v">3 件</div></div><div class="a">去处理</div></div>
+          <div class="t4-tile"><div><div class="k">出餐速率</div><div class="v">76 单/时</div></div><div class="a">看档口</div></div>
+          <div class="t4-tile"><div><div class="k">在店桌台</div><div class="v">18 / 24</div></div><div class="a">看实况</div></div>
+          <div class="t4-tile"><div><div class="k">备货还差</div><div class="v">7 项</div></div><div class="a">去备货</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>4 · 按钮优先</b><i>POS 作业面 + Linear 排版纪律 · 大色块按钮、数字压过标签</i></div>
+  </div>
+
+  <!-- 5 -->
+  <div class="cell">
+    <div class="thumb t5">
+      <div class="t5-status"><b>云味小馆 / 中山路店</b><span>2026-10-25 SAT</span><span class="ok">● ONLINE</span><span>76/min</span><span class="sp"></span><span>MANAGER 陈静</span></div>
+      <div class="t5-grid">
+        <div class="t5-b big">
+          <div><div class="h">▸ REVENUE_TODAY</div><div class="n">28,640<em>CNY</em></div><div class="ln">+12.4% vs yesterday</div></div>
+          <div><div class="h">▸ RATE / 30MIN</div><div class="scale"></div><div class="ln">76 plates/hr · 烧烤 12.5min</div></div>
+        </div>
+        <div class="t5-b"><div class="h">▸ ORDERS</div><div class="n">412<em>单</em></div><div class="ln">客单 69.5</div></div>
+        <div class="t5-b"><div class="h">▸ QUEUE</div><div class="n">9<em>待验收</em></div><div class="ln">1 overdue</div></div>
+        <div class="t5-b"><div class="h">▸ PENDING</div><div class="row"><span>张伟 事假</span><span>[ 待批 ]</span></div><div class="row"><span>灶台 9 项</span><span>[ 验收 ]</span></div><div class="row"><span>B 区 垃圾桶</span><span>[ 逾期 ]</span></div></div>
+        <div class="t5-b"><div class="h">▸ STAFF</div><div class="n">25<em>在班</em></div><div class="ln">早 8 · 中 6 · 晚 11</div></div>
+      </div>
+    </div>
+    <div class="cap"><b>5 · 终端核</b><i>秒数轮盘 web #16 · 等宽字做骨架、bento 网格、单色强调</i></div>
+  </div>
+
+  <!-- 6 -->
+  <div class="cell">
+    <div class="thumb t6">
+      <div class="t6-nav"><b>今天</b><span>生意</span><span>人</span><span>现场</span><span>厨房</span><span>系统</span></div>
+      <div class="t6-main">
+        <div class="t6-hd"><div class="t">今天 · 云味小馆</div><div class="s">10.25 周六 · 店长 陈静</div></div>
+        <div class="t6-signs">
+          <div class="sign red"><div><div class="k">待批请假</div><div class="v">2 <small>条</small></div></div><div class="btn">批准 / 驳回</div></div>
+          <div class="sign yellow"><div><div class="k">待验收</div><div class="v">9 <small>项</small></div></div><div class="btn">去验收</div></div>
+          <div class="sign green"><div><div class="k">今日营业额</div><div class="v">28,640 元 · 412 单 · 客单 69.5</div></div><div class="stamp">晚</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>6 · 招牌墙</b><i>秒数轮盘 east #6 · 香港街招：实色块 + 奶白边 + 硬投影 + 竖排</i></div>
+  </div>
+
+</div>
+</body>
+</html>

@@ -81,6 +81,15 @@ async def get_summary(db=Depends(get_db)):
         raise _wrap(exc, "读取备货汇总")
 
 
+@router.get("/snapshots", dependencies=_ADMIN_WRITE)
+async def get_snapshots(day: str = Query(..., description="YYYY-MM-DD"), db=Depends(get_db)):
+    """某一天的参考值快照 + 实际销量（ADR 0123），只读，管理端。"""
+    try:
+        return await prep_plan_service.get_snapshot_day(db, day)
+    except Exception as exc:
+        raise _wrap(exc, "读取参考值快照")
+
+
 @reader_router.get("/items")
 async def list_items(db=Depends(get_db)):
     try:

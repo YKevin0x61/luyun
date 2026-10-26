@@ -1,0 +1,1527 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>厨务管家 · 作业流</title>
+<style>
+/* dir-2 · 作业流 —— 令牌 + 基础层
+   页面里不写裸色值，全部走这里的变量。 */
+
+:root {
+  --bg: #0E1110;
+  --card: #171C1A;
+  --card-2: #1D2321;
+  --line: #232A27;
+  --line-strong: #2E3733;
+  --ink: #E8EEEA;
+  --ink-2: #92A39B;
+  --ink-3: #6C7C74;
+  --brand: #2FB98A;
+  --brand-ink: #08110D;
+  --amber: #E08B3C;
+  --danger: #E2503F;
+  --brand-soft: rgba(47, 185, 138, .14);
+  --amber-soft: rgba(224, 139, 60, .14);
+  --danger-soft: rgba(226, 80, 63, .14);
+
+  /* --danger 做正文色在卡片上只有 4.48:1、在 danger-soft 上 3.89:1，
+     都过不了 4.5。文字专用这一档：卡片上 5.26:1，软底上 4.57:1。
+     描边与实心块仍然用 --danger。 */
+  --danger-ink: #EA6350;
+
+  /* 班次条：只从 --brand 切三档浓淡，不引入新色相；休 / 假用既有灰与红 */
+  --shift-am: var(--brand);
+  --shift-mid: rgba(47, 185, 138, .66);
+  --shift-pm: rgba(47, 185, 138, .4);
+  --shift-off: var(--ink-3);
+  --shift-leave: var(--danger);
+
+  --font: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --r-card: 12px;
+  --r-btn: 10px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+}
+
+body {
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+input, textarea, select { font-family: inherit; }
+
+.num { font-variant-numeric: tabular-nums; }
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+::selection { background: var(--brand-soft); }
+
+/* 按下 / 悬停：只做状态反馈，不做编排动效 */
+.press { transition: opacity .12s ease, background-color .12s ease, border-color .12s ease; }
+.press:active { opacity: .82; }
+
+.nav-i { background: transparent; transition: background-color .12s ease; }
+.nav-i:hover { background: var(--card-2); }
+.nav-i.on, .nav-i.on:hover { background: var(--card); }
+
+.btn-ghost:hover { background: var(--card-2); }
+.btn-out:hover { border-color: var(--ink-3); }
+.cell:hover { border-color: var(--line-strong); }
+
+/* 滚动条 */
+.scrl { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.scrl::-webkit-scrollbar { width: 8px; height: 8px; }
+.scrl::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; }
+.scrl::-webkit-scrollbar-track { background: transparent; }
+
+.row-x {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.row-x::-webkit-scrollbar { display: none; }
+
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script>
+  /* Babel standalone 每次都会打一条「别在生产用浏览器内编译」的提示，那是工具链
+     自己的说明、不是页面问题；只屏蔽这一条，其余 warning 照常暴露。 */
+  (function () {
+    var warn = console.warn;
+    console.warn = function () {
+      var first = arguments[0];
+      if (typeof first === 'string' && first.indexOf('in-browser Babel transformer') >= 0) return;
+      return warn.apply(console, arguments);
+    };
+  })();
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script>
+/* dir-2 作业流 —— mock 数据（数字逐字取 spec 第 6 节，不另编） */
+
+window.DATA = {
+  store: {
+    name: '云味小馆',
+    branch: '中山路店',
+    date: '2026-10-25',
+    dateLabel: '10 月 25 日',
+    weekday: '周六',
+    openFrom: '06:00'
+  },
+
+  /* 今天（P1 / spec §6「今天」） */
+  today: {
+    revenue: 28640,
+    orders: 412,
+    avg: 69.5,
+    items: 1286,
+    tablesUsed: 18,
+    tablesTotal: 24,
+    rate30: 76,
+    slowest: '烧烤',
+    slowestMin: 12.5,
+    yest: 25480,
+    lastSat: 26820,
+    deltaYest: '+12.4%',
+    deltaLastSat: '+6.8%'
+  },
+
+  todo: {
+    hygiene: 9,
+    hygieneOverdue: 1,
+    leave: 2,
+    rectify: 1,
+    hr: 3,
+    prep: 7
+  },
+
+  /* 排班（28 人） */
+  shifts: [
+    { key: 'am', label: '早班', count: 8, time: '09:00–15:00' },
+    { key: 'mid', label: '中班', count: 6, time: '12:00–20:00' },
+    { key: 'pm', label: '晚班', count: 11, time: '16:00–22:30' }
+  ],
+  offCount: 3,
+  leaveToday: { name: '张伟', type: '事假', from: '10/26', to: '10/27', days: 2 },
+
+  prep: {
+    total: 7,
+    parts: [
+      { label: '热菜', n: 3 },
+      { label: '蒸笼', n: 2 },
+      { label: '凉菜', n: 2 }
+    ]
+  },
+
+  rectify: {
+    zone: '前厅 B 区',
+    item: '垃圾桶未加盖',
+    left: '1 小时 20 分',
+    count: 1
+  },
+
+  /* 日期带：10/19–10/25（mock 把 10/25 定为周六，故 10/19 是周日） */
+  week: [
+    { d: '19', w: '周日' }, { d: '20', w: '周一' }, { d: '21', w: '周二' },
+    { d: '22', w: '周三' }, { d: '23', w: '周四' }, { d: '24', w: '周五' },
+    { d: '25', w: '周六' }
+  ],
+
+  /* 销售（近 7 天） */
+  sales: {
+    amount: 186420,
+    orders: 6028,
+    avg: 30.9,
+    dishes: 86,
+    refund: 14,
+    days: [
+      { w: '周一', v: 22180 }, { w: '周二', v: 24060 }, { w: '周三', v: 25340 },
+      { w: '周四', v: 26120 }, { w: '周五', v: 29480 }, { w: '周六', v: 31240 },
+      { w: '周日', v: 28000 }
+    ],
+    stations: [
+      { name: '热菜', pct: 42.6 }, { name: '蒸笼', pct: 18.3 }, { name: '烧烤', pct: 15.1 },
+      { name: '凉菜', pct: 9.7 }, { name: '面点', pct: 8.2 }, { name: '吧台', pct: 6.1 }
+    ],
+    top: [
+      { rank: 1, name: '招牌酸菜鱼', station: '热菜', qty: 682, pct: '11.3%' },
+      { rank: 2, name: '藤椒鸡', station: '凉菜', qty: 514, pct: '8.5%' },
+      { rank: 3, name: '干锅花菜', station: '热菜', qty: 471, pct: '7.8%' },
+      { rank: 4, name: '红糖糍粑', station: '面点', qty: 398, pct: '6.6%' },
+      { rank: 5, name: '手打鱼丸汤', station: '蒸笼', qty: 342, pct: '5.7%' }
+    ]
+  },
+
+  /* 卫生 */
+  hygiene: {
+    passRate: 92,
+    judged: 1864,
+    pending: 9,
+    toShoot: 4,
+    passed: 118,
+    missed: 2,
+    current: {
+      zone: '后厨',
+      area: '灶台',
+      issue: '油污与残渣',
+      by: '王芳',
+      shift: '早班',
+      at: '10:24'
+    },
+    next: { zone: '蒸笼区', index: 3, total: 9 }
+  },
+
+  /* 10/25 当天名单 */
+  roster: [
+    { name: '陈静', role: '店长', shift: '早班', time: '09:00–15:00', zone: '全店' },
+    { name: '王芳', role: '后厨', shift: '早班', time: '09:00–15:00', zone: '后厨 灶台' },
+    { name: '李小雨', role: '服务员', shift: '早班', time: '09:00–15:00', zone: '前厅 A 区' },
+    { name: '周敏', role: '服务员', shift: '早班', time: '09:00–15:00', zone: '前厅 B 区' },
+    { name: '赵磊', role: '后厨', shift: '早班', time: '09:00–15:00', zone: '后厨 蒸笼' },
+    { name: '王国强', role: '厨师长', shift: '中班', time: '12:00–20:00', zone: '后厨' },
+    { name: '孙倩', role: '收银', shift: '中班', time: '12:00–20:00', zone: '前厅 收银台' },
+    { name: '刘洋', role: '服务员', shift: '中班', time: '12:00–20:00', zone: '前厅 A 区' },
+    { name: '吴强', role: '保洁', shift: '中班', time: '12:00–20:00', zone: '全店' },
+    { name: '郑海', role: '后厨', shift: '晚班', time: '16:00–22:30', zone: '后厨 烧烤' },
+    { name: '张伟', role: '服务员', shift: '请假', time: '—', zone: '前厅 A 区' }
+  ],
+
+  /* 待批请假 2 条 */
+  pendingLeave: [
+    { name: '张伟', type: '事假', range: '10/26–10/27', days: 2 },
+    { name: '郑海', type: '调休', range: '10/29', days: 1 }
+  ],
+
+  /* 月历：2026 年 10 月，10/25 定为周六（按 mock 倒推，10/1 是周三） */
+  cal: {
+    year: 2026,
+    month: 10,
+    weekdays: ['一', '二', '三', '四', '五', '六', '日'],
+    today: 25,
+    leaveDays: [26, 27],
+    pendingDay: 29,
+    unscheduled: [31],
+    /* 每天在岗人数（10/25 = 早 8 + 中 6 + 晚 11 = 25） */
+    counts: [23, 23, 26, 27, 26, 22, 22, 23, 23, 26, 27, 26, 22, 22, 23, 24, 26, 27, 26, 22, 22, 23, 24, 26, 25, 24, 22, 22, 23, 24, 26],
+    fixed: 3
+  }
+};
+
+</script>
+<script type="text/babel">
+/* dir-2 · 作业流 —— 共用件：壳 / 图标 / 卡片 / pill / 按钮 / SVG 图
+   每个 text/babel 文件跑在全局作用域里，所以整份套一个 IIFE，末尾挂 window。 */
+
+(function () {
+
+const { useState: uiUseState, useRef: uiUseRef } = React;
+
+const UI_ROLES = {
+  manager: { name: '陈静', title: '店长', full: '店长 陈静' },
+  boss: { name: '周志远', title: '老板', full: '老板 周志远' },
+  chef: { name: '王国强', title: '厨师长', full: '厨师长 王国强' },
+  staff: { name: '李小雨', title: '员工', full: '员工 李小雨' }
+};
+
+const UI_NAV = [
+  { key: 'today', label: '今天', icon: 'sun', roles: ['manager', 'boss', 'chef', 'staff'] },
+  { key: 'business', label: '生意', icon: 'trend', roles: ['manager', 'boss', 'chef'] },
+  { key: 'people', label: '人', icon: 'users', roles: ['manager'], badge: '2' },
+  { key: 'floor', label: '现场', icon: 'shield', roles: ['manager', 'boss', 'chef'], badge: '9' },
+  { key: 'kitchen', label: '厨房', icon: 'pan', roles: ['manager', 'chef'] },
+  { key: 'system', label: '系统', icon: 'sliders', roles: ['manager'] }
+];
+
+const UI_ICONS = {
+  sun: { c: [[12, 12, 4]], d: ['M12 2.6v2.4', 'M12 19v2.4', 'M2.6 12h2.4', 'M19 12h2.4', 'M5.3 5.3l1.7 1.7', 'M17 17l1.7 1.7', 'M18.7 5.3L17 7', 'M7 17l-1.7 1.7'] },
+  trend: { d: ['M4 16.4l5-5 3.2 3.2L20 7', 'M15 7h5v5'] },
+  users: { c: [[9, 8, 3.2], [17.2, 9.4, 2.4]], d: ['M3 20.2c0-3.3 2.7-5.8 6-5.8s6 2.5 6 5.8', 'M16.6 14.6c2.4.3 4.2 2.2 4.2 4.6'] },
+  shield: { d: ['M12 3.2l7 2.6v5.5c0 4.3-3 8.1-7 9.5-4-1.4-7-5.2-7-9.5V5.8l7-2.6z', 'M9 12.1l2.2 2.2 4.3-4.4'] },
+  pan: { d: ['M4.4 12h15.2', 'M5.8 12c0 3.7 2.8 6.5 6.2 6.5s6.2-2.8 6.2-6.5', 'M2.2 12h2.2', 'M19.6 12h2.2'] },
+  sliders: { c: [[15.4, 7, 2], [10.6, 17, 2]], d: ['M4 7h9.4', 'M17.4 7h2.6', 'M4 17h4.6', 'M12.6 17h7.4'] },
+  check: { d: ['M4.6 12.6l4.8 4.8L19.4 6.6'] },
+  x: { d: ['M6 6l12 12', 'M18 6L6 18'] },
+  clock: { c: [[12, 12, 8.6]], d: ['M12 7.4V12l3.2 2'] },
+  chevron: { d: ['M9.6 6l6 6-6 6'] },
+  down: { d: ['M6 9.6l6 6 6-6'] },
+  plus: { d: ['M12 5.2v13.6', 'M5.2 12h13.6'] },
+  undo: { d: ['M4.4 9.2h9.4a5.4 5.4 0 010 10.8H8.6', 'M8.2 5L4 9.2l4.2 4.2'] },
+  download: { d: ['M12 3.6v11', 'M7.4 10.6L12 15.2l4.6-4.6', 'M4.2 20h15.6'] },
+  camera: { c: [[12, 13.4, 3]], d: ['M4.4 8.4h3.2L9.1 5.8h5.8l1.5 2.6h3.2a1.6 1.6 0 011.6 1.6v8.4a1.6 1.6 0 01-1.6 1.6H4.4a1.6 1.6 0 01-1.6-1.6V10a1.6 1.6 0 011.6-1.6z'] },
+  box: { d: ['M12 3.2l8 4.2v9.2l-8 4.2-8-4.2V7.4l8-4.2z', 'M4.2 7.6l7.8 4.2 7.8-4.2', 'M12 11.8v9'] },
+  alert: { c: [[12, 17.2, 0.9]], d: ['M12 4.4l8.6 15.2H3.4L12 4.4z', 'M12 10v4'] },
+  user: { c: [[12, 8, 3.6]], d: ['M4.6 20.4c0-4.1 3.3-7 7.4-7s7.4 2.9 7.4 7'] },
+  calendar: { d: ['M4.6 6.6h14.8a1.2 1.2 0 011.2 1.2v11.6a1.2 1.2 0 01-1.2 1.2H4.6a1.2 1.2 0 01-1.2-1.2V7.8a1.2 1.2 0 011.2-1.2z', 'M8 4v4', 'M16 4v4', 'M3.6 11.2h16.8'] },
+  grid: { d: ['M4 4h6.4v6.4H4z', 'M13.6 4H20v6.4h-6.4z', 'M4 13.6h6.4V20H4z', 'M13.6 13.6H20V20h-6.4z'] },
+  edit: { d: ['M4.4 19.6h4l10-10-4-4-10 10v4z', 'M13.6 4.4l4 4'] },
+  dots: { c: [[6, 12, 1.3], [12, 12, 1.3], [18, 12, 1.3]] }
+};
+
+function Icon(props) {
+  const def = UI_ICONS[props.name] || { d: [], c: [] };
+  const size = props.size || 18;
+  const color = props.color || 'currentColor';
+  const solid = props.solid;
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+         stroke={color} strokeWidth={props.sw || 1.7} strokeLinecap="round" strokeLinejoin="round"
+         aria-hidden="true" style={{ display: 'block', flex: '0 0 auto' }}>
+      {(def.d || []).map((p, i) => <path key={'p' + i} d={p} />)}
+      {(def.c || []).map((c, i) => (
+        <circle key={'c' + i} cx={c[0]} cy={c[1]} r={c[2]}
+                fill={solid ? color : 'none'} stroke={solid ? 'none' : color} />
+      ))}
+    </svg>
+  );
+}
+
+/* 「A · B」里的那个点做成分隔件：视觉一样，读屏不念「点」，也避免整段文本里堆点 */
+function Sep() {
+  return <span aria-hidden="true" style={{ display: 'inline-block', width: '0.74em', textAlign: 'center', color: 'var(--ink-3)', fontWeight: 500 }}>·</span>;
+}
+
+function Mark() {
+  return (
+    <span style={{ width: 24, height: 24, borderRadius: 7, background: 'var(--brand)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }}>
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="var(--brand-ink)" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true">
+        <path d="M2.5 9.5h9" /><path d="M4.6 9.5V5.6" /><path d="M7 9.5V3.4" /><path d="M9.4 9.5V6.8" />
+      </svg>
+    </span>
+  );
+}
+
+const UI_PILL = {
+  brand: { bg: 'var(--brand-soft)', fg: 'var(--brand)' },
+  amber: { bg: 'var(--amber-soft)', fg: 'var(--amber)' },
+  danger: { bg: 'var(--danger-soft)', fg: 'var(--danger-ink)' },
+  neutral: { bg: 'var(--card-2)', fg: 'var(--ink-2)' }
+};
+
+function Pill(props) {
+  const tone = UI_PILL[props.tone] || UI_PILL.brand;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5, height: 24, padding: '0 9px',
+      borderRadius: 999, background: tone.bg, color: tone.fg,
+      fontSize: 13, fontWeight: 600, lineHeight: 1, letterSpacing: '-0.01em', whiteSpace: 'nowrap'
+    }}>{props.children}</span>
+  );
+}
+
+function Btn(props) {
+  const kind = props.kind || 'solid';
+  const h = props.h || 52;
+  const base = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+    height: h, borderRadius: 'var(--r-btn)', fontSize: props.fs || 16, fontWeight: 600,
+    letterSpacing: '-0.01em', cursor: 'pointer', whiteSpace: 'nowrap',
+    width: props.w || (props.grow ? '100%' : 'auto'),
+    flex: props.grow ? '1 1 auto' : '0 0 auto',
+    padding: props.w || props.grow ? '0 16px' : '0 18px'
+  };
+  let skin;
+  if (props.disabled) {
+    skin = { background: 'var(--card-2)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'default' };
+  } else if (kind === 'solid') {
+    skin = { background: 'var(--brand)', color: 'var(--brand-ink)', border: '1px solid var(--brand)' };
+  } else if (kind === 'danger') {
+    skin = { background: 'var(--bg)', color: 'var(--danger-ink)', border: '1px solid var(--danger)' };
+  } else if (kind === 'outline') {
+    skin = { background: 'transparent', color: 'var(--ink)', border: '1px solid var(--line-strong)' };
+  } else {
+    skin = { background: 'transparent', color: 'var(--ink-2)', border: '1px solid transparent' };
+  }
+  return (
+    <button className={'press btn-' + (props.disabled ? 'off' : 'on')} onClick={props.disabled ? undefined : props.onClick}
+            disabled={props.disabled ? true : undefined} style={Object.assign({}, base, skin, props.style)}>
+      {props.icon ? <Icon name={props.icon} size={17} /> : null}
+      {props.children}
+    </button>
+  );
+}
+
+function Card(props) {
+  return (
+    <div style={Object.assign({
+      background: 'var(--card)', border: '1px solid var(--line)',
+      borderRadius: 'var(--r-card)', padding: props.pad || 16
+    }, props.style)}>{props.children}</div>
+  );
+}
+
+function Underline(props) {
+  const w = props.w || 24;
+  return <span style={{ display: 'block', width: w, height: 3, borderRadius: 1.5, background: 'var(--amber)', marginTop: props.mt === undefined ? 8 : props.mt }} />;
+}
+
+function PageHead(props) {
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16 }}>
+        <h1 style={{ margin: 0, fontSize: 34, lineHeight: '40px', fontWeight: 700, letterSpacing: '-0.03em' }}>{props.title}</h1>
+        {props.right}
+      </div>
+      <Underline />
+      {props.sub ? <div style={{ marginTop: 12, fontSize: 14, color: 'var(--ink-2)', letterSpacing: '-0.01em' }}>{props.sub}</div> : null}
+    </div>
+  );
+}
+
+function LiveDot(props) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, color: 'var(--ink-2)' }}>
+      <span style={{ width: 7, height: 7, borderRadius: 4, background: 'var(--brand)', flex: '0 0 auto' }} />
+      {props.children || '实时连接'}
+    </span>
+  );
+}
+
+/* ---------- 桌面壳：224 导航 | 中列 | 360 详情 ---------- */
+function DeskShell(props) {
+  const role = UI_ROLES[props.role] || UI_ROLES.manager;
+  const navs = UI_NAV.filter(n => n.roles.indexOf(props.role || 'manager') >= 0);
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '224px minmax(0, 1fr) 360px', height: '100vh', overflow: 'hidden' }}>
+      <aside style={{ display: 'flex', flexDirection: 'column', minHeight: 0, padding: '22px 12px 16px' }}>
+        <div style={{ padding: '0 8px 20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+            <Mark />
+            <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.02em' }}>厨务管家</span>
+          </div>
+          <div style={{ marginTop: 7, fontSize: 13, color: 'var(--ink-2)' }}>
+            云味小馆<Sep />中山路店
+          </div>
+        </div>
+        <nav style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {navs.map(n => {
+            const on = n.key === props.active;
+            return (
+              <div key={n.key} className={'nav-i' + (on ? ' on' : '')} style={{
+                position: 'relative', display: 'flex', alignItems: 'center', gap: 10,
+                height: 40, padding: '0 10px 0 14px', borderRadius: 8, cursor: 'pointer',
+                color: on ? 'var(--ink)' : 'var(--ink-2)', fontSize: 14, fontWeight: on ? 600 : 500
+              }}>
+                {on ? <span style={{ position: 'absolute', left: 0, top: 9, bottom: 9, width: 4, borderRadius: 2, background: 'var(--brand)' }} /> : null}
+                <Icon name={n.icon} size={18} color={on ? 'var(--brand)' : 'var(--ink-3)'} />
+                <span>{n.label}</span>
+                {n.badge ? <span className="num" style={{ marginLeft: 'auto', fontSize: 13, color: on ? 'var(--ink-2)' : 'var(--ink-3)' }}>{n.badge}</span> : null}
+              </div>
+            );
+          })}
+        </nav>
+        <div style={{ marginTop: 'auto', borderTop: '1px solid var(--line)', paddingTop: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ width: 28, height: 28, borderRadius: 14, background: 'var(--brand-soft)', color: 'var(--brand)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 600 }}>{role.name.charAt(0)}</span>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: '-0.01em' }}>{role.full}</div>
+            <div style={{ fontSize: 13, color: 'var(--ink-2)' }}>{props.role === 'boss' ? '只读权限' : props.role === 'chef' ? '厨房与现场' : '全部权限'}</div>
+          </div>
+        </div>
+      </aside>
+
+      <main className="scrl" style={{ minWidth: 0, overflowY: 'auto', overflowX: 'hidden' }}>{props.children}</main>
+
+      <aside className="scrl" style={{ borderLeft: '1px solid var(--line)', minWidth: 0, overflowY: 'auto', overflowX: 'hidden' }}>
+        {props.rail}
+      </aside>
+    </div>
+  );
+}
+
+/* ---------- 手机壳：390×844 ---------- */
+function TabBar(props) {
+  const tabs = [
+    { k: 'today', label: '今天', icon: 'sun' },
+    { k: 'floor', label: '现场', icon: 'shield' },
+    { k: 'kitchen', label: '厨房', icon: 'pan' },
+    { k: 'me', label: '我的', icon: 'user' }
+  ];
+  return (
+    <nav style={{ height: 64, flex: '0 0 64px', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', borderTop: '1px solid var(--line)' }}>
+      {tabs.map(t => {
+        const on = t.k === props.active;
+        return (
+          <button key={t.k} onClick={props.onTab ? () => props.onTab(t.k) : undefined}
+                  style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 3, cursor: props.onTab ? 'pointer' : 'default' }}>
+            <span style={{ height: 6, display: 'flex', alignItems: 'center' }}>
+              {on ? <span style={{ width: 6, height: 6, borderRadius: 3, background: 'var(--brand)' }} /> : null}
+            </span>
+            <Icon name={t.icon} size={19} solid={on} color={on ? 'var(--brand)' : 'var(--ink-3)'} />
+            <span style={{ fontSize: 13, fontWeight: on ? 600 : 500, color: on ? 'var(--ink)' : 'var(--ink-2)' }}>{t.label}</span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+function PhoneShell(props) {
+  const role = UI_ROLES[props.role] || UI_ROLES.manager;
+  return (
+    <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+      <div style={{ width: 390, height: 844, borderRadius: 24, border: '1px solid var(--line-strong)', background: 'var(--bg)', overflow: 'hidden', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+        <header style={{ height: 56, flex: '0 0 56px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px', borderBottom: '1px solid var(--line)' }}>
+          <div>
+            <div style={{ fontSize: 20, lineHeight: '22px', fontWeight: 700, letterSpacing: '-0.03em' }}>{props.title}</div>
+            <Underline mt={4} />
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--ink-2)', letterSpacing: '-0.01em' }}>{role.full}</div>
+        </header>
+        <div className="scrl" style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', padding: 16 }}>
+          {props.children}
+        </div>
+        <TabBar active={props.tab} onTab={props.onTab} />
+      </div>
+    </div>
+  );
+}
+
+/* ---------- SVG 折线 ---------- */
+function LineChart(props) {
+  const days = props.days;
+  const W = 326, H = 166;
+  const padL = 46, padR = 16, padT = 24, padB = 30;
+  const y0 = 20000, y1 = 32000;
+  const iw = W - padL - padR;
+  const ih = H - padT - padB;
+  const px = i => padL + (iw * i) / (days.length - 1);
+  const py = v => padT + ih * (1 - (v - y0) / (y1 - y0));
+  const topIdx = days.reduce((best, d, i, arr) => (d.v > arr[best].v ? i : best), 0);
+  const pts = days.map((d, i) => [px(i), py(d.v)]);
+  const line = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  const area = line + ' L' + pts[pts.length - 1][0].toFixed(1) + ' ' + (padT + ih) + ' L' + pts[0][0].toFixed(1) + ' ' + (padT + ih) + ' Z';
+  const grid = [20000, 25000, 30000];
+  const label = v => (v / 10000).toFixed(v % 10000 === 0 ? 0 : 1) + ' 万';
+  return (
+    <svg width={W} height={H} viewBox={'0 0 ' + W + ' ' + H} style={{ display: 'block', maxWidth: '100%' }} role="img" aria-label="近 7 天营业额折线">
+      {grid.map(g => (
+        <g key={g}>
+          <line x1={padL} x2={W - padR} y1={py(g)} y2={py(g)} stroke="var(--line)" strokeWidth="1" />
+          <text x={padL - 10} y={py(g) + 4} textAnchor="end" fontSize="12" fill="var(--ink-2)">{label(g)}</text>
+        </g>
+      ))}
+      <path d={area} style={{ fill: 'var(--brand-soft)' }} />
+      <path d={line} fill="none" stroke="var(--brand)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      {pts.map((p, i) => (
+        <circle key={i} cx={p[0]} cy={p[1]} r={i === topIdx ? 4 : 2.4}
+                fill={i === topIdx ? 'var(--brand)' : 'var(--card)'}
+                stroke="var(--brand)" strokeWidth={i === topIdx ? 2 : 1.6} />
+      ))}
+      <text x={pts[topIdx][0]} y={pts[topIdx][1] - 11} textAnchor={topIdx > 3 ? 'end' : 'start'}
+            fontSize="12" fontWeight="600" fill="var(--brand)">¥31,240</text>
+      {days.map((d, i) => (
+        <text key={d.w} x={px(i)} y={H - 8} textAnchor="middle" fontSize="12" fill="var(--ink-2)">{d.w}</text>
+      ))}
+    </svg>
+  );
+}
+
+/* ---------- 验收对照图：内联 SVG 抽象不锈钢台面 ---------- */
+function CounterShot(props) {
+  const act = props.variant === 'act';
+  return (
+    <svg viewBox="0 0 160 240" preserveAspectRatio="xMidYMid slice" width="100%" height="100%" role="img"
+         aria-label={act ? '实拍：灶台台面油污残留' : '标准图：清洁后的灶台台面'}>
+      {/* 台面铺满整帧：像手机贴近拍的一张 */}
+      <rect x="0" y="0" width="160" height="240" style={{ fill: 'var(--ink-3)' }} opacity={act ? '.34' : '.5'} />
+      {/* 靠墙的挡水沿 */}
+      <rect x="0" y="0" width="160" height="26" style={{ fill: 'var(--line)' }} />
+      <rect x="0" y="26" width="160" height="3" style={{ fill: 'var(--ink-2)' }} opacity={act ? '.2' : '.4'} />
+      {/* 拉丝 */}
+      {[34, 42, 50, 58, 66, 74, 82, 90, 98, 106, 114, 122, 130, 138, 146, 154, 162, 170, 178, 186, 194, 202].map(y => (
+        <rect key={y} x="0" y={y} width="160" height="1" style={{ fill: 'var(--ink-2)' }} opacity={act ? '.1' : '.16'} />
+      ))}
+      {/* 灶眼与炉架 */}
+      <circle cx="80" cy="146" r="44" fill="none" style={{ stroke: 'var(--ink-2)' }} strokeWidth="2" opacity={act ? '.26' : '.38'} />
+      <circle cx="80" cy="146" r="33" fill="none" style={{ stroke: 'var(--ink-2)' }} strokeWidth="1.4" opacity={act ? '.22' : '.32'} />
+      <circle cx="80" cy="146" r="14" style={{ fill: 'var(--bg)' }} opacity=".5" />
+      <rect x="34" y="141" width="92" height="9" rx="3" style={{ fill: 'var(--ink-2)' }} opacity={act ? '.26' : '.36'} />
+      <rect x="75.5" y="100" width="9" height="92" rx="3" style={{ fill: 'var(--ink-2)' }} opacity={act ? '.26' : '.36'} />
+      {/* 前沿与地面阴影 */}
+      <rect x="0" y="226" width="160" height="5" style={{ fill: 'var(--ink-2)' }} opacity={act ? '.18' : '.34'} />
+      <rect x="0" y="231" width="160" height="9" style={{ fill: 'var(--bg)' }} opacity=".8" />
+      {act ? (
+        <g>
+          {/* 油污与残渣 */}
+          <ellipse cx="107" cy="96" rx="14" ry="6" transform="rotate(-14 107 96)" style={{ fill: 'var(--amber)' }} opacity=".62" />
+          <ellipse cx="121" cy="106" rx="7" ry="3.2" transform="rotate(-6 121 106)" style={{ fill: 'var(--amber)' }} opacity=".5" />
+          <ellipse cx="96" cy="88" rx="6" ry="2.8" transform="rotate(-20 96 88)" style={{ fill: 'var(--amber)' }} opacity=".48" />
+          <circle cx="130" cy="88" r="2.3" style={{ fill: 'var(--amber)' }} opacity=".62" />
+          <ellipse cx="62" cy="182" rx="7" ry="2.6" style={{ fill: 'var(--amber)' }} opacity=".4" />
+          <ellipse cx="118" cy="196" rx="4" ry="1.8" style={{ fill: 'var(--amber)' }} opacity=".38" />
+          <circle cx="44" cy="112" r="1.8" style={{ fill: 'var(--amber)' }} opacity=".5" />
+          {/* 红圈标注：圈住最大那片油污 */}
+          <circle cx="108" cy="98" r="21" fill="none" style={{ stroke: 'var(--danger)' }} strokeWidth="1.8" />
+          <path d="M122 82l12-10" style={{ stroke: 'var(--danger)' }} strokeWidth="1.4" />
+        </g>
+      ) : (
+        <g>
+          {/* 标准：干净、擦过的台面 */}
+          <rect x="18" y="60" width="46" height="1.5" transform="rotate(-3 18 60)" style={{ fill: 'var(--ink)' }} opacity=".22" />
+          <rect x="18" y="68" width="28" height="1.5" transform="rotate(-3 18 68)" style={{ fill: 'var(--ink)' }} opacity=".16" />
+          <rect x="20" y="150" width="34" height="1" style={{ fill: 'var(--ink)' }} opacity=".18" />
+        </g>
+      )}
+    </svg>
+  );
+}
+
+/* ---------- 驳回理由层（手机内） ---------- */
+function ReasonSheet(props) {
+  const [text, setText] = uiUseState('');
+  if (!props.open) return null;
+  const ok = text.trim().length > 0;
+  return (
+    <div style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, zIndex: 30 }}>
+      <div onClick={props.onClose} style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, background: 'var(--bg)', opacity: .66 }} />
+      <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, background: 'var(--card)', borderTop: '1px solid var(--line-strong)', borderRadius: '16px 16px 0 0', padding: '18px 16px 20px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ fontSize: 17, fontWeight: 600, letterSpacing: '-0.02em' }}>驳回 <Sep /> 灶台 油污与残渣</div>
+          <button onClick={props.onClose} style={{ width: 32, height: 32, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'var(--ink-2)' }}>
+            <Icon name="x" size={18} />
+          </button>
+        </div>
+        <div style={{ marginTop: 14, fontSize: 15, color: 'var(--ink)', fontWeight: 500 }}>哪里不合格（必填，员工能看到）</div>
+        <textarea value={text} onChange={e => setText(e.target.value)} rows={3}
+                  placeholder="例如：灶台右下角仍有油污，排水口没拆洗"
+                  style={{
+                    marginTop: 8, width: '100%', minHeight: 92, resize: 'none', padding: '12px 12px',
+                    fontSize: 16, lineHeight: '24px', color: 'var(--ink)', letterSpacing: '-0.01em',
+                    background: 'var(--card-2)', border: '1px solid var(--line-strong)', borderRadius: 10, outline: 'none'
+                  }} />
+        <div style={{ marginTop: 14, display: 'flex', gap: 10 }}>
+          <Btn kind="outline" h={52} w={112} onClick={props.onClose}>取消</Btn>
+          <Btn kind="danger" h={52} grow disabled={!ok} onClick={() => { props.onSubmit(text.trim()); setText(''); }}>提交驳回</Btn>
+        </div>
+        <div style={{ marginTop: 10, fontSize: 13, color: 'var(--ink-2)' }}>驳回后王芳会收到通知，并能直接回拍。</div>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, {
+  UI_ROLES, UI_NAV, Icon, Sep, Mark, Pill, Btn, Card, Underline, PageHead,
+  LiveDot, DeskShell, PhoneShell, TabBar, LineChart, CounterShot, ReasonSheet
+});
+
+})();
+
+</script>
+<script type="text/babel">
+/* dir-2 · 作业流 —— 四张页面 */
+
+(function () {
+
+const { useState } = React;
+const D = window.DATA;
+const {
+  Icon, Sep, Pill, Btn, Card, Underline, PageHead, LiveDot,
+  DeskShell, PhoneShell, LineChart, CounterShot, ReasonSheet
+} = window;
+
+function comma(n) { return Number(n).toLocaleString('en-US'); }
+function money(n) { return '¥' + comma(n); }
+
+/* 今天剩下的时间表：时间取自班次定义（早 09–15 / 中 12–20 / 晚 16–22:30），
+   09:00 早班上岗已经过去，所以「接下来」从 12:00 起。 */
+const AGENDA = [
+  { t: '12:00', text: '中班 6 人上岗' },
+  { t: '15:00', text: '早班 8 人下班' },
+  { t: '16:00', text: '晚班 11 人上岗' },
+  { t: '20:00', text: '中班 6 人下班' },
+  { t: '22:30', text: '晚班 11 人下班' }
+];
+
+/* ============================================================ 今天 */
+
+const todayS = {
+  wrap: { maxWidth: 720, margin: '0 auto', padding: '26px 32px 44px' },
+  band: { display: 'flex', gap: 6, marginTop: 20 },
+  chip: {
+    flex: 1, height: 64, borderRadius: 10, display: 'flex', flexDirection: 'column',
+    alignItems: 'center', justifyContent: 'center', gap: 3
+  },
+  hero: {
+    height: 220, marginTop: 18, borderRadius: 'var(--r-card)', border: '1px solid var(--line-strong)',
+    background: 'var(--card)', padding: '16px 18px 16px', display: 'flex', flexDirection: 'column'
+  },
+  heroMeta: { marginTop: 9, fontSize: 14, color: 'var(--ink-2)', letterSpacing: '-0.01em' },
+  heroNote: { marginTop: 7, fontSize: 14, color: 'var(--ink-2)', display: 'flex', alignItems: 'center', gap: 6 },
+  restLabel: { marginTop: 26, marginBottom: 10, fontSize: 13, color: 'var(--ink-2)', display: 'flex', alignItems: 'center', gap: 8 },
+  rail: { padding: '22px 22px 30px' },
+  railRow: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }
+};
+
+function RailTitle(props) {
+  return <div style={{ fontSize: 17, fontWeight: 600, letterSpacing: '-0.02em' }}>{props.children}</div>;
+}
+
+function TodayHero(props) {
+  const [state, setState] = useState('pending');
+  const readOnly = props.role === 'boss';
+  return (
+    <div style={todayS.hero}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--amber)', letterSpacing: '0.01em' }}>现在最该处理</span>
+        <Pill tone={state === 'approved' ? 'brand' : state === 'rejected' ? 'danger' : 'amber'}>
+          {state === 'approved' ? '已批准' : state === 'rejected' ? '已驳回' : '待批'}
+        </Pill>
+        <span style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--ink-2)' }}>今天唯一要你签的</span>
+      </div>
+      <div style={{ marginTop: 11, fontSize: 22, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: '28px' }}>张伟请假待批</div>
+      <div style={todayS.heroMeta}>
+        事假 <Sep /> 10/26–10/27 <Sep /> 2 天 <Sep /> 还没批准
+      </div>
+      <div style={todayS.heroNote}>
+        <Icon name="check" size={15} color="var(--ink-2)" />
+        批准后自动写入排班，前厅 A 区少一人
+      </div>
+
+      <div style={{ marginTop: 'auto' }}>
+        {readOnly ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 52, fontSize: 14, color: 'var(--ink-2)' }}>
+            <Icon name="clock" size={16} color="var(--ink-2)" />
+            只读身份，等店长批
+          </div>
+        ) : state === 'pending' ? (
+          <div style={{ display: 'flex', gap: 10 }}>
+            <Btn grow h={52} onClick={() => setState('approved')}>批准</Btn>
+            <Btn kind="outline" h={52} w={132} onClick={() => setState('rejected')}>驳回</Btn>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 52 }}>
+            <Icon name={state === 'approved' ? 'check' : 'x'} size={17} color={state === 'approved' ? 'var(--brand)' : 'var(--danger-ink)'} />
+            <span style={{ fontSize: 15, fontWeight: 500 }}>
+              {state === 'approved' ? '已批准，已写入 10/26–10/27 排班' : '已驳回，张伟会收到通知'}
+            </span>
+            <button onClick={() => setState('pending')} style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--ink-2)', cursor: 'pointer', textDecoration: 'underline', textUnderlineOffset: 3 }}>撤销</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TodayTodo(props) {
+  const t = props.tone;
+  const tint = t === 'amber' ? { bg: 'var(--amber-soft)', fg: 'var(--amber)' }
+    : t === 'neutral' ? { bg: 'var(--card-2)', fg: 'var(--ink-2)' }
+      : { bg: 'var(--brand-soft)', fg: 'var(--brand)' };
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 14, padding: '14px 16px',
+      background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 'var(--r-card)'
+    }}>
+      <span style={{ width: 38, height: 38, borderRadius: 10, background: tint.bg, color: tint.fg, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }}>
+        <Icon name={props.icon} size={19} />
+      </span>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-0.02em' }}>{props.title}</span>
+          {props.pill ? <Pill tone={props.pillTone || 'amber'}>{props.pill}</Pill> : null}
+        </div>
+        <div style={{ marginTop: 4, fontSize: 14, color: 'var(--ink-2)', display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>{props.meta}</div>
+      </div>
+      {props.action ? <Btn kind="outline" h={40} fs={14} onClick={props.onAction}>{props.action}</Btn> : null}
+    </div>
+  );
+}
+
+function TodayRail() {
+  const kpi = [
+    { label: '营业额', value: money(D.today.revenue), sub: '较昨日 ' + D.today.deltaYest + '，较上周六 ' + D.today.deltaLastSat },
+    { label: '订单', value: D.today.orders + ' 单', sub: '客单价 ¥' + D.today.avg },
+    { label: '待验收', value: D.todo.hygiene + ' 项', sub: '其中逾期 ' + D.todo.hygieneOverdue }
+  ];
+  const now = [
+    { label: '出餐速率', value: D.today.rate30 + ' 单/时' },
+    { label: '在店桌台', value: D.today.tablesUsed + '/' + D.today.tablesTotal },
+    { label: '最慢档口', value: D.today.slowest + ' ' + D.today.slowestMin + ' 分钟' }
+  ];
+  const hr = '1px solid var(--line)';
+  return (
+    <div style={todayS.rail}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+        <RailTitle>接下来</RailTitle>
+        <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>{D.store.dateLabel} {D.store.weekday}</span>
+      </div>
+
+      <div>
+        <div style={{ marginTop: 8 }}>
+          {AGENDA.map((a, i) => (
+            <div key={a.t + a.text} style={{ display: 'flex', alignItems: 'center', gap: 12, height: 32, borderTop: i ? hr : 'none' }}>
+              <span className="num" style={{ width: 42, fontSize: 13, color: 'var(--ink-2)' }}>{a.t}</span>
+              <span style={{ fontSize: 14, letterSpacing: '-0.01em' }}>{a.text}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16, paddingTop: 16, borderTop: hr }}>
+        <RailTitle>经营</RailTitle>
+        <div style={{ marginTop: 8 }}>
+          {kpi.map((k, i) => (
+            <div key={k.label} style={{ paddingTop: i ? 8 : 0, marginTop: i ? 8 : 0, borderTop: i ? hr : 'none' }}>
+              <div style={todayS.railRow}>
+                <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>{k.label}</span>
+                <span className="num" style={{ fontSize: 21, fontWeight: 600, letterSpacing: '-0.02em' }}>{k.value}</span>
+              </div>
+              <div style={{ marginTop: 2, fontSize: 13, color: 'var(--ink-2)', textAlign: 'right' }}>{k.sub}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16, paddingTop: 16, borderTop: hr }}>
+        <RailTitle>现在</RailTitle>
+        <div style={{ marginTop: 6 }}>
+          {now.map((n, i) => (
+            <div key={n.label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 28, borderTop: i ? hr : 'none' }}>
+              <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>{n.label}</span>
+              <span className="num" style={{ fontSize: 14, fontWeight: 500 }}>{n.value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16, paddingTop: 16, borderTop: hr }}>
+        <RailTitle>今天谁上班</RailTitle>
+        <div style={{ marginTop: 6 }}>
+          {D.shifts.map((s, i) => (
+            <div key={s.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 28, borderTop: i ? hr : 'none' }}>
+              <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>{s.label} <span className="num">{s.time}</span></span>
+              <span className="num" style={{ fontSize: 14, fontWeight: 600 }}>{s.count} 人</span>
+            </div>
+          ))}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 28, borderTop: hr }}>
+            <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>休 <span className="num">{D.offCount} 人</span></span>
+            <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>请假 <span className="num">1 人</span>（张伟）</span>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 3, marginTop: 8 }}>
+          {[8, 6, 11].map((n, i) => (
+            <span key={i} style={{ width: n * 8 + 'px', height: 6, borderRadius: 3, background: i === 0 ? 'var(--shift-am)' : i === 1 ? 'var(--shift-mid)' : 'var(--shift-pm)' }} />
+          ))}
+          <span style={{ width: '24px', height: 6, borderRadius: 3, background: 'var(--shift-off)' }} />
+          <span style={{ width: '8px', height: 6, borderRadius: 3, background: 'var(--shift-leave)' }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TodayPage(props) {
+  return (
+    <DeskShell role={props.role} active="today" rail={<TodayRail />}>
+      <div style={todayS.wrap}>
+        <PageHead
+          title="今天"
+          sub={<span>{D.store.dateLabel} {D.store.weekday} <Sep /> 营业日 {D.store.openFrom} 起</span>}
+          right={<LiveDot />}
+        />
+
+        <div style={todayS.band}>
+          {D.week.map((d, i) => {
+            const on = i === D.week.length - 1;
+            return (
+              <div key={d.d} style={Object.assign({}, todayS.chip, {
+                background: on ? 'var(--brand)' : 'var(--card)',
+                border: '1px solid ' + (on ? 'var(--brand)' : 'var(--line)')
+              })}>
+                <span style={{ fontSize: 12, color: on ? 'var(--brand-ink)' : 'var(--ink-2)' }}>{d.w}</span>
+                <span className="num" style={{ fontSize: 18, fontWeight: 600, lineHeight: '20px', letterSpacing: '-0.02em', color: on ? 'var(--brand-ink)' : 'var(--ink)' }}>{d.d}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        <TodayHero role={props.role} />
+
+        <div style={todayS.restLabel}>
+          <span>其余待办 3 件</span>
+          <span style={{ flex: 1, height: 1, background: 'var(--line)' }} />
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <TodayTodo
+            icon="shield" tone="brand" title="卫生验收"
+            pill={'逾期 ' + D.todo.hygieneOverdue} pillTone="danger"
+            meta={<span><span className="num">{D.todo.hygiene}</span> 项待验收 <Sep /> 后厨 灶台 等</span>}
+            action="去验收" />
+          <TodayTodo
+            icon="alert" tone="amber" title="整改单 1 条"
+            pill="待整改" pillTone="amber"
+            meta={<span>{D.rectify.zone} <Sep /> {D.rectify.item} <Sep /> 距截止 <span className="num">{D.rectify.left}</span></span>}
+            action="查看" />
+          <TodayTodo
+            icon="box" tone="neutral" title="备货还差 7 项"
+            meta={<span>热菜 <span className="num">3</span> <Sep /> 蒸笼 <span className="num">2</span> <Sep /> 凉菜 <span className="num">2</span></span>}
+            action="去备货" />
+        </div>
+      </div>
+    </DeskShell>
+  );
+}
+
+/* ============================================================ 销售报表 */
+
+const salesS = {
+  store: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 13, color: 'var(--ink-2)' },
+  chips: { display: 'flex', gap: 8, marginTop: 12, paddingBottom: 2 },
+  chip: { height: 36, padding: '0 14px', borderRadius: 999, fontSize: 14, fontWeight: 500, whiteSpace: 'nowrap', cursor: 'pointer' },
+  stats: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 },
+  statCard: { background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 'var(--r-card)', padding: '12px 14px' },
+  statLabel: { fontSize: 13, color: 'var(--ink-2)' },
+  statValue: { marginTop: 4, fontSize: 25, fontWeight: 600, letterSpacing: '-0.03em', lineHeight: '30px' },
+  secHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  secTitle: { fontSize: 16, fontWeight: 600, letterSpacing: '-0.02em' }
+};
+
+function SalesStat(props) {
+  return (
+    <div style={salesS.statCard}>
+      <div style={salesS.statLabel}>{props.label}</div>
+      <div className="num" style={salesS.statValue}>{props.value}</div>
+    </div>
+  );
+}
+
+function SalesPage(props) {
+  const [period, setPeriod] = useState('7d');
+  const [tip, setTip] = useState(false);
+  const periods = [{ k: 'today', t: '今天' }, { k: 'yest', t: '昨天' }, { k: '7d', t: '近 7 天' }, { k: 'month', t: '本月' }];
+  const maxPct = D.sales.stations[0].pct;
+  return (
+    <PhoneShell role={props.role} title="销售报表" tab="sales" onTab={props.onTab}>
+      <div style={salesS.store}>
+        <span>{D.store.name}<Sep />{D.store.branch}</span>
+        <span>只读报表</span>
+      </div>
+
+      <div className="row-x" style={salesS.chips}>
+        {periods.map(p => {
+          const on = p.k === period;
+          return (
+            <button key={p.k} onClick={() => setPeriod(p.k)} style={Object.assign({}, salesS.chip, {
+              background: on ? 'var(--brand)' : 'var(--card)',
+              border: '1px solid ' + (on ? 'var(--brand)' : 'var(--line)'),
+              color: on ? 'var(--brand-ink)' : 'var(--ink-2)',
+              fontWeight: on ? 600 : 500
+            })}>{p.t}</button>
+          );
+        })}
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 16 }}>
+        <span style={salesS.secTitle}>近 7 天</span>
+        <button onClick={() => setTip(!tip)} aria-label="口径说明"
+                style={{ width: 26, height: 26, borderRadius: 13, border: '1px solid var(--line-strong)', color: 'var(--ink-2)', fontSize: 13, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>?</button>
+      </div>
+
+      <div style={salesS.stats}>
+        <SalesStat label="销售金额" value={money(D.sales.amount)} />
+        <SalesStat label="订单" value={comma(D.sales.orders)} />
+        <SalesStat label="客单价" value={'¥' + D.sales.avg} />
+        <SalesStat label="菜品" value={String(D.sales.dishes)} />
+      </div>
+      <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 13, color: 'var(--ink-2)' }}>
+        <span>退菜 <span className="num">{D.sales.refund}</span> 行</span>
+        <span>近 7 天合计</span>
+      </div>
+
+      {tip ? (
+        <div style={{ marginTop: 10, padding: '10px 12px', background: 'var(--card-2)', border: '1px solid var(--line)', borderRadius: 10, fontSize: 13, lineHeight: '20px', color: 'var(--ink-2)' }}>
+          销售金额 = 已结账订单合计；客单价 = 销售金额 ÷ 订单数（¥186,420 ÷ 6,028 = ¥30.9）。
+        </div>
+      ) : null}
+
+      <Card pad={14} style={{ marginTop: 12 }}>
+        <div style={salesS.secHead}>
+          <span style={salesS.secTitle}>营业额走势</span>
+          <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>周六最高</span>
+        </div>
+        <LineChart days={D.sales.days} />
+      </Card>
+
+      <Card pad={14} style={{ marginTop: 12 }}>
+        <div style={salesS.secHead}>
+          <span style={salesS.secTitle}>档口占比</span>
+          <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>按金额</span>
+        </div>
+        {D.sales.stations.map(s => (
+          <div key={s.name} style={{ display: 'flex', alignItems: 'center', gap: 10, height: 28 }}>
+            <span style={{ width: 42, fontSize: 14, color: 'var(--ink)' }}>{s.name}</span>
+            <span style={{ flex: 1, height: 8, borderRadius: 4, background: 'var(--line)', overflow: 'hidden' }}>
+              <span style={{ display: 'block', height: 8, width: (s.pct / maxPct * 100) + '%', background: 'var(--brand)', borderRadius: 4 }} />
+            </span>
+            <span className="num" style={{ width: 46, textAlign: 'right', fontSize: 13, color: 'var(--ink-2)' }}>{s.pct}%</span>
+          </div>
+        ))}
+      </Card>
+
+      <Card pad={14} style={{ marginTop: 12 }}>
+        <div style={salesS.secHead}>
+          <span style={salesS.secTitle}>菜品榜</span>
+          <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>前 5</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', fontSize: 13, color: 'var(--ink-2)', paddingBottom: 6 }}>
+          <span style={{ width: 20 }}></span>
+          <span style={{ flex: 1 }}>菜品</span>
+          <span style={{ width: 36 }}>档口</span>
+          <span style={{ width: 48, textAlign: 'right' }}>数量</span>
+          <span style={{ width: 50, textAlign: 'right' }}>占比</span>
+        </div>
+        {D.sales.top.map(t => (
+          <div key={t.name} style={{ display: 'flex', alignItems: 'center', height: 46, borderTop: '1px solid var(--line)' }}>
+            <span className="num" style={{ width: 20, fontSize: 13, color: 'var(--ink-3)' }}>{t.rank}</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 16, fontWeight: 500, letterSpacing: '-0.02em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
+            <span style={{ width: 36, fontSize: 13, color: 'var(--ink-2)' }}>{t.station}</span>
+            <span className="num" style={{ width: 48, textAlign: 'right', fontSize: 16 }}>{t.qty}</span>
+            <span className="num" style={{ width: 50, textAlign: 'right', fontSize: 13, color: 'var(--ink-2)' }}>{t.pct}</span>
+          </div>
+        ))}
+      </Card>
+
+      <div style={{ marginTop: 16 }}>
+        <Btn kind="outline" h={48} grow icon="download">导出 CSV</Btn>
+      </div>
+      <div style={{ marginTop: 20 }} />
+    </PhoneShell>
+  );
+}
+
+/* ============================================================ 日常验收 */
+
+const dailyS = {
+  date: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 13, color: 'var(--ink-2)' },
+  sum: { display: 'flex', marginTop: 10, background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 'var(--r-card)', overflow: 'hidden' },
+  sumCell: { flex: 1, padding: '12px 0', textAlign: 'center' },
+  sumNum: { fontSize: 19, fontWeight: 600, letterSpacing: '-0.02em', lineHeight: '22px' },
+  sumLabel: { marginTop: 3, fontSize: 13, color: 'var(--ink-2)' },
+  card: { marginTop: 12, background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 'var(--r-card)', padding: 14 },
+  shots: { display: 'flex', gap: 8, marginTop: 12 },
+  fig: { flex: 1, position: 'relative', margin: 0, height: 240, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--line)' },
+  tag: { position: 'absolute', left: 6, top: 6, display: 'inline-flex', alignItems: 'center', height: 22, padding: '0 7px', borderRadius: 6, background: 'var(--bg)', fontSize: 13, fontWeight: 600, letterSpacing: '-0.01em' },
+  queue: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, padding: '0 2px' }
+};
+
+function DailyPage(props) {
+  const [sheet, setSheet] = useState(false);
+  const [res, setRes] = useState(null);
+  const [reason, setReason] = useState('');
+  const h = D.hygiene;
+  const sum = [
+    { n: h.pending, label: '待验收', color: 'var(--amber)' },
+    { n: h.toShoot, label: '待拍', color: 'var(--ink)' },
+    { n: h.passed, label: '已通过', color: 'var(--ink-2)' },
+    { n: h.missed, label: '漏验', color: 'var(--danger-ink)' }
+  ];
+  return (
+    <PhoneShell role={props.role} title="日常验收" tab="floor" onTab={props.onTab}>
+      <div style={dailyS.date}>
+        <span>{D.store.dateLabel} {D.store.weekday}</span>
+        <span className="num">营业日 {D.store.openFrom} 起</span>
+      </div>
+
+      <div style={dailyS.sum}>
+        {sum.map((s, i) => (
+          <div key={s.label} style={Object.assign({}, dailyS.sumCell, { borderLeft: i ? '1px solid var(--line)' : 'none' })}>
+            <div className="num" style={Object.assign({}, dailyS.sumNum, { color: s.color })}>{s.n}</div>
+            <div style={dailyS.sumLabel}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={dailyS.card}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.03em' }}>灶台 <Sep /> 油污与残渣</div>
+            <div style={{ marginTop: 4, fontSize: 13, color: 'var(--ink-2)' }}>后厨 <Sep /> 日常验收</div>
+          </div>
+          <Pill tone={res === 'pass' ? 'brand' : res === 'reject' ? 'danger' : 'amber'}>
+            {res === 'pass' ? '已通过' : res === 'reject' ? '已驳回' : '待验收'}
+          </Pill>
+        </div>
+
+        <div style={dailyS.shots}>
+          <figure style={dailyS.fig}>
+            <CounterShot variant="std" />
+            <figcaption style={Object.assign({}, dailyS.tag, { color: 'var(--ink-2)' })}>标准图</figcaption>
+          </figure>
+          <figure style={dailyS.fig}>
+            <CounterShot variant="act" />
+            <figcaption style={Object.assign({}, dailyS.tag, { color: 'var(--ink)' })}>
+              实拍 <Sep /> {h.current.by} <span className="num">{h.current.at}</span>
+            </figcaption>
+          </figure>
+        </div>
+
+        <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, color: 'var(--ink-2)' }}>
+          <Icon name="camera" size={15} color="var(--ink-2)" />
+          <span>{h.current.shift} <Sep /> 提交人不能自验 <Sep /> 对照标准图判</span>
+        </div>
+
+        {res ? (
+          <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, height: 52 }}>
+            <Icon name={res === 'pass' ? 'check' : 'x'} size={17} color={res === 'pass' ? 'var(--brand)' : 'var(--danger-ink)'} />
+            <span style={{ fontSize: 15, fontWeight: 500 }}>
+              {res === 'pass' ? '已通过，王芳 10:24 的实拍' : '已驳回，理由已发给王芳'}
+            </span>
+            <button onClick={() => { setRes(null); setReason(''); }} style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--ink-2)', textDecoration: 'underline', textUnderlineOffset: 3, cursor: 'pointer' }}>撤销</button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+            <Btn h={52} grow onClick={() => setRes('pass')}>通过</Btn>
+            <Btn kind="danger" h={52} w={128} onClick={() => setSheet(true)}>驳回</Btn>
+          </div>
+        )}
+      </div>
+
+      <div style={dailyS.queue}>
+        <span style={{ fontSize: 14, color: 'var(--ink-2)' }}>下一项 <Sep /> 蒸笼区（3/9）</span>
+        <span style={{ display: 'flex', gap: 4 }}>
+          {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(i => (
+            <span key={i} style={{ width: 5, height: 5, borderRadius: 3, background: i <= h.next.index ? 'var(--brand)' : 'var(--line-strong)' }} />
+          ))}
+        </span>
+      </div>
+
+      {reason ? (
+        <div style={{ marginTop: 10, padding: '10px 12px', background: 'var(--card-2)', border: '1px solid var(--line)', borderRadius: 10, fontSize: 13, lineHeight: '20px', color: 'var(--ink-2)' }}>
+          驳回理由：{reason}
+        </div>
+      ) : null}
+
+      <div style={{ marginTop: 12, display: 'flex', gap: 10 }}>
+        <div style={{ flex: 1, background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 10, padding: '10px 12px' }}>
+          <div style={{ fontSize: 13, color: 'var(--ink-2)' }}>一次通过率</div>
+          <div className="num" style={{ marginTop: 2, fontSize: 18, fontWeight: 600, letterSpacing: '-0.02em' }}>{h.passRate}%</div>
+        </div>
+        <div style={{ flex: 1, background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 10, padding: '10px 12px' }}>
+          <div style={{ fontSize: 13, color: 'var(--ink-2)' }}>近 30 天判定</div>
+          <div className="num" style={{ marginTop: 2, fontSize: 18, fontWeight: 600, letterSpacing: '-0.02em' }}>{comma(h.judged)} 项</div>
+        </div>
+      </div>
+
+      <ReasonSheet key={sheet ? 'open' : 'closed'} open={sheet} onClose={() => setSheet(false)}
+                   onSubmit={txt => { setReason(txt); setRes('reject'); setSheet(false); }} />
+    </PhoneShell>
+  );
+}
+
+/* ============================================================ 排班月历 */
+
+const calS = {
+  wrap: { maxWidth: 720, margin: '0 auto', padding: '22px 32px 16px', display: 'flex', flexDirection: 'column', minHeight: '100%' },
+  head: { display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12 },
+  h1: { margin: 0, fontSize: 28, lineHeight: '34px', fontWeight: 700, letterSpacing: '-0.03em' },
+  legend: { display: 'flex', alignItems: 'center', gap: 14, marginTop: 14, fontSize: 13, color: 'var(--ink-2)' },
+  lgItem: { display: 'inline-flex', alignItems: 'center', gap: 6 },
+  wkHead: { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6, marginTop: 12, marginBottom: 6 },
+  grid: { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6 },
+  cell: { height: 118, borderRadius: 8, background: 'var(--card)', border: '1px solid var(--line)', padding: '7px 7px 6px', display: 'flex', flexDirection: 'column' },
+  bars: { display: 'flex', flexDirection: 'column', gap: 2, marginTop: 6, flex: 1, overflow: 'hidden' },
+  bar: { height: 3, borderRadius: 1.5 },
+  pen: { marginTop: 12, background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 'var(--r-card)', padding: '9px 12px 9px', display: 'flex', flexDirection: 'column' },
+  seg: { display: 'flex', gap: 4 },
+  segBtn: { height: 36, minWidth: 46, padding: '0 10px', borderRadius: 8, fontSize: 14, fontWeight: 500, cursor: 'pointer', border: '1px solid transparent' },
+  rail: { padding: '20px 20px 14px' },
+  row: { display: 'flex', alignItems: 'center', gap: 9, padding: '4px 0', borderTop: '1px solid var(--line)' }
+};
+
+const CAL_BAR = {
+  am: 'var(--shift-am)', mid: 'var(--shift-mid)', pm: 'var(--shift-pm)',
+  off: 'var(--shift-off)', leave: 'var(--shift-leave)'
+};
+const CAL_LEGEND = [
+  { k: 'am', t: '班' }, { k: 'off', t: '休' }, { k: 'leave', t: '假' }
+];
+
+function CalLegendSwatch(props) {
+  if (props.k === '班') {
+    return (
+      <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 1.5, width: 16 }}>
+        <span style={{ height: 3, borderRadius: 1.5, background: 'var(--shift-am)' }} />
+        <span style={{ height: 3, borderRadius: 1.5, background: 'var(--shift-mid)' }} />
+        <span style={{ height: 3, borderRadius: 1.5, background: 'var(--shift-pm)' }} />
+      </span>
+    );
+  }
+  return <span style={{ width: 16, height: 4, borderRadius: 2, background: props.color, border: props.dash ? '1px dashed var(--line-strong)' : 'none' }} />;
+}
+
+function CalendarPage(props) {
+  const [view, setView] = useState('month');
+  const [shift, setShift] = useState(null);
+  const [zone, setZone] = useState('后厨');
+  const [batches, setBatches] = useState([]);
+
+  const cal = D.cal;
+  /* mock 把 10/25 钉在周六（周六 = 第 6 列，索引 5），据此倒推 10/1 落在第 3 列 → 前导 2 格 */
+  const leads = ((5 - (cal.today - 1)) % 7 + 7) % 7;
+  const cells = [];
+  for (let i = 0; i < leads; i++) cells.push(null);
+  for (let d = 1; d <= 31; d++) cells.push(d);
+  while (cells.length < 35) cells.push(null);
+
+  const writeList = batches.reduce((acc, b) => acc.concat(b.items), []);
+  function writesOn(day) { return writeList.filter(w => w.day === day); }
+
+  function pickShift(k) { setShift(k); }
+  function pickZone(z) { setZone(z); }
+
+  function clickCell(day) {
+    if (!shift) return;
+    const key = shift + '|' + zone;
+    setBatches(prev => {
+      const next = prev.slice();
+      const last = next[next.length - 1];
+      if (last && last.key === key) {
+        next[next.length - 1] = { key: key, items: last.items.concat([{ day: day, shift: shift, zone: zone }]) };
+      } else {
+        next.push({ key: key, items: [{ day: day, shift: shift, zone: zone }] });
+      }
+      return next;
+    });
+  }
+
+  function undo() {
+    if (!batches.length) return;
+    setBatches(batches.slice(0, batches.length - 1));
+  }
+
+  const hint = shift
+    ? '已选 ' + (shift === 'off' ? '休' : { am: '早', mid: '中', pm: '晚' }[shift]) + '班（' + zone + '），点日期写入'
+    : '先选班次，再点日期写入';
+
+  return (
+    <DeskShell role={props.role} active="people" rail={<CalendarRail />}>
+      <div style={calS.wrap}>
+        <div style={calS.head}>
+          <div>
+            <h1 style={calS.h1}>{cal.year} 年 {cal.month} 月</h1>
+            <Underline />
+            <div style={{ marginTop: 8, fontSize: 13, color: 'var(--ink-2)' }}>
+              {view === 'month' ? '整月排班，28 人花名册' : '第 4 周，10/19 – 10/25'}
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ display: 'flex', border: '1px solid var(--line-strong)', borderRadius: 8, overflow: 'hidden' }}>
+              {[{ k: 'month', t: '月' }, { k: 'week', t: '周' }].map(v => {
+                const on = v.k === view;
+                return (
+                  <button key={v.k} onClick={() => setView(v.k)} style={{
+                    height: 36, width: 46, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+                    background: on ? 'var(--card-2)' : 'transparent', color: on ? 'var(--ink)' : 'var(--ink-2)'
+                  }}>{v.t}</button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <div style={calS.legend}>
+          {CAL_LEGEND.map(l => (
+            <span key={l.t} style={calS.lgItem}>
+              {l.k === 'am' ? <CalLegendSwatch k="班" /> : <CalLegendSwatch color={CAL_BAR[l.k]} />}
+              {l.t}
+            </span>
+          ))}
+          <span style={calS.lgItem}><CalLegendSwatch color="transparent" dash />未排</span>
+          <span style={calS.lgItem}><span style={{ width: 16, height: 4, borderRadius: 2, background: 'var(--amber-soft)', border: '1px solid var(--amber)' }} />待批</span>
+        </div>
+
+        <div style={calS.wkHead}>
+          {cal.weekdays.map(w => (
+            <div key={w} style={{ fontSize: 13, color: 'var(--ink-2)', textAlign: 'center' }}>{w}</div>
+          ))}
+        </div>
+
+        <div style={calS.grid}>
+          {cells.map((day, idx) => {
+            if (!day) return <div key={'e' + idx} />;
+            const isToday = day === cal.today;
+            const isLeave = cal.leaveDays.indexOf(day) >= 0;
+            const isPending = day === cal.pendingDay;
+            const unsched = cal.unscheduled.indexOf(day) >= 0;
+            const ws = writesOn(day);
+            const delta = ws.reduce((s, w) => s + (w.shift === 'off' ? -1 : 1), 0);
+            const count = cal.counts[day - 1] + delta;
+            const base = Math.max(6, Math.min(11, cal.counts[day - 1] - 16));
+            const am = Math.ceil(base * 0.45), mid = Math.ceil(base * 0.75);
+            const extraShift = isLeave ? ['leave'] : (isPending ? ['leave'] : []);
+            const barKinds = [];
+            if (!unsched) {
+              for (let i = 0; i < base; i++) barKinds.push(i < am ? 'am' : (i < mid ? 'mid' : 'pm'));
+              extraShift.forEach(k => barKinds.push(k));
+            }
+            ws.forEach(w => barKinds.push(w.shift));
+            const dim = view === 'week' && (day < 19 || day > 25);
+            return (
+              <div key={day} className={shift ? 'cell press' : 'cell'}
+                   onClick={() => clickCell(day)}
+                   style={Object.assign({}, calS.cell, {
+                     border: '1px ' + (unsched ? 'dashed' : 'solid') + ' ' + (isToday ? 'var(--brand)' : (ws.length ? 'var(--line-strong)' : 'var(--line)')),
+                     background: dim ? 'var(--bg)' : 'var(--card)',
+                     cursor: shift ? 'pointer' : 'default'
+                   })}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 20 }}>
+                  <span className="num" style={{ fontSize: 13, fontWeight: 600, color: isToday ? 'var(--brand)' : 'var(--ink)' }}>{day}</span>
+                  {isLeave || isPending ? (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', height: 18, padding: '0 6px', borderRadius: 999, background: 'var(--amber-soft)', color: 'var(--amber)', fontSize: 13, fontWeight: 600, lineHeight: 1 }}>待批</span>
+                  ) : null}
+                  {unsched ? <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>未排</span> : null}
+                </div>
+                <div style={calS.bars}>
+                  {barKinds.slice(0, 12).map((k, i) => (
+                    <span key={i} style={Object.assign({}, calS.bar, { background: CAL_BAR[k] })} />
+                  ))}
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <span className="num" style={{ fontSize: 13, color: 'var(--ink-2)' }}>{unsched ? '—' : count}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={calS.pen}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 13, color: 'var(--ink-2)', whiteSpace: 'nowrap' }}>写排班</span>
+            <div style={calS.seg}>
+              {[{ k: 'am', t: '早' }, { k: 'mid', t: '中' }, { k: 'pm', t: '晚' }, { k: 'off', t: '休' }].map(s => {
+                const on = shift === s.k;
+                return (
+                  <button key={s.k} onClick={() => pickShift(s.k)} style={Object.assign({}, calS.segBtn, {
+                    background: on ? 'var(--brand)' : 'var(--card-2)',
+                    color: on ? 'var(--brand-ink)' : 'var(--ink-2)',
+                    fontWeight: on ? 600 : 500
+                  })}>{s.t}</button>
+                );
+              })}
+            </div>
+            <span style={{ width: 1, height: 22, background: 'var(--line)', flex: '0 0 auto' }} />
+            <div style={calS.seg}>
+              {['后厨', '前厅', '吧台'].map(z => {
+                const on = zone === z;
+                return (
+                  <button key={z} onClick={() => pickZone(z)} style={Object.assign({}, calS.segBtn, {
+                    minWidth: 52,
+                    background: on ? 'var(--card-2)' : 'transparent',
+                    border: '1px solid ' + (on ? 'var(--line-strong)' : 'transparent'),
+                    color: on ? 'var(--ink)' : 'var(--ink-2)'
+                  })}>{z}</button>
+                );
+              })}
+            </div>
+            <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--ink-2)', whiteSpace: 'nowrap' }}>
+              <Icon name="edit" size={15} color="var(--ink-3)" />
+              笔在手上，点格子就写入
+            </span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+            <span style={{ fontSize: 13, color: 'var(--ink-2)', whiteSpace: 'nowrap' }}>{hint}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>{batches.length ? '已写 ' + batches.length + ' 批' : '还没写入'}</span>
+              <Btn kind="ghost" h={30} fs={13} icon="undo" disabled={!batches.length} onClick={undo}>撤销最近一批</Btn>
+            </div>
+          </div>
+        </div>
+      </div>
+    </DeskShell>
+  );
+}
+
+function CalendarRail() {
+  const leavePill = { 早班: 'brand', 中班: 'neutral', 晚班: 'neutral', 请假: 'danger' };
+  const [done, setDone] = useState({});
+  return (
+    <div style={calS.rail}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+        <div>
+          <span className="num" style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.02em' }}>10.25</span>
+          <span style={{ marginLeft: 8, fontSize: 15, color: 'var(--ink-2)' }}>周六</span>
+        </div>
+        <Pill tone="amber">待批 2</Pill>
+      </div>
+      <div style={{ marginTop: 4, fontSize: 13, color: 'var(--ink-2)' }}>当天名单 <Sep /> 25 人在岗</div>
+
+      <div style={{ marginTop: 10 }}>
+        {D.roster.map(p => (
+          <div key={p.name} style={calS.row}>
+            <span style={{ width: 24, height: 24, borderRadius: 12, background: 'var(--card-2)', color: 'var(--ink-2)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 600, flex: '0 0 auto' }}>{p.name.charAt(0)}</span>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: '-0.01em' }}>{p.name}</span>
+                <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>{p.role}</span>
+              </div>
+              <div style={{ marginTop: 1, fontSize: 13, color: 'var(--ink-2)', display: 'flex', alignItems: 'center' }}>
+                {p.zone}
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Pill tone={leavePill[p.shift] || 'neutral'}>{p.shift}</Pill>
+              <span className="num" style={{ fontSize: 13, color: 'var(--ink-2)' }}>{p.time}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--line-strong)' }}>
+        <div style={{ fontSize: 17, fontWeight: 600, letterSpacing: '-0.02em' }}>待批请假</div>
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {D.pendingLeave.map(l => {
+            const key = l.name + l.range;
+            const state = done[key];
+            return (
+              <div key={key} style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 10, padding: '8px 11px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 14, fontWeight: 600 }}>{l.name} <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-2)' }}>{l.type}</span></span>
+                  <span className="num" style={{ fontSize: 13, color: 'var(--ink-2)' }}>{l.range}</span>
+                </div>
+                <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>共 <span className="num">{l.days}</span> 天</span>
+                  {state ? (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                      <Pill tone={state === 'ok' ? 'brand' : 'danger'}>{state === 'ok' ? '已批准' : '已驳回'}</Pill>
+                      <button onClick={() => setDone(Object.assign({}, done, { [key]: null }))}
+                              style={{ fontSize: 13, color: 'var(--ink-2)', textDecoration: 'underline', textUnderlineOffset: 3, cursor: 'pointer' }}>撤销</button>
+                    </span>
+                  ) : (
+                    <span style={{ display: 'flex', gap: 6 }}>
+                      <Btn h={30} fs={13} onClick={() => setDone(Object.assign({}, done, { [key]: 'ok' }))}>批准</Btn>
+                      <Btn kind="outline" h={30} fs={13} onClick={() => setDone(Object.assign({}, done, { [key]: 'no' }))}>驳回</Btn>
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--line)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, cursor: 'pointer' }}>
+          <Icon name="calendar" size={17} color="var(--ink-2)" />
+          <span style={{ fontSize: 14, fontWeight: 600 }}>固定班规则</span>
+          <span style={{ fontSize: 13, color: 'var(--ink-2)' }}><span className="num">{D.cal.fixed}</span> 条生效中</span>
+          <span style={{ marginLeft: 'auto' }}><Icon name="chevron" size={16} color="var(--ink-3)" /></span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { TodayPage, SalesPage, DailyPage, CalendarPage });
+
+})();
+
+</script>
+<script type="text/babel">
+/* dir-2 · 作业流 —— 入口：?p= today|sales|daily|calendar，?role= boss|manager|chef|staff */
+
+(function () {
+
+function readParams() {
+  const q = new URLSearchParams(window.location.search);
+  /* window.__PAGE__ / __ROLE__ 是静态体检（file:// 下没有 query）时的兜底 */
+  return {
+    page: window.__PAGE__ || q.get('p') || 'today',
+    role: window.__ROLE__ || q.get('role') || 'manager'
+  };
+}
+
+function App() {
+  const init = readParams();
+  const [page, setPage] = React.useState(init.page);
+  const [tab, setTab] = React.useState(init.page === 'daily' ? 'floor' : 'today');
+
+  /* tab 只接本次真有的两屏手机页：现场 = 日常验收，今天 = 手机版今天。
+     厨房 / 我的 两键没有对应页面，不接跳转。 */
+  function onTab(k) {
+    if (k === 'floor') { setPage('daily'); setTab('floor'); }
+    else if (k === 'today') { setPage('mtoday'); setTab('today'); }
+  }
+
+  const map = {
+    today: window.TodayPage,
+    sales: window.SalesPage,
+    daily: window.DailyPage,
+    calendar: window.CalendarPage,
+    mtoday: window.MobileTodayPage || window.TodayPage
+  };
+  const Page = map[page] || window.TodayPage;
+  return <Page role={init.role} tab={tab} onTab={onTab} />;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+})();
+
+</script>
+</body>
+</html>

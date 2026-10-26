@@ -1,0 +1,94 @@
+/* dir-2 · 作业流 —— 令牌 + 基础层
+   页面里不写裸色值，全部走这里的变量。 */
+
+:root {
+  --bg: #0E1110;
+  --card: #171C1A;
+  --card-2: #1D2321;
+  --line: #232A27;
+  --line-strong: #2E3733;
+  --ink: #E8EEEA;
+  --ink-2: #92A39B;
+  --ink-3: #6C7C74;
+  --brand: #2FB98A;
+  --brand-ink: #08110D;
+  --amber: #E08B3C;
+  --danger: #E2503F;
+  --brand-soft: rgba(47, 185, 138, .14);
+  --amber-soft: rgba(224, 139, 60, .14);
+  --danger-soft: rgba(226, 80, 63, .14);
+
+  /* --danger 做正文色在卡片上只有 4.48:1、在 danger-soft 上 3.89:1，
+     都过不了 4.5。文字专用这一档：卡片上 5.26:1，软底上 4.57:1。
+     描边与实心块仍然用 --danger。 */
+  --danger-ink: #EA6350;
+
+  /* 班次条：只从 --brand 切三档浓淡，不引入新色相；休 / 假用既有灰与红 */
+  --shift-am: var(--brand);
+  --shift-mid: rgba(47, 185, 138, .66);
+  --shift-pm: rgba(47, 185, 138, .4);
+  --shift-off: var(--ink-3);
+  --shift-leave: var(--danger);
+
+  --font: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --r-card: 12px;
+  --r-btn: 10px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+}
+
+body {
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+input, textarea, select { font-family: inherit; }
+
+.num { font-variant-numeric: tabular-nums; }
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+::selection { background: var(--brand-soft); }
+
+/* 按下 / 悬停：只做状态反馈，不做编排动效 */
+.press { transition: opacity .12s ease, background-color .12s ease, border-color .12s ease; }
+.press:active { opacity: .82; }
+
+.nav-i { background: transparent; transition: background-color .12s ease; }
+.nav-i:hover { background: var(--card-2); }
+.nav-i.on, .nav-i.on:hover { background: var(--card); }
+
+.cell:hover { border-color: var(--line-strong); }
+
+/* 滚动条 */
+.scrl { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.scrl::-webkit-scrollbar { width: 8px; height: 8px; }
+.scrl::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; }
+.scrl::-webkit-scrollbar-track { background: transparent; }
+
+.row-x {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.row-x::-webkit-scrollbar { display: none; }

@@ -454,9 +454,14 @@ journalctl -u luyun-backup
 > 冷备依赖 `pg_dump`（`postgresql-client`，版本需 ≥ 服务端）。`PYTHON_BIN` 可覆盖
 > 执行用的解释器。
 
+> **备份范围**：整库 `app.pgdump`（全部业务表，含卫生 / 排班 / 考勤 / 损耗 / 企微订阅）、
+> POS 凭据 `credentials.enc`、更新凭据 `github_release.enc`、运行配置、三类照片
+> （标准图 / 其它照片 / 损耗照片，两个照片目录），以及采集状态文件
+> `table_state.json` / `delivery_bills.json`（跟库一起回滚，否则恢复后会漏采当天订单）。
+>
 > **不在备份范围内**（页面会明确列出，清单见 `services/backup_points.NOT_BACKED_UP`）：
-> 日志（`logs` 表；与业务表同库，不再有独立的 `logs.db` 文件）、采集状态文件、
-> 更新访问凭据 `github_release.enc`、更新作业状态与更新历史。
+> 日志（`logs` 表；与业务表同库，不再有独立的 `logs.db` 文件）、更新作业状态与更新历史、
+> `data/settled_raw` 等原始单据存档。
 
 ---
 

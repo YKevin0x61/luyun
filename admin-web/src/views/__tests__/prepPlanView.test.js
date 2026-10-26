@@ -125,23 +125,23 @@ describe('进页面就出清单', () => {
     vi.stubGlobal('fetch', probeFetch())
     const wrapper = await mountView()
 
-    expect(wrapper.text()).not.toContain('未来 24 小时')
+    // ADR 0122 起窗口就是「未来 24 小时」，这条改成正向断言
+    expect(wrapper.text()).toContain('未来 24 小时')
     expect(wrapper.text()).not.toContain('午后补货')
     expect(wrapper.find('.pp-refresh').exists()).toBe(false)
   })
 
-  it('已打烊时不给清单，只给一句话', async () => {
+  it('打烊后仍然给到明天此刻的参考值', async () => {
+    // ADR 0122：滚动 24 小时窗口下没有「打烊就没数」这回事
     const closedToday = {
       ...TODAY,
       window: { ...TODAY.window, closed: true },
-      entries: [],
-      remaining_count: 0,
     }
     vi.stubGlobal('fetch', probeFetch({ today: closedToday }))
     const wrapper = await mountView()
 
-    expect(wrapper.text()).toContain('今天已打烊')
-    expect(wrapper.text()).not.toContain('虾饺馅')
+    expect(wrapper.text()).toContain('虾饺馅')
+    expect(wrapper.text()).toContain('未来 24 小时')
   })
 })
 

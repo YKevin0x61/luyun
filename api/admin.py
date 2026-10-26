@@ -29,6 +29,7 @@ from db_core.schema import (
     OVERTIME_TABLES,
     RECIPE_TABLES,
     SCHEDULING_TABLES,
+    TABLE_GROUPS,
     WASTAGE_TABLES,
     WECOM_SUBSCRIPTION_TABLES,
 )
@@ -55,23 +56,14 @@ _ADMIN_WRITABLE_TABLES = frozenset(
     table for table in ALL_TABLES
     if table != "auth" and table not in _ADMIN_READ_ONLY_TABLES
 )
-_ADMIN_TABLE_GROUPS = (
-    ("business", "业务数据", tuple(t for t in ALL_TABLES if t not in ("auth", "logs"))),
-    ("recipe", "配方库", RECIPE_TABLES),
-    ("hygiene", "卫生管理", HYGIENE_TABLES),
-    ("scheduling", "排班", SCHEDULING_TABLES),
-    ("wecom", "企微推送", WECOM_SUBSCRIPTION_TABLES),
-    ("overtime", "人事", OVERTIME_TABLES),
-    ("attendance", "考勤", ATTENDANCE_TABLES),
-    ("wastage", "损耗", WASTAGE_TABLES),
-    ("auth", "登录认证", AUTH_PHYSICAL_TABLES),
-    ("external", "其他数据源", ("logs",)),
-)
+# 分组口径在 db_core/schema.py 的 TABLE_GROUPS（备份页的「包里装了什么」共用同一份）
+_ADMIN_TABLE_GROUPS = TABLE_GROUPS
+# `logs` 只读、且点了会跳到 /logs：它现在归「系统设置」组，但仍然不是可查询的表。
 _ADMIN_DB_TABLES = frozenset(
     table
-    for key, _label, tables in _ADMIN_TABLE_GROUPS
-    if key != "external"
+    for _key, _label, tables in _ADMIN_TABLE_GROUPS
     for table in tables
+    if table != "logs"
 )
 _ADMIN_REDACTED_COLUMNS = {
     "admin_user": frozenset({"password_hash"}),
@@ -326,6 +318,25 @@ def _is_numeric_column_type(data_type: Any) -> bool:
     return str(data_type or "").strip().lower() in _NUMERIC_COLUMN_TYPES
 
 
+def _is_missing_table_error(exc: Exception) -> bool:
+    """「这张表库里还没建」—— 迁移没应用，不是服务端缺陷。
+
+    数据浏览的表清单来自代码常量（`db_core/schema.py`），**不查库**，所以新迁移没应用
+    时列表里照样有这张表；点开就是 asyncpg 的 `relation "x" does not exist` 原文。
+    那句话与数值列 LIKE 一样，会被直接渲染到表格区给店长看 —— 它该是一句能照做的话。
+    """
+    return exc.__class__.__name__ == "UndefinedTableError" or (
+        "does not exist" in str(exc) and "relation" in str(exc)
+    )
+
+
+def _missing_table_detail(table_name: str) -> str:
+    return (
+        f"这张表还没建（{table_name}）：请在「系统更新 → 数据库迁移」应用待应用的迁移，"
+        "然后刷新本页"
+    )
+
+
 def _validate_batch_update_column(column: str, table_columns: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', column):
         raise HTTPException(status_code=400, detail="无效的字段名")
@@ -392,6 +403,9 @@ async def get_table_schema(table_name: str, db=Depends(get_db)):
     except HTTPException:
         raise
     except Exception as e:
+        if _is_missing_table_error(e):
+            logger.warning("表结构读取失败（表未建）: %s %s", table_name, e)
+            raise HTTPException(status_code=400, detail=_missing_table_detail(table_name))
         logger.error(f"获取表结构失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -488,6 +502,9 @@ async def get_table_rows(
     except HTTPException:
         raise
     except Exception as e:
+        if _is_missing_table_error(e):
+            logger.warning("表数据读取失败（表未建）: %s %s", table_name, e)
+            raise HTTPException(status_code=400, detail=_missing_table_detail(table_name))
         logger.error(f"获取表数据失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

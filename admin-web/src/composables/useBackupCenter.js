@@ -16,6 +16,7 @@ import {
   CONTENT_LABELS,
   CONTENT_OTHER_PHOTOS,
   CONTENT_STANDARD_PHOTOS,
+  CONTENT_WASTAGE_PHOTOS,
   PHOTO_CONTENTS,
   backupPointRow,
   backupPointsEmptyHint,
@@ -85,6 +86,8 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     include_recipes: true,
     include_standard_photos: true,
     include_other_photos: true,
+    include_wastage_photos: true,
+    include_scraper_state: true,
   })
   const exporting = ref(false)
   const exportBtnLabel = computed(() => (exporting.value ? '导出中…' : '生成并下载备份'))
@@ -172,6 +175,8 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
         include_recipes: exportForm.include_recipes,
         include_standard_photos: exportForm.include_standard_photos,
         include_other_photos: exportForm.include_other_photos,
+        include_wastage_photos: exportForm.include_wastage_photos,
+        include_scraper_state: exportForm.include_scraper_state,
       })
       const jobId = started?.job_id
       if (!jobId) throw new Error('导出任务创建失败')
@@ -394,6 +399,8 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     apply_recipes: false,
     apply_standard_photos: false,
     apply_other_photos: false,
+    apply_wastage_photos: false,
+    apply_scraper_state: false,
   })
   const importPreview = ref(null)
   const importToken = ref('')
@@ -451,10 +458,14 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
   const crossPointOtherMissing = computed(() =>
     importCrossPoint.value?.other_missing
     ?? (importCrossPoint.value?.missing?.other || []).length)
+  const crossPointWastageMissing = computed(() =>
+    importCrossPoint.value?.wastage_missing
+    ?? (importCrossPoint.value?.missing?.wastage || []).length)
   const crossPointMissingLabels = computed(() => {
     const labels = []
     if (crossPointStandardMissing.value) labels.push(CONTENT_LABELS.standard_photos)
     if (crossPointOtherMissing.value) labels.push(CONTENT_LABELS.other_photos)
+    if (crossPointWastageMissing.value) labels.push(CONTENT_LABELS.wastage_photos)
     return labels
   })
   const importPhotoItems = computed(() => {
@@ -488,6 +499,8 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
       ['含配方', meta.includes?.recipes_db ? '是' : '否'],
       ['含标准图', meta.includes?.standard_photos ? '是' : '否'],
       ['含其它照片', meta.includes?.other_photos ? '是' : '否'],
+      ['含损耗照片', meta.includes?.wastage_photos ? '是' : '否'],
+      ['含采集状态', meta.includes?.scraper_state ? '是' : '否'],
       ['导出时间', meta.exported_at ? formatTs(meta.exported_at) : '—'],
       ['应用版本', meta.app_version || '—'],
     ]
@@ -507,6 +520,8 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
       importState.apply_recipes = !!defaults.recipes_db
       importState.apply_standard_photos = !!defaults.standard_photos
       importState.apply_other_photos = !!defaults.other_photos
+      importState.apply_wastage_photos = !!defaults.wastage_photos
+      importState.apply_scraper_state = !!defaults.scraper_state
       return
     }
     const includes = importIncludes.value
@@ -516,6 +531,8 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     importState.apply_recipes = !!includes.recipes_db
     importState.apply_standard_photos = !!includes.standard_photos
     importState.apply_other_photos = !!includes.other_photos
+    importState.apply_wastage_photos = !!includes.wastage_photos
+    importState.apply_scraper_state = !!includes.scraper_state
   }
 
   /**
@@ -529,6 +546,9 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     }
     if (importState.apply_other_photos && crossPointOtherMissing.value) {
       rechecked.push(CONTENT_LABELS.other_photos)
+    }
+    if (importState.apply_wastage_photos && crossPointWastageMissing.value) {
+      rechecked.push(CONTENT_LABELS.wastage_photos)
     }
     return rechecked
   })
@@ -619,16 +639,27 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     if (data?.applied_labels?.length) parts.push(`已恢复：${data.applied_labels.join('、')}`)
     else parts.push('没有任何内容被恢复')
     const photos = data?.photos_restored || {}
-    if (photos.standard || photos.other) {
-      parts.push(`照片：标准图 ${photos.standard || 0} 张、其它照片 ${photos.other || 0} 张`)
+    if (photos.standard || photos.other || photos.wastage) {
+      const photoParts = [
+        `标准图 ${photos.standard || 0} 张`,
+        `其它照片 ${photos.other || 0} 张`,
+      ]
+      if (photos.wastage) photoParts.push(`损耗照片 ${photos.wastage} 张`)
+      parts.push(`照片：${photoParts.join('、')}`)
     }
     if (data?.snapshot_ts) parts.push(`已生成新的本机回滚快照 ${data.snapshot_ts}`)
     let msg = `${verb}成功。${parts.join('；')}。`
     const consistency = data?.photo_consistency
     if (consistency && consistency.ok === false) {
-      msg += `⚠️ 但库里引用的照片有 ${consistency.standard_missing || 0} 张标准图、`
-        + `${consistency.other_missing || 0} 张其它照片在磁盘上找不到，标准图清单会缺这些项；`
-        + '请重新上传这些标准图，或用含照片的冷备归档补齐。'
+      const missingParts = [
+        `${consistency.standard_missing || 0} 张标准图`,
+        `${consistency.other_missing || 0} 张其它照片`,
+      ]
+      if (consistency.wastage_missing) {
+        missingParts.push(`${consistency.wastage_missing} 张损耗照片`)
+      }
+      msg += `⚠️ 但库里引用的照片有 ${missingParts.join('、')}在磁盘上找不到，`
+        + '标准图清单会缺这些项；请重新上传这些标准图，或用含照片的冷备归档补齐。'
     }
     if (data?.session_invalidated) msg += '当前登录会话已失效，请点击确认后重新登录。'
     // 合并模式可能有个别行写不进去（约束冲突 / 类型不匹配 / 磁盘错误）：
@@ -663,6 +694,8 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
       formData.append('apply_recipes', importState.apply_recipes ? 'true' : 'false')
       formData.append('apply_standard_photos', importState.apply_standard_photos ? 'true' : 'false')
       formData.append('apply_other_photos', importState.apply_other_photos ? 'true' : 'false')
+      formData.append('apply_wastage_photos', importState.apply_wastage_photos ? 'true' : 'false')
+      formData.append('apply_scraper_state', importState.apply_scraper_state ? 'true' : 'false')
       formData.append('force', forceRequired.value && forceContinue.value ? 'true' : 'false')
       const data = await api.upload(
         '/api/backup/import/apply',
@@ -703,6 +736,8 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     if (importState.apply_recipes) labels.push('配方数据')
     if (importState.apply_standard_photos) labels.push('标准图')
     if (importState.apply_other_photos) labels.push('其它照片')
+    if (importState.apply_wastage_photos) labels.push('损耗照片')
+    if (importState.apply_scraper_state) labels.push('采集状态')
     return labels
   })
 
@@ -835,9 +870,11 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     const contentCodes = Array.isArray(point.contents) ? point.contents : []
     const hasStandard = contentCodes.includes(CONTENT_STANDARD_PHOTOS)
     const hasOther = contentCodes.includes(CONTENT_OTHER_PHOTOS)
+    const hasWastage = contentCodes.includes(CONTENT_WASTAGE_PHOTOS)
     const photoFlags = {
       apply_standard_photos: hasStandard,
       apply_other_photos: hasOther,
+      apply_wastage_photos: hasWastage,
     }
     const details = [
       `目标本机回滚快照：${ts}`,
@@ -851,8 +888,8 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
       details.push('恢复方式：pg_restore --clean，会先删除并重建数据库对象')
       details.push('恢复期间采集会中断，恢复完成后需要重新登录后台')
     }
-    if (!hasStandard && !hasOther) {
-      details.push('该快照不含卫生照片，恢复后标准图与其它照片保持现状')
+    if (!hasStandard && !hasOther && !hasWastage) {
+      details.push('该快照不含照片，恢复后标准图、其它照片与损耗照片保持现状')
     }
     requestConfirm(
       {
@@ -873,6 +910,27 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
       },
       () => rollbackSnapshotNow(ts, photoFlags),
     )
+  }
+
+  // ==================== 「这个包里装了什么」的表清单 ====================
+  // 整库 pg_dump 覆盖全部表；分组来自后端 db_core/schema.py 的 TABLE_GROUPS，
+  // 页面不自己维护一份表名（会漂移）。
+  const backupTableGroups = ref([])
+  const backupTableTotal = ref(0)
+  const backupTablePresentCount = ref(0)
+  const backupTablePending = ref([])
+
+  async function loadBackupTables() {
+    try {
+      const data = await api.get('/api/backup/tables', null, null, 'no-store')
+      backupTableGroups.value = Array.isArray(data?.groups) ? data.groups : []
+      backupTableTotal.value = Number(data?.total) || 0
+      backupTablePresentCount.value = Number(data?.present_count) || 0
+      backupTablePending.value = Array.isArray(data?.pending) ? data.pending : []
+    } catch (err) {
+      // 表清单只是说明性信息：拿不到就不列，不打扰用户
+      backupTableGroups.value = []
+    }
   }
 
   // ==================== 保留与清理 ====================
@@ -1063,6 +1121,11 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     pointsError,
     loadPoints,
     notBackedUp,
+    backupTableGroups,
+    backupTableTotal,
+    backupTablePresentCount,
+    backupTablePending,
+    loadBackupTables,
     mediumLabels,
     mediumPurposes,
     snapshotPoints,

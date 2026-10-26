@@ -157,6 +157,7 @@ describe('页面清单（唯一来源）', () => {
       // 票 08：备货计划从管理后台的 `/prep-plan` 搬进后勤组 —— 套的是工作台外壳
       // （顶栏那条窄栏 + 按身份过滤的导航），后台那条导航不再渲染它。
       '/workbench/kitchen/prep-plan',
+      '/workbench/kitchen/prep-review',
       // 损耗分析（从 worktool2 那个小程序搬过来）：后勤组的第三页，同套工作台外壳。
       '/workbench/kitchen/loss',
       // 员工三页搬进工作台的「我的」组（票 03）：套工作台外壳，后台导航照样不渲染；

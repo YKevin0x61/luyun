@@ -29,8 +29,11 @@ export const WORKBENCH_FIELD_HOME = '/workbench/floor/daily'
  *  也读同一份口径）。 */
 export const WORKBENCH_HOME = WORKBENCH_ROOT
 
-/** 仪表盘那张卡的说明：两组一起说，别只列现场那一组。 */
-export const WORKBENCH_DASHBOARD_BLURB = '当班排班 · 现场验收 · 整改 · 仪容仪表 · 红黑榜'
+/** 仪表盘那张卡的说明：三组一起说，别只列现场那一组。
+ *
+ *  2026-10-26 用户定稿：原句只写了排班 + 卫生（人事与现场各占一半），后勤组
+ *  （配方、备货计划、损耗）补齐后就不全了，改成四段能力各点一项。 */
+export const WORKBENCH_DASHBOARD_BLURB = '排班考勤 · 卫生验收 · 配方备货 · 损耗登记'
 
 /** 页面标题的统一写法：`<页面名> · 工作台`。
  *

@@ -20,8 +20,13 @@ describe('backupPoints helpers', () => {
     expect(CONTENT_LABELS.other_photos).toBe('其它照片')
   })
 
-  it('treats the two hygiene photo classes as independent', () => {
-    expect(PHOTO_CONTENTS).toEqual(['standard_photos', 'other_photos'])
+  it('treats the three photo classes as independent', () => {
+    // 损耗照片是独立类别：它回自己的目录（wastage-captures），不能并进「其它照片」。
+    expect(PHOTO_CONTENTS).toEqual([
+      'standard_photos',
+      'other_photos',
+      'wastage_photos',
+    ])
   })
 
   it('summarises deletions across 本机回滚快照 / 导出备份 / 冷备', () => {

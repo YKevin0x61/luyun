@@ -150,6 +150,7 @@ dish_catalog = None
 restaurant_scraper = None
 scraper_task = None
 wecom_push_task = None
+prep_snapshot_task = None
 hygiene_overdue_task = None
 hygiene_variant_task = None
 hygiene_maintenance_task = None
@@ -278,7 +279,7 @@ def _sweep_stale_restore_dumps_at_startup() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global db_manager, dish_catalog, restaurant_scraper, scraper_task, wecom_push_task
+    global db_manager, dish_catalog, restaurant_scraper, scraper_task, wecom_push_task, prep_snapshot_task
     global reconcile_scheduler_task, unmapped_watchdog_task
     global recipe_store, employee_accounts, hygiene_work, hygiene_attire, hygiene_overdue_task
     global hygiene_archive
@@ -417,6 +418,10 @@ async def lifespan(app: FastAPI):
                 "企微推送调度", wecom_push_service.scheduler_loop(db_manager)
             )
             startup_results.append("企微推送调度器")
+            prep_snapshot_task = _start_resident_task(
+                "备货参考值快照", _prep_snapshot_loop(db_manager)
+            )
+            startup_results.append("备货参考值快照")
 
         # 启动日志持久化（PostgreSQL logs 表，与业务表同库）
         if background_enabled and await log_storage.start():
@@ -1303,6 +1308,8 @@ SPA_PAGE_ROUTES = (
     # 两种身份都进得去，员工那一档页面是只读的）。旧 `/prep-plan` 从这一份清单与
     # vue-router 一起删掉 —— 自然 404、不留别名（`?next=` 里的老地址由前端换）。
     "/workbench/kitchen/prep-plan",
+    # 备货复盘（ADR 0123）：每小时参考值快照 vs 实际销量，管理端只读。
+    "/workbench/kitchen/prep-review",
     # 日常损耗登记（从 worktool2 那个小程序搬过来）：分析与明细在后勤组
     # （`/workbench/kitchen/loss`）：管理端会话直接进，开了「损耗分析」能力的员工会话也进
     # （2026-10-14，页面清单里的 `staffCap: wastage`）；员工端的登记页在「我的」组
@@ -1691,6 +1698,29 @@ async def _send_scraper_health_alert(message: str) -> None:
 
 
 # 餐厅数据爬取任务
+async def _prep_snapshot_loop(db_manager):
+    """备货参考值每小时快照（ADR 0123）。
+
+    两件事：整点写一份当前参考值；顺手把「窗口已经结束、实际还缺」的历史窗口补算掉。
+    只跑单 worker（部署约束），所以不需要分布式锁。
+    """
+    from services.prep_plan_service import prep_plan_service
+
+    INTERVAL = 3600
+    while True:
+        try:
+            now = datetime.now(CHINA_TZ)
+            await prep_plan_service.write_snapshot(db_manager, now)
+            await prep_plan_service.backfill_actuals(db_manager, now)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("备货参考值快照失败，下一轮再试")
+        # 睡到下一个整点（误差再小也不打点，整点对齐是快照的语义）
+        now = datetime.now(CHINA_TZ)
+        await asyncio.sleep(INTERVAL - (now.minute * 60 + now.second) + 5)
+
+
 async def run_restaurant_scraper():
     """运行餐厅数据爬取任务"""
     global restaurant_scraper

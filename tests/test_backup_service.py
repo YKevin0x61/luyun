@@ -30,6 +30,7 @@ from services.backup_service import (
     CONTENT_RUNTIME,
     PHOTO_OTHER,
     PHOTO_STANDARD,
+    PHOTO_WASTAGE,
     SNAPSHOT_KEEP,
 )
 from services.credentials_store import CredentialBundle
@@ -405,6 +406,99 @@ class MissingHygieneCaptureIdsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(originals[PHOTO_STANDARD], ["std-1"])
         self.assertEqual(originals[PHOTO_OTHER], ["other-1"])
 
+    async def test_attire_photos_are_classified_and_checked(self):
+        """仪容仪表的照片也在 hygiene-captures 里：合格参照进标准图、自拍进其它照片。
+
+        这两张表当初漏登记在分类 SQL 之外 —— 照片于是既不进备份包，恢复后的
+        「库引用了但磁盘没有」也查不出来（分类漏 = 一致性检查看不见它）。
+        """
+        await seed_hygiene_photo_refs(
+            self.db._conn,
+            attire_standards=["attire-std-1"],
+            attire_shots=["attire-shot-1"],
+        )
+
+        classified = await backup_service.classify_hygiene_capture_ids(
+            self.db, include_variants=False
+        )
+
+        self.assertIn("attire-std-1", classified[PHOTO_STANDARD])
+        self.assertIn("attire-shot-1", classified[PHOTO_OTHER])
+
+        # 两张图都没落盘 → 缺图检查必须把它们报出来，而不是静默通过。
+        result = await backup_service.missing_hygiene_capture_ids(
+            self.db, capture_root=self.capture_root
+        )
+        self.assertIn("attire-std-1", result["missing"].get(PHOTO_STANDARD, []))
+        self.assertIn("attire-shot-1", result["missing"].get(PHOTO_OTHER, []))
+
+    async def test_wastage_photos_are_their_own_class_in_their_own_directory(self):
+        """损耗照片是**独立类别**、独立目录：混进「其它照片」会被恢复到卫生目录。"""
+        wastage_root = Path(settings.DATABASE_DIR) / "wastage-captures"
+        wastage_root.mkdir(parents=True, exist_ok=True)
+        (wastage_root / "waste-1").write_bytes(b"WASTE")
+
+        await seed_hygiene_photo_refs(self.db._conn, wastage=["waste-1"])
+
+        classified = await backup_service.classify_hygiene_capture_ids(
+            self.db, include_variants=False
+        )
+        self.assertEqual(classified[PHOTO_WASTAGE], ["waste-1"])
+        self.assertNotIn("waste-1", classified[PHOTO_OTHER])
+
+        # 卫生目录里没有它、损耗目录里有它 —— 缺图检查必须按各自的根判断。
+        missing = await backup_service.missing_hygiene_capture_ids(self.db)
+        self.assertNotIn("waste-1", missing["missing"].get(PHOTO_WASTAGE, []))
+
+        collected = await backup_service.collect_hygiene_photo_paths(self.db)
+        names = [name for name, _path in collected["members"]]
+        self.assertIn("photos/wastage/waste-1", names)
+        self.assertNotIn("photos/other/waste-1", names)
+
+
+class RunStateBackupTest(unittest.TestCase):
+    """采集状态文件与库是一份事实的两种形态：备份要带走、恢复要写回。"""
+
+    def setUp(self):
+        self._old_dir = settings.DATABASE_DIR
+        self._tmpdir = tempfile.TemporaryDirectory()
+        settings.DATABASE_DIR = self._tmpdir.name
+
+    def tearDown(self):
+        settings.DATABASE_DIR = self._old_dir
+        self._tmpdir.cleanup()
+
+    def _write(self, name, payload):
+        path = Path(settings.DATABASE_DIR) / name
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_collect_and_restore_roundtrip(self):
+        table_state = {"biz_date": "2026-01-01", "table_states": {"1": 1.0}}
+        delivery = {"biz_date": "2026-01-01", "bills": ["b1", "b2"]}
+        table_path = self._write("table_state.json", table_state)
+        bills_path = self._write("delivery_bills.json", delivery)
+
+        payload = backup_service.collect_run_state()
+        self.assertEqual(payload["table_state"], table_state)
+        self.assertEqual(payload["delivery_bills"], delivery)
+
+        table_path.unlink()
+        bills_path.unlink()
+        restored = backup_service.restore_run_state(payload)
+
+        self.assertTrue(restored["table_state"])
+        self.assertTrue(restored["delivery_bills"])
+        self.assertEqual(json.loads(table_path.read_text(encoding="utf-8")), table_state)
+        self.assertEqual(json.loads(bills_path.read_text(encoding="utf-8")), delivery)
+
+    def test_missing_files_are_recorded_as_none_and_skipped_on_restore(self):
+        payload = backup_service.collect_run_state()
+        self.assertIsNone(payload["table_state"])
+        self.assertIsNone(payload["delivery_bills"])
+
+        self.assertEqual(backup_service.restore_run_state(payload), {})
+
 
 class ContentEquivalenceTest(unittest.TestCase):
     """PG 的整库 pg_dump 同时覆盖业务数据与配方数据。"""
@@ -479,10 +573,12 @@ class PgSnapshotPhotoTest(unittest.TestCase):
 
     def _fake_psql(self, standard, other, variants=()):
         def fake(sql):
-            if "hygiene_standards" in sql:
-                return [[cid] for cid in standard]
             if "hygiene_capture_variants" in sql:
                 return [list(row) for row in variants]
+            # 仪容仪表的合格参照也是标准图（hygiene_attire_standard 不含
+            # "hygiene_standards" 这个子串，必须单独判，否则会落进下面那条通配）。
+            if "hygiene_standards" in sql or "hygiene_attire_standard" in sql:
+                return [[cid] for cid in standard]
             if "hygiene_" in sql:
                 return [[cid] for cid in other]
             return []

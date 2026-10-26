@@ -43,6 +43,30 @@ export const TABLE_LABELS = {
   hygiene_fix_overdue_notices: '整改逾期提醒',
   hygiene_teaching_examples: '卫生教学示例',
   hygiene_capture_variants: '卫生图片缩略图',
+  hygiene_wecom_shares: '验收照片投递',
+  hygiene_attire_standard: '仪容仪表标准图',
+  hygiene_attire_shots: '仪容仪表自拍',
+  prep_plan_snapshots: '备货预测快照',
+  prep_plan_actuals: '备货实际销量',
+  staff_shifts: '排班班次',
+  staff_assignments: '排班结果',
+  scheduling_rules: '轮转规则',
+  scheduling_overrides: '单日覆盖',
+  scheduling_requests: '请假与换班',
+  scheduling_zone_defaults: '默认工作区',
+  wecom_push_subscriptions: '企微推送订阅',
+  wecom_channel_groups: '企微渠道分组',
+  wecom_channel_group_members: '企微分组成员',
+  wecom_push_outbox: '企微出站队列',
+  wecom_push_audit: '企微配置变更',
+  overtime_entries: '加班与补钟',
+  overtime_salary_snapshots: '计薪底薪快照',
+  seniority_bonus_changes: '工龄奖变更',
+  statutory_holidays: '法定节假日',
+  attendance_ledger: '月度考勤台账',
+  wastage_records: '损耗登记',
+  wastage_images: '损耗照片',
+  wastage_templates: '损耗常用模板',
   logs: '运行日志',
 }
 
@@ -89,6 +113,30 @@ export const TABLE_ICONS = {
   hygiene_fix_overdue_notices: 'timer',
   hygiene_teaching_examples: 'file-text',
   hygiene_capture_variants: 'image',
+  hygiene_wecom_shares: 'image',
+  hygiene_attire_standard: 'image',
+  hygiene_attire_shots: 'camera',
+  prep_plan_snapshots: 'calculator',
+  prep_plan_actuals: 'clipboard',
+  staff_shifts: 'calendar',
+  staff_assignments: 'calendar',
+  scheduling_rules: 'receipt',
+  scheduling_overrides: 'calendar',
+  scheduling_requests: 'clipboard',
+  scheduling_zone_defaults: 'store',
+  wecom_push_subscriptions: 'file-text',
+  wecom_channel_groups: 'store',
+  wecom_channel_group_members: 'user',
+  wecom_push_outbox: 'package',
+  wecom_push_audit: 'receipt',
+  overtime_entries: 'timer',
+  overtime_salary_snapshots: 'calculator',
+  seniority_bonus_changes: 'receipt',
+  statutory_holidays: 'calendar',
+  attendance_ledger: 'clipboard',
+  wastage_records: 'trending-down',
+  wastage_images: 'image',
+  wastage_templates: 'file-text',
   logs: 'file-text',
 }
 
@@ -142,6 +190,20 @@ export const COLUMN_LABELS = {
   'auth.expires_at': '过期时间', 'auth.last_seen_at': '最后活跃', 'auth.token_hash': 'Token哈希',
   'auth.label': '标签', 'auth.revoked_at': '撤销时间', 'auth.created_at': '创建时间',
   'auth.updated_at': '更新时间', 'auth.rowid': '序号',
+  // 下面这些是新表/新增列的表级覆盖：同名列在别处含义不同，或要写得更具体。
+  'prep_items.shelf_life_hours': '保质期(小时)', 'prep_items.lead_time_hours': '提前量(小时)',
+  'prep_items.min_batch_qty': '最小起批量', 'prep_items.safety_stock_ratio': '安全库存系数',
+  'prep_plan_entries.produced_by': '产量登记人', 'prep_plan_entries.produced_at': '产量登记时间',
+  'staff_shifts.name': '班次名称', 'staff_shifts.duty_slot': '卫生档位',
+  'staff_assignments.source': '来源', 'staff_assignments.half_rest': '休半天',
+  'scheduling_overrides.kind': '覆盖来源', 'scheduling_requests.kind': '申请类型',
+  'scheduling_requests.note': '备注',
+  'wecom_push_webhooks.hygiene_feed': '卫生播报', 'wecom_channel_groups.name': '分组名称',
+  'hygiene_wecom_shares.kind': '业务类型',
+  'hygiene_employees.health_cert_date': '健康证到期',
+  'attendance_ledger.month': '月份', 'attendance_ledger.shift_name': '本月班次',
+  'wastage_records.item_name': '物品名称', 'wastage_records.reason': '损耗原因',
+  'wastage_templates.item_name': '物品名称', 'wastage_templates.reason': '损耗原因',
   'orders.source': '堂食/外卖', 'orders.dish_status': '出餐状态', 'orders.ready_time': '出餐时间',
   run_id: '运行ID', plan_item_id: '计划项ID', prep_item_id: '备货项ID', item_name: '备货项名称',
   slot_start: '时段开始', slot_end: '时段结束', forecast_qty: '预测量', available_qty: '可用量',
@@ -177,6 +239,38 @@ export const COLUMN_LABELS = {
   left_capture_id: '左图ID', right_capture_id: '右图ID', left_content_type: '左图类型',
   right_content_type: '右图类型', left_markup_json: '左图标记', source_capture_id: '原图ID',
   variant: '规格', width: '宽度', height: '高度',
+  // ── 以下是通用列名。新增表（排班 / 企微订阅 / 人事 / 考勤 / 损耗 / 备货快照）里
+  //    同名列都走这里，避免每张表各写一遍、写漏一处就露出裸英文。
+  tenant_id: '租户ID', unit: '单位', position: '岗位', active: '是否启用',
+  plan_day: '营业日', window_start: '窗口开始', window_end: '窗口结束',
+  shift_id: '班次ID', shift_name: '班次', cycle: '轮转周期', anchor_date: '起算日',
+  start_date: '开始日期', end_date: '结束日期', note: '备注', peer_employee_id: '换班对象',
+  snapshot_at: '快照时间', suggested_qty: '建议量', final_qty: '实际采用量',
+  qty_source: '数量来源', demand_qty: '需求量', store_factor: '门店系数', quantile: '分位点',
+  basis_json: '计算依据', rules_fingerprint: '规则指纹', sold_qty: '实际销量',
+  computed_at: '计算时间', produced_qty: '实际产量', produced_by: '产量登记人',
+  produced_at: '产量登记时间',
+  topic_id: '主题ID', params_json: '参数', schedule_id: '计划ID',
+  target_channel_id: '目标渠道ID', target_group_id: '目标分组ID',
+  group_id: '分组ID', channel_id: '渠道ID', content_summary: '内容摘要',
+  attempts: '尝试次数', last_error: '最后错误', idempotency_key: '幂等键',
+  scheduled_at: '计划发送时间', finished_at: '完成时间', sending_at: '开始发送时间',
+  actor: '操作人', action: '动作', object_type: '对象类型', object_id: '对象ID',
+  object_name: '对象名称', before_json: '变更前', after_json: '变更后',
+  entry_date: '加班日期', half_hours: '时长(小时)', reject_reason: '驳回原因',
+  created_by: '登记人', decided_by: '审批人', decided_at: '审批时间',
+  month: '月份', base_salary: '底薪', old_value: '调整前', new_value: '调整后',
+  changed_by: '修改人',
+  day: '日期', opening_balance: '期初结余', closing_balance: '期末结余',
+  lodging: '是否住宿', borrowed_store: '借调门店', resigned: '是否离职', sealed_at: '封账时间',
+  quantity: '数量', reason: '原因', remark: '备注', wastage_date: '损耗日期',
+  operator_kind: '登记人类型', operator_name: '登记人', record_id: '记录ID',
+  owner_key: '归属键', owner_kind: '归属类型', ref_key: '关联标识', dedupe_key: '去重键',
+  caption: '说明文字', extra_capture_id: '附加图片ID',
+  recipe_id: '配方ID', admin_caps: '管理权限', id_card_no: '身份证号',
+  hire_date: '入职日期', seniority_bonus: '工龄奖',
+  steamer_id: '蒸笼ID', port_index: '笼位', stack_order: '叠放顺序',
+  loaded_at: '上笼时间', is_hold: '叫起', is_rushed: '催菜', fired_at: '起菜时间',
 }
 
 /** 自增/自动维护列：新增记录表单中永不展示；编辑记录表单中始终隐藏（不可篡改）。 */
@@ -213,16 +307,77 @@ export function getColumnLabel(table, column) {
     || column
 }
 
+// 值的中文写法。**只用于列表展示**（`DataTable` 的单元格文本与 title），
+// 行编辑 / 批量编辑提交的仍是库里那一份原值 —— 所以在这里翻成中文不会写坏数据。
+// 键可以是 `表.列`（同一列在表间含义不同）或 `列`（全库同一个含义，如布尔位）。
+const YES_NO = { 0: '否', 1: '是' }
+
 const CELL_VALUE_LABELS = {
   'orders.source': {
     dine_in: '堂食',
     delivery: '外卖',
   },
+  // 排班
+  'staff_shifts.duty_slot': { day: '白班', night: '夜班' },
+  'staff_assignments.source': { rule: '规则轮转', override: '单日覆盖' },
+  'scheduling_overrides.kind': { manual: '店长手改', leave: '请假', swap: '换班' },
+  'scheduling_requests.kind': { leave: '请假', swap: '换班' },
+  'scheduling_requests.status': {
+    pending_peer: '待对方确认',
+    pending_manager: '待店长审批',
+    approved: '已批准',
+    rejected: '已驳回',
+    cancelled: '已撤回',
+  },
+  // 加班与补钟
+  'overtime_entries.status': {
+    pending: '待审批',
+    approved: '已批准',
+    rejected: '已驳回',
+    cancelled: '已撤回',
+    voided: '已作废',
+  },
+  // 企微出站
+  'wecom_push_outbox.status': {
+    pending: '待发送',
+    sending: '发送中',
+    sent: '已发送',
+    failed: '发送失败',
+    skipped: '已跳过',
+  },
+  'hygiene_wecom_shares.kind': {
+    attire: '工装',
+    daily: '日常卫生',
+    deep_clean: '深度清洁',
+    fix: '整改',
+  },
+  // 损耗
+  'wastage_records.reason': {
+    spoiled: '变质腐败',
+    expired: '过期丢弃',
+    damaged: '破损/污染',
+    production_fail: '制作失败',
+    excess: '备货过量',
+    other: '其他',
+  },
+  'wastage_records.operator_kind': { staff: '员工', admin: '管理端' },
+  'wastage_templates.owner_kind': { staff: '员工', admin: '管理端' },
+  // 布尔位（库里是 0 / 1）
+  enabled: YES_NO,
+  is_active: YES_NO,
+  active: YES_NO,
+  approved: YES_NO,
+  disabled: YES_NO,
+  is_hold: YES_NO,
+  is_rushed: YES_NO,
+  half_rest: YES_NO,
 }
 
 export function getCellLabel(table, column, value) {
-  const key = `${String(table || '')}.${String(column || '')}`
-  const mapped = CELL_VALUE_LABELS[key]
+  const columnName = String(column || '')
+  const mapped = CELL_VALUE_LABELS[`${String(table || '')}.${columnName}`]
+    || CELL_VALUE_LABELS[columnName]
+    || CELL_VALUE_LABELS[columnName.toLowerCase()]
   if (!mapped) return value
   const label = mapped[value]
   return label === undefined ? value : label

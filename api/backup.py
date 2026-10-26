@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from config import settings
 from database import DatabaseManager, get_db
+from db_core.schema import SYSTEM_TABLES, TABLE_GROUPS
 from services import (
     backup_import_staging,
     backup_points,
@@ -38,9 +39,12 @@ from services.backup_service import (
     CONTENT_OTHER_PHOTOS,
     CONTENT_RECIPES,
     CONTENT_RUNTIME,
+    CONTENT_SCRAPER_STATE,
     CONTENT_STANDARD_PHOTOS,
+    CONTENT_WASTAGE_PHOTOS,
     PHOTO_OTHER,
     PHOTO_STANDARD,
+    PHOTO_WASTAGE,
     PROVENANCE_LABELS,
     PROVENANCE_MANUAL,
     PROVENANCE_PRE_IMPORT,
@@ -117,6 +121,7 @@ def _restore_exclusive(entry: str) -> Iterator[None]:
 PHOTO_KINDS = (
     (PHOTO_STANDARD, "standard_photos", "标准图"),
     (PHOTO_OTHER, "other_photos", "其它照片"),
+    (PHOTO_WASTAGE, "wastage_photos", "损耗照片"),
 )
 
 
@@ -128,6 +133,10 @@ class BackupExportIn(BaseModel):
     include_app_db: bool = Field(True, description="是否打包业务数据（整库 pg_dump）")
     include_standard_photos: bool = Field(True, description="是否打包标准图（含历史版本）")
     include_other_photos: bool = Field(True, description="是否打包其它卫生照片")
+    include_wastage_photos: bool = Field(True, description="是否打包损耗登记照片")
+    include_scraper_state: bool = Field(
+        True, description="是否打包采集状态（差分基线 / 外卖去重清单）"
+    )
 
 
 class RetentionIn(BaseModel):
@@ -226,6 +235,9 @@ def _default_apply(parsed: dict, diff: dict) -> Dict[str, bool]:
         and not missing.get(PHOTO_STANDARD),
         CONTENT_OTHER_PHOTOS: bool(includes.get("other_photos"))
         and not missing.get(PHOTO_OTHER),
+        CONTENT_WASTAGE_PHOTOS: bool(includes.get("wastage_photos"))
+        and not missing.get(PHOTO_WASTAGE),
+        CONTENT_SCRAPER_STATE: bool(includes.get("scraper_state")),
     }
 
 
@@ -239,6 +251,7 @@ async def _validation(parsed: dict, db: DatabaseManager) -> dict:
     backup_ids = {
         PHOTO_STANDARD: sorted((parsed.get("standard_photos") or {}).keys()),
         PHOTO_OTHER: sorted((parsed.get("other_photos") or {}).keys()),
+        PHOTO_WASTAGE: sorted((parsed.get("wastage_photos") or {}).keys()),
     }
     diff = await backup_points.photo_difference(backup_ids, db=db)
     declared_consistency = meta.get("consistency") or {}
@@ -324,7 +337,11 @@ async def _collect_export_payload(
                 ),
             )
 
-        if payload.include_standard_photos or payload.include_other_photos:
+        if (
+            payload.include_standard_photos
+            or payload.include_other_photos
+            or payload.include_wastage_photos
+        ):
             _report_progress(progress, "photos_scan")
             photo_info = await backup_service.collect_hygiene_photo_paths(db)
     except Exception:
@@ -439,6 +456,8 @@ async def _run_export_job(
             app_pg_source=collected["app_pg_path"],
             include_standard_photos=payload.include_standard_photos,
             include_other_photos=payload.include_other_photos,
+            include_wastage_photos=payload.include_wastage_photos,
+            include_scraper_state=payload.include_scraper_state,
             photo_members=photo_info.get("members"),
             photo_manifest=photo_info.get("manifest"),
             photo_missing=photo_info.get("missing"),
@@ -576,6 +595,8 @@ async def export_backup(
             app_pg_bytes=_read_temp_bytes(collected["app_pg_path"]),
             include_standard_photos=payload.include_standard_photos,
             include_other_photos=payload.include_other_photos,
+            include_wastage_photos=payload.include_wastage_photos,
+            include_scraper_state=payload.include_scraper_state,
             photo_members={
                 name: path.read_bytes()
                 for name, path in (photo_info.get("members") or [])
@@ -634,6 +655,23 @@ def _staging_http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
+async def _notify_scraper_state_reload() -> None:
+    """让运行中的 scraper 立即重读采集状态文件。
+
+    整库恢复后库里是旧数据，采集器内存里的差分基线却还是恢复前的：不重读，
+    它会认为恢复后到当前的订单都已采集过，于是永久漏采。
+    """
+    try:
+        from main import restaurant_scraper
+
+        state = getattr(restaurant_scraper, "state", None)
+        if state is not None:
+            state.load_table_state()
+            state.collected_delivery_bills = state.load_delivery_bills()
+    except Exception as exc:  # noqa: BLE001 —— 进程内通知失败不该让恢复失败
+        logger.warning("通知 scraper 重读采集状态失败: %s", exc)
+
+
 async def _after_restore_photo_consistency(
     touched: bool, db: DatabaseManager
 ) -> Optional[dict]:
@@ -648,11 +686,12 @@ async def _after_restore_photo_consistency(
     result = await backup_service.missing_hygiene_capture_ids(db)
     if not result["ok"]:
         logger.warning(
-            "⚠️ [审计] 恢复后照片不一致：标准图缺 %s 张、其它照片缺 %s 张"
+            "⚠️ [审计] 恢复后照片不一致：标准图缺 %s 张、其它照片缺 %s 张、损耗照片缺 %s 张"
             "（库已引用但磁盘上找不到，标准图清单会缺这些项，"
             "请重新上传标准图或从冷备归档补齐）",
             result["standard_missing"],
             result["other_missing"],
+            result.get("wastage_missing", 0),
         )
     return result
 
@@ -667,6 +706,8 @@ async def _apply_parsed_backup(
     apply_recipes: bool,
     apply_standard_photos: bool,
     apply_other_photos: bool,
+    apply_wastage_photos: bool,
+    apply_scraper_state: bool,
     force: bool,
     db: DatabaseManager,
 ) -> dict:
@@ -690,6 +731,8 @@ async def _apply_parsed_backup(
         blocked.append(CONTENT_LABELS[CONTENT_STANDARD_PHOTOS])
     if apply_other_photos and missing.get(PHOTO_OTHER):
         blocked.append(CONTENT_LABELS[CONTENT_OTHER_PHOTOS])
+    if apply_wastage_photos and missing.get(PHOTO_WASTAGE):
+        blocked.append(CONTENT_LABELS[CONTENT_WASTAGE_PHOTOS])
     if blocked and not force:
         raise HTTPException(
             status_code=409,
@@ -701,6 +744,7 @@ async def _apply_parsed_backup(
                 "missing": {
                     PHOTO_STANDARD: len(missing.get(PHOTO_STANDARD) or []),
                     PHOTO_OTHER: len(missing.get(PHOTO_OTHER) or []),
+                    PHOTO_WASTAGE: len(missing.get(PHOTO_WASTAGE) or []),
                 },
             },
         )
@@ -744,11 +788,13 @@ async def _apply_parsed_backup(
     will_touch_photos = (
         (apply_standard_photos and bool(parsed.get("standard_photos")))
         or (apply_other_photos and bool(parsed.get("other_photos")))
+        or (apply_wastage_photos and bool(parsed.get("wastage_photos")))
     )
-    # 任何一类内容被写回都算一次恢复：凭据 / 运行配置同样要能退回去
+    # 任何一类内容被写回都算一次恢复：凭据 / 运行配置 / 采集状态同样要能退回去
     will_restore = bool(
         (apply_credentials and parsed.get("credentials"))
         or (apply_runtime and parsed["runtime"] is not None)
+        or (apply_scraper_state and parsed.get("run_state"))
         or will_touch_db
         or will_touch_photos
     )
@@ -774,6 +820,26 @@ async def _apply_parsed_backup(
             applied[CONTENT_CREDENTIALS] = True
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"备份中的凭据无效：{exc}")
+        # 更新用的 GitHub 凭据与 POS 凭据同一把密钥：跟着「凭据」一起回滚，
+        # 否则换机/还原后「系统更新」要重新申请 PAT。
+        github_bytes = parsed.get("github_release_enc")
+        if github_bytes:
+            try:
+                github_path = backup_service.get_github_release_credential_path()
+                github_path.parent.mkdir(parents=True, exist_ok=True)
+                github_path.write_bytes(github_bytes)
+                try:
+                    os.chmod(github_path, 0o600)
+                except OSError:
+                    pass
+            except OSError as exc:
+                logger.warning("恢复 GitHub 更新凭据失败: %s", exc)
+
+    if apply_scraper_state and parsed.get("run_state"):
+        restored_state = backup_service.restore_run_state(parsed["run_state"])
+        applied[CONTENT_SCRAPER_STATE] = bool(restored_state)
+        if not restored_state:
+            logger.warning("采集状态写回失败：备份里没有可用的运行期状态")
 
     if apply_runtime and parsed["runtime"] is not None:
         try:
@@ -831,20 +897,23 @@ async def _apply_parsed_backup(
     if apply_recipes and applied[CONTENT_APP_PG]:
         applied[CONTENT_RECIPES] = True
 
-    restored_photos = {PHOTO_STANDARD: 0, PHOTO_OTHER: 0}
-    if apply_standard_photos or apply_other_photos:
+    restored_photos = {PHOTO_STANDARD: 0, PHOTO_OTHER: 0, PHOTO_WASTAGE: 0}
+    if apply_standard_photos or apply_other_photos or apply_wastage_photos:
         restored_photos = backup_points.restore_photos(
             parsed.get("standard_photos") if apply_standard_photos else {},
             parsed.get("other_photos") if apply_other_photos else {},
+            parsed.get("wastage_photos") if apply_wastage_photos else {},
         )
         applied[CONTENT_STANDARD_PHOTOS] = bool(apply_standard_photos)
         applied[CONTENT_OTHER_PHOTOS] = bool(apply_other_photos)
+        applied[CONTENT_WASTAGE_PHOTOS] = bool(apply_wastage_photos)
 
     photo_consistency = await _after_restore_photo_consistency(
         bool(
             applied[CONTENT_APP_PG]
             or applied[CONTENT_STANDARD_PHOTOS]
             or applied[CONTENT_OTHER_PHOTOS]
+            or applied[CONTENT_WASTAGE_PHOTOS]
         ),
         db,
     )
@@ -860,6 +929,8 @@ async def _apply_parsed_backup(
         await _notify_scraper_reload()
     if applied[CONTENT_RUNTIME]:
         await _notify_scraper_reload_runtime(db)
+    if applied[CONTENT_SCRAPER_STATE]:
+        await _notify_scraper_state_reload()
 
     session_invalidated = (
         applied[CONTENT_APP_PG] or applied[CONTENT_CREDENTIALS]
@@ -942,6 +1013,8 @@ async def import_backup_apply(
     apply_recipes: bool = Form(True),
     apply_standard_photos: bool = Form(True),
     apply_other_photos: bool = Form(True),
+    apply_wastage_photos: bool = Form(True),
+    apply_scraper_state: bool = Form(True),
     force: bool = Form(False),
     session_id: str = Depends(require_session),
     db: DatabaseManager = Depends(get_db),
@@ -969,6 +1042,8 @@ async def import_backup_apply(
             apply_recipes=apply_recipes,
             apply_standard_photos=apply_standard_photos,
             apply_other_photos=apply_other_photos,
+            apply_wastage_photos=apply_wastage_photos,
+            apply_scraper_state=apply_scraper_state,
             force=force,
             db=db,
         )
@@ -989,6 +1064,7 @@ async def rollback_snapshot(
     ts: str,
     apply_standard_photos: bool = True,
     apply_other_photos: bool = True,
+    apply_wastage_photos: bool = True,
     db: DatabaseManager = Depends(get_db),
     session_id: str = Depends(require_session),
 ):
@@ -1018,6 +1094,7 @@ async def rollback_snapshot(
             snap_dir,
             apply_standard_photos=apply_standard_photos,
             apply_other_photos=apply_other_photos,
+            apply_wastage_photos=apply_wastage_photos,
             db=db,
         )
 
@@ -1028,6 +1105,7 @@ async def _rollback_snapshot_locked(
     *,
     apply_standard_photos: bool,
     apply_other_photos: bool,
+    apply_wastage_photos: bool,
     db: DatabaseManager,
 ) -> dict:
     """真正执行回滚（调用方已持恢复互斥、已完成快照校验）。"""
@@ -1104,22 +1182,53 @@ async def _rollback_snapshot_locked(
         credentials_store.reload()
         applied[CONTENT_CREDENTIALS] = True
 
-    restored_photos = {PHOTO_STANDARD: 0, PHOTO_OTHER: 0}
+    # 采集状态与更新凭据：与库一起回滚，否则恢复后采集器按旧基线漏单、
+    # 「系统更新」页还要重新申请 PAT。
+    snap_run_state = snap_dir / "run_state.json"
+    if snap_run_state.is_file():
+        try:
+            payload = json.loads(snap_run_state.read_text(encoding="utf-8"))
+            applied[CONTENT_SCRAPER_STATE] = bool(
+                backup_service.restore_run_state(payload)
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning("回滚采集状态失败: %s", exc)
+
+    snap_github = snap_dir / "github_release.enc"
+    if snap_github.is_file():
+        try:
+            import shutil as _shutil
+
+            github_path = backup_service.get_github_release_credential_path()
+            github_path.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copy2(str(snap_github), github_path)
+            try:
+                os.chmod(github_path, 0o600)
+            except OSError:
+                pass
+        except OSError as exc:
+            logger.warning("回滚 GitHub 更新凭据失败: %s", exc)
+
+    restored_photos = {PHOTO_STANDARD: 0, PHOTO_OTHER: 0, PHOTO_WASTAGE: 0}
     kinds = []
     if apply_standard_photos:
         kinds.append(PHOTO_STANDARD)
     if apply_other_photos:
         kinds.append(PHOTO_OTHER)
+    if apply_wastage_photos:
+        kinds.append(PHOTO_WASTAGE)
     if kinds:
         restored_photos = backup_service.restore_snapshot_photos(ts, kinds)
         applied[CONTENT_STANDARD_PHOTOS] = bool(apply_standard_photos)
         applied[CONTENT_OTHER_PHOTOS] = bool(apply_other_photos)
+        applied[CONTENT_WASTAGE_PHOTOS] = bool(apply_wastage_photos)
 
     photo_consistency = await _after_restore_photo_consistency(
         bool(
             applied[CONTENT_APP_PG]
             or applied[CONTENT_STANDARD_PHOTOS]
             or applied[CONTENT_OTHER_PHOTOS]
+            or applied[CONTENT_WASTAGE_PHOTOS]
         ),
         db,
     )
@@ -1132,6 +1241,8 @@ async def _rollback_snapshot_locked(
     )
     await _notify_scraper_reload()
     await _notify_scraper_reload_runtime(db)
+    if applied[CONTENT_SCRAPER_STATE]:
+        await _notify_scraper_state_reload()
     # 回滚本身会新建一份前置快照备份点：健康结论需要重算。
     backup_points.invalidate_health_cache()
 
@@ -1171,6 +1282,49 @@ async def list_points(db: DatabaseManager = Depends(get_db)):
         "export_app_db_supported": True,
         "app_db_export_format": "pgdump",
         "app_db_restore_mode": "overwrite_only",
+    }
+
+
+async def _existing_public_tables(db: DatabaseManager) -> set:
+    """库里真实存在的表名（判断清单里哪些表还没应用迁移）。"""
+    conn = getattr(db, "_conn", db)
+    try:
+        cursor = await conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+        )
+        rows = await cursor.fetchall()
+    except Exception as exc:  # noqa: BLE001 —— 清单接口不因探测失败而 500
+        logger.warning("读取库表清单失败，按全部未应用展示: %s", exc)
+        return set()
+    return {row[0] for row in rows if row and row[0]}
+
+
+@router.get("/tables")
+async def backup_table_inventory(db: DatabaseManager = Depends(get_db)):
+    """「这个包里装了什么」的表清单：整库 pg_dump 覆盖的每一张表。
+
+    分组的唯一出处是 ``db_core/schema.py`` 的 ``TABLE_GROUPS``（Admin 数据浏览器
+    共用同一份），再补上不在业务分组里的系统表。``present=false`` 表示结构已声明
+    但迁移还没应用（例如 ``0034`` 的两张复盘表）——页面据此标注，不假装备份里有。
+    """
+    existing = await _existing_public_tables(db)
+    groups = []
+    pending: List[str] = []
+    for key, label, tables in TABLE_GROUPS + (("system", "系统表", SYSTEM_TABLES),):
+        rows = []
+        for name in tables:
+            present = name in existing
+            rows.append({"name": name, "present": present})
+            if not present:
+                pending.append(name)
+        groups.append({"key": key, "label": label, "tables": rows})
+    return {
+        "groups": groups,
+        "total": sum(len(group["tables"]) for group in groups),
+        "present_count": sum(
+            1 for group in groups for table in group["tables"] if table["present"]
+        ),
+        "pending": pending,
     }
 
 
