@@ -88,7 +88,7 @@ describe('hygieneCopy', () => {
     expect(canAcceptFixTicket({ id: 10, admin_caps: ['daily_review'] }, ticket, after)).toBe(false)
   })
 
-  it('卫生八页合成一个板块，不把员工手机入口与人事页算进去', () => {
+  it('卫生九页合成一个板块，不把员工手机入口与人事页算进去', () => {
     // 2026-10-04：排班与卫生合并成子系统「工作台」，这一组是它的「卫生」那一组
     // （组名 2026-10-08 由用户裁定，从「现场」改过来），
     // 品牌三件套跟着子系统走（名字只在 workbenchCopy.js 写一次）。
@@ -106,6 +106,9 @@ describe('hygieneCopy', () => {
     expect(HYGIENE_BRAND_TAGLINE).toBe('卫生 · 对照实拍验收')
     expect(HYGIENE_ADMIN_NAV.map((item) => item.path)).toEqual([
       '/workbench/floor/zones',
+      // 日常清单（2026-10-19 用户裁定）：手机上是独立一页、电脑端仍是工作区页的右栏 ——
+      // 入口两档都要有，都读这份手写名单。
+      '/workbench/floor/zone-items',
       '/workbench/floor/daily',
       '/workbench/floor/attire',
       '/workbench/floor/deep-clean',
@@ -115,7 +118,7 @@ describe('hygieneCopy', () => {
       '/workbench/floor/trend',
     ])
     expect(HYGIENE_ADMIN_NAV.map((item) => item.shortTitle)).toEqual([
-      '工作区', '日常', '仪容', '专项', '整改', '榜', '数据', '趋势',
+      '工作区', '清单', '日常', '仪容', '专项', '整改', '榜', '数据', '趋势',
     ])
     expect(HYGIENE_STAFF_TABS.map((item) => item.id)).toEqual([
       'inbox', 'deep', 'fix', 'boards', 'me',
