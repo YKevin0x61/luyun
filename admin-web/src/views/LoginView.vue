@@ -41,7 +41,7 @@ const imageUploads = useImageUploadQueueStore()
 
 /** 两个显式 Tab。`scope` 是品牌副题，跟着身份走。
  *
- *  共享账号那一档的名字跟领域词表（CONTEXT「超级管理员」）与工作台顶栏逐字一致：
+ *  共享账号那一档的名字跟领域词表（GLOSSARY「超级管理员」）与工作台顶栏逐字一致：
  *  「管理员」在词表里另有所指 —— 花名册上某个真人的卫生权限派生标签（ADR 0093），
  *  同一个账号在系统里只许有一个名字。 */
 const PANEL_TABS = [

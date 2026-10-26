@@ -124,7 +124,7 @@ Admin 热更新：`cd admin-web && npm run dev`（`:5173`，代理 `/api`、`/ws
 | [deploy/README.md](deploy/README.md) | 反代、备份、Docker 细节 |
 | [docs/release-asset-layout.md](docs/release-asset-layout.md) | 发行包附件契约 |
 | [AGENTS.md](AGENTS.md) | 仓库架构与开发约定 |
-| [CONTEXT.md](CONTEXT.md) | 领域词汇 |
+| [GLOSSARY.md](GLOSSARY.md) | 领域词汇 |
 | [docs/adr/0011-release-bundle-update.md](docs/adr/0011-release-bundle-update.md) | 发行包交付决策 |
 
 ---

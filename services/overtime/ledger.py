@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""加班与补钟台账（`CONTEXT.md` 的「加班与补钟登记」，决策见 `docs/adr/0100`）。
+"""加班与补钟台账（`GLOSSARY.md` 的「加班与补钟登记」，决策见 `docs/adr/0100`）。
 
 一条记录 = 一个**自然日** + 一个**带符号的半小时数** + 必填事由：加班为正、补钟为负。
 符号就是类型，表里不存 `kind` —— 读的时候按符号派生（`overtime` / `makeup`）。
@@ -255,7 +255,7 @@ def _month_summary(rows: list[dict], month: str) -> dict:
     只有这两种状态算进「这个月加了多少」：已驳回 / 已撤回 / 已作废的登记不进合计
     —— 它们没换来钱，也不该让员工以为自己加过（票 03 的全店统计同一条口径）。
 
-    净时长 = 加班与补钟**正负相抵**（`CONTEXT.md` 的「净时长」）。负数照实给：员工端
+    净时长 = 加班与补钟**正负相抵**（`GLOSSARY.md` 的「净时长」）。负数照实给：员工端
     要看得见「这个月是净欠的」，扣不扣钱是票 03 的事。
     """
     buckets = {
@@ -316,7 +316,7 @@ class OvertimeLedger:
         """今天 —— **自然日**（北京时零点切），不是 06:00 的营业日。
 
         加班记的是「哪一天加的班」，日历日才是员工嘴里的那天；06:00 那个切点是 POS
-        与卫生日常的口径（`CONTEXT.md` 的「加班与补钟登记」_Avoid_ 点名了这一条）。
+        与卫生日常的口径（`GLOSSARY.md` 的「加班与补钟登记」_Avoid_ 点名了这一条）。
         """
         return self._now_dt().date().isoformat()
 
@@ -433,7 +433,7 @@ class OvertimeLedger:
         }
 
     @_needs_migration
-    async def list_pending(self) -> dict:
+    async def list_pending(self, *, exclude_employee_id: Optional[int] = None) -> dict:
         """全店**等审批**的登记（管理端那一页的队列）。
 
         **旧的在前**：待办是先来先处理的队列，不是「最新动态」（同排班 `inbox`）。
@@ -441,10 +441,18 @@ class OvertimeLedger:
 
         每条带 `employee_name`：队列上写成「李四 · 9/24 · +6.5 小时 · 中秋加班」，
         只给员工号等于让店长自己去查名单。
+
+        `exclude_employee_id` 只给店长那一面（`/review/pending`）用：**自己提的那几笔
+        不进队列** —— 他不能批自己的登记（`approve()` 的 `cannot_self_accept`），摆在
+        队列里就是一颗点了必被拒的「批准」。管理端的超管没有员工号，不传这个参数，
+        队列照旧是全店的。
         """
-        rows = await self._rows(
-            " WHERE status = ?", (STATUS_PENDING,), "created_at, id"
-        )
+        clause = " WHERE status = ?"
+        params: list[Any] = [STATUS_PENDING]
+        if exclude_employee_id is not None:
+            clause += " AND employee_id <> ?"
+            params.append(int(exclude_employee_id))
+        rows = await self._rows(clause, tuple(params), "created_at, id")
         names = await self._name_index()
         for row in rows:
             row["employee_name"] = names.get(int(row["employee_id"]), "")
@@ -532,6 +540,25 @@ class OvertimeLedger:
 
         `reject_reason` 只有驳回那一条路带值；批 / 撤 / 作废传 `None`，于是那一列被
         显式写回空（本轮之前它本来就该是空的）。
+        """
+        return await self._decide_locked(
+            entry_id, status, expect, decided_by, reject_reason, error_code
+        )
+
+    async def _decide_locked(
+        self,
+        entry_id: int,
+        status: str,
+        expect: tuple[str, ...],
+        decided_by: str,
+        reject_reason: Optional[str] = None,
+        error_code: str = "entry_not_pending",
+    ) -> dict:
+        """`_decide` 的锁内主体：**调用方已经持有写锁**，这里只改状态、提交、回读。
+
+        单独拆出来是因为 `approve()` 要把「底薪快照 INSERT」与这次状态变更收在**同一
+        个 `serialized_write`** 里；`asyncio.Lock` 不可重入，`approve` 拿到锁之后再去
+        调 `_decide` 就会自己等自己。两条路共用这一份改状态的实现，不各写一遍。
         """
         stamp = self._now_iso()
         await self._claim(entry_id, status, expect, stamp, decided_by, reject_reason, error_code)
@@ -655,7 +682,7 @@ class OvertimeLedger:
     async def salary_snapshot(self, employee_id: int, month: str) -> Optional[int]:
         """某个人某个月的**计费底薪**；该月还没批过任何一笔就回 `None`。
 
-        它是「这个月的钱按哪一版底薪算」的唯一答案（`CONTEXT.md` 的「底薪快照」）：
+        它是「这个月的钱按哪一版底薪算」的唯一答案（`GLOSSARY.md` 的「底薪快照」）：
         写下之后不再变，所以月中调薪不会把已经算出来的数改掉。
         """
         cur = await self._conn.execute(
@@ -671,8 +698,10 @@ class OvertimeLedger:
     ) -> None:
         """写下这个月的计费底薪 —— **已经有的不覆盖**（该月第一次审批定音）。
 
-        不提交：调用方把这一条 INSERT 与它后面那次状态变更收在同一个事务里，于是
-        「批了却没记底薪」与「记了底薪却没批」两种半截账都不会留在库里。
+        不提交，而且**调用方必须已经持有写锁**（`approve()` 就在自己的
+        `@serialized_write` 里调用它）：锁保证这一条 INSERT 与它后面那次状态变更之间
+        不会有别的写请求收事务，于是「批了却没记底薪」与「记了底薪却没批」两种半截账
+        都不会留在库里。
         """
         await self._conn.execute(
             "INSERT INTO overtime_salary_snapshots"
@@ -694,6 +723,7 @@ class OvertimeLedger:
         return None if value is None or value == "" else int(value)
 
     @_needs_migration
+    @serialized_write
     async def approve(self, actor: EntryActor, entry_id: int) -> dict:
         """批准一笔**待审批**的登记（票 02），顺带定下这个月的计费底薪（票 03）。
 
@@ -703,27 +733,33 @@ class OvertimeLedger:
         **底薪待补的人批不了**（票 03 的验收 3）：钱算不出来，先让超管去花名册补档案。
         快照按**登记日期**那个月写（验收 4：8 月的单 9 月才批，写的还是 8 月），而且
         只在该月还没有快照时才写 —— 于是「该月第一次点头」那一刻的底薪说了算。
+
+        **提交人不能批自己的登记**（同卫生 `cannot_self_accept` 的口径）：钱与留痕都是
+        自己给自己。判据看「这一笔算谁的」（`employee_id`），不看 `created_by` —— 店长
+        代别人补录的那一笔，批的仍然是他，允许。
+
+        **读档案底薪 + 写快照 + 改状态收在同一个 `serialized_write` 里**：这一段以前
+        落在锁外，未提交的快照 INSERT 会被任何并发写请求的收尾带上（成功 commit 落成
+        「没人批过却有底薪」的孤儿行，失败 rollback 则吞掉快照、批准照旧提交 —— 那笔
+        已批准的加班费从此算不出来）。快照必须与批准同生共死，锁内才做得到。
         """
         row = await self._entry_by_id(int(entry_id))
         if row is None:
             raise OvertimeError("unknown_entry", "unknown_entry")
         employee_id = int(row["employee_id"])
+        if actor.employee_id is not None and int(actor.employee_id) == employee_id:
+            raise OvertimeError("cannot_self_accept", "cannot_self_accept")
         month = str(row["entry_date"])[:7]
         if await self.salary_snapshot(employee_id, month) is None:
             salary = await self._base_salary(employee_id)
             if salary is None:
                 raise OvertimeError("salary_missing", "salary_missing")
             await self._write_snapshot(employee_id, month, salary)
-        try:
-            return await self._decide(
-                int(entry_id), STATUS_APPROVED, (STATUS_PENDING,), actor.stamp
-            )
-        except OvertimeError:
-            # 没抢到（别人先批了、或这一笔已经不是待审批）：把这次还没提交的快照
-            # INSERT 一起丢掉 —— 否则它挂在一个失败的事务里，会被后面某次 commit
-            # 顺手带进去，落成一行「没人批过却有底薪」的记录。
-            await self._rollback_quietly()
-            raise
+        # 异常时 `serialized_write` 无条件 rollback：上面那条还没提交的快照 INSERT 与
+        # 半截状态变更一起被丢掉，不会挂在一个失败的事务里被后面某次 commit 顺手带走。
+        return await self._decide_locked(
+            int(entry_id), STATUS_APPROVED, (STATUS_PENDING,), actor.stamp
+        )
 
     @_needs_migration
     async def reject(self, actor: EntryActor, entry_id: int, reason: Any) -> dict:

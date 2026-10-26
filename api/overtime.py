@@ -62,6 +62,9 @@ _ERROR_DETAILS = {
     "entry_not_approved": "只有已批准的登记能作废：这一笔还没批，或已经被作废了",
     # 票 03：金额要用底薪算，底薪没补就批不了 —— 说清去哪儿补，别只说「参数不合法」。
     "salary_missing": "这位同事的底薪还没补：先到花名册补上底薪，再回来批这一笔",
+    # 提交人不能批自己的登记（同卫生的 `cannot_self_accept` 口径）：钱与留痕都是自己
+    # 给自己。判据看「这一笔算谁的」，所以代别人补录的那一笔仍然批得动。
+    "cannot_self_accept": "交这笔的人不能自己批：请让另一位有「加班与补钟审批」权限的店长来处理",
     # 逐条点名迁移文件（同排班的 `not_migrated`）：503 要说清该应用哪一个脚本。
     # 票 05 加表时也在这句里补上自己的文件名。
     "not_migrated": (
@@ -75,6 +78,8 @@ _ERROR_STATUS = {
     # 找不到的那一行：这里只有「这条登记」。撤别人的登记也走它。
     "unknown_entry": 404,
     "unknown_employee": 404,
+    # 「你没这个权限」不是「参数写错了」：403 与卫生的 `cannot_self_accept` 同一个口径。
+    "cannot_self_accept": 403,
     # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
     "not_migrated": 503,
 }
@@ -139,6 +144,10 @@ def _require_reviewer(employee: dict = Depends(require_staff_session)) -> dict:
     被拒是 **403**（「你没这个权限」），不是 404：后者会把「权限不够」说成「这一笔不
     存在」，店长会以为是数据没了。判据每次请求现读 `admin_caps`，所以收回能力与给他
     能力一样，下一次请求就生效 —— 没有第二份「登录时快照的权限」。
+
+    **「提交人不能批自己」不在这里判**：这一层拿不到「这一笔算谁的」。那条判据落在
+    服务层 `OvertimeLedger.approve()` 的写锁里（`cannot_self_accept`），写锁内读到的
+    那一行才是权威 —— 两处各判一遍就有两个答案。
     """
     if not _can_review(employee):
         raise HTTPException(
@@ -455,12 +464,19 @@ async def admin_void(
 
 @router.get("/review/pending")
 async def review_pending(
-    db=Depends(get_db), _reviewer: dict = Depends(_require_reviewer)
+    db=Depends(get_db), reviewer: dict = Depends(_require_reviewer)
 ) -> dict:
-    """全店**等审批**的队列，旧的在前 —— 与管理端那条同一个服务层方法。"""
+    """全店**等审批**的队列，旧的在前 —— 与管理端那条同一个服务层方法。
+
+    **自己提的那几笔不进来**：他不能批自己的登记（服务层的 `cannot_self_accept`），
+    摆在队列里就是一颗点了必被拒的「批准」。管理端那条（超管）仍然看全店。
+    """
     ledger = OvertimeLedger(db)
     try:
-        return {**await ledger.list_pending(), **_LIMITS}
+        return {
+            **await ledger.list_pending(exclude_employee_id=reviewer["id"]),
+            **_LIMITS,
+        }
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
 

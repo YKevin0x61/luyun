@@ -640,6 +640,14 @@ class HygieneWork:
 
     @serialized_write
     async def delete_zone(self, actor: dict, zone_id: int) -> dict:
+        """硬删工作区：该区**全部**日常记录与整改单一起清掉，不是"只删进行中"。
+
+        清空范围（ADR 0073 的 2026-10-26 更正，用户裁定"对齐承诺"）：该区检查项与标准图、
+        全部日常实例与实拍（**含已验收的历史照片**）、该区红黑榜事件、全部整改单与回拍。
+        不可恢复。表结构上没有"只删进行中而删掉区"的路：`hygiene_daily_items.zone_id` 与
+        `hygiene_fix_tickets.zone_id` 都是 NO ACTION，而保留已通过实拍就得保留它引用的
+        检查项。页面文案与 ADR 都按整区清空如实描述。
+        """
         self._require_super(actor)
         zone = await self._fetch_zone(zone_id)
         if zone is None:
@@ -671,6 +679,10 @@ class HygieneWork:
 
     @serialized_write
     async def delete_daily_item(self, actor: dict, item_id: int) -> dict:
+        """硬删检查项：该项**全部**日常记录与事件一起清掉（含已通过的历史实拍）。
+
+        与 ``delete_zone`` 同一口径：不可恢复；页面文案已如实说明（ADR 0073 的更正）。
+        """
         self._require_super(actor)
         item = await self._fetch_item(item_id)
         if item is None:
@@ -1964,12 +1976,18 @@ class HygieneWork:
             )
         return inbox
 
-    async def list_pending_daily(self, actor: dict, days: int = 7) -> list[dict]:
+    async def list_pending_daily(
+        self, actor: dict, days: int = 7, *, pending_review_only: bool = False
+    ) -> list[dict]:
         """最近 ``days`` 个营业日（含今天）里**还没验收**的日常行，今天在前。
 
         隔夜验收（2026-10-18）的清单：昨天甚至前几晚交的照片，早上仍要能被看见、
         能一键验。``list_daily_work`` 对历史日期会回**全部**检查项（历史回看语义），
         所以这里按 ``status == 待验收`` 过滤，并保证每行都带 ``business_date``。
+
+        ``pending_review_only`` 与 ``list_daily_work`` 同名参数同一语义：员工账号上的
+        「管理员」拉「待我验收」那一档时，范围要放开到全店两个班次（否则他只能补验自己
+        那个区的隔夜照片），自己交的仍然排除。
 
         范围收在 ``DAILY_BACKFILL_DAYS``（可补验下界）内：更早的行就算出现也点不了，
         列出来只会让人白点一次，所以上限取「今天 + 下界天数」。
@@ -1979,7 +1997,9 @@ class HygieneWork:
         pending: list[dict] = []
         for offset in range(limit):
             target = shift_business_date(today, -offset)
-            for row in await self.list_daily_work(actor, target):
+            for row in await self.list_daily_work(
+                actor, target, pending_review_only=pending_review_only
+            ):
                 if row.get("status") != STATUS_PENDING:
                     continue
                 # list_daily_work 已经带上这个字段；显式覆盖保证它是**这一轮**的日期
@@ -2116,11 +2136,14 @@ class HygieneWork:
         )
         return await cur.fetchone() is not None
 
-    async def _deep_clean_rejected_reasons(self, item_ids) -> dict:
-        """被驳回过的专项项 → 最近一次原因（**不限营业日**）。
+    async def _deep_clean_rejected_reasons(self, business_date: str, item_ids) -> dict:
+        """今天这一天的专项项里被驳回过的 → 最近一次原因。
 
-        专项项是「全店一项、每周固定的那一项」，被驳回后状态回到待拍、跨天仍是同一条
-        待办；原先按营业日过滤，隔夜后原因就查不到了（员工只看到"待拍"，照着原样再拍）。
+        专项项是「全店一项、每周固定的那一项」，但它的实例是**按营业日**建的
+        （``hygiene_deep_clean_instances`` 的唯一键就是 business_date + item_id）：
+        本周被驳回、下周同一 weekday 是**全新 instance**，从没被驳回过。所以原因必须
+        按营业日收口，不能"这个 item 历史上被驳回过就永久为真" —— 那会让下周的待拍项
+        顶着上周的原因渲染「已驳回：<过期原因>」（2026-10 审查 repro_hyg_1 第 2 条）。
 
         专项驳回事件的 shift 留空（那是对日常的判据），所以这里按 item_id + shift IS NULL
         区分；一次查完，不在行循环里逐条查。
@@ -2131,10 +2154,10 @@ class HygieneWork:
         placeholders = ",".join("?" * len(ids))
         cur = await self._conn.execute(
             f"""SELECT item_id, reason FROM hygiene_board_events
-                WHERE board = ? AND event_type = ?
+                WHERE board = ? AND event_type = ? AND business_date = ?
                   AND shift IS NULL AND item_id IN ({placeholders})
                 ORDER BY id DESC""",
-            [BOARD_PERSON, EVENT_REJECT, *ids],
+            [BOARD_PERSON, EVENT_REJECT, business_date, *ids],
         )
         found: dict = {}
         for row in await cur.fetchall():
@@ -2982,27 +3005,57 @@ class HygieneWork:
         start = hygiene_week_start(clock)
         return start, start + timedelta(days=7)
 
+    @staticmethod
+    def _week_date_bounds(start: datetime, end: datetime) -> tuple[str, str]:
+        """营业周对应的营业日区间 ``[本周周一, 下周周一)``（``YYYY-MM-DD`` 字符串）。
+
+        红黑榜与趋势必须用**同一把尺子**：分周看的是这一笔活属于哪个营业日，不是
+        "哪一刻点的通过按钮"。补验上周日的照片时事件记在本周一，按 ``occurred_at``
+        分周会把它算进本周，而趋势按 ``business_date`` 算上周 —— 同一个事件在两个
+        页面归属两个营业周（2026-10 审查 repro_hyg_1 第 3 条）。这里返回的就是
+        ``business_date`` 的边界（含头不含尾，字符串比较即日期比较）。
+        """
+        return start.date().isoformat(), end.date().isoformat()
+
     async def _events_in_week(self, board: str, now: Optional[datetime] = None) -> list:
         start, end = self._week_bounds(now)
+        start_date, end_date = self._week_date_bounds(start, end)
         cur = await self._conn.execute(
+            # 按营业日分周；老数据里没有 business_date 的（早期整改单逾期事件）退回
+            # 按 occurred_at 分周，行为与改动前一致，不会把它们漏掉。
             """SELECT id, board, event_type, zone_id, employee_id, item_id,
                       shift, business_date, occurred_at
                FROM hygiene_board_events
-               WHERE board = ? AND occurred_at >= ? AND occurred_at < ?
+               WHERE board = ?
+                 AND (
+                       (business_date IS NOT NULL AND business_date >= ? AND business_date < ?)
+                    OR (business_date IS NULL AND occurred_at >= ? AND occurred_at < ?)
+                 )
                ORDER BY id ASC""",
-            (board, start.isoformat(), end.isoformat()),
+            (
+                board,
+                start_date,
+                end_date,
+                start.isoformat(),
+                end.isoformat(),
+            ),
         )
         return [self._event_from_row(row) for row in await cur.fetchall()]
 
     async def person_board(self, now: Optional[datetime] = None) -> list:
         start, end = self._week_bounds(now)
+        start_date, end_date = self._week_date_bounds(start, end)
         cur = await self._conn.execute(
             """SELECT employee_id, event_type, COUNT(*) AS event_count
                FROM hygiene_board_events
-               WHERE board = ? AND occurred_at >= ? AND occurred_at < ?
+               WHERE board = ?
+                 AND (
+                       (business_date IS NOT NULL AND business_date >= ? AND business_date < ?)
+                    OR (business_date IS NULL AND occurred_at >= ? AND occurred_at < ?)
+                 )
                  AND employee_id IS NOT NULL
                GROUP BY employee_id, event_type""",
-            (BOARD_PERSON, start.isoformat(), end.isoformat()),
+            (BOARD_PERSON, start_date, end_date, start.isoformat(), end.isoformat()),
         )
         by_id = {}
         for event_row in await cur.fetchall():
@@ -3036,13 +3089,18 @@ class HygieneWork:
 
     async def zone_board(self, now: Optional[datetime] = None) -> list:
         start, end = self._week_bounds(now)
+        start_date, end_date = self._week_date_bounds(start, end)
         cur = await self._conn.execute(
             """SELECT zone_id, event_type, COUNT(*) AS event_count
                FROM hygiene_board_events
-               WHERE board = ? AND occurred_at >= ? AND occurred_at < ?
+               WHERE board = ?
+                 AND (
+                       (business_date IS NOT NULL AND business_date >= ? AND business_date < ?)
+                    OR (business_date IS NULL AND occurred_at >= ? AND occurred_at < ?)
+                 )
                  AND zone_id IS NOT NULL
                GROUP BY zone_id, event_type""",
-            (BOARD_ZONE, start.isoformat(), end.isoformat()),
+            (BOARD_ZONE, start_date, end_date, start.isoformat(), end.isoformat()),
         )
         by_id = {}
         for event_row in await cur.fetchall():
@@ -3546,7 +3604,7 @@ class HygieneWork:
         )
         raw_rows = [dict(row) for row in await cur.fetchall()]
         rejected_reasons = await self._deep_clean_rejected_reasons(
-            [row["item_id"] for row in raw_rows]
+            business_date, [row["item_id"] for row in raw_rows]
         )
         rows = []
         for mapping in raw_rows:
@@ -4945,7 +5003,8 @@ class HygieneWork:
         self, where: str, params, required: bool = False
     ) -> dict:
         rows = await self._archive_rows(
-            f"""SELECT s.id, s.capture_id, s.instance_id, i.pending_submission_id
+            f"""SELECT s.id, s.capture_id, s.instance_id, i.pending_submission_id,
+                       i.status AS instance_status
                 FROM hygiene_daily_submissions s
                 JOIN hygiene_daily_instances i ON i.id = s.instance_id
                 WHERE {where}""",
@@ -4958,9 +5017,13 @@ class HygieneWork:
         ids = [int(row["id"]) for row in rows]
         roots = [str(row["capture_id"]) for row in rows]
         derivatives = await self._archive_derivatives(roots)
+        # 只回退**还在等验收**的实例。已通过的不动状态：`accept_daily` 成功后本来就不清
+        # `pending_submission_id`，只看这个字段会把已验收的一起退回待拍 —— 员工重拍、
+        # 店长再验，同一天同一项会再记一次「一次通过」，红黑榜/趋势凭空多一次。
         resets = [
             row for row in rows
-            if int(row["pending_submission_id"] or 0) == int(row["id"])
+            if row.get("instance_status") == STATUS_PENDING
+            and int(row["pending_submission_id"] or 0) == int(row["id"])
         ]
         now = self._now_iso()
         try:
@@ -4996,7 +5059,7 @@ class HygieneWork:
     ) -> dict:
         rows = await self._archive_rows(
             f"""SELECT d.id, d.before_capture_id, d.after_capture_id, d.instance_id,
-                       i.pending_submission_id
+                       i.pending_submission_id, i.status AS instance_status
                 FROM hygiene_deep_clean_submissions d
                 JOIN hygiene_deep_clean_instances i ON i.id = d.instance_id
                 WHERE {where}""",
@@ -5014,9 +5077,12 @@ class HygieneWork:
             if value
         ]
         derivatives = await self._archive_derivatives(roots)
+        # 同日常：只回退「待验收」的实例，已通过的删证据但不改状态（见
+        # `_archive_drop_daily_submissions` 的说明）。
         resets = [
             row for row in rows
-            if int(row["pending_submission_id"] or 0) == int(row["id"])
+            if row.get("instance_status") == STATUS_PENDING
+            and int(row["pending_submission_id"] or 0) == int(row["id"])
         ]
         now = self._now_iso()
         try:
@@ -5050,7 +5116,8 @@ class HygieneWork:
         self, where: str, params, required: bool = False
     ) -> dict:
         rows = await self._archive_rows(
-            f"""SELECT r.id, r.capture_id, r.ticket_id, t.pending_reshoot_id
+            f"""SELECT r.id, r.capture_id, r.ticket_id, t.pending_reshoot_id,
+                       t.status AS ticket_status
                 FROM hygiene_fix_reshoots r
                 JOIN hygiene_fix_tickets t ON t.id = r.ticket_id
                 WHERE {where}""",
@@ -5063,9 +5130,11 @@ class HygieneWork:
         ids = [int(row["id"]) for row in rows]
         roots = [str(row["capture_id"]) for row in rows]
         derivatives = await self._archive_derivatives(roots)
+        # 同日常/专项：只有「待验收」的整改单退回待回拍；已闭环的删证据不动状态。
         resets = [
             row for row in rows
-            if int(row["pending_reshoot_id"] or 0) == int(row["id"])
+            if row.get("ticket_status") == STATUS_PENDING
+            and int(row["pending_reshoot_id"] or 0) == int(row["id"])
         ]
         now = self._now_iso()
         try:

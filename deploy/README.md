@@ -16,7 +16,7 @@
 - KDS 看板构建产物（`public/kds/`，挂载在 `/kds`）
 
 生产交付与升级遵循 **ADR 0011**（详见 `docs/adr/0011-release-bundle-update.md`、
-`CONTEXT.md`「部署与更新」；`docs/adr/0010-github-release-update-job.md` 已取代）：
+`GLOSSARY.md`「部署与更新」；`docs/adr/0010-github-release-update-job.md` 已取代）：
 
 > **ADR 引用只给路径、不给链接**：`docs/adr/` 里随发行包发布的只有 0011 / 0012 / 0013 / 0082
 > （规则见 `.gitignore` 的 `docs/*` 段），0010 / 0084 / 0089 / 0090 等其余 ADR **只在本机仓库**——

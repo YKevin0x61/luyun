@@ -13,6 +13,8 @@ const ROUTES = [
   { path: '/workbench/floor/daily', component: { template: '<div>日常</div>' } },
   { path: '/workbench/kitchen/recipe', component: { template: '<div>配方</div>' } },
   { path: '/workbench/kitchen/prep-plan', component: { template: '<div>备货</div>' } },
+  { path: '/workbench/kitchen/prep-review', component: { template: '<div>复盘</div>' } },
+  { path: '/workbench/kitchen/prep-rules', component: { template: '<div>换算规则</div>' } },
   { path: '/workbench/staff/today', component: { template: '<div>我的</div>' } },
 ]
 
@@ -51,10 +53,10 @@ describe('工作台级导航（管理端：今天 / 人事 / 现场 / 后勤；�
   it('店长这一档：五个门都在，「今天」指 /workbench（B2 那条回首页的路）', async () => {
     const wrapper = await mountNav('/workbench/hr/calendar', 'super')
 
-    // 后勤那一格现在有三条：配方（选择岗位）/ 备货计划 / 损耗分析 —— 前两条 `both`、
-    // 最后一条只给管理端，所以店长这一档三条都在。
+    // 后勤那一格现在有四条：配方（选择岗位）/ 备货计划 / 备货复盘 / 损耗分析 ——
+    // 前两条 `both`，后两条（复盘与损耗分析）只给管理端，所以店长这一档四条都在。
     expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
-      '今天', '人事', '现场', '选择岗位', '备货计划', '损耗分析',
+      '今天', '人事', '现场', '选择岗位', '备货计划', '备货复盘', '换算规则', '损耗分析',
     ])
     expect(wrapper.get('a[href="/workbench"]').text()).toBe('今天')
     // 站在人事组里，「人事」那一格亮。
@@ -78,7 +80,7 @@ describe('工作台级导航（管理端：今天 / 人事 / 现场 / 后勤；�
     const wrapper = await mountNav('/workbench/kitchen/prep-plan', 'super')
 
     const cell = wrapper.get('.wb-nav-cell.is-multi')
-    expect(cell.findAll('.wb-nav-item')).toHaveLength(3)
+    expect(cell.findAll('.wb-nav-item')).toHaveLength(5)
     expect(cell.classes()).toContain('is-on')
     expect(wrapper.findAll('.wb-nav-item.is-current').map((item) => item.attributes('href')))
       .toEqual(['/workbench/kitchen/prep-plan'])

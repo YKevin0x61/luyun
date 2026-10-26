@@ -1249,10 +1249,10 @@ class AttendanceLedgerTableContractTest(unittest.TestCase):
 
         catalog = _admin_catalog()
         self.assertIn(self.TABLE, catalog["tables"])
-        self.assertEqual(catalog["table_meta"][self.TABLE]["group"], "attendance")
+        self.assertEqual(catalog["table_meta"][self.TABLE]["group"], "hr")
         self.assertTrue(catalog["table_meta"][self.TABLE]["read_only"])
         groups = {group["key"]: group for group in catalog["groups"]}
-        self.assertEqual(set(groups["attendance"]["tables"]), set(ATTENDANCE_TABLES))
+        self.assertIn(self.TABLE, groups["hr"]["tables"])
 
         # 只读不是「按钮变灰」：通用写入口真的拒。
         with self.assertRaises(HTTPException) as caught:

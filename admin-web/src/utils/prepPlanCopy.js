@@ -6,8 +6,8 @@
 
 export const PREP_PLAN_TITLE = '备货计划'
 
-export const MADE_LABEL = '厨房做的'
-export const BOUGHT_LABEL = '要买的'
+export const MADE_LABEL = '半成品'
+export const BOUGHT_LABEL = '原料'
 export const DONE_LABEL = '做完'
 export const DONE_SECTION_PREFIX = '已做'
 export const COPY_LABEL = '复制清单'
@@ -25,8 +25,8 @@ export const FORMULA_HINT =
 export const MISSING_RULE_TEXT = '没有配方系数，算不出建议量'
 export const NO_HISTORY_TEXT = '近 4 周没有可比的同星期几'
 export const RECIPE_FIX_LINK = '配方系数不对？去数据管理改'
-export const KIND_FLIP_TO_BOUGHT = '这个其实是买的'
-export const KIND_FLIP_TO_MADE = '这个其实是厨房做的'
+export const KIND_FLIP_TO_BOUGHT = '这个其实是原料'
+export const KIND_FLIP_TO_MADE = '这个其实是半成品'
 export const MANUAL_MARK = '手改'
 export const UNDO_LABEL = '撤回'
 export const READ_ONLY_HINT = '只读：备货计划由管理端查看。'

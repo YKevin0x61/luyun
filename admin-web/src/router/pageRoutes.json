@@ -299,6 +299,14 @@
       "public": false
     },
     {
+      "path": "/workbench/kitchen/prep-rules",
+      "title": "换算规则",
+      "group": "kitchen",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
       "path": "/workbench/kitchen/loss",
       "title": "损耗分析",
       "group": "kitchen",

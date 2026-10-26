@@ -28,7 +28,7 @@ Human- and agent-facing layout rules for this repo. Goal: each top-level area ha
 | `.scratch/` | Local markdown issue tracker (open features plus resolved history); see `docs/agents/issue-tracker.md` |
 | `AGENTS.md` | Canonical agent guide for this repo |
 | `CLAUDE.md` | Short pointer to `AGENTS.md` (tool entry file only) |
-| `CONTEXT.md` | Ubiquitous language / domain terms |
+| `GLOSSARY.md` | Ubiquitous language / domain terms |
 | `README.md` | Human overview and quick start |
 | Subdirectory `README.md` | Ops manual for that directory — not a second architecture essay |
 

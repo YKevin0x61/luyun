@@ -6,7 +6,7 @@
 「Testing Decisions」）：申报窗口由**自然日**决定（不是 06:00 的营业日），所以时钟
 必须能拨；HTTP 面另有一小段薄缝，只回答「谁能打、打进去会怎样」。
 
-术语与口径见 `CONTEXT.md` 的「加班与补钟登记」「净时长」，决策理由见
+术语与口径见 `GLOSSARY.md` 的「加班与补钟登记」「净时长」，决策理由见
 `docs/adr/0100-overtime-and-makeup-ledger.md`。
 """
 
@@ -14,7 +14,7 @@ import asyncio
 import tempfile
 import unittest
 from datetime import datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -432,6 +432,94 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
             await self.ledger.salary_snapshot(employee["id"], "2026-09")
         )
 
+    # ── 审批的归属与事务边界（Slice A 修复）─────────────────────────────────
+
+    async def test_a_supervisor_cannot_approve_his_own_entry(self):
+        """提交人不能批自己的登记（同卫生 `cannot_self_accept` 的口径）。
+
+        钱与留痕都是自己给自己：这一笔仍在待审批、也没落底薪快照。判据看「这笔算谁的」
+        （`employee_id`），不看 `created_by` —— 店长代别人补录的那一笔，批的仍然是他。
+        """
+        supervisor = await self._employee(phone="13800138011", name="李四", salary=5100)
+        own = await self.ledger.submit(
+            EntryActor(employee_id=supervisor["id"], can_backfill=True), TODAY, 4, "我自己加的班"
+        )
+
+        with self.assertRaises(OvertimeError) as caught:
+            await self.ledger.approve(
+                EntryActor(employee_id=supervisor["id"], can_backfill=True), own["id"]
+            )
+        self.assertEqual(caught.exception.code, "cannot_self_accept")
+
+        rows = (await self.ledger.list_mine(supervisor["id"]))["entries"]
+        self.assertEqual([(row["id"], row["status"]) for row in rows], [(own["id"], "pending")])
+        self.assertIsNone(
+            await self.ledger.salary_snapshot(supervisor["id"], "2026-09")
+        )
+        # 队列里也不再摆出他自己那一笔（店长面传 exclude，管理端不传）。
+        self.assertEqual((await self.ledger.list_pending())["count"], 1)
+        self.assertEqual(
+            (
+                await self.ledger.list_pending(exclude_employee_id=supervisor["id"])
+            )["count"],
+            0,
+        )
+
+    async def test_salary_snapshot_is_written_inside_the_approval_write_lock(self):
+        """底薪快照与批准在同一个 `serialized_write` 里：并发写请求插不进中间。
+
+        以前 `approve()` 先写快照、后拿锁，这段落在锁外的未提交 INSERT 会被任何并发写
+        请求的收尾带上：失败 rollback 时快照被吞掉、批准照旧提交，那笔已批准的加班费
+        从此算不出来（`monthly_stats` 记成 `unpriced`）。
+        """
+        employee = await self._employee(salary=5100)
+        entry = await self.ledger.submit(
+            EntryActor(employee_id=employee["id"]), TODAY, 4, "加班"
+        )
+
+        real_write_snapshot = OvertimeLedger._write_snapshot
+        inserted = asyncio.Event()
+        proceed = asyncio.Event()
+
+        async def gated_write_snapshot(ledger_self, employee_id, month, base_salary):
+            await real_write_snapshot(ledger_self, employee_id, month, base_salary)
+            # 快照插完了：从这里到状态变更之间，写锁必须一直在这个事务手里。
+            inserted.set()
+            await proceed.wait()
+
+        with patch.object(OvertimeLedger, "_write_snapshot", gated_write_snapshot):
+            approving = asyncio.create_task(
+                self.ledger.approve(EntryActor(), entry["id"])
+            )
+            await asyncio.wait_for(inserted.wait(), timeout=5)
+
+            # 一笔参数非法的并发写请求：它走到 `serialized_write` 的 except 分支会无条件
+            # rollback。锁没罩住快照时，它此刻就能跑完并把那条 INSERT 收掉。
+            failing = asyncio.create_task(
+                self.ledger.submit(
+                    EntryActor(employee_id=employee["id"]), "不是日期", 2, "并发写"
+                )
+            )
+            await asyncio.sleep(0.05)
+            self.assertFalse(
+                failing.done(),
+                "并发写请求在审批持锁期间就进了锁 —— 底薪快照又落回了锁外",
+            )
+
+            proceed.set()
+            approved = await asyncio.wait_for(approving, timeout=5)
+            with self.assertRaises(OvertimeError) as caught:
+                await asyncio.wait_for(failing, timeout=5)
+            self.assertEqual(caught.exception.code, "invalid_date")
+
+        self.assertEqual(approved["status"], "approved")
+        self.assertEqual(
+            await self.ledger.salary_snapshot(employee["id"], "2026-09"), 5100
+        )
+        stats = await self.ledger.monthly_stats("2026-09")
+        self.assertEqual(stats["total"]["unpriced"], 0)
+        self.assertEqual(stats["items"][0]["amount"], 40)
+
     # ── 票 03：按月统计与加班费 ─────────────────────────────────────────────
 
     async def test_monthly_stats_pay_per_person_and_the_total_row(self):
@@ -619,11 +707,12 @@ class OvertimeTableContractTest(unittest.TestCase):
         catalog = _admin_catalog()
         for table in OVERTIME_TABLES:
             self.assertIn(table, catalog["tables"])
-            self.assertEqual(catalog["table_meta"][table]["group"], "overtime")
+            self.assertEqual(catalog["table_meta"][table]["group"], "hr")
             self.assertTrue(catalog["table_meta"][table]["read_only"])
         groups = {group["key"]: group for group in catalog["groups"]}
-        self.assertEqual(set(groups["overtime"]["tables"]), set(OVERTIME_TABLES))
-        self.assertEqual(groups["overtime"]["label"], "人事")
+        for table in OVERTIME_TABLES:
+            self.assertIn(table, groups["hr"]["tables"])
+        self.assertEqual(groups["hr"]["label"], "人事考勤")
 
 
 # ── HTTP 薄缝：谁能打、打进去会怎样 ──────────────────────────────────────────
@@ -1272,6 +1361,36 @@ def test_supervisor_reviews_a_colleagues_entry_on_the_phone(overtime_http):
     assert by_id[second["id"]]["status"] == "rejected"
     assert by_id[second["id"]]["reject_reason"] == "那天你排的是休"
     assert by_id[first["id"]]["employee_id"] == colleague
+
+
+def test_supervisor_cannot_approve_his_own_entry_on_the_phone(overtime_http):
+    """提交人不能批自己的登记 —— 同卫生 `cannot_self_accept` 的口径。
+
+    店长既是提交人又是唯一的审批人：不拦的话钱与留痕都是自己给自己。被拒是 **403**、
+    理由与卫生那句对齐；队列里也不再摆出自己那一笔（摆着就是一颗点了必被拒的「批准」）。
+    """
+    client, _db, accounts = overtime_http
+    supervisor_id = _supervisor(accounts)
+    _staff_cookie(client, accounts, phone=SUPERVISOR_PHONE)
+
+    own = _submit(client, TODAY, 4, "我自己加的班")
+    assert own["employee_id"] == supervisor_id
+
+    queue = client.get("/api/overtime/review/pending")
+    assert queue.status_code == 200, queue.text
+    assert [
+        row for row in queue.json()["entries"] if row["employee_id"] == supervisor_id
+    ] == []
+
+    approved = client.post(f"/api/overtime/review/{own['id']}/approve")
+    assert approved.status_code == 403, approved.text
+    assert "不能自己批" in approved.json()["detail"]
+
+    # 一个字都没改：这一笔仍在待审批里，等另一位有审批权限的店长点头。
+    mine = client.get("/api/overtime/me").json()
+    assert [(row["id"], row["status"]) for row in mine["entries"]] == [
+        (own["id"], "pending")
+    ]
 
 
 def test_supervisor_backfills_any_past_date_while_staff_cannot(overtime_http):

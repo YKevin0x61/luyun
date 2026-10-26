@@ -68,11 +68,12 @@ export function usePrepPlan() {
   const todoInStation = computed(() => activeEntries.value.filter((entry) => !entry.done_at))
   const doneInStation = computed(() => activeEntries.value.filter((entry) => entry.done_at))
 
-  /** 档口内两段：厨房做的 / 要买的（顺序由后端给：按建议量降序）。 */
+  /** 档口内两段：半成品 / 原料（顺序由后端给：按建议量降序）。
+   *  展示用「半成品 / 原料」；落库仍是 kind = made / bought（历史枚举，不为改文案迁库）。 */
   const groups = computed(() =>
     [
-      { kind: 'made', label: '厨房做的' },
-      { kind: 'bought', label: '要买的' },
+      { kind: 'made', label: '半成品' },
+      { kind: 'bought', label: '原料' },
     ]
       .map((group) => ({
         ...group,

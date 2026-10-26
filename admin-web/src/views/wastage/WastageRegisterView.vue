@@ -16,7 +16,7 @@
  *
  * 反馈走页内一句话（不是 toast），与「今天」页、加班页同一个写法。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
@@ -27,8 +27,11 @@ import HygieneLiveCamera from '../../components/hygiene/HygieneLiveCamera.vue'
 import { api } from '../../api/client.js'
 import { loginRedirectTarget } from '../../utils/loginNext'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
+import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
+import { IDENTITY_ADMIN, IDENTITY_STAFF } from '../../utils/workbenchIdentity'
 
 const router = useRouter()
+const identityStore = useWorkbenchIdentityStore()
 
 const state = ref('loading') // loading | ready | error
 const errorText = ref('')
@@ -83,6 +86,38 @@ function redirectLogin() {
   if (target) router.replace(target)
 }
 
+/** 这一轮请求按哪套凭据解析：员工档声明 staff、超管档声明 admin。
+ *
+ *  共用电脑上两套 cookie 都在（ADR 0091），而后端默认「管理端优先」—— 员工在员工页记的
+ *  一笔会归属成管理端、明细还能看到全店。所以页面按**此刻的工作台身份**显式声明一次。
+ *  声明只选凭据、不放宽校验（同 WS 的 `?identity=`）：那一支没有有效会话就是 401，
+ *  不回落到另一支。
+ *
+ *  身份探针还没给出结论（`null`）时**不声明**：退回旧的 cookie 优先级（顶多还是旧行为），
+ *  绝不自作主张猜一个声明去提权；探针回来后下面的 watch 会按新身份重读一次。
+ */
+function identityParams() {
+  const identity = identityStore.identity
+  if (identity === IDENTITY_STAFF) return { identity: 'staff' }
+  if (identity === IDENTITY_ADMIN) return { identity: 'admin' }
+  return {}
+}
+
+/** 给 `api.upload` 用：它只收 path（没有 params 参数），所以查询串直接拼在路径上。 */
+function withIdentity(path) {
+  const { identity } = identityParams()
+  return identity ? `${path}?identity=${identity}` : path
+}
+
+// 身份探针晚于本页第一轮请求时（切换器先发起探针、或两套会话都在的共用电脑），拿到结论
+// 后按新身份重读：否则员工页上还是按管理端拿到的全店视图。
+watch(
+  () => identityStore.identity,
+  (next, prev) => {
+    if (next && next !== prev && state.value === 'ready') load(true)
+  },
+)
+
 function formatQuantity(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return ''
@@ -93,11 +128,12 @@ function formatQuantity(value) {
 async function load(quiet = false) {
   if (!quiet) state.value = 'loading'
   try {
+    const params = identityParams()
     const [meta, tpl, sug, list] = await Promise.all([
-      api.get('/api/wastage/meta'),
-      api.get('/api/wastage/templates'),
-      api.get('/api/wastage/suggestions'),
-      api.get('/api/wastage/records', { limit: 8 }),
+      api.get('/api/wastage/meta', params),
+      api.get('/api/wastage/templates', params),
+      api.get('/api/wastage/suggestions', params),
+      api.get('/api/wastage/records', { ...params, limit: 8 }),
     ])
     reasons.value = meta.meta.reasons
     units.value = meta.meta.units
@@ -125,7 +161,7 @@ async function load(quiet = false) {
 
 async function loadRecords() {
   try {
-    const list = await api.get('/api/wastage/records', { limit: 8 })
+    const list = await api.get('/api/wastage/records', { ...identityParams(), limit: 8 })
     records.value = list.records || []
     total.value = list.total || 0
   } catch (err) {
@@ -156,13 +192,17 @@ async function saveAsTemplate() {
   formError.value = ''
   note.value = ''
   try {
-    await api.post('/api/wastage/templates', {
-      item_name: itemName.value.trim(),
-      unit: unit.value,
-      reason: reason.value,
-    })
+    await api.post(
+      '/api/wastage/templates',
+      {
+        item_name: itemName.value.trim(),
+        unit: unit.value,
+        reason: reason.value,
+      },
+      identityParams(),
+    )
     note.value = '已存为常用模板，下次点一下就能填好。'
-    templates.value = (await api.get('/api/wastage/templates')).templates || []
+    templates.value = (await api.get('/api/wastage/templates', identityParams())).templates || []
   } catch (err) {
     if (err.status === 401) return redirectLogin()
     formError.value = err.message || '存模板失败'
@@ -173,8 +213,8 @@ async function removeTemplate(tpl) {
   if (!tpl.id) return
   formError.value = ''
   try {
-    await api.delete(`/api/wastage/templates/${tpl.id}`)
-    templates.value = (await api.get('/api/wastage/templates')).templates || []
+    await api.delete(`/api/wastage/templates/${tpl.id}`, identityParams())
+    templates.value = (await api.get('/api/wastage/templates', identityParams())).templates || []
   } catch (err) {
     if (err.status === 401) return redirectLogin()
     formError.value = err.message || '删模板失败'
@@ -209,7 +249,8 @@ async function uploadOne(file, filename = 'wastage.jpg') {
   try {
     const form = new FormData()
     form.append('file', file, filename)
-    const data = await api.upload('/api/wastage/images', form)
+    // 上传也要声明身份：图归属决定提交时能不能绑进这一笔（双 cookie 下默认归管理端）。
+    const data = await api.upload(withIdentity('/api/wastage/images'), form)
     images.value = [...images.value, data.image]
   } catch (err) {
     if (err.status === 401) {
@@ -242,21 +283,26 @@ async function submit() {
   formError.value = ''
   note.value = ''
   try {
-    const data = await api.post('/api/wastage/records', {
-      item_name: itemName.value.trim(),
-      quantity: Number(quantity.value),
-      unit: unit.value,
-      reason: reason.value,
-      remark: remark.value.trim(),
-      wastage_date: day.value,
-      image_ids: images.value.map((row) => row.capture_id),
-    })
+    const data = await api.post(
+      '/api/wastage/records',
+      {
+        item_name: itemName.value.trim(),
+        quantity: Number(quantity.value),
+        unit: unit.value,
+        reason: reason.value,
+        remark: remark.value.trim(),
+        wastage_date: day.value,
+        image_ids: images.value.map((row) => row.capture_id),
+      },
+      identityParams(),
+    )
     const record = data.record
     note.value = `已记下：${record.item_name} ${formatQuantity(record.quantity)}${record.unit} · ${record.reason_text}`
     resetForm()
     await loadRecords()
     // 名字建议要跟着长：这一笔的物料名下次该能补全出来。
-    suggestions.value = (await api.get('/api/wastage/suggestions')).suggestions || []
+    suggestions.value =
+      (await api.get('/api/wastage/suggestions', identityParams())).suggestions || []
   } catch (err) {
     if (err.status === 401) {
       redirectLogin()
@@ -268,8 +314,12 @@ async function submit() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   document.title = workbenchDocumentTitle('损耗登记')
+  // 共用电脑上两套 cookie 都在：先等身份探针给出结论，别让员工那一档先按管理端
+  // 拿到一次全店明细。探针由壳 / 切换器发起；这里只在它还没开始时补一次（在飞时
+  // `refresh()` 直接返回，由上面的 watch 在结论回来后重读）。
+  if (!identityStore.probed) await identityStore.refresh()
   load()
 })
 </script>

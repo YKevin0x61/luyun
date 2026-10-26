@@ -17,14 +17,24 @@ _warned_open_admin = False
 
 # 会改状态的方法。GET/HEAD/OPTIONS 不在其中（OPTIONS 还要留给 CORS 预检）。
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-# 带这些头的调用不是「浏览器自动附带凭据」，不构成 CSRF 面。
+# 带这些头、且**没有 `Sec-Fetch-Site`** 的调用不是「浏览器自动附带凭据」，不构成 CSRF 面。
+# 浏览器里的脚本也能带自定义头（跨站 fetch + CORS 预检就会放行任意头），所以这个豁免
+# 只能给「根本不发 `Sec-Fetch-Site`」的非浏览器客户端（curl / 脚本 / KDS）用。
 _CSRF_EXEMPT_HEADERS = ("authorization", "x-admin-token")
+
+# 身份显式声明的取值：WebSocket 的 `?identity=` 与 HTTP 的 `?identity=` 共用这两个词。
+# 两处都只拿它**选凭据**，不给身份、不放宽校验（见 `identify_ws` 与
+# `require_any_identity_session`）。
+IDENTITY_STAFF = "staff"
+IDENTITY_ADMIN = "admin"
+# HTTP 那一面从查询串读声明（WS 从 `?identity=` 读同一个参数名）。
+_HTTP_IDENTITY_PARAM = "identity"
 
 
 def csrf_origin_rejected(request: Request) -> bool:
     """跨站写请求判定（CSRF 纵深防御）。
 
-    只对**浏览器会自动附带凭据**的请求生效：带会话 cookie、且没有显式 token 头。
+    只对**浏览器会自动附带凭据**的请求生效：带会话 cookie。
 
     判定优先看 `Sec-Fetch-Site`——现代浏览器都发，而且**不受反向代理改写 Host 的
     影响**（部署里的 nginx/Caddy 都转发原 Host，但 Vite 开发代理是
@@ -32,7 +42,13 @@ def csrf_origin_rejected(request: Request) -> bool:
 
     * ``cross-site`` → 拒绝；
     * ``same-origin`` / ``same-site`` / ``none`` → 放行；
-    * 缺失（老浏览器、curl、脚本）→ 退回比较 ``Origin`` 与 ``Host``；两者都缺则放行。
+    * 缺失（老浏览器、curl、脚本）→ 先看显式 token 头（非浏览器客户端才带得出它，
+      这类调用本来就不在 CSRF 面里）；再看 ``Origin`` 与 ``Host``，两者都缺则放行。
+
+    **自定义头不是通用豁免**：跨站页面里的 `fetch(..., {credentials: 'include',
+    headers: {'X-Admin-Token': 'x'}})` 只要 CORS 预检通过，浏览器就会把自定义头与
+    cookie 一起发出去。所以有 ``Sec-Fetch-Site`` 时它说了算，豁免只在它缺失的回退
+    分支里生效 —— KDS 的 `?token=` 链路、curl、脚本照旧不受影响。
 
     `SameSite=Lax` 仍是主要屏障，这里是纵深：一旦将来为了让员工页嵌进别的站点而把
     cookie 放宽成 ``SameSite=None``，写接口不会被跨站表单直接打穿。
@@ -45,13 +61,17 @@ def csrf_origin_rejected(request: Request) -> bool:
         or cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
     ):
         return False
-    for header in _CSRF_EXEMPT_HEADERS:
-        if request.headers.get(header):
-            return False
 
     fetch_site = (request.headers.get("sec-fetch-site") or "").strip().lower()
     if fetch_site:
+        # 浏览器的请求一定带它、页面脚本也改不了它：有就以它为准，不看自定义头。
         return fetch_site == "cross-site"
+
+    # 到这里只可能是老浏览器 / curl / 脚本：没有 `Sec-Fetch-Site` 的请求里，显式 token
+    # 头才说明「凭据是调用方自己给的，不是浏览器自动附带」。
+    for header in _CSRF_EXEMPT_HEADERS:
+        if request.headers.get(header):
+            return False
 
     origin = (request.headers.get("origin") or "").strip()
     host = (request.headers.get("host") or "").strip()
@@ -116,8 +136,9 @@ class WsIdentity:
 # **只决定拿哪份凭据去验**，绝不放宽校验本身：声明 staff 时管理端 cookie / token
 # 一律不看，没有有效员工会话就拒绝连接（fail-closed），反之亦然。认不出的值也拒绝，
 # 不静默退回旧优先级——那会让拼错的声明悄悄拿到管理端身份。
-WS_IDENTITY_STAFF = "staff"
-WS_IDENTITY_ADMIN = "admin"
+# HTTP 面的 `require_any_identity_session` 用同一对取值（`IDENTITY_*`，定义在文件顶部）。
+WS_IDENTITY_STAFF = IDENTITY_STAFF
+WS_IDENTITY_ADMIN = IDENTITY_ADMIN
 _WS_IDENTITY_PARAM = "identity"
 
 
@@ -235,6 +256,30 @@ async def require_staff_session(request: Request) -> dict:
     return employee
 
 
+async def _admin_session_identity(request: Request) -> Optional[dict]:
+    """管理端会话（Session Cookie）。认不出返回 None。"""
+    admin_session = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    if await auth_service.validate_session_id(admin_session):
+        return {"kind": "admin", "session_id": admin_session}
+    return None
+
+
+async def _staff_session_identity(request: Request) -> Optional[dict]:
+    """员工会话（手机端那个 cookie）。认不出返回 None。
+
+    没有员工 cookie 时**不碰**员工账号服务：未登录访客拿到的是 401，而不是服务刚起、
+    `main.employee_accounts` 还没装配那几秒的 503。
+    """
+    staff_session = request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    if not staff_session:
+        return None
+    accounts = _staff_accounts()
+    employee = await accounts.get_staff_session(staff_session)
+    if employee is None:
+        return None
+    return {"kind": "staff", "employee": employee}
+
+
 async def require_any_identity_session(request: Request) -> dict:
     """「任一身份」门：管理端会话或员工会话，任一有效即放行。
 
@@ -243,20 +288,34 @@ async def require_any_identity_session(request: Request) -> dict:
     （票 08）的读接口要用它，不该为了一个依赖 import 卫生的路由模块。判定顺序与
     CSRF 拦截、WS 身份那几处一致：两套 cookie 都在时**管理端优先**。
 
+    **显式声明（`?identity=staff|admin`）是「这台浏览器同时持两套 cookie 时按谁看」的
+    答案**（形状照 WS 的 `identify_ws`）：店里那台共用电脑上两套 cookie 都在，员工页按
+    默认优先级会被管理端顶掉 —— 他记的一笔归属成管理端、明细里还能看到全店。声明
+    **只选凭据、不给身份**（fail-closed）：声明的那一支验不过就是 401，不回落到另一支；
+    不带声明时优先级逐字不变（KDS / curl / 脚本照常）。
+
     拒绝时是 401「未授权」（与 `verify_admin_token` 同一个 body），不是「需要登录」
     —— 契约测试用这个 body 把「鉴权门拒绝」与业务自己的 401 分开。没带员工 cookie
     时不碰员工账号服务，所以服务刚起、`main.employee_accounts` 还没装配的那几秒，
     未登录访客拿到的是 401 而不是 503。
     """
-    admin_session = request.cookies.get(settings.SESSION_COOKIE_NAME)
-    if await auth_service.validate_session_id(admin_session):
-        return {"kind": "admin", "session_id": admin_session}
+    declared = request.query_params.get(_HTTP_IDENTITY_PARAM)
+    if declared is not None:
+        declared = declared.strip().lower()
+        if declared == IDENTITY_STAFF:
+            identity = await _staff_session_identity(request)
+        elif declared == IDENTITY_ADMIN:
+            identity = await _admin_session_identity(request)
+        else:
+            identity = None
+        if identity is None:
+            raise HTTPException(status_code=401, detail="未授权")
+        return identity
 
-    staff_session = request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
-    if staff_session:
-        accounts = _staff_accounts()
-        employee = await accounts.get_staff_session(staff_session)
-        if employee is not None:
-            return {"kind": "staff", "employee": employee}
-
+    identity = await _admin_session_identity(request)
+    if identity is not None:
+        return identity
+    identity = await _staff_session_identity(request)
+    if identity is not None:
+        return identity
     raise HTTPException(status_code=401, detail="未授权")

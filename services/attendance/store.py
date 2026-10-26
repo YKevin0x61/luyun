@@ -968,9 +968,16 @@ def _ledger_value(field: str, value: Any) -> Any:
         if value is None:
             return None
         try:
-            return float(value)
+            number = float(value)
         except (TypeError, ValueError) as exc:
             raise AttendanceError(f"invalid_{field}", str(value)) from exc
+        # **非有限数一律拒**（NaN / ±Infinity）：HTTP 层的 `Optional[float]` 认它们，
+        # PostgreSQL 的 DOUBLE PRECISION 也收它们，可 `sheet()` 的 JSON 序列化用
+        # `allow_nan=False` —— 一个 NaN 落库就是整张考勤表永久 500，而页面上清不掉
+        # （只能进库手改）。所以拦在写台账之前，code 与「给了非数字」共用同一句文案。
+        if not math.isfinite(number):
+            raise AttendanceError(f"invalid_{field}", str(value))
+        return number
     return _text(value)
 
 
@@ -978,10 +985,14 @@ def _ledger_number(row: Optional[dict], column: str) -> Optional[float]:
     """台账那一行上的一个数字列（没有那一行 / 没填过 = `None`，**不是 0**）。
 
     「从没给过期初」与「期初是 0」是两件事：页面上一格留空、`0` 是一个真写下的数。
+
+    非有限数（NaN / ±Infinity）按「没填」读：写口已经拒它们了，这里兜的是**存量坏值**
+    —— 老版本写进去的那一行不该让整张表（以及导出件）永远 500。
     """
     if not row or row.get(column) is None:
         return None
-    return float(row[column])
+    number = float(row[column])
+    return number if math.isfinite(number) else None
 
 
 def _is_on_the_sheet(employee: dict, on_record: bool) -> bool:

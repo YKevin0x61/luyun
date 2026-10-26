@@ -181,7 +181,7 @@ class UpdateItemRequest(BaseModel):
 
 @router.patch("/items/{item_id}", dependencies=_ADMIN_WRITE)
 async def update_item(item_id: int, payload: UpdateItemRequest, db=Depends(get_db)):
-    """改「做的 / 要买的」归属或所属档口（ADR 0117：系统先猜，人在页面上改）。"""
+    """改「半成品 / 原料」归属或所属档口（ADR 0117：系统先猜，人在页面上改）。"""
     try:
         return await prep_plan_service.update_item(
             db, item_id, kind=payload.kind, station=payload.station

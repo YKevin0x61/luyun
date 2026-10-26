@@ -89,7 +89,7 @@ describe('档口页签与两段分组', () => {
     expect(plan.activeStation.value).toBe('shulong')
   })
 
-  it('档口内分成「厨房做的」与「要买的」两段', async () => {
+  it('档口内分成「半成品」与「原料」两段', async () => {
     const plan = usePrepPlan()
     await plan.load()
 

@@ -10,6 +10,7 @@
  * 服务端自己的口径（校验、归属、统计算法）在 `tests/test_wastage.py` 里压，这里不重复。
  */
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -29,6 +30,7 @@ vi.mock('../../../api/client.js', () => ({
 
 import WastageAnalysisView from '../WastageAnalysisView.vue'
 import WastageRegisterView from '../WastageRegisterView.vue'
+import { useWorkbenchIdentityStore } from '../../../stores/workbenchIdentity'
 
 const META = {
   today: '2026-10-17',
@@ -110,13 +112,23 @@ function route() {
   return router
 }
 
-async function mountView(component, path) {
+async function mountView(component, path, identity = 'staff') {
   const router = route()
   await router.push(path)
   await router.isReady()
+  // 工作台身份由外壳的探针定（真机上是 `stores/workbenchIdentity`）。这一页按它给请求
+  // 声明 `?identity=staff|admin`（双 cookie 的共用电脑上必须显式声明），测试里直接预置
+  // 「已探过」的那一档，不去打真实的会话探针接口。
+  const pinia = createPinia()
+  const identityStore = useWorkbenchIdentityStore(pinia)
+  if (identity) {
+    identityStore.identity = identity
+    identityStore.available = [identity]
+    identityStore.sessions = { admin: identity === 'super', staff: identity === 'staff' }
+  }
   return mount(component, {
     global: {
-      plugins: [router],
+      plugins: [router, pinia],
       stubs: {
         LuyunDatePicker: { template: '<input />' },
         // 页内相机挂的是真组件（`getUserMedia` 在 jsdom 里没有）：这里替身只负责
@@ -165,6 +177,11 @@ describe('损耗登记页（员工端）', () => {
       '/api/wastage/suggestions',
       '/api/wastage/records',
     ])
+    // 员工档的页面每个请求都声明 `?identity=staff`：共用电脑上两套 cookie 都在时，
+    // 后端默认「管理端优先」会让员工页的归属与可见范围都是错的（Slice A 修复）。
+    for (const [, params] of get.mock.calls) {
+      expect(params).toMatchObject({ identity: 'staff' })
+    }
     // 模板 chips 与「我最近的登记」都摆出来了。
     expect(wrapper.text()).toContain('五花肉')
     expect(wrapper.text()).toContain('我最近的登记')
@@ -185,8 +202,10 @@ describe('损耗登记页（员工端）', () => {
     await flushPromises()
 
     expect(post).toHaveBeenCalledTimes(1)
-    const [url, body] = post.mock.calls[0]
+    const [url, body, params] = post.mock.calls[0]
     expect(url).toBe('/api/wastage/records')
+    // 写也要声明：归属（谁记的）由这一支决定。
+    expect(params).toEqual({ identity: 'staff' })
     expect(body.item_name).toBe('五花肉')
     expect(body.quantity).toBe(1.5)
     expect(body.unit).toBe('kg')
@@ -231,8 +250,24 @@ describe('损耗登记页（员工端）', () => {
     await flushPromises()
 
     expect(upload).toHaveBeenCalledTimes(1)
-    expect(upload.mock.calls[0][0]).toBe('/api/wastage/images')
+    // 上传也带声明：图归属决定提交时能不能绑进这一笔。
+    expect(upload.mock.calls[0][0]).toBe('/api/wastage/images?identity=staff')
     expect(wrapper.findAll('.loss-shot')).toHaveLength(1)
+  })
+
+  it('同页的店长档（管理端会话）声明 admin，而不是员工', async () => {
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss', 'super')
+    await flushPromises()
+
+    expect(get.mock.calls.map(([url]) => url)).toEqual([
+      '/api/wastage/meta',
+      '/api/wastage/templates',
+      '/api/wastage/suggestions',
+      '/api/wastage/records',
+    ])
+    for (const [, params] of get.mock.calls) {
+      expect(params).toMatchObject({ identity: 'admin' })
+    }
   })
 })
 

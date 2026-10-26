@@ -66,13 +66,13 @@ function jsonResponse(data, status = 200) {
   }
 }
 
-function probeFetch({ today = TODAY } = {}) {
+function probeFetch({ today = TODAY, stations = [{ id: 'shulong', name: '熟笼', color: '#111' }] } = {}) {
   const calls = []
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url)
     calls.push({ path, method: options.method || 'GET', body: options.body })
     if (path.includes('/api/stations')) {
-      return jsonResponse([{ id: 'shulong', name: '熟笼', color: '#111' }])
+      return jsonResponse(stations)
     }
     if (path.includes('/api/prep-plan/today/entries/')) {
       return jsonResponse({ success: true, id: 1 })
@@ -115,9 +115,9 @@ describe('进页面就出清单', () => {
     expect(wrapper.text()).toContain('备货计划')
     expect(wrapper.text()).toContain('虾饺馅')
     expect(wrapper.text()).toContain('80份')
-    // 分两段：厨房做的 / 要买的
-    expect(wrapper.text()).toContain('厨房做的')
-    expect(wrapper.text()).toContain('要买的')
+    // 分两段：半成品 / 原料
+    expect(wrapper.text()).toContain('半成品')
+    expect(wrapper.text()).toContain('原料')
     expect(wrapper.find('.pp-empty').exists()).toBe(false)
   })
 
@@ -142,6 +142,55 @@ describe('进页面就出清单', () => {
 
     expect(wrapper.text()).toContain('虾饺馅')
     expect(wrapper.text()).toContain('未来 24 小时')
+  })
+})
+
+describe('档口与层级', () => {
+  const TWO_STATIONS = {
+    ...TODAY,
+    entries: [
+      TODAY.entries[0],
+      { ...TODAY.entries[1], id: 3, prep_item_id: 13, item_name: '蛋挞盖', station: 'xibing', kind: 'bought' },
+    ],
+  }
+
+  it('当前档口带 is-on（选中态），不是写了类名却没样式', async () => {
+    vi.stubGlobal(
+      'fetch',
+      probeFetch({
+        today: TWO_STATIONS,
+        stations: [
+          { id: 'shulong', name: '熟笼', color: '#111' },
+          { id: 'xibing', name: '西饼', color: '#222' },
+        ],
+      }),
+    )
+    const wrapper = await mountView()
+
+    const tabs = wrapper.findAll('.pp-mode')
+    expect(tabs.map((node) => node.text())).toEqual(['熟笼1', '西饼1'])
+    expect(tabs[0].classes()).toContain('is-on')
+    expect(tabs[0].attributes('aria-selected')).toBe('true')
+    expect(tabs[1].classes()).not.toContain('is-on')
+
+    await tabs[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.pp-mode')[1].classes()).toContain('is-on')
+    // 切档后清单跟着换：第二个档口的品才在页面上
+    expect(wrapper.find('.pp-rows').text()).toContain('蛋挞盖')
+    expect(wrapper.find('.pp-rows').text()).not.toContain('虾饺馅')
+  })
+
+  it('参考值为 0 的行降权（is-zero），不是和真要做的抢眼睛', async () => {
+    const withZero = {
+      ...TODAY,
+      entries: [{ ...TODAY.entries[0], final_qty: 0, suggested_qty: 0 }],
+    }
+    vi.stubGlobal('fetch', probeFetch({ today: withZero }))
+    const wrapper = await mountView()
+
+    expect(wrapper.find('.pp-row').classes()).toContain('is-zero')
+    expect(wrapper.find('.pp-qty-unit').text()).toBe('份')
   })
 })
 
@@ -210,6 +259,9 @@ describe('员工这一档', () => {
 
     expect(wrapper.text()).toContain('先选你在哪个档口')
     expect(wrapper.text()).not.toContain('虾饺馅')
+    // 还没选档口时清单是空的：别用「0 项」告诉他今天没活，别让复制清单去复制一张空单
+    expect(wrapper.get('.pp-title').text()).not.toContain('0')
+    expect(wrapper.get('.pp-copy').attributes('disabled')).toBeDefined()
   })
 
   it('选了档口之后才出清单', async () => {
@@ -223,6 +275,27 @@ describe('员工这一档', () => {
     const post = fetchMock.calls.find((call) => call.method === 'POST')
     expect(post.path).toContain('/api/prep-plan/staff-station')
     expect(JSON.parse(post.body)).toEqual({ station: 'shulong' })
+  })
+
+  it('员工端点整行（含数量那一块）都能展开近 7 天依据', async () => {
+    const picked = { ...TODAY, staff: true, staff_station: 'shulong', needs_station_pick: false }
+    vi.stubGlobal('fetch', probeFetch({ today: picked }))
+    const wrapper = await mountView()
+
+    // 员工端点数字（disabled 按钮，指针穿透）和点行空白都该落到同一个展开动作上
+    await wrapper.get('.pp-row').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pp-detail').exists()).toBe(true)
+    expect(wrapper.find('.pp-detail').text()).toContain('同星期几')
+  })
+
+  it('管理端点行空白不展开（点名称才展开，数量那一格是改数量）', async () => {
+    vi.stubGlobal('fetch', probeFetch())
+    const wrapper = await mountView()
+
+    await wrapper.get('.pp-row').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pp-detail').exists()).toBe(false)
   })
 
   it('员工没有「改归属」入口（那是管理端的事）', async () => {

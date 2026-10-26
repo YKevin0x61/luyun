@@ -65,16 +65,18 @@ SPARSE_FLOOR_DAYS = 7
 SPARSE_FLOOR_QTY = 1.0
 
 # 配方岗位 → 档口（沿用旧口径；半成品规则里 position 用的就是这一套名字）
+# 岗位 = 备货品「谁做的」，不是档口本身：多个岗位可以归到同一个档口
+# （熟笼/熟笼冻品/馅档/案板 都算熟笼档）。2026-10-26 用户裁定删掉三个不是岗位的名字：
+#   「明档」「熟笼冻品」「西饼凉菜」——它们是旧数据里的子分类写法，跟「明档1/明档2」
+#   重复或语义不清。存量数据由 `0038_normalize_positions.sql` 归并到近义岗位。
 POSITION_STATION_MAP = {
     "熟笼": "shulong",
-    "熟笼冻品": "shulong",
     "馅档": "shulong",
     "案板": "shulong",
     "西饼": "xibing",
-    "西饼凉菜": "xibing",
     "肠粉": "changfen",
-    "明档": "mingdang1",
     "明档1": "mingdang1",
+    "明档2": "mingdang2",
     "煎炸": "jianzha",
 }
 

@@ -15,6 +15,11 @@
 员工由 `WastageActor.sees_all` 带出去（API 层现读 `admin_caps`，服务层只认这个标记）。
 统计是另一道门：`_require_wastage_reader`（管理端或带那一项能力的员工）。
 
+**共用电脑上两套 cookie 都在时，员工页用 `?identity=staff` 显式声明**（管理端页声明
+`admin`）：后端那个「任一身份」门的默认优先级是管理端优先，不声明的话员工在员工页
+记的一笔会归到共用账号名下、明细还会拿到全店。声明只选凭据、不放宽校验（形状同 WS
+的 `identify_ws`），页面侧见 `WastageRegisterView.vue`；不带声明时优先级逐字不变。
+
 **照片上传与登记是两步**（同源项目：先 `uploadFile` 拿到 fileID 数组，提交时再带上）：
 `POST /images` 落盘并记一行元数据，返回 `capture_id`；提交记录时把它放进 `image_ids`。
 未绑定的图是孤儿行（`record_id IS NULL`），留着可查、可清。

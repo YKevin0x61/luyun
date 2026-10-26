@@ -65,7 +65,7 @@ async def get_rows(table_name: str, db): ...
 
 - `database.py` is now a thin (~130-line) facade: `DatabaseManager` is composed from mixins in `db_core/`, re-exporting the same public names (`DatabaseManager`, `get_db`, `CHINA_TZ`, `ALL_TABLES`, `ensure_beijing_datetime`) so callers are unaffected.
 - `db_core/` module layout:
-  - `database_connection.py` — `DatabaseConnection`: the **owner** of the business-DB connection — create / replace / close it, and answer "is it still usable?" (`connect` / `close` / `alive` / `table`). Holders (`TableView`, `RecipeStore`, the hygiene services) keep a reference to **this object**, and the object survives a reconnect in place (see `CONTEXT.md`「数据库连接 (Database Connection)」and `rebind()` below).
+  - `database_connection.py` — `DatabaseConnection`: the **owner** of the business-DB connection — create / replace / close it, and answer "is it still usable?" (`connect` / `close` / `alive` / `table`). Holders (`TableView`, `RecipeStore`, the hygiene services) keep a reference to **this object**, and the object survives a reconnect in place (see `GLOSSARY.md`「数据库连接 (Database Connection)」and `rebind()` below).
   - `connection.py` — `_ConnectionMixin`: the **facade** onto `DatabaseManager` — it holds one `DatabaseConnection`, exposes `is_connected` / `readable_tables` / connection stats, and creates the **global write lock** (`_write_lock`) inside `connect()` (the two services sharing it via owner would otherwise fall back to private locks and interleave implicit transactions). It no longer owns the connection lifecycle — that lives in `database_connection.py`. `connect()` still rejects any backend other than `postgres`; no DDL runs at startup.
   - `table_db.py` — `TableView`: per-table view sharing the one `PgConnection`; no startup column migrations (`migrate_orders_kds_columns` retired with SQLite).
   - `ports.py` — `OrdersPort` / `DishStationsPort` / `ReportsPort`; access via `db.orders` / `db.dish_stations` / `db.reports`.
@@ -91,7 +91,7 @@ async def get_rows(table_name: str, db): ...
   - Column management (`/api/admin/tables/{table}/columns`)
   - Sync unmapped dishes to orders (`/api/admin/sync-stations`)
   - Get unmapped dishes from orders (`/api/admin/unmapped-dishes`)
-- The rest of the route modules live in `api/`: `auth`, `hygiene`, `scheduling`, `analytics`, `prep_plan`, `recipes`, `release_update`, `db_migrations`, `backup`, `tables`, `wecom_push`, `logs`, `credentials`, `db_credentials`, `export_api`, `runtime_settings`, `security`, `report_dishes`, `semi_rules` — all registered with `app.include_router(...)` in `main.py`. (`api/scheduling.py` 与 `api/hygiene.py` 在**代码上互不 import**：排班不读卫生、卫生也不读排班，两边只共用公共层的员工身份与工作区名单，见 `CONTEXT.md` 的「固定工作区」。**界面上这两个模块从 2026-10-04 起是同一个子系统「工作台」**（排班 + 卫生合并，页内分人事 / 现场 / 后勤三组），页面同住 `/workbench/*` —— 旧的 `/scheduling*` 与 `/hygiene/*` 前缀已删除、不留别名。)
+- The rest of the route modules live in `api/`: `auth`, `hygiene`, `scheduling`, `analytics`, `prep_plan`, `recipes`, `release_update`, `db_migrations`, `backup`, `tables`, `wecom_push`, `logs`, `credentials`, `db_credentials`, `export_api`, `runtime_settings`, `security`, `report_dishes`, `semi_rules` — all registered with `app.include_router(...)` in `main.py`. (`api/scheduling.py` 与 `api/hygiene.py` 在**代码上互不 import**：排班不读卫生、卫生也不读排班，两边只共用公共层的员工身份与工作区名单，见 `GLOSSARY.md` 的「固定工作区」。**界面上这两个模块从 2026-10-04 起是同一个子系统「工作台」**（排班 + 卫生合并，页内分人事 / 现场 / 后勤三组），页面同住 `/workbench/*` —— 旧的 `/scheduling*` 与 `/hygiene/*` 前缀已删除、不留别名。)
 
 ### Scraper (`scraper/restaurant_scraper.py` + modules)
 
@@ -182,7 +182,7 @@ Single-machine, single-instance, **single uvicorn worker** deployment. **Two ext
 - **`GET /api/healthz`**（免鉴权、只读）返回 DB 状态与聚合磁盘水位，供探针使用；磁盘水位高**不**改状态码（重启容器腾不出空间）。进程内磁盘守护见 `services/disk_guard.py`，阈值由 `DISK_WARN_PCT` / `DISK_CRITICAL_PCT` 控制。
 - **schema 变更不随重启生效，也不随更新作业生效。** 应用按设计**不在启动期改结构**（结构变更要可追溯，见 `_connect_postgres` 的 docstring），`db_core/schema.py` 现在只剩表名清单。所以新增或改动表/索引，就要出 `migrations/pg/000N_*.sql`（**只做加成性变更**：加列带默认值 / 加索引 / 建新表）并**提交**——发行包按 `git archive HEAD` 打包，没提交的脚本不会进包。门店在 Admin「系统更新」→「数据库迁移」应用（`/api/db-migrations`），版本检测会把待应用条数显示在版本状态卡上。`0001` 带 `luyun:bootstrap-only` 标记（含 `DROP TABLE`），永远不进待应用清单。详见 `migrations/pg/README.md`。
 - **卫生端会话 id 只存哈希。** `hygiene_staff_sessions.session_id` 存的是 `sha256(cookie)`（`accounts.hash_session_id`），cookie 本身发原文——拿 cookie 原值直接查库永远查不到，必须走 `EmployeeAccounts.get_staff_session()`。**身份代码在公共层 `services/identity/accounts.py`**（员工花名册、登录、会话 cookie；排班和卫生共用），工作区名单的只读入口也在公共层（`services/identity/zones.py` 的 `ZoneDirectory`，表和页面都还是卫生的，排班只读它）；`services/hygiene/accounts.py` 的 `HygieneEmployeeAccounts` 继承它、只加上卫生的当日分工（班次 + 工作区），并把老名字 `EmployeeAccounts` 继续转发出来，所以 26 个既有导入方不用改。库表仍是 `hygiene_employees` / `hygiene_staff_sessions`，这次只搬代码不搬表。存量明文行由 `EmployeeAccounts.prepare()` 在启动期（`main.py`）**原地哈希化**，员工不需要重登；这一项**不改 schema**，不需要新的 `migrations/pg/000N`。额外还有 `SESSION_IDLE_HOURS`（默认 336 = 14 天，0 = 关闭）的闲置上限，靠每次请求节流刷新 `last_seen_at` 判定。
-- **写请求有跨站拦截。** `main.py` 的 `csrf_origin_guard` 中间件：带会话 cookie、且浏览器报 `Sec-Fetch-Site: cross-site` 的 POST/PUT/PATCH/DELETE 直接 403。判定**优先看 `Sec-Fetch-Site`**（不受反向代理改写 Host 影响），缺失才退回比较 `Origin` 与 `Host`，两者都缺放行。带 `Authorization` / `X-Admin-Token` 的调用和无 cookie 的调用不受影响，所以 TestClient 与 KDS 的 `?token=` 链路照常。
+- **写请求有跨站拦截。** `main.py` 的 `csrf_origin_guard` 中间件：带会话 cookie、且浏览器报 `Sec-Fetch-Site: cross-site` 的 POST/PUT/PATCH/DELETE 直接 403。判定**优先看 `Sec-Fetch-Site`**（不受反向代理改写 Host 影响），缺失才退回比较 `Origin` 与 `Host`，两者都缺放行。**自定义头不是通用豁免**：浏览器里的脚本也能带 `Authorization` / `X-Admin-Token`（跨站 fetch + CORS 预检），所以只在请求**没有** `Sec-Fetch-Site` 时（curl / 脚本 / KDS 那类非浏览器客户端）才认这两个头。无 cookie 的调用不受影响，TestClient 与 KDS 的 `?token=` 链路照常。
 - **`tests/conftest.py` 只保护 `pytest`。** `python -c`、REPL、临时验证脚本、没写隔离的 `scripts/` 脚本都会按 `.env` 的 `POSTGRES_DSN` 直接连库——本机 `.env` 指的是真库 `luyun`（审查期间真发生过一次误写）。做任何验证前先把 DSN 指到专用测试库（`POSTGRES_DSN=postgresql://localhost:5432/luyun_test`，**必须在 `from config import settings` 之前**，env 优先级高于 `.env`；库不存在就先跑一次 `pytest`，conftest 会建），测试内查库可参照 `tests/pg_probe.py`。要连生产库时只读、只 `SELECT`，并先打印 `settings.POSTGRES_DSN` 确认。
 
 ---
@@ -199,7 +199,7 @@ Uses the five canonical triage roles (`needs-triage`, `needs-info`, `ready-for-a
 
 ### Domain docs
 
-Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Single-context: one `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
 ### Repo layout
 

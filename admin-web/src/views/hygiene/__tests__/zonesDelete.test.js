@@ -10,12 +10,15 @@ const items = readFileSync(join(here, '../../../components/hygiene/HygieneZoneIt
 const home = readFileSync(join(here, '../HygieneHomeView.vue'), 'utf8')
 
 describe('admin can delete a zone or daily item with confirm', () => {
-  it('calls DELETE after a Chinese confirm and explains in-flight work goes away', () => {
+  it('calls DELETE after a Chinese confirm and says the whole history goes away', () => {
+    // 2026-10-26 用户裁定「对齐承诺」：删区/删检查项实际都是整区/整项清空（含已通过的
+    // 历史实拍与红黑榜事件），确认文案必须如实说明，不能再承诺"只删进行中"。
     expect(zones).toMatch(/ConfirmDialog/)
     expect(zones).toMatch(/删除卫生工作区/)
-    expect(zones).toMatch(/进行中的日常待办和未闭环整改单/)
+    expect(zones).toMatch(/全部日常记录（含已验收的历史照片与红黑榜事件）和全部整改单/)
+    expect(zones).toMatch(/全部日常记录（含历史照片）和全部整改单，删了不能恢复/)
     expect(items).toMatch(/删除日常检查项/)
-    expect(items).toMatch(/该项进行中的待办/)
+    expect(items).toMatch(/该项全部记录（含历史照片），删了不能恢复/)
     expect(zones).toMatch(/api\.delete\(`\/api\/hygiene\/admin\/zones\/\$\{zone\.id\}`\)/)
     expect(items).toMatch(/api\.delete\(`\/api\/hygiene\/admin\/items\/\$\{item\.id\}`\)/)
     expect(zones).toMatch(/aria-label="`删除卫生工作区 \$\{zone\.name\}`"/)

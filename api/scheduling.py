@@ -707,15 +707,26 @@ async def week(
 
 
 @router.get("/roster")
-async def roster(db=Depends(get_db), _: dict = Depends(_require_scheduler)) -> dict:
+async def roster(
+    db=Depends(get_db),
+    identity: dict = Depends(_require_scheduler),
+) -> dict:
     """全体花名册 + 每人当前那条规则 + 每人每班次的固定工作区（没配就是 `{}`）。
 
     名单面板会一起读固定工作区（票 03），所以缺 0006 时这里也要出 503 那句话 ——
     不然「已更新代码、还没应用迁移」这段窗口里，店长看到的是 500。
+
+    **手机号按调用方身份投影**：这条路由在 `_require_scheduler` 后面，员工会话 + `schedule`
+    能力也进得来，而手机号是同事的私人联系方式、不是排班需要的字段 —— 只有管理端会话
+    才拿到（员工端看自己的手机号走 `/me`，看同事的花名册走管理端 `/api/hygiene/admin/roster`，
+    见 `docs/adr/0098`）。投影在服务层（`roster_with_rules(include_phone=…)`），
+    fail-closed 默认不给。
     """
     store = SchedulingStore(db)
     try:
-        data = await store.roster_with_rules()
+        data = await store.roster_with_rules(
+            include_phone=identity.get("kind") == "admin"
+        )
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
     # 周期能写多少天由服务层的常量说了算：规则编辑页照这个数校验，别在前端再写死一份。

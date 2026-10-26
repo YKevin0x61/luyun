@@ -1310,6 +1310,9 @@ SPA_PAGE_ROUTES = (
     "/workbench/kitchen/prep-plan",
     # 备货复盘（ADR 0123）：每小时参考值快照 vs 实际销量，管理端只读。
     "/workbench/kitchen/prep-review",
+    # 备货品换算规则（2026-10-26）：换成从销售报表搬进后勤组的一页；漏这一条就是
+    # 直连 uvicorn 硬导航 404（`tests/test_spa_page_routes.py` 双向盯住）。
+    "/workbench/kitchen/prep-rules",
     # 日常损耗登记（从 worktool2 那个小程序搬过来）：分析与明细在后勤组
     # （`/workbench/kitchen/loss`）：管理端会话直接进，开了「损耗分析」能力的员工会话也进
     # （2026-10-14，页面清单里的 `staffCap: wastage`）；员工端的登记页在「我的」组

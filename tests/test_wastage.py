@@ -580,6 +580,164 @@ def test_admin_reads_statistics_and_sees_every_record(wastage_http):
     assert listed.json()["total"] == 1
 
 
+# ── 共用电脑的两套 cookie：页面用 `?identity=` 声明「此刻按谁看」（Slice A 修复）──
+#
+# `/workbench/staff/loss` 的落点身份是 `both`（员工与店长都能进同一页）。两套 cookie
+# 都在时后端默认「管理端优先」（与 CSRF / WS 那几处一致），于是员工页会把员工记的账
+# 归属成管理端、明细还能看到全店。页面按工作台身份给请求加 `?identity=staff|admin`：
+# 声明**只选凭据、不给身份**（fail-closed），不带声明时优先级逐字不变。
+
+
+def _employee_session(accounts, phone=PHONE):
+    return _run(accounts.login(phone, PASSWORD))["session_id"]
+
+
+def _dual_cookie(client, accounts, phone=PHONE):
+    """共用电脑：管理端会话还在，员工又登了自己的会话（两套 cookie 都在）。"""
+    _admin_cookie(client)
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, _employee_session(accounts, phone))
+
+
+def _record_body(item="青菜", qty=1.5):
+    return {
+        "item_name": item,
+        "quantity": qty,
+        "unit": "kg",
+        "reason": "expired",
+        "wastage_date": TODAY,
+    }
+
+
+def test_dual_cookie_without_declaration_keeps_admin_first(wastage_http):
+    """不带声明的调用优先级逐字不变：两套 cookie 都在时仍然是管理端（opt-in 的声明）。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _dual_cookie(client, accounts)
+
+    created = client.post("/api/wastage/records", json=_record_body())
+    assert created.status_code == 200, created.text
+    record = created.json()["record"]
+    assert record["operator_kind"] == "admin"
+    assert record["employee_id"] is None
+
+
+def test_dual_cookie_staff_declaration_attributes_the_record_to_the_employee(wastage_http):
+    """员工页声明 `?identity=staff` 后，写按员工归属（不是共用账号的管理端）。"""
+    client, _db, accounts = wastage_http
+    employee_id = _employee_id(accounts)
+    _dual_cookie(client, accounts)
+
+    created = client.post(
+        "/api/wastage/records", params={"identity": "staff"}, json=_record_body()
+    )
+    assert created.status_code == 200, created.text
+    record = created.json()["record"]
+    assert record["operator_kind"] == "staff"
+    assert record["employee_id"] == employee_id
+
+
+def test_dual_cookie_staff_declaration_sees_only_his_own_records(wastage_http):
+    """员工页声明后，明细只有自己记的那几笔 —— 看不到同事记的（含照片与「谁记的」）。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _employee_id(accounts, PHONE2, NAME2)
+
+    # 同事先用他自己的员工会话记一笔。
+    _staff_cookie(client, accounts, PHONE2)
+    other = client.post("/api/wastage/records", json=_record_body(item="豆腐", qty=2))
+    assert other.status_code == 200, other.text
+    other_record = other.json()["record"]
+
+    # 共用电脑：管理端 cookie + 本人员工 cookie，打开员工那一页并声明身份。
+    _dual_cookie(client, accounts)
+    listed = client.get("/api/wastage/records", params={"identity": "staff"})
+    assert listed.status_code == 200, listed.text
+    assert [row["id"] for row in listed.json()["records"]] == []
+    assert listed.json()["total"] == 0
+
+    # 本人员工记一笔：明细里只有自己的。
+    own = client.post(
+        "/api/wastage/records", params={"identity": "staff"}, json=_record_body()
+    )
+    listed = client.get("/api/wastage/records", params={"identity": "staff"})
+    assert [row["id"] for row in listed.json()["records"]] == [own.json()["record"]["id"]]
+    assert other_record["id"] not in [row["id"] for row in listed.json()["records"]]
+
+
+def test_dual_cookie_admin_declaration_keeps_the_shop_wide_view(wastage_http):
+    """店长用同一页时声明 `?identity=admin`：统计与全店明细照旧。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _dual_cookie(client, accounts)
+
+    own = client.post(
+        "/api/wastage/records", params={"identity": "staff"}, json=_record_body()
+    )
+    assert own.status_code == 200, own.text
+
+    listed = client.get("/api/wastage/records", params={"identity": "admin"})
+    assert listed.status_code == 200, listed.text
+    assert [row["id"] for row in listed.json()["records"]] == [own.json()["record"]["id"]]
+    stats = client.get(
+        "/api/wastage/statistics", params={"month": "2026-09", "identity": "admin"}
+    )
+    assert stats.status_code == 200, stats.text
+    assert stats.json()["total_count"] == 1
+
+
+def test_dual_cookie_image_upload_honours_the_declaration(wastage_http):
+    """照片上传也要声明：双 cookie 下 `?identity=staff` 传的图属于员工，另一位员工读不到。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _employee_id(accounts, PHONE2, NAME2)
+    _dual_cookie(client, accounts)
+
+    upload = client.post(
+        "/api/wastage/images",
+        params={"identity": "staff"},
+        files={"file": ("shot.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+    assert upload.status_code == 200, upload.text
+    capture_id = upload.json()["image"]["capture_id"]
+
+    # 同一个请求身份能读；换成另一位员工（不带声明，只有他自己的 cookie）读不到。
+    assert (
+        client.get(f"/api/wastage/images/{capture_id}", params={"identity": "staff"})
+        .status_code
+        == 200
+    )
+    _staff_cookie(client, accounts, PHONE2)
+    assert client.get(f"/api/wastage/images/{capture_id}").status_code == 404
+
+
+def test_declared_identity_must_match_the_credential(wastage_http):
+    """声明只选凭据、不给身份：那一支验不过就是 401，不回落到另一支（fail-closed）。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+
+    # 只有管理端 cookie，却声明 staff。
+    _admin_cookie(client)
+    assert (
+        client.get("/api/wastage/records", params={"identity": "staff"}).status_code
+        == 401
+    )
+
+    # 只有员工 cookie，却声明 admin。
+    _staff_cookie(client, accounts)
+    assert (
+        client.get("/api/wastage/records", params={"identity": "admin"}).status_code
+        == 401
+    )
+
+    # 认不出的声明也拒绝，不静默退回默认优先级。
+    _dual_cookie(client, accounts)
+    for value in ("wibble", ""):
+        response = client.get("/api/wastage/records", params={"identity": value})
+        assert response.status_code == 401, (value, response.text)
+    # 不带声明照旧可用（双 cookie 时走管理端）。
+    assert client.get("/api/wastage/records").status_code == 200
+
+
 def test_images_upload_bind_and_read(wastage_http):
     """照片走真实的 HTTP 链路：传 → 提交时带上 → 自己读得到、别人读不到。"""
     client, _db, accounts = wastage_http

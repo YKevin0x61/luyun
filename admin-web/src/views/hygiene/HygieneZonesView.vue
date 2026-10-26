@@ -284,7 +284,7 @@ async function confirmDeleteZone() {
       <p class="wbx-sub">维护各卫生工作区的日常检查项和当前标准图。</p>
       <details class="rule-help">
         <summary>规则说明</summary>
-        <p>卫生工作区与档口、配方岗位相互独立。每个工作区可选白班、夜班或只跑其中一个班次；没有当前标准图的检查项不会出现在员工端；更换标准图后，新检查使用新图。删除工作区或检查项会同时删除进行中的待办和该区未闭环整改单。</p>
+        <p>卫生工作区与档口、配方岗位相互独立。每个工作区可选白班、夜班或只跑其中一个班次；没有当前标准图的检查项不会出现在员工端；更换标准图后，新检查使用新图。删除工作区会同时删除该区全部日常记录（含已验收的历史照片与红黑榜事件）和全部整改单；删除检查项会删除该检查项的全部记录（含历史照片与红黑榜事件）。这两项操作都不可恢复。</p>
       </details>
     </header>
 
@@ -410,7 +410,7 @@ async function confirmDeleteZone() {
     <ConfirmDialog
       v-if="deleteZoneTarget"
       title="删除卫生工作区"
-      :message="`删除「${deleteZoneTarget.name}」会同时删除该区进行中的日常待办和未闭环整改单。`"
+      :message="`删除「${deleteZoneTarget.name}」会同时删除该区全部日常记录（含历史照片）和全部整改单，删了不能恢复。`"
       confirm-label="删除"
       danger
       @confirm="confirmDeleteZone"

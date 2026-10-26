@@ -146,7 +146,7 @@ onMounted(load)
 .pr-kicker {
   margin: 0;
   font-size: 12px;
-  color: var(--ink-3, #6b6560);
+  color: var(--ink-dim);
 }
 
 .pr-title {
@@ -159,12 +159,12 @@ onMounted(load)
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: var(--ink-3, #6b6560);
+  color: var(--ink-dim);
 }
 
 .pr-date input {
   padding: 4px 8px;
-  border: 1px solid var(--line, #e5e0d8);
+  border: 1px solid var(--line);
   border-radius: 6px;
   font: inherit;
 }
@@ -174,11 +174,11 @@ onMounted(load)
 .pr-error {
   margin: 0;
   font-size: 13px;
-  color: var(--ink-3, #6b6560);
+  color: var(--ink-dim);
 }
 
 .pr-error {
-  color: var(--danger, #b3261e);
+  color: var(--danger-bright);
 }
 
 .pr-table {
@@ -191,14 +191,14 @@ onMounted(load)
   text-align: left;
   font-weight: 600;
   font-size: 12px;
-  color: var(--ink-3, #6b6560);
-  border-bottom: 1px solid var(--line, #e5e0d8);
+  color: var(--ink-dim);
+  border-bottom: 1px solid var(--line);
   padding: 8px 10px;
   white-space: nowrap;
 }
 
 .pr-table td {
-  border-bottom: 1px solid var(--line-soft, #efeae2);
+  border-bottom: 1px solid var(--line);
   padding: 8px 10px;
 }
 
@@ -210,20 +210,20 @@ onMounted(load)
 .pr-unit {
   margin-left: 4px;
   font-size: 11px;
-  color: var(--ink-3, #6b6560);
+  color: var(--ink-dim);
 }
 
 .pr-warn {
   margin-left: 8px;
   font-size: 11px;
-  color: var(--warn, #b45309);
+  color: var(--warn);
 }
 
 .pr-up {
-  color: var(--danger, #b3261e);
+  color: var(--danger-bright);
 }
 
 .pr-down {
-  color: var(--good, #15803d);
+  color: var(--ok);
 }
 </style>

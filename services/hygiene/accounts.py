@@ -127,7 +127,7 @@ class HygieneEmployeeAccounts(_EmployeeIdentity):
         zone_name = duty.get("zone_name")
         if zone_id is not None and zone_name is None:
             # 那个区被删了：排班那张表的 `zone_id` 没有外键，也不追着卫生的删区动作改历史
-            # （CONTEXT.md 的「固定工作区」那条），所以这里按**没配区**渲染 —— 跟排班页
+            # （GLOSSARY.md 的「固定工作区」那条），所以这里按**没配区**渲染 —— 跟排班页
             # 同一个口径。不回一个已经不存在、页面又翻译不出名字的 id。
             zone_id = None
         return self._assignment(

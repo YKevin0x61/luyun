@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""业务库连接的所有者（CONTEXT.md「数据库连接 (Database Connection)」）。
+"""业务库连接的所有者（GLOSSARY.md「数据库连接 (Database Connection)」）。
 
 进程内**唯一**拥有业务库连接的东西：建立、替换、关闭，以及回答「现在这条连接
 还能用吗」。持有者（``TableView`` / ``RecipeStore`` / 卫生的三个 service）拿到的

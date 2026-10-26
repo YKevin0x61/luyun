@@ -148,7 +148,7 @@ async function confirmDeleteItem() {
     <ConfirmDialog
       v-if="deleteItemTarget"
       title="删除日常检查项"
-      :message="`删除「${deleteItemTarget.name}」会同时删除该项进行中的待办。`"
+      :message="`删除「${deleteItemTarget.name}」会同时删除该项全部记录（含历史照片），删了不能恢复。`"
       confirm-label="删除"
       danger
       @confirm="confirmDeleteItem"

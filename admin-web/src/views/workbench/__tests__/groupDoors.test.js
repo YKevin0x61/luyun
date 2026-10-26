@@ -8,7 +8,8 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenchCopy.js'
 import { HYGIENE_ADMIN_NAV } from '../../../utils/hygieneCopy.js'
-import { PREP_PLAN_PATH } from '../../../utils/prepPlanPaths.js'
+import { PREP_PLAN_PATH, PREP_REVIEW_PATH } from '../../../utils/prepPlanPaths.js'
+import { PREP_RULES_PATH } from '../../../utils/prepRulePaths.js'
 import { RECIPE_HOME_PATH } from '../../../utils/recipePaths.js'
 import { WASTAGE_ANALYSIS_PATH } from '../../../utils/wastagePaths.js'
 import { workbenchPagesOf } from '../../../utils/workbenchNav.js'
@@ -139,10 +140,10 @@ describe('人事壳（工作台级导航 + 本组四页）', () => {
     const hrefs = wrapper.findAll('.wb-nav-item').map((item) => item.attributes('href'))
     // 身份过滤照旧按**落点那一页**的 `audience` 走：店长这一档没有「我的」那一格
     // （员工三页是 `staff`），与 `WorkbenchLayout` 里的判定同一份代码。
-    // 后勤那一格三条：配方 / 备货计划（`both`）+ 损耗分析（只给管理端）。
+    // 后勤那一格四条：配方 / 备货计划（`both`）+ 备货复盘 / 损耗分析（只给管理端）。
     expect(hrefs).toEqual([
       WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
-      RECIPE_HOME_PATH, PREP_PLAN_PATH, WASTAGE_ANALYSIS_PATH,
+      RECIPE_HOME_PATH, PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, WASTAGE_ANALYSIS_PATH,
     ])
     expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
     // ③-2：组内页挪到左 rail（统一壳一处渲染），它自己的条数 = 本组可见页数。
@@ -239,7 +240,7 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
     // （员工三页是 `staff`），与 `WorkbenchLayout` 里的判定同一份代码。
     expect(hrefs).toEqual([
       WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
-      RECIPE_HOME_PATH, PREP_PLAN_PATH, WASTAGE_ANALYSIS_PATH,
+      RECIPE_HOME_PATH, PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, WASTAGE_ANALYSIS_PATH,
     ])
     expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
     // rail 自己的名字跟着组名走：工作台 · 现场（2026-10-19 信息架构重排第二层：

@@ -24,6 +24,7 @@
 import { PAGE_ROUTES, pageMeta, pageRow } from '../router/pageRoutes.js'
 import { hasCap } from './adminCaps.js'
 import { PREP_PLAN_PATH, PREP_REVIEW_PATH } from './prepPlanPaths.js'
+import { PREP_RULES_PATH } from './prepRulePaths.js'
 import { RECIPE_HOME_PATH, RECIPE_MANAGE_PATH, RECIPE_QR_PATH } from './recipePaths.js'
 import { WASTAGE_ANALYSIS_PATH } from './wastagePaths.js'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_TITLE } from './workbenchCopy.js'
@@ -58,6 +59,9 @@ const KITCHEN_GROUP = {
     // 备货复盘（ADR 0123）：每小时参考值快照 vs 实际销量，改公式前先看它。
     // 员工那一档看不到它（清单里 `audience: admin`）。
     { to: PREP_REVIEW_PATH },
+    // 备货品换算规则（2026-10-26）：系数错了就在这一页改 —— 之前只能跳到数据管理
+    // 那张裸表里找行改。
+    { to: PREP_RULES_PATH },
     // 损耗分析（从 worktool2 那个小程序搬过来）：店长按月看「这个月损耗了多少、什么
     // 原因最多、哪几样最费」，是天天会看的数，不是配置页 —— 所以给它一扇直达的门。
     // 员工那一档看不到它（清单里 `audience: admin`）。
@@ -69,7 +73,7 @@ const KITCHEN_GROUP = {
   // 派生出来是六项）。名单里只写路径，标题仍从清单取。
   pages: [
     RECIPE_HOME_PATH, RECIPE_QR_PATH, RECIPE_MANAGE_PATH,
-    PREP_PLAN_PATH, PREP_REVIEW_PATH, WASTAGE_ANALYSIS_PATH,
+    PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, WASTAGE_ANALYSIS_PATH,
   ],
 }
 

@@ -11,7 +11,7 @@ import StationShareChart from '../components/salesreport/StationShareChart.vue'
 import TimePeriodCards from '../components/salesreport/TimePeriodCards.vue'
 import DishSalesTable from '../components/salesreport/DishSalesTable.vue'
 import SemiFinishedTable from '../components/salesreport/SemiFinishedTable.vue'
-import RulesTab from '../components/salesreport/RulesTab.vue'
+import RulesReadonlyTable from '../components/salesreport/RulesReadonlyTable.vue'
 import TextExportModal from '../components/salesreport/TextExportModal.vue'
 import WecomPushModal from '../components/salesreport/WecomPushModal.vue'
 import RefundModal from '../components/salesreport/RefundModal.vue'
@@ -195,7 +195,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <RulesTab v-else />
+    <RulesReadonlyTable v-else />
 
     <TextExportModal
       v-if="modal === 'text-export'"

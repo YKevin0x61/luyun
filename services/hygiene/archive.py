@@ -307,7 +307,7 @@ class HygieneDataArchive:
     async def _attach_submitters(self, rows: list[dict]) -> None:
         """补上提交人姓名。
 
-        水印优先显示姓名（CONTEXT「员工」），台账里也得是人名——六张业务表各自只存
+        水印优先显示姓名（GLOSSARY「员工」），台账里也得是人名——六张业务表各自只存
         id 与手机号，姓名只在花名册里，所以批量查一次再回填，避免逐条查。
         """
         ids = sorted(

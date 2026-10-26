@@ -1992,11 +1992,26 @@ async def staff_daily_work(
     # 和 `staff_list_fix` 同一个坑：`list_daily_work` 会抛 `HygieneWorkError`（`?review=1`
     # 时普通员工撞的就是 `forbidden`），不过一遍 `_work_http_error` 就是 500 而不是 403。
     try:
-        return {
+        payload: Dict[str, Any] = {
             "items": await work.list_daily_work(
                 _staff_actor(staff["employee"]), pending_review_only=pending_review_only
             )
         }
+        if pending_review_only:
+            # 隔夜验收（2026-10-18）：与 `/admin/daily-queue` 同一块口径。员工账号上的
+            # 「管理员」补验昨晚的照片，得先看得见它 —— `items` 仍只回今天待验收
+            # （形状不变），过去营业日里还没验的单独给 `pending_past`。
+            today = work.business_date()
+            payload["pending_past"] = [
+                row
+                for row in await work.list_pending_daily(
+                    _staff_actor(staff["employee"]),
+                    days=DAILY_BACKFILL_DAYS + 1,
+                    pending_review_only=True,
+                )
+                if row.get("business_date") != today
+            ]
+        return payload
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
 
@@ -2034,7 +2049,12 @@ async def staff_accept_daily(
 ) -> Dict[str, Any]:
     try:
         accepted = await work.accept_daily(
-            _staff_actor(staff["employee"]), item_id, body.shift
+            _staff_actor(staff["employee"]),
+            item_id,
+            body.shift,
+            # 隔夜补验：与 admin 入口同一口径（不传就是今天）。收下不传的话，补验请求
+            # 会被静默忽略 —— 若同一项今天也有一张待验收，验掉的会是**今天**那张。
+            business_date=_optional_business_date(body.business_date),
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
@@ -2052,7 +2072,12 @@ async def staff_reject_daily(
 ) -> Dict[str, Any]:
     try:
         rejected = await work.reject_daily(
-            _staff_actor(staff["employee"]), item_id, body.shift, reason=_require_reject_reason(body.reason)
+            _staff_actor(staff["employee"]),
+            item_id,
+            body.shift,
+            reason=_require_reject_reason(body.reason),
+            # 同上：补验（驳回）也要落到请求指定的营业日，而不是今天的实例。
+            business_date=_optional_business_date(body.business_date),
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc

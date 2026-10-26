@@ -3,7 +3,7 @@
 """常驻后台 task 的数目必须可核对，文档口径必须与代码一致（PERF-06）。
 
 缺陷背景（`.scratch/project-review-2026-09-22` PERF-06）：文档（`deploy/luyun.service`、
-`deploy/README.md`、`CONTEXT.md`）把「7 个常驻后台循环」当成"必须单 worker"的论据，而
+`deploy/README.md`、`GLOSSARY.md`）把「7 个常驻后台循环」当成"必须单 worker"的论据，而
 lifespan 实际起的常驻 task 还要加上内存监控 / 内存清理 / 磁盘守护 / realtime Redis 订阅 /
 日志落库消费者。数字失真的后果是判断依据失真：真要解除单 worker 时按"7 个"评估会漏掉
 三分之一。
@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # 文档里必须与代码一致的三处（PERF-06 的验收面）。
 DOC_FILES = (
     REPO_ROOT / "AGENTS.md",
-    REPO_ROOT / "CONTEXT.md",
+    REPO_ROOT / "GLOSSARY.md",
     REPO_ROOT / "deploy" / "luyun.service",
     REPO_ROOT / "deploy" / "README.md",
     REPO_ROOT / "deploy" / "docker-compose.yml",

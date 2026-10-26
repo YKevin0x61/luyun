@@ -1118,9 +1118,9 @@ def test_override_errors_are_readable_400s(scheduling_http):
 
 
 def test_single_day_override_refuses_an_approved_leave(scheduling_http):
-    """那天有已批的假：PUT 单日覆盖整笔 400（与批量端点的 `leave_approved` 同判据）。
+    """那天有已批的假：PUT 单日覆盖 / DELETE 撤销都整笔 400（与批量端点的 `leave_approved` 同判据）。
 
-    请假批下来就是那条覆盖记录；改班 / 改成休都会把它换掉，所以两种都拒 ——
+    请假批下来就是那条覆盖记录；改班 / 改成休 / 把它删掉都会把那条假换掉，所以三种都拒 ——
     先撤掉假再改。
     """
     client, db, accounts = scheduling_http
@@ -1135,6 +1135,11 @@ def test_single_day_override_refuses_an_approved_leave(scheduling_http):
         response = client.put(base, json=payload)
         assert response.status_code == 400, (payload, response.text)
         assert response.json()["detail"] == "这天有已批准的假：先撤掉假再改班"
+
+    # 撤销也过同一道闸：删覆盖记录同样等于把那条假抹掉（单格清除以前漏了这条判据）。
+    undo = client.delete(base)
+    assert undo.status_code == 400, undo.text
+    assert undo.json()["detail"] == "这天有已批准的假：先撤掉假再改班"
 
     # 那天仍是批过的假：整笔请求什么都没写。
     day = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
@@ -1316,19 +1321,21 @@ def test_batch_skips_what_it_cannot_paint_and_names_every_reason(scheduling_http
     ) == (ids["夜班"], True)
 
     # 同一片换成 clear：2026-10-18 起过去的日子也能清（放开 ADR 0108 决策 6），
-    # 只剩可补记窗口这一条下界 —— 两格都在窗口内，整片写完、一格不跳。
+    # 只剩可补记窗口这一条下界。两格都在窗口内，但**只有 9/25 那格真被处理了** ——
+    # 它上面才刚写了夜班覆盖。9/10 那格既没有覆盖、也从没铺过（展开只往今天以后补，
+    # 过去的日子不回头），「清除」对它是 no-op：不计 applied，也不进 skipped（它不是
+    # 「刷不了」，是没有东西可清，更不该顺手补一行上班）。
     cleared = _batch(
         client,
         "clear",
         [
-            {"employee_id": employee_id, "business_date": "2026-09-10"},  # 14 天前
+            {"employee_id": employee_id, "business_date": "2026-09-10"},  # 14 天前，从没铺过
             {"employee_id": employee_id, "business_date": "2026-09-25"},
         ],
     )
 
     assert cleared.status_code == 200, cleared.text
-    assert cleared.json()["applied"] == 2
-    assert cleared.json()["skipped"] == []
+    assert (cleared.json()["applied"], cleared.json()["skipped"]) == (1, [])
     after = [
         item
         for item in client.get(
@@ -1338,6 +1345,8 @@ def test_batch_skips_what_it_cannot_paint_and_names_every_reason(scheduling_http
     ][0]
     # 9/25 的夜班覆盖被摘掉、按规则重算（这条规则是白班），青点也没了。
     assert after["cells"]["2026-09-25"]["overridden"] is False
+    # 9/10 没有被这次「清除」补写出一行上班（清除不是补记；补记走 set_override）。
+    assert client.get("/api/scheduling/day", params={"date": "2026-09-10"}).json()["total"] == 0
 
 
 def test_batch_reminds_about_pending_requests_but_still_paints(scheduling_http):
@@ -2641,7 +2650,8 @@ def test_staff_with_schedule_cap_can_manage_the_whole_shop(scheduling_http, monk
     判据只在 `admin_caps` 那一列、每次请求现读：勾上就当场生效，收回就当场 403。
     **`roster`（花名册）是另一个键**：能改排班不等于能看花名册（身份证号与底薪不下发
     员工端，见 `docs/adr/0098`），但排班这一面本身要读 `/roster` 那份「人 + 规则」名单
-    —— 那一份只带姓名 / 手机号 / 职位 / 规则，与档口的隐私无关。
+    —— 那一份只带姓名 / 职位 / 状态 / 规则；手机号按调用方身份投影，员工会话拿不到
+    （见 `test_schedule_cap_does_not_leak_colleagues_phone_numbers`）。
     """
     client, _db, accounts = scheduling_http
     employee_id = _employee_id(accounts)
@@ -2683,3 +2693,39 @@ def test_staff_with_schedule_cap_can_manage_the_whole_shop(scheduling_http, monk
     assert client.put(
         f"/api/scheduling/rules/{employee_id}", json={"cycle": [day_id]}
     ).status_code == 403
+
+
+def test_schedule_cap_does_not_leak_colleagues_phone_numbers(scheduling_http, monkeypatch):
+    """「排班管理」能力拿到的是排班需要的名单，**不是全店同事的手机号**。
+
+    `GET /api/scheduling/roster` 挂在 `_require_scheduler` 后面，而 2026-10-14 起
+    「员工会话 + `schedule`」也进得来 —— 手机号是同事的私人联系方式、排班用不到，
+    与 `GET /api/scheduling/me/colleagues`「不给手机号」同一口径（`docs/adr/0098`）。
+    管理端花名册页读的是 `/api/hygiene/admin/roster`（那份照旧带手机号），所以投影在
+    这条读口上按调用方身份分两档，管理端会话不受影响 —— 这一条把两档都钉住。
+    """
+    client, _db, accounts = scheduling_http
+    admin_session = _admin_cookie(client)  # 夹具已经用管理端账号登录过
+    employee_id = _employee_id(accounts)  # 张三
+    colleague = _employee_id(accounts, "13800138001", "李四")
+    _wire_staff_accounts(monkeypatch, accounts)
+
+    # 没勾能力：这扇门关着（403 —— 会话在、权限不在）。
+    _staff_cookie(client, accounts)
+    assert client.get("/api/scheduling/roster").status_code == 403
+
+    _run(accounts.set_admin_caps(employee_id, ["schedule"]))
+    _staff_cookie(client, accounts)
+    resp = client.get("/api/scheduling/roster")
+    assert resp.status_code == 200, resp.text
+    employees = {row["id"]: row for row in resp.json()["employees"]}
+    # 名单本身读得到（要排班），只是不带手机号。
+    assert set(employees) == {employee_id, colleague}
+    assert all(row.get("name") for row in employees.values())
+    assert [row for row in employees.values() if "phone" in row] == []
+
+    # 管理端会话读同一个端点：照旧带手机号（月历面板拿它当姓名缺失时的兜底显示）。
+    _as_manager(client, admin_session)
+    admin_resp = client.get("/api/scheduling/roster")
+    assert admin_resp.status_code == 200, admin_resp.text
+    assert all(row.get("phone") for row in admin_resp.json()["employees"])

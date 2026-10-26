@@ -1042,6 +1042,57 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             [row["has_rule"] for row in grid["employees"]], [True, True]
         )
 
+    async def test_a_disabled_employee_leaves_every_read_side_at_once(self):
+        """离职的人不该再算「上班」：月历人数、当日名单、员工看到的全店人数同一口径。
+
+        停用只改花名册（`EmployeeAccounts.disable` 不删 `staff_assignments` 的行），
+        90 天窗口里李四的行照旧躺着；`week_grid` 一直按名单筛人，月历 / 当日名单 /
+        `my_month.staff_count` 以前直接数行 —— 于是同一天店长在月历上看到 2 人在上班，
+        而实际在职只有张三，员工手机上也能看到「已离职的同事明天上班」。
+        """
+        stay = await self._employee()
+        gone = await self._employee("13800138001", "李四")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(stay["id"], [day])
+        await self.store.set_rule(gone["id"], [day])
+        await self.store.expand()
+
+        await self.accounts.disable(gone["id"])
+
+        calendar = await self.store.month_calendar("2026-09")
+        cell = [item for item in calendar["days"] if item["business_date"] == TODAY][0]
+        self.assertEqual((cell["total"], cell["counts"][str(day)]), (1, 1))
+
+        detail = await self.store.day_detail(TODAY)
+        self.assertEqual(detail["total"], 1)
+        self.assertEqual(
+            [person["id"] for group in detail["groups"] for person in group["people"]],
+            [stay["id"]],
+        )
+        # 员工端那份名单（`my_day` 直读 `day_detail`）里也没有离职的人。
+        mine = await self.store.my_day(TODAY)
+        self.assertEqual(
+            [person["id"] for group in mine["groups"] for person in group["people"]],
+            [stay["id"]],
+        )
+        # 员工月历格子上的「全店上班人数」跟店长月历是同一个数。
+        self.assertEqual(
+            [
+                item["staff_count"]
+                for item in (await self.store.my_month(stay["id"]))["days"]
+                if item["business_date"] == TODAY
+            ],
+            [1],
+        )
+        # 停用不清行：重新启用之后他立刻回到名单与人数里（历史行一直还在）。
+        await self.accounts.enable(gone["id"])
+        self.assertEqual((await self.store.day_detail(TODAY))["total"], 2)
+        after_cells = {
+            item["business_date"]: item
+            for item in (await self.store.month_calendar("2026-09"))["days"]
+        }
+        self.assertEqual(after_cells[TODAY]["total"], 2)
+
     # ── 票 03：每人每班次一个固定工作区 ────────────────────────────────
 
     async def test_zone_default_is_written_into_new_rows(self):
@@ -1742,6 +1793,54 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             await self.store.clear_override(employee["id"], "2026-08-01")
         self.assertEqual(past.exception.code, "past_day")
 
+    async def test_clearing_a_day_that_was_never_scheduled_writes_nothing(self):
+        """「清除班次」不是补记：既没覆盖、也没结果行的过去日子上必须 no-op。
+
+        过去的日子只在它当年是「今天」时才被铺过，所以 9/1 本来没有行。旧实现是
+        「摘覆盖 + 按现在的规则重算」，对那种日子会**补写一行上班** —— 考勤表把那一天
+        从「待补」算成「上班」，月历格子凭空冒出一个人，`source='rule'` 还看不出这是
+        被一次「清除」造出来的。单格与批量两条路都要守住（批量回执也不能把这种格子
+        算成「已清 N 格」）。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.expand()
+        self.assertEqual(
+            [
+                row["business_date"]
+                for row in await self._rows(employee["id"])
+                if row["business_date"] < TODAY
+            ],
+            [],
+        )
+
+        batch = await self.store.set_overrides_batch(
+            "clear", items=[{"employee_id": employee["id"], "business_date": "2026-09-01"}]
+        )
+        self.assertEqual(
+            (batch["applied"], batch["skipped"], batch["employee_ids"]), (0, [], [])
+        )
+
+        # 单格那条路一样：什么都不写。
+        await self.store.clear_override(employee["id"], "2026-09-02")
+
+        detail = await self.store.day_detail("2026-09-01")
+        self.assertEqual((detail["total"], detail["off_count"]), (0, 0))
+        self.assertEqual(
+            [
+                row["business_date"]
+                for row in await self._rows(employee["id"])
+                if row["business_date"] < TODAY
+            ],
+            [],
+        )
+        self.assertEqual(await self._overrides(), [])
+
+        # 对照：真补记走明示的那条路（`set_override`）—— 过去的日子照样能改。
+        await self.store.set_override(employee["id"], "2026-09-01", shift_id=day)
+        self.assertEqual((await self.store.day_detail("2026-09-01"))["total"], 1)
+
     async def test_rule_change_does_not_wipe_an_overridden_day(self):
         """验收 6：改规则时已被覆盖的那天不被冲掉（一个字都不动，含 `updated_at`）。"""
         employee = await self._employee()
@@ -1873,6 +1972,39 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         # 闸只挡那一天：别的日子照常能改。
         saved = await self.store.set_override(employee["id"], "2026-09-26", shift_id=night)
         self.assertEqual(saved["shift_id"], night)
+
+    async def test_clearing_a_single_cell_refuses_an_approved_leave(self):
+        """单格「撤销覆盖」不许抹掉已批的假：与批量清除 `leave_approved` 同一处判据。
+
+        覆盖记录 `kind=leave` 就是那条被批准的假，删了它那天会按规则重写成上班，而
+        `scheduling_requests` 里那条申请仍是 `approved` —— 审批记录与排班事实互相矛盾。
+        批量清除一直返回 `skipped: leave_approved`，单格这条以前没有这道闸。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+        request = await self.store.submit_leave(employee["id"], "2026-09-25")
+        await self.store.approve_request(request["id"])
+        before_detail = await self.store.day_detail("2026-09-25")
+        before_overrides = await self._overrides()
+
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.clear_override(employee["id"], "2026-09-25")
+        self.assertEqual(caught.exception.code, "leave_approved")
+
+        # 一个字节都没写：还是请假那天，覆盖记录还是 kind=leave。
+        self.assertEqual(await self.store.day_detail("2026-09-25"), before_detail)
+        self.assertEqual(await self._overrides(), before_overrides)
+        self.assertEqual([row["status"] for row in await self._requests()], ["approved"])
+
+        # 批量清除对同一格一直就是这个口径（对照：两条路同一个词）。
+        batch = await self.store.set_overrides_batch(
+            "clear", items=[{"employee_id": employee["id"], "business_date": "2026-09-25"}]
+        )
+        self.assertEqual(
+            [(item["reason"]) for item in batch["skipped"]], ["leave_approved"]
+        )
 
     async def test_override_validates_its_own_payload(self):
         """「改成休」不能顺带带班次或区；改班次必须给班次；人、班次、区都得存在。"""
@@ -2515,6 +2647,46 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self._zone_ids(second["id"]))["2026-09-25"], pastry)
         detail = await self.store.day_detail("2026-09-25")
         self.assertEqual([person["name"] for person in detail["groups"][0]["people"]], ["李四"])
+
+    async def test_a_swap_never_touches_an_approved_leave(self):
+        """换班不许碰已批的假：提的人那天得真有班次，批准时两边都查一次 `_leave_ids`。
+
+        两条缺口各守一处 ——
+        ① 申请人那天是请假（有行、`shift_id` 空）：`submit_swap` 只能判「有没有行」时
+           会把这一天也放进来，现在拒绝（`nothing_to_swap`）；
+        ② 对方那天批过假：批准时写下去会用 `kind=swap` 把 `kind=leave` 盖掉，对方从
+           「请假」变成来上申请人的班，而申请表里那条假仍是 `approved` —— 现在整笔拒绝
+           （`leave_approved`，与批量清除 / 单格撤销同一个词）。
+        """
+        first, second, day, night = await self._two_people()
+
+        # ① 申请人自己那天是请假：手上没有班可换。
+        own_leave = await self.store.submit_leave(first["id"], "2026-09-25")
+        await self.store.approve_request(own_leave["id"])
+        with self.assertRaises(SchedulingError) as nothing:
+            await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        self.assertEqual(nothing.exception.code, "nothing_to_swap")
+
+        # ② 对方那天是请假：对方可以点头（那一步还不动排班），店长批准时被拦下。
+        peer_leave = await self.store.submit_leave(second["id"], "2026-09-28")
+        await self.store.approve_request(peer_leave["id"])
+        swap = await self.store.submit_swap(first["id"], second["id"], "2026-09-28")
+        await self.store.answer_swap(second["id"], swap["id"], True)
+        with self.assertRaises(SchedulingError) as caught:
+            await self.store.approve_request(swap["id"])
+        self.assertEqual(caught.exception.code, "leave_approved")
+
+        # 一个字节都没写：李四还是请假，张三还是白班，那条换班还等在店长待办里。
+        detail = await self.store.day_detail("2026-09-28")
+        self.assertEqual(
+            [person["id"] for person in detail["off_people"] if person["leave"]],
+            [second["id"]],
+        )
+        self.assertEqual(await self._day_shift(first["id"], "2026-09-28"), day)
+        self.assertEqual(
+            [(row["kind"], row["status"]) for row in await self._requests()],
+            [("leave", "approved"), ("leave", "approved"), ("swap", "pending_manager")],
+        )
 
     async def test_a_swap_validates_its_people_and_its_day(self):
         """每道闸各说各的：跟自己换、缺人、人不在了、没选日期、过去、太远、那天没班。"""

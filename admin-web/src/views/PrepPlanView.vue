@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import MiniBarChart from '../components/prep/MiniBarChart.vue'
 import { api } from '../api/client'
 import { usePrepPlan } from '../composables/usePrepPlan'
@@ -45,6 +45,7 @@ const {
 const editingId = ref(null)
 const editingValue = ref('')
 const copied = ref(false)
+const modeBar = ref(null)
 
 const staffStationLabel = computed(
   () => allStations.value.find((row) => row.id === staffStation.value)?.label || staffStation.value,
@@ -87,6 +88,11 @@ function roundQty(value) {
 
 function qtyText(entry) {
   return `${roundQty(entry.final_qty ?? entry.suggested_qty)}${entry.unit || ''}`
+}
+
+/** 参考值为 0 的品：数据照列（不替店长删信息），但整行降权，别和真要做的抢眼睛。 */
+function isZero(entry) {
+  return roundQty(entry.final_qty ?? entry.suggested_qty) === 0
 }
 
 function isManual(entry) {
@@ -153,12 +159,30 @@ async function copyList() {
   }
 }
 
+/**
+ * 档口栏在手机上横滑（6 个档口一行放不下）。默认档口可能落在视野外，
+ * 换完档口若不把它滑回来，师傅看到的是一排**都没有高亮**的档口 —— 不知道自己在看哪档。
+ * 只改该栏的 scrollLeft，不动页面纵向滚动。
+ */
+async function revealActiveStation() {
+  await nextTick()
+  const bar = modeBar.value
+  const active = bar && bar.querySelector('.pp-mode.is-on')
+  if (!bar || !active) return
+  const barBox = bar.getBoundingClientRect()
+  const box = active.getBoundingClientRect()
+  if (box.left >= barBox.left && box.right <= barBox.right) return
+  bar.scrollLeft += box.left - barBox.left - (barBox.width - box.width) / 2
+}
+
 onMounted(async () => {
   await load()
+  void revealActiveStation()
 })
 
 watch(activeStation, () => {
   void load()
+  void revealActiveStation()
 })
 </script>
 
@@ -167,14 +191,22 @@ watch(activeStation, () => {
     <header class="pp-head">
       <div class="pp-head-main">
         <p class="pp-kicker">备货计划 · 参考值</p>
-        <h1 class="pp-title">今天参考值 <b>{{ remainingCount }}</b> 项</h1>
+        <h1 class="pp-title">
+          今天参考值
+          <template v-if="!needsStationPick"><b>{{ remainingCount }}</b> 项</template>
+        </h1>
         <p class="pp-sub">
           {{ windowText }}
-          <span v-if="doneCount"> · 已做 {{ doneCount }} 项</span>
+          <span v-if="doneCount" class="pp-sub-done"> · 已做 {{ doneCount }} 项</span>
         </p>
       </div>
       <div class="pp-head-side">
-        <button type="button" class="pp-copy" @click="copyList">
+        <button
+          type="button"
+          class="pp-copy"
+          :disabled="state !== 'ready' || needsStationPick"
+          @click="copyList"
+        >
           {{ copied ? COPIED_LABEL : COPY_LABEL }}
         </button>
       </div>
@@ -207,25 +239,37 @@ watch(activeStation, () => {
     <p v-else-if="!groups.length" class="pp-empty">今天不用做。</p>
 
     <template v-else>
-      <nav v-if="stationTabs.length > 1 && !isStaff" class="pp-modes" role="tablist" aria-label="档口">
+      <nav
+        v-if="stationTabs.length > 1 && !isStaff"
+        ref="modeBar"
+        class="pp-modes"
+        role="tablist"
+        aria-label="档口"
+      >
         <button
           v-for="tab in stationTabs"
           :key="tab.id"
           type="button"
           class="pp-mode"
-          :class="{ 'is-active': tab.id === activeStation }"
+          :class="{ 'is-on': tab.id === activeStation }"
           role="tab"
           :aria-selected="tab.id === activeStation"
           @click="activeStation = tab.id"
         >
-          {{ tab.label }} <b>{{ tab.remaining }}</b>
+          {{ tab.label }}<b>{{ tab.remaining }}</b>
         </button>
       </nav>
 
       <section v-for="group in groups" :key="group.kind" class="pp-group">
         <h2 class="pp-group-title">{{ group.label }}</h2>
         <ul class="pp-rows">
-          <li v-for="entry in group.entries" :key="entry.id" class="pp-row">
+          <li
+            v-for="entry in group.entries"
+            :key="entry.id"
+            class="pp-row"
+            :class="{ 'is-zero': isZero(entry), 'is-staff': isStaff }"
+            @click="isStaff && toggleExpand(entry)"
+          >
             <button type="button" class="pp-row-main" @click="toggleExpand(entry)">
               <span class="pp-name">{{ entry.item_name }}</span>
               <span class="pp-caret" aria-hidden="true">{{ expandedId === entry.id ? '▾' : '▸' }}</span>
@@ -251,7 +295,8 @@ watch(activeStation, () => {
               :disabled="isStaff"
               @click="!isStaff && startEdit(entry)"
             >
-              <b>{{ qtyText(entry) }}</b>
+              <b>{{ roundQty(entry.final_qty ?? entry.suggested_qty) }}</b>
+              <small v-if="entry.unit" class="pp-qty-unit">{{ entry.unit }}</small>
               <i v-if="isManual(entry)" class="pp-manual">手改</i>
             </button>
 
@@ -266,7 +311,7 @@ watch(activeStation, () => {
               做完
             </button>
 
-            <div v-if="expandedId === entry.id" class="pp-detail">
+            <div v-if="expandedId === entry.id" class="pp-detail" @click.stop>
               <div class="pp-chart">
                 <MiniBarChart :points="barPoints(entry)" />
               </div>
@@ -293,7 +338,7 @@ watch(activeStation, () => {
                   class="pp-act"
                   @click="setKind(entry, entry.kind === 'made' ? 'bought' : 'made')"
                 >
-                  {{ entry.kind === 'made' ? '其实是买的' : '其实是做的' }}
+                  {{ entry.kind === 'made' ? '其实是原料' : '其实是半成品' }}
                 </button>
               </div>
             </div>
@@ -308,7 +353,10 @@ watch(activeStation, () => {
             <button type="button" class="pp-row-main" @click="toggleExpand(entry)">
               <span class="pp-name">{{ entry.item_name }}</span>
             </button>
-            <span class="pp-qty"><b>{{ qtyText(entry) }}</b></span>
+            <span class="pp-qty">
+              <b>{{ roundQty(entry.final_qty ?? entry.suggested_qty) }}</b>
+              <small v-if="entry.unit" class="pp-qty-unit">{{ entry.unit }}</small>
+            </span>
             <button v-if="!isStaff" type="button" class="pp-check" @click="toggleDone(entry)">
               撤回
             </button>
@@ -365,17 +413,24 @@ watch(activeStation, () => {
   color: var(--action);
 }
 
+/* 副标题（时间窗 / 已做几项）：先前没有类规则，吃浏览器默认的 `p` 样式 —— 16px 墨色，
+   比 20px 标题只小一档，整页第一眼是「三层白字」。这里压回 12px 的 dim 档。 */
+.pp-sub {
+  margin: 2px 0 0;
+  font-size: var(--fs-12, 12px);
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.pp-sub-done {
+  color: var(--ink-faint);
+}
+
 .pp-head-side {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: var(--sp-2, 8px);
-}
-
-.pp-window {
-  font-size: var(--fs-12, 12px);
-  color: var(--ink-dim);
-  font-variant-numeric: tabular-nums;
 }
 
 .pp-copy {
@@ -388,45 +443,8 @@ watch(activeStation, () => {
   font-size: var(--fs-12, 12px);
 }
 
-.pp-tabs {
-  display: flex;
-  min-width: 0;
-  gap: var(--sp-2, 8px);
-  overflow-x: auto;
-  padding-bottom: 2px;
-  scrollbar-width: none;
-}
-
-.pp-tabs::-webkit-scrollbar {
-  display: none;
-}
-
-.pp-tab {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 44px;
-  padding: 0 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-full, 999px);
-  background: var(--surface-1);
-  color: var(--ink-dim);
-  font-size: var(--fs-13, 13px);
-}
-
-.pp-tab.is-on {
-  background: var(--action);
-  border-color: var(--action);
-  color: var(--action-ink);
-  font-weight: 600;
-}
-
-.pp-tab b {
-  font-size: var(--fs-12, 12px);
-  padding: 0 6px;
-  border-radius: var(--r-full, 999px);
-  background: none;
+.pp-copy:disabled {
+  opacity: 0.55;
 }
 
 .pp-group-title {
@@ -449,9 +467,12 @@ watch(activeStation, () => {
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--sp-2, 8px);
-  min-height: 56px;
+  min-height: 60px;
   padding: 6px 0;
-  border-bottom: 1px solid var(--line);
+  /* 分隔线用 `--line-control`（`.55`）而不是默认的 `--line`（`.13`）：这一页是**长清单**，
+     行与行只靠一条 0.13 的青线，叠在壳的网格背景上等于没有 —— 手机上整片糊成一块，
+     分不清哪一行是哪一项。控件的强分隔档在深底上是 2.5:1 上下的细线：看得清、不抢内容。 */
+  border-bottom: 1px solid var(--line-control);
 }
 
 .pp-row-main:focus {
@@ -504,10 +525,42 @@ watch(activeStation, () => {
   font-weight: 600;
 }
 
+/* 单位比数字小一号、压一档色：`59.4条` 整串 16px 粗体时，量词和数量一样重，
+   六行看下来是一片白字。0 值行降到 faint —— 参考值是 0 说明今天不用备。 */
+.pp-qty-unit {
+  font-size: var(--fs-11, 11px);
+  color: var(--ink-dim);
+}
+
+.pp-row.is-staff {
+  cursor: pointer;
+}
+
+.pp-row.is-zero .pp-name,
+.pp-row.is-done .pp-name {
+  color: var(--ink-dim);
+}
+
+.pp-row.is-done .pp-qty b,
+.pp-row.is-done .pp-qty-unit {
+  color: var(--ink-faint);
+}
+
+.pp-row.is-zero .pp-qty b,
+.pp-row.is-zero .pp-qty-unit {
+  color: var(--ink-faint);
+}
+
 .pp-manual {
   font-size: var(--fs-11, 11px);
   font-style: normal;
   color: var(--warn);
+}
+
+/* 员工端的数量是只读的 disabled 按钮：Chrome 对 disabled 元素不派发点击，事件也冒泡不上去。
+   指针穿透让「点数字」跟「点这一行」一样能展开近 7 天依据 —— 师傅第一反应就是点数字。 */
+.pp-qty:disabled {
+  pointer-events: none;
 }
 
 .pp-qty-input {
@@ -551,8 +604,8 @@ watch(activeStation, () => {
 
 .pp-caret {
   flex: 0 0 auto;
-  font-size: var(--fs-11, 11px);
-  color: var(--ink-faint);
+  font-size: var(--fs-12, 12px);
+  color: var(--ink-dim);
 }
 
 .pp-chart {
@@ -695,177 +748,62 @@ watch(activeStation, () => {
   font-size: var(--fs-12);
 }
 
+/* 档口筛选：容器是一条可以横着滑的胶囊栏。
+   手机上 6 个档口在 390px 里放不下，旧写法没有 `flex:0 0 auto` + 横向滚动，每个按钮被
+   压缩到 53–60px，档口名竖着断成「西饼 / 档 / 16」三行。现在按钮不缩、一行不折，放不下就横滑。 */
 .pp-modes {
   display: flex;
   gap: 4px;
+  min-width: 0;
+  max-width: 100%;
   padding: 3px;
+  border: 1px solid var(--line);
   border-radius: var(--r-full);
   background: var(--surface-2);
   align-self: flex-start;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.pp-modes::-webkit-scrollbar {
+  display: none;
 }
 
 .pp-mode {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-height: 44px;
-  padding: 0 16px;
-  border: 0;
+  padding: 0 14px;
+  border: 1px solid transparent;
   border-radius: var(--r-full);
   background: none;
   color: var(--ink-dim);
   font-size: var(--fs-13, 13px);
+  white-space: nowrap;
 }
 
+/* 选中态：v3 把档口选择复用了 v2 的视图 tab（模板给 `is-active`、样式写 `is-on`），
+   于是**任何一个档口都没有高亮**——切成哪个档只看得到数字变。类名对齐在模板里，
+   这里用 action-soft 底 + 淡边框标出来（不用实底：一排 6 个里一个亮绿太抢）。 */
 .pp-mode.is-on {
-  background: var(--surface-0);
+  border-color: var(--wb-tint-22);
+  background: var(--action-soft);
   color: var(--ink);
   font-weight: 600;
 }
 
-.pp-restock,
-.pp-review {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.pp-expired {
-  list-style: none;
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  /* 令牌层没有 `--danger-line`，边框取 danger 自己的淡档；底色用既有的 danger-soft。
-     **不写 fallback 字面量**：令牌层（`html[data-workbench]`）保证这两个值都有，
-     fallback 只会变成第二份硬编码色值 —— 设计护栏（`designGuard.test.js`）会红。 */
-  border: 1px solid var(--wb-danger-a45);
-  background: var(--danger-soft);
-  border-radius: 10px;
-}
-
-.pp-expired li {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 0;
-  font-size: var(--fs-13, 13px);
-}
-
-.pp-expired-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.pp-expired-text em {
-  margin-left: 6px;
-  font-style: normal;
-  color: var(--danger-bright);
-}
-
-.pp-expired-btn {
-  flex: 0 0 auto;
-  padding: 4px 12px;
-  border-radius: 999px;
-  border: 1px solid var(--wb-danger-a45);
-  background: var(--surface-0);
-  color: var(--danger-bright);
+.pp-mode b {
   font-size: var(--fs-12, 12px);
-  cursor: pointer;
-}
-
-.pp-restock-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.pp-restock-main {
-  flex: 1 1 140px;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.pp-restock-main b {
-  font-size: var(--fs-14, 14px);
-}
-
-.pp-restock-main span {
-  font-size: var(--fs-11, 11px);
+  font-weight: 600;
   color: var(--ink-faint);
   font-variant-numeric: tabular-nums;
 }
 
-.pp-restock-form {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.pp-act-primary {
-  border-color: var(--action);
+.pp-mode.is-on b {
   color: var(--action);
-}
-
-.pp-reason {
-  min-height: 44px;
-  padding: 0 8px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-1);
-  background: var(--surface-2);
-  color: var(--ink);
-  font-size: var(--fs-12, 12px);
-}
-
-.pp-review-sum {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: baseline;
-  padding: 8px 0;
-  font-size: var(--fs-12, 12px);
-  color: var(--ink-dim);
-}
-
-.pp-review-sum b {
-  color: var(--ink);
-}
-
-.pp-review-sum em {
-  margin-left: auto;
-  font-style: normal;
-  color: var(--ink-faint);
-}
-
-.pp-review-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2px 8px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.pp-review-nums {
-  grid-column: 1 / 2;
-  font-size: var(--fs-11, 11px);
-  color: var(--ink-faint);
-  font-variant-numeric: tabular-nums;
-}
-
-.pp-review-delta {
-  grid-row: 1 / 3;
-  grid-column: 2 / 3;
-  align-self: center;
-  font-style: normal;
-  font-size: var(--fs-13, 13px);
-  color: var(--ink-dim);
-  font-variant-numeric: tabular-nums;
-}
-
-.pp-review-delta.is-off {
-  color: var(--warn);
-  font-weight: 600;
 }
 
 .pp-error {
@@ -893,7 +831,9 @@ watch(activeStation, () => {
 
 @media (min-width: 720px) {
   .pp-row {
-    grid-template-columns: minmax(0, 1fr) 120px 96px;
+    /* 第三列 = `.pp-check` 的 44px。旧值 96px 让按钮不贴右，行尾多出 52px 死白：
+       页头「复制清单」贴右、列表按钮却缩进一截，整页右边缘对不齐。 */
+    grid-template-columns: minmax(0, 1fr) 120px 44px;
   }
 }
 </style>

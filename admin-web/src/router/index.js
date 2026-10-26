@@ -162,6 +162,12 @@ const routes = [
   workbenchKitchenPage('/workbench/kitchen/prep-review', 'prep-review', () =>
     import('../views/PrepReviewView.vue'),
   ),
+  // 备货品换算规则（2026-10-26）：从销售报表的「换算规则」tab 搬进后勤组。
+  // 它答的是「一道菜用多少备货品」，是备货建议量的唯一来源，属于维护面而不是报表面；
+  // 报表页那边保留同一组件的只读模式。只给管理端（spec §2 决策 5）。
+  workbenchKitchenPage('/workbench/kitchen/prep-rules', 'prep-rules', () =>
+    import('../views/prep/PrepRulesView.vue'),
+  ),
   // 损耗分析（从 worktool2 那个小程序搬过来）：后勤组的第三页 —— 店长按月看损耗的
   // 总数 / 原因分布 / 高损耗物料 / 逐日趋势，下半页是按条件翻的明细。清单里是
   // `audience: admin` + `staffCap: wastage`（2026-10-14 用户裁定）：管理端会话直接进，

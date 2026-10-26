@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""加班与补钟（`CONTEXT.md` 的「加班与补钟登记」）。
+"""加班与补钟（`GLOSSARY.md` 的「加班与补钟登记」）。
 
 与排班、卫生同一条分层规矩：这一层只从公共层取「这个人是谁」（`services.identity`），
 不 import 排班或卫生的模块 —— 三个域靠数据对接，不靠调用。

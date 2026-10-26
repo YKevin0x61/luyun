@@ -10,6 +10,7 @@
 import unittest
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request as StarletteRequest
@@ -67,7 +68,13 @@ class CsrfOriginRejectedTest(unittest.TestCase):
         )
         self.assertFalse(csrf_origin_rejected(request))
 
-    def test_explicit_token_header_is_exempt(self):
+    def test_cross_site_write_with_a_custom_token_header_is_still_rejected(self):
+        """自定义头不是通用豁免：浏览器的跨站 fetch 也能带着它 + cookie 一起发。
+
+        `main.py` 的 CORS 是 `allow_origins=["*"] + allow_headers=["*"]`，预检会放行
+        任意请求头（见 `CorsPreflightContractTest`），所以「带 Authorization /
+        X-Admin-Token 就放行」在浏览器面前等于没有这一层。
+        """
         for header in ("authorization", "x-admin-token"):
             request = make_request(
                 "POST",
@@ -77,6 +84,16 @@ class CsrfOriginRejectedTest(unittest.TestCase):
                     "host": HOST,
                     header: "Bearer whatever",
                 },
+            )
+            self.assertTrue(csrf_origin_rejected(request), header)
+
+    def test_token_header_is_exempt_only_without_sec_fetch_site(self):
+        """没有 `Sec-Fetch-Site` 的非浏览器客户端（curl / 脚本 / KDS）照旧豁免。"""
+        for header in ("authorization", "x-admin-token"):
+            request = make_request(
+                "POST",
+                cookie=STAFF_COOKIE,
+                headers={"host": HOST, header: "Bearer whatever"},
             )
             self.assertFalse(csrf_origin_rejected(request), header)
 
@@ -175,6 +192,45 @@ class CsrfMiddlewareContractTest(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"ok": True})
+
+
+class CorsPreflightContractTest(unittest.TestCase):
+    """`main.py` 的 CORS 配置放行任意来源 + 任意请求头（与 `main.py` 同形）。
+
+    这条是上面「跨站 + 自定义头必须拒」能成立的前提：攻击页只要多带一个头，预检就会
+    放行它，浏览器随后把自定义头与 cookie 一起发出去。**不动 CORS**（这里只钉住现状），
+    纵深由 `csrf_origin_rejected` 那一层自己负责。
+    """
+
+    def test_preflight_lets_an_attacker_attach_any_header(self):
+        app = FastAPI()
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        @app.post("/api/wastage/records")
+        async def write():  # pragma: no cover - 只为预检
+            return {"ok": True}
+
+        with TestClient(app) as client:
+            preflight = client.options(
+                "/api/wastage/records",
+                headers={
+                    "Origin": "http://evil.example.com",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "x-admin-token,content-type",
+                },
+            )
+        self.assertEqual(preflight.status_code, 200, preflight.text)
+        self.assertEqual(preflight.headers["access-control-allow-origin"], "*")
+        self.assertIn(
+            "x-admin-token",
+            preflight.headers["access-control-allow-headers"].lower(),
+        )
 
 
 if __name__ == "__main__":

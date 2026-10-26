@@ -1372,12 +1372,16 @@ class SchedulingStore:
     async def clear_override(self, employee_id: int, business_date: str) -> dict:
         """撤掉某人某天的覆盖，那天回到规则铺出来的样子（票 07 的验收项）。
 
-        今天与以后按**现在的规则**重算一遍。
+        今天与以后按**现在的规则**重算一遍；可补记窗口内（过去 30 天）的过去日子一样
+        能撤，更早的仍是 `past_day`（2026-10-18 用户裁定放开 ADR 0108 决策 6）。
 
-        **过去的日子不给撤**（票 14；ADR 0108 决策 6）：以前对过去是「摘掉覆盖记录、
-        结果行不动」—— 月历上的青点消失了、格子里的班次一点没变，没人看得出发生了
-        什么。新口径下过去只能**改成某个班**（`set_override` 在可补记窗口内照常写），
-        不能退回规则；要撤就先把它改回今天或以后 —— 拒绝的理由是 `past_clear`。
+        **那天有已批准的假就整笔拒绝**（`leave_approved`）：覆盖记录 `kind=leave` 就是
+        那条被批的假，删掉它等于把假抹掉，而申请表里那条仍然是 `approved`。判据与
+        批量清除的 `skipped: leave_approved` 是同一处（`_leave_ids`）、同一个词 ——
+        「清除班次」不许动已批的假，单格与批量不能两套。
+
+        **那天什么都没有就是 no-op**：既没有覆盖记录、也没有结果行时 `_restore_day`
+        不补写（见那里）—— 「清除」不该在从没铺过的过去日子里凭空造出一行上班。
 
         **今天只读一次**往下传：「这一天算不算过去」与「那天还在不在窗口里」两处各读
         一次钟的话，请求正好跨过 06:00 时会重算一个已经结束的营业日（或者漏算刚到的
@@ -1396,29 +1400,57 @@ class SchedulingStore:
 
     @serialized_write
     async def _clear_override(self, employee_id: int, day: str, today: str) -> None:
+        """单格「撤销覆盖」：删覆盖记录 + 按现在的规则重算那天。
+
+        **删之前先问一句「那天批过假没有」**（`_leave_ids`），命中就拒绝 —— 与批量清除
+        的 `skipped: leave_approved` 同一处判据、同一个错误码。判据放在锁里而不是
+        `clear_override` 那道锁外：判完到删之间正好有人批下那天的假，锁外会漏掉。
+        """
+        if employee_id in await self._leave_ids([employee_id], day):
+            raise SchedulingError("leave_approved", "leave_approved")
         await self._delete_override_row(employee_id, day)
         await self._restore_day(employee_id, day, today)
         await self._conn.commit()
 
-    async def _delete_override_row(self, employee_id: int, day: str) -> None:
+    async def _delete_override_row(self, employee_id: int, day: str) -> bool:
         """摘掉某人某天的覆盖记录（结果行不动）。不自己上锁、不提交。
 
         批量端点的「清除班次」也走它 —— 一条覆盖记录的删法只此一处。
+
+        返回**真的删掉了一行没有**：清除链靠它区分「那天本来有覆盖」与「什么都没有」
+        （后者不该让批量回执说「已清一格」，也不该广播 nudge）。
         """
-        await self._conn.execute(
+        cur = await self._conn.execute(
             "DELETE FROM scheduling_overrides WHERE employee_id = ? AND business_date = ?",
             (employee_id, day),
         )
+        return cur.rowcount > 0
 
-    async def _restore_day(self, employee_id: int, day: str, today: str) -> None:
+    async def _restore_day(self, employee_id: int, day: str, today: str) -> bool:
         """把某一天按**现在的规则**重算回 `source='rule'`。不自己上锁、不提交。
 
         没有规则、或那天已经在窗口外：把这一行删掉，那天回到「还没铺到」——
         跟月历上窗口尽头的空格是同一个状态，不是「那天休」。
 
+        **没有结果行就什么都不做并返回 False**：过去的日子只在它当年是「今天」时才被
+        铺过，从没排过的那些天本来就没有行。清除 / 退回规则是「把覆盖撤掉、让规则重新
+        说话」，不是「补一行上班」—— 在空日子上按现在的规则 INSERT 会把考勤表从「待补」
+        改成「上班」、把月历格子填上、把一个从没发生过的班次写进历史。要补记某天，
+        走 `set_override` / 批量 `shift` 那条明示的路。
+
         规则只读**他自己**那一条（`_rule_for`）而不是全店的：别人的规则写坏了，
         不该把这个人「撤掉覆盖」也一起挡住。`today` 由调用方给，见 `clear_override`。
+
+        返回这一天有没有被真的处理过（写回规则行 / 删掉覆盖行）：批量回执的 `applied`
+        只数这些格子。
         """
+        cur = await self._conn.execute(
+            """SELECT id FROM staff_assignments
+               WHERE employee_id = ? AND business_date = ?""",
+            (employee_id, day),
+        )
+        if await cur.fetchone() is None:
+            return False
         rule = await self._rule_for(employee_id)
         if rule is None or day > self._window_from(today)[1]:
             await self._conn.execute(
@@ -1426,7 +1458,7 @@ class SchedulingStore:
                    WHERE employee_id = ? AND business_date = ? AND source = ?""",
                 (employee_id, day, SOURCE_OVERRIDE),
             )
-            return
+            return True
         shift_id = _cycle_shift(rule, day)
         zone_id = None
         if shift_id is not REST:
@@ -1434,6 +1466,7 @@ class SchedulingStore:
         await self._write_day_row(
             employee_id, day, shift_id, zone_id, SOURCE_RULE, self._now_iso()
         )
+        return True
 
     async def _write_day_row(
         self,
@@ -1517,6 +1550,10 @@ class SchedulingStore:
         跨 06:00 的一次批量不再出现「前半批按今天算、后半批按明天算」。
 
         `employee_ids` 是**真写下去的那些人**，只给路由层广播用（响应里不带出去）。
+
+        `applied` 同样是**真写下去/真清掉的那些格**：`clear` 在「既没有覆盖记录、也没有
+        结果行」的日子上无事可做（`_restore_day` 的 no-op），那些格既不算 applied 也不进
+        `skipped` —— 它不是失败，只是没有理由可写进那张定死的词表（ADR 0107 决策 6）。
         """
         if action not in BATCH_ACTIONS:
             raise SchedulingError("invalid_batch_action", "invalid_batch_action")
@@ -1530,13 +1567,9 @@ class SchedulingStore:
         last_day = self._window_from(today)[1]
         cells = [self._batch_cell(item) for item in items]
 
-        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
-        # 「不在册」= 花名册里没有这个人，或他停用 / 还没批准（周表也是这么筛的）。
-        known = {
-            employee["id"]
-            for employee in roster
-            if not employee["disabled"] and employee["approved"]
-        }
+        # 「不在册」= 花名册里没有这个人，或他停用 / 还没批准 —— 判据与周表、月历、
+        # 当日名单共用一份（`_on_roster_ids`），别在这里再拼一遍。
+        known = await self._on_roster_ids()
 
         shift: Optional[int] = None
         zone: Optional[int] = None
@@ -1576,7 +1609,9 @@ class SchedulingStore:
 
         written = [cell for cell, reason in zip(cells, reasons) if reason is None]
         if action == BATCH_CLEAR:
-            await self._clear_batch_rows(written, today)
+            # 「清除」可能对某几格无事可做（既没覆盖、也没结果行，见 `_restore_day`）：
+            # 只有真被处理过的那些格才算 `applied`、才广播。
+            written = await self._clear_batch_rows(written, today)
         else:
             rows = []
             for employee_id, day in written:
@@ -1667,17 +1702,28 @@ class SchedulingStore:
         await self._conn.commit()
 
     @serialized_write
-    async def _clear_batch_rows(self, cells: list[tuple[int, str]], today: str) -> None:
+    async def _clear_batch_rows(
+        self, cells: list[tuple[int, str]], today: str
+    ) -> list[tuple[int, str]]:
         """这一批「清除班次」：每格摘掉覆盖记录、按现在的规则重算，最后一次提交。
 
         与单格撤销（`_clear_override`）共用同一个删法 —— 批量清除与逐格撤销必须落到
         同一件事上。能走到这里的格子都在可补记窗口内（含过去 30 天；更早的在筛选那一步
-        就记 `past_day`）。
+        就记 `past_day`）；那天有已批的假的一组早在筛选那一步就记 `leave_approved`。
+
+        返回**真被处理过的那些格**（`_delete_override_row` / `_restore_day` 两个返回值
+        里有一个是真的）：既没有覆盖记录、也没有结果行的格子在清除时无事可做
+        （`_restore_day` 的 no-op），不能算进回执的 `applied` —— 店长点「清除」之后
+        被告知「已清 N 格」，而其中有些格子本来就什么都没有。
         """
+        handled: list[tuple[int, str]] = []
         for employee_id, day in cells:
-            await self._delete_override_row(employee_id, day)
-            await self._restore_day(employee_id, day, today)
+            removed = await self._delete_override_row(employee_id, day)
+            restored = await self._restore_day(employee_id, day, today)
+            if removed or restored:
+                handled.append((employee_id, day))
         await self._conn.commit()
+        return handled
 
     async def _pending_request_days(
         self, employee_ids: set[int]
@@ -1873,6 +1919,25 @@ class SchedulingStore:
             "days": days,
         }
 
+    async def _on_roster_ids(self) -> set[int]:
+        """在册的人：花名册里**已批准且未停用**的那些。
+
+        `staff_assignments` 是物化的结果：员工停用（离职）只改花名册，90 天窗口里已经
+        铺下的行照旧躺着，`expand()` 也仍会给有规则的人补行 —— 所以「谁在上班」不能只数
+        结果行。`week_grid` 一直是这么筛的（并在 `excluded` 里报「另有 N 人已停用」），
+        批量落笔的「不在册」也用它；月历 / 当日名单 / 员工看到的全店上班人数以前直接数行，
+        于是同一天给出两个人数（停用的人只在一处出现）。现在这几处读口都从这里取判据。
+
+        **不清行、不落任何写入**：停用只是「他不在名单里」，重新启用（`enable`）时结果行
+        还在，人立刻回到名单与人数里 —— 这也正是「停用不删历史」的意思。
+        """
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        return {
+            employee["id"]
+            for employee in roster
+            if employee["approved"] and not employee["disabled"]
+        }
+
     @_needs_migration
     async def month_calendar(self, month: str) -> dict:
         """一个月的月历：每天各班的**人数**（票 02 的验收项）。
@@ -1881,15 +1946,26 @@ class SchedulingStore:
         `overridden` 是那天有几行是**单日覆盖**写的（票 07）：月历靠它在格子上打个点，
         点开看「谁被改了、改了成什么」—— 它和人数走的是两条查询，「改成休」那种改动
         在人数里看不出来，在这个计数里看得出来。
+
+        **只数在册的人**（`_on_roster_ids`）：停用 / 待批准的人名下可能还躺着结果行
+        （停用不删行），他们既不算「上班人数」，也不算「那天被改过」的标记 —— 与
+        `week_grid`、当日名单、员工月历的 `staff_count` 是同一份名单判据。
         """
         start, next_month = _month_bounds(month)
         first = start.isoformat()
 
+        # 名单判据拼成一段 SQL 条件：空名单走 `AND FALSE`（同一条语句、结果自然是 0），
+        # 不为「一个在册的人都没有」再写一套空实现。
+        on_roster = sorted(await self._on_roster_ids())
+        marks = ", ".join("?" for _ in on_roster)
+        on_roster_clause = f"AND employee_id IN ({marks})" if on_roster else "AND FALSE"
+
         cur = await self._conn.execute(
-            """SELECT business_date, shift_id, COUNT(*) AS n FROM staff_assignments
+            f"""SELECT business_date, shift_id, COUNT(*) AS n FROM staff_assignments
                WHERE business_date >= ? AND business_date < ? AND shift_id IS NOT NULL
+                 {on_roster_clause}
                GROUP BY business_date, shift_id""",
-            (first, next_month.isoformat()),
+            (first, next_month.isoformat(), *on_roster),
         )
         counted: dict[str, dict[int, int]] = {}
         for row in await cur.fetchall():
@@ -1903,10 +1979,11 @@ class SchedulingStore:
         # 那天有几行是被单日覆盖写下的（票 07 的标记）：>0 就是「这一天跟规则不一样」。
         # 休也算 —— 「被改成休」正是店长最需要一眼看到的那种改动，而它不在人数里。
         cur = await self._conn.execute(
-            """SELECT business_date, COUNT(*) AS n FROM staff_assignments
+            f"""SELECT business_date, COUNT(*) AS n FROM staff_assignments
                WHERE business_date >= ? AND business_date < ? AND source = ?
+                 {on_roster_clause}
                GROUP BY business_date""",
-            (first, next_month.isoformat(), SOURCE_OVERRIDE),
+            (first, next_month.isoformat(), SOURCE_OVERRIDE, *on_roster),
         )
         overridden: dict[str, int] = {}
         for row in await cur.fetchall():
@@ -1917,11 +1994,12 @@ class SchedulingStore:
         # 这一位只让月历在格子上多报一句「有几个人只上半天」—— 半天休是结果行上的一个
         # 标志，不改人数口径，所以单开一条查询、不往 `counts` 里掺。
         cur = await self._conn.execute(
-            """SELECT business_date, COUNT(*) AS n FROM staff_assignments
+            f"""SELECT business_date, COUNT(*) AS n FROM staff_assignments
                WHERE business_date >= ? AND business_date < ? AND half_rest = 1
                  AND shift_id IS NOT NULL
+                 {on_roster_clause}
                GROUP BY business_date""",
-            (first, next_month.isoformat()),
+            (first, next_month.isoformat(), *on_roster),
         )
         half_rest: dict[str, int] = {}
         for row in await cur.fetchall():
@@ -1969,10 +2047,16 @@ class SchedulingStore:
         `half_rest`（票 07 / ADR 0114）是「这个人这天只上半天」：他仍然在自己的班次那一
         组里（那天确实上班），面板靠这个字段在他名字旁边写一句「休半天」。**只读** ——
         设置它的地方只有考勤表页。
+
+        **只出在册的人**（`_on_roster_ids`）：停用（离职）/ 还没批准的人名下可能还留着
+        结果行（停用不删行），他们不该出现在「这天谁上班」的名单里，也不该把人数字段
+        撑大 —— 与 `week_grid` 的名单判据、月历的人数口径是同一份（`my_day` 直读这里，
+        员工端因此也不会看到「已离职的同事明天上班」）。
         """
         day = _require_business_date(business_date)
         names = await self._name_index()
         zone_names = await self._zone_name_index()
+        on_roster = await self._on_roster_ids()
 
         cur = await self._conn.execute(
             """SELECT employee_id, shift_id, zone_id, source, half_rest
@@ -1983,12 +2067,16 @@ class SchedulingStore:
         by_shift: dict[Any, list[tuple[int, Optional[int], bool, bool]]] = {}
         for row in await cur.fetchall():
             mapping = dict(row)
+            employee_id = int(mapping["employee_id"])
+            if employee_id not in on_roster:
+                # 不在册：他那天的行不参与这一天的名单（连「休」那一组也不算）。
+                continue
             key = REST if mapping["shift_id"] is None else int(mapping["shift_id"])
             zone = None if mapping["zone_id"] is None else int(mapping["zone_id"])
             overridden = mapping["source"] == SOURCE_OVERRIDE
             half_rest = _is_half_rest(mapping["shift_id"], mapping["half_rest"])
             by_shift.setdefault(key, []).append(
-                (int(mapping["employee_id"]), zone, overridden, half_rest)
+                (employee_id, zone, overridden, half_rest)
             )
 
         def person(
@@ -2379,12 +2467,20 @@ class SchedulingStore:
         """区间内每天全店有几个人上班（`shift_id` 非空的行数，休不算）。
 
         `last` 是**右开**的（跟 `month_calendar` 那条一样是下月一号），别按两端都含读。
+
+        **只数在册的人**：与 `month_calendar` 的 `total` 是同一个数（员工月历格子上的
+        `staff_count` 就是它），停用的人两边都不算 —— 否则同一天店长看到 2 人、员工看到
+        3 人。名单判据见 `_on_roster_ids`（空名单用 `AND FALSE` 走同一条语句）。
         """
+        on_roster = sorted(await self._on_roster_ids())
+        marks = ", ".join("?" for _ in on_roster)
+        on_roster_clause = f"AND employee_id IN ({marks})" if on_roster else "AND FALSE"
         cur = await self._conn.execute(
-            """SELECT business_date, COUNT(*) AS n FROM staff_assignments
+            f"""SELECT business_date, COUNT(*) AS n FROM staff_assignments
                WHERE business_date >= ? AND business_date < ? AND shift_id IS NOT NULL
+                 {on_roster_clause}
                GROUP BY business_date""",
-            (first, last),
+            (first, last, *on_roster),
         )
         counts: dict[str, int] = {}
         for row in await cur.fetchall():
@@ -2405,6 +2501,9 @@ class SchedulingStore:
         （票 08 的口径，跟员工页其他几处一致）。
 
         空组（那天某个班一个人都没有）不出去：员工看的是名单，不是「这个班今天没人」。
+
+        「谁在名单里」跟着 `day_detail` 走（`_on_roster_ids`）：停用 / 待批准的人不出现，
+        于是员工手机上也不会看到「已离职的同事明天上班」。
         """
         detail = await self.day_detail(business_date)
         groups = [
@@ -2434,7 +2533,7 @@ class SchedulingStore:
         }
 
     @_needs_migration
-    async def roster_with_rules(self) -> dict:
+    async def roster_with_rules(self, *, include_phone: bool = False) -> dict:
         """名单：全体花名册 + 每人当前那条规则 + 每人每班次的固定区。
 
         花名册来自**公共层**（`EmployeeAccounts.list_roster`），工作区名单也来自公共层
@@ -2444,35 +2543,49 @@ class SchedulingStore:
         **读不出来的规则显示出来，不抛错**（`_rule_for_display`）：这一页是店长唯一能
         重配周期的入口，它跟着别人的脏数据 400，那个人就只能进库改。所以这一条走
         `_rule_rows()`（不解码）而不是 `list_rules()`。
+
+        **手机号按调用方身份投影**（`include_phone`，默认不给）：这条读口在
+        `_require_scheduler` 那扇门后面（2026-10-14 起员工会话 + `schedule` 能力也进得来），
+        而手机号是同事的私人联系方式，不是排班需要的字段 —— 与 `/me/colleagues`
+        「不给手机号」同一条口径。管理端会话才给（`api/scheduling.py` 的路由按身份传
+        `include_phone`），管理端花名册页（`/api/hygiene/admin/roster`）本来就有自己那份
+        带手机号的名单，不靠这一条。默认 `False` 是 fail-closed：以后新加的调用方
+        不显式开口就要不到手机号。
         """
         employees = await EmployeeAccounts(self._write_lock_owner).list_roster()
         raw_rules = await self._rule_rows()
         shifts = await self.list_shifts()
         known_shift_ids = {shift["id"] for shift in shifts}
         defaults = await self.zone_defaults()
+
+        rows = []
+        for employee in employees:
+            row = {
+                "id": employee["id"],
+                "name": employee["name"],
+            }
+            if include_phone:
+                # 只给管理端：员工端的「我是谁」在 `/me` 那几条里（读的永远是自己）。
+                row["phone"] = employee["phone"]
+            row.update({
+                "job_title": employee["job_title"],
+                "approved": employee["approved"],
+                "disabled": employee["disabled"],
+                # 没配过规则是 None；配过但读不出来是
+                # {"cycle": None, "anchor_date": None, "invalid": True}。
+                "rule": (
+                    None
+                    if employee["id"] not in raw_rules
+                    else self._rule_for_display(raw_rules[employee["id"]], known_shift_ids)
+                ),
+                # {班次 id: 工作区 id}；没配过就是空对象
+                "zone_defaults": defaults.get(employee["id"], {}),
+            })
+            rows.append(row)
         return {
             "shifts": shifts,
             "zones": await self._zone_directory().list_zones(),
-            "employees": [
-                {
-                    "id": employee["id"],
-                    "name": employee["name"],
-                    "phone": employee["phone"],
-                    "job_title": employee["job_title"],
-                    "approved": employee["approved"],
-                    "disabled": employee["disabled"],
-                    # 没配过规则是 None；配过但读不出来是
-                    # {"cycle": None, "anchor_date": None, "invalid": True}。
-                    "rule": (
-                        None
-                        if employee["id"] not in raw_rules
-                        else self._rule_for_display(raw_rules[employee["id"]], known_shift_ids)
-                    ),
-                    # {班次 id: 工作区 id}；没配过就是空对象
-                    "zone_defaults": defaults.get(employee["id"], {}),
-                }
-                for employee in employees
-            ],
+            "employees": rows,
         }
 
     async def _name_index(self) -> dict[int, str]:
@@ -2769,8 +2882,9 @@ class SchedulingStore:
         所以对方拒绝、或申请人自己撤回，其他人的排班一个字都不变（验收项）。
 
         换的是「那天两个人各自的样子」：对方那天本来就休（或还没排到，新人没配规则），
-        批了就是他接走你的班、你那天空出来 —— 这也是一种换班。但**提的人那天得有一行**：
-        手上没有班就没什么可换的（`nothing_to_swap`），先让店长配上规则再说。
+        批了就是他接走你的班、你那天空出来 —— 这也是一种换班。但**提的人那天得真有班次**：
+        那天休 / 那天批了假 / 还没排到都只有一行（或没有行），手上没有班就没什么可换的
+        （`nothing_to_swap`）。以前只判「有没有一行」，请假那天因此也能拿去跟人换。
 
         **今天与窗口末日只读一次**（同 `set_override`、`submit_leave`）：跨 06:00 的
         请求里，「那天过去了没有」与「那天还在不在窗口里」用同一个营业日判。
@@ -2806,7 +2920,12 @@ class SchedulingStore:
             raise SchedulingError("beyond_swap", last_day)
         # 先把自己那天铺出来再问「有没有班」：规则配了但还没展开时不能误判成「没班」。
         await self.expand(employee_id)
-        if not (await self._day_shift(employee_id, day))[0]:
+        # 换的是「班」，不是「那天有没有一行」：那天休 / 那天请假 / 还没排到都只有一行
+        # （或没有行），没有可以拿去跟人对调的东西。只判「有没有行」会把请假那天也放进来
+        # —— 批准之后对方从「请假」变成来上这个申请人的班，而他自己的假被 `kind=swap`
+        # 盖掉。判据是 `shift_id` 非空（跟 `_leave_ids` 认「请假」的同一个形状）。
+        scheduled, mine_shift = await self._day_shift(employee_id, day)
+        if not scheduled or mine_shift is None:
             raise SchedulingError("nothing_to_swap", "nothing_to_swap")
         for row in await self._request_rows(employee_id=employee_id):
             if row["status"] not in (STATUS_PENDING_PEER, STATUS_PENDING_MANAGER):
@@ -3006,6 +3125,12 @@ class SchedulingStore:
 
         动手之前先 `_claim_request` 占住这条申请：对调是拿**当下**的班算的，执行两次
         就是把班换回去 —— 两条都回「批了」，员工那边看着却白换了。
+
+        **任何一方那天有已批准的假就整笔拒绝**（`leave_approved`）：写下去会用
+        `kind=swap` 把那条 `kind=leave` 的覆盖记录盖掉，对方从「请假」变成来上申请人的班，
+        而申请表里那条假仍是 `approved` —— 审批记录与排班事实互相矛盾。判据与批量清除、
+        单格撤销同一处（`_leave_ids`）、同一个词。拒绝时 `_claim_request` 那次 UPDATE 被
+        `serialized_write` 回滚，申请仍是「等店长批」，店长可以驳回它。
         """
         employee_id = int(row["employee_id"])
         peer_id = self._peer_of_swap(row)
@@ -3015,7 +3140,10 @@ class SchedulingStore:
         applied: list[str] = []
         skipped: list[str] = []
         if day < today or day > last_day:
+            # 过去 / 窗口外那天本来就不写：不在这里拦请假（拦了也没东西可盖）。
             skipped.append(day)
+        elif await self._leave_ids([employee_id, peer_id], day):
+            raise SchedulingError("leave_approved", "leave_approved")
         else:
             _, mine_now = await self._day_shift(employee_id, day)
             _, theirs_now = await self._day_shift(peer_id, day)

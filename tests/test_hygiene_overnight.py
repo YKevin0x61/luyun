@@ -9,7 +9,9 @@
   ``pending_past`` 给出过去几天里还没验的行，验收/驳回可以带 ``business_date`` 补验，
   下界是 ``DAILY_BACKFILL_DAYS``。
 * 驳回原因按营业日查，跨天之后整改单（状态仍是「待回拍」）的原因就查不到了。现在整改
-  与专项的原因按 id/ticket_id 取最近一条（不限营业日），**日常的原因仍然按日**。
+  的原因按 ticket_id 取最近一条（整改单状态跨天不变，这条不受营业日影响）；**日常与
+  专项的原因仍按营业日**——专项的实例是按营业日建的，上周的驳回不能算到本周的新实例上
+  （2026-10 审查 repro_hyg_1 第 2 条）。
 
 时钟是注入的：上周二建/驳回专项、昨天建/驳回整改单、今天来看。
 """
@@ -259,13 +261,20 @@ def test_fix_reject_reason_survives_the_business_day_rollover(env):
     assert row["reject_reason"] == "回拍角度不对"
 
 
-def test_deep_reject_reason_survives_into_the_next_week(env):
-    """专项上周二楼被驳回：本周二同一条待办仍要能显示原因（按 item_id 取最近一条）。"""
+def test_deep_reject_reason_does_not_leak_into_the_next_week(env):
+    """专项上周二被驳回：本周二同一项是**全新 instance**，不能顶着上周的原因。
+
+    驳回原因只属于被驳回的那个营业日实例（``hygiene_deep_clean_instances`` 的键是
+    business_date + item_id）。不加营业日过滤的话"历史上被驳回过"会永久为真，员工端
+    会对着本周全新的待拍项渲染「已驳回：<上周的原因>」（2026-10 审查 repro_hyg_1
+    第 2 条）。同一天内的原因仍然可见，见
+    ``test_hygiene_reject_visibility.test_deep_clean_reject_is_visible_to_staff``。
+    """
     items = _run(env.work.list_deep_clean_work(SUPER))["items"]
     row = next(item for item in items if item["item_id"] == env.deep_item["id"])
     assert row["status"] == "待拍"
-    assert row["rejected"] is True
-    assert row["reject_reason"] == "滤网没拆下来洗"
+    assert row["rejected"] is False
+    assert row["reject_reason"] is None
 
 
 # ── 撤销验收（2026-10-18）───────────────────────────────────────────────────

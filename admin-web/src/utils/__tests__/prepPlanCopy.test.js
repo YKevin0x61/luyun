@@ -52,7 +52,7 @@ describe('prep-plan copy', () => {
 
   it('标题与两类归属是中文，不把英文枚举漏到界面上', () => {
     expect(copy.PREP_PLAN_TITLE).toBe('备货计划')
-    expect(copy.MADE_LABEL).toBe('厨房做的')
-    expect(copy.BOUGHT_LABEL).toBe('要买的')
+    expect(copy.MADE_LABEL).toBe('半成品')
+    expect(copy.BOUGHT_LABEL).toBe('原料')
   })
 })

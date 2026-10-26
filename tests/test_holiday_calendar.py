@@ -55,11 +55,12 @@ class HolidayCalendarTableContractTest(unittest.TestCase):
         catalog = _admin_catalog()
         for table in ATTENDANCE_TABLES:
             self.assertIn(table, catalog["tables"])
-            self.assertEqual(catalog["table_meta"][table]["group"], "attendance")
+            self.assertEqual(catalog["table_meta"][table]["group"], "hr")
             self.assertTrue(catalog["table_meta"][table]["read_only"])
         groups = {group["key"]: group for group in catalog["groups"]}
-        self.assertEqual(set(groups["attendance"]["tables"]), set(ATTENDANCE_TABLES))
-        self.assertEqual(groups["attendance"]["label"], "考勤")
+        for table in ATTENDANCE_TABLES:
+            self.assertIn(table, groups["hr"]["tables"])
+        self.assertEqual(groups["hr"]["label"], "人事考勤")
 
     def test_admin_data_browser_rejects_writes_to_the_calendar(self):
         """只读不是「按钮变灰」：通用写入口真的拒。"""
